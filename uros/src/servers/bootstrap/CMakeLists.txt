@@ -412,8 +412,31 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # ⚠️ It EXITS when it finds no partitions, and that is correct rather than a
   # failure -- there is nothing to serve.  What it must not do is exit quietly:
   # see the note in block_server.c on #400.
+  # ipc_bench, OFF by default (#552).
+  #
+  # 🔴 The list above is curated and its ORDER is load-bearing; ipc_bench is a
+  # benchmark and takes minutes, so putting it in unconditionally would change
+  # the boot time, the memory and the set of lines the harness reads for a
+  # verdict on EVERY campaign.  Whether it belongs there is a decision that
+  # wants the cost measured, and this switch is how the measurement is taken
+  # without committing to the answer.
+  #
+  # ⚠️ LAST, for cow_test's reason: it is the entry most likely to end the run,
+  # so every other verdict is already in the log when it starts.
+  option(UROS_BUNDLE_IPC_BENCH
+         "Put ipc_bench in the x86-64 bundle (slow; for measuring it)" OFF)
+  if(UROS_BUNDLE_IPC_BENCH)
+    set(_IPC_BENCH_LINE "ipc_bench ipc_bench\n")
+    set(_IPC_BENCH_FILE "ipc_bench:${_SBIN}/ipc_bench")
+    set(_IPC_BENCH_DEP  ipc_bench_server)
+  else()
+    set(_IPC_BENCH_LINE "")
+    set(_IPC_BENCH_FILE "")
+    set(_IPC_BENCH_DEP  "")
+  endif()
+
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_IPC_BENCH_LINE}")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -513,6 +536,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
+            ${_IPC_BENCH_FILE}
     # 🔥 THE FILE AND NOT THE TARGET.  `DEPENDS cap_test_manifest' is an
     # ORDERING dependency: ninja runs that target first and never notices that
     # its output changed, so the bundle went on shipping a stale manifest while
@@ -525,6 +549,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
             hal_bar_test_server
+            ${_IPC_BENCH_DEP}
             ${_CONF}
     COMMENT "Bundle: bootstrap.conf + 13 tasks + hal_server + block_device_server"
     VERBATIM)
