@@ -1645,8 +1645,12 @@ thread_invoke(
 	 * starts waiting.  Charged to its own column rather than left in the
 	 * body phase, which is what made the first run of that profile report
 	 * a Mach trap of three hundred million cycles.
+	 *
+	 * #392 also stamps the clock into new_thread's sample here: that stamp
+	 * is the far side of the switch, and the thread being switched to is the
+	 * only one that can charge the interval after it.
 	 */
-	SP_BLOCKED(old_thread);
+	SP_BLOCKED(old_thread, new_thread, SP_BODY);
 
 	disable_preemption();
 	old_thread = switch_context(old_thread, old_thread->continuation,
@@ -1670,6 +1674,13 @@ thread_invoke(
 	}
 #endif /* MACH_RT */
 	thread_dispatch(old_thread);
+	/*
+	 * #392: the switch is closed HERE and not at SP_BACK, because the issue
+	 * asks for switch_context and thread_dispatch together -- a thread that
+	 * has been switched to is not yet running its own code until the thread
+	 * it displaced has been disposed of.
+	 */
+	SP_SWITCHED();
 	enable_preemption();
 
 	ETAP_DATA_LOAD(probe_data[0], old_thread);
@@ -1709,6 +1720,7 @@ thread_continue(
 
 	if (old_thread != THREAD_NULL)
 		thread_dispatch(old_thread);
+	SP_SWITCHED();			/* #392, as in thread_invoke() */
 	self->at_safe_point = NOT_AT_SAFE_POINT;
 
 	/*
