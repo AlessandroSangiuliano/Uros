@@ -140,14 +140,43 @@
  * the other side of that stamp to the switch.  The two halves of the number are
  * taken on two different threads and that is what makes it a number.
  */
-#define	SP_CLAIM	5	/* claim the receiver, park the sender       */
-#define	SP_WAIT		6	/* off the processor -- the OTHER end's time */
-#define	SP_SWITCH	7	/* 🔥 switch_context + thread_dispatch        */
-#define	SP_RESUME	8	/* back with a reply: ith_state, the trailer */
-#define	SP_COPYOUT	9	/* the header translated: ports -> names     */
-#define	SP_PUT		10	/* copyoutmsg: 🔥 THE RECEIVE-SIDE COPY       */
-#define	SP_BODY		11	/* everything the marks above did not name   */
-#define	SP_PHASES	12
+/*
+ * 🔥 AND THE CLAIM IN FOUR, BECAUSE ONE COLUMN MEASURED IT AT 31% OF THE WORK.
+ *
+ * That is the largest on-processor phase of the hot path -- larger than both
+ * copies together (12%) and nearly twice the switch (16%) -- under a name that
+ * covers eleven separate things: the destination queue's lock, finding and
+ * vetting the receiver, the scheduler state change under thread_lock, the
+ * sender's own parking, the receiver's dequeue, the message store, two more
+ * unlocks, the object release, ast_off, ast_context, timer_switch.
+ *
+ * A bucket whose number is too big for its name gets DIVIDED, not explained.
+ * #482 learned that three times in one issue, and every time the plausible
+ * explanation was wrong.
+ *
+ * ⚠️ Each division costs one more timestamp pair -- 60 cycles on this machine,
+ * measured -- charged to the phase it opens.  Three more marks on a subject of
+ * 2,781 on-processor cycles is a real widening and it is declared in the dump.
+ * The alternative is a 31% bucket whose contents are argued about.
+ */
+#define	SP_PICK		5	/* lock the queue, find and vet the receiver */
+#define	SP_CLAIM	6	/* splsched, thread_lock, TH_WAIT -> TH_RUN  */
+#define	SP_PARK		7	/* the sender onto the reply queue, TH_WAIT  */
+#define	SP_DELIVER	8	/* hand the message over, set up the switch  */
+#define	SP_WAIT		9	/* off the processor -- the OTHER end's time */
+#define	SP_SWITCH	10	/* 🔥 switch_context + thread_dispatch        */
+/*
+ * And the resume in two, for the same reason at 23%: lowering the interrupt
+ * level is not bookkeeping about a message, and on this target splx() can take
+ * pending interrupts and run ASTs.  A column that folds it in with reading
+ * ith_state and filling in a trailer is naming the wrong thing.
+ */
+#define	SP_SPL		11	/* enable_preemption + splx after the switch */
+#define	SP_RESUME	12	/* back with a reply: ith_state, the trailer */
+#define	SP_COPYOUT	13	/* the header translated: ports -> names     */
+#define	SP_PUT		14	/* copyoutmsg: 🔥 THE RECEIVE-SIDE COPY       */
+#define	SP_BODY		15	/* everything the marks above did not name   */
+#define	SP_PHASES	16
 
 /*
  * 🔴 And the return is NOT one of them, which is a decision and not an

@@ -84,9 +84,13 @@ static const char *const sp_name[SP_PHASES] = {
 	"COPYIN  ",	/* SP_COPYIN  */
 	"resolve ",	/* SP_RESOLVE */
 	"queue   ",	/* SP_QUEUE   */
+	"pick rcv",	/* SP_PICK    */
 	"claim   ",	/* SP_CLAIM   */
+	"park snd",	/* SP_PARK    */
+	"deliver ",	/* SP_DELIVER */
 	"wait    ",	/* SP_WAIT    */
 	"SWITCH  ",	/* SP_SWITCH  */
+	"splx    ",	/* SP_SPL     */
 	"resume  ",	/* SP_RESUME  */
 	"copyout ",	/* SP_COPYOUT */
 	"PUT     ",	/* SP_PUT     */
@@ -331,6 +335,31 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 		       p->sample[median][SP_SWITCH]);
 		sp_print_pct(sp_percent(p->sample[median][SP_ENTRY] + ret_mean +
 					p->sample[median][SP_SWITCH], work));
+		printf(" of the same %u\n", work);
+
+		/*
+		 * 🔑 And the counterweight on one line, because it is what the
+		 * first divided run turned out to be about: the hand-off
+		 * machinery against the two copies.  Six columns that exist
+		 * because one thread stops running and another starts.
+		 */
+		printf("syscall_profile   hand-off machinery: pick %u + claim "
+		       "%u + park %u + deliver %u + switch %u + splx %u = %u, "
+		       "share",
+		       p->sample[median][SP_PICK], p->sample[median][SP_CLAIM],
+		       p->sample[median][SP_PARK],
+		       p->sample[median][SP_DELIVER],
+		       p->sample[median][SP_SWITCH], p->sample[median][SP_SPL],
+		       p->sample[median][SP_PICK] + p->sample[median][SP_CLAIM] +
+		       p->sample[median][SP_PARK] +
+		       p->sample[median][SP_DELIVER] +
+		       p->sample[median][SP_SWITCH] + p->sample[median][SP_SPL]);
+		sp_print_pct(sp_percent(p->sample[median][SP_PICK] +
+					p->sample[median][SP_CLAIM] +
+					p->sample[median][SP_PARK] +
+					p->sample[median][SP_DELIVER] +
+					p->sample[median][SP_SWITCH] +
+					p->sample[median][SP_SPL], work));
 		printf(" of the same %u\n", work);
 	}
 

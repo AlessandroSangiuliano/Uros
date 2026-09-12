@@ -1819,6 +1819,13 @@ mach_msg_overwrite_trap(
 #endif	/* THREAD_SWAPPER */
 
 		/*
+		 * #392: the receiver found and vetted, and the destination
+		 * queue locked.  Everything after this is committing to the
+		 * hand-off rather than deciding whether one is possible.
+		 */
+		SP_MARK(SP_PICK);
+
+		/*
 		 * #319 SMP-safe hand-off.  On SMP a concurrent timeout or abort
 		 * can pull the receiver out of TH_WAIT using thread_lock alone
 		 * (clear_wait never takes imq_lock), even while it is still queued
@@ -1894,6 +1901,14 @@ mach_msg_overwrite_trap(
 		SP_HANDOFF();
 
 		/*
+		 * #392: the scheduler state change -- splsched, thread_lock on
+		 * the receiver, TH_WAIT off and TH_RUN on, last_processor,
+		 * thread_unlock.  The claim is what makes the hand-off safe on
+		 * SMP (#319) and it is measured on its own for that reason.
+		 */
+		SP_MARK(SP_CLAIM);
+
+		/*
 		 *	Safe to unlock dest_port now that we are
 		 *	committed to this path, because we hold
 		 *	dest_mqueue locked.
@@ -1940,6 +1955,14 @@ mach_msg_overwrite_trap(
 		thread_unlock(self);
 
 		imq_unlock(rcv_mqueue);
+
+		/*
+		 * #392: the sender parked -- on the reply port's queue, its
+		 * receive state filled in, TH_WAIT set under the queue lock
+		 * (#317 window A), the lock dropped.  The cost of going to
+		 * sleep, separate from the cost of waking somebody else.
+		 */
+		SP_MARK(SP_PARK);
 
 		/*
 		 *	Extract receiver from dest_mqueue, and store the
@@ -2024,7 +2047,7 @@ mach_msg_overwrite_trap(
 			     * the far side of the switch, and only the thread
 			     * being switched to can close it.
 			     */
-			    SP_BLOCKED(self, receiver, SP_CLAIM);
+			    SP_BLOCKED(self, receiver, SP_DELIVER);
 
 			    old_thread = switch_context(self, 0, receiver);
 			    assert(old_thread != self);
@@ -2036,6 +2059,16 @@ mach_msg_overwrite_trap(
 			}
 
 			splx(s);
+
+			/*
+			 * #392: lowering the interrupt level is its own
+			 * column.  On this target splx() can take the
+			 * interrupts that arrived while the hand-off held
+			 * splsched() and run the ASTs they queued, and that is
+			 * not bookkeeping about a message -- folding it in with
+			 * reading ith_state names the wrong thing.
+			 */
+			SP_MARK(SP_SPL);
 		}
 
 
