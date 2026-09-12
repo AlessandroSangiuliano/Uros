@@ -56,12 +56,15 @@ flipc2_bufgroup_init_handle(struct flipc2_bufgroup *bg,
 /*
  * flipc2_bufgroup_create — Allocate and initialize a buffer group.
  *
+ * host_priv:  a port that permits vm_wire, or MACH_PORT_NULL to leave the pool
+ *             pageable on purpose.  See the contract in <flipc2.h> (#546).
  * pool_size:  requested total memory (will be rounded up as needed)
  * slot_size:  usable data bytes per slot (64..65536)
  * bg:         [out] buffer group handle
  */
 flipc2_return_t
 flipc2_bufgroup_create(
+    mach_port_t         host_priv,
     uint32_t            pool_size,
     uint32_t            slot_size,
     flipc2_bufgroup_t  *bg_out)
@@ -107,9 +110,23 @@ flipc2_bufgroup_create(
     if (kr != KERN_SUCCESS)
         return FLIPC2_ERR_RESOURCE_SHORTAGE;
 
-    /* Wire the memory (best-effort) */
-    (void)vm_wire(mach_host_self(), mach_task_self(), addr, total_size,
-                  VM_PROT_READ | VM_PROT_WRITE);
+    /*
+     * Wire the pool if the caller supplied a port that permits it.
+     *
+     * ⚠️ The answer is READ.  What stood here asked with mach_host_self() --
+     * the unprivileged host port, where vm_wire wants host_priv_t -- and threw
+     * the refusal away behind a (void), so the pool was never once wired and
+     * the comment said "best-effort" (#546).  "Best-effort" described an
+     * intention; the behaviour was "never".
+     */
+    if (host_priv != MACH_PORT_NULL) {
+        kr = vm_wire(host_priv, mach_task_self(), addr, total_size,
+                     VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            vm_deallocate(mach_task_self(), addr, total_size);
+            return FLIPC2_ERR_RESOURCE_SHORTAGE;
+        }
+    }
 
     /* Initialize header */
     hdr = (struct flipc2_bufgroup_header *)addr;

@@ -769,13 +769,28 @@ Deallocates semaphore send rights and detaches both channels.
 
 ```c
 flipc2_return_t
-flipc2_bufgroup_create(uint32_t pool_size,
+flipc2_bufgroup_create(mach_port_t host_priv,
+                       uint32_t pool_size,
                        uint32_t slot_size,
                        flipc2_bufgroup_t *bg);
 ```
 Creates a shared buffer pool. `pool_size` is the requested total memory (actual
 allocation may be larger). `slot_size` is the usable data bytes per slot (stride
 is 8-byte aligned). On creation, all slots are chained in a free list.
+
+`host_priv` decides whether the pool is **wired**, and it is the caller's to
+supply because a library cannot hold a privileged port (#546):
+
+- `MACH_PORT_NULL` — the pool stays pageable, deliberately. A FLIPC fast path
+  over a pageable pool can take a page fault, which is a trip into the kernel in
+  the one place that claims not to make one. Choose this knowingly.
+- a port that permits `vm_wire` — the pool is wired, and
+  `FLIPC2_ERR_RESOURCE_SHORTAGE` comes back if it could not be. A caller that
+  asked for wiring is never handed an unwired pool with a success code.
+
+⚠️ Earlier revisions wired with `mach_host_self()` and discarded the answer, so
+no pool was ever wired: `vm_wire` is declared `host_priv_t` and the unprivileged
+host port is refused every time.
 
 ```c
 flipc2_return_t flipc2_bufgroup_destroy(flipc2_bufgroup_t bg);
@@ -1059,13 +1074,15 @@ Buffer groups let multiple channels share a common memory pool.
  * Server manages a buffer pool shared with a driver.
  * Multiple command channels reference the same pool.
  */
-void bufgroup_example(mach_port_t driver_task) {
+void bufgroup_example(mach_port_t driver_task, mach_port_t host_priv) {
     flipc2_bufgroup_t bg;
     flipc2_channel_t cmd_ch, reply_ch;
     mach_port_t cmd_sem, reply_sem;
 
-    /* Create a buffer pool: 64 KB total, 256-byte slots */
-    flipc2_bufgroup_create(64 * 1024, 256, &bg);
+    /* Create a buffer pool: 64 KB total, 256-byte slots, wired.
+     * host_priv comes from bootstrap_ports; pass MACH_PORT_NULL to
+     * accept a pageable pool. */
+    flipc2_bufgroup_create(host_priv, 64 * 1024, 256, &bg);
 
     /* Create channels */
     flipc2_channel_create(64 * 1024, 256, &cmd_ch, &cmd_sem);

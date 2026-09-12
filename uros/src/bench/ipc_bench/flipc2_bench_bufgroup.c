@@ -89,7 +89,8 @@ bench_flipc2_bufgroup_alloc_free(void)
     int                 i;
     uint64_t            offset;
 
-    ret = flipc2_bufgroup_create(FLIPC2_BENCH_BG_POOL_SIZE,
+    ret = flipc2_bufgroup_create(flipc2_host_priv_port,
+                                 FLIPC2_BENCH_BG_POOL_SIZE,
                                  FLIPC2_BENCH_BG_SLOT_SIZE, &bg);
     if (ret != FLIPC2_SUCCESS) {
         printf("  bufgroup alloc+free: create failed %d\n", ret);
@@ -144,7 +145,8 @@ bench_flipc2_bufgroup_rpc(const char *label, int data_size, int iters)
     if (flipc2_pair_create(&pair, label) != 0)
         return;
 
-    ret = flipc2_bufgroup_create(FLIPC2_BENCH_BG_POOL_SIZE,
+    ret = flipc2_bufgroup_create(flipc2_host_priv_port,
+                                 FLIPC2_BENCH_BG_POOL_SIZE,
                                  FLIPC2_BENCH_BG_SLOT_SIZE, &bg);
     if (ret != FLIPC2_SUCCESS) {
         printf("  %s: bufgroup create failed %d\n", label, ret);
@@ -273,7 +275,8 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
     }
 
     /* Create buffer group */
-    ret = flipc2_bufgroup_create(FLIPC2_BENCH_BG_POOL_SIZE,
+    ret = flipc2_bufgroup_create(flipc2_host_priv_port,
+                                 FLIPC2_BENCH_BG_POOL_SIZE,
                                  FLIPC2_BENCH_BG_SLOT_SIZE, &bg);
     if (ret != FLIPC2_SUCCESS) {
         printf("  %s: bufgroup create failed %d\n", label, ret);

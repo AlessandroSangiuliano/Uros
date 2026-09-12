@@ -22,6 +22,14 @@
 
 mach_port_t flipc2_clock_port;
 
+/*
+ * #546: the port a bufgroup is wired with, or MACH_PORT_NULL.  Set once by
+ * bench_flipc2_run() from what bootstrap_ports handed ipc_bench, which the
+ * kernel builds from realhost.host_priv_self -- so it is the privileged one and
+ * vm_wire accepts it.
+ */
+mach_port_t flipc2_host_priv_port;
+
 void
 flipc2_get_time(tvalspec_t *tv)
 {
