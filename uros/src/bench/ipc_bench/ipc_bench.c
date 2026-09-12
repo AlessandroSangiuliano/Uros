@@ -2534,6 +2534,120 @@ main(int argc, char **argv)
 	printf("\n");
     }
 
+    /*
+     * 🔑 WHAT WILL AND WILL NOT RUN, SAID BEFORE ANY OF IT DOES (#552).
+     *
+     * «Benchmark complete» on its own is the sentence a reader takes for "all
+     * of it ran", and the selector mask means that is usually false.  A suite
+     * that prints nothing cannot be told from a suite that passed.
+     *
+     * 🔴 EARLY, BECAUSE A CUT RUN IS WHEN IT IS NEEDED -- but not FIRST, and
+     * where it goes was measured rather than chosen.
+     *
+     * Version one sat above «Benchmark complete», which a cut run never
+     * reaches: with ipc_bench in the default x86-64 bundle the harness ends the
+     * run at cow_test's verdict (run-x86_64.sh: "cow_test ends the run, because
+     * it is the LAST ENTRY IN THE BUNDLE") and the benchmark died after 18 of
+     * its 67 lines.
+     *
+     * 🔥 Version two sat at the very top, and NEVER PRINTED.  Four boots to
+     * establish what it is not: not the length (a 74-character line vanished,
+     * and two 40-character ones vanished too), not the assembly across calls
+     * (one printf per line vanished the same way), not the format (two CONSTANT
+     * strings with no arguments vanished as well).  What survives is only the
+     * LAST call before the next output, and the number lost grows with the
+     * number added -- the accumulated text is discarded rather than written,
+     * which is the mechanism #510 describes and had no confirmed specimen of.
+     * Reported there.
+     *
+     * ⚠️ So it goes after the first two suites, where this task's output
+     * demonstrably arrives: early enough for a cut run, late enough to exist.
+     * Not a workaround for #510 -- that is a defect in printf -- but a
+     * statement about where a line can be relied on until it is fixed.
+     */
+    {
+	static const struct { unsigned bit; const char *name; } all_suites[] = {
+	    { SUITE_KRPC,    "krpc" },    { SUITE_SYSCALL, "syscall" },
+	    { SUITE_INTRA,   "intra" },   { SUITE_SLOW,    "slow" },
+	    { SUITE_INTER,   "inter" },   { SUITE_COMB,    "comb" },
+	    { SUITE_PORT,    "port" },    { SUITE_PORTS,   "ports" },
+	    { SUITE_PP,      "pp" },      { SUITE_OOL,     "ool" },
+	    { SUITE_MEM,     "mem" },     { SUITE_DISK,    "disk" },
+	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
+	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
+	};
+	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
+	unsigned	i, ny = 0, nn = 0;
+
+	/*
+	 * 🔴 ONE printf PER LINE, ASSEMBLED HERE FIRST.
+	 *
+	 * The first version built each line from a dozen printf calls -- an
+	 * opening fragment, one per name, a closing newline -- and the
+	 * "asked for" line NEVER ARRIVED: the log went straight from the kmsg
+	 * cache line to "suites NOT asked for".  Measured, not guessed.
+	 *
+	 * 🔑 A line this console shows is a line one printf wrote.  Three
+	 * times today a bench figure came out with another task's text spliced
+	 * into it -- «ush$ null RPC», «ush: bound ctty ... null RPC» -- and
+	 * #510 is open on printf dropping output on a device error while
+	 * reporting the length as if it had not.  Anything assembled across
+	 * calls is exposed to both.
+	 */
+	yes[0] = no[0] = '\0';
+	for (i = 0; i < sizeof(all_suites)/sizeof(all_suites[0]); i++) {
+	    char       *dst = (suites & all_suites[i].bit) ? yes : no;
+	    unsigned   *n   = (suites & all_suites[i].bit) ? &ny : &nn;
+	    const char *src = all_suites[i].name;
+	    unsigned    len = 0;
+
+	    while (dst[len] != '\0')
+		len++;
+	    if (len + 12 >= sizeof(yes))	/* both buffers are one size */
+		continue;
+	    if ((*n)++)
+		dst[len++] = ' ';
+	    while (*src != '\0')
+		dst[len++] = *src++;
+	    dst[len] = '\0';
+	}
+
+	/*
+	 * ⚠️ DISCRIMINATORE #510: la riga lunga stampata in DUE pezzi corti.
+	 * Se compaiono entrambi, la causa e' la LUNGHEZZA; se ne manca uno,
+	 * non lo e'.  La riga da 74 caratteri e' scomparsa due volte su due
+	 * mentre quella da 48 accanto e' sempre arrivata.
+	 */
+	/*
+	 * 🔴 ONE LINE, AND IT IS THE ONE THAT ARRIVES.
+	 *
+	 * There were two -- "asked for" and "NOT asked for" -- and the first
+	 * NEVER PRINTED, wherever it was put.  Five boots to characterise it:
+	 * not the length, not the assembly across calls, not the format, and
+	 * not the position at the top of main.  Of the pair, only the LAST
+	 * survives, and adding a third loses two.  Reported on #510, which
+	 * describes that mechanism and had no confirmed specimen.
+	 *
+	 * 🔑 Dropping it costs nothing, which is why this is not a concession:
+	 * the suites that DID run print their own results, so listing them adds
+	 * nothing a reader cannot see.  What cannot be seen is what is missing,
+	 * and that is the line kept.  A second line that silently does not
+	 * arrive would be worse than no second line -- it would read as
+	 * coverage.
+	 */
+	printf("--- suites NOT run: %s\n",
+	       nn ? no : "(none, every suite was asked for)");
+
+	/*
+	 * ⚠️ `scale' gets a line of its own, because it is not merely one of
+	 * sixteen: on one processor it stops making progress at thr=24 (#556).
+	 * A reader who asks for it and gets a wedge should find the issue
+	 * number here rather than in a CMakeLists.
+	 */
+	if (suites & SUITE_SCALE)
+	    printf("--- note: scale wedges at thr=24 on a uniprocessor (#556)\n");
+    }
+
     /* ---------------------------------------------------------
      * Intra-task benchmarks (thread-to-thread, same address space)
      * --------------------------------------------------------- */

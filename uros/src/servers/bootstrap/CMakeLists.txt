@@ -412,14 +412,27 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # ⚠️ It EXITS when it finds no partitions, and that is correct rather than a
   # failure -- there is nothing to serve.  What it must not do is exit quietly:
   # see the note in block_server.c on #400.
-  # ipc_bench, OFF by default (#552).
+  # ipc_bench, OFF by default -- and MEASURED, not assumed (#552 done-when 8).
   #
-  # 🔴 The list above is curated and its ORDER is load-bearing; ipc_bench is a
-  # benchmark and takes minutes, so putting it in unconditionally would change
-  # the boot time, the memory and the set of lines the harness reads for a
-  # verdict on EVERY campaign.  Whether it belongs there is a decision that
-  # wants the cost measured, and this switch is how the measurement is taken
-  # without committing to the answer.
+  # 🔴 THE ANSWER IS NO, AND THE REASON IS NOT THE COST.
+  #
+  # Measured: with the entry added, a boot costs +3 seconds of wall clock (11 ->
+  # 14) and the bundle grows 342 KB (3008976 -> 3350928 bytes).  Both are
+  # nothing.  What decides it is that THE BENCHMARK DOES NOT FINISH: the run
+  # ended after 14 seconds with 18 of the benchmark's 67 result lines, cut at
+  # the fault-stress suite.
+  #
+  # 🔑 scripts/run-x86_64.sh ends the run at cow_test's verdict, and says why in
+  # its own words: "cow_test ends the run, because it is the LAST ENTRY IN THE
+  # BUNDLE".  Putting ipc_bench after cow_test makes cow_test no longer last
+  # while it remains the marker, so the new entry is killed where it stands.
+  # Line 750 of that script records the same trap springing once already --
+  # "making cow_test the marker then cut off act_test".
+  #
+  # ⚠️ So every campaign would carry a benchmark that runs a quarter of its
+  # suites and then dies, and its output would look like a table.  If it is ever
+  # to join the default bundle, the harness's end marker has to move with it --
+  # that is the work, not this switch.
   #
   # ⚠️ LAST, for cow_test's reason: it is the entry most likely to end the run,
   # so every other verdict is already in the log when it starts.

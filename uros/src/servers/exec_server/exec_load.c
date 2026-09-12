@@ -39,7 +39,23 @@
 #include <mach/mach_traps.h>
 #include <mach/mach_interface.h>
 #include <mach/task_special_ports.h>  /* TASK_CAP_PORT (#235) */
-#include <mach/i386/thread_status.h>
+/*
+ * 🔴 THIS MACHINE'S HEADER, NOT i386's BY NAME (#552).
+ *
+ * It was <mach/i386/thread_status.h>, which on an x86-64 compile redefines
+ * MACHINE_THREAD_STATE_COUNT to i386_SAVED_STATE_COUNT over the correct value
+ * -- and that count is what thread_get_state sizes its buffer from, so the
+ * wrong machine's number wins silently.  Three files in ipc_bench had the same
+ * line and the same consequence.
+ *
+ * ⚠️ And the sequence below is now the SEVENTH copy of "give a fresh thread a
+ * program counter and a stack" in this tree: six were in ipc_bench (one helper
+ * now), bootstrap has one per target in i386/set_regs.c and x86_64/set_regs.c,
+ * and this is the third shape.  bootstrap's per-target FILES are this project's
+ * established pattern for it; whoever ports exec_server to x86-64 should follow
+ * that rather than grow this conditional.
+ */
+#include <mach/machine/thread_status.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -249,8 +265,13 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
              mach_port_t *out_thread)
 {
     mach_port_t th;
+#if defined(__x86_64__)
+    struct x86_64_thread_state regs;
+    unsigned int reg_count = x86_64_THREAD_STATE_COUNT;
+#else
     struct i386_thread_state regs;
     unsigned int reg_count = i386_THREAD_STATE_COUNT;
+#endif
     kern_return_t kr;
 
     kr = thread_create(new_task, &th);
@@ -260,20 +281,46 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
     }
 
     /* Pull the default state from the kernel so segment selectors
-     * and EFLAGS are the right user-mode defaults; we only override
-     * EIP and ESP. */
+     * and the flags register are the right user-mode defaults; we only
+     * override the program counter and the stack pointer.  A zeroed frame
+     * would hand ring 3 a null code segment. */
+#if defined(__x86_64__)
+    kr = thread_get_state(th, x86_64_THREAD_STATE,
+                          (thread_state_t)&regs, &reg_count);
+#else
     kr = thread_get_state(th, i386_THREAD_STATE,
                           (thread_state_t)&regs, &reg_count);
+#endif
     if (kr != KERN_SUCCESS) {
         printf("exec: thread_get_state kr=%d\n", kr);
         return EXEC_ERR_THREAD_CREATE;
     }
 
+#if defined(__x86_64__)
+    regs.rip = (uint64_t)entry;
+    /*
+     * ⚠️ EIGHT off the top, which the i386 branch does not do.
+     *
+     * The System V ABI wants rsp sixteen-byte aligned AT a call, so a
+     * function sees it eight past a boundary once its return address is
+     * pushed.  A thread the kernel starts is entered by a jump and has no
+     * return address, so what its entry point must see is what a callee
+     * sees; starting it on a boundary misaligns every SSE spill in that
+     * function.  Same reasoning bootstrap's x86_64/set_regs.c carries for
+     * the first user thread, and the reason this is not a width
+     * translation of the line below.
+     */
+    regs.rsp = (uint64_t)stack_top - 0x8;
+
+    kr = thread_set_state(th, x86_64_THREAD_STATE,
+                          (thread_state_t)&regs, reg_count);
+#else
     regs.eip  = (unsigned int)entry;
     regs.uesp = (unsigned int)stack_top;
 
     kr = thread_set_state(th, i386_THREAD_STATE,
                           (thread_state_t)&regs, reg_count);
+#endif
     if (kr != KERN_SUCCESS) {
         printf("exec: thread_set_state kr=%d\n", kr);
         return EXEC_ERR_THREAD_CREATE;
