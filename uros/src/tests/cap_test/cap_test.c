@@ -1321,6 +1321,67 @@ a_wired_page_can_be_given_back(mach_port_t host_priv)
         (void)vm_deallocate(mach_task_self(), a4, size);
     }
 
+    /*
+     * Probe 5 -- the one that actually reaches it.
+     *
+     * 🔴 Probe 4 does not, and the reason is worth keeping: vm_remap with
+     * copy = TRUE copies EAGERLY, so the write through the copy finds a page of
+     * its own and never faults over the original.  A probe built from the right
+     * idea and the wrong primitive passes, and passing is what it looks like.
+     *
+     * 🔑 What is needed is a LAZY copy, and vm_read is how a task arms one on
+     * its own memory: vm_map_copyin sets the source object to copy-delay and
+     * drops the source mappings to read-only.  The next WRITE through the wired
+     * mapping is then a copy-on-write fault whose source page is the wired page
+     * itself -- and that path severs the source in every space that holds it.
+     *
+     * ⚠️ Dropping a wired mapping to read-only is itself allowed: pmap_protect
+     * only adjusts statistics for a wired PTE.  It is pmap_page_protect, on the
+     * physical page, that refuses -- which is why the write and not the vm_read
+     * is the moment of truth.
+     */
+    {
+        vm_address_t   a5 = 0;
+        vm_offset_t    copy = 0;
+        mach_msg_type_number_t got = 0;
+        volatile char *p;
+
+        kr = vm_allocate(mach_task_self(), &a5, size, TRUE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 5: vm_allocate FAIL kr=%d\n", (int)kr);
+            return 0;
+        }
+        memset((void *)a5, 0x69, size);
+
+        kr = vm_wire(host_priv, mach_task_self(), a5, size,
+                     VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 5: vm_wire refused kr=%d\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a5, size);
+            return 0;
+        }
+
+        kr = vm_read(mach_task_self(), a5, size, &copy, &got);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 5: vm_read kr=%d — no lazy copy, "
+                   "probe skipped\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a5, size);
+            return ok;
+        }
+        printf("cap_test: [16] probe 5: lazy copy armed (%u bytes)\n",
+               (unsigned)got);
+
+        printf("cap_test: [16] probe 5: writing through the WIRED mapping "
+               "with a copy outstanding\n");
+        p = (volatile char *)a5;
+        for (vm_size_t off = 0; off < size; off += 4096)
+            p[off] = 0x11;
+        printf("cap_test: [16] probe 5 survived\n");
+
+        (void)vm_deallocate(mach_task_self(), copy, got);
+        (void)vm_deallocate(mach_task_self(), a5, size);
+    }
+
     return ok;
 }
 
