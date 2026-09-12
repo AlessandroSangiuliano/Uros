@@ -71,6 +71,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_U}/mach/bootstrap.defs
     ${_U}/mach/exc.defs
     ${UROS_UAPI_DIR}/mach/notify.defs
+    # sync.defs: semaphore_create/signal/wait.  The kernel has served these on
+    # this target all along -- sync_server.c is generated for mach_kernel -- but
+    # no user stub existed, so nothing on x86-64 could call one.  ipc_bench is
+    # what asked (#552); the kernel half was never the missing piece.
+    ${_U}/mach/sync.defs
     # device.defs used to be held out of this list: its stubs failed their own
     # _Static_asserts at -m64, because the two .defs trees described
     # security_token_t differently and were four bytes apart here.  #470 fixed
@@ -117,7 +122,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
                 bootstrap.h bootstrap.h  exc.h exc_user.h
                 exc_server.h exc_server.h  notify_server.h notify_server.h
                 bootstrap_server.h bootstrap_server.h
-                mach_klog.h mach_klog.h)
+                mach_klog.h mach_klog.h
+                sync.h sync.h)
   # device/device.h goes under its own directory, which is how it is spelled.
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
   set(_PUB_HDRS)

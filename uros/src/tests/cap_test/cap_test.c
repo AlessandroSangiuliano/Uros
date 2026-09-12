@@ -41,6 +41,8 @@
 #include <mach/rpc.h>		/* #478: struct rpc_subsystem */
 #include <mach/bootstrap.h>
 #include <mach/mach_host.h>	/* #546: vm_wire, vm_remap */
+#include <mach/sync.h>		/* #552: semaphore_create/signal/wait */
+#include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
@@ -1389,6 +1391,64 @@ a_wired_page_can_be_given_back(mach_port_t host_priv)
     return ok;
 }
 
+/*
+ * #552: [17] the kernel's semaphores, called from userland on this target.
+ *
+ * 🔑 `sync_server.c` has been generated for `mach_kernel` on x86-64 all along,
+ * so the kernel has served `semaphore_create` here since the port started --
+ * and no user stub existed, because the x86-64 branch of libmach's .defs list
+ * did not carry `sync.defs`.  Served and uncallable: produced and not consumed,
+ * invisible because the only caller in the tree was ipc_bench, which does not
+ * build on this target.
+ *
+ * ⚠️ So this arm exists to CALL them.  A generated stub that nothing calls is
+ * the same state the port was already in, one layer along -- `ms_thread_create.c`
+ * was present and uncompiled for the life of the port and looked like coverage.
+ * The round trip is create, signal, wait, destroy: the wait must not block,
+ * because the signal came first and the count is one.
+ */
+static boolean_t
+the_kernel_semaphores_answer(mach_port_t task)
+{
+    mach_port_t   sema = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    kr = semaphore_create(task, &sema, SYNC_POLICY_FIFO, 0);
+    if (kr != KERN_SUCCESS || sema == MACH_PORT_NULL) {
+        printf("cap_test: [17] semaphore_create FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+
+    kr = semaphore_signal(sema);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [17] semaphore_signal FAIL kr=%d\n", (int)kr);
+        (void)semaphore_destroy(task, sema);
+        return 0;
+    }
+
+    /*
+     * Signalled once with a count of zero, so exactly one wait is satisfied
+     * without blocking.  ⚠️ A second one would not return, which is why there
+     * is one: this arm has no way to time out, and a test that hangs reports
+     * nothing about anything.
+     */
+    kr = semaphore_wait(sema);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [17] semaphore_wait FAIL kr=%d\n", (int)kr);
+        (void)semaphore_destroy(task, sema);
+        return 0;
+    }
+
+    kr = semaphore_destroy(task, sema);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [17] semaphore_destroy FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+
+    printf("cap_test: [17] semaphore create/signal/wait/destroy: OK\n");
+    return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1847,6 +1907,10 @@ main(int argc, char **argv)
      * it from realhost.host_priv_self, so vm_wire is expected to accept it.
      */
     if (!a_wired_page_can_be_given_back(host_port))
+        pass = 0;
+
+    /* #552: the semaphore stubs this target never had, exercised. */
+    if (!the_kernel_semaphores_answer(mach_task_self()))
         pass = 0;
 
     /*
