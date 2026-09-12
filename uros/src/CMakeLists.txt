@@ -224,6 +224,35 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libgpu_console)
 endif()
 
+# libflipc2 (#552).
+#
+# ⚠️ Added as a LIBRARY and nothing more: no task in the x86-64 bundle links it
+# yet, so this changes what the tree BUILDS and not what a boot runs. ipc_bench
+# is what wants it, and it arrives once its child-thread start is written for
+# this target -- a library that compiles is not a library that works, and the
+# consumer is what collaudates the producer (libelf was reported done on a host
+# compile while no build here consumed it).
+#
+# 🔴 libvfs is NOT here, and the reason is #553 and not an oversight: its
+# fs_stat/fs_fstat stubs fail their own generated assertion at -m64 because
+# migcom sums field sizes without alignment padding, and vfs_stat_t needs
+# 8-byte alignment where i386 gave it 4. Adding it would mean either a broken
+# build or padding the .defs to silence two routines while the arithmetic stays
+# wrong for the next type.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libflipc2)
+endif()
+
+# ipc_bench on x86-64 (#552), beside the tests rather than behind
+# OSFMK_BUILD_IPC_BENCH, which is the i386 switch.
+#
+# ⚠️ Built but NOT in the bundle: servers/bootstrap's bundle is a curated list
+# and putting ipc_bench in it changes what every campaign boots. That call wants
+# the cost of adding it measured first.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(bench/ipc_bench)
+endif()
+
 # libsa_fs and libblk, ahead of the gate (#422).
 #
 # Stage 2: the filesystem bootstrap reads server images from once the bundle

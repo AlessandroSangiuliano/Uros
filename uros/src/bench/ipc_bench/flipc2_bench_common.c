@@ -8,6 +8,7 @@
  */
 
 #include "flipc2_bench.h"
+#include <mach/machine/thread_status.h>	/* #552: this machine's, not i386's */
 #include <mach.h>
 #include <mach/mach_host.h>
 #include <mach/clock.h>
@@ -294,4 +295,73 @@ bench_futex_pingpong(void)
     flipc2_get_time(&t1);
     pthread_join(ct, NULL);
     flipc2_print_result("semaphore ping-pong", flipc2_elapsed_ns(&t0, &t1), fx_iters);
+}
+
+/*
+ * #552: give a fresh thread a program counter and a stack, on either machine.
+ *
+ * 🔴 Five call sites in this benchmark did this inline against
+ * `struct i386_thread_state`, with `.eip`, `.uesp` and a cast of a function
+ * pointer to `unsigned int` -- which is the cast the compiler objects to at
+ * -m64, and rightly: it truncates the entry point.
+ *
+ * 🔑 One helper and not five per-target blocks, because here the two sequences
+ * differ only in the NAMES and the WIDTH.  crt0 was written twice on purpose
+ * (#426) because there the entry argument travels on the stack on one target
+ * and in a register on the other -- a difference in kind.  These children take
+ * no argument: everything they need is in memory they share with the parent, so
+ * the only machine-dependent words are the two being set.
+ *
+ * ⚠️ Read the state first rather than zeroing it.  The segment selectors and
+ * flags a fresh thread carries are the kernel's to choose, and a zeroed frame
+ * hands ring 3 a null code segment.
+ */
+kern_return_t
+bench_child_thread_start(mach_port_t thread, void (*entry)(void),
+                         vm_offset_t stack_top)
+{
+#if defined(__x86_64__)
+    struct x86_64_thread_state	state;
+#else
+    struct i386_thread_state	state;
+#endif
+    mach_msg_type_number_t	count;
+    kern_return_t		kr;
+
+#if defined(__x86_64__)
+    count = x86_64_THREAD_STATE_COUNT;
+    kr = thread_get_state(thread, x86_64_THREAD_STATE,
+			  (thread_state_t)&state, &count);
+    if (kr != KERN_SUCCESS)
+	return kr;
+
+    state.rip = (uint64_t)entry;
+    /*
+     * ⚠️ EIGHT off the top, which i386 does not do here.
+     *
+     * The System V ABI wants rsp sixteen-byte aligned AT a call, so a function
+     * sees it eight past a boundary once its return address is pushed.  A
+     * thread the kernel starts is entered by a jump and has no return address,
+     * so the value its entry point must see is the one a callee sees.  Starting
+     * it on a boundary leaves every SSE spill in that function misaligned --
+     * the same reasoning bootstrap's set_regs.c carries for the first user
+     * thread, and the reason this is not a width translation of i386's line.
+     */
+    state.rsp = (uint64_t)stack_top - 0x8;
+
+    return thread_set_state(thread, x86_64_THREAD_STATE,
+			    (thread_state_t)&state, x86_64_THREAD_STATE_COUNT);
+#else
+    count = i386_THREAD_STATE_COUNT;
+    kr = thread_get_state(thread, i386_THREAD_STATE,
+			  (thread_state_t)&state, &count);
+    if (kr != KERN_SUCCESS)
+	return kr;
+
+    state.eip  = (unsigned int)entry;
+    state.uesp = (unsigned int)stack_top;
+
+    return thread_set_state(thread, i386_THREAD_STATE,
+			    (thread_state_t)&state, i386_THREAD_STATE_COUNT);
+#endif
 }

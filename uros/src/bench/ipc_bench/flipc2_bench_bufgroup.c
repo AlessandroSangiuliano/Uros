@@ -21,7 +21,7 @@ extern int _mig_multithreaded;
 #include <mach/mach_traps.h>
 #include <mach/mach_interface.h>
 #include <mach/thread_switch.h>
-#include <mach/i386/thread_status.h>
+#include <mach/machine/thread_status.h>	/* #552: this machine's, not i386's */
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -249,8 +249,6 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
     mach_port_t         child_task, child_thread;
     vm_offset_t         child_stack;
     vm_address_t        child_fwd_addr, child_rev_addr, child_bg_addr;
-    struct i386_thread_state state;
-    mach_msg_type_number_t state_count;
     struct flipc2_desc  *d;
     tvalspec_t          t0, t1;
     uint64_t            offset;
@@ -432,13 +430,11 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
         return;
     }
 
-    state_count = i386_THREAD_STATE_COUNT;
-    thread_get_state(child_thread, i386_THREAD_STATE,
-                     (thread_state_t)&state, &state_count);
-    state.eip  = (unsigned int)flipc2_child_bg_echo_entry;
-    state.uesp = (unsigned int)(child_stack + FLIPC2_CHILD_STACK_SIZE);
-    thread_set_state(child_thread, i386_THREAD_STATE,
-                     (thread_state_t)&state, i386_THREAD_STATE_COUNT);
+    if (bench_child_thread_start(child_thread, flipc2_child_bg_echo_entry,
+                                 child_stack + FLIPC2_CHILD_STACK_SIZE)) {
+        printf("  %s: child thread start failed\n", label);
+        return;
+    }
     thread_resume(child_thread);
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 

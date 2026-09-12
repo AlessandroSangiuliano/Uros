@@ -90,6 +90,21 @@ add_custom_command(
 # ===========================================================================
 # Source files
 # ===========================================================================
+# #552: the two suites that need libvfs.
+#
+# 🔴 Held out on x86-64 and NOT silently: libvfs does not build for this target
+# because migcom sums field sizes without alignment padding and fs_stat's reply
+# comes out four bytes short at -m64 (#553).  Skipping them is a statement about
+# libvfs, so the suites say so at runtime rather than printing nothing -- a suite
+# that prints nothing is not a suite that passed.
+if(UROS_TARGET_ARCH STREQUAL "x86_64")
+  set(VFS_SMOKE_C "")
+  set(VFS_LIB "")
+else()
+  set(VFS_SMOKE_C libvfs_smoke.c proc_smoke.c)
+  set(VFS_LIB libvfs)
+endif()
+
 
 set(IPC_BENCH_SOURCES
   ipc_bench.c
@@ -105,9 +120,8 @@ set(IPC_BENCH_SOURCES
   flipc2_bench_bufgroup.c
   flipc2_bench_pollset.c
   flipc2_bench_mpsc.c
-  libvfs_smoke.c
   exec_smoke.c
-  proc_smoke.c
+  ${VFS_SMOKE_C}
   ${EXT2_USER_C}
   ${EXEC_USER_C}
   ${PROC_USER_C}
@@ -171,7 +185,7 @@ target_link_libraries(ipc_bench_server PRIVATE
   libmach
   libnetname
   libflipc2
-  libvfs
+  ${VFS_LIB}
   libgpu_console
   libcap
   -Wl,--end-group

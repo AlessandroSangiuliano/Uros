@@ -40,7 +40,14 @@
 
 #include "mem_bench.h"
 
-extern void	bzero(void *, unsigned int);
+/*
+ * #552: size_t, not unsigned int.  libmach defines it as
+ * bzero(void *, size_t) -- the same width as the pointer on x86-64 and four
+ * bytes wider than what this line used to promise.  A hand declaration that
+ * disagrees with the definition is the kind of thing that is right by accident
+ * on one word size.
+ */
+extern void	bzero(void *, size_t);
 
 /* ===================================================================
  * Timing helpers
