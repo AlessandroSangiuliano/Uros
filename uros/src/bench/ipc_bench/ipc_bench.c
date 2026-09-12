@@ -2779,6 +2779,58 @@ main(int argc, char **argv)
 #endif
     }
 
+    /*
+     * 🔑 WHAT DID NOT RUN, SAID OUT LOUD (#552).
+     *
+     * «Benchmark complete» on its own is the sentence a reader takes for "all
+     * of it ran", and the selector mask means that is usually false.  A suite
+     * that prints nothing cannot be told from a suite that passed -- which is
+     * the same failure as a test that never ran looking like a test that did.
+     *
+     * ⚠️ So the mask is reported, not assumed: this lists what was asked for
+     * and what was left out, from the mask itself rather than from a comment
+     * somebody has to keep in step with it.
+     */
+    {
+	static const struct { unsigned bit; const char *name; } all_suites[] = {
+	    { SUITE_KRPC,    "krpc" },    { SUITE_SYSCALL, "syscall" },
+	    { SUITE_INTRA,   "intra" },   { SUITE_SLOW,    "slow" },
+	    { SUITE_INTER,   "inter" },   { SUITE_COMB,    "comb" },
+	    { SUITE_PORT,    "port" },    { SUITE_PORTS,   "ports" },
+	    { SUITE_PP,      "pp" },      { SUITE_OOL,     "ool" },
+	    { SUITE_MEM,     "mem" },     { SUITE_DISK,    "disk" },
+	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
+	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
+	};
+	unsigned i, nrun = 0, nskip = 0;
+
+	printf("\n--- suites: ");
+	for (i = 0; i < sizeof(all_suites)/sizeof(all_suites[0]); i++)
+	    if (suites & all_suites[i].bit) {
+		printf("%s%s", nrun++ ? " " : "", all_suites[i].name);
+	    }
+	if (nrun == 0)
+	    printf("(none)");
+	printf("\n--- NOT run: ");
+	for (i = 0; i < sizeof(all_suites)/sizeof(all_suites[0]); i++)
+	    if (!(suites & all_suites[i].bit)) {
+		printf("%s%s", nskip++ ? " " : "", all_suites[i].name);
+	    }
+	if (nskip == 0)
+	    printf("(none — every suite was asked for)");
+	printf("\n");
+
+	/*
+	 * ⚠️ And `scale' gets a line of its own, because it is not merely
+	 * unasked: on one processor it stops making progress at thr=24 (#556),
+	 * and a reader who asks for it and gets a wedge should find the issue
+	 * number here rather than in a CMakeLists.
+	 */
+	if (suites & SUITE_SCALE)
+	    printf("--- note: scale wedges at thr=24 on a uniprocessor "
+		   "(#556)\n");
+    }
+
     printf("=== Benchmark complete ===\n");
 
     /*
