@@ -598,6 +598,39 @@ stack del kernel — qui non succede mai. I mark li restano (sono giusti per il
 caso che la prende) ma la descrizione onesta e' «un braccio che esiste e qui non
 si prende».
 
+
+### E la slow path a quattro processori costa 3× quella a uno — la hot path no
+
+Entrambe le letture con `-X`, quindi **cambia solo il numero di processori**.
+`-smp 1` e `-smp 4`, KVM, 3.993 MHz campionati, mediana sugli 8 sample bloccati.
+
+| fase | smp1 `-X` | smp4 `-X` | rapporto |
+|---|--:|--:|--:|
+| entry | 60 | 60 | **1.0** |
+| resolve | 210 | 360 | 1.7 |
+| `wait` *(wall)* | 2520 | 5045 | 2.0 |
+| **`RUNQ`** | **420** | **1405** | **3.3** |
+| `SWITCH` | 540 | 1230 | 2.3 |
+| `mq_recv` | 210 | 840 | 4.0 |
+| `copyout` | 300 | 990 | 3.3 |
+| **`PUT`** | **150** | **840** | **5.6** |
+| residue | 360 | 1020 | 2.8 |
+| **su processore** | **2301** | **6797** | **3.0** |
+| di cui «ottenere il processore» | 960 (41%) | 2635 (38%) | |
+
+🔑 **Tre volte, e #392 aveva trovato che la HOT path costa uguale a 1 e a 4.**
+Due comportamenti opposti sullo stesso kernel, ora misurati invece che supposti.
+La *quota* di «ottenere il processore» invece non si muove: 41% contro 38%.
+
+⚠️ `entry` sta fermo a 60 su entrambe, ed e' il controllo che rende leggibile il
+resto: l'ingresso nel trap e' lavoro per-CPU e non deve dipendere da quanti
+processori ci sono. Se si fosse mosso, la tabella starebbe misurando il clock o
+l'acceleratore.
+
+⚠️ `PUT` a 5,6× e `copyout` a 3,3× sono le due copie verso la memoria utente.
+Che sia TLB/cache con i thread che si spostano fra processori e' **plausibile e
+non misurato**, e resta scritto cosi' invece che come spiegazione.
+
 ## Come si riproduce
 
     sudo cpupower frequency-set -g performance -d 1.4GHz -u 4GHz
