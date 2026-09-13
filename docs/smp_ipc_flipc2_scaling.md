@@ -554,10 +554,39 @@ cio' che il gate prevede: la hand-off del #356 e' **same-task only**, quindi
 usa la hand-off diretta dentro `mach_msg`. Se fossero calate tutte, si sarebbe
 misurato qualcos'altro.
 
-⚠️ Le righe di `inter` oscillano ancora (−14% … +41%): quella lotteria **resta**,
-ed e' quella che il PCID (#412) puo' togliere aprendo il gate a cross-task. Il
-motivo per cui e' chiuso e' scritto in `sched_prim.c` ed e' un costo di i386:
-*«an inter-task switch on one CPU costs a cr3 reload = full TLB flush on i386»*.
+### ❌ E su `inter` NON e' rumore — correzione
+
+La prima stesura di questa sezione diceva che `inter` «oscilla senza direzione».
+Falso, e a dirlo sono i boot singoli, che le mediane nascondevano:
+
+| `inter` **con** `-X` | boot 1 | boot 2 | boot 3 | |
+|---|--:|--:|--:|---|
+| null | 2.27 | 3.57 | 2.36 | sparso |
+| 128B | 2.26 | 2.25 | 2.29 | **stretto e basso** |
+| **1024B** | **3.94** | **3.96** | **4.46** | **stretto e ALTO** |
+| 4096B | 2.85 | 2.73 | 2.76 | stretto e basso |
+
+| `inter` **senza** `-X` | boot 1 | boot 2 | boot 3 |
+|---|--:|--:|--:|
+| 1024B | 4.22 | 2.80 | 2.57 |
+
+🔴 **Tre boot su tre alti sono un MODO, non una lotteria**: su `1024B` il braccio
+con `-X` e' riproducibilmente piu' lento, mentre senza arriva fino a 2.57.
+
+🔑 E c'e' il rovescio, altrettanto mancato: con `-X` **tre righe di `inter` su
+quattro diventano STRETTE** (128B 2.25-2.29, 4096B 2.73-2.85) dove senza
+oscillavano da 2.35 a 4.06. Quindi il flag fa qualcosa anche cross-task —
+stabilizza — e su una riga peggiora. Perche' proprio 1024B **non e' noto**, e
+resta scritto cosi' invece che spiegato.
+
+⚠️ **Quindi `-X` non e' un guadagno gratuito**: −45/−67% su otto righe same-task
+e una perdita riproducibile su una cross-task. Se si pensasse di accenderlo per
+default, quella riga e' l'obiezione e va capita prima.
+
+⚠️ La lotteria cross-task nel suo insieme **resta**, ed e' quella che il PCID
+(#412) puo' togliere aprendo il gate. Il motivo per cui e' chiuso e' scritto in
+`sched_prim.c` ed e' un costo di i386: *«an inter-task switch on one CPU costs a
+cr3 reload = full TLB flush on i386»*.
 
 ### Dove vanno i cicli di un trap della SLOW path (#559)
 
