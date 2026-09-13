@@ -606,11 +606,40 @@ fra 2.25 e 2.71 con dispersione dell'1-8%. Tre ripetizioni uguali capitano con
 probabilita' 0,25 ⇒ su dodici taglie ci si aspettano **~3 righe «strette» per
 caso**, e se ne osservano 4: non e' struttura, e' il conteggio previsto.
 
-⚠️ **Cosa resta aperto**: cosa decide la pescata. `HW_FOOTPRINT` non e'
-compilato, quindi `last_processor` il kernel lo mantiene ma **non lo usa** per
-piazzare — il piazzamento si ridecide a ogni sveglia. La coda e' probabilmente
-la coppia che finisce su due CPU invece che su una, ma **non e' misurato**, e
-finche' non lo e' resta scritto cosi'.
+#### ❌ E una correzione dentro la correzione: `HW_FOOTPRINT` E' compilato
+
+La prima stesura di questa sezione diceva che `HW_FOOTPRINT` non e' compilato su
+x86-64 e che quindi `last_processor` non viene usato per piazzare. **Falso.** Il
+generato `config-include/hw_footprint.h` lo mette a **1 su ENTRAMBI** i target, e
+il blocco di affinita' e' nel preprocessato di `sched_prim.c`.
+
+🔴 **L'avevo "dimostrato" con uno strumento rotto**: avevo sostituito `-c` con
+`-E` nella riga di comando lasciandoci il `-o file.o`, quindi il preprocessato
+finiva nell'oggetto e `grep` leggeva stdin vuoto. Zero occorrenze, e le ho
+lette come un'assenza. **Un'assenza va confermata da una presenza**: rifatto con
+`thread_setrun` come controllo (12 occorrenze), `last_processor` ne ha 5.
+
+🔑 **E il meccanismo vero spiega piu' cose di quello che avevo inventato.**
+L'affinita' e' condizionata:
+
+```c
+processor = th->last_processor;
+if (processor->state == PROCESSOR_IDLE) { ...dispatch li'...; return; }
+/* altrimenti: la PRIMA CPU idle della coda */
+```
+
+Preferisce l'ultima CPU **solo se quella CPU e' IDLE**. Ma in un RPC sincrono,
+nell'istante in cui il waker sveglia il peer, **il waker sta ancora girando su
+quella CPU**: il controllo fallisce esattamente nel caso in cui co-locare
+servirebbe, e la coppia viene spedita sulla prima CPU idle. ⇒ **l'affinita' non
+puo' co-locare una coppia sincrona, ed e' strutturale, non un difetto.**
+
+Ed e' esattamente cio' che la hand-off del #356 aggira: accoda il risvegliato
+sulla runq della CPU **corrente**, perche' il waker *sa* di stare per bloccarsi —
+informazione che `thread_setrun` da sola non ha. Essendo same-task, `inter` non
+la prende **mai** ⇒ la coppia cross-task si divide sempre. E' la spiegazione piu'
+economica della coda, e resta **da misurare**: serve che la coppia dichiari la
+propria CPU ai due lati del loop cronometrato.
 
 🔴 **La regola operativa che ne esce**: su `inter` un confronto ha bisogno di
 molte pescate, e la statistica da riportare e' **la frazione nel picco e la
