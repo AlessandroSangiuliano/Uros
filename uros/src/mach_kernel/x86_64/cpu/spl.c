@@ -13,6 +13,15 @@
 #include <cpu/spl.h>
 #include <trap/trap.h>
 
+/*
+ * The switch that takes the #454 early-out away, for the arm of the
+ * measurement that has to show the cost coming back.  Off means the early-out
+ * is IN, which is the shipping shape.
+ */
+#ifndef	ABLATE_454_EARLYOUT
+#define	ABLATE_454_EARLYOUT	0
+#endif
+
 spl_t splget(void)
 {
 	return percpu()->ipl;
@@ -70,6 +79,29 @@ int spl_defer(unsigned vector)
  */
 static void spl_replay(struct percpu *p)
 {
+#if	!ABLATE_454_EARLYOUT
+	/*
+	 * 🔥 #392/#454: NOTHING RECORDED, NOTHING TO LOOK FOR — and the search
+	 * is 240 iterations long.
+	 *
+	 * The scan below runs from vector 255 downwards and stops when the
+	 * class is masked, which for a level of zero is at vector 15.  So every
+	 * splx() that lowers to the bottom walks 240 vectors to discover that
+	 * four words are zero, and #392 measured one splx() at 19-21% of the
+	 * on-processor work of a mach_msg hand-off -- more than the context
+	 * switch it protects, and ten times the scheduler state change.
+	 *
+	 * Four loads and three ORs answer the same question when the answer is
+	 * no, which it is on every path that did not defer an interrupt.  It is
+	 * exactly equivalent: a bit set nowhere is a bit set at no level.
+	 *
+	 * ⚠️ ABLATE_454_EARLYOUT=1 takes it away again, because a correction is
+	 * verified by REMOVING it and watching the number come back.
+	 */
+	if ((p->pending[0] | p->pending[1] | p->pending[2] | p->pending[3]) == 0)
+		return;
+#endif
+
 	for (;;) {
 		unsigned found = 0;
 		int any = 0;

@@ -121,3 +121,369 @@
 - `mach_port_names()` ~14× e `concurrent same-space` degradano: path già reso lock-free da **#331**, ma KVM non mostra il win → **#332** (bare-metal).
 - **FLIPC2 throughput user-space (no kernel) quasi piatto** (4→8 ns) + **futex hand-off** che scala meglio dei path kernel-mediati → prova empirica della direzione **AMP/multikernel** (meno stato condiviso = scala meglio).
 - Misura di scaling pulita (no oversubscription) = **OMEGA (i9 32-core)**.
+
+
+---
+
+# 2026-09-13 — x86-64, smp1: l'early-out di `spl_replay()` (#454, trovato da #392)
+
+**Host**: pavillion — **la stessa macchina della tabella sopra**, AMD Ryzen 5 4600H (6 core / 12 thread), KVM, QEMU 11.0.
+**Kernel**: ramo `feature/454-spl-replay-early-out` = epic `v0.3.0-x86-64` + una guardia in `spl_replay()`.
+**Data**: 2026-09-13. `~/uros-tests/431-mediana.sh x64 3 1` — 3 boot per braccio, **mediana**, **entrambe le braccia nella stessa sessione**.
+**Condizione**: governor `performance` + `boost=1`, verificato **prima e dopo** ogni campagna; frequenza campionata durante (412 e 408 campioni). A batteria.
+**Bundle**: **bench DA SOLO** (`bootstrap.conf` = `name_server` + `ipc_bench`), come le baseline di giugno.
+**Unità**: µs/op. Lower = faster.
+
+> **Perche' questa tabella esiste**
+> Le misure di stamattina dicevano che su `intra`, `inter` e `slow` x86-64 era
+> 1,38-1,48× piu' lento di i386. La scomposizione per fase di #392 ha trovato
+> il motivo, e non era il messaggio: `splx()` scandiva **240 vettori** a ogni
+> abbassamento di livello per scoprire che quattro parole di bit pendenti erano
+> zero, e una hand-off lo paga **due volte** (il secondo dentro il controllo
+> `THREAD_SWAPPER` del ricevente). La guardia e' quattro load e tre OR.
+>
+> 🔴 **Le due braccia sono nella stessa sessione**, non «oggi contro stamattina»:
+> confrontare due campagne prese in due momenti e' l'errore che ha prodotto,
+> oggi stesso, una tabella con ogni numero triplicato perche' il portatile era
+> passato al profilo batteria.
+>
+> ⚠️ **La mediana della frequenza campionata e' 2,43 GHz nel braccio ablato e
+> 1,92 nel braccio con la guardia** — il campionatore gira anche nelle pause fra
+> un boot e l'altro, quando la macchina e' ferma, e le tira giu' entrambe. Quel
+> che conta e' il **verso**: il braccio piu' LENTO e' quello che ha girato al
+> clock piu' ALTO, quindi il guadagno non puo' essere un artefatto del clock.
+
+## I controlli, prima dei risultati
+
+Le righe che **non** bloccano e non abbassano il livello di interrupt non si
+muovono. Se si fossero mosse, la misura sarebbe stata di qualcos'altro.
+
+| controllo | prima | dopo |
+|---|--:|--:|
+| `mach_null` (trap nudo) | 0.03 | 0.03 |
+| `mach_print("")` | 0.05 | 0.05 |
+| `port alloc + destroy` | 0.36 | 0.36 |
+| FLIPC2 throughput no-kernel (batch=1) | 0.03 | 0.03 |
+| FLIPC2 128B produce+consume | 0.03 | 0.03 |
+
+E il controllo di correttezza, che non e' «le suite sono verdi»: l'autotest dei
+differiti del #522 e' l'unico che esercita il replay **con bit pendenti**, ed e'
+verde a `-smp 4` — *«lowering replayed 10 of the 10 owed, handler ran 10 more
+times»*, tick `99 99 99 99`. Senza quella riga, tutto il resto verde sarebbe
+stato compatibile con «il replay non avviene piu'».
+
+## Tutte le misurazioni
+
+| Sezione | Metrica | prima | dopo | Δ |
+|---|---|--:|--:|--:|
+| #324 futex vs Mach semaphore ping-pong (block+wake round-trip) | futex WAKE_WAIT ping-pong | 1.34 | 0.58 | -57% |
+|  | semaphore ping-pong | 4.87 | 1.95 | -60% |
+| Combined SEND\|RCV intra-task (hotpath) | 1024B inline RPC | 1.70 | 0.91 | -46% |
+|  | 128B inline RPC | 1.67 | 0.91 | -46% |
+|  | 4096B inline RPC | 1.71 | 0.99 | -42% |
+|  | null RPC | 1.65 | 0.87 | -47% |
+| FLIPC2 buffer group benchmarks | 256B RPC (bufgroup inter) | 2.76 | 2.06 | -25% |
+|  | 256B RPC (bufgroup) | 1.84 | 0.90 | -51% |
+|  | bufgroup alloc+free | 0.01 | 0.01 | +0% |
+| FLIPC2 endpoint benchmarks | 128B RPC (endpoint) | 2.80 | 1.95 | -30% |
+|  | endpoint create+destroy | 13.62 | 12.40 | -9% |
+|  | null RPC (endpoint) | 2.81 | 1.98 | -30% |
+| FLIPC2 game simulation (intra-task throughput) | audio 4KB PCM frame | 0.10 | 0.10 | +0% |
+|  | per draw command | 0.00 | 0.00 | sotto risoluzione |
+|  | texture 16KB chunk | 0.29 | 0.29 | +0% |
+| FLIPC2 inter-task BATCH (vm_remap, amortized) | batch=1 (inter) | 2.82 | 1.87 | -34% |
+|  | batch=16 (inter) | 0.22 | 0.14 | -36% |
+|  | batch=64 (inter) | 0.07 | 0.06 | -14% |
+| FLIPC2 inter-task RPC (urmach_futex hand-off) | 1024B RPC (inter futex) | 2.49 | 1.75 | -30% |
+|  | 128B RPC (inter futex) | 2.50 | 1.71 | -32% |
+|  | 4096B RPC (inter futex) | 2.73 | 1.89 | -31% |
+|  | null RPC (inter futex) | 2.38 | 1.90 | -20% |
+| FLIPC2 inter-task RPC (vm_remap shared memory) | 1024B RPC (inter) | 2.83 | 1.93 | -32% |
+|  | 128B RPC (inter) | 2.80 | 1.90 | -32% |
+|  | 4096B RPC (inter) | 2.97 | 2.10 | -29% |
+|  | null RPC (inter) | 2.81 | 1.96 | -30% |
+| FLIPC2 intra-task RPC (semaphore path) | 1024B RPC (intra) | 1.90 | 0.92 | -52% |
+|  | 128B RPC (intra) | 1.85 | 0.91 | -51% |
+|  | 4096B RPC (intra) | 2.00 | 1.04 | -48% |
+|  | null RPC (intra) | 1.92 | 0.93 | -52% |
+| FLIPC2 isolated channel RPC | 128B RPC (isolated inter) | 2.86 | 1.94 | -32% |
+|  | 128B RPC (isolated intra) | 1.85 | 0.89 | -52% |
+|  | null RPC (isolated inter) | 2.83 | 1.89 | -33% |
+|  | null RPC (isolated intra) | 1.83 | 0.89 | -51% |
+| FLIPC2 throughput (single-thread, no kernel) | null desc (batch=1) | 0.03 | 0.03 | +0% |
+|  | null desc (batch=16) | 0.00 | 0.00 | sotto risoluzione |
+|  | null desc (batch=64) | 0.00 | 0.00 | sotto risoluzione |
+| FLIPC2 throughput with data | 1024B produce+consume | 0.04 | 0.04 | +0% |
+|  | 128B produce+consume | 0.03 | 0.03 | +0% |
+|  | 4096B produce+consume | 0.10 | 0.09 | -10% |
+| Inter-task (task-to-task) | 1024B inline RPC | 4.43 | 2.54 | -43% |
+|  | 128B inline RPC | 4.25 | 2.39 | -44% |
+|  | 4096B inline RPC | 4.51 | 2.65 | -41% |
+|  | null RPC | 4.23 | 2.36 | -44% |
+| Intra-task (thread-to-thread) | 1024B inline RPC | 3.63 | 1.50 | -59% |
+|  | 128B inline RPC | 3.41 | 1.51 | -56% |
+|  | 4096B inline RPC | 3.49 | 1.53 | -56% |
+|  | null RPC | 3.38 | 1.44 | -57% |
+| Kernel RPC (where the MIG checks are) | mach_port_type (kernel RPC) | 0.28 | 0.31 | +11% |
+| OOL data (inter-task, PHYSICAL_COPY) | 16 KB OOL inter | 4.01 | 2.71 | -32% |
+|  | 4 KB OOL inter | 4.19 | 2.75 | -34% |
+|  | 64 KB OOL inter | 9.29 | 8.43 | -9% |
+| OOL data (intra-task, PHYSICAL_COPY) | 16 KB OOL | 3.25 | 1.92 | -41% |
+|  | 4 KB OOL | 3.23 | 1.85 | -43% |
+|  | 64 KB OOL | 3.69 | 2.07 | -44% |
+| PP inter-task | 1024B (no PP) | 3.87 | 2.55 | -34% |
+|  | 1024B (w/ PP) | 4.16 | 2.50 | -40% |
+|  | 128B (no PP) | 3.73 | 2.34 | -37% |
+|  | 128B (w/ PP) | 3.84 | 2.36 | -39% |
+|  | 4096B (no PP) | 3.90 | 2.59 | -34% |
+|  | 4096B (w/ PP) | 3.95 | 2.60 | -34% |
+|  | null (no PP) | 3.66 | 2.34 | -36% |
+|  | null (w/ PP) | 3.67 | 2.43 | -34% |
+| PP intra-task | 1024B (no PP) | 2.84 | 1.44 | -49% |
+|  | 1024B (w/ PP) | 2.83 | 1.43 | -49% |
+|  | 128B (no PP) | 2.97 | 1.42 | -52% |
+|  | 128B (w/ PP) | 2.97 | 1.42 | -52% |
+|  | 4096B (no PP) | 2.98 | 1.52 | -49% |
+|  | 4096B (w/ PP) | 3.05 | 1.49 | -51% |
+|  | null (no PP) | 2.77 | 1.40 | -49% |
+|  | null (w/ PP) | 2.76 | 1.38 | -50% |
+| Port operations | mach_port_names() | 3.37 | 3.53 | +5% |
+|  | port alloc + destroy | 0.36 | 0.36 | +0% |
+| Raw syscall (no IPC) | mach_null (noop trap) | 0.03 | 0.03 | +0% |
+|  | mach_print("") trap | 0.05 | 0.05 | +0% |
+| Slow-path receive (continuation path) | 1024B inline RPC (receiver blocked) | 3.42 | 1.46 | -57% |
+|  | 128B inline RPC (receiver blocked) | 3.39 | 1.44 | -58% |
+|  | 4096B inline RPC (receiver blocked) | 3.55 | 1.50 | -58% |
+|  | null RPC (receiver blocked) | 3.34 | 1.44 | -57% |
+
+⚠️ `mach_port_names()` +5% e `mach_port_type` +11% sono le due righe che salgono:
+nessuna delle due blocca, entrambe sono dentro il rumore fra boot di questa
+suite, e nessuna ha una spiegazione misurata. Restano scritte cosi' invece di
+essere arrotondate a zero.
+
+## Concurrent same-space (#327) — etichette a parte
+
+Il bench stampa il tempo grezzo dentro l'etichetta, quindi ogni boot ha una
+riga diversa e l'estrattore non le appaia. Mediane sui tre boot, calcolate a
+mano dai log:
+
+| | prima | dopo | Δ |
+|---|--:|--:|--:|
+| x1, 10000 RPC | 33.53 ms | 14.18 ms | −58% |
+| x2, 20000 RPC | 68.50 ms | 27.50 ms | −60% |
+| x4, 40000 RPC | 136.49 ms | 55.12 ms | −60% |
+
+## Contro la baseline i386 del 20/06 (la tabella in cima a questo file)
+
+Stessa macchina, stesso acceleratore, stesso bundle, stessa metodologia
+(mediana di 3). Le quattro righe su cui stamattina x86-64 perdeva:
+
+| riga | i386 20/06 | x86-64 prima | x86-64 dopo | dopo vs i386 |
+|---|--:|--:|--:|--:|
+| Hotpath SEND\|RCV null | 1.40 | 1.65 | **0.87** | **1,6× piu' veloce** |
+| Intra-task 128B | 2.29 | 3.41 | **1.51** | **1,5× piu' veloce** |
+| Slow-path null | 2.30 | 3.34 | **1.44** | **1,6× piu' veloce** |
+| Inter-task null | 3.07 | 4.23 | **2.36** | **1,3× piu' veloce** |
+| futex WAKE_WAIT ping-pong | 0.43 | 1.34 | **0.58** | 1,35× piu' lento (era 3,1×) |
+| port alloc + destroy | 1.24 | 0.36 | 0.36 | 3,4× piu' veloce |
+| mach_null | 0.11 | 0.03 | 0.03 | 3,7× piu' veloce |
+
+🔑 **Ogni riga su cui x86-64 era piu' lento di i386 ora e' piu' veloce.** La sola
+che resta indietro e' il ping-pong futex (#554), e il divario e' passato da
+3,1× a 1,35×.
+
+## Dove vanno i cicli — scomposizione per fase (#392)
+
+Lo strumento e' `kern/syscall_profile.{h,c}`, `cmake -DUROS_SYSCALL_PROFILE=ON`,
+spento di default. Trap `urmach_msg` sulla hot path mmot, `-smp 1`, KVM,
+mediana di 16 trap consecutivi, frequenza 3.993 MHz campionata.
+
+🔴 **Questa e' la tabella da rifare quando arriva il PCID (#412)**: `inter` cambia
+spazio di indirizzamento e `intra` no, quindi il PCID deve muovere `SWITCH`
+sulla prima e lasciarlo fermo sulla seconda. Se muove entrambe o nessuna, la
+premessa del #412 va riletta.
+
+| fase | ablato | con guardia | cosa chiude |
+|---|--:|--:|---|
+| entry | 60 | 60 | SYSCALL, swapgs, frame, dispatch |
+| get buf | 60 | 60 | `ikm_cache_get` |
+| **COPYIN** | **180** | **180** | `copyinmsg` — la copia in invio |
+| resolve | 150 | 120 | nome → porta |
+| queue | 120 | 150 | diritti, limiti di coda, i due lock |
+| **pick rcv** | **690** | **150** | trova e verifica il ricevente (conteneva uno `splx`) |
+| claim | 60 | 60 | cambio di stato sotto `thread_lock` |
+| park snd | 120 | 120 | il mittente sulla coda di reply |
+| deliver | 120 | 120 | consegna il messaggio, prepara lo switch |
+| wait | 3150 | 2040 | fuori dal processore — **il tempo dell'altro capo** |
+| **SWITCH** | **450** | **450** | `switch_context` + `thread_dispatch` |
+| **splx** | **600** | **60** | abbassa il livello di interrupt |
+| resume | 60 | 90 | sveglia, `ith_state`, trailer |
+| copyout | 210 | 210 | l'header tradotto: porte → nomi |
+| **PUT** | **150** | **150** | `copyoutmsg` — la copia in ricezione |
+| residue | 60 | 30 | quel che i mark non nominano |
+| return | 51 | 66 | ritorno → SYSRET (media, dal percorso in assembly) |
+| **totale su processore** | **3141** | **2076** | |
+
+Letture:
+
+- **Il soffitto del #391 (register-IPC) sono le due copie: 330 cicli su 2076, il
+  10-12%.** La macchina della hand-off e' il 63-68%.
+- **`claim` e' 60 cicli**, cioe' al pavimento dello strumento: il cambio di stato
+  dello scheduler — quello di cui parla il #319 — non costa niente. Costava la
+  ricerca del ricevente, e dentro c'era uno `splx`.
+- **A `-smp 4` non cresce niente**: `pick rcv` 690→660, `SWITCH` 450→420,
+  `splx` 600→630. Stessa forma del #482 sulla fault COW a otto processori.
+- ⚠️ **Il quanto del TSC in questo guest e' 30 cicli** e un paio di timestamp ne
+  costa 60: le quattro colonne a 60 sono **al di sotto della risoluzione**, non
+  misurate a 60.
+- ⚠️ **17 mark × 60 = 1020 cicli di strumento** su 3141 di soggetto. Dichiarato.
+  Ogni fase ne porta uno, quindi la correzione e' per colonna e uniforme.
+
+## Come rifare questa misura
+
+    sudo cpupower frequency-set -g performance -d 1.4GHz -u 4GHz
+    sudo sh -c 'echo 1 > /sys/devices/system/cpu/cpufreq/boost'
+
+    cmake -S uros -B uros/build-x86_64 -DUROS_BUNDLE_IPC_BENCH=ON \
+          -DUROS_BUNDLE_BENCH_ONLY=ON
+    ~/uros-tests/431-mediana.sh x64 3 1      # la campagna, 3 boot, mediana
+    ~/uros-tests/mediane.sh <log>...         # mediana per (suite, metrica)
+    ~/uros-tests/392-giro.sh 1 kvm 150 tag   # un boot con le fasi e il clock
+
+🔴 **`tlp` e' attivo su questa macchina**: staccando il carica batteria applica
+il profilo batteria e riporta il governor a `powersave`. Gli script verificano
+la condizione prima e dopo e **rifiutano di misurare** se non combacia — un giro
+gia' buttato oggi aveva ogni numero gonfiato di 2,93×, che e' esattamente
+4,10/1,40, perche' il TSC e' invariante e il core no.
+
+⚠️ Per misurare una sola suite: `-DUROS_BENCH_SUITES=comb`. Il default resta la
+lista piena.
+
+
+## 2026-09-13 — lo stesso a `-smp 4`, e qui la mediana di 3 NON basta
+
+**Stesse condizioni**, stessa sessione, 3 boot per braccio, `~/uros-tests/431-mediana.sh x64 3 4`.
+Governor verificato prima e dopo entrambe le campagne; frequenza campionata (415 e 282 campioni).
+
+🔴 **La riga pulita e' una sola, e le altre vanno lette come non risolte.**
+
+| riga | ablato (min / **mediana** / max) | con guardia (min / **mediana** / max) |
+|---|---|---|
+| **comb null** | 1.61 / **1.66** / 1.99 | 0.86 / **0.88** / 0.89 |
+| inter null | 3.44 / **3.48** / 3.56 | **2.48** / 3.82 / 3.83 |
+| intra null | 3.45 / **3.57** / 3.70 | **2.53** / 2.62 / 3.00 |
+| slow null | 3.58 / **3.84** / 3.96 | **2.97** / 3.98 / 4.09 |
+
+`comb` riproduce smp1 alla cifra: **−47%**, spread stretto su **entrambe** le braccia.
+
+⚠️ Le altre tre sono **bimodali nel braccio con la guardia**: un boot molto piu'
+veloce e gli altri sul modo lento, mentre il braccio ablato e' stretto. E' la
+lotteria di piazzamento inter-task gia' registrata (**#356**, **#446**: «inter
+bimodale»). Con tre boot la mediana cade da qualunque parte stiano due boot su
+tre — quindi **quelle tre righe non dicono ne' meglio ne' peggio**, e i loro
+minimi (3.44→2.48, 3.45→2.53, 3.58→2.97) sono l'unica cosa che si muove in modo
+coerente. Separarle vuol dire molti piu' boot, non una lettura piu' attenta.
+
+I controlli sono fermi anche qui: `mach_null` 0.03→0.03, `mach_port_type`
+0.29→0.29, `mach_port_names()` 30.84→30.88.
+
+### Tutte le misurazioni, `-smp 4`
+
+| Sezione | Metrica | prima | dopo | Δ |
+|---|---|--:|--:|--:|
+| #324 futex vs Mach semaphore ping-pong (block+wake round-trip) | futex WAKE_WAIT ping-pong | 1.47 | 0.63 | -57% |
+|  | semaphore ping-pong | 4.17 | 2.94 | -29% |
+| Combined SEND\|RCV intra-task (hotpath) | 1024B inline RPC | 1.75 | 0.95 | -46% |
+|  | 128B inline RPC | 1.71 | 0.92 | -46% |
+|  | 4096B inline RPC | 1.80 | 1.00 | -44% |
+|  | null RPC | 1.66 | 0.88 | -47% |
+| FLIPC2 buffer group benchmarks | 256B RPC (bufgroup inter) | 0.91 | 0.83 | -9% |
+|  | 256B RPC (bufgroup) | 2.70 | 2.90 | +7% |
+|  | bufgroup alloc+free | 0.01 | 0.01 | +0% |
+| FLIPC2 endpoint benchmarks | 128B RPC (endpoint) | 2.93 | 2.80 | -4% |
+|  | endpoint create+destroy | 18.17 | 16.06 | -12% |
+|  | null RPC (endpoint) | 2.89 | 2.65 | -8% |
+| FLIPC2 game simulation (intra-task throughput) | audio 4KB PCM frame | 0.10 | 0.10 | +0% |
+|  | per draw command | 0.00 | 0.00 | sotto risoluzione |
+|  | texture 16KB chunk | 0.29 | 0.29 | +0% |
+| FLIPC2 inter-task BATCH (vm_remap, amortized) | batch=1 (inter) | 2.77 | 2.26 | -18% |
+|  | batch=16 (inter) | 0.20 | 0.17 | -15% |
+|  | batch=64 (inter) | 0.07 | 0.07 | +0% |
+| FLIPC2 inter-task RPC (urmach_futex hand-off) | 1024B RPC (inter futex) | 2.66 | 1.87 | -30% |
+|  | 128B RPC (inter futex) | 2.47 | 1.88 | -24% |
+|  | 4096B RPC (inter futex) | 2.76 | 1.98 | -28% |
+|  | null RPC (inter futex) | 2.49 | 1.81 | -27% |
+| FLIPC2 inter-task RPC (vm_remap shared memory) | 1024B RPC (inter) | 2.86 | 3.63 | +27% |
+|  | 128B RPC (inter) | 2.94 | 3.41 | +16% |
+|  | 4096B RPC (inter) | 4.12 | 4.00 | -3% |
+|  | null RPC (inter) | 3.01 | 3.52 | +17% |
+| FLIPC2 intra-task RPC (semaphore path) | 1024B RPC (intra) | 2.88 | 2.19 | -24% |
+|  | 128B RPC (intra) | 3.00 | 2.13 | -29% |
+|  | 4096B RPC (intra) | 3.04 | 2.55 | -16% |
+|  | null RPC (intra) | 2.94 | 2.53 | -14% |
+| FLIPC2 isolated channel RPC | 128B RPC (isolated inter) | 3.00 | 2.93 | -2% |
+|  | 128B RPC (isolated intra) | 4.06 | 2.12 | -48% |
+|  | null RPC (isolated inter) | 2.98 | 2.72 | -9% |
+|  | null RPC (isolated intra) | 4.11 | 2.15 | -48% |
+| FLIPC2 throughput (single-thread, no kernel) | null desc (batch=1) | 0.03 | 0.03 | +0% |
+|  | null desc (batch=16) | 0.00 | 0.00 | sotto risoluzione |
+|  | null desc (batch=64) | 0.00 | 0.00 | sotto risoluzione |
+| FLIPC2 throughput with data | 1024B produce+consume | 0.04 | 0.05 | +25% |
+|  | 128B produce+consume | 0.03 | 0.03 | +0% |
+|  | 4096B produce+consume | 0.09 | 0.10 | +11% |
+| Inter-task (task-to-task) | 1024B inline RPC | 3.74 | 4.43 | +18% |
+|  | 128B inline RPC | 3.67 | 2.64 | -28% |
+|  | 4096B inline RPC | 3.96 | 2.93 | -26% |
+|  | null RPC | 3.48 | 3.82 | +10% |
+| Intra-task (thread-to-thread) | 1024B inline RPC | 3.80 | 3.03 | -20% |
+|  | 128B inline RPC | 3.73 | 4.04 | +8% |
+|  | 4096B inline RPC | 4.23 | 4.63 | +9% |
+|  | null RPC | 3.57 | 2.62 | -27% |
+| Kernel RPC (where the MIG checks are) | mach_port_type (kernel RPC) | 0.29 | 0.29 | +0% |
+| OOL data (inter-task, PHYSICAL_COPY) | 16 KB OOL inter | 5.37 | 3.13 | -42% |
+|  | 4 KB OOL inter | 6.18 | 3.45 | -44% |
+|  | 64 KB OOL inter | 10.62 | 13.73 | +29% |
+| OOL data (intra-task, PHYSICAL_COPY) | 16 KB OOL | 4.64 | 4.09 | -12% |
+|  | 4 KB OOL | 6.34 | 3.85 | -39% |
+|  | 64 KB OOL | 6.67 | 3.97 | -40% |
+| PP inter-task | 1024B (no PP) | 4.43 | 2.96 | -33% |
+|  | 1024B (w/ PP) | 4.05 | 2.81 | -31% |
+|  | 128B (no PP) | 3.57 | 3.86 | +8% |
+|  | 128B (w/ PP) | 3.59 | 2.59 | -28% |
+|  | 4096B (no PP) | 4.09 | 3.99 | -2% |
+|  | 4096B (w/ PP) | 5.80 | 4.65 | -20% |
+|  | null (no PP) | 3.57 | 2.67 | -25% |
+|  | null (w/ PP) | 3.55 | 2.76 | -22% |
+| PP intra-task | 1024B (no PP) | 3.74 | 3.18 | -15% |
+|  | 1024B (w/ PP) | 3.81 | 4.27 | +12% |
+|  | 128B (no PP) | 3.58 | 2.71 | -24% |
+|  | 128B (w/ PP) | 3.75 | 3.86 | +3% |
+|  | 4096B (no PP) | 3.87 | 3.95 | +2% |
+|  | 4096B (w/ PP) | 3.98 | 3.59 | -10% |
+|  | null (no PP) | 3.55 | 2.99 | -16% |
+|  | null (w/ PP) | 3.54 | 3.94 | +11% |
+| Port operations | mach_port_names() | 30.84 | 30.88 | +0% |
+|  | port alloc + destroy | 0.38 | 0.36 | -5% |
+| Raw syscall (no IPC) | mach_null (noop trap) | 0.03 | 0.03 | +0% |
+|  | mach_print("") trap | 0.05 | 0.05 | +0% |
+| Slow-path receive (continuation path) | 1024B inline RPC (receiver blocked) | 4.15 | 4.55 | +10% |
+|  | 128B inline RPC (receiver blocked) | 3.67 | 2.82 | -23% |
+|  | 4096B inline RPC (receiver blocked) | 4.38 | 3.47 | -21% |
+|  | null RPC (receiver blocked) | 3.84 | 3.98 | +4% |
+
+⚠️ Nel braccio con la guardia il **boot 1 e' morto** su
+`panic(cpu 1): vm_page_release: page 0x2788000 still mapped (#385)`, quindi le
+righe dopo la suite FLIPC2 BATCH hanno meno campioni in quel braccio. Il difetto
+e' **preesistente**: la campagna di stamattina, sull'epic senza la guardia, lo ha
+prodotto in 1 boot su 3 identicamente. Tre boot per braccio non separano 1/3 da
+0/3 su un difetto raro — serve la campagna da venti boot, come quella originale.
+
+## Cosa deve fare il PCID (#412) a questa tabella
+
+`inter` cambia spazio di indirizzamento, `intra` no. Il PCID deve muovere la
+colonna `SWITCH` della scomposizione per fase **sulla prima e non sulla
+seconda**. Se le muove entrambe, o nessuna, la premessa del #412 va riletta
+prima del codice.
+
+⚠️ E prima di misurare il PCID, `-smp 4` va reso leggibile: con la bimodalita'
+attuale tre boot non distinguono un guadagno del 20% dal rumore.
