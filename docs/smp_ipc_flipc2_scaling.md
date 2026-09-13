@@ -487,3 +487,132 @@ prima del codice.
 
 ⚠️ E prima di misurare il PCID, `-smp 4` va reso leggibile: con la bimodalita'
 attuale tre boot non distinguono un guadagno del 20% dal rumore.
+
+
+## 2026-09-13 (3) — `-smp 4` reso leggibile: il flag `-X` (#356/#446), e la slow path scomposta (#559)
+
+**Stesse condizioni**, stessa sessione, 3 boot per braccio, `~/uros-tests/446-ab.sh 3 4`.
+Governor `performance` + `boost=1` verificato prima e dopo. A batteria. Suite `intra slow inter comb`.
+**Le due braccia sono la STESSA IMMAGINE, un flag di differenza** — voce GRUB 14 contro 18.
+
+🔴 **E il controllo di presenza e' dentro la misura**: il braccio con `-X` deve
+stampare `sched: -X ... is ON`. Visto 0/0/0 nel braccio senza e 1/1/1 in quello
+con. Un flag che non prende e un flag che non fa niente sono indistinguibili nei
+numeri — e questo flag era **letto da due call site e scritto da nessuno** su
+x86-64 fino a oggi.
+
+### La lotteria collassa, boot per boot
+
+| | boot 1 | boot 2 | boot 3 |
+|---|--:|--:|--:|
+| `intra` null **senza** `-X` | **5.51** | 2.59 | 2.43 |
+| `intra` null **con** `-X` | 1.52 | 1.43 | 1.43 |
+| `slow` null **senza** | **4.61** | 2.69 | 2.46 |
+| `slow` null **con** | 1.35 | 1.37 | 1.35 |
+
+Da una dispersione del 130% fra boot a un numero stabile al 3%. E' il risultato
+che **#446 aveva misurato su omen** (±30-43% → ±1%), riprodotto su questa
+macchina per la prima volta — perche' fino a oggi il flag qui non era
+raggiungibile.
+
+### 🔑 L'esperimento DISCRIMINA, ed e' questo a renderlo una misura
+
+| Sezione | Metrica | prima | dopo | Δ |
+|---|---|--:|--:|--:|
+| Combined SEND\|RCV intra-task (hotpath) | 1024B inline RPC | 0.92 | 1.04 | +13% |
+|  | 128B inline RPC | 0.98 | 0.90 | -8% |
+|  | 4096B inline RPC | 0.98 | 1.04 | +6% |
+|  | null RPC | 0.87 | 0.90 | +3% |
+| Inter-task (task-to-task) | 1024B inline RPC | 2.80 | 3.96 | +41% |
+|  | 128B inline RPC | 2.63 | 2.26 | -14% |
+|  | 4096B inline RPC | 3.01 | 2.76 | -8% |
+|  | null RPC | 2.55 | 2.36 | -7% |
+| Intra-task (thread-to-thread) | 1024B inline RPC | 2.91 | 1.42 | -51% |
+|  | 128B inline RPC | 4.33 | 1.41 | -67% |
+|  | 4096B inline RPC | 3.16 | 1.46 | -54% |
+|  | null RPC | 2.59 | 1.43 | -45% |
+| Slow-path receive (continuation path) | 1024B inline RPC (receiver blocked) | 2.90 | 1.41 | -51% |
+|  | 128B inline RPC (receiver blocked) | 2.68 | 1.41 | -47% |
+|  | 4096B inline RPC (receiver blocked) | 3.23 | 1.46 | -55% |
+|  | null RPC (receiver blocked) | 2.69 | 1.35 | -50% |
+
+`intra` e `slow` crollano del 45-67%; **`inter` e `comb` no**. E' esattamente
+cio' che il gate prevede: la hand-off del #356 e' **same-task only**, quindi
+`inter` (task diversi) non la prende, e `comb` non passa dalla run queue perche'
+usa la hand-off diretta dentro `mach_msg`. Se fossero calate tutte, si sarebbe
+misurato qualcos'altro.
+
+⚠️ Le righe di `inter` oscillano ancora (−14% … +41%): quella lotteria **resta**,
+ed e' quella che il PCID (#412) puo' togliere aprendo il gate a cross-task. Il
+motivo per cui e' chiuso e' scritto in `sched_prim.c` ed e' un costo di i386:
+*«an inter-task switch on one CPU costs a cr3 reload = full TLB flush on i386»*.
+
+### Dove vanno i cicli di un trap della SLOW path (#559)
+
+`-smp 1`, KVM, 3.993 MHz campionati, mediana su una forma sola per finestra.
+🔴 **Un round trip della slow path e' DUE trap e sono due forme diverse**: la
+send non blocca, la receive si. Una mediana sulle due insieme e' una riga mai
+accaduta.
+
+| fase | hot path (`comb`, 1 trap) | slow: send | slow: receive |
+|---|--:|--:|--:|
+| entry | 60 | 60 | 60 |
+| `get buf` + `COPYIN` | 60 + 150 | `kmsg_get` 150 | — |
+| resolve | 150 | 210 | 210 |
+| accodamento / risveglio | queue+pick+claim+park+deliver = 570 | `mq_send` 120 | `mq_recv` 180 |
+| `wait` (il peer) | 2100 *(wall)* | — | 2520 *(wall)* |
+| **`RUNQ`** | **0** | — | **390** |
+| `SWITCH` | 450 | — | 540 |
+| `splx` + `resume` | 60 + 90 | — | — |
+| `copyout` + `PUT` | 210 + 330 | — | 300 + 150 |
+| residue | 30 | 60 | 390 |
+| **su processore** | **2211** | **651** | **2271** |
+
+🔑 **`RUNQ` + `SWITCH` = 930 su 2271, il 40%** del lavoro di una receive lenta e'
+*essere svegliati e ottenere un processore*. E **`RUNQ` e' esattamente zero sulla
+hot path**, spread `[0..0]` su sedici sample: zero dove il meccanismo dice che
+deve esserlo, perche' una hand-off diretta non tocca mai una run queue.
+
+⇒ Il round trip a due trap costa **651 + 2271 = 2922** cicli su processore contro
+i **2211** della hot path, **+32%**, e la voce singola piu' grossa che li separa
+e' una fase che la hot path non ha affatto.
+
+### Quale rotta prende davvero il traffico (#559, copertura)
+
+Un trap che arriva in `ipc/mach_msg.c` prende una di tre strade, e la
+scomposizione significa una cosa diversa su ognuna. Un boot, le quattro suite:
+
+| rotta | trap |
+|---|--:|
+| combinata (hot path) | 65.825, di cui **65.635 handed off** |
+| **solo SEND** | **242.413** |
+| **solo RCV** | **242.431** |
+
+🔑 **La rotta a due trap e' circa l'88% del traffico `mach_msg`.** Cio' che #392
+ha profilato e' la minoranza — ed e' il motivo per cui #559 esiste.
+
+❌ E gli stessi contatori hanno corretto un mio errore: **0 su 242.431** receive
+sono riprese in `mach_msg_receive_continue()`. `ipc_mqueue_receive()` passa la
+continuation a `thread_block()`, che la invoca solo se lo scheduler scarta lo
+stack del kernel — qui non succede mai. I mark li restano (sono giusti per il
+caso che la prende) ma la descrizione onesta e' «un braccio che esiste e qui non
+si prende».
+
+## Come si riproduce
+
+    sudo cpupower frequency-set -g performance -d 1.4GHz -u 4GHz
+    sudo sh -c 'echo 1 > /sys/devices/system/cpu/cpufreq/boost'
+
+    cmake -S uros -B uros/build-x86_64 -DUROS_BUNDLE_IPC_BENCH=ON \
+          -DUROS_BUNDLE_BENCH_ONLY=ON -DUROS_BENCH_SUITES="intra slow inter comb"
+    ~/uros-tests/446-ab.sh 3 4        # A/B del flag -X, 3 boot per braccio
+    ~/uros-tests/392-giro.sh 1 kvm 240 tag 18   # un boot con le fasi, voce 18
+
+🔴 **La voce GRUB non e' stabile**: 14 = bundle ordinario, 18 = lo stesso con
+`-X`. Si chiede a `uros/src/mach_kernel/x86_64/boot/grub.cfg`, dove le voci
+nuove vanno **in coda** proprio perche' inserirne una in mezzo rinumera in
+silenzio ogni invocazione che ne nomina una.
+
+⚠️ Il profilo per fase e' `-DUROS_SYSCALL_PROFILE=ON`, **spento di default**, e
+va letto solo per le FASI: con i dump accesi un `comb` null RPC legge 51 µs
+contro 2,21, perche' le printf stampano dentro il loop.
