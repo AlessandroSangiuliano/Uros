@@ -637,9 +637,45 @@ puo' co-locare una coppia sincrona, ed e' strutturale, non un difetto.**
 Ed e' esattamente cio' che la hand-off del #356 aggira: accoda il risvegliato
 sulla runq della CPU **corrente**, perche' il waker *sa* di stare per bloccarsi —
 informazione che `thread_setrun` da sola non ha. Essendo same-task, `inter` non
-la prende **mai** ⇒ la coppia cross-task si divide sempre. E' la spiegazione piu'
-economica della coda, e resta **da misurare**: serve che la coppia dichiari la
-propria CPU ai due lati del loop cronometrato.
+la prende **mai** ⇒ la coppia cross-task si divide sempre.
+
+#### ✅ E la previsione e' stata verificata: a `-smp 1` la coda NON c'e'
+
+Se la coda e' la coppia divisa su due CPU, a **una CPU sola non c'e' dove
+dividerla** e deve sparire. Stessa immagine, stesse voci GRUB, stesso bundle,
+stesso `isweep`, governor `performance` + boost verificati a rete prima e dopo
+(3612 → 3090 MHz, deriva termica), **due boot per braccio = 72 pescate per cella**:
+
+| | nel picco | mediana | p90 | **peggiore** |
+|---|--:|--:|--:|--:|
+| **`-smp 1` senza `-X`** | 94% | 2.51 | **2.68** | **3.35** |
+| **`-smp 1` con `-X`** | **100%** | **2.34** | **2.43** | **2.62** |
+| `-smp 4` senza `-X` | 58% | 2.66 | 4.19 | **13.10** |
+| `-smp 4` con `-X` | 58% | 2.61 | 3.92 | 4.26 |
+
+🔑 **Il picco resta dov'e' e si muove solo la coda**, ed e' questo a rendere la
+misura leggibile: se `-smp 1` fosse semplicemente «un'altra macchina» si sarebbe
+spostato anche il picco. Si e' mosso **soltanto** cio' che l'ipotesi prevedeva.
+
+🔑 **E sparisce anche l'ALTERNANZA.** Le pescate a smp4 non sono indipendenti:
+l'autocorrelazione della sequenza veloce/lenta in `conX-1` da' **lag 1 = 17%**
+(due pescate consecutive sono quasi sempre *diverse*) e lag 2 = 76% — periodo 2.
+A `-smp 1` lag 1 risale a **94%**. Il sospettato e' `queue_first(&pset->idle_queue)`
+nel ramo che l'affinita' non prende: **la coda delle CPU idle ruota**, quindi task
+figli consecutivi pescano CPU diverse a turno.
+
+⚠️ Questo **corregge anche un mio argomento**: avevo scritto che tre ripetizioni
+uguali capitano con probabilita' 0,25 *assumendo indipendenza*, che e' violata.
+La conclusione («nessuna taglia si distingue») ne esce **rafforzata** — con
+correlazione seriale le ripetizioni uguali sono ancora **piu'** probabili — ma il
+numero 0,25 e' un limite inferiore, non la probabilita'.
+
+⚠️ **Non spiegato, e con due soli boot per braccio**: a `-smp 1` il braccio con
+`-X` e' anche il piu' veloce in assoluto (mediana 2.34, il picco scende di un
+bucket). `inter` e' cross-task e il gate e' same-task, quindi il flag non
+dovrebbe toccarlo; e la deriva del clock gioca **contro** questo risultato,
+perche' il braccio con `-X` e' girato per secondo, a 3090 MHz. Va ripreso con
+piu' boot prima di dirne qualsiasi cosa.
 
 🔴 **La regola operativa che ne esce**: su `inter` un confronto ha bisogno di
 molte pescate, e la statistica da riportare e' **la frazione nel picco e la
