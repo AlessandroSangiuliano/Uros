@@ -535,10 +535,10 @@ raggiungibile.
 |  | 128B inline RPC | 0.98 | 0.90 | -8% |
 |  | 4096B inline RPC | 0.98 | 1.04 | +6% |
 |  | null RPC | 0.87 | 0.90 | +3% |
-| Inter-task (task-to-task) | 1024B inline RPC | 2.80 | 3.96 | +41% |
-|  | 128B inline RPC | 2.63 | 2.26 | -14% |
-|  | 4096B inline RPC | 3.01 | 2.76 | -8% |
-|  | null RPC | 2.55 | 2.36 | -7% |
+| Inter-task (task-to-task) | 1024B inline RPC | 2.80 | 3.96 | +41% ⚠️ |
+|  | 128B inline RPC | 2.63 | 2.26 | -14% ⚠️ |
+|  | 4096B inline RPC | 3.01 | 2.76 | -8% ⚠️ |
+|  | null RPC | 2.55 | 2.36 | -7% ⚠️ |
 | Intra-task (thread-to-thread) | 1024B inline RPC | 2.91 | 1.42 | -51% |
 |  | 128B inline RPC | 4.33 | 1.41 | -67% |
 |  | 4096B inline RPC | 3.16 | 1.46 | -54% |
@@ -548,43 +548,76 @@ raggiungibile.
 |  | 4096B inline RPC (receiver blocked) | 3.23 | 1.46 | -55% |
 |  | null RPC (receiver blocked) | 2.69 | 1.35 | -50% |
 
+⚠️ **Le quattro righe `inter` segnate sono un campione solo a testa** e non
+vanno lette come un Δ — vedi la ritirata qui sotto. Le altre dodici righe sono
+riproducibili (la dispersione fra boot crolla, ed e' il punto).
+
 `intra` e `slow` crollano del 45-67%; **`inter` e `comb` no**. E' esattamente
 cio' che il gate prevede: la hand-off del #356 e' **same-task only**, quindi
 `inter` (task diversi) non la prende, e `comb` non passa dalla run queue perche'
 usa la hand-off diretta dentro `mach_msg`. Se fossero calate tutte, si sarebbe
 misurato qualcos'altro.
 
-### ❌ E su `inter` NON e' rumore — correzione
+### ⚠️ Le quattro righe `inter` qui sopra NON vanno lette — ritirata (13/09, sera)
 
-La prima stesura di questa sezione diceva che `inter` «oscilla senza direzione».
-Falso, e a dirlo sono i boot singoli, che le mediane nascondevano:
+Questa sezione diceva prima: *«tre boot su tre alti sono un MODO, non una
+lotteria — su 1024B il braccio con `-X` e' riproducibilmente piu' lento»*, e
+concludeva che `-X` costa un +41% su una riga cross-task. **E' sbagliato, e lo
+e' per un motivo che vale ben oltre questa riga.**
 
-| `inter` **con** `-X` | boot 1 | boot 2 | boot 3 | |
-|---|--:|--:|--:|---|
-| null | 2.27 | 3.57 | 2.36 | sparso |
-| 128B | 2.26 | 2.25 | 2.29 | **stretto e basso** |
-| **1024B** | **3.94** | **3.96** | **4.46** | **stretto e ALTO** |
-| 4096B | 2.85 | 2.73 | 2.76 | stretto e basso |
+🔴 **L'unita' di campionamento era sbagliata.** Ogni riga `inter` costruisce e
+distrugge il proprio task figlio, e il piazzamento della coppia si decide li'.
+Quindi **una riga e' UNA pescata**, per quante iterazioni medi dentro: le 10000
+iterazioni mediano *dentro* una pescata, non *fra* pescate. Tre boot sono tre
+campioni, non trentamila — e il +41% era una riga che aveva pescato lento tre
+volte confrontata con una che aveva pescato veloce due volte su tre.
 
-| `inter` **senza** `-X` | boot 1 | boot 2 | boot 3 |
-|---|--:|--:|--:|
-| 1024B | 4.22 | 2.80 | 2.57 |
+#### La misura che lo dice, con il controllo DENTRO il boot
 
-🔴 **Tre boot su tre alti sono un MODO, non una lotteria**: su `1024B` il braccio
-con `-X` e' riproducibilmente piu' lento, mentre senza arriva fino a 2.57.
+Suite `isweep` (#446): dodici taglie, tre ripetizioni ciascuna, **nello stesso
+boot** — cosi' clock, governor, bundle e storia dello scheduler sono identici
+fra le ripetizioni per costruzione invece che per asserzione. Due boot per
+braccio ⇒ **72 misure per braccio**. pavillion, KVM, `-smp 4`, governor
+`performance`, boost on, a rete, ~3,8 GHz campionati prima e dopo, bundle
+`name_server` + `ipc_bench` con `inter isweep`, profilo OFF, voci GRUB 14 e 18
+(stessa immagine, un flag di differenza; `sched: -X ... is ON` verificato
+presente nel solo braccio con `-X`).
 
-🔑 E c'e' il rovescio, altrettanto mancato: con `-X` **tre righe di `inter` su
-quattro diventano STRETTE** (128B 2.25-2.29, 4096B 2.73-2.85) dove senza
-oscillavano da 2.35 a 4.06. Quindi il flag fa qualcosa anche cross-task —
-stabilizza — e su una riga peggiora. Perche' proprio 1024B **non e' noto**, e
-resta scritto cosi' invece che spiegato.
+La distribuzione **non e' bimodale**: e' un **picco stretto** a ~2,5 µs piu' una
+**coda destra**.
 
-⚠️ **Quindi `-X` non e' un guadagno gratuito**: −45/−67% su otto righe same-task
-e una perdita riproducibile su una cross-task. Se si pensasse di accenderlo per
-default, quella riga e' l'obiezione e va capita prima.
+| su 72 misure | senza `-X` | con `-X` |
+|---|--:|--:|
+| pescate nel picco (< 3,0 µs) | 42 (58%) | 42 (58%) |
+| mediana del picco | 2.54 | 2.52 |
+| pescate in coda (≥ 3,0 µs) | 30 (42%) | 30 (42%) |
+| mediana della coda | 3.53 | **3.82** |
+| **peggior pescata** | **13.10** | **4.26** |
 
-⚠️ La lotteria cross-task nel suo insieme **resta**, ed e' quella che il PCID
-(#412) puo' togliere aprendo il gate. Il motivo per cui e' chiuso e' scritto in
+🔑 **`-X` non cambia quanto spesso si finisce in coda, ne' il costo del picco.**
+Quel che fa e' **accorciare la coda**: 5 delle 30 pescate lente senza `-X`
+superano la *peggiore* pescata vista con `-X`. Sposta un po' in alto il centro
+della coda e ne toglie l'estremita'. ⚠️ Su 30 pescate lente per braccio e' un
+effetto **indicativo, non stabilito**.
+
+🔑 **E nessuna taglia si distingue.** Dentro un boot la stessa taglia legge 2.53,
+5.54 e 2.71; e in un boot intero (`senza-2`) **tutte** le dodici taglie leggono
+fra 2.25 e 2.71 con dispersione dell'1-8%. Tre ripetizioni uguali capitano con
+probabilita' 0,25 ⇒ su dodici taglie ci si aspettano **~3 righe «strette» per
+caso**, e se ne osservano 4: non e' struttura, e' il conteggio previsto.
+
+⚠️ **Cosa resta aperto**: cosa decide la pescata. `HW_FOOTPRINT` non e'
+compilato, quindi `last_processor` il kernel lo mantiene ma **non lo usa** per
+piazzare — il piazzamento si ridecide a ogni sveglia. La coda e' probabilmente
+la coppia che finisce su due CPU invece che su una, ma **non e' misurato**, e
+finche' non lo e' resta scritto cosi'.
+
+🔴 **La regola operativa che ne esce**: su `inter` un confronto ha bisogno di
+molte pescate, e la statistica da riportare e' **la frazione nel picco e la
+forma della coda**, mai la media di una riga — che e' picco e coda mescolati.
+
+⚠️ La lotteria cross-task **resta**, ed e' quella che il PCID (#412) puo'
+togliere aprendo il gate. Il motivo per cui e' chiuso e' scritto in
 `sched_prim.c` ed e' un costo di i386: *«an inter-task switch on one CPU costs a
 cr3 reload = full TLB flush on i386»*.
 
