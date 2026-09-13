@@ -82,16 +82,19 @@ static const char *const sp_name[SP_PHASES] = {
 	"entry   ",	/* SP_ENTRY   */
 	"get buf ",	/* SP_GET     */
 	"COPYIN  ",	/* SP_COPYIN  */
+	"kmsg_get",	/* SP_KMSGGET */
 	"resolve ",	/* SP_RESOLVE */
 	"queue   ",	/* SP_QUEUE   */
 	"pick rcv",	/* SP_PICK    */
 	"claim   ",	/* SP_CLAIM   */
 	"park snd",	/* SP_PARK    */
 	"deliver ",	/* SP_DELIVER */
+	"mq_send ",	/* SP_MQSEND  */
 	"wait    ",	/* SP_WAIT    */
 	"RUNQ    ",	/* SP_RUNQ    */
 	"SWITCH  ",	/* SP_SWITCH  */
 	"splx    ",	/* SP_SPL     */
+	"mq_recv ",	/* SP_MQRECV  */
 	"resume  ",	/* SP_RESUME  */
 	"copyout ",	/* SP_COPYOUT */
 	"PUT     ",	/* SP_PUT     */

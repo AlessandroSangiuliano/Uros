@@ -114,8 +114,22 @@
  */
 #define	SP_GET		1	/* a buffer for the message: ikm_cache_get   */
 #define	SP_COPYIN	2	/* copyinmsg: 🔥 THE SEND-SIDE COPY           */
-#define	SP_RESOLVE	3	/* name -> port: cache, lock-free, or table  */
-#define	SP_QUEUE	4	/* rights, queue limits, the two mqueue locks */
+/*
+ * 🔥 #559: THE SLOW PATH FUSES TWO PHASES INTO ONE CALL, so the fused call gets
+ * a column of its own instead of being charged to either of them.
+ *
+ * `ipc_kmsg_get()' takes the buffer AND copies the message in from the user in
+ * one go; on the hot path those are `get buf' and `COPYIN', separately.
+ * Charging it to one of the two would print a zero for the other, and a zero
+ * reads as "free" rather than as "nobody measured this".
+ *
+ * ⚠️ So every column is zero exactly where the work it names does not exist --
+ * the same shape as SP_RUNQ, which is zero on the hot path because a direct
+ * hand-off never touches a run queue.
+ */
+#define	SP_KMSGGET	3	/* ipc_kmsg_get: buffer E copia, non separabili */
+#define	SP_RESOLVE	4	/* name -> port: cache, lock-free, or table  */
+#define	SP_QUEUE	5	/* rights, queue limits, the two mqueue locks */
 /*
  * The hand-off in three, because the issue's "receiver claim + handoff
  * (switch_context, thread_dispatch)" is one phrase covering three costs that
@@ -159,11 +173,12 @@
  * 2,781 on-processor cycles is a real widening and it is declared in the dump.
  * The alternative is a 31% bucket whose contents are argued about.
  */
-#define	SP_PICK		5	/* lock the queue, find and vet the receiver */
-#define	SP_CLAIM	6	/* splsched, thread_lock, TH_WAIT -> TH_RUN  */
-#define	SP_PARK		7	/* the sender onto the reply queue, TH_WAIT  */
-#define	SP_DELIVER	8	/* hand the message over, set up the switch  */
-#define	SP_WAIT		9	/* off the processor -- the OTHER end's time */
+#define	SP_PICK		6	/* lock the queue, find and vet the receiver */
+#define	SP_CLAIM	7	/* splsched, thread_lock, TH_WAIT -> TH_RUN  */
+#define	SP_PARK		8	/* the sender onto the reply queue, TH_WAIT  */
+#define	SP_DELIVER	9	/* hand the message over, set up the switch  */
+#define	SP_MQSEND	10	/* ipc_mqueue_send: enqueue and wake        */
+#define	SP_WAIT		11	/* off the processor -- the OTHER end's time */
 /*
  * 🔥 #559: RUNNABLE BUT NOT RUNNING, and it is a phase because the question it
  * answers is the one that decides whether there is anything to optimise.
@@ -192,20 +207,21 @@
  * charged to SP_RUNQ, which is where it belongs: it is part of what being put
  * on a queue costs.
  */
-#define	SP_RUNQ		10	/* 🔥 runnable, waiting for a processor       */
-#define	SP_SWITCH	11	/* 🔥 switch_context + thread_dispatch        */
+#define	SP_RUNQ		12	/* 🔥 runnable, waiting for a processor       */
+#define	SP_SWITCH	13	/* 🔥 switch_context + thread_dispatch        */
 /*
  * And the resume in two, for the same reason at 23%: lowering the interrupt
  * level is not bookkeeping about a message, and on this target splx() can take
  * pending interrupts and run ASTs.  A column that folds it in with reading
  * ith_state and filling in a trailer is naming the wrong thing.
  */
-#define	SP_SPL		12	/* enable_preemption + splx after the switch */
-#define	SP_RESUME	13	/* back with a reply: ith_state, the trailer */
-#define	SP_COPYOUT	14	/* the header translated: ports -> names     */
-#define	SP_PUT		15	/* copyoutmsg: 🔥 THE RECEIVE-SIDE COPY       */
-#define	SP_BODY		16	/* everything the marks above did not name   */
-#define	SP_PHASES	17
+#define	SP_SPL		14	/* enable_preemption + splx after the switch */
+#define	SP_MQRECV	15	/* ipc_mqueue_receive, less the sleep       */
+#define	SP_RESUME	16	/* back with a reply: ith_state, the trailer */
+#define	SP_COPYOUT	17	/* the header translated: ports -> names     */
+#define	SP_PUT		18	/* copyoutmsg: 🔥 THE RECEIVE-SIDE COPY       */
+#define	SP_BODY		19	/* everything the marks above did not name   */
+#define	SP_PHASES	20
 
 /*
  * 🔴 And the return is NOT one of them, which is a decision and not an

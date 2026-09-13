@@ -281,6 +281,14 @@ mach_msg_send(
 	if (mr != MACH_MSG_SUCCESS)
 		return mr;
 
+	/*
+	 * #559: the buffer and the send-side copy, fused.  This is the route a
+	 * send-only trap takes -- it never enters the hot path at all, because
+	 * that block is gated on the combined option -- so none of the marks in
+	 * mach_msg_overwrite_trap() are on the way.
+	 */
+	SP_MARK(SP_KMSGGET);
+
 	if (option & MACH_SEND_CANCEL) {
 		if (notify == MACH_PORT_NULL)
 			mr = MACH_SEND_INVALID_NOTIFY;
@@ -293,7 +301,18 @@ mach_msg_send(
 		return mr;
 	}
 
+	SP_MARK(SP_RESOLVE);		/* #559: names -> ports, the general way */
+
 	mr = ipc_mqueue_send(kmsg, option & MACH_SEND_TIMEOUT, timeout);
+
+	/*
+	 * #559: the enqueue and the wake, in one column because from here they
+	 * are one call.  On the hot path the same work is five -- queue, pick,
+	 * claim, park, deliver -- and the difference between one column and
+	 * five is the difference between the two shapes, not a coarser
+	 * instrument.
+	 */
+	SP_MARK(SP_MQSEND);
 
 	if (mr != MACH_MSG_SUCCESS) {
 	    mr |= ipc_kmsg_copyout_pseudo(kmsg, space, map, MACH_MSG_BODY_NULL);
@@ -356,6 +375,9 @@ mach_msg_receive(
 #endif	/* MACH_RT */
 
 	mr = ipc_mqueue_copyin(space, rcv_name, &mqueue, &object);
+
+	SP_MARK(SP_RESOLVE);		/* #559: the receive port, resolved */
+
 	if (mr != MACH_MSG_SUCCESS) {
 		return mr;
 	}
@@ -409,6 +431,14 @@ mach_msg_receive(
 				timeout, FALSE,
 				mach_msg_receive_continue,
 				&kmsg, &seqno);
+	/*
+	 * #559: what is left of the receive once the sleep has been taken out.
+	 * The sleep itself is already three columns -- wait, RUNQ, SWITCH --
+	 * marked from the scheduler, so this is the finding-the-message half
+	 * and not the waiting-for-it half.
+	 */
+	SP_MARK(SP_MQRECV);
+
 
 	/* mqueue is unlocked */
 	ipc_object_release(object);
@@ -442,6 +472,9 @@ mach_msg_receive(
 	} else {
 		mr = ipc_kmsg_copyout(kmsg, space, map, MACH_PORT_NULL, slist);
 	}
+
+	SP_MARK(SP_COPYOUT);		/* #559: ports -> names, general way */
+
 	if (mr != MACH_MSG_SUCCESS) {
 		if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR
 #if	DIPC
@@ -463,6 +496,9 @@ mach_msg_receive(
 	}
 	mr = ipc_kmsg_put(msg, kmsg, 
 		kmsg->ikm_header.msgh_size + trailer->msgh_trailer_size);
+
+	SP_MARK(SP_PUT);		/* #559: 🔥 the receive-side copy */
+
 	FREE_SCATTER_LIST(slist, slist_size, slist_rt);
 
 	return mr;
@@ -611,6 +647,15 @@ finish_receive:
 				      self->ith_scatter_list);
 	}
 
+	/*
+	 * #559: THE OTHER ARM, and it is the one every blocking receive takes.
+	 * A receive that slept does not return through mach_msg_receive() at
+	 * all -- it reappears here, with the kernel stack reset, and goes
+	 * straight to user mode.  Marking only the first arm would print a zero
+	 * for the copyout and the put of exactly the traps this issue is about.
+	 */
+	SP_MARK(SP_COPYOUT);
+
 	if (mr != MACH_MSG_SUCCESS) {
 		if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR
 #if	DIPC
@@ -632,6 +677,8 @@ finish_receive:
 
 	mr = ipc_kmsg_put(msg, kmsg,
 		kmsg->ikm_header.msgh_size + trailer->msgh_trailer_size);
+
+	SP_MARK(SP_PUT);		/* #559: 🔥 the receive-side copy */
 
 done:
 	slist = self->ith_scatter_list;
