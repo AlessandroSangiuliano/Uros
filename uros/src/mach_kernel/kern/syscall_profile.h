@@ -30,6 +30,43 @@
  * current_thread(), which is the same trick and the same justification the
  * entry already uses for the user stack pointer: safe across two instructions
  * for a reason rather than by luck.
+ *
+ * ── #392: the body, split ─────────────────────────────────────────────
+ *
+ * #411 left one bucket called SP_BODY covering everything the trap actually
+ * does, and said in as many words that #392's first act is to divide it.  This
+ * is that division: the six phases #392 asks for, with the hand-off divided
+ * further because the measurement that reopened this issue said to.
+ *
+ * 🔑 WHY FURTHER.  Comparing x86-64 against the 20/06 i386 baseline on one
+ * machine, under one accelerator, at one clock, the gap did not track message
+ * SIZE at all -- 4096 bytes is within noise of a null message on every row:
+ *
+ *	comb   1.16x slower, and FASTER at four processors
+ *	inter  1.38x	slow  1.46x	intra  1.48x
+ *	trap mach_null 3.7x FASTER    port alloc+destroy 3.4x FASTER
+ *
+ * ❌ The first reading of that table was "the gap tracks how many THREAD
+ * SWITCHES the path does", with comb as the row that does not switch.  That is
+ * WRONG and the benchmark's own source says so: comb is the only suite that
+ * issues a combined send-and-receive, so it is the only one that reaches this
+ * hot path at all -- and reaching it means switching DIRECTLY to the receiver.
+ * The other three send and receive in two separate traps, which cannot take
+ * this path and wake their peer through the run queue instead.
+ *
+ * 🔑 So the axis is not how many switches, it is WHICH MECHANISM: a direct
+ * hand-off against a run-queue round trip.  comb, the row that uses the
+ * hand-off, is the row that degraded least.
+ *
+ * Either way the hand-off needs dividing -- a column folding "claim the
+ * receiver", "the switch" and "the sleep" together cannot separate what is
+ * inside it.  [#482: a bucket whose number is too big for its name gets
+ * divided, not explained]
+ *
+ * ⚠️ And the two copies get a column each, named for the copy and not for the
+ * function around it, because their SUM is the ceiling on what register-IPC
+ * (#391) could ever reclaim.  Everything else in the table is the floor #391
+ * does not touch.
  */
 
 #ifndef	_KERN_SYSCALL_PROFILE_H_
@@ -53,26 +90,93 @@
 #endif
 
 /*
- * The phases, in the order a Mach trap walks them.
+ * The phases, in the order the combined send-and-receive hot path walks them.
  *
- * 🔑 TWO, and #392 asks for six.  Three of the four it asks for that are not
- * here -- name→port resolution, and the two copies -- are subdivisions of
- * SP_BODY, and they are deliberately NOT declared as empty phases; the fourth
- * is the return, which is measured elsewhere for the reason below.
+ * 🔴 SP_BODY IS LAST AND IT IS THE RESIDUE, not "the trap".  Every mark below
+ * names the stretch it CLOSES, so a path that skips a mark leaves that stretch
+ * with whatever mark closes next -- and a trap that takes none of them, because
+ * it fell off the hot path at the first test, lands wholly in SP_BODY.  That is
+ * the honest arrangement: the slow path is not silently averaged into columns
+ * named after fast-path work, it sits in a column named after nothing in
+ * particular, where it can be recognised.
  *
- * A phase that is declared and never marked prints a zero, and a zero in a
- * breakdown reads as "this costs nothing" rather than as "nobody measured
- * this".  That is the instrument lying about its own coverage, which is worse
- * than the instrument being coarse.  SP_BODY is coarse and honest: it is
- * everything between the dispatcher entering the trap function and that
- * function returning, and #392's first act is to split it -- which is what
- * #482 learned when a bucket named for allocation turned out to be 44% a
- * debugging scan.  A bucket whose number is too big for its name gets divided.
+ * ⚠️ A phase that is declared and never marked prints a zero, and a zero reads
+ * as "this is free" rather than as "nobody measured this".  Which is why the
+ * one phase #392 asks for that cannot be marked from C -- the return, from the
+ * trap function returning to the SYSRET -- is NOT declared here.  See below.
  */
 #define	SP_ENTRY	0	/* SYSCALL -> the trap function's first C     */
-#define	SP_BODY		1	/* the trap function itself (#392 splits this) */
-#define	SP_WAIT		2	/* off the processor, waiting for a message   */
-#define	SP_PHASES	3
+/*
+ * Getting a buffer, and filling it.  Two columns and not one: ikm_cache_get()
+ * is the allocation the mmot path already avoids, and #392's own text says so
+ * -- "the naive L4 win is already half-present here".  Half-present is a claim
+ * with a number, and this is the number.
+ */
+#define	SP_GET		1	/* a buffer for the message: ikm_cache_get   */
+#define	SP_COPYIN	2	/* copyinmsg: 🔥 THE SEND-SIDE COPY           */
+#define	SP_RESOLVE	3	/* name -> port: cache, lock-free, or table  */
+#define	SP_QUEUE	4	/* rights, queue limits, the two mqueue locks */
+/*
+ * The hand-off in three, because the issue's "receiver claim + handoff
+ * (switch_context, thread_dispatch)" is one phrase covering three costs that
+ * scale with entirely different things:
+ *
+ *   SP_CLAIM  -- the scheduler state change under thread_lock, the sender put
+ *		  on the reply queue, the receiver taken off the destination
+ *		  queue.  Locks and list surgery.
+ *   SP_WAIT   -- the sender is off the processor.  🔴 NOT a cost of the
+ *		  mechanism: it is the other end doing its work.  It is here so
+ *		  that the other columns can be a share of something real, and
+ *		  it is the column that must never be added to the others.
+ *   SP_SWITCH -- from "about to call switch_context" to "running as the thread
+ *		  that was switched to, past thread_dispatch".  The address
+ *		  space change, the register file, the stack.
+ *
+ * 🔑 SP_SWITCH is the only one of the twelve that CANNOT be cut from a single
+ * thread's own timestamps, because from the sender's side the switch and the
+ * sleep are one interval -- switch_context() returns when somebody switches
+ * back.  So the thread giving up the processor stamps the clock into the
+ * INCOMING thread's sample, and the incoming thread charges the interval on
+ * the other side of that stamp to the switch.  The two halves of the number are
+ * taken on two different threads and that is what makes it a number.
+ */
+/*
+ * 🔥 AND THE CLAIM IN FOUR, BECAUSE ONE COLUMN MEASURED IT AT 31% OF THE WORK.
+ *
+ * That is the largest on-processor phase of the hot path -- larger than both
+ * copies together (12%) and nearly twice the switch (16%) -- under a name that
+ * covers eleven separate things: the destination queue's lock, finding and
+ * vetting the receiver, the scheduler state change under thread_lock, the
+ * sender's own parking, the receiver's dequeue, the message store, two more
+ * unlocks, the object release, ast_off, ast_context, timer_switch.
+ *
+ * A bucket whose number is too big for its name gets DIVIDED, not explained.
+ * #482 learned that three times in one issue, and every time the plausible
+ * explanation was wrong.
+ *
+ * ⚠️ Each division costs one more timestamp pair -- 60 cycles on this machine,
+ * measured -- charged to the phase it opens.  Three more marks on a subject of
+ * 2,781 on-processor cycles is a real widening and it is declared in the dump.
+ * The alternative is a 31% bucket whose contents are argued about.
+ */
+#define	SP_PICK		5	/* lock the queue, find and vet the receiver */
+#define	SP_CLAIM	6	/* splsched, thread_lock, TH_WAIT -> TH_RUN  */
+#define	SP_PARK		7	/* the sender onto the reply queue, TH_WAIT  */
+#define	SP_DELIVER	8	/* hand the message over, set up the switch  */
+#define	SP_WAIT		9	/* off the processor -- the OTHER end's time */
+#define	SP_SWITCH	10	/* 🔥 switch_context + thread_dispatch        */
+/*
+ * And the resume in two, for the same reason at 23%: lowering the interrupt
+ * level is not bookkeeping about a message, and on this target splx() can take
+ * pending interrupts and run ASTs.  A column that folds it in with reading
+ * ith_state and filling in a trailer is naming the wrong thing.
+ */
+#define	SP_SPL		11	/* enable_preemption + splx after the switch */
+#define	SP_RESUME	12	/* back with a reply: ith_state, the trailer */
+#define	SP_COPYOUT	13	/* the header translated: ports -> names     */
+#define	SP_PUT		14	/* copyoutmsg: 🔥 THE RECEIVE-SIDE COPY       */
+#define	SP_BODY		15	/* everything the marks above did not name   */
+#define	SP_PHASES	16
 
 /*
  * 🔴 And the return is NOT one of them, which is a decision and not an
@@ -129,7 +233,37 @@
  * A cap on how many times a thread prints.  A boot makes tens of thousands of
  * traps; an instrument that fills the log is one nobody reads.
  */
-#define	SP_MAX_DUMPS	4
+#define	SP_MAX_DUMPS	16
+
+/*
+ * 🔥 AND WHICH WINDOWS THOSE ARE, which is not a detail: with the cap alone
+ * they are the FIRST eight, and the first eight windows of a thread's life are
+ * the wrong hundred traps.
+ *
+ * The first run of this split proved it by printing twelve columns of zeroes.
+ * Every dump said "16 of 64 traps this thread made" and every phase inside
+ * mach_msg was 0 -- not because the hot path is never taken, but because the
+ * first sixty-four traps a thread makes are its STARTUP: looking a port up,
+ * registering with the name server, none of them a combined send-and-receive.
+ * The benchmark's ten thousand iterations begin after them and the instrument
+ * had already stopped printing.
+ *
+ * 🔑 So the windows are spaced geometrically -- 1, 2, 4, 8, 16, 32, 64, 128 --
+ * which costs the same eight dumps and reaches trap two thousand.  Early
+ * behaviour and steady-state behaviour both get looked at, and neither is
+ * assumed to stand for the other.
+ *
+ * ⚠️ A dump cannot name the suite it landed in.  It names the window and the
+ * trap numbers, and the log's own suite headers say where those fall.
+ *
+ * 🔑 Sixteen dumps and not eight, for a reason that is about the SUBJECT and
+ * not about the instrument: ipc_bench's busiest thread makes tens of thousands
+ * of traps, and only one of its suites uses a combined send-and-receive -- the
+ * only kind of trap that can reach the hand-off.  Stopping at window 128 stops
+ * before it.  Threads that make fewer traps than that still print fewer dumps;
+ * the cap costs nothing where it is not reached.
+ */
+#define	SP_WINDOW_DUE(w)	((w) != 0 && ((w) & ((w) - 1)) == 0)
 
 /*
  * Which trap the sample is of.
@@ -167,16 +301,53 @@ struct syscall_profile_thread {
 	 * that sat somewhere for a second.
 	 */
 	uint64_t	first;
+	/*
+	 * When the processor was handed to this thread, written by whichever
+	 * thread gave it up.  🔑 The one field of this structure a DIFFERENT
+	 * thread writes, and the reason is above SP_CLAIM: it is the only way
+	 * the switch can be separated from the sleep.
+	 *
+	 * ⚠️ Unsynchronised on purpose.  The writer is the thread that is about
+	 * to stop running on this processor and the reader is the thread that is
+	 * about to start; there is no third party and no ordering question.  A
+	 * lock here would be a lock taken inside the interval being measured.
+	 */
+	uint64_t	switch_in;
+	/*
+	 * Whose breakdown this is.
+	 *
+	 * 🔥 Added because a run printed two hundred dumps that were
+	 * indistinguishable from each other, and the question that mattered --
+	 * WHICH of the twenty-five threads these sixteen traps belonged to --
+	 * had no answer anywhere in the output.  Only one kind of thread in
+	 * that run takes the hot path; without a name, its breakdown could not
+	 * be found among the ones that do not.
+	 */
+	const void	*self;
 	uint32_t	slice[SP_PHASES];
 	uint32_t	sample[SP_SAMPLES][SP_PHASES];
 	uint32_t	total[SP_SAMPLES];
+	/*
+	 * Whether the sample in that slot went through the hand-off.
+	 *
+	 * 🔴 Kept per sample rather than filtered at the door, because #411
+	 * learned the hard way that discarding samples discards the subject: the
+	 * first version of this profile threw away every trap that slept and
+	 * printed nothing at all, since in an RPC somebody always sleeps.  So
+	 * nothing is discarded -- the window is described instead.  A median
+	 * taken over a window mixing hand-offs with traps that fell off the hot
+	 * path at the first test describes neither.
+	 */
+	uint8_t		hot[SP_SAMPLES];
 	uint32_t	nsamples;
+	uint32_t	nwindows;	/* how many have been filled so far  */
 	uint32_t	ndumps;
 	uint32_t	ndropped;	/* a trap opened while one was open  */
 	uint32_t	nblocked;	/* how many of them went to sleep    */
 	uint32_t	waiting;	/* off the processor right now       */
 	uint32_t	nseen;		/* profiled traps this thread made   */
 	uint32_t	open;		/* a sample is being built           */
+	uint32_t	took_handoff;	/* this sample reached the switch    */
 };
 
 /*
@@ -235,10 +406,32 @@ syscall_profile_begin(struct syscall_profile_thread *p, uint64_t entry_tsc)
 	p->nseen++;
 	p->open = 1;
 	p->waiting = 0;
+	p->took_handoff = 0;
 	p->first = entry_tsc;
 	p->cursor = entry_tsc;
 	for (i = 0; i < SP_PHASES; i++)
 		p->slice[i] = 0;
+}
+
+/*
+ * Charge the open stretch to `phase' AT a timestamp somebody else took.
+ *
+ * 🔑 The telescoping is what makes this safe to expose: every charge is
+ * (stamp - cursor) and then cursor becomes stamp, so the slices still sum to
+ * last-minus-first whoever read the clock.  What it must never do is move the
+ * cursor BACKWARDS -- a stale stamp would make the next slice enormous and the
+ * one before it negative-as-unsigned -- so a stamp that is not ahead of the
+ * cursor is refused rather than trusted.
+ */
+static __inline__ void
+syscall_profile_mark_at(struct syscall_profile_thread *p, int phase,
+			uint64_t stamp)
+{
+	if (!p->open || stamp <= p->cursor)
+		return;
+
+	p->slice[phase] += (uint32_t) (stamp - p->cursor);
+	p->cursor = stamp;
 }
 
 static __inline__ void
@@ -274,14 +467,30 @@ syscall_profile_mark(struct syscall_profile_thread *p, int phase)
  *
  * ⚠️ syscall_profile_waiting() is called for the thread being switched AWAY
  * from, not for current_thread(), which by then is somebody else.
+ *
+ * 🔥 #392: and it stamps the clock into the INCOMING thread's sample, which is
+ * the half of the switch measurement the outgoing side owns.  `phase' is what
+ * the stretch up to here belongs to -- SP_BODY for an ordinary block, SP_CLAIM
+ * for the hand-off, where the work just done has a name.
  */
 static __inline__ void
-syscall_profile_waiting(struct syscall_profile_thread *p)
+syscall_profile_switch_out(struct syscall_profile_thread *p,
+			   struct syscall_profile_thread *next, int phase)
 {
+	uint64_t	now = syscall_profile_tsc();
+
+	/*
+	 * The stamp is written whether or not the OUTGOING thread is being
+	 * profiled: the thread coming back is a different thread, and whether
+	 * its switch can be measured must not depend on who it displaced.
+	 */
+	if (next != (struct syscall_profile_thread *) 0)
+		next->switch_in = now;
+
 	if (!p->open || p->waiting)
 		return;
 
-	syscall_profile_mark(p, SP_BODY);
+	syscall_profile_mark_at(p, phase, now);
 	p->waiting = 1;
 	p->nblocked++;
 }
@@ -294,7 +503,14 @@ syscall_profile_waiting(struct syscall_profile_thread *p)
  * in thread_continue() having never returned from anywhere.  Hooking only the
  * first is the mistake that leaves a server thread's whole sleep charged to
  * whatever phase was open -- and a server thread is the one that always has a
- * continuation.
+ * continuation.  #392 adds a third: the mmot hand-off calls switch_context()
+ * itself, inline, and returns from it inside ipc/mach_msg.c without passing
+ * through either of the other two.
+ *
+ * 🔴 The sleep is closed AT the stamp the other thread took, so everything
+ * after that stamp is still open and belongs to the switch.  Closing it at
+ * "now" instead is the version that reports the switch as free, which is the
+ * one number this whole issue turns on.
  */
 static __inline__ void
 syscall_profile_resumed(struct syscall_profile_thread *p)
@@ -302,8 +518,48 @@ syscall_profile_resumed(struct syscall_profile_thread *p)
 	if (!p->open || !p->waiting)
 		return;
 
-	syscall_profile_mark(p, SP_WAIT);
+	/*
+	 * ⚠️ A stamp that is not ahead of the cursor means this thread resumed
+	 * without a hand-off that could be timed -- it was never switched to by
+	 * an instrumented path, or the stamp is from a previous sample.  Then
+	 * the two cannot be separated, and the whole interval goes to the WAIT.
+	 *
+	 * 🔴 That direction is the deliberate one.  The switch is the number
+	 * this issue turns on; a fallback that guessed in its favour would be an
+	 * instrument arranging its own conclusion.  Understating it costs a
+	 * sample, overstating it costs the finding.
+	 */
+	if (p->switch_in > p->cursor)
+		syscall_profile_mark_at(p, SP_WAIT, p->switch_in);
+	else
+		syscall_profile_mark(p, SP_WAIT);
 	p->waiting = 0;
+}
+
+/*
+ * ... and the switch itself is closed one call later, after thread_dispatch(),
+ * because the issue asks for both and because a thread that has been switched
+ * to is not yet running its own code until the thread it displaced has been
+ * disposed of.
+ */
+static __inline__ void
+syscall_profile_switched(struct syscall_profile_thread *p)
+{
+	if (!p->open || p->waiting)
+		return;
+
+	syscall_profile_mark(p, SP_SWITCH);
+}
+
+/*
+ * This sample reached the commit point of the hand-off: it is a sample of the
+ * path this issue is about, and not of a trap that fell off it.
+ */
+static __inline__ void
+syscall_profile_handoff(struct syscall_profile_thread *p)
+{
+	if (p->open)
+		p->took_handoff = 1;
 }
 
 
@@ -327,10 +583,12 @@ syscall_profile_commit(struct syscall_profile_thread *p)
 		total += p->slice[i];
 	}
 	p->total[p->nsamples] = total;
+	p->hot[p->nsamples] = (uint8_t) p->took_handoff;
 
 	if (++p->nsamples == SP_SAMPLES) {
 		p->nsamples = 0;
-		if (p->ndumps < SP_MAX_DUMPS) {
+		p->nwindows++;
+		if (p->ndumps < SP_MAX_DUMPS && SP_WINDOW_DUE(p->nwindows)) {
 			p->ndumps++;
 			syscall_profile_dump(p);
 		}
@@ -350,13 +608,22 @@ extern void	syscall_profile_enter(int trap_number);
 extern void	syscall_profile_leave(void);
 
 /*
- * The scheduler's one line: a thread about to give up the processor cannot be
- * a sample of what a trap costs.  Takes the thread rather than reading
- * current_thread(), because at the call site the answer would be wrong.
+ * The scheduler's lines.  A thread about to give up the processor cannot be a
+ * sample of what a trap costs; a thread that has just been given one owes its
+ * sample the two halves of the switch.
+ *
+ * ⚠️ syscall_profile_blocked() takes BOTH threads rather than reading
+ * current_thread(), because at that call site the answer would be wrong for
+ * one of them and about to be wrong for the other.
  */
 struct thread_shuttle;
-extern void	syscall_profile_blocked(struct thread_shuttle *);
+extern void	syscall_profile_blocked(struct thread_shuttle *old,
+					struct thread_shuttle *next,
+					int phase);
 extern void	syscall_profile_back(void);
+extern void	syscall_profile_switched_in(void);
+extern void	syscall_profile_took_handoff(void);
+extern void	syscall_profile_phase(int phase);
 
 /*
  * What the entry stub left in this processor's block, machine-dependent by
@@ -372,15 +639,21 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
 
 #define	SP_ENTER(n)	syscall_profile_enter(n)
 #define	SP_LEAVE()	syscall_profile_leave()
-#define	SP_BLOCKED(t)	syscall_profile_blocked(t)
+#define	SP_BLOCKED(o,n,p) syscall_profile_blocked(o, n, p)
 #define	SP_BACK()	syscall_profile_back()
+#define	SP_SWITCHED()	syscall_profile_switched_in()
+#define	SP_HANDOFF()	syscall_profile_took_handoff()
+#define	SP_MARK(p)	syscall_profile_phase(p)
 
 #else	/* !SYSCALL_PROFILE */
 
 #define	SP_ENTER(n)	MACRO_BEGIN MACRO_END
 #define	SP_LEAVE()	MACRO_BEGIN MACRO_END
-#define	SP_BLOCKED(t)	MACRO_BEGIN MACRO_END
+#define	SP_BLOCKED(o,n,p) MACRO_BEGIN MACRO_END
 #define	SP_BACK()	MACRO_BEGIN MACRO_END
+#define	SP_SWITCHED()	MACRO_BEGIN MACRO_END
+#define	SP_HANDOFF()	MACRO_BEGIN MACRO_END
+#define	SP_MARK(p)	MACRO_BEGIN MACRO_END
 
 #endif	/* SYSCALL_PROFILE */
 
