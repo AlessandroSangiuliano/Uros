@@ -134,6 +134,15 @@
 **Bundle**: **bench DA SOLO** (`bootstrap.conf` = `name_server` + `ipc_bench`), come le baseline di giugno.
 **Unità**: µs/op. Lower = faster.
 
+🔴 **LE TABELLE DELLE FASI SONO IN CICLI DI CPU, NON IN µs.** Il resto di questo
+documento e' in µs/op, che e' quello che stampa il bench; la scomposizione per
+fase la prende `rdtsc` e sono cicli. A 3.993 MHz, **1000 cicli = 0,25 µs**.
+
+⚠️ E il quanto del TSC in questo guest e' **30 cicli**: ogni cifra qui e' un suo
+multiplo, e una colonna a 60 e' *due quanti*, cioe' al pavimento della
+risoluzione, non «misurata a 60».
+
+
 > **Perche' questa tabella esiste**
 > Le misure di stamattina dicevano che su `intra`, `inter` e `slow` x86-64 era
 > 1,38-1,48× piu' lento di i386. La scomposizione per fase di #392 ha trovato
@@ -303,7 +312,7 @@ spazio di indirizzamento e `intra` no, quindi il PCID deve muovere `SWITCH`
 sulla prima e lasciarlo fermo sulla seconda. Se muove entrambe o nessuna, la
 premessa del #412 va riletta.
 
-| fase | ablato | con guardia | cosa chiude |
+| fase | ablato (cicli) | con guardia (cicli) | cosa chiude |
 |---|--:|--:|---|
 | entry | 60 | 60 | SYSCALL, swapgs, frame, dispatch |
 | get buf | 60 | 60 | `ikm_cache_get` |
@@ -554,7 +563,7 @@ motivo per cui e' chiuso e' scritto in `sched_prim.c` ed e' un costo di i386:
 send non blocca, la receive si. Una mediana sulle due insieme e' una riga mai
 accaduta.
 
-| fase | hot path (`comb`, 1 trap) | slow: send | slow: receive |
+| fase (cicli) | hot path (`comb`, 1 trap) | slow: send | slow: receive |
 |---|--:|--:|--:|
 | entry | 60 | 60 | 60 |
 | `get buf` + `COPYIN` | 60 + 150 | `kmsg_get` 150 | — |
@@ -604,7 +613,7 @@ si prende».
 Entrambe le letture con `-X`, quindi **cambia solo il numero di processori**.
 `-smp 1` e `-smp 4`, KVM, 3.993 MHz campionati, mediana sugli 8 sample bloccati.
 
-| fase | smp1 `-X` | smp4 `-X` | rapporto |
+| fase (cicli) | smp1 `-X` | smp4 `-X` | rapporto |
 |---|--:|--:|--:|
 | entry | 60 | 60 | **1.0** |
 | resolve | 210 | 360 | 1.7 |
