@@ -58,6 +58,14 @@ extern unsigned int	c_mmot_combined_S_R;
 extern unsigned int	c_mach_msg_trap_switch_fast;
 
 /*
+ * #559: and the three routes, which are the denominator the breakdown is a
+ * fraction of.  See the block above them in ipc/mach_msg.c.
+ */
+extern unsigned int	c_route_msg_send;
+extern unsigned int	c_route_msg_receive;
+extern unsigned int	c_route_msg_continue;
+
+/*
  * 🔥 AND THE SAME QUESTION ASKED OF THE INSTRUMENT ITSELF.
  *
  * With the counters above, twelve columns of zeroes alongside eighty thousand
@@ -362,6 +370,11 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       (unsigned int) SP_MARKS * sp_pair_cost,
 	       ret_mean, (unsigned int) ret_n,
 	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
+	printf("syscall_profile   routes kernel-wide: %u combined (%u handed "
+	       "off), %u send-only, %u receive-only (%u of them resumed in the "
+	       "continuation)\n",
+	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast,
+	       c_route_msg_send, c_route_msg_receive, c_route_msg_continue);
 
 	for (shape = 0; shape < SP_SHAPES; shape++)
 		sp_table(p, shape, ret_mean, ret_known);

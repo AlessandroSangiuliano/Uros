@@ -164,6 +164,31 @@
 #include <mach/mig_errors.h>
 #include <kern/assert.h>
 #include <kern/syscall_profile.h>	/* #411: the per-trap phase sample */
+
+/*
+ * 🔥 #559: WHICH ROUTE THE TRAFFIC TOOK, counted rather than assumed.
+ *
+ * A trap reaching this file takes one of three roads, and a breakdown means
+ * something different on each: the combined hot path, the same path fallen off
+ * into its slow_* labels, or -- for a send-only or receive-only trap, which
+ * never enters that block at all -- mach_msg_send() and mach_msg_receive().
+ * This issue was opened believing the benchmark used the second.  It uses the
+ * third, and only reading the source said so.
+ *
+ * ⚠️ A breakdown that does not say what fraction of the traffic it describes
+ * invites the reader to assume it describes all of it.  These are the
+ * denominator, printed beside the hot-path counters #392 already prints.
+ *
+ * Compiled only with the profile, so the shipping kernel counts nothing.
+ */
+#if	SYSCALL_PROFILE
+unsigned int	c_route_msg_send = 0;
+unsigned int	c_route_msg_receive = 0;
+unsigned int	c_route_msg_continue = 0;
+#define	SP_ROUTE(c)	((c)++)
+#else
+#define	SP_ROUTE(c)	MACRO_BEGIN MACRO_END
+#endif
 #include <kern/counters.h>
 #include <kern/cpu_number.h>
 #include <kern/lock.h>
@@ -276,6 +301,8 @@ mach_msg_send(
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
 
+	SP_ROUTE(c_route_msg_send);		/* #559 */
+
 	mr = ipc_kmsg_get(msg, send_size, &kmsg, space);
 
 	if (mr != MACH_MSG_SUCCESS)
@@ -373,6 +400,8 @@ mach_msg_receive(
 #if	MACH_RT
 	boolean_t slist_rt;
 #endif	/* MACH_RT */
+
+	SP_ROUTE(c_route_msg_receive);		/* #559 */
 
 	mr = ipc_mqueue_copyin(space, rcv_name, &mqueue, &object);
 
@@ -635,6 +664,8 @@ finish_receive:
 
 	space = current_space();
 	map = current_map();
+
+	SP_ROUTE(c_route_msg_continue);		/* #559 */
 
 	if (option & MACH_RCV_NOTIFY) {
 		if (notify == MACH_PORT_NULL)
