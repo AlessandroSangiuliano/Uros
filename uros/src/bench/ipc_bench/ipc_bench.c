@@ -755,6 +755,83 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 }
 
 /* ===================================================================
+ * Inter-task RPC swept by size, repeated inside one boot (#446)
+ *
+ * THE QUESTION: is a message SIZE slow, or is the BOOT slow?
+ *
+ * The four-size inter table cannot answer it.  #446 measured eleven boots
+ * of this path and found it bimodal, the fast mode appearing twice in the
+ * eleven with a 27% gap to the median -- so "1024B read high on three boots
+ * out of three" is three draws from a distribution whose slow mode is the
+ * common one, and the same three boots would be unremarkable under a model
+ * where the size means nothing at all.  Adding boots dilutes that slowly and
+ * expensively: the lottery is decided once per boot, so a boot buys ONE
+ * sample of it no matter how many iterations the row averages over.
+ *
+ * So the control goes INSIDE the boot.  Every size is measured REPS times in
+ * the one boot, which holds the clock, the governor, the bundle and the
+ * scheduler's history identical across the repeats by construction rather
+ * than by assertion -- the four axes a cross-boot comparison has to name are
+ * not even variables here.  Neighbours 768B and 1280B bracket the size under
+ * suspicion, so a threshold has something to be a threshold BETWEEN.
+ *
+ * The two outcomes are different pictures, which is what makes this a
+ * measurement and not another sample:
+ *
+ *   - a size that is intrinsically slow reads slow in EVERY repeat, and its
+ *     neighbours read fast in every repeat -- a step that stays put;
+ *   - a placement lottery scatters -- the same size reads fast in one repeat
+ *     and slow in the next, and which size is high moves between repeats.
+ *
+ * ⚠️ Each measurement builds and tears down its own child task, so a repeat
+ * is a fresh draw of whatever the placement decides, not a warm re-run of
+ * the previous one.  That is deliberate: the thing under suspicion IS what a
+ * fresh pair gets placed on.  It also means this suite creates one task per
+ * row, which is why it is asked for by name and is not part of `all'.
+ * =================================================================== */
+
+#define	ISWEEP_REPS	3
+
+static void
+bench_inter_sweep(int iters)
+{
+    /*
+     * Payload bytes, not message bytes: the label says what the caller
+     * asked to send, and the header is added below the way every other
+     * inter row adds it (sizeof(bench_1024_msg_t) is header + 1024).
+     * 0 is the null RPC, the anchor the rest is read against.
+     */
+    static const struct {
+	int		payload;
+	const char	*label;
+    } sizes[] = {
+	{    0, "payload    0B (null)" },
+	{   64, "payload   64B" },
+	{  128, "payload  128B" },
+	{  256, "payload  256B" },
+	{  512, "payload  512B" },
+	{  768, "payload  768B" },
+	{ 1024, "payload 1024B" },
+	{ 1280, "payload 1280B" },
+	{ 1536, "payload 1536B" },
+	{ 2048, "payload 2048B" },
+	{ 3072, "payload 3072B" },
+	{ 4096, "payload 4096B" },
+    };
+    const int	nsizes = (int)(sizeof(sizes) / sizeof(sizes[0]));
+    int		rep, i;
+
+    for (rep = 1; rep <= ISWEEP_REPS; rep++) {
+	printf("  -- repeat %d of %d --\n", rep, ISWEEP_REPS);
+	for (i = 0; i < nsizes; i++) {
+	    bench_inter_rpc(sizes[i].label,
+			    (int)sizeof(mach_msg_header_t) + sizes[i].payload,
+			    iters);
+	}
+    }
+}
+
+/* ===================================================================
  * Slow-path receive benchmark
  *
  * Guarantees the continuation path is exercised on every iteration.
@@ -2023,6 +2100,7 @@ bench_mach_print(int iters)
  *   intra    — intra-task Mach IPC RPC
  *   slow     — slow-path receive (continuation)
  *   inter    — inter-task Mach IPC RPC
+ *   isweep   — inter-task RPC swept by size, repeated within one boot (#446)
  *   port     — port alloc/destroy, mach_port_names
  *   pp       — protected payload (test + intra + inter)
  *   ool      — out-of-line data (intra + inter)
@@ -2049,7 +2127,19 @@ bench_mach_print(int iters)
 #define SUITE_SCALE	(1u << 13)	/* concurrency sweep, clean numbers (#319) */
 #define SUITE_PORTS	(1u << 14)	/* out-of-line port arrays, by count (#415) */
 #define SUITE_KRPC	(1u << 15)	/* MIG kernel RPC, where TypeCheck lives (#443) */
-#define SUITE_ALL	0xFFFFFFFFu
+#define SUITE_ISWEEP	(1u << 16)	/* inter-task RPC by size, repeated (#446) */
+
+/*
+ *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME.
+ *
+ *	It answers one question, it creates a child task per measurement, and
+ *	it prints a block that is read as a picture rather than as a row in
+ *	the baseline table -- so folding it into `all' would change what every
+ *	unargumented run of this server produces, and the 20/06 tables are
+ *	compared against those runs.  Naming it in `suites NOT run' is the
+ *	honest form: it says the suite exists and did not run.
+ */
+#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP)
 
 static int
 streq(const char *a, const char *b)
@@ -2070,6 +2160,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "intra"))   mask |= SUITE_INTRA;
 	else if (streq(argv[i], "slow"))    mask |= SUITE_SLOW;
 	else if (streq(argv[i], "inter"))   mask |= SUITE_INTER;
+	else if (streq(argv[i], "isweep"))  mask |= SUITE_ISWEEP;
 	else if (streq(argv[i], "port"))    mask |= SUITE_PORT;
 	else if (streq(argv[i], "pp"))	    mask |= SUITE_PP;
 	else if (streq(argv[i], "ool"))	    mask |= SUITE_OOL;
@@ -2575,6 +2666,7 @@ main(int argc, char **argv)
 	    { SUITE_MEM,     "mem" },     { SUITE_DISK,    "disk" },
 	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
+	    { SUITE_ISWEEP,  "isweep" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -2698,6 +2790,18 @@ main(int argc, char **argv)
 			(int)sizeof(bench_1024_msg_t), BENCH_ITERS);
 	bench_inter_rpc("4096B inline RPC",
 			(int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Inter-task swept by size, repeated within this boot (#446)
+     * --------------------------------------------------------- */
+    if (suites & SUITE_ISWEEP) {
+	printf("--- Inter-task size sweep (%d repeats in this boot) ---\n",
+	       ISWEEP_REPS);
+
+	bench_inter_sweep(BENCH_ITERS);
 
 	printf("\n");
     }
