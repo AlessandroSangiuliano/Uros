@@ -134,13 +134,22 @@
 **Bundle**: **bench DA SOLO** (`bootstrap.conf` = `name_server` + `ipc_bench`), come le baseline di giugno.
 **Unità**: µs/op. Lower = faster.
 
-🔴 **LE TABELLE DELLE FASI SONO IN CICLI DI CPU, NON IN µs.** Il resto di questo
+🔴 **LE TABELLE DELLE FASI SONO IN µs E IN CICLI, AFFIANCATI.** Il resto del
 documento e' in µs/op, che e' quello che stampa il bench; la scomposizione per
-fase la prende `rdtsc` e sono cicli. A 3.993 MHz, **1000 cicli = 0,25 µs**.
+fase la prende `rdtsc`, che da' cicli. A **3.993 MHz** la conversione e'
+`µs = cicli / 3993`, ed entrambe le colonne ci sono perche' servono a cose
+diverse: i µs per confrontarli col resto del file, i cicli perche' e' li' che si
+vede la risoluzione.
 
-⚠️ E il quanto del TSC in questo guest e' **30 cicli**: ogni cifra qui e' un suo
-multiplo, e una colonna a 60 e' *due quanti*, cioe' al pavimento della
-risoluzione, non «misurata a 60».
+⚠️ **Tre decimali sono la precisione onesta, non decorazione.** Il quanto del TSC
+in questo guest e' **30 cicli = 0,008 µs**: ogni cifra e' un suo multiplo, e una
+riga che legge 0,015 µs (60 cicli) e' *due quanti*, cioe' al pavimento della
+risoluzione — «troppo poco per essere misurato qui», non «misurato a 0,015».
+
+🔑 E il controllo incrociato fra i due strumenti, che vale piu' della
+conversione: a smp1 con `-X` il trap intero misura 4770 cicli = **1,19 µs**, e
+`ipc_bench` riporta `slow null RPC` a **1,35 µs/op**. La differenza e' il loop in
+userland. Due strumenti indipendenti, stesso ordine di grandezza.
 
 
 > **Perche' questa tabella esiste**
@@ -312,26 +321,26 @@ spazio di indirizzamento e `intra` no, quindi il PCID deve muovere `SWITCH`
 sulla prima e lasciarlo fermo sulla seconda. Se muove entrambe o nessuna, la
 premessa del #412 va riletta.
 
-| fase | ablato (cicli) | con guardia (cicli) | cosa chiude |
-|---|--:|--:|---|
-| entry | 60 | 60 | SYSCALL, swapgs, frame, dispatch |
-| get buf | 60 | 60 | `ikm_cache_get` |
-| **COPYIN** | **180** | **180** | `copyinmsg` — la copia in invio |
-| resolve | 150 | 120 | nome → porta |
-| queue | 120 | 150 | diritti, limiti di coda, i due lock |
-| **pick rcv** | **690** | **150** | trova e verifica il ricevente (conteneva uno `splx`) |
-| claim | 60 | 60 | cambio di stato sotto `thread_lock` |
-| park snd | 120 | 120 | il mittente sulla coda di reply |
-| deliver | 120 | 120 | consegna il messaggio, prepara lo switch |
-| wait | 3150 | 2040 | fuori dal processore — **il tempo dell'altro capo** |
-| **SWITCH** | **450** | **450** | `switch_context` + `thread_dispatch` |
-| **splx** | **600** | **60** | abbassa il livello di interrupt |
-| resume | 60 | 90 | sveglia, `ith_state`, trailer |
-| copyout | 210 | 210 | l'header tradotto: porte → nomi |
-| **PUT** | **150** | **150** | `copyoutmsg` — la copia in ricezione |
-| residue | 60 | 30 | quel che i mark non nominano |
-| return | 51 | 66 | ritorno → SYSRET (media, dal percorso in assembly) |
-| **totale su processore** | **3141** | **2076** | |
+| fase | ablato µs | con guardia µs | ablato cicli | guardia cicli | cosa chiude |
+|---|--:|--:|--:|--:|---|
+| entry | 0.015 | 0.015 | 60 | 60 | SYSCALL, swapgs, frame, dispatch |
+| get buf | 0.015 | 0.015 | 60 | 60 | `ikm_cache_get` |
+| **COPYIN** | **0.045** | **0.045** | 180 | 180 | `copyinmsg` — la copia in invio |
+| resolve | 0.038 | 0.030 | 150 | 120 | nome → porta |
+| queue | 0.030 | 0.038 | 120 | 150 | diritti, limiti di coda, i due lock |
+| **pick rcv** | **0.173** | **0.038** | 690 | 150 | trova e verifica il ricevente (conteneva uno `splx`) |
+| claim | 0.015 | 0.015 | 60 | 60 | cambio di stato sotto `thread_lock` |
+| park snd | 0.030 | 0.030 | 120 | 120 | il mittente sulla coda di reply |
+| deliver | 0.030 | 0.030 | 120 | 120 | consegna il messaggio, prepara lo switch |
+| wait | 0.789 | 0.511 | 3150 | 2040 | fuori dal processore — **il tempo dell'altro capo** |
+| **SWITCH** | **0.113** | **0.113** | 450 | 450 | `switch_context` + `thread_dispatch` |
+| **splx** | **0.150** | **0.015** | 600 | 60 | abbassa il livello di interrupt |
+| resume | 0.015 | 0.023 | 60 | 90 | sveglia, `ith_state`, trailer |
+| copyout | 0.053 | 0.053 | 210 | 210 | l'header tradotto: porte → nomi |
+| **PUT** | **0.038** | **0.038** | 150 | 150 | `copyoutmsg` — la copia in ricezione |
+| residue | 0.015 | 0.008 | 60 | 30 | quel che i mark non nominano |
+| return | 0.013 | 0.017 | 51 | 66 | ritorno → SYSRET (media, dal percorso in assembly) |
+| **totale su processore** | **0.787** | **0.520** | 3141 | 2076 |  |
 
 Letture:
 
@@ -563,19 +572,19 @@ motivo per cui e' chiuso e' scritto in `sched_prim.c` ed e' un costo di i386:
 send non blocca, la receive si. Una mediana sulle due insieme e' una riga mai
 accaduta.
 
-| fase (cicli) | hot path (`comb`, 1 trap) | slow: send | slow: receive |
-|---|--:|--:|--:|
-| entry | 60 | 60 | 60 |
-| `get buf` + `COPYIN` | 60 + 150 | `kmsg_get` 150 | — |
-| resolve | 150 | 210 | 210 |
-| accodamento / risveglio | queue+pick+claim+park+deliver = 570 | `mq_send` 120 | `mq_recv` 180 |
-| `wait` (il peer) | 2100 *(wall)* | — | 2520 *(wall)* |
-| **`RUNQ`** | **0** | — | **390** |
-| `SWITCH` | 450 | — | 540 |
-| `splx` + `resume` | 60 + 90 | — | — |
-| `copyout` + `PUT` | 210 + 330 | — | 300 + 150 |
-| residue | 30 | 60 | 390 |
-| **su processore** | **2211** | **651** | **2271** |
+| fase | hot path µs | slow send µs | slow recv µs | hot cicli | send cicli | recv cicli |
+|---|--:|--:|--:|--:|--:|--:|
+| entry | 0.015 | 0.015 | 0.015 | 60 | 60 | 60 |
+| `get buf` + `COPYIN` | 0.053 | — | — | 210 | — | — |
+| resolve | 0.038 | 0.053 | 0.053 | 150 | 210 | 210 |
+| accodamento / risveglio | 0.143 | 0.030 | 0.045 | 570 | 120 | 180 |
+| `wait` (il peer) *(wall)* | 0.526 | — | 0.631 | 2100 | — | 2520 |
+| **`RUNQ`** | **0.000** | — | **0.098** | 0 | — | 390 |
+| `SWITCH` | 0.113 | — | 0.135 | 450 | — | 540 |
+| `splx` + `resume` | 0.038 | — | — | 150 | — | — |
+| `copyout` + `PUT` | 0.135 | — | 0.113 | 540 | — | 450 |
+| residue | 0.008 | 0.015 | 0.098 | 30 | 60 | 390 |
+| **su processore** | **0.554** | **0.163** | **0.569** | 2211 | 651 | 2271 |
 
 🔑 **`RUNQ` + `SWITCH` = 930 su 2271, il 40%** del lavoro di una receive lenta e'
 *essere svegliati e ottenere un processore*. E **`RUNQ` e' esattamente zero sulla
@@ -613,19 +622,19 @@ si prende».
 Entrambe le letture con `-X`, quindi **cambia solo il numero di processori**.
 `-smp 1` e `-smp 4`, KVM, 3.993 MHz campionati, mediana sugli 8 sample bloccati.
 
-| fase (cicli) | smp1 `-X` | smp4 `-X` | rapporto |
-|---|--:|--:|--:|
-| entry | 60 | 60 | **1.0** |
-| resolve | 210 | 360 | 1.7 |
-| `wait` *(wall)* | 2520 | 5045 | 2.0 |
-| **`RUNQ`** | **420** | **1405** | **3.3** |
-| `SWITCH` | 540 | 1230 | 2.3 |
-| `mq_recv` | 210 | 840 | 4.0 |
-| `copyout` | 300 | 990 | 3.3 |
-| **`PUT`** | **150** | **840** | **5.6** |
-| residue | 360 | 1020 | 2.8 |
-| **su processore** | **2301** | **6797** | **3.0** |
-| di cui «ottenere il processore» | 960 (41%) | 2635 (38%) | |
+| fase | smp1 `-X` µs | smp4 `-X` µs | smp1 cicli | smp4 cicli | rapporto |
+|---|--:|--:|--:|--:|--:|
+| entry | 0.015 | 0.015 | 60 | 60 | **1.0** |
+| resolve | 0.053 | 0.090 | 210 | 360 | 1.7 |
+| `wait` *(wall)* | 0.631 | 1.263 | 2520 | 5045 | 2.0 |
+| **`RUNQ`** | **0.105** | **0.352** | 420 | 1405 | **3.3** |
+| `SWITCH` | 0.135 | 0.308 | 540 | 1230 | 2.3 |
+| `mq_recv` | 0.053 | 0.210 | 210 | 840 | 4.0 |
+| `copyout` | 0.075 | 0.248 | 300 | 990 | 3.3 |
+| **`PUT`** | **0.038** | **0.210** | 150 | 840 | **5.6** |
+| residue | 0.090 | 0.255 | 360 | 1020 | 2.8 |
+| **su processore** | **0.576** | **1.702** | 2301 | 6797 | **3.0** |
+| di cui «ottenere il processore» | 0.240 (41%) | 0.660 (38%) | 960 | 2635 | |
 
 🔑 **Tre volte, e #392 aveva trovato che la HOT path costa uguale a 1 e a 4.**
 Due comportamenti opposti sullo stesso kernel, ora misurati invece che supposti.
