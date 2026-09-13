@@ -75,6 +75,43 @@ machine_init(void)
 	clock_event_init(LAPIC_TIMER_VECTOR);
 
 	/*
+	 * #356/#446: the synchronous-RPC hand-off on block, and the ONE place
+	 * this target sets it.
+	 *
+	 * The machine-independent scheduler has read `sched_rpc_handoff' since
+	 * #356 and nothing on x86-64 has ever written it: the flag was set only
+	 * in i386/AT386/model_dep.c, so the experiment was unreachable here --
+	 * code consumed by two call sites and produced by none.  #559 found it
+	 * while trying to make -smp 4 readable, because #446 measured that this
+	 * is what collapses the inter-task placement lottery from +-30-43% to
+	 * +-1%.
+	 *
+	 * 🔴 THE LETTER IS -X AND NOT -P, and the difference is deliberate: on
+	 * this machine `P' is already the preemption test (thread/machine.c and
+	 * a few lines below).  Every letter with a mnemonic was taken or worse
+	 * than taken -- `R' pairs with `-r', which arms the debugger, and `p'
+	 * pairs with `-P' itself, so one mistyped key would select a different
+	 * experiment and produce a plausible measurement of it.  An arbitrary
+	 * letter that cannot be confused beats a memorable one that can.
+	 * i386 learns -X too, keeping -P as its old name, so the experiment has
+	 * one name on both targets rather than two.
+	 *
+	 * ⚠️ Read once, here, and not at the call sites: the scheduler reads it
+	 * inside thread_setrun(), and asking the command line there would scan
+	 * a string on every wakeup in the system.  machine_init() runs after
+	 * the timers and before any thread does, so nothing has been placed yet
+	 * when the answer is written down.
+	 */
+	{
+		extern int	sched_rpc_handoff;
+
+		sched_rpc_handoff = boot_flag('X');
+		if (sched_rpc_handoff)
+			printf("sched: -X, the #356 synchronous-RPC hand-off "
+			       "on block is ON (same-task only)\n");
+	}
+
+	/*
 	 * Configure the clock devices (#425).
 	 *
 	 * ⚠️ Here because kern/startup.c calls machine_init() before

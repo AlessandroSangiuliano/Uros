@@ -114,8 +114,22 @@
  */
 #define	SP_GET		1	/* a buffer for the message: ikm_cache_get   */
 #define	SP_COPYIN	2	/* copyinmsg: 🔥 THE SEND-SIDE COPY           */
-#define	SP_RESOLVE	3	/* name -> port: cache, lock-free, or table  */
-#define	SP_QUEUE	4	/* rights, queue limits, the two mqueue locks */
+/*
+ * 🔥 #559: THE SLOW PATH FUSES TWO PHASES INTO ONE CALL, so the fused call gets
+ * a column of its own instead of being charged to either of them.
+ *
+ * `ipc_kmsg_get()' takes the buffer AND copies the message in from the user in
+ * one go; on the hot path those are `get buf' and `COPYIN', separately.
+ * Charging it to one of the two would print a zero for the other, and a zero
+ * reads as "free" rather than as "nobody measured this".
+ *
+ * ⚠️ So every column is zero exactly where the work it names does not exist --
+ * the same shape as SP_RUNQ, which is zero on the hot path because a direct
+ * hand-off never touches a run queue.
+ */
+#define	SP_KMSGGET	3	/* ipc_kmsg_get: buffer E copia, non separabili */
+#define	SP_RESOLVE	4	/* name -> port: cache, lock-free, or table  */
+#define	SP_QUEUE	5	/* rights, queue limits, the two mqueue locks */
 /*
  * The hand-off in three, because the issue's "receiver claim + handoff
  * (switch_context, thread_dispatch)" is one phrase covering three costs that
@@ -159,24 +173,55 @@
  * 2,781 on-processor cycles is a real widening and it is declared in the dump.
  * The alternative is a 31% bucket whose contents are argued about.
  */
-#define	SP_PICK		5	/* lock the queue, find and vet the receiver */
-#define	SP_CLAIM	6	/* splsched, thread_lock, TH_WAIT -> TH_RUN  */
-#define	SP_PARK		7	/* the sender onto the reply queue, TH_WAIT  */
-#define	SP_DELIVER	8	/* hand the message over, set up the switch  */
-#define	SP_WAIT		9	/* off the processor -- the OTHER end's time */
-#define	SP_SWITCH	10	/* 🔥 switch_context + thread_dispatch        */
+#define	SP_PICK		6	/* lock the queue, find and vet the receiver */
+#define	SP_CLAIM	7	/* splsched, thread_lock, TH_WAIT -> TH_RUN  */
+#define	SP_PARK		8	/* the sender onto the reply queue, TH_WAIT  */
+#define	SP_DELIVER	9	/* hand the message over, set up the switch  */
+#define	SP_MQSEND	10	/* ipc_mqueue_send: enqueue and wake        */
+#define	SP_WAIT		11	/* off the processor -- the OTHER end's time */
+/*
+ * 🔥 #559: RUNNABLE BUT NOT RUNNING, and it is a phase because the question it
+ * answers is the one that decides whether there is anything to optimise.
+ *
+ * The slow path -- two traps per round trip, no hand-off -- costs about 1.7x
+ * the hot path for the same null message in the same address space.  With one
+ * column covering "stopped running" to "running again", that difference is
+ * unattributable: it is equally consistent with THE PEER BEING SLOW, which is
+ * not a cost of the mechanism at all, and with BEING PUT ON A RUN QUEUE AND
+ * PICKED UP COSTING, which is.  Optimising the first is optimising somebody
+ * else's work.
+ *
+ * 🔑 Its start is stamped by a THIRD thread -- whoever calls thread_setrun() --
+ * exactly as SP_SWITCH's start is stamped by whoever gives up the processor.
+ * That mechanism is not new here: it is the one that made the switch
+ * measurable, reused for the boundary one step earlier.
+ *
+ *	stop ──────────────────────────────────────────────────► run
+ *	     │ the peer produces │ queued, waiting  │ the switch │
+ *	     └──── SP_WAIT ──────┴──── SP_RUNQ ─────┴─ SP_SWITCH ┘
+ *	                         ▲                  ▲
+ *	                  thread_setrun()      switch_in
+ *
+ * ⚠️ Stamped at the TOP of thread_setrun(), not at the run_queue_enqueue() it
+ * reaches by one of four routes.  The priority recompute between the two is
+ * charged to SP_RUNQ, which is where it belongs: it is part of what being put
+ * on a queue costs.
+ */
+#define	SP_RUNQ		12	/* 🔥 runnable, waiting for a processor       */
+#define	SP_SWITCH	13	/* 🔥 switch_context + thread_dispatch        */
 /*
  * And the resume in two, for the same reason at 23%: lowering the interrupt
  * level is not bookkeeping about a message, and on this target splx() can take
  * pending interrupts and run ASTs.  A column that folds it in with reading
  * ith_state and filling in a trailer is naming the wrong thing.
  */
-#define	SP_SPL		11	/* enable_preemption + splx after the switch */
-#define	SP_RESUME	12	/* back with a reply: ith_state, the trailer */
-#define	SP_COPYOUT	13	/* the header translated: ports -> names     */
-#define	SP_PUT		14	/* copyoutmsg: 🔥 THE RECEIVE-SIDE COPY       */
-#define	SP_BODY		15	/* everything the marks above did not name   */
-#define	SP_PHASES	16
+#define	SP_SPL		14	/* enable_preemption + splx after the switch */
+#define	SP_MQRECV	15	/* ipc_mqueue_receive, less the sleep       */
+#define	SP_RESUME	16	/* back with a reply: ith_state, the trailer */
+#define	SP_COPYOUT	17	/* the header translated: ports -> names     */
+#define	SP_PUT		18	/* copyoutmsg: 🔥 THE RECEIVE-SIDE COPY       */
+#define	SP_BODY		19	/* everything the marks above did not name   */
+#define	SP_PHASES	20
 
 /*
  * 🔴 And the return is NOT one of them, which is a decision and not an
@@ -314,6 +359,14 @@ struct syscall_profile_thread {
 	 */
 	uint64_t	switch_in;
 	/*
+	 * When a third thread made this one runnable (#559).  The twin of
+	 * switch_in, one boundary earlier, and written by a different stranger:
+	 * switch_in comes from whoever gave up the processor, this from whoever
+	 * called thread_setrun().  Same absence of synchronisation and the same
+	 * reason -- a lock here would be a lock inside the interval measured.
+	 */
+	uint64_t	runnable_at;
+	/*
 	 * Whose breakdown this is.
 	 *
 	 * 🔥 Added because a run printed two hundred dumps that were
@@ -339,6 +392,15 @@ struct syscall_profile_thread {
 	 * path at the first test describes neither.
 	 */
 	uint8_t		hot[SP_SAMPLES];
+	/*
+	 * 🔥 #559: and whether it SLEPT, which is the same lesson one level
+	 * down.  A thread on the slow path alternates a send that does not
+	 * block with a receive that does, so half a window has the whole
+	 * wait/runq/switch story and half has none of it -- and a median across
+	 * both describes neither.  The hot path needed `hot' for exactly this
+	 * reason; the slow path needs this.
+	 */
+	uint8_t		slept[SP_SAMPLES];
 	uint32_t	nsamples;
 	uint32_t	nwindows;	/* how many have been filled so far  */
 	uint32_t	ndumps;
@@ -348,6 +410,7 @@ struct syscall_profile_thread {
 	uint32_t	nseen;		/* profiled traps this thread made   */
 	uint32_t	open;		/* a sample is being built           */
 	uint32_t	took_handoff;	/* this sample reached the switch    */
+	uint32_t	did_sleep;	/* this sample left the processor    */
 };
 
 /*
@@ -407,6 +470,14 @@ syscall_profile_begin(struct syscall_profile_thread *p, uint64_t entry_tsc)
 	p->open = 1;
 	p->waiting = 0;
 	p->took_handoff = 0;
+	p->did_sleep = 0;
+	/*
+	 * 🔴 Cleared, so that a stamp left by a PREVIOUS sample cannot be read
+	 * as a boundary of this one.  The `> cursor' test below would refuse a
+	 * stale one anyway; clearing it means the refusal is not the only thing
+	 * standing between a stale timestamp and a column.
+	 */
+	p->runnable_at = 0;
 	p->first = entry_tsc;
 	p->cursor = entry_tsc;
 	for (i = 0; i < SP_PHASES; i++)
@@ -492,6 +563,7 @@ syscall_profile_switch_out(struct syscall_profile_thread *p,
 
 	syscall_profile_mark_at(p, phase, now);
 	p->waiting = 1;
+	p->did_sleep = 1;
 	p->nblocked++;
 }
 
@@ -519,21 +591,43 @@ syscall_profile_resumed(struct syscall_profile_thread *p)
 		return;
 
 	/*
-	 * ⚠️ A stamp that is not ahead of the cursor means this thread resumed
-	 * without a hand-off that could be timed -- it was never switched to by
-	 * an instrumented path, or the stamp is from a previous sample.  Then
-	 * the two cannot be separated, and the whole interval goes to the WAIT.
+	 * Three intervals out of one, and the two boundaries between them were
+	 * both stamped by OTHER threads: thread_setrun() said when this one
+	 * became runnable, the outgoing thread said when it got a processor.
 	 *
-	 * 🔴 That direction is the deliberate one.  The switch is the number
-	 * this issue turns on; a fallback that guessed in its favour would be an
-	 * instrument arranging its own conclusion.  Understating it costs a
-	 * sample, overstating it costs the finding.
+	 * 🔴 EVERY FALLBACK COLLAPSES TOWARDS THE WAIT, and that is the whole
+	 * of the arithmetic worth reading here.  SP_RUNQ and SP_SWITCH are the
+	 * columns a conclusion would be drawn from; SP_WAIT is the column that
+	 * means "somebody else's work".  A boundary that cannot be trusted must
+	 * therefore add to the wait and never to the other two -- otherwise the
+	 * instrument quietly argues for its own finding.  Understating them
+	 * costs a sample; overstating them costs the finding.
 	 */
-	if (p->switch_in > p->cursor)
+	if (p->runnable_at > p->cursor && p->runnable_at <= p->switch_in) {
+		syscall_profile_mark_at(p, SP_WAIT, p->runnable_at);
+		syscall_profile_mark_at(p, SP_RUNQ, p->switch_in);
+	} else if (p->switch_in > p->cursor) {
+		/* the wake cannot be placed: wait and queue are one column */
 		syscall_profile_mark_at(p, SP_WAIT, p->switch_in);
-	else
+	} else {
+		/* nor can the switch: the whole interval is the wait */
 		syscall_profile_mark(p, SP_WAIT);
+	}
 	p->waiting = 0;
+}
+
+/*
+ * A third thread has put this one on a run queue.  Called with the target's
+ * thread_lock held, from thread_setrun().
+ *
+ * ⚠️ Unconditional, like the switch stamp: whether a thread's wake can be
+ * placed must not depend on whether the thread that woke it was being
+ * profiled.
+ */
+static __inline__ void
+syscall_profile_made_runnable(struct syscall_profile_thread *p)
+{
+	p->runnable_at = syscall_profile_tsc();
 }
 
 /*
@@ -584,6 +678,7 @@ syscall_profile_commit(struct syscall_profile_thread *p)
 	}
 	p->total[p->nsamples] = total;
 	p->hot[p->nsamples] = (uint8_t) p->took_handoff;
+	p->slept[p->nsamples] = (uint8_t) p->did_sleep;
 
 	if (++p->nsamples == SP_SAMPLES) {
 		p->nsamples = 0;
@@ -622,6 +717,7 @@ extern void	syscall_profile_blocked(struct thread_shuttle *old,
 					int phase);
 extern void	syscall_profile_back(void);
 extern void	syscall_profile_switched_in(void);
+extern void	syscall_profile_runnable(struct thread_shuttle *);
 extern void	syscall_profile_took_handoff(void);
 extern void	syscall_profile_phase(int phase);
 
@@ -642,6 +738,7 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
 #define	SP_BLOCKED(o,n,p) syscall_profile_blocked(o, n, p)
 #define	SP_BACK()	syscall_profile_back()
 #define	SP_SWITCHED()	syscall_profile_switched_in()
+#define	SP_RUNNABLE(t)	syscall_profile_runnable(t)
 #define	SP_HANDOFF()	syscall_profile_took_handoff()
 #define	SP_MARK(p)	syscall_profile_phase(p)
 
@@ -652,6 +749,7 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
 #define	SP_BLOCKED(o,n,p) MACRO_BEGIN MACRO_END
 #define	SP_BACK()	MACRO_BEGIN MACRO_END
 #define	SP_SWITCHED()	MACRO_BEGIN MACRO_END
+#define	SP_RUNNABLE(t)	MACRO_BEGIN MACRO_END
 #define	SP_HANDOFF()	MACRO_BEGIN MACRO_END
 #define	SP_MARK(p)	MACRO_BEGIN MACRO_END
 

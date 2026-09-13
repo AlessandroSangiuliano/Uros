@@ -760,6 +760,12 @@ parse_arguments(void)
 		    { extern int hwp_skip_enable; hwp_skip_enable = 1; }
 		    break;
 #if	NCPUS > 1
+		case 'X':	/* -X: the name this flag has on BOTH targets.
+				 * x86-64 cannot use -P -- there it is already
+				 * the preemption test -- so the experiment was
+				 * about to have two names.  This is the one;
+				 * -P below is kept as the old one so nothing
+				 * written down before today stops working. */
 		case 'P':	/* -P: enable the #356 synchronous-RPC hand-off
 				 * on block (wakee of a combined-op send runs on
 				 * the waker's CPU instead of a remote idle one,

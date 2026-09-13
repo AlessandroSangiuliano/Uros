@@ -58,6 +58,14 @@ extern unsigned int	c_mmot_combined_S_R;
 extern unsigned int	c_mach_msg_trap_switch_fast;
 
 /*
+ * #559: and the three routes, which are the denominator the breakdown is a
+ * fraction of.  See the block above them in ipc/mach_msg.c.
+ */
+extern unsigned int	c_route_msg_send;
+extern unsigned int	c_route_msg_receive;
+extern unsigned int	c_route_msg_continue;
+
+/*
  * 🔥 AND THE SAME QUESTION ASKED OF THE INSTRUMENT ITSELF.
  *
  * With the counters above, twelve columns of zeroes alongside eighty thousand
@@ -82,15 +90,19 @@ static const char *const sp_name[SP_PHASES] = {
 	"entry   ",	/* SP_ENTRY   */
 	"get buf ",	/* SP_GET     */
 	"COPYIN  ",	/* SP_COPYIN  */
+	"kmsg_get",	/* SP_KMSGGET */
 	"resolve ",	/* SP_RESOLVE */
 	"queue   ",	/* SP_QUEUE   */
 	"pick rcv",	/* SP_PICK    */
 	"claim   ",	/* SP_CLAIM   */
 	"park snd",	/* SP_PARK    */
 	"deliver ",	/* SP_DELIVER */
+	"mq_send ",	/* SP_MQSEND  */
 	"wait    ",	/* SP_WAIT    */
+	"RUNQ    ",	/* SP_RUNQ    */
 	"SWITCH  ",	/* SP_SWITCH  */
 	"splx    ",	/* SP_SPL     */
+	"mq_recv ",	/* SP_MQRECV  */
 	"resume  ",	/* SP_RESUME  */
 	"copyout ",	/* SP_COPYOUT */
 	"PUT     ",	/* SP_PUT     */
@@ -171,213 +183,211 @@ sp_print_pct(int pct)
 		printf(" %2d%%", pct);
 }
 
-void
-syscall_profile_dump(struct syscall_profile_thread *p)
+/*
+ * 🔥 #559: THE SHAPES IN A WINDOW, and one table for each of them.
+ *
+ * A window can hold three kinds of trap, and they differ by most of the table:
+ * one that took the hand-off, one that blocked without it, and one that never
+ * left the processor at all -- the last has no wait, no run-queue and no
+ * switch, because none of that happened to it.
+ *
+ * 🔴 A SLOW-PATH ROUND TRIP IS TWO TRAPS AND THEY ARE DIFFERENT SHAPES.  The
+ * send does not block; the receive does.  Printing one median for the window
+ * describes neither, and printing only the blocked one -- which is what this
+ * did first -- leaves the send half counted in the header and never broken
+ * down.  #392's whole finding came from dividing instead of averaging; the same
+ * applies to the window itself.
+ */
+#define	SP_SHAPE_HANDOFF	0
+#define	SP_SHAPE_BLOCKED	1
+#define	SP_SHAPE_AWAKE		2
+#define	SP_SHAPES		3
+
+static const char *const sp_shape_name[SP_SHAPES] = {
+	"hand-off",
+	"blocked, no hand-off",
+	"never left the processor",
+};
+
+static int
+sp_in_shape(struct syscall_profile_thread *p, int i, int shape)
+{
+	if (shape == SP_SHAPE_HANDOFF)
+		return p->hot[i] != 0;
+	if (shape == SP_SHAPE_BLOCKED)
+		return p->slept[i] != 0 && p->hot[i] == 0;
+	return p->slept[i] == 0;
+}
+
+/*
+ * One shape's breakdown.
+ *
+ * ⚠️ Only the columns that are not zero, and the zero ones named on one line
+ * after them.  With twenty phases and three shapes the full grid is sixty lines
+ * a dump, most of them zeroes -- and a kernel printf costs milliseconds, so the
+ * instrument would be perturbing the very thing it is watching.  The zero names
+ * are still printed, because a phase that is silently missing from a table
+ * cannot be told from one that was never declared.
+ */
+static void
+sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
+	 int ret_known)
 {
 	uint32_t	col[SP_SAMPLES];
-	uint32_t	whole;
-	int		n = 0;
-	int		nhot = 0;
-	int		median = -1;
-	int		i, ph;
-	uint64_t	ret_cyc, ret_n;
-	uint32_t	work;
-	uint32_t	copies;
-
-	if (sp_pair_cost == 0)
-		sp_measure_self();
+	uint32_t	whole, work, copies;
+	int		n = 0, median = -1, i, ph, primo;
 
 	for (i = 0; i < SP_SAMPLES; i++)
-		if (p->hot[i])
-			nhot++;
-
-	/*
-	 * The representative trap is the one whose TOTAL is the median, and its
-	 * own slices are what gets printed.
-	 *
-	 * 🔴 Not the per-phase medians, which is the tempting table and the
-	 * wrong one: a median per phase comes from a different trap in every
-	 * column, and the columns sum to something that never happened.  One
-	 * real trap, chosen for being the middle one, has slices that add up
-	 * because they were cut out of one interval.
-	 *
-	 * 🔥 #392: and chosen from among the traps that took the HAND-OFF, when
-	 * there are any.  A window holding both hand-offs and traps that fell
-	 * off the hot path at the first test has a median describing neither --
-	 * the two shapes differ by eight of the twelve columns.  When the window
-	 * holds none, everything is printed and the header says the breakdown is
-	 * of something else.
-	 */
-	for (i = 0; i < SP_SAMPLES; i++)
-		if (nhot == 0 || p->hot[i])
+		if (sp_in_shape(p, i, shape))
 			col[n++] = p->total[i];
+	/*
+	 * 🔴 Two samples at least.  A "median" of one is that one sample, and
+	 * printing it under the same heading as a median of sixteen invites it
+	 * to be read as one.
+	 */
+	if (n < 2)
+		return;
+
 	sp_sort(col, n);
 	whole = col[(n - 1) / 2];
-	for (i = 0; i < SP_SAMPLES; i++) {
-		if (p->total[i] == whole && (nhot == 0 || p->hot[i])) {
+	for (i = 0; i < SP_SAMPLES; i++)
+		if (p->total[i] == whole && sp_in_shape(p, i, shape)) {
 			median = i;
 			break;
 		}
-	}
 	if (median < 0)
 		return;
 
-	/*
-	 * ⚠️ The window and the trap numbers, and not just a dump counter.
-	 * The windows are spaced geometrically, so "#3" is traps 49-64 in one
-	 * thread and 1,985-2,000 in the next -- and which suite of the
-	 * benchmark those fell in is the difference between a startup number
-	 * and a steady-state one.
-	 */
-	printf("syscall_profile trap %d thread %p dump %u, window %u = traps "
-	       "%u..%u of %u this thread made (%u slept, %u dropped), %d of %d "
-	       "took the hand-off; %u marks x %u cyc = %u of instrument\n",
-	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
-	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen,
-	       p->nblocked, p->ndropped, nhot, (int) SP_SAMPLES,
-	       (unsigned int) SP_MARKS, sp_pair_cost,
-	       (unsigned int) SP_MARKS * sp_pair_cost);
-	printf("syscall_profile   median %s trap %u cyc (spread %u..%u); "
-	       "kernel-wide: %u hot-path candidates, %u hand-offs\n",
-	       nhot == 0 ? "NON-HANDOFF" : "hand-off", whole, col[0],
-	       col[n - 1], c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
-
-	/*
-	 * ⚠️ The on-processor phases are a share of WORK, and the wait is a
-	 * share of the wall clock, and the header says which is which.
-	 *
-	 * 🔥 They were all taken against the wall clock, and every one of them
-	 * printed `0%%' -- arithmetically correct and useless, because a trap
-	 * that waited three hundred million cycles for a message makes every
-	 * real phase a rounding error against its own total.  A table of zeroes
-	 * reads as "these cost nothing"; what it meant was "the denominator is
-	 * mostly sleep".
-	 */
 	work = 0;
 	for (ph = 0; ph < SP_PHASES; ph++)
 		if (ph != SP_WAIT)
 			work += p->sample[median][ph];
+	if (ret_known)
+		work += ret_mean;
+
+	printf("syscall_profile  [%s] median of %d: %u cyc "
+	       "(spread %u..%u), %u on a processor\n",
+	       sp_shape_name[shape], n, whole, col[0], col[n - 1], work);
 
 	for (ph = 0; ph < SP_PHASES; ph++) {
 		int	k = 0;
 
+		if (p->sample[median][ph] == 0)
+			continue;
+
 		for (i = 0; i < SP_SAMPLES; i++)
-			if (nhot == 0 || p->hot[i])
+			if (sp_in_shape(p, i, shape))
 				col[k++] = p->sample[i][ph];
 		sp_sort(col, k);
 
-		printf("syscall_profile   %s %10u ", sp_name[ph],
+		printf("syscall_profile    %s %9u ", sp_name[ph],
 		       p->sample[median][ph]);
 		sp_print_pct(sp_percent(p->sample[median][ph],
-				        ph == SP_WAIT ? whole : work));
+					ph == SP_WAIT ? whole : work));
 		printf(" %s  [%u..%u]\n",
 		       ph == SP_WAIT ? "of wall " : "of work",
 		       col[0], col[k - 1]);
 	}
 
+	primo = 1;
+	for (ph = 0; ph < SP_PHASES; ph++) {
+		if (p->sample[median][ph] != 0)
+			continue;
+		if (primo) {
+			printf("syscall_profile    zero here:");
+			primo = 0;
+		}
+		printf(" %s", sp_name[ph]);
+	}
+	if (!primo)
+		printf("\n");
+
+	if (!ret_known)
+		return;
+
 	/*
-	 * The return path, from the processor's own accounting.
-	 *
-	 * ⚠️ A MEAN, and labelled one, because that is what a running sum can
-	 * give and this file will not print a mean that looks like a median.
-	 * It is defensible here for the reason the column does not exist: the
-	 * return path runs the same instructions every time, so its
-	 * distribution has nothing to say that its centre does not.
+	 * 🔑 What the issues come here for, on two lines so that whichever is
+	 * the larger is the one the reader sees first: what register-IPC (#391)
+	 * could reclaim, against what it does not touch.
 	 */
-	syscall_profile_return_cycles(&ret_cyc, &ret_n);
-	if (ret_n != 0) {
-		uint32_t	ret_mean = (uint32_t) (ret_cyc / ret_n);
+	copies = p->sample[median][SP_COPYIN] + p->sample[median][SP_PUT];
+	printf("syscall_profile    #391 ceiling: the copies %u cyc "
+	       "(copyin %u + put %u), share", copies,
+	       p->sample[median][SP_COPYIN], p->sample[median][SP_PUT]);
+	sp_print_pct(sp_percent(copies, work));
+	printf(" of the %u on a processor\n", work);
 
-		printf("syscall_profile   return %6u  (mean of %u, this "
-		       "processor — not a column, see the header)\n",
-		       ret_mean, (unsigned int) ret_n);
+	printf("syscall_profile    getting the processor: RUNQ %u + SWITCH %u "
+	       "= %u, share",
+	       p->sample[median][SP_RUNQ], p->sample[median][SP_SWITCH],
+	       p->sample[median][SP_RUNQ] + p->sample[median][SP_SWITCH]);
+	sp_print_pct(sp_percent(p->sample[median][SP_RUNQ] +
+				p->sample[median][SP_SWITCH], work));
+	printf(" of the same %u\n", work);
+}
 
-		/*
-		 * 🔑 What #392 comes here for, said out loud rather than left
-		 * to be worked out from the table.
-		 *
-		 * #411 printed a BOUND here -- floor against the whole body --
-		 * because the body was one bucket and a bound was all it could
-		 * support.  With the body split the answer itself is printable:
-		 * the ceiling is the two copies and nothing else, because those
-		 * are the only two phases carrying the payload in registers
-		 * would remove.  Everything else -- the entry, the resolve, the
-		 * claim, the switch, the return -- is paid whatever the message
-		 * travels in.
-		 *
-		 * ⚠️ The share is of WORK, not of the trap.  A trap that waited
-		 * for a message spent most of its life off the processor, and a
-		 * percentage taken against that total would say the copies are
-		 * negligible -- which is true of the wall clock and false of
-		 * everything #392 is deciding.
-		 */
-		work += ret_mean;
-		copies = p->sample[median][SP_COPYIN] + p->sample[median][SP_PUT];
+void
+syscall_profile_dump(struct syscall_profile_thread *p)
+{
+	uint64_t	ret_cyc, ret_n;
+	uint32_t	ret_mean = 0;
+	int		ret_known = 0;
+	int		conta[SP_SHAPES];
+	int		i, ph, shape;
 
-		printf("syscall_profile   #391 ceiling: the two copies %u cyc"
-		       " (copyin %u + put %u), share",
-		       copies, p->sample[median][SP_COPYIN],
-		       p->sample[median][SP_PUT]);
-		sp_print_pct(sp_percent(copies, work));
-		printf(" of the %u cyc this trap spent ON a processor\n", work);
+	if (sp_pair_cost == 0)
+		sp_measure_self();
 
-		/*
-		 * And the switch beside it, because that is the phase the
-		 * x86-64-against-i386 comparison pointed at and the one #391
-		 * does not touch at all.  Two numbers on two lines, so that
-		 * whichever is the larger is the one the reader sees first.
-		 */
-		printf("syscall_profile   floor: entry %u + return %u + switch"
-		       " %u = %u cyc, share",
-		       p->sample[median][SP_ENTRY], ret_mean,
-		       p->sample[median][SP_SWITCH],
-		       p->sample[median][SP_ENTRY] + ret_mean +
-		       p->sample[median][SP_SWITCH]);
-		sp_print_pct(sp_percent(p->sample[median][SP_ENTRY] + ret_mean +
-					p->sample[median][SP_SWITCH], work));
-		printf(" of the same %u\n", work);
-
-		/*
-		 * 🔑 And the counterweight on one line, because it is what the
-		 * first divided run turned out to be about: the hand-off
-		 * machinery against the two copies.  Six columns that exist
-		 * because one thread stops running and another starts.
-		 */
-		printf("syscall_profile   hand-off machinery: pick %u + claim "
-		       "%u + park %u + deliver %u + switch %u + splx %u = %u, "
-		       "share",
-		       p->sample[median][SP_PICK], p->sample[median][SP_CLAIM],
-		       p->sample[median][SP_PARK],
-		       p->sample[median][SP_DELIVER],
-		       p->sample[median][SP_SWITCH], p->sample[median][SP_SPL],
-		       p->sample[median][SP_PICK] + p->sample[median][SP_CLAIM] +
-		       p->sample[median][SP_PARK] +
-		       p->sample[median][SP_DELIVER] +
-		       p->sample[median][SP_SWITCH] + p->sample[median][SP_SPL]);
-		sp_print_pct(sp_percent(p->sample[median][SP_PICK] +
-					p->sample[median][SP_CLAIM] +
-					p->sample[median][SP_PARK] +
-					p->sample[median][SP_DELIVER] +
-					p->sample[median][SP_SWITCH] +
-					p->sample[median][SP_SPL], work));
-		printf(" of the same %u\n", work);
+	for (shape = 0; shape < SP_SHAPES; shape++) {
+		conta[shape] = 0;
+		for (i = 0; i < SP_SAMPLES; i++)
+			if (sp_in_shape(p, i, shape))
+				conta[shape]++;
 	}
 
 	/*
-	 * ⚠️ Printed only while some site is dark, so that a working instrument
-	 * does not spend a line a dump saying it is working.
+	 * ⚠️ A MEAN, and labelled one, because that is what a running sum can
+	 * give and this file will not print a mean that looks like a median.
+	 * It is defensible for the return path alone: it runs the same
+	 * instructions whatever the message was.
 	 */
+	syscall_profile_return_cycles(&ret_cyc, &ret_n);
+	if (ret_n != 0) {
+		ret_mean = (uint32_t) (ret_cyc / ret_n);
+		ret_known = 1;
+	}
+
+	printf("syscall_profile trap %d thread %p dump %u, window %u = traps "
+	       "%u..%u of %u this thread made (%u dropped); shapes: %d "
+	       "hand-off, %d blocked, %d awake; %u marks x %u cyc = %u of "
+	       "instrument; return %u (mean of %u); kernel-wide %u candidates, "
+	       "%u hand-offs\n",
+	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
+	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen, p->ndropped,
+	       conta[SP_SHAPE_HANDOFF], conta[SP_SHAPE_BLOCKED],
+	       conta[SP_SHAPE_AWAKE],
+	       (unsigned int) SP_MARKS, sp_pair_cost,
+	       (unsigned int) SP_MARKS * sp_pair_cost,
+	       ret_mean, (unsigned int) ret_n,
+	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
+	printf("syscall_profile   routes kernel-wide: %u combined (%u handed "
+	       "off), %u send-only, %u receive-only (%u of them resumed in the "
+	       "continuation)\n",
+	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast,
+	       c_route_msg_send, c_route_msg_receive, c_route_msg_continue);
+
+	for (shape = 0; shape < SP_SHAPES; shape++)
+		sp_table(p, shape, ret_mean, ret_known);
+
 	/*
-	 * ⚠️ Printed only when THIS breakdown has nothing in it, which is the
-	 * case where the reader needs to know whether the instrument or the
-	 * path is the reason.  A dump with slices does not spend a line saying
-	 * the instrument works.
+	 * ⚠️ Printed only when nothing in this window marked anything, which is
+	 * the case where the reader needs to know whether the instrument or the
+	 * path is the reason.
 	 */
-	if (p->sample[median][SP_GET] == 0 &&
-	    p->sample[median][SP_RESOLVE] == 0 &&
-	    p->sample[median][SP_QUEUE] == 0) {
-		printf("syscall_profile   this thread marked nothing; sites "
-		       "kernel-wide (reached/of those with no sample open):");
+	if (sp_site[SP_KMSGGET] == 0 && sp_site[SP_GET] == 0 &&
+	    sp_site[SP_RESOLVE] == 0) {
+		printf("syscall_profile   NO SITE REACHED kernel-wide "
+		       "(reached/of those with no sample open):");
 		for (ph = 0; ph < SP_PHASES; ph++)
 			if (sp_site[ph] != 0)
 				printf(" %s=%u/%u", sp_name[ph], sp_site[ph],
@@ -447,6 +457,19 @@ syscall_profile_back(void)
 		return;
 
 	syscall_profile_resumed(&t->syscall_profile);
+}
+
+/*
+ * #559: a third thread has made `t' runnable.  Takes the thread rather than
+ * reading current_thread(), which at this call site is the waker.
+ */
+void
+syscall_profile_runnable(thread_t t)
+{
+	if (t == THREAD_NULL)
+		return;
+
+	syscall_profile_made_runnable(&t->syscall_profile);
 }
 
 void
