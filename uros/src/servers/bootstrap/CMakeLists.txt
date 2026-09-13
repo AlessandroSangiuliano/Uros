@@ -479,7 +479,23 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # ⚠️ La suite va nella bootstrap.conf e MAI nel -append del kernel: il
     # parser boot-arg legge ogni carattere come flag, e la 'h' di bencH e'
     # halt_in_debugger.
-    set(_BENCH_SUITES "krpc syscall intra slow inter comb port pp ool flipc2 cc")
+    # 🔑 A CACHE VARIABLE, because a measurement usually wants ONE suite.
+    #
+    # #392 profiles the combined send-and-receive trap, which is the only suite
+    # that reaches the mmot hot path -- and it runs sixth.  Under TCG the five
+    # before it take longer than any sensible run budget, so the arm that
+    # exists to be compared against KVM could not be taken at all.  Naming the
+    # suites at configure time turns a forty-minute wait into a two-minute one:
+    #
+    #	cmake -DUROS_BENCH_SUITES=comb
+    #
+    # ⚠️ The DEFAULT is the full list and stays the full list.  A build that
+    # quietly measured one suite would be the same defect as a benchmark that
+    # runs a quarter of its suites and prints a table -- which is the reason
+    # UROS_BUNDLE_IPC_BENCH is off by default a few lines above.
+    set(UROS_BENCH_SUITES "krpc syscall intra slow inter comb port pp ool flipc2 cc"
+        CACHE STRING "Which ipc_bench suites the bench-only bundle runs")
+    set(_BENCH_SUITES "${UROS_BENCH_SUITES}")
     file(GENERATE OUTPUT ${_CONF}
          CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
