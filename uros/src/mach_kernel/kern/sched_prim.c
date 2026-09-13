@@ -2492,6 +2492,14 @@ thread_setrun(
 
 	mp_disable_preemption();
 
+	/*
+	 * #559: this thread becomes runnable HERE, and the stamp is the start
+	 * of its run-queue phase -- the stretch between "somebody woke me" and
+	 * "a processor took me", which is invisible while it sits inside the
+	 * column that means "waiting for the other end".
+	 */
+	SP_RUNNABLE(th);
+
 	assert(! (th->state & TH_SWAPPED_OUT));
 
 	/*

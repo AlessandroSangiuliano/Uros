@@ -89,6 +89,7 @@ static const char *const sp_name[SP_PHASES] = {
 	"park snd",	/* SP_PARK    */
 	"deliver ",	/* SP_DELIVER */
 	"wait    ",	/* SP_WAIT    */
+	"RUNQ    ",	/* SP_RUNQ    */
 	"SWITCH  ",	/* SP_SWITCH  */
 	"splx    ",	/* SP_SPL     */
 	"resume  ",	/* SP_RESUME  */
@@ -178,6 +179,10 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	uint32_t	whole;
 	int		n = 0;
 	int		nhot = 0;
+	int		nslept = 0;
+	int		nsel;
+	const uint8_t	*sel;
+	const char	*forma;
 	int		median = -1;
 	int		i, ph;
 	uint64_t	ret_cyc, ret_n;
@@ -187,9 +192,41 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	if (sp_pair_cost == 0)
 		sp_measure_self();
 
-	for (i = 0; i < SP_SAMPLES; i++)
+	for (i = 0; i < SP_SAMPLES; i++) {
 		if (p->hot[i])
 			nhot++;
+		if (p->slept[i])
+			nslept++;
+	}
+
+	/*
+	 * 🔴 WHICH SHAPE THE MEDIAN IS OF, chosen rather than assumed, in three
+	 * steps from most specific to least.
+	 *
+	 * A window can hold three kinds of trap: one that took the hand-off,
+	 * one that blocked without it (the slow path's receive), and one that
+	 * never left the processor (the slow path's send).  They differ by most
+	 * of the table -- a trap that did not sleep has no wait, no run-queue
+	 * and no switch at all -- so a median across two of them is a row that
+	 * never happened.
+	 *
+	 * The hot path learned this first and got `hot'.  #559 found the same
+	 * thing one level down: a slow-path thread alternates the two, so half
+	 * of every window is each.
+	 */
+	if (nhot != 0) {
+		sel = p->hot;
+		nsel = nhot;
+		forma = "hand-off";
+	} else if (nslept != 0) {
+		sel = p->slept;
+		nsel = nslept;
+		forma = "blocked, no hand-off";
+	} else {
+		sel = (const uint8_t *) 0;
+		nsel = SP_SAMPLES;
+		forma = "never left the processor";
+	}
 
 	/*
 	 * The representative trap is the one whose TOTAL is the median, and its
@@ -209,12 +246,13 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	 * of something else.
 	 */
 	for (i = 0; i < SP_SAMPLES; i++)
-		if (nhot == 0 || p->hot[i])
+		if (sel == (const uint8_t *) 0 || sel[i])
 			col[n++] = p->total[i];
 	sp_sort(col, n);
 	whole = col[(n - 1) / 2];
 	for (i = 0; i < SP_SAMPLES; i++) {
-		if (p->total[i] == whole && (nhot == 0 || p->hot[i])) {
+		if (p->total[i] == whole &&
+		    (sel == (const uint8_t *) 0 || sel[i])) {
 			median = i;
 			break;
 		}
@@ -237,10 +275,11 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       p->nblocked, p->ndropped, nhot, (int) SP_SAMPLES,
 	       (unsigned int) SP_MARKS, sp_pair_cost,
 	       (unsigned int) SP_MARKS * sp_pair_cost);
-	printf("syscall_profile   median %s trap %u cyc (spread %u..%u); "
-	       "kernel-wide: %u hot-path candidates, %u hand-offs\n",
-	       nhot == 0 ? "NON-HANDOFF" : "hand-off", whole, col[0],
-	       col[n - 1], c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
+	printf("syscall_profile   median of the %d that are '%s': %u cyc "
+	       "(spread %u..%u); of the window %d took the hand-off, %d slept; "
+	       "kernel-wide %u candidates, %u hand-offs\n",
+	       nsel, forma, whole, col[0], col[n - 1], nhot, nslept,
+	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
 
 	/*
 	 * ⚠️ The on-processor phases are a share of WORK, and the wait is a
@@ -262,7 +301,7 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 		int	k = 0;
 
 		for (i = 0; i < SP_SAMPLES; i++)
-			if (nhot == 0 || p->hot[i])
+			if (sel == (const uint8_t *) 0 || sel[i])
 				col[k++] = p->sample[i][ph];
 		sp_sort(col, k);
 
@@ -447,6 +486,19 @@ syscall_profile_back(void)
 		return;
 
 	syscall_profile_resumed(&t->syscall_profile);
+}
+
+/*
+ * #559: a third thread has made `t' runnable.  Takes the thread rather than
+ * reading current_thread(), which at this call site is the waker.
+ */
+void
+syscall_profile_runnable(thread_t t)
+{
+	if (t == THREAD_NULL)
+		return;
+
+	syscall_profile_made_runnable(&t->syscall_profile);
 }
 
 void
