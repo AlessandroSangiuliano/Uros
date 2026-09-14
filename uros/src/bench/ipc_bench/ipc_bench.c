@@ -864,8 +864,26 @@ bench_inter_sweep(int iters)
  * touched so they are resident and indexed.
  * =================================================================== */
 
-#define FORKRACE_THREADS	4
-#define FORKRACE_ITERS		250
+/*
+ * 🔑 THE WATCHDOG, NOT THE WORK, IS WHAT A BOOT COSTS. Measured on the first
+ * run: 1000 concurrent fork-and-destroy pairs take 161 ms, or 161 us each, in
+ * a boot whose watchdog is two minutes. Twenty boots of the old workload bought
+ * 20,000 forks and seventy minutes; one boot buys 100,000 in sixteen seconds.
+ * So the pressure goes here rather than into the boot count -- boots still have
+ * their own value, since each one re-rolls the initial conditions a race may
+ * depend on, but they are the expensive axis and no longer the only one.
+ *
+ * ⚠️ MORE THREADS THAN PROCESSORS ON PURPOSE. Eight workers on four CPUs get
+ * preempted in the middle of a task_create, which widens the windows this is
+ * hunting instead of narrowing them; four would let each worker run its
+ * operation to completion far more often.
+ */
+#ifndef	FORKRACE_THREADS
+#define FORKRACE_THREADS	8
+#endif
+#ifndef	FORKRACE_ITERS
+#define FORKRACE_ITERS		12500
+#endif
 #define FORKRACE_REGION		(1024 * 1024)
 #define FORKRACE_PAGE		4096
 
