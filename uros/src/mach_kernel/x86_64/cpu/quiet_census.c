@@ -227,10 +227,48 @@ quiet_census_pass(int mycpu)
 			 * A page still `busy' with sleepers on it is the whole
 			 * shape of the wedge this was written for.
 			 */
+			/*
+			 * 🔑 #558: when the sleeper is in mutex_lock_wait the
+			 * event IS a mutex_t, and this kernel already records
+			 * who took it -- MUTEX_OWNER_TRACK (#383) keeps own_thr
+			 * and own_pc, built for exactly this: "a deadlocked
+			 * mutex whose own_thr points at a thread the census
+			 * also lists tells you the cycle".
+			 *
+			 * So the two halves join here: this line names the
+			 * holder, and the holder's own line, a few above or
+			 * below, says what IT is waiting for.
+			 */
+			if (nm != 0 && th->wait_event != 0 &&
+			    census_streq(nm, "mutex_lock_wait")) {
+				mutex_t	   *mx = (mutex_t *) th->wait_event;
+				uint64_t    poff = 0;
+				const char *pn;
+
+				printf(" [mutex held-by=%p", (void *) mx->own_thr);
+				pn = ksym_lookup_call((uint64_t) mx->own_pc, &poff);
+				if (pn != 0)
+					printf(" taken-at=%s+0x%lx]", pn,
+					       (unsigned long) poff);
+				else
+					printf(" taken-at=%p]", (void *) mx->own_pc);
+			}
+
 			if (nm != 0 && th->wait_event != 0 &&
 			    census_streq(nm, "vm_fault_page")) {
 				vm_page_t m = (vm_page_t) th->wait_event;
 
+#if	MACH_ASSERT
+				/*
+				 * #558: and WHICH LINE marked it busy.  The
+				 * state alone names a symptom; the site names
+				 * the defect.  vm_fault.c, which is where
+				 * every one of these sites lives.
+				 */
+				if (m->busy && m->busy_line != 0)
+					printf(" busied-at=vm_fault.c:%u",
+					       m->busy_line);
+#endif	/* MACH_ASSERT */
 				printf(" [page busy=%d wanted=%d wire=%d"
 				       " obj=%p off=0x%lx]",
 				       (int) m->busy, (int) m->wanted,

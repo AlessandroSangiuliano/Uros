@@ -219,6 +219,28 @@ struct vm_page {
 	int		pad;		/* extra space for ns32000 bit ops */
 #endif	/* ns32000 */
 
+#if	MACH_ASSERT
+	/*
+	 * #558: WHO marked this page busy, in the development kernel only.
+	 *
+	 * The wedge this exists for stops the machine with threads asleep on a
+	 * page that is busy for ever.  `busy' says the state; it does not say
+	 * which call site produced it, and the sites are many.  A return
+	 * line that did names the one that did.
+	 *
+	 * ❌ The first version stored __builtin_return_address(0), which in a
+	 * macro is the ENCLOSING FUNCTION's return address, not the site: it
+	 * reported `vm_fault+0x609', which resolves to the instruction after
+	 * the vm_fault_page() call.  True and useful -- the page is busied
+	 * inside vm_fault_page -- but not what was asked for.  __LINE__ is
+	 * exact, and four bytes rather than eight.
+	 *
+	 * ⚠️ Behind MACH_ASSERT: two kernels are already an axis here (#485),
+	 * and a per-page diagnostic belongs in only one of them.
+	 */
+	unsigned int	busy_line;
+#endif	/* MACH_ASSERT */
+
 	unsigned int
 	/* boolean_t */	busy:1,		/* page is in transit (O) */
 			wanted:1,	/* someone is waiting for page (O) */
@@ -514,6 +536,21 @@ extern void		cleanup_limbo_queue(void);
 		MACRO_END
 
 #define	VM_PAGE_WAIT()	vm_page_wait()
+
+/*
+ * #558: mark a page busy and record the call site that did it.  The plain
+ * assignment stays legal everywhere; this is for the fault paths, which is
+ * where a page left busy for ever has been observed.
+ */
+#if	MACH_ASSERT
+#define	VM_PAGE_SET_BUSY(m)						\
+	MACRO_BEGIN							\
+		(m)->busy = TRUE;					\
+		(m)->busy_line = __LINE__;				\
+	MACRO_END
+#else	/* MACH_ASSERT */
+#define	VM_PAGE_SET_BUSY(m)	((m)->busy = TRUE)
+#endif	/* MACH_ASSERT */
 
 #define vm_page_lock_queues()	mutex_lock(&vm_page_queue_lock)
 #define vm_page_unlock_queues()	mutex_unlock(&vm_page_queue_lock)
