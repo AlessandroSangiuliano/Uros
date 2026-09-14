@@ -953,6 +953,54 @@ bench_forkrace(void)
     get_time(&t0);
     for (i = 0; i < FORKRACE_THREADS; i++)
 	pthread_create(&w[i].th, NULL, forkrace_worker_func, &w[i]);
+
+    /*
+     * 🔴 A HEARTBEAT, BECAUSE "IT HUNG" IS NOT A RESULT.
+     *
+     * The totals are printed after the join, so a run that wedges prints
+     * nothing at all -- and then "wedged" carries no number, which makes
+     * "a resource ran out at a fixed count" indistinguishable from "a race
+     * caught it somewhere random".  Those want different fixes.
+     *
+     * The counters are read without synchronisation on purpose: they are
+     * aligned words this only ever reads, a stale value costs a heartbeat's
+     * accuracy and nothing else, and taking a lock here would serialise the
+     * very concurrency the suite exists to create.
+     *
+     * Printing only on change keeps a wedge from filling the log, and five
+     * unchanged rounds is reported once, with the count: that line is the
+     * whole diagnostic value of a run that never finishes.
+     */
+    {
+	unsigned	last = 0, still = 0;
+	int		running = 1;
+
+	while (running) {
+	    unsigned	n = 0;
+	    int		k;
+
+	    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1000);
+
+	    running = 0;
+	    for (k = 0; k < FORKRACE_THREADS; k++) {
+		n += w[k].made + w[k].refused;
+		if ((int)(w[k].made + w[k].refused) < w[k].iters)
+		    running = 1;
+	    }
+
+	    if (n != last) {
+		printf("  ... %u of %d\n", n, FORKRACE_THREADS * FORKRACE_ITERS);
+		last = n;
+		still = 0;
+	    } else if (running && ++still == 5) {
+		printf("  !!! STALLED at %u of %d — no progress for five "
+		       "rounds; the totals below will not be printed\n",
+		       n, FORKRACE_THREADS * FORKRACE_ITERS);
+		break;
+	    }
+	}
+    }
+
     for (i = 0; i < FORKRACE_THREADS; i++)
 	pthread_join(w[i].th, NULL);
     get_time(&t1);
