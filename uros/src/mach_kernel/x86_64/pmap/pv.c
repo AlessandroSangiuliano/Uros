@@ -7,7 +7,6 @@
 
 #include <stdint.h>
 
-#include <kern/assert.h>
 #include <kern/lock.h>
 #include <machine/cpu_data.h>
 #include <cpu/percpu.h>
@@ -117,16 +116,35 @@ static struct pv_lock *pv_lock_for(uint64_t pa)
 static void pv_lock_take(struct pv_lock *p)
 {
 	/*
-	 * 🔴 THE PRECONDITION IS ASSERTED, NOT REMEMBERED.  If a path ever
-	 * takes one of these with interrupts already off, the shootdown under
-	 * it deadlocks -- and it would do so rarely, on four processors, which
-	 * is the kind of defect this issue exists about.
+	 * ❌ THE PRECONDITION I ASSERTED HERE IS FALSE, AND THAT IS MEASURED
+	 * (#558, 14/09).
 	 *
-	 * Only once the system is up: the early mappings run with interrupts
-	 * off by construction, and pmap_initialized is the boundary the rest of
-	 * this file already uses to tell the two eras apart.
+	 * The assert was `!pmap_initialized || (read_rflags() & RFLAGS_IF)',
+	 * on the reasoning that a waiter with interrupts off cannot answer the
+	 * shootdown of whoever holds the lock -- hw_lock_lock()'s argument,
+	 * turned around.  It fired on the first boot:
+	 *
+	 *     pv_lock_page <- pv_enter <- pmap_enter <- vm_fault_wire_fast
+	 *       <- vm_fault_wire <- vm_map_wire <- kernel_memory_allocate
+	 *       <- kmem_alloc_aligned <- stack_alloc <- thread_machine_create
+	 *
+	 * Wiring a new thread's kernel stack reaches pv_enter with interrupts
+	 * ALREADY masked -- a probe at pmap_enter's entry reports
+	 * percpu_intr_level = 1 there, so a hw_lock is held somewhere above.
+	 * ⚠️ WHICH ONE IS NOT ESTABLISHED: vm_object_lock and
+	 * vm_page_lock_queues are both mutexes (atomic_cmpxchg8, no masking),
+	 * pmap_writer_lock is inert in the arm that ships, urmach_rcu_read_lock
+	 * raises the PREEMPT level and not the interrupt one, and
+	 * vm_fault_wire_fast releases the object lock before PMAP_ENTER.  Said
+	 * as unknown rather than guessed at a fourth time.
+	 *
+	 * 🔑 THE DESIGN CONSEQUENCE DOES NOT DEPEND ON THE NAME: legitimate
+	 * callers arrive here masked, so a waiter can be unable to answer, so
+	 * NOBODY MAY SHOOT DOWN WHILE HOLDING ONE OF THESE.  The lock is still
+	 * right for what pv.c does under it -- pv_enter, pv_remove and pv_count
+	 * shoot down nothing -- and the two walks in pmap.c that do are back to
+	 * unprotected, which is written where they are.
 	 */
-	assert(!pmap_initialized || (read_rflags() & RFLAGS_IF) != 0);
 
 	disable_preemption();
 

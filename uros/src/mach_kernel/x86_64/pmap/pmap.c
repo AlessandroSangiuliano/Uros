@@ -1094,6 +1094,33 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 	 * it, because that is what makes this safe rather than lucky.
 	 */
 	/*
+	 * ❌ STILL UNPROTECTED, AND THE TWO ATTEMPTS ARE WHY (#558).
+	 *
+	 * This is the loop the reperto faulted in, and it dereferences
+	 * pv->pmap with nothing held.  It should hold the page lock.  It cannot,
+	 * yet, and both ways of getting there have been tried and measured:
+	 *
+	 *  1. As a simple_lock it panicked on the first boot -- "ipi: a
+	 *     cross-call with interrupts off would deadlock" -- because
+	 *     simple_lock masks interrupts (#528) and pmap_protect_page() ends
+	 *     in a TLB shootdown that waits for every processor to answer.
+	 *
+	 *  2. As a lock that does NOT mask, the precondition it needs turned
+	 *     out to be false: wiring a kernel stack reaches pv_enter with
+	 *     interrupts already masked, so a waiter can be unable to answer
+	 *     the shootdown of whoever holds the lock.  See pv.c.
+	 *
+	 * 🔑 So what is left is the third shape, which is Linux's: move the
+	 * shootdown OUT of the locked region -- batch the (pmap, va) pairs
+	 * under the lock and flush them after releasing it.  The list is
+	 * unbounded, so that needs chunking, and this kernel already defers
+	 * shootdowns elsewhere (#313), so the machinery has a precedent here.
+	 *
+	 * Leaving it unprotected with this note is not a fix; it is the honest
+	 * state, and the note exists so the next attempt starts from what has
+	 * already been ruled out rather than repeating it.
+	 */
+	/*
 	 * 🔴 HELD ACROSS THE WHOLE WALK (#558), and this is the loop the reperto
 	 * faulted in.
 	 *
@@ -1113,11 +1140,9 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 	 * difference between this and taking a snapshot: a snapshot fixes a torn
 	 * pair and leaves the use-after-free exactly where it was.
 	 */
-	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next)
 		pmap_protect_page(pv->pmap, pv->va, flags);
-	pv_unlock_page(pa);
 }
 
 /*
@@ -1156,10 +1181,9 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 {
 	pv_entry_t pv;
 
-	/* Same reason as the protect loop above, and now legal for the same
-	 * reason: pv_lock_page() leaves interrupts on, so the tlb_flush_page()
-	 * at the bottom of this loop can still be acknowledged (#558). */
-	pv_lock_page(pa);
+	/* Unprotected for the same reason as the protect loop above (#558):
+	 * this ends in tlb_flush_page(), a cross-call, and a waiter that
+	 * arrived masked could not answer it. */
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
 		boolean_t   held = pmap_read_enter();
@@ -1197,7 +1221,6 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 */
 		tlb_flush_page(pv->pmap, pv->va);
 	}
-	pv_unlock_page(pa);
 }
 
 int pmap_is_referenced(uint64_t pa)
