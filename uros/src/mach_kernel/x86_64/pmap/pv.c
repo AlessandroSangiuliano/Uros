@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <kern/lock.h>
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
@@ -16,8 +17,21 @@
 static pv_entry_t pv_head_table;	/* one entry per physical page */
 static uint64_t   pv_pages;		/* how many pages it covers */
 
-/* Entries for the second and later mappings of a page. */
+/*
+ * Entries for the second and later mappings of a page.
+ *
+ * 🔥 THIS LIST IS GLOBAL, AND UNTIL #558 IT HAD NO LOCK AT ALL (09/2026).
+ *
+ * `pv_alloc' popped and `pv_free' pushed with neither lock nor atomics, so two
+ * processors mapping second-or-later mappings of DIFFERENT pages -- each under
+ * its own object lock, which is why nothing else caught it -- could be handed
+ * the SAME entry.  One page's list then grafts onto another's, and a walk from
+ * one page arrives at a `pv->pmap' belonging to somewhere else entirely.  That
+ * is a general protection fault when the value is wild enough to leave the
+ * canonical range, and silent corruption when it is not.
+ */
 static pv_entry_t pv_free_list;
+decl_simple_lock_data(static, pv_free_lock)
 
 #define pa_index(pa)	((pa) >> PT_SHIFT)
 
@@ -45,6 +59,8 @@ void pv_bootstrap(uint64_t top_of_ram)
 	 */
 	pv_head_table = (pv_entry_t)(uintptr_t)phys_to_direct(table_pa);
 	pv_pages = pages;
+
+	simple_lock_init(&pv_free_lock, ETAP_VM_PMAP_FREE);
 }
 
 int pv_managed(uint64_t pa)
@@ -72,41 +88,63 @@ static pv_entry_t pv_alloc(void)
 	uint64_t frame;
 	unsigned per_frame = PAGE_SIZE_4K / sizeof(struct pv_entry);
 
-	if (pv_free_list == PV_ENTRY_NULL) {
-		/*
-		 * pmap_table_frame(), same class as pmap_create()'s and the
-		 * large-page split's (#422): the boot allocator is empty once
-		 * the VM has taken physical memory over, and this runs on every
-		 * second mapping of a page for as long as the system is up --
-		 * so with boot_frame_alloc() the panic below was not a
-		 * safeguard, it was a wall a few mappings away.
-		 *
-		 * ⚠️ It can block, and today that is safe because nothing holds
-		 * a lock across it: pmap_enter() calls pv_enter() with none
-		 * taken, this pmap having no locking yet.  When it gains some
-		 * (#455), this call is the first place to look.
-		 */
-		frame = pmap_table_frame();
-		if (frame == 0)
-			return PV_ENTRY_NULL;
-
-		e = (pv_entry_t)(uintptr_t)phys_to_direct(frame);
-		for (unsigned i = 0; i < per_frame; i++) {
-			e[i].next = pv_free_list;
-			pv_free_list = &e[i];
-		}
+	simple_lock(&pv_free_lock);
+	if (pv_free_list != PV_ENTRY_NULL) {
+		e = pv_free_list;
+		pv_free_list = e->next;
+		simple_unlock(&pv_free_lock);
+		return e;
 	}
+	simple_unlock(&pv_free_lock);
 
+	/*
+	 * pmap_table_frame(), same class as pmap_create()'s and the large-page
+	 * split's (#422): the boot allocator is empty once the VM has taken
+	 * physical memory over, and this runs on every second mapping of a page
+	 * for as long as the system is up -- so with boot_frame_alloc() the
+	 * panic in pv_enter() was not a safeguard, it was a wall a few mappings
+	 * away.
+	 *
+	 * 🔴 AND IT IS CALLED WITH THE LOCK DOWN, WHICH IS THE WHOLE SHAPE OF
+	 * THIS FUNCTION.  It can block -- after the VM is up it is vm_page_grab
+	 * with a VM_PAGE_WAIT behind it -- and blocking while holding a spin
+	 * lock stops every other processor that wants an entry, on a lock whose
+	 * holder is asleep.  It is the same rule map.c states for the QSBR read
+	 * section next to the large-page split, for the same reason and one
+	 * step stronger: "THE FRAME IS TAKEN BEFORE THE SECTION OPENS".
+	 *
+	 * ⚠️ Two processors that both miss both take a frame, and both thread
+	 * theirs in.  That is not a leak and needs no undoing: an extra frame's
+	 * worth of entries is simply free entries, and the alternative -- hold
+	 * the lock across the allocation to keep the second one from happening
+	 * -- is the thing this arrangement exists to avoid.
+	 */
+	frame = pmap_table_frame();
+	if (frame == 0)
+		return PV_ENTRY_NULL;
+
+	e = (pv_entry_t)(uintptr_t)phys_to_direct(frame);
+
+	simple_lock(&pv_free_lock);
+	for (unsigned i = 0; i < per_frame; i++) {
+		e[i].next = pv_free_list;
+		pv_free_list = &e[i];
+	}
 	e = pv_free_list;
 	pv_free_list = e->next;
+	simple_unlock(&pv_free_lock);
+
 	return e;
 }
 
 static void pv_free(pv_entry_t e)
 {
 	e->pmap = PMAP_NULL;
+
+	simple_lock(&pv_free_lock);
 	e->next = pv_free_list;
 	pv_free_list = e;
+	simple_unlock(&pv_free_lock);
 }
 
 void pv_enter(uint64_t pa, pmap_t pmap, uint64_t va)
