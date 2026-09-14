@@ -1192,6 +1192,35 @@ vm_map_destroy(
 
 	pmap_destroy(map->pmap);
 
+	/*
+	 * 🔥 A MAP IS NOT FREED WHILE SOMEBODY IS STILL ON ITS LOCK (#558).
+	 *
+	 * The wedges this guard was written for look like this: several
+	 * threads asleep uninterruptibly on one heap address, the machine idle
+	 * for ever, `quiet_census' resets frozen.  A lock_t's sleepers are
+	 * woken by whoever releases it -- so if the object carrying the lock is
+	 * handed back to its zone while they sleep, nothing will ever release
+	 * it again and they are lost.
+	 *
+	 * 🔑 Reaching here should already mean nobody can be waiting: the last
+	 * reference is gone, and a thread with no reference has no business
+	 * asking for the lock.  So this does not defend the free -- it says the
+	 * REFERENCE PROTOCOL was violated upstream, which is a different and
+	 * larger defect than a missing lock.
+	 *
+	 * A panic rather than a printf because a wedge gives no backtrace and
+	 * this does: the whole difficulty of #558's shapes has been that the
+	 * machine stops without saying who stopped it.
+	 */
+	if (map->lock.waiting || map->lock.want_write ||
+	    map->lock.want_upgrade || map->lock.read_count != 0)
+		panic("vm_map_destroy: map 0x%lx freed with its lock in use "
+		      "(waiting %d, want_write %d, want_upgrade %d, readers %d)"
+		      " (#558)",
+		      (unsigned long) map,
+		      (int) map->lock.waiting, (int) map->lock.want_write,
+		      (int) map->lock.want_upgrade, (int) map->lock.read_count);
+
 	zfree(vm_map_zone, (vm_offset_t) map);
 }
 

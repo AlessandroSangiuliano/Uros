@@ -344,6 +344,18 @@ typedef struct thread_shuttle {
 	/* Blocking information */
 	int		reason;		/* why we blocked */
 	event_t		wait_event;	/* event we are waiting on */
+	/*
+	 * #558: WHO put this thread to sleep, not just on what.
+	 *
+	 * The wedges this exists for stop the machine with several threads
+	 * asleep on one address and nothing saying why -- which is the gap
+	 * #526 records as its own open question: "nothing in the log says who".
+	 * An address names an object only if you already know its type; the
+	 * return address of assert_wait's caller names the FUNCTION, and the
+	 * function is the type (lock_write means a lock_t, _mutex_lock a
+	 * mutex_t).  Diagnostic only: nothing reads it but the census.
+	 */
+	void		*wait_from;
 	kern_return_t	wait_result;	/* outcome of wait -
 					   may be examined by this thread
 					   WITHOUT locking */

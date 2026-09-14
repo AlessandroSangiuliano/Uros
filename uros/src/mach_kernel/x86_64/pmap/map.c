@@ -353,7 +353,24 @@ uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va)
 	return size;
 }
 
-uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
+/*
+ * The same work with the shootdown left to the caller (#558).
+ *
+ * 🔴 THE SPLIT IS NOT TIDINESS, IT IS THE FIX.  A walk of a page's pv list has
+ * to hold that page's lock across the dereference of `pv->pmap' -- that is the
+ * use-after-free this whole issue is about -- and it cannot hold anything
+ * across a shootdown, which cross-calls every processor and waits for answers
+ * that a masked waiter cannot give.  Both were tried and both failed, in that
+ * order, with a panic and with a false precondition.
+ *
+ * So the two are separated: the entry changes under the lock, and the flush
+ * happens after it is dropped.  This is Linux's mmu_gather shape, and it is
+ * not a foreign mechanism here -- #313 already defers kernel_pmap shootdowns.
+ *
+ * Returns the size mapped, and hands back the same value pmap_protect_page()
+ * would, so the caller knows what range to flush.
+ */
+uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
 {
 	uint64_t size = 0;
 	boolean_t held = pmap_read_enter();
@@ -407,7 +424,20 @@ uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
 
 	pmap_read_leave(held);
 
-	tlb_flush_range(pmap, va, size);
+	return size;
+}
+
+/*
+ * The whole operation, for the callers that are not walking a pv list and so
+ * have nothing to keep still across the flush.
+ */
+uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
+{
+	uint64_t size = pmap_protect_page_noflush(pmap, va, flags);
+
+	if (size != 0)
+		tlb_flush_range(pmap, va, size);
+
 	return size;
 }
 

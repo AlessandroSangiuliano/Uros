@@ -832,6 +832,198 @@ bench_inter_sweep(int iters)
 }
 
 /* ===================================================================
+ * #558: task_create and task_terminate, concurrently, and nothing else
+ *
+ * THE DEFECT this exists to provoke: `pmap_destroy()' reaches `pv_remove()'
+ * through its own page tables, so it rewrites the pv list of every page those
+ * tables map -- pages belonging to arbitrary VM objects, none of them locked.
+ * The readers of those same lists (`pmap_page_protect()' from the copy-on-write
+ * path) hold the page's OBJECT lock. Two different locks, so no exclusion.
+ * Underneath both, `pv_free_list' is a plain global push/pop with no lock and
+ * no atomics, so two processors can be handed the same entry.
+ *
+ * ❌ WHY THE OTHER SUITES DO NOT PROVOKE IT, which is the point of this one.
+ * `bench_inter_rpc()' terminates its child and creates the next from ONE
+ * thread, in sequence -- and sequential code does not race with itself. Its
+ * only overlap is accidental: the dying child's last reference dropped on
+ * another processor while this thread is already inside the next fork. Forty
+ * boots at `-smp 4', twenty under TCG and twenty under KVM, with `isweep'
+ * doing 36 create/destroy pairs per boot instead of four, produced **nothing**.
+ * That is not a rate for the defect; it is the shape of the workload.
+ *
+ * 🔑 So here the overlap IS the test. Every thread is a forker and a destroyer
+ * at once, and they all fork from THIS task, so all of them walk the pv lists
+ * of the same pages at the same time. No IPC, no child threads, no ports
+ * beyond the task port each iteration must release: the shortest path from
+ * `task_create()' to `vm_map_fork()' to `pmap_page_protect()', which is
+ * exactly the backtrace in the reperto.
+ *
+ * ⚠️ THE REGION IS NOT DECORATION. An address space with nothing resident in
+ * it is forked without `vm_map_fork()' ever reaching a page that has pv
+ * entries, and then this provokes nothing while looking busy. The pages are
+ * touched so they are resident and indexed.
+ * =================================================================== */
+
+/*
+ * 🔑 THE WATCHDOG, NOT THE WORK, IS WHAT A BOOT COSTS. Measured on the first
+ * run: 1000 concurrent fork-and-destroy pairs take 161 ms, or 161 us each, in
+ * a boot whose watchdog is two minutes. Twenty boots of the old workload bought
+ * 20,000 forks and seventy minutes; one boot buys 100,000 in sixteen seconds.
+ * So the pressure goes here rather than into the boot count -- boots still have
+ * their own value, since each one re-rolls the initial conditions a race may
+ * depend on, but they are the expensive axis and no longer the only one.
+ *
+ * ⚠️ MORE THREADS THAN PROCESSORS ON PURPOSE. Eight workers on four CPUs get
+ * preempted in the middle of a task_create, which widens the windows this is
+ * hunting instead of narrowing them; four would let each worker run its
+ * operation to completion far more often.
+ */
+#ifndef	FORKRACE_THREADS
+#define FORKRACE_THREADS	8
+#endif
+#ifndef	FORKRACE_ITERS
+#define FORKRACE_ITERS		12500
+#endif
+#define FORKRACE_REGION		(1024 * 1024)
+#define FORKRACE_PAGE		4096
+
+typedef struct {
+    int		iters;
+    unsigned	made;
+    unsigned	refused;
+    pthread_t	th;
+} forkrace_worker_t;
+
+static void *
+forkrace_worker_func(void *arg)
+{
+    forkrace_worker_t	*w = (forkrace_worker_t *)arg;
+    int			 i;
+
+    for (i = 0; i < w->iters; i++) {
+	mach_port_t	child;
+	kern_return_t	kr;
+
+	kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
+			 TRUE, &child);
+	if (kr != KERN_SUCCESS) {
+	    w->refused++;
+	    continue;
+	}
+	w->made++;
+
+	(void) task_terminate(child);
+
+	/*
+	 * 🔴 The right is released, and it is not housekeeping here: the LAST
+	 * reference is what carries the map to vm_map_deallocate() and so to
+	 * pmap_destroy(). Leaking it would leave every child alive and this
+	 * suite would fork a thousand tasks and destroy none of them.
+	 */
+	(void) mach_port_deallocate(mach_task_self(), child);
+    }
+    return (void *) 0;
+}
+
+static void
+bench_forkrace(void)
+{
+    forkrace_worker_t	w[FORKRACE_THREADS];
+    vm_offset_t		region = 0;
+    kern_return_t	kr;
+    tvalspec_t		t0, t1;
+    unsigned		made = 0, refused = 0;
+    unsigned long	off;
+    int			i;
+
+    kr = vm_allocate(mach_task_self(), &region, FORKRACE_REGION, TRUE);
+    if (kr != KERN_SUCCESS) {
+	printf("  forkrace: region alloc failed %d — not run\n", kr);
+	return;
+    }
+    for (off = 0; off < FORKRACE_REGION; off += FORKRACE_PAGE)
+	((volatile char *) region)[off] = 1;
+
+    for (i = 0; i < FORKRACE_THREADS; i++) {
+	w[i].iters = FORKRACE_ITERS;
+	w[i].made = 0;
+	w[i].refused = 0;
+    }
+
+    get_time(&t0);
+    for (i = 0; i < FORKRACE_THREADS; i++)
+	pthread_create(&w[i].th, NULL, forkrace_worker_func, &w[i]);
+
+    /*
+     * 🔴 A HEARTBEAT, BECAUSE "IT HUNG" IS NOT A RESULT.
+     *
+     * The totals are printed after the join, so a run that wedges prints
+     * nothing at all -- and then "wedged" carries no number, which makes
+     * "a resource ran out at a fixed count" indistinguishable from "a race
+     * caught it somewhere random".  Those want different fixes.
+     *
+     * The counters are read without synchronisation on purpose: they are
+     * aligned words this only ever reads, a stale value costs a heartbeat's
+     * accuracy and nothing else, and taking a lock here would serialise the
+     * very concurrency the suite exists to create.
+     *
+     * Printing only on change keeps a wedge from filling the log, and five
+     * unchanged rounds is reported once, with the count: that line is the
+     * whole diagnostic value of a run that never finishes.
+     */
+    {
+	unsigned	last = 0, still = 0;
+	int		running = 1;
+
+	while (running) {
+	    unsigned	n = 0;
+	    int		k;
+
+	    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1000);
+
+	    running = 0;
+	    for (k = 0; k < FORKRACE_THREADS; k++) {
+		n += w[k].made + w[k].refused;
+		if ((int)(w[k].made + w[k].refused) < w[k].iters)
+		    running = 1;
+	    }
+
+	    if (n != last) {
+		printf("  ... %u of %d\n", n, FORKRACE_THREADS * FORKRACE_ITERS);
+		last = n;
+		still = 0;
+	    } else if (running && ++still == 5) {
+		printf("  !!! STALLED at %u of %d — no progress for five "
+		       "rounds; the totals below will not be printed\n",
+		       n, FORKRACE_THREADS * FORKRACE_ITERS);
+		break;
+	    }
+	}
+    }
+
+    for (i = 0; i < FORKRACE_THREADS; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+
+    for (i = 0; i < FORKRACE_THREADS; i++) {
+	made += w[i].made;
+	refused += w[i].refused;
+    }
+
+    /*
+     * The count is a PRESENCE control: a suite that forked nothing because
+     * task_create refused every time would otherwise read exactly like a
+     * suite that forked a thousand times and found no defect.
+     */
+    printf("  %d threads x %d iters over %d KB: %u forked and destroyed, "
+	   "%u refused, %lu us\n",
+	   FORKRACE_THREADS, FORKRACE_ITERS, FORKRACE_REGION / 1024,
+	   made, refused, elapsed_ns(&t0, &t1) / 1000);
+
+    (void) vm_deallocate(mach_task_self(), region, FORKRACE_REGION);
+}
+
+/* ===================================================================
  * Slow-path receive benchmark
  *
  * Guarantees the continuation path is exercised on every iteration.
@@ -2101,6 +2293,7 @@ bench_mach_print(int iters)
  *   slow     — slow-path receive (continuation)
  *   inter    — inter-task Mach IPC RPC
  *   isweep   — inter-task RPC swept by size, repeated within one boot (#446)
+ *   forkrace — concurrent task_create/task_terminate, no IPC (#558)
  *   port     — port alloc/destroy, mach_port_names
  *   pp       — protected payload (test + intra + inter)
  *   ool      — out-of-line data (intra + inter)
@@ -2128,6 +2321,7 @@ bench_mach_print(int iters)
 #define SUITE_PORTS	(1u << 14)	/* out-of-line port arrays, by count (#415) */
 #define SUITE_KRPC	(1u << 15)	/* MIG kernel RPC, where TypeCheck lives (#443) */
 #define SUITE_ISWEEP	(1u << 16)	/* inter-task RPC by size, repeated (#446) */
+#define SUITE_FORKRACE	(1u << 17)	/* concurrent task_create/terminate (#558) */
 
 /*
  *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME.
@@ -2139,7 +2333,7 @@ bench_mach_print(int iters)
  *	compared against those runs.  Naming it in `suites NOT run' is the
  *	honest form: it says the suite exists and did not run.
  */
-#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP)
+#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE)
 
 static int
 streq(const char *a, const char *b)
@@ -2161,6 +2355,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "slow"))    mask |= SUITE_SLOW;
 	else if (streq(argv[i], "inter"))   mask |= SUITE_INTER;
 	else if (streq(argv[i], "isweep"))  mask |= SUITE_ISWEEP;
+	else if (streq(argv[i], "forkrace")) mask |= SUITE_FORKRACE;
 	else if (streq(argv[i], "port"))    mask |= SUITE_PORT;
 	else if (streq(argv[i], "pp"))	    mask |= SUITE_PP;
 	else if (streq(argv[i], "ool"))	    mask |= SUITE_OOL;
@@ -2666,7 +2861,7 @@ main(int argc, char **argv)
 	    { SUITE_MEM,     "mem" },     { SUITE_DISK,    "disk" },
 	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
-	    { SUITE_ISWEEP,  "isweep" },
+	    { SUITE_ISWEEP,  "isweep" }, { SUITE_FORKRACE, "forkrace" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -2790,6 +2985,19 @@ main(int argc, char **argv)
 			(int)sizeof(bench_1024_msg_t), BENCH_ITERS);
 	bench_inter_rpc("4096B inline RPC",
 			(int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Concurrent task_create/task_terminate (#558) -- a provoker,
+     * not a benchmark: it prints a count so that "it forked nothing"
+     * cannot be read as "it forked and found nothing".
+     * --------------------------------------------------------- */
+    if (suites & SUITE_FORKRACE) {
+	printf("--- Concurrent fork/destroy (#558) ---\n");
+
+	bench_forkrace();
 
 	printf("\n");
     }

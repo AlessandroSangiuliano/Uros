@@ -982,6 +982,13 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	return va + offset;
 }
 
+/*
+ * #558: how many mappings of one page the flush batch can name.  Beyond it the
+ * fallback is a broadcast flush, so this trades a rare pessimistic flush
+ * against stack space on every pmap_page_protect().
+ */
+#define	PV_FLUSH_BATCH	32
+
 /* ------------------------------------------------------------------ */
 /*  Operations that start from a physical page                          */
 /* ------------------------------------------------------------------ */
@@ -997,8 +1004,38 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 		 * successor is copied up into it — so take the head afresh
 		 * every time rather than holding a pointer across the change.
 		 */
-		while ((pv = pv_head(pa)) != PV_ENTRY_NULL
-		       && pv->pmap != PMAP_NULL) {
+		while (1) {
+			pmap_t		hpmap;
+			uint64_t	hva;
+
+			/*
+			 * 🔴 A SNAPSHOT UNDER THE LOCK, NOT A WALK UNDER IT
+			 * (#558).
+			 *
+			 * This loop cannot hold the page lock across its body:
+			 * pmap_forget() calls pv_remove() on this same page and
+			 * would deadlock against itself -- the shape of #486,
+			 * where a guard on a constant produced a self-deadlock.
+			 *
+			 * What it can do is stop reading a TORN PAIR. Without
+			 * the lock, `pv->pmap' and `pv->va' can come from two
+			 * different entries, because pv_remove() removing the
+			 * head copies the successor's pmap, va and next up in
+			 * three separate stores. The pair would name a real
+			 * address in the wrong address space, and unmapping it
+			 * would not fault -- it would unmap somebody else's
+			 * page, silently.
+			 */
+			pv_lock_page(pa);
+			pv = pv_head(pa);
+			if (pv == PV_ENTRY_NULL || pv->pmap == PMAP_NULL) {
+				pv_unlock_page(pa);
+				break;
+			}
+			hpmap = pv->pmap;
+			hva = pv->va;
+			pv_unlock_page(pa);
+
 			/*
 			 * 🔴 #546: THE SAME INVARIANT i386 HAS ASSERTED
 			 * ALL ALONG, AND THIS TARGET DID NOT.
@@ -1019,21 +1056,109 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			 * witness that says so, and without it the next route
 			 * would be silent again.
 			 */
-			if (pmap_is_wired(pv->pmap, pv->va))
+			if (pmap_is_wired(hpmap, hva))
 				panic("pmap_page_protect: removing a wired "
 				      "page, va 0x%lx pa 0x%lx",
-				      (unsigned long) pv->va,
+				      (unsigned long) hva,
 				      (unsigned long) pa);
-			pmap_forget(pv->pmap, pv->va);
+
+			/*
+			 * ⚠️ WHAT IS STILL OPEN HERE, SAID RATHER THAN LEFT
+			 * (#558). Between the snapshot and this call the entry
+			 * can be removed by another processor and `hpmap' can
+			 * be a pmap that pmap_destroy() has already handed back
+			 * to its zone. The lock above makes the PAIR coherent;
+			 * it does not keep the pmap alive across the gap, and
+			 * nothing here does. Closing it wants either a
+			 * reference taken on the pmap for the length of the
+			 * call, or pmap_forget() split so its pv_remove() is
+			 * done by a caller already holding this lock. Neither
+			 * is done here, and pretending otherwise in a comment
+			 * would be worse than the hole.
+			 */
+			pmap_forget(hpmap, hva);
 		}
 		return;
 	}
 
 	flags = pmap_flags_for_prot(prot);
 
-	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
-	     pv = pv->next)
-		pmap_protect_page(pv->pmap, pv->va, flags);
+	/*
+	 * 🔴 HELD ACROSS THE WHOLE WALK (#558), and this is the loop the
+	 * reperto faulted in.
+	 *
+	 * Without it, pmap_destroy() on another processor rewrites this list
+	 * underneath -- it reaches pv_remove() through its own page tables and
+	 * holds no object lock, so the object lock this path came in with
+	 * excludes nothing.  What comes back from `pv->pmap' is then a pmap
+	 * that has been handed back to its zone, and `->root_pa' is whatever
+	 * now lives at that offset: a general protection fault when the value
+	 * leaves the canonical range, silent corruption when it does not.
+	 *
+	 * ⚠️ pmap_protect_page() is allocation-free -- it walks and does a
+	 * read-modify-write, while the path that CAN block, pmap_split_page(),
+	 * is a different function.  Verified before holding a spin lock across
+	 * it, because that is what makes this safe rather than lucky.
+	 */
+	/*
+	 * 🔴 THE ENTRIES CHANGE UNDER THE LOCK; THE SHOOTDOWN HAPPENS AFTER IT
+	 * (#558).  Two earlier shapes are ruled out by measurement, not taste:
+	 *
+	 *  1. A simple_lock round the whole walk panicked on the first boot --
+	 *     "ipi: a cross-call with interrupts off would deadlock" -- because
+	 *     it masks interrupts (#528) and the shootdown waits for every
+	 *     processor to answer.
+	 *  2. A lock that does not mask needs every acquirer to have interrupts
+	 *     on, and they do not: wiring a kernel stack reaches pv_enter
+	 *     already masked, so a waiter could not answer either.  Probed, not
+	 *     assumed -- see pv.c.
+	 *
+	 * What is left is to separate the two, which is Linux's mmu_gather
+	 * shape and already this kernel's habit elsewhere (#313).  The
+	 * dereference of `pv->pmap' -- the use-after-free this issue is named
+	 * for -- stays INSIDE the section.  Only the flush leaves it.
+	 *
+	 * ⚠️ AND THE BATCH OVERFLOWS SAFELY.  A page with more mappings than
+	 * the batch holds cannot be flushed pair by pair afterwards, because
+	 * naming the rest would mean walking the list again without the lock.
+	 * So the fallback is the pessimistic one that needs no names: a
+	 * broadcast flush of everything, on every processor.  It is correct
+	 * whatever the list did, and a page mapped more than PV_FLUSH_BATCH
+	 * ways is rare enough that its cost is not the interesting number.
+	 */
+	{
+		struct { pmap_t pmap; uint64_t va; uint64_t size; }
+			batch[PV_FLUSH_BATCH];
+		unsigned  n = 0;
+		boolean_t overflow = FALSE;
+		unsigned  i;
+
+		pv_lock_page(pa);
+		for (pv = pv_head(pa);
+		     pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
+		     pv = pv->next) {
+			uint64_t size = pmap_protect_page_noflush(pv->pmap,
+								  pv->va, flags);
+
+			if (size == 0)
+				continue;
+			if (n < PV_FLUSH_BATCH) {
+				batch[n].pmap = pv->pmap;
+				batch[n].va = pv->va;
+				batch[n].size = size;
+				n++;
+			} else
+				overflow = TRUE;
+		}
+		pv_unlock_page(pa);
+
+		if (overflow)
+			tlb_flush_all(PMAP_NULL);
+		else
+			for (i = 0; i < n; i++)
+				tlb_flush_range(batch[i].pmap, batch[i].va,
+						batch[i].size);
+	}
 }
 
 /*
@@ -1045,6 +1170,12 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 {
 	pv_entry_t pv;
 
+	/*
+	 * The page lock spans the walk for the same reason as the protect loop
+	 * above: `pv->pmap->root_pa' dereferences a pmap this path does not own
+	 * and does not otherwise keep alive (#558).
+	 */
+	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
 		boolean_t   held = pmap_read_enter();
@@ -1052,9 +1183,12 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 		int	    hit = e != PT_ENTRY_NULL && (*e & bits) != 0;
 
 		pmap_read_leave(held);
-		if (hit)
+		if (hit) {
+			pv_unlock_page(pa);
 			return 1;
+		}
 	}
+	pv_unlock_page(pa);
 
 	return 0;
 }
@@ -1062,7 +1196,17 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 {
 	pv_entry_t pv;
+	struct { pmap_t pmap; uint64_t va; } fbatch[PV_FLUSH_BATCH];
+	unsigned   nflush = 0;
+	boolean_t  foverflow = FALSE;
 
+	/*
+	 * Same shape as the protect loop above (#558): the entries change under
+	 * the page lock, the shootdowns happen after it is dropped.  The
+	 * dereference of `pv->pmap' is what the lock is for; the flush is what
+	 * cannot be under it.
+	 */
+	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
 		boolean_t   held = pmap_read_enter();
@@ -1098,8 +1242,25 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 * holding the cached translation that will fail to record the
 		 * next touch, and that is exactly the one this did not run on.
 		 */
-		tlb_flush_page(pv->pmap, pv->va);
+		/*
+		 * Batched, not flushed here: see the protect loop.  An
+		 * overflow falls back to a broadcast of everything, which
+		 * needs no names for what it did not record.
+		 */
+		if (nflush < PV_FLUSH_BATCH) {
+			fbatch[nflush].pmap = pv->pmap;
+			fbatch[nflush].va = pv->va;
+			nflush++;
+		} else
+			foverflow = TRUE;
 	}
+	pv_unlock_page(pa);
+
+	if (foverflow)
+		tlb_flush_all(PMAP_NULL);
+	else
+		for (unsigned i = 0; i < nflush; i++)
+			tlb_flush_page(fbatch[i].pmap, fbatch[i].va);
 }
 
 int pmap_is_referenced(uint64_t pa)

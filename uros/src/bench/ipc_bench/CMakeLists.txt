@@ -146,8 +146,23 @@ target_compile_options(ipc_bench_server PRIVATE
   -include stdint.h
 )
 
+# 🔴 The forkrace knobs are CACHE VARIABLES, not numbers to edit in the source.
+#
+# The suite's discriminating control is "same total volume, fewer threads":
+# 8 threads wedge after ~100 operations, and the question is whether that is
+# the oversubscription or the volume.  Answering it by editing two #defines and
+# remembering to put them back is a control that eventually stays in -- so the
+# knobs move here, where a campaign sets them and the build records what it
+# was given.  Defaults are the values the ten-boot campaign used.
+set(UROS_FORKRACE_THREADS 8 CACHE STRING
+    "forkrace: worker threads (#558); more than the CPU count on purpose")
+set(UROS_FORKRACE_ITERS 12500 CACHE STRING
+    "forkrace: create/destroy pairs per worker (#558)")
+
 target_compile_definitions(ipc_bench_server PRIVATE
   MACH_IPC_COMPAT=0
+  FORKRACE_THREADS=${UROS_FORKRACE_THREADS}
+  FORKRACE_ITERS=${UROS_FORKRACE_ITERS}
 )
 
 target_include_directories(ipc_bench_server PRIVATE

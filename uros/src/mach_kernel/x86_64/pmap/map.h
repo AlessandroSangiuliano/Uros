@@ -83,6 +83,13 @@ uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va);
 uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags);
 
 /*
+ * The same, with the TLB shootdown left to the caller (#558).  For walks that
+ * must hold a lock across the entry change and must NOT hold one across the
+ * cross-call -- which is every walk of a page's pv list.
+ */
+uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags);
+
+/*
  * Replace the large leaf covering va with a table of next-level entries that
  * map the same physical range with the same permissions — one level finer:
  * a 1 GiB leaf becomes 512 of 2 MiB, a 2 MiB leaf becomes 512 of 4 KiB.

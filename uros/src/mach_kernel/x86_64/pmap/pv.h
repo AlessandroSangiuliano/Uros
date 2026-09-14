@@ -59,6 +59,16 @@ pv_entry_t pv_head(uint64_t pa);
 void pv_enter(uint64_t pa, pmap_t pmap, uint64_t va);
 void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va);
 
+/*
+ * Hold a page's list still across a walk that lives outside this file (#558).
+ *
+ * ⚠️ NOT for pmap_page_protect's VM_PROT_NONE loop: it calls pmap_forget(),
+ * which calls pv_remove() on the same page, and holding this across that is a
+ * self-deadlock.  That loop re-reads pv_head(pa) each iteration instead.
+ */
+void pv_lock_page(uint64_t pa);
+void pv_unlock_page(uint64_t pa);
+
 /* How many mappings a page has — the index's own view, for checking it. */
 unsigned pv_count(uint64_t pa);
 
