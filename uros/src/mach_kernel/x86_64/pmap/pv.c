@@ -35,6 +35,68 @@ decl_simple_lock_data(static, pv_free_lock)
 
 #define pa_index(pa)	((pa) >> PT_SHIFT)
 
+/*
+ * 🔥 THE LISTS THEMSELVES (#558).
+ *
+ * Half of this index was protected by accident and that is why it lasted: the
+ * VM paths reach a page's list with that page's OBJECT locked.  `pmap_destroy'
+ * does not -- it reaches pv_remove() through its own page tables, rewriting the
+ * list of every page those tables map, pages belonging to arbitrary objects.
+ * Two different locks are no exclusion at all, and pv_remove() removing the
+ * head COPIES the next entry's contents up and frees that entry, so a reader
+ * standing on the list can have the entry under it recycled mid-walk.
+ *
+ * 🔑 ONE LOCK PER PAGE WOULD COST 8 MB ON 4 GB of RAM, on a table that is
+ * already 24 bytes a page.  A hashed array is the same protection for a fixed
+ * size, and the size is chosen against CONCURRENT PAGES rather than against
+ * processors: with N locks and k operations in flight the collision rate is
+ * about k*k/2N, so 64 processors all in the index want thousands, not tens.
+ * 1024 gives about half a collision at that width and costs nothing here.
+ *
+ * ⚠️ AND THEY ARE PADDED TO A CACHE LINE, which is where the memory goes:
+ * simple_lock_data_t is ONE byte, so unpadded there would be sixty-four locks
+ * per line and two processors taking two DIFFERENT locks would ping-pong the
+ * line between them -- contention invented by the layout, invisible in the
+ * code.  1024 * 64 B = 64 KB, a quarter of a per-cent of the table it guards.
+ *
+ * 🔴 LOCK ORDER, and there is only one: a page's head lock may be taken with
+ * the free-list lock DOWN and then take it (pv_remove -> pv_free).  Never the
+ * other way: pv_enter() takes its entry from pv_alloc() BEFORE locking the
+ * head, which is also what keeps a blocking allocation out of the section.
+ */
+#define PV_LOCKS	1024		/* power of two: the index is a mask */
+
+struct pv_lock {
+	decl_simple_lock_data(, l)
+	char	pad[1];			/* never an empty struct */
+} __attribute__((aligned(64)));
+
+static struct pv_lock pv_locks[PV_LOCKS];
+
+static struct pv_lock *pv_lock_for(uint64_t pa)
+{
+	return &pv_locks[pa_index(pa) & (PV_LOCKS - 1)];
+}
+
+/*
+ * For the walks that live in pmap.c and must hold the list still across a whole
+ * traversal.  ⚠️ NOT for pmap_page_protect's VM_PROT_NONE loop: that one calls
+ * pmap_forget(), which calls pv_remove() on the SAME pa, and holding this
+ * across it is a self-deadlock -- the shape of #486.  That loop re-reads
+ * pv_head(pa) every iteration instead, which is why it was written that way.
+ */
+void pv_lock_page(uint64_t pa)
+{
+	if (pv_managed(pa))
+		simple_lock(&pv_lock_for(pa)->l);
+}
+
+void pv_unlock_page(uint64_t pa)
+{
+	if (pv_managed(pa))
+		simple_unlock(&pv_lock_for(pa)->l);
+}
+
 void pv_bootstrap(uint64_t top_of_ram)
 {
 	uint64_t pages = top_of_ram >> PT_SHIFT;
@@ -61,6 +123,8 @@ void pv_bootstrap(uint64_t top_of_ram)
 	pv_pages = pages;
 
 	simple_lock_init(&pv_free_lock, ETAP_VM_PMAP_FREE);
+	for (unsigned i = 0; i < PV_LOCKS; i++)
+		simple_lock_init(&pv_locks[i].l, ETAP_VM_PMAP);
 }
 
 int pv_managed(uint64_t pa)
@@ -155,15 +219,22 @@ void pv_enter(uint64_t pa, pmap_t pmap, uint64_t va)
 	if (head == PV_ENTRY_NULL)
 		return;
 
-	/* The common case: first mapping of this page, no allocation. */
-	if (head->pmap == PMAP_NULL) {
-		head->pmap = pmap;
-		head->va = va;
-		head->next = PV_ENTRY_NULL;
-		return;
-	}
-
 	/*
+	 * 🔴 THE ENTRY IS TAKEN BEFORE THE LOCK, ALWAYS -- even on the first
+	 * mapping, which will not need it.
+	 *
+	 * pv_alloc() can refill, and refilling calls pmap_table_frame(), which
+	 * BLOCKS.  Sleeping while holding this page's spin lock would stop
+	 * every other processor that touches the page, on a lock whose holder
+	 * is asleep.  So the allocation happens outside and the spare is handed
+	 * back if the list turns out to be empty: map.c's large-page split does
+	 * exactly this, and says why -- "allocate outside, decide inside, give
+	 * the page back if you lost the argument".
+	 *
+	 * ⚠️ The cost is an alloc and a free on the common path, which is the
+	 * price of not holding a lock across a wait.  It is paid once per
+	 * mapping, inside a page fault.
+	 *
 	 * The mapping exists whether or not it is recorded, and an unrecorded
 	 * one is invisible to every operation that starts from the physical
 	 * page — so pmap_page_protect would leave it writable while reporting
@@ -174,6 +245,18 @@ void pv_enter(uint64_t pa, pmap_t pmap, uint64_t va)
 	if (e == PV_ENTRY_NULL)
 		panic("pv: out of entries, a mapping would go unrecorded");
 
+	pv_lock_page(pa);
+
+	/* The common case: first mapping of this page, the spare goes back. */
+	if (head->pmap == PMAP_NULL) {
+		head->pmap = pmap;
+		head->va = va;
+		head->next = PV_ENTRY_NULL;
+		pv_unlock_page(pa);
+		pv_free(e);
+		return;
+	}
+
 	/*
 	 * Push in after the head rather than at the end: the head cannot move,
 	 * since its address is what identifies the page.
@@ -182,6 +265,8 @@ void pv_enter(uint64_t pa, pmap_t pmap, uint64_t va)
 	e->va = va;
 	e->next = head->next;
 	head->next = e;
+
+	pv_unlock_page(pa);
 }
 
 void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va)
@@ -189,22 +274,38 @@ void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va)
 	pv_entry_t head = pv_head(pa);
 	pv_entry_t prev, e;
 
-	if (head == PV_ENTRY_NULL || head->pmap == PMAP_NULL)
+	if (head == PV_ENTRY_NULL)
 		return;
+
+	pv_lock_page(pa);
+
+	if (head->pmap == PMAP_NULL) {
+		pv_unlock_page(pa);
+		return;
+	}
 
 	/*
 	 * Removing the head keeps the head where it is: the next entry's
 	 * contents are copied up into it and that entry is freed.
+	 *
+	 * 🔥 THOSE THREE STORES ARE WHY A READER NEEDS THIS LOCK AND NOT A
+	 * GRACE PERIOD.  A reader walking without it can take `pmap' from the
+	 * entry that was here and `va' from the one that replaced it -- an
+	 * entry that never existed, naming a real address in the wrong space.
+	 * That does not fault; it protects the wrong page, silently.  Deferring
+	 * the free would stop the use-after-free and leave this untouched.
 	 */
 	if (head->pmap == pmap && head->va == va) {
 		e = head->next;
 		if (e == PV_ENTRY_NULL) {
 			head->pmap = PMAP_NULL;
+			pv_unlock_page(pa);
 			return;
 		}
 		head->pmap = e->pmap;
 		head->va = e->va;
 		head->next = e->next;
+		pv_unlock_page(pa);
 		pv_free(e);
 		return;
 	}
@@ -213,9 +314,12 @@ void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va)
 	for (e = head->next; e != PV_ENTRY_NULL; prev = e, e = e->next)
 		if (e->pmap == pmap && e->va == va) {
 			prev->next = e->next;
+			pv_unlock_page(pa);
 			pv_free(e);
 			return;
 		}
+
+	pv_unlock_page(pa);
 }
 
 unsigned pv_count(uint64_t pa)
@@ -223,11 +327,14 @@ unsigned pv_count(uint64_t pa)
 	pv_entry_t head = pv_head(pa);
 	unsigned n = 0;
 
-	if (head == PV_ENTRY_NULL || head->pmap == PMAP_NULL)
+	if (head == PV_ENTRY_NULL)
 		return 0;
 
-	for (pv_entry_t e = head; e != PV_ENTRY_NULL; e = e->next)
-		n++;
+	pv_lock_page(pa);
+	if (head->pmap != PMAP_NULL)
+		for (pv_entry_t e = head; e != PV_ENTRY_NULL; e = e->next)
+			n++;
+	pv_unlock_page(pa);
 
 	return n;
 }
