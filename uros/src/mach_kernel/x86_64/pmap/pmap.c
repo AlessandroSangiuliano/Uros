@@ -997,8 +997,38 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 		 * successor is copied up into it — so take the head afresh
 		 * every time rather than holding a pointer across the change.
 		 */
-		while ((pv = pv_head(pa)) != PV_ENTRY_NULL
-		       && pv->pmap != PMAP_NULL) {
+		while (1) {
+			pmap_t		hpmap;
+			uint64_t	hva;
+
+			/*
+			 * 🔴 A SNAPSHOT UNDER THE LOCK, NOT A WALK UNDER IT
+			 * (#558).
+			 *
+			 * This loop cannot hold the page lock across its body:
+			 * pmap_forget() calls pv_remove() on this same page and
+			 * would deadlock against itself -- the shape of #486,
+			 * where a guard on a constant produced a self-deadlock.
+			 *
+			 * What it can do is stop reading a TORN PAIR. Without
+			 * the lock, `pv->pmap' and `pv->va' can come from two
+			 * different entries, because pv_remove() removing the
+			 * head copies the successor's pmap, va and next up in
+			 * three separate stores. The pair would name a real
+			 * address in the wrong address space, and unmapping it
+			 * would not fault -- it would unmap somebody else's
+			 * page, silently.
+			 */
+			pv_lock_page(pa);
+			pv = pv_head(pa);
+			if (pv == PV_ENTRY_NULL || pv->pmap == PMAP_NULL) {
+				pv_unlock_page(pa);
+				break;
+			}
+			hpmap = pv->pmap;
+			hva = pv->va;
+			pv_unlock_page(pa);
+
 			/*
 			 * 🔴 #546: THE SAME INVARIANT i386 HAS ASSERTED
 			 * ALL ALONG, AND THIS TARGET DID NOT.
@@ -1019,21 +1049,55 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			 * witness that says so, and without it the next route
 			 * would be silent again.
 			 */
-			if (pmap_is_wired(pv->pmap, pv->va))
+			if (pmap_is_wired(hpmap, hva))
 				panic("pmap_page_protect: removing a wired "
 				      "page, va 0x%lx pa 0x%lx",
-				      (unsigned long) pv->va,
+				      (unsigned long) hva,
 				      (unsigned long) pa);
-			pmap_forget(pv->pmap, pv->va);
+
+			/*
+			 * ⚠️ WHAT IS STILL OPEN HERE, SAID RATHER THAN LEFT
+			 * (#558). Between the snapshot and this call the entry
+			 * can be removed by another processor and `hpmap' can
+			 * be a pmap that pmap_destroy() has already handed back
+			 * to its zone. The lock above makes the PAIR coherent;
+			 * it does not keep the pmap alive across the gap, and
+			 * nothing here does. Closing it wants either a
+			 * reference taken on the pmap for the length of the
+			 * call, or pmap_forget() split so its pv_remove() is
+			 * done by a caller already holding this lock. Neither
+			 * is done here, and pretending otherwise in a comment
+			 * would be worse than the hole.
+			 */
+			pmap_forget(hpmap, hva);
 		}
 		return;
 	}
 
 	flags = pmap_flags_for_prot(prot);
 
+	/*
+	 * 🔴 HELD ACROSS THE WHOLE WALK (#558), and this is the loop the
+	 * reperto faulted in.
+	 *
+	 * Without it, pmap_destroy() on another processor rewrites this list
+	 * underneath -- it reaches pv_remove() through its own page tables and
+	 * holds no object lock, so the object lock this path came in with
+	 * excludes nothing.  What comes back from `pv->pmap' is then a pmap
+	 * that has been handed back to its zone, and `->root_pa' is whatever
+	 * now lives at that offset: a general protection fault when the value
+	 * leaves the canonical range, silent corruption when it does not.
+	 *
+	 * ⚠️ pmap_protect_page() is allocation-free -- it walks and does a
+	 * read-modify-write, while the path that CAN block, pmap_split_page(),
+	 * is a different function.  Verified before holding a spin lock across
+	 * it, because that is what makes this safe rather than lucky.
+	 */
+	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next)
 		pmap_protect_page(pv->pmap, pv->va, flags);
+	pv_unlock_page(pa);
 }
 
 /*
@@ -1045,6 +1109,12 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 {
 	pv_entry_t pv;
 
+	/*
+	 * The page lock spans the walk for the same reason as the protect loop
+	 * above: `pv->pmap->root_pa' dereferences a pmap this path does not own
+	 * and does not otherwise keep alive (#558).
+	 */
+	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
 		boolean_t   held = pmap_read_enter();
@@ -1052,9 +1122,12 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 		int	    hit = e != PT_ENTRY_NULL && (*e & bits) != 0;
 
 		pmap_read_leave(held);
-		if (hit)
+		if (hit) {
+			pv_unlock_page(pa);
 			return 1;
+		}
 	}
+	pv_unlock_page(pa);
 
 	return 0;
 }
@@ -1063,6 +1136,8 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 {
 	pv_entry_t pv;
 
+	/* Same reason as the two walks above (#558). */
+	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
 		boolean_t   held = pmap_read_enter();
@@ -1100,6 +1175,7 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 */
 		tlb_flush_page(pv->pmap, pv->va);
 	}
+	pv_unlock_page(pa);
 }
 
 int pmap_is_referenced(uint64_t pa)
