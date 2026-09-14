@@ -982,6 +982,13 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	return va + offset;
 }
 
+/*
+ * #558: how many mappings of one page the flush batch can name.  Beyond it the
+ * fallback is a broadcast flush, so this trades a rare pessimistic flush
+ * against stack space on every pmap_page_protect().
+ */
+#define	PV_FLUSH_BATCH	32
+
 /* ------------------------------------------------------------------ */
 /*  Operations that start from a physical page                          */
 /* ------------------------------------------------------------------ */
@@ -1094,55 +1101,64 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 	 * it, because that is what makes this safe rather than lucky.
 	 */
 	/*
-	 * ❌ STILL UNPROTECTED, AND THE TWO ATTEMPTS ARE WHY (#558).
+	 * 🔴 THE ENTRIES CHANGE UNDER THE LOCK; THE SHOOTDOWN HAPPENS AFTER IT
+	 * (#558).  Two earlier shapes are ruled out by measurement, not taste:
 	 *
-	 * This is the loop the reperto faulted in, and it dereferences
-	 * pv->pmap with nothing held.  It should hold the page lock.  It cannot,
-	 * yet, and both ways of getting there have been tried and measured:
+	 *  1. A simple_lock round the whole walk panicked on the first boot --
+	 *     "ipi: a cross-call with interrupts off would deadlock" -- because
+	 *     it masks interrupts (#528) and the shootdown waits for every
+	 *     processor to answer.
+	 *  2. A lock that does not mask needs every acquirer to have interrupts
+	 *     on, and they do not: wiring a kernel stack reaches pv_enter
+	 *     already masked, so a waiter could not answer either.  Probed, not
+	 *     assumed -- see pv.c.
 	 *
-	 *  1. As a simple_lock it panicked on the first boot -- "ipi: a
-	 *     cross-call with interrupts off would deadlock" -- because
-	 *     simple_lock masks interrupts (#528) and pmap_protect_page() ends
-	 *     in a TLB shootdown that waits for every processor to answer.
+	 * What is left is to separate the two, which is Linux's mmu_gather
+	 * shape and already this kernel's habit elsewhere (#313).  The
+	 * dereference of `pv->pmap' -- the use-after-free this issue is named
+	 * for -- stays INSIDE the section.  Only the flush leaves it.
 	 *
-	 *  2. As a lock that does NOT mask, the precondition it needs turned
-	 *     out to be false: wiring a kernel stack reaches pv_enter with
-	 *     interrupts already masked, so a waiter can be unable to answer
-	 *     the shootdown of whoever holds the lock.  See pv.c.
-	 *
-	 * 🔑 So what is left is the third shape, which is Linux's: move the
-	 * shootdown OUT of the locked region -- batch the (pmap, va) pairs
-	 * under the lock and flush them after releasing it.  The list is
-	 * unbounded, so that needs chunking, and this kernel already defers
-	 * shootdowns elsewhere (#313), so the machinery has a precedent here.
-	 *
-	 * Leaving it unprotected with this note is not a fix; it is the honest
-	 * state, and the note exists so the next attempt starts from what has
-	 * already been ruled out rather than repeating it.
+	 * ⚠️ AND THE BATCH OVERFLOWS SAFELY.  A page with more mappings than
+	 * the batch holds cannot be flushed pair by pair afterwards, because
+	 * naming the rest would mean walking the list again without the lock.
+	 * So the fallback is the pessimistic one that needs no names: a
+	 * broadcast flush of everything, on every processor.  It is correct
+	 * whatever the list did, and a page mapped more than PV_FLUSH_BATCH
+	 * ways is rare enough that its cost is not the interesting number.
 	 */
-	/*
-	 * 🔴 HELD ACROSS THE WHOLE WALK (#558), and this is the loop the reperto
-	 * faulted in.
-	 *
-	 * Without it, pmap_destroy() on another processor rewrites this list
-	 * underneath: it reaches pv_remove() through its own page tables and
-	 * holds no object lock, so the object lock this path arrived with
-	 * excludes nothing.  `pv->pmap' then names a pmap already handed back to
-	 * its zone and `->root_pa' is whatever now lives at that offset.
-	 *
-	 * ⚠️ IT TOOK TWO TRIES.  As a simple_lock this panicked on the first
-	 * boot -- "ipi: a cross-call with interrupts off would deadlock" --
-	 * because pmap_protect_page() ends in a TLB shootdown and simple_lock()
-	 * masks interrupts.  pv_lock_page() does not mask, which is what makes
-	 * holding it here legal; the reasoning is in pv.c beside the lock.
-	 *
-	 * 🔑 And the dereference happens INSIDE the section, which is the whole
-	 * difference between this and taking a snapshot: a snapshot fixes a torn
-	 * pair and leaves the use-after-free exactly where it was.
-	 */
-	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
-	     pv = pv->next)
-		pmap_protect_page(pv->pmap, pv->va, flags);
+	{
+		struct { pmap_t pmap; uint64_t va; uint64_t size; }
+			batch[PV_FLUSH_BATCH];
+		unsigned  n = 0;
+		boolean_t overflow = FALSE;
+		unsigned  i;
+
+		pv_lock_page(pa);
+		for (pv = pv_head(pa);
+		     pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
+		     pv = pv->next) {
+			uint64_t size = pmap_protect_page_noflush(pv->pmap,
+								  pv->va, flags);
+
+			if (size == 0)
+				continue;
+			if (n < PV_FLUSH_BATCH) {
+				batch[n].pmap = pv->pmap;
+				batch[n].va = pv->va;
+				batch[n].size = size;
+				n++;
+			} else
+				overflow = TRUE;
+		}
+		pv_unlock_page(pa);
+
+		if (overflow)
+			tlb_flush_all(PMAP_NULL);
+		else
+			for (i = 0; i < n; i++)
+				tlb_flush_range(batch[i].pmap, batch[i].va,
+						batch[i].size);
+	}
 }
 
 /*
@@ -1180,10 +1196,17 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 {
 	pv_entry_t pv;
+	struct { pmap_t pmap; uint64_t va; } fbatch[PV_FLUSH_BATCH];
+	unsigned   nflush = 0;
+	boolean_t  foverflow = FALSE;
 
-	/* Unprotected for the same reason as the protect loop above (#558):
-	 * this ends in tlb_flush_page(), a cross-call, and a waiter that
-	 * arrived masked could not answer it. */
+	/*
+	 * Same shape as the protect loop above (#558): the entries change under
+	 * the page lock, the shootdowns happen after it is dropped.  The
+	 * dereference of `pv->pmap' is what the lock is for; the flush is what
+	 * cannot be under it.
+	 */
+	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
 		boolean_t   held = pmap_read_enter();
@@ -1219,8 +1242,25 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 * holding the cached translation that will fail to record the
 		 * next touch, and that is exactly the one this did not run on.
 		 */
-		tlb_flush_page(pv->pmap, pv->va);
+		/*
+		 * Batched, not flushed here: see the protect loop.  An
+		 * overflow falls back to a broadcast of everything, which
+		 * needs no names for what it did not record.
+		 */
+		if (nflush < PV_FLUSH_BATCH) {
+			fbatch[nflush].pmap = pv->pmap;
+			fbatch[nflush].va = pv->va;
+			nflush++;
+		} else
+			foverflow = TRUE;
 	}
+	pv_unlock_page(pa);
+
+	if (foverflow)
+		tlb_flush_all(PMAP_NULL);
+	else
+		for (unsigned i = 0; i < nflush; i++)
+			tlb_flush_page(fbatch[i].pmap, fbatch[i].va);
 }
 
 int pmap_is_referenced(uint64_t pa)
