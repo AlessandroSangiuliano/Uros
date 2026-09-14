@@ -1093,11 +1093,34 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 	 * is a different function.  Verified before holding a spin lock across
 	 * it, because that is what makes this safe rather than lucky.
 	 */
-	pv_lock_page(pa);
+	/*
+	 * ❌ THE PAGE LOCK CANNOT GO ROUND THIS WALK, AND THAT IS MEASURED
+	 * RATHER THAN ARGUED (#558, 14/09).
+	 *
+	 * It was put here and the kernel refused to boot:
+	 *
+	 *     panic(cpu 2): ipi: a cross-call with interrupts off would deadlock
+	 *
+	 * simple_lock() MASKS INTERRUPTS on this target -- that is #528, "the
+	 * mask is the processor's count, not a flag in the lock" -- and this
+	 * walk ends in a TLB shootdown, which cross-calls every processor and
+	 * waits for them. With interrupts off the acknowledgement cannot
+	 * arrive. map.c:322 already states the rule for the QSBR section next
+	 * to it: "After the section, not inside it. tlb_flush_range() waits for
+	 * every ...". A spin lock is the same constraint, one step stronger.
+	 *
+	 * ⚠️ So this walk is STILL UNPROTECTED, which is the defect this issue
+	 * is about, and leaving it unprotected with a comment is not a fix --
+	 * it is the honest state until the shape is right. What it wants is the
+	 * work split so the shootdown happens outside the section: a snapshot
+	 * of the list taken under the lock and acted on after it, the way the
+	 * VM_PROT_NONE loop above now takes its pair. The list is unbounded, so
+	 * that needs a cursor or chunking, and inventing one under a deadline
+	 * is how the wrong loop got named in this issue's body yesterday.
+	 */
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next)
 		pmap_protect_page(pv->pmap, pv->va, flags);
-	pv_unlock_page(pa);
 }
 
 /*
@@ -1136,8 +1159,12 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 {
 	pv_entry_t pv;
 
-	/* Same reason as the two walks above (#558). */
-	pv_lock_page(pa);
+	/*
+	 * ❌ No page lock here either, and for the same reason as the protect
+	 * loop above: this ends in tlb_flush_page(), a cross-call, and
+	 * simple_lock() masks interrupts (#528). Still unprotected, still the
+	 * defect, said rather than covered.
+	 */
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
 		boolean_t   held = pmap_read_enter();
@@ -1175,7 +1202,6 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 */
 		tlb_flush_page(pv->pmap, pv->va);
 	}
-	pv_unlock_page(pa);
 }
 
 int pmap_is_referenced(uint64_t pa)
