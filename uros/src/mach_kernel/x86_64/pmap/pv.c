@@ -7,7 +7,12 @@
 
 #include <stdint.h>
 
+#include <kern/assert.h>
 #include <kern/lock.h>
+#include <machine/cpu_data.h>
+#include <cpu/percpu.h>
+#include <cpu/regs.h>
+#include <sync/atomic.h>
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
@@ -67,8 +72,7 @@ decl_simple_lock_data(static, pv_free_lock)
 #define PV_LOCKS	1024		/* power of two: the index is a mask */
 
 struct pv_lock {
-	decl_simple_lock_data(, l)
-	char	pad[1];			/* never an empty struct */
+	volatile uint8_t	l;
 } __attribute__((aligned(64)));
 
 static struct pv_lock pv_locks[PV_LOCKS];
@@ -76,6 +80,75 @@ static struct pv_lock pv_locks[PV_LOCKS];
 static struct pv_lock *pv_lock_for(uint64_t pa)
 {
 	return &pv_locks[pa_index(pa) & (PV_LOCKS - 1)];
+}
+
+/*
+ * 🔥 A SPIN LOCK THAT DOES NOT MASK INTERRUPTS, WHICH IS THE WHOLE POINT.
+ *
+ * simple_lock() masks them (#528, "the mask is the processor's count, not a
+ * flag in the lock"), and a walk of one of these lists ends in a TLB
+ * SHOOTDOWN: a cross-call to every processor that waits for their
+ * acknowledgement.  With interrupts off the acknowledgement cannot arrive, and
+ * the kernel says so rather than hanging --
+ *
+ *     panic(cpu 2): ipi: a cross-call with interrupts off would deadlock
+ *
+ * -- which is what happened when this was a simple_lock, on the first boot.
+ *
+ * 🔑 THE MASKING IS NOT WHAT MAKES A SPIN LOCK SAFE; it is what makes a lock
+ * that INTERRUPT HANDLERS take safe.  hw_lock_lock() says why: a waiter "may
+ * be in interrupt context, where the gate has already cleared IF", so a
+ * preempted holder could never be scheduled again.  These lists are reached
+ * only from fault and VM paths -- pmap.c is their only caller outside boot,
+ * and every one of those arrives holding blocking locks, which is already
+ * illegal in a handler.  A lock no handler takes does not need the mask.
+ *
+ * That is the same choice FreeBSD makes for the pmap (a blocking lock class
+ * rather than MTX_SPIN) and the BSDs make with IPL (the lock below the
+ * shootdown IPI's level), for exactly this reason.
+ *
+ * 🔴 PREEMPTION STILL GOES OFF.  A preempted holder makes every other
+ * processor spin for a quantum, and disable_preemption() is real on this
+ * target -- x86_64/cpu_data.h defines it as an inline over the per-CPU
+ * counter, overriding the empty macro <kern/cpu_data.h> supplies when MACH_RT
+ * is off (#461).  Verified, not assumed: an empty guard would be worse here
+ * than no guard.
+ */
+static void pv_lock_take(struct pv_lock *p)
+{
+	/*
+	 * 🔴 THE PRECONDITION IS ASSERTED, NOT REMEMBERED.  If a path ever
+	 * takes one of these with interrupts already off, the shootdown under
+	 * it deadlocks -- and it would do so rarely, on four processors, which
+	 * is the kind of defect this issue exists about.
+	 *
+	 * Only once the system is up: the early mappings run with interrupts
+	 * off by construction, and pmap_initialized is the boundary the rest of
+	 * this file already uses to tell the two eras apart.
+	 */
+	assert(!pmap_initialized || (read_rflags() & RFLAGS_IF) != 0);
+
+	disable_preemption();
+
+	for (;;) {
+		if (atomic_cmpxchg8(&p->l, 0, 1) == 0)
+			return;
+
+		/*
+		 * Spin on a plain read rather than on the exchange, so waiters
+		 * share the cache line instead of tearing it away from the
+		 * holder who needs it to release -- hw_lock_lock()'s reasoning,
+		 * and it applies to any spin lock.
+		 */
+		while (p->l != 0)
+			cpu_pause();
+	}
+}
+
+static void pv_lock_drop(struct pv_lock *p)
+{
+	(void) atomic_swap8(&p->l, 0);
+	enable_preemption();
 }
 
 /*
@@ -88,13 +161,13 @@ static struct pv_lock *pv_lock_for(uint64_t pa)
 void pv_lock_page(uint64_t pa)
 {
 	if (pv_managed(pa))
-		simple_lock(&pv_lock_for(pa)->l);
+		pv_lock_take(pv_lock_for(pa));
 }
 
 void pv_unlock_page(uint64_t pa)
 {
 	if (pv_managed(pa))
-		simple_unlock(&pv_lock_for(pa)->l);
+		pv_lock_drop(pv_lock_for(pa));
 }
 
 void pv_bootstrap(uint64_t top_of_ram)
@@ -124,7 +197,7 @@ void pv_bootstrap(uint64_t top_of_ram)
 
 	simple_lock_init(&pv_free_lock, ETAP_VM_PMAP_FREE);
 	for (unsigned i = 0; i < PV_LOCKS; i++)
-		simple_lock_init(&pv_locks[i].l, ETAP_VM_PMAP);
+		pv_locks[i].l = 0;
 }
 
 int pv_managed(uint64_t pa)
