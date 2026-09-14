@@ -840,6 +840,11 @@ assert_wait(
 	event_t		event,
 	boolean_t	interruptible)
 {
+	/*
+	 * #558: the caller, recorded here rather than one frame deeper,
+	 * because __assert_wait() would only ever see this wrapper.
+	 */
+	current_thread()->wait_from = __builtin_return_address(0);
 	__assert_wait(event, interruptible, FALSE);
 }
 
@@ -848,6 +853,7 @@ assert_wait_first(
 	event_t		event,
 	boolean_t	interruptible)
 {
+	current_thread()->wait_from = __builtin_return_address(0);
 	__assert_wait(event, interruptible, TRUE);
 }
 

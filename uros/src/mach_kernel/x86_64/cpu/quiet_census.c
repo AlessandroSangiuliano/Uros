@@ -27,6 +27,7 @@
  * the one thing it must not be mistaken for.
  */
 
+#include <ddb/ksym.h>
 #include <mach/kern_return.h>
 #include <kern/thread.h>
 #include <kern/task.h>
@@ -87,6 +88,13 @@
  * "the thing being looked for did not happen".
  */
 #define	QUIET_CPU	0
+
+/* #558: no string.h here, and one comparison does not justify pulling it in. */
+static int census_streq(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return *a == *b;
+}
 
 static unsigned long	quiet_passes;
 static unsigned long	quiet_resets;
@@ -190,6 +198,46 @@ quiet_census_pass(int mycpu)
 		printf("quiet_census:   th=%p state=%#x", th, th->state);
 		census_state(th->state);
 		printf(" wait_event=%p", (void *) th->wait_event);
+
+		/*
+		 * #558: the name, not the address.
+		 *
+		 * An address says a thread is asleep on something; the FUNCTION
+		 * that put it there says what that something IS -- lock_write
+		 * means a lock_t, _mutex_lock a mutex_t, vm_fault_page a page.
+		 * The kernel already carries its own symbols for backtraces, so
+		 * this costs a lookup and removes a host-side step that has to
+		 * be done against the exact image, which #558 spent an hour
+		 * discovering is not always still around.
+		 */
+		if (th->wait_from != 0) {
+			uint64_t    off = 0;
+			const char *nm = ksym_lookup_call(
+					    (uint64_t) th->wait_from, &off);
+
+			if (nm != 0)
+				printf(" from=%s+0x%lx", nm, (unsigned long) off);
+			else
+				printf(" from=%p", th->wait_from);
+
+			/*
+			 * 🔑 And when the sleeper is in vm_fault_page the event
+			 * IS a vm_page -- the type is known, so dereferencing it
+			 * is sound rather than a guess at an arbitrary address.
+			 * A page still `busy' with sleepers on it is the whole
+			 * shape of the wedge this was written for.
+			 */
+			if (nm != 0 && th->wait_event != 0 &&
+			    census_streq(nm, "vm_fault_page")) {
+				vm_page_t m = (vm_page_t) th->wait_event;
+
+				printf(" [page busy=%d wanted=%d wire=%d"
+				       " obj=%p off=0x%lx]",
+				       (int) m->busy, (int) m->wanted,
+				       (int) m->wire_count, m->object,
+				       (unsigned long) m->offset);
+			}
+		}
 		if (th->top_act != THR_ACT_NULL)
 			printf(" task=%p susp=%d",
 			       th->top_act->task, th->top_act->suspend_count);
