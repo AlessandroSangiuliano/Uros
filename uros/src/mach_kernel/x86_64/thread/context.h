@@ -38,6 +38,27 @@
 #ifndef _X86_64_THREAD_CONTEXT_H_
 #define _X86_64_THREAD_CONTEXT_H_
 
+/*
+ * The switch frame: what context_switch_raw() leaves at ctx.rsp, as indices
+ * of 64-bit words, in the order it pops them.  pushfq first and %r15 last,
+ * so counting up from the saved stack pointer the registers come out
+ * reversed.
+ *
+ * ⚠️ Here and not private to context.c, because a switched-out thread is
+ * READ as well as resumed: the debugger and the idle census walk a blocked
+ * thread's stack from its saved %rbp (#425, #558).  The debugger used to
+ * spell those two words as saved[5] and saved[7], a second copy of this
+ * layout that context.S could have moved without either noticing.
+ */
+#define CTX_R15		0
+#define CTX_R14		1
+#define CTX_R13		2	/* a fresh thread's entry point   */
+#define CTX_R12		3	/* its argument                   */
+#define CTX_RBX		4
+#define CTX_RBP		5	/* where a backtrace starts       */
+#define CTX_RFLAGS	6	/* the interrupt flag it resumes with */
+#define CTX_RETURN	7	/* where the switch's `ret` goes  */
+
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>

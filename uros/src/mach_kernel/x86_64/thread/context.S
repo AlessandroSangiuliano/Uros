@@ -19,8 +19,9 @@
  * call is the load: after it, the values popped belong to a different
  * thread and the return address is wherever that thread stopped.
  *
- * The registers are pushed in the order the initial frame in context_init()
- * lays them out, and the two must be read together — a thread that has
+ * The registers are pushed in the order CTX_R15..CTX_RETURN in
+ * <thread/context.h> name them and the initial frame in context_init() lays
+ * them out, and the three must be read together — a thread that has
  * never run is resumed by exactly this code, so its stack has to be a
  * forgery good enough to fool it.
  */

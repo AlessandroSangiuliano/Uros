@@ -15,11 +15,11 @@
 extern void context_thread_start(void);
 
 /*
- * The frame a never-run thread is resumed from, in the order
- * context_switch_raw() pops it.  Read the two together: this is a forgery
- * of what that code expects to find, and it has to be good enough that a
- * thread which has never run and one that was interrupted are
- * indistinguishable to it.
+ * The frame a never-run thread is resumed from.  The first eight words are
+ * the switch frame, CTX_R15..CTX_RETURN in <thread/context.h>; this is a
+ * forgery of what context_switch_raw() expects to find there, and it has to
+ * be good enough that a thread which has never run and one that was
+ * interrupted are indistinguishable to it.
  *
  * Ten words rather than the eight the switch consumes.  The ninth is a
  * deliberate zero where context_thread_start()'s return address would be,
@@ -28,14 +28,6 @@ extern void context_thread_start(void);
  * alignment: the ABI wants the stack sixteen-byte aligned at a call, and
  * the thread's first call is the one context_thread_start() makes.
  */
-#define CTX_R15		0
-#define CTX_R14		1
-#define CTX_R13		2	/* the entry point   */
-#define CTX_R12		3	/* its argument      */
-#define CTX_RBX		4
-#define CTX_RBP		5
-#define CTX_RFLAGS	6	/* the interrupt flag it begins with */
-#define CTX_RETURN	7	/* where the switch's `ret` goes */
 #define CTX_CALLER	8	/* the zero that ends a backtrace */
 #define CTX_WORDS	10
 
