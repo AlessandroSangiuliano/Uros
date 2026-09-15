@@ -1110,10 +1110,45 @@ trap_take_ast(struct trap_frame *frame)
 	 * a machine says it has one.  The test below is unchanged and finally
 	 * tests something.
 	 */
+	/*
+	 * 🔴 AND THE SPL, WHICH THIS NEVER ASKED (#558).
+	 *
+	 * The level marks the spans that hold something.  The interrupt level
+	 * marks Mach's older critical sections, and the machine-independent
+	 * code leans on those just as hard: data shared with an interrupt
+	 * handler and guarded by spl alone, and the scheduler's own sections
+	 * under splsched().  A thread taken off the processor inside one leaves
+	 * it open for as long as it is off -- the next thread runs at its own
+	 * level, and the handler the section was excluding runs over the half-
+	 * done work.
+	 *
+	 * It was reachable, and by the one class that gets through: at
+	 * splsched() only class fifteen is delivered, the cross-calls, and
+	 * their return comes through here.  #558's first defect was a thread
+	 * preempted inside assert_wait() at splsched() by exactly such a return,
+	 * after TH_WAIT and before the level went up; the mach_msg() fast path
+	 * says in so many words that it depends on the opposite -- "spl is
+	 * STILL held from the receiver claim above ... do not lower it until
+	 * after switch_context()" -- with TH_WAIT already set under imq_lock
+	 * and the receiver claimed but on no run queue.
+	 *
+	 * 🔑 It is the rule of the family this kernel comes from, translated.
+	 * There splsched() disables interrupts, and a return from an interrupt
+	 * preempts kernel code only when the interrupted context had them
+	 * enabled.  Here the level is software and IF stays on, so the flag
+	 * says nothing and the level has to be asked instead.
+	 *
+	 * ⚠️ Deferred, not dropped, as for the level: need_ast keeps the bit,
+	 * and the next return that finds SPL0 -- the next tick, at the latest --
+	 * takes it.  One tick of latency on a preemption that arrived inside a
+	 * critical section, against a section broken open.
+	 */
 	if ((frame->cs & 3) == USER_RPL)
 		take = AST_ALL;
 	else {
 		if (get_preemption_level() != 0)
+			return;
+		if (splget() != SPL0)
 			return;
 		take = AST_KERNEL_SAFE;
 	}
