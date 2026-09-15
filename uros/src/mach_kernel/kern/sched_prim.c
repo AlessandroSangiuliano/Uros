@@ -740,6 +740,48 @@ __assert_wait(
 			thread->wait_event);
 	}
 
+#if	MACHINE_PREEMPTION_LEVEL
+	/*
+	 * 🔴 THE WAIT IS DECLARED, AND THE CALLER STILL HOLDS ITS LOCK (#490).
+	 *
+	 * What follows this function, at every one of its callers, is
+	 * `unlock(l); thread_block()' -- Mach's own idiom, and the macro
+	 * thread_sleep_mutex() in <kern/sched_prim.h> spells it out.  Between
+	 * TH_WAIT and that block the thread owns the lock, so on a machine that
+	 * preempts in kernel mode an AST there finds a thread that has already
+	 * declared a wait: thread_block_reason() puts it to sleep holding the
+	 * lock, and every later taker waits for ever.  Caught twice in the
+	 * debugger, both times two threads on one activation -- one asleep on
+	 * its lock, the other suspended inside special_handler().
+	 *
+	 * 🔑 Raised HERE and not at the 67 callers.  Every existing
+	 * assert_wait/unlock/block sequence becomes safe without being touched,
+	 * and one written tomorrow in the old style is safe when it is written.
+	 * Auditing the callers is the weaker fix for the reason it always is:
+	 * it works until the sixty-eighth.
+	 *
+	 * 🔥 BEFORE THE STATE IS WRITTEN, NOT AFTER THE LOCKS ARE DROPPED
+	 * (#558).  This was raised at the end, after the TH_WAIT store below
+	 * and after the two usimple_unlock()s -- with the note "before splx(),
+	 * not after", because splx() replays deferred interrupts.  splx() was
+	 * not the only way in.  The last usimple_unlock() is `sti' followed by
+	 * the decrement of this same level, and sti's one-instruction shadow
+	 * delivers an interrupt that arrived while the wait queue was locked
+	 * exactly after that decrement: TH_WAIT set, level zero, two
+	 * instructions before the raise.  The idle census caught it with the
+	 * stack in hand -- ast_taken() under trap_common, and above it the
+	 * frame of assert_wait returning to vm_fault_page, whose object lock
+	 * the sleeper still held and its own waker was queued on.
+	 *
+	 * ⚠️ So the rule is about the STATE, not about any one way an interrupt
+	 * can arrive: no instant may exist at which this thread is TH_WAIT and
+	 * the level is zero.  Raising before the store makes that true however
+	 * the spin locks and splx() below behave.
+	 */
+	disable_preemption();
+	thread->wait_preempt = TRUE;
+#endif	/* MACHINE_PREEMPTION_LEVEL */
+
 	s = splsched();
 	if (event != NO_EVENT) {
 		index = wait_hash(event);
@@ -770,34 +812,6 @@ __assert_wait(
 		thread->sleep_stamp = sched_tick;
 		thread_unlock(thread);
 	}
-
-#if	MACHINE_PREEMPTION_LEVEL
-	/*
-	 * 🔴 THE WAIT IS DECLARED, AND THE CALLER STILL HOLDS ITS LOCK (#490).
-	 *
-	 * What follows this function, at every one of its callers, is
-	 * `unlock(l); thread_block()' -- Mach's own idiom, and the macro
-	 * thread_sleep_mutex() in <kern/sched_prim.h> spells it out.  Between
-	 * here and that block the thread is TH_WAIT and owns the lock, so on a
-	 * machine that preempts in kernel mode an AST here finds a thread that
-	 * has already declared a wait: thread_block_reason() puts it to sleep
-	 * holding the lock, and every later taker waits for ever.  Caught twice
-	 * in the debugger, both times two threads on one activation -- one
-	 * asleep on its lock, the other suspended inside special_handler().
-	 *
-	 * 🔑 Raised HERE and not at the 67 callers.  Every existing
-	 * assert_wait/unlock/block sequence becomes safe without being touched,
-	 * and one written tomorrow in the old style is safe when it is written.
-	 * Auditing the callers is the weaker fix for the reason it always is:
-	 * it works until the sixty-eighth.
-	 *
-	 * ⚠️ Before splx(), not after.  splx() lowers the level and replays what
-	 * was deferred at it, which is precisely the moment an arriving tick
-	 * could take the AST this exists to refuse.
-	 */
-	disable_preemption();
-	thread->wait_preempt = TRUE;
-#endif	/* MACHINE_PREEMPTION_LEVEL */
 
 	splx(s);
 }
