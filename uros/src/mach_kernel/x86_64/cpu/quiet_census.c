@@ -37,6 +37,9 @@
 #include <kern/lock.h>
 #include <kern/mutex_track.h>
 #include <vm/vm_page.h>
+#include <vm/vm_object.h>
+#include <pmap/pmap.h>
+#include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
 
@@ -138,6 +141,86 @@ census_state(int state)
 		printf(" (none)");
 }
 
+/*
+ * #558: the stack of a thread that is asleep, walked from its switch frame.
+ *
+ * The two halves below name a cycle, and the cycle does not fit the code: a
+ * thread asleep at vm_fault.c:685 is reported as the holder of the very
+ * object lock that line releases before it blocks -- in three boots of
+ * three.  Either the holder record is stale, which the lock word printed
+ * beside it answers, or something further up this thread's stack still holds
+ * the lock, and only the stack can say what.
+ *
+ * Only threads that kept their stack: a continuation means the stack was
+ * given up when the thread blocked (see the debugger's `thread' command,
+ * which reads the same frame through the same CTX_ indices).
+ *
+ * Every read stays inside the thread's own kernel stack and is asked of the
+ * kernel pmap first, as x86_64_backtrace() does.  ⚠️ The machine has been
+ * idle for QUIET_PASSES when this runs, but another processor can still wake
+ * a sleeper during the walk.  That gives a wrong chain, never a fault -- so a
+ * chain is evidence when it agrees with the from= on the line above it.
+ */
+#define	CENSUS_STACK_MAX	16
+
+static void
+census_stack(thread_t th)
+{
+	pmap_t		 kernel = pmap_kernel();
+	uint64_t	 low = (uint64_t) th->kernel_stack;
+	uint64_t	 high = low + KERNEL_STACK_SIZE;
+	uint64_t	 sp, rbp;
+	const uint64_t	*saved;
+	unsigned	 depth;
+
+	if ((th->state & TH_RUN) != 0 || th->continuation != 0 ||
+	    th->top_act == THR_ACT_NULL || low == 0)
+		return;
+
+	sp = th->top_act->mact.xxx_pcb.ctx.rsp;
+	if (sp < low || sp + (CTX_RETURN + 1) * 8 > high ||
+	    pmap_extract(kernel, sp) == 0 ||
+	    pmap_extract(kernel, sp + CTX_RETURN * 8) == 0) {
+		printf("quiet_census:     stack th=%p: its saved sp %p is not "
+		       "inside its own stack, not walked\n", th, (void *) sp);
+		return;
+	}
+	saved = (const uint64_t *) sp;
+	rbp = saved[CTX_RBP];
+
+	printf("quiet_census:     stack th=%p:", th);
+	for (depth = 0; depth < CENSUS_STACK_MAX; depth++) {
+		const uint64_t *frame;
+		uint64_t	next, ret;
+		uint64_t	off = 0;
+		const char     *nm;
+
+		if ((rbp & 7) != 0 || rbp < low || rbp + 16 > high)
+			break;
+		if (pmap_extract(kernel, rbp) == 0 ||
+		    pmap_extract(kernel, rbp + 8) == 0)
+			break;
+
+		frame = (const uint64_t *) rbp;
+		next = frame[0];
+		ret = frame[1];
+		if (ret == 0)
+			break;
+
+		/* the lookup on its own line: see report_symbol() in trap.c */
+		nm = ksym_lookup_call(ret, &off);
+		if (nm != 0)
+			printf(" %s+0x%lx", nm, (unsigned long) off);
+		else
+			printf(" %p", (void *) ret);
+
+		if (next <= rbp)
+			break;
+		rbp = next;
+	}
+	printf("\n");
+}
+
 void
 quiet_census_pass(int mycpu)
 {
@@ -195,6 +278,8 @@ quiet_census_pass(int mycpu)
 	 * (block_device_server, virtual_terminal_server) arrives truncated.
 	 */
 	queue_iterate(&default_pset.threads, th, thread_t, pset_threads) {
+		int	walk = 0;
+
 		printf("quiet_census:   th=%p state=%#x", th, th->state);
 		census_state(th->state);
 		printf(" wait_event=%p", (void *) th->wait_event);
@@ -248,10 +333,21 @@ quiet_census_pass(int mycpu)
 				printf(" [mutex held-by=%p", (void *) mx->own_thr);
 				pn = ksym_lookup_call((uint64_t) mx->own_pc, &poff);
 				if (pn != 0)
-					printf(" taken-at=%s+0x%lx]", pn,
+					printf(" taken-at=%s+0x%lx", pn,
 					       (unsigned long) poff);
 				else
-					printf(" taken-at=%p]", (void *) mx->own_pc);
+					printf(" taken-at=%p", (void *) mx->own_pc);
+				/*
+				 * ⚠️ And whether it is held at all.  held-by
+				 * is a note written beside the lock word, not
+				 * the word: a free word under five sleepers
+				 * is a lost wakeup (#476), a held one is a
+				 * holder, and the note alone cannot tell them
+				 * apart.
+				 */
+				printf(" locked=%d waiters=%d]", (int) mx->locked,
+				       (int) mx->waiters);
+				walk = 1;
 			}
 
 			if (nm != 0 && th->wait_event != 0 &&
@@ -274,6 +370,20 @@ quiet_census_pass(int mycpu)
 				       (int) m->busy, (int) m->wanted,
 				       (int) m->wire_count, m->object,
 				       (unsigned long) m->offset);
+				/*
+				 * The lock of the page's own object, read from
+				 * this side too: the sleeper released it at
+				 * vm_fault.c:686, so a word held here with
+				 * this thread's name on it is the contradiction
+				 * the stack below has to explain.
+				 */
+				if (m->object != VM_OBJECT_NULL)
+					printf(" [obj-lock locked=%d waiters=%d"
+					       " owner=%p]",
+					       (int) m->object->Lock.locked,
+					       (int) m->object->Lock.waiters,
+					       (void *) m->object->Lock.own_thr);
+				walk = 1;
 			}
 		}
 		if (th->top_act != THR_ACT_NULL)
@@ -282,6 +392,8 @@ quiet_census_pass(int mycpu)
 		if (th->name[0] != '\0')
 			printf(" name=\"%s\"", th->name);
 		printf("\n");
+		if (walk)
+			census_stack(th);
 		n++;
 	}
 
