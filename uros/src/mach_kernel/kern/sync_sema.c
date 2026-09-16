@@ -929,8 +929,17 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	 * woken).  If none is parked, the helper either woke a racing waiter
 	 * the normal way or found nobody — either way we block normally.
 	 */
+	/*
+	 * The word this one is waiting on, for the same reason futex_wait()
+	 * records it (#558): a report showing eight threads on eight different
+	 * hashes says only that they are eight different words, and the whole
+	 * question is which object each belongs to.  This path did not record
+	 * it, so a stalled machine full of WAIT_WAKE waiters was unreadable.
+	 */
+	self->futex_uaddr = (vm_offset_t) wait_uaddr;
 	if (!thread_handoff_to_parked_waiter(wake_key))
 		thread_block((void (*)(void)) 0);
+	self->futex_uaddr = 0;
 
 	if (self->wait_result == THREAD_TIMED_OUT)
 		return KERN_OPERATION_TIMED_OUT;

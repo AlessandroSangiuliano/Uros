@@ -346,6 +346,17 @@ quiet_census_pass(int mycpu)
 			 * holder, and the holder's own line, a few above or
 			 * below, says what IT is waiting for.
 			 */
+			/*
+			 * 🔑 THE WORD, NOT THE HASH (#558).  kern/sync_sema.c
+			 * records it for exactly this: the wait event is a hash
+			 * chosen so distinct words rarely collide, which is
+			 * right for matching a wake to a waiter and useless for
+			 * reading a report -- eight threads on eight hashes say
+			 * only that they are eight different words.
+			 */
+			if (th->futex_uaddr != 0)
+				printf(" futex=%p", (void *) th->futex_uaddr);
+
 			if (nm != 0 && th->wait_event != 0 &&
 			    census_streq(nm, "mutex_lock_wait")) {
 				mutex_t	   *mx = (mutex_t *) th->wait_event;
