@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <kern/lock.h>
+#include <kern/misc_protos.h>	/* printf: the ablated arm names itself */
 #include <machine/cpu_data.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
@@ -68,6 +69,28 @@ decl_simple_lock_data(static, pv_free_lock)
  * other way: pv_enter() takes its entry from pv_alloc() BEFORE locking the
  * head, which is also what keeps a blocking allocation out of the section.
  */
+/*
+ * The switch that takes the per-page lock away again (#558).
+ *
+ * Off means the lock is IN, which is the shipping shape.  On restores exactly
+ * what this file had before the lock existed -- a walk that follows pv->next
+ * and dereferences pv->pmap with nothing held -- and it exists because the
+ * general protection fault this was written for has never been reproduced: the
+ * lock was designed from a reading of one reperto, and a fix is verified by
+ * REMOVING it and watching the fault come back.
+ *
+ * ⚠️ The free list keeps its own lock in both arms.  That one answers a
+ * different failure (two processors handing out the same entry), and leaving
+ * it in place keeps the ablated arm about the WALK, which is what faulted.
+ *
+ * Set it from the build: cmake -DUROS_ABLATE_558_PVLOCK=ON.  pv_bootstrap()
+ * says which arm is running, because a log that does not name the arm is a
+ * campaign whose result cannot be attributed.
+ */
+#ifndef	ABLATE_558_PVLOCK
+#define	ABLATE_558_PVLOCK	0
+#endif
+
 #define PV_LOCKS	1024		/* power of two: the index is a mask */
 
 struct pv_lock {
@@ -115,6 +138,10 @@ static struct pv_lock *pv_lock_for(uint64_t pa)
  */
 static void pv_lock_take(struct pv_lock *p)
 {
+#if	ABLATE_558_PVLOCK
+	(void) p;
+	return;
+#else
 	/*
 	 * ❌ THE PRECONDITION I ASSERTED HERE IS FALSE, AND THAT IS MEASURED
 	 * (#558, 14/09).
@@ -161,12 +188,17 @@ static void pv_lock_take(struct pv_lock *p)
 		while (p->l != 0)
 			cpu_pause();
 	}
+#endif	/* ABLATE_558_PVLOCK */
 }
 
 static void pv_lock_drop(struct pv_lock *p)
 {
+#if	ABLATE_558_PVLOCK
+	(void) p;
+#else
 	(void) atomic_swap8(&p->l, 0);
 	enable_preemption();
+#endif	/* ABLATE_558_PVLOCK */
 }
 
 /*
@@ -216,6 +248,16 @@ void pv_bootstrap(uint64_t top_of_ram)
 	simple_lock_init(&pv_free_lock, ETAP_VM_PMAP_FREE);
 	for (unsigned i = 0; i < PV_LOCKS; i++)
 		pv_locks[i].l = 0;
+
+	/*
+	 * Which arm this boot is, said out loud.  A campaign whose log does not
+	 * name the arm cannot attribute what it finds -- and this one costs a
+	 * line in the ablated arm and nothing at all in the shipping one.
+	 */
+#if	ABLATE_558_PVLOCK
+	printf("pv: the per-page lock is ABLATED — the walks run with nothing "
+	       "held, as before #558\n");
+#endif	/* ABLATE_558_PVLOCK */
 }
 
 int pv_managed(uint64_t pa)

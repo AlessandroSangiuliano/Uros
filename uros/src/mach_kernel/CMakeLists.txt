@@ -108,6 +108,15 @@ option(UROS_IPC_PORT_TRACK "Build the port allocation tracking (a global mutex p
 # Same both-arms rule as above.
 option(UROS_USLOCK_CENSUS "Build the #486 simple-lock census (hooks on every simple lock)" OFF)
 
+# #558: take the per-page pv lock away again, leaving the walks in pmap.c
+# running with nothing held, as they were before the lock existed.  The
+# general protection fault that lock was written for has never been
+# reproduced, and a fix is verified by REMOVING it: this is the arm that has
+# to show the fault coming back.  The free list keeps its lock in both arms,
+# so the ablated arm is about the WALK.  pv_bootstrap() names the arm in the
+# boot log.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_558_PVLOCK "Build the #558 ablation: pv walks with no per-page lock" OFF)
+
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
 
@@ -281,6 +290,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_FAULT_PROFILE)
       list(APPEND KERNEL_DEFINES_BARE FAULT_PROFILE=1)
       message(STATUS "#482 copy-on-write fault phase profile: ON (x86_64)")
+  endif()
+  if(UROS_ABLATE_558_PVLOCK)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
+      message(STATUS "#558 ablation: the pv per-page lock is OFF (x86_64)")
   endif()
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
