@@ -158,11 +158,22 @@ set(UROS_FORKRACE_THREADS 8 CACHE STRING
     "forkrace: worker threads (#558); more than the CPU count on purpose")
 set(UROS_FORKRACE_ITERS 12500 CACHE STRING
     "forkrace: create/destroy pairs per worker (#558)")
+# 🔥 Children that RUN, and how many are alive at once.  Zero is the suite as
+# first written: a child that never runs never faults, so its pmap holds no
+# mappings and pmap_destroy() takes nothing out of any pv list -- eight boots
+# with the index unlocked came back clean under that shape, and could not have
+# done otherwise.  A count gives every page of the region one pv entry per
+# living child, and retiring one walks all of them while the others fault them
+# back in.  ⚠️ A live child costs a stack, a thread and its faults, so lower
+# the iteration count when raising this.
+set(UROS_FORKRACE_LIVE 0 CACHE STRING
+    "forkrace: live running children per worker (#558); 0 = children never run")
 
 target_compile_definitions(ipc_bench_server PRIVATE
   MACH_IPC_COMPAT=0
   FORKRACE_THREADS=${UROS_FORKRACE_THREADS}
   FORKRACE_ITERS=${UROS_FORKRACE_ITERS}
+  FORKRACE_LIVE=${UROS_FORKRACE_LIVE}
 )
 
 target_include_directories(ipc_bench_server PRIVATE
