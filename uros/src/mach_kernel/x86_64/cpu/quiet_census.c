@@ -408,9 +408,27 @@ quiet_census_pass(int mycpu)
 				walk = 1;
 			}
 		}
-		if (th->top_act != THR_ACT_NULL)
+		/*
+		 * 🔑 AND WHERE RING 3 WAS (#558).
+		 *
+		 * Nine threads asleep in urmach_futex are nine identical kernel
+		 * stacks, and the question is which call in the thread library
+		 * each of them made -- the same question #425 answered for the
+		 * debugger, with the same frame: the one the trap pushed on the
+		 * way in, still in this thread's own kernel stack.
+		 *
+		 * ⚠️ Printed as a bare address on purpose.  The symbols this
+		 * kernel carries are its OWN, and naming a user address from
+		 * them would produce a confident wrong answer; resolve it
+		 * outside, against the program's binary.
+		 */
+		if (th->top_act != THR_ACT_NULL) {
 			printf(" task=%p susp=%d",
 			       th->top_act->task, th->top_act->suspend_count);
+			if (th->top_act->mact.xxx_pcb.user != 0)
+				printf(" user-rip=%p",
+				       (void *) th->top_act->mact.xxx_pcb.user->rip);
+		}
 		if (th->name[0] != '\0')
 			printf(" name=\"%s\"", th->name);
 		printf("\n");
