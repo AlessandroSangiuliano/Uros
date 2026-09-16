@@ -884,6 +884,31 @@ bench_inter_sweep(int iters)
 #ifndef	FORKRACE_ITERS
 #define FORKRACE_ITERS		12500
 #endif
+/*
+ * 🔥 CHILDREN THAT RUN, AND HOW MANY ARE ALIVE AT ONCE (#558).
+ *
+ * Zero is the suite above: fork, terminate, release, and the child never runs.
+ * That shape forks hard and provokes ALMOST NO pv traffic, which took eight
+ * boots with the index's locks ablated to notice: a task that never runs never
+ * faults, so its pmap holds no mappings, so `pmap_destroy()' has nothing to
+ * take out of any pv list.  The only list long enough to walk was this task's
+ * own, and the concurrent REMOVER the defect needs was not there at all.
+ *
+ * With a count, each worker keeps that many children ALIVE, each with a thread
+ * reading the shared region.  Every page of the region then carries one pv
+ * entry per living child -- lists of tens rather than of one -- and retiring a
+ * child drives pmap_destroy() through all of them while the other children are
+ * still faulting them in and every worker's next task_create() is walking the
+ * same lists to write-protect them.  Reader, writer and allocator on the same
+ * lists at the same time, which is the reperto's shape.
+ *
+ * ⚠️ A child costs far more than a bare fork (a stack, a thread, its faults),
+ * so the iteration count belongs lower when this is on -- both are cache
+ * variables for that reason.
+ */
+#ifndef	FORKRACE_LIVE
+#define FORKRACE_LIVE		0
+#endif
 #define FORKRACE_REGION		(1024 * 1024)
 #define FORKRACE_PAGE		4096
 
@@ -894,12 +919,153 @@ typedef struct {
     pthread_t	th;
 } forkrace_worker_t;
 
+#if	FORKRACE_LIVE > 0
+/*
+ * The region the children read.  Written once before any of them exists, and
+ * inherited by every child at the same address -- task_create(inherit_memory)
+ * copies the address space, so a global holds for the child what it held for
+ * the parent, which is the same property child_echo_entry() relies on.
+ */
+static vm_offset_t	forkrace_region_addr;
+
+/*
+ * READ, never write.  A write would copy the page and END the sharing this is
+ * building: the point is many pmaps pointing at the SAME physical page, which
+ * is what makes a pv list long.
+ */
+/*
+ * 🔴 A CHILD ENDS BY ITSELF, and the first version did not.
+ *
+ * It read the region for ever and waited to be retired.  The run then reached
+ * "Benchmark complete" and the machine stayed busy until the watchdog closed
+ * it -- census passes pinned, resets climbing -- so the boot never reached an
+ * end the harness recognises.  Whatever the reason a child outlived its
+ * retirement, a workload that cannot finish cannot be measured, and a backstop
+ * that costs a counter is cheaper than a campaign of runs nobody can classify.
+ *
+ * The parent still retires them; this is what happens when that is not enough.
+ */
+#define FORKRACE_CHILD_PASSES	200
+
+static void
+forkrace_child_entry(void)
+{
+    volatile const char	*p = (volatile const char *) forkrace_region_addr;
+    unsigned long	 off;
+    int			 pass;
+
+    for (pass = 0; pass < FORKRACE_CHILD_PASSES; pass++) {
+	for (off = 0; off < FORKRACE_REGION; off += FORKRACE_PAGE)
+	    (void) p[off];
+
+	/*
+	 * Sleep between passes rather than spin: thirty-odd children spinning
+	 * on four processors would starve the forkers, and it is the forkers
+	 * that drive the walks this is hunting.
+	 */
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+    }
+
+    (void) task_terminate(mach_task_self());
+    for (;;)
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
+}
+
+/* One live child: a task, a stack, a thread reading the region.  Answers
+ * whether it was made, and leaves only the TASK right held. */
+static int
+forkrace_spawn_live(mach_port_t *out)
+{
+    mach_port_t		task, thread;
+    vm_offset_t		stack = 0;
+    kern_return_t	kr;
+
+    kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0, TRUE, &task);
+    if (kr != KERN_SUCCESS)
+	return 0;
+
+    kr = vm_allocate(task, &stack, CHILD_STACK_SIZE, TRUE);
+    if (kr != KERN_SUCCESS)
+	goto undo_task;
+
+    kr = thread_create(task, &thread);
+    if (kr != KERN_SUCCESS)
+	goto undo_task;
+
+    kr = bench_child_thread_start(thread, forkrace_child_entry,
+				  stack + CHILD_STACK_SIZE);
+    if (kr != KERN_SUCCESS)
+	goto undo_thread;
+
+    kr = thread_resume(thread);
+    if (kr != KERN_SUCCESS)
+	goto undo_thread;
+
+    /* 🔴 The thread right is not needed once it is running, and a right this
+     * loop keeps thousands of times is a leak that stops the next task. */
+    (void) mach_port_deallocate(mach_task_self(), thread);
+    *out = task;
+    return 1;
+
+undo_thread:
+    (void) mach_port_deallocate(mach_task_self(), thread);
+undo_task:
+    (void) task_terminate(task);
+    (void) mach_port_deallocate(mach_task_self(), task);
+    return 0;
+}
+
+static void
+forkrace_retire(mach_port_t task)
+{
+    (void) task_terminate(task);
+    (void) mach_port_deallocate(mach_task_self(), task);
+}
+#endif	/* FORKRACE_LIVE > 0 */
+
 static void *
 forkrace_worker_func(void *arg)
 {
     forkrace_worker_t	*w = (forkrace_worker_t *)arg;
     int			 i;
 
+#if	FORKRACE_LIVE > 0
+    mach_port_t		live[FORKRACE_LIVE];
+    int			held = 0, oldest = 0;
+
+    for (i = 0; i < w->iters; i++) {
+	mach_port_t	child;
+
+	if (!forkrace_spawn_live(&child)) {
+	    w->refused++;
+	    continue;
+	}
+	w->made++;
+
+	if (held < FORKRACE_LIVE) {
+	    live[held++] = child;
+	    continue;
+	}
+
+	/*
+	 * The ring is full: the oldest child dies while this one is starting
+	 * to fault the same pages in, and every other worker is walking those
+	 * lists too.
+	 */
+	{
+	    mach_port_t	retire = live[oldest];
+
+	    live[oldest] = child;
+	    oldest = (oldest + 1) % FORKRACE_LIVE;
+	    forkrace_retire(retire);
+	}
+    }
+
+    while (held-- > 0)
+	forkrace_retire(live[held]);
+
+    return (void *) 0;
+#else
     for (i = 0; i < w->iters; i++) {
 	mach_port_t	child;
 	kern_return_t	kr;
@@ -923,6 +1089,7 @@ forkrace_worker_func(void *arg)
 	(void) mach_port_deallocate(mach_task_self(), child);
     }
     return (void *) 0;
+#endif	/* FORKRACE_LIVE > 0 */
 }
 
 static void
@@ -943,6 +1110,11 @@ bench_forkrace(void)
     }
     for (off = 0; off < FORKRACE_REGION; off += FORKRACE_PAGE)
 	((volatile char *) region)[off] = 1;
+
+#if	FORKRACE_LIVE > 0
+    /* Before any child exists, so every one of them inherits it. */
+    forkrace_region_addr = region;
+#endif
 
     for (i = 0; i < FORKRACE_THREADS; i++) {
 	w[i].iters = FORKRACE_ITERS;
@@ -1015,10 +1187,15 @@ bench_forkrace(void)
      * task_create refused every time would otherwise read exactly like a
      * suite that forked a thousand times and found no defect.
      */
-    printf("  %d threads x %d iters over %d KB: %u forked and destroyed, "
-	   "%u refused, %lu us\n",
+    /*
+     * ⚠️ The live count is part of the line because it changes what the run
+     * MEANS: with zero the children never run and the pv lists stay one entry
+     * long, which is a different experiment wearing the same name.
+     */
+    printf("  %d threads x %d iters over %d KB, %d live children each: "
+	   "%u forked and destroyed, %u refused, %lu us\n",
 	   FORKRACE_THREADS, FORKRACE_ITERS, FORKRACE_REGION / 1024,
-	   made, refused, elapsed_ns(&t0, &t1) / 1000);
+	   FORKRACE_LIVE, made, refused, elapsed_ns(&t0, &t1) / 1000);
 
     (void) vm_deallocate(mach_task_self(), region, FORKRACE_REGION);
 }

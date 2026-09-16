@@ -92,6 +92,25 @@ static volatile int	wp_rounds;
 static volatile int	wp_slot = -1;
 static volatile int	wp_lost_the_window;
 
+/*
+ * Windows this driver has already answered.
+ *
+ * ❌ WITHOUT IT THE DRIVER WOKE THE PROBE MORE THAN ONCE PER WINDOW, and one
+ * of those wakeups could land in the NEXT window (#558).  The loop below woke
+ * while `wp_window_done > wp_rounds', and the probe closes that gap in two
+ * steps -- it increments wp_window_done, then blocks, is woken, and only then
+ * increments wp_rounds.  A driver that read the condition, was delayed, and
+ * called thread_wakeup() after the probe had already armed the next round
+ * cleared the wait the window exists to hold: wp_lost_the_window, the test's
+ * own guard, caught it and refused to claim a pass.
+ *
+ * Seen on about half of the runs under KVM, and it is OLDER than the fixes
+ * this file is being re-run for: the same rate at the commit before all three
+ * of them.  One wakeup per closed window removes it -- the probe cannot
+ * proceed without that wakeup, so a single one can never be stale.
+ */
+static volatile int	wp_answered;
+
 static void
 wp_probe_body(void)
 {
@@ -236,7 +255,7 @@ kernel_wait_preempt_test(void)
 		 * ⚠️ Only once the probe says its window is over: waking it
 		 * inside the window clears the wait the window exists to hold.
 		 */
-		if (wp_window_done > wp_rounds) {
+		if (wp_window_done > wp_answered) {
 			/*
 			 * 🔑 THE POSITIVE HALF.  "The probe did not wedge" and
 			 * "the lock came back" are two statements, and only the
@@ -248,6 +267,9 @@ kernel_wait_preempt_test(void)
 				took_it++;
 				mutex_unlock(&wp_lock);
 			}
+			/* Claimed before the wakeup, so the next turn round this
+			 * loop cannot answer the same window twice. */
+			wp_answered = wp_window_done;
 			thread_wakeup((event_t) &wp_event);
 		}
 

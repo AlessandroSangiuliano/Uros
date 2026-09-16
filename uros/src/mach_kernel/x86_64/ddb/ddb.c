@@ -1122,7 +1122,7 @@ static void describe_thread(uint64_t addr)
 		}
 
 		saved = (const uint64_t *)(uintptr_t) sp;
-		rbp = saved[5];
+		rbp = saved[CTX_RBP];
 
 		if (low == 0 || rbp < low || rbp >= high) {
 			cons_puts("    the word the switch frame should hold "
@@ -1135,8 +1135,8 @@ static void describe_thread(uint64_t addr)
 		}
 
 		cons_puts("    switched out at ");
-		cons_puthex64(saved[7]);
-		put_symbol(saved[7]);
+		cons_puthex64(saved[CTX_RETURN]);
+		put_symbol(saved[CTX_RETURN]);
 		cons_puts("\r\n");
 		trace(rbp);
 

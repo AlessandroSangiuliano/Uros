@@ -809,7 +809,7 @@ vm_fault_page(
 						m->absent = FALSE;
 						m->unusual = FALSE;
 						vm_object_absent_release(object);
-						m->busy = TRUE;
+						VM_PAGE_SET_BUSY(m);
 
 						vm_page_lock_queues();
 						VM_PAGE_QUEUES_REMOVE(m);
@@ -1051,7 +1051,7 @@ vm_fault_page(
 		     "vm_f_page: found page obj 0x%X, offset 0x%X, page 0x%X\n",
 				(integer_t)object, offset, (integer_t)m, 0, 0);
 			assert(!m->busy);
-			m->busy = TRUE;
+			VM_PAGE_SET_BUSY(m);
 			assert(!m->absent);
 			break;
 		}
@@ -2223,7 +2223,7 @@ vm_fault(
 					object = cur_object;
 				}
 FastMapInFault:
-				m->busy = TRUE;
+				VM_PAGE_SET_BUSY(m);
 
 				vm_object_paging_begin(object);
 				vm_object_unlock(object);
@@ -2390,7 +2390,7 @@ FastPmapEnter:
 			 *	the page copy.
 			 */
 
-			cur_m->busy = TRUE;
+			VM_PAGE_SET_BUSY(cur_m);
 
 			vm_object_paging_begin(cur_object);
 			vm_object_unlock(cur_object);
@@ -3140,7 +3140,7 @@ vm_fault_wire_fast(
 	 *	Mark page busy for other threads.
 	 */
 	assert(!m->busy);
-	m->busy = TRUE;
+	VM_PAGE_SET_BUSY(m);
 	assert(!m->absent);
 
 #if	!NORMA_VM

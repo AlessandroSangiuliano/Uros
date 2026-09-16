@@ -33,10 +33,15 @@
 #include <kern/task.h>
 #include <kern/processor.h>
 #include <kern/cpu_number.h>
+#include <kern/cpu_data.h>	/* #558: who is on each processor */
+#include <mach/machine.h>	/* machine_slot[] */
 #include <kern/misc_protos.h>
 #include <kern/lock.h>
 #include <kern/mutex_track.h>
 #include <vm/vm_page.h>
+#include <vm/vm_object.h>
+#include <pmap/pmap.h>
+#include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
 
@@ -138,6 +143,86 @@ census_state(int state)
 		printf(" (none)");
 }
 
+/*
+ * #558: the stack of a thread that is asleep, walked from its switch frame.
+ *
+ * The two halves below name a cycle, and the cycle does not fit the code: a
+ * thread asleep at vm_fault.c:685 is reported as the holder of the very
+ * object lock that line releases before it blocks -- in three boots of
+ * three.  Either the holder record is stale, which the lock word printed
+ * beside it answers, or something further up this thread's stack still holds
+ * the lock, and only the stack can say what.
+ *
+ * Only threads that kept their stack: a continuation means the stack was
+ * given up when the thread blocked (see the debugger's `thread' command,
+ * which reads the same frame through the same CTX_ indices).
+ *
+ * Every read stays inside the thread's own kernel stack and is asked of the
+ * kernel pmap first, as x86_64_backtrace() does.  ⚠️ The machine has been
+ * idle for QUIET_PASSES when this runs, but another processor can still wake
+ * a sleeper during the walk.  That gives a wrong chain, never a fault -- so a
+ * chain is evidence when it agrees with the from= on the line above it.
+ */
+#define	CENSUS_STACK_MAX	16
+
+static void
+census_stack(thread_t th)
+{
+	pmap_t		 kernel = pmap_kernel();
+	uint64_t	 low = (uint64_t) th->kernel_stack;
+	uint64_t	 high = low + KERNEL_STACK_SIZE;
+	uint64_t	 sp, rbp;
+	const uint64_t	*saved;
+	unsigned	 depth;
+
+	if ((th->state & TH_RUN) != 0 || th->continuation != 0 ||
+	    th->top_act == THR_ACT_NULL || low == 0)
+		return;
+
+	sp = th->top_act->mact.xxx_pcb.ctx.rsp;
+	if (sp < low || sp + (CTX_RETURN + 1) * 8 > high ||
+	    pmap_extract(kernel, sp) == 0 ||
+	    pmap_extract(kernel, sp + CTX_RETURN * 8) == 0) {
+		printf("quiet_census:     stack th=%p: its saved sp %p is not "
+		       "inside its own stack, not walked\n", th, (void *) sp);
+		return;
+	}
+	saved = (const uint64_t *) sp;
+	rbp = saved[CTX_RBP];
+
+	printf("quiet_census:     stack th=%p:", th);
+	for (depth = 0; depth < CENSUS_STACK_MAX; depth++) {
+		const uint64_t *frame;
+		uint64_t	next, ret;
+		uint64_t	off = 0;
+		const char     *nm;
+
+		if ((rbp & 7) != 0 || rbp < low || rbp + 16 > high)
+			break;
+		if (pmap_extract(kernel, rbp) == 0 ||
+		    pmap_extract(kernel, rbp + 8) == 0)
+			break;
+
+		frame = (const uint64_t *) rbp;
+		next = frame[0];
+		ret = frame[1];
+		if (ret == 0)
+			break;
+
+		/* the lookup on its own line: see report_symbol() in trap.c */
+		nm = ksym_lookup_call(ret, &off);
+		if (nm != 0)
+			printf(" %s+0x%lx", nm, (unsigned long) off);
+		else
+			printf(" %p", (void *) ret);
+
+		if (next <= rbp)
+			break;
+		rbp = next;
+	}
+	printf("\n");
+}
+
 void
 quiet_census_pass(int mycpu)
 {
@@ -195,9 +280,31 @@ quiet_census_pass(int mycpu)
 	 * (block_device_server, virtual_terminal_server) arrives truncated.
 	 */
 	queue_iterate(&default_pset.threads, th, thread_t, pset_threads) {
+		int	walk = 0;
+
 		printf("quiet_census:   th=%p state=%#x", th, th->state);
 		census_state(th->state);
 		printf(" wait_event=%p", (void *) th->wait_event);
+
+		/*
+		 * 🔑 A RUNNABLE THREAD ON AN IDLE MACHINE IS TWO DEFECTS, AND
+		 * THE STATE ALONE NAMES NEITHER (#558).
+		 *
+		 * TH_RUN with every processor in its idle thread means either
+		 * the thread is on a run queue nobody selects from -- an
+		 * accounting defect, the queue's count or its bitmap -- or it
+		 * is on NO queue at all, which is a thread lost between a
+		 * wakeup that claimed it and a dispatch that never happened.
+		 * Those want different fixes, and `runq' separates them in one
+		 * field.
+		 *
+		 * Only for the runnable non-idle threads: the idle threads are
+		 * TH_RUN by definition and are never on a queue, so printing it
+		 * for them would add a column of noise to every census.
+		 */
+		if ((th->state & TH_RUN) && !(th->state & TH_IDLE))
+			printf(" runq=%p pri=%d/%d", (void *) th->runq,
+			       (int) th->sched_pri, (int) th->priority);
 
 		/*
 		 * #558: the name, not the address.
@@ -227,27 +334,156 @@ quiet_census_pass(int mycpu)
 			 * A page still `busy' with sleepers on it is the whole
 			 * shape of the wedge this was written for.
 			 */
+			/*
+			 * 🔑 #558: when the sleeper is in mutex_lock_wait the
+			 * event IS a mutex_t, and this kernel already records
+			 * who took it -- MUTEX_OWNER_TRACK (#383) keeps own_thr
+			 * and own_pc, built for exactly this: "a deadlocked
+			 * mutex whose own_thr points at a thread the census
+			 * also lists tells you the cycle".
+			 *
+			 * So the two halves join here: this line names the
+			 * holder, and the holder's own line, a few above or
+			 * below, says what IT is waiting for.
+			 */
+			/*
+			 * 🔑 THE WORD, NOT THE HASH (#558).  kern/sync_sema.c
+			 * records it for exactly this: the wait event is a hash
+			 * chosen so distinct words rarely collide, which is
+			 * right for matching a wake to a waiter and useless for
+			 * reading a report -- eight threads on eight hashes say
+			 * only that they are eight different words.
+			 */
+			if (th->futex_uaddr != 0)
+				printf(" futex=%p", (void *) th->futex_uaddr);
+
+			if (nm != 0 && th->wait_event != 0 &&
+			    census_streq(nm, "mutex_lock_wait")) {
+				mutex_t	   *mx = (mutex_t *) th->wait_event;
+				uint64_t    poff = 0;
+				const char *pn;
+
+				printf(" [mutex held-by=%p", (void *) mx->own_thr);
+				pn = ksym_lookup_call((uint64_t) mx->own_pc, &poff);
+				if (pn != 0)
+					printf(" taken-at=%s+0x%lx", pn,
+					       (unsigned long) poff);
+				else
+					printf(" taken-at=%p", (void *) mx->own_pc);
+				/*
+				 * ⚠️ And whether it is held at all.  held-by
+				 * is a note written beside the lock word, not
+				 * the word: a free word under five sleepers
+				 * is a lost wakeup (#476), a held one is a
+				 * holder, and the note alone cannot tell them
+				 * apart.
+				 */
+				printf(" locked=%d waiters=%d]", (int) mx->locked,
+				       (int) mx->waiters);
+				walk = 1;
+			}
+
 			if (nm != 0 && th->wait_event != 0 &&
 			    census_streq(nm, "vm_fault_page")) {
 				vm_page_t m = (vm_page_t) th->wait_event;
 
+#if	MACH_ASSERT
+				/*
+				 * #558: and WHICH LINE marked it busy.  The
+				 * state alone names a symptom; the site names
+				 * the defect.  vm_fault.c, which is where
+				 * every one of these sites lives.
+				 */
+				if (m->busy && m->busy_line != 0)
+					printf(" busied-at=vm_fault.c:%u",
+					       m->busy_line);
+#endif	/* MACH_ASSERT */
 				printf(" [page busy=%d wanted=%d wire=%d"
 				       " obj=%p off=0x%lx]",
 				       (int) m->busy, (int) m->wanted,
 				       (int) m->wire_count, m->object,
 				       (unsigned long) m->offset);
+				/*
+				 * The lock of the page's own object, read from
+				 * this side too: the sleeper released it at
+				 * vm_fault.c:686, so a word held here with
+				 * this thread's name on it is the contradiction
+				 * the stack below has to explain.
+				 */
+				if (m->object != VM_OBJECT_NULL)
+					printf(" [obj-lock locked=%d waiters=%d"
+					       " owner=%p]",
+					       (int) m->object->Lock.locked,
+					       (int) m->object->Lock.waiters,
+					       (void *) m->object->Lock.own_thr);
+				walk = 1;
 			}
 		}
-		if (th->top_act != THR_ACT_NULL)
+		/*
+		 * 🔑 AND WHERE RING 3 WAS (#558).
+		 *
+		 * Nine threads asleep in urmach_futex are nine identical kernel
+		 * stacks, and the question is which call in the thread library
+		 * each of them made -- the same question #425 answered for the
+		 * debugger, with the same frame: the one the trap pushed on the
+		 * way in, still in this thread's own kernel stack.
+		 *
+		 * ⚠️ Printed as a bare address on purpose.  The symbols this
+		 * kernel carries are its OWN, and naming a user address from
+		 * them would produce a confident wrong answer; resolve it
+		 * outside, against the program's binary.
+		 */
+		if (th->top_act != THR_ACT_NULL) {
 			printf(" task=%p susp=%d",
 			       th->top_act->task, th->top_act->suspend_count);
+			if (th->top_act->mact.xxx_pcb.user != 0)
+				printf(" user-rip=%p",
+				       (void *) th->top_act->mact.xxx_pcb.user->rip);
+		}
 		if (th->name[0] != '\0')
 			printf(" name=\"%s\"", th->name);
 		printf("\n");
+		if (walk)
+			census_stack(th);
 		n++;
 	}
 
 	printf("quiet_census: %d threads listed\n", n);
+
+	/*
+	 * 🔥 AND WHO IS ON EACH PROCESSOR, WITHOUT WHICH "IDLE" IS HALF A WORD
+	 * (#558).
+	 *
+	 * The count above is cpu 0's alone -- quiet_census_busy() resets it when
+	 * THIS processor finds work -- so "the machine has been idle" is really
+	 * "cpu 0 has been idle".  A thread listed as TH_RUN on no run queue then
+	 * has two readings that the list cannot tell apart: lost between a
+	 * wakeup that claimed it and a dispatch that never came, or RUNNING on
+	 * another processor all along, spinning somewhere.
+	 *
+	 * The active thread per processor decides it, and it is the same field
+	 * the debugger reads to answer "which thread is this".
+	 */
+	{
+		int i;
+
+		for (i = 0; i < NCPUS; i++) {
+			thread_t act;
+
+			if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+				continue;
+
+			act = cpu_data[i].active_thread;
+			printf("quiet_census: cpu %d active=%p", i, act);
+			if (act != THREAD_NULL) {
+				printf(" state=%#x", act->state);
+				census_state(act->state);
+				if (act->name[0] != '\0')
+					printf(" name=\"%s\"", act->name);
+			}
+			printf("\n");
+		}
+	}
 
 	/*
 	 * And who is holding the one that everything piles up behind (#476).

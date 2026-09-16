@@ -148,16 +148,39 @@ _mutex_lock(mutex_t *m)
 		}
 
 		/*
-		 * Held by someone else and marked as having waiters.  Take
-		 * the interlock and re-read under it: the holder may have
-		 * released between the swap above and here, and a waiter that
-		 * slept on that would not be woken by anyone.
+		 * Held by someone else.  Take the interlock and announce AGAIN
+		 * under it, with the same exchange: the holder may have released
+		 * between the swap above and here, and a waiter that slept on
+		 * that would not be woken by anyone.
+		 *
+		 * 🔥 ANNOUNCE, NOT RE-READ (#558).  This was `if (m->locked ==
+		 * MUTEX_FREE)', and a read is not an announcement.  The 2 written
+		 * above can already have been CONSUMED -- a release swapped it to
+		 * 0, took the interlock before us, found waiters still 0 and woke
+		 * nobody -- and a third thread then takes the word on the fast
+		 * path, so the read finds 1 and commits to sleeping.  Between that
+		 * read and the waiters++ in mutex_lock_wait() the third thread can
+		 * release: its exchange returns 1, its read of waiters returns 0,
+		 * and it leaves without the interlock.  Word 0, waiters 1, a
+		 * sleeper nobody will wake -- read off the idle census in three
+		 * boots of four, each time on the thread holding the page every
+		 * other sleeper was waiting for.
+		 *
+		 * The exchange closes it without asking anyone to read in the
+		 * right order.  If it returns FREE the lock is ours.  Otherwise
+		 * the word is 2 from this instant, so any release after it takes
+		 * the slow path, which needs the interlock -- held here until
+		 * thread_sleep_interlock() has queued us -- and then finds
+		 * waiters counting us.  Both sides meet on one byte through a
+		 * locked instruction, a full barrier, so no store buffer can hide
+		 * either side from the other.
 		 */
 		hw_lock_lock(&m->interlock);
-		if (m->locked == MUTEX_FREE) {
+		if (atomic_swap8(&m->locked, MUTEX_WAIT) == MUTEX_FREE) {
 			MUTEX_TRACE(m, MTR_ILK_FREE, 0);
 			hw_lock_unlock(&m->interlock);
-			continue;
+			MUTEX_NOTE_ACQUIRED(m);
+			return;
 		}
 		MUTEX_NOTE_BLOCKING(m);
 		MUTEX_TRACE(m, MTR_SLEEP, m->waiters + 1);
@@ -209,13 +232,22 @@ mutex_unlock(mutex_t *m)
 	 *
 	 * So the release asks BOTH the word and the count.  Reading waiters
 	 * costs nothing measurable -- it is in the line this processor has just
-	 * made exclusive with the exchange -- and reading it without the
-	 * interlock is sound in the only case where its answer decides
-	 * anything: if the word came back 1 while a thread is queued, that
-	 * thread is already asleep and incremented under the interlock long
-	 * before, so there is no in-flight waiter to miss.  A waiter still on
-	 * its way has by definition written 2, and the word alone already
-	 * sends us the slow way.
+	 * made exclusive with the exchange.
+	 *
+	 * ❌ This said reading it without the interlock was sound because "a
+	 * waiter still on its way has by definition written 2, and the word
+	 * alone already sends us the slow way".  It had written 2 -- and the 2
+	 * could already have been consumed by an earlier release, the step 3
+	 * of the sequence above, leaving the waiter in flight behind a word
+	 * that says 1.  The count read here then missed it, and the census
+	 * found the result: word 0, waiters 1, nobody holding anything (#558).
+	 *
+	 * 🔑 What makes it sound now is the other side: _mutex_lock() writes 2
+	 * AGAIN under the interlock at the moment it commits to sleeping, so a
+	 * waiter in flight is always behind a word that says so.  The count
+	 * stays checked all the same: it costs nothing, and with two queued it
+	 * wakes the second at once rather than leaving it to the first one
+	 * woken to announce again.
 	 */
 	{
 		uint8_t was = atomic_swap8(&m->locked, MUTEX_FREE);
