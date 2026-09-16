@@ -33,6 +33,8 @@
 #include <kern/task.h>
 #include <kern/processor.h>
 #include <kern/cpu_number.h>
+#include <kern/cpu_data.h>	/* #558: who is on each processor */
+#include <mach/machine.h>	/* machine_slot[] */
 #include <kern/misc_protos.h>
 #include <kern/lock.h>
 #include <kern/mutex_track.h>
@@ -418,6 +420,41 @@ quiet_census_pass(int mycpu)
 	}
 
 	printf("quiet_census: %d threads listed\n", n);
+
+	/*
+	 * 🔥 AND WHO IS ON EACH PROCESSOR, WITHOUT WHICH "IDLE" IS HALF A WORD
+	 * (#558).
+	 *
+	 * The count above is cpu 0's alone -- quiet_census_busy() resets it when
+	 * THIS processor finds work -- so "the machine has been idle" is really
+	 * "cpu 0 has been idle".  A thread listed as TH_RUN on no run queue then
+	 * has two readings that the list cannot tell apart: lost between a
+	 * wakeup that claimed it and a dispatch that never came, or RUNNING on
+	 * another processor all along, spinning somewhere.
+	 *
+	 * The active thread per processor decides it, and it is the same field
+	 * the debugger reads to answer "which thread is this".
+	 */
+	{
+		int i;
+
+		for (i = 0; i < NCPUS; i++) {
+			thread_t act;
+
+			if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+				continue;
+
+			act = cpu_data[i].active_thread;
+			printf("quiet_census: cpu %d active=%p", i, act);
+			if (act != THREAD_NULL) {
+				printf(" state=%#x", act->state);
+				census_state(act->state);
+				if (act->name[0] != '\0')
+					printf(" name=\"%s\"", act->name);
+			}
+			printf("\n");
+		}
+	}
 
 	/*
 	 * And who is holding the one that everything piles up behind (#476).
