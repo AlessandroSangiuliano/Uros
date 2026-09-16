@@ -285,6 +285,26 @@ quiet_census_pass(int mycpu)
 		printf(" wait_event=%p", (void *) th->wait_event);
 
 		/*
+		 * 🔑 A RUNNABLE THREAD ON AN IDLE MACHINE IS TWO DEFECTS, AND
+		 * THE STATE ALONE NAMES NEITHER (#558).
+		 *
+		 * TH_RUN with every processor in its idle thread means either
+		 * the thread is on a run queue nobody selects from -- an
+		 * accounting defect, the queue's count or its bitmap -- or it
+		 * is on NO queue at all, which is a thread lost between a
+		 * wakeup that claimed it and a dispatch that never happened.
+		 * Those want different fixes, and `runq' separates them in one
+		 * field.
+		 *
+		 * Only for the runnable non-idle threads: the idle threads are
+		 * TH_RUN by definition and are never on a queue, so printing it
+		 * for them would add a column of noise to every census.
+		 */
+		if ((th->state & TH_RUN) && !(th->state & TH_IDLE))
+			printf(" runq=%p pri=%d/%d", (void *) th->runq,
+			       (int) th->sched_pri, (int) th->priority);
+
+		/*
 		 * #558: the name, not the address.
 		 *
 		 * An address says a thread is asleep on something; the FUNCTION
