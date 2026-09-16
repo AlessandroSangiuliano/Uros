@@ -933,13 +933,28 @@ static vm_offset_t	forkrace_region_addr;
  * building: the point is many pmaps pointing at the SAME physical page, which
  * is what makes a pv list long.
  */
+/*
+ * 🔴 A CHILD ENDS BY ITSELF, and the first version did not.
+ *
+ * It read the region for ever and waited to be retired.  The run then reached
+ * "Benchmark complete" and the machine stayed busy until the watchdog closed
+ * it -- census passes pinned, resets climbing -- so the boot never reached an
+ * end the harness recognises.  Whatever the reason a child outlived its
+ * retirement, a workload that cannot finish cannot be measured, and a backstop
+ * that costs a counter is cheaper than a campaign of runs nobody can classify.
+ *
+ * The parent still retires them; this is what happens when that is not enough.
+ */
+#define FORKRACE_CHILD_PASSES	200
+
 static void
 forkrace_child_entry(void)
 {
     volatile const char	*p = (volatile const char *) forkrace_region_addr;
     unsigned long	 off;
+    int			 pass;
 
-    for (;;) {
+    for (pass = 0; pass < FORKRACE_CHILD_PASSES; pass++) {
 	for (off = 0; off < FORKRACE_REGION; off += FORKRACE_PAGE)
 	    (void) p[off];
 
@@ -950,6 +965,10 @@ forkrace_child_entry(void)
 	 */
 	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
     }
+
+    (void) task_terminate(mach_task_self());
+    for (;;)
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
 }
 
 /* One live child: a task, a stack, a thread reading the region.  Answers
