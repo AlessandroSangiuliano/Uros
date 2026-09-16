@@ -522,6 +522,25 @@ done
 # run for staying silent, and only the last-started one here, which ends it.
 # act_test was in neither until #425 -- it could stop dead and be passed by
 # omission -- which is what a list nobody re-reads does.
+#
+# ⚠️⚠️ THE BENCH-ONLY BUNDLE HAS NO MARKER IN THIS LIST, AND IT CANNOT HAVE ONE.
+#
+# UROS_BUNDLE_BENCH_ONLY builds a bundle of name_server + ipc_bench, so
+# cow_test never runs and nothing below ever matches: every such boot is
+# reported "FAILED: never reached an end this script recognises", INCLUDING the
+# ones that did all of their work.  And ipc_bench closes by design with
+# bootstrap_completed() and `for(;;) thread_switch(DEPRESS)' -- it does not
+# exit -- so the watchdog is what ends those runs, always.
+#
+# 🔴 Adding "Benchmark complete" here would be worse than the gap: in the FULL
+# bundle ipc_bench can finish before cow_test, the marker would fire early, and
+# the entries after it would be cut off and the run reported as passed.  That
+# is exactly the failure the paragraph above records.
+#
+# 🔑 So a bench-only boot is classified FROM ITS LOG by the caller, which is
+# what ~/uros-tests/558-caccia.sh does ("Benchmark complete" => clean).  Read
+# that way, this script's FAILED verdict on such a run says nothing about the
+# kernel -- and reading it as a wedge cost an hour of #558's hunt.
 DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|cow_test: [0-9]+ of [0-9]+ arms passed|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
