@@ -1679,13 +1679,25 @@ vm_page_release(
 		printf("vm_page_release: page 0x%lx is about to be freed and "
 		       "somebody still maps it (#385/#531)\n"
 		       "  the page belongs to object %p at offset 0x%lx, "
-		       "wired %d, released by thread %p of task %p\n",
+		       "wired %d, released by thread %p of task %p%s\n",
 		       (unsigned long) mem->phys_addr,
 		       mem->object, (unsigned long) mem->offset,
 		       (int) mem->wire_count,
 		       current_thread(),
 		       current_thread()->top_act != THR_ACT_NULL ?
-			   (void *) current_thread()->top_act->task : (void *) 0);
+			   (void *) current_thread()->top_act->task : (void *) 0,
+		       /*
+			* ⚠️ Said here rather than left to the reader.  The
+			* releaser being the kernel's own teardown thread and
+			* the holder being a user pmap is the whole reading of
+			* this reperto, and without this the only way to tell
+			* was to match the task address against a census from
+			* ANOTHER boot -- an inference across two runs, which
+			* is how a plausible wrong answer gets written down.
+			*/
+		       (current_thread()->top_act != THR_ACT_NULL &&
+			current_thread()->top_act->task == kernel_task) ?
+			   " (the KERNEL's)" : "");
 		pmap_page_report_mappings(mem->phys_addr);
 		panic("vm_page_release: page 0x%lx still mapped (#385)",
 		      (unsigned long) mem->phys_addr);
