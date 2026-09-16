@@ -59,12 +59,37 @@ decl_simple_lock_data(static, pv_free_lock)
  * neither lock -- and the free-list arm is where the fault is most likely to
  * live.
  *
- * Set it from the build: cmake -DUROS_ABLATE_558_PVLOCK=ON.  pv_bootstrap()
- * says which arm is running, because a log that does not name the arm is a
- * campaign whose result cannot be attributed.
+ * 🔑 AND IT IS TWO SWITCHES, BECAUSE THERE ARE TWO MECHANISMS (16/09).
+ *
+ * With both locks off, 18 boots produced six `still mapped' panics (#531) and
+ * not one general protection fault -- so the arm that reproduces on demand
+ * cannot say WHICH of the two races it is reproducing.  The file itself
+ * separates them at the top:
+ *
+ *   the FREE LIST, unlocked, hands two processors the same entry, and "one
+ *   page's list grafts onto another's, and a walk from one page arrives at a
+ *   pv->pmap belonging to somewhere else entirely" -- a wild pointer, which
+ *   is the literal description of the fault #558 is named for;
+ *
+ *   the PER-PAGE lock, absent, lets a walk race pv_remove()'s head-copy and
+ *   MISS an entry -- a mapping nobody tears down, which is the literal
+ *   description of #531's panic.
+ *
+ * Each has a symptom the other does not obviously produce, so one switch each:
+ * UROS_ABLATE_558_PVLOCK for the page lock, UROS_ABLATE_558_PVFREELOCK for the
+ * free list.  ⚠️ The campaigns of 16/09 ran with BOTH on, which is now spelled
+ * with both options rather than with one.
+ *
+ * Set them from the build: cmake -DUROS_ABLATE_558_PVLOCK=ON
+ * -DUROS_ABLATE_558_PVFREELOCK=ON.  pv_bootstrap() says which arm is running,
+ * because a log that does not name the arm is a campaign whose result cannot
+ * be attributed -- and with two switches it has to name them separately.
  */
 #ifndef	ABLATE_558_PVLOCK
 #define	ABLATE_558_PVLOCK	0
+#endif
+#ifndef	ABLATE_558_PVFREELOCK
+#define	ABLATE_558_PVFREELOCK	0
 #endif
 
 /*
@@ -73,14 +98,14 @@ decl_simple_lock_data(static, pv_free_lock)
  */
 static void pv_free_lock_take(void)
 {
-#if	!ABLATE_558_PVLOCK
+#if	!ABLATE_558_PVFREELOCK
 	simple_lock(&pv_free_lock);
 #endif
 }
 
 static void pv_free_lock_drop(void)
 {
-#if	!ABLATE_558_PVLOCK
+#if	!ABLATE_558_PVFREELOCK
 	simple_unlock(&pv_free_lock);
 #endif
 }
@@ -280,8 +305,12 @@ void pv_bootstrap(uint64_t top_of_ram)
 	 */
 #if	ABLATE_558_PVLOCK
 	printf("pv: the per-page lock is ABLATED — the walks run with nothing "
-	       "held, as before #558\n");
+	       "held, so a walk can race pv_remove and MISS an entry\n");
 #endif	/* ABLATE_558_PVLOCK */
+#if	ABLATE_558_PVFREELOCK
+	printf("pv: the free list is ABLATED — pv_alloc and pv_free push and pop "
+	       "with no lock, so two processors can be handed the SAME entry\n");
+#endif	/* ABLATE_558_PVFREELOCK */
 }
 
 int pv_managed(uint64_t pa)

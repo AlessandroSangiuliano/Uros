@@ -116,6 +116,14 @@ option(UROS_USLOCK_CENSUS "Build the #486 simple-lock census (hooks on every sim
 # so the ablated arm is about the WALK.  pv_bootstrap() names the arm in the
 # boot log.  Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_558_PVLOCK "Build the #558 ablation: pv walks with no per-page lock" OFF)
+# The other half of the same ablation, and they are separate because the two
+# races have different symptoms: an unlocked FREE LIST hands two processors the
+# same entry, so one page's list grafts onto another's and a walk reaches a
+# pv->pmap belonging elsewhere -- a wild pointer, which is #558's fault; an
+# absent PER-PAGE lock lets a walk miss an entry, so a mapping is never torn
+# down -- which is #531's panic.  With both off, 18 boots gave six of the
+# second and none of the first, and could not say which race they were.
+option(UROS_ABLATE_558_PVFREELOCK "Build the #558 ablation: pv free list with no lock" OFF)
 
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
@@ -294,6 +302,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
       message(STATUS "#558 ablation: the pv per-page lock is OFF (x86_64)")
+  endif()
+  if(UROS_ABLATE_558_PVFREELOCK)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVFREELOCK=1)
+      message(STATUS "#558 ablation: the pv free list lock is OFF (x86_64)")
   endif()
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
