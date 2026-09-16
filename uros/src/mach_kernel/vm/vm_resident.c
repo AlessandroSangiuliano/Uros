@@ -1662,9 +1662,30 @@ vm_page_release(
 		 */
 		extern void pmap_page_report_mappings(vm_offset_t phys);
 
+		/*
+		 * 🔑 WHICH PAGE, AND WHO IS FREEING IT (#531, done-when 1 and 2).
+		 *
+		 * The issue asks for the page to be identified -- kernel or
+		 * user, and of which object -- and for the RELEASER to be named
+		 * beside the holder.  The holder comes from the pv list below.
+		 * The releaser is this thread, and the object is on the page
+		 * record that is already in hand, so both cost a print.
+		 *
+		 * ⚠️ object may be VM_OBJECT_NULL here and that is not an error:
+		 * a page removed from its object and then freed is the ordinary
+		 * shape of a teardown.  Printed as NULL rather than skipped,
+		 * because "no object" is itself an answer to "which object".
+		 */
 		printf("vm_page_release: page 0x%lx is about to be freed and "
-		       "somebody still maps it (#385/#531)\n",
-		       (unsigned long) mem->phys_addr);
+		       "somebody still maps it (#385/#531)\n"
+		       "  the page belongs to object %p at offset 0x%lx, "
+		       "wired %d, released by thread %p of task %p\n",
+		       (unsigned long) mem->phys_addr,
+		       mem->object, (unsigned long) mem->offset,
+		       (int) mem->wire_count,
+		       current_thread(),
+		       current_thread()->top_act != THR_ACT_NULL ?
+			   (void *) current_thread()->top_act->task : (void *) 0);
 		pmap_page_report_mappings(mem->phys_addr);
 		panic("vm_page_release: page 0x%lx still mapped (#385)",
 		      (unsigned long) mem->phys_addr);
