@@ -26,6 +26,24 @@ pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out)
 	pt_entry_t *table;
 	pt_entry_t *entry;
 
+	/*
+	 * 🔴 A DESTROYED SPACE MAPS NOTHING — AND WITHOUT THIS IT MAPS PHYSICAL
+	 * PAGE ZERO (#558).
+	 *
+	 * pmap_destroy() clears root_pa once the tables are given back, and
+	 * table_at(0) is the direct map's own base: a perfectly readable kernel
+	 * address holding whatever the firmware left at physical zero.  A walk
+	 * from there does not fault.  It reads those bytes as a PML4 and
+	 * follows any of them that has the valid bit set, into frames belonging
+	 * to somebody else.
+	 *
+	 * ⚠️ Not a guard that is always true: root_pa is zero exactly between
+	 * pmap_destroy() clearing it and the struct being freed, which is the
+	 * window a reader can still be inside.  Everywhere else it is a frame.
+	 */
+	if (root_pa == 0)
+		return PT_ENTRY_NULL;
+
 	/* PML4 — always a table; PS is not defined at this level. */
 	table = table_at(root_pa);
 	entry = &table[pml4_index(va)];

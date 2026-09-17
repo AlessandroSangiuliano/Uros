@@ -612,6 +612,32 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
 		     (uint32_t) -1);
 }
 
+/*
+ * 🔴 THE STRUCT GETS THE GRACE PERIOD THE TABLES HAVE ALWAYS HAD (#558).
+ *
+ * That asymmetry is what made the fault possible.  vminit.c gives a page table
+ * two waits before it is freed, one for writers and one for READERS -- "the
+ * callers of pmap_walk(), which hold a pointer into the table after the walk
+ * returns" -- and the pmap struct, which those same readers hold a pointer to,
+ * got none.  A walk of a page's pv list dereferences `pv->pmap', and a struct
+ * handed back to its zone and reissued is a `->root_pa' holding whatever now
+ * lives at that offset: a page-table walk whose frame is a kernel pointer,
+ * which is the reperto this issue was opened for.
+ *
+ * 🔑 THE ARGUMENT IS LOCAL, AND THAT IS THE POINT.  A reader holds a pmap read
+ * section across both the load of `pv->pmap' and its use; this waits for every
+ * such section to end before the struct is freed.  Nothing in it depends on
+ * who calls pmap_destroy(), or on what vm_map_destroy() did first, or on the
+ * page lock -- which is still taken, for the LIST, and is a different question
+ * from the STRUCT's lifetime.
+ *
+ * ⚠️ An earlier version of this fix rested on an order instead: the only caller
+ * empties the map first, so every pv_remove() has already run.  True today, and
+ * the reason it is not enough is that it stops being true silently -- a second
+ * caller, or a teardown that does not empty first, and the defect returns with
+ * nothing in this file to say so.  A fix that needs a paragraph about a
+ * different file to be correct is a fix waiting to be broken.
+ */
 void pmap_destroy(pmap_t pmap)
 {
 	const pt_entry_t *root;
@@ -644,6 +670,26 @@ void pmap_destroy(pmap_t pmap)
 
 	pmap_table_frame_free(pmap->root_pa);
 	pmap->root_pa = 0;
+
+	/*
+	 * ⚠️ AFTER root_pa is cleared and before the struct is handed back.
+	 *
+	 * A reader that entered before this point may be standing on a
+	 * `pv->pmap' that names this space; when this returns, every one of
+	 * them has left its section.  What it finds meanwhile is root_pa zero,
+	 * which pmap_walk() answers with PT_ENTRY_NULL rather than a fault --
+	 * the mapping is gone, which is the truth.  ⚠️ That answer is a guard
+	 * added with this, in walk.c: without it a zero root is read as physical
+	 * page zero through the direct map, which does not fault either.
+	 *
+	 * ⚠️ And it is safe at BOOTSTRAP, where pmap_init() destroys the
+	 * boundary probe: the wait skips this processor and every processor
+	 * whose machine_slot says it is not running, so with one processor up it
+	 * returns without spinning.  Asked of rcu.c rather than assumed, because
+	 * a grace period that cannot end is a boot that does not finish.
+	 */
+	urmach_synchronize_rcu();
+
 	pmap_free(pmap);
 }
 
@@ -1014,6 +1060,7 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 		unsigned   n = 0;
 		unsigned   i;
 		boolean_t  overflow = FALSE;
+		boolean_t  held;
 		pv_entry_t dead = PV_ENTRY_NULL;
 
 		/*
@@ -1032,13 +1079,15 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 		 * general protection fault this issue is named for, or silent
 		 * corruption when the value stays canonical.
 		 *
-		 * 🔑 Holding the lock across the body closes it, because the
-		 * teardown has to come through here: pmap_destroy() reaches
-		 * pmap_free_tables(), which calls pv_remove() on every leaf,
-		 * which takes THIS lock.  A destroyer whose entry is still on
-		 * this list is therefore blocked until this walk lets go, and a
-		 * destroyer that got there first has already removed its entry
-		 * and this walk will not see it.
+		 * 🔑 TWO DIFFERENT THINGS ARE HELD HERE, FOR TWO DIFFERENT
+		 * QUESTIONS, and conflating them is how this took three
+		 * attempts.  The page lock holds the LIST still: the pair
+		 * cannot tear and an entry cannot be recycled under the walk.
+		 * The read section holds the STRUCT alive: it spans the load of
+		 * `pv->pmap' and every use of it, and pmap_destroy() waits for
+		 * every such section before the struct goes back to its zone.
+		 * A lock cannot do the second job -- a pmap is not reached
+		 * through this page -- and a grace period cannot do the first.
 		 *
 		 * What made that impossible before was the call to
 		 * pmap_forget(): it takes the same lock through pv_remove() and
@@ -1049,6 +1098,7 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 		 * the shootdowns and the frees happen after the unlock, which
 		 * is the shape the protect loop below already had.
 		 */
+		held = pmap_read_enter();
 		pv_lock_page(pa);
 		while (1) {
 			pmap_t		hpmap;
@@ -1132,9 +1182,16 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 		pv_unlock_page(pa);
 
 		/*
-		 * Both of these need the lock DOWN: pv_free_chain() takes the
-		 * free list's, which is never held with this one, and a
-		 * shootdown cross-calls processors that may be waiting for it.
+		 * Both of these need the page lock DOWN: pv_free_chain() takes
+		 * the free list's, which is never held with it, and a shootdown
+		 * cross-calls processors that may be waiting for it.
+		 *
+		 * ⚠️ AND BOTH ARE STILL INSIDE THE READ SECTION, because the
+		 * batch holds `pmap' pointers and tlb_flush_range() reads
+		 * `->cpus_using' through them.  Ending the section at the
+		 * unlock would put the last dereference of a pmap this path
+		 * does not own AFTER the thing that keeps it alive -- the same
+		 * defect one step further down the function.
 		 */
 		pv_free_chain(dead);
 
@@ -1144,6 +1201,8 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			for (i = 0; i < n; i++)
 				tlb_flush_range(batch[i].pmap, batch[i].va,
 						batch[i].size);
+
+		pmap_read_leave(held);
 		return;
 	}
 
@@ -1197,8 +1256,19 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			batch[PV_FLUSH_BATCH];
 		unsigned  n = 0;
 		boolean_t overflow = FALSE;
+		boolean_t held;
 		unsigned  i;
 
+		/*
+		 * 🔴 THE READ SECTION SPANS THE LOAD OF `pv->pmap' AS WELL AS
+		 * ITS USE (#558), which is the half a per-call section inside
+		 * pmap_protect_page_noflush() could not give: the argument is
+		 * evaluated at the call site, BEFORE that function enters
+		 * anything.  pmap_destroy() waits for these sections before the
+		 * struct goes back to its zone, so between the two the pmap
+		 * cannot be reissued under this walk.
+		 */
+		held = pmap_read_enter();
 		pv_lock_page(pa);
 		for (pv = pv_head(pa);
 		     pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
@@ -1224,6 +1294,9 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			for (i = 0; i < n; i++)
 				tlb_flush_range(batch[i].pmap, batch[i].va,
 						batch[i].size);
+
+		/* After the flushes: the batch dereferences those pmaps. */
+		pmap_read_leave(held);
 	}
 }
 
@@ -1235,26 +1308,29 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 static int pv_test_bits(uint64_t pa, uint64_t bits)
 {
 	pv_entry_t pv;
+	boolean_t  held;
 
 	/*
-	 * The page lock spans the walk for the same reason as the protect loop
-	 * above: `pv->pmap->root_pa' dereferences a pmap this path does not own
-	 * and does not otherwise keep alive (#558).
+	 * The two halves the other walks take, for the same two reasons
+	 * (#558): the page lock holds the LIST still, and the read section
+	 * holds the STRUCT alive across the load of `pv->pmap' and its use.
+	 * One section round the walk rather than one per entry, so that the
+	 * rule is the same sentence in all four places.
 	 */
+	held = pmap_read_enter();
 	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
-		boolean_t   held = pmap_read_enter();
 		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
-		int	    hit = e != PT_ENTRY_NULL && (*e & bits) != 0;
 
-		pmap_read_leave(held);
-		if (hit) {
+		if (e != PT_ENTRY_NULL && (*e & bits) != 0) {
 			pv_unlock_page(pa);
+			pmap_read_leave(held);
 			return 1;
 		}
 	}
 	pv_unlock_page(pa);
+	pmap_read_leave(held);
 
 	return 0;
 }
@@ -1265,23 +1341,23 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 	struct { pmap_t pmap; uint64_t va; } fbatch[PV_FLUSH_BATCH];
 	unsigned   nflush = 0;
 	boolean_t  foverflow = FALSE;
+	boolean_t  held;
 
 	/*
 	 * Same shape as the protect loop above (#558): the entries change under
-	 * the page lock, the shootdowns happen after it is dropped.  The
-	 * dereference of `pv->pmap' is what the lock is for; the flush is what
-	 * cannot be under it.
+	 * the page lock, the shootdowns happen after it is dropped, and the read
+	 * section spans both -- the load of `pv->pmap' here and the dereference
+	 * tlb_flush_page() makes of it below, which is outside the page lock but
+	 * must not be outside this.
 	 */
+	held = pmap_read_enter();
 	pv_lock_page(pa);
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
-		boolean_t   held = pmap_read_enter();
 		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
 
-		if (e == PT_ENTRY_NULL) {
-			pmap_read_leave(held);
+		if (e == PT_ENTRY_NULL)
 			continue;
-		}
 
 		/*
 		 * 🔥 THE SHARPEST OF THE READ-MODIFY-WRITES (#455).
@@ -1294,7 +1370,6 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 * clean and its contents are dropped.
 		 */
 		pmap_pte_update(e, set ? bits : 0, set ? 0 : bits);
-		pmap_read_leave(held);
 
 		/*
 		 * Dropping the TLB entry is not housekeeping here, it is the
@@ -1327,6 +1402,8 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 	else
 		for (unsigned i = 0; i < nflush; i++)
 			tlb_flush_page(fbatch[i].pmap, fbatch[i].va);
+
+	pmap_read_leave(held);
 }
 
 int pmap_is_referenced(uint64_t pa)
