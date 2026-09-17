@@ -135,8 +135,21 @@ EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
 # now -- but a verdict that only works while the output is tidy is a verdict
 # that fails exactly when the machine is in the worst trouble. Unanchored, it
 # survives a shredded log.
+# ⚠️ `0 FAIL' IS A COUNT OF NONE, and this verdict had never seen one.
+#
+# ipc_bench prints "protected payload: 3 PASS, 0 FAIL" on a clean run, and
+# until #489 no bench-only boot ever reached this function -- every one of them
+# ran out the watchdog and was reported as cut short instead.  The first run
+# that did reach it came out FAILED, quoting a line that says nothing failed.
+#
+# 🔑 Excluded by the ZERO and not by the words: "3 PASS, 2 FAIL" still fails,
+# and so does the only other FAIL this program can print -- "radix overflow
+# test: FAIL", which it prints when it failed and not otherwise.  If the line's
+# shape ever changes the exclusion stops applying and this starts complaining
+# again, which is the direction an exclusion should fail in.
 BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
-	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" || true)
+	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
+	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
