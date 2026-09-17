@@ -594,6 +594,18 @@ pmap_page_report_mappings(vm_offset_t paddr)
 		return;
 	}
 
+	/*
+	 * ⚠️ NO PAGE LOCK, DELIBERATELY, and it is safe for one reason that
+	 * must not quietly stop being true (#558).
+	 *
+	 * This runs from a guard that is about to panic, and the processor it
+	 * runs on may be the one holding that lock -- taking it would turn a
+	 * report into a silent machine.  What makes reading without it
+	 * acceptable is that this loop never DEREFERENCES `pv->pmap': it
+	 * compares the pointer and prints it.  A torn pair misreports a va, on
+	 * a machine that is already dying; a dereference would fault in the
+	 * middle of the only message anybody is going to get.
+	 */
 	for (pv = pv_head((uint64_t) paddr);
 	     pv != PV_ENTRY_NULL && n < 8;
 	     pv = pv->next) {

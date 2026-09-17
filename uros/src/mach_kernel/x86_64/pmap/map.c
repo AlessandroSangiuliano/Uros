@@ -336,7 +336,25 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 	return rc;
 }
 
-uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va)
+/*
+ * Drop the mapping and leave the shootdown to the caller (#558).
+ *
+ * 🔴 THE PAIR TO pmap_protect_page_noflush() BELOW, AND FOR THE SAME REASON.
+ * A walk of a page's pv list has to hold that page's lock across the
+ * dereference of `pv->pmap' -- the use-after-free this issue is named for --
+ * and NOBODY MAY SHOOT DOWN WHILE HOLDING ONE: pv.c measured that legitimate
+ * callers reach pv_enter() with interrupts already masked, so a waiter cannot
+ * answer the cross-call of whoever holds the lock.
+ *
+ * The removal loop in pmap_page_protect() was the one walk left outside that
+ * shape.  It could not hold the lock while it called pmap_forget(), because
+ * pmap_forget() calls pv_remove() on the same page and this lock is not
+ * recursive, so it snapshotted one entry under the lock, dropped it, and then
+ * used the pmap -- which is the window.
+ *
+ * Returns the size unmapped, which is what the caller has to flush.
+ */
+uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va)
 {
 	uint64_t size = 0;
 	boolean_t held = pmap_read_enter();
@@ -349,7 +367,16 @@ uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va)
 
 	*entry = 0;
 	pmap_read_leave(held);
-	tlb_flush_range(pmap, va, size);
+	return size;
+}
+
+uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va)
+{
+	uint64_t size = pmap_unmap_page_noflush(pmap, va);
+
+	if (size != 0)
+		tlb_flush_range(pmap, va, size);
+
 	return size;
 }
 

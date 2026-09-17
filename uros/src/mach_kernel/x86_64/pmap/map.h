@@ -75,6 +75,13 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va);
 
 /*
+ * The same, with the TLB shootdown left to the caller (#558), for the walk that
+ * removes every mapping of a page while holding that page's pv lock.  Its pair
+ * for the protect side is pmap_protect_page_noflush() below.
+ */
+uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va);
+
+/*
  * Change the permission bits (INTEL_PTE_PERM) of the leaf mapping va,
  * keeping its frame and every other bit.  Returns the size of the page it
  * changed, or zero if va was not mapped.  Works on a large leaf as readily
