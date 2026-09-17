@@ -86,6 +86,14 @@ endif()
 # look exactly like a measuring build and behave like an ordinary one.
 option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF)
 option(UROS_SYSCALL_PROFILE "Build the #411 Mach trap phase profile, which #392 consumes" OFF)
+# 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
+# shipping answer: counting it is three increments on EVERY context switch, for
+# ever, to learn something that is learned once -- on a path whose saving is
+# about 114 ns, so the instrument can outweigh its subject.  It was on while
+# #561 was written, it found that the first version was a no-op, and it came
+# off.  What stays on is free: the line kern/startup.c prints once and the
+# `fpu=` on each thread in quiet_census.
+option(UROS_CONTEXT_FPU_COUNT "Count how often the #561 vector-state exemption fires" OFF)
 # 🔑 WHICH trap the profile follows (#554).  It filters on one slot of the table
 # in kern/syscall_sw.c: 33 is urmach_msg, #392's subject; 42 is urmach_futex,
 # #554's.  A cache variable and not a boot argument because the trap under study
@@ -300,6 +308,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       # -mgeneral-regs-only so that entry from user mode never has to save
       # vector state, which means no floating point anywhere in it (#453).
       KERNEL_FLOAT_OK=0)
+  if(UROS_CONTEXT_FPU_COUNT)
+      list(APPEND KERNEL_DEFINES_BARE CONTEXT_FPU_COUNT=1)
+      message(STATUS "#561 vector-state exemption counters: ON (x86_64)")
+  endif()
   if(UROS_SYSCALL_PROFILE)
       list(APPEND KERNEL_DEFINES_BARE SYSCALL_PROFILE=1
            SYSCALL_PROFILE_TRAP=${UROS_SYSCALL_PROFILE_TRAP})

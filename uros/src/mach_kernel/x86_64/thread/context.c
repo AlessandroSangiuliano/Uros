@@ -43,11 +43,11 @@ extern void context_thread_start(void);
  */
 #define CTX_RFLAGS_INITIAL	0x202ULL
 
-/* #561: how often the vector state did NOT have to move.  See quiet_census. */
-unsigned long	context_fpu_switches;
-unsigned long	context_fpu_saves_skipped;
-unsigned long	context_fpu_restores_skipped;
-unsigned long	context_fpu_exempted;	/* contexts told they need nothing */
+/*
+ * #561: how many contexts were told they need nothing.  A global, and allowed
+ * to be: it is written at thread creation, not on the switch path.
+ */
+unsigned long	context_fpu_exempted;
 
 void context_become_current(struct context *ctx, uint64_t stack_top,
 			    void *fpu_area)
@@ -199,18 +199,16 @@ void context_switch(struct context *old, struct context *fresh)
 	 * it runs, every time.  The hole in lazy FPU (CVE-2018-3665, #560) is
 	 * exactly the case this does not create.
 	 */
-	/*
-	 * Counted, because an optimisation nobody can see fire is an
-	 * optimisation nobody can tell from a no-op (#561).  Plain adds on a
-	 * path that is already serialised by the switch itself; they are a
-	 * report, not an accounting.
-	 */
-	context_fpu_switches++;
+#if	CONTEXT_FPU_COUNT
+	percpu()->fpu_switches++;
+	if (!(old->fpu_switch && old->fpu_area != 0))
+		percpu()->fpu_saves_skipped++;
+	if (!fresh->fpu_switch)
+		percpu()->fpu_restores_skipped++;
+#endif	/* CONTEXT_FPU_COUNT */
 
 	if (old->fpu_switch && old->fpu_area != 0)
 		fpu_save(old->fpu_area);
-	else
-		context_fpu_saves_skipped++;
 
 	if (fresh->fpu_area == 0)
 		panic("thread: switching to a thread with nowhere to restore "
@@ -218,8 +216,6 @@ void context_switch(struct context *old, struct context *fresh)
 
 	if (fresh->fpu_switch)
 		fpu_restore(fresh->fpu_area);
-	else
-		context_fpu_restores_skipped++;
 
 	context_switch_raw(&old->rsp, fresh->rsp);
 }

@@ -141,10 +141,36 @@ void context_exempt_vector_state(struct context *ctx);
  * state (#561).  Read by quiet_census: an exemption nobody can see fire cannot
  * be told apart from a no-op.
  */
-extern unsigned long	context_fpu_switches;
-extern unsigned long	context_fpu_saves_skipped;
-extern unsigned long	context_fpu_restores_skipped;
 extern unsigned long	context_fpu_exempted;
+
+/*
+ * 🔴 AND HOW OFTEN THE EXEMPTION FIRES, WHICH IS OFF (#561).
+ *
+ *	cmake -DUROS_CONTEXT_FPU_COUNT=ON
+ *
+ * Counting it means three increments on EVERY context switch, for ever, to
+ * learn something that is learned once -- and the thing being counted is a
+ * saving of about 114 ns, so an instrument on that path can cost more than its
+ * subject.  It was on while #561 was being written, it found that the first
+ * version was a no-op, and then it came off.
+ *
+ * ⚠️ Per-processor when it is on (see <cpu/percpu.h>): three globals written by
+ * every processor on the switch path would bounce one cache line between them,
+ * which is the measurement eating the thing measured.
+ *
+ * What stays on is free and catches the failure this found: the line
+ * kern/startup.c prints once, and the `fpu=' on each thread in quiet_census.
+ */
+#ifndef	CONTEXT_FPU_COUNT
+#define	CONTEXT_FPU_COUNT	0
+#endif
+
+#if	CONTEXT_FPU_COUNT
+void context_fpu_counts(unsigned long long *switches,
+			unsigned long long *saves_skipped,
+			unsigned long long *restores_skipped);
+#endif
+
 
 /*
  * Fill in a context for the thread that is *already running* — the boot

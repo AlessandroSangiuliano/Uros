@@ -31,7 +31,8 @@
 
 #include <x86_64/thread/fpu_stress.h>
 #include <x86_64/thread/fpu.h>
-#include <x86_64/thread/context.h>	/* #561: this file asks for vector state */
+#include <x86_64/thread/context.h>
+#include <x86_64/cpu/percpu.h>	/* #561: this file asks for vector state */
 #include <x86_64/time/tsc.h>
 #include <x86_64/cpu/regs.h>
 #include <kern/misc_protos.h>
@@ -237,24 +238,4 @@ fpu_stress_run(void)
 	       "vector registers, and every one of them read its own back "
 	       "(%s)\n", FPU_STRESS_THREADS, fpu_slot_want, fpu_save_instruction());
 
-	/*
-	 * 🔑 AND WHETHER THE EXEMPTION FIRED, on the one boot that is about
-	 * this (#561).
-	 *
-	 * The switch carries vector state only for threads that declared they
-	 * need it; a thread of the kernel task is exempt unless it asks, as the
-	 * three above did.  That is worth 228 ns a round trip where it applies
-	 * (#554) and nothing at all if it never applies -- and the two cannot
-	 * be told apart without a count.
-	 *
-	 * ⚠️ quiet_census prints the same numbers, and since #489 it hardly ever
-	 * runs: a boot now ends on its own marker instead of going idle, so the
-	 * census that waits for silence waits past the end of the run.  This
-	 * line is here because this one is always reached.
-	 */
-	printf("fpu_stress: %lu switches, %lu saves and %lu restores skipped "
-	       "— the threads that declared vector state got it, the rest did "
-	       "not pay for it (#561)\n",
-	       context_fpu_switches, context_fpu_saves_skipped,
-	       context_fpu_restores_skipped);
 }

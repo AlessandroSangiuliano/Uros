@@ -528,10 +528,33 @@ quiet_census_pass(int mycpu)
 	 * without a count.  Printed here because here is after the work: the
 	 * census runs when the machine has gone quiet.
 	 */
-	printf("quiet_census: fpu switches=%lu, saves skipped=%lu, restores "
-	       "skipped=%lu, contexts exempted at creation=%lu (#561)\n",
-	       context_fpu_switches, context_fpu_saves_skipped,
-	       context_fpu_restores_skipped, context_fpu_exempted);
+	/*
+	 * 🔑 THE FREE HALF OF THE OBSERVATION (#561).
+	 *
+	 * How OFTEN the vector-state exemption fires was counted once, on the
+	 * switch path, to justify the change -- and then taken off it: three
+	 * increments on every context switch is a cost paid for ever to learn
+	 * something learned once.
+	 *
+	 * What stays is what catches the failure, and it costs nothing here:
+	 * this number, written at thread creation, and the `fpu=' on each
+	 * thread's line above.  The way the exemption broke was that it was
+	 * granted and then thrown away by a second context_init(), and the
+	 * shape of that was exactly "exempted at creation says 14, and every
+	 * live kernel thread says fpu=1".  Both halves are printed, so that
+	 * disagreement cannot hide.
+	 */
+	printf("quiet_census: contexts exempted from vector state at "
+	       "creation=%lu (#561)\n", context_fpu_exempted);
+#if	CONTEXT_FPU_COUNT
+	{
+		unsigned long long sw, sa, re;
+
+		context_fpu_counts(&sw, &sa, &re);
+		printf("quiet_census: fpu switches=%llu, saves skipped=%llu, "
+		       "restores skipped=%llu (#561)\n", sw, sa, re);
+	}
+#endif	/* CONTEXT_FPU_COUNT */
 
 #if	MUTEX_OWNER_TRACK
 	printf("quiet_census: vm_page_queue_lock locked=%d waiters=%d "
