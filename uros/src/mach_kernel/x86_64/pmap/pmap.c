@@ -716,8 +716,23 @@ void pmap_activate(pmap_t pmap)
 		 * Already here.  Not merely an optimisation: writing CR3 to
 		 * the value it already holds would discard every non-global
 		 * translation this processor has, for nothing.
+		 *
+		 * ❌ AND IT DID WRITE IT.  #439 (ae93c506) added this test, this
+		 * comment and the `return' AROUND the existing write instead of
+		 * in place of it, so the branch that exists to skip the reload
+		 * performed it -- the comment was the statement of intent and
+		 * the code was its opposite, for four weeks, in eight lines.
+		 *
+		 * ⚠️ It was nearly reported as the cost of #554's block-and-wake
+		 * round trip, and it is NOT: switch_context() calls
+		 * PMAP_SWITCH_USER only when the activations' maps DIFFER, so
+		 * two threads of one task never arrive here at all.  What
+		 * reaches this branch is an activation borrowing a map that
+		 * resolves to the pmap already loaded, which is rare.  The fix
+		 * is worth making because a comment contradicting its code is a
+		 * trap for the next reader; it is not worth a performance claim,
+		 * and no measurement here is offered as one.
 		 */
-		write_cr3(pmap->root_pa);
 		return;
 	}
 
