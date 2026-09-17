@@ -350,6 +350,33 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		     fpu_area);
 
 	/*
+	 * 🔴 AND WHETHER THE SWITCH HAS TO CARRY ITS VECTOR STATE (#561).
+	 *
+	 * This is the one place that answers no, and it answers it from the
+	 * one fact that settles it: a thread of the kernel task NEVER RETURNS
+	 * TO RING 3.  Everything it will ever execute is code this build
+	 * compiles with -mgeneral-regs-only, and the binary is checked to
+	 * contain no vector instruction outside the files allowed one.
+	 *
+	 * ⚠️ Asked of the ACTIVATION's task and not of the shuttle's: in this
+	 * kernel a thread_shuttle has no task at all -- the activation owns
+	 * that relation, which is what kern/exception.c asks when it needs the
+	 * same answer.
+	 *
+	 * ⚠️ And of the task rather than of the activation's map.  An
+	 * activation may borrow another task's map -- switch_context() says so
+	 * -- and borrowing an address space changes where copyin() looks, not
+	 * who executes.  The question here is whether ring 3 is ever reached,
+	 * and that is the task's property.
+	 *
+	 * A kernel thread that does want vector registers asks:
+	 * context_needs_vector_state(), which fpu_stress.c calls because it
+	 * holds a pattern in all sixteen of them on purpose.
+	 */
+	if (thr_act->task == kernel_task)
+		context_exempt_vector_state(&pcb->ctx);
+
+	/*
 	 * And its user frame, here, because here is where the stack it lives on
 	 * comes from (#422).
 	 *
@@ -437,10 +464,29 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	 * is supposed to be invoked from, and going directly is what bypassed
 	 * everything owed to a thread arriving on a fresh stack.
 	 */
+	/*
+	 * 🔴 AND THE VECTOR-STATE DECISION SURVIVES THE RESTART (#561).
+	 *
+	 * This is a RE-initialisation: the context already exists and its
+	 * thread already has a history, which is why the call below carries
+	 * pcb->ctx.fpu_area across rather than asking for a new one.  The
+	 * flag belongs to the same history -- it says what this THREAD needs,
+	 * not what the stack it is being restarted on needs -- so it is
+	 * carried the same way.
+	 *
+	 * ❌ Without this the exemption was granted at creation and thrown away
+	 * here, and the counters said so: 14 contexts exempted, 8.8 MILLION
+	 * switches, and not one save or restore skipped.  context_init() sets
+	 * the safe default, which is correct for a context being built and
+	 * wrong for one being rebuilt.
+	 */
+	int	keep_fpu_switch = pcb->ctx.fpu_switch;
+
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
 		     pcb->ctx.fpu_area);
+	pcb->ctx.fpu_switch = keep_fpu_switch;
 	(void) continuation;
 }
 

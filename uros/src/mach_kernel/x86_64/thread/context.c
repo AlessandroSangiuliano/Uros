@@ -43,12 +43,53 @@ extern void context_thread_start(void);
  */
 #define CTX_RFLAGS_INITIAL	0x202ULL
 
+/* #561: how often the vector state did NOT have to move.  See quiet_census. */
+unsigned long	context_fpu_switches;
+unsigned long	context_fpu_saves_skipped;
+unsigned long	context_fpu_restores_skipped;
+unsigned long	context_fpu_exempted;	/* contexts told they need nothing */
+
 void context_become_current(struct context *ctx, uint64_t stack_top,
 			    void *fpu_area)
 {
 	ctx->rsp = 0;			/* the first switch away writes it */
 	ctx->kernel_stack_top = stack_top;
 	ctx->fpu_area = fpu_area;
+	/*
+	 * 🔴 THE CONTEXT THE MACHINE IS ALREADY RUNNING IN, and it keeps the
+	 * state moving (#561).  This is the boot context adopting the first
+	 * thread: whatever is in the vector registers at that moment is not
+	 * something this code put there, so it is not something it may decide
+	 * is worthless.
+	 */
+	ctx->fpu_switch = 1;
+}
+
+void context_needs_vector_state(struct context *ctx)
+{
+	ctx->fpu_switch = 1;
+}
+
+/*
+ * 🔴 THE ONLY WAY TO TURN IT OFF, AND IT HAS ONE CALLER ON PURPOSE (#561).
+ *
+ * Being wrong here is silent: a thread that executes a vector instruction
+ * with this clear corrupts whatever the registers held, which is some other
+ * thread's state, and nothing reports it.  So the exemption is not a
+ * judgement any caller may make -- it is made once, for threads of the kernel
+ * task, which cannot return to ring 3 and therefore execute only code this
+ * build compiles without vector instructions.  A kernel thread that wants
+ * them says so with context_needs_vector_state() and gets them.
+ *
+ * ⚠️ The default is the expensive one, set by context_init(), because a
+ * context whose flag was never written would otherwise inherit whatever the
+ * zone element last held -- and zalloc() does not zero.  Getting that wrong
+ * in the safe direction costs 228 ns; in the other it costs correctness.
+ */
+void context_exempt_vector_state(struct context *ctx)
+{
+	ctx->fpu_switch = 0;
+	context_fpu_exempted++;
 }
 
 void context_init(struct context *ctx, uint64_t stack_top,
@@ -65,6 +106,13 @@ void context_init(struct context *ctx, uint64_t stack_top,
 
 	if (stack_top & 0xF)
 		panic("thread: a stack that is not sixteen-byte aligned");
+
+	/*
+	 * The expensive answer by default (#561).  See
+	 * context_exempt_vector_state() for who is allowed to change it and
+	 * why the default is this way round.
+	 */
+	ctx->fpu_switch = 1;
 
 	frame[CTX_R15] = 0;
 	frame[CTX_R14] = 0;
@@ -129,14 +177,49 @@ void context_switch(struct context *old, struct context *fresh)
 	 * thread is about to run, and the first instruction that touches a
 	 * vector register would restore from nowhere.
 	 */
-	if (old->fpu_area != 0)
+	/*
+	 * 🔴 THE VECTOR STATE MOVES FOR WHOEVER DECLARED IT, AND FOR NOBODY
+	 * ELSE (#561).
+	 *
+	 * This was unconditional, and #554 measured what that costs: 228 ns on
+	 * a block-and-wake round trip, of which the restore is 165 -- more than
+	 * the whole gap that issue was opened about.  Every thread paid it,
+	 * including the ones that have never executed a vector instruction and
+	 * never will, which on this target is every thread of the kernel task
+	 * bar the ones that ask.
+	 *
+	 * 🔑 The area is still there in both cases: what is conditional is the
+	 * work, not the memory, so act_machine_get_state() and every other
+	 * reader still find somewhere to read.
+	 *
+	 * ⚠️ WHY THIS IS NOT THE LAZY SCHEME.  A thread whose flag is clear runs
+	 * with the previous thread's values still in the registers -- and it is
+	 * kernel code, which the build forbids to touch them and a checker
+	 * enforces.  A USER thread never does: its own state is restored before
+	 * it runs, every time.  The hole in lazy FPU (CVE-2018-3665, #560) is
+	 * exactly the case this does not create.
+	 */
+	/*
+	 * Counted, because an optimisation nobody can see fire is an
+	 * optimisation nobody can tell from a no-op (#561).  Plain adds on a
+	 * path that is already serialised by the switch itself; they are a
+	 * report, not an accounting.
+	 */
+	context_fpu_switches++;
+
+	if (old->fpu_switch && old->fpu_area != 0)
 		fpu_save(old->fpu_area);
+	else
+		context_fpu_saves_skipped++;
 
 	if (fresh->fpu_area == 0)
 		panic("thread: switching to a thread with nowhere to restore "
 		      "its FPU state from");
 
-	fpu_restore(fresh->fpu_area);
+	if (fresh->fpu_switch)
+		fpu_restore(fresh->fpu_area);
+	else
+		context_fpu_restores_skipped++;
 
 	context_switch_raw(&old->rsp, fresh->rsp);
 }

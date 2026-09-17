@@ -284,6 +284,15 @@ quiet_census_pass(int mycpu)
 
 		printf("quiet_census:   th=%p state=%#x", th, th->state);
 		census_state(th->state);
+		/*
+		 * #561: does this thread's vector state travel with it?  A
+		 * count of exemptions says how many were granted; this says to
+		 * WHOM, which is the question when the count and the effect
+		 * disagree.
+		 */
+		if (th->top_act != THR_ACT_NULL
+		    && th->top_act->mact.pcb != PCB_NULL)
+			printf(" fpu=%d", th->top_act->mact.pcb->ctx.fpu_switch);
 		printf(" wait_event=%p", (void *) th->wait_event);
 
 		/*
@@ -508,6 +517,21 @@ quiet_census_pass(int mycpu)
 	 * is hunting.
 	 */
 	mutex_trace_report();		/* nothing unless MUTEX_TRACE_ON */
+
+	/*
+	 * 🔑 Whether the vector-state exemption fires, and how often (#561).
+	 *
+	 * The switch carries a thread's FPU state only for threads that
+	 * declared they need it; every thread of the kernel task is exempt.
+	 * That is worth 228 ns a round trip where it applies (#554) and
+	 * NOTHING at all if it never applies, and the two are indistinguishable
+	 * without a count.  Printed here because here is after the work: the
+	 * census runs when the machine has gone quiet.
+	 */
+	printf("quiet_census: fpu switches=%lu, saves skipped=%lu, restores "
+	       "skipped=%lu, contexts exempted at creation=%lu (#561)\n",
+	       context_fpu_switches, context_fpu_saves_skipped,
+	       context_fpu_restores_skipped, context_fpu_exempted);
 
 #if	MUTEX_OWNER_TRACK
 	printf("quiet_census: vm_page_queue_lock locked=%d waiters=%d "

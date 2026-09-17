@@ -31,6 +31,7 @@
 
 #include <x86_64/thread/fpu_stress.h>
 #include <x86_64/thread/fpu.h>
+#include <x86_64/thread/context.h>	/* #561: this file asks for vector state */
 #include <x86_64/time/tsc.h>
 #include <x86_64/cpu/regs.h>
 #include <kern/misc_protos.h>
@@ -136,6 +137,25 @@ fpu_stress_run(void)
 
 		thread_swappable(th->top_act, FALSE);
 
+		/*
+		 * 🔴 THIS TEST IS THE EXCEPTION THE RULE IS WRITTEN AROUND
+		 * (#561).
+		 *
+		 * A thread of the kernel task does not have its vector state
+		 * carried across a switch, because kernel code contains no
+		 * vector instruction -- the build forbids the compiler to emit
+		 * one and a checker fails the build if one appears.  This file
+		 * writes them BY HAND, which is the whole point of it: it asks
+		 * whether a pattern held in all sixteen registers survives
+		 * being taken off the processor.
+		 *
+		 * So it asks for what it is about to use.  ⚠️ Without this line
+		 * the test would fail -- correctly, and for the wrong reason:
+		 * it would be reporting that this file did not declare itself,
+		 * not that the switch is broken.
+		 */
+		context_needs_vector_state(&th->top_act->mact.pcb->ctx);
+
 		s = splsched();
 		thread_lock(th);
 		act = th->top_act;
@@ -216,4 +236,25 @@ fpu_stress_run(void)
 	       "second, each holding a different pattern in all sixteen "
 	       "vector registers, and every one of them read its own back "
 	       "(%s)\n", FPU_STRESS_THREADS, fpu_slot_want, fpu_save_instruction());
+
+	/*
+	 * 🔑 AND WHETHER THE EXEMPTION FIRED, on the one boot that is about
+	 * this (#561).
+	 *
+	 * The switch carries vector state only for threads that declared they
+	 * need it; a thread of the kernel task is exempt unless it asks, as the
+	 * three above did.  That is worth 228 ns a round trip where it applies
+	 * (#554) and nothing at all if it never applies -- and the two cannot
+	 * be told apart without a count.
+	 *
+	 * ⚠️ quiet_census prints the same numbers, and since #489 it hardly ever
+	 * runs: a boot now ends on its own marker instead of going idle, so the
+	 * census that waits for silence waits past the end of the run.  This
+	 * line is here because this one is always reached.
+	 */
+	printf("fpu_stress: %lu switches, %lu saves and %lu restores skipped "
+	       "— the threads that declared vector state got it, the rest did "
+	       "not pay for it (#561)\n",
+	       context_fpu_switches, context_fpu_saves_skipped,
+	       context_fpu_restores_skipped);
 }

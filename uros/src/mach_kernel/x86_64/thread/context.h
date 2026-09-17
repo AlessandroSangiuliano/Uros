@@ -76,6 +76,35 @@ struct context {
 	uint64_t rsp;			/* where its saved registers are   */
 	uint64_t kernel_stack_top;	/* where an entry from ring 3 lands */
 	void    *fpu_area;		/* and its floating-point state    */
+	/*
+	 * 🔴 WHETHER THE SWITCH HAS TO MOVE THAT STATE (#561).
+	 *
+	 * The area is allocated for every thread and stays allocated -- the
+	 * invariant this file's neighbour defends is that "a thread with a pcb
+	 * has somewhere to save its registers", and act_machine_get_state()
+	 * reads it without checking for null.  What is conditional is not the
+	 * MEMORY, it is the WORK: saving and restoring on every switch costs
+	 * 228 ns a round trip (#554), and a thread that never executes a vector
+	 * instruction has nothing there worth moving.
+	 *
+	 * 🔑 DECLARED, NOT INFERRED.  The compiler cannot emit a vector
+	 * instruction into this kernel -- it is built -mgeneral-regs-only, and
+	 * the binary has none -- but a human can write one by hand, and one
+	 * does: fpu_stress.c holds a pattern in all sixteen registers on
+	 * purpose.  So a kernel thread does not get this by a rule about
+	 * kernel threads; it gets it by asking, and scripts/kernel-vector-check
+	 * fails the build if vector instructions appear outside the files
+	 * allowed to have them.
+	 *
+	 * ⚠️ AND THE SECURITY ARGUMENT IS ABOUT THE OTHER BOUNDARY.  While a
+	 * thread with this clear runs, the registers still hold the last user
+	 * thread's state -- that is not a leak, because the kernel is the one
+	 * reading them and before ANY user thread runs its own state is
+	 * restored.  What must never come back is the lazy scheme, where a USER
+	 * thread runs with another user's registers behind a #NM that
+	 * speculation can step around (CVE-2018-3665, #560).
+	 */
+	int	 fpu_switch;		/* 0: nothing to move on a switch  */
 };
 
 /*
@@ -92,6 +121,30 @@ struct context {
  */
 void context_init(struct context *ctx, uint64_t stack_top,
 		  void (*entry)(void *), void *arg, void *fpu_area);
+
+/*
+ * Say that this thread will execute vector instructions, so the switch must
+ * carry its state (#561).  A user thread is told this when it is created; a
+ * kernel thread has to ask, because nothing can tell from the outside.
+ */
+void context_needs_vector_state(struct context *ctx);
+
+/*
+ * And the exemption, which has ONE caller: threads of the kernel task, which
+ * never return to ring 3.  Read the comment on the definition before adding a
+ * second -- being wrong here corrupts another thread's registers in silence.
+ */
+void context_exempt_vector_state(struct context *ctx);
+
+/*
+ * How many switches happened and how many of them did not have to move vector
+ * state (#561).  Read by quiet_census: an exemption nobody can see fire cannot
+ * be told apart from a no-op.
+ */
+extern unsigned long	context_fpu_switches;
+extern unsigned long	context_fpu_saves_skipped;
+extern unsigned long	context_fpu_restores_skipped;
+extern unsigned long	context_fpu_exempted;
 
 /*
  * Fill in a context for the thread that is *already running* — the boot
