@@ -218,8 +218,16 @@ static void pv_lock_take(struct pv_lock *p)
 	 * callers arrive here masked, so a waiter can be unable to answer, so
 	 * NOBODY MAY SHOOT DOWN WHILE HOLDING ONE OF THESE.  The lock is still
 	 * right for what pv.c does under it -- pv_enter, pv_remove and pv_count
-	 * shoot down nothing -- and the two walks in pmap.c that do are back to
-	 * unprotected, which is written where they are.
+	 * shoot down nothing.
+	 *
+	 * ⚠️ AND THE SENTENCE THAT USED TO END THIS PARAGRAPH IS NO LONGER TRUE.
+	 * It said the walks in pmap.c that DO shoot down "are back to
+	 * unprotected, which is written where they are".  That was the state on
+	 * 14/09 and it was fixed by separating the two halves: the entries change
+	 * under this lock and the shootdowns happen after it is dropped
+	 * (pmap_protect_page_noflush, pmap_unmap_page_noflush, and the flush
+	 * batches in pmap.c).  Every walk of a pv list now holds this across the
+	 * dereference of `pv->pmap' and none of them cross-calls under it.
 	 */
 
 	disable_preemption();
@@ -252,10 +260,14 @@ static void pv_lock_drop(struct pv_lock *p)
 
 /*
  * For the walks that live in pmap.c and must hold the list still across a whole
- * traversal.  ⚠️ NOT for pmap_page_protect's VM_PROT_NONE loop: that one calls
- * pmap_forget(), which calls pv_remove() on the SAME pa, and holding this
- * across it is a self-deadlock -- the shape of #486.  That loop re-reads
- * pv_head(pa) every iteration instead, which is why it was written that way.
+ * traversal.
+ *
+ * ⚠️ NOT RECURSIVE.  This said the VM_PROT_NONE loop of pmap_page_protect()
+ * could not use it, because that loop calls pmap_forget(), which calls
+ * pv_remove() on the SAME pa -- a self-deadlock, the shape of #486.  True of
+ * the call, not of the loop: it holds the lock now and does the removal with
+ * pv_remove_locked(), which is the same surgery without the acquire.  What it
+ * must still not do is call anything that takes this lock or shoots down.
  */
 void pv_lock_page(uint64_t pa)
 {
@@ -455,20 +467,29 @@ void pv_enter(uint64_t pa, pmap_t pmap, uint64_t va)
 	pv_unlock_page(pa);
 }
 
-void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va)
+/*
+ * The list surgery of pv_remove(), for a caller that ALREADY HOLDS this page's
+ * lock (#558).
+ *
+ * 🔑 IT DOES NOT FREE -- IT HANDS THE DEAD ENTRY BACK, and that is the whole
+ * reason it is a separate function rather than a flag.  pv_free() takes the
+ * free list's lock, and the order this file keeps is that the two locks are
+ * never held together: pv_enter() and pv_remove() both put the page lock down
+ * before they call it.  A caller holding the page lock across a whole walk
+ * cannot put it down in the middle, so it collects what it detaches and frees
+ * the chain afterwards with pv_free_chain().
+ *
+ * Returns the entry the caller must free, or PV_ENTRY_NULL -- which covers
+ * both "no such mapping" and "that was the last one", since the head belongs
+ * to the table and is never freed.
+ */
+pv_entry_t pv_remove_locked(uint64_t pa, pmap_t pmap, uint64_t va)
 {
 	pv_entry_t head = pv_head(pa);
 	pv_entry_t prev, e;
 
-	if (head == PV_ENTRY_NULL)
-		return;
-
-	pv_lock_page(pa);
-
-	if (head->pmap == PMAP_NULL) {
-		pv_unlock_page(pa);
-		return;
-	}
+	if (head == PV_ENTRY_NULL || head->pmap == PMAP_NULL)
+		return PV_ENTRY_NULL;
 
 	/*
 	 * Removing the head keeps the head where it is: the next entry's
@@ -485,27 +506,53 @@ void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va)
 		e = head->next;
 		if (e == PV_ENTRY_NULL) {
 			head->pmap = PMAP_NULL;
-			pv_unlock_page(pa);
-			return;
+			return PV_ENTRY_NULL;
 		}
 		head->pmap = e->pmap;
 		head->va = e->va;
 		head->next = e->next;
-		pv_unlock_page(pa);
-		pv_free(e);
-		return;
+		return e;
 	}
 
 	prev = head;
 	for (e = head->next; e != PV_ENTRY_NULL; prev = e, e = e->next)
 		if (e->pmap == pmap && e->va == va) {
 			prev->next = e->next;
-			pv_unlock_page(pa);
-			pv_free(e);
-			return;
+			return e;
 		}
 
+	return PV_ENTRY_NULL;
+}
+
+void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va)
+{
+	pv_entry_t dead;
+
+	if (pv_head(pa) == PV_ENTRY_NULL)
+		return;
+
+	pv_lock_page(pa);
+	dead = pv_remove_locked(pa, pmap, va);
 	pv_unlock_page(pa);
+
+	if (dead != PV_ENTRY_NULL)
+		pv_free(dead);
+}
+
+/*
+ * Give back a chain of entries detached under the page lock (#558).
+ *
+ * ⚠️ `next' is read before the entry is handed over, because pv_free() puts it
+ * on the free list by writing that very field.
+ */
+void pv_free_chain(pv_entry_t list)
+{
+	while (list != PV_ENTRY_NULL) {
+		pv_entry_t next = list->next;
+
+		pv_free(list);
+		list = next;
+	}
 }
 
 unsigned pv_count(uint64_t pa)

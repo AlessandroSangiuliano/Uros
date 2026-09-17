@@ -62,12 +62,24 @@ void pv_remove(uint64_t pa, pmap_t pmap, uint64_t va);
 /*
  * Hold a page's list still across a walk that lives outside this file (#558).
  *
- * ⚠️ NOT for pmap_page_protect's VM_PROT_NONE loop: it calls pmap_forget(),
- * which calls pv_remove() on the same page, and holding this across that is a
- * self-deadlock.  That loop re-reads pv_head(pa) each iteration instead.
+ * ⚠️ The lock is NOT recursive, so a walk holding it cannot call pv_remove():
+ * the removal loop in pmap_page_protect() takes the pair below instead, and
+ * frees what it detached once the lock is down.
  */
 void pv_lock_page(uint64_t pa);
 void pv_unlock_page(uint64_t pa);
+
+/*
+ * Remove one mapping with this page's lock ALREADY HELD, and free a chain of
+ * what that returned once it is not (#558).
+ *
+ * 🔑 Two calls and not one because the free list has its own lock and the two
+ * are never held together.  pv_remove_locked() hands back the entry to free —
+ * PV_ENTRY_NULL when there is nothing, which includes removing the last
+ * mapping, since the head belongs to the table.
+ */
+pv_entry_t pv_remove_locked(uint64_t pa, pmap_t pmap, uint64_t va);
+void pv_free_chain(pv_entry_t list);
 
 /* How many mappings a page has — the index's own view, for checking it. */
 unsigned pv_count(uint64_t pa);
