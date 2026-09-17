@@ -440,6 +440,27 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast,
 	       c_route_msg_send, c_route_msg_receive, c_route_msg_continue);
 
+	/*
+	 * 🔴 EVERY COLUMN BELOW CARRIES ONE TIMESTAMP PAIR, AND THE PAIR DOES
+	 * NOT COST THE SAME ON EVERY TARGET (#554).
+	 *
+	 * A phase is closed by a mark, and a mark reads the clock, so each
+	 * number includes one pair of the cost printed above.  Within one run
+	 * that is a constant a reader can ignore; ACROSS TARGETS it is not.
+	 * x86-64 reads `lfence; rdtsc' and i386 reads `rdtsc', measured at 60
+	 * and 30 cycles here -- so comparing raw columns between them charges
+	 * x86-64 thirty cycles per phase boundary that are the instrument's and
+	 * not the kernel's.  With eight marked phases that is 240 cycles of a
+	 * 386-cycle difference: most of a finding, made of the ruler.
+	 *
+	 * Said here rather than left to whoever reads two dumps side by side,
+	 * because that reader is the one who cannot see the other target's
+	 * pair cost.
+	 */
+	printf("syscall_profile   each column below includes ONE pair (%u cyc "
+	       "on this target); subtract it per column, and when comparing "
+	       "TARGETS subtract each one's own\n", sp_pair_cost);
+
 	for (shape = 0; shape < SP_SHAPES; shape++)
 		sp_table(p, shape, ret_mean, ret_known);
 
