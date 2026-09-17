@@ -68,6 +68,12 @@ void fpu_init(void);
  */
 uint64_t fpu_area_size(void);
 
+/*
+ * Whether the restore is XRSTORS (#561).  It reads only the compacted format,
+ * so whoever prepares an area a thread has not yet saved into has to know.
+ */
+int fpu_uses_xsaves(void);
+
 #define FPU_AREA_ALIGN	64
 
 /* Whether the extended form is in use, or the fixed 512-byte legacy one. */
