@@ -704,6 +704,45 @@ void pmap_activate(pmap_t pmap)
 }
 
 /*
+ * One mapping fewer in this space.
+ *
+ * Its own function because two callers do it now -- pmap_forget() and the
+ * removal loop in pmap_page_protect(), which cannot use pmap_forget() because
+ * it holds the page's pv lock -- and the panic below has to say the same thing
+ * from both.
+ */
+static void pmap_resident_drop(pmap_t pmap, uint64_t va)
+{
+	/*
+	 * 🔥 ONE COUNTER, EIGHT PROCESSORS, AND `count--' IS THREE
+	 * INSTRUCTIONS (#455).
+	 *
+	 * The same lost update as pmap_protect_page's and next_table's, on a
+	 * word the machine-independent tree reads: two processors unmapping at
+	 * once each read the same value, each write it back decremented, and
+	 * one decrement is gone.  The count then drifts ABOVE the truth and
+	 * vm_debug.c sizes an array from it -- and the mirror case, two enters,
+	 * drifts it below, which is what the bench found as an underflow after
+	 * a few thousand map/unmap pairs at -smp 8.
+	 *
+	 * ⚠️ The check has to be the SAME operation, not one before it.
+	 * Reading zero and then decrementing is a decision taken about a value
+	 * that another processor may already have changed; the exchange answers
+	 * what was actually there at the instant it subtracted, so the panic
+	 * below reports a fact.
+	 *
+	 * panic() and not assert(), because Assert() lives in kern/debug.c and
+	 * the machine-independent tree is not in this kernel yet -- and because
+	 * an underflow here means the count has drifted from the tables, which
+	 * is not a condition to carry on from.
+	 */
+	if (atomic_add32((volatile uint32_t *) &pmap->resident_count,
+			 (uint32_t) -1) == 0)
+		panic("pmap: resident_count underflow at va 0x%lx",
+		      (unsigned long) va);
+}
+
+/*
  * Drop the mapping at va and forget it in the physical index too.  Returns
  * the size removed, or zero if there was nothing there.
  *
@@ -722,37 +761,8 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
 
-	if (size != 0) {
-		/*
-		 * 🔥 ONE COUNTER, EIGHT PROCESSORS, AND `count--' IS THREE
-		 * INSTRUCTIONS (#455).
-		 *
-		 * The same lost update as pmap_protect_page's and
-		 * next_table's, on a word the machine-independent tree reads:
-		 * two processors unmapping at once each read the same value,
-		 * each write it back decremented, and one decrement is gone.
-		 * The count then drifts ABOVE the truth and vm_debug.c sizes an
-		 * array from it -- and the mirror case, two enters, drifts it
-		 * below, which is what the bench found as an underflow after a
-		 * few thousand map/unmap pairs at -smp 8.
-		 *
-		 * ⚠️ The check has to be the SAME operation, not one before it.
-		 * Reading zero and then decrementing is a decision taken about
-		 * a value that another processor may already have changed; the
-		 * exchange answers what was actually there at the instant it
-		 * subtracted, so the panic below reports a fact.
-		 *
-		 * panic() and not assert(), because Assert() lives in
-		 * kern/debug.c and the machine-independent tree is not in this
-		 * kernel yet -- and because an underflow here means the count
-		 * has drifted from the tables, which is not a condition to
-		 * carry on from.
-		 */
-		if (atomic_add32((volatile uint32_t *) &pmap->resident_count,
-				 (uint32_t) -1) == 0)
-			panic("pmap_forget: resident_count underflow at "
-			      "va 0x%lx", (unsigned long) va);
-	}
+	if (size != 0)
+		pmap_resident_drop(pmap, va);
 
 	return size;
 }
@@ -999,42 +1009,63 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 	pv_entry_t pv;
 
 	if (prot == VM_PROT_NONE) {
+		struct { pmap_t pmap; uint64_t va; uint64_t size; }
+			   batch[PV_FLUSH_BATCH];
+		unsigned   n = 0;
+		unsigned   i;
+		boolean_t  overflow = FALSE;
+		pv_entry_t dead = PV_ENTRY_NULL;
+
 		/*
-		 * Each removal rewrites the list — the head especially, whose
-		 * successor is copied up into it — so take the head afresh
-		 * every time rather than holding a pointer across the change.
+		 * 🔴 THE WALK IS UNDER THE LOCK NOW, AND THAT IS THE #558 FIX.
+		 *
+		 * It used to take a snapshot instead: lock, copy `pv->pmap' and
+		 * `pv->va' out of the head, unlock, and only then use them.
+		 * That stopped the pair being TORN -- pv_remove() removing the
+		 * head copies the successor's three fields up in three separate
+		 * stores, so an unlocked reader could take the pmap of one
+		 * entry and the va of another and unmap somebody else's page
+		 * without faulting -- but it did nothing about the lifetime.
+		 * Between the unlock and the call, pmap_destroy() on another
+		 * processor can hand `hpmap' back to its zone, and the next
+		 * read of `->root_pa' is whatever now lives at that offset: the
+		 * general protection fault this issue is named for, or silent
+		 * corruption when the value stays canonical.
+		 *
+		 * 🔑 Holding the lock across the body closes it, because the
+		 * teardown has to come through here: pmap_destroy() reaches
+		 * pmap_free_tables(), which calls pv_remove() on every leaf,
+		 * which takes THIS lock.  A destroyer whose entry is still on
+		 * this list is therefore blocked until this walk lets go, and a
+		 * destroyer that got there first has already removed its entry
+		 * and this walk will not see it.
+		 *
+		 * What made that impossible before was the call to
+		 * pmap_forget(): it takes the same lock through pv_remove() and
+		 * this lock is not recursive.  So the body does the three
+		 * things pmap_forget() does, in the forms that may be used
+		 * under the lock -- an unmap that does not shoot down, a
+		 * removal that does not acquire, and the resident count -- and
+		 * the shootdowns and the frees happen after the unlock, which
+		 * is the shape the protect loop below already had.
 		 */
+		pv_lock_page(pa);
 		while (1) {
 			pmap_t		hpmap;
 			uint64_t	hva;
+			uint64_t	size;
+			pv_entry_t	e;
 
 			/*
-			 * 🔴 A SNAPSHOT UNDER THE LOCK, NOT A WALK UNDER IT
-			 * (#558).
-			 *
-			 * This loop cannot hold the page lock across its body:
-			 * pmap_forget() calls pv_remove() on this same page and
-			 * would deadlock against itself -- the shape of #486,
-			 * where a guard on a constant produced a self-deadlock.
-			 *
-			 * What it can do is stop reading a TORN PAIR. Without
-			 * the lock, `pv->pmap' and `pv->va' can come from two
-			 * different entries, because pv_remove() removing the
-			 * head copies the successor's pmap, va and next up in
-			 * three separate stores. The pair would name a real
-			 * address in the wrong address space, and unmapping it
-			 * would not fault -- it would unmap somebody else's
-			 * page, silently.
+			 * The head afresh every time: each removal rewrites the
+			 * list, the head especially, whose successor is copied
+			 * up into it.
 			 */
-			pv_lock_page(pa);
 			pv = pv_head(pa);
-			if (pv == PV_ENTRY_NULL || pv->pmap == PMAP_NULL) {
-				pv_unlock_page(pa);
+			if (pv == PV_ENTRY_NULL || pv->pmap == PMAP_NULL)
 				break;
-			}
 			hpmap = pv->pmap;
 			hva = pv->va;
-			pv_unlock_page(pa);
 
 			/*
 			 * 🔴 #546: THE SAME INVARIANT i386 HAS ASSERTED
@@ -1062,22 +1093,57 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 				      (unsigned long) hva,
 				      (unsigned long) pa);
 
+			size = pmap_unmap_page_noflush(hpmap, hva);
+
 			/*
-			 * ⚠️ WHAT IS STILL OPEN HERE, SAID RATHER THAN LEFT
-			 * (#558). Between the snapshot and this call the entry
-			 * can be removed by another processor and `hpmap' can
-			 * be a pmap that pmap_destroy() has already handed back
-			 * to its zone. The lock above makes the PAIR coherent;
-			 * it does not keep the pmap alive across the gap, and
-			 * nothing here does. Closing it wants either a
-			 * reference taken on the pmap for the length of the
-			 * call, or pmap_forget() split so its pv_remove() is
-			 * done by a caller already holding this lock. Neither
-			 * is done here, and pretending otherwise in a comment
-			 * would be worse than the hole.
+			 * ⚠️ THE ENTRY GOES WHATEVER THE UNMAP ANSWERED, and
+			 * that is not sloppiness about a zero -- it is what
+			 * makes this loop terminate.  The head is re-read every
+			 * turn, so an entry left in place would be read again
+			 * for ever.
+			 *
+			 * 🔑 And a zero here is a legitimate interleaving, not
+			 * a corrupt index: pmap_remove() on another processor
+			 * clears the entry through its own tables and then
+			 * blocks in pv_remove() waiting for this lock.  Its pv
+			 * entry is still on the list while its PTE is already
+			 * gone.  Removing it here is what that processor was
+			 * about to do, and it finds nothing left to remove.
 			 */
-			pmap_forget(hpmap, hva);
+			e = pv_remove_locked(pa, hpmap, hva);
+			if (e != PV_ENTRY_NULL) {
+				e->next = dead;
+				dead = e;
+			}
+
+			if (size == 0)
+				continue;
+
+			pmap_resident_drop(hpmap, hva);
+
+			if (n < PV_FLUSH_BATCH) {
+				batch[n].pmap = hpmap;
+				batch[n].va = hva;
+				batch[n].size = size;
+				n++;
+			} else
+				overflow = TRUE;
 		}
+		pv_unlock_page(pa);
+
+		/*
+		 * Both of these need the lock DOWN: pv_free_chain() takes the
+		 * free list's, which is never held with this one, and a
+		 * shootdown cross-calls processors that may be waiting for it.
+		 */
+		pv_free_chain(dead);
+
+		if (overflow)
+			tlb_flush_all(PMAP_NULL);
+		else
+			for (i = 0; i < n; i++)
+				tlb_flush_range(batch[i].pmap, batch[i].va,
+						batch[i].size);
 		return;
 	}
 
