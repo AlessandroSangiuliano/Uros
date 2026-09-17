@@ -343,6 +343,69 @@ catch_exception_raise_state_identity(mach_port_t exception_port,
 	return KERN_FAILURE;
 }
 
+/*
+ * [4] A COPY THE KERNEL CANNOT MAKE MUST FAIL, AND THIS TASK MUST SURVIVE IT.
+ *
+ * Arm three covers the copy that faults and RECOVERS -- a page the task owns
+ * and has not touched, which vm_fault brings in.  Nothing covered the other
+ * half: an address the task does not own at all, where the copy has to give up
+ * through the recovery table and answer an error.
+ *
+ * 🔑 The two are different mechanisms, not two sizes of the same one.  Arm
+ * three exercises vm_fault; this exercises EX_TABLE.  A copy routine can pass
+ * arm three and, on the unrecoverable address, fault the KERNEL -- which is a
+ * panic, not an error return -- or loop for ever retrying an instruction
+ * vm_fault keeps answering success to, which is exactly what #468 did for
+ * months while every self-test passed.
+ *
+ * ⚠️ The address is in the user half and deliberately far from anything this
+ * task maps, so the range check inside copyin() lets it through and the page
+ * tables are what refuse it.  An address in the KERNEL half would be rejected
+ * by the range check and would test that instead -- a different guard, and the
+ * one that is easy to pass by accident.
+ */
+static int
+arm_four_copy_that_must_fail(void)
+{
+	mach_port_t		port = MACH_PORT_NULL;
+	mach_msg_header_t	*bad;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &port);
+	if (kr != KERN_SUCCESS) {
+		printf("fault_test: [4] mach_port_allocate failed (%d) — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+
+	/*
+	 * A user address this task has never mapped.  Well below VM_MAX_ADDRESS
+	 * so the range check passes it, and nowhere near the heap, the stack or
+	 * the region arm one allocated.
+	 */
+	bad = (mach_msg_header_t *) (uintptr_t) 0x0000600000000000ULL;
+
+	mr = mach_msg(bad, MACH_SEND_MSG, sizeof (mach_msg_header_t), 0,
+		      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+
+	printf("fault_test: [4] a send whose header is at %p returned 0x%x%s\n",
+	       (void *) bad, (unsigned) mr,
+	       (mr == MACH_SEND_INVALID_DATA)
+	       ? " — MACH_SEND_INVALID_DATA: the copy gave up and said so"
+	       : " — WRONG, expected MACH_SEND_INVALID_DATA (0x10000002)");
+
+	/*
+	 * 🔑 And the program is still here to print this, which is half the
+	 * claim: a kernel that faulted on that address instead of recovering
+	 * would not have come back to user mode at all.
+	 */
+	(void) mach_port_deallocate(mach_task_self(), port);
+
+	return mr == MACH_SEND_INVALID_DATA;
+}
+
 static int
 arm_two_exception_to_the_task(void)
 {
@@ -439,9 +502,10 @@ main(int argc, char **argv)
 
 	passed += arm_one_fault_and_resume();
 	passed += arm_three_copyin_not_resident();
+	passed += arm_four_copy_that_must_fail();
 	passed += arm_two_exception_to_the_task();
 
-	printf("fault_test: %d of 3 arms passed\n", passed);
+	printf("fault_test: %d of 4 arms passed\n", passed);
 
 	/*
 	 * 🔴 IT ENDS, and the note that used to be here said it must not.
