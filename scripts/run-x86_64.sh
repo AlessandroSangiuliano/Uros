@@ -523,25 +523,38 @@ done
 # act_test was in neither until #425 -- it could stop dead and be passed by
 # omission -- which is what a list nobody re-reads does.
 #
-# ⚠️⚠️ THE BENCH-ONLY BUNDLE HAS NO MARKER IN THIS LIST, AND IT CANNOT HAVE ONE.
+# ⚠️⚠️ AND THE BENCH-ONLY BUNDLE ENDS HERE TOO, WHICH IS #489 COMING BACK.
 #
 # UROS_BUNDLE_BENCH_ONLY builds a bundle of name_server + ipc_bench, so
-# cow_test never runs and nothing below ever matches: every such boot is
-# reported "FAILED: never reached an end this script recognises", INCLUDING the
-# ones that did all of their work.  And ipc_bench closes by design with
-# bootstrap_completed() and `for(;;) thread_switch(DEPRESS)' -- it does not
-# exit -- so the watchdog is what ends those runs, always.
+# cow_test never runs; with no line of its own below, nothing matched such a
+# boot and every one was reported "FAILED: never reached an end this script
+# recognises", INCLUDING the ones that did all of their work.  ipc_bench closes
+# by design with bootstrap_completed() and `for(;;) thread_switch(DEPRESS)' --
+# it does not exit -- so the watchdog ended those runs, always: the whole
+# budget of seconds on every boot of every campaign, and an hour of #558's hunt
+# spent reading that verdict as a wedge.
 #
-# 🔴 Adding "Benchmark complete" here would be worse than the gap: in the FULL
-# bundle ipc_bench can finish before cow_test, the marker would fire early, and
-# the entries after it would be cut off and the run reported as passed.  That
-# is exactly the failure the paragraph above records.
+# ❌ This comment said the marker COULD NOT BE ADDED, because in the full
+# bundle ipc_bench might finish before cow_test and cut the run short.  That is
+# wrong, and the rule six paragraphs up is what makes it wrong: the marker must
+# be the last thing the bundle STARTS, and ipc_bench always is.
+# servers/bootstrap/CMakeLists.txt appends ${_IPC_BENCH_LINE} at the END of the
+# full bundle's conf, and the bench-only conf is `name_server' then
+# `ipc_bench'.  There is no bundle in which this line is printed by an entry
+# that is not the last one -- and in a bundle without the benchmark it is never
+# printed at all.
 #
-# 🔑 So a bench-only boot is classified FROM ITS LOG by the caller, which is
-# what ~/uros-tests/558-caccia.sh does ("Benchmark complete" => clean).  Read
-# that way, this script's FAILED verdict on such a run says nothing about the
-# kernel -- and reading it as a wedge cost an hour of #558's hunt.
-DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|cow_test: [0-9]+ of [0-9]+ arms passed|Assertion failed|panic\(cpu'
+# 🔑 Nor can it hide a reperto, and that was checked rather than argued: in all
+# three of the #531 panic logs to hand, `panic(cpu' is present and this line is
+# absent.  A boot that panics dies INSIDE the benchmark and ends on the
+# terminator it already had.  What the marker does cut is the quiet_census
+# output of the idle loop, which is what such a boot prints after its work --
+# the same output that made the idle loop look like a wedge.
+#
+# ⚠️ What this does NOT fix: UROS_BUNDLE_IPC_BENCH, the full bundle plus the
+# benchmark, still ends on cow_test -- which fires first and kills ipc_bench
+# where it stands.  That option's own comment names the work; this is not it.
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift
