@@ -1477,23 +1477,25 @@ void pmap_protect_kernel(void)
  * brackets below become nothing, because their instructions would be
  * invalid opcodes.
  */
-static int smap_on;
+/*
+ * 🔑 NOT static any more, and the brackets are inline in <pmap/pmap.h> (#554).
+ *
+ * They were two out-of-line calls in this file, reached from x86_64/lib/copy.c
+ * -- a different translation unit, so a real call and return around each of
+ * two instructions, on every copy the kernel makes across the user boundary.
+ * The phase profile put the pair of copyins in the futex round trip at 210
+ * cycles for eight bytes, and this is part of why.
+ *
+ * The header already said what to do: "A branch for now; the day it is on a
+ * hot path it becomes patched code, which is what the flag exists to make
+ * possible later without changing any caller."  It is on a hot path, and this
+ * is the step before that one: the branch stays, the calls go.
+ */
+int pmap_smap_on;
 
 int pmap_smap_enabled(void)
 {
-	return smap_on;
-}
-
-void pmap_user_access_begin(void)
-{
-	if (smap_on)
-		__asm__ volatile("stac" ::: "cc", "memory");
-}
-
-void pmap_user_access_end(void)
-{
-	if (smap_on)
-		__asm__ volatile("clac" ::: "cc", "memory");
+	return pmap_smap_on;
 }
 
 uint64_t pmap_enable_smep_smap(void)
@@ -1519,7 +1521,7 @@ uint64_t pmap_enable_smep_smap(void)
 	 */
 	if (cpu_has_smap()) {
 		want |= CR4_SMAP;
-		smap_on = 1;
+		pmap_smap_on = 1;
 	}
 
 	if (want)
