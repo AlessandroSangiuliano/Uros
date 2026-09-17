@@ -491,6 +491,24 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # It matters more now: the terminal double-fault self-test moved to entry 2
   # when the ordinary boot went on into the machine-independent kernel, and a
   # test nothing can select is a test that has stopped running.
+  # 🔴 NO VECTOR INSTRUCTION IN UNDECLARED KERNEL CODE (#561).
+  #
+  # The switch stopped carrying a thread's vector state for threads of the
+  # kernel task, which is worth 114 ns a switch and is correct only while
+  # kernel code contains no vector instruction outside the places that declare
+  # one.  -mgeneral-regs-only stops the COMPILER; it does not stop hand-written
+  # asm, and this tree has some on purpose.
+  #
+  # ⚠️ POST_BUILD on the kernel itself, not a target somebody has to remember:
+  # #549 found three checkers in scripts/ that nothing ran -- zero call sites in
+  # CMake, zero in any script -- and a check nobody runs is a check that is not
+  # there.  This one fails the link that produced the binary it read.
+  add_custom_command(TARGET mach_kernel POST_BUILD
+    COMMAND ${CMAKE_SOURCE_DIR}/../scripts/kernel-vector-check.py
+            $<TARGET_FILE:mach_kernel>
+    COMMENT "#561: checking no undeclared kernel code uses vector registers"
+    VERBATIM)
+
   add_custom_target(uros_iso
     COMMAND ${CMAKE_COMMAND} -E make_directory ${X86_64_ISO_DIR}/boot/grub
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:mach_kernel>
