@@ -112,13 +112,62 @@ copy_with_recovery(const void *from, void *to, vm_size_t len)
 	 */
 	pmap_user_access_begin();
 
-	__asm__ volatile(
-		"1:\n\t"
-		"rep movsb\n\t"
-		"2:\n"
-		EX_TABLE(1, 2)
-		: "+D"(to), "+S"(from), "+c"(len), "+r"(failed)
-		: : "memory");
+	/*
+	 * 🔴 A WORD IS NOT A STRING, AND `rep movsb' CHARGES FOR THE STRING
+	 * (#554).
+	 *
+	 * The phase profile of the futex round trip put its two copyins of ONE
+	 * FOUR-BYTE WORD at 210 cycles.  `rep movsb' earns its keep by moving
+	 * cache lines, and it pays a fixed start-up to get going that a
+	 * four-byte copy pays in full and gets nothing for.  The kernel's small
+	 * copies are not rare: a futex word, a port name, a size.
+	 *
+	 * So the two word-sized lengths take one load and one store instead.
+	 * Everything else is unchanged and still `rep movsb', because above a
+	 * few bytes the string move is the right instruction and hand-unrolling
+	 * it would be an entry in the recovery table per access.
+	 *
+	 * 🔑 THE CONTRACT IS THE SAME ONE, DELIBERATELY.  Each of these paths
+	 * leaves the count register zero when it completes and untouched when it
+	 * faults, and every faulting access resumes at the label after it -- so
+	 * the `len != 0' test below decides all three the same way, and the
+	 * recovery lands INSIDE this block and falls out through
+	 * pmap_user_access_end() exactly as the string form does.  A recovery
+	 * that jumped anywhere else would leave EFLAGS.AC set on a path out of
+	 * the copy.
+	 */
+	if (len == 4)
+		__asm__ volatile(
+			"1:\n\t"
+			"movl (%%rsi),%%eax\n\t"
+			"2:\n\t"
+			"movl %%eax,(%%rdi)\n\t"
+			"xorl %%ecx,%%ecx\n\t"
+			"3:\n"
+			EX_TABLE(1, 3)
+			EX_TABLE(2, 3)
+			: "+D"(to), "+S"(from), "+c"(len), "+r"(failed)
+			: : "rax", "memory");
+	else if (len == 8)
+		__asm__ volatile(
+			"1:\n\t"
+			"movq (%%rsi),%%rax\n\t"
+			"2:\n\t"
+			"movq %%rax,(%%rdi)\n\t"
+			"xorl %%ecx,%%ecx\n\t"
+			"3:\n"
+			EX_TABLE(1, 3)
+			EX_TABLE(2, 3)
+			: "+D"(to), "+S"(from), "+c"(len), "+r"(failed)
+			: : "rax", "memory");
+	else
+		__asm__ volatile(
+			"1:\n\t"
+			"rep movsb\n\t"
+			"2:\n"
+			EX_TABLE(1, 2)
+			: "+D"(to), "+S"(from), "+c"(len), "+r"(failed)
+			: : "memory");
 
 	pmap_user_access_end();
 

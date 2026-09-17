@@ -28,6 +28,7 @@
 #include <i386/sysenter.h>
 #include <i386/proc_reg.h>
 #include <i386/cpuid.h>
+#include <kern/syscall_profile.h>	/* #554 */
 #include <i386/seg.h>
 #include <i386/cpu_number.h>
 #include <kern/misc_protos.h>
@@ -173,3 +174,41 @@ sysenter_ap_init(int mycpu)
 
 	sysenter_setup_msrs((unsigned int)&sysenter_stub[mycpu].kstack);
 }
+
+#if	SYSCALL_PROFILE
+/*
+ * The two machine-dependent lines of the trap phase profile, for i386 (#554).
+ *
+ * 🔴 THIS TARGET TAKES NO TIMESTAMP IN ITS ENTRY STUB, and that is said rather
+ * than worked around.  x86-64's stub stores one in the per-processor block
+ * because #411 was written for it; i386's entry is older assembly that nothing
+ * has needed to touch, and touching it to win one column would be a change to
+ * the trap path of the only mature target in the tree.
+ *
+ * So the answer here is zero, which <kern/syscall_profile.h> reads as "no stub
+ * timestamp": the sample opens from the clock at the first C instruction and
+ * the dump prints the entry as a dash.  Every other phase is measured the same
+ * way on both targets, which is what a comparison needs.
+ *
+ * ⚠️ What this costs the comparison is exactly one column, and it is the column
+ * x86-64 wins by 3.7x anyway (mach_null 0.11 -> 0.03): the question #554 asks
+ * is about the phases AFTER the entry.
+ */
+uint64_t
+syscall_profile_entry_tsc(void)
+{
+	return 0;
+}
+
+/*
+ * Likewise: the return path's cost is measured by the stub that owns it, and
+ * this target's does not.  Zero samples means the dump says the return is
+ * unknown instead of reporting a mean of nothing.
+ */
+void
+syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count)
+{
+	*cycles = 0;
+	*count  = 0;
+}
+#endif	/* SYSCALL_PROFILE */

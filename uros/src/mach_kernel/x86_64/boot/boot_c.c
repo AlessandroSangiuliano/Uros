@@ -965,6 +965,65 @@ static void user_pmap_selftest(void)
 	}
 
 	/*
+	 * 🔴 AND AT EVERY LENGTH, because the copy is allowed to take a
+	 * different route for different ones (#554).
+	 *
+	 * The check above moves four bytes.  A copy routine that handles small
+	 * lengths with one instruction and long ones with `rep movsb' passes it
+	 * while getting every other length wrong, and the wrongness would show
+	 * up as a message body silently short by a byte -- the kind of defect
+	 * that surfaces three layers away from here.
+	 *
+	 * So: each length written through copyout() and read back through
+	 * copyin(), with a pattern that makes a short copy visible (the byte
+	 * after the range must stay what it was) and a marker that makes a copy
+	 * of the wrong bytes visible.
+	 */
+	{
+		static const unsigned sizes[] = { 1, 2, 3, 4, 5, 8, 16, 64, 129 };
+		unsigned char	 want[132];
+		unsigned char	 back[132];
+		unsigned	 si, i;
+		int		 bad = 0;
+
+		for (si = 0; si < sizeof sizes / sizeof sizes[0]; si++) {
+			unsigned	n = sizes[si];
+			boolean_t	wr, rd;
+
+			for (i = 0; i < n + 2; i++)
+				want[i] = (unsigned char) (0x40 + si * 16 + i);
+			for (i = 0; i < n + 2; i++)
+				back[i] = 0xa5;
+
+			wr = copyout((const char *) want,
+				     (char *)(uintptr_t)(USER_TEST_VA + 64), n);
+			rd = copyin((const char *)(uintptr_t)(USER_TEST_VA + 64),
+				    (char *) back, n);
+
+			if (wr || rd) {
+				bad = 1;
+				break;
+			}
+			for (i = 0; i < n; i++)
+				if (back[i] != want[i]) {
+					bad = 1;
+					break;
+				}
+			/* The byte past the range must not have moved. */
+			if (back[n] != 0xa5)
+				bad = 1;
+			if (bad)
+				break;
+		}
+
+		kputs(bad
+		      ? "UrMach x86-64: copyout/copyin at 1..129 bytes — WRONG, "
+			"a length was copied short, long or wrong\r\n"
+		      : "UrMach x86-64: copyout/copyin agree at every length "
+			"from 1 to 129, and copy nothing past the range\r\n");
+	}
+
+	/*
 	 * And what a trap taken INSIDE the window sees (#468).
 	 *
 	 * The processor does not clear EFLAGS.AC on a fault, so a trap raised

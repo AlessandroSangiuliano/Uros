@@ -86,6 +86,14 @@ endif()
 # look exactly like a measuring build and behave like an ordinary one.
 option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF)
 option(UROS_SYSCALL_PROFILE "Build the #411 Mach trap phase profile, which #392 consumes" OFF)
+# 🔑 WHICH trap the profile follows (#554).  It filters on one slot of the table
+# in kern/syscall_sw.c: 33 is urmach_msg, #392's subject; 42 is urmach_futex,
+# #554's.  A cache variable and not a boot argument because the trap under study
+# is a property of the EXPERIMENT, and this build already carries the switch that
+# compiles the instrument in -- a run whose subject is not visible in its
+# configuration is a run whose log cannot be re-read a month later.
+set(UROS_SYSCALL_PROFILE_TRAP 33
+    CACHE STRING "Which Mach trap the phase profile follows (33=urmach_msg, 42=urmach_futex)")
 
 # #385 layer four: poison a page on its way into the free list and verify it on
 # the way out.  Forensic, not an invariant: it fingerprints whoever wrote a page
@@ -293,7 +301,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       # vector state, which means no floating point anywhere in it (#453).
       KERNEL_FLOAT_OK=0)
   if(UROS_SYSCALL_PROFILE)
-      list(APPEND KERNEL_DEFINES_BARE SYSCALL_PROFILE=1)
+      list(APPEND KERNEL_DEFINES_BARE SYSCALL_PROFILE=1
+           SYSCALL_PROFILE_TRAP=${UROS_SYSCALL_PROFILE_TRAP})
+      message(STATUS "#411 trap phase profile: ON, following trap "
+                     "${UROS_SYSCALL_PROFILE_TRAP} (x86_64)")
   endif()
   if(UROS_FAULT_PROFILE)
       list(APPEND KERNEL_DEFINES_BARE FAULT_PROFILE=1)
@@ -975,7 +986,8 @@ endif()
 # what this buys here is that the facility is COMPILED on both targets and
 # cannot rot behind a switch only one of them can turn on.
 if(UROS_SYSCALL_PROFILE)
-    list(APPEND KERNEL_DEFINES -DSYSCALL_PROFILE=1)
+    list(APPEND KERNEL_DEFINES -DSYSCALL_PROFILE=1
+         -DSYSCALL_PROFILE_TRAP=${UROS_SYSCALL_PROFILE_TRAP})
 endif()
 if(UROS_FAULT_PROFILE)
     list(APPEND KERNEL_DEFINES -DFAULT_PROFILE=1)

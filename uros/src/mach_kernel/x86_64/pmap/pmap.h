@@ -317,8 +317,32 @@ static inline uint64_t pmap_flags_for_prot(vm_prot_t prot)
  * hot path it becomes patched code, which is what the flag exists to make
  * possible later without changing any caller.
  */
-void pmap_user_access_begin(void);
-void pmap_user_access_end(void);
+/*
+ * 🔴 INLINE, because they sit on every copy across the user boundary (#554).
+ *
+ * These were two calls into x86_64/pmap/pmap.c from x86_64/lib/copy.c: a call
+ * and a return around each of two instructions, on a path the whole kernel
+ * uses.  The comment above ends "the day it is on a hot path it becomes
+ * patched code" -- this is the step before that, and it costs nothing in
+ * clarity: the branch is still here and still on one flag.
+ *
+ * ⚠️ The flag is READ here and written only by pmap_enable_smep_smap().  It is
+ * not volatile and does not need to be: it is set once, before any user memory
+ * exists to touch, and never cleared.
+ */
+extern int	pmap_smap_on;
+
+static __inline__ void pmap_user_access_begin(void)
+{
+	if (pmap_smap_on)
+		__asm__ volatile("stac" ::: "cc", "memory");
+}
+
+static __inline__ void pmap_user_access_end(void)
+{
+	if (pmap_smap_on)
+		__asm__ volatile("clac" ::: "cc", "memory");
+}
 
 /* Whether SMAP is actually on, which decides whether the pair does anything. */
 int pmap_smap_enabled(void);
