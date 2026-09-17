@@ -21,6 +21,67 @@
 static uint64_t area_size = 512;	/* the legacy form, until asked */
 static int use_xsave;
 static int use_xsaveopt;
+static int use_xsavec;
+static int use_xsaves;
+static int have_xsaves_unused;	/* offered by the processor, not taken */
+
+/*
+ * 🔴 THE SAVE AND THE RESTORE ARE ONE DECISION, NOT TWO (#561).
+ *
+ * XSAVEC and XSAVES write the COMPACTED format; XSAVE and XSAVEOPT write the
+ * standard one.  XRSTOR reads either -- it looks at XCOMP_BV -- but XRSTORS
+ * reads ONLY the compacted one and faults on a standard image.  So choosing
+ * the save chooses the restore, and it also chooses what fpu_area_init() must
+ * leave behind: a thread's FIRST restore reads an area no save has ever
+ * written, and an image in the wrong format faults on the first switch to
+ * every new thread.
+ */
+#define	XSTATE_BV_OFFSET	512	/* which components the image carries */
+#define	XCOMP_BV_OFFSET		520	/* bit 63: the image is compacted     */
+#define	XCOMP_BV_COMPACTED	(1ULL << 63)
+
+#define	MSR_IA32_XSS		0xDA0
+
+/*
+ * 🔴 XSAVES IS DETECTED AND NOT USED, AND THAT IS A STATEMENT ABOUT THIS TREE
+ * RATHER THAN ABOUT THE INSTRUCTION (#561).
+ *
+ * It is the best rung on paper: the compacted format AND the modified
+ * optimisation, where XSAVEC has only the first and XSAVEOPT only the second.
+ * The code for it is written, a few lines up and a few lines down.
+ *
+ * ⚠️ NOBODY HAS EVER RUN IT.  This machine's processor does not offer XSAVES
+ * (it has xsavec and xsaveopt), and qemu does not offer it under TCG either --
+ * measured, by asking for it: `-cpu Skylake-Server' and `-cpu max' both come
+ * back announcing XSAVEOPT.  So the branch cannot be exercised here, and a
+ * branch nobody has executed is not support, it is a hope with a plausible
+ * shape.
+ *
+ * 🔑 And it cannot be made safe by trying it: the failure mode of a wrong
+ * compacted header is XRSTORS taking a #GP on the first switch to every
+ * thread, not a wrong value a self-test could compare.  A probe that cannot
+ * survive the failure it is probing for is not a probe.
+ *
+ * 🔑 AND THE MACHINE THAT CAN SETTLE IT IS IN THE INVENTORY: OMEGA, the
+ * i9-13900K.  Raptor Lake has XSAVES, so this is a short errand rather than an
+ * open question -- which is why the code stays here instead of being deleted:
+ *
+ *	1. set this to 1;
+ *	2. boot on OMEGA and read the announcement: XSAVES/XRSTORS;
+ *	3. fpu_stress (-F, more than one processor) must PASS there -- that is
+ *	   the test that a thread's sixteen vector registers survive a switch,
+ *	   and it is the only thing that can tell a correct compacted header
+ *	   from a lucky one;
+ *	4. re-run the whole ladder, because the point of that script is that
+ *	   every rung is WALKED, not that one of them was;
+ *	5. and measure it against XSAVEOPT the way XSAVEC was measured below.
+ *	   XSAVES has both properties, so it should win -- "should" being
+ *	   exactly the word that was wrong about XSAVEC.
+ *
+ * Until step 3 has happened on that machine, this stays 0 and the processor's
+ * offer is announced and declined.
+ */
+#define	FPU_ALLOW_XSAVES	0
 
 uint64_t fpu_area_size(void)
 {
@@ -32,11 +93,31 @@ int fpu_uses_xsave(void)
 	return use_xsave;
 }
 
+/*
+ * Whether the restore will be XRSTORS, which is the question fpu_area_init()
+ * has to answer before it writes a header (#561).
+ */
+int fpu_uses_xsaves(void)
+{
+	return use_xsaves;
+}
+
 const char *fpu_save_instruction(void)
 {
+	if (use_xsaves)
+		return "XSAVES/XRSTORS";
+	/*
+	 * ⚠️ Said out loud when the processor offers a rung this kernel is not
+	 * taking, so that a log from a machine with XSAVES does not look like a
+	 * machine without it.
+	 */
 	if (use_xsaveopt)
-		return "XSAVEOPT";
-	return use_xsave ? "XSAVE" : "FXSAVE";
+		return have_xsaves_unused ? "XSAVEOPT/XRSTOR (XSAVES present, "
+					    "unexercised — see fpu.c)"
+					  : "XSAVEOPT/XRSTOR";
+	if (use_xsavec)
+		return "XSAVEC/XRSTOR";
+	return use_xsave ? "XSAVE/XRSTOR" : "FXSAVE/FXRSTOR";
 }
 
 void fpu_init(void)
@@ -117,13 +198,82 @@ void fpu_init(void)
 	 * consistent to read, which matters for the state a debugger will
 	 * eventually ask for.
 	 *
-	 * The standard format, deliberately — XSAVEC's compacted one saves
-	 * space in the area and costs a different restore path, and space is
-	 * not what is scarce here.
+	 * ── The ladder, and the processor decides which rung (#561) ───
+	 *
+	 * ❌ This file stopped at XSAVEOPT, and said why: "The standard format,
+	 * deliberately -- XSAVEC's compacted one saves space in the area and
+	 * costs a different restore path, and space is not what is scarce
+	 * here."  That weighed a trade with one side missing.  #554 then
+	 * measured the restore at 165 ns a round trip, and the compacted form
+	 * is smaller to read -- so the question was never about space.
+	 *
+	 * 🔑 AND THE ORDER BETWEEN XSAVEC AND XSAVEOPT IS A MEASUREMENT, NOT A
+	 * RANKING.  XSAVEC compacts the image, which shortens the restore;
+	 * XSAVEOPT keeps the modified optimisation, which can skip the save
+	 * almost entirely.  Neither dominates on paper.
+	 *
+	 * ❌ It was written the other way round first, on the reasoning that a
+	 * smaller image is a shorter restore -- and the measurement refused it.
+	 * #554's ping-pong, median of 5 boots each, same kernel with the
+	 * feature offered or withheld by qemu so that only the rung differs:
+	 *
+	 *	XSAVEC    0.560 us
+	 *	XSAVEOPT  0.555 us
+	 *
+	 * Five nanoseconds apart, inside a spread of 0.554..0.572 -- so
+	 * compaction buys nothing here, because these threads use the
+	 * components anyway and there is little to compact, while the modified
+	 * optimisation does skip work on the save.  Indistinguishable is not a
+	 * reason to change a default, so XSAVEOPT keeps the place it had and
+	 * XSAVEC sits below it, ahead of plain XSAVE where it is unambiguously
+	 * better.
+	 *
+	 * ⚠️ On a machine with wider state -- AVX-512, where the standard image
+	 * is much larger than what a thread actually uses -- the answer could
+	 * be the other way.  This order is this machine's, and the script that
+	 * produced it is in ~/uros-tests.
+	 *
+	 * ⚠️ A kernel does not get to assume the part it boots on.  Every rung
+	 * is detected, and every rung is exercised: qemu can offer or withhold
+	 * each of these features, so the path a processor without XSAVES takes
+	 * is not a path nobody has run.
 	 */
 	cpuid_count(0xD, 1, &a, &b, &c, &d);
 	if (a & (1U << 0))
 		use_xsaveopt = 1;
+	if (a & (1U << 1))
+		use_xsavec = 1;
+	if (FPU_ALLOW_XSAVES && (a & (1U << 3)))
+		use_xsaves = 1;
+	else if (a & (1U << 3))
+		have_xsaves_unused = 1;
+
+	if (use_xsaves) {
+		/*
+		 * XSAVES also carries SUPERVISOR components, chosen by
+		 * IA32_XSS, and this kernel has none.  Written explicitly
+		 * rather than trusted to be zero from reset: the size asked
+		 * for below is the size for XCR0 AND XSS together, so a bit
+		 * left set by firmware would size the area for state the
+		 * kernel never saves.
+		 */
+		wrmsr(MSR_IA32_XSS, 0);
+	}
+
+	/*
+	 * And the size again, because the compacted forms need a different one:
+	 * CPUID.(EAX=0DH,ECX=1):EBX is the size of the COMPACTED layout, which
+	 * is what XSAVEC and XSAVES write and is smaller than the standard one.
+	 *
+	 * ⚠️ Never below the header: fpu_area_init() leaves a legacy-plus-header
+	 * image behind for the first restore, and an area sized for what the
+	 * compacted form happens to need must still hold it.
+	 */
+	if (use_xsaves || (use_xsavec && !use_xsaveopt)) {
+		cpuid_count(0xD, 1, &a, &b, &c, &d);
+		if (b >= XCOMP_BV_OFFSET + 8)
+			area_size = b;
+	}
 }
 
 /*
@@ -139,8 +289,16 @@ void fpu_init(void)
  */
 void fpu_save(void *area)
 {
-	if (use_xsaveopt)
+	if (use_xsaves)
+		__asm__ volatile("xsaves (%0)"
+				 : : "r"(area), "a"(0xFFFFFFFFU), "d"(0xFFFFFFFFU)
+				 : "memory");
+	else if (use_xsaveopt)
 		__asm__ volatile("xsaveopt (%0)"
+				 : : "r"(area), "a"(0xFFFFFFFFU), "d"(0xFFFFFFFFU)
+				 : "memory");
+	else if (use_xsavec)
+		__asm__ volatile("xsavec (%0)"
 				 : : "r"(area), "a"(0xFFFFFFFFU), "d"(0xFFFFFFFFU)
 				 : "memory");
 	else if (use_xsave)
@@ -153,7 +311,18 @@ void fpu_save(void *area)
 
 void fpu_restore(const void *area)
 {
-	if (use_xsave)
+	/*
+	 * 🔑 XRSTORS FOR XSAVES AND XRSTOR FOR EVERYTHING ELSE, and the pair
+	 * is not interchangeable in either direction (#561): XRSTOR reads
+	 * whichever format XCOMP_BV says, XRSTORS reads only the compacted
+	 * one.  Which is why fpu_area_init() below has to know which of these
+	 * will read what it writes.
+	 */
+	if (use_xsaves)
+		__asm__ volatile("xrstors (%0)"
+				 : : "r"(area), "a"(0xFFFFFFFFU), "d"(0xFFFFFFFFU)
+				 : "memory");
+	else if (use_xsave)
 		__asm__ volatile("xrstor (%0)"
 				 : : "r"(area), "a"(0xFFFFFFFFU), "d"(0xFFFFFFFFU)
 				 : "memory");
@@ -192,5 +361,21 @@ void fpu_area_init(void *area)
 	 * carries.  Zero means "none of them", and the restore then loads
 	 * every component's *initial* state — which is exactly what a new
 	 * thread wants, and cheaper than carrying a copy of it.
+	 *
+	 * 🔴 AND THE FORMAT HAS TO BE THE ONE THE RESTORE WILL READ (#561).
+	 *
+	 * The zeroing above leaves XCOMP_BV clear, which means STANDARD
+	 * format.  XRSTOR accepts that; XRSTORS does not -- it faults on
+	 * anything but a compacted image -- and this area is read by the
+	 * restore before any save has ever written it, on the first switch to
+	 * every thread the system creates.  So on a processor where XSAVES was
+	 * chosen, the header says compacted with no components: bit 63 set,
+	 * the rest zero, XSTATE_BV still zero.
+	 *
+	 * ⚠️ Not set unconditionally.  A compacted header handed to a plain
+	 * XRSTOR is equally wrong, and the wrongness would arrive as a fault
+	 * in the switch rather than here.
 	 */
+	if (fpu_uses_xsaves())
+		*(uint64_t *)(bytes + XCOMP_BV_OFFSET) = XCOMP_BV_COMPACTED;
 }

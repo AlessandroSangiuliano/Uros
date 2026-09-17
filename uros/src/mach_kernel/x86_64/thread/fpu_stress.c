@@ -31,6 +31,8 @@
 
 #include <x86_64/thread/fpu_stress.h>
 #include <x86_64/thread/fpu.h>
+#include <x86_64/thread/context.h>
+#include <x86_64/cpu/percpu.h>	/* #561: this file asks for vector state */
 #include <x86_64/time/tsc.h>
 #include <x86_64/cpu/regs.h>
 #include <kern/misc_protos.h>
@@ -136,6 +138,25 @@ fpu_stress_run(void)
 
 		thread_swappable(th->top_act, FALSE);
 
+		/*
+		 * 🔴 THIS TEST IS THE EXCEPTION THE RULE IS WRITTEN AROUND
+		 * (#561).
+		 *
+		 * A thread of the kernel task does not have its vector state
+		 * carried across a switch, because kernel code contains no
+		 * vector instruction -- the build forbids the compiler to emit
+		 * one and a checker fails the build if one appears.  This file
+		 * writes them BY HAND, which is the whole point of it: it asks
+		 * whether a pattern held in all sixteen registers survives
+		 * being taken off the processor.
+		 *
+		 * So it asks for what it is about to use.  ⚠️ Without this line
+		 * the test would fail -- correctly, and for the wrong reason:
+		 * it would be reporting that this file did not declare itself,
+		 * not that the switch is broken.
+		 */
+		context_needs_vector_state(&th->top_act->mact.pcb->ctx);
+
 		s = splsched();
 		thread_lock(th);
 		act = th->top_act;
@@ -216,4 +237,5 @@ fpu_stress_run(void)
 	       "second, each holding a different pattern in all sixteen "
 	       "vector registers, and every one of them read its own back "
 	       "(%s)\n", FPU_STRESS_THREADS, fpu_slot_want, fpu_save_instruction());
+
 }

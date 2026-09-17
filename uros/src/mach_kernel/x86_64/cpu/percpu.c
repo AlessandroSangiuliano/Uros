@@ -10,6 +10,7 @@
 #include <cpu/desc.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
+#include <mach/machine.h>		/* machine_slot[] (#561) */
 #include <kern/syscall_profile.h>	/* #411: the entry stub's clock reading */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
@@ -81,6 +82,42 @@ static void deny_user_segment_bases(void)
 	if (cr4 & CR4_FSGSBASE)
 		write_cr4(cr4 & ~CR4_FSGSBASE);
 }
+
+#if	CONTEXT_FPU_COUNT
+/*
+ * The #561 counters summed across the running processors.  Here rather than in
+ * thread/context.c because percpu_va() is this file's own, and where the blocks
+ * live is what this file exists to keep to itself.
+ *
+ * ⚠️ No lock: a count of switches taken by a processor that is still running is
+ * a moving number whatever is held while it is read, and what a reader wants
+ * from it is the order of magnitude and whether the thing fires at all.
+ */
+void context_fpu_counts(unsigned long long *switches,
+			unsigned long long *saves_skipped,
+			unsigned long long *restores_skipped)
+{
+	uint64_t sw = 0, sa = 0, re = 0;
+
+	for (int i = 0; i < NCPUS; i++) {
+		struct percpu *p;
+
+		if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+			continue;
+		p = (struct percpu *)(uintptr_t)percpu_va((uint32_t) i);
+		sw += p->fpu_switches;
+		sa += p->fpu_saves_skipped;
+		re += p->fpu_restores_skipped;
+	}
+
+	if (switches)
+		*switches = sw;
+	if (saves_skipped)
+		*saves_skipped = sa;
+	if (restores_skipped)
+		*restores_skipped = re;
+}
+#endif	/* CONTEXT_FPU_COUNT */
 
 void percpu_activate(uint32_t cpu_id)
 {

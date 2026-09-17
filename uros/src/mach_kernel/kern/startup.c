@@ -218,6 +218,9 @@
 #include <kern/startup.h>
 #include <kern/task.h>
 #include <kern/thread.h>
+#ifdef	__x86_64__
+#include <x86_64/thread/context.h>	/* #561 */
+#endif
 #include <kern/thread_swap.h>
 #include <kern/time_out.h>
 #include <kern/timer.h>
@@ -455,6 +458,34 @@ start_kernel_threads(void)
 #if	NORMA_VM
 	(void) kernel_thread(kernel_task, vm_object_thread, (char *) 0);
 #endif	/* NORMA_VM */
+
+#ifdef	__x86_64__
+	/*
+	 * 🔑 SAY WHETHER THE VECTOR-STATE EXEMPTION IS LIVE, ONCE, HERE (#561).
+	 *
+	 * The kernel threads THIS FUNCTION creates are up -- the idle threads,
+	 * the reaper, the scheduler and timeout threads -- and it is a moment
+	 * every boot reaches, which the two places tried before are not.
+	 *
+	 * ⚠️ It is a FLOOR and not a total: the clock and device services below
+	 * create threads of their own, and a census taken later counts more.
+	 * Said because the first version of this comment claimed the number was
+	 * final, and the two numbers disagreeing is exactly what would make a
+	 * reader distrust the honest one.  The
+	 * switch-path counters were taken off the hot path (three increments
+	 * per switch, for ever, to learn something learned once), and
+	 * quiet_census only reports when the machine goes quiet for five
+	 * hundred passes, which a busy one never does.
+	 *
+	 * ⚠️ A ZERO HERE IS A DEFECT AND NOT A CONFIGURATION.  It means every
+	 * context asked for its vector state to be carried, which is what the
+	 * first version of #561 did by accident: the exemption was granted at
+	 * creation and thrown away by a second context_init().  The line is
+	 * here so that reads as wrong to anybody watching a boot scroll past.
+	 */
+	printf("UrMach x86-64: %lu kernel contexts exempt from carrying vector "
+	       "state across a switch (#561)\n", context_fpu_exempted);
+#endif	/* __x86_64__ */
 
 	/*
 	 *	Create the clock service.

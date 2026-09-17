@@ -295,6 +295,23 @@ struct percpu {
 	 */
 	uint32_t intr_level;
 	uint32_t intr_saved_if;
+
+#if	CONTEXT_FPU_COUNT
+	/*
+	 * #561, and only when asked for: see <thread/context.h> for why this is
+	 * off by default.  Per-processor rather than three globals because they
+	 * are written on the context-switch path, where one shared line
+	 * bouncing between processors costs more than the vector pair it
+	 * measures -- the same class as the counters #455 had to make atomic,
+	 * arrived at from the other side.
+	 *
+	 * ⚠️ At the END, after intr_level, so that turning this on cannot move
+	 * a field the assembly entry paths know the offset of.
+	 */
+	uint64_t fpu_switches;
+	uint64_t fpu_saves_skipped;
+	uint64_t fpu_restores_skipped;
+#endif	/* CONTEXT_FPU_COUNT */
 };
 
 /*
