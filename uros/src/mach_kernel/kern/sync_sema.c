@@ -50,6 +50,7 @@
 #include <kern/time_out.h>		/* hz (#324) */
 #include <vm/vm_map.h>			/* vm_map_pmap() (#324) */
 #include <vm/pmap.h>			/* pmap_extract() (#324) */
+#include <kern/syscall_profile.h>	/* #554: where the round trip goes */
 
 /*
  *	Routine:	semaphore_create
@@ -887,6 +888,7 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	wake_key = futex_key(wake_uaddr, is_private);
 	if (wait_key == (event_t) 0 || wake_key == (event_t) 0)
 		return KERN_INVALID_ADDRESS;
+	SP_MARK(SP_FX_KEY);		/* #554: two user addresses -> two keys */
 
 	if (timeout_ms != 0) {
 		unsigned int uhz = (unsigned int) hz;
@@ -903,6 +905,14 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 
 	s = splsched();
 	assert_wait(wait_key, TRUE);
+	/*
+	 * ⚠️ BOTH copyins are charged here, and that is deliberate: the second
+	 * one sits under splsched with the wait already asserted, so a mark
+	 * between them would be a mark inside the window #299 exists to keep
+	 * short.  What the column answers is "what do the copies of this word
+	 * cost", and for that the pair is the honest unit.
+	 */
+	SP_MARK(SP_FX_COPYIN);
 
 	if (copyin((const char *) wait_uaddr, (char *) &cur, sizeof(cur)) != 0) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
@@ -922,6 +932,7 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	if (ticks != 0)
 		thread_set_timeout(ticks);
 	splx(s);
+	SP_MARK(SP_FX_ASSERT);		/* #554: the scheduler state change */
 
 	/*
 	 * Try to hand the CPU straight to a parked waiter on wake_uaddr
@@ -937,9 +948,29 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	 * it, so a stalled machine full of WAIT_WAKE waiters was unreadable.
 	 */
 	self->futex_uaddr = (vm_offset_t) wait_uaddr;
-	if (!thread_handoff_to_parked_waiter(wake_key))
+	if (thread_handoff_to_parked_waiter(wake_key))
+		/*
+		 * #554: this sample took the hand-off, so the dump can take its
+		 * median over one shape.  ⚠️ Without this line every futex
+		 * sample is filed as "blocked, no hand-off" WHATEVER happened --
+		 * the shape is set by this call and by nothing else -- and a
+		 * window of 262144 traps reporting `handoff=0' would read as a
+		 * finding about the kernel instead of a missing line here.
+		 */
+		SP_HANDOFF();
+	else
 		thread_block((void (*)(void)) 0);
 	self->futex_uaddr = 0;
+	/*
+	 * 🔥 THE COLUMN THIS ISSUE IS ABOUT.  Everything between the mark above
+	 * and this one is: finding a parked waiter, switching to it, being that
+	 * thread's peer for a while, and coming back.  The scheduler's own hooks
+	 * cut RUNQ and SWITCH out of it from the inside, so what stays here is
+	 * the hand-off's own bookkeeping.
+	 */
+	SP_MARK(SP_FX_HANDOFF);
+
+	SP_MARK(SP_FX_RESUME);		/* #554: awake, on the way out */
 
 	if (self->wait_result == THREAD_TIMED_OUT)
 		return KERN_OPERATION_TIMED_OUT;
@@ -1104,20 +1135,41 @@ kern_return_t
 urmach_futex(unsigned int *uaddr, int op, unsigned int val,
 	     unsigned int timeout_ms, unsigned int *wake_uaddr)
 {
-	boolean_t is_private = (op & URMACH_FUTEX_PRIVATE) != 0;
+	boolean_t	is_private = (op & URMACH_FUTEX_PRIVATE) != 0;
+	kern_return_t	kr;
+
+	/*
+	 * #554: the block+wake round trip, phase by phase.  Compiled out unless
+	 * the profile is built, and ignored unless it is pointed at this trap.
+	 *
+	 * ⚠️ ONE EXIT, and the four returns below became assignments for it.
+	 * SP_LEAVE() closes the sample; a path that returned around it would
+	 * leave one open, and the next trap on this thread would be measured
+	 * from the wrong instant -- a number about nothing, which is the failure
+	 * <kern/syscall_profile.h> was written to avoid.
+	 */
+	SP_ENTER(SP_TRAP_FUTEX);
 
 	switch (op & URMACH_FUTEX_OP_MASK) {
 	case URMACH_FUTEX_WAIT:
-		return futex_wait(uaddr, val, timeout_ms, is_private);
+		kr = futex_wait(uaddr, val, timeout_ms, is_private);
+		break;
 	case URMACH_FUTEX_WAKE:
-		return futex_wake(uaddr, (int) val, is_private);
+		kr = futex_wake(uaddr, (int) val, is_private);
+		break;
 	case URMACH_FUTEX_WAKE_WAIT:
-		return futex_wake_wait(wake_uaddr, uaddr, val, timeout_ms,
-				       is_private);
+		kr = futex_wake_wait(wake_uaddr, uaddr, val, timeout_ms,
+				     is_private);
+		break;
 	case URMACH_FUTEX_WAITV:
-		return futex_waitv((struct urmach_futexv *) uaddr, val,
-				   timeout_ms, wake_uaddr, is_private);
+		kr = futex_waitv((struct urmach_futexv *) uaddr, val,
+				 timeout_ms, wake_uaddr, is_private);
+		break;
 	default:
-		return KERN_INVALID_ARGUMENT;
+		kr = KERN_INVALID_ARGUMENT;
+		break;
 	}
+
+	SP_LEAVE();
+	return kr;
 }

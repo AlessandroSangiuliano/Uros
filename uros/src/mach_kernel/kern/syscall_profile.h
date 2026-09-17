@@ -224,6 +224,41 @@
 #define	SP_PHASES	20
 
 /*
+ * ── A SECOND TRAP, SHARING THE SLOTS AND NOT THE WORDS (#554) ─────────
+ *
+ * `urmach_futex' WAKE_WAIT is a block-and-wake round trip with no message in
+ * it, and it is the last row of the benchmark still behind i386.  Answering
+ * WHERE it loses wants this instrument, so the instrument has to fit a trap it
+ * was not written for.
+ *
+ * 🔑 THE SLOTS ARE REUSED AND THE NAMES ARE NOT.  Adding phases would mean
+ * adding them after SP_BODY, and SP_BODY is last on purpose -- it is the
+ * residue, and a residue with columns after it is not a residue.  So the futex
+ * borrows the slots whose WORK is the same shape and the dump prints a
+ * different vocabulary for them, chosen by which trap is being profiled.  A
+ * futex dump that said "park snd" or "pick rcv" would be naming a message's
+ * work in a path that has no message: this file's own rule is that a phase is
+ * named for the work, and that rule does not survive a second subject unless
+ * the words move with it.
+ *
+ * ⚠️ Aliases and not new numbers, so that `mach_msg' keeps its numbering and
+ * its history: a dump taken last month still means what it said.
+ */
+/*
+ * The two traps this instrument can be pointed at, by their slot in the table
+ * in kern/syscall_sw.c.  Named here because three files test them and a bare
+ * 33 in a conditional is a number nobody can check.
+ */
+#define	SP_TRAP_MSG	33	/* urmach_msg   -- #392's subject */
+#define	SP_TRAP_FUTEX	42	/* urmach_futex -- #554's subject */
+
+#define	SP_FX_COPYIN	SP_COPYIN	/* the wait word, copied in from user */
+#define	SP_FX_KEY	SP_PICK		/* uaddr -> wait key and wake key     */
+#define	SP_FX_ASSERT	SP_CLAIM	/* splsched + assert_wait, the state  */
+#define	SP_FX_HANDOFF	SP_DELIVER	/* thread_handoff_to_parked_waiter    */
+#define	SP_FX_RESUME	SP_RESUME	/* awake again, on the way out        */
+
+/*
  * 🔴 And the return is NOT one of them, which is a decision and not an
  * omission.
  *
@@ -411,6 +446,14 @@ struct syscall_profile_thread {
 	uint32_t	open;		/* a sample is being built           */
 	uint32_t	took_handoff;	/* this sample reached the switch    */
 	uint32_t	did_sleep;	/* this sample left the processor    */
+	/*
+	 * 🔴 "NOT MEASURED" AND "ZERO" ARE DIFFERENT ANSWERS (#554).  A target
+	 * whose entry stub takes no timestamp cannot report what the entry
+	 * cost, and printing a zero there would say the entry is free -- which
+	 * is this file's own named failure, one paragraph above SP_ENTRY.  So
+	 * the sample carries the fact and the dump prints a dash.
+	 */
+	uint32_t	entry_unknown;	/* the stub left no timestamp        */
 };
 
 /*
@@ -421,8 +464,18 @@ struct syscall_profile_thread {
  * textbook serialisation would cost several times the entire subject.  lfence
  * orders the earlier loads for a handful of cycles.
  *
- * ⚠️ x86-64 only, deliberately: lfence is SSE2, and nothing on i386 opens a
- * sample because the hook that opens one is in the x86-64 entry stub.
+ * ⚠️ On i386 there is no lfence to lean on -- it is SSE2 -- so that target
+ * reads the counter unordered.  What that costs is a few cycles of slop at a
+ * phase boundary, in one direction on each side of it, and it is named here
+ * rather than hidden: a column on i386 is a little softer than the same column
+ * on x86-64, and a DIFFERENCE of a few cycles between the two targets is not a
+ * finding.  A difference of hundreds is, which is the size #554 is about.
+ *
+ * ❌ This said "x86-64 only, deliberately ... nothing on i386 opens a sample".
+ * That was true and it made the switch beside it a lie: kern/CMakeLists gives
+ * both targets -DSYSCALL_PROFILE=1 and says the facility "cannot rot behind a
+ * switch only one of them can turn on" -- while turning it on for i386 did not
+ * compile at all.  #554 needs the comparison, so i386 gets a clock.
  */
 static __inline__ uint64_t
 syscall_profile_tsc(void)
@@ -431,6 +484,8 @@ syscall_profile_tsc(void)
 
 #if	defined(__x86_64__)
 	__asm__ __volatile__("lfence; rdtsc" : "=a" (lo), "=d" (hi) :: "memory");
+#elif	defined(__i386__)
+	__asm__ __volatile__("rdtsc" : "=a" (lo), "=d" (hi) :: "memory");
 #else
 #error	"syscall_profile has no time source on this machine"
 #endif
@@ -478,6 +533,16 @@ syscall_profile_begin(struct syscall_profile_thread *p, uint64_t entry_tsc)
 	 * standing between a stale timestamp and a column.
 	 */
 	p->runnable_at = 0;
+	/*
+	 * A target with no stub timestamp hands in a zero, and the sample opens
+	 * from the clock read here instead.  Using the zero would make the
+	 * first slice the whole age of the counter.
+	 */
+	if (entry_tsc == 0) {
+		entry_tsc = syscall_profile_tsc();
+		p->entry_unknown = 1;
+	} else
+		p->entry_unknown = 0;
 	p->first = entry_tsc;
 	p->cursor = entry_tsc;
 	for (i = 0; i < SP_PHASES; i++)

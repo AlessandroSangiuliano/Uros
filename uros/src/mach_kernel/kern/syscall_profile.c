@@ -15,13 +15,23 @@
 #endif
 
 /*
- * Which trap is being profiled: urmach_msg, slot 33 of the table in
- * kern/syscall_sw.c, because that is the path #392 exists to weigh.
+ * Which trap is being profiled -- a slot of the table in kern/syscall_sw.c.
+ * 33 is urmach_msg, the path #392 exists to weigh, and it is the default
+ * because that is what this instrument was built for.  42 is urmach_futex,
+ * #554's block-and-wake round trip.
+ *
+ * Set at configure time (UROS_SYSCALL_PROFILE_TRAP) so that the subject of a
+ * run is visible in the run's own configuration rather than in whoever
+ * remembers which arm it was.
  *
  * Defined whether or not the profile is compiled in, so that anything which
  * wants to point it elsewhere links either way.
  */
-int	syscall_profile_trap = 33;
+#ifndef	SYSCALL_PROFILE_TRAP
+#define	SYSCALL_PROFILE_TRAP	SP_TRAP_MSG
+#endif
+
+int	syscall_profile_trap = SYSCALL_PROFILE_TRAP;
 
 #if	SYSCALL_PROFILE
 
@@ -86,7 +96,14 @@ static unsigned int	sp_site_shut[SP_PHASES];
  * as copies.  A reader deciding #391 has to be able to find them without
  * knowing that ipc_kmsg_get() is where a message is copied in.
  */
-static const char *const sp_name[SP_PHASES] = {
+/*
+ * 🔑 TWO VOCABULARIES FOR ONE SET OF SLOTS (#554).  The futex borrows the
+ * phases whose work is the same shape and needs its own words for them: see
+ * the SP_FX_* block in the header for why the slots are shared rather than
+ * grown.  A slot the profiled trap cannot reach prints as "-" instead of a
+ * name that would invite a reader to look for it.
+ */
+static const char *const sp_name_msg[SP_PHASES] = {
 	"entry   ",	/* SP_ENTRY   */
 	"get buf ",	/* SP_GET     */
 	"COPYIN  ",	/* SP_COPYIN  */
@@ -108,6 +125,41 @@ static const char *const sp_name[SP_PHASES] = {
 	"PUT     ",	/* SP_PUT     */
 	"residue ",	/* SP_BODY    */
 };
+
+static const char *const sp_name_futex[SP_PHASES] = {
+	"entry   ",	/* SP_ENTRY               */
+	"-       ",	/* SP_GET     unreached   */
+	"COPYIN  ",	/* SP_FX_COPYIN: the word */
+	"-       ",	/* SP_KMSGGET unreached   */
+	"-       ",	/* SP_RESOLVE unreached   */
+	"-       ",	/* SP_QUEUE   unreached   */
+	"key hash",	/* SP_FX_KEY              */
+	"assert_w",	/* SP_FX_ASSERT           */
+	"-       ",	/* SP_PARK    unreached   */
+	"HANDOFF ",	/* SP_FX_HANDOFF          */
+	"-       ",	/* SP_MQSEND  unreached   */
+	"wait    ",	/* SP_WAIT                */
+	"RUNQ    ",	/* SP_RUNQ                */
+	"SWITCH  ",	/* SP_SWITCH              */
+	"splx    ",	/* SP_SPL                 */
+	"-       ",	/* SP_MQRECV  unreached   */
+	"resume  ",	/* SP_FX_RESUME           */
+	"-       ",	/* SP_COPYOUT unreached   */
+	"-       ",	/* SP_PUT     unreached   */
+	"residue ",	/* SP_BODY                */
+};
+
+/*
+ * Which words this dump speaks.  Read from the trap being profiled rather than
+ * passed down, because every call site that prints a phase name already knows
+ * nothing about traps and should go on knowing nothing.
+ */
+static const char *const *
+sp_names(void)
+{
+	return (syscall_profile_trap == SP_TRAP_FUTEX) ? sp_name_futex
+						       : sp_name_msg;
+}
 
 static void
 sp_sort(uint32_t *v, int n)
@@ -272,6 +324,18 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 	for (ph = 0; ph < SP_PHASES; ph++) {
 		int	k = 0;
 
+		/*
+		 * 🔴 The entry is UNAVAILABLE on a target whose stub takes no
+		 * timestamp, which is not the same as free (#554).  Printing it
+		 * as a dash keeps "nobody measured this" out of the column a
+		 * reader adds up.
+		 */
+		if (ph == SP_ENTRY && p->entry_unknown) {
+			printf("syscall_profile    %s         -  (no entry "
+			       "timestamp on this target)\n", sp_names()[ph]);
+			continue;
+		}
+
 		if (p->sample[median][ph] == 0)
 			continue;
 
@@ -280,7 +344,7 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 				col[k++] = p->sample[i][ph];
 		sp_sort(col, k);
 
-		printf("syscall_profile    %s %9u ", sp_name[ph],
+		printf("syscall_profile    %s %9u ", sp_names()[ph],
 		       p->sample[median][ph]);
 		sp_print_pct(sp_percent(p->sample[median][ph],
 					ph == SP_WAIT ? whole : work));
@@ -297,7 +361,7 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 			printf("syscall_profile    zero here:");
 			primo = 0;
 		}
-		printf(" %s", sp_name[ph]);
+		printf(" %s", sp_names()[ph]);
 	}
 	if (!primo)
 		printf("\n");
@@ -384,13 +448,23 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	 * the case where the reader needs to know whether the instrument or the
 	 * path is the reason.
 	 */
-	if (sp_site[SP_KMSGGET] == 0 && sp_site[SP_GET] == 0 &&
-	    sp_site[SP_RESOLVE] == 0) {
+	/*
+	 * ⚠️ THE PHASES ASKED ABOUT ARE THE PROFILED TRAP'S OWN (#554).  This
+	 * tested three phases of mach_msg, which no futex trap can reach -- so
+	 * extending the instrument to a second trap would have made this line
+	 * fire on EVERY futex dump.  A guard that is always true is worse than
+	 * no guard: it teaches its reader to skip the line that would matter.
+	 */
+	if (syscall_profile_trap == SP_TRAP_FUTEX
+	    ? (sp_site[SP_FX_KEY] == 0 && sp_site[SP_FX_COPYIN] == 0 &&
+	       sp_site[SP_FX_ASSERT] == 0)
+	    : (sp_site[SP_KMSGGET] == 0 && sp_site[SP_GET] == 0 &&
+	       sp_site[SP_RESOLVE] == 0)) {
 		printf("syscall_profile   NO SITE REACHED kernel-wide "
 		       "(reached/of those with no sample open):");
 		for (ph = 0; ph < SP_PHASES; ph++)
 			if (sp_site[ph] != 0)
-				printf(" %s=%u/%u", sp_name[ph], sp_site[ph],
+				printf(" %s=%u/%u", sp_names()[ph], sp_site[ph],
 				       sp_site_shut[ph]);
 		printf("\n");
 	}
