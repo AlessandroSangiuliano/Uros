@@ -930,15 +930,22 @@ ASSERT_IPL(SPL0);
 }
 
 /*
- * Allocate and initialize FP state for current thread.
- * Don't load state.
+ * Allocate and initialize FP state for a thread's pcb.  Don't load state.
  *
- * Locking not needed; always called on the current thread.
+ * #560: this used to be reachable only for the thread running right now,
+ * because the only thing that ever called it was the emulator linkage and,
+ * on real hardware, fp_load() off the #NM trap.  The switch now carries the
+ * state eagerly, so there is no #NM to allocate on, and pcb_init() asks for
+ * the area when the thread is built instead.  That is a thread which is not
+ * current and is not yet running, hence the pcb argument.
+ *
+ * Locking not needed: the caller either owns the current thread's pcb, or
+ * holds a pcb nobody else can reach yet.
  */
 void
-fp_state_alloc(void)
+fp_state_alloc_pcb(
+	pcb_t	pcb)
 {
-	pcb_t	pcb = current_act()->mact.pcb;
 	struct i386_fpsave_state *ifps;
 
 	ifps = (struct i386_fpsave_state *)zalloc(ifps_zone);
@@ -969,6 +976,16 @@ fp_state_alloc(void)
 	    hdr->xstate_bv_lo = XCR0_X87 | XCR0_SSE;
 	    hdr->xstate_bv_hi = 0;
 	}
+}
+
+/*
+ * Allocate and initialize FP state for the current thread.  The emulator
+ * linkage asks for it this way; everything else names the pcb.
+ */
+void
+fp_state_alloc(void)
+{
+	fp_state_alloc_pcb(current_act()->mact.pcb);
 }
 
 

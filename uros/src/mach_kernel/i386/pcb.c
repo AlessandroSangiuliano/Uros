@@ -484,6 +484,22 @@ pcb_init( register thread_act_t thr_act )
 	simple_lock_init(&pcb->lock, ETAP_MISC_PCB);
 
 	/*
+	 *	Give the thread its FPU save area now (#560).
+	 *
+	 *	This used to be allocated by fp_load(), off the #NM trap taken
+	 *	the first time a thread touched the unit.  The switch no longer
+	 *	arms CR0.TS, so that trap never comes, and an area allocated
+	 *	then would be an area allocated never: the thread would run with
+	 *	whatever the registers happened to hold and lose its own state
+	 *	at every switch.
+	 *
+	 *	zalloc() here either answers or panics -- it does not answer
+	 *	zero -- so there is no half-built pcb to consider.  It can
+	 *	block, which is allowed: thread creation is not a switch.
+	 */
+	fp_state_alloc_pcb(pcb);
+
+	/*
 	 *	Guarantee that the bootstrapped thread will be in user
 	 *	mode.
 	 */

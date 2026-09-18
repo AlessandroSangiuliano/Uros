@@ -226,6 +226,8 @@ extern void		fpnoextflt(void);
 extern void		fpextovrflt(void);
 extern void		fpexterrflt(void);
 extern void		fp_state_alloc(void);
+extern void		fp_state_alloc_pcb(
+					pcb_t				pcb);
 extern void		fpintr(void);
 extern void		fpflush(thread_act_t);
 
