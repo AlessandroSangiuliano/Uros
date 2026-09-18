@@ -2735,13 +2735,23 @@ ENTRY(set_tr)
 	ret				/* and return */
 
 /*
- * Set task-switched flag.
+ * _setts used to be here: four instructions that set CR0.TS.
+ *
+ * Nothing called it -- not one .c, .h or .S file in the tree named it -- and
+ * <i386/proc_reg.h> already spells the same thing inline as set_ts(), which
+ * since #560 survives only in the dead FPE branch of <i386/fpu.h>.
+ *
+ * 🔴 It is gone because of what arming that bit now means.  The switch carries
+ * the FPU state and CR0.TS is never set; fpnoextflt(), which used to be the
+ * restore, panics on a #NM raised with an FPU present and TS clear, because
+ * that combination says the invariant broke somewhere else.  A routine that
+ * arms TS is the one thing that could make it break, and it was sitting in the
+ * binary with no caller and no reason (#560).
+ *
+ * Found by asking "where else?" when closing that issue -- the grep that
+ * cleared the tree looked for set_ts() in C, and this is assembly touching
+ * CR0 by hand.
  */
-ENTRY(_setts)
-	movl	%cr0,%eax		/* get cr0 */
-	orl	$(CR0_TS),%eax		/* or in TS bit */
-	movl	%eax,%cr0		/* set cr0 */
-	ret
 
 /*
  * io register must not be used on slaves (no AT bus)
