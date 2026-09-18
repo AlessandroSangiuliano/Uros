@@ -46,6 +46,11 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=$REPO/uros/build-x86_64
 LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
 
+# What the run was taken under, written into the LOG rather than only shouted
+# at the terminal (#516).  Shared with run-qemu.sh, because each of the two
+# harnesses used to record the half the other omitted.
+. "$(dirname "$0")/run-conditions.sh"
+
 # ------------------------------------------------------------------ verdict
 #
 # Split out so it can judge a log it did not produce:
@@ -117,6 +122,13 @@ DOUBLE_FAULT='breaking the stack on purpose'
 EXPECTED_END='No bootstrap code loaded with the kernel'
 
 verdict() {
+# 🔑 Read out of the LOG and not out of the live variable, so that --judge on a
+# log taken weeks ago says what made it.  A log with no conditions block is one
+# from before #516, and saying so is the honest answer -- not guessing TCG
+# because that is what the default used to be.
+VACCEL=$(sed -n 's/^  accelerator:  //p' "$LOG" | head -1)
+[ -n "$VACCEL" ] || VACCEL="NOT RECORDED — this log predates #516"
+
 TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
 EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
 # ⚠️ `^panic\(', not `^panic:'.  This kernel prints `panic(cpu 0): ...' --
@@ -153,7 +165,7 @@ BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page f
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
-echo "=== verdict: $TESTS self-tests ==="
+echo "=== verdict: $TESTS self-tests, under $VACCEL ==="
 [ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: known QEMU artifact (TSC not invariant, #318)"
 
 if grep -aq "$MI_ENTRY" "$LOG"; then
@@ -463,6 +475,11 @@ fi
 IOMMU_ARGS=""
 IOMMU_NAME="none"
 
+# Kept before the loop below eats them, so the conditions block can say how the
+# run was actually driven (#516).  A condition nobody can reproduce the command
+# for is half a condition.
+ORIG_ARGS="$*"
+
 while :; do
 	case "${1:-}" in
 	--entry)
@@ -687,6 +704,7 @@ fi
 echo "=== iommu on the board: $IOMMU_NAME ==="
 echo "=== memory: ${MEM_ARGS:-from the command line} ==="
 
+uros_conditions_open
 : > "$LOG"
 
 # shellcheck disable=SC2086
@@ -844,6 +862,26 @@ done
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+
+# ⚠️ Appended, not prepended, and that is not a preference: the verdict tests
+# `head -1 "$LOG"' for qemu's own refusal to start, so a header would answer
+# that question with our own text and the refusal would stop being detectable.
+UROS_HOST_AT_END=$(uros_host_state)
+UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
+	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
+	"cpu:          ${CPU_ARGS:-from the command line}" \
+	"memory:       ${MEM_ARGS:-from the command line}" \
+	"entry:        ${UROS_X86_64_BOOT_ENTRY:-from grub.cfg default}" \
+	"budget:       ${SECS}s" \
+	"command:      $0 $ORIG_ARGS")
+printf '%s\n' "$UROS_COND" | tee -a "$LOG"
+
+# 🔥 A clock that moved during the run is a run nobody may compare with
+# another, and #560 lost a campaign to exactly that before anyone looked.
+if uros_clock_moved "$UROS_HOST_AT_END"; then
+	echo "  ⚠️ THE CLOCK MOVED DURING THIS RUN — do not compare its timings" \
+	     | tee -a "$LOG"
+fi
 
 grep -a "UrMach\|fault\|error\|Error\|panic\|^  " "$LOG" || true
 
