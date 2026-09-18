@@ -136,6 +136,80 @@ X87_MNEMONIC = re.compile(r"^\s*(f[a-z0-9]+)\b")
 
 SYMBOL_LINE = re.compile(r"^[0-9a-f]+ <([^>]+)>:")
 
+#
+# Regions of `.text' that are NOT CODE, named by the symbols that delimit them.
+#
+# 🔴 A different claim from ALLOWED above, and kept apart for that reason.  An
+# ALLOWED entry says "this code may touch the vector registers"; an entry here
+# says "these bytes are not instructions at all", so whatever objdump prints
+# for them means nothing.  Confusing the two would let a data region excuse the
+# code that follows it.
+#
+# i386/locore.S builds its fault-recovery and retry tables inside `.text' --
+# subsections `.text 2' and `.text 3' -- as pairs of .long.  objdump
+# disassembles .text and duly reported
+#
+#     recover_table_end  c01b1104:  dd 0c 1b  fisttpll (%ebx,%ebx,1)
+#
+# which is two address words from the retry table read as an x87 instruction.
+# The addresses shift whenever anything before them changes size, so this is
+# not a one-off: it is a region that must never be read as code.
+#
+# 🔴 BY ADDRESS AND NOT BY SYMBOL NAME, and that is the second version of this.
+# The first skipped lines attributed to these symbols, and failed -- because
+# recover_table_end and retry_table are the SAME ADDRESS, the tables being
+# adjacent, and objdump prints one header per address.  retry_table therefore
+# never appears as a symbol line at all, and half the data went on being read
+# as code.  nm knows both; the disassembly only knows whichever objdump chose.
+#
+DATA_RANGES = [
+    ("recover_table", "recover_table_end",
+     "i386 locore.S: .long pairs in .text 2"),
+    ("retry_table", "retry_table_end",
+     "i386 locore.S: .long pairs in .text 3"),
+]
+
+
+def data_ranges(kernel):
+    """The [start, end) address ranges of DATA_RANGES, from nm.
+
+    A pair neither of whose symbols exists is a region this target does not
+    have -- x86-64 has no such tables -- and is not an error.  A pair with
+    only one of the two is a rename that has left the region unguarded AND
+    silent, which is the failure this whole script exists to avoid.
+    """
+    try:
+        out = subprocess.run(["nm", kernel],
+                             capture_output=True, text=True,
+                             check=True).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError) as e:
+        print("kernel-vector-check: nm failed on %s — NOT CHECKED: %s"
+              % (kernel, e), file=sys.stderr)
+        return None
+
+    addr = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            addr[parts[2]] = int(parts[0], 16)
+
+    ranges = []
+    for lo_name, hi_name, _why in DATA_RANGES:
+        lo = addr.get(lo_name)
+        hi = addr.get(hi_name)
+        if lo is None and hi is None:
+            continue
+        if lo is None or hi is None:
+            print("kernel-vector-check: %s and %s must both be in %s — one is "
+                  "missing, so a data region is being read as code"
+                  % (lo_name, hi_name, kernel), file=sys.stderr)
+            return None
+        ranges.append((lo, hi))
+    return ranges
+
+
+INSTR_ADDR = re.compile(r"^\s*([0-9a-f]+):")
+
 
 def main(argv):
     if len(argv) != 2:
@@ -153,6 +227,10 @@ def main(argv):
     except subprocess.CalledProcessError as e:
         print("kernel-vector-check: objdump failed on %s — NOT CHECKED: %s"
               % (kernel, e), file=sys.stderr)
+        return 2
+
+    skip = data_ranges(kernel)
+    if skip is None:
         return 2
 
     symbol = "<none>"
@@ -178,6 +256,12 @@ def main(argv):
         if len(parts) < 3:
             continue
         seen_any_instruction = True
+
+        a = INSTR_ADDR.match(line)
+        if a:
+            where = int(a.group(1), 16)
+            if any(lo <= where < hi for lo, hi in skip):
+                continue
 
         text = parts[2]
         x87 = X87_MNEMONIC.match(text)
