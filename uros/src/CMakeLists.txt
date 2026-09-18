@@ -346,6 +346,20 @@ endif()
 # when the device table is full.
 add_subdirectory(tests/irq_claim_test)
 
+# And the task that divides by zero on purpose (#515).
+#
+# 🔑 The second test added on BOTH targets, and for a sharper version of the
+# same reason.  #515 is the issue where the two machines turned out to be
+# losing OPPOSITE halves of the same thing -- i386 panicked on a SIMD numeric
+# error it had armed and never received, x86-64 mapped #MF and never armed the
+# bit that raises it -- so a program built for one target would have found half
+# of it and left the tree looking healthy.  Only the provocation is
+# machine-dependent; the question is not.
+#
+# ⚠️ Placed with irq_claim_test rather than with fault_test, outside the gate:
+# what it needs is libmach and libpthreads, which are both behind it already.
+add_subdirectory(tests/fperr_test)
+
 # And the task that forks with copy-on-write (#407) -- the fifth clause of that
 # issue's done-when, and the only one nothing else exercises.
 #
