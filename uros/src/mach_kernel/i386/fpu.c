@@ -172,26 +172,57 @@ unsigned int	xsave_area_size;	/* XSAVE area size from CPUID (0 if no XSAVE) */
 unsigned int	xcr0_value;		/* current XCR0 value (enabled state components) */
 zone_t		ifps_zone;		/* zone for FPU save area */
 
-#if	NCPUS == 1
-volatile thread_act_t	fp_act = THR_ACT_NULL;
-				    /* thread whose state is in FPU */
-				    /* always THR_ACT_NULL if emulating FPU */
-volatile thread_act_t	fp_intr_act = THR_ACT_NULL;
+/*
+ * The state the registers hold when they hold nobody's (#560).
+ *
+ * A thread whose pcb has no save area still has to be switched to, and the
+ * registers at that moment hold the thread we are switching away from.
+ * Leaving them is the CVE-2018-3665 leak; this is what gets loaded instead.
+ *
+ * 🔑 On i386 there is no cheaper way to make the registers safe than to
+ * load something over them.  fninit() clears the x87 stack but leaves every
+ * XMM register untouched, so the scrub costs a restore either way -- which
+ * is the whole reason the lazy scheme has no secure variant to fall back to.
+ */
+static struct i386_fpsave_state	*fp_clean_state;
 
+/*
+ * The thread a floating-point error was raised for, when the AST that
+ * carries it has not been taken yet.
+ *
+ * 🔑 This is NOT ownership of the unit.  There used to be a second variable,
+ * fp_act, which said whose state the registers held, and it existed only
+ * because the restore was lazy: the registers could belong to a thread that
+ * was not running.  The switch now leaves the current thread's state in them
+ * and nobody else's, so that question has one answer -- current_act() -- and
+ * the variable asking it is gone (#560).
+ *
+ * This one survives because the AST is per-CPU while the error belongs to a
+ * thread: a switch between the interrupt and the AST still hands it to the
+ * wrong thread, on one processor and on many alike.  So it is no longer
+ * behind NCPUS == 1, which had left SMP with no tracking at all.
+ *
+ * ⚠️ And it is an array, for the same reason need_ast is one: it shadows a
+ * per-CPU AST.  A single global would have been a race the moment two
+ * processors took a floating-point error at once -- which is exactly why it
+ * could be a scalar while it was uniprocessor-only.
+ */
+volatile thread_act_t	fp_intr_act[NCPUS];
 
+/*
+ * Take the unit away from whoever has it.
+ *
+ * ⚠️ This used to also arm CR0.TS, which is what made the NEXT use of the
+ * unit trap into fpnoextflt().  With the restore eager there is no such
+ * route, so arming it here would strand the processor: the trap would come,
+ * and the handler that answered it is no longer on the path.  The callers
+ * that want the registers emptied get fninit(), which is what "no state" now
+ * means, and the switch reloads from memory regardless.
+ */
 #define	clear_fpu() \
     { \
-	set_ts(); \
-	fp_act = THR_ACT_NULL; \
+	fninit(); \
     }
-
-#else	/* NCPUS > 1 */
-#define	clear_fpu() \
-    { \
-	set_ts(); \
-    }
-
-#endif
 
 /* Forward */
 
@@ -241,10 +272,17 @@ init_fpu(void)
 	     * - CR4.OSFXSR: tells CPU that OS supports FXSAVE/FXRSTOR
 	     * - CR4.OSXMMEXCPT: enables #XM exception for unmasked SIMD exceptions
 	     * - CR0.EM must be clear (no FPU emulation)
-	     * - CR0.MP + CR0.TS: trap on FPU use for lazy context switching
+	     * - CR0.MP: WAIT/FWAIT honours CR0.TS
+	     *
+	     * 🔴 CR0.TS is CLEARED here and never armed again (#560).  It used
+	     * to be set, so that the first use of the unit by each thread
+	     * trapped and the restore could be deferred until then -- which
+	     * left the previous thread's registers in place for the new thread
+	     * to read speculatively (CVE-2018-3665).  The switch now carries
+	     * the state, so there is nothing to defer and nothing to trap on.
 	     */
 	    set_cr4(get_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
-	    set_cr0((get_cr0() & ~CR0_EM) | CR0_TS | CR0_MP);
+	    set_cr0((get_cr0() & ~(CR0_EM|CR0_TS)) | CR0_MP);
 
 	    /*
 	     * Probe CPUID.1:ECX for XSAVE support (bit 26).
@@ -376,6 +414,26 @@ fpu_module_init(void)
 			  THREAD_MAX * fps_size,
 			  THREAD_CHUNK * fps_size,
 			  "i386 fpsave state");
+
+	/*
+	 * Build the image loaded over the registers when the thread being
+	 * switched to has no state of its own (#560).  It is taken FROM the
+	 * unit rather than written by hand, so it is by construction a state
+	 * this processor accepts: fpinit() leaves the control word and MXCSR
+	 * the way a fresh thread gets them, and the save records exactly that.
+	 *
+	 * init_fpu() has already run -- machine_init() is ahead of
+	 * thread_init() in setup_main() -- so fp_kind and xsave_area_size are
+	 * the real ones here, which is also why the zone above is sized right.
+	 */
+	fp_clean_state = (struct i386_fpsave_state *) zalloc(ifps_zone);
+	bzero((char *) fp_clean_state, fps_size);
+	fpinit();
+	if (fp_kind == FP_XSAVE)
+	    xsave(&fp_clean_state->fx_save_state);
+	else
+	    fxsave(&fp_clean_state->fx_save_state);
+	fp_clean_state->fp_valid = TRUE;
 }
 
 /*
@@ -387,18 +445,23 @@ fp_free(fps)
 	struct i386_fpsave_state *fps;
 {
 ASSERT_IPL(SPL0);
-#if	NCPUS == 1
-	if ((fp_act != THR_ACT_NULL) && (fp_act->mact.pcb->ims.ifps == fps)) {
-		/* 
-		 * Make sure we don't get FPU interrupts later for
-		 * this thread
-		 */
-		fwait();
-
-		/* Mark it free and disable access */
-	    clear_fpu();
+	/*
+	 * If the area being freed is the live state of the thread running
+	 * right now, the registers still hold it.  Empty them: a freed area's
+	 * contents must not be readable from the unit afterwards, and there
+	 * is no longer a #NM trap between here and the next user of the
+	 * registers that would have replaced them.
+	 *
+	 * 🔑 This used to ask fp_act, and therefore only on a uniprocessor.
+	 * The question is now "is it the current thread's", which has the
+	 * same answer on both -- the registers hold the current thread's
+	 * state and nobody else's.
+	 */
+	if (current_act() != THR_ACT_NULL &&
+	    current_act()->mact.pcb->ims.ifps == fps) {
+		fwait();		/* wait for a possible interrupt */
+		clear_fpu();
 	}
-#endif	/* NCPUS == 1 */
 	zfree(ifps_zone, (vm_offset_t) fps);
 }
 
@@ -424,18 +487,15 @@ ASSERT_IPL(SPL0);
 	assert(thr_act != THR_ACT_NULL);
 	pcb = thr_act->mact.pcb;
 
-#if	NCPUS == 1
-
 	/*
-	 * If this thread`s state is in the FPU,
-	 * discard it; we are replacing the entire
-	 * FPU state.
+	 * If this thread`s state is in the FPU, discard it; we are replacing
+	 * the entire FPU state.  (Asked of current_act() rather than of a
+	 * lazy owner -- see fp_free.)
 	 */
-	if (fp_act == thr_act) {
+	if (thr_act == current_act()) {
 	    fwait();			/* wait for possible interrupt */
 	    clear_fpu();		/* no state in FPU */
 	}
-#endif
 
 	if (state->initialized == 0) {
 	    /*
@@ -539,9 +599,30 @@ ASSERT_IPL(SPL0);
 		hdr->xstate_bv_hi = 0;
 	    }
 
+	    /*
+	     * The state lives in memory and the registers do not have it.
+	     *
+	     * 🔴 This was never written down, and it mattered: ifps can come
+	     * straight from zalloc(), which does not zero, so fp_valid held
+	     * whatever the last user of that element left -- including the 2
+	     * that means "a floating-point exception is pending for this
+	     * thread".  Under the lazy scheme fp_load() read it on the #NM;
+	     * the switch reads it now, on every thread.
+	     */
+	    ifps->fp_valid = TRUE;
+
 	    simple_unlock(&pcb->lock);
 	    if (new_ifps != 0)
 		zfree(ifps_zone, (vm_offset_t) ifps);
+
+	    /*
+	     * If we just replaced the state of the thread running right now,
+	     * put it in the registers: it used to get there from the #NM
+	     * trap that clear_fpu()'s CR0.TS would have caused, and there is
+	     * no such trap any more (#560).
+	     */
+	    if (thr_act == current_act())
+		fpu_load_context(thr_act);
 	}
 
 	return KERN_SUCCESS;
@@ -581,15 +662,21 @@ ASSERT_IPL(SPL0);
 
 	/* Make sure we`ve got the latest fp state info */
 	/* If the live fpu state belongs to our target */
-#if	NCPUS == 1
-	if (thr_act == fp_act)
-#else
-	if (thr_act == current_act())
-#endif
-	{
-	    clear_ts();
+	if (thr_act == current_act()) {
 	    fp_save(thr_act);
-	    clear_fpu();
+	    /*
+	     * 🔴 The registers are NOT emptied here, and that is a change.
+	     * clear_fpu() used to arm CR0.TS, which cost nothing because the
+	     * thread's next use of the unit trapped and reloaded from the
+	     * copy fp_save() had just made.  With the restore eager there is
+	     * no reload before the thread goes on running, so emptying them
+	     * would throw away the state we were asked to READ.
+	     *
+	     * They stay live, which means the memory copy is stale again --
+	     * otherwise fpu_save_context() would skip the save at the next
+	     * switch and lose whatever the thread does from here.
+	     */
+	    ifps->fp_valid = FALSE;
 	}
 
 	state->fpkind = fp_kind;
@@ -699,41 +786,37 @@ ASSERT_IPL(SPL0);
 void
 fpnoextflt(void)
 {
-	/*
-	 * Enable FPU use.
-	 */
 ASSERT_IPL(SPL0);
-	clear_ts();
-#if	NCPUS == 1
-
 	/*
-	 * If this thread`s state is in the FPU, we are done.
+	 * 🔴 #560: this is no longer a route to anything.
+	 *
+	 * It used to be THE restore: the switch armed CR0.TS, the new
+	 * thread's first floating-point instruction trapped here, and this
+	 * function took the unit away from whoever had it and loaded the
+	 * current thread's state.  That deferral is what left one thread's
+	 * registers readable to the next one (CVE-2018-3665), so the switch
+	 * carries the state now and CR0.TS is never armed.
+	 *
+	 * What is left for this handler is the case it is actually named
+	 * for -- "coprocessor not present".  Two things can still raise a
+	 * #NM and neither is a context switch:
+	 *
+	 *  - CR0.EM is set, which init_fpu() does only when it found no FPU
+	 *    at all.  The thread asked for an instruction this machine does
+	 *    not have, and gets told so.
+	 *
+	 *  - CR0.TS is set, which nothing does any more.  If that happens
+	 *    the invariant this file now rests on has been broken somewhere
+	 *    else, and loading a thread's state here would paper over it:
+	 *    the registers would be right and the reason would be gone.
 	 */
-	if (fp_act == current_act())
-	    return;
-
-	/* Make sure we don't do fpsave() in fp_intr while doing fpsave()
-	 * here if the current fpu instruction generates an error.
-	 */
-	fwait();
-	/*
-	 * If another thread`s state is in the FPU, save it.
-	 */
-	if (fp_act != THR_ACT_NULL) {
-	    fp_save(fp_act);
+	if (fp_kind == FP_NO) {
+	    i386_exception(EXC_BAD_INSTRUCTION, EXC_I386_NOEXTFLT, 0);
+	    /*NOTREACHED*/
 	}
 
-	/*
-	 * Give this thread the FPU.
-	 */
-	fp_act = current_act();
-
-#endif	/* NCPUS == 1 */
-
-	/*
-	 * Load this thread`s state into the FPU.
-	 */
-	fp_load(current_act());
+	panic("fpnoextflt: #NM with an FPU present and CR0.TS clear (cr0=0x%x)",
+	      get_cr0());
 }
 
 /*
@@ -748,16 +831,13 @@ fpextovrflt(void)
 	register pcb_t		pcb;
 	register struct i386_fpsave_state *ifps;
 
-#if	NCPUS == 1
-
 	/*
-	 * Is exception for the currently running thread?
+	 * The check that used to be here asked whether the exception was for
+	 * the thread running right now, by comparing against the lazy owner.
+	 * It is gone with the owner: the unit holds the current thread's
+	 * state and nobody else's, so the answer is yes by construction
+	 * (#560).
 	 */
-	if (fp_act != thr_act) {
-	    /* Uh oh... */
-	    panic("fpextovrflt");
-	}
-#endif
 
 	/*
 	 * This is a non-recoverable error.
@@ -770,15 +850,12 @@ fpextovrflt(void)
 	simple_unlock(&pcb->lock);
 
 	/*
-	 * Re-initialize the FPU.
+	 * Re-initialize the FPU.  The thread has no save area any more, so
+	 * the registers must not be left holding what it had: the next
+	 * switch to it will load the clean image, but it is still running
+	 * until the exception below unwinds it.
 	 */
-	clear_ts();
 	fninit();
-
-	/*
-	 * And disable access.
-	 */
-	clear_fpu();
 
 	if (ifps)
 	    zfree(ifps_zone, (vm_offset_t) ifps);
@@ -799,41 +876,54 @@ fpexterrflt(void)
 {
 	register thread_act_t	thr_act = current_act();
 
+	int			mycpu;
+	register thread_act_t	owner;
+
 ASSERT_IPL(SPL0);
-#if	NCPUS == 1
+	mp_disable_preemption();
+	mycpu = cpu_number();
+	owner = fp_intr_act[mycpu];
+	fp_intr_act[mycpu] = THR_ACT_NULL;
+	mp_enable_preemption();
+
+	if (owner == THR_ACT_NULL)
+		panic("fpexterrflt: AST taken with no thread recorded");
+
 	/*
-	 * Since FPU errors only occur on ESC or WAIT instructions,
-	 * the current thread should own the FPU.  If it didn`t,
-	 * we should have gotten the task-switched interrupt first.
+	 * A context switch can happen between the interrupt and the AST, and
+	 * the AST is per-CPU while the error belongs to a thread -- so the
+	 * thread that reaches this point is not necessarily the one the
+	 * error is for.
+	 *
+	 * 🔑 The remembered condition (fp_valid == 2) used to be delivered by
+	 * fp_load(), off the #NM trap the owner would take the next time it
+	 * touched the unit.  There is no such trap now, so fpu_load_context()
+	 * delivers it: the restore is the one thing that is guaranteed to
+	 * happen before that thread runs again (#560).
+	 *
+	 * ⚠️ This whole arm used to be uniprocessor-only, which left SMP
+	 * raising the arithmetic exception against whatever thread the AST
+	 * happened to land on.
 	 */
-	if (fp_act != THR_ACT_NULL) {
-	    panic("fpexterrflt");
+	if (owner != thr_act) {
+		register struct i386_fpsave_state *ifps;
+
+		ifps = owner->mact.pcb->ims.ifps;
+		if (ifps != 0)
+			ifps->fp_valid = 2;
+		/*
+		 * If it has no save area the error dies with it: the thread
+		 * was told its state is uninitialized, or it is on its way
+		 * out.  Nothing to raise it against.
+		 */
 		return;
 	}
 
 	/*
-	 * Check if we got a context switch between the interrupt and the AST
-	 * This can happen if the interrupt arrived after the FPU AST was
-	 * checked. In this case, raise the exception in fp_load when this
-	 * thread next time uses the FPU. Remember exception condition in
-	 * fp_valid (extended boolean 2).
-	 */
-	if (fp_intr_act != thr_act) {
-		if (fp_intr_act == THR_ACT_NULL) {
-			panic("fpexterrflt: fp_intr_act == THR_ACT_NULL");
-			return;
-		}
-		fp_intr_act->mact.pcb->ims.ifps->fp_valid = 2;
-		fp_intr_act = THR_ACT_NULL;
-		return;
-	}
-	fp_intr_act = THR_ACT_NULL;
-#else	/* NCPUS == 1 */
-	/*
-	 * Save the FPU state and turn off the FPU.
+	 * Save the FPU state: the registers are the live copy, and the
+	 * status word read below has to be the one that faulted.
 	 */
 	fp_save(thr_act);
-#endif	/* NCPUS == 1 */
 
 	/*
 	 * Raise FPU exception.
@@ -930,6 +1020,97 @@ ASSERT_IPL(SPL0);
 }
 
 /*
+ * Save the outgoing thread's FPU state.  Called from switch_context() and
+ * machine_switch_act(), before the map and the pcb change.
+ *
+ * 🔴 This does NOT arm CR0.TS, and that absence is the point of #560: the
+ * registers must not be left holding this thread's data while another one
+ * runs.  fpu_load_context() below puts something else in them.
+ */
+void
+fpu_save_context(
+	thread_t	thread)
+{
+	register struct i386_fpsave_state *ifps;
+
+	ifps = thread->top_act->mact.pcb->ims.ifps;
+	if (ifps == 0 || ifps->fp_valid)
+	    return;
+
+	/* registers are in the FPU - save to memory */
+	ifps->fp_valid = TRUE;
+	if (fp_kind == FP_XSAVE)
+	    xsave(&ifps->fx_save_state);
+	else
+	    fxsave(&ifps->fx_save_state);
+}
+
+/*
+ * Load the incoming thread's FPU state.  Called from
+ * act_machine_switch_pcb(), which is the tail of every switch.
+ *
+ * 🔑 The place for this call has always existed and has always been right
+ * here -- it was fpu_load_context(), an empty macro.  What was missing was
+ * the restore, not somewhere to put it.
+ */
+void
+fpu_load_context(
+	thread_act_t	thr_act)
+{
+	register struct i386_fpsave_state *ifps;
+
+	ifps = thr_act->mact.pcb->ims.ifps;
+	if (ifps == 0)
+	    /*
+	     * This thread has no state of its own, and the registers at this
+	     * moment hold the thread we are switching away from.  Leaving
+	     * them there is exactly the leak, so they get the clean image.
+	     *
+	     * Reached in earnest: the thread setup_main() runs on never went
+	     * through pcb_init(), and fpu_set_state() frees the area of a
+	     * thread told its state is uninitialized.
+	     */
+	    ifps = fp_clean_state;
+	if (ifps == 0)
+	    /*
+	     * Before fpu_module_init() built the clean image.  Nothing has
+	     * had FPU state yet at this point, so there is none to leave.
+	     */
+	    return;
+
+	if (ifps->fp_valid == 2) {
+	    /*
+	     * A floating-point error was raised for this thread while
+	     * another one was running, and the AST that would have carried
+	     * it was consumed by that other thread (fpexterrflt).  fp_load()
+	     * used to raise the exception from the #NM trap, which is a
+	     * place where one CAN be raised; here we are inside the switch
+	     * with preemption disabled, and it is not.
+	     *
+	     * So it is re-armed against the thread being switched TO, which
+	     * is the one it belongs to, and i386_astintr() delivers it on
+	     * the way out to user mode.
+	     */
+	    ifps->fp_valid = TRUE;
+	    fp_intr_act[cpu_number()] = thr_act;
+	    ast_on(cpu_number(), AST_I386_FP);
+	}
+
+	if (fp_kind == FP_XSAVE)
+	    xrstor(&ifps->fx_save_state);
+	else
+	    fxrstor(&ifps->fx_save_state);
+
+	/*
+	 * A thread's own area is now stale -- the registers are the live
+	 * copy.  The clean image is shared and read-only in practice, so it
+	 * stays marked valid.
+	 */
+	if (ifps != fp_clean_state)
+	    ifps->fp_valid = FALSE;		/* in FPU */
+}
+
+/*
  * Allocate and initialize FP state for a thread's pcb.  Don't load state.
  *
  * #560: this used to be reachable only for the thread running right now,
@@ -995,19 +1176,25 @@ fp_state_alloc(void)
  *	(used by thread_terminate_self to ensure fp faults
  *	aren't satisfied by overly general trap code in the
  *	context of the reaper thread)
+ *
+ * ⚠️ The SMP arm of this used to read "not needed on MP x86s; fp not lazily
+ * evaluated", which was not true: on MP the SAVE was eager and the RESTORE
+ * was as lazy as anywhere else.  A comment asserting the property that was
+ * missing is how the property stayed missing (#560).
  */
 void
 fpflush(thread_act_t thr_act)
 {
-#if	NCPUS == 1
-	if (fp_act && thr_act == fp_act) {
-	    clear_ts();
+	/*
+	 * The registers hold the current thread's state, so they hold this
+	 * thread's only if it is the current one.  Empty them, so that a
+	 * floating-point fault raised after this point cannot be answered
+	 * with a dying thread's data.
+	 */
+	if (thr_act == current_act()) {
 	    fwait();
 	    clear_fpu();
 	}
-#else
-	/* not needed on MP x86s; fp not lazily evaluated */
-#endif
 }
 
 
@@ -1031,51 +1218,39 @@ ASSERT_IPL(SPL1);
 
 	/*
 	 * Save the FPU context to the thread using it.
+	 *
+	 * 🔑 Which thread that is no longer has to be looked up.  The two
+	 * arms this used to open with -- "the unit belongs to nobody" and
+	 * "the unit belongs to a thread that is not running" -- were both
+	 * consequences of the lazy restore, and neither can arise now: the
+	 * registers hold the current thread's state (#560).
 	 */
-#if	NCPUS == 1
-	if (fp_act == THR_ACT_NULL) {
-		printf("fpintr: FPU not belonging to anyone!\n");
-		clear_ts();
-		fninit();
-		clear_fpu();
-		return;
-	}
-
-	if (fp_act != thr_act) {
-	    /*
-	     * FPU exception is for a different thread.
-	     * When that thread again uses the FPU an exception will be
-	     * raised in fp_load. Remember the condition in fp_valid (== 2).
-	     */
-	    clear_ts();
-	    fp_save(fp_act);
-	    fp_act->mact.pcb->ims.ifps->fp_valid = 2;
-	    fninit();
-	    clear_fpu();
-	    /* leave fp_intr_act THR_ACT_NULL */
-	    return;
-	}
-	if (fp_intr_act != THR_ACT_NULL)
-	    panic("fp_intr: already caught intr");
-	fp_intr_act = thr_act;
-#endif	/* NCPUS == 1 */
-
-	clear_ts();
 	fp_save(thr_act);
+
+	/*
+	 * Clear the error condition in the unit so it is not signalled
+	 * again.  The saved copy keeps the status word that faulted, which
+	 * is what fpexterrflt() reports, and it stays the authoritative copy
+	 * -- the next switch to this thread restores from it.
+	 */
 	fninit();
-	clear_fpu();
 
 	/*
 	 * Since we are running on the interrupt stack, we must
 	 * signal the thread to take the exception when we return
 	 * to user mode.  Use an AST to do this.
 	 *
-	 * Don`t set the thread`s AST field.  If the thread is
-	 * descheduled before it takes the AST, it will notice
-	 * the FPU error when it reloads its FPU state.
+	 * ⚠️ The AST is per-CPU and the error belongs to a thread, so which
+	 * thread it was is recorded alongside it.  If a switch happens
+	 * before the AST is taken, fpexterrflt() hands the condition back to
+	 * the owner through fp_valid == 2, and fpu_load_context() delivers
+	 * it -- the restore being the one thing guaranteed to happen before
+	 * that thread runs again.  It used to be the #NM trap, which no
+	 * longer comes.
 	 */
 	s = splsched();
 	mp_disable_preemption();
+	fp_intr_act[cpu_number()] = thr_act;
 	ast_on(cpu_number(), AST_I386_FP);
 	mp_enable_preemption();
 	splx(s);

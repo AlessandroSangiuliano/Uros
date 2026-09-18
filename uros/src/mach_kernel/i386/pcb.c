@@ -349,9 +349,11 @@ act_machine_switch_pcb( thread_act_t new_act )
     }
 	mp_enable_preemption();
 	/*
-	 * Load the floating-point context, if necessary.
+	 * Load the floating-point context.  Not "if necessary": the registers
+	 * hold the thread we came from until something is put over them
+	 * (#560).
 	 */
-	fpu_load_context(pcb);
+	fpu_load_context(new_act);
 
 }
 

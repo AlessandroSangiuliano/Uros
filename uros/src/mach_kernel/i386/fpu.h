@@ -173,37 +173,33 @@ extern void	enable_fpe(struct i386_fpsave_state *ifps);
 
 #else	/* no FPE */
 
-#define	fpu_load_context(pcb)
-
 /*
- * Save thread`s FPU context.
- * If only one CPU, we just set the task-switched bit,
- * to keep the new thread from using the coprocessor.
- * If multiple CPUs, we save the entire state.
+ * The switch carries the FPU state (#560).
+ *
+ * 🔴 It did not, and that was CVE-2018-3665.  The outgoing thread's registers
+ * were left in the unit behind CR0.TS and the incoming thread ran with them
+ * still there; the restore came later, from the #NM trap, the first time the
+ * new thread touched the unit.  CR0.TS does stop the instruction
+ * architecturally, but it does not stop the processor from executing it
+ * speculatively against those registers, and the result leaves by a side
+ * channel.  What sits in them is a previous thread's data -- AES-NI round
+ * keys live in the XMM registers -- so the leak is between any two threads
+ * that share a processor.
+ *
+ * On one CPU it was worse than deferred: fpu_save_context() was only
+ * set_ts(), so the state was deliberately LEFT in the registers, across the
+ * quanta of an unbounded number of other threads, until somebody else
+ * happened to want the unit.
+ *
+ * These are functions rather than macros now because the restore has a case
+ * to decide (see fpu_load_context) and because the save is one decision on
+ * both uniprocessor and SMP: the split those two macros used to have existed
+ * only to express the laziness, and there is none left to express.
  */
-#if	NCPUS > 1
-#define	fpu_save_context(thread) \
-    { \
-	register struct i386_fpsave_state *ifps; \
-	ifps = (thread)->top_act->mact.pcb->ims.ifps; \
-	if (ifps != 0 && !ifps->fp_valid) { \
-	    /* registers are in FPU - save to memory */ \
-	    ifps->fp_valid = TRUE; \
-	    if (fp_kind == FP_XSAVE) \
-		xsave(&ifps->fx_save_state); \
-	    else \
-		fxsave(&ifps->fx_save_state); \
-	} \
-	set_ts(); \
-    }
-	    
-#else	/* NCPUS == 1 */
-#define	fpu_save_context(thread) \
-    { \
-	    set_ts(); \
-    }
-
-#endif	/* NCPUS == 1 */
+extern void		fpu_save_context(
+					thread_t			thread);
+extern void		fpu_load_context(
+					thread_act_t			thr_act);
 
 #endif	/* no FPE */
 
