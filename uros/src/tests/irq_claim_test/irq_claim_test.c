@@ -47,16 +47,25 @@
  * a delivered interrupt here evidence rather than noise.  ⚠️ Not assumed:
  * arm [4] reports what arrived, and zero is the control.
  *
- * ⚠️ NOT IRQ 13, which was the first choice because it is one of only two
- * lines the i386 kernel claims with a non-zero priority, and so the only way
- * to reach the "restore what was displaced" branch from here.  It is also the
- * FPU error line, and CR0_NE is never set in this tree -- the only two
- * mentions of it are in locore.S's revision history -- so numeric errors
- * still arrive as FERR# on that pin.  A line that can fire on its own makes
- * the count in arm [4] a measurement of something this program does not
- * control.  The displaced-handler branch is therefore NOT covered here, and
- * saying so is better than covering it with a line the test cannot hold
- * still.
+ * ⚠️ NOT IRQ 13, which was the first choice because it was one of only two
+ * lines the i386 kernel claimed with a non-zero priority, and so the only way
+ * to reach the "restore what was displaced" branch from here.  It could not be
+ * held still: it was also the FPU error line, and with CR0_NE never set a
+ * numeric error arrived on that pin as FERR# -- a line that can fire on its
+ * own makes the count in arm [4] a measurement of something this program does
+ * not control.
+ *
+ * 🔴 THAT REASON IS GONE AND THE CONCLUSION IS NOT (#515).  CR0.NE is armed
+ * now, so nothing asserts FERR# and IRQ 13 cannot fire on its own any more --
+ * but the same change set intpri[13] to 0, because a line no handler serves
+ * must not be left unmasked.  So it is no longer a line with a non-zero
+ * priority either, and therefore no longer a route to that branch.  The reason
+ * to avoid it changed completely; the choice of IRQ 5 did not.
+ *
+ * ⚠️ Which leaves IRQ 1, the keyboard at SPL6, as the only line the kernel
+ * still claims with a priority -- and the displaced-handler branch still NOT
+ * covered here.  Saying so is better than covering it with a line the test
+ * cannot hold still.
  */
 
 #include <mach.h>

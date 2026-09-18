@@ -105,6 +105,7 @@ CAP_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_server"
 CAP_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_test"
 IRQ_CLAIM_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/irq_claim_test"
 HAL_BAR_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/hal_bar_test"
+FPERR_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fperr_test"   # #515 x87/SIMD
 GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
@@ -224,6 +225,22 @@ if [ -f "$IRQ_CLAIM_TEST" ]; then
     IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
 fi
 
+# #515: un errore aritmetico non mascherato deve arrivare al thread che lo ha
+# causato.  Due righe e non una: i due bracci sono due RUN separate, perche'
+# il braccio SIMD lascia il proprio thread parcheggiato dentro una seconda
+# exception_raise() e quel messaggio, in uno stesso task, il braccio dopo se
+# lo prenderebbe per suo.
+#
+# ⚠️ In fondo, subito prima della ush.  Sul kernel che questo issue parte per
+# aggiustare il braccio SIMD PANICA -- e' il reperto di partenza -- quindi
+# tutto il resto del boot deve essere gia' passato quando tocca a lui.
+FPERR_TEST_X87_CONF_LINE=""
+FPERR_TEST_SSE_CONF_LINE=""
+if [ -f "$FPERR_TEST" ]; then
+    FPERR_TEST_X87_CONF_LINE="fperr_test fperr_test x87"
+    FPERR_TEST_SSE_CONF_LINE="fperr_test fperr_test sse"
+fi
+
 CAP_TEST_CONF_LINE=""
 if [ -f "$CAP_TEST" ]; then
     CAP_TEST_CONF_LINE="cap_test cap_test"
@@ -275,6 +292,8 @@ if [ "$MINIMAL" = "1" ]; then
     CAP_TEST_CONF_LINE=""
     IRQ_CLAIM_TEST_CONF_LINE=""
     HAL_BAR_TEST_CONF_LINE=""
+    FPERR_TEST_X87_CONF_LINE=""
+    FPERR_TEST_SSE_CONF_LINE=""
     GPUSTAT_CONF_LINE=""
 else
     HELLO_SERVER_LINE="hello_server hello_server"
@@ -303,6 +322,8 @@ ${CAP_TEST_CONF_LINE}
 ${IRQ_CLAIM_TEST_CONF_LINE}
 ${HAL_BAR_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
+${FPERR_TEST_X87_CONF_LINE}
+${FPERR_TEST_SSE_CONF_LINE}
 ${USH_CONF_LINE}
 CONF
 
@@ -375,6 +396,13 @@ fi
 IRQ_CLAIM_TEST_WRITE_LINE=""
 if [ -f "$IRQ_CLAIM_TEST" ]; then
     IRQ_CLAIM_TEST_WRITE_LINE="write $IRQ_CLAIM_TEST irq_claim_test"
+fi
+
+# #515: un solo binario per le due righe di bootstrap.conf -- i bracci si
+# distinguono per argv, non per immagine.
+FPERR_TEST_WRITE_LINE=""
+if [ -f "$FPERR_TEST" ]; then
+    FPERR_TEST_WRITE_LINE="write $FPERR_TEST fperr_test"
 fi
 
 CAP_TEST_WRITE_LINE=""
@@ -530,6 +558,7 @@ ${CAP_SERVER_WRITE_LINE}
 ${CAP_TEST_WRITE_LINE}
 ${IRQ_CLAIM_TEST_WRITE_LINE}
 ${HAL_BAR_TEST_WRITE_LINE}
+${FPERR_TEST_WRITE_LINE}
 ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
 ${PROC_SERVER_WRITE_LINE}

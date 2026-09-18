@@ -358,7 +358,15 @@ kdb_trap(
 		if (db_recover) {
 		    i386_nested_saved_state = *regs;
 		    db_printf("Caught ");
-		    if (type < 0 || type > TRAP_TYPES)
+		    /*
+		     * ⚠️ >=, not >.  TRAP_TYPES is the element count, so the
+		     * last valid index is one less -- the old test let a trap
+		     * numbered exactly TRAP_TYPES read one past the end of
+		     * trap_type[] and print whatever followed it as a string.
+		     * Found while adding vector 19 to that table (#515), which
+		     * is what would have made the case reachable.
+		     */
+		    if (type < 0 || type >= TRAP_TYPES)
 			db_printf("type %d", type);
 		    else
 			db_printf("%s", trap_type[type]);
@@ -590,7 +598,8 @@ kdbprinttrap(
 	int	sp)
 {
 	printf("kernel: ");
-	if (type < 0 || type > TRAP_TYPES)
+	/* >=, not >: see the same test in kdb_trap() above (#515). */
+	if (type < 0 || type >= TRAP_TYPES)
 	    db_printf("type %d", type);
 	else
 	    db_printf("%s", trap_type[type]);

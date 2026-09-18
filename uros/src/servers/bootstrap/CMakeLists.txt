@@ -500,7 +500,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -566,6 +566,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             cap_test:${_SBIN}/cap_test
             dl_test:${_SBIN}/dl_test
             fault_test:${_SBIN}/fault_test
+            # ⚠️ One entry for two configuration lines, like dma_reclaim_test
+            # above: the arms differ by argv, not by image.  They are separate
+            # RUNS because the SIMD arm leaves its faulting thread parked in a
+            # second exception_raise() -- a message a second arm in the same
+            # task would receive as its own (#515).
+            fperr_test:${_SBIN}/fperr_test
             act_test:${_SBIN}/act_test
             cow_test:${_SBIN}/cow_test
             hal_server:${_SBIN}/hal_server
@@ -611,12 +617,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_IRQ_CMF}
             name_server_bin netname_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
-            cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
+            cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
             hal_bar_test_server
             ${_IPC_BENCH_DEP}
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + 13 tasks + hal_server + block_device_server"
+    COMMENT "Bundle: bootstrap.conf + 14 tasks + hal_server + block_device_server"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

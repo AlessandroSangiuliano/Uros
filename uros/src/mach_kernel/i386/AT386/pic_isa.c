@@ -133,7 +133,21 @@ intr_t ivect[NINTR]= {
 	/* Inter processor interrupt also use this vector */
 	/* 13 */	(intr_t)mp_intr,	/* always */
 #else	/* MBUS && NCPUS > 1 */
-	/* 13 */	(intr_t)fpintr,		/* always */
+	/*
+	 * 🔴 fpintr was here, and IRQ 13 is dead silicon now (#515).
+	 *
+	 * The line carried the 387's FERR#, which a PC chipset turns into an
+	 * interrupt when CR0.NE is clear.  The kernel sets the bit, so an x87
+	 * numeric error is #MF -- a fault of the thread that caused it -- and
+	 * nothing asserts this line at all.
+	 *
+	 * ⚠️ intpri[13] goes to 0 with it, which is the half that matters:
+	 * form_pic_mask() unmasks every line with a non-zero priority, so
+	 * leaving SPL1 there would keep an enabled interrupt nobody handles.
+	 * It is also what made IRQ 13 unusable as a test line for #457, which
+	 * is where this issue came from.
+	 */
+	/* 13 */	(intr_t)intnull,
 #endif	/* MBUS && NCPUS > 1 */
 	/* 14 */	(intr_t)intnull,	/* hdintr, ... */
 	/* 15 */	(intr_t)intnull,	/* ??? */
@@ -143,5 +157,5 @@ u_char intpri[NINTR] = {
 	/* 00 */   	0,	SPL6,	0,	0,
 	/* 04 */	0,	0,	0,	0,
 	/* 08 */	0,	0,	0,	0,
-	/* 12 */	0,	SPL1,	0,	0,
+	/* 12 */	0,	0,	0,	0,	/* 13: was SPL1 (#515) */
 };

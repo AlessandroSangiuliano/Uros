@@ -430,9 +430,34 @@ kernel_trap(
 		fpextovrflt();
 		return (TRUE);
 
+	    /*
+	     * 🔴 A panic, and deliberately not a handler (#515).
+	     *
+	     * This kernel executes no floating point: KERNEL_FLOAT_OK is 0
+	     * since #560 and scripts/kernel-vector-check.py fails the link if
+	     * an x87 or SSE instruction appears outside the declared symbols.
+	     * An arithmetic fault in ring 0 therefore means that guarantee
+	     * broke somewhere the build-time check could not see -- which is
+	     * worth saying, and is worth more than raising an arithmetic
+	     * exception against a kernel thread that cannot have caused one.
+	     *
+	     * ⚠️ So the pair is deliberate: a check that makes it impossible,
+	     * and a panic that names the check when it happens anyway.
+	     *
+	     * ⚠️ T_FLOATING_POINT_ERROR used to call fpexterrflt() here, from
+	     * the days when that routine was an AST consumer and this was one
+	     * of the two places the AST could be taken.  It is the #MF handler
+	     * now and raises against current_act(), which in ring 0 is a
+	     * kernel thread -- so reaching it from here would be a confusing
+	     * way to panic rather than a way not to.
+	     */
 	    case T_FLOATING_POINT_ERROR:
-		fpexterrflt();
-		return (TRUE);
+	    case T_SIMD_ERROR:
+		panic("kernel_trap: arithmetic fault (trap %d) in kernel mode "
+		      "at eip 0x%x -- this kernel computes in no floating "
+		      "point (KERNEL_FLOAT_OK=0, kernel-vector-check)",
+		      type, regs->eip);
+		/*NOTREACHED*/
 
 	    case T_PAGE_FAULT:
 		/*
@@ -802,6 +827,17 @@ user_trap(
 
 	    case T_FLOATING_POINT_ERROR:
 		fpexterrflt();
+		return;
+
+	    /*
+	     * 🔴 New with #515, and the line above it is why it was missing:
+	     * this kernel has armed CR4.OSXMMEXCPT since SSE was enabled, so a
+	     * SIMD numeric error has always arrived here as a precise fault --
+	     * and there was no case for it, so it reached the default below
+	     * and panicked.  Two instructions from ring 3.
+	     */
+	    case T_SIMD_ERROR:
+		fpsseflt();
 		return;
 
 	    default:
@@ -1256,8 +1292,17 @@ v86_assist(
 
 /*
  * Handle AST traps for i386.
- * Check for delayed floating-point exception from
- * AT-bus machines.
+ *
+ * ⚠️ It used to open by asking whether this AST was a delayed floating-point
+ * exception from an AT-bus machine, and to call fpexterrflt() when it was
+ * (#515).  That arm is gone with AST_I386_FP: the error arrived as IRQ 13
+ * because CR0.NE was clear, at interrupt level and on whatever processor the
+ * PIC reached, so it had to be parked until the owning thread was next on its
+ * way to user mode.  With the bit set it is a fault of that thread, taken in
+ * its own context, and never reaches an AST at all.
+ *
+ * 🔑 Which leaves this routine with one job and no fork, and removes a
+ * mycpu/need_ast read from every AST the machine takes.
  */
 
 extern void     log_thread_action (thread_t, char *);
@@ -1273,26 +1318,8 @@ i386_astintr(int preemption)
 	s = splsched();		/* block interrupts to check reasons */
 	mp_disable_preemption();
 	mycpu = cpu_number();
-	if (need_ast[mycpu] & AST_I386_FP) {
-	    /*
-	     * AST was for delayed floating-point exception -
-	     * FP interrupt occured while in kernel.
-	     * Turn off this AST reason and handle the FPU error.
-	     */
 
-	    ast_off(mycpu, AST_I386_FP);
-	    mp_enable_preemption();
-	    splx(s);
-
-	    fpexterrflt();
-	}
-	else {
-	    /*
-	     * Not an FPU trap.  Handle the AST.
-	     * Interrupts are still blocked.
-	     */
-
-	    if (preemption) {
+	if (preemption) {
 
 	    /*
 	     * We don't want to process any AST if we were in
@@ -1315,18 +1342,17 @@ i386_astintr(int preemption)
 		self->preempt = TH_NOT_PREEMPTABLE;
 
 		thread_unlock (self);
-	    } else {
+	} else {
 		mp_enable_preemption();
-	    }
-
-	    ast_taken(preemption, mask, s
-#if	FAST_IDLE
-		      ,NO_IDLE_THREAD
-#endif	/* FAST_IDLE */
-		      );
-
-	    self->preempt = TH_PREEMPTABLE;
 	}
+
+	ast_taken(preemption, mask, s
+#if	FAST_IDLE
+		  ,NO_IDLE_THREAD
+#endif	/* FAST_IDLE */
+		  );
+
+	self->preempt = TH_PREEMPTABLE;
 }
 
 /*
@@ -1345,17 +1371,15 @@ i386_exception(
 	int	code,
 	int	subcode)
 {
-	spl_t			s;
 	exception_data_type_t   codes[EXCEPTION_CODE_MAX];
 
 	/*
-	 * Turn off delayed FPU error handling.
+	 * ⚠️ This used to open by turning off delayed FPU error handling --
+	 * splsched, ast_off(cpu_number(), AST_I386_FP), splx -- on every
+	 * exception the machine raises, of any kind (#515).  There is no such
+	 * AST any more: with CR0.NE set an x87 error is a fault of the thread
+	 * that caused it, so nothing is ever pending on a processor.
 	 */
-	s = splsched();
-	mp_disable_preemption();
-	ast_off(cpu_number(), AST_I386_FP);
-	mp_enable_preemption();
-	splx(s);
 
 #if	FPE
 	fpe_exception_fixup(exc, code, subcode);

@@ -92,15 +92,31 @@
 /*				15 */
 #define	T_FLOATING_POINT_ERROR	16
 #define	T_WATCHPOINT		17
+/*				18	machine check, no handler here */
+#define	T_SIMD_ERROR		19		/* #XF, SIMD numeric error */
 #define	T_SYSENTER		0x80		/* SYSENTER fast syscall entry */
 #define T_PREEMPT		255
 
+/*
+ * ⚠️ 17 is DDB's own and not the hardware's.  The processor raises #AC there;
+ * this kernel never enables alignment checking and kdb_trap() is called with
+ * T_WATCHPOINT as an invented type, so the two have never met.  Left as it is
+ * because renaming it would change what the debugger prints for a trap it
+ * synthesises, which is not what #515 is about -- but a real #AC would be
+ * reported as a watchpoint, and that is worth knowing.
+ *
+ * 🔴 19 is new (#515).  init_fpu() arms CR4.OSXMMEXCPT, which is the bit that
+ * makes a SIMD numeric error arrive as a precise fault at this vector -- and
+ * the table used to stop at 17, so user_trap() fell into its default and
+ * panicked on a fault an unprivileged task can raise in two instructions.
+ */
 #define TRAP_NAMES "divide error", "debug trap", "NMI", "breakpoint", \
 		   "overflow", "bounds check", "invalid opcode", \
 		   "no coprocessor", "double fault", "coprocessor overrun", \
 		   "invalid TSS", "segment not present", "stack bounds", \
 		   "general protection", "page fault", "(reserved)", \
-		   "coprocessor error", "watchpoint"
+		   "coprocessor error", "watchpoint", "machine check", \
+		   "SIMD floating-point error"
 
 /*
  * Page-fault trap codes.

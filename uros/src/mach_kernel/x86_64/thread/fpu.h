@@ -97,6 +97,23 @@ const char *fpu_save_instruction(void);
  * bytes — the instructions fault rather than misbehave if it is not, which
  * is the right way round.
  */
+/*
+ * Take the x87 numeric error the processor has just reported: return the
+ * status word that faulted, and clear the condition in the unit (#515).
+ *
+ * 🔴 Both halves are necessary and the second is the one that was missing.
+ * x87 reports a numeric error at the next WAITING instruction, so the flag in
+ * the status word is what raises #MF -- and it rides in the thread's own saved
+ * state across a switch, because XRSTOR puts it back.  A handler that answers
+ * KERN_SUCCESS sends the thread to the instruction that reported the error,
+ * where it faults again, for ever.  Measured: the exception arrived with the
+ * right subcode and the thread never came back.
+ *
+ * Called from the trap, where the faulting thread's registers are still the
+ * live copy -- this kernel never arms CR0.TS, so they always are.
+ */
+unsigned short fpu_take_x87_error(void);
+
 void fpu_save(void *area);
 void fpu_restore(const void *area);
 

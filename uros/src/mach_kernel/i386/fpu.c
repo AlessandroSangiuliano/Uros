@@ -188,27 +188,20 @@ static struct i386_fpsave_state	*fp_clean_state;
 static unsigned int		ifps_size;	/* one element of ifps_zone */
 
 /*
- * The thread a floating-point error was raised for, when the AST that
- * carries it has not been taken yet.
+ * ⚠️ Two variables used to live here and both are gone.
  *
- * 🔑 This is NOT ownership of the unit.  There used to be a second variable,
- * fp_act, which said whose state the registers held, and it existed only
- * because the restore was lazy: the registers could belong to a thread that
- * was not running.  The switch now leaves the current thread's state in them
- * and nobody else's, so that question has one answer -- current_act() -- and
- * the variable asking it is gone (#560).
+ * fp_act said whose state the registers held, and existed only because the
+ * restore was lazy: they could belong to a thread that was not running.  The
+ * switch now leaves the current thread's state in them and nobody else's, so
+ * the question has one answer -- current_act() (#560).
  *
- * This one survives because the AST is per-CPU while the error belongs to a
- * thread: a switch between the interrupt and the AST still hands it to the
- * wrong thread, on one processor and on many alike.  So it is no longer
- * behind NCPUS == 1, which had left SMP with no tracking at all.
- *
- * ⚠️ And it is an array, for the same reason need_ast is one: it shadows a
- * per-CPU AST.  A single global would have been a race the moment two
- * processors took a floating-point error at once -- which is exactly why it
- * could be a scalar while it was uniprocessor-only.
+ * fp_intr_act[NCPUS] said which thread a floating-point error had been raised
+ * for while the AST carrying it had not been taken yet.  It existed only
+ * because CR0.NE was clear: the error arrived as IRQ 13, on whatever processor
+ * the PIC reached, and had to be carried from there to the thread that earned
+ * it.  With the bit set the processor delivers the fault to that thread
+ * directly, so there is no interval to bridge and nothing to remember (#515).
  */
-volatile thread_act_t	fp_intr_act[NCPUS];
 
 /*
  * Take the unit away from whoever has it.
@@ -229,8 +222,6 @@ volatile thread_act_t	fp_intr_act[NCPUS];
 
 extern void		fpinit(void);
 extern void		fp_save(
-				thread_act_t	thr_act);
-extern void		fp_load(
 				thread_act_t	thr_act);
 
 /*
@@ -281,9 +272,30 @@ init_fpu(void)
 	     * left the previous thread's registers in place for the new thread
 	     * to read speculatively (CVE-2018-3665).  The switch now carries
 	     * the state, so there is nothing to defer and nothing to trap on.
+	     *
+	     * 🔴 CR0.NE is SET here, and had never been set on this target
+	     * (#515).  With it clear, an x87 numeric error does not raise #MF:
+	     * it asserts FERR#, which a PC chipset routes to IRQ 13 -- so the
+	     * one arithmetic fault the processor reports precisely arrived as
+	     * a PIC interrupt at SPL1, on a line that may be masked, shared or
+	     * claimed, and belonging to whatever thread happened to be running
+	     * when it got through.  That is the 387 arrangement, from when the
+	     * unit was a separate chip with no way to signal the CPU.
+	     *
+	     * 🔑 The NE=0 route is also the whole reason the deferred-error
+	     * machinery existed: fp_intr_act, AST_I386_FP, fp_valid == 2 and
+	     * fpintr() are all about carrying an error from the processor that
+	     * received the interrupt to the thread that earned it.  With NE
+	     * set the processor does that itself, and they are gone.
+	     *
+	     * ⚠️ Set alongside OSXMMEXCPT rather than anywhere else, because
+	     * the two say the same thing about the two halves of the unit: an
+	     * arithmetic error is a fault of this thread, not an interrupt
+	     * belonging to the machine.  One of them has been set since SSE
+	     * was enabled here; the other never was.
 	     */
 	    set_cr4(get_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
-	    set_cr0((get_cr0() & ~(CR0_EM|CR0_TS)) | CR0_MP);
+	    set_cr0((get_cr0() & ~(CR0_EM|CR0_TS)) | CR0_MP | CR0_NE);
 
 	    /*
 	     * Probe CPUID.1:ECX for XSAVE support (bit 26).
@@ -882,71 +894,101 @@ fpextovrflt(void)
 }
 
 /*
- * FPU error. Called by AST.
+ * x87 numeric error -- #MF, vector 16 (#515).
+ *
+ * 🔴 This used to be the AST half of a two-stage delivery, and every stage of
+ * it existed because CR0.NE was clear.  With the bit clear the processor does
+ * not raise #MF at all: it asserts FERR#, the chipset turns that into IRQ 13,
+ * fpintr() ran at SPL1 on whatever processor took the interrupt, recorded the
+ * thread in fp_intr_act[cpu] and armed AST_I386_FP -- and this routine then
+ * had to work out, on the way back to user mode, whether the thread it had
+ * landed in was the one the error belonged to, handing the condition back
+ * through fp_valid == 2 when it was not.
+ *
+ * 🔑 With CR0.NE set the processor does all of that itself.  The fault is
+ * delivered to the thread that owns the state, in its own context, through the
+ * gate <i386/idt.S> has always had at vector 16 -- so there is no interval to
+ * cover, nothing to record, and no wrong thread to hand anything back to.  The
+ * machinery is not maintained here; it is gone.
+ *
+ * ⚠️ The reported condition is CLEARED, and that is not tidiness.  x87 reports
+ * a numeric error at the next WAITING instruction, which means the flag in the
+ * status word is what raises the fault -- and FXRSTOR puts that status word
+ * back into the unit on the next switch to this thread.  Leaving it set would
+ * send a resumed thread into the same wait, for ever.  fpintr() left it set,
+ * and nothing noticed because nothing has ever resumed a thread from one; the
+ * 1991 comment in fp_load() that asked "does the fpu regenerate the interrupt
+ * in frstor or not?" is this question, and the answer is yes.
+ *
+ * 🔑 So the order here is: read the status word, clear the condition in the
+ * UNIT, then save.  The save is what the next switch-in restores from, so a
+ * unit cleared before it is the only way the cleared state reaches memory --
+ * and the value that faulted is already in hand, on its way out as the
+ * exception subcode.
  */
-
 void
 fpexterrflt(void)
 {
 	register thread_act_t	thr_act = current_act();
-
-	int			mycpu;
-	register thread_act_t	owner;
+	unsigned short		status;
 
 ASSERT_IPL(SPL0);
-	mp_disable_preemption();
-	mycpu = cpu_number();
-	owner = fp_intr_act[mycpu];
-	fp_intr_act[mycpu] = THR_ACT_NULL;
-	mp_enable_preemption();
-
-	if (owner == THR_ACT_NULL)
-		panic("fpexterrflt: AST taken with no thread recorded");
-
 	/*
-	 * A context switch can happen between the interrupt and the AST, and
-	 * the AST is per-CPU while the error belongs to a thread -- so the
-	 * thread that reaches this point is not necessarily the one the
-	 * error is for.
-	 *
-	 * 🔑 The remembered condition (fp_valid == 2) used to be delivered by
-	 * fp_load(), off the #NM trap the owner would take the next time it
-	 * touched the unit.  There is no such trap now, so fpu_load_context()
-	 * delivers it: the restore is the one thing that is guaranteed to
-	 * happen before that thread runs again (#560).
-	 *
-	 * ⚠️ This whole arm used to be uniprocessor-only, which left SMP
-	 * raising the arithmetic exception against whatever thread the AST
-	 * happened to land on.
+	 * ⚠️ From the unit and not from the save area.  A thread whose state
+	 * was freed by fpu_set_state() has no save area at all, and it can
+	 * still take this fault -- the registers are the live copy either way,
+	 * and they are where the faulting status word is.
 	 */
-	if (owner != thr_act) {
-		register struct i386_fpsave_state *ifps;
+	status = fnstsw();
+	fnclex();
 
-		ifps = owner->mact.pcb->ims.ifps;
-		if (ifps != 0)
-			ifps->fp_valid = 2;
-		/*
-		 * If it has no save area the error dies with it: the thread
-		 * was told its state is uninitialized, or it is on its way
-		 * out.  Nothing to raise it against.
-		 */
-		return;
-	}
+	fp_save(thr_act);
 
+	i386_exception(EXC_ARITHMETIC, EXC_I386_EXTERRFLT, status);
+	/*NOTREACHED*/
+}
+
+/*
+ * SIMD numeric error -- #XF, vector 19 (#515).
+ *
+ * 🔴 There has been nothing here at all.  init_fpu() has set CR4.OSXMMEXCPT
+ * since SSE was enabled on this target, and that bit is precisely what makes
+ * an unmasked SIMD exception arrive as this fault instead of as an invalid
+ * opcode -- while <i386/trap.h> stopped at 17, so user_trap() fell through to
+ * its default and panicked.  Two instructions from ring 3, `ldmxcsr' with a
+ * mask bit cleared and a divide by zero, stopped the machine.
+ *
+ * 🔑 Nothing like fpexterrflt()'s machinery above is needed, and the reason is
+ * architectural rather than a simplification: #XF is PRECISE.  It is raised by
+ * the instruction that caused it, in the thread that executed it, at the
+ * moment it executed it -- so there is no interval in which a switch can hand
+ * it to somebody else, and nothing to remember between the fault and the
+ * report.  Every line of the deferred-error machinery exists because the x87's
+ * report is NOT precise and, on this kernel, does not even arrive as a fault.
+ *
+ * ⚠️ And the MXCSR exception flags are deliberately NOT cleared, which is the
+ * opposite of what the x87 path has to do.  There the flag is what raises the
+ * fault, so leaving it set means the thread faults again at the same wait for
+ * ever; here the DIVISION raises it, the flag is only a record, and a handler
+ * that resumes this thread re-executes the division whatever we do.  Clearing
+ * would destroy the one piece of evidence and change nothing.
+ */
+void
+fpsseflt(void)
+{
+	register thread_act_t	thr_act = current_act();
+
+ASSERT_IPL(SPL0);
 	/*
-	 * Save the FPU state: the registers are the live copy, and the
-	 * status word read below has to be the one that faulted.
+	 * The registers are the live copy and MXCSR is in them, so the value
+	 * reported has to come from a save made here rather than from whatever
+	 * the last switch happened to leave in memory.
 	 */
 	fp_save(thr_act);
 
-	/*
-	 * Raise FPU exception.
-	 * Locking not needed on pcb->ims.ifps,
-	 * since thread is running.
-	 */
 	i386_exception(EXC_ARITHMETIC,
-		       EXC_I386_EXTERR,
-		       thr_act->mact.pcb->ims.ifps->fx_save_state.fx_status);
+		       EXC_I386_SSEFLT,
+		       thr_act->mact.pcb->ims.ifps->fx_save_state.fx_MXCSR);
 	/*NOTREACHED*/
 }
 
@@ -977,61 +1019,25 @@ fp_save(
 }
 
 /*
- * Restore FPU state from PCB.
+ * ⚠️ fp_load() stood here and is gone, with ZERO callers (#515).
  *
- * Locking not needed; always called on the current thread.
+ * It was the restore taken off the #NM trap, the first time a thread touched
+ * the unit after CR0.TS had been armed against it -- so #560 removed its last
+ * caller when it made the switch carry the state, and left the routine.  What
+ * kept it interesting until now is that it also carried the delayed-exception
+ * arm, wrapped in a `#if 1' and a 1991 comment:
+ *
+ *	I'm not sure this is needed.  Does the fpu regenerate the interrupt
+ *	in frstor or not?  Without this code we may miss some exceptions,
+ *	with it we might send too many exceptions.
+ *
+ * 🔑 The answer is yes, and #515 is where it stops mattering.  FXRSTOR puts
+ * the status word back into the unit exactly as it was saved, so an unmasked
+ * flag in it is reported at the thread's next waiting instruction -- which is
+ * why fpexterrflt() has to CLEAR the condition before saving.  The hardware
+ * carries the pending error in the thread's own state, and always did; what
+ * was missing was a fault to deliver it as.
  */
-
-void
-fp_load(
-	thread_act_t	thr_act)
-{
-	register pcb_t pcb = thr_act->mact.pcb;
-	register struct i386_fpsave_state *ifps;
-
-ASSERT_IPL(SPL0);
-	ifps = pcb->ims.ifps;
-	if (ifps == 0) {
-	    unsigned int clear_size;
-	    ifps = (struct i386_fpsave_state *) zalloc(ifps_zone);
-	    /* Clear fp_valid + fp_pad + save area */
-	    clear_size = 64;  /* fp_valid + fp_pad */
-	    if (fp_kind == FP_XSAVE)
-		clear_size += xsave_area_size;
-	    else
-		clear_size += sizeof(struct i386_fx_save);
-	    bzero((char *)ifps, clear_size);
-	    pcb->ims.ifps = ifps;
-	    fpinit();
-#if 1
-/* 
- * I'm not sure this is needed. Does the fpu regenerate the interrupt in
- * frstor or not? Without this code we may miss some exceptions, with it
- * we might send too many exceptions.
- */
-	} else if (ifps->fp_valid == 2) {
-		/* delayed exception pending */
-
-		ifps->fp_valid = TRUE;
-		clear_fpu();
-		/*
-		 * Raise FPU exception.
-		 * Locking not needed on pcb->ims.ifps,
-		 * since thread is running.
-		 */
-		i386_exception(EXC_ARITHMETIC,
-		       EXC_I386_EXTERR,
-		       thr_act->mact.pcb->ims.ifps->fx_save_state.fx_status);
-		/*NOTREACHED*/
-#endif
-	} else {
-	    if (fp_kind == FP_XSAVE)
-		xrstor(&ifps->fx_save_state);
-	    else
-		fxrstor(&ifps->fx_save_state);
-	}
-	ifps->fp_valid = FALSE;		/* in FPU */
-}
 
 /*
  * Save the outgoing thread's FPU state.  Called from switch_context() and
@@ -1092,23 +1098,19 @@ fpu_load_context(
 	     */
 	    return;
 
-	if (ifps->fp_valid == 2) {
-	    /*
-	     * A floating-point error was raised for this thread while
-	     * another one was running, and the AST that would have carried
-	     * it was consumed by that other thread (fpexterrflt).  fp_load()
-	     * used to raise the exception from the #NM trap, which is a
-	     * place where one CAN be raised; here we are inside the switch
-	     * with preemption disabled, and it is not.
-	     *
-	     * So it is re-armed against the thread being switched TO, which
-	     * is the one it belongs to, and i386_astintr() delivers it on
-	     * the way out to user mode.
-	     */
-	    ifps->fp_valid = TRUE;
-	    fp_intr_act[cpu_number()] = thr_act;
-	    ast_on(cpu_number(), AST_I386_FP);
-	}
+	/*
+	 * ⚠️ A third state used to be possible here: fp_valid == 2, meaning a
+	 * floating-point error had been raised for this thread while another
+	 * one was running, and the AST carrying it had been consumed by that
+	 * other thread.  The restore was where it got re-armed, because the
+	 * restore is the one thing guaranteed to happen before the owner runs
+	 * again.
+	 *
+	 * 🔑 It cannot happen now.  That whole hand-off existed because the
+	 * error arrived as IRQ 13 on whatever processor the PIC reached; with
+	 * CR0.NE set it is a fault of the thread that caused it, delivered in
+	 * its own context, and fp_valid is a boolean again (#515).
+	 */
 
 	if (fp_kind == FP_XSAVE)
 	    xrstor(&ifps->fx_save_state);
@@ -1215,61 +1217,28 @@ fpflush(thread_act_t thr_act)
 }
 
 
-#if	AT386
 /*
- *	Handle a coprocessor error interrupt on the AT386.
- *	This comes in on line 5 of the slave PIC at SPL1.
+ * 🔴 fpintr() stood here: the AT386 handler for the coprocessor error
+ * interrupt, "line 5 of the slave PIC at SPL1" (#515).
+ *
+ * It existed for one reason, and the reason was CR0.NE being clear.  An x87
+ * numeric error then asserts FERR#, the chipset turns that into IRQ 13, and
+ * the kernel has to pick the error up from whatever processor the PIC reached
+ * and carry it to the thread that earned it -- which is what fp_intr_act[] and
+ * AST_I386_FP were, and what fpexterrflt() spent most of itself deciding.
+ *
+ * With the bit set the processor raises #MF against that thread directly.
+ * There is nothing to carry, so there is nothing here.
+ *
+ * ⚠️ It also did `outb(0xf0, 0)', the write that clears the 387-era external
+ * busy latch, and that goes with it: there is no FERR# assertion left to
+ * acknowledge.
+ *
+ * ⚠️ One caller remains in the tree and is not built: busses/mbus/mbus.c calls
+ * fpintr() from the Sequent MBUS interrupt dispatcher, where IRQ 13 was shared
+ * with the inter-processor interrupt.  That bus port is in no configuration
+ * this tree compiles -- like busses/cbus and sqt beside it -- and following a
+ * change it cannot observe into it would be inventing work.  Said here so the
+ * reference is recorded rather than forgotten.
  */
 
-void
-fpintr(void)
-{
-	spl_t	s;
-	thread_act_t thr_act = current_act();
-
-ASSERT_IPL(SPL1);
-	/*
-	 * Turn off the extended 'busy' line.
-	 */
-	outb(0xf0, 0);
-
-	/*
-	 * Save the FPU context to the thread using it.
-	 *
-	 * 🔑 Which thread that is no longer has to be looked up.  The two
-	 * arms this used to open with -- "the unit belongs to nobody" and
-	 * "the unit belongs to a thread that is not running" -- were both
-	 * consequences of the lazy restore, and neither can arise now: the
-	 * registers hold the current thread's state (#560).
-	 */
-	fp_save(thr_act);
-
-	/*
-	 * Clear the error condition in the unit so it is not signalled
-	 * again.  The saved copy keeps the status word that faulted, which
-	 * is what fpexterrflt() reports, and it stays the authoritative copy
-	 * -- the next switch to this thread restores from it.
-	 */
-	fninit();
-
-	/*
-	 * Since we are running on the interrupt stack, we must
-	 * signal the thread to take the exception when we return
-	 * to user mode.  Use an AST to do this.
-	 *
-	 * ⚠️ The AST is per-CPU and the error belongs to a thread, so which
-	 * thread it was is recorded alongside it.  If a switch happens
-	 * before the AST is taken, fpexterrflt() hands the condition back to
-	 * the owner through fp_valid == 2, and fpu_load_context() delivers
-	 * it -- the restore being the one thing guaranteed to happen before
-	 * that thread runs again.  It used to be the #NM trap, which no
-	 * longer comes.
-	 */
-	s = splsched();
-	mp_disable_preemption();
-	fp_intr_act[cpu_number()] = thr_act;
-	ast_on(cpu_number(), AST_I386_FP);
-	mp_enable_preemption();
-	splx(s);
-}
-#endif	/* AT386 */
