@@ -139,6 +139,21 @@
 #define EXC_I386_GPFLT		13	/* general protection fault	*/
 #define EXC_I386_PGFLT		14	/* page fault			*/
 #define EXC_I386_EXTERRFLT	16	/* extension error fault	*/
+/*
+ * 🔴 New with #515.  The kernel has armed CR4.OSXMMEXCPT since SSE was enabled
+ * on this target, so a SIMD numeric error arrives as a precise fault at vector
+ * 19 -- and there was no name for it here, no trap type for it in <i386/trap.h>
+ * and no case for it in user_trap(), which meant an unprivileged task could
+ * raise it and stop the machine.
+ *
+ * 🔑 Numbered 19 because this second table is numbered by HARDWARE VECTOR: the
+ * older set above (EXC_I386_DIV, EXC_I386_EXTERR, ...) is small ordinals
+ * unrelated to the processor, and picking the next free one of those would
+ * have made the two arithmetic subcodes come from two different numberings
+ * with nothing to tell a handler which it was reading.  x86-64 numbers its
+ * EXC_X86_64_SSEFLT 19 for the same reason.
+ */
+#define EXC_I386_SSEFLT		19	/* SIMD floating-point error	*/
 #define EXC_I386_ENDPERR	33	/* emulated extension error flt	*/
 #define EXC_I386_ENOEXTFLT	32	/* emulated ext not present	*/
 
