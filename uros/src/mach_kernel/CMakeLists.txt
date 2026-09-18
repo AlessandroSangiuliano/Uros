@@ -987,7 +987,18 @@ set(KERNEL_DEFINES
     -DMACH_HOST=1
     -DKERNEL_PRIVATE
     -DSTAT_TIME
-    -DKERNEL_FLOAT_OK=1
+    # Zero, like x86-64, and on this target it is correctness rather than a
+    # cost (#560).  The switch carries the FPU state now, so a thread that has
+    # trapped into the kernel has its live x87 registers IN the unit -- and
+    # _doprnt_ext held 124 floating-point instructions, executed in whatever
+    # thread called printf.  Formatting a float there overwrote that thread's
+    # own registers, and it returned to user mode with them wrong and nothing
+    # reporting it.  (The lazy scheme was no better: the #NM handler loaded
+    # the thread's state and the conversion then clobbered it.)
+    #
+    # Nothing in the kernel asks for %f/%e/%g; the conversion is refused
+    # rather than approximated, and prints <no-fp>.  See kern/printf.c.
+    -DKERNEL_FLOAT_OK=0
     -DMACH_MACHINE_ROUTINES
     # -DMACH_PROF  # Disabled - requires prof.defs MIG generation
     -DKERNEL_SERVER=1
@@ -1728,6 +1739,21 @@ set_target_properties(${KERNEL_TARGET} PROPERTIES
 # run-qemu.sh boots without DDB symbol-by-name lookup, exactly as the
 # pre-#211 behaviour.
 # =============================================================================
+# #560: no floating-point instruction in this kernel outside the symbols that
+# declare one.  It matters more here than on x86-64: -mno-sse stops the
+# compiler reaching for SSE and stops nothing reaching for x87, which is
+# i386's default floating point -- and _doprnt_ext held 124 of them, run in
+# whatever thread had called printf, overwriting that thread's live registers.
+#
+# Same script as the x86-64 arm, and for the same reason as #549: a check
+# nobody runs is a check that is not there.  This one fails the link that
+# produced the binary it read.
+add_custom_command(TARGET ${KERNEL_TARGET} POST_BUILD
+  COMMAND ${CMAKE_SOURCE_DIR}/../scripts/kernel-vector-check.py
+          $<TARGET_FILE:${KERNEL_TARGET}>
+  COMMENT "#560: checking no undeclared kernel code uses floating point"
+  VERBATIM)
+
 if(OSFMK_GEN_KSYMS)
     set(KERNEL_KSYMS "${CMAKE_BINARY_DIR}/export/uros/boot/ksyms.bin")
     add_custom_command(
