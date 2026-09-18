@@ -73,6 +73,30 @@
 extern unsigned int	fperr_provoke_x87(void);
 extern unsigned int	fperr_provoke_sse(void);
 
+/* CPUID leaf 0x40000000: twelve characters of hypervisor signature. */
+extern void		fperr_cpuid_hv(unsigned int *out3);
+
+/*
+ * 🔴 Under TCG an unmasked SIMD zero-divide sets ZE in MXCSR and the processor
+ * does NOT raise #XF.  Under KVM, the same kernel, it does -- measured both
+ * ways while #515 was being written.  So the SIMD arm cannot pass on the
+ * emulator, and a test that called that a kernel defect on every default run
+ * would be teaching its reader to ignore it.
+ *
+ * ⚠️ Reported as SKIPPED and never as PASS, and guarded twice: the unit must
+ * have FLAGGED the error (ZE set, ZM clear), which is everything up to the
+ * processor's own decision having worked.  If the flag is not there, the
+ * unmasking or the division is at fault and the arm stays a failure.
+ */
+static int
+running_under_tcg(void)
+{
+	unsigned int	sig[3];
+
+	fperr_cpuid_hv(sig);
+	return memcmp(sig, "TCGTCGTCGTCG", 12) == 0;
+}
+
 enum arm { ARM_X87, ARM_SSE };
 
 static enum arm		the_arm;
@@ -171,6 +195,15 @@ catch_exception_raise_state_identity(mach_port_t exception_port,
 #define EXPECT_SSE	EXC_I386_SSEFLT
 #endif
 
+/*
+ * What run_the_arm() answers.  Three outcomes and not two: a skip is not a
+ * pass, and calling it one would be the instrument lying in the quiet
+ * direction — the direction this project keeps having to correct.
+ */
+#define ARM_FAILED	0
+#define ARM_PASSED	1
+#define ARM_SKIPPED	2
+
 static const char *
 arm_name(void)
 {
@@ -232,13 +265,13 @@ run_the_arm(void)
 				MACH_PORT_RIGHT_RECEIVE, &exc_port);
 	if (kr != KERN_SUCCESS) {
 		printf("fperr_test: mach_port_allocate failed (%d) — WRONG\n", kr);
-		return 0;
+		return ARM_FAILED;
 	}
 	kr = mach_port_insert_right(mach_task_self(), exc_port, exc_port,
 				    MACH_MSG_TYPE_MAKE_SEND);
 	if (kr != KERN_SUCCESS) {
 		printf("fperr_test: insert_right failed (%d) — WRONG\n", kr);
-		return 0;
+		return ARM_FAILED;
 	}
 
 	kr = task_set_exception_ports(mach_task_self(), EXC_MASK_ARITHMETIC,
@@ -247,7 +280,7 @@ run_the_arm(void)
 	if (kr != KERN_SUCCESS) {
 		printf("fperr_test: task_set_exception_ports failed (%d) — "
 		       "WRONG\n", kr);
-		return 0;
+		return ARM_FAILED;
 	}
 
 	/*
@@ -258,7 +291,7 @@ run_the_arm(void)
 	 */
 	if (pthread_create(&victim, NULL, the_thread_that_divides, NULL) != 0) {
 		printf("fperr_test: pthread_create failed — WRONG\n");
-		return 0;
+		return ARM_FAILED;
 	}
 
 	/*
@@ -268,16 +301,30 @@ run_the_arm(void)
 	mr = receive_one_exception();
 
 	if (exception_count == 0) {
+		/*
+		 * 🔑 The verdict is decided BEFORE anything is printed, and
+		 * that ordering is not cosmetic: the run harness judges a boot
+		 * by grepping its log for WRONG, so a line saying WRONG
+		 * followed by a line explaining that this is expected reads as
+		 * a failure to everything that reads logs rather than people.
+		 */
+		int	excused = (the_arm == ARM_SSE &&
+				   (victim_status & 0x204) == 0x004 &&
+				   victim_returned &&
+				   running_under_tcg());
+
 		printf("fperr_test: [%s] no exception arrived in %d ms (%s)"
-		       " — WRONG\n",
+		       " — %s\n",
 		       arm_name(), RECEIVE_MS,
 		       (mr == MACH_RCV_TIMED_OUT)
-		       ? "the receive timed out" : "the receive failed");
+		       ? "the receive timed out" : "the receive failed",
+		       excused ? "SKIPPED, see below" : "WRONG");
+
 		if (!victim_returned) {
 			printf("fperr_test: [%s] and the dividing thread has "
 			       "not come back either, so it is somewhere this "
 			       "program cannot see\n", arm_name());
-			return 0;
+			return ARM_FAILED;
 		}
 		/*
 		 * 🔑 The absence with a value behind it.  The unit's own
@@ -305,7 +352,16 @@ run_the_arm(void)
 				    "not raise #XF"
 				  : "ZE is clear with ZM clear: the division "
 				    "did not divide by zero"));
-		return 0;
+
+		if (excused) {
+			printf("fperr_test: [%s] and CPUID 0x40000000 says "
+			       "TCG, which does not raise #XF for an unmasked "
+			       "SIMD exception — SKIPPED, not passed: run it "
+			       "under -enable-kvm to ask the question\n",
+			       arm_name());
+			return ARM_SKIPPED;
+		}
+		return ARM_FAILED;
 	}
 
 	want_code = (the_arm == ARM_X87) ? EXPECT_X87 : EXPECT_SSE;
@@ -320,7 +376,7 @@ run_the_arm(void)
 
 	if (exception_type != EXC_ARITHMETIC ||
 	    (int) exception_code0 != want_code)
-		return 0;
+		return ARM_FAILED;
 
 	if (the_arm == ARM_SSE) {
 		/*
@@ -333,7 +389,7 @@ run_the_arm(void)
 		 */
 		printf("fperr_test: [%s] and the faulting thread stays where a "
 		       "precise fault leaves it — expected\n", arm_name());
-		return 1;
+		return ARM_PASSED;
 	}
 
 	/*
@@ -351,12 +407,12 @@ run_the_arm(void)
 		       "so the wait it was resumed at faulted again "
 		       "(%d exceptions seen) — WRONG\n",
 		       arm_name(), exception_count);
-		return 0;
+		return ARM_FAILED;
 	}
 
 	printf("fperr_test: [%s] and the thread resumed past the wait that "
 	       "faulted, on one exception\n", arm_name());
-	return 1;
+	return ARM_PASSED;
 }
 
 int
@@ -377,6 +433,8 @@ main(int argc, char **argv)
 
 	ok = run_the_arm();
 
-	printf("fperr_test: %s arm %s\n", arm_name(), ok ? "PASS" : "FAIL");
-	return ok ? 0 : 1;
+	printf("fperr_test: %s arm %s\n", arm_name(),
+	       (ok == ARM_PASSED) ? "PASS"
+	       : (ok == ARM_SKIPPED) ? "SKIPPED" : "FAIL");
+	return (ok == ARM_FAILED) ? 1 : 0;
 }

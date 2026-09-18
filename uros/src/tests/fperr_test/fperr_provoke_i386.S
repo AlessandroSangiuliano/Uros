@@ -139,3 +139,39 @@ fperr_provoke_sse:
 
 	leave
 	ret
+
+/*
+ * fperr_cpuid_hv -- CPUID leaf 0x40000000, the hypervisor signature.
+ *
+ * 🔑 Here because of a finding rather than for its own sake (#515).  Under TCG
+ * an unmasked SIMD zero-divide sets ZE in MXCSR and the processor does NOT
+ * raise #XF; under KVM, same kernel, it does.  So the SIMD arm cannot pass on
+ * the emulator, and a test that reported that as a kernel defect on every
+ * default run would be teaching people to ignore it.
+ *
+ * ⚠️ The signature only exists when the hypervisor CPUID bit is on.  When it
+ * is not, this returns whatever leaf 0x40000000 happens to hold and the
+ * comparison simply fails -- which is the safe direction: the arm goes on
+ * being a failure rather than being excused.
+ *
+ * out[0..2] = EBX, ECX, EDX: twelve characters, not NUL-terminated.
+ */
+	.globl	fperr_cpuid_hv
+fperr_cpuid_hv:
+	pushl	%ebp
+	movl	%esp, %ebp
+	pushl	%ebx			/* callee-saved, and cpuid writes it */
+	pushl	%edi
+
+	movl	8(%ebp), %edi		/* out */
+	movl	$0x40000000, %eax
+	xorl	%ecx, %ecx
+	cpuid
+	movl	%ebx, 0(%edi)
+	movl	%ecx, 4(%edi)
+	movl	%edx, 8(%edi)
+
+	popl	%edi
+	popl	%ebx
+	leave
+	ret

@@ -103,3 +103,30 @@ fperr_provoke_sse:
 
 	leave
 	ret
+
+/*
+ * fperr_cpuid_hv -- CPUID leaf 0x40000000, the hypervisor signature.
+ *
+ * See the i386 file beside this one for why a test needs to know: under TCG an
+ * unmasked SIMD zero-divide sets ZE in MXCSR and the processor does not raise
+ * #XF, where under KVM the same kernel does.
+ *
+ * out[0..2] = EBX, ECX, EDX.
+ */
+	.globl	fperr_cpuid_hv
+fperr_cpuid_hv:
+	pushq	%rbp
+	movq	%rsp, %rbp
+	pushq	%rbx			/* callee-saved, and cpuid writes it */
+
+	movq	%rdi, %r8		/* out */
+	movl	$0x40000000, %eax
+	xorl	%ecx, %ecx
+	cpuid
+	movl	%ebx, 0(%r8)
+	movl	%ecx, 4(%r8)
+	movl	%edx, 8(%r8)
+
+	popq	%rbx
+	leave
+	ret
