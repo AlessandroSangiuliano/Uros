@@ -8,7 +8,7 @@
 #
 # Uso:
 #   ./scripts/both-accelerators.sh x86-64 [--entry N] [secondi]
-#   ./scripts/both-accelerators.sh i386   [secondi] [argomenti per run-qemu.sh]
+#   ./scripts/both-accelerators.sh i386   [secondi] [argomenti per smoke-ush.sh]
 #
 # I secondi sono il budget di UNA run, non delle due.
 #
@@ -57,16 +57,21 @@ x86-64|i386)	shift ;;
 *)		echo "uso: $0 x86-64|i386 [argomenti]" >&2; exit 2 ;;
 esac
 
-# 🔴 Un budget anche per i386, perche' quella strada non ne ha uno suo.
-# run-x86_64.sh prende i secondi come argomento e si ferma da solo; run-qemu.sh
-# no -- fa `exec qemu' e resta li' finche' la macchina non decide di finire.
-# Una run TCG che si incastra aspetterebbe per sempre, e "per sempre" e' il
-# terzo esito di "non finito" che questo progetto ha gia' pagato: non un
-# risultato, ma nemmeno un errore che qualcuno vede.
+# Un backstop, e SOLO un backstop.
 #
-# ⚠️ Preso dal primo argomento se e' un numero, come fa run-x86_64.sh, perche'
-# due convenzioni diverse per la stessa cosa sono una che qualcuno sbagliera'.
-BUDGET=600
+# 🔴 I timeout veri stanno dentro l'harness che aspetta: smoke-ush.exp sa se
+# sta aspettando un banner, un prompt o un comando, e ha un budget per
+# ciascuno.  Questo qui non sa niente -- esiste per il caso in cui sia
+# `expect' stesso a piantarsi -- quindi deve stare COMODAMENTE SOPRA e mai
+# accanto ai suoi.
+#
+# ⚠️ La prima versione lo metteva a 1200, cioe' appena sopra il budget di boot
+# che avevo alzato a 900: un secondo giudice che non ha visto niente e taglia
+# per primo.  Se fosse scattato avrebbe troncato la run a meta' dei comandi e
+# prodotto proprio il confronto-fra-troncati contro cui questo script stampa
+# un avviso.  Misurato dopo: il boot costa 19 s sotto TCG e 22 sotto KVM, quindi
+# i 900 non servivano e il problema era la scelta del numero, non il numero.
+BUDGET=1800
 case "${1:-}" in
 [0-9]*)	BUDGET=$1
 	[ "$TARGET" = i386 ] && shift ;;
@@ -82,6 +87,18 @@ esac
 # ⚠️ In sequenza e mai in parallelo: una QEMU per volta.  Due macchine che si
 # contendono la CPU dell'host cambierebbero il timing di entrambe, e la lenta
 # delle due e' quella che gia' fatica a stare nel budget.
+# 🔴 SU i386 SI CONFRONTA LA SMOKE, non un boot nudo, e la ragione e' che UNA
+# RUN CHE NON FINISCE NON SI PUO' CONFRONTARE.
+#
+# run-x86_64.sh sa quando la sua run e' finita: il kernel annuncia un
+# terminatore e lo script lo aspetta.  run-qemu.sh no -- boota fino al prompt
+# di ush e resta li', quindi ogni run i386 nuda brucia il budget e viene
+# uccisa, sotto entrambi gli acceleratori.  Provato: 900 s per braccio, TCG 124
+# e KVM 124, e i due "concordavano" su un insieme TRONCATO.
+#
+# La smoke e' la sola run i386 che finisce da sola, perche' e' l'unica che
+# DIGITA `shutdown'.  Quindi e' anche la sola che due acceleratori possano
+# confrontare onestamente.
 TCG_LOG=$OUT/both-$TARGET-tcg.log
 KVM_LOG=$OUT/both-$TARGET-kvm.log
 
@@ -92,7 +109,7 @@ x86-64)
 	TCG_RC=$?
 	;;
 i386)
-	timeout "$BUDGET" "$SCRIPT_DIR/run-qemu.sh" --tcg -nographic "$@" \
+	timeout "$BUDGET" "$SCRIPT_DIR/smoke-ush.sh" --tcg "$@" \
 		</dev/null >"$TCG_LOG" 2>&1
 	TCG_RC=$?
 	;;
@@ -105,7 +122,7 @@ x86-64)
 	KVM_RC=$?
 	;;
 i386)
-	timeout "$BUDGET" "$SCRIPT_DIR/run-qemu.sh" -nographic "$@" \
+	timeout "$BUDGET" "$SCRIPT_DIR/smoke-ush.sh" "$@" \
 		</dev/null >"$KVM_LOG" 2>&1
 	KVM_RC=$?
 	;;
