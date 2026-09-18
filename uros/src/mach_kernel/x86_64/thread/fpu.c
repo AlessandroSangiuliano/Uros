@@ -120,6 +120,25 @@ const char *fpu_save_instruction(void)
 	return use_xsave ? "XSAVE/XRSTOR" : "FXSAVE/FXRSTOR";
 }
 
+/*
+ * See the comment on the declaration in fpu.h: read the status word that
+ * faulted, then clear the condition so that the thread this fault belongs to
+ * can be resumed at the instruction that reported it (#515).
+ *
+ * ⚠️ FNSTSW and FNCLEX are the non-waiting forms deliberately.  The waiting
+ * ones check for a pending unmasked exception before executing, which here is
+ * precisely the exception being handled -- so FSTSW would raise #MF again,
+ * inside the handler for #MF.
+ */
+unsigned short fpu_take_x87_error(void)
+{
+	unsigned short status;
+
+	__asm__ volatile ("fnstsw %0" : "=am" (status));
+	__asm__ volatile ("fnclex");
+	return status;
+}
+
 void fpu_init(void)
 {
 	uint64_t cr0 = read_cr0();

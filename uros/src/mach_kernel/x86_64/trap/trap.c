@@ -54,6 +54,7 @@
 #include <kern/cpu_data.h>	/* #459: get_preemption_level */
 #include <cpu/percpu.h>	/* #461: the spin-lock depth */
 #include <cpu/regs.h>
+#include <thread/fpu.h>	/* #515: take and clear an x87 numeric error */
 #include <cpu/spl.h>
 #include <ddb/ddb.h>
 #include <ddb/ksym.h>
@@ -1422,8 +1423,31 @@ user_fault_exception(const struct trap_frame *frame,
 		*subcode = (int) (frame->error & 0xffff);		break;
 	case T_ALIGNMENT_CHECK:
 		*exc = EXC_BAD_INSTRUCTION; *code = EXC_X86_64_ALIGNFLT;	break;
+	/*
+	 * 🔴 The x87 arm has a side effect, and it is not optional (#515).
+	 *
+	 * x87 reports a numeric error at the next WAITING instruction, so the
+	 * flag in the status word is what raises #MF -- and it rides in the
+	 * thread's own saved state across a switch, because XRSTOR puts it
+	 * back.  A handler that answers KERN_SUCCESS therefore sends the
+	 * thread to the instruction that reported the error, where it faults
+	 * again, for ever.  Measured before the fix: the exception arrived
+	 * with the right subcode and the thread never came back.
+	 *
+	 * fpu_take_x87_error() reads the faulting status word and clears the
+	 * condition, in that order, on the live registers -- which are the
+	 * faulting thread's, this kernel never having armed CR0.TS.  The
+	 * status word goes out as the subcode, which is where a handler reads
+	 * WHICH numeric error it was.
+	 *
+	 * ⚠️ #XF needs none of it.  It is PRECISE: the division raises it, the
+	 * MXCSR flag is only a record, and a resumed thread re-executes the
+	 * division whatever the kernel does.  Clearing would destroy the one
+	 * piece of evidence and change nothing.
+	 */
 	case T_FPU_ERROR:
-		*exc = EXC_ARITHMETIC;	*code = EXC_X86_64_EXTERRFLT;	break;
+		*exc = EXC_ARITHMETIC;	*code = EXC_X86_64_EXTERRFLT;
+		*subcode = (int) fpu_take_x87_error();			break;
 	case T_SIMD_ERROR:
 		*exc = EXC_ARITHMETIC;	*code = EXC_X86_64_SSEFLT;	break;
 	default:
