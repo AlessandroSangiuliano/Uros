@@ -42,7 +42,7 @@
 
 #if     defined(__GNUC__)
 #include <kern/spl.h>
-#include <i386/cpu_number.h>
+#include <kern/cpu_number.h>
 
 #warning This code has been compiled but not tested
 

@@ -206,6 +206,7 @@
 #include <device/conf.h>
 #include <device/subrs.h>
 #include <i386/fpu.h>
+#include <i386/fpu_stress.h>	/* fpu_stress_run (#560, '-F') */
 #include <i386/hwp.h>		/* hwp_init_cpu (#358) */
 #include <i386/pmap.h>
 #include <i386/ipl.h>
@@ -263,6 +264,13 @@ int		loadpt;
  * ignored.  Same fix and reason as cons_is_com1 / halt_in_debugger.
  */
 vm_size_t	mem_size __attribute__((section(".data"))) = 0;
+/*
+ * '-F' boot argument: run the #560 floating-point switch test once the
+ * scheduler is up.  In .data for the #337 reason above -- parse_arguments()
+ * runs before the BSS is cleared, so a BSS flag would be set and then wiped.
+ */
+int		fpu_stress_wanted __attribute__((section(".data"))) = 0;
+
 vm_offset_t	first_addr = 0;	/* set by start.s - keep out of bss */
 vm_offset_t	first_avail = 1;/* set by start.s - keep out of bss */
 vm_offset_t	last_addr;
@@ -741,6 +749,13 @@ parse_arguments(void)
 				 * (same-binary A/B / debug). */
 		    { extern int sched_idle_hlt; sched_idle_hlt = 0; }
 		    break;
+		case 'F':	/* -F: the name this test has on BOTH targets.
+				 * Three threads share a processor holding a
+				 * floating-point pattern each, and say whether
+				 * the switch gave it back (#560).  Costs a
+				 * second of boot and runs only when asked. */
+		    fpu_stress_wanted = 1;
+		    break;
 		case 'D':	/* -D: enable the SMP Direct-Thread-Switch on the
 				 * IPC slow path (ipc_dts_smp).  Off by default;
 				 * this flag turns it on for a same-binary A/B of
@@ -1008,23 +1023,28 @@ machine_kernel_ready(void)
 	hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
 }
 
-#if	NCPUS > 1
 /*
  * Every processor has an idle thread now (#461).
  *
- * Nothing to do, and the emptiness is a property of this machine rather than
- * an omission: i386 starts its processors from start_other_cpus(), at the end
- * of start_kernel_threads(), so none of them exists yet to be let anywhere.
- * The hook is for machines that wake their processors before the kernel is
- * entered -- x86-64 does, because its own bring-up checks need them -- and
- * therefore have processors waiting for the idle threads this point
- * guarantees.
+ * There is nothing to release here, and the emptiness is a property of this
+ * machine rather than an omission: i386 starts its processors from
+ * start_other_cpus(), at the end of start_kernel_threads(), so none of them
+ * exists yet to be let anywhere.  The hook is for machines that wake their
+ * processors before the kernel is entered -- x86-64 does, because its own
+ * bring-up checks need them -- and therefore have processors waiting for the
+ * idle threads this point guarantees.
+ *
+ * ⚠️ It used to be behind NCPUS > 1, on both sides of the call.  What the
+ * point actually guarantees -- a scheduler with every processor's idle thread
+ * in it -- is just as true of the one processor a uniprocessor has, and #560's
+ * test needs exactly that and nothing about SMP.
  */
 void
 machine_processors_ready(void)
 {
+	if (fpu_stress_wanted)
+		fpu_stress_run();	/* #560 acceptance, '-F' */
 }
-#endif	/* NCPUS > 1 */
 
 /*
  * Halt a cpu.

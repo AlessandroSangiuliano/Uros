@@ -30,7 +30,7 @@
 #include <i386/cpuid.h>
 #include <kern/syscall_profile.h>	/* #554 */
 #include <i386/seg.h>
-#include <i386/cpu_number.h>
+#include <kern/cpu_number.h>
 #include <kern/misc_protos.h>
 
 /*

@@ -714,13 +714,28 @@ _doprnt_ext(
 		 * <no-fp>, which is visible in a log and cannot be mistaken for
 		 * a value.
 		 */
-#if	KERNEL_FLOAT_OK
+		/*
+		 * 🔴 The labels are OUTSIDE the #if, and that is a fix.
+		 *
+		 * They used to be inside it, so a kernel built with
+		 * KERNEL_FLOAT_OK=0 -- x86-64, since #453 -- had no case for
+		 * these at all, and the <no-fp> block below had no label
+		 * reaching it: dead code, guarding nothing.  A %f there fell
+		 * through to `default', which echoes the character and does
+		 * NOT consume the double.  The eight bytes stayed in the
+		 * argument list and every conversion after it read from the
+		 * middle of them.
+		 *
+		 * So the comment above promised a property the code did not
+		 * have, on the one target that had asked for it.
+		 */
 		case 'f':
 		case 'F':
 		case 'e':
 		case 'E':
 		case 'g':
 		case 'G':
+#if	KERNEL_FLOAT_OK
 		{
 		    /*
 		     * Floating-point output.  Supports %f (fixed decimal),
@@ -894,7 +909,31 @@ _doprnt_ext(
 		    static const char	nofp[] = "<no-fp>";
 		    const char		*p = nofp;
 
-		    (void) va_arg(*argp, double);
+		    /*
+		     * 🔴 THE ARGUMENT IS NOT CONSUMED, AND THAT IS NOT AN
+		     * OMISSION.
+		     *
+		     * This used to be `(void) va_arg(*argp, double);', which
+		     * looks like the careful thing to do -- skip the eight
+		     * bytes so the conversions after it stay aligned.  It does
+		     * not compile once the case labels above actually reach
+		     * here: gcc answers
+		     *
+		     *	  error: SSE register argument with SSE disabled
+		     *
+		     * because on x86-64 a double travels in an XMM register,
+		     * and a kernel built -mgeneral-regs-only never saved those
+		     * to a va_list.  There is nothing at that offset to skip.
+		     *
+		     * 🔑 Which also says why skipping is not needed: a caller
+		     * cannot PASS a double either.  On x86-64 the build forbids
+		     * the compiler the registers it would travel in; on i386
+		     * loading one takes an x87 instruction, and
+		     * scripts/kernel-vector-check.py fails the build on those
+		     * outside the few symbols that declare them.  So a %f here
+		     * has no argument behind it -- this prints the marker for a
+		     * thing that cannot happen, and stays in case it does.
+		     */
 		    while (*p != '\0')
 			(*putc)(*p++);
 		    break;

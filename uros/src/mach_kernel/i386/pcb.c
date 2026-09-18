@@ -349,9 +349,11 @@ act_machine_switch_pcb( thread_act_t new_act )
     }
 	mp_enable_preemption();
 	/*
-	 * Load the floating-point context, if necessary.
+	 * Load the floating-point context.  Not "if necessary": the registers
+	 * hold the thread we came from until something is put over them
+	 * (#560).
 	 */
-	fpu_load_context(pcb);
+	fpu_load_context(new_act);
 
 }
 
@@ -482,6 +484,22 @@ pcb_init( register thread_act_t thr_act )
 	 * bzero((char *) pcb, sizeof *pcb);
 	 */
 	simple_lock_init(&pcb->lock, ETAP_MISC_PCB);
+
+	/*
+	 *	Give the thread its FPU save area now (#560).
+	 *
+	 *	This used to be allocated by fp_load(), off the #NM trap taken
+	 *	the first time a thread touched the unit.  The switch no longer
+	 *	arms CR0.TS, so that trap never comes, and an area allocated
+	 *	then would be an area allocated never: the thread would run with
+	 *	whatever the registers happened to hold and lose its own state
+	 *	at every switch.
+	 *
+	 *	zalloc() here either answers or panics -- it does not answer
+	 *	zero -- so there is no half-built pcb to consider.  It can
+	 *	block, which is allowed: thread creation is not a switch.
+	 */
+	fp_state_alloc_pcb(pcb);
 
 	/*
 	 *	Guarantee that the bootstrapped thread will be in user

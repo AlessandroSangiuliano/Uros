@@ -2627,44 +2627,19 @@ ENTRY(_clts)
 	ret
 
 /*
- * Save complete FPU state.
- * Uses XSAVE if fp_kind == FP_XSAVE, else FXSAVE.
- * Argument: pointer to save area (64-byte aligned for XSAVE,
- *           16-byte aligned for FXSAVE).
+ * _fpsave and _fprestore used to be here: two entry points wrapping
+ * XSAVE/FXSAVE and XRSTOR/FXRSTOR, picking between them on fp_kind.
+ *
+ * Nothing called them.  Not one .c, .h or .S file in the tree named either,
+ * and i386/fpu.c does the same choice inline where it needs it -- so they
+ * were a second implementation of the switch's most delicate instruction
+ * pair, kept correct by nobody and executed by nobody (#560).
+ *
+ * They are gone rather than exempted.  Removing them takes nothing away: the
+ * check that made them visible, scripts/kernel-vector-check.py, exists to say
+ * where this kernel touches floating point, and an answer that has to list
+ * code no path reaches is an answer that teaches the wrong thing.
  */
-ENTRY(_fpsave)
-	movl	4(%esp),%eax		/* get save area pointer */
-	cmpl	$5,EXT(fp_kind)		/* FP_XSAVE == 5 */
-	jne	1f
-	/* XSAVE: set EDX:EAX mask to -1 (save all components) */
-	movl	%eax,%ecx		/* save area pointer in ECX */
-	movl	$-1,%eax		/* mask low */
-	movl	$-1,%edx		/* mask high */
-	.byte	0x0f, 0xae, 0x21	/* xsave (%ecx) */
-	ret
-1:
-	fxsave	(%eax)			/* save complete state, including */
-					/* SSE and x87 */
-	ret
-
-/*
- * Restore FPU state.
- * Uses XRSTOR if fp_kind == FP_XSAVE, else FXRSTOR.
- * Argument: pointer to save area.
- */
-ENTRY(_fprestore)
-	movl	4(%esp),%eax		/* get save area pointer */
-	cmpl	$5,EXT(fp_kind)		/* FP_XSAVE == 5 */
-	jne	1f
-	/* XRSTOR: set EDX:EAX mask to -1 (restore all components) */
-	movl	%eax,%ecx		/* save area pointer in ECX */
-	movl	$-1,%eax		/* mask low */
-	movl	$-1,%edx		/* mask high */
-	.byte	0x0f, 0xae, 0x29	/* xrstor (%ecx) */
-	ret
-1:
-	fxrstor	(%eax)			/* restore complete state */
-	ret
 
 /*
  * Set cr3

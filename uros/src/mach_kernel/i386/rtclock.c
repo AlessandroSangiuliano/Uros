@@ -357,7 +357,17 @@ rtc_tick_pending(void)
  * last clock tick directly from the TSC: rtclock_intr() stamps rtclock_tsc_at_tick
  * when it advances mtime, and here we read the TSC and convert the delta.
  */
-extern unsigned int	mp_tsc_per_us;		/* TSC counts per microsecond (mp.c) */
+/*
+ * TSC counts per microsecond, or 0 when nobody has calibrated it.
+ *
+ * ⚠️ It is DEFINED here rather than where it is measured.  The calibration
+ * lives in i386/AT386/mp/mp.c, which joins the link only when UROS_NCPUS > 1,
+ * while this file is built in every configuration and reads the value on
+ * every path below -- so the uniprocessor kernel did not link.  Zero is the
+ * honest answer there and the one the code below already handles: fall back
+ * to the bounded-8254 read.
+ */
+unsigned int		mp_tsc_per_us;
 unsigned long long	rtclock_tsc_at_tick;	/* TSC at the last mtime advance */
 
 static __inline__ unsigned long long

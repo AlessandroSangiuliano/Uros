@@ -57,6 +57,14 @@ extern void	machine_init(void);
  */
 extern void	machine_kernel_ready(void);
 
+/*
+ * Every processor has an idle thread now (#461).  Declared outside the
+ * NCPUS > 1 block it used to sit in: what the point guarantees is as true of
+ * the single processor a uniprocessor has, and #560's acceptance check hangs
+ * off it on both.  The body below says what the hook is for.
+ */
+extern void	machine_processors_ready(void);
+
 #if	NCPUS > 1
 
 extern void	slave_main(void);
@@ -97,7 +105,6 @@ extern void	start_other_cpus(void);
  * a machine that starts its processors from start_other_cpus() has nothing
  * to release here.
  */
-extern void	machine_processors_ready(void);
 
 #endif	/* NCPUS > 1 */
 #endif	/* _KERN_STARTUP_H_ */
