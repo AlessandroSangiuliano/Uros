@@ -1471,6 +1471,9 @@ set(I386_C_SOURCES
     i386/pic.c
     i386/i386_rpc.c
     i386/rtclock.c
+    # #560 acceptance: does the switch carry a thread's floating-point
+    # state?  Armed by the -F boot argument, inert otherwise.
+    i386/fpu_stress.c
     # The six operations device_master.c needs from the machine (#457).
     # NOT an SMP source: it used to sit in the UROS_NCPUS > 1 block, which
     # left the uniprocessor kernel with nineteen undefined device_md_*
@@ -1579,6 +1582,8 @@ set(I386_ASM_SOURCES
     i386/bcopy.S
     i386/bzero.S
     i386/divide.S
+    # #560: the registers are written by hand, which is the point of it.
+    i386/fpu_stress.S
     i386/i386_lock.S
     i386/idt.S
     i386/interrupt.S
