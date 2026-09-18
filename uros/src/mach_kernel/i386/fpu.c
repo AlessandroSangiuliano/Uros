@@ -185,6 +185,7 @@ zone_t		ifps_zone;		/* zone for FPU save area */
  * is the whole reason the lazy scheme has no secure variant to fall back to.
  */
 static struct i386_fpsave_state	*fp_clean_state;
+static unsigned int		ifps_size;	/* one element of ifps_zone */
 
 /*
  * The thread a floating-point error was raised for, when the AST that
@@ -414,6 +415,7 @@ fpu_module_init(void)
 			  THREAD_MAX * fps_size,
 			  THREAD_CHUNK * fps_size,
 			  "i386 fpsave state");
+	ifps_size = fps_size;		/* fp_state_alloc_pcb copies a whole one */
 
 	/*
 	 * Build the image loaded over the registers when the thread being
@@ -434,6 +436,18 @@ fpu_module_init(void)
 	else
 	    fxsave(&fp_clean_state->fx_save_state);
 	fp_clean_state->fp_valid = TRUE;
+
+	/*
+	 * Said once, because it is what every thread now starts with and it
+	 * used to be established somewhere else entirely -- by fpinit(), off
+	 * the #NM trap, the first time a thread touched the unit (#560).
+	 * 0x037f is every numeric exception masked, which is what threads got
+	 * before and what they must keep getting.
+	 */
+	printf("fpu: threads start from the unit's own post-fpinit state "
+	       "(control 0x%04x, MXCSR 0x%04x)\n",
+	       fp_clean_state->fx_save_state.fx_control,
+	       fp_clean_state->fx_save_state.fx_MXCSR);
 }
 
 /*
@@ -1129,34 +1143,37 @@ fp_state_alloc_pcb(
 {
 	struct i386_fpsave_state *ifps;
 
-	ifps = (struct i386_fpsave_state *)zalloc(ifps_zone);
-	bzero((char *)ifps, sizeof(boolean_t) + 60);	/* fp_valid + fp_pad */
-	if (fp_kind == FP_XSAVE)
-	    bzero((char *)&ifps->fx_save_state, xsave_area_size);
-	else
-	    bzero((char *)&ifps->fx_save_state, sizeof(struct i386_fx_save));
-	pcb->ims.ifps = ifps;
-
-	ifps->fp_valid = TRUE;
-	ifps->fx_save_state.fx_control = (0x037f
-			& ~(FPC_IM|FPC_ZM|FPC_OM|FPC_PC))
-			| (FPC_PC_53|FPC_IC_AFF);
-	ifps->fx_save_state.fx_status = 0;
-	ifps->fx_save_state.fx_tag = 0xff;	/* all empty (abridged: 1 bit per reg) */
-	ifps->fx_save_state.fx_MXCSR = MXCSR_DEFAULT;
+	if (fp_clean_state == 0)
+	    panic("fp_state_alloc_pcb: no clean image yet");
 
 	/*
-	 * For XSAVE: initialize the XSAVE header.
-	 * Set xstate_bv to x87 + SSE to indicate those components
-	 * are present in the save area (initialized above).
+	 * A copy of the image the unit gave us after fpinit(), which is the
+	 * state a thread used to start with.
+	 *
+	 * 🔴 THIS USED TO BUILD THE IMAGE BY HAND, and doing that for every
+	 * thread would have changed what every thread starts with.  The hand
+	 * built control word was
+	 *
+	 *	(0x037f & ~(FPC_IM|FPC_ZM|FPC_OM|FPC_PC)) | FPC_PC_53|FPC_IC_AFF
+	 *
+	 * which leaves invalid-operation, zero-divide and overflow UNMASKED.
+	 * Nothing reached it: the only caller was the emulator linkage, and on
+	 * real hardware a thread's first use of the unit trapped into
+	 * fp_load(), which called fpinit() -- and fpinit() masks everything.
+	 * So threads have always started masked, and allocating this at
+	 * pcb_init() for every one of them would have silently made a
+	 * floating-point divide by zero trap where it used to answer infinity.
+	 *
+	 * 🔑 Taking the image FROM the unit rather than writing one is also
+	 * why it is right: it is whatever this processor produces after
+	 * fpinit(), including the XSAVE header, rather than a second opinion
+	 * about what that should look like.
 	 */
-	if (fp_kind == FP_XSAVE) {
-	    struct i386_xsave_header *hdr =
-		(struct i386_xsave_header *)
-		((unsigned char *)&ifps->fx_save_state + XSAVE_HDR_OFFSET);
-	    hdr->xstate_bv_lo = XCR0_X87 | XCR0_SSE;
-	    hdr->xstate_bv_hi = 0;
-	}
+	ifps = (struct i386_fpsave_state *) zalloc(ifps_zone);
+	bcopy((char *) fp_clean_state, (char *) ifps, ifps_size);
+	ifps->fp_valid = TRUE;		/* in memory, not in the unit */
+
+	pcb->ims.ifps = ifps;
 }
 
 /*
