@@ -54,16 +54,32 @@
 fperr_provoke_x87:
 	pushl	%ebp
 	movl	%esp, %ebp
-	subl	$8, %esp
+	subl	$16, %esp
 
 	fninit				/* control word = 0x037f, all masked */
 	fnstcw	-2(%ebp)
 	andw	$0xfffb, -2(%ebp)	/* clear ZM (bit 2): unmask zero-divide */
 	fldcw	-2(%ebp)
 
-	fld1				/* st(0) = 1.0            */
-	fldz				/* st(0) = 0.0, st(1) = 1.0 */
-	fdivp	%st, %st(1)		/* st(0) = 1.0/0.0 -> ZE, no trap yet */
+	/*
+	 * 🔴 A MEMORY divisor, and that is not a stylistic choice.  This was
+	 * written `fld1; fldz; fdivp %st,%st(1)' and assembled to `de f1',
+	 * which is FDIVRP and not FDIVP: GAS reverses the operands of the
+	 * non-commutative x87 instructions, so the divide computed 0.0/1.0 --
+	 * a perfectly ordinary zero, no exception, and a test that reported
+	 * the kernel had lost a fault the processor was never asked for.
+	 *
+	 * 🔑 Caught because this routine returns the status word: it came back
+	 * 0x3800, which is ZE clear with TOP back at 7, so the division had
+	 * COMPLETED and popped.  An absence with a value behind it.
+	 *
+	 * `fdiv' with a memory operand has no second register to reverse --
+	 * it is always st(0) = st(0) / mem -- so the ambiguity cannot arise.
+	 */
+	movl	$0, -16(%ebp)		/* 0.0 as a double, low half  */
+	movl	$0, -12(%ebp)		/*                 high half  */
+	fld1				/* st(0) = 1.0 */
+	fdivl	-16(%ebp)		/* st(0) = 1.0/0.0 -> ZE, no trap yet */
 
 	/*
 	 * Read the status word BEFORE the wait, not after: fnstsw is an
