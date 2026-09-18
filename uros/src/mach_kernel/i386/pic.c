@@ -318,10 +318,32 @@ picinit(void)
 	*/
 	outb ( master_ocw, PICM_OCW1 );
 
-#if 0
-	printf(" spl set to %x pic_mask set to %x \n", curr_ipl, curr_pic_mask);
-#endif
-
+	/*
+	 * 🔑 Say what the interrupt controller was left holding, once (#515).
+	 *
+	 * The interesting line is 13, which carried the 387's FERR#.  With
+	 * CR0.NE set nothing asserts it any more, and intpri[13] went to 0 so
+	 * that form_pic_mask() masks it at every level.
+	 *
+	 * 🔴 The verdict is taken from pic_mask[SPL0] and NOT from the chip,
+	 * and the first version of this got that wrong.  It read OCW1 back and
+	 * announced "IRQ 13 is masked" -- which it is, here, because this runs
+	 * at SPLHI where EVERY line is masked.  The sentence was true whatever
+	 * intpri[13] held, and a guard that is always true is worse than none.
+	 *
+	 * spl0 is the level at which the line would actually be open, so
+	 * pic_mask[SPL0] is the value that decides.  The chip read stays
+	 * beside it as what is programmed at this instant, which is a
+	 * different fact and is labelled as one.
+	 *
+	 * ⚠️ In both, a SET bit MASKS the line -- the opposite of the way
+	 * "enabled" reads -- so the word is spelled out rather than left to
+	 * the reader to invert.
+	 */
+	printf("pic: OCW1 now master 0x%02x slave 0x%02x; at spl0 the mask is "
+	       "0x%04x — IRQ 13 is %s (#515)\n",
+	       inb(master_ocw), inb(slaves_ocw), pic_mask[SPL0],
+	       (pic_mask[SPL0] & (1 << 13)) ? "masked" : "ENABLED");
 }
 
 

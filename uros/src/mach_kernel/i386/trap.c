@@ -1292,8 +1292,17 @@ v86_assist(
 
 /*
  * Handle AST traps for i386.
- * Check for delayed floating-point exception from
- * AT-bus machines.
+ *
+ * ⚠️ It used to open by asking whether this AST was a delayed floating-point
+ * exception from an AT-bus machine, and to call fpexterrflt() when it was
+ * (#515).  That arm is gone with AST_I386_FP: the error arrived as IRQ 13
+ * because CR0.NE was clear, at interrupt level and on whatever processor the
+ * PIC reached, so it had to be parked until the owning thread was next on its
+ * way to user mode.  With the bit set it is a fault of that thread, taken in
+ * its own context, and never reaches an AST at all.
+ *
+ * 🔑 Which leaves this routine with one job and no fork, and removes a
+ * mycpu/need_ast read from every AST the machine takes.
  */
 
 extern void     log_thread_action (thread_t, char *);
@@ -1309,26 +1318,8 @@ i386_astintr(int preemption)
 	s = splsched();		/* block interrupts to check reasons */
 	mp_disable_preemption();
 	mycpu = cpu_number();
-	if (need_ast[mycpu] & AST_I386_FP) {
-	    /*
-	     * AST was for delayed floating-point exception -
-	     * FP interrupt occured while in kernel.
-	     * Turn off this AST reason and handle the FPU error.
-	     */
 
-	    ast_off(mycpu, AST_I386_FP);
-	    mp_enable_preemption();
-	    splx(s);
-
-	    fpexterrflt();
-	}
-	else {
-	    /*
-	     * Not an FPU trap.  Handle the AST.
-	     * Interrupts are still blocked.
-	     */
-
-	    if (preemption) {
+	if (preemption) {
 
 	    /*
 	     * We don't want to process any AST if we were in
@@ -1351,18 +1342,17 @@ i386_astintr(int preemption)
 		self->preempt = TH_NOT_PREEMPTABLE;
 
 		thread_unlock (self);
-	    } else {
+	} else {
 		mp_enable_preemption();
-	    }
-
-	    ast_taken(preemption, mask, s
-#if	FAST_IDLE
-		      ,NO_IDLE_THREAD
-#endif	/* FAST_IDLE */
-		      );
-
-	    self->preempt = TH_PREEMPTABLE;
 	}
+
+	ast_taken(preemption, mask, s
+#if	FAST_IDLE
+		  ,NO_IDLE_THREAD
+#endif	/* FAST_IDLE */
+		  );
+
+	self->preempt = TH_PREEMPTABLE;
 }
 
 /*
@@ -1381,17 +1371,15 @@ i386_exception(
 	int	code,
 	int	subcode)
 {
-	spl_t			s;
 	exception_data_type_t   codes[EXCEPTION_CODE_MAX];
 
 	/*
-	 * Turn off delayed FPU error handling.
+	 * ⚠️ This used to open by turning off delayed FPU error handling --
+	 * splsched, ast_off(cpu_number(), AST_I386_FP), splx -- on every
+	 * exception the machine raises, of any kind (#515).  There is no such
+	 * AST any more: with CR0.NE set an x87 error is a fault of the thread
+	 * that caused it, so nothing is ever pending on a processor.
 	 */
-	s = splsched();
-	mp_disable_preemption();
-	ast_off(cpu_number(), AST_I386_FP);
-	mp_enable_preemption();
-	splx(s);
 
 #if	FPE
 	fpe_exception_fixup(exc, code, subcode);

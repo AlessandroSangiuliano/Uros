@@ -84,6 +84,7 @@ static inline uint32_t inl(uint16_t port)
 #define CR0_MP		(1UL << 1)	/* monitor coprocessor              */
 #define CR0_EM		(1UL << 2)	/* set: no FPU, emulate it          */
 #define CR0_TS		(1UL << 3)	/* the lazy-FPU trap; not used here */
+#define CR0_NE		(1UL << 5)	/* x87 errors are #MF, not FERR#    */
 #define CR0_WP		(1UL << 16)	/* kernel honours read-only pages   */
 #define CR0_PG		(1UL << 31)	/* paging enabled                   */
 

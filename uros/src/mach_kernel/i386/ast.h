@@ -82,13 +82,22 @@
 /*
  * Machine-dependent AST file for machines with no hardware AST support.
  *
- * For the I386, we define AST_I386_FP to handle delayed
- * floating-point exceptions.  The FPU may interrupt on errors
- * while the user is not running (in kernel or other thread running).
+ * 🔴 EMPTY, and that is the answer rather than an omission (#515).
+ *
+ * AST_I386_FP was here, with MACHINE_AST_PER_THREAD naming it, "to handle
+ * delayed floating-point exceptions -- the FPU may interrupt on errors while
+ * the user is not running (in kernel or other thread running)".  Every word of
+ * that was a consequence of CR0.NE being clear: the error arrived as IRQ 13,
+ * at interrupt level, on whatever processor the PIC reached, so it had to be
+ * parked somewhere until the owning thread was next on its way to user mode.
+ *
+ * With the bit set the processor raises #MF against the thread that caused the
+ * error, in its own context.  There is nothing delayed, so there is no AST.
+ *
+ * ⚠️ MACHINE_AST_PER_THREAD is therefore not defined here at all, and
+ * <kern/ast.h> supplies the machine-independent 0.  Defining it to 0 would
+ * read as a machine that has one and set it to nothing.
  */
-
-#define	AST_I386_FP	0x80000000
-#define MACHINE_AST_PER_THREAD  AST_I386_FP
 
 
 #endif	/* _I386_AST_H_ */

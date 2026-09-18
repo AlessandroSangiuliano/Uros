@@ -89,13 +89,11 @@ ALLOWED = {
     "fpu_save_context": "the switch's save (XSAVE/FXSAVE), i386",
     "fpu_load_context": "the switch's restore (XRSTOR/FXRSTOR), i386",
     "fp_save": "save helper behind fpu_get_state and the error paths, i386",
-    "fp_load": "restore helper, i386",
     "fpu_module_init": "builds the clean image by taking it FROM the unit "
                        "after fpinit(), i386",
     "fpu_get_state": "thread_get_state: saves so the caller can read, i386",
     "fpexterrflt": "saves the faulting status before raising, i386",
     "fpsseflt": "#XF: saves the faulting MXCSR before raising, i386 (#515)",
-    "fpintr": "IRQ 13: saves the faulting state before the AST, i386",
 
     # i386/fpu_stress.S, run by the threads fpu_stress.c creates.  Every
     # thread on this target carries its state -- there is no exemption to

@@ -131,9 +131,27 @@ void fpu_init(void)
 	 * instruction faults.  MP pairs with TS, which is exactly the
 	 * mechanism this design does not use — so TS is cleared and stays
 	 * cleared, and the register file is simply always live.
+	 *
+	 * 🔴 NE is set here, and was never set on this target either (#515).
+	 * This kernel maps T_FPU_ERROR to EXC_ARITHMETIC/EXC_X86_64_EXTERRFLT
+	 * and installs a gate at vector 16 — and with NE clear the processor
+	 * never uses it: an x87 numeric error asserts FERR# instead, which is
+	 * a 387-era signal meant for a PIC this kernel does not drive.  So the
+	 * handler existed and could not fire, and a thread that took such an
+	 * error stayed in the instruction that reported it.
+	 *
+	 * ⚠️ The boot processor inherits whatever the firmware left in CR0, so
+	 * it was a measurement; the APs were a proof.  ap_trampoline.S builds
+	 * CR0 from the reset value plus PE and then PG, and NE is 0 in the
+	 * reset value — so every AP came up without it however the BSP arrived.
+	 *
+	 * 🔑 Set beside OSXMMEXCPT below for the reason that pairs them: the
+	 * two bits say the same thing about the two halves of the unit, that
+	 * an arithmetic error is a fault of this thread rather than an
+	 * interrupt belonging to the machine.  x86-64 has always set one.
 	 */
 	cr0 &= ~(CR0_EM | CR0_TS);
-	cr0 |= CR0_MP;
+	cr0 |= CR0_MP | CR0_NE;
 	write_cr0(cr0);
 
 	/*
