@@ -430,28 +430,33 @@ kernel_trap(
 		fpextovrflt();
 		return (TRUE);
 
-	    case T_FLOATING_POINT_ERROR:
-		fpexterrflt();
-		return (TRUE);
-
 	    /*
 	     * 🔴 A panic, and deliberately not a handler (#515).
 	     *
 	     * This kernel executes no floating point: KERNEL_FLOAT_OK is 0
 	     * since #560 and scripts/kernel-vector-check.py fails the link if
 	     * an x87 or SSE instruction appears outside the declared symbols.
-	     * A SIMD numeric error in ring 0 therefore means that guarantee
+	     * An arithmetic fault in ring 0 therefore means that guarantee
 	     * broke somewhere the build-time check could not see -- which is
-	     * worth saying, and is not worth raising an arithmetic exception
-	     * against a kernel thread that cannot have caused one.
+	     * worth saying, and is worth more than raising an arithmetic
+	     * exception against a kernel thread that cannot have caused one.
 	     *
 	     * ⚠️ So the pair is deliberate: a check that makes it impossible,
 	     * and a panic that names the check when it happens anyway.
+	     *
+	     * ⚠️ T_FLOATING_POINT_ERROR used to call fpexterrflt() here, from
+	     * the days when that routine was an AST consumer and this was one
+	     * of the two places the AST could be taken.  It is the #MF handler
+	     * now and raises against current_act(), which in ring 0 is a
+	     * kernel thread -- so reaching it from here would be a confusing
+	     * way to panic rather than a way not to.
 	     */
+	    case T_FLOATING_POINT_ERROR:
 	    case T_SIMD_ERROR:
-		panic("kernel_trap: SIMD numeric error in kernel mode at "
-		      "eip 0x%x -- this kernel computes in no floating point "
-		      "(KERNEL_FLOAT_OK=0, kernel-vector-check)", regs->eip);
+		panic("kernel_trap: arithmetic fault (trap %d) in kernel mode "
+		      "at eip 0x%x -- this kernel computes in no floating "
+		      "point (KERNEL_FLOAT_OK=0, kernel-vector-check)",
+		      type, regs->eip);
 		/*NOTREACHED*/
 
 	    case T_PAGE_FAULT:

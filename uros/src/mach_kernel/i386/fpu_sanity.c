@@ -33,27 +33,37 @@
 #include <kern/misc_protos.h>		/* printf, panic */
 
 /*
- * Issuing a stray SSE instruction from generic kernel code is unsafe:
- * the kernel runs with CR0.TS armed for lazy FPU context switching,
- * and the trap handler for it (fpnoextflt) expects a real FPU thread
- * context, which we don't have during early init.  Instead we verify
- * exactly the bit the #309 fix is responsible for setting on each
- * CPU: CR4.OSFXSR, plus CR4.OSXSAVE on hardware that has XSAVE.
+ * Rather than issue a stray SSE instruction from generic kernel code, this
+ * verifies the bits themselves -- which is the per-CPU acceptance criterion in
+ * mechanical form: panic if the processor came up without ap_machine_init() /
+ * init_fpu() having programmed them, which is what #309 observed.
  *
- * This is the per-CPU acceptance criterion in mechanical form: panic
- * if the AP came up without ap_machine_init() / init_fpu() having
- * programmed those bits, which is what we observed before the fix.
+ * ⚠️ The comment that used to be here said the kernel runs with CR0.TS armed
+ * for lazy FPU context switching.  It has not since #560: the switch carries
+ * the state and CR0.TS is never armed on either target.  A comment asserting a
+ * property the tree no longer has is worse than no comment, because it reads
+ * as a reason not to look.
+ *
+ * 🔴 CR0.NE joins the list here (#515), and this is the right place for it
+ * rather than a print in init_fpu(): the 1991 note in locore.S that first
+ * asked for it said "set CR0_NE for slave processors, they do not have a PIC",
+ * so the bit is exactly the kind of thing an AP can come up without.  The
+ * 387-era fallback for NE=0 is FERR# on a PIC line, and a processor with no
+ * PIC in front of it has nowhere to send it at all.
  */
+#define	CR0_NE_BIT	0x00000020
 #define	CR4_OSFXSR	0x00000200
 #define	CR4_OSXMMEXCPT	0x00000400
 #define	CR4_OSXSAVE	0x00040000
 
+extern unsigned int get_cr0(void);
 extern unsigned int get_cr4(void);
 extern void panic(const char *, ...);
 
 void
 fpu_sanity_check(void)
 {
+	unsigned int cr0 = get_cr0();
 	unsigned int cr4 = get_cr4();
 
 	if ((cr4 & CR4_OSFXSR) == 0)
@@ -63,8 +73,14 @@ fpu_sanity_check(void)
 	if ((cr4 & CR4_OSXMMEXCPT) == 0)
 		panic("fpu_sanity: cpu %d CR4.OSXMMEXCPT not set",
 		      current_cpu_id());
+	if ((cr0 & CR0_NE_BIT) == 0)
+		panic("fpu_sanity: cpu %d CR0.NE not set (cr0=0x%x) — an x87 "
+		      "numeric error on this processor would assert FERR# "
+		      "instead of raising #MF (#515)",
+		      current_cpu_id(), cr0);
 
-	printf("fpu_sanity: cpu %d CR4=0x%x OSFXSR+OSXMMEXCPT%s ok (#309)\n",
-	       current_cpu_id(), cr4,
+	printf("fpu_sanity: cpu %d CR0=0x%x NE ok, CR4=0x%x "
+	       "OSFXSR+OSXMMEXCPT%s ok (#309, #515)\n",
+	       current_cpu_id(), cr0, cr4,
 	       (cr4 & CR4_OSXSAVE) ? "+OSXSAVE" : "");
 }

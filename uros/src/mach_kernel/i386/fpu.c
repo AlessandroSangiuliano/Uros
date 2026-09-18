@@ -281,9 +281,30 @@ init_fpu(void)
 	     * left the previous thread's registers in place for the new thread
 	     * to read speculatively (CVE-2018-3665).  The switch now carries
 	     * the state, so there is nothing to defer and nothing to trap on.
+	     *
+	     * 🔴 CR0.NE is SET here, and had never been set on this target
+	     * (#515).  With it clear, an x87 numeric error does not raise #MF:
+	     * it asserts FERR#, which a PC chipset routes to IRQ 13 -- so the
+	     * one arithmetic fault the processor reports precisely arrived as
+	     * a PIC interrupt at SPL1, on a line that may be masked, shared or
+	     * claimed, and belonging to whatever thread happened to be running
+	     * when it got through.  That is the 387 arrangement, from when the
+	     * unit was a separate chip with no way to signal the CPU.
+	     *
+	     * 🔑 The NE=0 route is also the whole reason the deferred-error
+	     * machinery existed: fp_intr_act, AST_I386_FP, fp_valid == 2 and
+	     * fpintr() are all about carrying an error from the processor that
+	     * received the interrupt to the thread that earned it.  With NE
+	     * set the processor does that itself, and they are gone.
+	     *
+	     * ⚠️ Set alongside OSXMMEXCPT rather than anywhere else, because
+	     * the two say the same thing about the two halves of the unit: an
+	     * arithmetic error is a fault of this thread, not an interrupt
+	     * belonging to the machine.  One of them has been set since SSE
+	     * was enabled here; the other never was.
 	     */
 	    set_cr4(get_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
-	    set_cr0((get_cr0() & ~(CR0_EM|CR0_TS)) | CR0_MP);
+	    set_cr0((get_cr0() & ~(CR0_EM|CR0_TS)) | CR0_MP | CR0_NE);
 
 	    /*
 	     * Probe CPUID.1:ECX for XSAVE support (bit 26).
@@ -882,71 +903,57 @@ fpextovrflt(void)
 }
 
 /*
- * FPU error. Called by AST.
+ * x87 numeric error -- #MF, vector 16 (#515).
+ *
+ * 🔴 This used to be the AST half of a two-stage delivery, and every stage of
+ * it existed because CR0.NE was clear.  With the bit clear the processor does
+ * not raise #MF at all: it asserts FERR#, the chipset turns that into IRQ 13,
+ * fpintr() ran at SPL1 on whatever processor took the interrupt, recorded the
+ * thread in fp_intr_act[cpu] and armed AST_I386_FP -- and this routine then
+ * had to work out, on the way back to user mode, whether the thread it had
+ * landed in was the one the error belonged to, handing the condition back
+ * through fp_valid == 2 when it was not.
+ *
+ * 🔑 With CR0.NE set the processor does all of that itself.  The fault is
+ * delivered to the thread that owns the state, in its own context, through the
+ * gate <i386/idt.S> has always had at vector 16 -- so there is no interval to
+ * cover, nothing to record, and no wrong thread to hand anything back to.  The
+ * machinery is not maintained here; it is gone.
+ *
+ * ⚠️ The reported condition is CLEARED, and that is not tidiness.  x87 reports
+ * a numeric error at the next WAITING instruction, which means the flag in the
+ * status word is what raises the fault -- and FXRSTOR puts that status word
+ * back into the unit on the next switch to this thread.  Leaving it set would
+ * send a resumed thread into the same wait, for ever.  fpintr() left it set,
+ * and nothing noticed because nothing has ever resumed a thread from one; the
+ * 1991 comment in fp_load() that asked "does the fpu regenerate the interrupt
+ * in frstor or not?" is this question, and the answer is yes.
+ *
+ * 🔑 So the order here is: read the status word, clear the condition in the
+ * UNIT, then save.  The save is what the next switch-in restores from, so a
+ * unit cleared before it is the only way the cleared state reaches memory --
+ * and the value that faulted is already in hand, on its way out as the
+ * exception subcode.
  */
-
 void
 fpexterrflt(void)
 {
 	register thread_act_t	thr_act = current_act();
-
-	int			mycpu;
-	register thread_act_t	owner;
+	unsigned short		status;
 
 ASSERT_IPL(SPL0);
-	mp_disable_preemption();
-	mycpu = cpu_number();
-	owner = fp_intr_act[mycpu];
-	fp_intr_act[mycpu] = THR_ACT_NULL;
-	mp_enable_preemption();
-
-	if (owner == THR_ACT_NULL)
-		panic("fpexterrflt: AST taken with no thread recorded");
-
 	/*
-	 * A context switch can happen between the interrupt and the AST, and
-	 * the AST is per-CPU while the error belongs to a thread -- so the
-	 * thread that reaches this point is not necessarily the one the
-	 * error is for.
-	 *
-	 * 🔑 The remembered condition (fp_valid == 2) used to be delivered by
-	 * fp_load(), off the #NM trap the owner would take the next time it
-	 * touched the unit.  There is no such trap now, so fpu_load_context()
-	 * delivers it: the restore is the one thing that is guaranteed to
-	 * happen before that thread runs again (#560).
-	 *
-	 * ⚠️ This whole arm used to be uniprocessor-only, which left SMP
-	 * raising the arithmetic exception against whatever thread the AST
-	 * happened to land on.
+	 * ⚠️ From the unit and not from the save area.  A thread whose state
+	 * was freed by fpu_set_state() has no save area at all, and it can
+	 * still take this fault -- the registers are the live copy either way,
+	 * and they are where the faulting status word is.
 	 */
-	if (owner != thr_act) {
-		register struct i386_fpsave_state *ifps;
+	status = fnstsw();
+	fnclex();
 
-		ifps = owner->mact.pcb->ims.ifps;
-		if (ifps != 0)
-			ifps->fp_valid = 2;
-		/*
-		 * If it has no save area the error dies with it: the thread
-		 * was told its state is uninitialized, or it is on its way
-		 * out.  Nothing to raise it against.
-		 */
-		return;
-	}
-
-	/*
-	 * Save the FPU state: the registers are the live copy, and the
-	 * status word read below has to be the one that faulted.
-	 */
 	fp_save(thr_act);
 
-	/*
-	 * Raise FPU exception.
-	 * Locking not needed on pcb->ims.ifps,
-	 * since thread is running.
-	 */
-	i386_exception(EXC_ARITHMETIC,
-		       EXC_I386_EXTERR,
-		       thr_act->mact.pcb->ims.ifps->fx_save_state.fx_status);
+	i386_exception(EXC_ARITHMETIC, EXC_I386_EXTERRFLT, status);
 	/*NOTREACHED*/
 }
 
