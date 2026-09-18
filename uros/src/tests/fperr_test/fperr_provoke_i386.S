@@ -17,6 +17,13 @@
 /*
  * fperr_provoke_x87 -- an unmasked zero-divide on the x87 stack.
  *
+ * Returns the x87 STATUS WORD as the unit had it when the wait was reached.
+ * 🔑 Because "no exception arrived" is an absence, and an absence explains
+ * nothing on its own: a status word with ZE set says the unit flagged the
+ * error and the processor declined to report it, and one without says the
+ * division never faulted at all.  Two different findings that read identically
+ * from the outside.
+ *
  * 🔑 The fault does NOT arrive at the division.  x87 reports a numeric error
  * at the next WAITING floating-point instruction, so the divide sets ZE in the
  * status word and carries on, and the `fwait' below is where #MF (or, on a
@@ -58,6 +65,16 @@ fperr_provoke_x87:
 	fldz				/* st(0) = 0.0, st(1) = 1.0 */
 	fdivp	%st, %st(1)		/* st(0) = 1.0/0.0 -> ZE, no trap yet */
 
+	/*
+	 * Read the status word BEFORE the wait, not after: fnstsw is an
+	 * FN-form instruction and GAS would fold the wait into it, which is
+	 * the fold this routine is written to avoid.  What it reads is the
+	 * flag the division just set, which is the interesting value either
+	 * way -- the wait does not change it.
+	 */
+	fnstsw	%ax
+	movzwl	%ax, %eax
+
 	fwait				/* <-- the fault is taken HERE */
 
 	leave
@@ -65,6 +82,11 @@ fperr_provoke_x87:
 
 /*
  * fperr_provoke_sse -- an unmasked zero-divide in the SIMD unit.
+ *
+ * Returns MXCSR as the unit had it after the division, for the same reason the
+ * x87 routine returns the status word: ZE set with ZM clear says the unit
+ * flagged the error and nothing reported it, ZM still set says the ldmxcsr
+ * above did not survive to the division.
  *
  * 🔑 Unlike the x87 arm this fault is PRECISE: #XF is raised by the division
  * itself, and the faulting address is the `divsd'.  Which means a handler that
@@ -93,6 +115,11 @@ fperr_provoke_sse:
 
 	xorpd	%xmm1, %xmm1		/* 0.0, and not a load either */
 	divsd	%xmm1, %xmm0		/* <-- the fault is taken HERE */
+
+	/* Reached only when the processor did not report it: say what MXCSR
+	 * ended up holding, so the absence has a value behind it. */
+	stmxcsr	-8(%ebp)
+	movl	-8(%ebp), %eax
 
 	leave
 	ret

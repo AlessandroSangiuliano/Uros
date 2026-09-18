@@ -16,6 +16,10 @@
 /*
  * fperr_provoke_x87 -- an unmasked zero-divide on the x87 stack.
  *
+ * Returns the x87 status word, so that "no exception arrived" carries a value
+ * rather than only an absence: ZE set means the unit flagged the error and the
+ * processor declined to report it, ZE clear means the division never faulted.
+ *
  * 🔑 The fault arrives at the `fwait', not at the division: x87 reports a
  * numeric error at the next waiting instruction.  Returning from here means
  * the kernel cleared the reported condition in the thread's saved state; not
@@ -41,6 +45,14 @@ fperr_provoke_x87:
 	fldz				/* st(0) = 0.0, st(1) = 1.0 */
 	fdivp	%st, %st(1)		/* st(0) = 1.0/0.0 -> ZE, no trap yet */
 
+	/*
+	 * Before the wait, not after: fnstsw is an FN-form instruction and GAS
+	 * would fold the wait into it.  The value is the same either way --
+	 * the wait does not change the flag the division set.
+	 */
+	fnstsw	%ax
+	movzwl	%ax, %eax
+
 	fwait				/* <-- the fault is taken HERE */
 
 	leave
@@ -48,6 +60,8 @@ fperr_provoke_x87:
 
 /*
  * fperr_provoke_sse -- an unmasked zero-divide in the SIMD unit.
+ *
+ * Returns MXCSR after the division, for the same reason.
  *
  * #XF is precise, so the faulting address is the `divsd' and a thread resumed
  * at it divides by zero again.  This routine is not expected to return.
@@ -66,6 +80,10 @@ fperr_provoke_sse:
 	movq	%rax, %xmm0
 	xorpd	%xmm1, %xmm1			/* 0.0 */
 	divsd	%xmm1, %xmm0			/* <-- the fault is taken HERE */
+
+	/* Reached only when the processor did not report it. */
+	stmxcsr	-8(%rbp)
+	movl	-8(%rbp), %eax
 
 	leave
 	ret

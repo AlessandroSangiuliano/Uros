@@ -52,6 +52,7 @@
  * this the call compiles as an implicit declaration returning int.
  */
 #include <mach/mach_host.h>
+#include <mach/mig_errors.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -59,9 +60,18 @@
 
 #include "exc_server.h"
 
-/* The two provocations, in fperr_provoke_<arch>.S beside this file. */
-extern void	fperr_provoke_x87(void);
-extern void	fperr_provoke_sse(void);
+/*
+ * The two provocations, in fperr_provoke_<arch>.S beside this file.
+ *
+ * Each returns the unit's own status register as it stood after the division:
+ * the x87 status word, and MXCSR.  🔑 Only reached when the processor did NOT
+ * report the error -- and that is exactly the case where a bare "no exception
+ * arrived" explains nothing.  A flag set with its mask clear says the unit
+ * flagged it and nothing carried it; the mask still set says the unmasking
+ * never survived to the division.  Two different defects, one silence.
+ */
+extern unsigned int	fperr_provoke_x87(void);
+extern unsigned int	fperr_provoke_sse(void);
 
 enum arm { ARM_X87, ARM_SSE };
 
@@ -72,6 +82,7 @@ static volatile int		exception_count;
 static volatile int		exception_type;
 static volatile natural_t	exception_code0;
 static volatile int		victim_returned;
+static volatile unsigned int	victim_status;
 
 static void *
 the_thread_that_divides(void *arg)
@@ -79,9 +90,9 @@ the_thread_that_divides(void *arg)
 	(void) arg;
 
 	if (the_arm == ARM_X87)
-		fperr_provoke_x87();
+		victim_status = fperr_provoke_x87();
 	else
-		fperr_provoke_sse();
+		victim_status = fperr_provoke_sse();
 
 	victim_returned = 1;
 	return NULL;
@@ -166,13 +177,56 @@ arm_name(void)
 	return the_arm == ARM_X87 ? "x87" : "SIMD";
 }
 
+/*
+ * Receive ONE exception message, or say that none came.
+ *
+ * 🔴 Hand-written rather than mach_msg_server_once(), and the reason is the
+ * only reason worth writing one: that routine passes MACH_MSG_TIMEOUT_NONE to
+ * the trap, so a kernel that delivers no exception leaves this program blocked
+ * for ever with "starting" as its last word.  Which is exactly what the first
+ * run of this test did on x86-64 -- where no exception is EXPECTED, because
+ * CR0.NE is clear -- and a hang is not a result.  "No exception arrived" is a
+ * finding, and an instrument that cannot report it cannot be trusted when it
+ * reports anything else.
+ *
+ * ⚠️ The reply has to be sent.  A thread suspended in exception_raise() waits
+ * for it, and the x87 arm's second half is whether that thread comes back.
+ */
+#define RECEIVE_MS	3000
+
+static mach_msg_return_t
+receive_one_exception(void)
+{
+	union {
+		mach_msg_header_t	hdr;
+		mig_reply_error_t	err;
+		char			pad[4096];
+	} req, rep;
+	mach_msg_return_t	mr;
+
+	mr = mach_msg(&req.hdr, MACH_RCV_MSG|MACH_RCV_TIMEOUT, 0,
+		      (mach_msg_size_t) sizeof req, exc_port,
+		      RECEIVE_MS, MACH_PORT_NULL);
+	if (mr != MACH_MSG_SUCCESS)
+		return mr;
+
+	(void) exc_server(&req.hdr, &rep.hdr);
+
+	if (rep.hdr.msgh_remote_port == MACH_PORT_NULL)
+		return MACH_MSG_SUCCESS;
+
+	return mach_msg(&rep.hdr, MACH_SEND_MSG, rep.hdr.msgh_size, 0,
+			MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
 static int
 run_the_arm(void)
 {
-	pthread_t	victim;
-	kern_return_t	kr;
-	int		want_code;
-	int		i;
+	pthread_t		victim;
+	kern_return_t		kr;
+	mach_msg_return_t	mr;
+	int			want_code;
+	int			i;
 
 	kr = mach_port_allocate(mach_task_self(),
 				MACH_PORT_RIGHT_RECEIVE, &exc_port);
@@ -211,16 +265,46 @@ run_the_arm(void)
 	 * One message, and then stop asking.  A loop would never come back:
 	 * the SIMD arm's thread raises a second exception by construction.
 	 */
-	(void) mach_msg_server_once(exc_server, 4096, exc_port,
-				    MACH_MSG_OPTION_NONE);
+	mr = receive_one_exception();
 
 	if (exception_count == 0) {
-		printf("fperr_test: [%s] no exception arrived%s — WRONG\n",
-		       arm_name(),
-		       victim_returned
-		       ? ", and the thread carried on as if nothing had"
-			 " happened"
-		       : "");
+		printf("fperr_test: [%s] no exception arrived in %d ms (%s)"
+		       " — WRONG\n",
+		       arm_name(), RECEIVE_MS,
+		       (mr == MACH_RCV_TIMED_OUT)
+		       ? "the receive timed out" : "the receive failed");
+		if (!victim_returned) {
+			printf("fperr_test: [%s] and the dividing thread has "
+			       "not come back either, so it is somewhere this "
+			       "program cannot see\n", arm_name());
+			return 0;
+		}
+		/*
+		 * 🔑 The absence with a value behind it.  The unit's own
+		 * register says which of the two silences this is.
+		 */
+		if (the_arm == ARM_X87)
+			printf("fperr_test: [%s] the dividing thread carried "
+			       "on, and the x87 status word it left is 0x%04x "
+			       "— %s\n", arm_name(), victim_status,
+			       (victim_status & 0x04)
+			       ? "ZE IS SET: the unit flagged the error and "
+				 "nothing reported it, which is CR0.NE clear"
+			       : "ZE is clear: the division never faulted at "
+				 "all, so the unmasking did not take");
+		else
+			printf("fperr_test: [%s] the dividing thread carried "
+			       "on, and the MXCSR it left is 0x%04x — %s\n",
+			       arm_name(), victim_status,
+			       (victim_status & 0x200)
+			       ? "ZM is STILL SET: the unmasking did not "
+				 "survive to the division"
+			       : ((victim_status & 0x04)
+				  ? "ZE is set and ZM is clear: the unit "
+				    "flagged the error and the processor did "
+				    "not raise #XF"
+				  : "ZE is clear with ZM clear: the division "
+				    "did not divide by zero"));
 		return 0;
 	}
 
