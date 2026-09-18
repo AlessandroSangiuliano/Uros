@@ -105,6 +105,7 @@ CAP_SERVER="$SBIN/cap_server"
 CAP_TEST="$SBIN/cap_test"
 IRQ_CLAIM_TEST="$SBIN/irq_claim_test"
 HAL_BAR_TEST="$SBIN/hal_bar_test"
+FPERR_TEST="$SBIN/fperr_test"
 DMA_RECLAIM_TEST="$SBIN/dma_reclaim_test"
 GPUSTAT="$SBIN/gpustat"
 HAL_SERVER="$SBIN/hal_server"
@@ -167,6 +168,21 @@ IRQ_CLAIM_TEST_CONF_LINE=""
 # is worth measuring.
 HAL_BAR_TEST_CONF_LINE=""
 [ -f "$HAL_BAR_TEST" ] && HAL_BAR_TEST_CONF_LINE="hal_bar_test hal_bar_test"
+
+# #515: un errore aritmetico non mascherato deve arrivare al thread che lo ha
+# causato.  DUE righe e un solo binario: i bracci si distinguono per argv.
+# Sono due RUN separate perche' il braccio SIMD lascia il proprio thread
+# parcheggiato dentro una seconda exception_raise(), e in uno stesso task il
+# braccio dopo si prenderebbe quel messaggio per suo.
+#
+# ⚠️ In fondo, subito prima della ush: sul kernel da cui #515 parte il braccio
+# SIMD PANICA, quindi tutto il resto deve essere gia' passato.
+FPERR_TEST_X87_CONF_LINE=""
+FPERR_TEST_SSE_CONF_LINE=""
+if [ -f "$FPERR_TEST" ]; then
+    FPERR_TEST_X87_CONF_LINE="fperr_test fperr_test x87"
+    FPERR_TEST_SSE_CONF_LINE="fperr_test fperr_test sse"
+fi
 # #513: lo stesso binario DUE volte -- il primo riempie la tavola delle regioni
 # DMA e MUORE tenendola, il secondo la ritrova resa dal kernel.  Una restituzione
 # non si dimostra con un'assenza: serve qualcun altro a cui venga data.
@@ -221,6 +237,8 @@ if [ "$MINIMAL" = "1" ]; then
     DMA_RECLAIM_CONF_LINES=""
     KERNEL242_TEST_CONF_LINE=""
     SIG_TEST_CONF_LINE=""
+    FPERR_TEST_X87_CONF_LINE=""
+    FPERR_TEST_SSE_CONF_LINE=""
     GPUSTAT_CONF_LINE=""
 else
     HELLO_SERVER_LINE="hello_server hello_server"
@@ -265,6 +283,8 @@ ${HAL_BAR_TEST_CONF_LINE}
 ${KERNEL242_TEST_CONF_LINE}
 ${SIG_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
+${FPERR_TEST_X87_CONF_LINE}
+${FPERR_TEST_SSE_CONF_LINE}
 ${USH_CONF_LINE}
 CONF
 
@@ -295,6 +315,7 @@ ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
 [ -f "$IRQ_CLAIM_TEST" ] && ARGS+=("irq_claim_test:$IRQ_CLAIM_TEST")
 [ -f "$HAL_BAR_TEST" ] && ARGS+=("hal_bar_test:$HAL_BAR_TEST")
+[ -f "$FPERR_TEST" ] && ARGS+=("fperr_test:$FPERR_TEST")
 [ -f "$KERNEL242_TEST" ] && ARGS+=("kernel242_test:$KERNEL242_TEST")
 [ -f "$SIG_TEST" ] && ARGS+=("sig_test:$SIG_TEST")
 [ -f "$GPUSTAT" ] && ARGS+=("gpustat:$GPUSTAT")
