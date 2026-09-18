@@ -951,6 +951,50 @@ ASSERT_IPL(SPL0);
 }
 
 /*
+ * SIMD numeric error -- #XF, vector 19 (#515).
+ *
+ * 🔴 There has been nothing here at all.  init_fpu() has set CR4.OSXMMEXCPT
+ * since SSE was enabled on this target, and that bit is precisely what makes
+ * an unmasked SIMD exception arrive as this fault instead of as an invalid
+ * opcode -- while <i386/trap.h> stopped at 17, so user_trap() fell through to
+ * its default and panicked.  Two instructions from ring 3, `ldmxcsr' with a
+ * mask bit cleared and a divide by zero, stopped the machine.
+ *
+ * 🔑 Nothing like fpexterrflt()'s machinery above is needed, and the reason is
+ * architectural rather than a simplification: #XF is PRECISE.  It is raised by
+ * the instruction that caused it, in the thread that executed it, at the
+ * moment it executed it -- so there is no interval in which a switch can hand
+ * it to somebody else, and nothing to remember between the fault and the
+ * report.  Every line of the deferred-error machinery exists because the x87's
+ * report is NOT precise and, on this kernel, does not even arrive as a fault.
+ *
+ * ⚠️ And the MXCSR exception flags are deliberately NOT cleared, which is the
+ * opposite of what the x87 path has to do.  There the flag is what raises the
+ * fault, so leaving it set means the thread faults again at the same wait for
+ * ever; here the DIVISION raises it, the flag is only a record, and a handler
+ * that resumes this thread re-executes the division whatever we do.  Clearing
+ * would destroy the one piece of evidence and change nothing.
+ */
+void
+fpsseflt(void)
+{
+	register thread_act_t	thr_act = current_act();
+
+ASSERT_IPL(SPL0);
+	/*
+	 * The registers are the live copy and MXCSR is in them, so the value
+	 * reported has to come from a save made here rather than from whatever
+	 * the last switch happened to leave in memory.
+	 */
+	fp_save(thr_act);
+
+	i386_exception(EXC_ARITHMETIC,
+		       EXC_I386_SSEFLT,
+		       thr_act->mact.pcb->ims.ifps->fx_save_state.fx_MXCSR);
+	/*NOTREACHED*/
+}
+
+/*
  * Save FPU state.
  *
  * Locking not needed:

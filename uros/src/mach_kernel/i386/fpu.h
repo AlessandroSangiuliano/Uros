@@ -221,6 +221,7 @@ extern kern_return_t	fpu_get_state(
 extern void		fpnoextflt(void);
 extern void		fpextovrflt(void);
 extern void		fpexterrflt(void);
+extern void		fpsseflt(void);
 extern void		fp_state_alloc(void);
 extern void		fp_state_alloc_pcb(
 					pcb_t				pcb);

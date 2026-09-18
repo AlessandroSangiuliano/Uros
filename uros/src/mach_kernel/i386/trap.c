@@ -434,6 +434,26 @@ kernel_trap(
 		fpexterrflt();
 		return (TRUE);
 
+	    /*
+	     * 🔴 A panic, and deliberately not a handler (#515).
+	     *
+	     * This kernel executes no floating point: KERNEL_FLOAT_OK is 0
+	     * since #560 and scripts/kernel-vector-check.py fails the link if
+	     * an x87 or SSE instruction appears outside the declared symbols.
+	     * A SIMD numeric error in ring 0 therefore means that guarantee
+	     * broke somewhere the build-time check could not see -- which is
+	     * worth saying, and is not worth raising an arithmetic exception
+	     * against a kernel thread that cannot have caused one.
+	     *
+	     * ⚠️ So the pair is deliberate: a check that makes it impossible,
+	     * and a panic that names the check when it happens anyway.
+	     */
+	    case T_SIMD_ERROR:
+		panic("kernel_trap: SIMD numeric error in kernel mode at "
+		      "eip 0x%x -- this kernel computes in no floating point "
+		      "(KERNEL_FLOAT_OK=0, kernel-vector-check)", regs->eip);
+		/*NOTREACHED*/
+
 	    case T_PAGE_FAULT:
 		/*
 		 * If the current map is a submap of the kernel map,
@@ -802,6 +822,17 @@ user_trap(
 
 	    case T_FLOATING_POINT_ERROR:
 		fpexterrflt();
+		return;
+
+	    /*
+	     * 🔴 New with #515, and the line above it is why it was missing:
+	     * this kernel has armed CR4.OSXMMEXCPT since SSE was enabled, so a
+	     * SIMD numeric error has always arrived here as a precise fault --
+	     * and there was no case for it, so it reached the default below
+	     * and panicked.  Two instructions from ring 3.
+	     */
+	    case T_SIMD_ERROR:
+		fpsseflt();
 		return;
 
 	    default:
