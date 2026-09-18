@@ -5,6 +5,38 @@
 **Data**: 2026-06-20. `./scripts/run-qemu.sh --bench --ahci -nographic -serial mon:stdio --smp N`, 3 run per N, **mediana**.
 **Unità**: µs/op salvo dove indicato `(ns)`; `(ns/RPC)` per concurrent. Lower = faster.
 
+> 🔴 **QUESTA COLONNA i386 HA DUE ERE, E QUELLA SOTTO È LA PRIMA (#560).**
+>
+> Ogni numero i386 di questo documento è stato preso **prima** che lo switch
+> portasse lo stato della FPU. Fino a quel commit il ripristino era *lazy*:
+> `CR0.TS` armato allo switch e lo stato ricaricato dal `#NM` alla prima
+> istruzione in virgola mobile del thread nuovo — che è il pattern di
+> **CVE-2018-3665**, e che rendeva i386 veloce qui *perché non era sicuro*.
+>
+> Reso eager, misurato oggi (18/09/2026) sulla stessa macchina, KVM, 6 boot per
+> braccio **alternati**, clock campionato a 3993 MHz su entrambi:
+>
+> | riga | prima (questo documento) | dopo | costo |
+> |---|--:|--:|--:|
+> | `smp1` futex WAKE_WAIT ping-pong | 0.678 | 0.852 | **+174 ns** |
+> | `smp1` semaphore ping-pong | 2.625 | 2.790 | **+165 ns** |
+> | `smp4` futex WAKE_WAIT ping-pong | 0.778 | 0.917 | **+139 ns** |
+> | `smp4` semaphore ping-pong | 2.150 | 2.365 | **+215 ns** |
+>
+> 🔑 È **lo stesso numero quattro volte**: il costo è *per switch*, e un round
+> trip sono due switch in ogni riga, quindi cade come la stessa cifra assoluta
+> per quanto lenta sia la riga. Ecco perché il futex segna +26% e il semaforo
+> +6% per la stessa cosa.
+>
+> ⇒ **Un confronto x86-64-contro-i386 che usa le righe qui sotto sottostima
+> i386 di ~170 ns a round trip.** Le righe restano come sono perché sono vere
+> di quello che erano, non perché siano ancora la baseline.
+>
+> ⚠️ E i numeri i386 qui sotto sono del **20/06**: la mediana di 3 run
+> consecutivi non tiene ferma la macchina (il build scalda il package e il
+> boost torna solo quando si raffredda), quindi una ripresa va fatta a bracci
+> **alternati** e col clock campionato durante ogni boot.
+
 > **Note**
 > - Mediana di 3 run (toglie gli outlier del single-run). Sopra i 6 vCPU = oversubscription (host 6c/12t).
 > - L'outlier `Intra-task null RPC` ~15µs a smp1/2 è un warmup costante del primo sample di quella suite (resta anche in mediana).
