@@ -37,7 +37,7 @@
 #include <i386/ioapic.h>		/* ioapic_unmask_irq (#322 replay) */
 #include <kern/cpu_data.h>		/* current_cpu_id() */
 #include <kern/misc_protos.h>		/* printf */
-#include <i386/cpu_number.h>		/* cpu_number() */
+#include <kern/cpu_number.h>		/* cpu_number() */
 #include <machine/AT386/mp/mp.h>	/* MP_AST/MP_CLOCK/MP_KDB/MP_TLB_FLUSH, cpu_int_word */
 #include <i386/lock.h>			/* i_bit_clear */
 #include <i386/eflags.h>		/* EFL_VM */

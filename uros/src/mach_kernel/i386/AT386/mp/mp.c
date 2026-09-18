@@ -203,7 +203,15 @@ extern unsigned char	mp_bsp_lapic_id_get(void);	/* mp_table.c */
 extern unsigned int	clknum;		/* rtclock.c: 8254 counts per second */
 extern unsigned int	clks_per_int;	/* rtclock.c: 8254 counts per HZ tick */
 
-unsigned int	mp_tsc_per_us;		/* 0 = not yet calibrated (fallback) */
+/*
+ * Calibrated below, but it LIVES in rtclock.c, which is built in every
+ * configuration.  This file is not: it joins the link only when
+ * UROS_NCPUS > 1, and rtclock.c reads the value on every build -- so
+ * defining it here left the uniprocessor kernel with an undefined symbol.
+ * Zero there means "not calibrated", which is the answer rtclock.c already
+ * knows how to give: it falls back to the 8254.
+ */
+extern unsigned int	mp_tsc_per_us;		/* rtclock.c: 0 = not calibrated */
 
 /*
  * #367: come-online poll budgets.  The fast budget is what a healthy AP

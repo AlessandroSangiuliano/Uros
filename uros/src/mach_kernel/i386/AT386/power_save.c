@@ -149,7 +149,15 @@ machine_idle(int mycpu)
 	st->halted = 1;
 	IDLE_HLT_MFENCE();
 	if (myprocessor->next_thread == THREAD_NULL &&
+#if	NCPUS > 1
+	    /*
+	     * The per-processor run queue exists only on SMP (struct
+	     * processor, kern/processor.h).  On a uniprocessor every
+	     * runnable thread is on the set's queue checked below, so there
+	     * is nothing else to ask.
+	     */
 	    myprocessor->runq.count == 0 &&
+#endif	/* NCPUS > 1 */
 	    myprocessor->processor_set->runq.count == 0 &&
 	    (need_ast[mycpu] & ~AST_SCHEDULING) == 0) {
 		st->naps++;

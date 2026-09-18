@@ -69,8 +69,15 @@ device_md_pci_write(unsigned int bus, unsigned int slot, unsigned int func,
 int
 device_md_irq_is_level(unsigned int irq)
 {
+#if	NCPUS > 1
+	/*
+	 * i386/ioapic.c joins the link only on SMP, so on a uniprocessor
+	 * there is no I/O APIC to ask and the 8259 answer above is the only
+	 * one there is.
+	 */
 	if (ioapic_active())
 		return ioapic_irq_is_level(irq);
+#endif	/* NCPUS > 1 */
 	return 0;
 }
 

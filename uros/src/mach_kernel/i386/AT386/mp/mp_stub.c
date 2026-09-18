@@ -35,7 +35,7 @@
 #include <kern/misc_protos.h>
 #include <kern/cpu_data.h>	/* current_cpu_id() (#301) */
 #include <vm/vm_kern.h>		/* kmem_alloc (#308) */
-#include <i386/cpu_number.h>	/* cpu_number() (#304) */
+#include <kern/cpu_number.h>	/* cpu_number() (#304) */
 #include <i386/lapic.h>		/* lapic_enable / lapic_send_ipi (#302) */
 #include <i386/fpu.h>		/* fpu_sanity_check (#309) */
 #include <i386/hwp.h>		/* hwp_init_cpu (#358) */

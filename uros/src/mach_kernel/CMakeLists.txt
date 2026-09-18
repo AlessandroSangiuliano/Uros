@@ -1471,6 +1471,11 @@ set(I386_C_SOURCES
     i386/pic.c
     i386/i386_rpc.c
     i386/rtclock.c
+    # The six operations device_master.c needs from the machine (#457).
+    # NOT an SMP source: it used to sit in the UROS_NCPUS > 1 block, which
+    # left the uniprocessor kernel with nineteen undefined device_md_*
+    # symbols at link time.
+    i386/device_machdep.c
     i386/sysenter.c
     i386/trap.c
     i386/user_ldt.c
@@ -1517,8 +1522,6 @@ if(UROS_NCPUS GREATER 1)
         i386/mp_desc.c
         i386/lapic.c
         i386/ioapic.c
-        # The six operations device_master.c needs from the machine (#457).
-        i386/device_machdep.c
         i386/AT386/mp/mp.c
         i386/AT386/mp/mp_stub.c
         i386/AT386/mp/mp_table.c
