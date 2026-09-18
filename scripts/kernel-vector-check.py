@@ -94,6 +94,7 @@ ALLOWED = {
                        "after fpinit(), i386",
     "fpu_get_state": "thread_get_state: saves so the caller can read, i386",
     "fpexterrflt": "saves the faulting status before raising, i386",
+    "fpsseflt": "#XF: saves the faulting MXCSR before raising, i386 (#515)",
     "fpintr": "IRQ 13: saves the faulting state before the AST, i386",
 
     # i386/fpu_stress.S, run by the threads fpu_stress.c creates.  Every
