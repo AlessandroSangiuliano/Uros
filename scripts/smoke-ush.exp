@@ -369,10 +369,29 @@ send "/hello_world\r"
 # land; don't anchor on the prompt afterwards (it may already have scrolled
 # past).  ush is back at a prompt and reading either way, so the shutdown
 # step below still drives cleanly.
-await "hello_world output and reap" {
-    {{hello[\r\n]}  hello  hello}
-    {exit=0x0       reap   exit=0x0}
-} {hello reap} {} $CMD_TIMEOUT $CMD_QUIET
+# 🔴 THE LITERAL HAS TO DISCRIMINATE AS WELL AS THE REGEX DOES, and this pair
+# is where that was learned the hard way.  The regex is `hello[\r\n]' -- the
+# word at the END of a line -- and it was first paired with the bare word
+# `hello', which lives inside `hello_dyn_world' and `hello_world'.  So the
+# garble check, which only reports interleaving when the plain text is ABSENT,
+# found `hello' in `exec: /hello_dyn_world' and stood down.
+#
+# Measured on campaign run 7, where the machine printed
+#
+#     gpu_server: text_hpelutlos(61): cap: provisioned task ...
+#
+# and `text_hpelutlos(' minus `hello' is EXACTLY `text_puts('.  The line was
+# there; the run was reported as NOTHING ARRIVED, which was true of the idle
+# machine afterwards and false about why the step failed.  One cause wearing
+# another's label, which is the defect this whole issue is about -- reproduced
+# by me, inside the fix for it.
+#
+# ⚠️ Built with [list] and not braces because the literal must contain a real
+# carriage return; inside {} the backslash would stay two characters.
+await "hello_world output and reap" [list \
+    [list {hello[\r\n]}  hello  "hello\r"] \
+    [list {exit=0x0}     reap   {exit=0x0}] \
+] {hello reap} {} $CMD_TIMEOUT $CMD_QUIET
 send_user "\n\[smoke\] hello_world stdout->ctty OK\n"
 send_user "\[smoke\] ush reaped hello_world (exit 0)\n"
 
@@ -387,10 +406,11 @@ expect { "ush\$ " {} timeout {} }
 # waitpid reap — the gap #234 left (it only proved reaching main).  Same
 # race handling as 3b: require "hello" and the exit=0x0 reap in either order.
 send "/hello_dyn_world\r"
-await "hello_dyn_world output and reap" {
-    {{hello[\r\n]}  hello  hello}
-    {exit=0x0       reap   exit=0x0}
-} {hello reap} {} $CMD_TIMEOUT $CMD_QUIET
+# Same pairing as 3b, and for the same reason — see the note there.
+await "hello_dyn_world output and reap" [list \
+    [list {hello[\r\n]}  hello  "hello\r"] \
+    [list {exit=0x0}     reap   {exit=0x0}] \
+] {hello reap} {} $CMD_TIMEOUT $CMD_QUIET
 send_user "\n\[smoke\] hello_dyn_world stdout->ctty OK (dynamic)\n"
 send_user "\[smoke\] ush reaped hello_dyn_world (exit 0, dynamic clean-exit)\n"
 

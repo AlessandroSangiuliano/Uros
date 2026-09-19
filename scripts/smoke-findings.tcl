@@ -13,19 +13,28 @@
 # ── Why this exists ───────────────────────────────────────────────────
 #
 # Eleven runs of the i386 acceptance smoke, one tree, clock pinned: 8 passed,
-# 3 failed.  The three failures had TWO causes, and from the outside they were
-# one event -- an `expect' step ran out of budget and printed `FAIL: no <thing>'.
+# 3 failed.  From the outside all three were one event -- an `expect' step ran
+# out of budget and printed `FAIL: no <thing>'.
 #
-#   - one run: the prompt was printed and arrived as `ugspuh_$', because
-#     gpu_server's text_puts cut into the line a character at a time;
-#   - two runs: the output simply stopped mid-line while the work was still
-#     going on.
+# The issue recorded them as TWO defects, one garbled line and two runs where
+# the output stopped mid-line while the work went on.  🔥 THAT WAS WRONG, and
+# only a detector could show it: all three have the wanted text PRESENT and cut
+# into by another writer.  The decomposition is exact --
 #
-# 🔑 One label over two causes is not a cosmetic problem.  It produced a
-# confident wrong story: the truncations were attributed to the CPU governor,
-# and the attribution had to be withdrawn when the same failure appeared at
-# full clock.  Nothing in the output could have contradicted it, because
-# nothing in the output said which of the two had happened.
+#     ush: bound ctty [dbegv]_ ipdi=d2= 4to usshi$ d=3
+#   = ush: bound ctty dev_id=2 to sid=3  +  [bg] pid=4  +  ush$
+#                                                     residue: none
+#
+# -- and the run that "stopped" goes on to print hello_exec's whole AUXV dump
+# after the point it was said to have stopped at.  The truncation class has no
+# confirmed members.
+#
+# 🔑 One label over three instances of one cause is not a cosmetic problem.  It
+# produced two confident wrong stories in a row: the failures were blamed on
+# the CPU governor, that was withdrawn when the same failure appeared at full
+# clock, and the replacement story lasted until somebody pointed a detector at
+# the bytes.  Nothing in the output could have contradicted either, because
+# nothing in the output said which of the three had happened.
 #
 # So this does not make the gate pass more often.  It makes a red run say which
 # kind of red it is.  Three findings, three sentences:
@@ -253,11 +262,30 @@ if {[info exists argv0] && [file tail $argv0] eq "smoke-findings.tcl"} {
 			[uros_finding "hello_world" {hello exit=0x0} "nothing here\n" 20 31 3 20] \
 			"missing: <<hello>> <<exit=0x0>>"]
 
+		# 6. 🔴 A WEAK LITERAL HIDES A GARBLING, and this is the real
+		#    window from campaign run 7 that proved it.  `hello' lives
+		#    inside `hello_dyn_world', so the plain-text guard stood
+		#    down and the finding came out NOTHING ARRIVED -- true of
+		#    the idle machine afterwards, false about why the step
+		#    failed.  `text_hpelutlos(' minus `hello' is exactly
+		#    `text_puts('.
+		#
+		#    Both directions are asserted: the discriminating literal
+		#    must find it, and the weak one must be seen NOT to, so the
+		#    case cannot quietly start passing for the wrong reason.
+		set RUN7 "exec: /hello_dyn_world -> TASK_CAP_PORT=0x2103\r\ngpu_server: text_hpelutlos(\r\n61): cap: provisioned task\r\n"
+		incr failures [check "a line-final literal finds the garbling" \
+			[uros_finding "hello_dyn_world" [list "hello\r"] $RUN7 20 31 3 20] \
+			"GARBLED"]
+		incr failures [check "and the bare word would have missed it" \
+			[uros_finding "hello_dyn_world" {hello} $RUN7 20 31 3 20] \
+			"NOTHING ARRIVED"]
+
 		if {$failures} {
 			puts "smoke-findings --self-test: $failures FAILED"
 			exit 1
 		}
-		puts "smoke-findings --self-test: all 6 passed"
+		puts "smoke-findings --self-test: all 8 passed"
 		exit 0
 	}
 
