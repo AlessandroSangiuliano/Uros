@@ -51,11 +51,26 @@
 # governor's name — on this laptop `performance' on battery still reported
 # 3.99 GHz while `powersave' gave 1.40, so the name alone would have compared
 # runs 2.85x apart without noticing (#460).
+#
+# 🔴 AND THE CEILING, not only where the clock happens to be (#544).  An idle
+# machine under `powersave' with scaling_max_freq at 3.0 GHz reports the same
+# 1397 MHz as one PINNED at 1.4, and the two are different experiments: the
+# first climbs to 3.0 the moment the run loads it, the second cannot.  Without
+# the cap, "measured at low clock" and "measured at a clock that was low when I
+# looked" print the same line -- which is the same defect this issue is about,
+# one layer down: two states, one label.
 uros_host_state() {
 	_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
 	       2>/dev/null || echo "?")
 	_mhz=$(awk '/cpu MHz/ {printf "%.0f", $4; exit}' /proc/cpuinfo \
 	       2>/dev/null || echo "?")
+	_cap=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
+	       2>/dev/null || echo "")
+	if [ -n "$_cap" ]; then
+		_cap="$(( _cap / 1000 ))MHz"
+	else
+		_cap="?"
+	fi
 	_ac="?"
 	for _p in /sys/class/power_supply/A*/online; do
 		[ -r "$_p" ] && _ac=$(cat "$_p") && break
@@ -65,7 +80,7 @@ uros_host_state() {
 	0)	_ac="battery" ;;
 	*)	_ac="AC?" ;;
 	esac
-	echo "governor=$_gov cpu=${_mhz}MHz power=$_ac at=$(date +%H:%M:%S)"
+	echo "governor=$_gov cpu=${_mhz}MHz cap=$_cap power=$_ac at=$(date +%H:%M:%S)"
 }
 
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host

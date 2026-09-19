@@ -794,7 +794,13 @@ IDLE_CHATTER='quiet_census:'
 # keeps printing meaningful lines forever is progress by this measure and has
 # to end somehow.  Ten times the asked-for seconds, so it is never the thing
 # that decides an ordinary run.
-HARD_DEADLINE=$(( $(date +%s) + SECS * 10 ))
+#
+# ⚠️ Named, because the verdict below quotes it.  Written as a literal in both
+# places, the two drift and the message states a multiplier the code does not
+# use -- which is exactly what the ablation that proved the livelock arm
+# printed: "the hard cap (5s x 10)" while the multiplier under test was 1.
+HARD_MULTIPLIER=10
+HARD_DEADLINE=$(( $(date +%s) + SECS * HARD_MULTIPLIER ))
 DEADLINE=$(( $(date +%s) + SECS ))
 RUN_STARTED=$(date +%s)
 
@@ -931,7 +937,7 @@ if [ "$CUT_SHORT" = 1 ]; then
 		# budget.  🔑 This is NOT "give it more seconds": it was given ten
 		# times more and used them all.
 		echo "  FAILED: STILL PRODUCING OUTPUT after ${RUN_SECONDS}s, which is the"
-		echo "          hard cap (${SECS}s x 10).  The kernel never reached an end"
+		echo "          hard cap (${SECS}s x ${HARD_MULTIPLIER}).  The kernel never reached an end"
 		echo "          this script recognises, and it was not stuck -- it was"
 		echo "          printing meaningful lines the whole time.  Giving it more"
 		echo "          seconds is the wrong move: look for something that repeats"
