@@ -423,6 +423,20 @@ if [ "$NBAD" -gt 0 ]; then
 fi
 
 echo "  passed: reached the end, nothing unexplained"
+
+# 🔑 Said on every verdict, and deliberately loudest on a PASSING one (#516).
+#
+# A green run under one accelerator is the dangerous result, not the reassuring
+# one: it is the shape both known divergences had.  TCG accepted an iretq no
+# real processor would (#477) and a store to the APIC page as if it were a
+# message (#432), and in both cases the suite was green for months.  A third,
+# the other way round, made a correct kernel look broken (#515).
+#
+# So the reminder lives in the sentence people actually read, rather than in a
+# checklist someone has to remember.  One line, every time.
+echo "  ⓘ this asked ONE accelerator ($VACCEL)."
+echo "    scripts/both-accelerators.sh x86-64 asks both and reports where they"
+echo "    disagree — which is the only thing neither run can say on its own."
 }
 
 if [ "${1:-}" = "--judge" ]; then

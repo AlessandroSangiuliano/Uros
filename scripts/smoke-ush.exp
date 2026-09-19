@@ -283,6 +283,14 @@ catch wait result
 set exit_status [lindex $result 3]
 if {$exit_status == 0} {
     send_user "\n\[smoke\] PASS — all steps green, QEMU exited cleanly\n"
+# 🔑 The same reminder run-x86_64.sh's verdict carries (#516), and for the same
+# reason: a green run under ONE accelerator is the dangerous result, because
+# that is the shape every divergence found so far has had.
+if {[llength $ACCEL_ARGS]} {
+    send_user "\[smoke\] ⓘ this asked ONE accelerator (TCG). scripts/both-accelerators.sh i386 asks both.\n"
+} else {
+    send_user "\[smoke\] ⓘ this asked ONE accelerator (KVM). scripts/both-accelerators.sh i386 asks both.\n"
+}
     exit 0
 } else {
     send_user "\n\[smoke\] FAIL — QEMU exit status $exit_status\n"
