@@ -37,11 +37,17 @@
 # nothing in the output said which of the three had happened.
 #
 # So this does not make the gate pass more often.  It makes a red run say which
-# kind of red it is.  Three findings, three sentences:
+# kind of red it is.  Four findings, four sentences:
 #
 #   NOTHING ARRIVED      the machine stopped producing output
 #   STILL PRODUCING      output was flowing when the cap ran out
 #   GARBLED              the bytes we wanted are there, interleaved
+#   HOST WAS SUSPENDED   this process was not scheduled; nothing was observed
+#
+# ⚠️ The fourth was not in the plan.  It was added because the first campaign
+# run under this harness produced two of it and they were read as the other
+# two -- once as a budget set too tight, once as a benchmark that had stalled.
+# The kernel journal settled it, and the harness can now settle it by itself.
 #
 # ⚠️ i386 is a reference instrument, not a target: it is kept because it is the
 # only thing that works end to end, and the shared code (libmach, migcom, the
@@ -157,7 +163,7 @@ proc uros_visible {s} {
 # $elapsed    : seconds since this wait started
 # $max_gap    : the longest silence seen DURING the wait, which is the number
 #               that says what a budget would have had to be
-proc uros_finding {label missing hay silent_for elapsed max_gap quiet_budget} {
+proc uros_finding {label missing hay silent_for elapsed max_gap quiet_budget {host_asleep 0}} {
 	set out ""
 
 	# Garbled is checked first because it is the only one of the three that
@@ -183,6 +189,33 @@ proc uros_finding {label missing hay silent_for elapsed max_gap quiet_budget} {
 	set named ""
 	foreach needle $missing {
 		append named " <<[uros_visible $needle]>>"
+	}
+
+	# 🔴 THE HOST WAS NOT RUNNING, which is not a fact about the kernel at all.
+	#
+	# `expect' measures wall time, so a laptop that suspends looks EXACTLY like
+	# a machine that has stopped producing output: the silence counter jumps
+	# forward by the whole sleep in one step.  Measured against the journal, on
+	# a campaign that had three suspends fall inside it:
+	#
+	#     reported silence 98s    PM: suspend 15:21:34 -> 15:23:03   (89s)
+	#     reported silence 1136s  PM: suspend 15:30:53 -> 15:49:47   (1134s)
+	#
+	# Both were read as findings about Uros -- once as a budget that was too
+	# tight, once as a benchmark that had stalled -- and both were the observer
+	# being asleep.  🔑 Which is this issue's own defect aimed at the harness
+	# instead of the kernel: one label over two causes, and the label named the
+	# wrong one.
+	#
+	# Detected rather than inferred: each poll asks for one second and is timed.
+	# A one-second wait that took ninety means this process was not scheduled,
+	# and no budget computed across it means anything.
+	if {$host_asleep > 0} {
+		append out "\n\[smoke\] FAIL: $label — THE HOST WAS SUSPENDED: this run cannot be judged\n"
+		append out "\[smoke\] missing:$named\n"
+		append out "\[smoke\] detail:  ${host_asleep}s of the ${elapsed}s elapsed passed with this process not scheduled\n"
+		append out "\[smoke\] detail:  not a finding about the kernel — re-run it on a machine that stays awake\n"
+		return $out
 	}
 
 	if {$silent_for >= $quiet_budget} {
@@ -281,11 +314,34 @@ if {[info exists argv0] && [file tail $argv0] eq "smoke-findings.tcl"} {
 			[uros_finding "hello_dyn_world" {hello} $RUN7 20 31 3 20] \
 			"NOTHING ARRIVED"]
 
+		# 7. 🔴 The observer was asleep.  Both sets of numbers are the
+		#    real ones, taken from a campaign and checked against the
+		#    kernel journal's own suspend records:
+		#
+		#      silence 98s   vs  PM: suspend 15:21:34 -> 15:23:03   (89s)
+		#      silence 1136s vs  PM: suspend 15:30:53 -> 15:49:47  (1134s)
+		#
+		#    Before this existed, the first was read as a budget set too
+		#    tight and the second as a benchmark that had stalled.
+		incr failures [check "a suspend is not a stopped machine (89s)" \
+			[uros_finding "flipc_bench" {{flipc_bench: done}} "niente\n" 98 100 4 90 89] \
+			"THE HOST WAS SUSPENDED"]
+		incr failures [check "a suspend is not a stopped machine (1134s)" \
+			[uros_finding "ush banner" {{ush v0.1.0}} "niente\n" 1136 1147 4 40 1134] \
+			"THE HOST WAS SUSPENDED"]
+
+		# 8. ⚠️ And garbling still outranks it: bytes that arrived
+		#    interleaved are an observation about the OUTPUT, and remain
+		#    true whatever the host did with its own clock afterwards.
+		incr failures [check "garbling outranks a suspend" \
+			[uros_finding "ush prompt" {{ush$ }} $SPECIMEN 1136 1147 4 40 1134] \
+			"GARBLED"]
+
 		if {$failures} {
 			puts "smoke-findings --self-test: $failures FAILED"
 			exit 1
 		}
-		puts "smoke-findings --self-test: all 8 passed"
+		puts "smoke-findings --self-test: all 11 passed"
 		exit 0
 	}
 

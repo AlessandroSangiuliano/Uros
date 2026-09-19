@@ -146,7 +146,7 @@ proc uros_peek {} {
 # prompt would go unreported, because an earlier prompt matched cleanly and its
 # plain text is still in the file -- and the detector only calls interleaving a
 # finding when the plain text is absent.
-proc uros_fail {label missing mark silent elapsed max_gap quiet} {
+proc uros_fail {label missing mark silent elapsed max_gap quiet {host_asleep 0}} {
     global TRANSCRIPT
     set hay ""
     catch {
@@ -156,7 +156,7 @@ proc uros_fail {label missing mark silent elapsed max_gap quiet} {
         set hay [read $f]
         close $f
     }
-    send_user [uros_finding $label $missing $hay $silent $elapsed $max_gap $quiet]
+    send_user [uros_finding $label $missing $hay $silent $elapsed $max_gap $quiet $host_asleep]
     send_user "\[smoke\] transcript: $TRANSCRIPT (from byte $mark)\n"
     exit 1
 }
@@ -198,11 +198,28 @@ proc await {label pairs required aborts wall quiet} {
     }
     lappend spec timeout {}
 
+    # 🔴 How much of the wait passed with this process NOT SCHEDULED.
+    #
+    # Each poll asks for $UROS_SLICE seconds and is timed.  A one-second wait
+    # that took ninety means the machine was asleep, and every budget computed
+    # across it is meaningless -- `expect' measures wall time, so a suspend is
+    # byte-for-byte indistinguishable from a kernel that stopped talking.
+    #
+    # ⚠️ The threshold is generous (four times the slice) because an ordinary
+    # loaded host overruns a one-second poll by fractions, and calling that a
+    # suspend would put a fourth wrong label on an honest failure.
+    set host_asleep 0
+
     while {1} {
         set ::_await_hit ""
         set ::timeout $UROS_SLICE
+        set slice_t0 [clock seconds]
         expect {*}$spec
         set now   [clock seconds]
+        set slice_wall [expr {$now - $slice_t0}]
+        if {$slice_wall > $UROS_SLICE * 4} {
+            set host_asleep [expr {$host_asleep + $slice_wall}]
+        }
         # 🔴 A match counts as progress on its own.  A matched pattern is
         # CONSUMED out of the buffer, so two slices either side of a match can
         # peek identical content -- and reading that as silence would call a
@@ -250,7 +267,7 @@ proc await {label pairs required aborts wall quiet} {
                 if {[lsearch -exact $seen $tag] >= 0} { continue }
                 lappend missing $literal
             }
-            uros_fail $label $missing $mark $silent $elapsed $max_gap $quiet
+            uros_fail $label $missing $mark $silent $elapsed $max_gap $quiet $host_asleep
         }
     }
 }
