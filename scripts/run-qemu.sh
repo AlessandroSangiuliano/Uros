@@ -30,6 +30,12 @@
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+
+# What the run was taken under (#516).  Shared with run-x86_64.sh, because each
+# of the two harnesses used to record the half the other omitted: this one
+# sampled the clock and never named its accelerator, that one named its
+# accelerator and never sampled the clock.
+. "$(dirname "$0")/run-conditions.sh"
 # Overridable so a measurement can run against a tree nobody is rebuilding.
 #
 # ⚠️ Not a convenience.  A campaign was once launched against uros/build while
@@ -57,6 +63,9 @@ USE_AHCI2=false
 USE_VIRTIO=false
 USE_BUNDLE=true     # Issue #186: stage-1 multiboot bundle (mod[1]) on by default
 USE_SHA_NI=false    # Issue #180: --sha-ni → TCG + Icelake-Server,+sha-ni
+# #516: this target has only ever been run under KVM, and until now there was
+# no way to ask for the other accelerator without also changing the CPU model.
+USE_TCG=false
 FRESH_DISK=false    # --fresh-disk: regen disk.img before launch (avoids stale
                     # stage-2 binaries after rebuild + ext2 writeback corruption
                     # from previous ungraceful QEMU exit)
@@ -64,6 +73,9 @@ BENCH_ARGS=""
 EXTRA_ARGS=""
 MINIMAL_ARG=""
 NO_REBOOT="-no-reboot"
+# Kept before the loop below eats them (#516): a condition nobody can reproduce
+# the command for is half a condition.
+ORIG_ARGS="$*"
 SMP_COUNT=""
 DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
                     # (otherwise the existing disk is reused, even with --bench;
@@ -84,6 +96,7 @@ while [ $# -gt 0 ]; do
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
+        --tcg) USE_TCG=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
         --diskregen) DISK_REGEN=true; shift ;;
         --reuse-bundle) REUSE_BUNDLE=true; shift ;;
@@ -167,12 +180,31 @@ fi
 # kernel and libcap exercise the SHA-NI compress fast path even when
 # the host CPU (or KVM-restricted CPUID) doesn't expose it.  TCG is
 # slower than KVM but produces correct architectural behaviour.
+# ── Which accelerator, and said on EVERY path (#516) ──────────────────
+#
+# 🔴 This used to announce itself only on the --sha-ni path.  The default is
+# KVM, it said nothing, and so every i386 result this project holds was taken
+# under KVM without any of them recording it -- the exact mirror of #516's
+# complaint about x86-64, where every result was TCG.
+#
+# 🔴 AND THE CPU MODEL CANNOT BE HELD FIXED ACROSS THE TWO.  `-cpu host' exists
+# only under KVM: it means "pass the host's CPUID through", which an emulator
+# has no way to honour.  So --tcg takes `max', the most any accelerator will
+# offer, and the model goes into the conditions block rather than being assumed
+# away.  A disagreement between the two runs might be the accelerator or might
+# be the model, and pretending otherwise would be inventing a control this
+# machine cannot give.
 if [ "$USE_SHA_NI" = true ]; then
-    QEMU_ARGS="-m 512M -accel tcg -cpu Icelake-Server,+sha-ni -kernel $KERNEL -initrd $INITRD $NO_REBOOT"
-    echo "Acceleration: TCG (--sha-ni: Icelake-Server,+sha-ni)"
+    ACCEL="TCG (--sha-ni, which also changes the CPU model)"
+    ACCEL_ARGS="-accel tcg -cpu Icelake-Server,+sha-ni"
+elif [ "$USE_TCG" = true ]; then
+    ACCEL="TCG (--tcg)"
+    ACCEL_ARGS="-accel tcg -cpu max"
 else
-    QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD $NO_REBOOT"
+    ACCEL="KVM (the default here; --tcg for the other one)"
+    ACCEL_ARGS="-enable-kvm -cpu host"
 fi
+QEMU_ARGS="-m 512M $ACCEL_ARGS -kernel $KERNEL -initrd $INITRD $NO_REBOOT"
 # #300: --smp N exposes N CPUs to the guest.  Requires the kernel to be
 # built with -DUROS_NCPUS=N (or >=N).
 if [ -n "$SMP_COUNT" ]; then
@@ -256,38 +288,24 @@ if [ "$USE_VIRTIO" = true ]; then
     QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=virtiodisk0"
 fi
 
-# ------------------------------------------------------- host state (#460)
+# ------------------------------------------------------- run conditions
 #
-# Say what the host was doing, on the same line as the run.
+# Say what the host was doing and what the machine is, on the same output as
+# the run.  The reasoning lives in scripts/run-conditions.sh, which both
+# harnesses now share; what used to be here was the host half alone (#460).
 #
-# A slow run and a wedged run reach the harness as the same red X, and #460
-# was first explained away as "the governor is on powersave" -- an arithmetic
-# built on a duration nobody had measured.  The real figures: 11 s green on
-# AC, and a wedge burning the full 420 s timeout.  2.85x the clock cannot
-# turn 11 into 420, so the explanation was false, but nothing in the output
-# made that checkable after the fact.
-#
-# ⚠️ The governor NAME is not the measurement -- the FREQUENCY is.  On this
-# laptop `performance' on battery still reported 3.99 GHz while `powersave'
-# gave 1.40, so reading the name alone would have compared runs taken at
-# clocks that differ by 2.85x without noticing.
-host_state() {
-	gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
-	      2>/dev/null || echo "?")
-	mhz=$(awk '/cpu MHz/ {printf "%.0f", $4; exit}' /proc/cpuinfo \
-	      2>/dev/null || echo "?")
-	ac="?"
-	for p in /sys/class/power_supply/A*/online; do
-		[ -r "$p" ] && ac=$(cat "$p") && break
-	done
-	case "$ac" in
-	1) ac="AC" ;;
-	0) ac="battery" ;;
-	*) ac="AC?" ;;
-	esac
-	echo "host: governor=$gov cpu=${mhz}MHz power=$ac started=$(date +%H:%M:%S)"
-}
-host_state
+# ⚠️ BEFORE the run and not after, because this script ends in `exec qemu'
+# deliberately -- without it this shell stays qemu's parent for the whole run
+# -- so nothing of ours runs once the machine does.  The block says so rather
+# than leaving a missing line: an i386 run cannot notice its own clock moving,
+# and a reader comparing it with an x86-64 run needs to know which of the two
+# could have.
+uros_conditions_open
+uros_conditions_block "i386" "$ACCEL" \
+	"cpu/accel:    $ACCEL_ARGS" \
+	"smp:          ${SMP_COUNT:-1}" \
+	"disk:         $([ "$USE_DISK" = true ] && echo yes || echo no)" \
+	"command:      $0 $ORIG_ARGS"
 
 # ⚠️ `exec' stays.  Without it this shell remains qemu's parent, and every
 # harness here starts the script with Popen() and later calls terminate() on

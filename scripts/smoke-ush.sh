@@ -15,6 +15,7 @@
 #   ./scripts/smoke-ush.sh
 #   ./scripts/smoke-ush.sh --log /tmp/smoke.log
 #   ./scripts/smoke-ush.sh --smp 8
+#   ./scripts/smoke-ush.sh --tcg           # the other accelerator (#516)
 #
 # Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
 # License: MIT
@@ -33,6 +34,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --log) LOGFILE="$2"; shift 2 ;;
         --smp) EXP_ARGS="$EXP_ARGS --smp $2"; shift 2 ;;
+        # #516: the other accelerator.  This is the only i386 run that ends on
+        # its own, so it is the only one two accelerators can be compared over.
+        --tcg) EXP_ARGS="$EXP_ARGS --tcg"; shift ;;
         -h|--help) sed -n '3,20p' "$0"; exit 0 ;;
         *) echo "smoke-ush: unknown option: $1" >&2; exit 2 ;;
     esac

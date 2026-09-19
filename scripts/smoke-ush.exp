@@ -21,6 +21,26 @@
 
 set BOOT_TIMEOUT  180
 set CMD_TIMEOUT   30
+#
+# 🔑 And 180 is enough for BOTH accelerators, which is not what was assumed
+# (#516).  The first version of this raised the boot budget to 900 under --tcg,
+# on the belief that TCG costs 10-30x -- and measured, this boot takes
+#
+#     TCG 19s,  KVM 22s     (i386, 1.4 GHz, on battery)
+#
+# so the inflation was solving a problem that does not exist, and the numbers
+# are within each other's noise.
+#
+# 🔴 WHERE THE BELIEF CAME FROM IS THE LESSON.  An earlier raw `--minimal' run
+# under TCG burned a 900s budget, and that was read as "TCG is slow".  It was
+# not slow: it never ENDS, because ush sits at its prompt and nothing types
+# `shutdown'.  Two different outcomes of "did not finish", and reading one as
+# the other is how a measurement gets replaced by a guess.
+#
+# ⚠️ TCG's cost is in EXECUTING instructions, and this run does not do much of
+# that -- it is device setup, disk I/O and waiting.  x86-64's self-test suite
+# is the opposite and pays four to seven minutes under it.  So "TCG is
+# expensive" is a statement about a workload, never about an accelerator.
 set REPO_ROOT     [file dirname [file dirname [file normalize $argv0]]]
 set RUN_QEMU      "$REPO_ROOT/scripts/run-qemu.sh"
 
@@ -29,7 +49,19 @@ set RUN_QEMU      "$REPO_ROOT/scripts/run-qemu.sh"
 # CPU count -- while the v0.2.0 acceptance checklist asks for it at -smp 8.
 # Nothing was wrong with run-qemu.sh (it has --smp); the harness simply could
 # not ask for it.  Default (no --smp) keeps the previous behaviour exactly.
+#
+# #516: optional "--tcg", forwarded the same way and for the same reason one
+# layer up.  This is the only i386 run that ENDS on its own -- it types
+# `shutdown' -- so it is the only one that can honestly be compared between two
+# accelerators.  Every i386 result this project holds was taken under KVM,
+# because that is run-qemu.sh's default and nothing here could ask for the
+# other one.
+#
+# ⚠️ The CPU model changes with it, and cannot not: `-cpu host' exists only
+# under KVM.  run-qemu.sh records which model it used, so the difference is
+# visible in the log rather than assumed away.
 set SMP_ARGS {}
+set ACCEL_ARGS {}
 for {set i 0} {$i < [llength $argv]} {incr i} {
     set a [lindex $argv $i]
     if {$a eq "--smp"} {
@@ -39,6 +71,8 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
             exit 2
         }
         set SMP_ARGS [list --smp [lindex $argv $i]]
+    } elseif {$a eq "--tcg"} {
+        set ACCEL_ARGS [list --tcg]
     } else {
         send_user "\[smoke\] FAIL: unknown option: $a\n"
         exit 2
@@ -49,8 +83,12 @@ for {set i 0} {$i < [llength $argv]} {incr i} {
 # a window, -serial mon:stdio multiplexes COM1 onto expect's pty.
 log_user 1
 set timeout $BOOT_TIMEOUT
+set T0 [clock seconds]
 
-spawn $RUN_QEMU --minimal --allow-reboot {*}$SMP_ARGS -display none -serial mon:stdio
+spawn $RUN_QEMU --minimal --allow-reboot {*}$SMP_ARGS {*}$ACCEL_ARGS -display none -serial mon:stdio
+if {[llength $ACCEL_ARGS]} {
+    send_user "\n\[smoke\] running under TCG (#516)\n"
+}
 if {[llength $SMP_ARGS]} {
     send_user "\n\[smoke\] running at [lindex $SMP_ARGS 1] CPUs\n"
 }
@@ -73,6 +111,11 @@ expect {
     "ush v0.1.0"      { send_user "\[smoke\] ush banner OK\n" }
     timeout           { send_user "\n\[smoke\] FAIL: no ush banner within ${BOOT_TIMEOUT}s\n"; exit 1 }
 }
+# 🔑 How long the boot actually took, said out loud (#516).  This is the line
+# that settled the budget question above, and it stays so that the next person
+# to wonder reads a number instead of reasoning from one accelerator's
+# reputation.
+send_user "\[smoke\] reached the shell in [expr {[clock seconds] - $T0}]s\n"
 expect {
     "ush\$ "          { send_user "\[smoke\] ush prompt OK\n" }
     timeout           { send_user "\n\[smoke\] FAIL: no ush prompt\n"; exit 1 }
@@ -240,6 +283,14 @@ catch wait result
 set exit_status [lindex $result 3]
 if {$exit_status == 0} {
     send_user "\n\[smoke\] PASS — all steps green, QEMU exited cleanly\n"
+# 🔑 The same reminder run-x86_64.sh's verdict carries (#516), and for the same
+# reason: a green run under ONE accelerator is the dangerous result, because
+# that is the shape every divergence found so far has had.
+if {[llength $ACCEL_ARGS]} {
+    send_user "\[smoke\] ⓘ this asked ONE accelerator (TCG). scripts/both-accelerators.sh i386 asks both.\n"
+} else {
+    send_user "\[smoke\] ⓘ this asked ONE accelerator (KVM). scripts/both-accelerators.sh i386 asks both.\n"
+}
     exit 0
 } else {
     send_user "\n\[smoke\] FAIL — QEMU exit status $exit_status\n"
