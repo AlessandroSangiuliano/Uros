@@ -342,6 +342,39 @@ add_custom_target(check-host-headers
   VERBATIM
 )
 
+# Can the acceptance smoke still tell its three failures apart? (#544)
+#
+# 🔑 Wired in rather than left to be typed, and the reason is #549: three
+# checkers were written in scripts/ to make defects impossible and NOTHING ran
+# any of them -- no CMake rule, no script, no hook.  A guard nobody runs is a
+# guard that is not there, and it is worse than none, because the next reader
+# sees the file and assumes the class is covered.
+#
+# This one has a definite right answer and exits non-zero on a violation, so it
+# belongs with the tests.  It costs milliseconds: it drives the classifier over
+# strings, boots nothing and touches no hardware.
+#
+# ⚠️ Guarded on tclsh being present instead of hard-failing the configure.  The
+# thing it protects (scripts/smoke-ush.exp) already needs expect, and neither is
+# a build dependency of the kernel -- a machine that can compile Uros but not
+# run its i386 smoke is a real configuration, and taking the build away from it
+# would be trading a guard for a wall.
+find_program(UROS_TCLSH NAMES tclsh)
+if(UROS_TCLSH)
+  add_test(NAME smoke_findings
+           COMMAND ${UROS_TCLSH}
+                   ${CMAKE_SOURCE_DIR}/../scripts/smoke-findings.tcl --self-test)
+  add_custom_target(check-smoke-findings
+    COMMAND ${UROS_TCLSH}
+            ${CMAKE_SOURCE_DIR}/../scripts/smoke-findings.tcl --self-test
+    COMMENT "smoke-findings --self-test (#544)"
+    USES_TERMINAL
+    VERBATIM
+  )
+else()
+  message(STATUS "tclsh not found: the #544 smoke-findings self-test will not run")
+endif()
+
 # Target clean-all: rimuove completamente la directory di build
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}
