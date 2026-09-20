@@ -96,9 +96,26 @@ uros_host_state() {
 	# ⚠️ Driver-dependent on purpose: under `intel_pstate' the very same name
 	# means a DYNAMIC governor that does ramp.  Encoded rather than assumed,
 	# because being quietly wrong here is what this line exists to stop.
+	#
+	# ⚠️ AND BOOST GOES OVER THE POLICY CEILING.  Measured here, with
+	# scaling_max_freq at 3000000 and boost enabled, the cores ran at
+	# 3918-3992 MHz -- above the ceiling that had just been set.  So the
+	# honest number with boost on is cpuinfo_max_freq (4000 MHz on this
+	# machine), and reporting the policy ceiling would understate the
+	# machine by a gigahertz.  Said from the measurement rather than from
+	# what the driver is supposed to do.
+	_boost=$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo "")
+	_hwmaxk=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq \
+	          2>/dev/null || echo "")
+	_top="$_cap"
+	if [ "$_boost" = 1 ] && [ -n "$_hwmaxk" ] && [ -n "$_capk" ] \
+	   && [ "$_hwmaxk" -gt "$_capk" ]; then
+		_top="$(( _hwmaxk / 1000 ))MHz (boost, over the ${_cap} ceiling)"
+	fi
+
 	case "$_drv:$_gov" in
 	intel_pstate:*|*:performance|*:ondemand|*:conservative|*:schedutil)
-		_eff="$_cap" ;;
+		_eff="$_top" ;;
 	*:powersave)
 		if [ -n "$_mink" ]; then
 			_eff="$(( _mink / 1000 ))MHz (governor pins it to the floor)"
