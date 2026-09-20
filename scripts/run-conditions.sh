@@ -64,13 +64,49 @@ uros_host_state() {
 	       2>/dev/null || echo "?")
 	_mhz=$(awk '/cpu MHz/ {printf "%.0f", $4; exit}' /proc/cpuinfo \
 	       2>/dev/null || echo "?")
-	_cap=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
-	       2>/dev/null || echo "")
-	if [ -n "$_cap" ]; then
-		_cap="$(( _cap / 1000 ))MHz"
+	_capk=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
+	        2>/dev/null || echo "")
+	_mink=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq \
+	        2>/dev/null || echo "")
+	_drv=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver \
+	       2>/dev/null || echo "?")
+	if [ -n "$_capk" ]; then
+		_cap="$(( _capk / 1000 ))MHz"
 	else
 		_cap="?"
 	fi
+
+	# 🔴 THE CEILING IS NOT THE CLOCK, and the governor decides which.
+	#
+	# With `acpi-cpufreq' the `powersave' governor is STATIC: it pins the core
+	# to scaling_min_freq and the ceiling above it means nothing.  Raising
+	# scaling_max_freq from 1400 to 3000 while leaving that governor in place
+	# changes the recorded ceiling and not one megahertz of the machine.
+	#
+	# That cost a campaign: eleven runs were taken as the "high clock" arm with
+	#
+	#     governor=powersave cpu=1397MHz cap=3000MHz
+	#
+	# and every fact needed to notice was on that line.  The block reported and
+	# did not conclude, so the ceiling got read and the governor did not.  A
+	# passing run took 454-463s in both arms -- identical, which is what
+	# settled it, because the same work at twice the clock is not the same
+	# number of seconds.
+	#
+	# ⚠️ Driver-dependent on purpose: under `intel_pstate' the very same name
+	# means a DYNAMIC governor that does ramp.  Encoded rather than assumed,
+	# because being quietly wrong here is what this line exists to stop.
+	case "$_drv:$_gov" in
+	intel_pstate:*|*:performance|*:ondemand|*:conservative|*:schedutil)
+		_eff="$_cap" ;;
+	*:powersave)
+		if [ -n "$_mink" ]; then
+			_eff="$(( _mink / 1000 ))MHz (governor pins it to the floor)"
+		else
+			_eff="?"
+		fi ;;
+	*)	_eff="$_cap (governor $_gov: unknown policy)" ;;
+	esac
 	_ac="?"
 	for _p in /sys/class/power_supply/A*/online; do
 		[ -r "$_p" ] && _ac=$(cat "$_p") && break
@@ -80,7 +116,7 @@ uros_host_state() {
 	0)	_ac="battery" ;;
 	*)	_ac="AC?" ;;
 	esac
-	echo "governor=$_gov cpu=${_mhz}MHz cap=$_cap power=$_ac at=$(date +%H:%M:%S)"
+	echo "governor=$_gov cpu=${_mhz}MHz cap=$_cap effective=$_eff power=$_ac at=$(date +%H:%M:%S)"
 }
 
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host
