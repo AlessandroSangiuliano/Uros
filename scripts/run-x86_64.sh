@@ -794,8 +794,15 @@ IDLE_CHATTER='quiet_census:'
 # keeps printing meaningful lines forever is progress by this measure and has
 # to end somehow.  Ten times the asked-for seconds, so it is never the thing
 # that decides an ordinary run.
-HARD_DEADLINE=$(( $(date +%s) + SECS * 10 ))
+#
+# ⚠️ Named, because the verdict below quotes it.  Written as a literal in both
+# places, the two drift and the message states a multiplier the code does not
+# use -- which is exactly what the ablation that proved the livelock arm
+# printed: "the hard cap (5s x 10)" while the multiplier under test was 1.
+HARD_MULTIPLIER=10
+HARD_DEADLINE=$(( $(date +%s) + SECS * HARD_MULTIPLIER ))
 DEADLINE=$(( $(date +%s) + SECS ))
+RUN_STARTED=$(date +%s)
 
 # How many meaningful lines the log holds.
 #
@@ -817,6 +824,17 @@ progress_count() {
 }
 LAST_PROGRESS=$(progress_count)
 CUT_SHORT=0
+# 🔴 WHICH of the two budgets ran out, kept rather than thrown away (#544).
+#
+# The watchdog above already answers two different questions -- "has it gone
+# quiet" (DEADLINE, pushed forward by progress) and "is it printing for ever"
+# (HARD_DEADLINE, wall time) -- and the verdict printed ONE sentence for both,
+# quoting ${SECS}s even in the hard-cap case where ten times that had passed.
+# The measurement existed and was discarded at the moment of printing, which is
+# the same defect the i386 smoke had one layer up: a reader could not tell
+# "the machine stopped" from "the machine was still working".
+CUT_REASON=
+
 # ── Every test that STARTED must have reported (#425) ──────────────────────
 #
 # 🔑 A single end marker cannot be right here, and two days were spent picking
@@ -866,9 +884,17 @@ while kill -0 "$QPID" 2>/dev/null; do
 		LAST_PROGRESS=$NOW_PROGRESS
 		DEADLINE=$(( $(date +%s) + SECS ))
 	fi
-	if [ "$(date +%s)" -ge "$DEADLINE" ] \
-	   || [ "$(date +%s)" -ge "$HARD_DEADLINE" ]; then
+	# ⚠️ The quiet budget is tested FIRST, and that order is the answer when
+	# both have run out: a run that went quiet and then sat there until the
+	# wall cap is a run that went quiet.
+	if [ "$(date +%s)" -ge "$DEADLINE" ]; then
 		CUT_SHORT=1
+		CUT_REASON=quiet
+		break
+	fi
+	if [ "$(date +%s)" -ge "$HARD_DEADLINE" ]; then
+		CUT_SHORT=1
+		CUT_REASON=livelock
 		break
 	fi
 	sleep 0.2
@@ -903,14 +929,28 @@ grep -a "UrMach\|fault\|error\|Error\|panic\|^  " "$LOG" || true
 # OBSERVATION and not about the kernel: nothing was judged, because nothing was
 # watched to the end.
 if [ "$CUT_SHORT" = 1 ]; then
+	RUN_SECONDS=$(( $(date +%s) - RUN_STARTED ))
 	echo
 	echo "=== verdict ==="
-	echo "  FAILED: ${SECS}s elapsed and the kernel never reached an end this"
-	echo "          script recognises.  That is a run nobody watched to the"
-	echo "          end, not a run that passed -- if the machine is simply"
-	echo "          slow (check the governor: this one drops to 1.4 GHz on"
-	echo "          battery) give it more seconds; if it is wedged, that is"
-	echo "          the bug."
+	if [ "$CUT_REASON" = livelock ]; then
+		# The log kept gaining meaningful lines for ten times the asked-for
+		# budget.  🔑 This is NOT "give it more seconds": it was given ten
+		# times more and used them all.
+		echo "  FAILED: STILL PRODUCING OUTPUT after ${RUN_SECONDS}s, which is the"
+		echo "          hard cap (${SECS}s x ${HARD_MULTIPLIER}).  The kernel never reached an end"
+		echo "          this script recognises, and it was not stuck -- it was"
+		echo "          printing meaningful lines the whole time.  Giving it more"
+		echo "          seconds is the wrong move: look for something that repeats"
+		echo "          in the log."
+	else
+		echo "  FAILED: NOTHING ARRIVED for ${SECS}s, after ${RUN_SECONDS}s of running."
+		echo "          The watchdog measures progress, not wall time, so this says"
+		echo "          the log stopped gaining meaningful lines -- a slow machine"
+		echo "          produces output slowly, this produced none.  If the machine"
+		echo "          is simply slow (check the governor: this one drops to"
+		echo "          1.4 GHz on battery) give it more seconds; if it is wedged,"
+		echo "          that is the bug."
+	fi
 	echo "  log: $LOG"
 	exit 1
 fi

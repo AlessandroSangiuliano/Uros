@@ -21,6 +21,21 @@
 
 set BOOT_TIMEOUT  180
 set CMD_TIMEOUT   30
+# Seconds of COMPLETE SILENCE that mean the machine has stopped rather than is
+# being slow (#544).  These are the second half of every budget below; the wall
+# figures above are unchanged, because tuning them was never the fix.
+#
+# 🔴 MEASURED, not chosen.  A green run prints the longest silence it saw, and
+# these sit above it with room -- see the commit that set them.  A quiet budget
+# picked from a feeling is the same mistake as a wall budget picked from one.
+#
+# ⚠️ BENCH_QUIET is separate and larger on purpose: flipc_bench computes over a
+# 1 MiB chunk without saying anything while it does, and a benchmark that is
+# quiet because it is busy is exactly the case a silence budget must not call
+# wedged.
+set BOOT_QUIET    [expr {[info exists env(UROS_BOOT_QUIET)]  ? $env(UROS_BOOT_QUIET)  : 40}]
+set CMD_QUIET     [expr {[info exists env(UROS_CMD_QUIET)]   ? $env(UROS_CMD_QUIET)   : 20}]
+set BENCH_QUIET   [expr {[info exists env(UROS_BENCH_QUIET)] ? $env(UROS_BENCH_QUIET) : 90}]
 #
 # 🔑 And 180 is enough for BOTH accelerators, which is not what was assumed
 # (#516).  The first version of this raised the boot budget to 900 under --tcg,
@@ -43,6 +58,219 @@ set CMD_TIMEOUT   30
 # expensive" is a statement about a workload, never about an accelerator.
 set REPO_ROOT     [file dirname [file dirname [file normalize $argv0]]]
 set RUN_QEMU      "$REPO_ROOT/scripts/run-qemu.sh"
+
+# ── Why a failed wait now has to NAME itself (#544) ───────────────────
+#
+# Eleven runs of this script on one tree, clock pinned: 8 passed, 3 failed, and
+# every one of the three printed the same shape of line -- `FAIL: no <thing>'.
+# That single label covered two very different events, and the cost was not
+# cosmetic: the failures were attributed to the CPU governor, and the
+# attribution had to be withdrawn when the same failure turned up at full
+# clock.  Nothing in the output could have contradicted it, because nothing in
+# the output said which had happened.
+#
+# 🔑 Going back to the three captured transcripts with a detector instead of a
+# label, the split was not the one the issue recorded.  Two of the three had
+# the wanted text PRESENT and cut into by another writer:
+#
+#     gpu_[sbegrver: text_] ppiuts(147): ush: setsid -> sidd=3= pi4
+#
+# which is `gpu_server: text_puts(147): ush: setsid -> sid=3' and `[bg] pid=4'
+# interleaved.  The line this step waits for had been written.  Read as "the
+# machine was too slow", it is the opposite of what happened.
+#
+# So each wait below now ends in one of three sentences instead of one:
+#
+#     NOTHING ARRIVED     the machine stopped producing output
+#     STILL PRODUCING     output was flowing when the cap ran out
+#     GARBLED             the bytes are there with another writer's inside them
+#
+# ⚠️ This does not make the gate greener.  The console interleaving is real and
+# is deliberately NOT being fixed -- i386 is a reference instrument, not a
+# target, and serialising its console is engineering on something being
+# retired.  What this buys is that a red run says which red it is, which is the
+# whole job of a reference signal.
+source "$REPO_ROOT/scripts/smoke-findings.tcl"
+
+# How often the wait below looks up from the pattern match to ask whether
+# anything is still arriving.  One second: short enough that the answer is
+# about this wait, long enough not to be a spin.
+set UROS_SLICE 1
+
+# The transcript the classifier reads.
+#
+# 🔴 It has to be a FILE, not expect's own buffer: expect keeps `match_max'
+# bytes (2000 by default) and a match CONSUMES everything up to it, so by the
+# time a wait fails the garbled line may be long gone from the buffer.  Raising
+# match_max instead would change which stale text the existing patterns can
+# still match, which is a behaviour change to the gate itself and not something
+# to do while fixing how it reports.
+#
+# ⚠️ Truncated per run on purpose: appended across runs, a previous boot's text
+# is in the haystack and the detector would answer about the wrong machine.
+set UROS_TESTS [expr {[info exists env(UROS_TESTS_DIR)] ? $env(UROS_TESTS_DIR) : "$env(HOME)/uros-tests"}]
+catch {file mkdir $UROS_TESTS}
+set TRANSCRIPT "$UROS_TESTS/smoke-ush-transcript.log"
+catch {file delete $TRANSCRIPT}
+log_file -a $TRANSCRIPT
+
+# The longest silence seen across the whole run, reported on a PASS.
+#
+# 🔑 This is the number the quiet budgets below are set from, and it is printed
+# on green runs precisely so it is set from a measurement rather than from
+# somebody's idea of how long is too long.
+#
+# 🔴 AND WHICH WAIT OWNED IT, because the budgets are three and a bare number
+# belongs to none of them.  The first low-clock campaign reported "longest
+# silence 15s" against budgets of 40 (boot), 20 (command) and 90 (bench), and
+# there was no way to tell whether that was comfortable or two seconds from
+# firing.  A measurement that does not say which threshold it bears on does not
+# measure that threshold.
+set UROS_MAX_GAP 0
+set UROS_MAX_GAP_WHERE "nothing yet"
+set UROS_MAX_GAP_BUDGET 0
+
+# Read the buffer WITHOUT eating it: -notransfer leaves the data in place, so
+# this can ask "has anything new arrived" without stealing bytes that a pattern
+# is about to need.  -timeout 0 makes it a look, not a wait.
+proc uros_peek {} {
+    set s ""
+    expect -timeout 0 -notransfer -re {(.|\n)+} { set s $expect_out(buffer) } timeout {}
+    return $s
+}
+
+# Print the finding and stop.
+#
+# $mark is where the transcript stood when this wait began: the haystack is
+# what arrived DURING the wait and nothing earlier.  🔴 Without that, a garbled
+# prompt would go unreported, because an earlier prompt matched cleanly and its
+# plain text is still in the file -- and the detector only calls interleaving a
+# finding when the plain text is absent.
+proc uros_fail {label missing mark silent elapsed max_gap quiet {host_asleep 0}} {
+    global TRANSCRIPT
+    set hay ""
+    catch {
+        set f [open $TRANSCRIPT r]
+        fconfigure $f -translation binary
+        seek $f $mark
+        set hay [read $f]
+        close $f
+    }
+    send_user [uros_finding $label $missing $hay $silent $elapsed $max_gap $quiet $host_asleep]
+    send_user "\[smoke\] transcript: $TRANSCRIPT (from byte $mark)\n"
+    exit 1
+}
+
+# ── The wait ──────────────────────────────────────────────────────────
+#
+# $pairs    {regex tag literal} — `literal' is the plain text the classifier
+#           looks for when the regex never matched; {} to skip that check.
+# $required tags that must all be seen before this returns
+# $aborts   tags that end the wait at once, leaving the caller to judge
+# $wall     total seconds — the old timeout, unchanged
+# $quiet    seconds of COMPLETE SILENCE that mean the machine has stopped
+#
+# 🔑 Two budgets rather than one, because "slow" and "stopped" are different
+# questions and a single number answers neither.  A slower machine produces
+# output slowly; a wedged one produces none.  ⚠️ The wall cap stays: a livelock
+# that prints for ever is progress by the silence measure and has to end.
+proc await {label pairs required aborts wall quiet} {
+    global UROS_SLICE TRANSCRIPT UROS_MAX_GAP UROS_MAX_GAP_WHERE UROS_MAX_GAP_BUDGET
+    set t0   [clock seconds]
+    set mark 0
+    catch {set mark [file size $TRANSCRIPT]}
+    set last_progress $t0
+    set max_gap 0
+    set seen {}
+    set prev [uros_peek]
+
+    # 🔴 `timeout' is a GLOBAL in expect, and this proc drives it a second at a
+    # time.  Left that way on return, every plain `expect' after it -- the bare
+    # prompt waits between steps -- would give up after one second instead of
+    # its own budget, and the next command would be typed at a shell that is
+    # not ready.  Saved and put back.
+    set saved_timeout [expr {[info exists ::timeout] ? $::timeout : 10}]
+
+    set spec {}
+    foreach p $pairs {
+        lassign $p pat tag
+        lappend spec -re $pat "set ::_await_hit [list $tag]"
+    }
+    lappend spec timeout {}
+
+    # 🔴 How much of the wait passed with this process NOT SCHEDULED.
+    #
+    # Each poll asks for $UROS_SLICE seconds and is timed.  A one-second wait
+    # that took ninety means the machine was asleep, and every budget computed
+    # across it is meaningless -- `expect' measures wall time, so a suspend is
+    # byte-for-byte indistinguishable from a kernel that stopped talking.
+    #
+    # ⚠️ The threshold is generous (four times the slice) because an ordinary
+    # loaded host overruns a one-second poll by fractions, and calling that a
+    # suspend would put a fourth wrong label on an honest failure.
+    set host_asleep 0
+
+    while {1} {
+        set ::_await_hit ""
+        set ::timeout $UROS_SLICE
+        set slice_t0 [clock seconds]
+        expect {*}$spec
+        set now   [clock seconds]
+        set slice_wall [expr {$now - $slice_t0}]
+        if {$slice_wall > $UROS_SLICE * 4} {
+            set host_asleep [expr {$host_asleep + $slice_wall}]
+        }
+        # 🔴 A match counts as progress on its own.  A matched pattern is
+        # CONSUMED out of the buffer, so two slices either side of a match can
+        # peek identical content -- and reading that as silence would call a
+        # working machine wedged.
+        set moved 0
+        if {$::_await_hit ne ""} {
+            set moved 1
+            if {[lsearch -exact $seen $::_await_hit] < 0} {
+                lappend seen $::_await_hit
+            }
+            if {[lsearch -exact $aborts $::_await_hit] >= 0} {
+                set ::timeout $saved_timeout
+                return $seen
+            }
+            set done 1
+            foreach r $required {
+                if {[lsearch -exact $seen $r] < 0} { set done 0 }
+            }
+            if {$done} {
+                set ::timeout $saved_timeout
+                return $seen
+            }
+        }
+        set pk [uros_peek]
+        if {$pk ne $prev} { set moved 1; set prev $pk }
+        if {$moved} {
+            set gap [expr {$now - $last_progress}]
+            if {$gap > $max_gap} { set max_gap $gap }
+            if {$gap > $UROS_MAX_GAP} {
+                set UROS_MAX_GAP $gap
+                set UROS_MAX_GAP_WHERE $label
+                set UROS_MAX_GAP_BUDGET $quiet
+            }
+            set last_progress $now
+        }
+
+        set silent  [expr {$now - $last_progress}]
+        set elapsed [expr {$now - $t0}]
+        if {$silent >= $quiet || $elapsed >= $wall} {
+            set missing {}
+            foreach p $pairs {
+                lassign $p pat tag literal
+                if {$literal eq ""} { continue }
+                if {[lsearch -exact $required $tag] < 0} { continue }
+                if {[lsearch -exact $seen $tag] >= 0} { continue }
+                lappend missing $literal
+            }
+            uros_fail $label $missing $mark $silent $elapsed $max_gap $quiet $host_asleep
+        }
+    }
+}
 
 # #376: optional "--smp N", forwarded to run-qemu.sh.  The spawn below used to
 # hardcode its whole argument list, so the smoke could only run at the default
@@ -97,47 +325,60 @@ if {[llength $SMP_ARGS]} {
 # URMACH_VERSION_STRING from <mach/urmach_version.h> at machine_startup.
 # We don't fail on miss (early-boot output ordering can race the screen
 # clear); just record if we caught it.
-set _saw_urmach 0
-expect {
-    -re "UrMach \[0-9\]+\\.\[0-9\]+\\.\[0-9\]+"  { set _saw_urmach 1 }
-    "ush v0.1.0"                                  { ;# fell through — banner missed }
-    timeout                                       { send_user "\n\[smoke\] FAIL: no ush banner within ${BOOT_TIMEOUT}s\n"; exit 1 }
+#
+# Step 1 is the same wait: ush's banner is the anchor, because ush writes it
+# only after ctty acquisition succeeds.  The two used to be two expects, the
+# first of which fell through on the ush banner -- one wait that collects both
+# tags says the same thing and has one place to report from.
+set _tags [await "ush banner" {
+    {{UrMach [0-9]+\.[0-9]+\.[0-9]+}  urmach  {}}
+    {{ush v0\.1\.0}                   ush     {ush v0.1.0}}
+} {ush} {} $BOOT_TIMEOUT $BOOT_QUIET]
+if {[lsearch -exact $_tags urmach] >= 0} {
+    send_user "\n\[smoke\] UrMach kernel banner OK\n"
 }
-if {$_saw_urmach} { send_user "\n\[smoke\] UrMach kernel banner OK\n" }
-
-# Step 1 — wait for shell prompt.  Boot prints a lot; we anchor on the
-# banner that ush writes only after ctty acquisition succeeds.
-expect {
-    "ush v0.1.0"      { send_user "\[smoke\] ush banner OK\n" }
-    timeout           { send_user "\n\[smoke\] FAIL: no ush banner within ${BOOT_TIMEOUT}s\n"; exit 1 }
-}
+send_user "\[smoke\] ush banner OK\n"
 # 🔑 How long the boot actually took, said out loud (#516).  This is the line
 # that settled the budget question above, and it stays so that the next person
 # to wonder reads a number instead of reasoning from one accelerator's
 # reputation.
 send_user "\[smoke\] reached the shell in [expr {[clock seconds] - $T0}]s\n"
-expect {
-    "ush\$ "          { send_user "\[smoke\] ush prompt OK\n" }
-    timeout           { send_user "\n\[smoke\] FAIL: no ush prompt\n"; exit 1 }
-}
+# 🔑 This is the wait one of the three captured failures died on, with the
+# prompt printed and arriving as `ugspuh_$'.  It is the reason the literal is
+# carried alongside the pattern: the regex could not match, and the plain text
+# is what the classifier goes looking for inside somebody else's line.
+#
+# ⚠️ On the BOOT budget, not the command one: the global `timeout' was still
+# $BOOT_TIMEOUT when this wait ran, and giving it $CMD_TIMEOUT here would have
+# quietly tightened the gate from 180s to 30s while claiming to only change how
+# it reports.
+await "ush prompt" {
+    {{ush\$ }  prompt  {ush$ }}
+} {prompt} {} $BOOT_TIMEOUT $BOOT_QUIET
+send_user "\[smoke\] ush prompt OK\n"
 
 # Step 2 — background a hello_exec job.  hello_exec is an infinite
 # loop (mach_null spin), so foreground would hang waitpid; bg keeps
 # ush at the prompt while the child prints its AUXV dump.
 set timeout $CMD_TIMEOUT
 send "/hello_exec &\r"
-expect {
-    -re "\\\[bg\\\] pid=\[0-9\]+"  { send_user "\n\[smoke\] bg fork OK\n" }
-    timeout                         { send_user "\n\[smoke\] FAIL: no \[bg\] line\n"; exit 1 }
-}
+# 🔑 The other two captured failures died here, both reported as `no [bg] line'
+# and both read as the machine being too slow.  One of the two had the line, as
+# `[dbegv]_ ipdi=d2=' -- `[bg] pid=2' with proc_server's registration woven
+# through it.  That is why the literal below is `[bg] pid=' and not the regex:
+# the classifier needs fixed text to look for.
+await "bg fork" {
+    {{\[bg\] pid=[0-9]+}  bg  {[bg] pid=}}
+} {bg} {} $CMD_TIMEOUT $CMD_QUIET
+send_user "\n\[smoke\] bg fork OK\n"
 
 # Step 3 — confirm hello_exec actually ran (exec_server hand-off,
 # AUXV stack walk).  Matches the AT_PAGESZ line which exec_server
 # always emits.
-expect {
-    "AT_PAGESZ"       { send_user "\[smoke\] hello_exec AUXV OK\n" }
-    timeout           { send_user "\n\[smoke\] FAIL: no AUXV output\n"; exit 1 }
-}
+await "hello_exec AUXV" {
+    {AT_PAGESZ  auxv  AT_PAGESZ}
+} {auxv} {} $CMD_TIMEOUT $CMD_QUIET
+send_user "\[smoke\] hello_exec AUXV OK\n"
 
 # Wait for the prompt to come back before the next command.
 expect { "ush\$ " {} timeout {} }
@@ -158,19 +399,31 @@ send "/hello_world\r"
 # land; don't anchor on the prompt afterwards (it may already have scrolled
 # past).  ush is back at a prompt and reading either way, so the shutdown
 # step below still drives cleanly.
-set _saw_hello 0
-set _saw_reap  0
-for {set i 0} {$i < 2} {incr i} {
-    expect {
-        -re "hello\[\r\n]" { set _saw_hello 1 }
-        -re "exit=0x0"     { set _saw_reap 1 }
-        timeout            { break }
-    }
-}
-if {$_saw_hello} { send_user "\n\[smoke\] hello_world stdout->ctty OK\n" } \
-                 else { send_user "\n\[smoke\] FAIL: no hello_world output\n"; exit 1 }
-if {$_saw_reap}  { send_user "\[smoke\] ush reaped hello_world (exit 0)\n" } \
-                 else { send_user "\n\[smoke\] FAIL: hello_world not reaped\n"; exit 1 }
+# 🔴 THE LITERAL HAS TO DISCRIMINATE AS WELL AS THE REGEX DOES, and this pair
+# is where that was learned the hard way.  The regex is `hello[\r\n]' -- the
+# word at the END of a line -- and it was first paired with the bare word
+# `hello', which lives inside `hello_dyn_world' and `hello_world'.  So the
+# garble check, which only reports interleaving when the plain text is ABSENT,
+# found `hello' in `exec: /hello_dyn_world' and stood down.
+#
+# Measured on campaign run 7, where the machine printed
+#
+#     gpu_server: text_hpelutlos(61): cap: provisioned task ...
+#
+# and `text_hpelutlos(' minus `hello' is EXACTLY `text_puts('.  The line was
+# there; the run was reported as NOTHING ARRIVED, which was true of the idle
+# machine afterwards and false about why the step failed.  One cause wearing
+# another's label, which is the defect this whole issue is about -- reproduced
+# by me, inside the fix for it.
+#
+# ⚠️ Built with [list] and not braces because the literal must contain a real
+# carriage return; inside {} the backslash would stay two characters.
+await "hello_world output and reap" [list \
+    [list {hello[\r\n]}  hello  "hello\r"] \
+    [list {exit=0x0}     reap   {exit=0x0}] \
+] {hello reap} {} $CMD_TIMEOUT $CMD_QUIET
+send_user "\n\[smoke\] hello_world stdout->ctty OK\n"
+send_user "\[smoke\] ush reaped hello_world (exit 0)\n"
 
 # Wait for the prompt before launching the dynamic case so the two runs
 # don't overlap on the tty.
@@ -183,19 +436,13 @@ expect { "ush\$ " {} timeout {} }
 # waitpid reap — the gap #234 left (it only proved reaching main).  Same
 # race handling as 3b: require "hello" and the exit=0x0 reap in either order.
 send "/hello_dyn_world\r"
-set _saw_dhello 0
-set _saw_dreap  0
-for {set i 0} {$i < 2} {incr i} {
-    expect {
-        -re "hello\[\r\n]" { set _saw_dhello 1 }
-        -re "exit=0x0"     { set _saw_dreap 1 }
-        timeout            { break }
-    }
-}
-if {$_saw_dhello} { send_user "\n\[smoke\] hello_dyn_world stdout->ctty OK (dynamic)\n" } \
-                  else { send_user "\n\[smoke\] FAIL: no hello_dyn_world output\n"; exit 1 }
-if {$_saw_dreap}  { send_user "\[smoke\] ush reaped hello_dyn_world (exit 0, dynamic clean-exit)\n" } \
-                  else { send_user "\n\[smoke\] FAIL: hello_dyn_world not reaped\n"; exit 1 }
+# Same pairing as 3b, and for the same reason — see the note there.
+await "hello_dyn_world output and reap" [list \
+    [list {hello[\r\n]}  hello  "hello\r"] \
+    [list {exit=0x0}     reap   {exit=0x0}] \
+] {hello reap} {} $CMD_TIMEOUT $CMD_QUIET
+send_user "\n\[smoke\] hello_dyn_world stdout->ctty OK (dynamic)\n"
+send_user "\[smoke\] ush reaped hello_dyn_world (exit 0, dynamic clean-exit)\n"
 
 expect { "ush\$ " {} timeout {} }
 
@@ -207,11 +454,18 @@ expect { "ush\$ " {} timeout {} }
 # Require the program's own "PASS" line.
 send "/pthread_min\r"
 set timeout 60
-expect {
-    -re "pthread_min: PASS"  { send_user "\n\[smoke\] pthread_min PASS (musl pthread_create works, #291)\n" }
-    -re "pthread_min: FAIL"  { send_user "\n\[smoke\] FAIL: pthread_min reported FAIL\n"; exit 1 }
-    timeout                  { send_user "\n\[smoke\] FAIL: no pthread_min result\n"; exit 1 }
+# ⚠️ `pthread_min: FAIL' is an ABORT, not a missing result: the test ran and
+# answered.  Folding it in with the waits above would report a defect in the
+# kernel as a defect in the harness's patience.
+set _tags [await "pthread_min result" {
+    {{pthread_min: PASS}  pass  {pthread_min: PASS}}
+    {{pthread_min: FAIL}  fail  {}}
+} {pass} {fail} 60 $CMD_QUIET]
+if {[lsearch -exact $_tags fail] >= 0} {
+    send_user "\n\[smoke\] FAIL: pthread_min reported FAIL\n"
+    exit 1
 }
+send_user "\n\[smoke\] pthread_min PASS (musl pthread_create works, #291)\n"
 
 expect { "ush\$ " {} timeout {} }
 
@@ -224,19 +478,22 @@ expect { "ush\$ " {} timeout {} }
 # (/flipc_bench -n 9 -c 4,16,64,1024).
 send "/flipc_bench -n 1 -c 64,1024\r"
 set timeout 120
-set _fb_argv 0
-set _fb_readback 0
-set _fb_done 0
-expect {
-    -re "flipc_bench: runs=1 chunks=2" { set _fb_argv 1; exp_continue }
-    -re "write A/B readback: OK"   { set _fb_readback 1; exp_continue }
-    -re "write A/B readback: MISMATCH" { send_user "\n\[smoke\] FAIL: flipc_bench write readback mismatch\n"; exit 1 }
-    -re "flipc_bench: done"        { set _fb_done 1 }
-    timeout                        { send_user "\n\[smoke\] FAIL: flipc_bench did not finish\n"; exit 1 }
+# The tags that are collected on the way (argv, readback) keep their own
+# verdicts below: `done' arriving without them is a different failure from
+# `done' never arriving, and the two must not print the same line.
+set _tags [await "flipc_bench" {
+    {{flipc_bench: runs=1 chunks=2}    argv      {flipc_bench: runs=1 chunks=2}}
+    {{write A/B readback: OK}          readback  {write A/B readback: OK}}
+    {{write A/B readback: MISMATCH}    mismatch  {}}
+    {{flipc_bench: done}               done      {flipc_bench: done}}
+} {done} {mismatch} 120 $BENCH_QUIET]
+if {[lsearch -exact $_tags mismatch] >= 0} {
+    send_user "\n\[smoke\] FAIL: flipc_bench write readback mismatch\n"
+    exit 1
 }
-if {$_fb_argv} { send_user "\n\[smoke\] argv reached static musl binary (exec SysV stack, #272 argv fix)\n" } \
+if {[lsearch -exact $_tags argv] >= 0} { send_user "\n\[smoke\] argv reached static musl binary (exec SysV stack, #272 argv fix)\n" } \
                else { send_user "\n\[smoke\] FAIL: flipc_bench ran with default args (argv not passed)\n"; exit 1 }
-if {$_fb_done && $_fb_readback} { send_user "\[smoke\] flipc_bench standalone OK (read+write A/B incl 1MiB, coherent, #272)\n" } \
+if {[lsearch -exact $_tags readback] >= 0} { send_user "\[smoke\] flipc_bench standalone OK (read+write A/B incl 1MiB, coherent, #272)\n" } \
                                 else { send_user "\n\[smoke\] FAIL: flipc_bench incomplete\n"; exit 1 }
 
 expect { "ush\$ " {} timeout {} }
@@ -251,13 +508,10 @@ expect { "ush\$ " {} timeout {} }
 # kernel issue.  The guard here exercises the FLIPC path, which is immune.
 send "/flipc_bench -R 60\r"
 set timeout 120
-set _fb_stress 0
-expect {
-    -re "flipc_bench: done"  { set _fb_stress 1 }
-    timeout                  { send_user "\n\[smoke\] FAIL: FLIPC read stress did not finish (churn instability?)\n"; exit 1 }
-}
-if {$_fb_stress} { send_user "\n\[smoke\] FLIPC fd+read stress OK (60 open/read/close, no fault)\n" } \
-                 else { send_user "\n\[smoke\] FAIL: FLIPC read stress incomplete\n"; exit 1 }
+await "FLIPC read stress" {
+    {{flipc_bench: done}  done  {flipc_bench: done}}
+} {done} {} 120 $BENCH_QUIET
+send_user "\n\[smoke\] FLIPC fd+read stress OK (60 open/read/close, no fault)\n"
 
 expect { "ush\$ " {} timeout {} }
 
@@ -268,10 +522,10 @@ expect { "ush\$ " {} timeout {} }
 # "System halted." printf never makes it out.  The deterministic success
 # signal is the root fs sync confirmation followed by QEMU dropping the VM.
 send "shutdown\r"
-expect {
-    "shutdown — unmount / ok" { send_user "\n\[smoke\] proc_shutdown drain + clean unmount OK\n" }
-    timeout                   { send_user "\n\[smoke\] FAIL: shutdown drain not acked\n"; exit 1 }
-}
+await "shutdown drain" {
+    {{shutdown — unmount / ok}  drain  {shutdown — unmount / ok}}
+} {drain} {} 120 $CMD_QUIET
+send_user "\n\[smoke\] proc_shutdown drain + clean unmount OK\n"
 
 # Wait for QEMU itself to exit (ACPI poweroff drops the VM).  QEMU
 # exits 0 on ACPI S5 with --allow-reboot (no -no-reboot).
@@ -283,6 +537,16 @@ catch wait result
 set exit_status [lindex $result 3]
 if {$exit_status == 0} {
     send_user "\n\[smoke\] PASS — all steps green, QEMU exited cleanly\n"
+# 🔑 The number the silence budgets are set from, printed on every green run so
+# they stay set from a measurement.  If this ever comes close to CMD_QUIET on a
+# healthy machine, that budget is too tight and this line is the warning.
+send_user "\[smoke\] longest silence during this run: ${UROS_MAX_GAP}s, waiting on \"${UROS_MAX_GAP_WHERE}\" (its budget: ${UROS_MAX_GAP_BUDGET}s)\n"
+# ⚠️ The margin, said as a margin.  A number next to its own threshold is what
+# a reader needs; two numbers in different sentences is what they get asked to
+# subtract, and nobody does.
+if {$UROS_MAX_GAP_BUDGET > 0 && $UROS_MAX_GAP * 2 >= $UROS_MAX_GAP_BUDGET} {
+    send_user "\[smoke\] ⚠️ that silence used [expr {$UROS_MAX_GAP * 100 / $UROS_MAX_GAP_BUDGET}]% of its budget — raise it before it fires on a working run\n"
+}
 # 🔑 The same reminder run-x86_64.sh's verdict carries (#516), and for the same
 # reason: a green run under ONE accelerator is the dangerous result, because
 # that is the shape every divergence found so far has had.

@@ -51,11 +51,79 @@
 # governor's name — on this laptop `performance' on battery still reported
 # 3.99 GHz while `powersave' gave 1.40, so the name alone would have compared
 # runs 2.85x apart without noticing (#460).
+#
+# 🔴 AND THE CEILING, not only where the clock happens to be (#544).  An idle
+# machine under `powersave' with scaling_max_freq at 3.0 GHz reports the same
+# 1397 MHz as one PINNED at 1.4, and the two are different experiments: the
+# first climbs to 3.0 the moment the run loads it, the second cannot.  Without
+# the cap, "measured at low clock" and "measured at a clock that was low when I
+# looked" print the same line -- which is the same defect this issue is about,
+# one layer down: two states, one label.
 uros_host_state() {
 	_gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
 	       2>/dev/null || echo "?")
 	_mhz=$(awk '/cpu MHz/ {printf "%.0f", $4; exit}' /proc/cpuinfo \
 	       2>/dev/null || echo "?")
+	_capk=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
+	        2>/dev/null || echo "")
+	_mink=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq \
+	        2>/dev/null || echo "")
+	_drv=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver \
+	       2>/dev/null || echo "?")
+	if [ -n "$_capk" ]; then
+		_cap="$(( _capk / 1000 ))MHz"
+	else
+		_cap="?"
+	fi
+
+	# 🔴 THE CEILING IS NOT THE CLOCK, and the governor decides which.
+	#
+	# With `acpi-cpufreq' the `powersave' governor is STATIC: it pins the core
+	# to scaling_min_freq and the ceiling above it means nothing.  Raising
+	# scaling_max_freq from 1400 to 3000 while leaving that governor in place
+	# changes the recorded ceiling and not one megahertz of the machine.
+	#
+	# That cost a campaign: eleven runs were taken as the "high clock" arm with
+	#
+	#     governor=powersave cpu=1397MHz cap=3000MHz
+	#
+	# and every fact needed to notice was on that line.  The block reported and
+	# did not conclude, so the ceiling got read and the governor did not.  A
+	# passing run took 454-463s in both arms -- identical, which is what
+	# settled it, because the same work at twice the clock is not the same
+	# number of seconds.
+	#
+	# ⚠️ Driver-dependent on purpose: under `intel_pstate' the very same name
+	# means a DYNAMIC governor that does ramp.  Encoded rather than assumed,
+	# because being quietly wrong here is what this line exists to stop.
+	#
+	# ⚠️ AND BOOST GOES OVER THE POLICY CEILING.  Measured here, with
+	# scaling_max_freq at 3000000 and boost enabled, the cores ran at
+	# 3918-3992 MHz -- above the ceiling that had just been set.  So the
+	# honest number with boost on is cpuinfo_max_freq (4000 MHz on this
+	# machine), and reporting the policy ceiling would understate the
+	# machine by a gigahertz.  Said from the measurement rather than from
+	# what the driver is supposed to do.
+	_boost=$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo "")
+	_hwmaxk=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq \
+	          2>/dev/null || echo "")
+	_top="$_cap"
+	if [ "$_boost" = 1 ] && [ -n "$_hwmaxk" ] && [ -n "$_capk" ] \
+	   && [ "$_hwmaxk" -gt "$_capk" ]; then
+		_top="$(( _hwmaxk / 1000 ))MHz (boost, over the ${_cap} ceiling)"
+	fi
+
+	case "$_drv:$_gov" in
+	intel_pstate:*|*:performance|*:ondemand|*:conservative|*:schedutil)
+		_eff="$_top" ;;
+	*:powersave)
+		if [ -n "$_mink" ]; then
+			_eff="$(( _mink / 1000 ))MHz (governor pins it to the floor)"
+		else
+			_eff="?"
+		fi ;;
+	*)	_eff="$_cap (governor $_gov: unknown policy)" ;;
+	esac
 	_ac="?"
 	for _p in /sys/class/power_supply/A*/online; do
 		[ -r "$_p" ] && _ac=$(cat "$_p") && break
@@ -65,7 +133,7 @@ uros_host_state() {
 	0)	_ac="battery" ;;
 	*)	_ac="AC?" ;;
 	esac
-	echo "governor=$_gov cpu=${_mhz}MHz power=$_ac at=$(date +%H:%M:%S)"
+	echo "governor=$_gov cpu=${_mhz}MHz cap=$_cap effective=$_eff power=$_ac at=$(date +%H:%M:%S)"
 }
 
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host
