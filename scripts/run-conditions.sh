@@ -161,7 +161,7 @@ uros_host_state() {
 # The machine answers in scaling_available_governors.  A driver that takes the
 # policy has no governors to list, so the kernel prints a FIXED string there;
 # one the core drives lists the governors it has registered instead, which is a
-# longer list and ends in a space.  Measured here, byte for byte under
+# longer list.  Measured here, byte for byte under
 # amd-pstate-epp: `performance powersave' and the newline, nothing else.  So
 # the test is that literal rather than a driver name, and a driver nobody here
 # has heard of is read correctly the day it turns up.
@@ -260,3 +260,78 @@ uros_clock_moved() {
 	[ "$_d" -lt 0 ] && _d=$(( -_d ))
 	[ $(( _d * 100 / _a )) -ge 10 ]
 }
+
+# ── --self-test: every reading, driven over machines this one is not ──
+#
+# 🔑 Wired into the build (uros/CMakeLists.txt) instead of left to be typed,
+# for #549's reason: three checkers were written to make defects impossible
+# and nothing ran any of them.  It boots nothing, touches no hardware and
+# costs milliseconds -- it sets the same variables uros_host_state samples
+# and reads back the one field they decide.
+#
+# 🔴 THE SPECIMENS ARE SAMPLED, not invented to please the classifier.  Row 2
+# is this laptop, byte for byte out of sysfs on the day #564 was opened; row 4
+# is the machine of #544, whose eleven runs were taken as the high-clock arm
+# under a governor that was pinning them.  A table written to match the code
+# tests the code against itself.
+#
+# ⚠️ Guarded on $0, because this file is SOURCED: without it run-qemu.sh's own
+# first argument would be read as this one's.
+case "$0" in
+*run-conditions.sh)
+	if [ "${1:-}" != --self-test ]; then
+		echo "run-conditions.sh is sourced, not run: see the head of it" >&2
+		echo "usage: sh run-conditions.sh --self-test" >&2
+		exit 2
+	fi
+
+	_fails=0
+	_total=0
+	echo "run-conditions --self-test (#564)"
+
+	# name|_drv|_gov|_avail|_mink|_cap|_top|_mhz|the effective= it must read
+	while IFS='|' read -r _name _drv _gov _avail _mink _cap _top _mhz _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		_eff=
+		uros_clock_policy
+		if [ "$_eff" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_eff>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+# an ACTIVE driver: `powersave' is the whole range with a bias
+intel_pstate, powersave|intel_pstate|powersave|performance powersave|400000|3900MHz|3900MHz|1200|3900MHz (the driver scales the range, powersave is its bias)
+amd-pstate-epp, powersave (victus, #564)|amd-pstate-epp|powersave|performance powersave|1108930|4280MHz|4280MHz|3703|4280MHz (the driver scales the range, powersave is its bias)
+intel_pstate, performance|intel_pstate|performance|performance powersave|400000|3900MHz|3900MHz|3900|3900MHz
+# a PASSIVE one: the core runs a governor and `powersave' is static
+acpi-cpufreq, powersave pinned (#544)|acpi-cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|1397|1400MHz (governor pins it to the floor)
+acpi-cpufreq, ondemand|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|2100|3992MHz (boost, over the 3000MHz ceiling)
+amd-pstate passive, powersave|amd-pstate|powersave|conservative ondemand userspace powersave performance schedutil |1108930|4280MHz|4280MHz|1108|1108MHz (governor pins it to the floor)
+# 🔑 the row that refutes repairing this by name: intel_pstate in passive mode
+# calls itself intel_cpufreq, and there `powersave' really does pin
+intel_cpufreq, powersave|intel_cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |800000|4000MHz|4000MHz|798|800MHz (governor pins it to the floor)
+# the literal and not a prefix of it
+a list that starts with those two words|acpi-cpufreq|powersave|performance powersave schedutil |1400000|3000MHz|3000MHz|1397|1400MHz (governor pins it to the floor)
+# the floor is a claim, and the field beside it can refute the claim
+the processor stands above its own floor|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil |1108930|4280MHz|4280MHz|3703|unsettled: floor 1108MHz, processor at 3703MHz (#564)
+# and what is not known is said instead of guessed
+powersave with no floor to read|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil ||3000MHz|3000MHz|1400|?
+a governor with no policy of its own|acpi-cpufreq|userspace|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3000MHz|1400|3000MHz (driver acpi-cpufreq, governor userspace: unknown policy)
+a machine that will not say|?|?|||?|?|?|? (driver ?, governor ?: unknown policy)
+EOF
+
+	if [ "$_fails" -gt 0 ]; then
+		echo "run-conditions --self-test: $_fails of $_total read otherwise"
+		exit 1
+	fi
+	echo "run-conditions --self-test: all $_total read as sampled"
+	exit 0
+	;;
+esac
