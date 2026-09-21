@@ -86,9 +86,11 @@ static int have_xsaves_unused;	/* offered by the processor, not taken */
  * 🔑 AND THIS KNOB IS WHY THE RUNG CAN BE WALKED AGAIN.  It stays, and it
  * stays a knob rather than becoming a deletion, because the objection that
  * opened this was never "XSAVES is slow" -- it was that a branch nobody has
- * executed is not support.  Set it to 1 and ~/uros-tests/561-scala-fpu.sh
- * walks the whole ladder from the top; leave it 0 and the processor's offer is
- * announced and declined, which is what a machine that has XSAVES now says.
+ * executed is not support.  Set it to 1 and scripts/xsave-ladder.sh walks the
+ * whole ladder from the top -- it moved into the tree with #563, so it travels
+ * to every machine instead of to whoever happened to have a copy.  Leave it 0
+ * and the processor's offer is announced and declined, which is what a machine
+ * that has XSAVES now says.
  *
  * ⚠️ AND THE CLOCK THESE NUMBERS WERE TAKEN AT IS NOT WHAT THE HARNESS SAID.
  * simo-victus drives amd-pstate-epp, where `powersave' is the ACTIVE mode and
@@ -286,7 +288,7 @@ void fpu_init(void)
 	 * ⚠️ On a machine with wider state -- AVX-512, where the standard image
 	 * is much larger than what a thread actually uses -- the answer could
 	 * be the other way.  This order is this machine's, and the script that
-	 * produced it is in ~/uros-tests.
+	 * produced it is scripts/xsave-ladder.sh.
 	 *
 	 * ⚠️ A kernel does not get to assume the part it boots on.  Every rung
 	 * is detected, and every rung is exercised: qemu can offer or withhold

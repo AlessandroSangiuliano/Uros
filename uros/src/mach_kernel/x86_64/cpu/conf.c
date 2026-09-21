@@ -45,8 +45,16 @@
  * here.  "console" is the exception they already describe elsewhere -- i386's
  * own comment calls its console cdev "the kernel/early-userspace printf sink"
  * -- because it drives no hardware.  It forwards to cnputc(), the same entry
- * the kernel's printf uses, over a serial port and framebuffer that
- * x86_64/ddb/cons.c has owned since the machine could print at all.
+ * the kernel's printf uses, over the serial port that x86_64/ddb/cons.c has
+ * owned since the machine could print at all.
+ *
+ * ⚠️ THE SERIAL PORT, AND NOTHING ELSE.  This read "a serial port and
+ * framebuffer", and the second half has never been true on this target:
+ * cons_putc() writes COM1 and the #428 capture buffer, the multiboot2
+ * framebuffer tag is never read, and nothing in x86_64/ maps a GOP surface --
+ * the word survives in comments and in no code.  It matters because it makes
+ * #497's question sharper rather than softer: the UART is not one of two
+ * channels to share with char_server, it is the only way anything prints.
  *
  * It is here because printf_init() is the first thing every server does, and
  * until it existed the first line of userland on this target was

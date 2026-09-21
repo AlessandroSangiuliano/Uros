@@ -25,8 +25,9 @@
  * ⚠️ It moves real bytes to the real console, which is the line conf.c draws:
  * "inventing a stub console here would be a device that reports success and
  * moves no bytes".  cnputc() is the same entry the kernel's own printf uses,
- * and below it x86_64/ddb/cons.c already knows the serial port and the
- * framebuffer.  Nothing here touches hardware, claims an interrupt, or owns a
+ * and below it x86_64/ddb/cons.c knows the serial port -- and only that, the
+ * framebuffer this used to name being one no code on this target touches
+ * (#497).  Nothing here touches hardware, claims an interrupt, or owns a
  * resource a user-space driver will want.
  *
  * ⚠️ WRITE-ONLY, and the read handler must be NO_READ rather than NULL_READ.
