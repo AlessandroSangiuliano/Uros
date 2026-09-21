@@ -279,9 +279,15 @@ uros_clock_moved() {
 #
 # 🔴 THE SPECIMENS ARE SAMPLED, not invented to please the classifier.  Row 2
 # is this laptop, byte for byte out of sysfs on the day #564 was opened; row 4
-# is the machine of #544, whose eleven runs were taken as the high-clock arm
-# under a governor that was pinning them.  A table written to match the code
+# is pavillion, whose eleven runs were taken as the high-clock arm under a
+# governor that was pinning them (#544).  A table written to match the code
 # tests the code against itself.
+#
+# 🔑 Row 4 is also the one that settles who is affected, and it settles it by
+# MEASUREMENT rather than by naming a driver: on that machine six busy loops
+# left the clock at 1397 MHz, which is a thing an active driver's `powersave'
+# cannot do.  So the reading it gets here is the reading it always got, and
+# nothing recorded there was ever labelled by the false line.
 #
 # ⚠️ Guarded on $0, because this file is SOURCED: without it run-qemu.sh's own
 # first argument would be read as this one's.
@@ -319,7 +325,7 @@ intel_pstate, powersave|intel_pstate|powersave|performance powersave|400000|3900
 amd-pstate-epp, powersave (victus, #564)|amd-pstate-epp|powersave|performance powersave|1108930|4280MHz|4280MHz|3703|4280MHz (the driver scales the range, powersave is its bias)
 intel_pstate, performance|intel_pstate|performance|performance powersave|400000|3900MHz|3900MHz|3900|3900MHz
 # a PASSIVE one: the core runs a governor and `powersave' is static
-acpi-cpufreq, powersave pinned (#544)|acpi-cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|1397|1400MHz (governor pins it to the floor)
+pavillion, powersave pinned (#544)|acpi-cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|1397|1400MHz (governor pins it to the floor)
 acpi-cpufreq, ondemand|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|2100|3992MHz (boost, over the 3000MHz ceiling)
 amd-pstate passive, powersave|amd-pstate|powersave|conservative ondemand userspace powersave performance schedutil |1108930|4280MHz|4280MHz|1108|1108MHz (governor pins it to the floor)
 # 🔑 the row that refutes repairing this by name: intel_pstate in passive mode
