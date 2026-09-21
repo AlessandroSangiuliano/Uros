@@ -81,9 +81,23 @@
 /* ------------------------------------------------------------------ */
 static void kputc(char c)
 {
-	while (!(inb(COM1 + 5) & 0x20))		/* wait THR empty */
-		;
-	outb(COM1, (uint8_t)c);
+	/*
+	 * cons_putc(), and no longer a second polled loop of its own (#551).
+	 *
+	 * The loop that was here waited for the transmitter for ever, like
+	 * the one in cons.c; bounding both was the first version, and it
+	 * left this one without cons_putc()'s MEMORY of a stuck port, so
+	 * that under a transmitter that never emptied the narration paid the
+	 * whole bound on every byte -- six milliseconds each under KVM, two
+	 * minutes for a boot's worth -- while cons_putc() paid it once.
+	 * Measured with scripts/uart-stall.py, which is what found it.
+	 *
+	 * One writer, one bound, one memory.  Safe from the first byte:
+	 * cons.c needs no initialisation, and its statics are zero because
+	 * the loader zeroes .bss (multiboot2), not because anything here
+	 * ran first.
+	 */
+	cons_putc(c);
 }
 
 static void kputs(const char *s)
