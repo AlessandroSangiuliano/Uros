@@ -113,6 +113,9 @@ consoleclose(dev_t dev)
 	(void)dev;
 }
 
+/* The most a hold may carry when the caller's bytes have no newline (#551). */
+#define CONSOLE_CHUNK	256
+
 io_return_t
 consolewrite(dev_t dev, io_req_t ior)
 {
@@ -127,15 +130,30 @@ consolewrite(dev_t dev, io_req_t ior)
 	n = ior->io_count;
 
 	/*
-	 * Serialize the whole buffer against kernel printf and any other
-	 * console writer (shared printf_lock) so SMP writers don't interleave
-	 * byte-by-byte on the UART.  cnputc -> com_putc is polled and never
-	 * blocks, so the section completes without a voluntary context switch.
+	 * One LINE under the lock, not the whole buffer (#551): the lock is
+	 * what keeps SMP writers from interleaving byte by byte on the UART,
+	 * and a line is the unit that needs it.  The buffer's length is the
+	 * caller's, and at a millisecond a byte on a struggling port a hold
+	 * sized by userland was a hold of any length.  A hold is now one line
+	 * or CONSOLE_CHUNK bytes of a line with no newline in it; between two
+	 * of them the scheduler may run somebody else.  cnputc -> com_putc is
+	 * polled and bounded, so a hold ends without a voluntary context
+	 * switch.  Same shape as x86-64's consolewrite().
 	 */
-	simple_lock(&printf_lock);
-	while (n--)
-		cnputc(*p++);
-	simple_unlock(&printf_lock);
+	while (n > 0) {
+		unsigned int k;
+
+		for (k = 0; k < n && k < CONSOLE_CHUNK; k++)
+			if (p[k] == '\n') {
+				k++;
+				break;
+			}
+		n -= k;
+		simple_lock(&printf_lock);
+		while (k--)
+			cnputc(*p++);
+		simple_unlock(&printf_lock);
+	}
 
 	ior->io_residual = 0;
 	return D_SUCCESS;
