@@ -233,6 +233,14 @@ uros_conditions_block() {
 	for _f in "$@"; do
 		[ -n "$_f" ] && echo "  $_f"
 	done
+	# 🔴 WHICH MACHINE, because a baseline belongs to one and no saved log in
+	# this project could say which.  #564 asks whether the other AMD laptop's
+	# recorded numbers carry the same false clock line, and every log here can
+	# be read for its governor, its ceiling and its accelerator while not one
+	# of them names the host that produced it -- so that question has to be
+	# answered by remembering instead of by grepping, which is the failure
+	# #516 was opened about, one field along.
+	echo "  host:         $(hostname -s 2>/dev/null || echo '?')"
 	echo "  host start:   ${UROS_HOST_AT_START:-not sampled}"
 	# ⚠️ A closing sample only where the harness is still alive to take one.
 	# run-qemu.sh ends in `exec qemu', deliberately -- without it that shell
