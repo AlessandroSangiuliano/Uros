@@ -421,6 +421,17 @@ preempt_test_run_remote(void)
 		break;
 	}
 
+#if	ABLATE_563_ALONE
+	/*
+	 * #563: pretend this processor is the only one running, so the line
+	 * that declines the question can be walked on a machine where it
+	 * would otherwise be unreachable -- there is no boot flag that caps
+	 * the processor count on this target, and an application processor
+	 * cannot be made to fail to arrive on demand.  A branch nobody has
+	 * executed is not support.
+	 */
+	target = PROCESSOR_NULL;
+#endif
 	/*
 	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
 	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here

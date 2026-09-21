@@ -148,6 +148,13 @@ option(UROS_ABLATE_558_PVFREELOCK "Build the #558 ablation: pv free list with no
 # answer that could not be told from the other two by taking it away would not
 # be worth having.  Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is never opened" OFF)
+# #563: make the five tests that need a second processor believe they are alone,
+# so the line that DECLINES the question can be executed.  There is no boot flag
+# capping the processor count on this target and an AP cannot be made to fail to
+# arrive on demand, so without this the correction would ship unexercised --
+# which is the objection #561 was built on.  Never ON in a kernel anyone boots
+# for anything else.
+option(UROS_ABLATE_563_ALONE "Build the #563 ablation: every test believes it is alone" OFF)
 
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
@@ -341,6 +348,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_563_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_WINDOW=1)
       message(STATUS "#563 ablation: the copy's window is never opened (x86_64)")
+  endif()
+  if(UROS_ABLATE_563_ALONE)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
+      message(STATUS "#563 ablation: every test believes it is alone (x86_64)")
   endif()
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)

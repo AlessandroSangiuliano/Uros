@@ -3666,8 +3666,15 @@ static void pci_cap_selftest(void)
 	if (agreed != listed - repeated || wrongly_found != 0)
 		kputs(" — WRONG, the walk and the devices disagree about the"
 		      " list\r\n");
+	/*
+	 * 🔑 NOT ASKED (#563), and the sentence already said why: the walk
+	 * agreed about NOTHING.  Which devices sit on this bus is a property
+	 * of the command line, not of the kernel -- the comment above says as
+	 * much, that the demand is one "both boards can meet" because of what
+	 * is plugged in.  A walk with nothing to walk has not disagreed.
+	 */
 	else if (listed == 0)
-		kputs(" — WRONG, not one device on this bus lists a"
+		kputs(" — NOT ASKED, not one device on this bus lists a"
 		      " capability, so the walk agreed about nothing\r\n");
 	else
 		kputs(" — every id a device lists, where it lists it, and"
@@ -3712,11 +3719,21 @@ static void pci_cap_selftest(void)
 	kputs(" device(s) offer MSI-X, ");
 	kputdec(msix_vectors);
 	kputs(" vectors in total");
+	/*
+	 * 🔑 THE FIRST TWO ARE NOT ASKED, THE THIRD IS WRONG (#563).
+	 *
+	 * This test wants a bus carrying both kinds of device, and whether it
+	 * gets one is decided by the `-device' lines, not by the kernel: "never
+	 * asked to find one" and "went unexercised" are the two sentences
+	 * saying so, and both carried the word for a wrong answer.  A table
+	 * found with no vectors in it is a different thing entirely, and keeps
+	 * it.
+	 */
 	if (msix_devices == 0)
-		kputs(" — WRONG, no device on this bus has a table, so the"
+		kputs(" — NOT ASKED, no device on this bus has a table, so the"
 		      " walk was never asked to find one\r\n");
 	else if (msix_devices >= devices)
-		kputs(" — WRONG, every device answered yes, so the absent"
+		kputs(" — NOT ASKED, every device answered yes, so the absent"
 		      " case went unexercised\r\n");
 	else if (msix_vectors < msix_devices)
 		kputs(" — WRONG, a table found with no vectors in it\r\n");
