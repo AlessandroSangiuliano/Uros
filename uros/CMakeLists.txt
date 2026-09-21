@@ -375,6 +375,27 @@ else()
   message(STATUS "tclsh not found: the #544 smoke-findings self-test will not run")
 endif()
 
+# Does the clock condition still read the MACHINE, or a list of driver names
+# again? (#564)
+#
+# 🔑 Here for the same reason as the block above, and it is the same shape: it
+# drives the classifier over a table of sampled machines, boots nothing and
+# exits non-zero when one of them reads differently than it did when it was
+# sampled.  The reading it protects had been wrong on every AMD run for as long
+# as this laptop has taken measurements, and nothing in the tree could notice.
+#
+# ⚠️ Run with `sh' rather than by either harness: run-conditions.sh is sourced
+# by both of them and belongs to neither, so it is checked once here, for both
+# targets, and not twice or in the wrong one.
+add_test(NAME run_conditions
+         COMMAND sh ${CMAKE_SOURCE_DIR}/../scripts/run-conditions.sh --self-test)
+add_custom_target(check-run-conditions
+  COMMAND sh ${CMAKE_SOURCE_DIR}/../scripts/run-conditions.sh --self-test
+  COMMENT "run-conditions --self-test (#564)"
+  USES_TERMINAL
+  VERBATIM
+)
+
 # Target clean-all: rimuove completamente la directory di build
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}
