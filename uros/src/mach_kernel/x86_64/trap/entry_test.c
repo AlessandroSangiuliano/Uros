@@ -373,7 +373,28 @@ __attribute__((noinline)) static void device_entry_test(void)
 	int had_interrupts;
 
 	if (!ioapic_init()) {
-		cons_puts("UrMach x86-64: no I/O APIC to enter from — WRONG\r\n");
+		/*
+		 * 🔑 WHICH OF THE TWO SILENCES (#563).
+		 *
+		 * ioapic_init() has exactly ONE way to fail: acpi_ioapic(0) yielded
+		 * nothing, which is the MADT saying this machine has no I/O APIC.
+		 * It does not fail for a mapping that went wrong or a version
+		 * register that read back oddly -- there is one `return 0' in it.
+		 *
+		 * So the only question left is whether the table was READ at all,
+		 * and the same walk answers it: the processor census comes from
+		 * there too (#438, #432).  A parse that found processors and no I/O
+		 * APIC describes a board; one that found neither did not happen,
+		 * and keeps the word for a defect.  Two halves of one table, and
+		 * they have to agree.
+		 */
+		if (acpi_cpu_count() > 0)
+			cons_puts("UrMach x86-64: NOT ASKED, the firmware"
+				  " describes no I/O APIC to enter from\r\n");
+		else
+			cons_puts("UrMach x86-64: no I/O APIC to enter from and"
+				  " no processor either, so the MADT was never"
+				  " read — WRONG\r\n");
 		return;
 	}
 
