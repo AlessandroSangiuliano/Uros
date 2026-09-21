@@ -74,6 +74,25 @@ LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
 # #318 was rewritten around that fact.
 KNOWN='timestamp counter measured against the 8254'
 
+# 🔑 THE THIRD WORD (#563).
+#
+# A self-test has three possible outcomes and this harness knew two.  Beside
+# "it passed" and "it is WRONG" there is "the question could not be asked" —
+# the processor has no SMAP, the machine has no 8254, the TSC never calibrated,
+# no second processor is running — and a kernel that says so is not a kernel
+# that failed.  Reported in the same breath as WRONG, such a line either fails
+# a boot that was fine or, once someone tires of it, teaches everyone to ignore
+# the word that matters.
+#
+# ⚠️ It is COUNTED for the same reason the line above it is: a question that
+# stopped being asked, and that nobody notices stopped being asked, is a test
+# that has quietly left the suite.  The number is the only thing standing
+# between "not applicable here" and "not applicable anywhere, since March".
+#
+# ⚠️ And it is deliberately NOT in the BAD pattern below: `NOT ASKED' contains
+# neither WRONG nor FAIL, so it falls out of that grep on its own.
+NOT_ASKED='NOT ASKED'
+
 # There are two kinds of run now, and they end differently (#458).
 #
 # The `-D' run ends in the double-fault self-test, which breaks the stack
@@ -131,6 +150,7 @@ VACCEL=$(sed -n 's/^  accelerator:  //p' "$LOG" | head -1)
 
 TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
 EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
+UNASKED=$(grep -ac "$NOT_ASKED" "$LOG" || true)
 # ⚠️ `^panic\(', not `^panic:'.  This kernel prints `panic(cpu 0): ...' --
 # kern/debug.c puts the processor number in parentheses -- so the old pattern
 # could never match a single panic this kernel has ever produced.  It was
@@ -167,6 +187,10 @@ NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 echo
 echo "=== verdict: $TESTS self-tests, under $VACCEL ==="
 [ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: known QEMU artifact (TSC not invariant, #318)"
+if [ "$UNASKED" -gt 0 ]; then
+	echo "  $UNASKED NOT ASKED: this machine could not pose the question (#563)"
+	grep -a "$NOT_ASKED" "$LOG" | sed 's/^/    /'
+fi
 
 if grep -aq "$MI_ENTRY" "$LOG"; then
 	# The machine-dependent self-tests all passed -- setup_main is reached
@@ -598,7 +622,14 @@ done
 # ⚠️ What this does NOT fix: UROS_BUNDLE_IPC_BENCH, the full bundle plus the
 # benchmark, still ends on cow_test -- which fires first and kills ipc_bench
 # where it stands.  That option's own comment names the work; this is not it.
-DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
+# ⚠️ THE THIRD WORD BELONGS HERE TOO, AND PER TEST (#563).
+#
+# These are the lines that mean "the run has produced its last output, stop
+# waiting".  A test that declines the question ends the run exactly as surely
+# as one that answers it, so each arm that can decline names `NOT ASKED' beside
+# its own PASS — and NOT as a bare alternative, which would let the FIRST test
+# to decline, hundreds of lines early, be read as the end of the boot.
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift

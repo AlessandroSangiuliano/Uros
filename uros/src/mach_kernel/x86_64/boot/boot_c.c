@@ -1057,25 +1057,79 @@ static void user_pmap_selftest(void)
 	 * fail.
 	 */
 	{
-		uint64_t	seen, after;
+		uint64_t	before, seen, after;
+
+		/*
+		 * 🔴 THE COUNT IS A DIFFERENCE, AND IT HAS TO BE (#563).
+		 *
+		 * `ac_traps' counts every trap that ARRIVES with AC set, and an
+		 * interrupt is a trap: the timer landing inside the deliberate
+		 * window a few hundred lines up — the one that writes through
+		 * USER_TEST_VA — bumps it without this probe doing anything at
+		 * all.  Read absolutely, "0 arrived" and "the window opened and
+		 * something else counted first" are the same number, and the
+		 * ablation below could not tell them apart either.
+		 */
+		before = trap_smap_lifted_count();
 
 		trap_expect(T_INVALID_OPCODE,
 			    (uint64_t)(uintptr_t)trap_probe_faulted);
 
+#if	!ABLATE_563_WINDOW
 		pmap_user_access_begin();
+#endif	/* !ABLATE_563_WINDOW — build with -DABLATE_563_WINDOW=1 and this
+	 * must go WRONG on a processor that HAS SMAP and stay green on one
+	 * that has not.  Those two outcomes from one switch are the whole of
+	 * what this correction does, and the only way to see it from outside. */
 		(void) trap_probe_ud();
 		pmap_user_access_end();
 
-		seen = trap_smap_lifted_count();
+		seen = trap_smap_lifted_count() - before;
 		after = trap_smap_after_last();
 
 		kputs("UrMach x86-64: a trap raised inside a copy's window — ");
 		kputhex64(seen);
 		kputs(" arrived with SMAP lifted, left at ");
 		kputhex64(after);
-		kputs(seen > 0 && after == 0
-		      ? " — the fault path does not inherit the copy's permission\r\n"
-		      : " — WRONG\r\n");
+
+		/*
+		 * 🔴 THREE ANSWERS, NOT TWO (#563).
+		 *
+		 * The question is whether the fault path inherits the one
+		 * permission a copy grants itself.  On a processor with no SMAP
+		 * there is no such permission to inherit: `stac' is an invalid
+		 * opcode, the brackets above compile to nothing, and the window
+		 * CANNOT open.  That is not this kernel failing, and saying
+		 * WRONG there is the instrument answering a question nobody
+		 * asked — which is how a real regression learns to look like
+		 * the weather (#522 is the same shape, mirrored).
+		 *
+		 * 🔑 AND NEITHER ARM CAN PASS BY ACCIDENT, which is what the
+		 * original `seen > 0' was protecting and what a third answer
+		 * could easily have thrown away:
+		 *
+		 *	SMAP on   the window MUST have opened (seen > 0) and the
+		 *		  handler MUST have closed it (after == 0);
+		 *	SMAP off  the window must NOT have opened (seen == 0) —
+		 *		  because if AC got set on a part that has no
+		 *		  way to set it, the finding is that, and it is
+		 *		  worth a WRONG of its own.
+		 *
+		 * So the count is still load-bearing on both sides.  What the
+		 * processor has is asked of pmap_smap_enabled(), which is the
+		 * flag pmap_enable_smep_smap() wrote when it decided — the
+		 * kernel is not guessing at a capability, it is reading back
+		 * its own decision.
+		 */
+		if (!pmap_smap_enabled())
+			kputs(seen == 0
+			      ? " — this processor has no SMAP, so the window "
+				"cannot open and there is nothing to inherit\r\n"
+			      : " — WRONG\r\n");
+		else
+			kputs(seen > 0 && after == 0
+			      ? " — the fault path does not inherit the copy's permission\r\n"
+			      : " — WRONG\r\n");
 	}
 	pmap_activate_boot(k);
 
@@ -3612,8 +3666,15 @@ static void pci_cap_selftest(void)
 	if (agreed != listed - repeated || wrongly_found != 0)
 		kputs(" — WRONG, the walk and the devices disagree about the"
 		      " list\r\n");
+	/*
+	 * 🔑 NOT ASKED (#563), and the sentence already said why: the walk
+	 * agreed about NOTHING.  Which devices sit on this bus is a property
+	 * of the command line, not of the kernel -- the comment above says as
+	 * much, that the demand is one "both boards can meet" because of what
+	 * is plugged in.  A walk with nothing to walk has not disagreed.
+	 */
 	else if (listed == 0)
-		kputs(" — WRONG, not one device on this bus lists a"
+		kputs(" — NOT ASKED, not one device on this bus lists a"
 		      " capability, so the walk agreed about nothing\r\n");
 	else
 		kputs(" — every id a device lists, where it lists it, and"
@@ -3658,11 +3719,21 @@ static void pci_cap_selftest(void)
 	kputs(" device(s) offer MSI-X, ");
 	kputdec(msix_vectors);
 	kputs(" vectors in total");
+	/*
+	 * 🔑 THE FIRST TWO ARE NOT ASKED, THE THIRD IS WRONG (#563).
+	 *
+	 * This test wants a bus carrying both kinds of device, and whether it
+	 * gets one is decided by the `-device' lines, not by the kernel: "never
+	 * asked to find one" and "went unexercised" are the two sentences
+	 * saying so, and both carried the word for a wrong answer.  A table
+	 * found with no vectors in it is a different thing entirely, and keeps
+	 * it.
+	 */
 	if (msix_devices == 0)
-		kputs(" — WRONG, no device on this bus has a table, so the"
+		kputs(" — NOT ASKED, no device on this bus has a table, so the"
 		      " walk was never asked to find one\r\n");
 	else if (msix_devices >= devices)
-		kputs(" — WRONG, every device answered yes, so the absent"
+		kputs(" — NOT ASKED, every device answered yes, so the absent"
 		      " case went unexercised\r\n");
 	else if (msix_vectors < msix_devices)
 		kputs(" — WRONG, a table found with no vectors in it\r\n");
