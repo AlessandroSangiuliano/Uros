@@ -545,12 +545,15 @@ kernel_task_create(
 					    map_size, TRUE, FALSE,
 					    &new_task->map)) != KERN_SUCCESS) {
 			/*
+			 * No diagnostic (#551).  The address is one the caller
+			 * chose, the caller gets KERN_INVALID_ADDRESS for it,
+			 * and the line that used to be printed here cost 9.6
+			 * million cycles of polled UART under printf_lock --
+			 * askable from ring 3, as often as anyone liked.
+			 *
 			 * New task created with ref count of 2 -- decrement by
 			 * one to force task deletion.
 			 */
-			printf("kmem_suballoc(%p,%lx,%lx,1,0,&new) Fails\n",
-			       kernel_map, (unsigned long) map_base,
-			       (unsigned long) map_size);
 			--new_task->ref_count;
 			task_deallocate(new_task);
 			return (retval);
