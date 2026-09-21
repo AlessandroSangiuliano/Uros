@@ -3137,6 +3137,22 @@ static void cons_selftest(void)
 	else
 		kputhex64((uint64_t)got);
 
+	/*
+	 * 🔑 THIS ONE KEEPS WRONG, AND THE REASON IS NOT THAT IT IS UNAMBIGUOUS
+	 * (#563).  It is that the other case cannot be observed.
+	 *
+	 * With no UART at COM1 every inb returns 0xFF: LSR reads all ones, so
+	 * THR_EMPTY appears set and the write does not hang, DATA_READY appears
+	 * set too, and the byte read back is 0xFF rather than the 0xA5 sent.
+	 * The verdict is then WRONG for a machine that simply has no serial
+	 * port, which is the shape this issue is about -- and a scratch-register
+	 * presence test would tell the two apart.
+	 *
+	 * ⚠️ But it would be a branch nobody can ever read.  This log travels
+	 * out of the very port whose absence it would report: on any machine
+	 * where the line can be seen, the UART is there.  A NOT ASKED that
+	 * cannot reach a reader is worth less than the WRONG it replaced.
+	 */
 	kputs(got == CONS_PROBE_BYTE
 	      ? " — the console can hear\r\n"
 	      : " — WRONG, the receive path does not work\r\n");
@@ -3489,6 +3505,14 @@ static void pci_cfg_selftest(void)
 	kputs(pci_cfg_is_ecam() ? "ECAM" : "0xCF8/0xCFC");
 	kputs(", host bridge at 00:00.0 reads ");
 	kputhex64(id);
+	/*
+	 * 🔑 KEEPS WRONG (#563): here the absence IS the subject.  What this
+	 * asks is whether the configuration mechanism -- ECAM or the two ports
+	 * -- reaches the bus at all, so "nothing answered" is the failure it
+	 * was written to catch, not a board declining to have PCI.  There is
+	 * nothing to cross-check it against either: on a CF8/CFC machine no
+	 * table describes the host bridge, and this read is the only witness.
+	 */
 	kputs(id != 0xFFFFFFFFu && id != 0
 	      ? " — a vendor answered, so the mechanism reaches the bus\r\n"
 	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
@@ -4610,6 +4634,16 @@ static void msix_table_selftest(void)
 				msix_regs_base = r[i].base;
 	}
 
+	/*
+	 * 🔑 KEEPS WRONG (#563).  `nic' was not assumed: it is a device this
+	 * very function found by SCANNING for the MSI-X capability, and the
+	 * board that offers none is already skipped cleanly above.  So a probe
+	 * that cannot find the table on a device whose capability was just read
+	 * is the probe, not the board.  The same goes for the two
+	 * msi_claim_vector() refusals nearby: the vector pool is this kernel's
+	 * own resource, fresh at boot, and running out of it at this point
+	 * would be a leak rather than a machine.
+	 */
 	if (!pci_msix_probe(0, 0, (uint8_t)nic, 0, &m)) {
 		kputs("UrMach x86-64: the MSI-X table could not be found"
 		      " — WRONG\r\n");
