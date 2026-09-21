@@ -155,6 +155,12 @@ option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is nev
 # which is the objection #561 was built on.  Never ON in a kernel anyone boots
 # for anything else.
 option(UROS_ABLATE_563_ALONE "Build the #563 ablation: every test believes it is alone" OFF)
+# #563: withhold the MADT's I/O APIC entries while leaving the processor census
+# alone, so the tests that route through one see the board a firmware without an
+# I/O APIC describes -- and the discriminator they use, the other half of the
+# same table, still answers.  qemu offers no machine that gives one without the
+# other.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_563_NO_IOAPIC "Build the #563 ablation: the MADT lists no I/O APIC" OFF)
 
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
@@ -352,6 +358,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
       message(STATUS "#563 ablation: every test believes it is alone (x86_64)")
+  endif()
+  if(UROS_ABLATE_563_NO_IOAPIC)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_NO_IOAPIC=1)
+      message(STATUS "#563 ablation: the MADT lists no I/O APIC (x86_64)")
   endif()
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
