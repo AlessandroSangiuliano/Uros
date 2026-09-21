@@ -31,8 +31,46 @@
 #include <stdint.h>
 
 /* One character out, waiting for room. */
+/*
+ * How many polls one byte may spend waiting for the transmitter (#551).
+ *
+ * In polls and not in time, because the first bytes go out before the TSC is
+ * calibrated, and because the boot narration's kputc (boot_c.c) shares this
+ * number so that the two polled writers cannot drift apart.  A poll costs
+ * whatever an `inb' costs on the accelerator or the machine, so this is a
+ * different length of time everywhere it runs -- which is why the number was
+ * measured against a healthy byte and not chosen, and why cons_cost_report()
+ * prints the slowest healthy byte of every boot beside it.
+ *
+ * Measured (victus, qemu 11.1.1, entry 6): under KVM and under TCG alike the
+ * slowest healthy byte polled ZERO times -- qemu's 16550 has room again
+ * before the `outb' that filled it returns, and the 80 µs a byte KVM shows
+ * is paid inside that outb, not in this loop.  So on either accelerator the
+ * bound is never approached by a working port, and only a stuck one reaches
+ * it: 4000 polls is some 6 ms under KVM, paid once per stall (cons_putc
+ * remembers).  On the metal a byte at 115200 baud takes 87 µs and a port
+ * poll about one, so a healthy byte would poll near 90 times and this bound
+ * is forty of them -- reasoning, not a measurement, and the per-boot line is
+ * what will turn it into one on the first bare-metal boot.
+ *
+ * The number itself lives in cons_bound.h, where boot.S can read it too.
+ */
+#include <ddb/cons_bound.h>
+
 void cons_putc(char c);
 void cons_puts(const char *s);
+
+/*
+ * The same write, straight to the wire, past the capture buffer (#551).  For
+ * the trap path's reporting, whose one message must reach a reader when
+ * everything else has stopped -- a selftest's capture included.
+ */
+void cons_putc_wire(char c);
+
+/* What the bound has done on this boot, for cons_cost_report() (#551). */
+unsigned cons_tx_dropped(void);
+unsigned cons_tx_spins_high(void);
+void cons_tx_spins_reset(void);
 
 /*
  * Formatted output (#415), for panic() and anything else that has a value to

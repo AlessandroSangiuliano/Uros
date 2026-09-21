@@ -43,6 +43,65 @@ static char	*cons_capture_buf;
 static unsigned	 cons_capture_len;
 static unsigned	 cons_capture_max;
 
+/*
+ * ── The transmitter may refuse, and a byte that waits for it forever is a
+ *    machine that stops (#551) ──────────────────────────────────────────
+ *
+ * cons_putc() spun on LSR_THR_EMPTY with no bound.  Around it, printf() holds
+ * printf_lock across every byte of a line, with preemption off and -- since
+ * #528 -- interrupts masked for the hold; and an unprivileged trap can make
+ * the kernel print: kernel_task_create() with an address the map refuses
+ * printed a 55-byte diagnostic, 9.6 million cycles on the machine that found
+ * it, and a loop over that trap was a program that kept a CPU inside a device
+ * spin, under the lock the whole system prints through, for as long as it
+ * liked.  If THRE never came at all -- a host whose stdout stopped draining, a
+ * UART left mid-state by whoever owns it in userspace -- it never came back.
+ *
+ * Two bounds, and the second is the one that matters:
+ *
+ *   1. A byte waits at most CONS_THRE_SPINS polls.  i386's com_putc has done
+ *      this since before this port existed.
+ *
+ *   2. 🔑 AND THE NEXT BYTE DOES NOT WAIT AGAIN.  With (1) alone a stuck
+ *      transmitter turns a 55-byte line into 55 times the bound: longer than
+ *      the unbounded wait ever was on a healthy port, and still under the
+ *      lock.  So one timeout marks the port stuck, and while the mark stands
+ *      every byte polls ONCE and is dropped if there is still no room.  The
+ *      mark clears itself the first time a poll finds room -- which is the
+ *      very next byte to try -- so a port that drains again resumes output at
+ *      the byte after the last one lost, with nothing to reset and nobody to
+ *      tell.
+ *
+ * What is lost is bytes on the wire and nothing else: printf() gives every
+ * byte to the log ring (klog_putc) as well as to this, so host_get_log still
+ * holds the whole line.  How many were lost is counted and said once per boot
+ * by cons_cost_report(), because a console that has been dropping output is
+ * the first thing a reader of that boot's log needs to know.
+ *
+ * ⚠️ The three words below are advisory and unlocked on purpose.  printf() and
+ * consolewrite() reach here under printf_lock, but panic and the debugger do
+ * not and must not; a lost update to a count of dropped bytes costs a number,
+ * and a lock here would cost the one path that has to work when locks do not.
+ */
+static unsigned	cons_tx_stuck;		/* the last byte found no room in its bound */
+static unsigned	cons_tx_dropped_count;
+static unsigned	cons_tx_spins_peak;	/* most polls one byte needed since reset */
+
+unsigned cons_tx_dropped(void)
+{
+	return cons_tx_dropped_count;
+}
+
+unsigned cons_tx_spins_high(void)
+{
+	return cons_tx_spins_peak;
+}
+
+void cons_tx_spins_reset(void)
+{
+	cons_tx_spins_peak = 0;
+}
+
 void cons_capture_begin(char *buf, unsigned max)
 {
 	cons_capture_len = 0;
@@ -71,8 +130,31 @@ void cons_putc(char c)
 		return;
 	}
 
-	while (!(inb(COM1 + UART_LSR) & LSR_THR_EMPTY))
-		;
+	cons_putc_wire(c);
+}
+
+void cons_putc_wire(char c)
+{
+	/*
+	 * ABLATE_551_UNBOUNDED puts the original loop back, so that
+	 * scripts/uart-stall.py can show the machine it stops -- a bound
+	 * nothing has ever hit is untested code, and this is how it is hit.
+	 */
+	unsigned spins = 0;
+
+	while (!(inb(COM1 + UART_LSR) & LSR_THR_EMPTY)) {
+#if	!ABLATE_551_UNBOUNDED
+		if (cons_tx_stuck || ++spins >= CONS_THRE_SPINS) {
+			cons_tx_stuck = 1;
+			cons_tx_dropped_count++;
+			return;
+		}
+#endif
+		cpu_pause();
+	}
+	cons_tx_stuck = 0;
+	if (spins > cons_tx_spins_peak)
+		cons_tx_spins_peak = spins;
 	outb(COM1 + UART_DATA, (uint8_t)c);
 }
 
@@ -273,9 +355,18 @@ int cons_loopback_probe(uint8_t byte)
 
 	outb(COM1 + UART_MCR, MCR_DTR | MCR_RTS | MCR_LOOPBACK);
 
-	while (!(inb(COM1 + UART_LSR) & LSR_THR_EMPTY))
-		;
-	outb(COM1 + UART_DATA, byte);
+	/*
+	 * Bounded like every other wait on this register (#551).  A byte that
+	 * cannot be handed to the transmitter is a byte that will not come
+	 * back, and the loop below then answers -1 for the right reason.
+	 */
+	for (unsigned i = 0; i < CONS_THRE_SPINS; i++) {
+		if (inb(COM1 + UART_LSR) & LSR_THR_EMPTY)
+			break;
+		cpu_pause();
+	}
+	if (inb(COM1 + UART_LSR) & LSR_THR_EMPTY)
+		outb(COM1 + UART_DATA, byte);
 
 	for (unsigned i = 0; i < LOOPBACK_SPINS; i++) {
 		if (inb(COM1 + UART_LSR) & LSR_DATA_READY) {

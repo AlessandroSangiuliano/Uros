@@ -1050,6 +1050,44 @@ printf(const char *fmt, ...)
 					 * faulting context or a stopped peer CPU,
 					 * which deadlocks the debugger's console. */
 
+	/*
+	 * ── The window: one line, at the wire's pace (#551) ──────────────
+	 *
+	 * From here to enable_preemption() this processor is not rescheduled,
+	 * and from simple_lock() to simple_unlock() -- on a target whose spin
+	 * lock masks interrupts for the hold, which x86-64 does (#528) -- it
+	 * takes no interrupt either.  The device wait is inside that: on
+	 * x86-64 cnputc() is a polled UART, and a byte costs what the wire
+	 * costs.  Measured rather than assumed, and printed on every boot by
+	 * cons_cost_report(): tens of microseconds a byte under KVM and TCG
+	 * on the machines this has run on, so a line is a few milliseconds.
+	 *
+	 * 🔑 The wait is inside on purpose, and the reason is what the lock is
+	 * FOR.  It protects no data structure; it makes a line a line on a
+	 * wire that every processor shares.  Rendering under the lock and
+	 * emitting outside it would move the device time out of the hold and
+	 * put the interleaving back -- two writers' bytes mixed on the wire,
+	 * the shape #544 chased through thirteen red runs.  Shortening the
+	 * hold the other way, a ring drained from an interrupt, is a different
+	 * console: an interrupt-driven one, which is not the polled path that
+	 * has to work inside panic() and before there is an interrupt
+	 * controller.  That console is #497's, in userspace, and until it owns
+	 * the wire this window is the price of a line that arrives whole.
+	 *
+	 * What #551 changed is the window's LENGTH.  It was unbounded: a
+	 * transmitter that never emptied kept this processor here for ever,
+	 * and an unprivileged trap could ask for it.  cons_putc() now gives a
+	 * byte a bounded wait and a stuck port one poll a byte, so a hold is
+	 * at most one line at the wire's pace on a healthy port and about one
+	 * poll a byte on a dead one.  The longest line ring 3 can choose is
+	 * MACH_PRINT_MAX-1 bytes through mach_print(), and one line or
+	 * CONSOLE_CHUNK bytes through the console device (consolewrite).
+	 *
+	 * ⚠️ i386 is the same shape with a different mask: its spin lock does
+	 * not touch the interrupt flag, and MACH_RT being 0 there means the
+	 * preemption calls are empty (#486) -- the window is one line with
+	 * interrupts as the caller had them, which for a trap is on.
+	 */
 	disable_preemption();
 	va_start(listp, fmt);
 #if	MP_PRINTF

@@ -27,6 +27,7 @@
  */
 
 #define COM1 0x3F8			/* first serial port (QEMU -serial) */
+#include <ddb/cons_bound.h>		/* #551: CONS_THRE_SPINS, shared with cons.c */
 
 /* ------------------------------------------------------------------ */
 /*  Multiboot2 header — GRUB reads this to load the ELF64 image.  (No   */
@@ -131,20 +132,32 @@ _start:
 serial_puts32:
 	pushl	%eax
 	pushl	%ebx
+	pushl	%ecx
 	pushl	%edx
 1:	movb	(%esi), %bl
 	testb	%bl, %bl
 	jz	2f
+	/*
+	 * Bounded (#551): a transmitter that never empties loses this byte,
+	 * not the boot.  The same number cons.c gives up at, and no memory of
+	 * a stuck port -- there is nowhere to keep one yet, and the hand-off
+	 * says a few hundred bytes.
+	 */
+	movl	$CONS_THRE_SPINS, %ecx
 	movw	$COM1+5, %dx			/* wait THR empty (LSR bit 5) */
 3:	inb	%dx, %al
 	testb	$0x20, %al
-	jz	3b
-	movb	%bl, %al
+	jnz	4f
+	decl	%ecx
+	jnz	3b
+	jmp	5f				/* no room: the byte is dropped */
+4:	movb	%bl, %al
 	movw	$COM1+0, %dx
 	outb	%al, %dx
-	incl	%esi
+5:	incl	%esi
 	jmp	1b
 2:	popl	%edx
+	popl	%ecx
 	popl	%ebx
 	popl	%eax
 	ret
@@ -248,14 +261,20 @@ hang64:
 putc64:
 	pushq	%rdx
 	pushq	%rcx
+	pushq	%r8
 	movb	%al, %cl			/* stash the char */
+	movl	$CONS_THRE_SPINS, %r8d		/* bounded (#551), as serial_puts32 */
 	movw	$COM1+5, %dx			/* wait THR empty (LSR bit 5) */
 1:	inb	%dx, %al
 	testb	$0x20, %al
-	jz	1b
-	movb	%cl, %al
+	jnz	2f
+	decl	%r8d
+	jnz	1b
+	jmp	3f				/* no room: the byte is dropped */
+2:	movb	%cl, %al
 	movw	$COM1+0, %dx
 	outb	%al, %dx
+3:	popq	%r8
 	popq	%rcx
 	popq	%rdx
 	ret

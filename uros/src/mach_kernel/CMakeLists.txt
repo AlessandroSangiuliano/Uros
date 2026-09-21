@@ -148,6 +148,12 @@ option(UROS_ABLATE_558_PVFREELOCK "Build the #558 ablation: pv free list with no
 # answer that could not be told from the other two by taking it away would not
 # be worth having.  Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is never opened" OFF)
+# #551: put the unbounded UART spin back.  A bound nothing has ever hit is
+# untested code; scripts/uart-stall.py stops the transmitter on purpose, and
+# this is the kernel that has to be seen NOT coming back for the bounded one's
+# coming back to mean anything.  Never ON in a kernel anyone boots for anything
+# else.
+option(UROS_ABLATE_551_UNBOUNDED "Build the #551 ablation: cons_putc waits for the transmitter for ever" OFF)
 # #563: make the five tests that need a second processor believe they are alone,
 # so the line that DECLINES the question can be executed.  There is no boot flag
 # capping the processor count on this target and an AP cannot be made to fail to
@@ -180,6 +186,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons_cost.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ddb.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cont_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/disasm.c
@@ -354,6 +361,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_563_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_WINDOW=1)
       message(STATUS "#563 ablation: the copy's window is never opened (x86_64)")
+  endif()
+  if(UROS_ABLATE_551_UNBOUNDED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_551_UNBOUNDED=1)
+      message(STATUS "#551 ablation: cons_putc waits for the transmitter for ever (x86_64)")
   endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)

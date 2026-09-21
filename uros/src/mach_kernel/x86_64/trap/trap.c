@@ -209,13 +209,21 @@ void trap_init(void)
 /* ------------------------------------------------------------------ */
 /*  Reporting                                                           */
 /* ------------------------------------------------------------------ */
-#define COM1 0x3F8
-
 static void tputc(char c)
 {
-	while (!(inb(COM1 + 5) & 0x20))
-		;
-	outb(COM1, (uint8_t)c);
+	/*
+	 * cons_putc_wire(), and not a polled loop of its own (#551).  This
+	 * was the fourth unbounded wait on the transmitter in the tree, and
+	 * the one scripts/uart-stall.py found after the other three were
+	 * bounded: the boot reached its end on a stuck port, said "no handler
+	 * — halted", and then spun here on the first byte of that line for
+	 * ever, halted in every sense but the one the word means.  Past the
+	 * capture buffer on purpose -- a selftest that captures the console
+	 * must not swallow the one message read when everything has stopped
+	 * -- and needing no lock, which is why this path could never use
+	 * printf() and still cannot.
+	 */
+	cons_putc_wire(c);
 }
 
 static void tputs(const char *s)
