@@ -203,11 +203,12 @@ halt_all_cpus(boolean_t reboot)
 /*
  * A character to the console (#453).
  *
- * The machine-independent printf() reaches the screen through this one name,
+ * The machine-independent printf() reaches the console through this one name,
  * so it is the whole of what kern/printf.c needs from a machine: everything
  * above it -- format parsing, the log buffer, the %-conversions -- is shared,
- * and everything below is x86_64/ddb/cons.c, which already knows about the
- * serial port and the framebuffer.
+ * and everything below is x86_64/ddb/cons.c, which knows the serial port --
+ * and only that.  ⚠️ This claimed a framebuffer as well, and this target has
+ * none; the line above said "the screen" for the same reason (#497).
  *
  * ⚠️ A thin forwarder and not a rename.  cons_putc() is this target's own
  * interface and is called directly by early boot, before there is a kernel
