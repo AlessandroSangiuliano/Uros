@@ -140,6 +140,14 @@ option(UROS_ABLATE_558_PVLOCK "Build the #558 ablation: pv walks with no per-pag
 # down -- which is #531's panic.  With both off, 18 boots gave six of the
 # second and none of the first, and could not say which race they were.
 option(UROS_ABLATE_558_PVFREELOCK "Build the #558 ablation: pv free list with no lock" OFF)
+# #563: do not open the copy's window before the probe that tests whether a
+# trap inherits it.  One switch, two outcomes, and that is the point: on a
+# processor WITH SMAP the self-test must go WRONG, because there the window is
+# the thing under test; on one WITHOUT it the boot must stay green and keep
+# saying the processor has no SMAP, because there nothing changed.  A third
+# answer that could not be told from the other two by taking it away would not
+# be worth having.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is never opened" OFF)
 
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
@@ -329,6 +337,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_558_PVFREELOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVFREELOCK=1)
       message(STATUS "#558 ablation: the pv free list lock is OFF (x86_64)")
+  endif()
+  if(UROS_ABLATE_563_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_WINDOW=1)
+      message(STATUS "#563 ablation: the copy's window is never opened (x86_64)")
   endif()
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
