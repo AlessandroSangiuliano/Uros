@@ -37,6 +37,7 @@
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
+#include <ddb/cons_cost.h>	/* #551: what one line on the console costs */
 #include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
@@ -297,6 +298,14 @@ machine_processors_ready(void)
 		       idle >= (int) (got - 1) ? "" :
 		       " — WRONG, one that never goes idle is one the "
 		       "scheduler will never dispatch to (#461)");
+
+		/*
+		 * What one line on this console costs, once per boot (#551).
+		 * Here because it is the first point with the scheduler up,
+		 * the TSC calibrated and every other processor idle, so the
+		 * number is the line's and not the boot's.
+		 */
+		cons_cost_report();
 
 		/*
 		 * -P on a machine with more than one processor: prove that an
