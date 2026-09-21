@@ -115,10 +115,19 @@ fpu_stress_run(void)
 		break;
 	}
 
+	/*
+	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
+	 * means either the machine has one and the flag was passed anyway, or
+	 * the others were woken and never arrived.  The second is a real defect
+	 * and it is not this test's to report: startup.c already prints
+	 * "%u of %u processors reached the scheduler" in the word the harness
+	 * greps for.  Saying WRONG here a second time adds a symptom, not a
+	 * finding, and buries the one verdict that names the cause.
+	 */
 	if (target == PROCESSOR_NULL) {
-		printf("fpu_stress: WRONG — no application processor other "
-		       "than the boot processor is running; nothing was "
-		       "measured (#408)\n");
+		printf("fpu_stress: NOT ASKED — alone, no application processor "
+		       "other than the boot processor is running (#408)\n");
 		return;
 	}
 
@@ -184,10 +193,18 @@ fpu_stress_run(void)
 	 * which at 100 Hz is about a hundred opportunities to lose it.
 	 */
 	t0 = rdtsc();
+	/*
+	 * 🔑 NOT ASKED, not WRONG (#563).  An uncalibrated TSC is a property of
+	 * the machine this booted on -- qemu offers no invariant counter, and
+	 * tsc_calibrate() can lose its two-run agreement to host jitter -- so
+	 * there is no ruler here, and a test with no ruler has not failed, it
+	 * has not been run.  The sentence below already said as much while
+	 * printing the word the harness greps for.
+	 */
 	limit = tsc_hz();
 	if (limit == 0) {
-		printf("fpu_stress: WRONG — no calibrated TSC, so the run "
-		       "cannot be timed and nothing is claimed\n");
+		printf("fpu_stress: NOT ASKED — no calibrated TSC on this "
+		       "machine, so the run cannot be timed (#318)\n");
 		return;
 	}
 
