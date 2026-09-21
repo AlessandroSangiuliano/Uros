@@ -95,11 +95,14 @@ static int have_xsaves_unused;	/* offered by the processor, not taken */
  * ⚠️ AND THE CLOCK THESE NUMBERS WERE TAKEN AT IS NOT WHAT THE HARNESS SAID.
  * simo-victus drives amd-pstate-epp, where `powersave' is the ACTIVE mode and
  * scales up -- sampled at 3.7-3.9 GHz during the runs -- and not the passive
- * governor that pins to the floor.  scripts/run-conditions.sh exempts
+ * governor that pins to the floor.  scripts/run-conditions.sh exempted
  * intel_pstate from that reading and not amd-pstate, so it reported
- * `effective=1108MHz' for a processor running at nearly four times that.  It
- * is its own defect and it is not this one; recorded here because a number is
- * only as good as the condition written beside it.
+ * `effective=1108MHz' for a processor running at nearly four times that.
+ *
+ * That was its own defect and it is fixed (#564): the reading asks the machine
+ * now instead of knowing driver names.  The numbers here were taken before it
+ * was, so the logs that hold them still carry the false condition, and it is
+ * recorded because a number is only as good as the condition written beside it.
  */
 #define	FPU_ALLOW_XSAVES	0
 
