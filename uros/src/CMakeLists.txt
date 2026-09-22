@@ -290,6 +290,8 @@ endif()
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libflipc2)
   add_subdirectory(lib/libvfs)
+  # libfspager: ext_server links it, and nothing else was holding it out (#498).
+  add_subdirectory(lib/libfspager)
 endif()
 
 # ipc_bench on x86-64 (#552), beside the tests rather than behind
@@ -539,6 +541,11 @@ endif()
 # four servers were waiting on them, and this is one of the four.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/block_device_server)
+endif()
+
+# ext_server (#498), and what was actually holding it out.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/ext_server)
 endif()
 
 # Everything below is userland; skip it wholesale on a non-i386 target.
