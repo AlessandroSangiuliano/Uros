@@ -601,6 +601,13 @@ default_pager_thread(
 				     default_pager_msg_size,
 				     pset,
 				     server_options);
+		/*
+		 * mach_msg_server does not return while it is serving, so
+		 * getting here at all is the failure -- and WHY was being
+		 * dropped into a variable nobody read (#569).  It is the only
+		 * thing this panic could usefully say.
+		 */
+		dprintf(("mach_msg_server returned %d\n", kr));
 		Panic("mach_msg_server failed");
 	}
 }

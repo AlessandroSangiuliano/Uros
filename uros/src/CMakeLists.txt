@@ -83,13 +83,7 @@ add_compile_options(-ffreestanding)
 # working.  The answer then is to fix what it found or to name the category
 # here, beside the four below -- and a category named here is a debt, which is
 # the whole reason #432 wrote them down rather than dropping -Wall.
-add_compile_options(-Wall -Werror -Wold-style-definition -Wold-style-declaration
-  -Wno-missing-braces
-  -Wno-pointer-sign
-  -Wno-unused-but-set-variable
-  -Wno-unused-function
-  -Wno-unused-variable
-  -Wno-strict-aliasing)
+add_compile_options(-Wall -Wno-error -Wold-style-definition -Wold-style-declaration)
 
 # The ODE export directory uses pseudo-symlinks ("link ppc") for mach/machine.
 # Create a real symlink in the build tree instead: mach/machine -> the
