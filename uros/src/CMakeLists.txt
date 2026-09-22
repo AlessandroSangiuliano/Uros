@@ -552,6 +552,10 @@ endif()
 # four servers were waiting on it.  This is another of the four.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND OSFMK_BUILD_CHAR_SERVER)
   add_subdirectory(servers/char_server)
+  # And the client that asks it for a character each way (#497).  There was
+  # none on this target: char_server publishes "char" and nobody looked it up,
+  # so "the server starts" was the whole of what a boot could show.
+  add_subdirectory(tests/char_test)
 endif()
 
 # Everything below is userland; skip it wholesale on a non-i386 target.
