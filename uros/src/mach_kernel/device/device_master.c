@@ -2485,14 +2485,13 @@ check_io_claim(unsigned int port)
 		if (port < io_claim[i].base
 		    || port >= io_claim[i].base + io_claim[i].count)
 			continue;
-		if (io_claim[i].task == current_task())
+		if (io_claim[i].task == me)
 			return KERN_SUCCESS;
 
 		printf("device_io_port: 0x%x is inside a range another task "
 		       "claimed (#497)\n", port);
 		return KERN_NO_ACCESS;
 	}
-	(void)me;
 	return KERN_SUCCESS;
 }
 
