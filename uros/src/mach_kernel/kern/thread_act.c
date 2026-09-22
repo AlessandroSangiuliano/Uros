@@ -1031,7 +1031,7 @@ thread_getstatus(
  * act_init()	- Initialize activation handling code
  */
 void
-act_init()
+act_init(void)
 {
 	thr_act_zone = zinit(
 			sizeof(struct thread_activation),

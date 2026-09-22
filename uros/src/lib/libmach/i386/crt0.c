@@ -67,7 +67,7 @@ void (*_cthread_exit_routine)(int);
 
 extern char etext;
 
-static int __inline__ Entry_sp(void)
+static __inline__ int  Entry_sp(void)
 {
 	int sp;
 	__asm__ volatile ("leal 4(%%ebp), %0" : "=r" (sp));

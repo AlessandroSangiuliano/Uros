@@ -3668,7 +3668,7 @@ ikm_cache_put(
 
 
 void
-ikm_cache_init()
+ikm_cache_init(void)
 {
 	unsigned int	cpu;
 

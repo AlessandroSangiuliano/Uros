@@ -226,7 +226,7 @@ on_swapped_list(task_t task)
  *	task_swapper_init: [exported]
  */
 void
-task_swapper_init()
+task_swapper_init(void)
 {
 	queue_init(&swapped_tasks);
 	queue_init(&eligible_tasks);
@@ -1413,7 +1413,7 @@ int task_swap_ast_aborted = 0;
  *	Process an AST_SWAPOUT.
  */
 void
-swapout_ast()
+swapout_ast(void)
 {
 	spl_t		s;
 	thread_act_t	act;

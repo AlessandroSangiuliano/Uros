@@ -130,25 +130,25 @@ extern cpu_data_t	cpu_data[NCPUS];
 #define extern static
 #endif
 
-static struct thread_shuttle __inline__ *current_thread(void);
-static int __inline__		current_cpu_id(void);
+static __inline__ struct thread_shuttle *current_thread(void);
+static __inline__ int 		current_cpu_id(void);
 #if	!MACHINE_PREEMPTION_LEVEL
-static int __inline__		get_preemption_level(void);
+static __inline__ int 		get_preemption_level(void);
 #endif
-static int __inline__		get_simple_lock_count(void);
-static int __inline__		get_interrupt_level(void);
+static __inline__ int 		get_simple_lock_count(void);
+static __inline__ int 		get_interrupt_level(void);
 
 #if	!MACHINE_PREEMPTION_LEVEL
-static void __inline__		disable_preemption(void);
-static void __inline__		enable_preemption(void);
-static void __inline__		enable_preemption_no_check(void);
+static __inline__ void 		disable_preemption(void);
+static __inline__ void 		enable_preemption(void);
+static __inline__ void 		enable_preemption_no_check(void);
 
-static void __inline__		mp_disable_preemption(void);
-static void __inline__		mp_enable_preemption(void);
-static void __inline__		mp_enable_preemption_no_check(void);
+static __inline__ void 		mp_disable_preemption(void);
+static __inline__ void 		mp_enable_preemption(void);
+static __inline__ void 		mp_enable_preemption_no_check(void);
 #endif	/* !MACHINE_PREEMPTION_LEVEL */
 
-static struct thread_shuttle __inline__ *current_thread(void)
+static __inline__ struct thread_shuttle  *current_thread(void)
 {
 	return (cpu_data[cpu_number()].active_thread);
 }
@@ -158,50 +158,50 @@ static struct thread_shuttle __inline__ *current_thread(void)
  * indexing through cpu_number().  Real per-%gs version lives in
  * machine/cpu_data.h and gets used when MACH_RT is on.
  */
-static int __inline__	current_cpu_id(void)
+static __inline__ int 	current_cpu_id(void)
 {
 	return (cpu_data[cpu_number()].cpu_id);
 }
 
 #if	!MACHINE_PREEMPTION_LEVEL
-static int __inline__	get_preemption_level(void)
+static __inline__ int 	get_preemption_level(void)
 {
 	return (0);
 }
 #endif	/* !MACHINE_PREEMPTION_LEVEL */
 
-static int __inline__	get_simple_lock_count(void)
+static __inline__ int 	get_simple_lock_count(void)
 {
 	return (cpu_data[cpu_number()].simple_lock_count);
 }
 
-static int __inline__	get_interrupt_level(void)
+static __inline__ int 	get_interrupt_level(void)
 {
 	return (cpu_data[cpu_number()].interrupt_level);
 }
 
 #if	!MACHINE_PREEMPTION_LEVEL
-static void __inline__	disable_preemption(void)
+static __inline__ void 	disable_preemption(void)
 {
 }
 
-static void __inline__	enable_preemption(void)
+static __inline__ void 	enable_preemption(void)
 {
 }
 
-static void __inline__	enable_preemption_no_check(void)
+static __inline__ void 	enable_preemption_no_check(void)
 {
 }
 
-static void __inline__	mp_disable_preemption(void)
+static __inline__ void 	mp_disable_preemption(void)
 {
 }
 
-static void __inline__	mp_enable_preemption(void)
+static __inline__ void 	mp_enable_preemption(void)
 {
 }
 
-static void __inline__	mp_enable_preemption_no_check(void)
+static __inline__ void 	mp_enable_preemption_no_check(void)
 {
 }
 #endif	/* !MACHINE_PREEMPTION_LEVEL */
