@@ -168,7 +168,7 @@ db_force_whitespace(void)
 }
 
 void
-db_reset_more()
+db_reset_more(void)
 {
 	db_output_line = 0;
 }

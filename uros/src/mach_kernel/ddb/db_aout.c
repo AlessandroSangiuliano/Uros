@@ -682,9 +682,7 @@ aout_db_lookup_incomplete(
  * Display possible completion for the symbol
  */
 int
-aout_db_print_completion(stab, symstr)
-	db_symtab_t	*stab;
-	char *		symstr;
+aout_db_print_completion(db_symtab_t *stab, char *symstr)
 {
 
 	return(db_sym_parse_and_print_completion(aout_db_qualified_print_completion,

@@ -486,7 +486,7 @@ boot_script_parse_line (vm_offset_t start, vm_size_t size, char *cmdline)
 
 /* Execute commands previously parsed.  */
 int
-boot_script_exec ()
+boot_script_exec (void)
 {
   int cmd_index;
 

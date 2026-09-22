@@ -589,8 +589,7 @@ thread_timeout_setup(
  */
 
 void
-thread_go(thread)
-	thread_t thread;
+thread_go(thread_t thread)
 {
 	int	s, state;
 
@@ -640,8 +639,7 @@ thread_go(thread)
  */
 
 void
-thread_will_wait(thread)
-	thread_t thread;
+thread_will_wait(thread_t thread)
 {
 	int	s;
 
@@ -663,9 +661,7 @@ thread_will_wait(thread)
  */
 
 void
-thread_will_wait_with_timeout(thread, msecs)
-	thread_t thread;
-	mach_msg_timeout_t msecs;
+thread_will_wait_with_timeout(thread_t thread, mach_msg_timeout_t msecs)
 {
 	unsigned int ticks = convert_ipc_timeout_to_ticks(msecs);
 	int s;

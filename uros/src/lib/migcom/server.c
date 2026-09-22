@@ -310,15 +310,7 @@ WriteIncludes(FILE *file)
 static void
 WriteGlobalDecls(FILE *file)
 {
-    if (BeAnsiC) {
-        fprintf(file, "#define novalue void\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "#define novalue void\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "#define novalue int\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "#define novalue void\n");
     fprintf(file, "\n");
 
     if (RCSId != strNULL)
@@ -552,16 +544,7 @@ WriteDispatcher(FILE *file, statement_t *stats, unsigned int maxsize)
       * Then, the server routine
       */
     fprintf(file, "mig_external boolean_t %s\n", ServerDemux);
-    if (BeAnsiC) {
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(InHeadP, OutHeadP)\n");
-        fprintf(file, "\tmach_msg_header_t *InHeadP, *OutHeadP;\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
     
     fprintf(file, "{\n");
     fprintf(file, "\t/*\n");
@@ -610,16 +593,7 @@ WriteDispatcher(FILE *file, statement_t *stats, unsigned int maxsize)
      * Then, the <subsystem>_server_routine routine
      */
     fprintf(file, "mig_external mig_routine_t %s_routine\n", ServerDemux);
-    if (BeAnsiC) {
-        fprintf(file, "\t(mach_msg_header_t *InHeadP)\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "\t(mach_msg_header_t *InHeadP)\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(InHeadP)\n");
-        fprintf(file, "\tmach_msg_header_t *InHeadP;\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "\t(mach_msg_header_t *InHeadP)\n");
     
     fprintf(file, "{\n");
     fprintf(file, "\tregister int msgh_id;\n");
@@ -823,16 +797,28 @@ WriteCheckArgSize(FILE *file, register argument_t *arg)
     register ipc_type_t *btype = ptype->itElement;
     argument_t *count = arg->argCount;
     int multiplier = btype->itTypeSize;
+    boolean_t round = btype->itTypeSize % 4 != 0;
+
+    /*
+     * 🔑 THE ROUND-UP IS PARENTHESISED, AND THAT IS THE GENERATOR'S JOB (#504).
+     *
+     * This used to emit `x + 3 & ~3'.  It is CORRECT -- `+' binds tighter than
+     * `&' -- and it is what -Wparentheses names, 463 times across the two
+     * targets, which is 77% of every diagnostic this project's userland
+     * produces.  Fixing the emitted files would have been undone by the next
+     * regeneration; there are four lines in this program that decide it, and
+     * this is one of them.
+     */
+    if (round)
+	fprintf(file, "(");
 
     if (multiplier > 1)
 	fprintf(file, "%d * ", multiplier);
 
     fprintf(file, "In%dP->%s", count->argRequestPos, count->argMsgField); /* XXX */
 
-    /* If the base type size of the data field isn`t a multiple of 4,
-       we have to round up. */
-    if (btype->itTypeSize % 4 != 0)
-	fprintf(file, " + 3 & ~3");
+    if (round)
+	fprintf(file, " + 3) & ~3");
 }
 
 static void
@@ -910,11 +896,12 @@ InArgMsgField(register argument_t *arg)
      *	ipc_kobject_server is the only thing that dispatches one.
      */
 
-    if (!(arg->argFlags & flRetCode))
-	if (akCheck(arg->argKind, akbServerImplicit)) 
+    if (!(arg->argFlags & flRetCode)) {
+	if (akCheck(arg->argKind, akbServerImplicit))
 	    SafeSnprintf(who, sizeof(who), "TrailerP->");
 	else
 	    SafeSnprintf(who, sizeof(who), "In%dP->", arg->argRequestPos);
+    }
 
     if (IsKernelServer && akIdent(arg->argKind) == akeRequestPort)
 	SafeSnprintf(buffer, MAX_STR_LEN,
@@ -1116,11 +1103,12 @@ WriteRequestArgs(FILE *file, register routine_t *rt)
 static void
 WriteExtractArg(FILE *file, register argument_t *arg)
 {
-    if (akCheckAll(arg->argKind, akbSendRcv|akbVarNeeded))
+    if (akCheckAll(arg->argKind, akbSendRcv|akbVarNeeded)) {
 	if (akCheck(arg->argKind, akbSendKPD))
 	    (*arg->argKPD_Extract)(file, arg);
 	else
 	    WriteExtractArgValue(file, arg);
+    }
 
     if ((akIdent(arg->argKind) == akeCount) &&
 	akCheck(arg->argKind, akbReturnSnd)) {
@@ -2008,8 +1996,12 @@ WriteArgSize(FILE *file, register argument_t *arg)
     register ipc_type_t *ptype = arg->argType;
     register int bsize = ptype->itElement->itTypeSize;
     register argument_t *count = arg->argCount;
+    boolean_t round = bsize % 4 != 0;
 
-	    
+    /* Parenthesised where it is emitted; see WriteCheckArgSize (#504). */
+    if (round)
+	fprintf(file, "(");
+
     if (bsize > 1)
 	fprintf(file, "%d * ", bsize);
     if (ptype->itString || !akCheck(count->argKind, akbVarNeeded))
@@ -2019,12 +2011,8 @@ WriteArgSize(FILE *file, register argument_t *arg)
 	/* get count from argument */
 	SafeString(file, count->argVarName);
 
-    /*
-     * If the base type size is not a multiple of sizeof(int) [4],
-     * we have to round up.
-     */
-    if (bsize % 4 != 0)
-	fprintf(file, " + 3 & ~3");
+    if (round)
+	fprintf(file, " + 3) & ~3");
 }
 
 /*
@@ -2236,16 +2224,7 @@ WriteRoutine(FILE *file, register routine_t *rt)
 
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
     fprintf(file, "mig_internal novalue _X%s\n", rt->rtName);
-    if (BeAnsiC) {
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(InHeadP, OutHeadP)\n");
-        fprintf(file, "\tmach_msg_header_t *InHeadP, *OutHeadP;\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
 
     fprintf(file, "{\n");
     WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbRequest, "Request",
@@ -2367,8 +2346,7 @@ WriteServer(FILE *file, statement_t *stats)
     register size = 0;
 
     WriteProlog(file);
-    if (BeAnsiC)
-	WriteForwardDeclarations(file, stats);
+    WriteForwardDeclarations(file, stats);
     for (stat = stats; stat != stNULL; stat = stat->stNext)
 	switch (stat->stKind)
 	{

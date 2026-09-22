@@ -52,9 +52,39 @@ add_compile_options(-ffreestanding)
 # printf's new format attribute is what catches a 64-bit value printed through
 # a 32-bit conversion.  Nor dangling-else, maybe-uninitialized, unused-value,
 # address or array-parameter, which name real defects and are few.
-add_compile_options(-Wall
+#
+# 🔴 -Wno-parentheses IS GONE (#504), and it was 77% of the debt.
+#
+# It was hiding 463 diagnostics across the two targets and 443 of them were
+# ONE line of migcom, emitting `x + 3 & ~3' for a round-up.  That is why the
+# suppression existed and why removing it had to wait for the generator: the
+# emitted files are rewritten on every build, so fixing them would have lasted
+# until the next one.
+#
+# ⚠️ It also turns -Wdangling-else back on, which gcc folds into this switch --
+# ten of them, all in migcom's own source.
+#
+# 🔴 -Werror, WHICH IS THE GUARD #504 ASKED FOR (#504).
+#
+# That issue ends: "a warning appearing in generated output should fail
+# something rather than scroll past".  The obvious reading is a check on the
+# generated files, and it is the wrong one -- not every stub goes through
+# cmake/mig.cmake, several CMakeLists call migcom themselves, and a guard that
+# covers some of the subject is the shape #485 named: worse than none, because
+# it answers about the wrong thing without failing.
+#
+# Both trees build clean today, so the complete guard is also the simplest one.
+# What it protects is not a number: it is that "zero warnings on both targets"
+# stays a statement somebody can rely on instead of a thing that used to be
+# true.
+#
+# ⚠️ It will fail on a gcc newer than the one in front of me, when that gcc
+# learns a diagnostic this code has always deserved.  That is the guard
+# working.  The answer then is to fix what it found or to name the category
+# here, beside the four below -- and a category named here is a debt, which is
+# the whole reason #432 wrote them down rather than dropping -Wall.
+add_compile_options(-Wall -Werror -Wold-style-definition -Wold-style-declaration
   -Wno-missing-braces
-  -Wno-parentheses
   -Wno-pointer-sign
   -Wno-unused-but-set-variable
   -Wno-unused-function

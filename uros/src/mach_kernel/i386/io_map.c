@@ -81,9 +81,7 @@ extern vm_offset_t	virtual_avail;
  * Mach VM is running.
  */
 vm_offset_t
-io_map(phys_addr, size)
-	vm_offset_t	phys_addr;
-	vm_size_t	size;
+io_map(vm_offset_t phys_addr, vm_size_t size)
 {
 	vm_offset_t	start;
 

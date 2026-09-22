@@ -1133,7 +1133,7 @@ db_show_port_id(
  *	Useful system state when the world has hung.
  */
 void
-db_system_stats()
+db_system_stats(void)
 {
 	extern void	db_device(void);
 	extern void	db_sched(void);
