@@ -16,7 +16,27 @@
 #define UART_DATA	0		/* receive when read, transmit when written */
 #define UART_LCR	3
 #define UART_MCR	4
+#define UART_IIR	2	/* read: interrupt id, and whether the FIFO is on */
 #define UART_LSR	5
+
+#define IIR_FIFO_ON	0xC0	/* both bits: a 16550 with a working FIFO */
+
+/*
+ * How many bytes may be handed over after ONE look at the transmitter (#567).
+ *
+ * 🔑 THRE MEANS THE FIFO IS EMPTY, NOT THAT ONE BYTE FITS.  boot.S turns the
+ * FIFO on -- FCR 0xC7 -- and every writer here then waited for THRE before
+ * EVERY byte, which is the worst of both: the sixteen-byte buffer is enabled
+ * and the code uses one slot of it, paying a read of the line status register
+ * for each byte.  Under KVM that read is an exit to the host, so it was half
+ * the cost of the console.
+ *
+ * ⚠️ PROBED, NOT ASSUMED.  A 16450 has no FIFO and takes one byte at a time;
+ * writing sixteen to it drops fifteen.  The 16550 says so in IIR's top two
+ * bits after FCR has been written, which is the only way to tell them apart,
+ * and a port that does not answer keeps the old depth of one.
+ */
+#define CONS_FIFO_DEPTH	16
 
 #define LSR_DATA_READY	0x01
 #define LSR_THR_EMPTY	0x20
@@ -84,6 +104,8 @@ static unsigned	 cons_capture_max;
  * and a lock here would cost the one path that has to work when locks do not.
  */
 static unsigned	cons_tx_stuck;		/* the last byte found no room in its bound */
+static unsigned	cons_fifo_depth;	/* 0 until probed; then 16 or 1 */
+static unsigned	cons_fifo_room;		/* bytes still writable without looking */
 static unsigned	cons_tx_dropped_count;
 static unsigned	cons_tx_spins_peak;	/* most polls one byte needed since reset */
 
@@ -133,6 +155,31 @@ void cons_putc(char c)
 	cons_putc_wire(c);
 }
 
+/*
+ * Ask the port whether it has a FIFO, once (#567).
+ *
+ * Lazily, on the first byte, because there is no other moment that is both
+ * after boot.S has written FCR and before anything prints -- this file has no
+ * init of its own, deliberately: it is the writer of last resort and the fewer
+ * things that must have happened before it works, the better.
+ */
+static void cons_fifo_probe(void)
+{
+	/*
+	 * ABLATE_567_NO_FIFO keeps the old depth of one, which is what this
+	 * file did before: the FIFO enabled and one slot of it used.  It is
+	 * the other arm of the measurement, in a binary that differs in
+	 * nothing else.
+	 */
+#if	ABLATE_567_NO_FIFO
+	cons_fifo_depth = 1;
+#else
+	cons_fifo_depth = ((inb(COM1 + UART_IIR) & IIR_FIFO_ON) == IIR_FIFO_ON)
+			  ? CONS_FIFO_DEPTH : 1;
+#endif
+	cons_fifo_room = 0;
+}
+
 void cons_putc_wire(char c)
 {
 	/*
@@ -142,20 +189,34 @@ void cons_putc_wire(char c)
 	 */
 	unsigned spins = 0;
 
-	while (!(inb(COM1 + UART_LSR) & LSR_THR_EMPTY)) {
+	if (cons_fifo_depth == 0)
+		cons_fifo_probe();
+
+	/*
+	 * A look at the transmitter buys a whole FIFO (#567).  When the room
+	 * from the last look is used up -- or when the port has no FIFO, where
+	 * the depth is one and this is every byte, exactly as before -- look
+	 * again.
+	 */
+	if (cons_fifo_room == 0) {
+		while (!(inb(COM1 + UART_LSR) & LSR_THR_EMPTY)) {
 #if	!ABLATE_551_UNBOUNDED
-		if (cons_tx_stuck || ++spins >= CONS_THRE_SPINS) {
-			cons_tx_stuck = 1;
-			cons_tx_dropped_count++;
-			return;
-		}
+			if (cons_tx_stuck || ++spins >= CONS_THRE_SPINS) {
+				cons_tx_stuck = 1;
+				cons_tx_dropped_count++;
+				return;
+			}
 #endif
-		cpu_pause();
+			cpu_pause();
+		}
+		cons_tx_stuck = 0;
+		if (spins > cons_tx_spins_peak)
+			cons_tx_spins_peak = spins;
+		cons_fifo_room = cons_fifo_depth;
 	}
-	cons_tx_stuck = 0;
-	if (spins > cons_tx_spins_peak)
-		cons_tx_spins_peak = spins;
+
 	outb(COM1 + UART_DATA, (uint8_t)c);
+	cons_fifo_room--;
 }
 
 void cons_puts(const char *s)
@@ -383,6 +444,13 @@ int cons_loopback_probe(uint8_t byte)
 	 * the report explaining why.
 	 */
 	outb(COM1 + UART_MCR, saved_mcr);
+
+	/*
+	 * Whatever this did to the port, the room counted before it is not
+	 * counted any more (#567): the next byte looks at the transmitter
+	 * again rather than trusting a number taken across a loopback.
+	 */
+	cons_fifo_room = 0;
 	return result;
 }
 

@@ -162,6 +162,9 @@ option(UROS_ABLATE_566_NO_GRACE "Build the #566 ablation: pmap_destroy does not 
 # shootdown standing still until every other processor has acknowledged.
 # UNSAFE: the caller goes on with stale translations elsewhere.
 option(UROS_ABLATE_566_NO_IPI_WAIT "Build the #566 ablation: ipi_call_others does not wait for the acknowledgements" OFF)
+# #567: one byte per look at the transmitter, which is what this tree did
+# before the FIFO was used.  The other arm of that measurement.
+option(UROS_ABLATE_567_NO_FIFO "Build the #567 ablation: one byte per look at the transmitter" OFF)
 # #563: make the five tests that need a second processor believe they are alone,
 # so the line that DECLINES the question can be executed.  There is no boot flag
 # capping the processor count on this target and an AP cannot be made to fail to
@@ -381,6 +384,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_566_NO_IPI_WAIT)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_IPI_WAIT=1)
       message(STATUS "#566 ablation: ipi_call_others does not wait for acks (x86_64)")
+  endif()
+  if(UROS_ABLATE_567_NO_FIFO)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_FIFO=1)
+      message(STATUS "#567 ablation: one byte per look at the transmitter (x86_64)")
   endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
