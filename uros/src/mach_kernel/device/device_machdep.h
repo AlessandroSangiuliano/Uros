@@ -76,6 +76,24 @@ extern int		device_md_irq_is_level(unsigned int irq);
 
 /* Stop and resume delivery of one interrupt. */
 extern void		device_md_irq_mask(unsigned int irq);
+
+/*
+ * The pending count of a forwarded line, noted and taken (#538).
+ *
+ * 🔑 THE HANDLER INCREMENTS ON WHICHEVER PROCESSOR TOOK THE INTERRUPT, and
+ * the drain thread reads-and-zeroes on its own.  splhigh() around the drain
+ * masks that processor's interrupts and nobody else's, so a front noted on a
+ * second processor between the read and the zero was simply lost -- and a
+ * plain `++' against an exchange is no better, because an unlocked
+ * read-modify-write can land its store after the exchange and count the
+ * front twice.  Both halves are locked instructions: `lock add' to note,
+ * `xchg' to take.
+ *
+ * Behind the machine because <sync/atomic.h> is x86-64's own and this table
+ * is machine-independent; i386 spells the same two instructions inline.
+ */
+extern void		device_md_irq_pending_note(volatile unsigned int *p);
+extern unsigned int	device_md_irq_pending_take(volatile unsigned int *p);
 extern void		device_md_irq_unmask(unsigned int irq);
 
 /*

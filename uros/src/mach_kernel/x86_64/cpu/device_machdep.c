@@ -34,6 +34,7 @@
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
 #include <ddb/cons.h>	/* #497: who owns COM1 */
+#include <sync/atomic.h>	/* #538: atomic_add32 / atomic_swap32 */
 #include <kern/misc_protos.h>	/* printf */
 #include <trap/trap.h>	/* the vector table, and the replay path */
 
@@ -94,6 +95,18 @@ device_md_irq_unmask(unsigned int irq)
 {
 	if (ioapic_present())
 		ioapic_unmask(acpi_irq_to_gsi((uint8_t)irq));
+}
+
+void
+device_md_irq_pending_note(volatile unsigned int *p)
+{
+	(void)atomic_add32((volatile uint32_t *)p, 1u);
+}
+
+unsigned int
+device_md_irq_pending_take(volatile unsigned int *p)
+{
+	return atomic_swap32((volatile uint32_t *)p, 0u);
 }
 
 unsigned int

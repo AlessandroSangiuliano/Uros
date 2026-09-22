@@ -97,6 +97,25 @@ device_md_irq_unmask(unsigned int irq)
  * ⚠️ i386_ioport_t, which is a name only this machine has.  Keeping the cast
  * here is the reason device_master.c no longer needs to know it exists.
  */
+/*
+ * #538: the two locked instructions, spelled here because i386 has no
+ * <sync/atomic.h>.  `lock addl' and `xchgl' -- the latter locks by itself.
+ */
+void
+device_md_irq_pending_note(volatile unsigned int *p)
+{
+	__asm__ volatile("lock addl $1, %0" : "+m"(*p) : : "memory");
+}
+
+unsigned int
+device_md_irq_pending_take(volatile unsigned int *p)
+{
+	unsigned int v = 0;
+
+	__asm__ volatile("xchgl %0, %1" : "+r"(v), "+m"(*p) : : "memory");
+	return v;
+}
+
 unsigned int
 device_md_io_read(unsigned int port, unsigned int size)
 {

@@ -174,7 +174,9 @@ irq_forward_handler(int irq)
 	if (irq_forward_mask_safe(irq))
 		device_md_irq_mask(irq);
 
-	irq_pending[irq]++;
+	/* Locked, because the drain takes this count from another processor
+	 * (#538); see device_machdep.h. */
+	device_md_irq_pending_note(&irq_pending[irq]);
 	thread_wakeup((event_t)&irq_thread_wake_event);
 }
 
@@ -191,13 +193,20 @@ irq_forward_thread(void)
 			ipc_port_t notify;
 			unsigned int pending;
 
+			/*
+			 * splhigh() still guards the TABLE fields against the
+			 * handler on this processor; the COUNT is taken with an
+			 * exchange because the handler may be on another one
+			 * (#538).  Taking it zeroes it, so a burst noted on a
+			 * line that was unregistered meanwhile is dropped here
+			 * rather than left pending for ever.
+			 */
 			s = splhigh();
-			pending = irq_pending[irq];
+			pending = device_md_irq_pending_take(&irq_pending[irq]);
 			if (pending == 0 || !irq_forward_table[irq].active) {
 				splx(s);
 				continue;
 			}
-			irq_pending[irq] = 0;
 			notify = irq_forward_table[irq].notify_port;
 			splx(s);
 
@@ -953,13 +962,20 @@ ds_master_device_intr_register(
 	if (notify_port == IP_NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	if (irq_forward_table[irq].active)
-		return KERN_RESOURCE_SHORTAGE;	/* already registered */
 
 	/* Spawn the bottom-half kthread on first registration. */
 	irq_forward_thread_start();
 
 	s = splhigh();
+	/*
+	 * Inside the section and not before it (#538): read outside, two
+	 * registrations for one line could both find it free, and both would
+	 * write it and both would register a machine handler for it.
+	 */
+	if (irq_forward_table[irq].active) {
+		splx(s);
+		return KERN_RESOURCE_SHORTAGE;	/* already registered */
+	}
 
 	/*
 	 * The table entry before the claim, because the claim is what makes
