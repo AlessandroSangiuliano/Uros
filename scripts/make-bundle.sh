@@ -89,7 +89,8 @@ BOOTSTRAP_CMF="$MANIFESTS/bootstrap.cmf"
 # census taken on x86-64 could not see them.  default_pager opens its backing
 # store and ext_server mounts the root; both were refused the first boot after
 # the permissive path went, and the root filesystem is what the rest of the
-# boot stands on.
+# boot stands on.  (ext_server has run on x86-64 as well since #498; the
+# census was taken before that.)
 DEFAULT_PAGER_CMF="$MANIFESTS/default_pager.cmf"
 EXT_SERVER_CMF="$MANIFESTS/ext_server.cmf"
 # #511: and the display server, which claims a display-class device so the

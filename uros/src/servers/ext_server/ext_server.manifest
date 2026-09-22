@@ -6,9 +6,9 @@
 #	ext2: cap_request(ahci0a) failed (2413)
 #	bootstrap: '.../ext_server' task terminated
 #
-# ⚠️ It does not run on x86-64 yet -- that is #498 -- so it is compiled on both
-# targets and shipped in i386's bundle only.  When it crosses, the .cmf has to
-# be named in the x86-64 bundle rule as well: a manifest that exists in the
+# ⚠️ Shipped on BOTH targets since #498, by two different rules: i386's bundle
+# is assembled by scripts/make-bundle.sh, x86-64's by servers/bootstrap's
+# CMakeLists.txt, and the .cmf is named in each.  A manifest that exists in the
 # export tree and is not in the bundle is a policy nobody reads, which is worse
 # than none because it looks like one.
 
