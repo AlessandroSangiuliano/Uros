@@ -48,17 +48,22 @@
  *   subscriber.  Subscribers wake up and call tty_read to drain.  No
  *   per-byte fan-out — would just multiply IPC cost for no benefit.
  *
- * TX model:
- *   tty_write asks the transmitter for room once per FIFO-full and writes
- *   the bytes one at a time.  No DMA on 16550.  A
- *   per-instance flag prevents concurrent writers (the server is
- *   single-threaded today, but the flag is cheap insurance against
- *   future re-entrancy if char_server ever spawns helper threads).
+ * TX model (#497):
+ *   tty_write puts bytes in a ring, fills the transmitter once, arms the
+ *   THRE interrupt if anything is left, and returns.  The interrupt refills
+ *   one FIFO-full per fire and disarms itself on an empty ring.  On a wire
+ *   the kernel still writes (the claim reply says), the fill is instead
+ *   "everything the chip takes right now", so a line stays tight.  The only
+ *   wait is a full ring, and it yields with the lock released rather than
+ *   spinning; after UART_TX_RING_WAITS of that the bytes are dropped,
+ *   counted, and the write says so.  No DMA on 16550.  A mutex, not a
+ *   flag, serialises the two writers this server now has.
  */
 
 #include <mach.h>
 #include <mach/mach_traps.h>
 #include <mach/message.h>
+#include <mach/thread_switch.h>	/* #497: a full ring yields, never spins */
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
@@ -88,25 +93,32 @@
 #define UART_IRQ	4u
 
 /*
- * How many times one byte may ask the transmitter for room (#497).
+ * The transmit ring, and how long a writer may wait for room in it (#497).
  *
- * 🔥 THIS WAS 1000000, WHICH IS NOT A BOUND, IT IS A NUMBER.  #551 is the
- * same defect one layer down -- an unbounded wait on this chip -- and the
- * kernel's console answered it with 4000 polls, reasoned at cons.h: a byte at
- * 115200 baud takes 87 us on the wire and a port poll about one, so a healthy
- * byte polls near 90 times and the bound is forty of those.  The chip is the
- * same chip; there was no reason for the driver's number to be 250 times the
- * kernel's except that nobody had picked it.
+ * 🔑 THE DRIVER WAS WRITTEN WITH THE CONSOLE'S TECHNIQUE.  It polled THR-empty
+ * before every byte -- first a million times, then 4000, then once per FIFO --
+ * and every version of that is the right shape for a panic console, where
+ * interrupts cannot be relied on, and the wrong one for a driver.  Linux's
+ * 8250, FreeBSD's and NetBSD's all do the same thing instead: bytes go into a
+ * ring, the transmitter is filled once, and the THRE interrupt refills it as
+ * it drains.  The writer never waits for the chip.  In a microkernel that
+ * matters more than in Linux, because a userspace thread spinning on a port
+ * is burning a scheduling quantum to do nothing.
  *
- * ⚠️ And on x86-64 it stopped being free.  Each poll is now an RPC (see the
- * accessors below), so the old value was up to a MILLION round trips per
- * byte -- a stall that would have looked like a hang and measured like one.
+ * The ring is twice CHR_BUF_MAX so that one MIG write always fits an empty
+ * ring (a ring of N holds N-1) with a second in flight behind it.
  *
- * ⚠️ i386 changes with it, from 1000000 to 4000.  Its polls are `inb' and
- * cost differently, but the reasoning above is about the UART and not about
- * the instruction, and one number with one reason beats two with none.
+ * ⚠️ UART_TX_RING_WAITS is the one wait left, and it is a count of YIELDS and
+ * not of polls: a writer that finds the ring full gives the CPU up for a
+ * millisecond at a time and looks again.  At 115200 baud the chip frees a
+ * FIFO-full every 1.4 ms, so 64 tries is some forty FIFOs of wire time -- a
+ * ring that stays full that long is a chip that has stopped, and the bytes
+ * are then dropped and counted rather than waited for (#551).
  */
-#define UART_TX_POLLS	4000u
+#define UART_TX_RING_SIZE	8192u	/* power of two, > CHR_BUF_MAX */
+#define UART_TX_RING_MASK	(UART_TX_RING_SIZE - 1u)
+#define UART_TX_RING_WAITS	64u
+#define UART_TX_YIELD_MS	1
 
 #define UART_RHR	0u	/* DLAB=0: receive holding		*/
 #define UART_THR	0u	/* DLAB=0: transmit holding		*/
@@ -316,7 +328,6 @@ struct uart_priv {
 	 */
 	pthread_mutex_t	tx_lock;
 	int		tx_lock_ready;
-	int		wire_is_ours;	/* the kernel's console stepped back (#497) */
 
 	/* How many bytes the transmitter will take without being asked
 	 * again, and how many it takes when it is (#497, after #567).
@@ -326,10 +337,30 @@ struct uart_priv {
 	unsigned int	fifo_depth;
 	unsigned int	fifo_room;
 
-	/* How many times a byte exhausted UART_TX_POLLS waiting for room.
-	 * #551's lesson: a stall that nobody counted is a stall nobody can
-	 * be shown.  Zero on every healthy boot. */
-	uint32_t	tx_stalls;
+	/*
+	 * The transmit ring (#497).  Producer = tty_write, from whichever
+	 * thread calls it; consumer = the pump, from the THRE interrupt on
+	 * the dispatch thread or from a writer's own kick.  All of it under
+	 * tx_lock, because the two really are different threads now.
+	 */
+	uint8_t		tx_ring[UART_TX_RING_SIZE];
+	uint32_t	tx_head;
+	uint32_t	tx_tail;
+	int		thre_armed;	/* IER_THRE is set in the chip */
+	int		wire_is_ours;	/* the kernel's console stepped back */
+
+	/*
+	 * Which path fed the FIFO, and what it cost.  Counted apart for the
+	 * same reason rx_by_irq and rx_by_poll are: "bytes went out" and
+	 * "the interrupt drove them" are two claims.  tx_waits is how often
+	 * a writer found the ring full and yielded; tx_drops is bytes given
+	 * up on after UART_TX_RING_WAITS of that.  Both zero on a healthy
+	 * boot under qemu, whose transmitter is always ready.
+	 */
+	uint32_t	tx_by_irq;
+	uint32_t	tx_by_kick;
+	uint32_t	tx_waits;
+	uint32_t	tx_drops;
 
 	/* Which path carried a received byte (#497).  The IRQ is the one
 	 * this driver is built around; the read-path peek below is #382's
@@ -378,6 +409,140 @@ uart_notify_subscribers(struct uart_priv *p)
 			p->subscribers[i] = MACH_PORT_NULL;
 		}
 	}
+}
+
+/* ============================================================
+ * Transmit: a ring, one FIFO per kick, one FIFO per interrupt (#497).
+ *
+ * 🔑 THE WRITER NEVER WAITS FOR THE CHIP.  tty_write puts its bytes in the
+ * ring, fills the transmitter once if it has room, arms the THRE interrupt
+ * if anything is left, and returns.  The interrupt refills one FIFO-full
+ * each time the transmitter empties and disarms itself when the ring is
+ * empty -- a THRE that stays enabled over an empty ring fires for ever.
+ * This is serial8250_tx_chars() by another name, and it is what every
+ * 16550 driver that is not a panic console does.
+ *
+ * ⚠️ ONE FIFO PER KICK, NOT "AS MUCH AS THE CHIP TAKES NOW", and the
+ * reason is honesty about what a boot can show.  qemu's transmitter is
+ * ready again before the write that filled it returns (#567), so a kick
+ * that looped on LSR would drain any burst synchronously and the
+ * interrupt path would never run under the only machine this is tested
+ * on.  Filling once and handing the rest to the interrupt costs a message
+ * round trip per sixteen bytes -- noise beside the 80 us each of those
+ * bytes costs under KVM -- and makes the path that matters on real
+ * hardware the path a boot actually exercises.
+ *
+ * ⚠️ IER is written from three places and always through uart_ier_write,
+ * so that what the chip has is a function of the ring and never of
+ * whichever caller wrote it last.
+ * ============================================================ */
+
+static void
+uart_ier_write(struct uart_priv *p)
+{
+	uint8_t ier = IER_RXRDY | IER_LSI;
+
+	p->thre_armed = (p->tx_head != p->tx_tail);
+	if (p->thre_armed)
+		ier |= IER_THRE;
+	uart_out(UART_IER, ier);
+}
+
+/* Write IER only if the ring's emptiness changed since the chip last
+ * heard: an RPC per byte would otherwise become two. */
+static void
+uart_ier_sync(struct uart_priv *p)
+{
+	int want = (p->tx_head != p->tx_tail);
+
+	if (want != p->thre_armed)
+		uart_ier_write(p);
+}
+
+/*
+ * Ask the chip once whether it has room, and move what fits.  No loop on
+ * LSR: a transmitter that is not ready gets the THRE interrupt, not a
+ * second look.  The counter says which path is paying.
+ */
+static void
+uart_tx_kick(struct uart_priv *p, uint32_t *counter)
+{
+	for (;;) {
+		if (p->fifo_room == 0 && p->tx_tail != p->tx_head
+		    && (uart_in(UART_LSR) & LSR_THRE))
+			p->fifo_room = p->fifo_depth;
+		if (p->tx_tail == p->tx_head || p->fifo_room == 0)
+			break;
+
+		while (p->tx_tail != p->tx_head && p->fifo_room != 0) {
+			uart_out(UART_THR, p->tx_ring[p->tx_tail]);
+			p->tx_tail = (p->tx_tail + 1u) & UART_TX_RING_MASK;
+			p->fifo_room--;
+			(*counter)++;
+		}
+
+		/*
+		 * 🔑 ONE FIFO WHEN THE WIRE IS OURS, EVERYTHING THE CHIP WILL
+		 * TAKE WHEN IT IS NOT -- and the kernel decided which, in the
+		 * reply to the claim.  On a wire we own, the rest belongs to
+		 * the THRE interrupt and a line spread over interrupts costs
+		 * nothing.  On a wire the kernel still writes (i386, until
+		 * #544), a line spread over interrupts is a line with gaps
+		 * in it, and every gap is a place the other writer lands: the
+		 * first boot of interrupt-driven TX there failed the smoke
+		 * twice in two, GARBLED, a kernel line inside "hello".  So a
+		 * sharer drains while the chip says ready and stops only when
+		 * it says not -- the tight lines it always had -- and the
+		 * interrupt carries only the tail a slow chip leaves.
+		 */
+		if (p->wire_is_ours)
+			break;
+	}
+
+	uart_ier_sync(p);
+}
+
+/*
+ * The ring is full.  Make room without depending on anybody else, and
+ * without spinning.
+ *
+ * 🔴 IT CANNOT WAIT FOR THE INTERRUPT, and the reason is structural: the
+ * THRE interrupt is dispatched by char_server's main thread, and a client's
+ * tty_write runs ON that thread.  A writer that parked itself waiting for
+ * the interrupt to drain the ring would be waiting for itself.  So it kicks
+ * the chip directly -- one LSR read, one FIFO -- and between kicks it gives
+ * the CPU up for a millisecond.
+ *
+ * 🔥 WITH THE LOCK HELD, AND THE FIRST VERSION RELEASED IT.  Releasing it
+ * looked like courtesy to the other thread; what it actually did was let
+ * the other writer enter the ring in the middle of this one's line -- the
+ * kernel's klog and a client's reply woven together at ring granularity,
+ * which is #544 rebuilt one layer up in the code that exists to remove it.
+ * A line is atomic or the single writer buys nothing.  The other writer
+ * sleeps on the mutex; the interrupt's transmit half trylocks and steps
+ * aside, because whoever holds this lock is pumping the chip already.
+ *
+ * Returns 1 when a byte fits, 0 after UART_TX_RING_WAITS tries.
+ */
+static int
+uart_tx_wait_ring(struct uart_priv *p)
+{
+	unsigned int tries;
+
+	for (tries = 0; tries < UART_TX_RING_WAITS; tries++) {
+		uart_tx_kick(p, &p->tx_by_kick);
+		if (((p->tx_head + 1u) & UART_TX_RING_MASK) != p->tx_tail)
+			return 1;
+		p->tx_waits++;
+		if (p->tx_waits == 1)
+			printf("uart: the transmit ring filled and a writer "
+			       "yielded for the first time — the chip is "
+			       "slower than what is being said to it "
+			       "(#497)\n");
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+			      UART_TX_YIELD_MS);
+	}
+	return 0;
 }
 
 /* ============================================================
@@ -445,6 +610,40 @@ uart_drain(struct uart_priv *p, int from_irq)
 			 * same counter. */
 			p->overrun_drops++;
 		}
+	}
+
+	/*
+	 * The transmit half (#497), and it runs whether or not a byte came
+	 * IN: a THRE interrupt on an idle line is exactly the case with
+	 * nothing to receive.  Under tx_lock because the ring is shared with
+	 * whichever thread is writing.
+	 */
+	if (from_irq && p->tx_lock_ready
+	    && pthread_mutex_trylock(&p->tx_lock) == 0) {
+		/*
+		 * trylock and not lock: a holder is a writer mid-line, and a
+		 * writer mid-line kicks the chip itself (uart_tx_wait_ring).
+		 * Blocking here would stall the thread that dispatches every
+		 * interrupt -- the RX line included -- for the length of the
+		 * other thread's write.  An edge stepped aside from is not
+		 * lost: the holder's closing kick reads LSR fresh and re-arms.
+		 */
+		int first = 0;
+
+		if (p->tx_tail != p->tx_head) {
+			uint32_t before = p->tx_by_irq;
+
+			uart_tx_kick(p, &p->tx_by_irq);
+			first = (before == 0 && p->tx_by_irq != 0);
+		}
+		(void)pthread_mutex_unlock(&p->tx_lock);
+
+		if (first)
+			printf("uart: the THRE interrupt refilled the "
+			       "transmitter — TX is interrupt-driven on this "
+			       "target; %u bytes had left by writers' own "
+			       "kicks before it fired (#497)\n",
+			       (unsigned)p->tx_by_kick);
 	}
 
 	if (!got_any)
@@ -602,9 +801,14 @@ uart_attach(void *priv)
 		return -1;
 	}
 
-	/* Enable RX-data and line-status interrupts.  Leave THRE off:
-	 * we drive TX polled, so a THRE IRQ would just be noise. */
-	uart_out(UART_IER, IER_RXRDY | IER_LSI);
+	/*
+	 * RX-data and line-status interrupts on; THRE follows the ring, which
+	 * is empty here.  This used to say "leave THRE off: we drive TX
+	 * polled, so a THRE IRQ would just be noise" -- the console's
+	 * technique, written into a driver.
+	 */
+	p->tx_head = p->tx_tail = 0;
+	uart_ier_write(p);
 
 	p->attached = 1;
 	printf("uart: COM1 attached @ 115200 8N1 (IRQ %u)\n", UART_IRQ);
@@ -617,7 +821,11 @@ uart_detach(void *priv)
 	struct uart_priv *p = priv;
 	unsigned int i;
 
+	(void)pthread_mutex_lock(&p->tx_lock);
 	uart_out(UART_IER, 0x00);
+	p->tx_head = p->tx_tail = 0;	/* what was queued is not going out */
+	p->thre_armed = 0;
+	(void)pthread_mutex_unlock(&p->tx_lock);
 	(void)char_core_irq_unregister(UART_IRQ);
 
 	for (i = 0; i < p->n_subscribers; i++) {
@@ -674,80 +882,51 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
  * tty_write — polled THR-empty, byte-by-byte.
  * ============================================================ */
 
-/*
- * Wait until the transmitter will take at least one byte, and record how
- * many it will take (#497).
- *
- * 🔑 THE POLL WAS PER BYTE AND THE FIFO IS SIXTEEN DEEP.  When LSR says
- * THR-empty on a chip whose FIFO is on, the whole FIFO is empty, so sixteen
- * bytes may go in before the question is worth asking again.  Asking once a
- * byte was merely wasteful while a poll was an `inb'; on x86-64 a poll is an
- * RPC, and an 80-byte line went from 160 kernel entries to 85.
- *
- * ⚠️ This is the kernel's own bookkeeping from #567 (cons_fifo_room), on the
- * same chip, for the same reason.  It is duplicated rather than shared
- * because the two writers must not share state -- that is the whole of what
- * #497 is about -- but the arithmetic had better agree.
- *
- * ⚠️ On the bound running out, room is left at ONE.  Not zero, which would
- * poll again for the next byte and turn a stall into a stall per byte; and
- * not depth, which would claim room the chip never reported.  The byte goes
- * out into a transmitter that may not be ready -- one lost byte on a port
- * that is already misbehaving, and the count below says it happened.
- */
-static void
-uart_tx_wait_room(struct uart_priv *p)
-{
-	unsigned int polls;
-
-	for (polls = 0; polls < UART_TX_POLLS; polls++) {
-		if (uart_in(UART_LSR) & LSR_THRE) {
-			p->fifo_room = p->fifo_depth;
-			return;
-		}
-	}
-
-	p->tx_stalls++;
-	p->fifo_room = 1u;
-}
-
 static int
 uart_tty_write(void *priv, const char *buf, size_t len)
 {
 	struct uart_priv *p = priv;
 	size_t i;
+	int dropped = 0;
 
 	if (!p->tx_lock_ready)
 		return -1;
 	(void)pthread_mutex_lock(&p->tx_lock);
 
 	for (i = 0; i < len; i++) {
-		if (p->fifo_room == 0)
-			uart_tx_wait_room(p);
-		uart_out(UART_THR, (uint8_t)buf[i]);
-		p->fifo_room--;
+		if (((p->tx_head + 1u) & UART_TX_RING_MASK) == p->tx_tail
+		    && !uart_tx_wait_ring(p)) {
+			/*
+			 * Counted and REPORTED to the caller, not absorbed:
+			 * a write that returns success for bytes it threw
+			 * away is #570's shape from the other side.
+			 */
+			if (p->tx_drops == 0)
+				printf("uart: dropping %u bytes — the ring "
+				       "stayed full for %u yields, the chip "
+				       "has stopped taking them (#497)\n",
+				       (unsigned)(len - i), UART_TX_RING_WAITS);
+			p->tx_drops += (uint32_t)(len - i);
+			dropped = 1;
+			break;
+		}
+		p->tx_ring[p->tx_head] = (uint8_t)buf[i];
+		p->tx_head = (p->tx_head + 1u) & UART_TX_RING_MASK;
 	}
 
-	(void)pthread_mutex_unlock(&p->tx_lock);
-	return 0;
-}
+	uart_tx_kick(p, &p->tx_by_kick);
 
-/* ============================================================
- * tty_set_attr — reprogram divisor + LCR.
- *
- * Only baud / 8N1-style framing for #207.  Parity/stop_bits are
- * accepted but baud is the only knob with real consequences for
- * QEMU bring-up.  Reject zero/garbage instead of locking the line.
- * ============================================================ */
+	(void)pthread_mutex_unlock(&p->tx_lock);
+	return dropped ? -1 : 0;
+}
 
 static int
 uart_tty_set_attr(void *priv, uint32_t baud, uint32_t data_bits,
 		  uint32_t parity, uint32_t stop_bits)
 {
+	struct uart_priv *p = priv;
 	uint32_t divisor;
 	uint8_t  lcr = LCR_8N1;
-
-	(void)priv;
 
 	if (baud == 0u || baud > 115200u)
 		return -1;
@@ -762,10 +941,14 @@ uart_tty_set_attr(void *priv, uint32_t baud, uint32_t data_bits,
 	(void)parity;
 	(void)stop_bits;
 
+	/* Under the lock: the pump may be mid-FIFO on the other thread, and
+	 * a divisor change under a byte in flight corrupts that byte. */
+	(void)pthread_mutex_lock(&p->tx_lock);
 	uart_out(UART_IER, 0x00);
 	uart_out(UART_LCR, lcr);
 	uart_set_divisor((uint16_t)divisor);
-	uart_out(UART_IER, IER_RXRDY | IER_LSI);
+	uart_ier_write(p);	/* THRE back on if the ring is not empty */
+	(void)pthread_mutex_unlock(&p->tx_lock);
 
 	return 0;
 }
