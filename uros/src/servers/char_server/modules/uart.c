@@ -276,6 +276,14 @@ struct uart_priv {
 	 * be shown.  Zero on every healthy boot. */
 	uint32_t	tx_stalls;
 
+	/* Which path carried a received byte (#497).  The IRQ is the one
+	 * this driver is built around; the read-path peek below is #382's
+	 * defence against a lost edge.  They are counted apart because
+	 * "input works" and "the interrupt works" are two claims, and a
+	 * test that reads a byte proves only the first. */
+	uint32_t	rx_by_irq;
+	uint32_t	rx_by_poll;
+
 	/* Subscribers receive a header-only wake-up per RX batch. */
 	mach_port_t	subscribers[UART_MAX_SUBSCRIBERS];
 	unsigned int	n_subscribers;
@@ -329,9 +337,8 @@ uart_notify_subscribers(struct uart_priv *p)
 /* Declared in <mach/mach_traps.h>, already included above (#426). */
 
 static void
-uart_irq_handler(void *arg)
+uart_drain(struct uart_priv *p, int from_irq)
 {
-	struct uart_priv *p = arg;
 	unsigned int budget;
 	int got_any = 0;
 
@@ -385,8 +392,35 @@ uart_irq_handler(void *arg)
 		}
 	}
 
-	if (got_any)
-		uart_notify_subscribers(p);
+	if (!got_any)
+		return;
+
+	/*
+	 * Say it once, per path.  #497 needs to know whether IRQ 4 is
+	 * DELIVERED on this target and not merely registered, and the two
+	 * are not the same fact: the peek in uart_tty_read() would carry
+	 * every byte on its own and the input would look identical.
+	 */
+	if (from_irq) {
+		p->rx_by_irq++;
+		if (p->rx_by_irq == 1)
+			printf("uart: IRQ 4 delivered a byte — the interrupt "
+			       "path is live on this target (#497)\n");
+	} else {
+		p->rx_by_poll++;
+		if (p->rx_by_poll == 1)
+			printf("uart: a byte arrived that no interrupt "
+			       "announced; the read-path peek took it "
+			       "(#382)\n");
+	}
+
+	uart_notify_subscribers(p);
+}
+
+static void
+uart_irq_handler(void *arg)
+{
+	uart_drain(arg, 1);
 }
 
 /* ============================================================
@@ -522,7 +556,7 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 	 * ate the front.  Defense in depth on top of the #381 kernel fix.
 	 */
 	if (p->ring_tail == p->ring_head && (uart_in(UART_LSR) & LSR_DR))
-		uart_irq_handler(p);
+		uart_drain(p, 0);
 
 	while (n < max && p->ring_tail != p->ring_head) {
 		buf[n++] = (char)p->ring[p->ring_tail];
