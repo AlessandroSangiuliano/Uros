@@ -9,7 +9,7 @@
  * and not enough for a debugger: a debugger is a conversation, and half of
  * one is a log.
  *
- * The port itself is already set up — boot.S programmes it to 38400 8N1 with
+ * The port itself is already set up — boot.S programmes it to 115200 8N1 with
  * the FIFO on before the first announcement — so what is missing is only the
  * receiving half.
  *

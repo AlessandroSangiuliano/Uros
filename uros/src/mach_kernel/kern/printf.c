@@ -1065,11 +1065,11 @@ printf(const char *fmt, ...)
 	 * cons_cost_report(): 83 us a byte under KVM, where there is no wire
 	 * at all and the cost is an exit to the host plus a chardev write;
 	 * 6.3 us under TCG, where it is a helper call in the same process.
-	 * The wire proper is the one nobody has measured: 8N1 at the 38400
-	 * baud boot.S programs is ten bits a byte, 260 us -- so the METAL is
-	 * three times slower than the emulator, and a reader who took the
-	 * KVM figure for the wire's pace would plan around a third of the
-	 * truth.  A line is milliseconds whichever of the three it is.
+	 * The wire proper is the one nobody has measured: 8N1 at the 115200
+	 * baud boot.S programs is ten bits a byte, 87 us -- the same order as
+	 * KVM's exit, where at the 38400 that stood there before it was three
+	 * times slower than the emulator (#567).  A line is milliseconds
+	 * whichever of the three it is.
 	 *
 	 * 🔑 The wait is inside on purpose, and the reason is what the lock is
 	 * FOR.  It protects no data structure; it makes a line a line on a

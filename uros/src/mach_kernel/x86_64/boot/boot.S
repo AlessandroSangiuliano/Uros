@@ -63,10 +63,25 @@ _start:
 	movl	%eax, boot_magic
 	movl	%ebx, boot_info
 
-	/* Minimal COM1 init: 38400 8N1, FIFO on. */
+	/* Minimal COM1 init: 115200 8N1, FIFO on.
+	 *
+	 * 🔑 115200 IS A DECISION AND THIS IS WHERE IT IS MADE (#567).  The
+	 * divisor was 3 -- 38400 -- which nothing ever chose; it is what the
+	 * line was written with.  On an accelerator it buys nothing, because
+	 * qemu's 16550 does not hold a byte for the time the divisor asks
+	 * for; on the metal it is the whole cost of a boot's output.  8N1 is
+	 * ten bits a byte, so 38400 is 260 us a byte and 115200 is 87 -- and
+	 * an entry-14 boot's 62 163 bytes go from 16.2 s of wire to 5.4.
+	 *
+	 * Divisor 1 exactly: the 16550's clock is 1.8432 MHz and 1843200/16
+	 * is 115200 with no remainder, so this is the fastest rate the part
+	 * reaches with no error at all.  grub.cfg says the same number, and
+	 * it has to: GRUB's own lines go out of this port before the kernel
+	 * is loaded, and two speeds on one wire is one of them unreadable.
+	 */
 	movw	$COM1+1, %dx ; xorb %al, %al   ; outb %al, %dx	/* IER: no interrupts */
 	movw	$COM1+3, %dx ; movb $0x80, %al ; outb %al, %dx	/* LCR: DLAB=1 */
-	movw	$COM1+0, %dx ; movb $0x03, %al ; outb %al, %dx	/* divisor low = 3 */
+	movw	$COM1+0, %dx ; movb $0x01, %al ; outb %al, %dx	/* divisor low = 1 */
 	movw	$COM1+1, %dx ; xorb %al, %al   ; outb %al, %dx	/* divisor high = 0 */
 	movw	$COM1+3, %dx ; movb $0x03, %al ; outb %al, %dx	/* LCR: 8N1, DLAB=0 */
 	movw	$COM1+2, %dx ; movb $0xC7, %al ; outb %al, %dx	/* FCR: enable+clear FIFO */

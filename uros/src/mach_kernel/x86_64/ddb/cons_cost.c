@@ -19,9 +19,11 @@
  *
  * ⚠️ The DEVICE's pace, and not the wire's: under an accelerator there is no
  * wire, and the two are not even the same order -- 83 us a byte under KVM
- * against the 260 us that 8N1 at 38400 baud takes on a real line (#567).
- * Which of them a boot measured is decided by what it booted on, which is why
- * the conditions block beside this line is part of the number (#516).
+ * against the 87 us that 8N1 at the 115200 baud boot.S now programs takes on
+ * a real line (#567; it was 260 at 38400, and 115200 is a decision made in
+ * boot.S and repeated in grub.cfg).  Which of them a boot measured is decided
+ * by what it booted on, which is why the conditions block beside this line is
+ * part of the number (#516).
  *
  *   - the most polls a healthy byte spent waiting for the transmitter, beside
  *     the bound cons_putc() gives up at.  The bound is in polls, and a poll is
