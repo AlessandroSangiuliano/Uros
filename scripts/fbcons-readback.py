@@ -39,7 +39,7 @@
 # ⚠️ One run at a time, with the harness's own lock: two qemus on one machine
 # manufacture each other's failures (run-x86_64.sh says why).
 
-import argparse, os, re, socket, subprocess, sys, time
+import argparse, fcntl, os, re, socket, subprocess, sys, time
 
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 LOCK = "/tmp/uros-x86_64-run.lock"
@@ -148,6 +148,12 @@ def main():
     ap.add_argument("--smp", type=int, default=1)
     ap.add_argument("--wait-for", default="boot_probe:",
                     help="serial text to wait for before the screendump")
+    ap.add_argument("--send", default=None,
+                    help="bytes to type at the console once --wait-for is "
+                         "seen, before the screendump; \\x escapes allowed "
+                         "(the debugger's door is \\x1c)")
+    ap.add_argument("--then-wait-for", default=None,
+                    help="serial text to wait for after --send")
     ap.add_argument("--budget", type=float, default=120.0)
     ap.add_argument("--out", default=None, help="where to leave the dump")
     a = ap.parse_args()
@@ -175,6 +181,17 @@ def main():
         return 2
 
     mon = f"/tmp/uros-fbcons-{os.getpid()}.mon"
+    # 🔑 A PIPE AND NOT A FILE, because a screen that only ever shows a boot
+    # tests one of the three places this console has to work.  The debugger's
+    # prompt and a panic's last line are the other two, and reaching the first
+    # of them means being able to TYPE at the machine.
+    fifo = f"/tmp/uros-fbcons-{os.getpid()}.fifo"
+    for end in (".in", ".out"):
+        try:
+            os.unlink(fifo + end)
+        except FileNotFoundError:
+            pass
+        os.mkfifo(fifo + end)
     log = os.path.join(out, "fbcons-readback.log")
     ppm = os.path.join(out, "fbcons-readback.ppm")
     for p in (log, ppm):
@@ -196,29 +213,48 @@ def main():
                       f"id=ahcidisk1,format=raw",
             "-device", "ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2",
             "-vga", "std", "-display", "none",
-            "-serial", f"file:{log}",
+            "-serial", f"pipe:{fifo}",
             "-monitor", f"unix:{mon},server=on,wait=off", "-no-reboot"]
     if a.kvm:
         argv.insert(1, "-enable-kvm")
 
+    # The reader opens first and non-blocking, so neither side waits for the
+    # other; qemu opens its ends O_RDWR and never waits either.
+    fd_out = os.open(fifo + ".out", os.O_RDONLY | os.O_NONBLOCK)
+    fcntl.fcntl(fd_out, 1031, 1 << 20)		# F_SETPIPE_SZ: a whole boot
+    fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
+
     q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                          stderr=subprocess.PIPE, text=True)
     rc = 2
-    try:
-        deadline = time.time() + a.budget
-        seen = False
-        while time.time() < deadline:
-            if q.poll() is not None:
-                break
-            try:
-                if a.wait_for in open(log, errors="replace").read():
-                    seen = True
-                    break
-            except FileNotFoundError:
-                pass
-            time.sleep(0.5)
+    serial_raw = bytearray()
 
-        if not seen:
+    def pump():
+        try:
+            while True:
+                chunk = os.read(fd_out, 65536)
+                if not chunk:
+                    break
+                serial_raw.extend(chunk)
+        except BlockingIOError:
+            pass
+        except OSError:
+            pass
+        return serial_raw.decode(errors="replace")
+
+    def wait_for(text, budget):
+        end = time.time() + budget
+        while time.time() < end:
+            if q.poll() is not None:
+                pump()
+                return text in pump()
+            if text in pump():
+                return True
+            time.sleep(0.25)
+        return False
+
+    try:
+        if not wait_for(a.wait_for, a.budget):
             err = (q.stderr.read() if q.poll() is not None else "").strip()
             print(f"fbcons-readback: never saw {a.wait_for!r} on the serial "
                   f"line in {a.budget:.0f}s — that says nothing about the "
@@ -226,8 +262,20 @@ def main():
                   + (f": {err}" if err else ""), file=sys.stderr)
             return 2
 
+        if a.send is not None:
+            time.sleep(1.0)
+            os.write(fd_in, a.send.encode().decode("unicode_escape")
+                     .encode("latin-1"))
+            if a.then_wait_for and not wait_for(a.then_wait_for, 30.0):
+                print(f"fbcons-readback: typed {a.send!r} and never saw "
+                      f"{a.then_wait_for!r} — the machine did not answer, "
+                      f"which says nothing about the framebuffer",
+                      file=sys.stderr)
+                return 2
+
         # A moment for the last lines to be drawn as well as sent.
-        time.sleep(1.0)
+        time.sleep(1.5)
+        open(log, "w").write(pump())
 
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(10.0)
@@ -243,7 +291,7 @@ def main():
             return 2
 
         lines, unknown, cols, rows = screen_lines(ppm, font)
-        serial = open(log, errors="replace").read()
+        serial = pump()
         drawn = [l for l in lines if l.strip()]
 
         print(f"fbcons-readback: {cols}x{rows} cells, {len(drawn)} non-blank "
@@ -283,10 +331,13 @@ def main():
     finally:
         q.kill()
         q.wait()
-        try:
-            os.unlink(mon)
-        except FileNotFoundError:
-            pass
+        os.close(fd_out)
+        os.close(fd_in)
+        for path in (mon, fifo + ".in", fifo + ".out"):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
         os.rmdir(LOCK)
     return rc
 
