@@ -7,7 +7,7 @@
 # ISO on -cdrom, with a separate data disk beside it; it is now the disk
 # itself, which is the whole of what QEMU is handed (#520).
 #
-# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [seconds] [qemu args...]
+# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [--kvm] [seconds] [qemu args...]
 #   run-x86_64.sh
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
@@ -529,6 +529,7 @@ fi
 # answers a different question, which is the failure this file exists to stop.
 IOMMU_ARGS=""
 IOMMU_NAME="none"
+KVM_ARGS=""
 
 # Kept before the loop below eats them, so the conditions block can say how the
 # run was actually driven (#516).  A condition nobody can reproduce the command
@@ -551,6 +552,19 @@ while :; do
 		esac
 		IOMMU_NAME=$2
 		shift 2 ;;
+	--kvm)
+		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
+		#
+		# `-enable-kvm' works only if the caller remembered to put a
+		# budget in front of it, because everything after the first
+		# positional goes to qemu.  A caller that forgets puts the flag
+		# in the budget's slot -- which both-accelerators.sh did on
+		# every x86-64 call it ever made, so the KVM half of the tool
+		# built to ask BOTH accelerators had never once run under KVM.
+		# Asked for here, before the positionals, it cannot land in the
+		# wrong slot at all.
+		KVM_ARGS="-enable-kvm"
+		shift ;;
 	*)
 		break ;;
 	esac
@@ -648,8 +662,37 @@ done
 # to decline, hundreds of lines early, be read as the end of the boot.
 DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
 
-SECS=${1:-90}
+SECS_IN=${1:-90}
 [ $# -gt 0 ] && shift
+
+# 🔴 AND A BUDGET THAT IS NOT A NUMBER IS A REFUSAL, NOT A RUN (#567).
+#
+# The first positional is the watchdog's budget and everything after it goes to
+# qemu, so a caller that forgets the budget puts a qemu FLAG in this slot.  It
+# was taken silently: `budget: -enable-kvms' was printed in the conditions
+# block, the arithmetic below turned it into zero, and the run failed with
+# "NOTHING ARRIVED ... after 0s of running" -- a sentence about a kernel, for a
+# qemu that was never asked to start.
+#
+# both-accelerators.sh did exactly that on every x86-64 call it has ever made:
+# `run-x86_64.sh "$@" -enable-kvm' with no seconds in "$@".  So the KVM arm of
+# the tool whose whole purpose is to ask BOTH accelerators had never once run
+# under KVM, and it went on to report which lines appeared "only under TCG" --
+# a disagreement between one accelerator and nothing.
+#
+# 🔑 Status 2, which this script already means "I refused to start": three and
+# one are different findings and must not share a sentence (#517).
+case "$SECS_IN" in
+*[!0-9]*|"")
+	echo "run-x86_64.sh: the first argument is the watchdog budget in" >&2
+	echo "  SECONDS, and '$SECS_IN' is not a number.  Everything after it" >&2
+	echo "  goes to qemu, so this is almost always a qemu flag typed with" >&2
+	echo "  no budget in front of it:" >&2
+	echo "      run-x86_64.sh 90 $SECS_IN $*" >&2
+	exit 2
+	;;
+esac
+SECS=$SECS_IN
 
 # What the caller actually handed to qemu, kept for the verdict.
 #
@@ -740,7 +783,12 @@ esac
 # Still opt-in rather than the default: on a rare or SMP-timing defect,
 # accelerating CHANGES the experiment, and those hunts want TCG.  What changes
 # here is only that the answer is on the screen instead of in someone's head.
-case " $* " in
+#
+# ⚠️ $KVM_ARGS AS WELL AS "$@", because --kvm takes the flag out of the
+# pass-through (#567).  Reading only "$@" would have printed `accelerator: TCG'
+# at the top of a KVM run -- the conditions block lying about the one condition
+# it exists to record, which is worse than not recording it.
+case " $KVM_ARGS $* " in
 *" -enable-kvm "*|*" -accel "*)	ACCEL="KVM (asked for on the command line)" ;;
 *)				ACCEL="TCG (no -enable-kvm; add it to use the host)" ;;
 esac
@@ -807,7 +855,7 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
 QPID=$!
 
