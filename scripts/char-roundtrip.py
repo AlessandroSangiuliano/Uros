@@ -34,10 +34,19 @@ import time
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 LOCK = "/tmp/uros-x86_64-run.lock"
 
-# What char_test prints when it has found the tty and is about to write.  The
-# byte is typed AFTER this, so the input arm cannot be answered by something
-# that was already in the FIFO before char_server owned the port.
-READY = "char_test: the tty is device"
+# What char_test prints when it has found the tty and is about to write.
+#
+# 🔥 IT HAS TO BE A LINE THAT GOES THROUGH THE TTY, and the first marker chosen
+# here did not.  "char_test: the tty is device 1" is an ordinary printf, which
+# reaches the wire through the KERNEL's console -- and by the time char_test
+# runs, the kernel has handed that wire to char_server (#497).  So the marker
+# was invisible for exactly the reason this issue exists, and the script
+# reported a boot that had got there as a boot that never did.
+#
+# The line below is written with tty_write, so it arrives by the road that is
+# still open.  The byte is typed AFTER it, so the input arm cannot be answered
+# by something that was in the FIFO before char_server owned the port.
+READY = "char_test: [1] this line left through char_server"
 
 # What it prints when the input arm has decided, whichever way.
 VERDICT = "char_test: [2]"
@@ -155,7 +164,6 @@ def main():
 
         time.sleep(1.0)
         text = pump()
-        open(log, "w").write(text)
 
         for line in text.splitlines():
             if VERDICT not in line:
@@ -180,6 +188,18 @@ def main():
 
         print(f"char-roundtrip: log: {log}")
     finally:
+        # 🔥 THE LOG IS WRITTEN HERE AND NOT WHERE THE VERDICT IS READ.
+        #
+        # It was written only after char_test reached its input verdict, so a
+        # boot that produced three hundred lines and then stopped short left
+        # NOTHING on disk -- and the one message its caller got was "the
+        # machine did not get there", which is true and says nothing about
+        # where.  A harness that discards the evidence on the path it exists
+        # to investigate is the shape #451 and #563 keep finding.
+        try:
+            open(log, "w").write(pump())
+        except OSError:
+            pass
         if q.poll() is None:
             q.terminate()
             try:
