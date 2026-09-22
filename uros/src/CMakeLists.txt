@@ -233,14 +233,23 @@ endif()
 # consumer is what collaudates the producer (libelf was reported done on a host
 # compile while no build here consumed it).
 #
-# 🔴 libvfs is NOT here, and the reason is #553 and not an oversight: its
-# fs_stat/fs_fstat stubs fail their own generated assertion at -m64 because
-# migcom sums field sizes without alignment padding, and vfs_stat_t needs
-# 8-byte alignment where i386 gave it 4. Adding it would mean either a broken
-# build or padding the .defs to silence two routines while the arithmetic stays
-# wrong for the next type.
+# ✅ libvfs IS here now (#553).  It was held out because its fs_stat/fs_fstat
+# stubs failed their own generated assertion at -m64, and the note here said
+# the only ways in were a broken build or padding the .defs to silence two
+# routines.  Neither was needed: migcom's arithmetic was already right (#416
+# aligns every field before placing it) and what was wrong was the number it
+# was given -- `vfs_stat_t' declared as twenty 32-bit words told it the field
+# was 4-aligned when the C type is 8-aligned.  Declared as ten 64-bit words it
+# is right, and the i386 stubs come out byte-identical.
+#
+# 🔑 Putting it in the build is half the fix and the half that lasts.  The
+# assertions that caught this are #416's, and they can only catch anything on a
+# target that COMPILES them: while libvfs was out of this build they were a
+# guard nobody ran (#549), which is why a four-byte-short reply sat here
+# unnoticed.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libflipc2)
+  add_subdirectory(lib/libvfs)
 endif()
 
 # ipc_bench on x86-64 (#552), beside the tests rather than behind
