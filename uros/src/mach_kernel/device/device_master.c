@@ -3330,8 +3330,19 @@ device_master_cap_revoked(uint64_t cap_id)
 		/* Freed in place, for the reason task_terminating() gives. */
 		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
 		device_claim[i].task = TASK_NULL;
+		/*
+		 * 🔥 AND THE TOKEN, WHICH WAS LEFT BEHIND -- with an `i--' after
+		 * it that dated from when a release COMPACTED this table by moving
+		 * the last entry into the hole.  #511 stopped the moving and left
+		 * the step back, so this loop re-examined the slot it had just
+		 * freed, found the same cap_id still in it, freed it again -- a
+		 * task_deallocate(TASK_NULL), a no-op -- and never advanced: an
+		 * infinite loop on the first real revoke of a claimed device.
+		 * Entries do not move, so the loop simply goes on; the token is
+		 * cleared so a recycled slot cannot answer to a dead capability.
+		 */
+		device_claim[i].cap_id = 0;
 		device_claim[i].nregions = 0;
-		i--;
 	}
 }
 
