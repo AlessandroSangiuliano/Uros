@@ -56,14 +56,21 @@ import "vfs_types.h";
  *   vfs_path_t   — NUL-terminated absolute path, up to VFS_PATH_MAX bytes
  *   vfs_buf_t    — out-of-line byte buffer (read/write payload)
  *   vfs_stat_t   — fixed 80-byte struct from vfs_types.h, sent inline as
- *                  20 × unsigned32 words
+ *                  10 × unsigned64 words.  🔴 TEN OF SIXTY-FOUR, not twenty of
+ *                  thirty-two, and the difference is not cosmetic: in
+ *                  `struct[N] of T' the element type carries the field's
+ *                  ALIGNMENT as well as its size, and nothing else.  The C
+ *                  type holds uint64_t members, so it is 8-aligned; declared
+ *                  as unsigned32 words MIG believed 4, put `st' at offset 36
+ *                  in the reply where the compiler puts it at 40, and sized
+ *                  the whole message four bytes short (#553).
  *   vfs_dirent_array_t — out-of-line byte buffer holding N × vfs_dirent_t
  */
 type vfs_u32_t           = unsigned32   ctype: vfs_u32_t;
 type vfs_u64_t           = unsigned64   ctype: vfs_u64_t;
 type vfs_path_t          = c_string[*:1024];
 type vfs_buf_t           = pointer_t;
-type vfs_stat_t          = struct[20] of unsigned32;     /* 80 bytes; see vfs_types.h */
+type vfs_stat_t          = struct[10] of unsigned64;     /* 80 bytes, 8-aligned; see vfs_types.h */
 type vfs_dirent_array_t  = pointer_t;
 
 /* ------------------------------------------------------------------ */
