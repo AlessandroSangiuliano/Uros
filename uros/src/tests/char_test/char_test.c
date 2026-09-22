@@ -64,10 +64,32 @@
 #include "libcap.h"
 
 #include "char_server.h"		/* MIG: char_* client stubs */
+#include "device_master.h"		/* MIG: device_io_port_write (#497) */
 #include <char/char_types.h>
+#include <mach/bootstrap.h>
 
 extern mach_port_t	name_server_port;
+extern mach_port_t	bootstrap_port;
 extern void		printf_init(mach_port_t device_server_port);
+
+/*
+ * The two scratch registers arm [3] pokes at (#497).
+ *
+ * 🔑 SCRATCH, so the arm costs nothing if it is WRONGLY ALLOWED.  Register 7
+ * of a 16550 holds whatever was last written to it and does nothing else, so
+ * a write that gets through changes no line setting, drops no byte and does
+ * not disturb a driver mid-sentence.  An arm that proves a refusal has to be
+ * willing to succeed, and this one can afford to.
+ *
+ * ⚠️ COM2 is here to keep the answer about COM1 meaningful.  A check that
+ * refused every legacy port would pass the first half and would have taken
+ * the kernel's own PIT and 8042 with it -- the very thing device_master.c
+ * says it will not do.  Whether a COM2 exists on this board is not the
+ * question: the kernel performs the `out' either way, and what is being read
+ * here is the PERMISSION, not the chip.
+ */
+#define	COM1_SCRATCH	0x3FFu
+#define	COM2_SCRATCH	0x2FFu
 
 /*
  * How long the input arm waits, and why it is a count of tries and not a
@@ -296,6 +318,59 @@ main(int argc, char **argv)
 		       "returned '%c' (0x%02x) first of %u bytes\n",
 		       RX_EXPECT, in[0], (unsigned)(unsigned char)in[0],
 		       (unsigned)in_count);
+	}
+
+	/*
+	 * [3] WHOSE PORT IS IT.  char_server claimed 0x3F8..0x3FF when uart.so
+	 * attached; this task holds the device master port like any other, and
+	 * before #497 that was enough to write any port behind no PCI BAR --
+	 * COM1 included, while a driver was mid-line on it.
+	 *
+	 * Both halves, because one of them alone proves nothing.  A refusal on
+	 * COM1 would be equally consistent with a check that refuses every
+	 * legacy port, and that check would be a worse bug than the hole it
+	 * closed.
+	 */
+	arms++;
+	{
+		mach_port_t	host = MACH_PORT_NULL, device = MACH_PORT_NULL;
+		mach_port_t	lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
+		mach_port_t	sec = MACH_PORT_NULL;
+		kern_return_t	mine, other;
+
+		kr = bootstrap_ports(bootstrap_port, &host, &device,
+				     &lw, &lp, &sec);
+		if (kr != KERN_SUCCESS) {
+			printf("char_test: [3] WRONG — bootstrap_ports "
+			       "kr=%d, so this arm cannot hold the master "
+			       "port it is about\n", (int)kr);
+		} else {
+			mine  = device_io_port_write(device, COM1_SCRATCH,
+						     1, 0x5Au);
+			other = device_io_port_write(device, COM2_SCRATCH,
+						     1, 0x5Au);
+
+			if (mine == KERN_NO_ACCESS && other == KERN_SUCCESS) {
+				printf("char_test: [3] COM1 0x%x is refused "
+				       "to this task and COM2 0x%x is not — "
+				       "the port has an owner, and the check "
+				       "is about the range and not about "
+				       "legacy ports\n",
+				       COM1_SCRATCH, COM2_SCRATCH);
+				passed++;
+			} else if (mine == KERN_SUCCESS) {
+				printf("char_test: [3] WRONG — this task "
+				       "wrote COM1 0x%x while char_server was "
+				       "driving it; the claim did not take\n",
+				       COM1_SCRATCH);
+			} else {
+				printf("char_test: [3] WRONG — COM1 gave %d "
+				       "and COM2 gave %d; a check that "
+				       "refuses an unclaimed port has taken "
+				       "the PIT and the keyboard with it\n",
+				       (int)mine, (int)other);
+			}
+		}
 	}
 
 	printf("char_test: %d of %d arms passed\n", passed, arms);

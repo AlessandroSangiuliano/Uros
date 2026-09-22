@@ -40,6 +40,13 @@ add_mig_userland_client(
   ${CMAKE_SOURCE_DIR}/src/servers/char_server/char_server.defs
   ${_CHT_OUT} CHT_MIG)
 
+# device_master.defs, user half: arm [3] asks the kernel to write a port
+# char_server owns, and must be told no.  Proving a refusal needs a task that
+# is not the driver, which is cap_test's reason for generating these too.
+add_mig_userland_client(${UROS_UAPI_DIR}/device/device_master.defs
+                        ${_CHT_OUT} CHT_DM)
+list(APPEND CHT_MIG_GENERATED ${CHT_DM_GENERATED})
+
 add_executable(char_test_bin char_test.c ${CHT_MIG_GENERATED})
 
 add_dependencies(char_test_bin libmach libpthreads libnetname libcap
