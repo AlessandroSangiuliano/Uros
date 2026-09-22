@@ -161,13 +161,27 @@ ACCEPTED = {
 # bootstrap.defs, exc.defs, char_server.defs and gpu_server.defs.
 # ---------------------------------------------------------------------------
 RECORDED = {
-    # <machine/types.h>, nine lines apart, and the split does NOT follow a
-    # boundary: 477 units get the per-architecture one published under
-    # generated/include, 155 get src/mach_services/include/machine/types.h.
-    # It is reached from sa_mach/types.h -- the file #480 was about -- so this
-    # is that issue's last copy, and settling it means deciding which of the
-    # two is the machine's word on its own types.
-    "machine/types.h",
+    # 🔑 EMPTY, AND THAT IS A RESULT (#565).
+    #
+    # <machine/types.h> was the one entry: 477 units got a copy published under
+    # generated/include and 155 got src/mach_services/include/machine/types.h,
+    # nine lines apart, and this list said settling it meant deciding which of
+    # the two is the machine's word on its own types.
+    #
+    # It was not a decision.  #481 had already made it -- fixed width means
+    # fixed, so there is one file and not one per architecture, and it deleted
+    # the rule that wrote the second.  What remained was the FILE: a four-line
+    # wrapper saying `#include <sa_mach/i386/types.h>', which CMake had written
+    # at configure time and which nothing has produced since August.  Asked
+    # rather than assumed -- `ninja -t query' answers "unknown target" -- and
+    # removed; a full reconfigure and rebuild of 812 targets does not bring it
+    # back, and what it named declares exactly what the surviving header does,
+    # `_SIG64_BITS' included, so nothing computed differently either way.
+    #
+    # ⚠️ `ninja -t cleandead' does NOT catch that one: it removes what a
+    # previous BUILD produced, and this was written by the configure step, so
+    # ninja never knew of it.  Reading the directory is the only thing that
+    # sees such a file, which is what this script does.
 }
 
 
