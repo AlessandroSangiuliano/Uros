@@ -41,6 +41,7 @@
 #include <kern/ipc_tt.h>
 #include <kern/task.h>
 #include <kern/lock.h>	/* #538: the tables' writer lock */
+#include <kern/rcu.h>	/* #538: the readers' section */
 #include <ipc/ipc_port.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -449,9 +450,19 @@ check_master_port(ipc_port_t port)
  * relies on instead: an entry is built COMPLETE before the field every lookup
  * matches on is written, with a compiler barrier between the two, and a freed
  * slot is unlinked through that same field.  The machine keeps x86 stores in
- * order; the compiler does not, which is what the barrier is for.  A slot's
- * REUSE only after a grace period, so that a reader mid-walk is never handed
- * a recycled entry, is the next step and is not claimed here.
+ * order; the compiler does not, which is what the barrier is for.
+ *
+ * Every lock-free walk sits between urmach_rcu_read_lock() and
+ * urmach_rcu_read_unlock(): preemption off and a per-CPU depth, no interrupt
+ * masking, nestable -- and on x86-64 with one processor it is exactly what
+ * stops trap_take_ast() from preempting the walk.  Nothing inside a section
+ * sleeps, and nothing inside it printf()s: a refusal is recorded and said
+ * after the section ends.  A section never keeps a table pointer past its
+ * end; a path that must use one across a sleep -- mapping pages, granting
+ * DMA -- re-finds the entry under the mutex and checks its identity (`id')
+ * before it writes.  What the section buys is the next step: a freed slot is
+ * REUSED only after a grace period, so a reader that matched an entry reads a
+ * whole one.
  *
  * ⚠️ Lock order, stated once: device_table_lock -> hw_lock/simple_lock ->
  * pci_cfg_port_lock.  A mutex is never taken inside a hw_lock section.
@@ -568,29 +579,37 @@ static kern_return_t
 check_mmio_phys(vm_offset_t phys)
 {
 	task_t me = current_task();
-	unsigned i;
+	unsigned i, n;
+	natural_t other_bdf = DEVICE_DMA_NO_BDF;
+	int mine = 0;
 
-	for (i = 0; i < device_nclaims; i++) {
-		/* A released entry is left in place; its owner is null. */
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n; i++) {
 		if (device_claim[i].task == TASK_NULL)
 			continue;
-
 		if (!device_owns_phys(i, phys))
 			continue;
-
 		if (device_claim[i].task == me)
-			return KERN_SUCCESS;
+			mine = 1;
+		else
+			other_bdf = device_claim[i].bdf;
+		break;
+	}
+	urmach_rcu_read_unlock();
 
+	if (mine)
+		return KERN_SUCCESS;
+
+	if (other_bdf != DEVICE_DMA_NO_BDF)
 		printf("device_mmio_map: 0x%lx belongs to %u:%u.%u, which is "
 		       "claimed by another task\n", (unsigned long)phys,
-		       (unsigned)(device_claim[i].bdf >> 8),
-		       (unsigned)((device_claim[i].bdf >> 3) & 0x1F),
-		       (unsigned)(device_claim[i].bdf & 0x7));
-		return KERN_NO_ACCESS;
-	}
-
-	printf("device_mmio_map: 0x%lx belongs to no device this task has "
-	       "claimed\n", (unsigned long)phys);
+		       (unsigned)(other_bdf >> 8),
+		       (unsigned)((other_bdf >> 3) & 0x1F),
+		       (unsigned)(other_bdf & 0x7));
+	else
+		printf("device_mmio_map: 0x%lx belongs to no device this task "
+		       "has claimed\n", (unsigned long)phys);
 	return KERN_NO_ACCESS;
 }
 
@@ -601,13 +620,19 @@ static int
 device_claimed_by_other(natural_t bdf)
 {
 	task_t me = current_task();
-	unsigned i;
+	unsigned i, n;
+	int other = 0;
 
-	for (i = 0; i < device_nclaims; i++)
-		if (device_claim[i].bdf == bdf)
-			return device_claim[i].task != me;
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n; i++)
+		if (device_claim[i].bdf == bdf) {
+			other = (device_claim[i].task != me);
+			break;
+		}
+	urmach_rcu_read_unlock();
 
-	return 0;
+	return other;
 }
 
 /*
@@ -623,37 +648,32 @@ static kern_return_t
 check_claim(natural_t bdf)
 {
 	task_t me = current_task();
-	unsigned i;
+	task_t holder = TASK_NULL;
+	unsigned i, n, hit = 0, at = 0;
 
 	if (bdf == DEVICE_DMA_NO_BDF)
 		return KERN_SUCCESS;
 
-	for (i = 0; i < device_nclaims; i++)
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n; i++)
 		if (device_claim[i].bdf == bdf) {
-			if (device_claim[i].task == me)
-				return KERN_SUCCESS;
-
-			/*
-			 * ⚠️ This refusal was silent, and a claim refused for
-			 * no reason a log can name is how dma_reclaim [5]
-			 * looked while it was being investigated.
-			 */
-			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
-			       "it is claimed by task 0x%lx (entry %u of %u)\n",
-			       (unsigned)(bdf >> 8),
-			       (unsigned)((bdf >> 3) & 0x1F),
-			       (unsigned)(bdf & 7), (unsigned long)me,
-			       (unsigned long)device_claim[i].task,
-			       i, device_nclaims);
-			return KERN_NO_ACCESS;
+			holder = device_claim[i].task;
+			hit = 1;
+			at = i;
+			break;
 		}
+	urmach_rcu_read_unlock();
 
-	/*
-	 * ⚠️ An UNCLAIMED device is refused too, and that is not the same
-	 * answer wearing the same code by accident: a driver that has not
-	 * presented a capability for this device's kind has exactly as much
-	 * right to map memory for it as one that presented somebody else's.
-	 */
+	if (hit && holder == me)
+		return KERN_SUCCESS;
+	if (hit)
+		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
+		       "it is claimed by task 0x%lx (entry %u of %u)\n",
+		       (unsigned)(bdf >> 8),
+		       (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)me,
+		       (unsigned long)holder, at, n);
 	return KERN_NO_ACCESS;
 }
 
@@ -678,13 +698,21 @@ static kern_return_t
 check_cfg_access(natural_t bdf)
 {
 	task_t me = current_task();
-	unsigned i;
+	unsigned i, n;
+	int bus = 0;
 
-	for (i = 0; i < device_nclaims; i++)
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n; i++)
 		if (device_claim[i].bdf == DEVICE_BDF_BUS
-		    && device_claim[i].task == me)
-			return KERN_SUCCESS;
+		    && device_claim[i].task == me) {
+			bus = 1;
+			break;
+		}
+	urmach_rcu_read_unlock();
 
+	if (bus)
+		return KERN_SUCCESS;
 	return check_claim(bdf);
 }
 
@@ -935,37 +963,48 @@ static kern_return_t
 check_irq_owner(unsigned int irq)
 {
 	task_t		me = current_task();
-	unsigned	i;
+	unsigned	i, n;
+	natural_t	other_bdf = DEVICE_DMA_NO_BDF;
+	int		mine = 0;
 
-	for (i = 0; i < device_nclaims; i++) {
-		/* A released entry is left in place; its owner is null. */
-		if (device_claim[i].task == TASK_NULL)
-			continue;
-
-		natural_t	bdf = device_claim[i].bdf;
+	/*
+	 * The config-space read inside the section is a spin lock and two
+	 * port accesses (pci_cfg_port_lock is a leaf), never a sleep.
+	 */
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n; i++) {
+		natural_t	bdf;
 		unsigned int	line;
 
+		if (device_claim[i].task == TASK_NULL)
+			continue;
+		bdf = device_claim[i].bdf;
 		if (bdf == DEVICE_BDF_BUS)
 			continue;
 
 		line = device_md_pci_read((unsigned)(bdf >> 8),
 					  (unsigned)((bdf >> 3) & 0x1F),
 					  (unsigned)(bdf & 0x7), 0x3C) & 0xFF;
-
 		if (line == 0 || line == 0xFF || line != irq)
 			continue;
 
 		if (device_claim[i].task == me)
-			return KERN_SUCCESS;
-
-		printf("device_intr_register: irq %u is raised by %u:%u.%u, "
-		       "which another task holds\n", irq,
-		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 0x7));
-		return KERN_NO_ACCESS;
+			mine = 1;
+		else
+			other_bdf = bdf;
+		break;
 	}
+	urmach_rcu_read_unlock();
 
-	return KERN_SUCCESS;
+	if (mine || other_bdf == DEVICE_DMA_NO_BDF)
+		return KERN_SUCCESS;
+
+	printf("device_intr_register: irq %u is raised by %u:%u.%u, "
+	       "which another task holds\n", irq,
+	       (unsigned)(other_bdf >> 8), (unsigned)((other_bdf >> 3) & 0x1F),
+	       (unsigned)(other_bdf & 0x7));
+	return KERN_NO_ACCESS;
 }
 
 kern_return_t
@@ -1592,9 +1631,12 @@ dma_region_drop(vm_offset_t kva)
 						    (unsigned long)snap.size);
 
 		if (snap.task != TASK_NULL) {
-			(void) vm_map_remove(snap.task->map, snap.uva,
-					     snap.uva + snap.size,
-					     VM_MAP_NO_FLAGS);
+			/* uva == 0 is a reservation whose mapping never
+			 * completed (map_pages_into_task); nothing to unmap. */
+			if (snap.uva != 0)
+				(void) vm_map_remove(snap.task->map, snap.uva,
+						     snap.uva + snap.size,
+						     VM_MAP_NO_FLAGS);
 			task_deallocate(snap.task);
 		}
 		if (snap.owner != TASK_NULL)
@@ -2123,46 +2165,72 @@ map_pages_into_task(task_t		task,
 	unsigned int		page;
 	kern_return_t		kr;
 	unsigned int		i;
+	uint64_t		region_id = 0;
+	int			reserved = 0;
 
 	if (npages == 0)
 		return KERN_INVALID_ARGUMENT;
 
 	/*
-	 * Asked BEFORE anything is mapped, so a region that cannot take the
-	 * record costs nothing to refuse.
+	 * Find the region and RESERVE it under the lock (#538): a region
+	 * records one mapping, and two mappers that both found `task' empty
+	 * would both proceed.  The reservation is the task pointer with uva
+	 * still zero -- dma_region_drop() knows that shape and does not
+	 * unmap a range that was never mapped.
 	 */
+	mutex_lock(&device_table_lock);
 	region = dma_region_of(pa_list ? pa_list[0] : phys_base, &page);
 	if (region != 0) {
-		if (region->task != TASK_NULL) {
+		uint64_t	rid = region->id;
+		task_t		rtask = region->task;
+		vm_offset_t	ruva = region->uva;
+		vm_size_t	rsize = region->size;
+
+		if (rtask != TASK_NULL) {
+			mutex_unlock(&device_table_lock);
 			printf("device: refusing to map region %llu again: it "
 			       "is already mapped for task 0x%lx at uva 0x%lx, "
 			       "and a region records one mapping\n",
-			       (unsigned long long)region->id,
-			       (unsigned long)region->task,
-			       (unsigned long)region->uva);
+			       (unsigned long long)rid, (unsigned long)rtask,
+			       (unsigned long)ruva);
 			return KERN_RESOURCE_SHORTAGE;
 		}
-		if (size != region->size) {
+		if (size != rsize) {
+			mutex_unlock(&device_table_lock);
 			printf("device: refusing to map %lu bytes of region "
 			       "%llu, which is %lu: the record covers the "
 			       "whole region or nothing\n",
-			       (unsigned long)size,
-			       (unsigned long long)region->id,
-			       (unsigned long)region->size);
+			       (unsigned long)size, (unsigned long long)rid,
+			       (unsigned long)rsize);
 			return KERN_INVALID_ARGUMENT;
 		}
+		task_reference(task);
+		region->task = task;
+		region->uva = 0;
+		region_id = rid;
+		reserved = 1;
 	}
+	mutex_unlock(&device_table_lock);
 
 	kr = vm_map_enter(map, &uva, size, 0, TRUE,
 			  VM_OBJECT_NULL, (vm_offset_t)0, FALSE,
 			  VM_PROT_READ | VM_PROT_WRITE,
 			  VM_PROT_READ | VM_PROT_WRITE,
 			  VM_INHERIT_NONE);
-	if (kr != KERN_SUCCESS)
+	if (kr != KERN_SUCCESS) {
+		if (reserved) {
+			mutex_lock(&device_table_lock);
+			if (region->kva != 0 && region->id == region_id
+			    && region->task == task) {
+				region->task = TASK_NULL;
+				mutex_unlock(&device_table_lock);
+				task_deallocate(task);
+			} else
+				mutex_unlock(&device_table_lock);
+		}
 		return kr;
+	}
 
-	/* #407: report rather than hand back a hole, and give back the range
-	 * vm_map_enter just took rather than abandon it. */
 	for (i = 0; i < npages; i++) {
 		vm_offset_t pa = pa_list ? pa_list[i]
 					 : phys_base + i * PAGE_SIZE;
@@ -2171,19 +2239,38 @@ map_pages_into_task(task_t		task,
 			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
 			(void) vm_map_remove(map, uva, uva + size,
 					     VM_MAP_NO_FLAGS);
+			if (reserved) {
+				mutex_lock(&device_table_lock);
+				if (region->kva != 0 && region->id == region_id
+				    && region->task == task) {
+					region->task = TASK_NULL;
+					mutex_unlock(&device_table_lock);
+					task_deallocate(task);
+				} else
+					mutex_unlock(&device_table_lock);
+			}
 			return KERN_RESOURCE_SHORTAGE;
 		}
 	}
 
-	if (region != 0) {
+	if (reserved) {
 		/*
-		 * Its own reference: the caller's is the caller's to drop, and
-		 * dma_region_drop() gives this one back when it takes the
-		 * mapping down.
+		 * Publish the mapping to the SAME region -- by identity, not
+		 * by pointer.  If the owner dropped it meanwhile, drop()
+		 * consumed the reservation's reference and unmapped nothing
+		 * (uva was zero); what this thread mapped is its own to undo.
 		 */
-		task_reference(task);
-		region->task = task;
-		region->uva = uva;
+		mutex_lock(&device_table_lock);
+		if (region->kva != 0 && region->id == region_id
+		    && region->task == task) {
+			region->uva = uva;
+			mutex_unlock(&device_table_lock);
+		} else {
+			mutex_unlock(&device_table_lock);
+			(void) vm_map_remove(map, uva, uva + size,
+					     VM_MAP_NO_FLAGS);
+			return KERN_INVALID_ADDRESS;
+		}
 	}
 
 	*uva_out = uva;
@@ -2230,11 +2317,13 @@ ds_master_device_dma_map_user(
 		unsigned int	i;
 		int		mine = 0;
 
+		urmach_rcu_read_lock();
 		for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
 			if (dma_region[i].kva == kva) {
 				mine = dma_region[i].owner == me;
 				break;
 			}
+		urmach_rcu_read_unlock();
 
 		if (!mine) {
 			printf("device_dma_map_user: 0x%lx is not a region "
@@ -2290,7 +2379,11 @@ ds_master_device_dma_map_user(
 	 * it, because device_mmio_map goes through the same code and a BAR is
 	 * exactly that: physical memory with no region behind it.
 	 */
+	/* Existence only: map_pages_into_task() re-finds it under the mutex
+	 * before it writes anything (#538). */
+	urmach_rcu_read_lock();
 	region = dma_region_of(pa, &page);
+	urmach_rcu_read_unlock();
 	if (region == 0) {
 		printf("device: dma_map_user refuses kva 0x%lx (phys 0x%lx): "
 		       "no DMA region holds that page\n",
@@ -2402,43 +2495,45 @@ ds_master_device_region_map(
 	vm_offset_t	phys_base, uva;
 	vm_size_t	round_sz;
 	unsigned int	page_offset;
+	unsigned	n;
+	uint64_t	rbase, rsize;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	for (i = 0; i < device_nclaims; i++)
+	/*
+	 * Everything the mapping needs is copied out of the read section;
+	 * the mapping itself sleeps and cannot be inside one (#538).
+	 */
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n; i++)
 		if (device_claim[i].bdf == bdf)
 			break;
-
-	if (i == device_nclaims || device_claim[i].task != me) {
+	if (i == n || device_claim[i].task != me) {
+		urmach_rcu_read_unlock();
 		printf("device_region_map: %u:%u.%u is not this task's\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
 		return KERN_NO_ACCESS;
 	}
-
-	if (index >= device_claim[i].nregions)
+	if (index >= device_claim[i].nregions
+	    || device_claim[i].region[index].is_io) {
+		urmach_rcu_read_unlock();
 		return KERN_INVALID_ARGUMENT;
-
-	/*
-	 * ⚠️ An I/O region has no address to map.  Refusing says so, where
-	 * mapping its base as if it were memory would hand back a window onto
-	 * whatever physical memory happens to live at that number.
-	 */
-	if (device_claim[i].region[index].is_io)
-		return KERN_INVALID_ARGUMENT;
+	}
+	rbase = device_claim[i].region[index].base;
+	rsize = device_claim[i].region[index].size;
+	urmach_rcu_read_unlock();
 
 	task = convert_port_to_task(task_port);
 	if (task == TASK_NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	phys_base   = trunc_page((vm_offset_t)
-				 device_claim[i].region[index].base);
-	page_offset = (unsigned int)(device_claim[i].region[index].base
-				     - phys_base);
-	round_sz    = round_page(page_offset
-				 + device_claim[i].region[index].size);
+	phys_base   = trunc_page((vm_offset_t)rbase);
+	page_offset = (unsigned int)(rbase - phys_base);
+	round_sz    = round_page(page_offset + rsize);
 
 	kr = map_pages_into_task(task, phys_base, 0,
 				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
@@ -2447,7 +2542,7 @@ ds_master_device_region_map(
 		return kr;
 
 	*uva_out  = uva + page_offset;
-	*size_out = (vm_size_t)device_claim[i].region[index].size;
+	*size_out = (vm_size_t)rsize;
 	return KERN_SUCCESS;
 }
 
@@ -2537,34 +2632,40 @@ check_io_claim(unsigned int port)
 {
 	task_t		me = current_task();
 	unsigned int	i;
+	int		verdict = 1;	/* unclaimed, or ours */
 
+	urmach_rcu_read_lock();
 	for (i = 0; i < IO_CLAIM_MAX; i++) {
 		if (io_claim[i].task == TASK_NULL)
 			continue;
 		if (port < io_claim[i].base
 		    || port >= io_claim[i].base + io_claim[i].count)
 			continue;
-		if (io_claim[i].task == me)
-			return KERN_SUCCESS;
-
-		printf("device_io_port: 0x%x is inside a range another task "
-		       "claimed (#497)\n", port);
-		return KERN_NO_ACCESS;
+		verdict = (io_claim[i].task == me);
+		break;
 	}
-	return KERN_SUCCESS;
+	urmach_rcu_read_unlock();
+
+	if (verdict)
+		return KERN_SUCCESS;
+	printf("device_io_port: 0x%x is inside a range another task "
+	       "claimed (#497)\n", port);
+	return KERN_NO_ACCESS;
 }
 
 static kern_return_t
 check_io_port(unsigned int port)
 {
 	task_t		me = current_task();
-	unsigned	i, b;
+	unsigned	i, n, b;
+	natural_t	other_bdf = DEVICE_DMA_NO_BDF;
+	int		mine = 0;
 
-	for (i = 0; i < device_nclaims; i++) {
-		/* A released entry is left in place; its owner is null. */
+	urmach_rcu_read_lock();
+	n = device_nclaims;
+	for (i = 0; i < n && !mine && other_bdf == DEVICE_DMA_NO_BDF; i++) {
 		if (device_claim[i].task == TASK_NULL)
 			continue;
-
 		if (device_claim[i].bdf == DEVICE_BDF_BUS)
 			continue;
 
@@ -2579,15 +2680,23 @@ check_io_port(unsigned int port)
 				continue;
 
 			if (device_claim[i].task == me)
-				return KERN_SUCCESS;
-
-			printf("device_io_port: 0x%x is inside %u:%u.%u's "
-			       "window, which another task holds\n", port,
-			       (unsigned)(device_claim[i].bdf >> 8),
-			       (unsigned)((device_claim[i].bdf >> 3) & 0x1F),
-			       (unsigned)(device_claim[i].bdf & 0x7));
-			return KERN_NO_ACCESS;
+				mine = 1;
+			else
+				other_bdf = device_claim[i].bdf;
+			break;
 		}
+	}
+	urmach_rcu_read_unlock();
+
+	if (mine)
+		return KERN_SUCCESS;
+	if (other_bdf != DEVICE_DMA_NO_BDF) {
+		printf("device_io_port: 0x%x is inside %u:%u.%u's "
+		       "window, which another task holds\n", port,
+		       (unsigned)(other_bdf >> 8),
+		       (unsigned)((other_bdf >> 3) & 0x1F),
+		       (unsigned)(other_bdf & 0x7));
+		return KERN_NO_ACCESS;
 	}
 
 	/*
@@ -2942,9 +3051,11 @@ ds_master_device_dma_table(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
+	urmach_rcu_read_lock();
 	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
 		if (dma_region[i].kva != 0)
 			used++;
+	urmach_rcu_read_unlock();
 
 	*total = (natural_t) DEVICE_MAX_DMA_REGIONS;
 	*in_use = (natural_t) used;
@@ -3008,13 +3119,21 @@ ds_master_device_claim_holder(
 	if (space == IS_NULL)
 		return KERN_SUCCESS;
 
+	/*
+	 * Under the mutex and not in a read section, because this is the one
+	 * lookup that DEREFERENCES the holder (its ipc space), and a task
+	 * pointer in a retired entry is compared by every other reader and
+	 * followed by none.  A rare RPC; the lock costs it nothing.
+	 */
+	mutex_lock(&device_table_lock);
 	for (i = 0; i < device_nclaims; i++)
 		if (device_claim[i].bdf == bdf) {
 			*held = (device_claim[i].task != TASK_NULL
 				 && device_claim[i].task->itk_space == space)
 				? 1u : 0u;
-			return KERN_SUCCESS;
+			break;
 		}
+	mutex_unlock(&device_table_lock);
 
 	return KERN_SUCCESS;
 }
@@ -3056,6 +3175,7 @@ ds_master_device_dma_map_foreign(
 	struct uros_cap		cap;
 	unsigned int		page, u;
 	unsigned long		base = 0;
+	uint64_t		r_id = 0;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -3074,7 +3194,11 @@ ds_master_device_dma_map_foreign(
 	 * this the call is "put any physical address inside my device's
 	 * reach", which is the property the whole issue exists to create.
 	 */
+	urmach_rcu_read_lock();
 	r = dma_region_of((vm_offset_t)paddr, &page);
+	if (r != 0)
+		r_id = r->id;
+	urmach_rcu_read_unlock();
 	if (r == 0)
 		return KERN_INVALID_ADDRESS;
 
@@ -3112,9 +3236,17 @@ ds_master_device_dma_map_foreign(
 		return KERN_SUCCESS;
 	}
 
-	/* The user list is appended by whichever server asks first, and two
-	 * can ask at once (#538): searched and grown under the lock. */
+	/*
+	 * The user list is appended by whichever server asks first, and two
+	 * can ask at once (#538): searched and grown under the lock -- after
+	 * checking that the slot still holds the region found above, by
+	 * identity, because the owner may have dropped it in between.
+	 */
 	mutex_lock(&device_table_lock);
+	if (r->kva == 0 || r->id != r_id) {
+		mutex_unlock(&device_table_lock);
+		return KERN_INVALID_ADDRESS;
+	}
 	for (u = 0; u < r->nusers; u++)
 		if (r->user[u].bdf == bdf) {
 			base = (unsigned long)r->user[u].dma;
