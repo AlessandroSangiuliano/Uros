@@ -154,6 +154,10 @@ option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is nev
 # coming back to mean anything.  Never ON in a kernel anyone boots for anything
 # else.
 option(UROS_ABLATE_551_UNBOUNDED "Build the #551 ablation: cons_putc waits for the transmitter for ever" OFF)
+# #566: remove the grace period from pmap_destroy, to find out whether it is
+# what the trap sweep pays a clock tick for on more than one processor.  UNSAFE
+# -- a reader may still hold the pmap.  Measurement only.
+option(UROS_ABLATE_566_NO_GRACE "Build the #566 ablation: pmap_destroy does not wait a grace period" OFF)
 # #563: make the five tests that need a second processor believe they are alone,
 # so the line that DECLINES the question can be executed.  There is no boot flag
 # capping the processor count on this target and an AP cannot be made to fail to
@@ -365,6 +369,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_551_UNBOUNDED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_551_UNBOUNDED=1)
       message(STATUS "#551 ablation: cons_putc waits for the transmitter for ever (x86_64)")
+  endif()
+  if(UROS_ABLATE_566_NO_GRACE)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_GRACE=1)
+      message(STATUS "#566 ablation: pmap_destroy does not wait a grace period (x86_64)")
   endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)

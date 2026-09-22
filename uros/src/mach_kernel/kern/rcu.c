@@ -73,6 +73,24 @@ urmach_synchronize_rcu(void)
 	int		me = cpu_number();
 
 	/*
+	 * ABLATE_566_NO_GRACE makes every grace period return at once, which
+	 * is UNSAFE -- a reader may still hold what the caller is about to
+	 * free -- and exists to answer one question: is the wait what the
+	 * #548 trap sweep pays a clock tick for on more than one processor?
+	 *
+	 * 🔑 HERE AND NOT AT A CALL SITE.  The first version of this ablation
+	 * removed the call in pmap_destroy() alone and changed nothing, which
+	 * read as "the grace period is innocent" -- wrongly: pmap_collect()
+	 * takes two more per batch (x86_64/pmap/vminit.c), and the sampler
+	 * was showing a processor inside THIS function a quarter of the time.
+	 * An ablation of one caller answers about that caller; the question
+	 * was about the wait.
+	 */
+#if	ABLATE_566_NO_GRACE
+	return;
+#endif
+
+	/*
 	 *	#336 LANDMINE, DISARMED: `me` used to be read without disabling
 	 *	preemption, safe only while the kernel could not preempt in kernel
 	 *	mode.  x86-64 can since #459/#463 -- an AST on the way out of any
