@@ -76,6 +76,7 @@ function(mig_user_header_name DEFS_NAME OUT_VAR)
     endif()
 endfunction()
 
+
 # Use -x c to force C preprocessing of .defs files (modern GCC ignores unknown extensions)
 function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
@@ -169,6 +170,61 @@ endfunction()
 # the top of this file is about.  It is set at the top level today, so the two
 # say the same thing -- left as it is because it is one expression either way
 # and this one cannot be emptied by a scope.
+# The user half alone, for a program that CALLS a subsystem and answers none
+# of it (#565).
+#
+# 🔑 WHAT IS NOT GENERATED CANNOT SHADOW ANYTHING.  add_mig_userland() below
+# emits both halves, and three tests called it for hal.defs and then removed
+# the server .c from their own sources again -- which says plainly that they
+# never wanted it.  What they could not remove was the server HEADER: MIG
+# writes it as <defs-basename>_server.h, and for hal.defs that is the name of
+# the HAL's own header, the one with `struct hal_device_info' in it.  Two files
+# of one name, both on those tests' -I lists, and which one they compiled
+# against was decided by the ORDER of their flags.
+#
+# It was decided correctly and on purpose -- hal_bar_test's CMakeLists says so
+# in a comment headed "THE SERVER'S OWN DIRECTORY COMES FIRST, AND THE ORDER IS
+# LOAD-BEARING" -- and that is the problem.  A build whose correctness rests on
+# the order of -I flags is one edit away from being wrong, and nothing reports
+# the choice.  Renaming the generated header was the first repair here and it
+# was the wrong one: it keeps producing a file nobody consumes, and only moves
+# where it lands.  This produces nothing instead, and the flag order stops
+# being load-bearing.
+#
+# ⚠️ -server /dev/null and no -sheader at all: migcom writes the server header
+# only when it is asked for one.
+function(add_mig_userland_client DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
+    get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
+    mig_user_header_name(${DEFS_NAME} USER_H_NAME)
+    set(MIG_PP ${OUTPUT_DIR}/${DEFS_NAME}.mig.i)
+    set(USER_C ${OUTPUT_DIR}/${DEFS_NAME}_user.c)
+    set(USER_H ${OUTPUT_DIR}/${USER_H_NAME}.h)
+
+    file(MAKE_DIRECTORY ${OUTPUT_DIR})
+    set_source_files_properties(${USER_C} ${USER_H} PROPERTIES GENERATED TRUE)
+
+    add_custom_command(
+        OUTPUT ${USER_C} ${USER_H}
+        COMMAND ${CMAKE_C_COMPILER} -E -x c
+                -I${UROS_UAPI_DIR}
+                ${UROS_MIG_USERLAND_INCLUDES}
+                ${UROS_MIG_DEFS_ARCH}
+                ${DEFS_FILE} -o ${MIG_PP}
+        COMMAND $<TARGET_FILE:migcom>
+                -target ${UROS_TARGET_ARCH}
+                -header ${USER_H}
+                -user ${USER_C}
+                -server /dev/null
+                ${MIG_PP}
+        DEPENDS migcom ${DEFS_FILE} ${UROS_MIG_COMMON_DEFS}
+        COMMENT "MIG: ${DEFS_NAME} (userland client, ${UROS_TARGET_ARCH})"
+        VERBATIM
+    )
+
+    set(${SUBSYS_NAME}_GENERATED ${${SUBSYS_NAME}_GENERATED}
+        ${USER_C} PARENT_SCOPE)
+endfunction()
+
 function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
     mig_user_header_name(${DEFS_NAME} USER_H_NAME)

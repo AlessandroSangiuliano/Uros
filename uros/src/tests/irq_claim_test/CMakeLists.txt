@@ -46,9 +46,12 @@ list(REMOVE_ITEM IQ_MIG_GENERATED ${_IQ_OUT}/device_master_server.c)
 # something only an owner or the bus scanner may do.  So it asks the HAL, the
 # same way every driver in the tree does.
 set(IQ_HAL_GENERATED)
-add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
-                 ${_IQ_OUT} IQ_HAL)
-list(REMOVE_ITEM IQ_HAL_GENERATED ${_IQ_OUT}/hal_server.c)
+# ⚠️ _client and not add_mig_userland: this program CALLS the HAL and answers
+# none of it, so the server half is not generated rather than generated and
+# then removed from the sources again.  What is not generated cannot shadow
+# the HAL's own hal_server.h (#565).
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
+                        ${_IQ_OUT} IQ_HAL)
 list(APPEND IQ_MIG_GENERATED ${IQ_HAL_GENERATED})
 
 add_executable(irq_claim_test_bin

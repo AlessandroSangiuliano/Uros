@@ -24,9 +24,12 @@ list(REMOVE_ITEM DR_MIG_GENERATED ${_DR_OUT}/device_master_server.c)
 # and then dies, so this program registers as a driver, reports a probe, and is
 # gone -- which is the only way the HAL's dead-name release has a witness.
 set(DR_HAL_GENERATED)
-add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
-                 ${_DR_OUT} DR_HAL)
-list(REMOVE_ITEM DR_HAL_GENERATED ${_DR_OUT}/hal_server.c)
+# ⚠️ _client and not add_mig_userland: this program CALLS the HAL and answers
+# none of it, so the server half is not generated rather than generated and
+# then removed from the sources again.  What is not generated cannot shadow
+# the HAL's own hal_server.h (#565).
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
+                        ${_DR_OUT} DR_HAL)
 list(APPEND DR_MIG_GENERATED ${DR_HAL_GENERATED})
 
 add_executable(dma_reclaim_test_server
