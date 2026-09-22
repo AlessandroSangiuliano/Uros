@@ -43,6 +43,7 @@
 #include <device/io_req.h>
 #include <device/console_cdev.h>
 #include <kern/lock.h>
+#include <kern/klog.h>	/* #497: the forwarder's only road */
 #include <kern/misc_protos.h>
 
 extern void cnputc(char);
@@ -109,8 +110,40 @@ consolewrite(dev_t dev, io_req_t ior)
 			}
 		n -= k;
 		simple_lock(&printf_lock);
-		while (k--)
+		while (k--) {
+			/*
+			 * 🔥 AND INTO THE LOG RING, WHICH IT WAS NOT (#497).
+			 *
+			 * The kernel's own printf reaches cnputc through
+			 * klog_cnputc(), which feeds the ring as well -- so
+			 * host_get_log() has every line the KERNEL said.  This
+			 * path, which is every printf from every TASK, called
+			 * cnputc alone, so userland output was in the ring
+			 * nowhere.
+			 *
+			 * That asymmetry was invisible while the kernel owned
+			 * the serial port, because both halves reached the wire
+			 * anyway and the ring was only a mirror.  #497 made the
+			 * ring the ONLY road for anything the kernel writes
+			 * once a driver has claimed COM1 -- and the first boot
+			 * with the handover showed exactly this shape: the
+			 * kernel's lines came out of the forwarder and every
+			 * task's line was gone.
+			 *
+			 * 🔑 klog.h calls this ring the thing "a userspace
+			 * forwarder drains", and a forwarder that cannot
+			 * reproduce the console is not draining the console.
+			 *
+			 * ⚠️ x86-64 only, because the handover is.  i386's
+			 * console keeps the port and its klog keeps meaning
+			 * "what the kernel printed"; changing that there would
+			 * put every task's output on the VGA console through
+			 * bootstrap's forwarder, which is a change to the
+			 * mature target that this issue has no business making.
+			 */
+			klog_putc(*p);
 			cnputc(*p++);
+		}
 		simple_unlock(&printf_lock);
 
 		/*
