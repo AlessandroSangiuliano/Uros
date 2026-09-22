@@ -2206,6 +2206,43 @@ test_trap_sweep(void)
 	SWEEP("task_terminate", 200, ({ mach_port_t c2;
 		kern_return_t r = task_create(me, NULL, 0, FALSE, &c2);
 		if (r == KERN_SUCCESS) r = task_terminate(c2); r; }));
+	/*
+	 * ── The pair, split (#566) ────────────────────────────────────────
+	 *
+	 * The two rows above run the SAME body -- create then terminate, 200
+	 * times -- and differ only in which return code they report.  On one
+	 * processor both cost about 6 000 cycles an iteration; on four the
+	 * first cost 31 090 237 and the second 6 670, which is the same work
+	 * 4 700 times apart in one boot.  A mean of 200 cannot be a lucky
+	 * draw, so what changes is not the routine but when it runs.
+	 *
+	 * Neither row can say WHICH half is expensive, because each iteration
+	 * does both.  These two do: 200 creates into an array, timed, then
+	 * 200 terminates out of it, timed.  The array is what makes the split
+	 * possible and it is also the cost of it -- the tasks are all alive at
+	 * once, which the paired rows never do.
+	 */
+	{
+		static mach_port_t	kids[200];
+		unsigned long long	t0;
+		int			i, made = 0;
+
+		t0 = tsc_now();
+		for (i = 0; i < 200; i++)
+			if (task_create(me, NULL, 0, FALSE, &kids[made])
+			    == KERN_SUCCESS)
+				made++;
+		sweep_report("task_create(alone)", made ? made : 1,
+			     tsc_now() - t0, made == 200 ? KERN_SUCCESS
+						         : KERN_FAILURE);
+
+		t0 = tsc_now();
+		for (i = 0; i < made; i++)
+			(void) task_terminate(kids[i]);
+		sweep_report("task_terminate(alone)", made ? made : 1,
+			     tsc_now() - t0, KERN_SUCCESS);
+	}
+
 	SWEEP("task_suspend", 500, task_suspend(child));
 	SWEEP("task_info(child)", 500, ({ struct task_basic_info bi;
 		mach_msg_type_number_t c = TASK_BASIC_INFO_COUNT;
