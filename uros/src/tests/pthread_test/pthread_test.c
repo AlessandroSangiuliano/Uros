@@ -1999,6 +1999,49 @@ sweep_report(const char *name, int n, unsigned long long cycles,
 	       (unsigned)(cycles / (unsigned)n));
 }
 
+/*
+ * ── The pair, split, and run TWICE (#566) ─────────────────────────────────
+ *
+ * The paired rows run the same body -- create then terminate, 200 times --
+ * and differ only in which return code they report, so neither can say which
+ * half is expensive.  These do: 200 creates into an array, timed, then 200
+ * terminates out of it, timed.
+ *
+ * 🔑 AND THE POINT IN THE BOOT IS ITSELF A VARIABLE.  Run after the paired
+ * rows, both halves came out uniprocessor-cheap on four processors, which
+ * said the expense is not in the routines -- but it said it about a different
+ * moment.  So this runs at two points, before the paired rows and after, and
+ * the four numbers together say whether the routines are expensive INSIDE the
+ * window or only the alternation is.
+ *
+ * ⚠️ The array is what makes the split possible and is also its cost: two
+ * hundred tasks are alive at once, which the paired rows never do.
+ */
+static void
+sweep_split_pair(mach_port_t me, const char *when)
+{
+	static mach_port_t	kids[200];
+	char			name[40];
+	unsigned long long	t0;
+	int			i, made = 0;
+
+	t0 = tsc_now();
+	for (i = 0; i < 200; i++)
+		if (task_create(me, NULL, 0, FALSE, &kids[made])
+		    == KERN_SUCCESS)
+			made++;
+	snprintf(name, sizeof name, "task_create(alone,%s)", when);
+	sweep_report(name, made ? made : 1, tsc_now() - t0,
+		     made == 200 ? KERN_SUCCESS : KERN_FAILURE);
+
+	t0 = tsc_now();
+	for (i = 0; i < made; i++)
+		(void) task_terminate(kids[i]);
+	snprintf(name, sizeof name, "task_terminate(alone,%s)", when);
+	sweep_report(name, made ? made : 1, tsc_now() - t0, KERN_SUCCESS);
+}
+
+
 #define SWEEP(nm, n, expr)	do {					\
 	unsigned long long s_ = tsc_now();				\
 	kern_return_t k_ = KERN_SUCCESS;				\
@@ -2200,6 +2243,8 @@ test_trap_sweep(void)
 		if (r == KERN_SUCCESS) (void)vm_deallocate(me, a, 4096); r; }));
 
 	/* ── task and thread, on the child so nothing here kills the test ── */
+	sweep_split_pair(me, "early");
+
 
 	/*
 	 * 🔴 THIS ROW IS TIMED TWICE, AND THE TWO NUMBERS ANSWER DIFFERENT
@@ -2267,42 +2312,7 @@ test_trap_sweep(void)
 	SWEEP("task_terminate", 200, ({ mach_port_t c2;
 		kern_return_t r = task_create(me, NULL, 0, FALSE, &c2);
 		if (r == KERN_SUCCESS) r = task_terminate(c2); r; }));
-	/*
-	 * ── The pair, split (#566) ────────────────────────────────────────
-	 *
-	 * The two rows above run the SAME body -- create then terminate, 200
-	 * times -- and differ only in which return code they report.  On one
-	 * processor both cost about 6 000 cycles an iteration; on four the
-	 * first cost 31 090 237 and the second 6 670, which is the same work
-	 * 4 700 times apart in one boot.  A mean of 200 cannot be a lucky
-	 * draw, so what changes is not the routine but when it runs.
-	 *
-	 * Neither row can say WHICH half is expensive, because each iteration
-	 * does both.  These two do: 200 creates into an array, timed, then
-	 * 200 terminates out of it, timed.  The array is what makes the split
-	 * possible and it is also the cost of it -- the tasks are all alive at
-	 * once, which the paired rows never do.
-	 */
-	{
-		static mach_port_t	kids[200];
-		unsigned long long	t0;
-		int			i, made = 0;
-
-		t0 = tsc_now();
-		for (i = 0; i < 200; i++)
-			if (task_create(me, NULL, 0, FALSE, &kids[made])
-			    == KERN_SUCCESS)
-				made++;
-		sweep_report("task_create(alone)", made ? made : 1,
-			     tsc_now() - t0, made == 200 ? KERN_SUCCESS
-						         : KERN_FAILURE);
-
-		t0 = tsc_now();
-		for (i = 0; i < made; i++)
-			(void) task_terminate(kids[i]);
-		sweep_report("task_terminate(alone)", made ? made : 1,
-			     tsc_now() - t0, KERN_SUCCESS);
-	}
+	sweep_split_pair(me, "late");
 
 	SWEEP("task_suspend", 500, task_suspend(child));
 	SWEEP("task_info(child)", 500, ({ struct task_basic_info bi;

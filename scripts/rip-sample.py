@@ -16,8 +16,9 @@
 # #566 needed to know whether a trap sweep's missing milliseconds were spent in
 # the kernel at all.
 #
-# ⚠️ Samples are NOT evenly spaced: each one is a monitor round trip, so the
-# rate depends on the host.  The counts rank; they do not integrate.
+# ⚠️ Samples are NOT evenly spaced: each one is a monitor round trip -- about
+# 40 ms here, which is what bounds the resolution.  The counts RANK; they do
+# not integrate.
 #
 # Usage:
 #   scripts/rip-sample.py [--build DIR] [--entry N] [--kvm] [--smp N]
@@ -57,11 +58,11 @@ def monitor_rips(path):
     s.settimeout(2)
     try:
         s.connect(path)
-        time.sleep(0.05)
+        time.sleep(0.008)
         try: s.recv(65536)
         except socket.timeout: pass
         s.sendall(b"info registers -a\n")
-        time.sleep(0.12)
+        time.sleep(0.030)
         buf = b""
         try:
             while True:
