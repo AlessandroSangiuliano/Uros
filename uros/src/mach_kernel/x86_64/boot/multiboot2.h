@@ -36,6 +36,7 @@
  * 32-bit RSDT address, and the 2.0 one that adds a 64-bit XSDT address.  A
  * loader supplies whichever the firmware offered.
  */
+#define MB2_TAG_FRAMEBUFFER	8	/* the display the loader set up (#568) */
 #define MB2_TAG_ELF_SECTIONS	9	/* the kernel's own section headers */
 #define MB2_TAG_ACPI_OLD	14	/* ACPI 1.0 RSDP */
 #define MB2_TAG_ACPI_NEW	15	/* ACPI 2.0+ RSDP */
@@ -91,6 +92,56 @@ struct mb2_tag {
 	uint32_t type;
 	uint32_t size;
 };
+
+/*
+ * The display, as the loader left it (#568).
+ *
+ * Present only because boot.S asks for it, and only when the loader could
+ * satisfy the request -- the header tag is optional on purpose, so this tag's
+ * absence is an ordinary answer and not a failure.  The colour information
+ * that follows `reserved' in the tag is not read: the emergency console draws
+ * white on black, and white and black are the same under any permutation of
+ * the channels.
+ */
+struct mb2_tag_framebuffer {
+	uint32_t type;
+	uint32_t size;
+	uint64_t addr;		/* physical base of the linear framebuffer */
+	uint32_t pitch;		/* BYTES per scanline, not pixels */
+	uint32_t width;		/* pixels */
+	uint32_t height;	/* pixels */
+	uint8_t  bpp;		/* bits per pixel */
+	uint8_t  fb_type;	/* 1 = direct RGB, 2 = EGA text */
+	uint16_t reserved;
+};
+
+#define MB2_FB_TYPE_RGB		1
+#define MB2_FB_TYPE_EGA_TEXT	2
+
+/*
+ * What the loader said, copied out of the tag.
+ *
+ * ⚠️ Copied and not pointed at: the tag list lives wherever GRUB put it, and
+ * this is read once, early, while that memory is still identity-mapped and
+ * before anything can be placed on top of it.  `present' is what every caller
+ * tests -- a machine with no framebuffer leaves the rest zero.
+ */
+struct mb2_framebuffer {
+	uint64_t addr;
+	uint32_t pitch;
+	uint32_t width;
+	uint32_t height;
+	uint8_t  bpp;
+	uint8_t  fb_type;
+	uint8_t  present;
+};
+
+/*
+ * Read the framebuffer tag, if the loader supplied one.  Returns whether it
+ * did; `out' is fully written either way, so a caller that ignores the return
+ * value still sees present == 0 rather than whatever was on its stack.
+ */
+boolean_t mb2_framebuffer(uint32_t info_pa, struct mb2_framebuffer *out);
 
 /* Memory-map tag: a header followed by entry_size-sized entries. */
 struct mb2_tag_mmap {

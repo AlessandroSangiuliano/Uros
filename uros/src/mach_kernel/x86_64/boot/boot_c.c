@@ -285,6 +285,62 @@ static void memmap_selftest(uint32_t info)
 }
 
 /*
+ * What display the loader left us, and whether there is one (#568).
+ *
+ * 🔴 IT REPORTS BOTH ANSWERS AND CALLS NEITHER OF THEM A FAILURE.  boot.S
+ * asks for a framebuffer OPTIONALLY, so a machine that has none boots exactly
+ * as it always did; what must not happen is that the difference goes unsaid.
+ * A boot that drew nothing because there was nothing to draw on, and a boot
+ * that drew nothing because the console is broken, look identical in a log
+ * that only mentions the framebuffer when it finds one -- and the second is
+ * the one somebody will spend an evening on.
+ *
+ * ⚠️ Read here, early, and while GRUB's tag list is still identity-mapped and
+ * nothing has been placed on top of it.
+ */
+static void framebuffer_selftest(uint32_t info)
+{
+	struct mb2_framebuffer fb;
+
+	if (!mb2_framebuffer(info, &fb)) {
+		kputs("UrMach x86-64: NO usable framebuffer from the loader");
+		if (fb.fb_type == MB2_FB_TYPE_EGA_TEXT)
+			kputs(" — it offered EGA TEXT, which is character"
+			      " cells and not pixels");
+		kputs(" — this boot's only output is COM1 (#568)\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: framebuffer ");
+	kputdec(fb.width);
+	kputs("x");
+	kputdec(fb.height);
+	kputs("x");
+	kputdec(fb.bpp);
+	kputs(" at ");
+	kputhex64(fb.addr);
+	kputs(", pitch ");
+	kputdec(fb.pitch);
+	kputs(" bytes");
+
+	/*
+	 * 🔑 And whether the pitch is the width, said EITHER WAY.  A scanline
+	 * is free to be padded and firmware often pads it, so a console that
+	 * assumed otherwise would draw correctly on the emulator and a
+	 * staircase on the machine.  Printed also when it is not padded,
+	 * because a note that only appears in one case leaves a reader unable
+	 * to tell a check that passed from a check that is not there -- and
+	 * this harness has no machine that pads, so the branch that matters
+	 * is the one nobody here can see fire.
+	 */
+	if (fb.pitch != (uint64_t)fb.width * (fb.bpp / 8))
+		kputs(", PADDED — the scanline is longer than the picture");
+	else
+		kputs(", not padded");
+	kputs(" (#568)\r\n");
+}
+
+/*
  * Build the direct map, then prove it by reading the witness a third way:
  * not through the image mapping, not through the low identity map, but at
  * DIRECT_MAP_BASE + its physical address.  If that yields the same word,
@@ -6400,6 +6456,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	phys_selftest();
 	cpu_selftest();
 	memmap_selftest(info);
+	framebuffer_selftest(info);
 	direct_map_selftest(info);
 	walk_selftest();
 	bootmem_selftest(info);
