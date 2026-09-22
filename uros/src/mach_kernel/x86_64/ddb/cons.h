@@ -111,6 +111,37 @@ void cons_drain(void);
 void cons_flush(void);
 
 /*
+ * Who owns COM1 (#497).
+ *
+ * 🔑 A DEVICE IS A RIGHT (#511), AND THIS ONE HAD NO OWNER.  The kernel's
+ * console has written this port since the machine could print, and nothing
+ * stopped a task holding the device master port writing it too -- the range
+ * check in device_master.c lets any port behind no PCI BAR through, and says
+ * so, because refusing everything unattributed would have taken the console
+ * with it.  So "the kernel and the driver coexist" was a hope, and #544 is
+ * fifty-three runs of what that hope is worth: thirteen of them garbled, two
+ * writers interleaving inside a word.
+ *
+ * cons_port_release() is the kernel stepping back.  It is called when a task
+ * claims the port, and after it the console's bytes go to the outputs this
+ * target still has -- the klog ring, which has held every byte since #200,
+ * and the framebuffer console of #568.  Nothing is lost; it stops being sent
+ * to a chip somebody else is driving.
+ *
+ * 🔴 IT COULD NOT HAVE BEEN WRITTEN BEFORE #568.  Until this kernel had a
+ * second mouth, giving the port away made it MUTE -- every self-test verdict,
+ * every panic.  That is why this issue waited for that one.
+ *
+ * cons_port_reclaim() is the way down, and it is a stated exception and not a
+ * race: a panic takes the port back, because a message that arrives possibly
+ * garbled beats a message that is lost.  A machine that is dying has no
+ * further use for the property that two writers never meet.
+ */
+void cons_port_release(void);
+void cons_port_reclaim(void);
+int cons_port_is_ours(void);
+
+/*
  * Where the bytes of this boot were actually handed to the port, counted so
  * that a drain nobody ever reached is visible as the zero it is rather than
  * passing for support.  cons_cost_report() prints them.

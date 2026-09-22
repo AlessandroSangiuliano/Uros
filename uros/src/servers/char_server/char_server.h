@@ -58,6 +58,16 @@ void char_core_run_discovery(const char_module_ops_t * const *modules,
 
 struct char_device_entry *char_core_dev_lookup(char_dev_id_t id);
 struct char_device_entry *char_core_dev_by_priv(void *priv);
+
+/*
+ * #497: the kernel's own output, handed to the tty because the kernel no
+ * longer writes the chip.  See core.c for why it skips both checks.
+ */
+int char_core_has_tty(void);
+int char_core_tty_write_raw(const char *buf, size_t len);
+
+/* #497: start the klog drain, once a tty exists to drain it into. */
+void char_klog_forward_start(void);
 unsigned int              char_core_dev_count(void);
 int                       char_core_dev_copy_all(struct char_device_info *out,
 						 unsigned int max);

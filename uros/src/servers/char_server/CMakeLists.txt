@@ -67,6 +67,25 @@ add_custom_command(
   VERBATIM
 )
 
+# 🔥 A TARGET OF ITS OWN, AND IT HAD TO BECOME ONE (#497).
+#
+# These four files used to be listed among char_server's sources, which made
+# the executable their owner -- and char_server add_dependencies() on all four
+# modules, so the generated header transitively depended on uart.so.  That was
+# harmless for exactly as long as no module included it.
+#
+# uart.so includes it now, to reach device_io_port_read/write, and the graph
+# closed on itself:
+#
+#	uart.so -> uart.c.o -> device_master.h -> ... -> uart.so
+#
+# 🔑 The header is not char_server's, it is the SUBSYSTEM's -- the comment
+# eight lines above has said so since it was written, "user stubs for
+# char_server MODULES" -- and a file that two targets use should be owned by
+# neither.
+add_custom_target(char_mig_device_master
+  DEPENDS ${DM_USER_C} ${DM_USER_H} ${DM_SERVER_C} ${DM_SERVER_H})
+
 # ===========================================================================
 # MIG: proc.defs — user stubs for proc_server RPCs (proc_set_ctty +
 # proc_tcsetpgrp / proc_tcgetpgrp).  Wired in #275.1 so the tty class
@@ -180,7 +199,8 @@ add_library(char_uart_module SHARED
   modules/uart.c
   modules/ssp_module_stub.c
 )
-add_dependencies(char_uart_module mig_mach_public_headers)
+add_dependencies(char_uart_module mig_mach_public_headers
+		 char_mig_device_master)
 target_compile_options(char_uart_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(char_uart_module PRIVATE MACH_IPC_COMPAT=0)
 # UART_DEBUG_TRACE (per-RX-byte + per-IRQ console trace) was bring-up
@@ -223,6 +243,7 @@ set(CHAR_SOURCES
   main.c
   core.c
   char_mig.c
+  klog_forward.c
   ${CHAR_SERVER_C}
   # core.c calls device_intr_register / device_intr_unregister
   # directly to wire module IRQs into the port set (#206).
@@ -242,11 +263,11 @@ add_executable(char_server
   ${CHAR_SOURCES}
   ${CHAR_USER_H}
   ${CHAR_SERVER_H}
-  ${DM_USER_H}
   ${PROC_USER_H}
 )
 
 add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke
+		 char_mig_device_master
 		 char_ps2_module char_uart_module char_ps2_mouse_module
 		 char_console_module)
 
@@ -266,6 +287,26 @@ target_link_libraries(char_server PRIVATE
   -Wl,--end-group
 )
 
+# 🔥 WHAT A MODULE NEEDS AND THE SERVER DOES NOT (#497).
+#
+# Modules are dlopen'd into this executable and resolve their undefined
+# symbols against ITS .dynsym, so a symbol the server never calls itself is
+# not in the binary and the module cannot find it.  uart.so took a
+# pthread_mutex when it gained a second writer; char_server uses pthread_create
+# and no mutex of its own, so the three mutex entry points were dropped by the
+# linker and the module stopped loading -- "no back-end modules loaded", with
+# no serial port and no error naming a symbol.
+#
+# ⚠️ AND THE LINK OF THE MODULE DID NOT COMPLAIN, because a module links with
+# `--unresolved-symbols=ignore-all'.  The failure is deferred to load time by
+# construction, so the build cannot be the thing that catches this; the check
+# is `nm -D' on both files, and it is worth doing whenever a module reaches for
+# something new.
+set(CHAR_MODULE_NEEDS
+  -Wl,-u,pthread_mutex_init
+  -Wl,-u,pthread_mutex_lock
+  -Wl,-u,pthread_mutex_unlock)
+
 target_link_options(char_server PRIVATE
   ${UROS_ARCH_FLAGS} -pie -nostdlib
   -Wl,-e,__start_mach
@@ -273,6 +314,7 @@ target_link_options(char_server PRIVATE
   -Wl,--export-dynamic
   -Wl,--hash-style=sysv
   -Wl,--build-id=none
+  ${CHAR_MODULE_NEEDS}
 )
 
 set_target_properties(char_server PROPERTIES

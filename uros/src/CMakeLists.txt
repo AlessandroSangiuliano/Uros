@@ -541,6 +541,32 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/block_device_server)
 endif()
 
+# char_server on x86-64 (#497), and the question it brings with it.
+#
+# 🔑 IT IS NOT A PORTING STEP, IT IS AN OWNERSHIP ONE.  This is the target where
+# the kernel's console and this server's uart module would both drive COM1, and
+# on i386 that costs 25% of the acceptance smoke -- 13 failures in 53 runs, every
+# one of them two writers interleaving within a line (#544).  The sentence in
+# modules/uart.c that says the two "coexist ... without collision" is refuted by
+# those specimens and does not survive this issue.
+#
+# It could not be asked until #568.  Until then the serial port was the only
+# output this kernel had, so giving it away made the kernel mute -- every
+# self-test verdict, every panic.  With a framebuffer console the kernel has
+# somewhere else to speak, and the port can go to the driver it belongs to.
+#
+# Nothing else was holding it out but this file: every library it links --
+# libcap, libdl, libelf, libgpu_console, libmodload, libpthreads -- is already
+# above the gate, and #423 brought the module loader across precisely because
+# four servers were waiting on it.  This is another of the four.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK AND OSFMK_BUILD_CHAR_SERVER)
+  add_subdirectory(servers/char_server)
+  # And the client that asks it for a character each way (#497).  There was
+  # none on this target: char_server publishes "char" and nobody looked it up,
+  # so "the server starts" was the whole of what a boot could show.
+  add_subdirectory(tests/char_test)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")

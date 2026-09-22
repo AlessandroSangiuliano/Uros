@@ -1,0 +1,28 @@
+# char_test manifest — the policy that lets a client speak to the serial
+# port at all (#497).
+#
+# 🔑 A CLIENT OF char_server NEEDED ONE, AND NOTHING IN THIS TREE HAD ONE.
+# ush, the only other tty client, carries an empty manifest and reaches its
+# terminal through the unbound-ctty exception -- which asks proc_server who
+# the session leader is.  proc_server has not crossed to x86-64, so that
+# exception is closed on this target and the cap-checked road is the only
+# one: char_server verifies the token on every read and every write.
+#
+# ⚠️ Without this file the test does not fail quietly, it fails LOUDLY, and
+# that is on purpose.  cap_request() comes back refused and the test says so
+# and stops -- rather than carrying on with an empty token, which would
+# exercise char_server's refusal path and report it as the serial port.
+
+name char_test
+
+# RESOURCE_SERIAL (7), any tty, CHAR_CAP_TTY_RW (1<<1 = 0x2).
+#
+# ⚠️ `any' and not the device id, for the same reason cap_test says `any'
+# about block devices: the id is assigned in the order modules attach, so a
+# manifest that named 1 would be a policy about whichever device happened to
+# be first.  The test asks char_server which device is the tty and requests a
+# capability for that one; this line says it may hold such a capability at
+# all.
+required 7 any 0x2
+
+# No `delegatable' lines: this task hands nothing on.

@@ -96,6 +96,26 @@ extern void		device_md_io_write(unsigned int port, unsigned int size,
 					   unsigned int value);
 
 /*
+ * A task has claimed, or given back, a range of legacy I/O ports (#497).
+ *
+ * 🔑 THE MACHINE IS THE ONLY THING THAT KNOWS WHAT IS AT AN ADDRESS.  The
+ * range check that makes a claim mean anything is machine-independent -- a
+ * port is a number and an owner is a task -- but the CONSEQUENCE is not: on
+ * x86-64 a claim covering COM1 is the kernel's console being asked to step
+ * back, because that is the chip it has been writing since the machine could
+ * print.  A port number means nothing to device_master.c and everything here.
+ *
+ * ⚠️ Called after the claim is recorded and before the reply, so a driver
+ * that gets KERN_SUCCESS knows the kernel has already stopped writing.  The
+ * other order would hand a driver a chip the kernel was still using for as
+ * long as the reply took.
+ */
+extern void		device_md_io_claimed(unsigned int base,
+					     unsigned int count);
+extern void		device_md_io_unclaimed(unsigned int base,
+					       unsigned int count);
+
+/*
  * What runs when the line fires.  Called with the interrupt number, in
  * interrupt context, on whichever processor took it.
  */
