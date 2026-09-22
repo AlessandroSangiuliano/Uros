@@ -173,6 +173,20 @@ extern int char_core_irq_register(uint32_t irq,
 extern int char_core_irq_unregister(uint32_t irq);
 
 /*
+ * The device master port (#497).
+ *
+ * For a module that cannot reach its hardware with an instruction of its own.
+ * A PCI module maps its BAR and uses ordinary loads and stores; an x86 I/O
+ * port is not memory and `in'/`out' are privileged, so on a target where this
+ * server holds no I/O permission the kernel executes them on the module's
+ * behalf -- device_io_port_read/write, taking this port.
+ *
+ * Returns MACH_PORT_NULL before char_core_irq_init() has run, which is before
+ * any module is loaded.
+ */
+extern mach_port_t char_core_device_port(void);
+
+/*
  * #382: report a console break (Ctrl+D) to the kernel debugger.  The
  * kernel accepts only when the -K boot flag armed the break; returns 0
  * when DDB was entered (byte consumed — do NOT deliver it as input),

@@ -461,6 +461,55 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     set(_IPC_BENCH_DEP  "")
   endif()
 
+  # char_server, and ONE module of the four (#497).
+  #
+  # 🔑 uart.so alone, because this issue is about ONE device.  ps2.so and
+  # ps2_mouse.so reach the 8042 on ports 0x60/0x64 and console.so wants
+  # gpu_server, which has not crossed; bundling them would put three
+  # unanswered questions in a run that was asked one.  They join when there is
+  # something to say about them.
+  #
+  # ⚠️ LAST of the ordinary entries, and not for cow_test's reason.  It is last
+  # because it is the entry that would take COM1 away from the kernel's
+  # console: every line the other seventeen entries print is already out of the
+  # port before this one starts, so a first boot shows what char_server does
+  # rather than what it does to everybody else's output.
+  #
+  # ⚠️ ${_IPC_BENCH_LINE} still follows it, and must.  run-x86_64.sh ends a run
+  # on the last entry the bundle STARTS, and in a bench bundle that is
+  # ipc_bench -- putting anything after it would make the marker fire on an
+  # entry that is not the last one, which is the mistake that comment records
+  # being made twice already.
+  #
+  # ⚠️ Conditional, so the DEFAULT bundle is unchanged.  OSFMK_BUILD_CHAR_SERVER
+  # is OFF, and a boot without it is byte-for-byte the boot every earlier
+  # measurement was taken on -- which is what makes the two comparable.
+  if(OSFMK_BUILD_CHAR_SERVER)
+    # ⚠️ char_test AFTER char_server, and it waits anyway.  The order in this
+    # file decides what bootstrap STARTS first and nothing more -- the test
+    # spins on netname_look_up("char") because a started server is not yet a
+    # registered one, and an ordering that was relied upon instead would be an
+    # interleaving mistaken for an order (run-x86_64.sh records that one).
+    set(_CHAR_CMF
+      "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/char_test.cmf")
+    set(_CHAR_LINE  "char_server char_server\nchar_test char_test\n")
+    set(_CHAR_FILES "char_server:${_SBIN}/char_server"
+                    "modules/char/uart.so:${_MOD}/char/uart.so"
+                    "char_test:${_SBIN}/char_test"
+                    "char_test.cmf:${_CHAR_CMF}")
+    # 🔑 The FILE for the manifest and the TARGET for the binaries, which is
+    # the distinction the comment below the mkbundle arguments was written to
+    # record: a target dependency orders the build and never notices that the
+    # output changed, so a stale .cmf ships while the export tree holds the
+    # new one.
+    set(_CHAR_DEP   char_server char_uart_module char_test_bin ${_CHAR_CMF})
+  else()
+    set(_CHAR_CMF   "")
+    set(_CHAR_LINE  "")
+    set(_CHAR_FILES "")
+    set(_CHAR_DEP   "")
+  endif()
+
   if(UROS_BUNDLE_BENCH_ONLY)
     # 🔴 LE SUITE SONO NOMINATE, E `scale' E' FUORI PER UN MOTIVO MISURATO.
     #
@@ -500,7 +549,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -607,6 +656,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
+            ${_CHAR_FILES}
             ${_IPC_BENCH_FILE}
     # 🔥 THE FILE AND NOT THE TARGET.  `DEPENDS cap_test_manifest' is an
     # ORDERING dependency: ninja runs that target first and never notices that
@@ -620,6 +670,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
             hal_bar_test_server
+            ${_CHAR_DEP}
             ${_IPC_BENCH_DEP}
             ${_CONF}
     COMMENT "Bundle: bootstrap.conf + 14 tasks + hal_server + block_device_server"

@@ -2445,6 +2445,56 @@ ds_master_device_mmio_unmap(
  * lines, the keyboard, the PIC and the PIT -- are behind no PCI BAR, and a
  * rule that refused everything unattributed would take the console with it.
  */
+/*
+ * Legacy I/O ranges a task has claimed (#497).
+ *
+ * 🔑 SEPARATE FROM device_claim[] BECAUSE IT ANSWERS A DIFFERENT QUESTION.
+ * That table is about PCI: an entry is a bus/device/function, its regions are
+ * MEASURED from the BARs when the device is handed over, and the whole point
+ * is that the caller cannot name an address.  A legacy device has no BAR to
+ * measure and no bdf to name it by, so the caller has to say where -- which is
+ * the weaker contract, and mixing the two would weaken the strong one.
+ *
+ * ⚠️ Four entries, and that is the number of legacy ranges this system has any
+ * business handing out: the two serial lines and the two halves of the 8042.
+ * A fifth claim is refused rather than silently dropped.
+ */
+#define	IO_CLAIM_MAX	4
+
+struct io_claim {
+	task_t		task;
+	unsigned int	base;
+	unsigned int	count;
+};
+
+static struct io_claim	io_claim[IO_CLAIM_MAX];
+
+/*
+ * Does this port belong to somebody who said so?  Returns KERN_SUCCESS when
+ * it is ours or unclaimed, KERN_NO_ACCESS when it is somebody else's.
+ */
+static kern_return_t
+check_io_claim(unsigned int port)
+{
+	task_t		me = current_task();
+	unsigned int	i;
+
+	for (i = 0; i < IO_CLAIM_MAX; i++) {
+		if (io_claim[i].task == TASK_NULL)
+			continue;
+		if (port < io_claim[i].base
+		    || port >= io_claim[i].base + io_claim[i].count)
+			continue;
+		if (io_claim[i].task == me)
+			return KERN_SUCCESS;
+
+		printf("device_io_port: 0x%x is inside a range another task "
+		       "claimed (#497)\n", port);
+		return KERN_NO_ACCESS;
+	}
+	return KERN_SUCCESS;
+}
+
 static kern_return_t
 check_io_port(unsigned int port)
 {
@@ -2481,7 +2531,13 @@ check_io_port(unsigned int port)
 		}
 	}
 
-	return KERN_SUCCESS;
+	/*
+	 * Nothing measured owns it.  Before #497 that was the end of the
+	 * question and the answer was always yes; now a task may have SAID it
+	 * owns a legacy range, and the hole closes exactly where somebody has
+	 * stepped into it.
+	 */
+	return check_io_claim(port);
 }
 
 kern_return_t
@@ -2530,6 +2586,103 @@ ds_master_device_io_port_write(
 
 	device_md_io_write(port, size, data);
 	return KERN_SUCCESS;
+}
+
+/*
+ * Claim a range of legacy I/O ports, and give it back (#497).
+ *
+ * See the comment beside these routines in device_master.defs for the hole
+ * they close and the one they deliberately leave open.
+ */
+kern_return_t
+ds_master_device_io_port_claim(
+	ipc_port_t		master_port,
+	unsigned int		port,
+	unsigned int		count)
+{
+	task_t		me = current_task();
+	kern_return_t	kr;
+	unsigned int	i, free_slot = IO_CLAIM_MAX;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	/*
+	 * ⚠️ A range that wraps, or an empty one, is refused rather than
+	 * clamped.  `base + count' is the comparison every check below makes,
+	 * and a caller that could make it wrap would own every port by owning
+	 * none.
+	 */
+	if (count == 0 || port + count < port || port + count > 0x10000u)
+		return KERN_INVALID_ARGUMENT;
+
+	for (i = 0; i < IO_CLAIM_MAX; i++) {
+		if (io_claim[i].task == TASK_NULL) {
+			if (free_slot == IO_CLAIM_MAX)
+				free_slot = i;
+			continue;
+		}
+		/* Overlapping somebody else's claim is a refusal, and
+		 * overlapping our own is idempotent rather than a second
+		 * entry: a driver that re-attaches must not consume slots. */
+		if (port + count <= io_claim[i].base
+		    || port >= io_claim[i].base + io_claim[i].count)
+			continue;
+		if (io_claim[i].task != me)
+			return KERN_NO_ACCESS;
+		if (io_claim[i].base == port && io_claim[i].count == count)
+			return KERN_SUCCESS;
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (free_slot == IO_CLAIM_MAX)
+		return KERN_RESOURCE_SHORTAGE;
+
+	io_claim[free_slot].task  = me;
+	io_claim[free_slot].base  = port;
+	io_claim[free_slot].count = count;
+
+	printf("device_io_port: task %p claimed 0x%x..0x%x (#497)\n",
+	       (void *)me, port, port + count - 1);
+
+	/* After the record and before the reply: see device_machdep.h. */
+	device_md_io_claimed(port, count);
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_master_device_io_port_unclaim(
+	ipc_port_t		master_port,
+	unsigned int		port)
+{
+	task_t		me = current_task();
+	kern_return_t	kr;
+	unsigned int	i, count;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	for (i = 0; i < IO_CLAIM_MAX; i++) {
+		if (io_claim[i].task != me || io_claim[i].base != port)
+			continue;
+
+		count = io_claim[i].count;
+		io_claim[i].task  = TASK_NULL;
+		io_claim[i].base  = 0;
+		io_claim[i].count = 0;
+		device_md_io_unclaimed(port, count);
+		return KERN_SUCCESS;
+	}
+
+	/*
+	 * ⚠️ Not found is KERN_INVALID_ARGUMENT and not success.  A driver
+	 * that gave back a range it never held is a driver whose bookkeeping
+	 * disagrees with the kernel's, and answering yes would hide that --
+	 * the shape of a guard that can never fire.
+	 */
+	return KERN_INVALID_ARGUMENT;
 }
 
 /*
@@ -3211,6 +3364,38 @@ device_master_task_terminating(task_t task)
 
 	if (task == TASK_NULL)
 		return;
+
+	/*
+	 * ── The legacy I/O ranges (#497) ──────────────────────────────────
+	 *
+	 * 🔴 FIRST, AND IT IS THE ONE WHOSE LEAK IS NOT MERELY A LEAK.  A
+	 * claim covering COM1 made the kernel's console step back; a driver
+	 * that died holding it would leave that console speaking to klog and a
+	 * framebuffer for ever, and on a headless box (#373) that is a machine
+	 * that has gone silent for the rest of the boot.  Every other entry
+	 * this hook reaps costs memory or a wedged device.  This one costs the
+	 * ability to be told about them.
+	 *
+	 * ⚠️ device_md_io_unclaimed() is what puts the console back, so the
+	 * range has to be handed to it before the slot is forgotten.
+	 */
+	for (i = 0; i < IO_CLAIM_MAX; i++) {
+		unsigned int base, count;
+
+		if (io_claim[i].task != task)
+			continue;
+
+		base  = io_claim[i].base;
+		count = io_claim[i].count;
+		io_claim[i].task  = TASK_NULL;
+		io_claim[i].base  = 0;
+		io_claim[i].count = 0;
+
+		printf("device_io_port: task %p died holding 0x%x..0x%x — "
+		       "released (#497)\n", (void *)task, base,
+		       base + count - 1);
+		device_md_io_unclaimed(base, count);
+	}
 
 	/*
 	 * ── The interrupt lines first (#511) ──────────────────────────────
