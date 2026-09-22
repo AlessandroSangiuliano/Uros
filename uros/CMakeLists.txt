@@ -396,6 +396,38 @@ add_custom_target(check-run-conditions
   VERBATIM
 )
 
+# Can two files of one name both be reached by one translation unit? (#565)
+#
+# 🔑 The third checker of #549's three, wired at last, and it had already been
+# written for exactly the defect that came back: `scripts/header-shadow-check.py'
+# says so in its own docstring -- #471 in the .defs, #480 in sa_mach/types.h,
+# #481 in export/include -- and the fourth instance was found by a symptom in a
+# fifth place, because nothing ran it.
+#
+# 🔴 AND WHAT IT CATCHES IS NOT ONLY WHAT THE BUILD MAKES.  Both instances found
+# on the day this was wired were STALE: a mach.h that #481's rename stopped
+# producing in August and that the build directory kept, and three hal_server.h
+# left behind by the rename in the same commit as this rule.  CMake deletes no
+# output it has stopped declaring, so a build directory accumulates headers
+# that shadow source ones exactly as live ones would -- and the only thing that
+# can see that is a check that reads the directory rather than the rules.
+#
+# ⚠️ It reads compile_commands.json, which uros/CMakeLists.txt turns on at the
+# top, so the file is there by construction.  If it ever is not, the script
+# answers NOT CHECKED and exits 2 rather than passing, which is the difference
+# between a guard and a guard-shaped silence.
+add_test(NAME header_shadow
+         COMMAND python3 ${CMAKE_SOURCE_DIR}/../scripts/header-shadow-check.py
+                 ${CMAKE_BINARY_DIR})
+
+add_custom_target(check-header-shadow
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/../scripts/header-shadow-check.py
+          ${CMAKE_BINARY_DIR}
+  COMMENT "header-shadow-check (#565)"
+  USES_TERMINAL
+  VERBATIM
+)
+
 # Target clean-all: rimuove completamente la directory di build
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}
