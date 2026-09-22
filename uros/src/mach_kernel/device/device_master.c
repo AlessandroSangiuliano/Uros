@@ -1210,6 +1210,7 @@ ds_master_device_intr_enable(
 	if (irq_forward_table[irq].owner != current_task()) {
 		printf("device_intr_enable: irq %u was registered by another "
 		       "task\n", irq);
+		splx(s);	/* #538: this return left the processor at SPLHI */
 		return KERN_NO_ACCESS;
 	}
 
