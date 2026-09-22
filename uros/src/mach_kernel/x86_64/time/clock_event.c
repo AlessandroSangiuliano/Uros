@@ -702,6 +702,15 @@ clock_event_tick(struct trap_frame *frame)
 	 */
 	urmach_rcu_advance();
 
+	/*
+	 * And whatever the console has queued (#567).  It never waits for the
+	 * transmitter, so this cannot lengthen a tick by a device: it writes
+	 * what the port will take now and leaves the rest.  It is what gets
+	 * out the bytes a writer had to leave behind because another
+	 * processor held the port.
+	 */
+	cndrain();
+
 	clock_selftest(cpu);
 
 	/*

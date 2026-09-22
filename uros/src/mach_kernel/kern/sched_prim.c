@@ -3171,6 +3171,15 @@ idle_thread_continue(void)
 		 */
 		urmach_rcu_drain();
 
+		/*
+		 * And whatever the console has queued and nobody has handed to
+		 * the port yet (#567).  Here for the same reason: an idle
+		 * processor is exactly when there is time, and this never
+		 * waits for the transmitter -- what will not fit right now
+		 * stays in the ring for the next pass.
+		 */
+		cndrain();
+
 #ifdef	MARK_CPU_IDLE
 		MARK_CPU_IDLE(mycpu);
 #endif	/* MARK_CPU_IDLE */

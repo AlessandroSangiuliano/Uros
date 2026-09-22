@@ -986,6 +986,18 @@ printf_init(void)
 	 */
 	simple_lock_init(&printf_lock, ETAP_MISC_PRINTF);
 	klog_init();
+
+	/*
+	 * And from here the console may stop writing the wire in the caller's
+	 * thread (#567).  Here and not earlier because this is the moment
+	 * printf() becomes the writer: what runs before it prints through the
+	 * machine's own early path, which has no ring behind it and must not
+	 * -- a byte queued before anybody exists to drain it is a byte that
+	 * waits for the first line somebody prints.
+	 *
+	 * A target whose console is synchronous answers this with nothing.
+	 */
+	cnasync(TRUE);
 }
 
 /* derived from boot_gets */
@@ -1071,17 +1083,29 @@ printf(const char *fmt, ...)
 	 * times slower than the emulator (#567).  A line is milliseconds
 	 * whichever of the three it is.
 	 *
-	 * 🔑 The wait is inside on purpose, and the reason is what the lock is
-	 * FOR.  It protects no data structure; it makes a line a line on a
-	 * wire that every processor shares.  Rendering under the lock and
-	 * emitting outside it would move the device time out of the hold and
-	 * put the interleaving back -- two writers' bytes mixed on the wire,
-	 * the shape #544 chased through thirteen red runs.  Shortening the
-	 * hold the other way, a ring drained from an interrupt, is a different
-	 * console: an interrupt-driven one, which is not the polled path that
-	 * has to work inside panic() and before there is an interrupt
-	 * controller.  That console is #497's, in userspace, and until it owns
-	 * the wire this window is the price of a line that arrives whole.
+	 * 🔴 AND THE DEVICE IS NOT INSIDE THE WINDOW ANY MORE (#567) -- on a
+	 * target whose console buffers, which x86-64's now does.  What stood
+	 * here said the wait was inside on purpose, and the reason given was
+	 * what the lock is FOR: it protects no data structure, it makes a line
+	 * a line on a wire that every processor shares, so rendering under the
+	 * lock and emitting outside it would put the interleaving back -- two
+	 * writers' bytes mixed on the wire, the shape #544 chased through
+	 * thirteen red runs.
+	 *
+	 * That was right about the lock and wrong about the conclusion.  A
+	 * RING answers the objection instead of arguing with it: bytes enter
+	 * it in the order the lock granted and leave it in ring order, so a
+	 * line still arrives whole whichever processor hands it over.  The
+	 * hold is now a memory write per byte, and cnflush() below writes the
+	 * port with preemption allowed and interrupts as the caller had them.
+	 *
+	 * ⚠️ It does not make a byte cheaper, and nothing here should be read
+	 * as saying so: under an accelerator the cost IS the `outb' and
+	 * somebody still pays it.  What changed is who, and when.
+	 *
+	 * ⚠️ On a target that has no ring -- i386 -- every word above the 🔴
+	 * still describes what happens, and the device time is still inside
+	 * the hold.
 	 *
 	 * What #551 changed is the window's LENGTH.  It was unbounded: a
 	 * transmitter that never emptied kept this processor here for ever,
@@ -1128,6 +1152,28 @@ printf(const char *fmt, ...)
       _doprnt(fmt, &listp, klog_cnputc, 16);
 	va_end(listp);
 	enable_preemption();
+
+	/*
+	 * And NOW the wire, outside everything above (#567).
+	 *
+	 * On a target whose console buffers, the loop just run put the line
+	 * into a ring and the device has not been touched yet; this hands it
+	 * over, with preemption allowed and interrupts as the caller had them.
+	 * The thread that printed still pays for the wire -- somebody must --
+	 * but no longer inside a window where it cannot be rescheduled.
+	 *
+	 * ⚠️ AFTER enable_preemption() and not between the unlock and it: the
+	 * point is the window, and leaving the device inside the outer half of
+	 * it would keep most of what this removes.
+	 *
+	 * ⚠️ And it is the whole ring that goes, not this line: another
+	 * processor may have left bytes behind because it could not get the
+	 * port.  That is what keeps the ring short, and it is why a line's
+	 * order on the wire is the ring's order and not the caller's.
+	 *
+	 * A target whose console is synchronous answers this with nothing.
+	 */
+	cnflush();
 }
 
 static char *copybyte_str;

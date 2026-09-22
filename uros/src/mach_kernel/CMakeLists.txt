@@ -165,6 +165,11 @@ option(UROS_ABLATE_566_NO_IPI_WAIT "Build the #566 ablation: ipi_call_others doe
 # #567: one byte per look at the transmitter, which is what this tree did
 # before the FIFO was used.  The other arm of that measurement.
 option(UROS_ABLATE_567_NO_FIFO "Build the #567 ablation: one byte per look at the transmitter" OFF)
+# #567: refuse to arm the console ring, so every byte goes to the port in the
+# caller's thread under printf_lock, which is the console this target had
+# before.  The other arm of the hold measurement, in a binary that differs in
+# nothing else.
+option(UROS_ABLATE_567_NO_RING "Build the #567 ablation: the console writes the wire in the caller's thread" OFF)
 # #563: make the five tests that need a second processor believe they are alone,
 # so the line that DECLINES the question can be executed.  There is no boot flag
 # capping the processor count on this target and an AP cannot be made to fail to
@@ -388,6 +393,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_567_NO_FIFO)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_FIFO=1)
       message(STATUS "#567 ablation: one byte per look at the transmitter (x86_64)")
+  endif()
+  if(UROS_ABLATE_567_NO_RING)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_RING=1)
+      message(STATUS "#567 ablation: the console writes the wire in the caller's thread (x86_64)")
   endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)

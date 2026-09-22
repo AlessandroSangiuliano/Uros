@@ -112,6 +112,13 @@ consolewrite(dev_t dev, io_req_t ior)
 		while (k--)
 			cnputc(*p++);
 		simple_unlock(&printf_lock);
+
+		/*
+		 * And the wire outside the hold, like printf() (#567).  Per
+		 * chunk and not once at the end: a writer that hands over 4 KB
+		 * should not build 4 KB of ring before any of it moves.
+		 */
+		cnflush();
 	}
 
 	ior->io_residual = 0;
