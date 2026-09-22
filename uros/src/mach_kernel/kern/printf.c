@@ -1051,16 +1051,25 @@ printf(const char *fmt, ...)
 					 * which deadlocks the debugger's console. */
 
 	/*
-	 * ── The window: one line, at the wire's pace (#551) ──────────────
+	 * ── The window: one line, at the device's pace (#551) ────────────
 	 *
 	 * From here to enable_preemption() this processor is not rescheduled,
 	 * and from simple_lock() to simple_unlock() -- on a target whose spin
 	 * lock masks interrupts for the hold, which x86-64 does (#528) -- it
 	 * takes no interrupt either.  The device wait is inside that: on
-	 * x86-64 cnputc() is a polled UART, and a byte costs what the wire
-	 * costs.  Measured rather than assumed, and printed on every boot by
-	 * cons_cost_report(): tens of microseconds a byte under KVM and TCG
-	 * on the machines this has run on, so a line is a few milliseconds.
+	 * x86-64 cnputc() is a polled UART, and a byte costs what the DEVICE
+	 * costs -- which is three different numbers, and calling any of them
+	 * "the wire" would be wrong twice over (#567).
+	 *
+	 * Measured rather than assumed, and printed on every boot by
+	 * cons_cost_report(): 83 us a byte under KVM, where there is no wire
+	 * at all and the cost is an exit to the host plus a chardev write;
+	 * 6.3 us under TCG, where it is a helper call in the same process.
+	 * The wire proper is the one nobody has measured: 8N1 at the 38400
+	 * baud boot.S programs is ten bits a byte, 260 us -- so the METAL is
+	 * three times slower than the emulator, and a reader who took the
+	 * KVM figure for the wire's pace would plan around a third of the
+	 * truth.  A line is milliseconds whichever of the three it is.
 	 *
 	 * 🔑 The wait is inside on purpose, and the reason is what the lock is
 	 * FOR.  It protects no data structure; it makes a line a line on a
@@ -1078,7 +1087,7 @@ printf(const char *fmt, ...)
 	 * transmitter that never emptied kept this processor here for ever,
 	 * and an unprivileged trap could ask for it.  cons_putc() now gives a
 	 * byte a bounded wait and a stuck port one poll a byte, so a hold is
-	 * at most one line at the wire's pace on a healthy port and about one
+	 * at most one line at the device's pace on a healthy port and about one
 	 * poll a byte on a dead one.  The longest line ring 3 can choose is
 	 * MACH_PRINT_MAX-1 bytes through mach_print(), and one line or
 	 * CONSOLE_CHUNK bytes through the console device (consolewrite).

@@ -88,11 +88,12 @@ consolewrite(dev_t dev, io_req_t ior)
 	 * interleaving byte by byte on the wire, and a line is the unit that
 	 * needs it.  The whole buffer used to be under it, and the buffer's
 	 * length is the CALLER's choice: on this target the hold masks
-	 * interrupts (#528) and a byte costs what the wire costs -- measured,
-	 * cons_cost_report() prints it every boot -- so a 4 KB write was a
-	 * tenth of a second of one processor with interrupts off, sized from
-	 * userland.  Now a hold is one line, or CONSOLE_CHUNK bytes of a line
-	 * that has no newline in it, and what a writer chooses is how many
+	 * interrupts (#528) and a byte costs what the DEVICE costs -- 83 us
+	 * under KVM, measured, and cons_cost_report() prints it every boot
+	 * (#567) -- so a 4 KB write was a third of a second of one processor
+	 * with interrupts off, sized from userland.  Now a hold is one line,
+	 * or CONSOLE_CHUNK bytes of a line that has no newline in it, and
+	 * what a writer chooses is how many
 	 * such holds it takes in a row, between any two of which the
 	 * scheduler may run somebody else.  cnputc is polled and bounded
 	 * (#551), so a hold ends without a voluntary context switch and

@@ -133,7 +133,8 @@ consolewrite(dev_t dev, io_req_t ior)
 	 * One LINE under the lock, not the whole buffer (#551): the lock is
 	 * what keeps SMP writers from interleaving byte by byte on the UART,
 	 * and a line is the unit that needs it.  The buffer's length is the
-	 * caller's, and at a millisecond a byte on a struggling port a hold
+	 * caller's, and at the device's pace -- tens of microseconds a byte,
+	 * measured on x86-64 (#567), more on a struggling port -- a hold
 	 * sized by userland was a hold of any length.  A hold is now one line
 	 * or CONSOLE_CHUNK bytes of a line with no newline in it; between two
 	 * of them the scheduler may run somebody else.  cnputc -> com_putc is
