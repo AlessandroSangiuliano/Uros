@@ -260,26 +260,6 @@ void cons_putc(char c)
 		return;
 	}
 
-	/*
-	 * The other output (#568), and exactly once per byte.
-	 *
-	 * 🔑 HERE AND NOT IN cnputc(), because cnputc() is not the bottom.
-	 * The debugger prints through cons_puts(), the trap reporter through
-	 * cons_putc_wire(), and neither goes anywhere near the
-	 * machine-independent name -- so a mirror placed there would have left
-	 * a fault report and a debugger prompt invisible on a machine whose
-	 * only output is the screen, which is the one machine this exists for.
-	 *
-	 * ⚠️ AFTER the capture check: while a selftest has the console pointed
-	 * at memory, the console IS that memory, and drawing its bytes would
-	 * put a test's intermediate output on an operator's screen.
-	 *
-	 * ⚠️ And cons_putc_wire() mirrors too, which is why the byte is handed
-	 * to the port below through the shared inner and not through it: one
-	 * call each way, never two.
-	 */
-	fbcons_putc(c);
-
 	if (cons_async_on) {
 		cons_queue(c);
 		return;
@@ -389,8 +369,40 @@ static unsigned cons_tx_room(int may_wait)
  * has turned it off -- this is also cons_putc()'s path, and then there is no
  * drainer in existence and no race at all.
  */
+/*
+ * ── The other output is drawn where a byte is HANDED OVER (#568) ───────
+ *
+ * 🔑 NOT IN cnputc(), because cnputc() is not the bottom: the debugger prints
+ * through cons_puts() and the trap reporter through cons_putc_wire(), neither
+ * of which goes near the machine-independent name.  A mirror placed there
+ * would have left a fault report and a debugger prompt invisible on a machine
+ * whose only output is the screen -- the one machine this exists for.
+ *
+ * 🔴 AND NOT IN cons_putc() EITHER, which is where it went first and where it
+ * cost the property #567 had just bought.  cons_putc() runs under printf_lock
+ * with preemption off and interrupts masked; a glyph is 559 ns; the per-boot
+ * line went straight from 287 ns of window a byte to 1026.  Drawing where the
+ * byte reaches the PORT puts it in the same place the wire already is --
+ * outside that lock when the ring is armed, and in the caller's thread when it
+ * is not, which is exactly the rule the wire follows.
+ *
+ * ⚠️ It also means order on the screen is order on the wire, because the
+ * port's lock is what serialises both.
+ *
+ * There are three places a byte is handed over -- here, the drain, and the
+ * queue that a stuck port throws away -- and each draws once, so no path draws
+ * twice and none draws nothing.
+ */
 static void cons_wire_byte(char c)
 {
+	/*
+	 * Before the port, and not after: a byte the transmitter refuses is
+	 * still a byte this kernel said, and on a machine where the screen is
+	 * the only output there is, dropping it from the screen because a wire
+	 * nobody is reading would not take it is the wrong way round.
+	 */
+	fbcons_putc(c);
+
 	if (cons_tx_room(1) == 0) {
 		cons_tx_dropped_count++;
 		return;
@@ -403,7 +415,6 @@ static void cons_wire_byte(char c)
 
 void cons_putc_wire(char c)
 {
-	fbcons_putc(c);
 	cons_wire_byte(c);
 }
 
@@ -458,9 +469,20 @@ static int cons_tx_one(int may_wait)
 		 * for the next tick.
 		 */
 		if (may_wait) {
+			/*
+			 * ⚠️ Drawn on the way out (#568).  These bytes are
+			 * lost to the wire, which is what a stuck port means;
+			 * they are not lost to the screen, which is working.
+			 * Bounded by the ring, so a stuck port pays at most
+			 * CONS_RING_SIZE glyphs once -- a couple of
+			 * milliseconds, not a wedge.
+			 */
 			hw_lock_lock(&cons_ring_lock);
-			cons_tx_dropped_count += cons_ring_head - cons_ring_tail;
-			cons_ring_tail = cons_ring_head;
+			while (cons_ring_head != cons_ring_tail) {
+				fbcons_putc(cons_ring[cons_ring_tail++ %
+						      CONS_RING_SIZE]);
+				cons_tx_dropped_count++;
+			}
 			hw_lock_unlock(&cons_ring_lock);
 		}
 		hw_lock_unlock(&cons_tx_lock);
@@ -475,6 +497,7 @@ static int cons_tx_one(int may_wait)
 	hw_lock_unlock(&cons_ring_lock);
 
 	if (went) {
+		fbcons_putc(c);			/* the other output (#568) */
 		outb(COM1 + UART_DATA, (uint8_t)c);
 		/* Guarded against the unlocked writer: see cons_putc_wire(). */
 		if (cons_fifo_room != 0)
