@@ -3351,14 +3351,22 @@ main(int argc, char **argv)
      * for now; pure correctness, not a perf bench. */
     if (suites & SUITE_FLIPC2) {
 	/*
-	 * #552: libvfs does not build for x86-64 yet -- migcom sums field
-	 * sizes without alignment padding and fs_stat's reply comes out four
-	 * bytes short at -m64 (#553).  ⚠️ SAID rather than skipped: a suite
-	 * that prints nothing cannot be told from one that passed.
+	 * ⚠️ SAID rather than skipped: a suite that prints nothing cannot be
+	 * told from one that passed.
+	 *
+	 * 🔴 AND THE REASON IS NOT THE ONE THIS USED TO GIVE.  It said libvfs
+	 * does not build for x86-64 (#553) -- true when it was written, false
+	 * now: #553 is fixed, libvfs.a builds and links on this target, and
+	 * the stubs pass every assertion migcom generates for them.
+	 *
+	 * What this suite still cannot do is RUN, because it goes client ->
+	 * libvfs -> name_server -> ext_server -> ext2, and ext_server is not
+	 * ported yet (#498).  A skip that names the wrong issue sends the next
+	 * reader to a defect that is already closed.
 	 */
 #if defined(__x86_64__)
-	printf("\n--- libvfs smoke: SKIPPED, libvfs is not built for x86-64 "
-	       "(#553) ---\n");
+	printf("\n--- libvfs smoke: SKIPPED, ext_server is not on x86-64 yet "
+	       "(#498). libvfs itself builds here since #553 ---\n");
 #else
 	extern void bench_libvfs_smoke(void);
 	bench_libvfs_smoke();
