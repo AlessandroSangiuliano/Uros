@@ -244,7 +244,6 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	int res;
 	kern_return_t kern_res;
 	pthread_mutex_t *busy;
-	tvalspec_t then;
 	int seq;
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{

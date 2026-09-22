@@ -2124,7 +2124,13 @@ test_trap_sweep(void)
 	      vm_wire(host, me, mem, 4096, VM_PROT_READ | VM_PROT_WRITE));
 	SWEEP("device_read", 500, ({ io_buf_ptr_t d; mach_msg_type_number_t n;
 		device_read(MACH_PORT_NULL, 0, 0, 512, &d, &n); }));
-	SWEEP("device_write", 500, ({ mach_msg_type_number_t n;
+	/*
+	 * io_buf_len_t and not mach_msg_type_number_t (#569): device_write's
+	 * bytes_written is an integer_t, which is SIGNED, and the test was
+	 * handing it the address of an unsigned one.  The interface carries
+	 * the type; a caller that picks its own is guessing (#448).
+	 */
+	SWEEP("device_write", 500, ({ io_buf_len_t n;
 		device_write(MACH_PORT_NULL, 0, 0, (io_buf_ptr_t)mem, 512,
 			     &n); }));
 	/*

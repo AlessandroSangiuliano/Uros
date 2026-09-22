@@ -375,7 +375,8 @@ echo_thread_func(void *arg)
 static void
 bench_intra_rpc(const char *label, int send_size, int iters)
 {
-    cache_snap_t	cs_before, cs_after;
+    cache_snap_t	cs_before = { 0 }, cs_after = { 0 };
+    int			cs_ok;
     mach_port_t		echo_port, reply_port;
     kern_return_t	kr;
     tvalspec_t		t0, t1;
@@ -415,7 +416,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     }
 
     /* Timed run */
-    cache_snap(&cs_before);
+    cs_ok = cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
 	send_buf.head.msgh_bits =
@@ -432,10 +433,18 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
-    cache_snap(&cs_after);
+    cs_ok &= cache_snap(&cs_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
-    print_cache_stats(label, &cs_before, &cs_after);
+    /*
+     * 🔴 ONLY IF BOTH SNAPSHOTS ANSWERED (#569).  cache_snap() returns 0 when
+     * host_info refuses and leaves the struct untouched; the print was
+     * commented out, so nobody had ever noticed that its input could be
+     * whatever was on the stack.  Enabling the line is what made the compiler
+     * say so.
+     */
+    if (cs_ok)
+	print_cache_stats(label, &cs_before, &cs_after);
 
     /* Cleanup: destroy ports (kills echo thread's receive) */
     mach_port_destroy(mach_task_self(), echo_port);
@@ -607,7 +616,8 @@ child_echo_entry(void)
 static void
 bench_inter_rpc(const char *label, int send_size, int iters)
 {
-    cache_snap_t		cs_before, cs_after;
+    cache_snap_t		cs_before = { 0 }, cs_after = { 0 };
+    int			cs_ok;
     kern_return_t		kr;
     mach_port_t			child_task, child_thread;
     mach_port_t			child_recv_port;	/* child receives */
@@ -723,7 +733,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     /*
      * Step 8: Timed run.
      */
-    cache_snap(&cs_before);
+    cs_ok = cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
 	send_buf.head.msgh_bits =
@@ -739,10 +749,18 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
-    cache_snap(&cs_after);
+    cs_ok &= cache_snap(&cs_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
-    print_cache_stats(label, &cs_before, &cs_after);
+    /*
+     * 🔴 ONLY IF BOTH SNAPSHOTS ANSWERED (#569).  cache_snap() returns 0 when
+     * host_info refuses and leaves the struct untouched; the print was
+     * commented out, so nobody had ever noticed that its input could be
+     * whatever was on the stack.  Enabling the line is what made the compiler
+     * say so.
+     */
+    if (cs_ok)
+	print_cache_stats(label, &cs_before, &cs_after);
 
     /*
      * Step 9: Cleanup — destroy the child task.

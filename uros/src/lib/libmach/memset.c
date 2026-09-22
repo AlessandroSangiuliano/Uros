@@ -94,8 +94,18 @@ memset(void *dst0, int c0, size_t length)
 #endif
 {
 	size_t t;
-	unsigned int c;
 	void *dst;
+#ifndef BZERO
+	/*
+	 * ⚠️ Declared under the same guard as its only use (#569).  This file
+	 * is compiled twice -- once as memset, once with BZERO defined as
+	 * bzero -- and the fill value exists only in the first.  Outside the
+	 * guard it was a variable unused in half the builds, which is what
+	 * -Wno-unused-variable was covering; deleting it breaks the other
+	 * half, which is what deleting before reading costs.
+	 */
+	unsigned int c;
+#endif
 
 	dst = dst0;
 	/*

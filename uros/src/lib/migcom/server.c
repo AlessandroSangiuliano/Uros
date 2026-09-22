@@ -469,7 +469,6 @@ WriteRoutineEntries(FILE *file, statement_t *stats)
 static void
 WriteArgDescriptorEntries(FILE *file, statement_t *stats)
 {
-    register u_int current = 0;
     register statement_t *stat;
 
     fprintf(file, "\t{\n");
@@ -1183,8 +1182,6 @@ WriteConditionalCallArg(FILE *file, register argument_t *arg)
 {
     ipc_type_t *it = arg->argType;
     boolean_t NeedClose = FALSE;
-    string_t  msgfield = 
-	(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField;
 
     if ((it->itInTrans != strNULL) &&
 	akCheck(arg->argKind, akbSendRcv) &&
@@ -1348,7 +1345,6 @@ static void
 WriteInitKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
-    char *subindex = "";
     boolean_t close = FALSE;
     char firststring[MAX_STR_LEN];
     char string[MAX_STR_LEN];
@@ -1357,7 +1353,6 @@ WriteInitKPD_port(FILE *file, register argument_t *arg)
 	WriteKPD_Iterator(file, FALSE, FALSE, arg, TRUE);
 	SafeSnprintf(firststring, MAX_STR_LEN, "\t*ptr");
 	SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
-	subindex = "[i]";
 	close = TRUE;
     } else {
 	SafeSnprintf(firststring, MAX_STR_LEN, "OutP->%s", arg->argMsgField);
@@ -1629,7 +1624,6 @@ WriteKPD_ool(FILE *file, register argument_t *arg)
     char string[MAX_STR_LEN];
     boolean_t VarArray;
     argument_t *count;
-    u_int howbig;
     char *subindex;
 
     if (IS_MULTIPLE_KPD(it)) {
@@ -1637,13 +1631,11 @@ WriteKPD_ool(FILE *file, register argument_t *arg)
 	SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
 	VarArray = it->itElement->itVarArray;
 	count = arg->argSubCount;
-	howbig = it->itElement->itSize;
 	subindex = "[i]";
     } else {
 	SafeSnprintf(string, MAX_STR_LEN, "OutP->%s.", arg->argMsgField);
 	VarArray = it->itVarArray;
 	count = arg->argCount;
-	howbig = it->itSize;
 	subindex = "";
     }
 

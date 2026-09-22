@@ -61,8 +61,6 @@
 #define mutex_unlock(a)
 #define mutex_init(a)
 
-static security_token_t null_security_token;
-
 static void free_file_buffers(
 		struct minixfs_file *);
 
@@ -572,14 +570,11 @@ read_fs(
 static int
 mount_fs(register struct minixfs_file	*fp)
 {
-	register struct minix_super_block *fs;
 	int error;
 
 	error = read_fs(&fp->f_dev, &fp->f_fs);
 	if (error)
 	    return (error);
-
-	fs = fp->f_fs;
 
 	/*
 	 * Calculate indirect block levels.
@@ -623,7 +618,7 @@ minixfs_open_file(
 	register char	*cp, *component;
 	register int	c;	/* char */
 	register int	rc;
-	ino_t		inumber, parent_inumber;
+	ino_t		inumber;
 	char	        *namebuf;
 	struct minixfs_file *fp;
 
@@ -691,7 +686,6 @@ minixfs_open_file(
 	     * Save directory inumber in case we find a
 	     * symbolic link.
 	     */
-	    parent_inumber = inumber;
 	    rc = search_directory(component, fp, &inumber);
 	    if (rc)
 	        goto exit;

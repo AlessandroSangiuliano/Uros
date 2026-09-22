@@ -1390,7 +1390,7 @@ test_dirty_list(void)
 {
 	kern_return_t	kr;
 	natural_t	fid1, fid2;
-	natural_t	size1, size2;
+	natural_t	size1;
 	pointer_t	orig1, orig2;
 	mach_msg_type_number_t orig1_cnt, orig2_cnt;
 	pointer_t	rdata;
@@ -1851,7 +1851,7 @@ static void
 test_batch_rpc(void)
 {
 	kern_return_t	kr;
-	natural_t	fid, file_size;
+	natural_t	fid;
 	pointer_t	data;
 	mach_msg_type_number_t data_count;
 	tvalspec_t	t0, t1;

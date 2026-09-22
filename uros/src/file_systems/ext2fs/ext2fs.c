@@ -369,8 +369,6 @@ vnode_gen_bump(struct ext2fs_file *fp)
 	}
 }
 
-static security_token_t null_security_token;
-
 static void free_file_buffers(
 		struct ext2fs_file *);
 

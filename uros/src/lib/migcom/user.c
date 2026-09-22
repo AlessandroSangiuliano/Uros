@@ -2061,20 +2061,6 @@ WriteFieldDecl(FILE *file, argument_t *arg)
 /* Fill in the string with an expression that refers to the size
  * of the specified array:
  */
-static void
-GetArraySize(register argument_t *arg, char *size)
-{
-    register ipc_type_t *it = arg->argType;
-
-    if (it->itVarArray) {
-	if (arg->argCount->argByReferenceUser) {
-	    sprintf(size, "*%s", arg->argCount->argVarName);
-	} else
-	    sprintf(size, "%s", arg->argCount->argVarName);
-    } else {
-	sprintf(size, "%d", (it->itNumber * it->itSize + 7) / 8);
-    }
-}
 
 
 static void
@@ -2163,8 +2149,6 @@ WriteRPCRoutineDescriptor(file, rt, arg_count, descr_count,
     int arg_count, descr_count;
     string_t work_routine, stub_routine, sig_array;
 {
-    register argument_t *arg;
-
     fprintf(file, "          { (mig_impl_routine_t) %s,\n\
             (mig_stub_routine_t) %s, ",
 	    work_routine, stub_routine);
@@ -2280,9 +2264,7 @@ static int
 CheckRPCCall(register routine_t *rt)
 {
     register argument_t *arg;
-    register int i;
 
-    i = 0;
     for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)
     {
 	if (akCheck(arg->argKind, akbUserArg) &&
