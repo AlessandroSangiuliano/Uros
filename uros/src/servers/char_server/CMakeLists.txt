@@ -67,6 +67,25 @@ add_custom_command(
   VERBATIM
 )
 
+# 🔥 A TARGET OF ITS OWN, AND IT HAD TO BECOME ONE (#497).
+#
+# These four files used to be listed among char_server's sources, which made
+# the executable their owner -- and char_server add_dependencies() on all four
+# modules, so the generated header transitively depended on uart.so.  That was
+# harmless for exactly as long as no module included it.
+#
+# uart.so includes it now, to reach device_io_port_read/write, and the graph
+# closed on itself:
+#
+#	uart.so -> uart.c.o -> device_master.h -> ... -> uart.so
+#
+# 🔑 The header is not char_server's, it is the SUBSYSTEM's -- the comment
+# eight lines above has said so since it was written, "user stubs for
+# char_server MODULES" -- and a file that two targets use should be owned by
+# neither.
+add_custom_target(char_mig_device_master
+  DEPENDS ${DM_USER_C} ${DM_USER_H} ${DM_SERVER_C} ${DM_SERVER_H})
+
 # ===========================================================================
 # MIG: proc.defs — user stubs for proc_server RPCs (proc_set_ctty +
 # proc_tcsetpgrp / proc_tcgetpgrp).  Wired in #275.1 so the tty class
@@ -180,7 +199,8 @@ add_library(char_uart_module SHARED
   modules/uart.c
   modules/ssp_module_stub.c
 )
-add_dependencies(char_uart_module mig_mach_public_headers)
+add_dependencies(char_uart_module mig_mach_public_headers
+		 char_mig_device_master)
 target_compile_options(char_uart_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(char_uart_module PRIVATE MACH_IPC_COMPAT=0)
 # UART_DEBUG_TRACE (per-RX-byte + per-IRQ console trace) was bring-up
@@ -242,11 +262,11 @@ add_executable(char_server
   ${CHAR_SOURCES}
   ${CHAR_USER_H}
   ${CHAR_SERVER_H}
-  ${DM_USER_H}
   ${PROC_USER_H}
 )
 
 add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke
+		 char_mig_device_master
 		 char_ps2_module char_uart_module char_ps2_mouse_module
 		 char_console_module)
 

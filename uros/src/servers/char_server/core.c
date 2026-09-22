@@ -257,6 +257,35 @@ char_core_irq_init(mach_port_t master_device, mach_port_t port_set)
 }
 
 /*
+ * The device master port, for a module whose hardware it cannot reach with
+ * an instruction of its own (#497).
+ *
+ * 🔑 An x86 I/O port is not memory.  A module that drives a PCI device maps
+ * its BAR and reads it with ordinary loads -- ahci.so does exactly that --
+ * but `in' and `out' are privileged, and on x86-64 this server runs in ring 3
+ * with no I/O permission bitmap and no `iopl' device to ask for one.  So the
+ * instruction is the kernel's to execute, and this is the port it is asked
+ * through: device_io_port_read/write, the same pair virtio_blk.so has used
+ * since it crossed.
+ *
+ * ⚠️ It is named after what it IS and not after who wants it.  `irq_master_device'
+ * below is the same port under a name that describes one of its uses, and a
+ * second module reaching for it would have had to know that.
+ *
+ * ⚠️ NOT a global exported to modules, deliberately.  A module cannot include
+ * the server's own char_server.h to pick one up: MIG generates a client-stub
+ * header of that exact name into the build directory and it comes FIRST on the
+ * include path, so the include resolves to the wrong file and the declaration
+ * is simply absent (#565/#481).  A function declared in char_module_abi.h --
+ * the header modules already include -- cannot be shadowed that way.
+ */
+mach_port_t
+char_core_device_port(void)
+{
+	return irq_master_device;
+}
+
+/*
  * #382: forward a console break (Ctrl+D spotted by uart.so / ps2.so) to
  * the kernel debugger.  The RPC blocks this dispatch thread for the whole
  * DDB session — intended: nothing char_server-side should move while the
