@@ -1753,8 +1753,8 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	if (kr != KERN_SUCCESS)
 		printf("ext2: set_protected_payload failed (kr=%d)\n", kr);
 	else
-		printf("ext2: protected payload set (mnt=%p)\n",
-		       (void *)mnt);
+		printf("ext2: protected payload set (slot %u)\n",
+		       mnt_payload(mnt));
 
 	/* Add to port set */
 	kr = mach_port_move_member(mach_task_self(), mnt->port, port_set);
