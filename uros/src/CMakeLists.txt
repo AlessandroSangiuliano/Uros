@@ -63,7 +63,27 @@ add_compile_options(-ffreestanding)
 #
 # ⚠️ It also turns -Wdangling-else back on, which gcc folds into this switch --
 # ten of them, all in migcom's own source.
-add_compile_options(-Wall -Wold-style-definition -Wold-style-declaration
+#
+# 🔴 -Werror, WHICH IS THE GUARD #504 ASKED FOR (#504).
+#
+# That issue ends: "a warning appearing in generated output should fail
+# something rather than scroll past".  The obvious reading is a check on the
+# generated files, and it is the wrong one -- not every stub goes through
+# cmake/mig.cmake, several CMakeLists call migcom themselves, and a guard that
+# covers some of the subject is the shape #485 named: worse than none, because
+# it answers about the wrong thing without failing.
+#
+# Both trees build clean today, so the complete guard is also the simplest one.
+# What it protects is not a number: it is that "zero warnings on both targets"
+# stays a statement somebody can rely on instead of a thing that used to be
+# true.
+#
+# ⚠️ It will fail on a gcc newer than the one in front of me, when that gcc
+# learns a diagnostic this code has always deserved.  That is the guard
+# working.  The answer then is to fix what it found or to name the category
+# here, beside the four below -- and a category named here is a debt, which is
+# the whole reason #432 wrote them down rather than dropping -Wall.
+add_compile_options(-Wall -Werror -Wold-style-definition -Wold-style-declaration
   -Wno-missing-braces
   -Wno-pointer-sign
   -Wno-unused-but-set-variable
