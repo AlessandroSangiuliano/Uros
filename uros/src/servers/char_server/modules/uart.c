@@ -8,16 +8,39 @@
  *
  * Owns COM1 (I/O 0x3F8, IRQ 4) for runtime userspace serial I/O.
  *
- * Coexistence with the kernel:
- *   The kernel keeps a polled-write COM1 path in com.c (cnputc →
- *   com_putc) that is used for printf, panic, and early boot output.
- *   That path only writes — never enables IER, never reads RHR.  This
- *   module owns reception, IRQ 4, and runtime configuration; it does
- *   not change the divisor away from the kernel's setting unless
- *   tty_set_attr is called by an admin client.  Therefore kernel
- *   printf and userspace TX/RX coexist on the same UART without
- *   collision: writes only touch THR (after waiting THR-empty), reads
- *   only touch RHR.
+ * 🔴 COEXISTENCE WITH THE KERNEL — AND THE SENTENCE THAT USED TO BE HERE.
+ *
+ * It read:
+ *
+ *	"Therefore kernel printf and userspace TX/RX coexist on the same
+ *	 UART without collision: writes only touch THR (after waiting
+ *	 THR-empty), reads only touch RHR."
+ *
+ * The READS half is true, and it is what makes the split below work: the
+ * kernel's console on i386 never reads RHR, so reception is this module's
+ * alone without anybody arranging it.
+ *
+ * The WRITES half is false, and #544 is the specimen cabinet.  Two writers
+ * that both wait for THR-empty and then write THR do not miss each other --
+ * they interleave a byte at a time, because "wait, then write" is two steps
+ * and neither holds anything across them.  Thirteen failures in fifty-three
+ * runs of the i386 acceptance smoke, every one of them two lines woven
+ * together inside a word.  A comment that asserts the property the code lacks
+ * is not documentation, it is cover.
+ *
+ * So the coexistence is ARRANGED rather than assumed (#497).  uart_attach()
+ * claims the port through the device master, and the kernel's console gives
+ * it up at that instant -- writing its bytes to the outputs it still has, the
+ * klog ring that has held every byte since #200 and the framebuffer console
+ * #568 gave this target.  One writer touches the chip.
+ *
+ * ⚠️ The dying machine is the exception, and it is stated rather than raced:
+ * a panic takes the port back, because a message that arrives possibly
+ * garbled beats a message that is lost.
+ *
+ * ⚠️ i386 keeps both writers for now.  Its console is com.c and reaches the
+ * chip with its own instruction, so the claim below does not touch it; that
+ * is #544's to close, and this comment is not the place to pretend otherwise.
  *
  * RX model:
  *   Per-IRQ batch: drain RX FIFO into a 4 KB power-of-two ring,
@@ -26,7 +49,8 @@
  *   per-byte fan-out — would just multiply IPC cost for no benefit.
  *
  * TX model:
- *   tty_write polls THR-empty, byte-by-byte.  No DMA on 16550.  A
+ *   tty_write asks the transmitter for room once per FIFO-full and writes
+ *   the bytes one at a time.  No DMA on 16550.  A
  *   per-instance flag prevents concurrent writers (the server is
  *   single-threaded today, but the flag is cheap insurance against
  *   future re-entrancy if char_server ever spawns helper threads).
@@ -40,8 +64,21 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <pthread.h>
+
 #include <char/char_module_abi.h>
 #include <char/char_types.h>
+
+/*
+ * MIG: device_io_port_{read,write} and device_io_port_{claim,unclaim}.
+ *
+ * ⚠️ Outside the arch guard below, because the CLAIM is wanted on both
+ * targets even though only one of them reaches the chip this way.  What it
+ * buys on i386 is narrower and is stated where it is implemented: it stops a
+ * second TASK from reaching the range, and it does not stop the kernel, whose
+ * console there writes the port with its own instruction.
+ */
+#include "device_master.h"
 
 /* ============================================================
  * 16550 register layout (offsets from base 0x3F8).
@@ -161,8 +198,6 @@
 
 #if defined(__x86_64__)
 
-#include "device_master.h"	/* MIG: device_io_port_{read,write} */
-
 /*
  * A refused access reads as an absent chip, and says so once.
  *
@@ -258,10 +293,29 @@ struct uart_priv {
 	uint32_t	ring_tail;	/* consumer read index */
 	uint32_t	overrun_drops;	/* bytes lost when ring full */
 
-	/* TX serialization: the server is single-threaded today, but
-	 * mark "in tty_write" anyway so a future re-entrant caller
-	 * can't interleave bytes mid-string. */
-	int		tx_busy;
+	/*
+	 * 🔥 TX SERIALISATION, AND IT USED TO BE AN int (#497).
+	 *
+	 * The comment here said the server was single-threaded "today" and
+	 * that the flag was cheap insurance against a future re-entrant
+	 * caller.  It was not insurance: `if (p->tx_busy) return -1;' followed
+	 * by `p->tx_busy = 1;' is a test and a set with nothing between them,
+	 * so two threads read zero and both proceed.
+	 *
+	 * The future arrived in this issue.  The klog forwarder writes the
+	 * kernel's output through this same entry point while a client may be
+	 * writing its own, and the specimen was immediate and familiar:
+	 *
+	 *	device: task ... died holding DMA region 8 (4096 bytes,
+	 *	lent to 0 devices, owner 0char_test: [1] this line left...
+	 *
+	 * which is #544's shape exactly -- two writers woven inside a word --
+	 * arriving in the server that exists to make it impossible.  A real
+	 * lock is what the property needs, and a flag that looked like one is
+	 * why nobody noticed it was missing.
+	 */
+	pthread_mutex_t	tx_lock;
+	int		tx_lock_ready;
 
 	/* How many bytes the transmitter will take without being asked
 	 * again, and how many it takes when it is (#497, after #567).
@@ -449,6 +503,16 @@ uart_probe(const struct hal_device_info *dev)
 		return NULL;
 	if (uart_scratch_test() < 0)
 		return NULL;
+
+	/*
+	 * Armed here and not in attach, because attach is where the first
+	 * bytes can already be going out.
+	 */
+	if (!uart_singleton.tx_lock_ready) {
+		if (pthread_mutex_init(&uart_singleton.tx_lock, NULL) != 0)
+			return NULL;
+		uart_singleton.tx_lock_ready = 1;
+	}
 	return &uart_singleton;
 }
 
@@ -470,6 +534,28 @@ static int
 uart_attach(void *priv)
 {
 	struct uart_priv *p = priv;
+	kern_return_t	 kr;
+
+	/*
+	 * Say the port is ours BEFORE touching a register that matters (#497).
+	 *
+	 * 🔑 The order is the whole point.  Everything below reprograms the
+	 * chip -- the divisor, the line, both FIFOs, the modem lines -- and on
+	 * x86-64 the kernel's console is writing it until this call returns.
+	 * Claiming afterwards would mean programming a 16550 somebody else was
+	 * mid-sentence on, which is #544 with the roles swapped.
+	 *
+	 * ⚠️ A refusal is fatal to the attach and is not worked around.  It
+	 * means another task holds this range, and a driver that went ahead
+	 * anyway would be the second writer this issue exists to remove.
+	 */
+	kr = device_io_port_claim(char_core_device_port(), UART_BASE, 8u);
+	if (kr != KERN_SUCCESS) {
+		printf("uart: COM1 0x%x..0x%x refused (kr=%d) — another task "
+		       "holds it; not attaching\n",
+		       UART_BASE, UART_BASE + 7u, (int)kr);
+		return -1;
+	}
 
 	/* Disable interrupts while we reconfigure. */
 	uart_out(UART_IER, 0x00);
@@ -532,6 +618,14 @@ uart_detach(void *priv)
 	}
 	p->n_subscribers = 0;
 	p->attached = 0;
+
+	/*
+	 * Give the range back LAST (#497), for attach's reason inverted: the
+	 * writes above are still this driver's to make, and on x86-64 the
+	 * kernel's console resumes the instant this returns.  Releasing first
+	 * would put two writers on the chip for the length of a detach.
+	 */
+	(void)device_io_port_unclaim(char_core_device_port(), UART_BASE);
 }
 
 /* ============================================================
@@ -614,9 +708,9 @@ uart_tty_write(void *priv, const char *buf, size_t len)
 	struct uart_priv *p = priv;
 	size_t i;
 
-	if (p->tx_busy)
+	if (!p->tx_lock_ready)
 		return -1;
-	p->tx_busy = 1;
+	(void)pthread_mutex_lock(&p->tx_lock);
 
 	for (i = 0; i < len; i++) {
 		if (p->fifo_room == 0)
@@ -625,7 +719,7 @@ uart_tty_write(void *priv, const char *buf, size_t len)
 		p->fifo_room--;
 	}
 
-	p->tx_busy = 0;
+	(void)pthread_mutex_unlock(&p->tx_lock);
 	return 0;
 }
 
