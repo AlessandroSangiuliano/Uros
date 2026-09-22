@@ -40,6 +40,7 @@
 #include <kern/ipc_mig.h>
 #include <kern/ipc_tt.h>
 #include <kern/task.h>
+#include <kern/lock.h>	/* #538: the tables' writer lock */
 #include <ipc/ipc_port.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -89,6 +90,15 @@ extern task_t port_name_to_task(mach_port_t name);
  * reach the hardware through.
  */
 #include <device/device_master_server.h>
+
+/*
+ * The tables' writer lock and the publish barrier (#538).  Declared here,
+ * ahead of device_master_init(), and explained at the claim table below --
+ * the regime they implement is written beside the data it protects.
+ */
+#define	publish_barrier()	__asm__ __volatile__("" ::: "memory")
+
+decl_mutex_data(static, device_table_lock)
 
 /* ================================================================
  * Interrupt forwarding
@@ -291,6 +301,8 @@ device_master_init(void)
 {
 	int i;
 
+	mutex_init(&device_table_lock, ETAP_NO_TRACE);
+
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
 		irq_forward_table[i].active = 0;
@@ -418,7 +430,34 @@ check_master_port(ipc_port_t port)
  */
 #define	DEVICE_MAX_REGIONS	6
 
-static struct {
+/*
+ * ── One writer at a time (#538) ────────────────────────────────────────
+ *
+ * 🔑 THE TABLES BELOW HAVE ONE OWNER FOR WRITES AND NONE FOR READS.
+ * device_table_lock is a mutex -- the primitive this kernel designed under
+ * #452, cmpxchg uncontended and asleep under contention, masking nothing --
+ * and it is the convention next door: device_lock() in ds_routines.c is the
+ * same type.  Every path that MUTATES device_claim[], dma_region[] or
+ * io_claim[] holds it around the mutation and around nothing else: never
+ * across printf(), never across map_pages_into_task(), never across a
+ * config-space measurement.  Those happen before the lock or after it, on
+ * values built or copied out under it.
+ *
+ * Readers hold nothing, because they are the hot path -- check_io_port() on
+ * every console byte since #497, check_claim() on every config access -- and
+ * a spin lock on x86-64 masks interrupts for the hold (#528).  What a reader
+ * relies on instead: an entry is built COMPLETE before the field every lookup
+ * matches on is written, with a compiler barrier between the two, and a freed
+ * slot is unlinked through that same field.  The machine keeps x86 stores in
+ * order; the compiler does not, which is what the barrier is for.  A slot's
+ * REUSE only after a grace period, so that a reader mid-walk is never handed
+ * a recycled entry, is the next step and is not claimed here.
+ *
+ * ⚠️ Lock order, stated once: device_table_lock -> hw_lock/simple_lock ->
+ * pci_cfg_port_lock.  A mutex is never taken inside a hw_lock section.
+ * Nothing asserts that, so it is a rule to read here.
+ */
+static struct device_claim_entry {
 	natural_t	bdf;
 	task_t		task;
 	uint64_t	cap_id;		/* the token that established it */
@@ -734,14 +773,14 @@ ds_master_device_pci_config_write(
  * count below is what says how many there are rather than the array's length.
  */
 static void
-measure_regions(unsigned int idx, natural_t bdf)
+measure_regions(struct device_claim_entry *e, natural_t bdf)
 {
 	unsigned int bus  = (unsigned)(bdf >> 8);
 	unsigned int slot = (unsigned)((bdf >> 3) & 0x1F);
 	unsigned int func = (unsigned)(bdf & 0x7);
 	unsigned int cmd, b, n = 0, hdr, nslots;
 
-	device_claim[idx].nregions = 0;
+	e->nregions = 0;
 
 	/*
 	 * 🔴 HOW MANY SLOTS ARE BARS DEPENDS ON THE HEADER TYPE, and probing
@@ -847,9 +886,9 @@ measure_regions(unsigned int idx, natural_t bdf)
 		}
 
 		if (base != 0 && size != 0 && size != 1) {
-			device_claim[idx].region[n].base  = base;
-			device_claim[idx].region[n].size  = size;
-			device_claim[idx].region[n].is_io = is_io;
+			e->region[n].base  = base;
+			e->region[n].size  = size;
+			e->region[n].is_io = is_io;
 			n++;
 		}
 
@@ -858,7 +897,7 @@ measure_regions(unsigned int idx, natural_t bdf)
 	}
 
 	device_md_pci_write(bus, slot, func, 0x04, cmd);
-	device_claim[idx].nregions = n;
+	e->nregions = n;
 
 	printf("device: %u:%u.%u handed over with %u region(s) measured\n",
 	       bus, slot, func, n);
@@ -1422,71 +1461,68 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	       uint64_t *id_out)
 {
 	struct dma_region *r = 0;
-	unsigned int i;
+	vm_offset_t	  *pa_copy;
+	task_t		   me = current_task();
+	unsigned int	   i, held = 0;
+	uint64_t	   id;
+
+	/* Before the lock: kalloc may block, and a mutex is not held across
+	 * anything that can (#538). */
+	pa_copy = (vm_offset_t *) kalloc(npages * sizeof(vm_offset_t));
+	if (pa_copy == 0)
+		return KERN_RESOURCE_SHORTAGE;
+	for (i = 0; i < npages; i++)
+		pa_copy[i] = pa[i];
+
+	mutex_lock(&device_table_lock);
+
+	/*
+	 * A ceiling per task, so a server that leaks buffers cannot take the
+	 * table from every other one -- counted under the lock, because the
+	 * count is what the lock exists to make true.
+	 */
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].owner == me)
+			held++;
+	if (held >= DEVICE_MAX_REGIONS_PER_TASK) {
+		mutex_unlock(&device_table_lock);
+		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
+		return KERN_NO_ACCESS;
+	}
 
 	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
 		if (dma_region[i].kva == 0) {
 			r = &dma_region[i];
 			break;
 		}
-
-	if (r == 0)
+	if (r == 0) {
+		mutex_unlock(&device_table_lock);
+		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
 		return KERN_NO_SPACE;
-
-	/*
-	 * 🔑 A THIRD ANSWER, because it is a different question.  "The table
-	 * is full" is somebody else's doing and may be over in a moment, so a
-	 * caller that waits is being sensible.  "You already hold as many as
-	 * you may" is about this caller and will never come right by waiting.
-	 * A driver has to be able to tell them apart to know whether trying
-	 * again is a strategy or a spin.
-	 *
-	 * ⚠️ And it is an authority answer rather than a scarcity one.  The
-	 * machine has room; this task is not allowed it.
-	 */
-	{
-		task_t		me = current_task();
-		unsigned int	held = 0, j;
-
-		for (j = 0; j < DEVICE_MAX_DMA_REGIONS; j++)
-			if (dma_region[j].kva != 0 && dma_region[j].owner == me)
-				held++;
-
-		if (held >= DEVICE_MAX_REGIONS_PER_TASK)
-			return KERN_NO_ACCESS;
 	}
 
-	r->pa = (vm_offset_t *) kalloc(npages * sizeof(vm_offset_t));
-	if (r->pa == 0)
-		return KERN_RESOURCE_SHORTAGE;
-
-	for (i = 0; i < npages; i++)
-		r->pa[i] = pa[i];
-
-	r->kva = kva;
+	/*
+	 * Everything, then the barrier, then `kva' -- the field every lookup
+	 * tests for "in use", which used to be written FIRST.
+	 */
+	r->pa = pa_copy;
 	r->size = size;
 	r->npages = npages;
 	r->nusers = 0;
 	r->task = task;
 	r->uva = uva;
-	r->id = dma_region_next_id++;
-
-	/*
-	 * ⚠️ The OWNER and the mapped-into task are recorded separately even
-	 * though they are the same today.  One is "who may say who else may
-	 * read this" and the other is "whose address space has to be taken
-	 * down before the pages go back": a contiguous buffer has the second
-	 * and not the first, and conflating them would make a free path decide
-	 * a question about authority.
-	 */
-	r->owner = current_task();
-	task_reference(r->owner);
-
+	r->id = id = dma_region_next_id++;
+	r->owner = me;
+	task_reference(me);
 	if (task != TASK_NULL)
 		task_reference(task);
+	publish_barrier();
+	r->kva = kva;
+
+	mutex_unlock(&device_table_lock);
 
 	if (id_out != 0)
-		*id_out = r->id;
+		*id_out = id;
 
 	return KERN_SUCCESS;
 }
@@ -1524,44 +1560,50 @@ static void
 dma_region_drop(vm_offset_t kva)
 {
 	unsigned int i, u;
+	struct dma_region snap;
 
+	mutex_lock(&device_table_lock);
 	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
 		struct dma_region *r = &dma_region[i];
 
 		if (r->kva != kva)
 			continue;
 
-		for (u = 0; u < r->nusers; u++)
-			(void) device_md_dma_revoke(r->user[u].bdf,
-						    (unsigned long)r->pa[0],
-						    (unsigned long)r->size);
-
 		/*
-		 * 🔴 THE TASK'S MAPPING BEFORE THE PAGES.  See the note on
-		 * `task' above: the other order hands wired pages back to the
-		 * VM and panics the kernel from a userland RPC.
+		 * Snapshot, unlink under the lock, and do the slow half --
+		 * revoking at the IOMMU, unmapping, freeing -- outside it, on
+		 * the copy (#538).  The unlink is the whole slot: a later add
+		 * takes it under the same lock and cannot see a half-cleared
+		 * entry.
 		 */
-		if (r->task != TASK_NULL) {
-			(void) vm_map_remove(r->task->map, r->uva,
-					     r->uva + r->size,
-					     VM_MAP_NO_FLAGS);
-			task_deallocate(r->task);
-			r->task = TASK_NULL;
-		}
-
-		if (r->owner != TASK_NULL) {
-			task_deallocate(r->owner);
-			r->owner = TASK_NULL;
-		}
-
-		kfree((vm_offset_t)r->pa, r->npages * sizeof(vm_offset_t));
+		snap = *r;
 		r->kva = 0;
 		r->id = 0;
 		r->pa = 0;
 		r->npages = 0;
 		r->nusers = 0;
+		r->task = TASK_NULL;
+		r->owner = TASK_NULL;
+		mutex_unlock(&device_table_lock);
+
+		for (u = 0; u < snap.nusers; u++)
+			(void) device_md_dma_revoke(snap.user[u].bdf,
+						    (unsigned long)snap.pa[0],
+						    (unsigned long)snap.size);
+
+		if (snap.task != TASK_NULL) {
+			(void) vm_map_remove(snap.task->map, snap.uva,
+					     snap.uva + snap.size,
+					     VM_MAP_NO_FLAGS);
+			task_deallocate(snap.task);
+		}
+		if (snap.owner != TASK_NULL)
+			task_deallocate(snap.owner);
+
+		kfree((vm_offset_t)snap.pa, snap.npages * sizeof(vm_offset_t));
 		return;
 	}
+	mutex_unlock(&device_table_lock);
 }
 
 
@@ -2637,6 +2679,7 @@ ds_master_device_io_port_claim(
 	if (count == 0 || port + count < port || port + count > 0x10000u)
 		return KERN_INVALID_ARGUMENT;
 
+	mutex_lock(&device_table_lock);
 	for (i = 0; i < IO_CLAIM_MAX; i++) {
 		if (io_claim[i].task == TASK_NULL) {
 			if (free_slot == IO_CLAIM_MAX)
@@ -2649,23 +2692,32 @@ ds_master_device_io_port_claim(
 		if (port + count <= io_claim[i].base
 		    || port >= io_claim[i].base + io_claim[i].count)
 			continue;
-		if (io_claim[i].task != me)
+		if (io_claim[i].task != me) {
+			mutex_unlock(&device_table_lock);
 			return KERN_NO_ACCESS;
+		}
 		if (io_claim[i].base == port && io_claim[i].count == count) {
+			mutex_unlock(&device_table_lock);
 			/* The hook is idempotent, and the answer has to be
 			 * given again: a re-attach asks the same question. */
 			*console_released = device_md_io_claimed(port, count);
 			return KERN_SUCCESS;
 		}
+		mutex_unlock(&device_table_lock);
 		return KERN_INVALID_ARGUMENT;
 	}
 
-	if (free_slot == IO_CLAIM_MAX)
+	if (free_slot == IO_CLAIM_MAX) {
+		mutex_unlock(&device_table_lock);
 		return KERN_RESOURCE_SHORTAGE;
+	}
 
-	io_claim[free_slot].task  = me;
+	/* The range, then the barrier, then the owner every lookup tests. */
 	io_claim[free_slot].base  = port;
 	io_claim[free_slot].count = count;
+	publish_barrier();
+	io_claim[free_slot].task  = me;
+	mutex_unlock(&device_table_lock);
 
 	printf("device_io_port: task %p claimed 0x%x..0x%x (#497)\n",
 	       (void *)me, port, port + count - 1);
@@ -2688,17 +2740,21 @@ ds_master_device_io_port_unclaim(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
+	mutex_lock(&device_table_lock);
 	for (i = 0; i < IO_CLAIM_MAX; i++) {
 		if (io_claim[i].task != me || io_claim[i].base != port)
 			continue;
 
 		count = io_claim[i].count;
-		io_claim[i].task  = TASK_NULL;
+		io_claim[i].task  = TASK_NULL;	/* unlinked first */
+		publish_barrier();
 		io_claim[i].base  = 0;
 		io_claim[i].count = 0;
+		mutex_unlock(&device_table_lock);
 		device_md_io_unclaimed(port, count);
 		return KERN_SUCCESS;
 	}
+	mutex_unlock(&device_table_lock);
 
 	/*
 	 * ⚠️ Not found is KERN_INVALID_ARGUMENT and not success.  A driver
@@ -3056,15 +3112,22 @@ ds_master_device_dma_map_foreign(
 		return KERN_SUCCESS;
 	}
 
+	/* The user list is appended by whichever server asks first, and two
+	 * can ask at once (#538): searched and grown under the lock. */
+	mutex_lock(&device_table_lock);
 	for (u = 0; u < r->nusers; u++)
 		if (r->user[u].bdf == bdf) {
 			base = (unsigned long)r->user[u].dma;
 			break;
 		}
+	if (u < r->nusers)
+		mutex_unlock(&device_table_lock);
 
 	if (u == r->nusers) {
-		if (r->nusers >= DEVICE_MAX_REGION_USERS)
+		if (r->nusers >= DEVICE_MAX_REGION_USERS) {
+			mutex_unlock(&device_table_lock);
 			return KERN_RESOURCE_SHORTAGE;
+		}
 
 		/*
 		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses.  The
@@ -3073,12 +3136,16 @@ ds_master_device_dma_map_foreign(
 		 */
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)r->pa,
-					       r->npages, TRUE, TRUE, &base))
+					       r->npages, TRUE, TRUE, &base)) {
+			mutex_unlock(&device_table_lock);
 			return KERN_FAILURE;
+		}
 
 		r->user[r->nusers].bdf = bdf;
 		r->user[r->nusers].dma = (vm_offset_t)base;
+		publish_barrier();
 		r->nusers++;
+		mutex_unlock(&device_table_lock);
 
 		printf("device: %02x:%02x.%u may now read a %u-page buffer it "
 		       "did not allocate, at 0x%lx — mapped by the server that "
@@ -3111,6 +3178,8 @@ ds_master_device_claim(
 	uint64_t		class_id;
 	task_t			me = current_task();
 	unsigned		i;
+	struct device_claim_entry fresh;
+	unsigned int b;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -3202,76 +3271,98 @@ ds_master_device_claim(
 		return KERN_NO_ACCESS;
 	}
 
+	/*
+	 * First look, under the lock: a device somebody else holds is refused
+	 * before any of its registers is touched (#538).
+	 */
+	mutex_lock(&device_table_lock);
 	for (i = 0; i < device_nclaims; i++)
 		if (device_claim[i].bdf == bdf) {
-			if (device_claim[i].task == me)
-				return KERN_SUCCESS;
+			task_t holder = device_claim[i].task;
 
-			/*
-			 * ⚠️ This refusal was silent, and a claim refused for
-			 * no reason a log can name is how dma_reclaim [5]
-			 * looked while it was being investigated.
-			 */
+			mutex_unlock(&device_table_lock);
+			if (holder == me)
+				return KERN_SUCCESS;
 			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
 			       "it is claimed by task 0x%lx (entry %u of %u)\n",
 			       (unsigned)(bdf >> 8),
 			       (unsigned)((bdf >> 3) & 0x1F),
 			       (unsigned)(bdf & 7), (unsigned long)me,
-			       (unsigned long)device_claim[i].task,
-			       i, device_nclaims);
+			       (unsigned long)holder, i, device_nclaims);
+			return KERN_NO_ACCESS;
+		}
+	mutex_unlock(&device_table_lock);
+
+	/*
+	 * Measure into a copy nobody can see, and outside the lock (#538).
+	 *
+	 * measure_regions() is up to six BAR probes of several config accesses
+	 * each, the device's decode switched off around them, and three
+	 * printf()s -- not something to hold the table lock across, and not
+	 * something to do INTO a slot that is already visible.  #511 published
+	 * `bdf' last and then measured into the live entry, so on a reused slot
+	 * the device was visible with nregions == 0 for the whole measurement
+	 * and check_io_port() fell through to "unattributed" for anyone holding
+	 * the master port.  The entry is complete before it is published now.
+	 */
+	fresh.nregions = 0;
+	if (bdf != DEVICE_BDF_BUS)
+		measure_regions(&fresh, bdf);
+
+	task_reference(me);
+
+	/*
+	 * Second look, because the measurement took time and the lock was not
+	 * held across it: a claimer that got in between is found here.
+	 */
+	mutex_lock(&device_table_lock);
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf) {
+			task_t holder = device_claim[i].task;
+
+			mutex_unlock(&device_table_lock);
+			task_deallocate(me);
+			if (holder == me)
+				return KERN_SUCCESS;
+			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
+			       "task 0x%lx claimed it while this one was "
+			       "measuring it (#538)\n",
+			       (unsigned)(bdf >> 8),
+			       (unsigned)((bdf >> 3) & 0x1F),
+			       (unsigned)(bdf & 7), (unsigned long)me,
+			       (unsigned long)holder);
 			return KERN_NO_ACCESS;
 		}
 
-	/*
-	 * ⚠️ Full is a REFUSAL and not a free-for-all.  A table that stopped
-	 * recording would leave every device past the sixteenth claimable by
-	 * anybody -- the check turning itself off exactly when there are
-	 * enough devices for it to matter.
-	 */
-	/*
-	 * A free slot, which a release leaves behind in place rather than
-	 * closing up.  device_nclaims is the high-water mark: the table is
-	 * walked to it and free entries are skipped by their null owner.
-	 */
+	/* A released slot is reused before the table grows. */
 	for (i = 0; i < device_nclaims; i++)
 		if (device_claim[i].task == TASK_NULL)
 			break;
-
-	if (i == device_nclaims && device_nclaims >= DEVICE_MAX_CLAIMS)
+	if (i == device_nclaims && device_nclaims >= DEVICE_MAX_CLAIMS) {
+		mutex_unlock(&device_table_lock);
+		task_deallocate(me);
 		return KERN_RESOURCE_SHORTAGE;
+	}
 
 	/*
-	 * 🔑 THE bdf IS WRITTEN LAST, and that is what publishes the entry.
-	 * Every lookup in this file matches on it, so a reader either does not
-	 * see this claim yet or sees it complete -- never a bdf whose owner has
-	 * not been stored.  Filling it first is what the old order did.
+	 * Everything, then the barrier, then the two fields lookups match on
+	 * -- task for check_io_port(), bdf for check_claim() -- and, for a
+	 * slot past the end, the count that brings it into the walk.
 	 */
-	device_claim[i].task = me;
 	device_claim[i].cap_id = cap.cap_id;
-	device_claim[i].nregions = 0;
+	for (b = 0; b < fresh.nregions; b++)
+		device_claim[i].region[b] = fresh.region[b];
+	device_claim[i].nregions = fresh.nregions;
+	publish_barrier();
+	device_claim[i].task = me;
 	device_claim[i].bdf = bdf;
-
-	/*
-	 * 🔑 MEASURED HERE AND NOWHERE ELSE, because this is the one instant
-	 * it is safe: the device has just changed hands and nobody is driving
-	 * it yet.  Everything downstream that has to know where this device's
-	 * registers are -- the span of a mapping, the range of an I/O port --
-	 * reads what this leaves behind.  The bus itself has no regions.
-	 */
-	if (bdf != DEVICE_BDF_BUS)
-		measure_regions(i, bdf);
-	task_reference(me);
-	if (i == device_nclaims)
+	if (i == device_nclaims) {
+		publish_barrier();
 		device_nclaims++;
+	}
+	mutex_unlock(&device_table_lock);
 
 	if (bdf == DEVICE_BDF_BUS) {
-		/*
-		 * ⚠️ A DIFFERENT SENTENCE, because the ordinary one is false
-		 * here.  Decoding the bus sentinel as bus/slot/func printed
-		 * `ffffff:1f.6 (class 0xffffffffffffffff)' -- an address no
-		 * machine has and a class no device reports, in a line whose
-		 * whole job is to say who got what.
-		 */
 		printf("device: the BUS is now scanned by task 0x%lx, which "
 		       "showed a capability for PCI devices with no instance "
 		       "named\n", (unsigned long)me);
@@ -3320,11 +3411,33 @@ device_master_cap_revoked(uint64_t cap_id)
 
 	for (i = 0; i < device_nclaims; i++) {
 		natural_t bdf;
+		task_t	  holder;
 
-		if (device_claim[i].cap_id != cap_id)
+		/* Unlink under the lock, release the hardware outside it (#538). */
+		mutex_lock(&device_table_lock);
+		if (device_claim[i].cap_id != cap_id) {
+			mutex_unlock(&device_table_lock);
 			continue;
-
+		}
 		bdf = device_claim[i].bdf;
+		holder = device_claim[i].task;
+		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
+		device_claim[i].task = TASK_NULL;
+		publish_barrier();
+		device_claim[i].nregions = 0;
+		/*
+		 * 🔥 AND THE TOKEN, WHICH WAS LEFT BEHIND -- with an `i--' after
+		 * it that dated from when a release COMPACTED this table by
+		 * moving the last entry into the hole.  #511 stopped the moving
+		 * and left the step back, so this loop re-examined the slot it
+		 * had just freed, found the same cap_id still in it, and never
+		 * advanced: an infinite loop on the first real revoke of a
+		 * claimed device.  Entries do not move, so the loop simply goes
+		 * on; the token is cleared so a recycled slot cannot answer to a
+		 * dead capability.
+		 */
+		device_claim[i].cap_id = 0;
+		mutex_unlock(&device_table_lock);
 
 		printf("device: the capability behind %02x:%02x.%u was revoked "
 		       "— the claim is dropped and the device is left reaching "
@@ -3333,32 +3446,7 @@ device_master_cap_revoked(uint64_t cap_id)
 		       (unsigned)(bdf & 7));
 
 		(void) device_md_dma_release(bdf);
-		task_deallocate(device_claim[i].task);
-
-		/*
-		 * ⚠️ Compacted, and the loop index is NOT advanced: the entry
-		 * moved into this slot has not been looked at.  One token can
-		 * stand behind more than one device -- a driver acquires a
-		 * capability for a CLASS and claims every instance of it with
-		 * the same one -- so a revocation that stopped at the first
-		 * match would leave the rest reaching.
-		 */
-		/* Freed in place, for the reason task_terminating() gives. */
-		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
-		device_claim[i].task = TASK_NULL;
-		/*
-		 * 🔥 AND THE TOKEN, WHICH WAS LEFT BEHIND -- with an `i--' after
-		 * it that dated from when a release COMPACTED this table by moving
-		 * the last entry into the hole.  #511 stopped the moving and left
-		 * the step back, so this loop re-examined the slot it had just
-		 * freed, found the same cap_id still in it, freed it again -- a
-		 * task_deallocate(TASK_NULL), a no-op -- and never advanced: an
-		 * infinite loop on the first real revoke of a claimed device.
-		 * Entries do not move, so the loop simply goes on; the token is
-		 * cleared so a recycled slot cannot answer to a dead capability.
-		 */
-		device_claim[i].cap_id = 0;
-		device_claim[i].nregions = 0;
+		task_deallocate(holder);
 	}
 }
 
@@ -3417,14 +3505,18 @@ device_master_task_terminating(task_t task)
 	for (i = 0; i < IO_CLAIM_MAX; i++) {
 		unsigned int base, count;
 
-		if (io_claim[i].task != task)
+		mutex_lock(&device_table_lock);
+		if (io_claim[i].task != task) {
+			mutex_unlock(&device_table_lock);
 			continue;
-
+		}
 		base  = io_claim[i].base;
 		count = io_claim[i].count;
 		io_claim[i].task  = TASK_NULL;
+		publish_barrier();
 		io_claim[i].base  = 0;
 		io_claim[i].count = 0;
+		mutex_unlock(&device_table_lock);
 
 		printf("device_io_port: task %p died holding 0x%x..0x%x — "
 		       "released (#497)\n", (void *)task, base,
@@ -3482,13 +3574,15 @@ device_master_task_terminating(task_t task)
 		vm_offset_t		kva;
 		vm_size_t		size;
 
-		if (r->kva == 0)
+		/* Read under the lock; drop() takes it again by itself. */
+		mutex_lock(&device_table_lock);
+		if (r->kva == 0 || (r->owner != task && r->task != task)) {
+			mutex_unlock(&device_table_lock);
 			continue;
-		if (r->owner != task && r->task != task)
-			continue;
-
+		}
 		kva = r->kva;
 		size = r->size;
+		mutex_unlock(&device_table_lock);
 
 		/*
 		 * ⚠️ WHO IT WAS MAPPED FOR, AND NOT JUST THAT IT WAS (#531).
@@ -3527,10 +3621,25 @@ device_master_task_terminating(task_t task)
 	for (i = 0; i < device_nclaims; i++) {
 		natural_t	bdf;
 
-		if (device_claim[i].task != task)
+		/*
+		 * Unlink under the lock, release the hardware outside it
+		 * (#538).  Unlinked in place: a release used to move the last
+		 * entry into the hole, and #511 stopped that because the move
+		 * was a struct copy other processors walked through -- the
+		 * "claimed by task 0x0" of two boots in ten.
+		 */
+		mutex_lock(&device_table_lock);
+		if (device_claim[i].task != task) {
+			mutex_unlock(&device_table_lock);
 			continue;
-
+		}
 		bdf = device_claim[i].bdf;
+		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
+		device_claim[i].task = TASK_NULL;
+		publish_barrier();
+		device_claim[i].nregions = 0;
+		device_claim[i].cap_id = 0;
+		mutex_unlock(&device_table_lock);
 
 		printf("device: task 0x%lx died driving %02x:%02x.%u — the "
 		       "claim is dropped and the device is left reaching "
@@ -3539,41 +3648,7 @@ device_master_task_terminating(task_t task)
 		       (unsigned)(bdf & 7));
 
 		(void) device_md_dma_release(bdf);
-
-		/*
-		 * ⚠️ The reference this entry held goes with it, and the caller
-		 * of task_terminate() still has one -- so the struct this is
-		 * running inside does not go away underneath it.
-		 */
-		task_deallocate(device_claim[i].task);
-
-		/*
-		 * 🔴 MARKED FREE, NOT COMPACTED (#511).  This used to be
-		 *
-		 *	device_claim[i] = device_claim[device_nclaims - 1];
-		 *
-		 * a struct assignment racing every processor that walks this
-		 * table -- there is no lock in this file, only splhigh(),
-		 * which serialises nothing between processors.  A reader could
-		 * see an entry half copied and did: `claimed by task 0x0', the
-		 * bdf of the entry moving in with a task field the copy had not
-		 * reached.  It never showed in eighty boots and showed twice in
-		 * ten once the measured regions made the struct seven times
-		 * bigger.
-		 *
-		 * 🔑 Freeing in place moves nothing, so there is nothing to
-		 * tear.  The bdf is cleared FIRST, which is the field every
-		 * lookup matches on: a reader either sees the entry it was
-		 * looking for or does not see it, and never sees somebody
-		 * else's device wearing this one's owner.
-		 *
-		 * ⚠️ This is not a fix for the file's lack of serialisation,
-		 * which is real and wider than this table.  It removes the
-		 * window this issue opened; the rest belongs to its own issue.
-		 */
-		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
-		device_claim[i].task = TASK_NULL;
-		device_claim[i].nregions = 0;
+		task_deallocate(task);
 	}
 }
 
