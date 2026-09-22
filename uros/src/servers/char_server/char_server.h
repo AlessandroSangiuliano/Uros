@@ -64,6 +64,7 @@ struct char_device_entry *char_core_dev_by_priv(void *priv);
  * longer writes the chip.  See core.c for why it skips both checks.
  */
 int char_core_has_tty(void);
+int char_core_wire_owned(void);	/* #497: did the kernel step back? */
 int char_core_tty_write_raw(const char *buf, size_t len);
 
 /* #497: start the klog drain, once a tty exists to drain it into. */

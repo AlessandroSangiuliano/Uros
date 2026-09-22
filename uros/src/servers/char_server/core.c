@@ -278,6 +278,32 @@ char_core_irq_init(mach_port_t master_device, mach_port_t port_set)
  * Returns the number of bytes handed to the module, or -1 if no tty is
  * attached.
  */
+/*
+ * Whether the serial wire is this server's ALONE, which is a fact the kernel
+ * states in the reply to device_io_port_claim and the driver hands here (#497).
+ *
+ * Two things hang on it and neither may be decided by the target the binary
+ * was built for: whether the klog forwarder runs at all -- on a wire the
+ * kernel still writes, forwarding its lines sends each one twice and adds a
+ * writer to the collision -- and how the driver paces its output.  Zero until
+ * a driver says otherwise, which is the safe answer: a sharer that behaves
+ * like an owner is #544; an owner that behaves like a sharer merely keeps its
+ * lines tight.
+ */
+static int	wire_owned;
+
+void
+char_core_set_wire_owned(int owned)
+{
+	wire_owned = owned ? 1 : 0;
+}
+
+int
+char_core_wire_owned(void)
+{
+	return wire_owned;
+}
+
 /* Is there a tty at all?  Asked by name rather than inferred from a
  * zero-length write's return value (#504's lesson about call sites that are
  * clever instead of plain). */

@@ -316,6 +316,7 @@ struct uart_priv {
 	 */
 	pthread_mutex_t	tx_lock;
 	int		tx_lock_ready;
+	int		wire_is_ours;	/* the kernel's console stepped back (#497) */
 
 	/* How many bytes the transmitter will take without being asked
 	 * again, and how many it takes when it is (#497, after #567).
@@ -549,7 +550,15 @@ uart_attach(void *priv)
 	 * means another task holds this range, and a driver that went ahead
 	 * anyway would be the second writer this issue exists to remove.
 	 */
-	kr = device_io_port_claim(char_core_device_port(), UART_BASE, 8u);
+	{
+		natural_t released = 0;
+
+		kr = device_io_port_claim(char_core_device_port(), UART_BASE,
+					  8u, &released);
+		p->wire_is_ours = (kr == KERN_SUCCESS && released != 0);
+		if (kr == KERN_SUCCESS)
+			char_core_set_wire_owned(p->wire_is_ours);
+	}
 	if (kr != KERN_SUCCESS) {
 		printf("uart: COM1 0x%x..0x%x refused (kr=%d) — another task "
 		       "holds it; not attaching\n",

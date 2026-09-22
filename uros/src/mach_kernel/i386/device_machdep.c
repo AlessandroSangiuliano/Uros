@@ -283,11 +283,12 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
  * and a comment that let that pass unsaid would be the same cover #544 found
  * in uart.c.
  */
-void
+int
 device_md_io_claimed(unsigned int base, unsigned int count)
 {
 	(void)base;
 	(void)count;
+	return 0;	/* the console keeps writing: see above */
 }
 
 void

@@ -136,11 +136,13 @@ covers_com1(unsigned int base, unsigned int count)
 		&& base + count >= COM1_BASE + COM1_COUNT) ? TRUE : FALSE;
 }
 
-void
+int
 device_md_io_claimed(unsigned int base, unsigned int count)
 {
-	if (covers_com1(base, count))
-		cons_port_release();
+	if (!covers_com1(base, count))
+		return 0;
+	cons_port_release();
+	return 1;
 }
 
 void
