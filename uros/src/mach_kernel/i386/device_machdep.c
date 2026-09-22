@@ -267,6 +267,37 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 }
 
 /*
+ * i386 records a claim and steps back from nothing (#497).
+ *
+ * 🔴 AND THAT IS A STATEMENT, NOT AN OVERSIGHT.  This kernel's console is
+ * i386/AT386/com.c and it reaches the chip with its own `outb' -- it is not
+ * behind device_io_port_write, so there is no point at which telling it to
+ * stop would be honest here.  x86-64's console gives the port up because that
+ * is where this issue's question was asked; making i386 do the same means
+ * changing com.c, which is #544's subject and has fifty-three runs of
+ * evidence waiting for it.
+ *
+ * ⚠️ The claim is still WORTH recording on this target: it stops a second
+ * TASK reaching the range through the master port, which is the half of the
+ * problem that is machine-independent.  What it does not stop is the kernel,
+ * and a comment that let that pass unsaid would be the same cover #544 found
+ * in uart.c.
+ */
+void
+device_md_io_claimed(unsigned int base, unsigned int count)
+{
+	(void)base;
+	(void)count;
+}
+
+void
+device_md_io_unclaimed(unsigned int base, unsigned int count)
+{
+	(void)base;
+	(void)count;
+}
+
+/*
  * 🔴 THIS MACHINE HAS NO MESSAGE-SIGNALLED INTERRUPTS, and says so.
  *
  * Not "not yet": this tree's i386 reaches interrupts through the 8259 and, on

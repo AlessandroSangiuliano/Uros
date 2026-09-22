@@ -277,11 +277,23 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Grant port-I/O privilege.  PS/2 (and future legacy back-ends like
-	 * uart) talk to the controller via inb/outb on fixed ISA ports —
-	 * device_open("iopl") gives the kernel's #GP trap-and-emulate path
-	 * the send right it checks for.  Holding the port is enough; no
-	 * further calls on it are needed. */
+	/* Grant port-I/O privilege, where the target has any to grant.
+	 *
+	 * A module that executes its own `in'/`out' -- ps2.so, and uart.so on
+	 * i386 -- needs the I/O permission bitmap, and device_open("iopl") is
+	 * how it is asked for: the kernel checks for this send right before it
+	 * will map a port range into the thread's TSS.  Holding the port is
+	 * enough; no further calls are made on it.
+	 *
+	 * ⚠️ IT IS ABSENT ON x86-64 AND THAT IS NOT A FAILURE.  That kernel has
+	 * no iopl device, no bitmap and no trap-and-emulate, so the open
+	 * returns D_NO_SUCH_DEVICE every boot.  This line used to end "port-I/O
+	 * modules will fault", which was true of every module when it was
+	 * written and is no longer true of uart.so: since #497 it reaches COM1
+	 * through device_io_port_read/write on the device master port, which
+	 * needs nothing from here.  A diagnostic that names a consequence has
+	 * to be corrected when the consequence stops following.
+	 */
 	{
 		security_token_t tok = { { 0, 0 } };
 		kern_return_t kr;
@@ -290,7 +302,9 @@ main(int argc, char **argv)
 				 "iopl", &char_iopl_port);
 		if (kr != KERN_SUCCESS)
 			printf("char_server: device_open(\"iopl\") failed "
-			       "(kr=%d) — port-I/O modules will fault\n",
+			       "(kr=%d) — a module that executes its own in/out "
+			       "will fault; one that goes through the device "
+			       "master port is unaffected (#497)\n",
 			       (int)kr);
 	}
 
@@ -312,6 +326,15 @@ main(int argc, char **argv)
 		char_core_run_discovery(modules, (unsigned int)n_modules,
 					hal_port);
 	}
+
+	/*
+	 * The kernel's own output, out through the port this server may have
+	 * just taken (#497).  After discovery, because there has to be a tty
+	 * to forward INTO; harmless when there is not, because it says so and
+	 * does not start.
+	 */
+	if (char_core_has_tty())
+		char_klog_forward_start();
 
 	subscribe_to_cap_revoke();
 

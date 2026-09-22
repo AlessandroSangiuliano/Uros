@@ -677,3 +677,50 @@ routine device_region_map(
 	out	uva		: vm_address_t;
 	out	size		: vm_size_t
 	);
+
+/*
+ * Claiming a range of I/O ports (#497).
+ *
+ * 🔑 THE HOLE check_io_port() LEAVES ON PURPOSE.  A port inside a claimed
+ * device's I/O BAR belongs to that device's driver and nobody else -- #511
+ * made that true.  A port behind NO BAR belongs to nobody, and the check says
+ * so in its own comment: "the legacy devices -- the serial lines, the
+ * keyboard, the PIC and the PIT -- are behind no PCI BAR, and a rule that
+ * refused everything unattributed would take the console with it."
+ *
+ * So COM1 was reachable by any task holding the master device port, including
+ * while char_server's uart.so was driving it.  That is not a hypothetical
+ * risk, it is #544's shape one level up: two writers on one 16550 interleave
+ * inside a word, thirteen times in fifty-three runs of the i386 smoke.
+ *
+ * This is how a driver says a legacy range is its own.  A range nobody has
+ * claimed stays reachable, exactly as before -- the hole is closed where
+ * somebody has stepped into it and nowhere else, so the PIT and the 8042 are
+ * not taken away from a kernel that still uses them.
+ *
+ * ⚠️ IN THE TAIL OF THIS FILE, WHERE EVERY NEW ROUTINE GOES.  MIG numbers a
+ * subsystem's routines by POSITION, so a routine inserted anywhere else
+ * renumbers every one after it and each existing caller silently invokes its
+ * neighbour.
+ *
+ * ⚠️ The kernel may step back because of this call.  On x86-64 a claim
+ * covering COM1 makes the console give the port up and write to klog and the
+ * framebuffer instead, which is why the reply matters: a driver that took the
+ * refusal for a grant would program a chip the kernel was still writing.
+ */
+routine device_io_port_claim(
+		master_port	: mach_port_t;
+	in	port		: natural_t;
+	in	count		: natural_t
+	);
+
+/*
+ * Give a claimed range back.  A driver calls this from detach; a task that
+ * dies without calling it leaves the claim behind, which is a leak this
+ * routine's absence would make permanent rather than a correctness problem --
+ * see the note in device_master.c on what still has to reap it.
+ */
+routine device_io_port_unclaim(
+		master_port	: mach_port_t;
+	in	port		: natural_t
+	);
