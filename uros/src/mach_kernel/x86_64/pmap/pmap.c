@@ -217,12 +217,28 @@ pmap_init(void)
 		pmap_boundary_probe = PMAP_NULL;
 		pmap_destroy(probe);
 
+		/*
+		 * ⚠️ THE FREE IS NO LONGER SYNCHRONOUS (#566), so this can no
+		 * longer count it here.  pmap_destroy() queues the struct and
+		 * returns; pmap_pool_frees is incremented when the callback
+		 * runs, which is after a grace period and after there is an
+		 * idle loop to run it in -- neither of which exists yet at
+		 * pmap_init() time.
+		 *
+		 * What is still checkable here, and is the half this probe was
+		 * about, is which ALLOCATOR the space belongs to: the question
+		 * was whether a pmap made before the zone opened goes back to
+		 * the pool rather than to the zone, and pmap_from_pool()
+		 * answers it from the address.  The count that used to stand in
+		 * for it is reported by quiet_census once the queue drains.
+		 */
 		printf("pmap: a space made before the zone went back to the "
 		       "%s after it -- %s\n",
 		       pooled ? "pool" : "zone",
-		       (pooled && pmap_pool_frees == frees + 1)
+		       pooled
 		       ? "the allocators are told apart across the boundary"
 		       : "WRONG");
+		(void) frees;
 	}
 
 	pmap_initialized = 1;
@@ -638,6 +654,18 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
  * nothing in this file to say so.  A fix that needs a paragraph about a
  * different file to be correct is a fix waiting to be broken.
  */
+/*
+ * What a grace period hands back (#566).  The head is inside the struct being
+ * freed, so the struct is found by stepping back from it -- and nothing may
+ * touch that struct between the call and this, which is the contract
+ * urmach_call_rcu() states.
+ */
+static void pmap_free_rcu(struct urmach_rcu_head *h)
+{
+	pmap_free((pmap_t) ((char *) h - __builtin_offsetof(struct pmap,
+							    rcu_head)));
+}
+
 void pmap_destroy(pmap_t pmap)
 {
 	const pt_entry_t *root;
@@ -672,7 +700,8 @@ void pmap_destroy(pmap_t pmap)
 	pmap->root_pa = 0;
 
 	/*
-	 * ⚠️ AFTER root_pa is cleared and before the struct is handed back.
+	 * ⚠️ AFTER root_pa is cleared and before the struct is handed back --
+	 * and QUEUED rather than waited for (#566).
 	 *
 	 * A reader that entered before this point may be standing on a
 	 * `pv->pmap' that names this space; when this returns, every one of
@@ -682,15 +711,42 @@ void pmap_destroy(pmap_t pmap)
 	 * added with this, in walk.c: without it a zero root is read as physical
 	 * page zero through the direct map, which does not fault either.
 	 *
+	 * 🔴 IT USED TO BLOCK HERE, and that is what #566 measured: a processor
+	 * is counted quiescent when it is idle, when it context-switches, or
+	 * when its TICK fires, so a peer busy in the kernel keeps the destroyer
+	 * spinning for up to a whole tick.  Two hundred terminations while
+	 * another task enumerated PCI cost 31 035 741 cycles each; with the
+	 * wait removed, 2 309.  No other system blocks the destroyer -- Linux
+	 * queues with call_rcu(), FreeBSD with epoch_call(), and XNU frees the
+	 * pmap from a deferred list -- and now neither does this one.
+	 *
+	 * The guarantee is unchanged: the callback runs only after a grace
+	 * period that BEGAN AFTER this call has ended, which is what makes the
+	 * struct safe to reuse.  What changed is who waits for it: nobody.
+	 *
 	 * ⚠️ And it is safe at BOOTSTRAP, where pmap_init() destroys the
-	 * boundary probe: the wait skips this processor and every processor
-	 * whose machine_slot says it is not running, so with one processor up it
-	 * returns without spinning.  Asked of rcu.c rather than assumed, because
-	 * a grace period that cannot end is a boot that does not finish.
+	 * boundary probe: queueing cannot fail and cannot block, so a boot with
+	 * one processor and no clock yet simply reclaims that pmap later, when
+	 * there is an idle loop to reclaim it in.
 	 */
-	urmach_synchronize_rcu();
+	/*
+	 * 🔴 AND THE SLOT IS MARKED IN FLIGHT BEFORE IT IS QUEUED.
+	 *
+	 * pmap_pool_alloc() calls a slot free when its ref_count is zero, and
+	 * the exchange above left it exactly there.  Queue without this and the
+	 * pool hands the slot to the next pmap_create() while the callback is
+	 * still pending -- then the callback runs and writes zero over a live
+	 * space's reference count.  That is not theory: the first version of
+	 * this deferral booted as far as bootstrap and never started a single
+	 * server.
+	 *
+	 * -1 is a value the allocator's test does not accept and nothing else
+	 * reads, and pmap_free() sets it back to zero when the callback runs,
+	 * which is the moment the slot really is free.
+	 */
+	pmap->ref_count = -1;
 
-	pmap_free(pmap);
+	urmach_call_rcu(&pmap->rcu_head, pmap_free_rcu);
 }
 
 void pmap_activate_boot(pmap_t pmap)

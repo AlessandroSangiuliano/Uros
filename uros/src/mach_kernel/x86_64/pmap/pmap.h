@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 
+#include <kern/rcu.h>		/* #566: the deferred free's head */
 #include <pmap/pte.h>
 
 /*
@@ -31,6 +32,13 @@
 struct pmap {
 	uint64_t root_pa;		/* PML4 physical address (the CR3 value) */
 	int      ref_count;
+
+	/*
+	 * What pmap_destroy() hands to the grace period instead of standing in
+	 * one (#566).  Carried in the struct because the struct is what is
+	 * being reclaimed: there is nowhere else to put it that outlives it.
+	 */
+	struct urmach_rcu_head rcu_head;
 
 	/*
 	 * Pages mapped in this space.  The machine-independent tree reads it

@@ -3163,6 +3163,14 @@ idle_thread_continue(void)
 		 */
 		urmach_rcu_quiescent_state();
 
+		/*
+		 * And hand back whatever a grace period has released (#566).
+		 * Here because this is thread context on every processor and
+		 * because an idle processor is exactly when there is time:
+		 * a callback frees memory and must not run from the tick.
+		 */
+		urmach_rcu_drain();
+
 #ifdef	MARK_CPU_IDLE
 		MARK_CPU_IDLE(mycpu);
 #endif	/* MARK_CPU_IDLE */
