@@ -50,7 +50,7 @@ extern void exception_return_wrapper( void );
  * all data queried from server work function resides in stable,
  * act-private storage, not on (shared) kernel stack.
  */
-static kern_return_t __inline__
+static __inline__ kern_return_t
 call_exc_serv(
 	      mach_port_t exc_port, exception_type_t exception,
 	      exception_data_t code, mach_msg_type_number_t codeCnt,

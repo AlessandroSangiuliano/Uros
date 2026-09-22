@@ -205,12 +205,14 @@ parseArgs(int argc, char *argv[])
 	      case 'L':
 		UseEventLogger = TRUE;
 		break;
-	      case 'k':
-		BeAnsiC = TRUE;
-		break;
-	      case 'K':
-		BeAnsiC = FALSE;
-		break;
+	      /*
+	       * 🔴 -k AND -K ARE GONE (#504).  They chose between ANSI and
+	       * K&R output; nothing has asked for K&R since 1993 and this
+	       * program no longer knows how to write it.  Removed rather
+	       * than accepted-and-ignored: a flag that is taken and does
+	       * nothing is worse than one that is refused, because the
+	       * caller believes it worked.
+	       */
 	      case 's':
 		if (streql(argv[0], "-server"))
 		{

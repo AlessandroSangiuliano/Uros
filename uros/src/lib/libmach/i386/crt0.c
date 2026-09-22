@@ -67,7 +67,7 @@ void (*_cthread_exit_routine)(int);
 
 extern char etext;
 
-static int __inline__ Entry_sp(void)
+static __inline__ int  Entry_sp(void)
 {
 	int sp;
 	__asm__ volatile ("leal 4(%%ebp), %0" : "=r" (sp));
@@ -84,16 +84,13 @@ __start(void)
 		char	kenvstr[1];	/* size varies */
 		char	k_auxv[1];	/* size varies */
 	};
-	int r11;
 	struct kframe *kfp;
 	char **targv;
 	char **argv;
 	int argc;
-	char **argcp;
 
 	kfp = (struct kframe *)Entry_sp();
 
-	argcp = (char **)kfp;		
 
 	for (argv = targv = &kfp->kargv[0]; *targv++; /* void */)
 		/* void */ ;

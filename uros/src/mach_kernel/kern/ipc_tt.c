@@ -1097,8 +1097,7 @@ convert_task_to_port(
  */
 
 ipc_port_t
-convert_act_to_port(thr_act)
-	thread_act_t thr_act;
+convert_act_to_port(thread_act_t thr_act)
 {
 	ipc_port_t port;
 

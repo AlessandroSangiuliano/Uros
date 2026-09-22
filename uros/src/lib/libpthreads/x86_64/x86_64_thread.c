@@ -36,7 +36,7 @@
  * routine() is eight bytes out, and the first `movaps' to a local takes a
  * general protection fault.
  */
-void
+kern_return_t
 _pthread_setup(pthread_t thread,
 	       void (*routine)(pthread_t),
 	       vm_address_t vsp)
@@ -58,6 +58,15 @@ _pthread_setup(pthread_t thread,
 				   (thread_state_t) &state,
 				   &count),
 		  r);
+	/*
+	 * 🔴 CHECKED, WHICH IT WAS NOT (#569).  MACH_CALL is `(ret) = (expr)'
+	 * and nothing more, so the answer was stored in a variable nobody read
+	 * -- which is what -Wunused-but-set-variable was saying, under a
+	 * suppression.  A thread whose state could not be read is a thread
+	 * about to be resumed on whatever the kernel happened to build.
+	 */
+	if (r != KERN_SUCCESS)
+		return r;
 
 	sp = (unsigned long *) ((unsigned long) sp & ~15UL);
 	*--sp = 0;			/* the return address that never was */
@@ -72,4 +81,11 @@ _pthread_setup(pthread_t thread,
 				   (thread_state_t) &state,
 				   x86_64_THREAD_STATE_COUNT),
 		  r);
+	/*
+	 * 🔑 AND THIS IS THE ONE THAT MATTERED.  If the state does not take,
+	 * rip is not `routine' and rsp is not the stack allocated for it: the
+	 * caller resumes a thread that jumps wherever the kernel's fresh frame
+	 * pointed, with an argument it never received.  Silently, before this.
+	 */
+	return r;
 }

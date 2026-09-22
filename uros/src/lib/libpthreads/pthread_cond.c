@@ -145,7 +145,8 @@ pthread_cond_broadcast(pthread_cond_t *cond)
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		int res;
-		if (res = _pthread_cond_lazy_init(cond))
+		res = _pthread_cond_lazy_init(cond);
+		if (res != 0)
 			return (res);
 	}
 	if (cond->sig == _PTHREAD_COND_SIG)
@@ -173,7 +174,8 @@ pthread_cond_signal(pthread_cond_t *cond)
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		int res;
-		if (res = _pthread_cond_lazy_init(cond))
+		res = _pthread_cond_lazy_init(cond);
+		if (res != 0)
 			return (res);
 	}
 	if (cond->sig == _PTHREAD_COND_SIG)
@@ -242,11 +244,11 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	int res;
 	kern_return_t kern_res;
 	pthread_mutex_t *busy;
-	tvalspec_t then;
 	int seq;
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
-		if (res = _pthread_cond_lazy_init(cond))
+		res = _pthread_cond_lazy_init(cond);
+		if (res != 0)
 			return (res);
 	}
 	if (cond->sig != _PTHREAD_COND_SIG)

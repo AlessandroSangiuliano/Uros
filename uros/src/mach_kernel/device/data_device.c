@@ -44,7 +44,7 @@ decl_mutex_data(static ,datadev_lock)	/* lock for data request lists */
  * Initialization of the datadev module
  */
 void
-datadev_init()
+datadev_init(void)
 {
     mutex_init(&datadev_lock, ETAP_IO_DATADEV);
     queue_init(&datadev_curr);

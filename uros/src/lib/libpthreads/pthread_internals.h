@@ -353,7 +353,15 @@ extern vm_address_t _sp(void);
 extern vm_address_t _adjust_sp(vm_address_t sp);
 extern void _spin_lock(pthread_lock_t *lockp);
 extern void _spin_unlock(pthread_lock_t *lockp);
-extern void _pthread_setup(pthread_t th, void (*f)(pthread_t), vm_address_t sp);
+/*
+ * 🔴 IT CAN FAIL, AND IT USED TO SAY SO TO NOBODY (#569).  It asks the kernel
+ * for the new thread's register state and gives it back with the entry point
+ * and stack in it; both calls were made and both answers dropped.  A failure
+ * there is a thread the caller is about to resume on whatever the kernel
+ * built for it.
+ */
+extern kern_return_t _pthread_setup(pthread_t th, void (*f)(pthread_t),
+				    vm_address_t sp);
 
 extern void _pthread_tsd_cleanup(pthread_t self);
 

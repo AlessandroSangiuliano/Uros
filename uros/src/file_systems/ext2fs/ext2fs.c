@@ -369,8 +369,6 @@ vnode_gen_bump(struct ext2fs_file *fp)
 	}
 }
 
-static security_token_t null_security_token;
-
 static void free_file_buffers(
 		struct ext2fs_file *);
 
@@ -520,18 +518,6 @@ icache_invalidate(struct ext2_mount *m, ino_t ino)
 /*
  * Vnode table — per-mount, accessed via ext2_mount.
  */
-
-static struct ext2_vnode *
-vnode_find(struct ext2_mount *m, ino_t ino)
-{
-	int i;
-	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
-		if (m->m_vnode_table[i].v_ino == ino &&
-		    m->m_vnode_table[i].v_refcount > 0)
-			return &m->m_vnode_table[i];
-	}
-	return NULL;
-}
 
 static struct ext2_vnode *
 vnode_get(struct ext2_mount *m, ino_t ino)

@@ -79,7 +79,7 @@ static vm_offset_t pci_paddr = PCI_PMEM_START;
  *---------------------------------------------------------
 */
 
-void pci_configure()
+void pci_configure(void)
 {
 	unsigned char	device;
 	unsigned short	bus;

@@ -853,7 +853,6 @@ _pthread_create(pthread_t t,
 		const thread_port_t kernel_thread)
 {
 	int res;
-	kern_return_t kern_res;
 	extern int _mig_multithreaded;
 
 	/*
@@ -981,7 +980,18 @@ pthread_create(pthread_t *thread,
 		t->arg = arg;
 		t->fun = start_routine;
 		/* Now set it up to execute */
-		_pthread_setup(t, _pthread_body, stack);
+		MACH_CALL(_pthread_setup(t, _pthread_body, stack), kern_res);
+		if (kern_res != KERN_SUCCESS)
+		{
+			/*
+			 * The thread exists and has no usable state, so it
+			 * must not be resumed (#569).  Before this the answer
+			 * was dropped and the resume happened anyway.
+			 */
+			printf("Can't set up thread: %d\n", kern_res);
+			res = EINVAL;
+			break;
+		}
 		/* Send it on it's way */
 		/*
 		 * ⚠️ Counted BEFORE the resume, not after.  The new thread can
@@ -1133,6 +1143,24 @@ pthread_exit(void *value_ptr)
 	/* Pool full — actually terminate */
 	_pthread_free_stack(self);
 	MACH_CALL(thread_terminate(mach_thread_self()), kern_res);
+
+	/*
+	 * 🔴 NOT REACHED — AND IF IT IS, THIS THREAD HAS NO STACK (#569).
+	 *
+	 * thread_terminate does not return on success.  Its answer was stored
+	 * in a variable nobody read, so a refusal simply fell out of this
+	 * function -- and _pthread_free_stack() ran two lines above, so what
+	 * it fell into was a return through memory that has been given back.
+	 *
+	 * There is nothing to unwind to and no caller to tell, so it says what
+	 * happened and stops running.  Suspended rather than spinning on
+	 * terminate: a kernel that refused once will refuse again, and a
+	 * thread burning a processor is worse than one standing still.
+	 */
+	printf("pthread: thread_terminate refused: %d — this thread has no "
+	       "stack left to return through, so it stops here\n", kern_res);
+	for (;;)
+		(void) thread_suspend(mach_thread_self());
 }
 
 /*
@@ -1142,7 +1170,6 @@ int
 pthread_join(pthread_t thread, 
 	     void **value_ptr)
 {
-	kern_return_t kern_res;
 	if (thread->sig == _PTHREAD_SIG)
 	{
 		LOCK(thread->lock);

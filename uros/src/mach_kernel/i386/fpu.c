@@ -467,8 +467,7 @@ fpu_module_init(void)
  * Called only when thread terminating - no locking necessary.
  */
 void
-fp_free(fps)
-	struct i386_fpsave_state *fps;
+fp_free(struct i386_fpsave_state *fps)
 {
 ASSERT_IPL(SPL0);
 	/*

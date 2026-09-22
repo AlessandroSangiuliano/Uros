@@ -641,7 +641,6 @@ run_the_arms(void)
 int
 main(int argc, char **argv)
 {
-	mach_port_t	quiet = MACH_PORT_NULL;
 	int		passed;
 
 	(void) argc;

@@ -32,7 +32,7 @@
 /*
  * Set up the initial state of a MACH thread
  */
-void
+kern_return_t
 _pthread_setup(pthread_t thread, 
 	       void (*routine)(pthread_t), 
 	       vm_address_t vsp)
@@ -65,4 +65,5 @@ _pthread_setup(pthread_t thread,
 				   (thread_state_t) &state,
 				   HP700_THREAD_STATE_COUNT),
 		  r);
+	return KERN_SUCCESS;	/* #569: not built; see the x86 ones */
 }
