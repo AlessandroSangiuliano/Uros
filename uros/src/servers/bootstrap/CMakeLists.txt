@@ -461,6 +461,31 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     set(_IPC_BENCH_DEP  "")
   endif()
 
+  # ext_server, UNCONDITIONALLY, and last before char_server (#498).
+  #
+  # 🔴 NOT BEHIND AN OPTION, AND THAT IS A DECISION RATHER THAN AN OVERSIGHT.
+  # char_server and ipc_bench are conditional so that the default boot stays
+  # the one earlier measurements were taken on.  This one is not: from #498 on,
+  # every x86-64 boot mounts a filesystem, because a server that only starts
+  # when somebody asks for it is a server whose regressions are found by the
+  # next person who asks.
+  #
+  # It mounts ahci0a as / and, when present, ahci1a as /mnt/disk2 -- the two
+  # AHCI disks make-disk-x86_64.sh builds for #432, each an ext2 written by
+  # mke2fs.  Those are the names it has always looked for on i386; nothing here
+  # chooses them.
+  #
+  # ⚠️ LAST of the entries that print through the kernel's console, by
+  # cow_test's rule: it is the first task on this target to do filesystem I/O
+  # through block_device_server, so it is the one most likely to end the run.
+  # It stays ahead of char_server for that entry's own reason -- char_server
+  # takes COM1, and everything before it has already been printed.
+  #
+  # ⚠️ It never exits: it mounts, prints `ext2: ready' and serves.  So
+  # run-x86_64.sh's pair for it closes on that line OR on its death, and judges
+  # only the first -- otherwise an ext_server that died would leave the run
+  # waiting for the watchdog and be read as a wedge.
+
   # char_server, and ONE module of the four (#497).
   #
   # 🔑 uart.so alone, because this issue is about ONE device.  ps2.so and
@@ -549,7 +574,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\next_server ext_server\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -591,6 +616,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # #511: the scanner, which holds the BUS rather than any one device.
   set(_HAL_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/hal_server.cmf")
+  # #498: the task that mounts the root.  Without its policy cap_server refuses
+  # it the block device, and the mount never happens.
+  set(_EXT_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/ext_server.cmf")
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
@@ -601,6 +630,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             bootstrap.cmf:${_BOOTSTRAP_CMF}
             hal_server.cmf:${_HAL_CMF}
             irq_claim_test.cmf:${_IRQ_CMF}
+            ext_server.cmf:${_EXT_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             irq_claim_test:${_SBIN}/irq_claim_test
@@ -632,6 +662,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # BOUND -- so running it before them would be asking the
             # question when the answer cannot be wrong.
             hal_bar_test:${_SBIN}/hal_bar_test
+            ext_server:${_SBIN}/ext_server
             # ⚠️ BOTH drivers now, and ahci.so is here for #432 rather than
             # for its own sake.  It was left out under #520 because
             # modload_load_class() loads whatever is in the class and that
@@ -664,16 +695,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # the export tree held the new one.  The symptom was a policy denial for a
     # line the source file plainly contained.
     DEPENDS mkbundle ${_CAPTEST_CMF} ${_DMARECLAIM_CMF} ${_BDS_CMF}
-            ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_IRQ_CMF}
+            ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_IRQ_CMF} ${_EXT_CMF}
             name_server_bin netname_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
-            hal_bar_test_server
+            hal_bar_test_server ext_server_bin
             ${_CHAR_DEP}
             ${_IPC_BENCH_DEP}
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + 14 tasks + hal_server + block_device_server"
+    COMMENT "Bundle: bootstrap.conf + 14 tasks + hal_server + block_device_server + ext_server"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

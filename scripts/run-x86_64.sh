@@ -441,6 +441,19 @@ must_report 'dma_reclaim: started' 'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 must_report 'hal_bar: started' 'hal_bar: [0-9]* of [0-9]* arms passed' \
 	'It reads the region records the HAL measured and asks for a rescan.  A HAL that never probed does not fail loudly -- it reports regions of size zero -- so the absence of this verdict means the program did not reach the end, which is a different finding from a wrong size.'
 
+# 🔑 A SERVER, so its last sentence is not a count of arms but the line it
+# prints before it starts serving (#498).  `ready' is printed only after the
+# mandatory mount of ahci0a succeeded, so it is also the proof that it mounted.
+#
+# ⚠️ The loop that ENDS the run closes this pair on its death as well, and this
+# one does not.  Stopping the wait when it dies keeps a dead ext_server from
+# being reported as a wedge by the watchdog; refusing to call that a report is
+# what keeps it from being reported as a pass.
+# ⚠️ Its own failure lines say `failed' in lower case, which the unexplained
+# scan above does not match -- this pair is the only thing judging it.
+must_report '=== ext2 filesystem server' 'ext2: ready, entering message loop' \
+	'It mounts ahci0a and serves it (#498).  Every way out of main() before that line is a failure -- a device it could not open, a capability it was refused, a superblock it could not read -- and each of them ends the task rather than printing a verdict.'
+
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
@@ -971,7 +984,8 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
-		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
+		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
+		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated"; then
 		sleep 1
 		break
 	fi
