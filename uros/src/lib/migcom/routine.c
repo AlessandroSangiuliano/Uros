@@ -552,16 +552,18 @@ rtPrintArg(register argument_t *arg)
 	printf("Implicit\t");
 	break;
       default:
-	if (akCheck(arg->argKind, akbRequest))
+	if (akCheck(arg->argKind, akbRequest)) {
 	    if (akCheck(arg->argKind, akbSend))
 		printf("In");
 	    else
 		printf("(In)");
-	if (akCheck(arg->argKind, akbReply))
+	}
+	if (akCheck(arg->argKind, akbReply)) {
 	    if (akCheck(arg->argKind, akbReturn))
 		printf("Out");
 	    else
 		printf("(Out)");
+	}
 	printf("\t");
     }
 
@@ -991,7 +993,7 @@ rtProcessSameCountFlag(register argument_t *arg)
 static ipc_flags_t
 rtProcessCountInOutFlag(register ipc_type_t *it, register ipc_flags_t flags, register arg_kind_t kind, boolean_t *what, string_t name)
 {
-    if (flags & flCountInOut) 
+    if (flags & flCountInOut) {
 	if (!akCheck(kind, akbReply)) {
 	    warn("%s: CountInOut is ignored: argument must be Out\n", name);
 	    flags &= ~flCountInOut;
@@ -1000,6 +1002,7 @@ rtProcessCountInOutFlag(register ipc_type_t *it, register ipc_flags_t flags, reg
 	    flags &= ~flCountInOut;
 	} else
 	    *what = TRUE;
+    }
 
     return flags;
 }
@@ -2040,17 +2043,19 @@ rtCheckRoutine(register routine_t *rt)
     /* Add dummy WaitTime and MsgOption arguments, if the routine
        doesn't have its own args and the user specified global values. */
 
-    if (rt->rtReplyPort == argNULL)
+    if (rt->rtReplyPort == argNULL) {
 	if (rt->rtOneWay)
 	    rtAddDummyReplyPort(rt, itZeroReplyPortType);
 	else
 	    rtAddDummyReplyPort(rt, itRealReplyPortType);
+    }
 
-    if (rt->rtMsgOption == argNULL)
+    if (rt->rtMsgOption == argNULL) {
 	if (MsgOption == strNULL)
 	    rtAddMsgOption(rt, "MACH_MSG_OPTION_NONE");
 	else
 	    rtAddMsgOption(rt, MsgOption);
+    }
 
     if ((rt->rtWaitTime == argNULL) &&
 	(WaitTime != strNULL))

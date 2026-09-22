@@ -726,7 +726,7 @@ WriteStructDecl(FILE *file, argument_t *args,
      * on a request, the caller sees it on a reply.  So it goes after the
      * marker, outside the message proper, which is what it is.
      */
-    if (!template_only)
+    if (!template_only) {
 	if (mask == akbRequest) {
 	    WriteList(file, args, func, mask | akbSendBody, "\n", "\n");
 	    fprintf(file, "\t\tchar msgh_end[0];\n");
@@ -738,6 +738,7 @@ WriteStructDecl(FILE *file, argument_t *args,
 	    if (isuser)
 		WriteTrailerDecl(file, trailer);
 	}
+    }
     fprintf(file, "\t} %s;\n", name);
     fprintf(file, "\n");
 
