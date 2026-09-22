@@ -50,6 +50,27 @@
 #define UART_BASE	0x3F8u
 #define UART_IRQ	4u
 
+/*
+ * How many times one byte may ask the transmitter for room (#497).
+ *
+ * 🔥 THIS WAS 1000000, WHICH IS NOT A BOUND, IT IS A NUMBER.  #551 is the
+ * same defect one layer down -- an unbounded wait on this chip -- and the
+ * kernel's console answered it with 4000 polls, reasoned at cons.h: a byte at
+ * 115200 baud takes 87 us on the wire and a port poll about one, so a healthy
+ * byte polls near 90 times and the bound is forty of those.  The chip is the
+ * same chip; there was no reason for the driver's number to be 250 times the
+ * kernel's except that nobody had picked it.
+ *
+ * ⚠️ And on x86-64 it stopped being free.  Each poll is now an RPC (see the
+ * accessors below), so the old value was up to a MILLION round trips per
+ * byte -- a stall that would have looked like a hang and measured like one.
+ *
+ * ⚠️ i386 changes with it, from 1000000 to 4000.  Its polls are `inb' and
+ * cost differently, but the reasoning above is about the UART and not about
+ * the instruction, and one number with one reason beats two with none.
+ */
+#define UART_TX_POLLS	4000u
+
 #define UART_RHR	0u	/* DLAB=0: receive holding		*/
 #define UART_THR	0u	/* DLAB=0: transmit holding		*/
 #define UART_DLL	0u	/* DLAB=1: divisor latch low		*/
@@ -67,6 +88,9 @@
 #define IER_RXRDY	0x01u	/* received data available */
 #define IER_THRE	0x02u	/* transmitter holding empty */
 #define IER_LSI		0x04u	/* line status interrupt */
+
+/* IIR bits (read) */
+#define IIR_FIFO_ON	0xC0u	/* both bits: a 16550 with a working FIFO */
 
 /* FCR bits */
 #define FCR_ENABLE	0x01u
@@ -238,6 +262,19 @@ struct uart_priv {
 	 * mark "in tty_write" anyway so a future re-entrant caller
 	 * can't interleave bytes mid-string. */
 	int		tx_busy;
+
+	/* How many bytes the transmitter will take without being asked
+	 * again, and how many it takes when it is (#497, after #567).
+	 * depth is 16 with the FIFO on and 1 without; attach measures it
+	 * from IIR rather than assuming, because a FIFO that failed to
+	 * enable and a FIFO of one are the same chip to this code. */
+	unsigned int	fifo_depth;
+	unsigned int	fifo_room;
+
+	/* How many times a byte exhausted UART_TX_POLLS waiting for room.
+	 * #551's lesson: a stall that nobody counted is a stall nobody can
+	 * be shown.  Zero on every healthy boot. */
+	uint32_t	tx_stalls;
 
 	/* Subscribers receive a header-only wake-up per RX batch. */
 	mach_port_t	subscribers[UART_MAX_SUBSCRIBERS];
@@ -414,6 +451,15 @@ uart_attach(void *priv)
 	uart_out(UART_FCR, FCR_ENABLE | FCR_RX_RESET | FCR_TX_RESET |
 			   FCR_TRIG_1);
 
+	/* How deep the transmitter is, ASKED rather than assumed (#497).
+	 * The FCR write above requests a FIFO; IIR is where the chip says
+	 * whether it has one.  A 16450, or a 16550 with the broken FIFO
+	 * that made the A revision famous, answers 1 -- and then every byte
+	 * polls, which is correct and slow instead of fast and wrong. */
+	p->fifo_depth = ((uart_in(UART_IIR) & IIR_FIFO_ON) == IIR_FIFO_ON)
+			? 16u : 1u;
+	p->fifo_room  = 0u;
+
 	/* DTR + RTS, plus OUT2 — without OUT2 the IRQ stays gated
 	 * inside the chip and we'd never see IRQ 4. */
 	uart_out(UART_MCR, MCR_DTR | MCR_RTS | MCR_OUT2);
@@ -491,23 +537,58 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
  * tty_write — polled THR-empty, byte-by-byte.
  * ============================================================ */
 
+/*
+ * Wait until the transmitter will take at least one byte, and record how
+ * many it will take (#497).
+ *
+ * 🔑 THE POLL WAS PER BYTE AND THE FIFO IS SIXTEEN DEEP.  When LSR says
+ * THR-empty on a chip whose FIFO is on, the whole FIFO is empty, so sixteen
+ * bytes may go in before the question is worth asking again.  Asking once a
+ * byte was merely wasteful while a poll was an `inb'; on x86-64 a poll is an
+ * RPC, and an 80-byte line went from 160 kernel entries to 85.
+ *
+ * ⚠️ This is the kernel's own bookkeeping from #567 (cons_fifo_room), on the
+ * same chip, for the same reason.  It is duplicated rather than shared
+ * because the two writers must not share state -- that is the whole of what
+ * #497 is about -- but the arithmetic had better agree.
+ *
+ * ⚠️ On the bound running out, room is left at ONE.  Not zero, which would
+ * poll again for the next byte and turn a stall into a stall per byte; and
+ * not depth, which would claim room the chip never reported.  The byte goes
+ * out into a transmitter that may not be ready -- one lost byte on a port
+ * that is already misbehaving, and the count below says it happened.
+ */
+static void
+uart_tx_wait_room(struct uart_priv *p)
+{
+	unsigned int polls;
+
+	for (polls = 0; polls < UART_TX_POLLS; polls++) {
+		if (uart_in(UART_LSR) & LSR_THRE) {
+			p->fifo_room = p->fifo_depth;
+			return;
+		}
+	}
+
+	p->tx_stalls++;
+	p->fifo_room = 1u;
+}
+
 static int
 uart_tty_write(void *priv, const char *buf, size_t len)
 {
 	struct uart_priv *p = priv;
 	size_t i;
-	unsigned int spins;
 
 	if (p->tx_busy)
 		return -1;
 	p->tx_busy = 1;
 
 	for (i = 0; i < len; i++) {
-		for (spins = 0; spins < 1000000u; spins++) {
-			if (uart_in(UART_LSR) & LSR_THRE)
-				break;
-		}
+		if (p->fifo_room == 0)
+			uart_tx_wait_room(p);
 		uart_out(UART_THR, (uint8_t)buf[i]);
+		p->fifo_room--;
 	}
 
 	p->tx_busy = 0;
