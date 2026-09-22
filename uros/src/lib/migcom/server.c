@@ -618,16 +618,6 @@ WriteDispatcher(FILE *file, statement_t *stats, unsigned int maxsize)
     }
 }
 
-/*
- *  Returns the return type of the server-side work function.
- *  Suitable for "extern %s serverfunc()".
- */
-static char *
-ServerSideType(routine_t *rt)
-{
-    return rt->rtRetCode->argType->itTransType;
-} 
-
 static void
 WriteRetCode(FILE *file, register argument_t *ret)
 {
@@ -657,15 +647,6 @@ WriteLocalVarDecl(FILE *file, register argument_t *arg)
 		arg->argVarName, it->itKPD_Number);
     } else
 	fprintf(file, "\t%s %s", it->itTransType, arg->argVarName);
-}
-
-static void
-WriteServerArgDecl(FILE *file, argument_t *arg)
-{
-    fprintf(file, "%s %s%s",
-	    arg->argType->itTransType,
-	    arg->argByReferenceServer ? "*" : "",
-	    arg->argVarName);
 }
 
 /*

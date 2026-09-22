@@ -88,26 +88,6 @@ static int                          vfs_initialised;
 /*  Mount resolution                                                   */
 /* ------------------------------------------------------------------ */
 
-/* Same logic as the server-side mount_prefix_match: prefix must end at
- * a '/' boundary in path (or path's end), so /mnt/d does not match
- * /mnt/disk1.  Returns matched length or 0. */
-static size_t
-vfs_match_prefix(const char *path, const char *prefix)
-{
-    size_t pl = strlen(prefix);
-    size_t patl = strlen(path);
-
-    if (pl > patl)
-        return 0;
-    if (strncmp(path, prefix, pl) != 0)
-        return 0;
-    if (pl == 1 && prefix[0] == '/')
-        return 1;
-    if (path[pl] == '\0' || path[pl] == '/')
-        return pl;
-    return 0;
-}
-
 /* Look up the mount that owns 'path'.  We always query name_server
  * because the in-process cache cannot know whether a more-specific
  * mount has appeared since the last lookup — e.g. the cached "/" entry
