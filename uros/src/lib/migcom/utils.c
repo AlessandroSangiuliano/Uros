@@ -153,9 +153,9 @@ WriteRCSDecl(FILE *file, identifier_t name, string_t rcs)
 {
     fprintf(file, "#ifndef\tlint\n");
     fprintf(file, "#if\tUseExternRCSId\n");
-    fprintf(file, "%s char %s_rcsid[] = %s;\n", (BeAnsiC) ? "const" : "", name, rcs);
+    fprintf(file, "const char %s_rcsid[] = %s;\n", name, rcs);
     fprintf(file, "#else\t/* UseExternRCSId */\n");
-    fprintf(file, "static %s char rcsid[] = %s;\n", (BeAnsiC) ? "const" : "", rcs);
+    fprintf(file, "static const char rcsid[] = %s;\n", rcs);
     fprintf(file, "#endif\t/* UseExternRCSId */\n");
     fprintf(file, "#endif\t/* lint */\n");
     fprintf(file, "\n");
@@ -185,13 +185,7 @@ WriteBogusDefines(FILE *file)
     fprintf(file, "\n");
 
     fprintf(file, "#ifndef\tUseStaticTemplates\n");
-    if (BeAnsiC) {
-        fprintf(file, "#define\tUseStaticTemplates\t1\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "#define\tUseStaticTemplates\t1\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }    
+    fprintf(file, "#define\tUseStaticTemplates\t1\n");
     fprintf(file, "#endif\t/* UseStaticTemplates */\n");
     fprintf(file, "\n");
 }

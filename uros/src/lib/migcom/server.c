@@ -310,15 +310,7 @@ WriteIncludes(FILE *file)
 static void
 WriteGlobalDecls(FILE *file)
 {
-    if (BeAnsiC) {
-        fprintf(file, "#define novalue void\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "#define novalue void\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "#define novalue int\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "#define novalue void\n");
     fprintf(file, "\n");
 
     if (RCSId != strNULL)
@@ -552,16 +544,7 @@ WriteDispatcher(FILE *file, statement_t *stats, unsigned int maxsize)
       * Then, the server routine
       */
     fprintf(file, "mig_external boolean_t %s\n", ServerDemux);
-    if (BeAnsiC) {
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(InHeadP, OutHeadP)\n");
-        fprintf(file, "\tmach_msg_header_t *InHeadP, *OutHeadP;\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
     
     fprintf(file, "{\n");
     fprintf(file, "\t/*\n");
@@ -610,16 +593,7 @@ WriteDispatcher(FILE *file, statement_t *stats, unsigned int maxsize)
      * Then, the <subsystem>_server_routine routine
      */
     fprintf(file, "mig_external mig_routine_t %s_routine\n", ServerDemux);
-    if (BeAnsiC) {
-        fprintf(file, "\t(mach_msg_header_t *InHeadP)\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "\t(mach_msg_header_t *InHeadP)\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(InHeadP)\n");
-        fprintf(file, "\tmach_msg_header_t *InHeadP;\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "\t(mach_msg_header_t *InHeadP)\n");
     
     fprintf(file, "{\n");
     fprintf(file, "\tregister int msgh_id;\n");
@@ -2250,16 +2224,7 @@ WriteRoutine(FILE *file, register routine_t *rt)
 
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
     fprintf(file, "mig_internal novalue _X%s\n", rt->rtName);
-    if (BeAnsiC) {
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(InHeadP, OutHeadP)\n");
-        fprintf(file, "\tmach_msg_header_t *InHeadP, *OutHeadP;\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "\t(mach_msg_header_t *InHeadP, mach_msg_header_t *OutHeadP)\n");
 
     fprintf(file, "{\n");
     WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbRequest, "Request",
@@ -2381,8 +2346,7 @@ WriteServer(FILE *file, statement_t *stats)
     register size = 0;
 
     WriteProlog(file);
-    if (BeAnsiC)
-	WriteForwardDeclarations(file, stats);
+    WriteForwardDeclarations(file, stats);
     for (stat = stats; stat != stNULL; stat = stat->stNext)
 	switch (stat->stKind)
 	{

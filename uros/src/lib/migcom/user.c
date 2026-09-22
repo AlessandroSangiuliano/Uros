@@ -395,17 +395,6 @@ WriteIncludes(FILE *file)
 	fprintf(file, "#include <mach/mig_log.h>\n");
 	fprintf(file, "#endif /* MIG_DEBUG */\n"); 
     }
-    fprintf(file, "/* LINTLIBRARY */\n");
-    fprintf(file, "\n");
-    if (!BeAnsiC) {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "#else\t/* %s */\n", NewCDecl);
-        fprintf(file, "extern mach_port_t mig_get_reply_port();\n");
-        fprintf(file, "extern void mig_dealloc_reply_port(mach_port_t);\n");
-	fprintf(file, "extern char *%s();\n", MessAllocRoutine);
-	fprintf(file, "extern void %s();\n", MessFreeRoutine);
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
     fprintf(file, "\n");
 }
 
@@ -2547,22 +2536,9 @@ WriteStubDecl(FILE *file, register routine_t *rt)
     fprintf(file, "\n");
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
     fprintf(file, "mig_external %s %s\n", ReturnTypeStr(rt), rt->rtUserName);
-    if (BeAnsiC) {
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
-        fprintf(file, ")\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
-        fprintf(file, ")\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(");
-        WriteList(file, rt->rtArgs, WriteNameDecl, akbUserArg, ", ", "");
-        fprintf(file, ")\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ";\n", ";\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "(\n");
+    WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
+    fprintf(file, ")\n");
     fprintf(file, "{\n");
 }
 

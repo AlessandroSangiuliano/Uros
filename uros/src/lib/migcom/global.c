@@ -114,7 +114,6 @@ boolean_t BeVerbose = FALSE;
 boolean_t UseMsgRPC = TRUE;
 boolean_t GenSymTab = FALSE;
 boolean_t UseEventLogger = FALSE;
-boolean_t BeAnsiC = TRUE;
 boolean_t UseRPCTrap = FALSE;
 boolean_t TestRPCTrap= FALSE;
 
@@ -144,8 +143,6 @@ int MaxMessSizeOnStack = -1;	/* by default, always on stack */
 
 string_t yyinname;
 
-char NewCDecl[] = "(defined(__STDC__) || defined(c_plusplus))";
-char LintLib[] = "defined(LINTLIBRARY)";
 
 void
 init_global()
