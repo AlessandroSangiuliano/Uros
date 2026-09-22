@@ -1222,7 +1222,8 @@ main(int argc, char **argv)
 
 	    strlcpy(pathname, sp->symtab_name, sizeof(pathname));
 	    strlcat(pathname, "_name", sizeof(pathname));
-	    if (ptr = getenv(pathname))
+	    ptr = getenv(pathname);
+	    if (ptr != NULL)
 		parse_path(sp, ptr);
 
 #ifdef DEBUG
@@ -1941,8 +1942,9 @@ do_bootstrap_environment(mach_port_t bootstrap,
 	p1 = (char *)(*env);
 	for (ep = __environment; *ep; ep++) {
 		p2 = *ep;
-		while (*p1++ = *p2++)
-			;
+		while (*p2 != '\0')
+			*p1++ = *p2++;
+		*p1++ = '\0';
 	}
 	*env_count = env_size;
 	return KERN_SUCCESS;

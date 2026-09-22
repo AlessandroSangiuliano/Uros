@@ -206,7 +206,7 @@ extern void		Load_context(
  *	Try to collect machine-dependent pages
  */
 void
-consider_machine_collect()
+consider_machine_collect(void)
 {
 }
 
@@ -1179,7 +1179,7 @@ thread_machine_set_current( thread_t thread )
  * Pool of kernel activations.
  */
 
-void act_machine_init()
+void act_machine_init(void)
 {
 	int i;
 	thread_act_t thr_act;

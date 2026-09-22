@@ -217,12 +217,28 @@ pmap_init(void)
 		pmap_boundary_probe = PMAP_NULL;
 		pmap_destroy(probe);
 
+		/*
+		 * ⚠️ THE FREE IS NO LONGER SYNCHRONOUS (#566), so this can no
+		 * longer count it here.  pmap_destroy() queues the struct and
+		 * returns; pmap_pool_frees is incremented when the callback
+		 * runs, which is after a grace period and after there is an
+		 * idle loop to run it in -- neither of which exists yet at
+		 * pmap_init() time.
+		 *
+		 * What is still checkable here, and is the half this probe was
+		 * about, is which ALLOCATOR the space belongs to: the question
+		 * was whether a pmap made before the zone opened goes back to
+		 * the pool rather than to the zone, and pmap_from_pool()
+		 * answers it from the address.  The count that used to stand in
+		 * for it is reported by quiet_census once the queue drains.
+		 */
 		printf("pmap: a space made before the zone went back to the "
 		       "%s after it -- %s\n",
 		       pooled ? "pool" : "zone",
-		       (pooled && pmap_pool_frees == frees + 1)
+		       pooled
 		       ? "the allocators are told apart across the boundary"
 		       : "WRONG");
+		(void) frees;
 	}
 
 	pmap_initialized = 1;
@@ -638,6 +654,18 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
  * nothing in this file to say so.  A fix that needs a paragraph about a
  * different file to be correct is a fix waiting to be broken.
  */
+/*
+ * What a grace period hands back (#566).  The head is inside the struct being
+ * freed, so the struct is found by stepping back from it -- and nothing may
+ * touch that struct between the call and this, which is the contract
+ * urmach_call_rcu() states.
+ */
+static void pmap_free_rcu(struct urmach_rcu_head *h)
+{
+	pmap_free((pmap_t) ((char *) h - __builtin_offsetof(struct pmap,
+							    rcu_head)));
+}
+
 void pmap_destroy(pmap_t pmap)
 {
 	const pt_entry_t *root;
@@ -672,7 +700,8 @@ void pmap_destroy(pmap_t pmap)
 	pmap->root_pa = 0;
 
 	/*
-	 * ⚠️ AFTER root_pa is cleared and before the struct is handed back.
+	 * ⚠️ AFTER root_pa is cleared and before the struct is handed back --
+	 * and QUEUED rather than waited for (#566).
 	 *
 	 * A reader that entered before this point may be standing on a
 	 * `pv->pmap' that names this space; when this returns, every one of
@@ -682,15 +711,42 @@ void pmap_destroy(pmap_t pmap)
 	 * added with this, in walk.c: without it a zero root is read as physical
 	 * page zero through the direct map, which does not fault either.
 	 *
+	 * 🔴 IT USED TO BLOCK HERE, and that is what #566 measured: a processor
+	 * is counted quiescent when it is idle, when it context-switches, or
+	 * when its TICK fires, so a peer busy in the kernel keeps the destroyer
+	 * spinning for up to a whole tick.  Two hundred terminations while
+	 * another task enumerated PCI cost 31 035 741 cycles each; with the
+	 * wait removed, 2 309.  No other system blocks the destroyer -- Linux
+	 * queues with call_rcu(), FreeBSD with epoch_call(), and XNU frees the
+	 * pmap from a deferred list -- and now neither does this one.
+	 *
+	 * The guarantee is unchanged: the callback runs only after a grace
+	 * period that BEGAN AFTER this call has ended, which is what makes the
+	 * struct safe to reuse.  What changed is who waits for it: nobody.
+	 *
 	 * ⚠️ And it is safe at BOOTSTRAP, where pmap_init() destroys the
-	 * boundary probe: the wait skips this processor and every processor
-	 * whose machine_slot says it is not running, so with one processor up it
-	 * returns without spinning.  Asked of rcu.c rather than assumed, because
-	 * a grace period that cannot end is a boot that does not finish.
+	 * boundary probe: queueing cannot fail and cannot block, so a boot with
+	 * one processor and no clock yet simply reclaims that pmap later, when
+	 * there is an idle loop to reclaim it in.
 	 */
-	urmach_synchronize_rcu();
+	/*
+	 * 🔴 AND THE SLOT IS MARKED IN FLIGHT BEFORE IT IS QUEUED.
+	 *
+	 * pmap_pool_alloc() calls a slot free when its ref_count is zero, and
+	 * the exchange above left it exactly there.  Queue without this and the
+	 * pool hands the slot to the next pmap_create() while the callback is
+	 * still pending -- then the callback runs and writes zero over a live
+	 * space's reference count.  That is not theory: the first version of
+	 * this deferral booted as far as bootstrap and never started a single
+	 * server.
+	 *
+	 * -1 is a value the allocator's test does not accept and nothing else
+	 * reads, and pmap_free() sets it back to zero when the callback runs,
+	 * which is the moment the slot really is free.
+	 */
+	pmap->ref_count = -1;
 
-	pmap_free(pmap);
+	urmach_call_rcu(&pmap->rcu_head, pmap_free_rcu);
 }
 
 void pmap_activate_boot(pmap_t pmap)
@@ -1020,14 +1076,81 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
  */
 static uint64_t device_next = DEVICE_MAP_BASE;
 
-uint64_t pmap_map_device(uint64_t pa, uint64_t size)
+/*
+ * ── Memory types, and the one entry this target repurposes (#568) ──────
+ *
+ * IA32_PAT holds eight entries; a page selects one with PAT, PCD and PWT.
+ * The architectural defaults are WB, WT, UC-, UC and then the same four
+ * again, so the four reachable without bit 7 are WB, WT, UC- and UC -- no
+ * write-combining among them, which is why a framebuffer mapped by
+ * pmap_map_device() below is uncacheable and costs 128 separate bus
+ * transactions a glyph.
+ *
+ * Entry 1 is taken for write-combining.  See pmap.h for why entry 1 and not
+ * the entry i386 took.
+ */
+#define IA32_PAT_MSR		0x277
+#define PAT_ENTRY_WC		0x01ULL		/* the encoding for WC */
+#define PAT_WC_SLOT		1		/* selected by PWT alone */
+
+static void pmap_pat_install(uint64_t pat)
+{
+	uint64_t cr0, cr3;
+
+	/*
+	 * The sequence the SDM gives for changing a memory-type register, and
+	 * every step of it is load-bearing.  Caches must not be left holding
+	 * lines under the old type while the new one is installed, and the TLB
+	 * must not be left holding translations that carry it.
+	 *
+	 * ⚠️ Interrupts off for the whole of it: this processor is running
+	 * with its caches disabled in the middle, and an interrupt handler
+	 * that ran there would run at a speed nothing else in the system
+	 * expects.
+	 */
+	__asm__ volatile("cli" : : : "memory");
+
+	cr0 = read_cr0();
+	write_cr0((cr0 & ~CR0_NW) | CR0_CD);	/* no-fill cache mode */
+	wbinvd();
+	cr3 = read_cr3();
+	write_cr3(cr3);				/* flush the TLB */
+
+	wrmsr(IA32_PAT_MSR, pat);
+
+	wbinvd();
+	write_cr3(cr3);
+	write_cr0(cr0);
+
+	__asm__ volatile("sti" : : : "memory");
+}
+
+void pmap_enable_wc(void)
+{
+	uint32_t a, b, c, d;
+	uint64_t pat;
+
+	cpuid(1, &a, &b, &c, &d);
+	if ((d & (1u << 16)) == 0)		/* CPUID.01H:EDX.PAT */
+		return;
+
+	pat = rdmsr(IA32_PAT_MSR);
+	if (((pat >> (8 * PAT_WC_SLOT)) & 0xFF) == PAT_ENTRY_WC)
+		return;				/* already ours */
+
+	pat &= ~(0xFFULL << (8 * PAT_WC_SLOT));
+	pat |= PAT_ENTRY_WC << (8 * PAT_WC_SLOT);
+	pmap_pat_install(pat);
+}
+
+static uint64_t pmap_map_device_flags(uint64_t pa, uint64_t size,
+				      uint64_t cache_flags)
 {
 	uint64_t offset = pa & (PAGE_SIZE_4K - 1);
 	uint64_t first = pa - offset;
 	uint64_t last = (pa + size + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
 	uint64_t va = device_next;
-	uint64_t flags = INTEL_PTE_WRITE | INTEL_PTE_NX
-		       | INTEL_PTE_NCACHE | INTEL_PTE_WTHRU;
+	uint64_t flags = INTEL_PTE_WRITE | INTEL_PTE_NX | cache_flags;
 
 	if (size == 0)
 		return 0;
@@ -1051,6 +1174,23 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	}
 
 	return va + offset;
+}
+
+uint64_t pmap_map_device(uint64_t pa, uint64_t size)
+{
+	return pmap_map_device_flags(pa, size,
+				     INTEL_PTE_NCACHE | INTEL_PTE_WTHRU);
+}
+
+uint64_t pmap_map_device_wc(uint64_t pa, uint64_t size)
+{
+	/*
+	 * PWT alone, which selects PAT entry 1 -- write-combining once
+	 * pmap_enable_wc() has run, write-through until then.  Never PCD:
+	 * with it the entry selected is 3, which is uncacheable and is the
+	 * thing being escaped.
+	 */
+	return pmap_map_device_flags(pa, size, INTEL_PTE_WTHRU);
 }
 
 /*

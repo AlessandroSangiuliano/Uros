@@ -44,6 +44,7 @@
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
+#include <ddb/cons_cost.h>	/* #567: one line about the console, once a boot */
 
 /*
  * How long "quiet" is.
@@ -250,9 +251,23 @@ quiet_census_pass(int mycpu)
 	 * had become part of the silence.  The interval has to stay under the
 	 * threshold, which is why it is written in terms of it.
 	 */
-	if ((++quiet_passes % (QUIET_PASSES / 5)) == 0)
+	if ((++quiet_passes % (QUIET_PASSES / 5)) == 0) {
 		printf("quiet_census: passes=%lu peak=%lu resets=%lu\n",
 		       quiet_passes, quiet_peak, quiet_resets);
+
+		/*
+		 * And, once, what the console did over this boot (#567).
+		 *
+		 * Here because this is where an ordinary run ends: the harness
+		 * stops a kernel that has nothing left to do rather than
+		 * waiting for it to halt, so halt_cpu()'s copy of this is
+		 * never reached by the runs that matter.  A machine with
+		 * enough idle passes behind it to print this line has had its
+		 * clock tick and its idle loop pass many times, which is
+		 * exactly the claim the line is there to check.
+		 */
+		cons_ring_report();
+	}
 
 	if (quiet_passes < QUIET_PASSES)
 		return;

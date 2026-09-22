@@ -197,32 +197,25 @@ WriteUserRoutine(FILE *file, routine_t *rt)
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
     WriteMigExternal(file);
     fprintf(file, "%s %s\n", ReturnTypeStr(rt), rt->rtUserName);
-    fprintf(file, "#if\t%s\n", LintLib);
-    fprintf(file, "    (");
-    WriteList(file, rt->rtArgs, WriteNameDecl, akbUserArg, ", " , "");
-    fprintf(file, ")\n");
-    WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ";\n", ";\n");
-    fprintf(file, "{ ");
-    fprintf(file, "return ");
-    fprintf(file, "%s(", rt->rtUserName);
-    WriteList(file, rt->rtArgs, WriteNameDecl, akbUserArg, ", ", "");
-    fprintf(file, "); }\n");
-    fprintf(file, "#else\n");
-    if (BeAnsiC) {
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
-        fprintf(file, ");\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
-        fprintf(file, ");\n");
-        fprintf(file, "#else\n");
-
-        fprintf(file, "    ();\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl); 
-    }
-    fprintf(file, "#endif\t/* %s */\n",  LintLib);
+    /*
+     * 🔴 ONE DECLARATION, AND IT IS A PROTOTYPE (#504).
+     *
+     * What stood here emitted three: a LINTLIBRARY stub, an ANSI prototype and
+     * a K&R one, chosen by preprocessor conditionals in every generated
+     * header.  Two of the three were unreachable -- nothing in this tree
+     * defines LINTLIBRARY, and -K, the 1993 option that asks for K&R output,
+     * is passed by nobody -- so what they amounted to was K&R syntax sitting
+     * in every header this program writes, for a compiler that will not see
+     * it.
+     *
+     * ⚠️ And the LINTLIBRARY one was not merely dead: its body was
+     * `{ return f(args); }' for the very f it was declaring.  Had anything
+     * ever defined that macro, every stub in the tree would have recursed
+     * until the stack ran out.
+     */
+    fprintf(file, "(\n");
+    WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
+    fprintf(file, ");\n");
 }
 
 void
@@ -360,35 +353,12 @@ WriteServerRoutine(FILE *file, routine_t *rt)
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
     WriteMigExternal(file);
     fprintf(file, "%s %s\n", ReturnTypeStr(rt), rt->rtServerName);
-    fprintf(file, "#if\t%s\n", LintLib);
-    fprintf(file, "    (");
-    WriteList(file, rt->rtArgs, WriteNameDecl, akbServerArg, ", " , "");
-    fprintf(file, ")\n");
-    WriteList(file, rt->rtArgs, WriteServerVarDecl,
-	      akbServerArg, ";\n", ";\n");
-    fprintf(file, "{ ");
-    fprintf(file, "return ");
-    fprintf(file, "%s(", rt->rtServerName);
-    WriteList(file, rt->rtArgs, WriteNameDecl, akbServerArg, ", ", "");
-    fprintf(file, "); }\n");
-    fprintf(file, "#else\n");
-    if (BeAnsiC) {
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteServerVarDecl,
-	      akbServerArg, ",\n", "\n");
-        fprintf(file, ");\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteServerVarDecl,
-	      akbServerArg, ",\n", "\n");
-        fprintf(file, ");\n");
-        fprintf(file, "#else\n");
 
-        fprintf(file, "    ();\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl); 
-    }
-    fprintf(file, "#endif\t/* %s */\n",  LintLib);
+    /* One declaration, and it is a prototype; see WriteUserRoutine (#504). */
+    fprintf(file, "(\n");
+    WriteList(file, rt->rtArgs, WriteServerVarDecl,
+	      akbServerArg, ",\n", "\n");
+    fprintf(file, ");\n");
 }
 
 static void

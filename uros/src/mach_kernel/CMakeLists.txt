@@ -140,6 +140,49 @@ option(UROS_ABLATE_558_PVLOCK "Build the #558 ablation: pv walks with no per-pag
 # down -- which is #531's panic.  With both off, 18 boots gave six of the
 # second and none of the first, and could not say which race they were.
 option(UROS_ABLATE_558_PVFREELOCK "Build the #558 ablation: pv free list with no lock" OFF)
+# #563: do not open the copy's window before the probe that tests whether a
+# trap inherits it.  One switch, two outcomes, and that is the point: on a
+# processor WITH SMAP the self-test must go WRONG, because there the window is
+# the thing under test; on one WITHOUT it the boot must stay green and keep
+# saying the processor has no SMAP, because there nothing changed.  A third
+# answer that could not be told from the other two by taking it away would not
+# be worth having.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is never opened" OFF)
+# #551: put the unbounded UART spin back.  A bound nothing has ever hit is
+# untested code; scripts/uart-stall.py stops the transmitter on purpose, and
+# this is the kernel that has to be seen NOT coming back for the bounded one's
+# coming back to mean anything.  Never ON in a kernel anyone boots for anything
+# else.
+option(UROS_ABLATE_551_UNBOUNDED "Build the #551 ablation: cons_putc waits for the transmitter for ever" OFF)
+# #566: remove the grace period from pmap_destroy, to find out whether it is
+# what the trap sweep pays a clock tick for on more than one processor.  UNSAFE
+# -- a reader may still hold the pmap.  Measurement only.
+option(UROS_ABLATE_566_NO_GRACE "Build the #566 ablation: pmap_destroy does not wait a grace period" OFF)
+# #566: and the other wait a processor can spend a trap inside -- the TLB
+# shootdown standing still until every other processor has acknowledged.
+# UNSAFE: the caller goes on with stale translations elsewhere.
+option(UROS_ABLATE_566_NO_IPI_WAIT "Build the #566 ablation: ipi_call_others does not wait for the acknowledgements" OFF)
+# #567: one byte per look at the transmitter, which is what this tree did
+# before the FIFO was used.  The other arm of that measurement.
+option(UROS_ABLATE_567_NO_FIFO "Build the #567 ablation: one byte per look at the transmitter" OFF)
+# #567: refuse to arm the console ring, so every byte goes to the port in the
+# caller's thread under printf_lock, which is the console this target had
+# before.  The other arm of the hold measurement, in a binary that differs in
+# nothing else.
+option(UROS_ABLATE_567_NO_RING "Build the #567 ablation: the console writes the wire in the caller's thread" OFF)
+# #563: make the five tests that need a second processor believe they are alone,
+# so the line that DECLINES the question can be executed.  There is no boot flag
+# capping the processor count on this target and an AP cannot be made to fail to
+# arrive on demand, so without this the correction would ship unexercised --
+# which is the objection #561 was built on.  Never ON in a kernel anyone boots
+# for anything else.
+option(UROS_ABLATE_563_ALONE "Build the #563 ablation: every test believes it is alone" OFF)
+# #563: withhold the MADT's I/O APIC entries while leaving the processor census
+# alone, so the tests that route through one see the board a firmware without an
+# I/O APIC describes -- and the discriminator they use, the other half of the
+# same table, still answers.  qemu offers no machine that gives one without the
+# other.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_563_NO_IOAPIC "Build the #563 ablation: the MADT lists no I/O APIC" OFF)
 
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
@@ -159,6 +202,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons_cost.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/fbcons.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ddb.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cont_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/disasm.c
@@ -329,6 +374,38 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_558_PVFREELOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVFREELOCK=1)
       message(STATUS "#558 ablation: the pv free list lock is OFF (x86_64)")
+  endif()
+  if(UROS_ABLATE_563_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_WINDOW=1)
+      message(STATUS "#563 ablation: the copy's window is never opened (x86_64)")
+  endif()
+  if(UROS_ABLATE_551_UNBOUNDED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_551_UNBOUNDED=1)
+      message(STATUS "#551 ablation: cons_putc waits for the transmitter for ever (x86_64)")
+  endif()
+  if(UROS_ABLATE_566_NO_GRACE)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_GRACE=1)
+      message(STATUS "#566 ablation: pmap_destroy does not wait a grace period (x86_64)")
+  endif()
+  if(UROS_ABLATE_566_NO_IPI_WAIT)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_IPI_WAIT=1)
+      message(STATUS "#566 ablation: ipi_call_others does not wait for acks (x86_64)")
+  endif()
+  if(UROS_ABLATE_567_NO_FIFO)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_FIFO=1)
+      message(STATUS "#567 ablation: one byte per look at the transmitter (x86_64)")
+  endif()
+  if(UROS_ABLATE_567_NO_RING)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_RING=1)
+      message(STATUS "#567 ablation: the console writes the wire in the caller's thread (x86_64)")
+  endif()
+  if(UROS_ABLATE_563_ALONE)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
+      message(STATUS "#563 ablation: every test believes it is alone (x86_64)")
+  endif()
+  if(UROS_ABLATE_563_NO_IOAPIC)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_NO_IOAPIC=1)
+      message(STATUS "#563 ablation: the MADT lists no I/O APIC (x86_64)")
   endif()
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)

@@ -27,6 +27,7 @@
  */
 
 #define COM1 0x3F8			/* first serial port (QEMU -serial) */
+#include <ddb/cons_bound.h>		/* #551: CONS_THRE_SPINS, shared with cons.c */
 
 /* ------------------------------------------------------------------ */
 /*  Multiboot2 header — GRUB reads this to load the ELF64 image.  (No   */
@@ -40,6 +41,35 @@ mb2_header:
 	.long	0				/* architecture 0 = i386 (32-bit handoff) */
 	.long	mb2_header_end - mb2_header	/* header length */
 	.long	-(0xE85250D6 + 0 + (mb2_header_end - mb2_header))
+
+	/* Ask the loader for a linear framebuffer (#568).
+	 *
+	 * 🔑 THE ONLY WAY TO GET ONE IS TO ASK BEFORE BEING LOADED.  Until
+	 * now this header carried nothing but its end tag, so GRUB left the
+	 * display in whatever mode firmware had and told us nothing about it
+	 * -- and on this target the serial port was therefore the only output
+	 * there is (#497).  A machine with no COM port, which is every recent
+	 * laptop and the one in scripts/make-omen-boot.sh, could not be
+	 * booted here at all.
+	 *
+	 * ⚠️ flags bit 0 = OPTIONAL, and that bit is the whole difference
+	 * between a second output and a kernel that will not load.  A
+	 * required tag a loader cannot satisfy is a refusal to boot; asked
+	 * for optionally, a machine that has no framebuffer starts exactly as
+	 * it does today and says so.  i386 has asked this way since #342.
+	 *
+	 * Zero width, height and depth: no preference.  What comes back is a
+	 * fact about the machine and is read from the type-8 tag, never
+	 * assumed -- see mb2_framebuffer().
+	 */
+	.align	8
+	.short	5				/* MULTIBOOT_HEADER_TAG_FRAMEBUFFER */
+	.short	1				/* flags: optional */
+	.long	20				/* size */
+	.long	0				/* width:  no preference */
+	.long	0				/* height: no preference */
+	.long	0				/* depth:  no preference */
+
 	.align	8
 	.short	0				/* end tag */
 	.short	0
@@ -62,10 +92,25 @@ _start:
 	movl	%eax, boot_magic
 	movl	%ebx, boot_info
 
-	/* Minimal COM1 init: 38400 8N1, FIFO on. */
+	/* Minimal COM1 init: 115200 8N1, FIFO on.
+	 *
+	 * 🔑 115200 IS A DECISION AND THIS IS WHERE IT IS MADE (#567).  The
+	 * divisor was 3 -- 38400 -- which nothing ever chose; it is what the
+	 * line was written with.  On an accelerator it buys nothing, because
+	 * qemu's 16550 does not hold a byte for the time the divisor asks
+	 * for; on the metal it is the whole cost of a boot's output.  8N1 is
+	 * ten bits a byte, so 38400 is 260 us a byte and 115200 is 87 -- and
+	 * an entry-14 boot's 62 163 bytes go from 16.2 s of wire to 5.4.
+	 *
+	 * Divisor 1 exactly: the 16550's clock is 1.8432 MHz and 1843200/16
+	 * is 115200 with no remainder, so this is the fastest rate the part
+	 * reaches with no error at all.  grub.cfg says the same number, and
+	 * it has to: GRUB's own lines go out of this port before the kernel
+	 * is loaded, and two speeds on one wire is one of them unreadable.
+	 */
 	movw	$COM1+1, %dx ; xorb %al, %al   ; outb %al, %dx	/* IER: no interrupts */
 	movw	$COM1+3, %dx ; movb $0x80, %al ; outb %al, %dx	/* LCR: DLAB=1 */
-	movw	$COM1+0, %dx ; movb $0x03, %al ; outb %al, %dx	/* divisor low = 3 */
+	movw	$COM1+0, %dx ; movb $0x01, %al ; outb %al, %dx	/* divisor low = 1 */
 	movw	$COM1+1, %dx ; xorb %al, %al   ; outb %al, %dx	/* divisor high = 0 */
 	movw	$COM1+3, %dx ; movb $0x03, %al ; outb %al, %dx	/* LCR: 8N1, DLAB=0 */
 	movw	$COM1+2, %dx ; movb $0xC7, %al ; outb %al, %dx	/* FCR: enable+clear FIFO */
@@ -131,20 +176,32 @@ _start:
 serial_puts32:
 	pushl	%eax
 	pushl	%ebx
+	pushl	%ecx
 	pushl	%edx
 1:	movb	(%esi), %bl
 	testb	%bl, %bl
 	jz	2f
+	/*
+	 * Bounded (#551): a transmitter that never empties loses this byte,
+	 * not the boot.  The same number cons.c gives up at, and no memory of
+	 * a stuck port -- there is nowhere to keep one yet, and the hand-off
+	 * says a few hundred bytes.
+	 */
+	movl	$CONS_THRE_SPINS, %ecx
 	movw	$COM1+5, %dx			/* wait THR empty (LSR bit 5) */
 3:	inb	%dx, %al
 	testb	$0x20, %al
-	jz	3b
-	movb	%bl, %al
+	jnz	4f
+	decl	%ecx
+	jnz	3b
+	jmp	5f				/* no room: the byte is dropped */
+4:	movb	%bl, %al
 	movw	$COM1+0, %dx
 	outb	%al, %dx
-	incl	%esi
+5:	incl	%esi
 	jmp	1b
 2:	popl	%edx
+	popl	%ecx
 	popl	%ebx
 	popl	%eax
 	ret
@@ -248,14 +305,20 @@ hang64:
 putc64:
 	pushq	%rdx
 	pushq	%rcx
+	pushq	%r8
 	movb	%al, %cl			/* stash the char */
+	movl	$CONS_THRE_SPINS, %r8d		/* bounded (#551), as serial_puts32 */
 	movw	$COM1+5, %dx			/* wait THR empty (LSR bit 5) */
 1:	inb	%dx, %al
 	testb	$0x20, %al
-	jz	1b
-	movb	%cl, %al
+	jnz	2f
+	decl	%r8d
+	jnz	1b
+	jmp	3f				/* no room: the byte is dropped */
+2:	movb	%cl, %al
 	movw	$COM1+0, %dx
 	outb	%al, %dx
+3:	popq	%r8
 	popq	%rcx
 	popq	%rdx
 	ret

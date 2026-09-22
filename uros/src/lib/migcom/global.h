@@ -100,7 +100,6 @@ extern boolean_t BeDebug;	/* enters in the debug mode */
 extern boolean_t UseMsgRPC;
 extern boolean_t GenSymTab;
 extern boolean_t UseEventLogger;
-extern boolean_t BeAnsiC;
 extern boolean_t UseRPCTrap;
 extern boolean_t TestRPCTrap;
 
@@ -145,7 +144,5 @@ extern string_t ServerFileName;
 
 extern void more_global();
 
-extern char NewCDecl[];
-extern char LintLib[];
 
 #endif	/* _GLOBAL_H */

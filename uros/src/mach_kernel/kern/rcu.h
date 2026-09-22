@@ -187,6 +187,63 @@ urmach_rcu_idle_exit(void)
  * high IPL (it spins with interrupts on).  Rare write paths only. */
 extern void	urmach_synchronize_rcu(void);
 
+/*
+ *	── Deferred reclamation: queue it, do not wait for it (#566) ────────
+ *
+ *	urmach_synchronize_rcu() blocks the writer until every processor has
+ *	reported.  On a machine where a peer is busy in the kernel that is a
+ *	whole clock tick, because a busy processor reports only when it ticks
+ *	-- measured: destroying two hundred tasks while another enumerated PCI
+ *	cost 31 035 741 cycles each against 2 824 when the peers were idle, and
+ *	2 309 with the wait removed altogether.
+ *
+ *	🔑 NO OTHER SYSTEM BLOCKS THE DESTROYER.  Linux's normal path is
+ *	call_rcu() -- queue a callback, return at once, and one grace period
+ *	retires hundreds of them; kfree_rcu() is the sugar for "just free it".
+ *	FreeBSD has epoch_call(), NetBSD pserialize with cross-calls, and XNU
+ *	-- this kernel's own relative -- frees the pmap from a deferred list.
+ *	Only synchronize_rcu() blocks, and Linux's version SLEEPS while it
+ *	does; ours spins, which is the shape that made a trap cost a tick.
+ *
+ *	So this is that primitive.  The caller embeds a head in the object,
+ *	unlinks the object, calls urmach_call_rcu(), and returns.  The callback
+ *	runs later, in thread context, once a grace period that BEGAN AFTER the
+ *	call has ended.
+ *
+ *	⚠️ The object must already be unreachable to new readers when this is
+ *	called -- the grace period counted is the one that starts after, not
+ *	one already running, which is why the stamp below adds two while a
+ *	grace period is in flight and one when none is.
+ */
+struct urmach_rcu_head {
+	struct urmach_rcu_head	*next;
+	void			(*func)(struct urmach_rcu_head *);
+	unsigned int		gp;	/* released once rcu_gp reaches this */
+};
+
+/* Queue `h' to be handed to `f' after a grace period.  Returns at once. */
+extern void	urmach_call_rcu(struct urmach_rcu_head *h,
+				void (*f)(struct urmach_rcu_head *));
+
+/*
+ *	One non-blocking step of the grace-period machine.  From the clock
+ *	tick, in interrupt context: it takes a snapshot or checks one, and
+ *	returns immediately when there is nothing queued.
+ */
+extern void	urmach_rcu_advance(void);
+
+/*
+ *	Run whatever is ready.  THREAD CONTEXT ONLY -- a callback frees memory
+ *	and may take the zone lock.  The idle loop calls it, and so does any
+ *	writer about to block in a grace period, so that a machine which never
+ *	goes idle still retires its queue.
+ */
+extern void	urmach_rcu_drain(void);
+
+/* How many callbacks are waiting and how many have been handed back. */
+extern unsigned int	urmach_rcu_queued;
+extern unsigned int	urmach_rcu_retired;
+
 /* One-time init (counters live in BSS-zeroed cpu_data[], so this is a stub). */
 extern void	urmach_rcu_init(void);
 

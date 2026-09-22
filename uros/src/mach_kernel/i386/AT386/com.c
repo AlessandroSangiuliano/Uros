@@ -288,8 +288,23 @@ int 		cons_is_com1 __attribute__((section(".data"))) = 0;
 						   then com1 is the console */
 char 		com_halt_char = '_' & 0x1f; 	/* CTRL(_) to enter ddb */
 
+/*
+ * 🔑 115200, the same number x86-64's boot.S now programs (#567) -- and this
+ * is NOT where this target's console speed is decided, which is what made the
+ * two look as though they disagreed.
+ *
+ * com_cons_init() below READS the divisor already in the port and sets
+ * cons_ispeed from what it finds.  On this target the UART belongs to whoever
+ * programmed it before the kernel -- firmware, GRUB, or qemu's reset value --
+ * and the kernel adopts that speed rather than imposing one (#207; #497 owns
+ * the question of who owns the port).  ISPEED is the fallback: the speed a
+ * tty is given when there is nothing to adopt.  So the 9600 that stood here
+ * was never the console's speed; it was the speed of a port nobody had
+ * programmed.  What changes is that the number written down in this tree is
+ * now one number and not two.
+ */
 #ifndef	PORTSELECTOR
-#define ISPEED	9600
+#define ISPEED	115200
 #define IFLAGS	(EVENP|ODDP|ECHO|CRMOD)
 #else
 #define ISPEED	4800
@@ -1218,6 +1233,10 @@ comreset(void)
 	outb(MODEM_CTL(COM0_ADDR), iDTR|iRTS|iOUT2);
 }
 
+/* The last byte found no room in its bound (#551); advisory and unlocked,
+ * for panic's sake, like every word cons_putc() keeps on x86-64. */
+static int	com_tx_stuck;
+
 void
 com_putc(
 	char		c)
@@ -1239,8 +1258,39 @@ com_putc(
 	 * UART belongs to userspace; this hook stays only for printf
 	 * during boot before char_server is up and for panic, where
 	 * we need a write that works no matter what.
+	 *
+	 * 🔑 AND A STUCK PORT IS PAID FOR ONCE, NOT ONCE A BYTE (#551).  The
+	 * 1000-poll bound was here first, and x86-64 had none: a transmitter
+	 * that never emptied kept that processor in cons_putc() for ever,
+	 * under printf_lock, at an unprivileged caller's request.  What this
+	 * target's bound missed is the byte AFTER the timeout: with the bound
+	 * alone a dead port turns a 55-byte line into 55 waits of the full
+	 * bound, still under the lock.  So the timeout is remembered, and
+	 * while it stands each byte polls once and is dropped if there is
+	 * still no room; the first poll that finds room clears it.  Same
+	 * shape as x86-64's cons_putc(), where the reasoning is written out.
+	 *
+	 * ⚠️ The asymmetry that stays: the NUMBER.  x86-64 measured its bound
+	 * against a healthy byte on both accelerators and prints the slowest
+	 * byte of every boot beside it; this 1000 was never measured against
+	 * anything, and nothing here reports how close a healthy byte comes.
+	 * i386 runs under KVM by default and on the metal, where a poll is a
+	 * port exit or a bus cycle -- a microsecond either way, so 1000 is a
+	 * millisecond, some ten byte-times at 115200 -- but that is reasoning
+	 * and not a measurement, and it is said so.
 	 */
-	for (i=0; (!(inb(LINE_STAT(COM0_ADDR)) & iTHRE)) && (i < 1000); i++);
+	if (!(inb(LINE_STAT(COM0_ADDR)) & iTHRE)) {
+		if (com_tx_stuck)
+			return;
+		for (i = 0; i < 1000; i++)
+			if (inb(LINE_STAT(COM0_ADDR)) & iTHRE)
+				break;
+		if (i == 1000) {
+			com_tx_stuck = 1;
+			return;
+		}
+	}
+	com_tx_stuck = 0;
 	outb(TXRX(COM0_ADDR),  c);
 }
 

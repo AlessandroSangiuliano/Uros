@@ -21,6 +21,8 @@
 #include <cpu/ipi.h>
 #include <cpu/regs.h>		/* #461: cpu_pause while the panic prints */
 #include <ddb/cons.h>
+#include <ddb/fbcons.h>
+#include <ddb/cons_cost.h>	/* #567: one line about the ring, at the halt */
 #include <cpu/smp.h>
 #include <sync/atomic.h>	/* #461: one stop broadcast, not four */
 #include <trap/trap.h>		/* x86_64_backtrace on the panic path */
@@ -100,6 +102,30 @@ static volatile uint64_t halt_broadcast;
 void
 halt_cpu(void)
 {
+	/*
+	 * 🔴 THE LAST BYTES GO OUT BEFORE THE PROCESSOR STOPS (#567).
+	 *
+	 * This is the end of every run on this target -- a panic, a self-test
+	 * that halts the machine because the boot WAS the test, an operator's
+	 * halt -- and it is the last moment anything can be handed to the
+	 * port.  A line that is in the ring and not on the wire when the `hlt'
+	 * runs is a line the harness reading this boot will never see, and on
+	 * this target the port is the only output there is (#497).
+	 *
+	 * First, and not after the backtrace: everything printed from here on
+	 * -- the backtrace included -- then reaches the port in this thread,
+	 * which is the only thread there will be.
+	 *
+	 * And one line before that, about where this boot's console bytes were
+	 * actually handed over.  It says itself once per boot, whether it is
+	 * reached from here or from a machine that went quiet first; it is
+	 * queued like any other line and the disarm below is what puts it on
+	 * the wire.
+	 */
+	cons_ring_report();
+	cons_async_set(0);
+	fbcons_flush();		/* #568: and out of the write-combining buffers */
+
 	if (panicstr != (const char *) 0) {
 		uint64_t spins;
 
@@ -171,6 +197,15 @@ halt_all_cpus(boolean_t reboot)
 		      "machine yet (#453)");
 
 	/*
+	 * Before the others are stopped (#567): a processor that is stopped
+	 * while the console still buffers is a processor that will not come
+	 * back to drain it, and this one ends in halt_cpu() which disarms the
+	 * ring anyway -- doing it here means the bytes leave while there is
+	 * still a whole machine to do it with.
+	 */
+	cons_async_set(0);
+
+	/*
 	 * The others first, then this one: stopping this processor first would
 	 * leave the rest running with nobody to stop them.
 	 *
@@ -203,11 +238,12 @@ halt_all_cpus(boolean_t reboot)
 /*
  * A character to the console (#453).
  *
- * The machine-independent printf() reaches the screen through this one name,
+ * The machine-independent printf() reaches the console through this one name,
  * so it is the whole of what kern/printf.c needs from a machine: everything
  * above it -- format parsing, the log buffer, the %-conversions -- is shared,
- * and everything below is x86_64/ddb/cons.c, which already knows about the
- * serial port and the framebuffer.
+ * and everything below is x86_64/ddb/cons.c, which knows the serial port --
+ * and only that.  ⚠️ This claimed a framebuffer as well, and this target has
+ * none; the line above said "the screen" for the same reason (#497).
  *
  * ⚠️ A thin forwarder and not a rename.  cons_putc() is this target's own
  * interface and is called directly by early boot, before there is a kernel
@@ -219,6 +255,31 @@ void
 cnputc(char c)
 {
 	cons_putc(c);
+}
+
+/*
+ * And the three that go with it once the wire is written outside the caller's
+ * critical section (#567).  Thin forwarders for the same reason as cnputc:
+ * cons_async_set()/cons_flush()/cons_drain() are this target's own interface
+ * and are called directly by code that runs before there is a kernel to have a
+ * printf() in.
+ */
+void
+cnasync(boolean_t on)
+{
+	cons_async_set(on ? 1 : 0);
+}
+
+void
+cnflush(void)
+{
+	cons_flush();
+}
+
+void
+cndrain(void)
+{
+	cons_drain();
 }
 
 /*

@@ -986,6 +986,18 @@ printf_init(void)
 	 */
 	simple_lock_init(&printf_lock, ETAP_MISC_PRINTF);
 	klog_init();
+
+	/*
+	 * And from here the console may stop writing the wire in the caller's
+	 * thread (#567).  Here and not earlier because this is the moment
+	 * printf() becomes the writer: what runs before it prints through the
+	 * machine's own early path, which has no ring behind it and must not
+	 * -- a byte queued before anybody exists to drain it is a byte that
+	 * waits for the first line somebody prints.
+	 *
+	 * A target whose console is synchronous answers this with nothing.
+	 */
+	cnasync(TRUE);
 }
 
 /* derived from boot_gets */
@@ -1050,6 +1062,65 @@ printf(const char *fmt, ...)
 					 * faulting context or a stopped peer CPU,
 					 * which deadlocks the debugger's console. */
 
+	/*
+	 * ── The window: one line, at the device's pace (#551) ────────────
+	 *
+	 * From here to enable_preemption() this processor is not rescheduled,
+	 * and from simple_lock() to simple_unlock() -- on a target whose spin
+	 * lock masks interrupts for the hold, which x86-64 does (#528) -- it
+	 * takes no interrupt either.  The device wait is inside that: on
+	 * x86-64 cnputc() is a polled UART, and a byte costs what the DEVICE
+	 * costs -- which is three different numbers, and calling any of them
+	 * "the wire" would be wrong twice over (#567).
+	 *
+	 * Measured rather than assumed, and printed on every boot by
+	 * cons_cost_report(): 83 us a byte under KVM, where there is no wire
+	 * at all and the cost is an exit to the host plus a chardev write;
+	 * 6.3 us under TCG, where it is a helper call in the same process.
+	 * The wire proper is the one nobody has measured: 8N1 at the 115200
+	 * baud boot.S programs is ten bits a byte, 87 us -- the same order as
+	 * KVM's exit, where at the 38400 that stood there before it was three
+	 * times slower than the emulator (#567).  A line is milliseconds
+	 * whichever of the three it is.
+	 *
+	 * 🔴 AND THE DEVICE IS NOT INSIDE THE WINDOW ANY MORE (#567) -- on a
+	 * target whose console buffers, which x86-64's now does.  What stood
+	 * here said the wait was inside on purpose, and the reason given was
+	 * what the lock is FOR: it protects no data structure, it makes a line
+	 * a line on a wire that every processor shares, so rendering under the
+	 * lock and emitting outside it would put the interleaving back -- two
+	 * writers' bytes mixed on the wire, the shape #544 chased through
+	 * thirteen red runs.
+	 *
+	 * That was right about the lock and wrong about the conclusion.  A
+	 * RING answers the objection instead of arguing with it: bytes enter
+	 * it in the order the lock granted and leave it in ring order, so a
+	 * line still arrives whole whichever processor hands it over.  The
+	 * hold is now a memory write per byte, and cnflush() below writes the
+	 * port with preemption allowed and interrupts as the caller had them.
+	 *
+	 * ⚠️ It does not make a byte cheaper, and nothing here should be read
+	 * as saying so: under an accelerator the cost IS the `outb' and
+	 * somebody still pays it.  What changed is who, and when.
+	 *
+	 * ⚠️ On a target that has no ring -- i386 -- every word above the 🔴
+	 * still describes what happens, and the device time is still inside
+	 * the hold.
+	 *
+	 * What #551 changed is the window's LENGTH.  It was unbounded: a
+	 * transmitter that never emptied kept this processor here for ever,
+	 * and an unprivileged trap could ask for it.  cons_putc() now gives a
+	 * byte a bounded wait and a stuck port one poll a byte, so a hold is
+	 * at most one line at the device's pace on a healthy port and about one
+	 * poll a byte on a dead one.  The longest line ring 3 can choose is
+	 * MACH_PRINT_MAX-1 bytes through mach_print(), and one line or
+	 * CONSOLE_CHUNK bytes through the console device (consolewrite).
+	 *
+	 * ⚠️ i386 is the same shape with a different mask: its spin lock does
+	 * not touch the interrupt flag, and MACH_RT being 0 there means the
+	 * preemption calls are empty (#486) -- the window is one line with
+	 * interrupts as the caller had them, which for a trap is on.
+	 */
 	disable_preemption();
 	va_start(listp, fmt);
 #if	MP_PRINTF
@@ -1081,6 +1152,28 @@ printf(const char *fmt, ...)
       _doprnt(fmt, &listp, klog_cnputc, 16);
 	va_end(listp);
 	enable_preemption();
+
+	/*
+	 * And NOW the wire, outside everything above (#567).
+	 *
+	 * On a target whose console buffers, the loop just run put the line
+	 * into a ring and the device has not been touched yet; this hands it
+	 * over, with preemption allowed and interrupts as the caller had them.
+	 * The thread that printed still pays for the wire -- somebody must --
+	 * but no longer inside a window where it cannot be rescheduled.
+	 *
+	 * ⚠️ AFTER enable_preemption() and not between the unlock and it: the
+	 * point is the window, and leaving the device inside the outer half of
+	 * it would keep most of what this removes.
+	 *
+	 * ⚠️ And it is the whole ring that goes, not this line: another
+	 * processor may have left bytes behind because it could not get the
+	 * port.  That is what keeps the ring short, and it is why a line's
+	 * order on the wire is the ring's order and not the caller's.
+	 *
+	 * A target whose console is synchronous answers this with nothing.
+	 */
+	cnflush();
 }
 
 static char *copybyte_str;

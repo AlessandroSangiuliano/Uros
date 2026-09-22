@@ -70,33 +70,25 @@ uros_host_state() {
 	        2>/dev/null || echo "")
 	_drv=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver \
 	       2>/dev/null || echo "?")
+
+	# 🔑 The two facts that say what `powersave' MEANS on this machine, both
+	# read from it rather than looked up by driver name -- see
+	# uros_clock_policy, and #564 for what the lookup cost.
+	_avail=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors \
+	         2>/dev/null || echo "")
+	# ⚠️ A SAMPLE AND NOT A CONCLUSION.  Under a driver that takes the policy
+	# itself the governor's name has stopped being the whole of it: two runs
+	# at `powersave' with different preferences are two conditions, and
+	# nothing else on the line would tell them apart.  What it does to this
+	# machine's clock is unmeasured, and the line does not say that it does.
+	_epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference \
+	       2>/dev/null || echo "")
 	if [ -n "$_capk" ]; then
 		_cap="$(( _capk / 1000 ))MHz"
 	else
 		_cap="?"
 	fi
 
-	# 🔴 THE CEILING IS NOT THE CLOCK, and the governor decides which.
-	#
-	# With `acpi-cpufreq' the `powersave' governor is STATIC: it pins the core
-	# to scaling_min_freq and the ceiling above it means nothing.  Raising
-	# scaling_max_freq from 1400 to 3000 while leaving that governor in place
-	# changes the recorded ceiling and not one megahertz of the machine.
-	#
-	# That cost a campaign: eleven runs were taken as the "high clock" arm with
-	#
-	#     governor=powersave cpu=1397MHz cap=3000MHz
-	#
-	# and every fact needed to notice was on that line.  The block reported and
-	# did not conclude, so the ceiling got read and the governor did not.  A
-	# passing run took 454-463s in both arms -- identical, which is what
-	# settled it, because the same work at twice the clock is not the same
-	# number of seconds.
-	#
-	# ⚠️ Driver-dependent on purpose: under `intel_pstate' the very same name
-	# means a DYNAMIC governor that does ramp.  Encoded rather than assumed,
-	# because being quietly wrong here is what this line exists to stop.
-	#
 	# ⚠️ AND BOOST GOES OVER THE POLICY CEILING.  Measured here, with
 	# scaling_max_freq at 3000000 and boost enabled, the cores ran at
 	# 3918-3992 MHz -- above the ceiling that had just been set.  So the
@@ -113,17 +105,9 @@ uros_host_state() {
 		_top="$(( _hwmaxk / 1000 ))MHz (boost, over the ${_cap} ceiling)"
 	fi
 
-	case "$_drv:$_gov" in
-	intel_pstate:*|*:performance|*:ondemand|*:conservative|*:schedutil)
-		_eff="$_top" ;;
-	*:powersave)
-		if [ -n "$_mink" ]; then
-			_eff="$(( _mink / 1000 ))MHz (governor pins it to the floor)"
-		else
-			_eff="?"
-		fi ;;
-	*)	_eff="$_cap (governor $_gov: unknown policy)" ;;
-	esac
+	# The one half of this line that can be wrong while every sample above
+	# is right, kept in a function of its own for that reason.
+	uros_clock_policy
 	_ac="?"
 	for _p in /sys/class/power_supply/A*/online; do
 		[ -r "$_p" ] && _ac=$(cat "$_p") && break
@@ -133,9 +117,96 @@ uros_host_state() {
 	0)	_ac="battery" ;;
 	*)	_ac="AC?" ;;
 	esac
-	echo "governor=$_gov cpu=${_mhz}MHz cap=$_cap effective=$_eff power=$_ac at=$(date +%H:%M:%S)"
+	echo "governor=$_gov${_epp:+ epp=$_epp} cpu=${_mhz}MHz cap=$_cap" \
+	     "effective=$_eff power=$_ac at=$(date +%H:%M:%S)"
 }
 
+# uros_clock_policy — WHICH of the two clocks this machine will actually run
+# at, decided from facts already sampled into _drv _gov _avail _mink _cap _top
+# _mhz.  Sets _eff.
+#
+# 🔑 Kept apart from the sampling because it is the one half of that line that
+# can be wrong while every sample in it is right — #564 printed cpu=3703MHz and
+# effective=1108MHz beside each other for a day — and because a decision whose
+# inputs are variables can be driven over machines this one is not, which is
+# what --self-test at the foot of this file does.
+#
+# 🔴 THE CEILING IS NOT THE CLOCK, and the governor decides which.
+#
+# With `acpi-cpufreq' the `powersave' governor is STATIC: it pins the core to
+# scaling_min_freq and the ceiling above it means nothing.  Raising
+# scaling_max_freq from 1400 to 3000 while leaving that governor in place
+# changes the recorded ceiling and not one megahertz of the machine.
+#
+# That cost a campaign: eleven runs were taken as the "high clock" arm with
+#
+#     governor=powersave cpu=1397MHz cap=3000MHz
+#
+# and every fact needed to notice was on that line.  The block reported and did
+# not conclude, so the ceiling got read and the governor did not.  A passing run
+# took 454-463s in both arms -- identical, which is what settled it, because the
+# same work at twice the clock is not the same number of seconds.
+#
+# 🔴🔴 AND THE SAME WORD NAMES THE OPPOSITE POLICY ON AN ACTIVE DRIVER.  Under
+# `intel_pstate' or `amd-pstate-epp' the word `powersave' is not a governor at
+# all: the driver takes the policy itself, scales the WHOLE range, and the name
+# means an energy bias.  One name on the line, two opposite machines behind it.
+#
+# ⚠️ WHICH OF THE TWO IS A QUESTION FOR THE MACHINE.  It used to be a list of
+# driver names kept here, and #564 is what the list cost: `intel_pstate' was on
+# it, `amd-pstate-epp' was not, so every measurement taken on this laptop
+# carried effective=1108MHz beside a processor sampled at 3.9 GHz — a false
+# clock on the one line that exists so that two runs may be compared at all.
+#
+# The machine answers in scaling_available_governors.  A driver that takes the
+# policy has no governors to list, so the kernel prints a FIXED string there;
+# one the core drives lists the governors it has registered instead, which is a
+# longer list.  Measured here, byte for byte under
+# amd-pstate-epp: `performance powersave' and the newline, nothing else.  So
+# the test is that literal rather than a driver name, and a driver nobody here
+# has heard of is read correctly the day it turns up.
+uros_clock_policy() {
+	case "$_avail" in
+	"performance powersave")	_who=driver ;;
+	"")				_who=unknown ;;
+	*)				_who=core ;;
+	esac
+
+	case "$_who:$_gov" in
+	driver:performance)
+		_eff="$_top" ;;
+	driver:*)
+		_eff="$_top (the driver scales the range, $_gov is its bias)" ;;
+	core:performance|core:ondemand|core:conservative|core:schedutil)
+		_eff="$_top" ;;
+	core:powersave)
+		if [ -z "$_mink" ]; then
+			_eff="?"
+		else
+			_floor=$(( _mink / 1000 ))
+			# 🔴 A CLAIM THE FIELD BESIDE IT CAN REFUTE.  "pins
+			# it to the floor" says the core CANNOT be above the
+			# floor, and cpu= says where it is.  #564 printed the
+			# two contradicting each other on every line for a
+			# day and nothing read them together, so the reading
+			# is no longer asserted over a processor standing
+			# above it.  The list of driver names has gone; this
+			# is what catches whatever takes its place.
+			#
+			# 10% is uros_clock_moved's threshold and for its
+			# reason: two real states are far apart (1108 against
+			# 3703 here) and two samples of one state are not.
+			if [ "${_mhz:-?}" -gt 0 ] 2>/dev/null &&
+			   [ $(( _mhz * 100 )) -gt $(( _floor * 110 )) ]; then
+				_eff="unsettled: floor ${_floor}MHz, processor at ${_mhz}MHz (#564)"
+			else
+				_eff="${_floor}MHz (governor pins it to the floor)"
+			fi
+		fi ;;
+	*)
+		_eff="$_cap (driver $_drv, governor $_gov: unknown policy)" ;;
+	esac
+}
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host
 # state in UROS_HOST_AT_START.
 uros_conditions_open() {
@@ -162,6 +233,14 @@ uros_conditions_block() {
 	for _f in "$@"; do
 		[ -n "$_f" ] && echo "  $_f"
 	done
+	# 🔴 WHICH MACHINE, because a baseline belongs to one and no saved log in
+	# this project could say which.  #564 asks whether the other AMD laptop's
+	# recorded numbers carry the same false clock line, and every log here can
+	# be read for its governor, its ceiling and its accelerator while not one
+	# of them names the host that produced it -- so that question has to be
+	# answered by remembering instead of by grepping, which is the failure
+	# #516 was opened about, one field along.
+	echo "  host:         $(hostname -s 2>/dev/null || echo '?')"
 	echo "  host start:   ${UROS_HOST_AT_START:-not sampled}"
 	# ⚠️ A closing sample only where the harness is still alive to take one.
 	# run-qemu.sh ends in `exec qemu', deliberately -- without it that shell
@@ -189,3 +268,84 @@ uros_clock_moved() {
 	[ "$_d" -lt 0 ] && _d=$(( -_d ))
 	[ $(( _d * 100 / _a )) -ge 10 ]
 }
+
+# ── --self-test: every reading, driven over machines this one is not ──
+#
+# 🔑 Wired into the build (uros/CMakeLists.txt) instead of left to be typed,
+# for #549's reason: three checkers were written to make defects impossible
+# and nothing ran any of them.  It boots nothing, touches no hardware and
+# costs milliseconds -- it sets the same variables uros_host_state samples
+# and reads back the one field they decide.
+#
+# 🔴 THE SPECIMENS ARE SAMPLED, not invented to please the classifier.  Row 2
+# is this laptop, byte for byte out of sysfs on the day #564 was opened; row 4
+# is pavillion, whose eleven runs were taken as the high-clock arm under a
+# governor that was pinning them (#544).  A table written to match the code
+# tests the code against itself.
+#
+# 🔑 Row 4 is also the one that settles who is affected, and it settles it by
+# MEASUREMENT rather than by naming a driver: on that machine six busy loops
+# left the clock at 1397 MHz, which is a thing an active driver's `powersave'
+# cannot do.  So the reading it gets here is the reading it always got, and
+# nothing recorded there was ever labelled by the false line.
+#
+# ⚠️ Guarded on $0, because this file is SOURCED: without it run-qemu.sh's own
+# first argument would be read as this one's.
+case "$0" in
+*run-conditions.sh)
+	if [ "${1:-}" != --self-test ]; then
+		echo "run-conditions.sh is sourced, not run: see the head of it" >&2
+		echo "usage: sh run-conditions.sh --self-test" >&2
+		exit 2
+	fi
+
+	_fails=0
+	_total=0
+	echo "run-conditions --self-test (#564)"
+
+	# name|_drv|_gov|_avail|_mink|_cap|_top|_mhz|the effective= it must read
+	while IFS='|' read -r _name _drv _gov _avail _mink _cap _top _mhz _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		_eff=
+		uros_clock_policy
+		if [ "$_eff" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_eff>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+# an ACTIVE driver: `powersave' is the whole range with a bias
+intel_pstate, powersave|intel_pstate|powersave|performance powersave|400000|3900MHz|3900MHz|1200|3900MHz (the driver scales the range, powersave is its bias)
+amd-pstate-epp, powersave (victus, #564)|amd-pstate-epp|powersave|performance powersave|1108930|4280MHz|4280MHz|3703|4280MHz (the driver scales the range, powersave is its bias)
+intel_pstate, performance|intel_pstate|performance|performance powersave|400000|3900MHz|3900MHz|3900|3900MHz
+# a PASSIVE one: the core runs a governor and `powersave' is static
+pavillion, powersave pinned (#544)|acpi-cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|1397|1400MHz (governor pins it to the floor)
+acpi-cpufreq, ondemand|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|2100|3992MHz (boost, over the 3000MHz ceiling)
+amd-pstate passive, powersave|amd-pstate|powersave|conservative ondemand userspace powersave performance schedutil |1108930|4280MHz|4280MHz|1108|1108MHz (governor pins it to the floor)
+# 🔑 the row that refutes repairing this by name: intel_pstate in passive mode
+# calls itself intel_cpufreq, and there `powersave' really does pin
+intel_cpufreq, powersave|intel_cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |800000|4000MHz|4000MHz|798|800MHz (governor pins it to the floor)
+# the literal and not a prefix of it
+a list that starts with those two words|acpi-cpufreq|powersave|performance powersave schedutil |1400000|3000MHz|3000MHz|1397|1400MHz (governor pins it to the floor)
+# the floor is a claim, and the field beside it can refute the claim
+the processor stands above its own floor|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil |1108930|4280MHz|4280MHz|3703|unsettled: floor 1108MHz, processor at 3703MHz (#564)
+# and what is not known is said instead of guessed
+powersave with no floor to read|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil ||3000MHz|3000MHz|1400|?
+a governor with no policy of its own|acpi-cpufreq|userspace|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3000MHz|1400|3000MHz (driver acpi-cpufreq, governor userspace: unknown policy)
+a machine that will not say|?|?|||?|?|?|? (driver ?, governor ?: unknown policy)
+EOF
+
+	if [ "$_fails" -gt 0 ]; then
+		echo "run-conditions --self-test: $_fails of $_total read otherwise"
+		exit 1
+	fi
+	echo "run-conditions --self-test: all $_total read as sampled"
+	exit 0
+	;;
+esac

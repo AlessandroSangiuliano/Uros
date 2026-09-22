@@ -62,9 +62,9 @@ mach_subsystem_join(rpc_subsystem_t subsys_1,	/* First input subsystem */
 
 	/* Make sure the two routine number ranges do not overlap:
 	 */
-	if (subsys_1->start <= subsys_2->start && subsys_1->end > subsys_2->start
+	if ((subsys_1->start <= subsys_2->start && subsys_1->end > subsys_2->start)
 					||
-	    subsys_2->start <= subsys_1->start && subsys_2->end > subsys_1->start)
+	    (subsys_2->start <= subsys_1->start && subsys_2->end > subsys_1->start))
 		return NULL;
 
 	/* Arrange that subsys_1 is the subsystem with the lower numbered

@@ -429,14 +429,39 @@ uint64_t acpi_lapic_base(void)
 	return lapic_base;
 }
 
+/*
+ * #563: describe a machine whose firmware lists no I/O APIC, while the rest of
+ * the table stays exactly as it was read.
+ *
+ * 🔑 ONE PLACE, because that is what makes the arm honest.  Faking the refusal
+ * at each of the three self-tests would prove those three lines print what they
+ * were written to print; withholding the entries HERE makes the whole kernel
+ * see the board the firmware describes, and the tests reach their own
+ * conclusions about it -- including ioapic_init(), whose single failure is this
+ * very lookup coming back empty.
+ *
+ * ⚠️ The processor census is untouched, and that is the point: it is the other
+ * half of the same table, and the discriminator those tests use.  qemu offers
+ * no machine that gives one without the other, so without this the branch would
+ * ship unexercised.
+ */
 unsigned acpi_ioapic_count(void)
 {
+#if	ABLATE_563_NO_IOAPIC
+	return 0;
+#else
 	return nioapics;
+#endif
 }
 
 const struct acpi_ioapic *acpi_ioapic(unsigned index)
 {
+#if	ABLATE_563_NO_IOAPIC
+	(void) index;
+	return 0;
+#else
 	return index < nioapics ? &ioapics[index] : 0;
+#endif
 }
 
 unsigned acpi_override_count(void)

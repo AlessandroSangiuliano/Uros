@@ -692,17 +692,47 @@ thread_state_entry_test(void)
 	bad = 0;
 
 	target = another_processor();
+#if	ABLATE_563_ALONE
+	/*
+	 * #563: pretend this processor is the only one running, so the line
+	 * that declines the question can be walked on a machine where it
+	 * would otherwise be unreachable -- there is no boot flag that caps
+	 * the processor count on this target, and an application processor
+	 * cannot be made to fail to arrive on demand.  A branch nobody has
+	 * executed is not support.
+	 */
+	target = PROCESSOR_NULL;
+#endif
+	/*
+	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
+	 * means either the machine has one and the flag was passed anyway, or
+	 * the others were woken and never arrived.  The second is a real defect
+	 * and it is not this test's to report: startup.c already prints
+	 * "%u of %u processors reached the scheduler" in the word the harness
+	 * greps for.  Saying WRONG here a second time adds a symptom, not a
+	 * finding, and buries the one verdict that names the cause.
+	 */
 	if (target == PROCESSOR_NULL) {
-		printf("state_test: WRONG — no processor other than this one is "
-		       "running, so the target would have to share this one and "
-		       "nothing was measured (#408)\n");
+		printf("state_test: NOT ASKED — alone, no processor other than "
+		       "this one is running, so the target would have to share "
+		       "it (#408)\n");
 		return;
 	}
 
+	/*
+	 * 🔑 NOT ASKED, not WRONG (#563).  An uncalibrated TSC is a property of
+	 * the machine this booted on -- qemu offers no invariant counter, and
+	 * tsc_calibrate() can lose its two-run agreement to host jitter -- so
+	 * there is no ruler here, and a test with no ruler has not failed, it
+	 * has not been run.  The sentence below already said as much while
+	 * printing the word the harness greps for.
+	 */
 	limit = tsc_hz();
 	if (limit == 0) {
-		printf("state_test: WRONG — no calibrated TSC, so the waits "
-		       "below cannot be bounded and nothing is claimed (#408)\n");
+		printf("state_test: NOT ASKED — no calibrated TSC on this "
+		       "machine, so the waits below cannot be bounded "
+		       "(#408, #318)\n");
 		return;
 	}
 

@@ -1220,9 +1220,9 @@ kmem_io_sglist_object_alloc(
  */
 
 kern_return_t
-kmem_io_object_trunc(copy, new_size)
-     vm_map_copy_t	copy;		/* IN/OUT copy object */
-     register vm_size_t new_size;	/* IN new object size */
+kmem_io_object_trunc(
+	vm_map_copy_t		copy,		/* IN/OUT copy object */
+	register vm_size_t	new_size)	/* IN new object size */
 {
 	register vm_size_t	offset, old_size;
 

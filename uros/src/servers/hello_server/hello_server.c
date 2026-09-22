@@ -69,19 +69,6 @@ hello_sigusr1(int s)
     printf("(hello_server): handler fired for signo=%d\n", s);
 }
 
-/*
- * Phase 6a smoke (#256): the pthread worker writes its argument
- * back via a shared "answer" slot, prints a line, and returns.
- */
-static volatile int hello_pthread_answer;
-static void *
-hello_pthread_worker(void *arg)
-{
-    int v = (int)(uintptr_t)arg;
-    printf("(hello_server)[pthread]: hello from worker, arg=%d\n", v);
-    hello_pthread_answer = v + 100;
-    return (void *)(uintptr_t)(v + 100);
-}
 
 /*
  * Phase 3 (#262): end-to-end POSIX file I/O smoke.  Exercises the new
@@ -622,31 +609,20 @@ main(int argc, char **argv)
         }
 
         /*
-         * Phase 6a (#256): pthread infrastructure (set_thread_area +
-         * clone + futex) landed but pthread_create runtime hangs in
-         * the post-clone setup — Phase 6b will dig into the clone/
-         * futex race once we have a proper kernel-side "activate LDT"
-         * primitive (today we yield to force a context switch, which
-         * works for the main thread but not yet for newly-created
-         * Mach threads coming in from thread_create_running).
+         * 🔴 THE #256 PTHREAD SMOKE IS GONE, AND ITS REASON WITH IT (#569).
+         *
+         * A worker and a pthread_create/join around it lived here behind
+         * `#ifdef UROS_PTHREAD_SMOKE', which nothing defines, under a comment
+         * saying pthread_create "hangs in the post-clone setup" and that a
+         * later phase would dig into it.  That was true when it was written
+         * and has not been for a long time: pthread_test runs in the bundle
+         * and reports 32 of 32 on both targets, which is a far better answer
+         * to the same question than two printf in a server.
+         *
+         * So what stood here was a disabled test kept alive by a comment
+         * describing a world that no longer exists -- which is worse than no
+         * test, because a reader finds it and believes the explanation.
          */
-#ifdef UROS_PTHREAD_SMOKE
-        {
-            pthread_t worker_tid;
-            int pr = pthread_create(&worker_tid, NULL,
-                                    hello_pthread_worker,
-                                    (void *)(uintptr_t)42);
-            if (pr != 0) {
-                printf("(hello_server): pthread_create failed: %d\n", pr);
-            } else {
-                printf("(hello_server): pthread_create OK\n");
-                void *ret = NULL;
-                int jr = pthread_join(worker_tid, &ret);
-                printf("(hello_server): pthread_join rc=%d ret=%d answer=%d\n",
-                       jr, (int)(uintptr_t)ret, hello_pthread_answer);
-            }
-        }
-#endif
 
         if (sr != 0) {
             printf("(hello_server): __uros_spawn(/hello_exec) failed: %d\n", sr);

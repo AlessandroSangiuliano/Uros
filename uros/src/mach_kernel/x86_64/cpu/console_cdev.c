@@ -25,8 +25,9 @@
  * ⚠️ It moves real bytes to the real console, which is the line conf.c draws:
  * "inventing a stub console here would be a device that reports success and
  * moves no bytes".  cnputc() is the same entry the kernel's own printf uses,
- * and below it x86_64/ddb/cons.c already knows the serial port and the
- * framebuffer.  Nothing here touches hardware, claims an interrupt, or owns a
+ * and below it x86_64/ddb/cons.c knows the serial port -- and only that, the
+ * framebuffer this used to name being one no code on this target touches
+ * (#497).  Nothing here touches hardware, claims an interrupt, or owns a
  * resource a user-space driver will want.
  *
  * ⚠️ WRITE-ONLY, and the read handler must be NO_READ rather than NULL_READ.
@@ -47,6 +48,9 @@
 extern void cnputc(char);
 
 decl_simple_lock_data(extern, printf_lock)
+
+/* The most a hold may carry when the caller's bytes have no newline (#551). */
+#define CONSOLE_CHUNK	256
 
 io_return_t
 consoleopen(dev_t dev, dev_mode_t flag, io_req_t ior)
@@ -77,15 +81,45 @@ consolewrite(dev_t dev, io_req_t ior)
 	n = ior->io_count;
 
 	/*
-	 * The whole buffer under the lock the kernel's own printf takes, so a
-	 * server's line and a kernel line cannot interleave character by
-	 * character on the wire.  cnputc is polled and never blocks, so this
-	 * section ends without a voluntary context switch.
+	 * One LINE under the lock the kernel's own printf takes, not the whole
+	 * buffer (#551).
+	 *
+	 * The lock is what keeps a server's line and a kernel line from
+	 * interleaving byte by byte on the wire, and a line is the unit that
+	 * needs it.  The whole buffer used to be under it, and the buffer's
+	 * length is the CALLER's choice: on this target the hold masks
+	 * interrupts (#528) and a byte costs what the DEVICE costs -- 83 us
+	 * under KVM, measured, and cons_cost_report() prints it every boot
+	 * (#567) -- so a 4 KB write was a third of a second of one processor
+	 * with interrupts off, sized from userland.  Now a hold is one line,
+	 * or CONSOLE_CHUNK bytes of a line that has no newline in it, and
+	 * what a writer chooses is how many
+	 * such holds it takes in a row, between any two of which the
+	 * scheduler may run somebody else.  cnputc is polled and bounded
+	 * (#551), so a hold ends without a voluntary context switch and
+	 * without waiting on a transmitter that will not empty.
 	 */
-	simple_lock(&printf_lock);
-	while (n--)
-		cnputc(*p++);
-	simple_unlock(&printf_lock);
+	while (n > 0) {
+		unsigned int k;
+
+		for (k = 0; k < n && k < CONSOLE_CHUNK; k++)
+			if (p[k] == '\n') {
+				k++;
+				break;
+			}
+		n -= k;
+		simple_lock(&printf_lock);
+		while (k--)
+			cnputc(*p++);
+		simple_unlock(&printf_lock);
+
+		/*
+		 * And the wire outside the hold, like printf() (#567).  Per
+		 * chunk and not once at the end: a writer that hands over 4 KB
+		 * should not build 4 KB of ring before any of it moves.
+		 */
+		cnflush();
+	}
 
 	ior->io_residual = 0;
 	return D_SUCCESS;

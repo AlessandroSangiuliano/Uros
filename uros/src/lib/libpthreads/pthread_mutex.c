@@ -167,7 +167,8 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
 		int res;
-		if (res = pthread_mutex_init(mutex, NULL))
+		res = pthread_mutex_init(mutex, NULL);
+		if (res != 0)
 			return (res);
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
@@ -266,7 +267,8 @@ pthread_mutex_trylock(pthread_mutex_t *mutex)
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
 		int res;
-		if (res = pthread_mutex_init(mutex, NULL))
+		res = pthread_mutex_init(mutex, NULL);
+		if (res != 0)
 			return (res);
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
@@ -310,7 +312,8 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
 		int res;
-		if (res = pthread_mutex_init(mutex, NULL))
+		res = pthread_mutex_init(mutex, NULL);
+		if (res != 0)
 			return (res);
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
@@ -400,7 +403,8 @@ pthread_mutex_unlock(pthread_mutex_t *mutex)
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
 		int res;
-		if (res = pthread_mutex_init(mutex, NULL))
+		res = pthread_mutex_init(mutex, NULL);
+		if (res != 0)
 			return (res);
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)

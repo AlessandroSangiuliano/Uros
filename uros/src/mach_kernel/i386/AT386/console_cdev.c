@@ -69,6 +69,34 @@ cnputc(char c)
 	fbcons_putc(c);
 }
 
+/*
+ * Nothing buffered, so nothing to arm, flush or drain (#567).
+ *
+ * This target's console is synchronous: com_putc() waits for the transmitter
+ * and hands the byte over in the caller's thread, which is what x86-64 stopped
+ * doing.  It is not an oversight that the same is not done here.  Since #207
+ * the UART belongs to userspace on this target and the kernel keeps only the
+ * writer of last resort -- for printf before char_server is up, and for panic
+ * -- so a ring here would buffer the output of exactly the moments that must
+ * not be buffered.  What this target's console should become is #212's
+ * question, and who owns the port is #497's.
+ */
+void
+cnasync(boolean_t on)
+{
+	(void) on;
+}
+
+void
+cnflush(void)
+{
+}
+
+void
+cndrain(void)
+{
+}
+
 void
 cninit(void)
 {
@@ -113,6 +141,9 @@ consoleclose(dev_t dev)
 	(void)dev;
 }
 
+/* The most a hold may carry when the caller's bytes have no newline (#551). */
+#define CONSOLE_CHUNK	256
+
 io_return_t
 consolewrite(dev_t dev, io_req_t ior)
 {
@@ -127,15 +158,31 @@ consolewrite(dev_t dev, io_req_t ior)
 	n = ior->io_count;
 
 	/*
-	 * Serialize the whole buffer against kernel printf and any other
-	 * console writer (shared printf_lock) so SMP writers don't interleave
-	 * byte-by-byte on the UART.  cnputc -> com_putc is polled and never
-	 * blocks, so the section completes without a voluntary context switch.
+	 * One LINE under the lock, not the whole buffer (#551): the lock is
+	 * what keeps SMP writers from interleaving byte by byte on the UART,
+	 * and a line is the unit that needs it.  The buffer's length is the
+	 * caller's, and at the device's pace -- tens of microseconds a byte,
+	 * measured on x86-64 (#567), more on a struggling port -- a hold
+	 * sized by userland was a hold of any length.  A hold is now one line
+	 * or CONSOLE_CHUNK bytes of a line with no newline in it; between two
+	 * of them the scheduler may run somebody else.  cnputc -> com_putc is
+	 * polled and bounded, so a hold ends without a voluntary context
+	 * switch.  Same shape as x86-64's consolewrite().
 	 */
-	simple_lock(&printf_lock);
-	while (n--)
-		cnputc(*p++);
-	simple_unlock(&printf_lock);
+	while (n > 0) {
+		unsigned int k;
+
+		for (k = 0; k < n && k < CONSOLE_CHUNK; k++)
+			if (p[k] == '\n') {
+				k++;
+				break;
+			}
+		n -= k;
+		simple_lock(&printf_lock);
+		while (k--)
+			cnputc(*p++);
+		simple_unlock(&printf_lock);
+	}
 
 	ior->io_residual = 0;
 	return D_SUCCESS;

@@ -43,43 +43,66 @@ static int have_xsaves_unused;	/* offered by the processor, not taken */
 #define	MSR_IA32_XSS		0xDA0
 
 /*
- * 🔴 XSAVES IS DETECTED AND NOT USED, AND THAT IS A STATEMENT ABOUT THIS TREE
- * RATHER THAN ABOUT THE INSTRUCTION (#561).
+ * 🔴 XSAVES HAS NOW BEEN RUN, AND IT IS DECLINED FOR A MEASURED REASON RATHER
+ * THAN FOR AN UNEXERCISED ONE (#561).
  *
  * It is the best rung on paper: the compacted format AND the modified
  * optimisation, where XSAVEC has only the first and XSAVEOPT only the second.
- * The code for it is written, a few lines up and a few lines down.
+ * The five steps written here used to end "until step 3 has happened this
+ * stays 0", and they have now all happened -- not on OMEGA, which was the only
+ * candidate known when they were written, but on a machine that arrived after:
  *
- * ⚠️ NOBODY HAS EVER RUN IT.  This machine's processor does not offer XSAVES
- * (it has xsavec and xsaveopt), and qemu does not offer it under TCG either --
- * measured, by asking for it: `-cpu Skylake-Server' and `-cpu max' both come
- * back announcing XSAVEOPT.  So the branch cannot be exercised here, and a
- * branch nobody has executed is not support, it is a hope with a plausible
- * shape.
+ *	simo-victus, AMD Ryzen 5 5600H (Zen 3), which offers xsaves where
+ *	pavillion's Ryzen 5 4600H does not.  qemu passes it through under KVM
+ *	(`-cpu max' and `-cpu host' both), and still does not offer it under
+ *	TCG -- asked, both ways, rather than assumed.
  *
- * 🔑 And it cannot be made safe by trying it: the failure mode of a wrong
- * compacted header is XRSTORS taking a #GP on the first switch to every
- * thread, not a wrong value a self-test could compare.  A probe that cannot
- * survive the failure it is probing for is not a probe.
+ * 🔑 THE RESULT IS THE ONE "SHOULD" DID NOT PREDICT, FOR THE SECOND TIME.
  *
- * 🔑 AND THE MACHINE THAT CAN SETTLE IT IS IN THE INVENTORY: OMEGA, the
- * i9-13900K.  Raptor Lake has XSAVES, so this is a short errand rather than an
- * open question -- which is why the code stays here instead of being deleted:
+ * Same kernel, the feature offered or withheld by qemu so that only the rung
+ * differs -- the method XSAVEC was measured with, below -- median of 5 boots
+ * each, -smp 1, KVM, bench-only bundle, the #554 futex ping-pong:
  *
- *	1. set this to 1;
- *	2. boot on OMEGA and read the announcement: XSAVES/XRSTORS;
- *	3. fpu_stress (-F, more than one processor) must PASS there -- that is
- *	   the test that a thread's sixteen vector registers survive a switch,
- *	   and it is the only thing that can tell a correct compacted header
- *	   from a lucky one;
- *	4. re-run the whole ladder, because the point of that script is that
- *	   every rung is WALKED, not that one of them was;
- *	5. and measure it against XSAVEOPT the way XSAVEC was measured below.
- *	   XSAVES has both properties, so it should win -- "should" being
- *	   exactly the word that was wrong about XSAVEC.
+ *	XSAVES/XRSTORS    579.7 ns    spread 545.6..597.6
+ *	XSAVEOPT/XRSTOR   575.9 ns    spread 559.7..594.9
  *
- * Until step 3 has happened on that machine, this stays 0 and the processor's
- * offer is announced and declined.
+ * 3.8 ns apart with the spreads lying on top of one another.  Having BOTH
+ * properties bought nothing measurable over having the modified optimisation
+ * alone, for the same reason compaction bought nothing for XSAVEC: these
+ * threads use the components, so there is little to compact, and what is left
+ * is the save the modified optimisation already skips.
+ *
+ * So the rule that settled XSAVEC settles this one the same way --
+ * INDISTINGUISHABLE IS NOT A REASON TO CHANGE A DEFAULT -- and XSAVEOPT keeps
+ * the place it had.
+ *
+ * ⚠️ What was verified, rather than what was hoped:
+ *	fpu_stress PASSES on XSAVES/XRSTORS (-F, -smp 4) -- the test that a
+ *	thread's sixteen vector registers survive a switch, and the only thing
+ *	that tells a correct compacted header from a lucky one;
+ *	the whole ladder was re-walked with it at 1 -- six rungs, each
+ *	announcing its own and each passing.
+ *
+ * 🔑 AND THIS KNOB IS WHY THE RUNG CAN BE WALKED AGAIN.  It stays, and it
+ * stays a knob rather than becoming a deletion, because the objection that
+ * opened this was never "XSAVES is slow" -- it was that a branch nobody has
+ * executed is not support.  Set it to 1 and scripts/xsave-ladder.sh walks the
+ * whole ladder from the top -- it moved into the tree with #563, so it travels
+ * to every machine instead of to whoever happened to have a copy.  Leave it 0
+ * and the processor's offer is announced and declined, which is what a machine
+ * that has XSAVES now says.
+ *
+ * ⚠️ AND THE CLOCK THESE NUMBERS WERE TAKEN AT IS NOT WHAT THE HARNESS SAID.
+ * simo-victus drives amd-pstate-epp, where `powersave' is the ACTIVE mode and
+ * scales up -- sampled at 3.7-3.9 GHz during the runs -- and not the passive
+ * governor that pins to the floor.  scripts/run-conditions.sh exempted
+ * intel_pstate from that reading and not amd-pstate, so it reported
+ * `effective=1108MHz' for a processor running at nearly four times that.
+ *
+ * That was its own defect and it is fixed (#564): the reading asks the machine
+ * now instead of knowing driver names.  The numbers here were taken before it
+ * was, so the logs that hold them still carry the false condition, and it is
+ * recorded because a number is only as good as the condition written beside it.
  */
 #define	FPU_ALLOW_XSAVES	0
 
@@ -113,7 +136,7 @@ const char *fpu_save_instruction(void)
 	 */
 	if (use_xsaveopt)
 		return have_xsaves_unused ? "XSAVEOPT/XRSTOR (XSAVES present, "
-					    "unexercised — see fpu.c)"
+					    "measured and not chosen — see fpu.c)"
 					  : "XSAVEOPT/XRSTOR";
 	if (use_xsavec)
 		return "XSAVEC/XRSTOR";
@@ -268,7 +291,7 @@ void fpu_init(void)
 	 * ⚠️ On a machine with wider state -- AVX-512, where the standard image
 	 * is much larger than what a thread actually uses -- the answer could
 	 * be the other way.  This order is this machine's, and the script that
-	 * produced it is in ~/uros-tests.
+	 * produced it is scripts/xsave-ladder.sh.
 	 *
 	 * ⚠️ A kernel does not get to assume the part it boots on.  Every rung
 	 * is detected, and every rung is exercised: qemu can offer or withhold

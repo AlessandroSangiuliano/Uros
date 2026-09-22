@@ -695,6 +695,22 @@ clock_event_tick(struct trap_frame *frame)
 	 */
 	urmach_rcu_quiescent_state();
 
+	/*
+	 * And one step of the grace-period machine, so that deferred
+	 * reclamation makes progress without anybody blocking in a grace
+	 * period (#566).  It returns at once when nothing is queued.
+	 */
+	urmach_rcu_advance();
+
+	/*
+	 * And whatever the console has queued (#567).  It never waits for the
+	 * transmitter, so this cannot lengthen a tick by a device: it writes
+	 * what the port will take now and leaves the rest.  It is what gets
+	 * out the bytes a writer had to leave behind because another
+	 * processor held the port.
+	 */
+	cndrain();
+
 	clock_selftest(cpu);
 
 	/*

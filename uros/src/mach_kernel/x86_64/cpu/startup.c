@@ -37,11 +37,13 @@
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
+#include <ddb/cons_cost.h>	/* #551: what one line on the console costs */
 #include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
+#include <ddb/fbcons.h>	/* #568: the other output, mapped once the pmap is up */
 
 /*
  * Machine initialisation, called once the machine-independent kernel is far
@@ -73,6 +75,21 @@ machine_init(void)
 	 */
 	trap_set_handler(LAPIC_TIMER_VECTOR, clock_event_tick);
 	clock_event_init(LAPIC_TIMER_VECTOR);
+
+	/*
+	 * The other output (#568).
+	 *
+	 * Here because this is the first machine-dependent call after
+	 * vm_mem_bootstrap(), and mapping the framebuffer needs a pmap that
+	 * can map device memory.  It is the same position i386 gives it --
+	 * cninit(), after i386_init() -- and it has the same consequence,
+	 * which is worth stating rather than discovering: everything printed
+	 * BEFORE this line reached COM1 only.  That is structural and not an
+	 * oversight, because the framebuffer sits above the low identity map
+	 * and there is no way to reach it earlier.
+	 */
+	pmap_enable_wc();
+	fbcons_init();
 
 	/*
 	 * #356/#446: the synchronous-RPC hand-off on block, and the ONE place
@@ -299,6 +316,14 @@ machine_processors_ready(void)
 		       "scheduler will never dispatch to (#461)");
 
 		/*
+		 * What one line on this console costs, once per boot (#551).
+		 * Here because it is the first point with the scheduler up,
+		 * the TSC calibrated and every other processor idle, so the
+		 * number is the line's and not the boot's.
+		 */
+		cons_cost_report();
+
+		/*
 		 * -P on a machine with more than one processor: prove that an
 		 * APPLICATION processor preempts, which is the claim #461 makes
 		 * and the one the uniprocessor form of this test cannot reach.
@@ -484,6 +509,23 @@ void
 slave_machine_init(void)
 {
 	fpu_init();
+
+	/*
+	 * And this processor's own memory-attribute table (#568).
+	 *
+	 * 🔴 PER-PROCESSOR, WHICH IS WHY IT IS HERE AND NOT ONLY ON THE BOOT
+	 * ONE.  IA32_PAT is not shared: an application processor that had not
+	 * been told would resolve the framebuffer's mapping through the
+	 * architectural default for that entry -- write-through, which over an
+	 * uncacheable aperture is uncacheable -- so anything it printed would
+	 * be drawn at the old cost, on a screen the boot processor was drawing
+	 * cheaply.  A difference of twenty times between two processors doing
+	 * the same thing, and nothing anywhere would have said so.
+	 *
+	 * i386 left exactly this gap open in #372 and wrote it down; this
+	 * target has a place to close it, so it is closed.
+	 */
+	pmap_enable_wc();
 }
 
 /*

@@ -589,8 +589,7 @@ thread_timeout_setup(
  */
 
 void
-thread_go(thread)
-	thread_t thread;
+thread_go(thread_t thread)
 {
 	int	s, state;
 
@@ -640,8 +639,7 @@ thread_go(thread)
  */
 
 void
-thread_will_wait(thread)
-	thread_t thread;
+thread_will_wait(thread_t thread)
 {
 	int	s;
 
@@ -663,9 +661,7 @@ thread_will_wait(thread)
  */
 
 void
-thread_will_wait_with_timeout(thread, msecs)
-	thread_t thread;
-	mach_msg_timeout_t msecs;
+thread_will_wait_with_timeout(thread_t thread, mach_msg_timeout_t msecs)
 {
 	unsigned int ticks = convert_ipc_timeout_to_ticks(msecs);
 	int s;
@@ -3162,6 +3158,23 @@ idle_thread_continue(void)
 		 * clock tick.
 		 */
 		urmach_rcu_quiescent_state();
+
+		/*
+		 * And hand back whatever a grace period has released (#566).
+		 * Here because this is thread context on every processor and
+		 * because an idle processor is exactly when there is time:
+		 * a callback frees memory and must not run from the tick.
+		 */
+		urmach_rcu_drain();
+
+		/*
+		 * And whatever the console has queued and nobody has handed to
+		 * the port yet (#567).  Here for the same reason: an idle
+		 * processor is exactly when there is time, and this never
+		 * waits for the transmitter -- what will not fit right now
+		 * stays in the ring for the next pass.
+		 */
+		cndrain();
 
 #ifdef	MARK_CPU_IDLE
 		MARK_CPU_IDLE(mycpu);

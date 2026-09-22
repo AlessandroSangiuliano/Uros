@@ -395,17 +395,6 @@ WriteIncludes(FILE *file)
 	fprintf(file, "#include <mach/mig_log.h>\n");
 	fprintf(file, "#endif /* MIG_DEBUG */\n"); 
     }
-    fprintf(file, "/* LINTLIBRARY */\n");
-    fprintf(file, "\n");
-    if (!BeAnsiC) {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "#else\t/* %s */\n", NewCDecl);
-        fprintf(file, "extern mach_port_t mig_get_reply_port();\n");
-        fprintf(file, "extern void mig_dealloc_reply_port(mach_port_t);\n");
-	fprintf(file, "extern char *%s();\n", MessAllocRoutine);
-	fprintf(file, "extern void %s();\n", MessFreeRoutine);
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
     fprintf(file, "\n");
 }
 
@@ -457,12 +446,13 @@ WriteRequestHead(FILE *file, routine_t *rt)
     if (rt->rtRetCArg != argNULL && !rt->rtSimpleRequest) 
 	fprintf(file, "ready_to_send:\n");
 
-    if (rt->rtMaxRequestPos > 0)
+    if (rt->rtMaxRequestPos > 0) {
 	if (rt->rtOverwrite)
 	    fprintf(file, "\tInP = &MessRequest;\n");
 	else
 	    fprintf(file, "\tInP = &Mess%sIn;\n",
 		    (rt->rtMessOnStack ? "." : "->"));
+    }
 
     fprintf(file, "\tInP->Head.msgh_bits =");
     if (rt->rtRetCArg == argNULL && !rt->rtSimpleRequest)
@@ -696,8 +686,8 @@ WriteMsgSend(FILE *file, routine_t *rt)
 		MsgResult,
 		rt->rtMsgOption->argVarName,
 		SendSize);
-	fprintf(file, " MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,");
-	fprintf(file, " (mach_msg_header_t *) 0, 0);\n");
+	fprintf(file, " MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL, ");
+	fprintf(file, "(mach_msg_header_t *) 0, 0);\n");
     }
     if (! rt->rtMessOnStack)
 	WriteReturn(file, rt, "\t\t", "msg_result", "\n");
@@ -767,19 +757,30 @@ WriteMsgSendReceive(FILE *file, routine_t *rt)
     fprintf(file, "\tmsg_result = mach_msg_overwrite(&InP->Head, MACH_SEND_MSG|%s, %s, 0, ",
 	    rt->rtMsgOption->argVarName,
 	    SendSize);
-    fprintf(file, " MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,");
-    fprintf(file, " (mach_msg_header_t *) 0, 0);\n");
+    fprintf(file, " MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL, ");
+    fprintf(file, "(mach_msg_header_t *) 0, 0);\n");
 
     fprintf(file, "\tif (msg_result != MACH_MSG_SUCCESS)\n");
     WriteReturnMsgError(file, rt, TRUE, argNULL, "msg_result");
     fprintf(file, "\n");
+
+    /*
+     * ⚠️ THE SEPARATOR BELONGS TO THE PIECE BEFORE IT, ONCE (#504).
+     *
+     * A call written by several fprintf() in a row had the comma-and-space on
+     * one of them and a leading space on the next, so the generated argument
+     * list came out with `MACH_PORT_NULL,  (mach_msg_header_t *) 0' -- two
+     * spaces, ninety times across the stubs of one build.  Nothing reads it
+     * wrong; it is generated code that looks like nobody owns it, which is
+     * how generated code stops being read at all.
+     */
 
     fprintf(file, "\tmsg_result = mach_msg_overwrite(&Out0P->Head, MACH_RCV_MSG|%s%s%s, 0, sizeof(Reply), InP->Head.msgh_local_port, %s, MACH_PORT_NULL, ",
 	    rt->rtMsgOption->argVarName,
 	    rt->rtUserImpl != 0 ? "|MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)" : "",
 	    rt->rtWaitTime != argNULL ? "|MACH_RCV_TIMEOUT" : "",
 	    rt->rtWaitTime != argNULL ? rt->rtWaitTime->argVarName : "MACH_MSG_TIMEOUT_NONE");
-    fprintf(file, " (mach_msg_header_t *) 0, 0);\n");
+    fprintf(file, "(mach_msg_header_t *) 0, 0);\n");
     WriteMsgCheckReceive(file, rt, "MACH_MSG_SUCCESS");
     fprintf(file, "\n");
 }
@@ -820,9 +821,9 @@ WriteMsgRPC(FILE *file, routine_t *rt)
 	    SendSize,
 	    rt->rtWaitTime != argNULL? rt->rtWaitTime->argVarName : "MACH_MSG_TIMEOUT_NONE");
 	if (rt->rtOverwrite)
-      	    fprintf(file, " &InOvTemplate->Head, sizeof(OverwriteTemplate));\n");
+      	    fprintf(file, "&InOvTemplate->Head, sizeof(OverwriteTemplate));\n");
 	else
-	    fprintf(file, " (mach_msg_header_t *) 0, 0);\n");
+	    fprintf(file, "(mach_msg_header_t *) 0, 0);\n");
     }
     WriteMsgCheckReceive(file, rt, "MACH_MSG_SUCCESS");
     fprintf(file, "\n");
@@ -978,12 +979,13 @@ WriteKPD_ool(FILE *file, register argument_t *arg)
     fprintf(file, "\t%s = %s;\n", firststring, arg->argTTName);
     fprintf(file, "\t%saddress = (void *)(%s%s%s);\n", 
 	string, ref, arg->argVarName, subindex);
-    if (VarArray)
-	if (IS_MULTIPLE_KPD(it)) 
+    if (VarArray) {
+	if (IS_MULTIPLE_KPD(it))
 	    WriteKPD_ool_varsize(file, arg, "\tptr", "size", TRUE);
-	else 
-	    WriteKPD_ool_varsize(file, arg, "InP", 
+	else
+	    WriteKPD_ool_varsize(file, arg, "InP",
 		strconcat(arg->argMsgField, ".size"), FALSE);
+    }
     if (arg->argDeallocate == d_MAYBE)
 	fprintf(file, "\t%sdeallocate =  %s;\n", 
 	    string, arg->argDealloc->argVarName); 
@@ -992,12 +994,22 @@ WriteKPD_ool(FILE *file, register argument_t *arg)
 
     fprintf(file, "\t%saddress = (void *)(%s%s%s);\n", 
 	string, ref, arg->argVarName, subindex);
-    if (VarArray)
-	if (IS_MULTIPLE_KPD(it)) 
+    /*
+     * ⚠️ BRACED THOUGH THE COMPILER IS SILENT HERE (#504).
+     *
+     * Two `else' in a row, binding to two different `if': the first to
+     * IS_MULTIPLE_KPD and the second to VarArray.  gcc does not warn -- the
+     * outer `if' has an else of its own, so nothing is dangling -- and that is
+     * precisely why this one is worse than the one above it, which does warn.
+     * The compiler's silence is not a statement that a reader can see it.
+     */
+    if (VarArray) {
+	if (IS_MULTIPLE_KPD(it))
 	    WriteKPD_ool_varsize(file, arg, "\tptr", "size", TRUE);
-	else 
-	    WriteKPD_ool_varsize(file, arg, "InP", 
+	else
+	    WriteKPD_ool_varsize(file, arg, "InP",
 		strconcat(arg->argMsgField, ".size"), FALSE);
+    }
     else
         fprintf(file, "\t%ssize = %d;\n", string, 
 	    (howmany * howbig + 7)/8);
@@ -1324,6 +1336,21 @@ WriteArgSize(FILE *file, register argument_t *arg)
     register int bsize = ptype->itElement->itTypeSize;
     register argument_t *count = arg->argCount;
 
+    boolean_t round = bsize % 4 != 0;
+
+    /*
+     * 🔑 THE ROUND-UP IS PARENTHESISED, AND THAT IS THE GENERATOR'S JOB (#504).
+     *
+     * This used to emit `x + 3 & ~3'.  It is CORRECT -- `+' binds tighter than
+     * `&' -- and it is what -Wparentheses names, 463 times across the two
+     * targets, which is 77% of every diagnostic this project's userland
+     * produces.  Fixing the emitted files would have been undone by the next
+     * regeneration; there are four lines in this program that decide it, and
+     * this is one of them.
+     */
+    if (round)
+	fprintf(file, "(");
+
     if (bsize > 1)
 	fprintf(file, "%d * ", bsize);
     if (ptype->itString)
@@ -1335,12 +1362,8 @@ WriteArgSize(FILE *file, register argument_t *arg)
 		count->argByReferenceUser ? "*" : "",
 		count->argVarName);
 
-    /*
-     * If the base type size is not a multiple of sizeof(int) [4],
-     * we have to round up.
-     */
-    if (bsize % 4 != 0)
-	fprintf(file, " + 3 & ~3");
+    if (round)
+	fprintf(file, " + 3) & ~3");
 }
 
 /*
@@ -1686,16 +1709,18 @@ WriteCheckArgSize(FILE *file, register argument_t *arg)
     register ipc_type_t *btype = ptype->itElement;
     argument_t *count = arg->argCount;
     int multiplier = btype->itTypeSize;
+    boolean_t round = btype->itTypeSize % 4 != 0;
+
+    if (round)
+	fprintf(file, "(");
 
     if (multiplier > 1)
 	fprintf(file, "%d * ", multiplier);
 
     fprintf(file, "Out%dP->%s", count->argReplyPos, count->argMsgField);
 
-    /* If the base type size of the data field isn`t a multiple of 4,
-       we have to round up. */
-    if (btype->itTypeSize % 4 != 0)
-	fprintf(file, " + 3 & ~3");
+    if (round)
+	fprintf(file, " + 3) & ~3");
 }
 
 static void
@@ -2036,20 +2061,6 @@ WriteFieldDecl(FILE *file, argument_t *arg)
 /* Fill in the string with an expression that refers to the size
  * of the specified array:
  */
-static void
-GetArraySize(register argument_t *arg, char *size)
-{
-    register ipc_type_t *it = arg->argType;
-
-    if (it->itVarArray) {
-	if (arg->argCount->argByReferenceUser) {
-	    sprintf(size, "*%s", arg->argCount->argVarName);
-	} else
-	    sprintf(size, "%s", arg->argCount->argVarName);
-    } else {
-	sprintf(size, "%d", (it->itNumber * it->itSize + 7) / 8);
-    }
-}
 
 
 static void
@@ -2138,8 +2149,6 @@ WriteRPCRoutineDescriptor(file, rt, arg_count, descr_count,
     int arg_count, descr_count;
     string_t work_routine, stub_routine, sig_array;
 {
-    register argument_t *arg;
-
     fprintf(file, "          { (mig_impl_routine_t) %s,\n\
             (mig_stub_routine_t) %s, ",
 	    work_routine, stub_routine);
@@ -2255,9 +2264,7 @@ static int
 CheckRPCCall(register routine_t *rt)
 {
     register argument_t *arg;
-    register int i;
 
-    i = 0;
     for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)
     {
 	if (akCheck(arg->argKind, akbUserArg) &&
@@ -2285,223 +2292,12 @@ WriteRPCRoutine(FILE *file, register routine_t *rt)
 
 /********************** End UserRPCTrap Routines*************************/
 
-/* Process an IN/INOUT arg before the short-circuited RPC */
-static void
-WriteShortCircInArgBefore(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-    char size[128];
-
-    fprintf(file, "\n\t/* IN %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-	    if (!(arg->argFlags & flDealloc) &&
-		    (!(arg->argFlags & flAuto) || !(arg->argFlags & flConst))) {
-		/* Need to map a copy of the array: */
-		GetArraySize(arg, size);
-		fprintf(file, "\t(void)vm_read(mach_task_self(),\n");
-		fprintf(file, "\t\t      (vm_address_t) %s%s, %s, (vm_address_t *) &_%sTemp_, &_MIG_Ignore_Count_);\n",
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName, size, arg->argVarName);
-		/* Point argument at the copy: */
-		fprintf(file, "\t*(char **)&%s%s = _%sTemp_;\n",
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName,
-					arg->argVarName);
-	    } else if ((arg->argFlags & flDealloc) &&
-			    ((arg->argFlags & flAuto) || it->itMigInLine)) {
-		/* Point the temp var at the original argument: */
-		fprintf(file, "\t_%sTemp_ = (char *) %s%s;\n",
-					arg->argVarName,
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber > 1) {
-	if (it->itStruct) {
-	    /* Arg is a struct -- nothing to do. */
-	} else {
-	    /* Arg is a C string or an in-line array: */
-	    if (!argIsOut(arg) && !(arg->argFlags & flConst)) {
-		/* Have to copy it into a temp.  Use a stack var, if this would
-		 * not overflow the -maxonstack specification:
-		 */
-		if (it->itTypeSize <= sizeof(char *) ||
-			arg->argRoutine->rtMessOnStack ||
-			arg->argRoutine->rtTempBytesOnStack +
-				     it->itTypeSize <= MaxMessSizeOnStack) {
-		    fprintf(file, "\t{   char _%sTemp_[%d];\n",
-			    arg->argVarName, it->itTypeSize);
-		    arg->argRoutine->rtTempBytesOnStack += it->itTypeSize;
-		    arg->argTempOnStack = TRUE;
-		} else {
-		    fprintf(file, "\t{   _%sTemp_ = (char *) %s(%d);\n",
-			    arg->argVarName, MessAllocRoutine, it->itTypeSize);
-		    arg->argTempOnStack = FALSE;
-		}
-		WriteCopyArg(file, arg, "_%sTemp_", "/* %s */ (char *) %s",
-				  arg->argVarName, arg->argVarName,
-				  arg->argVarName);
-		/* Point argument at temp: */
-		fprintf(file, "\t    *(char **)&%s%s = _%sTemp_;\n",
-					   (arg->argByReferenceUser ? "*" : ""),
-					   arg->argVarName,
-					   arg->argVarName);
-		fprintf(file, "\t}\n");
-	    }
-	}
-    }
-}
 
 
-/* Process an INOUT/OUT arg before the short-circuited RPC */
-static void
-WriteShortCircOutArgBefore(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-
-    fprintf(file, "\n\t/* OUT %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-	    if (!argIsIn(arg) && (arg->argFlags & flOverwrite)) {
-		/* Point the temp var at the original argument: */
-		fprintf(file, "\t    _%sTemp_ = (char *) %s%s;\n",
-					arg->argVarName,
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber > 1) {
-	/* Arg is an in-line array: */
-    }
-}
  
 
 
-/* Process an IN arg after the short-circuited RPC */
-static void
-WriteShortCircInArgAfter(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-    char size[128];
 
-    fprintf(file, "\n\t/* IN %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-	    GetArraySize(arg, size);
-	    if ((!(arg->argFlags & flAuto) && it->itMigInLine) ||
-		((arg->argFlags & flAuto) &&
-				((arg->argFlags & flDealloc) ||
-				 !(arg->argFlags & flConst))
-		)) {
-		/* Need to dealloc the temporary.  vm_deallocate's second
-		 * argument is a vm_address_t (integer), not a pointer —
-		 * historical migcom emitted "(vm_address_t *)" which
-		 * compiles fine on K&R / pre-strict-int compilers but
-		 * is rejected by modern gcc with -Wint-conversion. */
-		fprintf(file, "\t(void)vm_deallocate(mach_task_self(),");
-		fprintf(file, " (vm_address_t) _%sTemp_, %s);\n",
-					    arg->argVarName, size);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber > 1) {
-	if (it->itStruct) {
-	    /* Arg is a struct -- nothing to do. */
-	} else {
-	    /* Arg is a C string or an in-line array: */
-	    if (!argIsOut(arg) && !(arg->argFlags & flConst)) {
-		/* A temp needs to be deallocated, if not on stack: */
-		if (!arg->argTempOnStack) {
-		    fprintf(file, "\t%s(_%sTemp_, %d);\n",
-			    MessFreeRoutine, arg->argVarName, it->itTypeSize);
-		}
-	    }
-	}
-    }
-}
-
-static void
-WriteShortCircOutArgAfter(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-    char size[128];
-
-    fprintf(file, "\n\t/* OUT %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-
-	    /* Calculate size of array: */
-	    GetArraySize(arg, size);
-	    if (!(arg->argFlags & flDealloc) || (arg->argFlags & flOverwrite)) {
-		/* Copy argument to vm_allocated Temp: */
-		fprintf(file, "\t(void)vm_read(mach_task_self(),\n");
-		fprintf(file, "\t\t      (vm_address_t) %s%s, %s, (vm_address_t *) &_%sTemp_, &_MIG_Ignore_Count_);\n",
-				    (arg->argByReferenceUser ? "*" : ""),
-				    arg->argVarName, size, arg->argVarName);
-		if (!argIsIn(arg) && (arg->argFlags & flDealloc) &&
-					(arg->argFlags & flOverwrite)) {
-		    /* Deallocate argument returned by server.  Same
-		     * vm_deallocate signature fix as above. */
-		    fprintf(file, "\t(void)vm_deallocate(mach_task_self(),");
-		    fprintf(file, " (vm_address_t) %s%s, %s);\n",
-				    (arg->argByReferenceUser ? "*" : ""),
-				    arg->argVarName, size);
-		}
-		/* Point argument at new temporary: */
-		fprintf(file, "\t*(char **)&%s%s = _%sTemp_;\n",
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName,
-					arg->argVarName);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber != 1) {
-	/* Arg is an in-line array: */
-    }
-}
 
 
 
@@ -2511,22 +2307,9 @@ WriteStubDecl(FILE *file, register routine_t *rt)
     fprintf(file, "\n");
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
     fprintf(file, "mig_external %s %s\n", ReturnTypeStr(rt), rt->rtUserName);
-    if (BeAnsiC) {
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
-        fprintf(file, ")\n");
-    } else {
-        fprintf(file, "#if\t%s\n", NewCDecl);
-        fprintf(file, "(\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
-        fprintf(file, ")\n");
-        fprintf(file, "#else\n");
-        fprintf(file, "\t(");
-        WriteList(file, rt->rtArgs, WriteNameDecl, akbUserArg, ", ", "");
-        fprintf(file, ")\n");
-        WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ";\n", ";\n");
-        fprintf(file, "#endif\t/* %s */\n", NewCDecl);
-    }
+    fprintf(file, "(\n");
+    WriteList(file, rt->rtArgs, WriteUserVarDecl, akbUserArg, ",\n", "\n");
+    fprintf(file, ")\n");
     fprintf(file, "{\n");
 }
 

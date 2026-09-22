@@ -36,6 +36,7 @@
 #include <cpu/iommu.h>		/* #432: what polices DMA, if anything */
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
+#include <ddb/fbcons.h>
 #include <ddb/ddb.h>
 #include <ddb/ksym.h>
 #include <cpu/ipi.h>
@@ -81,9 +82,23 @@
 /* ------------------------------------------------------------------ */
 static void kputc(char c)
 {
-	while (!(inb(COM1 + 5) & 0x20))		/* wait THR empty */
-		;
-	outb(COM1, (uint8_t)c);
+	/*
+	 * cons_putc(), and no longer a second polled loop of its own (#551).
+	 *
+	 * The loop that was here waited for the transmitter for ever, like
+	 * the one in cons.c; bounding both was the first version, and it
+	 * left this one without cons_putc()'s MEMORY of a stuck port, so
+	 * that under a transmitter that never emptied the narration paid the
+	 * whole bound on every byte -- six milliseconds each under KVM, two
+	 * minutes for a boot's worth -- while cons_putc() paid it once.
+	 * Measured with scripts/uart-stall.py, which is what found it.
+	 *
+	 * One writer, one bound, one memory.  Safe from the first byte:
+	 * cons.c needs no initialisation, and its statics are zero because
+	 * the loader zeroes .bss (multiboot2), not because anything here
+	 * ran first.
+	 */
+	cons_putc(c);
 }
 
 static void kputs(const char *s)
@@ -268,6 +283,72 @@ static void memmap_selftest(uint32_t info)
 	kputs(" MiB total, top of ram ");
 	kputhex64(top);
 	kputs(top != 0 && usable != 0 ? "\r\n" : " NOTHING?!\r\n");
+}
+
+/*
+ * What display the loader left us, and whether there is one (#568).
+ *
+ * 🔴 IT REPORTS BOTH ANSWERS AND CALLS NEITHER OF THEM A FAILURE.  boot.S
+ * asks for a framebuffer OPTIONALLY, so a machine that has none boots exactly
+ * as it always did; what must not happen is that the difference goes unsaid.
+ * A boot that drew nothing because there was nothing to draw on, and a boot
+ * that drew nothing because the console is broken, look identical in a log
+ * that only mentions the framebuffer when it finds one -- and the second is
+ * the one somebody will spend an evening on.
+ *
+ * ⚠️ Read here, early, and while GRUB's tag list is still identity-mapped and
+ * nothing has been placed on top of it.
+ */
+static void framebuffer_selftest(uint32_t info)
+{
+	struct mb2_framebuffer fb;
+
+	mb2_framebuffer(info, &fb);
+
+	/*
+	 * Kept before it is reported, and kept whether or not there is one:
+	 * fbcons_init() runs long after this, once the pmap can map device
+	 * memory, and by then GRUB's tag list is nobody's in particular
+	 * (#568).
+	 */
+	fbcons_remember(&fb);
+
+	if (!fb.present) {
+		kputs("UrMach x86-64: NO usable framebuffer from the loader");
+		if (fb.fb_type == MB2_FB_TYPE_EGA_TEXT)
+			kputs(" — it offered EGA TEXT, which is character"
+			      " cells and not pixels");
+		kputs(" — this boot's only output is COM1 (#568)\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: framebuffer ");
+	kputdec(fb.width);
+	kputs("x");
+	kputdec(fb.height);
+	kputs("x");
+	kputdec(fb.bpp);
+	kputs(" at ");
+	kputhex64(fb.addr);
+	kputs(", pitch ");
+	kputdec(fb.pitch);
+	kputs(" bytes");
+
+	/*
+	 * 🔑 And whether the pitch is the width, said EITHER WAY.  A scanline
+	 * is free to be padded and firmware often pads it, so a console that
+	 * assumed otherwise would draw correctly on the emulator and a
+	 * staircase on the machine.  Printed also when it is not padded,
+	 * because a note that only appears in one case leaves a reader unable
+	 * to tell a check that passed from a check that is not there -- and
+	 * this harness has no machine that pads, so the branch that matters
+	 * is the one nobody here can see fire.
+	 */
+	if (fb.pitch != (uint64_t)fb.width * (fb.bpp / 8))
+		kputs(", PADDED — the scanline is longer than the picture");
+	else
+		kputs(", not padded");
+	kputs(" (#568)\r\n");
 }
 
 /*
@@ -1057,25 +1138,79 @@ static void user_pmap_selftest(void)
 	 * fail.
 	 */
 	{
-		uint64_t	seen, after;
+		uint64_t	before, seen, after;
+
+		/*
+		 * 🔴 THE COUNT IS A DIFFERENCE, AND IT HAS TO BE (#563).
+		 *
+		 * `ac_traps' counts every trap that ARRIVES with AC set, and an
+		 * interrupt is a trap: the timer landing inside the deliberate
+		 * window a few hundred lines up — the one that writes through
+		 * USER_TEST_VA — bumps it without this probe doing anything at
+		 * all.  Read absolutely, "0 arrived" and "the window opened and
+		 * something else counted first" are the same number, and the
+		 * ablation below could not tell them apart either.
+		 */
+		before = trap_smap_lifted_count();
 
 		trap_expect(T_INVALID_OPCODE,
 			    (uint64_t)(uintptr_t)trap_probe_faulted);
 
+#if	!ABLATE_563_WINDOW
 		pmap_user_access_begin();
+#endif	/* !ABLATE_563_WINDOW — build with -DABLATE_563_WINDOW=1 and this
+	 * must go WRONG on a processor that HAS SMAP and stay green on one
+	 * that has not.  Those two outcomes from one switch are the whole of
+	 * what this correction does, and the only way to see it from outside. */
 		(void) trap_probe_ud();
 		pmap_user_access_end();
 
-		seen = trap_smap_lifted_count();
+		seen = trap_smap_lifted_count() - before;
 		after = trap_smap_after_last();
 
 		kputs("UrMach x86-64: a trap raised inside a copy's window — ");
 		kputhex64(seen);
 		kputs(" arrived with SMAP lifted, left at ");
 		kputhex64(after);
-		kputs(seen > 0 && after == 0
-		      ? " — the fault path does not inherit the copy's permission\r\n"
-		      : " — WRONG\r\n");
+
+		/*
+		 * 🔴 THREE ANSWERS, NOT TWO (#563).
+		 *
+		 * The question is whether the fault path inherits the one
+		 * permission a copy grants itself.  On a processor with no SMAP
+		 * there is no such permission to inherit: `stac' is an invalid
+		 * opcode, the brackets above compile to nothing, and the window
+		 * CANNOT open.  That is not this kernel failing, and saying
+		 * WRONG there is the instrument answering a question nobody
+		 * asked — which is how a real regression learns to look like
+		 * the weather (#522 is the same shape, mirrored).
+		 *
+		 * 🔑 AND NEITHER ARM CAN PASS BY ACCIDENT, which is what the
+		 * original `seen > 0' was protecting and what a third answer
+		 * could easily have thrown away:
+		 *
+		 *	SMAP on   the window MUST have opened (seen > 0) and the
+		 *		  handler MUST have closed it (after == 0);
+		 *	SMAP off  the window must NOT have opened (seen == 0) —
+		 *		  because if AC got set on a part that has no
+		 *		  way to set it, the finding is that, and it is
+		 *		  worth a WRONG of its own.
+		 *
+		 * So the count is still load-bearing on both sides.  What the
+		 * processor has is asked of pmap_smap_enabled(), which is the
+		 * flag pmap_enable_smep_smap() wrote when it decided — the
+		 * kernel is not guessing at a capability, it is reading back
+		 * its own decision.
+		 */
+		if (!pmap_smap_enabled())
+			kputs(seen == 0
+			      ? " — this processor has no SMAP, so the window "
+				"cannot open and there is nothing to inherit\r\n"
+			      : " — WRONG\r\n");
+		else
+			kputs(seen > 0 && after == 0
+			      ? " — the fault path does not inherit the copy's permission\r\n"
+			      : " — WRONG\r\n");
 	}
 	pmap_activate_boot(k);
 
@@ -3083,6 +3218,22 @@ static void cons_selftest(void)
 	else
 		kputhex64((uint64_t)got);
 
+	/*
+	 * 🔑 THIS ONE KEEPS WRONG, AND THE REASON IS NOT THAT IT IS UNAMBIGUOUS
+	 * (#563).  It is that the other case cannot be observed.
+	 *
+	 * With no UART at COM1 every inb returns 0xFF: LSR reads all ones, so
+	 * THR_EMPTY appears set and the write does not hang, DATA_READY appears
+	 * set too, and the byte read back is 0xFF rather than the 0xA5 sent.
+	 * The verdict is then WRONG for a machine that simply has no serial
+	 * port, which is the shape this issue is about -- and a scratch-register
+	 * presence test would tell the two apart.
+	 *
+	 * ⚠️ But it would be a branch nobody can ever read.  This log travels
+	 * out of the very port whose absence it would report: on any machine
+	 * where the line can be seen, the UART is there.  A NOT ASKED that
+	 * cannot reach a reader is worth less than the WRONG it replaced.
+	 */
 	kputs(got == CONS_PROBE_BYTE
 	      ? " — the console can hear\r\n"
 	      : " — WRONG, the receive path does not work\r\n");
@@ -3254,7 +3405,28 @@ static void ioapic_madt_selftest(void)
 	kputs(n == 1 ? " at " : "s, first at ");
 
 	if (n == 0) {
-		kputs("— WRONG, the firmware describes no interrupt controller\r\n");
+		/*
+		 * 🔑 WHICH OF THE TWO SILENCES (#563).
+		 *
+		 * ioapic_init() has exactly ONE way to fail: acpi_ioapic(0) yielded
+		 * nothing, which is the MADT saying this machine has no I/O APIC.
+		 * It does not fail for a mapping that went wrong or a version
+		 * register that read back oddly -- there is one `return 0' in it.
+		 *
+		 * So the only question left is whether the table was READ at all,
+		 * and the same walk answers it: the processor census comes from
+		 * there too (#438, #432).  A parse that found processors and no I/O
+		 * APIC describes a board; one that found neither did not happen,
+		 * and keeps the word for a defect.  Two halves of one table, and
+		 * they have to agree.
+		 */
+		if (acpi_cpu_count() > 0)
+			kputs("— NOT ASKED, the firmware describes no interrupt"
+			      " controller on this board\r\n");
+		else
+			kputs("— WRONG, the firmware describes neither an"
+			      " interrupt controller nor a processor, so the"
+			      " MADT was never read\r\n");
 		return;
 	}
 
@@ -3414,6 +3586,14 @@ static void pci_cfg_selftest(void)
 	kputs(pci_cfg_is_ecam() ? "ECAM" : "0xCF8/0xCFC");
 	kputs(", host bridge at 00:00.0 reads ");
 	kputhex64(id);
+	/*
+	 * 🔑 KEEPS WRONG (#563): here the absence IS the subject.  What this
+	 * asks is whether the configuration mechanism -- ECAM or the two ports
+	 * -- reaches the bus at all, so "nothing answered" is the failure it
+	 * was written to catch, not a board declining to have PCI.  There is
+	 * nothing to cross-check it against either: on a CF8/CFC machine no
+	 * table describes the host bridge, and this read is the only witness.
+	 */
 	kputs(id != 0xFFFFFFFFu && id != 0
 	      ? " — a vendor answered, so the mechanism reaches the bus\r\n"
 	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
@@ -3612,8 +3792,15 @@ static void pci_cap_selftest(void)
 	if (agreed != listed - repeated || wrongly_found != 0)
 		kputs(" — WRONG, the walk and the devices disagree about the"
 		      " list\r\n");
+	/*
+	 * 🔑 NOT ASKED (#563), and the sentence already said why: the walk
+	 * agreed about NOTHING.  Which devices sit on this bus is a property
+	 * of the command line, not of the kernel -- the comment above says as
+	 * much, that the demand is one "both boards can meet" because of what
+	 * is plugged in.  A walk with nothing to walk has not disagreed.
+	 */
 	else if (listed == 0)
-		kputs(" — WRONG, not one device on this bus lists a"
+		kputs(" — NOT ASKED, not one device on this bus lists a"
 		      " capability, so the walk agreed about nothing\r\n");
 	else
 		kputs(" — every id a device lists, where it lists it, and"
@@ -3658,11 +3845,21 @@ static void pci_cap_selftest(void)
 	kputs(" device(s) offer MSI-X, ");
 	kputdec(msix_vectors);
 	kputs(" vectors in total");
+	/*
+	 * 🔑 THE FIRST TWO ARE NOT ASKED, THE THIRD IS WRONG (#563).
+	 *
+	 * This test wants a bus carrying both kinds of device, and whether it
+	 * gets one is decided by the `-device' lines, not by the kernel: "never
+	 * asked to find one" and "went unexercised" are the two sentences
+	 * saying so, and both carried the word for a wrong answer.  A table
+	 * found with no vectors in it is a different thing entirely, and keeps
+	 * it.
+	 */
 	if (msix_devices == 0)
-		kputs(" — WRONG, no device on this bus has a table, so the"
+		kputs(" — NOT ASKED, no device on this bus has a table, so the"
 		      " walk was never asked to find one\r\n");
 	else if (msix_devices >= devices)
-		kputs(" — WRONG, every device answered yes, so the absent"
+		kputs(" — NOT ASKED, every device answered yes, so the absent"
 		      " case went unexercised\r\n");
 	else if (msix_vectors < msix_devices)
 		kputs(" — WRONG, a table found with no vectors in it\r\n");
@@ -4518,6 +4715,16 @@ static void msix_table_selftest(void)
 				msix_regs_base = r[i].base;
 	}
 
+	/*
+	 * 🔑 KEEPS WRONG (#563).  `nic' was not assumed: it is a device this
+	 * very function found by SCANNING for the MSI-X capability, and the
+	 * board that offers none is already skipped cleanly above.  So a probe
+	 * that cannot find the table on a device whose capability was just read
+	 * is the probe, not the board.  The same goes for the two
+	 * msi_claim_vector() refusals nearby: the vector pool is this kernel's
+	 * own resource, fresh at boot, and running out of it at this point
+	 * would be a leak rather than a machine.
+	 */
 	if (!pci_msix_probe(0, 0, (uint8_t)nic, 0, &m)) {
 		kputs("UrMach x86-64: the MSI-X table could not be found"
 		      " — WRONG\r\n");
@@ -4659,7 +4866,28 @@ static void ioapic_selftest(void)
 	int had_interrupts;
 
 	if (!ioapic_init()) {
-		kputs("UrMach x86-64: no I/O APIC to route through — WRONG\r\n");
+		/*
+		 * 🔑 WHICH OF THE TWO SILENCES (#563).
+		 *
+		 * ioapic_init() has exactly ONE way to fail: acpi_ioapic(0) yielded
+		 * nothing, which is the MADT saying this machine has no I/O APIC.
+		 * It does not fail for a mapping that went wrong or a version
+		 * register that read back oddly -- there is one `return 0' in it.
+		 *
+		 * So the only question left is whether the table was READ at all,
+		 * and the same walk answers it: the processor census comes from
+		 * there too (#438, #432).  A parse that found processors and no I/O
+		 * APIC describes a board; one that found neither did not happen,
+		 * and keeps the word for a defect.  Two halves of one table, and
+		 * they have to agree.
+		 */
+		if (acpi_cpu_count() > 0)
+			kputs("UrMach x86-64: NOT ASKED, the firmware describes"
+			      " no I/O APIC to route through\r\n");
+		else
+			kputs("UrMach x86-64: no I/O APIC to route through and"
+			      " no processor either, so the MADT was never"
+			      " read — WRONG\r\n");
 		return;
 	}
 
@@ -4777,7 +5005,21 @@ static void device_master_irq_selftest(void)
 	deferrals = spl_deferred_count();
 
 	if (!device_md_irq_register(0, dm_irq_handler)) {
-		kputs("UrMach x86-64: no machine answer for irq 0 — WRONG\r\n");
+		/*
+		 * 🔑 THE REFUSAL HAS TWO MEANINGS AND ONLY ONE IS A DEFECT
+		 * (#563).  With irq 0 and a real handler the argument check
+		 * cannot be what refused, so what is left is: this board has no
+		 * I/O APIC, or it has one and the pin is out of its range.  The
+		 * first is the machine; the second is the mapping this test
+		 * exists to check.
+		 */
+		if (!ioapic_present())
+			kputs("UrMach x86-64: NOT ASKED, no I/O APIC on this"
+			      " board to answer for irq 0\r\n");
+		else
+			kputs("UrMach x86-64: no machine answer for irq 0, and"
+			      " there is an I/O APIC that should have given"
+			      " one — WRONG\r\n");
 		return;
 	}
 
@@ -6225,6 +6467,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	phys_selftest();
 	cpu_selftest();
 	memmap_selftest(info);
+	framebuffer_selftest(info);
 	direct_map_selftest(info);
 	walk_selftest();
 	bootmem_selftest(info);

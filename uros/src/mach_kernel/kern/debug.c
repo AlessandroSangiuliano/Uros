@@ -260,6 +260,24 @@ panic(const char *str, ...)
 
 	mp_disable_preemption();
 
+	/*
+	 * 🔴 THE CONSOLE STOPS BUFFERING HERE, AND WHAT IT HAD BUFFERED GOES
+	 * OUT FIRST (#567).
+	 *
+	 * Both halves matter and in this order.  On a target whose only output
+	 * is the serial port, a line that is in a ring and not on the wire is
+	 * a line lost the moment the machine stops -- and the lines just
+	 * before a panic are the ones that say why.  And everything printed
+	 * from here on has to reach the port in the caller's thread, because
+	 * after this there may be no tick, no idle processor and no next
+	 * printf to hand it over.
+	 *
+	 * Before the message and not after it, so the message itself is
+	 * written the synchronous way.  A target whose console does not buffer
+	 * answers this with nothing.
+	 */
+	cnasync(FALSE);
+
 #ifdef PPC
 #if NCONSFEED
 	console_feed_cancel_and_flush();

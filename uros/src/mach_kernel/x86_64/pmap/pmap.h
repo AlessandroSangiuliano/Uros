@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 
+#include <kern/rcu.h>		/* #566: the deferred free's head */
 #include <pmap/pte.h>
 
 /*
@@ -31,6 +32,13 @@
 struct pmap {
 	uint64_t root_pa;		/* PML4 physical address (the CR3 value) */
 	int      ref_count;
+
+	/*
+	 * What pmap_destroy() hands to the grace period instead of standing in
+	 * one (#566).  Carried in the struct because the struct is what is
+	 * being reclaimed: there is nowhere else to put it that outlives it.
+	 */
+	struct urmach_rcu_head rcu_head;
 
 	/*
 	 * Pages mapped in this space.  The machine-independent tree reads it
@@ -463,6 +471,45 @@ uint64_t pmap_enable_smep_smap(void);
  * unloaded.  A `pa` that is not page-aligned keeps its offset in the answer.
  */
 uint64_t pmap_map_device(uint64_t pa, uint64_t size);
+
+/*
+ * The same, but WRITE-COMBINING: stores may be gathered and delivered out of
+ * order (#568).
+ *
+ * 🔴 WRONG FOR REGISTERS AND RIGHT FOR A FRAMEBUFFER, and the difference is
+ * the whole reason this is a second name rather than a flag.  A register block
+ * needs every store to arrive separately and in order; a framebuffer needs the
+ * opposite, and paying register semantics for pixels is what made the console
+ * cost seventeen seconds of an entry-14 boot -- 128 uncacheable four-byte
+ * stores a glyph, measured.
+ *
+ * ⚠️ It does nothing until pmap_enable_wc() has run ON THIS PROCESSOR: the
+ * attribute table is per-processor, and a mapping made through an entry that
+ * still says write-through is write-through.  A caller that maps from one
+ * processor and draws from another gets whatever the drawing one was told.
+ */
+uint64_t pmap_map_device_wc(uint64_t pa, uint64_t size);
+
+/*
+ * Make write-combining reachable from a page table entry, on this processor.
+ *
+ * 🔑 IA32_PAT ENTRY 1, AND NOT ENTRY 7.  The entry a page selects is built
+ * from three bits -- PAT, PCD, PWT -- and on this target the PAT bit is bit 7
+ * of the entry, which is also INTEL_PTE_PS in every interior entry and is
+ * tested as such in five places.  Making one bit mean two things in a tree
+ * that reads it is how a page-size test starts answering about a memory type.
+ * Entry 1 is selected by PWT alone, its architectural default is write-through
+ * which nothing here maps, and it needs no bit 7 at all.  Linux's PAT layout
+ * puts write-combining at the same index for the same reason.
+ *
+ * i386 does this differently -- #372 took entry 7 -- because there the same
+ * choice was not available in the same way; the two targets agree on the
+ * effect and not on the encoding, which is said here so that a reader of both
+ * does not take one for a copy of the other.
+ *
+ * Idempotent, and a no-op on a processor whose CPUID does not offer PAT.
+ */
+void pmap_enable_wc(void);
 
 /*
  * Zeroing and copying physical pages (x86_64/pmap/phys.c).  Addresses are

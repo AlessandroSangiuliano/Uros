@@ -46,6 +46,60 @@ const struct mb2_tag *mb2_find_tag(uint32_t info_pa, uint32_t type)
 }
 
 /*
+ * What display the loader left, if any (#568).
+ *
+ * 🔴 EVERY FIELD COMES FROM THE TAG.  A framebuffer's pitch is not its width
+ * times its depth -- a mode is free to pad each scanline, and firmware often
+ * does -- so a console that computed the stride would draw a staircase on the
+ * machines that matter and a correct picture on the emulator that does not.
+ * The same goes for the address: it is 64-bit in the tag, and truncating it
+ * is how a console works everywhere except the machine it was written for.
+ *
+ * Only a direct-RGB mode is reported as present.  An EGA text tag describes
+ * 0xB8000 and character cells, which is a different thing to write and not
+ * the thing the caller of this is built to draw into; saying `present' for it
+ * would hand a glyph blitter a buffer that is not pixels.
+ */
+boolean_t mb2_framebuffer(uint32_t info_pa, struct mb2_framebuffer *out)
+{
+	const struct mb2_tag_framebuffer *fb;
+
+	out->addr = 0;
+	out->pitch = 0;
+	out->width = 0;
+	out->height = 0;
+	out->bpp = 0;
+	out->fb_type = 0;
+	out->present = 0;
+
+	fb = (const struct mb2_tag_framebuffer *)
+		mb2_find_tag(info_pa, MB2_TAG_FRAMEBUFFER);
+	if (fb == 0 || fb->size < sizeof(*fb))
+		return FALSE;
+
+	out->addr = fb->addr;
+	out->pitch = fb->pitch;
+	out->width = fb->width;
+	out->height = fb->height;
+	out->bpp = fb->bpp;
+	out->fb_type = fb->fb_type;
+
+	/*
+	 * And a mode with no pixels in it is not a framebuffer, whatever the
+	 * tag says.  A zero width, height, pitch or depth would make every
+	 * later calculation divide by nothing or draw outside itself, and the
+	 * caller's one test is `present'.
+	 */
+	if (fb->fb_type != MB2_FB_TYPE_RGB ||
+	    fb->width == 0 || fb->height == 0 ||
+	    fb->pitch == 0 || fb->bpp == 0)
+		return FALSE;
+
+	out->present = 1;
+	return TRUE;
+}
+
+/*
  * Walk the memory-map entries, calling back with each available region.
  * entry_size comes from the tag rather than sizeof: the format is versioned
  * and explicitly allowed to grow, so striding by our own struct would

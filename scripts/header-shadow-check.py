@@ -64,6 +64,17 @@ ACCEPTED = {
     "sys/types.h", "scsi/scsi.h", "pthread.h", "machine/va_list.h",
     "ctype.h", "errno.h", "float.h",
 
+    # limits.h joins them, and it was MEASURED rather than assumed to belong
+    # (#565).  The two spell everything differently -- sa_mach computes from
+    # the compiler's own __SCHAR_MAX__ and friends, musl writes the numbers --
+    # so eighteen of the nineteen shared macros differ textually and none
+    # differs in VALUE: eighteen static assertions of musl's numbers compile
+    # against sa_mach's header, at -m32, which is the only width this musl is
+    # built for.  The one real difference is a NAME and not a number: musl has
+    # NAME_MAX and sa_mach does not, so a unit that wanted it and reached the
+    # wrong header fails to build instead of computing something else.
+    "limits.h",
+
     # A private header of one component whose name is generic enough that
     # another component chose it too.  Each is included by quoted name from
     # its own directory, which searches that directory first, so no -I order
@@ -150,13 +161,27 @@ ACCEPTED = {
 # bootstrap.defs, exc.defs, char_server.defs and gpu_server.defs.
 # ---------------------------------------------------------------------------
 RECORDED = {
-    # <machine/types.h>, nine lines apart, and the split does NOT follow a
-    # boundary: 477 units get the per-architecture one published under
-    # generated/include, 155 get src/mach_services/include/machine/types.h.
-    # It is reached from sa_mach/types.h -- the file #480 was about -- so this
-    # is that issue's last copy, and settling it means deciding which of the
-    # two is the machine's word on its own types.
-    "machine/types.h",
+    # 🔑 EMPTY, AND THAT IS A RESULT (#565).
+    #
+    # <machine/types.h> was the one entry: 477 units got a copy published under
+    # generated/include and 155 got src/mach_services/include/machine/types.h,
+    # nine lines apart, and this list said settling it meant deciding which of
+    # the two is the machine's word on its own types.
+    #
+    # It was not a decision.  #481 had already made it -- fixed width means
+    # fixed, so there is one file and not one per architecture, and it deleted
+    # the rule that wrote the second.  What remained was the FILE: a four-line
+    # wrapper saying `#include <sa_mach/i386/types.h>', which CMake had written
+    # at configure time and which nothing has produced since August.  Asked
+    # rather than assumed -- `ninja -t query' answers "unknown target" -- and
+    # removed; a full reconfigure and rebuild of 812 targets does not bring it
+    # back, and what it named declares exactly what the surviving header does,
+    # `_SIG64_BITS' included, so nothing computed differently either way.
+    #
+    # ⚠️ `ninja -t cleandead' does NOT catch that one: it removes what a
+    # previous BUILD produced, and this was written by the configure step, so
+    # ninja never knew of it.  Reading the directory is the only thing that
+    # sees such a file, which is what this script does.
 }
 
 
@@ -226,14 +251,20 @@ def digest(path):
     return _digest_cache[path]
 
 
-def scan(build_dirs):
-    """relative path -> (set of distinct files, set of translation units)."""
+def scan(build_dirs, scanned=None):
+    """relative path -> (set of distinct files, set of translation units).
+
+    `scanned' collects the directories that actually had something to read, so
+    that main() can tell "nothing is shadowed" from "nothing was looked at".
+    """
     shadows = collections.defaultdict(lambda: (set(), set()))
     for build in build_dirs:
         cc = os.path.join(build, "compile_commands.json")
         if not os.path.exists(cc):
             print("skip %s: no compile_commands.json" % build, file=sys.stderr)
             continue
+        if scanned is not None:
+            scanned.append(build)
         for entry in json.load(open(cc)):
             roots = include_roots(entry["command"], entry["directory"])
             seen = {}
@@ -261,7 +292,20 @@ def main():
     builds = argv or [os.path.join(here, "..", "uros", "build"),
                       os.path.join(here, "..", "uros", "build-x86_64")]
 
-    shadows = scan(builds)
+    scanned = []
+    shadows = scan(builds, scanned)
+
+    # 🔴 A CHECK THAT COULD NOT RUN DOES NOT PASS (#565).
+    #
+    # Every directory named was skipped for want of a compile_commands.json,
+    # so this looked at nothing -- and an exit of 0 there would be the shape
+    # this project keeps finding: a guard that is always true.  It says so and
+    # exits 2, which is neither "clean" nor "shadowed" but "not asked".
+    if not scanned:
+        print("NOT CHECKED: none of the %d directories named had a "
+              "compile_commands.json, so nothing was examined" % len(builds),
+              file=sys.stderr)
+        return 2
     unexpected = sorted(r for r in shadows
                         if r not in ACCEPTED and r not in RECORDED)
     recorded = sorted(r for r in shadows if r in RECORDED)
@@ -281,7 +325,19 @@ def main():
               "Each is a header two of one unit's own -I roots both hold, so which\n"
               "one it compiles against is decided by flag order and reported by\n"
               "nothing.  Remove the second copy, or add it to ACCEPTED in this\n"
-              "script with the sentence that says why it is reachable on purpose."
+              "script with the sentence that says why it is reachable on purpose.\n"
+              "\n"
+              "\u26a0\ufe0f  A COPY UNDER A BUILD DIRECTORY MAY BE A LEFTOVER RATHER THAN AN\n"
+              "OUTPUT.  CMake deletes nothing it has stopped declaring, so a header\n"
+              "whose rule was renamed or removed stays on disk and shadows exactly as\n"
+              "a live one would.  Both instances #565 found were leftovers -- one of\n"
+              "them for a month.  Ask before assuming:\n"
+              "\n"
+              "    ninja -C <build> -t query <the path>   # 'unknown target' = leftover\n"
+              "    ninja -C <build> -t cleandead          # removes every leftover\n"
+              "\n"
+              "And if it IS still produced, the question is whether anything consumes\n"
+              "it: what is not generated cannot shadow anything."
               % len(unexpected), file=sys.stderr)
         return 1
 

@@ -421,11 +421,31 @@ preempt_test_run_remote(void)
 		break;
 	}
 
+#if	ABLATE_563_ALONE
+	/*
+	 * #563: pretend this processor is the only one running, so the line
+	 * that declines the question can be walked on a machine where it
+	 * would otherwise be unreachable -- there is no boot flag that caps
+	 * the processor count on this target, and an application processor
+	 * cannot be made to fail to arrive on demand.  A branch nobody has
+	 * executed is not support.
+	 */
+	target = PROCESSOR_NULL;
+#endif
+	/*
+	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
+	 * means either the machine has one and the flag was passed anyway, or
+	 * the others were woken and never arrived.  The second is a real defect
+	 * and it is not this test's to report: startup.c already prints
+	 * "%u of %u processors reached the scheduler" in the word the harness
+	 * greps for.  Saying WRONG here a second time adds a symptom, not a
+	 * finding, and buries the one verdict that names the cause.
+	 */
 	if (target == PROCESSOR_NULL) {
-		printf("preempt_test: WRONG — asked for an application "
-		       "processor other than the boot processor and this "
-		       "machine has none running; nothing was measured "
-		       "(#461)\n");
+		printf("preempt_test: NOT ASKED — alone, this machine has no "
+		       "application processor other than the boot processor "
+		       "running (#461)\n");
 		return;
 	}
 
