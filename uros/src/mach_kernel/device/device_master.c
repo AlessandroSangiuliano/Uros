@@ -101,6 +101,12 @@ extern task_t port_name_to_task(mach_port_t name);
 
 decl_mutex_data(static, device_table_lock)
 
+/* The grace-period callbacks that make a retired slot reusable (#538);
+ * defined beside the tables they belong to. */
+static void	claim_slot_retired(struct urmach_rcu_head *h);
+static void	io_slot_retired(struct urmach_rcu_head *h);
+static void	dma_slot_retired(struct urmach_rcu_head *h);
+
 /* ================================================================
  * Interrupt forwarding
  * ================================================================ */
@@ -480,6 +486,15 @@ static struct device_claim_entry {
 		int		is_io;
 	} region[DEVICE_MAX_REGIONS];
 	unsigned int	nregions;
+
+	/*
+	 * Retired, not yet reusable (#538).  Set under the mutex when the
+	 * entry is unlinked, cleared by the grace-period callback; a slot is
+	 * taken only when task == TASK_NULL AND this is clear, so a reader
+	 * that matched the old entry finishes reading the old entry.
+	 */
+	struct urmach_rcu_head	rcu;
+	volatile int		retiring;
 } device_claim[DEVICE_MAX_CLAIMS];
 
 static unsigned device_nclaims;
@@ -1441,6 +1456,15 @@ struct dma_region {
 		natural_t	bdf;
 		vm_offset_t	dma;	/* address of page zero          */
 	} user[DEVICE_MAX_REGION_USERS];
+
+	/*
+	 * Retired, not yet reusable (#538): `pa' and `npages' stay valid
+	 * until the callback frees them, because dma_region_of() reads both
+	 * after testing kva -- and a reader that passed that test before the
+	 * unlink must find them still there.
+	 */
+	struct urmach_rcu_head	rcu;
+	volatile int		retiring;
 };
 
 static struct dma_region dma_region[DEVICE_MAX_DMA_REGIONS];
@@ -1530,7 +1554,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	}
 
 	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
-		if (dma_region[i].kva == 0) {
+		if (dma_region[i].kva == 0 && !dma_region[i].retiring) {
 			r = &dma_region[i];
 			break;
 		}
@@ -1616,13 +1640,15 @@ dma_region_drop(vm_offset_t kva)
 		 * entry.
 		 */
 		snap = *r;
-		r->kva = 0;
+		r->kva = 0;			/* the field every lookup tests */
+		publish_barrier();
 		r->id = 0;
-		r->pa = 0;
-		r->npages = 0;
 		r->nusers = 0;
 		r->task = TASK_NULL;
 		r->owner = TASK_NULL;
+		/* pa and npages stay: dma_region_of() reads them after the
+		 * kva test, and the callback is what frees them (#538). */
+		r->retiring = 1;
 		mutex_unlock(&device_table_lock);
 
 		for (u = 0; u < snap.nusers; u++)
@@ -1642,7 +1668,7 @@ dma_region_drop(vm_offset_t kva)
 		if (snap.owner != TASK_NULL)
 			task_deallocate(snap.owner);
 
-		kfree((vm_offset_t)snap.pa, snap.npages * sizeof(vm_offset_t));
+		urmach_call_rcu(&r->rcu, dma_slot_retired);
 		return;
 	}
 	mutex_unlock(&device_table_lock);
@@ -2619,9 +2645,69 @@ struct io_claim {
 	task_t		task;
 	unsigned int	base;
 	unsigned int	count;
+	struct urmach_rcu_head	rcu;		/* #538: see device_claim */
+	volatile int		retiring;
 };
 
 static struct io_claim	io_claim[IO_CLAIM_MAX];
+
+/*
+ * ── Retiring a slot (#538) ─────────────────────────────────────────────
+ *
+ * An entry is UNLINKED under the mutex -- the field every lookup matches on
+ * goes first, with a barrier -- and its slot is marked retiring.  The mark
+ * clears in a callback that urmach_call_rcu() runs after a grace period,
+ * which every reader in a section has by then left.  Only then may the slot
+ * be taken again.  Until then a reader that matched the old entry reads the
+ * old entry's other fields whole, which is the whole of what the sections
+ * are for.
+ *
+ * ⚠️ The callback runs in thread context but from the idle thread (rcu.h),
+ * so it sleeps in nothing and takes no mutex: a store, and for a DMA region
+ * a kfree, which rcu.h permits by name.  On one processor with nobody else
+ * running, urmach_call_rcu() runs it inline, in the caller's context -- and
+ * that is correct too, because a reader cannot be mid-walk on the only
+ * processor while the unlinker is running on it.
+ *
+ * ⚠️ Task references are dropped at the unlink and not here: task_free()
+ * reaches vm_map_deallocate(), which can sleep.  That is safe because no
+ * reader follows a task pointer from an entry -- they compare it with
+ * current_task(); the one lookup that follows it, claim_holder(), takes the
+ * mutex instead.
+ */
+static void
+claim_slot_retired(struct urmach_rcu_head *h)
+{
+	struct device_claim_entry *e = (struct device_claim_entry *)
+		((char *)h - __builtin_offsetof(struct device_claim_entry, rcu));
+
+	publish_barrier();
+	e->retiring = 0;
+}
+
+static void
+io_slot_retired(struct urmach_rcu_head *h)
+{
+	struct io_claim *e = (struct io_claim *)
+		((char *)h - __builtin_offsetof(struct io_claim, rcu));
+
+	publish_barrier();
+	e->retiring = 0;
+}
+
+static void
+dma_slot_retired(struct urmach_rcu_head *h)
+{
+	struct dma_region *r = (struct dma_region *)
+		((char *)h - __builtin_offsetof(struct dma_region, rcu));
+
+	if (r->pa != 0)
+		kfree((vm_offset_t)r->pa, r->npages * sizeof(vm_offset_t));
+	r->pa = 0;
+	r->npages = 0;
+	publish_barrier();
+	r->retiring = 0;
+}
 
 /*
  * Does this port belong to somebody who said so?  Returns KERN_SUCCESS when
@@ -2791,7 +2877,7 @@ ds_master_device_io_port_claim(
 	mutex_lock(&device_table_lock);
 	for (i = 0; i < IO_CLAIM_MAX; i++) {
 		if (io_claim[i].task == TASK_NULL) {
-			if (free_slot == IO_CLAIM_MAX)
+			if (free_slot == IO_CLAIM_MAX && !io_claim[i].retiring)
 				free_slot = i;
 			continue;
 		}
@@ -2857,10 +2943,10 @@ ds_master_device_io_port_unclaim(
 		count = io_claim[i].count;
 		io_claim[i].task  = TASK_NULL;	/* unlinked first */
 		publish_barrier();
-		io_claim[i].base  = 0;
-		io_claim[i].count = 0;
+		io_claim[i].retiring = 1;
 		mutex_unlock(&device_table_lock);
 		device_md_io_unclaimed(port, count);
+		urmach_call_rcu(&io_claim[i].rcu, io_slot_retired);
 		return KERN_SUCCESS;
 	}
 	mutex_unlock(&device_table_lock);
@@ -3466,9 +3552,10 @@ ds_master_device_claim(
 			return KERN_NO_ACCESS;
 		}
 
-	/* A released slot is reused before the table grows. */
+	/* A released slot is reused before the table grows -- once its
+	 * grace period is over (#538). */
 	for (i = 0; i < device_nclaims; i++)
-		if (device_claim[i].task == TASK_NULL)
+		if (device_claim[i].task == TASK_NULL && !device_claim[i].retiring)
 			break;
 	if (i == device_nclaims && device_nclaims >= DEVICE_MAX_CLAIMS) {
 		mutex_unlock(&device_table_lock);
@@ -3556,7 +3643,7 @@ device_master_cap_revoked(uint64_t cap_id)
 		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
 		device_claim[i].task = TASK_NULL;
 		publish_barrier();
-		device_claim[i].nregions = 0;
+		device_claim[i].retiring = 1;
 		/*
 		 * 🔥 AND THE TOKEN, WHICH WAS LEFT BEHIND -- with an `i--' after
 		 * it that dated from when a release COMPACTED this table by
@@ -3579,6 +3666,7 @@ device_master_cap_revoked(uint64_t cap_id)
 
 		(void) device_md_dma_release(bdf);
 		task_deallocate(holder);
+		urmach_call_rcu(&device_claim[i].rcu, claim_slot_retired);
 	}
 }
 
@@ -3646,9 +3734,9 @@ device_master_task_terminating(task_t task)
 		count = io_claim[i].count;
 		io_claim[i].task  = TASK_NULL;
 		publish_barrier();
-		io_claim[i].base  = 0;
-		io_claim[i].count = 0;
+		io_claim[i].retiring = 1;
 		mutex_unlock(&device_table_lock);
+		urmach_call_rcu(&io_claim[i].rcu, io_slot_retired);
 
 		printf("device_io_port: task %p died holding 0x%x..0x%x — "
 		       "released (#497)\n", (void *)task, base,
@@ -3769,8 +3857,8 @@ device_master_task_terminating(task_t task)
 		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
 		device_claim[i].task = TASK_NULL;
 		publish_barrier();
-		device_claim[i].nregions = 0;
 		device_claim[i].cap_id = 0;
+		device_claim[i].retiring = 1;
 		mutex_unlock(&device_table_lock);
 
 		printf("device: task 0x%lx died driving %02x:%02x.%u — the "
@@ -3781,6 +3869,7 @@ device_master_task_terminating(task_t task)
 
 		(void) device_md_dma_release(bdf);
 		task_deallocate(task);
+		urmach_call_rcu(&device_claim[i].rcu, claim_slot_retired);
 	}
 }
 
