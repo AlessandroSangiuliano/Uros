@@ -1999,6 +1999,49 @@ sweep_report(const char *name, int n, unsigned long long cycles,
 	       (unsigned)(cycles / (unsigned)n));
 }
 
+/*
+ * ── The pair, split, and run TWICE (#566) ─────────────────────────────────
+ *
+ * The paired rows run the same body -- create then terminate, 200 times --
+ * and differ only in which return code they report, so neither can say which
+ * half is expensive.  These do: 200 creates into an array, timed, then 200
+ * terminates out of it, timed.
+ *
+ * 🔑 AND THE POINT IN THE BOOT IS ITSELF A VARIABLE.  Run after the paired
+ * rows, both halves came out uniprocessor-cheap on four processors, which
+ * said the expense is not in the routines -- but it said it about a different
+ * moment.  So this runs at two points, before the paired rows and after, and
+ * the four numbers together say whether the routines are expensive INSIDE the
+ * window or only the alternation is.
+ *
+ * ⚠️ The array is what makes the split possible and is also its cost: two
+ * hundred tasks are alive at once, which the paired rows never do.
+ */
+static void
+sweep_split_pair(mach_port_t me, const char *when)
+{
+	static mach_port_t	kids[200];
+	char			name[40];
+	unsigned long long	t0;
+	int			i, made = 0;
+
+	t0 = tsc_now();
+	for (i = 0; i < 200; i++)
+		if (task_create(me, NULL, 0, FALSE, &kids[made])
+		    == KERN_SUCCESS)
+			made++;
+	snprintf(name, sizeof name, "task_create(alone,%s)", when);
+	sweep_report(name, made ? made : 1, tsc_now() - t0,
+		     made == 200 ? KERN_SUCCESS : KERN_FAILURE);
+
+	t0 = tsc_now();
+	for (i = 0; i < made; i++)
+		(void) task_terminate(kids[i]);
+	snprintf(name, sizeof name, "task_terminate(alone,%s)", when);
+	sweep_report(name, made ? made : 1, tsc_now() - t0, KERN_SUCCESS);
+}
+
+
 #define SWEEP(nm, n, expr)	do {					\
 	unsigned long long s_ = tsc_now();				\
 	kern_return_t k_ = KERN_SUCCESS;				\
@@ -2200,12 +2243,77 @@ test_trap_sweep(void)
 		if (r == KERN_SUCCESS) (void)vm_deallocate(me, a, 4096); r; }));
 
 	/* ── task and thread, on the child so nothing here kills the test ── */
-	SWEEP("task_create", 200, ({ mach_port_t c2;
-		kern_return_t r = task_create(me, NULL, 0, FALSE, &c2);
-		if (r == KERN_SUCCESS) (void)task_terminate(c2); r; }));
+	sweep_split_pair(me, "early");
+
+
+	/*
+	 * 🔴 THIS ROW IS TIMED TWICE, AND THE TWO NUMBERS ANSWER DIFFERENT
+	 * QUESTIONS (#566).
+	 *
+	 * Every other row here reports `tsc_now()' deltas, which is WALL
+	 * CLOCK: the time between two instants, whoever was running in
+	 * between.  On one processor that is the same as this thread's own
+	 * time, because nothing else can run.  On four it is not, and this
+	 * row is where the difference was found -- 30 617 222 cycles an
+	 * iteration against 6 483 for the same work a few rows later, with
+	 * hal_server enumerating PCI and printing 158 lines in between.
+	 *
+	 * So it also reports what THREAD_BASIC_INFO says this thread was
+	 * given.  A wall figure far above the thread figure means the
+	 * measurement contains somebody else's work and may not be quoted as
+	 * the cost of a trap; the two agreeing means it may.
+	 */
+	{
+		struct thread_basic_info	ti;
+		mach_msg_type_number_t		tic;
+		unsigned long long		t0;
+		unsigned			cpu_us0 = 0, cpu_us1 = 0;
+		mach_port_t			self = mach_thread_self();
+		int				i;
+		kern_return_t			r = KERN_SUCCESS;
+
+		tic = THREAD_BASIC_INFO_COUNT;
+		if (thread_info(self, THREAD_BASIC_INFO, (thread_info_t)&ti,
+				&tic) == KERN_SUCCESS)
+			cpu_us0 = (unsigned)(ti.user_time.seconds * 1000000
+					     + ti.user_time.microseconds
+					     + ti.system_time.seconds * 1000000
+					     + ti.system_time.microseconds);
+
+		t0 = tsc_now();
+		for (i = 0; i < 200; i++) {
+			mach_port_t c2;
+
+			r = task_create(me, NULL, 0, FALSE, &c2);
+			if (r == KERN_SUCCESS)
+				(void) task_terminate(c2);
+		}
+		{
+			unsigned long long wall = tsc_now() - t0;
+
+			tic = THREAD_BASIC_INFO_COUNT;
+			if (thread_info(self, THREAD_BASIC_INFO,
+					(thread_info_t)&ti, &tic)
+			    == KERN_SUCCESS)
+				cpu_us1 = (unsigned)(
+					ti.user_time.seconds * 1000000
+					+ ti.user_time.microseconds
+					+ ti.system_time.seconds * 1000000
+					+ ti.system_time.microseconds);
+
+			sweep_report("task_create", 200, wall, r);
+			sweep_count--;	/* the line below is the same row */
+			printf("  sweep %-30s kr=%-6d %u us of thread time "
+			       "for the 200 (#566)\n", "task_create(cpu)",
+			       (int)KERN_SUCCESS, cpu_us1 - cpu_us0);
+			sweep_count++;
+		}
+	}
 	SWEEP("task_terminate", 200, ({ mach_port_t c2;
 		kern_return_t r = task_create(me, NULL, 0, FALSE, &c2);
 		if (r == KERN_SUCCESS) r = task_terminate(c2); r; }));
+	sweep_split_pair(me, "late");
+
 	SWEEP("task_suspend", 500, task_suspend(child));
 	SWEEP("task_info(child)", 500, ({ struct task_basic_info bi;
 		mach_msg_type_number_t c = TASK_BASIC_INFO_COUNT;

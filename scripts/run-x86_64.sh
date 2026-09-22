@@ -43,7 +43,24 @@
 # taken and never read.
 set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-BUILD=$REPO/uros/build-x86_64
+
+# 🔴 THE SAME OVERRIDE make-disk-x86_64.sh HAS, AND IT WAS MISSING HERE (#566).
+#
+# This line read `BUILD=$REPO/uros/build-x86_64', hard-coded, while the script
+# it calls to make the image honours UROS_BUILD_DIR.  So a run against another
+# build tree built that tree's disk image and then booted THIS one's, silently
+# and with an exit status of 0.
+#
+# It cost two ablations.  #566 removed the RCU grace period, measured no
+# change, and published "the grace period is innocent"; then removed the IPI
+# acknowledgement wait, measured no change, and published the same about that.
+# Neither kernel was ever started.  What gave it away was a sampler that kept
+# finding the processor inside the function the ablation had just deleted.
+#
+# 🔑 #485 named this exact shape -- AN OVERRIDE HONOURED BY HALF A PIPELINE IS
+# WORSE THAN NONE -- because the half that ignores it does not fail, it answers
+# about the wrong thing.
+BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
 
 # What the run was taken under, written into the LOG rather than only shouted

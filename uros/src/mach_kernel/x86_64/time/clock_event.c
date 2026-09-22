@@ -695,6 +695,13 @@ clock_event_tick(struct trap_frame *frame)
 	 */
 	urmach_rcu_quiescent_state();
 
+	/*
+	 * And one step of the grace-period machine, so that deferred
+	 * reclamation makes progress without anybody blocking in a grace
+	 * period (#566).  It returns at once when nothing is queued.
+	 */
+	urmach_rcu_advance();
+
 	clock_selftest(cpu);
 
 	/*
