@@ -89,8 +89,104 @@
 #define MCR_OUT2	0x08u	/* must be 1 for IRQ to leave the chip */
 
 /* ============================================================
- * Inline port I/O.
+ * Reaching the chip, which is not the same question on both targets (#497).
+ *
+ * 🔑 AN x86 I/O PORT IS NOT MEMORY.  A driver for a PCI device maps its BAR
+ * and reads it with ordinary loads -- ahci.so does exactly that, and the
+ * IOMMU polices the DMA coming back.  COM1 is behind no BAR: it lives in the
+ * separate 16-bit I/O address space, reachable only by `in' and `out', which
+ * are privileged.  No page table can map it and no IOMMU can see it.
+ *
+ * So "the driver touches the hardware directly" is true of everything with a
+ * BAR and cannot be made true of this one.  What is left is WHO executes the
+ * instruction, and the two targets answer differently because they were given
+ * different things to answer with:
+ *
+ *   i386      has the `iopl' device and a per-thread I/O permission bitmap in
+ *             the TSS.  char_server opens that device at startup (main.c) and
+ *             the kernel grants 0x3F8-0x3FF -- AT386/iopl.c names uart.so in
+ *             the comment beside the entry.  The instruction is ours.
+ *
+ *   x86-64    has neither: no iopl device in the device table, iomap_base set
+ *             past the end of the TSS (cpu/desc.c), no trap-and-emulate.  An
+ *             `outb' from here is a #GP, which arrives as EXC_BAD_INSTRUCTION
+ *             and kills the task -- measured, in uart_probe's scratch test,
+ *             before attach ever ran.
+ *
+ * So on x86-64 the kernel executes it, through the pair virtio_blk.so has
+ * used since it crossed: device_io_port_read/write on the device master port.
+ * It is a trap, a range check and the instruction -- no second task, no
+ * scheduling -- so it is a system call wearing a message's clothes, which is
+ * the shape seL4 gives the same problem.
+ *
+ * ⚠️ A BITMAP WOULD HAVE BEEN THE OTHER ANSWER, and it was not chosen for
+ * cost.  It is what GNU Mach, Fiasco and Linux's ioperm() do, and long mode
+ * kept the hardware for it.  What decided against it is that a bitmap, once
+ * granted, is read by the CPU and never again by the kernel: taking it back
+ * means editing the task's copy and interrupting every processor that might
+ * hold it.  This system already has revocation -- #511 made a device a right,
+ * cap_server hands it out and char_server is subscribed to the notification --
+ * and a capability simply stops working when it is revoked.
+ *
+ * ⚠️ AND IT IS NOT A SPLIT WE HAD TO MAKE.  The RPC works on i386 too: the
+ * kernel half is machine-independent and both targets supply device_md_io_*.
+ * i386 keeps its instruction because it is the mature target and its
+ * acceptance suite is the only net the shared code has -- not because the
+ * other road is closed there.
  * ============================================================ */
+
+#if defined(__x86_64__)
+
+#include "device_master.h"	/* MIG: device_io_port_{read,write} */
+
+/*
+ * A refused access reads as an absent chip, and says so once.
+ *
+ * 🔥 virtio_blk.so does NOT do this: vio_read32/16/8 discard the
+ * kern_return_t and return a stack variable the MIG stub never wrote when the
+ * call failed, so a refusal there is read as data.  An absent 16550 reads
+ * 0xFF on every register, which is a value this driver already knows how to
+ * disbelieve -- the scratch test rejects it -- so degrading to it turns a
+ * refusal into "no device" instead of into whatever was on the stack.
+ */
+static unsigned int	uart_rpc_refusals;
+
+static void
+uart_rpc_refused(const char *what, uint16_t off, kern_return_t kr)
+{
+	uart_rpc_refusals++;
+	if (uart_rpc_refusals == 1)
+		printf("uart: %s of 0x%x refused by the kernel (kr=%d) — "
+		       "COM1 reads as an absent chip from here on\n",
+		       what, (unsigned)(UART_BASE + off), (int)kr);
+}
+
+static inline uint8_t uart_in(uint16_t off)
+{
+	natural_t	v = 0xFFu;
+	kern_return_t	kr;
+
+	kr = device_io_port_read(char_core_device_port(),
+				 (natural_t)(UART_BASE + off), 1, &v);
+	if (kr != KERN_SUCCESS) {
+		uart_rpc_refused("read", off, kr);
+		return 0xFFu;
+	}
+	return (uint8_t)v;
+}
+
+static inline void uart_out(uint16_t off, uint8_t v)
+{
+	kern_return_t kr;
+
+	kr = device_io_port_write(char_core_device_port(),
+				  (natural_t)(UART_BASE + off), 1,
+				  (natural_t)v);
+	if (kr != KERN_SUCCESS)
+		uart_rpc_refused("write", off, kr);
+}
+
+#elif defined(__i386__)
 
 static inline uint8_t inb(uint16_t port)
 {
@@ -113,6 +209,10 @@ static inline void uart_out(uint16_t off, uint8_t v)
 {
 	outb((uint16_t)(UART_BASE + off), v);
 }
+
+#else
+#error "uart.so: this target has no stated way to reach a 16550"
+#endif
 
 /* ============================================================
  * Per-instance state.  Single COM1 instance.
