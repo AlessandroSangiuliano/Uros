@@ -327,6 +327,15 @@ main(int argc, char **argv)
 					hal_port);
 	}
 
+	/*
+	 * The kernel's own output, out through the port this server may have
+	 * just taken (#497).  After discovery, because there has to be a tty
+	 * to forward INTO; harmless when there is not, because it says so and
+	 * does not start.
+	 */
+	if (char_core_has_tty())
+		char_klog_forward_start();
+
 	subscribe_to_cap_revoke();
 
 	/* #363: wire the in-process keyboard->console loopback.  Runs after

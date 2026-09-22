@@ -257,6 +257,76 @@ char_core_irq_init(mach_port_t master_device, mach_port_t port_set)
 }
 
 /*
+ * Write bytes straight at the tty, with no capability and no job control
+ * (#497).
+ *
+ * 🔑 THIS IS THE KERNEL'S OWN OUTPUT AND NOT A CLIENT'S.  Once uart.so claims
+ * COM1 the kernel stops writing the chip, so every line it prints -- and every
+ * printf from every other task, which reaches the wire through the kernel's
+ * console device -- would arrive only in the klog ring and on a framebuffer.
+ * On a headless box that is a machine that has gone quiet.  The forwarder in
+ * main.c drains that ring and hands the bytes here, so they leave through the
+ * one writer the chip now has.
+ *
+ * ⚠️ It bypasses the cap check and the job-control check, and both are correct
+ * to bypass.  A capability answers "may this CLIENT use the terminal"; these
+ * bytes have no client, they are the kernel's.  Job control answers "is this
+ * process group in the foreground"; a panic is not in anybody's foreground.
+ * Bypassing them here is safe precisely because this entry point is not
+ * reachable from outside the server: it is not in char_server.defs.
+ *
+ * Returns the number of bytes handed to the module, or -1 if no tty is
+ * attached.
+ */
+/* Is there a tty at all?  Asked by name rather than inferred from a
+ * zero-length write's return value (#504's lesson about call sites that are
+ * clever instead of plain). */
+int
+char_core_has_tty(void)
+{
+	char_dev_id_t i;
+
+	/*
+	 * 🔥 FROM 1, AND OVER THE TABLE RATHER THAN THE COUNT.  alloc_dev_slot()
+	 * starts at 1 because slot 0 is the invalid id, so `i < n_devices' walks
+	 * the one slot that is never used and finds nothing -- which is how the
+	 * first version of this said "no tty" on a machine that had just
+	 * attached one, and silenced the forwarder that says the kernel is
+	 * still speaking.  char_core_dev_by_priv() above has always had it
+	 * right; this is the shape of copying a loop bound instead of reading
+	 * one.
+	 */
+	for (i = 1; i < CHAR_MAX_DEVICES; i++) {
+		if (devices[i].in_use
+		    && devices[i].info.class == CHAR_CLASS_TTY
+		    && devices[i].module->tty_write != NULL)
+			return 1;
+	}
+	return 0;
+}
+
+int
+char_core_tty_write_raw(const char *buf, size_t len)
+{
+	char_dev_id_t i;
+
+	/* From 1 and over the table: see char_core_has_tty() above. */
+	for (i = 1; i < CHAR_MAX_DEVICES; i++) {
+		if (!devices[i].in_use)
+			continue;
+		if (devices[i].info.class != CHAR_CLASS_TTY)
+			continue;
+		if (devices[i].module->tty_write == NULL)
+			continue;
+		if (devices[i].module->tty_write(devices[i].priv, buf, len)
+		    != 0)
+			return -1;
+		return (int)len;
+	}
+	return -1;
+}
+
+/*
  * The device master port, for a module whose hardware it cannot reach with
  * an instruction of its own (#497).
  *
