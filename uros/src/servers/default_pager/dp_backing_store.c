@@ -1673,7 +1673,8 @@ ps_clunmap(
 		 * paging segment cluster pages.
 		 * Optimize for entire cluster cleraing.
 		 */
-		if (newoff = (offset&((1<<(vm_page_shift+vs->vs_clshift))-1))) {
+		newoff = offset & ((1 << (vm_page_shift + vs->vs_clshift)) - 1);
+		if (newoff != 0) {
 			/*
 			 * Not cluster aligned.
 			 */
