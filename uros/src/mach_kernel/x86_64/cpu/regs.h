@@ -86,6 +86,8 @@ static inline uint32_t inl(uint16_t port)
 #define CR0_TS		(1UL << 3)	/* the lazy-FPU trap; not used here */
 #define CR0_NE		(1UL << 5)	/* x87 errors are #MF, not FERR#    */
 #define CR0_WP		(1UL << 16)	/* kernel honours read-only pages   */
+#define CR0_NW		(1UL << 29)	/* not-write-through; 0 with CD=1   */
+#define CR0_CD		(1UL << 30)	/* caches disabled, no-fill mode    */
 #define CR0_PG		(1UL << 31)	/* paging enabled                   */
 
 #define CR4_PAE		(1UL << 5)	/* physical address extension       */
@@ -374,6 +376,17 @@ static inline void write_dr(unsigned n, uint64_t v)
 #define EFER_NXE	(1UL << 11)	/* execute-disable bit is usable     */
 
 #ifndef __ASSEMBLER__
+
+/*
+ * Write back and invalidate every cache line, which is a heavy instruction and
+ * has exactly one caller here: the sequence for changing a memory-type
+ * register (#568).  The caches must not be left holding lines under the old
+ * type while the new one is installed.
+ */
+static inline void wbinvd(void)
+{
+	__asm__ volatile("wbinvd" : : : "memory");
+}
 
 static inline uint64_t rdmsr(uint32_t msr)
 {

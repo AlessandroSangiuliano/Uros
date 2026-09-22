@@ -66,6 +66,21 @@ void fbcons_init(void);
  */
 void fbcons_putc(char c);
 
+/*
+ * Make sure what has been drawn is actually on the panel.
+ *
+ * 🔴 WRITE-COMBINING MEANS STORES MAY STILL BE IN A BUFFER.  That is the point
+ * of it and it is fine while the machine goes on -- the buffer drains on the
+ * next fence, locked instruction, port access or interrupt, of which a running
+ * kernel has no shortage.  It is not fine at the end: a panic's last line
+ * sitting in a store buffer when the processor halts is the one line that
+ * mattered, lost to the optimisation that made the rest cheap.
+ *
+ * Called on every newline, which costs a fence per LINE against a hundred
+ * glyphs, and on the way down.
+ */
+void fbcons_flush(void);
+
 /* Whether anything is being drawn, for the per-boot report. */
 int fbcons_present(void);
 

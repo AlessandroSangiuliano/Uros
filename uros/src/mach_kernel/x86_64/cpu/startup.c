@@ -88,6 +88,7 @@ machine_init(void)
 	 * oversight, because the framebuffer sits above the low identity map
 	 * and there is no way to reach it earlier.
 	 */
+	pmap_enable_wc();
 	fbcons_init();
 
 	/*
@@ -508,6 +509,23 @@ void
 slave_machine_init(void)
 {
 	fpu_init();
+
+	/*
+	 * And this processor's own memory-attribute table (#568).
+	 *
+	 * 🔴 PER-PROCESSOR, WHICH IS WHY IT IS HERE AND NOT ONLY ON THE BOOT
+	 * ONE.  IA32_PAT is not shared: an application processor that had not
+	 * been told would resolve the framebuffer's mapping through the
+	 * architectural default for that entry -- write-through, which over an
+	 * uncacheable aperture is uncacheable -- so anything it printed would
+	 * be drawn at the old cost, on a screen the boot processor was drawing
+	 * cheaply.  A difference of twenty times between two processors doing
+	 * the same thing, and nothing anywhere would have said so.
+	 *
+	 * i386 left exactly this gap open in #372 and wrote it down; this
+	 * target has a place to close it, so it is closed.
+	 */
+	pmap_enable_wc();
 }
 
 /*

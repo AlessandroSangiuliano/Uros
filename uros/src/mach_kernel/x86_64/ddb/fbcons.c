@@ -10,6 +10,7 @@
 #include <device/fbcons_font.h>
 #include <ddb/cons.h>
 #include <ddb/fbcons.h>
+#include <cpu/regs.h>
 #include <pmap/pmap.h>
 #include <time/tsc.h>
 
@@ -228,8 +229,22 @@ static void fbcons_scroll(void)
 	fb_scrolls++;
 }
 
+void fbcons_flush(void)
+{
+	if (fb_ready)
+		__asm__ volatile("sfence" : : : "memory");
+}
+
 static void fbcons_newline(void)
 {
+	/*
+	 * The line that just ended reaches the panel here (#568).  Per line
+	 * and not per glyph: a fence every eight pixels would give back most
+	 * of what write-combining buys, and a line is the unit a reader needs
+	 * to be sure of.
+	 */
+	fbcons_flush();
+
 	fb_col = 0;
 	if (fb_row + 1 < fb_rows)
 		fb_row++;
@@ -280,6 +295,57 @@ void fbcons_putc(char ch)
 	fb_col++;
 }
 
+/*
+ * What the range registers say about the framebuffer's aperture.
+ *
+ * 🔑 REPORTED, NOT ACTED ON, and that is a deliberate difference from i386.
+ * #372 checks this and declines write-combining when the aperture is already
+ * write-BACK, because forcing WC on it would slow scattered stores.  That
+ * caveat does not apply here: the only alternative this pmap offers for device
+ * memory is UNCACHEABLE, and write-combining beats uncacheable either way --
+ * the SDM's combining rules give WC for MTRR-UC with PAT-WC and for MTRR-WB
+ * with PAT-WC alike.  So there is no branch, only a number on the record, and
+ * a machine where the choice turns out to matter will be visible rather than
+ * guessed at.
+ *
+ * Variable ranges only: the fixed ones cover the first megabyte and a linear
+ * framebuffer is never there.
+ */
+static unsigned fbcons_mtrr_type(uint64_t pa)
+{
+	uint64_t	def = rdmsr(0x2FF);		/* IA32_MTRR_DEF_TYPE */
+	unsigned	vcnt = (unsigned)(rdmsr(0xFE) & 0xFF);	/* MTRRCAP */
+	unsigned	i;
+
+	/* E clear: the registers are off and the whole space is uncacheable. */
+	if ((def & (1ULL << 11)) == 0)
+		return 0;
+
+	for (i = 0; i < vcnt; i++) {
+		uint64_t base = rdmsr(0x200 + 2 * i);
+		uint64_t mask = rdmsr(0x201 + 2 * i);
+
+		if ((mask & (1ULL << 11)) == 0)		/* V, valid */
+			continue;
+		if ((pa & mask & ~0xFFFULL) == (base & mask & ~0xFFFULL))
+			return (unsigned)(base & 0xFF);
+	}
+
+	return (unsigned)(def & 0xFF);
+}
+
+static const char *fbcons_memtype_name(unsigned t)
+{
+	switch (t) {
+	case 0:	return "UC";
+	case 1:	return "WC";
+	case 4:	return "WT";
+	case 5:	return "WP";
+	case 6:	return "WB";
+	default: return "?";
+	}
+}
+
 void fbcons_init(void)
 {
 	uint64_t	va, size;
@@ -324,7 +390,19 @@ void fbcons_init(void)
 	 * a bump allocator that never gives anything back.
 	 */
 	size = (uint64_t)fbcons_fb.pitch * (uint64_t)(fb_rows * FONT_H);
-	va = pmap_map_device(fbcons_fb.addr, size);
+
+	/*
+	 * 🔴 WRITE-COMBINING, and it is the difference between a console and a
+	 * console that costs seventeen seconds of a boot.  Mapped uncacheable,
+	 * a glyph is 128 separate four-byte bus transactions -- 9675 ns under
+	 * KVM, measured.  Nothing is read back from here, ever, so there is no
+	 * reason for a store to be delivered on its own.
+	 *
+	 * ⚠️ pmap_enable_wc() must already have run ON THIS PROCESSOR, which
+	 * machine_init() does immediately above this call, and each application
+	 * processor does for itself: the attribute table is per-processor.
+	 */
+	va = pmap_map_device_wc(fbcons_fb.addr, size);
 	if (va == 0) {
 		cons_printf("UrMach x86-64: fbcons: could not map the "
 			    "framebuffer at %llx — screen output is off "
@@ -348,6 +426,12 @@ void fbcons_init(void)
 	for (r = 0; r < fb_rows; r++)
 		for (c = 0; c < fb_cols; c++)
 			draw_cell(' ', c, r);
+
+	cons_printf("UrMach x86-64: fbcons: %ux%u characters at %llx, the "
+		    "aperture's range registers say %s, mapped "
+		    "write-combining (#568)\n",
+		    fb_cols, fb_rows, (unsigned long long) fbcons_fb.addr,
+		    fbcons_memtype_name(fbcons_mtrr_type(fbcons_fb.addr)));
 
 	fb_step = fb_rows / FB_SCROLL_FRACTION;
 	if (fb_step == 0)
