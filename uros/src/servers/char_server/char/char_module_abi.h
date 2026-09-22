@@ -187,6 +187,14 @@ extern int char_core_irq_unregister(uint32_t irq);
 extern mach_port_t char_core_device_port(void);
 
 /*
+ * A tty module tells core what the kernel answered when it claimed its
+ * port (#497): 1 if the kernel's console stepped back and the wire is this
+ * server's alone, 0 if the kernel still writes it.  Core starts the klog
+ * forwarder only on 1.
+ */
+extern void char_core_set_wire_owned(int owned);
+
+/*
  * #382: report a console break (Ctrl+D) to the kernel debugger.  The
  * kernel accepts only when the -K boot flag armed the break; returns 0
  * when DDB was entered (byte consumed — do NOT deliver it as input),

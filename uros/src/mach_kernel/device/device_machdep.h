@@ -110,8 +110,8 @@ extern void		device_md_io_write(unsigned int port, unsigned int size,
  * other order would hand a driver a chip the kernel was still using for as
  * long as the reply took.
  */
-extern void		device_md_io_claimed(unsigned int base,
-					     unsigned int count);
+extern int		device_md_io_claimed(unsigned int base,
+					     unsigned int count);	/* 1: the console stepped back */
 extern void		device_md_io_unclaimed(unsigned int base,
 					       unsigned int count);
 

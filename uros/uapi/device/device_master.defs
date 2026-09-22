@@ -711,8 +711,22 @@ routine device_region_map(
 routine device_io_port_claim(
 		master_port	: mach_port_t;
 	in	port		: natural_t;
-	in	count		: natural_t
+	in	count		: natural_t;
+	out	console_released : natural_t
 	);
+
+/*
+ * `console_released' is 1 when the kernel's own console gave up a port in
+ * this range because of the claim, 0 when it did not -- and 0 is an honest
+ * answer, not a failure.  On x86-64 a claim covering COM1 makes the console
+ * step back; on i386 it does not (com.c writes the chip with its own `outb'
+ * and #544 is where that changes).  A driver that gets 0 still owns the range
+ * against every other TASK, but it shares the wire with the kernel, and it
+ * must behave like a sharer: keep its lines tight, and forward nothing the
+ * kernel is already sending itself.  Making the driver guess this from the
+ * target it was compiled for would be a build expression answering a runtime
+ * question.
+ */
 
 /*
  * Give a claimed range back.  A driver calls this from detach; a task that

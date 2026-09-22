@@ -305,6 +305,7 @@ target_link_libraries(char_server PRIVATE
 set(CHAR_MODULE_NEEDS
   -Wl,-u,pthread_mutex_init
   -Wl,-u,pthread_mutex_lock
+  -Wl,-u,pthread_mutex_trylock
   -Wl,-u,pthread_mutex_unlock)
 
 target_link_options(char_server PRIVATE

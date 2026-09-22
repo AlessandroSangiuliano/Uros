@@ -2598,11 +2598,14 @@ kern_return_t
 ds_master_device_io_port_claim(
 	ipc_port_t		master_port,
 	unsigned int		port,
-	unsigned int		count)
+	unsigned int		count,
+	unsigned int		*console_released)
 {
 	task_t		me = current_task();
 	kern_return_t	kr;
 	unsigned int	i, free_slot = IO_CLAIM_MAX;
+
+	*console_released = 0;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -2631,8 +2634,12 @@ ds_master_device_io_port_claim(
 			continue;
 		if (io_claim[i].task != me)
 			return KERN_NO_ACCESS;
-		if (io_claim[i].base == port && io_claim[i].count == count)
+		if (io_claim[i].base == port && io_claim[i].count == count) {
+			/* The hook is idempotent, and the answer has to be
+			 * given again: a re-attach asks the same question. */
+			*console_released = device_md_io_claimed(port, count);
 			return KERN_SUCCESS;
+		}
 		return KERN_INVALID_ARGUMENT;
 	}
 
@@ -2647,7 +2654,7 @@ ds_master_device_io_port_claim(
 	       (void *)me, port, port + count - 1);
 
 	/* After the record and before the reply: see device_machdep.h. */
-	device_md_io_claimed(port, count);
+	*console_released = device_md_io_claimed(port, count);
 	return KERN_SUCCESS;
 }
 

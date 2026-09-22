@@ -333,8 +333,12 @@ main(int argc, char **argv)
 	 * to forward INTO; harmless when there is not, because it says so and
 	 * does not start.
 	 */
-	if (char_core_has_tty())
+	if (char_core_has_tty() && char_core_wire_owned())
 		char_klog_forward_start();
+	else if (char_core_has_tty())
+		printf("char_server: the kernel still writes the serial port "
+		       "itself on this target — its lines are not forwarded, "
+		       "they are already on the wire (#497)\n");
 
 	subscribe_to_cap_revoke();
 
