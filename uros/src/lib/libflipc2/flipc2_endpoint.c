@@ -553,6 +553,7 @@ flipc2_endpoint_create(
                                          ep->recv_port,
                                          ep_slot);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
                            MACH_PORT_RIGHT_RECEIVE, -1);
         vm_deallocate(mach_task_self(), addr,
@@ -565,6 +566,7 @@ flipc2_endpoint_create(
                             MACH_PORT_RIGHT_PORT_SET,
                             &ep->port_set);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
                            MACH_PORT_RIGHT_RECEIVE, -1);
         vm_deallocate(mach_task_self(), addr,
@@ -576,6 +578,7 @@ flipc2_endpoint_create(
     kr = mach_port_move_member(mach_task_self(),
                                ep->recv_port, ep->port_set);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->port_set,
                            MACH_PORT_RIGHT_PORT_SET, -1);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
@@ -589,6 +592,7 @@ flipc2_endpoint_create(
     kr = netname_check_in(name_server_port, (char *)name,
                           mach_task_self(), ep->recv_port);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->port_set,
                            MACH_PORT_RIGHT_PORT_SET, -1);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
