@@ -20,9 +20,12 @@ add_mig_userland(${UROS_UAPI_DIR}/device/device_master.defs ${_HB_OUT} HB_MIG)
 list(REMOVE_ITEM HB_MIG_GENERATED ${_HB_OUT}/device_master_server.c)
 
 set(HB_HAL_GENERATED)
-add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
-                 ${_HB_OUT} HB_HAL)
-list(REMOVE_ITEM HB_HAL_GENERATED ${_HB_OUT}/hal_server.c)
+# ⚠️ _client and not add_mig_userland: this program CALLS the HAL and answers
+# none of it, so the server half is not generated rather than generated and
+# then removed from the sources again.  What is not generated cannot shadow
+# the HAL's own hal_server.h (#565).
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
+                        ${_HB_OUT} HB_HAL)
 list(APPEND HB_MIG_GENERATED ${HB_HAL_GENERATED})
 
 add_executable(hal_bar_test_server
@@ -44,17 +47,21 @@ target_compile_definitions(hal_bar_test_server PRIVATE
 )
 
 target_include_directories(hal_bar_test_server PRIVATE
-  # 🔴 THE SERVER'S OWN DIRECTORY COMES FIRST, AND THE ORDER IS LOAD-BEARING.
-  # migcom writes a file called hal_server.h -- the SERVER-side header of
-  # hal.defs -- into the generated directory, and hal_server.h is also the name
-  # of the HAL's own header, the one that defines struct hal_device_info.  With
-  # the generated directory first, `#include "hal_server.h"' finds a header
-  # full of MIG declarations and the record this program is written about is an
-  # incomplete type.
+  # The HAL's own directory comes first, and it no longer has to (#565).
   #
-  # ⚠️ Nothing here includes migcom's copy, so shadowing it costs nothing: the
-  # server half of hal.defs is removed from the sources above, because this
-  # program is a client of the HAL and answers no RPC.
+  # 🔴 IT USED TO BE LOAD-BEARING, and this comment used to say so: migcom
+  # wrote a file called hal_server.h -- the SERVER-side header of hal.defs --
+  # into the generated directory below, and hal_server.h is also the name of
+  # the HAL's own header, the one that defines struct hal_device_info.  With
+  # the generated directory first, `#include "hal_server.h"' found a header
+  # full of MIG declarations and the record this program is written about was
+  # an incomplete type.
+  #
+  # 🔑 A build whose correctness rests on the order of two -I flags is one edit
+  # away from being wrong and reports the choice to nobody.  The MIG call above
+  # asks for the user half only now, so there is no second hal_server.h to
+  # order against -- this program is a client of the HAL and answers no RPC,
+  # which was already why the server .c was being removed again by hand.
   ${CMAKE_SOURCE_DIR}/src/servers/hal_server
   ${CMAKE_SOURCE_DIR}/src/lib/libpci
   ${_HB_OUT}
