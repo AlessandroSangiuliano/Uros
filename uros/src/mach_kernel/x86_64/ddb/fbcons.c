@@ -43,12 +43,37 @@
 #define FB_MAX_COLS	480
 #define FB_MAX_ROWS	135
 
+/*
+ * ── The screen JUMPS, it does not slide (#568) ─────────────────────────
+ *
+ * 🔴 SCROLLING IS THE WHOLE COST OF THIS CONSOLE, and it is not close.  An
+ * entry-14 boot drew 1.78 MILLION glyphs, of which eight thousand were the
+ * initial clear: everything else was five hundred and forty-five scrolls, each
+ * redrawing most of the screen so that it could move up by one row.
+ *
+ * A scroll by ONE row changes every row, so the work per printed line is a
+ * whole screen.  A scroll by HALF a screen changes every row exactly as much,
+ * for twenty-five printed lines instead of one.  The work per line falls by
+ * the step, and the step costs nothing but the way it looks: the picture jumps
+ * half a page instead of sliding, which is what a terminal called jump scroll
+ * and what every early console did for the same reason.
+ *
+ * ⚠️ Nothing is lost by jumping.  After a jump the cursor sits in the middle of
+ * the screen and the lines printed since are all still there; a machine that
+ * stops shows everything from the last jump, plus the half above it.
+ *
+ * Two is the fraction and not eight, because the other half of a boot log is
+ * usually what explains the line you are reading.
+ */
+#define FB_SCROLL_FRACTION	2
+
 static struct mb2_framebuffer	fbcons_fb;	/* what the loader said */
 
 static uint8_t		*fb_base;	/* mapped, or zero */
 static unsigned		 fb_bytespp;
 static unsigned		 fb_cols, fb_rows;
 static unsigned		 fb_col, fb_row;
+static unsigned		 fb_step;	/* rows the screen jumps by */
 static int		 fb_ready;
 
 /*
@@ -186,18 +211,20 @@ static void fbcons_scroll(void)
 {
 	unsigned r, c;
 
-	for (r = 0; r + 1 < fb_rows; r++)
+	for (r = 0; r + fb_step < fb_rows; r++)
 		for (c = 0; c < fb_cols; c++) {
-			uint8_t want = fb_cell[(r + 1) * FB_MAX_COLS + c];
+			uint8_t want = fb_cell[(r + fb_step) * FB_MAX_COLS + c];
 
 			if (want != fb_cell[r * FB_MAX_COLS + c])
 				draw_cell(want, c, r);
 		}
 
-	for (c = 0; c < fb_cols; c++)
-		if (fb_cell[(fb_rows - 1) * FB_MAX_COLS + c] != ' ')
-			draw_cell(' ', c, fb_rows - 1);
+	for (r = fb_rows - fb_step; r < fb_rows; r++)
+		for (c = 0; c < fb_cols; c++)
+			if (fb_cell[r * FB_MAX_COLS + c] != ' ')
+				draw_cell(' ', c, r);
 
+	fb_row = fb_rows - fb_step;
 	fb_scrolls++;
 }
 
@@ -207,7 +234,7 @@ static void fbcons_newline(void)
 	if (fb_row + 1 < fb_rows)
 		fb_row++;
 	else
-		fbcons_scroll();
+		fbcons_scroll();	/* and it decides where the cursor lands */
 }
 
 void fbcons_putc(char ch)
@@ -321,6 +348,10 @@ void fbcons_init(void)
 	for (r = 0; r < fb_rows; r++)
 		for (c = 0; c < fb_cols; c++)
 			draw_cell(' ', c, r);
+
+	fb_step = fb_rows / FB_SCROLL_FRACTION;
+	if (fb_step == 0)
+		fb_step = 1;
 
 	fb_col = 0;
 	fb_row = 0;
