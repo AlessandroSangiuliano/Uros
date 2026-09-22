@@ -52,9 +52,19 @@ add_compile_options(-ffreestanding)
 # printf's new format attribute is what catches a 64-bit value printed through
 # a 32-bit conversion.  Nor dangling-else, maybe-uninitialized, unused-value,
 # address or array-parameter, which name real defects and are few.
-add_compile_options(-Wall
+#
+# 🔴 -Wno-parentheses IS GONE (#504), and it was 77% of the debt.
+#
+# It was hiding 463 diagnostics across the two targets and 443 of them were
+# ONE line of migcom, emitting `x + 3 & ~3' for a round-up.  That is why the
+# suppression existed and why removing it had to wait for the generator: the
+# emitted files are rewritten on every build, so fixing them would have lasted
+# until the next one.
+#
+# ⚠️ It also turns -Wdangling-else back on, which gcc folds into this switch --
+# ten of them, all in migcom's own source.
+add_compile_options(-Wall -Wold-style-definition -Wold-style-declaration
   -Wno-missing-braces
-  -Wno-parentheses
   -Wno-pointer-sign
   -Wno-unused-but-set-variable
   -Wno-unused-function
