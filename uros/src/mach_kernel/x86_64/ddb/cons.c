@@ -65,6 +65,21 @@
 static void	cons_queue(char c);
 static void	cons_wire_byte(char c);
 
+/*
+ * Nonzero once a task has claimed COM1 and the console has stepped back
+ * (#497).  Read on the two paths that reach the port and nowhere else.
+ *
+ * ⚠️ A plain int and no lock, deliberately.  It is written twice in the life
+ * of a machine -- once when a driver attaches, once when the machine is
+ * dying -- and read by every byte.  A reader that sees the old value writes
+ * one more byte to a port whose new owner has not sent anything yet (the
+ * claim happens before the driver's first write) or, on the way down, misses
+ * one byte of a panic that is repeated on fbcons and in klog anyway.  A lock
+ * on the hot path to order two events that are ordered by the machine's own
+ * lifetime would cost every byte to buy nothing.
+ */
+static int	cons_port_given_away;
+
 static char	*cons_capture_buf;
 static unsigned	 cons_capture_len;
 static unsigned	 cons_capture_max;
@@ -403,6 +418,15 @@ static void cons_wire_byte(char c)
 	 */
 	fbcons_putc(c);
 
+	/*
+	 * Somebody else drives this chip now (#497).  fbcons above has the
+	 * byte and klog had it before either of them, so this is a byte that
+	 * changes destination and not a byte that is lost -- which is why it
+	 * is not counted as dropped.
+	 */
+	if (cons_port_given_away)
+		return;
+
 	if (cons_tx_room(1) == 0) {
 		cons_tx_dropped_count++;
 		return;
@@ -498,10 +522,14 @@ static int cons_tx_one(int may_wait)
 
 	if (went) {
 		fbcons_putc(c);			/* the other output (#568) */
-		outb(COM1 + UART_DATA, (uint8_t)c);
-		/* Guarded against the unlocked writer: see cons_putc_wire(). */
-		if (cons_fifo_room != 0)
-			cons_fifo_room--;
+		/* And not to the port, if it is no longer ours (#497). */
+		if (!cons_port_given_away) {
+			outb(COM1 + UART_DATA, (uint8_t)c);
+			/* Guarded against the unlocked writer: see
+			 * cons_putc_wire(). */
+			if (cons_fifo_room != 0)
+				cons_fifo_room--;
+		}
 	}
 
 	hw_lock_unlock(&cons_tx_lock);
@@ -565,6 +593,66 @@ void cons_flush(void)
 }
 
 /*
+ * Hand COM1 over, and take it back (#497).  See cons.h for why.
+ */
+void cons_port_release(void)
+{
+	if (cons_port_given_away)
+		return;
+
+	/*
+	 * 🔑 EMPTY THE RING FIRST, AND THE CHIP AFTER IT.  Whatever is queued
+	 * was said while the port was still ours, and the new owner is about
+	 * to program the line and reset both FIFOs -- so a byte still sitting
+	 * in the ring when the flag goes up would reach the screen and never
+	 * the wire, and a byte still in the transmitter would be erased
+	 * mid-flight.  Draining here is the difference between handing over a
+	 * port and abandoning one.
+	 */
+	/*
+	 * 🔑 ANNOUNCED ON THE WIRE, WHICH MEANS BEFORE THE FLAG AND NOT AFTER.
+	 * This line's whole job is to tell whoever is reading the serial log
+	 * why it is about to go quiet; printed after the handover it would go
+	 * to the framebuffer and the klog ring -- to everywhere except the
+	 * reader it is addressed to.
+	 */
+	cons_printf("UrMach x86-64: console: COM1 handed over to its driver; "
+		    "this kernel's output goes to klog and the framebuffer "
+		    "from here (#497)\n");
+
+	cons_flush();
+	{
+		/*
+		 * ⚠️ BOUNDED, because #551 is what an unbounded wait on this
+		 * chip costs and this is the same chip.  A transmitter that
+		 * never empties is a transmitter nobody is going to rescue by
+		 * waiting longer, and the handover has to complete either way:
+		 * the alternative to giving up here is a kernel that stops
+		 * because a serial port would not drain.
+		 */
+		unsigned spins = 0;
+
+		while ((inb(COM1 + UART_LSR) & LSR_THR_EMPTY) == 0) {
+			if (++spins >= CONS_THRE_SPINS)
+				break;
+			cpu_pause();
+		}
+	}
+
+	cons_port_given_away = 1;
+}
+
+void cons_port_reclaim(void)
+{
+	cons_port_given_away = 0;
+}
+
+int cons_port_is_ours(void)
+{
+	return cons_port_given_away ? 0 : 1;
+}
+
+/*
  * Append one byte, and pay for room if the ring has none.
  *
  * A full ring means this writer is outrunning the wire, and then it drains the
@@ -619,6 +707,30 @@ void cons_async_set(int on)
 	on = 0;
 #endif
 	if (!on) {
+		/*
+		 * 🔴 AND THE PORT COMES BACK (#497), BEFORE THE DRAIN.
+		 *
+		 * Every caller of this is the machine dying or being debugged:
+		 * halt_cpu(), the stop-the-others path, and DDB entry.  Those
+		 * are exactly the moments the handover must not survive --
+		 * a panic reaching only klog and a framebuffer is invisible on
+		 * a headless box (#373), and a debugger prompt on a line whose
+		 * owner is a task that is no longer scheduled is a debugger
+		 * nobody can answer.
+		 *
+		 * ⚠️ A STATED EXCEPTION AND NOT A RACE.  The driver still
+		 * believes it owns the chip, so on the way down the two
+		 * writers CAN meet -- which is the thing this issue removed
+		 * everywhere else.  It is the right trade and it is deliberate:
+		 * a message that arrives possibly garbled beats a message that
+		 * is lost, and a machine that is stopping has no further use
+		 * for the property.
+		 *
+		 * ⚠️ Before the drain, so the bytes that were queued while the
+		 * port was somebody else's still leave on the wire.
+		 */
+		cons_port_reclaim();
+
 		cons_async_on = 0;
 		while (cons_drain_run(1, CONS_DRAIN_DOWN) != 0)
 			;
