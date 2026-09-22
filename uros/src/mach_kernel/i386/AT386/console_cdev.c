@@ -69,6 +69,34 @@ cnputc(char c)
 	fbcons_putc(c);
 }
 
+/*
+ * Nothing buffered, so nothing to arm, flush or drain (#567).
+ *
+ * This target's console is synchronous: com_putc() waits for the transmitter
+ * and hands the byte over in the caller's thread, which is what x86-64 stopped
+ * doing.  It is not an oversight that the same is not done here.  Since #207
+ * the UART belongs to userspace on this target and the kernel keeps only the
+ * writer of last resort -- for printf before char_server is up, and for panic
+ * -- so a ring here would buffer the output of exactly the moments that must
+ * not be buffered.  What this target's console should become is #212's
+ * question, and who owns the port is #497's.
+ */
+void
+cnasync(boolean_t on)
+{
+	(void) on;
+}
+
+void
+cnflush(void)
+{
+}
+
+void
+cndrain(void)
+{
+}
+
 void
 cninit(void)
 {

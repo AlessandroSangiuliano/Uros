@@ -118,7 +118,16 @@ esac
 echo "=== both-accelerators: $TARGET, now KVM ==="
 case "$TARGET" in
 x86-64)
-	UROS_X86_64_LOG=$KVM_LOG "$SCRIPT_DIR/run-x86_64.sh" "$@" -enable-kvm
+	# 🔴 --kvm, E NON `-enable-kvm' IN CODA (#567).  Tutto cio' che segue il
+	# primo argomento posizionale va a qemu, e il primo posizionale e' il
+	# budget: senza secondi in "$@" il flag finiva NELLO SLOT DEL BUDGET.
+	# run-x86_64.sh lo accettava, stampava `budget: -enable-kvms', faceva
+	# zero secondi e falliva con "NOTHING ARRIVED" -- una frase su un
+	# kernel, per una qemu mai avviata.  Quindi il braccio KVM di questo
+	# script non ha MAI girato sotto KVM, e il confronto che stampava era
+	# fra un acceleratore e il nulla.  Ora il flag e' un'opzione e non puo'
+	# finire in nessuno slot.
+	UROS_X86_64_LOG=$KVM_LOG "$SCRIPT_DIR/run-x86_64.sh" --kvm "$@"
 	KVM_RC=$?
 	;;
 i386)

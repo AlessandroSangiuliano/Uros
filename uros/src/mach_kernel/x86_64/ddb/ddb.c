@@ -1494,6 +1494,30 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 	int		was_in = in_ddb[me];
 
 	/*
+	 * 🔴 THE CONSOLE STOPS BUFFERING HERE, AND WHAT IT HAD BUFFERED GOES
+	 * OUT FIRST (#567).
+	 *
+	 * A debugger is a conversation: what it writes has to be on the wire
+	 * before it waits for the answer, and once the prompt is open there is
+	 * nothing left to hand it over -- the other processors are parked and
+	 * the tick is not arriving.  A prompt sitting in a ring is a machine
+	 * that looks hung to the one person looking at it.
+	 *
+	 * 🔑 BEFORE ddb_stop_others(), AND THAT ORDER IS LOAD-BEARING.  The
+	 * others are stopped with an NMI, which a processor holding the port's
+	 * lock cannot refuse; stopping first could park one of them inside the
+	 * drain, and then the flush below would wait for a lock nobody is left
+	 * to release.  Done here, while the machine is still whole, the ring
+	 * ends empty and disarmed -- and cons_drain() takes the port only when
+	 * the ring is not empty, so from this line on nobody takes it at all.
+	 *
+	 * Not put back on leaving, deliberately.  The machine reached a
+	 * debugger; the synchronous console is the one to leave it with, and
+	 * the next printf_init() there will ever be is on the next boot.
+	 */
+	cons_async_set(0);
+
+	/*
 	 * Marked before anything is printed, so that a tick arriving while the
 	 * prompt is open cannot poll its way into a second one underneath it.
 	 * Restored rather than cleared, because a fault taken INSIDE the

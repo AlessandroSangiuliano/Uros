@@ -288,8 +288,23 @@ int 		cons_is_com1 __attribute__((section(".data"))) = 0;
 						   then com1 is the console */
 char 		com_halt_char = '_' & 0x1f; 	/* CTRL(_) to enter ddb */
 
+/*
+ * 🔑 115200, the same number x86-64's boot.S now programs (#567) -- and this
+ * is NOT where this target's console speed is decided, which is what made the
+ * two look as though they disagreed.
+ *
+ * com_cons_init() below READS the divisor already in the port and sets
+ * cons_ispeed from what it finds.  On this target the UART belongs to whoever
+ * programmed it before the kernel -- firmware, GRUB, or qemu's reset value --
+ * and the kernel adopts that speed rather than imposing one (#207; #497 owns
+ * the question of who owns the port).  ISPEED is the fallback: the speed a
+ * tty is given when there is nothing to adopt.  So the 9600 that stood here
+ * was never the console's speed; it was the speed of a port nobody had
+ * programmed.  What changes is that the number written down in this tree is
+ * now one number and not two.
+ */
 #ifndef	PORTSELECTOR
-#define ISPEED	9600
+#define ISPEED	115200
 #define IFLAGS	(EVENP|ODDP|ECHO|CRMOD)
 #else
 #define ISPEED	4800

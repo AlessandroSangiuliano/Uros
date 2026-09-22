@@ -10,4 +10,7 @@
 
 void cons_cost_report(void);
 
+/* Where this boot's console bytes were handed over (#567); at halt. */
+void cons_ring_report(void);
+
 #endif	/* _X86_64_DDB_CONS_COST_H_ */

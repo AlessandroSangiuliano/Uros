@@ -29,7 +29,8 @@
 #      sink is full four kilobytes after the reader stops.
 #   3. During the stall the processor is sampled through the monitor: RIP,
 #      mapped to a symbol with nm.  A kernel that waits for ever is IN
-#      cons_putc in every sample; a kernel that gives up is somewhere else,
+#      the UART wait in every sample (UART_WAIT below names it); a kernel
+#      that gives up is somewhere else,
 #      doing whatever the boot does next.
 #   4. Reading resumes, and what arrives is counted.  The bounded kernel lost
 #      bytes -- that is the deal -- and went on; the unbounded one lost none
@@ -55,6 +56,20 @@ import argparse, bisect, fcntl, os, re, select, socket, subprocess, sys, time
 
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 LOCK = "/tmp/uros-x86_64-run.lock"
+
+# The symbols that ARE the wait on the transmitter.
+#
+# 🔴 A LIST, AND IT HAS TO BE KEPT (#567).  This asks "is the processor inside
+# the UART wait", and it can only answer with the names the compiler actually
+# emitted: a wait that moved into a function not named here reads as a kernel
+# that kept running, which is the WRONG answer given loudly.  The wait was in
+# cons_putc when this was written; #567 moved it into cons_tx_room, which both
+# writers now share, and left cons_drain_run as the caller that inlines the
+# one-byte hand-over.  Check with `nm -S mach_kernel | grep cons_' after any
+# change to that file, and add what you find.
+UART_WAIT = ("cons_putc", "cons_putc_wire", "cons_tx_room", "cons_drain_run",
+             "cons_flush", "kputc")
+
 
 def symbols(kernel):
     out = subprocess.run(["nm", "-n", "--defined-only", kernel],
@@ -201,7 +216,7 @@ def main():
             print(f"uart-stall: monitor: {e}", file=sys.stderr); rips = []
         syms = [where(addrs, names, r) for r in rips]
         seen.append(syms)
-        if any(s in ("cons_putc", "kputc") for s in syms):
+        if any(s in UART_WAIT for s in syms):
             inside += 1
         print(f"  sample {i + 1}: " + (", ".join(f"{s} ({r:#x})" for r, s in zip(rips, syms)) or "(no answer)"))
 

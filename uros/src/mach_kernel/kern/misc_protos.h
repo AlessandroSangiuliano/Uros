@@ -270,6 +270,25 @@ extern void safe_gets(
 
 extern void cnputc(char);
 
+/*
+ * The three the console needs once a byte is not written in the caller's
+ * thread (#567).  A target whose console is synchronous answers all three
+ * with nothing, and says so where it does.
+ *
+ *   cnasync(TRUE)   the kernel's own printf stops writing the wire in the
+ *                   caller's thread.  Called by printf_init(), because that
+ *                   is the moment printf becomes the writer.
+ *   cnasync(FALSE)  the way down: stop buffering, AND get out what is
+ *                   already buffered.  panic(), the debugger, halt_all_cpus.
+ *   cnflush()       get out what is buffered, waiting for the device.  What
+ *                   printf() calls once it has let printf_lock go.
+ *   cndrain()       get out what the device will take right now, without
+ *                   waiting.  The clock tick and the idle loop.
+ */
+extern void cnasync(boolean_t on);
+extern void cnflush(void);
+extern void cndrain(void);
+
 extern int cngetc(void);
 
 extern int cnmaygetc(void);
