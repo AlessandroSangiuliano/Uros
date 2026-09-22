@@ -33,6 +33,7 @@
 #include <cpu/pci_msix.h>	/* #457: a device's own table */
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
+#include <ddb/cons.h>	/* #497: who owns COM1 */
 #include <kern/misc_protos.h>	/* printf */
 #include <trap/trap.h>	/* the vector table, and the replay path */
 
@@ -114,6 +115,52 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 	case 2:	outw((uint16_t)port, (uint16_t)value); break;
 	case 4:	outl((uint16_t)port, (uint32_t)value); break;
 	}
+}
+
+/*
+ * COM1's eight registers, which is the one legacy range this machine's kernel
+ * is also a writer of (#497).
+ *
+ * ⚠️ The whole window and not the base.  A driver claims 0x3F8..0x3FF and a
+ * comparison against 0x3F8 alone would miss a claim that named the same chip
+ * starting one register in -- the mistake check_io_port() records having made
+ * about PCI windows, arriving here in its legacy form.
+ */
+#define	COM1_BASE	0x3F8u
+#define	COM1_COUNT	8u
+
+static boolean_t
+covers_com1(unsigned int base, unsigned int count)
+{
+	return (base <= COM1_BASE
+		&& base + count >= COM1_BASE + COM1_COUNT) ? TRUE : FALSE;
+}
+
+void
+device_md_io_claimed(unsigned int base, unsigned int count)
+{
+	if (covers_com1(base, count))
+		cons_port_release();
+}
+
+void
+device_md_io_unclaimed(unsigned int base, unsigned int count)
+{
+	/*
+	 * 🔑 THE KERNEL TAKES IT BACK, AND THAT IS NOT SYMMETRY FOR ITS OWN
+	 * SAKE.  A driver that detaches leaves a machine whose only remaining
+	 * writers are the klog ring and a framebuffer -- and a framebuffer is
+	 * no use at all on the headless boxes this port has to run on (#373).
+	 * The console resuming is what keeps an automated run readable after a
+	 * driver has gone away.
+	 *
+	 * ⚠️ It does NOT reprogram the line.  The driver may have changed the
+	 * divisor; the console adopts whatever it finds, which is what it has
+	 * always done on this target -- boot.S sets the speed and cons.c has
+	 * never asked what it is.
+	 */
+	if (covers_com1(base, count))
+		cons_port_reclaim();
 }
 
 /*
