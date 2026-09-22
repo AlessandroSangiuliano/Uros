@@ -40,7 +40,7 @@
 #include <i386/proc_reg.h>		/* rdmsr (#372 fb memtype probe) */
 #include <vm/vm_kern.h>			/* kmem_alloc, kernel_map (#372 shadow) */
 #include "fbcons.h"
-#include "fbcons_font.h"
+#include <device/fbcons_font.h>	/* #568: one copy, shared with x86-64 */
 
 #define FONT_W		8
 #define FONT_H		16
