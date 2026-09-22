@@ -1076,14 +1076,81 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
  */
 static uint64_t device_next = DEVICE_MAP_BASE;
 
-uint64_t pmap_map_device(uint64_t pa, uint64_t size)
+/*
+ * ── Memory types, and the one entry this target repurposes (#568) ──────
+ *
+ * IA32_PAT holds eight entries; a page selects one with PAT, PCD and PWT.
+ * The architectural defaults are WB, WT, UC-, UC and then the same four
+ * again, so the four reachable without bit 7 are WB, WT, UC- and UC -- no
+ * write-combining among them, which is why a framebuffer mapped by
+ * pmap_map_device() below is uncacheable and costs 128 separate bus
+ * transactions a glyph.
+ *
+ * Entry 1 is taken for write-combining.  See pmap.h for why entry 1 and not
+ * the entry i386 took.
+ */
+#define IA32_PAT_MSR		0x277
+#define PAT_ENTRY_WC		0x01ULL		/* the encoding for WC */
+#define PAT_WC_SLOT		1		/* selected by PWT alone */
+
+static void pmap_pat_install(uint64_t pat)
+{
+	uint64_t cr0, cr3;
+
+	/*
+	 * The sequence the SDM gives for changing a memory-type register, and
+	 * every step of it is load-bearing.  Caches must not be left holding
+	 * lines under the old type while the new one is installed, and the TLB
+	 * must not be left holding translations that carry it.
+	 *
+	 * ⚠️ Interrupts off for the whole of it: this processor is running
+	 * with its caches disabled in the middle, and an interrupt handler
+	 * that ran there would run at a speed nothing else in the system
+	 * expects.
+	 */
+	__asm__ volatile("cli" : : : "memory");
+
+	cr0 = read_cr0();
+	write_cr0((cr0 & ~CR0_NW) | CR0_CD);	/* no-fill cache mode */
+	wbinvd();
+	cr3 = read_cr3();
+	write_cr3(cr3);				/* flush the TLB */
+
+	wrmsr(IA32_PAT_MSR, pat);
+
+	wbinvd();
+	write_cr3(cr3);
+	write_cr0(cr0);
+
+	__asm__ volatile("sti" : : : "memory");
+}
+
+void pmap_enable_wc(void)
+{
+	uint32_t a, b, c, d;
+	uint64_t pat;
+
+	cpuid(1, &a, &b, &c, &d);
+	if ((d & (1u << 16)) == 0)		/* CPUID.01H:EDX.PAT */
+		return;
+
+	pat = rdmsr(IA32_PAT_MSR);
+	if (((pat >> (8 * PAT_WC_SLOT)) & 0xFF) == PAT_ENTRY_WC)
+		return;				/* already ours */
+
+	pat &= ~(0xFFULL << (8 * PAT_WC_SLOT));
+	pat |= PAT_ENTRY_WC << (8 * PAT_WC_SLOT);
+	pmap_pat_install(pat);
+}
+
+static uint64_t pmap_map_device_flags(uint64_t pa, uint64_t size,
+				      uint64_t cache_flags)
 {
 	uint64_t offset = pa & (PAGE_SIZE_4K - 1);
 	uint64_t first = pa - offset;
 	uint64_t last = (pa + size + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
 	uint64_t va = device_next;
-	uint64_t flags = INTEL_PTE_WRITE | INTEL_PTE_NX
-		       | INTEL_PTE_NCACHE | INTEL_PTE_WTHRU;
+	uint64_t flags = INTEL_PTE_WRITE | INTEL_PTE_NX | cache_flags;
 
 	if (size == 0)
 		return 0;
@@ -1107,6 +1174,23 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	}
 
 	return va + offset;
+}
+
+uint64_t pmap_map_device(uint64_t pa, uint64_t size)
+{
+	return pmap_map_device_flags(pa, size,
+				     INTEL_PTE_NCACHE | INTEL_PTE_WTHRU);
+}
+
+uint64_t pmap_map_device_wc(uint64_t pa, uint64_t size)
+{
+	/*
+	 * PWT alone, which selects PAT entry 1 -- write-combining once
+	 * pmap_enable_wc() has run, write-through until then.  Never PCD:
+	 * with it the entry selected is 3, which is uncacheable and is the
+	 * thing being escaped.
+	 */
+	return pmap_map_device_flags(pa, size, INTEL_PTE_WTHRU);
 }
 
 /*

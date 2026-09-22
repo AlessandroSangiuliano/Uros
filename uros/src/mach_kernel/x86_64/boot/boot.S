@@ -41,6 +41,35 @@ mb2_header:
 	.long	0				/* architecture 0 = i386 (32-bit handoff) */
 	.long	mb2_header_end - mb2_header	/* header length */
 	.long	-(0xE85250D6 + 0 + (mb2_header_end - mb2_header))
+
+	/* Ask the loader for a linear framebuffer (#568).
+	 *
+	 * 🔑 THE ONLY WAY TO GET ONE IS TO ASK BEFORE BEING LOADED.  Until
+	 * now this header carried nothing but its end tag, so GRUB left the
+	 * display in whatever mode firmware had and told us nothing about it
+	 * -- and on this target the serial port was therefore the only output
+	 * there is (#497).  A machine with no COM port, which is every recent
+	 * laptop and the one in scripts/make-omen-boot.sh, could not be
+	 * booted here at all.
+	 *
+	 * ⚠️ flags bit 0 = OPTIONAL, and that bit is the whole difference
+	 * between a second output and a kernel that will not load.  A
+	 * required tag a loader cannot satisfy is a refusal to boot; asked
+	 * for optionally, a machine that has no framebuffer starts exactly as
+	 * it does today and says so.  i386 has asked this way since #342.
+	 *
+	 * Zero width, height and depth: no preference.  What comes back is a
+	 * fact about the machine and is read from the type-8 tag, never
+	 * assumed -- see mb2_framebuffer().
+	 */
+	.align	8
+	.short	5				/* MULTIBOOT_HEADER_TAG_FRAMEBUFFER */
+	.short	1				/* flags: optional */
+	.long	20				/* size */
+	.long	0				/* width:  no preference */
+	.long	0				/* height: no preference */
+	.long	0				/* depth:  no preference */
+
 	.align	8
 	.short	0				/* end tag */
 	.short	0

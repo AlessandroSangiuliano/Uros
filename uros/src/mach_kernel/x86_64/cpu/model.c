@@ -21,6 +21,7 @@
 #include <cpu/ipi.h>
 #include <cpu/regs.h>		/* #461: cpu_pause while the panic prints */
 #include <ddb/cons.h>
+#include <ddb/fbcons.h>
 #include <ddb/cons_cost.h>	/* #567: one line about the ring, at the halt */
 #include <cpu/smp.h>
 #include <sync/atomic.h>	/* #461: one stop broadcast, not four */
@@ -123,6 +124,7 @@ halt_cpu(void)
 	 */
 	cons_ring_report();
 	cons_async_set(0);
+	fbcons_flush();		/* #568: and out of the write-combining buffers */
 
 	if (panicstr != (const char *) 0) {
 		uint64_t spins;

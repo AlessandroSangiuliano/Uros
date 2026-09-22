@@ -51,6 +51,7 @@
 
 #include <kern/misc_protos.h>
 #include <ddb/cons.h>
+#include <ddb/fbcons.h>
 #include <ddb/cons_cost.h>
 #include <time/tsc.h>
 
@@ -178,9 +179,61 @@ static int	cons_ring_said;
 void
 cons_ring_report(void)
 {
+	uint64_t hz;
+
 	if (cons_ring_said)
 		return;
 	cons_ring_said = 1;
+
+	/*
+	 * And the other output, beside the wire's figures rather than
+	 * anywhere else (#568).  Two outputs with one cost recorded is how a
+	 * reader concludes the wrong thing about the one that was not.
+	 *
+	 * ⚠️ The initial clear IS in these numbers, on purpose.  Painting the
+	 * screen black is the largest single thing this console ever does --
+	 * one glyph per cell, eight thousand of them on a 1280x800 panel --
+	 * and a per-glyph figure that quietly left it out would describe a
+	 * console nobody runs.
+	 */
+	if (!fbcons_present()) {
+		printf("UrMach x86-64: console: no framebuffer was drawn on "
+		       "this boot — COM1 was the only output there was "
+		       "(#568)\n");
+	} else {
+		uint64_t g = fbcons_glyphs();
+		uint64_t cyc = fbcons_cycles();
+
+		hz = tsc_hz();
+		if (hz == 0 || g == 0)
+			printf("UrMach x86-64: console: the framebuffer drew "
+			       "%llu glyphs in %llu cycles on a %ux%u screen, "
+			       "%llu scrolls — NOT ASKED for the time, no "
+			       "calibrated TSC (#568)\n",
+			       (unsigned long long) g,
+			       (unsigned long long) cyc,
+			       fbcons_cols(), fbcons_rows(),
+			       (unsigned long long) fbcons_scrolls());
+		else
+			printf("UrMach x86-64: console: the framebuffer drew "
+			       "%llu glyphs in %llu cycles = %llu ns a glyph "
+			       "on a %ux%u screen, %llu scrolls (#568)\n",
+			       (unsigned long long) g,
+			       (unsigned long long) cyc,
+			       /*
+				* 🔴 DIVIDED BY THE GLYPHS FIRST.  cyc is the
+				* whole boot's: 5.7e10 under KVM, and
+				* multiplying that by a billion overflows a
+				* 64-bit unsigned and reported 223 ns for a
+				* glyph that costs 9600.  A number that is
+				* forty times too small, on the line whose job
+				* is to say what this console costs.
+				*/
+			       (unsigned long long)
+					((cyc / g) * 1000000000ULL / hz),
+			       fbcons_cols(), fbcons_rows(),
+			       (unsigned long long) fbcons_scrolls());
+	}
 
 	printf("UrMach x86-64: console: over this boot the ring was handed "
 	       "over %u times by the thread that printed, %u by a tick or an "
