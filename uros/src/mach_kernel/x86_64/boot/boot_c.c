@@ -36,6 +36,7 @@
 #include <cpu/iommu.h>		/* #432: what polices DMA, if anything */
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
+#include <ddb/fbcons.h>
 #include <ddb/ddb.h>
 #include <ddb/ksym.h>
 #include <cpu/ipi.h>
@@ -302,7 +303,17 @@ static void framebuffer_selftest(uint32_t info)
 {
 	struct mb2_framebuffer fb;
 
-	if (!mb2_framebuffer(info, &fb)) {
+	mb2_framebuffer(info, &fb);
+
+	/*
+	 * Kept before it is reported, and kept whether or not there is one:
+	 * fbcons_init() runs long after this, once the pmap can map device
+	 * memory, and by then GRUB's tag list is nobody's in particular
+	 * (#568).
+	 */
+	fbcons_remember(&fb);
+
+	if (!fb.present) {
 		kputs("UrMach x86-64: NO usable framebuffer from the loader");
 		if (fb.fb_type == MB2_FB_TYPE_EGA_TEXT)
 			kputs(" — it offered EGA TEXT, which is character"

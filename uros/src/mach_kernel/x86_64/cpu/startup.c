@@ -43,6 +43,7 @@
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
+#include <ddb/fbcons.h>	/* #568: the other output, mapped once the pmap is up */
 
 /*
  * Machine initialisation, called once the machine-independent kernel is far
@@ -74,6 +75,20 @@ machine_init(void)
 	 */
 	trap_set_handler(LAPIC_TIMER_VECTOR, clock_event_tick);
 	clock_event_init(LAPIC_TIMER_VECTOR);
+
+	/*
+	 * The other output (#568).
+	 *
+	 * Here because this is the first machine-dependent call after
+	 * vm_mem_bootstrap(), and mapping the framebuffer needs a pmap that
+	 * can map device memory.  It is the same position i386 gives it --
+	 * cninit(), after i386_init() -- and it has the same consequence,
+	 * which is worth stating rather than discovering: everything printed
+	 * BEFORE this line reached COM1 only.  That is structural and not an
+	 * oversight, because the framebuffer sits above the low identity map
+	 * and there is no way to reach it earlier.
+	 */
+	fbcons_init();
 
 	/*
 	 * #356/#446: the synchronous-RPC hand-off on block, and the ONE place

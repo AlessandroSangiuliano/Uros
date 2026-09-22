@@ -10,6 +10,7 @@
 
 #include <cpu/regs.h>
 #include <ddb/cons.h>
+#include <ddb/fbcons.h>
 #include <kern/lock.h>
 #include <time/tsc.h>
 
@@ -62,6 +63,7 @@
  * rather than the code.
  */
 static void	cons_queue(char c);
+static void	cons_wire_byte(char c);
 
 static char	*cons_capture_buf;
 static unsigned	 cons_capture_len;
@@ -258,12 +260,32 @@ void cons_putc(char c)
 		return;
 	}
 
+	/*
+	 * The other output (#568), and exactly once per byte.
+	 *
+	 * 🔑 HERE AND NOT IN cnputc(), because cnputc() is not the bottom.
+	 * The debugger prints through cons_puts(), the trap reporter through
+	 * cons_putc_wire(), and neither goes anywhere near the
+	 * machine-independent name -- so a mirror placed there would have left
+	 * a fault report and a debugger prompt invisible on a machine whose
+	 * only output is the screen, which is the one machine this exists for.
+	 *
+	 * ⚠️ AFTER the capture check: while a selftest has the console pointed
+	 * at memory, the console IS that memory, and drawing its bytes would
+	 * put a test's intermediate output on an operator's screen.
+	 *
+	 * ⚠️ And cons_putc_wire() mirrors too, which is why the byte is handed
+	 * to the port below through the shared inner and not through it: one
+	 * call each way, never two.
+	 */
+	fbcons_putc(c);
+
 	if (cons_async_on) {
 		cons_queue(c);
 		return;
 	}
 
-	cons_putc_wire(c);
+	cons_wire_byte(c);
 }
 
 /*
@@ -367,7 +389,7 @@ static unsigned cons_tx_room(int may_wait)
  * has turned it off -- this is also cons_putc()'s path, and then there is no
  * drainer in existence and no race at all.
  */
-void cons_putc_wire(char c)
+static void cons_wire_byte(char c)
 {
 	if (cons_tx_room(1) == 0) {
 		cons_tx_dropped_count++;
@@ -377,6 +399,12 @@ void cons_putc_wire(char c)
 	outb(COM1 + UART_DATA, (uint8_t)c);
 	if (cons_fifo_room != 0)
 		cons_fifo_room--;
+}
+
+void cons_putc_wire(char c)
+{
+	fbcons_putc(c);
+	cons_wire_byte(c);
 }
 
 /*
