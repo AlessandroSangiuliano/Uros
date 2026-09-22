@@ -14,8 +14,16 @@
  * accelerator and the machine they were taken on -- which is the only place a
  * figure like this means anything (#516).
  *
- * Five lines of one length, the median, and two numbers the line alone would
- * hide:
+ * Five lines of one length, two medians, and two numbers the line alone would
+ * hide.
+ *
+ * 🔑 THE SECOND MEDIAN IS THE WINDOW (#567), and the old number is quoted
+ * beside it in the line itself rather than left in a commit message: before
+ * the console kept a ring, the whole of a line's cost was spent inside
+ * printf_lock with preemption off and interrupts masked, so what the window
+ * USED TO BE is the first figure on the line.  A reader comparing a log from
+ * before this change with one from after needs both, and only one of them is
+ * measurable on any given boot.
  *
  * ⚠️ The DEVICE's pace, and not the wire's: under an accelerator there is no
  * wire, and the two are not even the same order -- 83 us a byte under KVM
@@ -112,10 +120,10 @@ cons_cost_report(void)
 
 	if (hz == 0) {
 		printf("UrMach x86-64: console: a %u-byte line costs %llu "
-		       "cycles, of which %llu is the window — NOT ASKED for "
-		       "the time, no calibrated TSC; the slowest byte polled "
-		       "%u times of %u allowed, %u bytes dropped so far "
-		       "(#551, #567)\n",
+		       "cycles, of which %llu is the window — before #567 the "
+		       "window was ALL of it — and NOT ASKED for the time, no "
+		       "calibrated TSC; the slowest byte polled %u times of "
+		       "%u allowed, %u bytes dropped so far (#551, #567)\n",
 		       len, (unsigned long long) med,
 		       (unsigned long long) med_hold, peak, CONS_THRE_SPINS,
 		       dropped);
@@ -126,8 +134,9 @@ cons_cost_report(void)
 		printf("UrMach x86-64: console: a %u-byte line costs %llu "
 		       "cycles = %llu us, %llu ns a byte, of which %llu ns a "
 		       "byte is the WINDOW where this processor cannot be "
-		       "rescheduled; the slowest byte polled %u times of %u "
-		       "allowed, %u bytes dropped so far (#551, #567)\n",
+		       "rescheduled — before #567 the window was ALL of it; "
+		       "the slowest byte polled %u times of %u allowed, %u "
+		       "bytes dropped so far (#551, #567)\n",
 		       len, (unsigned long long) med, (unsigned long long) us,
 		       (unsigned long long) ns_byte,
 		       (unsigned long long) ns_hold, peak, CONS_THRE_SPINS,
