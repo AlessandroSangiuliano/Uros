@@ -8,7 +8,7 @@
  *
  * Nothing in the tree recorded what a kernel printf costs, which is how 9.6
  * million cycles inside a trap were read as a defect in the trap: the whole
- * of it was a 55-byte diagnostic leaving a polled UART at the wire's pace,
+ * of it was a 55-byte diagnostic leaving a polled UART at the DEVICE's pace,
  * under printf_lock with interrupts masked.  So the cost is measured on every
  * boot and written into the log beside the numbers it explains, on the
  * accelerator and the machine they were taken on -- which is the only place a
@@ -16,6 +16,12 @@
  *
  * Five lines of one length, the median, and two numbers the line alone would
  * hide:
+ *
+ * ⚠️ The DEVICE's pace, and not the wire's: under an accelerator there is no
+ * wire, and the two are not even the same order -- 83 us a byte under KVM
+ * against the 260 us that 8N1 at 38400 baud takes on a real line (#567).
+ * Which of them a boot measured is decided by what it booted on, which is why
+ * the conditions block beside this line is part of the number (#516).
  *
  *   - the most polls a healthy byte spent waiting for the transmitter, beside
  *     the bound cons_putc() gives up at.  The bound is in polls, and a poll is
