@@ -2113,7 +2113,7 @@ vs_cluster_read(
 	paging_segment_t	ps;
 	struct clmap		clmap;
 	kern_return_t		error = KERN_SUCCESS;
-	int			size, size_wanted, i;
+	int			size, i;
 	unsigned int		residual;
 	int			unavail_size;
 	default_pager_thread_t	*dpt;
@@ -2230,7 +2230,6 @@ vs_cluster_read(
 			 */
 			vs_object_data_provided(vs, buffer, offset, size);
 		} else {
-			size_wanted = size;
 			if (error == KERN_SUCCESS) {
 				if (residual == size) {
 					/*

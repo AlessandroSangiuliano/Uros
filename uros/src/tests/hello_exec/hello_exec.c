@@ -141,7 +141,6 @@ dump_auxv(uint32_t *init_sp)
 {
     uint32_t argc = init_sp[0];
     uint32_t *p   = &init_sp[1 + argc + 1];   /* past argv + NULL */
-    int n        = 0;
     char buf[128];
     char *w;
 

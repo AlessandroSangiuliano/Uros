@@ -146,23 +146,6 @@
  * pulling libgcc's __udivmoddi4 into the freestanding -nostdlib build.
  * Slow but called only by printf for at most ~20 iterations per number.
  */
-static unsigned long long
-udivmod_ll(unsigned long long n, unsigned int base, unsigned int *rem)
-{
-	unsigned long long q = 0;
-	unsigned int r = 0;
-	int i;
-
-	for (i = 63; i >= 0; i--) {
-		r = (r << 1) | (unsigned int)((n >> i) & 1ULL);
-		if (r >= base) {
-			r -= base;
-			q |= (1ULL << i);
-		}
-	}
-	*rem = r;
-	return q;
-}
 
 /*
  * 🔴 A SECOND FORMATTER LIVED HERE, and it is gone (#432 audit).
@@ -453,11 +436,6 @@ printf(const char *fmt, ...)
 	return (ret);
 }
 
-static void
-savechar(void *arg, int c)
-{
-	*(*(char **)arg)++ = c;
-}
 
 /* sprintf / vsprintf live in sprintf.c (#106 — see libmach/CMakeLists.txt). */
 

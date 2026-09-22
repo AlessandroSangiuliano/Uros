@@ -32,7 +32,7 @@
 /*
  * Set up the initial state of a MACH thread
  */
-void
+kern_return_t
 _pthread_setup(pthread_t thread, 
 	       void (*routine)(pthread_t), 
 	       vm_address_t vsp)
@@ -52,6 +52,10 @@ _pthread_setup(pthread_t thread,
 				   (thread_state_t) &state,
 				   &count),
 		  r);
+	/* Checked, which it was not; see the x86-64 twin (#569). */
+	if (r != KERN_SUCCESS)
+		return r;
+
 	ts->eip = (int) routine;
 	*--sp = (int) thread;	/* argument to function */
 	*--sp = 0;		/* fake return address */
@@ -62,4 +66,5 @@ _pthread_setup(pthread_t thread,
 				   (thread_state_t) &state,
 				   i386_THREAD_STATE_COUNT),
 		  r);
+	return r;
 }

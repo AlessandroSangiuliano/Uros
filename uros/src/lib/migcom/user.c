@@ -2061,20 +2061,6 @@ WriteFieldDecl(FILE *file, argument_t *arg)
 /* Fill in the string with an expression that refers to the size
  * of the specified array:
  */
-static void
-GetArraySize(register argument_t *arg, char *size)
-{
-    register ipc_type_t *it = arg->argType;
-
-    if (it->itVarArray) {
-	if (arg->argCount->argByReferenceUser) {
-	    sprintf(size, "*%s", arg->argCount->argVarName);
-	} else
-	    sprintf(size, "%s", arg->argCount->argVarName);
-    } else {
-	sprintf(size, "%d", (it->itNumber * it->itSize + 7) / 8);
-    }
-}
 
 
 static void
@@ -2163,8 +2149,6 @@ WriteRPCRoutineDescriptor(file, rt, arg_count, descr_count,
     int arg_count, descr_count;
     string_t work_routine, stub_routine, sig_array;
 {
-    register argument_t *arg;
-
     fprintf(file, "          { (mig_impl_routine_t) %s,\n\
             (mig_stub_routine_t) %s, ",
 	    work_routine, stub_routine);
@@ -2280,9 +2264,7 @@ static int
 CheckRPCCall(register routine_t *rt)
 {
     register argument_t *arg;
-    register int i;
 
-    i = 0;
     for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)
     {
 	if (akCheck(arg->argKind, akbUserArg) &&
@@ -2310,223 +2292,12 @@ WriteRPCRoutine(FILE *file, register routine_t *rt)
 
 /********************** End UserRPCTrap Routines*************************/
 
-/* Process an IN/INOUT arg before the short-circuited RPC */
-static void
-WriteShortCircInArgBefore(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-    char size[128];
-
-    fprintf(file, "\n\t/* IN %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-	    if (!(arg->argFlags & flDealloc) &&
-		    (!(arg->argFlags & flAuto) || !(arg->argFlags & flConst))) {
-		/* Need to map a copy of the array: */
-		GetArraySize(arg, size);
-		fprintf(file, "\t(void)vm_read(mach_task_self(),\n");
-		fprintf(file, "\t\t      (vm_address_t) %s%s, %s, (vm_address_t *) &_%sTemp_, &_MIG_Ignore_Count_);\n",
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName, size, arg->argVarName);
-		/* Point argument at the copy: */
-		fprintf(file, "\t*(char **)&%s%s = _%sTemp_;\n",
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName,
-					arg->argVarName);
-	    } else if ((arg->argFlags & flDealloc) &&
-			    ((arg->argFlags & flAuto) || it->itMigInLine)) {
-		/* Point the temp var at the original argument: */
-		fprintf(file, "\t_%sTemp_ = (char *) %s%s;\n",
-					arg->argVarName,
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber > 1) {
-	if (it->itStruct) {
-	    /* Arg is a struct -- nothing to do. */
-	} else {
-	    /* Arg is a C string or an in-line array: */
-	    if (!argIsOut(arg) && !(arg->argFlags & flConst)) {
-		/* Have to copy it into a temp.  Use a stack var, if this would
-		 * not overflow the -maxonstack specification:
-		 */
-		if (it->itTypeSize <= sizeof(char *) ||
-			arg->argRoutine->rtMessOnStack ||
-			arg->argRoutine->rtTempBytesOnStack +
-				     it->itTypeSize <= MaxMessSizeOnStack) {
-		    fprintf(file, "\t{   char _%sTemp_[%d];\n",
-			    arg->argVarName, it->itTypeSize);
-		    arg->argRoutine->rtTempBytesOnStack += it->itTypeSize;
-		    arg->argTempOnStack = TRUE;
-		} else {
-		    fprintf(file, "\t{   _%sTemp_ = (char *) %s(%d);\n",
-			    arg->argVarName, MessAllocRoutine, it->itTypeSize);
-		    arg->argTempOnStack = FALSE;
-		}
-		WriteCopyArg(file, arg, "_%sTemp_", "/* %s */ (char *) %s",
-				  arg->argVarName, arg->argVarName,
-				  arg->argVarName);
-		/* Point argument at temp: */
-		fprintf(file, "\t    *(char **)&%s%s = _%sTemp_;\n",
-					   (arg->argByReferenceUser ? "*" : ""),
-					   arg->argVarName,
-					   arg->argVarName);
-		fprintf(file, "\t}\n");
-	    }
-	}
-    }
-}
 
 
-/* Process an INOUT/OUT arg before the short-circuited RPC */
-static void
-WriteShortCircOutArgBefore(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-
-    fprintf(file, "\n\t/* OUT %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-	    if (!argIsIn(arg) && (arg->argFlags & flOverwrite)) {
-		/* Point the temp var at the original argument: */
-		fprintf(file, "\t    _%sTemp_ = (char *) %s%s;\n",
-					arg->argVarName,
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber > 1) {
-	/* Arg is an in-line array: */
-    }
-}
  
 
 
-/* Process an IN arg after the short-circuited RPC */
-static void
-WriteShortCircInArgAfter(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-    char size[128];
 
-    fprintf(file, "\n\t/* IN %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-	    GetArraySize(arg, size);
-	    if ((!(arg->argFlags & flAuto) && it->itMigInLine) ||
-		((arg->argFlags & flAuto) &&
-				((arg->argFlags & flDealloc) ||
-				 !(arg->argFlags & flConst))
-		)) {
-		/* Need to dealloc the temporary.  vm_deallocate's second
-		 * argument is a vm_address_t (integer), not a pointer —
-		 * historical migcom emitted "(vm_address_t *)" which
-		 * compiles fine on K&R / pre-strict-int compilers but
-		 * is rejected by modern gcc with -Wint-conversion. */
-		fprintf(file, "\t(void)vm_deallocate(mach_task_self(),");
-		fprintf(file, " (vm_address_t) _%sTemp_, %s);\n",
-					    arg->argVarName, size);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber > 1) {
-	if (it->itStruct) {
-	    /* Arg is a struct -- nothing to do. */
-	} else {
-	    /* Arg is a C string or an in-line array: */
-	    if (!argIsOut(arg) && !(arg->argFlags & flConst)) {
-		/* A temp needs to be deallocated, if not on stack: */
-		if (!arg->argTempOnStack) {
-		    fprintf(file, "\t%s(_%sTemp_, %d);\n",
-			    MessFreeRoutine, arg->argVarName, it->itTypeSize);
-		}
-	    }
-	}
-    }
-}
-
-static void
-WriteShortCircOutArgAfter(FILE *file, register argument_t *arg)
-{
-    register ipc_type_t *it = arg->argType;
-    char size[128];
-
-    fprintf(file, "\n\t/* OUT %s: */\n", arg->argVarName);
-
-    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD)) {
-	switch (arg->argKPD_Type) {
-	case MACH_MSG_PORT_DESCRIPTOR:
-	    break;
-	case MACH_MSG_OOL_DESCRIPTOR:
-	    /* Arg is an out-of-line array: */
-
-	    /* Calculate size of array: */
-	    GetArraySize(arg, size);
-	    if (!(arg->argFlags & flDealloc) || (arg->argFlags & flOverwrite)) {
-		/* Copy argument to vm_allocated Temp: */
-		fprintf(file, "\t(void)vm_read(mach_task_self(),\n");
-		fprintf(file, "\t\t      (vm_address_t) %s%s, %s, (vm_address_t *) &_%sTemp_, &_MIG_Ignore_Count_);\n",
-				    (arg->argByReferenceUser ? "*" : ""),
-				    arg->argVarName, size, arg->argVarName);
-		if (!argIsIn(arg) && (arg->argFlags & flDealloc) &&
-					(arg->argFlags & flOverwrite)) {
-		    /* Deallocate argument returned by server.  Same
-		     * vm_deallocate signature fix as above. */
-		    fprintf(file, "\t(void)vm_deallocate(mach_task_self(),");
-		    fprintf(file, " (vm_address_t) %s%s, %s);\n",
-				    (arg->argByReferenceUser ? "*" : ""),
-				    arg->argVarName, size);
-		}
-		/* Point argument at new temporary: */
-		fprintf(file, "\t*(char **)&%s%s = _%sTemp_;\n",
-					(arg->argByReferenceUser ? "*" : ""),
-					arg->argVarName,
-					arg->argVarName);
-	    }
-	    break;
-	case MACH_MSG_OOL_PORTS_DESCRIPTOR:
-	    break;
-	default:
-	    printf("MiG internal error: type of kernel processed data unknown\n");
-	    exit(1);
-	}   /* end of switch */
-    } else if (it->itNumber != 1) {
-	/* Arg is an in-line array: */
-    }
-}
 
 
 

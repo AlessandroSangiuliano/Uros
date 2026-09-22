@@ -1,3 +1,12 @@
+/*
+ * ⚠️ flex writes yyunput() and input() unless told not to, and nothing here
+ * uses either -- so every build of this generated file carried two
+ * `defined but not used' (#569).  Asked of the generator rather than
+ * suppressed at the compiler, for the same reason #504 fixed migcom instead
+ * of its output: the file is rewritten on every build.
+ */
+%option nounput noinput
+
 %k 10000
 %n 5000
 %a 20000

@@ -37,12 +37,6 @@
 #include <mach/mach_host.h>
 #include <string.h>
 
-static int
-bg_is_power_of_2(uint32_t n)
-{
-    return n != 0 && (n & (n - 1)) == 0;
-}
-
 static void
 flipc2_bufgroup_init_handle(struct flipc2_bufgroup *bg,
                             struct flipc2_bufgroup_header *hdr)

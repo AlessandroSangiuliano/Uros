@@ -84,16 +84,13 @@ __start(void)
 		char	kenvstr[1];	/* size varies */
 		char	k_auxv[1];	/* size varies */
 	};
-	int r11;
 	struct kframe *kfp;
 	char **targv;
 	char **argv;
 	int argc;
-	char **argcp;
 
 	kfp = (struct kframe *)Entry_sp();
 
-	argcp = (char **)kfp;		
 
 	for (argv = targv = &kfp->kargv[0]; *targv++; /* void */)
 		/* void */ ;

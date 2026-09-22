@@ -1028,7 +1028,6 @@ rtProcessRetCodeFlag(register argument_t *thisarg)
 {
     register ipc_type_t *it = thisarg->argType;
     register ipc_flags_t flags = thisarg->argFlags;
-    register arg_kind_t kind = thisarg->argKind;
     string_t name = thisarg->argVarName;
     routine_t *thisrout = thisarg->argRoutine;
 

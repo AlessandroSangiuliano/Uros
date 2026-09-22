@@ -83,13 +83,23 @@ add_compile_options(-ffreestanding)
 # working.  The answer then is to fix what it found or to name the category
 # here, beside the four below -- and a category named here is a debt, which is
 # the whole reason #432 wrote them down rather than dropping -Wall.
-add_compile_options(-Wall -Werror -Wold-style-definition -Wold-style-declaration
-  -Wno-missing-braces
-  -Wno-pointer-sign
-  -Wno-unused-but-set-variable
-  -Wno-unused-function
-  -Wno-unused-variable
-  -Wno-strict-aliasing)
+#
+# 🔴 AND THE LAST SIX ARE GONE (#569).  What they were hiding, measured with
+# them off and then fixed: seven answers stored in variables nobody read --
+# two of which were a thread resumed with no register state and a
+# thread_terminate that could fall out of the function after the stack had
+# been freed -- twelve functions nothing called, a measurement taken and
+# dropped, a disabled test kept alive by a comment that had stopped being
+# true, and one out-parameter whose type the caller had guessed.
+#
+# ⚠️ Two of the six were suppressing NOTHING: -Wno-missing-braces and
+# -Wno-strict-aliasing found zero on either target.  A debt somebody paid and
+# nobody wrote off, which is the quiet failure mode of a staged suppression --
+# it outlives its reason without saying so.
+#
+# There is nothing named here any more, so the rule is simple again: the
+# userland builds with -Wall and it builds clean.
+add_compile_options(-Wall -Werror -Wold-style-definition -Wold-style-declaration)
 
 # The ODE export directory uses pseudo-symlinks ("link ppc") for mach/machine.
 # Create a real symlink in the build tree instead: mach/machine -> the

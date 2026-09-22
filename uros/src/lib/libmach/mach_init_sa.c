@@ -61,8 +61,6 @@ vm_size_t	vm_page_size;
 
 int		mach_init(void)
 {
-	kern_return_t		kr;
-
 #undef	mach_task_self
 
 	/*
