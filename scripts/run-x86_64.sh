@@ -1078,15 +1078,6 @@ if [ "$CUT_SHORT" = 1 ]; then
 		echo "          printing meaningful lines the whole time.  Giving it more"
 		echo "          seconds is the wrong move: look for something that repeats"
 		echo "          in the log."
-	elif [ -n "$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")" ]; then
-		# #578: the wire kept moving, and a line this script waits for
-		# arrived in pieces, so it never matched.  Said as that, with the
-		# lines, instead of as a machine that went quiet.
-		echo "  FAILED: AN EXPECTED LINE NEVER ARRIVED WHOLE, after ${RUN_SECONDS}s of running."
-		expected_reports missing_reports
-		echo "          and these lines carry two programs' output -- two writers"
-		echo "          inside one line (#578, #544):"
-		awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/            /'
 	else
 		echo "  FAILED: NOTHING ARRIVED for ${SECS}s, after ${RUN_SECONDS}s of running."
 		echo "          The watchdog measures progress, not wall time, so this says"
@@ -1095,6 +1086,21 @@ if [ "$CUT_SHORT" = 1 ]; then
 		echo "          is simply slow (check the governor: this one drops to"
 		echo "          1.4 GHz on battery) give it more seconds; if it is wedged,"
 		echo "          that is the bug."
+	fi
+	# #578: say what was being waited for, and whether the wire carries
+	# lines with two programs' output in them -- a boot whose expected line
+	# arrived in two pieces waited here for it and was called "nothing
+	# arrived".  Added to the verdict rather than replacing it: a glued line
+	# somewhere does not prove the missing one is the one that was cut, and
+	# a real wedge must still read as one.  Review found the first version
+	# made that choice for the reader.
+	expected_reports missing_reports
+	_garbled=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")
+	if [ -n "$_garbled" ]; then
+		echo "          the wire also carries lines with two programs' output in"
+		echo "          them -- if one of them is the line waited for, it arrived in"
+		echo "          pieces (#578, #544):"
+		printf '%s\n' "$_garbled" | sed 's/^/            /'
 	fi
 	echo "  log: $LOG"
 	exit 1
