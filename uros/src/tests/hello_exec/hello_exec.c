@@ -10,11 +10,11 @@
  * Loaded by exec_server, runs in a fresh task with empty IPC space.
  * Cannot use Mach IPC (no ports), only kernel traps:
  *   - mach_print  (trap 14, prints to kernel console)
- *   - mach_null   (trap 15, no-op for cycle counting)
+ *   - thread_switch (trap 61, to wait asleep for the parent -- #576)
  *
  * Strategy: greet via mach_print, walk the System V ABI initial
- * stack to enumerate the AUXV entries exec_server set up, then loop
- * forever waiting to be torn down by the parent.  The AUXV dump
+ * stack to enumerate the AUXV entries exec_server set up, then park
+ * asleep until the parent tears it down.  The AUXV dump
  * doubles as the acceptance check for #236 — a non-empty list with
  * AT_PAGESZ + AT_RANDOM (always) plus AT_SYSINFO_EHDR + AT_ENTRY
  * (when exec_server v0.4.0 is in place) proves the wire is right.
@@ -47,11 +47,20 @@ mach_print(const char *s)
     );
 }
 
+/* SWITCH_OPTION_WAIT, from <mach/thread_switch.h>, which this file cannot
+ * include: it has no headers but <stdint.h>. */
+#define HE_SWITCH_OPTION_WAIT	2
+
+/* thread_switch(thread, option, option_time): the arguments are read from
+ * the user stack, as mach_print's is. */
 static __attribute__((naked, noinline)) void
-mach_null(void)
+thread_switch_trap(uint32_t thread, int option, int option_time)
 {
+    (void)thread;
+    (void)option;
+    (void)option_time;
     __asm__ volatile (
-        "movl $-15, %%eax\n\t"
+        "movl $-61, %%eax\n\t"
         "movl %%esp, %%ecx\n\t"
         "call 1f\n"
         "1:\n\t"
@@ -60,7 +69,7 @@ mach_null(void)
         ".byte 0x0f, 0x34\n"
         "2:\n\t"
         "ret\n"
-        ::: "eax", "ecx", "edx"
+        ::: "eax", "ecx", "edx", "memory"
     );
 }
 
@@ -209,7 +218,18 @@ c_main(uint32_t *init_sp)
     mach_print("hello_exec: hello from exec_server v0.4.0\n");
     dump_auxv(init_sp);
 
-    /* Loop forever; the parent task_terminates us. */
+    /*
+     * 🔴 WAIT TO BE KILLED ASLEEP (#576).
+     *
+     * This was `for (;;) mach_null();' -- a runnable loop at the task's full
+     * priority for as long as nobody killed it, and hello_server's #269
+     * reproducer never did.  Two of them held the processor for the rest of
+     * every boot, and on one processor that starved pthread_test's arm [24],
+     * whose workers depress themselves below them.
+     *
+     * Parked in thread_switch(WAIT) it costs one wakeup a second, and the
+     * parent's task_terminate ends it exactly as before.
+     */
     for (;;)
-        mach_null();
+        thread_switch_trap(0, HE_SWITCH_OPTION_WAIT, 1000);
 }
