@@ -602,10 +602,28 @@ main(int argc, char **argv)
             printf("(hello_server)[fxchild]: execve returned %d\n", er);
             _exit(11);
         } else {
+            /*
+             * 🔴 THE PARENT ENDS WHAT IT STARTED (#576).
+             *
+             * The child execve's /hello_exec, which by design never exits: it
+             * waits for its parent to kill it.  This went straight to
+             * waitpid() and waited for ever -- so hello_server never reached
+             * the task_terminate of the spawn below either, and both
+             * hello_exec outlived the boot, spinning.  On one processor that
+             * starved pthread_test's arm [24].
+             *
+             * A beat for the exec to happen and print, the same beat the
+             * spawn below gives its child; then SIGKILL through proc_server,
+             * which terminates the task; then the waitpid, which now returns.
+             */
+            for (int j = 0; j < 30; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL,
+                                            SWITCH_OPTION_WAIT, 20);
+            int kr_kill = kill(xpid, SIGKILL);
             int xst = 0;
             int xwr = __uros_waitpid(xpid, &xst, 0);
-            printf("(hello_server): #269 waitpid -> wr=%d status=0x%x\n",
-                   xwr, xst);
+            printf("(hello_server): #269 kill(SIGKILL)=%d, waitpid -> wr=%d "
+                   "status=0x%x\n", kr_kill, xwr, xst);
         }
 
         /*
