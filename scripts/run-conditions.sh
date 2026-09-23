@@ -345,11 +345,12 @@ uros_conditions_block() {
 #
 # ⚠️ SIX, because a median has to be able to outvote one second.  With four
 # or five readings each half holds two, the lower middle of two is their
-# minimum, and one slow second -- 3202 among 39xx, 1884 among 2096, both
-# recorded -- flagged a steady run (#579, seventh review).  Three per half
-# is the least in which one outlier is outvoted.  A KVM boot here gives four
-# or five, so it is not judged: a clock moving inside five seconds is not
-# what #560 was.
+# minimum, and one slow second of the kind recorded -- 3202 among 39xx,
+# 1884 among 2096 -- in a run that short flags it (#579, seventh review).
+# Three per half is the least in which one outlier is outvoted.  A KVM boot
+# at a high clock gives four or five readings here (a capped one gives
+# more), so it is often not judged -- and the clock line SAYS so: a
+# question not asked is a third answer, not a "no" (#563).
 #
 # ⚠️ It used to compare cpu= at host start with cpu= at host end: cpu0, once
 # before make-disk and once after qemu was killed, neither inside the run,
@@ -419,11 +420,15 @@ uros_clock_run_moved() {
 #     from them, so the harness does not measure.
 #   - a driver the core drives that has no frequency table (amd-pstate in
 #     passive or guided mode -- victus can be switched into it -- and
-#     intel_cpufreq), under a governor that moves the clock (schedutil,
-#     ondemand, conservative, userspace): policy->cur is the governor's last
-#     target, any kHz.  Under `performance' and `powersave' the target is
-#     the ceiling or the floor, which are filtered.  The line carries it
-#     (uros_clock_fallback_note).
+#     intel_cpufreq): policy->cur is the last frequency set, which can be
+#     any kHz.  Under `performance' amd-pstate sets the ceiling itself,
+#     which is filtered, but intel_cpufreq sets the ceiling ROUNDED to a
+#     P-state (1450000 becomes 1400000), which no file states -- and nothing
+#     here tells the two drivers apart without naming them.  So the whole
+#     class gets the note, under every governor (uros_clock_fallback_note);
+#     the governor used to be consulted, and that silenced intel_cpufreq
+#     (#579, final review).  Under `userspace' the file scaling_setspeed does
+#     state policy->cur, and uros_clock_policy_khz reads it.
 # One is only written here, because no file tells it apart: a driver that
 # takes the policy falls back to policy->cur, which is scaling_min_freq under
 # `powersave' (victus, measured, and in intel_pstate's source), and under
@@ -433,10 +438,13 @@ uros_clock_run_moved() {
 # uros_clock_policy_khz [root] -- every frequency the policy files state, in
 # kHz, sorted, one line each: the numbers a reading must not be mistaken for.
 # root is /sys/devices/system/cpu; --self-test hands it a tree of its own.
+# scaling_setspeed is "<unsupported>" except under `userspace', where it is
+# policy->cur -- the stale-core fallback itself.
 uros_clock_policy_khz() {
 	_r=${1:-/sys/devices/system/cpu}
 	for _f in "$_r"/cpu[0-9]*/cpufreq/*_freq \
 		  "$_r"/cpu[0-9]*/cpufreq/base_frequency \
+		  "$_r"/cpu[0-9]*/cpufreq/scaling_setspeed \
 		  "$_r"/cpu[0-9]*/cpufreq/scaling_available_frequencies
 	do
 		case "$_f" in
@@ -447,19 +455,16 @@ uros_clock_policy_khz() {
 }
 
 # uros_clock_fallback_note <scaling_available_governors> <table: 1 or 0>
-# <governor> -- the words the clock line carries when a stale core's fallback
-# cannot be recognised: a driver the core drives (it lists governors) with no
-# frequency table, under a governor that moves the clock, falls back to that
-# governor's last target, which no file states.
+# -- the words the clock line carries when a stale core's fallback may not be
+# recognised: a driver the core drives (it lists governors) with no frequency
+# table falls back to the last frequency it set, which can be a number no
+# file states.
 uros_clock_fallback_note() {
 	case "$1" in
 	"performance powersave"|"") return 0 ;;
 	esac
 	[ "$2" = 1 ] && return 0
-	case "$3" in
-	performance|powersave) return 0 ;;
-	esac
-	echo "; a stale core's fallback here is the governor's last target, which no file states, and may be counted"
+	echo "; on this driver a stale core's fallback can be a number no file states, and may be counted"
 }
 
 # uros_clock_cpus -- /proc/<pid>/task/*/stat on stdin; prints " c1 c2 ..." ,
@@ -531,6 +536,8 @@ uros_clock_run_line() {
 	if [ -n "$_ceil" ] && [ $(( _med * 100 )) -gt $(( _ceil * 110 )) ]; then
 		_line="$_line -- ABOVE the ${_ceil}MHz ceiling"
 	fi
+	# Said, because uros_clock_run_moved does not ask below six (#563).
+	[ $# -lt 6 ] && _line="$_line; movement not judged under six readings"
 	echo "$_line"
 }
 
@@ -658,17 +665,17 @@ EOF
 	done <<'EOF'
 # sampled: real runs' "clock by sec:" lines, victus on AC, ~/uros-tests/<log>
 ceiling 1400 (579-politica-soffitto-1400-172406)|1400|1397 1397 1397 1396 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 -|median 1397MHz, max 1397MHz, read in 14 of 15 seconds
-performance (579-politica-performance-172555)|4280|3940 3967 3926 3983 3946 - - -|median 3946MHz, max 3983MHz, read in 5 of 8 seconds
-powersave, balance_power (579-politica-balance-power-172926)|4280|3893 3985 3927 3981 3998 - - -|median 3981MHz, max 3998MHz, read in 5 of 8 seconds
+performance (579-politica-performance-172555)|4280|3940 3967 3926 3983 3946 - - -|median 3946MHz, max 3983MHz, read in 5 of 8 seconds; movement not judged under six readings
+powersave, balance_power (579-politica-balance-power-172926)|4280|3893 3985 3927 3981 3998 - - -|median 3981MHz, max 3998MHz, read in 5 of 8 seconds; movement not judged under six readings
 # probes
-pavillion's two readings (idle 3992, six busy 3918) over its 3000 ceiling|3000|3918 3992|median 3918MHz, max 3992MHz, read in 2 of 2 seconds -- ABOVE the 3000MHz ceiling
-one second of boost is boost, not a ceiling that failed|1400|1397 1397 3700|median 1397MHz, max 3700MHz, read in 3 of 3 seconds
-exactly 10% over, by the median|1400|1540|median 1540MHz, max 1540MHz, read in 1 of 1 second
-just past 10%, by the median|1400|1541|median 1541MHz, max 1541MHz, read in 1 of 1 second -- ABOVE the 1400MHz ceiling
-an even count takes the lower middle|4280|1000 2000 3000 4000|median 2000MHz, max 4000MHz, read in 4 of 4 seconds
-sorted by value, not by text|4280|900 3268 1200|median 1200MHz, max 3268MHz, read in 3 of 3 seconds
-seconds with no reading count as asked, not as samples|4280|- 2096 - 2171 2096|median 2096MHz, max 2171MHz, read in 3 of 5 seconds
-no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz, read in 2 of 2 seconds
+pavillion's two readings (idle 3992, six busy 3918) over its 3000 ceiling|3000|3918 3992|median 3918MHz, max 3992MHz, read in 2 of 2 seconds -- ABOVE the 3000MHz ceiling; movement not judged under six readings
+one second of boost is boost, not a ceiling that failed|1400|1397 1397 3700|median 1397MHz, max 3700MHz, read in 3 of 3 seconds; movement not judged under six readings
+exactly 10% over, by the median|1400|1540|median 1540MHz, max 1540MHz, read in 1 of 1 second; movement not judged under six readings
+just past 10%, by the median|1400|1541|median 1541MHz, max 1541MHz, read in 1 of 1 second -- ABOVE the 1400MHz ceiling; movement not judged under six readings
+an even count takes the lower middle|4280|1000 2000 3000 4000|median 2000MHz, max 4000MHz, read in 4 of 4 seconds; movement not judged under six readings
+sorted by value, not by text|4280|900 3268 1200|median 1200MHz, max 3268MHz, read in 3 of 3 seconds; movement not judged under six readings
+seconds with no reading count as asked, not as samples|4280|- 2096 - 2171 2096|median 2096MHz, max 2171MHz, read in 3 of 5 seconds; movement not judged under six readings
+no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz, read in 2 of 2 seconds; movement not judged under six readings
 the run over before the first sample|1400||not measured: the run ended before the first sample, 1-2 s after qemu started
 one second asked, no reading|1400|-|not measured: no reading in 1 second (no qemu thread running, or only the policy's number)
 seven seconds asked, no reading|1400|- - - - - - -|not measured: no reading in 7 seconds (no qemu thread running, or only the policy's number)
@@ -770,13 +777,22 @@ performance on AC, steady within 1.5%|3940 3967 3926 3983 3946 - - -|no
 balance_power on AC, five readings|3893 3985 3927 3981 3998 - - -|no
 # probes
 four or five readings with one slow second: not judged|3893 3202 3918 3943 3927|no
+four readings, one slow second: not judged|3893 3202 3918 3943|no
 the #560 shape: 3000 then 3993|3000 3000 3000 3993 3993 3993|yes
 and back down|3993 3993 3993 3000 3000 3000|yes
+# sampled: 579-misurato-thread-performance-164122's clock samples
 one slow second is not a move|3893 3893 3918 3918 3202 3943 3952|no
+# probes
 exactly 10% is a move|1000 1000 1000 1100 1100 1100|yes
 just under 10% is not|1000 1000 1000 1099 1099 1099|no
 seconds with no reading are not readings|1000 - 1000 - 1000 1100 - 1100 1100|yes
 three readings: nothing claimed|1000 5000 9000|no
+ten readings: the median of five, two slow seconds outvoted|3900 3200 3900 3200 3900 3900 3900 3900 3900 3900|no
+eight readings: an even half takes its lower middle|1000 1000 1000 1000 1000 1000 1100 1100|no
+seven readings: the middle one belongs to neither half|1000 1000 1000 1000 1000 1100 1100|yes
+ten readings: two slow seconds in the second half outvoted|3900 3900 3900 3900 3900 3900 3200 3900 3200 3900|no
+ten readings: halves split at the middle, not at three|1000 1000 1000 1000 1000 1100 1100 1100 1100 1100|yes
+below 1000 MHz the sort is numeric, not by text|700 800 1000 800 800 800|no
 five readings: nothing claimed however far apart|1000 1000 5000 9000 9000|no
 a slow second in each half is outvoted|3900 3200 3900 3900 3900 3200|no
 halves out of order still give their median|3900 3200 3950 3900 3905 3200|no
@@ -785,13 +801,13 @@ one fast second in the second half is outvoted|3900 3900 3900 3900 3900 4500|no
 a second half out of order, a slow second in its middle|3900 3900 3900 3905 3200 3950|no
 EOF
 
-	# The fallback note (#579): name|scaling_available_governors|table 1/0|governor|note
-	while IFS='|' read -r _name _avail _table _gov _want
+	# The fallback note (#579): name|scaling_available_governors|table 1/0|note
+	while IFS='|' read -r _name _avail _table _want
 	do
 		[ -n "$_name" ] || continue
 		case "$_name" in \#*) continue ;; esac
 		_total=$(( _total + 1 ))
-		_got=$(uros_clock_fallback_note "$_avail" "$_table" "$_gov")
+		_got=$(uros_clock_fallback_note "$_avail" "$_table")
 		if [ "$_got" = "$_want" ]; then
 			echo "  ok    $_name"
 		else
@@ -801,14 +817,11 @@ EOF
 			_fails=$(( _fails + 1 ))
 		fi
 	done <<'EOF'
-victus, amd-pstate-epp: its fallback is scaling_min_freq|performance powersave|0|powersave|
-acpi-cpufreq: its fallback is a table entry|conservative ondemand userspace powersave performance schedutil|1|schedutil|
-amd-pstate passive, intel_cpufreq, schedutil: no table|conservative ondemand userspace powersave performance schedutil|0|schedutil|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
-the same under ondemand|conservative ondemand userspace powersave performance schedutil|0|ondemand|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
-the same under performance: its target is the ceiling, filtered|conservative ondemand userspace powersave performance schedutil|0|performance|
-the same under powersave: its target is the floor, filtered|conservative ondemand userspace powersave performance schedutil|0|powersave|
-a list that starts with those two words is the core's|performance powersave schedutil|0|schedutil|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
-no governors to read|||schedutil|
+victus, amd-pstate-epp: its fallback is scaling_min_freq|performance powersave|0|
+acpi-cpufreq: its fallback is a table entry|conservative ondemand userspace powersave performance schedutil|1|
+amd-pstate passive, intel_cpufreq: no table|conservative ondemand userspace powersave performance schedutil|0|; on this driver a stale core's fallback can be a number no file states, and may be counted
+a list that starts with those two words is the core's|performance powersave schedutil|0|; on this driver a stale core's fallback can be a number no file states, and may be counted
+no governors to read|||
 EOF
 
 	# The policy numbers (#579): two sysfs trees written here and read back.
@@ -841,6 +854,7 @@ EOF
 	_w b/cpu0/cpufreq/cpuinfo_max_freq 4000000
 	_w b/cpu0/cpufreq/cpuinfo_cur_freq 2345678
 	_w b/cpu0/cpufreq/base_frequency 2600000
+	_w b/cpu0/cpufreq/scaling_setspeed 2345000
 	while IFS='|' read -r _name _root _want
 	do
 		[ -n "$_name" ] || continue
@@ -857,7 +871,7 @@ EOF
 		fi
 	done <<'EOF'
 victus: the policy's numbers, not its counters, every core, in order|a|412625 1108930 1400000 2900000 4280985 
-acpi-cpufreq: the table, base_frequency, not the request|b|1400000 2100000 2600000 3000000 4000000 
+acpi-cpufreq under userspace: the table, base_frequency, scaling_setspeed, not the request|b|1400000 2100000 2345000 2600000 3000000 4000000 
 no cpufreq at all|none|
 EOF
 	rm -rf "$_tree"
