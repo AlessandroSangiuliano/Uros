@@ -858,7 +858,23 @@ uros_conditions_open
 # Rebuilt every run, not on demand.  --entry N is written INTO the image, as
 # /boot/grub/entry.cfg, so a disk that is merely up to date with the binaries
 # can still be selecting yesterday's menu entry.  It costs about a second.
-"$REPO/scripts/make-disk-x86_64.sh" >&2
+#
+# 🔴 EXCEPT a second AHCI disk named by UROS_X86_64_AHCI2_IMAGE (#498).  That
+# is a disk ANOTHER boot wrote -- typically the one i386 leaves after reading
+# this target's file and writing its own -- and it is attached as it is: the
+# bytes on it are the evidence, so it is never the build's to recreate.  The
+# disk builder is told to make the first AHCI disk only.
+if [ -n "${UROS_X86_64_AHCI2_IMAGE:-}" ]; then
+	if [ ! -f "$UROS_X86_64_AHCI2_IMAGE" ]; then
+		echo "run-x86_64.sh: UROS_X86_64_AHCI2_IMAGE=$UROS_X86_64_AHCI2_IMAGE" \
+		     "does not exist" >&2
+		exit 2
+	fi
+	UROS_X86_64_AHCI_DISKS="$BUILD/disk-x86_64-ahci.img" \
+		"$REPO/scripts/make-disk-x86_64.sh" >&2
+else
+	"$REPO/scripts/make-disk-x86_64.sh" >&2
+fi
 
 # 🔴 `bootindex' on both, because with two disks the boot device stops being
 # obvious and starts being whatever SeaBIOS enumerates first.  Only one of
@@ -874,7 +890,7 @@ uros_conditions_open
 # The disk on port 1 is ahci1a, which ext_server mounts at /mnt/disk2 -- the
 # disk xfile_test writes and the host reads back after the run (#498).  Named
 # once, because the check below has to open the same file qemu was given.
-AHCI_DISK2=$BUILD/disk-x86_64-ahci2.img
+AHCI_DISK2=${UROS_X86_64_AHCI2_IMAGE:-$BUILD/disk-x86_64-ahci2.img}
 DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device virtio-blk-pci,drive=urosdisk,bootindex=0
 	-device ich9-ahci,id=ahci0
