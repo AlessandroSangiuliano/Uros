@@ -362,6 +362,29 @@ struct uart_priv {
 	uint32_t	tx_waits;
 	uint32_t	tx_drops;
 
+	/*
+	 * A THRE edge that fired while a writer held the ring (#538).
+	 *
+	 * 🔴 THRE IS A TRANSITION, NOT A LEVEL.  The chip says "transmitter
+	 * empty" once, as it becomes so, and says nothing more until THR is
+	 * written again.  The interrupt's transmit half cannot take the lock
+	 * (see uart_drain) and steps aside -- and the first version stepped
+	 * aside in silence, on the belief that the holder's closing kick
+	 * would read LSR fresh.  It did, BEFORE the FIFO had drained: no
+	 * THRE yet, nothing to fill, unlock.  Then the FIFO drained, the edge
+	 * fired into a failed trylock, and with the boot's last lines already
+	 * in the ring and nobody left to write, no kick ever came again:
+	 * 7626 bytes waiting, chip idle, THRE enabled, wire dead -- read off
+	 * the live machine.
+	 *
+	 * So the edge is RECORDED, before the trylock, and every writer looks
+	 * here after releasing: whoever held the lock when the chip emptied
+	 * carries the refill.  Set by the dispatch thread, cleared by whoever
+	 * refills, ordered so that one of the two always sees it.
+	 */
+	volatile int	tx_irq_missed;
+	uint32_t	tx_by_rescue;	/* bytes a releasing writer sent for such an edge */
+
 	/* Which path carried a received byte (#497).  The IRQ is the one
 	 * this driver is built around; the read-path peek below is #382's
 	 * defence against a lost edge.  They are counted apart because
@@ -520,7 +543,10 @@ uart_tx_kick(struct uart_priv *p, uint32_t *counter)
  * which is #544 rebuilt one layer up in the code that exists to remove it.
  * A line is atomic or the single writer buys nothing.  The other writer
  * sleeps on the mutex; the interrupt's transmit half trylocks and steps
- * aside, because whoever holds this lock is pumping the chip already.
+ * aside, leaving a mark that the releasing writer acts on (#538,
+ * tx_irq_missed) -- because "whoever holds this lock is pumping the chip
+ * already" was true of this loop and false of a writer whose closing kick
+ * came before the FIFO drained.
  *
  * Returns 1 when a byte fits, 0 after UART_TX_RING_WAITS tries.
  */
@@ -618,25 +644,31 @@ uart_drain(struct uart_priv *p, int from_irq)
 	 * nothing to receive.  Under tx_lock because the ring is shared with
 	 * whichever thread is writing.
 	 */
-	if (from_irq && p->tx_lock_ready
-	    && pthread_mutex_trylock(&p->tx_lock) == 0) {
-		/*
-		 * trylock and not lock: a holder is a writer mid-line, and a
-		 * writer mid-line kicks the chip itself (uart_tx_wait_ring).
-		 * Blocking here would stall the thread that dispatches every
-		 * interrupt -- the RX line included -- for the length of the
-		 * other thread's write.  An edge stepped aside from is not
-		 * lost: the holder's closing kick reads LSR fresh and re-arms.
-		 */
+	if (from_irq && p->tx_lock_ready) {
 		int first = 0;
 
-		if (p->tx_tail != p->tx_head) {
-			uint32_t before = p->tx_by_irq;
+		/*
+		 * Record the edge FIRST, then try the lock (#538).  trylock
+		 * and not lock: a holder is a writer mid-line, and blocking
+		 * here would stall the thread that dispatches every interrupt
+		 * -- the RX line included -- for the length of that write.
+		 * The order is the mechanism: a writer reads the flag after it
+		 * unlocks, so a store made before a trylock that fails is seen
+		 * by the holder that unlocks after it, and a trylock that
+		 * succeeds means there was nobody to tell.  See tx_irq_missed.
+		 */
+		__atomic_store_n(&p->tx_irq_missed, 1, __ATOMIC_SEQ_CST);
+		if (pthread_mutex_trylock(&p->tx_lock) == 0) {
+			__atomic_store_n(&p->tx_irq_missed, 0,
+					 __ATOMIC_SEQ_CST);
+			if (p->tx_tail != p->tx_head) {
+				uint32_t before = p->tx_by_irq;
 
-			uart_tx_kick(p, &p->tx_by_irq);
-			first = (before == 0 && p->tx_by_irq != 0);
+				uart_tx_kick(p, &p->tx_by_irq);
+				first = (before == 0 && p->tx_by_irq != 0);
+			}
+			(void)pthread_mutex_unlock(&p->tx_lock);
 		}
-		(void)pthread_mutex_unlock(&p->tx_lock);
 
 		if (first)
 			printf("uart: the THRE interrupt refilled the "
@@ -826,6 +858,7 @@ uart_detach(void *priv)
 	uart_out(UART_IER, 0x00);
 	p->tx_head = p->tx_tail = 0;	/* what was queued is not going out */
 	p->thre_armed = 0;
+	p->tx_irq_missed = 0;		/* nothing left for an edge to move */
 	(void)pthread_mutex_unlock(&p->tx_lock);
 	(void)char_core_irq_unregister(UART_IRQ);
 
@@ -883,6 +916,28 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
  * tty_write — polled THR-empty, byte-by-byte.
  * ============================================================ */
 
+/*
+ * Release the ring, then carry any THRE edge that fired while it was held
+ * (#538): see tx_irq_missed.  A loop, because the refill holds the lock too
+ * and an edge can fire during it.
+ */
+static void
+uart_tx_unlock(struct uart_priv *p)
+{
+	uint32_t before = p->tx_by_rescue;
+
+	(void)pthread_mutex_unlock(&p->tx_lock);
+	while (__atomic_exchange_n(&p->tx_irq_missed, 0, __ATOMIC_SEQ_CST)) {
+		(void)pthread_mutex_lock(&p->tx_lock);
+		uart_tx_kick(p, &p->tx_by_rescue);
+		(void)pthread_mutex_unlock(&p->tx_lock);
+	}
+	if (before == 0 && p->tx_by_rescue != 0)
+		printf("uart: a THRE edge fired while a writer held the ring "
+		       "and the writer refilled the transmitter on release — "
+		       "the edge that used to be lost (#538)\n");
+}
+
 static int
 uart_tty_write(void *priv, const char *buf, size_t len)
 {
@@ -917,7 +972,7 @@ uart_tty_write(void *priv, const char *buf, size_t len)
 
 	uart_tx_kick(p, &p->tx_by_kick);
 
-	(void)pthread_mutex_unlock(&p->tx_lock);
+	uart_tx_unlock(p);
 	return dropped ? -1 : 0;
 }
 
@@ -949,7 +1004,7 @@ uart_tty_set_attr(void *priv, uint32_t baud, uint32_t data_bits,
 	uart_out(UART_LCR, lcr);
 	uart_set_divisor((uint16_t)divisor);
 	uart_ier_write(p);	/* THRE back on if the ring is not empty */
-	(void)pthread_mutex_unlock(&p->tx_lock);
+	uart_tx_unlock(p);
 
 	return 0;
 }
