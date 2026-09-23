@@ -794,13 +794,29 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	}
 	st->abar_size = (vm_size_t)abar_region->size;
 
-	/* Enable PCI bus master + memory space */
+	/*
+	 * Enable PCI bus master + memory space.
+	 *
+	 * ⚠️ Both halves checked, as virtio_blk's are since #570 (#577).  The
+	 * write discarded its answer, and a refusal left a controller that
+	 * decodes nothing: every ABAR read afterwards returns all ones FROM THE
+	 * BUS -- the absent-device value, with no refusal left anywhere to say
+	 * why -- and a controller that cannot master the bus never moves a byte
+	 * of the DMA this probe is about to set up.
+	 */
 	kr = device_pci_config_read(master_dev, bus, slot, func,
 				    PCI_COMMAND, &cmd_reg);
 	if (kr == KERN_SUCCESS) {
 		cmd_reg |= PCI_CMD_MEM_ENABLE | PCI_CMD_BUS_MASTER;
-		device_pci_config_write(master_dev, bus, slot, func,
-					PCI_COMMAND, cmd_reg);
+		kr = device_pci_config_write(master_dev, bus, slot, func,
+					     PCI_COMMAND, cmd_reg);
+	}
+	if (kr != KERN_SUCCESS) {
+		printf("ahci %u:%u.%u: the kernel refused the command register "
+		       "(kr=%d) — memory decoding and bus mastering cannot be "
+		       "turned on; not probing (#577)\n", bus, slot, func,
+		       (int)kr);
+		return -1;
 	}
 
 	/* Read IRQ */
