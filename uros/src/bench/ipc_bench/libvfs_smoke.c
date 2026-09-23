@@ -38,6 +38,27 @@ bench_libvfs_smoke(void)
 
 	printf("\n--- libvfs smoke test (#220 v0.1) ---\n");
 
+	/*
+	 * Asked of the name server first: a boot with no filesystem server --
+	 * a bench-only bundle, a diskless boot -- cannot pose any of what
+	 * follows, and saying FAILED there would be a finding about the
+	 * bundle rather than about libvfs (#563).
+	 */
+	{
+		netname_name_t root_matched;
+		mach_port_t root_port = MACH_PORT_NULL;
+
+		root_matched[0] = '\0';
+		if (netname_look_up_mount(name_server_port, "/", &root_port,
+					  root_matched) != KERN_SUCCESS ||
+		    root_port == MACH_PORT_NULL) {
+			printf("  libvfs: NOT ASKED — nothing is mounted at / "
+			       "on this boot\n");
+			return;
+		}
+		(void)mach_port_deallocate(mach_task_self(), root_port);
+	}
+
 	if (vfs_init() != 0) {
 		printf("  libvfs: vfs_init failed\n");
 		return;

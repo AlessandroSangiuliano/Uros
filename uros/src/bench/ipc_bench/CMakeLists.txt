@@ -90,20 +90,17 @@ add_custom_command(
 # ===========================================================================
 # Source files
 # ===========================================================================
-# #552: the two suites that need libvfs.
+# #552: the two suites that need libvfs, built on BOTH targets.
 #
-# 🔴 Held out on x86-64 and NOT silently: libvfs does not build for this target
-# because migcom sums field sizes without alignment padding and fs_stat's reply
-# comes out four bytes short at -m64 (#553).  Skipping them is a statement about
-# libvfs, so the suites say so at runtime rather than printing nothing -- a suite
-# that prints nothing is not a suite that passed.
-if(UROS_TARGET_ARCH STREQUAL "x86_64")
-  set(VFS_SMOKE_C "")
-  set(VFS_LIB "")
-else()
-  set(VFS_SMOKE_C libvfs_smoke.c proc_smoke.c)
-  set(VFS_LIB libvfs)
-endif()
+# 🔴 They were held out of x86-64 on a premise that fell: that migcom summed
+# field sizes without alignment padding.  It did not -- rtFindSize had aligned
+# every field since #416 -- and what fs_stat's reply lacked was a DECLARED
+# alignment (`struct[20] of unsigned32' for an 8-aligned C type); libvfs has
+# built here since #553.  Whether each suite can RUN is a question about the
+# boot, not the target, so each one asks it at runtime by the presence of the
+# servers it needs, and says NOT ASKED when they are not there.
+set(VFS_SMOKE_C libvfs_smoke.c proc_smoke.c)
+set(VFS_LIB libvfs)
 
 
 set(IPC_BENCH_SOURCES
