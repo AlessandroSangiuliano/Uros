@@ -2720,22 +2720,31 @@ check_io_claim(unsigned int port)
 	unsigned int	i;
 	int		verdict = 1;	/* unclaimed, or ours */
 
+	unsigned int	base = 0, count = 0;
+	task_t		holder = TASK_NULL;
+
 	urmach_rcu_read_lock();
 	for (i = 0; i < IO_CLAIM_MAX; i++) {
-		if (io_claim[i].task == TASK_NULL)
+		holder = io_claim[i].task;
+		if (holder == TASK_NULL)
 			continue;
-		if (port < io_claim[i].base
-		    || port >= io_claim[i].base + io_claim[i].count)
+		base  = io_claim[i].base;
+		count = io_claim[i].count;
+		if (port < base || port >= base + count)
 			continue;
-		verdict = (io_claim[i].task == me);
+		verdict = (holder == me);
 		break;
 	}
 	urmach_rcu_read_unlock();
 
 	if (verdict)
 		return KERN_SUCCESS;
-	printf("device_io_port: 0x%x is inside a range another task "
-	       "claimed (#497)\n", port);
+	/* The slot and what it says, not just the verdict: a refusal that
+	 * names no range cannot be told from a table that has been
+	 * overwritten -- and one was (#538). */
+	printf("device_io_port: 0x%x is inside 0x%x..0x%x, which task %p "
+	       "claimed (slot %u of %u; #497)\n", port, base,
+	       base + count - 1, (void *)holder, i, (unsigned)IO_CLAIM_MAX);
 	return KERN_NO_ACCESS;
 }
 
