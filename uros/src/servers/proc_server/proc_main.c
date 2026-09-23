@@ -88,6 +88,10 @@ struct pid_entry {
     char            cmdline[PROC_CMDLINE_MAX];
     uint8_t         state;           /* PROC_STATE_* */
     int32_t         exit_code;
+    /* #580: the process said how it is ending (proc_set_exit_code), so a
+     * signal that terminates it afterwards does not rewrite the answer.  A
+     * separate flag because 0 is a code a process can declare. */
+    uint8_t         exit_declared;
 
     /* Single subscriber for v0.1.0; v0.x.0 widens to a list. */
     mach_port_t     exit_notify;     /* send-once right, MACH_PORT_NULL if none */
@@ -262,6 +266,7 @@ proc_S_register(
     e->task_port  = task_port;
     e->state      = PROC_STATE_RUNNING;
     e->exit_code  = 0;
+    e->exit_declared = 0;
     e->exit_notify = MACH_PORT_NULL;
     e->signal_port = MACH_PORT_NULL;
     memset(&e->last_rusage, 0, sizeof(e->last_rusage));
@@ -620,6 +625,38 @@ sig_default_action(int signo)
 }
 
 /*
+ * Terminate `task' because signal `signo' ended it, and say so where waitpid
+ * will read it (#580).
+ *
+ * 🔴 THE ONLY PLACE proc_server ENDS A TASK FOR A SIGNAL.  An exit_code of
+ * 128 + N is libposix's "killed by signal N" (encode_status, posix_wait.c).
+ * For a signal the task handles itself, the task writes it on its way out
+ * (signals.c: exit_group(128 + signo)).  For SIGKILL, and for a default
+ * action carried out here because the task registered no handler, the task
+ * writes nothing -- it is being terminated, not exiting -- and every caller
+ * of task_terminate() below used to leave the code at 0.  waitpid then said
+ * "exited normally with 0" about a process that was killed.
+ *
+ * ⚠️ The first terminal event wins, as on Linux: a process that already
+ * declared its code is exiting, and a kill that lands during its exit does
+ * not rewrite how it ended.
+ */
+static kern_return_t
+terminate_for_signal(proc_pid_t pid, int signo, mach_port_t task)
+{
+    struct pid_entry *e;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e != NULL && e->task_port == task && !e->exit_declared) {
+        e->exit_code = 128 + signo;
+        e->exit_declared = 1;
+    }
+    pthread_mutex_unlock(&pid_lock);
+    return task_terminate(task);
+}
+
+/*
  * Carry out a signal's default disposition on the target's task port, for
  * a pid that has no usable signal_port.  Returns the PROC_* result code.
  */
@@ -634,7 +671,7 @@ apply_default_disposition(proc_pid_t pid, int signo, mach_port_t task)
 
     switch (sig_default_action(signo)) {
     case SIG_DFL_TERM:
-        kr = task_terminate(task);
+        kr = terminate_for_signal(pid, signo, task);
         return (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
     case SIG_DFL_STOP:
         kr = task_suspend(task);
@@ -755,7 +792,7 @@ proc_S_kill(
 
     switch (signo) {
     case PROC_SIGKILL:
-        kr = task_terminate(task);
+        kr = terminate_for_signal(pid, signo, task);
         *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
         return KERN_SUCCESS;
     case PROC_SIGSTOP:
@@ -1033,7 +1070,8 @@ proc_S_killpg(
         for (i = 0; i < n_uncatch; i++) {
             kern_return_t kr;
             switch (signo) {
-            case PROC_SIGKILL: kr = task_terminate(uncatch[i].port); break;
+            case PROC_SIGKILL: kr = terminate_for_signal(uncatch[i].pid, signo,
+                                                         uncatch[i].port); break;
             case PROC_SIGSTOP: kr = task_suspend  (uncatch[i].port); break;
             case PROC_SIGCONT: kr = task_resume   (uncatch[i].port); break;
             default:           kr = KERN_INVALID_ARGUMENT;           break;
@@ -1557,8 +1595,10 @@ proc_S_set_exit_code(
 
     pthread_mutex_lock(&pid_lock);
     e = find_by_pid_locked(pid);
-    if (e)
+    if (e) {
         e->exit_code = code;
+        e->exit_declared = 1;
+    }
     pthread_mutex_unlock(&pid_lock);
 
     *result = e ? PROC_OK : PROC_ERR_NOT_FOUND;
