@@ -638,14 +638,6 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		return -1;
 	}
 
-	/* Register IRQ */
-	if (st->irq > 0 && st->irq < 16) {
-		kr = device_intr_register(master_dev, st->irq, irq,
-					  MACH_MSG_TYPE_MAKE_SEND);
-		if (kr == KERN_SUCCESS)
-			printf("virtio: IRQ %u registered\n", st->irq);
-	}
-
 	/* Driver OK */
 	vio_write8(st, VIRTIO_PCI_STATUS,
 		   VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
@@ -698,6 +690,24 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		if (vio_refused_p(st))
 			return -1;
 		printf("virtio: status = 0x%02X\n", status);
+	}
+
+	/*
+	 * Register the interrupt line LAST, when nothing after it can fail.
+	 *
+	 * ⚠️ It used to be registered in the middle of the probe, and every
+	 * return -1 after it -- a disk too large to address, and since #570 a
+	 * refused register -- left a failed probe holding the line: the
+	 * framework's failure path gives the device's claim back but not the
+	 * line, and the kernel reclaims lines only when the task dies.  Nothing
+	 * in the probe needs the interrupt (a request polls the used ring), so
+	 * the line can wait for the controller to exist.
+	 */
+	if (st->irq > 0 && st->irq < 16) {
+		kr = device_intr_register(master_dev, st->irq, irq,
+					  MACH_MSG_TYPE_MAKE_SEND);
+		if (kr == KERN_SUCCESS)
+			printf("virtio: IRQ %u registered\n", st->irq);
 	}
 
 	virtio_n_states++;		/* committed: this controller came up */
