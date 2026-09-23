@@ -106,6 +106,8 @@ CAP_SERVER="$SBIN/cap_server"
 CAP_TEST="$SBIN/cap_test"
 IRQ_CLAIM_TEST="$SBIN/irq_claim_test"
 HAL_BAR_TEST="$SBIN/hal_bar_test"
+# #498: a file one target writes and the other reads.
+XFILE_TEST="$SBIN/xfile_test"
 FPERR_TEST="$SBIN/fperr_test"
 DMA_RECLAIM_TEST="$SBIN/dma_reclaim_test"
 GPUSTAT="$SBIN/gpustat"
@@ -196,6 +198,13 @@ fi
 DMA_RECLAIM_CONF_LINES=""
 [ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="dma_reclaim_test dma_reclaim_test holder
 dma_reclaim_test dma_reclaim_test check"
+# #498: the MIRROR of the x86-64 bundle's two lines -- this target reads the
+# file x86-64 wrote on /mnt/disk2 and leaves its own for x86-64 to read.  Both
+# say NOT ASKED on a boot without a second AHCI disk; run-qemu.sh
+# --ahci2-image attaches the one an x86-64 boot left behind.
+XFILE_CONF_LINES=""
+[ -f "$XFILE_TEST" ] && XFILE_CONF_LINES="xfile_test xfile_test read /mnt/disk2/from_x86_64.dat
+xfile_test xfile_test write /mnt/disk2/from_i386.dat"
 KERNEL242_TEST_CONF_LINE=""
 [ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
 SIG_TEST_CONF_LINE=""
@@ -236,6 +245,7 @@ if [ "$MINIMAL" = "1" ]; then
     IRQ_CLAIM_TEST_CONF_LINE=""
     HAL_BAR_TEST_CONF_LINE=""
     DMA_RECLAIM_CONF_LINES=""
+    XFILE_CONF_LINES=""
     KERNEL242_TEST_CONF_LINE=""
     SIG_TEST_CONF_LINE=""
     FPERR_TEST_X87_CONF_LINE=""
@@ -274,6 +284,7 @@ block_device_server block_device_server
 default_pager default_pager disk0c
 ${HELLO_SERVER_LINE}
 ext_server ext_server
+${XFILE_CONF_LINES}
 ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}
 ${IPC_BENCH_LINE}
@@ -316,6 +327,7 @@ ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
 [ -f "$IRQ_CLAIM_TEST" ] && ARGS+=("irq_claim_test:$IRQ_CLAIM_TEST")
 [ -f "$HAL_BAR_TEST" ] && ARGS+=("hal_bar_test:$HAL_BAR_TEST")
+[ -f "$XFILE_TEST" ] && ARGS+=("xfile_test:$XFILE_TEST")
 [ -f "$FPERR_TEST" ] && ARGS+=("fperr_test:$FPERR_TEST")
 [ -f "$KERNEL242_TEST" ] && ARGS+=("kernel242_test:$KERNEL242_TEST")
 [ -f "$SIG_TEST" ] && ARGS+=("sig_test:$SIG_TEST")
