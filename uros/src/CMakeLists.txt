@@ -541,6 +541,9 @@ endif()
 # four servers were waiting on them, and this is one of the four.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/block_device_server)
+  # Two tasks racing one I/O range, on purpose (#538): the presence that
+  # twenty green boots cannot be.
+  add_subdirectory(tests/io_claim_race)
 endif()
 
 # ext_server (#498), and what was actually holding it out.

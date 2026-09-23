@@ -155,6 +155,11 @@ def main():
     ap.add_argument("--then-wait-for", default=None,
                     help="serial text to wait for after --send")
     ap.add_argument("--budget", type=float, default=120.0)
+    ap.add_argument("--settle", type=float, default=1.5,
+                    help="seconds to let the machine run after the marker "
+                         "(and after --send) before the screen is dumped; "
+                         "the screen is where a kernel whose serial line "
+                         "has stopped still says what it did (#538)")
     ap.add_argument("--out", default=None, help="where to leave the dump")
     a = ap.parse_args()
 
@@ -273,8 +278,10 @@ def main():
                       file=sys.stderr)
                 return 2
 
-        # A moment for the last lines to be drawn as well as sent.
-        time.sleep(1.5)
+        # A moment for the last lines to be drawn as well as sent -- or, with
+        # --settle, long enough for a machine whose wire went quiet to write
+        # whatever it is going to write on the screen alone.
+        time.sleep(a.settle)
         open(log, "w").write(pump())
 
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

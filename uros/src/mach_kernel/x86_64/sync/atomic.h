@@ -139,6 +139,15 @@ static inline uint8_t atomic_swap8(volatile uint8_t *p, uint8_t v)
 	return v;
 }
 
+/* #538: the interrupt-pending counters are 32-bit and are TAKEN, not read. */
+static inline uint32_t atomic_swap32(volatile uint32_t *p, uint32_t v)
+{
+	__asm__ volatile("xchgl %0, %1"
+			 : "+r"(v), "+m"(*p)
+			 : : "memory");
+	return v;
+}
+
 /* Set a bit, answering with what it was. */
 static inline int atomic_test_and_set_bit(volatile uint64_t *p, unsigned bit)
 {

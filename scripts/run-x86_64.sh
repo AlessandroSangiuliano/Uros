@@ -199,6 +199,10 @@ UNASKED=$(grep -ac "$NOT_ASKED" "$LOG" || true)
 BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
 	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
+# #578: a line that carries two programs' output is a failure too, and it is
+# named as one -- the wire had two writers inside a line, whatever passed.
+GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
+[ -n "$GARBLED" ] && BAD=$(printf '%s\n%s' "$BAD" "$GARBLED" | sed '/^$/d')
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -338,6 +342,15 @@ must_report() {
 	fi
 	echo "  FAILED: '$1' appeared and '$2' never did."
 	echo "          $3"
+	# #578: "never did" is also what a line looks like when it arrived in two
+	# pieces with another program's output between them.  If the wire has
+	# such lines, they are shown here, where the reader is looking.
+	_garbled=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")
+	if [ -n "$_garbled" ]; then
+		echo "          it may have arrived in pieces -- these lines carry two"
+		echo "          programs' output (#578, #544):"
+		printf '%s\n' "$_garbled" | sed 's/^/            /'
+	fi
 	echo "  log: $LOG"
 	exit 1
 }
@@ -391,6 +404,13 @@ must_report 'act_test: started' 'act_test: [0-9]* of [0-9]* arms passed' \
 # With the guard ablated that run dies in a double fault reporting
 # `instruction: sysret' with the kernel standing on a ring-3 stack, which is
 # the whole of CVE-2012-0217 on one screen.
+
+# ⚠️ Its race arm says NOT ASKED on the default single processor, which is the
+# truth: the two claims are serialised by the scheduler there.  What this line
+# fails a run for is SILENCE -- a race test that stopped dead mid-round would
+# otherwise be passed by omission, which is the act_test lesson (#425).
+must_report 'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
+	'Two tasks claim one I/O range at the same instant for 400 rounds; a torn table is a kernel that answered two winners, and a test that stops dead mid-round is a wedge nobody would otherwise count (#538).'
 
 must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
@@ -1001,13 +1021,24 @@ all_reported() {
 	return 0
 }
 
-while kill -0 "$QPID" 2>/dev/null; do
-	# ⚠️ Same patterns as must_report above, and the counts are out of these
-	# for the same reason -- see the note there.  🔥 That they are written
-	# TWICE in this file is its own hazard: the first copy was corrected for
-	# act_test's fifth arm and this one would have gone on waiting.
-	if grep -aqE "$DONE_RE" "$LOG" \
-	   && all_reported \
+# The same pairs, said instead of tested: which test started and never printed
+# its closing line.  #578: a boot whose `cap_test: ALL TESTS PASSED' arrived in
+# two pieces waited 150 s for it and was then called "nothing arrived".
+missing_reports() {
+	while [ $# -ge 2 ]; do
+		if grep -aq "$1" "$LOG" && ! grep -aq "$2" "$LOG"; then
+			echo "          still waiting for: $2"
+		fi
+		shift 2
+	done
+}
+
+# 🔑 ONE list of the tests this loop waits for, handed to whichever of the two
+# above asks.  It was written inline in the loop's condition, and a second copy
+# for the verdict would have been two halves free to disagree -- the note in
+# the loop already records one such pair going out of step.
+expected_reports() {
+	"$@" \
 		'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 		'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
 		'fault_test: started'   'fault_test: [0-9]* of [0-9]* arms passed' \
@@ -1016,10 +1047,19 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
+		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
-		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'; then
+		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
+}
+
+while kill -0 "$QPID" 2>/dev/null; do
+	# ⚠️ Same patterns as must_report above, and the counts are out of these
+	# for the same reason -- see the note there.  🔥 That they are written
+	# TWICE in this file is its own hazard: the first copy was corrected for
+	# act_test's fifth arm and this one would have gone on waiting.
+	if grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; then
 		sleep 1
 		break
 	fi
@@ -1124,6 +1164,21 @@ if [ "$CUT_SHORT" = 1 ]; then
 		echo "          is simply slow (check the governor: this one drops to"
 		echo "          1.4 GHz on battery) give it more seconds; if it is wedged,"
 		echo "          that is the bug."
+	fi
+	# #578: say what was being waited for, and whether the wire carries
+	# lines with two programs' output in them -- a boot whose expected line
+	# arrived in two pieces waited here for it and was called "nothing
+	# arrived".  Added to the verdict rather than replacing it: a glued line
+	# somewhere does not prove the missing one is the one that was cut, and
+	# a real wedge must still read as one.  Review found the first version
+	# made that choice for the reader.
+	expected_reports missing_reports
+	_garbled=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")
+	if [ -n "$_garbled" ]; then
+		echo "          the wire also carries lines with two programs' output in"
+		echo "          them -- if one of them is the line waited for, it arrived in"
+		echo "          pieces (#578, #544):"
+		printf '%s\n' "$_garbled" | sed 's/^/            /'
 	fi
 	echo "  log: $LOG"
 	exit 1
