@@ -733,6 +733,46 @@ check_cfg_access(natural_t bdf)
 
 /* ---- PCI configuration space ---- */
 
+#ifdef ABLATE_577_BDF
+/*
+ * #577's ablation: ONE configuration access is refused, the ABLATE_577_NTH
+ * read (ABLATE_577_WRITE 0) or write (1) of register ABLATE_577_REG of device
+ * ABLATE_577_BDF, so that each step a caller has to check is refused on a real
+ * boot rather than argued about.  Only accesses through the two routines below
+ * are counted: the kernel's own measure_regions() reads the hardware directly.
+ * Every counted access is printed with its ordinal, so the log shows which step
+ * the number landed on.  The count is not atomic: this is an experiment, run on
+ * one processor, and it is never built otherwise.
+ *
+ * With ABLATE_577_ZERO the chosen READ is answered with 0 instead: not a
+ * refusal but a device that decodes nothing there, which is what a region
+ * that measures zero needs in order to exist on demand.
+ */
+#ifdef ABLATE_577_ZERO
+#define	ABLATE_577_SAYS	": ANSWERED 0"
+#else
+#define	ABLATE_577_SAYS	": REFUSED"
+#endif
+
+static int
+ablate_577_refuse(natural_t bdf, int write, unsigned int reg)
+{
+	static unsigned int	ablate_577_seen;
+	unsigned int		n;
+
+	if (bdf != (natural_t)ABLATE_577_BDF || write != ABLATE_577_WRITE
+	    || reg != (unsigned int)ABLATE_577_REG)
+		return 0;
+	n = ++ablate_577_seen;
+	printf("device_pci_config: #577 ablation — %s %u of register 0x%02x "
+	       "on %02x:%02x.%u, by task %p%s\n", write ? "write" : "read", n,
+	       reg, (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+	       (unsigned)(bdf & 7), (void *)current_task(),
+	       n == ABLATE_577_NTH ? ABLATE_577_SAYS : "");
+	return n == ABLATE_577_NTH;
+}
+#endif
+
 kern_return_t
 ds_master_device_pci_config_read(
 	ipc_port_t		master_port,
@@ -755,6 +795,17 @@ ds_master_device_pci_config_read(
 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
 	if (kr != KERN_SUCCESS)
 		return kr;
+#ifdef ABLATE_577_BDF
+	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
+			      0, reg)) {
+#ifdef ABLATE_577_ZERO
+		*data = 0;
+		return KERN_SUCCESS;
+#else
+		return KERN_NO_ACCESS;
+#endif
+	}
+#endif
 
 	*data = device_md_pci_read(bus, slot, func, reg);
 	return KERN_SUCCESS;
@@ -785,6 +836,11 @@ ds_master_device_pci_config_write(
 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
 	if (kr != KERN_SUCCESS)
 		return kr;
+#ifdef ABLATE_577_BDF
+	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
+			      1, reg))
+		return KERN_NO_ACCESS;
+#endif
 
 	device_md_pci_write(bus, slot, func, reg, data);
 	return KERN_SUCCESS;
@@ -2872,6 +2928,37 @@ ds_master_device_io_port_write(
 }
 
 /*
+ * Which PCI claim of ANOTHER task has an I/O region overlapping
+ * [port, port + count)?  Returns its index, or DEVICE_MAX_CLAIMS for none.
+ * Called with device_table_lock held, which every writer of device_claim[]
+ * holds too, so the answer cannot change before the caller acts on it.
+ */
+static unsigned int
+io_range_in_other_bar(unsigned int port, unsigned int count, task_t me)
+{
+	unsigned int	i, b;
+
+	for (i = 0; i < device_nclaims; i++) {
+		if (device_claim[i].task == TASK_NULL
+		    || device_claim[i].task == me
+		    || device_claim[i].bdf == DEVICE_BDF_BUS)
+			continue;
+		for (b = 0; b < device_claim[i].nregions; b++) {
+			uint64_t base = device_claim[i].region[b].base;
+			uint64_t size = device_claim[i].region[b].size;
+
+			if (!device_claim[i].region[b].is_io)
+				continue;
+			if ((uint64_t)port + count <= base
+			    || (uint64_t)port >= base + size)
+				continue;
+			return i;
+		}
+	}
+	return DEVICE_MAX_CLAIMS;
+}
+
+/*
  * Claim a range of legacy I/O ports, and give it back (#497).
  *
  * See the comment beside these routines in device_master.defs for the hole
@@ -2887,7 +2974,7 @@ ds_master_device_io_port_claim(
 {
 	task_t		me = current_task();
 	kern_return_t	kr;
-	unsigned int	i, free_slot = IO_CLAIM_MAX;
+	unsigned int	i, other, free_slot = IO_CLAIM_MAX;
 
 	*console_released = 0;
 	*klog_from = 0;
@@ -2906,6 +2993,33 @@ ds_master_device_io_port_claim(
 		return KERN_INVALID_ARGUMENT;
 
 	mutex_lock(&device_table_lock);
+	/*
+	 * 🔴 AND AGAINST THE I/O REGIONS OF THE PCI CLAIMS (#577).  This asked
+	 * io_claim[] only, while check_io_port() asks device_claim[] FIRST --
+	 * so a range inside another task's I/O BAR was granted here and then
+	 * refused, port by port, to the task it had been granted to: a claim
+	 * that succeeds and never delivers.  A range inside a BAR of our own is
+	 * not an overlap; check_io_port() gives those ports to us either way.
+	 *
+	 * ⚠️ Asked FIRST, before the legacy table: a re-attach of an identical
+	 * legacy claim is answered from that table without reaching anything
+	 * after it, and a window claimed since the first attach would be
+	 * granted again over the top.
+	 */
+	other = io_range_in_other_bar(port, count, me);
+	if (other != DEVICE_MAX_CLAIMS) {
+		natural_t	bdf = device_claim[other].bdf;
+		task_t		holder = device_claim[other].task;
+
+		mutex_unlock(&device_table_lock);
+		printf("device_io_port_claim: 0x%x..0x%x REFUSED to task %p — "
+		       "it overlaps an I/O window of %02x:%02x.%u, which task "
+		       "%p holds (#577)\n", port, port + count - 1, (void *)me,
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (void *)holder);
+		return KERN_NO_ACCESS;
+	}
+
 	for (i = 0; i < IO_CLAIM_MAX; i++) {
 		if (io_claim[i].task == TASK_NULL) {
 			if (free_slot == IO_CLAIM_MAX && !io_claim[i].retiring)

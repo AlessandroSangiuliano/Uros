@@ -585,6 +585,23 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		       "region(s)\n", n_bars);
 		return -1;
 	}
+
+	/*
+	 * ⚠️ A region with no size is not a window to drive (#577).  It is
+	 * what the registry holds when the HAL did not measure the device -- a
+	 * refused step of its probe, which pci_scan names -- or measured it
+	 * decoding nothing.  This driver used to take the base and go on, and
+	 * a few lines down it switches I/O decoding ON: over a BAR pci_scan
+	 * had just left switched off because it was not shown to be back
+	 * where it belongs.  ahci refuses the same size for the same reason.
+	 */
+	if (io_region->size == 0) {
+		printf("virtio %u:%u.%u: BAR0 has no size: the HAL did not "
+		       "measure it, or measured it decoding nothing (pci_scan's "
+		       "lines say which) — not probing (#577)\n", bus, slot,
+		       func);
+		return -1;
+	}
 	st->iobase = (unsigned int)io_region->base;
 	printf("virtio: I/O base = 0x%04X\n", st->iobase);
 

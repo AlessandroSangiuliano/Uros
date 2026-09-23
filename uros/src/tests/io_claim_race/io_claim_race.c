@@ -47,6 +47,13 @@
  * NOT ASKED; with two or more it says PASS or WRONG.  The default harness
  * boots one processor, so a default boot reads NOT ASKED here, which is the
  * truth and not a failure; `run-x86_64.sh 180 -smp 4' asks it.
+ *
+ * ── And one question that is not a race (#577) ──
+ *
+ * Arm [4], asked by `a' alone after the rounds, on any number of processors:
+ * a legacy claim inside the I/O window of a PCI device another task holds is
+ * refused.  It lives here because this is the program that claims legacy
+ * ranges for a living; see ask_bar_overlap().
  */
 
 #include <mach.h>
@@ -68,6 +75,8 @@
 #include <servers/netname_defs.h>
 
 #include "device_master.h"		/* MIG: device_io_port_claim/unclaim */
+#include "hal_server.h"			/* struct hal_device_info (arm [4]) */
+#include "hal.h"			/* the user half of hal.defs (arm [4]) */
 
 extern mach_port_t	name_server_port;
 extern mach_port_t	bootstrap_port;
@@ -217,6 +226,257 @@ processors(void)
 	return hi.avail_cpus > 0 ? (unsigned)hi.avail_cpus : 1u;
 }
 
+/*
+ * ── [4] A legacy claim inside another task's I/O window is refused ──
+ *
+ * check_io_port() asks the I/O windows of the PCI claims BEFORE the legacy
+ * table, so a legacy range inside a window another task holds used to be
+ * granted and then refused, port by port, to the task it had been granted to:
+ * a claim that succeeds and never delivers.  device_io_port_claim() refuses it
+ * now (#577), and this arm asks.
+ *
+ * The window is virtio-blk's, the boot disk's: the block server holds it for
+ * the whole boot, which is what makes it ANOTHER task's claim for as long as
+ * the arm runs.  It is found through the HAL, because this program may not
+ * read configuration space, and the claim is waited for with
+ * device_dma_owned(), which answers from the kernel's own claim table -- a HAL
+ * match is not a claim, and the HAL's BOUND comes after the probe.
+ *
+ * ⚠️ The premise is checked with a READ of the window's first register, which
+ * on a legacy virtio device is the host-feature word: read-only, so if the
+ * premise is false and the read goes through, nothing on the device changes.
+ * Never +0x13, the ISR, whose read is an acknowledge.
+ *
+ * Two questions -- the whole window, and eight ports straddling its first
+ * port -- so that overlap is asked and not only containment; and a control,
+ * the eight ports just below the window, which overlap nothing and must be
+ * granted, so that a claim path refusing everything cannot pass.  The answers
+ * are collected first and judged only after the premise is asked again: a
+ * window let go of in the middle would make a grant look like the defect.
+ */
+#define	VIRTIO_VENDOR		0x1AF4u
+#define	OWNED_TRIES		400u	/* x FIND_WAIT_MS: 20 s */
+
+static struct hal_device_info	hal_devs[HAL_MAX_DEVICES];
+
+struct overlap_ask {
+	unsigned int	port, count;
+	kern_return_t	claim;		/* what device_io_port_claim said */
+	kern_return_t	read;		/* under a grant: a read of the window */
+};
+
+/* Is any I/O region of any device in [port, port + count)? */
+static int
+io_range_is_a_window(unsigned int n, unsigned int port, unsigned int count)
+{
+	unsigned int	i, b;
+
+	for (i = 0; i < n; i++)
+		for (b = 0; b < hal_devs[i].n_bars; b++) {
+			const struct pci_bar_region *r = &hal_devs[i].bars[b];
+
+			if (!(r->flags & PCI_REGION_IO))
+				continue;
+			if ((uint64_t)port + count <= r->base
+			    || (uint64_t)port >= r->base + r->size)
+				continue;
+			return 1;
+		}
+	return 0;
+}
+
+/*
+ * Ask for one range.  A grant is given back at once -- for a range over the
+ * window, after finding out what it was worth: a read of the window's first
+ * register under it.  The control covers no part of the window, so there is
+ * nothing under it to read.
+ */
+static void
+ask_claim(mach_port_t device, struct overlap_ask *a, unsigned int win,
+	  int over_window)
+{
+	natural_t	released = 0, klog_from = 0, v = 0;
+
+	a->read = KERN_SUCCESS;
+	a->claim = device_io_port_claim(device, a->port, a->count,
+					&released, &klog_from);
+	if (a->claim != KERN_SUCCESS)
+		return;
+	if (over_window)
+		a->read = device_io_port_read(device, win, 4, &v);
+	(void) device_io_port_unclaim(device, a->port);
+}
+
+static int
+still_another_tasks(mach_port_t device, unsigned int bdf)
+{
+	natural_t	by_other = 0;
+
+	return device_dma_owned(device, bdf, &by_other) == KERN_SUCCESS
+	    && by_other == 1;
+}
+
+static void
+ask_bar_overlap(mach_port_t device, int *passed, int *arms)
+{
+	vm_offset_t		buf = 0;
+	mach_msg_type_number_t	bytes = 0;
+	unsigned int		n = 0, i, b, t, bdf = 0;
+	unsigned int		win = 0, size = 0, bad = 0;
+	natural_t		v;
+	mach_port_t		hal;
+	kern_return_t		kr;
+	struct overlap_ask	ask[3];
+	int			found = 0;
+
+	(*arms)++;
+
+	hal = find("hal");
+	if (hal == MACH_PORT_NULL
+	    || hal_list_devices(hal, &buf, &bytes, &n) != KERN_SUCCESS) {
+		printf("io_claim_race: [4] NOT ASKED — the HAL could not be "
+		       "asked where the devices' windows are (#563)\n");
+		(*arms)--;
+		return;
+	}
+	if (n > HAL_MAX_DEVICES)
+		n = HAL_MAX_DEVICES;
+	if (n > 0)
+		memcpy(hal_devs, (const void *)buf,
+		       (size_t)n * sizeof(struct hal_device_info));
+	if (bytes != 0)
+		(void) vm_deallocate(mach_task_self(), buf, bytes);
+
+	for (i = 0; i < n && !found; i++) {
+		if ((hal_devs[i].vendor_device & 0xFFFFu) != VIRTIO_VENDOR
+		    || (hal_devs[i].class_rev >> 24) != 0x01u)
+			continue;
+		for (b = 0; b < hal_devs[i].n_bars && !found; b++) {
+			const struct pci_bar_region *r = &hal_devs[i].bars[b];
+
+			if (!(r->flags & PCI_REGION_IO) || r->size < 8
+			    || r->base < 8)
+				continue;
+			win  = (unsigned int)r->base;
+			size = (unsigned int)r->size;
+			bdf  = (hal_devs[i].bus << 8) | (hal_devs[i].slot << 3)
+			     | hal_devs[i].func;
+			found = 1;
+		}
+	}
+	if (!found) {
+		printf("io_claim_race: [4] NOT ASKED — no virtio-blk controller "
+		       "with an I/O window in the HAL's registry (#563)\n");
+		(*arms)--;
+		return;
+	}
+	if (io_range_is_a_window(n, win - 8, 8)) {
+		printf("io_claim_race: [4] NOT ASKED — 0x%x..0x%x, the control "
+		       "range, is inside some device's window on this board "
+		       "(#563)\n", win - 8, win - 1);
+		(*arms)--;
+		return;
+	}
+
+	for (t = 0; t < OWNED_TRIES && !still_another_tasks(device, bdf); t++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+				     FIND_WAIT_MS);
+	if (t == OWNED_TRIES) {
+		printf("io_claim_race: [4] NOT ASKED — %u:%u.%u was not claimed "
+		       "by another task within %u s (#563)\n", bdf >> 8,
+		       (bdf >> 3) & 0x1F, bdf & 7,
+		       OWNED_TRIES * FIND_WAIT_MS / 1000);
+		(*arms)--;
+		return;
+	}
+
+	/* The premise, as the kernel sees it: the window is not ours. */
+	kr = device_io_port_read(device, win, 4, &v);
+	if (kr != KERN_NO_ACCESS) {
+		printf("io_claim_race: [4] NOT ASKED — a read of 0x%x, inside "
+		       "%u:%u.%u's window, answered kr=%d, and another task's "
+		       "window is refused (#563)\n", win, bdf >> 8,
+		       (bdf >> 3) & 0x1F, bdf & 7, (int)kr);
+		(*arms)--;
+		return;
+	}
+
+	ask[0].port = win;	ask[0].count = size;
+	ask[1].port = win - 4;	ask[1].count = 8;
+	ask[2].port = win - 8;	ask[2].count = 8;
+	for (i = 0; i < 3; i++)
+		ask_claim(device, &ask[i], win, i < 2);
+
+	if (!still_another_tasks(device, bdf)) {
+		printf("io_claim_race: [4] NOT ASKED — %u:%u.%u stopped being "
+		       "another task's while the arm ran (#563)\n", bdf >> 8,
+		       (bdf >> 3) & 0x1F, bdf & 7);
+		(*arms)--;
+		return;
+	}
+	/*
+	 * 🔴 THE TWO OVERLAPS ARE JUDGED BEFORE THE CONTROL CAN EXCUSE THE ARM.
+	 * On a kernel with the defect each of them is GRANTED and given back,
+	 * and on more than one processor a slot given back stays retiring for
+	 * a grace period -- so it is the defect itself that can fill the legacy
+	 * table and starve the control, and judging the control first could
+	 * turn a regressed kernel into NOT ASKED.  That is read from the code,
+	 * not seen: two -smp 4 boots of the old kernel with the old order both
+	 * said WRONG.  The fixed kernel answers an overlap before it looks for
+	 * a slot, so any answer but KERN_NO_ACCESS there is WRONG, a full table
+	 * included.
+	 */
+	for (i = 0; i < 2; i++) {
+		if (ask[i].claim == KERN_NO_ACCESS)
+			continue;
+		bad++;
+		if (ask[i].claim == KERN_SUCCESS)
+			printf("io_claim_race: [4] WRONG — device_io_port_claim"
+			       "(0x%x, 0x%x) inside %u:%u.%u's window, which "
+			       "another task holds, answered KERN_SUCCESS; a read "
+			       "of 0x%x under it then answered kr=%d — a claim "
+			       "that never delivers (#577)\n", ask[i].port,
+			       ask[i].count, bdf >> 8, (bdf >> 3) & 0x1F, bdf & 7,
+			       win, (int)ask[i].read);
+		else
+			printf("io_claim_race: [4] WRONG — device_io_port_claim"
+			       "(0x%x, 0x%x) over %u:%u.%u's window was refused "
+			       "with kr=%d, not KERN_NO_ACCESS\n", ask[i].port,
+			       ask[i].count, bdf >> 8, (bdf >> 3) & 0x1F, bdf & 7,
+			       (int)ask[i].claim);
+	}
+	if (bad != 0) {
+		/* What the control got, so a boot on more than one processor
+		 * records whether the defect had starved it. */
+		printf("io_claim_race: [4]     the control, 0x%x..0x%x, "
+		       "answered kr=%d\n", win - 8, win - 1,
+		       (int)ask[2].claim);
+		return;
+	}
+
+	if (ask[2].claim == KERN_RESOURCE_SHORTAGE) {
+		printf("io_claim_race: [4] NOT ASKED — both overlaps were "
+		       "refused, but the control claim found the legacy table "
+		       "full, so a claim path refusing everything would look "
+		       "the same (#563)\n");
+		(*arms)--;
+		return;
+	}
+	if (ask[2].claim != KERN_SUCCESS) {
+		printf("io_claim_race: [4] WRONG — 0x%x..0x%x, which overlaps no "
+		       "window, was refused (kr=%d)\n", win - 8, win - 1,
+		       (int)ask[2].claim);
+		return;
+	}
+
+	printf("io_claim_race: [4] 0x%x..0x%x and 0x%x..0x%x overlap %u:%u.%u's "
+	       "I/O window, which another task holds — both refused with "
+	       "KERN_NO_ACCESS; 0x%x..0x%x beside it was granted and given "
+	       "back\n", win, win + size - 1, win - 4, win + 3, bdf >> 8,
+	       (bdf >> 3) & 0x1F, bdf & 7, win - 8, win - 1);
+	(*passed)++;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -245,7 +505,7 @@ main(int argc, char **argv)
 		if (judge) {
 			printf("io_claim_race: WRONG — no name server port, "
 			       "so the two halves cannot find each other\n");
-			printf("io_claim_race: 0 of 3 arms passed\n");
+			printf("io_claim_race: 0 of 4 arms passed\n");
 		}
 		return 1;
 	}
@@ -260,7 +520,7 @@ main(int argc, char **argv)
 		if (judge) {
 			printf("io_claim_race: WRONG — could not register "
 			       "\"%s\"\n", judge ? NAME_A : NAME_B);
-			printf("io_claim_race: 0 of 3 arms passed\n");
+			printf("io_claim_race: 0 of 4 arms passed\n");
 		}
 		return 1;
 	}
@@ -271,7 +531,11 @@ main(int argc, char **argv)
 			printf("io_claim_race: [1] NOT ASKED — the other half "
 			       "never registered, so the question was never "
 			       "put (#563)\n");
-			printf("io_claim_race: 0 of 0 arms passed\n");
+			/* [4] needs no other half, so it is still asked. */
+			ask_bar_overlap(device, &passed, &arms);
+			printf("io_claim_race: %d of %d arms passed\n",
+			       passed, arms);
+			return (passed == arms) ? 0 : 1;
 		}
 		return 0;
 	}
@@ -440,6 +704,8 @@ main(int argc, char **argv)
 			       "clean after the rounds (claim kr=%d)\n",
 			       (int)kr);
 	}
+
+	ask_bar_overlap(device, &passed, &arms);
 
 	printf("io_claim_race: %d of %d arms passed\n", passed, arms);
 	return (passed == arms) ? 0 : 1;
