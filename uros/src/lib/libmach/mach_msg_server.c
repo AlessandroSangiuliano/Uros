@@ -209,6 +209,20 @@ mach_msg_server(
 	while (mr == MACH_MSG_SUCCESS) {
 	    /* we have a request message */
 
+	    /*
+	     * Every reply starts as no reply (#583).  The two buffers
+	     * swap on each reply, so bufReply holds the request before
+	     * last.  A demux that takes a one-way message by hand sets
+	     * RetCode and leaves the header alone; if that old request
+	     * was complex, the COMPLEX bit skipped the MIG_NO_REPLY test
+	     * below, the request went out as the reply to its spent reply
+	     * port, and the failed send destroyed it -- with the rights
+	     * the server had kept from it.
+	     */
+	    bufReply->Head.msgh_bits = 0;
+	    bufReply->Head.msgh_remote_port = MACH_PORT_NULL;
+	    bufReply->RetCode = MIG_NO_REPLY;
+
 	    (void) (*demux)(&bufRequest->Head, &bufReply->Head);
 
 	    if (!(bufReply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
