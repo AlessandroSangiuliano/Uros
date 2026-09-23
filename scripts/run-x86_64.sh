@@ -441,6 +441,30 @@ must_report 'dma_reclaim: started' 'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 must_report 'hal_bar: started' 'hal_bar: [0-9]* of [0-9]* arms passed' \
 	'It reads the region records the HAL measured and asks for a rescan.  A HAL that never probed does not fail loudly -- it reports regions of size zero -- so the absence of this verdict means the program did not reach the end, which is a different finding from a wrong size.'
 
+# 🔑 A SERVER, so its last sentence is not a count of arms but the line it
+# prints before it starts serving (#498).  `ready' is printed only after the
+# mandatory mount of ahci0a succeeded, so it is also the proof that it mounted.
+#
+# ⚠️ The loop that ENDS the run closes this pair on its death as well, and this
+# one does not.  Stopping the wait when it dies keeps a dead ext_server from
+# being reported as a wedge by the watchdog; refusing to call that a report is
+# what keeps it from being reported as a pass.
+# ⚠️ Its own failure lines say `failed' in lower case, which the unexplained
+# scan above does not match -- this pair is the only thing judging it.
+must_report '=== ext2 filesystem server' 'ext2: ready, entering message loop' \
+	'It mounts ahci0a and serves it (#498).  Every way out of main() before that line is a failure -- a device it could not open, a capability it was refused, a superblock it could not read -- and each of them ends the task rather than printing a verdict.'
+
+# 🔑 Two roles of one binary, with a prefix each, so that one of them stopping
+# dead cannot be covered by the other one finishing (#498).  Either may decline
+# -- the reader when the other target has written nothing, either one when
+# /mnt/disk2 is not attached -- and that is its last sentence too (#563).
+must_report 'xfile_read: started' 'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+	'It reads a file the OTHER target wrote on /mnt/disk2 and checks every byte (#498).  Silence is a client of libvfs that stopped inside an RPC to ext_server, which is a different finding from a byte that came back wrong.'
+must_report 'xfile_write: started' 'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+	'It writes, syncs and reads back the file the other target will read (#498).  Silence is a write, a sync or a read that never returned.'
+must_report 'xfile_write: \[1\] wrote' 'xfile-verify: [0-9]* of [0-9]* checks passed' \
+	'The host reads the disk image back after the run with e2fsck and debugfs (#498).  Without that line nobody but the writer has looked, and the writer once reported a clean sync over a file of zeros (#573).'
+
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
@@ -834,7 +858,23 @@ uros_conditions_open
 # Rebuilt every run, not on demand.  --entry N is written INTO the image, as
 # /boot/grub/entry.cfg, so a disk that is merely up to date with the binaries
 # can still be selecting yesterday's menu entry.  It costs about a second.
-"$REPO/scripts/make-disk-x86_64.sh" >&2
+#
+# 🔴 EXCEPT a second AHCI disk named by UROS_X86_64_AHCI2_IMAGE (#498).  That
+# is a disk ANOTHER boot wrote -- typically the one i386 leaves after reading
+# this target's file and writing its own -- and it is attached as it is: the
+# bytes on it are the evidence, so it is never the build's to recreate.  The
+# disk builder is told to make the first AHCI disk only.
+if [ -n "${UROS_X86_64_AHCI2_IMAGE:-}" ]; then
+	if [ ! -f "$UROS_X86_64_AHCI2_IMAGE" ]; then
+		echo "run-x86_64.sh: UROS_X86_64_AHCI2_IMAGE=$UROS_X86_64_AHCI2_IMAGE" \
+		     "does not exist" >&2
+		exit 2
+	fi
+	UROS_X86_64_AHCI_DISKS="$BUILD/disk-x86_64-ahci.img" \
+		"$REPO/scripts/make-disk-x86_64.sh" >&2
+else
+	"$REPO/scripts/make-disk-x86_64.sh" >&2
+fi
 
 # 🔴 `bootindex' on both, because with two disks the boot device stops being
 # obvious and starts being whatever SeaBIOS enumerates first.  Only one of
@@ -846,12 +886,17 @@ uros_conditions_open
 # QEMU refuses `iommu_platform=on' on anything but a modern-only one, so the
 # legacy virtio driver cannot be placed behind the IOMMU at all.  AHCI is an
 # ordinary bus master with nothing to negotiate.
+#
+# The disk on port 1 is ahci1a, which ext_server mounts at /mnt/disk2 -- the
+# disk xfile_test writes and the host reads back after the run (#498).  Named
+# once, because the check below has to open the same file qemu was given.
+AHCI_DISK2=${UROS_X86_64_AHCI2_IMAGE:-$BUILD/disk-x86_64-ahci2.img}
 DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device virtio-blk-pci,drive=urosdisk,bootindex=0
 	-device ich9-ahci,id=ahci0
 	-drive file=$BUILD/disk-x86_64-ahci.img,if=none,id=ahcidisk0,format=raw
 	-device ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1
-	-drive file=$BUILD/disk-x86_64-ahci2.img,if=none,id=ahcidisk1,format=raw
+	-drive file=$AHCI_DISK2,if=none,id=ahcidisk1,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
 # shellcheck disable=SC2086
@@ -971,7 +1016,10 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
-		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
+		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
+		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
+		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'; then
 		sleep 1
 		break
 	fi
@@ -998,6 +1046,36 @@ done
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+
+# ── The host reads what the boot wrote (#498) ─────────────────────────────
+#
+# 🔴 A GREEN xfile_write IS NOT A FILE ON THE DISK.  Its read-back goes through
+# the server that wrote it, and on the first boot that got this far the
+# server said the sync succeeded, gave back every byte -- and the disk held
+# zeros: the data had gone into a cache with no write-back and been counted
+# as written (#573).  Only a reader that shares no code with the writer can
+# say that, and QEMU has exited, so the image is still.
+#
+# Appended to the LOG, like everything the verdict reads, so --judge on this
+# log says what this run said.  Its failures are `WRONG' lines, which the
+# unexplained scan already fails a run for; the pair below fails it for the
+# check not having run at all.
+XFILE_PATH=$(sed -n 's/^xfile_write: \[1\] wrote [0-9]* bytes to \([^ ]*\) in .*/\1/p' \
+	"$LOG" | head -1)
+if [ -n "$XFILE_PATH" ]; then
+	case "$XFILE_PATH" in
+	/mnt/disk2/*)
+		python3 "$REPO/scripts/xfile-verify.py" "$AHCI_DISK2" \
+			"${XFILE_PATH#/mnt/disk2}" --writer x86_64 2>&1 \
+			| tee -a "$LOG" || true
+		;;
+	*)
+		echo "xfile-verify: WRONG — xfile_write wrote $XFILE_PATH, which" \
+		     "is not on /mnt/disk2, the only disk this script can read" \
+		     "back" | tee -a "$LOG"
+		;;
+	esac
+fi
 
 # ⚠️ Appended, not prepended, and that is not a preference: the verdict tests
 # `head -1 "$LOG"' for qemu's own refusal to start, so a header would answer

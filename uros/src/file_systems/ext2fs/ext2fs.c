@@ -181,16 +181,44 @@ extern kern_return_t device_write_phys(
  * Otherwise fall back to direct device_read/write (bootstrap path).
  * ================================================================ */
 
+/*
+ * 🔴 THE COUNT IS CONVERTED HERE, AND NOWHERE ELSE (#498).
+ *
+ * The device hands back an out-of-line buffer with a MIG count, which is a
+ * mach_msg_type_number_t -- four bytes on both targets.  Everything in this
+ * file keeps a buffer's size as a vm_size_t, because that is what
+ * vm_deallocate() takes -- four bytes on i386 and EIGHT on x86-64.
+ *
+ * The two used to meet at the call sites, as `(unsigned int *)&size': a
+ * pointer cast that tells the device to write four bytes into an eight-byte
+ * variable.  The upper half kept whatever was on the stack, and the
+ * vm_deallocate() that followed released a region billions of bytes long.
+ * The first create on x86-64 did that to a block bitmap it had just read,
+ * unmapped its own text, and died returning from the trap -- at the
+ * instruction after `syscall' in syscall_vm_deallocate.
+ *
+ * 🔑 It survived on i386 because the widths are equal there, and in most
+ * places on x86-64 because the variable happened to live in a struct that
+ * open had zeroed.  So the conversion lives in the one function every read
+ * goes through, the callers pass their own type, and a caller that passes
+ * anything else is a compiler error rather than a cast.
+ */
 static inline kern_return_t
 ext2_dev_read(struct device *dev, recnum_t recnum,
 	      io_buf_len_t bytes_wanted,
-	      io_buf_ptr_t *data, mach_msg_type_number_t *bytes_read)
+	      io_buf_ptr_t *data, vm_size_t *bytes_read)
 {
+	mach_msg_type_number_t count = 0;
+	kern_return_t kr;
+
 	if (dev->blk)
-		return blk_read(dev->blk, recnum, bytes_wanted,
-				data, bytes_read);
-	return device_read(dev->dev_port, 0, recnum,
-			   (int)bytes_wanted, data, bytes_read);
+		kr = blk_read(dev->blk, recnum, bytes_wanted, data, &count);
+	else
+		kr = device_read(dev->dev_port, 0, recnum,
+				 (int)bytes_wanted, data, &count);
+	if (kr == KERN_SUCCESS)
+		*bytes_read = (vm_size_t)count;
+	return kr;
 }
 
 static inline kern_return_t
@@ -205,17 +233,25 @@ ext2_dev_write(struct device *dev, recnum_t recnum,
 			    data, data_count, (int *)bytes_written);
 }
 
+/* The same conversion as ext2_dev_read(), for the same reason. */
 static inline kern_return_t
 ext2_dev_read_overwrite(struct device *dev, recnum_t recnum,
 			io_buf_len_t bytes_wanted,
 			vm_offset_t buffer,
-			mach_msg_type_number_t *bytes_read)
+			vm_size_t *bytes_read)
 {
+	mach_msg_type_number_t count = 0;
+	kern_return_t kr;
+
 	if (dev->blk)
-		return blk_read_overwrite(dev->blk, recnum, bytes_wanted,
-					  buffer, bytes_read);
-	return device_read_overwrite(dev->dev_port, 0, recnum,
-				     bytes_wanted, buffer, bytes_read);
+		kr = blk_read_overwrite(dev->blk, recnum, bytes_wanted,
+					buffer, &count);
+	else
+		kr = device_read_overwrite(dev->dev_port, 0, recnum,
+					   bytes_wanted, buffer, &count);
+	if (kr == KERN_SUCCESS)
+		*bytes_read = (vm_size_t)count;
+	return kr;
 }
 
 static inline int
@@ -673,7 +709,7 @@ static int
 read_inode(ino_t inumber, register struct ext2fs_file *fp)
 {
 	vm_offset_t		buf;
-	mach_msg_type_number_t	buf_size;
+	vm_size_t		buf_size;
 	register
 	struct ext2_super_block	*fs;
 	daddr_t			disk_block;
@@ -859,7 +895,7 @@ block_map_locked(
 	for (; level >= 0; level--) {
 
 	    vm_offset_t	data;
-	    mach_msg_type_number_t	size;
+	    vm_size_t		size;
 
 	    if (ind_block_num == 0)
 		break;
@@ -987,7 +1023,7 @@ ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
 			 (recnum_t) dbtorec(&fp->f_dev,
 					    ext2_fsbtodb(fs, disk_block)),
 			 n_contig * block_size,
-			 (char **)&ra_buf, (unsigned int *)&ra_buf_size);
+			 (char **)&ra_buf, &ra_buf_size);
 	if (rc != 0)
 		return;
 
@@ -1111,7 +1147,7 @@ fallback_read:
 								disk_block)),
 					     (int) block_size,
 					     (char **) &fp->f_buf,
-					     (unsigned int *)&fp->f_buf_size);
+					     &fp->f_buf_size);
 				if (rc)
 				    return (rc);
 				page_cache_insert(fp->f_dev.cache, disk_block,
@@ -1125,7 +1161,7 @@ fallback_read:
 								disk_block)),
 				     (int) block_size,
 				     (char **) &fp->f_buf,
-				     (unsigned int *)&fp->f_buf_size);
+				     &fp->f_buf_size);
 	        }
 		if (rc)
 		    return (rc);
@@ -1215,7 +1251,7 @@ fallback_read_direct:
 								disk_block)),
 						(int) block_size,
 						*buf_p,
-						(unsigned int *)size_p);
+						size_p);
 					if (rc)
 						return (rc);
 					page_cache_insert(fp->f_dev.cache,
@@ -1230,7 +1266,7 @@ fallback_read_direct:
 								disk_block)),
 				     (int) block_size,
 				     *buf_p,
-				     (unsigned int *)size_p);
+				     size_p);
 			if (rc)
 				return (rc);
 		}
@@ -1335,8 +1371,8 @@ read_fs(
 	struct ext2_super_block *fs, raw_fs;
 	vm_offset_t		buf;
 	vm_offset_t		buf2;
-	mach_msg_type_number_t	buf_size;
-	mach_msg_type_number_t	buf2_size;
+	vm_size_t		buf_size;
+	vm_size_t		buf2_size;
 	int			error;
 	int			gd_count;
 	int			gd_blocks;
@@ -1702,7 +1738,7 @@ ext2fs_open_file_into(
 		     * Read file for symbolic link
 		     */
 		    vm_offset_t	buf;
-		    mach_msg_type_number_t	buf_size;
+		    vm_size_t		buf_size;
 		    daddr_t	disk_block;
 		    register struct ext2_super_block *fs = fp->f_fs;
 
@@ -2128,7 +2164,7 @@ read_disk_block(
 							  disk_block)),
 			   (int) EXT2_BLOCK_SIZE(fp->f_fs),
 			   (char **) data_out,
-			   (unsigned int *) size_out);
+			   size_out);
 }
 
 /*
@@ -2764,7 +2800,7 @@ write_inode(ino_t inumber, struct ext2fs_file *fp)
 	 */
 	if (vn->v_inode_blk == 0) {
 		vm_offset_t		buf;
-		mach_msg_type_number_t	buf_size;
+		vm_size_t		buf_size;
 		int			rc;
 
 		rc = ext2_dev_read(&fp->f_dev,

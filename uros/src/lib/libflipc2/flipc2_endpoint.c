@@ -93,13 +93,81 @@ struct flipc2_endpoint {
 };
 
 /* ------------------------------------------------------------------ */
-/*  Global storage for the endpoint pointer used by the MIG stubs     */
-/*                                                                     */
-/*  The MIG-generated server stubs receive the first argument from     */
-/*  msgh_local_port.  When protected payloads are enabled, this is     */
-/*  the payload value, not the port name.  We cast it to get back      */
-/*  the struct flipc2_endpoint pointer.                                */
+/*  Endpoints are addressed by SLOT, never by pointer (#498)          */
 /* ------------------------------------------------------------------ */
+/*
+ * The MIG server stubs take their first argument from msgh_local_port, and
+ * with protected payloads that is the payload the server attached, not the
+ * port name.  This file used to put `(unsigned long)ep' there and cast it
+ * straight back.
+ *
+ * 🔴 That fits on i386 by coincidence and not by design.  The payload rides in
+ * a port-name field, and the kernel says so in an assertion of its own:
+ *
+ *     ipc_kmsg.c
+ *     _Static_assert(sizeof(natural_t) == sizeof(mach_port_t),
+ *         "a protected payload is delivered in a port-name field and cannot
+ *          be wider than one");
+ *
+ * A port name is four bytes on both targets; a pointer is eight here.  So the
+ * high half of every endpoint address was being dropped on the way in and
+ * invented on the way out, and the four readers below each turned the result
+ * into a pointer without asking whether it was one.
+ *
+ * ⚠️ WHETHER THAT WAS BITING IS UNMEASURED.  It is lossless exactly when the
+ * addresses vm_allocate hands out stay under 4 GiB, which is a property of the
+ * address-space layout and not of this code.  Printing one endpoint address on
+ * an x86-64 boot would settle it; nothing here depends on the answer, because
+ * a slot fits whatever the layout does.
+ *
+ * 🔑 A slot is also checkable, and a reconstructed pointer never is.
+ *
+ * ⚠️ No lock: this file has none anywhere, so the table inherits the regime the
+ * endpoint code already has -- creation and teardown from one thread.  Said
+ * rather than fixed here, because inventing a lock for the table alone would
+ * suggest the rest of the file has one.
+ */
+#define FLIPC2_MAX_ENDPOINTS    8
+#define FLIPC2_EP_SLOT_NONE     0u
+
+static struct flipc2_endpoint  *flipc2_ep_slots[FLIPC2_MAX_ENDPOINTS];
+
+/* Returns the payload to attach, or FLIPC2_EP_SLOT_NONE when the table is full. */
+static unsigned
+flipc2_ep_register(struct flipc2_endpoint *ep)
+{
+    unsigned i;
+
+    for (i = 0; i < FLIPC2_MAX_ENDPOINTS; i++) {
+        if (flipc2_ep_slots[i] == NULL) {
+            flipc2_ep_slots[i] = ep;
+            /* ⚠️ +1: the kernel reads `payload != 0' as "has a payload at
+             * all", so slot zero could not be told from having none. */
+            return i + 1u;
+        }
+    }
+    return FLIPC2_EP_SLOT_NONE;
+}
+
+static void
+flipc2_ep_unregister(const struct flipc2_endpoint *ep)
+{
+    unsigned i;
+
+    for (i = 0; i < FLIPC2_MAX_ENDPOINTS; i++)
+        if (flipc2_ep_slots[i] == ep)
+            flipc2_ep_slots[i] = NULL;
+}
+
+static struct flipc2_endpoint *
+flipc2_ep_from_payload(mach_port_t arg)
+{
+    unsigned slot = (unsigned)arg;
+
+    if (slot == FLIPC2_EP_SLOT_NONE || slot > FLIPC2_MAX_ENDPOINTS)
+        return NULL;
+    return flipc2_ep_slots[slot - 1u];
+}
 
 /* ------------------------------------------------------------------ */
 /*  Dead-name notification handler                                     */
@@ -179,8 +247,9 @@ flipc2_ep_demux_reactor(mach_msg_header_t *in, mach_msg_header_t *out)
 
     if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
         struct flipc2_endpoint *ep =
-            (struct flipc2_endpoint *)(unsigned long)in->msgh_local_port;
-        flipc2_ep_cleanup_dead_reactor(ep, in);
+            flipc2_ep_from_payload(in->msgh_local_port);
+        if (ep != NULL)
+            flipc2_ep_cleanup_dead_reactor(ep, in);
         ((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
         out->msgh_size = sizeof(mig_reply_error_t);
         return TRUE;
@@ -202,8 +271,9 @@ flipc2_ep_demux(mach_msg_header_t *in, mach_msg_header_t *out)
     /* Handle dead-name notifications */
     if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
         struct flipc2_endpoint *ep =
-            (struct flipc2_endpoint *)(unsigned long)in->msgh_local_port;
-        flipc2_ep_cleanup_dead(ep, in);
+            flipc2_ep_from_payload(in->msgh_local_port);
+        if (ep != NULL)
+            flipc2_ep_cleanup_dead(ep, in);
         /* Mark as no-reply notification */
         ((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
         out->msgh_size = sizeof(mig_reply_error_t);
@@ -239,7 +309,7 @@ ds_flipc2_endpoint_connect_rpc(
     unsigned int       *entries_out)
 {
     struct flipc2_endpoint *ep =
-        (struct flipc2_endpoint *)(unsigned long)server_port;
+        flipc2_ep_from_payload(server_port);
     flipc2_return_t     ret;
     flipc2_channel_t    fwd_ch = (flipc2_channel_t)0;
     flipc2_channel_t    rev_ch = (flipc2_channel_t)0;
@@ -250,6 +320,9 @@ ds_flipc2_endpoint_connect_rpc(
     uint32_t            i;
     uint32_t            cs, re;
     int                 slot;
+
+    if (ep == NULL)
+        return KERN_INVALID_ARGUMENT;
 
     /* Check client limit */
     if (ep->n_clients >= ep->max_clients)
@@ -368,8 +441,11 @@ ds_flipc2_endpoint_disconnect_rpc(
     mach_port_t         client_task)
 {
     struct flipc2_endpoint *ep =
-        (struct flipc2_endpoint *)(unsigned long)server_port;
+        flipc2_ep_from_payload(server_port);
     uint32_t i;
+
+    if (ep == NULL)
+        return KERN_INVALID_ARGUMENT;
 
     for (i = 0; i < ep->max_clients; i++) {
         if (!ep->conns[i].active)
@@ -407,6 +483,7 @@ flipc2_endpoint_create(
     struct flipc2_endpoint *ep;
     vm_address_t        addr;
     uint32_t            i;
+    unsigned            ep_slot;
 
     if (!name || !ep_out)
         return FLIPC2_ERR_INVALID_ARGUMENT;
@@ -463,11 +540,20 @@ flipc2_endpoint_create(
         return FLIPC2_ERR_KERNEL;
     }
 
-    /* Set protected payload so MIG stubs receive the ep pointer */
+    /* The SLOT, not the address (#498) -- see flipc2_ep_from_payload. */
+    ep_slot = flipc2_ep_register(ep);
+    if (ep_slot == FLIPC2_EP_SLOT_NONE) {
+        mach_port_mod_refs(mach_task_self(), ep->recv_port,
+                           MACH_PORT_RIGHT_RECEIVE, -1);
+        vm_deallocate(mach_task_self(), addr,
+                      sizeof(struct flipc2_endpoint));
+        return FLIPC2_ERR_KERNEL;
+    }
     kr = mach_port_set_protected_payload(mach_task_self(),
                                          ep->recv_port,
-                                         (unsigned long)ep);
+                                         ep_slot);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
                            MACH_PORT_RIGHT_RECEIVE, -1);
         vm_deallocate(mach_task_self(), addr,
@@ -480,6 +566,7 @@ flipc2_endpoint_create(
                             MACH_PORT_RIGHT_PORT_SET,
                             &ep->port_set);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
                            MACH_PORT_RIGHT_RECEIVE, -1);
         vm_deallocate(mach_task_self(), addr,
@@ -491,6 +578,7 @@ flipc2_endpoint_create(
     kr = mach_port_move_member(mach_task_self(),
                                ep->recv_port, ep->port_set);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->port_set,
                            MACH_PORT_RIGHT_PORT_SET, -1);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
@@ -504,6 +592,7 @@ flipc2_endpoint_create(
     kr = netname_check_in(name_server_port, (char *)name,
                           mach_task_self(), ep->recv_port);
     if (kr != KERN_SUCCESS) {
+        flipc2_ep_unregister(ep);
         mach_port_mod_refs(mach_task_self(), ep->port_set,
                            MACH_PORT_RIGHT_PORT_SET, -1);
         mach_port_mod_refs(mach_task_self(), ep->recv_port,
@@ -612,6 +701,11 @@ flipc2_endpoint_destroy(
 
     if (!ep)
         return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    /* Out of the slot table before anything else is torn down: a message
+     * arriving on the receive right after this point resolves to NULL and is
+     * refused, rather than to an endpoint being dismantled (#498). */
+    flipc2_ep_unregister(ep);
 
     /* Disconnect all active clients */
     for (i = 0; i < ep->max_clients; i++) {

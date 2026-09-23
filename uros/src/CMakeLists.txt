@@ -290,6 +290,8 @@ endif()
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libflipc2)
   add_subdirectory(lib/libvfs)
+  # libfspager: ext_server links it, and nothing else was holding it out (#498).
+  add_subdirectory(lib/libfspager)
 endif()
 
 # ipc_bench on x86-64 (#552), beside the tests rather than behind
@@ -541,6 +543,18 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/block_device_server)
 endif()
 
+# ext_server (#498), and what was actually holding it out.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/ext_server)
+endif()
+
+# A file written by one target and read by the other (#498).  The same source
+# is built in the i386 half below, which is the whole test: a width the two
+# builds of ext_server disagree on shows up as a byte at a named offset.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/xfile_test)
+endif()
+
 # char_server on x86-64 (#497), and the question it brings with it.
 #
 # 🔑 IT IS NOT A PORTING STEP, IT IS AN OWNERSHIP ONE.  This is the target where
@@ -722,6 +736,10 @@ add_subdirectory(tests/dma_reclaim_test)
 # whole address anyway is the point: it is fixed at 64 bits on both targets so
 # that a machine which cannot reach such a device can still say it is there.
 add_subdirectory(tests/hal_bar_test)
+
+# A file written by one target and read by the other (#498) -- the same source
+# as in the x86-64 half above.
+add_subdirectory(tests/xfile_test)
 
 # Build kernel242_test (#242 no-goto kernel exerciser)
 add_subdirectory(tests/kernel242_test)

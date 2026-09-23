@@ -57,6 +57,45 @@
 #include <device/device_types.h>
 #include <device/device.h>
 
+/*
+ * device_read() reports a mach_msg_type_number_t and this file keeps a
+ * buffer's size as a vm_size_t -- four bytes against eight on x86-64.  The
+ * conversion lives here so that no call site casts one pointer into the
+ * other, which wrote four bytes into eight and left the upper half to the
+ * stack (#498; ext2_dev_read() in ext2fs.c records what that did).  The
+ * outputs are written only on success, as the stubs underneath do.
+ */
+static kern_return_t
+minix_device_read(mach_port_t port, dev_mode_t mode, recnum_t recnum,
+		  int bytes_wanted, vm_offset_t *data, vm_size_t *bytes_read)
+{
+	io_buf_ptr_t buf = 0;
+	mach_msg_type_number_t count = 0;
+	kern_return_t kr;
+
+	kr = device_read(port, mode, recnum, bytes_wanted, &buf, &count);
+	if (kr == KERN_SUCCESS) {
+		*data = (vm_offset_t)buf;
+		*bytes_read = (vm_size_t)count;
+	}
+	return kr;
+}
+
+static kern_return_t
+minix_device_read_overwrite(mach_port_t port, dev_mode_t mode,
+			    recnum_t recnum, int bytes_wanted,
+			    vm_address_t buffer, vm_size_t *bytes_read)
+{
+	mach_msg_type_number_t count = 0;
+	kern_return_t kr;
+
+	kr = device_read_overwrite(port, mode, recnum, bytes_wanted, buffer,
+				   &count);
+	if (kr == KERN_SUCCESS)
+		*bytes_read = (vm_size_t)count;
+	return kr;
+}
+
 #define mutex_lock(a)
 #define mutex_unlock(a)
 #define mutex_init(a)
@@ -418,14 +457,14 @@ buf_read_file(
 				      TRUE);
 		    fp->f_buf_size = block_size;
 		} else {
-		    rc = device_read(fp->f_dev.dev_port,
+		    rc = minix_device_read(fp->f_dev.dev_port,
 				     0,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							minix_fsbtodb(fs,
 								disk_block)),
 				     (int) block_size,
-				     (char **) &fp->f_buf,
-				     (unsigned int *)&fp->f_buf_size);
+				     &fp->f_buf,
+				     &fp->f_buf_size);
 	        }
 		if (rc)
 		    return (rc);
@@ -449,14 +488,14 @@ buf_read_file(
 		if (rc != 0)
 		    return (rc);
 
-		rc = device_read_overwrite(fp->f_dev.dev_port,
+		rc = minix_device_read_overwrite(fp->f_dev.dev_port,
 				     0,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							minix_fsbtodb(fs,
 								disk_block)),
 				     (int) block_size,
 				     (vm_address_t) *buf_p,
-				     (unsigned int *)size_p);
+				     size_p);
 	        if (rc)
 		    return (rc);
 	}

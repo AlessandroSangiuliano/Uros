@@ -20,6 +20,11 @@
 #                                                   # rigenerato (anche con
 #                                                   # --bench: la suite passa
 #                                                   # dal bundle stage-1)
+#   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG come secondo disco
+#                                                   # AHCI, SENZA ricrearlo: e'
+#                                                   # /mnt/disk2, dove x86-64
+#                                                   # lascia il file che questo
+#                                                   # target legge (#498)
 #
 # L'immagine disco contiene /mach_servers/ con:
 #   bootstrap.conf   — configurazione del bootstrap
@@ -60,6 +65,7 @@ USE_DISK=true
 # compatibility but is a no-op when USE_DISK=true.
 USE_AHCI=true
 USE_AHCI2=false
+AHCI2_IMAGE=""      # --ahci2-image PATH: attach PATH as AHCI port 1 AS IT IS (#498)
 USE_VIRTIO=false
 USE_BUNDLE=true     # Issue #186: stage-1 multiboot bundle (mod[1]) on by default
 USE_SHA_NI=false    # Issue #180: --sha-ni → TCG + Icelake-Server,+sha-ni
@@ -93,6 +99,7 @@ while [ $# -gt 0 ]; do
         --window) EXTRA_ARGS="$EXTRA_ARGS -display gtk"; shift ;;
         --no-bundle) USE_BUNDLE=false; shift ;;
         --ahci2) USE_AHCI=true; USE_AHCI2=true; shift ;;
+        --ahci2-image) USE_AHCI=true; USE_AHCI2=true; AHCI2_IMAGE="$2"; shift 2 ;;
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
@@ -261,8 +268,20 @@ if [ "$USE_AHCI" = true ]; then
     QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
 
     if [ "$USE_AHCI2" = true ]; then
-        AHCI_DISK1="$BUILD_DIR/ahci-test1.img"
-        create_ahci_test_disk "$AHCI_DISK1" "disk1"
+        # #498: --ahci2-image attaches a disk ANOTHER boot wrote -- the one an
+        # x86-64 run leaves as disk-x86_64-ahci2.img, which ext_server mounts
+        # at /mnt/disk2 on both targets.  It is never recreated here: the
+        # bytes on it are the evidence.
+        if [ -n "$AHCI2_IMAGE" ]; then
+            if [ ! -f "$AHCI2_IMAGE" ]; then
+                echo "ERRORE: --ahci2-image $AHCI2_IMAGE non esiste"
+                exit 1
+            fi
+            AHCI_DISK1="$AHCI2_IMAGE"
+        else
+            AHCI_DISK1="$BUILD_DIR/ahci-test1.img"
+            create_ahci_test_disk "$AHCI_DISK1" "disk1"
+        fi
         QEMU_ARGS="$QEMU_ARGS -drive id=ahcidisk1,file=$AHCI_DISK1,format=raw,if=none"
         QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk1,bus=ahci0.1"
         echo "AHCI port 1: $AHCI_DISK1"

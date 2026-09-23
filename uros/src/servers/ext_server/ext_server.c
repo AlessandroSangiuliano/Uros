@@ -169,6 +169,50 @@ struct mount_context {
 };
 
 static struct mount_context	mounts[MAX_MOUNTS];
+
+/*
+ * A mount context is addressed by INDEX, never by pointer (#498).
+ *
+ * 🔴 The protected payload is a PORT-NAME-WIDTH value, and that is not an
+ * implementation detail to route around: the kernel delivers it in
+ * msgh_local_port, and ipc_kmsg.c asserts
+ *
+ *     sizeof(natural_t) == sizeof(mach_port_t)
+ *         "a protected payload is delivered in a port-name field and cannot
+ *          be wider than one"
+ *
+ * So `(unsigned long)mnt' fitted on i386 by coincidence -- a 32-bit pointer in
+ * a 32-bit field -- and truncates here, where a pointer is eight bytes and a
+ * port name is four.  Eighteen handlers cast it straight back, and not one of
+ * them checked the result, so a payload that did not survive the trip became a
+ * wild pointer eighteen ways.
+ *
+ * 🔑 An index is not a workaround for a field that is too narrow.  It is what
+ * fits in the field the mechanism defines, and it can be BOUNDS-CHECKED, which
+ * a reconstructed pointer never can.  The i386 build gets the same guard.
+ *
+ * ⚠️ Offset by one, because zero is not a value here: the kernel reads
+ * `payload != 0' as "this port has a payload at all" (ipc_kmsg.c), so slot 0
+ * would be indistinguishable from having none.
+ */
+#define MNT_PAYLOAD_NONE	0u
+
+static inline unsigned
+mnt_payload(const struct mount_context *mnt)
+{
+	return (unsigned)(mnt - mounts) + 1u;
+}
+
+static inline struct mount_context *
+mnt_from_payload(mach_port_t arg)
+{
+	unsigned slot = (unsigned)arg;
+
+	if (slot == MNT_PAYLOAD_NONE || slot > MAX_MOUNTS)
+		return NULL;
+	return &mounts[slot - 1u];
+}
+
 static int			n_mounts;
 static mach_port_t		port_set;	/* port set for all mounts */
 
@@ -368,9 +412,12 @@ ds_ext2_open(
 	ext2_path_t		path,
 	natural_t		*fid_out)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
+	struct mount_context *mnt = mnt_from_payload(fs_port_arg);
 	fs_private_t priv;
 	int fid, rc, i, donor;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	/*
 	 * #385: the whole slot allocation is one critical section.  Claim
@@ -538,9 +585,12 @@ ds_ext2_stat(
 	natural_t	fid,
 	natural_t	*file_size_out)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
+	struct mount_context *mnt = mnt_from_payload(fs_port_arg);
 	int idx = (int)fid - 1;
 	fs_private_t priv = of_op_begin(mnt, idx);
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	if (priv == (fs_private_t)0)
 		return KERN_INVALID_ARGUMENT;
@@ -559,13 +609,16 @@ ds_ext2_read(
 	pointer_t		*data_out,
 	mach_msg_type_number_t	*data_count_out)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
+	struct mount_context *mnt = mnt_from_payload(fs_port_arg);
 	int idx = (int)fid - 1;
 	fs_private_t priv;
 	kern_return_t kr;
 	vm_offset_t buf;
 	size_t fsize;
 	int rc;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	priv = of_op_begin(mnt, idx);
 	if (priv == (fs_private_t)0)
@@ -607,10 +660,13 @@ ds_ext2_close(
 	mach_port_t	fs_port_arg,
 	natural_t	fid)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
+	struct mount_context *mnt = mnt_from_payload(fs_port_arg);
 	int idx = (int)fid - 1;
 	fs_private_t priv;
 	mach_port_t  owner;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	if (idx < 0 || idx >= MAX_OPEN_FILES)
 		return KERN_INVALID_ARGUMENT;
@@ -664,10 +720,13 @@ ds_ext2_write(
 	pointer_t		data,
 	mach_msg_type_number_t	data_count)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
+	struct mount_context *mnt = mnt_from_payload(fs_port_arg);
 	int idx = (int)fid - 1;
 	fs_private_t priv;
 	int rc;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	priv = of_op_begin(mnt, idx);
 	if (priv == (fs_private_t)0) {
@@ -706,8 +765,11 @@ kern_return_t
 ds_ext2_sync(
 	mach_port_t	fs_port_arg)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
+	struct mount_context *mnt = mnt_from_payload(fs_port_arg);
 	int rc;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	/* Flush dirty metadata — iterate only dirty files (#385: under
 	 * of_lock, shared with open/close/write/writeback). */
@@ -883,10 +945,13 @@ vfs_open(
 	vfs_u64_t	*handle_out,
 	vfs_u32_t	*type_out)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
 	natural_t fid;
 	kern_return_t kr;
 	fs_private_t priv;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	kr = ds_ext2_open(fs_port, path, &fid);
 
@@ -904,6 +969,14 @@ vfs_open(
 	if (kr != KERN_SUCCESS && (flags & VFS_O_CREAT)) {
 		int rc = ext2fs_create(&mnt->dev, path, mode ? mode : 0644);
 		if (rc != 0) {
+			/*
+			 * Said here, because the reply cannot: it carries
+			 * KERN_FAILURE, and the code below it is what names
+			 * the cause (#498 -- the first create on x86-64 failed
+			 * and nothing on the console said why).
+			 */
+			printf("ext2: create %s on %s failed (rc=%d)\n", path,
+			       mnt->service_name, rc);
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
 			(void)mach_port_deallocate(mach_task_self(), client_task);
@@ -997,9 +1070,12 @@ vfs_write(
 kern_return_t
 vfs_truncate(mach_port_t fs_port, vfs_u64_t handle, vfs_u64_t length)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
 	fs_private_t priv = vfs_op_begin(mnt, handle);
 	int rc;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	if (!priv)
 		return KERN_INVALID_ARGUMENT;
@@ -1017,8 +1093,11 @@ vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
 {
 	natural_t fid;
 	kern_return_t kr;
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
 	fs_private_t priv;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	/* Open + fstat + close.  v0.1 acceptable; future work: a
 	 * dedicated lookup that doesn't allocate an fid. */
@@ -1039,8 +1118,11 @@ vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
 kern_return_t
 vfs_fstat(mach_port_t fs_port, vfs_u64_t handle, vfs_stat_t *st)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
 	fs_private_t priv = vfs_op_begin(mnt, handle);
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	if (!priv)
 		return KERN_INVALID_ARGUMENT;
@@ -1058,7 +1140,7 @@ vfs_readdir(
 	mach_msg_type_number_t	*entries_count_out,
 	vfs_u64_t		*next_cookie_out)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
 	fs_private_t priv = vfs_op_begin(mnt, dir_handle);
 	struct fs_dirent *tmp;
 	vfs_dirent_t *outv;
@@ -1066,6 +1148,9 @@ vfs_readdir(
 	vm_offset_t buf;
 	kern_return_t kr;
 	int rc;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	*entries_out       = (pointer_t)0;
 	*entries_count_out = 0;
@@ -1133,7 +1218,10 @@ vfs_readdir(
 kern_return_t
 vfs_unlink(mach_port_t fs_port, vfs_path_t path)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	return ext2fs_unlink(&mnt->dev, path) == 0
 		? KERN_SUCCESS : KERN_FAILURE;
@@ -1142,7 +1230,10 @@ vfs_unlink(mach_port_t fs_port, vfs_path_t path)
 kern_return_t
 vfs_mkdir(mach_port_t fs_port, vfs_path_t path, int mode)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	return ext2fs_mkdir(&mnt->dev, path, mode ? mode : 0755) == 0
 		? KERN_SUCCESS : KERN_FAILURE;
@@ -1151,7 +1242,10 @@ vfs_mkdir(mach_port_t fs_port, vfs_path_t path, int mode)
 kern_return_t
 vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	return ext2fs_rmdir(&mnt->dev, path) == 0
 		? KERN_SUCCESS : KERN_FAILURE;
@@ -1160,7 +1254,10 @@ vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
 kern_return_t
 vfs_rename(mach_port_t fs_port, vfs_path_t old_path, vfs_path_t new_path)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	return ext2fs_rename(&mnt->dev, old_path, new_path) == 0
 		? KERN_SUCCESS : KERN_FAILURE;
@@ -1182,8 +1279,11 @@ vfs_sync(mach_port_t fs_port)
 kern_return_t
 vfs_unmount(mach_port_t fs_port)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
 	int rc;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	(void) ds_ext2_sync(fs_port);
 
@@ -1333,9 +1433,12 @@ kern_return_t
 vfs_mmap(mach_port_t fs_port, vfs_u64_t handle,
          vfs_u32_t prot, vfs_u32_t flags, mach_port_t *out_mem_obj)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
 	fs_private_t priv;
 	mach_port_t mem_obj;
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	(void)prot; (void)flags;        /* Phase B: hints only */
 
@@ -1648,14 +1751,18 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	}
 
 	/* Set protected payload — MIG handlers receive mnt as fs_port_arg */
+	/*
+	 * The SLOT, not the address (#498).  See mnt_from_payload: this field
+	 * is a port name's width, and a pointer does not fit in it here.
+	 */
 	kr = mach_port_set_protected_payload(mach_task_self(),
 					     mnt->port,
-					     (unsigned long)mnt);
+					     mnt_payload(mnt));
 	if (kr != KERN_SUCCESS)
 		printf("ext2: set_protected_payload failed (kr=%d)\n", kr);
 	else
-		printf("ext2: protected payload set (mnt=%p)\n",
-		       (void *)mnt);
+		printf("ext2: protected payload set (slot %u)\n",
+		       mnt_payload(mnt));
 
 	/* Add to port set */
 	kr = mach_port_move_member(mach_task_self(), mnt->port, port_set);
@@ -1705,7 +1812,10 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 kern_return_t
 vfs_flipc_endpoint(mach_port_t fs_port, vfs_path_t endpoint, int *result)
 {
-	struct mount_context *mnt = (struct mount_context *)fs_port;
+	struct mount_context *mnt = mnt_from_payload(fs_port);
+
+	if (mnt == NULL)
+		return KERN_INVALID_ARGUMENT;
 
 	if (mnt && mnt->flipc_ep[0]) {
 		strncpy(endpoint, mnt->flipc_ep, VFS_PATH_MAX - 1);

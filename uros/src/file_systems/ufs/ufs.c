@@ -130,6 +130,45 @@
 #include <device/device_types.h>
 #include <device/device.h>
 
+/*
+ * device_read() reports a mach_msg_type_number_t and this file keeps a
+ * buffer's size as a vm_size_t -- four bytes against eight on x86-64.  The
+ * conversion lives here so that no call site casts one pointer into the
+ * other, which wrote four bytes into eight and left the upper half to the
+ * stack (#498; ext2_dev_read() in ext2fs.c records what that did).  The
+ * outputs are written only on success, as the stubs underneath do.
+ */
+static kern_return_t
+ufs_device_read(mach_port_t port, dev_mode_t mode, recnum_t recnum,
+		int bytes_wanted, vm_offset_t *data, vm_size_t *bytes_read)
+{
+	io_buf_ptr_t buf = 0;
+	mach_msg_type_number_t count = 0;
+	kern_return_t kr;
+
+	kr = device_read(port, mode, recnum, bytes_wanted, &buf, &count);
+	if (kr == KERN_SUCCESS) {
+		*data = (vm_offset_t)buf;
+		*bytes_read = (vm_size_t)count;
+	}
+	return kr;
+}
+
+static kern_return_t
+ufs_device_read_overwrite(mach_port_t port, dev_mode_t mode,
+			  recnum_t recnum, int bytes_wanted,
+			  vm_address_t buffer, vm_size_t *bytes_read)
+{
+	mach_msg_type_number_t count = 0;
+	kern_return_t kr;
+
+	kr = device_read_overwrite(port, mode, recnum, bytes_wanted, buffer,
+				   &count);
+	if (kr == KERN_SUCCESS)
+		*bytes_read = (vm_size_t)count;
+	return kr;
+}
+
 static void	free_file_buffers(
 				  struct ufs_file *);
 
@@ -233,13 +272,13 @@ read_inode(ino_t inumber, register struct ufs_file *fp)
 	fs = fp->f_fs;
 	disk_block = itod(fs, inumber);
 
-	rc = device_read(fp->f_dev.dev_port,
+	rc = ufs_device_read(fp->f_dev.dev_port,
 			 0,
 			 (recnum_t) dbtorec(&fp->f_dev,
 					    fsbtodb(fp->f_fs, disk_block)),
 			 (int) fs->fs_bsize,
-			 (char **)&buf,
-			 (mach_msg_type_number_t *)&buf_size);
+			 &buf,
+			 &buf_size);
 	if (rc != KERN_SUCCESS)
 	    return (rc);
 
@@ -354,14 +393,14 @@ block_map(
 		data = fp->f_blk[level];
 	    }
 	    else {
-		rc = device_read(fp->f_dev.dev_port,
+		rc = ufs_device_read(fp->f_dev.dev_port,
 				 0,
 				 (recnum_t) dbtorec(&fp->f_dev,
 						    fsbtodb(fp->f_fs,
 							    ind_block_num)),
 				 fp->f_fs->fs_bsize,
-				 (char **)&data,
-				 (mach_msg_type_number_t *)&size);
+				 &data,
+				 &size);
 		if (rc != KERN_SUCCESS)
 		    return (rc);
 
@@ -450,14 +489,14 @@ buf_read_file(
 				      TRUE);
 		    fp->f_buf_size = block_size;
 	        } else {
-		    rc = device_read(fp->f_dev.dev_port,
+		    rc = ufs_device_read(fp->f_dev.dev_port,
 				     0,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							fsbtodb(fs,
 								disk_block)),
 				     (int) block_size,
-				     (char **) &fp->f_buf,
-				     (mach_msg_type_number_t *)&fp->f_buf_size);
+				     &fp->f_buf,
+				     &fp->f_buf_size);
 	        }
 	        if (rc)
 		    return (rc);
@@ -480,14 +519,14 @@ buf_read_file(
 		if (rc != 0)
 		    return (rc);
 
-		rc = device_read_overwrite(fp->f_dev.dev_port,
+		rc = ufs_device_read_overwrite(fp->f_dev.dev_port,
 				0,
 				(recnum_t) dbtorec(&fp->f_dev,
 						   fsbtodb(fs,
 							   disk_block)),
 				(int) block_size,
 				*buf_p,
-				(mach_msg_type_number_t *)size_p);
+				size_p);
 	        if (rc)
 		    return (rc);
 	}
@@ -558,10 +597,10 @@ read_fs(struct device *dev, struct fs **fsp)
 	vm_size_t	buf_size;
 	int		error;
 
-	error = device_read(dev->dev_port, 0,
+	error = ufs_device_read(dev->dev_port, 0,
 		    		(recnum_t) dbtorec(dev, SBLOCK), SBSIZE,
-			    	(char **) &buf, 
-				(mach_msg_type_number_t *)&buf_size);
+			    	&buf, 
+				&buf_size);
 	if (error)
 	    return (error);
 
@@ -752,14 +791,14 @@ ufs_open_file(
 		    register struct fs *fs = fp->f_fs;
 
 		    (void) block_map(fp, (daddr_t)0, &disk_block);
-		    rc = device_read(fp->f_dev.dev_port,
+		    rc = ufs_device_read(fp->f_dev.dev_port,
 				     0,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							fsbtodb(fs,
 								disk_block)),
 				     (int) dblksize(fs, &(fp->f_di), 0),
-				     (char **) &buf,
-				     (mach_msg_type_number_t *)&buf_size);
+				     &buf,
+				     &buf_size);
 		    if (rc)
 			goto exit;
 
