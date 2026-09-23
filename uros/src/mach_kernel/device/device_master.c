@@ -2853,13 +2853,15 @@ ds_master_device_io_port_claim(
 	ipc_port_t		master_port,
 	unsigned int		port,
 	unsigned int		count,
-	unsigned int		*console_released)
+	unsigned int		*console_released,
+	unsigned int		*klog_from)
 {
 	task_t		me = current_task();
 	kern_return_t	kr;
 	unsigned int	i, free_slot = IO_CLAIM_MAX;
 
 	*console_released = 0;
+	*klog_from = 0;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -2895,7 +2897,7 @@ ds_master_device_io_port_claim(
 			mutex_unlock(&device_table_lock);
 			/* The hook is idempotent, and the answer has to be
 			 * given again: a re-attach asks the same question. */
-			*console_released = device_md_io_claimed(port, count);
+			*console_released = device_md_io_claimed(port, count, klog_from);
 			return KERN_SUCCESS;
 		}
 		mutex_unlock(&device_table_lock);
@@ -2914,11 +2916,18 @@ ds_master_device_io_port_claim(
 	io_claim[free_slot].task  = me;
 	mutex_unlock(&device_table_lock);
 
-	printf("device_io_port: task %p claimed 0x%x..0x%x (#497)\n",
-	       (void *)me, port, port + count - 1);
+	/*
+	 * ⚠️ No line per claim.  There was one, and #538's race test -- two
+	 * tasks claiming and releasing a range four hundred times -- turned it
+	 * into eight hundred kernel lines through the forwarder, which under
+	 * TCG was the whole of a fifteen-minute budget.  A claim is the
+	 * driver's event to report (uart.so says "COM1 attached"), and the one
+	 * the kernel cares about -- the console stepping back -- is said by
+	 * the console itself.
+	 */
 
 	/* After the record and before the reply: see device_machdep.h. */
-	*console_released = device_md_io_claimed(port, count);
+	*console_released = device_md_io_claimed(port, count, klog_from);
 	return KERN_SUCCESS;
 }
 
