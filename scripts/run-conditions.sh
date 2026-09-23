@@ -537,6 +537,8 @@ EOF
 	done <<'EOF'
 # sampled: the "clock samples:" line of a real run, ~/uros-tests/<log>
 victus, powersave/balance_power, battery (579-misurato-thread-qemu-163424)|4280|10|2096 2096 2096 2096 2096 2096 2096 2096 1884 2171|median 2096MHz, max 2171MHz over 10 samples
+victus, performance, battery (579-misurato-thread-performance-164122)|4280|7|3893 3893 3918 3918 3202 3943 3952|median 3918MHz, max 3952MHz over 7 samples
+victus, ceiling 1400, battery (579-misurato-thread-soffitto-1400-164551)|1400|16|1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1396|median 1397MHz, max 1397MHz over 16 samples
 # probes
 pavillion's two readings (idle 3992, six busy 3918) over its 3000 ceiling|3000|2|3918 3992|median 3918MHz, max 3992MHz over 2 samples -- ABOVE the 3000MHz ceiling
 one second of boost is boost, not a ceiling that failed|1400|3|1397 1397 3700|median 1397MHz, max 3700MHz over 3 samples
