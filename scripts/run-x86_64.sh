@@ -462,6 +462,8 @@ must_report 'xfile_read: started' 'xfile_read: \([0-9]* of [0-9]* arms passed\|N
 	'It reads a file the OTHER target wrote on /mnt/disk2 and checks every byte (#498).  Silence is a client of libvfs that stopped inside an RPC to ext_server, which is a different finding from a byte that came back wrong.'
 must_report 'xfile_write: started' 'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 	'It writes, syncs and reads back the file the other target will read (#498).  Silence is a write, a sync or a read that never returned.'
+must_report 'xfile_write: \[1\] wrote' 'xfile-verify: [0-9]* of [0-9]* checks passed' \
+	'The host reads the disk image back after the run with e2fsck and debugfs (#498).  Without that line nobody but the writer has looked, and the writer once reported a clean sync over a file of zeros (#573).'
 
 
 # And the one that must report on EVERY boot that gets far enough, which is a
@@ -868,12 +870,17 @@ uros_conditions_open
 # QEMU refuses `iommu_platform=on' on anything but a modern-only one, so the
 # legacy virtio driver cannot be placed behind the IOMMU at all.  AHCI is an
 # ordinary bus master with nothing to negotiate.
+#
+# The disk on port 1 is ahci1a, which ext_server mounts at /mnt/disk2 -- the
+# disk xfile_test writes and the host reads back after the run (#498).  Named
+# once, because the check below has to open the same file qemu was given.
+AHCI_DISK2=$BUILD/disk-x86_64-ahci2.img
 DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device virtio-blk-pci,drive=urosdisk,bootindex=0
 	-device ich9-ahci,id=ahci0
 	-drive file=$BUILD/disk-x86_64-ahci.img,if=none,id=ahcidisk0,format=raw
 	-device ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1
-	-drive file=$BUILD/disk-x86_64-ahci2.img,if=none,id=ahcidisk1,format=raw
+	-drive file=$AHCI_DISK2,if=none,id=ahcidisk1,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
 # shellcheck disable=SC2086
@@ -1023,6 +1030,36 @@ done
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+
+# ── The host reads what the boot wrote (#498) ─────────────────────────────
+#
+# 🔴 A GREEN xfile_write IS NOT A FILE ON THE DISK.  Its read-back goes through
+# the server that wrote it, and on the first boot that got this far the
+# server said the sync succeeded, gave back every byte -- and the disk held
+# zeros: the data had gone into a cache with no write-back and been counted
+# as written (#573).  Only a reader that shares no code with the writer can
+# say that, and QEMU has exited, so the image is still.
+#
+# Appended to the LOG, like everything the verdict reads, so --judge on this
+# log says what this run said.  Its failures are `WRONG' lines, which the
+# unexplained scan already fails a run for; the pair below fails it for the
+# check not having run at all.
+XFILE_PATH=$(sed -n 's/^xfile_write: \[1\] wrote [0-9]* bytes to \([^ ]*\) in .*/\1/p' \
+	"$LOG" | head -1)
+if [ -n "$XFILE_PATH" ]; then
+	case "$XFILE_PATH" in
+	/mnt/disk2/*)
+		python3 "$REPO/scripts/xfile-verify.py" "$AHCI_DISK2" \
+			"${XFILE_PATH#/mnt/disk2}" --writer x86_64 2>&1 \
+			| tee -a "$LOG" || true
+		;;
+	*)
+		echo "xfile-verify: WRONG — xfile_write wrote $XFILE_PATH, which" \
+		     "is not on /mnt/disk2, the only disk this script can read" \
+		     "back" | tee -a "$LOG"
+		;;
+	esac
+fi
 
 # ⚠️ Appended, not prepended, and that is not a preference: the verdict tests
 # `head -1 "$LOG"' for qemu's own refusal to start, so a header would answer
