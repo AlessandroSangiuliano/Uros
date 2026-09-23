@@ -199,6 +199,10 @@ UNASKED=$(grep -ac "$NOT_ASKED" "$LOG" || true)
 BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
 	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
+# #578: a line that carries two programs' output is a failure too, and it is
+# named as one -- the wire had two writers inside a line, whatever passed.
+GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
+[ -n "$GARBLED" ] && BAD=$(printf '%s\n%s' "$BAD" "$GARBLED" | sed '/^$/d')
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -338,6 +342,15 @@ must_report() {
 	fi
 	echo "  FAILED: '$1' appeared and '$2' never did."
 	echo "          $3"
+	# #578: "never did" is also what a line looks like when it arrived in two
+	# pieces with another program's output between them.  If the wire has
+	# such lines, they are shown here, where the reader is looking.
+	_garbled=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")
+	if [ -n "$_garbled" ]; then
+		echo "          it may have arrived in pieces -- these lines carry two"
+		echo "          programs' output (#578, #544):"
+		printf '%s\n' "$_garbled" | sed 's/^/            /'
+	fi
 	echo "  log: $LOG"
 	exit 1
 }
@@ -963,13 +976,24 @@ all_reported() {
 	return 0
 }
 
-while kill -0 "$QPID" 2>/dev/null; do
-	# ⚠️ Same patterns as must_report above, and the counts are out of these
-	# for the same reason -- see the note there.  🔥 That they are written
-	# TWICE in this file is its own hazard: the first copy was corrected for
-	# act_test's fifth arm and this one would have gone on waiting.
-	if grep -aqE "$DONE_RE" "$LOG" \
-	   && all_reported \
+# The same pairs, said instead of tested: which test started and never printed
+# its closing line.  #578: a boot whose `cap_test: ALL TESTS PASSED' arrived in
+# two pieces waited 150 s for it and was then called "nothing arrived".
+missing_reports() {
+	while [ $# -ge 2 ]; do
+		if grep -aq "$1" "$LOG" && ! grep -aq "$2" "$LOG"; then
+			echo "          still waiting for: $2"
+		fi
+		shift 2
+	done
+}
+
+# 🔑 ONE list of the tests this loop waits for, handed to whichever of the two
+# above asks.  It was written inline in the loop's condition, and a second copy
+# for the verdict would have been two halves free to disagree -- the note in
+# the loop already records one such pair going out of step.
+expected_reports() {
+	"$@" \
 		'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 		'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
 		'fault_test: started'   'fault_test: [0-9]* of [0-9]* arms passed' \
@@ -979,7 +1003,15 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
 		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
-		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
+		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'
+}
+
+while kill -0 "$QPID" 2>/dev/null; do
+	# ⚠️ Same patterns as must_report above, and the counts are out of these
+	# for the same reason -- see the note there.  🔥 That they are written
+	# TWICE in this file is its own hazard: the first copy was corrected for
+	# act_test's fifth arm and this one would have gone on waiting.
+	if grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; then
 		sleep 1
 		break
 	fi
@@ -1046,6 +1078,15 @@ if [ "$CUT_SHORT" = 1 ]; then
 		echo "          printing meaningful lines the whole time.  Giving it more"
 		echo "          seconds is the wrong move: look for something that repeats"
 		echo "          in the log."
+	elif [ -n "$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")" ]; then
+		# #578: the wire kept moving, and a line this script waits for
+		# arrived in pieces, so it never matched.  Said as that, with the
+		# lines, instead of as a machine that went quiet.
+		echo "  FAILED: AN EXPECTED LINE NEVER ARRIVED WHOLE, after ${RUN_SECONDS}s of running."
+		expected_reports missing_reports
+		echo "          and these lines carry two programs' output -- two writers"
+		echo "          inside one line (#578, #544):"
+		awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/            /'
 	else
 		echo "  FAILED: NOTHING ARRIVED for ${SECS}s, after ${RUN_SECONDS}s of running."
 		echo "          The watchdog measures progress, not wall time, so this says"
