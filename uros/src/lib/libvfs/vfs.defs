@@ -53,7 +53,11 @@ import "vfs_types.h";
 /*
  * Wire types.
  *   vfs_u32_t / vfs_u64_t — scalar widths (matching uint32_t/uint64_t in C)
- *   vfs_path_t   — NUL-terminated absolute path, up to VFS_PATH_MAX bytes
+ *   vfs_path_t   — NUL-terminated path, up to VFS_PATH_MAX bytes, absolute
+ *                  from the ROOT OF THE MOUNT the message is sent to, not
+ *                  from the client's namespace: /mnt/disk2/x arrives at the
+ *                  /mnt/disk2 mount as "/x" (#572).  The mount point is the
+ *                  client's to know; libvfs strips it.
  *   vfs_buf_t    — out-of-line byte buffer (read/write payload)
  *   vfs_stat_t   — fixed 80-byte struct from vfs_types.h, sent inline as
  *                  10 × unsigned64 words.  🔴 TEN OF SIXTY-FOUR, not twenty of

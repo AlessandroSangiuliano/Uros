@@ -98,20 +98,51 @@ static int                          vfs_initialised;
  * name_server change-notification channel.  Cost is one ~1.4 µs RPC per
  * vfs_open / vfs_stat — acceptable, since those are rare.  The cache is
  * maintained for diagnostics and as the unit dead-name eviction targets
- * (vfs_evict_port_locked). */
+ * (vfs_evict_port_locked).
+ *
+ * 🔴 *relp IS WHAT GOES ON THE WIRE, NOT path (#572).  The mount's server
+ * answers for its own tree, from its own root: /mnt/disk2/x is "/x" to the
+ * filesystem mounted at /mnt/disk2.  Sending the whole path asked that
+ * filesystem for a /mnt/disk2 directory it does not have, and so every mount
+ * but "/" was unreachable -- on both targets, for as long as there had been a
+ * second mount.
+ *
+ * 🔑 Stripped HERE because the mount point belongs to the client's namespace
+ * and not to the filesystem.  The server cannot know where a given client put
+ * it; this function is the one place that knows which prefix it matched.
+ *
+ * *relp points into path, so it lives as long as the caller's string. */
 static mach_port_t
-vfs_resolve_mount(const char *path)
+vfs_resolve_mount(const char *path, const char **relp)
 {
     int i;
     netname_name_t matched;
     mach_port_t port = MACH_PORT_NULL;
     kern_return_t kr;
+    size_t len;
 
     matched[0] = '\0';
     kr = netname_look_up_mount(name_server_port, (char *)path,
                                &port, matched);
     if (kr != NETNAME_SUCCESS || port == MACH_PORT_NULL)
         return MACH_PORT_NULL;
+
+    /* The name server matches a literal, segment-aligned prefix, with "/"
+     * matching every absolute path.  A match that is not a prefix of what
+     * was asked would be a disagreement between the two about what a path
+     * is, and guessing the remainder would send some other file's name --
+     * refused instead, with the reference given back. */
+    len = strlen(matched);
+    if (len == 0 || strncmp(path, matched, len) != 0) {
+        (void)mach_port_deallocate(mach_task_self(), port);
+        return MACH_PORT_NULL;
+    }
+    if (strcmp(matched, "/") == 0)
+        *relp = path;
+    else if (path[len] == '\0')
+        *relp = "/";
+    else
+        *relp = path + len;
 
     /* Refresh-or-insert cache entry for matched prefix.
      *
@@ -251,6 +282,7 @@ vfs_fd_t
 vfs_open(const char *path, int flags, int mode)
 {
     mach_port_t fs_port;
+    const char *rel = path;
     vfs_u64_t   handle = 0;
     vfs_u32_t   type   = VFS_FT_UNKNOWN;
     vfs_fd_t    fd;
@@ -271,7 +303,7 @@ vfs_open(const char *path, int flags, int mode)
     int attempt;
     for (attempt = 0; attempt < 2; attempt++) {
         pthread_mutex_lock(&vfs_lock);
-        fs_port = vfs_resolve_mount(path);
+        fs_port = vfs_resolve_mount(path, &rel);
         if (fs_port == MACH_PORT_NULL) {
             pthread_mutex_unlock(&vfs_lock);
             return VFS_FD_INVALID;
@@ -285,7 +317,7 @@ vfs_open(const char *path, int flags, int mode)
         /* #385: hand the fs_server a send right to our task so it can
          * reclaim this open's server-side fid if we die without close()
          * (e.g. SIGKILL) — the right turns into a dead name on our death. */
-        kr = fs_open(fs_port, mach_task_self(), (char *)path, flags, mode,
+        kr = fs_open(fs_port, mach_task_self(), (char *)rel, flags, mode,
                      &handle, &type);
         if (!vfs_send_died(kr))
             break;
@@ -546,6 +578,7 @@ int
 vfs_stat(const char *path, vfs_stat_t *out)
 {
     mach_port_t fs_port;
+    const char *rel = path;
     kern_return_t kr;
 
     if (!path || !out || path[0] != '/')
@@ -558,12 +591,12 @@ vfs_stat(const char *path, vfs_stat_t *out)
     int attempt;
     for (attempt = 0; attempt < 2; attempt++) {
         pthread_mutex_lock(&vfs_lock);
-        fs_port = vfs_resolve_mount(path);
+        fs_port = vfs_resolve_mount(path, &rel);
         pthread_mutex_unlock(&vfs_lock);
         if (fs_port == MACH_PORT_NULL)
             return -1;
 
-        kr = fs_stat(fs_port, (char *)path, out);
+        kr = fs_stat(fs_port, (char *)rel, out);
         if (!vfs_send_died(kr))
             break;
         pthread_mutex_lock(&vfs_lock);
@@ -791,6 +824,7 @@ int
 vfs_unlink(const char *path)
 {
     mach_port_t fs_port;
+    const char *rel = path;
     kern_return_t kr = KERN_FAILURE;
     int attempt;
 
@@ -801,12 +835,12 @@ vfs_unlink(const char *path)
 
     for (attempt = 0; attempt < 2; attempt++) {
         pthread_mutex_lock(&vfs_lock);
-        fs_port = vfs_resolve_mount(path);
+        fs_port = vfs_resolve_mount(path, &rel);
         pthread_mutex_unlock(&vfs_lock);
         if (fs_port == MACH_PORT_NULL)
             return -1;
 
-        kr = fs_unlink(fs_port, (char *)path);
+        kr = fs_unlink(fs_port, (char *)rel);
         if (!vfs_send_died(kr))
             break;
         pthread_mutex_lock(&vfs_lock);
@@ -858,6 +892,7 @@ int
 vfs_rename(const char *oldpath, const char *newpath)
 {
     mach_port_t po, pn;
+    const char *orel = oldpath, *nrel = newpath;
     kern_return_t kr = KERN_FAILURE;
     int attempt;
 
@@ -868,8 +903,8 @@ vfs_rename(const char *oldpath, const char *newpath)
 
     for (attempt = 0; attempt < 2; attempt++) {
         pthread_mutex_lock(&vfs_lock);
-        po = vfs_resolve_mount(oldpath);
-        pn = vfs_resolve_mount(newpath);
+        po = vfs_resolve_mount(oldpath, &orel);
+        pn = vfs_resolve_mount(newpath, &nrel);
         pthread_mutex_unlock(&vfs_lock);
         if (po == MACH_PORT_NULL || pn == MACH_PORT_NULL)
             return -1;
@@ -882,7 +917,7 @@ vfs_rename(const char *oldpath, const char *newpath)
             return vfs_unlink(oldpath);
         }
 
-        kr = fs_rename(po, (char *)oldpath, (char *)newpath);
+        kr = fs_rename(po, (char *)orel, (char *)nrel);
         if (!vfs_send_died(kr))
             break;
         pthread_mutex_lock(&vfs_lock);
