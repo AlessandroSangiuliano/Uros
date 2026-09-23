@@ -108,6 +108,7 @@ IRQ_CLAIM_TEST="$SBIN/irq_claim_test"
 HAL_BAR_TEST="$SBIN/hal_bar_test"
 # #498: a file one target writes and the other reads.
 XFILE_TEST="$SBIN/xfile_test"
+MSG_SERVER_TEST="$SBIN/msg_server_test"
 FPERR_TEST="$SBIN/fperr_test"
 DMA_RECLAIM_TEST="$SBIN/dma_reclaim_test"
 GPUSTAT="$SBIN/gpustat"
@@ -205,6 +206,10 @@ dma_reclaim_test dma_reclaim_test check"
 XFILE_CONF_LINES=""
 [ -f "$XFILE_TEST" ] && XFILE_CONF_LINES="xfile_test xfile_test read /mnt/disk2/from_x86_64.dat
 xfile_test xfile_test write /mnt/disk2/from_i386.dat"
+# #583: libmach's mach_msg_server asked directly -- a right the server kept
+# must survive its next message.  Needs nothing but libmach and a thread.
+MSG_SERVER_TEST_CONF_LINE=""
+[ -f "$MSG_SERVER_TEST" ] && MSG_SERVER_TEST_CONF_LINE="msg_server_test msg_server_test"
 KERNEL242_TEST_CONF_LINE=""
 [ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
 SIG_TEST_CONF_LINE=""
@@ -246,6 +251,7 @@ if [ "$MINIMAL" = "1" ]; then
     HAL_BAR_TEST_CONF_LINE=""
     DMA_RECLAIM_CONF_LINES=""
     XFILE_CONF_LINES=""
+    MSG_SERVER_TEST_CONF_LINE=""
     KERNEL242_TEST_CONF_LINE=""
     SIG_TEST_CONF_LINE=""
     FPERR_TEST_X87_CONF_LINE=""
@@ -289,6 +295,7 @@ ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}
 ${IPC_BENCH_LINE}
 ${PTHREAD_TEST_LINE}
+${MSG_SERVER_TEST_CONF_LINE}
 ${CAP_TEST_CONF_LINE}
 ${IRQ_CLAIM_TEST_CONF_LINE}
 ${HAL_BAR_TEST_CONF_LINE}
@@ -328,6 +335,7 @@ ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$IRQ_CLAIM_TEST" ] && ARGS+=("irq_claim_test:$IRQ_CLAIM_TEST")
 [ -f "$HAL_BAR_TEST" ] && ARGS+=("hal_bar_test:$HAL_BAR_TEST")
 [ -f "$XFILE_TEST" ] && ARGS+=("xfile_test:$XFILE_TEST")
+[ -f "$MSG_SERVER_TEST" ] && ARGS+=("msg_server_test:$MSG_SERVER_TEST")
 [ -f "$FPERR_TEST" ] && ARGS+=("fperr_test:$FPERR_TEST")
 [ -f "$KERNEL242_TEST" ] && ARGS+=("kernel242_test:$KERNEL242_TEST")
 [ -f "$SIG_TEST" ] && ARGS+=("sig_test:$SIG_TEST")
