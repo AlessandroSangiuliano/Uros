@@ -70,6 +70,14 @@
  */
 #define	KLOG_POLL_MS	10
 
+/*
+ * How many polls an unfinished line is held back before it is sent anyway
+ * (#578) -- 50 ms.  See the loop: a line is forwarded whole, and this is the
+ * bound on how long "whole" is waited for, so that a prompt with no newline
+ * still reaches the wire.
+ */
+#define	KLOG_HOLD_POLLS	5
+
 static pthread_t	klog_tid;
 static int		klog_started;
 
@@ -101,6 +109,9 @@ klog_forward_thread(void *arg)
 	mach_port_t	host = mach_host_self();
 	klog_data_t	buf;
 	int		complained = 0;
+	natural_t	held_from = 0;		/* the unfinished line being waited for */
+	mach_msg_type_number_t held_len = 0;
+	unsigned int	held_polls = 0;
 
 	(void)arg;
 
@@ -125,6 +136,8 @@ klog_forward_thread(void *arg)
 		mach_msg_type_number_t	cnt = sizeof(buf);
 		natural_t		next;
 		kern_return_t		kr;
+		natural_t		from;
+		mach_msg_type_number_t	whole;
 
 		kr = host_get_log(host, cursor, buf, &cnt, &next);
 		if (kr != KERN_SUCCESS && !complained) {
@@ -134,6 +147,56 @@ klog_forward_thread(void *arg)
 		}
 		if (kr == KERN_SUCCESS && cnt > 0) {
 			/*
+			 * 🔴 WHOLE LINES ONLY (#578).  klog_read() hands over
+			 * whatever is in the ring at this instant, and a line
+			 * is appended to the ring one character at a time --
+			 * so on more than one processor this read can end in
+			 * the middle of one.  Sent as it was, the half went
+			 * out, the ring was released, a client's own tty_write
+			 * landed in the gap, and the other half followed it:
+			 * `cap_test: AL' + another line + `L TESTS PASSED'.
+			 *
+			 * So only up to the last newline is written, and the
+			 * cursor stops at the start of the unfinished line,
+			 * which the next poll reads again, whole or longer.
+			 * `from' is where the kernel actually read from: it
+			 * moves a cursor that fell out of the ring.
+			 */
+			from = next - cnt;
+			whole = cnt;
+			while (whole > 0 && buf[whole - 1] != '\n')
+				whole--;
+
+			if (whole == 0 && cnt < sizeof(buf)) {
+				/*
+				 * Nothing but an unfinished line.  Held while
+				 * it keeps growing; once it has stood still
+				 * for KLOG_HOLD_POLLS polls it is a prompt, or
+				 * a line nobody will finish, and it goes.
+				 */
+				if (from == held_from && cnt == held_len) {
+					held_polls++;
+				} else {
+					held_from = from;
+					held_len = cnt;
+					held_polls = 0;
+				}
+				if (held_polls < KLOG_HOLD_POLLS) {
+					thread_switch(MACH_PORT_NULL,
+						      SWITCH_OPTION_WAIT,
+						      KLOG_POLL_MS);
+					continue;
+				}
+				whole = cnt;
+			}
+			/* A single line longer than the whole buffer has no
+			 * newline to stop at: it cannot be held, and goes. */
+			if (whole == 0)
+				whole = cnt;
+			held_len = 0;
+			held_polls = 0;
+
+			/*
 			 * ⚠️ The cursor advances whether or not the bytes
 			 * reached the wire.  A tty that refuses -- a write in
 			 * flight, a port that went away -- must not make this
@@ -141,8 +204,8 @@ klog_forward_thread(void *arg)
 			 * turn one lost line into a loop that never catches
 			 * up and never lets go of the ring.
 			 */
-			(void)char_core_tty_write_raw(buf, (size_t)cnt);
-			cursor = next;
+			(void)char_core_tty_write_raw(buf, (size_t)whole);
+			cursor = from + whole;
 		}
 		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
 			      KLOG_POLL_MS);

@@ -235,6 +235,41 @@ measure_page_copy(void)
 }
 
 /*
+ * Print a label and a row of cycle counts as ONE printf (#578).
+ *
+ * These rows used to be a printf per number, so each line reached the console
+ * as nine writes, and on more than one processor another task's line landed
+ * between two of them: `children alive: 4719bootstrap: ...'.  134 of the glued
+ * lines in two days of boots were these three rows.
+ */
+/* The longest row printed: fault_cycles has COW_PAGES, the depth rows
+ * DEPTH_STEPS; the buffer is sized from whichever is larger, so no value is
+ * ever dropped to make a row fit. */
+#define	ROW_MAX	(COW_PAGES > DEPTH_STEPS ? COW_PAGES : DEPTH_STEPS)
+
+static void
+print_cycles_row(const char *label, const unsigned long long *v, int n)
+{
+	char	line[128 + 21 * ROW_MAX];	/* label + " %llu" x ROW_MAX */
+	size_t	len;
+	int	i;
+
+	/*
+	 * ⚠️ strlen() and not sprintf()'s return value: libmach's sprintf is
+	 * defined void, whatever the prototype in <stdio.h> says, so what it
+	 * "returns" is whatever was in the register.  Found by review.
+	 */
+	sprintf(line, "%s", label);
+	len = strlen(line);
+	for (i = 0; i < n; i++) {
+		sprintf(line + len, " %llu", v[i]);
+		len += strlen(line + len);
+	}
+	printf("%s\n", line);
+}
+
+
+/*
  * ── Arm five: what a shadow chain costs, one level at a time ─────────────
  *
  * Mach's copy-on-write is not one indirection, it is a CHAIN.  Every fork of an
@@ -312,10 +347,8 @@ measure_chain_depth(void)
 		deep[i] = t1 - t0;
 	}
 
-	printf("cow_test: [5] fault cycles by chain depth, children alive:");
-	for (i = 0; i < forked; i++)
-		printf(" %llu", deep[i]);
-	printf("\n");
+	print_cycles_row("cow_test: [5] fault cycles by chain depth, children alive:",
+			 deep, forked);
 
 	/*
 	 * And now take the references away -- all but ONE.
@@ -349,10 +382,8 @@ measure_chain_depth(void)
 		shallow[i] = t1 - t0;
 	}
 
-	printf("cow_test: [5] the same pages with one child left, chain shallow:");
-	for (i = 0; i < forked; i++)
-		printf(" %llu", shallow[i]);
-	printf("\n");
+	print_cycles_row("cow_test: [5] the same pages with one child left, chain shallow:",
+			 shallow, forked);
 
 	if (forked > 0)
 		(void) task_terminate(kids[0]);
@@ -578,10 +609,8 @@ run_the_arms(void)
 	 */
 	copy_cycles = measure_page_copy();
 
-	printf("cow_test: [4] copy-on-write fault, cycles per page:");
-	for (i = 0; i < COW_PAGES; i++)
-		printf(" %llu", fault_cycles[i]);
-	printf("\n");
+	print_cycles_row("cow_test: [4] copy-on-write fault, cycles per page:",
+			 fault_cycles, COW_PAGES);
 
 	if (copy_cycles) {
 		unsigned long long f = 0;

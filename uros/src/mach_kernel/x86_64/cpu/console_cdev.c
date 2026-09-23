@@ -41,6 +41,7 @@
 #include <device/conf.h>
 #include <device/device_types.h>
 #include <device/io_req.h>
+#include <device/ds_routines.h>	/* device_write_get (#578) */
 #include <device/console_cdev.h>
 #include <kern/lock.h>
 #include <kern/klog.h>	/* #497: the forwarder's only road */
@@ -77,6 +78,26 @@ consolewrite(dev_t dev, io_req_t ior)
 	(void) dev;
 	if (ior == 0)
 		return D_INVALID_OPERATION;
+
+	/*
+	 * 🔴 OUT-OF-LINE DATA IS MAPPED BEFORE IT IS READ (#578).
+	 *
+	 * An inband write carries its bytes in the message and io_data points
+	 * at them.  A device_write() carries them out of line, and io_data is
+	 * then a vm_map_copy_t -- a page list, since this is a device port --
+	 * until device_write_get() maps it.  This routine read io_data as
+	 * bytes in both cases, and nothing noticed because every printf was
+	 * inband: the first one that was not put the copy object's own fields
+	 * on the wire as text.  ds_write_done() unmaps it afterwards.
+	 */
+	if (!(ior->io_op & IO_INBAND)) {
+		boolean_t	wait;
+		io_return_t	rc;
+
+		rc = device_write_get(ior, &wait);
+		if (rc != KERN_SUCCESS)
+			return rc;
+	}
 
 	p = (char *) ior->io_data;
 	n = ior->io_count;

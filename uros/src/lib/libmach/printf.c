@@ -290,7 +290,29 @@ printf_init(mach_port_t device_server_port)
 	}
 }
 
-#define	PRINTF_BUFMAX	128
+/*
+ * 🔴 A LINE LEAVES IN ONE WRITE (#578).
+ *
+ * This buffer was 128 bytes and was flushed whenever it filled, so any line
+ * longer than 128 bytes reached the console as TWO writes -- and each write is
+ * its own consolewrite(), its own printf_lock hold.  On more than one
+ * processor another task's line took the lock between the two halves: 118
+ * glued lines in two days of boots, every one of them cut at exactly byte 128,
+ * on the kernel's wire before the COM1 handover and in klog after it.
+ *
+ * 128 is IO_INBAND_MAX, the most one inband write carries, which is why the
+ * cure is not simply a bigger buffer: a flush longer than that goes out of
+ * line (device_write) instead, still as ONE write.  And a full buffer is
+ * flushed up to its last newline, keeping the unfinished line for the next
+ * flush, so a printf that fills it cuts at a line boundary.
+ *
+ * ⚠️ The bound, stated: a line up to CONSOLE_CHUNK (256) bytes reaches klog and
+ * the wire whole.  Past that the KERNEL cuts it -- consolewrite() holds the
+ * lock for one line or 256 bytes, whichever is shorter, because the hold masks
+ * interrupts (#551) -- and past PRINTF_BUFMAX so does this buffer.  0.3 % of
+ * the lines a boot prints are longer than 256.
+ */
+#define	PRINTF_BUFMAX	1024
 
 int printf_bufmax = PRINTF_BUFMAX;
 
@@ -330,8 +352,10 @@ get_console_port(void)
 			 token, (char *) "console", &console_port);
 }
 
+/* Send the first `upto' bytes of the buffer in ONE write per attempt (#578),
+ * and keep the rest at the front for the next flush. */
 static void
-flush(struct printf_state *state)
+flush_upto(struct printf_state *state, unsigned int upto)
 {
 	io_buf_len_t amt;
 	int offset, count;
@@ -347,14 +371,21 @@ flush(struct printf_state *state)
 	 * full buffer to it before draining to the serial console.
 	 * Sending the pre-tee buffer (instead of looping on amt below)
 	 * keeps the mirror's call rate independent of serial speed. */
-	if (printf_mirror_hook != NULL && state->index > 0)
-		(*printf_mirror_hook)(state->buf, state->index);
+	if (printf_mirror_hook != NULL && upto > 0)
+		(*printf_mirror_hook)(state->buf, upto);
 
 	offset = 0;
-	count = state->index;
+	count = upto;
 	while (count) {
-	    kr = device_write_inband(console_port, 0, 0,
-				     &state->buf[offset], count, &amt);
+	    /* One write either way: inband while it fits, out of line past
+	     * IO_INBAND_MAX.  See PRINTF_BUFMAX. */
+	    if (count <= IO_INBAND_MAX)
+		kr = device_write_inband(console_port, 0, 0,
+					 &state->buf[offset], count, &amt);
+	    else
+		kr = device_write(console_port, 0, 0,
+				  (io_buf_ptr_t) &state->buf[offset],
+				  count, &amt);
 	    if (kr != D_SUCCESS) {
 		if (console_port == MACH_PORT_NULL) {
 		    /* If the console port is null it's probably because
@@ -387,8 +418,16 @@ flush(struct printf_state *state)
 		(void) device_set_status(console_port, TTY_DRAIN, &word, 0);
 	}
 #endif	/* TTY_DRAIN */
-	state->total += state->index;
-	state->index = 0;
+	state->total += upto;
+	if (upto < state->index)
+		memmove(state->buf, &state->buf[upto], state->index - upto);
+	state->index -= upto;
+}
+
+static void
+flush(struct printf_state *state)
+{
+	flush_upto(state, state->index);
 }
 
 static void
@@ -403,8 +442,16 @@ outchar(void *arg, int c)
 	state->buf[state->index] = c;
 	state->index++;
 
-	if (state->index >= printf_bufmax)
-	    flush(state);
+	if (state->index >= printf_bufmax) {
+	    /* Full: send the complete lines and keep the unfinished one, so
+	     * the cut falls at a newline (#578).  A single line longer than
+	     * the whole buffer has no newline to cut at, and goes as it is. */
+	    unsigned int upto = state->index;
+
+	    while (upto > 0 && state->buf[upto - 1] != '\n')
+		upto--;
+	    flush_upto(state, upto > 0 ? upto : state->index);
+	}
 }
 
 /*
