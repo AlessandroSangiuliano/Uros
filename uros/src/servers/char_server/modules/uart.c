@@ -1017,12 +1017,32 @@ static int
 uart_tty_subscribe(void *priv, mach_port_t notify_port)
 {
 	struct uart_priv *p = priv;
+	unsigned int i, slot = UART_MAX_SUBSCRIBERS;
 
-	if (p->n_subscribers >= UART_MAX_SUBSCRIBERS)
-		return -1;
-	p->subscribers[p->n_subscribers++] = notify_port;
-	printf("uart: subscriber added (port=0x%x, total=%u)\n",
-	       (unsigned)notify_port, p->n_subscribers);
+	/*
+	 * #583: a slot freed by the notify loop -- the subscriber's port died
+	 * -- is taken again, and a port that is already subscribed is not added
+	 * twice.  It used to append at n_subscribers and refuse at the limit,
+	 * so the freed slots were never reused: after eight subscriptions in the
+	 * life of the boot, nobody could subscribe again.
+	 */
+	for (i = 0; i < p->n_subscribers; i++) {
+		if (p->subscribers[i] == notify_port) {
+			/* the same port again: the right it brought is one too many */
+			(void)mach_port_deallocate(mach_task_self(), notify_port);
+			return 0;
+		}
+		if (p->subscribers[i] == MACH_PORT_NULL && slot == UART_MAX_SUBSCRIBERS)
+			slot = i;
+	}
+	if (slot == UART_MAX_SUBSCRIBERS) {
+		if (p->n_subscribers >= UART_MAX_SUBSCRIBERS)
+			return -1;
+		slot = p->n_subscribers++;
+	}
+	p->subscribers[slot] = notify_port;
+	printf("uart: subscriber added (port=0x%x, slot %u of %u)\n",
+	       (unsigned)notify_port, slot, UART_MAX_SUBSCRIBERS);
 	return 0;
 }
 
