@@ -251,11 +251,20 @@ static void
 print_cycles_row(const char *label, const unsigned long long *v, int n)
 {
 	char	line[128 + 21 * ROW_MAX];	/* label + " %llu" x ROW_MAX */
-	int	len = 0, i;
+	size_t	len;
+	int	i;
 
-	len += sprintf(line + len, "%s", label);
-	for (i = 0; i < n; i++)
-		len += sprintf(line + len, " %llu", v[i]);
+	/*
+	 * ⚠️ strlen() and not sprintf()'s return value: libmach's sprintf is
+	 * defined void, whatever the prototype in <stdio.h> says, so what it
+	 * "returns" is whatever was in the register.  Found by review.
+	 */
+	sprintf(line, "%s", label);
+	len = strlen(line);
+	for (i = 0; i < n; i++) {
+		sprintf(line + len, " %llu", v[i]);
+		len += strlen(line + len);
+	}
 	printf("%s\n", line);
 }
 
