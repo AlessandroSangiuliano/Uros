@@ -457,6 +457,32 @@ char_tty_subscribe(mach_port_t char_port,
 }
 
 /*
+ * tty_subscribe_member — see char_server.defs (#583).  The same gate as
+ * tty_read's bypass and nothing wider: a member of the tty's session.
+ * On refusal mach_msg_server destroys the send right the request carried.
+ */
+kern_return_t
+char_tty_subscribe_member(mach_port_t char_port, uint32_t dev_id,
+			  int caller_pid, mach_port_t notify_port)
+{
+	struct char_device_entry *dev;
+
+	(void)char_port;
+
+	dev = char_core_dev_lookup((char_dev_id_t)dev_id);
+	if (dev == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (dev->info.class != CHAR_CLASS_TTY)
+		return KERN_INVALID_ARGUMENT;
+	if (!tty_session_owner_check(dev, caller_pid))
+		return KERN_PROTECTION_FAILURE;
+	if (dev->module->tty_subscribe == NULL)
+		return KERN_FAILURE;
+	return (dev->module->tty_subscribe(dev->priv, notify_port) == 0)
+		? KERN_SUCCESS : KERN_FAILURE;
+}
+
+/*
  * tty_acquire_ctty — bind this tty as the controlling terminal of the
  * caller's session (#275.1).  We hand proc_server a fresh send right
  * to char_service_port; once #275.2 wires per-tty signal delivery, the
