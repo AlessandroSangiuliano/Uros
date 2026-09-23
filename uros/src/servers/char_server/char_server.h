@@ -65,6 +65,7 @@ struct char_device_entry *char_core_dev_by_priv(void *priv);
  */
 int char_core_has_tty(void);
 int char_core_wire_owned(void);	/* #497: did the kernel step back? */
+unsigned int char_core_wire_klog_from(void);	/* and where its log continues */
 int char_core_tty_write_raw(const char *buf, size_t len);
 
 /* #497: start the klog drain, once a tty exists to drain it into. */

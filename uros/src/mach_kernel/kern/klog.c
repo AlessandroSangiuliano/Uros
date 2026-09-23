@@ -95,6 +95,19 @@ klog_read(natural_t start,
 	return KERN_SUCCESS;
 }
 
+natural_t
+klog_cursor(void)
+{
+	natural_t now;
+
+	if (!klog_ready)
+		return 0;
+	simple_lock(&klog_lock);
+	now = klog_head;
+	simple_unlock(&klog_lock);
+	return now;
+}
+
 /*
  * MIG entry point (mach_klog_server.c): drop the host arg, defer to
  * klog_read.  Any task with a host_t name can drain — printf already

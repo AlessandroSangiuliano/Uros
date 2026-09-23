@@ -137,7 +137,10 @@ void cons_flush(void);
  * garbled beats a message that is lost.  A machine that is dying has no
  * further use for the property that two writers never meet.
  */
-void cons_port_release(void);
+/* Returns the klog cursor taken at the instant the port changed hands: the
+ * forwarder's starting point (#497).  Idempotent; a second call returns the
+ * same cursor. */
+unsigned int cons_port_release(void);
 void cons_port_reclaim(void);
 int cons_port_is_ours(void);
 

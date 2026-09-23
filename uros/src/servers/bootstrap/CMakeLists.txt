@@ -549,7 +549,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\nio_claim_race io_claim_race a\nio_claim_race io_claim_race b\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -632,6 +632,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # BOUND -- so running it before them would be asking the
             # question when the answer cannot be wrong.
             hal_bar_test:${_SBIN}/hal_bar_test
+            # #538: ONE image for two lines, like dma_reclaim_test above --
+            # the roles differ by argv.  It only claims and releases a range
+            # nobody drives (COM2), so it can sit anywhere; here, after the
+            # last driver has claimed its own.
+            io_claim_race:${_SBIN}/io_claim_race
             # ⚠️ BOTH drivers now, and ahci.so is here for #432 rather than
             # for its own sake.  It was left out under #520 because
             # modload_load_class() loads whatever is in the class and that
@@ -669,7 +674,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
-            hal_bar_test_server
+            hal_bar_test_server io_claim_race_bin
             ${_CHAR_DEP}
             ${_IPC_BENCH_DEP}
             ${_CONF}

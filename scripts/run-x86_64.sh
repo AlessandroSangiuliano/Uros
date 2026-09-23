@@ -392,6 +392,13 @@ must_report 'act_test: started' 'act_test: [0-9]* of [0-9]* arms passed' \
 # `instruction: sysret' with the kernel standing on a ring-3 stack, which is
 # the whole of CVE-2012-0217 on one screen.
 
+# ⚠️ Its race arm says NOT ASKED on the default single processor, which is the
+# truth: the two claims are serialised by the scheduler there.  What this line
+# fails a run for is SILENCE -- a race test that stopped dead mid-round would
+# otherwise be passed by omission, which is the act_test lesson (#425).
+must_report 'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
+	'Two tasks claim one I/O range at the same instant for 400 rounds; a torn table is a kernel that answered two winners, and a test that stops dead mid-round is a wedge nobody would otherwise count (#538).'
+
 must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
 
@@ -971,6 +978,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
+		'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
 		sleep 1
 		break

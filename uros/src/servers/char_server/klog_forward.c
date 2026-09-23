@@ -105,29 +105,21 @@ klog_forward_thread(void *arg)
 	(void)arg;
 
 	/*
-	 * 🔥 SKIP WHAT IS ALREADY OUT, AND THIS WAS NOT OBVIOUS UNTIL IT WAS
-	 * SEEN.  A cursor of 0 means "the oldest byte still in the ring", and
-	 * the ring holds 64 KiB -- an entire boot's output, every line of
-	 * which has ALREADY left through the port while the kernel still owned
-	 * it.  So the first thing this thread did was send the whole boot down
-	 * the wire a second time, at eighty microseconds a byte, burying the
-	 * lines it exists to deliver under five seconds of replay.
+	 * 🔥 START WHERE THE KERNEL SAYS, NOT WHERE THIS THREAD HAPPENS TO BE.
 	 *
-	 * The drain to the tip is the fix, and it has to be a LOOP: one call
-	 * returns at most 4 KiB, so a single call would skip a sixteenth of the
-	 * backlog and dutifully repeat the rest.
+	 * A cursor of 0 means "the oldest byte still in the ring" -- an entire
+	 * boot's output, every line of which already left through the port
+	 * while the kernel owned it -- so the first version replayed the whole
+	 * boot down the wire a second time.  The second version skipped the
+	 * ring to its own tip when this thread started, milliseconds after the
+	 * handover, and every line the kernel said in between -- including the
+	 * one naming why a task had just died -- was in the ring, off the wire,
+	 * and never forwarded.  The kernel took the cursor at the instant it
+	 * stepped back, under the lock every printf holds, and handed it to
+	 * the driver in the claim reply: from there on is ours, before it was
+	 * already said.
 	 */
-	for (;;) {
-		mach_msg_type_number_t	cnt = sizeof(buf);
-		natural_t		next;
-
-		if (host_get_log(host, cursor, buf, &cnt, &next)
-		    != KERN_SUCCESS)
-			break;
-		if (cnt == 0)
-			break;
-		cursor = next;
-	}
+	cursor = (natural_t) char_core_wire_klog_from();
 
 	for (;;) {
 		mach_msg_type_number_t	cnt = sizeof(buf);

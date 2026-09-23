@@ -131,6 +131,14 @@ wait_for_service(const char *name)
  * and a test that hard-coded the number would then exercise the keyboard and
  * report about the serial port.
  */
+/*
+ * Whether a "uart" module attached at all.  The third arm is about the claim
+ * uart.so makes on COM1; on a machine with no 16550 (a laptop without a
+ * serial port -- #497's own bring-up box) the module's scratch test refuses
+ * and nothing is claimed, and the arm has no question to ask.
+ */
+static int	have_uart;
+
 static int
 find_tty(mach_port_t char_port, chr_u32_t *dev_id_out)
 {
@@ -154,6 +162,8 @@ find_tty(mach_port_t char_port, chr_u32_t *dev_id_out)
 		printf("char_test: device %u is class %u, module \"%s\"\n",
 		       (unsigned)list[i].id, (unsigned)list[i].class,
 		       list[i].module_name);
+		if (strcmp(list[i].module_name, "uart") == 0)
+			have_uart = 1;
 		if (!found && list[i].class == CHAR_CLASS_TTY) {
 			*dev_id_out = (chr_u32_t)list[i].id;
 			found = 1;
@@ -332,7 +342,18 @@ main(int argc, char **argv)
 	 * closed.
 	 */
 	arms++;
-	{
+	if (!have_uart) {
+		/*
+		 * The third word (#563): with no uart module attached there is
+		 * no claim on COM1, a write to it would be ALLOWED, and the arm
+		 * below would call that "the claim did not take".  It did not
+		 * exist.
+		 */
+		printf("char_test: [3] NOT ASKED — no uart module attached on "
+		       "this machine, so there is no claim on COM1 to test "
+		       "(#563)\n");
+		arms--;
+	} else {
 		mach_port_t	host = MACH_PORT_NULL, device = MACH_PORT_NULL;
 		mach_port_t	lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
 		mach_port_t	sec = MACH_PORT_NULL;

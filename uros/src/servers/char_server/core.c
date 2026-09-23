@@ -290,18 +290,26 @@ char_core_irq_init(mach_port_t master_device, mach_port_t port_set)
  * like an owner is #544; an owner that behaves like a sharer merely keeps its
  * lines tight.
  */
-static int	wire_owned;
+static int		wire_owned;
+static unsigned int	wire_klog_from;
 
 void
-char_core_set_wire_owned(int owned)
+char_core_set_wire_owned(int owned, unsigned int klog_from)
 {
 	wire_owned = owned ? 1 : 0;
+	wire_klog_from = klog_from;
 }
 
 int
 char_core_wire_owned(void)
 {
 	return wire_owned;
+}
+
+unsigned int
+char_core_wire_klog_from(void)
+{
+	return wire_klog_from;
 }
 
 /* Is there a tty at all?  Asked by name rather than inferred from a

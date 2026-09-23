@@ -12,7 +12,15 @@
 #include <ddb/cons.h>
 #include <ddb/fbcons.h>
 #include <kern/lock.h>
+#include <kern/klog.h>	/* #497: the cursor the forwarder starts from */
 #include <time/tsc.h>
+
+/*
+ * The lock every printf() holds for the length of a line, and consolewrite()
+ * for the length of a chunk.  Taken once in this file, at the handover, for a
+ * reason recorded there (#497, found by #538's four-processor boot).
+ */
+decl_simple_lock_data(extern, printf_lock)
 
 #define COM1		0x3F8
 
@@ -79,6 +87,14 @@ static void	cons_wire_byte(char c);
  * lifetime would cost every byte to buy nothing.
  */
 static int	cons_port_given_away;
+
+/*
+ * Where klog stood when the port changed hands (#497).  Every line finished
+ * before this cursor reached the wire under this kernel's own hand; every
+ * line after it is in the ring from here on and is the forwarder's to carry.
+ * Taken under printf_lock beside the flag, so that no line straddles it.
+ */
+static unsigned int	cons_port_klog_from;
 
 static char	*cons_capture_buf;
 static unsigned	 cons_capture_len;
@@ -595,10 +611,10 @@ void cons_flush(void)
 /*
  * Hand COM1 over, and take it back (#497).  See cons.h for why.
  */
-void cons_port_release(void)
+unsigned int cons_port_release(void)
 {
 	if (cons_port_given_away)
-		return;
+		return cons_port_klog_from;
 
 	/*
 	 * 🔑 EMPTY THE RING FIRST, AND THE CHIP AFTER IT.  Whatever is queued
@@ -621,6 +637,28 @@ void cons_port_release(void)
 		    "from here (#497)\n");
 
 	cons_flush();
+
+	/*
+	 * 🔥 UNDER printf_lock, AND THE FIRST VERSION WAS NOT.  Draining the
+	 * ring and waiting for the transmitter covers every byte that has
+	 * been SAID; it does not cover a line another processor is in the
+	 * middle of saying.  #538's four-processor boot showed exactly that:
+	 * cap_test's line reached the wire up to "must N", the flag went up,
+	 * the rest of it went to klog and the framebuffer -- and the forwarder
+	 * starts at klog's tip, so that tail never reached the wire at all.
+	 * Every printf() holds printf_lock for the length of its line and
+	 * consolewrite() for the length of its chunk, so holding it here means
+	 * nobody is mid-line when the port changes hands.
+	 *
+	 * ⚠️ The masked window is the SECOND flush, which is only what arrived
+	 * since the first one a moment ago, and the bounded wait for the
+	 * transmitter -- not the whole ring.  Lock order: this is a spin lock,
+	 * the table mutex is not held (device_master.c calls this hook after
+	 * unlocking), and the ring locks nest inside it as they do under every
+	 * printf().
+	 */
+	simple_lock(&printf_lock);
+	cons_flush();
 	{
 		/*
 		 * ⚠️ BOUNDED, because #551 is what an unbounded wait on this
@@ -638,8 +676,19 @@ void cons_port_release(void)
 			cpu_pause();
 		}
 	}
-
 	cons_port_given_away = 1;
+	/*
+	 * 🔥 THE CURSOR, HERE, UNDER THE SAME LOCK.  The first forwarder
+	 * skipped klog to its own tip when it started, milliseconds after
+	 * this flag went up -- and every line the kernel said in between,
+	 * including the one naming why a task had just died, was in the
+	 * ring, off the wire, and never forwarded.  Found while reading a
+	 * boot in which cap_test terminated eight lines after the handover
+	 * with nothing to say why.
+	 */
+	cons_port_klog_from = (unsigned int) klog_cursor();
+	simple_unlock(&printf_lock);
+	return cons_port_klog_from;
 }
 
 void cons_port_reclaim(void)
