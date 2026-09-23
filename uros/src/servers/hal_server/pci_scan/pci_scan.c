@@ -216,17 +216,31 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
  *	the original value	0, and the restore then wrote 0 into the BAR:
  *				the device moved to address 0, and the
  *				read-back, comparing 0 with 0, said nothing
+ *	the write of all ones	the probe read the address back, and the
+ *				size came out of it: 0x2000 for a 0x1000 BAR
  *	the probe		a size of 0, dropped as "decodes nothing" --
  *				a reason about the device, not the refusal
+ *	the restore		the BAR left holding the probe's all ones,
+ *				and decoding switched back ON over it
  *	the read-back		a false "DID NOT TAKE ITS ADDRESS BACK"
- *	the command register	decoding left off for the rest of the boot,
- *				and nothing said
+ *	the command register	decoding left off until a driver switched it
+ *				on -- for a device with none, for the rest of
+ *				the boot -- and nothing said
+ *
+ * (Each row is a boot of #577's ablation, which refuses exactly that step.)
  *
  * So each step goes through one of the two helpers below, which say which
- * step was refused, and a refusal ends the measurement of the device: its
- * regions go to the registry unmeasured, size 0, which is what every driver
- * already refuses to map.  Nothing written is left written, where the kernel
- * lets it be put back.
+ * step was refused, and what follows depends on where it lands:
+ *
+ *   - a step of a BAR's measurement ends the measurement of the device.
+ *     What was written into the BAR is written back, the command register is
+ *     put back, and the regions go to the registry unmeasured, size 0, which
+ *     ahci and virtio_blk refuse to drive;
+ *   - a BAR not shown to be back -- its restore or its read-back refused, or
+ *     a read-back that differs -- does the same but leaves the device's
+ *     decoding OFF: the one write here that is deliberately not put back;
+ *   - a refused restore of the command register is said, and the
+ *     measurement stands, because every BAR is back and the sizes are true.
  */
 static int
 measure_read(const struct hal_device_info *dev, unsigned int reg,
@@ -488,10 +502,12 @@ pci_scan_measure(struct hal_device_info *dev)
 	 *
 	 * 🔴 BUT ONLY FROM THIS COPY.  hal_registry_set_sizes() writes back
 	 * the sizes of the regions still listed and removes none, so the
-	 * registry keeps a dropped region at size 0; and the kernel, measuring
-	 * the same BAR at claim time, keeps it as a window.  Making only the
-	 * registry drop it shifts every later region's index against the
-	 * kernel's list, which is how drivers name a region -- see #585.
+	 * registry keeps a dropped region at size 0.  The kernel, measuring the
+	 * same BAR at claim time, keeps an I/O or 32-bit one as a window and
+	 * drops a 64-bit one, so the two lists do not always have the same
+	 * members, and a driver names a region by its index in one to the
+	 * other.  Making only the registry drop it moved that disagreement
+	 * rather than ending it -- see #585.
 	 */
 	{
 		unsigned int	kept = 0;

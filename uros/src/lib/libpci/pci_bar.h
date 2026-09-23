@@ -75,8 +75,10 @@
  * belong in a decode.  pci_bar_size_from_probe() below is the arithmetic half
  * of that measurement; hal_server's pci_scan module is the half that writes.
  *
- * ⚠️ A size of zero therefore means "nobody measured this one", and it is not
- * the same statement as a base of zero.  A consumer that maps a region has to
+ * ⚠️ A size of zero therefore means "nobody measured this one" -- or, in
+ * hal_server's registry today, one measured as decoding nothing, which pci_scan
+ * drops from its own copy and the registry keeps (#585) -- and it is not the
+ * same statement as a base of zero.  A consumer that maps a region has to
  * treat it as a refusal rather than as an empty region.
  */
 struct pci_bar_region {

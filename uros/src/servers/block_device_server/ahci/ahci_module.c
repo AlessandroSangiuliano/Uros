@@ -777,11 +777,11 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 * through `st->abar', writable, and silent, because a mapping does not
 	 * have to reach a device to succeed.
 	 *
-	 * ⚠️ A size of zero means nobody measured it, and that is refused rather
-	 * than treated as a small region: it is the answer a HAL that skipped
-	 * the probe gives, and mapping zero bytes would fail later and further
-	 * away.  Below 0x100 there is not even a generic host control block, so
-	 * the driver could not read CAP to find out what it is talking to.
+	 * ⚠️ A size of zero is refused rather than treated as a small region --
+	 * what it means is below -- and mapping zero bytes would fail later and
+	 * further away.  Below 0x100 there is not even a generic host control
+	 * block, so the driver could not read CAP to find out what it is
+	 * talking to.
 	 */
 	if (abar_region->size == 0) {
 		/*
@@ -812,11 +812,15 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 * Enable PCI bus master + memory space.
 	 *
 	 * ⚠️ Both halves checked, as virtio_blk's are since #570 (#577).  The
-	 * write discarded its answer, and a refusal left a controller that
-	 * decodes nothing: every ABAR read afterwards returns all ones FROM THE
-	 * BUS -- the absent-device value, with no refusal left anywhere to say
-	 * why -- and a controller that cannot master the bus never moves a byte
-	 * of the DMA this probe is about to set up.
+	 * write discarded its answer, and a refused read skipped it without a
+	 * word, so the probe went on with whatever the register already held.
+	 * On QEMU's board that was memory decoding and bus mastering, left on
+	 * by the firmware and put back by pci_scan, and the probe worked by
+	 * luck.  On a controller that did not have them, every ABAR read
+	 * returns all ones FROM THE BUS -- the absent-device value, with no
+	 * refusal left anywhere to say why -- and a controller that cannot
+	 * master the bus never moves a byte of the DMA set up next.  A driver
+	 * the kernel will not let configure its own device does not drive it.
 	 */
 	kr = device_pci_config_read(master_dev, bus, slot, func,
 				    PCI_COMMAND, &cmd_reg);
@@ -828,8 +832,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	if (kr != KERN_SUCCESS) {
 		printf("ahci %u:%u.%u: the kernel refused the command register "
 		       "(kr=%d) — memory decoding and bus mastering cannot be "
-		       "turned on; not probing (#577)\n", bus, slot, func,
-		       (int)kr);
+		       "checked or turned on; not probing (#577)\n", bus, slot,
+		       func, (int)kr);
 		return -1;
 	}
 
