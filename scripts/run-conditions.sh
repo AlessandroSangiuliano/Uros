@@ -346,7 +346,8 @@ uros_conditions_block() {
 # ⚠️ SIX, because a median has to be able to outvote one second.  With four
 # or five readings each half holds two, the lower middle of two is their
 # minimum, and one slow second of the kind recorded -- 3202 among 39xx,
-# 1884 among 2096 -- in a run that short flags it (#579, seventh review).
+# 1884 among 2096 -- flags a run of four, and a run of five unless it is the
+# middle reading, which is in neither half (#579, seventh review).
 # Three per half is the least in which one outlier is outvoted.  A KVM boot
 # at a high clock gives four or five readings here (a capped one gives
 # more), so it is often not judged -- and the clock line SAYS so: a
@@ -676,6 +677,7 @@ an even count takes the lower middle|4280|1000 2000 3000 4000|median 2000MHz, ma
 sorted by value, not by text|4280|900 3268 1200|median 1200MHz, max 3268MHz, read in 3 of 3 seconds; movement not judged under six readings
 seconds with no reading count as asked, not as samples|4280|- 2096 - 2171 2096|median 2096MHz, max 2171MHz, read in 3 of 5 seconds; movement not judged under six readings
 no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz, read in 2 of 2 seconds; movement not judged under six readings
+six readings are judged, so nothing is said about it|4280|3000 3000 3000 3993 3993 3993|median 3000MHz, max 3993MHz, read in 6 of 6 seconds
 the run over before the first sample|1400||not measured: the run ended before the first sample, 1-2 s after qemu started
 one second asked, no reading|1400|-|not measured: no reading in 1 second (no qemu thread running, or only the policy's number)
 seven seconds asked, no reading|1400|- - - - - - -|not measured: no reading in 7 seconds (no qemu thread running, or only the policy's number)
@@ -791,8 +793,12 @@ ten readings: the median of five, two slow seconds outvoted|3900 3200 3900 3200 
 eight readings: an even half takes its lower middle|1000 1000 1000 1000 1000 1000 1100 1100|no
 seven readings: the middle one belongs to neither half|1000 1000 1000 1000 1000 1100 1100|yes
 ten readings: two slow seconds in the second half outvoted|3900 3900 3900 3900 3900 3900 3200 3900 3200 3900|no
-ten readings: halves split at the middle, not at three|1000 1000 1000 1000 1000 1100 1100 1100 1100 1100|yes
+ten readings: halves split at the middle, not at three|1000 1000 1000 1000 1000 1100 1100 1100 1000 1000|yes
+seven readings: the middle one is not the first half's either|1000 1100 1100 1000 1100 1100 1100|no
+eight readings: the first half's lower middle too|1000 1000 1200 1200 1000 1000 1000 1000|no
 below 1000 MHz the sort is numeric, not by text|700 800 1000 800 800 800|no
+and in the second half|800 800 800 700 800 1000|no
+and in the second half, with 900 among 1000s|1000 1000 1000 900 1000 1100|no
 five readings: nothing claimed however far apart|1000 1000 5000 9000 9000|no
 a slow second in each half is outvoted|3900 3200 3900 3900 3900 3200|no
 halves out of order still give their median|3900 3200 3950 3900 3905 3200|no
@@ -833,7 +839,8 @@ EOF
 		echo "run-conditions --self-test: cannot make a scratch directory under ${TMPDIR:-/tmp}; the policy-number rows were not run" >&2
 		exit 2
 	fi
-	mkdir -p "$_tree/a/cpu0/cpufreq" "$_tree/a/cpu11/cpufreq" "$_tree/b/cpu0/cpufreq"
+	mkdir -p "$_tree/a/cpu0/cpufreq" "$_tree/a/cpu11/cpufreq" "$_tree/b/cpu0/cpufreq" \
+		 "$_tree/b/cpu11/cpufreq"
 	_w() { printf '%s\n' "$2" > "$_tree/$1"; }
 	# a: victus's cpu0 as sysfs has it, the two counters among them, and an
 	# eleventh core whose ceiling only it states
@@ -855,6 +862,7 @@ EOF
 	_w b/cpu0/cpufreq/cpuinfo_cur_freq 2345678
 	_w b/cpu0/cpufreq/base_frequency 2600000
 	_w b/cpu0/cpufreq/scaling_setspeed 2345000
+	_w b/cpu11/cpufreq/scaling_setspeed 1850000
 	while IFS='|' read -r _name _root _want
 	do
 		[ -n "$_name" ] || continue
@@ -871,7 +879,7 @@ EOF
 		fi
 	done <<'EOF'
 victus: the policy's numbers, not its counters, every core, in order|a|412625 1108930 1400000 2900000 4280985 
-acpi-cpufreq under userspace: the table, base_frequency, scaling_setspeed, not the request|b|1400000 2100000 2345000 2600000 3000000 4000000 
+under userspace: the table, base_frequency, every core's scaling_setspeed, not the request|b|1400000 1850000 2100000 2345000 2600000 3000000 4000000 
 no cpufreq at all|none|
 EOF
 	rm -rf "$_tree"
