@@ -20,6 +20,12 @@
 # no newline followed by a line (`  10428bootstrap: ...' -- an unfinished line,
 # not two writers inside one), and terminal escape sequences.
 #
+# ⚠️ Limits, stated (found by review): a cut whose first half happens to end
+# in a separator -- a space, most often -- is not seen, since the separator
+# rule is what keeps ordinary prose out; and the kernel's own prefix
+# `UrMach x86-64:' is not in the list.  It under-counts, never over-counts,
+# and it counts the same way in both arms of a comparison.
+#
 # The names are the prefixes that start lines in the x86-64 boots, taken from
 # the logs rather than remembered.  Checked over 105 boots before it was wired
 # in: it flags the 133 glued lines found by hand and nothing else.
