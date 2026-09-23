@@ -85,7 +85,9 @@ uros_host_state() {
 	       2>/dev/null || echo "")
 	# Whether boost may carry the core past the ceiling is decided in
 	# uros_clock_policy, from this; see the head of it (#579).
-	_boost=$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo "")
+	_boost=$(uros_boost_state \
+		"$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null)" \
+		"$(cat /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null)")
 
 	# The one half of this line that can be wrong while every sample above
 	# is right, kept in a function of its own for that reason.
@@ -101,6 +103,26 @@ uros_host_state() {
 	esac
 	echo "governor=$_gov${_epp:+ epp=$_epp} cpu=${_mhz}MHz cap=$_cap" \
 	     "effective=$_eff power=$_ac at=$(date +%H:%M:%S)"
+}
+
+# uros_boost_state <cpufreq/boost> <intel_pstate/no_turbo> -- 1, 0 or empty.
+#
+# ⚠️ TWO FILES SAY IT, AND ONE OF THEM BACKWARDS.  cpufreq/boost exists only
+# for a driver that implements the core's boost switch; intel_pstate, in both
+# of its modes, does not, and keeps its own switch as intel_pstate/no_turbo,
+# where 0 means turbo is ON.  Reading only the first left every Intel machine
+# without HWP -- whose default is intel_pstate's passive mode, intel_cpufreq,
+# a core-driven driver -- with no boost at all on the line (#579, third
+# review).  The general file wins where both exist.
+uros_boost_state() {
+	case "$1" in
+	0|1)	echo "$1" ;;
+	*)	case "$2" in
+		0)	echo 1 ;;
+		1)	echo 0 ;;
+		*)	echo "" ;;
+		esac ;;
+	esac
 }
 
 # uros_clock_policy — WHICH of the two clocks this machine will actually run
@@ -181,9 +203,12 @@ uros_host_state() {
 # - Under a driver that takes the policy, the ceiling is the clock: measured
 #   on victus (amd-pstate-epp, kernel 7.1), and in the kernel's source
 #   intel_pstate with HWP writes it into HWP_MAX_PERF.  Two exceptions are
-#   known from that source and occur on no machine here: intel_pstate
-#   without HWP lets turbo pass a ceiling set inside the turbo range, and
-#   amd-pstate-epp before 6.8 never read scaling_max_freq at all.
+#   known from that source and occur on no machine here: intel_pstate in
+#   ACTIVE mode without HWP lets turbo pass a ceiling set inside the turbo
+#   range, and amd-pstate-epp before 6.8 never read scaling_max_freq at
+#   all.  (Without HWP intel_pstate defaults to PASSIVE mode, intel_cpufreq,
+#   which lists governors, reads as the core's and gets the hedge: see
+#   uros_boost_state for where its turbo switch is.)
 # - Wherever it runs, the ceiling is a claim that cpu= can refute; see below
 #   for how coarse that is.
 #
@@ -453,6 +478,8 @@ victus capped at its nominal 3300, performance|amd-pstate-epp|performance|perfor
 amd-pstate passive under a ceiling|amd-pstate|schedutil|conservative ondemand userspace powersave performance schedutil |1108930|1400000|1|1397|1400MHz (boost on: a clock above it is not excluded, #579)
 Intel acpi-cpufreq, ceiling on the turbo entry|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |800000|2601000|1|1200|2601MHz (boost on: a clock above it is not excluded, #579)
 conservative gets the same words|acpi-cpufreq|conservative|conservative ondemand userspace powersave performance schedutil |1400000|3000000|1|2100|3000MHz (boost on: a clock above it is not excluded, #579)
+Intel without HWP: intel_cpufreq, turbo on by no_turbo=0|intel_cpufreq|schedutil|conservative ondemand userspace powersave performance schedutil |800000|3000000|1|2990|3000MHz (boost on: a clock above it is not excluded, #579)
+boost on and no ceiling to read|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000||1|2100|?
 # probes: no boost to speak of -- switched off, or no boost file at all
 acpi-cpufreq, boost off|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|0|2990|3000MHz
 acpi-cpufreq, no boost file|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000||2990|3000MHz
@@ -460,6 +487,7 @@ acpi-cpufreq, no boost file|acpi-cpufreq|ondemand|conservative ondemand userspac
 the processor stands above a driver's ceiling|amd-pstate-epp|powersave|performance powersave|1108930|1400000|1|3703|unsettled: ceiling 1400MHz, processor at 3703MHz (#579) (the driver scales the range, powersave is its bias)
 above the ceiling with boost off|acpi-cpufreq|performance|conservative ondemand userspace powersave performance schedutil |1400000|3000000|0|3993|unsettled: ceiling 3000MHz, processor at 3993MHz (#579)
 above the ceiling under userspace|acpi-cpufreq|userspace|conservative ondemand userspace powersave performance schedutil |1400000|3000000|1|3993|unsettled: ceiling 3000MHz, processor at 3993MHz (#579) (driver acpi-cpufreq, governor userspace: unknown policy)
+above the ceiling where no governors are listed|acpi-cpufreq|performance||1400000|3000000|1|3993|unsettled: ceiling 3000MHz, processor at 3993MHz (#579) (driver acpi-cpufreq, governor performance: unknown policy)
 exactly 10% over the ceiling|amd-pstate-epp|performance|performance powersave|1108930|1400000|1|1540|1400MHz
 just past 10% over the ceiling|amd-pstate-epp|performance|performance powersave|1108930|1400000|1|1541|unsettled: ceiling 1400MHz, processor at 1541MHz (#579)
 no ceiling to hold the sample against|amd-pstate-epp|performance|performance powersave|1108930||1|3000|?
@@ -508,6 +536,30 @@ unsorted in, sorted by value not by text|4280|900 3268 1200|median 1200MHz, max 
 no ceiling and nothing read|||not measured: no sample could be read
 no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz over 2 samples
 nothing could be read|1400||not measured: no sample could be read
+EOF
+
+	# The boost switch (#579): name|cpufreq/boost|intel_pstate/no_turbo|reads
+	while IFS='|' read -r _name _b _nt _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		_got=$(uros_boost_state "$_b" "$_nt")
+		if [ "$_got" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_got>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+victus: the general switch, on|1||1
+the general switch, off|0||0
+intel_pstate: no general switch, no_turbo=0 is turbo ON||0|1
+intel_pstate: no general switch, no_turbo=1 is turbo off||1|0
+both present, the general one wins|0|0|0
+neither file: not known|||
 EOF
 
 	if [ "$_fails" -gt 0 ]; then
