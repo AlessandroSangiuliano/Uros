@@ -438,20 +438,25 @@ pci_scan_measure(struct hal_device_info *dev)
 		return -1;
 	}
 
+	/*
+	 * ⚠️ A refused restore of the command register does NOT unmake the
+	 * measurement.  Every BAR was shown to be back, so the sizes are true,
+	 * and a driver switches decoding on for itself when it takes the
+	 * device.  What is wrong until then is the decoding, and that is what
+	 * is said.  Withholding the sizes here cost the controller on the
+	 * ablated boot, where the old code, saying nothing, had kept it.
+	 */
 	if (measure_write(dev, PCI_COMMAND, cmd,
-			  "the write that puts the command register back") != 0) {
-		printf("pci_scan: %02u:%02u.%u is LEFT WITH ITS DECODING OFF "
-		       "for the rest of the boot: the command register could "
-		       "not be put back to 0x%04x (#577)\n",
+			  "the write that puts the command register back") != 0)
+		printf("pci_scan: %02u:%02u.%u is LEFT WITH ITS DECODING OFF: "
+		       "the command register could not be put back to 0x%04x, "
+		       "and stays off unless a driver switches it on (#577)\n",
 		       dev->bus, dev->slot, dev->func, cmd);
-		return -1;
-	}
 
 	if (outcome == REGION_REFUSED) {
 		printf("pci_scan: %02u:%02u.%u not measured, because a step "
 		       "of bar%u's measurement was refused: its regions go to "
-		       "the registry unmeasured, size 0, and its command "
-		       "register is back as it was (#577)\n",
+		       "the registry unmeasured, size 0 (#577)\n",
 		       dev->bus, dev->slot, dev->func, dev->bars[r - 1].slot);
 		return -1;
 	}
