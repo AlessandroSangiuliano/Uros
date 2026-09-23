@@ -1006,7 +1006,20 @@ expected_reports() {
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'
 }
 
+# #579: the clock the run gets, asked once a second of the cores qemu's
+# threads are running on -- see uros_clock_now for why those and not effective=.
+# Every second leaves a word, its MHz or "-", so the log says which seconds
+# answered.  The first is asked a full second after the fork: a qemu that
+# refuses its command line is gone by then and gets no clock "in run".
+CLOCK_POLICY=$(uros_clock_policy_khz | tr '\n' ' ')
+CLOCK_SECONDS=""
+CLOCK_LAST=$(( $(date +%s) + 1 ))
 while kill -0 "$QPID" 2>/dev/null; do
+	if [ -n "$CLOCK_POLICY" ] && [ "$(date +%s)" -gt "$CLOCK_LAST" ]; then
+		CLOCK_LAST=$(date +%s)
+		CLOCK_NOW=$(uros_clock_now "$QPID" "$CLOCK_POLICY")
+		CLOCK_SECONDS="$CLOCK_SECONDS ${CLOCK_NOW:--}"
+	fi
 	# ⚠️ Same patterns as must_report above, and the counts are out of these
 	# for the same reason -- see the note there.  🔥 That they are written
 	# TWICE in this file is its own hazard: the first copy was corrected for
@@ -1043,7 +1056,24 @@ wait "$QPID" 2>/dev/null || true
 # `head -1 "$LOG"' for qemu's own refusal to start, so a header would answer
 # that question with our own text and the refusal would stop being detectable.
 UROS_HOST_AT_END=$(uros_host_state)
+CLOCK_CEIL=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
+	     2>/dev/null || echo "")
+[ -n "$CLOCK_CEIL" ] && CLOCK_CEIL=$(( CLOCK_CEIL / 1000 ))
+CLOCK_CPUFREQ=/sys/devices/system/cpu/cpu0/cpufreq
+if [ -z "$CLOCK_POLICY" ]; then
+	CLOCK_LINE="not measured: no cpufreq here, so a stale core's fallback is the TSC's nominal clock, which no file states"
+else
+	# shellcheck disable=SC2086
+	CLOCK_LINE=$(uros_clock_run_line "$CLOCK_CEIL" $CLOCK_SECONDS)
+	case "$CLOCK_LINE" in
+	median*) CLOCK_LINE="$CLOCK_LINE$(uros_clock_fallback_note \
+		"$(cat "$CLOCK_CPUFREQ/scaling_available_governors" 2>/dev/null)" \
+		"$([ -r "$CLOCK_CPUFREQ/scaling_available_frequencies" ] && echo 1 || echo 0)")" ;;
+	esac
+fi
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
+	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
+	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
 	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
 	"cpu:          ${CPU_ARGS:-from the command line}" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
@@ -1054,7 +1084,9 @@ printf '%s\n' "$UROS_COND" | tee -a "$LOG"
 
 # 🔥 A clock that moved during the run is a run nobody may compare with
 # another, and #560 lost a campaign to exactly that before anyone looked.
-if uros_clock_moved "$UROS_HOST_AT_END"; then
+# Judged from the run's own seconds (#579) -- see uros_clock_run_moved.
+# shellcheck disable=SC2086
+if uros_clock_run_moved $CLOCK_SECONDS; then
 	echo "  ⚠️ THE CLOCK MOVED DURING THIS RUN — do not compare its timings" \
 	     | tee -a "$LOG"
 fi

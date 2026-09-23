@@ -302,6 +302,7 @@ fi
 # could have.
 uros_conditions_open
 uros_conditions_block "i386" "$ACCEL" \
+	"clock in run: not measured (this harness execs qemu; see host end)" \
 	"cpu/accel:    $ACCEL_ARGS" \
 	"smp:          ${SMP_COUNT:-1}" \
 	"disk:         $([ "$USE_DISK" = true ] && echo yes || echo no)" \
