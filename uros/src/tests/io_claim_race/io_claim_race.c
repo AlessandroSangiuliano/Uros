@@ -414,13 +414,16 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 		(*arms)--;
 		return;
 	}
-	if (ask[2].claim == KERN_RESOURCE_SHORTAGE) {
-		printf("io_claim_race: [4] NOT ASKED — the control claim found "
-		       "the legacy table full (#563)\n");
-		(*arms)--;
-		return;
-	}
-
+	/*
+	 * 🔴 THE TWO OVERLAPS ARE JUDGED BEFORE THE CONTROL CAN EXCUSE THE ARM.
+	 * On a kernel with the defect each of them is GRANTED and given back,
+	 * and on more than one processor a slot given back stays retiring for
+	 * a grace period -- so it is the defect itself that fills the legacy
+	 * table and starves the control.  Judging the control first turned a
+	 * regressed kernel into NOT ASKED.  The fixed kernel answers an overlap
+	 * before it looks for a slot, so any answer but KERN_NO_ACCESS there
+	 * is WRONG, a full table included.
+	 */
 	for (i = 0; i < 2; i++) {
 		if (ask[i].claim == KERN_NO_ACCESS)
 			continue;
@@ -440,14 +443,23 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 			       ask[i].count, bdf >> 8, (bdf >> 3) & 0x1F, bdf & 7,
 			       (int)ask[i].claim);
 	}
+	if (bad != 0)
+		return;
+
+	if (ask[2].claim == KERN_RESOURCE_SHORTAGE) {
+		printf("io_claim_race: [4] NOT ASKED — both overlaps were "
+		       "refused, but the control claim found the legacy table "
+		       "full, so a claim path refusing everything would look "
+		       "the same (#563)\n");
+		(*arms)--;
+		return;
+	}
 	if (ask[2].claim != KERN_SUCCESS) {
-		bad++;
 		printf("io_claim_race: [4] WRONG — 0x%x..0x%x, which overlaps no "
 		       "window, was refused (kr=%d)\n", win - 8, win - 1,
 		       (int)ask[2].claim);
-	}
-	if (bad != 0)
 		return;
+	}
 
 	printf("io_claim_race: [4] 0x%x..0x%x and 0x%x..0x%x overlap %u:%u.%u's "
 	       "I/O window, which another task holds — both refused with "
@@ -485,7 +497,7 @@ main(int argc, char **argv)
 		if (judge) {
 			printf("io_claim_race: WRONG — no name server port, "
 			       "so the two halves cannot find each other\n");
-			printf("io_claim_race: 0 of 3 arms passed\n");
+			printf("io_claim_race: 0 of 4 arms passed\n");
 		}
 		return 1;
 	}
@@ -500,7 +512,7 @@ main(int argc, char **argv)
 		if (judge) {
 			printf("io_claim_race: WRONG — could not register "
 			       "\"%s\"\n", judge ? NAME_A : NAME_B);
-			printf("io_claim_race: 0 of 3 arms passed\n");
+			printf("io_claim_race: 0 of 4 arms passed\n");
 		}
 		return 1;
 	}
