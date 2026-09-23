@@ -295,6 +295,8 @@ virtqueue_setup(struct virtio_state *st)
 	vio_write16(st, VIRTIO_PCI_QUEUE_SEL, 0);
 
 	st->vq_size = vio_read16(st, VIRTIO_PCI_QUEUE_SIZE);
+	if (vio_refused_p(st))
+		return -1;		/* 0xFFFF is not a queue size (#570) */
 	if (st->vq_size == 0) {
 		printf("virtio: queue 0 size is 0\n");
 		return -1;
@@ -434,6 +436,10 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
 	if (n_seg == 0)
 		return -1;
 
+	/* A controller the kernel has refused is not driven (#570). */
+	if (vio_refused_p(st))
+		return -1;
+
 	/*
 	 * ⚠️ Refused, not truncated.  A short chain would read part of what was
 	 * asked for and report success, which is the failure this server cannot
@@ -483,6 +489,14 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
 	st->vq_avail->idx++;
 
 	vio_write16(st, VIRTIO_PCI_QUEUE_NOTIFY, 0);
+
+	/*
+	 * A refused notify is a request the device was never told about: the
+	 * loop below would spin its whole budget and then call it a timeout
+	 * (#570).  The descriptor stays in the ring, and so does the latch.
+	 */
+	if (vio_refused_p(st))
+		return -1;
 
 	for (timeout = 0; timeout < 10000000; timeout++) {
 		__asm__ volatile("pause" ::: "memory");
@@ -598,6 +612,8 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		   VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
 	host_features = vio_read32(st, VIRTIO_PCI_HOST_FEATURES);
+	if (vio_refused_p(st))
+		return -1;		/* said by vio_refused (#570) */
 	printf("virtio: host features = 0x%08X\n", host_features);
 	vio_write32(st, VIRTIO_PCI_GUEST_FEATURES, 0);
 
@@ -635,6 +651,13 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 */
 	cap_lo = vio_read32(st, st->config_off + 0);
 	cap_hi = vio_read32(st, st->config_off + 4);
+	/*
+	 * Before the check below, which would otherwise read all ones as a
+	 * disk too large to address and print that reason instead of the
+	 * real one (#570).
+	 */
+	if (vio_refused_p(st))
+		return -1;
 	if (cap_hi != 0) {
 		printf("virtio: capacity %u:%08X sectors exceeds what this "
 		       "driver addresses — refusing the disk\n",
