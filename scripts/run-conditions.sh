@@ -587,7 +587,11 @@ EOF
 			_fails=$(( _fails + 1 ))
 		fi
 	done <<'EOF'
-# probes -- the sampled rows are a real run's "clock by sec:" line
+# sampled: real runs' "clock by sec:" lines, victus on AC, ~/uros-tests/<log>
+ceiling 1400 (579-politica-soffitto-1400-172406)|1400|1397 1397 1397 1396 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 -|median 1397MHz, max 1397MHz, read in 14 of 15 seconds
+performance (579-politica-performance-172555)|4280|3940 3967 3926 3983 3946 - - -|median 3946MHz, max 3983MHz, read in 5 of 8 seconds
+powersave, balance_power (579-politica-balance-power-172926)|4280|3893 3985 3927 3981 3998 - - -|median 3981MHz, max 3998MHz, read in 5 of 8 seconds
+# probes
 pavillion's two readings (idle 3992, six busy 3918) over its 3000 ceiling|3000|3918 3992|median 3918MHz, max 3992MHz, read in 2 of 2 seconds -- ABOVE the 3000MHz ceiling
 one second of boost is boost, not a ceiling that failed|1400|1397 1397 3700|median 1397MHz, max 3700MHz, read in 3 of 3 seconds
 exactly 10% over, by the median|1400|1540|median 1540MHz, max 1540MHz, read in 1 of 1 second
