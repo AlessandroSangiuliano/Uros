@@ -686,8 +686,19 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	       "(%u MB)\n", st->config_off,
 	       st->config_off == VIRTIO_PCI_CONFIG_MSIX ? "on" : "off",
 	       st->disk_sectors, st->disk_sectors / 2048);
-	printf("virtio: status = 0x%02X\n",
-	       vio_read8(st, VIRTIO_PCI_STATUS));
+	{
+		uint8_t status = vio_read8(st, VIRTIO_PCI_STATUS);
+
+		/*
+		 * The probe's LAST register access, and the latch is looked at
+		 * after it like after every other (#570): a refusal here used to
+		 * be printed as a status of 0xFF and the controller committed as
+		 * up, one access after it had been declared stopped.
+		 */
+		if (vio_refused_p(st))
+			return -1;
+		printf("virtio: status = 0x%02X\n", status);
+	}
 
 	virtio_n_states++;		/* committed: this controller came up */
 
