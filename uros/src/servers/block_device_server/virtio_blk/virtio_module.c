@@ -588,13 +588,29 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	st->iobase = (unsigned int)io_region->base;
 	printf("virtio: I/O base = 0x%04X\n", st->iobase);
 
-	/* Enable I/O space + bus master */
+	/*
+	 * Enable I/O space + bus master.
+	 *
+	 * ⚠️ Both halves checked, for #570's reason one level down.  Every
+	 * register access after this depends on I/O decoding being on, and a
+	 * refused write here used to be taken as done -- after which the device
+	 * decodes nothing, every read comes back all ones FROM THE BUS, and
+	 * there is no refusal left for the accessors to latch: the absent-device
+	 * value, with nobody to say why.
+	 */
 	kr = device_pci_config_read(master_dev, bus, slot, func,
 				    PCI_COMMAND, &cmd_reg);
 	if (kr == KERN_SUCCESS) {
 		cmd_reg |= PCI_CMD_IO_ENABLE | PCI_CMD_BUS_MASTER;
-		device_pci_config_write(master_dev, bus, slot, func,
-					PCI_COMMAND, cmd_reg);
+		kr = device_pci_config_write(master_dev, bus, slot, func,
+					     PCI_COMMAND, cmd_reg);
+	}
+	if (kr != KERN_SUCCESS) {
+		printf("virtio %u:%u.%u: the kernel refused the command register "
+		       "(kr=%d) — I/O decoding and bus mastering cannot be "
+		       "turned on; not probing (#570)\n", bus, slot, func,
+		       (int)kr);
+		return -1;
 	}
 
 	/* Read IRQ */
