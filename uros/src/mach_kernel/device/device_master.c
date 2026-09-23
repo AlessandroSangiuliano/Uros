@@ -2783,6 +2783,26 @@ check_io_port(unsigned int port)
 	}
 	urmach_rcu_read_unlock();
 
+#ifdef ABLATE_570_REFUSE_IOBAR
+	/*
+	 * #570's ablation: the holder of a PCI I/O BAR is refused its own
+	 * registers after ABLATE_570_REFUSE_IOBAR accesses, so that the driver's
+	 * refusal path runs on a real boot.  The count is not atomic: this is an
+	 * experiment, run on one processor, and it is never built otherwise.
+	 */
+	if (mine) {
+		static unsigned int	ablate_570_seen;
+		unsigned int		n = ablate_570_seen++;
+
+		if (n >= ABLATE_570_REFUSE_IOBAR) {
+			if (n == ABLATE_570_REFUSE_IOBAR)
+				printf("device_io_port: #570 ablation — refusing "
+				       "0x%x to the holder of its own BAR, after "
+				       "%u allowed accesses\n", port, n);
+			return KERN_NO_ACCESS;
+		}
+	}
+#endif
 	if (mine)
 		return KERN_SUCCESS;
 	if (other_bdf != DEVICE_DMA_NO_BDF) {

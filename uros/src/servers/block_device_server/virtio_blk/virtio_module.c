@@ -86,46 +86,123 @@ static unsigned virtio_n_states;
  * I/O port accessors
  * ================================================================ */
 
+/*
+ * 🔴 WHAT A REFUSAL DOES HERE, DECIDED (#570) -- and the next driver that
+ * reaches for device_io_port_read/write should copy this, not what was here.
+ *
+ * This is a legacy virtio device, so every register is an x86 I/O port, and
+ * on x86-64 ring 3 cannot execute `in' or `out': each access is an RPC to the
+ * device master, which checks it (check_io_port, device_master.c) and may say
+ * no -- the port is inside another task's claimed BAR, or the master port is
+ * not one.  The accessors used to discard that answer, and the MIG stub does
+ * not write the out-parameter when the call fails, so a refused read handed
+ * the driver whatever was on its stack -- a plausible queue size, a plausible
+ * feature word -- and a refused write was simply taken as done.
+ *
+ * What they do now, three things, and each one is there for a reason:
+ *
+ *   1. A refused READ returns all ones, never an uninitialised value: it is
+ *      what a read of an absent device gives, and so what a check written
+ *      for "no device" already distrusts.  (uart.so does the same, #497.)
+ *   2. The first refusal is SAID, once per controller, with the port, the
+ *      register and the kernel's answer: a refusal nobody reads is #552.
+ *   3. And it is LATCHED: from then on the accessors do not touch the device
+ *      at all, reads answer all ones and writes are dropped.  A driver that
+ *      went on programming a device the kernel had just refused it would be
+ *      half-configuring hardware from values it knows are not register
+ *      values.  The latch is in the accessors, not at the call sites, so that
+ *      "stop" does not depend on every one of forty calls remembering to.
+ *
+ * What the call sites still owe is to look at the latch before they USE a
+ * value: vio_refused_p() at the three places a read decides something -- the
+ * queue size before it sizes an allocation, the capacity before it is
+ * believed, and a request before its notify is waited on.
+ */
+static void
+vio_refused(struct virtio_state *st, const char *what, unsigned int off,
+	    unsigned int size, kern_return_t kr)
+{
+	if (st->refused != KERN_SUCCESS)
+		return;
+	st->refused = kr;
+	printf("virtio %u:%u.%u: the kernel refused a %u-byte %s of port 0x%x "
+	       "(register +0x%x, kr=%d) — this controller stops here; nothing "
+	       "it reads from now on is a register value (#570)\n",
+	       st->pci_bus, st->pci_slot, st->pci_func, size, what,
+	       st->iobase + off, off, (int)kr);
+}
+
+static inline int
+vio_refused_p(const struct virtio_state *st)
+{
+	return st->refused != KERN_SUCCESS;
+}
+
+static uint32_t
+vio_read(struct virtio_state *st, unsigned int off, unsigned int size)
+{
+	unsigned int	val = 0xFFFFFFFFu;
+	kern_return_t	kr;
+
+	if (vio_refused_p(st))
+		return 0xFFFFFFFFu;
+	kr = device_io_port_read(st->master_device, st->iobase + off, size,
+				 &val);
+	if (kr != KERN_SUCCESS) {
+		vio_refused(st, "read", off, size, kr);
+		return 0xFFFFFFFFu;
+	}
+	return val;
+}
+
+static void
+vio_write(struct virtio_state *st, unsigned int off, unsigned int size,
+	  uint32_t val)
+{
+	kern_return_t	kr;
+
+	if (vio_refused_p(st))
+		return;
+	kr = device_io_port_write(st->master_device, st->iobase + off, size,
+				  val);
+	if (kr != KERN_SUCCESS)
+		vio_refused(st, "write", off, size, kr);
+}
+
 static inline uint32_t
 vio_read32(struct virtio_state *st, unsigned int off)
 {
-	unsigned int val;
-	device_io_port_read(st->master_device, st->iobase + off, 4, &val);
-	return val;
+	return vio_read(st, off, 4);
 }
 
 static inline uint16_t
 vio_read16(struct virtio_state *st, unsigned int off)
 {
-	unsigned int val;
-	device_io_port_read(st->master_device, st->iobase + off, 2, &val);
-	return (uint16_t)val;
+	return (uint16_t)vio_read(st, off, 2);
 }
 
 static inline uint8_t
 vio_read8(struct virtio_state *st, unsigned int off)
 {
-	unsigned int val;
-	device_io_port_read(st->master_device, st->iobase + off, 1, &val);
-	return (uint8_t)val;
+	return (uint8_t)vio_read(st, off, 1);
 }
 
 static inline void
 vio_write32(struct virtio_state *st, unsigned int off, uint32_t val)
 {
-	device_io_port_write(st->master_device, st->iobase + off, 4, val);
+	vio_write(st, off, 4, val);
 }
 
 static inline void
 vio_write16(struct virtio_state *st, unsigned int off, uint16_t val)
 {
-	device_io_port_write(st->master_device, st->iobase + off, 2, val);
+	vio_write(st, off, 2, val);
 }
 
 static inline void
 vio_write8(struct virtio_state *st, unsigned int off, uint8_t val)
 {
-	device_io_port_write(st->master_device, st->iobase + off, 1, val);
+	vio_write(st, off, 1, val);
 }
 
 /* ================================================================
@@ -218,6 +295,8 @@ virtqueue_setup(struct virtio_state *st)
 	vio_write16(st, VIRTIO_PCI_QUEUE_SEL, 0);
 
 	st->vq_size = vio_read16(st, VIRTIO_PCI_QUEUE_SIZE);
+	if (vio_refused_p(st))
+		return -1;		/* 0xFFFF is not a queue size (#570) */
 	if (st->vq_size == 0) {
 		printf("virtio: queue 0 size is 0\n");
 		return -1;
@@ -357,6 +436,10 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
 	if (n_seg == 0)
 		return -1;
 
+	/* A controller the kernel has refused is not driven (#570). */
+	if (vio_refused_p(st))
+		return -1;
+
 	/*
 	 * ⚠️ Refused, not truncated.  A short chain would read part of what was
 	 * asked for and report success, which is the failure this server cannot
@@ -406,6 +489,14 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
 	st->vq_avail->idx++;
 
 	vio_write16(st, VIRTIO_PCI_QUEUE_NOTIFY, 0);
+
+	/*
+	 * A refused notify is a request the device was never told about: the
+	 * loop below would spin its whole budget and then call it a timeout
+	 * (#570).  The descriptor stays in the ring, and so does the latch.
+	 */
+	if (vio_refused_p(st))
+		return -1;
 
 	for (timeout = 0; timeout < 10000000; timeout++) {
 		__asm__ volatile("pause" ::: "memory");
@@ -497,13 +588,29 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	st->iobase = (unsigned int)io_region->base;
 	printf("virtio: I/O base = 0x%04X\n", st->iobase);
 
-	/* Enable I/O space + bus master */
+	/*
+	 * Enable I/O space + bus master.
+	 *
+	 * ⚠️ Both halves checked, for #570's reason one level down.  Every
+	 * register access after this depends on I/O decoding being on, and a
+	 * refused write here used to be taken as done -- after which the device
+	 * decodes nothing, every read comes back all ones FROM THE BUS, and
+	 * there is no refusal left for the accessors to latch: the absent-device
+	 * value, with nobody to say why.
+	 */
 	kr = device_pci_config_read(master_dev, bus, slot, func,
 				    PCI_COMMAND, &cmd_reg);
 	if (kr == KERN_SUCCESS) {
 		cmd_reg |= PCI_CMD_IO_ENABLE | PCI_CMD_BUS_MASTER;
-		device_pci_config_write(master_dev, bus, slot, func,
-					PCI_COMMAND, cmd_reg);
+		kr = device_pci_config_write(master_dev, bus, slot, func,
+					     PCI_COMMAND, cmd_reg);
+	}
+	if (kr != KERN_SUCCESS) {
+		printf("virtio %u:%u.%u: the kernel refused the command register "
+		       "(kr=%d) — I/O decoding and bus mastering cannot be "
+		       "turned on; not probing (#570)\n", bus, slot, func,
+		       (int)kr);
+		return -1;
 	}
 
 	/* Read IRQ */
@@ -521,20 +628,14 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		   VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER);
 
 	host_features = vio_read32(st, VIRTIO_PCI_HOST_FEATURES);
+	if (vio_refused_p(st))
+		return -1;		/* said by vio_refused (#570) */
 	printf("virtio: host features = 0x%08X\n", host_features);
 	vio_write32(st, VIRTIO_PCI_GUEST_FEATURES, 0);
 
 	if (virtqueue_setup(st) < 0) {
 		vio_write8(st, VIRTIO_PCI_STATUS, VIRTIO_STATUS_FAILED);
 		return -1;
-	}
-
-	/* Register IRQ */
-	if (st->irq > 0 && st->irq < 16) {
-		kr = device_intr_register(master_dev, st->irq, irq,
-					  MACH_MSG_TYPE_MAKE_SEND);
-		if (kr == KERN_SUCCESS)
-			printf("virtio: IRQ %u registered\n", st->irq);
 	}
 
 	/* Driver OK */
@@ -558,6 +659,13 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 */
 	cap_lo = vio_read32(st, st->config_off + 0);
 	cap_hi = vio_read32(st, st->config_off + 4);
+	/*
+	 * Before the check below, which would otherwise read all ones as a
+	 * disk too large to address and print that reason instead of the
+	 * real one (#570).
+	 */
+	if (vio_refused_p(st))
+		return -1;
 	if (cap_hi != 0) {
 		printf("virtio: capacity %u:%08X sectors exceeds what this "
 		       "driver addresses — refusing the disk\n",
@@ -570,8 +678,37 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	       "(%u MB)\n", st->config_off,
 	       st->config_off == VIRTIO_PCI_CONFIG_MSIX ? "on" : "off",
 	       st->disk_sectors, st->disk_sectors / 2048);
-	printf("virtio: status = 0x%02X\n",
-	       vio_read8(st, VIRTIO_PCI_STATUS));
+	{
+		uint8_t status = vio_read8(st, VIRTIO_PCI_STATUS);
+
+		/*
+		 * The probe's LAST register access, and the latch is looked at
+		 * after it like after every other (#570): a refusal here used to
+		 * be printed as a status of 0xFF and the controller committed as
+		 * up, one access after it had been declared stopped.
+		 */
+		if (vio_refused_p(st))
+			return -1;
+		printf("virtio: status = 0x%02X\n", status);
+	}
+
+	/*
+	 * Register the interrupt line LAST, when nothing after it can fail.
+	 *
+	 * ⚠️ It used to be registered in the middle of the probe, and every
+	 * return -1 after it -- a disk too large to address, and since #570 a
+	 * refused register -- left a failed probe holding the line: the
+	 * framework's failure path gives the device's claim back but not the
+	 * line, and the kernel reclaims lines only when the task dies.  Nothing
+	 * in the probe needs the interrupt (a request polls the used ring), so
+	 * the line can wait for the controller to exist.
+	 */
+	if (st->irq > 0 && st->irq < 16) {
+		kr = device_intr_register(master_dev, st->irq, irq,
+					  MACH_MSG_TYPE_MAKE_SEND);
+		if (kr == KERN_SUCCESS)
+			printf("virtio: IRQ %u registered\n", st->irq);
+	}
 
 	virtio_n_states++;		/* committed: this controller came up */
 
@@ -765,7 +902,21 @@ static void
 virtio_mod_irq_handler(void *priv)
 {
 	struct virtio_state *st = (struct virtio_state *)priv;
+
 	vio_read8(st, VIRTIO_PCI_ISR);
+
+	/*
+	 * 🔴 A REFUSED CONTROLLER LEAVES ITS LINE MASKED (#570).  On a legacy
+	 * virtio device the ISR read above is the acknowledge: it is what
+	 * de-asserts INTx.  Once the latch is set that read no longer reaches
+	 * the device, so a line that was asserted stays asserted -- and
+	 * unmasking it anyway is #222's storm, mask, notify, unmask, for ever,
+	 * on a controller that has said it stopped.  The kernel masked the line
+	 * when it forwarded this interrupt, and it gives each line one owner,
+	 * so leaving it masked silences this controller and nothing else.
+	 */
+	if (vio_refused_p(st))
+		return;
 	(void)device_intr_enable(st->master_device, st->irq);
 }
 
