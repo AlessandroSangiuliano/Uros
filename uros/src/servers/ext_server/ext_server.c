@@ -915,24 +915,61 @@ vfs_op_end(struct mount_context *mnt, vfs_u64_t handle)
 	of_op_end(mnt, (int)handle - 1);
 }
 
+/* The file type an inode's IFMT bits name, as the wire spells it. */
+static vfs_u32_t
+vfs_type_of(unsigned int mode)
+{
+	switch (mode & IFMT) {
+	case IFREG:	return VFS_FT_REG;
+	case IFDIR:	return VFS_FT_DIR;
+	case IFLNK:	return VFS_FT_SYMLINK;
+	case IFCHR:	return VFS_FT_CHAR;
+	case IFBLK:	return VFS_FT_BLOCK;
+	case IFIFO:	return VFS_FT_FIFO;
+	case IFSOCK:	return VFS_FT_SOCK;
+	default:	return VFS_FT_UNKNOWN;
+	}
+}
+
+/*
+ * 🔴 FROM THE INODE, ALL OF IT (#581).
+ *
+ * This used to have the inode in hand and fill the record from other
+ * things: a block size of 4096 whatever the filesystem said, a block count
+ * computed from the size, one link for everything, a type that called a
+ * symlink regular, and a mode DEDUCED -- 0755 for any file
+ * ext2fs_file_is_executable() liked, which is every regular file, because
+ * that function answers bootstrap's loader and keeps its permission test
+ * under #if 0.  uid, gid and the three times were left at the memset's 0.
+ *
+ * #553's end-to-end check found it: a file created 0644 came back 0755 with
+ * 123 blocks, identically on both targets, while debugfs read Mode 0644 and
+ * Blockcount 136 off the same image.  The layout was right; the values put
+ * in it were made up.
+ *
+ * read_inode() has already converted every field used here to CPU order.
+ * i_blocks is in 512-byte units, which is what st_blocks means.
+ */
 static void
 vfs_fill_stat(fs_private_t priv, vfs_stat_t *st)
 {
+	struct ext2fs_file *fp = (struct ext2fs_file *)priv;
 	struct ext2_vnode *vn = ext2fs_file_vnode(priv);
-	int is_dir = ext2fs_file_is_directory(priv);
-	int is_exec = ext2fs_file_is_executable(priv);
+	const struct ext2_inode *ic = fp->f_ic;
 
 	memset(st, 0, sizeof(*st));
-	st->st_size     = (vfs_u64_t)ext2fs_file_size(priv);
-	st->st_blksize  = 4096;
-	st->st_blocks   = (st->st_size + 511) / 512;
-	st->st_nlink    = 1;
-	st->st_type     = is_dir ? VFS_FT_DIR : VFS_FT_REG;
-	st->st_mode     = is_dir  ? 0755 :
-	                  is_exec ? 0755 : 0644;
-	if (vn) {
-		st->st_ino  = (vfs_u64_t)vn->v_ino;
-	}
+	st->st_ino       = vn ? (vfs_u64_t)vn->v_ino : (vfs_u64_t)fp->f_ino;
+	st->st_size      = (vfs_u64_t)ext2fs_file_size(priv);
+	st->st_blocks    = (vfs_u64_t)ic->i_blocks;
+	st->st_atime_sec = (vfs_u64_t)ic->i_atime;
+	st->st_mtime_sec = (vfs_u64_t)ic->i_mtime;
+	st->st_ctime_sec = (vfs_u64_t)ic->i_ctime;
+	st->st_mode      = (vfs_u32_t)(ic->i_mode & 07777);
+	st->st_nlink     = (vfs_u32_t)ic->i_links_count;
+	st->st_uid       = (vfs_u32_t)ic->i_uid;
+	st->st_gid       = (vfs_u32_t)ic->i_gid;
+	st->st_blksize   = (vfs_u32_t)EXT2_BLOCK_SIZE(fp->f_fs);
+	st->st_type      = (uint8_t)vfs_type_of(ic->i_mode);
 }
 
 kern_return_t
