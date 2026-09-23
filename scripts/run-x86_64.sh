@@ -1068,7 +1068,8 @@ else
 	case "$CLOCK_LINE" in
 	median*) CLOCK_LINE="$CLOCK_LINE$(uros_clock_fallback_note \
 		"$(cat "$CLOCK_CPUFREQ/scaling_available_governors" 2>/dev/null)" \
-		"$([ -r "$CLOCK_CPUFREQ/scaling_available_frequencies" ] && echo 1 || echo 0)")" ;;
+		"$([ -r "$CLOCK_CPUFREQ/scaling_available_frequencies" ] && echo 1 || echo 0)" \
+		"$(cat "$CLOCK_CPUFREQ/scaling_governor" 2>/dev/null)")" ;;
 	esac
 fi
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \

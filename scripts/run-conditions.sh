@@ -44,8 +44,10 @@
 # build heats the package, so the first boots after one run at a lower clock
 # than the later ones.  #560 lost a whole campaign to exactly that — arm A ran
 # at 3000 MHz and arm B at 3993, and the difference read as the change under
-# test.  A run that changed clock mid-flight is a run nobody may compare, and
-# now it says so instead of being found out afterwards.
+# test.  The two samples say what the host was doing at the edges of a run.
+# Whether the clock moved DURING it is judged from the run's own per-second
+# readings (uros_clock_run_moved, #579): cpu0 at the edges is outside the
+# run, and the end sample is taken as the clock falls.
 
 # One line: the host's half of the four axes.  The FREQUENCY and not only the
 # governor's name — on this laptop `performance' on battery still reported
@@ -80,7 +82,8 @@ uros_host_state() {
 	# itself the governor's name has stopped being the whole of it: two runs
 	# at `powersave' with different preferences are two conditions, and
 	# nothing else on the line would tell them apart.  What it does to the
-	# clock is measured by the run, not here: on victus balance_power ran
+	# clock is measured by an x86-64 run, not here (i386 execs qemu and does
+	# not measure): on victus balance_power ran
 	# at 2096 on battery and 3981 on AC (#579), so the power source is part
 	# of the condition too, and the line carries it.
 	_epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference \
@@ -324,27 +327,35 @@ uros_conditions_block() {
 	# run-qemu.sh ends in `exec qemu', deliberately -- without it that shell
 	# stays qemu's parent for the whole run -- so on i386 nothing runs after
 	# the machine does.  Said out loud rather than left as a missing line,
-	# because a reader comparing two runs needs to know which of them could
-	# have noticed its clock moving.
+	# because a reader comparing two runs needs to know what each recorded;
+	# on i386 the clock during the run is not measured either.
 	echo "  host end:     ${UROS_HOST_AT_END:-not sampled (this harness execs qemu)}"
 	echo "=== end run conditions ==="
 }
 
 # uros_clock_run_moved [second ...] -- did the run's clock move, by enough to
 # matter?  True when the median of the first half of its readings and that
-# of the second half differ by 10% or more; with fewer than four readings it
+# of the second half differ by 10% or more.  With fewer than SIX readings it
 # claims nothing.
 #
 # 🔑 A verdict, not a number, because the question a reader has is not "what
 # was the clock" but "may I compare this run with another one".  10% because
-# two real states are far apart (1.4 and 3.9 GHz here) and one boosted second
-# is not a state: medians of halves let a single second pass.
+# two real states are far apart (1.4 and 3.9 GHz here) and one slow or
+# boosted second is not a state.
+#
+# ⚠️ SIX, because a median has to be able to outvote one second.  With four
+# or five readings each half holds two, the lower middle of two is their
+# minimum, and one slow second -- 3202 among 39xx, 1884 among 2096, both
+# recorded -- flagged a steady run (#579, seventh review).  Three per half
+# is the least in which one outlier is outvoted.  A KVM boot here gives four
+# or five, so it is not judged: a clock moving inside five seconds is not
+# what #560 was.
 #
 # ⚠️ It used to compare cpu= at host start with cpu= at host end: cpu0, once
-# before make-disk and once after qemu was killed -- neither inside the run,
-# and at rest each is as likely the policy's number as a clock.  Beside the
-# per-second readings it warned "do not compare" for runs whose readings sat
-# within 1.5% of each other (#579, sixth review).
+# before make-disk and once after qemu was killed, neither inside the run,
+# the end one taken as the clock falls (3771 then 2393 around a run that
+# read 3893-3977).  Beside the per-second readings it warned "do not compare"
+# for runs whose readings sat within 1.5% of each other (sixth review).
 uros_clock_run_moved() {
 	_nums=""
 	for _t in "$@"; do
@@ -355,7 +366,7 @@ uros_clock_run_moved() {
 	done
 	# shellcheck disable=SC2086
 	set -- $_nums
-	[ $# -ge 4 ] || return 1
+	[ $# -ge 6 ] || return 1
 	_h=$(( $# / 2 ))
 	_a=$(printf '%s\n' "$@" | head -n "$_h" | sort -n | sed -n "$(( (_h + 1) / 2 ))p")
 	_b=$(printf '%s\n' "$@" | tail -n "$_h" | sort -n | sed -n "$(( (_h + 1) / 2 ))p")
@@ -401,19 +412,23 @@ uros_clock_run_moved() {
 # cpuinfo_cur_freq is left out: it reads the P-state request, not the
 # counters.
 #
-# ⚠️ WHERE THE FALLBACK IS A NUMBER NO FILE STATES, it cannot be recognised,
-# and the line says so rather than counting it silently:
+# ⚠️ WHERE THE FALLBACK IS A NUMBER NO FILE STATES, it cannot be recognised.
+# Two such cases are read off the machine and said on the line:
 #   - no cpufreq at all: the fallback is cpu_khz, the TSC's nominal clock.
 #     Busy cores still read their counters, but a stale one cannot be told
 #     from them, so the harness does not measure.
 #   - a driver the core drives that has no frequency table (amd-pstate in
 #     passive or guided mode -- victus can be switched into it -- and
-#     intel_cpufreq): policy->cur is the governor's last target, any kHz.
-#     uros_clock_fallback_note reads that off the machine and the line
-#     carries it.
-#   - intel_pstate in active mode answers with its own get(); no file tells
-#     it from amd-pstate-epp, whose fallback is scaling_min_freq (measured).
-#     On no machine here.
+#     intel_cpufreq), under a governor that moves the clock (schedutil,
+#     ondemand, conservative, userspace): policy->cur is the governor's last
+#     target, any kHz.  Under `performance' and `powersave' the target is
+#     the ceiling or the floor, which are filtered.  The line carries it
+#     (uros_clock_fallback_note).
+# One is only written here, because no file tells it apart: a driver that
+# takes the policy falls back to policy->cur, which is scaling_min_freq under
+# `powersave' (victus, measured, and in intel_pstate's source), and under
+# `performance' can be a number no file states -- intel_pstate truncates
+# scaling_max_freq to a whole ratio.  On no machine here.
 
 # uros_clock_policy_khz [root] -- every frequency the policy files state, in
 # kHz, sorted, one line each: the numbers a reading must not be mistaken for.
@@ -432,14 +447,18 @@ uros_clock_policy_khz() {
 }
 
 # uros_clock_fallback_note <scaling_available_governors> <table: 1 or 0>
-# -- the words the clock line carries when a stale core's fallback cannot be
-# recognised: a driver the core drives (it lists governors) with no frequency
-# table falls back to the governor's last target, which no file states.
+# <governor> -- the words the clock line carries when a stale core's fallback
+# cannot be recognised: a driver the core drives (it lists governors) with no
+# frequency table, under a governor that moves the clock, falls back to that
+# governor's last target, which no file states.
 uros_clock_fallback_note() {
 	case "$1" in
 	"performance powersave"|"") return 0 ;;
 	esac
 	[ "$2" = 1 ] && return 0
+	case "$3" in
+	performance|powersave) return 0 ;;
+	esac
 	echo "; a stale core's fallback here is the governor's last target, which no file states, and may be counted"
 }
 
@@ -523,10 +542,11 @@ uros_clock_run_line() {
 # costs milliseconds -- it sets the same variables uros_host_state samples
 # and reads back the one field they decide.
 #
-# 🔴 A ROW SAYS WHETHER IT WAS SAMPLED, and a sampled one is not invented to
-# please the classifier: it names where it came from.  The rest are headed
-# "probes" -- chosen inputs that pin one branch each, so that breaking the
-# branch turns a row BAD.  Row 2 of the first table is this laptop, byte for
+# 🔴 A SAMPLED ROW SAYS SO AND NAMES WHERE IT CAME FROM, and it is not
+# invented to please the classifier.  Every other row is a chosen input that
+# pins one branch, so that breaking the branch turns a row BAD -- chosen, not
+# observed, whatever heading it sits under.  Row 2 of the first table is this
+# laptop, byte for
 # byte out of sysfs on the day #564 was opened; row 4
 # is pavillion, whose eleven runs were taken as the high-clock arm under a
 # governor that was pinning them (#544).  A table written to match the code
@@ -609,6 +629,8 @@ intel_cpufreq, powersave|intel_cpufreq|powersave|conservative ondemand userspace
 a list that starts with those two words|acpi-cpufreq|powersave|performance powersave schedutil |1400000|3000000|1|1397|1400MHz (governor pins it to the floor)
 # the floor is a claim, and the field beside it can refute the claim
 the processor stands above its own floor|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil |1108930|4280985|1|3703|unsettled: floor 1108MHz, processor at 3703MHz (#564)
+exactly 10% over the floor is still pinned|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil |1400000|3000000|1|1540|1400MHz (governor pins it to the floor)
+just past 10% over the floor is not|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil |1400000|3000000|1|1541|unsettled: floor 1400MHz, processor at 1541MHz (#564)
 # and what is not known is said instead of guessed
 powersave with no floor to read|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil ||3000000||1400|?
 a governor with no policy of its own|acpi-cpufreq|userspace|conservative ondemand userspace powersave performance schedutil |1400000|3000000||1400|3000MHz (driver acpi-cpufreq, governor userspace: unknown policy)
@@ -744,23 +766,32 @@ EOF
 	done <<'EOF'
 # sampled: 579-politica-performance-172555, which the old test called moved
 performance on AC, steady within 1.5%|3940 3967 3926 3983 3946 - - -|no
+# sampled, and five readings: not judged (579-politica-balance-power-172926)
+balance_power on AC, five readings|3893 3985 3927 3981 3998 - - -|no
 # probes
+four or five readings with one slow second: not judged|3893 3202 3918 3943 3927|no
 the #560 shape: 3000 then 3993|3000 3000 3000 3993 3993 3993|yes
 and back down|3993 3993 3993 3000 3000 3000|yes
 one slow second is not a move|3893 3893 3918 3918 3202 3943 3952|no
-exactly 10% is a move|1000 1000 1100 1100|yes
-just under 10% is not|1000 1000 1099 1099|no
-seconds with no reading are not readings|1000 - - 1000 1100 - 1100|yes
+exactly 10% is a move|1000 1000 1000 1100 1100 1100|yes
+just under 10% is not|1000 1000 1000 1099 1099 1099|no
+seconds with no reading are not readings|1000 - 1000 - 1000 1100 - 1100 1100|yes
 three readings: nothing claimed|1000 5000 9000|no
+five readings: nothing claimed however far apart|1000 1000 5000 9000 9000|no
+a slow second in each half is outvoted|3900 3200 3900 3900 3900 3200|no
+halves out of order still give their median|3900 3200 3950 3900 3905 3200|no
+one fast second in the first half is outvoted|4500 3900 3900 3900 3900 3900|no
+one fast second in the second half is outvoted|3900 3900 3900 3900 3900 4500|no
+a second half out of order, a slow second in its middle|3900 3900 3900 3905 3200 3950|no
 EOF
 
-	# The fallback note (#579): name|scaling_available_governors|table 1/0|note
-	while IFS='|' read -r _name _avail _table _want
+	# The fallback note (#579): name|scaling_available_governors|table 1/0|governor|note
+	while IFS='|' read -r _name _avail _table _gov _want
 	do
 		[ -n "$_name" ] || continue
 		case "$_name" in \#*) continue ;; esac
 		_total=$(( _total + 1 ))
-		_got=$(uros_clock_fallback_note "$_avail" "$_table")
+		_got=$(uros_clock_fallback_note "$_avail" "$_table" "$_gov")
 		if [ "$_got" = "$_want" ]; then
 			echo "  ok    $_name"
 		else
@@ -770,17 +801,25 @@ EOF
 			_fails=$(( _fails + 1 ))
 		fi
 	done <<'EOF'
-victus, amd-pstate-epp: its fallback is scaling_min_freq|performance powersave|0|
-acpi-cpufreq: its fallback is a table entry|conservative ondemand userspace powersave performance schedutil|1|
-amd-pstate passive, intel_cpufreq: no table|conservative ondemand userspace powersave performance schedutil|0|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
-no governors to read|||
+victus, amd-pstate-epp: its fallback is scaling_min_freq|performance powersave|0|powersave|
+acpi-cpufreq: its fallback is a table entry|conservative ondemand userspace powersave performance schedutil|1|schedutil|
+amd-pstate passive, intel_cpufreq, schedutil: no table|conservative ondemand userspace powersave performance schedutil|0|schedutil|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
+the same under ondemand|conservative ondemand userspace powersave performance schedutil|0|ondemand|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
+the same under performance: its target is the ceiling, filtered|conservative ondemand userspace powersave performance schedutil|0|performance|
+the same under powersave: its target is the floor, filtered|conservative ondemand userspace powersave performance schedutil|0|powersave|
+a list that starts with those two words is the core's|performance powersave schedutil|0|schedutil|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
+no governors to read|||schedutil|
 EOF
 
 	# The policy numbers (#579): two sysfs trees written here and read back.
 	# 🔑 Made rather than described, because uros_clock_policy_khz's subject
 	# is which FILES count, and only files can show a glob, an exclusion or a
 	# sort gone wrong.
-	_tree=$(mktemp -d "${TMPDIR:-/tmp}/run-conditions.XXXXXX")
+	_tree=$(mktemp -d "${TMPDIR:-/tmp}/run-conditions.XXXXXX") || _tree=
+	if [ -z "$_tree" ] || [ ! -d "$_tree" ]; then
+		echo "run-conditions --self-test: cannot make a scratch directory under ${TMPDIR:-/tmp}; the policy-number rows were not run" >&2
+		exit 2
+	fi
 	mkdir -p "$_tree/a/cpu0/cpufreq" "$_tree/a/cpu11/cpufreq" "$_tree/b/cpu0/cpufreq"
 	_w() { printf '%s\n' "$2" > "$_tree/$1"; }
 	# a: victus's cpu0 as sysfs has it, the two counters among them, and an
