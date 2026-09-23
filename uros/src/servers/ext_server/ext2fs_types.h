@@ -46,11 +46,16 @@
  *
  * ⚠️ The MIG subsystem id is NOT this: it is the wire identifier and stays
  * fixed for the life of the server.
+ *
+ * 0.5.1 -- the metadata flush that had never succeeded (#483): a read cache
+ * cleared the inode's block, and write_inode() refused it for the life of the
+ * mount.  A fix with no new interface, so PATCH.  The fix landed without the
+ * number and the number follows it here.
  */
 #define EXT2_SERVER_VERSION_MAJOR	0
 #define EXT2_SERVER_VERSION_MINOR	5
-#define EXT2_SERVER_VERSION_PATCH	0
-#define EXT2_SERVER_VERSION_STRING	"0.5.0"
+#define EXT2_SERVER_VERSION_PATCH	1
+#define EXT2_SERVER_VERSION_STRING	"0.5.1"
 
 typedef char ext2_path_t[1024];
 
