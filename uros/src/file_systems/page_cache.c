@@ -92,15 +92,15 @@ entry_free_data(struct page_cache *pc, struct page_cache_entry *e)
 static int
 entry_writeback(struct page_cache *pc, struct page_cache_entry *e)
 {
+	int ret;
+
 	if (!e->pc_dirty)
 		return 0;
-	if (pc->pc_writeback) {
-		int ret = pc->pc_writeback(pc->pc_writeback_ctx,
-					   e->pc_block, e->pc_data,
-					   e->pc_size, e->pc_phys);
-		if (ret != 0)
-			return ret;
-	}
+	/* Never NULL: page_cache_create refuses a cache without one (#573). */
+	ret = pc->pc_writeback(pc->pc_writeback_ctx, e->pc_block, e->pc_data,
+			       e->pc_size, e->pc_phys);
+	if (ret != 0)
+		return ret;
 	e->pc_dirty = 0;
 	pc->pc_writebacks++;
 	return 0;
@@ -143,6 +143,11 @@ page_cache_create(unsigned int max_entries,
 {
 	struct page_cache *pc;
 	unsigned int i;
+
+	/* #573: see page_cache.h -- a cache that could lose dirty blocks is
+	 * not one this function makes. */
+	if (writeback == NULL)
+		return NULL;
 
 	pc = (struct page_cache *)malloc(sizeof(*pc));
 	if (!pc)
@@ -527,13 +532,6 @@ page_cache_sync(struct page_cache *pc)
 
 		if (n == 0)
 			break;
-
-		if (!pc->pc_writeback) {
-			/* No writeback callback: dirty data is discardable */
-			for (i = 0; i < n; i++)
-				mark_range_done(pc, batch[i].block, 1, 1);
-			continue;
-		}
 
 		/* Phase 2: sort by block number to find contiguous runs */
 		batch_sort(batch, n);
