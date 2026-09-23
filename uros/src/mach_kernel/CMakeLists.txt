@@ -170,6 +170,12 @@ option(UROS_ABLATE_567_NO_FIFO "Build the #567 ablation: one byte per look at th
 # before.  The other arm of the hold measurement, in a binary that differs in
 # nothing else.
 option(UROS_ABLATE_567_NO_RING "Build the #567 ablation: the console writes the wire in the caller's thread" OFF)
+# #570: make the device master REFUSE the holder of a PCI I/O BAR its own
+# registers, after N allowed accesses, so that a driver's refusal path is asked
+# on a real boot instead of argued.  0 refuses the probe; a larger N lets the
+# probe through and refuses a request.  Empty = off.  Never set in a kernel
+# anyone boots for anything else.
+set(UROS_ABLATE_570_REFUSE_IOBAR "" CACHE STRING "Build the #570 ablation: refuse a PCI I/O BAR to its holder after N accesses (empty = off)")
 # #563: make the five tests that need a second processor believe they are alone,
 # so the line that DECLINES the question can be executed.  There is no boot flag
 # capping the processor count on this target and an AP cannot be made to fail to
@@ -398,6 +404,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_567_NO_RING)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_RING=1)
       message(STATUS "#567 ablation: the console writes the wire in the caller's thread (x86_64)")
+  endif()
+  if(NOT UROS_ABLATE_570_REFUSE_IOBAR STREQUAL "")
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_570_REFUSE_IOBAR=${UROS_ABLATE_570_REFUSE_IOBAR})
+      message(STATUS "#570 ablation: a PCI I/O BAR is refused to its holder after ${UROS_ABLATE_570_REFUSE_IOBAR} accesses (x86_64)")
   endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
