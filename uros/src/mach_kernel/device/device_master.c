@@ -2912,6 +2912,37 @@ ds_master_device_io_port_write(
 }
 
 /*
+ * Which PCI claim of ANOTHER task has an I/O region overlapping
+ * [port, port + count)?  Returns its index, or DEVICE_MAX_CLAIMS for none.
+ * Called with device_table_lock held, which every writer of device_claim[]
+ * holds too, so the answer cannot change before the caller acts on it.
+ */
+static unsigned int
+io_range_in_other_bar(unsigned int port, unsigned int count, task_t me)
+{
+	unsigned int	i, b;
+
+	for (i = 0; i < device_nclaims; i++) {
+		if (device_claim[i].task == TASK_NULL
+		    || device_claim[i].task == me
+		    || device_claim[i].bdf == DEVICE_BDF_BUS)
+			continue;
+		for (b = 0; b < device_claim[i].nregions; b++) {
+			uint64_t base = device_claim[i].region[b].base;
+			uint64_t size = device_claim[i].region[b].size;
+
+			if (!device_claim[i].region[b].is_io)
+				continue;
+			if ((uint64_t)port + count <= base
+			    || (uint64_t)port >= base + size)
+				continue;
+			return i;
+		}
+	}
+	return DEVICE_MAX_CLAIMS;
+}
+
+/*
  * Claim a range of legacy I/O ports, and give it back (#497).
  *
  * See the comment beside these routines in device_master.defs for the hole
@@ -2927,7 +2958,7 @@ ds_master_device_io_port_claim(
 {
 	task_t		me = current_task();
 	kern_return_t	kr;
-	unsigned int	i, free_slot = IO_CLAIM_MAX;
+	unsigned int	i, other, free_slot = IO_CLAIM_MAX;
 
 	*console_released = 0;
 	*klog_from = 0;
@@ -2971,6 +3002,28 @@ ds_master_device_io_port_claim(
 		}
 		mutex_unlock(&device_table_lock);
 		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * 🔴 AND AGAINST THE I/O REGIONS OF THE PCI CLAIMS (#577).  This asked
+	 * io_claim[] only, while check_io_port() asks device_claim[] FIRST --
+	 * so a range inside another task's I/O BAR was granted here and then
+	 * refused, port by port, to the task it had been granted to: a claim
+	 * that succeeds and never delivers.  A range inside a BAR of our own is
+	 * not an overlap; check_io_port() gives those ports to us either way.
+	 */
+	other = io_range_in_other_bar(port, count, me);
+	if (other != DEVICE_MAX_CLAIMS) {
+		natural_t	bdf = device_claim[other].bdf;
+		task_t		holder = device_claim[other].task;
+
+		mutex_unlock(&device_table_lock);
+		printf("device_io_port_claim: 0x%x..0x%x REFUSED to task %p — "
+		       "it overlaps an I/O window of %02x:%02x.%u, which task "
+		       "%p holds (#577)\n", port, port + count - 1, (void *)me,
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (void *)holder);
+		return KERN_NO_ACCESS;
 	}
 
 	if (free_slot == IO_CLAIM_MAX) {
