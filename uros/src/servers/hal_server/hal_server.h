@@ -209,8 +209,9 @@ int  hal_registry_add(const struct hal_device_info *dev);
 
 /*
  * Record the sizes a measurement produced, for a device already in the
- * registry.  Only the sizes: see the definition for why the rest of the
- * measured record is not copied, and why the match is by slot.
+ * registry, and remove the regions it dropped.  Only the sizes of the rest:
+ * see the definition for why the rest of the measured record is not copied,
+ * and why the match is by slot.
  */
 int  hal_registry_set_sizes(unsigned int bus, unsigned int slot,
 			    unsigned int func,

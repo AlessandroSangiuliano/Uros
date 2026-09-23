@@ -160,21 +160,38 @@ hal_registry_add(const struct hal_device_info *dev)
  * different numbers on any device with a 64-bit BAR -- a region at index 1 can
  * start at slot 2 -- and indexing was the shape of the defect in ahci_module.c
  * this issue had to fix once already.
+ *
+ * 🔴 AND A REGION THE MEASUREMENT DROPPED LEAVES THE REGISTRY (#577).  This
+ * used to write the sizes of the regions still in the list and leave the rest
+ * alone, so a region pci_scan dropped because it measures zero (e4dee7da)
+ * stayed here with the size 0 the scan had given it -- the drop was made in
+ * the caller's copy and the registry never heard of it.  A driver was then
+ * handed a region "that measures 0 bytes", and hal_bar's arm [2] saw what a HAL
+ * that never probed reports.  A slot missing from the measured list is removed
+ * now; the addresses of the others are still the registry's own.
  */
 int
 hal_registry_set_sizes(unsigned int bus, unsigned int slot, unsigned int func,
 		       const struct pci_bar_region *measured, unsigned int n)
 {
 	int		i = find_index(bus, slot, func);
-	unsigned int	m, k;
+	unsigned int	m, k, kept = 0;
 
 	if (i < 0 || measured == NULL)
 		return -1;
 
-	for (m = 0; m < n; m++)
-		for (k = 0; k < registry[i].info.n_bars; k++)
+	for (k = 0; k < registry[i].info.n_bars; k++) {
+		for (m = 0; m < n; m++)
 			if (registry[i].info.bars[k].slot == measured[m].slot)
-				registry[i].info.bars[k].size = measured[m].size;
+				break;
+		if (m == n)
+			continue;	/* the measurement dropped it */
+		if (kept != k)
+			registry[i].info.bars[kept] = registry[i].info.bars[k];
+		registry[i].info.bars[kept].size = measured[m].size;
+		kept++;
+	}
+	registry[i].info.n_bars = kept;
 
 	return 0;
 }
