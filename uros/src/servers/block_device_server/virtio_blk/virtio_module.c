@@ -86,46 +86,123 @@ static unsigned virtio_n_states;
  * I/O port accessors
  * ================================================================ */
 
+/*
+ * 🔴 WHAT A REFUSAL DOES HERE, DECIDED (#570) -- and the next driver that
+ * reaches for device_io_port_read/write should copy this, not what was here.
+ *
+ * This is a legacy virtio device, so every register is an x86 I/O port, and
+ * on x86-64 ring 3 cannot execute `in' or `out': each access is an RPC to the
+ * device master, which checks it (check_io_port, device_master.c) and may say
+ * no -- the port is inside another task's claimed BAR, or the master port is
+ * not one.  The accessors used to discard that answer, and the MIG stub does
+ * not write the out-parameter when the call fails, so a refused read handed
+ * the driver whatever was on its stack -- a plausible queue size, a plausible
+ * feature word -- and a refused write was simply taken as done.
+ *
+ * What they do now, three things, and each one is there for a reason:
+ *
+ *   1. A refused READ returns all ones, never an uninitialised value: it is
+ *      what a read of an absent device gives, and so what a check written
+ *      for "no device" already distrusts.  (uart.so does the same, #497.)
+ *   2. The first refusal is SAID, once per controller, with the port, the
+ *      register and the kernel's answer: a refusal nobody reads is #552.
+ *   3. And it is LATCHED: from then on the accessors do not touch the device
+ *      at all, reads answer all ones and writes are dropped.  A driver that
+ *      went on programming a device the kernel had just refused it would be
+ *      half-configuring hardware from values it knows are not register
+ *      values.  The latch is in the accessors, not at the call sites, so that
+ *      "stop" does not depend on every one of forty calls remembering to.
+ *
+ * What the call sites still owe is to look at the latch before they USE a
+ * value: vio_refused_p() at the three places a read decides something -- the
+ * queue size before it sizes an allocation, the capacity before it is
+ * believed, and a request before its notify is waited on.
+ */
+static void
+vio_refused(struct virtio_state *st, const char *what, unsigned int off,
+	    unsigned int size, kern_return_t kr)
+{
+	if (st->refused != KERN_SUCCESS)
+		return;
+	st->refused = kr;
+	printf("virtio %u:%u.%u: the kernel refused a %u-byte %s of port 0x%x "
+	       "(register +0x%x, kr=%d) — this controller stops here; nothing "
+	       "it reads from now on is a register value (#570)\n",
+	       st->pci_bus, st->pci_slot, st->pci_func, size, what,
+	       st->iobase + off, off, (int)kr);
+}
+
+static inline int
+vio_refused_p(const struct virtio_state *st)
+{
+	return st->refused != KERN_SUCCESS;
+}
+
+static uint32_t
+vio_read(struct virtio_state *st, unsigned int off, unsigned int size)
+{
+	unsigned int	val = 0xFFFFFFFFu;
+	kern_return_t	kr;
+
+	if (vio_refused_p(st))
+		return 0xFFFFFFFFu;
+	kr = device_io_port_read(st->master_device, st->iobase + off, size,
+				 &val);
+	if (kr != KERN_SUCCESS) {
+		vio_refused(st, "read", off, size, kr);
+		return 0xFFFFFFFFu;
+	}
+	return val;
+}
+
+static void
+vio_write(struct virtio_state *st, unsigned int off, unsigned int size,
+	  uint32_t val)
+{
+	kern_return_t	kr;
+
+	if (vio_refused_p(st))
+		return;
+	kr = device_io_port_write(st->master_device, st->iobase + off, size,
+				  val);
+	if (kr != KERN_SUCCESS)
+		vio_refused(st, "write", off, size, kr);
+}
+
 static inline uint32_t
 vio_read32(struct virtio_state *st, unsigned int off)
 {
-	unsigned int val;
-	device_io_port_read(st->master_device, st->iobase + off, 4, &val);
-	return val;
+	return vio_read(st, off, 4);
 }
 
 static inline uint16_t
 vio_read16(struct virtio_state *st, unsigned int off)
 {
-	unsigned int val;
-	device_io_port_read(st->master_device, st->iobase + off, 2, &val);
-	return (uint16_t)val;
+	return (uint16_t)vio_read(st, off, 2);
 }
 
 static inline uint8_t
 vio_read8(struct virtio_state *st, unsigned int off)
 {
-	unsigned int val;
-	device_io_port_read(st->master_device, st->iobase + off, 1, &val);
-	return (uint8_t)val;
+	return (uint8_t)vio_read(st, off, 1);
 }
 
 static inline void
 vio_write32(struct virtio_state *st, unsigned int off, uint32_t val)
 {
-	device_io_port_write(st->master_device, st->iobase + off, 4, val);
+	vio_write(st, off, 4, val);
 }
 
 static inline void
 vio_write16(struct virtio_state *st, unsigned int off, uint16_t val)
 {
-	device_io_port_write(st->master_device, st->iobase + off, 2, val);
+	vio_write(st, off, 2, val);
 }
 
 static inline void
 vio_write8(struct virtio_state *st, unsigned int off, uint8_t val)
 {
-	device_io_port_write(st->master_device, st->iobase + off, 1, val);
+	vio_write(st, off, 1, val);
 }
 
 /* ================================================================

@@ -92,6 +92,13 @@ struct virtio_state {
 	vm_address_t	data_kva, data_uva, data_dma;
 
 	uint16_t	last_used_idx;
+
+	/*
+	 * The first refused register access, KERN_SUCCESS until there is one
+	 * (#570).  Set by the accessors in virtio_module.c, and once set the
+	 * accessors stop touching the device: see the comment above them.
+	 */
+	kern_return_t	refused;
 };
 
 
