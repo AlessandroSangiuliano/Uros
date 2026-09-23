@@ -633,9 +633,11 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # question when the answer cannot be wrong.
             hal_bar_test:${_SBIN}/hal_bar_test
             # #538: ONE image for two lines, like dma_reclaim_test above --
-            # the roles differ by argv.  It only claims and releases a range
-            # nobody drives (COM2), so it can sit anywhere; here, after the
-            # last driver has claimed its own.
+            # the roles differ by argv.  The race only claims and releases a
+            # range nobody drives (COM3), so it can sit anywhere; here, after
+            # the last driver has claimed its own.  Arm [4] (#577) asks about
+            # virtio-blk's window and waits for that claim itself rather than
+            # trusting this position.
             io_claim_race:${_SBIN}/io_claim_race
             # ⚠️ BOTH drivers now, and ahci.so is here for #432 rather than
             # for its own sake.  It was left out under #520 because
