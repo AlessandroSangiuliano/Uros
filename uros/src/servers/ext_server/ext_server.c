@@ -1542,6 +1542,8 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	mnt->dev.dev_port = blk_port(bd);
 	mnt->dev.rec_size = blk_rec_size(bd);
 	mnt->dev.mount_data = NULL;
+	/* No cache until the superblock has said what a block is (#573). */
+	mnt->dev.cache = NULL;
 
 	/*
 	 * Authenticate the partition port via the Uros capability system.
@@ -1601,139 +1603,146 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 		       (unsigned)authed);
 	}
 
-	/* Create initial page cache (non-DMA, no writeback yet) */
-	mnt->dev.cache = page_cache_create(8192, NULL, NULL);
-	if (!mnt->dev.cache)
-		printf("ext2: warning: page cache alloc failed, "
-		       "running uncached\n");
-	else
-		printf("ext2: page cache enabled (8192 blocks)\n");
-
-	/* Verify ext2 superblock by opening a known test file.
-	 * Also use the first open to discover the block size and
-	 * configure the page cache writeback callback. */
+	/*
+	 * 🔴 THE SUPERBLOCK FIRST, THEN THE CACHE -- AND THE CACHE WITH ITS
+	 * WRITE-BACK FROM THE MOMENT IT EXISTS (#573).
+	 *
+	 * This used to make a cache with no write-back, then open /hello.txt
+	 * and, only if that file was there, learn the block size from it and
+	 * give the cache its callback.  A partition without the file kept a
+	 * cache that dropped every dirty block and counted it as written: on
+	 * x86-64, whose disks carry no such fixture, a 62674-byte file synced
+	 * "successfully" and the host read back zeros.  The file was a test
+	 * fixture, and the mount's durability depended on it.
+	 *
+	 * 🔑 The root directory is inode 2 on every ext2 there is, so opening
+	 * it reads the superblock and proves the filesystem without asking
+	 * anything of what is stored on it.  A partition whose root cannot be
+	 * opened is not one this server can mount, and it gives back the
+	 * device it authenticated rather than keeping it for nothing.
+	 */
 	{
 		fs_private_t priv;
-		int rc = ext2fs_open_file(&mnt->dev, "hello.txt", &priv);
-		if (rc == 0) {
-			struct ext2fs_file *fp =
-				(struct ext2fs_file *)priv;
-			int blksz = EXT2_BLOCK_SIZE(fp->f_fs);
+		struct ext2fs_file *fp;
+		int rc, blksz;
 
-			printf("ext2: mounted, /hello.txt size=%u bytes"
-			       " (blk=%d)\n",
-			       (unsigned int)ext2fs_file_size(priv),
-			       blksz);
-
-			/* Set up writeback context */
-			mnt->wb.dev = &mnt->dev;
-			mnt->wb.blk_to_sec = blksz / DEV_BSIZE;
-
-			/* Upgrade to DMA-backed page cache */
-			{
-				/*
-				 * #520: addresses are vm_address_t, and the
-				 * address list is OUT OF LINE -- so it is no
-				 * longer sixteen kilobytes of this frame on
-				 * top of the stub's own.  It is memory the
-				 * kernel handed over, and this task releases
-				 * it below.
-				 */
-				vm_address_t kva, uva;
-				uint64_t region_id = 0;
-				vm_address_t *pa_list = NULL;
-				mach_msg_type_number_t pa_cnt = 0;
-				unsigned int n_entries = 4096;
-				unsigned int n_pages;
-				struct page_cache *dma_pc;
-
-				n_pages = (n_entries * blksz + 4095) / 4096;
-				if (n_pages > 4096)
-					n_pages = 4096;
-
-				/*
-				 * ⚠️ DEVICE_DMA_NO_BDF: these pages are read
-				 * by the BLOCK SERVER's disk and not by any
-				 * device this server owns, so there is no
-				 * bus/device/function it could name (#432).
-				 */
-				kr = device_dma_alloc_sg(
-					device_port, DEVICE_DMA_NO_BDF,
-					n_pages,
-					mach_task_self(),
-					&kva, &uva,
-					&pa_list, &pa_cnt, &region_id);
-				printf("ext2: DMA alloc: kr=%d kva=0x%lx uva=0x%lx n_pages=%u pa_cnt=%u\n",
-				       kr, (unsigned long)kva,
-				       (unsigned long)uva, n_pages, pa_cnt);
-				if (kr == KERN_SUCCESS) {
-					dma_pc = page_cache_create_dma(
-						n_entries,
-						(vm_size_t)blksz,
-						(vm_offset_t)uva,
-						pa_list, pa_cnt,
-						ext2_writeback,
-						&mnt->wb);
-					if (dma_pc) {
-						page_cache_destroy(
-							mnt->dev.cache);
-						mnt->dev.cache = dma_pc;
-						printf("ext2: DMA page "
-						       "cache (%u "
-						       "entries, %u "
-						       "pages)\n",
-						       dma_pc->pc_max_entries,
-						       pa_cnt);
-					} else {
-						printf("ext2: DMA cache "
-						       "create failed, "
-						       "using non-DMA\n");
-						vm_deallocate(
-							mach_task_self(),
-							(vm_offset_t)uva,
-							(vm_size_t)n_pages
-								* 4096);
-					}
-				} else {
-					printf("ext2: DMA alloc failed "
-					       "(kr=%d), using "
-					       "non-DMA cache\n", kr);
-				}
-
-				/*
-				 * ⚠️ #520: the out-of-line list is released on
-				 * every path, including the ones that just
-				 * failed.  page_cache_create_dma copies what
-				 * it needs, so nothing outlives this block --
-				 * and a receiver that forgets out-of-line
-				 * memory leaks one allocation per mount, which
-				 * is exactly the size of leak nobody notices.
-				 */
-				if (pa_list != NULL)
-					(void) vm_deallocate(
-						mach_task_self(),
-						(vm_address_t)pa_list,
-						(vm_size_t)pa_cnt
-						* sizeof(vm_address_t));
-			}
-
-			/* Set writeback on non-DMA cache if
-			 * DMA upgrade failed */
-			if (mnt->dev.cache &&
-			    !mnt->dev.cache->pc_dma_pool) {
-				mnt->dev.cache->pc_writeback =
-					ext2_writeback;
-				mnt->dev.cache->pc_writeback_ctx =
-					&mnt->wb;
-			}
-			printf("ext2: writeback enabled\n");
-
-			ext2fs_close_file(priv);
-			free(priv);
-		} else {
-			printf("ext2: mount OK (test file not found, "
-			       "rc=%d)\n", rc);
+		rc = ext2fs_open_file(&mnt->dev, "/", &priv);
+		if (rc != 0) {
+			printf("ext2: %s holds no ext2 root this server can "
+			       "read (rc=%d) -- not mounted\n", driver_name, rc);
+			blk_close(bd);
+			mnt->dev.blk = NULL;
+			mnt->dev.dev_port = MACH_PORT_NULL;
+			return -1;
 		}
+		fp = (struct ext2fs_file *)priv;
+		blksz = EXT2_BLOCK_SIZE(fp->f_fs);
+		printf("ext2: %s is ext2 with %d-byte blocks, root directory "
+		       "%u bytes\n", driver_name, blksz,
+		       (unsigned int)ext2fs_file_size(priv));
+		ext2fs_close_file(priv);
+		free(priv);
+
+		mnt->wb.dev = &mnt->dev;
+		mnt->wb.blk_to_sec = blksz / DEV_BSIZE;
+
+		/* A DMA-backed cache first, with the write-back. */
+		{
+			/*
+			 * #520: addresses are vm_address_t, and the
+			 * address list is OUT OF LINE -- so it is no
+			 * longer sixteen kilobytes of this frame on
+			 * top of the stub's own.  It is memory the
+			 * kernel handed over, and this task releases
+			 * it below.
+			 */
+			vm_address_t kva, uva;
+			uint64_t region_id = 0;
+			vm_address_t *pa_list = NULL;
+			mach_msg_type_number_t pa_cnt = 0;
+			unsigned int n_entries = 4096;
+			unsigned int n_pages;
+			struct page_cache *dma_pc;
+
+			n_pages = (n_entries * blksz + 4095) / 4096;
+			if (n_pages > 4096)
+				n_pages = 4096;
+
+			/*
+			 * ⚠️ DEVICE_DMA_NO_BDF: these pages are read
+			 * by the BLOCK SERVER's disk and not by any
+			 * device this server owns, so there is no
+			 * bus/device/function it could name (#432).
+			 */
+			kr = device_dma_alloc_sg(
+				device_port, DEVICE_DMA_NO_BDF,
+				n_pages,
+				mach_task_self(),
+				&kva, &uva,
+				&pa_list, &pa_cnt, &region_id);
+			printf("ext2: DMA alloc: kr=%d kva=0x%lx uva=0x%lx n_pages=%u pa_cnt=%u\n",
+			       kr, (unsigned long)kva,
+			       (unsigned long)uva, n_pages, pa_cnt);
+			if (kr == KERN_SUCCESS) {
+				dma_pc = page_cache_create_dma(
+					n_entries,
+					(vm_size_t)blksz,
+					(vm_offset_t)uva,
+					pa_list, pa_cnt,
+					ext2_writeback,
+					&mnt->wb);
+				if (dma_pc) {
+					mnt->dev.cache = dma_pc;
+					printf("ext2: DMA page "
+					       "cache (%u "
+					       "entries, %u "
+					       "pages)\n",
+					       dma_pc->pc_max_entries,
+					       pa_cnt);
+				} else {
+					printf("ext2: DMA cache "
+					       "create failed, "
+					       "using non-DMA\n");
+					vm_deallocate(
+						mach_task_self(),
+						(vm_offset_t)uva,
+						(vm_size_t)n_pages
+							* 4096);
+				}
+			} else {
+				printf("ext2: DMA alloc failed "
+				       "(kr=%d), using "
+				       "non-DMA cache\n", kr);
+			}
+
+			/*
+			 * ⚠️ #520: the out-of-line list is released on
+			 * every path, including the ones that just
+			 * failed.  page_cache_create_dma copies what
+			 * it needs, so nothing outlives this block --
+			 * and a receiver that forgets out-of-line
+			 * memory leaks one allocation per mount, which
+			 * is exactly the size of leak nobody notices.
+			 */
+			if (pa_list != NULL)
+				(void) vm_deallocate(
+					mach_task_self(),
+					(vm_address_t)pa_list,
+					(vm_size_t)pa_cnt
+					* sizeof(vm_address_t));
+		}
+
+		/* ...otherwise a plain one, with the same write-back. */
+		if (mnt->dev.cache == NULL)
+			mnt->dev.cache = page_cache_create(8192, ext2_writeback,
+							   &mnt->wb);
+		if (mnt->dev.cache == NULL)
+			printf("ext2: no page cache -- every block goes to the "
+			       "device as it is written\n");
+		else
+			printf("ext2: page cache of %u blocks, write-back "
+			       "enabled%s\n", mnt->dev.cache->pc_max_entries,
+			       mnt->dev.cache->pc_dma_pool ? ", DMA-backed" : "");
 	}
 
 	/* Allocate per-mount receive port */
