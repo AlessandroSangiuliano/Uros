@@ -902,7 +902,21 @@ static void
 virtio_mod_irq_handler(void *priv)
 {
 	struct virtio_state *st = (struct virtio_state *)priv;
+
 	vio_read8(st, VIRTIO_PCI_ISR);
+
+	/*
+	 * 🔴 A REFUSED CONTROLLER LEAVES ITS LINE MASKED (#570).  On a legacy
+	 * virtio device the ISR read above is the acknowledge: it is what
+	 * de-asserts INTx.  Once the latch is set that read no longer reaches
+	 * the device, so a line that was asserted stays asserted -- and
+	 * unmasking it anyway is #222's storm, mask, notify, unmask, for ever,
+	 * on a controller that has said it stopped.  The kernel masked the line
+	 * when it forwarded this interrupt, and it gives each line one owner,
+	 * so leaving it masked silences this controller and nothing else.
+	 */
+	if (vio_refused_p(st))
+		return;
 	(void)device_intr_enable(st->master_device, st->irq);
 }
 
