@@ -969,6 +969,14 @@ vfs_open(
 	if (kr != KERN_SUCCESS && (flags & VFS_O_CREAT)) {
 		int rc = ext2fs_create(&mnt->dev, path, mode ? mode : 0644);
 		if (rc != 0) {
+			/*
+			 * Said here, because the reply cannot: it carries
+			 * KERN_FAILURE, and the code below it is what names
+			 * the cause (#498 -- the first create on x86-64 failed
+			 * and nothing on the console said why).
+			 */
+			printf("ext2: create %s on %s failed (rc=%d)\n", path,
+			       mnt->service_name, rc);
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
 			(void)mach_port_deallocate(mach_task_self(), client_task);
