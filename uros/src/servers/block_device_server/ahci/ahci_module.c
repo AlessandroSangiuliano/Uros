@@ -785,13 +785,16 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 */
 	if (abar_region->size == 0) {
 		/*
-		 * The HAL drops a region that MEASURES zero, so zero here is
-		 * one it did not measure -- a refused step of the probe says so
-		 * in pci_scan's own line (#577).
+		 * Zero is not a measurement of 0 bytes.  It is what the
+		 * registry holds for a region the HAL did not size -- a
+		 * refused step of its probe, which pci_scan names in its own
+		 * line (#577) -- and for one it measured as decoding nothing,
+		 * which pci_scan drops from its copy but the registry keeps.
+		 * Either way there is no window here to drive.
 		 */
-		printf("ahci: BAR5 arrived unmeasured (size 0): the HAL did not "
-		       "size it, so how much of it is registers is unknown — "
-		       "refusing to drive it\n");
+		printf("ahci: BAR5 has no size: the HAL did not measure it, or "
+		       "measured it decoding nothing (pci_scan's lines say "
+		       "which) — refusing to drive it\n");
 		return -1;
 	}
 	if (abar_region->size < AHCI_PORT_BASE) {
