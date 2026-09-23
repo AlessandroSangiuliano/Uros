@@ -303,10 +303,12 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
  * in uart.c.
  */
 int
-device_md_io_claimed(unsigned int base, unsigned int count)
+device_md_io_claimed(unsigned int base, unsigned int count,
+		     unsigned int *klog_from)
 {
 	(void)base;
 	(void)count;
+	*klog_from = 0;
 	return 0;	/* the console keeps writing: see above */
 }
 

@@ -150,11 +150,14 @@ covers_com1(unsigned int base, unsigned int count)
 }
 
 int
-device_md_io_claimed(unsigned int base, unsigned int count)
+device_md_io_claimed(unsigned int base, unsigned int count,
+		     unsigned int *klog_from)
 {
-	if (!covers_com1(base, count))
+	if (!covers_com1(base, count)) {
+		*klog_from = 0;
 		return 0;
-	cons_port_release();
+	}
+	*klog_from = cons_port_release();
 	return 1;
 }
 

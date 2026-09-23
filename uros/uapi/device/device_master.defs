@@ -712,8 +712,18 @@ routine device_io_port_claim(
 		master_port	: mach_port_t;
 	in	port		: natural_t;
 	in	count		: natural_t;
-	out	console_released : natural_t
+	out	console_released : natural_t;
+	out	klog_from	: natural_t
 	);
+
+/*
+ * `klog_from' is where the kernel's log continues after the handover: the
+ * cursor a forwarder passes to host_get_log() to receive every line the
+ * kernel has said since its console stepped back, and none it said before
+ * -- those were already on the wire.  Meaningful only with console_released
+ * = 1, and 0 otherwise.  A forwarder that started from its own idea of "now"
+ * lost every line between the handover and its first look.
+ */
 
 /*
  * `console_released' is 1 when the kernel's own console gave up a port in

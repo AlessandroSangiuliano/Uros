@@ -129,7 +129,8 @@ extern void		device_md_io_write(unsigned int port, unsigned int size,
  * long as the reply took.
  */
 extern int		device_md_io_claimed(unsigned int base,
-					     unsigned int count);	/* 1: the console stepped back */
+					     unsigned int count,
+					     unsigned int *klog_from);	/* 1: the console stepped back; *klog_from = where its log continues */
 extern void		device_md_io_unclaimed(unsigned int base,
 					       unsigned int count);
 

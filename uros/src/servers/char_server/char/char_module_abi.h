@@ -192,7 +192,7 @@ extern mach_port_t char_core_device_port(void);
  * server's alone, 0 if the kernel still writes it.  Core starts the klog
  * forwarder only on 1.
  */
-extern void char_core_set_wire_owned(int owned);
+extern void char_core_set_wire_owned(int owned, unsigned int klog_from);
 
 /*
  * #382: report a console break (Ctrl+D) to the kernel debugger.  The

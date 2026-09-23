@@ -47,4 +47,13 @@ extern kern_return_t klog_read(natural_t start,
 			       mach_msg_type_number_t *count,
 			       natural_t *next);
 
+/*
+ * The write cursor right now: the `start' a reader passes to klog_read() to
+ * receive everything appended from this instant on and nothing before it
+ * (#497).  The console takes it when it hands its port to a driver, so the
+ * driver's forwarder can carry every line the kernel says after that and
+ * repeat none it said before.
+ */
+extern natural_t klog_cursor(void);
+
 #endif /* _KERN_KLOG_H_ */

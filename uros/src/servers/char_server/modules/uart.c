@@ -750,13 +750,14 @@ uart_attach(void *priv)
 	 * anyway would be the second writer this issue exists to remove.
 	 */
 	{
-		natural_t released = 0;
+		natural_t released = 0, klog_from = 0;
 
 		kr = device_io_port_claim(char_core_device_port(), UART_BASE,
-					  8u, &released);
+					  8u, &released, &klog_from);
 		p->wire_is_ours = (kr == KERN_SUCCESS && released != 0);
 		if (kr == KERN_SUCCESS)
-			char_core_set_wire_owned(p->wire_is_ours);
+			char_core_set_wire_owned(p->wire_is_ours,
+						 (unsigned int)klog_from);
 	}
 	if (kr != KERN_SUCCESS) {
 		printf("uart: COM1 0x%x..0x%x refused (kr=%d) — another task "
