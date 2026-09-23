@@ -18,8 +18,14 @@
 
 #include <libvfs.h>
 #include <mach.h>
+#include <mach_init.h>			/* name_server_port */
+#include <servers/netname.h>
+#include <servers/netname_defs.h>	/* netname_name_t */
 #include <stdio.h>
 #include <string.h>
+
+/* What make-disk-image.sh writes into disk0b's hello.txt -- not the root's. */
+#define DISK1_HELLO	"Hello from disk0b partition\n"
 
 void
 bench_libvfs_smoke(void)
@@ -128,16 +134,60 @@ bench_libvfs_smoke(void)
 		}
 	}
 
-	/* Try the second mount if present.  Failure is OK — depends on
-	 * which AHCI partitions QEMU exposes today. */
-	fd = vfs_open("/mnt/disk1/hello.txt", VFS_O_RDONLY, 0);
-	if (fd == VFS_FD_INVALID) {
-		printf("  libvfs: /mnt/disk1/hello.txt unreachable "
-		       "(optional mount, skipping)\n");
-	} else {
-		printf("  libvfs: /mnt/disk1/hello.txt fd=%d "
-		       "(mount cache routed via /mnt/disk1)\n", fd);
-		vfs_close(fd);
+	/*
+	 * The second mount (#572).
+	 *
+	 * 🔴 This arm used to say "Failure is OK -- depends on which AHCI
+	 * partitions QEMU exposes today", and it printed "unreachable
+	 * (optional mount, skipping)" in every one of 152 captured logs --
+	 * 124 of them from boots that had just printed `mount registered at
+	 * "/mnt/disk1"'.  libvfs sent the whole path, and the filesystem
+	 * mounted there has no /mnt/disk1 directory.  The excuse was true of
+	 * the case it imagined and covered the one that happened.
+	 *
+	 * 🔑 So "optional" is decided by whether the MOUNT exists -- the name
+	 * server says which prefix the path resolves to -- and never by
+	 * whether an open failed.  And the bytes are checked: disk0b's
+	 * hello.txt is not the root's, so a path routed to the wrong mount
+	 * reads the wrong file and says so.
+	 */
+	{
+		netname_name_t matched;
+		mach_port_t mport = MACH_PORT_NULL;
+
+		matched[0] = '\0';
+		if (netname_look_up_mount(name_server_port,
+					  "/mnt/disk1/hello.txt", &mport,
+					  matched) == KERN_SUCCESS &&
+		    mport != MACH_PORT_NULL)
+			(void)mach_port_deallocate(mach_task_self(), mport);
+
+		if (strcmp(matched, "/mnt/disk1") != 0) {
+			printf("  libvfs: /mnt/disk1 is not mounted on this "
+			       "boot (the path resolves to \"%s\") — the "
+			       "second-mount arm is NOT ASKED\n", matched);
+		} else if ((fd = vfs_open("/mnt/disk1/hello.txt",
+					  VFS_O_RDONLY, 0)) ==
+			   VFS_FD_INVALID) {
+			printf("  libvfs: /mnt/disk1 is mounted and "
+			       "/mnt/disk1/hello.txt cannot be opened FAILED\n");
+			ok = 0;
+		} else {
+			memset(buf, 0, sizeof(buf));
+			n = vfs_read(fd, buf, sizeof(buf) - 1);
+			if (n == (ssize_t)strlen(DISK1_HELLO) &&
+			    memcmp(buf, DISK1_HELLO, (size_t)n) == 0) {
+				printf("  libvfs: /mnt/disk1/hello.txt came "
+				       "from disk0b, through the mount at "
+				       "/mnt/disk1\n");
+			} else {
+				printf("  libvfs: /mnt/disk1/hello.txt read "
+				       "%ld bytes that are not disk0b's "
+				       "FAILED\n", (long)n);
+				ok = 0;
+			}
+			vfs_close(fd);
+		}
 	}
 
 	printf("  libvfs: %s\n", ok ? "PASS" : "FAIL");
