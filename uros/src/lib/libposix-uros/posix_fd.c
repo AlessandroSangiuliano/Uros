@@ -480,21 +480,13 @@ static int tty_waiter_get(mach_port_t cport, unsigned dev_id,
 }
 
 /*
- * Block until char_server says data arrived, or TTY_RESCUE_MS pass.
+ * Block until char_server says data arrived.  The message is header-only.
  *
- * ⚠️ THE TIMEOUT IS PART OF THE CONTRACT, NOT A POLL BY ANOTHER NAME.
- * uart_tty_read() documents that an edge-triggered IRQ 4 front can be lost
- * for good -- the 16550 keeps INT raised and never fires again -- and that
- * "readers poll this entry point continuously anyway", so the LSR peek on
- * an empty read resurrects the line (#382).  The first version of this
- * waited forever: the shell read two commands and slept through the third,
- * typed while hello_exec's output kept the transmitter busy on the same
- * line.  So the wait ends every TTY_RESCUE_MS and the caller reads again:
- * the driver's rescue still happens, at four reads a second instead of as
- * fast as the processor goes.  The message is header-only.
+ * No timeout.  A 250 ms one stood here for a while, blamed on a lost IRQ
+ * front: it was hiding char_server's mach_msg_server destroying the send
+ * right this port was subscribed with (#583).  A notification that does not
+ * come is a defect to find, and a timeout makes it look like a slow tty.
  */
-#define TTY_RESCUE_MS 250
-
 static void tty_waiter_wait(mach_port_t port)
 {
     union {
@@ -502,8 +494,8 @@ static void tty_waiter_wait(mach_port_t port)
         char              room[128];
     } msg;
 
-    (void)mach_msg(&msg.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(msg),
-                   port, TTY_RESCUE_MS, MACH_PORT_NULL);
+    (void)mach_msg(&msg.hdr, MACH_RCV_MSG, 0, sizeof(msg), port,
+                   MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 }
 
 long __uros_read(int fd, void *buf, size_t count)
