@@ -17,13 +17,20 @@
  *
  * Three messages, in an order the client fixes:
  *
- *   KEEP     complex RPC; the server keeps the send right it carries
+ *   KEEP     complex RPC; the server keeps the two send rights it carries
  *   ONE-WAY  no reply port; the demux sets RetCode and nothing else
- *   PROBE    RPC; the server says what it still holds under that name
+ *   PROBE    RPC; the server says what it still holds under those names
  *
  * The same fact is then asked from the other side: the client holds the
- * receive right, so it can see whether any send right to it still exists.
+ * receive rights, so it can see whether any send right to them still exists.
  * Two halves that must agree.
+ *
+ * ⚠️ TWO rights, because of where the first one lies.  On x86-64 the body is
+ * eight bytes, so the first descriptor's name is at offset 32 -- exactly where
+ * mig_reply_error_t keeps RetCode.  The one-way demux's MIG_NO_REPLY lands on
+ * that name, and the loop's destroy then deallocates 0xfffffecf instead: with
+ * one descriptor this test passed on x86-64 with the defect in place
+ * (measured).  The second descriptor lies past RetCode on both targets.
  */
 
 #include <mach.h>
@@ -42,18 +49,20 @@
  * line in the log and not a boot that never ends. */
 #define MST_RCV_MS	10000
 
+#define MST_RIGHTS	2
+
 typedef struct {
 	mach_msg_header_t		head;
 	mach_msg_body_t			body;
-	mach_msg_port_descriptor_t	port;
+	mach_msg_port_descriptor_t	port[MST_RIGHTS];
 } keep_request_t;
 
 typedef struct {
 	mach_msg_header_t	head;
 	NDR_record_t		ndr;
 	kern_return_t		ret_code;	/* where mig_reply_error_t has it */
-	kern_return_t		refs_kr;
-	mach_port_urefs_t	refs;
+	kern_return_t		refs_kr[MST_RIGHTS];
+	mach_port_urefs_t	refs[MST_RIGHTS];
 } probe_reply_t;
 
 typedef union {
@@ -63,12 +72,13 @@ typedef union {
 } reply_buffer_t;
 
 static mach_port_t server_port;
-static mach_port_t kept = MACH_PORT_NULL;
+static mach_port_t kept[MST_RIGHTS];
 
 static boolean_t
 mst_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
 	mig_reply_error_t *r = (mig_reply_error_t *)out;
+	int i;
 
 	if (in->msgh_id == MST_ONEWAY) {
 		/* char_server's IRQ path, field for field. */
@@ -85,7 +95,8 @@ mst_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	r->NDR = NDR_record;
 
 	if (in->msgh_id == MST_KEEP) {
-		kept = ((keep_request_t *)in)->port.name;
+		for (i = 0; i < MST_RIGHTS; i++)
+			kept[i] = ((keep_request_t *)in)->port[i].name;
 		r->RetCode = KERN_SUCCESS;
 		return TRUE;
 	}
@@ -93,9 +104,11 @@ mst_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 		probe_reply_t *p = (probe_reply_t *)out;
 
 		p->ret_code = KERN_SUCCESS;
-		p->refs = 0;
-		p->refs_kr = mach_port_get_refs(mach_task_self(), kept,
-						MACH_PORT_RIGHT_SEND, &p->refs);
+		for (i = 0; i < MST_RIGHTS; i++) {
+			p->refs[i] = 0;
+			p->refs_kr[i] = mach_port_get_refs(mach_task_self(),
+				kept[i], MACH_PORT_RIGHT_SEND, &p->refs[i]);
+		}
 		out->msgh_size = sizeof(probe_reply_t);
 		return TRUE;
 	}
@@ -130,7 +143,7 @@ rpc(mach_msg_header_t *req, mach_msg_size_t size, mach_port_t reply_port,
 int
 main(int argc, char **argv)
 {
-	mach_port_t		gift, reply_port;
+	mach_port_t		gift[MST_RIGHTS], reply_port;
 	keep_request_t		keep;
 	mach_msg_header_t	oneway, probe;
 	reply_buffer_t		rep;
@@ -139,7 +152,7 @@ main(int argc, char **argv)
 	mach_msg_return_t	mr;
 	kern_return_t		kr;
 	pthread_t		server;
-	int			server_holds, sender_exists;
+	int			i, passed = 0;
 
 	(void)argc;
 	(void)argv;
@@ -152,7 +165,9 @@ main(int argc, char **argv)
 				      server_port, MACH_MSG_TYPE_MAKE_SEND)
 	       != KERN_SUCCESS
 	    || mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
-				  &gift) != KERN_SUCCESS
+				  &gift[0]) != KERN_SUCCESS
+	    || mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				  &gift[1]) != KERN_SUCCESS
 	    || mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
 				  &reply_port) != KERN_SUCCESS) {
 		printf("msg_server_test: no ports -- WRONG\n");
@@ -163,7 +178,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* KEEP: the server is handed a send right to `gift' and keeps it. */
+	/* KEEP: the server is handed a send right to each `gift' and keeps them. */
 	keep.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
 		| MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
 				 MACH_MSG_TYPE_MAKE_SEND_ONCE);
@@ -171,10 +186,12 @@ main(int argc, char **argv)
 	keep.head.msgh_remote_port = server_port;
 	keep.head.msgh_local_port = reply_port;
 	keep.head.msgh_id = MST_KEEP;
-	keep.body.msgh_descriptor_count = 1;
-	keep.port.name = gift;
-	keep.port.disposition = MACH_MSG_TYPE_MAKE_SEND;
-	keep.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	keep.body.msgh_descriptor_count = MST_RIGHTS;
+	for (i = 0; i < MST_RIGHTS; i++) {
+		keep.port[i].name = gift[i];
+		keep.port[i].disposition = MACH_MSG_TYPE_MAKE_SEND;
+		keep.port[i].type = MACH_MSG_PORT_DESCRIPTOR;
+	}
 	mr = rpc(&keep.head, sizeof(keep), reply_port, &rep);
 	if (mr != MACH_MSG_SUCCESS || rep.error.RetCode != KERN_SUCCESS) {
 		printf("msg_server_test: KEEP failed (mr=0x%x ret=%d) -- WRONG\n",
@@ -208,22 +225,30 @@ main(int argc, char **argv)
 		       mr);
 		return 1;
 	}
-	server_holds = rep.probe.refs_kr == KERN_SUCCESS && rep.probe.refs == 1;
-	printf("msg_server_test: [1] the server holds the right it kept: "
-	       "get_refs kr=%d refs=%u -- %s\n", rep.probe.refs_kr,
-	       (unsigned)rep.probe.refs, server_holds ? "ok" : "WRONG");
+	for (i = 0; i < MST_RIGHTS; i++) {
+		int holds = rep.probe.refs_kr[i] == KERN_SUCCESS
+			    && rep.probe.refs[i] == 1;
+		int sender;
 
-	/* The other half: does any send right to `gift' still exist? */
-	kr = mach_port_get_attributes(mach_task_self(), gift,
-				      MACH_PORT_RECEIVE_STATUS,
-				      (mach_port_info_t)&st, &cnt);
-	sender_exists = kr == KERN_SUCCESS && st.mps_srights != 0;
-	printf("msg_server_test: [2] its receiver sees a sender: kr=%d "
-	       "srights=%u -- %s\n", kr,
-	       kr == KERN_SUCCESS ? (unsigned)st.mps_srights : 0u,
-	       sender_exists ? "ok" : "WRONG");
+		printf("msg_server_test: [%d] the server holds right %d it kept: "
+		       "get_refs kr=%d refs=%u -- %s\n", 2 * i + 1, i + 1,
+		       rep.probe.refs_kr[i], (unsigned)rep.probe.refs[i],
+		       holds ? "ok" : "WRONG");
 
-	printf("msg_server_test: %d of 2 arms passed\n",
-	       server_holds + sender_exists);
-	return server_holds && sender_exists ? 0 : 1;
+		/* The other half: does any send right to it still exist? */
+		cnt = MACH_PORT_RECEIVE_STATUS_COUNT;
+		kr = mach_port_get_attributes(mach_task_self(), gift[i],
+					      MACH_PORT_RECEIVE_STATUS,
+					      (mach_port_info_t)&st, &cnt);
+		sender = kr == KERN_SUCCESS && st.mps_srights != 0;
+		printf("msg_server_test: [%d] its receiver sees a sender: kr=%d "
+		       "srights=%u -- %s\n", 2 * i + 2, kr,
+		       kr == KERN_SUCCESS ? (unsigned)st.mps_srights : 0u,
+		       sender ? "ok" : "WRONG");
+		passed += holds + sender;
+	}
+
+	printf("msg_server_test: %d of %d arms passed\n", passed,
+	       2 * MST_RIGHTS);
+	return passed == 2 * MST_RIGHTS ? 0 : 1;
 }
