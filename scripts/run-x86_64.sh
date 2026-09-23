@@ -387,6 +387,9 @@ must_report 'cow_test: started' 'cow_test: [0-9]* of [0-9]* arms passed' \
 must_report 'act_test: started' 'act_test: [0-9]* of [0-9]* arms passed' \
 	'It was in NEITHER list until #425 -- not the one that ends the run and not the one that fails it for silence -- so it could start, stop dead, and be reported as a pass by omission.'
 
+must_report 'msg_server_test: started' 'msg_server_test: [0-9]* of [0-9]* arms passed' \
+	'It runs the mach_msg_server of libmach in a thread and asks it, after a one-way message, whether it still holds a right it kept (#583).  A loop that lost the right answers WRONG; silence means the loop never answered at all.'
+
 # 🔥 And one of its arms means less than it looks like on this host.
 #
 # act_test's sixth arm (#411) points a thread at a non-canonical address and
@@ -1043,6 +1046,7 @@ expected_reports() {
 		'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
 		'fault_test: started'   'fault_test: [0-9]* of [0-9]* arms passed' \
 		'act_test: started'     'act_test: [0-9]* of [0-9]* arms passed' \
+		'msg_server_test: started' 'msg_server_test: [0-9]* of [0-9]* arms passed' \
 		'cap_test: starting'    'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
