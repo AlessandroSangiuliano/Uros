@@ -207,6 +207,82 @@ xf_mount_present(const char *path, char *dir, size_t dirlen)
 }
 
 /*
+ * What fs_stat says about the file, field by field (#553).
+ *
+ * 🔑 THE STAT RECORD IS THE ROUTINE WITH #553'S SHAPE.  vfs_stat_t is 80 bytes
+ * of 8-aligned fields, and while vfs.defs declared it as twenty 32-bit words
+ * MIG put it four bytes away from where the compiler did.  The assertions
+ * migcom generates now hold -- which proves the client and the server agree
+ * about the layout, not that the layout is the one the server WRITES.  So the
+ * fields are read back and checked against values this program knows, at
+ * offsets spread across the record: a u64 at 8 and 16, u32s at 48, 52 and 64,
+ * a byte at 68.  A record shifted by four bytes gets every one of them wrong.
+ *
+ * st_blocks is derived rather than copied: the file's data blocks, plus the
+ * single-indirect block once there are more than twelve, in 512-byte units.
+ * That holds for every ext2 block size from 1 KiB up, because 62674 bytes
+ * never needs a double-indirect block.
+ */
+static void
+xf_check_stat(const char *path, int arm)
+{
+	vfs_stat_t	st;
+	uint64_t	nblk, want_blocks;
+	const char	*bad = NULL;
+
+	if (vfs_stat(path, &st) != 0) {
+		printf("%s: [%d] WRONG — fs_stat(%s) failed on a file this "
+		       "program has just %s\n", tag, arm, path,
+		       strcmp(tag, "xfile_write") == 0 ? "written" : "opened");
+		failed++;
+		return;
+	}
+
+	want_blocks = 0;
+	if (st.st_blksize >= 1024 && st.st_blksize <= 65536 &&
+	    (st.st_blksize & (st.st_blksize - 1)) == 0) {
+		nblk = (XF_SIZE + st.st_blksize - 1) / st.st_blksize;
+		want_blocks = (nblk + (nblk > 12 ? 1 : 0)) *
+			      (st.st_blksize / 512);
+	}
+	if (want_blocks == 0)
+		bad = "st_blksize is not an ext2 block size";
+	else if (st.st_size != XF_SIZE)
+		bad = "st_size";
+	else if (st.st_type != VFS_FT_REG)
+		bad = "st_type is not a regular file";
+	else if ((st.st_mode & 0777) != 0644)
+		bad = "st_mode is not the 0644 the writer created it with";
+	else if (st.st_nlink != 1)
+		bad = "st_nlink";
+	else if (st.st_ino == 0)
+		bad = "st_ino is zero";
+	else if (st.st_blocks != want_blocks)
+		bad = "st_blocks is not what the size and block size make";
+
+	if (bad != NULL) {
+		printf("%s: [%d] WRONG — fs_stat(%s): %s — ino %llu size %llu "
+		       "blocks %llu (expected %llu) mode 0%o nlink %u blksize "
+		       "%u type %u\n", tag, arm, path, bad,
+		       (unsigned long long)st.st_ino,
+		       (unsigned long long)st.st_size,
+		       (unsigned long long)st.st_blocks,
+		       (unsigned long long)want_blocks,
+		       (unsigned)st.st_mode, (unsigned)st.st_nlink,
+		       (unsigned)st.st_blksize, (unsigned)st.st_type);
+		failed++;
+		return;
+	}
+	printf("%s: [%d] fs_stat reads back ino %llu, %llu bytes in %llu "
+	       "sectors of %u-byte blocks, mode 0%o, one link, a regular file "
+	       "(#553)\n", tag, arm, (unsigned long long)st.st_ino,
+	       (unsigned long long)st.st_size,
+	       (unsigned long long)st.st_blocks, (unsigned)st.st_blksize,
+	       (unsigned)(st.st_mode & 0777));
+	passed++;
+}
+
+/*
  * Read the whole file from offset 0 and compare every byte.  The header's
  * writer name is taken from the file -- the reader cannot know it -- after
  * checking that it is one this program writes.
@@ -348,6 +424,7 @@ xf_write(const char *path)
 	 */
 	xf_check_contents(fd, 3, 4);
 	(void)vfs_close(fd);
+	xf_check_stat(path, 5);
 }
 
 static void
@@ -361,16 +438,7 @@ xf_read(const char *path)
 		       "it for this boot to read\n", tag, path);
 		return;
 	}
-	if (st.st_size != XF_SIZE) {
-		printf("%s: [1] WRONG — %s is %llu bytes and the writer "
-		       "wrote %u\n", tag, path,
-		       (unsigned long long)st.st_size, XF_SIZE);
-		failed++;
-	} else {
-		printf("%s: [1] %s is %u bytes, the size its writer "
-		       "wrote\n", tag, path, XF_SIZE);
-		passed++;
-	}
+	xf_check_stat(path, 1);
 
 	fd = vfs_open(path, VFS_O_RDONLY, 0);
 	if (fd == VFS_FD_INVALID) {
