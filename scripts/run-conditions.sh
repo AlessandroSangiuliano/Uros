@@ -352,48 +352,59 @@ uros_clock_moved() {
 # processor, while the run is on it.
 #
 # So the harness asks the processor once a second while qemu is alive, and
-# the conditions block says what it answered.  The reading is the FASTEST
-# core at that second: qemu's vCPU threads are the busy ones, and the idle
-# cores around them report their own lower clocks.  The median over the
-# run is the clock the run got; the maximum is how far boost went.
+# the conditions block says what it answered.  It asks about the cores that
+# are running qemu's threads at that second, not about the machine: a host
+# thread in state R is on a core, and /proc/<pid>/task/*/stat names which.
+# The reading at a second is the fastest of those cores; the median over the
+# run is the clock the run got, and the maximum is how far boost went.
 #
-# ⚠️ WHICH COUNTER.  cpuinfo_avg_freq is the kernel's reading of APERF/MPERF
-# over the last few milliseconds, and it is the one that saw 3268 MHz on
-# all twelve cores under a 3300 ceiling.  Kernels without it get
-# /proc/cpuinfo's cpu MHz, which on x86 comes from the same counters but
-# falls back to the policy's clock for an idle core.  The line names the
-# counter it used.
-uros_clock_source() {
-	for _f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_avg_freq; do
-		[ -r "$_f" ] && { echo cpuinfo_avg_freq; return; }
-	done
-	echo "/proc/cpuinfo"
-}
+# 🔴 WHY NOT THE FASTEST CORE OF THE MACHINE, which was the first version.
+# On x86 every clock reading in sysfs and /proc -- cpuinfo_avg_freq and
+# /proc/cpuinfo's cpu MHz alike -- is arch_freq_get_on_cpu(): APERF/MPERF
+# over the last tick, and for a core whose last tick is older than 20 ms,
+# the POLICY's number (policy->cur, or cpu_khz where there is no cpufreq).
+# On victus an idle core answers 1108930 kHz to the kHz, which is
+# scaling_min_freq and no counter ratio; under acpi-cpufreq `performance' an
+# idle core would answer the ceiling, and a run slowed by heat would have
+# been reported at the ceiling -- the deduction back in through the reading
+# written to replace it (fourth review).  A core running a vCPU ticks, so its
+# reading is the counter's.  One source then serves, /proc/cpuinfo, which
+# every kernel here has.
 
-# One sample: the fastest core now, in MHz, from the counter named above.
-# Prints nothing when neither counter can be read.
+# uros_clock_now <pid> -- one sample, in MHz: the fastest core that one of
+# <pid>'s threads is running on right now.  Prints nothing when none of its
+# threads is running.
 uros_clock_now() {
-	if [ "$1" = cpuinfo_avg_freq ]; then
-		cat /sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_avg_freq \
-		    2>/dev/null |
-		awk '/^[0-9]+$/ { if ($1 > m) m = $1 } END { if (m) print int(m / 1000) }'
-	else
-		awk '/^cpu MHz/ { v = int($4 + 0.5); if (v > m) m = v }
-		     END { if (m) print m }' /proc/cpuinfo 2>/dev/null
-	fi
+	_cpus=$(cat /proc/"$1"/task/*/stat 2>/dev/null |
+		awk '{ sub(/^.*\) /, ""); if ($1 == "R") printf " %s", $37 }')
+	[ -n "$_cpus" ] || return 0
+	awk -v want="$_cpus " '
+		/^processor/ { p = $3 }
+		/^cpu MHz/ {
+			v = int($4 + 0.5)
+			if (index(want, " " p " ") && v > m) m = v
+		}
+		END { if (m) print m }' /proc/cpuinfo 2>/dev/null
 }
 
-# uros_clock_run_line <ceiling MHz, or empty> [sample ...]
+# uros_clock_run_line <ceiling MHz, or empty> <seconds asked> [sample ...]
 #
 # The summary, from the samples alone, so that --self-test can drive it.
 # 🔑 The ceiling is compared with the MEDIAN and not the maximum: one boosted
 # second is boost, a run that sat above the ceiling is a ceiling that did not
 # hold.  10% for the reason every other threshold in this file uses it.
+# With no sample it says which of the two reasons: qemu gone before the first
+# second, or seconds in which none of its threads was on a core.
 uros_clock_run_line() {
 	_ceil=$1
-	shift
+	_asked=$2
+	shift 2
 	if [ $# -eq 0 ]; then
-		echo "not measured: no sample could be read"
+		if [ "${_asked:-0}" -eq 0 ]; then
+			echo "not measured: qemu had exited before the first second"
+		else
+			echo "not measured: in $_asked seconds none of qemu's threads was found running"
+		fi
 		return
 	fi
 	_sorted=$(printf '%s\n' "$@" | sort -n)
@@ -507,14 +518,14 @@ a driver that lists no governors|acpi-cpufreq|performance||1400000|3000000|1|210
 a machine that will not say|?|?|||||?|? (driver ?, governor ?: unknown policy)
 EOF
 
-	# The measured clock (#579): name|ceiling MHz|samples|the line it must read
-	while IFS='|' read -r _name _ceil _samples _want
+	# The measured clock (#579): name|ceiling MHz|seconds asked|samples|the line it must read
+	while IFS='|' read -r _name _ceil _asked _samples _want
 	do
 		[ -n "$_name" ] || continue
 		case "$_name" in \#*) continue ;; esac
 		_total=$(( _total + 1 ))
 		# shellcheck disable=SC2086
-		_got=$(uros_clock_run_line "$_ceil" $_samples)
+		_got=$(uros_clock_run_line "$_ceil" "$_asked" $_samples)
 		if [ "$_got" = "$_want" ]; then
 			echo "  ok    $_name"
 		else
@@ -524,18 +535,18 @@ EOF
 			_fails=$(( _fails + 1 ))
 		fi
 	done <<'EOF'
-# sampled: victus under a 1400 ceiling, pavillion's 3918/3992 over its 3000
-victus under its 1400 ceiling|1400|1397 1398 1396 1395 1397|median 1397MHz, max 1398MHz over 5 samples
-pavillion over its 3000 ceiling|3000|3918 3992 3950|median 3950MHz, max 3992MHz over 3 samples -- ABOVE the 3000MHz ceiling
-# probes: one boosted second is boost, not a ceiling that failed
-one second of boost|1400|1397 1397 3700|median 1397MHz, max 3700MHz over 3 samples
-exactly 10% over, by the median|1400|1540|median 1540MHz, max 1540MHz over 1 sample
-just past 10%, by the median|1400|1541|median 1541MHz, max 1541MHz over 1 sample -- ABOVE the 1400MHz ceiling
-an even count takes the lower middle|4280|1000 2000 3000 4000|median 2000MHz, max 4000MHz over 4 samples
-unsorted in, sorted by value not by text|4280|900 3268 1200|median 1200MHz, max 3268MHz over 3 samples
-no ceiling and nothing read|||not measured: no sample could be read
-no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz over 2 samples
-nothing could be read|1400||not measured: no sample could be read
+# sampled: the "clock samples:" line of a real run, ~/uros-tests/<log>
+victus, powersave/balance_power, battery (579-misurato-thread-qemu-163424)|4280|10|2096 2096 2096 2096 2096 2096 2096 2096 1884 2171|median 2096MHz, max 2171MHz over 10 samples
+# probes
+pavillion's two readings (idle 3992, six busy 3918) over its 3000 ceiling|3000|2|3918 3992|median 3918MHz, max 3992MHz over 2 samples -- ABOVE the 3000MHz ceiling
+one second of boost is boost, not a ceiling that failed|1400|3|1397 1397 3700|median 1397MHz, max 3700MHz over 3 samples
+exactly 10% over, by the median|1400|1|1540|median 1540MHz, max 1540MHz over 1 sample
+just past 10%, by the median|1400|1|1541|median 1541MHz, max 1541MHz over 1 sample -- ABOVE the 1400MHz ceiling
+an even count takes the lower middle|4280|4|1000 2000 3000 4000|median 2000MHz, max 4000MHz over 4 samples
+sorted by value, not by text|4280|3|900 3268 1200|median 1200MHz, max 3268MHz over 3 samples
+no ceiling, samples still summarised||2|3268 3269|median 3268MHz, max 3269MHz over 2 samples
+qemu gone before the first second|1400|0||not measured: qemu had exited before the first second
+asked, and no qemu thread was ever running|1400|7||not measured: in 7 seconds none of qemu's threads was found running
 EOF
 
 	# The boost switch (#579): name|cpufreq/boost|intel_pstate/no_turbo|reads

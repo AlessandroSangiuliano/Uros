@@ -1006,15 +1006,16 @@ expected_reports() {
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'
 }
 
-# #579: the clock the run gets, asked of the processor once a second while
-# qemu is alive -- see uros_clock_run_line for why this and not effective=.
-CLOCK_SRC=$(uros_clock_source)
+# #579: the clock the run gets, asked once a second of the cores qemu's
+# threads are running on -- see uros_clock_now for why those and not effective=.
 CLOCK_SAMPLES=""
+CLOCK_ASKED=0
 CLOCK_LAST=0
 while kill -0 "$QPID" 2>/dev/null; do
 	if [ "$(date +%s)" -ne "$CLOCK_LAST" ]; then
 		CLOCK_LAST=$(date +%s)
-		CLOCK_NOW=$(uros_clock_now "$CLOCK_SRC")
+		CLOCK_ASKED=$(( CLOCK_ASKED + 1 ))
+		CLOCK_NOW=$(uros_clock_now "$QPID")
 		[ -n "$CLOCK_NOW" ] && CLOCK_SAMPLES="$CLOCK_SAMPLES $CLOCK_NOW"
 	fi
 	# ⚠️ Same patterns as must_report above, and the counts are out of these
@@ -1057,9 +1058,10 @@ CLOCK_CEIL=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
 	     2>/dev/null || echo "")
 [ -n "$CLOCK_CEIL" ] && CLOCK_CEIL=$(( CLOCK_CEIL / 1000 ))
 # shellcheck disable=SC2086
-CLOCK_LINE=$(uros_clock_run_line "$CLOCK_CEIL" $CLOCK_SAMPLES)
+CLOCK_LINE=$(uros_clock_run_line "$CLOCK_CEIL" "$CLOCK_ASKED" $CLOCK_SAMPLES)
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
-	"clock in run: $CLOCK_LINE (fastest core each second, $CLOCK_SRC)" \
+	"clock in run: $CLOCK_LINE (cores running qemu's threads, /proc/cpuinfo)" \
+	"clock samples:${CLOCK_SAMPLES:- none} (MHz, one a second)" \
 	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
 	"cpu:          ${CPU_ARGS:-from the command line}" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
