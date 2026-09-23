@@ -83,27 +83,11 @@ uros_host_state() {
 	# machine's clock is unmeasured, and the line does not say that it does.
 	_epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference \
 	       2>/dev/null || echo "")
-	if [ -n "$_capk" ]; then
-		_cap="$(( _capk / 1000 ))MHz"
-	else
-		_cap="?"
-	fi
-
-	# ⚠️ AND BOOST GOES OVER THE POLICY CEILING.  Measured here, with
-	# scaling_max_freq at 3000000 and boost enabled, the cores ran at
-	# 3918-3992 MHz -- above the ceiling that had just been set.  So the
-	# honest number with boost on is cpuinfo_max_freq (4000 MHz on this
-	# machine), and reporting the policy ceiling would understate the
-	# machine by a gigahertz.  Said from the measurement rather than from
-	# what the driver is supposed to do.
+	# Whether boost may carry the core past the ceiling is decided in
+	# uros_clock_policy, from these; see the head of it (#579).
 	_boost=$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo "")
 	_hwmaxk=$(cat /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq \
 	          2>/dev/null || echo "")
-	_top="$_cap"
-	if [ "$_boost" = 1 ] && [ -n "$_hwmaxk" ] && [ -n "$_capk" ] \
-	   && [ "$_hwmaxk" -gt "$_capk" ]; then
-		_top="$(( _hwmaxk / 1000 ))MHz (boost, over the ${_cap} ceiling)"
-	fi
 
 	# The one half of this line that can be wrong while every sample above
 	# is right, kept in a function of its own for that reason.
@@ -122,8 +106,8 @@ uros_host_state() {
 }
 
 # uros_clock_policy — WHICH of the two clocks this machine will actually run
-# at, decided from facts already sampled into _drv _gov _avail _mink _cap _top
-# _mhz.  Sets _eff.
+# at, decided from facts already sampled into _drv _gov _avail _mink _capk
+# _hwmaxk _boost _mhz.  Sets _cap, _top and _eff.
 #
 # 🔑 Kept apart from the sampling because it is the one half of that line that
 # can be wrong while every sample in it is right — #564 printed cpu=3703MHz and
@@ -165,11 +149,56 @@ uros_host_state() {
 # amd-pstate-epp: `performance powersave' and the newline, nothing else.  So
 # the test is that literal rather than a driver name, and a driver nobody here
 # has heard of is read correctly the day it turns up.
+#
+# 🔴 AND THE SAME QUESTION DECIDES WHETHER BOOST PASSES THE CEILING (#579).
+# With boost on and cpuinfo_max_freq above scaling_max_freq, two machines give
+# the same picture and behave in opposite ways, both measured under a full load:
+#
+#   pavillion, acpi-cpufreq (core), ceiling 3000 = its nominal clock
+#                         -> the cores ran at 3918-3992 MHz, OVER it (#544)
+#   victus, amd-pstate-epp (driver), ceiling 3300 = its nominal clock
+#                         -> all twelve at 3268 MHz, UNDER it; 3693-3793 with
+#                            no ceiling, so boost was there to be had
+#   victus, ceiling 1400  -> boots 20.9 s against 12.0 s at 4280, samples at
+#                            1395-1398 straight after the load
+#
+# When the core drives the clock, boost is a hardware state above the top one
+# the governor may ask for, and the ceiling does not reach it.  A driver that
+# takes the policy writes the ceiling into the processor's own request, and
+# the ceiling bounds boost as well.  The first version of this reading was
+# measured on pavillion alone and applied to both, so every capped run on
+# victus was labelled at 4280 MHz.
+#
+# ⚠️ Not measured: a core-driven machine with its ceiling BELOW the nominal
+# clock.  There boost may never engage at all, and the line still says it
+# does.  The one sample that exists is pavillion at its nominal clock.
 uros_clock_policy() {
 	case "$_avail" in
 	"performance powersave")	_who=driver ;;
 	"")				_who=unknown ;;
 	*)				_who=core ;;
+	esac
+
+	if [ -n "$_capk" ]; then
+		_cap="$(( _capk / 1000 ))MHz"
+	else
+		_cap="?"
+	fi
+	_top="$_cap"
+	case "$_who" in
+	core)
+		if [ "$_boost" = 1 ] && [ -n "$_hwmaxk" ] && [ -n "$_capk" ] \
+		   && [ "$_hwmaxk" -gt "$_capk" ]; then
+			_top="$(( _hwmaxk / 1000 ))MHz (boost, over the ${_cap} ceiling)"
+		fi ;;
+	driver)
+		# 🔴 The ceiling is a claim here too, and cpu= can refute it:
+		# a driver that turns out to let boost through would put the
+		# processor above it.  Same 10% and same reason as the floor.
+		if [ -n "$_capk" ] && [ "${_mhz:-?}" -gt 0 ] 2>/dev/null &&
+		   [ $(( _mhz * 100 )) -gt $(( _capk / 1000 * 110 )) ]; then
+			_top="unsettled: ceiling ${_cap}, processor at ${_mhz}MHz (#579)"
+		fi ;;
 	esac
 
 	case "$_who:$_gov" in
@@ -303,8 +332,8 @@ case "$0" in
 	_total=0
 	echo "run-conditions --self-test (#564)"
 
-	# name|_drv|_gov|_avail|_mink|_cap|_top|_mhz|the effective= it must read
-	while IFS='|' read -r _name _drv _gov _avail _mink _cap _top _mhz _want
+	# name|_drv|_gov|_avail|_mink|_capk|_hwmaxk|_boost|_mhz|the effective= it must read
+	while IFS='|' read -r _name _drv _gov _avail _mink _capk _hwmaxk _boost _mhz _want
 	do
 		[ -n "$_name" ] || continue
 		case "$_name" in \#*) continue ;; esac
@@ -321,24 +350,31 @@ case "$0" in
 		fi
 	done <<'EOF'
 # an ACTIVE driver: `powersave' is the whole range with a bias
-intel_pstate, powersave|intel_pstate|powersave|performance powersave|400000|3900MHz|3900MHz|1200|3900MHz (the driver scales the range, powersave is its bias)
-amd-pstate-epp, powersave (victus, #564)|amd-pstate-epp|powersave|performance powersave|1108930|4280MHz|4280MHz|3703|4280MHz (the driver scales the range, powersave is its bias)
-intel_pstate, performance|intel_pstate|performance|performance powersave|400000|3900MHz|3900MHz|3900|3900MHz
+intel_pstate, powersave|intel_pstate|powersave|performance powersave|400000|3900000|3900000||1200|3900MHz (the driver scales the range, powersave is its bias)
+amd-pstate-epp, powersave (victus, #564)|amd-pstate-epp|powersave|performance powersave|1108930|4280985|4280985|1|3703|4280MHz (the driver scales the range, powersave is its bias)
+intel_pstate, performance|intel_pstate|performance|performance powersave|400000|3900000|3900000||3900|3900MHz
 # a PASSIVE one: the core runs a governor and `powersave' is static
-pavillion, powersave pinned (#544)|acpi-cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|1397|1400MHz (governor pins it to the floor)
-acpi-cpufreq, ondemand|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3992MHz (boost, over the 3000MHz ceiling)|2100|3992MHz (boost, over the 3000MHz ceiling)
-amd-pstate passive, powersave|amd-pstate|powersave|conservative ondemand userspace powersave performance schedutil |1108930|4280MHz|4280MHz|1108|1108MHz (governor pins it to the floor)
+pavillion, powersave pinned (#544)|acpi-cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|1|1397|1400MHz (governor pins it to the floor)
+acpi-cpufreq, ondemand|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|1|2100|4000MHz (boost, over the 3000MHz ceiling)
+# #579: the same boost picture, a driver that takes the policy, and the ceiling holds
+victus capped at 1400, the run #579 was opened on|amd-pstate-epp|powersave|performance powersave|1108930|1400000|4280985|1|1397|1400MHz (the driver scales the range, powersave is its bias)
+victus capped at its nominal 3300, performance|amd-pstate-epp|performance|performance powersave|1108930|3300000|4280985|1|3268|3300MHz
+# the ceiling is a claim too, and the field beside it can refute it
+the processor stands above a driver's ceiling|amd-pstate-epp|performance|performance powersave|1108930|1400000|4280985|1|3703|unsettled: ceiling 1400MHz, processor at 3703MHz (#579)
+# boost switched off: nothing passes the ceiling on either kind
+acpi-cpufreq, ondemand, boost off|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|0|2990|3000MHz
+amd-pstate passive, powersave|amd-pstate|powersave|conservative ondemand userspace powersave performance schedutil |1108930|4280985|4280985|1|1108|1108MHz (governor pins it to the floor)
 # 🔑 the row that refutes repairing this by name: intel_pstate in passive mode
 # calls itself intel_cpufreq, and there `powersave' really does pin
-intel_cpufreq, powersave|intel_cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |800000|4000MHz|4000MHz|798|800MHz (governor pins it to the floor)
+intel_cpufreq, powersave|intel_cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |800000|4000000|4000000||798|800MHz (governor pins it to the floor)
 # the literal and not a prefix of it
-a list that starts with those two words|acpi-cpufreq|powersave|performance powersave schedutil |1400000|3000MHz|3000MHz|1397|1400MHz (governor pins it to the floor)
+a list that starts with those two words|acpi-cpufreq|powersave|performance powersave schedutil |1400000|3000000|3000000|1|1397|1400MHz (governor pins it to the floor)
 # the floor is a claim, and the field beside it can refute the claim
-the processor stands above its own floor|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil |1108930|4280MHz|4280MHz|3703|unsettled: floor 1108MHz, processor at 3703MHz (#564)
+the processor stands above its own floor|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil |1108930|4280985|4280985|1|3703|unsettled: floor 1108MHz, processor at 3703MHz (#564)
 # and what is not known is said instead of guessed
-powersave with no floor to read|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil ||3000MHz|3000MHz|1400|?
-a governor with no policy of its own|acpi-cpufreq|userspace|conservative ondemand userspace powersave performance schedutil |1400000|3000MHz|3000MHz|1400|3000MHz (driver acpi-cpufreq, governor userspace: unknown policy)
-a machine that will not say|?|?|||?|?|?|? (driver ?, governor ?: unknown policy)
+powersave with no floor to read|acpi-cpufreq|powersave|conservative ondemand powersave performance schedutil ||3000000|3000000||1400|?
+a governor with no policy of its own|acpi-cpufreq|userspace|conservative ondemand userspace powersave performance schedutil |1400000|3000000|3000000||1400|3000MHz (driver acpi-cpufreq, governor userspace: unknown policy)
+a machine that will not say|?|?||||||?|? (driver ?, governor ?: unknown policy)
 EOF
 
 	if [ "$_fails" -gt 0 ]; then
