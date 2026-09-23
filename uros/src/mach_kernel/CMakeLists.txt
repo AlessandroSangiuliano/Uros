@@ -180,9 +180,40 @@ set(UROS_ABLATE_570_REFUSE_IOBAR "" CACHE STRING "Build the #570 ablation: refus
 # NTH read (0) or write (1) of register REG of device BDF that comes through the
 # device_pci_config_read/write RPCs -- so that each step a caller has to check
 # is refused on a real boot.  "BDF,WRITE,REG,NTH", e.g. "0x28,1,0x04,2" for the
-# second write of 00:05.0's command register.  Empty = off.  Never set in a
-# kernel anyone boots for anything else.
-set(UROS_ABLATE_577_REFUSE_CFG "" CACHE STRING "Build the #577 ablation: refuse one config access, BDF,WRITE,REG,NTH (empty = off)")
+# second write of 00:05.0's command register.  A fifth field "zero" answers
+# that READ with 0 instead of refusing it: a device that decodes nothing there,
+# which is how a region that MEASURES zero is made on demand.  Empty = off.
+# Never set in a kernel anyone boots for anything else.
+#
+# 🔴 Parsed HERE, above the branch, and appended in BOTH arms (see the note on
+# UROS_FAULT_PROFILE above): the code it builds is machine-independent, and
+# pci_scan and ahci run on i386 too.  ⚠️ The same BDF is a different device on
+# each board -- 0x20 is virtio-blk on x86-64's and ahci on i386's.
+set(UROS_ABLATE_577_REFUSE_CFG "" CACHE STRING "Build the #577 ablation: refuse one config access, BDF,WRITE,REG,NTH[,zero] (empty = off)")
+set(UROS_ABLATE_577_DEFS "")
+if(NOT UROS_ABLATE_577_REFUSE_CFG STREQUAL "")
+    string(REPLACE "," ";" _a577 "${UROS_ABLATE_577_REFUSE_CFG}")
+    list(LENGTH _a577 _a577n)
+    if(NOT (_a577n EQUAL 4 OR _a577n EQUAL 5))
+        message(FATAL_ERROR "UROS_ABLATE_577_REFUSE_CFG is BDF,WRITE,REG,NTH[,zero] -- got '${UROS_ABLATE_577_REFUSE_CFG}'")
+    endif()
+    list(GET _a577 0 _a577bdf)
+    list(GET _a577 1 _a577w)
+    list(GET _a577 2 _a577reg)
+    list(GET _a577 3 _a577nth)
+    set(UROS_ABLATE_577_DEFS ABLATE_577_BDF=${_a577bdf} ABLATE_577_WRITE=${_a577w}
+                             ABLATE_577_REG=${_a577reg} ABLATE_577_NTH=${_a577nth})
+    set(_a577what "refused")
+    if(_a577n EQUAL 5)
+        list(GET _a577 4 _a577mode)
+        if(NOT _a577mode STREQUAL "zero" OR NOT _a577w EQUAL 0)
+            message(FATAL_ERROR "UROS_ABLATE_577_REFUSE_CFG: the fifth field is 'zero', and only on a read -- got '${UROS_ABLATE_577_REFUSE_CFG}'")
+        endif()
+        list(APPEND UROS_ABLATE_577_DEFS ABLATE_577_ZERO=1)
+        set(_a577what "answered with 0")
+    endif()
+    message(STATUS "#577 ablation: config access ${_a577nth} (write=${_a577w}) of register ${_a577reg} on BDF ${_a577bdf} is ${_a577what} (${UROS_TARGET_ARCH})")
+endif()
 # #563: make the five tests that need a second processor believe they are alone,
 # so the line that DECLINES the question can be executed.  There is no boot flag
 # capping the processor count on this target and an AP cannot be made to fail to
@@ -416,20 +447,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_570_REFUSE_IOBAR=${UROS_ABLATE_570_REFUSE_IOBAR})
       message(STATUS "#570 ablation: a PCI I/O BAR is refused to its holder after ${UROS_ABLATE_570_REFUSE_IOBAR} accesses (x86_64)")
   endif()
-  if(NOT UROS_ABLATE_577_REFUSE_CFG STREQUAL "")
-      string(REPLACE "," ";" _a577 "${UROS_ABLATE_577_REFUSE_CFG}")
-      list(LENGTH _a577 _a577n)
-      if(NOT _a577n EQUAL 4)
-          message(FATAL_ERROR "UROS_ABLATE_577_REFUSE_CFG is BDF,WRITE,REG,NTH -- four numbers, got '${UROS_ABLATE_577_REFUSE_CFG}'")
-      endif()
-      list(GET _a577 0 _a577bdf)
-      list(GET _a577 1 _a577w)
-      list(GET _a577 2 _a577reg)
-      list(GET _a577 3 _a577nth)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_577_BDF=${_a577bdf} ABLATE_577_WRITE=${_a577w}
-                                      ABLATE_577_REG=${_a577reg} ABLATE_577_NTH=${_a577nth})
-      message(STATUS "#577 ablation: config access ${_a577nth} (write=${_a577w}) of register ${_a577reg} on BDF ${_a577bdf} is refused (x86_64)")
-  endif()
+  list(APPEND KERNEL_DEFINES_BARE ${UROS_ABLATE_577_DEFS})
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
       message(STATUS "#563 ablation: every test believes it is alone (x86_64)")
@@ -1143,6 +1161,9 @@ if(UROS_FAULT_PROFILE)
     message(STATUS "#482 copy-on-write fault phase profile: ON (i386)")
 endif()
 
+foreach(_d IN LISTS UROS_ABLATE_577_DEFS)
+    list(APPEND KERNEL_DEFINES -D${_d})
+endforeach()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
     message(STATUS "#385 free-page poison: ON (i386)")

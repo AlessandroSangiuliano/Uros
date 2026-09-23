@@ -743,7 +743,17 @@ check_cfg_access(natural_t bdf)
  * Every counted access is printed with its ordinal, so the log shows which step
  * the number landed on.  The count is not atomic: this is an experiment, run on
  * one processor, and it is never built otherwise.
+ *
+ * With ABLATE_577_ZERO the chosen READ is answered with 0 instead: not a
+ * refusal but a device that decodes nothing there, which is what a region
+ * that measures zero needs in order to exist on demand.
  */
+#ifdef ABLATE_577_ZERO
+#define	ABLATE_577_SAYS	": ANSWERED 0"
+#else
+#define	ABLATE_577_SAYS	": REFUSED"
+#endif
+
 static int
 ablate_577_refuse(natural_t bdf, int write, unsigned int reg)
 {
@@ -758,7 +768,7 @@ ablate_577_refuse(natural_t bdf, int write, unsigned int reg)
 	       "on %02x:%02x.%u, by task %p%s\n", write ? "write" : "read", n,
 	       reg, (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 	       (unsigned)(bdf & 7), (void *)current_task(),
-	       n == ABLATE_577_NTH ? ": REFUSED" : "");
+	       n == ABLATE_577_NTH ? ABLATE_577_SAYS : "");
 	return n == ABLATE_577_NTH;
 }
 #endif
@@ -787,8 +797,14 @@ ds_master_device_pci_config_read(
 		return kr;
 #ifdef ABLATE_577_BDF
 	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
-			      0, reg))
+			      0, reg)) {
+#ifdef ABLATE_577_ZERO
+		*data = 0;
+		return KERN_SUCCESS;
+#else
 		return KERN_NO_ACCESS;
+#endif
+	}
 #endif
 
 	*data = device_md_pci_read(bus, slot, func, reg);
