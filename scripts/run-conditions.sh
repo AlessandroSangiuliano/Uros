@@ -200,8 +200,11 @@ uros_boost_state() {
 #   whether or not cpuinfo_max_freq stands above the ceiling.  Intel's
 #   acpi-cpufreq without CPPC shows cpuinfo_max_freq == scaling_max_freq ==
 #   the turbo entry (base + 1 MHz) and still turbos far past it.
-# - Under a driver that takes the policy, the ceiling is the clock: measured
-#   on victus (amd-pstate-epp, kernel 7.1), and in the kernel's source
+# - Under a driver that takes the policy, the ceiling HOLDS -- boost does
+#   not pass it -- and the line gives the ceiling as the most the run can
+#   get; below it the clock is the energy bias's to choose (victus under
+#   balance_power ran at 2096 with the ceiling at 4280).  Measured on victus
+#   (amd-pstate-epp, kernel 7.1), and in the kernel's source
 #   intel_pstate with HWP writes it into HWP_MAX_PERF.  Two exceptions are
 #   known from that source and occur on no machine here: intel_pstate in
 #   ACTIVE mode without HWP lets turbo pass a ceiling set inside the turbo
@@ -358,61 +361,110 @@ uros_clock_moved() {
 # The reading at a second is the fastest of those cores; the median over the
 # run is the clock the run got, and the maximum is how far boost went.
 #
-# 🔴 WHY NOT THE FASTEST CORE OF THE MACHINE, which was the first version.
-# On x86 every clock reading in sysfs and /proc -- cpuinfo_avg_freq and
-# /proc/cpuinfo's cpu MHz alike -- is arch_freq_get_on_cpu(): APERF/MPERF
-# over the last tick, and for a core whose last tick is older than 20 ms,
-# the POLICY's number (policy->cur, or cpu_khz where there is no cpufreq).
-# On victus an idle core answers 1108930 kHz to the kHz, which is
-# scaling_min_freq and no counter ratio; under acpi-cpufreq `performance' an
-# idle core would answer the ceiling, and a run slowed by heat would have
-# been reported at the ceiling -- the deduction back in through the reading
-# written to replace it (fourth review).  A core running a vCPU ticks, so its
-# reading is the counter's.  One source then serves, /proc/cpuinfo, which
-# every kernel here has.
+# 🔴 AND A READING CAN BE THE POLICY'S NUMBER, NOT THE PROCESSOR'S.  On x86,
+# cpuinfo_avg_freq, scaling_cur_freq and /proc/cpuinfo's cpu MHz are all
+# arch_freq_get_on_cpu(): APERF/MPERF over the last tick -- and for a core
+# whose last tick is older than 20 ms, the policy's number instead
+# (policy->cur, or cpu_khz with no cpufreq).  On victus that number is
+# 1108930 kHz to the kHz, scaling_min_freq; under acpi-cpufreq it is the
+# table entry last asked for, the ceiling under `performance'.  The first
+# version read the fastest core of the machine and so took idle cores'
+# policy numbers (fourth review); reading only the cores qemu's threads are
+# on is not enough either, because a thread just woken onto a core that had
+# been idle is in state R before that core ticks -- 2-6% of such readings on
+# victus came back as 1108.930 (fifth review), and one busy core did too.
+#
+# 🔑 So a reading equal, to the kHz, to a number the policy files state is
+# not taken as a measurement.  A ratio of two counters lands on 1397.371,
+# 1395.457, 2096.155; the policy's numbers are the ones written in
+# cpufreq/*_freq and scaling_available_frequencies.  Where there is no
+# cpufreq at all every reading is the TSC's nominal clock, and the harness
+# says it did not measure.  ⚠️ Not covered: a driver whose fallback is a
+# number no file states -- intel_cpufreq's last target is a ratio times
+# 100 MHz, and intel_pstate's own get() -- on no machine here.  The
+# acpi-cpufreq file cpuinfo_cur_freq is left out: it reads the P-state
+# request, not the counters.
 
-# uros_clock_now <pid> -- one sample, in MHz: the fastest core that one of
-# <pid>'s threads is running on right now.  Prints nothing when none of its
-# threads is running.
-uros_clock_now() {
-	_cpus=$(cat /proc/"$1"/task/*/stat 2>/dev/null |
-		awk '{ sub(/^.*\) /, ""); if ($1 == "R") printf " %s", $37 }')
-	[ -n "$_cpus" ] || return 0
-	awk -v want="$_cpus " '
-		/^processor/ { p = $3 }
-		/^cpu MHz/ {
-			v = int($4 + 0.5)
-			if (index(want, " " p " ") && v > m) m = v
-		}
-		END { if (m) print m }' /proc/cpuinfo 2>/dev/null
+# uros_clock_policy_khz -- every frequency the policy files state, in kHz,
+# one line each: the numbers a reading must not be mistaken for.
+uros_clock_policy_khz() {
+	for _f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/*_freq \
+		  /sys/devices/system/cpu/cpu[0-9]*/cpufreq/base_frequency \
+		  /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_available_frequencies
+	do
+		case "$_f" in
+		*/cpuinfo_avg_freq|*/scaling_cur_freq|*/cpuinfo_cur_freq) continue ;;
+		esac
+		[ -r "$_f" ] && cat "$_f" 2>/dev/null
+	done | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un
 }
 
-# uros_clock_run_line <ceiling MHz, or empty> <seconds asked> [sample ...]
+# uros_clock_cpus -- /proc/<pid>/task/*/stat on stdin; prints " c1 c2 ..." ,
+# the cores that threads in state R are on.  The comm field may hold spaces
+# and parentheses, so everything up to the LAST ") " goes; then the state is
+# $1 and field 39, the processor, is $37.
+uros_clock_cpus() {
+	awk '{ sub(/^.*\) /, ""); if ($1 == "R") printf " %s", $37 }'
+}
+
+# uros_clock_pick <cores> <policy kHz, space-separated> -- /proc/cpuinfo on
+# stdin; prints, in MHz, the fastest of <cores> whose reading is not one of
+# the policy's numbers, or nothing.
+uros_clock_pick() {
+	awk -v want="$1 " -v pol=" $2 " '
+		/^processor/ { p = $3 }
+		/^cpu MHz/ {
+			khz = int($4 * 1000 + 0.5)
+			if (!index(want, " " p " ")) next
+			if (index(pol, " " khz " ")) next
+			if (khz > m) m = khz
+		}
+		END { if (m) print int(m / 1000 + 0.5) }'
+}
+
+# uros_clock_now <pid> <policy kHz> -- one sample of the live machine: the
+# two pieces above on /proc.  Prints nothing when no reading qualifies.
+uros_clock_now() {
+	_cpus=$(cat /proc/"$1"/task/*/stat 2>/dev/null | uros_clock_cpus)
+	[ -n "$_cpus" ] || return 0
+	uros_clock_pick "$_cpus" "$2" < /proc/cpuinfo 2>/dev/null
+}
+
+# uros_clock_run_line <ceiling MHz, or empty> [second ...]
 #
-# The summary, from the samples alone, so that --self-test can drive it.
+# The summary, from what each second answered -- a number of MHz, or "-" for
+# a second with no reading -- so that --self-test can drive it and the log
+# keeps every second, not only the ones that answered.
 # 🔑 The ceiling is compared with the MEDIAN and not the maximum: one boosted
 # second is boost, a run that sat above the ceiling is a ceiling that did not
 # hold.  10% for the reason every other threshold in this file uses it.
-# With no sample it says which of the two reasons: qemu gone before the first
-# second, or seconds in which none of its threads was on a core.
 uros_clock_run_line() {
 	_ceil=$1
-	_asked=$2
-	shift 2
+	shift
+	_asked=$#
+	_nums=""
+	for _t in "$@"; do
+		case "$_t" in
+		''|*[!0-9]*) ;;
+		*) _nums="$_nums $_t" ;;
+		esac
+	done
+	_secs="$_asked seconds"
+	[ "$_asked" -eq 1 ] && _secs="1 second"
+	if [ "$_asked" -eq 0 ]; then
+		echo "not measured: qemu had exited before the first second"
+		return
+	fi
+	# shellcheck disable=SC2086
+	set -- $_nums
 	if [ $# -eq 0 ]; then
-		if [ "${_asked:-0}" -eq 0 ]; then
-			echo "not measured: qemu had exited before the first second"
-		else
-			echo "not measured: in $_asked seconds none of qemu's threads was found running"
-		fi
+		echo "not measured: no reading in $_secs (no qemu thread running, or only the policy's number)"
 		return
 	fi
 	_sorted=$(printf '%s\n' "$@" | sort -n)
 	_med=$(printf '%s\n' "$_sorted" | sed -n "$(( ($# + 1) / 2 ))p")
 	_max=$(printf '%s\n' "$_sorted" | tail -n 1)
-	_n="$# samples"
-	[ $# -eq 1 ] && _n="1 sample"
-	_line="median ${_med}MHz, max ${_max}MHz over $_n"
+	_line="median ${_med}MHz, max ${_max}MHz, read in $# of $_secs"
 	if [ -n "$_ceil" ] && [ $(( _med * 100 )) -gt $(( _ceil * 110 )) ]; then
 		_line="$_line -- ABOVE the ${_ceil}MHz ceiling"
 	fi
@@ -518,14 +570,14 @@ a driver that lists no governors|acpi-cpufreq|performance||1400000|3000000|1|210
 a machine that will not say|?|?|||||?|? (driver ?, governor ?: unknown policy)
 EOF
 
-	# The measured clock (#579): name|ceiling MHz|seconds asked|samples|the line it must read
-	while IFS='|' read -r _name _ceil _asked _samples _want
+	# The measured clock (#579): name|ceiling MHz|what each second answered|the line it must read
+	while IFS='|' read -r _name _ceil _secs _want
 	do
 		[ -n "$_name" ] || continue
 		case "$_name" in \#*) continue ;; esac
 		_total=$(( _total + 1 ))
 		# shellcheck disable=SC2086
-		_got=$(uros_clock_run_line "$_ceil" "$_asked" $_samples)
+		_got=$(uros_clock_run_line "$_ceil" $_secs)
 		if [ "$_got" = "$_want" ]; then
 			echo "  ok    $_name"
 		else
@@ -535,20 +587,60 @@ EOF
 			_fails=$(( _fails + 1 ))
 		fi
 	done <<'EOF'
-# sampled: the "clock samples:" line of a real run, ~/uros-tests/<log>
-victus, powersave/balance_power, battery (579-misurato-thread-qemu-163424)|4280|10|2096 2096 2096 2096 2096 2096 2096 2096 1884 2171|median 2096MHz, max 2171MHz over 10 samples
-victus, performance, battery (579-misurato-thread-performance-164122)|4280|7|3893 3893 3918 3918 3202 3943 3952|median 3918MHz, max 3952MHz over 7 samples
-victus, ceiling 1400, battery (579-misurato-thread-soffitto-1400-164551)|1400|16|1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1397 1396|median 1397MHz, max 1397MHz over 16 samples
-# probes
-pavillion's two readings (idle 3992, six busy 3918) over its 3000 ceiling|3000|2|3918 3992|median 3918MHz, max 3992MHz over 2 samples -- ABOVE the 3000MHz ceiling
-one second of boost is boost, not a ceiling that failed|1400|3|1397 1397 3700|median 1397MHz, max 3700MHz over 3 samples
-exactly 10% over, by the median|1400|1|1540|median 1540MHz, max 1540MHz over 1 sample
-just past 10%, by the median|1400|1|1541|median 1541MHz, max 1541MHz over 1 sample -- ABOVE the 1400MHz ceiling
-an even count takes the lower middle|4280|4|1000 2000 3000 4000|median 2000MHz, max 4000MHz over 4 samples
-sorted by value, not by text|4280|3|900 3268 1200|median 1200MHz, max 3268MHz over 3 samples
-no ceiling, samples still summarised||2|3268 3269|median 3268MHz, max 3269MHz over 2 samples
-qemu gone before the first second|1400|0||not measured: qemu had exited before the first second
-asked, and no qemu thread was ever running|1400|7||not measured: in 7 seconds none of qemu's threads was found running
+# probes -- the sampled rows are a real run's "clock by sec:" line
+pavillion's two readings (idle 3992, six busy 3918) over its 3000 ceiling|3000|3918 3992|median 3918MHz, max 3992MHz, read in 2 of 2 seconds -- ABOVE the 3000MHz ceiling
+one second of boost is boost, not a ceiling that failed|1400|1397 1397 3700|median 1397MHz, max 3700MHz, read in 3 of 3 seconds
+exactly 10% over, by the median|1400|1540|median 1540MHz, max 1540MHz, read in 1 of 1 second
+just past 10%, by the median|1400|1541|median 1541MHz, max 1541MHz, read in 1 of 1 second -- ABOVE the 1400MHz ceiling
+an even count takes the lower middle|4280|1000 2000 3000 4000|median 2000MHz, max 4000MHz, read in 4 of 4 seconds
+sorted by value, not by text|4280|900 3268 1200|median 1200MHz, max 3268MHz, read in 3 of 3 seconds
+seconds with no reading count as asked, not as samples|4280|- 2096 - 2171 2096|median 2096MHz, max 2171MHz, read in 3 of 5 seconds
+no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz, read in 2 of 2 seconds
+qemu gone before the first second|1400||not measured: qemu had exited before the first second
+one second asked, no reading|1400|-|not measured: no reading in 1 second (no qemu thread running, or only the policy's number)
+seven seconds asked, no reading|1400|- - - - - - -|not measured: no reading in 7 seconds (no qemu thread running, or only the policy's number)
+EOF
+
+	# The sampler (#579): name|threads comm@state@core;...|cores core:MHz,...|policy kHz|MHz it must pick
+	# Each thread becomes a real /proc/<pid>/task/<tid>/stat line: fields 4-37
+	# hold 104-137 and field 38 (exit_signal) 17, so a reader off by one field
+	# lands on a core that does not exist; each core a real /proc/cpuinfo pair.
+	while IFS='|' read -r _name _threads _cores _pol _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		_stat=$(printf '%s\n' "$_threads" | tr ';' '\n' | awk -F@ 'NF == 3 {
+			printf "%d (%s) %s", NR, $1, $2
+			for (f = 4; f <= 37; f++) printf " %d", 100 + f
+			printf " 17 %s", $3
+			for (f = 40; f <= 52; f++) printf " 0"
+			printf "\n" }')
+		_info=$(printf '%s\n' "$_cores" | tr ',' '\n' | awk -F: 'NF == 2 {
+			printf "processor\t: %s\nvendor_id\t: AuthenticAMD\ncpu MHz\t\t: %s\n\n", $1, $2 }')
+		_got=$(printf '%s\n' "$_info" |
+		       uros_clock_pick "$(printf '%s\n' "$_stat" | uros_clock_cpus)" "$_pol")
+		if [ "$_got" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_got>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+# probes (cores 7 and 11 read as the prototype on victus read them; the decoys are chosen)
+two running threads, their cores only|sh@R@7;sh@R@11|0:1676.000,7:2096.155,11:2096.143,5:3867.412|1108930 1400000 4280985|2096
+a sleeping thread's core is not the run's|qemu-system-x86@S@3;CPU 0/KVM@R@5|3:3993.000,5:1397.412|1108930 1400000 4280985|1397
+a comm with spaces and parentheses|qemu (a) b) c@R@5|5:1397.412,0:3000.001|1108930|1397
+core 1 is not core 11|CPU 1/KVM@R@11|1:3900.123,11:1500.456|1108930|1500
+the policy's number is not a reading|CPU 0/KVM@R@3;CPU 1/KVM@R@4|3:1108.930,4:1397.300|1108930 1400000 4280985|1397
+only the policy's number: no reading|CPU 0/KVM@R@3|3:1108.930|1108930 1400000 4280985|
+one kHz off the policy's number is a reading|CPU 0/KVM@R@3|3:1108.931|1108930 1400000 4280985|1109
+MHz are rounded, not cut|CPU 0/KVM@R@3|3:1397.612|1108930 1400000 4280985|1398
+a policy number floating point would cut a kHz short|CPU 0/KVM@R@3|3:2048.006|2048006|
+a table entry is a policy number too (acpi-cpufreq)|CPU 0/KVM@R@2|2:3000.000|1400000 2100000 3000000 4000000|
+no thread running: no reading|qemu-system-x86@S@2;CPU 0/KVM@S@6|2:3900.000,6:3901.000|1108930|
 EOF
 
 	# The boost switch (#579): name|cpufreq/boost|intel_pstate/no_turbo|reads

@@ -1008,15 +1008,17 @@ expected_reports() {
 
 # #579: the clock the run gets, asked once a second of the cores qemu's
 # threads are running on -- see uros_clock_now for why those and not effective=.
-CLOCK_SAMPLES=""
-CLOCK_ASKED=0
-CLOCK_LAST=0
+# Every second leaves a word, its MHz or "-", so the log says which seconds
+# answered.  The first is asked a full second after the fork: a qemu that
+# refuses its command line is gone by then and gets no clock "in run".
+CLOCK_POLICY=$(uros_clock_policy_khz | tr '\n' ' ')
+CLOCK_SECONDS=""
+CLOCK_LAST=$(( $(date +%s) + 1 ))
 while kill -0 "$QPID" 2>/dev/null; do
-	if [ "$(date +%s)" -ne "$CLOCK_LAST" ]; then
+	if [ -n "$CLOCK_POLICY" ] && [ "$(date +%s)" -gt "$CLOCK_LAST" ]; then
 		CLOCK_LAST=$(date +%s)
-		CLOCK_ASKED=$(( CLOCK_ASKED + 1 ))
-		CLOCK_NOW=$(uros_clock_now "$QPID")
-		[ -n "$CLOCK_NOW" ] && CLOCK_SAMPLES="$CLOCK_SAMPLES $CLOCK_NOW"
+		CLOCK_NOW=$(uros_clock_now "$QPID" "$CLOCK_POLICY")
+		CLOCK_SECONDS="$CLOCK_SECONDS ${CLOCK_NOW:--}"
 	fi
 	# ⚠️ Same patterns as must_report above, and the counts are out of these
 	# for the same reason -- see the note there.  🔥 That they are written
@@ -1057,11 +1059,15 @@ UROS_HOST_AT_END=$(uros_host_state)
 CLOCK_CEIL=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
 	     2>/dev/null || echo "")
 [ -n "$CLOCK_CEIL" ] && CLOCK_CEIL=$(( CLOCK_CEIL / 1000 ))
-# shellcheck disable=SC2086
-CLOCK_LINE=$(uros_clock_run_line "$CLOCK_CEIL" "$CLOCK_ASKED" $CLOCK_SAMPLES)
+if [ -z "$CLOCK_POLICY" ]; then
+	CLOCK_LINE="not measured: no cpufreq here, and without it every reading is the TSC's nominal clock"
+else
+	# shellcheck disable=SC2086
+	CLOCK_LINE=$(uros_clock_run_line "$CLOCK_CEIL" $CLOCK_SECONDS)
+fi
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
-	"clock in run: $CLOCK_LINE (cores running qemu's threads, /proc/cpuinfo)" \
-	"clock samples:${CLOCK_SAMPLES:- none} (MHz, one a second)" \
+	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
+	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
 	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
 	"cpu:          ${CPU_ARGS:-from the command line}" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
