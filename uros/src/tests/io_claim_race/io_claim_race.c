@@ -286,11 +286,14 @@ io_range_is_a_window(unsigned int n, unsigned int port, unsigned int count)
 }
 
 /*
- * Ask for one range.  A grant is given back at once, after finding out what
- * it was worth: a read of the window's first register under it.
+ * Ask for one range.  A grant is given back at once -- for a range over the
+ * window, after finding out what it was worth: a read of the window's first
+ * register under it.  The control covers no part of the window, so there is
+ * nothing under it to read.
  */
 static void
-ask_claim(mach_port_t device, struct overlap_ask *a, unsigned int win)
+ask_claim(mach_port_t device, struct overlap_ask *a, unsigned int win,
+	  int over_window)
 {
 	natural_t	released = 0, klog_from = 0, v = 0;
 
@@ -299,7 +302,8 @@ ask_claim(mach_port_t device, struct overlap_ask *a, unsigned int win)
 					&released, &klog_from);
 	if (a->claim != KERN_SUCCESS)
 		return;
-	a->read = device_io_port_read(device, win, 4, &v);
+	if (over_window)
+		a->read = device_io_port_read(device, win, 4, &v);
 	(void) device_io_port_unclaim(device, a->port);
 }
 
@@ -401,7 +405,7 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 	ask[1].port = win - 4;	ask[1].count = 8;
 	ask[2].port = win - 8;	ask[2].count = 8;
 	for (i = 0; i < 3; i++)
-		ask_claim(device, &ask[i], win);
+		ask_claim(device, &ask[i], win, i < 2);
 
 	if (!still_another_tasks(device, bdf)) {
 		printf("io_claim_race: [4] NOT ASKED — %u:%u.%u stopped being "
