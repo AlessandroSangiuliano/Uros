@@ -187,8 +187,8 @@ uros_host_state() {
 # - Wherever it runs, the ceiling is a claim that cpu= can refute; see below
 #   for how coarse that is.
 #
-# 🔑 The measured clock during the run is what would settle all of it, and
-# this line does not take one.
+# 🔑 What settles it is the clock measured while the run is on the
+# processor, and that is not this line's job: see uros_clock_run_line.
 uros_clock_policy() {
 	case "$_avail" in
 	"performance powersave")	_who=driver ;;
@@ -316,6 +316,73 @@ uros_clock_moved() {
 	[ $(( _d * 100 / _a )) -ge 10 ]
 }
 
+# ── The clock the run ran at, measured while it ran (#579) ────────────────
+#
+# 🔴 effective= above is DEDUCED, and three issues have now been spent on the
+# deduction: #544 (a static governor read as a ramping one), #564 (a driver
+# read as the wrong kind) and #579 (boost read as passing a ceiling that
+# held).  Each was a plausible rule about cpufreq that was false on some
+# machine, and the last one ends by saying what no file here states.  The
+# answer to "what clock did this run get" is not in sysfs.  It is in the
+# processor, while the run is on it.
+#
+# So the harness asks the processor once a second while qemu is alive, and
+# the conditions block says what it answered.  The reading is the FASTEST
+# core at that second: qemu's vCPU threads are the busy ones, and the idle
+# cores around them report their own lower clocks.  The median over the
+# run is the clock the run got; the maximum is how far boost went.
+#
+# ⚠️ WHICH COUNTER.  cpuinfo_avg_freq is the kernel's reading of APERF/MPERF
+# over the last few milliseconds, and it is the one that saw 3268 MHz on
+# all twelve cores under a 3300 ceiling.  Kernels without it get
+# /proc/cpuinfo's cpu MHz, which on x86 comes from the same counters but
+# falls back to the policy's clock for an idle core.  The line names the
+# counter it used.
+uros_clock_source() {
+	for _f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_avg_freq; do
+		[ -r "$_f" ] && { echo cpuinfo_avg_freq; return; }
+	done
+	echo "/proc/cpuinfo"
+}
+
+# One sample: the fastest core now, in MHz, from the counter named above.
+# Prints nothing when neither counter can be read.
+uros_clock_now() {
+	if [ "$1" = cpuinfo_avg_freq ]; then
+		cat /sys/devices/system/cpu/cpu[0-9]*/cpufreq/cpuinfo_avg_freq \
+		    2>/dev/null |
+		awk '/^[0-9]+$/ { if ($1 > m) m = $1 } END { if (m) print int(m / 1000) }'
+	else
+		awk '/^cpu MHz/ { v = int($4 + 0.5); if (v > m) m = v }
+		     END { if (m) print m }' /proc/cpuinfo 2>/dev/null
+	fi
+}
+
+# uros_clock_run_line <ceiling MHz, or empty> [sample ...]
+#
+# The summary, from the samples alone, so that --self-test can drive it.
+# 🔑 The ceiling is compared with the MEDIAN and not the maximum: one boosted
+# second is boost, a run that sat above the ceiling is a ceiling that did not
+# hold.  10% for the reason every other threshold in this file uses it.
+uros_clock_run_line() {
+	_ceil=$1
+	shift
+	if [ $# -eq 0 ]; then
+		echo "not measured: no sample could be read"
+		return
+	fi
+	_sorted=$(printf '%s\n' "$@" | sort -n)
+	_med=$(printf '%s\n' "$_sorted" | sed -n "$(( ($# + 1) / 2 ))p")
+	_max=$(printf '%s\n' "$_sorted" | tail -n 1)
+	_n="$# samples"
+	[ $# -eq 1 ] && _n="1 sample"
+	_line="median ${_med}MHz, max ${_max}MHz over $_n"
+	if [ -n "$_ceil" ] && [ $(( _med * 100 )) -gt $(( _ceil * 110 )) ]; then
+		_line="$_line -- ABOVE the ${_ceil}MHz ceiling"
+	fi
+	echo "$_line"
+}
+
 # ── --self-test: every reading, driven over machines this one is not ──
 #
 # 🔑 Wired into the build (uros/CMakeLists.txt) instead of left to be typed,
@@ -410,6 +477,37 @@ a governor with no policy of its own|acpi-cpufreq|userspace|conservative ondeman
 the same, with boost on|acpi-cpufreq|userspace|conservative ondemand userspace powersave performance schedutil |1400000|3000000|1|2100|3000MHz (boost on: a clock above it is not excluded, #579) (driver acpi-cpufreq, governor userspace: unknown policy)
 a driver that lists no governors|acpi-cpufreq|performance||1400000|3000000|1|2100|3000MHz (driver acpi-cpufreq, governor performance: unknown policy)
 a machine that will not say|?|?|||||?|? (driver ?, governor ?: unknown policy)
+EOF
+
+	# The measured clock (#579): name|ceiling MHz|samples|the line it must read
+	while IFS='|' read -r _name _ceil _samples _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		# shellcheck disable=SC2086
+		_got=$(uros_clock_run_line "$_ceil" $_samples)
+		if [ "$_got" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_got>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+# sampled: victus under a 1400 ceiling, pavillion's 3918/3992 over its 3000
+victus under its 1400 ceiling|1400|1397 1398 1396 1395 1397|median 1397MHz, max 1398MHz over 5 samples
+pavillion over its 3000 ceiling|3000|3918 3992 3950|median 3950MHz, max 3992MHz over 3 samples -- ABOVE the 3000MHz ceiling
+# probes: one boosted second is boost, not a ceiling that failed
+one second of boost|1400|1397 1397 3700|median 1397MHz, max 3700MHz over 3 samples
+exactly 10% over, by the median|1400|1540|median 1540MHz, max 1540MHz over 1 sample
+just past 10%, by the median|1400|1541|median 1541MHz, max 1541MHz over 1 sample -- ABOVE the 1400MHz ceiling
+an even count takes the lower middle|4280|1000 2000 3000 4000|median 2000MHz, max 4000MHz over 4 samples
+unsorted in, sorted by value not by text|4280|900 3268 1200|median 1200MHz, max 3268MHz over 3 samples
+no ceiling and nothing read|||not measured: no sample could be read
+no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz over 2 samples
+nothing could be read|1400||not measured: no sample could be read
 EOF
 
 	if [ "$_fails" -gt 0 ]; then
