@@ -1059,11 +1059,17 @@ UROS_HOST_AT_END=$(uros_host_state)
 CLOCK_CEIL=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq \
 	     2>/dev/null || echo "")
 [ -n "$CLOCK_CEIL" ] && CLOCK_CEIL=$(( CLOCK_CEIL / 1000 ))
+CLOCK_CPUFREQ=/sys/devices/system/cpu/cpu0/cpufreq
 if [ -z "$CLOCK_POLICY" ]; then
-	CLOCK_LINE="not measured: no cpufreq here, and without it every reading is the TSC's nominal clock"
+	CLOCK_LINE="not measured: no cpufreq here, so a stale core's fallback is the TSC's nominal clock, which no file states"
 else
 	# shellcheck disable=SC2086
 	CLOCK_LINE=$(uros_clock_run_line "$CLOCK_CEIL" $CLOCK_SECONDS)
+	case "$CLOCK_LINE" in
+	median*) CLOCK_LINE="$CLOCK_LINE$(uros_clock_fallback_note \
+		"$(cat "$CLOCK_CPUFREQ/scaling_available_governors" 2>/dev/null)" \
+		"$([ -r "$CLOCK_CPUFREQ/scaling_available_frequencies" ] && echo 1 || echo 0)")" ;;
+	esac
 fi
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
@@ -1078,7 +1084,9 @@ printf '%s\n' "$UROS_COND" | tee -a "$LOG"
 
 # 🔥 A clock that moved during the run is a run nobody may compare with
 # another, and #560 lost a campaign to exactly that before anyone looked.
-if uros_clock_moved "$UROS_HOST_AT_END"; then
+# Judged from the run's own seconds (#579) -- see uros_clock_run_moved.
+# shellcheck disable=SC2086
+if uros_clock_run_moved $CLOCK_SECONDS; then
 	echo "  ⚠️ THE CLOCK MOVED DURING THIS RUN — do not compare its timings" \
 	     | tee -a "$LOG"
 fi

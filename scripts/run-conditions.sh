@@ -79,8 +79,10 @@ uros_host_state() {
 	# ⚠️ A SAMPLE AND NOT A CONCLUSION.  Under a driver that takes the policy
 	# itself the governor's name has stopped being the whole of it: two runs
 	# at `powersave' with different preferences are two conditions, and
-	# nothing else on the line would tell them apart.  What it does to this
-	# machine's clock is unmeasured, and the line does not say that it does.
+	# nothing else on the line would tell them apart.  What it does to the
+	# clock is measured by the run, not here: on victus balance_power ran
+	# at 2096 on battery and 3981 on AC (#579), so the power source is part
+	# of the condition too, and the line carries it.
 	_epp=$(cat /sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference \
 	       2>/dev/null || echo "")
 	# Whether boost may carry the core past the ceiling is decided in
@@ -202,8 +204,9 @@ uros_boost_state() {
 #   the turbo entry (base + 1 MHz) and still turbos far past it.
 # - Under a driver that takes the policy, the ceiling HOLDS -- boost does
 #   not pass it -- and the line gives the ceiling as the most the run can
-#   get; below it the clock is the energy bias's to choose (victus under
-#   balance_power ran at 2096 with the ceiling at 4280).  Measured on victus
+#   get; below it the clock is the driver's, from the bias AND the power
+#   source (victus under balance_power, ceiling 4280: 2096 on battery, 3981
+#   on AC, 3693-3793 under a 12-thread load).  Measured on victus
 #   (amd-pstate-epp, kernel 7.1), and in the kernel's source
 #   intel_pstate with HWP writes it into HWP_MAX_PERF.  Two exceptions are
 #   known from that source and occur on no machine here: intel_pstate in
@@ -268,7 +271,7 @@ uros_clock_policy() {
 			# above it.  The list of driver names has gone; this
 			# is what catches whatever takes its place.
 			#
-			# 10% is uros_clock_moved's threshold and for its
+			# 10% is uros_clock_run_moved's threshold and for its
 			# reason: two real states are far apart (1108 against
 			# 3703 here) and two samples of one state are not.
 			if [ "${_mhz:-?}" -gt 0 ] 2>/dev/null &&
@@ -327,21 +330,38 @@ uros_conditions_block() {
 	echo "=== end run conditions ==="
 }
 
-# Did the clock move between the two samples, and by enough to matter?
+# uros_clock_run_moved [second ...] -- did the run's clock move, by enough to
+# matter?  True when the median of the first half of its readings and that
+# of the second half differ by 10% or more; with fewer than four readings it
+# claims nothing.
 #
 # 🔑 A verdict, not a number, because the question a reader has is not "what
-# was the clock" but "may I compare this run with another one".  10% is the
-# threshold: this machine's two states are 1.4 GHz and 3.99, so anything real
-# is far above it, and jitter between two samples of the same state is far
-# below.
-uros_clock_moved() {
-	_a=$(echo "${UROS_HOST_AT_START:-}" | sed -n 's/.*cpu=\([0-9]*\)MHz.*/\1/p')
-	_b=$(echo "$1" | sed -n 's/.*cpu=\([0-9]*\)MHz.*/\1/p')
-	[ -n "$_a" ] && [ -n "$_b" ] || return 1
-	[ "$_a" -gt 0 ] 2>/dev/null || return 1
+# was the clock" but "may I compare this run with another one".  10% because
+# two real states are far apart (1.4 and 3.9 GHz here) and one boosted second
+# is not a state: medians of halves let a single second pass.
+#
+# ⚠️ It used to compare cpu= at host start with cpu= at host end: cpu0, once
+# before make-disk and once after qemu was killed -- neither inside the run,
+# and at rest each is as likely the policy's number as a clock.  Beside the
+# per-second readings it warned "do not compare" for runs whose readings sat
+# within 1.5% of each other (#579, sixth review).
+uros_clock_run_moved() {
+	_nums=""
+	for _t in "$@"; do
+		case "$_t" in
+		''|*[!0-9]*) ;;
+		*) _nums="$_nums $_t" ;;
+		esac
+	done
+	# shellcheck disable=SC2086
+	set -- $_nums
+	[ $# -ge 4 ] || return 1
+	_h=$(( $# / 2 ))
+	_a=$(printf '%s\n' "$@" | head -n "$_h" | sort -n | sed -n "$(( (_h + 1) / 2 ))p")
+	_b=$(printf '%s\n' "$@" | tail -n "$_h" | sort -n | sed -n "$(( (_h + 1) / 2 ))p")
 	_d=$(( _b - _a ))
 	[ "$_d" -lt 0 ] && _d=$(( -_d ))
-	[ $(( _d * 100 / _a )) -ge 10 ]
+	[ $(( _d * 100 )) -ge $(( _a * 10 )) ]
 }
 
 # ── The clock the run ran at, measured while it ran (#579) ────────────────
@@ -372,31 +392,55 @@ uros_clock_moved() {
 # policy numbers (fourth review); reading only the cores qemu's threads are
 # on is not enough either, because a thread just woken onto a core that had
 # been idle is in state R before that core ticks -- 2-6% of such readings on
-# victus came back as 1108.930 (fifth review), and one busy core did too.
+# victus came back as 1108.930 (fifth review).
 #
 # 🔑 So a reading equal, to the kHz, to a number the policy files state is
 # not taken as a measurement.  A ratio of two counters lands on 1397.371,
 # 1395.457, 2096.155; the policy's numbers are the ones written in
-# cpufreq/*_freq and scaling_available_frequencies.  Where there is no
-# cpufreq at all every reading is the TSC's nominal clock, and the harness
-# says it did not measure.  ⚠️ Not covered: a driver whose fallback is a
-# number no file states -- intel_cpufreq's last target is a ratio times
-# 100 MHz, and intel_pstate's own get() -- on no machine here.  The
-# acpi-cpufreq file cpuinfo_cur_freq is left out: it reads the P-state
-# request, not the counters.
+# cpufreq/*_freq and scaling_available_frequencies.  The acpi-cpufreq file
+# cpuinfo_cur_freq is left out: it reads the P-state request, not the
+# counters.
+#
+# ⚠️ WHERE THE FALLBACK IS A NUMBER NO FILE STATES, it cannot be recognised,
+# and the line says so rather than counting it silently:
+#   - no cpufreq at all: the fallback is cpu_khz, the TSC's nominal clock.
+#     Busy cores still read their counters, but a stale one cannot be told
+#     from them, so the harness does not measure.
+#   - a driver the core drives that has no frequency table (amd-pstate in
+#     passive or guided mode -- victus can be switched into it -- and
+#     intel_cpufreq): policy->cur is the governor's last target, any kHz.
+#     uros_clock_fallback_note reads that off the machine and the line
+#     carries it.
+#   - intel_pstate in active mode answers with its own get(); no file tells
+#     it from amd-pstate-epp, whose fallback is scaling_min_freq (measured).
+#     On no machine here.
 
-# uros_clock_policy_khz -- every frequency the policy files state, in kHz,
-# one line each: the numbers a reading must not be mistaken for.
+# uros_clock_policy_khz [root] -- every frequency the policy files state, in
+# kHz, sorted, one line each: the numbers a reading must not be mistaken for.
+# root is /sys/devices/system/cpu; --self-test hands it a tree of its own.
 uros_clock_policy_khz() {
-	for _f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/*_freq \
-		  /sys/devices/system/cpu/cpu[0-9]*/cpufreq/base_frequency \
-		  /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_available_frequencies
+	_r=${1:-/sys/devices/system/cpu}
+	for _f in "$_r"/cpu[0-9]*/cpufreq/*_freq \
+		  "$_r"/cpu[0-9]*/cpufreq/base_frequency \
+		  "$_r"/cpu[0-9]*/cpufreq/scaling_available_frequencies
 	do
 		case "$_f" in
 		*/cpuinfo_avg_freq|*/scaling_cur_freq|*/cpuinfo_cur_freq) continue ;;
 		esac
 		[ -r "$_f" ] && cat "$_f" 2>/dev/null
 	done | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -un
+}
+
+# uros_clock_fallback_note <scaling_available_governors> <table: 1 or 0>
+# -- the words the clock line carries when a stale core's fallback cannot be
+# recognised: a driver the core drives (it lists governors) with no frequency
+# table falls back to the governor's last target, which no file states.
+uros_clock_fallback_note() {
+	case "$1" in
+	"performance powersave"|"") return 0 ;;
+	esac
+	[ "$2" = 1 ] && return 0
+	echo "; a stale core's fallback here is the governor's last target, which no file states, and may be counted"
 }
 
 # uros_clock_cpus -- /proc/<pid>/task/*/stat on stdin; prints " c1 c2 ..." ,
@@ -452,7 +496,7 @@ uros_clock_run_line() {
 	_secs="$_asked seconds"
 	[ "$_asked" -eq 1 ] && _secs="1 second"
 	if [ "$_asked" -eq 0 ]; then
-		echo "not measured: qemu had exited before the first second"
+		echo "not measured: the run ended before the first sample, 1-2 s after qemu started"
 		return
 	fi
 	# shellcheck disable=SC2086
@@ -479,8 +523,11 @@ uros_clock_run_line() {
 # costs milliseconds -- it sets the same variables uros_host_state samples
 # and reads back the one field they decide.
 #
-# 🔴 THE SPECIMENS ARE SAMPLED, not invented to please the classifier.  Row 2
-# is this laptop, byte for byte out of sysfs on the day #564 was opened; row 4
+# 🔴 A ROW SAYS WHETHER IT WAS SAMPLED, and a sampled one is not invented to
+# please the classifier: it names where it came from.  The rest are headed
+# "probes" -- chosen inputs that pin one branch each, so that breaking the
+# branch turns a row BAD.  Row 2 of the first table is this laptop, byte for
+# byte out of sysfs on the day #564 was opened; row 4
 # is pavillion, whose eleven runs were taken as the high-clock arm under a
 # governor that was pinning them (#544).  A table written to match the code
 # tests the code against itself.
@@ -600,15 +647,17 @@ an even count takes the lower middle|4280|1000 2000 3000 4000|median 2000MHz, ma
 sorted by value, not by text|4280|900 3268 1200|median 1200MHz, max 3268MHz, read in 3 of 3 seconds
 seconds with no reading count as asked, not as samples|4280|- 2096 - 2171 2096|median 2096MHz, max 2171MHz, read in 3 of 5 seconds
 no ceiling, samples still summarised||3268 3269|median 3268MHz, max 3269MHz, read in 2 of 2 seconds
-qemu gone before the first second|1400||not measured: qemu had exited before the first second
+the run over before the first sample|1400||not measured: the run ended before the first sample, 1-2 s after qemu started
 one second asked, no reading|1400|-|not measured: no reading in 1 second (no qemu thread running, or only the policy's number)
 seven seconds asked, no reading|1400|- - - - - - -|not measured: no reading in 7 seconds (no qemu thread running, or only the policy's number)
 EOF
 
 	# The sampler (#579): name|threads comm@state@core;...|cores core:MHz,...|policy kHz|MHz it must pick
 	# Each thread becomes a real /proc/<pid>/task/<tid>/stat line: fields 4-37
-	# hold 104-137 and field 38 (exit_signal) 17, so a reader off by one field
-	# lands on a core that does not exist; each core a real /proc/cpuinfo pair.
+	# hold 104-137, field 38 (exit_signal) 17 and field 40 (rt_priority) 0.  A
+	# reader one field early lands on core 17, which no row has; one field
+	# late lands on core 0, which rows hold as a decoy with another clock.
+	# Each core becomes a real /proc/cpuinfo pair.
 	while IFS='|' read -r _name _threads _cores _pol _want
 	do
 		[ -n "$_name" ] || continue
@@ -638,9 +687,14 @@ two running threads, their cores only|sh@R@7;sh@R@11|0:1676.000,7:2096.155,11:20
 a sleeping thread's core is not the run's|qemu-system-x86@S@3;CPU 0/KVM@R@5|3:3993.000,5:1397.412|1108930 1400000 4280985|1397
 a comm with spaces and parentheses|qemu (a) b) c@R@5|5:1397.412,0:3000.001|1108930|1397
 core 1 is not core 11|CPU 1/KVM@R@11|1:3900.123,11:1500.456|1108930|1500
+the fastest of two, listed first|CPU 0/KVM@R@5;CPU 1/KVM@R@7|5:3867.000,7:1397.412|1108930|3867
+the fastest of two, listed last|CPU 0/KVM@R@7;CPU 1/KVM@R@5|7:1397.412,5:3867.000|1108930|3867
+a thread blocked in D is not running|worker@D@2;CPU 0/KVM@R@5|2:3900.000,5:1397.412,0:2500.000|1108930|1397
+a stopped or dead thread is not running|worker@T@2;other@Z@3;CPU 0/KVM@R@5|2:3900.000,3:3800.000,5:1397.412|1108930|1397
 the policy's number is not a reading|CPU 0/KVM@R@3;CPU 1/KVM@R@4|3:1108.930,4:1397.300|1108930 1400000 4280985|1397
 only the policy's number: no reading|CPU 0/KVM@R@3|3:1108.930|1108930 1400000 4280985|
 one kHz off the policy's number is a reading|CPU 0/KVM@R@3|3:1108.931|1108930 1400000 4280985|1109
+a reading inside a longer policy number is a reading|CPU 0/KVM@R@3|3:400.000|1108930 1400000 4280985|400
 MHz are rounded, not cut|CPU 0/KVM@R@3|3:1397.612|1108930 1400000 4280985|1398
 a policy number floating point would cut a kHz short|CPU 0/KVM@R@3|3:2048.006|2048006|
 a table entry is a policy number too (acpi-cpufreq)|CPU 0/KVM@R@2|2:3000.000|1400000 2100000 3000000 4000000|
@@ -671,11 +725,109 @@ both present, the general one wins|0|0|0
 neither file: not known|||
 EOF
 
+	# Did the clock move (#579): name|what each second answered|yes or no
+	while IFS='|' read -r _name _secs _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		# shellcheck disable=SC2086
+		if uros_clock_run_moved $_secs; then _got=yes; else _got=no; fi
+		if [ "$_got" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_got>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+# sampled: 579-politica-performance-172555, which the old test called moved
+performance on AC, steady within 1.5%|3940 3967 3926 3983 3946 - - -|no
+# probes
+the #560 shape: 3000 then 3993|3000 3000 3000 3993 3993 3993|yes
+and back down|3993 3993 3993 3000 3000 3000|yes
+one slow second is not a move|3893 3893 3918 3918 3202 3943 3952|no
+exactly 10% is a move|1000 1000 1100 1100|yes
+just under 10% is not|1000 1000 1099 1099|no
+seconds with no reading are not readings|1000 - - 1000 1100 - 1100|yes
+three readings: nothing claimed|1000 5000 9000|no
+EOF
+
+	# The fallback note (#579): name|scaling_available_governors|table 1/0|note
+	while IFS='|' read -r _name _avail _table _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		_got=$(uros_clock_fallback_note "$_avail" "$_table")
+		if [ "$_got" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_got>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+victus, amd-pstate-epp: its fallback is scaling_min_freq|performance powersave|0|
+acpi-cpufreq: its fallback is a table entry|conservative ondemand userspace powersave performance schedutil|1|
+amd-pstate passive, intel_cpufreq: no table|conservative ondemand userspace powersave performance schedutil|0|; a stale core's fallback here is the governor's last target, which no file states, and may be counted
+no governors to read|||
+EOF
+
+	# The policy numbers (#579): two sysfs trees written here and read back.
+	# 🔑 Made rather than described, because uros_clock_policy_khz's subject
+	# is which FILES count, and only files can show a glob, an exclusion or a
+	# sort gone wrong.
+	_tree=$(mktemp -d "${TMPDIR:-/tmp}/run-conditions.XXXXXX")
+	mkdir -p "$_tree/a/cpu0/cpufreq" "$_tree/a/cpu11/cpufreq" "$_tree/b/cpu0/cpufreq"
+	_w() { printf '%s\n' "$2" > "$_tree/$1"; }
+	# a: victus's cpu0 as sysfs has it, the two counters among them, and an
+	# eleventh core whose ceiling only it states
+	_w a/cpu0/cpufreq/scaling_min_freq 1108930
+	_w a/cpu0/cpufreq/scaling_max_freq 1400000
+	_w a/cpu0/cpufreq/cpuinfo_min_freq 412625
+	_w a/cpu0/cpufreq/cpuinfo_max_freq 4280985
+	_w a/cpu0/cpufreq/amd_pstate_max_freq 4280985
+	_w a/cpu0/cpufreq/amd_pstate_lowest_nonlinear_freq 1108930
+	_w a/cpu0/cpufreq/cpuinfo_avg_freq 1397371
+	_w a/cpu0/cpufreq/scaling_cur_freq 1397425
+	_w a/cpu0/cpufreq/scaling_setspeed '<unsupported>'
+	_w a/cpu11/cpufreq/scaling_max_freq 2900000
+	# b: acpi-cpufreq's table, and the request it reads as its current clock
+	_w b/cpu0/cpufreq/scaling_available_frequencies '3000000 2100000 1400000 '
+	_w b/cpu0/cpufreq/scaling_min_freq 1400000
+	_w b/cpu0/cpufreq/scaling_max_freq 3000000
+	_w b/cpu0/cpufreq/cpuinfo_max_freq 4000000
+	_w b/cpu0/cpufreq/cpuinfo_cur_freq 2345678
+	_w b/cpu0/cpufreq/base_frequency 2600000
+	while IFS='|' read -r _name _root _want
+	do
+		[ -n "$_name" ] || continue
+		case "$_name" in \#*) continue ;; esac
+		_total=$(( _total + 1 ))
+		_got=$(uros_clock_policy_khz "$_tree/$_root" | tr '\n' ' ')
+		if [ "$_got" = "$_want" ]; then
+			echo "  ok    $_name"
+		else
+			echo "  BAD   $_name"
+			echo "        wanted <<$_want>>"
+			echo "        read   <<$_got>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	done <<'EOF'
+victus: the policy's numbers, not its counters, every core, in order|a|412625 1108930 1400000 2900000 4280985 
+acpi-cpufreq: the table, base_frequency, not the request|b|1400000 2100000 2600000 3000000 4000000 
+no cpufreq at all|none|
+EOF
+	rm -rf "$_tree"
+
 	if [ "$_fails" -gt 0 ]; then
 		echo "run-conditions --self-test: $_fails of $_total read otherwise"
 		exit 1
 	fi
-	echo "run-conditions --self-test: all $_total read as sampled"
+	echo "run-conditions --self-test: all $_total read as expected"
 	exit 0
 	;;
 esac
