@@ -733,6 +733,36 @@ check_cfg_access(natural_t bdf)
 
 /* ---- PCI configuration space ---- */
 
+#ifdef ABLATE_577_BDF
+/*
+ * #577's ablation: ONE configuration access is refused, the ABLATE_577_NTH
+ * read (ABLATE_577_WRITE 0) or write (1) of register ABLATE_577_REG of device
+ * ABLATE_577_BDF, so that each step a caller has to check is refused on a real
+ * boot rather than argued about.  Only accesses through the two routines below
+ * are counted: the kernel's own measure_regions() reads the hardware directly.
+ * Every counted access is printed with its ordinal, so the log shows which step
+ * the number landed on.  The count is not atomic: this is an experiment, run on
+ * one processor, and it is never built otherwise.
+ */
+static int
+ablate_577_refuse(natural_t bdf, int write, unsigned int reg)
+{
+	static unsigned int	ablate_577_seen;
+	unsigned int		n;
+
+	if (bdf != (natural_t)ABLATE_577_BDF || write != ABLATE_577_WRITE
+	    || reg != (unsigned int)ABLATE_577_REG)
+		return 0;
+	n = ++ablate_577_seen;
+	printf("device_pci_config: #577 ablation — %s %u of register 0x%02x "
+	       "on %02x:%02x.%u, by task %p%s\n", write ? "write" : "read", n,
+	       reg, (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+	       (unsigned)(bdf & 7), (void *)current_task(),
+	       n == ABLATE_577_NTH ? ": REFUSED" : "");
+	return n == ABLATE_577_NTH;
+}
+#endif
+
 kern_return_t
 ds_master_device_pci_config_read(
 	ipc_port_t		master_port,
@@ -755,6 +785,11 @@ ds_master_device_pci_config_read(
 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
 	if (kr != KERN_SUCCESS)
 		return kr;
+#ifdef ABLATE_577_BDF
+	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
+			      0, reg))
+		return KERN_NO_ACCESS;
+#endif
 
 	*data = device_md_pci_read(bus, slot, func, reg);
 	return KERN_SUCCESS;
@@ -785,6 +820,11 @@ ds_master_device_pci_config_write(
 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
 	if (kr != KERN_SUCCESS)
 		return kr;
+#ifdef ABLATE_577_BDF
+	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
+			      1, reg))
+		return KERN_NO_ACCESS;
+#endif
 
 	device_md_pci_write(bus, slot, func, reg, data);
 	return KERN_SUCCESS;
