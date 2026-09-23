@@ -418,11 +418,13 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 	 * 🔴 THE TWO OVERLAPS ARE JUDGED BEFORE THE CONTROL CAN EXCUSE THE ARM.
 	 * On a kernel with the defect each of them is GRANTED and given back,
 	 * and on more than one processor a slot given back stays retiring for
-	 * a grace period -- so it is the defect itself that fills the legacy
-	 * table and starves the control.  Judging the control first turned a
-	 * regressed kernel into NOT ASKED.  The fixed kernel answers an overlap
-	 * before it looks for a slot, so any answer but KERN_NO_ACCESS there
-	 * is WRONG, a full table included.
+	 * a grace period -- so it is the defect itself that can fill the legacy
+	 * table and starve the control, and judging the control first could
+	 * turn a regressed kernel into NOT ASKED.  That is read from the code,
+	 * not seen: two -smp 4 boots of the old kernel with the old order both
+	 * said WRONG.  The fixed kernel answers an overlap before it looks for
+	 * a slot, so any answer but KERN_NO_ACCESS there is WRONG, a full table
+	 * included.
 	 */
 	for (i = 0; i < 2; i++) {
 		if (ask[i].claim == KERN_NO_ACCESS)
@@ -443,8 +445,14 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 			       ask[i].count, bdf >> 8, (bdf >> 3) & 0x1F, bdf & 7,
 			       (int)ask[i].claim);
 	}
-	if (bad != 0)
+	if (bad != 0) {
+		/* What the control got, so a boot on more than one processor
+		 * records whether the defect had starved it. */
+		printf("io_claim_race: [4]     the control, 0x%x..0x%x, "
+		       "answered kr=%d\n", win - 8, win - 1,
+		       (int)ask[2].claim);
 		return;
+	}
 
 	if (ask[2].claim == KERN_RESOURCE_SHORTAGE) {
 		printf("io_claim_race: [4] NOT ASKED — both overlaps were "

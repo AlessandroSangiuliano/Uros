@@ -232,6 +232,9 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
  * So each step goes through one of the two helpers below, which say which
  * step was refused, and what follows depends on where it lands:
  *
+ *   - the first read of the command register, or the write that switches
+ *     decoding off, ends the measurement before anything is written: the
+ *     regions go to the registry unmeasured, size 0;
  *   - a step of a BAR's measurement ends the measurement of the device.
  *     What was written into the BAR is written back, the command register is
  *     put back, and the regions go to the registry unmeasured, size 0, which
