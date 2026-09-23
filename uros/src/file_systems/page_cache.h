@@ -108,8 +108,16 @@ struct page_cache {
  * Create a page cache with the given maximum number of cached blocks.
  * 'writeback' is called when a dirty block must be flushed (eviction or sync).
  * 'ctx' is passed as-is to the callback (typically the device port).
- * If writeback is NULL, dirty blocks are silently discarded on eviction.
- * Returns NULL on allocation failure.
+ *
+ * 🔴 'writeback' MUST NOT BE NULL, and a cache asked for without one is
+ * refused: NULL comes back, as for an allocation failure (#573).  This used
+ * to say that dirty blocks were then "silently discarded", and that is what
+ * happened to every write on a mount configured before its block size was
+ * known: the data was dropped, counted as written, and the sync succeeded
+ * over a file of zeros.  A cache that holds a filesystem's blocks cannot
+ * have dirty data it is allowed to lose.
+ *
+ * Returns NULL on allocation failure or without a writeback.
  */
 struct page_cache *page_cache_create(unsigned int max_entries,
 				     page_cache_writeback_fn writeback,
