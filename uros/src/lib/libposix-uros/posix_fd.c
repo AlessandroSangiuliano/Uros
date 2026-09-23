@@ -31,6 +31,8 @@
 #include "proc.h"               /* proc_getsid */
 #include "char_server.h"        /* char_tty_get_ctty/read/write/set_tostop */
 #include <mach/mach_traps.h>	/* the traps, declared once (#426) */
+#include <mach/thread_switch.h>	/* SWITCH_OPTION_WAIT (#583) */
+#include <mach/mach_syscalls.h>	/* syscall_thread_switch (#583) */
 
 /* Console write sink — same SYSENTER trap handlers.c reaches for. */
 extern void mach_print(const char *);
@@ -384,6 +386,111 @@ static int tty_fd_snapshot(int fd, mach_port_t *port, unsigned *dev_id)
     return (*port == MACH_PORT_NULL) ? -EIO : 0;
 }
 
+/*
+ * 🔴 A TTY READ THAT FINDS NOTHING WAITS FOR THE TTY, IT DOES NOT ASK AGAIN
+ * (#583).
+ *
+ * char_server's tty_read never blocks: an empty ring is 0 bytes.  Its .defs
+ * says how to wait -- subscribe to the "data available" notification and
+ * read after each one -- and this file ignored that and looped on tty_read
+ * with swtch_pri(0) between turns.  swtch_pri yields only when something
+ * else is runnable, so on an idle system it returned at once: an i386 shell
+ * at its prompt held the processor at 92%, char_server 16 s and proc_server
+ * 8 s out of every 30, because each turn cost five RPCs (the session check
+ * and tty_jobctl_check's three are all proc_server round trips).
+ *
+ * One receive right per (process, tty), subscribed once through
+ * tty_subscribe_member -- the session-member access tty_read already has.
+ * The notification is a queued message, so a byte that arrives between an
+ * empty read and the wait is not lost; the only gap is the first time, when
+ * data may have come before the subscription existed, and the read is
+ * repeated right after subscribing to close it.
+ *
+ * ⚠️ The entry remembers WHICH PROCESS made it.  A fork() child inherits this
+ * memory but not the IPC space, so the parent's port name means nothing
+ * there -- it must neither be used nor released; the child subscribes anew.
+ * The receive right dies with the process, and char_server drops a
+ * subscriber whose port is dead the next time it sends.
+ */
+#define TTY_WAITERS 4
+
+static struct tty_waiter {
+    unsigned int pid;           /* the process that made it; 0 = empty */
+    unsigned int dev_id;
+    mach_port_t  port;          /* receive right; char_server has a send right */
+    int          refused;       /* the subscription was refused: poll slowly */
+} tty_waiters[TTY_WAITERS];
+static pthread_mutex_t tty_waiters_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The port to wait on for (cport, dev_id), subscribing on first use.  *fresh
+ * says the subscription was made just now.  -1: the tty refused it. */
+static int tty_waiter_get(mach_port_t cport, unsigned dev_id,
+                          mach_port_t *out, int *fresh)
+{
+    struct tty_waiter *e = NULL, *free_e = NULL;
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr;
+    int i;
+
+    *fresh = 0;
+    pthread_mutex_lock(&tty_waiters_lock);
+    for (i = 0; i < TTY_WAITERS; i++) {
+        struct tty_waiter *w = &tty_waiters[i];
+        if (w->pid == __uros_my_pid && w->dev_id == dev_id)
+            e = w;
+        else if (free_e == NULL && w->pid != __uros_my_pid)
+            free_e = w;         /* empty, or a parent's: not ours to release */
+    }
+    if (e != NULL) {
+        int refused = e->refused;
+        *out = e->port;
+        pthread_mutex_unlock(&tty_waiters_lock);
+        return refused ? -1 : 0;
+    }
+    if (free_e == NULL) {
+        pthread_mutex_unlock(&tty_waiters_lock);
+        return -1;
+    }
+    e = free_e;
+    e->pid = __uros_my_pid;
+    e->dev_id = dev_id;
+    e->port = MACH_PORT_NULL;
+    e->refused = 1;
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr == KERN_SUCCESS) {
+        kr = char_tty_subscribe_member(cport, dev_id, (int)__uros_my_pid, port);
+        if (kr == KERN_SUCCESS) {
+            e->port = port;
+            e->refused = 0;
+            *fresh = 1;
+        } else {
+            (void)mach_port_mod_refs(mach_task_self(), port,
+                                     MACH_PORT_RIGHT_RECEIVE, -1);
+        }
+    }
+    pthread_mutex_unlock(&tty_waiters_lock);
+    if (e->refused) {
+        mach_print("libposix: the tty refused a data-available subscription; "
+                   "reads on it poll every 20 ms (#583)\n");
+        return -1;
+    }
+    *out = port;
+    return 0;
+}
+
+/* Block until char_server says data arrived.  The message is header-only. */
+static void tty_waiter_wait(mach_port_t port)
+{
+    union {
+        mach_msg_header_t hdr;
+        char              room[128];
+    } msg;
+
+    (void)mach_msg(&msg.hdr, MACH_RCV_MSG, 0, sizeof(msg), port,
+                   MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
 long __uros_read(int fd, void *buf, size_t count)
 {
     int err;
@@ -401,10 +508,11 @@ long __uros_read(int fd, void *buf, size_t count)
             int      cres = 0;
             unsigned int want = count > sizeof(rbuf)
                                 ? sizeof(rbuf) : (unsigned)count;
-            /* Block until data is available — uart.so drains its IRQ
-             * ring into the RPC buf; if the ring is empty we yield and
-             * retry instead of busy-spinning the demux thread.  No
+            /* Block until data is available: an empty read waits for the
+             * tty's notification (#583, see tty_waiter_get).  No
              * O_NONBLOCK support yet (v0.1 ush doesn't need it). */
+            mach_port_t notify = MACH_PORT_NULL;
+            int         fresh = 0;
             for (;;) {
                 rlen = sizeof(rbuf);
                 if (char_tty_read(cport, cap, 0, dev_id,
@@ -417,7 +525,17 @@ long __uros_read(int fd, void *buf, size_t count)
                     return -EIO;
                 if (rlen > 0)
                     break;
-                (void)swtch_pri(0);
+                if (notify == MACH_PORT_NULL) {
+                    if (tty_waiter_get(cport, dev_id, &notify, &fresh) != 0) {
+                        notify = MACH_PORT_NULL;
+                        (void)syscall_thread_switch(MACH_PORT_NULL,
+                                                    SWITCH_OPTION_WAIT, 20);
+                        continue;
+                    }
+                    if (fresh)
+                        continue;       /* read again: the subscription is new */
+                }
+                tty_waiter_wait(notify);
             }
             if (rlen > count) rlen = count;
             if (rlen) memcpy(buf, rbuf, rlen);
