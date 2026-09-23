@@ -150,28 +150,33 @@ uros_host_state() {
 # the test is that literal rather than a driver name, and a driver nobody here
 # has heard of is read correctly the day it turns up.
 #
-# 🔴 AND THE SAME QUESTION DECIDES WHETHER BOOST PASSES THE CEILING (#579).
-# With boost on and cpuinfo_max_freq above scaling_max_freq, two machines give
-# the same picture and behave in opposite ways, both measured under a full load:
+# 🔴 AND NOTHING IN SYSFS SAYS WHETHER BOOST PASSES THE CEILING (#579).  With
+# boost on and cpuinfo_max_freq above scaling_max_freq, the same picture has
+# been measured both ways:
 #
-#   pavillion, acpi-cpufreq (core), ceiling 3000 = its nominal clock
-#                         -> the cores ran at 3918-3992 MHz, OVER it (#544)
-#   victus, amd-pstate-epp (driver), ceiling 3300 = its nominal clock
-#                         -> all twelve at 3268 MHz, UNDER it; 3693-3793 with
-#                            no ceiling, so boost was there to be had
-#   victus, ceiling 1400  -> boots 20.9 s against 12.0 s at 4280, samples at
-#                            1395-1398 straight after the load
+#   pavillion, acpi-cpufreq, `performance', ceiling 3000 = its nominal clock
+#                  -> 3992 MHz idle, 3918 with six busy loops: OVER (#544)
+#   victus, amd-pstate-epp, `performance', ceiling 3300 = its nominal clock
+#                  -> 3268 MHz on all twelve under a full load, UNDER, with
+#                     3693-3793 to be had once the ceiling is lifted
+#   victus, ceiling 1400
+#                  -> boots of 20.9 s against 12.0 s at 4280: UNDER
 #
-# When the core drives the clock, boost is a hardware state above the top one
-# the governor may ask for, and the ceiling does not reach it.  A driver that
-# takes the policy writes the ceiling into the processor's own request, and
-# the ceiling bounds boost as well.  The first version of this reading was
-# measured on pavillion alone and applied to both, so every capped run on
-# victus was labelled at 4280 MHz.
+# The first version of this reading believed pavillion and printed
+# effective=4280MHz for every capped run on victus.  The second asked
+# uros_clock_policy's question -- does the driver take the policy -- and
+# review refuted that from the kernel's source: amd-pstate in passive or
+# guided mode lists every governor, so it reads as the core's, and it writes
+# the ceiling into the same CPPC request -epp does.  Intel's acpi-cpufreq
+# reaches turbo only through a table entry the ceiling can exclude.  Whether
+# boost gets past depends on how each driver meets the hardware, and no file
+# here states it.
 #
-# ⚠️ Not measured: a core-driven machine with its ceiling BELOW the nominal
-# clock.  There boost may never engage at all, and the line still says it
-# does.  The one sample that exists is pavillion at its nominal clock.
+# So the reading no longer concludes.  Under a driver that takes the policy
+# the ceiling is the clock (victus, measured).  Where the core drives it and
+# boost could reach higher, the line gives the ceiling and says boost is not
+# excluded.  On every machine the ceiling is a claim that cpu= can refute; see
+# below for how coarse that check is.
 uros_clock_policy() {
 	case "$_avail" in
 	"performance powersave")	_who=driver ;;
@@ -185,21 +190,22 @@ uros_clock_policy() {
 		_cap="?"
 	fi
 	_top="$_cap"
-	case "$_who" in
-	core)
-		if [ "$_boost" = 1 ] && [ -n "$_hwmaxk" ] && [ -n "$_capk" ] \
-		   && [ "$_hwmaxk" -gt "$_capk" ]; then
-			_top="$(( _hwmaxk / 1000 ))MHz (boost, over the ${_cap} ceiling)"
-		fi ;;
-	driver)
-		# 🔴 The ceiling is a claim here too, and cpu= can refute it:
-		# a driver that turns out to let boost through would put the
-		# processor above it.  Same 10% and same reason as the floor.
-		if [ -n "$_capk" ] && [ "${_mhz:-?}" -gt 0 ] 2>/dev/null &&
-		   [ $(( _mhz * 100 )) -gt $(( _capk / 1000 * 110 )) ]; then
-			_top="unsettled: ceiling ${_cap}, processor at ${_mhz}MHz (#579)"
-		fi ;;
-	esac
+	if [ "$_who" = core ] && [ "$_boost" = 1 ] && [ -n "$_hwmaxk" ] \
+	   && [ -n "$_capk" ] && [ "$_hwmaxk" -gt "$_capk" ]; then
+		_top="$_cap (boost on: up to $(( _hwmaxk / 1000 ))MHz not excluded, #579)"
+	fi
+	# 🔴 A processor sampled more than 10% above the ceiling refutes it,
+	# whatever the driver.  That is the same threshold as the floor, for
+	# the same reason.  It is coarse on purpose, and it only catches a
+	# clock far above the ceiling: pavillion's 3992 over 3000 (133%), or a
+	# 1400 ceiling under a 3.7 GHz sample.  All-core boost on victus is
+	# 12-15% above nominal, and a sample taken at rest can sit inside the
+	# margin while the loaded cores are past it: six of eight samples
+	# under `performance' there read 3243-3444, around a nominal of 3300.
+	if [ -n "$_capk" ] && [ "${_mhz:-?}" -gt 0 ] 2>/dev/null &&
+	   [ $(( _mhz * 100 )) -gt $(( _capk / 1000 * 110 )) ]; then
+		_top="unsettled: ceiling ${_cap}, processor at ${_mhz}MHz (#579)"
+	fi
 
 	case "$_who:$_gov" in
 	driver:performance)
@@ -355,15 +361,22 @@ amd-pstate-epp, powersave (victus, #564)|amd-pstate-epp|powersave|performance po
 intel_pstate, performance|intel_pstate|performance|performance powersave|400000|3900000|3900000||3900|3900MHz
 # a PASSIVE one: the core runs a governor and `powersave' is static
 pavillion, powersave pinned (#544)|acpi-cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|1|1397|1400MHz (governor pins it to the floor)
-acpi-cpufreq, ondemand|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|1|2100|4000MHz (boost, over the 3000MHz ceiling)
-# #579: the same boost picture, a driver that takes the policy, and the ceiling holds
-victus capped at 1400, the run #579 was opened on|amd-pstate-epp|powersave|performance powersave|1108930|1400000|4280985|1|1397|1400MHz (the driver scales the range, powersave is its bias)
-victus capped at its nominal 3300, performance|amd-pstate-epp|performance|performance powersave|1108930|3300000|4280985|1|3268|3300MHz
-# the ceiling is a claim too, and the field beside it can refute it
-the processor stands above a driver's ceiling|amd-pstate-epp|performance|performance powersave|1108930|1400000|4280985|1|3703|unsettled: ceiling 1400MHz, processor at 3703MHz (#579)
-# boost switched off: nothing passes the ceiling on either kind
-acpi-cpufreq, ondemand, boost off|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|0|2990|3000MHz
+acpi-cpufreq, ondemand, at rest|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|1|2100|3000MHz (boost on: up to 4000MHz not excluded, #579)
 amd-pstate passive, powersave|amd-pstate|powersave|conservative ondemand userspace powersave performance schedutil |1108930|4280985|4280985|1|1108|1108MHz (governor pins it to the floor)
+# #579: boost and the ceiling.  Sampled: pavillion (246c11ce), victus (#579)
+pavillion, performance, boost over its ceiling (#544)|acpi-cpufreq|performance|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|1|3993|unsettled: ceiling 3000MHz, processor at 3993MHz (#579)
+victus capped at 1400, the run #579 was opened on|amd-pstate-epp|powersave|performance powersave|1108930|1400000|4280985|1|1397|1400MHz (the driver scales the range, powersave is its bias)
+victus capped at its nominal 3300, performance|amd-pstate-epp|performance|performance powersave|1108930|3300000|4280985|1|3265|3300MHz
+# probes: amd-pstate passive meets the ceiling the way -epp does, in the kernel's code, and reads as the core's
+amd-pstate passive under a ceiling|amd-pstate|schedutil|conservative ondemand userspace powersave performance schedutil |1108930|1400000|4280985|1|1397|1400MHz (boost on: up to 4280MHz not excluded, #579)
+# probes: nothing to pass the ceiling with -- boost off, no boost file, no headroom
+acpi-cpufreq, boost off|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000|0|2990|3000MHz
+acpi-cpufreq, no boost file|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|3000000|4000000||2990|3000MHz
+acpi-cpufreq, ceiling at the hardware maximum|acpi-cpufreq|ondemand|conservative ondemand userspace powersave performance schedutil |1400000|4000000|4000000|1|3990|4000MHz
+# probes: the ceiling is a claim on every kind of machine, and 10% is its margin
+the processor stands above a driver's ceiling|amd-pstate-epp|powersave|performance powersave|1108930|1400000|4280985|1|3703|unsettled: ceiling 1400MHz, processor at 3703MHz (#579) (the driver scales the range, powersave is its bias)
+exactly 10% over the ceiling|amd-pstate-epp|performance|performance powersave|1108930|1400000|4280985|1|1540|1400MHz
+just past 10% over the ceiling|amd-pstate-epp|performance|performance powersave|1108930|1400000|4280985|1|1541|unsettled: ceiling 1400MHz, processor at 1541MHz (#579)
 # 🔑 the row that refutes repairing this by name: intel_pstate in passive mode
 # calls itself intel_cpufreq, and there `powersave' really does pin
 intel_cpufreq, powersave|intel_cpufreq|powersave|conservative ondemand userspace powersave performance schedutil |800000|4000000|4000000||798|800MHz (governor pins it to the floor)
