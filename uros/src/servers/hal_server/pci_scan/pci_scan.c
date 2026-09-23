@@ -485,6 +485,13 @@ pci_scan_measure(struct hal_device_info *dev)
 	 * downstream treats a region as a thing it can map.  A driver handed a
 	 * region of no size asks the kernel to map nothing, and what comes
 	 * back is an error nobody can trace to a BAR that was never there.
+	 *
+	 * 🔴 BUT ONLY FROM THIS COPY.  hal_registry_set_sizes() writes back
+	 * the sizes of the regions still listed and removes none, so the
+	 * registry keeps a dropped region at size 0; and the kernel, measuring
+	 * the same BAR at claim time, keeps it as a window.  Making only the
+	 * registry drop it shifts every later region's index against the
+	 * kernel's list, which is how drivers name a region -- see #585.
 	 */
 	{
 		unsigned int	kept = 0;
