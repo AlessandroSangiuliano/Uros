@@ -160,7 +160,9 @@ typedef struct vfs_stat {
     uint8_t     st_type;            /* VFS_FT_*                        */
     uint8_t     _pad[11];           /* reserved, brings sizeof to 80   */
 } vfs_stat_t;
-/* sizeof(vfs_stat_t) == 80 bytes == 20 * uint32_t (matches vfs.defs). */
+/* sizeof(vfs_stat_t) == 80 bytes == 10 * uint64_t, which is how vfs.defs
+ * declares it -- 8-aligned, like the uint64_t members.  It said 20 * uint32_t,
+ * and MIG took the alignment of the declared element: 4 (#553). */
 
 /*
  * vfs_dirent_t — single readdir entry.  Fixed-size for a fixed-size

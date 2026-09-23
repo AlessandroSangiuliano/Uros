@@ -3369,26 +3369,15 @@ main(int argc, char **argv)
      * for now; pure correctness, not a perf bench. */
     if (suites & SUITE_FLIPC2) {
 	/*
-	 * ⚠️ SAID rather than skipped: a suite that prints nothing cannot be
-	 * told from one that passed.
-	 *
-	 * 🔴 AND THE REASON IS NOT THE ONE THIS USED TO GIVE.  It said libvfs
-	 * does not build for x86-64 (#553) -- true when it was written, false
-	 * now: #553 is fixed, libvfs.a builds and links on this target, and
-	 * the stubs pass every assertion migcom generates for them.
-	 *
-	 * What this suite still cannot do is RUN, because it goes client ->
-	 * libvfs -> name_server -> ext_server -> ext2, and ext_server is not
-	 * ported yet (#498).  A skip that names the wrong issue sends the next
-	 * reader to a defect that is already closed.
+	 * On both targets since #498 put ext_server on x86-64.  It used to be
+	 * compiled out there, first blaming libvfs (#553, fixed) and then
+	 * ext_server (#498, done) -- two skips in a row that each named a
+	 * reason which had stopped being true.  Whether a filesystem is
+	 * mounted is a fact about THIS boot, so the suite asks it of the name
+	 * server and says NOT ASKED when there is none.
 	 */
-#if defined(__x86_64__)
-	printf("\n--- libvfs smoke: SKIPPED, ext_server is not on x86-64 yet "
-	       "(#498). libvfs itself builds here since #553 ---\n");
-#else
 	extern void bench_libvfs_smoke(void);
 	bench_libvfs_smoke();
-#endif
     }
 
     /* exec_server smoke test (#228 v0.1.0) — same FLIPC gate. */
@@ -3399,13 +3388,12 @@ main(int argc, char **argv)
 
     /* proc_server smoke test (#237 v0.1.0) — same FLIPC gate. */
     if (suites & SUITE_FLIPC2) {
-#if defined(__x86_64__)
-	printf("\n--- proc smoke: SKIPPED, it links libvfs, which is not built "
-	       "for x86-64 (#553) ---\n");
-#else
+	/* It looks exec_server and proc_server up itself and says so when
+	 * either is absent -- which on x86-64 they are, until #421 and #496.
+	 * It was compiled out there "because libvfs is not built" (#553),
+	 * which stopped being true when #553 was fixed. */
 	extern void bench_proc_smoke(void);
 	bench_proc_smoke();
-#endif
     }
 
     printf("=== Benchmark complete ===\n");
