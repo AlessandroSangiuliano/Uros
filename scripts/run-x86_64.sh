@@ -454,6 +454,15 @@ must_report 'hal_bar: started' 'hal_bar: [0-9]* of [0-9]* arms passed' \
 must_report '=== ext2 filesystem server' 'ext2: ready, entering message loop' \
 	'It mounts ahci0a and serves it (#498).  Every way out of main() before that line is a failure -- a device it could not open, a capability it was refused, a superblock it could not read -- and each of them ends the task rather than printing a verdict.'
 
+# 🔑 Two roles of one binary, with a prefix each, so that one of them stopping
+# dead cannot be covered by the other one finishing (#498).  Either may decline
+# -- the reader when the other target has written nothing, either one when
+# /mnt/disk2 is not attached -- and that is its last sentence too (#563).
+must_report 'xfile_read: started' 'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+	'It reads a file the OTHER target wrote on /mnt/disk2 and checks every byte (#498).  Silence is a client of libvfs that stopped inside an RPC to ext_server, which is a different finding from a byte that came back wrong.'
+must_report 'xfile_write: started' 'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+	'It writes, syncs and reads back the file the other target will read (#498).  Silence is a write, a sync or a read that never returned.'
+
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
@@ -985,7 +994,9 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
-		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated"; then
+		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
+		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'; then
 		sleep 1
 		break
 	fi

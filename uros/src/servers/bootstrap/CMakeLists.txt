@@ -485,6 +485,13 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # run-x86_64.sh's pair for it closes on that line OR on its death, and judges
   # only the first -- otherwise an ext_server that died would leave the run
   # waiting for the watchdog and be read as a wedge.
+  #
+  # xfile_test follows it TWICE, one binary with two roles (#498).  The READER
+  # comes first and looks for the file the OTHER target wrote on /mnt/disk2;
+  # on an ordinary boot the disk is fresh and it says NOT ASKED.  The WRITER
+  # then leaves this target's own file there.  Boot i386 next with the same
+  # disk as its second AHCI drive and its reader finds this one -- that is the
+  # crossing, and nothing here has to be reconfigured to make it.
 
   # char_server, and ONE module of the four (#497).
   #
@@ -574,7 +581,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\next_server ext_server\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\next_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -663,6 +670,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # question when the answer cannot be wrong.
             hal_bar_test:${_SBIN}/hal_bar_test
             ext_server:${_SBIN}/ext_server
+            # ⚠️ One entry for two configuration lines, like dma_reclaim_test:
+            # the roles differ by argv, not by image.
+            xfile_test:${_SBIN}/xfile_test
             # ⚠️ BOTH drivers now, and ahci.so is here for #432 rather than
             # for its own sake.  It was left out under #520 because
             # modload_load_class() loads whatever is in the class and that
@@ -700,7 +710,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
-            hal_bar_test_server ext_server_bin
+            hal_bar_test_server ext_server_bin xfile_test_bin
             ${_CHAR_DEP}
             ${_IPC_BENCH_DEP}
             ${_CONF}
