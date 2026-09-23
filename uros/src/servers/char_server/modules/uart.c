@@ -895,10 +895,15 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 	 * delivery was impossible at the instant the RX line rose (CPUs
 	 * parked at IF=0 during a DDB session being the proven case) —
 	 * the 16550 then holds INT asserted with a full FIFO and never
-	 * fires again.  Readers poll this entry point continuously
-	 * anyway (the tty read poll), so one LSR peek per empty-ring
-	 * read resurrects the line within a poll period no matter what
-	 * ate the front.  Defense in depth on top of the #381 kernel fix.
+	 * fires again.  One LSR peek per empty-ring read resurrects the
+	 * line, no matter what ate the front.
+	 *
+	 * Readers no longer poll (#583): libposix reads, and on an empty
+	 * ring waits for the subscriber notification.  So the peek runs
+	 * on the first read of each wait and on every read a notification
+	 * causes -- a reader already waiting when the front is lost stays
+	 * waiting until something else reads.  The #381 kernel fix is what
+	 * keeps the front from being lost; this is defense in depth.
 	 */
 	if (p->ring_tail == p->ring_head && (uart_in(UART_LSR) & LSR_DR))
 		uart_drain(p, 0);

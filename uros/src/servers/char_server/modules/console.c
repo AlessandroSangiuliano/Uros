@@ -96,8 +96,8 @@ struct console_priv {
 	uint32_t	overrun_drops;	/* bytes lost when the ring is full */
 
 	/* Subscribers get a header-only wake-up per input batch, mirroring
-	 * uart.so.  ush polls tty_read so this is belt-and-braces, but a
-	 * future notify-based client gets the same contract. */
+	 * uart.so.  libposix waits for it before reading again (#583): a
+	 * wake-up that is not sent is a shell that does not read. */
 	mach_port_t	subscribers[CON_MAX_SUBSCRIBERS];
 	unsigned int	n_subscribers;
 };
@@ -330,7 +330,8 @@ console_detach(void *priv)
 	p->attached = 0;
 }
 
-/* tty_read — drain the RX ring (non-blocking; libposix polls). */
+/* tty_read — drain the RX ring (non-blocking; on an empty ring libposix
+ * waits for the subscriber wake-up, #583). */
 static int
 console_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 {
