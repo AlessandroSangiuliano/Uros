@@ -27,7 +27,7 @@
  * one in 260; now the median of three decides, and a failed attempt is asked
  * again.
  */
-static uint64_t hz;
+static uint64_t tsc_rate;	/* not `hz': that is the kernel's ticks per second */
 
 int tsc_is_invariant(void)
 {
@@ -101,13 +101,22 @@ int tsc_calibrate(void)
 	}
 
 	rulers_vote(&v);
-	hz = v.hz;
-	return hz != 0;
+	tsc_rate = v.hz;
+	return tsc_rate != 0;
 }
 
 uint64_t tsc_hz(void)
 {
-	return hz;
+	return tsc_rate;
+}
+
+/*
+ * The refinement's answer replaces the boot value once (time/tsc_refine.c).
+ * One aligned 64-bit store: a reader sees the old rate or the new one.
+ */
+void tsc_refined(uint64_t rate)
+{
+	tsc_rate = rate;
 }
 
 uint64_t tsc_hz_run(unsigned which)

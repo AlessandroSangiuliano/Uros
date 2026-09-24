@@ -115,4 +115,13 @@ unsigned tsc_calibrate_attempts(void);
 /* The run the median did not agree with, or -1. */
 int tsc_set_aside(void);
 
+/*
+ * The refinement (#508, phase 4): a kernel thread that measures the TSC
+ * against a ruler that lasts a second -- the HPET or the PM timer -- from two
+ * points taken a second apart, asleep in between, and adopts the answer if it
+ * agrees with the boot value.  Started once the scheduler runs.
+ */
+void tsc_refine_start(void);
+void tsc_refined(uint64_t rate);	/* for the refinement only */
+
 #endif	/* _X86_64_TIME_TSC_H_ */

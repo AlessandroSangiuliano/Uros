@@ -220,6 +220,7 @@
 #include <kern/thread.h>
 #ifdef	__x86_64__
 #include <x86_64/thread/context.h>	/* #561 */
+#include <x86_64/time/tsc.h>		/* #508: the refinement */
 #endif
 #include <kern/thread_swap.h>
 #include <kern/time_out.h>
@@ -485,6 +486,13 @@ start_kernel_threads(void)
 	 */
 	printf("UrMach x86-64: %lu kernel contexts exempt from carrying vector "
 	       "state across a switch (#561)\n", context_fpu_exempted);
+
+	/*
+	 * #508: the TSC's rate, measured again over a second now that a thread
+	 * can sleep through one.  Here because it is the first moment every
+	 * boot reaches with a scheduler to wake it.
+	 */
+	tsc_refine_start();
 #endif	/* __x86_64__ */
 
 	/*

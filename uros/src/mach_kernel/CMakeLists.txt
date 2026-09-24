@@ -324,6 +324,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pmtimer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/ruler.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rulers.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc_refine.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
