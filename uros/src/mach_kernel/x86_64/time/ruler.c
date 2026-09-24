@@ -182,6 +182,15 @@ int ruler_rate(const struct ruler *r, uint64_t subject_mask,
  * the interval, it cannot be judged right or wrong, and it is set aside
  * before the vote rather than outvoted in it.
  *
+ * THREE TOLERANCES, AND THIS IS ONLY THE FIRST.  One part in sixty-four
+ * between the runs of one ruler, here.  Between rulers, the mean of their
+ * widest brackets plus 1000 ppm (rulers.h), because each ruler's own rate is
+ * good to 500 ppm.  Between an exact source and the rulers, half the widest
+ * bracket plus 1000 ppm (tsc.c), because under a hypervisor the rulers run
+ * on the host's clock and its NTP may steer that by 500 ppm.  What the census
+ * of four machines found about each source -- which states a rate, where,
+ * and which only seems to -- is in freq_source.h.
+ *
  * FOUR ATTEMPTS, because the failure being defended against is interference
  * in a window, and the answer to a transient is to measure again.  #464
  * learned it for the LAPIC timer, whose single disagreeing pair had cost one
