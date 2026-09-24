@@ -1054,6 +1054,12 @@ forkrace_worker_func(void *arg)
     for (i = 0; i < w->iters; i++) {
 	mach_port_t	child;
 
+#if	FORKRACE_ABLATE_584_STALL
+	/* #584: blocked for good halfway -- asleep, not runnable. */
+	if (i == w->iters / 2)
+	    for (;;)
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
+#endif
 	if (!forkrace_spawn_live(&child)) {
 	    w->refused++;
 	    continue;
@@ -1088,6 +1094,12 @@ forkrace_worker_func(void *arg)
 	mach_port_t	child;
 	kern_return_t	kr;
 
+#if	FORKRACE_ABLATE_584_STALL
+	/* #584: blocked for good halfway -- asleep, not runnable. */
+	if (i == w->iters / 2)
+	    for (;;)
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
+#endif
 	kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
 			 TRUE, &child);
 	if (kr != KERN_SUCCESS) {
