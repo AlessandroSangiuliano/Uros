@@ -1164,7 +1164,9 @@ bench_forkrace(void)
     {
 	unsigned	last = 0, still = 0;
 	int		running = 1;
+	tvalspec_t	seen, now;
 
+	get_time(&seen);
 	while (running) {
 	    unsigned	n = 0;
 	    int		k;
@@ -1182,10 +1184,18 @@ bench_forkrace(void)
 		printf("  ... %u of %d\n", n, FORKRACE_THREADS * FORKRACE_ITERS);
 		last = n;
 		still = 0;
+		get_time(&seen);
 	    } else if (running && ++still == 5) {
+		/*
+		 * #584: with the real time since the last progress, because
+		 * "five rounds" is a time only if a round is -- and that is
+		 * the question this line has to be able to answer.
+		 */
+		get_time(&now);
 		printf("  !!! STALLED at %u of %d — no progress for five "
-		       "rounds; the totals below will not be printed\n",
-		       n, FORKRACE_THREADS * FORKRACE_ITERS);
+		       "rounds (%lu ms); the totals below will not be "
+		       "printed\n", n, FORKRACE_THREADS * FORKRACE_ITERS,
+		       elapsed_ns(&seen, &now) / 1000000);
 		break;
 	    }
 	}
