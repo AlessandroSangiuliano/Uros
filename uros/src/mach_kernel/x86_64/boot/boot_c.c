@@ -70,6 +70,7 @@
 #include <time/freq_source.h>	/* #508 */
 #include <time/pmtimer.h>	/* #508 */
 #include <time/hpet.h>		/* #508 */
+#include <time/ruler.h>		/* #508 */
 #include <trap/trap.h>
 
 #include <boot/bootarg.h>
@@ -3034,43 +3035,50 @@ static uint64_t rulers_read_hpet(void)
 	return hpet_read();
 }
 
-static uint64_t rulers_tsc_khz(uint64_t (*read)(void), uint64_t mask,
-			       uint64_t hz, uint64_t span, uint64_t *counted)
+static uint64_t rulers_subject_tsc(void)
 {
-	uint64_t budget, start, c0, c, t0, t1;
+	return rdtsc();
+}
 
-	/*
-	 * Bounded by the TSC, which is known to count (it was just measured,
-	 * whether or not the two runs agreed).  A second of it if the rate is
-	 * known, and 2^34 counts -- between 1.7 and 17 s at any rate a
-	 * processor has -- if it is not.
-	 */
-	budget = tsc_hz() ? tsc_hz() : (1ULL << 34);
-	start = rdtsc();
+/*
+ * The TSC against one ruler, through the one routine the calibration will use
+ * (time/ruler.c): edge to edge, each end with its window.  Bounded by the
+ * TSC -- a second of it if the rate is known, 2^34 counts (between 1.7 and
+ * 17 s at any rate a processor has) if it is not.
+ */
+static uint64_t rulers_tsc_khz(uint64_t (*read)(void), uint64_t mask,
+			       uint64_t hz, uint64_t span, uint64_t *counted,
+			       uint64_t *window_ppm)
+{
+	struct ruler		r = { read, mask, hz };
+	struct ruler_run	run;
+	uint64_t		budget = tsc_hz() ? tsc_hz() : (1ULL << 34);
 
-	c0 = read();
-	do {
-		c = read();
-		if (rdtsc() - start > budget)
-			return 0;
-	} while (c == c0);
-	t0 = rdtsc();
-	c0 = c;
+	if (!ruler_measure(&r, rulers_subject_tsc, ~0ULL, span, budget, &run))
+		return 0;
+	*counted = run.counts;
+	*window_ppm = ruler_window_ppm(&run);
+	return run.hz / 1000;
+}
 
-	do {
-		c = read();
-		if (rdtsc() - start > budget)
-			return 0;
-	} while (((c - c0) & mask) < span);
-	t1 = rdtsc();
-
-	*counted = (c - c0) & mask;
-	return ((t1 - t0) * hz / *counted) / 1000;
+static void rulers_report(uint64_t khz, uint64_t counted, uint64_t window_ppm)
+{
+	if (khz == 0) {
+		kputs("WRONG, it did not count\r\n");
+		return;
+	}
+	kputs("the TSC runs at ");
+	kputdec(khz);
+	kputs(" kHz against it, over ");
+	kputdec(counted);
+	kputs(" counts, the ends within ");
+	kputdec(window_ppm);
+	kputs(" ppm\r\n");
 }
 
 static void rulers_selftest(void)
 {
-	uint64_t khz, counted;
+	uint64_t khz, counted, ppm;
 
 	/*
 	 * The 8254 first, read back rather than waited on, so its number can
@@ -3081,17 +3089,9 @@ static void rulers_selftest(void)
 	kputs("UrMach x86-64: 8254 channel 2, read back: ");
 	pit_ruler_start();
 	khz = rulers_tsc_khz(rulers_read_pit, 0xffffULL, PIT_HZ,
-			     PIT_HZ * 3ULL / 100, &counted);
+			     PIT_HZ * 3ULL / 100, &counted, &ppm);
 	pit_ruler_stop();
-	if (khz == 0) {
-		kputs("WRONG, it did not count\r\n");
-	} else {
-		kputs("the TSC runs at ");
-		kputdec(khz);
-		kputs(" kHz against it, over ");
-		kputdec(counted);
-		kputs(" counts\r\n");
-	}
+	rulers_report(khz, counted, ppm);
 
 	kputs("UrMach x86-64: ACPI PM timer: ");
 	if (!pmtimer_init()) {
@@ -3109,16 +3109,8 @@ static void rulers_selftest(void)
 				     pmtimer_width() == 32 ? 0xffffffffULL
 							   : 0x00ffffffULL,
 				     PMTIMER_HZ, PMTIMER_HZ * 3ULL / 100,
-				     &counted);
-		if (khz == 0) {
-			kputs("WRONG, it did not count\r\n");
-		} else {
-			kputs("the TSC runs at ");
-			kputdec(khz);
-			kputs(" kHz against it, over ");
-			kputdec(counted);
-			kputs(" counts\r\n");
-		}
+				     &counted, &ppm);
+		rulers_report(khz, counted, ppm);
 	}
 
 	kputs("UrMach x86-64: HPET: ");
@@ -3142,16 +3134,8 @@ static void rulers_selftest(void)
 	kputs(hpet_started_here() ? ", started here: " : ", already running: ");
 	khz = rulers_tsc_khz(rulers_read_hpet,
 			     hpet_counter_64() ? ~0ULL : 0xffffffffULL,
-			     hpet_hz(), hpet_hz() * 3 / 100, &counted);
-	if (khz == 0) {
-		kputs("WRONG, it did not count\r\n");
-	} else {
-		kputs("the TSC runs at ");
-		kputdec(khz);
-		kputs(" kHz against it, over ");
-		kputdec(counted);
-		kputs(" counts\r\n");
-	}
+			     hpet_hz(), hpet_hz() * 3 / 100, &counted, &ppm);
+	rulers_report(khz, counted, ppm);
 }
 
 /*
