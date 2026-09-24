@@ -273,7 +273,7 @@ preempt_reporter(void)
 	printf("preempt_test: reporter running on processor %d\n",
 	       preempt_slot_r);
 	t0 = rdtsc();
-	deadline = tsc_hz() ? tsc_hz() : 0;
+	deadline = tsc_hz();
 	if (deadline == 0) {
 		/*
 		 * #586: a run that cannot be timed is NOT ASKED (#563), in the
@@ -491,7 +491,7 @@ preempt_test_run_remote(void)
 	 * which says strictly less.
 	 */
 	t0 = rdtsc();
-	limit = tsc_hz() ? tsc_hz() * 10 : 0;
+	limit = tsc_hz() * 10;	/* zero with no TSC: the reporter declines and ends the run */
 
 	while (!preempt_reported) {
 		if (limit != 0 && rdtsc() - t0 > limit) {
