@@ -3536,9 +3536,10 @@ static void timer_selftest(void)
 
 	/*
 	 * #586: an uncalibrated TSC is a question that cannot be posed, not a
-	 * wrong answer.  tsc_calibrate() declines by design when its two runs
-	 * disagree -- under TCG about once in 280 boots -- and then there is
-	 * nothing to hold the gap against.  Every other consumer of tsc_hz()
+	 * wrong answer.  tsc_calibrate() declines when no attempt finds a
+	 * median another run agrees with (#508; before it, two disagreeing runs
+	 * gave up the boot about once in 260), and then there is nothing to hold
+	 * the gap against.  Every other consumer of tsc_hz()
 	 * says NOT ASKED for the same reason (#563); this said WRONG and failed
 	 * boots that had done everything right.  The count above still decided
 	 * whether the tick kept firing: it needs no TSC.
@@ -3558,10 +3559,10 @@ static void timer_selftest(void)
 	 * 🔑 The bound is *derived*, not chosen: one part in thirty-two, which
 	 * is the sum of the two calibrations' own tolerances.
 	 *
-	 * Each clock is measured twice and accepted if the two runs agree
-	 * within one part in sixty-four. So each of the two numbers going into
-	 * this ratio is permitted to be that far out, and the ratio of two such
-	 * numbers is permitted to be twice that. A tighter bound here would be
+	 * Each clock is accepted when the median of its runs agrees with
+	 * another run within one part in sixty-four (#508). So each of the two
+	 * numbers going into this ratio is permitted to be that far out, and the
+	 * ratio of two such numbers is permitted to be twice that. A tighter bound here would be
 	 * asserting an accuracy the inputs do not promise — it would fail on
 	 * calibrations that were accepted as good, which is a test contradicting
 	 * its own premises rather than catching a defect.
@@ -3573,7 +3574,11 @@ static void timer_selftest(void)
 	 * noise arriving where the design says it may.
 	 *
 	 * Which also says where to look if this ever needs to be tighter: not
-	 * here, but at the two calibrations feeding it.
+	 * here, but at the two calibrations feeding it.  #508 looked: 62739 kHz
+	 * was 0.38% above the timer's true 62500, the cost of programming the
+	 * 8254 inside the interval it timed.  Measured edge to edge the timer
+	 * reads within 64 ppm of it, and the measured period is within 0.05%
+	 * under KVM over ten boots.
 	 */
 	off = period > expected ? period - expected : expected - period;
 	kputs(off <= expected / 32
