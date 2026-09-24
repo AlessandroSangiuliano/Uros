@@ -213,6 +213,17 @@ device_md_io_reserved(unsigned int base, unsigned int count)
 {
 	unsigned int i;
 
+#if	ABLATE_508_LEND_RULERS
+	/*
+	 * #508: keep nothing, so the claim path hands the rulers out and both
+	 * of the checks that should notice -- the boot line and
+	 * io_claim_race's arm [5] -- can be seen noticing.
+	 */
+	(void)base;
+	(void)count;
+	(void)i;
+	return 0;
+#endif
 	for (i = 0; i < sizeof(kernel_io) / sizeof(kernel_io[0]); i++)
 		if (io_overlaps(base, count, kernel_io[i].base,
 				kernel_io[i].count))

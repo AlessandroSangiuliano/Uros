@@ -232,6 +232,11 @@ option(UROS_ABLATE_586_TSC_DISAGREE "Build the #586 ablation: the TSC calibratio
 # branch that must stay WRONG, which the calibration ablation cannot reach.
 # Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_586_NO_TICKS "Build the #586 ablation: the tick self-test counts no ticks" OFF)
+# #508: the kernel keeps none of its rulers' ports, so a claim takes the 8254,
+# its gate and the PM timer -- and io_claim_race's arm [5] and the boot's
+# "legacy ports the kernel keeps" line must both say WRONG.  Never ON in a
+# kernel anyone boots for anything else.
+option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
 # I/O APIC describes -- and the discriminator they use, the other half of the
@@ -465,6 +470,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
       message(STATUS "#586 ablation: the tick self-test counts no ticks (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_LEND_RULERS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_LEND_RULERS=1)
+      message(STATUS "#508 ablation: the kernel keeps none of its rulers' ports (x86_64)")
   endif()
   if(UROS_ABLATE_586_TSC_DISAGREE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_TSC_DISAGREE=1)
