@@ -45,7 +45,16 @@ void rulers_find(void)
 		rulers[RULER_PM].r = (struct ruler){
 			read_pm,
 			pmtimer_width() == 32 ? 0xffffffffULL : 0x00ffffffULL,
+#if	ABLATE_508_RULER_LIES
+			/*
+			 * #508: the PM timer's rate is taken as one part in
+			 * thirty-two higher than the specification's, a ruler
+			 * that lies, so the vote can be seen naming it.
+			 */
+			PMTIMER_HZ + PMTIMER_HZ / 32,
+#else
 			PMTIMER_HZ,
+#endif
 		};
 		rulers[RULER_PM].present = 1;
 		rulers[RULER_PM].span = PMTIMER_HZ * 3ULL / 100;

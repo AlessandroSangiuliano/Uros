@@ -657,6 +657,14 @@ void acpi_hpet(struct acpi_hpet *out)
 
 	*out = (struct acpi_hpet){ 0 };
 
+#if	ABLATE_508_NO_HPET
+	/*
+	 * #508: the table is withheld here, in one place, so that the whole
+	 * kernel sees a board without an HPET -- the census, the vote, the
+	 * refinement -- the way #563 withheld the I/O APIC.
+	 */
+	return;
+#endif
 	t = (const struct acpi_hpet_table *)acpi_find_table("HPET");
 	if (t == 0 || t->header.length < sizeof(*t))
 		return;
