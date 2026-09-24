@@ -2992,6 +2992,71 @@ static void freq_census(void)
  * spread between them is the interesting part and a pass/fail would hide the
  * one number worth looking at.
  */
+/*
+ * Where the TSC's rate came from (#508): each exact source's statement, how
+ * far it is from what the rulers measured, and what was made of it -- by the
+ * rules tsc.c states.  A source that contradicts the rulers is WRONG.
+ */
+static void tsc_source_selftest(void)
+{
+	const struct tsc_source	*s = tsc_source();
+	unsigned		id;
+
+	kputs("UrMach x86-64: the TSC's exact sources: ");
+	for (id = 0; id < FREQ_EXACT; id++) {
+		kputs(id == 0 ? "" : ", ");
+		kputs(freq_exact_name(id));
+		if (s->verdict[id] == TSC_ABSENT) {
+			kputs(" states none");
+			continue;
+		}
+		kputs(" ");
+		kputdec(s->hz[id] / 1000);
+		kputs(" kHz");
+		switch (s->verdict[id]) {
+		case TSC_UNCHECKED:
+			kputs(", not believed: nothing was measured to check it");
+			break;
+		case TSC_ADOPTED:
+			kputs(", ");
+			kputdec(s->ppm[id]);
+			kputs(" ppm from the rulers: adopted");
+			break;
+		case TSC_AGREES:
+			kputs(", agreeing with it");
+			break;
+		case TSC_NOT_USED:
+			kputs(", ");
+			kputdec(s->apart_ppm[id]);
+			kputs(" ppm from the adopted value: not used");
+			break;
+		case TSC_CONTRADICTS:
+			kputs(", WRONG: ");
+			kputdec(s->ppm[id]);
+			kputs(" ppm from the rulers, who allow ");
+			kputdec(s->bound_ppm);
+			break;
+		}
+	}
+	if (s->adopted >= 0) {
+		kputs(" — the TSC runs at ");
+		kputdec(tsc_hz() / 1000);
+		kputs(" kHz, by ");
+		kputs(freq_exact_name((unsigned)s->adopted));
+		kputs("\r\n");
+	} else if (s->measured != 0) {
+		for (id = 0; id < FREQ_EXACT; id++)
+			if (s->verdict[id] != TSC_ABSENT)
+				break;
+		kputs(id == FREQ_EXACT ? " — none states a rate, so the rulers' "
+				       : " — none agreed, so the rulers' ");
+		kputdec(s->measured / 1000);
+		kputs(" kHz stands\r\n");
+	} else {
+		kputs(" — nothing measured, nothing adopted\r\n");
+	}
+}
+
 static void tsc_selftest(void)
 {
 	const struct rulers_verdict	*v;
@@ -3066,6 +3131,7 @@ static void tsc_selftest(void)
 	if (v->hz == 0) {
 		kputs(" — WRONG, no ruler produced a median, so the TSC is left "
 		      "uncalibrated and its consumers say NOT ASKED (#586)\r\n");
+		tsc_source_selftest();
 		return;
 	}
 	if (v->answered == 1) {
@@ -3083,6 +3149,7 @@ static void tsc_selftest(void)
 	}
 	kputdec(v->hz / 1000);
 	kputs(" kHz\r\n");
+	tsc_source_selftest();
 }
 
 /*
@@ -3405,8 +3472,17 @@ static void timer_selftest(void)
 	kputs(", measured against the ");
 	kputs(rulers_get(rulers_elected())->name);
 	kputs(": the median, ");
-	kputdec(rate / 1000);
+	kputdec(lapic_timer_measured_hz() / 1000);
 	kputs(" kHz");
+	if (lapic_timer_exact_hz() != 0) {
+		kputs("; the hypervisor states ");
+		kputdec(lapic_timer_exact_hz() / 1000);
+		kputs(" kHz after the divisor, ");
+		kputdec(lapic_timer_exact_ppm());
+		kputs(lapic_timer_exact_adopted()
+		      ? " ppm from it: adopted"
+		      : " ppm from it, more than the rulers allow: WRONG");
+	}
 	if (lapic_timer_set_aside() >= 0) {
 		kputs(", run ");
 		kputdec((unsigned)lapic_timer_set_aside());

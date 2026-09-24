@@ -82,4 +82,37 @@ struct freq_hypervisor {
 
 void freq_hypervisor_read(struct freq_hypervisor *out);
 
+/*
+ * The exact sources, as candidates for the TSC's rate (#508, phase 3), in the
+ * order they are believed:
+ *
+ *   FREQ_CPUID     CPUID 0x15, when it states the crystal as well as the
+ *                  ratio: the processor stating its own crystal.
+ *   FREQ_TIMING    the hypervisor's timing leaf, 0x40000010: the hypervisor
+ *                  stating the frequency it gives the guest's TSC.
+ *   FREQ_KVMCLOCK  KVM's clock: a conversion factor the frequency is inferred
+ *                  from, not a statement of it -- and #508 measured it not
+ *                  following a TSC the hypervisor had rescaled (219 ppm off
+ *                  under `tsc-frequency=', where the timing leaf was right).
+ *
+ * Zero means "does not state one", and a leaf present with every field zero
+ * -- what KVM gives a guest for 0x15 and 0x16 -- is exactly that.  Two
+ * things are never candidates: 0x15 with a ratio and no crystal, which needs
+ * a per-model table this kernel does not keep (the measurement lands within
+ * 10 ppm without it), and 0x16, a nominal base clock that #508 found 0.29%
+ * from the TSC on one machine, inside every agreement window.
+ *
+ * `lapic_bus_hz' is the timing leaf's other field, the LAPIC timer's clock
+ * before the divisor.
+ */
+enum { FREQ_CPUID, FREQ_TIMING, FREQ_KVMCLOCK, FREQ_EXACT };
+
+struct freq_exact {
+	uint64_t	tsc_hz[FREQ_EXACT];
+	uint64_t	lapic_bus_hz;
+};
+
+void freq_exact_read(struct freq_exact *out);
+const char *freq_exact_name(unsigned id);
+
 #endif	/* _X86_64_TIME_FREQ_SOURCE_H_ */
