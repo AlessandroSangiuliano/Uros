@@ -37,6 +37,8 @@
 
 #include <stdint.h>
 
+#include <time/ruler.h>
+
 /*
  * The crystal, in hertz.  1193182 is 105/88 MHz, which is the colour
  * subcarrier frequency divided down — the number is strange because its
@@ -81,5 +83,26 @@ int pit_delay_us(unsigned us);
  */
 int pit_periodic_start(unsigned hz);
 void pit_periodic_stop(void);
+
+/*
+ * Channel 2 as a free-running down-counter that is read back (#508): start it,
+ * read it as often as wanted, stop it.  It counts down modulo 65536 at PIT_HZ,
+ * so two reads less than 54.9 ms apart give an interval with nothing
+ * programmed inside it.  pit_delay_us() reprograms the channel and must not
+ * run while a caller is reading this.
+ */
+void pit_ruler_start(void);
+uint16_t pit_ruler_read(void);
+void pit_ruler_stop(void);
+
+/*
+ * The same channel as a ruler for time/ruler.c, counting up, and the span the
+ * calibrations measure over: thirty milliseconds, long enough that reading
+ * the ruler at the two ends is a small part of the interval, and short enough
+ * that the channel does not wrap inside it (65536 counts, 54.9 ms).  Start it
+ * with pit_ruler_start() first.
+ */
+extern const struct ruler pit_read_back;
+#define PIT_RULER_SPAN	(PIT_HZ * 3u / 100u)
 
 #endif	/* _X86_64_TIME_PIT_H_ */

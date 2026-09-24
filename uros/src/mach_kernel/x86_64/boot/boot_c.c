@@ -67,6 +67,11 @@
 #include <sync/lock.h>
 #include <time/pit.h>
 #include <time/tsc.h>
+#include <time/freq_source.h>	/* #508 */
+#include <time/pmtimer.h>	/* #508 */
+#include <time/hpet.h>		/* #508 */
+#include <time/ruler.h>		/* #508 */
+#include <time/rulers.h>	/* #508 */
 #include <trap/trap.h>
 
 #include <boot/bootarg.h>
@@ -2814,6 +2819,160 @@ static void ring3_selftest(void)
  * code selector the long-mode bit that makes it 64-bit at all.
  */
 /*
+ * What the processor, the hypervisor and the firmware say about the clocks,
+ * before anything measures them (#508, phase 1).
+ *
+ * A census and nothing more: each value is printed as its source gave it,
+ * under the name its specification gives it, and none is believed yet --
+ * which is why no line here carries a verdict.  It is here so that which
+ * sources the calibration trusts is decided from what the machines we have
+ * actually answer (TCG and KVM, the CPU models, both boards), not from what
+ * the manuals say a machine may answer.
+ */
+static void freq_census_putsig(const char *sig)
+{
+	for (int i = 0; i < 12 && sig[i] != '\0'; i++)
+		kputc(sig[i] >= 0x20 && sig[i] < 0x7f ? sig[i] : '.');
+}
+
+static void freq_census(void)
+{
+	struct freq_cpuid	cpu;
+	struct freq_hypervisor	hv;
+	struct acpi_pm_timer	pm;
+	struct acpi_hpet	hpet;
+
+	freq_cpuid_read(&cpu);
+	kputs("UrMach x86-64: frequency census: CPUID highest leaf ");
+	kputhex64(cpu.max_leaf);
+	if (cpu.has_15) {
+		kputs("; 0x15 crystal ");
+		kputdec(cpu.crystal_hz);
+		kputs(" Hz, TSC/crystal ");
+		kputdec(cpu.tsc_numerator);
+		kputs("/");
+		kputdec(cpu.tsc_denominator);
+	} else {
+		kputs("; 0x15 not offered");
+	}
+	if (cpu.has_16) {
+		kputs("; 0x16 base ");
+		kputdec(cpu.base_mhz);
+		kputs(" max ");
+		kputdec(cpu.max_mhz);
+		kputs(" bus ");
+		kputdec(cpu.bus_mhz);
+		kputs(" MHz");
+	} else {
+		kputs("; 0x16 not offered");
+	}
+	kputs("\r\n");
+
+	freq_hypervisor_read(&hv);
+	kputs("UrMach x86-64: frequency census: ");
+	if (!hv.present) {
+		kputs("no hypervisor bit\r\n");
+	} else {
+		kputs("hypervisor \"");
+		freq_census_putsig(hv.signature);
+		kputs("\", highest leaf ");
+		kputhex64(hv.max_leaf);
+		if (hv.has_timing) {
+			kputs("; 0x40000010 TSC ");
+			kputdec(hv.tsc_khz);
+			kputs(" kHz, bus ");
+			kputdec(hv.bus_khz);
+			kputs(" kHz");
+		} else {
+			kputs("; 0x40000010 not offered");
+		}
+		if (hv.is_kvm) {
+			kputs("; KVM features ");
+			kputhex64(hv.kvm_features);
+			if (!hv.kvmclock_asked) {
+				kputs("; kvmclock not offered");
+			} else if (hv.kvmclock_version == 0) {
+				kputs("; kvmclock asked, the host wrote nothing");
+			} else {
+				kputs("; kvmclock implies TSC ");
+				kputdec(hv.kvmclock_tsc_hz);
+				kputs(" Hz (mul ");
+				kputhex64(hv.kvmclock_mul);
+				kputs(", shift ");
+				if (hv.kvmclock_shift < 0)
+					kputc('-');
+				kputdec(hv.kvmclock_shift < 0
+					? -hv.kvmclock_shift : hv.kvmclock_shift);
+				kputs(", flags ");
+				kputhex64(hv.kvmclock_flags);
+				kputs(")");
+			}
+		}
+		kputs("\r\n");
+	}
+
+	acpi_pm_timer(&pm);
+	kputs("UrMach x86-64: frequency census: ACPI PM timer: ");
+	if (!pm.fadt_found) {
+		kputs("no FADT\r\n");
+	} else {
+		kputs("PM_TMR_BLK ");
+		kputhex64(pm.blk);
+		kputs(", PM_TMR_LEN ");
+		kputdec(pm.len);
+		kputs(", ");
+		kputdec(pm.width);
+		kputs(" bits");
+		if (pm.has_xblk) {
+			kputs(", X_PM_TMR_BLK space ");
+			kputdec(pm.xblk.space_id);
+			kputs(" at ");
+			kputhex64(pm.xblk.address);
+		} else {
+			kputs(", no X_PM_TMR_BLK (a table too short for it)");
+		}
+		if (pm.hw_reduced)
+			kputs(" — hardware-reduced ACPI: no fixed timer");
+		else if (pm.address == 0)
+			kputs(" — the FADT states no timer");
+		else {
+			kputs(" — the timer is at ");
+			kputs(pm.space_id == ACPI_GAS_IO ? "port " : "memory ");
+			kputhex64(pm.address);
+		}
+		kputs("\r\n");
+	}
+
+	acpi_hpet(&hpet);
+	kputs("UrMach x86-64: frequency census: HPET table: ");
+	if (!hpet.found) {
+		kputs("none\r\n");
+	} else {
+		kputs("base space ");
+		kputdec(hpet.base.space_id);
+		kputs(" at ");
+		kputhex64(hpet.base.address);
+		kputs(", REV_ID ");
+		kputdec(hpet.block_id & 0xff);
+		kputs(", NUM_TIM_CAP ");
+		kputdec((hpet.block_id >> 8) & 0x1f);
+		kputs(", COUNT_SIZE_CAP ");
+		kputdec((hpet.block_id >> 13) & 1);
+		kputs(", LEG_RT_CAP ");
+		kputdec((hpet.block_id >> 15) & 1);
+		kputs(", VENDOR_ID ");
+		kputhex64(hpet.block_id >> 16);
+		kputs(", number ");
+		kputdec(hpet.number);
+		kputs(", minimum tick ");
+		kputdec(hpet.min_tick);
+		kputs(", page protection ");
+		kputdec(hpet.page_protection & 0xf);
+		kputs("\r\n");
+	}
+}
+
+/*
  * The kernel learns to measure time (#409).
  *
  * Everything proved on this target so far has been a conjunction of facts —
@@ -2835,16 +2994,195 @@ static void ring3_selftest(void)
  */
 static void tsc_selftest(void)
 {
-	int ok = tsc_calibrate();
+	const struct rulers_verdict	*v;
+	struct kernel_ruler		*k;
+	uint64_t			w;
+	unsigned			i, id, n = tsc_calibrate_runs();
+	int				first = 1;
+
+	(void) tsc_calibrate();
+	v = rulers_verdict();
+	k = rulers_get(RULER_8254);
 
 	kputs("UrMach x86-64: timestamp counter measured against the 8254 at ");
-	kputdec((unsigned)(tsc_hz_run(0) / 1000000));
-	kputs(" and ");
-	kputdec((unsigned)(tsc_hz_run(1) / 1000000));
-	kputs(" MHz, ");
+	for (i = 0; i < n; i++) {
+		kputs(i == 0 ? "" : (i + 1 == n ? " and " : ", "));
+		kputdec((unsigned)(tsc_hz_run(i) / 1000000));
+	}
+	kputs(" MHz (ends within ");
+	for (i = 0; i < n; i++) {
+		kputs(i == 0 ? "" : (i + 1 == n ? " and " : ", "));
+		kputdec(tsc_window_ppm(i));
+	}
+	kputs(" ppm), ");
 	kputs(tsc_is_invariant() ? "invariant" : "NOT invariant (#318)");
-	kputs(ok ? " — two runs agree, the mechanism counts\r\n"
-		 : " — WRONG, the runs disagree or the ruler never counted\r\n");
+	/*
+	 * No WRONG here even when this ruler found no median: the others vote
+	 * without it, and the line below says whether the TSC was calibrated.
+	 */
+	if (k->tsc.hz == 0) {
+		kputs(" — no median agreed with another run in ");
+		kputdec(tsc_calibrate_attempts());
+		kputs(" attempts\r\n");
+	} else {
+		kputs(" — the median, ");
+		kputdec(k->tsc.hz / 1000);
+		kputs(" kHz, on attempt ");
+		kputdec(tsc_calibrate_attempts());
+		if (tsc_set_aside() >= 0) {
+			kputs(", run ");
+			kputdec((unsigned)tsc_set_aside());
+			kputs(" set aside as the one that disagreed");
+		}
+		kputs("\r\n");
+	}
+
+	/*
+	 * The vote (#508, time/rulers.h): the TSC as every ruler measured it,
+	 * each with its widest bracket, and what was believed.
+	 */
+	kputs("UrMach x86-64: the TSC against each ruler: ");
+	for (id = 0; id < RULERS; id++) {
+		k = rulers_get(id);
+		if (!k->present)
+			continue;
+		kputs(first ? "" : ", ");
+		first = 0;
+		kputs(k->name);
+		if (k->tsc.hz == 0) {
+			kputs(" no median");
+			continue;
+		}
+		w = 0;
+		for (i = 0; i < RULER_RUNS; i++)
+			if (k->tsc.run_hz[i] != 0 && k->tsc.run_ppm[i] > w)
+				w = k->tsc.run_ppm[i];
+		kputs(" ");
+		kputdec(k->tsc.hz / 1000);
+		kputs(" kHz (");
+		kputdec(w);
+		kputs(" ppm)");
+	}
+	if (v->hz == 0) {
+		kputs(" — WRONG, no ruler produced a median, so the TSC is left "
+		      "uncalibrated and its consumers say NOT ASKED (#586)\r\n");
+		return;
+	}
+	if (v->answered == 1) {
+		kputs(" — one ruler answered, so there was no vote: ");
+	} else if (v->no_majority) {
+		kputs(" — no two agree, so the ");
+		kputs(rulers_get((unsigned)v->kept)->name);
+		kputs("'s, whose ends were narrowest, is kept: ");
+	} else if (v->dissenter >= 0) {
+		kputs(" — the ");
+		kputs(rulers_get((unsigned)v->dissenter)->name);
+		kputs(" disagrees with the other two and is not used: ");
+	} else {
+		kputs(" — they agree: ");
+	}
+	kputdec(v->hz / 1000);
+	kputs(" kHz\r\n");
+}
+
+/*
+ * The two rulers the machine has besides the 8254 (#508, phase 2).
+ *
+ * Each is found, made readable, and asked one question: how fast the TSC
+ * runs against it, over the same thirty milliseconds the 8254 calibration
+ * uses.  Nothing takes the answer yet -- tsc_hz() is still the 8254's -- and
+ * that is deliberate: three rulers read side by side are the evidence the
+ * vote in phase 4 will be designed from, including the question phase 1
+ * raised about whether an emulator's rulers are independent at all.
+ *
+ * The interval runs from an edge of the ruler to a later edge, and both are
+ * seen by reading it, so nothing is programmed inside the interval.  In kHz,
+ * not MHz, because the differences phase 1 found are a third of a percent.
+ */
+/*
+ * The rulers the machine has besides the 8254 (#508): found, made readable,
+ * and described.  What the TSC measures against each, and their vote, is
+ * tsc_selftest()'s line -- which runs after this.
+ */
+static void rulers_selftest(void)
+{
+	rulers_find();
+
+	kputs("UrMach x86-64: ACPI PM timer: ");
+	if (!pmtimer_present()) {
+		kputs("none — the FADT states no timer, or the platform is "
+		      "hardware-reduced\r\n");
+	} else {
+		kputs(pmtimer_is_io() ? "port " : "memory ");
+		kputhex64(pmtimer_address());
+		kputs(", ");
+		kputdec(pmtimer_width());
+		kputs(" bits, ");
+		kputdec(PMTIMER_HZ);
+		kputs(" Hz by specification\r\n");
+	}
+
+	kputs("UrMach x86-64: HPET: ");
+	if (!hpet_present()) {
+		kputs("none — no table, or a block whose capability register "
+		      "does not add up\r\n");
+		return;
+	}
+	kputs("at ");
+	kputhex64(hpet_address());
+	kputs(", period ");
+	kputdec(hpet_period_fs());
+	kputs(" fs (");
+	kputdec(hpet_hz());
+	kputs(" Hz), ");
+	kputs(hpet_counter_64() ? "64" : "32");
+	kputs("-bit counter, ");
+	kputdec(hpet_comparators());
+	kputs(" comparators, vendor ");
+	kputhex64(hpet_vendor());
+	kputs(hpet_started_here() ? ", started here\r\n"
+				  : ", already running\r\n");
+}
+
+/*
+ * The rulers that are ports are the kernel's, and a claim cannot take them
+ * (#508).  Asked of device_md_io_reserved() itself -- the function
+ * ds_master_device_io_port_claim() asks -- so this line cannot say a port is
+ * kept while the claim path lets it go; io_claim_race's arm [5] asks the
+ * same question from a task, through the claim.
+ */
+static void rulers_kept_one(unsigned int base, unsigned int count,
+			    int *first)
+{
+	const char *owner = device_md_io_reserved(base, count);
+
+	kputs(*first ? "" : ", ");
+	*first = 0;
+	kputhex64(base);
+	if (count > 1) {
+		kputs("..");
+		kputhex64(base + count - 1);
+	}
+	kputs(" ");
+	kputs(owner ? owner : "NOT KEPT");
+}
+
+static void rulers_kept_selftest(void)
+{
+	int first = 1;
+	int all = 1;
+
+	kputs("UrMach x86-64: legacy ports the kernel keeps: ");
+	rulers_kept_one(0x40, 4, &first);
+	all &= device_md_io_reserved(0x40, 4) != 0;
+	rulers_kept_one(0x61, 1, &first);
+	all &= device_md_io_reserved(0x61, 1) != 0;
+	if (pmtimer_present() && pmtimer_is_io()) {
+		rulers_kept_one((unsigned int)pmtimer_address(), 4, &first);
+		all &= device_md_io_reserved((unsigned int)pmtimer_address(),
+					     4) != 0;
+	}
+	kputs(all ? "\r\n" : " — WRONG, a ruler can be claimed\r\n");
 }
 
 /*
@@ -3048,16 +3386,32 @@ static void timer_selftest(void)
 	int had_interrupts;
 
 	kputs("UrMach x86-64: the local APIC timer counts at ");
-	kputdec((unsigned)(lapic_timer_hz_run(0) / 1000));
-	kputs(" and ");
-	kputdec((unsigned)(lapic_timer_hz_run(1) / 1000));
-	kputs(" kHz after the divisor");
+	for (unsigned i = 0; i < RULER_RUNS; i++) {
+		kputs(i == 0 ? "" : (i + 1 == RULER_RUNS ? " and " : ", "));
+		kputdec((unsigned)(lapic_timer_hz_run(i) / 1000));
+	}
+	kputs(" kHz after the divisor (ends within ");
+	for (unsigned i = 0; i < RULER_RUNS; i++) {
+		kputs(i == 0 ? "" : (i + 1 == RULER_RUNS ? " and " : ", "));
+		kputdec(lapic_timer_window_ppm(i));
+	}
+	kputs(" ppm)");
 
 	if (rate == 0) {
-		kputs(" — WRONG, it never counted\r\n");
+		kputs(" — WRONG, it never counted, or no median agreed with "
+		      "another run\r\n");
 		return;
 	}
-	kputs(", measured against the 8254");
+	kputs(", measured against the ");
+	kputs(rulers_get(rulers_elected())->name);
+	kputs(": the median, ");
+	kputdec(rate / 1000);
+	kputs(" kHz");
+	if (lapic_timer_set_aside() >= 0) {
+		kputs(", run ");
+		kputdec((unsigned)lapic_timer_set_aside());
+		kputs(" set aside as the one that disagreed");
+	}
 
 	/*
 	 * And how many tries that took (#464).
@@ -3169,9 +3523,10 @@ static void timer_selftest(void)
 
 	/*
 	 * #586: an uncalibrated TSC is a question that cannot be posed, not a
-	 * wrong answer.  tsc_calibrate() declines by design when its two runs
-	 * disagree -- under TCG about once in 280 boots -- and then there is
-	 * nothing to hold the gap against.  Every other consumer of tsc_hz()
+	 * wrong answer.  tsc_calibrate() declines when no attempt finds a
+	 * median another run agrees with (#508; before it, two disagreeing runs
+	 * gave up the boot about once in 260), and then there is nothing to hold
+	 * the gap against.  Every other consumer of tsc_hz()
 	 * says NOT ASKED for the same reason (#563); this said WRONG and failed
 	 * boots that had done everything right.  The count above still decided
 	 * whether the tick kept firing: it needs no TSC.
@@ -3191,10 +3546,10 @@ static void timer_selftest(void)
 	 * 🔑 The bound is *derived*, not chosen: one part in thirty-two, which
 	 * is the sum of the two calibrations' own tolerances.
 	 *
-	 * Each clock is measured twice and accepted if the two runs agree
-	 * within one part in sixty-four. So each of the two numbers going into
-	 * this ratio is permitted to be that far out, and the ratio of two such
-	 * numbers is permitted to be twice that. A tighter bound here would be
+	 * Each clock is accepted when the median of its runs agrees with
+	 * another run within one part in sixty-four (#508). So each of the two
+	 * numbers going into this ratio is permitted to be that far out, and the
+	 * ratio of two such numbers is permitted to be twice that. A tighter bound here would be
 	 * asserting an accuracy the inputs do not promise — it would fail on
 	 * calibrations that were accepted as good, which is a test contradicting
 	 * its own premises rather than catching a defect.
@@ -3206,7 +3561,11 @@ static void timer_selftest(void)
 	 * noise arriving where the design says it may.
 	 *
 	 * Which also says where to look if this ever needs to be tighter: not
-	 * here, but at the two calibrations feeding it.
+	 * here, but at the two calibrations feeding it.  #508 looked: 62739 kHz
+	 * was 0.38% above the timer's true 62500, the cost of programming the
+	 * 8254 inside the interval it timed.  Measured edge to edge the timer
+	 * reads within 64 ppm of it, and the measured period is within 0.05%
+	 * under KVM over ten boots.
 	 */
 	off = period > expected ? period - expected : expected - period;
 	kputs(off <= expected / 32
@@ -6521,7 +6880,10 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	cons_selftest();
 	ksym_selftest();
 	ioapic_madt_selftest();
+	freq_census();
+	rulers_selftest();
 	tsc_selftest();
+	rulers_kept_selftest();
 	timer_selftest();
 	pci_cfg_selftest();
 	pci_cap_selftest();

@@ -152,7 +152,7 @@ wall_subtick_nsec(uint64_t anchor)
 	uint64_t	per_us, delta, maxd, ns, cap;
 
 	/*
-	 * Zero when the calibration did not run or its two runs disagreed.  Then
+	 * Zero when the calibration did not run or found no agreeing median.  Then
 	 * the tick is all there is, and saying so by returning nothing beats
 	 * interpolating with a rate nobody measured.
 	 */

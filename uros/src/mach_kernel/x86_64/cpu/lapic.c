@@ -12,6 +12,8 @@
 #include <cpu/regs.h>
 #include <pmap/pmap.h>
 #include <time/pit.h>
+#include <time/ruler.h>	/* #508: the rule the TSC shares */
+#include <time/rulers.h>	/* #508: against the elected ruler */
 #include <trap/trap.h>
 
 #define MSR_APIC_BASE		0x1B
@@ -293,9 +295,35 @@ void lapic_send_nmi(uint32_t apic_id)
  */
 static uint32_t timer_hz;
 
-static uint32_t timer_measure_once(void)
+/*
+ * The timer's current count, read as a counter that goes UP, which is what
+ * time/ruler.c measures.  The timer is left counting down from the top in
+ * one-shot mode while this is read; at any divisor a machine uses that is
+ * seconds before it reaches zero, and the whole calibration takes well under
+ * one.
+ */
+static uint64_t subject_timer(void)
 {
-	uint32_t before, after;
+	return (uint32_t)~lapic_read(LAPIC_TIMER_CUR);
+}
+
+/*
+ * Against the 8254 read back, by the rule the TSC is calibrated by
+ * (time/ruler.c: three runs, the median, four attempts), which is what #464
+ * asked for when it retried this one and left the TSC giving up the boot.
+ *
+ * ⚠️ The old measurement waited on pit_delay_us(), programming the 8254 inside
+ * its own interval, over 20 ms: the tick self-test showed the result once the
+ * TSC stopped carrying the same error -- the tick 0.7% longer than asked for,
+ * under KVM and TCG alike.
+ */
+static struct ruler_calibration timer_cal;
+
+uint32_t lapic_timer_calibrate(void)
+{
+	timer_hz = 0;
+	if (!lapic_present())
+		return 0;
 
 	/*
 	 * Masked throughout.  Calibration is a measurement, not a service, and
@@ -304,110 +332,26 @@ static uint32_t timer_measure_once(void)
 	 */
 	lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
 	lapic_write(LAPIC_TIMER_DIV, TIMER_DIVIDE_16);
+	lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFFu);
 
 	/*
-	 * Count down from the top, so the interval cannot reach zero and wrap
-	 * into a small difference that looks like a slow clock.
+	 * Against the ruler the vote elected (time/rulers.h): the narrowest of
+	 * those it did not name, so a ruler found wrong measuring the TSC does
+	 * not go on to measure this.
 	 */
-	lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFFu);
-	before = lapic_read(LAPIC_TIMER_CUR);
+	{
+		unsigned		id = rulers_elected();
+		struct kernel_ruler	*k = rulers_get(id);
 
-	if (!pit_delay_us(LAPIC_CALIBRATE_US)) {
-		lapic_write(LAPIC_TIMER_INIT, 0);
-		return 0;
+		rulers_start(id);
+		if (ruler_calibrate(&k->r, subject_timer, 0xffffffffULL,
+				    k->span, 1ULL << 34, 0, &timer_cal))
+			timer_hz = (uint32_t)timer_cal.hz;
+		rulers_stop(id);
 	}
 
-	after = lapic_read(LAPIC_TIMER_CUR);
 	lapic_write(LAPIC_TIMER_INIT, 0);	/* stop */
-
-	if (after >= before)
-		return 0;			/* it never counted */
-
-	return (uint32_t)(((uint64_t)(before - after) * 1000000u)
-			  / LAPIC_CALIBRATE_US);
-}
-
-/*
- * Twice, and the two must agree — the same discipline the timestamp counter's
- * calibration already had, applied here because the two are compared against
- * each other later and a bound on that comparison is only as good as the
- * weaker of the two measurements.
- *
- * A single reading cannot tell a frequency from an interval that was
- * interrupted: a system-management interrupt inside the window, or the host
- * taking the emulator off its processor, gives a number that is wrong and
- * looks ordinary. Two that agree are not proof — they share a ruler — but one
- * that disagrees with itself is proof of the opposite, which is the case this
- * can decide.
- *
- * One part in sixty-four, matching the counter's, so the two sides of the
- * comparison are held to the same standard rather than to two numbers chosen
- * separately.
- */
-#define TIMER_CALIBRATE_TOLERANCE	64
-
-/*
- * And how many times to ASK (#464).
- *
- * The agreement test above is right and stays exactly as it is.  What was
- * wrong was the conclusion drawn from a single disagreement: the pair is
- * evidence about that pair, not about the timer.  The host taking the
- * emulator off its processor inside one of the two windows is a transient,
- * and the answer to a transient is to measure again -- not to declare the
- * hardware unusable and stop the machine before it has a scheduler.
- *
- * It cost one boot in fifteen, measured, and the panic named the wrong thing:
- * "no usable timer backend" on a machine whose timer was fine.
- *
- * Four, because the failure being defended against is one interference in one
- * window; four consecutive interferences is a machine that is not going to
- * calibrate anything and should say so rather than spin.
- */
-#define TIMER_CALIBRATE_ATTEMPTS	4
-
-static uint32_t timer_hz_run[2];
-static unsigned timer_hz_attempts;
-
-uint32_t lapic_timer_calibrate(void)
-{
-	uint32_t spread, allowed;
-	unsigned attempt;
-
-	timer_hz = 0;
-	timer_hz_attempts = 0;
-
-	if (!lapic_present())
-		return 0;
-
-	for (attempt = 1; attempt <= TIMER_CALIBRATE_ATTEMPTS; attempt++) {
-		timer_hz_attempts = attempt;
-
-		timer_hz_run[0] = timer_measure_once();
-		timer_hz_run[1] = timer_measure_once();
-
-		/*
-		 * ⚠️ Not retried, and that is the distinction the retry must
-		 * not blur.  A zero here is timer_measure_once() reporting
-		 * that the counter never moved or that the PIT delay failed --
-		 * a fact about the machine, not about this window -- and a
-		 * loop that kept asking would turn a broken timer into a
-		 * slower boot with the same ending.
-		 */
-		if (timer_hz_run[0] == 0 || timer_hz_run[1] == 0)
-			return 0;
-
-		spread = timer_hz_run[0] > timer_hz_run[1]
-		       ? timer_hz_run[0] - timer_hz_run[1]
-		       : timer_hz_run[1] - timer_hz_run[0];
-		allowed = timer_hz_run[0] / TIMER_CALIBRATE_TOLERANCE;
-
-		if (spread <= allowed) {
-			timer_hz = (timer_hz_run[0] + timer_hz_run[1]) / 2;
-			return timer_hz;
-		}
-	}
-
-	return 0;
+	return timer_hz;
 }
 
 /*
@@ -420,12 +364,22 @@ uint32_t lapic_timer_calibrate(void)
  */
 unsigned lapic_timer_calibrate_attempts(void)
 {
-	return timer_hz_attempts;
+	return timer_cal.attempts;
 }
 
 uint32_t lapic_timer_hz_run(unsigned which)
 {
-	return which < 2 ? timer_hz_run[which] : 0;
+	return which < RULER_RUNS ? (uint32_t)timer_cal.run_hz[which] : 0;
+}
+
+uint64_t lapic_timer_window_ppm(unsigned which)
+{
+	return which < RULER_RUNS ? timer_cal.run_ppm[which] : 0;
+}
+
+int lapic_timer_set_aside(void)
+{
+	return timer_cal.set_aside;
 }
 
 uint32_t lapic_timer_hz(void)

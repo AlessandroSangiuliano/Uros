@@ -135,6 +135,20 @@ extern void		device_md_io_unclaimed(unsigned int base,
 					       unsigned int count);
 
 /*
+ * Whether a range of legacy ports touches one the kernel keeps for itself,
+ * and whose it is (#508).  Returns the owner's name, or 0.
+ *
+ * 🔑 NOT EVERY CHIP A CLAIM CAN NAME IS A CHIP A DRIVER MAY HAVE.  COM1 is
+ * lent (device_md_io_claimed() above: the console steps back); a ruler is
+ * not, because the kernel's own sense of time is measured against it and a
+ * task that could reprogram it could make every later measurement lie
+ * without touching anything the kernel would notice.  Asked before a claim is
+ * recorded, so a refused range never exists in the table even briefly.
+ */
+extern const char	*device_md_io_reserved(unsigned int base,
+					       unsigned int count);
+
+/*
  * What runs when the line fires.  Called with the interrupt number, in
  * interrupt context, on whichever processor took it.
  */

@@ -320,6 +320,26 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 }
 
 /*
+ * The legacy ports this kernel keeps (#508): the 8254, which on i386 is not
+ * only a ruler but the clock itself -- rtclock ticks from its channel 0 --
+ * and port 0x61, which gates channel 2.
+ *
+ * ⚠️ This answers for device_io_port_claim() only.  i386 has a second way to
+ * a port, i386_io_port_add() (iopb.c), which grants it in the task's I/O
+ * permission bitmap and asks nothing here; that path is i386's own and is
+ * not closed by this.
+ */
+const char *
+device_md_io_reserved(unsigned int base, unsigned int count)
+{
+	if (base < 0x40 + 4 && 0x40 < base + count)
+		return "the 8254, the kernel's clock";
+	if (base < 0x61 + 1 && 0x61 < base + count)
+		return "the 8254's channel-2 gate";
+	return 0;
+}
+
+/*
  * 🔴 THIS MACHINE HAS NO MESSAGE-SIGNALLED INTERRUPTS, and says so.
  *
  * Not "not yet": this tree's i386 reaches interrupts through the 8259 and, on

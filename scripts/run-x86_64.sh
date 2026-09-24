@@ -86,10 +86,22 @@ LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
 # exactly as much as one that never fails — both get ignored — and a silent
 # skip is how a real regression hides behind a known one.
 #
-# The TSC one is a property of QEMU, which does not offer an invariant
-# timestamp counter even with -cpu max (measured 27/07 on both cpu models).
-# #318 was rewritten around that fact.
-KNOWN='timestamp counter measured against the 8254'
+# The one entry: a machine that did not let the TSC be calibrated (#508).
+#
+# 🔴 THE EXCUSE USED TO GIVE THE WRONG REASON.  It matched every line that
+# began "timestamp counter measured against the 8254" and said "known QEMU
+# artifact (TSC not invariant, #318)" -- but the line had long stopped saying
+# WRONG about invariance; it said WRONG only when the calibration refused.  So
+# a real refusal was excused for a reason it did not have, and any other WRONG
+# a later version of that line might print would have been excused with it.
+#
+# Now it matches the refusal and nothing else: no ruler produced a median,
+# after four attempts each (#508), or -- in a log from before #508 -- the old
+# two runs disagreed.  It is excused rather than failed because every consumer
+# of tsc_hz() then says NOT ASKED, which is the right answer to a machine
+# whose clock would not be measured (#586); and it is COUNTED, below, because
+# a calibration that failed is still an event somebody should see.
+KNOWN='no ruler produced a median\|WRONG, the runs disagree or the ruler never counted'
 
 # 🔑 THE THIRD WORD (#563).
 #
@@ -207,7 +219,7 @@ NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
 echo "=== verdict: $TESTS self-tests, under $VACCEL ==="
-[ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: known QEMU artifact (TSC not invariant, #318)"
+[ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: the TSC could not be calibrated, and its consumers said NOT ASKED (#508, #586)"
 if [ "$UNASKED" -gt 0 ]; then
 	echo "  $UNASKED NOT ASKED: this machine could not pose the question (#563)"
 	grep -a "$NOT_ASKED" "$LOG" | sed 's/^/    /'

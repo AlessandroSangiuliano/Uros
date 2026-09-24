@@ -81,7 +81,6 @@ static uint8_t		event_vector;
 #define	MSR_IA32_TSC_DEADLINE	0x6E0
 #define	CPUID_01_ECX_TSC_DEADLINE (1u << 24)
 
-static uint64_t		tsc_per_ns_num;	/* tsc_hz, as a numerator */
 
 static int tscdl_probe(void)
 {
@@ -116,7 +115,6 @@ static int tscdl_probe(void)
 		return 0;
 	}
 
-	tsc_per_ns_num = tsc_hz();
 	return 1;
 }
 
@@ -137,9 +135,15 @@ static void tscdl_setup(uint8_t vector)
 
 static int tscdl_arm(uint64_t ns)
 {
-	uint64_t ticks, now;
+	uint64_t ticks, now, rate = tsc_hz();
 
-	if (tsc_per_ns_num == 0)
+	/*
+	 * Read at every arm rather than copied at probe (#508): the refinement
+	 * replaces the boot rate once, a second after the scheduler starts, and
+	 * a copy taken here earlier would go on arming by the old one.  A
+	 * second place to update is a second place to forget.
+	 */
+	if (rate == 0)
 		return 0;
 
 	/*
@@ -151,8 +155,8 @@ static int tscdl_arm(uint64_t ns)
 	 * a moment in the past, which fires immediately, forever -- a livelock
 	 * that reads as "the clock is too fast".
 	 */
-	ticks = (ns / NS_PER_SEC) * tsc_per_ns_num
-	      + ((ns % NS_PER_SEC) * tsc_per_ns_num) / NS_PER_SEC;
+	ticks = (ns / NS_PER_SEC) * rate
+	      + ((ns % NS_PER_SEC) * rate) / NS_PER_SEC;
 	if (ticks == 0)
 		ticks = 1;		/* never arm for "now or earlier" */
 

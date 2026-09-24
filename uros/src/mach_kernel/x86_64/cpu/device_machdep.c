@@ -34,6 +34,7 @@
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
 #include <ddb/cons.h>	/* #497: who owns COM1 */
+#include <time/pmtimer.h>	/* #508: a ruler is not lent */
 #include <sync/atomic.h>	/* #538: atomic_add32 / atomic_swap32 */
 #include <kern/misc_protos.h>	/* printf */
 #include <trap/trap.h>	/* the vector table, and the replay path */
@@ -179,6 +180,60 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 	 */
 	if (covers_com1(base, count))
 		cons_port_reclaim();
+}
+
+/*
+ * The legacy ports this kernel keeps (#508): its rulers.
+ *
+ * The 8254's four registers and port 0x61, whose low bits gate channel 2 and
+ * read its output -- that is how pit_delay_us() times an interval -- and the
+ * ACPI power-management timer wherever the FADT put it, if it is a port.  The
+ * HPET is not here because it is memory, and a task maps memory only inside
+ * the regions of a PCI device it has claimed (check_mmio_phys()), which the
+ * HPET is not.
+ */
+static const struct {
+	unsigned int	base;
+	unsigned int	count;
+	const char	*owner;
+} kernel_io[] = {
+	{ 0x40, 4, "the 8254, the kernel's ruler" },
+	{ 0x61, 1, "the 8254's channel-2 gate" },
+};
+
+static int
+io_overlaps(unsigned int base, unsigned int count,
+	    unsigned int rbase, unsigned int rcount)
+{
+	return base < rbase + rcount && rbase < base + count;
+}
+
+const char *
+device_md_io_reserved(unsigned int base, unsigned int count)
+{
+	unsigned int i;
+
+#if	ABLATE_508_LEND_RULERS
+	/*
+	 * #508: keep nothing, so the claim path hands the rulers out and both
+	 * of the checks that should notice -- the boot line and
+	 * io_claim_race's arm [5] -- can be seen noticing.
+	 */
+	(void)base;
+	(void)count;
+	(void)i;
+	return 0;
+#endif
+	for (i = 0; i < sizeof(kernel_io) / sizeof(kernel_io[0]); i++)
+		if (io_overlaps(base, count, kernel_io[i].base,
+				kernel_io[i].count))
+			return kernel_io[i].owner;
+
+	if (pmtimer_present() && pmtimer_is_io()
+	    && io_overlaps(base, count, (unsigned int)pmtimer_address(), 4))
+		return "the ACPI PM timer, the kernel's ruler";
+
+	return 0;
 }
 
 /*

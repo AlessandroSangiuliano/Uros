@@ -2,40 +2,32 @@
  * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * SPDX-License-Identifier: MIT
  *
- * The timestamp counter, and how fast it actually runs (#409).
+ * The timestamp counter, and how fast it actually runs (#409, #508).
  */
 
 #include <stdint.h>
 
 #include <cpu/regs.h>
 #include <time/pit.h>
+#include <time/ruler.h>
+#include <time/rulers.h>
 #include <time/tsc.h>
 
 /*
- * How long each measurement runs.
+ * Measured against the 8254 read back, by the rule every calibration shares
+ * (time/ruler.c: three runs, the median, four attempts).
  *
- * Long enough that the fixed costs — the port writes that start and stop the
- * ruler, the loop that polls it — are a rounding error against the interval,
- * and short enough to fit in one countdown of a sixteen-bit counter.  Two
- * runs of this are about sixty milliseconds of boot, which is worth it for a
- * number every later measurement depends on.
+ * What #508 found here, so it is not found again.  The old measurement read
+ * the TSC, then programmed the 8254, then waited for it: six port accesses
+ * inside its own interval.  Under KVM BOTH runs read 0.37% fast -- what
+ * 111 us of 30 ms would do; under TCG the first run paid for translating the
+ * code as well, and was the high one in 207 of 207 recorded boots.  The
+ * interval now runs from an edge of the ruler to an edge, with nothing
+ * programmed inside it.  And two runs that disagreed gave up the boot, about
+ * one in 260; now the median of three decides, and a failed attempt is asked
+ * again.
  */
-#define CALIBRATE_US	30000u
-
-/*
- * How far apart the two runs may be and still be believed.
- *
- * One part in sixty-four, a little under two percent.  Loose enough that a
- * system-management interrupt or an emulator losing the host processor for a
- * moment does not fail an honest calibration; tight enough that the failures
- * worth catching — a ruler that is not counting, an interval that was
- * interrupted for a long time — cannot pass.  A tolerance in the same units
- * as the thing measured, so it does not need revisiting on a faster machine.
- */
-#define CALIBRATE_TOLERANCE	64
-
-static uint64_t hz;
-static uint64_t hz_run[2];
+static uint64_t tsc_rate;	/* not `hz': that is the kernel's ticks per second */
 
 int tsc_is_invariant(void)
 {
@@ -49,71 +41,105 @@ int tsc_is_invariant(void)
 	return (d & (1U << 8)) != 0;		/* invariant TSC */
 }
 
-static uint64_t measure_once(void)
+static uint64_t subject_tsc(void)
 {
-	uint64_t start, end;
-
-	/*
-	 * Ordered on both sides.  RDTSC may float past the instructions around
-	 * it, and the two instructions it must not float past are the ones
-	 * that start and stop the interval — an unordered pair could sample
-	 * the counter before the gate opened and after it closed, or the
-	 * reverse, and the error would be a bias rather than noise.
-	 */
-	start = rdtsc_ordered();
-	if (!pit_delay_us(CALIBRATE_US))
-		return 0;
-	end = rdtsc_ordered();
-
-	if (end <= start)
-		return 0;
-
-	return ((end - start) * 1000000u) / CALIBRATE_US;
+	return rdtsc_ordered();
 }
 
-int tsc_calibrate(void)
+#if	ABLATE_508_ONE_RUN_OUT || ABLATE_586_TSC_DISAGREE
+static void ablate_runs(uint64_t run_hz[RULER_RUNS])
 {
-	uint64_t spread, allowed;
+	unsigned i;
 
-	hz = 0;
-	hz_run[0] = measure_once();
-	hz_run[1] = measure_once();
+	(void)i;
+#if	ABLATE_508_ONE_RUN_OUT
+	/*
+	 * #508: one run reads one part in thirty-two high, the shape of every
+	 * refusal the old calibration took on its own, so the median can be
+	 * seen setting it aside.
+	 */
+	run_hz[0] += run_hz[0] / 32;
+#endif
 #if	ABLATE_586_TSC_DISAGREE
 	/*
-	 * #586: the first run reads one part in 32 high, the shape of every
-	 * refusal this has taken on its own (07/08, 27/08 twice, 24/09: the
-	 * first run the high one each time), so the refusal below happens on
-	 * purpose and every consumer of tsc_hz() can be seen answering it.
+	 * #586, reshaped by #508: every run of every attempt reads a different
+	 * amount high, one part in thirty-two apart, so no two ever agree and
+	 * the calibration declines on purpose -- which is how every consumer of
+	 * tsc_hz() is seen answering a machine that could not calibrate.  With
+	 * one run out of three, the median would simply set it aside.
 	 */
-	hz_run[0] += hz_run[0] / 32;
+	for (i = 0; i < RULER_RUNS; i++)
+		run_hz[i] += run_hz[i] * i / 32;
+#endif
+}
+#define	TSC_ABLATE	ablate_runs
+#else
+#define	TSC_ABLATE	0
 #endif
 
-	if (hz_run[0] == 0 || hz_run[1] == 0)
-		return 0;
+/*
+ * Against every ruler the machine has, and then they vote (time/rulers.h).
+ * The ablations reach every ruler's runs alike: #586's has to leave the
+ * machine with no ruler that answered, or the vote would carry on without the
+ * 8254 and the NOT ASKED paths it exists to run would not run.
+ */
+int tsc_calibrate(void)
+{
+	struct rulers_verdict	v;
+	struct kernel_ruler	*k;
+	unsigned		id;
 
-	spread = hz_run[0] > hz_run[1] ? hz_run[0] - hz_run[1]
-				       : hz_run[1] - hz_run[0];
-	allowed = hz_run[0] / CALIBRATE_TOLERANCE;
+	rulers_find();
+	for (id = 0; id < RULERS; id++) {
+		k = rulers_get(id);
+		if (!k->present)
+			continue;
+		rulers_start(id);
+		(void) ruler_calibrate(&k->r, subject_tsc, ~0ULL, k->span,
+				       1ULL << 34, TSC_ABLATE, &k->tsc);
+		rulers_stop(id);
+	}
 
-	/*
-	 * Two that agree are not a proof of accuracy — they share the same
-	 * ruler, so a ruler that is wrong is wrong twice — but two that
-	 * disagree are a proof that at least one is meaningless, and that is
-	 * the case this can actually decide.
-	 */
-	if (spread > allowed)
-		return 0;
-
-	hz = (hz_run[0] + hz_run[1]) / 2;
-	return 1;
+	rulers_vote(&v);
+	tsc_rate = v.hz;
+	return tsc_rate != 0;
 }
 
 uint64_t tsc_hz(void)
 {
-	return hz;
+	return tsc_rate;
+}
+
+/*
+ * The refinement's answer replaces the boot value once (time/tsc_refine.c).
+ * One aligned 64-bit store: a reader sees the old rate or the new one.
+ */
+void tsc_refined(uint64_t rate)
+{
+	tsc_rate = rate;
 }
 
 uint64_t tsc_hz_run(unsigned which)
 {
-	return which < 2 ? hz_run[which] : 0;
+	return which < RULER_RUNS ? rulers_get(RULER_8254)->tsc.run_hz[which] : 0;
+}
+
+uint64_t tsc_window_ppm(unsigned which)
+{
+	return which < RULER_RUNS ? rulers_get(RULER_8254)->tsc.run_ppm[which] : 0;
+}
+
+unsigned tsc_calibrate_runs(void)
+{
+	return RULER_RUNS;
+}
+
+unsigned tsc_calibrate_attempts(void)
+{
+	return rulers_get(RULER_8254)->tsc.attempts;
+}
+
+int tsc_set_aside(void)
+{
+	return rulers_get(RULER_8254)->tsc.set_aside;
 }

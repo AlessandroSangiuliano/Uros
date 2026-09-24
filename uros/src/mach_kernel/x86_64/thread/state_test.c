@@ -723,7 +723,7 @@ thread_state_entry_test(void)
 	/*
 	 * 🔑 NOT ASKED, not WRONG (#563).  An uncalibrated TSC is a property of
 	 * the machine this booted on -- qemu offers no invariant counter, and
-	 * tsc_calibrate() can lose its two-run agreement to host jitter -- so
+	 * tsc_calibrate() can find no agreeing median in four attempts -- so
 	 * there is no ruler here, and a test with no ruler has not failed, it
 	 * has not been run.  The sentence below already said as much while
 	 * printing the word the harness greps for.

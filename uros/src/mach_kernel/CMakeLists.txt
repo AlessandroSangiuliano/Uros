@@ -226,12 +226,38 @@ option(UROS_ABLATE_563_ALONE "Build the #563 ablation: every test believes it is
 # Every consumer of tsc_hz() then has to answer a missing rate, and they are all
 # asked at once, which waiting for the natural refusal would take hundreds of
 # boots to do.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_586_TSC_DISAGREE "Build the #586 ablation: the TSC calibration's two runs disagree" OFF)
+option(UROS_ABLATE_586_TSC_DISAGREE "Build the #586 ablation: no two of the TSC calibration's runs agree, so it declines" OFF)
 # #586: the tick self-test's handler acknowledges each tick and counts none of
 # them, so the period line meets a calibrated TSC with no gap to measure -- the
 # branch that must stay WRONG, which the calibration ablation cannot reach.
 # Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_586_NO_TICKS "Build the #586 ablation: the tick self-test counts no ticks" OFF)
+# #508: the kernel keeps none of its rulers' ports, so a claim takes the 8254,
+# its gate and the PM timer -- and io_claim_race's arm [5] and the boot's
+# "legacy ports the kernel keeps" line must both say WRONG.  Never ON in a
+# kernel anyone boots for anything else.
+option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
+# #508: an MMIO mapping is checked on its first page only, as it was before the
+# span was bounded, so irq_claim_test's arm [10] -- one page past the owned
+# card's region -- must say WRONG.  Never ON in a kernel anyone boots for
+# anything else.
+# #508: one of the TSC calibration's three runs reads one part in thirty-two
+# high, the shape of every refusal the old calibration took on its own, so the
+# median can be seen setting it aside.  Never ON in a kernel anyone boots for
+# anything else.
+option(UROS_ABLATE_508_ONE_RUN_OUT "Build the #508 ablation: one TSC calibration run reads 1/32 high" OFF)
+# #508: the end of the first run of every calibration attempt is read ~3 ms
+# late, so its bracket is wider than the tolerance and the run must be set
+# aside before the vote -- for the TSC and the LAPIC timer alike, since they
+# share the rule.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_508_END_DELAYED "Build the #508 ablation: one calibration run's end is read ~3 ms late" OFF)
+# #508: the PM timer's rate is taken 1/32 high, a ruler that lies, so the vote
+# must name it and nothing measure against it.  Never ON otherwise.
+option(UROS_ABLATE_508_RULER_LIES "Build the #508 ablation: the PM timer's rate is taken 1/32 high" OFF)
+# #508: the ACPI HPET table is withheld, a board without an HPET, so two
+# rulers vote and the refinement uses the PM timer.  Never ON otherwise.
+option(UROS_ABLATE_508_NO_HPET "Build the #508 ablation: the ACPI HPET table is withheld" OFF)
+option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
 # I/O APIC describes -- and the discriminator they use, the other half of the
@@ -299,6 +325,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_dev.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/freq_source.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/hpet.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pmtimer.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/ruler.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rulers.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc_refine.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
@@ -463,9 +495,33 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
       message(STATUS "#586 ablation: the tick self-test counts no ticks (x86_64)")
   endif()
+  if(UROS_ABLATE_508_ONE_RUN_OUT)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_ONE_RUN_OUT=1)
+      message(STATUS "#508 ablation: one TSC calibration run reads 1/32 high (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_END_DELAYED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_END_DELAYED=1)
+      message(STATUS "#508 ablation: one calibration run's end is read ~3 ms late (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_RULER_LIES)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_RULER_LIES=1)
+      message(STATUS "#508 ablation: the PM timer's rate is taken 1/32 high (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_NO_HPET)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_NO_HPET=1)
+      message(STATUS "#508 ablation: the ACPI HPET table is withheld (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_SPAN_UNBOUNDED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
+      message(STATUS "#508 ablation: an MMIO mapping is checked on its first page only (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_LEND_RULERS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_LEND_RULERS=1)
+      message(STATUS "#508 ablation: the kernel keeps none of its rulers' ports (x86_64)")
+  endif()
   if(UROS_ABLATE_586_TSC_DISAGREE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_TSC_DISAGREE=1)
-      message(STATUS "#586 ablation: the TSC calibration's first run reads 1/32 high, so the two disagree (x86_64)")
+      message(STATUS "#586 ablation: each TSC calibration run reads a different 1/32 high, so none agree and it declines (x86_64)")
   endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)

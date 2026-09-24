@@ -198,7 +198,6 @@ void lapic_send_nmi(uint32_t apic_id);
  * branch now gets taken by the tick as well as by the device vectors.
  */
 #define LAPIC_TIMER_VECTOR	0xE1
-#define LAPIC_CALIBRATE_US	20000u
 
 /*
  * Measure how fast the timer counts, on this processor, against the 8254.
@@ -210,22 +209,26 @@ void lapic_send_nmi(uint32_t apic_id);
  * The answer is shared because the rate belongs to the machine; the timer
  * that uses it belongs to each processor.
  *
- * It measures twice and requires the two to agree within one part in
- * sixty-four, and returns zero if they do not. Two that agree are not proof
- * of accuracy — they share a ruler — but one reading that disagrees with
- * itself proves at least one of them meaningless, which is the case this can
- * decide.
+ * By the rule the TSC is calibrated by (time/ruler.c, #508): three runs, each
+ * from an edge of the 8254 read back to a later edge, and the median,
+ * believed when another run agrees with it within one part in sixty-four; up
+ * to four attempts.  Returns zero if none produced such a median.
  */
 uint32_t lapic_timer_calibrate(void);
 
-/* The measured rate, or zero if calibration has not run or the two runs
- * disagreed — zero rather than one of them, because a rate nobody should
+/* The measured rate, or zero if calibration has not run or no attempt
+ * agreed — zero rather than one of the runs, because a rate nobody should
  * trust must not be usable by accident. */
 uint32_t lapic_timer_hz(void);
 
-/* The two runs, for reporting: the spread is the interesting part of a
- * calibration and a verdict alone would hide it. */
+/* The last attempt's runs and their brackets (ppm), for reporting: the spread
+ * is the interesting part of a calibration and a verdict alone would hide it.
+ * A run of zero was set aside before the vote. */
 uint32_t lapic_timer_hz_run(unsigned which);
+uint64_t lapic_timer_window_ppm(unsigned which);
+
+/* The run the median disagreed with, or -1. */
+int lapic_timer_set_aside(void);
 
 /*
  * How many attempts the calibration needed (#464).  One is the ordinary case;

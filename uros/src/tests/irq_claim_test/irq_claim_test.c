@@ -375,6 +375,12 @@ arm_four_what_is_refused(void)
  * discovering what to own by reading it would be the circle #511 exists to
  * break.  The HAL enumerates; everybody else is told.
  */
+/*
+ * The owned card's first memory region, kept for arms [9] and [10] (#508):
+ * zero size when the card was not owned or has none.
+ */
+static struct pci_bar_region	nic_region;
+
 static int
 own_the_network_card(natural_t *bdf_out)
 {
@@ -408,10 +414,18 @@ own_the_network_card(natural_t *bdf_out)
 	devs = (const struct hal_device_info *)buf;
 	for (i = 0; i < n; i++)
 		if ((devs[i].class_rev >> 8) == IQ_NET_CLASS) {
+			unsigned int b;
+
 			bdf = (natural_t)((devs[i].bus << 8)
 					  | (devs[i].slot << 3) | devs[i].func);
 			class_rev = devs[i].class_rev;
 			found = 1;
+			for (b = 0; b < devs[i].n_bars && b < HAL_MAX_BARS; b++)
+				if ((devs[i].bars[b].flags & PCI_REGION_IO) == 0
+				    && devs[i].bars[b].size != 0) {
+					nic_region = devs[i].bars[b];
+					break;
+				}
 			break;
 		}
 
@@ -519,6 +533,73 @@ arm_five_an_interrupt_with_no_wire(void)
 	return (released_ok && slot >= 16) ? 2 : 0;
 }
 
+/*
+ * [9] and [10]: a mapping ends where its region ends (#508).
+ *
+ * The kernel used to check only the page a mapping started on, and a task
+ * holding one BAR could ask for enough pages to run past it -- on these
+ * boards into the I/O APIC, the HPET and the local APIC, which sit just
+ * above the PCI windows.  So from the card this task owns: the whole memory
+ * region maps, and the same base asked for one page more is refused with
+ * KERN_NO_ACCESS.  Nothing is read or written through either mapping.
+ */
+static int
+arm_six_a_mapping_ends_with_its_region(void)
+{
+	vm_address_t	uva = 0;
+	uint64_t	page = 4096, whole;
+	kern_return_t	kr;
+	int		ok = 0;
+
+	if (nic_region.size == 0) {
+		printf("irq_claim_test: [9] DID NOT RUN — no owned card with a "
+		       "memory region to map\n");
+		printf("irq_claim_test: [10] DID NOT RUN — so nothing to run "
+		       "past\n");
+		return 0;
+	}
+
+	whole = (nic_region.size + page - 1) & ~(page - 1);
+
+	kr = device_mmio_map(master_device, (vm_address_t)nic_region.base,
+			     (vm_size_t)whole, mach_task_self(), &uva);
+	if (kr == KERN_SUCCESS) {
+		(void) device_mmio_unmap(master_device, uva, (vm_size_t)whole,
+					 mach_task_self());
+		printf("irq_claim_test: [9] 0x%llx..0x%llx, the whole of the "
+		       "owned card's memory region, maps and is given back\n",
+		       (unsigned long long)nic_region.base,
+		       (unsigned long long)(nic_region.base + whole - 1));
+		ok++;
+	} else
+		printf("irq_claim_test: [9] WRONG — the owned card's own "
+		       "memory region 0x%llx (+0x%llx) would not map "
+		       "(kr=%d)\n", (unsigned long long)nic_region.base,
+		       (unsigned long long)whole, (int)kr);
+
+	uva = 0;
+	kr = device_mmio_map(master_device, (vm_address_t)nic_region.base,
+			     (vm_size_t)(whole + page), mach_task_self(), &uva);
+	if (kr == KERN_NO_ACCESS) {
+		printf("irq_claim_test: [10] one page more, to 0x%llx, refused "
+		       "with KERN_NO_ACCESS — a mapping ends where its region "
+		       "does (#508)\n",
+		       (unsigned long long)(nic_region.base + whole + page - 1));
+		ok++;
+	} else {
+		if (kr == KERN_SUCCESS)
+			(void) device_mmio_unmap(master_device, uva,
+						 (vm_size_t)(whole + page),
+						 mach_task_self());
+		printf("irq_claim_test: [10] WRONG — a mapping one page past "
+		       "the owned card's region answered kr=%d, and a task that "
+		       "holds one BAR can reach whatever lies above it\n",
+		       (int)kr);
+	}
+
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -567,7 +648,8 @@ main(int argc, char **argv)
 	}
 
 	passed += arm_five_an_interrupt_with_no_wire();
-	printf("irq_claim_test: %d of 2 message-signalled arms passed\n",
-	       passed);
-	return passed == 2 ? 0 : 1;
+	passed += arm_six_a_mapping_ends_with_its_region();
+	printf("irq_claim_test: %d of 4 message-signalled and mapping arms "
+	       "passed\n", passed);
+	return passed == 4 ? 0 : 1;
 }
