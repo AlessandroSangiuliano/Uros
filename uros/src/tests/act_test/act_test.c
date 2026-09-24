@@ -1342,7 +1342,7 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0;
+	int		passed = 0, arm_one_passed;
 
 	(void) argc;
 	(void) argv;
@@ -1356,7 +1356,8 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	passed += arm_one_terminate_in_exception();
+	arm_one_passed = arm_one_terminate_in_exception();
+	passed += arm_one_passed;
 	passed += arm_two_abort_in_mach_msg();
 	passed += arm_three_suspend_in_mach_msg();
 	passed += arm_four_state_of_a_thread_in_a_trap();
@@ -1379,7 +1380,9 @@ main(int argc, char **argv)
 	if (arm_one_thread_ran_on) {
 		printf("act_test: [1] the terminated thread resumed past its "
 		       "fault after all — WRONG\n");
-		passed--;
+		/* Once: an arm that already failed is not failed again. */
+		if (arm_one_passed)
+			passed--;
 	}
 
 	printf("act_test: %d of 6 arms passed\n", passed);
