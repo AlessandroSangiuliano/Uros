@@ -221,6 +221,12 @@ endif()
 # which is the objection #561 was built on.  Never ON in a kernel anyone boots
 # for anything else.
 option(UROS_ABLATE_563_ALONE "Build the #563 ablation: every test believes it is alone" OFF)
+# #586: make tsc_calibrate() decline, the way it does on its own about once in
+# 280 boots under TCG -- the first of its two runs reads high and they disagree.
+# Every consumer of tsc_hz() then has to answer a missing rate, and they are all
+# asked at once, which waiting for the natural refusal would take hundreds of
+# boots to do.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_586_TSC_DISAGREE "Build the #586 ablation: the TSC calibration's two runs disagree" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
 # I/O APIC describes -- and the discriminator they use, the other half of the
@@ -448,6 +454,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       message(STATUS "#570 ablation: a PCI I/O BAR is refused to its holder after ${UROS_ABLATE_570_REFUSE_IOBAR} accesses (x86_64)")
   endif()
   list(APPEND KERNEL_DEFINES_BARE ${UROS_ABLATE_577_DEFS})
+  if(UROS_ABLATE_586_TSC_DISAGREE)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_586_TSC_DISAGREE=1)
+      message(STATUS "#586 ablation: the TSC calibration's first run reads 1/32 high, so the two disagree (x86_64)")
+  endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
       message(STATUS "#563 ablation: every test believes it is alone (x86_64)")
