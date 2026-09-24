@@ -235,6 +235,29 @@ preempt_worker_b(void)
 		cpu_pause();
 }
 
+/*
+ * End the run here -- but only when "here" is the boot processor.
+ *
+ * This boot exists to answer one question and it has been answered, or has
+ * been declined; going on into bootstrap_create would end it in the #422
+ * panic and bury the verdict under a backtrace.  On an application processor
+ * the same halt would strand the boot processor waiting for a verdict from a
+ * processor that has stopped, so it hands the ending back (#461).
+ */
+static void
+preempt_end(void)
+{
+	if (preempt_remote) {
+		preempt_reported = 1;
+		for (;;)
+			cpu_pause();
+	}
+
+	printf("preempt_test: halted — this boot was the test (#459)\n");
+	for (;;)
+		__asm__ __volatile__("cli; hlt");
+}
+
 static void
 preempt_reporter(void)
 {
@@ -252,10 +275,16 @@ preempt_reporter(void)
 	t0 = rdtsc();
 	deadline = tsc_hz() ? tsc_hz() : 0;
 	if (deadline == 0) {
-		printf("preempt_test: no calibrated TSC — the run cannot be "
-		       "timed, so nothing is claimed\n");
+		/*
+		 * #586: a run that cannot be timed is NOT ASKED (#563), in the
+		 * word the harness counts -- and it still has to END.  This used
+		 * to return: the boot processor then waited for a report that
+		 * never came, with no TSC to bound the wait.
+		 */
+		printf("preempt_test: NOT ASKED — no calibrated TSC, so the run "
+		       "cannot be timed (#586, #318)\n");
 		preempt_done = 1;
-		return;
+		preempt_end();
 	}
 
 	while (rdtsc() - t0 < deadline)
@@ -297,24 +326,7 @@ preempt_reporter(void)
 	       "thread and given to another, %u times a second\n",
 	       current_processor()->slot_num, clock_event_hz());
 
-	/*
-	 * End the run here -- but only when "here" is the boot processor.
-	 *
-	 * This boot exists to answer one question and it has been answered;
-	 * going on into bootstrap_create would end it in the #422 panic and
-	 * bury the verdict under a backtrace.  On an application processor the
-	 * same halt would strand the boot processor waiting for a verdict from
-	 * a processor that has stopped, so it hands the ending back (#461).
-	 */
-	if (preempt_remote) {
-		preempt_reported = 1;
-		for (;;)
-			cpu_pause();
-	}
-
-	printf("preempt_test: halted — this boot was the test (#459)\n");
-	for (;;)
-		__asm__ __volatile__("cli; hlt");
+	preempt_end();
 }
 
 /*
