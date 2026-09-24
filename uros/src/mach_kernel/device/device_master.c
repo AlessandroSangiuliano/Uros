@@ -630,6 +630,14 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 	}
 	urmach_rcu_read_unlock();
 
+#if	ABLATE_508_SPAN_UNBOUNDED
+	/*
+	 * #508: the first page only, as before the span was bounded, so that
+	 * irq_claim_test's arm [10] can be seen noticing.
+	 */
+	if (mine)
+		return KERN_SUCCESS;
+#endif
 	if (mine && (uint64_t)phys + len <= end)
 		return KERN_SUCCESS;
 

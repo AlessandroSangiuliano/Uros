@@ -237,6 +237,11 @@ option(UROS_ABLATE_586_NO_TICKS "Build the #586 ablation: the tick self-test cou
 # "legacy ports the kernel keeps" line must both say WRONG.  Never ON in a
 # kernel anyone boots for anything else.
 option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
+# #508: an MMIO mapping is checked on its first page only, as it was before the
+# span was bounded, so irq_claim_test's arm [10] -- one page past the owned
+# card's region -- must say WRONG.  Never ON in a kernel anyone boots for
+# anything else.
+option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
 # I/O APIC describes -- and the discriminator they use, the other half of the
@@ -470,6 +475,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
       message(STATUS "#586 ablation: the tick self-test counts no ticks (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_SPAN_UNBOUNDED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
+      message(STATUS "#508 ablation: an MMIO mapping is checked on its first page only (x86_64)")
   endif()
   if(UROS_ABLATE_508_LEND_RULERS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_LEND_RULERS=1)
