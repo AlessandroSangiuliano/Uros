@@ -165,12 +165,19 @@ set(UROS_FORKRACE_ITERS 12500 CACHE STRING
 # the iteration count when raising this.
 set(UROS_FORKRACE_LIVE 0 CACHE STRING
     "forkrace: live running children per worker (#558); 0 = children never run")
+# #584: every worker falls asleep for good halfway through its iterations --
+# blocked, not runnable -- so the heartbeat has to recognise a stall with
+# nothing else to run.  That is the case a DEPRESS round cannot time.  Never
+# set in a build anyone measures anything with.
+set(UROS_FORKRACE_ABLATE_584_STALL 0 CACHE STRING
+    "forkrace: 1 = every worker blocks for good halfway (#584 ablation)")
 
 target_compile_definitions(ipc_bench_server PRIVATE
   MACH_IPC_COMPAT=0
   FORKRACE_THREADS=${UROS_FORKRACE_THREADS}
   FORKRACE_ITERS=${UROS_FORKRACE_ITERS}
   FORKRACE_LIVE=${UROS_FORKRACE_LIVE}
+  FORKRACE_ABLATE_584_STALL=${UROS_FORKRACE_ABLATE_584_STALL}
 )
 
 target_include_directories(ipc_bench_server PRIVATE
