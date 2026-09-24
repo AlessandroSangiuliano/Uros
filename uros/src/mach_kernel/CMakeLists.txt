@@ -226,7 +226,7 @@ option(UROS_ABLATE_563_ALONE "Build the #563 ablation: every test believes it is
 # Every consumer of tsc_hz() then has to answer a missing rate, and they are all
 # asked at once, which waiting for the natural refusal would take hundreds of
 # boots to do.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_586_TSC_DISAGREE "Build the #586 ablation: the TSC calibration's two runs disagree" OFF)
+option(UROS_ABLATE_586_TSC_DISAGREE "Build the #586 ablation: no two of the TSC calibration's runs agree, so it declines" OFF)
 # #586: the tick self-test's handler acknowledges each tick and counts none of
 # them, so the period line meets a calibrated TSC with no gap to measure -- the
 # branch that must stay WRONG, which the calibration ablation cannot reach.
@@ -241,6 +241,11 @@ option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps no
 # span was bounded, so irq_claim_test's arm [10] -- one page past the owned
 # card's region -- must say WRONG.  Never ON in a kernel anyone boots for
 # anything else.
+# #508: one of the TSC calibration's three runs reads one part in thirty-two
+# high, the shape of every refusal the old calibration took on its own, so the
+# median can be seen setting it aside.  Never ON in a kernel anyone boots for
+# anything else.
+option(UROS_ABLATE_508_ONE_RUN_OUT "Build the #508 ablation: one TSC calibration run reads 1/32 high" OFF)
 option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
@@ -477,6 +482,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
       message(STATUS "#586 ablation: the tick self-test counts no ticks (x86_64)")
   endif()
+  if(UROS_ABLATE_508_ONE_RUN_OUT)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_ONE_RUN_OUT=1)
+      message(STATUS "#508 ablation: one TSC calibration run reads 1/32 high (x86_64)")
+  endif()
   if(UROS_ABLATE_508_SPAN_UNBOUNDED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
       message(STATUS "#508 ablation: an MMIO mapping is checked on its first page only (x86_64)")
@@ -487,7 +496,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   endif()
   if(UROS_ABLATE_586_TSC_DISAGREE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_TSC_DISAGREE=1)
-      message(STATUS "#586 ablation: the TSC calibration's first run reads 1/32 high, so the two disagree (x86_64)")
+      message(STATUS "#586 ablation: each TSC calibration run reads a different 1/32 high, so none agree and it declines (x86_64)")
   endif()
   if(UROS_ABLATE_563_ALONE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)

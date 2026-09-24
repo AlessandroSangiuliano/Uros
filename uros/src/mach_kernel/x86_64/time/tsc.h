@@ -77,14 +77,14 @@ int tsc_is_invariant(void);
 /*
  * Measure the counter against the 8254 and remember the answer.
  *
- * Runs twice and requires the two runs to agree, because a single
- * measurement has no way to distinguish a frequency from an accident: a
- * system-management interrupt landing inside the interval, or an emulator
- * scheduling the host away, produces a number that is wrong and looks
- * ordinary.  Two that agree closely are not proof, but one that disagrees
- * with itself is proof of the opposite, and that is the case worth catching.
+ * Three runs, each from an edge of the 8254 read back to a later edge, and
+ * the median, believed when another run agrees with it; up to four attempts
+ * (#508, tsc.c says why each number is what it is).  A single measurement
+ * cannot tell a frequency from an accident -- an interrupt inside the
+ * interval, an emulator scheduling the host away -- and two can only
+ * disagree; three can say which one is wrong.
  *
- * Returns zero if the ruler refused to count or the two runs disagreed, in
+ * Returns zero if no attempt produced a median another run agreed with, in
  * which case tsc_hz() stays zero rather than holding a number nobody should
  * use.
  */
@@ -99,10 +99,20 @@ int tsc_calibrate(void);
 uint64_t tsc_hz(void);
 
 /*
- * The two runs, in hertz, for reporting.  Kept so the check can show what it
- * compared rather than only its verdict: a spread is the interesting part of
- * a calibration, and a pass/fail hides exactly the number worth seeing.
+ * The runs of the last attempt, for reporting: each one's rate in hertz
+ * (zero if it was set aside before the vote) and how far its two ends could
+ * be, in parts per million.  Kept so the check can show what it compared
+ * rather than only its verdict: a spread is the interesting part of a
+ * calibration, and a pass/fail hides exactly the number worth seeing.
  */
 uint64_t tsc_hz_run(unsigned which);
+uint64_t tsc_window_ppm(unsigned which);
+unsigned tsc_calibrate_runs(void);
+
+/* Which attempt produced the answer, or the last one if none did. */
+unsigned tsc_calibrate_attempts(void);
+
+/* The run the median did not agree with, or -1. */
+int tsc_set_aside(void);
 
 #endif	/* _X86_64_TIME_TSC_H_ */

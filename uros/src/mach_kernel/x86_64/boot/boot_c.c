@@ -2994,15 +2994,36 @@ static void freq_census(void)
 static void tsc_selftest(void)
 {
 	int ok = tsc_calibrate();
+	unsigned i, n = tsc_calibrate_runs();
 
 	kputs("UrMach x86-64: timestamp counter measured against the 8254 at ");
-	kputdec((unsigned)(tsc_hz_run(0) / 1000000));
-	kputs(" and ");
-	kputdec((unsigned)(tsc_hz_run(1) / 1000000));
-	kputs(" MHz, ");
+	for (i = 0; i < n; i++) {
+		kputs(i == 0 ? "" : (i + 1 == n ? " and " : ", "));
+		kputdec((unsigned)(tsc_hz_run(i) / 1000000));
+	}
+	kputs(" MHz (ends within ");
+	for (i = 0; i < n; i++) {
+		kputs(i == 0 ? "" : (i + 1 == n ? " and " : ", "));
+		kputdec(tsc_window_ppm(i));
+	}
+	kputs(" ppm), ");
 	kputs(tsc_is_invariant() ? "invariant" : "NOT invariant (#318)");
-	kputs(ok ? " — two runs agree, the mechanism counts\r\n"
-		 : " — WRONG, the runs disagree or the ruler never counted\r\n");
+	if (!ok) {
+		kputs(" — WRONG, no median agreed with another run in ");
+		kputdec(tsc_calibrate_attempts());
+		kputs(" attempts\r\n");
+		return;
+	}
+	kputs(" — the median, ");
+	kputdec(tsc_hz() / 1000);
+	kputs(" kHz, on attempt ");
+	kputdec(tsc_calibrate_attempts());
+	if (tsc_set_aside() >= 0) {
+		kputs(", run ");
+		kputdec((unsigned)tsc_set_aside());
+		kputs(" set aside as the one that disagreed");
+	}
+	kputs("\r\n");
 }
 
 /*
