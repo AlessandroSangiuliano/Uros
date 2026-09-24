@@ -257,6 +257,12 @@ option(UROS_ABLATE_508_RULER_LIES "Build the #508 ablation: the PM timer's rate 
 # #508: the ACPI HPET table is withheld, a board without an HPET, so two
 # rulers vote and the refinement uses the PM timer.  Never ON otherwise.
 option(UROS_ABLATE_508_NO_HPET "Build the #508 ablation: the ACPI HPET table is withheld" OFF)
+# #508: no exact source is seen, so the measured path runs on a machine that
+# has one.  Never ON otherwise.
+option(UROS_ABLATE_508_EXACT_HIDDEN "Build the #508 ablation: the exact TSC sources are not seen" OFF)
+# #508: the first exact source that states a rate states it 1/32 high, so the
+# rulers contradict it and it is WRONG.  Never ON otherwise.
+option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC source states 1/32 high" OFF)
 option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
@@ -510,6 +516,14 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_508_NO_HPET)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_NO_HPET=1)
       message(STATUS "#508 ablation: the ACPI HPET table is withheld (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_EXACT_HIDDEN)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_EXACT_HIDDEN=1)
+      message(STATUS "#508 ablation: the exact TSC sources are not seen (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_EXACT_LIES)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_EXACT_LIES=1)
+      message(STATUS "#508 ablation: the first exact TSC source states 1/32 high (x86_64)")
   endif()
   if(UROS_ABLATE_508_SPAN_UNBOUNDED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
