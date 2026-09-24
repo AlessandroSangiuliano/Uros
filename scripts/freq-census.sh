@@ -19,7 +19,16 @@
 #      and KVM {max, qemu64, host}, each on the pc and the q35 board.  Each
 #      boot keeps its whole serial log; the summary keeps, per boot, the
 #      "frequency census" lines, the 8254 calibration, the TSC measured
-#      against the PM timer and the HPET, and the verdict.
+#      against the PM timer and the HPET, the vote between the three rulers,
+#      the refinement, and the verdict.
+#
+# Around the boots the summary also records the host's NTP state, before and
+# after.  Inside a guest the 8254, the PM timer and the HPET are QEMU's, and
+# they run on the host's CLOCK_MONOTONIC: with clocksource tsc, that is the
+# TSC corrected by NTP's frequency and by whatever offset the kernel's PLL is
+# still slewing.  So the rulers read the host's correction, not a defect of
+# either side, and the numbers cannot be read without it (OMEGA, victus and
+# omen each had to take it by hand, #508).
 #
 # ⚠️ run-x86_64.sh rebuilds the kernel from THIS tree on every boot, so the
 # tree must not be edited while this runs; the summary's first line records
@@ -85,9 +94,40 @@ else
 fi
 # What the host kernel calibrated, and which clock it trusts: the number a
 # guest's paravirtual clock will repeat, and the reason it may not be the TSC.
+# The refined value is the one kvmclock repeats, and it can sit thousands of
+# ppm from the quick "Detected" one (omen: 2799.927 then 2808.000 MHz).  A
+# host that disabled its HPET says so here too (omen: dysfunctional in PC10).
 journalctl -k -b --no-pager 2>/dev/null \
-	| grep -o "tsc: Detected [0-9.]* MHz.*\|Marking TSC unstable.*\|Switched to clocksource [a-z_-]*" \
+	| grep -o "tsc: Detected [0-9.]* MHz.*\|tsc: Refined TSC clocksource calibration: [0-9.]* MHz\|Marking TSC unstable.*\|Switched to clocksource [a-z_-]*\|hpet: HPET dysfunctional.*" \
 	| sed 's/^/host kernel: /' >> "$SUM"
+
+# The host's NTP, as timesyncd reports it and as the kernel's PLL holds it.
+# adjtimex's offset is what the PLL is still slewing; in nanosecond mode with
+# time constant c it slews 1/2^(2+c) of it every second (#508, omen).
+host_ntp() {
+	local when=$1 ts
+	ts=$(timedatectl timesync-status 2>/dev/null \
+		| sed -n 's/^ *\(Offset\|Frequency\|Packet count\|Poll interval\): */\1 /p' \
+		| paste -sd ';' -)
+	echo "host NTP $when ($(date +%H:%M:%S)): timesyncd ${ts:-not available}"
+	python3 - "$when" <<'EOF' 2>/dev/null || echo "host NTP $1: adjtimex not read"
+import ctypes, sys, time
+
+class Timex(ctypes.Structure):
+    _fields_ = [("modes", ctypes.c_uint), ("offset", ctypes.c_long),
+                ("freq", ctypes.c_long), ("maxerror", ctypes.c_long),
+                ("esterror", ctypes.c_long), ("status", ctypes.c_int),
+                ("constant", ctypes.c_long), ("rest", ctypes.c_long * 32)]
+
+t = Timex()
+state = ctypes.CDLL(None).adjtimex(ctypes.byref(t))
+unit = 1e6 if t.status & 0x2000 else 1e3   # STA_NANO: ns, otherwise us
+print("host NTP %s (%s): adjtimex state %d, status 0x%x, offset %+.3f ms, "
+      "freq %+.3f ppm, constant %d" % (sys.argv[1], time.strftime("%H:%M:%S"),
+      state, t.status, t.offset / unit, t.freq / 65536.0, t.constant))
+EOF
+}
+host_ntp before >> "$SUM"
 
 # ── 2. the guests ────────────────────────────────────────────────────────
 cd "$REPO" || exit 1
@@ -103,11 +143,12 @@ for acc in tcg kvm; do
 				./scripts/run-x86_64.sh $flag --entry 14 300 $args \
 				> "$OUT/$tag.out" 2>&1
 			echo "   exit $?" >> "$SUM"
-			grep -a "frequency census\|timestamp counter measured\|ACPI PM timer: \|UrMach x86-64: HPET: " \
+			grep -a "frequency census\|timestamp counter measured\|ACPI PM timer: \|UrMach x86-64: HPET: \|the TSC against each ruler\|the TSC refined" \
 				"$OUT/$tag.log" | sed 's/UrMach x86-64: //' | cut -c1-330 >> "$SUM"
 			grep -a "=== verdict\|^  passed\|^  FAILED" "$OUT/$tag.out" >> "$SUM"
 		done
 	done
 done
+host_ntp after >> "$SUM"
 echo "done $(date +%H:%M:%S)" >> "$SUM"
 echo "summary: $SUM"
