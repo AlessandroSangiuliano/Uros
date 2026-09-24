@@ -179,3 +179,11 @@ void pit_ruler_stop(void)
 	outb(PIT_GATE_PORT,
 	     inb(PIT_GATE_PORT) & ~(PIT_GATE_ENABLE | PIT_SPEAKER_ON));
 }
+
+static uint64_t pit_read_up(void)
+{
+	return (uint16_t)~pit_ruler_read();
+}
+
+const struct ruler pit_read_back = { pit_read_up, 0xffff, PIT_HZ };
+

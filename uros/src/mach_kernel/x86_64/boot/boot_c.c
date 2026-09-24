@@ -3401,16 +3401,30 @@ static void timer_selftest(void)
 	int had_interrupts;
 
 	kputs("UrMach x86-64: the local APIC timer counts at ");
-	kputdec((unsigned)(lapic_timer_hz_run(0) / 1000));
-	kputs(" and ");
-	kputdec((unsigned)(lapic_timer_hz_run(1) / 1000));
-	kputs(" kHz after the divisor");
+	for (unsigned i = 0; i < RULER_RUNS; i++) {
+		kputs(i == 0 ? "" : (i + 1 == RULER_RUNS ? " and " : ", "));
+		kputdec((unsigned)(lapic_timer_hz_run(i) / 1000));
+	}
+	kputs(" kHz after the divisor (ends within ");
+	for (unsigned i = 0; i < RULER_RUNS; i++) {
+		kputs(i == 0 ? "" : (i + 1 == RULER_RUNS ? " and " : ", "));
+		kputdec(lapic_timer_window_ppm(i));
+	}
+	kputs(" ppm)");
 
 	if (rate == 0) {
-		kputs(" — WRONG, it never counted\r\n");
+		kputs(" — WRONG, it never counted, or no median agreed with "
+		      "another run\r\n");
 		return;
 	}
-	kputs(", measured against the 8254");
+	kputs(", measured against the 8254 read back: the median, ");
+	kputdec(rate / 1000);
+	kputs(" kHz");
+	if (lapic_timer_set_aside() >= 0) {
+		kputs(", run ");
+		kputdec((unsigned)lapic_timer_set_aside());
+		kputs(" set aside as the one that disagreed");
+	}
 
 	/*
 	 * And how many tries that took (#464).

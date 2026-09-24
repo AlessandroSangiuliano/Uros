@@ -50,4 +50,38 @@ int ruler_measure(const struct ruler *r,
 /* The window as parts per million of the interval: how far the ends can be. */
 uint64_t ruler_window_ppm(const struct ruler_run *run);
 
+/*
+ * The calibration rule, one for every subject (#508): the TSC and the LAPIC
+ * timer are held to it alike, which #464 asked for and which had drifted --
+ * the LAPIC timer asked again on a disagreement, the TSC gave up the boot.
+ * ruler.c says why each number is what it is.
+ */
+#define RULER_RUNS		3	/* per attempt; the median of these */
+#define RULER_ATTEMPTS		4	/* then the machine is not calibrating */
+#define RULER_TOLERANCE		64	/* one part in this, between runs */
+
+struct ruler_calibration {
+	uint64_t	hz;			/* the median believed, or 0 */
+	uint64_t	run_hz[RULER_RUNS];	/* the last attempt's runs; 0 =
+						   set aside before the vote */
+	uint64_t	run_ppm[RULER_RUNS];	/* each run's bracket, in ppm */
+	unsigned	attempts;		/* the one that answered, or the
+						   last one tried */
+	int		set_aside;		/* the run the median disagreed
+						   with, or -1 */
+};
+
+/*
+ * Calibrate `subject' against `r' by the rule above, each run over `span' of
+ * the ruler and bounded by `budget' TSC counts.  `ablate', when not null, is
+ * handed each attempt's runs before the vote: it is how an ablation build
+ * makes a run disagree on purpose, and it is null in any kernel booted for
+ * anything else.  Returns 1 with out->hz set, or 0 with out->hz zero.
+ */
+int ruler_calibrate(const struct ruler *r,
+		    uint64_t (*subject)(void), uint64_t subject_mask,
+		    uint64_t span, uint64_t budget,
+		    void (*ablate)(uint64_t run_hz[RULER_RUNS]),
+		    struct ruler_calibration *out);
+
 #endif	/* _X86_64_TIME_RULER_H_ */
