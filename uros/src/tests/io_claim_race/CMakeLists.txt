@@ -26,6 +26,14 @@ set(ICR_MIG_GENERATED)
 add_mig_userland_client(${UROS_UAPI_DIR}/device/device_master.defs
                         ${_ICR_OUT} ICR_MIG)
 
+# hal.defs, user half, for arm [4] (#577): the window it asks about is found
+# in the HAL's registry, because this program may not read configuration
+# space.  _client for hal_bar_test's reason -- no second hal_server.h (#565).
+set(ICR_HAL_GENERATED)
+add_mig_userland_client(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
+                        ${_ICR_OUT} ICR_HAL)
+list(APPEND ICR_MIG_GENERATED ${ICR_HAL_GENERATED})
+
 add_executable(io_claim_race_bin io_claim_race.c ${ICR_MIG_GENERATED})
 
 add_dependencies(io_claim_race_bin libmach libpthreads libnetname
@@ -41,6 +49,8 @@ target_compile_options(io_claim_race_bin PRIVATE
 target_compile_definitions(io_claim_race_bin PRIVATE MACH_IPC_COMPAT=0)
 
 target_include_directories(io_claim_race_bin PRIVATE
+  ${CMAKE_SOURCE_DIR}/src/servers/hal_server
+  ${CMAKE_SOURCE_DIR}/src/lib/libpci
   ${_ICR_OUT}
   ${CMAKE_SOURCE_DIR}/uapi
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
