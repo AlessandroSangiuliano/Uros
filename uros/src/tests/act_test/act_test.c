@@ -345,21 +345,28 @@ arm_one_terminate_in_exception(void)
 	 *      before the call returns.  A question from here on converts the
 	 *      name to no activation, and thread_suspend(THR_ACT_NULL) answers
 	 *      KERN_INVALID_ARGUMENT (thread_act.c:404).
-	 *   2. later, in the killed thread and the reaper: the activation is
-	 *      freed and its port destroyed with it (act_free, thread_act.c:1205
-	 *      -> ipc_tt.c:425).  The name is dead, and the send is refused at
-	 *      copyin: MACH_SEND_INVALID_DEST (ipc/ipc_kmsg.c:1576).  One event,
-	 *      not two -- there is no moment when the activation is gone and the
-	 *      port still alive.
+	 *   2. the activation is freed and its port destroyed with it
+	 *      (act_free, thread_act.c:1205 -> ipc_tt.c:425), by whichever
+	 *      thread drops the last reference to it.  Normally that is the
+	 *      reaper, after the killed thread has run its own end, and after
+	 *      thread_terminate has returned.  But THIS thread holds a reference
+	 *      through the kill (kern/ipc_mig.c:1931, dropped at :1936), so if it
+	 *      is preempted at the end of the call while the other two finish,
+	 *      the free is its own, before the call returns.  Either way the
+	 *      name is dead, and the send is refused at copyin:
+	 *      MACH_SEND_INVALID_DEST (ipc/ipc_kmsg.c:1576).  One event, not two
+	 *      -- there is no moment when the activation is gone and the port
+	 *      still alive.
 	 *   2'. the port dying between copyin and the kernel's dispatch drops the
 	 *      request on a dead port, and the stub answers MIG_SERVER_DIED.
 	 *      Read from the code; no boot has shown it.
 	 *
 	 * The order only goes forward, so a question sees the stage it reached
-	 * and never an earlier one.  Asked at once, on one processor, it is
-	 * nearly always stage 1; a clock tick or the killed thread's priority
-	 * can let the teardown finish first, and then it is stage 2 -- once in
-	 * 346 runs here, and once in five in the issue's first campaign.
+	 * and never an earlier one.  Asked at once it is nearly always stage 1;
+	 * a clock tick or the killed thread's priority can let the teardown
+	 * finish first, and then it is stage 2 -- once in the 144 one-processor
+	 * runs here and in none of the 202 on two or four, and once in five in
+	 * the issue's first campaign (TCG, one processor).
 	 *
 	 * ⚠️ KERN_TERMINATED is what an INACTIVE activation answers
 	 * (thread_act.c:409), and this used to be the first of the two answers
@@ -386,11 +393,13 @@ arm_one_terminate_in_exception(void)
 			"on its way";
 		break;
 	case KERN_TERMINATED:
+		/* ⚠️ Under 256 bytes on the wire, CR included: a longer line is
+		 * written in two console holds and can be cut (#578). */
 		printf("act_test: [1] the same name answered KERN_TERMINATED "
-		       "after the kill — the kill took effect, but the order "
-		       "written in this test says a question asked after "
-		       "thread_terminate returns cannot reach an inactive "
-		       "activation; the kernel's order changed — WRONG\n");
+		       "after the kill: the kill took effect, but this test's "
+		       "written order says no question asked after the kill can "
+		       "reach an inactive activation — the order changed — "
+		       "WRONG\n");
 		return 0;
 	default:
 		printf("act_test: [1] after the kill the kernel still answered "
