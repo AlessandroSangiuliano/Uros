@@ -2992,6 +2992,22 @@ ds_master_device_io_port_claim(
 	if (count == 0 || port + count < port || port + count > 0x10000u)
 		return KERN_INVALID_ARGUMENT;
 
+	/*
+	 * #508: a range the kernel keeps is refused before anything is
+	 * recorded.  Asked outside the lock because the answer is the
+	 * machine's, not the table's.
+	 */
+	{
+		const char *owner = device_md_io_reserved(port, count);
+
+		if (owner != 0) {
+			printf("device_io_port_claim: 0x%x..0x%x REFUSED to task "
+			       "%p — it covers %s (#508)\n", port,
+			       port + count - 1, (void *)me, owner);
+			return KERN_NO_ACCESS;
+		}
+	}
+
 	mutex_lock(&device_table_lock);
 	/*
 	 * 🔴 AND AGAINST THE I/O REGIONS OF THE PCI CLAIMS (#577).  This asked
