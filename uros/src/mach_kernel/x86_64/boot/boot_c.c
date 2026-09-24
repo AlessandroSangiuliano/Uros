@@ -3032,7 +3032,7 @@ static uint64_t rulers_read_pm(void)
 
 static uint64_t rulers_read_hpet(void)
 {
-	return hpet_read();
+	return hpet_read32();
 }
 
 static uint64_t rulers_subject_tsc(void)
@@ -3133,7 +3133,7 @@ static void rulers_selftest(void)
 	kputhex64(hpet_vendor());
 	kputs(hpet_started_here() ? ", started here: " : ", already running: ");
 	khz = rulers_tsc_khz(rulers_read_hpet,
-			     hpet_counter_64() ? ~0ULL : 0xffffffffULL,
+			     0xffffffffULL,
 			     hpet_hz(), hpet_hz() * 3 / 100, &counted, &ppm);
 	rulers_report(khz, counted, ppm);
 }

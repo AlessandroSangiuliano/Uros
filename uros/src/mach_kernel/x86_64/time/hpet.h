@@ -36,4 +36,12 @@ int hpet_started_here(void);		/* the counter was halted and this started it */
 /* The counter.  A 32-bit counter reads as its low half, zero-extended. */
 uint64_t hpet_read(void);
 
+/*
+ * The counter's low 32 bits, in one access.  For an interval shorter than a
+ * wrap of them -- 43 s at 100 MHz, five minutes at 14.318 MHz -- this is all
+ * a ruler needs, and it is one exit to the host under an emulator where
+ * hpet_read() is three.
+ */
+uint32_t hpet_read32(void);
+
 #endif	/* _X86_64_TIME_HPET_H_ */

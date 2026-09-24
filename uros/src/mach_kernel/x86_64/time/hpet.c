@@ -159,3 +159,8 @@ uint64_t hpet_read(void)
 
 	return ((uint64_t)hi << 32) | lo;
 }
+
+uint32_t hpet_read32(void)
+{
+	return rd32(HPET_MAIN_COUNTER);
+}
