@@ -51,6 +51,27 @@ int ruler_measure(const struct ruler *r,
 uint64_t ruler_window_ppm(const struct ruler_run *run);
 
 /*
+ * A point: the ruler's value and the subject at one instant, give or take
+ * half the bracket (#508, phase 4).  Two points taken far apart give a rate
+ * whose error is the two brackets divided by the distance -- and the time
+ * between them can be spent asleep, where ruler_measure() spins.  The ruler
+ * must not wrap between the two.
+ */
+struct ruler_point {
+	uint64_t	ruler;
+	uint64_t	subject;	/* at the middle of the bracket */
+	uint64_t	bracket;	/* subject counts the read took */
+};
+
+void ruler_point(const struct ruler *r, uint64_t (*subject)(void),
+		 struct ruler_point *p);
+
+/* The rate between two points, as ruler_measure() reports one; 0 if none. */
+int ruler_rate(const struct ruler *r, uint64_t subject_mask,
+	       const struct ruler_point *a, const struct ruler_point *b,
+	       struct ruler_run *out);
+
+/*
  * The calibration rule, one for every subject (#508): the TSC and the LAPIC
  * timer are held to it alike, which #464 asked for and which had drifted --
  * the LAPIC timer asked again on a disagreement, the TSC gave up the boot.

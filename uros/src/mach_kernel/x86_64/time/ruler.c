@@ -124,6 +124,43 @@ uint64_t ruler_window_ppm(const struct ruler_run *run)
 }
 
 /*
+ * The narrowest of three reads: a read the host interrupted has a wide
+ * bracket, and one of three is enough to find a read it did not.
+ */
+void ruler_point(const struct ruler *r, uint64_t (*subject)(void),
+		 struct ruler_point *p)
+{
+	uint64_t s0, c, s1;
+	unsigned i;
+
+	p->bracket = ~0ULL;
+	for (i = 0; i < 3; i++) {
+		s0 = subject();
+		c = r->read() & r->mask;
+		s1 = subject();
+		if (s1 - s0 < p->bracket) {
+			p->ruler = c;
+			p->subject = s0 + (s1 - s0) / 2;
+			p->bracket = s1 - s0;
+		}
+	}
+}
+
+int ruler_rate(const struct ruler *r, uint64_t subject_mask,
+	       const struct ruler_point *a, const struct ruler_point *b,
+	       struct ruler_run *out)
+{
+	*out = (struct ruler_run){ 0 };
+	out->counts = (b->ruler - a->ruler) & r->mask;
+	out->subject = (b->subject - a->subject) & subject_mask;
+	out->window = a->bracket + b->bracket;
+	if (out->counts == 0 || out->subject == 0)
+		return 0;
+	out->hz = out->subject * r->hz / out->counts;
+	return 1;
+}
+
+/*
  * ── The rule ────────────────────────────────────────────────────────────
  *
  * ONE PART IN SIXTY-FOUR between runs, a little under two percent.  Tight
