@@ -18,6 +18,12 @@
  * scheduler.  assert_wait() with a timeout blocks until the tick says the
  * second is over.
  *
+ * When the rate came from an exact source (tsc.c), this is a check and not a
+ * refinement: the exact source stands, for the reason it was adopted -- it is
+ * the same number every boot, where this measurement carries the host's NTP
+ * of the moment -- and the line says how far the second's measurement is
+ * from it.
+ *
  * The ruler is the one rulers_long() names: the HPET or the PM timer, never
  * the 8254, whose sixteen bits wrap every 54.9 ms.  How long the sleep really
  * lasted is read off the TSC, and a sleep long enough for the ruler to have
@@ -98,6 +104,20 @@ static void tsc_refine_thread(void)
 
 	spread = run.hz > boot ? run.hz - boot : boot - run.hz;
 	ppm = spread * 1000000 / boot;
+
+	if (tsc_source()->adopted >= 0) {
+		printf("UrMach x86-64: the TSC checked against the %s over %lu ms: "
+		       "%lu kHz, %lu ppm from %s's value, the ends within %lu ppm"
+		       "%s\n", k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
+		       freq_exact_name((unsigned)tsc_source()->adopted),
+		       ruler_window_ppm(&run),
+		       spread <= boot / RULER_TOLERANCE
+		       ? " — the exact source stands"
+		       : " — WRONG, more than one part in 64 from an exact "
+			 "source");
+		thread_terminate_self();
+	}
+
 	adopted = spread <= boot / RULER_TOLERANCE;
 	if (adopted)
 		tsc_refined(run.hz);
