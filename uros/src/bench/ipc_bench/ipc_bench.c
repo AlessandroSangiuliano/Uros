@@ -1122,6 +1122,78 @@ forkrace_worker_func(void *arg)
 #endif	/* FORKRACE_LIVE > 0 */
 }
 
+/*
+ * 🔴 A HEARTBEAT, BECAUSE "IT HUNG" IS NOT A RESULT.
+ *
+ * The totals are printed after the join, so a run that wedges prints nothing
+ * at all -- and then "wedged" carries no number, which makes "a resource ran
+ * out at a fixed count" indistinguishable from "a race caught it somewhere
+ * random".  Those want different fixes.
+ *
+ * The counters are read without synchronisation on purpose: they are aligned
+ * words this only ever reads, a stale value costs a heartbeat's accuracy and
+ * nothing else, and taking a lock here would serialise the very concurrency
+ * the suite exists to create.
+ *
+ * Printing only on change keeps a wedge from filling the log, and five
+ * unchanged seconds is reported once, with the count: that line is the whole
+ * diagnostic value of a run that never finishes.
+ *
+ * 🔥 ITS OWN THREAD, AND IT SLEEPS (#584).  This was a loop in the suite's
+ * thread around thread_switch(..., DEPRESS, 1000), which is a second only
+ * while something else is runnable.  When all eight workers were inside the
+ * kernel at once nothing was, and "five rounds" passed in no time: 11 of the
+ * 12 STALLED lines of #558's hunt were followed by the totals of a run that
+ * had finished.  SWITCH_OPTION_WAIT sleeps for real, and in a thread of its
+ * own the suite's thread can simply join -- so t1 is taken the moment the
+ * last worker ends, not when a heartbeat happens to look.  And it asks as
+ * little of the kernel as a heartbeat can: one trap and a timer, no futex
+ * and no clock server, because it exists to speak when the kernel is broken.
+ */
+typedef struct {
+    forkrace_worker_t	*w;
+    volatile int	 done;
+} forkrace_watch_t;
+
+static void *
+forkrace_watchdog(void *arg)
+{
+    forkrace_watch_t	*wd = (forkrace_watch_t *)arg;
+    unsigned		 last = 0, still = 0;
+    tvalspec_t		 seen, now;
+
+    get_time(&seen);
+    for (;;) {
+	unsigned	n = 0;
+	int		k, running = 0;
+
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
+	if (wd->done)
+	    break;
+
+	for (k = 0; k < FORKRACE_THREADS; k++) {
+	    n += wd->w[k].made + wd->w[k].refused;
+	    if ((int)(wd->w[k].made + wd->w[k].refused) < wd->w[k].iters)
+		running = 1;
+	}
+
+	if (n != last) {
+	    printf("  ... %u of %d\n", n, FORKRACE_THREADS * FORKRACE_ITERS);
+	    last = n;
+	    still = 0;
+	    get_time(&seen);
+	} else if (running && ++still == 5) {
+	    get_time(&now);
+	    printf("  !!! STALLED at %u of %d — no progress for %lu ms; the "
+		   "totals below come only if it resumes\n", n,
+		   FORKRACE_THREADS * FORKRACE_ITERS,
+		   elapsed_ns(&seen, &now) / 1000000);
+	    break;
+	}
+    }
+    return (void *) 0;
+}
+
 static void
 bench_forkrace(void)
 {
@@ -1131,7 +1203,9 @@ bench_forkrace(void)
     tvalspec_t		t0, t1;
     unsigned		made = 0, refused = 0;
     unsigned long	off;
-    int			i;
+    int			i, watching;
+    forkrace_watch_t	watch;
+    pthread_t		watch_th;
 
     kr = vm_allocate(mach_task_self(), &region, FORKRACE_REGION, TRUE);
     if (kr != KERN_SUCCESS) {
@@ -1156,66 +1230,20 @@ bench_forkrace(void)
     for (i = 0; i < FORKRACE_THREADS; i++)
 	pthread_create(&w[i].th, NULL, forkrace_worker_func, &w[i]);
 
-    /*
-     * 🔴 A HEARTBEAT, BECAUSE "IT HUNG" IS NOT A RESULT.
-     *
-     * The totals are printed after the join, so a run that wedges prints
-     * nothing at all -- and then "wedged" carries no number, which makes
-     * "a resource ran out at a fixed count" indistinguishable from "a race
-     * caught it somewhere random".  Those want different fixes.
-     *
-     * The counters are read without synchronisation on purpose: they are
-     * aligned words this only ever reads, a stale value costs a heartbeat's
-     * accuracy and nothing else, and taking a lock here would serialise the
-     * very concurrency the suite exists to create.
-     *
-     * Printing only on change keeps a wedge from filling the log, and five
-     * unchanged rounds is reported once, with the count: that line is the
-     * whole diagnostic value of a run that never finishes.
-     */
-    {
-	unsigned	last = 0, still = 0;
-	int		running = 1;
-	tvalspec_t	seen, now;
-
-	get_time(&seen);
-	while (running) {
-	    unsigned	n = 0;
-	    int		k;
-
-	    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1000);
-
-	    running = 0;
-	    for (k = 0; k < FORKRACE_THREADS; k++) {
-		n += w[k].made + w[k].refused;
-		if ((int)(w[k].made + w[k].refused) < w[k].iters)
-		    running = 1;
-	    }
-
-	    if (n != last) {
-		printf("  ... %u of %d\n", n, FORKRACE_THREADS * FORKRACE_ITERS);
-		last = n;
-		still = 0;
-		get_time(&seen);
-	    } else if (running && ++still == 5) {
-		/*
-		 * #584: with the real time since the last progress, because
-		 * "five rounds" is a time only if a round is -- and that is
-		 * the question this line has to be able to answer.
-		 */
-		get_time(&now);
-		printf("  !!! STALLED at %u of %d — no progress for five "
-		       "rounds (%lu ms); the totals below will not be "
-		       "printed\n", n, FORKRACE_THREADS * FORKRACE_ITERS,
-		       elapsed_ns(&seen, &now) / 1000000);
-		break;
-	    }
-	}
-    }
+    watch.w = w;
+    watch.done = 0;
+    watching = pthread_create(&watch_th, NULL, forkrace_watchdog, &watch) == 0;
+    if (!watching)
+	printf("  forkrace: no heartbeat thread -- a wedge will be silent\n");
 
     for (i = 0; i < FORKRACE_THREADS; i++)
 	pthread_join(w[i].th, NULL);
     get_time(&t1);
+
+    /* After t1: the heartbeat's last sleep is not part of the figure. */
+    watch.done = 1;
+    if (watching)
+	pthread_join(watch_th, NULL);
 
     for (i = 0; i < FORKRACE_THREADS; i++) {
 	made += w[i].made;
