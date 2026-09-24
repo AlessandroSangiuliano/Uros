@@ -203,16 +203,23 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 	arm_one_kill_kr = thread_terminate(thread);
 
 	/*
-	 * ⚠️ And then ask the kernel about the thread again, HERE, while the
-	 * port is still in hand -- MIG deallocates it as soon as this returns.
+	 * ⚠️ And then ask the kernel about the thread again, at once and with
+	 * the same name.
 	 *
 	 * Because "thread_terminate answered KERN_SUCCESS" is the kernel
-	 * agreeing with itself, and this issue is precisely about a path where
-	 * the answer and the state came apart.  thread_suspend() on a live
-	 * activation returns KERN_SUCCESS and on a dead one returns
-	 * KERN_TERMINATED, so the two outcomes are different VALUES rather
-	 * than the presence or absence of one -- which is the only shape of
-	 * observation that can tell the kill from a kill that did nothing.
+	 * agreeing with itself, and #475 was precisely about a path where the
+	 * answer and the state came apart.  thread_suspend() on a live
+	 * activation returns KERN_SUCCESS and on a killed one something else,
+	 * so the two outcomes are different VALUES rather than the presence or
+	 * absence of one -- which is the only shape of observation that can
+	 * tell the kill from a kill that did nothing.  Which something else,
+	 * and why, is written where the answer is judged (#507).
+	 *
+	 * The name stays valid after this handler returns: exc_server passes
+	 * it and deallocates nothing, and mach_msg_server_once destroys the
+	 * request -- and the rights in it -- only when the handler answers
+	 * something other than KERN_SUCCESS (libmach/mach_msg_server.c:100-115).
+	 * It is asked here, at once, because "at once" is the question.
 	 */
 #ifdef ABLATE_507_ASK_LATE_MS
 	/*
@@ -273,6 +280,7 @@ arm_one_terminate_in_exception(void)
 {
 	pthread_t	victim;
 	kern_return_t	kr;
+	const char	*after;
 
 	kr = mach_port_allocate(mach_task_self(),
 				MACH_PORT_RIGHT_RECEIVE, &exc_port);
@@ -322,23 +330,69 @@ arm_one_terminate_in_exception(void)
 	}
 
 	/*
-	 * ⚠️ Two answers are right here and one is wrong, and which two took a
-	 * run to learn.
+	 * ── What the same name can answer after the kill, and in what order ──
 	 *
-	 * KERN_TERMINATED is what an activation marked inactive answers.
-	 * KERN_INVALID_ARGUMENT is what the NAME answers once the activation
-	 * behind it is gone entirely -- which is what this kernel does, because
-	 * the thread was the last one on its shuttle and the whole thing was
-	 * destroyed rather than merely disabled.  The second is the stronger
-	 * of the two.
+	 * 🔴 THE PROPERTY, not the answers seen so far (#507): the kill took
+	 * effect, so the name that answered KERN_SUCCESS to thread_terminate a
+	 * moment ago no longer reaches a live activation.  Which answer says so
+	 * depends only on how far the teardown the kill started has got when
+	 * the question is asked, and the kernel's order is (K = mach_kernel/):
 	 *
-	 * KERN_SUCCESS is the one that would mean nothing had happened, and it
-	 * is the reason this is asked at all: what makes the pair a proof is
-	 * that the SAME name answered KERN_SUCCESS to thread_terminate a
-	 * moment ago.  One name, two different values, in that order.
+	 *   1. inside thread_terminate, in THIS thread: the port stops naming
+	 *      the activation (K/kern/thread_act.c:298 -> kern/ipc_tt.c:395,
+	 *      kobject IKOT_NONE), and only then is the activation marked
+	 *      inactive (thread_act.c:317).  Both under the act lock, both done
+	 *      before the call returns.  A question from here on converts the
+	 *      name to no activation, and thread_suspend(THR_ACT_NULL) answers
+	 *      KERN_INVALID_ARGUMENT (thread_act.c:404).
+	 *   2. later, in the killed thread and the reaper: the activation is
+	 *      freed and its port destroyed with it (act_free, thread_act.c:1205
+	 *      -> ipc_tt.c:425).  The name is dead, and the send is refused at
+	 *      copyin: MACH_SEND_INVALID_DEST (ipc/ipc_kmsg.c:1576).  One event,
+	 *      not two -- there is no moment when the activation is gone and the
+	 *      port still alive.
+	 *   2'. the port dying between copyin and the kernel's dispatch drops the
+	 *      request on a dead port, and the stub answers MIG_SERVER_DIED.
+	 *      Read from the code; no boot has shown it.
+	 *
+	 * The order only goes forward, so a question sees the stage it reached
+	 * and never an earlier one.  Asked at once, on one processor, it is
+	 * nearly always stage 1; a clock tick or the killed thread's priority
+	 * can let the teardown finish first, and then it is stage 2 -- once in
+	 * 346 runs here, and once in five in the issue's first campaign.
+	 *
+	 * ⚠️ KERN_TERMINATED is what an INACTIVE activation answers
+	 * (thread_act.c:409), and this used to be the first of the two answers
+	 * the arm accepted.  Step 1 makes it unreachable for a question asked
+	 * after thread_terminate returns: by then the name reaches no
+	 * activation, active or not.  So it is refused below as a CHANGE OF
+	 * ORDER -- the kill still took effect, but the sequence written here is
+	 * no longer the kernel's, and this is where that has to be noticed.
+	 *
+	 * KERN_SUCCESS is the one that would mean nothing happened, and it is
+	 * the reason this is asked at all.
 	 */
-	if (arm_one_after_kr != KERN_TERMINATED
-	    && arm_one_after_kr != KERN_INVALID_ARGUMENT) {
+	switch (arm_one_after_kr) {
+	case KERN_INVALID_ARGUMENT:
+		after = "KERN_INVALID_ARGUMENT: the port no longer names an "
+			"activation";
+		break;
+	case MACH_SEND_INVALID_DEST:
+		after = "MACH_SEND_INVALID_DEST: the port itself is dead, the "
+			"activation freed";
+		break;
+	case MIG_SERVER_DIED:
+		after = "MIG_SERVER_DIED: the port died while the question was "
+			"on its way";
+		break;
+	case KERN_TERMINATED:
+		printf("act_test: [1] the same name answered KERN_TERMINATED "
+		       "after the kill — the kill took effect, but the order "
+		       "written in this test says a question asked after "
+		       "thread_terminate returns cannot reach an inactive "
+		       "activation; the kernel's order changed — WRONG\n");
+		return 0;
+	default:
 		printf("act_test: [1] after the kill the kernel still answered "
 		       "%d for that thread — WRONG\n", (int) arm_one_after_kr);
 		return 0;
@@ -357,8 +411,8 @@ arm_one_terminate_in_exception(void)
 	 * measurement.
 	 */
 	printf("act_test: [1] a thread stopped inside exception_raise was "
-	       "terminated, the kernel now calls it KERN_TERMINATED, and the "
-	       "task is still here to say so\n");
+	       "terminated, and the same name now answers %s — the task is "
+	       "still here to say so\n", after);
 	return 1;
 }
 
