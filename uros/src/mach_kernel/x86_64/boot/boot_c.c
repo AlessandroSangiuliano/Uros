@@ -68,6 +68,8 @@
 #include <time/pit.h>
 #include <time/tsc.h>
 #include <time/freq_source.h>	/* #508 */
+#include <time/pmtimer.h>	/* #508 */
+#include <time/hpet.h>		/* #508 */
 #include <trap/trap.h>
 
 #include <boot/bootarg.h>
@@ -3000,6 +3002,129 @@ static void tsc_selftest(void)
 	kputs(tsc_is_invariant() ? "invariant" : "NOT invariant (#318)");
 	kputs(ok ? " — two runs agree, the mechanism counts\r\n"
 		 : " — WRONG, the runs disagree or the ruler never counted\r\n");
+}
+
+/*
+ * The two rulers the machine has besides the 8254 (#508, phase 2).
+ *
+ * Each is found, made readable, and asked one question: how fast the TSC
+ * runs against it, over the same thirty milliseconds the 8254 calibration
+ * uses.  Nothing takes the answer yet -- tsc_hz() is still the 8254's -- and
+ * that is deliberate: three rulers read side by side are the evidence the
+ * vote in phase 4 will be designed from, including the question phase 1
+ * raised about whether an emulator's rulers are independent at all.
+ *
+ * The interval runs from an edge of the ruler to a later edge, and both are
+ * seen by reading it, so nothing is programmed inside the interval.  In kHz,
+ * not MHz, because the differences phase 1 found are a third of a percent.
+ */
+static uint64_t rulers_read_pm(void)
+{
+	return pmtimer_read();
+}
+
+static uint64_t rulers_read_hpet(void)
+{
+	return hpet_read();
+}
+
+static uint64_t rulers_tsc_khz(uint64_t (*read)(void), uint64_t mask,
+			       uint64_t hz, uint64_t span, uint64_t *counted)
+{
+	uint64_t budget, start, c0, c, t0, t1;
+
+	/*
+	 * Bounded by the TSC, which is known to count (it was just measured,
+	 * whether or not the two runs agreed).  A second of it if the rate is
+	 * known, and 2^34 counts -- between 1.7 and 17 s at any rate a
+	 * processor has -- if it is not.
+	 */
+	budget = tsc_hz() ? tsc_hz() : (1ULL << 34);
+	start = rdtsc();
+
+	c0 = read();
+	do {
+		c = read();
+		if (rdtsc() - start > budget)
+			return 0;
+	} while (c == c0);
+	t0 = rdtsc();
+	c0 = c;
+
+	do {
+		c = read();
+		if (rdtsc() - start > budget)
+			return 0;
+	} while (((c - c0) & mask) < span);
+	t1 = rdtsc();
+
+	*counted = (c - c0) & mask;
+	return ((t1 - t0) * hz / *counted) / 1000;
+}
+
+static void rulers_selftest(void)
+{
+	uint64_t khz, counted;
+
+	kputs("UrMach x86-64: ACPI PM timer: ");
+	if (!pmtimer_init()) {
+		kputs("none — the FADT states no timer, or the platform is "
+		      "hardware-reduced\r\n");
+	} else {
+		kputs(pmtimer_is_io() ? "port " : "memory ");
+		kputhex64(pmtimer_address());
+		kputs(", ");
+		kputdec(pmtimer_width());
+		kputs(" bits, ");
+		kputdec(PMTIMER_HZ);
+		kputs(" Hz by specification: ");
+		khz = rulers_tsc_khz(rulers_read_pm,
+				     pmtimer_width() == 32 ? 0xffffffffULL
+							   : 0x00ffffffULL,
+				     PMTIMER_HZ, PMTIMER_HZ * 3ULL / 100,
+				     &counted);
+		if (khz == 0) {
+			kputs("WRONG, it did not count\r\n");
+		} else {
+			kputs("the TSC runs at ");
+			kputdec(khz);
+			kputs(" kHz against it, over ");
+			kputdec(counted);
+			kputs(" counts\r\n");
+		}
+	}
+
+	kputs("UrMach x86-64: HPET: ");
+	if (!hpet_init()) {
+		kputs("none — no table, or a block whose capability register "
+		      "does not add up\r\n");
+		return;
+	}
+	kputs("at ");
+	kputhex64(hpet_address());
+	kputs(", period ");
+	kputdec(hpet_period_fs());
+	kputs(" fs (");
+	kputdec(hpet_hz());
+	kputs(" Hz), ");
+	kputs(hpet_counter_64() ? "64" : "32");
+	kputs("-bit counter, ");
+	kputdec(hpet_comparators());
+	kputs(" comparators, vendor ");
+	kputhex64(hpet_vendor());
+	kputs(hpet_started_here() ? ", started here: " : ", already running: ");
+	khz = rulers_tsc_khz(rulers_read_hpet,
+			     hpet_counter_64() ? ~0ULL : 0xffffffffULL,
+			     hpet_hz(), hpet_hz() * 3 / 100, &counted);
+	if (khz == 0) {
+		kputs("WRONG, it did not count\r\n");
+	} else {
+		kputs("the TSC runs at ");
+		kputdec(khz);
+		kputs(" kHz against it, over ");
+		kputdec(counted);
+		kputs(" counts\r\n");
+	}
 }
 
 /*
@@ -6678,6 +6803,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ioapic_madt_selftest();
 	freq_census();
 	tsc_selftest();
+	rulers_selftest();
 	timer_selftest();
 	pci_cfg_selftest();
 	pci_cap_selftest();

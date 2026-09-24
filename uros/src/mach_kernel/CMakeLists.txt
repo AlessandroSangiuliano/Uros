@@ -300,6 +300,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_dev.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/freq_source.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/hpet.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pmtimer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
