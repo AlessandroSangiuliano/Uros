@@ -546,16 +546,25 @@ device_class_of(natural_t bdf)
 }
 
 /*
- * Does this claimed device answer for `phys'?
+ * Does this claimed device answer for `phys', and if so, where does the
+ * region that holds it end?
+ *
+ * The end is rounded up to a page, because a mapping is made of pages: a
+ * region smaller than one, or one that ends mid-page, is reachable only as
+ * the whole page it sits in.  What lies in the rest of that page is the
+ * page's, not the region's -- a limit of the granularity, and not a thing a
+ * check can do better than.
  */
 static int
-device_owns_phys(unsigned int claim, vm_offset_t phys)
+device_owns_phys(unsigned int claim, vm_offset_t phys, uint64_t *end)
 {
 	natural_t    bdf = device_claim[claim].bdf;
 	unsigned int b;
 
-	if (phys >= VGA_LEGACY_BASE && phys < VGA_LEGACY_END)
+	if (phys >= VGA_LEGACY_BASE && phys < VGA_LEGACY_END) {
+		*end = VGA_LEGACY_END;
 		return device_class_of(bdf) == PCI_CLASS_DISPLAY;
+	}
 
 	/*
 	 * 🔑 THE WHOLE REGION AND NOT ITS FIRST PAGE.  This compared the page
@@ -571,50 +580,66 @@ device_owns_phys(unsigned int claim, vm_offset_t phys)
 		if (device_claim[claim].region[b].is_io)
 			continue;
 
-		if ((uint64_t)phys >= base && (uint64_t)phys < base + size)
+		if ((uint64_t)phys >= base && (uint64_t)phys < base + size) {
+			*end = round_page(base + size);
 			return 1;
+		}
 	}
 
 	return 0;
 }
 
 /*
- * May this task map this physical address?
+ * May this task map these physical pages?
  *
- * ⚠️ THE SPAN IS NOT BOUNDED YET, AND SAYING SO IS PART OF THE FIX.  What is
- * compared is the page the mapping starts on; a caller that holds a device
- * legitimately can still ask for more pages than that device has.  Bounding
- * it needs the region SIZES, which only the HAL knows because only the HAL
- * measures them -- and it does not tell the kernel.  Closing the difference
- * is the other half and it is written down rather than implied, because a
- * check that looks complete and is not is the shape this file has been bitten
- * by twice.
+ * 🔴 THE WHOLE SPAN, AND NOT THE PAGE IT STARTS ON (#508).  This compared the
+ * first page only, and said so: "the span is not bounded yet", because the
+ * region sizes were the HAL's and the kernel did not have them.  It has had
+ * them since the claim began measuring them (device_owns_phys() above says
+ * so), and the comment here went on saying the opposite -- two halves of one
+ * file disagreeing, while a task that held one BAR could ask for enough pages
+ * to run past it.  On the boards these suites boot, the PCI windows end just
+ * below the I/O APIC, the HPET and the local APIC: a mapping two megabytes
+ * long from the last BAR reached all three.
+ *
+ * So the span must end where the region it starts in ends, rounded up to the
+ * page the region's last byte is on.
  */
 static kern_return_t
-check_mmio_phys(vm_offset_t phys)
+check_mmio_phys(vm_offset_t phys, vm_size_t len)
 {
 	task_t me = current_task();
 	unsigned i, n;
 	natural_t other_bdf = DEVICE_DMA_NO_BDF;
 	int mine = 0;
+	uint64_t end = 0, region_end;
 
 	urmach_rcu_read_lock();
 	n = device_nclaims;
 	for (i = 0; i < n; i++) {
 		if (device_claim[i].task == TASK_NULL)
 			continue;
-		if (!device_owns_phys(i, phys))
+		if (!device_owns_phys(i, phys, &region_end))
 			continue;
-		if (device_claim[i].task == me)
+		if (device_claim[i].task == me) {
 			mine = 1;
-		else
+			end = region_end;
+		} else
 			other_bdf = device_claim[i].bdf;
 		break;
 	}
 	urmach_rcu_read_unlock();
 
-	if (mine)
+	if (mine && (uint64_t)phys + len <= end)
 		return KERN_SUCCESS;
+
+	if (mine) {
+		printf("device_mmio_map: 0x%lx..0x%lx runs past the end of the "
+		       "region it starts in, which ends at 0x%lx (#508)\n",
+		       (unsigned long)phys, (unsigned long)(phys + len - 1),
+		       (unsigned long)end);
+		return KERN_NO_ACCESS;
+	}
 
 	if (other_bdf != DEVICE_DMA_NO_BDF)
 		printf("device_mmio_map: 0x%lx belongs to %u:%u.%u, which is "
@@ -2527,7 +2552,7 @@ ds_master_device_mmio_map(
 	page_offset = (vm_offset_t)phys_addr - phys_base;
 	round_sz    = round_page(page_offset + size);
 
-	kr = check_mmio_phys(phys_base);
+	kr = check_mmio_phys(phys_base, round_sz);
 	if (kr != KERN_SUCCESS) {
 		task_deallocate(task);
 		return kr;
