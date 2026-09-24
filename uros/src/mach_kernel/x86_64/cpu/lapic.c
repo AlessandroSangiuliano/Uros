@@ -13,6 +13,7 @@
 #include <pmap/pmap.h>
 #include <time/pit.h>
 #include <time/ruler.h>	/* #508: the rule the TSC shares */
+#include <time/rulers.h>	/* #508: against the elected ruler */
 #include <trap/trap.h>
 
 #define MSR_APIC_BASE		0x1B
@@ -333,11 +334,21 @@ uint32_t lapic_timer_calibrate(void)
 	lapic_write(LAPIC_TIMER_DIV, TIMER_DIVIDE_16);
 	lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFFu);
 
-	pit_ruler_start();
-	if (ruler_calibrate(&pit_read_back, subject_timer, 0xffffffffULL,
-			    PIT_RULER_SPAN, 1ULL << 34, 0, &timer_cal))
-		timer_hz = (uint32_t)timer_cal.hz;
-	pit_ruler_stop();
+	/*
+	 * Against the ruler the vote elected (time/rulers.h): the narrowest of
+	 * those it did not name, so a ruler found wrong measuring the TSC does
+	 * not go on to measure this.
+	 */
+	{
+		unsigned		id = rulers_elected();
+		struct kernel_ruler	*k = rulers_get(id);
+
+		rulers_start(id);
+		if (ruler_calibrate(&k->r, subject_timer, 0xffffffffULL,
+				    k->span, 1ULL << 34, 0, &timer_cal))
+			timer_hz = (uint32_t)timer_cal.hz;
+		rulers_stop(id);
+	}
 
 	lapic_write(LAPIC_TIMER_INIT, 0);	/* stop */
 	return timer_hz;

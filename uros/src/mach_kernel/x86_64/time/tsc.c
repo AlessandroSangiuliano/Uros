@@ -10,6 +10,7 @@
 #include <cpu/regs.h>
 #include <time/pit.h>
 #include <time/ruler.h>
+#include <time/rulers.h>
 #include <time/tsc.h>
 
 /*
@@ -26,7 +27,7 @@
  * one in 260; now the median of three decides, and a failed attempt is asked
  * again.
  */
-static struct ruler_calibration cal;
+static uint64_t hz;
 
 int tsc_is_invariant(void)
 {
@@ -76,30 +77,47 @@ static void ablate_runs(uint64_t run_hz[RULER_RUNS])
 #define	TSC_ABLATE	0
 #endif
 
+/*
+ * Against every ruler the machine has, and then they vote (time/rulers.h).
+ * The ablations reach every ruler's runs alike: #586's has to leave the
+ * machine with no ruler that answered, or the vote would carry on without the
+ * 8254 and the NOT ASKED paths it exists to run would not run.
+ */
 int tsc_calibrate(void)
 {
-	int ok;
+	struct rulers_verdict	v;
+	struct kernel_ruler	*k;
+	unsigned		id;
 
-	pit_ruler_start();
-	ok = ruler_calibrate(&pit_read_back, subject_tsc, ~0ULL,
-			     PIT_RULER_SPAN, 1ULL << 34, TSC_ABLATE, &cal);
-	pit_ruler_stop();
-	return ok;
+	rulers_find();
+	for (id = 0; id < RULERS; id++) {
+		k = rulers_get(id);
+		if (!k->present)
+			continue;
+		rulers_start(id);
+		(void) ruler_calibrate(&k->r, subject_tsc, ~0ULL, k->span,
+				       1ULL << 34, TSC_ABLATE, &k->tsc);
+		rulers_stop(id);
+	}
+
+	rulers_vote(&v);
+	hz = v.hz;
+	return hz != 0;
 }
 
 uint64_t tsc_hz(void)
 {
-	return cal.hz;
+	return hz;
 }
 
 uint64_t tsc_hz_run(unsigned which)
 {
-	return which < RULER_RUNS ? cal.run_hz[which] : 0;
+	return which < RULER_RUNS ? rulers_get(RULER_8254)->tsc.run_hz[which] : 0;
 }
 
 uint64_t tsc_window_ppm(unsigned which)
 {
-	return which < RULER_RUNS ? cal.run_ppm[which] : 0;
+	return which < RULER_RUNS ? rulers_get(RULER_8254)->tsc.run_ppm[which] : 0;
 }
 
 unsigned tsc_calibrate_runs(void)
@@ -109,10 +127,10 @@ unsigned tsc_calibrate_runs(void)
 
 unsigned tsc_calibrate_attempts(void)
 {
-	return cal.attempts;
+	return rulers_get(RULER_8254)->tsc.attempts;
 }
 
 int tsc_set_aside(void)
 {
-	return cal.set_aside;
+	return rulers_get(RULER_8254)->tsc.set_aside;
 }

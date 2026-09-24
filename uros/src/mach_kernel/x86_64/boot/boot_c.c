@@ -71,6 +71,7 @@
 #include <time/pmtimer.h>	/* #508 */
 #include <time/hpet.h>		/* #508 */
 #include <time/ruler.h>		/* #508 */
+#include <time/rulers.h>	/* #508 */
 #include <trap/trap.h>
 
 #include <boot/bootarg.h>
@@ -2993,8 +2994,15 @@ static void freq_census(void)
  */
 static void tsc_selftest(void)
 {
-	int ok = tsc_calibrate();
-	unsigned i, n = tsc_calibrate_runs();
+	const struct rulers_verdict	*v;
+	struct kernel_ruler		*k;
+	uint64_t			w;
+	unsigned			i, id, n = tsc_calibrate_runs();
+	int				first = 1;
+
+	(void) tsc_calibrate();
+	v = rulers_verdict();
+	k = rulers_get(RULER_8254);
 
 	kputs("UrMach x86-64: timestamp counter measured against the 8254 at ");
 	for (i = 0; i < n; i++) {
@@ -3008,22 +3016,73 @@ static void tsc_selftest(void)
 	}
 	kputs(" ppm), ");
 	kputs(tsc_is_invariant() ? "invariant" : "NOT invariant (#318)");
-	if (!ok) {
-		kputs(" — WRONG, no median agreed with another run in ");
+	/*
+	 * No WRONG here even when this ruler found no median: the others vote
+	 * without it, and the line below says whether the TSC was calibrated.
+	 */
+	if (k->tsc.hz == 0) {
+		kputs(" — no median agreed with another run in ");
 		kputdec(tsc_calibrate_attempts());
 		kputs(" attempts\r\n");
+	} else {
+		kputs(" — the median, ");
+		kputdec(k->tsc.hz / 1000);
+		kputs(" kHz, on attempt ");
+		kputdec(tsc_calibrate_attempts());
+		if (tsc_set_aside() >= 0) {
+			kputs(", run ");
+			kputdec((unsigned)tsc_set_aside());
+			kputs(" set aside as the one that disagreed");
+		}
+		kputs("\r\n");
+	}
+
+	/*
+	 * The vote (#508, time/rulers.h): the TSC as every ruler measured it,
+	 * each with its widest bracket, and what was believed.
+	 */
+	kputs("UrMach x86-64: the TSC against each ruler: ");
+	for (id = 0; id < RULERS; id++) {
+		k = rulers_get(id);
+		if (!k->present)
+			continue;
+		kputs(first ? "" : ", ");
+		first = 0;
+		kputs(k->name);
+		if (k->tsc.hz == 0) {
+			kputs(" no median");
+			continue;
+		}
+		w = 0;
+		for (i = 0; i < RULER_RUNS; i++)
+			if (k->tsc.run_hz[i] != 0 && k->tsc.run_ppm[i] > w)
+				w = k->tsc.run_ppm[i];
+		kputs(" ");
+		kputdec(k->tsc.hz / 1000);
+		kputs(" kHz (");
+		kputdec(w);
+		kputs(" ppm)");
+	}
+	if (v->hz == 0) {
+		kputs(" — WRONG, no ruler produced a median, so the TSC is left "
+		      "uncalibrated and its consumers say NOT ASKED (#586)\r\n");
 		return;
 	}
-	kputs(" — the median, ");
-	kputdec(tsc_hz() / 1000);
-	kputs(" kHz, on attempt ");
-	kputdec(tsc_calibrate_attempts());
-	if (tsc_set_aside() >= 0) {
-		kputs(", run ");
-		kputdec((unsigned)tsc_set_aside());
-		kputs(" set aside as the one that disagreed");
+	if (v->answered == 1) {
+		kputs(" — one ruler answered, so there was no vote: ");
+	} else if (v->no_majority) {
+		kputs(" — no two agree, so the ");
+		kputs(rulers_get((unsigned)v->kept)->name);
+		kputs("'s, whose ends were narrowest, is kept: ");
+	} else if (v->dissenter >= 0) {
+		kputs(" — the ");
+		kputs(rulers_get((unsigned)v->dissenter)->name);
+		kputs(" disagrees with the other two and is not used: ");
+	} else {
+		kputs(" — they agree: ");
 	}
-	kputs("\r\n");
+	kputdec(v->hz / 1000);
+	kputs(" kHz\r\n");
 }
 
 /*
@@ -3040,82 +3099,17 @@ static void tsc_selftest(void)
  * seen by reading it, so nothing is programmed inside the interval.  In kHz,
  * not MHz, because the differences phase 1 found are a third of a percent.
  */
-/* A down-counter read as an up-counter, so one routine measures all three. */
-static uint64_t rulers_read_pit(void)
-{
-	return (uint16_t)~pit_ruler_read();
-}
-
-static uint64_t rulers_read_pm(void)
-{
-	return pmtimer_read();
-}
-
-static uint64_t rulers_read_hpet(void)
-{
-	return hpet_read32();
-}
-
-static uint64_t rulers_subject_tsc(void)
-{
-	return rdtsc();
-}
-
 /*
- * The TSC against one ruler, through the one routine the calibration will use
- * (time/ruler.c): edge to edge, each end with its window.  Bounded by the
- * TSC -- a second of it if the rate is known, 2^34 counts (between 1.7 and
- * 17 s at any rate a processor has) if it is not.
+ * The rulers the machine has besides the 8254 (#508): found, made readable,
+ * and described.  What the TSC measures against each, and their vote, is
+ * tsc_selftest()'s line -- which runs after this.
  */
-static uint64_t rulers_tsc_khz(uint64_t (*read)(void), uint64_t mask,
-			       uint64_t hz, uint64_t span, uint64_t *counted,
-			       uint64_t *window_ppm)
-{
-	struct ruler		r = { read, mask, hz };
-	struct ruler_run	run;
-	uint64_t		budget = tsc_hz() ? tsc_hz() : (1ULL << 34);
-
-	if (!ruler_measure(&r, rulers_subject_tsc, ~0ULL, span, budget, &run))
-		return 0;
-	*counted = run.counts;
-	*window_ppm = ruler_window_ppm(&run);
-	return run.hz / 1000;
-}
-
-static void rulers_report(uint64_t khz, uint64_t counted, uint64_t window_ppm)
-{
-	if (khz == 0) {
-		kputs("WRONG, it did not count\r\n");
-		return;
-	}
-	kputs("the TSC runs at ");
-	kputdec(khz);
-	kputs(" kHz against it, over ");
-	kputdec(counted);
-	kputs(" counts, the ends within ");
-	kputdec(window_ppm);
-	kputs(" ppm\r\n");
-}
-
 static void rulers_selftest(void)
 {
-	uint64_t khz, counted, ppm;
-
-	/*
-	 * The 8254 first, read back rather than waited on, so its number can
-	 * be set beside the calibration's -- which waits on it -- and the cost
-	 * of the programming inside the calibration's interval shows as their
-	 * difference.
-	 */
-	kputs("UrMach x86-64: 8254 channel 2, read back: ");
-	pit_ruler_start();
-	khz = rulers_tsc_khz(rulers_read_pit, 0xffffULL, PIT_HZ,
-			     PIT_HZ * 3ULL / 100, &counted, &ppm);
-	pit_ruler_stop();
-	rulers_report(khz, counted, ppm);
+	rulers_find();
 
 	kputs("UrMach x86-64: ACPI PM timer: ");
-	if (!pmtimer_init()) {
+	if (!pmtimer_present()) {
 		kputs("none — the FADT states no timer, or the platform is "
 		      "hardware-reduced\r\n");
 	} else {
@@ -3125,17 +3119,11 @@ static void rulers_selftest(void)
 		kputdec(pmtimer_width());
 		kputs(" bits, ");
 		kputdec(PMTIMER_HZ);
-		kputs(" Hz by specification: ");
-		khz = rulers_tsc_khz(rulers_read_pm,
-				     pmtimer_width() == 32 ? 0xffffffffULL
-							   : 0x00ffffffULL,
-				     PMTIMER_HZ, PMTIMER_HZ * 3ULL / 100,
-				     &counted, &ppm);
-		rulers_report(khz, counted, ppm);
+		kputs(" Hz by specification\r\n");
 	}
 
 	kputs("UrMach x86-64: HPET: ");
-	if (!hpet_init()) {
+	if (!hpet_present()) {
 		kputs("none — no table, or a block whose capability register "
 		      "does not add up\r\n");
 		return;
@@ -3152,11 +3140,8 @@ static void rulers_selftest(void)
 	kputdec(hpet_comparators());
 	kputs(" comparators, vendor ");
 	kputhex64(hpet_vendor());
-	kputs(hpet_started_here() ? ", started here: " : ", already running: ");
-	khz = rulers_tsc_khz(rulers_read_hpet,
-			     0xffffffffULL,
-			     hpet_hz(), hpet_hz() * 3 / 100, &counted, &ppm);
-	rulers_report(khz, counted, ppm);
+	kputs(hpet_started_here() ? ", started here\r\n"
+				  : ", already running\r\n");
 }
 
 /*
@@ -3417,7 +3402,9 @@ static void timer_selftest(void)
 		      "another run\r\n");
 		return;
 	}
-	kputs(", measured against the 8254 read back: the median, ");
+	kputs(", measured against the ");
+	kputs(rulers_get(rulers_elected())->name);
+	kputs(": the median, ");
 	kputdec(rate / 1000);
 	kputs(" kHz");
 	if (lapic_timer_set_aside() >= 0) {
@@ -6894,8 +6881,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ksym_selftest();
 	ioapic_madt_selftest();
 	freq_census();
-	tsc_selftest();
 	rulers_selftest();
+	tsc_selftest();
 	rulers_kept_selftest();
 	timer_selftest();
 	pci_cfg_selftest();
