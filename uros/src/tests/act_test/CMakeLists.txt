@@ -43,6 +43,17 @@ target_compile_options(act_test_bin PRIVATE
 
 target_compile_definitions(act_test_bin PRIVATE MACH_IPC_COMPAT=0)
 
+# #507: ask arm [1]'s question N milliseconds AFTER the kill instead of at once,
+# so the teardown the kill starts has run further by the time the same name is
+# asked about -- the answers a late question gets, on demand rather than once in
+# a few hundred boots.  Empty = off.  Never set in a build booted for anything
+# else.
+set(UROS_ABLATE_507_ASK_LATE_MS "" CACHE STRING "Build the #507 ablation: act_test [1] asks N ms after the kill (empty = off)")
+if(NOT UROS_ABLATE_507_ASK_LATE_MS STREQUAL "")
+  target_compile_definitions(act_test_bin PRIVATE ABLATE_507_ASK_LATE_MS=${UROS_ABLATE_507_ASK_LATE_MS})
+  message(STATUS "#507 ablation: act_test [1] asks ${UROS_ABLATE_507_ASK_LATE_MS} ms after the kill")
+endif()
+
 # ⚠️ ${_AT_OUT} first: the stubs include each other by quoted name.  The shared
 # generated/ MIG directory is not needed here -- this test's stubs are its own.
 target_include_directories(act_test_bin PRIVATE
