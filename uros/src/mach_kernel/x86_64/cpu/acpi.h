@@ -177,4 +177,63 @@ uint16_t acpi_irq_flags(uint8_t irq);
  */
 uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus);
 
+/* ------------------------------------------------------------------ */
+/*
+ * Where a register lives: ACPI's Generic Address Structure (ACPI 6.5,
+ * 5.2.3.2), twelve bytes.  Only two address spaces are ever read here.
+ */
+struct acpi_gas {
+	uint8_t  space_id;
+	uint8_t  bit_width;
+	uint8_t  bit_offset;
+	uint8_t  access_size;
+	uint64_t address;
+} __attribute__((packed));
+
+#define ACPI_GAS_MEMORY		0x00
+#define ACPI_GAS_IO		0x01
+
+/*
+ * The power-management timer, as the FADT states it (#508).
+ *
+ * Both of the FADT's addresses are kept as the table gave them, and the one
+ * to use is chosen by the rule the specification states: the extended block
+ * wins when it is non-zero and in an address space that can be used.
+ * `address' is zero when neither says there is a timer, and on a
+ * hardware-reduced platform, where the fixed hardware the timer belongs to
+ * does not exist.
+ */
+struct acpi_pm_timer {
+	int		fadt_found;
+	int		hw_reduced;	/* flag bit 20, HW_REDUCED_ACPI */
+	int		width;		/* 24, or 32 with TMR_VAL_EXT (bit 8) */
+	uint8_t		len;		/* PM_TMR_LEN: 4 when there is a timer */
+	uint32_t	blk;		/* PM_TMR_BLK, a port */
+	int		has_xblk;	/* the table is long enough to hold it */
+	struct acpi_gas	xblk;		/* X_PM_TMR_BLK */
+	uint8_t		space_id;	/* of the address below */
+	uint64_t	address;	/* the one to use, or zero */
+};
+
+void acpi_pm_timer(struct acpi_pm_timer *out);
+
+/*
+ * The HPET, as its ACPI table states it (#508; IA-PC HPET 1.0a, 3.2.4).
+ *
+ * `block_id' is the firmware's copy of the low half of the timer block's
+ * capability register: vendor, whether the counter is 64 bits wide, the
+ * index of the last comparator, the revision.  The period is not in the
+ * table; it is in the register itself, which is phase 2's business.
+ */
+struct acpi_hpet {
+	int		found;
+	uint32_t	block_id;
+	struct acpi_gas	base;
+	uint8_t		number;
+	uint16_t	min_tick;	/* periodic mode's smallest safe period */
+	uint8_t		page_protection;
+};
+
+void acpi_hpet(struct acpi_hpet *out);
+
 #endif	/* _X86_64_CPU_ACPI_H_ */

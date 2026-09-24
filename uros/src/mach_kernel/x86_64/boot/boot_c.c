@@ -67,6 +67,7 @@
 #include <sync/lock.h>
 #include <time/pit.h>
 #include <time/tsc.h>
+#include <time/freq_source.h>	/* #508 */
 #include <trap/trap.h>
 
 #include <boot/bootarg.h>
@@ -2813,6 +2814,160 @@ static void ring3_selftest(void)
  * the right privilege level, the right kind of segment, and for the 64-bit
  * code selector the long-mode bit that makes it 64-bit at all.
  */
+/*
+ * What the processor, the hypervisor and the firmware say about the clocks,
+ * before anything measures them (#508, phase 1).
+ *
+ * A census and nothing more: each value is printed as its source gave it,
+ * under the name its specification gives it, and none is believed yet --
+ * which is why no line here carries a verdict.  It is here so that which
+ * sources the calibration trusts is decided from what the machines we have
+ * actually answer (TCG and KVM, the CPU models, both boards), not from what
+ * the manuals say a machine may answer.
+ */
+static void freq_census_putsig(const char *sig)
+{
+	for (int i = 0; i < 12 && sig[i] != '\0'; i++)
+		kputc(sig[i] >= 0x20 && sig[i] < 0x7f ? sig[i] : '.');
+}
+
+static void freq_census(void)
+{
+	struct freq_cpuid	cpu;
+	struct freq_hypervisor	hv;
+	struct acpi_pm_timer	pm;
+	struct acpi_hpet	hpet;
+
+	freq_cpuid_read(&cpu);
+	kputs("UrMach x86-64: frequency census: CPUID highest leaf ");
+	kputhex64(cpu.max_leaf);
+	if (cpu.has_15) {
+		kputs("; 0x15 crystal ");
+		kputdec(cpu.crystal_hz);
+		kputs(" Hz, TSC/crystal ");
+		kputdec(cpu.tsc_numerator);
+		kputs("/");
+		kputdec(cpu.tsc_denominator);
+	} else {
+		kputs("; 0x15 not offered");
+	}
+	if (cpu.has_16) {
+		kputs("; 0x16 base ");
+		kputdec(cpu.base_mhz);
+		kputs(" max ");
+		kputdec(cpu.max_mhz);
+		kputs(" bus ");
+		kputdec(cpu.bus_mhz);
+		kputs(" MHz");
+	} else {
+		kputs("; 0x16 not offered");
+	}
+	kputs("\r\n");
+
+	freq_hypervisor_read(&hv);
+	kputs("UrMach x86-64: frequency census: ");
+	if (!hv.present) {
+		kputs("no hypervisor bit\r\n");
+	} else {
+		kputs("hypervisor \"");
+		freq_census_putsig(hv.signature);
+		kputs("\", highest leaf ");
+		kputhex64(hv.max_leaf);
+		if (hv.has_timing) {
+			kputs("; 0x40000010 TSC ");
+			kputdec(hv.tsc_khz);
+			kputs(" kHz, bus ");
+			kputdec(hv.bus_khz);
+			kputs(" kHz");
+		} else {
+			kputs("; 0x40000010 not offered");
+		}
+		if (hv.is_kvm) {
+			kputs("; KVM features ");
+			kputhex64(hv.kvm_features);
+			if (!hv.kvmclock_asked) {
+				kputs("; kvmclock not offered");
+			} else if (hv.kvmclock_version == 0) {
+				kputs("; kvmclock asked, the host wrote nothing");
+			} else {
+				kputs("; kvmclock implies TSC ");
+				kputdec(hv.kvmclock_tsc_hz);
+				kputs(" Hz (mul ");
+				kputhex64(hv.kvmclock_mul);
+				kputs(", shift ");
+				if (hv.kvmclock_shift < 0)
+					kputc('-');
+				kputdec(hv.kvmclock_shift < 0
+					? -hv.kvmclock_shift : hv.kvmclock_shift);
+				kputs(", flags ");
+				kputhex64(hv.kvmclock_flags);
+				kputs(")");
+			}
+		}
+		kputs("\r\n");
+	}
+
+	acpi_pm_timer(&pm);
+	kputs("UrMach x86-64: frequency census: ACPI PM timer: ");
+	if (!pm.fadt_found) {
+		kputs("no FADT\r\n");
+	} else {
+		kputs("PM_TMR_BLK ");
+		kputhex64(pm.blk);
+		kputs(", PM_TMR_LEN ");
+		kputdec(pm.len);
+		kputs(", ");
+		kputdec(pm.width);
+		kputs(" bits");
+		if (pm.has_xblk) {
+			kputs(", X_PM_TMR_BLK space ");
+			kputdec(pm.xblk.space_id);
+			kputs(" at ");
+			kputhex64(pm.xblk.address);
+		} else {
+			kputs(", no X_PM_TMR_BLK (a table too short for it)");
+		}
+		if (pm.hw_reduced)
+			kputs(" — hardware-reduced ACPI: no fixed timer");
+		else if (pm.address == 0)
+			kputs(" — the FADT states no timer");
+		else {
+			kputs(" — the timer is at ");
+			kputs(pm.space_id == ACPI_GAS_IO ? "port " : "memory ");
+			kputhex64(pm.address);
+		}
+		kputs("\r\n");
+	}
+
+	acpi_hpet(&hpet);
+	kputs("UrMach x86-64: frequency census: HPET table: ");
+	if (!hpet.found) {
+		kputs("none\r\n");
+	} else {
+		kputs("base space ");
+		kputdec(hpet.base.space_id);
+		kputs(" at ");
+		kputhex64(hpet.base.address);
+		kputs(", REV_ID ");
+		kputdec(hpet.block_id & 0xff);
+		kputs(", NUM_TIM_CAP ");
+		kputdec((hpet.block_id >> 8) & 0x1f);
+		kputs(", COUNT_SIZE_CAP ");
+		kputdec((hpet.block_id >> 13) & 1);
+		kputs(", LEG_RT_CAP ");
+		kputdec((hpet.block_id >> 15) & 1);
+		kputs(", VENDOR_ID ");
+		kputhex64(hpet.block_id >> 16);
+		kputs(", number ");
+		kputdec(hpet.number);
+		kputs(", minimum tick ");
+		kputdec(hpet.min_tick);
+		kputs(", page protection ");
+		kputdec(hpet.page_protection & 0xf);
+		kputs("\r\n");
+	}
+}
+
 /*
  * The kernel learns to measure time (#409).
  *
@@ -6521,6 +6676,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	cons_selftest();
 	ksym_selftest();
 	ioapic_madt_selftest();
+	freq_census();
 	tsc_selftest();
 	timer_selftest();
 	pci_cfg_selftest();

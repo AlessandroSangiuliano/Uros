@@ -556,3 +556,115 @@ uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus)
 
 	return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/*
+ * The FADT, as far as the power-management timer (ACPI 6.5, 5.2.9).
+ *
+ * Only the fields this reads are named; the rest are spans of bytes whose
+ * offsets are asserted below, because a packed structure that is off by one
+ * byte reads a neighbouring field and returns something that looks like an
+ * answer.  The extended block exists only in a table long enough to hold it.
+ */
+struct acpi_fadt {
+	struct acpi_header	header;			/*   0 */
+	uint8_t			to_pm_tmr_blk[40];
+	uint32_t		pm_tmr_blk;		/*  76 */
+	uint8_t			to_pm_tmr_len[11];
+	uint8_t			pm_tmr_len;		/*  91 */
+	uint8_t			to_flags[20];
+	uint32_t		flags;			/* 112 */
+	uint8_t			to_x_pm_tmr_blk[92];
+	struct acpi_gas		x_pm_tmr_blk;		/* 208 */
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct acpi_gas) == 12,
+	       "a Generic Address Structure is twelve bytes");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, pm_tmr_blk) == 76,
+	       "PM_TMR_BLK is at byte 76 of the FADT");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, pm_tmr_len) == 91,
+	       "PM_TMR_LEN is at byte 91 of the FADT");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, flags) == 112,
+	       "the fixed feature flags are at byte 112 of the FADT");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, x_pm_tmr_blk) == 208,
+	       "X_PM_TMR_BLK is at byte 208 of the FADT");
+
+#define FADT_TMR_VAL_EXT	(1U << 8)
+#define FADT_HW_REDUCED_ACPI	(1U << 20)
+
+void acpi_pm_timer(struct acpi_pm_timer *out)
+{
+	const struct acpi_fadt *fadt;
+
+	*out = (struct acpi_pm_timer){ 0 };
+
+	fadt = (const struct acpi_fadt *)acpi_find_table("FACP");
+	if (fadt == 0)
+		return;
+	out->fadt_found = 1;
+
+	/*
+	 * The two fixed fields are within the ACPI 1.0 table, 116 bytes; a
+	 * table shorter than that is not a FADT this can read.
+	 */
+	if (fadt->header.length < __builtin_offsetof(struct acpi_fadt, to_x_pm_tmr_blk))
+		return;
+
+	out->hw_reduced = (fadt->flags & FADT_HW_REDUCED_ACPI) != 0;
+	out->width = (fadt->flags & FADT_TMR_VAL_EXT) ? 32 : 24;
+	out->len = fadt->pm_tmr_len;
+	out->blk = fadt->pm_tmr_blk;
+
+	if (fadt->header.length >= sizeof(struct acpi_fadt)) {
+		out->has_xblk = 1;
+		out->xblk = fadt->x_pm_tmr_blk;
+	}
+
+	if (out->hw_reduced)
+		return;
+
+	if (out->has_xblk && out->xblk.address != 0
+	    && (out->xblk.space_id == ACPI_GAS_IO
+		|| out->xblk.space_id == ACPI_GAS_MEMORY)) {
+		out->space_id = out->xblk.space_id;
+		out->address = out->xblk.address;
+	} else if (out->blk != 0) {
+		out->space_id = ACPI_GAS_IO;
+		out->address = out->blk;
+	}
+}
+
+/*
+ * The HPET description table (IA-PC HPET 1.0a, 3.2.4, table 3): 56 bytes.
+ */
+struct acpi_hpet_table {
+	struct acpi_header	header;			/*  0 */
+	uint32_t		block_id;		/* 36 */
+	struct acpi_gas		base;			/* 40 */
+	uint8_t			number;			/* 52 */
+	uint16_t		min_tick;		/* 53 */
+	uint8_t			page_protection;	/* 55 */
+} __attribute__((packed));
+
+_Static_assert(__builtin_offsetof(struct acpi_hpet_table, base) == 40,
+	       "the HPET's base address is at byte 40 of its table");
+_Static_assert(sizeof(struct acpi_hpet_table) == 56,
+	       "the HPET description table is 56 bytes");
+
+void acpi_hpet(struct acpi_hpet *out)
+{
+	const struct acpi_hpet_table *t;
+
+	*out = (struct acpi_hpet){ 0 };
+
+	t = (const struct acpi_hpet_table *)acpi_find_table("HPET");
+	if (t == 0 || t->header.length < sizeof(*t))
+		return;
+
+	out->found = 1;
+	out->block_id = t->block_id;
+	out->base = t->base;
+	out->number = t->number;
+	out->min_tick = t->min_tick;
+	out->page_protection = t->page_protection;
+}
