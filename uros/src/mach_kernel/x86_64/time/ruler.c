@@ -10,6 +10,16 @@
 #include <time/ruler.h>
 #include <time/tsc.h>
 
+#if	ABLATE_508_END_DELAYED
+/*
+ * #508: the end of the first run of every attempt is read with the host
+ * "taking the processor away" for 2^23 TSC counts (about 3 ms) inside the
+ * read, so its bracket is wider than the tolerance and the run must be set
+ * aside before the vote.  Never on in a kernel booted for anything else.
+ */
+static int delay_this_end, end_delayed;
+#endif
+
 /*
  * Wait for the ruler to change, sampling the subject on both sides of every
  * read.  On return *at is the new value and [*before, *after] brackets the
@@ -37,6 +47,15 @@ static int wait_edge(const struct ruler *r, uint64_t (*subject)(void),
 	from = r->read() & r->mask;
 	for (;;) {
 		s0 = subject();
+#if	ABLATE_508_END_DELAYED
+		if (delay_this_end) {
+			uint64_t t = rdtsc();
+
+			delay_this_end = 0;
+			while (rdtsc() - t < (1ULL << 23))
+				;
+		}
+#endif
 		c = r->read() & r->mask;
 		s1 = subject();
 		if (c != from) {
@@ -76,6 +95,9 @@ int ruler_measure(const struct ruler *r,
 			return 0;
 	} while (((target - c0) & r->mask) < span);
 
+#if	ABLATE_508_END_DELAYED
+	delay_this_end = end_delayed;
+#endif
 	if (!wait_edge(r, subject, start, budget, &c1, &b1, &a1))
 		return 0;
 
@@ -192,6 +214,9 @@ int ruler_calibrate(const struct ruler *r,
 		for (i = 0; i < RULER_RUNS; i++) {
 			out->run_hz[i] = 0;
 			out->run_ppm[i] = 0;
+#if	ABLATE_508_END_DELAYED
+			end_delayed = (i == 0);
+#endif
 			/*
 			 * ⚠️ NOT RETRIED, the distinction #464 drew and the
 			 * retry must not blur.  A ruler that never reached the
