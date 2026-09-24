@@ -2919,6 +2919,16 @@ static void timer_tick(struct trap_frame *frame)
 
 	(void)frame;
 
+#if	ABLATE_586_NO_TICKS
+	/*
+	 * #586: acknowledged and not counted, so the period line meets a
+	 * calibrated TSC with no gap to measure -- the branch that must stay
+	 * WRONG, and the one the calibration ablation cannot reach.
+	 */
+	(void)prev;
+	lapic_eoi();
+	return;
+#endif
 	ticks[id]++;
 	last_tsc[id] = now;
 
