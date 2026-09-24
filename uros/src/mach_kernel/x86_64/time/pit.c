@@ -134,3 +134,48 @@ void pit_periodic_stop(void)
 	outb(PIT_CHANNEL0, 0xFF);
 	outb(PIT_CHANNEL0, 0xFF);
 }
+
+/*
+ * Channel 2 as a ruler that is READ rather than waited on (#508).
+ *
+ * pit_delay_us() times an interval by programming the channel and polling its
+ * output, so everything it does before the gate opens -- six port accesses --
+ * sits inside a caller's TSC interval and outside the 8254's.  Under an
+ * emulator each of those accesses can cost tens of microseconds, and phase 2
+ * found the 8254 measuring the TSC 0.37% fast under KVM while three other
+ * sources agreed with each other.  Here nothing is programmed during an
+ * interval: the channel is started once, free-running, and read back.
+ *
+ * Mode 0 loaded with 0xFFFF: after terminal count the counter goes on
+ * counting down from 0xFFFF, so it runs modulo 65536 -- a 16-bit ruler that
+ * wraps every 54.9 ms, read through a latch so the two bytes belong to one
+ * instant.
+ */
+#define PIT_LATCH_CH2	0x80	/* channel 2, counter latch */
+
+void pit_ruler_start(void)
+{
+	uint8_t gate = inb(PIT_GATE_PORT) & ~(PIT_GATE_ENABLE | PIT_SPEAKER_ON);
+
+	outb(PIT_GATE_PORT, gate);
+	outb(PIT_COMMAND, PIT_MODE0_CH2);
+	outb(PIT_CHANNEL2, 0xFF);
+	outb(PIT_CHANNEL2, 0xFF);
+	outb(PIT_GATE_PORT, gate | PIT_GATE_ENABLE);
+}
+
+uint16_t pit_ruler_read(void)
+{
+	uint8_t lo, hi;
+
+	outb(PIT_COMMAND, PIT_LATCH_CH2);
+	lo = inb(PIT_CHANNEL2);
+	hi = inb(PIT_CHANNEL2);
+	return (uint16_t)((hi << 8) | lo);
+}
+
+void pit_ruler_stop(void)
+{
+	outb(PIT_GATE_PORT,
+	     inb(PIT_GATE_PORT) & ~(PIT_GATE_ENABLE | PIT_SPEAKER_ON));
+}

@@ -82,4 +82,15 @@ int pit_delay_us(unsigned us);
 int pit_periodic_start(unsigned hz);
 void pit_periodic_stop(void);
 
+/*
+ * Channel 2 as a free-running down-counter that is read back (#508): start it,
+ * read it as often as wanted, stop it.  It counts down modulo 65536 at PIT_HZ,
+ * so two reads less than 54.9 ms apart give an interval with nothing
+ * programmed inside it.  pit_delay_us() reprograms the channel and must not
+ * run while a caller is reading this.
+ */
+void pit_ruler_start(void);
+uint16_t pit_ruler_read(void);
+void pit_ruler_stop(void);
+
 #endif	/* _X86_64_TIME_PIT_H_ */

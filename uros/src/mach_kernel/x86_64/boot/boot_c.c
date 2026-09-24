@@ -3018,6 +3018,12 @@ static void tsc_selftest(void)
  * seen by reading it, so nothing is programmed inside the interval.  In kHz,
  * not MHz, because the differences phase 1 found are a third of a percent.
  */
+/* A down-counter read as an up-counter, so one routine measures all three. */
+static uint64_t rulers_read_pit(void)
+{
+	return (uint16_t)~pit_ruler_read();
+}
+
 static uint64_t rulers_read_pm(void)
 {
 	return pmtimer_read();
@@ -3065,6 +3071,27 @@ static uint64_t rulers_tsc_khz(uint64_t (*read)(void), uint64_t mask,
 static void rulers_selftest(void)
 {
 	uint64_t khz, counted;
+
+	/*
+	 * The 8254 first, read back rather than waited on, so its number can
+	 * be set beside the calibration's -- which waits on it -- and the cost
+	 * of the programming inside the calibration's interval shows as their
+	 * difference.
+	 */
+	kputs("UrMach x86-64: 8254 channel 2, read back: ");
+	pit_ruler_start();
+	khz = rulers_tsc_khz(rulers_read_pit, 0xffffULL, PIT_HZ,
+			     PIT_HZ * 3ULL / 100, &counted);
+	pit_ruler_stop();
+	if (khz == 0) {
+		kputs("WRONG, it did not count\r\n");
+	} else {
+		kputs("the TSC runs at ");
+		kputdec(khz);
+		kputs(" kHz against it, over ");
+		kputdec(counted);
+		kputs(" counts\r\n");
+	}
 
 	kputs("UrMach x86-64: ACPI PM timer: ");
 	if (!pmtimer_init()) {
