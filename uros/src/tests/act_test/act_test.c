@@ -348,11 +348,16 @@ arm_one_terminate_in_exception(void)
 	 *   2. the activation is freed and its port destroyed with it
 	 *      (act_free, thread_act.c:1205 -> ipc_tt.c:425), by whichever
 	 *      thread drops the last reference to it.  Normally that is the
-	 *      reaper, after the killed thread has run its own end, and after
-	 *      thread_terminate has returned.  But THIS thread holds a reference
-	 *      through the kill (kern/ipc_mig.c:1931, dropped at :1936), so if it
-	 *      is preempted at the end of the call while the other two finish,
-	 *      the free is its own, before the call returns.  Either way the
+	 *      reaper, once the killed thread has run its own end -- which may
+	 *      be before or after thread_terminate returns to user mode.  But
+	 *      THIS thread holds a reference through the kill
+	 *      (kern/ipc_mig.c:1931, dropped at :1936): if it is off the
+	 *      processor between the kill and :1936 while the other two finish,
+	 *      the free is its own.  On one processor only an interrupt can put
+	 *      it there, because x86-64 preempts in the kernel only on an
+	 *      interrupt's return; a preemption on the way out of the trap
+	 *      comes after :1936 and leaves the free to the reaper.  On several
+	 *      processors it can also block on the act lock.  Either way the
 	 *      name is dead, and the send is refused at copyin:
 	 *      MACH_SEND_INVALID_DEST (ipc/ipc_kmsg.c:1576).  One event, not two
 	 *      -- there is no moment when the activation is gone and the port
@@ -393,8 +398,8 @@ arm_one_terminate_in_exception(void)
 			"on its way";
 		break;
 	case KERN_TERMINATED:
-		/* ⚠️ Under 256 bytes on the wire, CR included: a longer line is
-		 * written in two console holds and can be cut (#578). */
+		/* ⚠️ At most 256 bytes on the wire, CR and LF included: a longer
+		 * line is written in two console holds and can be cut (#578). */
 		printf("act_test: [1] the same name answered KERN_TERMINATED "
 		       "after the kill: the kill took effect, but this test's "
 		       "written order says no question asked after the kill can "
