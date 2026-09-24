@@ -453,10 +453,18 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          "Bundle only name_server + ipc_bench, the way the baselines were taken" OFF)
   if(UROS_BUNDLE_IPC_BENCH)
     set(_IPC_BENCH_LINE "ipc_bench ipc_bench\n")
+  else()
+    set(_IPC_BENCH_LINE "")
+  endif()
+  # The image follows the configuration: whenever a bootstrap.conf names
+  # ipc_bench, the bundle carries it (#584).  The bench-only conf names it
+  # too, and from #552 until #584 it did so without the file unless
+  # UROS_BUNDLE_IPC_BENCH was also set -- bootstrap then looked for it on a
+  # disk this boot has no driver for, and the run ended in silence.
+  if(UROS_BUNDLE_IPC_BENCH OR UROS_BUNDLE_BENCH_ONLY)
     set(_IPC_BENCH_FILE "ipc_bench:${_SBIN}/ipc_bench")
     set(_IPC_BENCH_DEP  ipc_bench_server)
   else()
-    set(_IPC_BENCH_LINE "")
     set(_IPC_BENCH_FILE "")
     set(_IPC_BENCH_DEP  "")
   endif()
