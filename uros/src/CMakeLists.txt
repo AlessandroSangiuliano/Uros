@@ -558,6 +558,13 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/xfile_test)
 endif()
 
+# A right a server kept must survive the server's next message (#583): the
+# loop in libmach every server runs, asked directly.  Also built in the i386
+# half below -- the loop is the same code on both.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/msg_server_test)
+endif()
+
 # char_server on x86-64 (#497), and the question it brings with it.
 #
 # 🔑 IT IS NOT A PORTING STEP, IT IS AN OWNERSHIP ONE.  This is the target where
@@ -743,6 +750,10 @@ add_subdirectory(tests/hal_bar_test)
 # A file written by one target and read by the other (#498) -- the same source
 # as in the x86-64 half above.
 add_subdirectory(tests/xfile_test)
+
+# A right a server kept must survive the server's next message (#583) -- the
+# same source as in the x86-64 half above.
+add_subdirectory(tests/msg_server_test)
 
 # Build kernel242_test (#242 no-goto kernel exerciser)
 add_subdirectory(tests/kernel242_test)

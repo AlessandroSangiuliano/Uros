@@ -210,3 +210,23 @@ routine mouse_subscribe(
 	in	cap		: chr_token_t;
 	in	dev_id		: chr_u32_t;
 	in	notify_port	: mach_port_t);
+
+/*
+ * tty_subscribe_member — tty_subscribe for a member of the session that
+ * owns this tty as its controlling terminal, the access tty_read already
+ * gives it (#583).
+ *
+ * tty_subscribe demands a capability; libposix reads the ctty with an empty
+ * token under the session-owner bypass, so it could not subscribe, and it
+ * polled tty_read in a loop instead -- five RPCs a turn, the whole processor
+ * on an idle system.  The notify port is MAKE_SEND: the caller hands over a
+ * receive right's name and keeps no extra send right to release.
+ *
+ * Leaving: the module drops a subscriber whose port has died when it next
+ * sends to it, and a freed slot is taken again.
+ */
+routine tty_subscribe_member(
+		char_port	: mach_port_t;
+	in	dev_id		: chr_u32_t;
+	in	caller_pid	: int;
+	in	notify_port	: mach_port_make_send_t);

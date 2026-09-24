@@ -581,7 +581,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
          CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\nio_claim_race io_claim_race a\nio_claim_race io_claim_race b\next_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\nio_claim_race io_claim_race a\nio_claim_race io_claim_race b\next_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -649,6 +649,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             dma_reclaim_test:${_SBIN}/dma_reclaim_test
             cap_server:${_SBIN}/cap_server
             pthread_test:${_SBIN}/pthread_test
+            msg_server_test:${_SBIN}/msg_server_test
             cap_test:${_SBIN}/cap_test
             dl_test:${_SBIN}/dl_test
             fault_test:${_SBIN}/fault_test
@@ -716,6 +717,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             name_server_bin netname_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin fperr_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
+            msg_server_test_bin
             block_device_server virtio_blk_module ahci_module
             hal_bar_test_server io_claim_race_bin ext_server_bin xfile_test_bin
             ${_CHAR_DEP}

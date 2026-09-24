@@ -460,7 +460,15 @@ mach_msg_server(
 		while (mr == MACH_MSG_SUCCESS) {
 			int need_send = 1;
 
-			/* we have a request message */
+			/*
+			 * we have a request message.  Its reply starts as no
+			 * reply (#583): bufReply holds the request before last,
+			 * and a demux that set only RetCode would have that
+			 * request's header read below, and sent or destroyed.
+			 */
+			bufReply->Head.msgh_bits = 0;
+			bufReply->Head.msgh_remote_port = MACH_PORT_NULL;
+			bufReply->RetCode = MIG_NO_REPLY;
 			(void) (*demux)(&bufRequest->Head, &bufReply->Head);
 
 			if (!(bufReply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX)

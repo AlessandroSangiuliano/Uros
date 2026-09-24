@@ -96,8 +96,8 @@ struct console_priv {
 	uint32_t	overrun_drops;	/* bytes lost when the ring is full */
 
 	/* Subscribers get a header-only wake-up per input batch, mirroring
-	 * uart.so.  ush polls tty_read so this is belt-and-braces, but a
-	 * future notify-based client gets the same contract. */
+	 * uart.so.  libposix waits for it before reading again (#583): a
+	 * wake-up that is not sent is a shell that does not read. */
 	mach_port_t	subscribers[CON_MAX_SUBSCRIBERS];
 	unsigned int	n_subscribers;
 };
@@ -330,7 +330,8 @@ console_detach(void *priv)
 	p->attached = 0;
 }
 
-/* tty_read — drain the RX ring (non-blocking; libposix polls). */
+/* tty_read — drain the RX ring (non-blocking; on an empty ring libposix
+ * waits for the subscriber wake-up, #583). */
 static int
 console_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 {
@@ -379,10 +380,29 @@ static int
 console_tty_subscribe(void *priv, mach_port_t notify_port)
 {
 	struct console_priv *p = priv;
+	unsigned int i, slot = CON_MAX_SUBSCRIBERS;
 
-	if (p->n_subscribers >= CON_MAX_SUBSCRIBERS)
-		return -1;
-	p->subscribers[p->n_subscribers++] = notify_port;
+	/*
+	 * #583: a slot freed by the notify loop -- the subscriber's port died
+	 * -- is taken again, and a port that is already subscribed is not added
+	 * twice.  It used to append at n_subscribers and refuse at the limit,
+	 * so the freed slots were never reused: after eight subscriptions in the
+	 * life of the boot, nobody could subscribe again.
+	 */
+	for (i = 0; i < p->n_subscribers; i++) {
+		if (p->subscribers[i] == notify_port) {
+			(void)mach_port_deallocate(mach_task_self(), notify_port);
+			return 0;
+		}
+		if (p->subscribers[i] == MACH_PORT_NULL && slot == CON_MAX_SUBSCRIBERS)
+			slot = i;
+	}
+	if (slot == CON_MAX_SUBSCRIBERS) {
+		if (p->n_subscribers >= CON_MAX_SUBSCRIBERS)
+			return -1;
+		slot = p->n_subscribers++;
+	}
+	p->subscribers[slot] = notify_port;
 	return 0;
 }
 
