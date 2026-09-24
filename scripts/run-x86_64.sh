@@ -355,9 +355,12 @@ must_report() {
 	exit 1
 }
 
-must_report 'preempt_test: starting' 'preempt_test: PASS' \
+# #586: NOT ASKED is an ending too -- without a calibrated TSC neither test can
+# be timed, and the kernel says so in the word counted above.  Demanding PASS
+# failed a boot for a question the kernel had correctly declined.
+must_report 'preempt_test: starting' 'preempt_test: \(PASS\|NOT ASKED\)' \
 	'Its failure mode is silence: a processor never taken from a thread that will not yield prints nothing at all (#459/#461).'
-must_report 'fpu_stress: 3 threads' 'fpu_stress: PASS' \
+must_report 'fpu_stress: 3 threads' 'fpu_stress: \(PASS\|NOT ASKED\)' \
 	'The threads hold vector state for a second and then report; a boot cut short before that answers nothing (#408).'
 must_report 'state_test: the target is parked' 'state_test: PASS — 11' \
 	'thread_get_state() on a target that never stops waits for it for ever, and waiting for ever looks exactly like a short run (#408).'
