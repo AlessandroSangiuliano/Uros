@@ -188,6 +188,21 @@ const struct rulers_verdict *rulers_verdict(void)
 	return &verdict;
 }
 
+uint64_t rulers_bracket_ppm(void)
+{
+	uint64_t w = 0, x;
+	unsigned i;
+
+	for (i = 0; i < RULERS; i++)
+		if (rulers[i].present && rulers[i].tsc.hz != 0
+		    && !rulers[i].dissents) {
+			x = widest_ppm(&rulers[i]);
+			if (x > w)
+				w = x;
+		}
+	return w;
+}
+
 unsigned rulers_elected(void)
 {
 	unsigned ids[RULERS], n = 0, i;

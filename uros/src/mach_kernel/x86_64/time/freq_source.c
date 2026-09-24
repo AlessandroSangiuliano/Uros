@@ -181,3 +181,65 @@ void freq_hypervisor_read(struct freq_hypervisor *out)
 	if (out->kvm_features & KVM_FEATURE_CLOCKSOURCE2)
 		kvmclock_read(out);
 }
+
+void freq_exact_read(struct freq_exact *out)
+{
+	struct freq_cpuid	cpu;
+	struct freq_hypervisor	hv;
+
+	*out = (struct freq_exact){ { 0 }, 0 };
+#if	ABLATE_508_EXACT_HIDDEN
+	/*
+	 * #508: no exact source is seen, so the measured path runs on a
+	 * machine that has one.  Never on in a kernel booted otherwise.
+	 */
+	return;
+#endif
+	freq_cpuid_read(&cpu);
+#if	ABLATE_508_CPUID_15
+	/*
+	 * #508: the processor states 0x15 as OMEGA's does (crystal 38.4 MHz,
+	 * TSC/crystal 156/2), because no guest offers the leaf filled in and
+	 * this is the only way the path that adopts it runs.  Never on in a
+	 * kernel booted for anything else.
+	 */
+	cpu.has_15 = 1;
+	cpu.crystal_hz = 38400000;
+	cpu.tsc_numerator = 156;
+	cpu.tsc_denominator = 2;
+#endif
+	if (cpu.has_15 && cpu.crystal_hz != 0 && cpu.tsc_numerator != 0
+	    && cpu.tsc_denominator != 0)
+		out->tsc_hz[FREQ_CPUID] = (uint64_t)cpu.crystal_hz
+			* cpu.tsc_numerator / cpu.tsc_denominator;
+
+	freq_hypervisor_read(&hv);
+	if (hv.has_timing && hv.tsc_khz != 0)
+		out->tsc_hz[FREQ_TIMING] = (uint64_t)hv.tsc_khz * 1000;
+	if (hv.has_timing && hv.bus_khz != 0)
+		out->lapic_bus_hz = (uint64_t)hv.bus_khz * 1000;
+	out->tsc_hz[FREQ_KVMCLOCK] = hv.kvmclock_tsc_hz;
+
+#if	ABLATE_508_EXACT_LIES
+	/*
+	 * #508: the first source that states a rate states it one part in
+	 * thirty-two high, so the measurement can be seen contradicting it.
+	 */
+	for (unsigned i = 0; i < FREQ_EXACT; i++)
+		if (out->tsc_hz[i] != 0) {
+			out->tsc_hz[i] += out->tsc_hz[i] / 32;
+			break;
+		}
+#endif
+}
+
+const char *freq_exact_name(unsigned id)
+{
+	switch (id) {
+	case FREQ_CPUID:	return "CPUID 0x15";
+	case FREQ_TIMING:	return "the hypervisor's timing leaf";
+	case FREQ_KVMCLOCK:	return "KVM's clock";
+	}
+	return "?";
+}
+

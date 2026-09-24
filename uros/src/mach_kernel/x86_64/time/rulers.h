@@ -76,6 +76,10 @@ struct rulers_verdict {
 void rulers_vote(struct rulers_verdict *v);
 const struct rulers_verdict *rulers_verdict(void);
 
+/* The widest bracket, in ppm, among the rulers the verdict rests on: how far
+ * the measured value can be from its rulers because of how it was read. */
+uint64_t rulers_bracket_ppm(void);
+
 /* The ruler the LAPIC timer is calibrated against: the narrowest that was
  * not named, or the 8254 if none answered. */
 unsigned rulers_elected(void);

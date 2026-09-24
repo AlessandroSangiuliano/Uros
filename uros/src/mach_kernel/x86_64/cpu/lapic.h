@@ -230,6 +230,14 @@ uint64_t lapic_timer_window_ppm(unsigned which);
 /* The run the median disagreed with, or -1. */
 int lapic_timer_set_aside(void);
 
+/* The rate the hypervisor's timing leaf states after the divisor (0 if it
+ * states none), how far it is from the measurement, and whether it was
+ * adopted -- by the rule in lapic.c (#508). */
+uint64_t lapic_timer_measured_hz(void);	/* the median, before any adoption */
+uint64_t lapic_timer_exact_hz(void);
+uint64_t lapic_timer_exact_ppm(void);
+int lapic_timer_exact_adopted(void);
+
 /*
  * How many attempts the calibration needed (#464).  One is the ordinary case;
  * more than one means a window was interfered with and measured again, which
