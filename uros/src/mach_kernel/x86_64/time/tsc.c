@@ -78,6 +78,15 @@ int tsc_calibrate(void)
 	hz = 0;
 	hz_run[0] = measure_once();
 	hz_run[1] = measure_once();
+#if	ABLATE_586_TSC_DISAGREE
+	/*
+	 * #586: the first run reads one part in 32 high, the shape of every
+	 * refusal this has taken on its own (07/08, 27/08 twice, 24/09: the
+	 * first run the high one each time), so the refusal below happens on
+	 * purpose and every consumer of tsc_hz() can be seen answering it.
+	 */
+	hz_run[0] += hz_run[0] / 32;
+#endif
 
 	if (hz_run[0] == 0 || hz_run[1] == 0)
 		return 0;

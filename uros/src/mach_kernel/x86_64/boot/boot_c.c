@@ -2919,6 +2919,16 @@ static void timer_tick(struct trap_frame *frame)
 
 	(void)frame;
 
+#if	ABLATE_586_NO_TICKS
+	/*
+	 * #586: acknowledged and not counted, so the period line meets a
+	 * calibrated TSC with no gap to measure -- the branch that must stay
+	 * WRONG, and the one the calibration ablation cannot reach.
+	 */
+	(void)prev;
+	lapic_eoi();
+	return;
+#endif
 	ticks[id]++;
 	last_tsc[id] = now;
 
@@ -3012,8 +3022,8 @@ static uint64_t median_gap(void)
 	return gaps[n / 2];
 }
 
-/* What one tick should measure, in counter units. Zero if either clock is
- * unknown, in which case the period cannot be checked and says so. */
+/* What one tick should measure, in counter units. Zero if the TSC did not
+ * calibrate, in which case the period cannot be checked and says so (#586). */
 static uint64_t tick_expected_period(void)
 {
 	return tsc_hz() ? tsc_hz() / TICK_TEST_HZ : 0;
@@ -3157,8 +3167,23 @@ static void timer_selftest(void)
 	kputs(" counter units, one period is ");
 	kputdec((unsigned)expected);
 
-	if (expected == 0 || period == 0) {
-		kputs(" — WRONG, one of the two clocks is unknown\r\n");
+	/*
+	 * #586: an uncalibrated TSC is a question that cannot be posed, not a
+	 * wrong answer.  tsc_calibrate() declines by design when its two runs
+	 * disagree -- under TCG about once in 280 boots -- and then there is
+	 * nothing to hold the gap against.  Every other consumer of tsc_hz()
+	 * says NOT ASKED for the same reason (#563); this said WRONG and failed
+	 * boots that had done everything right.  The count above still decided
+	 * whether the tick kept firing: it needs no TSC.
+	 */
+	if (expected == 0) {
+		kputs(" — NOT ASKED, the TSC did not calibrate, so the gap has no "
+		      "ruler (#586)\r\n");
+		return;
+	}
+	if (period == 0) {
+		kputs(" — WRONG, fewer than two ticks, so there was no gap to "
+		      "measure\r\n");
 		return;
 	}
 
