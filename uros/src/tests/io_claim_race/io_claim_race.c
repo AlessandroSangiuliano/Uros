@@ -54,6 +54,12 @@
  * a legacy claim inside the I/O window of a PCI device another task holds is
  * refused.  It lives here because this is the program that claims legacy
  * ranges for a living; see ask_bar_overlap().
+ *
+ * ── And the kernel's rulers (#508) ──
+ *
+ * Arm [5], also `a' alone: the 8254 and port 0x61, its channel-2 gate, are
+ * the kernel's, and a claim that touches them -- whole, one register in, or
+ * reaching them from below -- is refused.  See ask_kernel_rulers().
  */
 
 #include <mach.h>
@@ -316,6 +322,64 @@ still_another_tasks(mach_port_t device, unsigned int bdf)
 	    && by_other == 1;
 }
 
+/*
+ * Arm [5] (#508): the kernel's rulers cannot be claimed.
+ *
+ * The 8254 and its gate are at the same ports on every PC, so this needs no
+ * table.  Three shapes, because a check against the base alone is the
+ * mistake #497 recorded: the whole chip, one register in, and a range that
+ * reaches the gate from the port below it.  Each must be refused with
+ * KERN_NO_ACCESS; anything granted is given straight back, and it is only
+ * ever claimed, never read or written.
+ *
+ * ⚠️ The PM timer is a ruler too, but its port is wherever the FADT put it,
+ * which a task cannot read.  The kernel's line "legacy ports the kernel
+ * keeps" asks that one of the same function the claim path asks.
+ */
+static void
+ask_kernel_rulers(mach_port_t device, int *passed, int *arms)
+{
+	static const struct {
+		unsigned int	port;
+		unsigned int	count;
+	} ask[] = {
+		{ 0x40, 4 },	/* the 8254 */
+		{ 0x43, 1 },	/* its command register alone */
+		{ 0x60, 2 },	/* from below, reaching the gate at 0x61 */
+	};
+	unsigned int	i, released, klog_from, bad = 0;
+	kern_return_t	kr;
+
+	(*arms)++;
+
+	for (i = 0; i < sizeof(ask) / sizeof(ask[0]); i++) {
+		kr = device_io_port_claim(device, ask[i].port, ask[i].count,
+					  &released, &klog_from);
+		if (kr == KERN_NO_ACCESS)
+			continue;
+		bad++;
+		if (kr == KERN_SUCCESS) {
+			(void) device_io_port_unclaim(device, ask[i].port);
+			printf("io_claim_race: [5] WRONG — 0x%x..0x%x was "
+			       "GRANTED, and it covers a ruler the kernel "
+			       "measures time with (#508)\n", ask[i].port,
+			       ask[i].port + ask[i].count - 1);
+		} else
+			printf("io_claim_race: [5] WRONG — 0x%x..0x%x was "
+			       "refused with kr=%d, not KERN_NO_ACCESS\n",
+			       ask[i].port, ask[i].port + ask[i].count - 1,
+			       (int)kr);
+	}
+
+	if (bad != 0)
+		return;
+
+	printf("io_claim_race: [5] 0x40..0x43, 0x43 alone and 0x60..0x61 "
+	       "refused with KERN_NO_ACCESS — the 8254 and its gate are the "
+	       "kernel's rulers (#508)\n");
+	(*passed)++;
+}
+
 static void
 ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 {
@@ -505,7 +569,7 @@ main(int argc, char **argv)
 		if (judge) {
 			printf("io_claim_race: WRONG — no name server port, "
 			       "so the two halves cannot find each other\n");
-			printf("io_claim_race: 0 of 4 arms passed\n");
+			printf("io_claim_race: 0 of 5 arms passed\n");
 		}
 		return 1;
 	}
@@ -520,7 +584,7 @@ main(int argc, char **argv)
 		if (judge) {
 			printf("io_claim_race: WRONG — could not register "
 			       "\"%s\"\n", judge ? NAME_A : NAME_B);
-			printf("io_claim_race: 0 of 4 arms passed\n");
+			printf("io_claim_race: 0 of 5 arms passed\n");
 		}
 		return 1;
 	}
@@ -531,8 +595,10 @@ main(int argc, char **argv)
 			printf("io_claim_race: [1] NOT ASKED — the other half "
 			       "never registered, so the question was never "
 			       "put (#563)\n");
-			/* [4] needs no other half, so it is still asked. */
+			/* [4] and [5] need no other half, so they are
+			 * still asked. */
 			ask_bar_overlap(device, &passed, &arms);
+			ask_kernel_rulers(device, &passed, &arms);
 			printf("io_claim_race: %d of %d arms passed\n",
 			       passed, arms);
 			return (passed == arms) ? 0 : 1;
@@ -706,6 +772,7 @@ main(int argc, char **argv)
 	}
 
 	ask_bar_overlap(device, &passed, &arms);
+	ask_kernel_rulers(device, &passed, &arms);
 
 	printf("io_claim_race: %d of %d arms passed\n", passed, arms);
 	return (passed == arms) ? 0 : 1;
