@@ -196,6 +196,18 @@ void freq_exact_read(struct freq_exact *out)
 	return;
 #endif
 	freq_cpuid_read(&cpu);
+#if	ABLATE_508_CPUID_15
+	/*
+	 * #508: the processor states 0x15 as OMEGA's does (crystal 38.4 MHz,
+	 * TSC/crystal 156/2), because no guest offers the leaf filled in and
+	 * this is the only way the path that adopts it runs.  Never on in a
+	 * kernel booted for anything else.
+	 */
+	cpu.has_15 = 1;
+	cpu.crystal_hz = 38400000;
+	cpu.tsc_numerator = 156;
+	cpu.tsc_denominator = 2;
+#endif
 	if (cpu.has_15 && cpu.crystal_hz != 0 && cpu.tsc_numerator != 0
 	    && cpu.tsc_denominator != 0)
 		out->tsc_hz[FREQ_CPUID] = (uint64_t)cpu.crystal_hz

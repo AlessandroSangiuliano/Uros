@@ -263,6 +263,9 @@ option(UROS_ABLATE_508_EXACT_HIDDEN "Build the #508 ablation: the exact TSC sour
 # #508: the first exact source that states a rate states it 1/32 high, so the
 # rulers contradict it and it is WRONG.  Never ON otherwise.
 option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC source states 1/32 high" OFF)
+# #508: the processor states CPUID 0x15 as OMEGA's does, so the path that
+# adopts it -- which no guest can reach -- runs.  Never ON otherwise.
+option(UROS_ABLATE_508_CPUID_15 "Build the #508 ablation: CPUID 0x15 states OMEGA's crystal and ratio" OFF)
 option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
@@ -524,6 +527,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_508_EXACT_LIES)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_EXACT_LIES=1)
       message(STATUS "#508 ablation: the first exact TSC source states 1/32 high (x86_64)")
+  endif()
+  if(UROS_ABLATE_508_CPUID_15)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_CPUID_15=1)
+      message(STATUS "#508 ablation: CPUID 0x15 states OMEGA's crystal and ratio (x86_64)")
   endif()
   if(UROS_ABLATE_508_SPAN_UNBOUNDED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
