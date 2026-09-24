@@ -3405,9 +3405,14 @@ main(int argc, char **argv)
 
     /*
      * Idle — don't exit, just sleep.
+     *
+     * SWITCH_OPTION_WAIT, which blocks for the time given (#584).  This was
+     * DEPRESS, which only lowers the priority and hands the processor to
+     * whoever else is runnable: on a machine at rest nobody is, it returns at
+     * once, and the loop kept the processor 24 s of every 30.
      */
     for (;;)
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1000);
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
 
     return 0;
 }
