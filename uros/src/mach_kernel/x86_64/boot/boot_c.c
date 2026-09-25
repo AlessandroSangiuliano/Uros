@@ -2995,18 +2995,18 @@ static void freq_census(void)
 /*
  * Where the TSC's rate came from (#508): each exact source's statement, how
  * far it is from what the rulers measured, and what was made of it -- by the
- * rules tsc.c states.  A source that contradicts the rulers is WRONG.
+ * rules time/exact.c states.  A source that contradicts the rulers is WRONG.
  */
 static void tsc_source_selftest(void)
 {
-	const struct tsc_source	*s = tsc_source();
+	const struct exact_choice	*s = tsc_source();
 	unsigned		id;
 
 	kputs("UrMach x86-64: the TSC's exact sources: ");
 	for (id = 0; id < FREQ_EXACT; id++) {
 		kputs(id == 0 ? "" : ", ");
 		kputs(freq_exact_name(id));
-		if (s->verdict[id] == TSC_ABSENT) {
+		if (s->verdict[id] == EXACT_ABSENT) {
 			kputs(" states none");
 			continue;
 		}
@@ -3014,23 +3014,23 @@ static void tsc_source_selftest(void)
 		kputdec(s->hz[id] / 1000);
 		kputs(" kHz");
 		switch (s->verdict[id]) {
-		case TSC_UNCHECKED:
+		case EXACT_UNCHECKED:
 			kputs(", not believed: nothing was measured to check it");
 			break;
-		case TSC_ADOPTED:
+		case EXACT_ADOPTED:
 			kputs(", ");
 			kputdec(s->ppm[id]);
 			kputs(" ppm from the rulers: adopted");
 			break;
-		case TSC_AGREES:
+		case EXACT_AGREES:
 			kputs(", agreeing with it");
 			break;
-		case TSC_NOT_USED:
+		case EXACT_NOT_USED:
 			kputs(", ");
 			kputdec(s->apart_ppm[id]);
 			kputs(" ppm from the adopted value: not used");
 			break;
-		case TSC_CONTRADICTS:
+		case EXACT_CONTRADICTS:
 			kputs(", WRONG: ");
 			kputdec(s->ppm[id]);
 			kputs(" ppm from the rulers, who allow ");
@@ -3046,7 +3046,7 @@ static void tsc_source_selftest(void)
 		kputs("\r\n");
 	} else if (s->measured != 0) {
 		for (id = 0; id < FREQ_EXACT; id++)
-			if (s->verdict[id] != TSC_ABSENT)
+			if (s->verdict[id] != EXACT_ABSENT)
 				break;
 		kputs(id == FREQ_EXACT ? " — none states a rate, so the rulers' "
 				       : " — none agreed, so the rulers' ");

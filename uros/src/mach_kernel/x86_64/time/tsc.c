@@ -9,6 +9,7 @@
 
 #include <cpu/regs.h>
 #include <time/pit.h>
+#include <time/exact.h>
 #include <time/ruler.h>
 #include <time/rulers.h>
 #include <time/tsc.h>
@@ -28,92 +29,25 @@
  * again.
  */
 static uint64_t tsc_rate;	/* not `hz': that is the kernel's ticks per second */
-static struct tsc_source source = { .adopted = -1 };
+static struct exact_choice source = { .adopted = -1 };
 
 /*
- * ── The exact sources, and which side wins (#508) ─────────────────────────
- *
- * Every source that states a rate is checked against the rulers, in the order
- * <time/freq_source.h> gives -- the processor's own statement, then the
- * hypervisor's, then the one inferred from KVM's clock -- and the first that
- * agrees with them is ADOPTED.  The reason the exact source wins over the
- * measurement it agrees with: it is the same number every boot, where the
- * measurement carries whatever the host's NTP was doing at that moment (#508
- * measured the rulers climbing 136 ppm in four minutes on a host still
- * converging, and sitting 8.5 ppm off on one that had settled).  The distance
- * is printed either way.
- *
- * AGREES WITH THE RULERS: no further from the measured value than half the
- * widest bracket behind it, plus 500 ppm for the rulers' own accuracy (IA-PC
- * HPET 1.0a 2.4.1) and 500 ppm on the other side -- under a hypervisor the
- * rulers run on the host's clock, which Linux's NTP may steer by up to
- * MAXFREQ, 500 ppm.  A source further than that CONTRADICTS the rulers, and
- * that is WRONG: one of two things that cannot both be wrong by so much is.
- *
- * TWO EXACT SOURCES CANNOT DIFFER.  Each is exact to well under a ppm (a
- * leaf in kHz, a 32-bit multiplier), so two more than 10 ppm apart are not
- * both exact, and the later one is NOT USED.  #508 found the case on a real
- * configuration, not an ablation: under QEMU's `tsc-frequency=' the timing
- * leaf said 2994000 kHz, the rulers agreed with it, and KVM's clock still
- * said the host's 2994656 -- 219 ppm, well inside the rulers' window, so only
- * the precedence caught it.
- *
- * NOTHING MEASURED, NOTHING ADOPTED.  With no ruler that answered, a source
- * cannot be checked, and it is not believed unchecked: tsc_hz() stays zero
- * and the consumers say NOT ASKED (#586).
+ * The exact sources, checked against the rulers by the rule time/exact.c
+ * states for every clock that has them.
  */
-#define EXACT_AGREE_PPM		10
-#define EXACT_BOUND_PPM		1000	/* 500 for the rulers, 500 for NTP */
-
-static uint64_t ppm_apart(uint64_t a, uint64_t b)
-{
-	uint64_t spread = a > b ? a - b : b - a;
-
-	return b ? spread * 1000000 / b : 0;
-}
-
 static void exact_decide(void)
 {
 	struct freq_exact	e;
-	uint64_t		adopted_hz = 0;
-	unsigned		id;
+	uint64_t		adopted;
 
 	freq_exact_read(&e);
-	source = (struct tsc_source){ .adopted = -1 };
-	source.measured = tsc_rate;
-	source.bound_ppm = rulers_bracket_ppm() / 2 + EXACT_BOUND_PPM;
-
-	for (id = 0; id < FREQ_EXACT; id++) {
-		source.hz[id] = e.tsc_hz[id];
-		if (e.tsc_hz[id] == 0) {
-			source.verdict[id] = TSC_ABSENT;
-			continue;
-		}
-		if (source.measured == 0) {
-			source.verdict[id] = TSC_UNCHECKED;
-			continue;
-		}
-		source.ppm[id] = ppm_apart(e.tsc_hz[id], source.measured);
-		if (source.ppm[id] > source.bound_ppm) {
-			source.verdict[id] = TSC_CONTRADICTS;
-			continue;
-		}
-		if (source.adopted < 0) {
-			source.adopted = (int)id;
-			adopted_hz = e.tsc_hz[id];
-			source.verdict[id] = TSC_ADOPTED;
-			continue;
-		}
-		source.apart_ppm[id] = ppm_apart(e.tsc_hz[id], adopted_hz);
-		source.verdict[id] = source.apart_ppm[id] <= EXACT_AGREE_PPM
-				     ? TSC_AGREES : TSC_NOT_USED;
-	}
-
-	if (source.adopted >= 0)
-		tsc_rate = adopted_hz;
+	adopted = exact_choose(e.tsc_hz, tsc_rate, rulers_bracket_ppm(),
+			       &source);
+	if (adopted != 0)
+		tsc_rate = adopted;
 }
 
-const struct tsc_source *tsc_source(void)
+const struct exact_choice *tsc_source(void)
 {
 	return &source;
 }

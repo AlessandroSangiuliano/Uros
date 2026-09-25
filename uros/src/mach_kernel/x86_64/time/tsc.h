@@ -26,7 +26,7 @@
 
 #include <stdint.h>
 
-#include <time/freq_source.h>
+#include <time/exact.h>
 
 /*
  * Read the counter.
@@ -119,29 +119,10 @@ int tsc_set_aside(void);
 
 /*
  * Where the rate came from (#508, phase 3): the exact sources the machine
- * offers, each checked against what the rulers measured, and the one adopted.
- * tsc.c says why each rule is what it is.
+ * offers, each checked against what the rulers measured, and the one adopted
+ * -- by the rule time/exact.c states.
  */
-enum {
-	TSC_ABSENT,		/* the source states no rate */
-	TSC_ADOPTED,		/* the first that agrees with the rulers */
-	TSC_AGREES,		/* within 10 ppm of the adopted one */
-	TSC_NOT_USED,		/* agrees with the rulers, not with the adopted one */
-	TSC_CONTRADICTS,	/* further from the rulers than they can be: WRONG */
-	TSC_UNCHECKED,		/* nothing was measured to check it against */
-};
-
-struct tsc_source {
-	uint64_t	measured;		/* the rulers' verdict, or 0 */
-	uint64_t	bound_ppm;		/* how far a source may be from it */
-	int		adopted;		/* FREQ_* id, or -1 */
-	uint64_t	hz[FREQ_EXACT];
-	uint64_t	ppm[FREQ_EXACT];	/* from the measurement */
-	uint64_t	apart_ppm[FREQ_EXACT];	/* from the adopted source */
-	int		verdict[FREQ_EXACT];
-};
-
-const struct tsc_source *tsc_source(void);
+const struct exact_choice *tsc_source(void);
 
 /*
  * The refinement (#508, phase 4): a kernel thread that measures the TSC

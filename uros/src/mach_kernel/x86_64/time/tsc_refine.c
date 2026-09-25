@@ -18,7 +18,7 @@
  * scheduler.  assert_wait() with a timeout blocks until the tick says the
  * second is over.
  *
- * When the rate came from an exact source (tsc.c), this is a check and not a
+ * When the rate came from an exact source (exact.c), this is a check and not a
  * refinement: the exact source stands, for the reason it was adopted -- it is
  * the same number every boot, where this measurement carries the host's NTP
  * of the moment -- and the line says how far the second's measurement is
