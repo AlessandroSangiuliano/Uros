@@ -51,10 +51,11 @@ extern i386_ioport_t	master_ocw, slaves_ocw;
 /*
  * Legacy ISA IRQ count.  We program one redirection-table entry per IRQ,
  * mapping GSI n -> vector 0x40+n (the PICM_VECTBASE the 8259 used, so the
- * interrupt.S dispatch is unchanged).  ISA interrupt-source overrides
- * (e.g. IRQ0 -> GSI2 on QEMU) are not applied: this kernel is event-driven
- * and never arms the PIT, so only the device lines (kbd/com/AHCI/mouse,
- * GSI == IRQ on every machine we target) matter.
+ * interrupt.S dispatch is unchanged).  One interrupt-source override is
+ * applied, hardcoded: IRQ0 -> GSI2, because the 8254 on IRQ 0 is processor
+ * 0's tick (rtclock.c) and arrives on pin 2 on every PC board (see
+ * gsi_for_irq).  The MADT's other overrides are not parsed; the device lines
+ * (kbd/com/AHCI/mouse) are GSI == IRQ on every machine we target.
  */
 #define IOAPIC_ISA_IRQS		16
 

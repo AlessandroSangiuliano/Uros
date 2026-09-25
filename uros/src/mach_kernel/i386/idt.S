@@ -173,7 +173,7 @@ Entry(idt)
 
 EXCEPTION(0x00,t_zero_div)
 EXCEP_SPC(0x01,t_debug)
-NMI_INTR(0x02,t_nmi)		/* NMI -> alltraps -> kernel_trap T_NMI (#344) */
+NMI_INTR(0x02,t_nmi)		/* NMI -> t_nmi (locore.S), not alltraps (#344) */
 EXCEP_USR(0x03,t_int3)
 EXCEP_USR(0x04,t_into)
 EXCEP_USR(0x05,t_bounds)

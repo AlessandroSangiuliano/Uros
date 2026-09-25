@@ -227,10 +227,11 @@ lapic_timer_calibrate(void)
  * lapic_timer_start() — arm this CPU's LAPIC timer to fire LAPIC_TIMER_VECTOR
  * periodically at the HZ rate, using the count calibrated above.  Called by
  * each AP from slave_machine_init() once its local APIC is enabled.  The
- * timer keeps counting in hardware even while masked by the TPR; the LAPIC
- * holds at most one tick pending in the IRR and delivers it when this CPU
- * drops back to spllo, so a CPU that spends a stretch at high spl coalesces
- * the missed ticks into one -- the same behaviour the masked device clock has.
+ * timer keeps counting in hardware whatever the level.  A tick that arrives
+ * above spllo is deferred in software since #322 -- the TPR stays 0 --
+ * and one tick is replayed when this CPU drops back to spllo, so a CPU that
+ * spends a stretch at high spl coalesces the missed ticks into one: the same
+ * behaviour the deferred device clock has (softspl_replay).
  */
 void
 lapic_timer_start(void)
@@ -252,11 +253,11 @@ lapic_timer_start(void)
  * stays master-only on the BSP's device clock; an AP only needs the per-CPU
  * quantum/usage accounting hertz_tick() does.
  *
- * Because LAPIC_TIMER_VECTOR sits in TPR class 3, the LAPIC delivered this
- * only because the CPU is at spllo; we therefore CANNOT be nested inside a
- * scheduler lock holder (those raise spl to splsched -> TPR 0x40, which masks
- * class 3).  So thread_quantum_update() may take thread_lock the ordinary way
- * -- none of the #317 cross-CPU trylock hazard applies.
+ * The ipi.S stub runs this only at spllo: above it the tick is deferred and
+ * replayed (#322; before that, the TPR masked class 3 at splsched).  So we
+ * CANNOT be nested inside a scheduler lock holder, and thread_quantum_update()
+ * may take thread_lock the ordinary way -- none of the #317 cross-CPU trylock
+ * hazard applies.
  *
  * Preemption is held off across hertz_tick for the same reason as
  * ipi_mp_handler (#316): hertz_tick's internal balanced enable_preemption
@@ -451,8 +452,11 @@ lapic_send_self_ipi(unsigned int vector)
  * spllo.  A deferred device IRQ had its RTE masked at defer time to stop a
  * level-triggered line from storming; unmask it and self-IPI so the line is
  * re-armed and the (possibly edge) interrupt is re-delivered.  The clock is
- * re-injected the same way so timekeeping does not lose the tick.  Bits
- * 0..15 are device IRQs (vector 0x40+irq); SOFTSPL_CLOCK_BIT is the timer.
+ * re-injected the same way, ONCE, however many ticks arrived while it was
+ * deferred: the 8254's edges are lost while its pin is masked, and the LAPIC
+ * timer keeps one pending, so a long stretch at a raised level costs ticks
+ * (#599).  Bits 0..15 are device IRQs (vector 0x40+irq); SOFTSPL_CLOCK_BIT
+ * is the timer.
  */
 void
 softspl_replay(int cpu)
