@@ -415,5 +415,22 @@ MACRO_END
 extern void		kernel_preempt_check (void);
 #endif	/* MACH_RT */
 
+#if	NCPUS > 1
+/*
+ * #599: a wait on another processor calls the clock watch every 1024 turns,
+ * so that a stop of processor 0's tick is still said when every other
+ * processor is spinning with interrupts off and taking no tick of its own
+ * (i386/clock_watch.c, clock_watch_spin).  `turns' is the caller's counter;
+ * `where' names the wait in the line.  kern/lock.c defines it empty for a
+ * machine that does not.
+ */
+extern void		clock_watch_spin(const char *where);
+#define	MACHINE_SPIN_WATCH(turns, where)				\
+	do {								\
+		if ((++(turns) & 0x3FF) == 0)				\
+			clock_watch_spin(where);			\
+	} while (0)
+#endif	/* NCPUS > 1 */
+
 #endif	/* _I386_LOCK_H_ */
 

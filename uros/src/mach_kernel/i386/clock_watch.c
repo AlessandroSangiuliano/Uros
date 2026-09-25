@@ -35,6 +35,10 @@
  * own ticks, so neither a host stall (the TSC jumps, few ticks) nor a burst of
  * catch-up ticks (many ticks, little TSC) is enough on its own.
  *
+ * A processor spinning with interrupts off takes no tick, so the waits on
+ * another processor run the same watch from inside the spin
+ * (clock_watch_spin).
+ *
  * On a stop, the first processor to see it prints a line without taking a
  * lock and repeats it every CW_REPEAT_MS while the stop lasts: the console is
  * shared, and another processor's output can cut a line (#544).  Once per boot
@@ -78,6 +82,7 @@ extern unsigned int		timeout_ticks;		/* kern/mach_clock.c */
 #define	CW_STOP_MS	2000	/* no tick from processor 0 for this long ... */
 #define	CW_STOP_TICKS	200	/* ... and for this many of the watcher's own */
 #define	CW_REPEAT_MS	10000	/* the line again, while the stop lasts */
+#define	CW_CONFIRM_MS	100	/* a spin's second look, see clock_watch_spin */
 #define	CW_ABLATE_AT	3000	/* processor 0's ticks, for the #599 ablations */
 
 /*
@@ -89,6 +94,7 @@ static struct {
 	unsigned int		seen;	/* nmi_cpu_tick[0] when it last moved */
 	unsigned long long	since;	/* this processor's TSC then */
 	unsigned int		ticks;	/* this processor's ticks since then */
+	unsigned long long	confirm; /* a spin's second look, 0 = none yet */
 	unsigned long long	next;	/* when the reporter repeats the line */
 } cw[NCPUS];
 
@@ -163,7 +169,7 @@ cw_dec(unsigned int v)
  * a hint next to the count, which is the measurement.
  */
 static void
-cw_say_stopped(int cpu, unsigned long long now)
+cw_say_stopped(int cpu, unsigned long long now, const char *where)
 {
 	unsigned long long	anchor = rtclock_tsc_at_tick;
 
@@ -171,6 +177,10 @@ cw_say_stopped(int cpu, unsigned long long now)
 	cw_dec(cw_ms(now - cw[cpu].since));
 	cw_puts(" ms (watched by processor ");
 	cw_dec((unsigned int)cpu);
+	if (where != 0) {
+		cw_puts(", spinning in ");
+		cw_puts(where);
+	}
 	cw_puts("): its count ");
 	cw_dec(cw[cpu].seen);
 	cw_puts(", timeout ticks ");
@@ -245,8 +255,13 @@ clock_watch_ablate(int cpu)
 }
 #endif
 
-void
-clock_watch_tick(int cpu)
+/*
+ * The watch itself.  `where' is 0 from the watcher's own tick, and names the
+ * wait it was spinning in otherwise; the two differ only in what stands in
+ * for the watcher's own ticks, which a spinning processor does not take.
+ */
+static void
+cw_watch(int cpu, const char *where)
 {
 	unsigned int		count;
 	unsigned long long	now, stop;
@@ -277,14 +292,23 @@ clock_watch_tick(int cpu)
 		cw[cpu].seen = count;
 		cw[cpu].since = now;
 		cw[cpu].ticks = 0;
+		cw[cpu].confirm = 0;
 		return;
 	}
 
-	if (++cw[cpu].ticks < CW_STOP_TICKS)
+	if (where == 0 && ++cw[cpu].ticks < CW_STOP_TICKS)
 		return;
 	stop = (unsigned long long)mp_tsc_per_us * (CW_STOP_MS * 1000u);
 	if (now - cw[cpu].since < stop)
 		return;
+	if (where != 0) {
+		if (cw[cpu].confirm == 0)
+			cw[cpu].confirm = now +
+			    (unsigned long long)mp_tsc_per_us *
+			    (CW_CONFIRM_MS * 1000u);
+		if (now < cw[cpu].confirm)
+			return;
+	}
 
 	if (cw_reporter != cpu) {
 		if (!__sync_bool_compare_and_swap(&cw_reporter, -1, cpu))
@@ -295,13 +319,44 @@ clock_watch_tick(int cpu)
 		return;
 	cw[cpu].next = now +
 	    (unsigned long long)mp_tsc_per_us * (CW_REPEAT_MS * 1000u);
-	cw_say_stopped(cpu, now);
+	cw_say_stopped(cpu, now, where);
 
 	if (!cw_nmi_sent) {
 		cw_nmi_sent = 1;
 		cw_dump_wanted = 1;
 		lapic_send_nmi(master_cpu);
 	}
+}
+
+void
+clock_watch_tick(int cpu)
+{
+	cw_watch(cpu, 0);
+}
+
+/*
+ * The same watch from inside a wait on another processor, found blind by the
+ * CLI_SPIN ablation: when processor 0 stopped with interrupts off, every other
+ * processor was in a TLB shootdown's wait for processor 0's ack within ten of
+ * its own ticks, spinning with interrupts off too, and none of them ticked
+ * again to say so.  The waits call this every 1024 turns
+ * (MACHINE_SPIN_WATCH, <i386/lock.h>): a simple lock's spin and a TLB
+ * shootdown's wait for its acks.  The assembly spins of i386_lock.S do not.
+ *
+ * With no ticks of its own to count, a spin declares a stop after CW_STOP_MS of
+ * its TSC and a second look CW_CONFIRM_MS later with processor 0's count still
+ * where it was: a host stall jumps the TSC once, and processor 0 ticks within
+ * one tick of the machine running again.  Interrupts go off for the look, so
+ * the watcher's own tick cannot cut into the state it shares with it.
+ */
+void
+clock_watch_spin(const char *where)
+{
+	unsigned int	flags;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+	cw_watch(cpu_number(), where);
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
 }
 
 /*

@@ -773,6 +773,7 @@ extern int max_lock_loops;
 		/* find other cpus using the pmap */                                 \
 		users = (pmap)->cpus_using & ~cpu_mask;                              \
 		if (users) {                                                         \
+			unsigned int cw_turns = 0;	/* #599 */                   \
 			LOOP_VAR;                                                    \
 			/* signal them, and wait for them to acknowledge the         \
 			 * flush.  We spin on the monotone cpu_update_needed ack     \
@@ -782,6 +783,8 @@ extern int max_lock_loops;
 			signal_cpus(users, (pmap), (s), (e));                        \
 			while (pmap_tlb_ack_outstanding(users)) {                    \
 				LOOP_CHECK("PMAP_UPDATE_TLBS", pmap);                \
+				MACHINE_SPIN_WATCH(cw_turns,                         \
+				    "a TLB shootdown's wait for its acks");          \
 				continue;                                            \
 			}                                                            \
 		}                                                                    \
