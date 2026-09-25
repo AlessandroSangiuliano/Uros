@@ -201,10 +201,12 @@ static const struct {
 	{ 0x40, 4, "the 8254, the kernel's ruler" },
 	{ 0x61, 1, "the 8254's channel-2 gate" },
 	/*
-	 * #597: pci_cfg_port_lock serialises the address/data pair; a task
-	 * holding these ports would drive it as two RPCs, outside the lock.
+	 * #597: pci_cfg_port_lock serialises the address/data pair, and a task
+	 * reaching these ports would drive it as two RPCs, outside the lock.
+	 * On an ECAM board the kernel does not use them at all, and they still
+	 * reach every device's configuration space: kept either way.
 	 */
-	{ 0xCF8, 8, "the PCI configuration ports, which the kernel serialises" },
+	{ 0xCF8, 8, "the PCI configuration ports" },
 };
 
 static int
