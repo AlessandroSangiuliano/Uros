@@ -214,6 +214,12 @@ unsigned rulers_elected(void)
 	return n ? narrowest(ids, n) : RULER_8254;
 }
 
+void rulers_distrust(unsigned id)
+{
+	if (id < RULERS)
+		rulers[id].dissents = 1;
+}
+
 int rulers_long(void)
 {
 	if (rulers[RULER_HPET].present && rulers[RULER_HPET].tsc.hz != 0

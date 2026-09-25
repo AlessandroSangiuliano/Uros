@@ -324,10 +324,11 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
  * only a ruler but the clock itself -- rtclock ticks from its channel 0 --
  * and port 0x61, which gates channel 2.
  *
- * ⚠️ This answers for device_io_port_claim() only.  i386 has a second way to
- * a port, i386_io_port_add() (iopb.c), which grants it in the task's I/O
- * permission bitmap and asks nothing here; that path is i386's own and is
- * not closed by this.
+ * Asked at all three doors to a port on this target (#594), not only at
+ * device_io_port_claim(): i386_io_port_add() (iopb.c) refuses a set for the
+ * task's I/O permission bitmap that names one of these, and the iopl device's
+ * #GP emulation (AT386/iopl.c) refuses to read one.  kernel242_test asks all
+ * of them from a task.
  */
 const char *
 device_md_io_reserved(unsigned int base, unsigned int count)

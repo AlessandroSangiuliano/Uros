@@ -260,13 +260,44 @@ option(UROS_ABLATE_508_NO_HPET "Build the #508 ablation: the ACPI HPET table is 
 # #508: no exact source is seen, so the measured path runs on a machine that
 # has one.  Never ON otherwise.
 option(UROS_ABLATE_508_EXACT_HIDDEN "Build the #508 ablation: the exact TSC sources are not seen" OFF)
-# #508: the first exact source that states a rate states it 1/32 high, so the
-# rulers contradict it and it is WRONG.  Never ON otherwise.
-option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC source states 1/32 high" OFF)
+# #508: the first exact source that states a rate states it a quarter high, so
+# the rulers contradict it and it is WRONG -- a quarter because under a
+# hypervisor a contradiction has to exceed the host's NTP slew, 12.5% (#594).
+# Never ON otherwise.
+option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC source states a quarter high" OFF)
 # #508: the processor states CPUID 0x15 as OMEGA's does, so the path that
 # adopts it -- which no guest can reach -- runs.  Never ON otherwise.
 option(UROS_ABLATE_508_CPUID_15 "Build the #508 ablation: CPUID 0x15 states OMEGA's crystal and ratio" OFF)
 option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
+# #594: CPUID 0x15 states the crystal as the timing leaf's bus clock and the
+# TSC's ratio to it, as a hypervisor following the SDM would -- no QEMU does --
+# so the LAPIC timer adopts 0x15's crystal in a guest.  Boot it with +invtsc.
+# Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_CRYSTAL_IS_BUS "Build the #594 ablation: CPUID 0x15 states the timing leaf's bus as the crystal" OFF)
+# #594: from the watchdog's second window, the TSC as it reads it runs 1/32
+# fast, so both rulers disagree with it: the watchdog must name the TSC, move
+# the tick to the local APIC timer and withdraw the TSC's rate -- and the boot
+# must go on.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_TSC_SKEWS "Build the #594 ablation: the TSC runs 1/32 fast as the watchdog reads it" OFF)
+# #594: from the watchdog's second window, the HPET as it reads it stops, so the
+# watchdog must name the HPET and go on with the PM timer.  Never ON otherwise.
+option(UROS_ABLATE_594_HPET_STOPS "Build the #594 ablation: the HPET stops as the watchdog reads it" OFF)
+# #594: the rulers carry a host's NTP slew -- in the watchdog, 0.4 s offsets
+# drained at an eighth a second, the sign alternating every 32 windows; at
+# boot, the rulers' answer 5% low -- which is what a host converging after a
+# reboot does to a guest.  Nothing may be named, and the exact source must
+# still be adopted.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_NTP_SLEW "Build the #594 ablation: the rulers carry a host's NTP phase slew" OFF)
+# #594, i386 only: the two halves of closing i386's other doors to the 8254.
+# REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
+# i386_io_port_add() must refuse the device whole and kernel242_test's control
+# port must fault.  UNCHECKED stops i386_io_port_add() and the iopl #GP
+# emulation asking device_md_io_reserved(), and brings back the emulated
+# channel-2 write to 0x43, so the emulated read of 0x40 must succeed.  Both
+# together are the kernel before #594: the bitmap grants the 8254.  Never ON
+# in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_IOPL_REOPEN "Build the #594 ablation (i386): the iopl device lists the 8254 and its gate again" OFF)
+option(UROS_ABLATE_594_UNCHECKED "Build the #594 ablation (i386): the bitmap and the iopl emulation do not ask device_md_io_reserved" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
 # I/O APIC describes -- and the discriminator they use, the other half of the
@@ -334,12 +365,14 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_dev.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/exact.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/freq_source.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/hpet.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pmtimer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/ruler.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rulers.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc_refine.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc_watch.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
@@ -526,11 +559,27 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   endif()
   if(UROS_ABLATE_508_EXACT_LIES)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_EXACT_LIES=1)
-      message(STATUS "#508 ablation: the first exact TSC source states 1/32 high (x86_64)")
+      message(STATUS "#508 ablation: the first exact TSC source states a quarter high (x86_64)")
   endif()
   if(UROS_ABLATE_508_CPUID_15)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_CPUID_15=1)
       message(STATUS "#508 ablation: CPUID 0x15 states OMEGA's crystal and ratio (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_TSC_SKEWS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_TSC_SKEWS=1)
+      message(STATUS "#594 ablation: the TSC runs 1/32 fast as the watchdog reads it (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_NTP_SLEW)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_NTP_SLEW=1)
+      message(STATUS "#594 ablation: the rulers carry a host's NTP phase slew (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_HPET_STOPS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)
+      message(STATUS "#594 ablation: the HPET stops as the watchdog reads it (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)
+      message(STATUS "#594 ablation: CPUID 0x15 states the timing leaf's bus as the crystal (x86_64)")
   endif()
   if(UROS_ABLATE_508_SPAN_UNBOUNDED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
@@ -1260,6 +1309,14 @@ endif()
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)
     list(APPEND KERNEL_DEFINES -D${_d})
 endforeach()
+if(UROS_ABLATE_594_IOPL_REOPEN)
+    list(APPEND KERNEL_DEFINES -DABLATE_594_IOPL_REOPEN=1)
+    message(STATUS "#594 ablation: the iopl device lists the 8254 and its gate again (i386)")
+endif()
+if(UROS_ABLATE_594_UNCHECKED)
+    list(APPEND KERNEL_DEFINES -DABLATE_594_UNCHECKED=1)
+    message(STATUS "#594 ablation: the bitmap and the iopl emulation do not ask device_md_io_reserved (i386)")
+endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
     message(STATUS "#385 free-page poison: ON (i386)")

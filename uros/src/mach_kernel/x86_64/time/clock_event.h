@@ -111,6 +111,25 @@ void		clock_event_stop(void);
 /* Which backend won, for the boot log and for DDB.  Never NULL. */
 const char	*clock_event_name(void);
 
+/*
+ * #594: move every processor's tick off the TSC, to the local APIC timer.
+ * Thread context, interrupts on.  Three outcomes, and the caller has to tell
+ * them apart: only after the first may the TSC's rate be withdrawn -- in the
+ * third the tick still runs on the TSC, and a deadline with no rate is a
+ * processor with no clock.
+ */
+enum {
+	CLOCK_EVENT_LEFT_TSC,		/* every processor now on the APIC */
+	CLOCK_EVENT_NOT_ON_TSC,		/* the tick was elsewhere already */
+	CLOCK_EVENT_NOWHERE_TO_GO,	/* on the TSC, and the APIC timer has
+					   no rate: there is no third backend
+					   yet (#593) */
+};
+int		clock_event_leave_tsc(void);
+
+/* #594: how many ticks this processor has taken since boot. */
+unsigned long	clock_event_ticks(unsigned cpu);
+
 /* The scheduler tick rate, in Hz, and its period in nanoseconds. */
 unsigned	clock_event_hz(void);
 

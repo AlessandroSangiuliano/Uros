@@ -2993,20 +2993,23 @@ static void freq_census(void)
  * one number worth looking at.
  */
 /*
- * Where the TSC's rate came from (#508): each exact source's statement, how
- * far it is from what the rulers measured, and what was made of it -- by the
- * rules tsc.c states.  A source that contradicts the rulers is WRONG.
+ * Each exact source's statement, how far it is from what the rulers measured,
+ * and what was made of it -- by the rules time/exact.c states.  A source that
+ * contradicts the rulers is WRONG.  `all' names the sources that state
+ * nothing as well, for a clock every source could have a rate for.
  */
-static void tsc_source_selftest(void)
+static void exact_sources_print(const struct exact_choice *s, int all)
 {
-	const struct tsc_source	*s = tsc_source();
-	unsigned		id;
+	unsigned	id;
+	int		first = 1;
 
-	kputs("UrMach x86-64: the TSC's exact sources: ");
 	for (id = 0; id < FREQ_EXACT; id++) {
-		kputs(id == 0 ? "" : ", ");
+		if (s->verdict[id] == EXACT_ABSENT && !all)
+			continue;
+		kputs(first ? "" : ", ");
+		first = 0;
 		kputs(freq_exact_name(id));
-		if (s->verdict[id] == TSC_ABSENT) {
+		if (s->verdict[id] == EXACT_ABSENT) {
 			kputs(" states none");
 			continue;
 		}
@@ -3014,23 +3017,23 @@ static void tsc_source_selftest(void)
 		kputdec(s->hz[id] / 1000);
 		kputs(" kHz");
 		switch (s->verdict[id]) {
-		case TSC_UNCHECKED:
+		case EXACT_UNCHECKED:
 			kputs(", not believed: nothing was measured to check it");
 			break;
-		case TSC_ADOPTED:
+		case EXACT_ADOPTED:
 			kputs(", ");
 			kputdec(s->ppm[id]);
 			kputs(" ppm from the rulers: adopted");
 			break;
-		case TSC_AGREES:
+		case EXACT_AGREES:
 			kputs(", agreeing with it");
 			break;
-		case TSC_NOT_USED:
+		case EXACT_NOT_USED:
 			kputs(", ");
 			kputdec(s->apart_ppm[id]);
 			kputs(" ppm from the adopted value: not used");
 			break;
-		case TSC_CONTRADICTS:
+		case EXACT_CONTRADICTS:
 			kputs(", WRONG: ");
 			kputdec(s->ppm[id]);
 			kputs(" ppm from the rulers, who allow ");
@@ -3038,6 +3041,19 @@ static void tsc_source_selftest(void)
 			break;
 		}
 	}
+}
+
+/*
+ * Where the TSC's rate came from (#508): exact_sources_print() over the three
+ * sources, then the rate and who gave it.
+ */
+static void tsc_source_selftest(void)
+{
+	const struct exact_choice	*s = tsc_source();
+	unsigned			id;
+
+	kputs("UrMach x86-64: the TSC's exact sources: ");
+	exact_sources_print(s, 1);
 	if (s->adopted >= 0) {
 		kputs(" — the TSC runs at ");
 		kputdec(tsc_hz() / 1000);
@@ -3046,7 +3062,7 @@ static void tsc_source_selftest(void)
 		kputs("\r\n");
 	} else if (s->measured != 0) {
 		for (id = 0; id < FREQ_EXACT; id++)
-			if (s->verdict[id] != TSC_ABSENT)
+			if (s->verdict[id] != EXACT_ABSENT)
 				break;
 		kputs(id == FREQ_EXACT ? " — none states a rate, so the rulers' "
 				       : " — none agreed, so the rulers' ");
@@ -3474,14 +3490,20 @@ static void timer_selftest(void)
 	kputs(": the median, ");
 	kputdec(lapic_timer_measured_hz() / 1000);
 	kputs(" kHz");
-	if (lapic_timer_exact_hz() != 0) {
-		kputs("; the hypervisor states ");
-		kputdec(lapic_timer_exact_hz() / 1000);
-		kputs(" kHz after the divisor, ");
-		kputdec(lapic_timer_exact_ppm());
-		kputs(lapic_timer_exact_adopted()
-		      ? " ppm from it: adopted"
-		      : " ppm from it, more than the rulers allow: WRONG");
+	{
+		const struct exact_choice *src = lapic_timer_source();
+
+		/*
+		 * #594: every source that states a rate, after the divisor.
+		 * KVM's clock never does -- it implies a TSC, not a bus -- so
+		 * the ones that state none are not listed.
+		 */
+		for (unsigned id = 0; id < FREQ_EXACT; id++)
+			if (src->verdict[id] != EXACT_ABSENT) {
+				kputs("; after the divisor ");
+				exact_sources_print(src, 0);
+				break;
+			}
 	}
 	if (lapic_timer_set_aside() >= 0) {
 		kputs(", run ");

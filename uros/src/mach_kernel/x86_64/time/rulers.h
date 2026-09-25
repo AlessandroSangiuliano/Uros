@@ -88,4 +88,9 @@ unsigned rulers_elected(void);
  * and was not named, for the refinement; -1 if there is none. */
 int rulers_long(void);
 
+/* #594: the watchdog found this ruler wrong while the system ran; from now on
+ * it is treated as the vote's dissenter, and rulers_long() and
+ * rulers_elected() pass over it. */
+void rulers_distrust(unsigned id);
+
 #endif	/* _X86_64_TIME_RULERS_H_ */

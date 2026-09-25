@@ -34,10 +34,24 @@ add_custom_command(
   VERBATIM
 )
 
+# #594: exc.defs, server half only, for test_io_kernel_ports -- a task that
+# asks for the kernel's ports through the iopl device and must be TOLD, by an
+# exception, that it was refused.
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
+set(_K242_EXC_OUT ${CMAKE_CURRENT_BINARY_DIR}/exc)
+set(K242_EXC_GENERATED)
+add_mig_userland(${UROS_UAPI_DIR}/mach/exc.defs ${_K242_EXC_OUT} K242_EXC)
+list(REMOVE_ITEM K242_EXC_GENERATED ${_K242_EXC_OUT}/exc_user.c)
+
 add_executable(kernel242_test_server
   kernel242_test.c
   ${MACH_I386_USER_C}
+  ${K242_EXC_GENERATED}
 )
+target_include_directories(kernel242_test_server PRIVATE ${_K242_EXC_OUT})
 
 add_dependencies(kernel242_test_server mig_mach_public_headers)
 

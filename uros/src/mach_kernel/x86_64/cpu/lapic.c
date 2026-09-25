@@ -14,7 +14,8 @@
 #include <time/pit.h>
 #include <time/ruler.h>	/* #508: the rule the TSC shares */
 #include <time/rulers.h>	/* #508: against the elected ruler */
-#include <time/freq_source.h>	/* #508: the timing leaf's bus rate */
+#include <time/exact.h>		/* #594: the rule the TSC's sources follow */
+#include <time/freq_source.h>	/* #508: the timer's exact sources */
 #include <trap/trap.h>
 
 #define MSR_APIC_BASE		0x1B
@@ -321,23 +322,23 @@ static uint64_t subject_timer(void)
 static struct ruler_calibration timer_cal;
 
 /*
- * The rate the hypervisor states, if it states one (#508): the timing leaf's
- * bus clock divided by the divisor this file sets, checked against the
- * measurement by the rule the TSC's exact sources follow (tsc.c) -- adopted
- * if it is no further than half the widest bracket plus 1000 ppm, WRONG if it
- * is.  QEMU's is 1 GHz, 62.5 MHz after the divisor.
+ * The rates the machine states for this timer (#508, #594), after the divisor
+ * this file sets, checked against the measurement by the rule time/exact.c
+ * states for the TSC's sources as well: the first that agrees is adopted, a
+ * later one more than 10 ppm from it is not used, one further from the
+ * measurement than the rulers allow is WRONG.
  *
- * ⚠️ CPUID 0x15's crystal is not used here.  On recent Intel parts the LAPIC
- * timer may count off that crystal, but #508 did not read the manual's
- * passage that would say so, and no machine this kernel boots on offers the
- * leaf to a guest with its fields filled in -- a source that could not be
- * checked here is not one to take on faith.
+ * Two sources, in that order.  CPUID 0x15's crystal, when the leaf states it:
+ * the manual says the timer counts that crystal whenever the leaf enumerates
+ * the TSC's ratio to it (SDM Vol. 3A, 253668-093US, 13.5.4) -- 38.4 MHz on
+ * OMEGA, 2.4 MHz after the divisor.  Then the hypervisor's timing leaf, whose
+ * bus field is what a guest's timer counts: QEMU's is 1 GHz, 62.5 MHz after
+ * the divisor.  No hypervisor this kernel has run under fills 0x15 in, so in a
+ * guest the first is absent and the order has never had to choose.
  */
 #define TIMER_DIVISOR		16	/* what TIMER_DIVIDE_16 selects */
 
-static uint64_t timer_exact_hz;
-static uint64_t timer_exact_ppm;
-static int	timer_exact_adopted;
+static struct exact_choice timer_source = { .adopted = -1 };
 
 uint32_t lapic_timer_calibrate(void)
 {
@@ -374,28 +375,19 @@ uint32_t lapic_timer_calibrate(void)
 
 	{
 		struct freq_exact	e;
-		uint64_t		spread, bound = 0;
+		uint64_t		hz[FREQ_EXACT], adopted, bracket = 0;
 		unsigned		i;
 
 		freq_exact_read(&e);
-		timer_exact_hz = e.lapic_bus_hz / TIMER_DIVISOR;
-		timer_exact_adopted = 0;
-		timer_exact_ppm = 0;
-		if (timer_exact_hz != 0 && timer_hz != 0) {
-			spread = timer_exact_hz > timer_hz
-				 ? timer_exact_hz - timer_hz
-				 : timer_hz - timer_exact_hz;
-			timer_exact_ppm = spread * 1000000 / timer_hz;
-			for (i = 0; i < RULER_RUNS; i++)
-				if (timer_cal.run_hz[i] != 0
-				    && timer_cal.run_ppm[i] > bound)
-					bound = timer_cal.run_ppm[i];
-			bound = bound / 2 + 1000;
-			if (timer_exact_ppm <= bound) {
-				timer_hz = (uint32_t)timer_exact_hz;
-				timer_exact_adopted = 1;
-			}
-		}
+		for (i = 0; i < FREQ_EXACT; i++)
+			hz[i] = e.lapic_hz[i] / TIMER_DIVISOR;
+		for (i = 0; i < RULER_RUNS; i++)
+			if (timer_cal.run_hz[i] != 0
+			    && timer_cal.run_ppm[i] > bracket)
+				bracket = timer_cal.run_ppm[i];
+		adopted = exact_choose(hz, timer_hz, bracket, &timer_source);
+		if (adopted != 0)
+			timer_hz = (uint32_t)adopted;
 	}
 	return timer_hz;
 }
@@ -405,19 +397,9 @@ uint64_t lapic_timer_measured_hz(void)
 	return timer_cal.hz;
 }
 
-uint64_t lapic_timer_exact_hz(void)
+const struct exact_choice *lapic_timer_source(void)
 {
-	return timer_exact_hz;
-}
-
-uint64_t lapic_timer_exact_ppm(void)
-{
-	return timer_exact_ppm;
-}
-
-int lapic_timer_exact_adopted(void)
-{
-	return timer_exact_adopted;
+	return &timer_source;
 }
 
 /*

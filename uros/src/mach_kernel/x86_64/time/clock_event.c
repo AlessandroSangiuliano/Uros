@@ -35,6 +35,8 @@
 #include <kern/cpu_number.h>		/* cpu_number */
 #include <kern/cpu_data.h>		/* #459: disable_preemption */
 #include <kern/rcu.h>		/* the tick's quiescent state (#455) */
+#include <x86_64/cpu/ipi.h>		/* #594: every processor leaves the TSC */
+#include <x86_64/cpu/percpu.h>		/* #594: percpu_intr_disable */
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
@@ -308,6 +310,62 @@ clock_event_stop(void)
 		ops->stop();
 }
 
+/*
+ * #594: the tick leaves the TSC, because the watchdog has named it.
+ *
+ * Every processor has to do it for itself -- each has its own timer -- so this
+ * processor does, and then asks the others by cross-call.  Each one, with
+ * interrupts off: disarms the deadline, puts its timer in one-shot mode and
+ * arms one tick.  A processor that was inside its tick handler when the
+ * backend changed finished that handler first (interrupts are off in it) and
+ * re-armed the deadline one last time; the cross-call arrives after, and
+ * replaces it.
+ *
+ * ⚠️ The cross-call, not "each processor notices at its next tick".  The next
+ * tick is a deadline on the counter that has just been found wrong, and a
+ * counter that stopped would never deliver it: the processor would lose its
+ * clock for good.
+ *
+ * ⚠️ Called BEFORE the TSC's rate is withdrawn (tsc_distrust()), never after:
+ * until every processor has answered, some may still re-arm the deadline, and
+ * tscdl_arm() with a rate of zero refuses -- a processor whose re-arm is
+ * refused has no clock.  ipi_call_others() returns only when all have done it.
+ *
+ * Processors not yet online set themselves up with `ops' when they arrive,
+ * which by then is this one.  If the local APIC timer has no rate there is
+ * nowhere to go, and the tick stays on the TSC: a third backend is #593.
+ */
+static void
+clock_event_resetup(void *arg)
+{
+	(void) arg;
+	tscdl_stop();
+	ops->setup(event_vector);
+	(void) ops->arm(tick_ns);
+}
+
+int
+clock_event_leave_tsc(void)
+{
+	if (ops != &tscdl_ops)
+		return CLOCK_EVENT_NOT_ON_TSC;
+	if (!lapic_ops.probe())
+		return CLOCK_EVENT_NOWHERE_TO_GO;
+
+	disable_preemption();
+	ops = &lapic_ops;
+	barrier();
+
+	percpu_intr_disable();
+	clock_event_resetup((void *) 0);
+	percpu_intr_enable();
+
+	ipi_call_others(clock_event_resetup, (void *) 0);
+	enable_preemption();
+
+	return CLOCK_EVENT_LEFT_TSC;
+}
+
 const char *
 clock_event_name(void)
 {
@@ -458,6 +516,19 @@ unsigned long	clock_tick_delivered[NCPUS];
  */
 static unsigned long	selftest_ticks[NCPUS];
 static uint64_t		selftest_tsc0[NCPUS];
+
+/*
+ * #594: every tick, per processor, and only counted -- unlike the self-test's
+ * count above, which stops once the TSC has no rate, which is exactly when the
+ * watchdog needs to ask whether every processor still has a clock.
+ */
+static volatile unsigned long	tick_count[NCPUS];
+
+unsigned long
+clock_event_ticks(unsigned cpu)
+{
+	return cpu < NCPUS ? tick_count[cpu] : 0;
+}
 
 /*
  * 🔥 RECORDED HERE, PRINTED SOMEWHERE ELSE, AND THAT IS NOT TIDINESS (#461).
@@ -715,6 +786,8 @@ clock_event_tick(struct trap_frame *frame)
 	 */
 	cndrain();
 
+	if (cpu < NCPUS)
+		tick_count[cpu]++;
 	clock_selftest(cpu);
 
 	/*
