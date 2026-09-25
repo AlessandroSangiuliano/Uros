@@ -387,7 +387,7 @@ The disk and bundle are built by scripts in `scripts/`, not by CMake. Both pick 
 
 ### Running on QEMU
 
-`scripts/run-qemu.sh` wraps the QEMU invocation and (re-)builds the disk/bundle as needed.
+`scripts/run-qemu.sh` wraps the QEMU invocation. Before every boot it runs `ninja` on the build directory (`uros/build`, or `UROS_BUILD_DIR`) and re-packs the stage-1 bundle (skip that with `--reuse-bundle`); it regenerates `disk.img` only with `--fresh-disk`, `--diskregen` or `--minimal`, or when the image is missing.
 
 ```sh
 ./scripts/run-qemu.sh                                 # graphical (default --ahci)

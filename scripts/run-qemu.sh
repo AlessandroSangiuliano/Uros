@@ -41,13 +41,17 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # sampled the clock and never named its accelerator, that one named its
 # accelerator and never sampled the clock.
 . "$(dirname "$0")/run-conditions.sh"
-# Overridable so a measurement can run against a tree nobody is rebuilding.
+# Overridable so a measurement can run against a build nobody else touches.
 #
 # ⚠️ Not a convenience.  A campaign was once launched against uros/build while
-# the same directory was being edited and re-ninja'd for unrelated work: this
-# script rebuilds the kernel and the bundle on every invocation, so each boot
-# picked up whatever the source happened to be at that moment, and the two arms
-# of the A/B no longer differed by one thing.  The logs were discarded.
+# the same directory was being edited and re-ninja'd for unrelated work, so each
+# boot picked up whatever that other work had last built, and the two arms of
+# the A/B no longer differed by one thing.  The logs were discarded.
+#
+# This script builds $BUILD_DIR before every boot (below), and a build
+# directory builds from the source tree it was configured from.  So an arm that
+# must stay old needs its own build directory configured from its own worktree,
+# not just its own build directory.
 #
 #	UROS_BUILD_DIR=/path/to/build-measure scripts/run-qemu.sh ...
 BUILD_DIR="${UROS_BUILD_DIR:-$REPO_ROOT/uros/build}"
@@ -120,6 +124,30 @@ while [ $# -gt 0 ]; do
         *) EXTRA_ARGS="$EXTRA_ARGS $1"; shift ;;
     esac
 done
+
+# Build what is about to boot (#592).
+#
+# This script used to boot whatever $BUILD_DIR already held: the kernel however
+# old, and a bundle and a disk packed from servers however old.  Its own
+# comment said the opposite, so an edit followed by a boot without a ninja in
+# between tested the previous build and reported on the edit.  run-x86_64.sh
+# has always built first; now both do, and nobody has to remember it.
+#
+# Everything, not a list of targets: make-bundle.sh and make-disk-image.sh pack
+# whatever lies under export/, and a list would go stale the day a server is
+# added to the bundle.  The output goes to a file and one line is printed,
+# because the callers keep this script's output as the run's log.
+if [ ! -f "$BUILD_DIR/build.ninja" ]; then
+    echo "ERROR: $BUILD_DIR is not a configured build directory (no build.ninja)"
+    exit 1
+fi
+BUILD_LOG="$BUILD_DIR/run-qemu-build.log"
+if ! ninja -C "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
+    tail -n 30 "$BUILD_LOG"
+    echo "ERROR: ninja -C $BUILD_DIR failed (whole output in $BUILD_LOG); nothing was booted"
+    exit 1
+fi
+echo "Build:   ninja -C $BUILD_DIR — $(tail -n 1 "$BUILD_LOG")"
 
 # Disk-image regeneration is opt-in: it happens only with --diskregen (or
 # --fresh-disk/--minimal, or when disk.img is missing).  Otherwise the existing
