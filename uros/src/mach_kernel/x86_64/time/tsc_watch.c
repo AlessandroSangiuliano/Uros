@@ -501,6 +501,15 @@ void tsc_watch(void)
 		windows++;
 		since++;
 
+		/*
+		 * #593: the tick's own reports, once a second from a thread.
+		 * The idle loop drains them too, but a processor that never
+		 * idles never drains: at one processor under TCG, the HPET's
+		 * ten-second window closed before its one-second window had
+		 * been printed, and was lost.
+		 */
+		clock_event_drain_reports();
+
 #if	ABLATE_594_TSC_SKEWS
 		if (windows == 2)
 			skew_from = rdtsc_ordered();
