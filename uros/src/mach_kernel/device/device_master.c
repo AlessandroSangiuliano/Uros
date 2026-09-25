@@ -1072,8 +1072,9 @@ check_irq_owner(unsigned int irq)
 	int		mine = 0;
 
 	/*
-	 * The config-space read inside the section is a spin lock and two
-	 * port accesses (pci_cfg_port_lock is a leaf), never a sleep.
+	 * The config-space read inside the section is a spin lock and a few
+	 * port accesses, or one memory reference on ECAM (pci_cfg_port_lock
+	 * is a leaf), never a sleep.
 	 */
 	urmach_rcu_read_lock();
 	n = device_nclaims;
@@ -2711,8 +2712,11 @@ ds_master_device_mmio_unmap(
  *
  * 🔑 A port belonging to NO claimed device stays reachable, and that is the
  * same decision check_irq_owner() makes: the legacy devices -- the serial
- * lines, the keyboard, the PIC and the PIT -- are behind no PCI BAR, and a
- * rule that refused everything unattributed would take the console with it.
+ * lines, the keyboard, the PIC -- are behind no PCI BAR, and a rule that
+ * refused everything unattributed would take the console with it.  The
+ * exception is what device_md_io_reserved() names, which the kernel keeps
+ * from every task: the 8254 and its gate, the PCI configuration ports, and
+ * on x86-64 the PM timer where it is a port (#508, #597).
  */
 /*
  * Legacy I/O ranges a task has claimed (#497).
@@ -2838,12 +2842,26 @@ check_io_claim(unsigned int port)
 }
 
 static kern_return_t
-check_io_port(unsigned int port)
+check_io_port(unsigned int port, unsigned int size)
 {
 	task_t		me = current_task();
 	unsigned	i, n, b;
 	natural_t	other_bdf = DEVICE_DMA_NO_BDF;
 	int		mine = 0;
+
+	/*
+	 * 🔴 The ports the kernel keeps are kept from reads and writes too, not
+	 * only from claims (#597).  Refusing the claim alone left them to every
+	 * holder of the master port: an unclaimed port falls through to
+	 * check_io_claim() below, which lets it through.  So a task could drive
+	 * the PCI configuration pair as two RPCs outside pci_cfg_port_lock --
+	 * the race #597 is about -- or program the 8254 the kernel measures
+	 * time with (#508).  Asked of the whole access, [port, port + size).
+	 * Silent: a refusal is the caller's to report, and a loop that asked
+	 * again would flood the console.
+	 */
+	if (device_md_io_reserved(port, size) != 0)
+		return KERN_NO_ACCESS;
 
 	urmach_rcu_read_lock();
 	n = device_nclaims;
@@ -2927,8 +2945,15 @@ ds_master_device_io_port_read(
 
 	if (size != 1 && size != 2 && size != 4)
 		return KERN_INVALID_ARGUMENT;
+	/*
+	 * #597: the port is cut to 16 bits by device_md_io_read(), and every
+	 * check below compares all 32, so 0x10CF8 passed as nothing reserved
+	 * and reached 0xCF8.  The claim path already had this bound.
+	 */
+	if (port > 0xFFFF || port + size > 0x10000)
+		return KERN_INVALID_ARGUMENT;
 
-	kr = check_io_port(port);
+	kr = check_io_port(port, size);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2951,8 +2976,11 @@ ds_master_device_io_port_write(
 
 	if (size != 1 && size != 2 && size != 4)
 		return KERN_INVALID_ARGUMENT;
+	/* The same bound as the read, for the same reason (#597). */
+	if (port > 0xFFFF || port + size > 0x10000)
+		return KERN_INVALID_ARGUMENT;
 
-	kr = check_io_port(port);
+	kr = check_io_port(port, size);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -3035,7 +3063,7 @@ ds_master_device_io_port_claim(
 
 		if (owner != 0) {
 			printf("device_io_port_claim: 0x%x..0x%x REFUSED to task "
-			       "%p — it covers %s (#508)\n", port,
+			       "%p — it covers %s (#508, #597)\n", port,
 			       port + count - 1, (void *)me, owner);
 			return KERN_NO_ACCESS;
 		}

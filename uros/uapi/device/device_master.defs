@@ -403,6 +403,12 @@ routine device_dma_alloc_sg(
 /*
  * I/O port read.
  * Reads 1, 2, or 4 bytes from the specified x86 I/O port.
+ *
+ * KERN_INVALID_ARGUMENT for another size or for an access past port 0xFFFF;
+ * KERN_NO_ACCESS for a port inside another task's claimed I/O BAR or legacy
+ * claim, and for a port the kernel keeps (the 8254 and its gate, the PCI
+ * configuration ports, and on x86-64 the PM timer where it is a port: #508,
+ * #597).
  */
 routine device_io_port_read(
 		master_port	: mach_port_t;
@@ -414,6 +420,7 @@ routine device_io_port_read(
 /*
  * I/O port write.
  * Writes 1, 2, or 4 bytes to the specified x86 I/O port.
+ * Refused as device_io_port_read() is.
  */
 routine device_io_port_write(
 		master_port	: mach_port_t;
@@ -685,8 +692,8 @@ routine device_region_map(
  * device's I/O BAR belongs to that device's driver and nobody else -- #511
  * made that true.  A port behind NO BAR belongs to nobody, and the check says
  * so in its own comment: "the legacy devices -- the serial lines, the
- * keyboard, the PIC and the PIT -- are behind no PCI BAR, and a rule that
- * refused everything unattributed would take the console with it."
+ * keyboard, the PIC -- are behind no PCI BAR, and a rule that refused
+ * everything unattributed would take the console with it."
  *
  * So COM1 was reachable by any task holding the master device port, including
  * while char_server's uart.so was driving it.  That is not a hypothetical
@@ -695,8 +702,11 @@ routine device_region_map(
  *
  * This is how a driver says a legacy range is its own.  A range nobody has
  * claimed stays reachable, exactly as before -- the hole is closed where
- * somebody has stepped into it and nowhere else, so the PIT and the 8042 are
- * not taken away from a kernel that still uses them.
+ * somebody has stepped into it -- except the ranges the kernel keeps for
+ * itself, which this interface refuses to claim, read or write: the 8254 and
+ * its gate (#508), the PCI configuration ports (#597), and on x86-64 the PM
+ * timer where it is a port.  (On i386 the I/O permission bitmap and the iopl
+ * device refuse them too, #594.)
  *
  * ⚠️ IN THE TAIL OF THIS FILE, WHERE EVERY NEW ROUTINE GOES.  MIG numbers a
  * subsystem's routines by POSITION, so a routine inserted anywhere else

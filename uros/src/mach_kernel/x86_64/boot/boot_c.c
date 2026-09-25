@@ -3229,7 +3229,7 @@ static void rulers_selftest(void)
 
 /*
  * The rulers that are ports are the kernel's, and a claim cannot take them
- * (#508).  Asked of device_md_io_reserved() itself -- the function
+ * (#508); nor the PCI configuration ports (#597).  Asked of device_md_io_reserved() itself -- the function
  * ds_master_device_io_port_claim() asks -- so this line cannot say a port is
  * kept while the claim path lets it go; io_claim_race's arm [5] asks the
  * same question from a task, through the claim.
@@ -3266,6 +3266,16 @@ static void rulers_kept_selftest(void)
 					     4) != 0;
 	}
 	kputs(all ? "\r\n" : " — WRONG, a ruler can be claimed\r\n");
+
+	/*
+	 * #597: on a line of its own, because the rulers' line is already
+	 * most of the console's 256 bytes.
+	 */
+	first = 1;
+	kputs("UrMach x86-64: configuration ports the kernel keeps: ");
+	rulers_kept_one(0xCF8, 8, &first);
+	kputs(device_md_io_reserved(0xCF8, 8) != 0
+	      ? "\r\n" : " — WRONG, a task can reach them\r\n");
 }
 
 /*

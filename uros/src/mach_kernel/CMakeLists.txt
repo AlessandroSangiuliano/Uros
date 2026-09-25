@@ -236,6 +236,15 @@ option(UROS_ABLATE_586_NO_TICKS "Build the #586 ablation: the tick self-test cou
 # its gate and the PM timer -- and io_claim_race's arm [5] and the boot's
 # "legacy ports the kernel keeps" line must both say WRONG.  Never ON in a
 # kernel anyone boots for anything else.
+# #597: i386's two-port PCI configuration access without its lock, as it was
+# before #597, and/or with its window widened by N reads of port 0x80 between
+# the address and the data (each one a VM exit under KVM).  NO_LOCK alone is
+# the old kernel; NO_LOCK with WIDEN makes the race frequent at -smp 4, and
+# WIDEN alone shows the lock closing even a wide window.  i386 only: x86-64
+# has had its own lock since 1b4c138d.  Never ON in a kernel anyone boots for
+# anything else.
+option(UROS_ABLATE_597_NO_LOCK "Build the #597 ablation: i386's PCI configuration access takes no lock" OFF)
+set(UROS_ABLATE_597_WIDEN "" CACHE STRING "Build the #597 ablation: N port 0x80 reads between the PCI address and data (empty = off)")
 option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
 # #508: an MMIO mapping is checked on its first page only, as it was before the
 # span was bounded, so irq_claim_test's arm [10] -- one page past the owned
@@ -533,6 +542,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       message(STATUS "#570 ablation: a PCI I/O BAR is refused to its holder after ${UROS_ABLATE_570_REFUSE_IOBAR} accesses (x86_64)")
   endif()
   list(APPEND KERNEL_DEFINES_BARE ${UROS_ABLATE_577_DEFS})
+  if(UROS_ABLATE_597_NO_LOCK OR NOT UROS_ABLATE_597_WIDEN STREQUAL "")
+      message(FATAL_ERROR "UROS_ABLATE_597_* ablate i386's PCI configuration lock; x86-64's is in x86_64/cpu/pci_cfg.c and is not touched by them")
+  endif()
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
       message(STATUS "#586 ablation: the tick self-test counts no ticks (x86_64)")
@@ -1316,6 +1328,14 @@ endif()
 if(UROS_ABLATE_594_UNCHECKED)
     list(APPEND KERNEL_DEFINES -DABLATE_594_UNCHECKED=1)
     message(STATUS "#594 ablation: the bitmap and the iopl emulation do not ask device_md_io_reserved (i386)")
+endif()
+if(UROS_ABLATE_597_NO_LOCK)
+    list(APPEND KERNEL_DEFINES -DABLATE_597_NO_LOCK=1)
+    message(STATUS "#597 ablation: the PCI configuration access takes no lock (i386)")
+endif()
+if(NOT UROS_ABLATE_597_WIDEN STREQUAL "")
+    list(APPEND KERNEL_DEFINES -DABLATE_597_WIDEN=${UROS_ABLATE_597_WIDEN})
+    message(STATUS "#597 ablation: ${UROS_ABLATE_597_WIDEN} port 0x80 reads between the PCI address and data (i386)")
 endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)

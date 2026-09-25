@@ -969,6 +969,90 @@ out:
     return ok;
 }
 
+/*
+ * ── [18] The PCI configuration ports are the kernel's (#597) ─────────
+ *
+ * The configuration mechanism is an address port and a data port, and the
+ * kernel keeps the pair whole under pci_cfg_port_lock.  A task reaching the
+ * ports could drive the pair as two RPCs, outside that lock, and its access
+ * would land on whatever another processor addressed in between -- the race
+ * that made the HAL count a device that is not there.  So the claim, the read
+ * and the write must all refuse them.
+ *
+ * The claim in three shapes, as io_claim_race [5] asks of the rulers: the
+ * whole window, the data port alone, and a range reaching 0xCF8 from below;
+ * anything granted is given straight back.  Then a READ of each port, which
+ * needs no claim: that was the route left open when only the claim refused
+ * them.  Then 0x10CFC, which the kernel cut to 0xCFC before any check saw it
+ * as reserved, and 0x61, the 8254's gate, which the same refusal keeps
+ * (#508); not 0x40, whose read, if the refusal were missing, would move the
+ * counter's byte flip-flop under i386's clock, which reads channel 0 as a
+ * latch command and two one-byte reads.  No write is tried -- if the refusal
+ * were missing, writing 0xCF8 would be the race itself -- and the write RPC
+ * asks the same checks as the read.
+ */
+static int
+the_pci_config_ports_are_the_kernels(mach_port_t device_port)
+{
+    static const struct {
+        unsigned int port;
+        unsigned int count;
+    } ask[] = {
+        { 0xCF8, 8 },   /* the address and the data */
+        { 0xCFC, 1 },   /* the data port alone */
+        { 0xCF4, 5 },   /* from below, reaching the address port */
+    };
+    static const struct {
+        unsigned int  port;
+        unsigned int  size;
+        kern_return_t want;
+    } read_at[] = {
+        { 0xCF8,   4, KERN_NO_ACCESS },          /* the address port */
+        { 0xCFC,   4, KERN_NO_ACCESS },          /* the data port */
+        { 0x10CFC, 4, KERN_INVALID_ARGUMENT },   /* 0xCFC above 16 bits */
+        { 0x61,    1, KERN_NO_ACCESS },          /* the 8254's gate (#508) */
+    };
+    unsigned int  i, released, klog_from, data, bad = 0;
+    kern_return_t kr;
+
+    for (i = 0; i < sizeof(ask) / sizeof(ask[0]); i++) {
+        kr = device_io_port_claim(device_port, ask[i].port, ask[i].count,
+                                  &released, &klog_from);
+        if (kr == KERN_NO_ACCESS)
+            continue;
+        bad++;
+        if (kr == KERN_SUCCESS) {
+            (void) device_io_port_unclaim(device_port, ask[i].port);
+            printf("cap_test: [18] WRONG — a claim of 0x%x..0x%x was "
+                   "GRANTED, and it covers the PCI configuration ports "
+                   "(#597)\n", ask[i].port, ask[i].port + ask[i].count - 1);
+        } else
+            printf("cap_test: [18] WRONG — a claim of 0x%x..0x%x was "
+                   "refused with kr=%d, not KERN_NO_ACCESS\n", ask[i].port,
+                   ask[i].port + ask[i].count - 1, (int)kr);
+    }
+    for (i = 0; i < sizeof(read_at) / sizeof(read_at[0]); i++) {
+        kr = device_io_port_read(device_port, read_at[i].port,
+                                 read_at[i].size, &data);
+        if (kr == read_at[i].want)
+            continue;
+        bad++;
+        printf("cap_test: [18] WRONG — a read of 0x%x answered kr=%d%s, "
+               "not %d: a task reaches a port the kernel keeps\n",
+               read_at[i].port, (int)kr,
+               kr == KERN_SUCCESS ? " (it was served)" : "",
+               (int)read_at[i].want);
+    }
+    if (bad != 0)
+        return 0;
+
+    printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone and "
+           "0xcf4..0xcf8, and reads of 0xcf8, 0xcfc, 0x61 and 0x10cfc, "
+           "refused — the claim and read RPCs keep the ports the kernel "
+           "keeps (#508, #597)\n");
+    return 1;
+}
+
 static int
 a_device_has_one_driver(mach_port_t device_port)
 {
@@ -1951,6 +2035,10 @@ main(int argc, char **argv)
 
     /* #552: the semaphore stubs this target never had, exercised. */
     if (!the_kernel_semaphores_answer(mach_task_self()))
+        pass = 0;
+
+    /* #597: no task reaches the configuration ports, claimed or not. */
+    if (!the_pci_config_ports_are_the_kernels(device_port))
         pass = 0;
 
     /*

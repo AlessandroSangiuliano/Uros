@@ -183,7 +183,8 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 }
 
 /*
- * The legacy ports this kernel keeps (#508): its rulers.
+ * The legacy ports this kernel keeps (#508): its rulers, and the PCI
+ * configuration ports (#597).
  *
  * The 8254's four registers and port 0x61, whose low bits gate channel 2 and
  * read its output -- that is how pit_delay_us() times an interval -- and the
@@ -199,6 +200,13 @@ static const struct {
 } kernel_io[] = {
 	{ 0x40, 4, "the 8254, the kernel's ruler" },
 	{ 0x61, 1, "the 8254's channel-2 gate" },
+	/*
+	 * #597: pci_cfg_port_lock serialises the address/data pair, and a task
+	 * reaching these ports would drive it as two RPCs, outside the lock.
+	 * On an ECAM board the kernel does not use them at all, and they still
+	 * reach every device's configuration space: kept either way.
+	 */
+	{ 0xCF8, 8, "the PCI configuration ports" },
 };
 
 static int

@@ -56,6 +56,18 @@
  *
  * A read of a function that is not there answers 0xFFFFFFFF, because that is
  * what the bus returns.  A caller enumerating has to know that number.
+ *
+ * 🔴 ONE ACCESS IS ONE INDIVISIBLE STEP, on every target and against every
+ * other configuration access on any processor.  The port mechanisms are
+ * several port accesses (the address, then the data) and each target
+ * serialises them under pci_cfg_port_lock, taken with interrupts off;
+ * device_master.c's lock order names that lock as a leaf and calls these from
+ * inside other sections on that basis.  No task can reach the ports:
+ * device_md_io_reserved() names them, and every door to a port asks it -- the
+ * claim, read and write RPCs on both targets (below port 0x10000 and above
+ * it), and on i386 the I/O permission bitmap and the iopl device's emulated
+ * reads too (#594).  i386 had no such lock until #597, and at -smp 4 its
+ * reads answered about other devices.
  */
 extern unsigned int	device_md_pci_read(unsigned int bus, unsigned int slot,
 					   unsigned int func, unsigned int reg);
