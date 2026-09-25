@@ -70,6 +70,7 @@
 #include <i386/apic.h>
 #include <i386/ioapic.h>		/* ioapic_mask_irq, for an ablation */
 #include <i386/clock_watch.h>
+#include <kern/spl.h>			/* splsched, for an ablation */
 #include <i386/cn_nolock.h>		/* the stopped processor may hold the console lock */
 
 #ifdef ABLATE_599_CLI_SPIN
@@ -186,6 +187,11 @@ clock_watch_init(void)
 #ifdef ABLATE_599_SPIN_ONLY
 	printf("clock: #599 ablation -- the watch does not run from the tick, "
 	       "only from inside spins\n");
+#endif
+#ifdef ABLATE_599_SPL_LEAK
+	printf("clock: #599 ablation -- after tick %u a thread_switch on "
+	       "processor 0 returns to user mode at splsched, once\n",
+	       CW_ABLATE_AT);
 #endif
 }
 
@@ -313,6 +319,30 @@ cw_watch(int cpu, const char *where)
 		lapic_send_nmi(master_cpu);
 	}
 }
+
+#ifdef ABLATE_599_SPL_LEAK
+/*
+ * #599's second hypothesis, on purpose: processor 0 goes back to user mode
+ * with its level raised, the way kern/subsystem.c's last release and
+ * kern/eventcount.c's evc_wait would.  A boot with it shows that
+ * return_to_user's check (spl_to_user_seen, trap.c) says so, and whether a
+ * raised level on processor 0 is enough to stop the tick, and for how long:
+ * the next switch to another thread may lower it.
+ */
+void
+clock_watch_ablate_spl_leak(void)
+{
+	static int	done;
+
+	if (cpu_number() != master_cpu || done ||
+	    nmi_cpu_tick[master_cpu] < CW_ABLATE_AT)
+		return;
+	done = 1;
+	cn_puts("\nclock: #599 ablation -- this thread_switch returns to user "
+		"mode at splsched now\n");
+	(void) splsched();
+}
+#endif
 
 void
 clock_watch_tick(int cpu)

@@ -153,6 +153,9 @@
 #include <kern/syscall_subr.h>
 #include <mach/mach_host_server.h>
 #include <mach/mach_syscalls.h>
+#ifdef	ABLATE_599_SPL_LEAK
+#include <i386/clock_watch.h>
+#endif
 
 /* Forwards */
 void	thread_depress_priority(
@@ -422,6 +425,9 @@ syscall_thread_switch(
 	if (option == SWITCH_OPTION_IDLE)
 	    return(KERN_ABORTED);
     }
+#ifdef	ABLATE_599_SPL_LEAK
+    clock_watch_ablate_spl_leak();	/* #599, i386: leave the level raised once */
+#endif
     return(KERN_SUCCESS);
 }
 
