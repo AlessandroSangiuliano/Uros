@@ -151,6 +151,54 @@ static uint64_t frozen_read(void)
 }
 #endif
 
+#if	ABLATE_594_NTP_SLEW
+/*
+ * #594: the rulers, as the watchdog reads them, carry what a host's NTP does to
+ * its clock while it converges -- what #594 measured on a host just rebooted.
+ * Linux's PLL drains a phase offset at offset >> (SHIFT_PLL + constant) a
+ * second (kernel/time/ntp.c, ntp_offset_chunk()), and timesyncd hands it
+ * offsets under 0.4 s with constant = log2(poll) - 4, which is 1 at its 32 s
+ * poll (timesyncd-manager.c).  So: from the second window, every 32 windows a
+ * new 0.4 s offset, the sign alternating, drained by an eighth a window --
+ * 50,000 ppm in its first second, and never more than 0.4 s in all.  A
+ * watchdog that names the TSC here has named a host's NTP.  Never on in a
+ * kernel booted for anything else.
+ */
+static int64_t		slew_rem_ns, slew_phase_ns;
+static uint64_t		(*slew_read_of[WATCH_MAX])(void);
+static uint64_t		slew_hz_of[WATCH_MAX];
+
+static void slew_window(unsigned windows)
+{
+	int64_t chunk;
+
+	if (windows >= 2 && (windows - 2) % 32 == 0)
+		slew_rem_ns = ((windows - 2) / 32) % 2 ? -400000000LL
+						       : 400000000LL;
+	chunk = slew_rem_ns / 8;
+	if (chunk == 0)
+		chunk = slew_rem_ns;
+	slew_rem_ns -= chunk;
+	slew_phase_ns += chunk;
+}
+
+static uint64_t slew_counts(unsigned i)
+{
+	return (uint64_t) (slew_phase_ns * (int64_t) slew_hz_of[i]
+			   / 1000000000LL);
+}
+
+static uint64_t slew_read0(void)
+{
+	return slew_read_of[0]() + slew_counts(0);
+}
+
+static uint64_t slew_read1(void)
+{
+	return slew_read_of[1]() + slew_counts(1);
+}
+#endif
+
 static void watch_sleep(void)
 {
 	assert_wait((event_t) &watch_wakeup, FALSE);
@@ -349,6 +397,13 @@ void tsc_watch(void)
 	       rate / 1000, w[0].name, n > 1 ? " and " : "",
 	       n > 1 ? w[1].name : "", WATCH_CONFIRM, bound);
 
+#if	ABLATE_594_NTP_SLEW
+	for (i = 0; i < n; i++) {
+		slew_read_of[i] = w[i].r.read;
+		slew_hz_of[i] = w[i].r.hz;
+		w[i].r.read = i == 0 ? slew_read0 : slew_read1;
+	}
+#endif
 	for (i = 0; i < n; i++)
 		ruler_point(&w[i].r, subject_tsc, &w[i].prev);
 
@@ -363,6 +418,9 @@ void tsc_watch(void)
 #if	ABLATE_594_TSC_SKEWS
 		if (windows == 2)
 			skew_from = rdtsc_ordered();
+#endif
+#if	ABLATE_594_NTP_SLEW
+		slew_window(windows);
 #endif
 #if	ABLATE_594_HPET_STOPS
 		if (windows == 2)

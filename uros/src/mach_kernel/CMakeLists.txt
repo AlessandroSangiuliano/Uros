@@ -280,6 +280,12 @@ option(UROS_ABLATE_594_TSC_SKEWS "Build the #594 ablation: the TSC runs 1/32 fas
 # #594: from the watchdog's second window, the HPET as it reads it stops, so the
 # watchdog must name the HPET and go on with the PM timer.  Never ON otherwise.
 option(UROS_ABLATE_594_HPET_STOPS "Build the #594 ablation: the HPET stops as the watchdog reads it" OFF)
+# #594: the rulers carry a host's NTP slew -- in the watchdog, 0.4 s offsets
+# drained at an eighth a second, the sign alternating every 32 windows; at
+# boot, the rulers' answer 5% low -- which is what a host converging after a
+# reboot does to a guest.  Nothing may be named, and the exact source must
+# still be adopted.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_NTP_SLEW "Build the #594 ablation: the rulers carry a host's NTP phase slew" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -560,6 +566,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_594_TSC_SKEWS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_TSC_SKEWS=1)
       message(STATUS "#594 ablation: the TSC runs 1/32 fast as the watchdog reads it (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_NTP_SLEW)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_NTP_SLEW=1)
+      message(STATUS "#594 ablation: the rulers carry a host's NTP phase slew (x86_64)")
   endif()
   if(UROS_ABLATE_594_HPET_STOPS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)

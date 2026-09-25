@@ -41,6 +41,16 @@ static void exact_decide(void)
 	uint64_t		adopted;
 
 	freq_exact_read(&e);
+#if	ABLATE_594_NTP_SLEW
+	/*
+	 * #594: the rulers' answer carries a host's NTP slew over the 30 ms
+	 * the runs took -- 5%, the order the kernel's PLL reaches with a 0.4 s
+	 * offset at constant 1 (tsc_watch.c says how) -- so the exact sources
+	 * are checked against rulers that are wrong for a reason a hypervisor's
+	 * guest cannot see.  Never on in a kernel booted for anything else.
+	 */
+	tsc_rate -= tsc_rate / 20;
+#endif
 	adopted = exact_choose(e.tsc_hz, tsc_rate, rulers_bracket_ppm(),
 			       &source);
 	if (adopted != 0)
