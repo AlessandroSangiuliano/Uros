@@ -35,9 +35,10 @@
 #
 # The disk has three MBR partitions (make-disk-image.sh): a, ext2 with
 # /mach_servers/ (bootstrap.conf and the servers); b, a small ext2; c, swap.
-# The ahci module publishes them as ahci0a/b/c and the block server adds the
-# driver-agnostic aliases disk0a/b/c (#184, #224).  Bootstrap stage 2 reads
-# disk0a, default_pager pages to disk0c, and ext_server mounts ahci0a as /.
+# The block server publishes them under the driver's prefix, ahci0a/b/c, and
+# under the driver-agnostic aliases disk0a/b/c (#184, #224).  Bootstrap stage 2
+# reads disk0a, default_pager pages to disk0c, and ext_server mounts ahci0a as
+# /, by that name whichever controller is disk0.
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -294,15 +295,14 @@ if [ -n "$SMP_COUNT" ]; then
     echo "SMP: $SMP_COUNT CPUs"
 fi
 
-# Issue #224: stage-2 e default_pager girano interamente su AHCI; il
-# driver IDE in-kernel non serve più.  La disk.img prodotta da
-# make-disk-image.sh ha layout MBR/3-partizioni (disk0a /mach_servers/,
-# disk0b test data, disk0c swap) e viene attaccata direttamente come
-# AHCI port 0.
+# Issue #224: the kernel's IDE driver is gone, and disk.img (three MBR
+# partitions, see the header) is attached directly as AHCI port 0.  Stage 2
+# and default_pager reach it through the disk0 aliases, so under
+# --virtio-first they run on the virtio copy instead (below).
 #
-# create_ahci_test_disk <path> <label> — secondario, solo per multi-mount.
-# Disco da 40 MB con due partizioni ext2 (hello.txt diverso) + raw swap,
-# senza /mach_servers/.
+# create_ahci_test_disk <path> <label> -- a second AHCI disk, for multi-mount
+# only: 40 MB, two ext2 partitions each with its own hello.txt, raw swap, no
+# /mach_servers/.
 create_ahci_test_disk() {
     _disk="$1"
     _label="$2"
@@ -384,9 +384,10 @@ fi
 # its own inode.  Not read-only, because as disk0 it takes default_pager's
 # paging on disk0c.
 #
-# The copy that was here before #224 took the first 4 MB of an IDE disk.  That
-# function was renamed away and this call was left behind, so the flag exited
-# with 127 before qemu started, from then until #592.
+# Before #224 this block built a new 40 MB disk and copied into it the first
+# 4 MB of the IDE disk's first partition.  That function was renamed away and
+# this call was left behind, so the flag exited with 127 before qemu started,
+# from then until #592.
 VIRTIO_DISK="$BUILD_DIR/virtio-test.img"
 VIRTIO_ARGS=""
 if [ "$USE_VIRTIO" = true ]; then

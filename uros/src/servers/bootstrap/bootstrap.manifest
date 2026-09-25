@@ -28,8 +28,9 @@ name bootstrap
 # the last line in the census of the permissive path.
 #
 # ⚠️ `any' and not the hash of a driver's partition name.  BOOT_DEV_NAME is
-# the alias `disk0a', and which partition stands behind it depends on the
-# board: `virtio_blk0a' on x86-64, `ahci0a' on i386, `virtio_blk0a' again under
+# the alias `disk0a', and which partition stands behind it depends on which
+# controllers are attached and in which PCI slots: `virtio_blk0a' under
+# run-x86_64.sh, `ahci0a' under run-qemu.sh, `virtio_blk0a' again under
 # run-qemu.sh --virtio-first (#592).  A manifest that named one of them would
 # be a policy about which disk the machine happened to boot from.
 required 4 any 0x3

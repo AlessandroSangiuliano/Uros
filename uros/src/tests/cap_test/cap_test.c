@@ -151,8 +151,9 @@ wait_for_cap_server(void)
  * registered.
  *
  * 🔴 Asked, not read off the candidate list.  Which controller the block
- * server numbers first depends on the board (#592): virtio-blk on x86-64,
- * AHCI on i386, virtio-blk again under run-qemu.sh --virtio-first.  This file
+ * server numbers first depends on which controllers are attached and in which
+ * PCI slots (#592): virtio-blk under run-x86_64.sh, AHCI under run-qemu.sh,
+ * virtio-blk again under run-qemu.sh --virtio-first.  This file
  * used to take the first candidate, 'virtio_blk0a', for the boot disk, so on
  * i386 arm [14] wrote its scratch block into the real boot disk, ahci0a,
  * which the arm exists to leave alone.
@@ -1657,9 +1658,10 @@ main(int argc, char **argv)
      * ── The subject is chosen, not raced for (#529) ───────────────────
      *
      * 🔴 THIS USED TO TAKE WHICHEVER NAME APPEARED FIRST, and that decided
-     * what arm [12] was testing.  The block server publishes 'virtio_blk0a'
-     * and then 'ahci0a', so a lookup landing between the two saw only one of
-     * them -- and the arm's verdict became a report of when it happened to
+     * what arm [12] was testing.  The block server publishes the partitions
+     * of its controllers one after the other ('virtio_blk0a' and then 'ahci0a'
+     * under run-x86_64.sh), so a lookup landing between the two saw only one
+     * of them -- and the arm's verdict became a report of when it happened to
      * look.  Twelve boots in twenty failed that way at -smp 4, on this branch
      * and on the baseline alike.
      *
@@ -1667,9 +1669,10 @@ main(int argc, char **argv)
      * considered.  The list is a preference, not a race, and virtio-blk is
      * first on purpose: the capability path had never been exercised on it --
      * virtio-blk carried no physical DMA entry points until this same issue
-     * added them -- and on x86-64 it is also the boot disk, the partition
-     * every server is loaded from.  On i386 it is not, so whether the chosen
-     * partition is the boot disk is asked of "disk0a" (#592).
+     * added them -- and under run-x86_64.sh it is also the boot disk, the
+     * partition every server is loaded from.  Under run-qemu.sh it is the boot
+     * disk only with --virtio-first, so whether the chosen partition is the
+     * boot disk is asked of "disk0a" (#592).
      *
      * ⚠️ The total wait is unchanged.  One thousand passes each rather than
      * two thousand over both, so a machine with neither disk waits exactly as
@@ -1966,9 +1969,13 @@ main(int argc, char **argv)
             continue;
         }
         /*
-         * The boot disk is the one partition the write half must not touch,
-         * and a partition that cannot be told apart from it is treated as
-         * it (#592).
+         * The boot disk never gets the write half, and neither does a
+         * partition that cannot be told apart from it (#592).  ⚠️ That is not
+         * yet the whole rule: ext_server mounts ahci0a as / by that name, so
+         * where ahci0a is not disk0a (run-x86_64.sh, run-qemu.sh
+         * --virtio-first) the write half lands in a mounted filesystem.
+         * The property that matters is "open by another task", and this
+         * file cannot see it: #596.
          */
         if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
                                           is_the_boot_disk(p) == 0))
