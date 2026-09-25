@@ -3229,7 +3229,7 @@ static void rulers_selftest(void)
 
 /*
  * The rulers that are ports are the kernel's, and a claim cannot take them
- * (#508).  Asked of device_md_io_reserved() itself -- the function
+ * (#508); nor the PCI configuration ports (#597).  Asked of device_md_io_reserved() itself -- the function
  * ds_master_device_io_port_claim() asks -- so this line cannot say a port is
  * kept while the claim path lets it go; io_claim_race's arm [5] asks the
  * same question from a task, through the claim.
@@ -3260,12 +3260,14 @@ static void rulers_kept_selftest(void)
 	all &= device_md_io_reserved(0x40, 4) != 0;
 	rulers_kept_one(0x61, 1, &first);
 	all &= device_md_io_reserved(0x61, 1) != 0;
+	rulers_kept_one(0xCF8, 8, &first);		/* #597 */
+	all &= device_md_io_reserved(0xCF8, 8) != 0;
 	if (pmtimer_present() && pmtimer_is_io()) {
 		rulers_kept_one((unsigned int)pmtimer_address(), 4, &first);
 		all &= device_md_io_reserved((unsigned int)pmtimer_address(),
 					     4) != 0;
 	}
-	kputs(all ? "\r\n" : " — WRONG, a ruler can be claimed\r\n");
+	kputs(all ? "\r\n" : " — WRONG, a port the kernel keeps can be claimed\r\n");
 }
 
 /*

@@ -322,7 +322,8 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 /*
  * The legacy ports this kernel keeps (#508): the 8254, which on i386 is not
  * only a ruler but the clock itself -- rtclock ticks from its channel 0 --
- * and port 0x61, which gates channel 2.
+ * and port 0x61, which gates channel 2.  And the PCI configuration ports
+ * (#597), whose two-step access only the kernel's lock keeps whole.
  *
  * Asked at all three doors to a port on this target (#594), not only at
  * device_io_port_claim(): i386_io_port_add() (iopb.c) refuses a set for the
@@ -337,6 +338,13 @@ device_md_io_reserved(unsigned int base, unsigned int count)
 		return "the 8254, the kernel's clock";
 	if (base < 0x61 + 1 && 0x61 < base + count)
 		return "the 8254's channel-2 gate";
+	/*
+	 * #597: the two-port configuration mechanism is serialised under the
+	 * kernel's pci_cfg_port_lock, and a task holding these ports would drive
+	 * the pair as two RPCs, outside it.
+	 */
+	if (base < 0xCF8 + 8 && 0xCF8 < base + count)
+		return "the PCI configuration ports, which the kernel serialises";
 	return 0;
 }
 

@@ -969,6 +969,57 @@ out:
     return ok;
 }
 
+/*
+ * ── [15] The PCI configuration ports are the kernel's (#597) ─────────
+ *
+ * The configuration mechanism is an address port and a data port, and the
+ * kernel keeps the pair whole under pci_cfg_port_lock.  A task holding the
+ * ports could drive the pair as two RPCs, outside that lock, and its read
+ * would answer about whatever another processor addressed in between -- the
+ * race that made the HAL count a device that is not there.  So a claim must
+ * refuse them.  Three shapes, as io_claim_race [5] asks of the rulers: the
+ * whole window, the data port alone, and a range reaching 0xCF8 from below.
+ * Anything granted is given straight back; nothing is read or written.
+ */
+static int
+the_pci_config_ports_are_the_kernels(mach_port_t device_port)
+{
+    static const struct {
+        unsigned int port;
+        unsigned int count;
+    } ask[] = {
+        { 0xCF8, 8 },   /* the address and the data */
+        { 0xCFC, 1 },   /* the data port alone */
+        { 0xCF4, 5 },   /* from below, reaching the address port */
+    };
+    unsigned int  i, released, klog_from, bad = 0;
+    kern_return_t kr;
+
+    for (i = 0; i < sizeof(ask) / sizeof(ask[0]); i++) {
+        kr = device_io_port_claim(device_port, ask[i].port, ask[i].count,
+                                  &released, &klog_from);
+        if (kr == KERN_NO_ACCESS)
+            continue;
+        bad++;
+        if (kr == KERN_SUCCESS) {
+            (void) device_io_port_unclaim(device_port, ask[i].port);
+            printf("cap_test: [15] WRONG — 0x%x..0x%x was GRANTED, and it "
+                   "covers the PCI configuration ports (#597)\n",
+                   ask[i].port, ask[i].port + ask[i].count - 1);
+        } else
+            printf("cap_test: [15] WRONG — 0x%x..0x%x was refused with "
+                   "kr=%d, not KERN_NO_ACCESS\n", ask[i].port,
+                   ask[i].port + ask[i].count - 1, (int)kr);
+    }
+    if (bad != 0)
+        return 0;
+
+    printf("cap_test: [15] 0xcf8..0xcff, 0xcfc alone and 0xcf4..0xcf8 "
+           "refused with KERN_NO_ACCESS — the PCI configuration ports are "
+           "the kernel's (#597)\n");
+    return 1;
+}
+
 static int
 a_device_has_one_driver(mach_port_t device_port)
 {
@@ -1951,6 +2002,10 @@ main(int argc, char **argv)
 
     /* #552: the semaphore stubs this target never had, exercised. */
     if (!the_kernel_semaphores_answer(mach_task_self()))
+        pass = 0;
+
+    /* #597: the configuration ports cannot be taken past the kernel's lock. */
+    if (!the_pci_config_ports_are_the_kernels(device_port))
         pass = 0;
 
     /*
