@@ -50,6 +50,7 @@
 #include <i386/pit.h>			/* PIT ports for 8254 calibration ref */
 #include <i386/pio.h>			/* inb/outb */
 #include <kern/uslock_census.h>		/* #486: uslock_census_sample */
+#include <i386/clock_watch.h>		/* #599: clock_watch_tick/init */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
@@ -215,8 +216,10 @@ lapic_timer_calibrate(void)
 	 * and on the BSP before any AP arms -- the AP isn't scheduling yet, so
 	 * the brief gap with neither source is harmless.
 	 */
-	if (lapic_timer_count != 0)
+	if (lapic_timer_count != 0) {
 		lapic_timer_enabled = 1;
+		clock_watch_init();	/* #599: the APs' ticks watch the BSP's */
+	}
 }
 
 /*
@@ -276,6 +279,8 @@ lapic_timer_handler(struct i386_interrupt_state *regs)
 	/* #355: also bump THIS cpu's own tick, so the NMI can detect a partial
 	 * (single-cpu) wedge instead of only a total clock-stop. */
 	nmi_cpu_tick[cpu_number()]++;
+	/* #599: and watch processor 0's, which nothing else can see stop. */
+	clock_watch_tick(cpu_number());
 
 	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
 	hertz_tick(usermode, (vm_offset_t)regs->eip);

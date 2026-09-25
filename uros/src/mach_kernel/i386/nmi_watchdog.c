@@ -51,6 +51,7 @@
 #if	NCPUS > 1
 #include <i386/lapic.h>
 #include <i386/apic.h>
+#include <i386/clock_watch.h>
 #endif	/* NCPUS > 1 */
 
 extern void cnputc(char);
@@ -242,6 +243,15 @@ nmi_watchdog(struct i386_saved_state *regs)
 		__sync_fetch_and_or(&cpus_active, me);
 		return;
 	}
+
+	/*
+	 * #599: an application processor saw processor 0's tick stop and sent
+	 * this to ask where processor 0 is.  Before the DDB door below, which
+	 * would otherwise take it for an NMI button with -K armed, and before
+	 * the -W watchdog, which would count it as one of its own.
+	 */
+	if (clock_watch_nmi(regs))
+		return;
 
 	/*
 	 * #382: emergency DDB door.  With -K armed but the perf-counter
