@@ -95,13 +95,13 @@ bench_game_draw_commands(void)
     flipc2_get_time(&t1);
 
     {
-        unsigned long total_ns = flipc2_elapsed_ns(&t0, &t1);
-        unsigned long ns_per_frame = total_ns / GAME_FRAMES;
-        unsigned long us_frame = ns_per_frame / 1000;
-        unsigned long us_frac  = (ns_per_frame % 1000) / 10;
+        unsigned long long total_ns = flipc2_elapsed_ns(&t0, &t1);
+        unsigned long long ns_per_frame = total_ns / GAME_FRAMES;
+        unsigned long long us_frame = ns_per_frame / 1000;
+        unsigned long long us_frac  = (ns_per_frame % 1000) / 10;
 
         printf("  draw cmds (60/frame, batched)       "
-               "%5lu.%02lu us/frame (%d frames, %lu us total)\n",
+               "%5llu.%02llu us/frame (%d frames, %llu us total)\n",
                us_frame, us_frac, GAME_FRAMES, total_ns / 1000);
         flipc2_print_result("  per draw command",
                             total_ns, GAME_FRAMES * GAME_DRAW_CMDS_PER_FRAME);
@@ -352,17 +352,18 @@ bench_game_mixed_frame(void)
     flipc2_get_time(&t1);
 
     {
-        unsigned long total_ns = flipc2_elapsed_ns(&t0, &t1);
-        unsigned long ns_per_frame = total_ns / GAME_FRAMES;
-        unsigned long us_frame = ns_per_frame / 1000;
-        unsigned long us_frac  = (ns_per_frame % 1000) / 10;
+        unsigned long long total_ns = flipc2_elapsed_ns(&t0, &t1);
+        unsigned long long ns_per_frame = total_ns / GAME_FRAMES;
+        unsigned long long us_frame = ns_per_frame / 1000;
+        unsigned long long us_frac  = (ns_per_frame % 1000) / 10;
         unsigned long budget_us = 16666; /* 16.67 ms @ 60fps */
-        unsigned long pct = (ns_per_frame / 10) / (budget_us / 10);
+        unsigned long long pct = (ns_per_frame / 10) / (budget_us / 10);
 
         printf("  mixed frame (60 draw+tex+audio)     "
-               "%5lu.%02lu us/frame (%d frames)\n",
+               "%5llu.%02llu us/frame (%d frames)\n",
                us_frame, us_frac, GAME_FRAMES);
-        printf("  frame budget @ 60fps: %lu.%02lu us / 16666 us = %lu.%lu%%\n",
+        printf("  frame budget @ 60fps: %llu.%02llu us / 16666 us = "
+               "%llu.%llu%%\n",
                us_frame, us_frac,
                pct / 10, pct % 10);
     }
@@ -495,17 +496,18 @@ bench_game_mixed_frame_inter(void)
     flipc2_get_time(&t1);
 
     {
-        unsigned long total_ns = flipc2_elapsed_ns(&t0, &t1);
-        unsigned long ns_per_frame = total_ns / GAME_FRAMES;
-        unsigned long us_frame = ns_per_frame / 1000;
-        unsigned long us_frac  = (ns_per_frame % 1000) / 10;
+        unsigned long long total_ns = flipc2_elapsed_ns(&t0, &t1);
+        unsigned long long ns_per_frame = total_ns / GAME_FRAMES;
+        unsigned long long us_frame = ns_per_frame / 1000;
+        unsigned long long us_frac  = (ns_per_frame % 1000) / 10;
         unsigned long budget_us = 16666;
-        unsigned long pct = (ns_per_frame / 10) / (budget_us / 10);
+        unsigned long long pct = (ns_per_frame / 10) / (budget_us / 10);
 
         printf("  mixed frame INTER-TASK (62 desc)     "
-               "%5lu.%02lu us/frame (%d frames)\n",
+               "%5llu.%02llu us/frame (%d frames)\n",
                us_frame, us_frac, GAME_FRAMES);
-        printf("  frame budget @ 60fps: %lu.%02lu us / 16666 us = %lu.%lu%%\n",
+        printf("  frame budget @ 60fps: %llu.%02llu us / 16666 us = "
+               "%llu.%llu%%\n",
                us_frame, us_frac,
                pct / 10, pct % 10);
     }
