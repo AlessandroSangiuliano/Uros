@@ -83,6 +83,7 @@ extern unsigned int		mp_tsc_per_us;		/* rtclock.c */
 extern unsigned long long	rtclock_tsc_at_tick;	/* rtclock.c */
 extern int			curr_ipl[];		/* spl.S */
 extern unsigned int		timeout_ticks;		/* kern/mach_clock.c */
+extern volatile unsigned int	ioapic_overlaps;	/* ioapic.c */
 
 #define	CW_STOP_MS	2000	/* no tick from processor 0 for this long ... */
 #define	CW_STOP_TICKS	200	/* ... and for this many of the watcher's own */
@@ -164,7 +165,9 @@ cw_say_stopped(int cpu, unsigned long long now, const char *where)
 	cn_hex(softspl_pending[master_cpu]);
 	cn_puts(", the clock's TSC anchor ");
 	cn_dec(anchor <= now ? cw_ms(now - anchor) : 0);
-	cn_puts(" ms old\n");
+	cn_puts(" ms old, I/O APIC overlaps ");
+	cn_dec(ioapic_overlaps);
+	cn_puts("\n");
 }
 
 void

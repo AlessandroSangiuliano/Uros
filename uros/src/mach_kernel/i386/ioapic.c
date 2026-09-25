@@ -38,6 +38,8 @@
 #include <i386/pic.h>			/* master_ocw / slaves_ocw */
 #include <i386/io_map_entries.h>	/* io_map */
 #include <kern/misc_protos.h>		/* printf */
+#include <kern/cpu_number.h>		/* cpu_number, #599 counts */
+#include <i386/cn_nolock.h>		/* #599: said from interrupt context */
 
 extern unsigned int	mp_ioapic_phys_get(int idx);
 extern int		mp_ioapic_count_get(void);
@@ -93,6 +95,44 @@ ioapic_write(unsigned int reg, unsigned int value)
 }
 
 /*
+ * #599: how often the select/window pair is used for a read-modify-write, on
+ * which processor, and how often one started while another was still
+ * inside.  Nothing in this file serialises the pair, and that is #599's
+ * first hypothesis for processor 0's stopped tick: an interleaving can leave
+ * one pin holding another pin's entry.  An overlap is the precondition, not
+ * the corruption -- which entry ends where depends on how the two sequences
+ * interleave -- so it is counted in every boot, where a stop is too rare to
+ * wait for.  The first overlap of a boot is also said, without a lock.  Read
+ * by the clock watch's line and scripts/i386-clock-snapshot.py.
+ */
+unsigned int		ioapic_rmw_count[NCPUS];
+volatile unsigned int	ioapic_inside;
+volatile unsigned int	ioapic_overlaps;
+
+static __inline__ int
+ioapic_enter(void)
+{
+	ioapic_rmw_count[cpu_number()]++;
+	if (__sync_fetch_and_add(&ioapic_inside, 1) == 0)
+		return 0;
+	return __sync_fetch_and_add(&ioapic_overlaps, 1) == 0;
+}
+
+static void
+ioapic_leave(int first, unsigned int gsi)
+{
+	__sync_fetch_and_sub(&ioapic_inside, 1);
+	if (!first)
+		return;
+	cn_puts("\nioapic: a read-modify-write of pin ");
+	cn_dec(gsi);
+	cn_puts(" on processor ");
+	cn_dec((unsigned int)cpu_number());
+	cn_puts(" started while another was inside the select/window pair "
+		"(#599); the next ones are counted, not said\n");
+}
+
+/*
  * Write a redirection-table entry.  `low` carries vector/trigger/polarity/
  * mask; the high dword carries the physical destination APIC ID.  The high
  * word is written first while the entry is (or is about to be) masked, per
@@ -130,6 +170,7 @@ void
 ioapic_mask_irq(unsigned int irq)
 {
 	unsigned int reg, low, gsi;
+	int first;
 
 	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
 		return;
@@ -137,14 +178,17 @@ ioapic_mask_irq(unsigned int irq)
 	if (gsi >= ioapic_redirs)
 		return;
 	reg = IOA_R_REDIRECTION + 2 * gsi;
+	first = ioapic_enter();
 	low = ioapic_read(reg);
 	ioapic_write(reg, low | IOA_R_R_MASKED);
+	ioapic_leave(first, gsi);
 }
 
 void
 ioapic_unmask_irq(unsigned int irq)
 {
 	unsigned int reg, low, gsi;
+	int first;
 
 	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
 		return;
@@ -152,8 +196,10 @@ ioapic_unmask_irq(unsigned int irq)
 	if (gsi >= ioapic_redirs)
 		return;
 	reg = IOA_R_REDIRECTION + 2 * gsi;
+	first = ioapic_enter();
 	low = ioapic_read(reg);
 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
+	ioapic_leave(first, gsi);
 }
 
 /*
