@@ -27,25 +27,31 @@
  *
  * With one ruler left the disagreement is reported and nobody is named.
  *
- * ── THE BOUND, AND WHY AN NTP SLEW STAYS INSIDE IT ────────────────────────
+ * ── ON BARE METAL, THE RATE; UNDER A HYPERVISOR, THE TIME ─────────────────
  *
- * The same bound the exact sources are held to (time/exact.c): half the
- * widest bracket of the boot measurement plus 1000 ppm -- plus, here, the
- * window's own brackets.  The 1000 is two 500s, and they cover the two things
- * that move the rulers against a TSC that is right:
+ * On bare metal the rulers are crystals and nothing steers them.  A window's
+ * rate is judged against the bound the exact sources are held to
+ * (time/exact.c): half the widest bracket of the boot measurement plus
+ * 1000 ppm, plus the window's own brackets.
  *
- *   - when the rate was ADOPTED from an exact source, the rulers may be off by
- *     their own accuracy (500 ppm, IA-PC HPET 1.0a 2.4.1) and, under a
- *     hypervisor, by the host's NTP correction of the moment (Linux's
- *     MAXFREQ, 500 ppm);
- *   - when the rate was MEASURED against the rulers, their own error cancels,
- *     and what is left is how far the host's NTP correction has moved since
- *     -- from one end of MAXFREQ to the other at worst, 1000 ppm.
+ * Under a hypervisor both rulers are one witness -- copies of the host's
+ * clock -- and the host's NTP steers it.  That is not the 500 ppm of MAXFREQ:
+ * the phase it corrects is drained on top, an eighth of the offset a second at
+ * timesyncd's poll, and #594 measured it after a reboot at 7325 ppm for three
+ * windows in a row, 50,000 in the ablation that reproduces it.  A window's rate
+ * cannot tell that from a broken TSC.  The TIME can: the host's clock is kept
+ * within MAXPHASE (0.5 s, <linux/timex.h>) of true time, so over any stretch
+ * its elapsed time is within 2 * MAXPHASE of true, however it was slewed in
+ * between.  So under a hypervisor what is judged is the time the TSC kept
+ * against each ruler over the last WATCH_HORIZON windows, and the allowance is
+ * 2 * MAXPHASE plus the rate bound over that stretch (the bound without its
+ * phase term).  A TSC that stops is caught in two seconds; one a percent off,
+ * in about two minutes; below about 0.9% a guest cannot tell it from its
+ * host's NTP, and says so by not naming it.
  *
- * #508 measured what that looks like: a host converging after a reboot moved
- * the rulers 136 ppm in four minutes, a settled one sat 8.5 ppm off.  A
- * broken TSC is not that: a counter that stops, or follows the core's clock,
- * is off by percents.
+ * That holds for a host whose NTP client steers the clock through the kernel's
+ * PLL, as timesyncd and ntpd do.  A client that slews through the tick, as
+ * chrony can, is not bounded this way.
  *
  * ── THREE WINDOWS IN A ROW ────────────────────────────────────────────────
  *
@@ -88,6 +94,9 @@
 #define WATCH_SUMMARY		60	/* windows between summary lines */
 #define WATCH_RULERS_PPM	1000	/* between two rulers: 500 each */
 #define WATCH_MAX		2	/* the HPET and the PM timer */
+#define WATCH_HORIZON		120	/* windows the time is kept over */
+#define WATCH_MAXPHASE_NS	500000000LL	/* Linux, <linux/timex.h> */
+#define WATCH_NS_PER_S		((uint64_t) 1000000000)
 
 enum {
 	SUSPECT_NONE,		/* everything inside the bound */
@@ -109,6 +118,14 @@ struct watched {
 	uint64_t		win_ppm;
 	int64_t			dev_min, dev_max, dev_sum;	/* per summary */
 	unsigned		n;
+	/* the time kept: per window, the TSC's time less the ruler's */
+	int64_t			lag_ns[WATCH_HORIZON];
+	uint64_t		len_ns[WATCH_HORIZON];
+	int64_t			lag_sum;
+	uint64_t		len_sum;
+	unsigned		head, filled;
+	int64_t			lag_win;	/* this window's */
+	uint64_t		len_win;
 };
 
 static int watch_wakeup;	/* posted by nobody: the timeout ends the wait */
@@ -293,6 +310,12 @@ static int watch_window(struct watched *w, uint64_t rate, uint64_t bound)
 	w->prev = cur;
 	if (counts >= w->r.mask - w->r.mask / 16)
 		return 0;
+	w->len_win = elapsed / rate * 1000000000ULL
+		     + (elapsed % rate) * 1000000000ULL / rate;
+	w->lag_win = (int64_t) w->len_win
+		     - (int64_t) (run.counts / w->r.hz * 1000000000ULL
+				  + (run.counts % w->r.hz) * 1000000000ULL
+				    / w->r.hz);
 	if (!w->moved) {
 		w->hz = 0;
 		w->win_ppm = 0;
@@ -306,12 +329,53 @@ static int watch_window(struct watched *w, uint64_t rate, uint64_t bound)
 	return w->win_ppm <= bound;
 }
 
-static int outside(const struct watched *w, uint64_t bound)
+static void horizon_push(struct watched *w)
 {
-	uint64_t d = w->dev_ppm < 0 ? (uint64_t) -w->dev_ppm
-				    : (uint64_t) w->dev_ppm;
+	if (w->filled == WATCH_HORIZON) {
+		w->lag_sum -= w->lag_ns[w->head];
+		w->len_sum -= w->len_ns[w->head];
+	} else
+		w->filled++;
+	w->lag_ns[w->head] = w->lag_win;
+	w->len_ns[w->head] = w->len_win;
+	w->lag_sum += w->lag_win;
+	w->len_sum += w->len_win;
+	w->head = (w->head + 1) % WATCH_HORIZON;
+}
 
-	return !w->moved || d > bound + w->win_ppm;
+/* A window set aside breaks the stretch: its time was not measured. */
+static void horizon_reset(struct watched *w)
+{
+	w->lag_sum = 0;
+	w->len_sum = 0;
+	w->head = 0;
+	w->filled = 0;
+}
+
+static uint64_t allowance_ns(const struct watched *w, uint64_t rate_ppm)
+{
+	return 2 * WATCH_MAXPHASE_NS + w->len_sum / 1000000 * rate_ppm;
+}
+
+/*
+ * Outside the bound.  On bare metal: this window's rate.  Under a hypervisor:
+ * the time kept over the horizon (the header says why).  A ruler that did not
+ * move is outside either way.
+ */
+static int outside(const struct watched *w, uint64_t bound, int vm,
+		   uint64_t rate_ppm)
+{
+	uint64_t d;
+
+	if (!w->moved)
+		return 1;
+	if (vm) {
+		d = w->lag_sum < 0 ? (uint64_t) -w->lag_sum
+				   : (uint64_t) w->lag_sum;
+		return d > allowance_ns(w, rate_ppm);
+	}
+	d = w->dev_ppm < 0 ? (uint64_t) -w->dev_ppm : (uint64_t) w->dev_ppm;
+	return d > bound + w->win_ppm;
 }
 
 /*
@@ -334,18 +398,25 @@ static void summary(struct watched *w, unsigned n, unsigned windows,
 
 	if (b != 0)
 		printf("UrMach x86-64: the TSC watchdog, %u windows: from the "
-		       "%s %ld..%ld ppm (mean %ld), from the %s %ld..%ld ppm "
-		       "(mean %ld); the bound %lu ppm, %u set aside (#594)\n",
-		       windows, a->name, (long) a->dev_min, (long) a->dev_max,
-		       (long) (a->dev_sum / (int64_t) a->n), b->name,
+		       "%s %ld..%ld ppm (mean %ld), time kept %lld ms over %lu "
+		       "s; from the %s %ld..%ld ppm (mean %ld), %lld ms over %lu "
+		       "s; the bound %lu ppm, %u set aside (#594)\n", windows,
+		       a->name, (long) a->dev_min, (long) a->dev_max,
+		       (long) (a->dev_sum / (int64_t) a->n),
+		       (long long) (a->lag_sum / 1000000),
+		       a->len_sum / WATCH_NS_PER_S, b->name,
 		       (long) b->dev_min, (long) b->dev_max,
-		       (long) (b->dev_sum / (int64_t) b->n), bound, aside);
+		       (long) (b->dev_sum / (int64_t) b->n),
+		       (long long) (b->lag_sum / 1000000),
+		       b->len_sum / WATCH_NS_PER_S, bound, aside);
 	else if (a != 0)
 		printf("UrMach x86-64: the TSC watchdog, %u windows: from the "
-		       "%s %ld..%ld ppm (mean %ld); the bound %lu ppm, %u set "
-		       "aside (#594)\n", windows, a->name, (long) a->dev_min,
-		       (long) a->dev_max, (long) (a->dev_sum / (int64_t) a->n),
-		       bound, aside);
+		       "%s %ld..%ld ppm (mean %ld), time kept %lld ms over %lu "
+		       "s; the bound %lu ppm, %u set aside (#594)\n", windows,
+		       a->name, (long) a->dev_min, (long) a->dev_max,
+		       (long) (a->dev_sum / (int64_t) a->n),
+		       (long long) (a->lag_sum / 1000000),
+		       a->len_sum / WATCH_NS_PER_S, bound, aside);
 	else
 		printf("UrMach x86-64: the TSC watchdog, %u windows: none "
 		       "judged; %u set aside (#594)\n", windows, aside);
@@ -359,12 +430,15 @@ static void summary(struct watched *w, unsigned n, unsigned windows,
 void tsc_watch(void)
 {
 	static const unsigned	ids[WATCH_MAX] = { RULER_HPET, RULER_PM };
-	struct watched		w[WATCH_MAX];
+	static struct watched	w[WATCH_MAX];	/* the horizons: not on a stack */
 	unsigned		n = 0, live, i, windows = 0, aside = 0;
 	unsigned		streak = 0, since = 0;
 	int			last = SUSPECT_NONE, last_who = -1;
+	int			vm = freq_under_hypervisor();
 	uint64_t		rate = tsc_hz();
-	uint64_t		bound = tsc_source()->bound_ppm;
+	/* the rate bound: exact.c's, without the phase term it adds for a VM */
+	uint64_t		bound = tsc_source()->bound_ppm
+					- tsc_source()->phase_ppm;
 
 	if (rate == 0) {
 		printf("UrMach x86-64: the TSC watchdog: NOT ASKED — the TSC "
@@ -391,11 +465,22 @@ void tsc_watch(void)
 	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
 #endif
 
-	printf("UrMach x86-64: the TSC watchdog: every second, the TSC at %lu "
-	       "kHz against %s%s%s; a clock is named after %u windows in a "
-	       "row, beyond %lu ppm plus the window's brackets (#594)\n",
-	       rate / 1000, w[0].name, n > 1 ? " and " : "",
-	       n > 1 ? w[1].name : "", WATCH_CONFIRM, bound);
+	if (vm)
+		printf("UrMach x86-64: the TSC watchdog: every second, the TSC "
+		       "at %lu kHz against %s%s%s -- under a hypervisor, by the "
+		       "time kept over the last %u s: a clock is named after %u "
+		       "windows in a row more than %lld ms plus %lu ppm from the "
+		       "others (#594)\n", rate / 1000, w[0].name,
+		       n > 1 ? " and " : "", n > 1 ? w[1].name : "",
+		       WATCH_HORIZON, WATCH_CONFIRM,
+		       2 * WATCH_MAXPHASE_NS / 1000000, bound);
+	else
+		printf("UrMach x86-64: the TSC watchdog: every second, the TSC "
+		       "at %lu kHz against %s%s%s; a clock is named after %u "
+		       "windows in a row, beyond %lu ppm plus the window's "
+		       "brackets (#594)\n", rate / 1000, w[0].name,
+		       n > 1 ? " and " : "", n > 1 ? w[1].name : "",
+		       WATCH_CONFIRM, bound);
 
 #if	ABLATE_594_NTP_SLEW
 	for (i = 0; i < n; i++) {
@@ -442,8 +527,13 @@ void tsc_watch(void)
 			return;		/* only a ruler can be named, and one is left */
 		if (!judged) {
 			aside++;
+			for (i = 0; i < n; i++)
+				horizon_reset(&w[i]);
 			continue;
 		}
+		for (i = 0; i < n; i++)
+			if (w[i].live)
+				horizon_push(&w[i]);
 
 		for (i = 0; i < n; i++) {
 			if (!w[i].live || !w[i].moved)
@@ -459,13 +549,13 @@ void tsc_watch(void)
 		if (live == 1) {
 			for (i = 0; !w[i].live; i++)
 				;
-			if (outside(&w[i], bound)) {
+			if (outside(&w[i], bound, vm, bound)) {
 				suspect = SUSPECT_PAIR;
 				who = (int) i;
 			}
 		} else {
-			int	off0 = outside(&w[0], bound);
-			int	off1 = outside(&w[1], bound);
+			int	off0 = outside(&w[0], bound, vm, bound);
+			int	off1 = outside(&w[1], bound, vm, bound);
 			int	agree = w[0].moved && w[1].moved
 				&& ppm_apart(w[0].hz, w[1].hz)
 				   <= (w[0].win_ppm + w[1].win_ppm) / 2
@@ -494,6 +584,7 @@ void tsc_watch(void)
 		if (suspect != SUSPECT_NONE && streak == WATCH_CONFIRM) {
 			if (suspect == SUSPECT_TSC) {
 				int tick = clock_event_leave_tsc();
+				const char *what;
 
 				/*
 				 * The rate is withdrawn only when the tick no
@@ -503,25 +594,42 @@ void tsc_watch(void)
 				 */
 				if (tick != CLOCK_EVENT_NOWHERE_TO_GO)
 					tsc_distrust();
-				printf("UrMach x86-64: the TSC watchdog — WRONG: "
-				       "the TSC ran %ld ppm from its rate by the "
-				       "%s and %ld by the %s, which agree with "
-				       "each other, for %u windows in a row; "
-				       "%s (#594)\n", (long) w[0].dev_ppm,
-				       w[0].name, (long) w[1].dev_ppm,
-				       w[1].name, WATCH_CONFIRM,
-				       tick == CLOCK_EVENT_LEFT_TSC
-				       ? "it is no longer trusted: the tick "
-					 "moved to the local APIC timer, and "
-					 "the clock no longer interpolates with "
-					 "it"
+				what = tick == CLOCK_EVENT_LEFT_TSC
+				       ? "it is no longer trusted: the tick moved "
+					 "to the local APIC timer, and the clock "
+					 "no longer interpolates with it"
 				       : tick == CLOCK_EVENT_NOT_ON_TSC
-				       ? "it is no longer trusted: the tick "
-					 "was not on it, and the clock no "
-					 "longer interpolates with it"
+				       ? "it is no longer trusted: the tick was "
+					 "not on it, and the clock no longer "
+					 "interpolates with it"
 				       : "and the tick STAYS on it: the local "
-					 "APIC timer has no rate, and there is "
-					 "no third backend (#593)");
+					 "APIC timer has no rate, and there is no "
+					 "third backend (#593)";
+				if (vm)
+					printf("UrMach x86-64: the TSC watchdog — "
+					       "WRONG: over the last %lu s the TSC "
+					       "kept time %lld ms from the %s and "
+					       "%lld ms from the %s, which agree "
+					       "with each other -- more than the "
+					       "%lu ms a host's NTP can account "
+					       "for -- for %u windows in a row; %s "
+					       "(#594)\n",
+					       w[0].len_sum / WATCH_NS_PER_S,
+					       (long long) (w[0].lag_sum / 1000000),
+					       w[0].name,
+					       (long long) (w[1].lag_sum / 1000000),
+					       w[1].name,
+					       allowance_ns(&w[0], bound) / 1000000,
+					       WATCH_CONFIRM, what);
+				else
+					printf("UrMach x86-64: the TSC watchdog — "
+					       "WRONG: the TSC ran %ld ppm from "
+					       "its rate by the %s and %ld by the "
+					       "%s, which agree with each other, "
+					       "for %u windows in a row; %s "
+					       "(#594)\n", (long) w[0].dev_ppm,
+					       w[0].name, (long) w[1].dev_ppm,
+					       w[1].name, WATCH_CONFIRM, what);
 				tick_after_move();
 				return;
 			}
@@ -530,7 +638,26 @@ void tsc_watch(void)
 
 				x->live = 0;
 				rulers_distrust(x->id);
-				if (x->moved)
+				if (!x->moved)
+					printf("UrMach x86-64: the TSC watchdog "
+					       "— WRONG: the %s did not move "
+					       "while the TSC and the %s agreed, "
+					       "for %u windows in a row; it is "
+					       "no longer used as a ruler "
+					       "(#594)\n", x->name,
+					       w[1 - who].name, WATCH_CONFIRM);
+				else if (vm)
+					printf("UrMach x86-64: the TSC watchdog "
+					       "— WRONG: over the last %lu s the "
+					       "%s kept time %lld ms from the "
+					       "TSC's, while the TSC and the %s "
+					       "agreed, for %u windows in a row; "
+					       "it is no longer used as a ruler "
+					       "(#594)\n",
+					       x->len_sum / WATCH_NS_PER_S, x->name,
+					       (long long) (-x->lag_sum / 1000000),
+					       w[1 - who].name, WATCH_CONFIRM);
+				else
 					printf("UrMach x86-64: the TSC watchdog "
 					       "— WRONG: the %s put the TSC %ld "
 					       "ppm from its rate, against the "
@@ -540,30 +667,29 @@ void tsc_watch(void)
 					       "(#594)\n", x->name,
 					       (long) x->dev_ppm,
 					       w[1 - who].name, WATCH_CONFIRM);
-				else
-					printf("UrMach x86-64: the TSC watchdog "
-					       "— WRONG: the %s did not move "
-					       "while the TSC and the %s agreed, "
-					       "for %u windows in a row; it is "
-					       "no longer used as a ruler "
-					       "(#594)\n", x->name,
-					       w[1 - who].name, WATCH_CONFIRM);
 			} else if (suspect == SUSPECT_PAIR) {
 				printf("UrMach x86-64: the TSC watchdog — WRONG: "
 				       "the TSC and the %s, the only ruler left, "
-				       "disagree by %ld ppm for %u windows in a "
+				       "disagree by %ld %s for %u windows in a "
 				       "row, and two clocks cannot say which "
 				       "one is wrong (#594)\n", w[who].name,
-				       (long) w[who].dev_ppm, WATCH_CONFIRM);
+				       vm ? (long) (w[who].lag_sum / 1000000)
+					  : (long) w[who].dev_ppm,
+				       vm ? "ms of time kept" : "ppm",
+				       WATCH_CONFIRM);
 			} else {
 				printf("UrMach x86-64: the TSC watchdog — WRONG: "
-				       "the TSC is %ld ppm from its rate by the "
-				       "%s and %ld by the %s for %u windows in a "
-				       "row, and no two of the three agree: "
-				       "nothing is named (#594)\n",
-				       (long) w[0].dev_ppm, w[0].name,
-				       (long) w[1].dev_ppm, w[1].name,
-				       WATCH_CONFIRM);
+				       "the TSC is %ld %s from the %s and %ld "
+				       "from the %s for %u windows in a row, "
+				       "and no two of the three agree: nothing "
+				       "is named (#594)\n",
+				       vm ? (long) (w[0].lag_sum / 1000000)
+					  : (long) w[0].dev_ppm,
+				       vm ? "ms of time kept" : "ppm",
+				       w[0].name,
+				       vm ? (long) (w[1].lag_sum / 1000000)
+					  : (long) w[1].dev_ppm,
+				       w[1].name, WATCH_CONFIRM);
 			}
 		}
 
