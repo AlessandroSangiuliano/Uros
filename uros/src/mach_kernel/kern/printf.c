@@ -966,6 +966,37 @@ boolean_t	new_printf_cpu_number = FALSE;
 decl_simple_lock_data(,printf_lock)
 
 /*
+ * #599: the processor that holds printf_lock, or -1.
+ *
+ * On i386 the spin lock leaves interrupts as the caller had them, and
+ * consolewrite() holds printf_lock for a line at the device's pace with them
+ * on.  An interrupt handler on that processor that calls printf() -- intnull()
+ * for a vector nobody handles, among others -- used to spin for ever on the
+ * lock its own interrupted thread held, before its EOI: the vector stayed in
+ * service, and the tick's, in the same priority class, was never delivered
+ * again.  #599's widening arm stopped the tick exactly that way.
+ *
+ * Only the holder writes its own number here, so a printf() that finds its
+ * own number is certainly nested inside the holder.  It takes the path that
+ * does not take printf_lock, the one DDB already takes (klog_putc, on it,
+ * has the same check for its own lock): its line may land inside the
+ * interrupted one, which is the price of not stopping the machine.  Masking
+ * interrupts for the hold instead would keep them off for a line at the
+ * device's pace, milliseconds under KVM (#567).
+ */
+volatile int	printf_lock_holder = -1;
+
+static __inline__ int
+printf_nested(void)
+{
+#ifdef ABLATE_599_PRINTF_WAITS
+	return 0;	/* #599 ablation: a nested printf waits, as before */
+#else
+	return printf_lock_holder == cpu_number();
+#endif
+}
+
+/*
  * #200: every char that goes to the console also lands in the kernel
  * ring buffer so userspace can drain it via host_get_log.  Used as
  * the putc callback in _doprnt and as a direct cnputc wrapper for
@@ -1124,8 +1155,10 @@ printf(const char *fmt, ...)
 	disable_preemption();
 	va_start(listp, fmt);
 #if	MP_PRINTF
-	if (cpu_data[master_cpu].active_thread && !db_active) {
+	if (cpu_data[master_cpu].active_thread && !db_active &&
+	    !printf_nested()) {
 		simple_lock(&printf_lock);
+		printf_lock_holder = cpu_number();
 		if (cpu_number() != master_cpu)
 			new_printf_cpu_number = TRUE;
 		if (MP_PRINTF_CPU_PREFIX && new_printf_cpu_number) {
@@ -1146,6 +1179,7 @@ printf(const char *fmt, ...)
 			klog_cnputc(' ');
 		}
 		_doprnt(fmt, &listp, klog_cnputc, 16);
+		printf_lock_holder = -1;
 		simple_unlock(&printf_lock);
       } else
 #endif	/* MP_PRINTF */
