@@ -225,14 +225,14 @@ static void watch_sleep(void)
 }
 
 /*
- * After the TSC is named: is there still a tick, on every processor that had
- * one?  A second asleep -- which needs this processor's tick to end at all --
+ * After the TSC is named -- or the HPET, with the tick on it (#593): is there
+ * still a tick, on every processor that had one?  A second asleep -- which needs this processor's tick to end at all --
  * timed by a ruler rather than by the counter just withdrawn, and every
  * processor's tick count before and after.  A processor that ticked before and
  * took none since has no clock, and that is WRONG: a move that left one
  * processor behind is worse than no move.
  */
-static void tick_after_move(void)
+static void tick_after_move(const char *named)
 {
 	unsigned long		before[NCPUS], got, lo = ~0UL, hi = 0;
 	unsigned		cpu, ticking = 0, silent = 0, first = NCPUS;
@@ -241,8 +241,8 @@ static void tick_after_move(void)
 	uint64_t		r0, r1, ms;
 
 	if (id < 0) {
-		printf("UrMach x86-64: the tick after the TSC was named: NOT "
-		       "ASKED — no ruler left to time it by (#594)\n");
+		printf("UrMach x86-64: the tick after the %s was named: NOT "
+		       "ASKED — no ruler left to time it by (#594)\n", named);
 		return;
 	}
 	k = rulers_get((unsigned) id);
@@ -270,14 +270,15 @@ static void tick_after_move(void)
 	}
 
 	if (silent != 0)
-		printf("UrMach x86-64: the tick after the TSC was named — WRONG: "
+		printf("UrMach x86-64: the tick after the %s was named — WRONG: "
 		       "processor %u%s took no tick in %lu ms by the %s: it has "
-		       "no clock (#594)\n", first,
+		       "no clock (#594)\n", named, first,
 		       silent > 1 ? " and others" : "", ms, k->name);
 	else
-		printf("UrMach x86-64: the tick after the TSC was named, on the "
+		printf("UrMach x86-64: the tick after the %s was named, on the "
 		       "%s: %u processor%s took %lu..%lu ticks each in %lu ms by "
-		       "the %s, at %u Hz (#594)\n", clock_event_name(), ticking,
+		       "the %s, at %u Hz (#594)\n", named, clock_event_name(),
+		       ticking,
 		       ticking == 1 ? "" : "s", lo, hi, ms, k->name,
 		       clock_event_hz());
 }
@@ -594,17 +595,17 @@ void tsc_watch(void)
 				 */
 				if (tick != CLOCK_EVENT_NOWHERE_TO_GO)
 					tsc_distrust();
-				what = tick == CLOCK_EVENT_LEFT_TSC
+				what = tick == CLOCK_EVENT_LEFT
 				       ? "it is no longer trusted: the tick moved "
-					 "to the local APIC timer, and the clock "
-					 "no longer interpolates with it"
-				       : tick == CLOCK_EVENT_NOT_ON_TSC
+					 "off it, and the clock no longer "
+					 "interpolates with it"
+				       : tick == CLOCK_EVENT_NOT_ON
 				       ? "it is no longer trusted: the tick was "
 					 "not on it, and the clock no longer "
 					 "interpolates with it"
-				       : "and the tick STAYS on it: the local "
-					 "APIC timer has no rate, and there is no "
-					 "third backend (#593)";
+				       : "and the tick STAYS on it: neither the "
+					 "local APIC timer nor the HPET can take "
+					 "it (#593)";
 				if (vm)
 					printf("UrMach x86-64: the TSC watchdog — "
 					       "WRONG: over the last %lu s the TSC "
@@ -630,14 +631,25 @@ void tsc_watch(void)
 					       "(#594)\n", (long) w[0].dev_ppm,
 					       w[0].name, (long) w[1].dev_ppm,
 					       w[1].name, WATCH_CONFIRM, what);
-				tick_after_move();
+				tick_after_move("TSC");
 				return;
 			}
 			if (suspect == SUSPECT_RULER) {
 				struct watched *x = &w[who];
+				int hpet_tick = CLOCK_EVENT_NOT_ON;
 
 				x->live = 0;
 				rulers_distrust(x->id);
+				/*
+				 * #593: the HPET's counter is also the tick's
+				 * clock when the tick runs on its comparator,
+				 * and a counter that has stopped or runs wrong
+				 * takes every processor's clock with it.  The
+				 * tick leaves it as it leaves the TSC; said on
+				 * its own line, after the naming.
+				 */
+				if (x->id == RULER_HPET)
+					hpet_tick = clock_event_leave_hpet();
 				if (!x->moved)
 					printf("UrMach x86-64: the TSC watchdog "
 					       "— WRONG: the %s did not move "
@@ -667,6 +679,15 @@ void tsc_watch(void)
 					       "(#594)\n", x->name,
 					       (long) x->dev_ppm,
 					       w[1 - who].name, WATCH_CONFIRM);
+				if (hpet_tick == CLOCK_EVENT_LEFT) {
+					printf("UrMach x86-64: the tick left the "
+					       "HPET for %s (#593)\n",
+					       clock_event_name());
+					tick_after_move("HPET");
+				} else if (hpet_tick == CLOCK_EVENT_NOWHERE_TO_GO)
+					printf("UrMach x86-64: the tick STAYS on "
+					       "the HPET: no other backend can "
+					       "take it (#593)\n");
 			} else if (suspect == SUSPECT_PAIR) {
 				printf("UrMach x86-64: the TSC watchdog — WRONG: "
 				       "the TSC and the %s, the only ruler left, "

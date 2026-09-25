@@ -37,6 +37,7 @@
 #include <kern/rcu.h>		/* the tick's quiescent state (#455) */
 #include <x86_64/cpu/ipi.h>		/* #594: every processor leaves the TSC */
 #include <x86_64/cpu/percpu.h>		/* #594: percpu_intr_disable */
+#include <x86_64/time/hpet_event.h>	/* #593: the third backend */
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
@@ -78,6 +79,16 @@ static unsigned		event_hz = CLOCK_EVENT_HZ;
 static uint64_t		tick_ns;
 static uint8_t		event_vector;
 
+/*
+ * #593: the local APIC's timer cannot be used at all -- neither of its two
+ * modes -- which is what a timer that stops, or a calibration that found no
+ * rate for either clock, leaves a machine with.  Before #593 that was the
+ * panic below; now the tick must run on the HPET and say so.
+ */
+#ifndef	ABLATE_593_NO_APIC_TIMER
+#define	ABLATE_593_NO_APIC_TIMER	0
+#endif
+
 /* ------------------------------------------------------ tsc-deadline ---- */
 
 #define	MSR_IA32_TSC_DEADLINE	0x6E0
@@ -87,6 +98,12 @@ static uint8_t		event_vector;
 static int tscdl_probe(void)
 {
 	uint32_t a, b, c, d;
+
+#if ABLATE_593_NO_APIC_TIMER
+	printf("clock_event: tsc-deadline: the APIC timer is unusable, by "
+	       "ablation (#593)\n");
+	return 0;
+#endif
 
 	/*
 	 * Two conditions, and both are needed for a REASON, not for symmetry:
@@ -175,13 +192,18 @@ static void tscdl_stop(void)
 }
 
 static const struct clock_event_ops tscdl_ops = {
-	"tsc-deadline", tscdl_probe, tscdl_setup, tscdl_arm, tscdl_stop
+	"tsc-deadline", tscdl_probe, tscdl_setup, tscdl_arm, tscdl_stop, 0
 };
 
 /* ----------------------------------------------------- lapic one-shot --- */
 
 static int lapic_probe_ev(void)
 {
+#if ABLATE_593_NO_APIC_TIMER
+	printf("clock_event: lapic-oneshot: the APIC timer is unusable, by "
+	       "ablation (#593)\n");
+	return 0;
+#endif
 	return lapic_present() && lapic_timer_hz() != 0;
 }
 
@@ -220,7 +242,7 @@ static void lapic_stop_ev(void)
 
 static const struct clock_event_ops lapic_ops = {
 	"lapic-oneshot", lapic_probe_ev, lapic_setup_ev, lapic_arm,
-	lapic_stop_ev
+	lapic_stop_ev, 0
 };
 
 /* --------------------------------------------------------- selection ---- */
@@ -231,17 +253,30 @@ static const struct clock_event_ops *ops;
  * Preference order, best first.  Kept as a table so that adding a backend is
  * adding a row, and so the boot log can say what was rejected as well as what
  * won -- "why did it pick that one" is a question that gets asked at 2am.
+ *
+ * #593: the HPET LAST, and argued rather than appended.  The two above are
+ * each processor's own timer, armed by one WRMSR or one APIC write on the
+ * processor that wants the interrupt.  The HPET is one device for the whole
+ * machine: every arm is a read of its counter and, often, a write to its
+ * comparator -- each an exit to the host under an emulator, where the APIC
+ * is emulated in the kernel's own module -- taken under a lock every
+ * processor shares, and every tick but the boot processor's arrives as an IPI
+ * the boot processor sends.  It costs more on every axis and gains nothing a
+ * working APIC timer lacks, so it is the backend for when the APIC timer
+ * cannot be used: the machine where that used to end the boot with the panic
+ * in clock_event_init().
  */
 static const struct clock_event_ops * const backends[] = {
 	&tscdl_ops,
 	&lapic_ops,
+	&hpet_event_ops,
 };
 
 void
 clock_event_init(uint8_t vector)
 {
 	unsigned i;
-	int forced_lapic;
+	int forced_lapic, forced_hpet;
 
 	tick_ns = NS_PER_SEC / event_hz;
 	event_vector = vector;
@@ -250,14 +285,24 @@ clock_event_init(uint8_t vector)
 	 * -T forces the LAPIC backend even where the deadline works, so the
 	 * two can be compared on the SAME binary.  An A/B across two builds
 	 * measures the builds as much as the change.
+	 *
+	 * -H (#593) forces the HPET the same way, past both of the APIC
+	 * timer's modes: the backend a machine reaches only when the APIC
+	 * timer cannot be used would otherwise be run by no boot at all.
 	 */
 	forced_lapic = boot_flag('T');
+	forced_hpet = boot_flag('H');
 
 	ops = (const struct clock_event_ops *) 0;
 	for (i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
 		const struct clock_event_ops *b = backends[i];
 		int usable = b->probe();
 
+		if (forced_hpet && b != &hpet_event_ops) {
+			printf("clock_event: %s %s, skipped by -H\n",
+			       b->name, usable ? "available" : "unavailable");
+			continue;
+		}
 		if (forced_lapic && b == &tscdl_ops) {
 			printf("clock_event: %s %s, skipped by -T\n",
 			       b->name, usable ? "available" : "unavailable");
@@ -279,6 +324,9 @@ clock_event_init(uint8_t vector)
 		panic("clock_event: no usable timer backend — the scheduler "
 		      "would never preempt anything (#459)");
 	}
+
+	if (ops->start)
+		ops->start(vector);
 
 	printf("clock_event: using %s at %u Hz (%llu ns per tick)\n",
 	       ops->name, event_hz, (unsigned long long) tick_ns);
@@ -311,49 +359,66 @@ clock_event_stop(void)
 }
 
 /*
- * #594: the tick leaves the TSC, because the watchdog has named it.
+ * #594, #593: the tick leaves a clock the watchdog has named -- the TSC, or
+ * the HPET's counter.
  *
- * Every processor has to do it for itself -- each has its own timer -- so this
- * processor does, and then asks the others by cross-call.  Each one, with
- * interrupts off: disarms the deadline, puts its timer in one-shot mode and
- * arms one tick.  A processor that was inside its tick handler when the
- * backend changed finished that handler first (interrupts are off in it) and
- * re-armed the deadline one last time; the cross-call arrives after, and
- * replaces it.
+ * Every processor has to do it for itself -- each has its own timer, or its
+ * own deadline in the HPET's broadcast -- so this processor does, and then
+ * asks the others by cross-call.  Each one, with interrupts off: takes its
+ * deadline out of the old backend, sets up the new one and arms one tick.  A
+ * processor that was inside its tick handler when the backend changed
+ * finished that handler first (interrupts are off in it) and re-armed the old
+ * backend one last time; the cross-call arrives after, and replaces it.
  *
  * ⚠️ The cross-call, not "each processor notices at its next tick".  The next
- * tick is a deadline on the counter that has just been found wrong, and a
- * counter that stopped would never deliver it: the processor would lose its
- * clock for good.
+ * tick is a deadline on the clock that has just been found wrong, and a clock
+ * that stopped would never deliver it: the processor would lose its clock for
+ * good.
  *
- * ⚠️ Called BEFORE the TSC's rate is withdrawn (tsc_distrust()), never after:
- * until every processor has answered, some may still re-arm the deadline, and
- * tscdl_arm() with a rate of zero refuses -- a processor whose re-arm is
- * refused has no clock.  ipi_call_others() returns only when all have done it.
+ * ⚠️ Called BEFORE the named clock's rate is withdrawn (tsc_distrust()), never
+ * after: until every processor has answered, some may still re-arm the old
+ * backend, and tscdl_arm() with a rate of zero refuses -- a processor whose
+ * re-arm is refused has no clock.  ipi_call_others() returns only when all
+ * have done it.
  *
- * Processors not yet online set themselves up with `ops' when they arrive,
- * which by then is this one.  If the local APIC timer has no rate there is
- * nowhere to go, and the tick stays on the TSC: a third backend is #593.
+ * The first other backend in the preference order that probes usable, and
+ * its start() before anything is pointed at it.  Processors not yet online
+ * set themselves up with `ops' when they arrive, which by then is the new one.
+ * If none can take the tick, it stays where it is, and the caller says so.
  */
+static const struct clock_event_ops *leaving;
+
 static void
 clock_event_resetup(void *arg)
 {
 	(void) arg;
-	tscdl_stop();
+	leaving->stop();
 	ops->setup(event_vector);
 	(void) ops->arm(tick_ns);
 }
 
-int
-clock_event_leave_tsc(void)
+static int
+clock_event_leave(const struct clock_event_ops *from)
 {
-	if (ops != &tscdl_ops)
-		return CLOCK_EVENT_NOT_ON_TSC;
-	if (!lapic_ops.probe())
+	const struct clock_event_ops	*to = 0;
+	unsigned			i;
+
+	if (ops != from)
+		return CLOCK_EVENT_NOT_ON;
+	for (i = 0; i < sizeof(backends) / sizeof(backends[0]); i++)
+		if (backends[i] != from && backends[i]->probe()) {
+			to = backends[i];
+			break;
+		}
+	if (to == 0)
 		return CLOCK_EVENT_NOWHERE_TO_GO;
 
+	if (to->start)
+		to->start(event_vector);
+
 	disable_preemption();
-	ops = &lapic_ops;
+	leaving = from;
+	ops = to;
 	barrier();
 
 	percpu_intr_disable();
@@ -363,7 +428,19 @@ clock_event_leave_tsc(void)
 	ipi_call_others(clock_event_resetup, (void *) 0);
 	enable_preemption();
 
-	return CLOCK_EVENT_LEFT_TSC;
+	return CLOCK_EVENT_LEFT;
+}
+
+int
+clock_event_leave_tsc(void)
+{
+	return clock_event_leave(&tscdl_ops);
+}
+
+int
+clock_event_leave_hpet(void)
+{
+	return clock_event_leave(&hpet_event_ops);
 }
 
 const char *
@@ -656,6 +733,9 @@ clock_event_drain_reports(void)
 						   : 0),
 		       clock_event_name());
 	}
+
+	/* And the HPET broadcast's own accounting, when it is the clock. */
+	hpet_event_drain_report();
 }
 
 void

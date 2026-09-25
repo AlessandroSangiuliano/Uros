@@ -293,11 +293,14 @@ option(UROS_ABLATE_594_NTP_SLEW "Build the #594 ablation: the rulers carry a hos
 # sends that began on a processor already between the two halves of another.
 # Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_593_ICR_OPEN "Build the #593 ablation: an IPI send may be interrupted between its two register writes" OFF)
-# #593: BEHIND lands every 128th HPET comparator write after the counter has
-# passed the deadline it carries; UNCHECKED takes away the read-back that
-# notices.  BEHIND alone must cost late ticks and a count; with UNCHECKED,
-# every processor's clock stops until the counter's low half wraps.  Never ON
-# in a kernel anyone boots for anything else.
+# #593: NO_APIC_TIMER makes the local APIC's timer unusable in either mode, so
+# the tick must run on the HPET's broadcast and the boot lines must say so.
+# BEHIND lands every 128th HPET comparator write after the counter has passed
+# the deadline it carries; UNCHECKED takes away the read-back that notices.
+# BEHIND alone must cost late ticks and a count; with UNCHECKED, every
+# processor's clock stops until the counter's low half wraps.  Never ON in a
+# kernel anyone boots for anything else.
+option(UROS_ABLATE_593_NO_APIC_TIMER "Build the #593 ablation: the local APIC timer is unusable in both modes" OFF)
 option(UROS_ABLATE_593_BEHIND "Build the #593 ablation: every 128th HPET comparator write lands behind the counter" OFF)
 option(UROS_ABLATE_593_UNCHECKED "Build the #593 ablation: an HPET comparator write is not read back" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
@@ -589,6 +592,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_594_HPET_STOPS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)
       message(STATUS "#594 ablation: the HPET stops as the watchdog reads it (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_NO_APIC_TIMER)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NO_APIC_TIMER=1)
+      message(STATUS "#593 ablation: the local APIC timer is unusable in both modes (x86_64)")
   endif()
   if(UROS_ABLATE_593_BEHIND)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_BEHIND=1)

@@ -118,20 +118,21 @@ void		clock_event_stop(void);
 const char	*clock_event_name(void);
 
 /*
- * #594: move every processor's tick off the TSC, to the local APIC timer.
- * Thread context, interrupts on.  Three outcomes, and the caller has to tell
- * them apart: only after the first may the TSC's rate be withdrawn -- in the
- * third the tick still runs on the TSC, and a deadline with no rate is a
+ * #594, #593: move every processor's tick off the TSC, or off the HPET, to the
+ * first other backend in the preference order that can take it.  Thread
+ * context, interrupts on.  Three outcomes, and the caller has to tell them
+ * apart: only after the first may the named clock's rate be withdrawn -- in
+ * the third the tick still runs on it, and a deadline with no rate is a
  * processor with no clock.
  */
 enum {
-	CLOCK_EVENT_LEFT_TSC,		/* every processor now on the APIC */
-	CLOCK_EVENT_NOT_ON_TSC,		/* the tick was elsewhere already */
-	CLOCK_EVENT_NOWHERE_TO_GO,	/* on the TSC, and the APIC timer has
-					   no rate: there is no third backend
-					   yet (#593) */
+	CLOCK_EVENT_LEFT,		/* every processor now elsewhere */
+	CLOCK_EVENT_NOT_ON,		/* the tick was elsewhere already */
+	CLOCK_EVENT_NOWHERE_TO_GO,	/* on it still: no other backend
+					   can take the tick */
 };
 int		clock_event_leave_tsc(void);
+int		clock_event_leave_hpet(void);
 
 /* #594: how many ticks this processor has taken since boot. */
 unsigned long	clock_event_ticks(unsigned cpu);

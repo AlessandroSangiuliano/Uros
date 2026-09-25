@@ -59,6 +59,9 @@
  *   0x50..0x5F  message-signalled interrupts, which have no pin (#457)
  *   0xE0        one vector kept for exercising this path by hand
  *   0xE1        the local APIC timer (#522)
+ *   0xF0        the HPET comparator that broadcasts the tick when the local
+ *               APIC timer cannot be used (#593) -- class fifteen, because
+ *               one processor's spl level must not stop every clock
  *   0xF1..0xFE  processor-to-processor messages
  *   0xFF        the local APIC's spurious vector
  *
