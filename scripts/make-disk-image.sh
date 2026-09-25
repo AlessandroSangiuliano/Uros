@@ -343,13 +343,26 @@ echo "  disk0b: ext2, ${FS1_SIZE_MB} MB  — hello.txt + bench.dat (test data)"
 echo "  disk0c: raw,  ${SWAP_SIZE_MB} MB — paging/swap"
 echo ""
 
+# The image is built beside its destination and moved over it at the end, and
+# its stamp -- when it was made, which run-qemu.sh compares with the binaries
+# it carries (#592) -- is taken now and put in place only then.  The old stamp
+# goes first: a run cut off halfway leaves the previous image with no stamp,
+# which run-qemu.sh regenerates, instead of a half-written image or a stamp
+# that vouches for one.  The image's own mtime cannot serve: qemu moves it on
+# every guest write.  And a qemu that still has the old image open keeps its
+# own inode rather than seeing its filesystems rewritten.
+DISK_STAMP="$DISK_IMG.stamp"
+DISK_NEW="$DISK_IMG.new"
+rm -f "$DISK_STAMP" "$DISK_NEW"
+touch "$DISK_STAMP.new"
+
 # --- 1. Immagine vuota ---
 echo "[1/6] Creazione immagine vuota (${IMG_SIZE_MB} MB)..."
-dd if=/dev/zero of="$DISK_IMG" bs=1M count="$IMG_SIZE_MB" status=none
+dd if=/dev/zero of="$DISK_NEW" bs=1M count="$IMG_SIZE_MB" status=none
 
 # --- 2. Tabella partizioni MBR ---
 echo "[2/6] Scrittura tabella partizioni MBR (3 entries)..."
-sfdisk --quiet "$DISK_IMG" <<EOF
+sfdisk --quiet "$DISK_NEW" <<EOF
 label: dos
 start=$PART0_START_SECT, size=$FS0_SIZE_SECTS, type=83
 start=$PART1_START_SECT, size=$FS1_SIZE_SECTS, type=83
@@ -360,7 +373,7 @@ EOF
 echo "[3/6] Formattazione ext2 (disk0a + disk0b)..."
 PART_IMG=$(mktemp /tmp/osfmk-part.XXXXXX.img)
 PART1_IMG=$(mktemp /tmp/osfmk-part1.XXXXXX.img)
-trap 'rm -f "$PART_IMG" "$PART1_IMG" "$BOOTSTRAP_CONF"' EXIT
+trap 'rm -f "$PART_IMG" "$PART1_IMG" "$BOOTSTRAP_CONF" "$DISK_NEW" "$DISK_STAMP.new"' EXIT
 
 dd if=/dev/zero of="$PART_IMG" bs="$SECT_SIZE" count="$FS0_SIZE_SECTS" status=none
 mke2fs -t ext2 -q -F \
@@ -445,7 +458,9 @@ dd if=/dev/urandom of="$BENCH_LARGE" bs=1M count=12 status=none
 # bench_4m.dat (#267): 4 MB — apples-to-apples with the historical
 # file-pool cached-read baseline (~930 MB/s at 64 KB, warm).
 dd if=/dev/urandom of="$BENCH_4M" bs=1M count=4 status=none
-trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$POSIX_SMOKE" "$BENCH_DAT" "$BENCH_LARGE" "$BENCH_4M"' EXIT
+# ⚠️ This trap replaces the one above, so it names everything that one did:
+# leaving PART1_IMG out of it leaked an 8 MB /tmp file on every run (#592).
+trap 'rm -f "$PART_IMG" "$PART1_IMG" "$BOOTSTRAP_CONF" "$DISK_NEW" "$DISK_STAMP.new" "$HELLO_TXT" "$POSIX_SMOKE" "$BENCH_DAT" "$BENCH_LARGE" "$BENCH_4M"' EXIT
 
 # hello_exec is optional (#228 v0.1.0): copy to / so exec_server can
 # load "/hello_exec" via libvfs.
@@ -664,11 +679,13 @@ rm -f "$DBHELLO"
 
 # --- 5. Inserimento delle due partizioni ext2 nell'immagine disco ---
 echo "[5/6] Assemblaggio partizioni ext2 (disk0a + disk0b)..."
-dd if="$PART_IMG"  of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART0_START_SECT" conv=notrunc status=none
-dd if="$PART1_IMG" of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
+dd if="$PART_IMG"  of="$DISK_NEW" bs="$SECT_SIZE" seek="$PART0_START_SECT" conv=notrunc status=none
+dd if="$PART1_IMG" of="$DISK_NEW" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
 
 # --- 6. La partizione swap è già zero-filled (nessun formato necessario) ---
 echo "[6/6] Partizione swap (disk0c) pronta (zero-filled)."
+mv -f "$DISK_NEW" "$DISK_IMG"
+mv -f "$DISK_STAMP.new" "$DISK_STAMP"
 
 echo ""
 echo "=== Immagine disco creata con successo ==="
