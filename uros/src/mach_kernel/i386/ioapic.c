@@ -76,6 +76,35 @@ static vm_offset_t	ioapic_base;	/* MMIO virtual base of I/O APIC #0 */
 static unsigned int	ioapic_redirs;	/* number of redirection entries */
 static unsigned char	ioapic_dest;	/* boot CPU physical APIC ID */
 
+#ifdef ABLATE_599_WIDEN
+/*
+ * #599 ablation: ABLATE_599_WIDEN reads of port 0x80 (each a VM exit under
+ * KVM) in each gap of the pair -- after a select, between a read and the
+ * select for the write -- on the other processors only.  Processor 0 keeps
+ * its own read-modify-writes, which are the tick's defer and replay, as
+ * short as they are.  If the pair's race is what stops the tick, this makes
+ * it frequent at four processors and leaves it absent at one.
+ */
+static void
+ioapic_widen(void)
+{
+	static int	said;
+	int		w;
+
+	if (cpu_number() == master_cpu)
+		return;
+	if (!said) {
+		said = 1;
+		cn_puts("\nioapic: #599 ablation -- the other processors wait in "
+			"each gap of the select/window pair\n");
+	}
+	for (w = 0; w < ABLATE_599_WIDEN; w++)
+		(void) inb(0x80);
+}
+#else
+#define	ioapic_widen()
+#endif
+
 /*
  * Indexed register access: write the register number to RSELECT, then read
  * or write the value through RWINDOW.
@@ -84,6 +113,7 @@ static unsigned int
 ioapic_read(unsigned int reg)
 {
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
+	ioapic_widen();
 	return *(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW);
 }
 
@@ -91,6 +121,7 @@ static void
 ioapic_write(unsigned int reg, unsigned int value)
 {
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
+	ioapic_widen();
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW) = value;
 }
 
@@ -180,6 +211,7 @@ ioapic_mask_irq(unsigned int irq)
 	reg = IOA_R_REDIRECTION + 2 * gsi;
 	first = ioapic_enter();
 	low = ioapic_read(reg);
+	ioapic_widen();
 	ioapic_write(reg, low | IOA_R_R_MASKED);
 	ioapic_leave(first, gsi);
 }
@@ -198,6 +230,7 @@ ioapic_unmask_irq(unsigned int irq)
 	reg = IOA_R_REDIRECTION + 2 * gsi;
 	first = ioapic_enter();
 	low = ioapic_read(reg);
+	ioapic_widen();
 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
 	ioapic_leave(first, gsi);
 }
