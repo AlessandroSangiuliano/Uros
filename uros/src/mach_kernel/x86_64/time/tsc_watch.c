@@ -377,22 +377,35 @@ void tsc_watch(void)
 
 		if (suspect != SUSPECT_NONE && streak == WATCH_CONFIRM) {
 			if (suspect == SUSPECT_TSC) {
-				const char *left = clock_event_leave_tsc();
+				int tick = clock_event_leave_tsc();
 
-				tsc_distrust();
+				/*
+				 * The rate is withdrawn only when the tick no
+				 * longer needs it.  Left on the TSC, the tick
+				 * re-arms from tsc_hz(), and zero there is a
+				 * processor that never ticks again.
+				 */
+				if (tick != CLOCK_EVENT_NOWHERE_TO_GO)
+					tsc_distrust();
 				printf("UrMach x86-64: the TSC watchdog — WRONG: "
 				       "the TSC ran %ld ppm from its rate by the "
 				       "%s and %ld by the %s, which agree with "
-				       "each other, for %u windows in a row; it "
-				       "is no longer trusted: the tick %s%s%s%s, "
-				       "and the clock no longer interpolates "
-				       "with it (#594)\n", (long) w[0].dev_ppm,
+				       "each other, for %u windows in a row; "
+				       "%s (#594)\n", (long) w[0].dev_ppm,
 				       w[0].name, (long) w[1].dev_ppm,
 				       w[1].name, WATCH_CONFIRM,
-				       left ? "left " : "was not on it",
-				       left ? left : "",
-				       left ? " for " : "",
-				       left ? clock_event_name() : "");
+				       tick == CLOCK_EVENT_LEFT_TSC
+				       ? "it is no longer trusted: the tick "
+					 "moved to the local APIC timer, and "
+					 "the clock no longer interpolates with "
+					 "it"
+				       : tick == CLOCK_EVENT_NOT_ON_TSC
+				       ? "it is no longer trusted: the tick "
+					 "was not on it, and the clock no "
+					 "longer interpolates with it"
+				       : "and the tick STAYS on it: the local "
+					 "APIC timer has no rate, and there is "
+					 "no third backend (#593)");
 				return;
 			}
 			if (suspect == SUSPECT_RULER) {

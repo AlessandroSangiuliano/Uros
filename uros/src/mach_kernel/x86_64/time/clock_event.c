@@ -332,9 +332,8 @@ clock_event_stop(void)
  * refused has no clock.  ipi_call_others() returns only when all have done it.
  *
  * Processors not yet online set themselves up with `ops' when they arrive,
- * which by then is this one.  Returns the name of the backend the tick left,
- * or zero if it was not on the TSC -- or if the local APIC timer has no rate,
- * in which case there is nowhere to go and the tick stays where it is.
+ * which by then is this one.  If the local APIC timer has no rate there is
+ * nowhere to go, and the tick stays on the TSC: a third backend is #593.
  */
 static void
 clock_event_resetup(void *arg)
@@ -345,11 +344,13 @@ clock_event_resetup(void *arg)
 	(void) ops->arm(tick_ns);
 }
 
-const char *
+int
 clock_event_leave_tsc(void)
 {
-	if (ops != &tscdl_ops || !lapic_ops.probe())
-		return (const char *) 0;
+	if (ops != &tscdl_ops)
+		return CLOCK_EVENT_NOT_ON_TSC;
+	if (!lapic_ops.probe())
+		return CLOCK_EVENT_NOWHERE_TO_GO;
 
 	disable_preemption();
 	ops = &lapic_ops;
@@ -362,7 +363,7 @@ clock_event_leave_tsc(void)
 	ipi_call_others(clock_event_resetup, (void *) 0);
 	enable_preemption();
 
-	return tscdl_ops.name;
+	return CLOCK_EVENT_LEFT_TSC;
 }
 
 const char *
