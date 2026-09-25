@@ -3183,6 +3183,48 @@ static void tsc_selftest(void)
  * not MHz, because the differences phase 1 found are a third of a percent.
  */
 /*
+ * #593, for #318's question: what one read of each clock costs, in TSC cycles
+ * -- the least of sixteen, because the least is the read nothing interrupted.
+ * A timebase is read on every clock_gettime(), and under an emulator a
+ * device register is an exit to the host where the TSC is an instruction.
+ */
+static uint32_t tsc_read32(void)
+{
+	return (uint32_t)rdtsc();
+}
+
+static uint64_t read_cost(uint32_t (*rd)(void))
+{
+	uint64_t best = ~0ULL;
+
+	for (unsigned i = 0; i < 16; i++) {
+		uint64_t t0 = rdtsc_ordered();
+
+		(void)rd();
+		t0 = rdtsc_ordered() - t0;
+		if (t0 < best)
+			best = t0;
+	}
+	return best;
+}
+
+static void read_costs(void)
+{
+	kputs("UrMach x86-64: one read, in TSC cycles, the least of 16: the "
+	      "TSC ");
+	kputdec(read_cost(tsc_read32));
+	if (pmtimer_present()) {
+		kputs(", the PM timer ");
+		kputdec(read_cost(pmtimer_read));
+	}
+	if (hpet_present()) {
+		kputs(", the HPET ");
+		kputdec(read_cost(hpet_read32));
+	}
+	kputs(" (#593, for #318)\r\n");
+}
+
+/*
  * The rulers the machine has besides the 8254 (#508): found, made readable,
  * and described.  What the TSC measures against each, and their vote, is
  * tsc_selftest()'s line -- which runs after this.
@@ -3209,6 +3251,7 @@ static void rulers_selftest(void)
 	if (!hpet_present()) {
 		kputs("none — no table, or a block whose capability register "
 		      "does not add up\r\n");
+		read_costs();
 		return;
 	}
 	kputs("at ");
@@ -3225,6 +3268,7 @@ static void rulers_selftest(void)
 	kputhex64(hpet_vendor());
 	kputs(hpet_started_here() ? ", started here\r\n"
 				  : ", already running\r\n");
+	read_costs();
 }
 
 /*
