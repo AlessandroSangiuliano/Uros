@@ -14,7 +14,7 @@
 # queste partizioni via cap_request + device_open_cap.
 #
 # Uso:
-#   ./scripts/make-disk-image.sh                    # default 40 MB
+#   ./scripts/make-disk-image.sh                    # default 512 MB
 #   ./scripts/make-disk-image.sh -o disk.img        # path output custom
 #   ./scripts/make-disk-image.sh -s 64              # dimensione totale in MB
 #
@@ -196,10 +196,11 @@ if [ ! -f "$PTHREAD_TEST" ]; then
 fi
 
 # --- File di configurazione del bootstrap ---
-# Formato: <symtab_name> <path> [args...]
-# Il path relativo viene risolto come /dev/boot_device/mach_servers/<path>
-# L'argomento "hd0b" dopo il path diventa argv[1] del default_pager,
-# che lo apre con device_open() e lo usa come backing store di paging.
+# Format: <symtab_name> <path> [args...]
+# Bootstrap takes <path> from the stage-1 bundle, and from /mach_servers/ on
+# disk0a when the bundle does not carry it.  The "disk0c" after default_pager
+# becomes its argv[1]: it opens that partition through the block server and
+# pages to it.
 BOOTSTRAP_CONF=$(mktemp)
 # cap_server (if built) goes right after name_server: it publishes its
 # port via netname_check_in so the name_server must be up first.
@@ -423,7 +424,7 @@ if [ -f "$PROC_SERVER" ]; then
 fi
 echo "[4/6] Copia file nel filesystem ext2..."
 # ipc_bench's disk_bench tests open hello.txt / bench.dat at the root
-# of the default ext2 mount (ext_server → ahci0a / hd0a), so seed both
+# of the default ext2 mount (ext_server mounts ahci0a at /), so seed both
 # files here.  bench.dat only needs the first 64 bytes — a 1 KB blob
 # is plenty and keeps the partition small.
 HELLO_TXT=$(mktemp)
