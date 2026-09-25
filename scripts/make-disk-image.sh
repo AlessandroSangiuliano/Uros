@@ -197,12 +197,29 @@ fi
 
 # Every temporary file lives in one directory, created before the first of
 # them, and one trap removes it with the half-built image and its stamp (#592).
-# The traps used to be three, each replacing the last and each installed after
-# some of the files it named: an 8 MB partition image leaked from every run and
-# 80 of them had piled up in /tmp, and a run that failed early left
-# bootstrap.conf and the bench files behind.
+# There used to be separate traps, each replacing the last and each installed
+# after some of the files it named: the second forgot a partition image, which
+# leaked 8 MB from every run (80 of them had piled up in /tmp), and a run that
+# failed early left bootstrap.conf and the bench files behind.
 TMPD=$(mktemp -d /tmp/osfmk-disk.XXXXXX)
 trap 'rm -rf "$TMPD"; rm -f "$DISK_IMG.new" "$DISK_IMG.stamp.new"' EXIT
+
+# The image is built beside its destination as disk.img.new, and it and its
+# stamp are moved in place at the end, the image first (#592).  The stamp says
+# when the image was made; run-qemu.sh compares it with what the image is made
+# from, because the image's own mtime moves on every guest write.  It is taken
+# here, before bootstrap.conf is decided and before any file is copied, so a
+# binary built while this runs is newer than it.  A run cut off before the
+# first move leaves the previous image and its own stamp; one cut off between
+# the two moves leaves the new image beside the old stamp, which is older than
+# everything the new image was made from, so the next boot regenerates for
+# nothing rather than keeping a stale disk (the other order would keep one).
+# And a qemu that still has the old image open keeps its own inode rather than
+# seeing its filesystems rewritten.
+DISK_STAMP="$DISK_IMG.stamp"
+DISK_NEW="$DISK_IMG.new"
+rm -f "$DISK_NEW"
+touch "$DISK_STAMP.new"
 
 # --- File di configurazione del bootstrap ---
 # Format: <symtab_name> <path> [args...]
@@ -352,18 +369,6 @@ echo "  disk0b: ext2, ${FS1_SIZE_MB} MB  — hello.txt + bench.dat (test data)"
 echo "  disk0c: raw,  ${SWAP_SIZE_MB} MB — paging/swap"
 echo ""
 
-# The image is built beside its destination, and the image and its stamp
-# replace the old pair together at the end, or not at all (#592).  The stamp
-# says when the image was made; run-qemu.sh compares it with what the image is
-# made from, because the image's own mtime moves on every guest write.  It is
-# taken now, before any input is read, so a binary rebuilt while this runs is
-# newer than it.  A run cut off halfway leaves the previous image and its own
-# stamp untouched, and a qemu that still has the old image open keeps its own
-# inode rather than seeing its filesystems rewritten.
-DISK_STAMP="$DISK_IMG.stamp"
-DISK_NEW="$DISK_IMG.new"
-rm -f "$DISK_NEW"
-touch "$DISK_STAMP.new"
 
 # --- 1. Immagine vuota ---
 echo "[1/6] Creazione immagine vuota (${IMG_SIZE_MB} MB)..."

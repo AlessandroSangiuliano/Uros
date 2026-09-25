@@ -376,7 +376,7 @@ ninja migcom                   # MIG compiler (Flex/Bison)
 
 ### Disk image and stage-1 bundle
 
-The disk and bundle are built by scripts in `scripts/`, not by CMake. Each packs its own list of files from `uros/build/export/.../user/` (servers, modules, libraries; the disk also carries musl's `libc.so` as the dynamic linker). An optional entry on a list is included only when its binary was built, so optional components are silently included only when their flag was enabled; a new binary is packed only once it is added to the lists.
+The disk and bundle are built by scripts in `scripts/`, not by CMake. Each packs its own list of files from `uros/build/export/.../user/`: the bundle takes servers, modules and their manifests; the disk takes servers, modules, test programs and `libfoo.so`, plus musl's `libc.so` as the dynamic linker. An optional entry on a list is included only when its binary was built, so optional components are silently included only when their flag was enabled; a new binary is packed only once it is added to the lists.
 
 ```sh
 ./scripts/make-disk-image.sh             # MBR + 3 partitions (ext2/ext2/raw swap)

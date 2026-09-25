@@ -189,9 +189,9 @@ fi
 [ "$BUILD_ONLY" = true ] && exit 0
 
 # The disk's age is the stamp make-disk-image.sh leaves beside it (#592): taken
-# when a run starts, and moved in place together with the image when the run
-# finishes, so a run cut off halfway -- here or by hand -- leaves the previous
-# image and its own stamp.  Not disk.img's own mtime: qemu writes the image
+# when a run starts and moved in place after the image when it finishes, so a
+# run cut off halfway -- here or by hand -- never leaves a stale image with a
+# stamp newer than its inputs (make-disk-image.sh says why the order matters).  Not disk.img's own mtime: qemu writes the image
 # (ext2 on ahci0a and ahci0b, and paging on disk0c when AHCI is disk0), so that
 # mtime says when the guest last wrote.
 #
