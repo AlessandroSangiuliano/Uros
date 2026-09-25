@@ -272,6 +272,14 @@ option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping 
 # so the LAPIC timer adopts 0x15's crystal in a guest.  Boot it with +invtsc.
 # Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_594_CRYSTAL_IS_BUS "Build the #594 ablation: CPUID 0x15 states the timing leaf's bus as the crystal" OFF)
+# #594: from the watchdog's fifth window, the TSC as it reads it runs 1/32
+# fast, so both rulers disagree with it: the watchdog must name the TSC, move
+# the tick to the local APIC timer and withdraw the TSC's rate -- and the boot
+# must go on.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_TSC_SKEWS "Build the #594 ablation: the TSC runs 1/32 fast as the watchdog reads it" OFF)
+# #594: from the watchdog's fifth window, the HPET as it reads it stops, so the
+# watchdog must name the HPET and go on with the PM timer.  Never ON otherwise.
+option(UROS_ABLATE_594_HPET_STOPS "Build the #594 ablation: the HPET stops as the watchdog reads it" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -356,6 +364,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/ruler.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rulers.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc_refine.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc_watch.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
@@ -547,6 +556,14 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_508_CPUID_15)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_CPUID_15=1)
       message(STATUS "#508 ablation: CPUID 0x15 states OMEGA's crystal and ratio (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_TSC_SKEWS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_TSC_SKEWS=1)
+      message(STATUS "#594 ablation: the TSC runs 1/32 fast as the watchdog reads it (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_HPET_STOPS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)
+      message(STATUS "#594 ablation: the HPET stops as the watchdog reads it (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

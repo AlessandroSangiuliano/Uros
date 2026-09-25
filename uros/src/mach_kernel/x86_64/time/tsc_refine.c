@@ -48,7 +48,7 @@ static uint64_t subject_tsc(void)
 	return rdtsc_ordered();
 }
 
-static void tsc_refine_thread(void)
+static void tsc_refine(void)
 {
 	int			id = rulers_long();
 	uint64_t		boot = tsc_hz();
@@ -62,12 +62,12 @@ static void tsc_refine_thread(void)
 		printf("UrMach x86-64: the TSC refined: NOT ASKED — it was not "
 		       "calibrated at boot, so there is nothing to refine "
 		       "(#508, #586)\n");
-		thread_terminate_self();
+		return;
 	}
 	if (id < 0) {
 		printf("UrMach x86-64: the TSC refined: NOT ASKED — no ruler that "
 		       "lasts a second answered the vote (#508)\n");
-		thread_terminate_self();
+		return;
 	}
 	k = rulers_get((unsigned)id);
 
@@ -93,13 +93,13 @@ static void tsc_refine_thread(void)
 		printf("UrMach x86-64: the TSC refined against the %s: NOT ASKED "
 		       "— the sleep lasted %lu ms, long enough for the ruler "
 		       "to wrap (#508)\n", k->name, elapsed * 1000 / boot);
-		thread_terminate_self();
+		return;
 	}
 
 	if (!ruler_rate(&k->r, ~0ULL, &a, &b, &run)) {
 		printf("UrMach x86-64: the TSC refined against the %s — WRONG, "
 		       "the ruler did not move in a second (#508)\n", k->name);
-		thread_terminate_self();
+		return;
 	}
 
 	spread = run.hz > boot ? run.hz - boot : boot - run.hz;
@@ -115,7 +115,7 @@ static void tsc_refine_thread(void)
 		       ? " — the exact source stands"
 		       : " — WRONG, more than one part in 64 from an exact "
 			 "source");
-		thread_terminate_self();
+		return;
 	}
 
 	adopted = spread <= boot / RULER_TOLERANCE;
@@ -134,10 +134,21 @@ static void tsc_refine_thread(void)
 		       : " — WRONG, more than one part in 64 from the boot "
 			 "value, so one of the two measurements is wrong; the "
 			 "boot value is kept");
+}
+
+/*
+ * One thread for both: the refinement once, then the watchdog for as long as
+ * there is something to watch (#594).  The watchdog starts from the rate the
+ * refinement left, whatever it decided.
+ */
+static void tsc_time_thread(void)
+{
+	tsc_refine();
+	tsc_watch();
 	thread_terminate_self();
 }
 
 void tsc_refine_start(void)
 {
-	(void) kernel_thread(kernel_task, tsc_refine_thread, (char *) 0);
+	(void) kernel_thread(kernel_task, tsc_time_thread, (char *) 0);
 }
