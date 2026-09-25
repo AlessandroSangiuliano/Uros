@@ -93,6 +93,7 @@
 #include <kern/misc_protos.h>
 
 #include <device/device_types_kernel.h>
+#include <device/device_machdep.h>	/* #594: device_md_io_reserved */
 
 #include <i386/io_port.h>
 #include <i386/iopb.h>
@@ -381,6 +382,30 @@ iopb_destroy(
 }
 
 /*
+ * #594: the first port of a set that the kernel keeps, or IO_REG_NULL.
+ *
+ * device_io_port_claim() refuses the 8254 and its gate (#508), and this is
+ * the same question asked at the other door: i386_io_port_add() grants a
+ * whole set into the task's I/O permission bitmap, and one bit there opens a
+ * port to reads and writes alike.  Asked of the same device_md_io_reserved(),
+ * so there is one list of what the kernel keeps, not one per door.
+ */
+static io_reg_t
+io_port_list_reserved(
+	io_reg_t	*list)
+{
+	io_reg_t	port;
+
+	while ((port = *list++) != IO_REG_NULL) {
+#if	!ABLATE_594_UNCHECKED
+	    if (device_md_io_reserved(port, 1) != 0)
+		return port;
+#endif	/* !ABLATE_594_UNCHECKED */
+	}
+	return IO_REG_NULL;
+}
+
+/*
  * Add an IO mapping to a thread.
  */
 kern_return_t
@@ -392,6 +417,7 @@ i386_io_port_add(
 	iopb_tss_t	io_tss, new_io_tss;
 	io_port_t	io_port;
 	io_use_t	iu, old_iu;
+	io_reg_t	reserved;
 
 	/*
 	 * #448: an act, because that is what arrives.  mach_i386.defs declares
@@ -417,15 +443,27 @@ i386_io_port_add(
 
 	    /* find the io_port_t for the device */
 	    io_port = device_to_io_port_lookup(device);
-	    if (io_port == 0) {
+	    reserved = IO_REG_NULL;
+	    if (io_port != 0)
+		reserved = io_port_list_reserved(io_port->io_port_list);
+	    if (io_port == 0 || reserved != IO_REG_NULL) {
 		/*
-		 * Device does not have IO ports available.
+		 * Device does not have IO ports available -- or it has, and
+		 * one of them is the kernel's (#594), in which case the set
+		 * is refused whole rather than granted less one: a task that
+		 * asked for a set and got part of it would find out at the
+		 * port, one fault at a time.
 		 */
 		simple_unlock(&iopb_lock);
 		if (new_io_tss)
 		    kfree((vm_offset_t)new_io_tss, sizeof(struct iopb_tss));
 		kfree((vm_offset_t) iu, sizeof(struct io_use));
-		return KERN_INVALID_ARGUMENT;
+		if (io_port == 0)
+		    return KERN_INVALID_ARGUMENT;
+		printf("i386_io_port_add: REFUSED -- the set names port 0x%x, "
+		       "which is %s (#594)\n", reserved,
+		       device_md_io_reserved(reserved, 1));
+		return KERN_NO_ACCESS;
 	    }
 
 	    /* Have the IO port. */
