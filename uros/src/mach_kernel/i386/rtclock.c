@@ -397,15 +397,22 @@ rtc_div64_32(unsigned long long num, unsigned int den)
 static unsigned int
 rtc_subtick_nsec(void)
 {
-	unsigned int	delta, maxd, sub;
+	unsigned long long	since;
+	unsigned int		delta, maxd, sub;
 
 	if (mp_tsc_per_us == 0)
 		return 0;			/* not calibrated: mtime only */
-	delta = (unsigned int)(rtc_rdtsc() - rtclock_tsc_at_tick);
-	/* Cap the delta (~20 ms) so the divl quotient can't exceed 32 bits. */
+	/*
+	 * Cap the delta (~20 ms) so the divl quotient can't exceed 32 bits --
+	 * and cap it in 64 bits, BEFORE the cut to 32 (#599).  Cut first, a
+	 * delta past 2^32 cycles (1.3 s at 3.3 GHz) wrapped to a small number:
+	 * once the tick had stopped for that long, every reading fell back to
+	 * mtime and climbed again, so an interval could come out negative.
+	 * Capped first, a stale anchor reads as what it is: at least a tick.
+	 */
+	since = rtc_rdtsc() - rtclock_tsc_at_tick;
 	maxd = mp_tsc_per_us * 20000u;
-	if (maxd && delta > maxd)
-		delta = maxd;
+	delta = (maxd && since > maxd) ? maxd : (unsigned int)since;
 	sub = rtc_div64_32((unsigned long long)delta * 1000ULL, mp_tsc_per_us);
 	if ((int)sub > rtclock.intr_nsec)
 		sub = rtclock.intr_nsec;	/* never exceed one tick */
