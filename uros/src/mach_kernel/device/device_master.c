@@ -2714,10 +2714,9 @@ ds_master_device_mmio_unmap(
  * same decision check_irq_owner() makes: the legacy devices -- the serial
  * lines, the keyboard, the PIC -- are behind no PCI BAR, and a rule that
  * refused everything unattributed would take the console with it.  The
- * exception is what device_md_io_reserved() names, which the kernel itself
- * uses and keeps from every task: the 8254 and its gate, the PCI
- * configuration ports, and on x86-64 the PM timer where it is a port (#508,
- * #597).
+ * exception is what device_md_io_reserved() names, which the kernel keeps
+ * from every task: the 8254 and its gate, the PCI configuration ports, and
+ * on x86-64 the PM timer where it is a port (#508, #597).
  */
 /*
  * Legacy I/O ranges a task has claimed (#497).
@@ -3064,7 +3063,7 @@ ds_master_device_io_port_claim(
 
 		if (owner != 0) {
 			printf("device_io_port_claim: 0x%x..0x%x REFUSED to task "
-			       "%p — it covers %s (#508)\n", port,
+			       "%p — it covers %s (#508, #597)\n", port,
 			       port + count - 1, (void *)me, owner);
 			return KERN_NO_ACCESS;
 		}

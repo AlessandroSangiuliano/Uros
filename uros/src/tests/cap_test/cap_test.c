@@ -985,8 +985,9 @@ out:
  * needs no claim: that was the route left open when only the claim refused
  * them.  Then 0x10CFC, which the kernel cut to 0xCFC before any check saw it
  * as reserved, and 0x61, the 8254's gate, which the same refusal keeps
- * (#508); not 0x40, whose read would move the counter's byte flip-flop under
- * the kernel if the refusal were missing.  No write is tried -- if the refusal
+ * (#508); not 0x40, whose read, if the refusal were missing, would move the
+ * counter's byte flip-flop under i386's clock, which reads channel 0 as a
+ * latch command and two one-byte reads.  No write is tried -- if the refusal
  * were missing, writing 0xCF8 would be the race itself -- and the write RPC
  * asks the same checks as the read.
  */
@@ -1047,8 +1048,8 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
 
     printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone and "
            "0xcf4..0xcf8, and reads of 0xcf8, 0xcfc, 0x61 and 0x10cfc, "
-           "refused — the ports the kernel keeps are out of every task's "
-           "reach (#508, #597)\n");
+           "refused — the claim and read RPCs keep the ports the kernel "
+           "keeps (#508, #597)\n");
     return 1;
 }
 
