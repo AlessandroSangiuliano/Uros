@@ -45,6 +45,9 @@
  *   device/ds_routines.c  ds_read_done NULL-data clamp  -> test_device_read
  *   i386/fpu.c            FPU state save/restore       -> test_fpu_state
  *   i386/iopb.c           i386_io_port_list (#445)     -> test_io_port_list
+ *                         i386_io_port_add refusing the
+ *                         kernel's ports (#594)         -> test_io_kernel_ports
+ *   i386/AT386/iopl.c     #GP emulation refusing them  -> test_io_kernel_ports
  *   i386/user_ldt.c       user LDT install             -> test_user_ldt
  *   i386/db_interface.c   DDB (SKIP — debugger-only)
  *   debug.c panic restart (SKIP — would panic the kernel)
@@ -815,6 +818,336 @@ test_fpu_state(void)
 }
 
 /* =========================================================================
+ * i386/iopb.c + i386/AT386/iopl.c  -- the kernel's ports, asked for (#594)
+ *
+ * #508 made device_io_port_claim() refuse the 8254 and port 0x61, its
+ * channel-2 gate.  On this target a task had two more ways to a port, and
+ * both are asked here, from a task, which is the only place the question
+ * means anything:
+ *
+ *   - the I/O permission bitmap, which i386_io_port_add() fills with the
+ *     iopl device's whole set the first time a thread holding that device
+ *     touches a port;
+ *   - the #GP emulation in iopl.c, which reads a port the bitmap does NOT
+ *     grant, for any thread that holds the iopl device.
+ *
+ * A second thread does the asking, because a refused `in' is an exception
+ * and a thread stopped in exception_raise() cannot also receive it.  The
+ * handler steps the thread over the one-byte instruction and answers, so
+ * every probe comes back either faulted or with the value it read.
+ *
+ * 🔑 The first probe is a port the set DOES grant: 0x201, the game port,
+ * where a read on a machine without one returns nothing and changes
+ * nothing.  Without it, a kernel that granted nothing at all -- the iopl
+ * device refused whole -- would pass every other probe by faulting, and the
+ * test would report the absence of the mechanism as its success.
+ *
+ * ⚠️ The write probe is a channel-2 command to 0x43, which the emulation
+ * used to carry out for any task whose bitmap held 0x42.  Channel 2 is not
+ * this kernel's clock, so on a kernel that still let it through the write
+ * programs a counter nothing here reads; a probe that could stop the clock
+ * when it failed would be a test that breaks what it checks.
+ * ========================================================================= */
+#if defined(__i386__)
+
+#include <mach/mach_host.h>	/* thread_set_exception_ports */
+#include <mach/exception.h>
+#include "exc_server.h"
+
+#define K242_IO_RECEIVE_MS	3000
+
+enum k242_io_op { K242_INB, K242_INL, K242_OUTB };
+
+static const struct k242_io_probe {
+    unsigned short   port;
+    enum k242_io_op  op;
+    int              refused;	/* what a correct kernel does */
+    const char      *what;
+} k242_io_probes[] = {
+    { 0x201, K242_INB,  0, "inb 0x201, the game port the iopl set grants" },
+    { 0x40,  K242_INB,  1, "inb 0x40, the 8254's channel 0 -- this "
+                           "kernel's clock" },
+    { 0x42,  K242_INB,  1, "inb 0x42, the 8254's channel 2" },
+    { 0x61,  K242_INB,  1, "inb 0x61, channel 2's gate" },
+    { 0x3e,  K242_INL,  1, "inl 0x3e, whose last two bytes are 0x40 and "
+                           "0x41" },
+    { 0x43,  K242_OUTB, 1, "outb 0xb0 to 0x43, a channel-2 command" },
+};
+
+#define K242_IO_PROBES	(sizeof(k242_io_probes) / sizeof(k242_io_probes[0]))
+
+static mach_port_t      k242_io_exc_port = MACH_PORT_NULL;
+static volatile int     k242_io_faulted;	/* set by the handler */
+static volatile int     k242_io_exception;
+static volatile int     k242_io_stray;		/* a fault on anything else */
+static volatile int     k242_io_done;
+static volatile int     k242_io_exc_kr = KERN_SUCCESS;
+
+static struct {
+    int           faulted;
+    int           exception;
+    unsigned int  value;
+} k242_io_result[K242_IO_PROBES];
+
+/*
+ * The one-byte forms only (`in %dx', `out %dx'): the handler steps over
+ * exactly one byte, and checks that the byte it steps over is one of these
+ * three before it does.
+ */
+static void *
+k242_io_prober(void *arg)
+{
+    mach_port_t self = mach_thread_self();
+    unsigned int i;
+    unsigned char v8;
+    unsigned int v32;
+
+    (void)arg;
+
+    k242_io_exc_kr = thread_set_exception_ports(self,
+                                                EXC_MASK_BAD_INSTRUCTION,
+                                                k242_io_exc_port,
+                                                EXCEPTION_DEFAULT,
+                                                THREAD_STATE_NONE);
+    (void)mach_port_deallocate(mach_task_self(), self);
+    if (k242_io_exc_kr != KERN_SUCCESS) {
+        k242_io_done = 1;
+        return NULL;
+    }
+
+    for (i = 0; i < K242_IO_PROBES; i++) {
+        unsigned short port = k242_io_probes[i].port;
+
+        k242_io_faulted = 0;
+        k242_io_exception = 0;
+        v8 = 0;
+        v32 = 0;
+        switch (k242_io_probes[i].op) {
+        case K242_INB:
+            __asm__ volatile("inb %%dx, %%al" : "=a"(v8) : "d"(port));
+            v32 = v8;
+            break;
+        case K242_INL:
+            __asm__ volatile("inl %%dx, %%eax" : "=a"(v32) : "d"(port));
+            break;
+        case K242_OUTB:
+            __asm__ volatile("outb %%al, %%dx" : : "a"(0xb0), "d"(port));
+            break;
+        }
+        k242_io_result[i].faulted = k242_io_faulted;
+        k242_io_result[i].exception = k242_io_exception;
+        k242_io_result[i].value = v32;
+    }
+
+    k242_io_done = 1;
+    return NULL;
+}
+
+/*
+ * What exc_server calls.  It steps the thread over the refused instruction
+ * rather than repairing anything: the refusal is the answer, and the thread
+ * is sent on to ask the next question.
+ *
+ * ⚠️ The thread and task rights arrive with the message and are released
+ * here on every path.  The receive loop below never destroys a request, so
+ * a right this routine kept would be kept for good.
+ */
+kern_return_t
+catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
+                      mach_port_t task, int exception,
+                      exception_data_t code, mach_msg_type_number_t codeCnt)
+{
+    struct i386_thread_state st;
+    mach_msg_type_number_t cnt = i386_THREAD_STATE_COUNT;
+    unsigned char op = 0;
+    kern_return_t kr;
+
+    (void)exception_port;
+    (void)code;
+    (void)codeCnt;
+
+    kr = thread_get_state(thread, i386_THREAD_STATE,
+                          (thread_state_t)&st, &cnt);
+    if (kr == KERN_SUCCESS)
+        op = *(volatile unsigned char *)st.eip;
+    if (op == 0xec || op == 0xed || op == 0xee) {
+        st.eip += 1;
+        kr = thread_set_state(thread, i386_THREAD_STATE,
+                              (const natural_t *)&st, cnt);
+    } else
+        kr = KERN_FAILURE;
+
+    if (kr == KERN_SUCCESS) {
+        k242_io_exception = exception;
+        k242_io_faulted = 1;
+    } else
+        k242_io_stray = 1;
+
+    (void)mach_port_deallocate(mach_task_self(), thread);
+    (void)mach_port_deallocate(mach_task_self(), task);
+    return kr;
+}
+
+kern_return_t
+catch_exception_raise_state(mach_port_t exception_port, int exception,
+                            exception_data_t code,
+                            mach_msg_type_number_t codeCnt,
+                            int *flavor, thread_state_t old_state,
+                            mach_msg_type_number_t old_stateCnt,
+                            thread_state_t new_state,
+                            mach_msg_type_number_t *new_stateCnt)
+{
+    (void)exception_port; (void)exception; (void)code; (void)codeCnt;
+    (void)flavor; (void)old_state; (void)old_stateCnt;
+    (void)new_state; (void)new_stateCnt;
+    return KERN_FAILURE;
+}
+
+kern_return_t
+catch_exception_raise_state_identity(mach_port_t exception_port,
+                                     mach_port_t thread, mach_port_t task,
+                                     int exception, exception_data_t code,
+                                     mach_msg_type_number_t codeCnt,
+                                     int *flavor, thread_state_t old_state,
+                                     mach_msg_type_number_t old_stateCnt,
+                                     thread_state_t new_state,
+                                     mach_msg_type_number_t *new_stateCnt)
+{
+    (void)exception_port; (void)thread; (void)task; (void)exception;
+    (void)code; (void)codeCnt; (void)flavor; (void)old_state;
+    (void)old_stateCnt; (void)new_state; (void)new_stateCnt;
+    return KERN_FAILURE;
+}
+
+/*
+ * Serve exceptions until the prober says it is done, or until a whole
+ * receive window passes with nothing -- a thread that is neither done nor
+ * faulting is somewhere this program cannot see, and saying so is the
+ * result.  Hand-written for the timeout, as fperr_test's is.
+ */
+static int
+k242_io_serve(void)
+{
+    union {
+        mach_msg_header_t   hdr;
+        mig_reply_error_t   err;
+        char                pad[4096];
+    } req, rep;
+    mach_msg_return_t mr;
+
+    while (!k242_io_done) {
+        mr = mach_msg(&req.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                      (mach_msg_size_t)sizeof req, k242_io_exc_port,
+                      K242_IO_RECEIVE_MS, MACH_PORT_NULL);
+        if (mr == MACH_RCV_TIMED_OUT)
+            return k242_io_done;
+        if (mr != MACH_MSG_SUCCESS)
+            return 0;
+        (void)exc_server(&req.hdr, &rep.hdr);
+        if (rep.hdr.msgh_remote_port != MACH_PORT_NULL)
+            (void)mach_msg(&rep.hdr, MACH_SEND_MSG, rep.hdr.msgh_size, 0,
+                           MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+                           MACH_PORT_NULL);
+    }
+    return 1;
+}
+
+static void
+test_io_kernel_ports(void)
+{
+    mach_port_t         iopl = MACH_PORT_NULL;
+    security_token_t    sec = { { 0, 0 } };
+    char                name[] = "iopl";
+    pthread_t           prober;
+    unsigned int        i, wrong = 0;
+    kern_return_t       kr;
+
+    BEGIN_TEST("the 8254 and its gate through the iopl device (iopb.c, "
+               "iopl.c, #594)");
+
+    kr = device_open(g_device_master, MACH_PORT_NULL, 0, sec, name, &iopl);
+    EXPECT_KR(kr, D_SUCCESS, "device_open(\"iopl\")");
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &k242_io_exc_port);
+    EXPECT_KR(kr, KERN_SUCCESS, "mach_port_allocate");
+    kr = mach_port_insert_right(mach_task_self(), k242_io_exc_port,
+                                k242_io_exc_port, MACH_MSG_TYPE_MAKE_SEND);
+    EXPECT_KR(kr, KERN_SUCCESS, "mach_port_insert_right");
+
+    EXPECT(pthread_create(&prober, NULL, k242_io_prober, NULL) == 0,
+           "pthread_create");
+
+    if (!k242_io_serve()) {
+        printf("  FAIL: the probing thread neither finished nor faulted "
+               "within %d ms -- WRONG, it is somewhere this program cannot "
+               "see\n", K242_IO_RECEIVE_MS);
+        g_fail++;
+        return;
+    }
+    (void)pthread_join(prober, NULL);
+
+    EXPECT_KR(k242_io_exc_kr, KERN_SUCCESS, "thread_set_exception_ports");
+    EXPECT(!k242_io_stray, "an exception on an instruction that is not a "
+           "probe");
+
+    for (i = 0; i < K242_IO_PROBES; i++) {
+        const struct k242_io_probe *p = &k242_io_probes[i];
+        int ok = (k242_io_result[i].faulted == p->refused);
+
+        if (k242_io_result[i].faulted)
+            printf("  %s: refused, exception %d%s\n", p->what,
+                   k242_io_result[i].exception,
+                   ok ? "" : " -- WRONG, the iopl set names this port, "
+                             "so the task should have read it");
+        else
+            printf("  %s: %s 0x%x%s\n", p->what,
+                   p->op == K242_OUTB ? "carried out, eax" : "read",
+                   k242_io_result[i].value,
+                   ok ? "" : " -- WRONG, a port the kernel keeps reached "
+                             "a task");
+        if (!ok)
+            wrong++;
+        else if (k242_io_result[i].faulted &&
+                 k242_io_result[i].exception != EXC_BAD_INSTRUCTION) {
+            printf("  -- WRONG, refused as exception %d and not "
+                   "EXC_BAD_INSTRUCTION (%d)\n",
+                   k242_io_result[i].exception, EXC_BAD_INSTRUCTION);
+            wrong++;
+        }
+    }
+
+    /*
+     * The device right is released, not closed: the iopl device is one
+     * device for the whole system, and a close here would take the port
+     * sets of char_server and gpu_server with it.
+     */
+    (void)mach_port_deallocate(mach_task_self(), iopl);
+    (void)mach_port_mod_refs(mach_task_self(), k242_io_exc_port,
+                             MACH_PORT_RIGHT_RECEIVE, -1);
+
+    EXPECT(wrong == 0, "a port the kernel keeps reached a task, or the "
+           "control was refused");
+    printf("  the game port read, and every one of the kernel's ports "
+           "refused\n");
+    PASS();
+}
+
+#else	/* !__i386__ */
+
+/*
+ * x86-64 has no iopl device, no I/O permission bitmap and no #GP emulation
+ * (char_server/main.c says why): device_io_port_claim() is its only door, and
+ * io_claim_race's arm [5] asks that one.
+ */
+static void
+test_io_kernel_ports(void)
+{
+}
+
+#endif	/* __i386__ */
+
+/* =========================================================================
  * Test runner — called from main, must run AFTER bootstrap finishes,
  * AFTER name_server is up.  We give the rest of the boot a few hundred
  * ms by spinning on netname_look_up for ipc_bench, but if it never
@@ -878,6 +1211,7 @@ main(int argc, char **argv)
     test_evc_wait();
     test_device_read();
     test_fpu_state();
+    test_io_kernel_ports();
 
     printf("\n=== kernel242_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);
     return (g_fail == 0) ? 0 : 1;
