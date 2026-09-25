@@ -29,6 +29,21 @@
  * still said the host's 2994656 -- 219 ppm, well inside the rulers' window,
  * so only the precedence caught it.
  *
+ * UNDER A HYPERVISOR, THE HOST'S NTP ALSO SLEWS THE PHASE (#594).  MAXFREQ
+ * bounds only the frequency Linux's NTP sets.  The phase error it is handed
+ * is drained on top of that, offset >> (SHIFT_PLL + time_constant) every
+ * second (kernel/time/ntp.c, ntp_offset_chunk()), with the offset clamped to
+ * MAXPHASE, 0.5 s, and time_constant to 0 and above.  So a host's clock may
+ * run up to MAXPHASE >> SHIFT_PLL = 125 ms a second -- 125,000 ppm -- from
+ * true time while it converges, and a guest's rulers with it.  #594 measured
+ * it on a host just rebooted: timesyncd hands the kernel offsets under 0.4 s
+ * at constant 1, and the rulers ran 3343 ppm from KVM's clock at boot and
+ * 7325 ppm from the TSC a few minutes later -- here the exact source was found
+ * WRONG and the rulers' value, 0.33% off, adopted.  Under a hypervisor that
+ * term is added: a source contradicts the rulers only beyond what the host's
+ * NTP can do to them within one measurement.  On bare metal the rulers are
+ * crystals, and nothing slews them.
+ *
  * NOTHING MEASURED, NOTHING ADOPTED.  With no ruler that answered, a source
  * cannot be checked, and it is not believed unchecked: the clock's rate stays
  * zero and its consumers say NOT ASKED (#586).
@@ -46,6 +61,9 @@
 
 #define EXACT_AGREE_PPM		10
 #define EXACT_BOUND_PPM		1000	/* 500 for the rulers, 500 for NTP */
+#define NTP_MAXPHASE_NS		500000000	/* Linux, <linux/timex.h> */
+#define NTP_SHIFT_PLL		2		/* the same header */
+#define EXACT_PHASE_PPM		((NTP_MAXPHASE_NS / 1000) >> NTP_SHIFT_PLL)
 
 static uint64_t ppm_apart(uint64_t a, uint64_t b)
 {
@@ -62,7 +80,8 @@ uint64_t exact_choose(const uint64_t hz[FREQ_EXACT], uint64_t measured,
 
 	*out = (struct exact_choice){ .adopted = -1 };
 	out->measured = measured;
-	out->bound_ppm = bracket_ppm / 2 + EXACT_BOUND_PPM;
+	out->phase_ppm = freq_under_hypervisor() ? EXACT_PHASE_PPM : 0;
+	out->bound_ppm = bracket_ppm / 2 + EXACT_BOUND_PPM + out->phase_ppm;
 
 	for (id = 0; id < FREQ_EXACT; id++) {
 		out->hz[id] = hz[id];

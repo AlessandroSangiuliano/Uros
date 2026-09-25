@@ -142,6 +142,14 @@ static void kvmclock_read(struct freq_hypervisor *out)
 	out->kvmclock_tsc_hz = pvclock_implied_hz(mul, shift);
 }
 
+int freq_under_hypervisor(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (c & CPUID_HYPERVISOR_BIT) != 0;
+}
+
 void freq_hypervisor_read(struct freq_hypervisor *out)
 {
 	uint32_t a, b, c, d;
@@ -239,12 +247,16 @@ void freq_exact_read(struct freq_exact *out)
 
 #if	ABLATE_508_EXACT_LIES
 	/*
-	 * #508: the first source that states a rate states it one part in
-	 * thirty-two high, so the measurement can be seen contradicting it.
+	 * #508: the first source that states a rate states it a quarter high,
+	 * so the measurement can be seen contradicting it.  A quarter and not
+	 * the thirty-second it was: under a hypervisor a contradiction now has
+	 * to exceed what the host's NTP can do to the rulers, 12.5% (exact.c,
+	 * #594), and a lie inside that is one this check cannot tell from a
+	 * host converging.
 	 */
 	for (unsigned i = 0; i < FREQ_EXACT; i++)
 		if (out->tsc_hz[i] != 0) {
-			out->tsc_hz[i] += out->tsc_hz[i] / 32;
+			out->tsc_hz[i] += out->tsc_hz[i] / 4;
 			break;
 		}
 #endif

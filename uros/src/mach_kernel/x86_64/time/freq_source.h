@@ -86,6 +86,13 @@ struct freq_hypervisor {
 void freq_hypervisor_read(struct freq_hypervisor *out);
 
 /*
+ * CPUID.1:ECX[31] alone (#594): whether the rulers are hardware, or copies of
+ * a host's clock that the host's NTP steers.  time/exact.c and the watchdog
+ * judge the two cases differently.
+ */
+int freq_under_hypervisor(void);
+
+/*
  * The exact sources, as candidates for the TSC's rate (#508, phase 3), in the
  * order they are believed:
  *

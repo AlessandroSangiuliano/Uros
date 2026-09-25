@@ -29,6 +29,8 @@ enum {
 struct exact_choice {
 	uint64_t	measured;		/* the rulers' verdict, or 0 */
 	uint64_t	bound_ppm;		/* how far a source may be from it */
+	uint64_t	phase_ppm;		/* the part of it that is a host's
+						   NTP slew: 0 on bare metal */
 	int		adopted;		/* FREQ_* id, or -1 */
 	uint64_t	hz[FREQ_EXACT];
 	uint64_t	ppm[FREQ_EXACT];	/* from the measurement */

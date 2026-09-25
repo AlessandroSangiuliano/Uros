@@ -260,9 +260,11 @@ option(UROS_ABLATE_508_NO_HPET "Build the #508 ablation: the ACPI HPET table is 
 # #508: no exact source is seen, so the measured path runs on a machine that
 # has one.  Never ON otherwise.
 option(UROS_ABLATE_508_EXACT_HIDDEN "Build the #508 ablation: the exact TSC sources are not seen" OFF)
-# #508: the first exact source that states a rate states it 1/32 high, so the
-# rulers contradict it and it is WRONG.  Never ON otherwise.
-option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC source states 1/32 high" OFF)
+# #508: the first exact source that states a rate states it a quarter high, so
+# the rulers contradict it and it is WRONG -- a quarter because under a
+# hypervisor a contradiction has to exceed the host's NTP slew, 12.5% (#594).
+# Never ON otherwise.
+option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC source states a quarter high" OFF)
 # #508: the processor states CPUID 0x15 as OMEGA's does, so the path that
 # adopts it -- which no guest can reach -- runs.  Never ON otherwise.
 option(UROS_ABLATE_508_CPUID_15 "Build the #508 ablation: CPUID 0x15 states OMEGA's crystal and ratio" OFF)
@@ -557,7 +559,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   endif()
   if(UROS_ABLATE_508_EXACT_LIES)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_EXACT_LIES=1)
-      message(STATUS "#508 ablation: the first exact TSC source states 1/32 high (x86_64)")
+      message(STATUS "#508 ablation: the first exact TSC source states a quarter high (x86_64)")
   endif()
   if(UROS_ABLATE_508_CPUID_15)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_CPUID_15=1)
