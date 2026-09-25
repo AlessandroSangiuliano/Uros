@@ -140,6 +140,70 @@ unsigned int		ioapic_rmw_count[NCPUS];
 volatile unsigned int	ioapic_inside;
 volatile unsigned int	ioapic_overlaps;
 
+/*
+ * 🔴 THE PAIR IS ONE FOR THE WHOLE MACHINE, AND A READ-MODIFY-WRITE SELECTS
+ * TWICE (#599).  Two processors interleaving inside it each read or write the
+ * other's pin.  The widening arm (UROS_ABLATE_599_WIDEN) showed both ways it
+ * ends: pin 2 -- the 8254 -- holding pin 11's entry, so hardclock never ran
+ * again while everything else did; and AHCI's pin holding line 5's entry,
+ * whose vector had no handler and stopped the tick through intnull's printf.
+ * Processor 0 masks and unmasks from interrupt context (the deferral and its
+ * replay), and the others from thread context (device_intr_enable after every
+ * AHCI interrupt), so the race needs nothing unusual to happen.
+ *
+ * So every access sequence -- a read-modify-write, the two writes of an entry
+ * -- holds ioapic_pair_lock, with interrupts off, the pattern #597 gave the
+ * PCI configuration pair (i386/pci/pcibios.c):
+ *
+ *   - a leaf: nothing is taken or waited on while it is held, so it cannot
+ *     be part of a cycle;
+ *   - interrupts off for the hold, so an interrupt on the same processor
+ *     cannot start a sequence inside one (the deferral path masks from
+ *     interrupt context).  Every caller already had them off; this does not
+ *     rely on it.
+ *
+ * ioapic_lock_waits counts how often the lock was found taken: a lock nobody
+ * ever waits on is one whose absence could not have been noticed either.
+ * The overlap count above is taken inside the lock, where it can only stay 0.
+ */
+static volatile unsigned char	ioapic_pair_lock;
+volatile unsigned int		ioapic_lock_waits;
+
+static unsigned int
+ioapic_pair_enter(void)
+{
+	unsigned int	flags;
+	unsigned char	busy;
+	int		waited = 0;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+#ifndef ABLATE_599_NO_LOCK
+	for (;;) {
+		busy = 1;
+		__asm__ volatile("xchgb %0, %1"
+				 : "+q" (busy), "+m" (ioapic_pair_lock)
+				 : : "memory");
+		if (busy == 0)
+			break;
+		waited = 1;
+		__asm__ volatile("pause");
+	}
+	if (waited)
+		__sync_fetch_and_add(&ioapic_lock_waits, 1);
+#endif
+	return flags;
+}
+
+static void
+ioapic_pair_leave(unsigned int flags)
+{
+#ifndef ABLATE_599_NO_LOCK
+	__asm__ volatile("" : : : "memory");
+	ioapic_pair_lock = 0;
+#endif
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 static __inline__ int
 ioapic_enter(void)
 {
@@ -173,9 +237,12 @@ static void
 ioapic_write_rte(unsigned int irq, unsigned int low)
 {
 	unsigned int reg = IOA_R_REDIRECTION + 2 * irq;
+	unsigned int flags;
 
+	flags = ioapic_pair_enter();
 	ioapic_write(reg + 1, (unsigned int)ioapic_dest << 24);
 	ioapic_write(reg, low);
+	ioapic_pair_leave(flags);
 }
 
 /*
@@ -200,7 +267,7 @@ gsi_for_irq(unsigned int irq)
 void
 ioapic_mask_irq(unsigned int irq)
 {
-	unsigned int reg, low, gsi;
+	unsigned int reg, low, gsi, flags;
 	int first;
 
 	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
@@ -209,17 +276,19 @@ ioapic_mask_irq(unsigned int irq)
 	if (gsi >= ioapic_redirs)
 		return;
 	reg = IOA_R_REDIRECTION + 2 * gsi;
+	flags = ioapic_pair_enter();
 	first = ioapic_enter();
 	low = ioapic_read(reg);
 	ioapic_widen();
 	ioapic_write(reg, low | IOA_R_R_MASKED);
 	ioapic_leave(first, gsi);
+	ioapic_pair_leave(flags);
 }
 
 void
 ioapic_unmask_irq(unsigned int irq)
 {
-	unsigned int reg, low, gsi;
+	unsigned int reg, low, gsi, flags;
 	int first;
 
 	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
@@ -228,11 +297,13 @@ ioapic_unmask_irq(unsigned int irq)
 	if (gsi >= ioapic_redirs)
 		return;
 	reg = IOA_R_REDIRECTION + 2 * gsi;
+	flags = ioapic_pair_enter();
 	first = ioapic_enter();
 	low = ioapic_read(reg);
 	ioapic_widen();
 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
 	ioapic_leave(first, gsi);
+	ioapic_pair_leave(flags);
 }
 
 /*
@@ -285,7 +356,12 @@ ioapic_init(void)
 	ioapic_dest = mp_bsp_lapic_id_get();
 
 	/* Max redirection entry is in version reg bits 16-23 (count = max+1). */
-	version = ioapic_read(IOA_R_VERSION);
+	{
+		unsigned int	flags = ioapic_pair_enter();
+
+		version = ioapic_read(IOA_R_VERSION);
+		ioapic_pair_leave(flags);
+	}
 	ioapic_redirs = ((version >> IOA_R_VERSION_ME_SHIFT) &
 			 IOA_R_VERSION_ME_MASK) + 1;
 	if (ioapic_redirs > IOAPIC_ISA_IRQS)

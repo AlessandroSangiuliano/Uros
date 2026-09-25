@@ -134,6 +134,7 @@ say("urmach_rcu_retired", "urmach_rcu_retired")
 print("== #599 counters")
 say("ioapic_overlaps", "ioapic_overlaps")
 say("ioapic_inside", "ioapic_inside")
+say("ioapic_lock_waits", "ioapic_lock_waits")
 for c in range(ncpu):
     say("ioapic_rmw_count[%d]" % c, "ioapic_rmw_count[%d]" % c)
 say("spl_to_user_count", "spl_to_user_count")
