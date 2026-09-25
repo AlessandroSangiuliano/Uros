@@ -354,7 +354,9 @@ hardclock(
 	 * #331 step 2: per-CPU QSBR backstop.  Fires at HZ on every CPU; reports
 	 * a quiescent state when this CPU is not mid-lookup (depth==0).  This is
 	 * what keeps a grace period from stalling on a CPU that busy-spins on a
-	 * lock and never context-switches.
+	 * lock and never context-switches.  On i386 SMP only processor 0 comes
+	 * through here; the others make the same report from their own tick,
+	 * lapic_timer_handler() (#599).
 	 */
 	urmach_rcu_quiescent_state();
 

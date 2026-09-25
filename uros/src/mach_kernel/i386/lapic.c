@@ -51,6 +51,7 @@
 #include <i386/pio.h>			/* inb/outb */
 #include <kern/uslock_census.h>		/* #486: uslock_census_sample */
 #include <i386/clock_watch.h>		/* #599: clock_watch_tick/init */
+#include <kern/rcu.h>			/* urmach_rcu_quiescent_state */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
@@ -284,6 +285,15 @@ lapic_timer_handler(struct i386_interrupt_state *regs)
 
 	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
 	hertz_tick(usermode, (vm_offset_t)regs->eip);
+
+	/*
+	 * #331's per-processor RCU backstop, which hardclock gives processor 0
+	 * (#599): without it an application processor reported a quiescent
+	 * state only when it switched threads or idled, so one spinning on a
+	 * lock held a grace period open.  x86-64's tick does the same
+	 * (x86_64/time/clock_event.c).
+	 */
+	urmach_rcu_quiescent_state();
 
 	lapic_eoi();
 	mp_enable_preemption_no_check();
