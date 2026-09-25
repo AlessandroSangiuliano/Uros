@@ -19,7 +19,6 @@
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
-#include <cpu/smp.h>
 #include <trap/trap.h>
 #include <time/hpet.h>
 #include <time/hpet_event.h>
@@ -131,7 +130,6 @@ static int		pm_gap;		/* a fire interval too long for the PM
 					   timer's wrap: its total is not a
 					   time */
 static uint64_t		tsc0;
-static unsigned long	ticks0[NCPUS];
 
 /* The window closed, for the thread that prints it. */
 static struct report {
@@ -139,7 +137,6 @@ static struct report {
 	unsigned	index;
 	uint64_t	counts, pm, tsc;
 	int		pm_valid;
-	unsigned long	ticks[NCPUS];
 } report;
 static volatile int	report_pending;
 static unsigned		reports_dropped;
@@ -308,11 +305,7 @@ static uint64_t window_length(unsigned index)
 
 static void window_open(uint32_t now)
 {
-	unsigned c;
-
 	w = (struct window){ .late_min = UINT32_MAX };
-	for (c = 0; c < NCPUS; c++)
-		ticks0[c] = clock_event_ticks(c);
 	win_last = now;
 	win_counts = 0;
 	win_length = window_length(win_index);
@@ -332,7 +325,6 @@ static void window_open(uint32_t now)
 static void window_account(uint32_t now)
 {
 	uint32_t gap = now - win_last;
-	unsigned c;
 
 	win_counts += gap;
 	win_last = now;
@@ -357,8 +349,6 @@ static void window_account(uint32_t now)
 		report.pm = win_pm;
 		report.pm_valid = pmtimer_present() && !pm_gap;
 		report.tsc = rdtsc() - tsc0;
-		for (c = 0; c < NCPUS; c++)
-			report.ticks[c] = clock_event_ticks(c) - ticks0[c];
 		smp_wmb();
 		report_pending = 1;
 	}
@@ -668,7 +658,6 @@ void hpet_event_drain_report(void)
 {
 	struct report	*r = &report;
 	uint64_t	tsc_rate = tsc_hz();
-	unsigned	ev_hz = clock_event_hz();
 	unsigned	c;
 	struct line	l;
 
@@ -721,40 +710,34 @@ void hpet_event_drain_report(void)
 		put_u(&l, reports_dropped);
 		put_s(&l, " windows closed while one waited to be printed");
 	}
+#if defined(ABLATE_593_ICR_OPEN) && ABLATE_593_ICR_OPEN
+	put_s(&l, "; since boot, ");
+	put_u(&l, lapic_icr_nested());
+	put_s(&l, " IPI sends began inside another on the same processor "
+		  "(UROS_ABLATE_593_ICR_OPEN)");
+#endif
 	put_s(&l, " (#593)");
 	printf("%s\n", l.b);
 
+	/*
+	 * Each processor's ticks against the TSC and the PM timer are
+	 * clock_event.c's lines, whatever the backend; what only the broadcast
+	 * can say is how long after its deadline each processor re-armed --
+	 * the IPI's delivery and the tick handler together.
+	 */
 	for (c = 0; c < NCPUS; c++) {
-		unsigned long t = r->ticks[c];
-
-		if (!smp_is_online(c) && t == 0)
+		if (r->w.rearm_n[c] == 0)
 			continue;
 		l.n = 0;
 		put_s(&l, "clock_event: hpet: cpu ");
 		put_u(&l, c);
-		put_s(&l, " took ");
-		put_u(&l, t);
+		put_s(&l, " re-armed ");
+		put_u(&l, counts_to_ns(r->w.rearm_sum[c] / r->w.rearm_n[c]));
+		put_s(&l, " ns after its deadline on average, ");
+		put_u(&l, counts_to_ns(r->w.rearm_max[c]));
+		put_s(&l, " at most, over ");
+		put_u(&l, r->w.rearm_n[c]);
 		put_s(&l, " ticks");
-		if (tsc_rate != 0 && r->tsc != 0) {
-			put_s(&l, ", ");
-			put_u(&l, (uint64_t)t * 1000 * tsc_rate
-				  / ((uint64_t)ev_hz * r->tsc));
-			put_s(&l, " per mille of nominal by the TSC");
-		}
-		if (r->pm_valid && r->pm != 0) {
-			put_s(&l, ", ");
-			put_u(&l, (uint64_t)t * 1000 * PMTIMER_HZ
-				  / ((uint64_t)ev_hz * r->pm));
-			put_s(&l, " by the PM timer");
-		}
-		if (r->w.rearm_n[c] != 0) {
-			put_s(&l, "; due to re-armed ");
-			put_u(&l, counts_to_ns(r->w.rearm_sum[c]
-					       / r->w.rearm_n[c]));
-			put_s(&l, " ns mean, ");
-			put_u(&l, counts_to_ns(r->w.rearm_max[c]));
-			put_s(&l, " max");
-		}
 		printf("%s\n", l.b);
 	}
 

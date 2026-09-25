@@ -38,6 +38,7 @@
 #include <x86_64/cpu/ipi.h>		/* #594: every processor leaves the TSC */
 #include <x86_64/cpu/percpu.h>		/* #594: percpu_intr_disable */
 #include <x86_64/time/hpet_event.h>	/* #593: the third backend */
+#include <x86_64/time/pmtimer.h>	/* #593: the ticks against a ruler */
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
@@ -683,6 +684,176 @@ clock_selftest(unsigned cpu)
 	clock_report[cpu].pending |= CLOCK_REPORT_RATE;
 }
 
+/* ---------------------------------------------- the tick's windows ---- */
+
+/*
+ * #593: every processor's ticks against the TSC and the PM timer, in windows
+ * of 1 s, then 10 s, then a minute -- whatever the backend, so that two
+ * backends can be compared on one binary, -H against none.  The HPET's own
+ * report says how late its comparator matched; this says whether each
+ * processor got the ticks it was owed, which is the question for all three.
+ *
+ * Driven by the boot processor's tick, timed by the TSC -- or by the PM timer
+ * when the TSC has no rate (#594) -- closed in the tick and printed by
+ * clock_event_drain_reports().  The PM timer's total is added up a tick at a
+ * time, because at 24 bits it wraps every 4.7 s; a gap between two ticks
+ * longer than four seconds by the TSC makes that total no longer a time, and
+ * the line says so.
+ */
+static struct {
+	int		open;
+	unsigned	index;
+	uint64_t	tsc0, tsc_last;
+	uint32_t	pm_last;
+	uint64_t	pm;
+	int		pm_gap;
+	unsigned long	ticks0[NCPUS];
+} tw;
+
+static struct {
+	unsigned	index;
+	uint64_t	tsc, pm;
+	int		pm_valid;
+	unsigned long	ticks[NCPUS];
+} tw_report;
+
+static volatile int	tw_pending;
+static unsigned		tw_dropped;
+
+static uint64_t
+tick_window_seconds(unsigned index)
+{
+	return index == 0 ? 1 : index == 1 ? 10 : 60;
+}
+
+static void
+tick_window_open(uint64_t now)
+{
+	unsigned c;
+
+	for (c = 0; c < NCPUS; c++)
+		tw.ticks0[c] = tick_count[c];
+	tw.tsc0 = tw.tsc_last = now;
+	tw.pm = 0;
+	tw.pm_gap = 0;
+	if (pmtimer_present())
+		tw.pm_last = pmtimer_read();
+	tw.open = 1;
+}
+
+static void
+tick_window_account(void)
+{
+	uint64_t	rate = tsc_hz(), now = rdtsc(), want;
+	unsigned	c;
+	int		closed;
+
+	if (!tw.open) {
+		tick_window_open(now);
+		return;
+	}
+	if (pmtimer_present()) {
+		uint32_t pm = pmtimer_read();
+
+		tw.pm += pmtimer_delta(tw.pm_last, pm);
+		tw.pm_last = pm;
+	}
+	if (rate != 0 && now - tw.tsc_last > 4 * rate)
+		tw.pm_gap = 1;
+	tw.tsc_last = now;
+
+	want = tick_window_seconds(tw.index);
+	if (rate != 0)
+		closed = now - tw.tsc0 >= want * rate;
+	else if (pmtimer_present())
+		closed = tw.pm >= want * PMTIMER_HZ;
+	else
+		return;		/* no clock to close a window by */
+	if (!closed)
+		return;
+
+	if (tw_pending) {
+		tw_dropped++;
+	} else {
+		tw_report.index = tw.index;
+		tw_report.tsc = now - tw.tsc0;
+		tw_report.pm = tw.pm;
+		tw_report.pm_valid = pmtimer_present() && !tw.pm_gap;
+		for (c = 0; c < NCPUS; c++)
+			tw_report.ticks[c] = tick_count[c] - tw.ticks0[c];
+		smp_wmb();
+		tw_pending = 1;
+	}
+	tw.index++;
+	tick_window_open(now);
+}
+
+static void
+tick_window_print(void)
+{
+	uint64_t	rate = tsc_hz();
+	uint64_t	tsc_ms, pm_ms;
+	unsigned	c;
+
+	if (tw_pending != 1 || !__sync_bool_compare_and_swap(&tw_pending, 1, 2))
+		return;
+	smp_rmb();
+
+	tsc_ms = rate ? tw_report.tsc * 1000 / rate : 0;
+	pm_ms = tw_report.pm * 1000 / PMTIMER_HZ;
+	if (rate != 0 && tw_report.pm_valid)
+		printf("clock_event: window %u on %s, %llu ms by the TSC, %llu "
+		       "ms by the PM timer%s (#593)\n", tw_report.index,
+		       clock_event_name(), (unsigned long long) tsc_ms,
+		       (unsigned long long) pm_ms,
+		       tw_dropped ? "; windows were dropped while one waited "
+				    "to be printed" : "");
+	else if (rate != 0)
+		printf("clock_event: window %u on %s, %llu ms by the TSC, no PM "
+		       "timer to check it by%s (#593)\n", tw_report.index,
+		       clock_event_name(), (unsigned long long) tsc_ms,
+		       tw_dropped ? "; windows were dropped while one waited "
+				    "to be printed" : "");
+	else
+		printf("clock_event: window %u on %s, the TSC has no rate, "
+		       "%llu ms by the PM timer%s (#593)\n", tw_report.index,
+		       clock_event_name(), (unsigned long long) pm_ms,
+		       tw_dropped ? "; windows were dropped while one waited "
+				    "to be printed" : "");
+
+	for (c = 0; c < NCPUS; c++) {
+		uint64_t t = tw_report.ticks[c];
+		uint64_t by_tsc = rate && tw_report.tsc
+				  ? t * 1000 * rate
+				    / ((uint64_t) event_hz * tw_report.tsc) : 0;
+		uint64_t by_pm = tw_report.pm_valid && tw_report.pm
+				 ? t * 1000 * PMTIMER_HZ
+				   / ((uint64_t) event_hz * tw_report.pm) : 0;
+
+		if (t == 0 && tick_count[c] == 0)
+			continue;	/* not a processor that ticks here */
+		if (rate != 0 && tw_report.pm_valid)
+			printf("clock_event: cpu %u took %llu ticks in window "
+			       "%u, %llu per mille of nominal by the TSC, %llu "
+			       "by the PM timer\n", c, (unsigned long long) t,
+			       tw_report.index, (unsigned long long) by_tsc,
+			       (unsigned long long) by_pm);
+		else if (rate != 0)
+			printf("clock_event: cpu %u took %llu ticks in window "
+			       "%u, %llu per mille of nominal by the TSC\n", c,
+			       (unsigned long long) t, tw_report.index,
+			       (unsigned long long) by_tsc);
+		else
+			printf("clock_event: cpu %u took %llu ticks in window "
+			       "%u, %llu per mille of nominal by the PM timer\n",
+			       c, (unsigned long long) t, tw_report.index,
+			       (unsigned long long) by_pm);
+	}
+
+	smp_wmb();
+	tw_pending = 0;
+}
+
 void
 clock_event_drain_reports(void)
 {
@@ -733,6 +904,9 @@ clock_event_drain_reports(void)
 						   : 0),
 		       clock_event_name());
 	}
+
+	/* Every processor's ticks, whatever the backend (#593). */
+	tick_window_print();
 
 	/* And the HPET broadcast's own accounting, when it is the clock. */
 	hpet_event_drain_report();
@@ -869,6 +1043,8 @@ clock_event_tick(struct trap_frame *frame)
 	if (cpu < NCPUS)
 		tick_count[cpu]++;
 	clock_selftest(cpu);
+	if (cpu == (unsigned) master_cpu)
+		tick_window_account();
 
 	/*
 	 * Acknowledge, then re-arm.
