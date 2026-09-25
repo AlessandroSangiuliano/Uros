@@ -1100,9 +1100,12 @@ test_io_kernel_ports(void)
                    k242_io_result[i].exception,
                    ok ? "" : " -- WRONG, the iopl set names this port, "
                              "so the task should have read it");
+        else if (p->op == K242_OUTB)
+            printf("  %s: carried out%s\n", p->what,
+                   ok ? "" : " -- WRONG, a port the kernel keeps reached "
+                             "a task");
         else
-            printf("  %s: %s 0x%x%s\n", p->what,
-                   p->op == K242_OUTB ? "carried out, eax" : "read",
+            printf("  %s: read 0x%x%s\n", p->what,
                    k242_io_result[i].value,
                    ok ? "" : " -- WRONG, a port the kernel keeps reached "
                              "a task");
