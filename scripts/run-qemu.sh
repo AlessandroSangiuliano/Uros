@@ -71,6 +71,7 @@ USE_AHCI=true
 USE_AHCI2=false
 AHCI2_IMAGE=""      # --ahci2-image PATH: attach PATH as AHCI port 1 AS IT IS (#498)
 USE_VIRTIO=false
+VIRTIO_FIRST=false  # --virtio-first: the virtio-blk controller goes before the AHCI one (#592)
 USE_BUNDLE=true     # Issue #186: stage-1 multiboot bundle (mod[1]) on by default
 USE_SHA_NI=false    # Issue #180: --sha-ni → TCG + Icelake-Server,+sha-ni
 # #516: this target has only ever been run under KVM, and until now there was
@@ -106,6 +107,7 @@ while [ $# -gt 0 ]; do
         --ahci2-image) USE_AHCI=true; USE_AHCI2=true; AHCI2_IMAGE="$2"; shift 2 ;;
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
+        --virtio-first) USE_VIRTIO=true; VIRTIO_FIRST=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
         --tcg) USE_TCG=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
@@ -124,6 +126,14 @@ while [ $# -gt 0 ]; do
         *) EXTRA_ARGS="$EXTRA_ARGS $1"; shift ;;
     esac
 done
+
+# A virtio disk beside no AHCI disk would never finish booting: ext_server
+# mounts ahci0a as / and waits for it (ext_server.c), whichever controller the
+# block server numbers first.  Said before anything is built.
+if [ "$USE_VIRTIO" = true ] && [ "$USE_AHCI" != true ]; then
+    echo "ERROR: --virtio needs the AHCI boot disk beside it: ext_server mounts ahci0a as / and waits for it"
+    exit 1
+fi
 
 # Build what is about to boot (#592).
 #
@@ -285,15 +295,16 @@ DBGFS
     done
 }
 
+AHCI_ARGS=""
 if [ "$USE_AHCI" = true ]; then
     if [ ! -f "$DISK_IMG" ]; then
         echo "ERRORE: $DISK_IMG non trovato — esegui ./scripts/make-disk-image.sh prima"
         exit 1
     fi
     echo "AHCI port 0: $DISK_IMG (contiene /mach_servers/, hello.txt, swap)"
-    QEMU_ARGS="$QEMU_ARGS -device ich9-ahci,id=ahci0"
-    QEMU_ARGS="$QEMU_ARGS -drive id=ahcidisk0,file=$DISK_IMG,format=raw,if=none"
-    QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
+    AHCI_ARGS="-device ich9-ahci,id=ahci0"
+    AHCI_ARGS="$AHCI_ARGS -drive id=ahcidisk0,file=$DISK_IMG,format=raw,if=none"
+    AHCI_ARGS="$AHCI_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
 
     if [ "$USE_AHCI2" = true ]; then
         # #498: --ahci2-image attaches a disk ANOTHER boot wrote -- the one an
@@ -310,8 +321,8 @@ if [ "$USE_AHCI" = true ]; then
             AHCI_DISK1="$BUILD_DIR/ahci-test1.img"
             create_ahci_test_disk "$AHCI_DISK1" "disk1"
         fi
-        QEMU_ARGS="$QEMU_ARGS -drive id=ahcidisk1,file=$AHCI_DISK1,format=raw,if=none"
-        QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk1,bus=ahci0.1"
+        AHCI_ARGS="$AHCI_ARGS -drive id=ahcidisk1,file=$AHCI_DISK1,format=raw,if=none"
+        AHCI_ARGS="$AHCI_ARGS -device ide-hd,drive=ahcidisk1,bus=ahci0.1"
         echo "AHCI port 1: $AHCI_DISK1"
     fi
 elif [ "$USE_DISK" = true ]; then
@@ -319,20 +330,40 @@ elif [ "$USE_DISK" = true ]; then
     echo "  non potrà aprire disk0a — avvio degraded (solo bundle stage-1)."
 fi
 
-# Optionally add a virtio-blk-pci device with a test disk.
-# The boot disk stays on IDE; the virtio-blk controller appears as a
-# separate PCI device that the virtio_blk driver can detect and probe.
+# --virtio, --virtio-first: a virtio-blk-pci controller beside the AHCI one.
 #
-# Same layout as the AHCI test disk (Issue #184): MBR + 4 MB ext2 + 4 MB
-# ext2 + ~32 MB raw swap, so default_pager finds "disk0c" regardless of
-# whether the backing module is AHCI or virtio-blk.
+# Its disk is a byte copy of disk.img, made again at every launch (#592): the
+# same partition table, the same /mach_servers/ and the same swap partition.
+# So it serves stage 2's disk0a and default_pager's disk0c whichever of the two
+# controllers the block server numbers first, and this script does not have to
+# predict which one that is.  The block server numbers disks in the order the
+# controllers bind, which is the order of their PCI slots, and qemu hands out
+# slots in command-line order: --virtio attaches the controller after the AHCI
+# one, --virtio-first before it.  The log names the winner:
+# "blk: registered alias 'disk0a' -> '<controller>0a'".
+#
+# A copy and not the same file twice, because two controllers writing one image
+# corrupt it.  Removed first, so a qemu that still has the old copy open keeps
+# its own inode.  Not read-only, because as disk0 it takes default_pager's
+# paging on disk0c.
+#
+# The copy that was here before #224 took the first 4 MB of an IDE disk.  That
+# function was renamed away and this call was left behind, so the flag exited
+# with 127 before qemu started, from then until #592.
 VIRTIO_DISK="$BUILD_DIR/virtio-test.img"
+VIRTIO_ARGS=""
 if [ "$USE_VIRTIO" = true ]; then
-    # Always recreate to ensure correct layout
-    create_ahci_disk "$VIRTIO_DISK" "disk0"
-    echo "Virtio-blk: $VIRTIO_DISK"
-    QEMU_ARGS="$QEMU_ARGS -drive id=virtiodisk0,file=$VIRTIO_DISK,format=raw,if=none"
-    QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=virtiodisk0"
+    rm -f "$VIRTIO_DISK"
+    cp --sparse=always "$DISK_IMG" "$VIRTIO_DISK"
+    VIRTIO_PLACE="$([ "$VIRTIO_FIRST" = true ] && echo before || echo after) the AHCI controller"
+    echo "Virtio-blk: $VIRTIO_DISK (byte copy of disk.img), $VIRTIO_PLACE"
+    VIRTIO_ARGS="-drive id=virtiodisk0,file=$VIRTIO_DISK,format=raw,if=none"
+    VIRTIO_ARGS="$VIRTIO_ARGS -device virtio-blk-pci,drive=virtiodisk0"
+fi
+if [ "$VIRTIO_FIRST" = true ]; then
+    QEMU_ARGS="$QEMU_ARGS $VIRTIO_ARGS $AHCI_ARGS"
+else
+    QEMU_ARGS="$QEMU_ARGS $AHCI_ARGS $VIRTIO_ARGS"
 fi
 
 # ------------------------------------------------------- run conditions
@@ -353,6 +384,7 @@ uros_conditions_block "i386" "$ACCEL" \
 	"cpu/accel:    $ACCEL_ARGS" \
 	"smp:          ${SMP_COUNT:-1}" \
 	"disk:         $([ "$USE_DISK" = true ] && echo yes || echo no)" \
+	"virtio:       $([ "$USE_VIRTIO" = true ] && echo "$VIRTIO_DISK, $VIRTIO_PLACE" || echo no)" \
 	"command:      $0 $ORIG_ARGS"
 
 # ⚠️ `exec' stays.  Without it this shell remains qemu's parent, and every
