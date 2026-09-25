@@ -1,37 +1,38 @@
 #!/usr/bin/env sh
-# Avvia Uros sotto QEMU: kernel multiboot + bootstrap server come modulo.
+# Boots Uros (i386) under QEMU: the kernel by multiboot (-kernel), the
+# bootstrap server, the stage-1 bundle and the DDB symbols as multiboot
+# modules (-initrd).  The disk made by make-disk-image.sh is attached as port 0
+# of an AHCI controller (#224; the kernel's IDE driver is gone).
 #
-# Il kernel Mach viene caricato via multiboot (-kernel), il bootstrap server
-# come modulo multiboot (-initrd). Se presente un'immagine disco con i server
-# (creata da make-disk-image.sh), viene aggiunta come IDE primary (-hda).
-#
-# Uso:
-#   ./scripts/run-qemu.sh                           # avvio standard
+# Usage:
+#   ./scripts/run-qemu.sh                           # standard boot
 #   ./scripts/run-qemu.sh -nographic -serial mon:stdio  # headless
-#   ./scripts/run-qemu.sh --no-disk                 # senza disco
-#   ./scripts/run-qemu.sh --fresh-disk              # rigenera disk.img prima
-#                                                   # del boot (utile dopo
-#                                                   # rebuild o se la run
-#                                                   # precedente è stata
-#                                                   # chiusa a metà writeback)
-#   ./scripts/run-qemu.sh --diskregen               # come sopra: rigenera il
-#                                                   # disco SOLO quando lo chiedi.
-#                                                   # Di default il disco NON è
-#                                                   # rigenerato (anche con
-#                                                   # --bench: la suite passa
-#                                                   # dal bundle stage-1)
-#   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG come secondo disco
-#                                                   # AHCI, SENZA ricrearlo: e'
-#                                                   # /mnt/disk2, dove x86-64
-#                                                   # lascia il file che questo
-#                                                   # target legge (#498)
+#   ./scripts/run-qemu.sh --no-disk                 # no disk
+#   ./scripts/run-qemu.sh --fresh-disk              # regenerate disk.img before
+#                                                   # the boot (after a rebuild,
+#                                                   # or when the previous run
+#                                                   # was cut off mid-writeback)
+#   ./scripts/run-qemu.sh --diskregen               # the same: the disk is
+#                                                   # regenerated ONLY when asked.
+#                                                   # By default it is NOT (not
+#                                                   # even with --bench: the
+#                                                   # suite rides the stage-1
+#                                                   # bundle)
+#   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG as the second AHCI
+#                                                   # disk, NOT recreated: it is
+#                                                   # /mnt/disk2, where x86-64
+#                                                   # leaves the file this
+#                                                   # target reads (#498)
+#   ./scripts/run-qemu.sh --virtio                  # add a virtio-blk disk, a
+#                                                   # copy of disk.img, after the
+#                                                   # AHCI controller (#592)
+#   ./scripts/run-qemu.sh --virtio-first            # the same, before it
 #
-# L'immagine disco contiene /mach_servers/ con:
-#   bootstrap.conf   — configurazione del bootstrap
-#   default_pager    — server di paging
-#
-# Il driver IDE del kernel (hd.c) vede il disco QEMU come hd0.
-# boot_device → d_partitions[0] → prima partizione MBR (ext2).
+# The disk has three MBR partitions (make-disk-image.sh): a, ext2 with
+# /mach_servers/ (bootstrap.conf and the servers); b, a small ext2; c, swap.
+# The ahci module publishes them as ahci0a/b/c and the block server adds the
+# driver-agnostic aliases disk0a/b/c (#184, #224).  Bootstrap stage 2 reads
+# disk0a, default_pager pages to disk0c, and ext_server mounts ahci0a as /.
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)

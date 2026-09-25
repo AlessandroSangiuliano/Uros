@@ -395,7 +395,8 @@ The disk and bundle are built by scripts in `scripts/`, not by CMake. Both pick 
 ./scripts/run-qemu.sh --fresh-disk                    # regenerate disk.img first
 ./scripts/run-qemu.sh --bench all                     # full bench suite
 ./scripts/run-qemu.sh --ahci2                         # add a second AHCI disk
-./scripts/run-qemu.sh --virtio                        # also expose a virtio-blk
+./scripts/run-qemu.sh --virtio                        # add a virtio-blk disk (a copy of disk.img) after the AHCI one
+./scripts/run-qemu.sh --virtio-first                  # the same, before it, so the virtio disk becomes disk0
 ./scripts/run-qemu.sh --sha-ni                        # force TCG + Icelake +sha-ni
 ./scripts/run-qemu.sh --no-disk                       # boot bundle only
 ./scripts/run-qemu.sh --no-bundle                     # boot disk only
@@ -530,7 +531,7 @@ uros/
 ├── build/                     # Build output
 │   └── export/uros/boot/      # mach_kernel binary
 scripts/
-├── run-qemu.sh                # QEMU launch (--ahci, --virtio, --bench, --minimal, --smp N)
+├── run-qemu.sh                # QEMU launch (--ahci, --virtio, --virtio-first, --bench, --minimal, --smp N)
 ├── run-ush.sh                 # serial-only ush convenience launcher
 ├── smoke-ush.sh / .exp        # release smoke gate (--smp N)
 ├── diag293-mach.exp           # focused Mach OOL stress harness
