@@ -501,10 +501,10 @@ static void hpet_ev_setup(uint8_t vector)
 
 /*
  * A deadline counted from now -- a processor's first, or one whose tick came
- * too late to count from the deadline that fired -- moved onto the grid of a
- * processor already armed with the same interval: the first point of that
- * grid at or after the deadline asked for.  Never earlier than asked, at most
- * one interval later, and once: from then on the two re-arm from the same
+ * too late to count from the deadline that fired -- moved onto the grid of
+ * another processor with the same interval: the first point of that grid at
+ * or after the deadline asked for.  Never earlier than asked, at most one
+ * interval later, and once: from then on the two re-arm from the same
  * deadlines and share every broadcast.
  *
  * Without it, processors that started a few milliseconds apart keep their
@@ -512,23 +512,32 @@ static void hpet_ev_setup(uint8_t vector)
  * measured at 1.8 comparator interrupts per period at four processors under
  * KVM, and the writes found behind the counter came from one phase's
  * deadline arriving while the other's broadcast was still being sent.
+ *
+ * ⚠️ A processor that has been sent its tick and has not re-armed yet has a
+ * grid too -- the deadline that fired, plus its interval -- and it counts.
+ * Looking only at armed processors, TCG kept three phases at four processors
+ * for minutes: its vCPUs take their ticks one after another, and a fresh arm
+ * made while the others were all between their kick and their re-arm found
+ * nobody to join.
  */
 static uint32_t join_locked(unsigned self, uint32_t want, uint32_t counts)
 {
-	uint64_t left = armed & ~BIT(self);
+	uint64_t left = (armed | woken) & ~BIT(self);
 
 	while (left != 0) {
 		unsigned	c = (unsigned)__builtin_ctzll(left);
+		uint32_t	grid;
 		int32_t		after;
 		uint32_t	k;
 
 		left &= left - 1;
 		if (interval[c] != counts)
 			continue;
-		after = (int32_t)(want - due[c]);
+		grid = (armed & BIT(c)) ? due[c] : woken_for[c];
+		after = (int32_t)(want - grid);
 		k = after <= 0 ? 0 : ((uint32_t)after + counts - 1) / counts;
 		w.joins++;
-		return due[c] + k * counts;
+		return grid + k * counts;
 	}
 	return want;
 }
