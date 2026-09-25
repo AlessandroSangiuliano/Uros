@@ -133,4 +133,14 @@ const struct exact_choice *tsc_source(void);
 void tsc_refine_start(void);
 void tsc_refined(uint64_t rate);	/* for the refinement only */
 
+/*
+ * The watchdog (#594, time/tsc_watch.c): after the refinement, the same thread
+ * keeps comparing the TSC with the rulers that last a second, and names a
+ * clock that disagrees with the other two.  tsc_watch() returns when nothing
+ * is left to watch; tsc_distrust() is what it calls when the clock it names
+ * is the TSC, after the tick has left it.
+ */
+void tsc_watch(void);
+void tsc_distrust(void);
+
 #endif	/* _X86_64_TIME_TSC_H_ */

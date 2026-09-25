@@ -129,9 +129,23 @@ int tsc_calibrate(void)
 	return tsc_rate != 0;
 }
 
+/*
+ * #594: zero once the watchdog has named the TSC, which is what every
+ * consumer already answers as NOT ASKED (#586): the clock's sub-tick
+ * interpolation stops, and nothing new is timed by it.  The watchdog moves
+ * the tick off the TSC before it calls tsc_distrust(), not after
+ * (clock_event.c says why).
+ */
+static int tsc_withdrawn;
+
 uint64_t tsc_hz(void)
 {
-	return tsc_rate;
+	return tsc_withdrawn ? 0 : tsc_rate;
+}
+
+void tsc_distrust(void)
+{
+	tsc_withdrawn = 1;
 }
 
 /*
