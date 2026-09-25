@@ -70,13 +70,13 @@
 #include <i386/apic.h>
 #include <i386/ioapic.h>		/* ioapic_mask_irq, for an ablation */
 #include <i386/clock_watch.h>
+#include <i386/cn_nolock.h>		/* the stopped processor may hold the console lock */
 
 #ifdef ABLATE_599_CLI_SPIN
 #include <kern/lock.h>
 decl_simple_lock_data(extern, timer_lock)	/* kern/mach_clock.c */
 #endif
 
-extern void			cnputc(char);
 extern int			db_active;		/* a processor is in DDB */
 extern volatile unsigned int	nmi_cpu_tick[];		/* nmi_watchdog.c */
 extern unsigned int		mp_tsc_per_us;		/* rtclock.c */
@@ -136,38 +136,6 @@ cw_ms(unsigned long long cycles)
 	return us / 1000;
 }
 
-/* Console output that takes no lock: the stopped processor may hold one. */
-static void
-cw_puts(const char *s)
-{
-	while (*s)
-		cnputc(*s++);
-}
-
-static void
-cw_hex(unsigned int v)
-{
-	int	i;
-
-	cw_puts("0x");
-	for (i = 28; i >= 0; i -= 4)
-		cnputc("0123456789abcdef"[(v >> i) & 0xF]);
-}
-
-static void
-cw_dec(unsigned int v)
-{
-	char	buf[11];
-	int	i = sizeof (buf);
-
-	buf[--i] = '\0';
-	do {
-		buf[--i] = (char)('0' + v % 10);
-		v /= 10;
-	} while (v != 0);
-	cw_puts(&buf[i]);
-}
-
 /*
  * The watcher's line.  The anchor's age is read without the lock that
  * rtclock_intr writes it under, so its two halves can tear; it is printed as
@@ -178,25 +146,25 @@ cw_say_stopped(int cpu, unsigned long long now, const char *where)
 {
 	unsigned long long	anchor = rtclock_tsc_at_tick;
 
-	cw_puts("\nclock: processor 0's tick has not run for ");
-	cw_dec(cw_ms(now - cw[cpu].since));
-	cw_puts(" ms (watched by processor ");
-	cw_dec((unsigned int)cpu);
+	cn_puts("\nclock: processor 0's tick has not run for ");
+	cn_dec(cw_ms(now - cw[cpu].since));
+	cn_puts(" ms (watched by processor ");
+	cn_dec((unsigned int)cpu);
 	if (where != 0) {
-		cw_puts(", spinning in ");
-		cw_puts(where);
+		cn_puts(", spinning in ");
+		cn_puts(where);
 	}
-	cw_puts("): its count ");
-	cw_dec(cw[cpu].seen);
-	cw_puts(", timeout ticks ");
-	cw_dec(timeout_ticks);
-	cw_puts(", spl ");
-	cw_dec((unsigned int)curr_ipl[master_cpu]);
-	cw_puts(", pending ");
-	cw_hex(softspl_pending[master_cpu]);
-	cw_puts(", the clock's TSC anchor ");
-	cw_dec(anchor <= now ? cw_ms(now - anchor) : 0);
-	cw_puts(" ms old\n");
+	cn_puts("): its count ");
+	cn_dec(cw[cpu].seen);
+	cn_puts(", timeout ticks ");
+	cn_dec(timeout_ticks);
+	cn_puts(", spl ");
+	cn_dec((unsigned int)curr_ipl[master_cpu]);
+	cn_puts(", pending ");
+	cn_hex(softspl_pending[master_cpu]);
+	cn_puts(", the clock's TSC anchor ");
+	cn_dec(anchor <= now ? cw_ms(now - anchor) : 0);
+	cn_puts(" ms old\n");
 }
 
 void
@@ -252,7 +220,7 @@ clock_watch_ablate(int cpu)
 		 * runs with them on, and a device interrupt deferred here would
 		 * do its own read-modify-write inside this one.
 		 */
-		cw_puts("\nclock: #599 ablation -- processor 0 masks the 8254's "
+		cn_puts("\nclock: #599 ablation -- processor 0 masks the 8254's "
 			"pin now\n");
 		__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
 		ioapic_mask_irq(0);
@@ -260,7 +228,7 @@ clock_watch_ablate(int cpu)
 	}
 #endif
 #ifdef ABLATE_599_CLI_SPIN
-	cw_puts("\nclock: #599 ablation -- processor 0 takes the timeout list's "
+	cn_puts("\nclock: #599 ablation -- processor 0 takes the timeout list's "
 		"lock and spins with interrupts off now\n");
 	simple_lock(&timer_lock);
 	__asm__ volatile("cli");
@@ -298,9 +266,9 @@ cw_watch(int cpu, const char *where)
 
 	if (!cw[cpu].armed || count != cw[cpu].seen) {
 		if (cw_reporter == cpu) {
-			cw_puts("\nclock: processor 0's tick ran again after ");
-			cw_dec(cw_ms(now - cw[cpu].since));
-			cw_puts(" ms\n");
+			cn_puts("\nclock: processor 0's tick ran again after ");
+			cn_dec(cw_ms(now - cw[cpu].since));
+			cn_puts(" ms\n");
 			cw_reporter = -1;
 		}
 		cw[cpu].armed = 1;
@@ -397,51 +365,51 @@ clock_watch_nmi(struct i386_saved_state *regs)
 	user = (regs->efl & EFL_VM) || (regs->cs & 3) != 0;
 	esp = user ? regs->uesp : (unsigned int)&regs->uesp;
 
-	cw_puts("\nclock: processor 0 at the NMI: eip ");
-	cw_hex(regs->eip);
-	cw_puts(user ? " (user)" : " (kernel)");
-	cw_puts(", eflags ");
-	cw_hex(regs->efl);
-	cw_puts((regs->efl & EFL_IF) ? " (interrupts on)" : " (interrupts off)");
-	cw_puts(", esp ");
-	cw_hex(esp);
-	cw_puts(", ebp ");
-	cw_hex(regs->ebp);
+	cn_puts("\nclock: processor 0 at the NMI: eip ");
+	cn_hex(regs->eip);
+	cn_puts(user ? " (user)" : " (kernel)");
+	cn_puts(", eflags ");
+	cn_hex(regs->efl);
+	cn_puts((regs->efl & EFL_IF) ? " (interrupts on)" : " (interrupts off)");
+	cn_puts(", esp ");
+	cn_hex(esp);
+	cn_puts(", ebp ");
+	cn_hex(regs->ebp);
 
-	cw_puts("\nclock: processor 0's backtrace:");
+	cn_puts("\nclock: processor 0's backtrace:");
 	ebp = regs->ebp;
 	for (i = 0; !user && i < 24 && ebp >= VM_MIN_KERNEL_ADDRESS; i++) {
 		unsigned int	*fr = (unsigned int *)ebp;
 
 		cnputc(' ');
-		cw_hex(fr[1]);
+		cn_hex(fr[1]);
 		if (fr[0] <= ebp)	/* frames ascend; anything else ends it */
 			break;
 		ebp = fr[0];
 	}
 
-	cw_puts("\nclock: processor 0's spl ");
-	cw_dec((unsigned int)curr_ipl[master_cpu]);
-	cw_puts(", pending ");
-	cw_hex(softspl_pending[master_cpu]);
-	cw_puts(", active thread ");
-	cw_hex((unsigned int)cpu_data[master_cpu].active_thread);
+	cn_puts("\nclock: processor 0's spl ");
+	cn_dec((unsigned int)curr_ipl[master_cpu]);
+	cn_puts(", pending ");
+	cn_hex(softspl_pending[master_cpu]);
+	cn_puts(", active thread ");
+	cn_hex((unsigned int)cpu_data[master_cpu].active_thread);
 
-	cw_puts("\nclock: processor 0's local APIC: TPR ");
-	cw_hex(LAPIC_REG32(LAPIC_TPR));
-	cw_puts(", PPR ");
-	cw_hex(LAPIC_REG32(LAPIC_PPR));
-	cw_puts(", in service (vectors 255..0)");
+	cn_puts("\nclock: processor 0's local APIC: TPR ");
+	cn_hex(LAPIC_REG32(LAPIC_TPR));
+	cn_puts(", PPR ");
+	cn_hex(LAPIC_REG32(LAPIC_PPR));
+	cn_puts(", in service (vectors 255..0)");
 	for (i = 7; i >= 0; i--) {
 		cnputc(' ');
-		cw_hex(LAPIC_REG32(LAPIC_ISR_BASE + 0x10 * i));
+		cn_hex(LAPIC_REG32(LAPIC_ISR_BASE + 0x10 * i));
 	}
-	cw_puts(", requested");
+	cn_puts(", requested");
 	for (i = 7; i >= 0; i--) {
 		cnputc(' ');
-		cw_hex(LAPIC_REG32(LAPIC_IRR_BASE + 0x10 * i));
+		cn_hex(LAPIC_REG32(LAPIC_IRR_BASE + 0x10 * i));
 	}
-	cw_puts("\n");
+	cn_puts("\n");
 	return 1;
 }
 
