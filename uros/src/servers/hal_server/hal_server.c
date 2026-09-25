@@ -115,6 +115,13 @@ hal_run_discovery(void)
 
 		for (i = 0; i < n; i++) {
 			int rc = hal_registry_add(&scan_buf[i]);
+			/*
+			 * The region count before the measurement, which drops
+			 * a region that decodes nothing from scan_buf while the
+			 * registry keeps it at size 0 (#585): the count the
+			 * probe wrote to, and the count hal_list_devices shows.
+			 */
+			unsigned int regions = scan_buf[i].n_bars;
 
 			if (rc != HAL_REGISTRY_ADD_NEW)
 				continue;
@@ -146,28 +153,30 @@ hal_run_discovery(void)
 				 * made a rescan's phantom read "1 measured"
 				 * although nothing had been touched (#597).
 				 */
-				if (scan_buf[i].n_bars > 0)
+				if (regions > 0)
 					measured++;
 			}
 
 			/*
 			 * 🔴 A bus that did not change has no new device, so
-			 * one found by a rescan is either hardware that was
-			 * plugged in or a read that answered about something
-			 * else.  i386's unserialised configuration access
-			 * produced the second at -smp 4 (#597), and the line
-			 * that reported it gave only a count.
+			 * one found by a rescan -- a BDF the registry did not
+			 * have, or a known BDF answering with another identity,
+			 * which hal_registry_add() replaces and says so -- is
+			 * either hardware that changed or a read that answered
+			 * about something else.  i386's unserialised
+			 * configuration access produced both at -smp 4 (#597),
+			 * and the line that reported them gave only a count.
 			 */
 			if (discovery_runs > 0)
-				printf("hal: a rescan found a device the "
-				       "registry did not have: %02x:%02x.%x "
+				printf("hal: a rescan put a new device in "
+				       "the registry: %02u:%02u.%u "
 				       "vendor/device 0x%08x class 0x%08x "
 				       "irq %u, %u region(s)\n",
 				       scan_buf[i].bus, scan_buf[i].slot,
 				       scan_buf[i].func,
 				       scan_buf[i].vendor_device,
 				       scan_buf[i].class_rev, scan_buf[i].irq,
-				       scan_buf[i].n_bars);
+				       regions);
 
 			/* #173: only fresh devices trigger hal_device_added
 			 * — repeated rescans over a stable bus stay quiet. */

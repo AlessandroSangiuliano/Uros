@@ -287,8 +287,11 @@ check_rescan(int n_before)
 	 * the DEVICE was left alone, because a probe that ran a second time
 	 * would restore what it wrote and produce the same numbers.  That half
 	 * is in the HAL's own line -- `(N new, M measured)' -- which prints
-	 * zero measured on every rescan and cannot print zero if the probe ran.
-	 * Two observations, because one of them cannot distinguish the cases.
+	 * zero measured on every rescan of an unchanged bus.  It counts only
+	 * probes that finished, so a probe that was refused or found a region
+	 * moved part-way wrote without being counted; those say so on lines of
+	 * their own (pci_scan.c).  Two observations, because one of them cannot
+	 * distinguish the cases.
 	 */
 	arm("[5] a rescan leaves every region exactly as it was", changed == 0,
 	    "a rescan overwrote the record, which is where a measured size "
