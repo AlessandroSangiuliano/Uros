@@ -89,6 +89,12 @@ struct clock_event_ops {
 	int		(*arm)(uint64_t ns);
 
 	void		(*stop)(void);
+
+	/* Once, on the boot processor, when this backend is chosen: whatever
+	 * the machine has only one of -- a device to route, a handler to
+	 * install (#593).  Null for a backend that is all per-processor
+	 * state.  Must be idempotent: a -C boot chooses the clock twice. */
+	void		(*start)(uint8_t vector);
 };
 
 /*

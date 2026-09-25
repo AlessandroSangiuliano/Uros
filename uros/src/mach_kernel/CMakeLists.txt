@@ -293,6 +293,13 @@ option(UROS_ABLATE_594_NTP_SLEW "Build the #594 ablation: the rulers carry a hos
 # sends that began on a processor already between the two halves of another.
 # Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_593_ICR_OPEN "Build the #593 ablation: an IPI send may be interrupted between its two register writes" OFF)
+# #593: BEHIND lands every 128th HPET comparator write after the counter has
+# passed the deadline it carries; UNCHECKED takes away the read-back that
+# notices.  BEHIND alone must cost late ticks and a count; with UNCHECKED,
+# every processor's clock stops until the counter's low half wraps.  Never ON
+# in a kernel anyone boots for anything else.
+option(UROS_ABLATE_593_BEHIND "Build the #593 ablation: every 128th HPET comparator write lands behind the counter" OFF)
+option(UROS_ABLATE_593_UNCHECKED "Build the #593 ablation: an HPET comparator write is not read back" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -373,6 +380,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/exact.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/freq_source.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/hpet.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/hpet_event.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pmtimer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/ruler.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rulers.c
@@ -581,6 +589,14 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_594_HPET_STOPS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)
       message(STATUS "#594 ablation: the HPET stops as the watchdog reads it (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_BEHIND)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_BEHIND=1)
+      message(STATUS "#593 ablation: every 128th HPET comparator write lands behind the counter (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_UNCHECKED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_UNCHECKED=1)
+      message(STATUS "#593 ablation: an HPET comparator write is not read back (x86_64)")
   endif()
   if(UROS_ABLATE_593_ICR_OPEN)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_ICR_OPEN=1)
