@@ -71,6 +71,11 @@
 #include <i386/ioapic.h>		/* ioapic_mask_irq, for an ablation */
 #include <i386/clock_watch.h>
 
+#ifdef ABLATE_599_CLI_SPIN
+#include <kern/lock.h>
+decl_simple_lock_data(extern, timer_lock)	/* kern/mach_clock.c */
+#endif
+
 extern void			cnputc(char);
 extern int			db_active;		/* a processor is in DDB */
 extern volatile unsigned int	nmi_cpu_tick[];		/* nmi_watchdog.c */
@@ -204,8 +209,12 @@ clock_watch_init(void)
 	       "pin and leaves nothing pending\n", CW_ABLATE_AT);
 #endif
 #ifdef ABLATE_599_CLI_SPIN
-	printf("clock: #599 ablation -- at tick %u processor 0 spins with "
-	       "interrupts off\n", CW_ABLATE_AT);
+	printf("clock: #599 ablation -- at tick %u processor 0 takes the timeout "
+	       "list's lock and spins with interrupts off\n", CW_ABLATE_AT);
+#endif
+#ifdef ABLATE_599_SPIN_ONLY
+	printf("clock: #599 ablation -- the watch does not run from the tick, "
+	       "only from inside spins\n");
 #endif
 }
 
@@ -219,7 +228,12 @@ clock_watch_init(void)
  *   MASK_PIT	pin 2 masked with no pending bit to unmask it again, which is
  *		what a lost read-modify-write of the I/O APIC leaves;
  *   CLI_SPIN	processor 0 spinning with interrupts off, never sending its
- *		EOI.
+ *		EOI.  It takes the timeout list's lock first and keeps it, so
+ *		that any other processor arming a timeout ends up spinning on
+ *		it within a tick -- which is what makes SPIN_ONLY's answer
+ *		certain rather than a matter of what the others were doing;
+ *   SPIN_ONLY	the watch does not run from the tick, so that with CLI_SPIN
+ *		only a spin (clock_watch_spin) can say so.
  */
 void
 clock_watch_ablate(int cpu)
@@ -246,8 +260,9 @@ clock_watch_ablate(int cpu)
 	}
 #endif
 #ifdef ABLATE_599_CLI_SPIN
-	cw_puts("\nclock: #599 ablation -- processor 0 spins with interrupts off "
-		"now\n");
+	cw_puts("\nclock: #599 ablation -- processor 0 takes the timeout list's "
+		"lock and spins with interrupts off now\n");
+	simple_lock(&timer_lock);
 	__asm__ volatile("cli");
 	for (;;)
 		__asm__ volatile("pause");
@@ -331,7 +346,9 @@ cw_watch(int cpu, const char *where)
 void
 clock_watch_tick(int cpu)
 {
+#ifndef ABLATE_599_SPIN_ONLY
 	cw_watch(cpu, 0);
+#endif
 }
 
 /*
