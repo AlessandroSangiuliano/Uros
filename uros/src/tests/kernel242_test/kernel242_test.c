@@ -848,8 +848,6 @@ test_fpu_state(void)
  * programs a counter nothing here reads; a probe that could stop the clock
  * when it failed would be a test that breaks what it checks.
  * ========================================================================= */
-#if defined(__i386__)
-
 #include <mach/mach_host.h>	/* thread_set_exception_ports */
 #include <mach/exception.h>
 #include "exc_server.h"
@@ -1136,19 +1134,6 @@ test_io_kernel_ports(void)
     PASS();
 }
 
-#else	/* !__i386__ */
-
-/*
- * x86-64 has no iopl device, no I/O permission bitmap and no #GP emulation
- * (char_server/main.c says why): device_io_port_claim() is its only door, and
- * io_claim_race's arm [5] asks that one.
- */
-static void
-test_io_kernel_ports(void)
-{
-}
-
-#endif	/* __i386__ */
 
 /* =========================================================================
  * Test runner — called from main, must run AFTER bootstrap finishes,
