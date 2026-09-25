@@ -204,8 +204,61 @@ static void icr_wait_idle(void)
 		cpu_pause();
 }
 
+/*
+ * #593: the ablation that leaves the send open to an interrupt, and the count
+ * that shows what the opening lets in: a send begun on a processor that was
+ * already between the two halves of another.
+ */
+#ifndef	ABLATE_593_ICR_OPEN
+#define	ABLATE_593_ICR_OPEN	0
+#endif
+
+#if ABLATE_593_ICR_OPEN
+#include <cpus.h>		/* NCPUS */
+#include <x86_64/cpu_number.h>
+
+static volatile uint32_t	icr_inside[NCPUS];
+static volatile uint64_t	icr_nested_count;
+
+uint64_t lapic_icr_nested(void)
+{
+	return icr_nested_count;
+}
+#endif
+
 static void icr_send(uint32_t apic_id, uint32_t command)
 {
+#if !ABLATE_593_ICR_OPEN
+	int was_enabled = interrupts_enabled();
+
+	/*
+	 * 🔴 NO INTERRUPT BETWEEN THE WAIT AND THE SECOND WRITE (#593).
+	 *
+	 * The register is one per processor and a send is three steps on it,
+	 * so an interrupt whose handler sends an IPI of its own, landing in
+	 * the middle, rewrites the destination under the interrupted send:
+	 * the interrupted command then leaves with the handler's destination,
+	 * and the processor it was meant for never hears it.  Landing after
+	 * the wait and before the writes is the same failure the wait exists
+	 * to prevent -- a second message written over a first still pending.
+	 *
+	 * The tick already sends from interrupt context (hertz_tick can wake a
+	 * thread and knock on the processor it is given to), and the HPET's
+	 * broadcast sends from a class no spl level holds back, a hundred
+	 * times a second.  Masked here and nowhere else, because this is the
+	 * one place that knows the register takes more than one write.
+	 */
+	interrupts_disable();
+#else
+	unsigned self = (unsigned)cpu_number();
+
+	if (self < NCPUS) {
+		if (icr_inside[self])
+			icr_nested_count++;
+		icr_inside[self]++;
+	}
+#endif
+
 	icr_wait_idle();
 
 	/*
@@ -215,6 +268,14 @@ static void icr_send(uint32_t apic_id, uint32_t command)
 	 */
 	lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
 	lapic_write(LAPIC_ICR_LOW, command);
+
+#if !ABLATE_593_ICR_OPEN
+	if (was_enabled)
+		interrupts_enable();
+#else
+	if (self < NCPUS)
+		icr_inside[self]--;
+#endif
 }
 
 void lapic_send_init(uint32_t apic_id)

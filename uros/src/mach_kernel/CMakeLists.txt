@@ -288,6 +288,11 @@ option(UROS_ABLATE_594_HPET_STOPS "Build the #594 ablation: the HPET stops as th
 # reboot does to a guest.  Nothing may be named, and the exact source must
 # still be adopted.  Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_594_NTP_SLEW "Build the #594 ablation: the rulers carry a host's NTP phase slew" OFF)
+# #593: icr_send() leaves the interrupt command register open to an interrupt
+# between its wait and its second write, as it did before #593, and counts the
+# sends that began on a processor already between the two halves of another.
+# Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_593_ICR_OPEN "Build the #593 ablation: an IPI send may be interrupted between its two register writes" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -576,6 +581,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_594_HPET_STOPS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)
       message(STATUS "#594 ablation: the HPET stops as the watchdog reads it (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_ICR_OPEN)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_ICR_OPEN=1)
+      message(STATUS "#593 ablation: an IPI send may be interrupted between its two register writes (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)
