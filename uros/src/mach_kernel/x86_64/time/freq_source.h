@@ -20,12 +20,15 @@
 #include <stdint.h>
 
 /*
- * CPUID leaves 0x15 and 0x16 (Intel SDM, "CPUID — CPU Identification").
+ * CPUID leaves 0x15 and 0x16 (Intel SDM Vol. 1, 253665-093US, chapter 21,
+ * Table 21-53 and the page after it; earlier revisions kept them in Vol. 2A
+ * under "CPUID — CPU Identification").
  *
  * 0x15 states the TSC as a ratio to the core crystal, and the crystal's
  * frequency where the part enumerates it; TSC = crystal * numerator /
  * denominator.  0x16 states nominal frequencies in MHz, which are what the
- * part is sold as, not what it measures.
+ * part is sold as, not what it measures -- the manual's own words are that
+ * they "should not be used for any other purpose".
  *
  * ⚠️ Zero means "not stated", field by field: a numerator of zero means the
  * ratio is not enumerated, a crystal of zero means the crystal is not.  And
@@ -102,14 +105,25 @@ void freq_hypervisor_read(struct freq_hypervisor *out);
  * 10 ppm without it), and 0x16, a nominal base clock that #508 found 0.29%
  * from the TSC on one machine, inside every agreement window.
  *
- * `lapic_bus_hz' is the timing leaf's other field, the LAPIC timer's clock
- * before the divisor.
+ * `lapic_hz' is the same census for the LAPIC timer's clock, before the
+ * divisor, by the same ids (#594):
+ *
+ *   FREQ_CPUID     0x15's crystal, when the leaf enumerates the ratio AND
+ *                  states the crystal.  "The APIC timer frequency will be the
+ *                  processor's bus clock or core crystal clock frequency (when
+ *                  TSC/core crystal clock ratio is enumerated in CPUID.15H)
+ *                  divided by the value specified in the divide configuration
+ *                  register" (SDM Vol. 3A, 253668-093US, 13.5.4).  A ratio
+ *                  with no crystal -- omen's 234/2 -- says the timer counts
+ *                  the crystal and does not say how fast: not a source.
+ *   FREQ_TIMING    the timing leaf's bus field.
+ *   FREQ_KVMCLOCK  never: KVM's clock implies a TSC rate, not a bus.
  */
 enum { FREQ_CPUID, FREQ_TIMING, FREQ_KVMCLOCK, FREQ_EXACT };
 
 struct freq_exact {
 	uint64_t	tsc_hz[FREQ_EXACT];
-	uint64_t	lapic_bus_hz;
+	uint64_t	lapic_hz[FREQ_EXACT];
 };
 
 void freq_exact_read(struct freq_exact *out);

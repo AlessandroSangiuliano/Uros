@@ -187,7 +187,7 @@ void freq_exact_read(struct freq_exact *out)
 	struct freq_cpuid	cpu;
 	struct freq_hypervisor	hv;
 
-	*out = (struct freq_exact){ { 0 }, 0 };
+	*out = (struct freq_exact){ { 0 }, { 0 } };
 #if	ABLATE_508_EXACT_HIDDEN
 	/*
 	 * #508: no exact source is seen, so the measured path runs on a
@@ -209,15 +209,17 @@ void freq_exact_read(struct freq_exact *out)
 	cpu.tsc_denominator = 2;
 #endif
 	if (cpu.has_15 && cpu.crystal_hz != 0 && cpu.tsc_numerator != 0
-	    && cpu.tsc_denominator != 0)
+	    && cpu.tsc_denominator != 0) {
 		out->tsc_hz[FREQ_CPUID] = (uint64_t)cpu.crystal_hz
 			* cpu.tsc_numerator / cpu.tsc_denominator;
+		out->lapic_hz[FREQ_CPUID] = cpu.crystal_hz;
+	}
 
 	freq_hypervisor_read(&hv);
 	if (hv.has_timing && hv.tsc_khz != 0)
 		out->tsc_hz[FREQ_TIMING] = (uint64_t)hv.tsc_khz * 1000;
 	if (hv.has_timing && hv.bus_khz != 0)
-		out->lapic_bus_hz = (uint64_t)hv.bus_khz * 1000;
+		out->lapic_hz[FREQ_TIMING] = (uint64_t)hv.bus_khz * 1000;
 	out->tsc_hz[FREQ_KVMCLOCK] = hv.kvmclock_tsc_hz;
 
 #if	ABLATE_508_EXACT_LIES
