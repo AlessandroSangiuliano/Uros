@@ -27,8 +27,10 @@ name bootstrap
 # open the partition stage 2 is loaded from -- the one request it makes, and
 # the last line in the census of the permissive path.
 #
-# ⚠️ `any' and not the hash of BOOT_DEV_NAME, because the name of the boot
-# device is a boot argument: it is `virtio_blk0a' under one command line and
-# something else under another, and a manifest that named one of them would be
-# a policy about which disk the machine happened to boot from.
+# ⚠️ `any' and not the hash of a driver's partition name.  BOOT_DEV_NAME is
+# the alias `disk0a', and which partition stands behind it depends on which
+# controllers are attached and in which PCI slots: `virtio_blk0a' under
+# run-x86_64.sh, `ahci0a' under run-qemu.sh, `virtio_blk0a' again under
+# run-qemu.sh --virtio-first (#592).  A manifest that named one of them would
+# be a policy about which disk the machine happened to boot from.
 required 4 any 0x3

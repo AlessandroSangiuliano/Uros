@@ -145,6 +145,38 @@ wait_for_cap_server(void)
 }
 
 /*
+ * Whether the partition behind `part_port` is the boot disk: the one the
+ * block server published as "disk0a", which bootstrap stage 2 loads servers
+ * from.  1 if it is, 0 if disk0a is another partition, -1 if disk0a is not
+ * registered.
+ *
+ * 🔴 Asked, not read off the candidate list.  Which controller the block
+ * server numbers first depends on which controllers are attached and in which
+ * PCI slots (#592): virtio-blk under run-x86_64.sh, AHCI under run-qemu.sh,
+ * virtio-blk again under run-qemu.sh --virtio-first.  This file
+ * used to take the first candidate, 'virtio_blk0a', for the boot disk, so on
+ * i386 arm [14] wrote its scratch block into the real boot disk, ahci0a,
+ * which the arm exists to leave alone.
+ *
+ * The block server checks both names in with the same receive right, and a
+ * task holds one name for all its send rights to one port, so equal names
+ * mean the same partition.
+ */
+static int
+is_the_boot_disk(mach_port_t part_port)
+{
+    mach_port_t boot = MACH_PORT_NULL;
+    int         same;
+
+    if (netname_look_up(name_server_port, "", (char *)"disk0a", &boot)
+        != KERN_SUCCESS)
+        return -1;
+    same = boot == part_port;
+    (void)mach_port_deallocate(mach_task_self(), boot);
+    return same;
+}
+
+/*
  * Test [6]: a complex message the kernel must refuse halfway (#442).
  *
  * ipc_kmsg_copyin_body translates the descriptors one at a time and calls
@@ -746,10 +778,11 @@ out:
  * check.
  */
 /*
- * The last 4096-byte block of the AHCI test partitions, which are 30720
- * sectors.  It is past everything mke2fs and the loader put near the front,
- * and it is read and put back afterwards, so the number only has to be
- * inside the partition.
+ * The last 4096 bytes of a 30720-sector partition, the size of x86-64's AHCI
+ * test disks.  It is past everything mke2fs and the loader put near the front
+ * of those, and it is read and put back afterwards, so the number only has to
+ * be inside the partition.  In a larger partition it can land on data, which
+ * is one more reason the boot disk never gets the write half.
  */
 #define SCRATCH_BLOCK	30712u
 
@@ -867,9 +900,9 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
      * partition every server is still being loaded from.
      */
     if (!scratch) {
-        printf("cap_test: [14] %s is the boot disk — the write transfer is "
-               "not attempted there, so the write path is covered here only "
-               "by its refusal\n", name);
+        printf("cap_test: [14] %s is the boot disk, or cannot be told apart "
+               "from it — the write transfer is not attempted there, so the "
+               "write path is covered here only by its refusal\n", name);
         goto out;
     }
 
@@ -1625,18 +1658,21 @@ main(int argc, char **argv)
      * ── The subject is chosen, not raced for (#529) ───────────────────
      *
      * 🔴 THIS USED TO TAKE WHICHEVER NAME APPEARED FIRST, and that decided
-     * what arm [12] was testing.  The block server publishes 'virtio_blk0a'
-     * and then 'ahci0a', so a lookup landing between the two saw only one of
-     * them -- and the arm's verdict became a report of when it happened to
+     * what arm [12] was testing.  The block server publishes the partitions
+     * of its controllers one after the other ('virtio_blk0a' and then 'ahci0a'
+     * under run-x86_64.sh), so a lookup landing between the two saw only one
+     * of them -- and the arm's verdict became a report of when it happened to
      * look.  Twelve boots in twenty failed that way at -smp 4, on this branch
      * and on the baseline alike.
      *
      * 🔑 So each candidate gets the WHOLE budget before the next is
-     * considered.  The list is a preference, not a race, and the first entry
-     * is the boot disk on purpose: it is the partition every server is loaded
-     * from, and it is the one the capability path had never been exercised on
-     * -- virtio-blk carried no physical DMA entry points until this same
-     * issue added them.
+     * considered.  The list is a preference, not a race, and virtio-blk is
+     * first on purpose: the capability path had never been exercised on it --
+     * virtio-blk carried no physical DMA entry points until this same issue
+     * added them -- and under run-x86_64.sh it is also the boot disk, the
+     * partition every server is loaded from.  Under run-qemu.sh it is the boot
+     * disk only with --virtio-first, so whether the chosen partition is the
+     * boot disk is asked of "disk0a" (#592).
      *
      * ⚠️ The total wait is unchanged.  One thousand passes each rather than
      * two thousand over both, so a machine with neither disk waits exactly as
@@ -1670,11 +1706,15 @@ main(int argc, char **argv)
         printf("cap_test: [2] device_open_cap negative — "
                "SKIPPED (no BDS partition in name server)\n");
     } else {
-        printf("cap_test: the disk arms run on '%s'%s\n", found_name,
+        int boot = is_the_boot_disk(part_port);
+
+        printf("cap_test: the disk arms run on '%s'%s, %s\n", found_name,
                found_name == candidates[0]
-               ? ", the boot disk, as intended"
-               : " — NOT the preferred disk, so [12] is about a different "
-                 "controller than usual");
+               ? "" : " (not the preferred 'virtio_blk0a')",
+               boot > 0 ? "the boot disk (disk0a)"
+               : boot == 0 ? "not the boot disk (disk0a is another partition)"
+               : "and 'disk0a' is not registered, so whether it is the boot "
+                 "disk is not known");
         char zero_tok[CAP_TOKEN_MAX];
         memset(zero_tok, 0, sizeof(zero_tok));
 
@@ -1929,11 +1969,16 @@ main(int argc, char **argv)
             continue;
         }
         /*
-         * Index 0 is the boot disk by construction of this list, and it is
-         * the one partition the write half must not touch.
+         * The boot disk never gets the write half, and neither does a
+         * partition that cannot be told apart from it (#592).  ⚠️ That is not
+         * yet the whole rule: ext_server mounts ahci0a as / by that name, so
+         * where ahci0a is not disk0a (run-x86_64.sh, run-qemu.sh
+         * --virtio-first) the write half lands in a mounted filesystem.
+         * The property that matters is "open by another task", and this
+         * file cannot see it: #596.
          */
         if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
-                                          i != 0))
+                                          is_the_boot_disk(p) == 0))
             pass = 0;
         (void)mach_port_deallocate(mach_task_self(), p);
     }

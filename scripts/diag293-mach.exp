@@ -18,6 +18,13 @@ set RUN_QEMU      "$REPO_ROOT/scripts/run-qemu.sh"
 log_user 1
 set timeout $BOOT_TIMEOUT
 
+# Built before the boot's 180 s start (#592): run-qemu.sh builds before every
+# boot, so without this the budget would include the compiler.
+if {[catch {exec $RUN_QEMU --build-only >@ stdout 2>@ stderr}]} {
+    send_user "\n\[diag293\] the build failed — nothing was booted\n"
+    exit 1
+}
+
 spawn $RUN_QEMU --minimal --allow-reboot -display none -serial mon:stdio
 
 expect {

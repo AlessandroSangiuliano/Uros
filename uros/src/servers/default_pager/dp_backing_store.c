@@ -798,9 +798,10 @@ bs_add_device(
 	/*
 	 * Issue #184: paging traffic flows through the block_device_server
 	 * (BDS), gated by a Uros capability.  We discover the partition by
-	 * its BDS-published netname (typically "disk0b" — see the
-	 * driver-agnostic alias added in BDS), then exchange a one-shot
-	 * cap for an authenticated per-(client, partition) port.
+	 * its BDS-published netname (argv[1]: "disk0c", the
+	 * driver-agnostic alias BDS adds, in the bootstrap.conf that
+	 * make-bundle.sh and make-disk-image.sh write), then exchange a
+	 * one-shot cap for an authenticated per-(client, partition) port.
 	 */
 	printf("(default_pager): bs_add_device: opening '%s' via BDS\n",
 	       dev_name);

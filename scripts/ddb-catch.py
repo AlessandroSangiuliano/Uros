@@ -132,6 +132,12 @@ def attempt(n):
     finally:
         kill_cur()
 
+# Built before the first attempt (#592): run-qemu.sh builds before every boot,
+# and attempt() gives the COM1 socket twenty seconds to appear, which a
+# compile would spend.
+if subprocess.run([RUN, "--build-only"]).returncode != 0:
+    print("the build failed — nothing was booted"); sys.exit(1)
+
 for n in range(1, MAX+1):
     if attempt(n):
         print("CAUGHT — log at", LOG); sys.exit(0)

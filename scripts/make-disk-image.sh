@@ -14,7 +14,7 @@
 # queste partizioni via cap_request + device_open_cap.
 #
 # Uso:
-#   ./scripts/make-disk-image.sh                    # default 40 MB
+#   ./scripts/make-disk-image.sh                    # default 512 MB
 #   ./scripts/make-disk-image.sh -o disk.img        # path output custom
 #   ./scripts/make-disk-image.sh -s 64              # dimensione totale in MB
 #
@@ -195,12 +195,39 @@ if [ ! -f "$PTHREAD_TEST" ]; then
     exit 1
 fi
 
+# Every temporary file lives in one directory, created before the first of
+# them, and one trap removes it with the half-built image and its stamp (#592).
+# There used to be separate traps, each replacing the last and each installed
+# after some of the files it named: the second forgot a partition image, which
+# leaked 8 MB from every run (80 of them had piled up in /tmp), and a run that
+# failed early left bootstrap.conf and the bench files behind.
+TMPD=$(mktemp -d /tmp/osfmk-disk.XXXXXX)
+trap 'rm -rf "$TMPD"; rm -f "$DISK_IMG.new" "$DISK_IMG.stamp.new"' EXIT
+
+# The image is built beside its destination as disk.img.new, and it and its
+# stamp are moved in place at the end, the image first (#592).  The stamp says
+# when the image was made; run-qemu.sh compares it with what the image is made
+# from, because the image's own mtime moves on every guest write.  It is taken
+# here, before bootstrap.conf is decided and before any file is copied, so a
+# binary built while this runs is newer than it.  A run cut off before the
+# first move leaves the previous image and its own stamp; one cut off between
+# the two moves leaves the new image beside the old stamp, which is older than
+# everything the new image was made from, so the next boot regenerates for
+# nothing rather than keeping a stale disk (the other order would keep one).
+# And a qemu that still has the old image open keeps its own inode rather than
+# seeing its filesystems rewritten.
+DISK_STAMP="$DISK_IMG.stamp"
+DISK_NEW="$DISK_IMG.new"
+rm -f "$DISK_NEW"
+touch "$DISK_STAMP.new"
+
 # --- File di configurazione del bootstrap ---
-# Formato: <symtab_name> <path> [args...]
-# Il path relativo viene risolto come /dev/boot_device/mach_servers/<path>
-# L'argomento "hd0b" dopo il path diventa argv[1] del default_pager,
-# che lo apre con device_open() e lo usa come backing store di paging.
-BOOTSTRAP_CONF=$(mktemp)
+# Format: <symtab_name> <path> [args...]
+# Bootstrap takes <path> from the stage-1 bundle, and from /mach_servers/ on
+# disk0a when the bundle does not carry it.  The "disk0c" after default_pager
+# becomes its argv[1]: it opens that partition through the block server and
+# pages to it.
+BOOTSTRAP_CONF=$(mktemp -p "$TMPD")
 # cap_server (if built) goes right after name_server: it publishes its
 # port via netname_check_in so the name_server must be up first.
 CAP_SERVER_CONF_LINE=""
@@ -342,13 +369,14 @@ echo "  disk0b: ext2, ${FS1_SIZE_MB} MB  — hello.txt + bench.dat (test data)"
 echo "  disk0c: raw,  ${SWAP_SIZE_MB} MB — paging/swap"
 echo ""
 
+
 # --- 1. Immagine vuota ---
 echo "[1/6] Creazione immagine vuota (${IMG_SIZE_MB} MB)..."
-dd if=/dev/zero of="$DISK_IMG" bs=1M count="$IMG_SIZE_MB" status=none
+dd if=/dev/zero of="$DISK_NEW" bs=1M count="$IMG_SIZE_MB" status=none
 
 # --- 2. Tabella partizioni MBR ---
 echo "[2/6] Scrittura tabella partizioni MBR (3 entries)..."
-sfdisk --quiet "$DISK_IMG" <<EOF
+sfdisk --quiet "$DISK_NEW" <<EOF
 label: dos
 start=$PART0_START_SECT, size=$FS0_SIZE_SECTS, type=83
 start=$PART1_START_SECT, size=$FS1_SIZE_SECTS, type=83
@@ -357,9 +385,8 @@ EOF
 
 # --- 3. Formattare le due partizioni ext2 ---
 echo "[3/6] Formattazione ext2 (disk0a + disk0b)..."
-PART_IMG=$(mktemp /tmp/osfmk-part.XXXXXX.img)
-PART1_IMG=$(mktemp /tmp/osfmk-part1.XXXXXX.img)
-trap 'rm -f "$PART_IMG" "$PART1_IMG" "$BOOTSTRAP_CONF"' EXIT
+PART_IMG=$(mktemp -p "$TMPD" part.XXXXXX.img)
+PART1_IMG=$(mktemp -p "$TMPD" part1.XXXXXX.img)
 
 dd if=/dev/zero of="$PART_IMG" bs="$SECT_SIZE" count="$FS0_SIZE_SECTS" status=none
 mke2fs -t ext2 -q -F \
@@ -423,14 +450,14 @@ if [ -f "$PROC_SERVER" ]; then
 fi
 echo "[4/6] Copia file nel filesystem ext2..."
 # ipc_bench's disk_bench tests open hello.txt / bench.dat at the root
-# of the default ext2 mount (ext_server → ahci0a / hd0a), so seed both
+# of the default ext2 mount (ext_server mounts ahci0a at /), so seed both
 # files here.  bench.dat only needs the first 64 bytes — a 1 KB blob
 # is plenty and keeps the partition small.
-HELLO_TXT=$(mktemp)
-POSIX_SMOKE=$(mktemp)
-BENCH_DAT=$(mktemp)
-BENCH_LARGE=$(mktemp)
-BENCH_4M=$(mktemp)
+HELLO_TXT=$(mktemp -p "$TMPD")
+POSIX_SMOKE=$(mktemp -p "$TMPD")
+BENCH_DAT=$(mktemp -p "$TMPD")
+BENCH_LARGE=$(mktemp -p "$TMPD")
+BENCH_4M=$(mktemp -p "$TMPD")
 printf 'Hello from /mach_servers/ root\n' > "$HELLO_TXT"
 # Read-only fixture for hello_server's POSIX fd-layer smoke (#262).
 # Kept separate from hello.txt, which disk_bench uses as a write
@@ -444,7 +471,6 @@ dd if=/dev/urandom of="$BENCH_LARGE" bs=1M count=12 status=none
 # bench_4m.dat (#267): 4 MB — apples-to-apples with the historical
 # file-pool cached-read baseline (~930 MB/s at 64 KB, warm).
 dd if=/dev/urandom of="$BENCH_4M" bs=1M count=4 status=none
-trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$POSIX_SMOKE" "$BENCH_DAT" "$BENCH_LARGE" "$BENCH_4M"' EXIT
 
 # hello_exec is optional (#228 v0.1.0): copy to / so exec_server can
 # load "/hello_exec" via libvfs.
@@ -654,7 +680,7 @@ echo "  /mach_servers/modules/hal/pci_scan.so     → $(stat -c%s "$HAL_PCI_SCAN
 echo "  /mach_servers/ext_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
 # --- 4b. Popola disk0b con hello.txt (test data) ---
-DBHELLO=$(mktemp)
+DBHELLO=$(mktemp -p "$TMPD")
 printf 'Hello from disk0b partition\n' > "$DBHELLO"
 debugfs -w -f /dev/stdin "$PART1_IMG" <<DBGFS 2>/dev/null
 write $DBHELLO hello.txt
@@ -663,11 +689,13 @@ rm -f "$DBHELLO"
 
 # --- 5. Inserimento delle due partizioni ext2 nell'immagine disco ---
 echo "[5/6] Assemblaggio partizioni ext2 (disk0a + disk0b)..."
-dd if="$PART_IMG"  of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART0_START_SECT" conv=notrunc status=none
-dd if="$PART1_IMG" of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
+dd if="$PART_IMG"  of="$DISK_NEW" bs="$SECT_SIZE" seek="$PART0_START_SECT" conv=notrunc status=none
+dd if="$PART1_IMG" of="$DISK_NEW" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
 
 # --- 6. La partizione swap è già zero-filled (nessun formato necessario) ---
 echo "[6/6] Partizione swap (disk0c) pronta (zero-filled)."
+mv -f "$DISK_NEW" "$DISK_IMG"
+mv -f "$DISK_STAMP.new" "$DISK_STAMP"
 
 echo ""
 echo "=== Immagine disco creata con successo ==="

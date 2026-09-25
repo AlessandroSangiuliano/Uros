@@ -1,37 +1,46 @@
 #!/usr/bin/env sh
-# Avvia Uros sotto QEMU: kernel multiboot + bootstrap server come modulo.
+# Boots Uros (i386) under QEMU: the kernel by multiboot (-kernel), the
+# bootstrap server, the stage-1 bundle and the DDB symbols as multiboot
+# modules (-initrd).  The disk made by make-disk-image.sh is attached as port 0
+# of an AHCI controller (#224; the kernel's IDE driver is gone).
 #
-# Il kernel Mach viene caricato via multiboot (-kernel), il bootstrap server
-# come modulo multiboot (-initrd). Se presente un'immagine disco con i server
-# (creata da make-disk-image.sh), viene aggiunta come IDE primary (-hda).
-#
-# Uso:
-#   ./scripts/run-qemu.sh                           # avvio standard
+# Usage:
+#   ./scripts/run-qemu.sh                           # standard boot
 #   ./scripts/run-qemu.sh -nographic -serial mon:stdio  # headless
-#   ./scripts/run-qemu.sh --no-disk                 # senza disco
-#   ./scripts/run-qemu.sh --fresh-disk              # rigenera disk.img prima
-#                                                   # del boot (utile dopo
-#                                                   # rebuild o se la run
-#                                                   # precedente è stata
-#                                                   # chiusa a metà writeback)
-#   ./scripts/run-qemu.sh --diskregen               # come sopra: rigenera il
-#                                                   # disco SOLO quando lo chiedi.
-#                                                   # Di default il disco NON è
-#                                                   # rigenerato (anche con
-#                                                   # --bench: la suite passa
-#                                                   # dal bundle stage-1)
-#   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG come secondo disco
-#                                                   # AHCI, SENZA ricrearlo: e'
-#                                                   # /mnt/disk2, dove x86-64
-#                                                   # lascia il file che questo
-#                                                   # target legge (#498)
+#   ./scripts/run-qemu.sh --no-disk                 # no disk
+#   ./scripts/run-qemu.sh --fresh-disk              # regenerate disk.img before
+#                                                   # the boot (when the previous
+#                                                   # run was cut off
+#                                                   # mid-writeback)
+#   ./scripts/run-qemu.sh --diskregen               # the same.  Unasked, the
+#                                                   # disk is regenerated when it
+#                                                   # is missing, with --minimal,
+#                                                   # and, when it is attached,
+#                                                   # when it is stale (see the
+#                                                   # disk's stamp below; a kernel
+#                                                   # rebuild alone is not) -- not
+#                                                   # for --bench: the suite
+#                                                   # rides the bundle
+#   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG as the second AHCI
+#                                                   # disk, NOT recreated: it is
+#                                                   # /mnt/disk2, where x86-64
+#                                                   # leaves the file this
+#                                                   # target reads (#498)
+#   ./scripts/run-qemu.sh --virtio                  # add a virtio-blk disk, a
+#                                                   # copy of disk.img, after the
+#                                                   # AHCI controller (#592)
+#   ./scripts/run-qemu.sh --virtio-first            # the same, before it
+#   ./scripts/run-qemu.sh --build-only              # only the build, which every
+#                                                   # boot runs first; a caller
+#                                                   # that times the boot runs
+#                                                   # this before its clock
 #
-# L'immagine disco contiene /mach_servers/ con:
-#   bootstrap.conf   — configurazione del bootstrap
-#   default_pager    — server di paging
-#
-# Il driver IDE del kernel (hd.c) vede il disco QEMU come hd0.
-# boot_device → d_partitions[0] → prima partizione MBR (ext2).
+# The disk has three MBR partitions (make-disk-image.sh): a, ext2 with
+# /mach_servers/ (bootstrap.conf and the servers); b, a small ext2; c, swap.
+# The block server publishes them under the driver's prefix, ahci0a/b/c, and
+# under the driver-agnostic aliases disk0a/b/c (#184, #224).  Bootstrap stage 2
+# reads disk0a, default_pager pages to disk0c, and ext_server mounts ahci0a as
+# /, by that name whichever controller is disk0.
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -41,13 +50,17 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 # sampled the clock and never named its accelerator, that one named its
 # accelerator and never sampled the clock.
 . "$(dirname "$0")/run-conditions.sh"
-# Overridable so a measurement can run against a tree nobody is rebuilding.
+# Overridable so a measurement can run against a build nobody else touches.
 #
 # ⚠️ Not a convenience.  A campaign was once launched against uros/build while
-# the same directory was being edited and re-ninja'd for unrelated work: this
-# script rebuilds the kernel and the bundle on every invocation, so each boot
-# picked up whatever the source happened to be at that moment, and the two arms
-# of the A/B no longer differed by one thing.  The logs were discarded.
+# the same directory was being edited and re-ninja'd for unrelated work, so each
+# boot picked up whatever that other work had last built, and the two arms of
+# the A/B no longer differed by one thing.  The logs were discarded.
+#
+# This script builds $BUILD_DIR before every boot (below), and a build
+# directory builds from the source tree it was configured from.  So an arm that
+# must stay old needs its own build directory configured from its own worktree,
+# not just its own build directory.
 #
 #	UROS_BUILD_DIR=/path/to/build-measure scripts/run-qemu.sh ...
 BUILD_DIR="${UROS_BUILD_DIR:-$REPO_ROOT/uros/build}"
@@ -67,6 +80,7 @@ USE_AHCI=true
 USE_AHCI2=false
 AHCI2_IMAGE=""      # --ahci2-image PATH: attach PATH as AHCI port 1 AS IT IS (#498)
 USE_VIRTIO=false
+VIRTIO_FIRST=false  # --virtio-first: the virtio-blk controller goes before the AHCI one (#592)
 USE_BUNDLE=true     # Issue #186: stage-1 multiboot bundle (mod[1]) on by default
 USE_SHA_NI=false    # Issue #180: --sha-ni → TCG + Icelake-Server,+sha-ni
 # #516: this target has only ever been run under KVM, and until now there was
@@ -83,12 +97,14 @@ NO_REBOOT="-no-reboot"
 # the command for is half a condition.
 ORIG_ARGS="$*"
 SMP_COUNT=""
-DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
-                    # (otherwise the existing disk is reused, even with --bench;
-                    # the bench suite is carried by the stage-1 bundle)
+DISK_REGEN=false    # --diskregen: regenerate disk.img this launch even if it is
+                    # current (see the regeneration block for when it is not;
+                    # --bench alone never asks: the suite rides the bundle)
 REUSE_BUNDLE=false  # --reuse-bundle: skip the make-bundle.sh step and reuse the
-                    # existing bootstrap.bundle (fast iteration / repeated launches
-                    # of the same kernel+servers, e.g. SMP reliability loops)
+                    # existing bootstrap.bundle as it is, saying so if the build
+                    # is newer (repeated launches of the same kernel+servers,
+                    # e.g. SMP reliability loops)
+BUILD_ONLY=false    # --build-only: run the build step below and exit (#592)
 CONSOLE_ARG=""      # --with-console: ship the on-screen console TTY (#363) in the
                     # bundle so ush binds the graphical window instead of the UART.
                     # Off by default → serial/headless/bench paths unchanged.
@@ -102,11 +118,13 @@ while [ $# -gt 0 ]; do
         --ahci2-image) USE_AHCI=true; USE_AHCI2=true; AHCI2_IMAGE="$2"; shift 2 ;;
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
+        --virtio-first) USE_VIRTIO=true; VIRTIO_FIRST=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
         --tcg) USE_TCG=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
         --diskregen) DISK_REGEN=true; shift ;;
         --reuse-bundle) REUSE_BUNDLE=true; shift ;;
+        --build-only) BUILD_ONLY=true; shift ;;
         --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
         --allow-reboot) NO_REBOOT=""; shift ;;
         --smp) shift; SMP_COUNT="$1"; shift ;;
@@ -121,14 +139,90 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Disk-image regeneration is opt-in: it happens only with --diskregen (or
-# --fresh-disk/--minimal, or when disk.img is missing).  Otherwise the existing
-# disk is reused -- even with --bench -- so iterating on the kernel doesn't pay
-# the disk-format cost every launch.  The bench suite reaches ipc_bench through
-# the stage-1 bundle (rebuilt below), so changing --bench suites does NOT need
-# a disk regen.
-if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ]; then
+# A virtio disk beside no AHCI disk would never finish booting: ext_server
+# mounts ahci0a as / and waits for it (ext_server.c), whichever controller the
+# block server numbers first.  Said before anything is built.
+if [ "$USE_VIRTIO" = true ] && [ "$USE_AHCI" != true ]; then
+    echo "ERROR: --virtio needs the AHCI boot disk beside it: ext_server mounts ahci0a as / and waits for it"
+    exit 1
+fi
+
+# Build what is about to boot (#592).
+#
+# This script used to boot whatever $BUILD_DIR already held: the kernel however
+# old, a bundle packed from servers however old, and a disk regenerated only
+# when asked.  Its own comment said it rebuilt them, so an edit followed by a
+# boot without a ninja in between tested the previous build and reported on the
+# edit.  Now it runs ninja first, as run-x86_64.sh does, then re-packs the
+# bundle, and regenerates the disk when it is stale (below).  ush, the terminal server and the programs on the ext2 root travel
+# only on the disk, so the disk has to follow the build too.
+#
+# Everything, not a list of targets: make-bundle.sh and make-disk-image.sh each
+# pack their own list of files (from export/, and musl's libc.so for the disk),
+# and a list of targets here would be a third list to keep in step with them.  The output goes to a
+# file and two lines are printed, because the callers keep this script's
+# output as the run's log.
+#
+# ⚠️ A caller that times the boot runs `run-qemu.sh --build-only' first.
+# Otherwise the build falls inside its clock: smoke-ush.exp would call forty
+# silent seconds of compiling a machine that stopped talking, and a total
+# budget would shrink by however long the compiler took.
+if [ ! -f "$BUILD_DIR/build.ninja" ]; then
+    echo "ERROR: $BUILD_DIR is not a configured build directory (no build.ninja)"
+    exit 1
+fi
+BUILD_LOG="$BUILD_DIR/run-qemu-build.log"
+BUILD_T0=$(date +%s)
+echo "Build:   ninja -C $BUILD_DIR (output in $BUILD_LOG)"
+if ! ninja -C "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
+    tail -n 30 "$BUILD_LOG"
+    echo "ERROR: ninja -C $BUILD_DIR failed (whole output in $BUILD_LOG); nothing was booted"
+    exit 1
+fi
+# Ninja's last line is the last step to finish, not a total, so the steps are
+# counted, leaving out its re-check of globbed directories, which is not one.
+if grep -q '^ninja: no work to do' "$BUILD_LOG"; then
+    echo "Build:   up to date"
+else
+    echo "Build:   $(grep '^\[[0-9]*/[0-9]*\]' "$BUILD_LOG" | grep -vc 'Re-checking globbed') steps in $(( $(date +%s) - BUILD_T0 ))s"
+fi
+[ "$BUILD_ONLY" = true ] && exit 0
+
+# The disk's age is the stamp make-disk-image.sh leaves beside it (#592): taken
+# when a run starts and moved in place after the image when it finishes, so a
+# run cut off halfway -- here or by hand -- never leaves a stale image with a
+# stamp newer than its inputs (make-disk-image.sh says why the order matters).  Not disk.img's own mtime: qemu writes the image
+# (ext2 on ahci0a and ahci0b, and paging on disk0c when AHCI is disk0), so that
+# mtime says when the guest last wrote.
+#
+# Stale means: no stamp, or newer than it any file under export/uros/$ARCH/user,
+# musl's libc.so (the disk's dynamic linker), or make-disk-image.sh itself,
+# which decides what goes on the disk.  That is more than the disk carries --
+# the generator packs a list -- so it errs towards regenerating.  The kernel is
+# not on the disk, so a kernel rebuild alone does not make it stale.  Asked only
+# when the disk is attached.
+DISK_STAMP="$DISK_IMG.stamp"
+STALE_DISK=false
+if [ "$USE_AHCI" = true ] && [ -f "$DISK_IMG" ]; then
+    if [ ! -f "$DISK_STAMP" ] ||
+       [ -n "$(find "$BUILD_DIR/export/uros/$ARCH/user" \
+                   "$BUILD_DIR/src/contrib/musl-install/lib/libc.so" \
+                   "$REPO_ROOT/scripts/make-disk-image.sh" \
+                   -type f -newer "$DISK_STAMP" -print 2>/dev/null | head -n 1)" ]; then
+        STALE_DISK=true
+    fi
+fi
+
+# Disk-image regeneration happens with --diskregen, --fresh-disk or --minimal,
+# when disk.img is missing, and, when the disk is attached, when it is stale
+# as defined above (#592).  Otherwise the existing disk is
+# reused -- even with --bench -- so iterating on the kernel alone doesn't pay
+# the disk-format cost every launch.
+# The bench suite reaches ipc_bench through the stage-1 bundle (rebuilt below),
+# so changing --bench suites does NOT need a disk regen.
+if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ] || [ "$STALE_DISK" = true ]; then
     [ -f "$DISK_IMG" ] || echo "disk.img missing — regenerating."
+    [ "$STALE_DISK" = true ] && echo "disk.img has no stamp, or something it is made from is newer than its stamp — regenerating."
     if [ -n "$BENCH_ARGS" ]; then
         echo "Regenerating disk image (--bench):$BENCH_ARGS"
         "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
@@ -142,9 +236,16 @@ fi
 
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
 # binaries stay in sync with the on-disk copy (especially with --bench).
+# --reuse-bundle is a request, and it is honoured as asked: the bundle is not
+# checked against the flags it was packed with nor against a pack that was cut
+# off.  A binary that changed after it was packed is named, though (#592):
+# after the build above, reusing it may boot a new kernel with old servers.
 if [ "$USE_BUNDLE" = true ]; then
     if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
         echo "Bundle:  reusing $BUNDLE_IMG (--reuse-bundle, skipped rebuild)"
+        NEWER=$(find "$BUILD_DIR/export/uros/$ARCH/user" -type f -newer "$BUNDLE_IMG" -print 2>/dev/null | head -n 1)
+        [ -n "$NEWER" ] &&
+            echo "Bundle:  ⚠️ older than the build: ${NEWER#"$BUILD_DIR"/} changed after it was packed"
     elif [ -n "$BENCH_ARGS" ]; then
         "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG $CONSOLE_ARG
     else
@@ -219,20 +320,22 @@ if [ -n "$SMP_COUNT" ]; then
     echo "SMP: $SMP_COUNT CPUs"
 fi
 
-# Issue #224: stage-2 e default_pager girano interamente su AHCI; il
-# driver IDE in-kernel non serve più.  La disk.img prodotta da
-# make-disk-image.sh ha layout MBR/3-partizioni (disk0a /mach_servers/,
-# disk0b test data, disk0c swap) e viene attaccata direttamente come
-# AHCI port 0.
+# Issue #224: the kernel's IDE driver is gone, and disk.img (three MBR
+# partitions, see the header) is attached directly as AHCI port 0.  Stage 2
+# and default_pager reach it through the disk0 aliases, so under
+# --virtio-first they run on the virtio copy instead (below).
 #
-# create_ahci_test_disk <path> <label> — secondario, solo per multi-mount.
-# Disco da 40 MB con due partizioni ext2 (hello.txt diverso) + raw swap,
-# senza /mach_servers/.
+# create_ahci_test_disk <path> <label> -- a second AHCI disk, for multi-mount
+# only: 40 MB, two ext2 partitions each with its own hello.txt, raw swap, no
+# /mach_servers/.
 create_ahci_test_disk() {
     _disk="$1"
     _label="$2"
 
     echo "  Creazione disco AHCI secondario: $_disk ($_label)"
+    # A new file, not the old one rewritten: a qemu still holding the old disk
+    # keeps its own inode (#592).
+    rm -f "$_disk"
     dd if=/dev/zero of="$_disk" bs=1M count=40 status=none
 
     sfdisk --quiet "$_disk" <<SFDISK
@@ -257,15 +360,16 @@ DBGFS
     done
 }
 
+AHCI_ARGS=""
 if [ "$USE_AHCI" = true ]; then
     if [ ! -f "$DISK_IMG" ]; then
         echo "ERRORE: $DISK_IMG non trovato — esegui ./scripts/make-disk-image.sh prima"
         exit 1
     fi
     echo "AHCI port 0: $DISK_IMG (contiene /mach_servers/, hello.txt, swap)"
-    QEMU_ARGS="$QEMU_ARGS -device ich9-ahci,id=ahci0"
-    QEMU_ARGS="$QEMU_ARGS -drive id=ahcidisk0,file=$DISK_IMG,format=raw,if=none"
-    QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
+    AHCI_ARGS="-device ich9-ahci,id=ahci0"
+    AHCI_ARGS="$AHCI_ARGS -drive id=ahcidisk0,file=$DISK_IMG,format=raw,if=none"
+    AHCI_ARGS="$AHCI_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
 
     if [ "$USE_AHCI2" = true ]; then
         # #498: --ahci2-image attaches a disk ANOTHER boot wrote -- the one an
@@ -282,8 +386,8 @@ if [ "$USE_AHCI" = true ]; then
             AHCI_DISK1="$BUILD_DIR/ahci-test1.img"
             create_ahci_test_disk "$AHCI_DISK1" "disk1"
         fi
-        QEMU_ARGS="$QEMU_ARGS -drive id=ahcidisk1,file=$AHCI_DISK1,format=raw,if=none"
-        QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk1,bus=ahci0.1"
+        AHCI_ARGS="$AHCI_ARGS -drive id=ahcidisk1,file=$AHCI_DISK1,format=raw,if=none"
+        AHCI_ARGS="$AHCI_ARGS -device ide-hd,drive=ahcidisk1,bus=ahci0.1"
         echo "AHCI port 1: $AHCI_DISK1"
     fi
 elif [ "$USE_DISK" = true ]; then
@@ -291,20 +395,41 @@ elif [ "$USE_DISK" = true ]; then
     echo "  non potrà aprire disk0a — avvio degraded (solo bundle stage-1)."
 fi
 
-# Optionally add a virtio-blk-pci device with a test disk.
-# The boot disk stays on IDE; the virtio-blk controller appears as a
-# separate PCI device that the virtio_blk driver can detect and probe.
+# --virtio, --virtio-first: a virtio-blk-pci controller beside the AHCI one.
 #
-# Same layout as the AHCI test disk (Issue #184): MBR + 4 MB ext2 + 4 MB
-# ext2 + ~32 MB raw swap, so default_pager finds "disk0c" regardless of
-# whether the backing module is AHCI or virtio-blk.
+# Its disk is a byte copy of disk.img, made again at every launch (#592): the
+# same partition table, the same /mach_servers/ and the same swap partition.
+# So it serves stage 2's disk0a and default_pager's disk0c whichever of the two
+# controllers the block server numbers first, and this script does not have to
+# predict which one that is.  The block server numbers disks in the order the
+# controllers bind, which is the order of their PCI slots, and qemu hands out
+# slots in command-line order: --virtio attaches the controller after the AHCI
+# one, --virtio-first before it.  The log names the winner:
+# "blk: registered alias 'disk0a' -> '<controller>0a'".
+#
+# A copy and not the same file twice, because two controllers writing one image
+# corrupt it.  Removed first, so a qemu that still has the old copy open keeps
+# its own inode.  Not read-only, because as disk0 it takes default_pager's
+# paging on disk0c.
+#
+# Before #224 this block built a new 40 MB disk and copied into it the first
+# 4 MB of the IDE disk's first partition.  That function was renamed away and
+# this call was left behind, so the flag exited with 127 before qemu started,
+# from then until #592.
 VIRTIO_DISK="$BUILD_DIR/virtio-test.img"
+VIRTIO_ARGS=""
 if [ "$USE_VIRTIO" = true ]; then
-    # Always recreate to ensure correct layout
-    create_ahci_disk "$VIRTIO_DISK" "disk0"
-    echo "Virtio-blk: $VIRTIO_DISK"
-    QEMU_ARGS="$QEMU_ARGS -drive id=virtiodisk0,file=$VIRTIO_DISK,format=raw,if=none"
-    QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=virtiodisk0"
+    rm -f "$VIRTIO_DISK"
+    cp --sparse=always "$DISK_IMG" "$VIRTIO_DISK"
+    VIRTIO_PLACE="$([ "$VIRTIO_FIRST" = true ] && echo before || echo after) the AHCI controller"
+    echo "Virtio-blk: $VIRTIO_DISK (byte copy of disk.img), $VIRTIO_PLACE"
+    VIRTIO_ARGS="-drive id=virtiodisk0,file=$VIRTIO_DISK,format=raw,if=none"
+    VIRTIO_ARGS="$VIRTIO_ARGS -device virtio-blk-pci,drive=virtiodisk0"
+fi
+if [ "$VIRTIO_FIRST" = true ]; then
+    QEMU_ARGS="$QEMU_ARGS $VIRTIO_ARGS $AHCI_ARGS"
+else
+    QEMU_ARGS="$QEMU_ARGS $AHCI_ARGS $VIRTIO_ARGS"
 fi
 
 # ------------------------------------------------------- run conditions
@@ -325,6 +450,7 @@ uros_conditions_block "i386" "$ACCEL" \
 	"cpu/accel:    $ACCEL_ARGS" \
 	"smp:          ${SMP_COUNT:-1}" \
 	"disk:         $([ "$USE_DISK" = true ] && echo yes || echo no)" \
+	"virtio:       $([ "$USE_VIRTIO" = true ] && echo "$VIRTIO_DISK, $VIRTIO_PLACE" || echo no)" \
 	"command:      $0 $ORIG_ARGS"
 
 # ⚠️ `exec' stays.  Without it this shell remains qemu's parent, and every
