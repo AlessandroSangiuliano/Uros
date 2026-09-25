@@ -244,7 +244,7 @@ cmake -G Ninja -DUROS_TARGET_ARCH=x86_64 -S uros -B uros/build-x86_64
 ./scripts/run-ush.sh                               # minimal bundle, serial-only, drops into ush$
 ```
 
-`run-qemu.sh` runs `ninja` on the build directory before every boot, re-packs `bootstrap.bundle`, and regenerates `disk.img` when the build is newer than the stamp `make-disk-image.sh` leaves beside it, or when `--fresh-disk` is passed.  `run-ush.sh` is the fastest path to an interactive shell over the serial console (Ctrl-A x to quit).
+`run-qemu.sh` runs `ninja` on the build directory before every boot, re-packs `bootstrap.bundle`, and regenerates `disk.img` when a userland binary, musl's `libc.so` or `make-disk-image.sh` is newer than the stamp that script leaves beside the image, or when `--fresh-disk` is passed.  `run-ush.sh` is the fastest path to an interactive shell over the serial console (Ctrl-A x to quit).
 
 ### CMake configuration options
 
@@ -376,7 +376,7 @@ ninja migcom                   # MIG compiler (Flex/Bison)
 
 ### Disk image and stage-1 bundle
 
-The disk and bundle are built by scripts in `scripts/`, not by CMake. Both pick up whatever binaries are present in `uros/build/export/.../user/sbin/`, so optional components are silently included only when their flag was enabled.
+The disk and bundle are built by scripts in `scripts/`, not by CMake. Each packs its own list of files from `uros/build/export/.../user/` (servers, modules, libraries; the disk also carries musl's `libc.so` as the dynamic linker). An optional entry on a list is included only when its binary was built, so optional components are silently included only when their flag was enabled; a new binary is packed only once it is added to the lists.
 
 ```sh
 ./scripts/make-disk-image.sh             # MBR + 3 partitions (ext2/ext2/raw swap)
@@ -387,7 +387,7 @@ The disk and bundle are built by scripts in `scripts/`, not by CMake. Both pick 
 
 ### Running on QEMU
 
-`scripts/run-qemu.sh` wraps the QEMU invocation. Before every boot it runs `ninja` on the build directory (`uros/build`, or `UROS_BUILD_DIR`), re-packs the stage-1 bundle (`--reuse-bundle` reuses it as it is, and says so when the build is newer), and regenerates `disk.img` when the disk is attached and has no stamp or the build is newer than its stamp, with `--fresh-disk`, `--diskregen` or `--minimal`, or when the image is missing. `--build-only` runs the build and exits, for a caller that times the boot.
+`scripts/run-qemu.sh` wraps the QEMU invocation. Before every boot it runs `ninja` on the build directory (`uros/build`, or `UROS_BUILD_DIR`), re-packs the stage-1 bundle (`--reuse-bundle` reuses it as it is, and says so when the build is newer), and regenerates `disk.img` when the disk is attached and has no stamp, or a userland binary, musl's `libc.so` or `make-disk-image.sh` is newer than its stamp (a kernel rebuild alone does not touch the disk), with `--fresh-disk`, `--diskregen` or `--minimal`, or when the image is missing. `--build-only` runs the build and exits, for a caller that times the boot.
 
 ```sh
 ./scripts/run-qemu.sh                                 # graphical (default --ahci)
@@ -405,7 +405,7 @@ The disk and bundle are built by scripts in `scripts/`, not by CMake. Both pick 
 
 `scripts/run-ush.sh` is the convenience wrapper for `--minimal --allow-reboot -display none -serial mon:stdio`: it builds the minimal bundle and drops you straight at the `ush$` prompt over the serial console.
 
-`--fresh-disk` is the safe default after an ungracefully-closed previous run — `disk.img` carries ext2 writeback state from the guest and a half-flushed image can cause spurious stage-2 hangs. After a rebuild the disk is regenerated anyway, because the build is newer than its stamp.
+`--fresh-disk` is the safe default after an ungracefully-closed previous run — `disk.img` carries ext2 writeback state from the guest and a half-flushed image can cause spurious stage-2 hangs. After a rebuild of anything the disk is made from, it is regenerated anyway; a kernel-only rebuild keeps the disk, so pass `--fresh-disk` after a crash.
 
 ### Smoke test
 

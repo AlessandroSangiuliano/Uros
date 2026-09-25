@@ -195,13 +195,22 @@ if [ ! -f "$PTHREAD_TEST" ]; then
     exit 1
 fi
 
+# Every temporary file lives in one directory, created before the first of
+# them, and one trap removes it with the half-built image and its stamp (#592).
+# The traps used to be three, each replacing the last and each installed after
+# some of the files it named: an 8 MB partition image leaked from every run and
+# 80 of them had piled up in /tmp, and a run that failed early left
+# bootstrap.conf and the bench files behind.
+TMPD=$(mktemp -d /tmp/osfmk-disk.XXXXXX)
+trap 'rm -rf "$TMPD"; rm -f "$DISK_IMG.new" "$DISK_IMG.stamp.new"' EXIT
+
 # --- File di configurazione del bootstrap ---
 # Format: <symtab_name> <path> [args...]
 # Bootstrap takes <path> from the stage-1 bundle, and from /mach_servers/ on
 # disk0a when the bundle does not carry it.  The "disk0c" after default_pager
 # becomes its argv[1]: it opens that partition through the block server and
 # pages to it.
-BOOTSTRAP_CONF=$(mktemp)
+BOOTSTRAP_CONF=$(mktemp -p "$TMPD")
 # cap_server (if built) goes right after name_server: it publishes its
 # port via netname_check_in so the name_server must be up first.
 CAP_SERVER_CONF_LINE=""
@@ -343,21 +352,18 @@ echo "  disk0b: ext2, ${FS1_SIZE_MB} MB  — hello.txt + bench.dat (test data)"
 echo "  disk0c: raw,  ${SWAP_SIZE_MB} MB — paging/swap"
 echo ""
 
-# The image is built beside its destination and moved over it at the end, and
-# its stamp -- when it was made, which run-qemu.sh compares with the binaries
-# it carries (#592) -- is taken now and put in place only then.  The old stamp
-# goes first: a run cut off halfway leaves the previous image with no stamp,
-# which run-qemu.sh regenerates, instead of a half-written image or a stamp
-# that vouches for one.  The image's own mtime cannot serve: qemu moves it on
-# every guest write.  And a qemu that still has the old image open keeps its
-# own inode rather than seeing its filesystems rewritten.
+# The image is built beside its destination, and the image and its stamp
+# replace the old pair together at the end, or not at all (#592).  The stamp
+# says when the image was made; run-qemu.sh compares it with what the image is
+# made from, because the image's own mtime moves on every guest write.  It is
+# taken now, before any input is read, so a binary rebuilt while this runs is
+# newer than it.  A run cut off halfway leaves the previous image and its own
+# stamp untouched, and a qemu that still has the old image open keeps its own
+# inode rather than seeing its filesystems rewritten.
 DISK_STAMP="$DISK_IMG.stamp"
 DISK_NEW="$DISK_IMG.new"
-rm -f "$DISK_STAMP" "$DISK_NEW"
+rm -f "$DISK_NEW"
 touch "$DISK_STAMP.new"
-# Removed on any exit from here on, a failure in the next two steps included
-# (the traps further down replace this one and name both again).
-trap 'rm -f "$DISK_NEW" "$DISK_STAMP.new"' EXIT
 
 # --- 1. Immagine vuota ---
 echo "[1/6] Creazione immagine vuota (${IMG_SIZE_MB} MB)..."
@@ -374,9 +380,8 @@ EOF
 
 # --- 3. Formattare le due partizioni ext2 ---
 echo "[3/6] Formattazione ext2 (disk0a + disk0b)..."
-PART_IMG=$(mktemp /tmp/osfmk-part.XXXXXX.img)
-PART1_IMG=$(mktemp /tmp/osfmk-part1.XXXXXX.img)
-trap 'rm -f "$PART_IMG" "$PART1_IMG" "$BOOTSTRAP_CONF" "$DISK_NEW" "$DISK_STAMP.new"' EXIT
+PART_IMG=$(mktemp -p "$TMPD" part.XXXXXX.img)
+PART1_IMG=$(mktemp -p "$TMPD" part1.XXXXXX.img)
 
 dd if=/dev/zero of="$PART_IMG" bs="$SECT_SIZE" count="$FS0_SIZE_SECTS" status=none
 mke2fs -t ext2 -q -F \
@@ -443,11 +448,11 @@ echo "[4/6] Copia file nel filesystem ext2..."
 # of the default ext2 mount (ext_server mounts ahci0a at /), so seed both
 # files here.  bench.dat only needs the first 64 bytes — a 1 KB blob
 # is plenty and keeps the partition small.
-HELLO_TXT=$(mktemp)
-POSIX_SMOKE=$(mktemp)
-BENCH_DAT=$(mktemp)
-BENCH_LARGE=$(mktemp)
-BENCH_4M=$(mktemp)
+HELLO_TXT=$(mktemp -p "$TMPD")
+POSIX_SMOKE=$(mktemp -p "$TMPD")
+BENCH_DAT=$(mktemp -p "$TMPD")
+BENCH_LARGE=$(mktemp -p "$TMPD")
+BENCH_4M=$(mktemp -p "$TMPD")
 printf 'Hello from /mach_servers/ root\n' > "$HELLO_TXT"
 # Read-only fixture for hello_server's POSIX fd-layer smoke (#262).
 # Kept separate from hello.txt, which disk_bench uses as a write
@@ -461,9 +466,6 @@ dd if=/dev/urandom of="$BENCH_LARGE" bs=1M count=12 status=none
 # bench_4m.dat (#267): 4 MB — apples-to-apples with the historical
 # file-pool cached-read baseline (~930 MB/s at 64 KB, warm).
 dd if=/dev/urandom of="$BENCH_4M" bs=1M count=4 status=none
-# ⚠️ This trap replaces the one above, so it names everything that one did:
-# leaving PART1_IMG out of it leaked an 8 MB /tmp file on every run (#592).
-trap 'rm -f "$PART_IMG" "$PART1_IMG" "$BOOTSTRAP_CONF" "$DISK_NEW" "$DISK_STAMP.new" "$HELLO_TXT" "$POSIX_SMOKE" "$BENCH_DAT" "$BENCH_LARGE" "$BENCH_4M"' EXIT
 
 # hello_exec is optional (#228 v0.1.0): copy to / so exec_server can
 # load "/hello_exec" via libvfs.
@@ -673,7 +675,7 @@ echo "  /mach_servers/modules/hal/pci_scan.so     → $(stat -c%s "$HAL_PCI_SCAN
 echo "  /mach_servers/ext_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
 # --- 4b. Popola disk0b con hello.txt (test data) ---
-DBHELLO=$(mktemp)
+DBHELLO=$(mktemp -p "$TMPD")
 printf 'Hello from disk0b partition\n' > "$DBHELLO"
 debugfs -w -f /dev/stdin "$PART1_IMG" <<DBGFS 2>/dev/null
 write $DBHELLO hello.txt

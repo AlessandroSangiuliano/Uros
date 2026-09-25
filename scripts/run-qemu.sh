@@ -16,10 +16,11 @@
 #                                                   # disk is regenerated when it
 #                                                   # is missing, with --minimal,
 #                                                   # and, when it is attached,
-#                                                   # when the build is newer than
-#                                                   # its stamp or it has none
-#                                                   # (not for --bench: the suite
-#                                                   # rides the bundle)
+#                                                   # when it is stale (see the
+#                                                   # disk's stamp below; a kernel
+#                                                   # rebuild alone is not) -- not
+#                                                   # for --bench: the suite
+#                                                   # rides the bundle
 #   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG as the second AHCI
 #                                                   # disk, NOT recreated: it is
 #                                                   # /mnt/disk2, where x86-64
@@ -153,13 +154,12 @@ fi
 # when asked.  Its own comment said it rebuilt them, so an edit followed by a
 # boot without a ninja in between tested the previous build and reported on the
 # edit.  Now it runs ninja first, as run-x86_64.sh does, then re-packs the
-# bundle, and regenerates the disk when its stamp is older than the build
-# (below).  ush, the terminal server and the programs on the ext2 root travel
+# bundle, and regenerates the disk when it is stale (below).  ush, the terminal server and the programs on the ext2 root travel
 # only on the disk, so the disk has to follow the build too.
 #
 # Everything, not a list of targets: make-bundle.sh and make-disk-image.sh each
-# pack their own list of files from under export/, and a list of targets here
-# would be a third list to keep in step with those two.  The output goes to a
+# pack their own list of files (from export/, and musl's libc.so for the disk),
+# and a list of targets here would be a third list to keep in step with them.  The output goes to a
 # file and two lines are printed, because the callers keep this script's
 # output as the run's log.
 #
@@ -188,23 +188,26 @@ else
 fi
 [ "$BUILD_ONLY" = true ] && exit 0
 
-# The disk's age is the stamp make-disk-image.sh leaves beside it (#592):
-# written when a run starts, put in place only when the run finishes, and
-# removed first, so a run cut off halfway -- here or by hand -- leaves a disk
-# with no stamp.  Not disk.img's own mtime: qemu writes the image (ext2 on
-# ahci0a and ahci0b, and paging on disk0c when AHCI is disk0), so that mtime
-# says when the guest last wrote.
+# The disk's age is the stamp make-disk-image.sh leaves beside it (#592): taken
+# when a run starts, and moved in place together with the image when the run
+# finishes, so a run cut off halfway -- here or by hand -- leaves the previous
+# image and its own stamp.  Not disk.img's own mtime: qemu writes the image
+# (ext2 on ahci0a and ahci0b, and paging on disk0c when AHCI is disk0), so that
+# mtime says when the guest last wrote.
 #
-# Stale means: no stamp, or any file under export/uros/$ARCH/user or musl's
-# libc.so (the disk's dynamic linker) newer than it.  That is more than the
-# disk carries -- the generator packs a list -- so it errs towards
-# regenerating.  Asked only when the disk is attached.
+# Stale means: no stamp, or newer than it any file under export/uros/$ARCH/user,
+# musl's libc.so (the disk's dynamic linker), or make-disk-image.sh itself,
+# which decides what goes on the disk.  That is more than the disk carries --
+# the generator packs a list -- so it errs towards regenerating.  The kernel is
+# not on the disk, so a kernel rebuild alone does not make it stale.  Asked only
+# when the disk is attached.
 DISK_STAMP="$DISK_IMG.stamp"
 STALE_DISK=false
 if [ "$USE_AHCI" = true ] && [ -f "$DISK_IMG" ]; then
     if [ ! -f "$DISK_STAMP" ] ||
        [ -n "$(find "$BUILD_DIR/export/uros/$ARCH/user" \
                    "$BUILD_DIR/src/contrib/musl-install/lib/libc.so" \
+                   "$REPO_ROOT/scripts/make-disk-image.sh" \
                    -type f -newer "$DISK_STAMP" -print 2>/dev/null | head -n 1)" ]; then
         STALE_DISK=true
     fi
@@ -219,7 +222,7 @@ fi
 # so changing --bench suites does NOT need a disk regen.
 if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ] || [ "$STALE_DISK" = true ]; then
     [ -f "$DISK_IMG" ] || echo "disk.img missing — regenerating."
-    [ "$STALE_DISK" = true ] && echo "disk.img has no stamp, or the build is newer than its stamp — regenerating."
+    [ "$STALE_DISK" = true ] && echo "disk.img has no stamp, or something it is made from is newer than its stamp — regenerating."
     if [ -n "$BENCH_ARGS" ]; then
         echo "Regenerating disk image (--bench):$BENCH_ARGS"
         "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
@@ -235,14 +238,14 @@ fi
 # binaries stay in sync with the on-disk copy (especially with --bench).
 # --reuse-bundle is a request, and it is honoured as asked: the bundle is not
 # checked against the flags it was packed with nor against a pack that was cut
-# off.  What changed since it was packed is said, though (#592): after the
-# build above, reusing it may boot a new kernel with old servers.
+# off.  A binary that changed after it was packed is named, though (#592):
+# after the build above, reusing it may boot a new kernel with old servers.
 if [ "$USE_BUNDLE" = true ]; then
     if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
         echo "Bundle:  reusing $BUNDLE_IMG (--reuse-bundle, skipped rebuild)"
-        if [ -n "$(find "$BUILD_DIR/export/uros/$ARCH/user" -type f -newer "$BUNDLE_IMG" -print 2>/dev/null | head -n 1)" ]; then
-            echo "Bundle:  ⚠️ older than the build: a binary under export/ changed after it was packed"
-        fi
+        NEWER=$(find "$BUILD_DIR/export/uros/$ARCH/user" -type f -newer "$BUNDLE_IMG" -print 2>/dev/null | head -n 1)
+        [ -n "$NEWER" ] &&
+            echo "Bundle:  ⚠️ older than the build: ${NEWER#"$BUILD_DIR"/} changed after it was packed"
     elif [ -n "$BENCH_ARGS" ]; then
         "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG $CONSOLE_ARG
     else
