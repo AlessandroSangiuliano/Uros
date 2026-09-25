@@ -158,7 +158,13 @@ if ! ninja -C "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
     echo "ERROR: ninja -C $BUILD_DIR failed (whole output in $BUILD_LOG); nothing was booted"
     exit 1
 fi
-echo "Build:   ninja -C $BUILD_DIR — $(tail -n 1 "$BUILD_LOG")"
+# Ninja's last line is the last step to finish, not a total, so the steps are
+# counted, leaving out its re-check of globbed directories, which is not one.
+if grep -q '^ninja: no work to do' "$BUILD_LOG"; then
+    echo "Build:   ninja -C $BUILD_DIR — up to date"
+else
+    echo "Build:   ninja -C $BUILD_DIR — $(grep '^\[[0-9]*/[0-9]*\]' "$BUILD_LOG" | grep -vc 'Re-checking globbed') steps"
+fi
 
 # Disk-image regeneration is opt-in: it happens only with --diskregen (or
 # --fresh-disk/--minimal, or when disk.img is missing).  Otherwise the existing
