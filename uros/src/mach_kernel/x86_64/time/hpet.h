@@ -9,7 +9,9 @@
  * is a ruler that needs no ruler.  This file reads it, and the only thing it
  * ever writes is the overall enable bit, when the firmware left the counter
  * halted: the specification's initial state is "halted and zeroed" (3.1).
- * The comparators and their interrupts are #593's.
+ *
+ * The comparators below are #593's, and only time/hpet_event.c drives them:
+ * the clock-event backend for when the local APIC's timer cannot be used.
  */
 
 #ifndef _X86_64_TIME_HPET_H_
@@ -43,5 +45,39 @@ uint64_t hpet_read(void);
  * hpet_read() is three.
  */
 uint32_t hpet_read32(void);
+
+/* ------------------------------------------------------------------ */
+/*  The comparators (#593)                                              */
+/* ------------------------------------------------------------------ */
+
+/* LEG_RT_CAP: timer 0 can take the 8254's line and timer 1 the RTC's. */
+int hpet_legacy_capable(void);
+
+/* Whether this kernel has switched LegacyReplacement on (2.3.5). */
+int hpet_legacy_routed(void);
+
+struct hpet_comparator_caps {
+	int		fsb;		/* Tn_FSB_INT_DEL_CAP */
+	int		periodic;	/* Tn_PER_INT_CAP */
+	int		size_64;	/* Tn_SIZE_CAP */
+	uint32_t	route_cap;	/* Tn_INT_ROUTE_CAP: I/O APIC inputs */
+};
+
+void hpet_comparator_caps(unsigned n, struct hpet_comparator_caps *out);
+
+/*
+ * Configure comparator n one-shot, edge-triggered and 32 bits wide, parked a
+ * wrap away, and let it interrupt: as an FSB message of `data' written to
+ * `addr', or through LegacyReplacement (n must be 0 or 1, and the block must
+ * be legacy-capable; returns 0 otherwise).
+ */
+void hpet_comparator_fsb(unsigned n, uint32_t addr, uint32_t data);
+int hpet_comparator_legacy(unsigned n);
+
+/* Stop comparator n from interrupting. */
+void hpet_comparator_off(unsigned n);
+
+/* The match value, against the counter's low 32 bits. */
+void hpet_comparator_set(unsigned n, uint32_t value);
 
 #endif	/* _X86_64_TIME_HPET_H_ */
