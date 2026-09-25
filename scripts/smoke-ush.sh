@@ -42,11 +42,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# The build goes before the clock (#592).  run-qemu.sh builds before every
+# boot, and smoke-ush.exp times the boot from its spawn: forty seconds of
+# compiling there would read as a machine that stopped talking.  Built here,
+# the spawn finds nothing to do.  A failed build is a smoke that did not start.
+#
 # $EXP_ARGS is deliberately unquoted: it must word-split into separate argv
 # entries for the expect script.
 if [ -n "$LOGFILE" ]; then
-    "$EXP" $EXP_ARGS 2>&1 | tee "$LOGFILE"
+    "$SCRIPT_DIR/run-qemu.sh" --build-only 2>&1 | tee "$LOGFILE"
+    [ "${PIPESTATUS[0]}" -eq 0 ] || exit 2
+    "$EXP" $EXP_ARGS 2>&1 | tee -a "$LOGFILE"
     exit "${PIPESTATUS[0]}"
 else
+    "$SCRIPT_DIR/run-qemu.sh" --build-only || exit 2
     exec "$EXP" $EXP_ARGS
 fi

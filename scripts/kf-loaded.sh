@@ -17,6 +17,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NBURN=${1:-8}
 MAXR=${2:-15}
 
+# Built before the burners and outside the 260 s below (#592): run-qemu.sh
+# builds before every boot, and the first attempt would otherwise spend its
+# budget compiling under eight burners.
+"$ROOT/scripts/run-qemu.sh" --build-only || exit 1
+
 BURN_PIDS=()
 for i in $(seq 1 "$NBURN"); do
     ( while :; do :; done ) &
