@@ -207,9 +207,9 @@ static void
 check_rescan(int n_before)
 {
 	kern_return_t	kr;
-	int		n_after, i;
+	int		n_after, n_common, i;
 	unsigned int	b;
-	int		changed = 0;
+	int		changed = 0, replaced = 0;
 
 	kr = hal_rescan(hal_port);
 	if (kr != KERN_SUCCESS) {
@@ -219,10 +219,48 @@ check_rescan(int n_before)
 	}
 
 	n_after = fetch_registry(after, MAX_DEVS);
+
+	/*
+	 * 🔴 Who, and not only how many (#597).  The count used to be the
+	 * whole answer, so a phantom produced by a configuration read that
+	 * answered about another device was reported as "the count changed"
+	 * and nothing else.  The registry appends a new BDF at the end and
+	 * overwrites a known BDF whose identity changed, so the entries past
+	 * n_before are what appeared, and an index whose identity differs is
+	 * what was replaced.
+	 */
+	n_common = n_after < n_before ? n_after : n_before;
+	for (i = 0; i < n_common; i++)
+		if (after[i].bus != before[i].bus
+		    || after[i].slot != before[i].slot
+		    || after[i].func != before[i].func
+		    || after[i].vendor_device != before[i].vendor_device
+		    || after[i].class_rev != before[i].class_rev) {
+			printf("hal_bar:   entry %d was %02u:%02u.%u 0x%08x "
+			       "class 0x%08x and is now %02u:%02u.%u 0x%08x "
+			       "class 0x%08x\n", i,
+			       before[i].bus, before[i].slot, before[i].func,
+			       before[i].vendor_device, before[i].class_rev,
+			       after[i].bus, after[i].slot, after[i].func,
+			       after[i].vendor_device, after[i].class_rev);
+			replaced++;
+		}
+	for (i = n_before; i < n_after; i++)
+		printf("hal_bar:   the rescan added %02u:%02u.%u vendor/device "
+		       "0x%08x class 0x%08x, %u region(s)\n",
+		       after[i].bus, after[i].slot, after[i].func,
+		       after[i].vendor_device, after[i].class_rev,
+		       after[i].n_bars);
+
 	if (n_after != n_before) {
 		arm("[5] a rescan leaves every region exactly as it was", 0,
 		    "the device count changed across a rescan of a bus that "
 		    "did not change");
+		return;
+	}
+	if (replaced != 0) {
+		arm("[5] a rescan leaves every region exactly as it was", 0,
+		    "a rescan replaced a device's identity in the registry");
 		return;
 	}
 

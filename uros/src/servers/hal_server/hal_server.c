@@ -80,6 +80,13 @@ static int n_discovery;
 
 static struct hal_device_info scan_buf[HAL_MAX_DEVICES];
 
+/*
+ * How many discovery passes have finished.  The first is the boot scan, whose
+ * devices dump_registry() lists; every later one is a rescan, and a device a
+ * rescan finds is named where it is found (#597).
+ */
+static int discovery_runs;
+
 /* ================================================================
  * Discovery pass — run every loaded module, merge into the registry
  * ================================================================ */
@@ -132,8 +139,35 @@ hal_run_discovery(void)
 						       scan_buf[i].func,
 						       scan_buf[i].bars,
 						       scan_buf[i].n_bars);
-				measured++;
+				/*
+				 * Counted only where there was something to
+				 * probe: a device with no regions returns 0
+				 * without writing a byte, and counting it
+				 * made a rescan's phantom read "1 measured"
+				 * although nothing had been touched (#597).
+				 */
+				if (scan_buf[i].n_bars > 0)
+					measured++;
 			}
+
+			/*
+			 * 🔴 A bus that did not change has no new device, so
+			 * one found by a rescan is either hardware that was
+			 * plugged in or a read that answered about something
+			 * else.  i386's unserialised configuration access
+			 * produced the second at -smp 4 (#597), and the line
+			 * that reported it gave only a count.
+			 */
+			if (discovery_runs > 0)
+				printf("hal: a rescan found a device the "
+				       "registry did not have: %02x:%02x.%x "
+				       "vendor/device 0x%08x class 0x%08x "
+				       "irq %u, %u region(s)\n",
+				       scan_buf[i].bus, scan_buf[i].slot,
+				       scan_buf[i].func,
+				       scan_buf[i].vendor_device,
+				       scan_buf[i].class_rev, scan_buf[i].irq,
+				       scan_buf[i].n_bars);
 
 			/* #173: only fresh devices trigger hal_device_added
 			 * — repeated rescans over a stable bus stay quiet. */
@@ -154,6 +188,7 @@ hal_run_discovery(void)
 		       "(%d new, %d measured)\n",
 		       ops->name, n, new_devs, measured);
 	}
+	discovery_runs++;
 }
 
 /* ================================================================
