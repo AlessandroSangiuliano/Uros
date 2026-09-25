@@ -47,5 +47,8 @@ extern void	clock_watch_ablate(int cpu);	/* from hardclock */
 #ifdef ABLATE_599_SPL_LEAK
 extern void	clock_watch_ablate_spl_leak(void); /* from thread_switch */
 #endif
+#ifdef ABLATE_599_NESTED_PRINTF
+extern void	clock_watch_ablate_nested_printf(void); /* from consolewrite */
+#endif
 
 #endif	/* _I386_CLOCK_WATCH_H_ */

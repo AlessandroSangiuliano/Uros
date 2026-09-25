@@ -188,6 +188,15 @@ clock_watch_init(void)
 	printf("clock: #599 ablation -- the watch does not run from the tick, "
 	       "only from inside spins\n");
 #endif
+#ifdef ABLATE_599_NESTED_PRINTF
+	printf("clock: #599 ablation -- after tick %u processor 0 raises a line "
+	       "nobody handles while consolewrite holds printf_lock, once\n",
+	       CW_ABLATE_AT);
+#endif
+#ifdef ABLATE_599_PRINTF_WAITS
+	printf("clock: #599 ablation -- a nested printf waits for printf_lock, "
+	       "as before the fix\n");
+#endif
 #ifdef ABLATE_599_SPL_LEAK
 	printf("clock: #599 ablation -- after tick %u a thread_switch on "
 	       "processor 0 returns to user mode at splsched, once\n",
@@ -341,6 +350,42 @@ clock_watch_ablate_spl_leak(void)
 	cn_puts("\nclock: #599 ablation -- this thread_switch returns to user "
 		"mode at splsched now\n");
 	(void) splsched();
+}
+#endif
+
+#ifdef ABLATE_599_NESTED_PRINTF
+/*
+ * The widening arm's second stop, on purpose (#599).  consolewrite() calls
+ * this with printf_lock held and interrupts on; once, on processor 0 after
+ * CW_ABLATE_AT ticks, it raises the vector of an ISA line whose handler is
+ * intnull() -- found in ivect[] rather than named, since a line's owner
+ * changes during a boot -- so that intnull()'s printf() runs nested inside
+ * the holder.  With printf_nested() (kern/printf.c) the line comes out and
+ * the boot goes on; with PRINTF_WAITS it spins before its EOI and the tick
+ * stops behind the vector in service.
+ */
+extern void	(*ivect[])();
+extern void	intnull(int);
+
+void
+clock_watch_ablate_nested_printf(void)
+{
+	static int	done;
+	int		irq;
+
+	if (cpu_number() != master_cpu || done ||
+	    nmi_cpu_tick[master_cpu] < CW_ABLATE_AT)
+		return;
+	for (irq = 15; irq > 2; irq--)
+		if (ivect[irq] == (void (*)())intnull)
+			break;
+	if (irq <= 2)
+		return;
+	done = 1;
+	cn_puts("\nclock: #599 ablation -- line ");
+	cn_dec((unsigned int)irq);
+	cn_puts(" raised inside consolewrite's hold now\n");
+	lapic_send_self_ipi(0x40 + irq);
 }
 #endif
 
