@@ -100,6 +100,7 @@ static uint64_t		armed;		/* processors with a deadline here */
 static uint32_t		due[NCPUS];
 static uint64_t		woken;		/* sent their tick, not re-armed yet */
 static uint32_t		woken_for[NCPUS];
+static uint32_t		interval[NCPUS];	/* each one's last request */
 static int		programmed;
 static uint32_t		programmed_at;
 #if ABLATE_593_BEHIND
@@ -112,6 +113,7 @@ struct window {
 	uint64_t	idle_fires;	/* ... with nothing due */
 	uint64_t	passed;		/* writes found behind the counter */
 	uint64_t	kicks;		/* ticks sent, self-IPIs included */
+	uint64_t	joins;		/* arms moved onto another's grid */
 	uint64_t	late_n, late_sum;
 	uint32_t	late_min, late_max;
 	uint64_t	rearm_n[NCPUS], rearm_sum[NCPUS];
@@ -497,11 +499,46 @@ static void hpet_ev_setup(uint8_t vector)
 	lapic_timer_stop();
 }
 
+/*
+ * A deadline counted from now -- a processor's first, or one whose tick came
+ * too late to count from the deadline that fired -- moved onto the grid of a
+ * processor already armed with the same interval: the first point of that
+ * grid at or after the deadline asked for.  Never earlier than asked, at most
+ * one interval later, and once: from then on the two re-arm from the same
+ * deadlines and share every broadcast.
+ *
+ * Without it, processors that started a few milliseconds apart keep their
+ * own phases for good, and every period costs one interrupt per phase:
+ * measured at 1.8 comparator interrupts per period at four processors under
+ * KVM, and the writes found behind the counter came from one phase's
+ * deadline arriving while the other's broadcast was still being sent.
+ */
+static uint32_t join_locked(unsigned self, uint32_t want, uint32_t counts)
+{
+	uint64_t left = armed & ~BIT(self);
+
+	while (left != 0) {
+		unsigned	c = (unsigned)__builtin_ctzll(left);
+		int32_t		after;
+		uint32_t	k;
+
+		left &= left - 1;
+		if (interval[c] != counts)
+			continue;
+		after = (int32_t)(want - due[c]);
+		k = after <= 0 ? 0 : ((uint32_t)after + counts - 1) / counts;
+		w.joins++;
+		return due[c] + k * counts;
+	}
+	return want;
+}
+
 static int hpet_ev_arm(uint64_t ns)
 {
 	unsigned	self = (unsigned)cpu_number();
 	uint64_t	kick = 0;
 	uint32_t	counts, now, base;
+	int		fresh = 1;
 
 	if (!started || self >= NCPUS)
 		return 0;
@@ -533,11 +570,16 @@ static int hpet_ev_arm(uint64_t ns)
 		w.rearm_sum[self] += late;
 		if (late > w.rearm_max[self])
 			w.rearm_max[self] = late;
-		if ((int32_t)(woken_for[self] + counts - now) > (int32_t)ahead)
+		if ((int32_t)(woken_for[self] + counts - now) > (int32_t)ahead) {
 			base = woken_for[self];
+			fresh = 0;
+		}
 	}
 
 	due[self] = base + counts;
+	if (fresh)
+		due[self] = join_locked(self, due[self], counts);
+	interval[self] = counts;
 	armed |= BIT(self);
 	if (!programmed || (int32_t)(due[self] - programmed_at) < 0)
 		reprogram_locked(&kick);
@@ -654,7 +696,9 @@ void hpet_event_drain_report(void)
 	put_u(&l, r->w.kicks);
 	put_s(&l, " ticks sent, ");
 	put_u(&l, r->w.passed);
-	put_s(&l, " writes found behind the counter");
+	put_s(&l, " writes found behind the counter, ");
+	put_u(&l, r->w.joins);
+	put_s(&l, " arms moved onto another processor's grid");
 	if (r->w.late_n != 0) {
 		put_s(&l, "; the comparator late by ");
 		put_u(&l, counts_to_ns(r->w.late_min));
