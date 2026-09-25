@@ -57,4 +57,12 @@
 
 extern const struct clock_event_ops hpet_event_ops;
 
+/*
+ * What the broadcast has recorded and not yet said: the comparator's
+ * lateness, the deadlines found already passed, and each processor's ticks
+ * against the TSC and the PM timer.  Thread context only, for
+ * clock_event_drain_reports()'s reason.
+ */
+void hpet_event_drain_report(void);
+
 #endif	/* _X86_64_TIME_HPET_EVENT_H_ */

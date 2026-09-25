@@ -11,6 +11,7 @@
 #include <cpus.h>			/* NCPUS */
 #include <kern/misc_protos.h>		/* printf */
 #include <kern/cpu_number.h>		/* cpu_number */
+#include <sync/barrier.h>		/* smp_wmb, smp_rmb */
 #include <sync/lock.h>
 
 #include <cpu/acpi.h>
@@ -18,9 +19,12 @@
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
+#include <cpu/smp.h>
 #include <trap/trap.h>
 #include <time/hpet.h>
 #include <time/hpet_event.h>
+#include <time/pmtimer.h>
+#include <time/tsc.h>
 
 _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
 
@@ -68,6 +72,15 @@ _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
 
 enum { ROUTE_NONE, ROUTE_FSB, ROUTE_LEGACY };
 
+/*
+ * Report windows, in seconds by the counter: the first says early whether
+ * the rate is right at all, the second is long enough to catch what a
+ * second hides, and after that one a minute.
+ */
+#define	WINDOW_FIRST_S		1
+#define	WINDOW_SECOND_S		10
+#define	WINDOW_REST_S		60
+
 static int		started;
 static int		route;
 static unsigned		comparator;
@@ -93,7 +106,7 @@ static uint32_t		programmed_at;
 static unsigned		behind_writes;
 #endif
 
-/* What the broadcast counted, all in HPET counts. */
+/* What a window counted, all in HPET counts. */
 struct window {
 	uint64_t	fires;		/* comparator interrupts */
 	uint64_t	idle_fires;	/* ... with nothing due */
@@ -106,6 +119,28 @@ struct window {
 };
 
 static struct window	w;
+static uint32_t		win_last;	/* the counter at the last fire */
+static uint64_t		win_counts;
+static uint64_t		win_length;
+static unsigned		win_index;
+static uint32_t		pm_last;
+static uint64_t		win_pm;
+static int		pm_gap;		/* a fire interval too long for the PM
+					   timer's wrap: its total is not a
+					   time */
+static uint64_t		tsc0;
+static unsigned long	ticks0[NCPUS];
+
+/* The window closed, for the thread that prints it. */
+static struct report {
+	struct window	w;
+	unsigned	index;
+	uint64_t	counts, pm, tsc;
+	int		pm_valid;
+	unsigned long	ticks[NCPUS];
+} report;
+static volatile int	report_pending;
+static unsigned		reports_dropped;
 
 static uint32_t ns_to_counts(uint64_t ns)
 {
@@ -116,6 +151,11 @@ static uint32_t ns_to_counts(uint64_t ns)
 	if (c > HPET_EV_MAX_COUNTS)
 		c = HPET_EV_MAX_COUNTS;
 	return (uint32_t)c;
+}
+
+static uint64_t counts_to_ns(uint64_t counts)
+{
+	return counts * hpet_period_fs() / FS_PER_NS;
 }
 
 /* ------------------------------------------------------------ routing -- */
@@ -253,6 +293,77 @@ static void kick_send(uint64_t kick)
 	}
 }
 
+/* ------------------------------------------------------------ windows -- */
+
+static uint64_t window_length(unsigned index)
+{
+	if (index == 0)
+		return hz * WINDOW_FIRST_S;
+	if (index == 1)
+		return hz * WINDOW_SECOND_S;
+	return hz * WINDOW_REST_S;
+}
+
+static void window_open(uint32_t now)
+{
+	unsigned c;
+
+	w = (struct window){ .late_min = UINT32_MAX };
+	for (c = 0; c < NCPUS; c++)
+		ticks0[c] = clock_event_ticks(c);
+	win_last = now;
+	win_counts = 0;
+	win_length = window_length(win_index);
+	win_pm = 0;
+	pm_gap = 0;
+	if (pmtimer_present())
+		pm_last = pmtimer_read();
+	tsc0 = rdtsc();
+}
+
+/*
+ * The time between two fires, added up on three clocks.  The PM timer wraps
+ * every 4.7 s at 24 bits, so a gap longer than four seconds -- a stall, which
+ * is what the UNCHECKED ablation is for -- makes its total no longer a time,
+ * and the report says so rather than printing it.
+ */
+static void window_account(uint32_t now)
+{
+	uint32_t gap = now - win_last;
+	unsigned c;
+
+	win_counts += gap;
+	win_last = now;
+	if (gap > hz * 4)
+		pm_gap = 1;
+	if (pmtimer_present()) {
+		uint32_t pm = pmtimer_read();
+
+		win_pm += pmtimer_delta(pm_last, pm);
+		pm_last = pm;
+	}
+
+	if (win_counts < win_length)
+		return;
+
+	if (report_pending) {
+		reports_dropped++;
+	} else {
+		report.w = w;
+		report.index = win_index;
+		report.counts = win_counts;
+		report.pm = win_pm;
+		report.pm_valid = pmtimer_present() && !pm_gap;
+		report.tsc = rdtsc() - tsc0;
+		for (c = 0; c < NCPUS; c++)
+			report.ticks[c] = clock_event_ticks(c) - ticks0[c];
+		smp_wmb();
+		report_pending = 1;
+	}
+	win_index++;
+	window_open(now);
+}
+
 /* ------------------------------------------------------------ backend -- */
 
 static int hpet_ev_probe(void)
@@ -306,6 +417,7 @@ static void hpet_ev_intr(struct trap_frame *frame)
 	reprogram_locked(&kick);
 	if (kick == 0)
 		w.idle_fires++;
+	window_account(now);
 	hw_lock_unlock(&ev_lock);
 
 	lapic_eoi();
@@ -355,7 +467,7 @@ static void hpet_ev_start(uint8_t vector)
 			     acpi_irq_flags(0));
 	}
 
-	w = (struct window){ .late_min = UINT32_MAX };
+	window_open(hpet_read32());
 	started = 1;
 
 	if (route == ROUTE_FSB)
@@ -462,3 +574,137 @@ const struct clock_event_ops hpet_event_ops = {
 	"hpet", hpet_ev_probe, hpet_ev_setup, hpet_ev_arm, hpet_ev_stop,
 	hpet_ev_start
 };
+
+/* ------------------------------------------------------------- report -- */
+
+/*
+ * A line built in a local buffer and printed by ONE printf: a line made of
+ * several is a line another processor's output can land inside (#578).  Not
+ * the kernel's sprintf(), which writes through one static pointer and is not
+ * for two processors at once.
+ */
+struct line {
+	char		b[400];
+	unsigned	n;
+};
+
+static void put_s(struct line *l, const char *s)
+{
+	while (*s != '\0' && l->n < sizeof(l->b) - 1)
+		l->b[l->n++] = *s++;
+	l->b[l->n] = '\0';
+}
+
+static void put_u(struct line *l, uint64_t v)
+{
+	char	d[21];
+	char	*p = d + sizeof(d) - 1;
+
+	*p = '\0';
+	do {
+		*--p = (char)('0' + v % 10);
+		v /= 10;
+	} while (v != 0);
+	put_s(l, p);
+}
+
+/*
+ * The window's line, and one per processor.  Claimed by compare-and-swap,
+ * because the idle loop drains reports on every processor and two of them
+ * finding the same window would print it twice.
+ */
+void hpet_event_drain_report(void)
+{
+	struct report	*r = &report;
+	uint64_t	tsc_rate = tsc_hz();
+	unsigned	ev_hz = clock_event_hz();
+	unsigned	c;
+	struct line	l;
+
+	if (report_pending != 1
+	    || !__sync_bool_compare_and_swap(&report_pending, 1, 2))
+		return;
+	smp_rmb();
+
+	l.n = 0;
+	put_s(&l, "clock_event: hpet: window ");
+	put_u(&l, r->index);
+	put_s(&l, ", ");
+	put_u(&l, r->counts * 1000 / hz);
+	put_s(&l, " ms by the counter, ");
+	if (tsc_rate != 0) {
+		put_u(&l, r->tsc * 1000 / tsc_rate);
+		put_s(&l, " ms by the TSC, ");
+	} else {
+		put_s(&l, "the TSC has no rate, ");
+	}
+	if (r->pm_valid) {
+		put_u(&l, r->pm * 1000 / PMTIMER_HZ);
+		put_s(&l, " ms by the PM timer");
+	} else if (pmtimer_present()) {
+		put_s(&l, "the PM timer wrapped inside a gap between two fires");
+	} else {
+		put_s(&l, "no PM timer");
+	}
+	put_s(&l, " -- ");
+	put_u(&l, r->w.fires);
+	put_s(&l, " comparator interrupts (");
+	put_u(&l, r->w.idle_fires);
+	put_s(&l, " with nothing due), ");
+	put_u(&l, r->w.kicks);
+	put_s(&l, " ticks sent, ");
+	put_u(&l, r->w.passed);
+	put_s(&l, " writes found behind the counter");
+	if (r->w.late_n != 0) {
+		put_s(&l, "; the comparator late by ");
+		put_u(&l, counts_to_ns(r->w.late_min));
+		put_s(&l, "..");
+		put_u(&l, counts_to_ns(r->w.late_max));
+		put_s(&l, " ns, mean ");
+		put_u(&l, counts_to_ns(r->w.late_sum / r->w.late_n));
+	}
+	if (reports_dropped != 0) {
+		put_s(&l, "; ");
+		put_u(&l, reports_dropped);
+		put_s(&l, " windows closed while one waited to be printed");
+	}
+	put_s(&l, " (#593)");
+	printf("%s\n", l.b);
+
+	for (c = 0; c < NCPUS; c++) {
+		unsigned long t = r->ticks[c];
+
+		if (!smp_is_online(c) && t == 0)
+			continue;
+		l.n = 0;
+		put_s(&l, "clock_event: hpet: cpu ");
+		put_u(&l, c);
+		put_s(&l, " took ");
+		put_u(&l, t);
+		put_s(&l, " ticks");
+		if (tsc_rate != 0 && r->tsc != 0) {
+			put_s(&l, ", ");
+			put_u(&l, (uint64_t)t * 1000 * tsc_rate
+				  / ((uint64_t)ev_hz * r->tsc));
+			put_s(&l, " per mille of nominal by the TSC");
+		}
+		if (r->pm_valid && r->pm != 0) {
+			put_s(&l, ", ");
+			put_u(&l, (uint64_t)t * 1000 * PMTIMER_HZ
+				  / ((uint64_t)ev_hz * r->pm));
+			put_s(&l, " by the PM timer");
+		}
+		if (r->w.rearm_n[c] != 0) {
+			put_s(&l, "; due to re-armed ");
+			put_u(&l, counts_to_ns(r->w.rearm_sum[c]
+					       / r->w.rearm_n[c]));
+			put_s(&l, " ns mean, ");
+			put_u(&l, counts_to_ns(r->w.rearm_max[c]));
+			put_s(&l, " max");
+		}
+		printf("%s\n", l.b);
+	}
+
+	smp_wmb();
+	report_pending = 0;
+}
