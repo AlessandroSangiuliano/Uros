@@ -11,14 +11,14 @@
 #   ./scripts/run-qemu.sh --fresh-disk              # regenerate disk.img before
 #                                                   # the boot (when the previous
 #                                                   # run was cut off
-#                                                   # mid-writeback; after a
-#                                                   # rebuild it happens anyway)
+#                                                   # mid-writeback)
 #   ./scripts/run-qemu.sh --diskregen               # the same.  Unasked, the
-#                                                   # disk is regenerated only
-#                                                   # when a binary it carries
-#                                                   # is newer (not for --bench:
-#                                                   # the suite rides the
-#                                                   # stage-1 bundle)
+#                                                   # disk is regenerated when it
+#                                                   # is missing, with --minimal,
+#                                                   # and when something it
+#                                                   # carries was rebuilt after
+#                                                   # it (not for --bench: the
+#                                                   # suite rides the bundle)
 #   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG as the second AHCI
 #                                                   # disk, NOT recreated: it is
 #                                                   # /mnt/disk2, where x86-64
@@ -95,12 +95,13 @@ NO_REBOOT="-no-reboot"
 # the command for is half a condition.
 ORIG_ARGS="$*"
 SMP_COUNT=""
-DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
-                    # (otherwise the existing disk is reused, even with --bench;
-                    # the bench suite is carried by the stage-1 bundle)
+DISK_REGEN=false    # --diskregen: regenerate disk.img this launch even if it is
+                    # current (see the regeneration block for when it is not;
+                    # --bench alone never asks: the suite rides the bundle)
 REUSE_BUNDLE=false  # --reuse-bundle: skip the make-bundle.sh step and reuse the
-                    # existing bootstrap.bundle (fast iteration / repeated launches
-                    # of the same kernel+servers, e.g. SMP reliability loops)
+                    # existing bootstrap.bundle while nothing it is packed from
+                    # changed (repeated launches of the same kernel+servers,
+                    # e.g. SMP reliability loops)
 BUILD_ONLY=false    # --build-only: run the build step below and exit (#592)
 CONSOLE_ARG=""      # --with-console: ship the on-screen console TTY (#363) in the
                     # bundle so ush binds the graphical window instead of the UART.
@@ -185,29 +186,59 @@ else
 fi
 [ "$BUILD_ONLY" = true ] && exit 0
 
-# Whether an image is older than any binary it is packed from.  Both images
-# are packed from export/uros/$ARCH/user (make-bundle.sh, make-disk-image.sh).
-older_than_binaries() {
-    [ -n "$(find "$BUILD_DIR/export/uros/$ARCH/user" -type f -newer "$1" -print 2>/dev/null | head -n 1)" ]
+# Whether anything an image is packed from is newer than REF; a missing REF
+# counts as older than everything.  The inputs are read off the two
+# generators: both pack export/uros/$ARCH/user, make-disk-image.sh also carries
+# musl's libc.so as /lib/ld-musl-$ARCH.so.1, and the bundle's format is
+# mkbundle's.
+inputs_newer_than() {
+    _ref=$1; shift
+    [ -f "$_ref" ] || return 0
+    [ -n "$(find "$@" -type f -newer "$_ref" -print 2>/dev/null | head -n 1)" ]
 }
+USER_EXPORT="$BUILD_DIR/export/uros/$ARCH/user"
+MUSL_LIBC="$BUILD_DIR/src/contrib/musl-install/lib/libc.so"
+
+# The disk's age is its stamp's, not its own mtime: qemu writes the image
+# (ext2 on disk0a and disk0b, paging on disk0c), so disk.img's mtime says when
+# the guest last wrote, and a binary built while a guest ran would look older
+# than the disk.  The stamp is taken when a regeneration starts and kept only
+# once it has finished, so a regeneration cut off halfway leaves the disk
+# stale rather than current.  A disk with no stamp -- made by hand, or before
+# #592 -- is regenerated once.
+DISK_STAMP="$DISK_IMG.stamp"
 STALE_DISK=false
-[ -f "$DISK_IMG" ] && older_than_binaries "$DISK_IMG" && STALE_DISK=true
+if [ "$USE_AHCI" = true ] && [ -f "$DISK_IMG" ] &&
+   inputs_newer_than "$DISK_STAMP" "$USER_EXPORT" "$MUSL_LIBC"; then
+    STALE_DISK=true
+fi
+
+# Written beside the image and moved over it, so a qemu that still has the old
+# disk open keeps its own inode instead of seeing its filesystems rewritten.
+regenerate_disk() {
+    rm -f "$DISK_IMG.new"
+    touch "$DISK_STAMP.new"
+    "$REPO_ROOT/scripts/make-disk-image.sh" -o "$DISK_IMG.new" "$@"
+    mv -f "$DISK_IMG.new" "$DISK_IMG"
+    mv -f "$DISK_STAMP.new" "$DISK_STAMP"
+}
 
 # Disk-image regeneration happens with --diskregen, --fresh-disk or --minimal,
-# when disk.img is missing, and when a binary it carries is newer than it
-# (#592).  Otherwise the existing disk is reused -- even with --bench -- so
-# iterating on the kernel alone doesn't pay the disk-format cost every launch.
+# when disk.img is missing, and, when the disk is attached, when something it
+# carries is newer than its stamp (#592).  Otherwise the existing disk is
+# reused -- even with --bench -- so iterating on the kernel alone doesn't pay
+# the disk-format cost every launch.
 # The bench suite reaches ipc_bench through the stage-1 bundle (rebuilt below),
 # so changing --bench suites does NOT need a disk regen.
 if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ] || [ "$STALE_DISK" = true ]; then
     [ -f "$DISK_IMG" ] || echo "disk.img missing — regenerating."
-    [ "$STALE_DISK" = true ] && echo "disk.img is older than a binary it carries — regenerating."
+    [ "$STALE_DISK" = true ] && echo "disk.img is older than something it carries, or has no stamp — regenerating."
     if [ -n "$BENCH_ARGS" ]; then
         echo "Regenerating disk image (--bench):$BENCH_ARGS"
-        "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
+        regenerate_disk --bench $BENCH_ARGS $MINIMAL_ARG
     else
         echo "Regenerating disk image$([ -n "$MINIMAL_ARG" ] && echo " (--minimal)")…"
-        "$REPO_ROOT/scripts/make-disk-image.sh" $MINIMAL_ARG
+        regenerate_disk $MINIMAL_ARG
     fi
 elif [ -n "$BENCH_ARGS" ]; then
     echo "Bench suites:$BENCH_ARGS (via bundle; disk reused — pass --diskregen to rebuild it)"
@@ -215,11 +246,13 @@ fi
 
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
 # binaries stay in sync with the on-disk copy (especially with --bench).
-# --reuse-bundle keeps the existing one only while no binary it is packed from
+# --reuse-bundle keeps the existing one only while nothing it is packed from
 # is newer (#592): reusing it after the build above changed a server would
-# boot a new kernel with old servers.
+# boot a new kernel with old servers.  The bundle's own mtime is its age:
+# nothing but make-bundle.sh writes it.
 if [ "$USE_BUNDLE" = true ]; then
-    if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ] && ! older_than_binaries "$BUNDLE_IMG"; then
+    if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ] &&
+       ! inputs_newer_than "$BUNDLE_IMG" "$USER_EXPORT" "$BUILD_DIR/tools/mkbundle"; then
         echo "Bundle:  reusing $BUNDLE_IMG (--reuse-bundle, skipped rebuild)"
     elif [ -n "$BENCH_ARGS" ]; then
         "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG $CONSOLE_ARG
