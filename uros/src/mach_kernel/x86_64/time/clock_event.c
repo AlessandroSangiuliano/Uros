@@ -329,6 +329,32 @@ clock_event_init(uint8_t vector)
 	if (ops->start)
 		ops->start(vector);
 
+	/*
+	 * #593: whether the APIC timer keeps counting in the deep C-states
+	 * (ARAT, CPUID.06H:EAX[2]).  Without it a processor sleeping deeper
+	 * than C1 loses its tick, and needs a timer outside its core to wake it
+	 * -- the HPET's broadcast.  Printed so the question is answered per
+	 * machine rather than assumed: the idle loop only halts today, and C1
+	 * keeps the APIC timer counting whatever this says.
+	 */
+	{
+		uint32_t a, b, c, d;
+
+		cpuid(0, &a, &b, &c, &d);
+		if (a >= 6) {
+			cpuid(6, &a, &b, &c, &d);
+			printf("clock_event: the APIC timer %s in deep C-states "
+			       "(ARAT, CPUID.06H:EAX[2] = %u); the idle loop "
+			       "halts, in C1 (#593)\n",
+			       (a & 4) ? "keeps counting" : "STOPS",
+			       (a >> 2) & 1);
+		} else {
+			printf("clock_event: CPUID has no leaf 6, so nothing "
+			       "says whether the APIC timer counts in deep "
+			       "C-states; the idle loop halts, in C1 (#593)\n");
+		}
+	}
+
 	printf("clock_event: using %s at %u Hz (%llu ns per tick)\n",
 	       ops->name, event_hz, (unsigned long long) tick_ns);
 }
