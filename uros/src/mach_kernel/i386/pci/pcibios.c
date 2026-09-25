@@ -33,6 +33,7 @@
 #include <i386/pci/pci.h>
 #include <i386/pci/pcibios.h>
 #include <i386/pio.h>
+#include <i386/eflags.h>		/* EFL_IF, for the port-pair lock below */
 #include <kern/misc_protos.h>
 #include <mach/std_types.h>
 
@@ -138,6 +139,61 @@ pcici_t pcitag (unsigned char bus,
 	return tag;
 }
 
+/*
+ * ── The address and the data are two ports, and the pair is one access ──
+ *
+ * 🔴 IT WAS NOT SERIALISED ON THIS TARGET (#597).  Mechanism 1 writes the
+ * address to 0xCF8 and then reads or writes the datum at 0xCFC; mechanism 2
+ * selects the function through 0xCF8 and 0xCFA and then touches the port.
+ * Anything that moves those between the two steps makes the access answer
+ * about -- or write into -- a DIFFERENT device, and the caller cannot tell:
+ * the value is a well-formed register.
+ *
+ * 🔥 Seen at -smp 4 and never on one processor, where no caller runs in an
+ * interrupt path and the kernel does not preempt kernel code: the HAL's
+ * rescan counted a device on bus 8 that is not there, its scan read 00:00.0's
+ * class word as a BAR of the ISA bridge, and a claim of 0:0.0 was refused
+ * because its class read back as all ones.  x86-64 had paid for the same
+ * defect three times and fixed it in its own file only (1b4c138d).  This is
+ * the same lock under the same name, the one device_master.c's lock order
+ * names on both targets.
+ *
+ * ⚠️ The same shape as x86-64's: an xchg spin taken with interrupts off, and
+ * the flag saved and restored by hand.  It needs nothing initialised, so it
+ * serves the boot-time enumeration too, and the interrupts-off half closes the
+ * one-processor case of a handler touching configuration space between the
+ * two steps.
+ */
+static volatile unsigned char	pci_cfg_port_lock;
+
+static inline unsigned long
+pci_cfg_port_enter(void)
+{
+	unsigned long	flags;
+	unsigned char	busy;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+	for (;;) {
+		busy = 1;
+		__asm__ volatile("xchgb %0, %1"
+				 : "+q" (busy), "+m" (pci_cfg_port_lock)
+				 : : "memory");
+		if (busy == 0)
+			break;
+		__asm__ volatile("pause");
+	}
+	return flags;
+}
+
+static inline void
+pci_cfg_port_leave(unsigned long flags)
+{
+	__asm__ volatile("" : : : "memory");
+	pci_cfg_port_lock = 0;
+	if (flags & EFL_IF)
+		__asm__ volatile("sti" : : : "memory");
+}
+
 /*--------------------------------------------------------------------
  *
  *      Read register from configuration space.
@@ -148,10 +204,11 @@ pcici_t pcitag (unsigned char bus,
 
 unsigned long pci_conf_read (pcici_t tag, unsigned long reg)
 {
-	unsigned long addr, data = 0;
+	unsigned long addr, data = 0, flags;
 
 	if (!tag.cfg1) return (0xfffffffful);
 
+	flags = pci_cfg_port_enter();
 	switch (pci_mode) {
 
 	case 1:
@@ -178,6 +235,7 @@ unsigned long pci_conf_read (pcici_t tag, unsigned long reg)
 		outb (CONF2_FORWARD_PORT, 0);
 		break;
 	};
+	pci_cfg_port_leave(flags);
 
 #ifdef PCI_DEBUG
 	printf ("data=%x\n", data);
@@ -196,10 +254,11 @@ unsigned long pci_conf_read (pcici_t tag, unsigned long reg)
 
 void pci_conf_write (pcici_t tag, unsigned long reg, unsigned long data)
 {
-	unsigned long addr;
+	unsigned long addr, flags;
 
 	if (!tag.cfg1) return;
 
+	flags = pci_cfg_port_enter();
 	switch (pci_mode) {
 
 	case 1:
@@ -228,4 +287,5 @@ void pci_conf_write (pcici_t tag, unsigned long reg, unsigned long data)
 		outb (CONF2_FORWARD_PORT, 0);
 		break;
 	};
+	pci_cfg_port_leave(flags);
 }
