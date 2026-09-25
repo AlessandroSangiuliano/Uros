@@ -344,6 +344,46 @@ lapic_send_nmi_all_excluding_self(void)
 }
 
 /*
+ * #599: an NMI to one processor, so that the clock watch (clock_watch.c) can
+ * ask processor 0 where it is once its tick has stopped.  An NMI ignores IF,
+ * the TPR and the in-service bits, so it reaches a processor that no maskable
+ * interrupt can.
+ *
+ * ⚠️ The destination and the command are two registers.  lapic_send_ipi()
+ * writes them as two stores with interrupts possibly on, and this is called
+ * from an interrupt: had it cut in between those stores, the interrupted
+ * sender's command would go to OUR destination.  So the destination it had
+ * written is put back before returning, and this pair is written with
+ * interrupts off.
+ */
+void
+lapic_send_nmi(int slot)
+{
+	unsigned char	lapic_dest;
+	unsigned int	flags, icrd;
+
+	if (lapic_start == 0)
+		return;
+
+	lapic_dest = mp_cpu_lapic_id_get(slot);
+	if (lapic_dest == 0xFF)
+		return;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+	lapic_ipi_wait();
+	icrd = LAPIC_REG32(LAPIC_ICRD);
+	LAPIC_REG32(LAPIC_ICRD) =
+	    ((unsigned int)lapic_dest & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG32(LAPIC_ICR) =
+	    LAPIC_ICR_DM_NMI
+	    | LAPIC_ICR_LEVEL_ASSERT
+	    | LAPIC_ICR_DSS_DEST;
+	lapic_ipi_wait();
+	LAPIC_REG32(LAPIC_ICRD) = icrd;
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
+/*
  * #322 soft-spl (deferred interrupt masking).
  *
  * #311 raised the LAPIC task-priority register to class 4 on every spl above
