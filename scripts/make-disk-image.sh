@@ -355,6 +355,9 @@ DISK_STAMP="$DISK_IMG.stamp"
 DISK_NEW="$DISK_IMG.new"
 rm -f "$DISK_STAMP" "$DISK_NEW"
 touch "$DISK_STAMP.new"
+# Removed on any exit from here on, a failure in the next two steps included
+# (the traps further down replace this one and name both again).
+trap 'rm -f "$DISK_NEW" "$DISK_STAMP.new"' EXIT
 
 # --- 1. Immagine vuota ---
 echo "[1/6] Creazione immagine vuota (${IMG_SIZE_MB} MB)..."
