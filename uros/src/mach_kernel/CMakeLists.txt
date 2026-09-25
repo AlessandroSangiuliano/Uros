@@ -267,6 +267,11 @@ option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC 
 # adopts it -- which no guest can reach -- runs.  Never ON otherwise.
 option(UROS_ABLATE_508_CPUID_15 "Build the #508 ablation: CPUID 0x15 states OMEGA's crystal and ratio" OFF)
 option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
+# #594: CPUID 0x15 states the crystal as the timing leaf's bus clock and the
+# TSC's ratio to it, as a hypervisor following the SDM would -- no QEMU does --
+# so the LAPIC timer adopts 0x15's crystal in a guest.  Boot it with +invtsc.
+# Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_CRYSTAL_IS_BUS "Build the #594 ablation: CPUID 0x15 states the timing leaf's bus as the crystal" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -542,6 +547,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_508_CPUID_15)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_CPUID_15=1)
       message(STATUS "#508 ablation: CPUID 0x15 states OMEGA's crystal and ratio (x86_64)")
+  endif()
+  if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)
+      message(STATUS "#594 ablation: CPUID 0x15 states the timing leaf's bus as the crystal (x86_64)")
   endif()
   if(UROS_ABLATE_508_SPAN_UNBOUNDED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
