@@ -9,7 +9,9 @@
 
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
+#include <cpu/regs.h>	/* read_rflags, the pair lock below */
 #include <pmap/pmap.h>
+#include <sync/atomic.h>	/* atomic_swap8, the pair lock below */
 #include <trap/trap.h>
 
 /*
@@ -41,6 +43,41 @@ static volatile uint8_t *io;
 static unsigned pins;
 static uint32_t base_gsi;
 
+/*
+ * 🔴 ONE PAIR FOR THE WHOLE MACHINE, AND A READ-MODIFY-WRITE SELECTS TWICE
+ * (#599).  Two processors interleaving inside it each read or write the
+ * other's pin.  On i386 that put pin 11's entry on pin 2 and stopped the
+ * clock for good, and put an unhandled line's entry on AHCI's pin.  Here
+ * device_machdep.c masks and unmasks from whichever processor handles the
+ * interrupt or returns the line, so the same race is open.
+ *
+ * So every access sequence holds ioapic_pair_lock, the pattern of the PCI
+ * configuration pair (pci_cfg.c): a leaf, interrupts off for the hold so an
+ * interrupt on the same processor cannot start a sequence inside one, and
+ * not simple_lock, because ioapic_init() runs before percpu_activate().
+ */
+static volatile uint8_t	ioapic_pair_lock;
+
+static inline uint64_t ioapic_pair_enter(void)
+{
+	uint64_t flags = read_rflags();
+
+	interrupts_disable();
+	while (atomic_swap8(&ioapic_pair_lock, 1) != 0)
+		cpu_pause();
+
+	return flags;
+}
+
+static inline void ioapic_pair_leave(uint64_t flags)
+{
+	__asm__ volatile("" ::: "memory");
+	ioapic_pair_lock = 0;
+
+	if (flags & RFLAGS_IF)
+		interrupts_enable();
+}
+
 static uint32_t ioapic_read(unsigned reg)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
@@ -60,12 +97,28 @@ int ioapic_present(void)
 
 uint32_t ioapic_id(void)
 {
-	return ioapic_present() ? (ioapic_read(IOAPIC_REG_ID) >> 24) & 0xF : 0;
+	uint64_t flags;
+	uint32_t id;
+
+	if (!ioapic_present())
+		return 0;
+	flags = ioapic_pair_enter();
+	id = (ioapic_read(IOAPIC_REG_ID) >> 24) & 0xF;
+	ioapic_pair_leave(flags);
+	return id;
 }
 
 uint32_t ioapic_version(void)
 {
-	return ioapic_present() ? ioapic_read(IOAPIC_REG_VERSION) & 0xFF : 0;
+	uint64_t flags;
+	uint32_t version;
+
+	if (!ioapic_present())
+		return 0;
+	flags = ioapic_pair_enter();
+	version = ioapic_read(IOAPIC_REG_VERSION) & 0xFF;
+	ioapic_pair_leave(flags);
+	return version;
 }
 
 unsigned ioapic_pin_count(void)
@@ -85,6 +138,7 @@ static unsigned redir_reg(uint32_t gsi)
 int ioapic_init(void)
 {
 	const struct acpi_ioapic *a = acpi_ioapic(0);
+	uint64_t flags;
 
 	if (a == 0 || a->address == 0)
 		return 0;
@@ -99,6 +153,7 @@ int ioapic_init(void)
 	 * exist on a controller with fewer, and leave pins unmasked on one
 	 * with more.
 	 */
+	flags = ioapic_pair_enter();
 	pins = ((ioapic_read(IOAPIC_REG_VERSION) >> 16) & 0xFF) + 1;
 
 	/*
@@ -111,6 +166,7 @@ int ioapic_init(void)
 	 */
 	for (unsigned i = 0; i < pins; i++)
 		ioapic_write(IOAPIC_REG_REDIR + 2 * i, RTE_MASKED);
+	ioapic_pair_leave(flags);
 
 	return 1;
 }
@@ -141,25 +197,36 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 	 * the destination it would use meanwhile is whatever the firmware
 	 * left.
 	 */
+	uint64_t pair = ioapic_pair_enter();
+
 	ioapic_write(reg + 1, apic_id << 24);
 	ioapic_write(reg, low);
+	ioapic_pair_leave(pair);
 }
 
 void ioapic_mask(uint32_t gsi)
 {
 	unsigned reg = redir_reg(gsi);
+	uint64_t flags = ioapic_pair_enter();
 
 	ioapic_write(reg, ioapic_read(reg) | RTE_MASKED);
+	ioapic_pair_leave(flags);
 }
 
 void ioapic_unmask(uint32_t gsi)
 {
 	unsigned reg = redir_reg(gsi);
+	uint64_t flags = ioapic_pair_enter();
 
 	ioapic_write(reg, ioapic_read(reg) & ~RTE_MASKED);
+	ioapic_pair_leave(flags);
 }
 
 int ioapic_is_masked(uint32_t gsi)
 {
-	return (ioapic_read(redir_reg(gsi)) & RTE_MASKED) != 0;
+	uint64_t flags = ioapic_pair_enter();
+	int masked = (ioapic_read(redir_reg(gsi)) & RTE_MASKED) != 0;
+
+	ioapic_pair_leave(flags);
+	return masked;
 }
