@@ -101,6 +101,7 @@
 
 #include <device/io_req.h>
 #include <device/dev_hdr.h>
+#include <device/device_machdep.h>	/* #594: device_md_io_reserved */
 
 #include <i386/io_port.h>
 #include <i386/eflags.h>
@@ -112,7 +113,8 @@
 /* Forward */
 
 extern boolean_t	iopl_port_forbidden(
-					int	io_port);
+					int		io_port,
+					unsigned int	width);
 
 /*
  * IOPL device.
@@ -122,12 +124,20 @@ device_t	iopl_device = 0;
 
 /*
  * Ports that we allow access to.
+ *
+ * #594: not the 8254 (0x40, timer 0, and 0x42, timer 2) and not port 0x61,
+ * its channel-2 gate, which this list used to open to every task holding the
+ * iopl device.  They are the ports device_md_io_reserved() keeps, and a claim
+ * of them is refused (#508); a bitmap that granted them anyway was the same
+ * port reached by the other door.  On this target the 8254's channel 0 is the
+ * clock itself, so a task that could write 0x40 could change how long a tick
+ * is.  i386_io_port_add() refuses a set that names any of them, so putting
+ * one back here is not a quiet grant but the iopl device refused whole.
  */
 io_reg_t iopl_port_list[] = {
-	/* timer 0 */
-	0x40,
-	/* timer 2 */
-	0x42,
+#if	ABLATE_594_IOPL_REOPEN
+	0x40, 0x42, 0x61,
+#endif	/* ABLATE_594_IOPL_REOPEN */
 	/* PS/2 controller (8042) — data + status/command.
 	 * Userspace char_server/ps2.so owns the keyboard; kd0's IRQ
 	 * is hijacked via device_intr_register at attach time. */
@@ -137,8 +147,6 @@ io_reg_t iopl_port_list[] = {
 	 * still polled-writes here from cnputc → com_putc for printf
 	 * and panic, but userspace TX/RX happens here too (#207). */
 	0x3F8, 0x3F9, 0x3FA, 0x3FB, 0x3FC, 0x3FD, 0x3FE, 0x3FF,
-	/* speaker output */
-	0x61,
 	/* configuration RAM */
 	0x70, 0x71,			/* XXX should not need! */
 	/* game port */
@@ -240,9 +248,26 @@ io_reg_t iopl_ports_used[IOPL_PORTS_USED_MAX] = {
 
 boolean_t
 iopl_port_forbidden(
-	int	io_port)
+	int		io_port,
+	unsigned int	width)
 {
 	int	i;
+
+	/*
+	 * #594: the ports the kernel keeps, asked of the same function a claim
+	 * asks (#508).  This is the third door to them: a task holding the iopl
+	 * device that reads a port its bitmap does not grant arrives here
+	 * through the #GP, and until now was read ANY port not listed below --
+	 * which, with the list compiled out, was every port.  A read is not
+	 * obviously harmless either: the kernel reads channel 0 as a latch
+	 * command followed by two one-byte reads of 0x40 (rtclock.c), and
+	 * nothing orders a task's read against that sequence running on
+	 * another processor.
+	 */
+#if	!ABLATE_594_UNCHECKED
+	if (device_md_io_reserved((unsigned int)io_port, width) != 0)
+	    return TRUE;
+#endif	/* !ABLATE_594_UNCHECKED */
 
 #if 0	/* we only read from these... it should be OK */
 
@@ -299,8 +324,11 @@ iopl_port_forbidden(
 /*
  * Emulate certain IO instructions for the AT bus.
  *
- * We emulate writes to the timer control port, 43.
- * Only writes to timer 2 are allowed.
+ * #594: no longer writes to the timer control port, 43.  This emulated a
+ * channel-2 command for any task whose bitmap held 0x42, and the 8254 --
+ * command register included -- is a device the kernel keeps
+ * (device_md_io_reserved); 0x42 is in no bitmap now, and a write to 0x43
+ * falls through to the refusal below like any other write.
  *
  * Temporarily, we allow reads of any IO port,
  * but ONLY if the thread has the IOPL device mapped
@@ -313,6 +341,29 @@ iopl_port_forbidden(
  * ports for devices it exists from the allowable list.
  */
 
+/*
+ * #594: how many ports a read spans, so the reserved check sees all of them:
+ * an `inl' from 0x3E touches 0x3E..0x41, and the 8254 with it.  Zero for
+ * anything that is not a read, which this emulation refuses anyway.
+ */
+static unsigned int
+iopl_read_width(
+	int	opcode)
+{
+	switch (opcode) {
+	    case 0xE4:		/* inb imm */
+	    case 0xEC:		/* inb dx */
+		return 1;
+	    case 0x66E5:	/* inw imm */
+	    case 0x66ED:	/* inw dx */
+		return 2;
+	    case 0xE5:		/* inl imm */
+	    case 0xED:		/* inl dx */
+		return 4;
+	}
+	return 0;
+}
+
 boolean_t
 iopl_emulate(
 	struct i386_saved_state	*regs,
@@ -320,11 +371,13 @@ iopl_emulate(
 	int			io_port)
 {
 	iopb_tss_t	iopb;
+	unsigned int	width;
 
 	iopb = current_act()->mact.pcb->ims.io_tss;
 	if (iopb == 0)
 	    return FALSE;		/* no IO mapped */
 
+#if	ABLATE_594_UNCHECKED
 	/*
 	 * Handle outb to the timer control port,
 	 * for timer 2 only.
@@ -343,6 +396,7 @@ iopl_emulate(
 	    }
 	    return FALSE;	/* invalid IO to port 42 */
 	}
+#endif	/* ABLATE_594_UNCHECKED */
 
 	/*
 	 * If the thread has the IOPL device mapped, and
@@ -352,9 +406,11 @@ iopl_emulate(
 	 * Don`t do this for V86 mode threads
 	 * (hack for DOS emulator XXX!)
 	 */
-	if (!(regs->efl & EFL_VM) &&
+	width = iopl_read_width(opcode);
+	if (width != 0 &&
+	    !(regs->efl & EFL_VM) &&
 	    iopb_check_mapping(current_thread(), iopl_device) &&
-	    !iopl_port_forbidden(io_port))
+	    !iopl_port_forbidden(io_port, width))
 	{
 	    /*
 	     * handle inb, inw, inl
