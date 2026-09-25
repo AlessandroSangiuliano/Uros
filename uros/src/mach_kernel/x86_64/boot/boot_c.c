@@ -3260,14 +3260,22 @@ static void rulers_kept_selftest(void)
 	all &= device_md_io_reserved(0x40, 4) != 0;
 	rulers_kept_one(0x61, 1, &first);
 	all &= device_md_io_reserved(0x61, 1) != 0;
-	rulers_kept_one(0xCF8, 8, &first);		/* #597 */
-	all &= device_md_io_reserved(0xCF8, 8) != 0;
 	if (pmtimer_present() && pmtimer_is_io()) {
 		rulers_kept_one((unsigned int)pmtimer_address(), 4, &first);
 		all &= device_md_io_reserved((unsigned int)pmtimer_address(),
 					     4) != 0;
 	}
-	kputs(all ? "\r\n" : " — WRONG, a port the kernel keeps can be claimed\r\n");
+	kputs(all ? "\r\n" : " — WRONG, a ruler can be claimed\r\n");
+
+	/*
+	 * #597: on a line of its own, because the rulers' line is already
+	 * most of the console's 256 bytes.
+	 */
+	first = 1;
+	kputs("UrMach x86-64: configuration ports the kernel keeps: ");
+	rulers_kept_one(0xCF8, 8, &first);
+	kputs(device_md_io_reserved(0xCF8, 8) != 0
+	      ? "\r\n" : " — WRONG, a task can reach them\r\n");
 }
 
 /*
