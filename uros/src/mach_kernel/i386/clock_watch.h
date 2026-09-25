@@ -37,4 +37,8 @@ extern void	clock_watch_init(void);
 extern void	clock_watch_tick(int cpu);
 extern int	clock_watch_nmi(struct i386_saved_state *regs);
 
+#if defined(ABLATE_599_MASK_PIT) || defined(ABLATE_599_CLI_SPIN)
+extern void	clock_watch_ablate(int cpu);	/* from hardclock */
+#endif
+
 #endif	/* _I386_CLOCK_WATCH_H_ */

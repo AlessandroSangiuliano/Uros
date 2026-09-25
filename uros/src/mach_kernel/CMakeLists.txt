@@ -245,6 +245,14 @@ option(UROS_ABLATE_586_NO_TICKS "Build the #586 ablation: the tick self-test cou
 # anything else.
 option(UROS_ABLATE_597_NO_LOCK "Build the #597 ablation: i386's PCI configuration access takes no lock" OFF)
 set(UROS_ABLATE_597_WIDEN "" CACHE STRING "Build the #597 ablation: N port 0x80 reads between the PCI address and data (empty = off)")
+# #599: stop processor 0's tick on purpose, 3000 ticks into the boot, to show
+# that the clock watch (i386/clock_watch.c) sees it and what the NMI's dump
+# says.  MASK_PIT masks the 8254's pin with nothing pending to unmask it, the
+# shape a lost I/O APIC read-modify-write leaves; CLI_SPIN spins processor 0
+# with interrupts off.  i386 with UROS_NCPUS > 1 only: the watch runs on the
+# other processors.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_599_MASK_PIT "Build the #599 ablation: processor 0 masks the 8254's pin once, with nothing pending" OFF)
+option(UROS_ABLATE_599_CLI_SPIN "Build the #599 ablation: processor 0 spins with interrupts off once" OFF)
 option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
 # #508: an MMIO mapping is checked on its first page only, as it was before the
 # span was bounded, so irq_claim_test's arm [10] -- one page past the owned
@@ -544,6 +552,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   list(APPEND KERNEL_DEFINES_BARE ${UROS_ABLATE_577_DEFS})
   if(UROS_ABLATE_597_NO_LOCK OR NOT UROS_ABLATE_597_WIDEN STREQUAL "")
       message(FATAL_ERROR "UROS_ABLATE_597_* ablate i386's PCI configuration lock; x86-64's is in x86_64/cpu/pci_cfg.c and is not touched by them")
+  endif()
+  if(UROS_ABLATE_599_MASK_PIT OR UROS_ABLATE_599_CLI_SPIN)
+      message(FATAL_ERROR "UROS_ABLATE_599_* stop i386's 8254 tick for i386's clock watch; x86-64 has neither")
   endif()
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
@@ -1336,6 +1347,19 @@ endif()
 if(NOT UROS_ABLATE_597_WIDEN STREQUAL "")
     list(APPEND KERNEL_DEFINES -DABLATE_597_WIDEN=${UROS_ABLATE_597_WIDEN})
     message(STATUS "#597 ablation: ${UROS_ABLATE_597_WIDEN} port 0x80 reads between the PCI address and data (i386)")
+endif()
+if(UROS_ABLATE_599_MASK_PIT OR UROS_ABLATE_599_CLI_SPIN)
+    if(NOT UROS_NCPUS GREATER 1)
+        message(FATAL_ERROR "UROS_ABLATE_599_* need UROS_NCPUS > 1: the clock watch runs on the other processors, and without it the ablation would stop the clock with nothing to say so")
+    endif()
+endif()
+if(UROS_ABLATE_599_MASK_PIT)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_MASK_PIT=1)
+    message(STATUS "#599 ablation: processor 0 masks the 8254's pin at tick 3000, nothing pending (i386)")
+endif()
+if(UROS_ABLATE_599_CLI_SPIN)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_CLI_SPIN=1)
+    message(STATUS "#599 ablation: processor 0 spins with interrupts off at tick 3000 (i386)")
 endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)

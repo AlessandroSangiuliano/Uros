@@ -64,6 +64,7 @@
 #include <i386/eflags.h>		/* EFL_IF, EFL_VM */
 #include <i386/lapic.h>
 #include <i386/apic.h>
+#include <i386/ioapic.h>		/* ioapic_mask_irq, for an ablation */
 #include <i386/clock_watch.h>
 
 extern void			cnputc(char);
@@ -77,6 +78,7 @@ extern unsigned int		timeout_ticks;		/* kern/mach_clock.c */
 #define	CW_STOP_MS	2000	/* no tick from processor 0 for this long ... */
 #define	CW_STOP_TICKS	200	/* ... and for this many of the watcher's own */
 #define	CW_REPEAT_MS	10000	/* the line again, while the stop lasts */
+#define	CW_ABLATE_AT	3000	/* processor 0's ticks, for the #599 ablations */
 
 /*
  * One per watcher.  Each is written only by its own processor, from its own
@@ -187,8 +189,61 @@ clock_watch_init(void)
 {
 	printf("clock: the other processors watch processor 0's tick, and say "
 	       "so when it has not run for %u ms (#599)\n", CW_STOP_MS);
+#ifdef ABLATE_599_MASK_PIT
+	printf("clock: #599 ablation -- at tick %u processor 0 masks the 8254's "
+	       "pin and leaves nothing pending\n", CW_ABLATE_AT);
+#endif
+#ifdef ABLATE_599_CLI_SPIN
+	printf("clock: #599 ablation -- at tick %u processor 0 spins with "
+	       "interrupts off\n", CW_ABLATE_AT);
+#endif
 }
 
+#if defined(ABLATE_599_MASK_PIT) || defined(ABLATE_599_CLI_SPIN)
+/*
+ * Stop processor 0's tick on purpose, from its own tick, CW_ABLATE_AT ticks
+ * into the boot -- about half-way through the full bundle's tests.  Each is
+ * the shape of one of #599's hypotheses, so a boot with it shows that the
+ * watch fires on that shape and what the NMI's dump then says:
+ *
+ *   MASK_PIT	pin 2 masked with no pending bit to unmask it again, which is
+ *		what a lost read-modify-write of the I/O APIC leaves;
+ *   CLI_SPIN	processor 0 spinning with interrupts off, never sending its
+ *		EOI.
+ */
+void
+clock_watch_ablate(int cpu)
+{
+	static int	done;
+
+	if (cpu != master_cpu || done || nmi_cpu_tick[cpu] < CW_ABLATE_AT)
+		return;
+	done = 1;
+#ifdef ABLATE_599_MASK_PIT
+	{
+		unsigned int	flags;
+
+		/*
+		 * With interrupts off, as every other caller does it: hardclock
+		 * runs with them on, and a device interrupt deferred here would
+		 * do its own read-modify-write inside this one.
+		 */
+		cw_puts("\nclock: #599 ablation -- processor 0 masks the 8254's "
+			"pin now\n");
+		__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+		ioapic_mask_irq(0);
+		__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+	}
+#endif
+#ifdef ABLATE_599_CLI_SPIN
+	cw_puts("\nclock: #599 ablation -- processor 0 spins with interrupts off "
+		"now\n");
+	__asm__ volatile("cli");
+	for (;;)
+		__asm__ volatile("pause");
+#endif
+}
+#endif
 
 void
 clock_watch_tick(int cpu)

@@ -145,6 +145,10 @@
 #include <i386/mach_param.h>	/* for HZ */
 #endif	/* MACH_MP_DEBUG */
 
+#if	NCPUS > 1
+#include <i386/clock_watch.h>	/* #599 ablations */
+#endif
+
 extern	char	return_to_iret[];
 
 #if	TIME_STAMP && AT386 && NCPUS > 1
@@ -225,6 +229,9 @@ hardclock(
 	nmi_heartbeat++;
 	/* #355: per-cpu tick so the NMI can pinpoint a single wedged core. */
 	nmi_cpu_tick[mycpu]++;
+#if	NCPUS > 1 && (defined(ABLATE_599_MASK_PIT) || defined(ABLATE_599_CLI_SPIN))
+	clock_watch_ablate(mycpu);	/* #599: stop this tick on purpose */
+#endif
 
 #ifdef	PARANOID_KDB
 	if (paranoid_cpu == mycpu &&
