@@ -267,6 +267,16 @@ option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC 
 # adopts it -- which no guest can reach -- runs.  Never ON otherwise.
 option(UROS_ABLATE_508_CPUID_15 "Build the #508 ablation: CPUID 0x15 states OMEGA's crystal and ratio" OFF)
 option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
+# #594, i386 only: the two halves of closing i386's other doors to the 8254.
+# REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
+# i386_io_port_add() must refuse the device whole and kernel242_test's control
+# port must fault.  UNCHECKED stops i386_io_port_add() and the iopl #GP
+# emulation asking device_md_io_reserved(), and brings back the emulated
+# channel-2 write to 0x43, so the emulated read of 0x40 must succeed.  Both
+# together are the kernel before #594: the bitmap grants the 8254.  Never ON
+# in a kernel anyone boots for anything else.
+option(UROS_ABLATE_594_IOPL_REOPEN "Build the #594 ablation (i386): the iopl device lists the 8254 and its gate again" OFF)
+option(UROS_ABLATE_594_UNCHECKED "Build the #594 ablation (i386): the bitmap and the iopl emulation do not ask device_md_io_reserved" OFF)
 # #563: withhold the MADT's I/O APIC entries while leaving the processor census
 # alone, so the tests that route through one see the board a firmware without an
 # I/O APIC describes -- and the discriminator they use, the other half of the
@@ -1260,6 +1270,14 @@ endif()
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)
     list(APPEND KERNEL_DEFINES -D${_d})
 endforeach()
+if(UROS_ABLATE_594_IOPL_REOPEN)
+    list(APPEND KERNEL_DEFINES -DABLATE_594_IOPL_REOPEN=1)
+    message(STATUS "#594 ablation: the iopl device lists the 8254 and its gate again (i386)")
+endif()
+if(UROS_ABLATE_594_UNCHECKED)
+    list(APPEND KERNEL_DEFINES -DABLATE_594_UNCHECKED=1)
+    message(STATUS "#594 ablation: the bitmap and the iopl emulation do not ask device_md_io_reserved (i386)")
+endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
     message(STATUS "#385 free-page poison: ON (i386)")
