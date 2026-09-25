@@ -2712,8 +2712,12 @@ ds_master_device_mmio_unmap(
  *
  * 🔑 A port belonging to NO claimed device stays reachable, and that is the
  * same decision check_irq_owner() makes: the legacy devices -- the serial
- * lines, the keyboard, the PIC and the PIT -- are behind no PCI BAR, and a
- * rule that refused everything unattributed would take the console with it.
+ * lines, the keyboard, the PIC -- are behind no PCI BAR, and a rule that
+ * refused everything unattributed would take the console with it.  The
+ * exception is what device_md_io_reserved() names, which the kernel itself
+ * uses and keeps from every task: the 8254 and its gate, the PCI
+ * configuration ports, and on x86-64 the PM timer where it is a port (#508,
+ * #597).
  */
 /*
  * Legacy I/O ranges a task has claimed (#497).
@@ -2942,6 +2946,13 @@ ds_master_device_io_port_read(
 
 	if (size != 1 && size != 2 && size != 4)
 		return KERN_INVALID_ARGUMENT;
+	/*
+	 * #597: the port is cut to 16 bits by device_md_io_read(), and every
+	 * check below compares all 32, so 0x10CF8 passed as nothing reserved
+	 * and reached 0xCF8.  The claim path already had this bound.
+	 */
+	if (port > 0xFFFF || port + size > 0x10000)
+		return KERN_INVALID_ARGUMENT;
 
 	kr = check_io_port(port, size);
 	if (kr != KERN_SUCCESS)
@@ -2965,6 +2976,9 @@ ds_master_device_io_port_write(
 		return kr;
 
 	if (size != 1 && size != 2 && size != 4)
+		return KERN_INVALID_ARGUMENT;
+	/* The same bound as the read, for the same reason (#597). */
+	if (port > 0xFFFF || port + size > 0x10000)
 		return KERN_INVALID_ARGUMENT;
 
 	kr = check_io_port(port, size);

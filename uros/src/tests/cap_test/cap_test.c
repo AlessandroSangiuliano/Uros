@@ -983,9 +983,12 @@ out:
  * whole window, the data port alone, and a range reaching 0xCF8 from below;
  * anything granted is given straight back.  Then a READ of each port, which
  * needs no claim: that was the route left open when only the claim refused
- * them.  No write is tried -- if the refusal were missing, writing 0xCF8 would
- * be the race itself -- and the write RPC asks the same check_io_port() as
- * the read.
+ * them.  Then 0x10CFC, which the kernel cut to 0xCFC before any check saw it
+ * as reserved, and 0x61, the 8254's gate, which the same refusal keeps
+ * (#508); not 0x40, whose read would move the counter's byte flip-flop under
+ * the kernel if the refusal were missing.  No write is tried -- if the refusal
+ * were missing, writing 0xCF8 would be the race itself -- and the write RPC
+ * asks the same checks as the read.
  */
 static int
 the_pci_config_ports_are_the_kernels(mach_port_t device_port)
@@ -998,7 +1001,16 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0xCFC, 1 },   /* the data port alone */
         { 0xCF4, 5 },   /* from below, reaching the address port */
     };
-    static const unsigned int read_at[] = { 0xCF8, 0xCFC };
+    static const struct {
+        unsigned int  port;
+        unsigned int  size;
+        kern_return_t want;
+    } read_at[] = {
+        { 0xCF8,   4, KERN_NO_ACCESS },          /* the address port */
+        { 0xCFC,   4, KERN_NO_ACCESS },          /* the data port */
+        { 0x10CFC, 4, KERN_INVALID_ARGUMENT },   /* 0xCFC above 16 bits */
+        { 0x61,    1, KERN_NO_ACCESS },          /* the 8254's gate (#508) */
+    };
     unsigned int  i, released, klog_from, data, bad = 0;
     kern_return_t kr;
 
@@ -1019,22 +1031,24 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
                    ask[i].port + ask[i].count - 1, (int)kr);
     }
     for (i = 0; i < sizeof(read_at) / sizeof(read_at[0]); i++) {
-        kr = device_io_port_read(device_port, read_at[i], 4, &data);
-        if (kr == KERN_NO_ACCESS)
+        kr = device_io_port_read(device_port, read_at[i].port,
+                                 read_at[i].size, &data);
+        if (kr == read_at[i].want)
             continue;
         bad++;
         printf("cap_test: [18] WRONG — a read of 0x%x answered kr=%d%s, "
-               "not KERN_NO_ACCESS: a task can drive the configuration "
-               "pair around the kernel's lock (#597)\n", read_at[i],
-               (int)kr, kr == KERN_SUCCESS ? " (it was served)" : "");
+               "not %d: a task reaches a port the kernel keeps\n",
+               read_at[i].port, (int)kr,
+               kr == KERN_SUCCESS ? " (it was served)" : "",
+               (int)read_at[i].want);
     }
     if (bad != 0)
         return 0;
 
     printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone and "
-           "0xcf4..0xcf8, and reads of 0xcf8 and 0xcfc, refused with "
-           "KERN_NO_ACCESS — the PCI configuration ports are the "
-           "kernel's (#597)\n");
+           "0xcf4..0xcf8, and reads of 0xcf8, 0xcfc, 0x61 and 0x10cfc, "
+           "refused — the ports the kernel keeps are out of every task's "
+           "reach (#508, #597)\n");
     return 1;
 }
 
