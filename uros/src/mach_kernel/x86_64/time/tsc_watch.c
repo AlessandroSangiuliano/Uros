@@ -115,7 +115,7 @@ static int watch_wakeup;	/* posted by nobody: the timeout ends the wait */
 
 #if	ABLATE_594_TSC_SKEWS
 /*
- * #594: from the fifth window on, the TSC as the watchdog reads it runs one
+ * #594: from the second window on, the TSC as the watchdog reads it runs one
  * part in thirty-two fast, so both rulers put it outside the bound and the
  * path that names it -- and moves the tick off it -- runs.  Never on in a
  * kernel booted for anything else.
@@ -139,7 +139,7 @@ static uint64_t subject_tsc(void)
 
 #if	ABLATE_594_HPET_STOPS
 /*
- * #594: from the fifth window on, the HPET as the watchdog reads it stops
+ * #594: from the second window on, the HPET as the watchdog reads it stops
  * counting -- the shape of an HPET that stops in a deep package C-state --
  * so the path that names a ruler runs.  Never on otherwise.
  */
@@ -157,6 +157,64 @@ static void watch_sleep(void)
 	thread_set_timeout(hz);
 	thread_block((void (*)(void)) 0);
 	reset_timeout_check(&current_thread()->timer);
+}
+
+/*
+ * After the TSC is named: is there still a tick, on every processor that had
+ * one?  A second asleep -- which needs this processor's tick to end at all --
+ * timed by a ruler rather than by the counter just withdrawn, and every
+ * processor's tick count before and after.  A processor that ticked before and
+ * took none since has no clock, and that is WRONG: a move that left one
+ * processor behind is worse than no move.
+ */
+static void tick_after_move(void)
+{
+	unsigned long		before[NCPUS], got, lo = ~0UL, hi = 0;
+	unsigned		cpu, ticking = 0, silent = 0, first = NCPUS;
+	int			id = rulers_long();
+	struct kernel_ruler	*k;
+	uint64_t		r0, r1, ms;
+
+	if (id < 0) {
+		printf("UrMach x86-64: the tick after the TSC was named: NOT "
+		       "ASKED — no ruler left to time it by (#594)\n");
+		return;
+	}
+	k = rulers_get((unsigned) id);
+	for (cpu = 0; cpu < NCPUS; cpu++)
+		before[cpu] = clock_event_ticks(cpu);
+	r0 = k->r.read();
+	watch_sleep();
+	r1 = k->r.read();
+	ms = ((r1 - r0) & k->r.mask) * 1000 / k->r.hz;
+
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		if (before[cpu] == 0)
+			continue;	/* never ticked: not a processor here */
+		ticking++;
+		got = clock_event_ticks(cpu) - before[cpu];
+		if (got == 0) {
+			if (silent++ == 0)
+				first = cpu;
+			continue;
+		}
+		if (got < lo)
+			lo = got;
+		if (got > hi)
+			hi = got;
+	}
+
+	if (silent != 0)
+		printf("UrMach x86-64: the tick after the TSC was named — WRONG: "
+		       "processor %u%s took no tick in %lu ms by the %s: it has "
+		       "no clock (#594)\n", first,
+		       silent > 1 ? " and others" : "", ms, k->name);
+	else
+		printf("UrMach x86-64: the tick after the TSC was named, on the "
+		       "%s: %u processor%s took %lu..%lu ticks each in %lu ms by "
+		       "the %s, at %u Hz (#594)\n", clock_event_name(), ticking,
+		       ticking == 1 ? "" : "s", lo, hi, ms, k->name,
+		       clock_event_hz());
 }
 
 static uint64_t ppm_apart(uint64_t a, uint64_t b)
@@ -303,11 +361,11 @@ void tsc_watch(void)
 		since++;
 
 #if	ABLATE_594_TSC_SKEWS
-		if (windows == 5)
+		if (windows == 2)
 			skew_from = rdtsc_ordered();
 #endif
 #if	ABLATE_594_HPET_STOPS
-		if (windows == 5)
+		if (windows == 2)
 			for (i = 0; i < n; i++)
 				if (w[i].id == RULER_HPET) {
 					hpet_frozen = w[i].r.read();
@@ -406,6 +464,7 @@ void tsc_watch(void)
 				       : "and the tick STAYS on it: the local "
 					 "APIC timer has no rate, and there is "
 					 "no third backend (#593)");
+				tick_after_move();
 				return;
 			}
 			if (suspect == SUSPECT_RULER) {

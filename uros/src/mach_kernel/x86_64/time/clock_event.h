@@ -127,6 +127,9 @@ enum {
 };
 int		clock_event_leave_tsc(void);
 
+/* #594: how many ticks this processor has taken since boot. */
+unsigned long	clock_event_ticks(unsigned cpu);
+
 /* The scheduler tick rate, in Hz, and its period in nanoseconds. */
 unsigned	clock_event_hz(void);
 

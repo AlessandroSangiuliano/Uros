@@ -518,6 +518,19 @@ static unsigned long	selftest_ticks[NCPUS];
 static uint64_t		selftest_tsc0[NCPUS];
 
 /*
+ * #594: every tick, per processor, and only counted -- unlike the self-test's
+ * count above, which stops once the TSC has no rate, which is exactly when the
+ * watchdog needs to ask whether every processor still has a clock.
+ */
+static volatile unsigned long	tick_count[NCPUS];
+
+unsigned long
+clock_event_ticks(unsigned cpu)
+{
+	return cpu < NCPUS ? tick_count[cpu] : 0;
+}
+
+/*
  * 🔥 RECORDED HERE, PRINTED SOMEWHERE ELSE, AND THAT IS NOT TIDINESS (#461).
  *
  * This used to call printf() directly, from the timer interrupt handler.  It
@@ -773,6 +786,8 @@ clock_event_tick(struct trap_frame *frame)
 	 */
 	cndrain();
 
+	if (cpu < NCPUS)
+		tick_count[cpu]++;
 	clock_selftest(cpu);
 
 	/*
