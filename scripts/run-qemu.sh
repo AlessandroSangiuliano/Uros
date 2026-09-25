@@ -9,15 +9,16 @@
 #   ./scripts/run-qemu.sh -nographic -serial mon:stdio  # headless
 #   ./scripts/run-qemu.sh --no-disk                 # no disk
 #   ./scripts/run-qemu.sh --fresh-disk              # regenerate disk.img before
-#                                                   # the boot (after a rebuild,
-#                                                   # or when the previous run
-#                                                   # was cut off mid-writeback)
-#   ./scripts/run-qemu.sh --diskregen               # the same: the disk is
-#                                                   # regenerated ONLY when asked.
-#                                                   # By default it is NOT (not
-#                                                   # even with --bench: the
-#                                                   # suite rides the stage-1
-#                                                   # bundle)
+#                                                   # the boot (when the previous
+#                                                   # run was cut off
+#                                                   # mid-writeback; after a
+#                                                   # rebuild it happens anyway)
+#   ./scripts/run-qemu.sh --diskregen               # the same.  Unasked, the
+#                                                   # disk is regenerated only
+#                                                   # when a binary it carries
+#                                                   # is newer (not for --bench:
+#                                                   # the suite rides the
+#                                                   # stage-1 bundle)
 #   ./scripts/run-qemu.sh --ahci2-image IMG         # IMG as the second AHCI
 #                                                   # disk, NOT recreated: it is
 #                                                   # /mnt/disk2, where x86-64
@@ -27,6 +28,10 @@
 #                                                   # copy of disk.img, after the
 #                                                   # AHCI controller (#592)
 #   ./scripts/run-qemu.sh --virtio-first            # the same, before it
+#   ./scripts/run-qemu.sh --build-only              # only the build, which every
+#                                                   # boot runs first; a caller
+#                                                   # that times the boot runs
+#                                                   # this before its clock
 #
 # The disk has three MBR partitions (make-disk-image.sh): a, ext2 with
 # /mach_servers/ (bootstrap.conf and the servers); b, a small ext2; c, swap.
@@ -95,6 +100,7 @@ DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
 REUSE_BUNDLE=false  # --reuse-bundle: skip the make-bundle.sh step and reuse the
                     # existing bootstrap.bundle (fast iteration / repeated launches
                     # of the same kernel+servers, e.g. SMP reliability loops)
+BUILD_ONLY=false    # --build-only: run the build step below and exit (#592)
 CONSOLE_ARG=""      # --with-console: ship the on-screen console TTY (#363) in the
                     # bundle so ush binds the graphical window instead of the UART.
                     # Off by default → serial/headless/bench paths unchanged.
@@ -114,6 +120,7 @@ while [ $# -gt 0 ]; do
         --fresh-disk) FRESH_DISK=true; shift ;;
         --diskregen) DISK_REGEN=true; shift ;;
         --reuse-bundle) REUSE_BUNDLE=true; shift ;;
+        --build-only) BUILD_ONLY=true; shift ;;
         --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
         --allow-reboot) NO_REBOOT=""; shift ;;
         --smp) shift; SMP_COUNT="$1"; shift ;;
@@ -139,20 +146,30 @@ fi
 # Build what is about to boot (#592).
 #
 # This script used to boot whatever $BUILD_DIR already held: the kernel however
-# old, and a bundle and a disk packed from servers however old.  Its own
-# comment said the opposite, so an edit followed by a boot without a ninja in
-# between tested the previous build and reported on the edit.  run-x86_64.sh
-# has always built first; now both do, and nobody has to remember it.
+# old, a bundle packed from servers however old, and a disk regenerated only
+# when asked.  Its own comment said it rebuilt them, so an edit followed by a
+# boot without a ninja in between tested the previous build and reported on the
+# edit.  Now it runs ninja first, as run-x86_64.sh does, and then re-packs the
+# bundle and regenerates the disk whenever a binary they carry is newer than
+# they are (below).  ush, the terminal server and the programs on the ext2 root
+# travel only on the disk, so the disk has to follow the build too.
 #
 # Everything, not a list of targets: make-bundle.sh and make-disk-image.sh pack
 # whatever lies under export/, and a list would go stale the day a server is
-# added to the bundle.  The output goes to a file and one line is printed,
+# added to the bundle.  The output goes to a file and two lines are printed,
 # because the callers keep this script's output as the run's log.
+#
+# ⚠️ A caller that times the boot runs `run-qemu.sh --build-only' first.
+# Otherwise the build falls inside its clock: smoke-ush.exp would call forty
+# silent seconds of compiling a machine that stopped talking, and a total
+# budget would shrink by however long the compiler took.
 if [ ! -f "$BUILD_DIR/build.ninja" ]; then
     echo "ERROR: $BUILD_DIR is not a configured build directory (no build.ninja)"
     exit 1
 fi
 BUILD_LOG="$BUILD_DIR/run-qemu-build.log"
+BUILD_T0=$(date +%s)
+echo "Build:   ninja -C $BUILD_DIR (output in $BUILD_LOG)"
 if ! ninja -C "$BUILD_DIR" > "$BUILD_LOG" 2>&1; then
     tail -n 30 "$BUILD_LOG"
     echo "ERROR: ninja -C $BUILD_DIR failed (whole output in $BUILD_LOG); nothing was booted"
@@ -161,19 +178,29 @@ fi
 # Ninja's last line is the last step to finish, not a total, so the steps are
 # counted, leaving out its re-check of globbed directories, which is not one.
 if grep -q '^ninja: no work to do' "$BUILD_LOG"; then
-    echo "Build:   ninja -C $BUILD_DIR — up to date"
+    echo "Build:   up to date"
 else
-    echo "Build:   ninja -C $BUILD_DIR — $(grep '^\[[0-9]*/[0-9]*\]' "$BUILD_LOG" | grep -vc 'Re-checking globbed') steps"
+    echo "Build:   $(grep '^\[[0-9]*/[0-9]*\]' "$BUILD_LOG" | grep -vc 'Re-checking globbed') steps in $(( $(date +%s) - BUILD_T0 ))s"
 fi
+[ "$BUILD_ONLY" = true ] && exit 0
 
-# Disk-image regeneration is opt-in: it happens only with --diskregen (or
-# --fresh-disk/--minimal, or when disk.img is missing).  Otherwise the existing
-# disk is reused -- even with --bench -- so iterating on the kernel doesn't pay
-# the disk-format cost every launch.  The bench suite reaches ipc_bench through
-# the stage-1 bundle (rebuilt below), so changing --bench suites does NOT need
-# a disk regen.
-if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ]; then
+# Whether an image is older than any binary it is packed from.  Both images
+# are packed from export/uros/$ARCH/user (make-bundle.sh, make-disk-image.sh).
+older_than_binaries() {
+    [ -n "$(find "$BUILD_DIR/export/uros/$ARCH/user" -type f -newer "$1" -print 2>/dev/null | head -n 1)" ]
+}
+STALE_DISK=false
+[ -f "$DISK_IMG" ] && older_than_binaries "$DISK_IMG" && STALE_DISK=true
+
+# Disk-image regeneration happens with --diskregen, --fresh-disk or --minimal,
+# when disk.img is missing, and when a binary it carries is newer than it
+# (#592).  Otherwise the existing disk is reused -- even with --bench -- so
+# iterating on the kernel alone doesn't pay the disk-format cost every launch.
+# The bench suite reaches ipc_bench through the stage-1 bundle (rebuilt below),
+# so changing --bench suites does NOT need a disk regen.
+if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ] || [ "$STALE_DISK" = true ]; then
     [ -f "$DISK_IMG" ] || echo "disk.img missing — regenerating."
+    [ "$STALE_DISK" = true ] && echo "disk.img is older than a binary it carries — regenerating."
     if [ -n "$BENCH_ARGS" ]; then
         echo "Regenerating disk image (--bench):$BENCH_ARGS"
         "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
@@ -187,8 +214,11 @@ fi
 
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
 # binaries stay in sync with the on-disk copy (especially with --bench).
+# --reuse-bundle keeps the existing one only while no binary it is packed from
+# is newer (#592): reusing it after the build above changed a server would
+# boot a new kernel with old servers.
 if [ "$USE_BUNDLE" = true ]; then
-    if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
+    if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ] && ! older_than_binaries "$BUNDLE_IMG"; then
         echo "Bundle:  reusing $BUNDLE_IMG (--reuse-bundle, skipped rebuild)"
     elif [ -n "$BENCH_ARGS" ]; then
         "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG $CONSOLE_ARG

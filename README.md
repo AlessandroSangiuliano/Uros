@@ -244,7 +244,7 @@ cmake -G Ninja -DUROS_TARGET_ARCH=x86_64 -S uros -B uros/build-x86_64
 ./scripts/run-ush.sh                               # minimal bundle, serial-only, drops into ush$
 ```
 
-`run-qemu.sh` rebuilds `disk.img` and `bootstrap.bundle` automatically when `--fresh-disk` or `--bench` is passed.  `run-ush.sh` is the fastest path to an interactive shell over the serial console (Ctrl-A x to quit).
+`run-qemu.sh` runs `ninja` on the build directory before every boot, re-packs `bootstrap.bundle`, and regenerates `disk.img` when a binary it carries is newer, or when `--fresh-disk` is passed.  `run-ush.sh` is the fastest path to an interactive shell over the serial console (Ctrl-A x to quit).
 
 ### CMake configuration options
 
@@ -387,7 +387,7 @@ The disk and bundle are built by scripts in `scripts/`, not by CMake. Both pick 
 
 ### Running on QEMU
 
-`scripts/run-qemu.sh` wraps the QEMU invocation. Before every boot it runs `ninja` on the build directory (`uros/build`, or `UROS_BUILD_DIR`) and re-packs the stage-1 bundle (skip that with `--reuse-bundle`); it regenerates `disk.img` only with `--fresh-disk`, `--diskregen` or `--minimal`, or when the image is missing.
+`scripts/run-qemu.sh` wraps the QEMU invocation. Before every boot it runs `ninja` on the build directory (`uros/build`, or `UROS_BUILD_DIR`), re-packs the stage-1 bundle (`--reuse-bundle` keeps it while no server in it changed), and regenerates `disk.img` when a binary it carries is newer, with `--fresh-disk`, `--diskregen` or `--minimal`, or when the image is missing. `--build-only` runs the build and exits, for a caller that times the boot.
 
 ```sh
 ./scripts/run-qemu.sh                                 # graphical (default --ahci)
@@ -405,7 +405,7 @@ The disk and bundle are built by scripts in `scripts/`, not by CMake. Both pick 
 
 `scripts/run-ush.sh` is the convenience wrapper for `--minimal --allow-reboot -display none -serial mon:stdio`: it builds the minimal bundle and drops you straight at the `ush$` prompt over the serial console.
 
-`--fresh-disk` is the safe default after a rebuild or an ungracefully-closed previous run — `disk.img` carries ext2 writeback state from the guest and a half-flushed image can cause spurious stage-2 hangs.
+`--fresh-disk` is the safe default after an ungracefully-closed previous run — `disk.img` carries ext2 writeback state from the guest and a half-flushed image can cause spurious stage-2 hangs. After a rebuild the disk is regenerated anyway.
 
 ### Smoke test
 
