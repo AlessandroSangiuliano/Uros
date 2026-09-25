@@ -166,12 +166,54 @@ pcici_t pcitag (unsigned char bus,
  */
 static volatile unsigned char	pci_cfg_port_lock;
 
+/*
+ * The #597 ablations (mach_kernel/CMakeLists.txt): ABLATE_597_NO_LOCK is the
+ * access as it was, ABLATE_597_WIDEN=N puts N reads of port 0x80 between the
+ * address and the data.  The first access says which is built, so a log can
+ * never pass for an ordinary kernel's.
+ */
+#if defined(ABLATE_597_NO_LOCK) || defined(ABLATE_597_WIDEN)
+static void
+ablate_597_says(void)
+{
+	static int	said;
+
+	if (said)
+		return;
+	said = 1;
+#ifdef ABLATE_597_NO_LOCK
+	printf("pci: #597 ablation -- the configuration access takes no lock\n");
+#endif
+#ifdef ABLATE_597_WIDEN
+	printf("pci: #597 ablation -- %d port 0x80 reads between address and "
+	       "data\n", ABLATE_597_WIDEN);
+#endif
+}
+#endif
+
+static inline void
+ablate_597_widen(void)
+{
+#ifdef ABLATE_597_WIDEN
+	int	w;
+
+	for (w = 0; w < ABLATE_597_WIDEN; w++)
+		(void) inb(0x80);
+#endif
+}
+
 static inline unsigned long
 pci_cfg_port_enter(void)
 {
 	unsigned long	flags;
 	unsigned char	busy;
 
+#if defined(ABLATE_597_NO_LOCK) || defined(ABLATE_597_WIDEN)
+	ablate_597_says();
+#endif
+#ifdef ABLATE_597_NO_LOCK
+	return 0;
+#endif
 	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
 	for (;;) {
 		busy = 1;
@@ -188,6 +230,9 @@ pci_cfg_port_enter(void)
 static inline void
 pci_cfg_port_leave(unsigned long flags)
 {
+#ifdef ABLATE_597_NO_LOCK
+	return;
+#endif
 	__asm__ volatile("" : : : "memory");
 	pci_cfg_port_lock = 0;
 	if (flags & EFL_IF)
@@ -217,6 +262,7 @@ unsigned long pci_conf_read (pcici_t tag, unsigned long reg)
 		printf ("pci_conf_read(1): addr=%x ", addr);
 #endif
 		outl (CONF1_ADDR_PORT, addr);
+		ablate_597_widen();
 		data = inl (CONF1_DATA_PORT);
 		outl (CONF1_ADDR_PORT, 0   );
 		break;
@@ -268,6 +314,7 @@ void pci_conf_write (pcici_t tag, unsigned long reg, unsigned long data)
 			addr, data);
 #endif
 		outl (CONF1_ADDR_PORT, addr);
+		ablate_597_widen();
 		outl (CONF1_DATA_PORT, data);
 		outl (CONF1_ADDR_PORT,   0 );
 		break;
