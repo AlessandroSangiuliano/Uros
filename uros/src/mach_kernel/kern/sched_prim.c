@@ -859,7 +859,7 @@ __assert_wait(
 #if	MACHINE_PREEMPTION_LEVEL
 /*
  * Give back what the assert above took.  See <kern/sched_prim.h> for why this
- * is one function called from both ways out of the window rather than a rule.
+ * is one function called from every way out of the window rather than a rule.
  */
 void
 assert_wait_preempt_release(thread_t thread)
@@ -878,9 +878,10 @@ assert_wait_preempt_release(thread_t thread)
 	thread->wait_preempt = FALSE;
 
 	/*
-	 * ⚠️ _no_check, deliberately.  The two callers are both about to do
-	 * their own AST work -- thread_block_reason() is on its way into the
-	 * scheduler and clear_wait()'s caller returns through a trap -- so
+	 * ⚠️ _no_check, deliberately.  Every caller is about to do its own AST
+	 * work -- thread_block_reason(), thread_run() and the futex hand-off
+	 * are on their way into the scheduler, and clear_wait()'s caller
+	 * returns through a trap -- so
 	 * taking one here would be taking it in the middle of somebody's
 	 * critical section for no gain.  Whether the checking form should act
 	 * on an urgent AST at all is #462, and it is not this window.
@@ -1396,8 +1397,8 @@ thread_handoff_to_parked_waiter(
 	 * thread_dispatch(); self resumes here when it is later woken. */
 #if	MACHINE_PREEMPTION_LEVEL
 	/*
-	 * #599: the third way out of assert_wait()'s window, beside
-	 * thread_block_reason() and thread_run(): what the caller's
+	 * #599: one of the ways out of assert_wait()'s window, beside
+	 * thread_block_reason(), thread_run() and clear_wait(): what the caller's
 	 * assert_wait() raised is given back here, at splsched, or this
 	 * processor keeps it and self leaves owing it.
 	 */
@@ -2170,9 +2171,12 @@ thread_run(
 	s = splsched();
 #if	MACHINE_PREEMPTION_LEVEL
 	/*
-	 * #599: as in thread_block_reason(), the wait window ends here, after
-	 * splsched() and a raise of this function's own, so the level never
-	 * passes through zero with TH_WAIT set.  Only
+	 * #599: as in thread_block_reason(), the wait window ends here, at
+	 * splsched(): the level does reach zero with TH_WAIT set before
+	 * thread_invoke() raises it again, and what keeps a preemption out of
+	 * that stretch is splsched -- no interrupt, so no AST -- as it is in
+	 * thread_block_reason().  It used to be given back before splsched,
+	 * where an interrupt could preempt a thread that was TH_WAIT.  Only
 	 * thread_switch(SWITCH_OPTION_WAIT) with a hand-off hint reaches this
 	 * with a wait declared; a no-op for everyone else.
 	 */
