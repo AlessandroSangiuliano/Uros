@@ -67,6 +67,28 @@ typedef int (*page_cache_writeback_fn)(void *ctx, daddr_t block,
 				       vm_offset_t data, vm_size_t size,
 				       vm_offset_t phys);
 
+/*
+ * #599: the fill a page_cache_get runs for a block it does not hold, with no
+ * lock of the cache's held.  It must read all `size' bytes of `block' into
+ * `data' (or through `phys', the slot's physical address, 0 for a slab slot)
+ * and answer 0, or answer why not.  It takes no lock, waits for nothing but
+ * its device, and never calls into a page cache.
+ */
+typedef int (*page_cache_fill_fn)(void *ctx, daddr_t block,
+				  vm_offset_t data, vm_size_t size,
+				  vm_offset_t phys);
+
+/*
+ * #599: an entry's state.  FREE: on the free list.  FILLING: keyed, being
+ * read by the page_cache_get that keyed it; not data yet -- nobody else may
+ * see its bytes, and every lookup of its key waits.  VALID: a cached block.
+ * ORPHAN: pinned when its block was discarded; no key, freed at the last put.
+ */
+#define PC_FREE		0
+#define PC_FILLING	1
+#define PC_VALID	2
+#define PC_ORPHAN	3
+
 struct page_cache_entry {
 	daddr_t			pc_block;	/* disk block number (key) */
 	vm_offset_t		pc_data;	/* cached block data */
@@ -76,6 +98,14 @@ struct page_cache_entry {
 	int			pc_dirty;	/* block has been modified */
 	int			pc_wfail;	/* #599: its writeback failed,
 						   and it was said once */
+	int			pc_state;	/* #599: PC_FREE .. PC_ORPHAN */
+	/*
+	 * #599: pins -- pointers into pc_data held outside pc_lock (a
+	 * page_cache_get's caller, until page_cache_put).  A pinned entry is
+	 * never re-keyed or reused: a pin guards identity and lifetime, not
+	 * content.
+	 */
+	unsigned int		pc_refs;
 	/*
 	 * #599: pc_wgen counts the writes into the slot; a sync marks the
 	 * block clean only if it is the count it copied when it collected the
@@ -103,6 +133,14 @@ struct page_cache {
 	 * and ds_ext2_sync's -- used to overwrite each other's marks.
 	 */
 	pthread_mutex_t		pc_sync_lock;
+	/*
+	 * #599: broadcast when a fill ends; every wait for a FILLING key is
+	 * on it, and the key is looked up again after the wait -- never the
+	 * old pointer.  pc_nwaiters counts the threads inside the wait (the
+	 * self-test watches it).
+	 */
+	pthread_cond_t		pc_cond;
+	unsigned int		pc_nwaiters;
 	uint64_t		pc_seq;		/* ticks at every clean->dirty */
 	unsigned int		pc_sync_calls;
 	unsigned int		pc_max_entries;
@@ -178,6 +216,34 @@ void page_cache_selftest(unsigned int *ran, unsigned int *wrong,
  * passing test.
  */
 extern int page_cache_quiet;
+
+/*
+ * #599: the block, cached and pinned -- or read into the cache by `fill' and
+ * then pinned.
+ *
+ *  - held VALID: pinned, one hit;
+ *  - being read by another get: waits for that fill, then looks again;
+ *  - not held: a slot is keyed FILLING (one miss), `fill' runs with no lock
+ *    held, and the entry is published VALID and pinned -- or, if the fill
+ *    failed, withdrawn: an unread entry never leaves this function.
+ *
+ * Answers 0 and a pinned entry in *ep; 0 and NULL when there is no slot to
+ * give (fill not called: read uncached); or the fill's non-zero answer, with
+ * nothing cached.  Every pinned entry is given back with page_cache_put.
+ */
+int page_cache_get(struct page_cache *pc, daddr_t block,
+		   page_cache_fill_fn fill, void *ctx,
+		   struct page_cache_entry **ep)
+	__attribute__((warn_unused_result));
+
+/* #599: give a pin back. */
+void page_cache_put(struct page_cache *pc, struct page_cache_entry *e);
+
+/*
+ * #599: is `block' held -- cached or being read?  A hint for readahead: no
+ * pin, no statistics.
+ */
+int page_cache_contains(struct page_cache *pc, daddr_t block);
 
 /*
  * Look up a disk block in the cache.

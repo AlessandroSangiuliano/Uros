@@ -399,6 +399,305 @@ st_write_refuses_a_part(void)
 	return ok;
 }
 
+/*
+ * The fill double: waits at the gate for its block, counts the calls, and
+ * answers st_fill_answer, or fills the slot with st_fill_byte.
+ */
+static unsigned int	st_fill_calls;
+static int		st_fill_answer;
+static unsigned char	st_fill_byte = 0xF0;
+
+static int
+st_fill(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
+	vm_offset_t phys)
+{
+	(void)ctx;
+	(void)phys;
+	st_gate_wait(block);
+	st_fill_calls++;
+	if (st_fill_answer != 0)
+		return st_fill_answer;
+	memset((void *)data, st_fill_byte, size);
+	return 0;
+}
+
+/* A get on a thread of its own. */
+struct st_getter {
+	struct page_cache	*pc;
+	daddr_t			 block;
+	struct page_cache_entry	*e;
+	int			 rc;
+	pthread_t		 th;
+};
+
+static void *
+st_get_thread(void *arg)
+{
+	struct st_getter *g = (struct st_getter *)arg;
+
+	g->rc = page_cache_get(g->pc, g->block, st_fill, 0, &g->e);
+	return 0;
+}
+
+static int
+st_get_start(struct st_getter *g, struct page_cache *pc, daddr_t block)
+{
+	memset(g, 0, sizeof(*g));
+	g->pc = pc;
+	g->block = block;
+	return pthread_create(&g->th, 0, st_get_thread, g) == 0;
+}
+
+/* Until `n' threads wait on the cache's condition: 1 ms at a time, 5 s. */
+static int
+st_wait_waiters(struct page_cache *pc, unsigned int n)
+{
+	unsigned int i;
+
+	for (i = 0; i < 5000 && *(volatile unsigned int *)&pc->pc_nwaiters < n;
+	     i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	return *(volatile unsigned int *)&pc->pc_nwaiters >= n;
+}
+
+static int
+st_bytes(const struct page_cache_entry *e, unsigned char v)
+{
+	unsigned int i;
+
+	for (i = 0; i < ST_BLOCK; i++)
+		if (((const unsigned char *)e->pc_data)[i] != v)
+			return 0;
+	return 1;
+}
+
+/* P12: a failed fill leaves nothing cached, and the next get reads again. */
+static int
+st_failed_fill_leaves_nothing(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct page_cache_entry	*e = 0;
+	unsigned int		 calls = st_fill_calls;
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	st_fill_answer = ST_EIO;
+	if (page_cache_get(pc, 7, st_fill, 0, &e) != ST_EIO || e != 0 ||
+	    page_cache_contains(pc, 7))
+		ok = 0;
+	st_fill_answer = 0;
+	if (page_cache_get(pc, 7, st_fill, 0, &e) != 0 || e == 0 ||
+	    !st_bytes(e, st_fill_byte) || st_fill_calls - calls != 2)
+		ok = 0;
+	if (e != 0)
+		page_cache_put(pc, e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/*
+ * P13: a get of a block being read waits for that read and takes its bytes;
+ * its own fill is never called.
+ */
+static int
+st_get_waits_for_the_fill(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct st_getter	 g1, g2;
+	unsigned int		 calls = st_fill_calls;
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	st_gate_reset(8);
+	if (!st_get_start(&g1, pc, 8)) {
+		st_gate_reset((daddr_t)-1);
+		(void) st_done(pc);
+		return 0;
+	}
+	if (!st_wait_for(&st_gate_entered) || !st_get_start(&g2, pc, 8) ||
+	    !st_wait_waiters(pc, 1))
+		ok = 0;
+	st_gate_release();
+	(void) pthread_join(g1.th, 0);
+	(void) pthread_join(g2.th, 0);
+	st_gate_reset((daddr_t)-1);
+	if (g1.rc != 0 || g2.rc != 0 || g1.e == 0 || g2.e != g1.e ||
+	    !st_bytes(g1.e, st_fill_byte) || st_fill_calls - calls != 1)
+		ok = 0;
+	if (g1.e != 0)
+		page_cache_put(pc, g1.e);
+	if (g2.e != 0)
+		page_cache_put(pc, g2.e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/*
+ * P14: neither a pinned entry nor one being read is ever a victim: with both
+ * slots so held, a get of a third block answers 0 with no entry, and its
+ * fill is not called.
+ */
+static int
+st_held_entries_are_not_victims(void)
+{
+	struct page_cache	*pc = page_cache_create(2, ST_BLOCK,
+							st_writeback, 0);
+	struct page_cache_entry	*e1 = 0, *e3 = (struct page_cache_entry *)1;
+	struct st_getter	 g2;
+	unsigned int		 calls;
+	int			 ok = 1, rc3;
+
+	if (pc == 0)
+		return 0;
+	if (page_cache_get(pc, 1, st_fill, 0, &e1) != 0 || e1 == 0)
+		ok = 0;
+	st_gate_reset(2);
+	if (!st_get_start(&g2, pc, 2)) {
+		st_gate_reset((daddr_t)-1);
+		if (e1 != 0)
+			page_cache_put(pc, e1);
+		(void) st_done(pc);
+		return 0;
+	}
+	if (!st_wait_for(&st_gate_entered))
+		ok = 0;
+	calls = st_fill_calls;
+	rc3 = page_cache_get(pc, 3, st_fill, 0, &e3);
+	if (rc3 != 0 || e3 != 0 || st_fill_calls != calls ||
+	    !page_cache_contains(pc, 1) || !page_cache_contains(pc, 2))
+		ok = 0;
+	st_gate_release();
+	(void) pthread_join(g2.th, 0);
+	st_gate_reset((daddr_t)-1);
+	if (e1 != 0)
+		page_cache_put(pc, e1);
+	if (g2.e != 0)
+		page_cache_put(pc, g2.e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/* P15: a get of a cached block never reads it, so dirty bytes survive. */
+static int
+st_hit_never_fills(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct page_cache_entry	*e = 0;
+	unsigned int		 calls;
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	if (st_write_byte(pc, 9, 0x99) != 0)
+		ok = 0;
+	calls = st_fill_calls;
+	if (page_cache_get(pc, 9, st_fill, 0, &e) != 0 || e == 0 ||
+	    !st_bytes(e, 0x99) || !e->pc_dirty || st_fill_calls != calls)
+		ok = 0;
+	if (e != 0)
+		page_cache_put(pc, e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/* P16: a get counts one miss or one hit; contains counts nothing. */
+static int
+st_counts_are_one(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct page_cache_entry	*e = 0;
+	unsigned int		 h, m;
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	h = pc->pc_hits;
+	m = pc->pc_misses;
+	if (page_cache_get(pc, 10, st_fill, 0, &e) != 0 || e == 0 ||
+	    pc->pc_misses != m + 1 || pc->pc_hits != h)
+		ok = 0;
+	if (e != 0)
+		page_cache_put(pc, e);
+	e = 0;
+	if (page_cache_get(pc, 10, st_fill, 0, &e) != 0 || e == 0 ||
+	    pc->pc_hits != h + 1 || pc->pc_misses != m + 1)
+		ok = 0;
+	if (e != 0)
+		page_cache_put(pc, e);
+	(void) page_cache_contains(pc, 10);
+	(void) page_cache_contains(pc, 11);
+	if (pc->pc_hits != h + 1 || pc->pc_misses != m + 1)
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/*
+ * P17: a write of a block being read lands after the read: the block ends
+ * with the write's bytes, dirty -- not the disk's, over them.
+ */
+struct st_wr {
+	struct page_cache	*pc;
+	int			 rc;
+	pthread_t		 th;
+};
+
+static void *
+st_wr_thread(void *arg)
+{
+	struct st_wr *w = (struct st_wr *)arg;
+
+	w->rc = st_write_byte(w->pc, 12, 0x17);
+	return 0;
+}
+
+static int
+st_write_lands_after_fill(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct st_getter	 g;
+	struct st_wr		 w;
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	memset(&w, 0, sizeof(w));
+	w.pc = pc;
+	st_gate_reset(12);
+	if (!st_get_start(&g, pc, 12)) {
+		st_gate_reset((daddr_t)-1);
+		(void) st_done(pc);
+		return 0;
+	}
+	if (!st_wait_for(&st_gate_entered) ||
+	    pthread_create(&w.th, 0, st_wr_thread, &w) != 0 ||
+	    !st_wait_waiters(pc, 1))
+		ok = 0;
+	st_gate_release();
+	(void) pthread_join(g.th, 0);
+	(void) pthread_join(w.th, 0);
+	st_gate_reset((daddr_t)-1);
+	if (g.rc != 0 || w.rc != 0 || !st_holds(pc, 12, 0x17, 1))
+		ok = 0;
+	if (g.e != 0)
+		page_cache_put(pc, g.e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
 /* A sync on a thread of its own; its answer, and when it is done. */
 struct st_syncer {
 	struct page_cache	*pc;
@@ -587,5 +886,11 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong,
 	st_case(ran, wrong, failed, st_write_during_writeback_stays_dirty());
 	st_case(ran, wrong, failed, st_one_sync_at_a_time());
 	st_case(ran, wrong, failed, st_sync_takes_what_was_dirty());
+	st_case(ran, wrong, failed, st_failed_fill_leaves_nothing());
+	st_case(ran, wrong, failed, st_get_waits_for_the_fill());
+	st_case(ran, wrong, failed, st_held_entries_are_not_victims());
+	st_case(ran, wrong, failed, st_hit_never_fills());
+	st_case(ran, wrong, failed, st_counts_are_one());
+	st_case(ran, wrong, failed, st_write_lands_after_fill());
 	page_cache_quiet = 0;
 }
