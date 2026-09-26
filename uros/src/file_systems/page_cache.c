@@ -268,7 +268,11 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 
 	pthread_mutex_lock(&pc->pc_lock);
 
-	/* Check if already cached (update data if so) */
+	/*
+	 * Already cached: left as it is, and only moved to MRU.  It may be
+	 * dirty, and newer than what the caller read from the disk (#599:
+	 * this comment said "update data if so", and it never did).
+	 */
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			lru_remove(e);
@@ -312,53 +316,47 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 }
 
 int
-page_cache_mark_dirty(struct page_cache *pc, daddr_t block)
+page_cache_write(struct page_cache *pc, daddr_t block, vm_offset_t data,
+		 vm_size_t size)
 {
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
-	pthread_mutex_lock(&pc->pc_lock);
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			e->pc_dirty = 1;
-			pthread_mutex_unlock(&pc->pc_lock);
-			return 0;
-		}
-	}
-	pthread_mutex_unlock(&pc->pc_lock);
-	return -1;
-}
-
-void
-page_cache_update(struct page_cache *pc, daddr_t block,
-		  vm_offset_t data, vm_size_t size)
-{
-	unsigned int h = PC_HASH(block);
-	struct page_cache_entry *e;
+	if (size != pc->pc_block_size)
+		return KERN_INVALID_ARGUMENT;
 
 	pthread_mutex_lock(&pc->pc_lock);
+	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next)
+		if (e->pc_block == block)
+			break;
 
-	/* If block is already cached, update in place */
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			/* #599: a fixed slot in either kind of cache */
-			memcpy((void *)e->pc_data, (void *)data,
-			       size < e->pc_size ? size : e->pc_size);
-			e->pc_dirty = 1;
-			lru_remove(e);
-			lru_insert_mru(pc, e);
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
+	if (e != NULL) {
+		lru_remove(e);
+	} else {
+		if (pc->pc_free) {
+			e = pc->pc_free;
+			pc->pc_free = e->pc_hash_next;
+			e->pc_hash_next = NULL;
+		} else {
+			e = evict_lru(pc);
+			if (!e) {
+				pthread_mutex_unlock(&pc->pc_lock);
+				return KERN_RESOURCE_SHORTAGE;
+			}
 		}
+		e->pc_block = block;
+		e->pc_busy = 0;
+		e->pc_hash_next = pc->pc_hash[h];
+		pc->pc_hash[h] = e;
+		pc->pc_count++;
 	}
 
+	/* #599: the copy and the dirty bit in the same hold */
+	memcpy((void *)e->pc_data, (void *)data, size);
+	e->pc_dirty = 1;
+	lru_insert_mru(pc, e);
 	pthread_mutex_unlock(&pc->pc_lock);
-
-	/* Not cached — insert as new dirty entry
-	 * (page_cache_insert and page_cache_mark_dirty acquire their own lock)
-	 */
-	page_cache_insert(pc, block, data, size);
-	page_cache_mark_dirty(pc, block);
+	return KERN_SUCCESS;
 }
 
 /*

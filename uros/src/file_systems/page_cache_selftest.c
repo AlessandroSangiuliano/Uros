@@ -100,7 +100,8 @@ st_destroy_refuses_dirty(void)
 	if (pc == 0)
 		return 0;
 	memset(blk, 0x5A, sizeof(blk));
-	page_cache_update(pc, 7, (vm_offset_t)blk, sizeof(blk));
+	if (page_cache_write(pc, 7, (vm_offset_t)blk, sizeof(blk)) != 0)
+		return 0;
 	refused = page_cache_destroy(pc) != 0;
 	if (!refused)
 		return 0;		/* freed: the cache is gone */
@@ -108,6 +109,128 @@ st_destroy_refuses_dirty(void)
 	(void) page_cache_sync(pc);
 	destroyed = page_cache_destroy(pc) == 0;
 	return destroyed;
+}
+
+/* The entry that holds `b', or 0. */
+static struct page_cache_entry *
+st_entry(struct page_cache *pc, daddr_t b)
+{
+	unsigned int i;
+
+	for (i = 0; i < pc->pc_max_entries; i++)
+		if (pc->pc_pool[i].pc_block == b)
+			return &pc->pc_pool[i];
+	return 0;
+}
+
+static int
+st_holds(struct page_cache *pc, daddr_t b, unsigned char v, int dirty)
+{
+	struct page_cache_entry *e = st_entry(pc, b);
+	unsigned int i;
+
+	if (e == 0 || (e->pc_dirty != 0) != (dirty != 0))
+		return 0;
+	for (i = 0; i < ST_BLOCK; i++)
+		if (((const unsigned char *)e->pc_data)[i] != v)
+			return 0;
+	return 1;
+}
+
+/* Written back and destroyed, so a case leaves nothing behind. */
+static int
+st_done(struct page_cache *pc)
+{
+	st_wb_answer = 0;
+	(void) page_cache_sync(pc);
+	return page_cache_destroy(pc) == 0;
+}
+
+/*
+ * P3: a write lands, copied and dirty, whether the block was cached or not;
+ * and an insert of a block already written leaves the write alone.
+ */
+static int
+st_write_lands(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	unsigned char		 blk[ST_BLOCK];
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	memset(blk, 0x11, sizeof(blk));
+	page_cache_insert(pc, 1, (vm_offset_t)blk, sizeof(blk));
+	memset(blk, 0x22, sizeof(blk));
+	if (page_cache_write(pc, 1, (vm_offset_t)blk, sizeof(blk)) != 0 ||
+	    !st_holds(pc, 1, 0x22, 1))
+		ok = 0;
+	memset(blk, 0x33, sizeof(blk));
+	if (page_cache_write(pc, 2, (vm_offset_t)blk, sizeof(blk)) != 0)
+		ok = 0;
+	memset(blk, 0x44, sizeof(blk));
+	page_cache_insert(pc, 2, (vm_offset_t)blk, sizeof(blk));
+	if (!st_holds(pc, 2, 0x33, 1))
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/*
+ * P4: with every slot being written back (busy), a write of another block
+ * is refused -- and the blocks being written are exactly as they were.
+ */
+static int
+st_write_refused_when_full(void)
+{
+	struct page_cache	*pc = page_cache_create(2, ST_BLOCK,
+							st_writeback, 0);
+	unsigned char		 blk[ST_BLOCK];
+	int			 ok = 1, rc;
+
+	if (pc == 0)
+		return 0;
+	memset(blk, 0x55, sizeof(blk));
+	if (page_cache_write(pc, 1, (vm_offset_t)blk, sizeof(blk)) != 0 ||
+	    page_cache_write(pc, 2, (vm_offset_t)blk, sizeof(blk)) != 0)
+		ok = 0;
+	pc->pc_pool[0].pc_busy = 1;
+	pc->pc_pool[1].pc_busy = 1;
+	memset(blk, 0x66, sizeof(blk));
+	rc = page_cache_write(pc, 3, (vm_offset_t)blk, sizeof(blk));
+	if (rc == 0 || st_entry(pc, 3) != 0 ||
+	    !st_holds(pc, 1, 0x55, 1) || !st_holds(pc, 2, 0x55, 1))
+		ok = 0;
+	pc->pc_pool[0].pc_busy = 0;
+	pc->pc_pool[1].pc_busy = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/* P5: a write that is not a whole block is refused, and changes nothing. */
+static int
+st_write_refuses_a_part(void)
+{
+	struct page_cache	*pc = page_cache_create(2, ST_BLOCK,
+							st_writeback, 0);
+	unsigned char		 blk[ST_BLOCK];
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	memset(blk, 0x77, sizeof(blk));
+	if (page_cache_write(pc, 1, (vm_offset_t)blk, sizeof(blk)) != 0)
+		ok = 0;
+	memset(blk, 0x88, sizeof(blk));
+	if (page_cache_write(pc, 1, (vm_offset_t)blk, ST_BLOCK / 2) !=
+	    KERN_INVALID_ARGUMENT || !st_holds(pc, 1, 0x77, 1))
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
 }
 
 void
@@ -123,5 +246,14 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong)
 		(*wrong)++;
 	(*ran)++;
 	if (!st_destroy_refuses_dirty())
+		(*wrong)++;
+	(*ran)++;
+	if (!st_write_lands())
+		(*wrong)++;
+	(*ran)++;
+	if (!st_write_refused_when_full())
+		(*wrong)++;
+	(*ran)++;
+	if (!st_write_refuses_a_part())
 		(*wrong)++;
 }

@@ -3495,10 +3495,13 @@ write_file_locked(
 
 		if (off == 0 && chunk == (vm_size_t)block_size) {
 			/* Full block write — use page cache */
-			if (fp->f_dev.cache)
-				page_cache_update(fp->f_dev.cache,
-						  disk_block, data, chunk);
-			else {
+			if (fp->f_dev.cache) {
+				/* #599: a write the cache refuses fails */
+				rc = page_cache_write(fp->f_dev.cache,
+						      disk_block, data, chunk);
+				if (rc != 0)
+					return rc;
+			} else {
 				rc = write_disk_block(fp, disk_block,
 						      data, chunk);
 				if (rc != 0)
@@ -3527,11 +3530,13 @@ write_file_locked(
 					       block_size);
 					memcpy((void *)(tmp + off),
 					       (void *)data, chunk);
-					page_cache_update(fp->f_dev.cache,
-							  disk_block,
-							  tmp, block_size);
+					rc = page_cache_write(fp->f_dev.cache,
+							      disk_block,
+							      tmp, block_size);
 					vm_deallocate(mach_task_self(),
 						      tmp, block_size);
+					if (rc != 0)
+						return rc;	/* #599 */
 					goto next;
 				}
 			}
@@ -3551,9 +3556,9 @@ write_file_locked(
 			memcpy((void *)(blkbuf + off), (void *)data, chunk);
 
 			if (fp->f_dev.cache)
-				page_cache_update(fp->f_dev.cache,
-						  disk_block,
-						  blkbuf, block_size);
+				rc = page_cache_write(fp->f_dev.cache,
+						      disk_block,
+						      blkbuf, block_size);
 			else {
 				rc = write_disk_block(fp, disk_block,
 						      blkbuf, block_size);

@@ -153,26 +153,32 @@ int page_cache_lookup(struct page_cache *pc, daddr_t block,
 		      vm_offset_t *data_out, vm_size_t *size_out);
 
 /*
- * Insert a block into the cache: 'size' bytes (at most a slot's) are copied
- * from 'data' into a slot.  Caller retains ownership of 'data'.  If the cache
- * is full, the LRU entry is evicted and its slot reused.
+ * Insert a CLEAN block into the cache: 'size' bytes (at most a slot's) are
+ * copied from 'data' into a slot.  Caller retains ownership of 'data'.  If
+ * the cache is full, the LRU entry is evicted and its slot reused.
+ *
+ * A block already cached is left as it is -- it may be dirty, and newer
+ * than what the caller read from the disk (#599: this said "update data if
+ * so", and never did).
  */
 void page_cache_insert(struct page_cache *pc, daddr_t block,
 		       vm_offset_t data, vm_size_t size);
 
 /*
- * Mark a cached block as dirty.  Returns 0 on success, -1 if the
- * block is not in the cache.
+ * Write a whole block into the cache (#599): the bytes are copied and the
+ * block marked dirty in one hold of the cache's lock, into the slot that
+ * holds it or into one taken for it -- or the write is refused and nothing
+ * changes.  'size' must be the cache's block size (KERN_INVALID_ARGUMENT
+ * otherwise).  KERN_RESOURCE_SHORTAGE when there is no slot to give.
+ *
+ * It replaces page_cache_update, which on a miss dropped the lock, inserted,
+ * then marked dirty: a readahead insert of the same block in between made
+ * the insert a no-op, and a full cache made it return in silence -- the
+ * write lost, and reported as done.
  */
-int page_cache_mark_dirty(struct page_cache *pc, daddr_t block);
-
-/*
- * Update data in a cached block (or insert it) and mark it dirty.
- * Used for write operations: the caller provides new data, the cache
- * copies it, and the block is marked dirty for later writeback.
- */
-void page_cache_update(struct page_cache *pc, daddr_t block,
-		       vm_offset_t data, vm_size_t size);
+int page_cache_write(struct page_cache *pc, daddr_t block,
+		     vm_offset_t data, vm_size_t size)
+	__attribute__((warn_unused_result));
 
 /*
  * Synchronize all dirty blocks to disk via the writeback callback.
