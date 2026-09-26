@@ -580,12 +580,13 @@ kdb_kentry(
 	bcopy((char *)&regs, (char *)&ddb_regs, sizeof (ddb_regs));
 	trap_from_user = IS_USER_TRAP(&ddb_regs, &etext);
 
+	/*
+	 * #599: no COM1 session here.  This entry parks no one (remote_kdb's
+	 * request is dropped, lapic.c), so every processor goes on taking the
+	 * bank's lock, this one included -- bounded while db_active (com.c).
+	 */
 	db_active++;
-	if (db_active == 1)
-		com_ddb_session(1);	/* #599 */
 	db_task_trap(-1, 0, trap_from_user);
-	if (db_active == 1)
-		com_ddb_session(0);	/* #599 */
 	db_active--;
 
 	if (trap_from_user) {

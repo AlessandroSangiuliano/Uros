@@ -281,6 +281,21 @@ iopl_port_forbidden(
 	    return TRUE;
 #endif	/* !ABLATE_594_UNCHECKED */
 
+	/*
+	 * #599: and the ports only a claimant reaches, through the RPC, under
+	 * the chip's lock: COM1's registers (device_md_io_window).  COM1 left
+	 * the bitmap, and a read here was then a bare inb by any holder of
+	 * the iopl device -- one that acknowledges uart.so's THRE interrupt
+	 * (IIR), takes a byte it was owed (RBR) or clears its line errors
+	 * (LSR) (found in review).
+	 */
+	{
+	    unsigned int wb, wc;
+
+	    if (device_md_io_window((unsigned int)io_port, width, &wb, &wc))
+		return TRUE;
+	}
+
 #if 0	/* we only read from these... it should be OK */
 
 	if (io_port <= 0xff)

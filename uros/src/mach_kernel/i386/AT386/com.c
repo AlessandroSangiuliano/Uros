@@ -406,6 +406,9 @@ comprobe(
 			com_cons_init();
 			return(1);
 		}
+		printf("com0: ABLATE_599_COMPROBE_OLD_EXIT -- the old probe runs "
+		       "over the line above now, and comattach clears IER and "
+		       "MCR (#599)\n");
 #endif
 	}
 	oldctl = inb(LINE_CTL(addr));	 /* Save old value of LINE_CTL */
@@ -1316,51 +1319,74 @@ static int	com_tx_stuck;
  * this kernel holds com_bank_lock: the console's THR write (com_putc), the
  * divisor sequence (com_set_divisor), and every register a task reaches
  * through device_io_port_read/write (com_port_in/com_port_out).  The kernel's
- * own tty driver for COM1 does not open (comopen), and the I/O bitmap no
- * longer reaches the chip (iopl.c).
+ * own tty driver for COM1 does not open (comopen), and a task's own `in' and
+ * `out' do not reach the chip (iopl.c).
  *
- * A leaf lock with interrupts off, in ioapic_pair_enter's shape.  Who does
- * not wait on it: a writer nested on a processor that is already inside (an
- * NMI, a printf inside the hold) -- com_bank_mine[] is set before the lock is
- * taken and cleared after it is let go, so the whole hold is covered, the
- * spin included -- and the processor a DDB session runs on (com_ddb_cpu).
- * Those take nothing and write THR only if DLAB is clear, counting the bytes
- * they drop.  Every other processor takes the lock as always, session or
- * not: until it is parked it is still running.
+ * A leaf lock with interrupts off, whose word IS its holder: 0 when free, the
+ * holder's processor number plus one when held, taken by one cmpxchg and let
+ * go by one store, so there is no instant at which the lock is held and the
+ * holder not named (found in review: a holder mark set beside the lock left
+ * two such windows, and a mark set before the spin let a writer nested on a
+ * processor still waiting go past the lock).  A writer nested on the holder's
+ * own processor -- an NMI, a printf inside the hold -- takes nothing and
+ * writes THR only if DLAB is clear, counting what it drops; one nested on a
+ * processor that is only waiting waits too, and gets the lock in its turn.
+ *
+ * While a debugger is active anywhere (db_active), no one waits on the lock
+ * without bound: DDB parks the other processors with an NMI, and one of them
+ * may be parked holding it.  A bounded wait that fails is remembered for the
+ * rest of that debugger's activity, so the bytes after it do not each pay
+ * the bound; the ones that go without the lock write THR only if DLAB is
+ * clear, which DDB's session (below) makes sure of.
  */
-static volatile unsigned char	com_bank_lock;
-static volatile unsigned char	com_bank_mine[NCPUS];
-static volatile int		com_ddb_cpu = -1;
+#define	COM_BANK_DDB_SPINS	1000000
+
+extern int			db_active;
+
+static volatile int		com_bank_owner;		/* 0, or cpu + 1 */
+static int			com_bank_gave_up;	/* ... while db_active */
 unsigned int			com_bank_dropped;	/* THR bytes not written:
 							   DLAB set, lock not ours */
 
 static int
-com_bank_try(void)
+com_bank_try(int me)
 {
-	unsigned char busy = 1;
+	int old = 0;
 
-	__asm__ volatile("xchgb %0, %1"
-			 : "+q" (busy), "+m" (com_bank_lock)
-			 : : "memory");
-	return busy == 0;
+	__asm__ volatile("lock; cmpxchgl %2, %1"
+			 : "+a" (old), "+m" (com_bank_owner)
+			 : "r" (me + 1)
+			 : "memory", "cc");
+	return old == 0;
 }
 
 static int
 com_bank_enter(unsigned int *flags)
 {
-	int me;
+	int me, i;
 
 	__asm__ volatile("pushfl; popl %0; cli" : "=r" (*flags) : : "memory");
 	me = cpu_number();
-	if (com_ddb_cpu == me || com_bank_mine[me])
-		return 0;
-	com_bank_mine[me] = 1;
-	__asm__ volatile("" : : : "memory");
-#ifndef	ABLATE_599_COM_NO_LOCK
-	while (!com_bank_try())
+	if (com_bank_owner == me + 1)
+		return 0;			/* nested on the holder */
+#ifdef	ABLATE_599_COM_NO_LOCK
+	(void)i;
+	return 1;	/* as before #599: nothing taken, THR written regardless */
+#else
+	if (!db_active) {
+		com_bank_gave_up = 0;
+		while (!com_bank_try(me))
+			__asm__ volatile("pause");
+		return 1;
+	}
+	for (i = 0; i < (com_bank_gave_up ? 1 : COM_BANK_DDB_SPINS); i++) {
+		if (com_bank_try(me))
+			return 1;
 		__asm__ volatile("pause");
+	}
+	com_bank_gave_up = 1;
+	return 0;
 #endif
-	return 1;
 }
 
 static void
@@ -1368,54 +1394,31 @@ com_bank_leave(unsigned int flags, int took)
 {
 	if (took) {
 		__asm__ volatile("" : : : "memory");
-#ifndef	ABLATE_599_COM_NO_LOCK
-		com_bank_lock = 0;
-		__asm__ volatile("" : : : "memory");
-#endif
-		com_bank_mine[cpu_number()] = 0;
+		com_bank_owner = 0;
 	}
 	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
 }
 
 /*
- * #599: DDB's session on the bank, from the processor that stopped the
- * others, after they are parked (kdb_trap waits for them) and until before
- * they are let go.
- *
- * Entry takes the bank if nobody holds it -- bounded, because a processor
- * parked in the middle of a divisor sequence holds it for as long as the
- * session lasts, and not tried at all if this processor is itself inside it
- * -- then saves LCR and closes the latch.  Exit puts LCR back exactly and
- * gives the bank back if it took it, so a sequence a parked processor was in
- * the middle of goes on where it meant to.  In between this processor takes
- * nothing (com_ddb_cpu).  Outside any NCPUS test: one processor can be caught
- * half-way as well.
+ * #599: DDB's session on the bank, on kdb_trap's outermost entry, after the
+ * other processors are parked (it waits for them) and until before they are
+ * let go.  One of them may have been parked in the middle of a divisor
+ * sequence with the latch open, and DDB's own bytes go without the lock when
+ * that one holds it: entry saves LCR and closes the latch, exit puts LCR back
+ * exactly, so the sequence goes on where it meant to.  The session takes no
+ * lock -- it waits for nobody -- and kdb_kentry, which parks no one, has
+ * none: there every processor, the debugger's included, takes the lock, with
+ * the bound above.  Outside any NCPUS test: one processor can be caught
+ * half-way inside the hold as well, by a trap.
  */
-#define	COM_DDB_SPINS	1000000
-
 static int	com_ddb_lcr = -1;
-static int	com_ddb_locked;
 
 void
 com_ddb_session(int entering)
 {
-	int lcr, i;
+	int lcr;
 
 	if (entering) {
-		com_ddb_locked = 0;
-#ifndef	ABLATE_599_COM_NO_LOCK
-		for (i = 0; i < COM_DDB_SPINS &&
-			    !com_bank_mine[cpu_number()]; i++) {
-			if (com_bank_try()) {
-				com_ddb_locked = 1;
-				break;
-			}
-			__asm__ volatile("pause");
-		}
-#else
-		(void)i;
-#endif
-		com_ddb_cpu = cpu_number();
 		lcr = inb(LINE_CTL(COM0_ADDR));
 		com_ddb_lcr = lcr;
 		if (lcr & iDLAB) {
@@ -1427,12 +1430,6 @@ com_ddb_session(int entering)
 	} else if (com_ddb_lcr >= 0) {
 		outb(LINE_CTL(COM0_ADDR), com_ddb_lcr);
 		com_ddb_lcr = -1;
-		com_ddb_cpu = -1;
-		if (com_ddb_locked) {
-			com_ddb_locked = 0;
-			__asm__ volatile("" : : : "memory");
-			com_bank_lock = 0;
-		}
 	}
 }
 
