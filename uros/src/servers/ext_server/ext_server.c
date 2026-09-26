@@ -494,6 +494,7 @@ fs_error(int rc)
 	case 0:				return KERN_SUCCESS;
 	case FS_NO_ENTRY:		return VFS_ERR_NOENT;
 	case FS_NOT_DIRECTORY:		return VFS_ERR_NOTDIR;
+	case FS_IS_DIRECTORY:		return VFS_ERR_ISDIR;
 	case FS_NAME_TOO_LONG:		return VFS_ERR_NAMETOOLONG;
 	case FS_INVALID_PARAMETER:
 	case FS_NOT_IN_FILE:
@@ -846,7 +847,7 @@ ds_ext2_write(
 		of_op_end(mnt, idx);
 		printf("ext2: write fid=%u offset=%u count=%u failed: %d\n",
 		       fid, offset, data_count, rc);
-		return KERN_FAILURE;
+		return fs_error(rc);	/* #599: the reason, not "failed" */
 	}
 
 	/* Write sets dirty flags — track for efficient sync (#385: the

@@ -4091,7 +4091,17 @@ ext2fs_write_file(
 
 	vnode_mutex_lock(fp);
 	vnode_gen_check(fp);
-	rc = write_file_locked(fp, offset, data, size);
+	/*
+	 * #599: a directory is written by its own operations, which keep its
+	 * records well-formed and its flags theirs.  A write through a handle
+	 * put raw bytes in its blocks, and put its vnode on the writeback
+	 * thread's dirty list, where a flush of its flags ran beside the
+	 * namespace operations that set them (found in review).
+	 */
+	if ((fp->f_ic->i_mode & IFMT) == IFDIR)
+		rc = FS_IS_DIRECTORY;
+	else
+		rc = write_file_locked(fp, offset, data, size);
 	vnode_mutex_unlock(fp);
 	return rc;
 }
@@ -4102,6 +4112,18 @@ ext2fs_write_file(
  * #384: body; runs under the vnode lock (see wrapper below) so the
  * inode snapshot it serializes is consistent with concurrent writers.
  */
+/* #599: what a failed flush did not write, dirty again for the next one */
+static void
+flush_reraise(struct ext2_vnode *vn, int inode, int gd, int super)
+{
+	if (inode)
+		vn->v_inode_dirty = 1;
+	if (gd)
+		vn->v_gd_dirty = 1;
+	if (super)
+		vn->v_super_dirty = 1;
+}
+
 static int
 flush_metadata_locked(struct ext2fs_file *fp)
 {
@@ -4109,55 +4131,70 @@ flush_metadata_locked(struct ext2fs_file *fp)
 	struct ext2_vnode *vn = fp->f_vnode;
 	int n_dirty = 0;
 	int rc;
+	int w_inode, w_gd, w_super;
 
 	if (!vn)
 		return 0;
 
-	if (vn->v_inode_dirty) n_dirty++;
-	if (vn->v_gd_dirty) n_dirty++;
-	if (vn->v_super_dirty) n_dirty++;
+	/*
+	 * #599: the three flags taken once, and cleared as they are taken.
+	 * Read twice -- once to count the records and once to fill them --
+	 * and cleared all three at the end, a flag another operation raised
+	 * in between put the wrong buffers under the records, and was cleared
+	 * with nothing written for it (found in review).  What this flush
+	 * does not write is raised again below.
+	 */
+	w_inode = vn->v_inode_dirty;
+	w_gd = vn->v_gd_dirty;
+	w_super = vn->v_super_dirty;
+	vn->v_inode_dirty = vn->v_gd_dirty = vn->v_super_dirty = 0;
+
+	if (w_inode) n_dirty++;
+	if (w_gd) n_dirty++;
+	if (w_super) n_dirty++;
 
 	if (n_dirty == 0)
 		return 0;
 
 	/* Single dirty item or no batch stub: unbatched path */
 	if (n_dirty == 1 || !ext2_dev_has_batch(&fp->f_dev)) {
-		if (vn->v_inode_dirty) {
+		if (w_inode) {
 			rc = write_inode(vn->v_ino, fp);
 			icache_follow(fp, rc);		/* #599 */
 			if (rc != 0) {
 				printf("ext2: flush: inode %lu not written "
 				       "(rc=%d)\n",
 				       (unsigned long) vn->v_ino, rc);
+				flush_reraise(vn, w_inode, w_gd, w_super);
 				return rc;
 			}
-			vn->v_inode_dirty = 0;
 		}
-		if (vn->v_gd_dirty) {
+		if (w_gd) {
 			rc = write_gd(fp);
 			if (rc != 0) {
 				printf("ext2: flush: group descriptors not "
 				       "written (rc=%d)\n", rc);
+				flush_reraise(vn, 0, w_gd, w_super);
 				return rc;
 			}
-			vn->v_gd_dirty = 0;
 		}
-		if (vn->v_super_dirty) {
+		if (w_super) {
 			rc = write_super(fp);
 			if (rc != 0) {
 				printf("ext2: flush: superblock not written "
 				       "(rc=%d)\n", rc);
+				flush_reraise(vn, 0, 0, w_super);
 				return rc;
 			}
-			vn->v_super_dirty = 0;
 		}
 		return 0;
 	}
 
 	/*
-	 * Multiple dirty items — batch the writes into one IPC.
-	 * The inode block is cached in fp->f_inode_blk from read_inode(),
-	 * so no device_read is needed here.
+	 * Multiple dirty items — batch the writes into one IPC.  #599: the
+	 * inode block is read afresh first (vnode_inode_block), under
+	 * ext2_itable_lock and v_lock, and the lock is held until the batch
+	 * is written.
 	 */
 	{
 		recnum_t recnums[3];
@@ -4171,7 +4208,7 @@ flush_metadata_locked(struct ext2fs_file *fp)
 		int itable = 0;		/* #599: ext2_itable_lock held */
 
 		/* --- Prepare inode block (serialize in-place) --- */
-		if (vn->v_inode_dirty) {
+		if (w_inode) {
 			daddr_t inode_disk_block = ext2_ino2blk(fs,
 						fp->f_gd, vn->v_ino);
 
@@ -4182,6 +4219,7 @@ flush_metadata_locked(struct ext2fs_file *fp)
 					       inode_disk_block);	/* #599 */
 			if (rc != 0) {
 				pthread_mutex_unlock(&ext2_itable_lock);
+				flush_reraise(vn, w_inode, w_gd, w_super);
 				return rc;
 			}
 			serialize_inode(fp);
@@ -4193,7 +4231,7 @@ flush_metadata_locked(struct ext2fs_file *fp)
 		}
 
 		/* --- Prepare group descriptors --- */
-		if (vn->v_gd_dirty) {
+		if (w_gd) {
 			int gd_loc = fs->s_first_data_block + 1;
 			int gd_sec = (gd_loc * EXT2_BLOCK_SIZE(fs))
 				     / DEV_BSIZE;
@@ -4205,7 +4243,7 @@ flush_metadata_locked(struct ext2fs_file *fp)
 
 		/* --- Prepare superblock (little-endian raw copy) --- */
 		struct ext2_super_block raw_sb;
-		if (vn->v_super_dirty) {
+		if (w_super) {
 			/* Full copy first so untouched fields (uuid,
 			 * reserved_gdt_blocks, ...) survive — see write_super
 			 * (#266). */
@@ -4288,17 +4326,17 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			mach_msg_type_number_t data_sizes[3];
 			unsigned int bi = 0;
 
-			if (vn->v_inode_dirty) {
+			if (w_inode) {
 				data_bufs[bi] = (io_buf_ptr_t)vn->v_inode_blk;
 				data_sizes[bi] = inode_blk_size;
 				bi++;
 			}
-			if (vn->v_gd_dirty) {
+			if (w_gd) {
 				data_bufs[bi] = (io_buf_ptr_t)fp->f_gd;
 				data_sizes[bi] = fp->f_gd_size;
 				bi++;
 			}
-			if (vn->v_super_dirty) {
+			if (w_super) {
 				data_bufs[bi] = (io_buf_ptr_t)&raw_sb;
 				data_sizes[bi] = SBSIZE;
 				bi++;
@@ -4317,22 +4355,23 @@ flush_metadata_locked(struct ext2fs_file *fp)
 				if (itable)
 					pthread_mutex_unlock(
 						&ext2_itable_lock);
+				flush_reraise(vn, w_inode, w_gd, w_super);
 				return rc;
 			}
 
 			off = 0;
-			if (vn->v_inode_dirty) {
+			if (w_inode) {
 				memcpy((void *)(concat + off),
 				       (void *)vn->v_inode_blk,
 				       inode_blk_size);
 				off += inode_blk_size;
 			}
-			if (vn->v_gd_dirty) {
+			if (w_gd) {
 				memcpy((void *)(concat + off),
 				       (void *)fp->f_gd, fp->f_gd_size);
 				off += fp->f_gd_size;
 			}
-			if (vn->v_super_dirty) {
+			if (w_super) {
 				memcpy((void *)(concat + off),
 				       (void *)&raw_sb, SBSIZE);
 				off += SBSIZE;
@@ -4351,11 +4390,8 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			pthread_mutex_unlock(&ext2_itable_lock);
 			icache_follow(fp, rc);		/* #599 */
 		}
-		if (rc == KERN_SUCCESS) {
-			vn->v_inode_dirty = 0;
-			vn->v_gd_dirty = 0;
-			vn->v_super_dirty = 0;
-		} else {
+		if (rc != KERN_SUCCESS) {
+			flush_reraise(vn, w_inode, w_gd, w_super);
 			/*
 			 * 🔴 #483: it used to return here saying nothing.  A
 			 * caller learned that "a sync failed" and could not
@@ -4368,9 +4404,9 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			       n, (unsigned long) vn->v_ino,
 			       fp->f_dev.blk ? "libblk" : "device_write_batch",
 			       rc,
-			       vn->v_inode_dirty ? " [inode]" : "",
-			       vn->v_gd_dirty ? " [group desc]" : "",
-			       vn->v_super_dirty ? " [superblock]" : "");
+			       w_inode ? " [inode]" : "",
+			       w_gd ? " [group desc]" : "",
+			       w_super ? " [superblock]" : "");
 		}
 		return rc;
 	}
