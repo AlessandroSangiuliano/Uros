@@ -623,7 +623,8 @@ unsigned iommu_fault_poll(void);
  * How many times refusals may have gone uncounted, since boot: drains in
  * which an engine said it dropped some OR the kernel saw it may have -- a
  * full or filling log, an entry never written, a log that had stopped
- * (0873fc75, 898764d4; QEMU never raises the engine's own flag) -- and
+ * (0873fc75, 898764d4; QEMU's AMD-Vi, as this kernel sets it up, never
+ * raises EventOverflow, where QEMU's VT-d does raise PFO) -- and
  * refusals from devices the per-device count had no room to name (#599).
  * It only goes up.  A "may have": no count here says a refusal WAS lost.
  *

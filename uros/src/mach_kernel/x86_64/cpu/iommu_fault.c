@@ -250,7 +250,6 @@ int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong)
 #define	FAKE_AMD_RUN		(1ULL << 3)	/* MMIO 2020h, EventLogRun */
 #define	FAKE_AMD_LOG_EN		(1ULL << 2)	/* MMIO 0018h, EventLogEn */
 #define	FAKE_AMD_OTHER		(1ULL << 0)	/* MMIO 0018h, IommuEn: kept */
-#define	FAKE_AMD_UNWRITTEN	(~0ULL)		/* no restart writes this */
 #define	FAKE_VTD_PFO		(1u << 0)	/* FSTS */
 #define	FAKE_VTD_PPF		(1u << 1)
 #define	FAKE_VTD_F		(1ULL << 63)	/* a fault record's F */
@@ -261,7 +260,8 @@ static struct fault_ledger	fake_ledger;
 
 struct fake_amd {
 	uint64_t	head, tail, status, status_w1c, control;
-	uint64_t	control_stop, control_start;
+	uint64_t	control_log[IOMMU_AMD_CONTROL_LOG];
+	unsigned	control_logged;
 };
 
 /* An IO_PAGE_FAULT event from `bdf' at `address', in the slot at `off'. */
@@ -283,8 +283,8 @@ static unsigned fake_amd_drain(struct fake_amd *r, uint64_t *lost)
 	v.status = &r->status;
 	v.status_w1c = &r->status_w1c;
 	v.control = &r->control;
-	v.control_stop = &r->control_stop;
-	v.control_start = &r->control_start;
+	v.control_log = r->control_log;
+	v.control_logged = &r->control_logged;
 	v.log = (volatile uint8_t *)fake_amd_log;
 	v.bytes = FAKE_AMD_BYTES;
 	(void) iommu_amd_evtlog_drain(&v, 0, &s);
@@ -389,24 +389,23 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
 
 	/*
 	 * A6: the log overflowed and stopped (Run clear, EventLogEn set): a
-	 * loss, the flag cleared, the log restarted -- CONTROL written with
-	 * EventLogEn off and then on, every other bit kept (FAKE_AMD_OTHER
-	 * stands for them) -- and the unit marked stopped.  The two writes land
-	 * in words of their own, which start as a value neither write can
-	 * produce, so a restart that never happened reads as one (found in
-	 * review: the check compared a CONTROL nobody had to write).  A second
+	 * loss, the flag cleared, the log restarted -- CONTROL written exactly
+	 * twice, EventLogEn off and THEN on, every other bit kept
+	 * (FAKE_AMD_OTHER stands for them) -- and the unit marked stopped.  The
+	 * writes are read from the fabricated engine's log, in order: a restart
+	 * that never happened, or one with its writes swapped (which leaves a
+	 * live log disabled), fails (found in review, twice).  A second
 	 * drain that still finds it stopped: another loss, and blind.  A8: a
 	 * drain that finds it running clears both, and counts nothing.
 	 */
 	bzero((char *)&r, sizeof(r));
 	r.status = FAKE_AMD_OVERFLOW;
 	r.control = FAKE_AMD_LOG_EN | FAKE_AMD_OTHER;
-	r.control_stop = r.control_start = FAKE_AMD_UNWRITTEN;
 	found = fake_amd_drain(&r, &lost);
 	(*ran)++;
 	if (found != 0 || lost != 1 || r.status_w1c != FAKE_AMD_OVERFLOW ||
-	    r.control_stop != FAKE_AMD_OTHER ||
-	    r.control_start != (FAKE_AMD_LOG_EN | FAKE_AMD_OTHER) ||
+	    r.control_logged != 2 || r.control_log[0] != FAKE_AMD_OTHER ||
+	    r.control_log[1] != (FAKE_AMD_LOG_EN | FAKE_AMD_OTHER) ||
 	    !(fake_ledger.stopped & 1) || (fake_ledger.blind & 1))
 		fake_failed(ran, wrong, failed);
 	found = fake_amd_drain(&r, &lost);
@@ -418,11 +417,11 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
 	fake_ledger.stopped = fake_ledger.blind = 0;
 	bzero((char *)&r, sizeof(r));
 	r.control = FAKE_AMD_LOG_EN;
-	r.control_stop = r.control_start = FAKE_AMD_UNWRITTEN;
 	found = fake_amd_drain(&r, &lost);
 	(*ran)++;
 	if (found != 0 || lost != 1 || r.status_w1c != 0 ||
-	    r.control_stop != 0 || r.control_start != FAKE_AMD_LOG_EN ||
+	    r.control_logged != 2 || r.control_log[0] != 0 ||
+	    r.control_log[1] != FAKE_AMD_LOG_EN ||
 	    !(fake_ledger.stopped & 1))
 		fake_failed(ran, wrong, failed);
 
@@ -432,12 +431,11 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
 	 */
 	fake_ledger.blind = 1;
 	r.status = FAKE_AMD_RUN;
-	r.control_stop = r.control_start = FAKE_AMD_UNWRITTEN;
+	r.control_logged = 0;
 	found = fake_amd_drain(&r, &lost);
 	(*ran)++;
 	if (lost != 0 || fake_ledger.stopped != 0 || fake_ledger.blind != 0 ||
-	    r.control_stop != FAKE_AMD_UNWRITTEN ||
-	    r.control_start != FAKE_AMD_UNWRITTEN)
+	    r.control_logged != 0)
 		fake_failed(ran, wrong, failed);
 
 	/* V1: one of two records set: found, and only its F written. */
@@ -566,8 +564,8 @@ static unsigned fault_report_print(void)
 	 * print.  Claiming under the lock is what keeps two callers from
 	 * printing the same records; printing outside it is the lock's rule.
 	 *
-	 * 🔑 The ring's element i is the (ledger.total - logged + i)th fault of
-	 * the boot, and that number is what says whether it has been printed.
+	 * 🔑 The kth fault of the boot is at ring[k % IOMMU_FAULT_LOG], and k
+	 * -- against `reported' -- is what says whether it has been printed.
 	 * Comparing positions inside the ring could not: the ring's element
 	 * zero is a different fault after every wrap.
 	 */

@@ -342,13 +342,18 @@ unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s);
  * a live engine a write-one-to-clear goes to the register it reads
  * (status_w1c == status, fsts_w1c == fsts); a fabricated one gives them
  * separate words, so reads stay put and the check sees what was written.
- * The same for the restart's two CONTROL writes, EventLogEn off and then on
- * (control_stop, control_start == control live): a fabricated engine sees
- * both, where one word would show only a final value equal to the first.
+ * CONTROL is written by the restart twice, EventLogEn off and then on, and
+ * ends as it began, so a fabricated engine also keeps a log of the writes in
+ * order (control_log, IOMMU_AMD_CONTROL_LOG deep; NULL live): the check sees
+ * both writes and which came first (found in review: two separate words saw
+ * both, but not the order, and the order is the restart).
  */
+#define	IOMMU_AMD_CONTROL_LOG	4
+
 struct iommu_amd_evtlog {
 	volatile uint64_t	*head, *tail, *status, *status_w1c, *control;
-	volatile uint64_t	*control_stop, *control_start;
+	uint64_t		*control_log;	/* fabricated only */
+	unsigned		*control_logged;
 	volatile uint8_t	*log;
 	unsigned		 bytes;
 };

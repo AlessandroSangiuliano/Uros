@@ -232,8 +232,9 @@ routine device_intr_enable(
  * has been granted and nothing else, and every other address in the machine
  * faults for it.  #599: a device whose DMA bypasses the engine is confined by
  * nothing, and QEMU's legacy virtio is one -- a page never granted to it
- * received a disk block with translation on (428001fc); the kernel's line at
- * the grant says which case it is.  What it gives up is the second property #432
+ * received a disk block with translation on (428001fc).  The kernel cannot
+ * tell the two cases apart, and its line when this is called says so.  What
+ * it gives up is the second property #432
  * stage 3e added -- not knowing where its memory is.  Confinement stops a
  * device reaching elsewhere by accident; the IOVA stops it doing so on
  * purpose, and this keeps the first and loses the second.
