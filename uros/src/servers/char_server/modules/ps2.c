@@ -27,7 +27,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
-#include <pthread.h>
 
 #include <char/char_module_abi.h>
 #include <char/char_types.h>
@@ -242,8 +241,6 @@ e0_keysym(uint8_t sc)
 struct ps2_priv {
 	int		attached;
 	uint8_t		cfg_found;	/* the config byte attach read */
-	pthread_mutex_t	drain_lock;	/* #599: one reader of 0x60 at a time */
-	int		drain_lock_ready;
 	uint32_t	modifiers;	/* CHAR_KBD_MOD_* current state */
 	int		e0_pending;	/* next byte is part of an E0 seq */
 	mach_port_t	subscribers[PS2_MAX_SUBSCRIBERS];
@@ -384,14 +381,6 @@ ps2_irq_handler(void *arg)
 	struct ps2_priv *p = arg;
 	unsigned int budget;
 
-	/*
-	 * #599: attach drains once after registering IRQ 1 (see there), so
-	 * two threads can reach this loop; status-then-data is a pair, and
-	 * two readers of it take each other's bytes.
-	 */
-	if (p->drain_lock_ready)
-		(void)pthread_mutex_lock(&p->drain_lock);
-
 	/* Drain whatever the controller has queued.  Bounded budget so
 	 * a stuck IRQ doesn't starve the rest of the demux. */
 	for (budget = 0; budget < 32u; budget++) {
@@ -415,8 +404,6 @@ ps2_irq_handler(void *arg)
 			ps2_handle_scancode(p, sc);
 		}
 	}
-	if (p->drain_lock_ready)
-		(void)pthread_mutex_unlock(&p->drain_lock);
 }
 
 /* ============================================================
@@ -429,11 +416,6 @@ ps2_probe(const struct hal_device_info *dev)
 	(void)dev;
 	if (ps2_singleton.attached)
 		return NULL;
-	if (!ps2_singleton.drain_lock_ready) {
-		if (pthread_mutex_init(&ps2_singleton.drain_lock, NULL) != 0)
-			return NULL;
-		ps2_singleton.drain_lock_ready = 1;
-	}
 	return &ps2_singleton;
 }
 
@@ -552,8 +534,10 @@ ps2_attach(void *priv)
 	 * the line -- and stood back from it, as the claim asks.  The byte is
 	 * still in the output buffer, holding the edge-triggered line up, and
 	 * no interrupt will come for it or after it.  So the handler runs once
-	 * here, under the lock it takes (found in review: a keystroke during
-	 * attach left the keyboard dead).
+	 * here (found in review: a keystroke during attach left the keyboard
+	 * dead).  No lock: attach runs on char_server's dispatch thread before
+	 * mach_msg_server starts, and that one thread is the only one that
+	 * ever runs the handler -- an IRQ 1 meanwhile only queues its message.
 	 */
 	ps2_irq_handler(p);
 
@@ -562,12 +546,12 @@ ps2_attach(void *priv)
 		printf("ps2: keyboard attached (IRQ %u); enable-scan answered "
 		       "0x%02x; %s\n", PS2_IRQ, (unsigned)ack,
 		       stood_back ? "the kernel's reader stood back"
-				  : "no kernel reader of the 8042");
+				  : "no kernel reader stood back");
 	else
 		printf("ps2: keyboard attached (IRQ %u); enable-scan: no answer "
 		       "-- it went to another reader, or nowhere; %s\n", PS2_IRQ,
 		       stood_back ? "the kernel's reader stood back"
-				  : "no kernel reader of the 8042");
+				  : "no kernel reader stood back");
 	return 0;
 }
 
@@ -598,6 +582,7 @@ ps2_detach(void *priv)
 	 * 1 and leave the keyboard off.  The claim goes last.
 	 */
 	(void)ctrl_send(PS2_CMD_DISABLE_P1);
+	drain_output_buffer();	/* #599: the first byte after READ_CFG is its */
 	if (ctrl_send(PS2_CMD_READ_CFG) == 0 && wait_output_full() == 0) {
 		uint8_t cur = inb(PS2_DATA);
 

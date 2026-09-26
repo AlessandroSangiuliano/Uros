@@ -494,9 +494,11 @@ ddb_kbd_irq_handed_over(void)
  * firmware may hand us the keyboard port with its IRQ and/or clock
  * disabled, so IRQ 1 never fires and ddb_kbd_intr() never runs (this is
  * why Ctrl+D worked under QEMU — SeaBIOS pre-enables the controller —
- * but not on real hardware).  Mirror char_server/modules/ps2.c's
+ * but not on real hardware).  After char_server/modules/ps2.c's
  * ps2_attach(): drain, set the config byte (port-1 IRQ + set-1
- * translation + keyboard clock on), re-enable port 1, enable scanning.
+ * translation; the keyboard's clock stays off across the read-back,
+ * #599), read it back, re-enable port 1 -- which turns the clock on --
+ * and enable scanning.
  * All waits are bounded so a wedged controller can't hang the boot.
  * ------------------------------------------------------------------ */
 #define KBD_STAT_IBF	0x02	/* input buffer full (cmd still in flight) */
