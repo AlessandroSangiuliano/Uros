@@ -54,6 +54,7 @@
 
 #include <cpu/regs.h>
 #include <cpu/spl.h>
+#include <sync/atomic.h>	/* atomic_swap8, cmos_pair_lock */
 
 /*
  * The index/data port pair.  Writing an index selects a register; the value
@@ -63,8 +64,16 @@
  * is no way to read back what it was.  Every index written here has it clear,
  * which leaves NMI enabled -- the state this kernel wants and the state it is
  * in when we get here.  A machine that had masked NMI around something would
- * have it unmasked by this read, which is why the whole sequence is done at
- * splhigh and at boot.
+ * have it unmasked by this read.
+ *
+ * 🔴 NOT "at splhigh and at boot", as this used to say (#599).  The reading
+ * also runs at any time on any processor through clock_get_time() on the
+ * battery clock, which takes a host port, not the privileged one, and
+ * splhigh is per processor: two tasks on two processors interleaved their
+ * index and data accesses and each could read the other's register.  So
+ * every select-and-read holds cmos_pair_lock with interrupts off, the
+ * pattern of pci_cfg.c's port pair; and the ports are kept from tasks
+ * (device_machdep.c's kernel_io[]).
  */
 #define	RTC_INDEX	0x70
 #define	RTC_DATA	0x71
@@ -91,11 +100,24 @@ struct rtc_reading {
 	uint8_t	sec, min, hour, day, month, year, century;
 };
 
+static volatile uint8_t	cmos_pair_lock;
+
 static uint8_t
 cmos_read(uint8_t index)
 {
+	uint64_t	flags = read_rflags();
+	uint8_t		value;
+
+	interrupts_disable();
+	while (atomic_swap8(&cmos_pair_lock, 1) != 0)
+		cpu_pause();
 	outb(RTC_INDEX, index);
-	return inb(RTC_DATA);
+	value = inb(RTC_DATA);
+	__asm__ volatile("" ::: "memory");
+	cmos_pair_lock = 0;
+	if (flags & RFLAGS_IF)
+		interrupts_enable();
+	return value;
 }
 
 /*

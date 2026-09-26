@@ -183,8 +183,8 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 }
 
 /*
- * The legacy ports this kernel keeps (#508): its rulers, and the PCI
- * configuration ports (#597).
+ * The legacy ports this kernel keeps (#508): its rulers, the PCI
+ * configuration ports (#597), the CMOS and the 8259s (#599).
  *
  * The 8254's four registers and port 0x61, whose low bits gate channel 2 and
  * read its output -- that is how pit_delay_us() times an interval -- and the
@@ -207,6 +207,16 @@ static const struct {
 	 * reach every device's configuration space: kept either way.
 	 */
 	{ 0xCF8, 8, "the PCI configuration ports" },
+	/*
+	 * #599: the CMOS pair, serialised under time/rtc.c's cmos_pair_lock,
+	 * whose index port is also the NMI mask; and the 8259s and their
+	 * ELCR, which the kernel programs at boot and a task could unmask or
+	 * redirect underneath it.
+	 */
+	{ 0x70, 2, "the CMOS, whose index port is also the NMI mask" },
+	{ 0x20, 2, "the 8259 interrupt controllers" },
+	{ 0xA0, 2, "the 8259 interrupt controllers" },
+	{ 0x4D0, 2, "the 8259s' edge/level registers" },
 };
 
 static int
