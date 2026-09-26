@@ -278,8 +278,8 @@ vfs_init(void)
     return 0;
 }
 
-vfs_fd_t
-vfs_open(const char *path, int flags, int mode)
+kern_return_t
+vfs_open_rc(const char *path, int flags, int mode, vfs_fd_t *fd_out)
 {
     mach_port_t fs_port;
     const char *rel = path;
@@ -288,8 +288,9 @@ vfs_open(const char *path, int flags, int mode)
     vfs_fd_t    fd;
     kern_return_t kr;
 
+    *fd_out = VFS_FD_INVALID;
     if (!path || path[0] != '/')
-        return VFS_FD_INVALID;
+        return VFS_ERR_INVAL;
 
     vfs_init();
 
@@ -306,7 +307,7 @@ vfs_open(const char *path, int flags, int mode)
         fs_port = vfs_resolve_mount(path, &rel);
         if (fs_port == MACH_PORT_NULL) {
             pthread_mutex_unlock(&vfs_lock);
-            return VFS_FD_INVALID;
+            return VFS_ERR_NOENT;       /* no filesystem serves it */
         }
         /* Drop the lock across the RPC: the fs_server can be slow and
          * holding the libvfs mutex through a kernel transition would
@@ -326,8 +327,10 @@ vfs_open(const char *path, int flags, int mode)
         vfs_mark_port_dead_locked(fs_port);
         pthread_mutex_unlock(&vfs_lock);
     }
-    if (kr != KERN_SUCCESS || handle == 0)
-        return VFS_FD_INVALID;
+    if (kr != KERN_SUCCESS)
+        return kr;
+    if (handle == 0)
+        return VFS_ERR_IO;              /* a success with no handle */
 
     pthread_mutex_lock(&vfs_lock);
     fd = vfs_fd_alloc();
@@ -336,7 +339,7 @@ vfs_open(const char *path, int flags, int mode)
         /* Out of fd slots — close the just-opened handle so the
          * fs_server doesn't leak its per-open state. */
         (void)fs_close(fs_port, handle);
-        return VFS_FD_INVALID;
+        return KERN_RESOURCE_SHORTAGE;
     }
     vfs_fds[fd].in_use  = 1;
     vfs_fds[fd].dead    = 0;
@@ -352,7 +355,17 @@ vfs_open(const char *path, int flags, int mode)
     vfs_fds[fd].wb_start = 0;
     vfs_fds[fd].wb_len  = 0;
     pthread_mutex_unlock(&vfs_lock);
-    return fd;
+    *fd_out = fd;
+    return KERN_SUCCESS;
+}
+
+vfs_fd_t
+vfs_open(const char *path, int flags, int mode)
+{
+    vfs_fd_t fd;
+
+    return vfs_open_rc(path, flags, mode, &fd) == KERN_SUCCESS
+        ? fd : VFS_FD_INVALID;
 }
 
 int
@@ -582,7 +595,7 @@ vfs_stat(const char *path, vfs_stat_t *out)
     kern_return_t kr;
 
     if (!path || !out || path[0] != '/')
-        return -1;
+        return VFS_ERR_INVAL;
 
     vfs_init();
 
@@ -594,7 +607,7 @@ vfs_stat(const char *path, vfs_stat_t *out)
         fs_port = vfs_resolve_mount(path, &rel);
         pthread_mutex_unlock(&vfs_lock);
         if (fs_port == MACH_PORT_NULL)
-            return -1;
+            return VFS_ERR_NOENT;
 
         kr = fs_stat(fs_port, (char *)rel, out);
         if (!vfs_send_died(kr))
@@ -603,7 +616,7 @@ vfs_stat(const char *path, vfs_stat_t *out)
         vfs_mark_port_dead_locked(fs_port);
         pthread_mutex_unlock(&vfs_lock);
     }
-    return (kr == KERN_SUCCESS) ? 0 : -1;
+    return kr;
 }
 
 int
@@ -615,7 +628,7 @@ vfs_fstat(vfs_fd_t fd, vfs_stat_t *out)
     kern_return_t kr;
 
     if (!out)
-        return -1;
+        return VFS_ERR_INVAL;
 
     /* #232: flush buffered writes so st_size reflects them. */
     (void)vfs_flipc_wb_flush(fd);
@@ -624,7 +637,7 @@ vfs_fstat(vfs_fd_t fd, vfs_stat_t *out)
     e = vfs_fd_get(fd);
     if (!e || e->dead) {
         pthread_mutex_unlock(&vfs_lock);
-        return -1;
+        return VFS_ERR_BADHANDLE;
     }
     fs_port = e->fs_port;
     handle  = e->handle;
@@ -635,9 +648,9 @@ vfs_fstat(vfs_fd_t fd, vfs_stat_t *out)
         pthread_mutex_lock(&vfs_lock);
         vfs_mark_port_dead_locked(fs_port);
         pthread_mutex_unlock(&vfs_lock);
-        return -1;
+        return kr;
     }
-    return (kr == KERN_SUCCESS) ? 0 : -1;
+    return kr;
 }
 
 int
@@ -829,7 +842,7 @@ vfs_unlink(const char *path)
     int attempt;
 
     if (!path || path[0] != '/')
-        return -1;
+        return VFS_ERR_INVAL;
 
     vfs_init();
 
@@ -838,7 +851,7 @@ vfs_unlink(const char *path)
         fs_port = vfs_resolve_mount(path, &rel);
         pthread_mutex_unlock(&vfs_lock);
         if (fs_port == MACH_PORT_NULL)
-            return -1;
+            return VFS_ERR_NOENT;
 
         kr = fs_unlink(fs_port, (char *)rel);
         if (!vfs_send_died(kr))
@@ -847,7 +860,7 @@ vfs_unlink(const char *path)
         vfs_mark_port_dead_locked(fs_port);
         pthread_mutex_unlock(&vfs_lock);
     }
-    return (kr == KERN_SUCCESS) ? 0 : -1;
+    return kr;
 }
 
 int
@@ -897,7 +910,7 @@ vfs_rename(const char *oldpath, const char *newpath)
     int attempt;
 
     if (!oldpath || !newpath || oldpath[0] != '/' || newpath[0] != '/')
-        return -1;
+        return VFS_ERR_INVAL;
 
     vfs_init();
 
@@ -907,13 +920,13 @@ vfs_rename(const char *oldpath, const char *newpath)
         pn = vfs_resolve_mount(newpath, &nrel);
         pthread_mutex_unlock(&vfs_lock);
         if (po == MACH_PORT_NULL || pn == MACH_PORT_NULL)
-            return -1;
+            return VFS_ERR_NOENT;
 
         /* Different mounts can't share an atomic rename — POSIX returns
          * EXDEV; we synthesize it as copy + unlink of the source. */
         if (po != pn) {
             if (vfs_copy(oldpath, newpath) != 0)
-                return -1;
+                return VFS_ERR_IO;
             return vfs_unlink(oldpath);
         }
 
@@ -924,5 +937,5 @@ vfs_rename(const char *oldpath, const char *newpath)
         vfs_mark_port_dead_locked(po);
         pthread_mutex_unlock(&vfs_lock);
     }
-    return (kr == KERN_SUCCESS) ? 0 : -1;
+    return kr;
 }
