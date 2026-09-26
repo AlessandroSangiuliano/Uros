@@ -1338,7 +1338,11 @@ com_getc(
 {
 	unsigned char	c = 0;
 
-	outb(INTR_ENAB(COM0_ADDR), 0);
+	/*
+	 * #599: polled from LSR.DR, which works whatever IER holds.  This
+	 * wrote IER = 0 and then TX|RX around every character -- on -r boots,
+	 * DDB's input, over the IER uart.so had programmed.
+	 */
 	while (!(inb(LINE_STAT(COM0_ADDR)) & iDR)) {
 		if (!wait) {
 			c = (unsigned char) -1;
@@ -1347,7 +1351,6 @@ com_getc(
 	}
 	if (!c)
 		c = inb(TXRX(COM0_ADDR));
-	outb(INTR_ENAB(COM0_ADDR), iTX_ENAB|iRX_ENAB);
 	if (c == K_CR)
 	  	c = K_LF;
 	return(c);
@@ -1358,12 +1361,11 @@ com_is_char(void)
 {
 	boolean_t	rc;
 
-	outb(INTR_ENAB(COM0_ADDR), 0);
+	/* #599: as com_getc, LSR alone -- IER is uart.so's */
 	if (!(inb(LINE_STAT(COM0_ADDR)) & iDR))
 		rc = FALSE;
 	else
 		rc = TRUE;
-	outb(INTR_ENAB(COM0_ADDR), iTX_ENAB|iRX_ENAB);
 	return(rc);
 }
 
