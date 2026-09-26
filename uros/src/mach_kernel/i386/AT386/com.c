@@ -1332,12 +1332,13 @@ static int	com_tx_stuck;
  * writes THR only if DLAB is clear, counting what it drops; one nested on a
  * processor that is only waiting waits too, and gets the lock in its turn.
  *
- * While a debugger is active anywhere (db_active), no one waits on the lock
- * without bound: DDB parks the other processors with an NMI, and one of them
- * may be parked holding it.  A bounded wait that fails is remembered for the
- * rest of that debugger's activity, so the bytes after it do not each pay
- * the bound; the ones that go without the lock write THR only if DLAB is
- * clear, which DDB's session (below) makes sure of.
+ * While a debugger is active anywhere (db_active), the console's writer
+ * (com_putc, and only it) does not wait on the lock without bound: DDB parks
+ * the other processors with an NMI, and one of them may be parked holding it.
+ * A bounded wait that fails is remembered until a wait succeeds, so the bytes
+ * after it do not each pay the bound; a byte that goes without the lock is
+ * written only if DLAB is clear, which DDB's session (below) makes sure of on
+ * kdb_trap.  Every other access waits (com_bank_enter_for).
  */
 #define	COM_BANK_DDB_SPINS	1000000
 
@@ -1360,8 +1361,16 @@ com_bank_try(int me)
 	return old == 0;
 }
 
+/*
+ * `console': the one caller allowed to give up -- com_putc, which has the
+ * DLAB check to fall back on.  Every other access to the bank (the divisor
+ * sequence, a task's register) waits for the lock whatever db_active says:
+ * it has no safe way to proceed without it (found in review: they ignored a
+ * failed wait and ran unlocked), and it runs in a thread on a processor that
+ * is not the debugger's, which waits out the session if parked.
+ */
 static int
-com_bank_enter(unsigned int *flags)
+com_bank_enter_for(unsigned int *flags, int console)
 {
 	int me, i;
 
@@ -1371,22 +1380,31 @@ com_bank_enter(unsigned int *flags)
 		return 0;			/* nested on the holder */
 #ifdef	ABLATE_599_COM_NO_LOCK
 	(void)i;
+	(void)console;
 	return 1;	/* as before #599: nothing taken, THR written regardless */
 #else
-	if (!db_active) {
-		com_bank_gave_up = 0;
+	if (!db_active || !console) {
 		while (!com_bank_try(me))
 			__asm__ volatile("pause");
+		com_bank_gave_up = 0;
 		return 1;
 	}
 	for (i = 0; i < (com_bank_gave_up ? 1 : COM_BANK_DDB_SPINS); i++) {
-		if (com_bank_try(me))
+		if (com_bank_try(me)) {
+			com_bank_gave_up = 0;
 			return 1;
+		}
 		__asm__ volatile("pause");
 	}
 	com_bank_gave_up = 1;
 	return 0;
 #endif
+}
+
+static int
+com_bank_enter(unsigned int *flags)
+{
+	return com_bank_enter_for(flags, 0);
 }
 
 static void
@@ -1583,7 +1601,7 @@ com_putc(
 	com_tx_stuck = 0;
 	{
 		unsigned int flags;
-		int took = com_bank_enter(&flags);
+		int took = com_bank_enter_for(&flags, 1);
 
 		if (took || !(inb(LINE_CTL(COM0_ADDR)) & iDLAB))
 			outb(TXRX(COM0_ADDR),  c);
