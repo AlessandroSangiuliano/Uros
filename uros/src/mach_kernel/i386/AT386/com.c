@@ -339,7 +339,7 @@ static struct baud_rate_info com_speeds[] = {
 };
 
 extern unsigned int	com_set_divisor(unsigned int divisor);	/* #599 */
-extern void		com_lcr_write(unsigned int value);
+extern void		com_port_out(unsigned int port, unsigned int value);
 
 int
 comprobe(
@@ -372,10 +372,14 @@ comprobe(
 	 * -kernel boot COM1 is found with LCR 0 (measured), five data bits,
 	 * and this kernel wrote its console into it until uart.so attached.
 	 * Before com_cons_init(), which reads the line to know what it has.
+	 *
+	 * ABLATE_599_COMPROBE_OLD_EXIT takes out the adoption and nothing
+	 * else: the line is still set up, and a boot without -r then runs the
+	 * probe below over it, as it used to.
 	 */
-#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
 	if (unit == 0) {
 		unsigned char scratch = inb(addr + 7);
+		unsigned int rb;
 		int there, lcr;
 
 		outb(addr + 7, 0x5a);
@@ -385,23 +389,25 @@ comprobe(
 			return 0;
 		lcr = inb(LINE_CTL(addr));
 		if ((lcr & iDLAB) || (lcr & i8BITS) != i8BITS) {
-			(void) com_set_divisor(1);
-			com_lcr_write(i8BITS);
+			rb = com_set_divisor(1);
+			com_port_out(LINE_CTL(addr), i8BITS);
 			printf("com0: found LCR 0x%02x, a line nobody set up for "
-			       "a console; set to 115200 8N1 (#599)\n",
-			       (unsigned)lcr);
+			       "a console; set to 115200 8N1, the latch read back "
+			       "0x%04x%s (#599)\n", (unsigned)lcr, rb,
+			       rb == 1 ? "" : " -- WRONG, it does not hold 1");
 		} else
 			printf("com0: adopted as it was found, LCR 0x%02x "
 			       "(#599)\n", (unsigned)lcr);
+#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
 		com_cons_init();
 		return(1);
-	}
 #else
-	if (unit == 0 && cons_is_com1) {
-		com_cons_init();
-		return(1);
-	}
+		if (cons_is_com1) {
+			com_cons_init();
+			return(1);
+		}
 #endif
+	}
 	oldctl = inb(LINE_CTL(addr));	 /* Save old value of LINE_CTL */
 	oldmsb = inb(BAUD_MSB(addr));	 /* Save old value of BAUD_MSB */
 	outb(LINE_CTL(addr), 0);	 /* Select INTR_ENAB */    
@@ -515,6 +521,15 @@ comopen(
 	at386_io_lock_state();
 
 	if (unit >= NCOM || (isai = cominfo[unit]) == 0 || isai->alive == 0)
+		return(D_NO_SUCH_DEVICE);
+	/*
+	 * #599: unit 0 is COM1, which is the kernel's console under
+	 * com_bank_lock and the device of the task that claims it (uart.so).
+	 * This tty driver reaches the chip with its own outb under nothing --
+	 * comparam opens the divisor latch, commctl rewrites LCR, comstart
+	 * writes THR -- so it does not open unit 0.
+	 */
+	if (unit == 0)
 		return(D_NO_SUCH_DEVICE);
 	tp = &com_tty[unit];
 	at386_io_lock(MP_DEV_WAIT);
@@ -1464,20 +1479,37 @@ com_set_divisor(unsigned int divisor)
 }
 
 /*
- * #599: LCR written for a task (device_io_port_write; the I/O bitmap no longer
- * reaches it).  Under com_bank_lock, so it cannot land between the halves of a
- * divisor sequence -- closing the latch before DLM, which would then be IER --
- * or be overwritten by the LCR that sequence puts back.  Bit 7 never arrives:
- * device_io_port_write refuses it.
+ * #599: a COM1 register reached by a task (device_io_port_read/write, one
+ * byte -- check_io_port refuses a wider access to the window), under
+ * com_bank_lock, so it cannot land between the halves of a divisor sequence
+ * -- a THR write into DLL, an LCR write closing the latch before DLM, which
+ * would then be IER -- or be overwritten by the LCR that sequence puts back.
+ * LCR bit 7 is refused before this (device_md_io_opens_latch); it is cleared
+ * here as well, because a latch opened by one locked write and left open is
+ * a latch the next console byte lands in, whoever wrote it.
  */
+unsigned int
+com_port_in(unsigned int port)
+{
+	unsigned int flags, v;
+	int took;
+
+	took = com_bank_enter(&flags);
+	v = inb(port);
+	com_bank_leave(flags, took);
+	return v;
+}
+
 void
-com_lcr_write(unsigned int value)
+com_port_out(unsigned int port, unsigned int value)
 {
 	unsigned int flags;
 	int took;
 
+	if (port == LINE_CTL(COM0_ADDR))
+		value &= ~iDLAB;
 	took = com_bank_enter(&flags);
-	outb(LINE_CTL(COM0_ADDR), value & ~iDLAB);
+	outb(port, value);
 	com_bank_leave(flags, took);
 }
 

@@ -162,7 +162,7 @@
 #define MCR_OUT2	0x08u	/* must be 1 for IRQ to leave the chip */
 
 /* ============================================================
- * Reaching the chip, which is not the same question on both targets (#497).
+ * Reaching the chip (#497, #599).
  *
  * 🔑 AN x86 I/O PORT IS NOT MEMORY.  A driver for a PCI device maps its BAR
  * and reads it with ordinary loads -- ahci.so does exactly that, and the
@@ -170,27 +170,23 @@
  * separate 16-bit I/O address space, reachable only by `in' and `out', which
  * are privileged.  No page table can map it and no IOMMU can see it.
  *
- * So "the driver touches the hardware directly" is true of everything with a
- * BAR and cannot be made true of this one.  What is left is WHO executes the
- * instruction, and the two targets answer differently because they were given
- * different things to answer with:
- *
- *   i386      has the `iopl' device and a per-thread I/O permission bitmap in
- *             the TSS.  char_server opens that device at startup (main.c) and
- *             the kernel grants 0x3F8-0x3FF -- AT386/iopl.c names uart.so in
- *             the comment beside the entry.  The instruction is ours.
- *
- *   x86-64    has neither: no iopl device in the device table, iomap_base set
- *             past the end of the TSS (cpu/desc.c), no trap-and-emulate.  An
- *             `outb' from here is a #GP, which arrives as EXC_BAD_INSTRUCTION
- *             and kills the task -- measured, in uart_probe's scratch test,
- *             before attach ever ran.
- *
- * So on x86-64 the kernel executes it, through the pair virtio_blk.so has
+ * So the kernel executes the instruction, through the pair virtio_blk.so has
  * used since it crossed: device_io_port_read/write on the device master port.
  * It is a trap, a range check and the instruction -- no second task, no
  * scheduling -- so it is a system call wearing a message's clothes, which is
- * the shape seL4 gives the same problem.
+ * the shape seL4 gives the same problem.  The kernel lets only the task that
+ * claimed the whole window through, one byte at a time, and under the lock
+ * its own console's writes to the chip take, so none of this driver's
+ * accesses can land inside the kernel's divisor sequence (#599).
+ *
+ * ⚠️ ON BOTH TARGETS, SINCE #599.  x86-64 never had a choice: no iopl device,
+ * iomap_base past the end of the TSS, and an `outb' from here is a #GP that
+ * kills the task.  i386 had the `iopl' device and a per-thread I/O bitmap,
+ * and this driver executed its own instructions there -- which gave the chip
+ * to whoever opened "iopl", claim or no claim, and reached it past the lock
+ * the console's THR write takes, so a byte of this driver's could land in
+ * the divisor latch under a sequence of the kernel's.  COM1 left the bitmap
+ * (AT386/iopl.c).
  *
  * ⚠️ A BITMAP WOULD HAVE BEEN THE OTHER ANSWER, and it was not chosen for
  * cost.  It is what GNU Mach, Fiasco and Linux's ioperm() do, and long mode
@@ -200,15 +196,8 @@
  * hold it.  This system already has revocation -- #511 made a device a right,
  * cap_server hands it out and char_server is subscribed to the notification --
  * and a capability simply stops working when it is revoked.
- *
- * ⚠️ AND IT IS NOT A SPLIT WE HAD TO MAKE.  The RPC works on i386 too: the
- * kernel half is machine-independent and both targets supply device_md_io_*.
- * i386 keeps its instruction because it is the mature target and its
- * acceptance suite is the only net the shared code has -- not because the
- * other road is closed there.
  * ============================================================ */
 
-#if defined(__x86_64__)
 
 /*
  * A refused access reads as an absent chip, and says so once.
@@ -257,33 +246,6 @@ static inline void uart_out(uint16_t off, uint8_t v)
 		uart_rpc_refused("write", off, kr);
 }
 
-#elif defined(__i386__)
-
-static inline uint8_t inb(uint16_t port)
-{
-	uint8_t v;
-	__asm__ __volatile__ ("inb %1, %0" : "=a"(v) : "Nd"(port));
-	return v;
-}
-
-static inline void outb(uint16_t port, uint8_t v)
-{
-	__asm__ __volatile__ ("outb %0, %1" : : "a"(v), "Nd"(port));
-}
-
-static inline uint8_t uart_in(uint16_t off)
-{
-	return inb((uint16_t)(UART_BASE + off));
-}
-
-static inline void uart_out(uint16_t off, uint8_t v)
-{
-	outb((uint16_t)(UART_BASE + off), v);
-}
-
-#else
-#error "uart.so: this target has no stated way to reach a 16550"
-#endif
 
 /* ============================================================
  * Per-instance state.  Single COM1 instance.
@@ -753,38 +715,6 @@ uart_probe(const struct hal_device_info *dev)
  * ============================================================ */
 
 /*
- * #599: LCR goes through the kernel on both targets.  On i386 the I/O
- * permission bitmap no longer lets a task reach it: its bit 7 opens the
- * divisor latch under the kernel's console, and device_io_port_write
- * refuses that bit.  Written only at attach and at set_attr.
- */
-static void
-uart_lcr_out(uint8_t v)
-{
-	kern_return_t kr;
-
-	kr = device_io_port_write(char_core_device_port(),
-				  (natural_t)(UART_BASE + UART_LCR), 1,
-				  (natural_t)v);
-	if (kr != KERN_SUCCESS)
-		printf("uart: LCR 0x%02x refused by the kernel (kr=%d)\n",
-		       (unsigned)v, (int)kr);
-}
-
-/* LCR read the same way; -1 when the kernel refused it */
-static int
-uart_lcr_in(void)
-{
-	natural_t	v = 0;
-
-	if (device_io_port_read(char_core_device_port(),
-				(natural_t)(UART_BASE + UART_LCR), 1, &v)
-	    != KERN_SUCCESS)
-		return -1;
-	return (int)(v & 0xFFu);
-}
-
-/*
  * #599: the divisor is set by the kernel, on both targets.  The latch shares
  * its two ports with THR and IER, switched by LCR bit 7, and on i386 the
  * kernel's console writes THR from any context with its own outb: a latch
@@ -852,18 +782,13 @@ uart_attach(void *priv)
 	 * whatever LCR says, so this line is where such a chip shows.
 	 */
 	{
-		int lcr = uart_lcr_in();
+		uint8_t lcr = uart_in(UART_LCR);
+		uint8_t mcr = uart_in(UART_MCR);
+		uint8_t ier = uart_in(UART_IER);
 
-		if (lcr < 0)
-			printf("uart: COM1 found with LCR unread (refused), MCR "
-			       "0x%02x, IER 0x%02x (#599)\n",
-			       (unsigned)uart_in(UART_MCR),
-			       (unsigned)uart_in(UART_IER));
-		else
-			printf("uart: COM1 found with LCR 0x%02x, MCR 0x%02x, "
-			       "IER 0x%02x (#599)\n", (unsigned)lcr,
-			       (unsigned)uart_in(UART_MCR),
-			       (unsigned)uart_in(UART_IER));
+		printf("uart: COM1 found with LCR 0x%02x, MCR 0x%02x, IER "
+		       "0x%02x (#599)\n", (unsigned)lcr, (unsigned)mcr,
+		       (unsigned)ier);
 	}
 
 	/* Disable interrupts while we reconfigure. */
@@ -873,7 +798,7 @@ uart_attach(void *priv)
 	 * crystal / 16x clock).  The kernel boot path leaves the UART
 	 * at the same setting, so existing kernel printfs continue to
 	 * land at the right speed. */
-	uart_lcr_out(LCR_8N1);
+	uart_out(UART_LCR, LCR_8N1);
 	uart_set_divisor(1);
 
 	/* Enable + reset both FIFOs, RX trigger 1 byte (low latency). */
@@ -899,7 +824,13 @@ uart_attach(void *priv)
 
 	if (char_core_irq_register(UART_IRQ, uart_irq_handler, p) < 0) {
 		printf("uart: IRQ %u register failed\n", UART_IRQ);
-		/* #599: the claim goes with the attach, as ps2.so's does */
+		/*
+		 * #599: the claim goes with the attach, as ps2.so's does --
+		 * and on x86-64 the kernel's console takes the port back with
+		 * it, so char_server must not go on believing it has the wire.
+		 */
+		p->wire_is_ours = 0;
+		char_core_set_wire_owned(0, 0);
 		(void)device_io_port_unclaim(char_core_device_port(),
 					     UART_BASE);
 		return -1;
@@ -1077,7 +1008,7 @@ uart_tty_set_attr(void *priv, uint32_t baud, uint32_t data_bits,
 	 * a divisor change under a byte in flight corrupts that byte. */
 	(void)pthread_mutex_lock(&p->tx_lock);
 	uart_out(UART_IER, 0x00);
-	uart_lcr_out(lcr);
+	uart_out(UART_LCR, lcr);
 	uart_set_divisor((uint16_t)divisor);
 	uart_ier_write(p);	/* THRE back on if the ring is not empty */
 	uart_tx_unlock(p);

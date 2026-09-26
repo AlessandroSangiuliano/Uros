@@ -93,6 +93,11 @@ device_md_irq_pending_take(volatile unsigned int *p)
 unsigned int
 device_md_io_read(unsigned int port, unsigned int size)
 {
+	extern unsigned int cons_port_in(unsigned int port);
+
+	/* #599: COM1's registers go under the lock the divisor takes */
+	if (port >= 0x3F8 && port < 0x3F8 + 7 && size == 1)
+		return cons_port_in(port);
 	switch (size) {
 	case 1:	return inb((uint16_t)port);
 	case 2:	return inw((uint16_t)port);
@@ -104,11 +109,11 @@ device_md_io_read(unsigned int port, unsigned int size)
 void
 device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 {
-	extern void cons_lcr_write(unsigned int value);
+	extern void cons_port_out(unsigned int port, unsigned int value);
 
-	/* #599: COM1's LCR goes under the lock the divisor takes */
-	if (port == 0x3FB && size == 1) {
-		cons_lcr_write(value);
+	/* #599: COM1's registers go under the lock the divisor takes */
+	if (port >= 0x3F8 && port < 0x3F8 + 7 && size == 1) {
+		cons_port_out(port, value);
 		return;
 	}
 	switch (size) {

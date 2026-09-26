@@ -493,15 +493,30 @@ unsigned int cons_set_divisor(unsigned int divisor)
 }
 
 /*
- * #599: LCR written for the task that holds COM1 (device_io_port_write), under
- * the same lock, so it cannot land inside cons_set_divisor's sequence --
- * closing the latch before DLM -- nor be overwritten by the LCR it restores.
- * Bit 7 never arrives: device_io_port_write refuses it.
+ * #599: a COM1 register reached by the task that holds it
+ * (device_io_port_read/write, one byte), under the same lock, so it cannot
+ * land inside cons_set_divisor's sequence -- a THR write into DLL, an LCR
+ * write closing the latch before DLM -- nor be overwritten by the LCR it
+ * restores.  LCR bit 7 is refused before this; it is cleared here as well,
+ * because a latch opened by one locked write and left open is a latch the
+ * next byte lands in.
  */
-void cons_lcr_write(unsigned int value)
+unsigned int cons_port_in(unsigned int port)
 {
+	unsigned int v;
+
 	hw_lock_lock(&cons_tx_lock);
-	outb(COM1 + UART_LCR, (uint8_t)(value & ~0x80u));
+	v = inb((uint16_t)port);
+	hw_lock_unlock(&cons_tx_lock);
+	return v;
+}
+
+void cons_port_out(unsigned int port, unsigned int value)
+{
+	if (port == COM1 + UART_LCR)
+		value &= ~0x80u;
+	hw_lock_lock(&cons_tx_lock);
+	outb((uint16_t)port, (uint8_t)value);
 	hw_lock_unlock(&cons_tx_lock);
 }
 

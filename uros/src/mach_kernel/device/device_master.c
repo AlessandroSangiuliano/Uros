@@ -3033,9 +3033,17 @@ check_io_port(unsigned int port, unsigned int size)
 	{
 		unsigned int wb, wc;
 
-		if (device_md_io_window(port, size, &wb, &wc) &&
-		    !holds_io_window(wb, wc))
-			return KERN_NO_ACCESS;
+		if (device_md_io_window(port, size, &wb, &wc)) {
+			/*
+			 * One byte at a time: a 16550 is byte-wide, and a
+			 * wider access reached LCR through outw/outl past
+			 * the latch refusal and the chip's lock (review).
+			 */
+			if (size != 1)
+				return KERN_INVALID_ARGUMENT;
+			if (!holds_io_window(wb, wc))
+				return KERN_NO_ACCESS;
+		}
 	}
 
 	urmach_rcu_read_lock();
