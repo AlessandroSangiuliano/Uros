@@ -107,7 +107,7 @@ static int census_streq(const char *a, const char *b)
 
 static unsigned long	quiet_passes;
 static unsigned long	quiet_all_passes;		/* #599: never reset */
-static unsigned long	quiet_next_report = 1000;
+static unsigned long	quiet_next_report = QUIET_PASSES / 5;
 static unsigned long	quiet_resets;
 static unsigned long	quiet_peak;
 static int		quiet_said;
@@ -286,10 +286,28 @@ quiet_census_pass(int mycpu)
 	 * printed whatever the count does.  #599: it was printed when the count
 	 * reached a hundred, so a count that work kept resetting (a user poller
 	 * that returns to ring 3 every 10 ms: char_server's klog forwarder)
-	 * silenced the one line meant to explain a silent census, and the
-	 * console's report it carries with it (found in review).  It is driven
-	 * now by every idle pass since boot, at 1000, 2000, 4000... -- a line
-	 * per doubling, so a long idle run costs a handful.
+	 * silenced the one line meant to explain a silent census (found in
+	 * review).  So it is driven by every idle pass since boot, which work
+	 * does not reset, a line per doubling: a long idle run costs a handful.
+	 *
+	 * ⚠️ And the first of them comes at a fifth of the threshold, written in
+	 * terms of it.  quiet_all_passes is never below quiet_passes, so the
+	 * first line always comes before the census can fire.  The first version
+	 * of this started at a thousand, above the threshold of five hundred: a
+	 * boot quiet from the start (-S, or a wedge early in the boot) fired the
+	 * census first, and quiet_said then kept this line from ever being
+	 * printed (found in review).  The same happened once before, when the
+	 * threshold came down from three thousand under an interval of a
+	 * thousand.
+	 *
+	 * With it, what the console did so far (#567, #568).  The kernel cannot
+	 * tell which moment ends an ordinary run -- the harness stops a kernel
+	 * that has nothing left to do rather than waiting for it to halt -- so
+	 * each report carries a copy and the last one in the log is the run's.
+	 * They begin with this line's word, so the harness reads them as idle
+	 * chatter: a line it counted as progress would put off, at every
+	 * doubling, its verdict on a boot that has stopped.  halt_cpu() says
+	 * the final copy (cons_ring_report).
 	 */
 	quiet_passes++;
 	if (++quiet_all_passes == quiet_next_report) {
@@ -297,25 +315,19 @@ quiet_census_pass(int mycpu)
 		printf("quiet_census: passes=%lu peak=%lu resets=%lu (after %lu "
 		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
 		       quiet_resets, quiet_all_passes);
-
-		/*
-		 * And, once, what the console did over this boot (#567).
-		 *
-		 * Here because this is where an ordinary run ends: the harness
-		 * stops a kernel that has nothing left to do rather than
-		 * waiting for it to halt, so halt_cpu()'s copy of this is
-		 * never reached by the runs that matter.  A machine with
-		 * enough idle passes behind it to print this line has had its
-		 * clock tick and its idle loop pass many times, which is
-		 * exactly the claim the line is there to check.
-		 */
-		cons_ring_report();
+		cons_ring_lines("quiet_census: ", "so far this boot");
 	}
 
 	if (quiet_passes < QUIET_PASSES)
 		return;
 
 	quiet_said = 1;
+
+	/*
+	 * The console's copy first (#567): the census below is what a reader
+	 * of a stopped boot looks at, and the bytes still queued are part of it.
+	 */
+	cons_ring_lines("quiet_census: ", "so far this boot");
 
 	printf("quiet_census (#476): the machine has been idle for %lu idle "
 	       "passes; %d tasks and %d threads\n",
