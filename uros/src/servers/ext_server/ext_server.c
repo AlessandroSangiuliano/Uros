@@ -402,6 +402,45 @@ writeback_thread(void *arg)
 	return NULL;
 }
 
+/*
+ * #599: hand the block server the capability for a mount's page cache, on
+ * the handle that mount reads through.
+ *
+ * The block server's disk fills the cache by DMA; on a machine that confines
+ * devices the kernel maps it for that disk only on a capability naming the
+ * buffer, issued by cap_server to its owner -- this server -- and handed
+ * over.  Nothing handed it over: under translation every zero-copy read was
+ * refused, and the mount spun on a directory block of zeros (menu entry 16).
+ * One line either way, naming the side that refused.
+ */
+static kern_return_t
+ext2_lend_buffer(struct mount_context *mnt, uint64_t region_id)
+{
+	struct uros_cap	t;
+	kern_return_t	kr;
+
+	memset(&t, 0, sizeof(t));
+	kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+			 CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
+	if (kr != KERN_SUCCESS) {
+		printf("ext2: cap_server would not issue a capability for "
+		       "page-cache buffer %llu (kr=%d) — the cache will copy\n",
+		       (unsigned long long)region_id, (int)kr);
+		return kr;
+	}
+	kr = device_register_dma(mnt->dev.dev_port, (char *)&t, sizeof(t));
+	memset(&t, 0, sizeof(t));
+	if (kr != KERN_SUCCESS) {
+		printf("ext2: the block server would not take the capability "
+		       "for page-cache buffer %llu (kr=%d) — the cache will "
+		       "copy\n", (unsigned long long)region_id, (int)kr);
+		return kr;
+	}
+	printf("ext2: handed the block server the capability for page-cache "
+	       "buffer %llu\n", (unsigned long long)region_id);
+	return KERN_SUCCESS;
+}
+
 /* ================================================================
  * MIG server routines  (ds_ prefix from ext2fs_server.defs)
  * ================================================================ */
@@ -1751,13 +1790,25 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 			       kr, (unsigned long)kva,
 			       (unsigned long)uva, n_pages, pa_cnt);
 			if (kr == KERN_SUCCESS) {
-				dma_pc = page_cache_create_dma(
-					n_entries,
-					(vm_size_t)blksz,
-					(vm_offset_t)uva,
-					pa_list, pa_cnt,
-					ext2_writeback,
-					&mnt->wb);
+				/*
+				 * #599: the cache is built on the buffer
+				 * only once the block server holds its
+				 * capability; otherwise the buffer goes back
+				 * whole, through device_dma_free alone -- the
+				 * kernel takes its mapping down, and a
+				 * vm_deallocate here first used to leave the
+				 * region itself in the kernel for good.
+				 */
+				dma_pc = NULL;
+				if (ext2_lend_buffer(mnt, region_id) ==
+				    KERN_SUCCESS)
+					dma_pc = page_cache_create_dma(
+						n_entries,
+						(vm_size_t)blksz,
+						(vm_offset_t)uva,
+						pa_list, pa_cnt,
+						ext2_writeback,
+						&mnt->wb);
 				if (dma_pc) {
 					mnt->dev.cache = dma_pc;
 					printf("ext2: DMA page "
@@ -1767,14 +1818,13 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 					       dma_pc->pc_max_entries,
 					       pa_cnt);
 				} else {
-					printf("ext2: DMA cache "
-					       "create failed, "
-					       "using non-DMA\n");
-					vm_deallocate(
-						mach_task_self(),
-						(vm_offset_t)uva,
-						(vm_size_t)n_pages
-							* 4096);
+					printf("ext2: no DMA page cache, "
+					       "using non-DMA (the buffer "
+					       "freed: kr=%d)\n",
+					       (int)device_dma_free(
+						device_port,
+						DEVICE_DMA_NO_BDF, kva,
+						(vm_size_t)n_pages * 4096));
 				}
 			} else {
 				printf("ext2: DMA alloc failed "
