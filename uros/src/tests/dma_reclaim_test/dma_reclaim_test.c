@@ -249,9 +249,14 @@ struct reclaim_msg {
 	natural_t		held;
 };
 
-/* Room for the trailer the kernel appends on the receiving side. */
+/*
+ * Room for the trailer the kernel appends on the receiving side -- and for
+ * the larger offer of arm [6] (#599), which comes down the same port and is
+ * received here if it arrives late, to be skipped by its id.
+ */
 struct reclaim_rcv {
 	struct reclaim_msg	msg;
+	char			room[32];
 	mach_msg_trailer_t	trailer;
 };
 
@@ -292,17 +297,78 @@ hear_from_the_holder(mach_port_t mine, unsigned *held)
 	if (mine == MACH_PORT_NULL)
 		return 0;
 
-	memset(&r, 0, sizeof(r));
+	/*
+	 * #599: the offer below comes down the same port first, and a late
+	 * one would otherwise be read here as a table count of garbage.
+	 */
+	do {
+		memset(&r, 0, sizeof(r));
+		if (mach_msg(&r.msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			     sizeof(r), mine, 5000, MACH_PORT_NULL)
+		    != MACH_MSG_SUCCESS)
+			return 0;
+	} while (r.msg.head.msgh_id != RECLAIM_MSG_ID);
 
-	if (mach_msg(&r.msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
-		     sizeof(r), mine, 5000, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
-		return 0;
-
-	if (r.msg.head.msgh_id != RECLAIM_MSG_ID || r.msg.held == 0)
+	if (r.msg.held == 0)
 		return 0;
 
 	*held = (unsigned) r.msg.held;
 	return 1;
+}
+
+/*
+ * ── [6] Another task's buffer is not this task's to free (#599) ─────────
+ *
+ * device_dma_free checked no owner: any holder of the master port freed any
+ * region it named.  That takes two tasks to show, and these two are already
+ * joined: the holder, before it takes the table, offers the checker one of
+ * its own regions by address and waits for an answer; the checker frees it
+ * and must be told KERN_NO_ACCESS; the holder then frees it itself, as its
+ * owner, and carries on exactly as before.
+ */
+#define VICTIM_MSG_ID	531
+#define VICTIM_ACK_ID	532
+
+struct victim_msg {
+	mach_msg_header_t	head;
+	NDR_record_t		ndr;
+	vm_address_t		kva;
+	natural_t		kr;	/* in the ack: what the free answered */
+};
+
+struct victim_rcv {
+	struct victim_msg	msg;
+	mach_msg_trailer_t	trailer;
+};
+
+static kern_return_t	victim_kr = KERN_SUCCESS;
+static int		victim_ran;
+
+static void
+victim_send(mach_port_t to, mach_msg_id_t id, vm_address_t kva,
+	    kern_return_t kr)
+{
+	struct victim_msg m;
+
+	memset(&m, 0, sizeof(m));
+	m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.head.msgh_size = sizeof(m);
+	m.head.msgh_remote_port = to;
+	m.head.msgh_id = id;
+	m.ndr = NDR_record;
+	m.kva = kva;
+	m.kr = (natural_t)kr;
+	(void) mach_msg(&m.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m),
+			0, MACH_PORT_NULL, 1000, MACH_PORT_NULL);
+}
+
+static int
+victim_receive(mach_port_t on, mach_msg_id_t id, struct victim_rcv *r)
+{
+	memset(r, 0, sizeof(*r));
+	return mach_msg(&r->msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			sizeof(*r), on, 5000, MACH_PORT_NULL)
+		== MACH_MSG_SUCCESS && r->msg.head.msgh_id == id;
 }
 
 /* Take one slot.  Answers zero and leaves nothing behind on a refusal. */
@@ -545,6 +611,22 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 
 	*keep = mine;
 
+	/* #599 [6]: the holder's offer, while the holder is alive. */
+	{
+		struct victim_rcv offer;
+
+		if (victim_receive(mine, VICTIM_MSG_ID, &offer)) {
+			if (offer.msg.kva != 0) {
+				victim_kr = device_dma_free(device_port,
+							    DEVICE_DMA_NO_BDF,
+							    offer.msg.kva,
+							    REGION_BYTES);
+				victim_ran = 1;
+			}
+			victim_send(p, VICTIM_ACK_ID, offer.msg.kva, victim_kr);
+		}
+	}
+
 	for (t = 0; t < RECLAIM_TRIES; t++) {
 		mach_port_type_t type = 0;
 
@@ -635,6 +717,36 @@ main(int argc, char **argv)
 			printf("dma_reclaim: the checker never appeared — "
 			       "taking nothing\n");
 			die();
+		}
+
+		/* #599 [6]: one of this task's regions, offered and taken
+		 * back.  After the rendezvous, before the table. */
+		{
+			vm_address_t	vkva = 0;
+			uint64_t	vid = 0;
+			struct victim_rcv ack;
+
+			if (take_one(&vkva, &vid)) {
+				victim_send(peer, VICTIM_MSG_ID, vkva, 0);
+				if (!victim_receive(holder_port, VICTIM_ACK_ID,
+						    &ack))
+					printf("dma_reclaim: the checker never "
+					       "answered the offer\n");
+				printf("dma_reclaim: the holder frees the "
+				       "region it offered, as its owner "
+				       "(kr=%d)\n",
+				       (int)device_dma_free(device_port,
+						DEVICE_DMA_NO_BDF, vkva,
+						REGION_BYTES));
+			} else {
+				/* Offered empty, so the checker's first
+				 * message is always the offer. */
+				victim_send(peer, VICTIM_MSG_ID, 0, 0);
+				(void) victim_receive(holder_port,
+						      VICTIM_ACK_ID, &ack);
+				printf("dma_reclaim: no region to offer the "
+				       "checker\n");
+			}
 		}
 
 		printf("dma_reclaim: the checker is watching; taking "
@@ -1013,6 +1125,15 @@ main(int argc, char **argv)
 		printf("dma_reclaim: [4] and [5] cannot run: no HAL\n");
 		n_fail += 2;
 	}
+
+	if (victim_ran) {
+		printf("dma_reclaim: [6] freeing the holder's region from here "
+		       "answered %d\n", (int)victim_kr);
+		arm(6, "another task's buffer is not this task's to free",
+		    victim_kr == KERN_NO_ACCESS);
+	} else
+		printf("dma_reclaim: [6] another task's buffer — DID NOT RUN, "
+		       "the holder offered none\n");
 
 	printf("dma_reclaim: %d of %d arms passed\n", n_pass, n_pass + n_fail);
 	die();
