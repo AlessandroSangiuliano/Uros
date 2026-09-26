@@ -752,14 +752,29 @@ uart_probe(const struct hal_device_info *dev)
  * Attach: program 8N1 @ 115200, enable FIFO + RX IRQ.
  * ============================================================ */
 
+/*
+ * #599: the divisor is set by the kernel, on both targets.  The latch shares
+ * its two ports with THR and IER, switched by LCR bit 7, and on i386 the
+ * kernel's console writes THR from any context with its own outb: a latch
+ * this driver opened with its own writes could take a console byte as a
+ * divisor byte.  The kernel does the whole sequence under the lock its THR
+ * write takes (device_io_port_set_divisor) and says what the latch held.  A
+ * refusal leaves the divisor as it was, and is said.
+ */
 static void
 uart_set_divisor(uint16_t div)
 {
-	uint8_t lcr = uart_in(UART_LCR);
-	uart_out(UART_LCR, lcr | LCR_DLAB);
-	uart_out(UART_DLL, (uint8_t)(div & 0xFFu));
-	uart_out(UART_DLM, (uint8_t)((div >> 8) & 0xFFu));
-	uart_out(UART_LCR, lcr & (uint8_t)~LCR_DLAB);
+	natural_t	readback = 0;
+	kern_return_t	kr;
+
+	kr = device_io_port_set_divisor(char_core_device_port(), UART_BASE,
+					(natural_t)div, &readback);
+	if (kr != KERN_SUCCESS)
+		printf("uart: divisor 0x%04x refused by the kernel (kr=%d); "
+		       "left as it was\n", (unsigned)div, (int)kr);
+	else if (readback != div)
+		printf("uart: divisor 0x%04x written, 0x%04x read back — WRONG "
+		       "(#599)\n", (unsigned)div, (unsigned)readback);
 }
 
 static int

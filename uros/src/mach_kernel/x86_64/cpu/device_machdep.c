@@ -130,6 +130,21 @@ covers_com1(unsigned int base, unsigned int count)
 		&& base + count >= COM1_BASE + COM1_COUNT) ? TRUE : FALSE;
 }
 
+/* #599: see <device/device_machdep.h>; COM1 is the one 16550 known here. */
+int
+device_md_io_set_divisor(unsigned int base, unsigned int divisor,
+			 unsigned int *readback)
+{
+	extern unsigned int cons_set_divisor(unsigned int divisor);
+
+	if (base != 0x3F8)
+		return 0;
+	*readback = cons_set_divisor(divisor);
+	printf("cons: COM1 divisor 0x%04x written, 0x%04x read back (#599)\n",
+	       divisor, *readback);
+	return 1;
+}
+
 int
 device_md_io_claimed(unsigned int base, unsigned int count,
 		     unsigned int *klog_from)

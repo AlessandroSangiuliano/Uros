@@ -147,6 +147,16 @@ extern void		device_md_io_unclaimed(unsigned int base,
 					       unsigned int count);
 
 /*
+ * #599: set the divisor of the 16550 at `base' under the lock the kernel's
+ * own writes to that chip take, and read it back.  Answers 1 when done, 0
+ * when this machine knows no such chip there.  The caller has checked the
+ * claim.
+ */
+extern int		device_md_io_set_divisor(unsigned int base,
+						 unsigned int divisor,
+						 unsigned int *readback);
+
+/*
  * Whether a range of legacy ports touches one the kernel keeps for itself,
  * and whose it is (#508).  Returns the owner's name, or 0.
  *

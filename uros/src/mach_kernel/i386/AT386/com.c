@@ -1279,10 +1279,10 @@ static int	com_tx_stuck;
  * #599: the 16550's register bank.  LCR bit 7 (DLAB) turns 0x3F8 and 0x3F9
  * from THR and IER into the divisor latch: a THR write that lands while it is
  * set becomes a divisor byte.  The console writes THR from any context, and
- * the divisor is set by uart.so with its own outb, under nothing the kernel
- * knows about -- the census's DLAB row.  com_putc's THR write holds
- * com_bank_lock; the divisor sequence is to move into the kernel under the
- * same lock.
+ * the divisor was set by uart.so with its own outb, under nothing the kernel
+ * knew about -- the census's DLAB row.  The divisor is now set only here
+ * (com_set_divisor, for the task that holds COM1), and it and com_putc's THR
+ * write both hold com_bank_lock.
  *
  * A leaf lock with interrupts off, in ioapic_pair_enter's shape, with a
  * holder: an NMI or a nested printf on the holder's own processor must not
@@ -1362,6 +1362,48 @@ com_bank_leave(unsigned int flags, int took)
 		com_bank_lock = 0;
 	}
 	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
+/*
+ * #599: the divisor, set by the kernel for the task that holds COM1
+ * (device_io_port_set_divisor): LCR with DLAB, DLL, DLM, the latch read back
+ * while it is still open, LCR as it was -- all under com_bank_lock, which
+ * com_putc's THR write takes.  Answers what the latch held.  A read back
+ * that differs from what was written is counted and said, every time: it is
+ * the census's DLAB race, and the test's measure.
+ *
+ * ABLATE_599_WIDEN_DIVISOR holds the latch open for N port-0x80 reads
+ * between DLL and DLM, with the lock held, so a writer that ignored the lock
+ * would land in it.
+ */
+unsigned int	com_divisor_sets, com_divisor_wrong;
+
+unsigned int
+com_set_divisor(unsigned int divisor)
+{
+	unsigned int flags, readback;
+	int took, lcr;
+#ifdef	ABLATE_599_WIDEN_DIVISOR
+	int i;
+#endif
+
+	took = com_bank_enter(&flags);
+	lcr = inb(LINE_CTL(COM0_ADDR)) & ~iDLAB;
+	outb(LINE_CTL(COM0_ADDR), lcr | iDLAB);
+	outb(BAUD_LSB(COM0_ADDR), divisor & 0xFF);
+#ifdef	ABLATE_599_WIDEN_DIVISOR
+	for (i = 0; i < ABLATE_599_WIDEN_DIVISOR; i++)
+		(void)inb(0x80);
+#endif
+	outb(BAUD_MSB(COM0_ADDR), (divisor >> 8) & 0xFF);
+	readback = inb(BAUD_LSB(COM0_ADDR)) |
+		   ((unsigned int)inb(BAUD_MSB(COM0_ADDR)) << 8);
+	outb(LINE_CTL(COM0_ADDR), lcr);
+	com_divisor_sets++;
+	if (readback != divisor)
+		com_divisor_wrong++;
+	com_bank_leave(flags, took);
+	return readback;
 }
 
 void

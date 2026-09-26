@@ -27,6 +27,7 @@
 #include <i386/pic.h>		/* NINTR */
 #include <i386/pio.h>
 #include <i386/AT386/ddb_kbd.h>	/* -K, and the 8042's reader (#599) */
+#include <kern/misc_protos.h>	/* printf (#599: the divisor line) */
 
 unsigned int
 device_md_pci_read(unsigned int bus, unsigned int slot, unsigned int func,
@@ -319,6 +320,22 @@ device_md_io_claimed(unsigned int base, unsigned int count,
 	if (range_touches(base, count, 0x60) || range_touches(base, count, 0x64))
 		return ddb_kbd_8042_claimed();
 	return 0;
+}
+
+int
+device_md_io_set_divisor(unsigned int base, unsigned int divisor,
+			 unsigned int *readback)
+{
+	extern unsigned int com_set_divisor(unsigned int divisor);
+	extern unsigned int com_divisor_sets, com_divisor_wrong;
+
+	if (base != 0x3F8)
+		return 0;
+	*readback = com_set_divisor(divisor);
+	printf("com: divisor 0x%04x written, 0x%04x read back (%u of %u set "
+	       "wrong) (#599)\n", divisor, *readback, com_divisor_wrong,
+	       com_divisor_sets);
+	return 1;
 }
 
 void

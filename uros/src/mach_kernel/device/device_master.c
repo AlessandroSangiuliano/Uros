@@ -2954,6 +2954,54 @@ check_io_claim(unsigned int port)
 	return KERN_NO_ACCESS;
 }
 
+/* #599: does the caller hold a claim covering all of [base, base + count)? */
+static int
+holds_io_window(unsigned int base, unsigned int count)
+{
+	task_t		me = current_task();
+	unsigned int	i;
+	int		held = 0;
+
+	urmach_rcu_read_lock();
+	for (i = 0; i < IO_CLAIM_MAX && !held; i++) {
+		if (io_claim[i].task != me)
+			continue;
+		if (io_claim[i].base <= base &&
+		    base + count <= io_claim[i].base + io_claim[i].count)
+			held = 1;
+	}
+	urmach_rcu_read_unlock();
+	return held;
+}
+
+/*
+ * #599: see device_master.defs.  Refused to anyone but the holder of the
+ * whole window, so a divisor can be set only by the one driver the kernel's
+ * console knows is there.
+ */
+kern_return_t
+ds_master_device_io_port_set_divisor(
+	ipc_port_t		master_port,
+	natural_t		port,
+	natural_t		divisor,
+	natural_t		*readback)
+{
+	unsigned int	rb = 0;
+	kern_return_t	kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (divisor == 0 || divisor > 0xFFFFu)
+		return KERN_INVALID_ARGUMENT;
+	if (!holds_io_window(port, 8u))
+		return KERN_NO_ACCESS;
+	if (!device_md_io_set_divisor(port, divisor, &rb))
+		return KERN_INVALID_ARGUMENT;
+	*readback = (natural_t)rb;
+	return KERN_SUCCESS;
+}
+
 static kern_return_t
 check_io_port(unsigned int port, unsigned int size)
 {

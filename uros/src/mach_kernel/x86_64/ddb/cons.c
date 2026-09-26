@@ -459,6 +459,32 @@ void cons_putc_wire(char c)
 }
 
 /*
+ * #599: the divisor, set by the kernel for the task that holds COM1
+ * (device_io_port_set_divisor): LCR with bit 7, DLL, DLM, the latch read back
+ * while open, LCR as it was, under cons_tx_lock -- which every THR write from
+ * the drain takes.  By the time a driver holds COM1 the console has stepped
+ * back from the port (cons_port_given_away), so this is uncontended in the
+ * ordinary case; the lock is what keeps a take-back on the way down from
+ * writing into an open latch.  Answers what the latch held; the caller says
+ * it (device_md_io_set_divisor).
+ */
+unsigned int cons_set_divisor(unsigned int divisor)
+{
+	uint8_t		lcr;
+	unsigned int	readback;
+
+	hw_lock_lock(&cons_tx_lock);
+	lcr = inb(COM1 + UART_LCR) & (uint8_t)~0x80u;
+	outb(COM1 + UART_LCR, lcr | 0x80u);
+	outb(COM1 + 0, (uint8_t)(divisor & 0xFFu));
+	outb(COM1 + 1, (uint8_t)((divisor >> 8) & 0xFFu));
+	readback = inb(COM1 + 0) | ((unsigned int)inb(COM1 + 1) << 8);
+	outb(COM1 + UART_LCR, lcr);
+	hw_lock_unlock(&cons_tx_lock);
+	return readback;
+}
+
+/*
  * Hand ONE byte from the ring to the port.
  *
  * 🔴 ONE BYTE PER HOLD, AND THAT IS THE WHOLE POINT.  hw_lock masks

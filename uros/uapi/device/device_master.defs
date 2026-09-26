@@ -778,3 +778,23 @@ routine device_dma_region_users(
 	in	region_id	: dma_region_id_t;
 	out	users		: natural_t
 	);
+
+/*
+ * #599: set the divisor of the 16550 whose eight ports begin at `port', and
+ * say what the latch holds afterwards.  Only for the task that holds a claim
+ * on the whole eight-port window (KERN_NO_ACCESS otherwise); a divisor of 0
+ * or above 0xFFFF, or a port with no such chip this kernel knows, is
+ * KERN_INVALID_ARGUMENT.
+ *
+ * The divisor latch shares its two ports with THR and IER, switched by LCR
+ * bit 7, and the kernel's console writes THR from any context: a driver that
+ * opened the latch with its own writes could have a console byte land in it.
+ * The kernel does the whole sequence -- LCR with the bit set, DLL, DLM, the
+ * read back, LCR as it was -- under the lock its own THR write takes.
+ */
+routine device_io_port_set_divisor(
+		master_port	: mach_port_t;
+	in	port		: natural_t;
+	in	divisor		: natural_t;
+	out	readback	: natural_t
+	);
