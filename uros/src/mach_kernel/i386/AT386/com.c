@@ -338,6 +338,9 @@ static struct baud_rate_info com_speeds[] = {
 	-1,	-1
 };
 
+extern unsigned int	com_set_divisor(unsigned int divisor);	/* #599 */
+extern void		com_lcr_write(unsigned int value);
+
 int
 comprobe(
 	caddr_t			port,
@@ -361,22 +364,36 @@ comprobe(
 	 * will adopt.  QEMU's chardev sends every byte whatever the divisor and
 	 * word length, so it never showed; on the metal the lines between here
 	 * and uart.so's attach would come out as noise.  A chip is there if its
-	 * scratch register holds a byte, saved and put back; nothing else is
-	 * touched.
+	 * scratch register holds a byte, saved and put back.
+	 *
+	 * A line somebody set up for a console -- eight data bits, the latch
+	 * closed -- is kept as it is, speed and all.  One nobody set up is
+	 * given 115200 8N1, x86-64's boot.S setting and uart.so's: under QEMU's
+	 * -kernel boot COM1 is found with LCR 0 (measured), five data bits,
+	 * and this kernel wrote its console into it until uart.so attached.
+	 * Before com_cons_init(), which reads the line to know what it has.
 	 */
 #ifndef	ABLATE_599_COMPROBE_OLD_EXIT
 	if (unit == 0) {
 		unsigned char scratch = inb(addr + 7);
-		int there;
+		int there, lcr;
 
 		outb(addr + 7, 0x5a);
 		there = inb(addr + 7) == 0x5a;
 		outb(addr + 7, scratch);
 		if (!there)
 			return 0;
+		lcr = inb(LINE_CTL(addr));
+		if ((lcr & iDLAB) || (lcr & i8BITS) != i8BITS) {
+			(void) com_set_divisor(1);
+			com_lcr_write(i8BITS);
+			printf("com0: found LCR 0x%02x, a line nobody set up for "
+			       "a console; set to 115200 8N1 (#599)\n",
+			       (unsigned)lcr);
+		} else
+			printf("com0: adopted as it was found, LCR 0x%02x "
+			       "(#599)\n", (unsigned)lcr);
 		com_cons_init();
-		printf("com0: adopted as it was found, LCR 0x%02x (#599)\n",
-		       (unsigned)inb(LINE_CTL(addr)));
 		return(1);
 	}
 #else
