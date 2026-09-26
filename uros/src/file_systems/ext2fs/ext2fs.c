@@ -835,6 +835,35 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
  * Given an offset in a file, find the disk block number that
  * contains that block.
  */
+/*
+ * #599: a block number read off the disk -- an inode's pointer, an indirect
+ * block's entry -- checked before it is used: 0 (a hole) or inside
+ * [s_first_data_block, s_blocks_count).  A damaged pointer was read from
+ * wherever it named, handed to the page cache as a key, or written through.
+ */
+/*
+ * Set only by ext2_blockio_selftest, for the refusals it provokes on
+ * purpose, and only while it runs -- at ext_server's start, before any other
+ * thread exists.  A boot log where the self-test's expected refusals read
+ * like a damaged disk would teach its reader to skip the line that is one.
+ */
+static int	ext2_selftest_quiet;
+
+static int
+ext2_block_in_range(const struct ext2fs_file *fp, daddr_t b, const char *what)
+{
+	const struct ext2_super_block *fs = fp->f_fs;
+
+	if (b == 0 || (b >= fs->s_first_data_block && b < fs->s_blocks_count))
+		return 0;
+	if (!ext2_selftest_quiet)
+		printf("ext2: inode %u: %s block %lu is outside the filesystem "
+	       "(%u..%u) — refused as damaged\n", (unsigned)fp->f_ino, what,
+	       (unsigned long)b, (unsigned)fs->s_first_data_block,
+	       (unsigned)fs->s_blocks_count - 1);
+	return FS_CORRUPT;
+}
+
 static int
 block_map_locked(
 	struct ext2fs_file	*fp,
@@ -888,6 +917,10 @@ block_map_locked(
 
 	if (file_block < NDADDR) {
 	    /* Direct block. */
+	    rc = ext2_block_in_range(fp, fp->f_ic->i_block[file_block],
+				     "a data");			/* #599 */
+	    if (rc != 0)
+		return (rc);
 	    *disk_block_p = fp->f_ic->i_block[file_block];
 	    return (0);
 	}
@@ -911,6 +944,9 @@ block_map_locked(
 	}
 
 	ind_block_num = fp->f_ic->i_block[level + NDADDR];
+	rc = ext2_block_in_range(fp, ind_block_num, "an indirect");	/* #599 */
+	if (rc != 0)
+	    return (rc);
 
 	for (; level >= 0; level--) {
 
@@ -955,6 +991,10 @@ block_map_locked(
 		idx = file_block;
 
 	    ind_block_num = le32_to_cpu(((daddr_t *)data)[idx]);
+	    rc = ext2_block_in_range(fp, ind_block_num,
+				     level > 0 ? "an indirect" : "a data");
+	    if (rc != 0)
+		return (rc);				/* #599 */
 	}
 
 	*disk_block_p = ind_block_num;
@@ -1442,6 +1482,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 
 	*ran = 0;
 	*wrong = 0;
+	ext2_selftest_quiet = 1;
 	memset(&sb, 0, sizeof(sb));
 	memset(&f, 0, sizeof(f));
 	sb.s_log_block_size = 0;		/* 1 KiB */
@@ -1479,7 +1520,31 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	if (rc == 0)
 		(*wrong)++;
 
+	/*
+	 * E1: a pointer outside the filesystem (64 blocks) is refused as
+	 * damaged, not read: a direct one, and the single-indirect root that
+	 * file block 12 goes through.  Exactly FS_CORRUPT -- the device would
+	 * answer something else.
+	 */
+	{
+		daddr_t	b = 0;
+
+		f.f_ic->i_block[2] = 80;
+		(*ran)++;
+		if (block_map(&f, 2, &b) != FS_CORRUPT)
+			(*wrong)++;
+		f.f_ic->i_block[2] = 0;
+		f.f_ic->i_size = 16 * 1024;
+		f.f_ic->i_block[NDADDR] = 80;
+		(*ran)++;
+		if (block_map(&f, NDADDR, &b) != FS_CORRUPT)
+			(*wrong)++;
+		f.f_ic->i_block[NDADDR] = 0;
+		f.f_ic->i_size = 4 * 1024;
+	}
+
 	free_file_buffers(&f);
+	ext2_selftest_quiet = 0;
 }
 
 /*
@@ -1945,8 +2010,16 @@ ext2fs_open_file_into(
 		    daddr_t	disk_block;
 		    register struct ext2_super_block *fs = fp->f_fs;
 
-		    (void) block_map(fp, (daddr_t)0, &disk_block);
-		    rc = ext2_dev_read(&fp->f_dev,
+		    /*
+		     * #599: the map's answer is read, not discarded, and a
+		     * slow symlink with no block is damaged -- block 0 is the
+		     * boot block, not the link's body.
+		     */
+		    rc = block_map(fp, (daddr_t)0, &disk_block);
+		    if (rc == 0 && disk_block == 0)
+			rc = FS_CORRUPT;
+		    if (rc == 0)
+			rc = ext2_dev_read(&fp->f_dev,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
