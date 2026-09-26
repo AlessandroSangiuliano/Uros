@@ -183,21 +183,26 @@ cdt_driver(void)
 	if (wrong != 0)
 		(void) com_set_divisor(divisor);	/* put it back, alone */
 
-	if (lines1 - lines0 < CDT_LINES)
+	/*
+	 * A wrong read-back is evidence however few lines went out: it is
+	 * asked first (found in review -- a short flood hid it behind
+	 * NOT ASKED).  Only a clean run needs the flood to have overlapped.
+	 */
+	if (wrong != 0)
+		printf("com: [divisor-race] WRONG — %u of %u divisor sequences "
+		       "read back something other than 0x%04x (last 0x%04x) "
+		       "while processor 1 sent %u lines: bytes went into the "
+		       "latch (#599)\n",
+		       wrong, rounds, divisor, last, lines1 - lines0);
+	else if (lines1 - lines0 < CDT_LINES)
 		printf("com: [divisor-race] NOT ASKED — %u rounds and only %u "
 		       "lines of flood went out inside them (#599)\n",
 		       rounds, lines1 - lines0);
-	else if (wrong == 0)
+	else
 		printf("com: [divisor-race] PASS — %u divisor sequences on "
 		       "processor %d while processor 1 sent %u lines: every "
 		       "one read back 0x%04x (#599)\n",
 		       rounds, cpu_number(), lines1 - lines0, divisor);
-	else
-		printf("com: [divisor-race] WRONG — %u of %u divisor sequences "
-		       "read back something other than 0x%04x (last 0x%04x) "
-		       "while processor 1 sent %u lines: the console's bytes "
-		       "went into the latch (#599)\n",
-		       wrong, rounds, divisor, last, lines1 - lines0);
 #else	/* NCPUS > 1 */
 	printf("com: [divisor-race] NOT ASKED — a uniprocessor build: the "
 	       "sequence runs with interrupts off, and nothing but an NMI can "
