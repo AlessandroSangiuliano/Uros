@@ -142,7 +142,7 @@ extern void		device_md_io_write(unsigned int port, unsigned int size,
  */
 extern int		device_md_io_claimed(unsigned int base,
 					     unsigned int count,
-					     unsigned int *klog_from);	/* 1: the console stepped back; *klog_from = where its log continues */
+					     unsigned int *klog_from);	/* 1: the kernel's own user of the range stepped back -- the console for COM1 (*klog_from = where its log continues), the break-key reader for the 8042 (#599) */
 extern void		device_md_io_unclaimed(unsigned int base,
 					       unsigned int count);
 

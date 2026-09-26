@@ -958,9 +958,9 @@ machine_init(void)
 	probeio();
 
 	/*
-	 * #335: arm the PS/2 break-key (Ctrl+D -> DDB) when -K was given and
-	 * the console is not serial.  After probeio() so the PIC / I-O APIC
-	 * and all device IRQs are configured; IRQ 1 is still free here.
+	 * #335: arm the PS/2 break-key (Ctrl+D -> DDB) when -K was given --
+	 * on a serial console too, since #382.  After probeio() so the PIC /
+	 * I-O APIC and all device IRQs are configured; IRQ 1 is still free.
 	 */
 	{
 		extern void ddb_kbd_break_init(void);

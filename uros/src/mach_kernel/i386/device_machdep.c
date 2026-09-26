@@ -26,6 +26,7 @@
 #include <i386/misc_protos.h>
 #include <i386/pic.h>		/* NINTR */
 #include <i386/pio.h>
+#include <i386/AT386/ddb_kbd.h>	/* -K, and the 8042's reader (#599) */
 
 unsigned int
 device_md_pci_read(unsigned int bus, unsigned int slot, unsigned int func,
@@ -172,6 +173,8 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 		  &irq_saved_handler[irq]);
 
 	take_irq((int)irq, (int)irq, SPL6, (intr_t)handler);
+	if (irq == 1)
+		ddb_kbd_irq_handed_over();	/* #599: the shared window ends */
 	return 1;
 }
 
@@ -250,7 +253,6 @@ device_md_irq_unregister(unsigned int irq)
  * kdb_trap skips its own park when the flag is already up, and clears it on
  * the way out.
  */
-extern int		ddb_kbd_break_enabled;	/* -K (model_dep.c) */
 extern void		Debugger(const char *message);
 
 int
@@ -286,37 +288,44 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 }
 
 /*
- * i386 records a claim and steps back from nothing (#497).
+ * What the kernel's own user of a claimed range does (#497, #599).
  *
- * 🔴 AND THAT IS A STATEMENT, NOT AN OVERSIGHT.  This kernel's console is
- * i386/AT386/com.c and it reaches the chip with its own `outb' -- it is not
- * behind device_io_port_write, so there is no point at which telling it to
- * stop would be honest here.  x86-64's console gives the port up because that
- * is where this issue's question was asked; making i386 do the same means
- * changing com.c, which is #544's subject and has fifty-three runs of
- * evidence waiting for it.
+ * 🔴 THE 8042 (0x60, 0x64): the break-key reader stands back.  On -K boots
+ * ddb_kbd_intr() owns IRQ 1 until a driver registers it and reads both
+ * ports on every interrupt; before the claim, ps2.so's commands and their
+ * answers went through ports that reader was also reading.  The answer is 1
+ * only when there is a reader and it stood back.
  *
- * ⚠️ The claim is still WORTH recording on this target: it stops a second
- * TASK reaching the range through the master port, which is the half of the
- * problem that is machine-independent.  What it does not stop is the kernel,
- * and a comment that let that pass unsaid would be the same cover #544 found
- * in uart.c.
+ * ⚠️ COM1 is not stepped back from on this target: the console is
+ * i386/AT386/com.c, reaching the chip with its own `outb', and the #599 UART
+ * work serialises the chip instead of handing it over.  The claim is still
+ * worth recording: it stops a second TASK reaching the range through the
+ * master port, which is the half of the problem that is machine-independent.
+ *
+ * A dispatch on the range, for both ranges; `klog_from' has meaning only for
+ * a console, which this target does not hand over.
  */
+static int
+range_touches(unsigned int base, unsigned int count, unsigned int port)
+{
+	return base <= port && port < base + count;
+}
+
 int
 device_md_io_claimed(unsigned int base, unsigned int count,
 		     unsigned int *klog_from)
 {
-	(void)base;
-	(void)count;
 	*klog_from = 0;
-	return 0;	/* the console keeps writing: see above */
+	if (range_touches(base, count, 0x60) || range_touches(base, count, 0x64))
+		return ddb_kbd_8042_claimed();
+	return 0;
 }
 
 void
 device_md_io_unclaimed(unsigned int base, unsigned int count)
 {
-	(void)base;
-	(void)count;
+	if (range_touches(base, count, 0x60) || range_touches(base, count, 0x64))
+		ddb_kbd_8042_unclaimed();
 }
 
 /*

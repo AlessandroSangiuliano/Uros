@@ -16,10 +16,15 @@
  *   - Scancode set 1 translation table covers letters, digits,
  *     punctuation, space, backspace, enter, and Shift modifiers.
  *     Ctrl/Alt are reported as no-op (DDB doesn't need them).
- *   - Compatible with ps2.so (userspace): DDB only runs in panic /
- *     breakpoint context where IRQs are masked, so polled reads from
- *     port 0x60 don't race with ps2.so's IRQ-driven reads.  On DDB
- *     exit, IRQs come back on and ps2.so resumes normally.
+ *   - Shared with ps2.so (userspace).  DDB's own polled reads happen in
+ *     panic / breakpoint context with the other processors parked, and
+ *     are the stated exception: a debugger entered in the middle of a
+ *     driver's command can eat an answer, and the driver's bounded waits
+ *     turn that into a line, not a hang.  The break-key reader on IRQ 1
+ *     is NOT that context: it runs whenever the line fires, and until
+ *     ps2.so registers IRQ 1 it would read the answers to ps2.so's own
+ *     commands.  #599: it stands back while a task holds the 8042's
+ *     ports (ddb_kbd_8042_claimed below).
  *
  * Serial console (cons_is_com1) path is preserved: when the boot
  * picked COM1 as the console, cngetc/cnmaygetc forward to com_getc.
@@ -33,6 +38,7 @@
 #include <i386/pio.h>
 #include <i386/ipl.h>		/* SPL6 */
 #include <chips/busses.h>	/* take_irq / reset_irq / intr_t */
+#include <i386/AT386/ddb_kbd.h>
 
 extern int com_getc(boolean_t wait);
 extern int cons_is_com1;
@@ -256,9 +262,9 @@ cnpollc(boolean_t on)
 	/*
 	 * Pre-#208 this saved/restored kd.c's kb_mode and mouse_in_use
 	 * state so the in-kernel ANSI tty wouldn't be disturbed by DDB.
-	 * Now ps2.so owns the keyboard in userspace and is suspended
-	 * during DDB anyway (we're in panic / breakpoint context with
-	 * IRQs masked), so there is nothing to preserve.
+	 * Now ps2.so owns the keyboard in userspace, so there is nothing to
+	 * preserve.  #599: DDB's polled reads of the 8042 are the stated
+	 * exception -- see the note at the top of this file.
 	 */
 	(void)on;
 }
@@ -272,11 +278,13 @@ cnpollc(boolean_t on)
  *
  * This installs a minimal IRQ-1 top half that watches for Ctrl+D and
  * calls kdb_kintr() — the exact entry comintr() uses — landing DDB on the
- * interrupted frame.  Opt-in via the -K boot flag, and only when the
- * console is not COM1.  It claims IRQ 1 with take_irq(); if the userspace
- * char_server/ps2.so later registers IRQ 1, device_intr_register() does a
- * reset_irq() before its take_irq(), so it transparently takes the line
- * over (and restores this handler on unregister) — no clobber, no hang.
+ * interrupted frame.  Opt-in via the -K boot flag.  It claims IRQ 1 with
+ * take_irq(); if the userspace char_server/ps2.so later registers IRQ 1,
+ * device_intr_register() does a reset_irq() before its take_irq(), so it
+ * takes the line over (and restores this handler on unregister).  That is
+ * clean for the LINE and says nothing about the ports: until the line moves,
+ * this reader and ps2.so's commands share 0x60/0x64, which is what #599's
+ * claim below is for.
  * ============================================================ */
 
 #if	MACH_KDB || MACH_KGDB
@@ -293,6 +301,53 @@ int ddb_kbd_break_enabled __attribute__((section(".data"))) = 0;
 static int ddb_brk_ctrl;	/* Ctrl currently held */
 
 /*
+ * #599: the reader and a task's claim on the 8042, under one leaf lock.
+ *
+ * A mask set on another processor must exclude a reader that has already
+ * passed its test, so the test and the reads are one hold: pushfl; cli;
+ * xchgb, the shape of 77ae0c7d.  Nothing else is taken inside, and
+ * kdb_kintr() is called after the hold ends.
+ *
+ * ddb_kbd_armed: the reader is installed on IRQ 1 -- whether or not the 8042
+ * answered at boot, it reads the ports whenever the line fires, so that is
+ * when there is a reader to stand back.  The two counters are printed when
+ * IRQ 1 goes to a driver and when a claim goes.
+ */
+static volatile unsigned char	i8042_lock;
+static volatile int		i8042_claimed;
+static int			i8042_claims;	/* claims on 0x60/0x64 held */
+static int			ddb_kbd_armed;
+unsigned int			ddb_kbd_stood_back;
+unsigned int			ddb_kbd_bytes_taken;
+
+static unsigned int
+i8042_enter(void)
+{
+	unsigned int	flags;
+	unsigned char	busy;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+	for (;;) {
+		busy = 1;
+		__asm__ volatile("xchgb %0, %1"
+				 : "+q" (busy), "+m" (i8042_lock)
+				 : : "memory");
+		if (busy == 0)
+			break;
+		__asm__ volatile("pause");
+	}
+	return flags;
+}
+
+static void
+i8042_leave(unsigned int flags)
+{
+	__asm__ volatile("" : : : "memory");
+	i8042_lock = 0;
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
+/*
  * IRQ-1 top half.  Reached through the ivect[] dispatch (interrupt.S)
  * with interrupts enabled at SPL6 — the same context comintr() runs in,
  * so kdb_kintr() from here is safe.  We drain port 0x60 to ack the 8042;
@@ -302,28 +357,104 @@ void
 ddb_kbd_intr(int unit)
 {
 	unsigned char status, sc;
+	unsigned int flags;
+	int fire = 0;
 	(void)unit;
 
+	flags = i8042_enter();
+	if (i8042_claimed) {
+		/* #599: a task holds the 8042; its bytes are not ours */
+		ddb_kbd_stood_back++;
+		i8042_leave(flags);
+		return;
+	}
 	status = inb(KBD_STATUS);
-	if ((status & KBD_STAT_OBF) == 0)
-		return;			/* nothing pending (shared / spurious) */
-	if (status & KBD_STAT_AUX) {
-		(void)inb(KBD_DATA);	/* mouse byte — drain and ignore */
+	if ((status & KBD_STAT_OBF) == 0) {
+		i8042_leave(flags);	/* nothing pending (shared / spurious) */
 		return;
 	}
 	sc = inb(KBD_DATA);
-
-	if (sc == 0xE0)			/* extended prefix; next byte stands alone */
-		return;
-	if (sc == KBD_SC_CTRL)        { ddb_brk_ctrl = 1; return; }
-	if (sc == (KBD_SC_CTRL|0x80)) { ddb_brk_ctrl = 0; return; }
-
-	if (ddb_brk_ctrl && sc == KBD_SC_D) {
+	ddb_kbd_bytes_taken++;
+	if (status & KBD_STAT_AUX)
+		;			/* mouse byte — drained and ignored */
+	else if (sc == 0xE0)
+		;			/* extended prefix; next byte stands alone */
+	else if (sc == KBD_SC_CTRL)
+		ddb_brk_ctrl = 1;
+	else if (sc == (KBD_SC_CTRL|0x80))
+		ddb_brk_ctrl = 0;
+	else if (ddb_brk_ctrl && sc == KBD_SC_D) {
 		ddb_brk_ctrl = 0;	/* one-shot: don't re-fire on key repeat */
-#if	MACH_KDB || MACH_KGDB
-		kdb_kintr();
-#endif
+		fire = 1;
 	}
+	i8042_leave(flags);
+
+#if	MACH_KDB || MACH_KGDB
+	if (fire)
+		kdb_kintr();
+#else
+	(void)fire;
+#endif
+}
+
+/*
+ * #599: a task claimed the 8042's ports.  Answers 1 when the reader is armed
+ * and now stands back, 0 when there is no reader to stand back.  Under
+ * ABLATE_599_I8042_SHARED the claim is answered but the mask is not set, so
+ * the reader goes on reading the task's bytes -- the old behaviour, for the
+ * test that must show it.
+ */
+int
+ddb_kbd_8042_claimed(void)
+{
+	unsigned int flags;
+
+	if (!ddb_kbd_break_enabled || !ddb_kbd_armed)
+		return 0;
+	/* One line per hand-over, however many of its ports are claimed */
+	if (++i8042_claims > 1)
+		return 1;
+	flags = i8042_enter();
+#ifndef	ABLATE_599_I8042_SHARED
+	i8042_claimed = 1;
+#endif
+	i8042_leave(flags);
+	printf("DDB: the 8042 is claimed by a task — the break-key reader "
+	       "stands back (it had taken %u bytes) (#599)\n",
+	       ddb_kbd_bytes_taken);
+	return 1;
+}
+
+void
+ddb_kbd_8042_unclaimed(void)
+{
+	unsigned int flags;
+
+	if (!ddb_kbd_break_enabled || !ddb_kbd_armed || i8042_claims == 0)
+		return;
+	if (--i8042_claims > 0)
+		return;
+	flags = i8042_enter();
+	i8042_claimed = 0;
+	i8042_leave(flags);
+	printf("DDB: the 8042 is the kernel's again — while it was claimed the "
+	       "break-key reader stood back %u times; it has taken %u bytes "
+	       "(#599)\n", ddb_kbd_stood_back, ddb_kbd_bytes_taken);
+}
+
+/*
+ * #599: IRQ 1 goes to a driver.  The window in which this reader and the
+ * driver's commands shared the 8042 ends here, so what it did in it is said
+ * here, in a line a boot's log keeps.
+ */
+void
+ddb_kbd_irq_handed_over(void)
+{
+	if (!ddb_kbd_break_enabled || !ddb_kbd_armed)
+		return;
+	printf("DDB: IRQ 1 goes to a driver — until now the break-key reader "
+	       "stood back %u times and took %u bytes (#599)\n",
+	       ddb_kbd_stood_back, ddb_kbd_bytes_taken);
 }
 
 /* ------------------------------------------------------------------
@@ -458,6 +589,7 @@ ddb_kbd_break_init(void)
 	cfg = ddb_8042_kbd_enable(&ack);	/* make the 8042 deliver IRQ 1 */
 	reset_irq(1, &o_unit, &o_spl, &o_handler);
 	take_irq(1, 1, SPL6, (intr_t)ddb_kbd_intr);
+	ddb_kbd_armed = 1;		/* installed, answer or not */
 	splx(s);
 
 	if (cfg < 0) {
