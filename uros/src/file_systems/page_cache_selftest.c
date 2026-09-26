@@ -38,21 +38,34 @@
 
 #define ST_BLOCK	1024u
 
-/* Writeback doubles: count the calls, and answer ok or a fixed error. */
+#define ST_EIO		2500		/* D_IO_ERROR, as a device answers */
+
+/*
+ * The writeback double: counts the calls, remembers the last block and its
+ * first byte, and answers st_wb_answer for every block, or fails only
+ * st_wb_fail_block ((daddr_t)-1: none).
+ */
 static unsigned int	st_wb_calls;
 static int		st_wb_answer;
+static daddr_t		st_wb_fail_block = (daddr_t)-1;
+static daddr_t		st_wb_last_block;
+static unsigned char	st_wb_last_byte;
 
 static int
 st_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 	     vm_offset_t phys)
 {
 	(void)ctx;
-	(void)block;
-	(void)data;
 	(void)size;
 	(void)phys;
 	st_wb_calls++;
-	return st_wb_answer;
+	if (st_wb_answer != 0)
+		return st_wb_answer;
+	if (block == st_wb_fail_block)
+		return ST_EIO;
+	st_wb_last_block = block;
+	st_wb_last_byte = *(const unsigned char *)data;
+	return 0;
 }
 
 /*
@@ -142,8 +155,107 @@ static int
 st_done(struct page_cache *pc)
 {
 	st_wb_answer = 0;
+	st_wb_fail_block = (daddr_t)-1;
 	(void) page_cache_sync(pc);
 	return page_cache_destroy(pc) == 0;
+}
+
+static int
+st_write_byte(struct page_cache *pc, daddr_t b, unsigned char v)
+{
+	unsigned char blk[ST_BLOCK];
+
+	memset(blk, v, sizeof(blk));
+	return page_cache_write(pc, b, (vm_offset_t)blk, sizeof(blk));
+}
+
+/*
+ * P6: eviction keeps what it cannot write.  Two dirty blocks, the oldest
+ * unwritable: a write of a third takes the other one's slot, and the
+ * unwritable one stays cached and dirty -- and a later good sync writes
+ * exactly its bytes.
+ */
+static int
+st_evict_keeps_unwritable(void)
+{
+	struct page_cache	*pc = page_cache_create(2, ST_BLOCK,
+							st_writeback, 0);
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	if (st_write_byte(pc, 1, 0xA1) != 0 || st_write_byte(pc, 2, 0xA2) != 0)
+		ok = 0;
+	st_wb_fail_block = 1;
+	if (st_write_byte(pc, 3, 0xA3) != 0 || !st_holds(pc, 1, 0xA1, 1) ||
+	    st_entry(pc, 2) != 0 || !st_holds(pc, 3, 0xA3, 1))
+		ok = 0;
+	st_wb_fail_block = (daddr_t)-1;
+	st_wb_last_block = (daddr_t)-1;
+	(void) page_cache_sync(pc);
+	if (!st_holds(pc, 1, 0xA1, 0))
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/*
+ * P7: with every block dirty and unwritable, a write of another fails with
+ * the device's answer after at most four writebacks -- and every block is
+ * still there, dirty, with its bytes.
+ */
+static int
+st_write_fails_when_nothing_writes(void)
+{
+	struct page_cache	*pc = page_cache_create(2, ST_BLOCK,
+							st_writeback, 0);
+	unsigned int		 calls;
+	int			 ok = 1, rc;
+
+	if (pc == 0)
+		return 0;
+	if (st_write_byte(pc, 1, 0xB1) != 0 || st_write_byte(pc, 2, 0xB2) != 0)
+		ok = 0;
+	st_wb_answer = ST_EIO;
+	calls = st_wb_calls;
+	rc = st_write_byte(pc, 3, 0xB3);
+	if (rc != ST_EIO || st_wb_calls - calls > 4 || st_entry(pc, 3) != 0 ||
+	    !st_holds(pc, 1, 0xB1, 1) || !st_holds(pc, 2, 0xB2, 1))
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
+/*
+ * P8: a clean block beyond the scan window is still found before a write is
+ * refused.  All but the newest entry dirty and unwritable; the newest clean:
+ * a write of another block takes its slot.
+ */
+static int
+st_clean_found_past_the_window(void)
+{
+	unsigned int		 n = PAGE_CACHE_VICTIM_SCAN + 2, b;
+	struct page_cache	*pc = page_cache_create(n, ST_BLOCK,
+							st_writeback, 0);
+	unsigned char		 blk[ST_BLOCK];
+	int			 ok = 1;
+
+	if (pc == 0)
+		return 0;
+	for (b = 1; b < n; b++)
+		if (st_write_byte(pc, (daddr_t)b, 0xC1) != 0)
+			ok = 0;
+	memset(blk, 0xC2, sizeof(blk));
+	page_cache_insert(pc, 1000, (vm_offset_t)blk, sizeof(blk));
+	st_wb_answer = ST_EIO;
+	if (st_write_byte(pc, 2000, 0xC3) != 0 || st_entry(pc, 1000) != 0 ||
+	    !st_holds(pc, 2000, 0xC3, 1))
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
 }
 
 /*
@@ -240,6 +352,7 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong)
 	*wrong = 0;
 	st_wb_calls = 0;
 	st_wb_answer = 0;
+	page_cache_quiet = 1;
 
 	(*ran)++;
 	if (!st_slots_are_fixed())
@@ -256,4 +369,14 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong)
 	(*ran)++;
 	if (!st_write_refuses_a_part())
 		(*wrong)++;
+	(*ran)++;
+	if (!st_evict_keeps_unwritable())
+		(*wrong)++;
+	(*ran)++;
+	if (!st_write_fails_when_nothing_writes())
+		(*wrong)++;
+	(*ran)++;
+	if (!st_clean_found_past_the_window())
+		(*wrong)++;
+	page_cache_quiet = 0;
 }

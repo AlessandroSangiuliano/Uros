@@ -36,6 +36,8 @@
 
 #define PC_HASH(block) ((unsigned int)(block) % PAGE_CACHE_HASH_BUCKETS)
 
+int	page_cache_quiet;	/* see page_cache.h */
+
 /* Remove entry from LRU list */
 static void
 lru_remove(struct page_cache_entry *e)
@@ -71,52 +73,108 @@ hash_remove(struct page_cache *pc, struct page_cache_entry *e)
 	}
 }
 
-/* Write back a dirty entry via the writeback callback */
-static int
-entry_writeback(struct page_cache *pc, struct page_cache_entry *e)
-{
-	int ret;
+/*
+ * #599: how take_victim may make room.  PC_TAKE_CLEAN never writes a block
+ * back for it -- a readahead insert has no business costing a disk write --
+ * and PC_TAKE_ANY may write back up to PC_EVICT_TRIES dirty victims.
+ */
+#define PC_TAKE_CLEAN	0
+#define PC_TAKE_ANY	1
+#define PC_VICTIM_SCAN	PAGE_CACHE_VICTIM_SCAN
+#define PC_EVICT_TRIES	4
 
-	if (!e->pc_dirty)
-		return 0;
-	/* Never NULL: page_cache_create refuses a cache without one (#573). */
-	ret = pc->pc_writeback(pc->pc_writeback_ctx, e->pc_block, e->pc_data,
-			       e->pc_size, e->pc_phys);
-	if (ret != 0)
-		return ret;
-	e->pc_dirty = 0;
-	pc->pc_writebacks++;
-	return 0;
+/* Can this entry's slot be taken?  #599: the one predicate eviction asks. */
+static int
+evictable(const struct page_cache_entry *e)
+{
+	return !e->pc_busy;
 }
 
-/* Evict the LRU entry, returning it to the free list */
+/* Detach an entry that is being taken, and count it. */
 static struct page_cache_entry *
-evict_lru(struct page_cache *pc)
+take_detach(struct page_cache *pc, struct page_cache_entry *e)
 {
-	struct page_cache_entry *victim = pc->pc_lru_tail.pc_lru_prev;
-
-	/*
-	 * #384: skip entries whose data a page_cache_sync writeback is
-	 * using outside pc_lock — re-using (DMA) or freeing (non-DMA)
-	 * their buffer mid-write would flush another block's bytes, or
-	 * worse.  Busy entries are rare (one sync batch at a time).
-	 */
-	while (victim != &pc->pc_lru_head && victim->pc_busy)
-		victim = victim->pc_lru_prev;
-
-	/* Don't evict the head sentinel */
-	if (victim == &pc->pc_lru_head)
-		return NULL;
-
-	/* Write back dirty data before evicting */
-	entry_writeback(pc, victim);
-
-	lru_remove(victim);
-	hash_remove(pc, victim);
+	lru_remove(e);
+	hash_remove(pc, e);
 	pc->pc_count--;
 	pc->pc_evictions++;
+	e->pc_block = -1;
+	e->pc_dirty = 0;
+	e->pc_wfail = 0;
+	return e;
+}
 
-	return victim;
+/*
+ * A slot for a new block, under pc_lock; never waits.
+ *
+ * #599: the eviction this replaces wrote a dirty victim back, IGNORED THE
+ * ANSWER and took the slot anyway -- a block the device refused was dropped,
+ * with only a printf in ext_server to say so.  A dirty entry now leaves only
+ * once the disk has it: a failed writeback leaves it cached and dirty, moved
+ * to MRU so the next search does not start from it again, and said once
+ * (pc_wfail); its answer is kept in *wb_rc for a caller that ends up with no
+ * slot.
+ *
+ * The writeback runs under pc_lock, as it did.  It cannot deadlock: the
+ * callback takes no lock of the cache's, and the block server it calls is
+ * single-threaded and never calls back into ext_server.
+ *
+ * Order: the free list; a clean entry among the PC_VICTIM_SCAN oldest; (ANY)
+ * up to PC_EVICT_TRIES dirty victims written back; any clean entry at all;
+ * none.
+ */
+static struct page_cache_entry *
+take_victim(struct page_cache *pc, int mode, int *wb_rc)
+{
+	struct page_cache_entry *e, *prev;
+	unsigned int n;
+	int tries = 0, rc;
+
+	if (pc->pc_free) {
+		e = pc->pc_free;
+		pc->pc_free = e->pc_hash_next;
+		e->pc_hash_next = NULL;
+		return e;
+	}
+
+	for (e = pc->pc_lru_tail.pc_lru_prev, n = 0;
+	     e != &pc->pc_lru_head && n < PC_VICTIM_SCAN;
+	     e = e->pc_lru_prev, n++)
+		if (evictable(e) && !e->pc_dirty)
+			return take_detach(pc, e);
+
+	for (e = pc->pc_lru_tail.pc_lru_prev;
+	     mode == PC_TAKE_ANY && e != &pc->pc_lru_head &&
+	     tries < PC_EVICT_TRIES;
+	     e = prev) {
+		prev = e->pc_lru_prev;
+		if (!evictable(e) || !e->pc_dirty)
+			continue;
+		tries++;
+		rc = pc->pc_writeback(pc->pc_writeback_ctx, e->pc_block,
+				      e->pc_data, e->pc_size, e->pc_phys);
+		if (rc == 0) {
+			pc->pc_writebacks++;
+			return take_detach(pc, e);
+		}
+		if (wb_rc != NULL)
+			*wb_rc = rc;
+		if (!e->pc_wfail && !page_cache_quiet)
+			printf("page cache: block %lu could not be written back "
+			       "(%d) — it stays cached and dirty, and is tried "
+			       "again at the next sync\n",
+			       (unsigned long)e->pc_block, rc);
+		e->pc_wfail = 1;
+		lru_remove(e);
+		lru_insert_mru(pc, e);
+	}
+
+	for (e = pc->pc_lru_tail.pc_lru_prev; e != &pc->pc_lru_head;
+	     e = e->pc_lru_prev)
+		if (evictable(e) && !e->pc_dirty)
+			return take_detach(pc, e);
+
+	return NULL;
 }
 
 /*
@@ -282,17 +340,11 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 		}
 	}
 
-	/* Get a free entry, evicting if necessary */
-	if (pc->pc_free) {
-		e = pc->pc_free;
-		pc->pc_free = e->pc_hash_next;
-		e->pc_hash_next = NULL;
-	} else {
-		e = evict_lru(pc);
-		if (!e) {
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
+	/* A free or clean slot: an insert never costs a writeback (#599) */
+	e = take_victim(pc, PC_TAKE_CLEAN, NULL);
+	if (!e) {
+		pthread_mutex_unlock(&pc->pc_lock);
+		return;
 	}
 
 	/* #599: a fixed slot in either kind of cache */
@@ -333,16 +385,16 @@ page_cache_write(struct page_cache *pc, daddr_t block, vm_offset_t data,
 	if (e != NULL) {
 		lru_remove(e);
 	} else {
-		if (pc->pc_free) {
-			e = pc->pc_free;
-			pc->pc_free = e->pc_hash_next;
-			e->pc_hash_next = NULL;
-		} else {
-			e = evict_lru(pc);
-			if (!e) {
-				pthread_mutex_unlock(&pc->pc_lock);
-				return KERN_RESOURCE_SHORTAGE;
-			}
+		int wb_rc = KERN_RESOURCE_SHORTAGE;
+
+		/*
+		 * #599: no slot is the last refused writeback's answer, or a
+		 * shortage -- the write fails and nothing is lost.
+		 */
+		e = take_victim(pc, PC_TAKE_ANY, &wb_rc);
+		if (!e) {
+			pthread_mutex_unlock(&pc->pc_lock);
+			return wb_rc;
 		}
 		e->pc_block = block;
 		e->pc_busy = 0;
@@ -410,7 +462,17 @@ mark_range_done(struct page_cache *pc, daddr_t first, int count, int success)
 				ce->pc_busy = 0;
 				if (success) {
 					ce->pc_dirty = 0;
+					ce->pc_wfail = 0;
 					pc->pc_writebacks++;
+				} else if (!ce->pc_wfail) {
+					/* #599: said once, not every 5 s */
+					if (!page_cache_quiet)
+					    printf("page cache: block %lu could not "
+					       "be written back — it stays "
+					       "dirty, and is tried again at "
+					       "the next sync\n",
+					       (unsigned long)ce->pc_block);
+					ce->pc_wfail = 1;
 				}
 				break;
 			}
@@ -629,17 +691,11 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 
 	pc->pc_misses++;
 
-	/* Get a free entry or evict */
-	if (pc->pc_free) {
-		e = pc->pc_free;
-		pc->pc_free = e->pc_hash_next;
-		e->pc_hash_next = NULL;
-	} else {
-		e = evict_lru(pc);
-		if (!e) {
-			pthread_mutex_unlock(&pc->pc_lock);
-			return NULL;
-		}
+	/* Get a free entry or evict (#599: keeping what cannot be written) */
+	e = take_victim(pc, PC_TAKE_ANY, NULL);
+	if (!e) {
+		pthread_mutex_unlock(&pc->pc_lock);
+		return NULL;
 	}
 
 	/* Set up the entry (data/phys already assigned from pool) */

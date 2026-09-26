@@ -357,13 +357,12 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 	/* #599: a short write is not a write. */
 	if (rc == KERN_SUCCESS && bytes_written != (io_buf_len_t)size)
 		rc = D_IO_ERROR;
-	if (rc != KERN_SUCCESS)
-		printf("ext2: writeback block %ld failed: %d\n",
-		       (long)block, rc);
 	/*
-	 * #599: the device's answer, not -1: the page cache keeps the block
-	 * dirty on any non-zero, and a caller that reports it names the
-	 * cause.
+	 * #599: not printed here -- the page cache says a block it could not
+	 * write once, not at every retry of every sync.
+	 *
+	 * The device's answer, not -1: the page cache keeps the block dirty
+	 * on any non-zero, and a caller that reports it names the cause.
 	 */
 	return (int)rc;
 }

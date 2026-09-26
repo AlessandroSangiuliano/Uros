@@ -51,6 +51,12 @@
 #define PAGE_CACHE_HASH_BUCKETS	4096
 
 /*
+ * #599: how many of the oldest entries eviction looks at for a clean one
+ * before it writes a dirty one back; the self-test builds its case around it.
+ */
+#define PAGE_CACHE_VICTIM_SCAN	64
+
+/*
  * Writeback callback: called when a dirty block must be flushed to disk.
  * Arguments: opaque context, block number, data pointer, data size,
  * physical address (non-zero for DMA-backed entries).
@@ -67,6 +73,8 @@ struct page_cache_entry {
 	vm_offset_t		pc_phys;	/* physical addr (0 = vm_allocate'd); full
 					   width: a page can be above 4 GiB (#599) */
 	int			pc_dirty;	/* block has been modified */
+	int			pc_wfail;	/* #599: its writeback failed,
+						   and it was said once */
 	int			pc_busy;	/* #384: writeback in flight —
 						   its data is being written
 						   outside pc_lock, so eviction
@@ -142,6 +150,14 @@ int page_cache_destroy(struct page_cache *pc);
  * the cases, *wrong the wrong answers.
  */
 void page_cache_selftest(unsigned int *ran, unsigned int *wrong);
+
+/*
+ * Set only by page_cache_selftest, while it runs at ext_server's start
+ * before any other thread: the failures it provokes on purpose are not
+ * printed, so that the boot log does not report a failing disk that is a
+ * passing test.
+ */
+extern int page_cache_quiet;
 
 /*
  * Look up a disk block in the cache.
