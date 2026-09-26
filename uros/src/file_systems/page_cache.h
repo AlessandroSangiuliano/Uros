@@ -316,14 +316,4 @@ struct page_cache *page_cache_create_dma(unsigned int max_entries,
 					 page_cache_writeback_fn writeback,
 					 void *ctx);
 
-/*
- * Allocate a cache entry for 'block' without populating data.
- * The entry is inserted into the hash/LRU and its pre-allocated
- * DMA buffer (pc_data/pc_phys) is ready for direct device I/O.
- * Returns NULL if the cache has no DMA pool or allocation fails.
- * Caller must hold NO locks — this function locks internally.
- */
-struct page_cache_entry *page_cache_alloc_entry(struct page_cache *pc,
-						daddr_t block);
-
 #endif /* _PAGE_CACHE_H_ */

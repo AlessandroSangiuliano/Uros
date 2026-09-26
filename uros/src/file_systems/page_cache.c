@@ -782,42 +782,6 @@ page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
 	return pc;
 }
 
-struct page_cache_entry *
-page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
-{
-	struct page_cache_entry *e;
-
-	if (!pc->pc_dma_pool)
-		return NULL;
-
-	pthread_mutex_lock(&pc->pc_lock);
-
-	/* Check if already cached (#599: a key being read is waited out) */
-	e = find_ready(pc, block);
-	if (e != NULL) {
-		lru_remove(e);
-		lru_insert_mru(pc, e);
-		pc->pc_hits++;
-		pthread_mutex_unlock(&pc->pc_lock);
-		return e;
-	}
-
-	pc->pc_misses++;
-
-	/* Get a free entry or evict (#599: keeping what cannot be written) */
-	e = take_victim(pc, PC_TAKE_ANY, NULL);
-	if (!e) {
-		pthread_mutex_unlock(&pc->pc_lock);
-		return NULL;
-	}
-
-	/* Set up the entry (data/phys already assigned from pool) */
-	key_entry(pc, e, block, PC_VALID);
-
-	pthread_mutex_unlock(&pc->pc_lock);
-	return e;
-}
-
 void
 page_cache_print_stats(struct page_cache *pc)
 {

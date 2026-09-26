@@ -367,16 +367,19 @@ vnode_mutex_unlock(struct ext2fs_file *fp)
  * releases it on its only way out.
  */
 struct ext2_bref {
+	struct page_cache_entry *br_entry; /* the page-cache slot br_data
+					   is in, pinned, or NULL */
 	vm_offset_t	br_priv;	/* a buffer of our own, or 0 */
 	vm_size_t	br_priv_size;
-	vm_offset_t	br_data;	/* the block's bytes: br_priv, or a
-					   page-cache slot */
+	vm_offset_t	br_data;	/* the block's bytes: br_entry's
+					   slot, or br_priv */
 	daddr_t		br_fblock;	/* the file block they are, or -1 */
 };
 
 static void
 bref_init(struct ext2_bref *br)
 {
+	br->br_entry = NULL;
 	br->br_priv = 0;
 	br->br_priv_size = 0;
 	br->br_data = 0;
@@ -386,11 +389,14 @@ bref_init(struct ext2_bref *br)
 /*
  * The buffer goes and its block number with it, in one place.  A release
  * that kept the number let the next read inside that block find it held,
- * answer 0 + off, and have its caller dereference that.
+ * answer 0 + off, and have its caller dereference that.  A slot is given
+ * back to the cache, which may reuse it from then on.
  */
 static void
-bref_release(struct ext2_bref *br)
+bref_release(struct ext2fs_file *fp, struct ext2_bref *br)
 {
+	if (br->br_entry != NULL)
+		page_cache_put(fp->f_dev.cache, br->br_entry);
 	if (br->br_priv != 0)
 		(void) vm_deallocate(mach_task_self(), br->br_priv,
 				     br->br_priv_size);
@@ -1178,6 +1184,29 @@ ext2_fill(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 }
 
 /*
+ * #599: `disk_block' through the page cache, for either branch of
+ * buf_read_file.  Readahead first, outside the fill -- its block_map takes
+ * the vnode lock, which a fill must never be inside -- and only for a
+ * sequential read of a block not already held.  Then page_cache_get, which
+ * reads a miss into a slot nobody else can see until the read has landed,
+ * and withdraws it if the read fails: the old paths keyed the slot first and
+ * read after, so a failed read left an unread block cached.
+ *
+ * Answers 0 and a pinned entry; 0 and NULL when the cache has no slot to
+ * give (the caller reads uncached and keeps none); or the read's error, with
+ * nothing cached.
+ */
+static int
+ext2_cache_get(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block,
+	       struct page_cache_entry **ep)
+{
+	if (file_block == fp->f_ra_last_block + 1 &&
+	    !page_cache_contains(fp->f_dev.cache, disk_block))
+		ext2_readahead(fp, file_block, disk_block);
+	return page_cache_get(fp->f_dev.cache, disk_block, ext2_fill, fp, ep);
+}
+
+/*
  * Read a portion of a file into an internal buffer.  Return
  * the location in the buffer and the amount in the buffer.
  * The buffer is br's, and stays valid until br is released
@@ -1215,11 +1244,13 @@ buf_read_file(
 	if (off || (!*buf_p) || *size_p < block_size ||
 	    ((*buf_p) & (fp->f_dev.rec_size-1))) {
 	    if (file_block != br->br_fblock) {
+		struct page_cache_entry *e = NULL;
+
 		/*
 		 * #599: the old block goes, number and all, before anything
 		 * that can fail; a failure below leaves nothing held.
 		 */
-		bref_release(br);
+		bref_release(fp, br);
 	        rc = block_map(fp, file_block, &disk_block);
 		if (rc != 0)
 		    return (rc);
@@ -1233,79 +1264,31 @@ buf_read_file(
 		    memset((void *)br->br_priv, 0, block_size);
 		    br->br_priv_size = block_size;
 		    br->br_data = br->br_priv;
-		} else if (fp->f_dev.cache) {
-		    vm_offset_t cached;
-		    vm_size_t   cached_size;
-
-		    if (page_cache_lookup(fp->f_dev.cache, disk_block,
-					  &cached, &cached_size) == 0) {
-			/* Page cache hit — borrow pointer (zero-copy) */
-			br->br_data = cached;
-		    } else {
-			/* Page cache miss — readahead if sequential */
-			if (file_block == fp->f_ra_last_block + 1)
-				ext2_readahead(fp, file_block, disk_block);
-
-			/* Re-check cache (readahead may have populated it) */
-			if (page_cache_lookup(fp->f_dev.cache, disk_block,
-					      &cached, &cached_size) == 0) {
-				br->br_data = cached;
-			} else if (fp->f_dev.cache->pc_dma_pool &&
-				   ext2_dev_has_phys(&fp->f_dev)) {
-				/* Zero-copy DMA path */
-				struct page_cache_entry *e;
-				e = page_cache_alloc_entry(fp->f_dev.cache,
-							   disk_block);
-				if (e) {
-					/* #599: not narrowed */
-					vm_address_t pa = e->pc_phys;
-					io_buf_len_t got;
-					rc = ext2_dev_read_phys(
-						&fp->f_dev,
-						(recnum_t) dbtorec(&fp->f_dev,
-							ext2_fsbtodb(fs,
-								disk_block)),
-						(io_buf_len_t) block_size,
-						&pa, 1, &got);
-					if (rc == 0 && got != (io_buf_len_t)block_size)
-						rc = D_IO_ERROR;	/* #599 */
-					if (rc)
-						return (rc);
-					br->br_data = e->pc_data;
-				} else {
-					goto fallback_read;
-				}
-			} else {
-fallback_read:
-				/* Single block read (fallback) */
-				rc = ext2_dev_read(&fp->f_dev,
-					     (recnum_t) dbtorec(&fp->f_dev,
-							ext2_fsbtodb(fs,
-								disk_block)),
-					     (int) block_size,
-					     (char **) &br->br_priv,
-					     &br->br_priv_size);
-				if (rc)
-				    return (rc);
-				br->br_data = br->br_priv;
-				page_cache_insert(fp->f_dev.cache, disk_block,
-						  br->br_priv,
-						  br->br_priv_size);
-			}
-		    }
 		} else {
-		    rc = ext2_dev_read(&fp->f_dev,
+		    if (fp->f_dev.cache) {
+			rc = ext2_cache_get(fp, file_block, disk_block, &e);
+			if (rc != 0)
+			    return (rc);
+		    }
+		    if (e != NULL) {
+			/* #599: held until br is released */
+			br->br_entry = e;
+			br->br_data = e->pc_data;
+		    } else {
+			/* No cache, or no slot to give: our own, cached
+			 * nowhere */
+			rc = ext2_dev_read(&fp->f_dev,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
 				     (int) block_size,
 				     (char **) &br->br_priv,
 				     &br->br_priv_size);
-		    if (rc == 0)
+			if (rc)
+			    return (rc);
 			br->br_data = br->br_priv;
-	        }
-		if (rc)
-		    return (rc);
+		    }
+		}
 
 	        br->br_fblock = file_block;
 	    }
@@ -1335,25 +1318,7 @@ fallback_read:
 		if (fp->f_dev.cache) {
 			struct page_cache_entry *e = NULL;
 
-			/*
-			 * #599: readahead first, outside the fill -- its
-			 * block_map takes the vnode lock, which a fill must
-			 * never be inside -- and only for a sequential read of
-			 * a block not already held.
-			 */
-			if (file_block == fp->f_ra_last_block + 1 &&
-			    !page_cache_contains(fp->f_dev.cache, disk_block))
-				ext2_readahead(fp, file_block, disk_block);
-
-			/*
-			 * #599: through page_cache_get, which reads a miss
-			 * into a slot nobody else can see until the read has
-			 * landed, and withdraws it if the read fails.  The old
-			 * path keyed the slot first and read after, so a
-			 * failed read left an unread block cached.
-			 */
-			rc = page_cache_get(fp->f_dev.cache, disk_block,
-					    ext2_fill, fp, &e);
+			rc = ext2_cache_get(fp, file_block, disk_block, &e);
 			if (rc != 0)
 				return (rc);
 			if (e != NULL) {
@@ -1534,6 +1499,58 @@ ext2_selftest_writeback(void *ctx, daddr_t block, vm_offset_t data,
 	return KERN_FAILURE;
 }
 
+/*
+ * E5: the buffered path holds a cache slot for as long as its bref and no
+ * longer, and a buffered read that fails leaves nothing cached.  Block 1
+ * (disk 20) is put in the cache clean and read unaligned: answered from the
+ * slot, pinned while the bref holds it, unpinned once it is released.  Then
+ * block 2, mapped to disk 21 and not held, read unaligned on the device that
+ * answers nothing: an error, 21 not held, and no slot pinned.
+ */
+static void
+ext2_selftest_bref(struct ext2fs_file *f, struct ext2_bref *br,
+		   struct page_cache *pc, unsigned int *ran,
+		   unsigned int *wrong)
+{
+	unsigned char			 blk[1024];
+	struct page_cache_entry		*e;
+	vm_offset_t			 buf = 0;
+	vm_size_t			 size = 0;
+	unsigned int			 i, pinned;
+	int				 rc;
+
+	memset(blk, 0x5a, sizeof(blk));
+	page_cache_insert(pc, 20, (vm_offset_t)blk, sizeof(blk));
+	f->f_ra_last_block = (daddr_t)-2;
+	rc = buf_read_file(f, br, 1024 + 5, &buf, &size);
+	e = br->br_entry;
+	(*ran)++;
+	if (rc != 0 || e == NULL || e->pc_refs != 1 || size != 1024 - 5 ||
+	    *(const unsigned char *)buf != 0x5a) {
+		(*wrong)++;
+		e = NULL;
+	}
+	bref_release(f, br);
+	if (e != NULL && e->pc_refs != 0)
+		(*wrong)++;
+
+	f->f_ic->i_block[2] = 21;
+	f->f_ra_last_block = (daddr_t)-2;
+	buf = 0;
+	size = 0;
+	rc = buf_read_file(f, br, 2048 + 5, &buf, &size);
+	pinned = 0;
+	for (i = 0; i < pc->pc_max_entries; i++)
+		if (pc->pc_pool[i].pc_refs != 0)
+			pinned++;
+	(*ran)++;
+	if (rc == 0 || br->br_entry != NULL ||
+	    page_cache_contains(pc, 21) || pinned != 0)
+		(*wrong)++;
+	bref_release(f, br);
+	f->f_ic->i_block[2] = 0;
+}
+
 void
 ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 {
@@ -1615,7 +1632,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	 * afresh -- zeros, a real buffer -- not answered from a released one
 	 * as 0 + 5.
 	 */
-	bref_release(&br);
+	bref_release(&f, &br);
 	buf = 0;
 	size = 0;
 	(void) buf_read_file(&f, &br, 0, &buf, &size);
@@ -1628,7 +1645,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	(*ran)++;
 	if (rc != 0 || buf < 4096 || size != 1024 - 5)
 		(*wrong)++;
-	bref_release(&br);
+	bref_release(&f, &br);
 
 	/*
 	 * E3: an aligned read goes through the page cache's get, and a read
@@ -1652,6 +1669,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 			if (rc == 0 || page_cache_contains(pc, 20) ||
 			    pc->pc_misses != 1)
 				(*wrong)++;
+			ext2_selftest_bref(&f, &br, pc, ran, wrong);
 			f.f_dev.cache = NULL;
 			(void) vm_deallocate(mach_task_self(), page, 4096);
 		} else {
@@ -1662,7 +1680,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 			(void) page_cache_destroy(pc);
 	}
 
-	bref_release(&br);
+	bref_release(&f, &br);
 	free_file_buffers(&f);
 	ext2_selftest_quiet = 0;
 }
@@ -1760,7 +1778,7 @@ search_directory(
 
 	bref_init(&br);
 	rc = search_directory_impl(name, fp, &br, inumber_p);
-	bref_release(&br);
+	bref_release(fp, &br);
 	return (rc);
 }
 
@@ -2438,13 +2456,13 @@ ext2fs_read_file(
 	vm_offset_t		start,
 	vm_size_t		size)
 {
+	struct ext2fs_file	*fp = (struct ext2fs_file *)private;
 	struct ext2_bref	br;
 	int			rc;
 
 	bref_init(&br);
-	rc = ext2fs_read_file_impl((struct ext2fs_file *)private, &br,
-				   offset, start, size);
-	bref_release(&br);
+	rc = ext2fs_read_file_impl(fp, &br, offset, start, size);
+	bref_release(fp, &br);
 	return (rc);
 }
 
@@ -2522,13 +2540,13 @@ ext2fs_readdir(fs_private_t private,
 	       unsigned int max,
 	       unsigned int *out_count)
 {
+	struct ext2fs_file	*fp = (struct ext2fs_file *)private;
 	struct ext2_bref	br;
 	int			rc;
 
 	bref_init(&br);
-	rc = ext2fs_readdir_impl((struct ext2fs_file *)private, &br, out,
-				 max, out_count);
-	bref_release(&br);
+	rc = ext2fs_readdir_impl(fp, &br, out, max, out_count);
+	bref_release(fp, &br);
 	return rc;
 }
 
@@ -3121,7 +3139,7 @@ dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
 
 	bref_init(&br);
 	rc = dir_add_entry_impl(dir_fp, &br, name, ino, file_type);
-	bref_release(&br);
+	bref_release(dir_fp, &br);
 	return rc;
 }
 
@@ -3206,7 +3224,7 @@ dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
 
 	bref_init(&br);
 	rc = dir_remove_entry_impl(dir_fp, &br, name, ino_out);
-	bref_release(&br);
+	bref_release(dir_fp, &br);
 	return rc;
 }
 
