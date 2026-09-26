@@ -226,6 +226,8 @@ ds_device_open(mach_port_t master, mach_port_t reply,
  * poisons and frees it, and destroys its receive right.  Everything a handle
  * holds is let go here, so neither path can forget a part of it.
  */
+static void blk_phys_said(const struct blk_handle *h, const char *when);
+
 static void
 blk_handle_destroy(struct blk_handle *h, const char *how)
 {
@@ -249,6 +251,8 @@ blk_handle_destroy(struct blk_handle *h, const char *how)
 	       h->n_dma_caps + h->dropped == 1 ? "y" : "ies",
 	       h->refusals, h->refusals == 1 ? "" : "s");
 
+	if (h->phys_req != 0)
+		blk_phys_said(h, "in all,");
 	memset(h->dma_cap, 0, sizeof(h->dma_cap));	/* #599 */
 	h->magic = 0;        /* poison so a stray msg can't reuse it */
 	blk_payload_release(h->payload);
@@ -912,6 +916,45 @@ blk_pages_cover(mach_msg_type_number_t npages, unsigned int total,
 	return 0;
 }
 
+static unsigned long long blk_tsc(void);
+
+/*
+ * #599: the cost of asking.  Every page of a physical transfer is asked of
+ * the kernel (device_dma_map_foreign_op): one RPC and one MAC a page.  This
+ * keeps the cycles spent asking against the cycles of the transfer, per
+ * handle, and says them at powers of two from 1024 requests and when the
+ * handle ends -- the number that decides whether the kernel needs a faster
+ * path for the same answer.
+ */
+static void
+blk_phys_said(const struct blk_handle *h, const char *when)
+{
+	uint64_t per_page = h->phys_pages ? h->xlate_cyc / h->phys_pages : 0;
+	uint64_t per_req = h->phys_req ? h->xfer_cyc / h->phys_req : 0;
+	uint64_t all = h->xlate_cyc + h->xfer_cyc;
+	unsigned permille = all ? (unsigned)((h->xlate_cyc * 1000) / all) : 0;
+
+	printf("blk: %s: %s %llu physical requests, %llu pages: asking the "
+	       "kernel %llu cycles a page, the transfer %llu a request — "
+	       "asking is %u.%u%% of it\n", h->part ? h->part->name : "?",
+	       when, (unsigned long long)h->phys_req,
+	       (unsigned long long)h->phys_pages, (unsigned long long)per_page,
+	       (unsigned long long)per_req, permille / 10, permille % 10);
+}
+
+static void
+blk_phys_account(struct blk_handle *h, unsigned int pages,
+		 unsigned long long t0, unsigned long long t1,
+		 unsigned long long t2)
+{
+	h->phys_req++;
+	h->phys_pages += pages;
+	h->xlate_cyc += t1 - t0;
+	h->xfer_cyc += t2 - t1;
+	if (h->phys_req >= 1024 && (h->phys_req & (h->phys_req - 1)) == 0)
+		blk_phys_said(h, "after");
+}
+
 /* A refusal the kernel will give again whatever is asked (#599). */
 static int
 blk_refusal_is_final(kern_return_t kr)
@@ -1078,6 +1121,9 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		 * before the driver is called, so nothing is sent and nothing
 		 * reports success.
 		 */
+		unsigned long long t0 = blk_tsc(), t1;
+		int rc;
+
 		for (i = 0; i < phys_addrsCnt; i++) {
 			kr = blk_dma_for(h, phys_addrs[i],
 					 CAP_OP_DMA_DEVICE_WRITE, &dma[i]);
@@ -1088,12 +1134,15 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 			}
 		}
 
-		if (ctrl->ops->read_sectors_phys(ctrl->priv,
+		t1 = blk_tsc();
+		rc = ctrl->ops->read_sectors_phys(ctrl->priv,
 					  part->disk_index,
 					  part->start_lba + recnum,
 					  nsectors,
 					  dma, phys_addrsCnt,
-					  total) < 0)
+					  total);
+		blk_phys_account(h, phys_addrsCnt, t0, t1, blk_tsc());
+		if (rc < 0)
 			return D_IO_ERROR;
 	}
 
@@ -1148,6 +1197,9 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		 * direction (#599: a write needs the device to READ the page),
 		 * and refuse the same way: before the driver is called.
 		 */
+		unsigned long long t0 = blk_tsc(), t1;
+		int rc;
+
 		for (i = 0; i < phys_addrsCnt; i++) {
 			kr = blk_dma_for(h, phys_addrs[i],
 					 CAP_OP_DMA_DEVICE_READ, &dma[i]);
@@ -1158,12 +1210,15 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 			}
 		}
 
-		if (ctrl->ops->write_sectors_phys(ctrl->priv,
+		t1 = blk_tsc();
+		rc = ctrl->ops->write_sectors_phys(ctrl->priv,
 						   part->disk_index,
 						   part->start_lba + recnum,
 						   nsectors,
 						   dma, phys_addrsCnt,
-						   total) < 0)
+						   total);
+		blk_phys_account(h, phys_addrsCnt, t0, t1, blk_tsc());
+		if (rc < 0)
 			return D_IO_ERROR;
 	}
 
