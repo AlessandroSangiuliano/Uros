@@ -367,49 +367,64 @@ ddb_8042_out_full(void)
 	return -1;
 }
 
-static void
+static int
 ddb_8042_cmd(unsigned char c)
 {
-	if (ddb_8042_in_empty() == 0)
-		outb(KBD_STATUS, c);
+	if (ddb_8042_in_empty() < 0)
+		return -1;
+	outb(KBD_STATUS, c);
+	return 0;
 }
 
-static void
+static int
 ddb_8042_data(unsigned char v)
 {
-	if (ddb_8042_in_empty() == 0)
-		outb(KBD_DATA, v);
+	if (ddb_8042_in_empty() < 0)
+		return -1;
+	outb(KBD_DATA, v);
+	return 0;
 }
 
-static void
-ddb_8042_kbd_enable(void)
+/*
+ * #599: answers the configuration byte READ BACK after it was written, or -1
+ * when the 8042 did not answer; *ack is the keyboard's answer to
+ * enable-scan, or -1 when none came.  It gave up in silence, and the boot
+ * line promised a door the controller may not have opened.
+ */
+static int
+ddb_8042_kbd_enable(int *ack)
 {
 	unsigned char cfg;
 	int i;
 
-	ddb_8042_cmd(I8042_DISABLE_P1);
-	ddb_8042_cmd(I8042_DISABLE_P2);
+	*ack = -1;
+	if (ddb_8042_cmd(I8042_DISABLE_P1) < 0 ||
+	    ddb_8042_cmd(I8042_DISABLE_P2) < 0)
+		return -1;
 	for (i = 0; i < 16; i++) {		/* drain stale OBF bytes */
 		if ((inb(KBD_STATUS) & KBD_STAT_OBF) == 0)
 			break;
 		(void)inb(KBD_DATA);
 	}
 
-	ddb_8042_cmd(I8042_READ_CFG);
-	if (ddb_8042_out_full() < 0)
-		return;
+	if (ddb_8042_cmd(I8042_READ_CFG) < 0 || ddb_8042_out_full() < 0)
+		return -1;
 	cfg = inb(KBD_DATA);
 	cfg |= 0x01;	/* enable port-1 (keyboard) interrupt -> IRQ 1 */
 	cfg |= 0x40;	/* translate to scancode set 1 (our tables) */
 	cfg &= ~0x10;	/* clear "disable port-1 clock" -> keyboard on */
-	ddb_8042_cmd(I8042_WRITE_CFG);
-	ddb_8042_data(cfg);
+	if (ddb_8042_cmd(I8042_WRITE_CFG) < 0 || ddb_8042_data(cfg) < 0)
+		return -1;
+	if (ddb_8042_cmd(I8042_READ_CFG) < 0 || ddb_8042_out_full() < 0)
+		return -1;
+	cfg = inb(KBD_DATA);			/* what it holds now */
 
-	ddb_8042_cmd(I8042_ENABLE_P1);
-
-	ddb_8042_data(KBD_ENABLE_SCAN);		/* 0xF4 */
+	if (ddb_8042_cmd(I8042_ENABLE_P1) < 0 ||
+	    ddb_8042_data(KBD_ENABLE_SCAN) < 0)	/* 0xF4 */
+		return -1;
 	if (ddb_8042_out_full() == 0)
-		(void)inb(KBD_DATA);		/* eat the 0xFA ACK */
+		*ack = inb(KBD_DATA);		/* 0xFA, as read */
+	return cfg;
 }
 
 /*
@@ -423,7 +438,7 @@ void
 ddb_kbd_break_init(void)
 {
 	spl_t	s;
-	int	o_unit, o_spl;
+	int	o_unit, o_spl, cfg, ack;
 	intr_t	o_handler;
 
 	if (!ddb_kbd_break_enabled)
@@ -440,10 +455,22 @@ ddb_kbd_break_init(void)
 	 */
 
 	s = splhigh();
-	ddb_8042_kbd_enable();		/* make the 8042 deliver IRQ 1 */
+	cfg = ddb_8042_kbd_enable(&ack);	/* make the 8042 deliver IRQ 1 */
 	reset_irq(1, &o_unit, &o_spl, &o_handler);
 	take_irq(1, 1, SPL6, (intr_t)ddb_kbd_intr);
 	splx(s);
 
-	printf("DDB: press Ctrl+D on the PS/2 keyboard to enter the debugger\n");
+	if (cfg < 0) {
+		printf("DDB: the 8042 did not answer — the PS/2 break key will "
+		       "not work (#599)\n");
+		return;
+	}
+	if (ack >= 0)
+		printf("DDB: press Ctrl+D on the PS/2 keyboard to enter the "
+		       "debugger (config 0x%02x read back, the keyboard answered "
+		       "0x%02x)\n", (unsigned)cfg, (unsigned)ack);
+	else
+		printf("DDB: press Ctrl+D on the PS/2 keyboard to enter the "
+		       "debugger (config 0x%02x read back; the keyboard did not "
+		       "answer enable-scan)\n", (unsigned)cfg);
 }
