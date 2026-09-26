@@ -216,6 +216,18 @@ ext2_dev_read(struct device *dev, recnum_t recnum,
 	else
 		kr = device_read(dev->dev_port, 0, recnum,
 				 (int)bytes_wanted, data, &count);
+	/*
+	 * #599: every byte asked for, or an error.  A short answer was
+	 * handed on as a read, and readahead built cache entries out of the
+	 * bytes past it.  The out-of-line buffer goes back here.
+	 */
+	if (kr == KERN_SUCCESS && (io_buf_len_t)count < bytes_wanted) {
+		if (count != 0)
+			(void) vm_deallocate(mach_task_self(),
+					     (vm_offset_t)*data, count);
+		*data = 0;
+		kr = D_IO_ERROR;
+	}
 	if (kr == KERN_SUCCESS)
 		*bytes_read = (vm_size_t)count;
 	return kr;
@@ -249,6 +261,8 @@ ext2_dev_read_overwrite(struct device *dev, recnum_t recnum,
 	else
 		kr = device_read_overwrite(dev->dev_port, 0, recnum,
 					   bytes_wanted, buffer, &count);
+	if (kr == KERN_SUCCESS && (io_buf_len_t)count < bytes_wanted)
+		kr = D_IO_ERROR;		/* #599: every byte, or an error */
 	if (kr == KERN_SUCCESS)
 		*bytes_read = (vm_size_t)count;
 	return kr;
@@ -1191,6 +1205,8 @@ buf_read_file(
 								disk_block)),
 						(io_buf_len_t) block_size,
 						&pa, 1, &br);
+					if (rc == 0 && br != (io_buf_len_t)block_size)
+						rc = D_IO_ERROR;	/* #599 */
 					if (rc)
 						return (rc);
 					fp->f_buf = e->pc_data;
@@ -1293,6 +1309,9 @@ fallback_read:
 									disk_block)),
 							(io_buf_len_t) block_size,
 							&pa, 1, &br);
+						if (rc == 0 && br !=
+						    (io_buf_len_t)block_size)
+							rc = D_IO_ERROR; /* #599 */
 						if (rc)
 							return (rc);
 						memcpy((void *)*buf_p,
