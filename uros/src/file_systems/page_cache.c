@@ -647,13 +647,16 @@ page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
 	/* Set up DMA pool metadata */
 	pc->pc_dma_pool = pool_va;
 	pc->pc_dma_pool_size = (vm_size_t)n_pages * 4096;
-	pc->pc_dma_n_pages = n_pages;
-	pc->pc_block_size = block_size;
-	if (n_pages > 4096)
-		n_pages = 4096;
-	memcpy(pc->pc_dma_pa, pa_list, n_pages * sizeof(unsigned int));
 
-	/* Pre-assign data buffers and physical addresses to each entry */
+	/*
+	 * Pre-assign data buffers and physical addresses to each entry.
+	 *
+	 * #599: pa_list is read here and nowhere after.  A copy of it, kept in
+	 * the cache beside two sizes, was written at half its width (a
+	 * sizeof(unsigned int) left over from before #520) and read by nothing;
+	 * it went, with the sizes.  pc_phys is the only record of a page's
+	 * address, and it is as wide as the list it comes from.
+	 */
 	for (i = 0; i < max_entries; i++) {
 		unsigned int page_idx = i / entries_per_page;
 		unsigned int offset = (i % entries_per_page) *

@@ -1120,8 +1120,8 @@ buf_read_file(
 				e = page_cache_alloc_entry(fp->f_dev.cache,
 							   disk_block);
 				if (e) {
-					vm_address_t pa =
-						(unsigned int)e->pc_phys;
+					/* #599: not narrowed */
+					vm_address_t pa = e->pc_phys;
 					io_buf_len_t br;
 					rc = ext2_dev_read_phys(
 						&fp->f_dev,
@@ -1221,8 +1221,8 @@ fallback_read:
 					e = page_cache_alloc_entry(
 						fp->f_dev.cache, disk_block);
 					if (e) {
-						vm_address_t pa =
-							(unsigned int)e->pc_phys;
+						/* #599: not narrowed */
+						vm_address_t pa = e->pc_phys;
 						io_buf_len_t br;
 						rc = ext2_dev_read_phys(
 							&fp->f_dev,

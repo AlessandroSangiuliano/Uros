@@ -64,7 +64,8 @@ struct page_cache_entry {
 	daddr_t			pc_block;	/* disk block number (key) */
 	vm_offset_t		pc_data;	/* cached block data */
 	vm_size_t		pc_size;	/* size of cached data */
-	vm_offset_t		pc_phys;	/* physical addr (0 = vm_allocate'd) */
+	vm_offset_t		pc_phys;	/* physical addr (0 = vm_allocate'd); full
+					   width: a page can be above 4 GiB (#599) */
 	int			pc_dirty;	/* block has been modified */
 	int			pc_busy;	/* #384: writeback in flight —
 						   its data is being written
@@ -90,14 +91,6 @@ struct page_cache {
 	/* DMA pool: pre-allocated wired pages with known physical addrs */
 	vm_offset_t		pc_dma_pool;	  /* base VA (0 = no DMA) */
 	vm_size_t		pc_dma_pool_size; /* total pool bytes */
-	/*
-	 * 🔴 vm_address_t since #520.  These feed pc_phys, which has always
-	 * been a vm_offset_t -- so the narrow half of the pair was silently
-	 * deciding how far a zero-copy read could reach.
-	 */
-	vm_address_t		pc_dma_pa[4096];  /* per-page physical addrs */
-	unsigned int		pc_dma_n_pages;	  /* number of DMA pages */
-	vm_size_t		pc_block_size;	  /* block size for slot calc */
 	struct page_cache_entry	*pc_hash[PAGE_CACHE_HASH_BUCKETS];
 	/* LRU sentinels: head.pc_lru_next = MRU, tail.pc_lru_prev = LRU */
 	struct page_cache_entry	pc_lru_head;
