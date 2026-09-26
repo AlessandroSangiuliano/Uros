@@ -454,9 +454,16 @@ int iommu_amd_build(void)
 	 * smallest either may be.  Allocated here rather than in stage 2b
 	 * because an engine cannot be enabled without them and finding that
 	 * out with translation half on is not a discovery anyone wants.
+	 *
+	 * #599: one event log PER UNIT, frames side by side.  Every unit was
+	 * pointed at the same frame, and two engines writing one ring each
+	 * overwrite the other's entries and move a head the other does not
+	 * own.  Units numbered 1 and above have never run: QEMU refuses a
+	 * second vIOMMU.  The command buffer is still shared -- a grant-path
+	 * question, not the fault log's.
 	 */
 	command = boot_frame_alloc();
-	event = boot_frame_alloc();
+	event = boot_frames_alloc(iommu_unit_count() ? iommu_unit_count() : 1);
 	if (command == 0 || event == 0)
 		return 0;
 
@@ -487,7 +494,8 @@ int iommu_amd_build(void)
 
 	iommu_record_tables(table, (uint64_t)AMD_DEVICE_TABLE_FRAMES * 4096u,
 			    command, event, written, 0,
-			    AMD_DEVICE_TABLE_FRAMES + 2u);
+			    AMD_DEVICE_TABLE_FRAMES + 1u +
+			    (iommu_unit_count() ? iommu_unit_count() : 1));
 	return 1;
 }
 
@@ -556,7 +564,8 @@ int iommu_amd_enable(void)
 		*(volatile uint64_t *)(regs + AMD_REG_CMDBUF) =
 			(t->command & AMD_BASE_MASK) | AMD_BUFLEN_256;
 		*(volatile uint64_t *)(regs + AMD_REG_EVTLOG) =
-			(t->event & AMD_BASE_MASK) | AMD_BUFLEN_256;
+			((t->event + (uint64_t)i * AMD_EVENT_LOG_BYTES)
+			 & AMD_BASE_MASK) | AMD_BUFLEN_256;	/* #599 */
 
 		/*
 		 * The ring pointers, written rather than trusted.  They reset
@@ -1222,7 +1231,8 @@ int iommu_amd_evtlog_of(unsigned unit, struct iommu_amd_evtlog *v)
 	v->status = (volatile uint64_t *)(regs + AMD_REG_STATUS);
 	v->status_w1c = v->status;
 	v->control = (volatile uint64_t *)(regs + AMD_REG_CONTROL);
-	v->log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event);
+	v->log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event +
+			(uint64_t)unit * AMD_EVENT_LOG_BYTES);	/* its own */
 	v->bytes = AMD_EVENT_LOG_BYTES;
 	return 1;
 }
