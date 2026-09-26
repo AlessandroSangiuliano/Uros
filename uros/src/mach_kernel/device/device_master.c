@@ -1846,12 +1846,21 @@ dma_region_drop(vm_offset_t kva, task_t owner, vm_size_t size, natural_t bdf)
 						    (unsigned long)snap.size);
 
 		if (snap.task != TASK_NULL) {
-			/* uva == 0 is a reservation whose mapping never
-			 * completed (map_pages_into_task); nothing to unmap. */
+			/*
+			 * uva == 0 is a reservation whose mapping never
+			 * completed (map_pages_into_task); nothing to unmap.
+			 *
+			 * #599: only the pages that still map this region's
+			 * frames.  This removed [uva, uva + size) by address,
+			 * and the owner may have deallocated the range and
+			 * mapped something else there before freeing -- the
+			 * AHCI driver does exactly that -- which then went.
+			 */
 			if (snap.uva != 0)
-				(void) vm_map_remove(snap.task->map, snap.uva,
-						     snap.uva + snap.size,
-						     VM_MAP_NO_FLAGS);
+				(void) vm_map_remove_frames(snap.task->map,
+							    snap.uva, snap.pa,
+							    snap.npages,
+							    VM_MAP_NO_FLAGS);
 			task_deallocate(snap.task);
 		}
 		if (snap.owner != TASK_NULL)

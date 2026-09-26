@@ -1120,6 +1120,74 @@ a_buffer_is_freed_whole_and_once(mach_port_t device_port)
     return 1;
 }
 
+/*
+ * ── [23] A free takes back the buffer's mapping, not the address (#599) ───
+ *
+ * The drop of a region removed the owner's user mapping by address, whatever
+ * occupied it by then -- and the AHCI driver deallocates its buffers' user
+ * mappings before it frees them.  So a task that gave the range back and
+ * mapped something else there lost that instead.  This deallocates a buffer's
+ * mapping, maps a page of its own at the same address, writes 0x5A, frees the
+ * buffer, and reads the page back: it must still be there, still 0x5A.
+ */
+static int
+a_free_takes_its_mapping_not_the_address(mach_port_t device_port)
+{
+    kern_return_t   kr, kr_free, kr_read;
+    vm_address_t    kva = 0, uva = 0, mine;
+    vm_address_t   *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0, got = 0;
+    uint64_t        region_id = 0;
+    vm_offset_t     data = 0;
+    unsigned char   seen = 0;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [23] a free takes its own mapping — DID NOT RUN, "
+               "no buffer (kr=%d)\n", (int)kr);
+        return 1;
+    }
+
+    (void)vm_deallocate(mach_task_self(), uva, 4096);
+    mine = uva;
+    kr = vm_allocate(mach_task_self(), &mine, 4096, FALSE);
+    if (kr != KERN_SUCCESS || mine != uva) {
+        printf("cap_test: [23] a free takes its own mapping — DID NOT RUN, "
+               "the address was not given back to this task (kr=%d)\n",
+               (int)kr);
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+        return 1;
+    }
+    *(volatile unsigned char *)mine = 0x5A;
+
+    kr_free = device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    kr_read = vm_read(mach_task_self(), mine, 4096, &data, &got);
+    if (kr_read == KERN_SUCCESS) {
+        seen = *(unsigned char *)data;
+        (void)vm_deallocate(mach_task_self(), data, got);
+    }
+    (void)vm_deallocate(mach_task_self(), mine, 4096);
+
+    if (kr_free != KERN_SUCCESS || kr_read != KERN_SUCCESS || seen != 0x5A) {
+        printf("cap_test: [23] WRONG — a buffer freed after its range was "
+               "given back and remapped: the free answered %d, a read of "
+               "the page mapped there since %d, holding 0x%x — the free "
+               "took an address that was no longer the buffer's\n",
+               (int)kr_free, (int)kr_read, (unsigned)seen);
+        return 0;
+    }
+    printf("cap_test: [23] a buffer freed after its range was given back and "
+           "remapped (free kr=%d): the page mapped there since still reads "
+           "(kr=%d) 0x%x — the free took the buffer's mapping, not its "
+           "address\n", (int)kr_free, (int)kr_read, (unsigned)seen);
+    return 1;
+}
+
 static int
 a_device_has_one_driver(mach_port_t device_port)
 {
@@ -2110,6 +2178,10 @@ main(int argc, char **argv)
 
     /* #599: a DMA buffer is freed by its owner, whole, once. */
     if (!a_buffer_is_freed_whole_and_once(device_port))
+        pass = 0;
+
+    /* #599: and its free takes its mapping, not whatever is there now. */
+    if (!a_free_takes_its_mapping_not_the_address(device_port))
         pass = 0;
 
     /*
