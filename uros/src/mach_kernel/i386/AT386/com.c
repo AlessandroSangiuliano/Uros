@@ -1297,65 +1297,110 @@ static int	com_tx_stuck;
  * from THR and IER into the divisor latch: a THR write that lands while it is
  * set becomes a divisor byte.  The console writes THR from any context, and
  * the divisor was set by uart.so with its own outb, under nothing the kernel
- * knew about -- the census's DLAB row.  The divisor is now set only here
- * (com_set_divisor, for the task that holds COM1), and it and com_putc's THR
- * write both hold com_bank_lock.
+ * knew about -- the census's DLAB row.  Now every access to the chip from
+ * this kernel holds com_bank_lock: the console's THR write (com_putc), the
+ * divisor sequence (com_set_divisor), and every register a task reaches
+ * through device_io_port_read/write (com_port_in/com_port_out).  The kernel's
+ * own tty driver for COM1 does not open (comopen), and the I/O bitmap no
+ * longer reaches the chip (iopl.c).
  *
- * A leaf lock with interrupts off, in ioapic_pair_enter's shape, with a
- * holder: an NMI or a nested printf on the holder's own processor must not
- * wait on itself.  Such a writer, and DDB (db_active: the other processors are
- * parked and one of them may hold the lock), take nothing and write THR only
- * if DLAB is clear, counting the bytes they drop.
+ * A leaf lock with interrupts off, in ioapic_pair_enter's shape.  Who does
+ * not wait on it: a writer nested on a processor that is already inside (an
+ * NMI, a printf inside the hold) -- com_bank_mine[] is set before the lock is
+ * taken and cleared after it is let go, so the whole hold is covered, the
+ * spin included -- and the processor a DDB session runs on (com_ddb_cpu).
+ * Those take nothing and write THR only if DLAB is clear, counting the bytes
+ * they drop.  Every other processor takes the lock as always, session or
+ * not: until it is parked it is still running.
  */
-extern int			db_active;
 static volatile unsigned char	com_bank_lock;
-static volatile int		com_bank_holder = -1;
+static volatile unsigned char	com_bank_mine[NCPUS];
+static volatile int		com_ddb_cpu = -1;
 unsigned int			com_bank_dropped;	/* THR bytes not written:
 							   DLAB set, lock not ours */
 
 static int
+com_bank_try(void)
+{
+	unsigned char busy = 1;
+
+	__asm__ volatile("xchgb %0, %1"
+			 : "+q" (busy), "+m" (com_bank_lock)
+			 : : "memory");
+	return busy == 0;
+}
+
+static int
 com_bank_enter(unsigned int *flags)
 {
-	unsigned char busy;
 	int me;
 
 	__asm__ volatile("pushfl; popl %0; cli" : "=r" (*flags) : : "memory");
 	me = cpu_number();
-	if (db_active || com_bank_holder == me)
+	if (com_ddb_cpu == me || com_bank_mine[me])
 		return 0;
+	com_bank_mine[me] = 1;
+	__asm__ volatile("" : : : "memory");
 #ifndef	ABLATE_599_COM_NO_LOCK
-	for (;;) {
-		busy = 1;
-		__asm__ volatile("xchgb %0, %1"
-				 : "+q" (busy), "+m" (com_bank_lock)
-				 : : "memory");
-		if (busy == 0)
-			break;
+	while (!com_bank_try())
 		__asm__ volatile("pause");
-	}
-#else
-	(void)busy;
 #endif
-	com_bank_holder = me;
 	return 1;
 }
 
+static void
+com_bank_leave(unsigned int flags, int took)
+{
+	if (took) {
+		__asm__ volatile("" : : : "memory");
+#ifndef	ABLATE_599_COM_NO_LOCK
+		com_bank_lock = 0;
+		__asm__ volatile("" : : : "memory");
+#endif
+		com_bank_mine[cpu_number()] = 0;
+	}
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 /*
- * #599: DDB's session on the bank.  DDB writes the console without
- * com_bank_lock, so a divisor sequence it interrupted half-way -- DLAB set --
- * would take its bytes into the divisor.  The outermost entry saves LCR and
- * clears DLAB; the outermost exit puts LCR back exactly, so an interrupted
- * sequence goes on where it meant to.  Outside any NCPUS test: one processor
- * can be caught half-way as well.
+ * #599: DDB's session on the bank, from the processor that stopped the
+ * others, after they are parked (kdb_trap waits for them) and until before
+ * they are let go.
+ *
+ * Entry takes the bank if nobody holds it -- bounded, because a processor
+ * parked in the middle of a divisor sequence holds it for as long as the
+ * session lasts, and not tried at all if this processor is itself inside it
+ * -- then saves LCR and closes the latch.  Exit puts LCR back exactly and
+ * gives the bank back if it took it, so a sequence a parked processor was in
+ * the middle of goes on where it meant to.  In between this processor takes
+ * nothing (com_ddb_cpu).  Outside any NCPUS test: one processor can be caught
+ * half-way as well.
  */
+#define	COM_DDB_SPINS	1000000
+
 static int	com_ddb_lcr = -1;
+static int	com_ddb_locked;
 
 void
 com_ddb_session(int entering)
 {
-	int lcr;
+	int lcr, i;
 
 	if (entering) {
+		com_ddb_locked = 0;
+#ifndef	ABLATE_599_COM_NO_LOCK
+		for (i = 0; i < COM_DDB_SPINS &&
+			    !com_bank_mine[cpu_number()]; i++) {
+			if (com_bank_try()) {
+				com_ddb_locked = 1;
+				break;
+			}
+			__asm__ volatile("pause");
+		}
+#else
+		(void)i;
+#endif
+		com_ddb_cpu = cpu_number();
 		lcr = inb(LINE_CTL(COM0_ADDR));
 		com_ddb_lcr = lcr;
 		if (lcr & iDLAB) {
@@ -1367,27 +1412,22 @@ com_ddb_session(int entering)
 	} else if (com_ddb_lcr >= 0) {
 		outb(LINE_CTL(COM0_ADDR), com_ddb_lcr);
 		com_ddb_lcr = -1;
+		com_ddb_cpu = -1;
+		if (com_ddb_locked) {
+			com_ddb_locked = 0;
+			__asm__ volatile("" : : : "memory");
+			com_bank_lock = 0;
+		}
 	}
-}
-
-static void
-com_bank_leave(unsigned int flags, int took)
-{
-	if (took) {
-		com_bank_holder = -1;
-		__asm__ volatile("" : : : "memory");
-		com_bank_lock = 0;
-	}
-	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
 }
 
 /*
  * #599: the divisor, set by the kernel for the task that holds COM1
  * (device_io_port_set_divisor): LCR with DLAB, DLL, DLM, the latch read back
  * while it is still open, LCR as it was -- all under com_bank_lock, which
- * com_putc's THR write takes.  Answers what the latch held.  A read back
- * that differs from what was written is counted and said, every time: it is
- * the census's DLAB race, and the test's measure.
+ * com_putc's THR write takes.  Answers what the latch held, and counts a
+ * read-back that differs (com_divisor_wrong); saying it is the caller's --
+ * device_md_io_set_divisor, comprobe and the -U test each do.
  *
  * ABLATE_599_WIDEN_DIVISOR holds the latch open for N port-0x80 reads
  * between DLL and DLM, with the lock held, so a writer that ignored the lock

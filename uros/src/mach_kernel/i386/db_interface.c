@@ -325,11 +325,30 @@ kdb_trap(
 	 */
 	{
 		extern volatile int ddb_nmi_park;
+		extern volatile int ddb_nmi_parked;
 		extern void lapic_send_nmi_all_excluding_self(void);
 
 		if (db_active == 1 && !ddb_nmi_park) {
 			ddb_nmi_park = 1;
 			lapic_send_nmi_all_excluding_self();
+		}
+		/*
+		 * #599: and wait until they ARE parked -- whoever sent the
+		 * NMIs (device_md_debugger_break sends them before Debugger).
+		 * The send waits only for the ICR, and a processor still
+		 * running could open COM1's latch after the bank was looked
+		 * at.  Bounded: a processor that never parks is a machine
+		 * that has other problems, and the session goes on.
+		 */
+		if (db_active == 1 && ddb_nmi_park) {
+			int i, n = 0, spins;
+
+			for (i = 0; i < NCPUS; i++)
+				if (i != cpu_number() && machine_slot[i].running)
+					n++;
+			for (spins = 0; ddb_nmi_parked < n &&
+				     spins < 10000000; spins++)
+				__asm__ __volatile__("pause" : : : "memory");
 		}
 	}
 #endif	/* NCPUS > 1 */
@@ -475,6 +494,14 @@ kdb_trap(
 	enable_preemption();
 #endif	/* NCPUS > 1 */
 
+	/*
+	 * #599: the bank back BEFORE the parked processors go -- one of them
+	 * may be in the middle of a divisor sequence, and must find LCR as it
+	 * left it.
+	 */
+	if (db_active == 1)
+		com_ddb_session(0);	/* #599: LCR back exactly */
+
 #if	NCPUS > 1
 	/*
 	 * #382: outermost exit — release the CPUs parked at entry.  They
@@ -489,8 +516,6 @@ kdb_trap(
 	}
 #endif	/* NCPUS > 1 */
 
-	if (db_active == 1)
-		com_ddb_session(0);	/* #599: LCR back exactly */
 	db_active--;			/* #346: balances the entry bump */
 	db_splx(s);
 
