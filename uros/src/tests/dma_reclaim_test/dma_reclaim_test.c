@@ -513,6 +513,8 @@ become_a_driver(void)
  * Take the host bridge from the kernel, the way a driver does: a capability for
  * the CLASS out of this program's manifest, and a claim on the instance.
  */
+static uint64_t	bridge_claim_cap;	/* #599 [7]: the claim's capability */
+
 static int
 claim_the_bridge(void)
 {
@@ -543,7 +545,70 @@ claim_the_bridge(void)
 		return 0;
 	}
 
+	bridge_claim_cap = tok.cap_id;
 	return 1;
+}
+
+/*
+ * ── [7] A claim that ends takes its device's grants with it (#599) ───────
+ *
+ * Holding the bridge, map one page of a buffer for it through
+ * device_dma_map_foreign_op, count the devices the buffer is mapped for,
+ * revoke the CLAIM's capability, count again: 0.  The grants made for a
+ * device outlived its claim, so a restarted driver found stale addresses and
+ * the slots leaked until the buffer went.  Where no device mapping exists
+ * (a machine that confines nothing) the arm says NOT APPLICABLE.
+ */
+static void
+a_claim_takes_its_grants(void)
+{
+	vm_address_t	kva = 0, uva = 0, dma = 0;
+	vm_address_t	*pa_list = NULL;
+	mach_msg_type_number_t pa_cnt = 0;
+	uint64_t	rid = 0;
+	struct uros_cap	t;
+	kern_return_t	kr, kr_map = KERN_FAILURE, kr_rev = KERN_FAILURE;
+	natural_t	u0 = 0, u1 = 0;
+
+	kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+				 mach_task_self(), &kva, &uva, &pa_list,
+				 &pa_cnt, &rid);
+	if (kr != KERN_SUCCESS || pa_cnt != 1) {
+		printf("dma_reclaim: [7] a claim takes its grants — DID NOT "
+		       "RUN, no buffer (kr=%d)\n", (int)kr);
+		if (pa_list != NULL)
+			(void) vm_deallocate(mach_task_self(),
+					     (vm_address_t)pa_list,
+					     pa_cnt * sizeof(vm_address_t));
+		return;
+	}
+	memset(&t, 0, sizeof(t));
+	kr = cap_request(RESOURCE_DMA_BUFFER, rid,
+			 CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
+			 &t);
+	if (kr == KERN_SUCCESS)
+		kr_map = device_dma_map_foreign_op(device_port, BRIDGE_BDF,
+						   pa_list[0],
+						   CAP_OP_DMA_DEVICE_WRITE,
+						   (char *)&t, sizeof(t), &dma);
+	(void) device_dma_region_users(device_port, rid, &u0);
+	if (kr_map == KERN_SUCCESS)
+		kr_rev = cap_revoke(bridge_claim_cap);
+	(void) device_dma_region_users(device_port, rid, &u1);
+	(void) vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+			     pa_cnt * sizeof(vm_address_t));
+	(void) device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+
+	printf("dma_reclaim: [7] a page mapped for 0:0.0 (kr=%d): users %u; "
+	       "the claim revoked (kr=%d): users %u\n", (int)kr_map,
+	       (unsigned)u0, (int)kr_rev, (unsigned)u1);
+	if (kr_map == KERN_SUCCESS && kr_rev == KERN_SUCCESS && u0 == 0)
+		printf("dma_reclaim: [7] a claim takes its grants — NOT "
+		       "APPLICABLE, no device mapping exists here\n");
+	else
+		arm(7, "a claim that ends takes its device's grants",
+		    kr_map == KERN_SUCCESS && kr_rev == KERN_SUCCESS &&
+		    u0 == 1 && u1 == 0);
 }
 
 
@@ -1121,6 +1186,13 @@ main(int argc, char **argv)
 			       "inherited it",
 			    kr_before == KERN_NO_ACCESS && claimed
 			    && kr_after == KERN_SUCCESS);
+
+		/* #599 [7]: while the claim is held. */
+		if (claimed)
+			a_claim_takes_its_grants();
+		else
+			printf("dma_reclaim: [7] a claim takes its grants — "
+			       "DID NOT RUN, the bridge was not claimed\n");
 	} else {
 		printf("dma_reclaim: [4] and [5] cannot run: no HAL\n");
 		n_fail += 2;

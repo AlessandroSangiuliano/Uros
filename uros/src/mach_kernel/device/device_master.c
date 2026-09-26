@@ -4222,6 +4222,37 @@ ds_master_device_claim(
 }
 
 /*
+ * #599: forget every foreign grant made for `bdf', whose claim is ending.
+ * With device_table_lock held, in the same hold as the claim's unlink, so no
+ * region names a device that has no driver.  The IOMMU side goes with the
+ * domain, which device_md_dma_release() detaches right after; this is the
+ * record.  A restarted driver found stale addresses here, and the user slots
+ * leaked until each region was freed.
+ */
+static unsigned int
+purge_grants_for_locked(natural_t bdf)
+{
+	unsigned int i, u, n = 0;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
+		struct dma_region *r = &dma_region[i];
+
+		if (r->kva == 0)
+			continue;
+		for (u = 0; u < r->nusers; ) {
+			if (r->user[u].bdf != bdf) {
+				u++;
+				continue;
+			}
+			r->user[u] = r->user[r->nusers - 1];
+			r->nusers--;
+			n++;
+		}
+	}
+	return n;
+}
+
+/*
  * ── A revoked capability takes the device with it (#432) ─────────────
  *
  * 🔴 THIS IS WHAT A MATERIALISED CAPABILITY OWES.  A capability that is
@@ -4315,6 +4346,7 @@ device_master_cap_revoked(uint64_t cap_id)
 		 * dead capability.
 		 */
 		device_claim[i].cap_id = 0;
+		(void) purge_grants_for_locked(bdf);		/* #599 */
 		mutex_unlock(&device_table_lock);
 
 		printf("device: the capability behind %02x:%02x.%u was revoked "
@@ -4526,6 +4558,7 @@ device_master_task_terminating(task_t task)
 		publish_barrier();
 		device_claim[i].cap_id = 0;
 		device_claim[i].retiring = 1;
+		(void) purge_grants_for_locked(bdf);		/* #599 */
 		mutex_unlock(&device_table_lock);
 
 		printf("device: task 0x%lx died driving %02x:%02x.%u — the "
