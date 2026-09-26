@@ -204,8 +204,12 @@ static unsigned	cons_tx_spins_peak;	/* most polls one byte needed since reset */
  * writes a zero and BSS is already zero, so these need nothing to have
  * happened first.  And hw_lock masks interrupts for the hold, which is what
  * makes the rest of this sound: a clock tick cannot land on a processor
- * inside either section, so the tick's own drain can never meet itself, and
- * a processor parked by the debugger's IPI is never parked holding the port.
+ * inside either section, so the tick's own drain can never meet itself.
+ * #599: the debugger parks with an NMI, which the mask does not stop, so a
+ * processor CAN be parked holding the port -- in cons_set_divisor with the
+ * latch open, most dangerously.  Every writer that must not wait for ever
+ * takes the lock with a bound (cons_tx_lock_bounded), and DDB's session
+ * closes and reopens the latch (cons_ddb_session).
  */
 #define CONS_RING_SIZE	4096u	/* a power of two: the indices wrap by modulo */
 
@@ -431,6 +435,31 @@ static unsigned cons_tx_room(int may_wait)
  * queue that a stuck port throws away -- and each draws once, so no path draws
  * twice and none draws nothing.
  */
+/*
+ * #599: cons_tx_lock for a writer that must not wait for ever -- the ring
+ * off, the way down, a debugger -- where a processor parked or halted with the
+ * lock held would never let go.  A bounded wait; one that fails is remembered
+ * (cons_tx_gave_up) so the next caller tries once, until a wait succeeds.
+ */
+#define	CONS_TX_BOUNDED_SPINS	1000000u
+
+static int	cons_tx_gave_up;
+
+static int cons_tx_lock_bounded(void)
+{
+	unsigned int i, n = cons_tx_gave_up ? 1 : CONS_TX_BOUNDED_SPINS;
+
+	for (i = 0; i < n; i++) {
+		if (hw_lock_try(&cons_tx_lock)) {
+			cons_tx_gave_up = 0;
+			return 1;
+		}
+		cpu_pause();
+	}
+	cons_tx_gave_up = 1;
+	return 0;
+}
+
 static void cons_wire_byte(char c)
 {
 	/*
@@ -450,14 +479,34 @@ static void cons_wire_byte(char c)
 	if (cons_port_given_away)
 		return;
 
-	if (cons_tx_room(1) == 0) {
-		cons_tx_dropped_count++;
-		return;
-	}
+	/*
+	 * #599: under the port's lock, as every other THR write is, with a
+	 * bound.  This path runs with the ring off -- early boot, and the way
+	 * down, where the other processors may still be running (a DDB entry
+	 * drains the ring before it stops them) and one of them may be in a
+	 * divisor sequence with the latch open (found in review: a printf on
+	 * a third processor went into DLL).  The bound is for a holder that is
+	 * parked or halted and will never let go; after it the byte goes only
+	 * if the latch is closed, and the failure is remembered until a wait
+	 * succeeds, so the bytes after it do not each pay the bound.
+	 */
+	{
+		int locked = cons_tx_lock_bounded();
 
-	outb(COM1 + UART_DATA, (uint8_t)c);
-	if (cons_fifo_room != 0)
-		cons_fifo_room--;
+		if (!locked && (inb(COM1 + UART_LCR) & 0x80)) {
+			cons_tx_dropped_count++;
+			return;
+		}
+		if (cons_tx_room(1) == 0) {
+			cons_tx_dropped_count++;
+		} else {
+			outb(COM1 + UART_DATA, (uint8_t)c);
+			if (cons_fifo_room != 0)
+				cons_fifo_room--;
+		}
+		if (locked)
+			hw_lock_unlock(&cons_tx_lock);
+	}
 }
 
 void cons_putc_wire(char c)
@@ -472,9 +521,11 @@ void cons_putc_wire(char c)
  * the drain takes.  By the time a driver holds COM1 the console has stepped
  * back from the port (cons_port_given_away), so this is uncontended in the
  * ordinary case; the lock orders it against the take-back when the driver
- * lets go (cons_port_reclaim).  The way down takes no lock and puts LCR back
- * instead, which closes a latch a stopped sequence left open.  Answers what
- * the latch held; the caller says it (device_md_io_set_divisor).
+ * lets go (cons_port_reclaim).  The way down takes the port back without
+ * touching LCR; a latch a parked or stopped sequence left open is closed by
+ * DDB's session or by a halt's cons_port_close_latch(), and every THR write
+ * after the take-back waits for this lock, bounded.  Answers what the latch
+ * held; the caller says it (device_md_io_set_divisor).
  */
 unsigned int cons_set_divisor(unsigned int divisor)
 {
@@ -648,9 +699,11 @@ static unsigned cons_drain_run(int may_wait, unsigned site)
  *
  * The unlocked look at the two indices inside cons_drain_run() is what keeps
  * this off the port entirely when there is nothing to send, and that is also
- * what makes the way down safe: once the ring is empty and cons_async_set(0)
- * has run, no drainer will ever take cons_tx_lock again, so nothing can be
- * stopped or parked holding it.
+ * what keeps the ring's side off the lock on the way down: once the ring is
+ * empty and cons_async_set(0) has run, no drainer takes cons_tx_lock again.
+ * #599: other takers do -- uart.so's register and divisor RPCs, and the
+ * tick's poll -- so a processor can still be stopped or parked holding it;
+ * see cons_tx_lock_bounded() and cons_ddb_session().
  */
 void cons_drain(void)
 {
@@ -814,6 +867,12 @@ void cons_ddb_session(int entering)
 	} else if (cons_ddb_lcr >= 0) {
 		outb(COM1 + UART_LCR, (uint8_t)cons_ddb_lcr);
 		cons_ddb_lcr = -1;
+		/*
+		 * A wait on the port's lock that failed during the session
+		 * failed against a parked holder, which is about to run again:
+		 * the next writer waits properly.
+		 */
+		cons_tx_gave_up = 0;
 		if (cons_port_taken_back) {
 			cons_port_taken_back = 0;
 			cons_port_given_away = 1;
@@ -822,16 +881,25 @@ void cons_ddb_session(int entering)
 }
 
 /*
- * #599: the way down, after the others are stopped: the latch closed,
- * whatever was in the middle of it, so the last words reach the wire as
- * bytes and not as a divisor.  No lock, for cons_ddb_session()'s reason.
+ * #599: a halt: the latch closed, so the last words reach the wire as bytes
+ * and not as a divisor.  The halt IPI is not waited for, and a processor in a
+ * divisor sequence takes it only once the sequence ends, with interrupts back
+ * on -- so the latch is looked at under the port's lock, taken with the bound
+ * (found in review: closed right after the send, it raced the sequence).
+ * From then on every THR write takes the lock too (cons_wire_byte), so a
+ * sequence that starts before its processor halts is waited for, not written
+ * into.  Without the lock -- a holder that will never let go -- the latch is
+ * closed anyway: that holder is stopped.
  */
 void cons_port_close_latch(void)
 {
+	int locked = cons_tx_lock_bounded();
 	uint8_t lcr = inb(COM1 + UART_LCR);
 
 	if (lcr & 0x80)
 		outb(COM1 + UART_LCR, (uint8_t)(lcr & 0x7F));
+	if (locked)
+		hw_lock_unlock(&cons_tx_lock);
 }
 
 int cons_port_is_ours(void)

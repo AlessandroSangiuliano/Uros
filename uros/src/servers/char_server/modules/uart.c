@@ -77,11 +77,11 @@
 /*
  * MIG: device_io_port_{read,write} and device_io_port_{claim,unclaim}.
  *
- * ⚠️ Outside the arch guard below, because the CLAIM is wanted on both
- * targets even though only one of them reaches the chip this way.  What it
- * buys on i386 is narrower and is stated where it is implemented: it stops a
- * second TASK from reaching the range, and it does not stop the kernel, whose
- * console there writes the port with its own instruction.
+ * Both targets reach every register this way since #599, and the claim is
+ * what the kernel lets through: only the claimant reaches the window, one
+ * byte at a time, under the lock the kernel's own writes to the chip take.
+ * What the claim does not do on i386 is make the kernel's console step back:
+ * it and this driver share the chip under that lock.
  */
 #include "device_master.h"
 
