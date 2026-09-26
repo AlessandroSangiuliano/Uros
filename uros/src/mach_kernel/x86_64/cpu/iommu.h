@@ -806,22 +806,20 @@ int iommu_domain_confined(uint16_t bdf);
 unsigned iommu_domain_count(void);
 
 /*
- * Drain the engines and print anything new.
+ * The thread that drains every engine every 100 ms and prints what they
+ * refused -- the only printer of the fault log (#599).  NOT ASKED, said once,
+ * when no engine translates.
  *
- * 🔴 THIS IS "a diagnosable event, not silence" (#432), and it is a POLL
- * because the alternative is not ready.  An engine can raise a
- * message-signalled interrupt when it records a fault -- VT-d through
- * FECTL/FEDATA/FEADDR, AMD through its event-log interrupt -- and it should,
- * because a poll reports late and a fault that arrives while a driver is
- * spinning on a transfer is exactly the one it needs now.  What a poll does
- * give is that no refusal goes unreported, which is the property worth having
- * first.
- *
- * ⚠️ Answers how many were printed, and prints nothing when there is nothing.
- * Cheap to call: one uncached register read per engine when no fault is
- * pending, and none at all when no device is in a domain.
+ * 🔴 THIS IS "a diagnosable event, not silence" (#432).  It was a poll run by
+ * the idle loop, and #432 closed on "no refusal goes unreported": a processor
+ * spinning in a driver never idles, so a refusal nobody asked about waited for
+ * the spin to end, and a uniprocessor boot could wait for ever
+ * (ahci [iommu-spin]: 129 refusals undrained after 2^32 cycles).  A thread
+ * woken by a timer drains whether or not anything idles.  An engine's
+ * message-signalled interrupt would add latency, not correctness, and is a
+ * follow-up.
  */
-unsigned iommu_fault_report(void);
+void iommu_fault_reporter_start(void);
 
 /*
  * What the log knows of one device's refusals, asked by the driver that owns

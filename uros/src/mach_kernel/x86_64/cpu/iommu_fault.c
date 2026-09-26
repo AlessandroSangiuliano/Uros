@@ -13,6 +13,11 @@
 #include <cpu/iommu_backend.h>
 #include <kern/assert.h>
 #include <kern/misc_protos.h>	/* printf, bzero */
+#include <kern/sched_prim.h>	/* the reporter's sleep, #599 */
+#include <kern/task.h>		/* kernel_task */
+#include <kern/thread.h>
+#include <kern/sched.h>		/* sched_tick: one a second */
+#include <kern/time_out.h>	/* hz */
 #include <sync/lock.h>		/* hw_lock, #599 */
 
 /*
@@ -42,6 +47,9 @@
  * preemption for the hold.  Zero is free: no init, no init order.
  */
 static hw_lock_data_t		iommu_fault_lock;
+
+/* #599: what the reporter sleeps on besides its timeout. */
+static int			iommu_fault_wakeup;
 
 static struct iommu_fault	fault_log[IOMMU_FAULT_LOG];
 static unsigned			fault_total;
@@ -243,24 +251,18 @@ uint64_t iommu_fault_lost(void)
  * ── Saying it out loud ───────────────────────────────────────────────
  *
  * 🔑 `reported' AND `fault_total' are two counters and not one.  The ring can
- * wrap between two polls, and then the number of faults that happened is
+ * wrap between two drains, and then the number of faults that happened is
  * larger than the number of records that survived -- so the reporter says how
  * many it could not show rather than showing the last sixteen and implying
  * that was all of them.
- */
-static unsigned reported;
-
-/*
- * 🔥 AND THERE IS NO RATE LIMIT IN HERE, WHICH IS WHERE ONE WAS PUT AND WAS
- * WRONG.  The idle loop calls this thousands of times a second and does want
- * one; a driver asking whether the IOMMU refused its transfer calls the SAME
- * function and must never be told no because the divider had not come round.
- * It was, for one run: the engine refused the DMA, QEMU said so on its own
- * console, and this kernel reported that nothing had been refused.
  *
- * 🔑 The limit belongs to the CALLER WITH THE FREQUENCY PROBLEM, which is the
- * idle loop, and it is there.  A function used by two callers with opposite
- * requirements cannot hold either one's policy.
+ * #599: printed by one thread only, the reporter below, and the cursors are
+ * its own: nothing else can print these lines or move them.  The idle loop
+ * used to print them, once every 4096 passes, and a driver's question too --
+ * a processor spinning in a driver never idles, so a refusal nobody asked
+ * about waited for the spin to end, and a uniprocessor boot could wait for
+ * ever.  Draining and printing are apart now: a driver's question drains and
+ * never prints.
  */
 
 static const char *fault_kind_name(uint8_t kind)
@@ -273,8 +275,9 @@ static const char *fault_kind_name(uint8_t kind)
 	}
 }
 
-unsigned iommu_fault_report(void)
+static unsigned fault_report_print(void)
 {
+	static unsigned reported;
 	static uint64_t reported_unplaced, reported_episodes;
 	struct iommu_fault copy[IOMMU_FAULT_LOG];
 	uint64_t unplaced, episodes;
@@ -332,7 +335,8 @@ unsigned iommu_fault_report(void)
 		       " — the count above is a floor\n",
 		       (unsigned long long)episodes);
 
-	return printed;
+	/* Anything said: the reporter's once-a-second limit counts it all. */
+	return printed + (lost != 0) + (unplaced != 0) + (episodes != 0);
 }
 
 void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a)
@@ -357,4 +361,55 @@ void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a)
 	a->undrained = a->recorded - before;
 	a->lost = fault_episodes + fault_devices.unplaced;
 	hw_lock_unlock(&iommu_fault_lock);
+
+	if (a->undrained != 0)
+		thread_wakeup((event_t)&iommu_fault_wakeup);	/* to print */
+}
+
+/*
+ * ── The reporter (#599) ──────────────────────────────────────────────
+ *
+ * A kernel thread that drains every engine every 100 ms, whether or not any
+ * processor idles and whether or not any driver asks, and prints what is new
+ * at most once a second.  At kernel_thread's default priority, below the
+ * clock's softclock, which delivers the timed wakeup it sleeps on.
+ *
+ * ⚠️ A wakeup that arrives between the drain and the sleep is not lost for
+ * good: it costs at most one period, 100 ms, when the timeout ends the sleep.
+ * A thread spinning at or above this priority, or with preemption off,
+ * starves it -- which no interrupt would cure, since the thread must run.
+ */
+unsigned long iommu_fault_reporter_passes;	/* nm/gdb: rises ~10 a second */
+
+static void iommu_fault_reporter(void)
+{
+	unsigned last_print = sched_tick;
+	int period = hz / 10 ? hz / 10 : 1;
+
+	printf("iommu: refusals are read out every %d ms by a thread of their "
+	       "own, and printed at most once a second (#599)\n",
+	       period * 1000 / hz);
+	for (;;) {
+		iommu_fault_reporter_passes++;
+		if (sched_tick != last_print) {	/* a second has turned */
+			if (fault_report_print() != 0)
+				last_print = sched_tick;
+		} else {
+			(void) iommu_fault_poll();
+		}
+		assert_wait((event_t)&iommu_fault_wakeup, FALSE);
+		thread_set_timeout(period);
+		thread_block((void (*)(void)) 0);
+		reset_timeout_check(&current_thread()->timer);
+	}
+}
+
+void iommu_fault_reporter_start(void)
+{
+	if (!iommu_translating()) {
+		printf("iommu: the fault reporter: NOT ASKED — no engine is "
+		       "translating, so nothing can be refused (#599)\n");
+		return;
+	}
+	(void) kernel_thread(kernel_task, iommu_fault_reporter, (char *) 0);
 }

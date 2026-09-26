@@ -805,15 +805,12 @@ device_md_dma_faults(unsigned int bdf, struct device_md_faults *a)
 		return 0;
 
 	/*
-	 * 🔴 DRAINED HERE, AND THAT IS THE POINT OF THE CALL.  The engines'
-	 * fault records are otherwise read when a processor next goes idle,
-	 * which is after the driver has given up -- so a driver asking "was I
-	 * refused" would be told no about the refusal it is asking about.
-	 * Reporting as well as draining, because the kernel's log is where
-	 * anybody reading this afterwards will look.
+	 * 🔴 DRAINED HERE, and in the same hold as the count is read, so the
+	 * answer is current.  #599: the reporter thread drains every 100 ms as
+	 * well -- `undrained' says how many this call still found -- and it is
+	 * the one that prints; a driver's question never does.
 	 */
 	iommu_fault_ask((uint16_t)bdf, &f);
-	(void) iommu_fault_report();
 
 	a->count = (unsigned)f.recorded;
 	a->last = (unsigned long)f.last_address;
