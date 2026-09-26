@@ -77,26 +77,6 @@ device_md_irq_is_level(unsigned int irq)
 		== ACPI_TRIGGER_LEVEL;
 }
 
-/*
- * ⚠️ The ISA interrupt number is translated to a global system interrupt
- * before the pin is touched.  They are not the same number: the firmware may
- * say that ISA 0 arrives on GSI 2, and it usually does.  Masking pin 0
- * because the caller said 0 would leave the timer running and silence
- * something else.
- */
-void
-device_md_irq_mask(unsigned int irq)
-{
-	if (ioapic_present())
-		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
-}
-
-void
-device_md_irq_unmask(unsigned int irq)
-{
-	if (ioapic_present())
-		ioapic_unmask(acpi_irq_to_gsi((uint8_t)irq));
-}
 
 void
 device_md_irq_pending_note(volatile unsigned int *p)
@@ -280,6 +260,40 @@ device_md_io_reserved(unsigned int base, unsigned int count)
 #define	DEVICE_MD_VECTOR(irq)	(IOAPIC_ISA_VECTOR_BASE + (irq))
 
 /*
+ * ⚠️ The ISA interrupt number is translated to a global system interrupt
+ * before the pin is touched.  They are not the same number: the firmware may
+ * say that ISA 0 arrives on GSI 2, and it usually does.  Masking pin 0
+ * because the caller said 0 would leave the timer running and silence
+ * something else.
+ */
+void
+device_md_irq_mask(unsigned int irq)
+{
+	/*
+	 * #599: a line, and only a line, has a pin.  device_master.c's task
+	 * teardown asks this for every slot the task held, message-signalled
+	 * ones (16..31) included, and GSI 16..23 are other devices' pins: a
+	 * dead driver's MSI slot masked somebody else's line, and slot 24 and
+	 * up panicked in the I/O APIC's redir_reg().  An MSI slot is disarmed
+	 * in its device (device_md_msi_unregister) and its handler released;
+	 * there is nothing to mask here.
+	 */
+	if (irq >= DEVICE_MD_IRQ_MAX)
+		return;
+	if (ioapic_present())
+		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
+}
+
+void
+device_md_irq_unmask(unsigned int irq)
+{
+	if (irq >= DEVICE_MD_IRQ_MAX)
+		return;		/* no pin: see device_md_irq_mask() */
+	if (ioapic_present())
+		ioapic_unmask(acpi_irq_to_gsi((uint8_t)irq));
+}
+
+/*
  * ── And sixteen more that are not lines ──────────────────────────────
  *
  * Message-signalled interrupts continue the numbering rather than starting a
@@ -460,7 +474,7 @@ device_md_debugger_break(void)
 #define	MSI_ADDRESS_BASE	0xFEE00000ULL
 #define	MSI_ADDRESS_DEST(id)	(((unsigned long long)(id) & 0xFFu) << 12)
 
-static unsigned int	msi_next;	/* slots are handed out in order */
+static volatile unsigned int	msi_next;	/* slots are handed out in order */
 
 /*
  * Claim a vector and say what a device must write to reach it.
@@ -497,11 +511,23 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 	 * never used or one a device is still programmed to write to.  ⚠️ Which
 	 * makes unregister leave the slot spent -- see below.
 	 */
-	if (msi_next >= DEVICE_MD_MSI_MAX)
-		return 0;
+	/*
+	 * #599: taken with a compare-and-swap.  It was a read and an
+	 * increment, and two processors allocating at once got the same slot.
+	 * device_master.c calls this under its irq_forward_lock now, but the
+	 * boot self-test does not, and a counter safe only for some callers is
+	 * a proof kept in another file.
+	 */
+	for (;;) {
+		unsigned int	n = msi_next;
 
-	slot = DEVICE_MD_MSI_BASE + msi_next;
-	msi_next++;
+		if (n >= DEVICE_MD_MSI_MAX)
+			return 0;
+		if (__sync_bool_compare_and_swap(&msi_next, n, n + 1)) {
+			slot = DEVICE_MD_MSI_BASE + n;
+			break;
+		}
+	}
 	vector = DEVICE_MD_VECTOR(slot);
 
 	/*
