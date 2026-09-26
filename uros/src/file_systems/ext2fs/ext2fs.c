@@ -3867,8 +3867,8 @@ write_file_locked(
 			 * map.  Linked first, a failed write left the file
 			 * mapping a block that still held its last owner's
 			 * bytes, where it read zeros before (found in
-			 * review).  Written first, a failure frees the block
-			 * and the map never saw it.
+			 * review).  Written first, a failed write frees the
+			 * block and the map never saw it.
 			 */
 			if (off == 0 && chunk == (vm_size_t)block_size)
 				rc = write_file_block(fp, disk_block, data);
@@ -3880,11 +3880,17 @@ write_file_locked(
 				break;
 			}
 			rc = link_fresh_block(fp, file_block, disk_block);
-			if (rc != 0) {
-				block_free(fp, disk_block);
-				break;
-			}
+			/*
+			 * Linked, or perhaps linked: a failure after an
+			 * indirect block on the disk already names the data
+			 * block leaves it in the file's map, so it is kept
+			 * allocated -- freed, it would be handed to another
+			 * file while this one still reached it (found in
+			 * review).  At worst a block is allocated to nothing.
+			 */
 			linked = 1;
+			if (rc != 0)
+				break;
 		} else {
 			/* #599: every answer is the device's or the cache's */
 			if (off == 0 && chunk == (vm_size_t)block_size)
@@ -3906,8 +3912,10 @@ write_file_locked(
 	 * later chunk failed, so the inode is dirty and the cached copy stale
 	 * either way; the size moves only over what was written.
 	 */
-	if (offset > fp->f_ic->i_size)
+	if (offset > fp->f_ic->i_size) {
 		fp->f_ic->i_size = offset;
+		linked = 1;	/* the inode changed: dirty either way */
+	}
 	if (rc == 0 || linked) {
 		fp->f_vnode->v_inode_dirty = 1;
 		{
@@ -3920,11 +3928,45 @@ write_file_locked(
 }
 
 /*
- * #599: put a block whose bytes are already on the disk into the file's map
- * at `file_block' -- directly, or through the indirect blocks, allocating
- * those as it goes.  The data block itself is the caller's to free if this
- * fails; an indirect block allocated before the failure is left allocated,
- * as it always was.
+ * #599: a block for the double- or triple-indirect level, zeroed on the disk
+ * before anything reads it as pointers.  block_alloc gives a block with its
+ * last owner's bytes, and link_fresh_block read those as block numbers --
+ * of other files, or out of range -- and wrote through them (found in review;
+ * a fresh image, all zeros, hides it).  indirect_set zero-fills the single
+ * level itself.  0 when there is no block, or it could not be zeroed.
+ */
+static daddr_t
+fresh_indirect_block(struct ext2fs_file *fp)
+{
+	vm_size_t	size = EXT2_BLOCK_SIZE(fp->f_fs);
+	vm_offset_t	zeros;
+	daddr_t		b;
+
+	b = block_alloc(fp, 0);
+	if (b == 0)
+		return 0;
+	if (vm_allocate(mach_task_self(), &zeros, size, TRUE) != KERN_SUCCESS) {
+		block_free(fp, b);
+		return 0;
+	}
+	if (write_disk_block(fp, b, zeros, size) != 0) {
+		(void) vm_deallocate(mach_task_self(), zeros, size);
+		block_free(fp, b);
+		return 0;
+	}
+	(void) vm_deallocate(mach_task_self(), zeros, size);
+	return b;
+}
+
+/*
+ * #599: put a block whose bytes are already written -- to the page cache,
+ * or to the disk where there is none -- into the file's map at `file_block',
+ * directly or through the indirect blocks, allocating those as it goes.  The
+ * order holds in the in-core map; on the disk an indirect block written here
+ * can name a data block whose bytes are still in the cache, until the next
+ * sync.  A failure can leave an on-disk indirect block naming the data block
+ * already, so the caller keeps it allocated; an indirect block allocated
+ * before the failure is left allocated too.
  */
 static int
 link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
@@ -3963,7 +4005,7 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 
 		/* Get/alloc double-indirect block */
 		if (dind == 0) {
-			dind = block_alloc(fp, 0);
+			dind = fresh_indirect_block(fp);
 			if (dind == 0)
 				return KERN_RESOURCE_SHORTAGE;
 			fp->f_ic->i_block[EXT2_DIND_BLOCK] =
@@ -4010,7 +4052,7 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 
 		/* Get/alloc triple-indirect block */
 		if (tind == 0) {
-			tind = block_alloc(fp, 0);
+			tind = fresh_indirect_block(fp);
 			if (tind == 0)
 				return KERN_RESOURCE_SHORTAGE;
 			fp->f_ic->i_block[EXT2_TIND_BLOCK] =
@@ -4030,7 +4072,7 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 
 		/* Get/alloc double-indirect */
 		if (dind == 0) {
-			dind = block_alloc(fp, 0);
+			dind = fresh_indirect_block(fp);
 			if (dind == 0)
 				return KERN_RESOURCE_SHORTAGE;
 			fp->f_ic->i_blocks +=
