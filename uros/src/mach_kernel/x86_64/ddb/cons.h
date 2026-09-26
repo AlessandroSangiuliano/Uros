@@ -149,6 +149,7 @@ void cons_port_reclaim(void);
 int cons_port_is_ours(void);
 void cons_ddb_session(int entering);	/* #599: see cons.c */
 void cons_port_close_latch(void);	/* #599: the way down, after the stop */
+void cons_percpu_ready(void);	/* #599: the boot processor's %gs is set */
 int cons_poll_getc(void);	/* #599: -1 unless the port is still ours */
 
 /*

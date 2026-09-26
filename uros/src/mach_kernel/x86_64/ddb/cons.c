@@ -386,30 +386,26 @@ static unsigned cons_tx_room(int may_wait)
 }
 
 /*
- * Straight to the port, taking no lock (#551, #567).
+ * Straight to the port (#551, #567) -- #599: under the port's lock, taken with
+ * a bound, once the lock package can be used at all (cons_locks_usable).
  *
- * ⚠️ AND IT TAKES NO LOCK ON PURPOSE.  trap.c's reporter writes through here
- * because its one message has to reach a reader when everything else has
- * stopped, which a lock cannot promise.  The price is that a fault report
- * that lands while another processor is draining the ring shares the port
- * with it: the bytes interleave, as that report's bytes already did, and the
- * two of them decrement the same count of FIFO room with no lock between,
- * so a lost update leaves the count too high and a few bytes of an already-
- * garbled report reach a FIFO with no space for them.  That is the whole of
- * the race, it is bounded to the report, and it is the cheaper half of the
- * trade.
+ * ⚠️ IT USED TO TAKE NO LOCK, ON PURPOSE: trap.c's reporter writes through
+ * here because its one message has to reach a reader when everything else has
+ * stopped, which an unbounded lock cannot promise.  A bounded one can: a
+ * holder that is running lets go within the bound, and after it -- a holder
+ * parked or halted for good -- the byte goes without the lock if the divisor
+ * latch is closed, and a failed wait is remembered so the bytes after it do
+ * not each pay the bound (cons_tx_lock_bounded).  What the unlocked write cost
+ * was not only interleaving with the drain: with the ring off, a printf on one
+ * processor went into DLL under another processor's divisor sequence.
  *
- * 🔴 WHAT IS NOT LEFT TO THAT RACE IS THE UNDERFLOW.  cons_fifo_room is
- * unsigned, and a decrement of zero is four billion -- which cons_tx_room()
- * would then hand out as room, and the console would write thousands of bytes
- * to a port it had never looked at.  The check above cannot prevent it: the
- * other writer may reach zero between the check and the decrement.  So the
- * decrement is guarded here and in cons_tx_one(), which costs a compare and
- * closes the one outcome of this race that is not merely untidy.
+ * 🔴 THE UNDERFLOW GUARD STAYS.  cons_fifo_room is unsigned, and a decrement
+ * of zero is four billion -- which cons_tx_room() would then hand out as room.
+ * A byte written without the lock can still race the drain's decrement, so
+ * the decrement is guarded here and in cons_tx_one(), which costs a compare.
  *
  * When the ring is not armed -- early boot, and everything after the way down
- * has turned it off -- this is also cons_putc()'s path, and then there is no
- * drainer in existence and no race at all.
+ * has turned it off -- this is also cons_putc()'s path.
  */
 /*
  * ── The other output is drawn where a byte is HANDED OVER (#568) ───────
@@ -444,6 +440,23 @@ static unsigned cons_tx_room(int may_wait)
 #define	CONS_TX_BOUNDED_SPINS	1000000u
 
 static int	cons_tx_gave_up;
+
+/*
+ * #599: whether the lock package can be used at all.  hw_lock reaches the
+ * per-CPU block through %gs for its preemption and interrupt counters, and
+ * before the boot processor's percpu_activate() %gs has a zero base: address
+ * zero, a page of the interrupt vector table in the kernel's own space and
+ * an unmapped one in the self-tests' pmap (found in review: the first early
+ * byte through the locked path would have faulted there).  Until then there
+ * is one processor and nothing to exclude, and the console takes no lock --
+ * the rule pci_cfg.c and ioapic.c follow for the same reason.
+ */
+static int	cons_locks_usable;
+
+void cons_percpu_ready(void)
+{
+	cons_locks_usable = 1;
+}
 
 static int cons_tx_lock_bounded(void)
 {
@@ -491,9 +504,10 @@ static void cons_wire_byte(char c)
 	 * succeeds, so the bytes after it do not each pay the bound.
 	 */
 	{
-		int locked = cons_tx_lock_bounded();
+		int locked = cons_locks_usable ? cons_tx_lock_bounded() : 0;
 
-		if (!locked && (inb(COM1 + UART_LCR) & 0x80)) {
+		if (!locked && cons_locks_usable &&
+		    (inb(COM1 + UART_LCR) & 0x80)) {
 			cons_tx_dropped_count++;
 			return;
 		}
@@ -893,7 +907,7 @@ void cons_ddb_session(int entering)
  */
 void cons_port_close_latch(void)
 {
-	int locked = cons_tx_lock_bounded();
+	int locked = cons_locks_usable ? cons_tx_lock_bounded() : 0;
 	uint8_t lcr = inb(COM1 + UART_LCR);
 
 	if (lcr & 0x80)

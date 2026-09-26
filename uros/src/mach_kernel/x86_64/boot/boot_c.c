@@ -1607,6 +1607,7 @@ static void percpu_selftest(void)
 	 * those would take, so it stays inert until here.
 	 */
 	FP_READY();
+	cons_percpu_ready();	/* #599: the console may take its lock now */
 
 	kputs("UrMach x86-64: gs base was ");
 	kputhex64(before);
