@@ -492,9 +492,12 @@ must_report 'hal_bar: started' 'hal_bar: [0-9]* of [0-9]* arms passed' \
 # #599: the two self-tests ext_server runs before it reads a disk.  Their
 # WRONG lines fail the run by themselves; these pairs are what fail it when a
 # line never appears -- a self-test that stops printing is not one that passed.
-must_report '=== ext2 filesystem server' 'ext2: [0-9]* directory records checked' \
+# ⚠️ The patterns take the WRONG form of each line too: matching only the
+# passing one made a WRONG answer read as "never did", a second reason that
+# was false.
+must_report '=== ext2 filesystem server' 'ext2: .*directory records' \
 	'ext_server asks the directory-record check about records built to break each rule before it reads a disk (#599).  No line means the check never ran.'
-must_report '=== ext2 filesystem server' 'ext2: [0-9]* block-I/O cases' \
+must_report '=== ext2 filesystem server' 'ext2: .*block-I/O cases' \
 	'ext_server asks its block-I/O paths about a file whose device answers nothing (#599).  No line means they were never asked.'
 
 must_report '=== ext2 filesystem server' 'ext2: ready, entering message loop' \
