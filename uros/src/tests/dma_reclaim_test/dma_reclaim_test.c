@@ -334,6 +334,7 @@ struct victim_msg {
 	NDR_record_t		ndr;
 	vm_address_t		kva;
 	natural_t		kr;	/* in the ack: what the free answered */
+	uint64_t		cap_id;	/* [8]: a capability of the holder's */
 };
 
 struct victim_rcv {
@@ -343,14 +344,17 @@ struct victim_rcv {
 
 static kern_return_t	victim_kr = KERN_SUCCESS;
 static int		victim_ran;
+static kern_return_t	revoke_kr = KERN_SUCCESS;	/* [8] */
+static int		revoke_ran;
 
 static void
 victim_send(mach_port_t to, mach_msg_id_t id, vm_address_t kva,
-	    kern_return_t kr)
+	    kern_return_t kr, uint64_t cap_id)
 {
 	struct victim_msg m;
 
 	memset(&m, 0, sizeof(m));
+	m.cap_id = cap_id;
 	m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	m.head.msgh_size = sizeof(m);
 	m.head.msgh_remote_port = to;
@@ -688,7 +692,15 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 							    REGION_BYTES);
 				victim_ran = 1;
 			}
-			victim_send(p, VICTIM_ACK_ID, offer.msg.kva, victim_kr);
+			/*
+			 * #599 [8]: and a capability issued to the holder is
+			 * not this task's to revoke.
+			 */
+			if (offer.msg.cap_id != 0) {
+				revoke_kr = cap_revoke(offer.msg.cap_id);
+				revoke_ran = 1;
+			}
+			victim_send(p, VICTIM_ACK_ID, offer.msg.kva, victim_kr, 0);
 		}
 	}
 
@@ -790,9 +802,16 @@ main(int argc, char **argv)
 			vm_address_t	vkva = 0;
 			uint64_t	vid = 0;
 			struct victim_rcv ack;
+			struct uros_cap	vtok;
 
+			memset(&vtok, 0, sizeof(vtok));
 			if (take_one(&vkva, &vid)) {
-				victim_send(peer, VICTIM_MSG_ID, vkva, 0);
+				/* [8]: a capability of this task's, offered
+				 * for the checker to try to revoke. */
+				(void) cap_request(RESOURCE_DMA_BUFFER, vid,
+						   CAP_OP_DMA_DEVICE_READ, 0,
+						   &vtok);
+				victim_send(peer, VICTIM_MSG_ID, vkva, 0, vtok.cap_id);
 				if (!victim_receive(holder_port, VICTIM_ACK_ID,
 						    &ack))
 					printf("dma_reclaim: the checker never "
@@ -806,7 +825,7 @@ main(int argc, char **argv)
 			} else {
 				/* Offered empty, so the checker's first
 				 * message is always the offer. */
-				victim_send(peer, VICTIM_MSG_ID, 0, 0);
+				victim_send(peer, VICTIM_MSG_ID, 0, 0, 0);
 				(void) victim_receive(holder_port,
 						      VICTIM_ACK_ID, &ack);
 				printf("dma_reclaim: no region to offer the "
@@ -1206,6 +1225,15 @@ main(int argc, char **argv)
 	} else
 		printf("dma_reclaim: [6] another task's buffer — DID NOT RUN, "
 		       "the holder offered none\n");
+
+	if (revoke_ran) {
+		printf("dma_reclaim: [8] revoking the holder's capability from "
+		       "here answered %d\n", (int)revoke_kr);
+		arm(8, "another task's capability is not this task's to revoke",
+		    revoke_kr == CAP_ERR_UNAUTHORIZED);
+	} else
+		printf("dma_reclaim: [8] another task's capability — DID NOT "
+		       "RUN, the holder offered none\n");
 
 	printf("dma_reclaim: %d of %d arms passed\n", n_pass, n_pass + n_fail);
 	die();
