@@ -508,14 +508,18 @@ xf_fresh_blocks(const char *path, int arm)
 }
 
 /*
- * #599 X2: a block that changes owner leaves nothing of its old owner in the
- * cache.  A scratch file next to `path' is written over XF_FRESH_BLOCKS
- * blocks and removed with no sync, so its blocks go back to the bitmap with
- * their bytes still in the cache, dirty; a directory made next, which as a
- * rule takes one of them, must then take a file that can be created and
- * looked up -- before a sync and after it.  The removed file's bytes used to
- * stay cached: the directory read them back as its own records, and a sync
- * wrote them over it.
+ * #599 X2: a directory made on the blocks of a file removed unsynced works.
+ * A scratch file next to `path' is written over XF_FRESH_BLOCKS blocks and
+ * removed with no sync, so its blocks go back to the bitmap with their bytes
+ * still in the cache, dirty; a directory made next, which as a rule takes one
+ * of them, must then take a file that can be created and looked up -- before
+ * a sync and after it.
+ *
+ * ⚠️ Since ee2c26e2 this no longer shows the discard it was written for: the
+ * directory's first block goes to the disk through write_data_block, whose
+ * page_cache_wrote replaces the stale copy, so the arm passes with
+ * block_free's and block_alloc's discards taken out (found in review).  The
+ * discard's own arm is X4 below, through a block written OUTSIDE the cache.
  */
 #define XF_DEAD_BYTE	0xC7u
 
@@ -674,6 +678,138 @@ xf_neighbour_inodes(const char *path, int arm)
 	passed++;
 }
 
+/*
+ * #599 X4: a block that changes owner leaves nothing of its old owner in the
+ * cache -- the discard in block_free and block_alloc, seen through a block
+ * this server writes to the disk directly: an indirect block (indirect_set's
+ * write_disk_block).  A scratch file of XF_DEAD_I_BLOCKS blocks is written
+ * and removed with no sync, so its blocks go back to the bitmap with their
+ * bytes still cached, dirty.  A second file then takes XF_IND_BLOCKS blocks,
+ * enough to need its single-indirect block, which as a rule is one of the
+ * freed ones.  Its data blocks go through the cache and replace any stale
+ * copy; its indirect block does not.  With the stale copy left in the cache,
+ * the sync writes the removed file's bytes over the indirect block, and the
+ * second file, opened again (so no private copy of the map answers), reads
+ * blocks that are not its own, or cannot be read at all.
+ */
+#define XF_DEAD_I_BLOCKS	64u
+#define XF_IND_BLOCKS		14u	/* 12 direct and 2 through the indirect */
+
+static unsigned char
+xf_ind_byte(uint32_t block)
+{
+	return (unsigned char)(0x21u + block);
+}
+
+/* The step that failed, or 0 when the second file reads back whole. */
+static const char *
+xf_indirect_steps(const char *dead, const char *ind, uint32_t bs,
+		  uint32_t *bad_block)
+{
+	uint32_t	done, n, b, i;
+	vfs_fd_t	fd;
+	ssize_t		r;
+
+	if (vfs_open_rc(dead, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the file to remove";
+	memset(buf, XF_DEAD_BYTE, sizeof(buf));
+	for (done = 0; done < XF_DEAD_I_BLOCKS * bs; done += n) {
+		n = XF_DEAD_I_BLOCKS * bs - done;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		if (vfs_write(fd, buf, n) != (ssize_t)n) {
+			(void)vfs_close(fd);
+			return "writing the file to remove";
+		}
+	}
+	(void)vfs_close(fd);
+	if (vfs_unlink(dead) != 0)
+		return "removing the file, unsynced";
+
+	if (vfs_open_rc(ind, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the file with an indirect block";
+	for (b = 0; b < XF_IND_BLOCKS; b++)
+		for (done = 0; done < bs; done += n) {
+			n = bs - done;
+			if (n > sizeof(buf))
+				n = sizeof(buf);
+			memset(buf, xf_ind_byte(b), n);
+			if (vfs_write(fd, buf, n) != (ssize_t)n) {
+				(void)vfs_close(fd);
+				return "writing the file with an indirect "
+				       "block";
+			}
+		}
+	if (vfs_sync(fd) != 0) {
+		(void)vfs_close(fd);
+		return "syncing";
+	}
+	(void)vfs_close(fd);
+
+	if (vfs_open_rc(ind, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS)
+		return "opening it again";
+	for (b = 0; b < XF_IND_BLOCKS; b++)
+		for (done = 0; done < bs; done += n) {
+			n = bs - done;
+			if (n > sizeof(buf))
+				n = sizeof(buf);
+			r = vfs_read(fd, buf, n);
+			if (r != (ssize_t)n) {
+				(void)vfs_close(fd);
+				*bad_block = b;
+				return "reading it back";
+			}
+			for (i = 0; i < n; i++)
+				if (buf[i] != xf_ind_byte(b)) {
+					(void)vfs_close(fd);
+					*bad_block = b;
+					return "comparing what it read";
+				}
+		}
+	(void)vfs_close(fd);
+	return 0;
+}
+
+static void
+xf_indirect_owner(const char *path, int arm)
+{
+	char		 dead[128], ind[128];
+	vfs_stat_t	 st;
+	const char	*step;
+	uint32_t	 bs, bad = 0;
+
+	if (vfs_stat(path, &st) != 0 || st.st_blksize < 1024 ||
+	    st.st_blksize > 65536 ||
+	    (st.st_blksize & (st.st_blksize - 1)) != 0 ||
+	    xf_scratch_name(dead, sizeof(dead), path, "xf_dead_i.dat") != 0 ||
+	    xf_scratch_name(ind, sizeof(ind), path, "xf_ind.dat") != 0) {
+		printf("%s: [%d] WRONG — no block size or scratch names for "
+		       "the indirect-block arm next to %s\n", tag, arm, path);
+		failed++;
+		return;
+	}
+	bs = (uint32_t)st.st_blksize;
+	(void)vfs_unlink(dead);		/* an earlier boot's */
+	(void)vfs_unlink(ind);
+	step = xf_indirect_steps(dead, ind, bs, &bad);
+	(void)vfs_unlink(ind);
+	if (step != 0) {
+		printf("%s: [%d] WRONG — %s failed at block %u of %u: a file "
+		       "that needed an indirect block, made on the blocks of "
+		       "one removed unsynced, did not read back as written "
+		       "(#599)\n", tag, arm, step, bad, XF_IND_BLOCKS);
+		failed++;
+	} else {
+		printf("%s: [%d] a file of %u blocks with an indirect block, "
+		       "made on the blocks of one removed unsynced, reads back "
+		       "whole after a sync, opened again (#599)\n", tag, arm,
+		       XF_IND_BLOCKS);
+		passed++;
+	}
+}
+
 static void
 xf_write(const char *path)
 {
@@ -740,6 +876,7 @@ xf_write(const char *path)
 	xf_fresh_blocks(path, 6);
 	xf_owner_change(path, 7);
 	xf_neighbour_inodes(path, 8);
+	xf_indirect_owner(path, 9);
 }
 
 static void
