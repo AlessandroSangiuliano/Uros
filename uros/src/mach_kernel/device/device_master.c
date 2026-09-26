@@ -3364,21 +3364,29 @@ ds_master_device_dma_faults(
 	natural_t		bdf,
 	natural_t		*confined,
 	natural_t		*count,
-	vm_address_t		*address)
+	vm_address_t		*address,
+	natural_t		*lost,
+	natural_t		*undrained)
 {
+	struct device_md_faults a;
 	kern_return_t kr;
-	unsigned long last = 0;
-	unsigned n;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	n = device_md_dma_faults(bdf, &last);
+	/*
+	 * #599: a bdf that is not a device is refused.  It was answered
+	 * "confined 0, count 0" -- a question about nothing, answered as data.
+	 */
+	if (!device_md_dma_faults(bdf, &a))
+		return KERN_INVALID_ARGUMENT;
 
 	*confined = (natural_t)device_md_dma_confined(bdf);
-	*count = (natural_t)n;
-	*address = (vm_address_t)last;
+	*count = (natural_t)a.count;
+	*address = (vm_address_t)a.last;
+	*lost = (natural_t)a.lost;
+	*undrained = (natural_t)a.undrained;
 	return KERN_SUCCESS;
 }
 

@@ -335,23 +335,26 @@ unsigned iommu_fault_report(void)
 	return printed;
 }
 
-unsigned iommu_faults_for(uint16_t bdf, uint64_t *last_address)
+void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a)
 {
 	/*
 	 * #599: the count and the last address, both from the per-device
-	 * table, which only grows.  The address came from the ring, and a
-	 * noisier device could push it out while the count stayed.
+	 * table, which only grows (the address came from the ring, and a
+	 * noisier device could push it out while the count stayed); and how
+	 * many of them this drain found, which is what a driver's refusal
+	 * looks like when nothing else read the engines in time.
 	 */
 	const struct fault_device *d;
-	unsigned n = 0;
+	uint64_t before;
 
 	hw_lock_lock(&iommu_fault_lock);
 	d = fault_table_find(&fault_devices, bdf);
-	if (d != 0) {
-		n = (unsigned)d->recorded;
-		if (last_address)
-			*last_address = d->last_address;
-	}
+	before = d != 0 ? d->recorded : 0;
+	(void) drain_all_locked();
+	d = fault_table_find(&fault_devices, bdf);
+	a->recorded = d != 0 ? d->recorded : 0;
+	a->last_address = d != 0 ? d->last_address : 0;
+	a->undrained = a->recorded - before;
+	a->lost = fault_episodes + fault_devices.unplaced;
 	hw_lock_unlock(&iommu_fault_lock);
-	return n;
 }

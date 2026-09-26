@@ -599,17 +599,54 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
  * worked" -- so the verdict is read from whether the machine CAN refuse,
  * asked before the attempt rather than inferred from it.
  */
+/*
+ * #599: the verdict device_master.defs writes beside device_dma_faults, in one
+ * place.  Between two answers about a confined device: the count moved --
+ * refused; otherwise `lost' moved -- unknown, refusals may have gone
+ * uncounted; otherwise not refused.  Compared with != because the counts wrap
+ * modulo 2^32.
+ */
+enum ahci_dma_verdict { AHCI_NOT_REFUSED, AHCI_UNKNOWN, AHCI_REFUSED };
+
+static enum ahci_dma_verdict
+ahci_dma_verdict(natural_t count0, natural_t lost0, natural_t count1,
+		 natural_t lost1)
+{
+	if (count1 != count0)
+		return AHCI_REFUSED;
+	if (lost1 != lost0)
+		return AHCI_UNKNOWN;
+	return AHCI_NOT_REFUSED;
+}
+
 static void
 ahci_iommu_selftest(struct ahci_state *st)
 {
 	vm_address_t	kva = 0, pa = 0;
 	natural_t	confined = 0, before = 0, after = 0;
+	natural_t	lost0 = 0, lost1 = 0, undrained = 0;
 	vm_address_t	refused = 0;
+	enum ahci_dma_verdict v;
 	kern_return_t	kr;
 	int		rc;
 
 	if (st->n_ports == 0)
 		return;
+
+	/*
+	 * #599 [iommu-bdf]: a bdf that is not a device is refused, not
+	 * answered "nothing refused, not confined".  Before the confined
+	 * check, so that every target asks it: i386 answers it too.
+	 */
+	kr = device_dma_faults(st->master_device, 0x10000, &confined, &before,
+			       &refused, &lost0, &undrained);
+	if (kr == KERN_INVALID_ARGUMENT)
+		printf("ahci: [iommu-bdf] a bdf that is not a device (0x10000) "
+		       "is refused (kr=%d)\n", kr);
+	else
+		printf("ahci: [iommu-bdf] WRONG — a bdf that is not a device "
+		       "(0x10000) was answered (kr=%d, confined %u, count %u)\n",
+		       kr, (unsigned)confined, (unsigned)before);
 
 	/*
 	 * 🔑 ASKED BEFORE, so that "no faults" afterwards means something.  A
@@ -618,7 +655,8 @@ ahci_iommu_selftest(struct ahci_state *st)
 	 * a machine that never refuses anything.
 	 */
 	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
-			       &confined, &before, &refused);
+			       &confined, &before, &refused, &lost0,
+			       &undrained);
 	if (kr != KERN_SUCCESS)
 		return;
 
@@ -657,7 +695,8 @@ ahci_iommu_selftest(struct ahci_state *st)
 	}
 
 	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
-			       &confined, &after, &refused);
+			       &confined, &after, &refused, &lost1, &undrained);
+	v = ahci_dma_verdict(before, lost0, after, lost1);
 
 	/*
 	 * 🔥 AND THE COMMAND REPORTS SUCCESS.  rc comes back 0: the controller
@@ -670,7 +709,7 @@ ahci_iommu_selftest(struct ahci_state *st)
 	 * symptom available to a driver says the transfer worked, so a driver
 	 * that could not ask the kernel would go looking for a corrupt disk.
 	 */
-	if (kr == KERN_SUCCESS && after > before && refused != 0)
+	if (kr == KERN_SUCCESS && v == AHCI_REFUSED && refused != 0)
 		printf("ahci: [iommu] REFUSED at 0x%08lX — and the command "
 		       "returned %d, so the DEVICE never noticed: the domain "
 		       "is enforced, and only the kernel can say so\n",
@@ -681,11 +720,20 @@ ahci_iommu_selftest(struct ahci_state *st)
 	 * address and would be read as one.  It is what QEMU's amd-iommu does:
 	 * the refusal is real and the address quadword of its event is zero.
 	 */
-	else if (kr == KERN_SUCCESS && after > before)
+	else if (kr == KERN_SUCCESS && v == AHCI_REFUSED)
 		printf("ahci: [iommu] REFUSED %u time(s), and the command "
 		       "returned %d — but the engine recorded no address, so "
 		       "the refusal is known and the page is not\n",
 		       (unsigned)(after - before), rc);
+	/*
+	 * #599: no refusal recorded, and the kernel says refusals may have
+	 * gone uncounted in between -- neither a pass nor a hole.
+	 */
+	else if (kr == KERN_SUCCESS && v == AHCI_UNKNOWN)
+		printf("ahci: [iommu] UNKNOWN — no refusal recorded, and the "
+		       "kernel may have lost some in between (lost %u -> %u); "
+		       "the command returned %d\n", (unsigned)lost0,
+		       (unsigned)lost1, rc);
 	else if (rc < 0)
 		printf("ahci: [iommu] the transfer failed (%d) and no refusal "
 		       "was recorded — blocked, but not by anything that "

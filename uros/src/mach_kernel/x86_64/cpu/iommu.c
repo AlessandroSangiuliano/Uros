@@ -1683,11 +1683,14 @@ static struct device_domain *domain_slot(uint16_t bdf)
 	return 0;
 }
 
-const struct iommu_domain *iommu_domain_of(uint16_t bdf)
+int iommu_domain_confined(uint16_t bdf)
 {
-	struct device_domain *s = domain_slot(bdf);
+	int confined;
 
-	return s == 0 ? 0 : &s->domain;
+	mutex_lock(&iommu_domain_lock);
+	confined = domain_slot(bdf) != 0;
+	mutex_unlock(&iommu_domain_lock);
+	return confined;
 }
 
 unsigned iommu_domain_count(void)
@@ -2064,8 +2067,8 @@ static int domain_release_locked(uint16_t bdf)
 	/*
 	 * ⚠️ The slot goes even though the tables stay.  What the slot records
 	 * is that a device is IN a domain, and after the detach it is not --
-	 * leaving it would make iommu_domain_of() answer with a domain nothing
-	 * points at, which is a lie that reads like bookkeeping.
+	 * leaving it would make iommu_domain_confined() answer yes for a domain
+	 * nothing points at, which is a lie that reads like bookkeeping.
 	 */
 	for (i = 0; i < ndevice_domains; i++)
 		if (&device_domains[i] == s) {

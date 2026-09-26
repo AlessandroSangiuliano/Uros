@@ -458,12 +458,21 @@ device_md_dma_revoke(unsigned int bdf, unsigned long pa, unsigned long size)
 	return 0;
 }
 
-unsigned
-device_md_dma_faults(unsigned int bdf, unsigned long *last)
+int
+device_md_dma_faults(unsigned int bdf, struct device_md_faults *a)
 {
-	(void)bdf;
-	(void)last;
-	return 0;
+	/*
+	 * #599: nothing polices DMA here, so nothing is refused and nothing
+	 * can be lost -- the true answer, all zero.  A bdf that is not a
+	 * device is still not one.
+	 */
+	if (bdf > 0xFFFFu)
+		return 0;
+	a->count = 0;
+	a->last = 0;
+	a->lost = 0;
+	a->undrained = 0;
+	return 1;
 }
 
 int

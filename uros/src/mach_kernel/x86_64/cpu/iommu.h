@@ -790,13 +790,17 @@ int iommu_domain_release(uint16_t bdf);
 int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size);
 
 /*
- * The domain a device is in, or null when it is still passing through.
+ * Whether a device is in a domain, or still passing through.
  *
- * 🔑 Null IS the answer for most devices, and it is the one worth reporting: a
+ * 🔑 "No" IS the answer for most devices, and it is the one worth reporting: a
  * device with no domain is a device this kernel is not policing, which is what
  * #432 exists to stop being invisible.
+ *
+ * #599: asked under iommu_domain_lock.  It was iommu_domain_of(), which
+ * handed out a pointer into device_domains[] with no lock, while a release
+ * compacts that array.
  */
-const struct iommu_domain *iommu_domain_of(uint16_t bdf);
+int iommu_domain_confined(uint16_t bdf);
 
 /* How many devices have been taken off pass-through. */
 unsigned iommu_domain_count(void);
@@ -820,15 +824,26 @@ unsigned iommu_domain_count(void);
 unsigned iommu_fault_report(void);
 
 /*
- * How many refusals this device has been given, and the last address it was
- * refused.  Answers zero when it has never been refused.
+ * What the log knows of one device's refusals, asked by the driver that owns
+ * it: the engines are drained first, in the same hold.
  *
  * 🔑 PER DEVICE, because that is the question a DRIVER asks.  A transfer that
  * failed has two ordinary explanations -- the device is broken, or the
  * driver programmed an address it was never granted -- and they are told apart
  * by nothing the device reports.  This is the second one, answered.
+ *
+ * #599: `recorded' only goes up, `lost' is iommu_fault_lost(), and
+ * `undrained' is how many of `recorded' this call had to drain -- refusals
+ * nothing had read out of the engines by the time the driver asked.  It never
+ * prints.
  */
-unsigned iommu_faults_for(uint16_t bdf, uint64_t *last_address);
+struct iommu_fault_answer {
+	uint64_t	recorded;
+	uint64_t	last_address;
+	uint64_t	lost;
+	uint64_t	undrained;
+};
+void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a);
 
 /*
  * Whether a domain could be given to a device at all on this machine.

@@ -364,17 +364,24 @@ extern int		device_md_dma_revoke(unsigned int bdf,
 					     unsigned long size);
 
 /*
- * How many of this device's DMA requests the machine has refused, and the last
- * address it refused.  Zero when it has refused none, and zero on a machine
- * that refuses nothing because it polices nothing.
+ * What the machine knows of this device's refused DMA requests (#599): how
+ * many since boot and the last address refused, how many times refusals may
+ * have gone uncounted, and how many of the count this call itself had to read
+ * out of the engines.  All zero on a machine that refuses nothing because it
+ * polices nothing.
  *
- * ⚠️ `*last' is left alone when the answer is zero, rather than being cleared.
- * A caller that ignored the count and read the address would then see whatever
- * it had put there itself -- which is a wrong answer it wrote, and far easier
- * to trace than a zero that looks like an address.
+ * Answers 0 when `bdf' is not a device (above 0xFFFF), and nothing is
+ * filled in; the caller refuses the question.  It used to answer "no
+ * refusals" to it.
  */
-extern unsigned		device_md_dma_faults(unsigned int bdf,
-					     unsigned long *last);
+struct device_md_faults {
+	unsigned	count;		/* since boot, modulo 2^32 */
+	unsigned long	last;		/* the last refused address, or 0 */
+	unsigned	lost;		/* times refusals may have gone uncounted */
+	unsigned	undrained;	/* read out of the engines by this call */
+};
+extern int		device_md_dma_faults(unsigned int bdf,
+					     struct device_md_faults *a);
 
 /*
  * Whether this device is confined to what it has been granted right now.

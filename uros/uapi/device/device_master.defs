@@ -548,12 +548,30 @@ routine device_dma_owned(
 	out	by_other	: natural_t
 	);
 
+/*
+ * #599: what the kernel knows of a device's refusals.  `count' is the
+ * refusals recorded since boot, `address' the last refused, `lost' how many
+ * times refusals may have gone uncounted (an engine said it dropped some, or a
+ * device could not be named), `undrained' how many of `count' this very call
+ * had to read out of the engines.  The counts wrap modulo 2^32: compare with
+ * !=.  A bdf above 0xFFFF is not a device: KERN_INVALID_ARGUMENT.
+ *
+ * Between two calls, on a confined device:
+ *   count moved                   -> REFUSED;
+ *   otherwise, lost moved         -> UNKNOWN;
+ *   otherwise                     -> NOT REFUSED.
+ *
+ * Grown in place, keeping its id: a client built before it fails loudly
+ * (MIG_TYPE_ERROR or MACH_RCV_TOO_LARGE), and ahci is its one caller.
+ */
 routine device_dma_faults(
 		master_port	: mach_port_t;
 	in	bdf		: natural_t;
 	out	confined	: natural_t;
 	out	count		: natural_t;
-	out	address		: vm_address_t
+	out	address		: vm_address_t;
+	out	lost		: natural_t;
+	out	undrained	: natural_t
 	);
 
 /*

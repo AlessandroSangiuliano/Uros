@@ -796,11 +796,10 @@ device_md_dma_revoke(unsigned int bdf, unsigned long pa, unsigned long size)
 	return iommu_revoke((uint16_t)bdf, (uint64_t)pa, (uint64_t)size);
 }
 
-unsigned
-device_md_dma_faults(unsigned int bdf, unsigned long *last)
+int
+device_md_dma_faults(unsigned int bdf, struct device_md_faults *a)
 {
-	uint64_t address = 0;
-	unsigned n;
+	struct iommu_fault_answer f;
 
 	if (bdf > 0xFFFFu)
 		return 0;
@@ -813,13 +812,14 @@ device_md_dma_faults(unsigned int bdf, unsigned long *last)
 	 * Reporting as well as draining, because the kernel's log is where
 	 * anybody reading this afterwards will look.
 	 */
+	iommu_fault_ask((uint16_t)bdf, &f);
 	(void) iommu_fault_report();
 
-	n = iommu_faults_for((uint16_t)bdf, &address);
-	if (n != 0 && last != 0)
-		*last = (unsigned long)address;
-
-	return n;
+	a->count = (unsigned)f.recorded;
+	a->last = (unsigned long)f.last_address;
+	a->lost = (unsigned)f.lost;
+	a->undrained = (unsigned)f.undrained;
+	return 1;
 }
 
 int
@@ -828,7 +828,7 @@ device_md_dma_confined(unsigned int bdf)
 	if (bdf > 0xFFFFu)
 		return 0;
 
-	return iommu_domain_of((uint16_t)bdf) != 0;
+	return iommu_domain_confined((uint16_t)bdf);	/* #599: locked */
 }
 
 int
