@@ -555,11 +555,37 @@ ps2_attach(void *priv)
 	return 0;
 }
 
+/*
+ * #599: the answer to READ_CFG, skipping mouse bytes.  Port 1 is disabled and
+ * drained before the command, but port 2 belongs to ps2_mouse.so and stays
+ * live, so a packet byte can land in the output buffer ahead of the answer;
+ * the status's AUX bit says which is which.  Bounded: a mouse that streams
+ * for 16 bytes is a controller this does not wait on.
+ */
+static int
+ps2_read_cfg_answer(uint8_t *cfg)
+{
+	unsigned int n;
+
+	for (n = 0; n < 16; n++) {
+		if (wait_output_full() != 0)
+			return -1;
+		if (inb(PS2_STATUS) & PS2_STAT_AUX) {
+			(void)inb(PS2_DATA);
+			continue;
+		}
+		*cfg = inb(PS2_DATA);
+		return 0;
+	}
+	return -1;
+}
+
 static void
 ps2_detach(void *priv)
 {
 	struct ps2_priv *p = priv;
 	unsigned int i;
+	uint8_t cfg;
 
 	/*
 	 * #599: only what attach did is undone.  core.c also calls this for
@@ -582,9 +608,9 @@ ps2_detach(void *priv)
 	 * 1 and leave the keyboard off.  The claim goes last.
 	 */
 	(void)ctrl_send(PS2_CMD_DISABLE_P1);
-	drain_output_buffer();	/* #599: the first byte after READ_CFG is its */
-	if (ctrl_send(PS2_CMD_READ_CFG) == 0 && wait_output_full() == 0) {
-		uint8_t cur = inb(PS2_DATA);
+	drain_output_buffer();
+	if (ctrl_send(PS2_CMD_READ_CFG) == 0 && ps2_read_cfg_answer(&cfg) == 0) {
+		uint8_t cur = cfg;
 
 		cur = (uint8_t)((cur & ~0x41u) | (p->cfg_found & 0x41u));
 		if (ctrl_send(PS2_CMD_WRITE_CFG) == 0)
