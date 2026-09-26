@@ -227,9 +227,13 @@ routine device_intr_enable(
  * Declare that this device must be programmed with PHYSICAL addresses, so its
  * domain maps every grant at the address the memory is really at.
  *
- * 🔴 THIS IS NOT AN OPT-OUT OF ISOLATION.  The device is still confined: it
- * reaches what it has been granted and nothing else, and every other address
- * in the machine faults for it.  What it gives up is the second property #432
+ * 🔴 THIS IS NOT AN OPT-OUT OF ISOLATION -- where the device's DMA goes
+ * through the IOMMU.  There the device is still confined: it reaches what it
+ * has been granted and nothing else, and every other address in the machine
+ * faults for it.  #599: a device whose DMA bypasses the engine is confined by
+ * nothing, and QEMU's legacy virtio is one -- a page never granted to it
+ * received a disk block with translation on (428001fc); the kernel's line at
+ * the grant says which case it is.  What it gives up is the second property #432
  * stage 3e added -- not knowing where its memory is.  Confinement stops a
  * device reaching elsewhere by accident; the IOVA stops it doing so on
  * purpose, and this keeps the first and loses the second.
@@ -551,8 +555,9 @@ routine device_dma_owned(
 /*
  * #599: what the kernel knows of a device's refusals.  `count' is the
  * refusals recorded since boot, `address' the last refused, `lost' how many
- * times refusals may have gone uncounted (an engine said it dropped some, or a
- * device could not be named), `undrained' how many of `count' this very call
+ * times refusals may have gone uncounted (an engine said it dropped some, the
+ * kernel saw that it may have -- a full or filling log, an entry never
+ * written, a log that had stopped -- or a device could not be named), `undrained' how many of `count' this very call
  * had to read out of the engines.  The counts wrap modulo 2^32: compare with
  * !=.  A bdf above 0xFFFF is not a device: KERN_INVALID_ARGUMENT.
  *

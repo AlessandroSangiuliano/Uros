@@ -621,8 +621,11 @@ unsigned iommu_fault_poll(void);
 
 /*
  * How many times refusals may have gone uncounted, since boot: drains in
- * which an engine said it dropped some, and refusals from devices the
- * per-device count had no room to name (#599).  It only goes up.
+ * which an engine said it dropped some OR the kernel saw it may have -- a
+ * full or filling log, an entry never written, a log that had stopped
+ * (0873fc75, 898764d4; QEMU never raises the engine's own flag) -- and
+ * refusals from devices the per-device count had no room to name (#599).
+ * It only goes up.  A "may have": no count here says a refusal WAS lost.
  *
  * Reported rather than folded into the count, because the two are different
  * facts: the count says how many were read, and this says that the number is
@@ -744,10 +747,12 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
  * the address the memory is really at.  Answers non-zero when the domain was
  * opened that way.
  *
- * 🔴 STILL CONFINED, and that is the whole distinction.  An identity domain
- * contains only what was granted, so every other address in the machine faults
- * for this device exactly as before -- what is lost is that the driver knows
- * where its buffer is.  #432 stage 3d is kept and stage 3e is given up, for a
+ * 🔴 STILL CONFINED -- where the device's DMA goes through the IOMMU, and that
+ * is the whole distinction.  An identity domain contains only what was
+ * granted, so every other address in the machine faults for this device
+ * exactly as before -- what is lost is that the driver knows where its buffer
+ * is.  #599: a device whose DMA bypasses the engine is confined by nothing,
+ * domain or not; QEMU's legacy virtio does (428001fc).  #432 stage 3d is kept and stage 3e is given up, for a
  * device that cannot accept what 3e hands out.
  *
  * ⚠️ Before the first grant only.  A domain that already holds translated

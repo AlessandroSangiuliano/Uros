@@ -4513,7 +4513,8 @@ static void iommu_selftest(void)
 		kputdec(wrong);
 		kputs(" wrong");
 		if (!ok) {
-			kputs(" (A1-A8 then V1-V3, failed mask ");
+			/* #599: bit n is the (n+1)th case; A6 has two */
+			kputs(" (bits: A1-A6, A6 again, A7, A8, V1-V3; failed mask ");
 			kputdec(failed);
 			kputs(")");
 		}
@@ -4973,7 +4974,8 @@ static void iommu_selftest(void)
 				kputdec(faults);
 				kputs(" dma refusals recorded so far");
 				if (iommu_fault_lost() != 0)
-					kputs(" — AND THE ENGINE DROPPED SOME");
+					kputs(" — and some may have gone "
+					      "uncounted (see iommu_fault_lost)");
 				kputs(faults == 0
 				      ? " — which under pass-through is the"
 					" only right answer\r\n"

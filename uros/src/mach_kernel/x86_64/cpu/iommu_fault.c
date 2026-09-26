@@ -23,7 +23,8 @@
 /*
  * ── Stage 3d: the log of refusals ────────────────────────────────────
  *
- * A ring of the last IOMMU_FAULT_LOG, and a count that does not wrap with it.
+ * A ring of the last IOMMU_FAULT_LOG, and a count that does not wrap with it
+ * (64 bits since #599, and read by difference).
  * Both are needed and they answer different questions -- see the note on
  * IOMMU_FAULT_LOG in <cpu/iommu.h>.
  *
@@ -97,7 +98,7 @@ struct fault_table {
  */
 struct fault_ledger {
 	struct iommu_fault	ring[IOMMU_FAULT_LOG];
-	unsigned		total;
+	uint64_t		total;		/* #599: 64 bits -- see below */
 	struct fault_table	table;
 	uint64_t		episodes;
 	unsigned		why;		/* IOMMU_LOST_*, since boot */
@@ -248,6 +249,8 @@ int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong)
 #define	FAKE_AMD_OVERFLOW	(1ULL << 0)	/* MMIO 2020h, EventOverflow */
 #define	FAKE_AMD_RUN		(1ULL << 3)	/* MMIO 2020h, EventLogRun */
 #define	FAKE_AMD_LOG_EN		(1ULL << 2)	/* MMIO 0018h, EventLogEn */
+#define	FAKE_AMD_OTHER		(1ULL << 0)	/* MMIO 0018h, IommuEn: kept */
+#define	FAKE_AMD_UNWRITTEN	(~0ULL)		/* no restart writes this */
 #define	FAKE_VTD_PFO		(1u << 0)	/* FSTS */
 #define	FAKE_VTD_PPF		(1u << 1)
 #define	FAKE_VTD_F		(1ULL << 63)	/* a fault record's F */
@@ -258,6 +261,7 @@ static struct fault_ledger	fake_ledger;
 
 struct fake_amd {
 	uint64_t	head, tail, status, status_w1c, control;
+	uint64_t	control_stop, control_start;
 };
 
 /* An IO_PAGE_FAULT event from `bdf' at `address', in the slot at `off'. */
@@ -279,6 +283,8 @@ static unsigned fake_amd_drain(struct fake_amd *r, uint64_t *lost)
 	v.status = &r->status;
 	v.status_w1c = &r->status_w1c;
 	v.control = &r->control;
+	v.control_stop = &r->control_stop;
+	v.control_start = &r->control_start;
 	v.log = (volatile uint8_t *)fake_amd_log;
 	v.bytes = FAKE_AMD_BYTES;
 	(void) iommu_amd_evtlog_drain(&v, 0, &s);
@@ -383,19 +389,25 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
 
 	/*
 	 * A6: the log overflowed and stopped (Run clear, EventLogEn set): a
-	 * loss, the flag cleared, the log restarted -- EventLogEn left set --
-	 * and the unit marked stopped.  A second drain that still finds it
-	 * stopped: another loss, and blind.  A8: a drain that finds it running
-	 * clears both, and counts nothing.
+	 * loss, the flag cleared, the log restarted -- CONTROL written with
+	 * EventLogEn off and then on, every other bit kept (FAKE_AMD_OTHER
+	 * stands for them) -- and the unit marked stopped.  The two writes land
+	 * in words of their own, which start as a value neither write can
+	 * produce, so a restart that never happened reads as one (found in
+	 * review: the check compared a CONTROL nobody had to write).  A second
+	 * drain that still finds it stopped: another loss, and blind.  A8: a
+	 * drain that finds it running clears both, and counts nothing.
 	 */
 	bzero((char *)&r, sizeof(r));
 	r.status = FAKE_AMD_OVERFLOW;
-	r.control = FAKE_AMD_LOG_EN;
+	r.control = FAKE_AMD_LOG_EN | FAKE_AMD_OTHER;
+	r.control_stop = r.control_start = FAKE_AMD_UNWRITTEN;
 	found = fake_amd_drain(&r, &lost);
 	(*ran)++;
 	if (found != 0 || lost != 1 || r.status_w1c != FAKE_AMD_OVERFLOW ||
-	    r.control != FAKE_AMD_LOG_EN || !(fake_ledger.stopped & 1) ||
-	    (fake_ledger.blind & 1))
+	    r.control_stop != FAKE_AMD_OTHER ||
+	    r.control_start != (FAKE_AMD_LOG_EN | FAKE_AMD_OTHER) ||
+	    !(fake_ledger.stopped & 1) || (fake_ledger.blind & 1))
 		fake_failed(ran, wrong, failed);
 	found = fake_amd_drain(&r, &lost);
 	(*ran)++;
@@ -406,18 +418,26 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
 	fake_ledger.stopped = fake_ledger.blind = 0;
 	bzero((char *)&r, sizeof(r));
 	r.control = FAKE_AMD_LOG_EN;
+	r.control_stop = r.control_start = FAKE_AMD_UNWRITTEN;
 	found = fake_amd_drain(&r, &lost);
 	(*ran)++;
 	if (found != 0 || lost != 1 || r.status_w1c != 0 ||
+	    r.control_stop != 0 || r.control_start != FAKE_AMD_LOG_EN ||
 	    !(fake_ledger.stopped & 1))
 		fake_failed(ran, wrong, failed);
 
-	/* A8: running again: stopped and blind cleared, nothing lost. */
+	/*
+	 * A8: running again: stopped and blind cleared, nothing lost, and
+	 * CONTROL not written -- a running log is not toggled.
+	 */
 	fake_ledger.blind = 1;
 	r.status = FAKE_AMD_RUN;
+	r.control_stop = r.control_start = FAKE_AMD_UNWRITTEN;
 	found = fake_amd_drain(&r, &lost);
 	(*ran)++;
-	if (lost != 0 || fake_ledger.stopped != 0 || fake_ledger.blind != 0)
+	if (lost != 0 || fake_ledger.stopped != 0 || fake_ledger.blind != 0 ||
+	    r.control_stop != FAKE_AMD_UNWRITTEN ||
+	    r.control_start != FAKE_AMD_UNWRITTEN)
 		fake_failed(ran, wrong, failed);
 
 	/* V1: one of two records set: found, and only its F written. */
@@ -523,15 +543,23 @@ static const char *fault_kind_name(uint8_t kind)
 	}
 }
 
+/*
+ * #599: the ring is indexed by the count modulo its size, which stays right
+ * across a wrap of the count only while the size divides 2^64.
+ */
+_Static_assert((IOMMU_FAULT_LOG & (IOMMU_FAULT_LOG - 1)) == 0,
+	       "IOMMU_FAULT_LOG must be a power of two");
+
 static unsigned fault_report_print(void)
 {
-	static unsigned reported;
+	static uint64_t reported;
 	static uint64_t reported_unplaced, reported_episodes;
 	static uint32_t said_blind;
 	uint32_t blind;
 	struct iommu_fault copy[IOMMU_FAULT_LOG];
 	uint64_t unplaced, episodes;
-	unsigned n = 0, from, oldest, lost, printed = 0, why;
+	uint64_t pending, from, lost;
+	unsigned n = 0, printed = 0, why;
 
 	/*
 	 * #599: drain, claim [reported, ledger.total), copy, let go -- then
@@ -543,13 +571,22 @@ static unsigned fault_report_print(void)
 	 * Comparing positions inside the ring could not: the ring's element
 	 * zero is a different fault after every wrap.
 	 */
+	/*
+	 * 🔥 #599: by DIFFERENCE, and the count is 64 bits.  This bounded the
+	 * copy with ordered comparisons on 32-bit counts, and once the count
+	 * wrapped `reported' stood above `oldest', the loop ran from the old
+	 * `reported' to the new count, and every refusal after the sixteenth
+	 * went past the end of copy[] on the reporter's stack (found in
+	 * review; a driver that keeps its device faulting gets there).  The
+	 * difference is right across a wrap, and at most IOMMU_FAULT_LOG
+	 * records are copied however large it is.
+	 */
 	hw_lock_lock(&iommu_fault_lock);
 	(void) drain_all_locked();
-	oldest = ledger.total > IOMMU_FAULT_LOG ? ledger.total - IOMMU_FAULT_LOG
-					       : 0;
-	from = reported > oldest ? reported : oldest;
-	lost = from - reported;		/* wrapped out before anyone printed */
-	for (unsigned k = from; k != ledger.total; k++)
+	pending = ledger.total - reported;
+	lost = pending > IOMMU_FAULT_LOG ? pending - IOMMU_FAULT_LOG : 0;
+	from = reported + lost;		/* wrapped out before anyone printed */
+	for (uint64_t k = from; k != ledger.total; k++)
 		copy[n++] = ledger.ring[k % IOMMU_FAULT_LOG];
 	reported = ledger.total;
 	unplaced = ledger.table.unplaced - reported_unplaced;
@@ -574,8 +611,8 @@ static unsigned fault_report_print(void)
 		printed++;
 	}
 	if (lost != 0)
-		printf("iommu: and %u more that this log had no room for\n",
-		       lost);
+		printf("iommu: and %llu more that this log had no room for\n",
+		       (unsigned long long)lost);
 	if (unplaced != 0)
 		printf("iommu: %llu refusal(s) from devices the per-device count "
 		       "has no room to name, %llu since boot (#599)\n",
@@ -605,7 +642,7 @@ static unsigned fault_report_print(void)
 		printed++;
 	}
 
-	/* Anything said: the reporter's once-a-second limit counts it all. */
+	/* Anything said: the reporter's one-per-second limit counts it all. */
 	return printed + (lost != 0) + (unplaced != 0) + (episodes != 0);
 }
 
@@ -641,7 +678,9 @@ void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a)
  *
  * A kernel thread that drains every engine every 100 ms, whether or not any
  * processor idles and whether or not any driver asks, and prints what is new
- * at most once a second.  At kernel_thread's default priority, below the
+ * at most once per turn of sched_tick -- one report in each second of the
+ * scheduler's clock, so two can come one period apart across a turn (the
+ * limit is on how many, not on the spacing).  At kernel_thread's default priority, below the
  * clock's softclock, which delivers the timed wakeup it sleeps on.
  *
  * ⚠️ A wakeup that arrives between the drain and the sleep is not lost for
@@ -657,11 +696,11 @@ static void iommu_fault_reporter(void)
 	int period = hz / 10 ? hz / 10 : 1;
 
 	printf("iommu: refusals are read out every %d ms by a thread of their "
-	       "own, and printed at most once a second (#599)\n",
-	       period * 1000 / hz);
+	       "own, and printed at most once per turn of the scheduler's "
+	       "second (#599)\n", period * 1000 / hz);
 	for (;;) {
 		iommu_fault_reporter_passes++;
-		if (sched_tick != last_print) {	/* a second has turned */
+		if (sched_tick != last_print) {	/* sched_tick has turned */
 			if (fault_report_print() != 0)
 				last_print = sched_tick;
 		} else {

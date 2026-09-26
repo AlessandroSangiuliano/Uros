@@ -1231,6 +1231,8 @@ int iommu_amd_evtlog_of(unsigned unit, struct iommu_amd_evtlog *v)
 	v->status = (volatile uint64_t *)(regs + AMD_REG_STATUS);
 	v->status_w1c = v->status;
 	v->control = (volatile uint64_t *)(regs + AMD_REG_CONTROL);
+	v->control_stop = v->control;
+	v->control_start = v->control;
 	v->log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event +
 			(uint64_t)unit * AMD_EVENT_LOG_BYTES);	/* its own */
 	v->bytes = AMD_EVENT_LOG_BYTES;
@@ -1333,10 +1335,10 @@ unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
 		uint64_t control = *v->control;
 
 		why |= IOMMU_LOST_STOPPED;
-		*v->control = control & ~AMD_CTL_EVENTLOG_EN;
+		*v->control_stop = control & ~AMD_CTL_EVENTLOG_EN;
 		if (status & AMD_STATUS_EVT_OVERFLOW)
 			*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
-		*v->control = control | AMD_CTL_EVENTLOG_EN;
+		*v->control_start = control | AMD_CTL_EVENTLOG_EN;
 		iommu_fault_sink_stopped(s, unit, 1);
 	} else {
 		if (status & AMD_STATUS_EVT_OVERFLOW)
