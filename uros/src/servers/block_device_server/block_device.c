@@ -978,8 +978,10 @@ blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
 	uint64_t	answered = 0;
 	unsigned int	j, i, n = h->n_dma_caps, kept;
 
+	h->dma_asked = 0;
 	for (j = 0; j < n; j++) {
 		i = (h->dma_last + j) % n;
+		h->dma_asked++;
 		kr = device_dma_map_foreign_op(master_device, bdf, pa, op,
 					       (char *)&h->dma_cap[i],
 					       sizeof(h->dma_cap[i]), dma);
@@ -990,8 +992,10 @@ blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
 		}
 		if (kr == KERN_PROTECTION_FAILURE)
 			result = kr;
-		else if (blk_refusal_is_final(kr))
+		else if (blk_refusal_is_final(kr)) {
 			drop[i] = 1;
+			h->dma_final_kr = kr;
+		}
 		else if (kr != KERN_NO_ACCESS) {
 			result = kr;
 			break;
@@ -1035,7 +1039,23 @@ blk_refused(struct blk_handle *h, vm_address_t pa, natural_t op,
 	h->refusal_kr = kr;
 	if (!changed && (h->refusals & (h->refusals - 1)) != 0)
 		return;
-	if (h->n_dma_caps == 0)
+	/*
+	 * #599: "not asked" only when blk_dma_for had nothing to ask with.
+	 * It asks with every capability and forgets the ones the kernel
+	 * refuses for good, so a handle can reach here holding none after the
+	 * kernel refused them in this very request (found in review).
+	 */
+	if (h->n_dma_caps == 0 && h->dma_asked != 0)
+		printf("blk: %s: a physical %s of 0x%lx refused before any DMA "
+		       "— the kernel refused, for good, the %u capabilit%s "
+		       "this handle held (kr=%d), and they are forgotten "
+		       "(refusal %u on this handle)\n",
+		       h->part->name,
+		       op == CAP_OP_DMA_DEVICE_WRITE ? "read" : "write",
+		       (unsigned long)pa, h->dma_asked,
+		       h->dma_asked == 1 ? "y" : "ies", (int)h->dma_final_kr,
+		       h->refusals);
+	else if (h->n_dma_caps == 0)
 		printf("blk: %s: a physical %s of 0x%lx refused before any DMA "
 		       "— this handle holds no buffer capability (%s); the "
 		       "kernel was not asked (refusal %u on this handle)\n",

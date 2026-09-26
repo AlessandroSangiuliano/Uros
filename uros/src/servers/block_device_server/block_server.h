@@ -323,6 +323,10 @@ struct blk_handle {
 	unsigned int		dropped;	/* capabilities forgotten */
 	unsigned int		refusals;	/* physical requests refused */
 	kern_return_t		refusal_kr;	/* the last refusal's code */
+	unsigned int		dma_asked;	/* #599: capabilities the last
+						   blk_dma_for asked with */
+	kern_return_t		dma_final_kr;	/* ... and the kernel's code
+						   for the last it forgot */
 
 	/*
 	 * #599: what asking the kernel for every page costs, against the
