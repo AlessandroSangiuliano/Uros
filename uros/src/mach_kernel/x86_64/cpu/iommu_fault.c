@@ -19,6 +19,7 @@
 #include <kern/sched.h>		/* sched_tick: one a second */
 #include <kern/time_out.h>	/* hz */
 #include <sync/lock.h>		/* hw_lock, #599 */
+#include <cpu/quiet_census.h>	/* #599: the reporter is not work */
 
 /*
  * ── Stage 3d: the log of refusals ────────────────────────────────────
@@ -659,6 +660,7 @@ static void iommu_fault_reporter(void)
 	printf("iommu: refusals are read out every %d ms by a thread of their "
 	       "own, and printed at most once a second (#599)\n",
 	       period * 1000 / hz);
+	quiet_census_exempt_self();	/* wakes every period, work or not */
 	for (;;) {
 		iommu_fault_reporter_passes++;
 		if (sched_tick != last_print) {	/* a second has turned */

@@ -44,6 +44,7 @@
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
+#include <sync/atomic.h>	/* #599: atomic_cmpxchg64 */
 #include <ddb/cons_cost.h>	/* #567: one line about the console, once a boot */
 
 /*
@@ -107,11 +108,59 @@ static unsigned long	quiet_resets;
 static unsigned long	quiet_peak;
 static int		quiet_said;
 
+/*
+ * #599: the kernel's own periodic threads -- the TSC watchdog, every second,
+ * and the IOMMU fault reporter, every 100 ms -- wake processor 0 whatever the
+ * machine is doing.  Counted as work, they reset the count long before it
+ * reaches QUIET_PASSES, and the census never fired: a boot that stopped with
+ * every thread waiting (599-caccia2-2) printed no census in 90 s of quiet,
+ * and only gdb named the lost wakeup.  A thread that registers here is not
+ * counted when the idle loop hands processor 0 to it; `exempt=' in the line
+ * about the census says how often that happened.
+ *
+ * ⚠️ What this does not see: a thread that runs on processor 0 straight after
+ * an exempt one, with no idle pass between, resets nothing -- as work on the
+ * other processors never has.
+ */
+#define	QUIET_EXEMPT_MAX	4
+
+static volatile uint64_t	quiet_exempt[QUIET_EXEMPT_MAX];
+static unsigned long		quiet_exempt_runs;
+
 void
-quiet_census_busy(int mycpu)
+quiet_census_exempt_self(void)
+{
+	uint64_t	me = (uint64_t) current_thread();
+	unsigned	i;
+
+	for (i = 0; i < QUIET_EXEMPT_MAX; i++)
+		if (atomic_cmpxchg64(&quiet_exempt[i], 0, me) == 0)
+			return;
+	printf("quiet_census: no room to exempt thread %p -- its wakes count "
+	       "as work, and the census may never fire (#599)\n",
+	       (void *) me);
+}
+
+static int
+quiet_is_exempt(thread_t th)
+{
+	unsigned	i;
+
+	for (i = 0; th != 0 && i < QUIET_EXEMPT_MAX; i++)
+		if (quiet_exempt[i] == (uint64_t) th)
+			return 1;
+	return 0;
+}
+
+void
+quiet_census_busy(int mycpu, thread_t next)
 {
 	if (mycpu != QUIET_CPU)
 		return;
+	if (quiet_is_exempt(next)) {
+		quiet_exempt_runs++;
+		return;
+	}
 	if (quiet_passes > quiet_peak)
 		quiet_peak = quiet_passes;
 	quiet_resets++;
@@ -252,8 +301,9 @@ quiet_census_pass(int mycpu)
 	 * threshold, which is why it is written in terms of it.
 	 */
 	if ((++quiet_passes % (QUIET_PASSES / 5)) == 0) {
-		printf("quiet_census: passes=%lu peak=%lu resets=%lu\n",
-		       quiet_passes, quiet_peak, quiet_resets);
+		printf("quiet_census: passes=%lu peak=%lu resets=%lu "
+		       "exempt=%lu\n", quiet_passes, quiet_peak, quiet_resets,
+		       quiet_exempt_runs);
 
 		/*
 		 * And, once, what the console did over this boot (#567).

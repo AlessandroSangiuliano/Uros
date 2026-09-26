@@ -40,6 +40,7 @@
 #include <time/ruler.h>
 #include <time/rulers.h>
 #include <time/tsc.h>
+#include <cpu/quiet_census.h>	/* #599: this thread is not work */
 
 static int refine_wakeup;	/* an event nobody posts: the timeout ends the wait */
 
@@ -143,6 +144,7 @@ static void tsc_refine(void)
  */
 static void tsc_time_thread(void)
 {
+	quiet_census_exempt_self();	/* #599: wakes every second, work or not */
 	tsc_refine();
 	tsc_watch();
 	thread_terminate_self();
