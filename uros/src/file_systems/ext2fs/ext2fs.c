@@ -488,6 +488,12 @@ static int write_file_locked(
 		vm_offset_t,
 		vm_size_t);
 
+static void ext2_selftest_dir(
+		struct ext2fs_file *,
+		struct page_cache *,
+		unsigned int *,
+		unsigned int *);
+
 static int search_directory(
 		char *,
 	        struct ext2fs_file *,
@@ -1729,6 +1735,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 				(*wrong)++;
 			ext2_selftest_bref(&f, &br, pc, ran, wrong);
 			ext2_selftest_write(&f, pc, ran, wrong);
+			ext2_selftest_dir(&f, pc, ran, wrong);
 			f.f_dev.cache = NULL;
 			(void) vm_deallocate(mach_task_self(), page, 4096);
 		} else {
@@ -3026,36 +3033,50 @@ inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
 #define EXT2_FT_DIR		2
 
 /*
- * Persist a single directory block that was modified in place.  buf is
- * the borrowed page-cache pointer returned by buf_read_file (so the
- * cache already reflects our edit); we only need to push it to disk.
+ * #599: a directory block written straight to the disk, then given to the
+ * cache -- only once the disk has it, so a write that fails leaves the cache
+ * with what the disk still holds.  The directory edits used to happen in the
+ * cached block itself: a failed write left the cache answering with a name
+ * the disk never got, until the block was evicted.  `data' is the caller's
+ * own buffer, never a page-cache slot: a DMA-pool page is not handed to the
+ * copy path.
  */
 static int
-dir_write_block(struct ext2fs_file *dir_fp, daddr_t lblk, vm_offset_t buf)
+write_data_block(struct ext2fs_file *fp, daddr_t dblk, vm_offset_t data,
+		 vm_size_t size)
+{
+	int rc = write_disk_block(fp, dblk, data, size);
+
+	if (rc == 0 && fp->f_dev.cache)
+		rc = page_cache_wrote(fp->f_dev.cache, dblk, data, size);
+	return rc;
+}
+
+/*
+ * A copy of the directory block at `buf', to be edited and written with
+ * dir_write_block; NULL when there is no memory.  The caller frees it.
+ */
+static char *
+dir_block_copy(vm_offset_t buf, int bs)
+{
+	char *copy = malloc(bs);
+
+	if (copy != NULL)
+		memcpy(copy, (void *)buf, bs);
+	return copy;
+}
+
+/* Write logical directory block `lblk', edited in `copy'. */
+static int
+dir_write_block(struct ext2fs_file *dir_fp, daddr_t lblk, const char *copy)
 {
 	daddr_t dblk;
-	int bs = EXT2_BLOCK_SIZE(dir_fp->f_fs);
-	char *tmp;
 	int rc = block_map(dir_fp, lblk, &dblk);
+
 	if (rc != 0)
 		return rc;
-	/*
-	 * 'buf' is the page-cache page we borrowed and edited in place.  With
-	 * the DMA-backed page cache that buffer lives in device DMA memory,
-	 * and device_write() cannot copyin from that mapping — it silently
-	 * persists zeroes (the in-process VA reads fine, but the kernel-side
-	 * copyin of the non-phys write path does not).  Copy into a normal
-	 * heap buffer for the synchronous write.  Directory writes are a cold
-	 * path, so the extra 4 KiB copy is negligible; file data keeps using
-	 * the working phys writeback path untouched.
-	 */
-	tmp = malloc(bs);
-	if (!tmp)
-		return KERN_RESOURCE_SHORTAGE;
-	memcpy(tmp, (void *)buf, bs);
-	rc = write_disk_block(dir_fp, dblk, (vm_offset_t)tmp, bs);
-	free(tmp);
-	return rc;
+	return write_data_block(dir_fp, dblk, (vm_offset_t)copy,
+				EXT2_BLOCK_SIZE(dir_fp->f_fs));
 }
 
 /*
@@ -3100,7 +3121,7 @@ dir_grow_and_add(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
 	dp->file_type = (unsigned char)file_type;
 	memcpy(dp->name, name, name_len);
 
-	rc = write_disk_block(dir_fp, newblk, (vm_offset_t)blk, block_size);
+	rc = write_data_block(dir_fp, newblk, (vm_offset_t)blk, block_size);
 	free(blk);
 	if (rc != 0) {
 		block_free(dir_fp, newblk);
@@ -3129,9 +3150,9 @@ dir_grow_and_add(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
  * large enough, or trailing slack in a live entry that can be split off.
  * Grows the directory by a block if nothing fits.  Returns 0 / error.
  *
- * dir_fp must have its inode loaded and a vnode (for dirty flags).  We
- * read through buf_read_file, so the buffer we mutate is the same memory
- * the page cache hands future readers; dir_write_block then persists it.
+ * dir_fp must have its inode loaded and a vnode (for dirty flags).  The
+ * block is read through buf_read_file and edited in a copy (#599), which
+ * dir_write_block puts on the disk and then in the cache.
  */
 static int
 dir_add_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
@@ -3178,6 +3199,11 @@ dir_add_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
 
 			if (rec_len - used >= needed) {
 				struct ext2_dir_entry *ne;
+				char *copy = dir_block_copy(buf, block_size);
+
+				if (copy == NULL)
+					return KERN_RESOURCE_SHORTAGE;
+				dp = (struct ext2_dir_entry *)(copy + off);
 				if (used == 0) {
 					ne = dp;	/* reuse deleted slot whole */
 				} else {
@@ -3191,7 +3217,8 @@ dir_add_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
 				ne->file_type = (unsigned char)file_type;
 				memcpy(ne->name, name, name_len);
 
-				rc = dir_write_block(dir_fp, lblk, buf);
+				rc = dir_write_block(dir_fp, lblk, copy);
+				free(copy);
 				if (rc != 0)
 					return rc;
 				if (m)
@@ -3240,7 +3267,7 @@ dir_remove_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
 		vm_offset_t buf = 0;
 		vm_size_t buf_size = 0;
 		daddr_t lblk = offset / block_size;
-		struct ext2_dir_entry *prev = NULL;
+		int prev_off = -1;
 		int off, rc;
 
 		rc = buf_read_file(dir_fp, br, offset, &buf, &buf_size);
@@ -3268,15 +3295,25 @@ dir_remove_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
 			if (le32_to_cpu(dp->inode) != 0 &&
 			    dp->name_len == name_len &&
 			    memcmp(dp->name, name, name_len) == 0) {
+				char *copy = dir_block_copy(buf, block_size);
+
+				if (copy == NULL)
+					return KERN_RESOURCE_SHORTAGE;
 				if (ino_out)
 					*ino_out = (ino_t)le32_to_cpu(dp->inode);
-				if (prev)
+				if (prev_off >= 0) {
+					struct ext2_dir_entry *prev =
+						(struct ext2_dir_entry *)
+						(copy + prev_off);
 					prev->rec_len = cpu_to_le16(
 						le16_to_cpu(prev->rec_len) + rec_len);
-				else
-					dp->inode = cpu_to_le32(0);
+				} else {
+					((struct ext2_dir_entry *)(copy + off))
+						->inode = cpu_to_le32(0);
+				}
 
-				rc = dir_write_block(dir_fp, lblk, buf);
+				rc = dir_write_block(dir_fp, lblk, copy);
+				free(copy);
 				if (rc != 0)
 					return rc;
 				if (m)
@@ -3284,7 +3321,7 @@ dir_remove_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
 						      DCACHE_NEGATIVE);
 				return 0;
 			}
-			prev = dp;
+			prev_off = off;
 			off += rec_len;
 		}
 	}
@@ -3301,6 +3338,48 @@ dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
 	rc = dir_remove_entry_impl(dir_fp, &br, name, ino_out);
 	bref_release(dir_fp, &br);
 	return rc;
+}
+
+/*
+ * #599 E6, for ext2_blockio_selftest: a directory edit reaches the cache only
+ * once the disk has it.  A directory of one block (disk 23), held in the
+ * cache with one record, is given a name on the device that answers nothing:
+ * the write fails, and the cached block must still be the one the disk has.
+ */
+static void
+ext2_selftest_dir(struct ext2fs_file *f, struct page_cache *pc,
+		  unsigned int *ran, unsigned int *wrong)
+{
+	unsigned char		 blk[1024];
+	struct ext2_dir_entry	*dp = (struct ext2_dir_entry *)blk;
+	struct page_cache_entry	*e = NULL;
+	unsigned short		 mode = f->f_ic->i_mode;
+	unsigned long		 isize = f->f_ic->i_size;
+	int			 rc, same = 0;
+
+	memset(blk, 0, sizeof(blk));
+	dp->inode = cpu_to_le32(2);
+	dp->rec_len = cpu_to_le16(sizeof(blk));
+	dp->name_len = 1;
+	dp->file_type = EXT2_FT_DIR;
+	dp->name[0] = '.';
+	(void) page_cache_install(pc, 23, (vm_offset_t)blk, sizeof(blk),
+				  page_cache_ticket(pc));
+	f->f_ic->i_mode = IFDIR | 0755;
+	f->f_ic->i_size = sizeof(blk);
+	f->f_ic->i_block[0] = 23;
+	f->f_ra_last_block = (daddr_t)-2;
+	rc = dir_add_entry(f, "e6", 5, EXT2_FT_REG_FILE);
+	if (page_cache_get(pc, 23, ext2_fill, f, &e) == 0 && e != NULL) {
+		same = memcmp((void *)e->pc_data, blk, sizeof(blk)) == 0;
+		page_cache_put(pc, e);
+	}
+	f->f_ic->i_block[0] = 0;
+	f->f_ic->i_size = isize;
+	f->f_ic->i_mode = mode;
+	(*ran)++;
+	if (rc == 0 || !same)
+		(*wrong)++;
 }
 
 /*
@@ -4746,7 +4825,7 @@ ext2fs_mkdir(struct device *dev, const char *path, int mode)
 	dotdot->file_type = EXT2_FT_DIR;
 	dotdot->name[0] = '.';
 	dotdot->name[1] = '.';
-	rc = write_disk_block(&parent, dblk, (vm_offset_t)blk, block_size);
+	rc = write_data_block(&parent, dblk, (vm_offset_t)blk, block_size);
 	free(blk);
 	if (rc != 0) {
 		block_free(&parent, dblk);

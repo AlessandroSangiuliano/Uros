@@ -1055,6 +1055,101 @@ st_discard_leaves_nothing(void)
 	return ok;
 }
 
+/* A wrote on a thread of its own, and when it is done. */
+struct st_wroter {
+	struct page_cache	*pc;
+	daddr_t			 block;
+	int			 rc;
+	volatile int		 done;
+	pthread_t		 th;
+};
+
+static void *
+st_wrote_thread(void *arg)
+{
+	struct st_wroter *w = (struct st_wroter *)arg;
+	unsigned char blk[ST_BLOCK];
+
+	memset(blk, 0xA9, sizeof(blk));
+	w->rc = page_cache_wrote(w->pc, w->block, (vm_offset_t)blk, ST_BLOCK);
+	w->done = 1;
+	return 0;
+}
+
+/*
+ * P20: page_cache_wrote gives the cache what the disk now has.  A clean
+ * cached block takes the bytes and stays clean, a dirty one takes them and
+ * stays dirty, a part of a block is refused and changes nothing, and an
+ * absent block stays absent -- with a ticket taken before now stale.  A
+ * wrote of a block being read waits for the read, and its bytes are the
+ * ones left.
+ */
+static int
+st_wrote_follows_the_disk(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct st_getter	 g;
+	struct st_wroter	 w;
+	unsigned char		 blk[ST_BLOCK];
+	uint64_t		 t;
+	int			 ok = 1, started = 0;
+
+	if (pc == 0)
+		return 0;
+	memset(blk, 0x91, sizeof(blk));
+	if (st_install(pc, 5, blk) != 0)
+		ok = 0;
+	memset(blk, 0x92, sizeof(blk));
+	if (page_cache_wrote(pc, 5, (vm_offset_t)blk, ST_BLOCK) != 0 ||
+	    !st_holds(pc, 5, 0x92, 0))
+		ok = 0;
+	if (st_write_byte(pc, 6, 0x93) != 0)
+		ok = 0;
+	memset(blk, 0x94, sizeof(blk));
+	if (page_cache_wrote(pc, 6, (vm_offset_t)blk, ST_BLOCK) != 0 ||
+	    !st_holds(pc, 6, 0x94, 1))
+		ok = 0;
+	memset(blk, 0x95, sizeof(blk));
+	if (page_cache_wrote(pc, 5, (vm_offset_t)blk, ST_BLOCK / 2) !=
+	    KERN_INVALID_ARGUMENT || !st_holds(pc, 5, 0x92, 0))
+		ok = 0;
+	t = page_cache_ticket(pc);
+	if (page_cache_wrote(pc, 9, (vm_offset_t)blk, ST_BLOCK) != 0 ||
+	    page_cache_contains(pc, 9) ||
+	    page_cache_install(pc, 9, (vm_offset_t)blk, ST_BLOCK, t) !=
+	    PAGE_CACHE_STALE)
+		ok = 0;
+
+	st_fill_answer = 0;
+	st_gate_reset(10);
+	if (!st_get_start(&g, pc, 10)) {
+		st_gate_reset((daddr_t)-1);
+		(void) st_done(pc);
+		return 0;
+	}
+	memset(&w, 0, sizeof(w));
+	w.pc = pc;
+	w.block = 10;
+	if (st_wait_for(&st_gate_entered) &&
+	    pthread_create(&w.th, 0, st_wrote_thread, &w) == 0)
+		started = 1;
+	if (!started || !st_wait_waiters(pc, 1) || w.done)
+		ok = 0;			/* it did not wait for the read */
+	st_gate_release();
+	(void) pthread_join(g.th, 0);
+	if (started)
+		(void) pthread_join(w.th, 0);
+	st_gate_reset((daddr_t)-1);
+	if (g.rc != 0 || g.e == 0 || w.rc != 0 || !st_holds(pc, 10, 0xA9, 0))
+		ok = 0;
+	if (g.e != 0)
+		page_cache_put(pc, g.e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
 /* Count a case, and mark it failed by its number. */
 static void
 st_case(unsigned int *ran, unsigned int *wrong, unsigned int *failed, int ok)
@@ -1098,5 +1193,6 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong,
 	st_case(ran, wrong, failed, st_write_lands_after_fill());
 	st_case(ran, wrong, failed, st_install_takes_no_stale_bytes());
 	st_case(ran, wrong, failed, st_discard_leaves_nothing());
+	st_case(ran, wrong, failed, st_wrote_follows_the_disk());
 	page_cache_quiet = 0;
 }

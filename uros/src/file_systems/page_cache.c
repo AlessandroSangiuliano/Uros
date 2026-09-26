@@ -543,6 +543,28 @@ page_cache_put(struct page_cache *pc, struct page_cache_entry *e)
 	pthread_mutex_unlock(&pc->pc_lock);
 }
 
+/* #599: see page_cache.h. */
+int
+page_cache_wrote(struct page_cache *pc, daddr_t block, vm_offset_t data,
+		 vm_size_t size)
+{
+	struct page_cache_entry *e;
+
+	if (size != pc->pc_block_size)
+		return KERN_INVALID_ARGUMENT;
+
+	pthread_mutex_lock(&pc->pc_lock);
+	e = find_ready(pc, block);
+	if (e != NULL) {
+		memcpy((void *)e->pc_data, (void *)data, size);
+		e->pc_wgen++;
+	} else {
+		pc->pc_forget = ++pc->pc_seq;
+	}
+	pthread_mutex_unlock(&pc->pc_lock);
+	return KERN_SUCCESS;
+}
+
 /*
  * #599: see page_cache.h.  It waits for a fill (the slot is not data yet,
  * and the filler publishes it) and for a writeback (the sync holds the entry

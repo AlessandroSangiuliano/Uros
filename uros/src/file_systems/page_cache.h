@@ -315,6 +315,19 @@ int page_cache_write(struct page_cache *pc, daddr_t block,
 	__attribute__((warn_unused_result));
 
 /*
+ * #599: the disk now holds exactly these bytes of `block', written there
+ * without the cache -- a directory block.  A cached copy takes them (its
+ * dirty bit left as it is; its write count moves, so a writeback of older
+ * bytes in flight does not mark it clean); a copy being read is waited out
+ * first.  With no copy, pc_forget rises: a readahead ticket taken before
+ * may hold what the disk had before this write.  KERN_INVALID_ARGUMENT for
+ * anything but a whole block, with nothing done.
+ */
+int page_cache_wrote(struct page_cache *pc, daddr_t block,
+		     vm_offset_t data, vm_size_t size)
+	__attribute__((warn_unused_result));
+
+/*
  * #599: `block' is dead -- freed, or about to belong to another file -- and
  * whatever the cache holds of it goes: a dirty copy is never written, and a
  * copy being read or written back is waited out first.  A pinned copy loses
