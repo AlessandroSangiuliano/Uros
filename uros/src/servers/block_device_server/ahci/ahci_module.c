@@ -687,6 +687,66 @@ ahci_iommu_spin(struct ahci_state *st, vm_address_t pa)
 		       kr0, kr1, rc);
 }
 
+/*
+ * #599 [iommu-burst]: a burst larger than the engine's log is recorded whole
+ * or counted as lost.  `e' is how many records one refused read made -- the
+ * first read's count, taken while `lost' stood still.  Eight refused reads
+ * back to back, then the question: the count must have grown by 8e, or `lost'
+ * must have moved.  An engine that made one record per read may be
+ * collapsing refusals (VT-d does), and there the question cannot be asked.
+ * Then one more read, which must still move the count: an engine that
+ * stopped logging would not.
+ */
+#define AHCI_BURST	8u
+
+static void
+ahci_iommu_burst(struct ahci_state *st, vm_address_t pa, natural_t e)
+{
+	natural_t	confined = 0, c0 = 0, c1 = 0, c2 = 0, l0 = 0, l1 = 0;
+	natural_t	u = 0;
+	vm_address_t	refused = 0;
+	natural_t	dc, dl;
+	unsigned	i;
+
+	if (e == 0) {
+		printf("ahci: [iommu-burst] NOT ASKED — the first refused read "
+		       "gave no count to scale by\n");
+		return;
+	}
+	(void) device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				 &c0, &refused, &l0, &u);
+	for (i = 0; i < AHCI_BURST; i++)
+		(void) ahci_read_into_ungranted(st, pa);
+	(void) device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				 &c1, &refused, &l1, &u);
+	dc = c1 - c0;
+	dl = l1 - l0;
+
+	if (dc == AHCI_BURST * e || dl != 0)
+		printf("ahci: [iommu-burst] %u refused reads of %u records "
+		       "each: %u recorded, lost %u -> %u — recorded whole, or "
+		       "counted as lost\n", AHCI_BURST, (unsigned)e,
+		       (unsigned)dc, (unsigned)l0, (unsigned)l1);
+	else if (e == 1)
+		printf("ahci: [iommu-burst] NOT ASKED — one record per read, so "
+		       "the engine may be collapsing them: %u reads, %u "
+		       "recorded\n", AHCI_BURST, (unsigned)dc);
+	else
+		printf("ahci: [iommu-burst] WRONG — %u refused reads of %u "
+		       "records each: %u recorded of %u, and lost stayed at %u: "
+		       "refusals went missing and nothing said so\n",
+		       AHCI_BURST, (unsigned)e, (unsigned)dc,
+		       (unsigned)(AHCI_BURST * e), (unsigned)l1);
+
+	(void) ahci_read_into_ungranted(st, pa);
+	(void) device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				 &c2, &refused, &l1, &u);
+	if (c2 == c1)
+		printf("ahci: [iommu-burst] WRONG — a read after the burst moved "
+		       "nothing (count %u): the engine has stopped logging\n",
+		       (unsigned)c2);
+}
+
 static void
 ahci_iommu_selftest(struct ahci_state *st)
 {
@@ -801,6 +861,8 @@ ahci_iommu_selftest(struct ahci_state *st)
 		       "is confined — THE DOMAIN IS BUILT AND NOT ENFORCED\n");
 
 	ahci_iommu_spin(st, pa);
+	ahci_iommu_burst(st, pa, kr == KERN_SUCCESS && v == AHCI_REFUSED &&
+				 lost1 == lost0 ? after - before : 0);
 	device_dma_free(st->master_device, DEVICE_DMA_NO_BDF, kva, 4096);
 }
 
