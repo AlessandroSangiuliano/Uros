@@ -413,6 +413,16 @@ LEXT(set_spl)
 	movl	%eax, LAPIC_TPR(%edx)
 	jmp	2f
 9:
+	/*
+	 * #599: no I/O APIC, so the 8259 delivers to the master alone (LINT0),
+	 * and its mask -- curr_pic_mask and OCW1 below -- is one for the
+	 * machine.  Another processor's level written there masked or
+	 * unmasked the master's lines under it.  Only the master programs the
+	 * 8259; the others' levels are theirs alone (their LAPIC timer is
+	 * deferred in software).  %edx is this processor's number here.
+	 */
+	cmpl	EXT(master_cpu), %edx
+	jne	2f
 #endif	/* NCPUS > 1 */
 #if	!MP_V1_1
 	cmpl	$(SPLHI), %eax		/* if SPLHI */
