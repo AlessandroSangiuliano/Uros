@@ -3947,9 +3947,16 @@ ext2fs_create(struct device *dev, const char *path, int mode)
 	if (rc != 0)
 		return rc;
 
-	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+	/*
+	 * #599: only FS_NO_ENTRY means the name is free.  Any other failure --
+	 * a damaged directory, a read that did not land -- used to be taken for
+	 * "absent", and a second entry of the same name was added.
+	 */
+	rc = search_directory((char *)leaf, &parent, &existing);
+	if (rc != FS_NO_ENTRY) {
 		ext2fs_close_file((fs_private_t)&parent);
-		return FS_INVALID_PARAMETER;	/* already exists */
+		return rc == 0 ? FS_INVALID_PARAMETER	/* already exists */
+			       : rc;
 	}
 
 	goal = (parent.f_ino - 1) / parent.f_fs->s_inodes_per_group;
@@ -4136,9 +4143,11 @@ ext2fs_mkdir(struct device *dev, const char *path, int mode)
 	if (rc != 0)
 		return rc;
 
-	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+	rc = search_directory((char *)leaf, &parent, &existing); /* #599 */
+	if (rc != FS_NO_ENTRY) {
 		ext2fs_close_file((fs_private_t)&parent);
-		return FS_INVALID_PARAMETER;	/* already exists */
+		return rc == 0 ? FS_INVALID_PARAMETER	/* already exists */
+			       : rc;
 	}
 
 	block_size = EXT2_BLOCK_SIZE(parent.f_fs);
