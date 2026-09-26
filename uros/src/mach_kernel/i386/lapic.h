@@ -67,7 +67,14 @@ extern vm_offset_t lapic_start;	/* set by mp_table.c via io_map() */
  */
 #define LAPIC_TIMER_VECTOR	0x3F
 
-#define LAPIC_SPURIOUS_VECTOR	0xFF
+/*
+ * #599: 0xEF, not 0xFF.  0xFF is t_preempt in idt.S, so a spurious interrupt
+ * was taken as a preemption trap.  The low four bits stay 1111, which the
+ * older local APICs require of this vector; its IDT entry is
+ * lapic_spurious_entry (ipi.S), which returns without an EOI, as the SDM
+ * says a spurious interrupt must.
+ */
+#define LAPIC_SPURIOUS_VECTOR	0xEF
 
 struct i386_interrupt_state;		/* <i386/thread.h>; only a pointer is used */
 

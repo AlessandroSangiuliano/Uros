@@ -212,3 +212,11 @@ Entry(ipi_call_func_entry)
 	IPI_ENTER
 	call	EXT(ipi_call_func_handler)
 	IPI_LEAVE
+
+/*
+ * #599: the local APIC's spurious interrupt (LAPIC_SPURIOUS_VECTOR).  It sets
+ * no in-service bit, so it takes no EOI and has nothing to do: return to
+ * whatever it cut into.
+ */
+Entry(lapic_spurious_entry)
+	iret
