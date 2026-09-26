@@ -106,6 +106,8 @@ static int census_streq(const char *a, const char *b)
 }
 
 static unsigned long	quiet_passes;
+static unsigned long	quiet_all_passes;		/* #599: never reset */
+static unsigned long	quiet_next_report = 1000;
 static unsigned long	quiet_resets;
 static unsigned long	quiet_peak;
 static int		quiet_said;
@@ -277,24 +279,24 @@ quiet_census_pass(int mycpu)
 	}
 
 	/*
-	 * ⚠️ A word about itself, rarely, because the first two versions of
-	 * this both reported NOTHING and an absence cannot say which of its
-	 * two causes it had: cpu 0 not reaching the threshold, or the shared
-	 * counter being reset out from under it by another processor finding
-	 * work.  The peak and the reset count separate those, and one line
-	 * every thousand passes is not enough output to matter.
+	 * ⚠️ A word about itself, rarely, because the first versions of this
+	 * reported NOTHING and an absence cannot say which cause it had: cpu 0
+	 * not reaching the threshold, or the count being reset by work.  The
+	 * peak and the reset count separate those -- but only if the line is
+	 * printed whatever the count does.  #599: it was printed when the count
+	 * reached a hundred, so a count that work kept resetting (a user poller
+	 * that returns to ring 3 every 10 ms: char_server's klog forwarder)
+	 * silenced the one line meant to explain a silent census, and the
+	 * console's report it carries with it (found in review).  It is driven
+	 * now by every idle pass since boot, at 1000, 2000, 4000... -- a line
+	 * per doubling, so a long idle run costs a handful.
 	 */
-	/*
-	 * ⚠️ Every hundred, not every thousand.  It was every thousand while
-	 * the threshold below was three thousand; lowering the threshold to
-	 * five hundred left this line unreachable -- the census fires first,
-	 * every time -- so the one thing that could explain a silent instrument
-	 * had become part of the silence.  The interval has to stay under the
-	 * threshold, which is why it is written in terms of it.
-	 */
-	if ((++quiet_passes % (QUIET_PASSES / 5)) == 0) {
-		printf("quiet_census: passes=%lu peak=%lu resets=%lu\n",
-		       quiet_passes, quiet_peak, quiet_resets);
+	quiet_passes++;
+	if (++quiet_all_passes == quiet_next_report) {
+		quiet_next_report *= 2;
+		printf("quiet_census: passes=%lu peak=%lu resets=%lu (after %lu "
+		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
+		       quiet_resets, quiet_all_passes);
 
 		/*
 		 * And, once, what the console did over this boot (#567).
