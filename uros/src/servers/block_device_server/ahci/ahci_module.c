@@ -619,6 +619,74 @@ ahci_dma_verdict(natural_t count0, natural_t lost0, natural_t count1,
 	return AHCI_NOT_REFUSED;
 }
 
+/* The whole time-stamp counter: EDX:EAX, never EAX alone (#523). */
+static unsigned long long
+ahci_tsc(void)
+{
+	unsigned int lo, hi;
+
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+/* One sector into `pa', which this controller was never granted. */
+static int
+ahci_read_into_ungranted(struct ahci_state *st, vm_address_t pa)
+{
+	struct ata_fis_h2d fis;
+
+	memset(&fis, 0, sizeof(fis));
+	fis.fis_type	= FIS_TYPE_H2D;
+	fis.flags	= FIS_H2D_FLAG_CMD;
+	fis.command	= ATA_CMD_READ_DMA_EXT;
+	fis.device	= ATA_DEV_LBA;
+	fis.sector_count = 1;
+	return ahci_submit_cmd(st, 0, &fis, pa, 512, 0);
+}
+
+/*
+ * #599 [iommu-spin]: a refusal the kernel had to be asked about is a failure.
+ * One more refused read into the page, then 2^32 time-stamp cycles spent
+ * here, in user mode and with no system call -- a processor that never goes
+ * idle -- and only then the question.  The count must have moved, and the
+ * refusal must already have been read out of the engines by something other
+ * than the question: `undrained' is how many the question itself had to
+ * read.  The idle loop was the only other reader, and a processor spinning
+ * in a driver never runs it.  The values are printed as read, pass or fail.
+ */
+static void
+ahci_iommu_spin(struct ahci_state *st, vm_address_t pa)
+{
+	natural_t	confined = 0, c0 = 0, c1 = 0, l0 = 0, l1 = 0;
+	natural_t	u0 = 0, u1 = 0;
+	vm_address_t	refused = 0;
+	unsigned long long t0;
+	kern_return_t	kr0, kr1;
+	int		rc;
+
+	kr0 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				&c0, &refused, &l0, &u0);
+	rc = ahci_read_into_ungranted(st, pa);
+	t0 = ahci_tsc();
+	while (ahci_tsc() - t0 < (1ULL << 32))
+		__asm__ volatile("pause");
+	kr1 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				&c1, &refused, &l1, &u1);
+
+	if (kr0 == KERN_SUCCESS && kr1 == KERN_SUCCESS && c1 != c0 && u1 == 0)
+		printf("ahci: [iommu-spin] the refusal was read out while this "
+		       "driver spun 2^32 cycles: count %u -> %u, undrained 0, "
+		       "lost %u -> %u\n", (unsigned)c0, (unsigned)c1,
+		       (unsigned)l0, (unsigned)l1);
+	else
+		printf("ahci: [iommu-spin] WRONG — after 2^32 cycles of "
+		       "spinning, count %u -> %u, undrained %u, lost %u -> %u "
+		       "(kr %d, %d; the read returned %d): nothing had read "
+		       "the engines but the question\n", (unsigned)c0,
+		       (unsigned)c1, (unsigned)u1, (unsigned)l0, (unsigned)l1,
+		       kr0, kr1, rc);
+}
+
 static void
 ahci_iommu_selftest(struct ahci_state *st)
 {
@@ -681,18 +749,7 @@ ahci_iommu_selftest(struct ahci_state *st)
 	printf("ahci: [iommu] asking port 0 to read one sector into "
 	       "0x%08lX, a page granted to no device\n", (unsigned long)pa);
 
-	{
-		struct ata_fis_h2d fis;
-
-		memset(&fis, 0, sizeof(fis));
-		fis.fis_type	= FIS_TYPE_H2D;
-		fis.flags	= FIS_H2D_FLAG_CMD;
-		fis.command	= ATA_CMD_READ_DMA_EXT;
-		fis.device	= ATA_DEV_LBA;
-		fis.sector_count = 1;
-
-		rc = ahci_submit_cmd(st, 0, &fis, pa, 512, 0);
-	}
+	rc = ahci_read_into_ungranted(st, pa);
 
 	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
 			       &confined, &after, &refused, &lost1, &undrained);
@@ -743,6 +800,7 @@ ahci_iommu_selftest(struct ahci_state *st)
 		       "device was never granted, though the kernel says it "
 		       "is confined — THE DOMAIN IS BUILT AND NOT ENFORCED\n");
 
+	ahci_iommu_spin(st, pa);
 	device_dma_free(st->master_device, DEVICE_DMA_NO_BDF, kva, 4096);
 }
 
