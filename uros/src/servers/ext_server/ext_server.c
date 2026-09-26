@@ -2245,6 +2245,23 @@ main(int argc, char **argv)
 			       "makes (#599)\n", wrong, ran);
 	}
 
+	/*
+	 * #599: the block-I/O paths, on a file whose device answers nothing.
+	 * One line either way; the page-cache arms are added to it.
+	 */
+	{
+		unsigned int ran, wrong;
+
+		ext2_blockio_selftest(&ran, &wrong);
+		if (wrong == 0)
+			printf("ext2: %u block-I/O cases on a device that "
+			       "answers nothing, 0 wrong (#599)\n", ran);
+		else
+			printf("ext2: WRONG — %u of %u block-I/O cases on a "
+			       "device that answers nothing answered wrong "
+			       "(#599)\n", wrong, ran);
+	}
+
 	/* Create port set for all mount ports */
 	kr = mach_port_allocate(mach_task_self(),
 		MACH_PORT_RIGHT_PORT_SET, &port_set);

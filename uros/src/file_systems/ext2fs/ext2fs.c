@@ -1422,6 +1422,67 @@ ext2_dirent_selftest(unsigned int *ran, unsigned int *wrong)
 }
 
 /*
+ * #599: the block-I/O paths, asked at every start of ext_server, on a file
+ * whose device answers nothing (dev_port MACH_PORT_NULL, no block layer): any
+ * transfer fails, so a path that answers success without one is reading
+ * something that is not the disk.  1 KiB blocks, block 0 a hole, block 1
+ * mapped.  The page-cache work of #599 adds its arms here, one per defect,
+ * each written to fail when its fix is taken out.  *ran counts the cases,
+ * *wrong the wrong answers.
+ */
+void
+ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
+{
+	struct ext2_super_block	sb;
+	struct ext2fs_file	f;
+	vm_offset_t		buf;
+	vm_size_t		size;
+	unsigned int		i, nonzero;
+	int			rc;
+
+	*ran = 0;
+	*wrong = 0;
+	memset(&sb, 0, sizeof(sb));
+	memset(&f, 0, sizeof(f));
+	sb.s_log_block_size = 0;		/* 1 KiB */
+	sb.s_first_data_block = 1;
+	sb.s_blocks_count = 64;
+	sb.s_inodes_count = 16;
+	f.f_fs = &sb;
+	f.f_ic = &f.f_ic_scratch;
+	f.f_ic->i_size = 4 * 1024;
+	f.f_ic->i_block[0] = 0;			/* a hole */
+	f.f_ic->i_block[1] = 20;		/* mapped */
+	f.f_dev.dev_port = MACH_PORT_NULL;
+	f.f_dev.rec_size = 512;
+	f.f_buf_blkno = (daddr_t)-1;
+	f.f_nindir[0] = 1024 / 4;
+	f.f_nindir[1] = (1024 / 4) * (1024 / 4);
+
+	/* E0a: a hole reads as zeros, and the device is never asked. */
+	buf = 0;
+	size = 0;
+	rc = buf_read_file(&f, 0, &buf, &size);
+	nonzero = 0;
+	for (i = 0; rc == 0 && buf != 0 && i < size; i++)
+		if (((const unsigned char *)buf)[i] != 0)
+			nonzero++;
+	(*ran)++;
+	if (rc != 0 || buf == 0 || size != 1024 || nonzero != 0)
+		(*wrong)++;
+
+	/* E0b: a mapped block on a device that answers nothing is an error. */
+	buf = 0;
+	size = 0;
+	rc = buf_read_file(&f, 1024, &buf, &size);
+	(*ran)++;
+	if (rc == 0)
+		(*wrong)++;
+
+	free_file_buffers(&f);
+}
+
+/*
  * Search a directory for a name and return its
  * i_number.
  */

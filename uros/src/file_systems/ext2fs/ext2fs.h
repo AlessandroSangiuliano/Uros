@@ -147,6 +147,7 @@
  */
 
 extern void ext2_dirent_selftest(unsigned int *, unsigned int *); /* #599 */
+extern void ext2_blockio_selftest(unsigned int *, unsigned int *); /* #599 */
 extern int ext2fs_open_file(struct device *, const char *, fs_private_t *);
 extern int ext2fs_open_file_into(struct device *, const char *,
 				 fs_private_t *, struct ext2fs_file *);
