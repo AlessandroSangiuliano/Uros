@@ -113,6 +113,7 @@ struct fs_ops {
 #define	FS_NOT_IN_FILE		5005	/* offset not in file */
 #define	FS_INVALID_PARAMETER	5006	/* bad parameter to a routine */
 #define	FS_NO_RESOURCES		5007	/* server resource exhausted (e.g. vnode table) */
+#define	FS_CORRUPT		5008	/* an on-disk structure is damaged (#599) */
 
 extern int open_file(mach_port_t, const char *, struct file *);
 extern int open_file_on_port(mach_port_t, const char *, struct file *);

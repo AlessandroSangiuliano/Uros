@@ -428,6 +428,12 @@ static int search_directory(
 	        struct ext2fs_file *,
 		ino_t *);
 
+static int ext2_dirent_check(
+		const struct ext2fs_file *,
+		const struct ext2_dir_entry *,
+		vm_size_t,
+		vm_offset_t);
+
 static int read_fs(
 		struct device *,
 		struct ext2_super_block **,
@@ -1283,6 +1289,67 @@ fallback_read_direct:
 }
 
 /*
+ * #599: one directory record, checked before anything in it is used.
+ *
+ * Every walk over a directory advances by the record's own rec_len, so a
+ * record is trusted with the position of the next one.  search_directory
+ * trusted it entirely: an all-zero block -- a read that never landed -- has
+ * rec_len 0, and the walk stayed on it for ever, holding the server's thread.
+ * ext2fs_readdir stopped at 0 and answered success with what it had, so rmdir
+ * found a damaged directory empty; dir_add_entry and dir_remove_entry checked
+ * half the rule and skipped the rest of the block in silence.
+ *
+ * `room' is what is left from the record to the end of its block, or of the
+ * directory if that comes first.  The rule is the on-disk format's, in the
+ * order that keeps each test inside what the previous one proved: room for a
+ * header before the header is read; a length that is at least the smallest
+ * record, a multiple of four and inside the block; a name inside its record;
+ * an inode number the filesystem has.  Tombstones (inode 0) keep their name
+ * length and are held to it.
+ *
+ * Answers 0, or FS_CORRUPT after one line that names the directory, the
+ * offset and the values -- a damaged directory is an error its caller sees,
+ * never an empty or a shorter one.
+ */
+static int
+ext2_dirent_check(
+	const struct ext2fs_file	*dir_fp,
+	const struct ext2_dir_entry	*dp,
+	vm_size_t			room,
+	vm_offset_t			offset)
+{
+	unsigned int	rec_len = 0, name_len = 0, inode = 0;
+	const char	*why = 0;
+
+	if (room < EXT2_DIR_REC_LEN(1))
+		why = "less room than the smallest record";
+	else {
+		rec_len = le16_to_cpu(dp->rec_len);
+		name_len = dp->name_len;
+		inode = le32_to_cpu(dp->inode);
+		if (rec_len < EXT2_DIR_REC_LEN(1))
+			why = "a record shorter than the smallest";
+		else if ((rec_len & EXT2_DIR_ROUND) != 0)
+			why = "a record length that is not a multiple of four";
+		else if (rec_len > room)
+			why = "a record that crosses the end of its block";
+		else if (EXT2_DIR_REC_LEN(name_len) > rec_len)
+			why = "a name longer than its record";
+		else if (inode > dir_fp->f_fs->s_inodes_count)
+			why = "an inode number the filesystem does not have";
+	}
+
+	if (why == 0)
+		return 0;
+
+	printf("ext2: directory inode %u, offset %lu: %s (rec_len %u, "
+	       "name_len %u, inode %u, room %lu) — refused as damaged\n",
+	       (unsigned)dir_fp->f_ino, (unsigned long)offset, why, rec_len,
+	       name_len, inode, (unsigned long)room);
+	return FS_CORRUPT;
+}
+
+/*
  * Search a directory for a name and return its
  * i_number.
  */
@@ -1331,6 +1398,9 @@ search_directory(
 		return (rc);
 
 	    dp = (struct ext2_dir_entry *)buf;
+	    rc = ext2_dirent_check(fp, dp, buf_size, offset);	/* #599 */
+	    if (rc != 0)
+		return (rc);
 	    if (le32_to_cpu(dp->inode) != 0) {
 		strncpy (tmp_name, dp->name, le16_to_cpu(dp->name_len));
 		tmp_name[le16_to_cpu(dp->name_len)] = '\0';
@@ -2065,8 +2135,9 @@ ext2fs_readdir(fs_private_t private,
 			break;
 
 		dp = (struct ext2_dir_entry *)buf;
-		if (le16_to_cpu(dp->rec_len) == 0)
-			break;	/* corrupt — avoid infinite loop */
+		rc = ext2_dirent_check(fp, dp, buf_size, offset); /* #599 */
+		if (rc != 0)
+			return rc;
 
 		if (le32_to_cpu(dp->inode) != 0) {
 			nlen = dp->name_len;
@@ -2618,16 +2689,22 @@ dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
 		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
 		if (rc != 0)
 			return rc;
+		if (buf_size > (vm_size_t)block_size)
+			buf_size = block_size;
 
 		off = 0;
-		while (off + 8 <= block_size) {
+		while ((vm_size_t)off < buf_size) {
 			struct ext2_dir_entry *dp =
 				(struct ext2_dir_entry *)((char *)buf + off);
-			int rec_len = le16_to_cpu(dp->rec_len);
+			int rec_len;
 			int used;
 
-			if (rec_len < 8 || (off + rec_len) > block_size)
-				break;	/* corrupt block — give up on it */
+			/* #599: a damaged block is refused, not skipped */
+			rc = ext2_dirent_check(dir_fp, dp, buf_size - off,
+					       offset + off);
+			if (rc != 0)
+				return rc;
+			rec_len = le16_to_cpu(dp->rec_len);
 
 			used = (le32_to_cpu(dp->inode) == 0)
 				? 0 : EXT2_DIR_REC_LEN(dp->name_len);
@@ -2666,7 +2743,8 @@ dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
  * inode number is returned through ino_out so the caller can drop link
  * counts / free the inode.  Removal is the classic ext2 tombstone: the
  * entry's rec_len is folded into the previous record, or inode is zeroed
- * when it is the first record in the block.  Returns 0 / FS_NO_ENTRY.
+ * when it is the first record in the block.  Returns 0 / FS_NO_ENTRY, or
+ * FS_CORRUPT for a damaged block (#599).
  */
 static int
 dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
@@ -2687,15 +2765,24 @@ dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
 		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
 		if (rc != 0)
 			return rc;
+		if (buf_size > (vm_size_t)block_size)
+			buf_size = block_size;
 
 		off = 0;
-		while (off + 8 <= block_size) {
+		while ((vm_size_t)off < buf_size) {
 			struct ext2_dir_entry *dp =
 				(struct ext2_dir_entry *)((char *)buf + off);
-			int rec_len = le16_to_cpu(dp->rec_len);
+			int rec_len;
 
-			if (rec_len < 8 || (off + rec_len) > block_size)
-				break;
+			/*
+			 * #599: refused, not skipped -- skipping answered
+			 * FS_NO_ENTRY for a name after the damage.
+			 */
+			rc = ext2_dirent_check(dir_fp, dp, buf_size - off,
+					       offset + off);
+			if (rc != 0)
+				return rc;
+			rec_len = le16_to_cpu(dp->rec_len);
 
 			if (le32_to_cpu(dp->inode) != 0 &&
 			    dp->name_len == name_len &&
