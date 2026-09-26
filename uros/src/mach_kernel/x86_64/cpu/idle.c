@@ -181,11 +181,9 @@ machine_idle_exit(int mycpu)
 	idle_state[mycpu].halted = 0;
 
 	/*
-	 * Work arrived: the quiet stretch #476 is waiting for starts again --
-	 * unless it is one of the kernel's own periodic threads (#599).  The
-	 * thread dispatched to this processor, if the idle loop was handed one.
+	 * #599: the quiet census no longer counts this as work -- it asks
+	 * whether a user task's thread ran (cpu/quiet_census.c).
 	 */
-	quiet_census_busy(mycpu, cpu_to_processor(mycpu)->next_thread);
 }
 
 void

@@ -942,6 +942,10 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	 */
 	thread_machine_set_current(new);
 
+	/* #476, #599: work, for the quiet census (cpu/quiet_census.c) */
+	if (new_act->task != kernel_task)
+		percpu()->user_dispatches++;
+
 	/* Where ring 3 lands now, and whose floating-point area is next. */
 	act_machine_switch_pcb(new_act);
 

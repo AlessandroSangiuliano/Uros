@@ -44,7 +44,7 @@
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
-#include <sync/atomic.h>	/* #599: atomic_cmpxchg64 */
+#include <cpu/percpu.h>	/* #599: user dispatches, all processors */
 #include <ddb/cons_cost.h>	/* #567: one line about the console, once a boot */
 
 /*
@@ -58,8 +58,8 @@
  * does not matter as long as it is far longer than any pause a working boot
  * takes.
  *
- * ⚠️ Reset by machine_idle_exit(), so a processor that finds work starts the
- * count again.  Without that reset this would eventually fire on a healthy
+ * ⚠️ Reset by work (quiet_work(): a user task's thread given a processor, or
+ * running on one -- #599), so the count starts again.  Without that reset this would eventually fire on a healthy
  * system that simply had a slow patch, and a census of a system that is about
  * to carry on is a false report.
  */
@@ -85,7 +85,9 @@
 #define	QUIET_PASSES	500
 
 /*
- * The one processor that owns the count, on both sides.
+ * The one processor that owns the count.  Since #599 the work that resets it
+ * is looked for on every processor -- by this processor, in its own pass --
+ * so there is still one writer.
  *
  * 🔥 The version before this counted here and let every processor reset, and
  * it reported nothing at all -- not even the line it printed about itself.
@@ -109,58 +111,27 @@ static unsigned long	quiet_peak;
 static int		quiet_said;
 
 /*
- * #599: the kernel's own periodic threads -- the TSC watchdog, every second,
- * and the IOMMU fault reporter, every 100 ms -- wake processor 0 whatever the
- * machine is doing.  Counted as work, they reset the count long before it
- * reaches QUIET_PASSES, and the census never fired: a boot that stopped with
- * every thread waiting (599-caccia2-2) printed no census in 90 s of quiet,
- * and only gdb named the lost wakeup.  A thread that registers here is not
- * counted when the idle loop hands processor 0 to it; `exempt=' in the line
- * about the census says how often that happened.
+ * #476, #599: what counts as work.  It used to be the idle loop handing
+ * processor 0 a thread, any thread -- and the kernel's own periodic threads,
+ * the TSC watchdog every second and the IOMMU fault reporter every 100 ms,
+ * wake it whatever the machine is doing (through the softclock thread, as
+ * every timed wakeup does).  The count never reached QUIET_PASSES: the boot
+ * that stopped with every thread waiting (599-caccia2-2) printed no census in
+ * 90 s of quiet, and only gdb named the lost wakeup.  Registering those two
+ * threads as exempt did not help, for the softclock reason (found in review).
  *
- * ⚠️ What this does not see: a thread that runs on processor 0 straight after
- * an exempt one, with no idle pass between, resets nothing -- as work on the
- * other processors never has.
+ * So the question is asked of the tasks, on every processor: a thread of a
+ * task other than the kernel's given a processor since the last pass
+ * (percpu's user_dispatches, counted in switch_context()), or one running
+ * now -- which is what a user loop with no switches looks like.  Kernel
+ * threads are not work here, whatever they do: #476 and #599 are user tasks
+ * that stopped.
  */
-#define	QUIET_EXEMPT_MAX	4
+static uint64_t	quiet_dispatches;
 
-static volatile uint64_t	quiet_exempt[QUIET_EXEMPT_MAX];
-static unsigned long		quiet_exempt_runs;
-
-void
-quiet_census_exempt_self(void)
+static void
+quiet_work(void)
 {
-	uint64_t	me = (uint64_t) current_thread();
-	unsigned	i;
-
-	for (i = 0; i < QUIET_EXEMPT_MAX; i++)
-		if (atomic_cmpxchg64(&quiet_exempt[i], 0, me) == 0)
-			return;
-	printf("quiet_census: no room to exempt thread %p -- its wakes count "
-	       "as work, and the census may never fire (#599)\n",
-	       (void *) me);
-}
-
-static int
-quiet_is_exempt(thread_t th)
-{
-	unsigned	i;
-
-	for (i = 0; th != 0 && i < QUIET_EXEMPT_MAX; i++)
-		if (quiet_exempt[i] == (uint64_t) th)
-			return 1;
-	return 0;
-}
-
-void
-quiet_census_busy(int mycpu, thread_t next)
-{
-	if (mycpu != QUIET_CPU)
-		return;
-	if (quiet_is_exempt(next)) {
-		quiet_exempt_runs++;
-		return;
-	}
 	if (quiet_passes > quiet_peak)
 		quiet_peak = quiet_passes;
 	quiet_resets++;
@@ -284,6 +255,16 @@ quiet_census_pass(int mycpu)
 	if (quiet_said)
 		return;
 
+	{
+		int		running_user;
+		uint64_t	d = percpu_user_dispatches(&running_user);
+
+		if (d != quiet_dispatches || running_user) {
+			quiet_dispatches = d;
+			quiet_work();
+		}
+	}
+
 	/*
 	 * ⚠️ A word about itself, rarely, because the first two versions of
 	 * this both reported NOTHING and an absence cannot say which of its
@@ -301,9 +282,8 @@ quiet_census_pass(int mycpu)
 	 * threshold, which is why it is written in terms of it.
 	 */
 	if ((++quiet_passes % (QUIET_PASSES / 5)) == 0) {
-		printf("quiet_census: passes=%lu peak=%lu resets=%lu "
-		       "exempt=%lu\n", quiet_passes, quiet_peak, quiet_resets,
-		       quiet_exempt_runs);
+		printf("quiet_census: passes=%lu peak=%lu resets=%lu\n",
+		       quiet_passes, quiet_peak, quiet_resets);
 
 		/*
 		 * And, once, what the console did over this boot (#567).
@@ -528,9 +508,9 @@ quiet_census_pass(int mycpu)
 	 * 🔥 AND WHO IS ON EACH PROCESSOR, WITHOUT WHICH "IDLE" IS HALF A WORD
 	 * (#558).
 	 *
-	 * The count above is cpu 0's alone -- quiet_census_busy() resets it when
-	 * THIS processor finds work -- so "the machine has been idle" is really
-	 * "cpu 0 has been idle".  A thread listed as TH_RUN on no run queue then
+	 * The count above is of cpu 0's idle passes, and since #599 it is reset
+	 * by a user task's thread running on ANY processor -- but a kernel
+	 * thread busy on another one resets nothing.  A thread listed as TH_RUN on no run queue then
 	 * has two readings that the list cannot tell apart: lost between a
 	 * wakeup that claimed it and a dispatch that never came, or RUNNING on
 	 * another processor all along, spinning somewhere.

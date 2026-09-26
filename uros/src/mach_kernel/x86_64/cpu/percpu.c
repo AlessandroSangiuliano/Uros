@@ -18,10 +18,41 @@
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
 #include <trap/trap.h>
+#include <kern/thread.h>		/* #599: whose thread a processor runs */
+#include <kern/thread_act.h>
+#include <kern/task.h>
 
 static uint64_t percpu_va(uint32_t cpu_id)
 {
 	return PERCPU_BASE + (uint64_t)cpu_id * PAGE_SIZE_4K;
+}
+
+/*
+ * #476, #599: the quiet census's two questions about the other processors --
+ * how many user threads they have been given since boot, and whether one of
+ * them is running a user thread now.  Blocks are found by processor number,
+ * as context_fpu_counts() finds them: on this target the number is the APIC
+ * id and the block's index.
+ */
+uint64_t percpu_user_dispatches(int *running_user)
+{
+	uint64_t n = 0;
+
+	*running_user = 0;
+	for (int i = 0; i < NCPUS; i++) {
+		struct percpu *p;
+		thread_t th;
+
+		if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+			continue;
+		p = (struct percpu *)(uintptr_t)percpu_va((uint32_t) i);
+		n += p->user_dispatches;
+		th = (thread_t) p->active_thread;
+		if (th != THREAD_NULL && th->top_act != THR_ACT_NULL &&
+		    th->top_act->task != kernel_task)
+			*running_user = 1;
+	}
+	return n;
 }
 
 void percpu_alloc(uint32_t cpu_id)

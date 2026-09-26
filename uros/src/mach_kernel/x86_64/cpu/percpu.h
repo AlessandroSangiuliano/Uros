@@ -296,6 +296,14 @@ struct percpu {
 	uint32_t intr_level;
 	uint32_t intr_saved_if;
 
+	/*
+	 * #476, #599: how many times this processor was given a thread of a
+	 * task other than the kernel's -- the quiet census's measure of work.
+	 * Per processor, like the counters below, because it is written on the
+	 * context-switch path.  At the END for the reason those are.
+	 */
+	uint64_t user_dispatches;
+
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is
@@ -362,6 +370,9 @@ _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)
  */
 void percpu_alloc(uint32_t cpu_id);
 void percpu_activate(uint32_t cpu_id);
+
+/* #476, #599: user dispatches since boot, all processors; see percpu.c */
+uint64_t percpu_user_dispatches(int *running_user);
 
 /* This CPU's block, via the pointer it keeps at offset zero. */
 static inline struct percpu *percpu(void)
