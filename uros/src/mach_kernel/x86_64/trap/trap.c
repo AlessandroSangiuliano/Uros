@@ -708,6 +708,11 @@ static volatile uint64_t backtrace_lock;
 
 void x86_64_backtrace(uint64_t rbp)
 {
+	x86_64_backtrace_after(rbp, 0);
+}
+
+void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
+{
 	pmap_t kernel = pmap_kernel();
 	uint64_t spins;
 
@@ -717,6 +722,8 @@ void x86_64_backtrace(uint64_t rbp)
 		cpu_pause();
 	}
 
+	if (first != 0)
+		first();
 	tputs("  cpu ");
 	if (lapic_present())
 		tputdec(lapic_id());
