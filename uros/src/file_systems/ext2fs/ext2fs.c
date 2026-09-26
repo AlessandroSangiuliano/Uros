@@ -2832,6 +2832,18 @@ block_free_impl(struct ext2fs_file *fp, daddr_t block)
  * updates and hand the same block to two writers.  ext2_alloc_lock is
  * a leaf lock (nothing else is acquired while holding it).
  */
+/*
+ * #599: a block that changes owner leaves nothing of its old owner in the
+ * page cache.  A file removed with dirty blocks still cached left them there:
+ * the next file or directory to take one of those blocks read the old owner's
+ * bytes back through the cache, and the next sync wrote them over the new
+ * owner's.  block_free discards before the block goes back in the bitmap --
+ * every caller has already decided its content is dead, and until the bit is
+ * clear nobody else can be handed it -- and block_alloc discards again for
+ * the new owner, since a reader with a stale map may have cached it in
+ * between.  Both outside ext2_alloc_lock, which stays a leaf: a discard can
+ * wait for a fill or a writeback of the block.
+ */
 static daddr_t
 block_alloc(struct ext2fs_file *fp, int goal_group)
 {
@@ -2840,12 +2852,16 @@ block_alloc(struct ext2fs_file *fp, int goal_group)
 	pthread_mutex_lock(&ext2_alloc_lock);
 	b = block_alloc_impl(fp, goal_group);
 	pthread_mutex_unlock(&ext2_alloc_lock);
+	if (b != 0 && fp->f_dev.cache)
+		page_cache_discard(fp->f_dev.cache, b);
 	return b;
 }
 
 static void
 block_free(struct ext2fs_file *fp, daddr_t block)
 {
+	if (fp->f_dev.cache)
+		page_cache_discard(fp->f_dev.cache, block);
 	pthread_mutex_lock(&ext2_alloc_lock);
 	block_free_impl(fp, block);
 	pthread_mutex_unlock(&ext2_alloc_lock);

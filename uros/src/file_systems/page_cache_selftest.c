@@ -960,6 +960,101 @@ st_install_takes_no_stale_bytes(void)
 	return ok;
 }
 
+/* A discard on a thread of its own, and when it is done. */
+struct st_discarder {
+	struct page_cache	*pc;
+	daddr_t			 block;
+	volatile int		 done;
+	pthread_t		 th;
+};
+
+static void *
+st_discard_thread(void *arg)
+{
+	struct st_discarder *d = (struct st_discarder *)arg;
+
+	page_cache_discard(d->pc, d->block);
+	d->done = 1;
+	return 0;
+}
+
+/*
+ * P19: a discarded block leaves the cache and is never written.  A dirty
+ * block discarded is gone, a sync writes nothing, and a ticket taken before
+ * the discard is stale after it.  A pinned block discarded loses its key and
+ * keeps its bytes for its holder, and its slot is freed at the put.  A
+ * discard of a block being written back waits for the write to land.
+ */
+static int
+st_discard_leaves_nothing(void)
+{
+	struct page_cache	*pc = page_cache_create(4, ST_BLOCK,
+							st_writeback, 0);
+	struct page_cache_entry	*e = 0;
+	struct st_syncer	 sy;
+	struct st_discarder	 d;
+	unsigned char		 blk[ST_BLOCK];
+	unsigned int		 calls;
+	uint64_t		 t;
+	int			 ok = 1, started = 0;
+
+	if (pc == 0)
+		return 0;
+	st_wb_answer = 0;
+	t = page_cache_ticket(pc);
+	if (st_write_byte(pc, 5, 0xB1) != 0)
+		ok = 0;
+	page_cache_discard(pc, 5);
+	calls = st_wb_calls;
+	if (page_cache_contains(pc, 5) || page_cache_sync(pc) != 0 ||
+	    st_wb_calls != calls)
+		ok = 0;
+	memset(blk, 0xB2, sizeof(blk));
+	if (page_cache_install(pc, 5, (vm_offset_t)blk, ST_BLOCK, t) !=
+	    PAGE_CACHE_STALE)
+		ok = 0;
+
+	st_fill_answer = 0;
+	if (page_cache_get(pc, 6, st_fill, 0, &e) != 0 || e == 0) {
+		ok = 0;
+	} else {
+		page_cache_discard(pc, 6);
+		if (page_cache_contains(pc, 6) || e->pc_state != PC_ORPHAN ||
+		    !st_bytes(e, st_fill_byte))
+			ok = 0;
+		page_cache_put(pc, e);
+		if (e->pc_state != PC_FREE)
+			ok = 0;
+	}
+
+	if (st_write_byte(pc, 7, 0xB3) != 0)
+		ok = 0;
+	st_gate_reset(7);
+	if (!st_sync_start(&sy, pc)) {
+		st_gate_reset((daddr_t)-1);
+		(void) st_done(pc);
+		return 0;
+	}
+	memset(&d, 0, sizeof(d));
+	d.pc = pc;
+	d.block = 7;
+	if (st_wait_for(&st_gate_entered) &&
+	    pthread_create(&d.th, 0, st_discard_thread, &d) == 0)
+		started = 1;
+	if (!started || !st_wait_waiters(pc, 1) || d.done)
+		ok = 0;			/* it did not wait for the write */
+	st_gate_release();
+	(void) pthread_join(sy.th, 0);
+	if (started)
+		(void) pthread_join(d.th, 0);
+	st_gate_reset((daddr_t)-1);
+	if (!d.done || page_cache_contains(pc, 7) || st_wb_last_block != 7)
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
 /* Count a case, and mark it failed by its number. */
 static void
 st_case(unsigned int *ran, unsigned int *wrong, unsigned int *failed, int ok)
@@ -1002,5 +1097,6 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong,
 	st_case(ran, wrong, failed, st_counts_are_one());
 	st_case(ran, wrong, failed, st_write_lands_after_fill());
 	st_case(ran, wrong, failed, st_install_takes_no_stale_bytes());
+	st_case(ran, wrong, failed, st_discard_leaves_nothing());
 	page_cache_quiet = 0;
 }

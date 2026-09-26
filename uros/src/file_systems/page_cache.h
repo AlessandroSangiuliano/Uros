@@ -315,6 +315,16 @@ int page_cache_write(struct page_cache *pc, daddr_t block,
 	__attribute__((warn_unused_result));
 
 /*
+ * #599: `block' is dead -- freed, or about to belong to another file -- and
+ * whatever the cache holds of it goes: a dirty copy is never written, and a
+ * copy being read or written back is waited out first.  A pinned copy loses
+ * its key and stays readable by whoever holds it (ORPHAN) until the last
+ * page_cache_put frees it.  Raises pc_forget, so no readahead ticket taken
+ * before brings the old bytes back.
+ */
+void page_cache_discard(struct page_cache *pc, daddr_t block);
+
+/*
  * Synchronize all dirty blocks to disk via the writeback callback.
  * Dirty blocks remain cached (clean) after successful writeback.
  * Returns the number of blocks that failed to write back.

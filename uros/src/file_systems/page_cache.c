@@ -543,6 +543,47 @@ page_cache_put(struct page_cache *pc, struct page_cache_entry *e)
 	pthread_mutex_unlock(&pc->pc_lock);
 }
 
+/*
+ * #599: see page_cache.h.  It waits for a fill (the slot is not data yet,
+ * and the filler publishes it) and for a writeback (the sync holds the entry
+ * by pointer and marks it when the write lands) -- on pc_cond, which both
+ * broadcast.  Neither needs anything the caller may hold: the filler needs
+ * its device and pc_lock, the sync thread holds only pc_sync_lock.
+ */
+void
+page_cache_discard(struct page_cache *pc, daddr_t block)
+{
+	struct page_cache_entry *e;
+
+	pthread_mutex_lock(&pc->pc_lock);
+	for (;;) {
+		for (e = pc->pc_hash[PC_HASH(block)]; e; e = e->pc_hash_next)
+			if (e->pc_block == block)
+				break;
+		if (e == NULL || (e->pc_state != PC_FILLING && !e->pc_busy))
+			break;
+		pc->pc_nwaiters++;
+		pthread_cond_wait(&pc->pc_cond, &pc->pc_lock);
+		pc->pc_nwaiters--;
+	}
+	if (e != NULL) {
+		lru_remove(e);
+		hash_remove(pc, e);
+		pc->pc_count--;
+		e->pc_dirty = 0;
+		e->pc_wfail = 0;
+		e->pc_clean_seq = 0;
+		if (e->pc_refs > 0) {
+			e->pc_block = -1;
+			e->pc_state = PC_ORPHAN;
+		} else {
+			free_entry(pc, e);
+		}
+	}
+	pc->pc_forget = ++pc->pc_seq;
+	pthread_mutex_unlock(&pc->pc_lock);
+}
+
 int
 page_cache_contains(struct page_cache *pc, daddr_t block)
 {
@@ -622,6 +663,7 @@ mark_range_done(struct page_cache *pc, const struct sync_entry *b, int count,
 			ce->pc_wfail = 1;
 		}
 	}
+	pthread_cond_broadcast(&pc->pc_cond);	/* #599: discard waits on busy */
 	pthread_mutex_unlock(&pc->pc_lock);
 }
 
