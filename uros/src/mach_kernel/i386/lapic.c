@@ -300,6 +300,39 @@ lapic_timer_handler(struct i386_interrupt_state *regs)
 	mp_enable_preemption_no_check();
 }
 
+/*
+ * #599: every command with a destination goes through here.
+ *
+ * The destination (ICRD) and the command (ICR) are two registers, and the
+ * ICR write is what sends.  A sender interrupted between the two by a handler
+ * that sends its own IPI -- or by an NMI into DDB, which sends to the other
+ * processors, and which cli does not keep out -- found that handler's
+ * destination in ICRD, and its own command went there: a lost AST, a lost
+ * doorbell, an INIT to the wrong processor.  So the pair is written with
+ * interrupts off, and the destination that was in ICRD is put back before
+ * returning.  That second half is what makes a nested sender compose with
+ * the one it interrupted, NMI included: whoever cut in restores the ICRD the
+ * interrupted sender had written.
+ *
+ * Callers check lapic_start.  The shorthand senders (DSS_SELF, DSS_OTHERS)
+ * write ICR only, and ICRD means nothing to them.
+ */
+void
+lapic_icr_send(unsigned char dest, unsigned int command)
+{
+	unsigned int	flags, icrd;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+	lapic_ipi_wait();
+	icrd = LAPIC_REG32(LAPIC_ICRD);
+	LAPIC_REG32(LAPIC_ICRD) =
+	    ((unsigned int)dest & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG32(LAPIC_ICR) = command;
+	lapic_ipi_wait();
+	LAPIC_REG32(LAPIC_ICRD) = icrd;
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 void
 lapic_send_ipi(int slot, unsigned int vector)
 {
@@ -312,15 +345,11 @@ lapic_send_ipi(int slot, unsigned int vector)
 	if (lapic_dest == 0xFF)
 		return;		/* slot unknown — silent, callers check ncpus */
 
-	lapic_ipi_wait();
-	LAPIC_REG32(LAPIC_ICRD) =
-	    ((unsigned int)lapic_dest & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
-	LAPIC_REG32(LAPIC_ICR)  =
+	lapic_icr_send(lapic_dest,
 	    LAPIC_ICR_DM_FIXED
 	    | LAPIC_ICR_LEVEL_ASSERT
 	    | LAPIC_ICR_DSS_DEST
-	    | (vector & LAPIC_ICR_VECTOR_MASK);
-	lapic_ipi_wait();
+	    | (vector & LAPIC_ICR_VECTOR_MASK));
 }
 
 void
@@ -363,20 +392,13 @@ lapic_send_nmi_all_excluding_self(void)
  * #599: an NMI to one processor, so that the clock watch (clock_watch.c) can
  * ask processor 0 where it is once its tick has stopped.  An NMI ignores IF,
  * the TPR and the in-service bits, so it reaches a processor that no maskable
- * interrupt can.
- *
- * ⚠️ The destination and the command are two registers.  lapic_send_ipi()
- * writes them as two stores with interrupts possibly on, and this is called
- * from an interrupt: had it cut in between those stores, the interrupted
- * sender's command would go to OUR destination.  So the destination it had
- * written is put back before returning, and this pair is written with
- * interrupts off.
+ * interrupt can.  It is sent from an interrupt, which is why the pair goes
+ * through lapic_icr_send().
  */
 void
 lapic_send_nmi(int slot)
 {
 	unsigned char	lapic_dest;
-	unsigned int	flags, icrd;
 
 	if (lapic_start == 0)
 		return;
@@ -385,18 +407,10 @@ lapic_send_nmi(int slot)
 	if (lapic_dest == 0xFF)
 		return;
 
-	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
-	lapic_ipi_wait();
-	icrd = LAPIC_REG32(LAPIC_ICRD);
-	LAPIC_REG32(LAPIC_ICRD) =
-	    ((unsigned int)lapic_dest & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
-	LAPIC_REG32(LAPIC_ICR) =
+	lapic_icr_send(lapic_dest,
 	    LAPIC_ICR_DM_NMI
 	    | LAPIC_ICR_LEVEL_ASSERT
-	    | LAPIC_ICR_DSS_DEST;
-	lapic_ipi_wait();
-	LAPIC_REG32(LAPIC_ICRD) = icrd;
-	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+	    | LAPIC_ICR_DSS_DEST);
 }
 
 /*
@@ -484,9 +498,12 @@ softspl_replay(int cpu)
  * self-test (start_other_cpus sends a CALL_FUNC to the BSP) and as room
  * for future directed sends; their handlers stay minimal.
  *
- * All IPI handlers run with interrupts disabled (K_INTR_GATE in the IDT),
- * %gs = CPU_DATA, on the stack the LAPIC interrupted — no kmsg pool / no
- * sleeping, exactly like any other hardware interrupt handler.
+ * All IPI handlers are entered with interrupts disabled (K_INTR_GATE in the
+ * IDT), %gs = CPU_DATA, on the stack the LAPIC interrupted — no kmsg pool /
+ * no sleeping, exactly like any other hardware interrupt handler.  They do
+ * not stay disabled: ast_check()'s splx() ends in sti, as every i386 splx()
+ * does.  What keeps maskable interrupts out until the EOI is the vector in
+ * service, whose class is above every other (#599).
  */
 void
 ipi_resched_handler(void)

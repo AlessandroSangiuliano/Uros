@@ -82,6 +82,7 @@
 #include <machine/AT386/mp/mp.h>
 #include <machine/AT386/mp/boot.h>		/* #300: MP_BOOT, MP_MACH_START */
 #include <i386/apic.h>				/* #300: LAPIC_ICR / LAPIC_ICRD */
+#include <i386/lapic.h>				/* #599: lapic_icr_send */
 #include <i386/setjmp.h>
 #include <i386/misc_protos.h>
 #include <i386/spl.h>				/* #302: splhi/splx for TSC calib */
@@ -367,31 +368,24 @@ mp_poll_online(int slot, unsigned int budget_us)
 	return machine_slot[slot].running == TRUE;
 }
 
-static void
-mp_lapic_ipi_wait(void)
-{
-	while (LAPIC_REG32(LAPIC_ICR) & LAPIC_ICR_DS_PENDING)
-		;
-}
-
+/*
+ * INIT and STARTUP through the one sender that writes the destination and the
+ * command as a pair (lapic_icr_send, #599): cpu_start() runs at spl0 at
+ * bring-up and in processor_start(), where an interrupt that sends its own
+ * IPI could otherwise land between the two and take the INIT.
+ */
 static void
 mp_lapic_send_init(unsigned int dest_lapic_id)
 {
-	LAPIC_REG32(LAPIC_ICRD) =
-	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
-	LAPIC_REG32(LAPIC_ICR)  =
-	    LAPIC_ICR_DM_INIT | LAPIC_ICR_LEVEL_ASSERT;
-	mp_lapic_ipi_wait();
+	lapic_icr_send((unsigned char)dest_lapic_id,
+	    LAPIC_ICR_DM_INIT | LAPIC_ICR_LEVEL_ASSERT);
 }
 
 static void
 mp_lapic_send_sipi(unsigned int dest_lapic_id, unsigned int vector)
 {
-	LAPIC_REG32(LAPIC_ICRD) =
-	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
-	LAPIC_REG32(LAPIC_ICR)  =
-	    LAPIC_ICR_DM_STARTUP | (vector & LAPIC_ICR_VECTOR_MASK);
-	mp_lapic_ipi_wait();
+	lapic_icr_send((unsigned char)dest_lapic_id,
+	    LAPIC_ICR_DM_STARTUP | (vector & LAPIC_ICR_VECTOR_MASK));
 }
 
 /*

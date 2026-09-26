@@ -73,6 +73,7 @@ struct i386_interrupt_state;		/* <i386/thread.h>; only a pointer is used */
 
 extern void	lapic_enable(void);
 extern void	lapic_eoi(void);
+extern void	lapic_icr_send(unsigned char dest, unsigned int command); /* #599 */
 extern void	lapic_send_ipi(int slot, unsigned int vector);
 extern void	lapic_send_ipi_all_excluding_self(unsigned int vector);
 extern void	lapic_send_nmi_all_excluding_self(void);	/* #382 DDB park */
