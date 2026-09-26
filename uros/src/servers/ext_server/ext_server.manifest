@@ -21,3 +21,14 @@ name ext_server
 # says the server may open a block device read-write; which one is the boot's
 # decision, and the capability it is issued names the instance.
 required 4 any 0x3
+
+# RESOURCE_DMA_BUFFER (10), any buffer, the device may READ and WRITE it (0x3)
+# (#599).
+#
+# The block server's disk fills this server's page cache by DMA, and on a
+# machine that confines devices the kernel maps the cache for that disk only
+# on a capability naming the buffer, issued to its owner and handed to the
+# block server.  Without this line cap_server refuses the capability, the
+# mount says so, and the cache copies instead.  `any', because the buffer is
+# created at mount time; cap_server asks the kernel whose it is.
+required 10 any 0x3
