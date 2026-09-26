@@ -4513,7 +4513,7 @@ static void iommu_selftest(void)
 		kputdec(wrong);
 		kputs(" wrong");
 		if (!ok) {
-			kputs(" (A1-A5 then V1-V3, failed mask ");
+			kputs(" (A1-A8 then V1-V3, failed mask ");
 			kputdec(failed);
 			kputs(")");
 		}

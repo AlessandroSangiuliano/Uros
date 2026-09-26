@@ -101,6 +101,9 @@ struct fault_ledger {
 	struct fault_table	table;
 	uint64_t		episodes;
 	unsigned		why;		/* IOMMU_LOST_*, since boot */
+	uint32_t		stopped;	/* a bit per unit: its log was
+						   found stopped last drain */
+	uint32_t		blind;		/* ... and the drain before */
 };
 
 static struct fault_ledger	ledger;
@@ -156,6 +159,23 @@ void iommu_fault_sink_record(struct iommu_fault_sink *s,
 	l->total++;
 	fault_table_note(&l->table, f->source, f->address);
 	s->found++;
+}
+
+void iommu_fault_sink_stopped(struct iommu_fault_sink *s, unsigned unit,
+			      int stopped)
+{
+	struct fault_ledger *l = s->l;
+	uint32_t bit = unit < 32 ? 1u << unit : 0;
+
+	assert(!s->live || hw_lock_held(&iommu_fault_lock));
+	if (!stopped) {
+		l->stopped &= ~bit;
+		l->blind &= ~bit;
+		return;
+	}
+	if (l->stopped & bit)
+		l->blind |= bit;	/* a restart did not bring it back */
+	l->stopped |= bit;
 }
 
 void iommu_fault_sink_lost(struct iommu_fault_sink *s, unsigned unit,
@@ -226,6 +246,8 @@ int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong)
  */
 #define	FAKE_AMD_BYTES		4096u
 #define	FAKE_AMD_OVERFLOW	(1ULL << 0)	/* MMIO 2020h, EventOverflow */
+#define	FAKE_AMD_RUN		(1ULL << 3)	/* MMIO 2020h, EventLogRun */
+#define	FAKE_AMD_LOG_EN		(1ULL << 2)	/* MMIO 0018h, EventLogEn */
 #define	FAKE_VTD_PFO		(1u << 0)	/* FSTS */
 #define	FAKE_VTD_PPF		(1u << 1)
 #define	FAKE_VTD_F		(1ULL << 63)	/* a fault record's F */
@@ -359,6 +381,45 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
 	if (found != 0 || lost != 1 || r.head != 16)
 		fake_failed(ran, wrong, failed);
 
+	/*
+	 * A6: the log overflowed and stopped (Run clear, EventLogEn set): a
+	 * loss, the flag cleared, the log restarted -- EventLogEn left set --
+	 * and the unit marked stopped.  A second drain that still finds it
+	 * stopped: another loss, and blind.  A8: a drain that finds it running
+	 * clears both, and counts nothing.
+	 */
+	bzero((char *)&r, sizeof(r));
+	r.status = FAKE_AMD_OVERFLOW;
+	r.control = FAKE_AMD_LOG_EN;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (found != 0 || lost != 1 || r.status_w1c != FAKE_AMD_OVERFLOW ||
+	    r.control != FAKE_AMD_LOG_EN || !(fake_ledger.stopped & 1) ||
+	    (fake_ledger.blind & 1))
+		fake_failed(ran, wrong, failed);
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (lost != 1 || !(fake_ledger.blind & 1))
+		fake_failed(ran, wrong, failed);
+
+	/* A7: stopped with no overflow: a loss, a restart, no flag written. */
+	fake_ledger.stopped = fake_ledger.blind = 0;
+	bzero((char *)&r, sizeof(r));
+	r.control = FAKE_AMD_LOG_EN;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (found != 0 || lost != 1 || r.status_w1c != 0 ||
+	    !(fake_ledger.stopped & 1))
+		fake_failed(ran, wrong, failed);
+
+	/* A8: running again: stopped and blind cleared, nothing lost. */
+	fake_ledger.blind = 1;
+	r.status = FAKE_AMD_RUN;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (lost != 0 || fake_ledger.stopped != 0 || fake_ledger.blind != 0)
+		fake_failed(ran, wrong, failed);
+
 	/* V1: one of two records set: found, and only its F written. */
 	fake_vtd_rec[0] = 0;
 	fake_vtd_rec[1] = 0;
@@ -466,6 +527,8 @@ static unsigned fault_report_print(void)
 {
 	static unsigned reported;
 	static uint64_t reported_unplaced, reported_episodes;
+	static uint32_t said_blind;
+	uint32_t blind;
 	struct iommu_fault copy[IOMMU_FAULT_LOG];
 	uint64_t unplaced, episodes;
 	unsigned n = 0, from, oldest, lost, printed = 0, why;
@@ -494,6 +557,7 @@ static unsigned fault_report_print(void)
 	episodes = ledger.episodes - reported_episodes;
 	reported_episodes = ledger.episodes;
 	why = ledger.why;
+	blind = ledger.blind;
 	hw_lock_unlock(&iommu_fault_lock);
 
 	for (unsigned i = 0; i < n; i++) {
@@ -519,12 +583,27 @@ static unsigned fault_report_print(void)
 		       (unsigned long long)reported_unplaced);
 	if (episodes != 0)
 		printf("iommu: an engine may have discarded refusals, %llu "
-		       "time(s) since the last report (seen since boot:%s%s%s) "
+		       "time(s) since the last report (seen since boot:%s%s%s%s) "
 		       "— every count here is a floor\n",
 		       (unsigned long long)episodes,
 		       why & IOMMU_LOST_OVERFLOW ? " its own flag" : "",
 		       why & IOMMU_LOST_FULL ? " a full log" : "",
-		       why & IOMMU_LOST_EMPTY ? " an entry never written" : "");
+		       why & IOMMU_LOST_EMPTY ? " an entry never written" : "",
+		       why & IOMMU_LOST_STOPPED ? " a log that had stopped" : "");
+	for (unsigned u = 0; u < 32; u++) {
+		uint32_t bit = 1u << u;
+
+		if ((blind & bit) && !(said_blind & bit))
+			printf("iommu: unit %u's event log stays stopped after a "
+			       "restart — its refusals go unrecorded, and every "
+			       "drain counts a loss (#599)\n", u);
+		else if (!(blind & bit) && (said_blind & bit))
+			printf("iommu: unit %u's event log logs again\n", u);
+	}
+	if (blind != said_blind) {
+		said_blind = blind;
+		printed++;
+	}
 
 	/* Anything said: the reporter's once-a-second limit counts it all. */
 	return printed + (lost != 0) + (unplaced != 0) + (episodes != 0);

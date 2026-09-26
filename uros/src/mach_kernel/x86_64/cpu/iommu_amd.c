@@ -1202,6 +1202,7 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 
 #define	AMD_STATUS_EVT_OVERFLOW	(1ULL << 0)	/* RW1C */
 #define	AMD_STATUS_EVT_INT	(1ULL << 1)	/* RW1C */
+#define	AMD_STATUS_EVT_RUN	(1ULL << 3)	/* RO: events are being logged */
 
 /* #599: the live engine's view: its registers and its event log. */
 int iommu_amd_evtlog_of(unsigned unit, struct iommu_amd_evtlog *v)
@@ -1301,9 +1302,36 @@ unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
 	 * ring and set it again.
 	 */
 	status = *v->status;
-	if (status & AMD_STATUS_EVT_OVERFLOW) {
+	if (status & AMD_STATUS_EVT_OVERFLOW)
 		why |= IOMMU_LOST_OVERFLOW;
-		*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
+
+	/*
+	 * #599: a log that stopped is restarted.  48882 Rev 3.06 §2.5.1:
+	 * "event logging is disabled ... when the event log overflows", and the
+	 * restart is EventLogRun = 0, EventLogEn = 0, EventOverflow cleared
+	 * (W1C), EventLogEn = 1 -- which clears EventOverflow and sets
+	 * EventLogRun (MMIO 0018h bit 2).  Writing EventLogEn = 1 while it is
+	 * already 1 "has no effect", hence the 0 first.  Only a stopped log is
+	 * toggled, and Run is already 0 then: nothing is waited for under the
+	 * lock.  With Run = 1 clearing EventOverflow is enough: "When
+	 * EventOverflow = 1b, the IOMMU does not write new event log entries
+	 * even when EventLogRun = 1b" (MMIO 2020h bit 3).  Nothing else writes
+	 * CONTROL at run time; the command path never does.
+	 */
+	if (!(status & AMD_STATUS_EVT_RUN) &&
+	    (*v->control & AMD_CTL_EVENTLOG_EN)) {
+		uint64_t control = *v->control;
+
+		why |= IOMMU_LOST_STOPPED;
+		*v->control = control & ~AMD_CTL_EVENTLOG_EN;
+		if (status & AMD_STATUS_EVT_OVERFLOW)
+			*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
+		*v->control = control | AMD_CTL_EVENTLOG_EN;
+		iommu_fault_sink_stopped(s, unit, 1);
+	} else {
+		if (status & AMD_STATUS_EVT_OVERFLOW)
+			*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
+		iommu_fault_sink_stopped(s, unit, 0);
 	}
 	if (status & AMD_STATUS_EVT_INT)
 		*v->status_w1c = AMD_STATUS_EVT_INT;

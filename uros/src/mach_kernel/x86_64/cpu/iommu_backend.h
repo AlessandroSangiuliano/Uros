@@ -312,8 +312,18 @@ void iommu_fault_sink_record(struct iommu_fault_sink *s,
 #define	IOMMU_LOST_FULL		0x2u	/* its log was full, or filled while
 					   it was read */
 #define	IOMMU_LOST_EMPTY	0x4u	/* it logged an entry it never wrote */
+#define	IOMMU_LOST_STOPPED	0x8u	/* it was not logging */
 void iommu_fault_sink_lost(struct iommu_fault_sink *s, unsigned unit,
 			   unsigned why);
+
+/*
+ * #599: whether the unit's event log was found not running in this drain.
+ * One drain that finds it stopped restarts it; the next that still finds it
+ * stopped calls it blind, and every drain while blind counts a loss, until one
+ * finds it running again.  The states live in the ledger, not in the vendor.
+ */
+void iommu_fault_sink_stopped(struct iommu_fault_sink *s, unsigned unit,
+			      int stopped);
 
 /*
  * Drain one engine's records into `s'.  Answers how many were found.  Called
