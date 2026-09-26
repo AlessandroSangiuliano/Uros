@@ -147,9 +147,9 @@ free_entry(struct page_cache *pc, struct page_cache_entry *e)
 }
 
 /*
- * Detach an entry that is being taken, and count it.  #599: a copy that had
- * been dirty leaves the cache here, so pc_forget rises to when it was made
- * clean (page_cache_install).
+ * Detach an entry that is being taken, and count it.  #599: a copy the disk
+ * got bytes from, or bytes into (a writeback, page_cache_wrote), leaves the
+ * cache here, so pc_forget rises to when that happened (page_cache_install).
  */
 static struct page_cache_entry *
 take_detach(struct page_cache *pc, struct page_cache_entry *e)

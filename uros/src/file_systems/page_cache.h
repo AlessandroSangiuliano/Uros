@@ -124,9 +124,11 @@ struct page_cache_entry {
 	uint64_t		pc_dirty_seq;
 	unsigned int		pc_tried;
 	/*
-	 * #599: the cache's pc_seq when a writeback last made this block
-	 * clean, 0 if it never was dirty.  Its copy leaving the cache raises
-	 * pc_forget to it (page_cache_install).
+	 * #599: the cache's pc_seq when the disk last got bytes this copy
+	 * holds -- a writeback made it clean, or page_cache_wrote put the
+	 * bytes a write just gave the disk into it -- 0 if neither ever
+	 * happened.  Its copy leaving the cache raises pc_forget to it
+	 * (page_cache_install).
 	 */
 	uint64_t		pc_clean_seq;
 	int			pc_busy;	/* #384: writeback in flight —
@@ -154,13 +156,14 @@ struct page_cache {
 	 */
 	pthread_cond_t		pc_cond;
 	unsigned int		pc_nwaiters;
-	uint64_t		pc_seq;		/* ticks at every clean->dirty
-						   and dirty->clean */
+	uint64_t		pc_seq;		/* ticks at every clean->dirty,
+						   dirty->clean and wrote */
 	/*
-	 * #599: the newest pc_seq at which a copy that had been dirty left
-	 * the cache -- evicted once written back.  A readahead ticket older
-	 * than it may hold that block's old bytes, read from the disk before
-	 * the writeback landed.  64 bits: it never wraps.
+	 * #599: the newest pc_seq at which a copy holding bytes the disk got
+	 * after it was read left the cache -- evicted once written back, or
+	 * once page_cache_wrote updated it.  A readahead ticket older than it
+	 * may hold that block's old bytes, read from the disk before the write
+	 * landed.  64 bits: it never wraps.
 	 */
 	uint64_t		pc_forget;
 	unsigned int		pc_sync_calls;
