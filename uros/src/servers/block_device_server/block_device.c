@@ -170,21 +170,18 @@ ds_device_open(mach_port_t master, mach_port_t reply,
  * KERN_SUCCESS without touching state.  No-senders remains armed as
  * the safety net for clients that forget to close.
  */
-kern_return_t
-ds_device_close(mach_port_t device)
+/*
+ * #599: the one end of a handle, for close and for no-senders alike.
+ * Unlinks it, says so in the caller's word ("closed" or "released"),
+ * poisons and frees it, and destroys its receive right.  Everything a handle
+ * holds is let go here, so neither path can forget a part of it.
+ */
+static void
+blk_handle_destroy(struct blk_handle *h, const char *how)
 {
-	if (device == 0)
-		return KERN_SUCCESS;
-
-	uint32_t *magicp = blk_object_for(device);
-	uint32_t magic = magicp ? *magicp : 0;
-	if (magic != BLK_MAGIC_HANDLE)
-		return KERN_SUCCESS;
-
-	struct blk_handle *h = blk_object_for(device);
 	mach_port_t name = h->recv_port;
-
 	struct blk_handle **pp = &blk_handles_head;
+
 	while (*pp != NULL) {
 		if (*pp == h) {
 			*pp = h->next;
@@ -193,8 +190,8 @@ ds_device_close(mach_port_t device)
 		pp = &(*pp)->next;
 	}
 
-	printf("blk: handle for %s closed (cap %llu, port=0x%x)\n",
-	       h->part ? h->part->name : "(unknown)",
+	printf("blk: handle for %s %s (cap %llu, port=0x%x)\n",
+	       h->part ? h->part->name : "(unknown)", how,
 	       (unsigned long long)h->cap_id,
 	       (unsigned)name);
 
@@ -208,6 +205,20 @@ ds_device_close(mach_port_t device)
 	 * so no explicit cancellation is needed.
 	 */
 	(void)mach_port_destroy(mach_task_self(), name);
+}
+
+kern_return_t
+ds_device_close(mach_port_t device)
+{
+	if (device == 0)
+		return KERN_SUCCESS;
+
+	uint32_t *magicp = blk_object_for(device);
+	uint32_t magic = magicp ? *magicp : 0;
+	if (magic != BLK_MAGIC_HANDLE)
+		return KERN_SUCCESS;
+
+	blk_handle_destroy(blk_object_for(device), "closed");
 	return KERN_SUCCESS;
 }
 
@@ -362,27 +373,15 @@ blk_handle_no_senders(mach_msg_header_t *in, mach_msg_header_t *out)
 		return FALSE;
 
 	mach_port_t name = in->msgh_local_port;
-	struct blk_handle **pp = &blk_handles_head;
-	struct blk_handle *h = NULL;
-	while (*pp != NULL) {
-		if ((*pp)->recv_port == name) {
-			h = *pp;
-			*pp = h->next;
-			break;
-		}
-		pp = &(*pp)->next;
-	}
+	struct blk_handle *h;
 
-	if (h != NULL) {
-		printf("blk: handle for %s released (cap %llu, port=0x%x)\n",
-		       h->part ? h->part->name : "(unknown)",
-		       (unsigned long long)h->cap_id,
-		       (unsigned)name);
-		h->magic = 0;        /* poison so a stray msg can't reuse it */
-		blk_payload_release(h->payload);
-		free(h);
-		(void)mach_port_destroy(mach_task_self(), name);
-	} else {
+	for (h = blk_handles_head; h != NULL; h = h->next)
+		if (h->recv_port == name)
+			break;
+
+	if (h != NULL)
+		blk_handle_destroy(h, "released");
+	else {
 		printf("blk: no-senders for unknown port 0x%x — ignored\n",
 		       (unsigned)name);
 	}
