@@ -863,6 +863,70 @@ vfs_unlink(const char *path)
     return kr;
 }
 
+/*
+ * #599: the server has had fs_mkdir and fs_rmdir since #231; nothing on this
+ * side asked them.  The same shape as vfs_unlink.
+ */
+int
+vfs_mkdir(const char *path, int mode)
+{
+    mach_port_t fs_port;
+    const char *rel = path;
+    kern_return_t kr = KERN_FAILURE;
+    int attempt;
+
+    if (!path || path[0] != '/')
+        return VFS_ERR_INVAL;
+
+    vfs_init();
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        pthread_mutex_lock(&vfs_lock);
+        fs_port = vfs_resolve_mount(path, &rel);
+        pthread_mutex_unlock(&vfs_lock);
+        if (fs_port == MACH_PORT_NULL)
+            return VFS_ERR_NOENT;
+
+        kr = fs_mkdir(fs_port, (char *)rel, mode);
+        if (!vfs_send_died(kr))
+            break;
+        pthread_mutex_lock(&vfs_lock);
+        vfs_mark_port_dead_locked(fs_port);
+        pthread_mutex_unlock(&vfs_lock);
+    }
+    return kr;
+}
+
+int
+vfs_rmdir(const char *path)
+{
+    mach_port_t fs_port;
+    const char *rel = path;
+    kern_return_t kr = KERN_FAILURE;
+    int attempt;
+
+    if (!path || path[0] != '/')
+        return VFS_ERR_INVAL;
+
+    vfs_init();
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        pthread_mutex_lock(&vfs_lock);
+        fs_port = vfs_resolve_mount(path, &rel);
+        pthread_mutex_unlock(&vfs_lock);
+        if (fs_port == MACH_PORT_NULL)
+            return VFS_ERR_NOENT;
+
+        kr = fs_rmdir(fs_port, (char *)rel);
+        if (!vfs_send_died(kr))
+            break;
+        pthread_mutex_lock(&vfs_lock);
+        vfs_mark_port_dead_locked(fs_port);
+        pthread_mutex_unlock(&vfs_lock);
+    }
+    return kr;
+}
+
 int
 vfs_copy(const char *src, const char *dst)
 {

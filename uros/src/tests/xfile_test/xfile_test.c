@@ -507,6 +507,115 @@ xf_fresh_blocks(const char *path, int arm)
 	}
 }
 
+/*
+ * #599 X2: a block that changes owner leaves nothing of its old owner in the
+ * cache.  A scratch file next to `path' is written over XF_FRESH_BLOCKS
+ * blocks and removed with no sync, so its blocks go back to the bitmap with
+ * their bytes still in the cache, dirty; a directory made next, which as a
+ * rule takes one of them, must then take a file that can be created and
+ * looked up -- before a sync and after it.  The removed file's bytes used to
+ * stay cached: the directory read them back as its own records, and a sync
+ * wrote them over it.
+ */
+#define XF_DEAD_BYTE	0xC7u
+
+/* The step that failed, with its answer in *rc, or 0. */
+static const char *
+xf_owner_steps(const char *dead, const char *dir, const char *inner,
+	       uint32_t bs, int *rc)
+{
+	uint32_t	done, n;
+	vfs_fd_t	fd;
+
+	*rc = vfs_open_rc(dead, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			  &fd);
+	if (*rc != KERN_SUCCESS)
+		return "creating the file to remove";
+	memset(buf, XF_DEAD_BYTE, sizeof(buf));
+	for (done = 0; done < XF_FRESH_BLOCKS * bs; done += n) {
+		n = XF_FRESH_BLOCKS * bs - done;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		if (vfs_write(fd, buf, n) != (ssize_t)n) {
+			(void)vfs_close(fd);
+			*rc = -1;
+			return "writing the file to remove";
+		}
+	}
+	(void)vfs_close(fd);
+	if ((*rc = vfs_unlink(dead)) != 0)
+		return "removing the file, unsynced";
+	if ((*rc = vfs_mkdir(dir, 0755)) != 0)
+		return "making the directory";
+	*rc = vfs_open_rc(inner, VFS_O_RDWR | VFS_O_CREAT, 0644, &fd);
+	if (*rc != KERN_SUCCESS)
+		return "creating a file in the new directory";
+	(void)vfs_close(fd);
+	{
+		vfs_stat_t st;
+
+		if ((*rc = vfs_stat(inner, &st)) != 0)
+			return "looking the file up, before a sync";
+	}
+	*rc = vfs_open_rc(inner, VFS_O_RDONLY, 0, &fd);
+	if (*rc != KERN_SUCCESS)
+		return "opening the file to sync";
+	*rc = vfs_sync(fd);
+	(void)vfs_close(fd);
+	if (*rc != 0)
+		return "syncing";
+	{
+		vfs_stat_t st;
+
+		if ((*rc = vfs_stat(inner, &st)) != 0)
+			return "looking the file up, after the sync";
+	}
+	return 0;
+}
+
+static void
+xf_owner_change(const char *path, int arm)
+{
+	char		 dead[128], dir[128], inner[128];
+	vfs_stat_t	 st;
+	const char	*step;
+	uint32_t	 bs;
+	int		 rc = 0;
+
+	if (vfs_stat(path, &st) != 0 || st.st_blksize < 1024 ||
+	    st.st_blksize > 65536 ||
+	    (st.st_blksize & (st.st_blksize - 1)) != 0 ||
+	    xf_scratch_name(dead, sizeof(dead), path, "xf_dead.dat") != 0 ||
+	    xf_scratch_name(dir, sizeof(dir), path, "xf_dir") != 0 ||
+	    xf_scratch_name(inner, sizeof(inner), path,
+			    "xf_dir/inner") != 0) {
+		printf("%s: [%d] WRONG — no block size or scratch names for "
+		       "the owner-change arm next to %s\n", tag, arm, path);
+		failed++;
+		return;
+	}
+	bs = (uint32_t)st.st_blksize;
+	/* Leftovers of an earlier boot on the same disk */
+	(void)vfs_unlink(inner);
+	(void)vfs_rmdir(dir);
+	(void)vfs_unlink(dead);
+
+	step = xf_owner_steps(dead, dir, inner, bs, &rc);
+	(void)vfs_unlink(inner);
+	(void)vfs_rmdir(dir);
+	if (step != 0) {
+		printf("%s: [%d] WRONG — %s failed (0x%x), after a file's "
+		       "blocks were freed with their bytes unsynced (#599)\n",
+		       tag, arm, step, (unsigned)rc);
+		failed++;
+	} else {
+		printf("%s: [%d] a directory made on the blocks of a file "
+		       "removed unsynced takes a file, found before a sync "
+		       "and after it (#599)\n", tag, arm);
+		passed++;
+	}
+}
+
 static void
 xf_write(const char *path)
 {
@@ -571,6 +680,7 @@ xf_write(const char *path)
 	(void)vfs_close(fd);
 	xf_check_stat(path, 5);
 	xf_fresh_blocks(path, 6);
+	xf_owner_change(path, 7);
 }
 
 static void

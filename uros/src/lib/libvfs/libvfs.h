@@ -115,6 +115,8 @@ int             vfs_mmap(vfs_fd_t fd, int prot, int flags,
 /*
  * Namespace operations (v0.3.0, #231).  Paths are absolute.
  *   vfs_unlink — remove a name.
+ *   vfs_mkdir  — make a directory; vfs_rmdir removes an empty one.
+ *                Both answer 0 or the reason, as vfs_unlink does.
  *   vfs_rename — move a name; same-mount uses the server's atomic
  *                rename, cross-mount is synthesized as copy + unlink
  *                (POSIX EXDEV semantics).
@@ -122,6 +124,8 @@ int             vfs_mmap(vfs_fd_t fd, int prot, int flags,
  *                within or across mounts.  Returns 0 / -1.
  */
 int             vfs_unlink(const char *path);
+int             vfs_mkdir(const char *path, int mode);
+int             vfs_rmdir(const char *path);
 int             vfs_rename(const char *oldpath, const char *newpath);
 int             vfs_copy(const char *src, const char *dst);
 
