@@ -1202,14 +1202,12 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 #define	AMD_STATUS_EVT_OVERFLOW	(1ULL << 0)	/* RW1C */
 #define	AMD_STATUS_EVT_INT	(1ULL << 1)	/* RW1C */
 
-unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
+/* #599: the live engine's view: its registers and its event log. */
+int iommu_amd_evtlog_of(unsigned unit, struct iommu_amd_evtlog *v)
 {
 	const struct iommu_unit *u = iommu_unit(unit);
 	const struct iommu_tables *t = iommu_tables();
 	volatile uint8_t *regs;
-	volatile uint8_t *log;
-	uint64_t head, tail, status;
-	unsigned found = 0;
 
 	if (u == 0 || !u->answered || u->register_va == 0)
 		return 0;
@@ -1217,19 +1215,40 @@ unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
 		return 0;
 
 	regs = (volatile uint8_t *)(uintptr_t)u->register_va;
-	log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event);
+	v->head = (volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD);
+	v->tail = (volatile uint64_t *)(regs + AMD_REG_EVTLOG_TAIL);
+	v->status = (volatile uint64_t *)(regs + AMD_REG_STATUS);
+	v->status_w1c = v->status;
+	v->control = (volatile uint64_t *)(regs + AMD_REG_CONTROL);
+	v->log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event);
+	v->bytes = AMD_EVENT_LOG_BYTES;
+	return 1;
+}
 
-	status = *(volatile uint64_t *)(regs + AMD_REG_STATUS);
+unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
+{
+	struct iommu_amd_evtlog v;
+
+	if (!iommu_amd_evtlog_of(unit, &v))
+		return 0;
+	return iommu_amd_evtlog_drain(&v, unit, s);
+}
+
+unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
+				unsigned unit, struct iommu_fault_sink *s)
+{
+	uint64_t head, tail, status;
+	unsigned found = 0;
+
+	status = *v->status;
 	if (status & AMD_STATUS_EVT_OVERFLOW)
 		iommu_fault_sink_lost(s, unit, IOMMU_LOST_OVERFLOW);
 
-	head = *(volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD)
-	       & AMD_RING_PTR_MASK;
-	tail = *(volatile uint64_t *)(regs + AMD_REG_EVTLOG_TAIL)
-	       & AMD_RING_PTR_MASK;
+	head = *v->head & AMD_RING_PTR_MASK;
+	tail = *v->tail & AMD_RING_PTR_MASK;
 
 	while (head != tail) {
-		volatile uint64_t *e = (volatile uint64_t *)(log + head);
+		volatile uint64_t *e = (volatile uint64_t *)(v->log + head);
 		struct iommu_fault f;
 
 		if (iommu_amd_fault_decode(e[0], e[1], &f)) {
@@ -1247,10 +1266,10 @@ unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
 		e[0] = 0;
 		e[1] = 0;
 
-		head = (head + 16u) % AMD_EVENT_LOG_BYTES;
+		head = (head + 16u) % v->bytes;
 	}
 
-	*(volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD) = head;
+	*v->head = head;
 
 	/*
 	 * The overflow bit last, and only after the ring has been emptied:
@@ -1259,11 +1278,9 @@ unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
 	 * ring and set it again.
 	 */
 	if (status & AMD_STATUS_EVT_OVERFLOW)
-		*(volatile uint64_t *)(regs + AMD_REG_STATUS) =
-			AMD_STATUS_EVT_OVERFLOW;
+		*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
 	if (status & AMD_STATUS_EVT_INT)
-		*(volatile uint64_t *)(regs + AMD_REG_STATUS) =
-			AMD_STATUS_EVT_INT;
+		*v->status_w1c = AMD_STATUS_EVT_INT;
 
 	return found;
 }

@@ -324,6 +324,30 @@ unsigned iommu_vtd_fault_drain(unsigned unit, struct iommu_fault_sink *s);
 unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s);
 
 /*
+ * #599: each drain is a core over a view of the registers it touches, so the
+ * cores can run against fabricated engines at boot as well as live ones.  On
+ * a live engine a write-one-to-clear goes to the register it reads
+ * (status_w1c == status, fsts_w1c == fsts); a fabricated one gives them
+ * separate words, so reads stay put and the check sees what was written.
+ */
+struct iommu_amd_evtlog {
+	volatile uint64_t	*head, *tail, *status, *status_w1c, *control;
+	volatile uint8_t	*log;
+	unsigned		 bytes;
+};
+struct iommu_vtd_records {
+	volatile uint32_t	*fsts, *fsts_w1c;
+	volatile uint8_t	*records;	/* 16 bytes each */
+	unsigned		 count;
+};
+int iommu_amd_evtlog_of(unsigned unit, struct iommu_amd_evtlog *v);
+unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
+				unsigned unit, struct iommu_fault_sink *s);
+int iommu_vtd_records_of(unsigned unit, struct iommu_vtd_records *v);
+unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
+				 unsigned unit, struct iommu_fault_sink *s);
+
+/*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────
  *
  * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make
