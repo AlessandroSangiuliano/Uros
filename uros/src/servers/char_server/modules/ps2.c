@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <pthread.h>
 
 #include <char/char_module_abi.h>
 #include <char/char_types.h>
@@ -241,6 +242,8 @@ e0_keysym(uint8_t sc)
 struct ps2_priv {
 	int		attached;
 	uint8_t		cfg_found;	/* the config byte attach read */
+	pthread_mutex_t	drain_lock;	/* #599: one reader of 0x60 at a time */
+	int		drain_lock_ready;
 	uint32_t	modifiers;	/* CHAR_KBD_MOD_* current state */
 	int		e0_pending;	/* next byte is part of an E0 seq */
 	mach_port_t	subscribers[PS2_MAX_SUBSCRIBERS];
@@ -381,6 +384,14 @@ ps2_irq_handler(void *arg)
 	struct ps2_priv *p = arg;
 	unsigned int budget;
 
+	/*
+	 * #599: attach drains once after registering IRQ 1 (see there), so
+	 * two threads can reach this loop; status-then-data is a pair, and
+	 * two readers of it take each other's bytes.
+	 */
+	if (p->drain_lock_ready)
+		(void)pthread_mutex_lock(&p->drain_lock);
+
 	/* Drain whatever the controller has queued.  Bounded budget so
 	 * a stuck IRQ doesn't starve the rest of the demux. */
 	for (budget = 0; budget < 32u; budget++) {
@@ -404,6 +415,8 @@ ps2_irq_handler(void *arg)
 			ps2_handle_scancode(p, sc);
 		}
 	}
+	if (p->drain_lock_ready)
+		(void)pthread_mutex_unlock(&p->drain_lock);
 }
 
 /* ============================================================
@@ -416,6 +429,11 @@ ps2_probe(const struct hal_device_info *dev)
 	(void)dev;
 	if (ps2_singleton.attached)
 		return NULL;
+	if (!ps2_singleton.drain_lock_ready) {
+		if (pthread_mutex_init(&ps2_singleton.drain_lock, NULL) != 0)
+			return NULL;
+		ps2_singleton.drain_lock_ready = 1;
+	}
 	return &ps2_singleton;
 }
 
@@ -467,9 +485,11 @@ ps2_attach(void *priv)
 
 	kr = ps2_claim(&stood_back);
 	if (kr != KERN_SUCCESS) {
-		printf("ps2: the 8042 (0x%x, 0x%x) refused (kr=%d) — another "
-		       "task holds it; not attaching\n", PS2_DATA, PS2_STATUS,
-		       (int)kr);
+		printf("ps2: the 8042 (0x%x, 0x%x) refused (kr=%d) — %s; not "
+		       "attaching\n", PS2_DATA, PS2_STATUS, (int)kr,
+		       kr == KERN_NO_ACCESS ? "another task holds it" :
+		       kr == KERN_RESOURCE_SHORTAGE ?
+		       "no claim slot is free" : "the claim was refused");
 		return -1;
 	}
 
@@ -526,6 +546,17 @@ ps2_attach(void *priv)
 		return -1;
 	}
 
+	/*
+	 * #599: a byte that arrived between the ACK and the registration
+	 * above made its edge while the kernel's break-key reader still had
+	 * the line -- and stood back from it, as the claim asks.  The byte is
+	 * still in the output buffer, holding the edge-triggered line up, and
+	 * no interrupt will come for it or after it.  So the handler runs once
+	 * here, under the lock it takes (found in review: a keystroke during
+	 * attach left the keyboard dead).
+	 */
+	ps2_irq_handler(p);
+
 	p->attached = 1;
 	if (ack_seen)
 		printf("ps2: keyboard attached (IRQ %u); enable-scan answered "
@@ -546,18 +577,34 @@ ps2_detach(void *priv)
 	struct ps2_priv *p = priv;
 	unsigned int i;
 
+	/*
+	 * #599: only what attach did is undone.  core.c also calls this for
+	 * an instance that was probed and never attached, which holds no
+	 * claim and read no config byte.
+	 */
+	if (!p->attached)
+		return;
+
 	(void)char_core_irq_unregister(PS2_IRQ);
 	/*
-	 * #599: the config byte attach read, and port 1 enabled.  Attach read
-	 * it after disabling both ports, so its interrupt and translation bits
-	 * are as attach found them and its two port-disable bits are attach's
-	 * own; port 1 is enabled after it because a kernel break-key reader
-	 * that takes the 8042 back needs IRQ 1 from the keyboard.  This only
-	 * disabled port 1, and left the keyboard off.  The claim goes last.
+	 * #599: port 1 as attach found it, port 2 as it is now.  The
+	 * port-1 interrupt and translation bits come from the config byte
+	 * attach read (its port-disable bits are attach's own, set by its
+	 * DISABLE_P1/P2 before the read); port 2's bits are read afresh,
+	 * because ps2_mouse.so enables port 2 and IRQ 12 after ps2.so
+	 * attached, and writing the old byte back would turn the mouse off.
+	 * Port 1 ends enabled: a kernel break-key reader that takes the 8042
+	 * back needs IRQ 1 from the keyboard.  This used to only disable port
+	 * 1 and leave the keyboard off.  The claim goes last.
 	 */
 	(void)ctrl_send(PS2_CMD_DISABLE_P1);
-	if (ctrl_send(PS2_CMD_WRITE_CFG) == 0)
-		(void)ctrl_write_data(p->cfg_found);
+	if (ctrl_send(PS2_CMD_READ_CFG) == 0 && wait_output_full() == 0) {
+		uint8_t cur = inb(PS2_DATA);
+
+		cur = (uint8_t)((cur & ~0x41u) | (p->cfg_found & 0x41u));
+		if (ctrl_send(PS2_CMD_WRITE_CFG) == 0)
+			(void)ctrl_write_data(cur);
+	}
 	(void)ctrl_send(PS2_CMD_ENABLE_P1);
 	ps2_unclaim();
 
