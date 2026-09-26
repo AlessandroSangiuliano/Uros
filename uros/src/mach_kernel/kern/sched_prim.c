@@ -660,7 +660,9 @@ static void
 will_wait_preempt_raise(thread_t thread)
 {
 	assert(thread == current_thread());
-	assert(!thread->wait_preempt);
+	/* A wait inside a wait: see __assert_wait(), once per window. */
+	if (thread->wait_preempt)
+		return;
 	disable_preemption();
 	thread->wait_preempt = TRUE;
 }
@@ -807,9 +809,17 @@ __assert_wait(
 	 * can arrive: no instant may exist at which this thread is TH_WAIT and
 	 * the level is zero.  Raising before the store makes that true however
 	 * the spin locks and splx() below behave.
+	 *
+	 * #599: once per window.  A thread that has declared a wait and then
+	 * sleeps on a lock declares a second one inside it, and a second raise
+	 * would be given back once -- the block that ends both windows releases
+	 * one -- leaving this processor a level for good.  The one raise
+	 * already taken covers the inner window too.
 	 */
-	disable_preemption();
-	thread->wait_preempt = TRUE;
+	if (!thread->wait_preempt) {
+		disable_preemption();
+		thread->wait_preempt = TRUE;
+	}
 #endif	/* MACHINE_PREEMPTION_LEVEL */
 
 	s = splsched();
@@ -1067,6 +1077,22 @@ clear_wait_locked(
 	** woken the thread.  We can just unlock and return.
 	*/
 
+	/*
+	 * #599: a thread clearing its OWN wait while a waker on another
+	 * processor is between taking it off the hash and waking it.  Returning
+	 * then left wait_event at WAKING_EVENT for the caller to carry on with:
+	 * irq_forward_thread cancelled its wait that way, took a mutex, and
+	 * mutex_lock_assert_safe() stopped a four-processor boot
+	 * (599-g2-x64char-smp4).  So the waker is let finish -- it needs only
+	 * this thread's lock -- and the clear goes on from what it left.  Not
+	 * seen on one processor: the waker there runs both halves at splsched.
+	 */
+	while (event == (event_t)WAKING_EVENT && thread == current_thread()) {
+		thread_unlock(thread);
+		__asm__ __volatile__("pause" : : : "memory");
+		thread_lock(thread);
+		event = thread->wait_event;
+	}
 	if (event == (event_t)WAKING_EVENT) {
 		return;
 	}
@@ -1368,6 +1394,17 @@ thread_handoff_to_parked_waiter(
 	/* Direct switch.  self (already TH_WAIT via the caller's assert_wait)
 	 * is disposed -- and so parked -- by the victim's own post-switch
 	 * thread_dispatch(); self resumes here when it is later woken. */
+#if	MACHINE_PREEMPTION_LEVEL
+	/*
+	 * #599: the third way out of assert_wait()'s window, beside
+	 * thread_block_reason() and thread_run(): what the caller's
+	 * assert_wait() raised is given back here, at splsched, or this
+	 * processor keeps it and self leaves owing it.
+	 */
+	mp_disable_preemption();
+	assert_wait_preempt_release(self);
+	mp_enable_preemption();
+#endif
 	thread_invoke(self, victim, 0);
 
 	splx(s);
@@ -2130,15 +2167,19 @@ thread_run(
 			continuation, new_thread, thread);
 #endif	/* MACH_ASSERT */
 
+	s = splsched();
 #if	MACHINE_PREEMPTION_LEVEL
 	/*
-	 * #599: as in thread_block_reason(), the wait window ends here.  Only
+	 * #599: as in thread_block_reason(), the wait window ends here, after
+	 * splsched() and a raise of this function's own, so the level never
+	 * passes through zero with TH_WAIT set.  Only
 	 * thread_switch(SWITCH_OPTION_WAIT) with a hand-off hint reaches this
 	 * with a wait declared; a no-op for everyone else.
 	 */
+	mp_disable_preemption();
 	assert_wait_preempt_release(thread);
+	mp_enable_preemption();
 #endif
-	s = splsched();
 	thread_lock(thread);
 	/* Apply same sentinel detection as thread_block_reason */
 	if ((vm_offset_t)continuation >= (vm_offset_t)-SAFE_POINT_SENTINEL_MAX) {
