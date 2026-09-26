@@ -40,6 +40,7 @@
 #include <mach.h>
 #include <mach/vm_types.h>
 #include <pthread.h>
+#include <stdint.h>
 
 /*
  * Hash buckets.  Must scale with the entry count or lookups degrade into
@@ -75,6 +76,16 @@ struct page_cache_entry {
 	int			pc_dirty;	/* block has been modified */
 	int			pc_wfail;	/* #599: its writeback failed,
 						   and it was said once */
+	/*
+	 * #599: pc_wgen counts the writes into the slot; a sync marks the
+	 * block clean only if it is the count it copied when it collected the
+	 * block, so a write that lands during the writeback keeps it dirty.
+	 * pc_dirty_seq is the cache's pc_seq when it went dirty (the sync's
+	 * horizon), pc_tried the sync call that last collected it.
+	 */
+	unsigned int		pc_wgen;
+	uint64_t		pc_dirty_seq;
+	unsigned int		pc_tried;
 	int			pc_busy;	/* #384: writeback in flight —
 						   its data is being written
 						   outside pc_lock, so eviction
@@ -86,6 +97,14 @@ struct page_cache_entry {
 
 struct page_cache {
 	pthread_mutex_t		pc_lock;	/* protects all fields below */
+	/*
+	 * #599: one page_cache_sync at a time; taken before pc_lock, and
+	 * never with an ext2 lock held.  Two syncs -- the writeback thread's
+	 * and ds_ext2_sync's -- used to overwrite each other's marks.
+	 */
+	pthread_mutex_t		pc_sync_lock;
+	uint64_t		pc_seq;		/* ticks at every clean->dirty */
+	unsigned int		pc_sync_calls;
 	unsigned int		pc_max_entries;
 	/*
 	 * #599: every slot is this size, fixed at creation: pc_data, pc_size

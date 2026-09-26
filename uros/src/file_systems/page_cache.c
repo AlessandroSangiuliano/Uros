@@ -199,6 +199,7 @@ page_cache_alloc(unsigned int max_entries, vm_size_t block_size,
 
 	memset(pc, 0, sizeof(*pc));
 	pthread_mutex_init(&pc->pc_lock, NULL);
+	pthread_mutex_init(&pc->pc_sync_lock, NULL);	/* #599 */
 	pc->pc_max_entries = max_entries;
 	pc->pc_block_size = block_size;
 	pc->pc_writeback = writeback;
@@ -405,6 +406,9 @@ page_cache_write(struct page_cache *pc, daddr_t block, vm_offset_t data,
 
 	/* #599: the copy and the dirty bit in the same hold */
 	memcpy((void *)e->pc_data, (void *)data, size);
+	if (!e->pc_dirty)
+		e->pc_dirty_seq = ++pc->pc_seq;
+	e->pc_wgen++;
 	e->pc_dirty = 1;
 	lru_insert_mru(pc, e);
 	pthread_mutex_unlock(&pc->pc_lock);
@@ -418,6 +422,8 @@ page_cache_write(struct page_cache *pc, daddr_t block, vm_offset_t data,
 #define SYNC_BATCH	64
 
 struct sync_entry {
+	struct page_cache_entry *e;	/* #599: the entry itself, pinned busy */
+	unsigned int	wgen;		/* its write count when collected */
 	daddr_t		block;
 	vm_offset_t	data;
 	vm_size_t	size;
@@ -443,39 +449,35 @@ batch_sort(struct sync_entry *b, int n)
 }
 
 /*
- * Post-writeback bookkeeping for a range of blocks, under lock:
- * always drop the busy pin; mark clean only if the write landed.
- * (#384: an entry that vanished meanwhile — invalidated — is fine;
- * its busy flag is reset when the entry is reused.)
+ * Post-writeback bookkeeping for `count' collected entries, under lock:
+ * always drop the busy pin; mark an entry clean only if the write landed and
+ * nothing wrote into it since it was collected (#599: by the entry pointer
+ * and its write count -- by block number, a write that landed during the
+ * writeback was marked clean without ever reaching the disk).
  */
 static void
-mark_range_done(struct page_cache *pc, daddr_t first, int count, int success)
+mark_range_done(struct page_cache *pc, const struct sync_entry *b, int count,
+		int success)
 {
 	int i;
 
 	pthread_mutex_lock(&pc->pc_lock);
 	for (i = 0; i < count; i++) {
-		unsigned int h = PC_HASH(first + i);
-		struct page_cache_entry *ce;
-		for (ce = pc->pc_hash[h]; ce; ce = ce->pc_hash_next) {
-			if (ce->pc_block == first + i) {
-				ce->pc_busy = 0;
-				if (success) {
-					ce->pc_dirty = 0;
-					ce->pc_wfail = 0;
-					pc->pc_writebacks++;
-				} else if (!ce->pc_wfail) {
-					/* #599: said once, not every 5 s */
-					if (!page_cache_quiet)
-					    printf("page cache: block %lu could not "
-					       "be written back — it stays "
-					       "dirty, and is tried again at "
-					       "the next sync\n",
-					       (unsigned long)ce->pc_block);
-					ce->pc_wfail = 1;
-				}
-				break;
-			}
+		struct page_cache_entry *ce = b[i].e;
+
+		ce->pc_busy = 0;
+		if (success && ce->pc_wgen == b[i].wgen) {
+			ce->pc_dirty = 0;
+			ce->pc_wfail = 0;
+			pc->pc_writebacks++;
+		} else if (!success && !ce->pc_wfail) {
+			/* #599: said once, not every 5 s */
+			if (!page_cache_quiet)
+				printf("page cache: block %lu could not be "
+				       "written back — it stays dirty, and "
+				       "is tried again at the next sync\n",
+				       (unsigned long)ce->pc_block);
+			ce->pc_wfail = 1;
 		}
 	}
 	pthread_mutex_unlock(&pc->pc_lock);
@@ -486,41 +488,45 @@ page_cache_sync(struct page_cache *pc)
 {
 	struct sync_entry batch[SYNC_BATCH];
 	int n, i, failures = 0;
-	int skip_failed;
+	uint64_t horizon;
+	unsigned int call;
 	struct page_cache_entry *e;
 
 	/*
-	 * #384: the old version kept a resume CURSOR (an entry pointer)
-	 * and the batch's DATA pointers across the pc_lock release while
-	 * it wrote the batch out.  Concurrent producers could evict,
-	 * re-key or free those entries meanwhile: the resumed LRU walk
-	 * then wandered through re-used memory, and the writeback pushed
-	 * other blocks' bytes.  Now every batch restarts from the LRU
-	 * tail (written entries turn clean, so the scan makes progress
-	 * by itself; permanently-failing entries are skipped by count),
-	 * and batch entries are pinned busy so eviction leaves their
-	 * buffers alone until the write lands.
+	 * #599: one sync at a time (pc_sync_lock), and each dirty block that
+	 * was dirty when this call began is tried once by it: the horizon is
+	 * pc_seq now, and pc_tried is this call's number.  That is what ends
+	 * the loop -- a block that fails, or one re-dirtied behind the sync,
+	 * is not collected again by the same call.  The old skip-by-count
+	 * guessed at the same thing and was wrong when another sync ran.
+	 *
+	 * #384: batch entries are pinned busy, so eviction leaves their slots
+	 * alone until the write lands, and every batch restarts from the LRU
+	 * tail.
 	 */
-	skip_failed = 0;
-	for (;;) {
-		int seen_failed = 0;
+	pthread_mutex_lock(&pc->pc_sync_lock);
+	pthread_mutex_lock(&pc->pc_lock);
+	horizon = pc->pc_seq;
+	call = ++pc->pc_sync_calls;
+	pthread_mutex_unlock(&pc->pc_lock);
 
+	for (;;) {
 		/* Phase 1: collect dirty entries under lock, pin them */
 		n = 0;
 		pthread_mutex_lock(&pc->pc_lock);
 		e = pc->pc_lru_tail.pc_lru_prev;
 		while (e != &pc->pc_lru_head && n < SYNC_BATCH) {
-			if (e->pc_dirty && !e->pc_busy) {
-				if (seen_failed < skip_failed) {
-					seen_failed++;
-				} else {
-					e->pc_busy = 1;
-					batch[n].block = e->pc_block;
-					batch[n].data  = e->pc_data;
-					batch[n].size  = e->pc_size;
-					batch[n].phys  = e->pc_phys;
-					n++;
-				}
+			if (e->pc_dirty && !e->pc_busy &&
+			    e->pc_dirty_seq <= horizon && e->pc_tried != call) {
+				e->pc_busy = 1;
+				e->pc_tried = call;
+				batch[n].e     = e;
+				batch[n].wgen  = e->pc_wgen;
+				batch[n].block = e->pc_block;
+				batch[n].data  = e->pc_data;
+				batch[n].size  = e->pc_size;
+				batch[n].phys  = e->pc_phys;
+				n++;
 			}
 			e = e->pc_lru_prev;
 		}
@@ -556,7 +562,7 @@ page_cache_sync(struct page_cache *pc)
 					batch[i].phys);
 				if (ret != 0)
 					failures++;
-				mark_range_done(pc, run_start, 1, ret == 0);
+				mark_range_done(pc, &batch[i], 1, ret == 0);
 				i++;
 			} else {
 				/* Merged write: copy into contiguous
@@ -580,7 +586,7 @@ page_cache_sync(struct page_cache *pc)
 						if (ret != 0)
 							failures++;
 						mark_range_done(pc,
-						    batch[i + j].block, 1,
+						    &batch[i + j], 1,
 						    ret == 0);
 					}
 					i += run_len;
@@ -601,21 +607,14 @@ page_cache_sync(struct page_cache *pc)
 
 				if (ret != 0)
 					failures += run_len;
-				mark_range_done(pc, run_start, run_len,
+				mark_range_done(pc, &batch[i], run_len,
 						ret == 0);
 				i += run_len;
 			}
 		}
-
-		/*
-		 * Entries that failed stay dirty: skip that many on the
-		 * next pass so the scan keeps making forward progress
-		 * instead of re-collecting the same failing blocks
-		 * forever within one sync call.
-		 */
-		skip_failed = failures;
 	}
 
+	pthread_mutex_unlock(&pc->pc_sync_lock);
 	return failures;
 }
 
