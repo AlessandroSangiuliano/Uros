@@ -844,6 +844,17 @@ ds_ext2_write(
 		      (vm_size_t)data_count);
 
 	if (rc != 0) {
+		/*
+		 * #599: a write that failed part way can still have linked
+		 * blocks and grown the file, which leaves the inode dirty; it
+		 * goes on the dirty list like a write that succeeded, or no
+		 * sync would ever write it (found in review).
+		 */
+		if (ext2fs_is_dirty(priv)) {
+			pthread_mutex_lock(&mnt->of_lock);
+			dirty_list_add(mnt, idx);
+			pthread_mutex_unlock(&mnt->of_lock);
+		}
 		of_op_end(mnt, idx);
 		printf("ext2: write fid=%u offset=%u count=%u failed: %d\n",
 		       fid, offset, data_count, rc);
@@ -2068,6 +2079,14 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 					(vm_size_t)count);
 				if (rc != 0) {
 					rep->status = VFS_FLIPC_ERR_IO;
+					/* #599: see ds_ext2_write */
+					if (ext2fs_is_dirty(priv)) {
+						pthread_mutex_lock(
+							&mnt->of_lock);
+						dirty_list_add(mnt, idx);
+						pthread_mutex_unlock(
+							&mnt->of_lock);
+					}
 				} else {
 					/* #388: the dirty list is shared with
 					 * close/sync/writeback — of_lock, like

@@ -205,6 +205,9 @@ struct ext2_vnode {
 	int			v_inode_dirty;	/* inode needs writeback */
 	int			v_gd_dirty;	/* group descriptors dirty */
 	int			v_super_dirty;	/* superblock dirty */
+	int			v_flushing;	/* #599: flushes in flight --
+						   their flags are taken, not
+						   yet on the disk */
 };
 
 /*

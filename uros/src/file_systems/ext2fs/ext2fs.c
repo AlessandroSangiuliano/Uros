@@ -2678,7 +2678,15 @@ ext2fs_is_dirty(fs_private_t private)
 	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
 	if (!fp->f_vnode)
 		return 0;
-	return(fp->f_vnode->v_inode_dirty || fp->f_vnode->v_gd_dirty || fp->f_vnode->v_super_dirty);
+	/*
+	 * #599: a flush takes the three flags when it starts, so while one is
+	 * in flight they read clear for metadata not yet on the disk; counted
+	 * as dirty, or the writeback thread dropped the handle from its list
+	 * and a flush that then failed raised the flags again for nobody
+	 * (found in review).
+	 */
+	return(fp->f_vnode->v_inode_dirty || fp->f_vnode->v_gd_dirty ||
+	       fp->f_vnode->v_super_dirty || fp->f_vnode->v_flushing);
 }
 
 boolean_t
@@ -4166,10 +4174,11 @@ flush_reraise(struct ext2_vnode *vn, int inode, int gd, int super)
 		vn->v_super_dirty = 1;
 }
 
+static int flush_metadata_taken(struct ext2fs_file *, int, int, int, int);
+
 static int
 flush_metadata_locked(struct ext2fs_file *fp)
 {
-	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_vnode *vn = fp->f_vnode;
 	int n_dirty = 0;
 	int rc;
@@ -4197,6 +4206,21 @@ flush_metadata_locked(struct ext2fs_file *fp)
 
 	if (n_dirty == 0)
 		return 0;
+
+	vn->v_flushing++;	/* ext2fs_is_dirty: taken, not yet written */
+	rc = flush_metadata_taken(fp, w_inode, w_gd, w_super, n_dirty);
+	vn->v_flushing--;
+	return rc;
+}
+
+/* #599: the flush proper, over the flags flush_metadata_locked took */
+static int
+flush_metadata_taken(struct ext2fs_file *fp, int w_inode, int w_gd,
+		     int w_super, int n_dirty)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_vnode *vn = fp->f_vnode;
+	int rc;
 
 	/* Single dirty item or no batch stub: unbatched path */
 	if (n_dirty == 1 || !ext2_dev_has_batch(&fp->f_dev)) {
