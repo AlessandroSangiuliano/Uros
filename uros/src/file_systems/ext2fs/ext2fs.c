@@ -3818,6 +3818,8 @@ write_old_part(struct ext2fs_file *fp, daddr_t disk_block, int off,
 	return rc;
 }
 
+static int link_fresh_block(struct ext2fs_file *, daddr_t, daddr_t);
+
 /*
  * Write data to a file at the given offset.
  * Allocates new blocks as needed, extends file size.
@@ -3831,14 +3833,13 @@ write_file_locked(
 {
 	struct ext2_super_block *fs = fp->f_fs;
 	int block_size = EXT2_BLOCK_SIZE(fs);
-	int rc;
+	int rc = 0, linked = 0;
 
-	while (size > 0) {
+	while (size > 0 && rc == 0) {
 		daddr_t file_block = ext2_lblkno(fs, offset);
 		int off = ext2_blkoff(fs, offset);
 		vm_size_t chunk = block_size - off;
 		daddr_t disk_block;
-		int fresh = 0;
 
 		if (chunk > size)
 			chunk = size;
@@ -3846,184 +3847,223 @@ write_file_locked(
 		/* Resolve file block → disk block */
 		rc = block_map_locked(fp, file_block, &disk_block);
 		if (rc != 0)
-			return rc;
+			break;
 
 		if (disk_block == 0) {
-			int nindir = NINDIR(fs);
-
 			disk_block = block_alloc(fp, 0);
-			if (disk_block == 0)
-				return KERN_RESOURCE_SHORTAGE;
-			fresh = 1;
-
-			if (file_block < NDADDR) {
-				/* Direct block */
-				fp->f_ic->i_block[file_block] = disk_block;
-
-			} else if (file_block < NDADDR + nindir) {
-				/* Single indirect */
-				int idx = file_block - NDADDR;
-				daddr_t ind = fp->f_ic->i_block[EXT2_IND_BLOCK];
-
-				rc = indirect_set(fp, &ind, idx,
-						  disk_block, block_size);
-				if (rc != 0) return rc;
-				fp->f_ic->i_block[EXT2_IND_BLOCK] = ind;
-				invalidate_ind_cache(fp, 0, ind);
-
-			} else if (file_block < NDADDR + nindir +
-				   nindir * nindir) {
-				/* Double indirect */
-				int rem = file_block - NDADDR - nindir;
-				int idx1 = rem / nindir;
-				int idx2 = rem % nindir;
-				daddr_t dind =
-					fp->f_ic->i_block[EXT2_DIND_BLOCK];
-				daddr_t sind;
-				vm_offset_t dind_buf;
-				vm_size_t dind_size;
-
-				/* Get/alloc double-indirect block */
-				if (dind == 0) {
-					dind = block_alloc(fp, 0);
-					if (dind == 0)
-						return KERN_RESOURCE_SHORTAGE;
-					fp->f_ic->i_block[EXT2_DIND_BLOCK] =
-						dind;
-					fp->f_ic->i_blocks +=
-						block_size / DEV_BSIZE;
-				}
-
-				/* Read it to find single-indirect pointer */
-				rc = read_disk_block(fp, dind,
-						     &dind_buf, &dind_size);
-				if (rc != 0) return rc;
-				sind = le32_to_cpu(
-					((daddr_t *)dind_buf)[idx1]);
-				vm_deallocate(mach_task_self(),
-					      dind_buf, dind_size);
-
-				/* Set data block in single-indirect */
-				rc = indirect_set(fp, &sind, idx2,
-						  disk_block, block_size);
-				if (rc != 0) return rc;
-
-				/* Update double-indirect entry if sind
-				 * was just allocated */
-				rc = indirect_set(fp, &dind, idx1,
-						  sind, block_size);
-				if (rc != 0) return rc;
-				fp->f_ic->i_block[EXT2_DIND_BLOCK] = dind;
-				invalidate_ind_cache(fp, 0, sind);
-				invalidate_ind_cache(fp, 1, dind);
-
-			} else {
-				/* Triple indirect */
-				long rem = file_block - NDADDR - nindir -
-					   (long)nindir * nindir;
-				int idx1 = rem / ((long)nindir * nindir);
-				int idx2 = (rem / nindir) % nindir;
-				int idx3 = rem % nindir;
-				daddr_t tind =
-					fp->f_ic->i_block[EXT2_TIND_BLOCK];
-				daddr_t dind, sind;
-				vm_offset_t tbuf, dbuf;
-				vm_size_t tsize, dsize;
-
-				/* Get/alloc triple-indirect block */
-				if (tind == 0) {
-					tind = block_alloc(fp, 0);
-					if (tind == 0)
-						return KERN_RESOURCE_SHORTAGE;
-					fp->f_ic->i_block[EXT2_TIND_BLOCK] =
-						tind;
-					fp->f_ic->i_blocks +=
-						block_size / DEV_BSIZE;
-				}
-
-				/* Read triple to find double pointer */
-				rc = read_disk_block(fp, tind,
-						     &tbuf, &tsize);
-				if (rc != 0) return rc;
-				dind = le32_to_cpu(
-					((daddr_t *)tbuf)[idx1]);
-				vm_deallocate(mach_task_self(),
-					      tbuf, tsize);
-
-				/* Get/alloc double-indirect */
-				if (dind == 0) {
-					dind = block_alloc(fp, 0);
-					if (dind == 0)
-						return KERN_RESOURCE_SHORTAGE;
-					fp->f_ic->i_blocks +=
-						block_size / DEV_BSIZE;
-				}
-
-				/* Read double to find single pointer */
-				rc = read_disk_block(fp, dind,
-						     &dbuf, &dsize);
-				if (rc != 0) return rc;
-				sind = le32_to_cpu(
-					((daddr_t *)dbuf)[idx2]);
-				vm_deallocate(mach_task_self(),
-					      dbuf, dsize);
-
-				/* Set data block in single-indirect */
-				rc = indirect_set(fp, &sind, idx3,
-						  disk_block, block_size);
-				if (rc != 0) return rc;
-
-				/* Update double → single */
-				rc = indirect_set(fp, &dind, idx2,
-						  sind, block_size);
-				if (rc != 0) return rc;
-
-				/* Update triple → double */
-				rc = indirect_set(fp, &tind, idx1,
-						  dind, block_size);
-				if (rc != 0) return rc;
-				fp->f_ic->i_block[EXT2_TIND_BLOCK] = tind;
-				invalidate_ind_cache(fp, 0, sind);
-				invalidate_ind_cache(fp, 1, dind);
-				invalidate_ind_cache(fp, 2, tind);
+			if (disk_block == 0) {
+				rc = KERN_RESOURCE_SHORTAGE;
+				break;
 			}
-			fp->f_ic->i_blocks += block_size / DEV_BSIZE;
 
-			/* #384: the shared block map changed — invalidate
-			 * every other opener's private indirect caches. */
-			vnode_gen_bump(fp);
+			/*
+			 * #599: the block's bytes BEFORE the block is in the
+			 * map.  Linked first, a failed write left the file
+			 * mapping a block that still held its last owner's
+			 * bytes, where it read zeros before (found in
+			 * review).  Written first, a failure frees the block
+			 * and the map never saw it.
+			 */
+			if (off == 0 && chunk == (vm_size_t)block_size)
+				rc = write_file_block(fp, disk_block, data);
+			else
+				rc = write_fresh_part(fp, disk_block, off,
+						      data, chunk);
+			if (rc != 0) {
+				block_free(fp, disk_block);
+				break;
+			}
+			rc = link_fresh_block(fp, file_block, disk_block);
+			if (rc != 0) {
+				block_free(fp, disk_block);
+				break;
+			}
+			linked = 1;
+		} else {
+			/* #599: every answer is the device's or the cache's */
+			if (off == 0 && chunk == (vm_size_t)block_size)
+				rc = write_file_block(fp, disk_block, data);
+			else
+				rc = write_old_part(fp, disk_block, off, data,
+						    chunk);
+			if (rc != 0)
+				break;
 		}
-
-		/* #599: every answer is the device's or the cache's */
-		if (off == 0 && chunk == (vm_size_t)block_size)
-			rc = write_file_block(fp, disk_block, data);
-		else if (fresh)
-			rc = write_fresh_part(fp, disk_block, off, data, chunk);
-		else
-			rc = write_old_part(fp, disk_block, off, data, chunk);
-		if (rc != 0)
-			return rc;
 
 		offset += chunk;
 		data += chunk;
 		size -= chunk;
 	}
 
-	/* Update file size if extended */
+	/*
+	 * #599: what this call linked is in the in-core map whether or not a
+	 * later chunk failed, so the inode is dirty and the cached copy stale
+	 * either way; the size moves only over what was written.
+	 */
 	if (offset > fp->f_ic->i_size)
 		fp->f_ic->i_size = offset;
-
-	/* Mark inode dirty — flushed on sync or close.
-	 * gd and superblock are marked dirty in block_alloc() only
-	 * when new blocks are actually allocated.
-	 * Invalidate inode cache so future opens re-read from disk. */
-	fp->f_vnode->v_inode_dirty = 1;
-	{
-	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
-	if (m)
-		icache_invalidate(m, fp->f_ino);
+	if (rc == 0 || linked) {
+		fp->f_vnode->v_inode_dirty = 1;
+		{
+		struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+		if (m)
+			icache_invalidate(m, fp->f_ino);
+		}
 	}
+	return rc;
+}
 
+/*
+ * #599: put a block whose bytes are already on the disk into the file's map
+ * at `file_block' -- directly, or through the indirect blocks, allocating
+ * those as it goes.  The data block itself is the caller's to free if this
+ * fails; an indirect block allocated before the failure is left allocated,
+ * as it always was.
+ */
+static int
+link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int nindir = NINDIR(fs);
+	int rc;
+
+	if (file_block < NDADDR) {
+		/* Direct block */
+		fp->f_ic->i_block[file_block] = disk_block;
+
+	} else if (file_block < NDADDR + nindir) {
+		/* Single indirect */
+		int idx = file_block - NDADDR;
+		daddr_t ind = fp->f_ic->i_block[EXT2_IND_BLOCK];
+
+		rc = indirect_set(fp, &ind, idx,
+				  disk_block, block_size);
+		if (rc != 0) return rc;
+		fp->f_ic->i_block[EXT2_IND_BLOCK] = ind;
+		invalidate_ind_cache(fp, 0, ind);
+
+	} else if (file_block < NDADDR + nindir +
+		   nindir * nindir) {
+		/* Double indirect */
+		int rem = file_block - NDADDR - nindir;
+		int idx1 = rem / nindir;
+		int idx2 = rem % nindir;
+		daddr_t dind =
+			fp->f_ic->i_block[EXT2_DIND_BLOCK];
+		daddr_t sind;
+		vm_offset_t dind_buf;
+		vm_size_t dind_size;
+
+		/* Get/alloc double-indirect block */
+		if (dind == 0) {
+			dind = block_alloc(fp, 0);
+			if (dind == 0)
+				return KERN_RESOURCE_SHORTAGE;
+			fp->f_ic->i_block[EXT2_DIND_BLOCK] =
+				dind;
+			fp->f_ic->i_blocks +=
+				block_size / DEV_BSIZE;
+		}
+
+		/* Read it to find single-indirect pointer */
+		rc = read_disk_block(fp, dind,
+				     &dind_buf, &dind_size);
+		if (rc != 0) return rc;
+		sind = le32_to_cpu(
+			((daddr_t *)dind_buf)[idx1]);
+		vm_deallocate(mach_task_self(),
+			      dind_buf, dind_size);
+
+		/* Set data block in single-indirect */
+		rc = indirect_set(fp, &sind, idx2,
+				  disk_block, block_size);
+		if (rc != 0) return rc;
+
+		/* Update double-indirect entry if sind
+		 * was just allocated */
+		rc = indirect_set(fp, &dind, idx1,
+				  sind, block_size);
+		if (rc != 0) return rc;
+		fp->f_ic->i_block[EXT2_DIND_BLOCK] = dind;
+		invalidate_ind_cache(fp, 0, sind);
+		invalidate_ind_cache(fp, 1, dind);
+
+	} else {
+		/* Triple indirect */
+		long rem = file_block - NDADDR - nindir -
+			   (long)nindir * nindir;
+		int idx1 = rem / ((long)nindir * nindir);
+		int idx2 = (rem / nindir) % nindir;
+		int idx3 = rem % nindir;
+		daddr_t tind =
+			fp->f_ic->i_block[EXT2_TIND_BLOCK];
+		daddr_t dind, sind;
+		vm_offset_t tbuf, dbuf;
+		vm_size_t tsize, dsize;
+
+		/* Get/alloc triple-indirect block */
+		if (tind == 0) {
+			tind = block_alloc(fp, 0);
+			if (tind == 0)
+				return KERN_RESOURCE_SHORTAGE;
+			fp->f_ic->i_block[EXT2_TIND_BLOCK] =
+				tind;
+			fp->f_ic->i_blocks +=
+				block_size / DEV_BSIZE;
+		}
+
+		/* Read triple to find double pointer */
+		rc = read_disk_block(fp, tind,
+				     &tbuf, &tsize);
+		if (rc != 0) return rc;
+		dind = le32_to_cpu(
+			((daddr_t *)tbuf)[idx1]);
+		vm_deallocate(mach_task_self(),
+			      tbuf, tsize);
+
+		/* Get/alloc double-indirect */
+		if (dind == 0) {
+			dind = block_alloc(fp, 0);
+			if (dind == 0)
+				return KERN_RESOURCE_SHORTAGE;
+			fp->f_ic->i_blocks +=
+				block_size / DEV_BSIZE;
+		}
+
+		/* Read double to find single pointer */
+		rc = read_disk_block(fp, dind,
+				     &dbuf, &dsize);
+		if (rc != 0) return rc;
+		sind = le32_to_cpu(
+			((daddr_t *)dbuf)[idx2]);
+		vm_deallocate(mach_task_self(),
+			      dbuf, dsize);
+
+		/* Set data block in single-indirect */
+		rc = indirect_set(fp, &sind, idx3,
+				  disk_block, block_size);
+		if (rc != 0) return rc;
+
+		/* Update double → single */
+		rc = indirect_set(fp, &dind, idx2,
+				  sind, block_size);
+		if (rc != 0) return rc;
+
+		/* Update triple → double */
+		rc = indirect_set(fp, &tind, idx1,
+				  dind, block_size);
+		if (rc != 0) return rc;
+		fp->f_ic->i_block[EXT2_TIND_BLOCK] = tind;
+		invalidate_ind_cache(fp, 0, sind);
+		invalidate_ind_cache(fp, 1, dind);
+		invalidate_ind_cache(fp, 2, tind);
+	}
+	fp->f_ic->i_blocks += block_size / DEV_BSIZE;
+
+	/* #384: the shared block map changed — invalidate
+	 * every other opener's private indirect caches. */
+	vnode_gen_bump(fp);
 	return 0;
 }
 
