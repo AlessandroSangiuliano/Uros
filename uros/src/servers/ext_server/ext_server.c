@@ -406,6 +406,35 @@ writeback_thread(void *arg)
  * MIG server routines  (ds_ prefix from ext2fs_server.defs)
  * ================================================================ */
 
+/*
+ * #599: what a client is told when the filesystem said no.
+ *
+ * Every failure used to go back as KERN_FAILURE: libvfs' VFS_ERR_* codes
+ * were defined, and a comment below said the caller "already receives
+ * VFS_ERR_NOENT", but nothing produced one.  So a directory refused as
+ * damaged, a read the device never did and a name that is simply not there
+ * were one answer, and xfile_read reported a damaged directory as "not on
+ * this disk".  The codes are the library's (vfs_types.h); anything that is
+ * not the filesystem's own verdict -- a device error, a refusal from the
+ * block server -- is VFS_ERR_IO, because to the client that is what it is.
+ */
+static kern_return_t
+fs_error(int rc)
+{
+	switch (rc) {
+	case 0:				return KERN_SUCCESS;
+	case FS_NO_ENTRY:		return VFS_ERR_NOENT;
+	case FS_NOT_DIRECTORY:		return VFS_ERR_NOTDIR;
+	case FS_NAME_TOO_LONG:		return VFS_ERR_NAMETOOLONG;
+	case FS_INVALID_PARAMETER:
+	case FS_NOT_IN_FILE:
+	case FS_SYMLINK_LOOP:		return VFS_ERR_INVAL;
+	case FS_NO_RESOURCES:
+	case KERN_RESOURCE_SHORTAGE:	return KERN_RESOURCE_SHORTAGE;
+	default:			return VFS_ERR_IO;
+	}
+}
+
 kern_return_t
 ds_ext2_open(
 	mach_port_t		fs_port_arg,
@@ -545,7 +574,8 @@ ds_ext2_open(
 			 * came from one benchmark measuring how fast a lookup
 			 * misses -- so the loudest thing in the log was a test
 			 * getting exactly the result it asked for.  The caller
-			 * already receives VFS_ERR_NOENT and every test that
+			 * receives VFS_ERR_NOENT (since #599; before, a bare
+			 * KERN_FAILURE for every failure) and every test that
 			 * cares reports its own verdict; nothing was learning
 			 * anything from the line.
 			 *
@@ -559,7 +589,7 @@ ds_ext2_open(
 			if (rc != FS_NO_ENTRY || ext2_verbose)
 				printf("ext2: open \"%s\" failed (rc=%d)\n",
 				       path, rc);
-			return KERN_FAILURE;
+			return fs_error(rc);		/* #599 */
 		}
 		pthread_mutex_lock(&mnt->of_lock);
 		mnt->open_files[fid].private = priv;
@@ -999,16 +1029,20 @@ vfs_open(
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
 		(void)mach_port_deallocate(mach_task_self(), client_task);
-		return KERN_FAILURE;
+		return VFS_ERR_EXIST;			/* #599 */
 	}
 
-	/* O_CREAT: create the file then reopen if it didn't exist. */
-	if (kr != KERN_SUCCESS && (flags & VFS_O_CREAT)) {
+	/*
+	 * O_CREAT: create the file then reopen if it didn't exist.  #599: only
+	 * if it did not exist -- any other failure (a damaged directory, an
+	 * I/O error) is the answer, not a reason to create beside it.
+	 */
+	if (kr == VFS_ERR_NOENT && (flags & VFS_O_CREAT)) {
 		int rc = ext2fs_create(&mnt->dev, path, mode ? mode : 0644);
 		if (rc != 0) {
 			/*
-			 * Said here, because the reply cannot: it carries
-			 * KERN_FAILURE, and the code below it is what names
+			 * Said here as well as in the reply: the reply carries
+			 * the kind (#599), and the code below it is what names
 			 * the cause (#498 -- the first create on x86-64 failed
 			 * and nothing on the console said why).
 			 */
@@ -1017,7 +1051,7 @@ vfs_open(
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
 			(void)mach_port_deallocate(mach_task_self(), client_task);
-			return KERN_FAILURE;
+			return fs_error(rc);		/* #599 */
 		}
 		kr = ds_ext2_open(fs_port, path, &fid);
 	}
@@ -1122,7 +1156,7 @@ vfs_truncate(mach_port_t fs_port, vfs_u64_t handle, vfs_u64_t length)
 	}
 	rc = ext2fs_truncate_file(priv, (vm_size_t)length);
 	vfs_op_end(mnt, handle);
-	return rc == 0 ? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(rc);				/* #599 */
 }
 
 kern_return_t
@@ -1210,7 +1244,7 @@ vfs_readdir(
 	vfs_op_end(mnt, dir_handle);
 	if (rc != 0) {
 		free(tmp);
-		return KERN_FAILURE;
+		return fs_error(rc);			/* #599 */
 	}
 
 	kr = vm_allocate(mach_task_self(), &buf,
@@ -1260,8 +1294,7 @@ vfs_unlink(mach_port_t fs_port, vfs_path_t path)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_unlink(&mnt->dev, path) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_unlink(&mnt->dev, path));	/* #599 */
 }
 
 kern_return_t
@@ -1272,8 +1305,7 @@ vfs_mkdir(mach_port_t fs_port, vfs_path_t path, int mode)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_mkdir(&mnt->dev, path, mode ? mode : 0755) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_mkdir(&mnt->dev, path, mode ? mode : 0755));	/* #599 */
 }
 
 kern_return_t
@@ -1284,8 +1316,7 @@ vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_rmdir(&mnt->dev, path) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_rmdir(&mnt->dev, path));	/* #599 */
 }
 
 kern_return_t
@@ -1296,8 +1327,7 @@ vfs_rename(mach_port_t fs_port, vfs_path_t old_path, vfs_path_t new_path)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_rename(&mnt->dev, old_path, new_path) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_rename(&mnt->dev, old_path, new_path));	/* #599 */
 }
 
 kern_return_t
