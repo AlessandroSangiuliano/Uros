@@ -272,7 +272,8 @@ gpu_core_cap_check(const char *token, unsigned int token_count,
 		return -1;
 
 	memcpy(&cap, token, sizeof(cap));
-	kr = urmach_cap_verify(&cap, (uint32_t)op, resource_id);
+	kr = urmach_cap_verify(&cap, GPU_CAP_RESOURCE_TYPE, (uint32_t)op,
+			       resource_id);	/* #599: typed */
 	if (kr != KERN_SUCCESS) {
 		printf("gpu_server: cap_verify FAIL "
 		       "(op=0x%llx res=0x%llx kr=%d)\n",

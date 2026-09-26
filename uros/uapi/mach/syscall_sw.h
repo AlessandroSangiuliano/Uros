@@ -133,8 +133,8 @@ kernel_trap(evc_wait,-17,1)
  *	the RPC to cap_server for the hot verify/use paths; see kern/cap.c
  *	for the handlers and cap_types.h for token layout.
  */
-kernel_trap(urmach_cap_verify,-37,4)
-kernel_trap(urmach_cap_use,-38,4)
+kernel_trap(urmach_cap_verify,-37,5)
+kernel_trap(urmach_cap_use,-38,5)
 kernel_trap(urmach_cap_revoke,-39,2)
 kernel_trap(urmach_cap_register,-40,1)
 

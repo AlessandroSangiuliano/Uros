@@ -210,20 +210,22 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint64_t op, uint
 
 kern_return_t
 cap_verify_local(const struct uros_cap *token,
+                 uint32_t resource_type,
                  uint32_t op,
                  uint64_t resource_id)
 {
     if (token == NULL) return CAP_ERR_INVALID_TOKEN;
-    return urmach_cap_verify(token, op, resource_id);
+    return urmach_cap_verify(token, resource_type, op, resource_id);
 }
 
 kern_return_t
 cap_use_local(const struct uros_cap *token,
+              uint32_t resource_type,
               uint32_t op,
               uint64_t resource_id)
 {
     if (token == NULL) return CAP_ERR_INVALID_TOKEN;
-    return urmach_cap_use(token, op, resource_id);
+    return urmach_cap_use(token, resource_type, op, resource_id);
 }
 
 /*

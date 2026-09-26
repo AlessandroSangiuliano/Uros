@@ -2155,7 +2155,7 @@ main(int argc, char **argv)
                 ctl_bad++;
 
             xmm_fill(pat);
-            kr = urmach_cap_verify(&bogus, 1, 0);
+            kr = urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
             xmm_read(got);
             if (kr != CAP_ERR_INTERNAL)
                 hmac_ran = 1;

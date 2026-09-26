@@ -169,6 +169,7 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
  */
 static kern_return_t
 cap_check_locked(const struct uros_cap *t,
+                 uint32_t resource_type,
                  uint32_t op,
                  uint64_t resource_id)
 {
@@ -176,6 +177,16 @@ cap_check_locked(const struct uros_cap *t,
         return CAP_ERR_INTERNAL;
     if (!cap_hmac_check(t))
         return CAP_ERR_INVALID_TOKEN;
+    /*
+     * #599: and the KIND of resource the token names, for every caller --
+     * the kernel's own and the two traps.  None compared it, so a token for
+     * one kind was accepted for another whose ids matched: a block-device
+     * capability carrying somebody's DMA region id passed
+     * device_dma_map_foreign.  The type is under the MAC, so once that
+     * verifies the field is the issuer's.
+     */
+    if (t->resource_type != resource_type)
+        return CAP_ERR_RESOURCE_MISMATCH;
     if (t->resource_id != resource_id)
         return CAP_ERR_RESOURCE_MISMATCH;
     if ((t->allowed_ops & (uint64_t)op) != (uint64_t)op)
@@ -226,21 +237,8 @@ cap_check_in_kernel(const struct uros_cap *token,
     kern_return_t kr;
 
     simple_lock(&cap_lock);
-    kr = cap_check_locked(token, op, resource_id);
+    kr = cap_check_locked(token, resource_type, op, resource_id);
     simple_unlock(&cap_lock);
-
-    /*
-     * #599: and the KIND of resource the token names.  cap_check_locked
-     * compares the MAC, the id, the ops and revocation, never the type, so
-     * a token for one kind was accepted for another whose ids happened to
-     * match: a block-device capability carrying somebody's DMA region id
-     * passed device_dma_map_foreign, and a task could mint its own "buffer"
-     * capability around any check that relied on who had been handed one.
-     * The type is under the MAC, so once that verifies the field is the
-     * issuer's.
-     */
-    if (kr == KERN_SUCCESS && token->resource_type != resource_type)
-        kr = CAP_ERR_RESOURCE_MISMATCH;
     return kr;
 }
 
@@ -295,6 +293,7 @@ cap_type_selftest(void)
 
 kern_return_t
 urmach_cap_verify(const struct uros_cap *user_token,
+                  uint32_t resource_type,
                   uint32_t op,
                   uint64_t resource_id)
 {
@@ -304,13 +303,14 @@ urmach_cap_verify(const struct uros_cap *user_token,
         return kr;
 
     simple_lock(&cap_lock);
-    kr = cap_check_locked(&t, op, resource_id);
+    kr = cap_check_locked(&t, resource_type, op, resource_id);
     simple_unlock(&cap_lock);
     return kr;
 }
 
 kern_return_t
 urmach_cap_use(const struct uros_cap *user_token,
+               uint32_t resource_type,
                uint32_t op,
                uint64_t resource_id)
 {
@@ -320,7 +320,7 @@ urmach_cap_use(const struct uros_cap *user_token,
         return kr;
 
     simple_lock(&cap_lock);
-    kr = cap_check_locked(&t, op, resource_id);
+    kr = cap_check_locked(&t, resource_type, op, resource_id);
     if (kr != KERN_SUCCESS) {
         simple_unlock(&cap_lock);
         return kr;

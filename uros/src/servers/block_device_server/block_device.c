@@ -93,19 +93,15 @@ blk_part_from_authed_handle(mach_port_t device)
 }
 
 /*
- * #599: a token that verifies AND names the kind of resource expected.
- * urmach_cap_verify checks the MAC, the id, the ops and revocation, never
- * the type; once the MAC verifies, the type field is the issuer's.
+ * #599: a token that verifies AND names the kind of resource expected --
+ * the trap takes the type since #599, so a check without one cannot be
+ * written.
  */
 static kern_return_t
 blk_token_check(const struct uros_cap *t, uint32_t type, uint32_t op,
 		uint64_t id)
 {
-	kern_return_t kr = urmach_cap_verify(t, op, id);
-
-	if (kr == KERN_SUCCESS && t->resource_type != type)
-		kr = CAP_ERR_RESOURCE_MISMATCH;
-	return kr;
+	return urmach_cap_verify(t, type, op, id);
 }
 
 /*
