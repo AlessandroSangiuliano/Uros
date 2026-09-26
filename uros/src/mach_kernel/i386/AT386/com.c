@@ -1275,6 +1275,95 @@ comreset(void)
  * for panic's sake, like every word cons_putc() keeps on x86-64. */
 static int	com_tx_stuck;
 
+/*
+ * #599: the 16550's register bank.  LCR bit 7 (DLAB) turns 0x3F8 and 0x3F9
+ * from THR and IER into the divisor latch: a THR write that lands while it is
+ * set becomes a divisor byte.  The console writes THR from any context, and
+ * the divisor is set by uart.so with its own outb, under nothing the kernel
+ * knows about -- the census's DLAB row.  com_putc's THR write holds
+ * com_bank_lock; the divisor sequence is to move into the kernel under the
+ * same lock.
+ *
+ * A leaf lock with interrupts off, in ioapic_pair_enter's shape, with a
+ * holder: an NMI or a nested printf on the holder's own processor must not
+ * wait on itself.  Such a writer, and DDB (db_active: the other processors are
+ * parked and one of them may hold the lock), take nothing and write THR only
+ * if DLAB is clear, counting the bytes they drop.
+ */
+extern int			db_active;
+static volatile unsigned char	com_bank_lock;
+static volatile int		com_bank_holder = -1;
+unsigned int			com_bank_dropped;	/* THR bytes not written:
+							   DLAB set, lock not ours */
+
+static int
+com_bank_enter(unsigned int *flags)
+{
+	unsigned char busy;
+	int me;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (*flags) : : "memory");
+	me = cpu_number();
+	if (db_active || com_bank_holder == me)
+		return 0;
+#ifndef	ABLATE_599_COM_NO_LOCK
+	for (;;) {
+		busy = 1;
+		__asm__ volatile("xchgb %0, %1"
+				 : "+q" (busy), "+m" (com_bank_lock)
+				 : : "memory");
+		if (busy == 0)
+			break;
+		__asm__ volatile("pause");
+	}
+#else
+	(void)busy;
+#endif
+	com_bank_holder = me;
+	return 1;
+}
+
+/*
+ * #599: DDB's session on the bank.  DDB writes the console without
+ * com_bank_lock, so a divisor sequence it interrupted half-way -- DLAB set --
+ * would take its bytes into the divisor.  The outermost entry saves LCR and
+ * clears DLAB; the outermost exit puts LCR back exactly, so an interrupted
+ * sequence goes on where it meant to.  Outside any NCPUS test: one processor
+ * can be caught half-way as well.
+ */
+static int	com_ddb_lcr = -1;
+
+void
+com_ddb_session(int entering)
+{
+	int lcr;
+
+	if (entering) {
+		lcr = inb(LINE_CTL(COM0_ADDR));
+		com_ddb_lcr = lcr;
+		if (lcr & iDLAB) {
+			outb(LINE_CTL(COM0_ADDR), lcr & ~iDLAB);
+			printf("ddb: COM1's divisor latch was open (LCR 0x%02x); "
+			       "closed for the session, reopened on the way out "
+			       "(#599)\n", (unsigned)lcr);
+		}
+	} else if (com_ddb_lcr >= 0) {
+		outb(LINE_CTL(COM0_ADDR), com_ddb_lcr);
+		com_ddb_lcr = -1;
+	}
+}
+
+static void
+com_bank_leave(unsigned int flags, int took)
+{
+	if (took) {
+		com_bank_holder = -1;
+		__asm__ volatile("" : : : "memory");
+		com_bank_lock = 0;
+	}
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 void
 com_putc(
 	char		c)
@@ -1329,7 +1418,16 @@ com_putc(
 		}
 	}
 	com_tx_stuck = 0;
-	outb(TXRX(COM0_ADDR),  c);
+	{
+		unsigned int flags;
+		int took = com_bank_enter(&flags);
+
+		if (took || !(inb(LINE_CTL(COM0_ADDR)) & iDLAB))
+			outb(TXRX(COM0_ADDR),  c);
+		else
+			com_bank_dropped++;
+		com_bank_leave(flags, took);
+	}
 }
 
 int

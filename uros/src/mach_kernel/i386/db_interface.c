@@ -155,6 +155,7 @@
 #include <ddb/db_sym.h>
 #include <ddb/db_break.h>
 #include <ddb/db_watch.h>
+extern void	com_ddb_session(int entering);	/* i386/AT386/com.c (#599) */
 
 int	 db_active = 0;
 int	 db_pass_thru[NCPUS];
@@ -332,6 +333,8 @@ kdb_trap(
 		}
 	}
 #endif	/* NCPUS > 1 */
+	if (db_active == 1)
+		com_ddb_session(1);	/* #599: the bank, before any print */
 
 	switch (type) {
 	    case T_DEBUG:	/* single_step */
@@ -486,6 +489,8 @@ kdb_trap(
 	}
 #endif	/* NCPUS > 1 */
 
+	if (db_active == 1)
+		com_ddb_session(0);	/* #599: LCR back exactly */
 	db_active--;			/* #346: balances the entry bump */
 	db_splx(s);
 
@@ -551,7 +556,11 @@ kdb_kentry(
 	trap_from_user = IS_USER_TRAP(&ddb_regs, &etext);
 
 	db_active++;
+	if (db_active == 1)
+		com_ddb_session(1);	/* #599 */
 	db_task_trap(-1, 0, trap_from_user);
+	if (db_active == 1)
+		com_ddb_session(0);	/* #599 */
 	db_active--;
 
 	if (trap_from_user) {
