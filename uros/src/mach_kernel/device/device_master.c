@@ -3768,6 +3768,218 @@ ds_master_device_dma_map_foreign(
 }
 
 /*
+ * #599: is `bdf' claimed by the calling task?  With device_table_lock held,
+ * which every claim writer takes, so the answer holds until it is dropped.
+ */
+static int
+claim_is_mine_locked(natural_t bdf)
+{
+	unsigned int i;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			return device_claim[i].task == current_task();
+	return 0;
+}
+
+/*
+ * ── One page of somebody else's buffer, for one direction (#599) ─────
+ *
+ * See the note on device_dma_map_foreign_op in <device/device_master.defs>.
+ * What changed from device_dma_map_foreign, which this replaces:
+ *
+ *  - the direction is the transfer's.  The old call checked no direction
+ *    per request, so a capability that let the device only read a buffer
+ *    was answered for a transfer that writes it, the engine refused the
+ *    write, the controller reported success, and the client got junk;
+ *  - the region is the one the capability names, found by its id, and the
+ *    page must be in it -- not the region the page happens to be in,
+ *    checked against every capability the caller holds in turn, which
+ *    printed one "showed no capability" line per wrong one;
+ *  - one MAC per call, not two: once the token verifies, its ops are the
+ *    issuer's, and the direction is read from them;
+ *  - refusals are silent: the caller says them, once, in its own words.
+ */
+kern_return_t
+ds_master_device_dma_map_foreign_op(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	vm_address_t		paddr,
+	natural_t		op,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
+	vm_address_t		*dma_addr)
+{
+	kern_return_t		kr;
+	struct dma_region	*r = 0;
+	struct uros_cap		cap;
+	unsigned int		i, page = 0, u;
+	unsigned long		base = 0;
+	uint64_t		rid;
+	int			reads, writes, identity = 0, granted = 0;
+	unsigned int		npages = 0;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (bdf == DEVICE_DMA_NO_BDF)
+		return KERN_INVALID_ARGUMENT;
+	if (op != CAP_OP_DMA_DEVICE_READ && op != CAP_OP_DMA_DEVICE_WRITE)
+		return KERN_INVALID_ARGUMENT;
+	if (tokenCnt != sizeof(struct uros_cap))
+		return KERN_INVALID_ARGUMENT;
+
+	/* A device has one driver, and only that driver may map for it. */
+	kr = check_claim(bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	memcpy(&cap, token, sizeof(cap));
+
+	/* The capability itself: authentic, a DMA buffer's, not revoked. */
+	kr = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER, 0, cap.resource_id);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	rid = cap.resource_id;
+
+	/* The buffer it names, and the page inside it. */
+	urmach_rcu_read_lock();
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].id == rid) {
+			r = &dma_region[i];
+			break;
+		}
+	if (r != 0) {
+		npages = r->npages;
+		for (page = 0; page < npages; page++)
+			if (r->pa[page] == (paddr & ~(vm_address_t)PAGE_MASK))
+				break;
+	}
+	urmach_rcu_read_unlock();
+	if (r == 0)
+		return KERN_INVALID_ADDRESS;
+	if (page == npages)
+		return KERN_NO_ACCESS;
+
+	/* The direction this transfer needs. */
+	if ((cap.allowed_ops & (uint64_t)op) == 0)
+		return KERN_PROTECTION_FAILURE;
+	reads = (cap.allowed_ops & CAP_OP_DMA_DEVICE_READ) != 0;
+	writes = (cap.allowed_ops & CAP_OP_DMA_DEVICE_WRITE) != 0;
+
+	/*
+	 * ⚠️ On a machine that polices nothing, the physical address IS the
+	 * answer and no mapping happens -- after every check above, which is
+	 * what makes it an answer and not a pass-through.
+	 */
+	if (!device_md_dma_isolates()) {
+		*dma_addr = paddr;
+		return KERN_SUCCESS;
+	}
+
+	/*
+	 * The user list is searched and grown under the lock (#538), after
+	 * checking that the slot still holds the region found above, by
+	 * identity, and that the device is still this task's: the region may
+	 * have been dropped, and the claim released, in between.
+	 */
+	mutex_lock(&device_table_lock);
+	if (r->kva == 0 || r->id != rid || !claim_is_mine_locked(bdf)) {
+		mutex_unlock(&device_table_lock);
+		return KERN_INVALID_ADDRESS;
+	}
+	for (u = 0; u < r->nusers; u++)
+		if (r->user[u].bdf == bdf)
+			break;
+	if (u < r->nusers) {
+		if ((op == CAP_OP_DMA_DEVICE_READ && !r->user[u].reads) ||
+		    (op == CAP_OP_DMA_DEVICE_WRITE && !r->user[u].writes)) {
+			mutex_unlock(&device_table_lock);
+			return KERN_PROTECTION_FAILURE;
+		}
+		base = (unsigned long)r->user[u].dma;
+		identity = r->user[u].identity;
+	} else {
+		if (r->nusers >= DEVICE_MAX_REGION_USERS) {
+			mutex_unlock(&device_table_lock);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		/*
+		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses (or
+		 * each page at its own, in an identity domain).  The caller
+		 * asks page by page and pays for the mapping once.
+		 */
+		if (!device_md_dma_grant_pages(bdf,
+					       (const unsigned long *)r->pa,
+					       r->npages, reads, writes, &base,
+					       &identity)) {
+			mutex_unlock(&device_table_lock);
+			return KERN_FAILURE;
+		}
+		r->user[r->nusers].bdf = bdf;
+		r->user[r->nusers].dma = (vm_offset_t)base;
+		r->user[r->nusers].identity = (unsigned char)identity;
+		r->user[r->nusers].reads = (unsigned char)reads;
+		r->user[r->nusers].writes = (unsigned char)writes;
+		publish_barrier();
+		r->nusers++;
+		granted = 1;
+	}
+	mutex_unlock(&device_table_lock);
+
+	if (granted)
+		printf("device: %02x:%02x.%u may now reach a %u-page buffer it "
+		       "did not allocate, at 0x%lx (%s%s) — mapped by the server "
+		       "that owns the device, on a capability its owner handed "
+		       "over\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), npages, base,
+		       reads ? "reads" : "", writes ? (reads ? ", writes" :
+						       "writes") : "");
+
+	if (identity)
+		*dma_addr = paddr;
+	else
+		*dma_addr = (vm_address_t)(base + (unsigned long)page *
+					   PAGE_SIZE +
+					   (paddr & (vm_address_t)PAGE_MASK));
+	return KERN_SUCCESS;
+}
+
+/*
+ * How many devices this buffer is mapped for, asked by its owner (#599).
+ */
+kern_return_t
+ds_master_device_dma_region_users(
+	ipc_port_t		master_port,
+	cap_u64_t		region_id,
+	natural_t		*users)
+{
+	kern_return_t	kr;
+	unsigned int	i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	mutex_lock(&device_table_lock);
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].id == region_id)
+			break;
+	if (i == DEVICE_MAX_DMA_REGIONS) {
+		mutex_unlock(&device_table_lock);
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (dma_region[i].owner != current_task()) {
+		mutex_unlock(&device_table_lock);
+		return KERN_NO_ACCESS;
+	}
+	*users = dma_region[i].nusers;
+	mutex_unlock(&device_table_lock);
+	return KERN_SUCCESS;
+}
+
+/*
  * ── Claiming a device, by showing a capability for its kind (#432) ───
  *
  * See the note on device_claim in <device/device_master.defs>.  In one line:
