@@ -358,30 +358,51 @@ vnode_mutex_unlock(struct ext2fs_file *fp)
 }
 
 /*
- * #599: let a handle's block buffer go -- and its block number with it, in
- * one place.  buf_read_file released the buffer before a read that could
- * fail and kept the number, so the next read inside that block found it
- * "cached", returned 0 + off, and its caller dereferenced that.  Every
- * release of f_buf is this.
+ * #599: the block one call is reading through buf_read_file, and the buffer
+ * its bytes are in.  It lives on the caller's stack for that call and no
+ * longer.  The handle used to keep it between calls, and a handle is not one
+ * caller's: the MIG and the FLIPC paths serve the same open file, so one
+ * call released and refilled the buffer while the other was still reading
+ * it.  Each caller of buf_read_file is a wrapper that starts a bref and
+ * releases it on its only way out.
+ */
+struct ext2_bref {
+	vm_offset_t	br_priv;	/* a buffer of our own, or 0 */
+	vm_size_t	br_priv_size;
+	vm_offset_t	br_data;	/* the block's bytes: br_priv, or a
+					   page-cache slot */
+	daddr_t		br_fblock;	/* the file block they are, or -1 */
+};
+
+static void
+bref_init(struct ext2_bref *br)
+{
+	br->br_priv = 0;
+	br->br_priv_size = 0;
+	br->br_data = 0;
+	br->br_fblock = -1;
+}
+
+/*
+ * The buffer goes and its block number with it, in one place.  A release
+ * that kept the number let the next read inside that block find it held,
+ * answer 0 + off, and have its caller dereference that.
  */
 static void
-handle_buf_release(struct ext2fs_file *fp)
+bref_release(struct ext2_bref *br)
 {
-	if (fp->f_buf != 0 && !fp->f_buf_borrowed)
-		(void) vm_deallocate(mach_task_self(), fp->f_buf,
-				     fp->f_buf_size);
-	fp->f_buf = 0;
-	fp->f_buf_size = 0;
-	fp->f_buf_borrowed = 0;
-	fp->f_buf_blkno = -1;
+	if (br->br_priv != 0)
+		(void) vm_deallocate(mach_task_self(), br->br_priv,
+				     br->br_priv_size);
+	bref_init(br);
 }
 
 /*
  * #384: drop this handle's private caches of the shared block map —
- * the indirect-block buffers (f_blk[]) and the data-block buffer
- * (f_buf).  Used when the shared map changed underneath them: the
- * cached blocks may have been freed and re-allocated, and walking a
- * stale indirect buffer reads file DATA as an indirect table.
+ * the indirect-block buffers (f_blk[]).  Used when the shared map
+ * changed underneath them: the cached blocks may have been freed and
+ * re-allocated, and walking a stale indirect buffer reads file DATA as
+ * an indirect table.
  */
 static void
 handle_caches_drop(struct ext2fs_file *fp)
@@ -398,7 +419,6 @@ handle_caches_drop(struct ext2fs_file *fp)
 		}
 		fp->f_blkno[level] = -1;
 	}
-	handle_buf_release(fp);
 	fp->f_ra_last_block = -1;
 }
 
@@ -445,6 +465,7 @@ static int block_map(
 
 static int buf_read_file(
 		struct ext2fs_file *,
+		struct ext2_bref *,
 		vm_offset_t,
 		vm_offset_t *,
 		vm_size_t *);
@@ -704,10 +725,6 @@ free_file_buffers(register struct ext2fs_file *fp)
 	    fp->f_blkno[level] = -1;
 	}
 
-	/*
-	 * Free the data block (skip if borrowed from page cache)
-	 */
-	handle_buf_release(fp);
 	fp->f_ra_last_block = -1;
 
 	/*
@@ -1163,10 +1180,13 @@ ext2_fill(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 /*
  * Read a portion of a file into an internal buffer.  Return
  * the location in the buffer and the amount in the buffer.
+ * The buffer is br's, and stays valid until br is released
+ * or handed to another call here for another block.
  */
 static int
 buf_read_file(
 	register struct ext2fs_file	*fp,
+	struct ext2_bref		*br,
 	vm_offset_t			offset,
 	vm_offset_t			*buf_p,		/* out */
 	vm_size_t			*size_p)	/* out */
@@ -1194,24 +1214,25 @@ buf_read_file(
 
 	if (off || (!*buf_p) || *size_p < block_size ||
 	    ((*buf_p) & (fp->f_dev.rec_size-1))) {
-	    if (file_block != fp->f_buf_blkno) {
+	    if (file_block != br->br_fblock) {
 		/*
 		 * #599: the old block goes, number and all, before anything
 		 * that can fail; a failure below leaves nothing held.
 		 */
-		handle_buf_release(fp);
+		bref_release(br);
 	        rc = block_map(fp, file_block, &disk_block);
 		if (rc != 0)
 		    return (rc);
 
 		if (disk_block == 0) {
-		    if (vm_allocate(mach_task_self(), &fp->f_buf,
+		    if (vm_allocate(mach_task_self(), &br->br_priv,
 				    block_size, TRUE) != KERN_SUCCESS) {
-			fp->f_buf = 0;
+			br->br_priv = 0;
 			return (KERN_RESOURCE_SHORTAGE);
 		    }
-		    memset((void *)fp->f_buf, 0, block_size);
-		    fp->f_buf_size = block_size;
+		    memset((void *)br->br_priv, 0, block_size);
+		    br->br_priv_size = block_size;
+		    br->br_data = br->br_priv;
 		} else if (fp->f_dev.cache) {
 		    vm_offset_t cached;
 		    vm_size_t   cached_size;
@@ -1219,9 +1240,7 @@ buf_read_file(
 		    if (page_cache_lookup(fp->f_dev.cache, disk_block,
 					  &cached, &cached_size) == 0) {
 			/* Page cache hit — borrow pointer (zero-copy) */
-			fp->f_buf = cached;
-			fp->f_buf_size = block_size;
-			fp->f_buf_borrowed = 1;
+			br->br_data = cached;
 		    } else {
 			/* Page cache miss — readahead if sequential */
 			if (file_block == fp->f_ra_last_block + 1)
@@ -1230,9 +1249,7 @@ buf_read_file(
 			/* Re-check cache (readahead may have populated it) */
 			if (page_cache_lookup(fp->f_dev.cache, disk_block,
 					      &cached, &cached_size) == 0) {
-				fp->f_buf = cached;
-				fp->f_buf_size = block_size;
-				fp->f_buf_borrowed = 1;
+				br->br_data = cached;
 			} else if (fp->f_dev.cache->pc_dma_pool &&
 				   ext2_dev_has_phys(&fp->f_dev)) {
 				/* Zero-copy DMA path */
@@ -1242,21 +1259,19 @@ buf_read_file(
 				if (e) {
 					/* #599: not narrowed */
 					vm_address_t pa = e->pc_phys;
-					io_buf_len_t br;
+					io_buf_len_t got;
 					rc = ext2_dev_read_phys(
 						&fp->f_dev,
 						(recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
 						(io_buf_len_t) block_size,
-						&pa, 1, &br);
-					if (rc == 0 && br != (io_buf_len_t)block_size)
+						&pa, 1, &got);
+					if (rc == 0 && got != (io_buf_len_t)block_size)
 						rc = D_IO_ERROR;	/* #599 */
 					if (rc)
 						return (rc);
-					fp->f_buf = e->pc_data;
-					fp->f_buf_size = block_size;
-					fp->f_buf_borrowed = 1;
+					br->br_data = e->pc_data;
 				} else {
 					goto fallback_read;
 				}
@@ -1268,12 +1283,14 @@ fallback_read:
 							ext2_fsbtodb(fs,
 								disk_block)),
 					     (int) block_size,
-					     (char **) &fp->f_buf,
-					     &fp->f_buf_size);
+					     (char **) &br->br_priv,
+					     &br->br_priv_size);
 				if (rc)
 				    return (rc);
+				br->br_data = br->br_priv;
 				page_cache_insert(fp->f_dev.cache, disk_block,
-						  fp->f_buf, fp->f_buf_size);
+						  br->br_priv,
+						  br->br_priv_size);
 			}
 		    }
 		} else {
@@ -1282,13 +1299,15 @@ fallback_read:
 							ext2_fsbtodb(fs,
 								disk_block)),
 				     (int) block_size,
-				     (char **) &fp->f_buf,
-				     &fp->f_buf_size);
+				     (char **) &br->br_priv,
+				     &br->br_priv_size);
+		    if (rc == 0)
+			br->br_data = br->br_priv;
 	        }
 		if (rc)
 		    return (rc);
 
-	        fp->f_buf_blkno = file_block;
+	        br->br_fblock = file_block;
 	    }
 
 	    /*
@@ -1296,7 +1315,7 @@ fallback_read:
 	     * offset, and size of remainder of buffer after that
 	     * byte.
 	     */
-	    *buf_p = fp->f_buf + off;
+	    *buf_p = br->br_data + off;
 	    *size_p = block_size - off;
 
 	} else {
@@ -1520,6 +1539,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 {
 	struct ext2_super_block	sb;
 	struct ext2fs_file	f;
+	struct ext2_bref	br;
 	vm_offset_t		buf;
 	vm_size_t		size;
 	unsigned int		i, nonzero;
@@ -1528,6 +1548,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	*ran = 0;
 	*wrong = 0;
 	ext2_selftest_quiet = 1;
+	bref_init(&br);
 	memset(&sb, 0, sizeof(sb));
 	memset(&f, 0, sizeof(f));
 	sb.s_log_block_size = 0;		/* 1 KiB */
@@ -1541,14 +1562,13 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	f.f_ic->i_block[1] = 20;		/* mapped */
 	f.f_dev.dev_port = MACH_PORT_NULL;
 	f.f_dev.rec_size = 512;
-	f.f_buf_blkno = (daddr_t)-1;
 	f.f_nindir[0] = 1024 / 4;
 	f.f_nindir[1] = (1024 / 4) * (1024 / 4);
 
 	/* E0a: a hole reads as zeros, and the device is never asked. */
 	buf = 0;
 	size = 0;
-	rc = buf_read_file(&f, 0, &buf, &size);
+	rc = buf_read_file(&f, &br, 0, &buf, &size);
 	nonzero = 0;
 	for (i = 0; rc == 0 && buf != 0 && i < size; i++)
 		if (((const unsigned char *)buf)[i] != 0)
@@ -1560,7 +1580,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	/* E0b: a mapped block on a device that answers nothing is an error. */
 	buf = 0;
 	size = 0;
-	rc = buf_read_file(&f, 1024, &buf, &size);
+	rc = buf_read_file(&f, &br, 1024, &buf, &size);
 	(*ran)++;
 	if (rc == 0)
 		(*wrong)++;
@@ -1589,23 +1609,26 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	}
 
 	/*
-	 * E2: a read that fails lets the handle's buffer go with its block
-	 * number.  Hold block 0 (the hole), fail a read of block 1, then read
-	 * offset 5 of block 0 again: it must be read afresh -- zeros, a real
-	 * buffer -- not answered from a released one as 0 + 5.
+	 * E2: a read that fails lets the bref's buffer go with its block
+	 * number.  Hold block 0 (the hole), fail a read of block 1 through the
+	 * same bref, then read offset 5 of block 0 again: it must be read
+	 * afresh -- zeros, a real buffer -- not answered from a released one
+	 * as 0 + 5.
 	 */
+	bref_release(&br);
 	buf = 0;
 	size = 0;
-	(void) buf_read_file(&f, 0, &buf, &size);
+	(void) buf_read_file(&f, &br, 0, &buf, &size);
 	buf = 0;
 	size = 0;
-	(void) buf_read_file(&f, 1024, &buf, &size);
+	(void) buf_read_file(&f, &br, 1024, &buf, &size);
 	buf = 0;
 	size = 0;
-	rc = buf_read_file(&f, 5, &buf, &size);
+	rc = buf_read_file(&f, &br, 5, &buf, &size);
 	(*ran)++;
 	if (rc != 0 || buf < 4096 || size != 1024 - 5)
 		(*wrong)++;
+	bref_release(&br);
 
 	/*
 	 * E3: an aligned read goes through the page cache's get, and a read
@@ -1624,7 +1647,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 			f.f_dev.cache = pc;
 			f.f_ra_last_block = (daddr_t)-2; /* not sequential */
 			buf = page;
-			rc = buf_read_file(&f, 1024, &buf, &got);
+			rc = buf_read_file(&f, &br, 1024, &buf, &got);
 			(*ran)++;
 			if (rc == 0 || page_cache_contains(pc, 20) ||
 			    pc->pc_misses != 1)
@@ -1639,6 +1662,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 			(void) page_cache_destroy(pc);
 	}
 
+	bref_release(&br);
 	free_file_buffers(&f);
 	ext2_selftest_quiet = 0;
 }
@@ -1648,9 +1672,10 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
  * i_number.
  */
 static int
-search_directory(
+search_directory_impl(
 	char *name,
 	register struct ext2fs_file *fp,
+	struct ext2_bref *br,
 	ino_t *inumber_p)
 {
 	vm_offset_t	buf;
@@ -1687,7 +1712,7 @@ search_directory(
 	while (offset < fp->f_ic->i_size) {
 	    buf = 0;
 	    buf_size = 0;
-	    rc = buf_read_file(fp, offset, &buf, &buf_size);
+	    rc = buf_read_file(fp, br, offset, &buf, &buf_size);
 	    if (rc != KERN_SUCCESS)
 		return (rc);
 
@@ -1722,6 +1747,21 @@ search_directory(
 		dcache_insert(m, fp->f_ino, name, DCACHE_NEGATIVE);
 	}
 	return (FS_NO_ENTRY);
+}
+
+static int
+search_directory(
+	char *name,
+	struct ext2fs_file *fp,
+	ino_t *inumber_p)
+{
+	struct ext2_bref br;
+	int rc;
+
+	bref_init(&br);
+	rc = search_directory_impl(name, fp, &br, inumber_p);
+	bref_release(&br);
+	return (rc);
 }
 
 static int
@@ -2298,7 +2338,6 @@ ext2fs_clone_file(struct ext2fs_file *dst, const struct ext2fs_file *src)
 	}
 
 	/* Per-opener state: fresh */
-	dst->f_buf_blkno = -1;
 	dst->f_ra_last_block = -1;
 }
 
@@ -2348,14 +2387,14 @@ ext2fs_file_vnode(fs_private_t private)
  * Copy a portion of a file into kernel memory.
  * Cross block boundaries when necessary.
  */
-int
-ext2fs_read_file(
-	fs_private_t private,
+static int
+ext2fs_read_file_impl(
+	struct ext2fs_file	*fp,
+	struct ext2_bref	*br,
 	vm_offset_t		offset,
 	vm_offset_t		start,
 	vm_size_t		size)
 {
-  	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
 	int			rc;
 	register vm_size_t	csize;
 	vm_offset_t		buf;
@@ -2368,7 +2407,7 @@ ext2fs_read_file(
 	while (size != 0) {
 	    buf = start;
 	    buf_size = size;
-	    rc = buf_read_file(fp, offset, &buf, &buf_size);
+	    rc = buf_read_file(fp, br, offset, &buf, &buf_size);
 	    if (rc)
 		return (rc);
 
@@ -2392,6 +2431,23 @@ ext2fs_read_file(
 	return (0);
 }
 
+int
+ext2fs_read_file(
+	fs_private_t private,
+	vm_offset_t		offset,
+	vm_offset_t		start,
+	vm_size_t		size)
+{
+	struct ext2_bref	br;
+	int			rc;
+
+	bref_init(&br);
+	rc = ext2fs_read_file_impl((struct ext2fs_file *)private, &br,
+				   offset, start, size);
+	bref_release(&br);
+	return (rc);
+}
+
 boolean_t
 ext2fs_file_is_directory(fs_private_t private)
 {
@@ -2408,13 +2464,13 @@ ext2fs_file_is_directory(fs_private_t private)
  * caller can detect truncation by comparing *out_count to what it
  * expected or by re-reading with a larger buffer.
  */
-int
-ext2fs_readdir(fs_private_t private,
-	       struct fs_dirent *out,
-	       unsigned int max,
-	       unsigned int *out_count)
+static int
+ext2fs_readdir_impl(struct ext2fs_file *fp,
+		    struct ext2_bref *br,
+		    struct fs_dirent *out,
+		    unsigned int max,
+		    unsigned int *out_count)
 {
-	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
 	vm_offset_t		buf;
 	vm_size_t		buf_size;
 	vm_offset_t		offset;
@@ -2430,7 +2486,7 @@ ext2fs_readdir(fs_private_t private,
 	while (offset < fp->f_ic->i_size && n < max) {
 		buf = 0;
 		buf_size = 0;
-		rc = buf_read_file(fp, offset, &buf, &buf_size);
+		rc = buf_read_file(fp, br, offset, &buf, &buf_size);
 		if (rc != KERN_SUCCESS)
 			return rc;
 		if (buf_size == 0)
@@ -2458,6 +2514,22 @@ ext2fs_readdir(fs_private_t private,
 
 	*out_count = n;
 	return KERN_SUCCESS;
+}
+
+int
+ext2fs_readdir(fs_private_t private,
+	       struct fs_dirent *out,
+	       unsigned int max,
+	       unsigned int *out_count)
+{
+	struct ext2_bref	br;
+	int			rc;
+
+	bref_init(&br);
+	rc = ext2fs_readdir_impl((struct ext2fs_file *)private, &br, out,
+				 max, out_count);
+	bref_release(&br);
+	return rc;
 }
 
 size_t
@@ -2969,8 +3041,8 @@ dir_grow_and_add(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
  * the page cache hands future readers; dir_write_block then persists it.
  */
 static int
-dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
-	      int file_type)
+dir_add_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
+		   const char *name, ino_t ino, int file_type)
 {
 	struct ext2_super_block *fs = dir_fp->f_fs;
 	int block_size = EXT2_BLOCK_SIZE(fs);
@@ -2988,7 +3060,7 @@ dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
 		daddr_t lblk = offset / block_size;
 		int off, rc;
 
-		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		rc = buf_read_file(dir_fp, br, offset, &buf, &buf_size);
 		if (rc != 0)
 			return rc;
 		if (buf_size > (vm_size_t)block_size)
@@ -3040,6 +3112,19 @@ dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
 	return dir_grow_and_add(dir_fp, name, ino, file_type, name_len);
 }
 
+static int
+dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
+	      int file_type)
+{
+	struct ext2_bref br;
+	int rc;
+
+	bref_init(&br);
+	rc = dir_add_entry_impl(dir_fp, &br, name, ino, file_type);
+	bref_release(&br);
+	return rc;
+}
+
 /*
  * Remove the entry 'name' from directory dir_fp.  On success the removed
  * inode number is returned through ino_out so the caller can drop link
@@ -3049,7 +3134,8 @@ dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
  * FS_CORRUPT for a damaged block (#599).
  */
 static int
-dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
+dir_remove_entry_impl(struct ext2fs_file *dir_fp, struct ext2_bref *br,
+		      const char *name, ino_t *ino_out)
 {
 	struct ext2_super_block *fs = dir_fp->f_fs;
 	int block_size = EXT2_BLOCK_SIZE(fs);
@@ -3064,7 +3150,7 @@ dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
 		struct ext2_dir_entry *prev = NULL;
 		int off, rc;
 
-		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		rc = buf_read_file(dir_fp, br, offset, &buf, &buf_size);
 		if (rc != 0)
 			return rc;
 		if (buf_size > (vm_size_t)block_size)
@@ -3110,6 +3196,18 @@ dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
 		}
 	}
 	return FS_NO_ENTRY;
+}
+
+static int
+dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
+{
+	struct ext2_bref br;
+	int rc;
+
+	bref_init(&br);
+	rc = dir_remove_entry_impl(dir_fp, &br, name, ino_out);
+	bref_release(&br);
+	return rc;
 }
 
 /*
@@ -3545,10 +3643,6 @@ write_file_locked(
 			 * every other opener's private indirect caches. */
 			vnode_gen_bump(fp);
 		}
-
-		/* Invalidate f_buf so read path re-fetches from cache */
-		if (fp->f_buf_blkno == file_block)
-			handle_buf_release(fp);
 
 		if (off == 0 && chunk == (vm_size_t)block_size) {
 			/* Full block write — use page cache */

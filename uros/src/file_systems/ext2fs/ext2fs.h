@@ -231,15 +231,11 @@ struct ext2fs_file {
 	daddr_t			f_blkno[NIADDR];
 						/* disk address of block in
 						   buffer */
-	vm_offset_t		f_buf;		/* buffer for data block */
-	vm_size_t		f_buf_size;	/* size of data block */
-	daddr_t			f_buf_blkno;	/* block number of data block */
 	vm_offset_t		f_inode_blk;	/* cached raw inode block (scratch) */
 	vm_size_t		f_inode_blk_size;
 	daddr_t			f_ra_last_block;/* last logical block read (readahead) */
-	int			f_buf_borrowed;	/* f_buf points into page cache */
 	unsigned int		f_gen;		/* #384: v_gen this handle's
-						   f_blk[]/f_buf caches match */
+						   f_blk[] caches match */
 };
 
 #define file_is_structured(_fp_)	((_fp_)->f_fs != 0)
