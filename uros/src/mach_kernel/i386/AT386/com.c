@@ -1424,6 +1424,23 @@ com_lcr_write(unsigned int value)
 	com_bank_leave(flags, took);
 }
 
+/* #599: what the latch holds, read under the same lock */
+unsigned int
+com_get_divisor(void)
+{
+	unsigned int flags, divisor;
+	int took, lcr;
+
+	took = com_bank_enter(&flags);
+	lcr = inb(LINE_CTL(COM0_ADDR)) & ~iDLAB;
+	outb(LINE_CTL(COM0_ADDR), lcr | iDLAB);
+	divisor = inb(BAUD_LSB(COM0_ADDR)) |
+		  ((unsigned int)inb(BAUD_MSB(COM0_ADDR)) << 8);
+	outb(LINE_CTL(COM0_ADDR), lcr);
+	com_bank_leave(flags, took);
+	return divisor;
+}
+
 void
 com_putc(
 	char		c)

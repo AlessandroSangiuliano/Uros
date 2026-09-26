@@ -268,6 +268,8 @@ option(UROS_ABLATE_599_PRINTF_WAITS "Build the #599 ablation: a printf nested in
 option(UROS_ABLATE_599_NO_LOCK "Build the #599 ablation: i386's I/O APIC select/window pair takes no lock, as before the fix" OFF)
 option(UROS_ABLATE_599_I8042_SHARED "Build the #599 ablation: i386's break-key reader keeps reading the 8042 while a task holds its ports" OFF)
 option(UROS_ABLATE_599_COMPROBE_OLD_EXIT "Build the #599 ablation: i386's comprobe/comattach clobber unit 0 on boots without -r, as before the fix" OFF)
+option(UROS_ABLATE_599_COM_NO_LOCK "Build the #599 ablation: i386's com_bank_lock is not taken -- THR writes and the divisor sequence race, as before the fix" OFF)
+set(UROS_ABLATE_599_WIDEN_DIVISOR "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between DLL and DLM in i386's divisor sequence (empty = off)")
 set(UROS_ABLATE_599_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads in each gap of the I/O APIC pair, other processors only (empty = off)")
 option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
 # #508: an MMIO mapping is checked on its first page only, as it was before the
@@ -573,8 +575,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_599_MASK_PIT OR UROS_ABLATE_599_CLI_SPIN OR UROS_ABLATE_599_SPIN_ONLY OR UROS_ABLATE_599_SPL_LEAK OR UROS_ABLATE_599_NO_LOCK OR UROS_ABLATE_599_NESTED_PRINTF OR UROS_ABLATE_599_PRINTF_WAITS OR NOT UROS_ABLATE_599_WIDEN STREQUAL "")
       message(FATAL_ERROR "UROS_ABLATE_599_* stop i386's 8254 tick for i386's clock watch; x86-64 has neither")
   endif()
-  if(UROS_ABLATE_599_I8042_SHARED OR UROS_ABLATE_599_COMPROBE_OLD_EXIT)
-      message(FATAL_ERROR "UROS_ABLATE_599_I8042_SHARED and _COMPROBE_OLD_EXIT ablate i386's 8042 reader and com.c; x86-64 has neither")
+  if(UROS_ABLATE_599_I8042_SHARED OR UROS_ABLATE_599_COMPROBE_OLD_EXIT OR UROS_ABLATE_599_COM_NO_LOCK OR NOT UROS_ABLATE_599_WIDEN_DIVISOR STREQUAL "")
+      message(FATAL_ERROR "UROS_ABLATE_599_I8042_SHARED, _COMPROBE_OLD_EXIT, _COM_NO_LOCK and _WIDEN_DIVISOR ablate i386's 8042 reader and com.c; x86-64 has neither")
   endif()
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
@@ -1411,6 +1413,17 @@ if(UROS_ABLATE_599_COMPROBE_OLD_EXIT)
     list(APPEND KERNEL_DEFINES -DABLATE_599_COMPROBE_OLD_EXIT=1)
     message(STATUS "#599 ablation: comprobe/comattach clobber unit 0 without -r (i386)")
 endif()
+# The divisor race needs two processors (com_divisor_test.c, -U), but the
+# lock is also what a uniprocessor boot takes, so neither is refused there:
+# a -U boot on one processor answers NOT ASKED by itself.
+if(UROS_ABLATE_599_COM_NO_LOCK)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_COM_NO_LOCK=1)
+    message(STATUS "#599 ablation: com_bank_lock is not taken (i386)")
+endif()
+if(NOT UROS_ABLATE_599_WIDEN_DIVISOR STREQUAL "")
+    list(APPEND KERNEL_DEFINES -DABLATE_599_WIDEN_DIVISOR=${UROS_ABLATE_599_WIDEN_DIVISOR})
+    message(STATUS "#599 ablation: ${UROS_ABLATE_599_WIDEN_DIVISOR} port 0x80 reads between DLL and DLM (i386)")
+endif()
 if(NOT UROS_ABLATE_599_WIDEN STREQUAL "")
     list(APPEND KERNEL_DEFINES -DABLATE_599_WIDEN=${UROS_ABLATE_599_WIDEN})
     message(STATUS "#599 ablation: ${UROS_ABLATE_599_WIDEN} port 0x80 reads in each gap of the I/O APIC pair, other processors (i386)")
@@ -1865,6 +1878,9 @@ set(I386_C_SOURCES
     # #560 acceptance: does the switch carry a thread's floating-point
     # state?  Armed by the -F boot argument, inert otherwise.
     i386/fpu_stress.c
+    # #599: may a console byte land in COM1's divisor latch?  Armed by the
+    # -U boot argument, inert otherwise.
+    i386/AT386/com_divisor_test.c
     # The six operations device_master.c needs from the machine (#457).
     # NOT an SMP source: it used to sit in the UROS_NCPUS > 1 block, which
     # left the uniprocessor kernel with nineteen undefined device_md_*

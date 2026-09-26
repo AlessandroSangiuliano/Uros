@@ -207,6 +207,7 @@
 #include <device/subrs.h>
 #include <i386/fpu.h>
 #include <i386/fpu_stress.h>	/* fpu_stress_run (#560, '-F') */
+#include <i386/AT386/com_divisor_test.h>	/* '-U' (#599) */
 #include <i386/hwp.h>		/* hwp_init_cpu (#358) */
 #include <i386/pmap.h>
 #include <i386/ipl.h>
@@ -756,6 +757,11 @@ parse_arguments(void)
 				 * second of boot and runs only when asked. */
 		    fpu_stress_wanted = 1;
 		    break;
+		case 'U':	/* -U: may a console byte land in COM1's divisor
+				 * latch?  Processor 1 floods the console while
+				 * processor 0 sets the divisor (#599). */
+		    com_divisor_test_wanted = 1;
+		    break;
 		case 'D':	/* -D: enable the SMP Direct-Thread-Switch on the
 				 * IPC slow path (ipc_dts_smp).  Off by default;
 				 * this flag turns it on for a same-binary A/B of
@@ -1044,6 +1050,8 @@ machine_processors_ready(void)
 {
 	if (fpu_stress_wanted)
 		fpu_stress_run();	/* #560 acceptance, '-F' */
+	if (com_divisor_test_wanted)
+		com_divisor_test_start();	/* #599, '-U'; returns at once */
 }
 
 /*
