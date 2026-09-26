@@ -4088,9 +4088,10 @@ ext2fs_rename(struct device *dev, const char *oldpath, const char *newpath)
 	rc = open_parent_dir(dev, oldpath, oldleafbuf, &oldleaf, &oldp);
 	if (rc != 0)
 		return rc;
-	if (search_directory((char *)oldleaf, &oldp, &ino) != 0) {
+	rc = search_directory((char *)oldleaf, &oldp, &ino);
+	if (rc != 0) {			/* #599: the real error, not FS_NO_ENTRY */
 		ext2fs_close_file((fs_private_t)&oldp);
-		return FS_NO_ENTRY;
+		return rc;
 	}
 
 	/* Determine the entry's file_type from the inode mode. */
@@ -4241,9 +4242,10 @@ ext2fs_rmdir(struct device *dev, const char *path)
 	if (rc != 0)
 		return rc;
 
-	if (search_directory((char *)leaf, &parent, &ino) != 0) {
+	rc = search_directory((char *)leaf, &parent, &ino);
+	if (rc != 0) {			/* #599: the real error, not FS_NO_ENTRY */
 		ext2fs_close_file((fs_private_t)&parent);
-		return FS_NO_ENTRY;
+		return rc;
 	}
 
 	/* Open the target and verify it is an empty directory. */
@@ -4252,9 +4254,11 @@ ext2fs_rmdir(struct device *dev, const char *path)
 	target.f_fs  = parent.f_fs;
 	target.f_gd  = parent.f_gd;
 	target.f_ic  = &target.f_ic_scratch;
-	if (read_inode(ino, &target) != 0) {
+	rc = read_inode(ino, &target);
+	if (rc != 0) {
+		free_file_buffers(&target);
 		ext2fs_close_file((fs_private_t)&parent);
-		return FS_NO_ENTRY;
+		return rc;
 	}
 	if ((target.f_ic->i_mode & IFMT) != IFDIR) {
 		free_file_buffers(&target);
@@ -4268,8 +4272,17 @@ ext2fs_rmdir(struct device *dev, const char *path)
 		return rc != 0 ? rc : FS_INVALID_PARAMETER; /* not empty */
 	}
 
-	/* Remove the name, free the directory's blocks and inode. */
-	(void)dir_remove_entry(&parent, leaf, &ino);
+	/*
+	 * Remove the name, then free the directory's blocks and inode.
+	 * #599: only if the name went.  The answer was discarded and the
+	 * directory freed anyway, which left a name reaching a freed inode.
+	 */
+	rc = dir_remove_entry(&parent, leaf, &ino);
+	if (rc != 0) {
+		free_file_buffers(&target);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
 	free_file_blocks(&parent, target.f_ic->i_block, 0, &freed);
 	(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
 	inode_free(&parent, ino, 1);
