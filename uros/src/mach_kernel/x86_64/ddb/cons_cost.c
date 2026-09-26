@@ -253,8 +253,9 @@ cons_ring_report(void)
  * of these at every doubling of processor 0's idle passes, so its number
  * depends on how long a run lasts; the harness counts "UrMach x86-64:" lines
  * as self-tests and "NOT ASKED" lines as questions the machine could not
- * pose, and each copy in either form would have added one of each per
- * doubling (found in review).  The time a glyph takes is the final copy's.
+ * pose, and each copy in the final report's form added two of the first per
+ * doubling, and one of the second on a boot with no calibrated TSC (found
+ * in review).  The time a glyph takes is the final copy's.
  *
  * ⚠️ Not the run's figures, unless the census fired on a machine that had
  * gone quiet: a run the harness ends between two doublings has console work
