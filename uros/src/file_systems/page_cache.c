@@ -379,13 +379,6 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 	struct page_cache_entry *e;
 	vm_offset_t buf;
 
-	/* #384: refuse garbage keys (see page_cache_alloc_entry). */
-	if (block < 0) {
-		printf("page_cache: rejecting negative block %ld update\n",
-		       (long)block);
-		return;
-	}
-
 	pthread_mutex_lock(&pc->pc_lock);
 
 	/* If block is already cached, update in place */
@@ -678,15 +671,6 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 
 	if (!pc->pc_dma_pool)
 		return NULL;
-
-	/* #384: refuse garbage keys — a negative block is always a bug
-	 * in the caller (stale/corrupt block map) and would become an
-	 * unflushable dirty entry hammering the device forever. */
-	if (block < 0) {
-		printf("page_cache: rejecting negative block %ld\n",
-		       (long)block);
-		return NULL;
-	}
 
 	pthread_mutex_lock(&pc->pc_lock);
 
