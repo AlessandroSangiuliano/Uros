@@ -558,6 +558,17 @@ page_cache_wrote(struct page_cache *pc, daddr_t block, vm_offset_t data,
 	if (e != NULL) {
 		memcpy((void *)e->pc_data, (void *)data, size);
 		e->pc_wgen++;
+		/*
+		 * The copy now holds bytes the disk got after any ticket
+		 * taken before this, so its leaving the cache must raise
+		 * pc_forget past them -- as a writeback's clean copy does
+		 * (found in review: a clean copy kept pc_clean_seq 0, its
+		 * eviction raised nothing, and an older readahead installed
+		 * the pre-write block).  A dirty copy keeps its dirty
+		 * sequence: its sync will stamp it.
+		 */
+		if (!e->pc_dirty)
+			e->pc_clean_seq = ++pc->pc_seq;
 	} else {
 		pc->pc_forget = ++pc->pc_seq;
 	}
