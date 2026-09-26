@@ -320,11 +320,9 @@ struct blk_handle {
 	struct uros_cap		dma_cap[BLK_HANDLE_DMA_CAPS];
 	unsigned int		n_dma_caps;
 	unsigned int		dma_last;	/* answered last: tried first */
-	int			registered;	/* ever handed one (interim) */
 	unsigned int		dropped;	/* capabilities forgotten */
 	unsigned int		refusals;	/* physical requests refused */
 	kern_return_t		refusal_kr;	/* the last refusal's code */
-	unsigned int		passed;		/* passed through (interim) */
 
 	/*
 	 * #599: what asking the kernel for every page costs, against the

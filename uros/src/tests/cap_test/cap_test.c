@@ -895,6 +895,45 @@ b2_read(mach_port_t handle, struct b2_page *pg, unsigned *magic, int *intact)
 }
 
 /*
+ * [12b] A page no capability covers is refused before any DMA (#599).  A
+ * fresh handle, handed nothing, reads into a page of this task's: the block
+ * server must refuse it and the page must hold what it held.  Until every
+ * client handed its buffers over, such a handle had its addresses passed
+ * through untranslated: without an IOMMU the superblock landed in the page,
+ * and with one the engine refused the transfer while the controller
+ * answered success.  Which of the server's lines appears is not asked.
+ */
+static int
+a_page_nobody_granted_is_refused(mach_port_t device_port, mach_port_t part_port,
+                                 const char *name)
+{
+    mach_port_t    h;
+    struct b2_page r;
+    kern_return_t  kr;
+    unsigned       magic;
+    int            intact, ok;
+
+    h = b2_open(part_port, name);
+    if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
+        printf("cap_test: [12b] WRONG — no handle or no page to try\n");
+        b2_close(h);
+        return 0;
+    }
+    kr = b2_read(h, &r, &magic, &intact);
+    ok = kr != KERN_SUCCESS && intact;
+    if (ok)
+        printf("cap_test: [12b] a read into a page nobody granted refused "
+               "(kr=%d), the page untouched\n", (int)kr);
+    else
+        printf("cap_test: [12b] WRONG — a read into a page nobody granted "
+               "answered kr=%d, page %s, +1080 0x%x\n", (int)kr,
+               intact ? "untouched" : "WRITTEN", magic);
+    b2_free(device_port, &r);
+    b2_close(h);
+    return ok;
+}
+
+/*
  * [19] A second client cannot spend the first one's capability.  Two handles
  * on one partition, each handed its own page; the second reads into the
  * first's page and must be refused with the page untouched, before and after
@@ -2541,6 +2580,9 @@ main(int argc, char **argv)
             pass = 0;
         /* #599: once, on the first candidate that is there. */
         if (!b2_done) {
+            if (!a_page_nobody_granted_is_refused(device_port, p,
+                                                  candidates[i]))
+                pass = 0;
             if (!a_capability_is_its_handles(device_port, p, candidates[i]))
                 pass = 0;
             if (!revoking_a_capability_takes_the_mapping_down(device_port, p,

@@ -822,14 +822,12 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
  *    was never invalidated, and served a freed region's address to any
  *    client without asking.
  *  - A page no capability covers is refused BEFORE any DMA, and the
- *    client is told so.  The old path sent the untranslated address, the
- *    engine refused the transfer, the controller reported success, and the
- *    client was answered with whatever the page held.
- *
- * ⚠️ One exception, until every client hands its buffers over: a handle
- * whose client has never registered one passes its addresses through, with
- * a line that says so -- i386's ext_server lived on that path.  Every
- * refusal on a handle that HAS registered is final.
+ *    client is told so, on every handle.  The old path sent the
+ *    untranslated address, the engine refused the transfer, the controller
+ *    reported success, and the client was answered with whatever the page
+ *    held.  Until every client handed its buffers over, a handle that had
+ *    never registered one passed its addresses through; none does any
+ *    more, on either target, and the exception is gone.
  */
 
 kern_return_t
@@ -875,7 +873,6 @@ ds_device_register_dma(mach_port_t device, mach_port_t reply,
 		h->n_dma_caps++;
 	}
 	h->dma_cap[i] = t;
-	h->registered = 1;
 
 	printf("blk: a client handed %s a capability for buffer %llu "
 	       "(%u on this handle)\n", h->part->name,
@@ -980,20 +977,6 @@ blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
 	int		drop[BLK_HANDLE_DMA_CAPS] = { 0 };
 	uint64_t	answered = 0;
 	unsigned int	j, i, n = h->n_dma_caps, kept;
-
-	if (n == 0 && !h->registered) {
-		/* The interim: see the note above ds_device_register_dma. */
-		h->passed++;
-		if ((h->passed & (h->passed - 1)) == 0)
-			printf("blk: %s: a physical %s of 0x%lx passed through "
-			       "untranslated — this handle's client has handed "
-			       "over no buffer capability (%u so far)\n",
-			       h->part->name,
-			       op == CAP_OP_DMA_DEVICE_WRITE ? "read" : "write",
-			       (unsigned long)pa, h->passed);
-		*dma = pa;
-		return KERN_SUCCESS;
-	}
 
 	for (j = 0; j < n; j++) {
 		i = (h->dma_last + j) % n;
