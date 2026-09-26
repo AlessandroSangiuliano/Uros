@@ -771,6 +771,19 @@ uart_lcr_out(uint8_t v)
 		       (unsigned)v, (int)kr);
 }
 
+/* LCR read the same way; -1 when the kernel refused it */
+static int
+uart_lcr_in(void)
+{
+	natural_t	v = 0;
+
+	if (device_io_port_read(char_core_device_port(),
+				(natural_t)(UART_BASE + UART_LCR), 1, &v)
+	    != KERN_SUCCESS)
+		return -1;
+	return (int)(v & 0xFFu);
+}
+
 /*
  * #599: the divisor is set by the kernel, on both targets.  The latch shares
  * its two ports with THR and IER, switched by LCR bit 7, and on i386 the
@@ -832,6 +845,27 @@ uart_attach(void *priv)
 		return -1;
 	}
 
+	/*
+	 * #599: the chip as its last owner left it -- the kernel's console,
+	 * and on i386 comprobe()/comattach() before it, which used to leave
+	 * LCR at 0 and clear MCR on boots without -r.  QEMU sends every byte
+	 * whatever LCR says, so this line is where such a chip shows.
+	 */
+	{
+		int lcr = uart_lcr_in();
+
+		if (lcr < 0)
+			printf("uart: COM1 found with LCR unread (refused), MCR "
+			       "0x%02x, IER 0x%02x (#599)\n",
+			       (unsigned)uart_in(UART_MCR),
+			       (unsigned)uart_in(UART_IER));
+		else
+			printf("uart: COM1 found with LCR 0x%02x, MCR 0x%02x, "
+			       "IER 0x%02x (#599)\n", (unsigned)lcr,
+			       (unsigned)uart_in(UART_MCR),
+			       (unsigned)uart_in(UART_IER));
+	}
+
 	/* Disable interrupts while we reconfigure. */
 	uart_out(UART_IER, 0x00);
 
@@ -865,6 +899,9 @@ uart_attach(void *priv)
 
 	if (char_core_irq_register(UART_IRQ, uart_irq_handler, p) < 0) {
 		printf("uart: IRQ %u register failed\n", UART_IRQ);
+		/* #599: the claim goes with the attach, as ps2.so's does */
+		(void)device_io_port_unclaim(char_core_device_port(),
+					     UART_BASE);
 		return -1;
 	}
 
