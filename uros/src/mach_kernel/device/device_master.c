@@ -1549,10 +1549,10 @@ struct dma_region {
 	 * ── What makes this buffer nameable, and whose it is (#432) ──
 	 *
 	 * 🔴 A REGION NEEDS AN IDENTITY BEFORE ANYONE CAN BE GIVEN A
-	 * CAPABILITY FOR IT.  device_dma_map_foreign takes a physical address
-	 * and checks only that the kernel allocated it for DMA -- so any
-	 * holder of the master port can put anybody's DMA buffer inside its
-	 * own device's reach.  That is narrower than "all of physical memory",
+	 * CAPABILITY FOR IT.  device_dma_map_foreign (retired by #599) took a
+	 * physical address and checked only that the kernel allocated it for
+	 * DMA -- so any holder of the master port could put anybody's DMA
+	 * buffer inside its own device's reach.  That is narrower than "all of physical memory",
 	 * which is where this started, and it is not "only what somebody
 	 * handed me".  Closing the difference means the buffer has a NAME a
 	 * capability can carry, and an OWNER whose consent that capability
@@ -1612,7 +1612,8 @@ struct dma_region {
 		/*
 		 * #599: the capability the grant rests on; revoking it takes
 		 * the grant down (device_master_cap_revoked).  0 for a grant
-		 * made by the retired device_dma_map_foreign.
+		 * made on no capability (none are, since #599 retired
+		 * device_dma_map_foreign).
 		 */
 		uint64_t	cap_id;
 	} user[DEVICE_MAX_REGION_USERS];
@@ -3578,199 +3579,6 @@ ds_master_device_dma_owned(
 		return kr;
 
 	*by_other = (natural_t)device_claimed_by_other(bdf);
-	return KERN_SUCCESS;
-}
-
-/*
- * ── The server that owns the device maps somebody else's buffer ──────
- *
- * See the note on device_dma_map_foreign in <device/device_master.defs> for
- * why this exists.  In one line: the block server's disk has to read the
- * filesystem's page cache, and the filesystem owns no device to name.
- */
-kern_return_t
-ds_master_device_dma_map_foreign(
-	ipc_port_t		master_port,
-	natural_t		bdf,
-	vm_address_t		paddr,
-	cap_token_t		token,
-	mach_msg_type_number_t	tokenCnt,
-	vm_address_t		*dma_addr)
-{
-	kern_return_t		kr, kr_write;
-	struct dma_region	*r;
-	struct uros_cap		cap;
-	unsigned int		page, u;
-	unsigned long		base = 0;
-	uint64_t		r_id = 0;
-	int			reads, writes, identity = 0;
-
-	kr = check_master_port(master_port);
-	if (kr != KERN_SUCCESS)
-		return kr;
-
-	if (bdf == DEVICE_DMA_NO_BDF)
-		return KERN_INVALID_ARGUMENT;
-
-	/* A device has one driver, and only that driver may map for it. */
-	kr = check_claim(bdf);
-	if (kr != KERN_SUCCESS)
-		return kr;
-
-	/*
-	 * 🔴 THE PAGE MUST BE ONE THIS KERNEL HANDED OUT FOR DMA.  Without
-	 * this the call is "put any physical address inside my device's
-	 * reach", which is the property the whole issue exists to create.
-	 */
-	urmach_rcu_read_lock();
-	r = dma_region_of((vm_offset_t)paddr, &page);
-	if (r != 0)
-		r_id = r->id;
-	urmach_rcu_read_unlock();
-	if (r == 0)
-		return KERN_INVALID_ADDRESS;
-
-	/*
-	 * 🔴 AND A CAPABILITY FOR THAT REGION, WHICH IS THE DELEGATION.
-	 * Knowing the address is not the same as having been given the buffer:
-	 * before this, a driver could put another server's page cache inside
-	 * its device's reach on the strength of an address it happened to see.
-	 * The token says the region's OWNER handed it over.
-	 */
-	if (tokenCnt != sizeof(struct uros_cap))
-		return KERN_INVALID_ARGUMENT;
-
-	memcpy(&cap, token, sizeof(cap));
-
-	/*
-	 * #599: r_id, the copy taken inside the read section above, and not
-	 * r->id: the slot may have been dropped and reused since, and the
-	 * check would then be made against another buffer's name.  The
-	 * re-check under device_table_lock below is what catches the reuse;
-	 * this makes the check and its message say the same thing it does.
-	 *
-	 * 🔑 And BOTH directions, each asked for.  This used to check the
-	 * device-write op alone and then map the region for reading and
-	 * writing, so a capability that allowed the device only to read the
-	 * buffer was refused for that, and one that allowed only writes was
-	 * given reads as well.  What is mapped is what the capability allows.
-	 */
-	kr = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER,
-				 (uint32_t)CAP_OP_DMA_DEVICE_READ, r_id);
-	reads = kr == KERN_SUCCESS;
-	kr_write = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER,
-				       (uint32_t)CAP_OP_DMA_DEVICE_WRITE,
-				       r_id);
-	writes = kr_write == KERN_SUCCESS;
-	if (!reads && !writes) {
-		printf("device: %02x:%02x.%u showed no capability for DMA "
-		       "region %lu (kr=%d) — knowing an address is not being "
-		       "given the buffer\n",
-		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 7), (unsigned long)r_id, (int)kr_write);
-		return KERN_NO_ACCESS;
-	}
-
-	/*
-	 * ⚠️ On a machine that polices nothing, the physical address IS the
-	 * answer and no mapping happens.  Reported as success because that is
-	 * what it is: the caller asked for an address its device can use, and
-	 * on such a machine every address is one.
-	 */
-	if (!device_md_dma_isolates()) {
-		*dma_addr = paddr;
-		return KERN_SUCCESS;
-	}
-
-	/*
-	 * The user list is appended by whichever server asks first, and two
-	 * can ask at once (#538): searched and grown under the lock -- after
-	 * checking that the slot still holds the region found above, by
-	 * identity, because the owner may have dropped it in between.
-	 */
-	mutex_lock(&device_table_lock);
-	if (r->kva == 0 || r->id != r_id) {
-		mutex_unlock(&device_table_lock);
-		return KERN_INVALID_ADDRESS;
-	}
-	for (u = 0; u < r->nusers; u++)
-		if (r->user[u].bdf == bdf) {
-			base = (unsigned long)r->user[u].dma;
-			identity = r->user[u].identity;
-			break;
-		}
-
-	/*
-	 * #599: a capability for a direction the existing mapping does not
-	 * have is refused, not widened.  Widening means re-mapping a window a
-	 * device may be using; every capability issued today allows both, and
-	 * this line is what would say so the day one does not.
-	 */
-	if (u < r->nusers &&
-	    ((reads && !r->user[u].reads) || (writes && !r->user[u].writes))) {
-		mutex_unlock(&device_table_lock);
-		printf("device: %02x:%02x.%u was mapped DMA region %lu for "
-		       "%s only, and a capability for %s arrived after — the "
-		       "mapping is not widened\n",
-		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 7), (unsigned long)r_id,
-		       r->user[u].reads ? "the device's reads"
-					: "the device's writes",
-		       r->user[u].reads ? "its writes" : "its reads");
-		return KERN_NO_ACCESS;
-	}
-	if (u < r->nusers)
-		mutex_unlock(&device_table_lock);
-
-	if (u == r->nusers) {
-		if (r->nusers >= DEVICE_MAX_REGION_USERS) {
-			mutex_unlock(&device_table_lock);
-			return KERN_RESOURCE_SHORTAGE;
-		}
-
-		/*
-		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses.  The
-		 * caller asks page by page and pays for it once: everything
-		 * after this is the arithmetic below.
-		 */
-		if (!device_md_dma_grant_pages(bdf,
-					       (const unsigned long *)r->pa,
-					       r->npages, reads, writes, &base,
-					       &identity)) {
-			mutex_unlock(&device_table_lock);
-			return KERN_FAILURE;
-		}
-
-		r->user[r->nusers].bdf = bdf;
-		r->user[r->nusers].dma = (vm_offset_t)base;
-		r->user[r->nusers].identity = (unsigned char)identity;
-		r->user[r->nusers].reads = (unsigned char)reads;
-		r->user[r->nusers].writes = (unsigned char)writes;
-		r->user[r->nusers].cap_id = 0;	/* #599: rests on no id */
-		publish_barrier();
-		r->nusers++;
-		mutex_unlock(&device_table_lock);
-
-		printf("device: %02x:%02x.%u may now read a %u-page buffer it "
-		       "did not allocate, at 0x%lx — mapped by the server that "
-		       "owns the device, not by the one that owns the memory\n",
-		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 7), r->npages, base);
-	}
-
-	/*
-	 * #599: the byte asked for, not its page.  The offset inside the page
-	 * was dropped here, so a filesystem with blocks smaller than a page --
-	 * several cache slots to a page -- had every slot after the first read
-	 * into and written from the first; and in an identity domain the page
-	 * is at its own address, not at a window's base + page * PAGE_SIZE.
-	 */
-	if (identity)
-		*dma_addr = paddr;
-	else
-		*dma_addr = (vm_address_t)(base + (unsigned long)page *
-					   PAGE_SIZE +
-					   (paddr & (vm_address_t)PAGE_MASK));
 	return KERN_SUCCESS;
 }
 
