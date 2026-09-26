@@ -166,9 +166,10 @@ int page_cache_destroy(struct page_cache *pc);
 
 /*
  * #599: the page cache's self-test, run at ext_server's start; *ran counts
- * the cases, *wrong the wrong answers.
+ * the cases, *wrong the wrong answers, *failed which ones.
  */
-void page_cache_selftest(unsigned int *ran, unsigned int *wrong);
+void page_cache_selftest(unsigned int *ran, unsigned int *wrong,
+			 unsigned int *failed);	/* bit n-1: case n failed */
 
 /*
  * Set only by page_cache_selftest, while it runs at ext_server's start

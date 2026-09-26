@@ -2296,15 +2296,16 @@ main(int argc, char **argv)
 
 	/* #599: the page cache, on small caches of its own. */
 	{
-		unsigned int ran, wrong;
+		unsigned int ran, wrong, failed;
 
-		page_cache_selftest(&ran, &wrong);
+		page_cache_selftest(&ran, &wrong, &failed);
 		if (wrong == 0)
 			printf("ext2: %u page-cache cases, 0 wrong (#599)\n",
 			       ran);
 		else
 			printf("ext2: WRONG — %u of %u page-cache cases "
-			       "answered wrong (#599)\n", wrong, ran);
+			       "answered wrong, P-mask 0x%x (#599)\n", wrong,
+			       ran, failed);
 	}
 
 	/* Create port set for all mount ports */

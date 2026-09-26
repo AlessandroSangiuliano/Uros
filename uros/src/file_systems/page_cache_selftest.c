@@ -505,101 +505,87 @@ st_one_sync_at_a_time(void)
 }
 
 /*
- * P11: a sync ends while blocks keep being dirtied behind it.  A writer
- * dirties new blocks without pause; the sync must still return within the
- * bounded wait -- it takes only what was dirty when it began.
+ * P11: a sync takes only what was dirty when it began -- which is what makes
+ * it end while blocks keep being dirtied behind it.  Deterministic, on the
+ * gate: the sync collects three dirty blocks and is held in the middle of
+ * writing the first; ten new blocks are dirtied; the gate opens.  When the
+ * sync returns, the three are clean and the ten are still dirty.  A sync
+ * that took every dirty block it found would have written the ten too, and
+ * against a writer that keeps up it would never have returned.
  */
-struct st_writer {
-	struct page_cache	*pc;
-	volatile int		 stop;
-	pthread_t		 th;
-};
-
-static void *
-st_writer_thread(void *arg)
-{
-	struct st_writer *w = (struct st_writer *)arg;
-	daddr_t b = 5000;
-
-	while (!w->stop)
-		(void) st_write_byte(w->pc, b++, 0xB0);
-	return 0;
-}
-
 static int
-st_sync_ends_under_writes(void)
+st_sync_takes_what_was_dirty(void)
 {
-	struct page_cache	*pc = page_cache_create(16, ST_BLOCK,
+	struct page_cache	*pc = page_cache_create(32, ST_BLOCK,
 							st_writeback, 0);
 	struct st_syncer	 sy;
-	struct st_writer	 w;
-	int			 ok = 1, ended;
+	unsigned int		 b;
+	int			 ok = 1;
 
 	if (pc == 0)
 		return 0;
-	memset(&w, 0, sizeof(w));
-	w.pc = pc;
-	if (pthread_create(&w.th, 0, st_writer_thread, &w) != 0) {
+	for (b = 1; b <= 5; b += 2)
+		if (st_write_byte(pc, (daddr_t)b, 0xB1) != 0)
+			ok = 0;
+	st_gate_reset(1);
+	if (!st_sync_start(&sy, pc)) {
+		st_gate_reset((daddr_t)-1);
 		(void) st_done(pc);
 		return 0;
 	}
-	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 5);
-	if (!st_sync_start(&sy, pc))
+	if (!st_wait_for(&st_gate_entered))
 		ok = 0;
-	ended = st_wait_for(&sy.done);
-	w.stop = 1;
-	(void) pthread_join(w.th, 0);
+	for (b = 101; b <= 119; b += 2)
+		if (st_write_byte(pc, (daddr_t)b, 0xB2) != 0)
+			ok = 0;
+	st_gate_release();
 	(void) pthread_join(sy.th, 0);
-	if (!ended)
-		ok = 0;
+	st_gate_reset((daddr_t)-1);
+	for (b = 1; b <= 5; b += 2)
+		if (!st_holds(pc, (daddr_t)b, 0xB1, 0))
+			ok = 0;
+	for (b = 101; b <= 119; b += 2)
+		if (!st_holds(pc, (daddr_t)b, 0xB2, 1))
+			ok = 0;
 	if (!st_done(pc))
 		ok = 0;
 	return ok;
 }
 
+/* Count a case, and mark it failed by its number. */
+static void
+st_case(unsigned int *ran, unsigned int *wrong, unsigned int *failed, int ok)
+{
+	(*ran)++;
+	if (!ok) {
+		(*wrong)++;
+		*failed |= 1u << (*ran - 1);
+	}
+}
+
 void
-page_cache_selftest(unsigned int *ran, unsigned int *wrong)
+page_cache_selftest(unsigned int *ran, unsigned int *wrong,
+		    unsigned int *failed)
 {
 	*ran = 0;
 	*wrong = 0;
+	*failed = 0;
 	st_wb_calls = 0;
 	st_wb_answer = 0;
 	page_cache_quiet = 1;
 	pthread_mutex_init(&st_gate_lock, 0);
 	pthread_cond_init(&st_gate_cond, 0);
 
-	(*ran)++;
-	if (!st_slots_are_fixed())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_destroy_refuses_dirty())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_write_lands())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_write_refused_when_full())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_write_refuses_a_part())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_evict_keeps_unwritable())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_write_fails_when_nothing_writes())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_clean_found_past_the_window())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_write_during_writeback_stays_dirty())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_one_sync_at_a_time())
-		(*wrong)++;
-	(*ran)++;
-	if (!st_sync_ends_under_writes())
-		(*wrong)++;
+	st_case(ran, wrong, failed, st_slots_are_fixed());
+	st_case(ran, wrong, failed, st_destroy_refuses_dirty());
+	st_case(ran, wrong, failed, st_write_lands());
+	st_case(ran, wrong, failed, st_write_refused_when_full());
+	st_case(ran, wrong, failed, st_write_refuses_a_part());
+	st_case(ran, wrong, failed, st_evict_keeps_unwritable());
+	st_case(ran, wrong, failed, st_write_fails_when_nothing_writes());
+	st_case(ran, wrong, failed, st_clean_found_past_the_window());
+	st_case(ran, wrong, failed, st_write_during_writeback_stays_dirty());
+	st_case(ran, wrong, failed, st_one_sync_at_a_time());
+	st_case(ran, wrong, failed, st_sync_takes_what_was_dirty());
 	page_cache_quiet = 0;
 }
