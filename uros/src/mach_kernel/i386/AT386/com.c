@@ -1425,8 +1425,8 @@ com_bank_leave(unsigned int flags, int took)
  * that one holds it: entry saves LCR and closes the latch, exit puts LCR back
  * exactly, so the sequence goes on where it meant to.  The session takes no
  * lock -- it waits for nobody -- and kdb_kentry, which parks no one, has
- * none: there every processor, the debugger's included, takes the lock, with
- * the bound above.  Outside any NCPUS test: one processor can be caught
+ * none: there every processor takes the lock -- the console's writer with
+ * the bound above, every other access waiting for it.  Outside any NCPUS test: one processor can be caught
  * half-way inside the hold as well, by a trap.
  */
 static int	com_ddb_lcr = -1;

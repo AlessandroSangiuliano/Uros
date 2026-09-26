@@ -583,7 +583,8 @@ kdb_kentry(
 	/*
 	 * #599: no COM1 session here.  This entry parks no one (remote_kdb's
 	 * request is dropped, lapic.c), so every processor goes on taking the
-	 * bank's lock, this one included -- bounded while db_active (com.c).
+	 * bank's lock, this one included -- the console's writer with a bound
+	 * while db_active, every other access waiting (com.c).
 	 */
 	db_active++;
 	db_task_trap(-1, 0, trap_from_user);

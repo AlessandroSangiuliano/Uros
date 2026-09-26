@@ -493,8 +493,9 @@ static void cons_wire_byte(char c)
 		return;
 
 	/*
-	 * #599: under the port's lock, as every other THR write is, with a
-	 * bound.  This path runs with the ring off -- early boot, and the way
+	 * #599: under the port's lock, with a bound, once the lock package can
+	 * be used (before cons_percpu_ready there is one processor and no
+	 * lock).  This path runs with the ring off -- early boot, and the way
 	 * down, where the other processors may still be running (a DDB entry
 	 * drains the ring before it stops them) and one of them may be in a
 	 * divisor sequence with the latch open (found in review: a printf on

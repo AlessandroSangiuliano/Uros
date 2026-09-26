@@ -139,9 +139,11 @@ void cons_flush(void);
  * a message that is lost.  A machine that is dying has no further use for the
  * property that two writers never meet.  #599: DDB's session closes the latch
  * after the others are stopped (cons_ddb_session), a halt closes it under
- * the port's lock (cons_port_close_latch), every THR write takes that lock
- * with a bound, and a DDB session that continues gives the port back to its
- * driver.
+ * the port's lock (cons_port_close_latch), and a DDB session that continues
+ * gives the port back to its driver.  Every THR write takes the port's lock
+ * once the lock package can be used (cons_percpu_ready): the drain and a
+ * task's register write wait for it, the writers that must not wait for ever
+ * (cons_wire_byte: the ring off, the way down, the reporter) with a bound.
  */
 /* Returns the klog cursor taken at the instant the port changed hands: the
  * forwarder's starting point (#497).  Idempotent; a second call returns the

@@ -2686,8 +2686,9 @@ ext2fs_is_dirty(fs_private_t private)
 	 * read here without the lock they were clear while one was in flight,
 	 * and the writeback thread dropped a handle whose flush then failed
 	 * (found in review, twice: a count of flushes in flight still left a
-	 * window at each end).  Every caller holds of_lock and not v_lock,
-	 * the order the writeback's own flushes take them in.
+	 * window at each end).  No caller holds v_lock; the writeback thread
+	 * and ds_ext2_sync hold of_lock, the order their own flushes take the
+	 * two in, and the write paths' failure branch holds neither.
 	 */
 	vnode_mutex_lock(fp);
 	dirty = fp->f_vnode->v_inode_dirty || fp->f_vnode->v_gd_dirty ||
@@ -3901,9 +3902,9 @@ write_file_locked(
 			 * double- or triple-indirect block is linked as it is
 			 * allocated), so the inode is dirty either way.  A
 			 * failed link leaves the data block reachable from
-			 * nothing on the disk -- link_fresh_block writes the
-			 * one reference to it last, with nothing after it to
-			 * fail -- so it is freed (#599; kept, as the second
+			 * nothing on the disk -- the write that joins it to the
+			 * reachable map comes last in link_fresh_block, with
+			 * nothing after it to fail -- so it is freed (#599; kept, as the second
 			 * review round had it, it was counted by no i_blocks).
 			 */
 			linked = 1;
@@ -3984,10 +3985,12 @@ fresh_indirect_block(struct ext2fs_file *fp)
  * directly or through the indirect blocks, allocating those as it goes.  The
  * order holds in the in-core map; on the disk an indirect block written here
  * can name a data block whose bytes are still in the cache, until the next
- * sync.  The one on-disk reference to the data block is written last, with
- * nothing after it that can fail (a parent is updated only when its child
- * was just allocated), so a failure leaves the data block reachable from
- * nothing on the disk and the caller frees it; an indirect block allocated
+ * sync.  The write that makes the data block reachable from the disk's map
+ * comes last, with nothing after it that can fail -- the entry naming it in
+ * an existing single-indirect block, or the parent entry that joins a new
+ * chain holding it (a parent is updated only when its child was just
+ * allocated) -- so a failure leaves the data block reachable from nothing on
+ * the disk and the caller frees it; an indirect block allocated
  * before the failure is left allocated, as it always was.
  */
 static int
