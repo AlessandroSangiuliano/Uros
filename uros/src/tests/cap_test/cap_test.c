@@ -939,19 +939,16 @@ a_capability_is_its_handles(mach_port_t device_port, mach_port_t part_port,
     b2_free(device_port, &r2);
 
     if (!ok) {
-        printf("cap_test: [19] WRONG — %s: the second handle into the first's "
-               "page kr=%d (page %s), the first into it kr=%d 0x%x, the "
-               "second again kr=%d (page %s), the second into its own kr=%d "
-               "0x%x\n", name, (int)k1, i1 ? "untouched" : "WRITTEN",
-               (int)k2, m2, (int)k3, i3 ? "untouched" : "WRITTEN", (int)k4,
-               m4);
+        printf("cap_test: [19] WRONG — %s: 2nd into 1st's page kr=%d (%s), "
+               "1st kr=%d 0x%x, 2nd again kr=%d (%s), 2nd own kr=%d 0x%x\n",
+               name, (int)k1, i1 ? "untouched" : "WRITTEN", (int)k2, m2,
+               (int)k3, i3 ? "untouched" : "WRITTEN", (int)k4, m4);
         return 0;
     }
-    printf("cap_test: [19] %s: a second handle reading into the first "
-           "handle's page was refused (kr=%d, then kr=%d after the first had "
-           "read into it, 0x%x) and the page was not touched; each read its "
-           "own (0x%x) — a buffer capability is spent by the handle it was "
-           "handed on\n", name, (int)k1, (int)k3, m2, m4);
+    printf("cap_test: [19] %s: a second handle refused the first's page "
+           "(kr=%d, kr=%d after the first read 0x%x), page untouched; own "
+           "page 0x%x — a capability is its handle's\n", name, (int)k1,
+           (int)k3, m2, m4);
     return 1;
 }
 
@@ -1001,18 +998,17 @@ a_handle_refuses_rather_than_evicts(mach_port_t device_port,
          kr[4] == KERN_NO_SPACE && kr_again == 0 && kr_read == 0 &&
          magic == 0xEF53u && kr_new == 0;
     if (!ok) {
-        printf("cap_test: [21] WRONG — %s: five capabilities for one buffer "
-               "on one handle answered %d %d %d %d %d, the first again %d, a "
-               "read %d (0x%x), the fifth on a new handle %d; expected 0 0 0 "
-               "0 %d, 0, 0 (0xef53), 0\n", name, (int)kr[0], (int)kr[1],
-               (int)kr[2], (int)kr[3], (int)kr[4], (int)kr_again,
-               (int)kr_read, magic, (int)kr_new, (int)KERN_NO_SPACE);
+        printf("cap_test: [21] WRONG — %s: five on one handle %d %d %d %d "
+               "%d, first again %d, read %d 0x%x, fifth on a new handle %d; "
+               "want 0 0 0 0 %d, 0, 0 0xef53, 0\n", name, (int)kr[0],
+               (int)kr[1], (int)kr[2], (int)kr[3], (int)kr[4],
+               (int)kr_again, (int)kr_read, magic, (int)kr_new,
+               (int)KERN_NO_SPACE);
         return 0;
     }
-    printf("cap_test: [21] %s: a handle took four capabilities and refused "
-           "the fifth (kr=%d), took the first again in its own place (kr=0), "
-           "still read (0x%x), and a new handle took the fifth (kr=0) — full "
-           "refuses, it does not evict\n", name, (int)kr[4], magic);
+    printf("cap_test: [21] %s: four capabilities taken, the fifth refused "
+           "(kr=%d), the first again 0, a read 0x%x, a new handle took the "
+           "fifth — full refuses, never evicts\n", name, (int)kr[4], magic);
     return 1;
 }
 
@@ -1371,18 +1367,17 @@ a_buffer_is_freed_whole_and_once(mach_port_t device_port)
 
     if (kr_half != KERN_INVALID_ARGUMENT || kr_alive != KERN_SUCCESS ||
         kr_whole != KERN_SUCCESS || kr_again != KERN_INVALID_ADDRESS) {
-        printf("cap_test: [22] WRONG — a two-page buffer freed at one page "
-               "answered %d, then a capability for it %d, the whole free %d "
-               "and a second free %d; expected %d, 0, 0 and %d\n",
-               (int)kr_half, (int)kr_alive, (int)kr_whole, (int)kr_again,
-               (int)KERN_INVALID_ARGUMENT, (int)KERN_INVALID_ADDRESS);
+        printf("cap_test: [22] WRONG — a 2-page buffer freed at 1 page %d, "
+               "then its capability %d, the whole free %d, a second free %d; "
+               "want %d, 0, 0, %d\n", (int)kr_half, (int)kr_alive,
+               (int)kr_whole, (int)kr_again, (int)KERN_INVALID_ARGUMENT,
+               (int)KERN_INVALID_ADDRESS);
         return 0;
     }
-    printf("cap_test: [22] a two-page buffer freed at one page was refused "
-           "(kr=%d) and still had an owner to issue a capability for "
-           "(kr=%d); the whole free answered %d and a second free %d — the "
-           "kernel frees what its owner allocated, whole, once\n",
-           (int)kr_half, (int)kr_alive, (int)kr_whole, (int)kr_again);
+    printf("cap_test: [22] a 2-page buffer freed at 1 page refused (kr=%d), "
+           "still issuable (kr=%d); whole free %d, again %d — freed by its "
+           "owner, whole, once\n", (int)kr_half, (int)kr_alive,
+           (int)kr_whole, (int)kr_again);
     return 1;
 }
 
@@ -1441,16 +1436,15 @@ a_free_takes_its_mapping_not_the_address(mach_port_t device_port)
 
     if (kr_free != KERN_SUCCESS || kr_read != KERN_SUCCESS || seen != 0x5A) {
         printf("cap_test: [23] WRONG — a buffer freed after its range was "
-               "given back and remapped: the free answered %d, a read of "
-               "the page mapped there since %d, holding 0x%x — the free "
-               "took an address that was no longer the buffer's\n",
+               "remapped: free %d, the new page's read %d holding 0x%x — the "
+               "free took an address no longer the buffer's\n",
                (int)kr_free, (int)kr_read, (unsigned)seen);
         return 0;
     }
-    printf("cap_test: [23] a buffer freed after its range was given back and "
-           "remapped (free kr=%d): the page mapped there since still reads "
-           "(kr=%d) 0x%x — the free took the buffer's mapping, not its "
-           "address\n", (int)kr_free, (int)kr_read, (unsigned)seen);
+    printf("cap_test: [23] a buffer freed after its range was remapped (free "
+           "kr=%d): the new page still reads (kr=%d) 0x%x — the free took the "
+           "mapping, not the address\n", (int)kr_free, (int)kr_read,
+           (unsigned)seen);
     return 1;
 }
 
