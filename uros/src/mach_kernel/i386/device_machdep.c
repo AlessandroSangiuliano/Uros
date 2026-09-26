@@ -437,7 +437,7 @@ device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
 int
 device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 			  unsigned int n, int read, int write,
-			  unsigned long *dma_addr)
+			  unsigned long *dma_addr, int *identity)
 {
 	(void)bdf;
 	(void)pa;
@@ -445,6 +445,7 @@ device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 	(void)read;
 	(void)write;
 	(void)dma_addr;
+	(void)identity;
 	return 0;
 }
 

@@ -707,7 +707,11 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
 
 /*
  * The same for pages that are not physically contiguous: `n' frames, each
- * mapped at consecutive addresses starting from the one answered.
+ * mapped at consecutive addresses starting from the one answered -- except in
+ * an identity domain, where each frame is mapped at its own address and
+ * *identity_out says so (#599): page i is then at pa[i].  A caller that
+ * assumed the answer + i * 4096 there would program a device with the frames
+ * that follow pa[0], which are somebody else's.
  *
  * 🔑 ONE CALL AND ONE CONTIGUOUS WINDOW, not n grants.  A scatter-gather
  * buffer is scattered in PHYSICAL memory and there is no reason for it to be
@@ -717,7 +721,8 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
  * the grant one entry instead of a thousand.
  */
 int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
-		      int read, int write, uint64_t *iova_out);
+		      int read, int write, uint64_t *iova_out,
+		      int *identity_out);
 
 /*
  * This device must be programmed with physical addresses: map its grants at

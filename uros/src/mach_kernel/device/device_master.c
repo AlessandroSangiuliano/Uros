@@ -2218,10 +2218,12 @@ ds_master_device_dma_alloc_sg(
 
 	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
 		unsigned long iova = 0;
+		int identity = 0;
 
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)list,
-					       n_pages, TRUE, TRUE, &iova)) {
+					       n_pages, TRUE, TRUE, &iova,
+					       &identity)) {
 			/*
 			 * dma_region_drop() takes the user mapping down
 			 * itself now that the region records it (#531);
@@ -2237,10 +2239,17 @@ ds_master_device_dma_alloc_sg(
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
-		for (i = 0; i < n_pages; i++)
-			((vm_address_t *)list)[i] =
-				(vm_address_t)(iova + (unsigned long)i
-					       * PAGE_SIZE);
+		/*
+		 * #599: in an identity domain each page is reached at its
+		 * own address, which is what the list already holds; the
+		 * rewrite into a window would hand the driver the frames that
+		 * follow the first one, which are somebody else's.
+		 */
+		if (!identity)
+			for (i = 0; i < n_pages; i++)
+				((vm_address_t *)list)[i] =
+					(vm_address_t)(iova + (unsigned long)i
+						       * PAGE_SIZE);
 	}
 
 	task_deallocate(task);
@@ -3628,9 +3637,12 @@ ds_master_device_dma_map_foreign(
 		 * caller asks page by page and pays for it once: everything
 		 * after this is the arithmetic below.
 		 */
+		int identity = 0;	/* read by the next commit (#599) */
+
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)r->pa,
-					       r->npages, TRUE, TRUE, &base)) {
+					       r->npages, TRUE, TRUE, &base,
+					       &identity)) {
 			mutex_unlock(&device_table_lock);
 			return KERN_FAILURE;
 		}

@@ -13,6 +13,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <kern/kalloc.h>	/* an identity grant's page list, #599 */
 #include <kern/lock.h>		/* iommu_domain_lock, #599 */
 #include <kern/misc_protos.h>	/* printf, for the refusals (#432 stage 3d) */
 #include <pmap/layout.h>
@@ -1841,6 +1842,17 @@ struct iommu_granted {
 	uint64_t	pa;
 	uint64_t	iova;
 	uint64_t	size;
+
+	/*
+	 * #599: an identity domain's scatter-gather grant, page by page.  Its
+	 * frames are mapped where they are, so the range [pa, pa + size) is
+	 * not what was mapped, and a revoke that unmapped it would take pages
+	 * this device was given by somebody else and leave these reachable.
+	 * The grant keeps its own copy of the list (kalloc'd, `size' / 4096
+	 * entries), so that the revoke undoes exactly what the grant did
+	 * whoever calls it.  Zero for every other grant.
+	 */
+	uint64_t	*pages;
 };
 
 #define	IOMMU_MAX_GRANTS	16
@@ -2084,12 +2096,31 @@ static int iova_take(struct device_domain *s, uint64_t pa, uint64_t size,
 }
 
 static void grant_record(struct device_domain *s, uint64_t pa, uint64_t iova,
-			 uint64_t size)
+			 uint64_t size, uint64_t *pages)
 {
 	s->grants[s->ngrants].pa = pa;
 	s->grants[s->ngrants].iova = iova;
 	s->grants[s->ngrants].size = size;
+	s->grants[s->ngrants].pages = pages;
 	s->ngrants++;
+}
+
+/*
+ * Unmap an identity grant's frames, the first `n' of `pages'.  Used by the
+ * revoke and by a grant that fails part way: an identity address is the
+ * frame's own, so a page left mapped is reachable by the device whether or
+ * not anybody was told the address (#599).
+ */
+static int identity_unmap(struct device_domain *s, const uint64_t *pages,
+			  unsigned n)
+{
+	int	ok = 1;
+
+	for (unsigned i = 0; i < n; i++)
+		if (!iommu_domain_map(&s->domain, pages[i], pages[i], 4096u,
+				      0, 0))
+			ok = 0;
+	return ok;
 }
 
 static int grant_locked(uint16_t bdf, uint64_t pa, uint64_t size, int read,
@@ -2110,7 +2141,7 @@ static int grant_locked(uint16_t bdf, uint64_t pa, uint64_t size, int read,
 	if (!domain_flush(&s->domain))
 		return 0;
 
-	grant_record(s, pa, iova, size);
+	grant_record(s, pa, iova, size, 0);
 	*iova_out = iova;
 	return 1;
 }
@@ -2127,12 +2158,13 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
 }
 
 static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
-			      int read, int write, uint64_t *iova_out)
+			      int read, int write, uint64_t *iova_out,
+			      int *identity_out)
 {
 	struct device_domain *s = domain_for_grant(bdf);
 	uint64_t iova, size = (uint64_t)n * 4096u;
 
-	if (s == 0 || pa == 0 || n == 0 || iova_out == 0)
+	if (s == 0 || pa == 0 || n == 0 || iova_out == 0 || identity_out == 0)
 		return 0;
 
 	if (!iova_take(s, pa[0], size, &iova))
@@ -2141,23 +2173,43 @@ static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
 	/*
 	 * 🔴 AN IDENTITY DOMAIN CANNOT TAKE A CONTIGUOUS WINDOW, because its
 	 * addresses are the frames' own and those are scattered.  Each page is
-	 * mapped where it is, and the caller is answered the first one -- so a
-	 * caller must read the page list rather than assume base + i * 4096,
-	 * which is exactly what it had to do before any of this existed.
+	 * mapped where it is, and the caller is told so through *identity_out:
+	 * page i is then at pa[i], not at the answer + i * 4096.
+	 *
+	 * #599: this loop returned inside its first turn, so only pa[0] was
+	 * ever mapped, and the grant was recorded as the contiguous range
+	 * [pa[0], pa[0] + size).  Now every page is mapped, a failure part way
+	 * unmaps what was mapped (an identity address needs no telling to be
+	 * reached), and the record keeps the list for the revoke.
 	 */
-	if (s->identity)
-		for (unsigned i = 0; i < n; i++) {
+	if (s->identity) {
+		uint64_t *pages = (uint64_t *)kalloc((vm_size_t)n *
+						     sizeof(uint64_t));
+		unsigned  i;
+
+		if (pages == 0)
+			return 0;
+
+		for (i = 0; i < n; i++) {
+			pages[i] = pa[i];
 			if (!iommu_domain_map(&s->domain, pa[i], pa[i], 4096u,
 					      read, write))
-				return 0;
-
-			if (!domain_flush(&s->domain))
-				return 0;
-
-			grant_record(s, pa[0], pa[0], size);
-			*iova_out = pa[0];
-			return 1;
+				break;
 		}
+
+		if (i < n || !domain_flush(&s->domain)) {
+			(void) identity_unmap(s, pages, i);
+			(void) domain_flush(&s->domain);
+			kfree((vm_offset_t)pages,
+			      (vm_size_t)n * sizeof(uint64_t));
+			return 0;
+		}
+
+		grant_record(s, pa[0], pa[0], size, pages);
+		*iova_out = pa[0];
+		*identity_out = 1;
+		return 1;
+	}
 
 	/*
 	 * ⚠️ Fails PART WAY and says so, exactly as iommu_domain_map does: the
@@ -2174,18 +2226,21 @@ static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
 	if (!domain_flush(&s->domain))
 		return 0;
 
-	grant_record(s, pa[0], iova, size);
+	grant_record(s, pa[0], iova, size, 0);
 	*iova_out = iova;
+	*identity_out = 0;
 	return 1;
 }
 
 int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
-		      int read, int write, uint64_t *iova_out)
+		      int read, int write, uint64_t *iova_out,
+		      int *identity_out)
 {
 	int	ok;
 
 	mutex_lock(&iommu_domain_lock);
-	ok = grant_pages_locked(bdf, pa, n, read, write, iova_out);
+	ok = grant_pages_locked(bdf, pa, n, read, write, iova_out,
+				identity_out);
 	mutex_unlock(&iommu_domain_lock);
 	return ok;
 }
@@ -2243,6 +2298,13 @@ static int domain_release_locked(uint16_t bdf)
 	if (!ok)
 		return 0;
 
+	/* An identity grant's page list goes with the slot (#599). */
+	for (i = 0; i < s->ngrants; i++)
+		if (s->grants[i].pages != 0)
+			kfree((vm_offset_t)s->grants[i].pages,
+			      (vm_size_t)(s->grants[i].size / 4096u) *
+			      sizeof(uint64_t));
+
 	/*
 	 * ⚠️ The slot goes even though the tables stay.  What the slot records
 	 * is that a device is IN a domain, and after the detach it is not --
@@ -2291,11 +2353,20 @@ static int revoke_locked(uint16_t bdf, uint64_t pa, uint64_t size)
 	if (i == s->ngrants)
 		return 0;
 
-	if (!iommu_domain_map(&s->domain, s->grants[i].iova, pa, size, 0, 0))
+	if (s->grants[i].pages != 0) {
+		if (!identity_unmap(s, s->grants[i].pages,
+				    (unsigned)(size / 4096u)))
+			return 0;
+	} else if (!iommu_domain_map(&s->domain, s->grants[i].iova, pa, size,
+				     0, 0))
 		return 0;
 
 	if (!domain_flush(&s->domain))
 		return 0;
+
+	if (s->grants[i].pages != 0)
+		kfree((vm_offset_t)s->grants[i].pages,
+		      (vm_size_t)(size / 4096u) * sizeof(uint64_t));
 
 	/*
 	 * The record goes, and the ADDRESS does not come back.  See next_iova:

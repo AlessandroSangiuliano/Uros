@@ -334,7 +334,10 @@ extern int		device_md_dma_grant(unsigned int bdf,
 
 /*
  * The same for `n' frames that are not physically contiguous: they are made
- * reachable at CONSECUTIVE addresses starting from the one answered.
+ * reachable at CONSECUTIVE addresses starting from the one answered -- unless
+ * the device's domain is an identity one, where each frame is reachable at its
+ * own address and *identity is set (#599).  A caller computes page i as the
+ * answer + i * PAGE_SIZE only when *identity is zero, and as pa[i] otherwise.
  *
  * 🔑 One call and one window.  A scatter-gather buffer is scattered in
  * physical memory and there is no reason for it to be scattered in the
@@ -345,7 +348,8 @@ extern int		device_md_dma_grant_pages(unsigned int bdf,
 						  const unsigned long *pa,
 						  unsigned int n,
 						  int read, int write,
-						  unsigned long *dma_addr);
+						  unsigned long *dma_addr,
+						  int *identity);
 
 /*
  * Take a granted range back.  Answers non-zero when the device can no longer

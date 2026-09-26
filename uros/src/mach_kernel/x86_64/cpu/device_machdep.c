@@ -749,11 +749,11 @@ device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
 int
 device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 			  unsigned int n, int read, int write,
-			  unsigned long *dma_addr)
+			  unsigned long *dma_addr, int *identity)
 {
 	uint64_t iova = 0;
 	unsigned before;
-	int ok;
+	int ok, id = 0;
 
 	if (bdf > 0xFFFFu)
 		return 0;
@@ -770,7 +770,7 @@ device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 
 	before = iommu_domain_count();
 	ok = iommu_grant_pages((uint16_t)bdf, (const uint64_t *)pa, n,
-			       read, write, &iova);
+			       read, write, &iova, &id);
 
 	if (ok && iommu_domain_count() != before)
 		printf("iommu: %02x:%02x.%u is now in a domain of its own, "
@@ -781,6 +781,8 @@ device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 
 	if (ok && dma_addr != 0)
 		*dma_addr = (unsigned long)iova;
+	if (ok && identity != 0)
+		*identity = id;
 
 	return ok;
 }
