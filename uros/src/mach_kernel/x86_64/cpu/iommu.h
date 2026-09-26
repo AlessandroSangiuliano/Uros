@@ -646,6 +646,14 @@ int iommu_fault_overflowed(void);
 int iommu_fault_decode_check(unsigned *ran, unsigned *wrong);
 
 /*
+ * #599: the per-device refusal count, asked about itself on a scratch table:
+ * a table that is full counts a new device as unplaced rather than taking a
+ * named one's slot, and a device refused twice counts two and keeps the last
+ * address.
+ */
+int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong);
+
+/*
  * ── Stage 3d: a domain of its own, for one device ────────────────────
  *
  * 🔴 THIS IS WHERE #432 STOPS BEING A DESCRIPTION.  Everything before it built

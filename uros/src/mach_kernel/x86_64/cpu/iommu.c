@@ -206,8 +206,8 @@ void iommu_record_reset(void)
  * A mutex and not a spin lock: mapping can wait for a page-table frame
  * (pmap_table_frame -> VM_PAGE_WAIT), and a completion wait spins for up to
  * ten million turns.  Every caller is a thread; no interrupt handler submits
- * a command.  device_fault_seen() stays outside it: a counter bumped from
- * the fault report.
+ * a command.  The fault log is not under it: a device's refusal count lives
+ * in the log (#599) and never touches device_domains[].
  */
 decl_mutex_data(static, iommu_domain_lock)
 
@@ -1445,15 +1445,112 @@ static int			fault_overflow;
  * after" needs a number that only goes up, or its own two refusals could be
  * pushed out by a noisier device between the two calls and the comparison
  * would read as "not refused".  That is the one answer this must never give.
+ *
+ * #599: AND IT LIVES HERE, NOT IN THE DEVICE'S DOMAIN SLOT.  It was a field of
+ * device_domains[]: bumped without the domain lock while a release compacted
+ * that array, reset when a domain was opened, and not kept at all for a device
+ * in no domain -- a count that could move backwards between a driver's two
+ * questions.  This table only grows: a device, once named, keeps its slot for
+ * the boot.  A refusal from a device it has no room for is counted in
+ * `unplaced', which the report prints.
  */
-static void device_fault_seen(uint16_t bdf);
-static unsigned device_fault_count(uint16_t bdf);
+#define	IOMMU_FAULT_DEVICES	32	/* > IOMMU_MAX_DEVICE_DOMAINS */
+
+struct fault_device {
+	uint16_t	bdf;
+	uint16_t	used;
+	uint64_t	recorded;
+	uint64_t	last_address;
+};
+
+struct fault_table {
+	struct fault_device	dev[IOMMU_FAULT_DEVICES];
+	uint64_t		unplaced;
+};
+
+static struct fault_table	fault_devices;
+
+/* Count one refusal of `bdf' at `address'.  Slots fill in order, no holes. */
+static void fault_table_note(struct fault_table *t, uint16_t bdf,
+			     uint64_t address)
+{
+	for (unsigned i = 0; i < IOMMU_FAULT_DEVICES; i++) {
+		struct fault_device *d = &t->dev[i];
+
+		if (!d->used) {
+			d->used = 1;
+			d->bdf = bdf;
+		} else if (d->bdf != bdf) {
+			continue;
+		}
+		d->recorded++;
+		d->last_address = address;
+		return;
+	}
+	t->unplaced++;
+}
+
+static const struct fault_device *
+fault_table_find(const struct fault_table *t, uint16_t bdf)
+{
+	for (unsigned i = 0; i < IOMMU_FAULT_DEVICES && t->dev[i].used; i++)
+		if (t->dev[i].bdf == bdf)
+			return &t->dev[i];
+
+	return 0;
+}
 
 void iommu_record_fault(const struct iommu_fault *f)
 {
 	fault_log[fault_total % IOMMU_FAULT_LOG] = *f;
 	fault_total++;
-	device_fault_seen(f->source);
+	fault_table_note(&fault_devices, f->source, f->address);
+}
+
+/*
+ * #599: the table asked about itself, at every boot, on a scratch copy: 33
+ * devices refused once each -- 32 named, the 33rd unplaced and not found --
+ * and one refused twice, which counts 2 and keeps the second address.
+ */
+int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong)
+{
+	static struct fault_table t;	/* scratch; too big for the stack */
+	const struct fault_device *d;
+	unsigned i, named = 0;
+
+	*ran = 0;
+	*wrong = 0;
+	bzero((char *)&t, sizeof(t));
+	for (i = 0; i <= IOMMU_FAULT_DEVICES; i++)
+		fault_table_note(&t, (uint16_t)(0x100 + i), 0x1000u * i);
+	for (i = 0; i < IOMMU_FAULT_DEVICES; i++) {
+		d = fault_table_find(&t, (uint16_t)(0x100 + i));
+		if (d != 0 && d->recorded == 1 && d->last_address == 0x1000u * i)
+			named++;
+	}
+	(*ran)++;
+	if (named != IOMMU_FAULT_DEVICES)
+		(*wrong)++;
+	(*ran)++;
+	if (t.unplaced != 1)
+		(*wrong)++;
+	(*ran)++;
+	if (fault_table_find(&t, (uint16_t)(0x100 + IOMMU_FAULT_DEVICES)) != 0)
+		(*wrong)++;
+
+	bzero((char *)&t, sizeof(t));
+	fault_table_note(&t, 0x18, 0xA000);
+	fault_table_note(&t, 0x20, 0xB000);
+	fault_table_note(&t, 0x18, 0xC000);
+	d = fault_table_find(&t, 0x18);
+	(*ran)++;
+	if (d == 0 || d->recorded != 2)
+		(*wrong)++;
+	(*ran)++;
+	if (d == 0 || d->last_address != 0xC000)
+		(*wrong)++;
+
+	return *wrong == 0;
 }
 
 unsigned iommu_fault_count(void)
@@ -1552,20 +1649,16 @@ static const char *fault_kind_name(uint8_t kind)
 
 unsigned iommu_fault_report(void)
 {
+	static uint64_t reported_unplaced;
 	unsigned before = fault_total;
 	unsigned printed = 0;
 	unsigned lost;
 
 	/*
-	 * ⚠️ Nothing to poll until a device is in a domain.  Under
-	 * pass-through nothing can be refused, so this is not an optimisation
-	 * that skips a check -- it is the check having a known answer, and it
-	 * is what keeps this off the idle path of every machine that is not
-	 * using the feature.
+	 * #599: iommu_fault_poll() answers nothing until an engine translates.
+	 * This also asked iommu_domain_count() first, outside the lock that
+	 * guards it; the poll's own gate is the one that means something.
 	 */
-	if (iommu_domain_count() == 0)
-		return 0;
-
 	iommu_fault_poll();
 	if (fault_total == before)
 		return 0;
@@ -1611,6 +1704,14 @@ unsigned iommu_fault_report(void)
 	if (lost != 0)
 		printf("iommu: and %u more that this log had no room for\n",
 		       lost);
+	if (fault_devices.unplaced != reported_unplaced) {
+		printf("iommu: %llu refusal(s) from devices the per-device count "
+		       "has no room to name, %llu since boot (#599)\n",
+		       (unsigned long long)(fault_devices.unplaced -
+					    reported_unplaced),
+		       (unsigned long long)fault_devices.unplaced);
+		reported_unplaced = fault_devices.unplaced;
+	}
 	if (iommu_fault_overflowed())
 		printf("iommu: an engine ran out of fault records before"
 		       " anyone read them — the count above is a floor\n");
@@ -1621,21 +1722,17 @@ unsigned iommu_fault_report(void)
 unsigned iommu_faults_for(uint16_t bdf, uint64_t *last_address)
 {
 	/*
-	 * ⚠️ The COUNT comes from the per-device total and the ADDRESS from
-	 * the ring, which is the honest split: the first is a number that only
-	 * goes up, the second is a record that can be pushed out.  A caller
-	 * given a non-zero count and no address knows the refusal happened and
-	 * that this log no longer says where -- which is a worse answer than a
-	 * complete one and a much better answer than a wrong one.
+	 * #599: the count and the last address, both from the per-device
+	 * table, which only grows.  The address came from the ring, and a
+	 * noisier device could push it out while the count stayed.
 	 */
-	for (unsigned i = 0; i < iommu_fault_logged(); i++) {
-		const struct iommu_fault *f = iommu_fault(i);
+	const struct fault_device *d = fault_table_find(&fault_devices, bdf);
 
-		if (f != 0 && f->source == bdf && last_address)
-			*last_address = f->address;
-	}
-
-	return device_fault_count(bdf);
+	if (d == 0)
+		return 0;
+	if (last_address)
+		*last_address = d->last_address;
+	return (unsigned)d->recorded;
 }
 
 /*
@@ -1861,7 +1958,6 @@ struct device_domain {
 	uint16_t		bdf;
 	int			used;
 	int			identity;	/* iova == pa, by request */
-	unsigned		faults;		/* refusals, never wrapping */
 	unsigned		ngrants;
 	struct iommu_granted	grants[IOMMU_MAX_GRANTS];
 	struct iommu_domain	domain;
@@ -1892,29 +1988,6 @@ int iommu_can_isolate(void)
 			return 0;
 
 	return 1;
-}
-
-/*
- * ⚠️ A refusal from a device that is in NO domain is counted nowhere, and that
- * is not a gap: a device passing through cannot be refused, so a fault naming
- * one is an engine translating by a description this kernel did not write --
- * which iommu_fault_report() prints, loudly, and no per-device counter would
- * make more legible.
- */
-static void device_fault_seen(uint16_t bdf)
-{
-	for (unsigned i = 0; i < ndevice_domains; i++)
-		if (device_domains[i].used && device_domains[i].bdf == bdf)
-			device_domains[i].faults++;
-}
-
-static unsigned device_fault_count(uint16_t bdf)
-{
-	for (unsigned i = 0; i < ndevice_domains; i++)
-		if (device_domains[i].used && device_domains[i].bdf == bdf)
-			return device_domains[i].faults;
-
-	return 0;
 }
 
 static struct device_domain *domain_slot(uint16_t bdf)
@@ -1999,7 +2072,6 @@ static struct device_domain *domain_open(uint16_t bdf, int identity)
 	s->identity = identity;
 
 	s->ngrants = 0;
-	s->faults = 0;
 
 	if (!iommu_domain_create(&s->domain, found_vendor,
 				 (uint16_t)(ndevice_domains + 1u), levels))

@@ -4486,6 +4486,22 @@ static void iommu_selftest(void)
 			   " it is not\r\n");
 	}
 
+	/* #599: the per-device refusal count, on a scratch table. */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_fault_ledger_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" fault-log cases, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — a device's refusals only ever go up, and one the"
+			   " log has no room to name is counted as unplaced\r\n"
+			 : " — WRONG, a driver asking whether it was refused"
+			   " could be told no\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");
