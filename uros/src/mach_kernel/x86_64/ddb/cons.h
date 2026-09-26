@@ -168,7 +168,8 @@ int cons_poll_getc(void);	/* #599: -1 unless the port is still ours */
 /*
  * Where the bytes of this boot were actually handed to the port, counted so
  * that a drain nobody ever reached is visible as the zero it is rather than
- * passing for support.  cons_cost_report() prints them.
+ * passing for support.  cons_ring_report() prints them at a halt, and
+ * cons_ring_so_far() with each of the quiet census's reports (#599).
  */
 enum {
 	CONS_DRAIN_WRITER = 0,	/* the thread that printed, after unlocking */
