@@ -371,11 +371,13 @@ xf_write(const char *path)
 	vfs_fd_t	fd;
 	uint32_t	off = 0, n, i;
 	ssize_t		r = 0;
+	kern_return_t	rc;
 
-	fd = vfs_open(path, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644);
-	if (fd == VFS_FD_INVALID) {
+	rc = vfs_open_rc(path, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			 &fd);
+	if (rc != KERN_SUCCESS) {
 		printf("%s: [1] WRONG — %s could not be created, on a mount "
-		       "that is there\n", tag, path);
+		       "that is there (0x%x)\n", tag, path, (unsigned)rc);
 		failed++;
 		return;
 	}
@@ -432,18 +434,34 @@ xf_read(const char *path)
 {
 	vfs_stat_t	st;
 	vfs_fd_t	fd;
+	int		rc;
 
-	if (vfs_stat(path, &st) != 0) {
+	/*
+	 * #599: NOT ASKED only for a name that is not there.  Any other
+	 * failure is an answer about the disk, and it was reported as this:
+	 * on the entry-16 boot a directory refused as damaged read as "not on
+	 * this disk".  libvfs now says which (VFS_ERR_NOENT, or the reason),
+	 * and the value is printed as read.
+	 */
+	rc = vfs_stat(path, &st);
+	if (rc == VFS_ERR_NOENT) {
 		printf("%s: NOT ASKED — %s is not on this disk: nothing wrote "
 		       "it for this boot to read\n", tag, path);
 		return;
 	}
+	if (rc != 0) {
+		printf("%s: [1] WRONG — a stat of %s failed with 0x%x, which "
+		       "is not \"absent\": the disk answered, and not with "
+		       "the file\n", tag, path, (unsigned)rc);
+		failed++;
+		return;
+	}
 	xf_check_stat(path, 1);
 
-	fd = vfs_open(path, VFS_O_RDONLY, 0);
-	if (fd == VFS_FD_INVALID) {
+	rc = vfs_open_rc(path, VFS_O_RDONLY, 0, &fd);
+	if (rc != KERN_SUCCESS) {
 		printf("%s: [2] WRONG — %s answers a stat and refuses an "
-		       "open\n", tag, path);
+		       "open (0x%x)\n", tag, path, (unsigned)rc);
 		failed++;
 		return;
 	}
