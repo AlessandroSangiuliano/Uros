@@ -140,10 +140,19 @@ void cons_flush(void);
  * property that two writers never meet.  #599: DDB's session closes the latch
  * after the others are stopped (cons_ddb_session), a halt closes it under
  * the port's lock (cons_port_close_latch), and a DDB session that continues
- * gives the port back to its driver.  Every THR write takes the port's lock
- * once the lock package can be used (cons_percpu_ready): the drain and a
- * task's register write wait for it, the writers that must not wait for ever
- * (cons_wire_byte: the ring off, the way down, the reporter) with a bound.
+ * gives the port back to its driver.  Once the lock package can be used
+ * (cons_percpu_ready) a THR write is made under the port's lock, taken three
+ * ways.  cons_flush's drain, a task's register write and the way down's
+ * drain wait for it -- the way down's before the other processors are
+ * stopped, so a holder is running and lets go (cons_async_set(0) comes first
+ * in DDB's entry and in halt_cpu; a processor the halt reaches later finds
+ * the ring empty and takes nothing).  The tick's and the idle loop's drain
+ * only try it, and leave the byte queued when it is held.  cons_wire_byte
+ * (the ring off, the way down, the reporter), which must not wait for ever,
+ * waits with a bound, and after a failed wait writes without it if the
+ * divisor latch is closed: a holder that is parked or halted will never let
+ * go.  One write is made without it on purpose: cons_loopback_probe, at
+ * boot, on one processor with the ring off.
  */
 /* Returns the klog cursor taken at the instant the port changed hands: the
  * forwarder's starting point (#497).  Idempotent; a second call returns the

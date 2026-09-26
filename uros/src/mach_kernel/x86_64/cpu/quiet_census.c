@@ -131,8 +131,11 @@ static int		quiet_said;
  *
  * ⚠️ WHAT IT CANNOT SEE: a stop that leaves any user thread returning to
  * ring 3.  The measure is summed over every processor, so a poller keeps it
- * at zero passes -- char_server's klog forwarder, which polls every 10 ms
- * once uart.so holds COM1 on x86-64, is one (found in review).  The census
+ * far below the threshold -- char_server's klog forwarder, which polls every
+ * 10 ms once uart.so holds COM1 on x86-64, is one (found in review): after
+ * each of its returns the count starts again and climbs only through the
+ * idle loop's spin before it halts (IDLE_HLT_GRACE, 64 passes), so the peak
+ * the census reports under it is about that.  The census
  * names a machine on which ring 3 has gone quiet everywhere, which is the
  * shape of 599-caccia2-2; a stop of some tasks while others poll needs a
  * different instrument -- a wait that outlives a bound -- and is not this.  A first version
