@@ -13,6 +13,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <kern/lock.h>		/* iommu_domain_lock, #599 */
 #include <kern/misc_protos.h>	/* printf, for the refusals (#432 stage 3d) */
 #include <pmap/layout.h>
 #include <pmap/pmap.h>		/* pmap_table_frame (#458) */
@@ -190,6 +191,25 @@ void iommu_record_reset(void)
 	found_vendor = IOMMU_NONE;
 }
 
+/*
+ * #599: every grant, revoke and domain change holds iommu_domain_lock.
+ *
+ * device_domains[], each domain's next_iova and grant list, the page tables
+ * and the command queue -- AMD-Vi's ring tail and completion token, VT-d's
+ * CCMD/IOTLB registers -- had no serialisation, and grant and revoke come
+ * from device_master's RPCs on any processor.  Two grants could take one
+ * slot or one IOVA, two commands one ring slot (an invalidation lost, a
+ * device keeping a window it was refused), and a release compacted the
+ * array under another processor's lookup.
+ *
+ * A mutex and not a spin lock: mapping can wait for a page-table frame
+ * (pmap_table_frame -> VM_PAGE_WAIT), and a completion wait spins for up to
+ * ten million turns.  Every caller is a thread; no interrupt handler submits
+ * a command.  device_fault_seen() stays outside it: a counter bumped from
+ * the fault report.
+ */
+decl_mutex_data(static, iommu_domain_lock)
+
 enum iommu_vendor iommu_discover(void)
 {
 	/*
@@ -202,6 +222,7 @@ enum iommu_vendor iommu_discover(void)
 		return found_vendor;
 
 	discovered = 1;
+	mutex_init(&iommu_domain_lock, ETAP_MISC_MASTER);	/* #599 */
 
 	/*
 	 * ⚠️ The first reader to claim the machine ends it, on the assumption
@@ -2071,8 +2092,8 @@ static void grant_record(struct device_domain *s, uint64_t pa, uint64_t iova,
 	s->ngrants++;
 }
 
-int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
-		uint64_t *iova_out)
+static int grant_locked(uint16_t bdf, uint64_t pa, uint64_t size, int read,
+			int write, uint64_t *iova_out)
 {
 	struct device_domain *s = domain_for_grant(bdf);
 	uint64_t iova;
@@ -2094,8 +2115,19 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
 	return 1;
 }
 
-int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
-		      int read, int write, uint64_t *iova_out)
+int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
+		uint64_t *iova_out)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = grant_locked(bdf, pa, size, read, write, iova_out);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
+}
+
+static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
+			      int read, int write, uint64_t *iova_out)
 {
 	struct device_domain *s = domain_for_grant(bdf);
 	uint64_t iova, size = (uint64_t)n * 4096u;
@@ -2147,6 +2179,17 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
 	return 1;
 }
 
+int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
+		      int read, int write, uint64_t *iova_out)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = grant_pages_locked(bdf, pa, n, read, write, iova_out);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
+}
+
 /*
  * ⚠️ A revoke is a map with no permissions, and the two vendors do not agree
  * about what that IS -- entries_agree() asserts the difference: AMD's entry is
@@ -2159,7 +2202,7 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
  * a device is using at that moment.  What it costs is a table that only grows,
  * for a driver that maps and unmaps the same buffers.
  */
-int iommu_domain_identity(uint16_t bdf)
+static int domain_identity_locked(uint16_t bdf)
 {
 	if (!iommu_can_isolate())
 		return 0;
@@ -2176,7 +2219,17 @@ int iommu_domain_identity(uint16_t bdf)
 	return domain_open(bdf, 1) != 0;
 }
 
-int iommu_domain_release(uint16_t bdf)
+int iommu_domain_identity(uint16_t bdf)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = domain_identity_locked(bdf);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
+}
+
+static int domain_release_locked(uint16_t bdf)
 {
 	struct device_domain *s = domain_slot(bdf);
 	unsigned i;
@@ -2206,7 +2259,17 @@ int iommu_domain_release(uint16_t bdf)
 	return 1;
 }
 
-int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
+int iommu_domain_release(uint16_t bdf)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = domain_release_locked(bdf);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
+}
+
+static int revoke_locked(uint16_t bdf, uint64_t pa, uint64_t size)
 {
 	struct device_domain *s = domain_slot(bdf);
 	unsigned i;
@@ -2242,6 +2305,16 @@ int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
 	s->grants[i] = s->grants[s->ngrants - 1];
 	s->ngrants--;
 	return 1;
+}
+
+int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = revoke_locked(bdf, pa, size);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
 }
 
 int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
