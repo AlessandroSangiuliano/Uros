@@ -35,6 +35,7 @@
 #define PERCPU_SYSCALL_RET_MARK	144
 #define PERCPU_INTR_LEVEL	176
 #define PERCPU_INTR_SAVED_IF	180
+#define PERCPU_USER_RETURNS	184
 
 #ifndef __ASSEMBLER__
 
@@ -297,12 +298,15 @@ struct percpu {
 	uint32_t intr_saved_if;
 
 	/*
-	 * #476, #599: how many times this processor was given a thread of a
-	 * task other than the kernel's -- the quiet census's measure of work.
-	 * Per processor, like the counters below, because it is written on the
-	 * context-switch path.  At the END for the reason those are.
+	 * #476, #599: how many times this processor went back to ring 3 -- the
+	 * quiet census's measure of work, counted by the three exits to user
+	 * mode (trap_common's, thread_frame_return, and SYSRET) while %gs is
+	 * still the kernel's.  A user loop that never calls the kernel still
+	 * counts, at every tick that interrupts it; a user thread stuck in the
+	 * kernel does not, which is the difference the census is for.  Per
+	 * processor, because it is written on every return.
 	 */
-	uint64_t user_dispatches;
+	uint64_t user_returns;
 
 #if	CONTEXT_FPU_COUNT
 	/*
@@ -349,6 +353,8 @@ _Static_assert(__builtin_offsetof(struct percpu, intr_level)
 	       == PERCPU_INTR_LEVEL, "percpu intr_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)
 	       == PERCPU_INTR_SAVED_IF, "percpu intr_saved_if moved");
+_Static_assert(__builtin_offsetof(struct percpu, user_returns)
+	       == PERCPU_USER_RETURNS, "percpu user_returns moved");
 
 /*
  * Two halves, and the split is not tidiness.
@@ -371,8 +377,8 @@ _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)
 void percpu_alloc(uint32_t cpu_id);
 void percpu_activate(uint32_t cpu_id);
 
-/* #476, #599: user dispatches since boot, all processors; see percpu.c */
-uint64_t percpu_user_dispatches(int *running_user);
+/* #476, #599: returns to ring 3 since boot, all processors; see percpu.c */
+uint64_t percpu_user_returns(void);
 
 /* This CPU's block, via the pointer it keeps at offset zero. */
 static inline struct percpu *percpu(void)

@@ -120,14 +120,17 @@ static int		quiet_said;
  * 90 s of quiet, and only gdb named the lost wakeup.  Registering those two
  * threads as exempt did not help, for the softclock reason (found in review).
  *
- * So the question is asked of the tasks, on every processor: a thread of a
- * task other than the kernel's given a processor since the last pass
- * (percpu's user_dispatches, counted in switch_context()), or one running
- * now -- which is what a user loop with no switches looks like.  Kernel
- * threads are not work here, whatever they do: #476 and #599 are user tasks
- * that stopped.
+ * So the question is asked of ring 3, on every processor: a return to user
+ * mode since the last pass (percpu's user_returns, counted by the three exits
+ * to ring 3).  A user loop that never calls the kernel returns at every tick
+ * that interrupts it; a user thread stuck in the kernel, spinning or asleep,
+ * does not -- and that is the stop #476 and #599 are about.  A first version
+ * asked whether a user task's thread was given a processor or was on one
+ * now, which a thread spinning in the kernel on another processor answered
+ * for ever, and which followed another processor's thread with nothing
+ * keeping it alive (found in review).  Kernel threads are not work here.
  */
-static uint64_t	quiet_dispatches;
+static uint64_t	quiet_returns;
 
 static void
 quiet_work(void)
@@ -256,11 +259,10 @@ quiet_census_pass(int mycpu)
 		return;
 
 	{
-		int		running_user;
-		uint64_t	d = percpu_user_dispatches(&running_user);
+		uint64_t	r = percpu_user_returns();
 
-		if (d != quiet_dispatches || running_user) {
-			quiet_dispatches = d;
+		if (r != quiet_returns) {
+			quiet_returns = r;
 			quiet_work();
 		}
 	}

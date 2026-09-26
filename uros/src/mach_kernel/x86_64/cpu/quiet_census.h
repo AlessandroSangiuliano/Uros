@@ -10,13 +10,15 @@
 #define _KERN_QUIET_CENSUS_H_
 
 /*
- * One pass of an idle processor, and one processor finding work again.
+ * One pass of an idle processor.  Only the boot processor counts; the work
+ * that starts the count again is looked for by it, in its own pass, on every
+ * processor -- returns to ring 3 (#599; see quiet_census.c).
  *
- * ⚠️ Both take the processor number, and that is a correction.  The first
+ * ⚠️ It takes the processor number, and that is a correction.  The first
  * version counted on the boot processor and let ANY processor reset the
  * count, so with four of them waking on every tick the counter could not
  * accumulate at all -- and the failure was silence, which is what an absence
- * always looks like.  One processor owns the count on both sides.
+ * always looks like.
  */
 extern void	quiet_census_pass(int mycpu);
 

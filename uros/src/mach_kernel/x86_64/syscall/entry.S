@@ -564,6 +564,7 @@ syscall_entry:
 
 	cli
 	movq	TF_RSP(%rsp), %rsp	/* this thread's, not this processor's */
+	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
 	sysretq
 
@@ -666,6 +667,7 @@ syscall_entry:
 
 	cli
 	movq	TF_RSP(%rsp), %r10	/* the stack ring 3 came in on (#474) */
+	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
 
 	/*
