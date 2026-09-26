@@ -608,10 +608,6 @@ struct iommu_fault {
  */
 #define	IOMMU_FAULT_LOG		16
 
-unsigned iommu_fault_count(void);
-const struct iommu_fault *iommu_fault(unsigned index);	/* oldest first */
-unsigned iommu_fault_logged(void);			/* how many the ring holds */
-
 /*
  * Drain every engine's fault registers into the log.  Answers how many new
  * ones were found.
@@ -624,13 +620,16 @@ unsigned iommu_fault_logged(void);			/* how many the ring holds */
 unsigned iommu_fault_poll(void);
 
 /*
- * An engine ran out of fault records before anyone drained them.
+ * How many times refusals may have gone uncounted, since boot: drains in
+ * which an engine said it dropped some, and refusals from devices the
+ * per-device count had no room to name (#599).  It only goes up.
  *
  * Reported rather than folded into the count, because the two are different
  * facts: the count says how many were read, and this says that the number is
- * a floor rather than a total.
+ * a floor rather than a total.  It was a flag that stuck at the first
+ * overflow.
  */
-int iommu_fault_overflowed(void);
+uint64_t iommu_fault_lost(void);
 
 /*
  * Decode fault records whose right answers were established from the

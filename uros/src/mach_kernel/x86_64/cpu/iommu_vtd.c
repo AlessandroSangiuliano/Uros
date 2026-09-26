@@ -1068,7 +1068,7 @@ int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	return 1;
 }
 
-unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
+unsigned iommu_vtd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
 {
 	const struct iommu_unit *u = iommu_unit(unit);
 	volatile uint8_t *regs;
@@ -1084,8 +1084,7 @@ unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
 
 	status = *(volatile uint32_t *)(regs + VTD_FSTS);
 	if (status & VTD_FSTS_PFO) {
-		if (overflowed)
-			*overflowed = 1;
+		iommu_fault_sink_lost(s, unit, IOMMU_LOST_OVERFLOW);
 
 		/*
 		 * 🔴 CLEARED, or the engine records nothing further.  §11.4.7.1
@@ -1124,7 +1123,7 @@ unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
 		if (!iommu_vtd_fault_decode(rec[0], hi, &f))
 			continue;
 
-		iommu_record_fault(&f);
+		iommu_fault_sink_record(s, &f);
 		found++;
 
 		/*

@@ -294,19 +294,34 @@ int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out);
 int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out);
 
 /*
- * Drain one engine's records, calling iommu_record_fault() for each.  Answers
- * how many were found; sets `*overflowed' when the engine says it dropped
- * some.
+ * #599: where a drain puts what it finds.  Complete only in iommu_fault.c;
+ * a live one exists only while iommu_fault_lock is held, and recording into
+ * it asserts that.
+ */
+struct iommu_fault_sink;
+
+/* One decoded refusal. */
+void iommu_fault_sink_record(struct iommu_fault_sink *s,
+			     const struct iommu_fault *f);
+
+/*
+ * The engine may have discarded refusals in this drain; `why' says how.
+ * Counted, never cleared: it is the "floor" every answer carries.
+ */
+#define	IOMMU_LOST_OVERFLOW	0x1u	/* the engine's own flag */
+void iommu_fault_sink_lost(struct iommu_fault_sink *s, unsigned unit,
+			   unsigned why);
+
+/*
+ * Drain one engine's records into `s'.  Answers how many were found.  Called
+ * only from iommu_fault.c, with iommu_fault_lock held.
  *
  * ⚠️ The unit is passed by index and not by pointer because both readers need
  * its capability words as well as its register mapping, and a caller that
  * passed only the base address would have to re-derive where the records are.
  */
-unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed);
-unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed);
-
-/* One decoded refusal, for the reader that found it. */
-void iommu_record_fault(const struct iommu_fault *f);
+unsigned iommu_vtd_fault_drain(unsigned unit, struct iommu_fault_sink *s);
+unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s);
 
 /*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────

@@ -4951,7 +4951,7 @@ static void iommu_selftest(void)
 				kputs("UrMach x86-64:   ");
 				kputdec(faults);
 				kputs(" dma refusals recorded so far");
-				if (iommu_fault_overflowed())
+				if (iommu_fault_lost() != 0)
 					kputs(" — AND THE ENGINE DROPPED SOME");
 				kputs(faults == 0
 				      ? " — which under pass-through is the"

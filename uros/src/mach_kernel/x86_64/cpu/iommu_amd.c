@@ -1202,7 +1202,7 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 #define	AMD_STATUS_EVT_OVERFLOW	(1ULL << 0)	/* RW1C */
 #define	AMD_STATUS_EVT_INT	(1ULL << 1)	/* RW1C */
 
-unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
+unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
 {
 	const struct iommu_unit *u = iommu_unit(unit);
 	const struct iommu_tables *t = iommu_tables();
@@ -1220,8 +1220,8 @@ unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
 	log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event);
 
 	status = *(volatile uint64_t *)(regs + AMD_REG_STATUS);
-	if (status & AMD_STATUS_EVT_OVERFLOW && overflowed)
-		*overflowed = 1;
+	if (status & AMD_STATUS_EVT_OVERFLOW)
+		iommu_fault_sink_lost(s, unit, IOMMU_LOST_OVERFLOW);
 
 	head = *(volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD)
 	       & AMD_RING_PTR_MASK;
@@ -1233,7 +1233,7 @@ unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
 		struct iommu_fault f;
 
 		if (iommu_amd_fault_decode(e[0], e[1], &f)) {
-			iommu_record_fault(&f);
+			iommu_fault_sink_record(s, &f);
 			found++;
 		}
 

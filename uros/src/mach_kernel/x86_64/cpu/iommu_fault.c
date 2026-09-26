@@ -11,7 +11,9 @@
 #include <stdint.h>
 
 #include <cpu/iommu_backend.h>
+#include <kern/assert.h>
 #include <kern/misc_protos.h>	/* printf, bzero */
+#include <sync/lock.h>		/* hw_lock, #599 */
 
 /*
  * ── Stage 3d: the log of refusals ────────────────────────────────────
@@ -20,15 +22,38 @@
  * Both are needed and they answer different questions -- see the note on
  * IOMMU_FAULT_LOG in <cpu/iommu.h>.
  *
- * ⚠️ No lock.  The only writer is iommu_fault_poll(), and the callers of that
- * are the boot self-test and, later, the fault interrupt -- so the day a
- * second processor can poll is the day this needs one, and it is called out
- * here rather than discovered then.  A ring whose entries are 24 bytes cannot
- * be made safe by making the index atomic.
+ * 🔴 #599: iommu_fault_lock guards every drain, the ring, the counts and the
+ * per-device table.  This said "No lock -- the day a second processor can poll
+ * is the day this needs one", and that day had come: the idle loop of every
+ * processor and a driver's RPC drained the same engines, and two drains could
+ * each move an engine's head, count one record twice, or write the head
+ * backwards.
+ *
+ * The rule, which is why it is a raw hw_lock:
+ *  - a LEAF.  While holding it, code touches only engine registers, the
+ *    engines' log memory and what this file keeps.  No printf, no mutex, no
+ *    allocation, no thread_wakeup -- the report copies what it will print
+ *    and prints after letting go;
+ *  - no interrupt handler takes it;
+ *  - never held with iommu_domain_lock, and mechanically so: this file
+ *    cannot see that mutex (static in iommu.c).
+ * hw_lock is real in every configuration -- simple_lock and mutex compile to
+ * nothing on an NCPUS==1 build -- and it masks interrupts and disables
+ * preemption for the hold.  Zero is free: no init, no init order.
  */
+static hw_lock_data_t		iommu_fault_lock;
+
 static struct iommu_fault	fault_log[IOMMU_FAULT_LOG];
 static unsigned			fault_total;
-static int			fault_overflow;
+
+/*
+ * #599: drains in which an engine may have discarded a refusal -- today, the
+ * ones where it said so (AMD EventOverflow, VT-d PFO).  It only goes up, and
+ * with the unplaced count it is what iommu_fault_lost() answers.  This was a
+ * flag that stuck at the first overflow, and the report repeated its "floor"
+ * line after it for the rest of the boot.
+ */
+static uint64_t			fault_episodes;
 
 /*
  * Counted per device as well as kept in the ring, and the two are not the same
@@ -94,11 +119,33 @@ fault_table_find(const struct fault_table *t, uint16_t bdf)
 	return 0;
 }
 
-void iommu_record_fault(const struct iommu_fault *f)
+/*
+ * #599: the vendor drains reach the log only through a sink, and a live sink
+ * exists only inside drain_all_locked(), after the lock is taken.  The type
+ * is complete only in this file.
+ */
+struct iommu_fault_sink {
+	int		live;
+	unsigned	found;
+};
+
+void iommu_fault_sink_record(struct iommu_fault_sink *s,
+			     const struct iommu_fault *f)
 {
+	assert(!s->live || hw_lock_held(&iommu_fault_lock));
 	fault_log[fault_total % IOMMU_FAULT_LOG] = *f;
 	fault_total++;
 	fault_table_note(&fault_devices, f->source, f->address);
+	s->found++;
+}
+
+void iommu_fault_sink_lost(struct iommu_fault_sink *s, unsigned unit,
+			   unsigned why)
+{
+	(void)unit;
+	(void)why;
+	assert(!s->live || hw_lock_held(&iommu_fault_lock));
+	fault_episodes++;
 }
 
 /*
@@ -147,64 +194,49 @@ int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong)
 	return *wrong == 0;
 }
 
-unsigned iommu_fault_count(void)
-{
-	return fault_total;
-}
-
-unsigned iommu_fault_logged(void)
-{
-	return fault_total < IOMMU_FAULT_LOG ? fault_total : IOMMU_FAULT_LOG;
-}
-
 /*
- * Oldest first, which for a wrapped ring is not element zero.
+ * Every engine drained, with iommu_fault_lock held.
  *
- * 🔑 The caller counts 0..iommu_fault_logged()-1 and gets them in the order
- * they happened, whether or not the ring has wrapped -- which is the property
- * that lets a reporter be written once.  A reader handed the raw array would
- * have to know about the wrap, and every reader would have to know separately.
+ * ⚠️ Nothing to read before the engines are running.  A unit's fault
+ * registers are readable whether or not translation is on, and they are
+ * meaningless then -- an engine that is not translating refuses nothing.
+ * Reading them anyway would report whatever the firmware left behind as this
+ * kernel's own faults.
  */
-const struct iommu_fault *iommu_fault(unsigned index)
+static unsigned drain_all_locked(void)
 {
-	unsigned logged = iommu_fault_logged();
-	unsigned first;
+	struct iommu_fault_sink s = { 1, 0 };
 
-	if (index >= logged)
-		return 0;
-
-	first = fault_total < IOMMU_FAULT_LOG
-		? 0 : fault_total % IOMMU_FAULT_LOG;
-
-	return &fault_log[(first + index) % IOMMU_FAULT_LOG];
-}
-
-int iommu_fault_overflowed(void)
-{
-	return fault_overflow;
-}
-
-unsigned iommu_fault_poll(void)
-{
-	unsigned found = 0;
-
-	/*
-	 * ⚠️ Nothing to read before the engines are running.  A unit's fault
-	 * registers are readable whether or not translation is on, and they
-	 * are meaningless then -- an engine that is not translating refuses
-	 * nothing.  Reading them anyway would report whatever the firmware
-	 * left behind as this kernel's own faults.
-	 */
 	if (!iommu_translating())
 		return 0;
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++)
 		if (iommu_vendor() == IOMMU_INTEL)
-			found += iommu_vtd_fault_drain(i, &fault_overflow);
+			(void) iommu_vtd_fault_drain(i, &s);
 		else if (iommu_vendor() == IOMMU_AMD)
-			found += iommu_amd_fault_drain(i, &fault_overflow);
+			(void) iommu_amd_fault_drain(i, &s);
 
+	return s.found;
+}
+
+unsigned iommu_fault_poll(void)
+{
+	unsigned found;
+
+	hw_lock_lock(&iommu_fault_lock);
+	found = drain_all_locked();
+	hw_lock_unlock(&iommu_fault_lock);
 	return found;
+}
+
+uint64_t iommu_fault_lost(void)
+{
+	uint64_t lost;
+
+	hw_lock_lock(&iommu_fault_lock);
+	lost = fault_episodes + fault_devices.unplaced;
+	hw_lock_unlock(&iommu_fault_lock);
+	return lost;
 }
 
 /*
@@ -243,72 +275,62 @@ static const char *fault_kind_name(uint8_t kind)
 
 unsigned iommu_fault_report(void)
 {
-	static uint64_t reported_unplaced;
-	unsigned before = fault_total;
-	unsigned printed = 0;
-	unsigned lost;
+	static uint64_t reported_unplaced, reported_episodes;
+	struct iommu_fault copy[IOMMU_FAULT_LOG];
+	uint64_t unplaced, episodes;
+	unsigned n = 0, from, oldest, lost, printed = 0;
 
 	/*
-	 * #599: iommu_fault_poll() answers nothing until an engine translates.
-	 * This also asked iommu_domain_count() first, outside the lock that
-	 * guards it; the poll's own gate is the one that means something.
-	 */
-	iommu_fault_poll();
-	if (fault_total == before)
-		return 0;
-
-	/*
-	 * How many the ring could not keep.  Two ways to lose one -- the
-	 * engine dropped it, which iommu_fault_overflowed() says, and this
-	 * ring wrapped, which only arithmetic says.
-	 */
-	lost = (fault_total - before) > IOMMU_FAULT_LOG
-	       ? (fault_total - before) - IOMMU_FAULT_LOG : 0;
-
-	/*
+	 * #599: drain, claim [reported, fault_total), copy, let go -- then
+	 * print.  Claiming under the lock is what keeps two callers from
+	 * printing the same records; printing outside it is the lock's rule.
+	 *
 	 * 🔑 The ring's element i is the (fault_total - logged + i)th fault of
 	 * the boot, and that number is what says whether it has been printed.
 	 * Comparing positions inside the ring could not: the ring's element
 	 * zero is a different fault after every wrap.
 	 */
-	{
-		unsigned logged = iommu_fault_logged();
-		unsigned first = fault_total - logged;
-
-		for (unsigned i = 0; i < logged; i++) {
-			const struct iommu_fault *f = iommu_fault(i);
-
-			if (f == 0 || first + i < reported)
-				continue;
-
-			printf("iommu: %02x:%02x.%u was REFUSED a %s at "
-			       "0x%lx — %s (reason 0x%02x)\n",
-			       (unsigned)(f->source >> 8),
-			       (unsigned)((f->source >> 3) & 0x1F),
-			       (unsigned)(f->source & 7),
-			       f->write ? "write" : "transfer",
-			       (unsigned long)f->address,
-			       fault_kind_name(f->kind), (unsigned)f->reason);
-			printed++;
-		}
-	}
-
+	hw_lock_lock(&iommu_fault_lock);
+	(void) drain_all_locked();
+	oldest = fault_total > IOMMU_FAULT_LOG ? fault_total - IOMMU_FAULT_LOG
+					       : 0;
+	from = reported > oldest ? reported : oldest;
+	lost = from - reported;		/* wrapped out before anyone printed */
+	for (unsigned k = from; k != fault_total; k++)
+		copy[n++] = fault_log[k % IOMMU_FAULT_LOG];
 	reported = fault_total;
+	unplaced = fault_devices.unplaced - reported_unplaced;
+	reported_unplaced = fault_devices.unplaced;
+	episodes = fault_episodes - reported_episodes;
+	reported_episodes = fault_episodes;
+	hw_lock_unlock(&iommu_fault_lock);
 
+	for (unsigned i = 0; i < n; i++) {
+		const struct iommu_fault *f = &copy[i];
+
+		printf("iommu: %02x:%02x.%u was REFUSED a %s at "
+		       "0x%lx — %s (reason 0x%02x)\n",
+		       (unsigned)(f->source >> 8),
+		       (unsigned)((f->source >> 3) & 0x1F),
+		       (unsigned)(f->source & 7),
+		       f->write ? "write" : "transfer",
+		       (unsigned long)f->address,
+		       fault_kind_name(f->kind), (unsigned)f->reason);
+		printed++;
+	}
 	if (lost != 0)
 		printf("iommu: and %u more that this log had no room for\n",
 		       lost);
-	if (fault_devices.unplaced != reported_unplaced) {
+	if (unplaced != 0)
 		printf("iommu: %llu refusal(s) from devices the per-device count "
 		       "has no room to name, %llu since boot (#599)\n",
-		       (unsigned long long)(fault_devices.unplaced -
-					    reported_unplaced),
-		       (unsigned long long)fault_devices.unplaced);
-		reported_unplaced = fault_devices.unplaced;
-	}
-	if (iommu_fault_overflowed())
+		       (unsigned long long)unplaced,
+		       (unsigned long long)reported_unplaced);
+	if (episodes != 0)
 		printf("iommu: an engine ran out of fault records before"
-		       " anyone read them — the count above is a floor\n");
+		       " anyone read them, %llu time(s) since the last report"
+		       " — the count above is a floor\n",
+		       (unsigned long long)episodes);
 
 	return printed;
 }
@@ -320,11 +342,16 @@ unsigned iommu_faults_for(uint16_t bdf, uint64_t *last_address)
 	 * table, which only grows.  The address came from the ring, and a
 	 * noisier device could push it out while the count stayed.
 	 */
-	const struct fault_device *d = fault_table_find(&fault_devices, bdf);
+	const struct fault_device *d;
+	unsigned n = 0;
 
-	if (d == 0)
-		return 0;
-	if (last_address)
-		*last_address = d->last_address;
-	return (unsigned)d->recorded;
+	hw_lock_lock(&iommu_fault_lock);
+	d = fault_table_find(&fault_devices, bdf);
+	if (d != 0) {
+		n = (unsigned)d->recorded;
+		if (last_address)
+			*last_address = d->last_address;
+	}
+	hw_lock_unlock(&iommu_fault_lock);
+	return n;
 }
