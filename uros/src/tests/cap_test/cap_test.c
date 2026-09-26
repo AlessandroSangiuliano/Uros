@@ -899,9 +899,9 @@ b2_read(mach_port_t handle, struct b2_page *pg, unsigned *magic, int *intact)
  * fresh handle, handed nothing, reads into a page of this task's: the block
  * server must refuse it and the page must hold what it held.  Until every
  * client handed its buffers over, such a handle had its addresses passed
- * through untranslated: without an IOMMU the superblock landed in the page,
- * and with one the engine refused the transfer while the controller
- * answered success.  Which of the server's lines appears is not asked.
+ * through untranslated, and the superblock landed in the page -- also under
+ * --iommu, where this runs on virtio_blk0a, whose DMA QEMU never puts through
+ * the IOMMU (#591).  Which of the server's lines appears is not asked.
  */
 static int
 a_page_nobody_granted_is_refused(mach_port_t device_port, mach_port_t part_port,

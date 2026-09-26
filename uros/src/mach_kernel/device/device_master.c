@@ -3434,9 +3434,19 @@ ds_master_device_dma_identity(
 	if (!device_md_dma_identity(bdf))
 		return KERN_FAILURE;
 
+	/*
+	 * #599: the domain confines the device only if its DMA goes through
+	 * the IOMMU, and this cannot tell.  The one caller is the legacy virtio
+	 * driver, and QEMU sends a legacy virtio device's DMA straight to
+	 * memory: it cannot offer IOMMU_PLATFORM (#591), and without it
+	 * virtio_bus_device_plugged leaves dma_as at address_space_memory.
+	 * Measured: under --iommu amd a page never granted to virtio_blk0a
+	 * received the superblock.  This said "still confined".
+	 */
 	printf("iommu: %02x:%02x.%u asked to be programmed with PHYSICAL "
-	       "addresses — it is still confined to what it is granted, and "
-	       "it knows where that is\n",
+	       "addresses — its domain holds what it is granted, which "
+	       "confines it only if its DMA goes through the IOMMU: QEMU's "
+	       "legacy virtio does not (#591)\n",
 	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 	       (unsigned)(bdf & 7));
 
