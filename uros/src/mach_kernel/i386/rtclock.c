@@ -342,7 +342,15 @@ rtc_tick_pending(void)
 			 & (1u << (vec & 0x1f))) != 0);
 	}
 #endif	/* NCPUS > 1 */
-	outb(0x0a, 0x20);		/* OCW3: select master IRR for reading */
+	/*
+	 * OCW3 "read IRR" (0x0a) to the master's command port (0x20).  #599:
+	 * this was outb(0x0a, 0x20) -- outb takes (port, datum), so it wrote
+	 * 0x20 to DMA port 0x0a and never selected IRR, and the read below
+	 * returned whatever register was selected last: ISR after the first
+	 * master IRQ7, whose bit 0 is always clear here.  The wrap correction
+	 * above was lost, and a reading could step back by up to a tick.
+	 */
+	outb(0x20, 0x0a);		/* OCW3: select master IRR for reading */
 	return ((inb(0x20) & 1) != 0);	/* IRQ0 request pending? */
 }
 
@@ -935,10 +943,22 @@ void
 test_delay(void)
 {
   	register int i;
+	int	s;
 
 	for (i = 0; i < 10; i++)
 		printf("%d, %d\n", i, measure_delay(i));
 	for (i = 10; i <= 100; i+=10)
 		printf("%d, %d\n", i, measure_delay(i));
+
+	/*
+	 * #599: measure_delay() leaves counter 0 loaded with 0xffff, so the
+	 * tick came back at 18.2 Hz instead of HZ and the clock ran 5.5 times
+	 * slow after a `call test_delay' in DDB.  Put the tick back.  Not
+	 * rtclock_reset(): that returns on any processor but the master, and
+	 * DDB may be on another one; the 8254 is one for the whole machine.
+	 */
+	LOCK_RTC(s);
+	RTCLOCK_RESET();
+	UNLOCK_RTC(s);
 }
 #endif	/* MACH_KDB */
