@@ -61,6 +61,7 @@
 #include <kern/misc_protos.h>
 #include <kern/processor.h>
 #include <kern/sched_prim.h>
+#include <kern/ipc_sched.h>	/* thread_will_wait, thread_go (#599) */
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/thread_act.h>
@@ -79,6 +80,15 @@
  * the second round would otherwise read as a pass.
  */
 #define WP_ROUNDS		20
+
+/*
+ * #599: and as many again with the wait declared by thread_will_wait(), the
+ * form the IPC paths use under their port and mqueue mutexes, woken by
+ * thread_go() as they are.  assert_wait() had been made safe by #490/#558;
+ * its two siblings had not, and a receiver asleep holding its mqueue's lock
+ * stopped an entry-16 boot.  Rounds WP_ROUNDS..2*WP_ROUNDS-1 are this form.
+ */
+#define WP_ALL_ROUNDS		(2 * WP_ROUNDS)
 
 /* How long the window is held open, as a fraction of a second. */
 #define WP_WINDOW_DIVISOR	20		/* ~50 ms: several ticks */
@@ -121,6 +131,7 @@ wp_probe_body(void)
 	for (;;) {
 		spl_t		s;
 		uint64_t	t0;
+		int		will;
 
 		/*
 		 * 🔑 THE LOCK IS TAKEN BEFORE THE WAIT IS DECLARED, which is
@@ -141,8 +152,12 @@ wp_probe_body(void)
 		 * thread survives the window, and the two bits travel different
 		 * routes through ast_taken().
 		 */
+		will = wp_rounds >= WP_ROUNDS;
 		s = splsched();
-		assert_wait((event_t) &wp_event, TRUE);
+		if (will)
+			thread_will_wait(current_thread());	/* #599 */
+		else
+			assert_wait((event_t) &wp_event, TRUE);
 		ast_on(cpu_number(), AST_BLOCK);
 		splx(s);
 
@@ -166,7 +181,8 @@ wp_probe_body(void)
 		 * arms below are measuring nothing, and that has to be said
 		 * rather than counted as a pass.
 		 */
-		if (current_thread()->wait_event != (event_t) &wp_event)
+		if (will ? !(current_thread()->state & TH_WAIT)
+			 : current_thread()->wait_event != (event_t) &wp_event)
 			wp_lost_the_window++;
 
 		wp_window_done++;
@@ -187,7 +203,7 @@ kernel_wait_preempt_test(void)
 	processor_t	target = PROCESSOR_NULL;
 	uint64_t	t0, second;
 	int		me = cpu_number();
-	int		took_it = 0;
+	int		took_it = 0, took_will = 0;
 	spl_t		s;
 
 	/*
@@ -270,16 +286,17 @@ kernel_wait_preempt_test(void)
 	thread_resume(act);
 
 	printf("wait_preempt: arming AST_BLOCK inside the assert_wait window on "
-	       "processor %d while a mutex is held, %d times — an unfixed "
-	       "kernel sleeps there and never unlocks (#490)\n",
-	       target->slot_num, WP_ROUNDS);
+	       "processor %d while a mutex is held, %d times, then %d inside "
+	       "thread_will_wait's — an unfixed kernel sleeps there and never "
+	       "unlocks (#490, #599)\n",
+	       target->slot_num, WP_ROUNDS, WP_ROUNDS);
 
 	/*
 	 * Bounded, because the failing arm is a WEDGE.  A test that waited for
 	 * ever would report this defect as silence.
 	 */
 	t0 = rdtsc();
-	while (wp_rounds < WP_ROUNDS) {
+	while (wp_rounds < WP_ALL_ROUNDS) {
 		/*
 		 * ⚠️ Only once the probe says its window is over: waking it
 		 * inside the window clears the wait the window exists to hold.
@@ -292,24 +309,34 @@ kernel_wait_preempt_test(void)
 			 * asleep holding a lock is invisible until somebody
 			 * else asks for it.  So somebody else asks.
 			 */
+			int will = wp_window_done > WP_ROUNDS;
+
 			if (_mutex_try(&wp_lock)) {
-				took_it++;
+				if (will)
+					took_will++;
+				else
+					took_it++;
 				mutex_unlock(&wp_lock);
 			}
 			/* Claimed before the wakeup, so the next turn round this
 			 * loop cannot answer the same window twice. */
 			wp_answered = wp_window_done;
-			thread_wakeup((event_t) &wp_event);
+			if (will)
+				thread_go(th);		/* #599: as IPC wakes */
+			else
+				thread_wakeup((event_t) &wp_event);
 		}
 
 		if (rdtsc() - t0 > second * 30) {
 			printf("wait_preempt: WRONG — %d of %d rounds after "
 			       "thirty seconds, armed %d, windows closed %d, "
-			       "lock taken by this processor %d times: the "
-			       "probe went to sleep inside the window and is "
-			       "holding the mutex (#490)\n",
-			       wp_rounds, WP_ROUNDS, wp_armed, wp_window_done,
-			       took_it);
+			       "lock taken by this processor %d + %d times: the "
+			       "probe went to sleep inside the %s window and is "
+			       "holding the mutex (#490, #599)\n",
+			       wp_rounds, WP_ALL_ROUNDS, wp_armed,
+			       wp_window_done, took_it, took_will,
+			       wp_rounds >= WP_ROUNDS ? "thread_will_wait"
+						      : "assert_wait");
 			return;
 		}
 		cpu_pause();
@@ -339,10 +366,12 @@ kernel_wait_preempt_test(void)
 	 * accelerator, at this processor count.  Under TCG the window closes at
 	 * a wholly different speed than under KVM, and the harness runs both.
 	 */
-	if (took_it == 0) {
+	if (took_it == 0 || took_will == 0) {
 		printf("wait_preempt: NOT ASKED — %d rounds finished and this "
-		       "processor never once got the mutex, so nothing was "
-		       "proved about the lock (#490)\n", wp_rounds);
+		       "processor got the mutex %d times in the assert_wait "
+		       "rounds and %d in the thread_will_wait ones, so nothing "
+		       "was proved about one of them (#490, #599)\n", wp_rounds,
+		       took_it, took_will);
 		return;
 	}
 
@@ -354,8 +383,9 @@ kernel_wait_preempt_test(void)
 	}
 
 	printf("wait_preempt: PASS — %d rounds with a preemption AST pending "
-	       "across an outstanding assert_wait, on processor %d, and this "
-	       "processor took the mutex %d times between them: the window "
-	       "held and the lock was always released (#490)\n",
-	       wp_rounds, wp_slot, took_it);
+	       "across an outstanding assert_wait or thread_will_wait, on "
+	       "processor %d, and this processor took the mutex %d + %d times "
+	       "between them: the window held and the lock was always "
+	       "released (#490, #599)\n",
+	       wp_rounds, wp_slot, took_it, took_will);
 }

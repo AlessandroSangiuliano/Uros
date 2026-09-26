@@ -638,11 +638,42 @@ thread_go(thread_t thread)
  *		Assert that the thread intends to block.
  */
 
+#if	MACHINE_PREEMPTION_LEVEL
+/*
+ * #599: assert_wait()'s rule (#490, #558), kept by its two siblings too: no
+ * instant at which this thread is TH_WAIT and the preemption level is zero.
+ *
+ * The IPC paths declare their wait with thread_will_wait*() under the port's
+ * or the mqueue's lock -- a mutex -- and unlock after it.  A preemption between
+ * the TH_WAIT store and the unlock puts the thread to sleep holding that lock,
+ * and the thread that would have woken it waits on the lock for ever.  Caught
+ * live on an entry-16 boot at -smp 1 (599-caccia2-2-gdb.txt): bootstrap in
+ * ipc_mqueue_deliver -> _mutex_lock, asleep on the mqueue's mutex; the
+ * receiver asleep in ipc_mqueue_receive -> thread_will_wait -> splx ->
+ * ast_taken -> thread_block, holding it.  The IOMMU fault reporter's timed
+ * wakeups made the window easier to land in; they did not open it.
+ *
+ * Given back where the window ends: assert_wait_preempt_release() in
+ * thread_block_reason(), and in thread_run() for thread_switch's hand-off.
+ */
+static void
+will_wait_preempt_raise(thread_t thread)
+{
+	assert(thread == current_thread());
+	assert(!thread->wait_preempt);
+	disable_preemption();
+	thread->wait_preempt = TRUE;
+}
+#endif	/* MACHINE_PREEMPTION_LEVEL */
+
 void
 thread_will_wait(thread_t thread)
 {
 	int	s;
 
+#if	MACHINE_PREEMPTION_LEVEL
+	will_wait_preempt_raise(thread);	/* #599: before TH_WAIT */
+#endif
 	s = splsched();
 	thread_lock(thread);
 
@@ -666,6 +697,9 @@ thread_will_wait_with_timeout(thread_t thread, mach_msg_timeout_t msecs)
 	unsigned int ticks = convert_ipc_timeout_to_ticks(msecs);
 	int s;
 
+#if	MACHINE_PREEMPTION_LEVEL
+	will_wait_preempt_raise(thread);	/* #599: before TH_WAIT */
+#endif
 	s = splsched();
 	thread_lock(thread);
 
@@ -2096,6 +2130,14 @@ thread_run(
 			continuation, new_thread, thread);
 #endif	/* MACH_ASSERT */
 
+#if	MACHINE_PREEMPTION_LEVEL
+	/*
+	 * #599: as in thread_block_reason(), the wait window ends here.  Only
+	 * thread_switch(SWITCH_OPTION_WAIT) with a hand-off hint reaches this
+	 * with a wait declared; a no-op for everyone else.
+	 */
+	assert_wait_preempt_release(thread);
+#endif
 	s = splsched();
 	thread_lock(thread);
 	/* Apply same sentinel detection as thread_block_reason */
