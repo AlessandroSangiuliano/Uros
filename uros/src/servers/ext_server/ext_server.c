@@ -299,8 +299,9 @@ of_op_end(struct mount_context *mnt, int idx)
 
 /*
  * Flush a dirty page cache block to disk via libblk.
- * If phys != 0, use zero-copy DMA write.
- * Otherwise fall back to regular write with data copy.
+ * If phys != 0 and the device has the physical path, a zero-copy DMA write;
+ * a DMA-pool page without that path is copied to the heap and written; any
+ * other block is written as it is.  Returns the device's answer (#599).
  */
 static int
 ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
@@ -312,29 +313,59 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 				     DEV_BSIZE / wb->dev->rec_size);
 	kern_return_t rc;
 
+	bytes_written = 0;
 	if (phys && blk_has_phys(wb->dev->blk)) {
 		/*
 		 * #520: whole.  `phys' is a vm_offset_t and this cast used to
 		 * narrow it -- on i386 harmlessly, since the two are the same
 		 * type there, and on x86-64 by dropping the top half of a page
 		 * address into a DMA write.
+		 *
+		 * #599: and a refusal is the answer -- no fallback.  The block
+		 * server refuses a page no capability covers; writing the same
+		 * page another way would be around the refusal, not through it.
 		 */
 		vm_address_t pa = phys;
 		rc = blk_write_phys(wb->dev->blk, recnum,
 				    (io_buf_len_t)size,
 				    &pa, 1, &bytes_written);
+	} else if (phys) {
+		/*
+		 * #599: a DMA-pool page on a device without the physical path
+		 * is copied to the heap first.  It went to blk_write as it
+		 * was, and the out-of-line device_write cannot take a page of
+		 * the DMA pool (see dir_write_block in ext2fs.c, which copies
+		 * for the same reason) -- what reached the disk was not the
+		 * block.
+		 */
+		vm_offset_t copy = 0;
+
+		rc = vm_allocate(mach_task_self(), &copy, size, TRUE);
+		if (rc == KERN_SUCCESS) {
+			memcpy((void *)copy, (const void *)data, size);
+			rc = blk_write(wb->dev->blk, recnum, (io_buf_ptr_t)copy,
+				       (mach_msg_type_number_t)size,
+				       &bytes_written);
+			(void) vm_deallocate(mach_task_self(), copy, size);
+		}
 	} else {
 		rc = blk_write(wb->dev->blk, recnum,
 			       (io_buf_ptr_t)data,
 			       (mach_msg_type_number_t)size,
 			       &bytes_written);
 	}
-	if (rc != KERN_SUCCESS) {
+	/* #599: a short write is not a write. */
+	if (rc == KERN_SUCCESS && bytes_written != (io_buf_len_t)size)
+		rc = D_IO_ERROR;
+	if (rc != KERN_SUCCESS)
 		printf("ext2: writeback block %ld failed: %d\n",
 		       (long)block, rc);
-		return -1;
-	}
-	return 0;
+	/*
+	 * #599: the device's answer, not -1: the page cache keeps the block
+	 * dirty on any non-zero, and a caller that reports it names the
+	 * cause.
+	 */
+	return (int)rc;
 }
 
 /* ================================================================
