@@ -104,6 +104,14 @@ st_wait_for(volatile int *flag)
 	return *flag;
 }
 
+/* A clean block offered with a ticket taken now, as readahead would. */
+static int
+st_install(struct page_cache *pc, daddr_t b, const unsigned char *blk)
+{
+	return page_cache_install(pc, b, (vm_offset_t)blk, ST_BLOCK,
+				  page_cache_ticket(pc));
+}
+
 static int
 st_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 	     vm_offset_t phys)
@@ -139,7 +147,8 @@ st_slots_are_fixed(void)
 		return 0;
 	for (b = 1; b <= 6; b++) {
 		memset(blk, (int)b, sizeof(blk));
-		page_cache_insert(pc, (daddr_t)b, (vm_offset_t)blk, sizeof(blk));
+		if (st_install(pc, (daddr_t)b, blk) != 0)
+			ok = 0;
 		for (i = 0; i < 2; i++)
 			if (pc->pc_pool[i].pc_data !=
 			    pc->pc_slab + (vm_offset_t)i * ST_BLOCK ||
@@ -302,7 +311,8 @@ st_clean_found_past_the_window(void)
 		if (st_write_byte(pc, (daddr_t)b, 0xC1) != 0)
 			ok = 0;
 	memset(blk, 0xC2, sizeof(blk));
-	page_cache_insert(pc, 1000, (vm_offset_t)blk, sizeof(blk));
+	if (st_install(pc, 1000, blk) != 0)
+		ok = 0;
 	st_wb_answer = ST_EIO;
 	if (st_write_byte(pc, 2000, 0xC3) != 0 || st_entry(pc, 1000) != 0 ||
 	    !st_holds(pc, 2000, 0xC3, 1))
@@ -314,7 +324,7 @@ st_clean_found_past_the_window(void)
 
 /*
  * P3: a write lands, copied and dirty, whether the block was cached or not;
- * and an insert of a block already written leaves the write alone.
+ * and an install of a block already written leaves the write alone.
  */
 static int
 st_write_lands(void)
@@ -327,7 +337,8 @@ st_write_lands(void)
 	if (pc == 0)
 		return 0;
 	memset(blk, 0x11, sizeof(blk));
-	page_cache_insert(pc, 1, (vm_offset_t)blk, sizeof(blk));
+	if (st_install(pc, 1, blk) != 0)
+		ok = 0;
 	memset(blk, 0x22, sizeof(blk));
 	if (page_cache_write(pc, 1, (vm_offset_t)blk, sizeof(blk)) != 0 ||
 	    !st_holds(pc, 1, 0x22, 1))
@@ -336,8 +347,8 @@ st_write_lands(void)
 	if (page_cache_write(pc, 2, (vm_offset_t)blk, sizeof(blk)) != 0)
 		ok = 0;
 	memset(blk, 0x44, sizeof(blk));
-	page_cache_insert(pc, 2, (vm_offset_t)blk, sizeof(blk));
-	if (!st_holds(pc, 2, 0x33, 1))
+	if (st_install(pc, 2, blk) != PAGE_CACHE_PRESENT ||
+	    !st_holds(pc, 2, 0x33, 1))
 		ok = 0;
 	if (!st_done(pc))
 		ok = 0;
@@ -851,6 +862,104 @@ st_sync_takes_what_was_dirty(void)
 	return ok;
 }
 
+/* An install on a thread of its own, with a ticket taken there. */
+struct st_installer {
+	struct page_cache	*pc;
+	daddr_t			 block;
+	int			 rc;
+	volatile int		 done;
+	pthread_t		 th;
+};
+
+static void *
+st_install_thread(void *arg)
+{
+	struct st_installer *in = (struct st_installer *)arg;
+	unsigned char blk[ST_BLOCK];
+
+	memset(blk, 0xE7, sizeof(blk));
+	in->rc = st_install(in->pc, in->block, blk);
+	in->done = 1;
+	return 0;
+}
+
+/*
+ * P18: readahead publishes only bytes the disk cannot have changed since its
+ * ticket.  A ticket; then a block written, synced clean and evicted: an
+ * install of it with that ticket is STALE and leaves it absent, one with a
+ * fresh ticket caches it.  An install never touches a dirty block (PRESENT,
+ * the write's bytes kept) nor one being read: PRESENT at once, while the
+ * fill is held at the gate, and the fill's bytes are what the get sees.
+ */
+static int
+st_install_takes_no_stale_bytes(void)
+{
+	struct page_cache	*pc = page_cache_create(2, ST_BLOCK,
+							st_writeback, 0);
+	struct st_getter	 g;
+	struct st_installer	 in;
+	unsigned char		 blk[ST_BLOCK];
+	uint64_t		 t;
+	int			 ok = 1, started = 0;
+
+	if (pc == 0)
+		return 0;
+	t = page_cache_ticket(pc);
+	st_wb_answer = 0;
+	if (st_write_byte(pc, 5, 0xD1) != 0 || page_cache_sync(pc) != 0 ||
+	    !st_holds(pc, 5, 0xD1, 0))
+		ok = 0;
+	memset(blk, 0xD2, sizeof(blk));
+	if (st_install(pc, 6, blk) != 0 || st_install(pc, 8, blk) != 0 ||
+	    page_cache_contains(pc, 5))
+		ok = 0;			/* 5, the oldest, was evicted */
+	memset(blk, 0xD3, sizeof(blk));
+	if (page_cache_install(pc, 5, (vm_offset_t)blk, ST_BLOCK, t) !=
+	    PAGE_CACHE_STALE || page_cache_contains(pc, 5))
+		ok = 0;
+	if (st_install(pc, 5, blk) != 0 || !st_holds(pc, 5, 0xD3, 0))
+		ok = 0;
+	if (st_write_byte(pc, 5, 0xD4) != 0)
+		ok = 0;
+	memset(blk, 0xD5, sizeof(blk));
+	if (st_install(pc, 5, blk) != PAGE_CACHE_PRESENT ||
+	    !st_holds(pc, 5, 0xD4, 1))
+		ok = 0;
+	if (!st_done(pc))
+		ok = 0;
+
+	pc = page_cache_create(4, ST_BLOCK, st_writeback, 0);
+	if (pc == 0)
+		return 0;
+	st_gate_reset(9);
+	if (!st_get_start(&g, pc, 9)) {
+		st_gate_reset((daddr_t)-1);
+		(void) st_done(pc);
+		return 0;
+	}
+	memset(&in, 0, sizeof(in));
+	in.pc = pc;
+	in.block = 9;
+	if (st_wait_for(&st_gate_entered) &&
+	    pthread_create(&in.th, 0, st_install_thread, &in) == 0)
+		started = 1;
+	if (!started || !st_wait_for(&in.done) ||
+	    in.rc != PAGE_CACHE_PRESENT)
+		ok = 0;			/* it waited for the fill, or took it */
+	st_gate_release();
+	(void) pthread_join(g.th, 0);
+	if (started)
+		(void) pthread_join(in.th, 0);
+	st_gate_reset((daddr_t)-1);
+	if (g.rc != 0 || g.e == 0 || !st_bytes(g.e, st_fill_byte))
+		ok = 0;
+	if (g.e != 0)
+		page_cache_put(pc, g.e);
+	if (!st_done(pc))
+		ok = 0;
+	return ok;
+}
+
 /* Count a case, and mark it failed by its number. */
 static void
 st_case(unsigned int *ran, unsigned int *wrong, unsigned int *failed, int ok)
@@ -892,5 +1001,6 @@ page_cache_selftest(unsigned int *ran, unsigned int *wrong,
 	st_case(ran, wrong, failed, st_hit_never_fills());
 	st_case(ran, wrong, failed, st_counts_are_one());
 	st_case(ran, wrong, failed, st_write_lands_after_fill());
+	st_case(ran, wrong, failed, st_install_takes_no_stale_bytes());
 	page_cache_quiet = 0;
 }

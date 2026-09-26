@@ -58,6 +58,13 @@
 #define PAGE_CACHE_VICTIM_SCAN	64
 
 /*
+ * #599: page_cache_install's answers besides 0 and a kern_return_t: the key
+ * is held (cached or being read), or the bytes may be older than the disk.
+ */
+#define PAGE_CACHE_PRESENT	(-1)
+#define PAGE_CACHE_STALE	(-2)
+
+/*
  * Writeback callback: called when a dirty block must be flushed to disk.
  * Arguments: opaque context, block number, data pointer, data size,
  * physical address (non-zero for DMA-backed entries).
@@ -116,6 +123,12 @@ struct page_cache_entry {
 	unsigned int		pc_wgen;
 	uint64_t		pc_dirty_seq;
 	unsigned int		pc_tried;
+	/*
+	 * #599: the cache's pc_seq when a writeback last made this block
+	 * clean, 0 if it never was dirty.  Its copy leaving the cache raises
+	 * pc_forget to it (page_cache_install).
+	 */
+	uint64_t		pc_clean_seq;
 	int			pc_busy;	/* #384: writeback in flight —
 						   its data is being written
 						   outside pc_lock, so eviction
@@ -141,7 +154,15 @@ struct page_cache {
 	 */
 	pthread_cond_t		pc_cond;
 	unsigned int		pc_nwaiters;
-	uint64_t		pc_seq;		/* ticks at every clean->dirty */
+	uint64_t		pc_seq;		/* ticks at every clean->dirty
+						   and dirty->clean */
+	/*
+	 * #599: the newest pc_seq at which a copy that had been dirty left
+	 * the cache -- evicted once written back.  A readahead ticket older
+	 * than it may hold that block's old bytes, read from the disk before
+	 * the writeback landed.  64 bits: it never wraps.
+	 */
+	uint64_t		pc_forget;
 	unsigned int		pc_sync_calls;
 	unsigned int		pc_max_entries;
 	/*
@@ -255,16 +276,26 @@ int page_cache_lookup(struct page_cache *pc, daddr_t block,
 		      vm_offset_t *data_out, vm_size_t *size_out);
 
 /*
- * Insert a CLEAN block into the cache: 'size' bytes (at most a slot's) are
- * copied from 'data' into a slot.  Caller retains ownership of 'data'.  If
- * the cache is full, the LRU entry is evicted and its slot reused.
+ * #599: readahead's way in.  Take a ticket before reading the disk, then
+ * offer each block read with it.  page_cache_install copies `data' into a
+ * free or clean slot and caches it clean -- it never waits, never writes a
+ * block back to make room, and never overwrites: a key already held, cached
+ * or being read, answers PAGE_CACHE_PRESENT and is left as it is.
  *
- * A block already cached is left as it is -- it may be dirty, and newer
- * than what the caller read from the disk (#599: this said "update data if
- * so", and never did).
+ * The ticket is what keeps old bytes out.  A block dirty in the cache when
+ * the ticket was taken has newer bytes than the disk; readahead may have
+ * read the old ones.  While that copy stays cached the install finds it
+ * present.  Once it has been written back and evicted, pc_forget is past
+ * the ticket, and every install with that ticket answers PAGE_CACHE_STALE.
+ * Every way a copy leaves the cache raises pc_forget past any older ticket.
+ *
+ * Answers 0, PAGE_CACHE_PRESENT, PAGE_CACHE_STALE, KERN_RESOURCE_SHORTAGE
+ * (no free or clean slot) or KERN_INVALID_ARGUMENT (not a whole block).
+ * Caching a clean block is optional: readahead ignores the answer.
  */
-void page_cache_insert(struct page_cache *pc, daddr_t block,
-		       vm_offset_t data, vm_size_t size);
+uint64_t page_cache_ticket(struct page_cache *pc);
+int page_cache_install(struct page_cache *pc, daddr_t block,
+		       vm_offset_t data, vm_size_t size, uint64_t ticket);
 
 /*
  * Write a whole block into the cache (#599): the bytes are copied and the

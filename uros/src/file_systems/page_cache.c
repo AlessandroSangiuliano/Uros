@@ -127,6 +127,7 @@ key_entry(struct page_cache *pc, struct page_cache_entry *e, daddr_t block,
 	e->pc_busy = 0;
 	e->pc_dirty = 0;
 	e->pc_wfail = 0;
+	e->pc_clean_seq = 0;
 	e->pc_hash_next = pc->pc_hash[h];
 	pc->pc_hash[h] = e;
 	lru_insert_mru(pc, e);
@@ -145,10 +146,17 @@ free_entry(struct page_cache *pc, struct page_cache_entry *e)
 	pc->pc_free = e;
 }
 
-/* Detach an entry that is being taken, and count it. */
+/*
+ * Detach an entry that is being taken, and count it.  #599: a copy that had
+ * been dirty leaves the cache here, so pc_forget rises to when it was made
+ * clean (page_cache_install).
+ */
 static struct page_cache_entry *
 take_detach(struct page_cache *pc, struct page_cache_entry *e)
 {
+	if (e->pc_clean_seq > pc->pc_forget)
+		pc->pc_forget = e->pc_clean_seq;
+	e->pc_clean_seq = 0;
 	lru_remove(e);
 	hash_remove(pc, e);
 	pc->pc_count--;
@@ -212,6 +220,7 @@ take_victim(struct page_cache *pc, int mode, int *wb_rc)
 				      e->pc_data, e->pc_size, e->pc_phys);
 		if (rc == 0) {
 			pc->pc_writebacks++;
+			e->pc_clean_seq = ++pc->pc_seq;
 			return take_detach(pc, e);
 		}
 		if (wb_rc != NULL)
@@ -376,41 +385,53 @@ page_cache_lookup(struct page_cache *pc, daddr_t block,
 	return -1;
 }
 
-void
-page_cache_insert(struct page_cache *pc, daddr_t block,
-		  vm_offset_t data, vm_size_t size)
+uint64_t
+page_cache_ticket(struct page_cache *pc)
+{
+	uint64_t t;
+
+	pthread_mutex_lock(&pc->pc_lock);
+	t = pc->pc_seq;
+	pthread_mutex_unlock(&pc->pc_lock);
+	return t;
+}
+
+/*
+ * #599: see page_cache.h.  It replaces page_cache_insert, which waited out a
+ * key being read, wrote nothing back but took any clean slot, and could not
+ * tell bytes read before a writeback from bytes read after it.
+ */
+int
+page_cache_install(struct page_cache *pc, daddr_t block, vm_offset_t data,
+		   vm_size_t size, uint64_t ticket)
 {
 	struct page_cache_entry *e;
 
+	if (size != pc->pc_block_size)
+		return KERN_INVALID_ARGUMENT;
+
 	pthread_mutex_lock(&pc->pc_lock);
-
-	/*
-	 * Already cached: left as it is, and only moved to MRU.  It may be
-	 * dirty, and newer than what the caller read from the disk (#599: this
-	 * comment said "update data if so", and it never did).  A key being
-	 * read is waited out first.
-	 */
-	e = find_ready(pc, block);
-	if (e != NULL) {
-		lru_remove(e);
-		lru_insert_mru(pc, e);
+	if (pc->pc_forget > ticket) {
 		pthread_mutex_unlock(&pc->pc_lock);
-		return;
+		return PAGE_CACHE_STALE;
 	}
+	/* Held, cached or being read: left alone, and never waited for */
+	for (e = pc->pc_hash[PC_HASH(block)]; e; e = e->pc_hash_next)
+		if (e->pc_block == block) {
+			pthread_mutex_unlock(&pc->pc_lock);
+			return PAGE_CACHE_PRESENT;
+		}
 
-	/* A free or clean slot: an insert never costs a writeback (#599) */
+	/* A free or clean slot: an install never costs a writeback */
 	e = take_victim(pc, PC_TAKE_CLEAN, NULL);
-	if (!e) {
+	if (e == NULL) {
 		pthread_mutex_unlock(&pc->pc_lock);
-		return;
+		return KERN_RESOURCE_SHORTAGE;
 	}
-
-	/* #599: a fixed slot in either kind of cache */
-	memcpy((void *)e->pc_data, (void *)data,
-	       size < e->pc_size ? size : e->pc_size);
+	memcpy((void *)e->pc_data, (void *)data, size);
 	key_entry(pc, e, block, PC_VALID);
-
 	pthread_mutex_unlock(&pc->pc_lock);
+	return 0;
 }
 
 int
@@ -585,6 +606,7 @@ mark_range_done(struct page_cache *pc, const struct sync_entry *b, int count,
 		if (success && ce->pc_wgen == b[i].wgen) {
 			ce->pc_dirty = 0;
 			ce->pc_wfail = 0;
+			ce->pc_clean_seq = ++pc->pc_seq;	/* #599 */
 			pc->pc_writebacks++;
 		} else if (!success && !ce->pc_wfail) {
 			/* #599: said once, not every 5 s */

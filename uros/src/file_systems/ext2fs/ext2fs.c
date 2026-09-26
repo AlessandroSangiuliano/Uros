@@ -1064,8 +1064,14 @@ block_map(
 
 /*
  * Readahead: on sequential cache miss, prefetch up to RA_BLOCKS
- * contiguous disk blocks in a single device_read IPC and insert
- * them all into the page cache.
+ * contiguous disk blocks in a single device_read IPC and offer
+ * them all to the page cache.
+ *
+ * #599: through a ticket taken before anything is read, and
+ * page_cache_install, which takes only free or clean room, never a
+ * block already held, and never bytes the disk may have changed since
+ * the ticket (page_cache.h).  The old insert could publish a block's
+ * pre-writeback bytes over the copy the writeback had just evicted.
  */
 #define EXT2_RA_BLOCKS	32
 
@@ -1080,11 +1086,11 @@ ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
 	int i, rc;
 	vm_offset_t ra_buf;
 	vm_size_t ra_buf_size;
-	vm_offset_t cached;
-	vm_size_t cached_size;
+	uint64_t ticket;
 
 	if (!fp->f_dev.cache)
 		return;
+	ticket = page_cache_ticket(fp->f_dev.cache);
 
 	max_file_block = (fp->f_ic->i_size + block_size - 1) / block_size;
 
@@ -1108,9 +1114,8 @@ ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
 		if (db != disk_block + i)
 			break;
 
-		/* Stop if already cached */
-		if (page_cache_lookup(fp->f_dev.cache, db,
-				      &cached, &cached_size) == 0)
+		/* Stop at a block already held (#599: a hint, no hit) */
+		if (page_cache_contains(fp->f_dev.cache, db))
 			break;
 
 		n_contig++;
@@ -1128,12 +1133,11 @@ ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
 	if (rc != 0)
 		return;
 
-	/* Insert each block into page cache */
-	for (i = 0; i < n_contig; i++) {
-		page_cache_insert(fp->f_dev.cache, disk_block + i,
-				  ra_buf + i * block_size,
-				  (vm_size_t)block_size);
-	}
+	/* Offer each block; caching a clean block is optional */
+	for (i = 0; i < n_contig; i++)
+		(void) page_cache_install(fp->f_dev.cache, disk_block + i,
+					  ra_buf + i * block_size,
+					  (vm_size_t)block_size, ticket);
 
 	(void)vm_deallocate(mach_task_self(), ra_buf, ra_buf_size);
 }
@@ -1520,7 +1524,8 @@ ext2_selftest_bref(struct ext2fs_file *f, struct ext2_bref *br,
 	int				 rc;
 
 	memset(blk, 0x5a, sizeof(blk));
-	page_cache_insert(pc, 20, (vm_offset_t)blk, sizeof(blk));
+	(void) page_cache_install(pc, 20, (vm_offset_t)blk, sizeof(blk),
+				  page_cache_ticket(pc));
 	f->f_ra_last_block = (daddr_t)-2;
 	rc = buf_read_file(f, br, 1024 + 5, &buf, &size);
 	e = br->br_entry;
