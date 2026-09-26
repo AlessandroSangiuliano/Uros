@@ -476,6 +476,12 @@ static int buf_read_file(
 		vm_offset_t *,
 		vm_size_t *);
 
+static int write_file_locked(
+		struct ext2fs_file *,
+		vm_offset_t,
+		vm_offset_t,
+		vm_size_t);
+
 static int search_directory(
 		char *,
 	        struct ext2fs_file *,
@@ -1556,6 +1562,47 @@ ext2_selftest_bref(struct ext2fs_file *f, struct ext2_bref *br,
 	f->f_ic->i_block[2] = 0;
 }
 
+/*
+ * E4: part of a block the file already has (block 3, disk 22, not held), on
+ * the device that answers nothing: the write fails with the read's error and
+ * leaves nothing in the cache -- no block of zeros with the chunk in it,
+ * dirty.  write_file_locked marks the vnode dirty on success, so the case
+ * lends the handle one; the write must never get that far.
+ */
+static void
+ext2_selftest_write(struct ext2fs_file *f, struct page_cache *pc,
+		    unsigned int *ran, unsigned int *wrong)
+{
+	struct ext2_vnode	vn;
+	unsigned char		chunk[10];
+	unsigned int		i, dirty;
+	int			rc;
+
+	memset(&vn, 0, sizeof(vn));
+	if (pthread_mutex_init(&vn.v_lock, NULL) != 0) {
+		(*ran)++;
+		(*wrong)++;
+		return;
+	}
+	memset(chunk, 0x3c, sizeof(chunk));
+	f->f_ic->i_block[3] = 22;
+	f->f_vnode = &vn;
+	rc = write_file_locked(f, 3 * 1024 + 5, (vm_offset_t)chunk,
+			       sizeof(chunk));
+	f->f_vnode = NULL;
+	f->f_ic->i_block[3] = 0;
+	dirty = 0;
+	for (i = 0; i < pc->pc_max_entries; i++)
+		if (pc->pc_pool[i].pc_state != PC_FREE &&
+		    pc->pc_pool[i].pc_dirty)
+			dirty++;
+	(*ran)++;
+	if (rc == 0 || page_cache_contains(pc, 22) || dirty != 0 ||
+	    vn.v_inode_dirty)
+		(*wrong)++;
+	(void) pthread_mutex_destroy(&vn.v_lock);
+}
+
 void
 ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 {
@@ -1675,6 +1722,7 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 			    pc->pc_misses != 1)
 				(*wrong)++;
 			ext2_selftest_bref(&f, &br, pc, ran, wrong);
+			ext2_selftest_write(&f, pc, ran, wrong);
 			f.f_dev.cache = NULL;
 			(void) vm_deallocate(mach_task_self(), page, 4096);
 		} else {
@@ -3493,6 +3541,82 @@ invalidate_ind_cache(struct ext2fs_file *fp, int level, daddr_t blk)
 	}
 }
 
+/* A whole data block: into the cache, or to the disk when there is none. */
+static int
+write_file_block(struct ext2fs_file *fp, daddr_t disk_block, vm_offset_t data)
+{
+	vm_size_t size = EXT2_BLOCK_SIZE(fp->f_fs);
+
+	if (fp->f_dev.cache)
+		return page_cache_write(fp->f_dev.cache, disk_block, data, size);
+	return write_disk_block(fp, disk_block, data, size);
+}
+
+/*
+ * #599: part of a block this write allocated.  It starts as zeros: its last
+ * owner's bytes may still be on the disk or in the cache, and the
+ * read-modify-write this used to be handed them to the new file.
+ */
+static int
+write_fresh_part(struct ext2fs_file *fp, daddr_t disk_block, int off,
+		 vm_offset_t data, vm_size_t chunk)
+{
+	vm_size_t block_size = EXT2_BLOCK_SIZE(fp->f_fs);
+	vm_offset_t blkbuf;
+	int rc;
+
+	if (vm_allocate(mach_task_self(), &blkbuf, block_size, TRUE) !=
+	    KERN_SUCCESS)
+		return KERN_RESOURCE_SHORTAGE;
+	memset((void *)blkbuf, 0, block_size);
+	memcpy((void *)(blkbuf + off), (void *)data, chunk);
+	rc = write_file_block(fp, disk_block, blkbuf);
+	(void) vm_deallocate(mach_task_self(), blkbuf, block_size);
+	return rc;
+}
+
+/*
+ * #599: part of a block the file already had.  The rest of the block is what
+ * it holds, so it is read first, or the write fails: a read that failed used
+ * to be taken for a new block and zero-filled, and the write replaced the
+ * block's other bytes with zeros and succeeded.  Through the cache the block
+ * comes back pinned and is modified in its slot; with no cache, or no slot to
+ * give, it is modified privately and written whole.
+ *
+ * No readahead here: the caller holds the vnode lock, which readahead's
+ * block_map takes.
+ */
+static int
+write_old_part(struct ext2fs_file *fp, daddr_t disk_block, int off,
+	       vm_offset_t data, vm_size_t chunk)
+{
+	vm_offset_t blkbuf;
+	vm_size_t blkbuf_size;
+	int rc;
+
+	if (fp->f_dev.cache) {
+		struct page_cache_entry *e = NULL;
+
+		rc = page_cache_get(fp->f_dev.cache, disk_block, ext2_fill,
+				    fp, &e);
+		if (rc != 0)
+			return rc;
+		if (e != NULL) {
+			rc = page_cache_modify(fp->f_dev.cache, e,
+					       (vm_size_t)off, chunk, data);
+			page_cache_put(fp->f_dev.cache, e);
+			return rc;
+		}
+	}
+	rc = read_disk_block(fp, disk_block, &blkbuf, &blkbuf_size);
+	if (rc != 0)
+		return rc;
+	memcpy((void *)(blkbuf + off), (void *)data, chunk);
+	rc = write_file_block(fp, disk_block, blkbuf);
+	(void) vm_deallocate(mach_task_self(), blkbuf, blkbuf_size);
+	return rc;
+}
+
 /*
  * Write data to a file at the given offset.
  * Allocates new blocks as needed, extends file size.
@@ -3513,6 +3637,7 @@ write_file_locked(
 		int off = ext2_blkoff(fs, offset);
 		vm_size_t chunk = block_size - off;
 		daddr_t disk_block;
+		int fresh = 0;
 
 		if (chunk > size)
 			chunk = size;
@@ -3528,6 +3653,7 @@ write_file_locked(
 			disk_block = block_alloc(fp, 0);
 			if (disk_block == 0)
 				return KERN_RESOURCE_SHORTAGE;
+			fresh = 1;
 
 			if (file_block < NDADDR) {
 				/* Direct block */
@@ -3667,82 +3793,16 @@ write_file_locked(
 			vnode_gen_bump(fp);
 		}
 
-		if (off == 0 && chunk == (vm_size_t)block_size) {
-			/* Full block write — use page cache */
-			if (fp->f_dev.cache) {
-				/* #599: a write the cache refuses fails */
-				rc = page_cache_write(fp->f_dev.cache,
-						      disk_block, data, chunk);
-				if (rc != 0)
-					return rc;
-			} else {
-				rc = write_disk_block(fp, disk_block,
-						      data, chunk);
-				if (rc != 0)
-					return rc;
-			}
-		} else {
-			/* Partial block — read-modify-write */
-			vm_offset_t blkbuf;
-			vm_size_t blkbuf_size;
+		/* #599: every answer is the device's or the cache's */
+		if (off == 0 && chunk == (vm_size_t)block_size)
+			rc = write_file_block(fp, disk_block, data);
+		else if (fresh)
+			rc = write_fresh_part(fp, disk_block, off, data, chunk);
+		else
+			rc = write_old_part(fp, disk_block, off, data, chunk);
+		if (rc != 0)
+			return rc;
 
-			if (fp->f_dev.cache) {
-				vm_offset_t cached;
-				vm_size_t cached_size;
-
-				if (page_cache_lookup(fp->f_dev.cache,
-						      disk_block,
-						      &cached,
-						      &cached_size) == 0) {
-					/* Modify in-place via update */
-					vm_offset_t tmp;
-					if (vm_allocate(mach_task_self(),
-							&tmp, block_size,
-							TRUE) != KERN_SUCCESS)
-						return KERN_RESOURCE_SHORTAGE;
-					memcpy((void *)tmp, (void *)cached,
-					       block_size);
-					memcpy((void *)(tmp + off),
-					       (void *)data, chunk);
-					rc = page_cache_write(fp->f_dev.cache,
-							      disk_block,
-							      tmp, block_size);
-					vm_deallocate(mach_task_self(),
-						      tmp, block_size);
-					if (rc != 0)
-						return rc;	/* #599 */
-					goto next;
-				}
-			}
-
-			/* Read existing block from disk */
-			rc = read_disk_block(fp, disk_block,
-					     &blkbuf, &blkbuf_size);
-			if (rc != 0) {
-				/* New block: zero-fill */
-				if (vm_allocate(mach_task_self(), &blkbuf,
-						block_size, TRUE) != KERN_SUCCESS)
-					return KERN_RESOURCE_SHORTAGE;
-				memset((void *)blkbuf, 0, block_size);
-				blkbuf_size = block_size;
-			}
-
-			memcpy((void *)(blkbuf + off), (void *)data, chunk);
-
-			if (fp->f_dev.cache)
-				rc = page_cache_write(fp->f_dev.cache,
-						      disk_block,
-						      blkbuf, block_size);
-			else {
-				rc = write_disk_block(fp, disk_block,
-						      blkbuf, block_size);
-			}
-			vm_deallocate(mach_task_self(), blkbuf, blkbuf_size);
-			if (rc != 0)
-				return rc;
-		}
-
-	next:
 		offset += chunk;
 		data += chunk;
 		size -= chunk;

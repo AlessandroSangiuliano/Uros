@@ -267,13 +267,14 @@ void page_cache_put(struct page_cache *pc, struct page_cache_entry *e);
 int page_cache_contains(struct page_cache *pc, daddr_t block);
 
 /*
- * Look up a disk block in the cache.
- * On hit: sets *data_out and *size_out, moves entry to MRU, returns 0.
- * On miss: returns -1.
- * The returned pointer is owned by the cache — caller must copy if needed.
+ * #599: write `len' bytes at `off' into a block the caller holds pinned
+ * (page_cache_get), and mark it dirty, in one hold of the cache's lock.
+ * KERN_INVALID_ARGUMENT past the end of the slot; KERN_ABORTED if the block
+ * stopped being a cached block while pinned.
  */
-int page_cache_lookup(struct page_cache *pc, daddr_t block,
-		      vm_offset_t *data_out, vm_size_t *size_out);
+int page_cache_modify(struct page_cache *pc, struct page_cache_entry *e,
+		      vm_size_t off, vm_size_t len, vm_offset_t data)
+	__attribute__((warn_unused_result));
 
 /*
  * #599: readahead's way in.  Take a ticket before reading the disk, then

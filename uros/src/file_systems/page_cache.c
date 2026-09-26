@@ -361,28 +361,32 @@ page_cache_destroy(struct page_cache *pc)
 	return 0;
 }
 
+/*
+ * #599: see page_cache.h.  It replaces the partial write's lookup, which
+ * handed back a pointer into a slot with no hold on it and copied out of it
+ * with the lock dropped.
+ */
 int
-page_cache_lookup(struct page_cache *pc, daddr_t block,
-		  vm_offset_t *data_out, vm_size_t *size_out)
+page_cache_modify(struct page_cache *pc, struct page_cache_entry *e,
+		  vm_size_t off, vm_size_t len, vm_offset_t data)
 {
-	struct page_cache_entry *e;
+	if (off > e->pc_size || len > e->pc_size - off)
+		return KERN_INVALID_ARGUMENT;
 
 	pthread_mutex_lock(&pc->pc_lock);
-	e = find_ready(pc, block);	/* #599: never an entry being read */
-	if (e != NULL) {
-		/* Hit — move to MRU */
-		lru_remove(e);
-		lru_insert_mru(pc, e);
-		*data_out = e->pc_data;
-		*size_out = e->pc_size;
-		pc->pc_hits++;
+	if (e->pc_state != PC_VALID) {
 		pthread_mutex_unlock(&pc->pc_lock);
-		return 0;
+		return KERN_ABORTED;
 	}
-
-	pc->pc_misses++;
+	memcpy((void *)(e->pc_data + off), (void *)data, len);
+	if (!e->pc_dirty)
+		e->pc_dirty_seq = ++pc->pc_seq;
+	e->pc_wgen++;
+	e->pc_dirty = 1;
+	lru_remove(e);
+	lru_insert_mru(pc, e);
 	pthread_mutex_unlock(&pc->pc_lock);
-	return -1;
+	return KERN_SUCCESS;
 }
 
 uint64_t
