@@ -122,6 +122,13 @@ KNOWN='no ruler produced a median\|WRONG, the runs disagree or the ruler never c
 # neither WRONG nor FAIL, so it falls out of that grep on its own.
 NOT_ASKED='NOT ASKED'
 
+# #599: and a fourth, for the same reason: "UNKNOWN -- the engine may have
+# dropped the refusal" (device_master.defs' verdict for a count that stood
+# while `lost' moved).  Not a failure and not a pass: the question was asked
+# and the machine could not answer it.  Counted and listed, or a boot whose
+# refusals went missing is green with no mention of it (found in review).
+UNKNOWN_VERDICT='\] UNKNOWN —'
+
 # There are two kinds of run now, and they end differently (#458).
 #
 # The `-D' run ends in the double-fault self-test, which breaks the stack
@@ -180,6 +187,7 @@ VACCEL=$(sed -n 's/^  accelerator:  //p' "$LOG" | head -1)
 TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
 EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
 UNASKED=$(grep -ac "$NOT_ASKED" "$LOG" || true)
+UNKNOWNS=$(grep -ac "$UNKNOWN_VERDICT" "$LOG" || true)
 # ⚠️ `^panic\(', not `^panic:'.  This kernel prints `panic(cpu 0): ...' --
 # kern/debug.c puts the processor number in parentheses -- so the old pattern
 # could never match a single panic this kernel has ever produced.  It was
@@ -220,6 +228,10 @@ NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 echo
 echo "=== verdict: $TESTS self-tests, under $VACCEL ==="
 [ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: the TSC could not be calibrated, and its consumers said NOT ASKED (#508, #586)"
+if [ "$UNKNOWNS" -gt 0 ]; then
+	echo "  $UNKNOWNS UNKNOWN: asked, and the machine could not answer (#599)"
+	grep -a "$UNKNOWN_VERDICT" "$LOG" | sed 's/^/    /'
+fi
 if [ "$UNASKED" -gt 0 ]; then
 	echo "  $UNASKED NOT ASKED: this machine could not pose the question (#563)"
 	grep -a "$NOT_ASKED" "$LOG" | sed 's/^/    /'
