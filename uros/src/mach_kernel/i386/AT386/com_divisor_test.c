@@ -146,6 +146,13 @@ cdt_driver(void)
 		       "up, and the race is between processors (#599)\n");
 		cdt_park();
 	}
+	/*
+	 * The divisor to write, read BEFORE the flood starts.  Read during it,
+	 * a kernel without the lock hands back a console byte as "the divisor
+	 * found" -- measured, 0x0072 -- and then compares against it and puts
+	 * it back at the end.
+	 */
+	divisor = com_get_divisor();
 	if (cdt_thread(cdt_flooder, cpu_to_processor(1)) == THREAD_NULL) {
 		printf("com: [divisor-race] NOT ASKED — no thread for the flood "
 		       "(#599)\n");
@@ -160,7 +167,6 @@ cdt_driver(void)
 		cdt_park();
 	}
 
-	divisor = com_get_divisor();
 	lines0 = cdt_lines;
 	for (rounds = 0; rounds < CDT_ROUNDS_MAX; rounds++) {
 		if (rounds >= CDT_ROUNDS && cdt_lines - lines0 >= CDT_LINES)
