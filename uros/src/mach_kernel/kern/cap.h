@@ -62,6 +62,7 @@ extern void cap_init(void);
  * pointer to a copyin is a fault waiting for the machine that checks.
  */
 extern kern_return_t cap_check_in_kernel(const struct uros_cap *token,
+                                         uint32_t resource_type,
                                          uint32_t op,
                                          uint64_t resource_id);
 

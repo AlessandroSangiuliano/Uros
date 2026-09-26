@@ -3608,9 +3608,11 @@ ds_master_device_dma_map_foreign(
 	 * buffer was refused for that, and one that allowed only writes was
 	 * given reads as well.  What is mapped is what the capability allows.
 	 */
-	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_DMA_DEVICE_READ, r_id);
+	kr = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER,
+				 (uint32_t)CAP_OP_DMA_DEVICE_READ, r_id);
 	reads = kr == KERN_SUCCESS;
-	kr_write = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_DMA_DEVICE_WRITE,
+	kr_write = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER,
+				       (uint32_t)CAP_OP_DMA_DEVICE_WRITE,
 				       r_id);
 	writes = kr_write == KERN_SUCCESS;
 	if (!reads && !writes) {
@@ -3820,12 +3822,15 @@ ds_master_device_claim(
 	 * it, because a check that looks complete and is not is how this file
 	 * got the arrangement above.
 	 */
-	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
+	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+				 (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
 	if (kr != KERN_SUCCESS)
-		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_MMIO_MAP,
+		kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+					 (uint32_t)CAP_OP_PCI_MMIO_MAP,
 					 class_id);
 	if (kr != KERN_SUCCESS)
-		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_IRQ,
+		kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+					 (uint32_t)CAP_OP_PCI_IRQ,
 					 class_id);
 	if (kr != KERN_SUCCESS) {
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "

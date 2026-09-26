@@ -219,6 +219,7 @@ cap_init(void)
  */
 kern_return_t
 cap_check_in_kernel(const struct uros_cap *token,
+                    uint32_t resource_type,
                     uint32_t op,
                     uint64_t resource_id)
 {
@@ -227,7 +228,56 @@ cap_check_in_kernel(const struct uros_cap *token,
     simple_lock(&cap_lock);
     kr = cap_check_locked(token, op, resource_id);
     simple_unlock(&cap_lock);
+
+    /*
+     * #599: and the KIND of resource the token names.  cap_check_locked
+     * compares the MAC, the id, the ops and revocation, never the type, so
+     * a token for one kind was accepted for another whose ids happened to
+     * match: a block-device capability carrying somebody's DMA region id
+     * passed device_dma_map_foreign, and a task could mint its own "buffer"
+     * capability around any check that relied on who had been handed one.
+     * The type is under the MAC, so once that verifies the field is the
+     * issuer's.
+     */
+    if (kr == KERN_SUCCESS && token->resource_type != resource_type)
+        kr = CAP_ERR_RESOURCE_MISMATCH;
     return kr;
+}
+
+/*
+ * #599: the type check above, asked once the key exists.  A token signed
+ * here for a PCI class must answer as PCI and must not answer as a DMA buffer
+ * with the same id.  cap_id ~0 is one cap_server never issues, so no
+ * revocation entry can shadow it.  One line either way, with both answers.
+ */
+static void
+cap_type_selftest(void)
+{
+    struct uros_cap t;
+    kern_return_t   as_pci, as_dma;
+
+    bzero((char *)&t, sizeof(t));
+    t.cap_id = ~0ULL;
+    t.resource_type = RESOURCE_PCI_DEVICE;
+    t.resource_id = 0x010601;
+    t.allowed_ops = 0x3;
+    simple_lock(&cap_lock);
+    hmac_sha256(cap_hmac_key, CAP_HMAC_SIZE, &t,
+                sizeof(t) - CAP_HMAC_SIZE, t.hmac);
+    simple_unlock(&cap_lock);
+
+    as_pci = cap_check_in_kernel(&t, RESOURCE_PCI_DEVICE, 0x1, 0x010601);
+    as_dma = cap_check_in_kernel(&t, RESOURCE_DMA_BUFFER, 0x1, 0x010601);
+    bzero((char *)&t, sizeof(t));	/* a signed token does not linger */
+
+    if (as_pci == KERN_SUCCESS && as_dma == CAP_ERR_RESOURCE_MISMATCH)
+        printf("cap: a capability answers for the kind it names — a PCI "
+               "token checked as PCI gives %d, as a DMA buffer with the same "
+               "id %d (#599)\n", as_pci, as_dma);
+    else
+        printf("cap: WRONG — a PCI token checked as PCI gives %d and as a "
+               "DMA buffer with the same id %d; the kind is not what is "
+               "checked (#599)\n", as_pci, as_dma);
 }
 
 kern_return_t
@@ -351,6 +401,7 @@ urmach_cap_register(const struct uros_cap *user_token)
         simple_unlock(&cap_lock);
         printf("cap: hmac key registered (len=%u)\n",
                (unsigned)CAP_HMAC_SIZE);
+        cap_type_selftest();			/* #599 */
         return KERN_SUCCESS;
     }
 
