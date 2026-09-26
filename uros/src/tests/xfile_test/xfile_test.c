@@ -364,6 +364,149 @@ xf_check_contents(vfs_fd_t fd, int arm_hdr, int arm_body)
 	}
 }
 
+/*
+ * #599 X1: a block a write allocates starts as zeros.  A scratch file next to
+ * `path' is filled with 0xA5 over XF_FRESH_BLOCKS blocks, synced and removed;
+ * a second one gets one byte in the middle of each of as many blocks, and
+ * every other byte of them must read back as zero.  The second file's blocks
+ * are, as a rule, the first one's again, and that is the point: a partial
+ * write of a fresh block read the block first, and got its last owner's
+ * bytes from the cache or from the disk.
+ */
+#define XF_FRESH_BLOCKS	8u
+#define XF_FRESH_BYTE	0x5Au
+#define XF_OLD_BYTE	0xA5u
+
+static int
+xf_scratch_name(char *out, size_t len, const char *path, const char *leaf)
+{
+	const char	*slash = strrchr(path, '/');
+	size_t		 dir;
+
+	if (slash == NULL)
+		return -1;
+	dir = (size_t)(slash - path) + 1;
+	if (dir + strlen(leaf) + 1 > len)
+		return -1;
+	memcpy(out, path, dir);
+	strcpy(out + dir, leaf);
+	return 0;
+}
+
+/* The step that failed, or 0 when the file is there and read back. */
+static const char *
+xf_fresh_setup(const char *a, const char *b, uint32_t bs, vfs_fd_t *fdp)
+{
+	unsigned char	one = XF_FRESH_BYTE;
+	uint32_t	done, n, i;
+	vfs_fd_t	fd;
+
+	if (vfs_open_rc(a, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the first file";
+	memset(buf, XF_OLD_BYTE, sizeof(buf));
+	for (done = 0; done < XF_FRESH_BLOCKS * bs; done += n) {
+		n = XF_FRESH_BLOCKS * bs - done;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		if (vfs_write(fd, buf, n) != (ssize_t)n) {
+			(void)vfs_close(fd);
+			return "filling the first file";
+		}
+	}
+	if (vfs_sync(fd) != 0) {
+		(void)vfs_close(fd);
+		return "syncing the first file";
+	}
+	(void)vfs_close(fd);
+	if (vfs_unlink(a) != 0)
+		return "removing the first file";
+
+	if (vfs_open_rc(b, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the second file";
+	for (i = 0; i < XF_FRESH_BLOCKS; i++)
+		if (vfs_lseek(fd, (off_t)(i * bs + bs / 2), VFS_SEEK_SET) !=
+		    (off_t)(i * bs + bs / 2) || vfs_write(fd, &one, 1) != 1) {
+			(void)vfs_close(fd);
+			return "writing the second file";
+		}
+	if (vfs_lseek(fd, 0, VFS_SEEK_SET) != 0) {
+		(void)vfs_close(fd);
+		return "rewinding the second file";
+	}
+	*fdp = fd;
+	return 0;
+}
+
+static void
+xf_fresh_blocks(const char *path, int arm)
+{
+	char		 a[128], b[128];
+	vfs_stat_t	 st;
+	vfs_fd_t	 fd;
+	const char	*step;
+	uint32_t	 bs, size, off, n, i, bad = 0, first = 0;
+	unsigned char	 first_val = 0, want;
+	ssize_t		 r;
+
+	if (vfs_stat(path, &st) != 0 || st.st_blksize < 1024 ||
+	    st.st_blksize > 65536 ||
+	    (st.st_blksize & (st.st_blksize - 1)) != 0 ||
+	    xf_scratch_name(a, sizeof(a), path, "xf_fresh_a.dat") != 0 ||
+	    xf_scratch_name(b, sizeof(b), path, "xf_fresh_b.dat") != 0) {
+		printf("%s: [%d] WRONG — no block size or scratch names for "
+		       "the fresh-block arm next to %s\n", tag, arm, path);
+		failed++;
+		return;
+	}
+	bs = (uint32_t)st.st_blksize;
+	step = xf_fresh_setup(a, b, bs, &fd);
+	if (step != 0) {
+		printf("%s: [%d] WRONG — the fresh-block arm failed %s\n", tag,
+		       arm, step);
+		failed++;
+		(void)vfs_unlink(b);
+		return;
+	}
+
+	size = (XF_FRESH_BLOCKS - 1) * bs + bs / 2 + 1;
+	for (off = 0; off < size; off += n) {
+		n = size - off;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		r = vfs_read(fd, buf, n);
+		if (r != (ssize_t)n)
+			break;
+		for (i = 0; i < n; i++) {
+			want = (off + i) % bs == bs / 2 ? XF_FRESH_BYTE : 0;
+			if (buf[i] != want && bad++ == 0) {
+				first = off + i;
+				first_val = buf[i];
+			}
+		}
+	}
+	(void)vfs_close(fd);
+	(void)vfs_unlink(b);
+	if (off < size) {
+		printf("%s: [%d] WRONG — the read of %s at offset %u returned "
+		       "%ld of %u bytes\n", tag, arm, b, off, (long)r, n);
+		failed++;
+	} else if (bad != 0) {
+		printf("%s: [%d] WRONG — %u bytes of %u fresh blocks are not "
+		       "what was written, the first at offset %u (0x%02x): a "
+		       "new block kept its last owner's bytes (#599)\n", tag,
+		       arm, bad, XF_FRESH_BLOCKS, first, first_val);
+		failed++;
+	} else {
+		printf("%s: [%d] a byte in each of %u fresh blocks, and every "
+		       "other byte of them reads 0 -- none of the removed "
+		       "file's 0x%02x (#599)\n", tag, arm, XF_FRESH_BLOCKS,
+		       XF_OLD_BYTE);
+		passed++;
+	}
+}
+
 static void
 xf_write(const char *path)
 {
@@ -427,6 +570,7 @@ xf_write(const char *path)
 	xf_check_contents(fd, 3, 4);
 	(void)vfs_close(fd);
 	xf_check_stat(path, 5);
+	xf_fresh_blocks(path, 6);
 }
 
 static void
