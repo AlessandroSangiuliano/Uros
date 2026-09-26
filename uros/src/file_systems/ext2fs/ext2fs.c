@@ -344,6 +344,25 @@ vnode_mutex_unlock(struct ext2fs_file *fp)
 }
 
 /*
+ * #599: let a handle's block buffer go -- and its block number with it, in
+ * one place.  buf_read_file released the buffer before a read that could
+ * fail and kept the number, so the next read inside that block found it
+ * "cached", returned 0 + off, and its caller dereferenced that.  Every
+ * release of f_buf is this.
+ */
+static void
+handle_buf_release(struct ext2fs_file *fp)
+{
+	if (fp->f_buf != 0 && !fp->f_buf_borrowed)
+		(void) vm_deallocate(mach_task_self(), fp->f_buf,
+				     fp->f_buf_size);
+	fp->f_buf = 0;
+	fp->f_buf_size = 0;
+	fp->f_buf_borrowed = 0;
+	fp->f_buf_blkno = -1;
+}
+
+/*
  * #384: drop this handle's private caches of the shared block map —
  * the indirect-block buffers (f_blk[]) and the data-block buffer
  * (f_buf).  Used when the shared map changed underneath them: the
@@ -365,14 +384,7 @@ handle_caches_drop(struct ext2fs_file *fp)
 		}
 		fp->f_blkno[level] = -1;
 	}
-	if (fp->f_buf != 0) {
-		if (!fp->f_buf_borrowed)
-			(void) vm_deallocate(mach_task_self(),
-					     fp->f_buf, fp->f_buf_size);
-		fp->f_buf = 0;
-		fp->f_buf_borrowed = 0;
-	}
-	fp->f_buf_blkno = -1;
+	handle_buf_release(fp);
 	fp->f_ra_last_block = -1;
 }
 
@@ -681,15 +693,7 @@ free_file_buffers(register struct ext2fs_file *fp)
 	/*
 	 * Free the data block (skip if borrowed from page cache)
 	 */
-	if (fp->f_buf != 0) {
-	    if (!fp->f_buf_borrowed)
-		(void) vm_deallocate(mach_task_self(),
-				     fp->f_buf,
-				     fp->f_buf_size);
-	    fp->f_buf = 0;
-	    fp->f_buf_borrowed = 0;
-	}
-	fp->f_buf_blkno = -1;
+	handle_buf_release(fp);
 	fp->f_ra_last_block = -1;
 
 	/*
@@ -1132,24 +1136,21 @@ buf_read_file(
 	if (off || (!*buf_p) || *size_p < block_size ||
 	    ((*buf_p) & (fp->f_dev.rec_size-1))) {
 	    if (file_block != fp->f_buf_blkno) {
+		/*
+		 * #599: the old block goes, number and all, before anything
+		 * that can fail; a failure below leaves nothing held.
+		 */
+		handle_buf_release(fp);
 	        rc = block_map(fp, file_block, &disk_block);
 		if (rc != 0)
 		    return (rc);
 
-		if (fp->f_buf) {
-		    if (!fp->f_buf_borrowed)
-			(void)vm_deallocate(mach_task_self(),
-					    fp->f_buf,
-					    fp->f_buf_size);
-		    fp->f_buf = 0;
-		    fp->f_buf_borrowed = 0;
-		}
-
 		if (disk_block == 0) {
-		    (void)vm_allocate(mach_task_self(),
-				      &fp->f_buf,
-				      block_size,
-				      TRUE);
+		    if (vm_allocate(mach_task_self(), &fp->f_buf,
+				    block_size, TRUE) != KERN_SUCCESS) {
+			fp->f_buf = 0;
+			return (KERN_RESOURCE_SHORTAGE);
+		    }
 		    memset((void *)fp->f_buf, 0, block_size);
 		    fp->f_buf_size = block_size;
 		} else if (fp->f_dev.cache) {
@@ -1542,6 +1543,25 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 		f.f_ic->i_block[NDADDR] = 0;
 		f.f_ic->i_size = 4 * 1024;
 	}
+
+	/*
+	 * E2: a read that fails lets the handle's buffer go with its block
+	 * number.  Hold block 0 (the hole), fail a read of block 1, then read
+	 * offset 5 of block 0 again: it must be read afresh -- zeros, a real
+	 * buffer -- not answered from a released one as 0 + 5.
+	 */
+	buf = 0;
+	size = 0;
+	(void) buf_read_file(&f, 0, &buf, &size);
+	buf = 0;
+	size = 0;
+	(void) buf_read_file(&f, 1024, &buf, &size);
+	buf = 0;
+	size = 0;
+	rc = buf_read_file(&f, 5, &buf, &size);
+	(*ran)++;
+	if (rc != 0 || buf < 4096 || size != 1024 - 5)
+		(*wrong)++;
 
 	free_file_buffers(&f);
 	ext2_selftest_quiet = 0;
@@ -3451,17 +3471,8 @@ write_file_locked(
 		}
 
 		/* Invalidate f_buf so read path re-fetches from cache */
-		if (fp->f_buf_blkno == file_block) {
-			if (fp->f_buf) {
-				if (!fp->f_buf_borrowed)
-					vm_deallocate(mach_task_self(),
-						      fp->f_buf,
-						      fp->f_buf_size);
-				fp->f_buf = 0;
-				fp->f_buf_borrowed = 0;
-			}
-			fp->f_buf_blkno = -1;
-		}
+		if (fp->f_buf_blkno == file_block)
+			handle_buf_release(fp);
 
 		if (off == 0 && chunk == (vm_size_t)block_size) {
 			/* Full block write — use page cache */
