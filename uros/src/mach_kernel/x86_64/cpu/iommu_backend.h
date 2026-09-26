@@ -309,6 +309,9 @@ void iommu_fault_sink_record(struct iommu_fault_sink *s,
  * Counted, never cleared: it is the "floor" every answer carries.
  */
 #define	IOMMU_LOST_OVERFLOW	0x1u	/* the engine's own flag */
+#define	IOMMU_LOST_FULL		0x2u	/* its log was full, or filled while
+					   it was read */
+#define	IOMMU_LOST_EMPTY	0x4u	/* it logged an entry it never wrote */
 void iommu_fault_sink_lost(struct iommu_fault_sink *s, unsigned unit,
 			   unsigned why);
 

@@ -51,17 +51,6 @@ static hw_lock_data_t		iommu_fault_lock;
 /* #599: what the reporter sleeps on besides its timeout. */
 static int			iommu_fault_wakeup;
 
-static struct iommu_fault	fault_log[IOMMU_FAULT_LOG];
-static unsigned			fault_total;
-
-/*
- * #599: drains in which an engine may have discarded a refusal -- today, the
- * ones where it said so (AMD EventOverflow, VT-d PFO).  It only goes up, and
- * with the unplaced count it is what iommu_fault_lost() answers.  This was a
- * flag that stuck at the first overflow, and the report repeated its "floor"
- * line after it for the rest of the boot.
- */
-static uint64_t			fault_episodes;
 
 /*
  * Counted per device as well as kept in the ring, and the two are not the same
@@ -95,7 +84,26 @@ struct fault_table {
 	uint64_t		unplaced;
 };
 
-static struct fault_table	fault_devices;
+/*
+ * #599: everything the log keeps, in one place, so that the boot check can
+ * drain fabricated engines into a scratch copy through the same sink.
+ *
+ * `episodes' counts drains in which an engine may have discarded a refusal:
+ * it said so, its log was full or filled while read, or it logged an entry it
+ * never wrote (`why' keeps which, since boot).  It only goes up, and with the
+ * unplaced count it is what iommu_fault_lost() answers.  It was a flag that
+ * stuck at the first overflow, and the report repeated its "floor" line after
+ * it for the rest of the boot.
+ */
+struct fault_ledger {
+	struct iommu_fault	ring[IOMMU_FAULT_LOG];
+	unsigned		total;
+	struct fault_table	table;
+	uint64_t		episodes;
+	unsigned		why;		/* IOMMU_LOST_*, since boot */
+};
+
+static struct fault_ledger	ledger;
 
 /* Count one refusal of `bdf' at `address'.  Slots fill in order, no holes. */
 static void fault_table_note(struct fault_table *t, uint16_t bdf,
@@ -133,17 +141,20 @@ fault_table_find(const struct fault_table *t, uint16_t bdf)
  * is complete only in this file.
  */
 struct iommu_fault_sink {
-	int		live;
-	unsigned	found;
+	struct fault_ledger	*l;
+	int			 live;
+	unsigned		 found;
 };
 
 void iommu_fault_sink_record(struct iommu_fault_sink *s,
 			     const struct iommu_fault *f)
 {
+	struct fault_ledger *l = s->l;
+
 	assert(!s->live || hw_lock_held(&iommu_fault_lock));
-	fault_log[fault_total % IOMMU_FAULT_LOG] = *f;
-	fault_total++;
-	fault_table_note(&fault_devices, f->source, f->address);
+	l->ring[l->total % IOMMU_FAULT_LOG] = *f;
+	l->total++;
+	fault_table_note(&l->table, f->source, f->address);
 	s->found++;
 }
 
@@ -151,9 +162,9 @@ void iommu_fault_sink_lost(struct iommu_fault_sink *s, unsigned unit,
 			   unsigned why)
 {
 	(void)unit;
-	(void)why;
 	assert(!s->live || hw_lock_held(&iommu_fault_lock));
-	fault_episodes++;
+	s->l->episodes++;
+	s->l->why |= why;
 }
 
 /*
@@ -203,6 +214,182 @@ int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong)
 }
 
 /*
+ * ── The drains, asked about themselves (#599) ─────────────────────────
+ *
+ * At every boot, on fabricated engines: memory laid out as an engine's
+ * registers and log, drained by the vendors' own cores into a scratch ledger
+ * through a sink that is not live.  A write-one-to-clear lands in a word of
+ * its own, so the check reads what was written while the "register" it reads
+ * stays put.  What static memory cannot do is move a tail during a drain, so
+ * a ring that fills while it is read is not asked here; it is written at the
+ * core.
+ */
+#define	FAKE_AMD_BYTES		4096u
+#define	FAKE_AMD_OVERFLOW	(1ULL << 0)	/* MMIO 2020h, EventOverflow */
+#define	FAKE_VTD_PFO		(1u << 0)	/* FSTS */
+#define	FAKE_VTD_PPF		(1u << 1)
+#define	FAKE_VTD_F		(1ULL << 63)	/* a fault record's F */
+
+static uint64_t			fake_amd_log[FAKE_AMD_BYTES / 8];
+static uint64_t			fake_vtd_rec[2 * 2];
+static struct fault_ledger	fake_ledger;
+
+struct fake_amd {
+	uint64_t	head, tail, status, status_w1c, control;
+};
+
+/* An IO_PAGE_FAULT event from `bdf' at `address', in the slot at `off'. */
+static void fake_amd_event(unsigned off, uint16_t bdf, uint64_t address)
+{
+	fake_amd_log[off / 8] = (2ULL << 60) | bdf;	/* EventCode 0010b */
+	fake_amd_log[off / 8 + 1] = address;
+}
+
+/* Drain the fabricated AMD engine; how many found, and episodes added. */
+static unsigned fake_amd_drain(struct fake_amd *r, uint64_t *lost)
+{
+	struct iommu_amd_evtlog v;
+	struct iommu_fault_sink s = { &fake_ledger, 0, 0 };
+	uint64_t before = fake_ledger.episodes;
+
+	v.head = &r->head;
+	v.tail = &r->tail;
+	v.status = &r->status;
+	v.status_w1c = &r->status_w1c;
+	v.control = &r->control;
+	v.log = (volatile uint8_t *)fake_amd_log;
+	v.bytes = FAKE_AMD_BYTES;
+	(void) iommu_amd_evtlog_drain(&v, 0, &s);
+	*lost = fake_ledger.episodes - before;
+	return s.found;
+}
+
+static unsigned fake_vtd_drain(uint32_t fsts, uint32_t *w1c, uint64_t *lost)
+{
+	struct iommu_vtd_records v;
+	struct iommu_fault_sink s = { &fake_ledger, 0, 0 };
+	uint64_t before = fake_ledger.episodes;
+	uint32_t f = fsts;
+
+	*w1c = 0;
+	v.fsts = &f;
+	v.fsts_w1c = w1c;
+	v.records = (volatile uint8_t *)fake_vtd_rec;
+	v.count = 2;
+	(void) iommu_vtd_records_drain(&v, 0, &s);
+	*lost = fake_ledger.episodes - before;
+	return s.found;
+}
+
+/* Case number *ran failed: counted, and its bit set (A1 is bit 0). */
+static void fake_failed(unsigned *ran, unsigned *wrong, unsigned *failed)
+{
+	(*wrong)++;
+	*failed |= 1u << (*ran - 1);
+}
+
+static int fake_amd_empty(void)
+{
+	for (unsigned i = 0; i < FAKE_AMD_BYTES / 8; i++)
+		if (fake_amd_log[i] != 0)
+			return 0;
+	return 1;
+}
+
+int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
+{
+	struct fake_amd r;
+	uint64_t lost;
+	uint32_t w1c;
+	unsigned found, off;
+
+	*ran = 0;
+	*wrong = 0;
+	*failed = 0;
+	bzero((char *)&fake_ledger, sizeof(fake_ledger));
+
+	/* A1: two entries, read, consumed, head moved, nothing lost. */
+	bzero((char *)fake_amd_log, sizeof(fake_amd_log));
+	bzero((char *)&r, sizeof(r));
+	fake_amd_event(0, 0x20, 0xA000);
+	fake_amd_event(16, 0x20, 0xB000);
+	r.tail = 32;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (found != 2 || lost != 0 || r.head != 32 || !fake_amd_empty())
+		fake_failed(ran, wrong, failed);
+
+	/* A2: a ring that wraps, 0xFE0 -> 0x020: four entries. */
+	bzero((char *)&r, sizeof(r));
+	for (off = 0xFE0; off != 0x020; off = (off + 16) % FAKE_AMD_BYTES)
+		fake_amd_event(off, 0x20, 0xC000 + off);
+	r.head = 0xFE0;
+	r.tail = 0x020;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (found != 4 || lost != 0 || r.head != 0x020 || !fake_amd_empty())
+		fake_failed(ran, wrong, failed);
+
+	/* A3: a full ring (head one past tail): 255 found, and a loss. */
+	bzero((char *)&r, sizeof(r));
+	for (off = 0x10; off != 0; off = (off + 16) % FAKE_AMD_BYTES)
+		fake_amd_event(off, 0x20, 0xD000);
+	r.head = 0x10;
+	r.tail = 0;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (found != 255 || lost != 1 || r.head != 0)
+		fake_failed(ran, wrong, failed);
+
+	/* A4: nothing logged, the engine's flag up: a loss, the flag cleared. */
+	bzero((char *)&r, sizeof(r));
+	r.head = r.tail = 0x40;
+	r.status = FAKE_AMD_OVERFLOW;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (found != 0 || lost != 1 || r.status_w1c != FAKE_AMD_OVERFLOW)
+		fake_failed(ran, wrong, failed);
+
+	/* A5: an entry the tail passed and nothing wrote: a loss, consumed. */
+	bzero((char *)fake_amd_log, sizeof(fake_amd_log));
+	bzero((char *)&r, sizeof(r));
+	r.tail = 16;
+	found = fake_amd_drain(&r, &lost);
+	(*ran)++;
+	if (found != 0 || lost != 1 || r.head != 16)
+		fake_failed(ran, wrong, failed);
+
+	/* V1: one of two records set: found, and only its F written. */
+	fake_vtd_rec[0] = 0;
+	fake_vtd_rec[1] = 0;
+	fake_vtd_rec[2] = 0xE000;
+	fake_vtd_rec[3] = FAKE_VTD_F | 0x20;
+	found = fake_vtd_drain(FAKE_VTD_PPF, &w1c, &lost);
+	(*ran)++;
+	if (found != 1 || lost != 0 || fake_vtd_rec[1] != 0 ||
+	    fake_vtd_rec[3] != FAKE_VTD_F || w1c != 0)
+		fake_failed(ran, wrong, failed);
+
+	/* V2: both records set and records dropped: two, a loss, PFO cleared. */
+	fake_vtd_rec[1] = FAKE_VTD_F | 0x20;
+	fake_vtd_rec[3] = FAKE_VTD_F | 0x20;
+	found = fake_vtd_drain(FAKE_VTD_PPF | FAKE_VTD_PFO, &w1c, &lost);
+	(*ran)++;
+	if (found != 2 || lost != 1 || w1c != FAKE_VTD_PFO)
+		fake_failed(ran, wrong, failed);
+
+	/* V3: records dropped and none pending: a loss, PFO cleared. */
+	fake_vtd_rec[1] = 0;
+	fake_vtd_rec[3] = 0;
+	found = fake_vtd_drain(FAKE_VTD_PFO, &w1c, &lost);
+	(*ran)++;
+	if (found != 0 || lost != 1 || w1c != FAKE_VTD_PFO)
+		fake_failed(ran, wrong, failed);
+
+	return *wrong == 0;
+}
+
+/*
  * Every engine drained, with iommu_fault_lock held.
  *
  * ⚠️ Nothing to read before the engines are running.  A unit's fault
@@ -213,7 +400,7 @@ int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong)
  */
 static unsigned drain_all_locked(void)
 {
-	struct iommu_fault_sink s = { 1, 0 };
+	struct iommu_fault_sink s = { &ledger, 1, 0 };
 
 	if (!iommu_translating())
 		return 0;
@@ -242,7 +429,7 @@ uint64_t iommu_fault_lost(void)
 	uint64_t lost;
 
 	hw_lock_lock(&iommu_fault_lock);
-	lost = fault_episodes + fault_devices.unplaced;
+	lost = ledger.episodes + ledger.table.unplaced;
 	hw_lock_unlock(&iommu_fault_lock);
 	return lost;
 }
@@ -250,7 +437,7 @@ uint64_t iommu_fault_lost(void)
 /*
  * ── Saying it out loud ───────────────────────────────────────────────
  *
- * 🔑 `reported' AND `fault_total' are two counters and not one.  The ring can
+ * 🔑 `reported' AND `ledger.total' are two counters and not one.  The ring can
  * wrap between two drains, and then the number of faults that happened is
  * larger than the number of records that survived -- so the reporter says how
  * many it could not show rather than showing the last sixteen and implying
@@ -281,31 +468,32 @@ static unsigned fault_report_print(void)
 	static uint64_t reported_unplaced, reported_episodes;
 	struct iommu_fault copy[IOMMU_FAULT_LOG];
 	uint64_t unplaced, episodes;
-	unsigned n = 0, from, oldest, lost, printed = 0;
+	unsigned n = 0, from, oldest, lost, printed = 0, why;
 
 	/*
-	 * #599: drain, claim [reported, fault_total), copy, let go -- then
+	 * #599: drain, claim [reported, ledger.total), copy, let go -- then
 	 * print.  Claiming under the lock is what keeps two callers from
 	 * printing the same records; printing outside it is the lock's rule.
 	 *
-	 * 🔑 The ring's element i is the (fault_total - logged + i)th fault of
+	 * 🔑 The ring's element i is the (ledger.total - logged + i)th fault of
 	 * the boot, and that number is what says whether it has been printed.
 	 * Comparing positions inside the ring could not: the ring's element
 	 * zero is a different fault after every wrap.
 	 */
 	hw_lock_lock(&iommu_fault_lock);
 	(void) drain_all_locked();
-	oldest = fault_total > IOMMU_FAULT_LOG ? fault_total - IOMMU_FAULT_LOG
+	oldest = ledger.total > IOMMU_FAULT_LOG ? ledger.total - IOMMU_FAULT_LOG
 					       : 0;
 	from = reported > oldest ? reported : oldest;
 	lost = from - reported;		/* wrapped out before anyone printed */
-	for (unsigned k = from; k != fault_total; k++)
-		copy[n++] = fault_log[k % IOMMU_FAULT_LOG];
-	reported = fault_total;
-	unplaced = fault_devices.unplaced - reported_unplaced;
-	reported_unplaced = fault_devices.unplaced;
-	episodes = fault_episodes - reported_episodes;
-	reported_episodes = fault_episodes;
+	for (unsigned k = from; k != ledger.total; k++)
+		copy[n++] = ledger.ring[k % IOMMU_FAULT_LOG];
+	reported = ledger.total;
+	unplaced = ledger.table.unplaced - reported_unplaced;
+	reported_unplaced = ledger.table.unplaced;
+	episodes = ledger.episodes - reported_episodes;
+	reported_episodes = ledger.episodes;
+	why = ledger.why;
 	hw_lock_unlock(&iommu_fault_lock);
 
 	for (unsigned i = 0; i < n; i++) {
@@ -330,10 +518,13 @@ static unsigned fault_report_print(void)
 		       (unsigned long long)unplaced,
 		       (unsigned long long)reported_unplaced);
 	if (episodes != 0)
-		printf("iommu: an engine ran out of fault records before"
-		       " anyone read them, %llu time(s) since the last report"
-		       " — the count above is a floor\n",
-		       (unsigned long long)episodes);
+		printf("iommu: an engine may have discarded refusals, %llu "
+		       "time(s) since the last report (seen since boot:%s%s%s) "
+		       "— every count here is a floor\n",
+		       (unsigned long long)episodes,
+		       why & IOMMU_LOST_OVERFLOW ? " its own flag" : "",
+		       why & IOMMU_LOST_FULL ? " a full log" : "",
+		       why & IOMMU_LOST_EMPTY ? " an entry never written" : "");
 
 	/* Anything said: the reporter's once-a-second limit counts it all. */
 	return printed + (lost != 0) + (unplaced != 0) + (episodes != 0);
@@ -352,14 +543,14 @@ void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a)
 	uint64_t before;
 
 	hw_lock_lock(&iommu_fault_lock);
-	d = fault_table_find(&fault_devices, bdf);
+	d = fault_table_find(&ledger.table, bdf);
 	before = d != 0 ? d->recorded : 0;
 	(void) drain_all_locked();
-	d = fault_table_find(&fault_devices, bdf);
+	d = fault_table_find(&ledger.table, bdf);
 	a->recorded = d != 0 ? d->recorded : 0;
 	a->last_address = d != 0 ? d->last_address : 0;
 	a->undrained = a->recorded - before;
-	a->lost = fault_episodes + fault_devices.unplaced;
+	a->lost = ledger.episodes + ledger.table.unplaced;
 	hw_lock_unlock(&iommu_fault_lock);
 
 	if (a->undrained != 0)

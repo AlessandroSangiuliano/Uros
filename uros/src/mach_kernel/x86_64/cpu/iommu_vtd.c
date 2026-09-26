@@ -1094,33 +1094,11 @@ unsigned iommu_vtd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
 	return iommu_vtd_records_drain(&v, unit, s);
 }
 
-unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
-				 unsigned unit, struct iommu_fault_sink *s)
+/* Every record whose F is set, decoded, handed on and freed. */
+static unsigned vtd_walk_records(const struct iommu_vtd_records *v,
+				 struct iommu_fault_sink *s)
 {
 	unsigned found = 0;
-	uint32_t status;
-
-	status = *v->fsts;
-	if (status & VTD_FSTS_PFO) {
-		iommu_fault_sink_lost(s, unit, IOMMU_LOST_OVERFLOW);
-
-		/*
-		 * 🔴 CLEARED, or the engine records nothing further.  §11.4.7.1
-		 * PFO: "When this field is Set, hardware does not record any
-		 * new faults until software clears this field" -- so a reader
-		 * that only reported the overflow would turn one lost fault
-		 * into every subsequent one.
-		 */
-		*v->fsts_w1c = VTD_FSTS_PFO;
-	}
-
-	/*
-	 * PPF is the OR of every record's F, so a clear one means there is
-	 * nothing to walk -- one uncached read instead of NFR+1 of them, on
-	 * the path that runs on every poll and finds nothing almost always.
-	 */
-	if (!(status & VTD_FSTS_PPF))
-		return 0;
 
 	/*
 	 * ⚠️ Every record, and not only the one FSTS.FRI names.  That field
@@ -1154,6 +1132,41 @@ unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
 		rec[1] = VTD_FR_F;
 	}
 
+	return found;
+}
+
+unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
+				 unsigned unit, struct iommu_fault_sink *s)
+{
+	unsigned found = 0;
+	uint32_t status;
+
+	/*
+	 * PPF is the OR of every record's F, so a clear one means there is
+	 * nothing to walk -- one uncached read instead of NFR+1 of them, on
+	 * the path that runs on every poll and finds nothing almost always.
+	 */
+	status = *v->fsts;
+	if (status & VTD_FSTS_PPF)
+		found = vtd_walk_records(v, s);
+
+	/*
+	 * #599: PFO read AFTER the records are free, and cleared after that.
+	 * It was cleared first: with every record still full the engine could
+	 * drop another fault between the two, and the next drain would not
+	 * know.  Freeing the records first keeps the window in which it cannot
+	 * record as short as it can be.
+	 *
+	 * 🔴 CLEARED, or the engine records nothing further.  §11.4.7.1 PFO:
+	 * "When this field is Set, hardware does not record any new faults
+	 * until software clears this field" -- so a reader that only reported
+	 * the overflow would turn one lost fault into every subsequent one.
+	 */
+	status = *v->fsts;
+	if (status & VTD_FSTS_PFO) {
+		iommu_fault_sink_lost(s, unit, IOMMU_LOST_OVERFLOW);
+		*v->fsts_w1c = VTD_FSTS_PFO;
+	}
 	return found;
 }
 

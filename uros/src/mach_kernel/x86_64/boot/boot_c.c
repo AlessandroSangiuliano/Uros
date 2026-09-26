@@ -4502,6 +4502,27 @@ static void iommu_selftest(void)
 			   " could be told no\r\n");
 	}
 
+	/* #599: the drains, on fabricated engines. */
+	{
+		unsigned ran = 0, wrong = 0, failed = 0;
+		int ok = iommu_fault_drain_check(&ran, &wrong, &failed);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" fault-drain cases on fabricated engines, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		if (!ok) {
+			kputs(" (A1-A5 then V1-V3, failed mask ");
+			kputdec(failed);
+			kputs(")");
+		}
+		kputs(ok ? " — a full log, an overflow flag and an entry never"
+			   " written are each counted as a possible loss\r\n"
+			 : " — WRONG, refusals could go missing and nothing say"
+			   " so\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");

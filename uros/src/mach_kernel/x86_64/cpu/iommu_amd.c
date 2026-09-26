@@ -29,6 +29,7 @@
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 #include <cpu/pci_cfg.h>
+#include <cpu/regs.h>		/* cpu_pause */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
@@ -1234,26 +1235,43 @@ unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
 	return iommu_amd_evtlog_drain(&v, unit, s);
 }
 
+/*
+ * #599: every entry between head and tail, and then what may have been lost
+ * while the engine was not read.  Three ways, each counted as an episode
+ * (a false one only ever produces "unknown", never a false "not refused"):
+ *  - FULL: the ring was full when read, or filled while it was being read.
+ *    QEMU's AMD-Vi discards events into a full ring and sets EventOverflow
+ *    only when EventIntEn is set, which this kernel never sets -- counting
+ *    losses by the flag alone counted none (ahci [iommu-burst]: 255 of 1032
+ *    recorded, nothing said);
+ *  - EMPTY: an entry the tail had passed that stayed zero.  Linux re-reads
+ *    such an entry, for an erratum where the tail moves before the entry is
+ *    written; it was consumed here in silence.  Re-read up to 1000 pauses,
+ *    then counted;
+ *  - OVERFLOW: the engine's own flag, read AFTER the drain, so a flag set
+ *    while the ring was being emptied is not missed.
+ */
 unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
 				unsigned unit, struct iommu_fault_sink *s)
 {
-	uint64_t head, tail, status;
-	unsigned found = 0;
-
-	status = *v->status;
-	if (status & AMD_STATUS_EVT_OVERFLOW)
-		iommu_fault_sink_lost(s, unit, IOMMU_LOST_OVERFLOW);
+	uint64_t head, tail0, tail1, status;
+	unsigned found = 0, why = 0, consumed, since, spin;
 
 	head = *v->head & AMD_RING_PTR_MASK;
-	tail = *v->tail & AMD_RING_PTR_MASK;
+	tail0 = *v->tail & AMD_RING_PTR_MASK;
+	consumed = (unsigned)((tail0 + v->bytes - head) % v->bytes / 16u);
 
-	while (head != tail) {
+	while (head != tail0) {
 		volatile uint64_t *e = (volatile uint64_t *)(v->log + head);
 		struct iommu_fault f;
 
+		for (spin = 0; spin < 1000 && e[0] == 0 && e[1] == 0; spin++)
+			cpu_pause();
 		if (iommu_amd_fault_decode(e[0], e[1], &f)) {
 			iommu_fault_sink_record(s, &f);
 			found++;
+		} else {
+			why |= IOMMU_LOST_EMPTY;
 		}
 
 		/*
@@ -1271,17 +1289,27 @@ unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
 
 	*v->head = head;
 
+	tail1 = *v->tail & AMD_RING_PTR_MASK;
+	since = (unsigned)((tail1 + v->bytes - tail0) % v->bytes / 16u);
+	if (consumed + since >= v->bytes / 16u - 1u)
+		why |= IOMMU_LOST_FULL;
+
 	/*
 	 * The overflow bit last, and only after the ring has been emptied:
 	 * §2.5.1 has the engine discard every event while it is set, so
 	 * clearing it before making room would restart logging into a full
 	 * ring and set it again.
 	 */
-	if (status & AMD_STATUS_EVT_OVERFLOW)
+	status = *v->status;
+	if (status & AMD_STATUS_EVT_OVERFLOW) {
+		why |= IOMMU_LOST_OVERFLOW;
 		*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
+	}
 	if (status & AMD_STATUS_EVT_INT)
 		*v->status_w1c = AMD_STATUS_EVT_INT;
 
+	if (why != 0)
+		iommu_fault_sink_lost(s, unit, why);
 	return found;
 }
 

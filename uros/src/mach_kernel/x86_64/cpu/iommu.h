@@ -653,6 +653,14 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong);
 int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong);
 
 /*
+ * #599: the vendors' drains, run against fabricated engines at every boot: a
+ * ring that wraps, a full one, an empty one flagged overflow, an entry never
+ * written; VT-d records with and without PFO.  What may have been lost is
+ * counted as lost, and nothing else is.
+ */
+int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed);
+
+/*
  * ── Stage 3d: a domain of its own, for one device ────────────────────
  *
  * 🔴 THIS IS WHERE #432 STOPS BEING A DESCRIPTION.  Everything before it built
