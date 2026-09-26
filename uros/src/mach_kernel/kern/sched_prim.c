@@ -641,7 +641,9 @@ thread_go(thread_t thread)
 #if	MACHINE_PREEMPTION_LEVEL
 /*
  * #599: assert_wait()'s rule (#490, #558), kept by its two siblings too: no
- * instant at which this thread is TH_WAIT and the preemption level is zero.
+ * instant at which this thread is TH_WAIT, the preemption level is zero AND
+ * the interrupt level is spllo -- the conditions under which a kernel-mode
+ * return takes an AST (trap_take_ast).
  *
  * The IPC paths declare their wait with thread_will_wait*() under the port's
  * or the mqueue's lock -- a mutex -- and unlock after it.  A preemption between
@@ -806,9 +808,12 @@ __assert_wait(
 	 * the sleeper still held and its own waker was queued on.
 	 *
 	 * ⚠️ So the rule is about the STATE, not about any one way an interrupt
-	 * can arrive: no instant may exist at which this thread is TH_WAIT and
-	 * the level is zero.  Raising before the store makes that true however
-	 * the spin locks and splx() below behave.
+	 * can arrive: no instant may exist at which this thread is TH_WAIT, the
+	 * level is zero and the spl is spllo.  Raising before the store makes
+	 * that true however the spin locks and splx() below behave.  (The level
+	 * is given back at splsched in thread_block_reason() and thread_run(),
+	 * and reaches zero before thread_invoke() raises it again: there the
+	 * spl half of the rule is what holds -- #599.)
 	 *
 	 * #599: once per window.  A thread that has declared a wait and then
 	 * sleeps on a lock declares a second one inside it, and a second raise
@@ -878,12 +883,13 @@ assert_wait_preempt_release(thread_t thread)
 	thread->wait_preempt = FALSE;
 
 	/*
-	 * ⚠️ _no_check, deliberately.  Every caller is about to do its own AST
-	 * work -- thread_block_reason(), thread_run() and the futex hand-off
-	 * are on their way into the scheduler, and clear_wait()'s caller
-	 * returns through a trap -- so
-	 * taking one here would be taking it in the middle of somebody's
-	 * critical section for no gain.  Whether the checking form should act
+	 * ⚠️ _no_check, deliberately.  thread_block_reason(), thread_run() and
+	 * the futex hand-off are on their way into the scheduler, and a thread
+	 * that clears its own wait usually returns through a trap soon after,
+	 * so taking one here would be taking it in the middle of somebody's
+	 * critical section for no gain.  A kernel thread that clears its own
+	 * wait and goes on (irq_forward_thread) leaves a pending AST for the
+	 * next return at spllo -- a delay, not a loss.  Whether the checking form should act
 	 * on an urgent AST at all is #462, and it is not this window.
 	 */
 	enable_preemption_no_check();
@@ -1998,12 +2004,16 @@ thread_block_reason(
 	mp_disable_preemption();
 
 	/*
-	 * 🔑 AFTER this function's own raise and not before, so the level never
-	 * passes through zero on the way (#490).  What assert_wait() took is
-	 * given back here because the window it was protecting ends exactly
-	 * here: from this point the thread is committed to the scheduler, which
-	 * is where being taken off the processor is the intended outcome rather
-	 * than the defect.
+	 * 🔑 AT splsched (#490).  What assert_wait() took is given back here
+	 * because the window it was protecting ends exactly here: from this
+	 * point the thread is committed to the scheduler, which is where being
+	 * taken off the processor is the intended outcome rather than the
+	 * defect.  #599: the level does reach zero before thread_invoke()
+	 * raises it again -- mp_enable_preemption() below -- and what keeps an
+	 * AST out of that stretch is the spl: trap_take_ast refuses a kernel-
+	 * mode AST when the interrupt level is not spllo.  On x86-64 the spl
+	 * is a software level and interrupts still arrive at splsched; only the
+	 * AST is refused.
 	 *
 	 * ⚠️ Unconditional, and it is a no-op for a thread that declared no
 	 * wait -- thread_block() is called by plenty that did not.
@@ -2173,10 +2183,11 @@ thread_run(
 	/*
 	 * #599: as in thread_block_reason(), the wait window ends here, at
 	 * splsched(): the level does reach zero with TH_WAIT set before
-	 * thread_invoke() raises it again, and what keeps a preemption out of
-	 * that stretch is splsched -- no interrupt, so no AST -- as it is in
-	 * thread_block_reason().  It used to be given back before splsched,
-	 * where an interrupt could preempt a thread that was TH_WAIT.  Only
+	 * thread_invoke() raises it again, and what keeps an AST out of that
+	 * stretch is the spl -- trap_take_ast refuses a kernel-mode AST when
+	 * the interrupt level is not spllo; interrupts themselves still arrive
+	 * on x86-64 -- as it is in thread_block_reason().  It used to be given
+	 * back before splsched, where a return could take the AST.  Only
 	 * thread_switch(SWITCH_OPTION_WAIT) with a hand-off hint reaches this
 	 * with a wait declared; a no-op for everyone else.
 	 */

@@ -44,7 +44,7 @@
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
-#include <cpu/percpu.h>	/* #599: user dispatches, all processors */
+#include <cpu/percpu.h>	/* #599: returns to ring 3, all processors */
 #include <ddb/cons_cost.h>	/* #567: one line about the console, once a boot */
 
 /*
@@ -58,8 +58,8 @@
  * does not matter as long as it is far longer than any pause a working boot
  * takes.
  *
- * ⚠️ Reset by work (quiet_work(): a user task's thread given a processor, or
- * running on one -- #599), so the count starts again.  Without that reset this would eventually fire on a healthy
+ * ⚠️ Reset by work (quiet_work(): a return to ring 3 on any processor since
+ * the last pass -- #599), so the count starts again.  Without that reset this would eventually fire on a healthy
  * system that simply had a slow patch, and a census of a system that is about
  * to carry on is a false report.
  */
@@ -121,10 +121,19 @@ static int		quiet_said;
  * threads as exempt did not help, for the softclock reason (found in review).
  *
  * So the question is asked of ring 3, on every processor: a return to user
- * mode since the last pass (percpu's user_returns, counted by the three exits
- * to ring 3).  A user loop that never calls the kernel returns at every tick
- * that interrupts it; a user thread stuck in the kernel, spinning or asleep,
- * does not -- and that is the stop #476 and #599 are about.  A first version
+ * mode since the last pass (percpu's user_returns, counted at the exits to
+ * ring 3 -- trap_common's, thread_frame_return and SYSRET's; not the NMI/#DB
+ * path's, which a user loop's tick makes up for).  A user loop that never
+ * calls the kernel returns at every tick that interrupts it; a user thread
+ * stuck in the kernel, spinning or asleep, does not.
+ *
+ * ⚠️ WHAT IT CANNOT SEE: a stop that leaves any user thread returning to
+ * ring 3.  The measure is summed over every processor, so a poller keeps it
+ * at zero passes -- char_server's klog forwarder, which polls every 10 ms
+ * once uart.so holds COM1 on x86-64, is one (found in review).  The census
+ * names a machine on which ring 3 has gone quiet everywhere, which is the
+ * shape of 599-caccia2-2; a stop of some tasks while others poll needs a
+ * different instrument -- a wait that outlives a bound -- and is not this.  A first version
  * asked whether a user task's thread was given a processor or was on one
  * now, which a thread spinning in the kernel on another processor answered
  * for ever, and which followed another processor's thread with nothing
@@ -511,8 +520,9 @@ quiet_census_pass(int mycpu)
 	 * (#558).
 	 *
 	 * The count above is of cpu 0's idle passes, and since #599 it is reset
-	 * by a user task's thread running on ANY processor -- but a kernel
-	 * thread busy on another one resets nothing.  A thread listed as TH_RUN on no run queue then
+	 * only by a return to ring 3 on ANY processor -- a thread running or
+	 * spinning in kernel mode, user task's or kernel's, resets nothing, so
+	 * either can be the one found RUNNING below.  A thread listed as TH_RUN on no run queue then
 	 * has two readings that the list cannot tell apart: lost between a
 	 * wakeup that claimed it and a dispatch that never came, or RUNNING on
 	 * another processor all along, spinning somewhere.

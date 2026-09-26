@@ -298,10 +298,11 @@ struct percpu {
 	uint32_t intr_saved_if;
 
 	/*
-	 * #476, #599: how many times this processor went back to ring 3 -- the
-	 * quiet census's measure of work, counted by the three exits to user
-	 * mode (trap_common's, thread_frame_return, and SYSRET) while %gs is
-	 * still the kernel's.  A user loop that never calls the kernel still
+	 * #476, #599: how many times this processor went back to ring 3 by
+	 * trap_common's tail, thread_frame_return or the SYSRET path -- the
+	 * quiet census's measure of work -- counted while %gs is still the
+	 * kernel's.  trap_paranoid's return (NMI, #DB, #DF, #MC from ring 3) is
+	 * not counted.  A user loop that never calls the kernel still
 	 * counts, at every tick that interrupts it; a user thread stuck in the
 	 * kernel does not, which is the difference the census is for.  Per
 	 * processor, because it is written on every return.
