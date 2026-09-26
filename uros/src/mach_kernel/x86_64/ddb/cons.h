@@ -137,9 +137,11 @@ void cons_flush(void);
  * the port back with no lock -- a stated exception and not a race: a panic
  * takes the port back, because a message that arrives possibly garbled beats
  * a message that is lost.  A machine that is dying has no further use for the
- * property that two writers never meet.  #599: the latch is closed only once
- * the others are stopped (cons_ddb_session, cons_port_close_latch), and a
- * DDB session that continues gives the port back to its driver.
+ * property that two writers never meet.  #599: DDB's session closes the latch
+ * after the others are stopped (cons_ddb_session), a halt closes it under
+ * the port's lock (cons_port_close_latch), every THR write takes that lock
+ * with a bound, and a DDB session that continues gives the port back to its
+ * driver.
  */
 /* Returns the klog cursor taken at the instant the port changed hands: the
  * forwarder's starting point (#497).  Idempotent; a second call returns the
@@ -148,7 +150,7 @@ unsigned int cons_port_release(void);
 void cons_port_reclaim(void);
 int cons_port_is_ours(void);
 void cons_ddb_session(int entering);	/* #599: see cons.c */
-void cons_port_close_latch(void);	/* #599: the way down, after the stop */
+void cons_port_close_latch(void);	/* #599: a halt, under the port's lock */
 void cons_percpu_ready(void);	/* #599: the boot processor's %gs is set */
 int cons_poll_getc(void);	/* #599: -1 unless the port is still ours */
 

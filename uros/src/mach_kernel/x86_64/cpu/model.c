@@ -148,7 +148,7 @@ halt_cpu(void)
 		 */
 		if (atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
 			ipi_halt_others();
-		cons_port_close_latch();	/* #599: after the stop */
+		cons_port_close_latch();	/* #599: under the port's lock */
 
 		/*
 		 * Let the processor that got there first finish saying what
@@ -224,7 +224,7 @@ halt_all_cpus(boolean_t reboot)
 	 * consumed by nobody.
 	 */
 	ipi_halt_others();
-	cons_port_close_latch();	/* #599: after the stop */
+	cons_port_close_latch();	/* #599: under the port's lock */
 	halt_cpu();
 }
 

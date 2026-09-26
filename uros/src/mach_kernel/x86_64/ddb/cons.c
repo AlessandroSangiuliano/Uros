@@ -862,8 +862,9 @@ void cons_port_reclaim(void)
  * #599: DDB's session on COM1, from after the others are stopped until before
  * they are let go (ddb_enter), outermost only.  Entry saves LCR and closes the
  * latch a processor parked in the middle of a divisor sequence may have left
- * open; DDB then writes the port with no lock, which is why it has to be
- * closed.  Exit puts LCR back exactly, so that sequence goes on where it
+ * open; DDB's bytes then go without the port's lock when that parked
+ * processor holds it (the bounded wait gives up), which is why the latch has
+ * to be closed.  Exit puts LCR back exactly, so that sequence goes on where it
  * meant to, and gives the port back to a driver the way down took it from --
  * without that, the driver's input was read by the tick's poll and its
  * divisor sequence raced a console writing THR with no lock, for the rest of
