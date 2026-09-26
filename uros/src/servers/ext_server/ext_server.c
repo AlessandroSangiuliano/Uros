@@ -848,9 +848,11 @@ ds_ext2_write(
 		 * #599: a write that failed part way can still have linked
 		 * blocks and grown the file, which leaves the inode dirty; it
 		 * goes on the dirty list like a write that succeeded, or no
-		 * sync would ever write it (found in review).
+		 * sync would ever write it (found in review).  Not a write
+		 * refused for a directory: that one changed nothing, and a
+		 * directory's vnode stays off the writeback's list.
 		 */
-		if (ext2fs_is_dirty(priv)) {
+		if (rc != FS_IS_DIRECTORY && ext2fs_is_dirty(priv)) {
 			pthread_mutex_lock(&mnt->of_lock);
 			dirty_list_add(mnt, idx);
 			pthread_mutex_unlock(&mnt->of_lock);
@@ -2080,7 +2082,8 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 				if (rc != 0) {
 					rep->status = VFS_FLIPC_ERR_IO;
 					/* #599: see ds_ext2_write */
-					if (ext2fs_is_dirty(priv)) {
+					if (rc != FS_IS_DIRECTORY &&
+					    ext2fs_is_dirty(priv)) {
 						pthread_mutex_lock(
 							&mnt->of_lock);
 						dirty_list_add(mnt, idx);

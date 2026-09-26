@@ -2676,17 +2676,24 @@ int
 ext2fs_is_dirty(fs_private_t private)
 {
 	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	int dirty;
+
 	if (!fp->f_vnode)
 		return 0;
 	/*
-	 * #599: a flush takes the three flags when it starts, so while one is
-	 * in flight they read clear for metadata not yet on the disk; counted
-	 * as dirty, or the writeback thread dropped the handle from its list
-	 * and a flush that then failed raised the flags again for nobody
-	 * (found in review).
+	 * #599: under v_lock.  A flush takes the three flags when it starts
+	 * and holds v_lock until it has written them or raised them again, so
+	 * read here without the lock they were clear while one was in flight,
+	 * and the writeback thread dropped a handle whose flush then failed
+	 * (found in review, twice: a count of flushes in flight still left a
+	 * window at each end).  Every caller holds of_lock and not v_lock,
+	 * the order the writeback's own flushes take them in.
 	 */
-	return(fp->f_vnode->v_inode_dirty || fp->f_vnode->v_gd_dirty ||
-	       fp->f_vnode->v_super_dirty || fp->f_vnode->v_flushing);
+	vnode_mutex_lock(fp);
+	dirty = fp->f_vnode->v_inode_dirty || fp->f_vnode->v_gd_dirty ||
+		fp->f_vnode->v_super_dirty;
+	vnode_mutex_unlock(fp);
+	return dirty;
 }
 
 boolean_t
@@ -3848,6 +3855,7 @@ write_file_locked(
 	struct ext2_super_block *fs = fp->f_fs;
 	int block_size = EXT2_BLOCK_SIZE(fs);
 	int rc = 0, linked = 0;
+	vm_offset_t start = offset;
 
 	while (size > 0 && rc == 0) {
 		daddr_t file_block = ext2_lblkno(fs, offset);
@@ -3889,16 +3897,20 @@ write_file_locked(
 			}
 			rc = link_fresh_block(fp, file_block, disk_block);
 			/*
-			 * Linked, or perhaps linked: a failure after an
-			 * indirect block on the disk already names the data
-			 * block leaves it in the file's map, so it is kept
-			 * allocated -- freed, it would be handed to another
-			 * file while this one still reached it (found in
-			 * review).  At worst a block is allocated to nothing.
+			 * The in-core map may have changed either way (a fresh
+			 * double- or triple-indirect block is linked as it is
+			 * allocated), so the inode is dirty either way.  A
+			 * failed link leaves the data block reachable from
+			 * nothing on the disk -- link_fresh_block writes the
+			 * one reference to it last, with nothing after it to
+			 * fail -- so it is freed (#599; kept, as the second
+			 * review round had it, it was counted by no i_blocks).
 			 */
 			linked = 1;
-			if (rc != 0)
+			if (rc != 0) {
+				block_free(fp, disk_block);
 				break;
+			}
 		} else {
 			/* #599: every answer is the device's or the cache's */
 			if (off == 0 && chunk == (vm_size_t)block_size)
@@ -3920,8 +3932,8 @@ write_file_locked(
 	 * later chunk failed, so the inode is dirty and the cached copy stale
 	 * either way; the size moves only over what was written.
 	 */
-	if (offset > fp->f_ic->i_size) {
-		fp->f_ic->i_size = offset;
+	if (offset > start && offset > fp->f_ic->i_size) {
+		fp->f_ic->i_size = offset;	/* only over what was written */
 		linked = 1;	/* the inode changed: dirty either way */
 	}
 	if (rc == 0 || linked) {
@@ -3972,9 +3984,11 @@ fresh_indirect_block(struct ext2fs_file *fp)
  * directly or through the indirect blocks, allocating those as it goes.  The
  * order holds in the in-core map; on the disk an indirect block written here
  * can name a data block whose bytes are still in the cache, until the next
- * sync.  A failure can leave an on-disk indirect block naming the data block
- * already, so the caller keeps it allocated; an indirect block allocated
- * before the failure is left allocated too.
+ * sync.  The one on-disk reference to the data block is written last, with
+ * nothing after it that can fail (a parent is updated only when its child
+ * was just allocated), so a failure leaves the data block reachable from
+ * nothing on the disk and the caller frees it; an indirect block allocated
+ * before the failure is left allocated, as it always was.
  */
 static int
 link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
@@ -4007,7 +4021,7 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 		int idx2 = rem % nindir;
 		daddr_t dind =
 			fp->f_ic->i_block[EXT2_DIND_BLOCK];
-		daddr_t sind;
+		daddr_t sind, sind_was;
 		vm_offset_t dind_buf;
 		vm_size_t dind_size;
 
@@ -4030,17 +4044,26 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 			((daddr_t *)dind_buf)[idx1]);
 		vm_deallocate(mach_task_self(),
 			      dind_buf, dind_size);
+		sind_was = sind;
 
 		/* Set data block in single-indirect */
 		rc = indirect_set(fp, &sind, idx2,
 				  disk_block, block_size);
 		if (rc != 0) return rc;
 
-		/* Update double-indirect entry if sind
-		 * was just allocated */
-		rc = indirect_set(fp, &dind, idx1,
-				  sind, block_size);
-		if (rc != 0) return rc;
+		/*
+		 * Update the double-indirect entry only if sind was just
+		 * allocated.  #599: written also when it named sind already,
+		 * a failure of that redundant write came after the disk
+		 * already reached the data block (found in review); now the
+		 * data block is reachable from the disk only once nothing
+		 * is left to fail, and a failure frees it safely.
+		 */
+		if (sind_was == 0) {
+			rc = indirect_set(fp, &dind, idx1,
+					  sind, block_size);
+			if (rc != 0) return rc;
+		}
 		fp->f_ic->i_block[EXT2_DIND_BLOCK] = dind;
 		invalidate_ind_cache(fp, 0, sind);
 		invalidate_ind_cache(fp, 1, dind);
@@ -4054,7 +4077,7 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 		int idx3 = rem % nindir;
 		daddr_t tind =
 			fp->f_ic->i_block[EXT2_TIND_BLOCK];
-		daddr_t dind, sind;
+		daddr_t dind, sind, dind_was, sind_was;
 		vm_offset_t tbuf, dbuf;
 		vm_size_t tsize, dsize;
 
@@ -4077,6 +4100,7 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 			((daddr_t *)tbuf)[idx1]);
 		vm_deallocate(mach_task_self(),
 			      tbuf, tsize);
+		dind_was = dind;
 
 		/* Get/alloc double-indirect */
 		if (dind == 0) {
@@ -4095,21 +4119,25 @@ link_fresh_block(struct ext2fs_file *fp, daddr_t file_block, daddr_t disk_block)
 			((daddr_t *)dbuf)[idx2]);
 		vm_deallocate(mach_task_self(),
 			      dbuf, dsize);
+		sind_was = sind;
 
 		/* Set data block in single-indirect */
 		rc = indirect_set(fp, &sind, idx3,
 				  disk_block, block_size);
 		if (rc != 0) return rc;
 
-		/* Update double → single */
-		rc = indirect_set(fp, &dind, idx2,
-				  sind, block_size);
-		if (rc != 0) return rc;
-
-		/* Update triple → double */
-		rc = indirect_set(fp, &tind, idx1,
-				  dind, block_size);
-		if (rc != 0) return rc;
+		/* Update double → single, triple → double: only where the
+		 * child was just allocated (#599, as the double path) */
+		if (sind_was == 0) {
+			rc = indirect_set(fp, &dind, idx2,
+					  sind, block_size);
+			if (rc != 0) return rc;
+		}
+		if (dind_was == 0) {
+			rc = indirect_set(fp, &tind, idx1,
+					  dind, block_size);
+			if (rc != 0) return rc;
+		}
 		fp->f_ic->i_block[EXT2_TIND_BLOCK] = tind;
 		invalidate_ind_cache(fp, 0, sind);
 		invalidate_ind_cache(fp, 1, dind);
@@ -4181,7 +4209,6 @@ flush_metadata_locked(struct ext2fs_file *fp)
 {
 	struct ext2_vnode *vn = fp->f_vnode;
 	int n_dirty = 0;
-	int rc;
 	int w_inode, w_gd, w_super;
 
 	if (!vn)
@@ -4207,10 +4234,7 @@ flush_metadata_locked(struct ext2fs_file *fp)
 	if (n_dirty == 0)
 		return 0;
 
-	vn->v_flushing++;	/* ext2fs_is_dirty: taken, not yet written */
-	rc = flush_metadata_taken(fp, w_inode, w_gd, w_super, n_dirty);
-	vn->v_flushing--;
-	return rc;
+	return flush_metadata_taken(fp, w_inode, w_gd, w_super, n_dirty);
 }
 
 /* #599: the flush proper, over the flags flush_metadata_locked took */
