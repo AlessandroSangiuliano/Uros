@@ -728,6 +728,20 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 		printf("read_inode(%d)\n", i);
 #endif
 	fs = fp->f_fs;
+
+	/*
+	 * #599: checked before it is used.  The number comes off the disk --
+	 * a directory record, most often -- and it picks the group descriptor
+	 * and the block of the inode table, neither of which was bounded: a
+	 * damaged record would have read (and unlink would have freed) an
+	 * inode the filesystem does not have.
+	 */
+	if (inumber < 1 || inumber > (ino_t)fs->s_inodes_count) {
+		printf("ext2: inode %lu asked for, and this filesystem has 1 to "
+		       "%u — refused as damaged\n", (unsigned long)inumber,
+		       (unsigned)fs->s_inodes_count);
+		return FS_CORRUPT;
+	}
 	fp->f_ino = inumber;
 
 	/* Check the inode cache first */
