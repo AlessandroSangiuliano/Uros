@@ -616,6 +616,64 @@ xf_owner_change(const char *path, int arm)
 	}
 }
 
+/*
+ * #599 X3: an inode written through a file kept open does not undo another
+ * inode written since in the same inode-table block.  A file is created and
+ * kept open; a second one is created, written and closed; then the first is
+ * written and synced.  Both stay on the disk: the host's e2fsck finds a name
+ * pointing at an unused inode if the first file's flush wrote back a copy of
+ * the block taken when it was opened.  The arm itself can only say what it
+ * did -- this server answers a stat of the second file from its caches.
+ */
+static void
+xf_neighbour_inodes(const char *path, int arm)
+{
+	char		 a[128], b[128];
+	unsigned char	 one = 0x11;
+	vfs_stat_t	 st;
+	vfs_fd_t	 fa = -1, fb;
+	const char	*step = 0;
+
+	if (xf_scratch_name(a, sizeof(a), path, "xf_keep_a.dat") != 0 ||
+	    xf_scratch_name(b, sizeof(b), path, "xf_keep_b.dat") != 0) {
+		printf("%s: [%d] WRONG — no scratch names next to %s\n", tag,
+		       arm, path);
+		failed++;
+		return;
+	}
+	(void)vfs_unlink(a);
+	(void)vfs_unlink(b);
+	if (vfs_open_rc(a, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fa) != KERN_SUCCESS)
+		step = "creating the file kept open";
+	else if (vfs_write(fa, &one, 1) != 1)
+		step = "writing the file kept open";
+	else if (vfs_open_rc(b, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			     &fb) != KERN_SUCCESS)
+		step = "creating the second file";
+	else {
+		if (vfs_write(fb, &one, 1) != 1 || vfs_sync(fb) != 0)
+			step = "writing the second file";
+		(void)vfs_close(fb);
+		if (step == 0 && (vfs_write(fa, &one, 1) != 1 ||
+				  vfs_sync(fa) != 0))
+			step = "writing the file kept open, again";
+		if (step == 0 && vfs_stat(b, &st) != 0)
+			step = "looking the second file up";
+	}
+	if (fa >= 0)
+		(void)vfs_close(fa);
+	if (step != 0) {
+		printf("%s: [%d] WRONG — %s failed\n", tag, arm, step);
+		failed++;
+		return;
+	}
+	printf("%s: [%d] %s kept open across the making of %s, then written "
+	       "and synced; both left for the host's e2fsck (#599)\n", tag,
+	       arm, a, b);
+	passed++;
+}
+
 static void
 xf_write(const char *path)
 {
@@ -681,6 +739,7 @@ xf_write(const char *path)
 	xf_check_stat(path, 5);
 	xf_fresh_blocks(path, 6);
 	xf_owner_change(path, 7);
+	xf_neighbour_inodes(path, 8);
 }
 
 static void
