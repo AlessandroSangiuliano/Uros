@@ -121,6 +121,8 @@ blk_handles_revoke_by_cap_id(uint64_t cap_id)
 {
 	int n = 0;
 	for (struct blk_handle *h = blk_handles_head; h; h = h->next) {
+		unsigned int i, kept;
+
 		if (h->cap_id == cap_id && !h->revoked) {
 			h->revoked = 1;
 			n++;
@@ -129,6 +131,30 @@ blk_handles_revoke_by_cap_id(uint64_t cap_id)
 			       (unsigned long long)cap_id,
 			       (unsigned)h->recv_port);
 		}
+
+		/*
+		 * #599: and a buffer capability of that id, on any handle.
+		 * The kernel refuses it from the revocation on anyway (and the
+		 * next transfer would forget it); forgetting it here says so
+		 * when it happens, not at the next read.
+		 */
+		for (i = 0, kept = 0; i < h->n_dma_caps; i++) {
+			if (h->dma_cap[i].cap_id == cap_id) {
+				printf("blk: %s: capability %llu forgotten — "
+				       "cap_server says it was revoked\n",
+				       h->part ? h->part->name : "(unknown)",
+				       (unsigned long long)cap_id);
+				h->dropped++;
+				n++;
+				continue;
+			}
+			h->dma_cap[kept++] = h->dma_cap[i];
+		}
+		for (i = kept; i < h->n_dma_caps; i++)
+			memset(&h->dma_cap[i], 0, sizeof(h->dma_cap[i]));
+		h->n_dma_caps = kept;
+		if (h->dma_last >= kept)
+			h->dma_last = 0;
 	}
 	return n;
 }
