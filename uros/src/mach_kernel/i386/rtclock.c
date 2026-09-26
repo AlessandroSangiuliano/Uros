@@ -146,6 +146,11 @@ int	     rtc_print_lost_tick;	    /* print lost tick */
 #define	RTC_MAXRES	(RTC_MINRES / 20)	/* nsec per tick */
 #define	ZANO		(1000000000)
 #define ZHZ             (ZANO / (NSEC_PER_SEC / HZ))
+/*
+ * The 8254's latch command, then its two data bytes: a pair (#599).  Taken
+ * under LOCK_RTC, with the clock's interrupt masked, by rtc_gettime(), which
+ * on SMP reads it only until the TSC is calibrated (mp_tsc_per_us != 0).
+ */
 #define READ_8254(val)	{ \
         outb(PITCTL_PORT, PIT_C0);             \
 	(val) = inb(PITCTR0_PORT);               \

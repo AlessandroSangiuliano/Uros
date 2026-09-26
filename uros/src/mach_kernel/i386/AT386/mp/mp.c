@@ -227,7 +227,11 @@ extern unsigned int	mp_tsc_per_us;		/* rtclock.c: 0 = not calibrated */
 #define	MP_AP_SPEC_BUDGET_US	2000000u	/* 2 s    */
 #define	MP_AP_PIPE_BUDGET_US	100000u		/* 100 ms: all kicked APs */
 
-/* Latch + read 8254 counter 0; valid only with the clock IRQ masked. */
+/*
+ * Latch + read 8254 counter 0; valid only with the clock IRQ masked.  A pair
+ * with one context (#599): mp_tsc_calibrate() runs on the BSP at splhi before
+ * the first AP is kicked (mp_stub.c), so no other processor latches it.
+ */
 #define	MP_READ_8254(v)	{					\
 	outb(PITCTL_PORT, PIT_C0);				\
 	(v)  = inb(PITCTR0_PORT);				\

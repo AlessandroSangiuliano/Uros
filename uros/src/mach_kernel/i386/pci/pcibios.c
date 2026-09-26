@@ -72,6 +72,11 @@ int pci_conf_mode (void)
 	/*---------------------------------------
 	 *      Configuration mode 2 ?
 	 *---------------------------------------
+	 *
+	 * #599: the probe drives 0xCF8/0xCFA/0xCFC outside pci_cfg_port_lock,
+	 * and may: its one caller chain is machine_init -> probeio ->
+	 * pci_configure, on the boot processor, before the others start and
+	 * before any task exists.
 	*/
 
 	outb (CONF2_ENABLE_PORT,     0);
