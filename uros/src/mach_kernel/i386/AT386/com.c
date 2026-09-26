@@ -353,10 +353,38 @@ comprobe(
 		printf("com %d out of range\n", unit);
 		return(0);
 	}
+	/*
+	 * #599: unit 0 is adopted as found, with or without -r.  The probe
+	 * below leaves the chip it found with LCR at 0 (five data bits), DLM
+	 * at 0xFF over whatever DLL held, IER at 0 and the FIFO off -- on a boot
+	 * without -r, the chip the kernel's console writes and that uart.so
+	 * will adopt.  QEMU's chardev sends every byte whatever the divisor and
+	 * word length, so it never showed; on the metal the lines between here
+	 * and uart.so's attach would come out as noise.  A chip is there if its
+	 * scratch register holds a byte, saved and put back; nothing else is
+	 * touched.
+	 */
+#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
+	if (unit == 0) {
+		unsigned char scratch = inb(addr + 7);
+		int there;
+
+		outb(addr + 7, 0x5a);
+		there = inb(addr + 7) == 0x5a;
+		outb(addr + 7, scratch);
+		if (!there)
+			return 0;
+		com_cons_init();
+		printf("com0: adopted as it was found, LCR 0x%02x (#599)\n",
+		       (unsigned)inb(LINE_CTL(addr)));
+		return(1);
+	}
+#else
 	if (unit == 0 && cons_is_com1) {
 		com_cons_init();
 		return(1);
 	}
+#endif
 	oldctl = inb(LINE_CTL(addr));	 /* Save old value of LINE_CTL */
 	oldmsb = inb(BAUD_MSB(addr));	 /* Save old value of BAUD_MSB */
 	outb(LINE_CTL(addr), 0);	 /* Select INTR_ENAB */    
@@ -433,8 +461,18 @@ comattach(
 
 	ttychars(&com_tty[unit]);
 
+	/*
+	 * #599: unit 0's IER and MCR are left as found, with or without -r.
+	 * Since #207 the kernel is not this chip's driver: uart.so is, and
+	 * clearing MCR dropped DTR, RTS and OUT2 under it.
+	 */
+#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
+	if (unit == 0)
+		return;
+#else
 	if (unit == 0 && cons_is_com1)
 		return;
+#endif
 	
 	outb(INTR_ENAB(addr), 0);
 	outb(MODEM_CTL(addr), 0);
