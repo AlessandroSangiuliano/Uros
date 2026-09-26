@@ -206,15 +206,31 @@ static void icr_wait_idle(void)
 
 static void icr_send(uint32_t apic_id, uint32_t command)
 {
-	icr_wait_idle();
+	uint64_t	flags = read_rflags();
+	uint32_t	high;
 
 	/*
 	 * The destination goes in the high half and the command in the low
 	 * half, and writing the low half is what sends it — so the order is
 	 * not a style question.
+	 *
+	 * #599: and the two halves are a pair.  Most callers already had
+	 * interrupts off, but the AP knock at boot (smp.c) runs with them on
+	 * and preemptible, so a tick that sent its own IPI -- or a migration --
+	 * between the halves could send the knock's command to another
+	 * destination.  So the pair is written with interrupts off here, where
+	 * the proof is local, and the high half found on entry is put back, so
+	 * that a nested sender (an NMI's) composes with the one it cut into.
 	 */
+	interrupts_disable();
+	icr_wait_idle();
+	high = lapic_read(LAPIC_ICR_HIGH);
 	lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
 	lapic_write(LAPIC_ICR_LOW, command);
+	icr_wait_idle();
+	lapic_write(LAPIC_ICR_HIGH, high);
+	if (flags & RFLAGS_IF)
+		interrupts_enable();
 }
 
 void lapic_send_init(uint32_t apic_id)

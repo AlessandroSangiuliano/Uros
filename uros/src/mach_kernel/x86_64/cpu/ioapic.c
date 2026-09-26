@@ -224,8 +224,9 @@ void ioapic_unmask(uint32_t gsi)
 
 int ioapic_is_masked(uint32_t gsi)
 {
+	unsigned reg = redir_reg(gsi);	/* can panic: not inside the hold */
 	uint64_t flags = ioapic_pair_enter();
-	int masked = (ioapic_read(redir_reg(gsi)) & RTE_MASKED) != 0;
+	int masked = (ioapic_read(reg) & RTE_MASKED) != 0;
 
 	ioapic_pair_leave(flags);
 	return masked;
