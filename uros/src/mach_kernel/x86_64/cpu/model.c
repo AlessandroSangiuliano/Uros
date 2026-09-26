@@ -117,10 +117,10 @@ halt_cpu(void)
 	 * which is the only thread there will be.
 	 *
 	 * And one line before that, about where this boot's console bytes were
-	 * actually handed over.  It says itself once per boot, whether it is
-	 * reached from here or from a machine that went quiet first; it is
-	 * queued like any other line and the disarm below is what puts it on
-	 * the wire.
+	 * actually handed over: the final copy, said once whichever processor
+	 * comes through first (the quiet census's copies are "so far", #599).
+	 * It is queued like any other line and the disarm below is what puts
+	 * it on the wire.
 	 */
 	cons_ring_report();
 	cons_async_set(0);

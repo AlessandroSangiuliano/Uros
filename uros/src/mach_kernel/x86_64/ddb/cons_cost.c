@@ -160,30 +160,42 @@ cons_cost_report(void)
  * few lines into setup_main and would report a boot that has barely started
  * -- and in particular before there has been a single tick to drain anything.
  *
- * 🔑 AND A RUN ON THIS TARGET HAS TWO ENDS, so it is said from both and said
- * ONCE.  halt_cpu() is one: a panic, a self-test that halts because the boot
- * WAS the test, an operator's halt; it says this before disarming the ring,
- * so the line itself still goes out.  The other is the machine going quiet
- * with everything finished, which is how an ordinary run ends -- the harness
- * stops a kernel that has nothing left to do rather than waiting for it to
- * halt, so a report that only halt_cpu() made would never be printed by the
- * runs that matter most.
+ * 🔑 AND THE KERNEL CANNOT KNOW WHICH MOMENT IS THE END, so there are two
+ * kinds of copy.  halt_cpu() says the final one, "over this boot", ONCE
+ * (cons_ring_report): a panic, a self-test that halts because the boot WAS
+ * the test, an operator's halt; it says it before disarming the ring, so the
+ * line itself still goes out, and every processor the halt reaches comes
+ * through there, which is what the guard is for.  An ordinary run has no
+ * such moment -- the harness stops a kernel that has nothing left to do
+ * rather than waiting for it to halt -- so the quiet census says a copy "so
+ * far this boot" with each of its own reports and when it fires
+ * (cons_ring_lines, #599), and the last one in a log is that run's.  Only
+ * processor 0 says those, and they begin with the census's own word, so the
+ * harness reads them as idle chatter and not as progress.  (#599: the census
+ * used to say the once-a-boot copy itself.  A census whose first report came
+ * after it fired said none, and one that said it early left the halt with
+ * nothing to say -- found in review.)
  *
- * ⚠️ A plain word and no atomic, so two processors arriving together can both
- * print it.  That is the right way round for a report: a line said twice is a
- * reader's mild confusion, a line lost to a failed exchange is a boot with no
- * answer at all.
+ * ⚠️ A plain word and no atomic, so two processors halting together can both
+ * print the final copy.  That is the right way round for a report: a line
+ * said twice is a reader's mild confusion, a line lost to a failed exchange
+ * is a boot with no answer at all.
  */
 static int	cons_ring_said;
 
 void
 cons_ring_report(void)
 {
-	uint64_t hz;
-
 	if (cons_ring_said)
 		return;
 	cons_ring_said = 1;
+	cons_ring_lines("", "over this boot");
+}
+
+void
+cons_ring_lines(const char *lead, const char *when)
+{
+	uint64_t hz;
 
 	/*
 	 * And the other output, beside the wire's figures rather than
@@ -197,28 +209,28 @@ cons_ring_report(void)
 	 * console nobody runs.
 	 */
 	if (!fbcons_present()) {
-		printf("UrMach x86-64: console: no framebuffer was drawn on "
-		       "this boot — COM1 was the only output there was "
-		       "(#568)\n");
+		printf("%sUrMach x86-64: console: no framebuffer was drawn "
+		       "%s — COM1 was the only output there was (#568)\n",
+		       lead, when);
 	} else {
 		uint64_t g = fbcons_glyphs();
 		uint64_t cyc = fbcons_cycles();
 
 		hz = tsc_hz();
 		if (hz == 0 || g == 0)
-			printf("UrMach x86-64: console: the framebuffer drew "
-			       "%llu glyphs in %llu cycles on a %ux%u screen, "
-			       "%llu scrolls — NOT ASKED for the time, no "
-			       "calibrated TSC (#568)\n",
+			printf("%sUrMach x86-64: console: %s the framebuffer "
+			       "drew %llu glyphs in %llu cycles on a %ux%u "
+			       "screen, %llu scrolls — NOT ASKED for the time, "
+			       "no calibrated TSC (#568)\n", lead, when,
 			       (unsigned long long) g,
 			       (unsigned long long) cyc,
 			       fbcons_cols(), fbcons_rows(),
 			       (unsigned long long) fbcons_scrolls());
 		else
-			printf("UrMach x86-64: console: the framebuffer drew "
-			       "%llu glyphs in %llu cycles = %llu ns a glyph "
-			       "on a %ux%u screen, %llu scrolls (#568)\n",
-			       (unsigned long long) g,
+			printf("%sUrMach x86-64: console: %s the framebuffer "
+			       "drew %llu glyphs in %llu cycles = %llu ns a "
+			       "glyph on a %ux%u screen, %llu scrolls (#568)\n",
+			       lead, when, (unsigned long long) g,
 			       (unsigned long long) cyc,
 			       /*
 				* 🔴 DIVIDED BY THE GLYPHS FIRST.  cyc is the
@@ -235,10 +247,10 @@ cons_ring_report(void)
 			       (unsigned long long) fbcons_scrolls());
 	}
 
-	printf("UrMach x86-64: console: over this boot the ring was handed "
-	       "over %u times by the thread that printed, %u by a tick or an "
-	       "idle processor, %u on the way down; %u writers paid for room, "
-	       "%u bytes are still queued (#567)\n",
+	printf("%sUrMach x86-64: console: %s the ring was handed over %u "
+	       "times by the thread that printed, %u by a tick or an idle "
+	       "processor, %u on the way down; %u writers paid for room, %u "
+	       "bytes are still queued (#567)\n", lead, when,
 	       cons_drains(CONS_DRAIN_WRITER), cons_drains(CONS_DRAIN_DEFERRED),
 	       cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
 	       cons_queued());
