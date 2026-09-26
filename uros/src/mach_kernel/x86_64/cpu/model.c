@@ -115,14 +115,7 @@ halt_cpu(void)
 	 * First, and not after the backtrace: everything printed from here on
 	 * -- the backtrace included -- then reaches the port in this thread,
 	 * which is the only thread there will be.
-	 *
-	 * And one line before that, about where this boot's console bytes were
-	 * actually handed over: the final copy, said once whichever processor
-	 * comes through first (the quiet census's copies are "so far", #599).
-	 * It is queued like any other line and the disarm below is what puts
-	 * it on the wire.
 	 */
-	cons_ring_report();
 	cons_async_set(0);
 	fbcons_flush();		/* #568: and out of the write-combining buffers */
 
@@ -165,12 +158,27 @@ halt_cpu(void)
 		 * panicwait is what panic() raises around the message.  Bounded,
 		 * because a processor that dies mid-message must not silence the
 		 * rest: after the wait the report is made anyway.
+		 *
+		 * The console's final copy (#567) waits too, and for the same
+		 * reason: a second panicker arrives here at once, and its two
+		 * lines printed during the first one's message could split
+		 * "panic(cpu", the string the harness knows a panic by (found in
+		 * review, #599: the census no longer says this copy, so the
+		 * second panicker was always first to it).  The ring is off by
+		 * then, so it goes out as it is printed; said once, whichever
+		 * processor comes through first.
 		 */
 		for (spins = 0; spins < 200000000ULL && panicwait; spins++)
 			cpu_pause();
 
+		cons_ring_report();
 		x86_64_backtrace((uint64_t)(uintptr_t)
 				 __builtin_frame_address(0));
+	} else {
+		/* The console's final copy (#567); an orderly halt has no
+		 * message to wait for. */
+		cons_ring_report();
+		fbcons_flush();
 	}
 
 	for (;;)
