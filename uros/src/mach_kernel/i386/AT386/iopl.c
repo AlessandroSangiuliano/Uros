@@ -147,8 +147,12 @@ io_reg_t iopl_port_list[] = {
 	 * still polled-writes here from cnputc → com_putc for printf
 	 * and panic, but userspace TX/RX happens here too (#207). */
 	0x3F8, 0x3F9, 0x3FA, 0x3FB, 0x3FC, 0x3FD, 0x3FE, 0x3FF,
-	/* configuration RAM */
-	0x70, 0x71,			/* XXX should not need! */
+	/*
+	 * configuration RAM, 0x70/0x71: no longer here (#599).  The kernel
+	 * keeps the pair (device_md_io_reserved), whose index port also masks
+	 * NMI, and nothing in userland used it -- this line said "XXX should
+	 * not need!".
+	 */
 	/* game port */
 	0x201,
 	/* sound board */

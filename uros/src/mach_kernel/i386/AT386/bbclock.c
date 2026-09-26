@@ -130,11 +130,52 @@ extern int	rtcget(
 /*
  * Configure battery-backed clock.
  */
+/*
+ * #599: the CMOS is an index/data pair -- a register number to RTC_ADDR
+ * (0x70), then its value through RTC_DATA (0x71) -- and bit 7 of the index
+ * is the NMI mask.  The kernel's own sequences ran on the master only, with
+ * interrupts off, but that was a proof spread over the callers
+ * (bbc_gettime/bbc_settime bind to the master), and a task could reach the
+ * pair through the iopl bitmap and the port RPC.  Both doors are closed now
+ * (device_md_io_reserved, AT386/iopl.c), and every sequence here holds
+ * cmos_lock with interrupts off, so the proof is here: a leaf, the pattern
+ * of #597's PCI pair.
+ */
+static volatile unsigned char	cmos_lock;
+
+static unsigned int
+cmos_enter(void)
+{
+	unsigned int	flags;
+	unsigned char	busy;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+	for (;;) {
+		busy = 1;
+		__asm__ volatile("xchgb %0, %1"
+				 : "+q" (busy), "+m" (cmos_lock)
+				 : : "memory");
+		if (busy == 0)
+			break;
+		__asm__ volatile("pause");
+	}
+	return flags;
+}
+
+static void
+cmos_leave(unsigned int flags)
+{
+	__asm__ volatile("" : : : "memory");
+	cmos_lock = 0;
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
 int
 bbc_config(void)
 {
 	int		BbcFlag;
 	struct rtc_st	rtclk;
+	unsigned int	flags;
 
 #if	NCPUS > 1 && AT386
 	mp_disable_preemption();
@@ -146,10 +187,12 @@ bbc_config(void)
 	/*
 	 * Setup device.
 	 */
+	flags = cmos_enter();
 	outb(RTC_ADDR, RTC_A);
 	outb(RTC_DATA, RTC_DIV2 | RTC_RATE6);
 	outb(RTC_ADDR, RTC_B);
 	outb(RTC_DATA, RTC_HM);
+	cmos_leave(flags);
 
 	/*
 	 * Probe the device by trying to read it.
@@ -336,13 +379,23 @@ int
 rtcget(
 	struct rtc_st	* regs)
 {
+	unsigned int	flags = cmos_enter();
+
 	outb(RTC_ADDR, RTC_D); 
-	if (inb(RTC_DATA) & RTC_VRT == 0)
+	/*
+	 * #599: parenthesised.  It read `inb(RTC_DATA) & RTC_VRT == 0', which
+	 * is `inb(RTC_DATA) & 0', so a clock whose battery had gone flat was
+	 * never refused.
+	 */
+	if ((inb(RTC_DATA) & RTC_VRT) == 0) {
+		cmos_leave(flags);
 		return (-1);
+	}
 	outb(RTC_ADDR, RTC_A);	
 	while (inb(RTC_DATA) & RTC_UIP)		/* busy wait */
 		outb(RTC_ADDR, RTC_A);	
 	load_rtc((unsigned char *)regs);
+	cmos_leave(flags);
 	return (0);
 }	
 
@@ -351,6 +404,7 @@ rtcput(
 	struct rtc_st	* regs)
 {
 	register unsigned char	x;
+	unsigned int		flags = cmos_enter();
 
 	outb(RTC_ADDR, RTC_B);
 	x = inb(RTC_DATA);
@@ -359,6 +413,7 @@ rtcput(
 	save_rtc((unsigned char *)regs);
 	outb(RTC_ADDR, RTC_B);
 	outb(RTC_DATA, x & ~RTC_SET); 
+	cmos_leave(flags);
 }
 
 int

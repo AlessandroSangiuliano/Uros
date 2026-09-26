@@ -347,6 +347,20 @@ device_md_io_reserved(unsigned int base, unsigned int count)
 	 */
 	if (base < 0xCF8 + 8 && 0xCF8 < base + count)
 		return "the PCI configuration ports, which the kernel serialises";
+	/*
+	 * #599: the CMOS pair, serialised under bbclock.c's cmos_lock, whose
+	 * index port is also the NMI mask; and the 8259s and their ELCR, which
+	 * the kernel programs at boot and reads on its clock path
+	 * (rtc_tick_pending's OCW3), and which a task writing them would
+	 * redirect or mask underneath it.
+	 */
+	if (base < 0x70 + 2 && 0x70 < base + count)
+		return "the CMOS, whose index port is also the NMI mask";
+	if ((base < 0x20 + 2 && 0x20 < base + count) ||
+	    (base < 0xA0 + 2 && 0xA0 < base + count))
+		return "the 8259 interrupt controllers";
+	if (base < 0x4D0 + 2 && 0x4D0 < base + count)
+		return "the 8259s' edge/level registers";
 	return 0;
 }
 
