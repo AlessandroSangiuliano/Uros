@@ -340,11 +340,18 @@ ext2_dev_has_batch(struct device *dev)
  *    inode.  Each reads the block afresh, changes one slot and writes the
  *    block back while holding it: a block holds many inodes, and a copy
  *    written back without being read again undid its neighbours.  Leaf.
+ *  - ext2_icache_lock (global, #599): every mount's inode cache.  The
+ *    writeback thread's flushes write it (icache_follow) while path walks
+ *    on the MIG thread read and fill it (read_inode), and an entry is a
+ *    number and 128 bytes: read unlocked, one inode's fields came under
+ *    another's number (found in review).  Leaf.
  *
  * Lock order: v_lock -> ext2_alloc_lock (write-extend allocates while
  * holding the vnode); v_lock -> ext2_itable_lock (flush); v_lock -> pc_lock
- * (page cache) via the data path.  Never the reverse.
+ * (page cache) via the data path; v_lock -> ext2_icache_lock (flush).
+ * Never the reverse.
  */
+static pthread_mutex_t ext2_icache_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ext2_alloc_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ext2_itable_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ext2_vnode_table_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -603,29 +610,71 @@ ext2_get_mount(struct device *dev)
  * Inode cache — per-mount, accessed via ext2_mount.
  */
 
-static struct ext2_inode *
-icache_lookup(struct ext2_mount *m, ino_t ino)
+/*
+ * #599: every access under ext2_icache_lock, and a generation that moves
+ * whenever the cache is told something newer than a disk read could know --
+ * a flush's inode (icache_follow) or an invalidation.  read_inode takes the
+ * generation before its disk read and fills the cache only if it has not
+ * moved: otherwise a walk that read the disk before a flush put the
+ * pre-flush inode back after the flush's (found in review).
+ */
+static unsigned int ext2_icache_gen;
+
+static int
+icache_get(struct ext2_mount *m, ino_t ino, struct ext2_inode *out,
+	   unsigned int *gen)
 {
 	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
-	if (e->ic_ino == ino)
-		return &e->ic_inode;
-	return NULL;
+	int hit = 0;
+
+	pthread_mutex_lock(&ext2_icache_lock);
+	if (e->ic_ino == ino) {
+		*out = e->ic_inode;
+		hit = 1;
+	}
+	*gen = ext2_icache_gen;
+	pthread_mutex_unlock(&ext2_icache_lock);
+	return hit;
 }
 
+/* A disk read's inode: kept only if nothing newer was said since `gen'. */
+static void
+icache_fill(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode,
+	    unsigned int gen)
+{
+	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+
+	pthread_mutex_lock(&ext2_icache_lock);
+	if (gen == ext2_icache_gen) {
+		e->ic_ino = ino;
+		e->ic_inode = *inode;
+	}
+	pthread_mutex_unlock(&ext2_icache_lock);
+}
+
+/* What a flush wrote: newer than any disk read in flight. */
 static void
 icache_insert(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
 {
 	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+
+	pthread_mutex_lock(&ext2_icache_lock);
 	e->ic_ino = ino;
 	e->ic_inode = *inode;
+	ext2_icache_gen++;
+	pthread_mutex_unlock(&ext2_icache_lock);
 }
 
 static void
 icache_invalidate(struct ext2_mount *m, ino_t ino)
 {
 	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+
+	pthread_mutex_lock(&ext2_icache_lock);
 	if (e->ic_ino == ino)
 		e->ic_ino = 0;
+	ext2_icache_gen++;
+	pthread_mutex_unlock(&ext2_icache_lock);
 }
 
 /*
@@ -779,7 +828,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	struct ext2_super_block	*fs;
 	daddr_t			disk_block;
 	kern_return_t		rc;
-	struct ext2_inode	*cached = NULL;
+	unsigned int		icache_gen = 0;
 
 #ifdef	DEBUG
 	int	i = inumber;
@@ -806,13 +855,10 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	/* Check the inode cache first */
 	{
 	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
-	if (m)
-		cached = icache_lookup(m, inumber);
-	}
-	if (cached) {
+	if (m && icache_get(m, inumber, fp->f_ic, &icache_gen)) {
 		free_file_buffers(fp);
-		*fp->f_ic = *cached;
 		return (0);
+	}
 	}
 
 	/* Cache miss — read from disk */
@@ -868,11 +914,11 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	    inode->i_fsize = raw_inode->i_fsize;
 	}
 
-	/* Populate the inode cache */
+	/* Populate the inode cache, unless it was told something newer */
 	{
 	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
 	if (m)
-		icache_insert(m, inumber, fp->f_ic);
+		icache_fill(m, inumber, fp->f_ic, icache_gen);
 	}
 
 	/*
