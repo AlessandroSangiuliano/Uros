@@ -101,6 +101,19 @@ extern task_t port_name_to_task(mach_port_t name);
 
 decl_mutex_data(static, device_table_lock)
 
+/*
+ * #599: irq_forward_table's check-then-act sections -- register, the
+ * message-signalled register, unregister, intr_enable, a task's death --
+ * were guarded by splhigh() alone, which is per processor.  Two processors
+ * registering one line both found it free, and two unregisters by one task
+ * both found themselves the owner and both dropped its reference.  This spin
+ * lock is taken inside splhigh() by every writer, and by the bottom half
+ * for the two fields it reads.  Not device_table_lock: that one is a mutex,
+ * and the sections below run with interrupts masked.  Nothing that can
+ * block runs under it; task_deallocate() is called after it is dropped.
+ */
+decl_simple_lock_data(static, irq_forward_lock)
+
 /* The grace-period callbacks that make a retired slot reusable (#538);
  * defined beside the tables they belong to. */
 static void	claim_slot_retired(struct urmach_rcu_head *h);
@@ -219,12 +232,15 @@ irq_forward_thread(void)
 			 * rather than left pending for ever.
 			 */
 			s = splhigh();
+			simple_lock(&irq_forward_lock);
 			pending = device_md_irq_pending_take(&irq_pending[irq]);
 			if (pending == 0 || !irq_forward_table[irq].active) {
+				simple_unlock(&irq_forward_lock);
 				splx(s);
 				continue;
 			}
 			notify = irq_forward_table[irq].notify_port;
+			simple_unlock(&irq_forward_lock);
 			splx(s);
 
 			if (notify == IP_NULL)
@@ -309,6 +325,7 @@ device_master_init(void)
 	int i;
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
+	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
 
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
@@ -1150,12 +1167,14 @@ ds_master_device_intr_register(
 	irq_forward_thread_start();
 
 	s = splhigh();
+	simple_lock(&irq_forward_lock);
 	/*
 	 * Inside the section and not before it (#538): read outside, two
 	 * registrations for one line could both find it free, and both would
 	 * write it and both would register a machine handler for it.
 	 */
 	if (irq_forward_table[irq].active) {
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		return KERN_RESOURCE_SHORTAGE;	/* already registered */
 	}
@@ -1181,11 +1200,13 @@ ds_master_device_intr_register(
 		irq_forward_table[irq].notify_port = IP_NULL;
 		irq_forward_table[irq].active = 0;
 		irq_forward_table[irq].owner = TASK_NULL;
-		task_deallocate(me);
+		simple_unlock(&irq_forward_lock);
 		splx(s);
+		task_deallocate(me);	/* outside the spin lock */
 		return KERN_FAILURE;
 	}
 
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -1245,10 +1266,17 @@ ds_master_device_msi_register(
 
 	irq_forward_thread_start();
 
+	/*
+	 * Under irq_forward_lock from the allocation on (#599): the machine's
+	 * slot counter (x86-64's msi_next) is a read and an increment, and two
+	 * processors allocating at once took the same slot.
+	 */
 	s = splhigh();
+	simple_lock(&irq_forward_lock);
 
 	if (!device_md_msi_register(bus, dev, func, entry,
 				    irq_forward_handler, &slot)) {
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		return KERN_FAILURE;
 	}
@@ -1261,6 +1289,7 @@ ds_master_device_msi_register(
 	 */
 	if (slot >= IRQ_FORWARD_MAX) {
 		device_md_msi_unregister(slot);
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		return KERN_FAILURE;
 	}
@@ -1281,6 +1310,7 @@ ds_master_device_msi_register(
 	irq_forward_table[slot].owner = me;
 	task_reference(me);
 
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	*slot_out = slot;
@@ -1302,8 +1332,20 @@ ds_master_device_intr_unregister(
 	if (irq >= IRQ_FORWARD_MAX)
 		return KERN_INVALID_ARGUMENT;
 
-	if (!irq_forward_table[irq].active)
+	/*
+	 * The two checks inside the lock, with what they decide (#599): read
+	 * before it, two unregisters of one line by one task both found it
+	 * active and both found themselves its owner, and both dropped the
+	 * owner's reference.
+	 */
+	s = splhigh();
+	simple_lock(&irq_forward_lock);
+
+	if (!irq_forward_table[irq].active) {
+		simple_unlock(&irq_forward_lock);
+		splx(s);
 		return KERN_INVALID_ARGUMENT;
+	}
 
 	/*
 	 * 🔑 THE LINE IS GIVEN BACK BY WHOEVER TOOK IT (#511).  Any active
@@ -1312,12 +1354,12 @@ ds_master_device_intr_unregister(
 	 * its notifications simply cease.
 	 */
 	if (irq_forward_table[irq].owner != current_task()) {
+		simple_unlock(&irq_forward_lock);
+		splx(s);
 		printf("device_intr_unregister: irq %u was registered by "
 		       "another task\n", irq);
 		return KERN_NO_ACCESS;
 	}
-
-	s = splhigh();
 
 	/*
 	 * The line first, the entry second -- the mirror of register, and for
@@ -1368,11 +1410,13 @@ ds_master_device_intr_unregister(
 		task_t owner = irq_forward_table[irq].owner;
 
 		irq_forward_table[irq].owner = TASK_NULL;
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		task_deallocate(owner);
 		return KERN_SUCCESS;
 	}
 
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -1402,19 +1446,22 @@ ds_master_device_intr_enable(
 		return KERN_INVALID_ARGUMENT;
 
 	s = splhigh();
+	simple_lock(&irq_forward_lock);
 	/*
 	 * The same question as unregister's, for the same reason: unmasking a
 	 * line is an act on somebody's device.
 	 */
 	if (irq_forward_table[irq].owner != current_task()) {
+		simple_unlock(&irq_forward_lock);
+		splx(s);	/* #538: this return left the processor at SPLHI */
 		printf("device_intr_enable: irq %u was registered by another "
 		       "task\n", irq);
-		splx(s);	/* #538: this return left the processor at SPLHI */
 		return KERN_NO_ACCESS;
 	}
 
 	if (irq_forward_mask_safe((int)irq))
 		device_md_irq_unmask(irq);
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -4001,6 +4048,13 @@ device_master_task_terminating(task_t task)
 			continue;
 
 		s = splhigh();
+		simple_lock(&irq_forward_lock);
+		if (irq_forward_table[i].owner != task) {
+			/* given back on another processor since the look above */
+			simple_unlock(&irq_forward_lock);
+			splx(s);
+			continue;
+		}
 		if (irq_forward_table[i].active) {
 			device_md_irq_mask(i);
 			irq_forward_table[i].active = 0;
@@ -4009,6 +4063,7 @@ device_master_task_terminating(task_t task)
 		}
 		owner = irq_forward_table[i].owner;
 		irq_forward_table[i].owner = TASK_NULL;
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 
 		printf("device: task 0x%lx died holding irq %u — the line is "
