@@ -485,6 +485,19 @@ unsigned int cons_set_divisor(unsigned int divisor)
 }
 
 /*
+ * #599: LCR written for the task that holds COM1 (device_io_port_write), under
+ * the same lock, so it cannot land inside cons_set_divisor's sequence --
+ * closing the latch before DLM -- nor be overwritten by the LCR it restores.
+ * Bit 7 never arrives: device_io_port_write refuses it.
+ */
+void cons_lcr_write(unsigned int value)
+{
+	hw_lock_lock(&cons_tx_lock);
+	outb(COM1 + UART_LCR, (uint8_t)(value & ~0x80u));
+	hw_lock_unlock(&cons_tx_lock);
+}
+
+/*
  * Hand ONE byte from the ring to the port.
  *
  * 🔴 ONE BYTE PER HOLD, AND THAT IS THE WHOLE POINT.  hw_lock masks

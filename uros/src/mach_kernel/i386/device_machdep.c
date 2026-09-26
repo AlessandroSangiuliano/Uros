@@ -281,6 +281,13 @@ device_md_debugger_break(void)
 void
 device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 {
+	extern void com_lcr_write(unsigned int value);
+
+	/* #599: COM1's LCR goes under the lock the divisor takes */
+	if (port == 0x3FB && size == 1) {
+		com_lcr_write(value);
+		return;
+	}
 	switch (size) {
 	case 1:	outb((i386_ioport_t)port, (unsigned char)value); break;
 	case 2:	outw((i386_ioport_t)port, (unsigned short)value); break;
@@ -320,6 +327,30 @@ device_md_io_claimed(unsigned int base, unsigned int count,
 	if (range_touches(base, count, 0x60) || range_touches(base, count, 0x64))
 		return ddb_kbd_8042_claimed();
 	return 0;
+}
+
+/*
+ * #599: see <device/device_machdep.h>.  COM1 is the one window known here,
+ * and its scratch register (0x3FF) is outside it: that is what a driver's
+ * probe writes before it claims, and nothing the chip does depends on it.
+ */
+int
+device_md_io_window(unsigned int port, unsigned int size, unsigned int *base,
+		    unsigned int *count)
+{
+	if (port < 0x3F8 + 7 && 0x3F8 < port + size) {
+		*base = 0x3F8;
+		*count = 8;
+		return 1;
+	}
+	return 0;
+}
+
+int
+device_md_io_opens_latch(unsigned int port, unsigned int size,
+			 unsigned int data)
+{
+	return port == 0x3FB && size == 1 && (data & 0x80u) != 0;
 }
 
 int

@@ -753,6 +753,25 @@ uart_probe(const struct hal_device_info *dev)
  * ============================================================ */
 
 /*
+ * #599: LCR goes through the kernel on both targets.  On i386 the I/O
+ * permission bitmap no longer lets a task reach it: its bit 7 opens the
+ * divisor latch under the kernel's console, and device_io_port_write
+ * refuses that bit.  Written only at attach and at set_attr.
+ */
+static void
+uart_lcr_out(uint8_t v)
+{
+	kern_return_t kr;
+
+	kr = device_io_port_write(char_core_device_port(),
+				  (natural_t)(UART_BASE + UART_LCR), 1,
+				  (natural_t)v);
+	if (kr != KERN_SUCCESS)
+		printf("uart: LCR 0x%02x refused by the kernel (kr=%d)\n",
+		       (unsigned)v, (int)kr);
+}
+
+/*
  * #599: the divisor is set by the kernel, on both targets.  The latch shares
  * its two ports with THR and IER, switched by LCR bit 7, and on i386 the
  * kernel's console writes THR from any context with its own outb: a latch
@@ -820,7 +839,7 @@ uart_attach(void *priv)
 	 * crystal / 16x clock).  The kernel boot path leaves the UART
 	 * at the same setting, so existing kernel printfs continue to
 	 * land at the right speed. */
-	uart_out(UART_LCR, LCR_8N1);
+	uart_lcr_out(LCR_8N1);
 	uart_set_divisor(1);
 
 	/* Enable + reset both FIFOs, RX trigger 1 byte (low latency). */
@@ -1021,7 +1040,7 @@ uart_tty_set_attr(void *priv, uint32_t baud, uint32_t data_bits,
 	 * a divisor change under a byte in flight corrupts that byte. */
 	(void)pthread_mutex_lock(&p->tx_lock);
 	uart_out(UART_IER, 0x00);
-	uart_out(UART_LCR, lcr);
+	uart_lcr_out(lcr);
 	uart_set_divisor((uint16_t)divisor);
 	uart_ier_write(p);	/* THRE back on if the ring is not empty */
 	uart_tx_unlock(p);

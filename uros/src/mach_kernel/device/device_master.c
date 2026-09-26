@@ -3024,6 +3024,20 @@ check_io_port(unsigned int port, unsigned int size)
 	if (device_md_io_reserved(port, size) != 0)
 		return KERN_NO_ACCESS;
 
+	/*
+	 * #599: a chip reached only by the task that claimed all of it.  An
+	 * unclaimed port falls through to check_io_claim() below, which lets
+	 * it through -- so any holder of the master port could write COM1's
+	 * LCR without claiming a thing.
+	 */
+	{
+		unsigned int wb, wc;
+
+		if (device_md_io_window(port, size, &wb, &wc) &&
+		    !holds_io_window(wb, wc))
+			return KERN_NO_ACCESS;
+	}
+
 	urmach_rcu_read_lock();
 	n = device_nclaims;
 	for (i = 0; i < n && !mine && other_bdf == DEVICE_DMA_NO_BDF; i++) {
@@ -3144,6 +3158,9 @@ ds_master_device_io_port_write(
 	kr = check_io_port(port, size);
 	if (kr != KERN_SUCCESS)
 		return kr;
+	/* #599: the divisor latch is opened only by set_divisor */
+	if (device_md_io_opens_latch(port, size, data))
+		return KERN_NO_ACCESS;
 
 	device_md_io_write(port, size, data);
 	return KERN_SUCCESS;

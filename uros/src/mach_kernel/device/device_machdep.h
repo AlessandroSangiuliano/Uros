@@ -157,6 +157,29 @@ extern int		device_md_io_set_divisor(unsigned int base,
 						 unsigned int *readback);
 
 /*
+ * #599: a chip whose registers are reached only by the task that claimed all
+ * of them: answers 1 and the window to claim when [port, port + size) touches
+ * one of those registers.  An unclaimed port is otherwise open to every holder
+ * of the master port, and a task that wrote one register of COM1 -- LCR,
+ * opening the divisor latch -- reached the console's chip without claiming
+ * anything.  A register a probe must reach before it claims (COM1's scratch
+ * register) is not one of them.
+ */
+extern int		device_md_io_window(unsigned int port,
+					    unsigned int size,
+					    unsigned int *base,
+					    unsigned int *count);
+
+/*
+ * #599: a write that would open a 16550's divisor latch (LCR bit 7).  The
+ * divisor is set only by device_io_port_set_divisor, under the lock the
+ * kernel's own writes to the chip take.
+ */
+extern int		device_md_io_opens_latch(unsigned int port,
+						 unsigned int size,
+						 unsigned int data);
+
+/*
  * Whether a range of legacy ports touches one the kernel keeps for itself,
  * and whose it is (#508).  Returns the owner's name, or 0.
  *

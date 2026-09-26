@@ -1406,6 +1406,24 @@ com_set_divisor(unsigned int divisor)
 	return readback;
 }
 
+/*
+ * #599: LCR written for a task (device_io_port_write; the I/O bitmap no longer
+ * reaches it).  Under com_bank_lock, so it cannot land between the halves of a
+ * divisor sequence -- closing the latch before DLM, which would then be IER --
+ * or be overwritten by the LCR that sequence puts back.  Bit 7 never arrives:
+ * device_io_port_write refuses it.
+ */
+void
+com_lcr_write(unsigned int value)
+{
+	unsigned int flags;
+	int took;
+
+	took = com_bank_enter(&flags);
+	outb(LINE_CTL(COM0_ADDR), value & ~iDLAB);
+	com_bank_leave(flags, took);
+}
+
 void
 com_putc(
 	char		c)

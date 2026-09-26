@@ -104,6 +104,13 @@ device_md_io_read(unsigned int port, unsigned int size)
 void
 device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 {
+	extern void cons_lcr_write(unsigned int value);
+
+	/* #599: COM1's LCR goes under the lock the divisor takes */
+	if (port == 0x3FB && size == 1) {
+		cons_lcr_write(value);
+		return;
+	}
 	switch (size) {
 	case 1:	outb((uint16_t)port, (uint8_t)value); break;
 	case 2:	outw((uint16_t)port, (uint16_t)value); break;
@@ -128,6 +135,30 @@ covers_com1(unsigned int base, unsigned int count)
 {
 	return (base <= COM1_BASE
 		&& base + count >= COM1_BASE + COM1_COUNT) ? TRUE : FALSE;
+}
+
+/*
+ * #599: see <device/device_machdep.h>.  COM1 is the one window known here,
+ * and its scratch register (0x3FF) is outside it: that is what a driver's
+ * probe writes before it claims, and nothing the chip does depends on it.
+ */
+int
+device_md_io_window(unsigned int port, unsigned int size, unsigned int *base,
+		    unsigned int *count)
+{
+	if (port < 0x3F8 + 7 && 0x3F8 < port + size) {
+		*base = 0x3F8;
+		*count = 8;
+		return 1;
+	}
+	return 0;
+}
+
+int
+device_md_io_opens_latch(unsigned int port, unsigned int size,
+			 unsigned int data)
+{
+	return port == 0x3FB && size == 1 && (data & 0x80u) != 0;
 }
 
 /* #599: see <device/device_machdep.h>; COM1 is the one 16550 known here. */
