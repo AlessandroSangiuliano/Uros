@@ -1116,6 +1116,51 @@ ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
 }
 
 /*
+ * #599: the page cache's fill for this handle's device -- page_cache_get runs
+ * it, with no lock held, on a slot it has keyed FILLING.  All `size' bytes of
+ * `block', or an error:
+ *  - a DMA-pool slot on a device with the physical path: read into it
+ *    through `phys';
+ *  - a DMA-pool slot without that path: read out of line, then copied in --
+ *    a DMA-pool page is never handed to a copy-path RPC;
+ *  - a slab slot (phys 0): read into it in place.
+ * No fallback on a refusal: the block server's KERN_NO_ACCESS is the answer.
+ */
+static int
+ext2_fill(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
+	  vm_offset_t phys)
+{
+	struct ext2fs_file	*fp = (struct ext2fs_file *)ctx;
+	recnum_t		 rec = (recnum_t)dbtorec(&fp->f_dev,
+					   ext2_fsbtodb(fp->f_fs, block));
+	io_buf_len_t		 br = 0;
+	vm_size_t		 got = 0;
+	vm_offset_t		 buf = 0;
+	kern_return_t		 rc;
+
+	if (phys != 0 && ext2_dev_has_phys(&fp->f_dev)) {
+		vm_address_t pa = phys;
+
+		rc = ext2_dev_read_phys(&fp->f_dev, rec, (io_buf_len_t)size,
+					&pa, 1, &br);
+		if (rc == 0 && br != (io_buf_len_t)size)
+			rc = D_IO_ERROR;
+		return rc;
+	}
+	if (phys != 0) {
+		rc = ext2_dev_read(&fp->f_dev, rec, (io_buf_len_t)size,
+				   (io_buf_ptr_t *)&buf, &got);
+		if (rc == 0) {
+			memcpy((void *)data, (void *)buf, size);
+			(void) vm_deallocate(mach_task_self(), buf, got);
+		}
+		return rc;
+	}
+	return ext2_dev_read_overwrite(&fp->f_dev, rec, (io_buf_len_t)size,
+				       data, &got);
+}
+
+/*
  * Read a portion of a file into an internal buffer.  Return
  * the location in the buffer and the amount in the buffer.
  */
@@ -1269,75 +1314,42 @@ fallback_read:
 		}
 
 		if (fp->f_dev.cache) {
-			vm_offset_t cached;
-			vm_size_t   cached_size;
+			struct page_cache_entry *e = NULL;
 
-			if (page_cache_lookup(fp->f_dev.cache, disk_block,
-					      &cached, &cached_size) == 0) {
-				/* Page cache hit — copy to caller */
-				memcpy((void *)*buf_p, (void *)cached,
+			/*
+			 * #599: readahead first, outside the fill -- its
+			 * block_map takes the vnode lock, which a fill must
+			 * never be inside -- and only for a sequential read of
+			 * a block not already held.
+			 */
+			if (file_block == fp->f_ra_last_block + 1 &&
+			    !page_cache_contains(fp->f_dev.cache, disk_block))
+				ext2_readahead(fp, file_block, disk_block);
+
+			/*
+			 * #599: through page_cache_get, which reads a miss
+			 * into a slot nobody else can see until the read has
+			 * landed, and withdraws it if the read fails.  The old
+			 * path keyed the slot first and read after, so a
+			 * failed read left an unread block cached.
+			 */
+			rc = page_cache_get(fp->f_dev.cache, disk_block,
+					    ext2_fill, fp, &e);
+			if (rc != 0)
+				return (rc);
+			if (e != NULL) {
+				memcpy((void *)*buf_p, (void *)e->pc_data,
 				       block_size);
+				page_cache_put(fp->f_dev.cache, e);
 				*size_p = block_size;
 			} else {
-				/* Page cache miss — readahead if sequential */
-				if (file_block == fp->f_ra_last_block + 1)
-					ext2_readahead(fp, file_block,
-						       disk_block);
-
-				/* Re-check cache after readahead */
-				if (page_cache_lookup(fp->f_dev.cache,
-						disk_block,
-						&cached, &cached_size) == 0) {
-					memcpy((void *)*buf_p,
-					       (void *)cached, block_size);
-					*size_p = block_size;
-				} else if (fp->f_dev.cache->pc_dma_pool &&
-					   ext2_dev_has_phys(&fp->f_dev)) {
-					/* Zero-copy DMA into cache */
-					struct page_cache_entry *e;
-					e = page_cache_alloc_entry(
-						fp->f_dev.cache, disk_block);
-					if (e) {
-						/* #599: not narrowed */
-						vm_address_t pa = e->pc_phys;
-						io_buf_len_t br;
-						rc = ext2_dev_read_phys(
-							&fp->f_dev,
-							(recnum_t) dbtorec(
-								&fp->f_dev,
-								ext2_fsbtodb(fs,
-									disk_block)),
-							(io_buf_len_t) block_size,
-							&pa, 1, &br);
-						if (rc == 0 && br !=
-						    (io_buf_len_t)block_size)
-							rc = D_IO_ERROR; /* #599 */
-						if (rc)
-							return (rc);
-						memcpy((void *)*buf_p,
-						       (void *)e->pc_data,
-						       block_size);
-						*size_p = block_size;
-					} else {
-						goto fallback_read_direct;
-					}
-				} else {
-fallback_read_direct:
-					/* Single block read (fallback) */
-					rc = ext2_dev_read_overwrite(
-						&fp->f_dev,
-						(recnum_t) dbtorec(&fp->f_dev,
-							ext2_fsbtodb(fs,
-								disk_block)),
-						(int) block_size,
-						*buf_p,
-						size_p);
-					if (rc)
-						return (rc);
-					page_cache_insert(fp->f_dev.cache,
-							  disk_block,
-							  *buf_p, *size_p);
-				}
+				/* No slot to give: read uncached, keep none */
+				rc = ext2_dev_read_overwrite(&fp->f_dev,
+					(recnum_t) dbtorec(&fp->f_dev,
+						ext2_fsbtodb(fs, disk_block)),
+					(int) block_size, *buf_p, size_p);
+				if (rc)
+					return (rc);
 			}
 		} else {
 			rc = ext2_dev_read_overwrite(&fp->f_dev,
@@ -1490,6 +1502,19 @@ ext2_dirent_selftest(unsigned int *ran, unsigned int *wrong)
  * each written to fail when its fix is taken out.  *ran counts the cases,
  * *wrong the wrong answers.
  */
+/* The self-test's caches never hold a dirty block; a writeback is wrong. */
+static int
+ext2_selftest_writeback(void *ctx, daddr_t block, vm_offset_t data,
+			vm_size_t size, vm_offset_t phys)
+{
+	(void)ctx;
+	(void)block;
+	(void)data;
+	(void)size;
+	(void)phys;
+	return KERN_FAILURE;
+}
+
 void
 ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 {
@@ -1581,6 +1606,38 @@ ext2_blockio_selftest(unsigned int *ran, unsigned int *wrong)
 	(*ran)++;
 	if (rc != 0 || buf < 4096 || size != 1024 - 5)
 		(*wrong)++;
+
+	/*
+	 * E3: an aligned read goes through the page cache's get, and a read
+	 * that fails leaves nothing cached: after it the block is not held and
+	 * the cache counted one miss.
+	 */
+	{
+		struct page_cache	*pc;
+		vm_offset_t		 page = 0;
+		vm_size_t		 got = 1024;
+
+		pc = page_cache_create(4, 1024, ext2_selftest_writeback, 0);
+		if (pc != NULL &&
+		    vm_allocate(mach_task_self(), &page, 4096, TRUE) ==
+		    KERN_SUCCESS) {
+			f.f_dev.cache = pc;
+			f.f_ra_last_block = (daddr_t)-2; /* not sequential */
+			buf = page;
+			rc = buf_read_file(&f, 1024, &buf, &got);
+			(*ran)++;
+			if (rc == 0 || page_cache_contains(pc, 20) ||
+			    pc->pc_misses != 1)
+				(*wrong)++;
+			f.f_dev.cache = NULL;
+			(void) vm_deallocate(mach_task_self(), page, 4096);
+		} else {
+			(*ran)++;
+			(*wrong)++;
+		}
+		if (pc != NULL)
+			(void) page_cache_destroy(pc);
+	}
 
 	free_file_buffers(&f);
 	ext2_selftest_quiet = 0;
