@@ -334,9 +334,9 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 		 * #599: a DMA-pool page on a device without the physical path
 		 * is copied to the heap first.  It went to blk_write as it
 		 * was, and the out-of-line device_write cannot take a page of
-		 * the DMA pool (see dir_write_block in ext2fs.c, which copies
-		 * for the same reason) -- what reached the disk was not the
-		 * block.
+		 * the DMA pool (see write_data_block in ext2fs.c, which states
+		 * the same rule for its callers) -- what reached the disk was
+		 * not the block.
 		 */
 		vm_offset_t copy = 0;
 

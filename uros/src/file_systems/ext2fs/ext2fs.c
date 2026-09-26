@@ -928,7 +928,10 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	free_file_buffers(fp);
 
 	/*
-	 * Cache the raw inode block for write-back without re-reading.
+	 * The raw inode block, handed to a new vnode or freed.  #599: NOT for
+	 * write-back -- every flush reads the block afresh under
+	 * ext2_itable_lock (vnode_inode_block), because a copy kept from
+	 * here undid the inodes made in the same block since (8563299e).
 	 */
 	fp->f_inode_blk = buf;
 	fp->f_inode_blk_size = buf_size;
@@ -3429,8 +3432,9 @@ ext2_selftest_dir(struct ext2fs_file *f, struct page_cache *pc,
 }
 
 /*
- * Serialize the in-core inode into the cached raw inode block.
- * The block must already be in fp->f_inode_blk (populated by read_inode).
+ * Serialize the in-core inode into the vnode's inode block,
+ * fp->f_vnode->v_inode_blk, which the caller has just read afresh under
+ * ext2_itable_lock (vnode_inode_block, #599).
  */
 static void
 serialize_inode(struct ext2fs_file *fp)
@@ -3555,7 +3559,9 @@ icache_follow(struct ext2fs_file *fp, int rc)
 }
 
 /*
- * Write the inode back to disk using the cached inode block.
+ * Write the inode back to disk: its block read afresh under ext2_itable_lock
+ * (vnode_inode_block), this inode serialized into it, the block written back
+ * while the lock is held (#599).
  */
 static int
 write_inode(ino_t inumber, struct ext2fs_file *fp)
