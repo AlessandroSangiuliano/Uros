@@ -682,18 +682,26 @@ xf_neighbour_inodes(const char *path, int arm)
  * #599 X4: a block that changes owner leaves nothing of its old owner in the
  * cache -- the discard in block_free and block_alloc, seen through a block
  * this server writes to the disk directly: an indirect block (indirect_set's
- * write_disk_block).  A scratch file of XF_DEAD_I_BLOCKS blocks is written
- * and removed with no sync, so its blocks go back to the bitmap with their
- * bytes still cached, dirty.  A second file then takes XF_IND_BLOCKS blocks,
- * enough to need its single-indirect block, which as a rule is one of the
- * freed ones.  Its data blocks go through the cache and replace any stale
- * copy; its indirect block does not.  With the stale copy left in the cache,
- * the sync writes the removed file's bytes over the indirect block, and the
- * second file, opened again (so no private copy of the map answers), reads
- * blocks that are not its own, or cannot be read at all.
+ * write_disk_block).
+ *
+ * A scratch file of XF_DEAD_I_BLOCKS data blocks -- no indirect block -- is
+ * written and removed with no sync, so its blocks go back to the bitmap with
+ * their bytes still cached, dirty.  A second file then writes ONLY its file
+ * block 12 and 13: the allocator, lowest free first, hands out the data
+ * block for 12 and, right after it, the single-indirect block -- both from
+ * the removed file's blocks.  The data blocks go through the cache and
+ * replace their stale copies; the indirect block does not.  With the stale
+ * copy left in the cache, the sync writes the removed file's bytes over the
+ * indirect block, and the second file, opened again (so no private copy of
+ * the map answers), cannot read blocks 12 and 13.
+ *
+ * ⚠️ The first version wrote the second file from block 0, and its indirect
+ * block landed on the removed file's own indirect block, which was never in
+ * the cache: it passed with the discards taken out (found in review).
  */
-#define XF_DEAD_I_BLOCKS	64u
-#define XF_IND_BLOCKS		14u	/* 12 direct and 2 through the indirect */
+#define XF_DEAD_I_BLOCKS	12u
+#define XF_IND_FIRST		12u	/* the first block through the indirect */
+#define XF_IND_COUNT		2u
 
 static unsigned char
 xf_ind_byte(uint32_t block)
@@ -730,7 +738,12 @@ xf_indirect_steps(const char *dead, const char *ind, uint32_t bs,
 	if (vfs_open_rc(ind, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
 			&fd) != KERN_SUCCESS)
 		return "creating the file with an indirect block";
-	for (b = 0; b < XF_IND_BLOCKS; b++)
+	if (vfs_lseek(fd, (off_t)(XF_IND_FIRST * bs), VFS_SEEK_SET) !=
+	    (off_t)(XF_IND_FIRST * bs)) {
+		(void)vfs_close(fd);
+		return "seeking to its first indirect block";
+	}
+	for (b = XF_IND_FIRST; b < XF_IND_FIRST + XF_IND_COUNT; b++)
 		for (done = 0; done < bs; done += n) {
 			n = bs - done;
 			if (n > sizeof(buf))
@@ -738,8 +751,7 @@ xf_indirect_steps(const char *dead, const char *ind, uint32_t bs,
 			memset(buf, xf_ind_byte(b), n);
 			if (vfs_write(fd, buf, n) != (ssize_t)n) {
 				(void)vfs_close(fd);
-				return "writing the file with an indirect "
-				       "block";
+				return "writing through its indirect block";
 			}
 		}
 	if (vfs_sync(fd) != 0) {
@@ -750,7 +762,12 @@ xf_indirect_steps(const char *dead, const char *ind, uint32_t bs,
 
 	if (vfs_open_rc(ind, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS)
 		return "opening it again";
-	for (b = 0; b < XF_IND_BLOCKS; b++)
+	if (vfs_lseek(fd, (off_t)(XF_IND_FIRST * bs), VFS_SEEK_SET) !=
+	    (off_t)(XF_IND_FIRST * bs)) {
+		(void)vfs_close(fd);
+		return "seeking to its first indirect block again";
+	}
+	for (b = XF_IND_FIRST; b < XF_IND_FIRST + XF_IND_COUNT; b++)
 		for (done = 0; done < bs; done += n) {
 			n = bs - done;
 			if (n > sizeof(buf))
@@ -795,17 +812,21 @@ xf_indirect_owner(const char *path, int arm)
 	(void)vfs_unlink(ind);
 	step = xf_indirect_steps(dead, ind, bs, &bad);
 	(void)vfs_unlink(ind);
-	if (step != 0) {
-		printf("%s: [%d] WRONG — %s failed at block %u of %u: a file "
-		       "that needed an indirect block, made on the blocks of "
-		       "one removed unsynced, did not read back as written "
-		       "(#599)\n", tag, arm, step, bad, XF_IND_BLOCKS);
+	if (step != 0 && bad != 0) {
+		printf("%s: [%d] WRONG — %s failed at file block %u: a file "
+		       "written through its indirect block, on the blocks of "
+		       "one removed unsynced, did not read back after a sync "
+		       "(#599)\n", tag, arm, step, bad);
+		failed++;
+	} else if (step != 0) {
+		printf("%s: [%d] WRONG — the indirect-block arm failed %s "
+		       "(#599)\n", tag, arm, step);
 		failed++;
 	} else {
-		printf("%s: [%d] a file of %u blocks with an indirect block, "
-		       "made on the blocks of one removed unsynced, reads back "
-		       "whole after a sync, opened again (#599)\n", tag, arm,
-		       XF_IND_BLOCKS);
+		printf("%s: [%d] file blocks %u..%u written through an indirect "
+		       "block, on the blocks of a file removed unsynced, read "
+		       "back after a sync, opened again (#599)\n", tag, arm,
+		       XF_IND_FIRST, XF_IND_FIRST + XF_IND_COUNT - 1);
 		passed++;
 	}
 }
