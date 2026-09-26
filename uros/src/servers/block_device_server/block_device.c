@@ -63,8 +63,8 @@ static struct blk_handle *blk_handles_head = NULL;
  * are NOT considered authenticated for I/O: callers must first invoke
  * device_open_cap to obtain a handle.  Returns NULL on any other case.
  */
-static struct blk_partition *
-blk_part_from_authed_handle(mach_port_t device)
+static struct blk_handle *
+blk_authed_handle(mach_port_t device)
 {
 	if (device == 0)
 		return NULL;
@@ -81,7 +81,31 @@ blk_part_from_authed_handle(mach_port_t device)
 	 */
 	if (h->revoked)
 		return NULL;
-	return h->part;
+	return h;
+}
+
+static struct blk_partition *
+blk_part_from_authed_handle(mach_port_t device)
+{
+	struct blk_handle *h = blk_authed_handle(device);
+
+	return h ? h->part : NULL;
+}
+
+/*
+ * #599: a token that verifies AND names the kind of resource expected.
+ * urmach_cap_verify checks the MAC, the id, the ops and revocation, never
+ * the type; once the MAC verifies, the type field is the issuer's.
+ */
+static kern_return_t
+blk_token_check(const struct uros_cap *t, uint32_t type, uint32_t op,
+		uint64_t id)
+{
+	kern_return_t kr = urmach_cap_verify(t, op, id);
+
+	if (kr == KERN_SUCCESS && t->resource_type != type)
+		kr = CAP_ERR_RESOURCE_MISMATCH;
+	return kr;
 }
 
 /*
@@ -190,11 +214,16 @@ blk_handle_destroy(struct blk_handle *h, const char *how)
 		pp = &(*pp)->next;
 	}
 
-	printf("blk: handle for %s %s (cap %llu, port=0x%x)\n",
+	printf("blk: handle for %s %s (cap %llu, port=0x%x) — %u buffer "
+	       "capabilit%s dropped, %u physical request%s refused\n",
 	       h->part ? h->part->name : "(unknown)", how,
 	       (unsigned long long)h->cap_id,
-	       (unsigned)name);
+	       (unsigned)name,
+	       h->n_dma_caps + h->dropped,
+	       h->n_dma_caps + h->dropped == 1 ? "y" : "ies",
+	       h->refusals, h->refusals == 1 ? "" : "s");
 
+	memset(h->dma_cap, 0, sizeof(h->dma_cap));	/* #599 */
 	h->magic = 0;        /* poison so a stray msg can't reuse it */
 	blk_payload_release(h->payload);
 	free(h);
@@ -269,10 +298,11 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	 * client looked up, so try both.
 	 */
 	uint64_t resource_id = cap_name_hash(part->name);
-	kern_return_t kr = urmach_cap_verify(&token, op, resource_id);
+	kern_return_t kr = blk_token_check(&token, RESOURCE_BLK_DEVICE, op,
+					   resource_id);	/* #599: typed */
 	if (kr != KERN_SUCCESS && part->stable_name[0] != '\0') {
 		uint64_t alias_id = cap_name_hash(part->stable_name);
-		kr = urmach_cap_verify(&token, op, alias_id);
+		kr = blk_token_check(&token, RESOURCE_BLK_DEVICE, op, alias_id);
 		if (kr == KERN_SUCCESS)
 			resource_id = alias_id;
 	}
@@ -297,6 +327,7 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	struct blk_handle *h = (struct blk_handle *)malloc(sizeof(*h));
 	if (h == NULL)
 		return KERN_RESOURCE_SHORTAGE;
+	memset(h, 0, sizeof(*h));		/* #599: no capability yet */
 	h->magic     = BLK_MAGIC_HANDLE;
 	h->part      = part;
 	h->cap_id    = token.cap_id;
@@ -738,98 +769,91 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
  * ================================================================ */
 
 /* ================================================================
- * A client's pages, made reachable by THIS server's device (#432)
+ * A client's pages, made reachable by THIS server's device (#432, #599)
  * ================================================================ */
 
 /*
  * 🔴 THE HOLE THIS CLOSES IS THE ONE #432 NAMED `DEVICE_DMA_NO_BDF'.
  *
  * ext_server allocates a scatter-gather page cache and passes the PHYSICAL
- * addresses of those pages on every device_read_phys — because it owns no
+ * addresses of those pages on every device_read_phys -- because it owns no
  * device and has no bus/device/function to name.  Once this server's disk is
- * confined to what it was granted, those pages are in nobody's domain: the
- * transfer is refused, the fault names the page, and the filesystem stops.
- * Correct, diagnosable, and useless.
+ * confined to what it was granted, those pages are in nobody's domain.  The
+ * SERVER WHICH OWNS THE DEVICE does the mapping, and that server is this one.
  *
- * 🔑 The shape the issue asks for is that the SERVER WHICH OWNS THE DEVICE
- * does the mapping, and that server is this one.  So a client's physical
- * address is translated here, into an address this controller can use, and
- * the kernel is what checks that the page is one it handed out for DMA in the
- * first place.
+ * 🔴 #599: ON THE CLIENT'S WORD, PER HANDLE, AND ASKED EVERY TIME.
  *
- * 🔑 LAZILY, AND THAT IS WHY NO PROTOCOL CHANGED.  The alternative was for
- * ext_server to register its buffer with this server once (#498) -- a new
- * conversation between two servers, and a new thing for every future client to
- * remember to do.  Translating on first sight needs neither: the addresses
- * already arrive on every request, and the kernel maps the whole region behind
- * the first page of it, so the cost is one call per page, once, and never
- * again.
+ *  - A client hands the capability for its buffer to the HANDLE it reads
+ *    through (device_register_dma).  It is tried for that handle's
+ *    transfers and nobody else's.  They were kept per controller and tried
+ *    for any client, so once ext_server registered, any task with a handle
+ *    on that controller could have had the disk read or write its page
+ *    cache.
+ *  - Every page of every physical transfer is asked of the kernel
+ *    (device_dma_map_foreign_op), for the direction the transfer needs.
+ *    This server keeps no translation, so it has none that can outlive the
+ *    buffer it came from or the capability behind it: the cache it kept
+ *    was never invalidated, and served a freed region's address to any
+ *    client without asking.
+ *  - A page no capability covers is refused BEFORE any DMA, and the
+ *    client is told so.  The old path sent the untranslated address, the
+ *    engine refused the transfer, the controller reported success, and the
+ *    client was answered with whatever the page held.
  *
- * ⚠️ Direct-mapped and small, with replacement rather than growth.  A miss
- * costs one RPC that finds the region already mapped and answers arithmetic;
- * an unbounded table would cost memory proportional to every client this
- * server ever had.
+ * ⚠️ One exception, until every client hands its buffers over: a handle
+ * whose client has never registered one passes its addresses through, with
+ * a line that says so -- i386's ext_server lived on that path.  Every
+ * refusal on a handle that HAS registered is final.
  */
-#define	BLK_DMA_CACHE		512u
-
-struct blk_dma_entry {
-	vm_address_t	pa;		/* zero when the slot is empty */
-	vm_address_t	dma;
-};
-
-static struct blk_dma_entry blk_dma_cache[MAX_CONTROLLERS][BLK_DMA_CACHE];
-
-/*
- * The capabilities clients have handed this server for their buffers (#432).
- *
- * 🔑 A FEW PER CONTROLLER AND TRIED IN TURN, because this server has no way to
- * tell which client a physical address belongs to until the kernel says so.
- * The kernel does know -- it matches the token against the region containing
- * the page -- so the honest thing here is to offer what it has been given and
- * let the side that can decide, decide.
- *
- * ⚠️ Full REPLACES the oldest rather than refusing.  A client that registers
- * and goes away would otherwise pin a slot forever, and the cost of losing a
- * live one is a mapping that has to be re-established, not a wrong answer:
- * the kernel refuses a token that does not name the region.
- */
-#define	BLK_MAX_CLIENT_CAPS	4
-
-static struct {
-	char		token[CAP_TOKEN_MAX];
-	unsigned int	len;
-} blk_client_cap[MAX_CONTROLLERS][BLK_MAX_CLIENT_CAPS];
-
-static unsigned int blk_client_cap_next[MAX_CONTROLLERS];
 
 kern_return_t
 ds_device_register_dma(mach_port_t device, mach_port_t reply,
 		       mach_msg_type_name_t reply_poly,
 		       char *token, mach_msg_type_number_t tokenCnt)
 {
-	struct blk_partition	*part = blk_part_from_authed_handle(device);
-	unsigned int		ci, slot;
+	struct blk_handle	*h = blk_authed_handle(device);
+	struct uros_cap		t;
+	kern_return_t		kr;
+	unsigned int		i;
 
 	(void)reply;
 	(void)reply_poly;
 
-	if (!part || part->ctrl == NULL)
+	if (h == NULL || h->part == NULL || h->part->ctrl == NULL)
 		return KERN_NO_ACCESS;
-	if (tokenCnt == 0 || tokenCnt > CAP_TOKEN_MAX)
+	if (h->part->ctrl->ops->read_sectors_phys == NULL &&
+	    h->part->ctrl->ops->write_sectors_phys == NULL)
+		return D_INVALID_OPERATION;
+	if (tokenCnt != sizeof(struct uros_cap))
 		return KERN_INVALID_ARGUMENT;
 
-	ci = (unsigned int)(part->ctrl - controllers);
-	if (ci >= MAX_CONTROLLERS)
-		return KERN_INVALID_ARGUMENT;
+	memcpy(&t, token, sizeof(t));
+	kr = blk_token_check(&t, RESOURCE_DMA_BUFFER, CAP_OP_DMA_DEVICE_READ,
+			     t.resource_id);
+	if (kr != KERN_SUCCESS)
+		kr = blk_token_check(&t, RESOURCE_DMA_BUFFER,
+				     CAP_OP_DMA_DEVICE_WRITE, t.resource_id);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: %s: a buffer capability was refused (kr=%d) — "
+		       "it is not a DMA buffer's, or does not verify\n",
+		       h->part->name, (int)kr);
+		return kr;
+	}
 
-	slot = blk_client_cap_next[ci] % BLK_MAX_CLIENT_CAPS;
-	memcpy(blk_client_cap[ci][slot].token, token, tokenCnt);
-	blk_client_cap[ci][slot].len = tokenCnt;
-	blk_client_cap_next[ci]++;
+	for (i = 0; i < h->n_dma_caps; i++)
+		if (h->dma_cap[i].cap_id == t.cap_id)
+			break;
+	if (i == h->n_dma_caps) {
+		if (h->n_dma_caps == BLK_HANDLE_DMA_CAPS)
+			return KERN_NO_SPACE;
+		h->n_dma_caps++;
+	}
+	h->dma_cap[i] = t;
+	h->registered = 1;
 
-	printf("blk: a client handed %s a capability for a buffer it will "
-	       "DMA into (%u bytes, slot %u)\n", part->name,
-	       (unsigned)tokenCnt, slot);
+	printf("blk: a client handed %s a capability for buffer %llu "
+	       "(%u on this handle)\n", h->part->name,
+	       (unsigned long long)t.resource_id, h->n_dma_caps);
 	return KERN_SUCCESS;
 }
 
@@ -862,62 +886,125 @@ blk_pages_cover(mach_msg_type_number_t npages, unsigned int total,
 	return 0;
 }
 
-static vm_address_t
-blk_dma_for(struct blk_controller *ctrl, vm_address_t pa)
+/* A refusal the kernel will give again whatever is asked (#599). */
+static int
+blk_refusal_is_final(kern_return_t kr)
 {
-	unsigned int	ci = (unsigned int)(ctrl - controllers);
-	unsigned int	slot = (unsigned int)((pa >> 12) & (BLK_DMA_CACHE - 1));
-	struct blk_dma_entry *e;
-	natural_t	bdf;
-	vm_address_t	dma = 0;
-	kern_return_t	kr;
+	return kr == CAP_ERR_REVOKED || kr == CAP_ERR_INVALID_TOKEN ||
+	       kr == CAP_ERR_RESOURCE_MISMATCH || kr == KERN_INVALID_ADDRESS;
+}
 
-	if (ci >= MAX_CONTROLLERS)
-		return pa;
+/*
+ * The address this handle's controller reaches page `pa' at, for a transfer
+ * in direction `op' (the device reads the page: CAP_OP_DMA_DEVICE_READ; it
+ * writes it: _WRITE).  Asks the kernel with this handle's capabilities, the
+ * one that answered last first.  Success from any wins.  A capability the
+ * kernel refuses for good (revoked, not genuine, not a buffer's, the buffer
+ * gone) is forgotten; one that does not cover this page or this direction is
+ * kept.  Any other answer ends the search and is returned.
+ */
+static kern_return_t
+blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
+	    vm_address_t *dma)
+{
+	struct blk_controller *ctrl = h->part->ctrl;
+	natural_t	bdf = (natural_t)((ctrl->pci_bus << 8) |
+					  (ctrl->pci_slot << 3) |
+					  ctrl->pci_func);
+	kern_return_t	kr, result = KERN_NO_ACCESS;
+	int		drop[BLK_HANDLE_DMA_CAPS] = { 0 };
+	uint64_t	answered = 0;
+	unsigned int	j, i, n = h->n_dma_caps, kept;
 
-	e = &blk_dma_cache[ci][slot];
-	if (e->pa == pa && e->pa != 0)
-		return e->dma;
+	if (n == 0 && !h->registered) {
+		/* The interim: see the note above ds_device_register_dma. */
+		h->passed++;
+		if ((h->passed & (h->passed - 1)) == 0)
+			printf("blk: %s: a physical %s of 0x%lx passed through "
+			       "untranslated — this handle's client has handed "
+			       "over no buffer capability (%u so far)\n",
+			       h->part->name,
+			       op == CAP_OP_DMA_DEVICE_WRITE ? "read" : "write",
+			       (unsigned long)pa, h->passed);
+		*dma = pa;
+		return KERN_SUCCESS;
+	}
 
-	bdf = (natural_t)((ctrl->pci_bus << 8) | (ctrl->pci_slot << 3)
-			  | ctrl->pci_func);
-
-	/*
-	 * ⚠️ Every capability this controller has been handed, in turn.  This
-	 * server cannot tell which client owns a page; the KERNEL can, because
-	 * it matches the token against the region the page is in.  So the
-	 * choice is made by the side that can make it.
-	 */
-	kr = KERN_NO_ACCESS;
-	for (unsigned int c = 0; c < BLK_MAX_CLIENT_CAPS; c++) {
-		if (blk_client_cap[ci][c].len == 0)
-			continue;
-
-		kr = device_dma_map_foreign(master_device, bdf, pa,
-					    blk_client_cap[ci][c].token,
-					    blk_client_cap[ci][c].len, &dma);
-		if (kr == KERN_SUCCESS)
+	for (j = 0; j < n; j++) {
+		i = (h->dma_last + j) % n;
+		kr = device_dma_map_foreign_op(master_device, bdf, pa, op,
+					       (char *)&h->dma_cap[i],
+					       sizeof(h->dma_cap[i]), dma);
+		if (kr == KERN_SUCCESS) {
+			answered = h->dma_cap[i].cap_id;
+			result = KERN_SUCCESS;
 			break;
+		}
+		if (kr == KERN_PROTECTION_FAILURE)
+			result = kr;
+		else if (blk_refusal_is_final(kr))
+			drop[i] = 1;
+		else if (kr != KERN_NO_ACCESS) {
+			result = kr;
+			break;
+		}
 	}
 
-	if (kr != KERN_SUCCESS) {
-		/*
-		 * ⚠️ The untranslated address is returned, and the transfer
-		 * will be refused by the engine rather than by this line.
-		 * Which is the right way round: a refusal the hardware makes
-		 * names the device and the page, and a silent substitution
-		 * here would turn a diagnosable event back into a timeout.
-		 */
-		printf("blk: the kernel would not map 0x%lx for %02x:%02x.%u "
-		       "(kr=%d) — the transfer will be refused\n",
-		       (unsigned long)pa, (unsigned)(bdf >> 8),
-		       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7), kr);
-		return pa;
+	/* Forget the dead ones, keeping the order; find the one that answered. */
+	for (i = 0, kept = 0; i < n; i++) {
+		if (drop[i]) {
+			printf("blk: %s: capability %llu forgotten — the kernel "
+			       "says it is revoked, not genuine, not a buffer's, "
+			       "or its buffer is gone\n", h->part->name,
+			       (unsigned long long)h->dma_cap[i].cap_id);
+			h->dropped++;
+			continue;
+		}
+		h->dma_cap[kept++] = h->dma_cap[i];
 	}
+	for (i = kept; i < n; i++)
+		memset(&h->dma_cap[i], 0, sizeof(h->dma_cap[i]));
+	h->n_dma_caps = kept;
+	h->dma_last = 0;
+	for (i = 0; i < kept; i++)
+		if (result == KERN_SUCCESS && h->dma_cap[i].cap_id == answered)
+			h->dma_last = i;
 
-	e->pa = pa;
-	e->dma = dma;
-	return dma;
+	return result;
+}
+
+/*
+ * Say a refused physical transfer, per handle: at the first, at every power
+ * of two, and whenever the reason changes (#599).
+ */
+static void
+blk_refused(struct blk_handle *h, vm_address_t pa, natural_t op,
+	    kern_return_t kr)
+{
+	int changed = kr != h->refusal_kr;
+
+	h->refusals++;
+	h->refusal_kr = kr;
+	if (!changed && (h->refusals & (h->refusals - 1)) != 0)
+		return;
+	if (h->n_dma_caps == 0)
+		printf("blk: %s: a physical %s of 0x%lx refused before any DMA "
+		       "— this handle holds no buffer capability (%s); the "
+		       "kernel was not asked (refusal %u on this handle)\n",
+		       h->part->name,
+		       op == CAP_OP_DMA_DEVICE_WRITE ? "read" : "write",
+		       (unsigned long)pa,
+		       h->dropped ? "those handed were revoked or their "
+				    "buffers freed" : "none was handed",
+		       h->refusals);
+	else
+		printf("blk: %s: a physical %s of 0x%lx refused before any DMA "
+		       "— the kernel refused the %u capabilit%s this handle "
+		       "holds (kr=%d) (refusal %u on this handle)\n",
+		       h->part->name,
+		       op == CAP_OP_DMA_DEVICE_WRITE ? "read" : "write",
+		       (unsigned long)pa, h->n_dma_caps,
+		       h->n_dma_caps == 1 ? "y" : "ies", (int)kr, h->refusals);
 }
 
 kern_return_t
@@ -929,11 +1016,13 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		    mach_msg_type_number_t phys_addrsCnt,
 		    io_buf_len_t *bytes_read)
 {
-	struct blk_partition *part = blk_part_from_authed_handle(device);
-	if (!part)
+	struct blk_handle *h = blk_authed_handle(device);
+	if (!h)
 		return KERN_NO_ACCESS;
+	struct blk_partition *part = h->part;
 	struct blk_controller *ctrl = part->ctrl;
 	unsigned int total, nsectors;
+	kern_return_t kr;
 
 	if (!ctrl->ops->read_sectors_phys)
 		return D_INVALID_OPERATION;
@@ -957,8 +1046,21 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		if (phys_addrsCnt > BLK_PHYS_PAGES_MAX)
 			return D_INVALID_SIZE;
 
-		for (i = 0; i < phys_addrsCnt; i++)
-			dma[i] = blk_dma_for(ctrl, phys_addrs[i]);
+		/*
+		 * #599: every page first, for the direction a read needs (the
+		 * device writes the page); the first refusal ends the request
+		 * before the driver is called, so nothing is sent and nothing
+		 * reports success.
+		 */
+		for (i = 0; i < phys_addrsCnt; i++) {
+			kr = blk_dma_for(h, phys_addrs[i],
+					 CAP_OP_DMA_DEVICE_WRITE, &dma[i]);
+			if (kr != KERN_SUCCESS) {
+				blk_refused(h, phys_addrs[i],
+					    CAP_OP_DMA_DEVICE_WRITE, kr);
+				return kr;
+			}
+		}
 
 		if (ctrl->ops->read_sectors_phys(ctrl->priv,
 					  part->disk_index,
@@ -982,9 +1084,11 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		     mach_msg_type_number_t phys_addrsCnt,
 		     io_buf_len_t *bytes_written)
 {
-	struct blk_partition *part = blk_part_from_authed_handle(device);
-	if (!part)
+	struct blk_handle *h = blk_authed_handle(device);
+	if (!h)
 		return KERN_NO_ACCESS;
+	struct blk_partition *part = h->part;
+	kern_return_t kr;
 	struct blk_controller *ctrl = part->ctrl;
 	unsigned int total, nsectors;
 
@@ -1013,17 +1117,20 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 			return D_INVALID_SIZE;
 
 		/*
-		 * 🔴 THE WRITE HALF HANDED OVER UNTRANSLATED ADDRESSES.  The
-		 * read half has always mapped each page through blk_dma_for()
-		 * -- which is what asks the kernel for a device address the
-		 * IOMMU will accept -- and this one passed the caller's raw
-		 * physical addresses straight to the controller.  With a
-		 * translating unit in front of the device those are somebody
-		 * else's addresses or nobody's, and the two halves of one pair
-		 * were speaking different languages.
+		 * 🔴 THE WRITE HALF HANDED OVER UNTRANSLATED ADDRESSES once;
+		 * both halves translate every page now, each for its own
+		 * direction (#599: a write needs the device to READ the page),
+		 * and refuse the same way: before the driver is called.
 		 */
-		for (i = 0; i < phys_addrsCnt; i++)
-			dma[i] = blk_dma_for(ctrl, phys_addrs[i]);
+		for (i = 0; i < phys_addrsCnt; i++) {
+			kr = blk_dma_for(h, phys_addrs[i],
+					 CAP_OP_DMA_DEVICE_READ, &dma[i]);
+			if (kr != KERN_SUCCESS) {
+				blk_refused(h, phys_addrs[i],
+					    CAP_OP_DMA_DEVICE_READ, kr);
+				return kr;
+			}
+		}
 
 		if (ctrl->ops->write_sectors_phys(ctrl->priv,
 						   part->disk_index,

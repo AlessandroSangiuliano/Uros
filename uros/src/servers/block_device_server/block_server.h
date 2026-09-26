@@ -35,6 +35,7 @@
 #include <mach.h>
 #include <pci_bar.h>		/* #427: struct pci_bar_region */
 #include <mach/mach_types.h>
+#include <mach/cap_types.h>	/* struct uros_cap in a handle, #599 */
 #include <stdint.h>
 
 /* ================================================================
@@ -304,6 +305,26 @@ struct blk_handle {
 	uint64_t		cap_id;		/* matched against cap_revoke_notify */
 	int			revoked;	/* set by blk_cap_revoke_notify (#183) */
 	struct blk_handle	*next;		/* linked-list link, head in block_device.c */
+
+	/*
+	 * #599: the buffer capabilities this handle's client handed over with
+	 * device_register_dma, tried for THIS handle's physical transfers and
+	 * nobody else's.  They were kept per controller and tried for any
+	 * client, so once one client handed its buffer over, every task with
+	 * a handle on that controller could have the disk read and write it.
+	 * A full handle refuses a new one; it never evicts.  Let go in
+	 * blk_handle_destroy.  Single-threaded server (the one
+	 * mach_msg_server in block_server.c): no lock.
+	 */
+#define BLK_HANDLE_DMA_CAPS	4
+	struct uros_cap		dma_cap[BLK_HANDLE_DMA_CAPS];
+	unsigned int		n_dma_caps;
+	unsigned int		dma_last;	/* answered last: tried first */
+	int			registered;	/* ever handed one (interim) */
+	unsigned int		dropped;	/* capabilities forgotten */
+	unsigned int		refusals;	/* physical requests refused */
+	kern_return_t		refusal_kr;	/* the last refusal's code */
+	unsigned int		passed;		/* passed through (interim) */
 };
 
 /* ================================================================

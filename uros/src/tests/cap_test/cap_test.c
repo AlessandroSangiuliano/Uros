@@ -786,6 +786,272 @@ out:
  */
 #define SCRATCH_BLOCK	30712u
 
+/*
+ * ── #599: a buffer capability belongs to the handle it was handed on ──────
+ *
+ * The block server kept the capabilities its clients handed over per
+ * controller and tried them for any client, so once one client handed its
+ * buffer over, every task with a handle on that controller could have had
+ * the disk read or write it.  Now they live in the handle, a full handle
+ * refuses rather than evicts, and only a DMA buffer's capability is taken.
+ * The helpers below open a handle, allocate one page, hand its capability to
+ * a handle, and read the partition's first 4 KiB into it.
+ */
+static mach_port_t
+b2_open(mach_port_t part_port, const char *name)
+{
+    struct uros_cap  tok;
+    security_token_t null_sec = { { 0, 0 } };
+    char             blob[CAP_TOKEN_MAX];
+    mach_port_t      handle = MACH_PORT_NULL;
+
+    memset(&tok, 0, sizeof(tok));
+    if (cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
+                    CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok)
+        != KERN_SUCCESS)
+        return MACH_PORT_NULL;
+    memcpy(blob, &tok, sizeof(tok));
+    if (device_open_cap(part_port, MACH_PORT_NULL, D_READ | D_WRITE,
+                        null_sec, (char *)name, blob,
+                        (mach_msg_type_number_t)sizeof(tok), &handle)
+        != KERN_SUCCESS)
+        return MACH_PORT_NULL;
+    return handle;
+}
+
+static void
+b2_close(mach_port_t handle)
+{
+    if (handle == MACH_PORT_NULL)
+        return;
+    (void)device_close(handle);
+    (void)mach_port_deallocate(mach_task_self(), handle);
+}
+
+struct b2_page {
+    vm_address_t kva, uva, pa;
+    uint64_t     region;
+};
+
+static int
+b2_alloc(mach_port_t device_port, struct b2_page *pg)
+{
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    kern_return_t          kr;
+
+    memset(pg, 0, sizeof(*pg));
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &pg->kva, &pg->uva, &pa_list,
+                             &pa_cnt, &pg->region);
+    if (kr == KERN_SUCCESS && pa_cnt == 1)
+        pg->pa = pa_list[0];
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+    return kr == KERN_SUCCESS && pg->pa != 0;
+}
+
+static void
+b2_free(mach_port_t device_port, struct b2_page *pg)
+{
+    if (pg->kva != 0)
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, pg->kva, 4096);
+    pg->kva = 0;
+}
+
+static kern_return_t
+b2_hand(mach_port_t handle, uint64_t region, uint32_t type)
+{
+    struct uros_cap t;
+    kern_return_t   kr;
+
+    memset(&t, 0, sizeof(t));
+    kr = cap_request(type, region,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
+    if (kr != KERN_SUCCESS)
+        return kr;
+    return device_register_dma(handle, (char *)&t, sizeof(t));
+}
+
+/* Fill the page with 0xA5, read 4 KiB into it: kr, and what +1080 holds. */
+static kern_return_t
+b2_read(mach_port_t handle, struct b2_page *pg, unsigned *magic, int *intact)
+{
+    io_buf_len_t  got = 0;
+    vm_address_t  pa = pg->pa;
+    kern_return_t kr;
+    unsigned      i;
+
+    memset((void *)pg->uva, 0xA5, 4096);
+    kr = device_read_phys(handle, D_READ, 0, 4096, &pa, 1, &got);
+    *magic = (unsigned)(((unsigned char *)pg->uva)[1080])
+           | ((unsigned)(((unsigned char *)pg->uva)[1081]) << 8);
+    *intact = 1;
+    for (i = 0; i < 4096; i++)
+        if (((unsigned char *)pg->uva)[i] != 0xA5)
+            *intact = 0;
+    return kr;
+}
+
+/*
+ * [19] A second client cannot spend the first one's capability.  Two handles
+ * on one partition, each handed its own page; the second reads into the
+ * first's page and must be refused with the page untouched, before and after
+ * the first has read into it (a translation kept per controller would have
+ * been primed by then); and each still reads its own.
+ */
+static int
+a_capability_is_its_handles(mach_port_t device_port, mach_port_t part_port,
+                            const char *name)
+{
+    mach_port_t    ha, hb;
+    struct b2_page r1, r2;
+    kern_return_t  k1, k2, k3, k4;
+    unsigned       m1, m2, m3, m4;
+    int            i1, i2, i3, i4, ok;
+
+    ha = b2_open(part_port, name);
+    hb = b2_open(part_port, name);
+    if (ha == MACH_PORT_NULL || hb == MACH_PORT_NULL ||
+        !b2_alloc(device_port, &r1) || !b2_alloc(device_port, &r2) ||
+        b2_hand(ha, r1.region, RESOURCE_DMA_BUFFER) != KERN_SUCCESS ||
+        b2_hand(hb, r2.region, RESOURCE_DMA_BUFFER) != KERN_SUCCESS) {
+        printf("cap_test: [19] %s — DID NOT RUN, two handles and two handed "
+               "pages were not all there\n", name);
+        b2_close(ha);
+        b2_close(hb);
+        b2_free(device_port, &r1);
+        b2_free(device_port, &r2);
+        return 1;
+    }
+
+    k1 = b2_read(hb, &r1, &m1, &i1);		/* the other's page */
+    k2 = b2_read(ha, &r1, &m2, &i2);		/* its own */
+    k3 = b2_read(hb, &r1, &m3, &i3);		/* the other's, again */
+    k4 = b2_read(hb, &r2, &m4, &i4);		/* its own */
+    ok = k1 != KERN_SUCCESS && i1 && k2 == KERN_SUCCESS && m2 == 0xEF53u &&
+         k3 != KERN_SUCCESS && i3 && k4 == KERN_SUCCESS && m4 == 0xEF53u;
+
+    b2_close(ha);
+    b2_close(hb);
+    b2_free(device_port, &r1);
+    b2_free(device_port, &r2);
+
+    if (!ok) {
+        printf("cap_test: [19] WRONG — %s: the second handle into the first's "
+               "page kr=%d (page %s), the first into it kr=%d 0x%x, the "
+               "second again kr=%d (page %s), the second into its own kr=%d "
+               "0x%x\n", name, (int)k1, i1 ? "untouched" : "WRITTEN",
+               (int)k2, m2, (int)k3, i3 ? "untouched" : "WRITTEN", (int)k4,
+               m4);
+        return 0;
+    }
+    printf("cap_test: [19] %s: a second handle reading into the first "
+           "handle's page was refused (kr=%d, then kr=%d after the first had "
+           "read into it, 0x%x) and the page was not touched; each read its "
+           "own (0x%x) — a buffer capability is spent by the handle it was "
+           "handed on\n", name, (int)k1, (int)k3, m2, m4);
+    return 1;
+}
+
+/*
+ * [21] A handle holds four capabilities and refuses a fifth rather than
+ * evicting one; the same one handed again replaces itself; a new handle
+ * starts empty.
+ */
+static int
+a_handle_refuses_rather_than_evicts(mach_port_t device_port,
+                                    mach_port_t part_port, const char *name)
+{
+    mach_port_t     h, h2;
+    struct b2_page  r;
+    struct uros_cap t[5];
+    kern_return_t   kr[5], kr_again, kr_read, kr_new;
+    unsigned        magic;
+    int             intact, i, ok;
+
+    h = b2_open(part_port, name);
+    if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
+        printf("cap_test: [21] %s — DID NOT RUN, no handle or no page\n",
+               name);
+        b2_close(h);
+        b2_free(device_port, &r);
+        return 1;
+    }
+    for (i = 0; i < 5; i++) {
+        memset(&t[i], 0, sizeof(t[i]));
+        kr[i] = cap_request(RESOURCE_DMA_BUFFER, r.region,
+                            CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
+                            0, &t[i]);
+        if (kr[i] == KERN_SUCCESS)
+            kr[i] = device_register_dma(h, (char *)&t[i], sizeof(t[i]));
+    }
+    kr_again = device_register_dma(h, (char *)&t[0], sizeof(t[0]));
+    kr_read = b2_read(h, &r, &magic, &intact);
+    b2_close(h);
+
+    h2 = b2_open(part_port, name);
+    kr_new = h2 == MACH_PORT_NULL ? KERN_FAILURE
+           : device_register_dma(h2, (char *)&t[4], sizeof(t[4]));
+    b2_close(h2);
+    b2_free(device_port, &r);
+
+    ok = kr[0] == 0 && kr[1] == 0 && kr[2] == 0 && kr[3] == 0 &&
+         kr[4] == KERN_NO_SPACE && kr_again == 0 && kr_read == 0 &&
+         magic == 0xEF53u && kr_new == 0;
+    if (!ok) {
+        printf("cap_test: [21] WRONG — %s: five capabilities for one buffer "
+               "on one handle answered %d %d %d %d %d, the first again %d, a "
+               "read %d (0x%x), the fifth on a new handle %d; expected 0 0 0 "
+               "0 %d, 0, 0 (0xef53), 0\n", name, (int)kr[0], (int)kr[1],
+               (int)kr[2], (int)kr[3], (int)kr[4], (int)kr_again,
+               (int)kr_read, magic, (int)kr_new, (int)KERN_NO_SPACE);
+        return 0;
+    }
+    printf("cap_test: [21] %s: a handle took four capabilities and refused "
+           "the fifth (kr=%d), took the first again in its own place (kr=0), "
+           "still read (0x%x), and a new handle took the fifth (kr=0) — full "
+           "refuses, it does not evict\n", name, (int)kr[4], magic);
+    return 1;
+}
+
+/*
+ * [24] Only a DMA buffer's capability is taken for a buffer: a block-device
+ * capability that carries the buffer's id is refused.
+ */
+static int
+a_buffer_capability_is_a_buffers(mach_port_t device_port,
+                                 mach_port_t part_port, const char *name)
+{
+    mach_port_t    h;
+    struct b2_page r;
+    kern_return_t  kr;
+
+    h = b2_open(part_port, name);
+    if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
+        printf("cap_test: [24] %s — DID NOT RUN, no handle or no page\n",
+               name);
+        b2_close(h);
+        b2_free(device_port, &r);
+        return 1;
+    }
+    kr = b2_hand(h, r.region, RESOURCE_BLK_DEVICE);
+    b2_close(h);
+    b2_free(device_port, &r);
+
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [24] WRONG — %s took a block-device capability "
+               "carrying buffer %llu's id as that buffer's\n", name,
+               (unsigned long long)r.region);
+        return 0;
+    }
+    printf("cap_test: [24] %s refused a block-device capability carrying a "
+           "buffer's id (kr=%d) — the kind is checked, not only the id\n",
+           name, (int)kr);
+    return 1;
+}
+
 static int
 the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
                              const char *name, int scratch)
@@ -2189,6 +2455,7 @@ main(int argc, char **argv)
      * has had the whole test's worth of time, so a partition that is absent
      * here is absent, not late -- and a short budget is enough to say so.
      */
+    int b2_done = 0;		/* #599: the handle arms run once */
     for (unsigned i = 0;
          i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         mach_port_t p = MACH_PORT_NULL;
@@ -2211,6 +2478,18 @@ main(int argc, char **argv)
         if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
                                           is_the_boot_disk(p) == 0))
             pass = 0;
+        /* #599: once, on the first candidate that is there. */
+        if (!b2_done) {
+            if (!a_capability_is_its_handles(device_port, p, candidates[i]))
+                pass = 0;
+            if (!a_handle_refuses_rather_than_evicts(device_port, p,
+                                                     candidates[i]))
+                pass = 0;
+            if (!a_buffer_capability_is_a_buffers(device_port, p,
+                                                  candidates[i]))
+                pass = 0;
+            b2_done = 1;
+        }
         (void)mach_port_deallocate(mach_task_self(), p);
     }
 
