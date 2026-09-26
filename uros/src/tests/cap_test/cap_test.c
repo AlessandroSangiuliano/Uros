@@ -1001,6 +1001,10 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0xCF8, 8 },   /* the address and the data */
         { 0xCFC, 1 },   /* the data port alone */
         { 0xCF4, 5 },   /* from below, reaching the address port */
+        { 0x70,  2 },   /* the CMOS, whose index is the NMI mask (#599) */
+        { 0x20,  2 },   /* the master 8259 (#599) */
+        { 0xA0,  2 },   /* the slave 8259 (#599) */
+        { 0x4D0, 2 },   /* the 8259s' edge/level registers (#599) */
     };
     static const struct {
         unsigned int  port;
@@ -1011,6 +1015,8 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0xCFC,   4, KERN_NO_ACCESS },          /* the data port */
         { 0x10CFC, 4, KERN_INVALID_ARGUMENT },   /* 0xCFC above 16 bits */
         { 0x61,    1, KERN_NO_ACCESS },          /* the 8254's gate (#508) */
+        { 0x71,    1, KERN_NO_ACCESS },          /* the CMOS data (#599) */
+        { 0x21,    1, KERN_NO_ACCESS },          /* the 8259's mask (#599) */
     };
     unsigned int  i, released, klog_from, data, bad = 0;
     kern_return_t kr;
@@ -1024,8 +1030,9 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         if (kr == KERN_SUCCESS) {
             (void) device_io_port_unclaim(device_port, ask[i].port);
             printf("cap_test: [18] WRONG — a claim of 0x%x..0x%x was "
-                   "GRANTED, and it covers the PCI configuration ports "
-                   "(#597)\n", ask[i].port, ask[i].port + ask[i].count - 1);
+                   "GRANTED, and it covers ports the kernel keeps "
+                   "(#597, #599)\n", ask[i].port,
+                   ask[i].port + ask[i].count - 1);
         } else
             printf("cap_test: [18] WRONG — a claim of 0x%x..0x%x was "
                    "refused with kr=%d, not KERN_NO_ACCESS\n", ask[i].port,
@@ -1046,10 +1053,11 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
     if (bad != 0)
         return 0;
 
-    printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone and "
-           "0xcf4..0xcf8, and reads of 0xcf8, 0xcfc, 0x61 and 0x10cfc, "
-           "refused — the claim and read RPCs keep the ports the kernel "
-           "keeps (#508, #597)\n");
+    printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone, "
+           "0xcf4..0xcf8, the CMOS, both 8259s and the ELCR, and reads of "
+           "0xcf8, 0xcfc, 0x61, 0x71, 0x21 and 0x10cfc, refused — the claim "
+           "and read RPCs keep the ports the kernel keeps (#508, #597, "
+           "#599)\n");
     return 1;
 }
 
