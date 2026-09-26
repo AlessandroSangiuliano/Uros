@@ -31,6 +31,8 @@
 #include <char/char_module_abi.h>
 #include <char/char_types.h>
 
+#include "device_master.h"	/* the 8042's claim (#599) */
+
 /* ============================================================
  * 8042 controller registers and commands
  * ============================================================ */
@@ -238,6 +240,7 @@ e0_keysym(uint8_t sc)
 
 struct ps2_priv {
 	int		attached;
+	uint8_t		cfg_found;	/* the config byte attach read */
 	uint32_t	modifiers;	/* CHAR_KBD_MOD_* current state */
 	int		e0_pending;	/* next byte is part of an E0 seq */
 	mach_port_t	subscribers[PS2_MAX_SUBSCRIBERS];
@@ -416,11 +419,59 @@ ps2_probe(const struct hal_device_info *dev)
 	return &ps2_singleton;
 }
 
+/*
+ * #599: the 8042's two ports, claimed before the first command and given
+ * back last.  Until IRQ 1 is registered the kernel's break-key reader (-K
+ * boots) owns the line and reads both ports on every interrupt, so the
+ * answers to the commands below could go to it; the claim makes it stand
+ * back.  Two claims, because (0x60, 5) would cover 0x61, which the kernel
+ * keeps.  A refusal is fatal to the attach: carrying on unclaimed is the
+ * silent fallback this exists to remove.
+ */
+static kern_return_t
+ps2_claim(int *stood_back)
+{
+	natural_t released = 0, klog_from = 0;
+	kern_return_t kr;
+
+	*stood_back = 0;
+	kr = device_io_port_claim(char_core_device_port(), PS2_DATA, 1u,
+				  &released, &klog_from);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	*stood_back |= released != 0;
+	kr = device_io_port_claim(char_core_device_port(), PS2_STATUS, 1u,
+				  &released, &klog_from);
+	if (kr != KERN_SUCCESS) {
+		(void)device_io_port_unclaim(char_core_device_port(), PS2_DATA);
+		return kr;
+	}
+	*stood_back |= released != 0;
+	return KERN_SUCCESS;
+}
+
+static void
+ps2_unclaim(void)
+{
+	(void)device_io_port_unclaim(char_core_device_port(), PS2_STATUS);
+	(void)device_io_port_unclaim(char_core_device_port(), PS2_DATA);
+}
+
 static int
 ps2_attach(void *priv)
 {
 	struct ps2_priv *p = priv;
-	uint8_t cfg;
+	uint8_t cfg, ack = 0;
+	int ack_seen, stood_back;
+	kern_return_t kr;
+
+	kr = ps2_claim(&stood_back);
+	if (kr != KERN_SUCCESS) {
+		printf("ps2: the 8042 (0x%x, 0x%x) refused (kr=%d) — another "
+		       "task holds it; not attaching\n", PS2_DATA, PS2_STATUS,
+		       (int)kr);
+		return -1;
+	}
 
 	/* 8042 init sequence: disable both ports, drain OBF, read+modify
 	 * config byte to enable port-1 IRQ + translation, re-enable
@@ -431,19 +482,23 @@ ps2_attach(void *priv)
 
 	if (ctrl_send(PS2_CMD_READ_CFG) < 0 || wait_output_full() < 0) {
 		printf("ps2: read config failed\n");
+		ps2_unclaim();
 		return -1;
 	}
 	cfg = inb(PS2_DATA);
+	p->cfg_found = cfg;
 	cfg |= 0x01;	/* enable port-1 interrupt */
 	cfg |= 0x40;	/* enable scancode translation (set 1 to host) */
 	cfg &= ~0x10;	/* clear "disable port-1 clock" */
 
 	if (ctrl_send(PS2_CMD_WRITE_CFG) < 0 || ctrl_write_data(cfg) < 0) {
 		printf("ps2: write config failed\n");
+		ps2_unclaim();
 		return -1;
 	}
 	if (ctrl_send(PS2_CMD_ENABLE_P1) < 0) {
 		printf("ps2: enable port 1 failed\n");
+		ps2_unclaim();
 		return -1;
 	}
 
@@ -451,18 +506,37 @@ ps2_attach(void *priv)
 	 * left scanning enabled; the command is idempotent. */
 	if (ctrl_write_data(KBD_CMD_ENABLE_SCAN) < 0) {
 		printf("ps2: enable scan failed\n");
+		ps2_unclaim();
 		return -1;
 	}
-	(void)wait_output_full();
-	(void)inb(PS2_DATA);	/* eat the ACK byte (0xFA) */
+	/*
+	 * #599: the ACK is judged by whether a byte arrived, not by its value.
+	 * An empty data port reads back the last byte, so a test of the value
+	 * passes with no answer at all.  Until IRQ 1 is registered below, the
+	 * kernel's own reader of the line (ddb_kbd_intr, on -K boots) can take
+	 * the byte first; the answer was thrown away and nothing said so.
+	 */
+	ack_seen = wait_output_full() == 0;
+	if (ack_seen)
+		ack = inb(PS2_DATA);
 
 	if (char_core_irq_register(PS2_IRQ, ps2_irq_handler, p) < 0) {
 		printf("ps2: IRQ %u register failed\n", PS2_IRQ);
+		ps2_unclaim();
 		return -1;
 	}
 
 	p->attached = 1;
-	printf("ps2: keyboard attached (IRQ %u)\n", PS2_IRQ);
+	if (ack_seen)
+		printf("ps2: keyboard attached (IRQ %u); enable-scan answered "
+		       "0x%02x; %s\n", PS2_IRQ, (unsigned)ack,
+		       stood_back ? "the kernel's reader stood back"
+				  : "no kernel reader of the 8042");
+	else
+		printf("ps2: keyboard attached (IRQ %u); enable-scan: no answer "
+		       "-- it went to another reader, or nowhere; %s\n", PS2_IRQ,
+		       stood_back ? "the kernel's reader stood back"
+				  : "no kernel reader of the 8042");
 	return 0;
 }
 
@@ -473,7 +547,19 @@ ps2_detach(void *priv)
 	unsigned int i;
 
 	(void)char_core_irq_unregister(PS2_IRQ);
+	/*
+	 * #599: the config byte attach read, and port 1 enabled.  Attach read
+	 * it after disabling both ports, so its interrupt and translation bits
+	 * are as attach found them and its two port-disable bits are attach's
+	 * own; port 1 is enabled after it because a kernel break-key reader
+	 * that takes the 8042 back needs IRQ 1 from the keyboard.  This only
+	 * disabled port 1, and left the keyboard off.  The claim goes last.
+	 */
 	(void)ctrl_send(PS2_CMD_DISABLE_P1);
+	if (ctrl_send(PS2_CMD_WRITE_CFG) == 0)
+		(void)ctrl_write_data(p->cfg_found);
+	(void)ctrl_send(PS2_CMD_ENABLE_P1);
+	ps2_unclaim();
 
 	for (i = 0; i < p->n_subscribers; i++) {
 		if (p->subscribers[i] != MACH_PORT_NULL)
