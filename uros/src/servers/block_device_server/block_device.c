@@ -1067,11 +1067,12 @@ blk_refused(struct blk_handle *h, vm_address_t pa, natural_t op,
 		       h->refusals);
 	else
 		printf("blk: %s: a physical %s of 0x%lx refused before any DMA "
-		       "— the kernel refused the %u capabilit%s this handle "
-		       "holds (kr=%d) (refusal %u on this handle)\n",
+		       "— asked with %u of the %u capabilit%s this handle "
+		       "holds, the kernel answered kr=%d (refusal %u on this "
+		       "handle)\n",
 		       h->part->name,
 		       op == CAP_OP_DMA_DEVICE_WRITE ? "read" : "write",
-		       (unsigned long)pa, h->n_dma_caps,
+		       (unsigned long)pa, h->dma_asked, h->n_dma_caps,
 		       h->n_dma_caps == 1 ? "y" : "ies", (int)kr, h->refusals);
 }
 

@@ -652,7 +652,8 @@ ahci_read_into_ungranted(struct ahci_state *st, vm_address_t pa)
  * refusal must already have been read out of the engines by something other
  * than the question: `undrained' is how many the question itself had to
  * read.  The idle loop was the only other reader, and a processor spinning
- * in a driver never runs it.  The values are printed as read, pass or fail.
+ * in a driver never runs it.  Each line prints the values its verdict rests
+ * on, as read.
  */
 static void
 ahci_iommu_spin(struct ahci_state *st, vm_address_t pa)
@@ -702,9 +703,10 @@ ahci_iommu_spin(struct ahci_state *st, vm_address_t pa)
 		       (unsigned)l1, rc);
 	else
 		printf("ahci: [iommu-spin] WRONG — the count stood at %u and "
-		       "lost at %u: a refused read left no record and nothing "
-		       "said one was lost (the read returned %d)\n",
-		       (unsigned)c1, (unsigned)l1, rc);
+		       "lost at %u: the read left no record and nothing said "
+		       "one was lost -- refused unrecorded, or not refused at "
+		       "all (the [iommu] line says which it saw; the read "
+		       "returned %d)\n", (unsigned)c1, (unsigned)l1, rc);
 }
 
 /*
