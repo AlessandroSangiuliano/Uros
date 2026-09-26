@@ -2147,6 +2147,24 @@ main(int argc, char **argv)
 
 	printf("\n=== ext2 filesystem server " EXT2_SERVER_VERSION_STRING " ===\n");
 
+	/*
+	 * #599: the check every directory walk makes, asked before any disk is
+	 * read.  One line either way, with the counts it read.
+	 */
+	{
+		unsigned int ran, wrong;
+
+		ext2_dirent_selftest(&ran, &wrong);
+		if (wrong == 0)
+			printf("ext2: %u directory records checked, the damaged "
+			       "ones refused and the well-formed ones accepted, "
+			       "0 wrong (#599)\n", ran);
+		else
+			printf("ext2: WRONG — %u of %u directory records "
+			       "misjudged by the check every directory walk "
+			       "makes (#599)\n", wrong, ran);
+	}
+
 	/* Create port set for all mount ports */
 	kr = mach_port_allocate(mach_task_self(),
 		MACH_PORT_RIGHT_PORT_SET, &port_set);

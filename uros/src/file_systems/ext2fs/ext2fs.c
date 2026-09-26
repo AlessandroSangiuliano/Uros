@@ -1311,6 +1311,32 @@ fallback_read_direct:
  * offset and the values -- a damaged directory is an error its caller sees,
  * never an empty or a shorter one.
  */
+static const char *
+ext2_dirent_verdict(
+	const struct ext2_dir_entry	*dp,
+	vm_size_t			room,
+	unsigned int			inodes_count)
+{
+	unsigned int	rec_len, name_len;
+
+	if (room < EXT2_DIR_REC_LEN(1))
+		return "less room than the smallest record";
+
+	rec_len = le16_to_cpu(dp->rec_len);
+	name_len = dp->name_len;
+	if (rec_len < EXT2_DIR_REC_LEN(1))
+		return "a record shorter than the smallest";
+	if ((rec_len & EXT2_DIR_ROUND) != 0)
+		return "a record length that is not a multiple of four";
+	if (rec_len > room)
+		return "a record that crosses the end of its block";
+	if (EXT2_DIR_REC_LEN(name_len) > rec_len)
+		return "a name longer than its record";
+	if (le32_to_cpu(dp->inode) > inodes_count)
+		return "an inode number the filesystem does not have";
+	return 0;
+}
+
 static int
 ext2_dirent_check(
 	const struct ext2fs_file	*dir_fp,
@@ -1318,35 +1344,67 @@ ext2_dirent_check(
 	vm_size_t			room,
 	vm_offset_t			offset)
 {
-	unsigned int	rec_len = 0, name_len = 0, inode = 0;
-	const char	*why = 0;
+	const char	*why;
 
-	if (room < EXT2_DIR_REC_LEN(1))
-		why = "less room than the smallest record";
-	else {
-		rec_len = le16_to_cpu(dp->rec_len);
-		name_len = dp->name_len;
-		inode = le32_to_cpu(dp->inode);
-		if (rec_len < EXT2_DIR_REC_LEN(1))
-			why = "a record shorter than the smallest";
-		else if ((rec_len & EXT2_DIR_ROUND) != 0)
-			why = "a record length that is not a multiple of four";
-		else if (rec_len > room)
-			why = "a record that crosses the end of its block";
-		else if (EXT2_DIR_REC_LEN(name_len) > rec_len)
-			why = "a name longer than its record";
-		else if (inode > dir_fp->f_fs->s_inodes_count)
-			why = "an inode number the filesystem does not have";
-	}
-
+	why = ext2_dirent_verdict(dp, room, dir_fp->f_fs->s_inodes_count);
 	if (why == 0)
 		return 0;
 
-	printf("ext2: directory inode %u, offset %lu: %s (rec_len %u, "
-	       "name_len %u, inode %u, room %lu) — refused as damaged\n",
-	       (unsigned)dir_fp->f_ino, (unsigned long)offset, why, rec_len,
-	       name_len, inode, (unsigned long)room);
+	if (room < EXT2_DIR_REC_LEN(1))
+		printf("ext2: directory inode %u, offset %lu: %s (room %lu) — "
+		       "refused as damaged\n", (unsigned)dir_fp->f_ino,
+		       (unsigned long)offset, why, (unsigned long)room);
+	else
+		printf("ext2: directory inode %u, offset %lu: %s (rec_len %u, "
+		       "name_len %u, inode %u, room %lu) — refused as "
+		       "damaged\n", (unsigned)dir_fp->f_ino,
+		       (unsigned long)offset, why,
+		       (unsigned)le16_to_cpu(dp->rec_len),
+		       (unsigned)dp->name_len,
+		       (unsigned)le32_to_cpu(dp->inode), (unsigned long)room);
 	return FS_CORRUPT;
+}
+
+/*
+ * #599: the check above, asked about records built to break each of its
+ * rules and about well-formed ones, at every start of the server -- before
+ * any disk is read, so a check that answers wrong is said before it has
+ * decided anything.  *ran counts the questions, *wrong the wrong answers.
+ */
+void
+ext2_dirent_selftest(unsigned int *ran, unsigned int *wrong)
+{
+	static const struct {
+		unsigned int	inode, rec_len, name_len, room;
+		int		damaged;
+	} q[] = {
+		{   2,   12, 1, 4096, 0 },	/* the smallest record */
+		{   0, 4096, 3, 4096, 0 },	/* a tombstone filling the block */
+		{  11, 4084, 9, 4084, 0 },	/* the last record, exactly */
+		{ 100,   16, 5,   16, 0 },	/* the highest inode, a longer name */
+		{   0,    0, 0, 4096, 1 },	/* an unread block: all zero */
+		{   2,    8, 0, 4096, 1 },	/* shorter than the smallest */
+		{   2,   13, 1, 4096, 1 },	/* not a multiple of four */
+		{   2, 4100, 1, 4096, 1 },	/* crosses the block */
+		{   2,   12, 5, 4096, 1 },	/* a name longer than its record */
+		{ 101,   12, 1, 4096, 1 },	/* an inode the filesystem lacks */
+		{   2,   12, 1,    8, 1 },	/* no room for a header */
+	};
+	struct ext2_dir_entry	e;
+	unsigned int		i;
+
+	*ran = 0;
+	*wrong = 0;
+	for (i = 0; i < sizeof(q) / sizeof(q[0]); i++) {
+		memset(&e, 0, sizeof(e));
+		e.inode = cpu_to_le32(q[i].inode);
+		e.rec_len = cpu_to_le16(q[i].rec_len);
+		e.name_len = (unsigned char)q[i].name_len;
+		(*ran)++;
+		if ((ext2_dirent_verdict(&e, q[i].room, 100) != 0) !=
+		    q[i].damaged)
+			(*wrong)++;
+	}
 }
 
 /*
