@@ -1568,6 +1568,14 @@ struct dma_region {
 	task_t		owner;		/* who allocated it; holds a ref */
 
 	/*
+	 * #599: the device the owner allocated it for, or DEVICE_DMA_NO_BDF.
+	 * The free is checked against it, and the drop revokes the owner's
+	 * own grant from it -- so taking the grant back no longer depends on
+	 * the freeing caller naming the right device.
+	 */
+	natural_t	own_bdf;
+
+	/*
 	 * 🔥 WHERE ELSE THIS MEMORY IS MAPPED, AND A PANIC A USER TASK COULD
 	 * REACH.  device_dma_alloc_sg enters its pages into the caller's map
 	 * with pmap_enter(..., wired), and device_dma_free frees the KERNEL
@@ -1667,7 +1675,7 @@ static uint64_t dma_regions_freed;
 static kern_return_t
 dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	       unsigned int npages, task_t task, vm_offset_t uva,
-	       uint64_t *id_out)
+	       natural_t own_bdf, uint64_t *id_out)
 {
 	struct dma_region *r = 0;
 	vm_offset_t	  *pa_copy;
@@ -1722,6 +1730,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	r->uva = uva;
 	r->id = id = dma_region_next_id++;
 	r->owner = me;
+	r->own_bdf = own_bdf;
 	task_reference(me);
 	if (task != TASK_NULL)
 		task_reference(task);
@@ -1765,8 +1774,21 @@ dma_region_of(vm_offset_t pa, unsigned int *index)
  * stack while a disk can still write it -- which is the exact reach #432
  * exists to remove, reached by freeing in the wrong order.
  */
-static void
-dma_region_drop(vm_offset_t kva)
+/*
+ * #599: `owner' is who asks.  TASK_NULL is the kernel itself -- an
+ * allocation undoing its own record, a dying task's reclaim -- and nothing
+ * is checked.  Any other owner is a device_dma_free on behalf of that task,
+ * and the region must be one it owns, at the size and for the device it was
+ * allocated at: KERN_INVALID_ADDRESS for no such region, KERN_NO_ACCESS for
+ * somebody else's, KERN_INVALID_ARGUMENT for a size or a device that is not
+ * the allocation's.  Checked and unlinked in one hold, so two frees of one
+ * region cannot both pass.  Before this the free checked nothing: an unknown
+ * address was ignored here and kmem_free ran on it anyway, so any holder of
+ * the master port freed whatever kernel memory it named, and could free a
+ * buffer twice.
+ */
+static kern_return_t
+dma_region_drop(vm_offset_t kva, task_t owner, vm_size_t size, natural_t bdf)
 {
 	unsigned int i, u;
 	struct dma_region snap;
@@ -1777,6 +1799,16 @@ dma_region_drop(vm_offset_t kva)
 
 		if (r->kva != kva)
 			continue;
+
+		if (owner != TASK_NULL && r->owner != owner) {
+			mutex_unlock(&device_table_lock);
+			return KERN_NO_ACCESS;
+		}
+		if (owner != TASK_NULL &&
+		    (round_page(size) != r->size || bdf != r->own_bdf)) {
+			mutex_unlock(&device_table_lock);
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		/*
 		 * Snapshot, unlink under the lock, and do the slow half --
@@ -1802,6 +1834,17 @@ dma_region_drop(vm_offset_t kva)
 						    (unsigned long)snap.pa[0],
 						    (unsigned long)snap.size);
 
+		/*
+		 * #599: and the owner's own grant, from the record.  The free
+		 * path revoked it from the caller's bdf and a pmap_extract of
+		 * the first page; two of device_dma_alloc_sg's failure paths
+		 * never revoked it at all.
+		 */
+		if (snap.own_bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates())
+			(void) device_md_dma_revoke(snap.own_bdf,
+						    (unsigned long)snap.pa[0],
+						    (unsigned long)snap.size);
+
 		if (snap.task != TASK_NULL) {
 			/* uva == 0 is a reservation whose mapping never
 			 * completed (map_pages_into_task); nothing to unmap. */
@@ -1815,9 +1858,10 @@ dma_region_drop(vm_offset_t kva)
 			task_deallocate(snap.owner);
 
 		urmach_call_rcu(&r->rcu, dma_slot_retired);
-		return;
+		return KERN_SUCCESS;
 	}
 	mutex_unlock(&device_table_lock);
+	return KERN_INVALID_ADDRESS;
 }
 
 
@@ -1945,7 +1989,7 @@ ds_master_device_dma_alloc(
 		for (i = 0; i < n; i++)
 			pages[i] = pa + (vm_offset_t)i * PAGE_SIZE;
 
-		kr = dma_region_add(kva, size, pages, n, TASK_NULL, 0,
+		kr = dma_region_add(kva, size, pages, n, TASK_NULL, 0, bdf,
 				    &region_id);
 		if (kr != KERN_SUCCESS) {
 			kmem_free(kernel_map, kva, size);
@@ -1959,7 +2003,7 @@ ds_master_device_dma_alloc(
 		if (!device_md_dma_grant(bdf, (unsigned long)pa,
 					 (unsigned long)size, TRUE, TRUE,
 					 &iova)) {
-			dma_region_drop(kva);
+			(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 			kmem_free(kernel_map, kva, size);
 			return KERN_FAILURE;
 		}
@@ -1999,30 +2043,18 @@ ds_master_device_dma_free(
 	 * 🔴 REVOKED BEFORE THE MEMORY IS GIVEN BACK, and the order is the
 	 * whole of it.  Freed first, the page returns to the VM and can be
 	 * handed to anything -- a task's stack, another driver's buffer --
-	 * while the device is still able to write it, and for as long as
-	 * nobody happens to revoke.  That is precisely the reach this issue
-	 * exists to remove, arrived at by tidying up in the wrong order.
+	 * while a device is still able to write it.  The drop takes back the
+	 * owner's own grant and every device the region was lent to (the
+	 * block server's disk still reaching a filesystem's page cache)
+	 * before this frees a byte.
 	 *
-	 * ⚠️ The physical address is extracted while the mapping still exists,
-	 * for the same reason.  After kmem_free there is nothing to ask.
+	 * #599: and only a live region this task owns, whole, for the device
+	 * it was allocated for, once -- the drop says which it is not, and
+	 * nothing is freed then.  This freed whatever it was handed.
 	 */
-	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
-		vm_offset_t pa = pmap_extract(pmap_kernel(),
-					      (vm_offset_t)vaddr);
-
-		if (pa != 0)
-			(void) device_md_dma_revoke(bdf, (unsigned long)pa,
-						    (unsigned long)size);
-	}
-
-	/*
-	 * 🔴 AND EVERY DEVICE THIS REGION WAS LENT TO, before the memory goes
-	 * back.  The owner's own grant is above; this is the block server's
-	 * disk still reaching a filesystem's page cache.  Freed with either
-	 * one still mapped, the page returns to the VM and can become a task's
-	 * stack while a device can still write it.
-	 */
-	dma_region_drop((vm_offset_t)vaddr);
+	kr = dma_region_drop((vm_offset_t)vaddr, current_task(), size, bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
 	dma_regions_freed++;
 
 	kmem_free(kernel_map, (vm_offset_t)vaddr, size);
@@ -2198,7 +2230,7 @@ ds_master_device_dma_alloc_sg(
 	 * on them.  One writer now, and it is the function that maps.
 	 */
 	kr = dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
-			    TASK_NULL, 0, &region_id);
+			    TASK_NULL, 0, bdf, &region_id);
 	if (kr != KERN_SUCCESS) {
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
@@ -2216,7 +2248,7 @@ ds_master_device_dma_alloc_sg(
 	kr = map_pages_into_task(task, 0, (const vm_offset_t *)list, n_pages,
 				 &uva);
 	if (kr != KERN_SUCCESS) {
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
 		kmem_free(ipc_kernel_map, list, list_size);
@@ -2239,7 +2271,7 @@ ds_master_device_dma_alloc_sg(
 			 * removing the range here as well would be a second
 			 * removal of a range that may since be somebody's.
 			 */
-			dma_region_drop(kva);
+			(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 			(void) vm_map_unwire(ipc_kernel_map, list,
 					     list + list_size, FALSE);
 			kmem_free(ipc_kernel_map, list, list_size);
@@ -2268,7 +2300,7 @@ ds_master_device_dma_alloc_sg(
 		kmem_free(ipc_kernel_map, list, list_size);
 		/* The region owns the user mapping now, so it takes it down
 		 * along with itself (#531). */
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
@@ -2284,7 +2316,7 @@ ds_master_device_dma_alloc_sg(
 		kmem_free(ipc_kernel_map, list, list_size);
 		/* The region owns the user mapping now, so it takes it down
 		 * along with itself (#531). */
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
@@ -4194,7 +4226,7 @@ device_master_task_terminating(task_t task)
 		 * this file's reference is one of the ones keeping it so, and
 		 * that is exactly why the hook cannot live on the free path.
 		 */
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		kmem_free(kernel_map, kva, size);
 		dma_regions_reclaimed++;
 	}

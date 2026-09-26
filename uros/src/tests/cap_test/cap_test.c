@@ -1061,6 +1061,65 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
     return 1;
 }
 
+/*
+ * ── [22] A buffer is freed by its owner, whole, once (#599) ───────────────
+ *
+ * device_dma_free checked neither: an address that was no region's was
+ * ignored by the drop and kmem_free ran on it anyway, a region could be freed
+ * at half its size, and twice.  So any holder of the master port freed kernel
+ * memory it named.  The kernel now answers KERN_INVALID_ARGUMENT for a size
+ * that is not the allocation's -- and frees nothing, which the capability
+ * cap_server still issues for the region shows -- 0 for the right free, and
+ * KERN_INVALID_ADDRESS for the second.  Another task's region is
+ * dma_reclaim_test's to show, since it takes two tasks.
+ */
+static int
+a_buffer_is_freed_whole_and_once(mach_port_t device_port)
+{
+    kern_return_t   kr, kr_half, kr_alive, kr_whole, kr_again;
+    vm_address_t    kva = 0, uva = 0;
+    vm_address_t   *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    uint64_t        region_id = 0;
+    struct uros_cap tok;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 2,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [22] a buffer is freed whole and once — DID NOT "
+               "RUN, no two-page buffer (kr=%d)\n", (int)kr);
+        return 1;
+    }
+
+    kr_half = device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    memset(&tok, 0, sizeof(tok));
+    kr_alive = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                           CAP_OP_DMA_DEVICE_READ, 0, &tok);
+    kr_whole = kr_half == KERN_SUCCESS ? KERN_SUCCESS
+             : device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 8192);
+    kr_again = device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 8192);
+
+    if (kr_half != KERN_INVALID_ARGUMENT || kr_alive != KERN_SUCCESS ||
+        kr_whole != KERN_SUCCESS || kr_again != KERN_INVALID_ADDRESS) {
+        printf("cap_test: [22] WRONG — a two-page buffer freed at one page "
+               "answered %d, then a capability for it %d, the whole free %d "
+               "and a second free %d; expected %d, 0, 0 and %d\n",
+               (int)kr_half, (int)kr_alive, (int)kr_whole, (int)kr_again,
+               (int)KERN_INVALID_ARGUMENT, (int)KERN_INVALID_ADDRESS);
+        return 0;
+    }
+    printf("cap_test: [22] a two-page buffer freed at one page was refused "
+           "(kr=%d) and still had an owner to issue a capability for "
+           "(kr=%d); the whole free answered %d and a second free %d — the "
+           "kernel frees what its owner allocated, whole, once\n",
+           (int)kr_half, (int)kr_alive, (int)kr_whole, (int)kr_again);
+    return 1;
+}
+
 static int
 a_device_has_one_driver(mach_port_t device_port)
 {
@@ -2047,6 +2106,10 @@ main(int argc, char **argv)
 
     /* #597: no task reaches the configuration ports, claimed or not. */
     if (!the_pci_config_ports_are_the_kernels(device_port))
+        pass = 0;
+
+    /* #599: a DMA buffer is freed by its owner, whole, once. */
+    if (!a_buffer_is_freed_whole_and_once(device_port))
         pass = 0;
 
     /*
