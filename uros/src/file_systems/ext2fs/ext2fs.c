@@ -335,12 +335,18 @@ ext2_dev_has_batch(struct device *dev)
  *    updates (double-allocated blocks).  Leaf lock: nothing else is
  *    taken while holding it.
  *  - ext2_vnode_table_lock (global): vnode_get/put refcounts.
+ *  - ext2_itable_lock (global, #599): the read-modify-write of an
+ *    inode-table block -- write_new_inode, and a vnode's flush of its own
+ *    inode.  Each reads the block afresh, changes one slot and writes the
+ *    block back while holding it: a block holds many inodes, and a copy
+ *    written back without being read again undid its neighbours.  Leaf.
  *
  * Lock order: v_lock -> ext2_alloc_lock (write-extend allocates while
- * holding the vnode); v_lock -> pc_lock (page cache) via the data path.
- * Never the reverse.
+ * holding the vnode); v_lock -> ext2_itable_lock (flush); v_lock -> pc_lock
+ * (page cache) via the data path.  Never the reverse.
  */
 static pthread_mutex_t ext2_alloc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t ext2_itable_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t ext2_vnode_table_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void
@@ -3368,10 +3374,15 @@ vnode_inode_block(struct ext2fs_file *fp, ino_t inumber, daddr_t disk_block)
 	 * ⚠️ Read HERE and not on the cache hit.  Reading it there would undo
 	 * exactly the I/O the cache exists to avoid, on every open of every
 	 * file, to serve a write-back that most of them never do.  Here it is
-	 * paid once, by the flush that needs it, beside a write it is already
-	 * doing.
+	 * paid by the flush that needs it, beside a write it is already doing.
+	 *
+	 * 🔴 #599: and read EVERY time, under ext2_itable_lock, which the
+	 * caller holds until the block is written.  The block holds other
+	 * inodes, and write_new_inode writes them; a copy kept from an earlier
+	 * read wrote them back as they were then -- a file made while another
+	 * was open lost its inode at the other's next flush.
 	 */
-	if (vn->v_inode_blk == 0) {
+	{
 		vm_offset_t		buf;
 		vm_size_t		buf_size;
 		int			rc;
@@ -3388,6 +3399,9 @@ vnode_inode_block(struct ext2fs_file *fp, ino_t inumber, daddr_t disk_block)
 			return rc;
 		}
 
+		if (vn->v_inode_blk != 0)
+			(void) vm_deallocate(mach_task_self(), vn->v_inode_blk,
+					     vn->v_inode_blk_size);
 		vn->v_inode_blk = buf;
 		vn->v_inode_blk_size = buf_size;
 	}
@@ -3433,14 +3447,15 @@ write_inode(ino_t inumber, struct ext2fs_file *fp)
 	}
 
 	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
+	pthread_mutex_lock(&ext2_itable_lock);
 	rc = vnode_inode_block(fp, inumber, disk_block);
-	if (rc != 0)
-		return rc;
-
-	serialize_inode(fp);
-
-	return write_disk_block(fp, disk_block,
-				vn->v_inode_blk, EXT2_BLOCK_SIZE(fs));
+	if (rc == 0) {
+		serialize_inode(fp);
+		rc = write_disk_block(fp, disk_block, vn->v_inode_blk,
+				      EXT2_BLOCK_SIZE(fs));
+	}
+	pthread_mutex_unlock(&ext2_itable_lock);
+	return rc;
 }
 
 /*
@@ -3982,16 +3997,22 @@ flush_metadata_locked(struct ext2fs_file *fp)
 		unsigned int off;
 		io_buf_len_t bytes_written;
 		unsigned int inode_blk_size = EXT2_BLOCK_SIZE(fs);
+		int itable = 0;		/* #599: ext2_itable_lock held */
 
 		/* --- Prepare inode block (serialize in-place) --- */
 		if (vn->v_inode_dirty) {
 			daddr_t inode_disk_block = ext2_ino2blk(fs,
 						fp->f_gd, vn->v_ino);
 
+			/* #599: held until the batch is written */
+			pthread_mutex_lock(&ext2_itable_lock);
+			itable = 1;
 			rc = vnode_inode_block(fp, vn->v_ino,
 					       inode_disk_block);	/* #599 */
-			if (rc != 0)
+			if (rc != 0) {
+				pthread_mutex_unlock(&ext2_itable_lock);
 				return rc;
+			}
 			serialize_inode(fp);
 			recnums[n] = (recnum_t)dbtorec(&fp->f_dev,
 				ext2_fsbtodb(fs, inode_disk_block));
@@ -4121,8 +4142,12 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			 * concatenate into a single OOL buffer */
 			rc = vm_allocate(mach_task_self(), &concat,
 					 total_size, TRUE);
-			if (rc != KERN_SUCCESS)
+			if (rc != KERN_SUCCESS) {
+				if (itable)
+					pthread_mutex_unlock(
+						&ext2_itable_lock);
 				return rc;
+			}
 
 			off = 0;
 			if (vn->v_inode_dirty) {
@@ -4151,8 +4176,10 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			vm_deallocate(mach_task_self(), concat, total_size);
 		}
 
-		if (vn->v_inode_dirty)
+		if (itable) {
+			pthread_mutex_unlock(&ext2_itable_lock);
 			icache_follow(fp, rc);		/* #599 */
+		}
 		if (rc == KERN_SUCCESS) {
 			vn->v_inode_dirty = 0;
 			vn->v_gd_dirty = 0;
@@ -4262,9 +4289,12 @@ write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
 	struct ext2_inode *raw;
 	int rc, k;
 
+	pthread_mutex_lock(&ext2_itable_lock);		/* #599 */
 	rc = read_disk_block(ctx, itblk, &buf, &bsz);
-	if (rc != 0)
+	if (rc != 0) {
+		pthread_mutex_unlock(&ext2_itable_lock);
 		return rc;
+	}
 
 	raw = (struct ext2_inode *)((char *)buf +
 		ext2_itoo(fs, ino) * EXT2_INODE_SIZE(fs));
@@ -4278,6 +4308,7 @@ write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
 			raw->i_block[k] = cpu_to_le32(iblock[k]);
 
 	rc = write_disk_block(ctx, itblk, buf, EXT2_BLOCK_SIZE(fs));
+	pthread_mutex_unlock(&ext2_itable_lock);
 	vm_deallocate(mach_task_self(), buf, bsz);
 
 	{
