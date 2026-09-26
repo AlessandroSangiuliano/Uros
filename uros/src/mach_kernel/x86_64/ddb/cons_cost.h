@@ -14,7 +14,8 @@ void cons_cost_report(void);
  * once, at halt. */
 void cons_ring_report(void);
 
-/* The same lines, every call: each begins with lead and says when (#599). */
-void cons_ring_lines(const char *lead, const char *when);
+/* The same counts so far, one line beginning with lead, every call (#599):
+ * the quiet census's. */
+void cons_ring_so_far(const char *lead);
 
 #endif	/* _X86_64_DDB_CONS_COST_H_ */

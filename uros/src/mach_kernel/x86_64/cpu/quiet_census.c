@@ -45,7 +45,7 @@
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
 #include <cpu/percpu.h>	/* #599: returns to ring 3, all processors */
-#include <ddb/cons_cost.h>	/* #567: one line about the console, once a boot */
+#include <ddb/cons_cost.h>	/* #567: the console's counts, with each report */
 
 /*
  * How long "quiet" is.
@@ -303,14 +303,14 @@ quiet_census_pass(int mycpu)
 	 * threshold came down from three thousand under an interval of a
 	 * thousand.
 	 *
-	 * With it, what the console did so far (#567, #568).  The kernel cannot
-	 * tell which moment ends an ordinary run -- the harness stops a kernel
-	 * that has nothing left to do rather than waiting for it to halt -- so
-	 * each report carries a copy and the last one in the log is the run's.
-	 * They begin with this line's word, so the harness reads them as idle
-	 * chatter: a line it counted as progress would put off, at every
-	 * doubling, its verdict on a boot that has stopped.  halt_cpu() says
-	 * the final copy (cons_ring_report).
+	 * With it, the console's counts so far (#567, #568), one line: the
+	 * kernel cannot tell which moment ends an ordinary run -- the harness
+	 * stops a kernel that has nothing left to do rather than waiting for it
+	 * to halt -- so each report carries them, and what came after the last
+	 * report is in none.  It begins with this line's word, so the harness
+	 * reads it as idle chatter: a line it counted as progress would put
+	 * off, at every doubling, its verdict on a boot that has stopped.
+	 * halt_cpu() says the final copy (cons_ring_report).
 	 */
 	quiet_passes++;
 	if (++quiet_all_passes == quiet_next_report) {
@@ -318,7 +318,7 @@ quiet_census_pass(int mycpu)
 		printf("quiet_census: passes=%lu peak=%lu resets=%lu (after %lu "
 		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
 		       quiet_resets, quiet_all_passes);
-		cons_ring_lines("quiet_census: ", "so far this boot");
+		cons_ring_so_far("quiet_census: ");
 	}
 
 	if (quiet_passes < QUIET_PASSES)
@@ -327,10 +327,10 @@ quiet_census_pass(int mycpu)
 	quiet_said = 1;
 
 	/*
-	 * The console's copy first (#567): the census below is what a reader
+	 * The console's counts first (#567): the census below is what a reader
 	 * of a stopped boot looks at, and the bytes still queued are part of it.
 	 */
-	cons_ring_lines("quiet_census: ", "so far this boot");
+	cons_ring_so_far("quiet_census: ");
 
 	printf("quiet_census (#476): the machine has been idle for %lu idle "
 	       "passes; %d tasks and %d threads\n",
