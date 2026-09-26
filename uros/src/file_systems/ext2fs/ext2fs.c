@@ -3334,23 +3334,22 @@ serialize_inode(struct ext2fs_file *fp)
 }
 
 /*
- * Write the inode back to disk using the cached inode block.
- * No device_read needed — the block was cached by read_inode().
+ * The block that holds the vnode's inode, which both ways of flushing it
+ * serialize into.
+ *
+ * #599: the batched flush kept the silent KERN_FAILURE that #483 took out of
+ * write_inode below.  A create, mkdir or rmdir whose parent directory came
+ * from the inode cache dirties the parent's inode, the group descriptors and
+ * the superblock -- three items, so the batch -- and lost all three writes
+ * without a word: ext2fs_close_file does not look at the answer.  The group
+ * counts of the last such operation before a quiet period never reached the
+ * disk, and e2fsck said so.  Both paths now ask here.
  */
 static int
-write_inode(ino_t inumber, struct ext2fs_file *fp)
+vnode_inode_block(struct ext2fs_file *fp, ino_t inumber, daddr_t disk_block)
 {
 	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_vnode *vn = fp->f_vnode;
-	daddr_t disk_block;
-
-	if (!vn) {
-		printf("ext2: write_inode %u: no vnode\n",
-		       (unsigned)inumber);
-		return KERN_FAILURE;
-	}
-
-	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 
 	/*
 	 * 🔴 #483: READ THE BLOCK IF NOBODY HAS.  This used to return
@@ -3383,14 +3382,39 @@ write_inode(ino_t inumber, struct ext2fs_file *fp)
 				   (int) EXT2_BLOCK_SIZE(fs),
 				   (char **)&buf, &buf_size);
 		if (rc != KERN_SUCCESS) {
-			printf("ext2: write_inode %u: its block could not be "
-			       "read back (rc=%d)\n", (unsigned)inumber, rc);
+			printf("ext2: inode %u: its block could not be read "
+			       "back for a flush (rc=%d)\n", (unsigned)inumber,
+			       rc);
 			return rc;
 		}
 
 		vn->v_inode_blk = buf;
 		vn->v_inode_blk_size = buf_size;
 	}
+	return 0;
+}
+
+/*
+ * Write the inode back to disk using the cached inode block.
+ */
+static int
+write_inode(ino_t inumber, struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_vnode *vn = fp->f_vnode;
+	daddr_t disk_block;
+	int rc;
+
+	if (!vn) {
+		printf("ext2: write_inode %u: no vnode\n",
+		       (unsigned)inumber);
+		return KERN_FAILURE;
+	}
+
+	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
+	rc = vnode_inode_block(fp, inumber, disk_block);
+	if (rc != 0)
+		return rc;
 
 	serialize_inode(fp);
 
@@ -3939,12 +3963,14 @@ flush_metadata_locked(struct ext2fs_file *fp)
 
 		/* --- Prepare inode block (serialize in-place) --- */
 		if (vn->v_inode_dirty) {
-			if (vn->v_inode_blk == 0)
-				return KERN_FAILURE;
-			serialize_inode(fp);
-
 			daddr_t inode_disk_block = ext2_ino2blk(fs,
 						fp->f_gd, vn->v_ino);
+
+			rc = vnode_inode_block(fp, vn->v_ino,
+					       inode_disk_block);	/* #599 */
+			if (rc != 0)
+				return rc;
+			serialize_inode(fp);
 			recnums[n] = (recnum_t)dbtorec(&fp->f_dev,
 				ext2_fsbtodb(fs, inode_disk_block));
 			sizes[n] = inode_blk_size;
