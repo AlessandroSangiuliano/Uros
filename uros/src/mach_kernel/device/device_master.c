@@ -3386,10 +3386,12 @@ ds_master_device_dma_faults(
  * ── A device that must be programmed with physical addresses (#432) ──
  *
  * 🔴 NOT AN OPT-OUT OF ISOLATION, and the distinction is the whole of why this
- * exists rather than a flag that says "leave me alone".  The device is still
- * confined: its domain contains what it has been granted and nothing else, and
- * every other address in the machine faults for it.  What it gives up is stage
- * 3e -- not knowing where its memory is.
+ * exists rather than a flag that says "leave me alone".  Its domain contains
+ * what it has been granted and nothing else, and every other address in the
+ * machine faults for it -- where its DMA goes through the IOMMU.  What it gives
+ * up is stage 3e -- not knowing where its memory is.  (#599: the one caller's
+ * device, QEMU's legacy virtio, does not put its DMA through the IOMMU at all;
+ * see the line printed below.)
  *
  * 🔑 AND IT IS A CONSTRAINT AND NOT A PREFERENCE.  A legacy virtio device is
  * SPECIFIED to take physical addresses: there is no VIRTIO_F_ACCESS_PLATFORM
