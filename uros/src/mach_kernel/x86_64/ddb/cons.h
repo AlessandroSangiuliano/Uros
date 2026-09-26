@@ -143,6 +143,7 @@ void cons_flush(void);
 unsigned int cons_port_release(void);
 void cons_port_reclaim(void);
 int cons_port_is_ours(void);
+int cons_poll_getc(void);	/* #599: -1 unless the port is still ours */
 
 /*
  * Where the bytes of this boot were actually handed to the port, counted so

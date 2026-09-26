@@ -77,16 +77,23 @@ static void	cons_wire_byte(char c);
  * Nonzero once a task has claimed COM1 and the console has stepped back
  * (#497).  Read on the two paths that reach the port and nowhere else.
  *
- * ⚠️ A plain int and no lock, deliberately.  It is written twice in the life
- * of a machine -- once when a driver attaches, once when the machine is
- * dying -- and read by every byte.  A reader that sees the old value writes
- * one more byte to a port whose new owner has not sent anything yet (the
- * claim happens before the driver's first write) or, on the way down, misses
- * one byte of a panic that is repeated on fbcons and in klog anyway.  A lock
- * on the hot path to order two events that are ordered by the machine's own
- * lifetime would cost every byte to buy nothing.
+ * #599: written under cons_tx_lock -- the handover, the take-back when a
+ * driver lets go -- and read under it by the two paths that reach the port
+ * once a driver can exist: the drain, and the tick's poll for DDB's break
+ * character.  A byte the drain had already decided to send cannot reach the
+ * chip after the handover returns, and the poll cannot take a byte of the
+ * driver's input.  Read without the lock only where the ring is off: early
+ * boot, before there is a driver, and the way down, which takes the port
+ * back first (cons_port_take_back, the stated exception).
  */
 static int	cons_port_given_away;
+
+/*
+ * #599: LCR as the console had it when it let the port go, bit 7 clear; put
+ * back when the port comes back, so the console never writes THR into a
+ * divisor latch the driver -- or a sequence stopped half-way -- left open.
+ */
+static uint8_t	cons_port_lcr;
 
 /*
  * Where klog stood when the port changed hands (#497).  Every line finished
@@ -464,9 +471,10 @@ void cons_putc_wire(char c)
  * while open, LCR as it was, under cons_tx_lock -- which every THR write from
  * the drain takes.  By the time a driver holds COM1 the console has stepped
  * back from the port (cons_port_given_away), so this is uncontended in the
- * ordinary case; the lock is what keeps a take-back on the way down from
- * writing into an open latch.  Answers what the latch held; the caller says
- * it (device_md_io_set_divisor).
+ * ordinary case; the lock orders it against the take-back when the driver
+ * lets go (cons_port_reclaim).  The way down takes no lock and puts LCR back
+ * instead, which closes a latch a stopped sequence left open.  Answers what
+ * the latch held; the caller says it (device_md_io_set_divisor).
  */
 unsigned int cons_set_divisor(unsigned int divisor)
 {
@@ -698,6 +706,7 @@ unsigned int cons_port_release(void)
 	 */
 	simple_lock(&printf_lock);
 	cons_flush();
+	hw_lock_lock(&cons_tx_lock);	/* #599: the flag's lock, see its note */
 	{
 		/*
 		 * ⚠️ BOUNDED, because #551 is what an unbounded wait on this
@@ -715,7 +724,9 @@ unsigned int cons_port_release(void)
 			cpu_pause();
 		}
 	}
+	cons_port_lcr = inb(COM1 + UART_LCR) & (uint8_t)~0x80u;
 	cons_port_given_away = 1;
+	hw_lock_unlock(&cons_tx_lock);
 	/*
 	 * 🔥 THE CURSOR, HERE, UNDER THE SAME LOCK.  The first forwarder
 	 * skipped klog to its own tip when it started, milliseconds after
@@ -730,9 +741,29 @@ unsigned int cons_port_release(void)
 	return cons_port_klog_from;
 }
 
+/*
+ * #599: the port back, with LCR as the console left it.  No lock: the way
+ * down calls this with the other processors stopped, one of them possibly
+ * inside cons_tx_lock -- in cons_set_divisor with the latch open, which this
+ * closes.
+ */
+static void cons_port_take_back(void)
+{
+	if (cons_port_given_away)
+		outb(COM1 + UART_LCR, cons_port_lcr);
+	cons_port_given_away = 0;
+}
+
+/*
+ * A driver let the port go.  Under cons_tx_lock, so a divisor sequence of
+ * the driver's still running on another processor ends before LCR is put
+ * back under it.
+ */
 void cons_port_reclaim(void)
 {
-	cons_port_given_away = 0;
+	hw_lock_lock(&cons_tx_lock);
+	cons_port_take_back();
+	hw_lock_unlock(&cons_tx_lock);
 }
 
 int cons_port_is_ours(void)
@@ -817,7 +848,7 @@ void cons_async_set(int on)
 		 * ⚠️ Before the drain, so the bytes that were queued while the
 		 * port was somebody else's still leave on the wire.
 		 */
-		cons_port_reclaim();
+		cons_port_take_back();
 
 		cons_async_on = 0;
 		while (cons_drain_run(1, CONS_DRAIN_DOWN) != 0)
@@ -985,6 +1016,26 @@ int cons_getc_nowait(void)
 		return -1;
 
 	return inb(COM1 + UART_DATA);
+}
+
+/*
+ * #599: the tick's poll for DDB's break character: a byte only from a port
+ * that is still the console's, decided under the lock the handover is made
+ * under.  Once a driver holds COM1 the byte is its input, and a poll that
+ * read it every ten milliseconds took it from under the driver's interrupt.
+ * A lock somebody holds -- this processor's own drain, interrupted -- is a
+ * tick without a poll, and the next tick asks again.
+ */
+int cons_poll_getc(void)
+{
+	int c = -1;
+
+	if (!hw_lock_try(&cons_tx_lock))
+		return -1;
+	if (!cons_port_given_away)
+		c = cons_getc_nowait();
+	hw_lock_unlock(&cons_tx_lock);
+	return c;
 }
 
 int cons_getc(void)

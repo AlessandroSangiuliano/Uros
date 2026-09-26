@@ -524,7 +524,7 @@ void ddb_poll_console(struct trap_frame *frame)
 	if (!enabled)
 		return;
 
-	c = cons_getc_nowait();
+	c = cons_poll_getc();	/* #599: not a byte of a driver's input */
 	if (c >= 0)
 		(void) ddb_break_char(c);
 
