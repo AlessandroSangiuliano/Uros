@@ -4846,6 +4846,16 @@ ext2fs_truncate_file(fs_private_t private, vm_size_t length)
 	vnode_mutex_lock(fp);
 	vnode_gen_check(fp);
 
+	/*
+	 * #599: a directory's blocks are its records, freed only by rmdir
+	 * (found in review: a truncate through a directory handle left a
+	 * linked directory with no '.' and no entries).
+	 */
+	if ((fp->f_ic->i_mode & IFMT) == IFDIR) {
+		vnode_mutex_unlock(fp);
+		return FS_IS_DIRECTORY;
+	}
+
 	if (fp->f_ic->i_size <= length) {
 		vnode_mutex_unlock(fp);
 		return 0;	/* grow-on-truncate not handled here */
