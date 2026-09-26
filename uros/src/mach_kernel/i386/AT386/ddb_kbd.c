@@ -24,7 +24,7 @@
  *     is NOT that context: it runs whenever the line fires, and until
  *     ps2.so registers IRQ 1 it would read the answers to ps2.so's own
  *     commands.  #599: it stands back while a task holds the 8042's
- *     ports (ddb_kbd_8042_claimed below).
+ *     ports (ddb_kbd_8042_recompute below).
  *
  * Serial console (cons_is_com1) path is preserved: when the boot
  * picked COM1 as the console, cngetc/cnmaygetc forward to com_getc.
@@ -39,6 +39,7 @@
 #include <i386/ipl.h>		/* SPL6 */
 #include <chips/busses.h>	/* take_irq / reset_irq / intr_t */
 #include <i386/AT386/ddb_kbd.h>
+#include <device/device_machdep.h>	/* device_io_port_held (#599) */
 
 extern int com_getc(boolean_t wait);
 extern int cons_is_com1;
@@ -315,7 +316,6 @@ static int ddb_brk_ctrl;	/* Ctrl currently held */
  */
 static volatile unsigned char	i8042_lock;
 static volatile int		i8042_claimed;
-static int			i8042_claims;	/* claims on 0x60/0x64 held */
 static int			ddb_kbd_armed;
 unsigned int			ddb_kbd_stood_back;
 unsigned int			ddb_kbd_bytes_taken;
@@ -398,48 +398,77 @@ ddb_kbd_intr(int unit)
 }
 
 /*
- * #599: a task claimed the 8042's ports.  Answers 1 when the reader is armed
- * and now stands back, 0 when there is no reader to stand back.  Under
- * ABLATE_599_I8042_SHARED the claim is answered but the mask is not set, so
- * the reader goes on reading the task's bytes -- the old behaviour, for the
- * test that must show it.
+ * #599: the claim as device_master's table has it.  Called after every claim
+ * or unclaim of a range touching 0x60 or 0x64 (device_md_io_claimed/unclaimed
+ * in i386/device_machdep.c).  The mask is recomputed from the table under
+ * i8042_lock -- the table read inside the hold -- so an identical re-claim
+ * counts once, and hooks that run in another order than their table changes
+ * (they run after device_table_lock is let go, on any processor) still leave
+ * the mask as the table is: whichever runs last reads the last change.  Found
+ * in review: a counter here was bumped twice by a re-claim and left the
+ * reader standing back with nothing claimed.
+ *
+ * When the claim goes and IRQ 1 is the reader's, a byte the reader stood back
+ * from is still in the output buffer, holding the edge-triggered line up, and
+ * no interrupt would ever come again: it is drained, and counted.  If IRQ 1
+ * is not the reader's -- a driver took it, and a driver that dies has its line
+ * masked rather than given back -- the reader does not read again, and the
+ * line says so.
+ *
+ * Answers whether the reader stands back now.  Under ABLATE_599_I8042_SHARED
+ * it never does: the claim is answered 0, the reader goes on reading the
+ * task's bytes, and the line says the ablation is on.
  */
+unsigned int	ddb_kbd_bytes_dropped;	/* left by a claim, drained after */
+
 int
-ddb_kbd_8042_claimed(void)
+ddb_kbd_8042_recompute(void)
 {
 	unsigned int flags;
+	int held, was, now, reader, drained = 0;
+	static int ablation_said;
 
 	if (!ddb_kbd_break_enabled || !ddb_kbd_armed)
 		return 0;
-	/* One line per hand-over, however many of its ports are claimed */
-	if (++i8042_claims > 1)
-		return 1;
 	flags = i8042_enter();
+	held = device_io_port_held(KBD_DATA) || device_io_port_held(KBD_STATUS);
+	was = i8042_claimed;
 #ifndef	ABLATE_599_I8042_SHARED
-	i8042_claimed = 1;
+	i8042_claimed = held;
 #endif
+	now = i8042_claimed;
+	reader = ivect[1] == (intr_t)ddb_kbd_intr;
+	if (was && !now) {
+		ddb_brk_ctrl = 0;	/* a Ctrl release it never saw */
+		if (reader && (inb(KBD_STATUS) & KBD_STAT_OBF)) {
+			(void)inb(KBD_DATA);
+			ddb_kbd_bytes_dropped++;
+			drained = 1;
+		}
+	}
 	i8042_leave(flags);
-	printf("DDB: the 8042 is claimed by a task — the break-key reader "
-	       "stands back (it had taken %u bytes) (#599)\n",
-	       ddb_kbd_bytes_taken);
-	return 1;
-}
 
-void
-ddb_kbd_8042_unclaimed(void)
-{
-	unsigned int flags;
-
-	if (!ddb_kbd_break_enabled || !ddb_kbd_armed || i8042_claims == 0)
-		return;
-	if (--i8042_claims > 0)
-		return;
-	flags = i8042_enter();
-	i8042_claimed = 0;
-	i8042_leave(flags);
-	printf("DDB: the 8042 is the kernel's again — while it was claimed the "
-	       "break-key reader stood back %u times; it has taken %u bytes "
-	       "(#599)\n", ddb_kbd_stood_back, ddb_kbd_bytes_taken);
+	if (!was && now)
+		printf("DDB: the 8042 is claimed by a task — the break-key "
+		       "reader stands back (it had taken %u bytes) (#599)\n",
+		       ddb_kbd_bytes_taken);
+	else if (was && !now && reader)
+		printf("DDB: the 8042 is the kernel's again — while it was "
+		       "claimed the break-key reader stood back %u times; it "
+		       "has taken %u bytes%s (#599)\n", ddb_kbd_stood_back,
+		       ddb_kbd_bytes_taken, drained ?
+		       ", and drained one the claim left pending" : "");
+	else if (was && !now)
+		printf("DDB: no task claims the 8042 now, but IRQ 1 is not the "
+		       "break-key reader's -- a driver took it and did not give "
+		       "it back -- so the reader does not read again this boot "
+		       "(#599)\n");
+	else if (!now && held && !ablation_said) {
+		ablation_said = 1;
+		printf("DDB: ABLATE_599_I8042_SHARED -- the 8042 is claimed and "
+		       "the break-key reader goes on reading it (#599)\n");
+	}
+	return now;
 }
 
 /*
@@ -452,6 +481,7 @@ ddb_kbd_irq_handed_over(void)
 {
 	if (!ddb_kbd_break_enabled || !ddb_kbd_armed)
 		return;
+	ddb_brk_ctrl = 0;	/* the driver sees the releases from here */
 	printf("DDB: IRQ 1 goes to a driver — until now the break-key reader "
 	       "stood back %u times and took %u bytes (#599)\n",
 	       ddb_kbd_stood_back, ddb_kbd_bytes_taken);
@@ -543,7 +573,12 @@ ddb_8042_kbd_enable(int *ack)
 	cfg = inb(KBD_DATA);
 	cfg |= 0x01;	/* enable port-1 (keyboard) interrupt -> IRQ 1 */
 	cfg |= 0x40;	/* translate to scancode set 1 (our tables) */
-	cfg &= ~0x10;	/* clear "disable port-1 clock" -> keyboard on */
+	/*
+	 * #599: the port-1 clock stays off (bit 4, as DISABLE_P1 left it)
+	 * across the read-back below, so the byte that answers it is the
+	 * controller's and not a key the keyboard sent in between (found in
+	 * review).  ENABLE_P1 turns the clock on after it.
+	 */
 	if (ddb_8042_cmd(I8042_WRITE_CFG) < 0 || ddb_8042_data(cfg) < 0)
 		return -1;
 	if (ddb_8042_cmd(I8042_READ_CFG) < 0 || ddb_8042_out_full() < 0)

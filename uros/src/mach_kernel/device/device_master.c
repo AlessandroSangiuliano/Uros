@@ -3002,6 +3002,25 @@ ds_master_device_io_port_set_divisor(
 	return KERN_SUCCESS;
 }
 
+/* #599: see <device/device_machdep.h> */
+int
+device_io_port_held(unsigned int port)
+{
+	unsigned int	i;
+	int		held = 0;
+
+	urmach_rcu_read_lock();
+	for (i = 0; i < IO_CLAIM_MAX && !held; i++) {
+		if (io_claim[i].task == TASK_NULL)
+			continue;
+		if (io_claim[i].base <= port &&
+		    port < io_claim[i].base + io_claim[i].count)
+			held = 1;
+	}
+	urmach_rcu_read_unlock();
+	return held;
+}
+
 static kern_return_t
 check_io_port(unsigned int port, unsigned int size)
 {

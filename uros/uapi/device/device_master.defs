@@ -715,16 +715,19 @@ routine device_io_port_claim(
  */
 
 /*
- * `console_released' is 1 when the kernel's own console gave up a port in
- * this range because of the claim, 0 when it did not -- and 0 is an honest
- * answer, not a failure.  On x86-64 a claim covering COM1 makes the console
- * step back; on i386 it does not (com.c writes the chip with its own `outb'
- * and #544 is where that changes).  A driver that gets 0 still owns the range
- * against every other TASK, but it shares the wire with the kernel, and it
- * must behave like a sharer: keep its lines tight, and forward nothing the
- * kernel is already sending itself.  Making the driver guess this from the
- * target it was compiled for would be a build expression answering a runtime
- * question.
+ * `console_released' is 1 when the kernel's own user of a port in this range
+ * stepped back because of the claim, 0 when it did not -- and 0 is an honest
+ * answer, not a failure.  Which user depends on the range and the target
+ * (#599): on x86-64 a claim covering COM1 makes the console step back, and
+ * `klog_from' then says where its log continues; on i386 a claim touching
+ * 0x60 or 0x64 makes the break-key reader of -K boots stand back, and
+ * `klog_from' is 0.  i386's console does not step back from COM1: it and the
+ * claimant share the chip under the kernel's lock.  A COM1 driver that gets 0
+ * still owns the range against every other TASK, but it shares the wire with
+ * the kernel, and it must behave like a sharer: keep its lines tight, and
+ * forward nothing the kernel is already sending itself.  Making the driver
+ * guess this from the target it was compiled for would be a build expression
+ * answering a runtime question.
  */
 
 /*

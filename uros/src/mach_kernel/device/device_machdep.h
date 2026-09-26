@@ -180,6 +180,15 @@ extern int		device_md_io_opens_latch(unsigned int port,
 						 unsigned int data);
 
 /*
+ * #599: from device_master to the machine: whether some task holds a claim
+ * covering `port'.  For a machine layer whose own user of a port stands back
+ * while one does (i386's break-key reader and the 8042), asked after the
+ * table changed, so the last to ask reads the last change.  Takes no lock:
+ * an RCU read section, safe with interrupts off.
+ */
+extern int		device_io_port_held(unsigned int port);
+
+/*
  * Whether a range of legacy ports touches one the kernel keeps for itself,
  * and whose it is (#508).  Returns the owner's name, or 0.
  *

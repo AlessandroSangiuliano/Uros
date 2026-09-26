@@ -330,7 +330,7 @@ device_md_io_claimed(unsigned int base, unsigned int count,
 {
 	*klog_from = 0;
 	if (range_touches(base, count, 0x60) || range_touches(base, count, 0x64))
-		return ddb_kbd_8042_claimed();
+		return ddb_kbd_8042_recompute();
 	return 0;
 }
 
@@ -378,7 +378,7 @@ void
 device_md_io_unclaimed(unsigned int base, unsigned int count)
 {
 	if (range_touches(base, count, 0x60) || range_touches(base, count, 0x64))
-		ddb_kbd_8042_unclaimed();
+		(void) ddb_kbd_8042_recompute();
 }
 
 /*
