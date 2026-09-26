@@ -1882,7 +1882,9 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 
 		/* ...otherwise a plain one, with the same write-back. */
 		if (mnt->dev.cache == NULL)
-			mnt->dev.cache = page_cache_create(8192, ext2_writeback,
+			mnt->dev.cache = page_cache_create(8192,
+							   (vm_size_t)blksz,
+							   ext2_writeback,
 							   &mnt->wb);
 		if (mnt->dev.cache == NULL)
 			printf("ext2: no page cache -- every block goes to the "
@@ -2291,6 +2293,19 @@ main(int argc, char **argv)
 			printf("ext2: WRONG — %u of %u block-I/O cases on a "
 			       "device that answers nothing answered wrong "
 			       "(#599)\n", wrong, ran);
+	}
+
+	/* #599: the page cache, on small caches of its own. */
+	{
+		unsigned int ran, wrong;
+
+		page_cache_selftest(&ran, &wrong);
+		if (wrong == 0)
+			printf("ext2: %u page-cache cases, 0 wrong (#599)\n",
+			       ran);
+		else
+			printf("ext2: WRONG — %u of %u page-cache cases "
+			       "answered wrong (#599)\n", wrong, ran);
 	}
 
 	/* Create port set for all mount ports */

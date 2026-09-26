@@ -499,6 +499,8 @@ must_report '=== ext2 filesystem server' 'ext2: .*directory records' \
 	'ext_server asks the directory-record check about records built to break each rule before it reads a disk (#599).  No line means the check never ran.'
 must_report '=== ext2 filesystem server' 'ext2: .*block-I/O cases' \
 	'ext_server asks its block-I/O paths about a file whose device answers nothing (#599).  No line means they were never asked.'
+must_report '=== ext2 filesystem server' 'ext2: .*page-cache cases' \
+	'ext_server asks the page cache about small caches of its own (#599).  No line means it was never asked.'
 
 must_report '=== ext2 filesystem server' 'ext2: ready, entering message loop' \
 	'It mounts ahci0a and serves it (#498).  Every way out of main() before that line is a failure -- a device it could not open, a capability it was refused, a superblock it could not read -- and each of them ends the task rather than printing a verdict.'

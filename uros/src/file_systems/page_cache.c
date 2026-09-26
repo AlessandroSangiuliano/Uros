@@ -71,23 +71,6 @@ hash_remove(struct page_cache *pc, struct page_cache_entry *e)
 	}
 }
 
-/* Free the data buffer of a cache entry.
- * In DMA mode the buffer is part of the pre-allocated pool —
- * do NOT vm_deallocate individual entries. */
-static void
-entry_free_data(struct page_cache *pc, struct page_cache_entry *e)
-{
-	if (!e->pc_data)
-		return;
-	if (pc->pc_dma_pool) {
-		/* DMA pool: buffer is permanent, just reset block key */
-		return;
-	}
-	vm_deallocate(mach_task_self(), e->pc_data, e->pc_size);
-	e->pc_data = 0;
-	e->pc_size = 0;
-}
-
 /* Write back a dirty entry via the writeback callback */
 static int
 entry_writeback(struct page_cache *pc, struct page_cache_entry *e)
@@ -130,23 +113,26 @@ evict_lru(struct page_cache *pc)
 
 	lru_remove(victim);
 	hash_remove(pc, victim);
-	entry_free_data(pc, victim);
 	pc->pc_count--;
 	pc->pc_evictions++;
 
 	return victim;
 }
 
-struct page_cache *
-page_cache_create(unsigned int max_entries,
-		  page_cache_writeback_fn writeback, void *ctx)
+/*
+ * The cache and its entries, with no slots yet: page_cache_create gives it a
+ * slab, page_cache_create_dma the caller's pool.
+ */
+static struct page_cache *
+page_cache_alloc(unsigned int max_entries, vm_size_t block_size,
+		 page_cache_writeback_fn writeback, void *ctx)
 {
 	struct page_cache *pc;
 	unsigned int i;
 
 	/* #573: see page_cache.h -- a cache that could lose dirty blocks is
 	 * not one this function makes. */
-	if (writeback == NULL)
+	if (writeback == NULL || max_entries == 0 || block_size == 0)
 		return NULL;
 
 	pc = (struct page_cache *)malloc(sizeof(*pc));
@@ -156,6 +142,7 @@ page_cache_create(unsigned int max_entries,
 	memset(pc, 0, sizeof(*pc));
 	pthread_mutex_init(&pc->pc_lock, NULL);
 	pc->pc_max_entries = max_entries;
+	pc->pc_block_size = block_size;
 	pc->pc_writeback = writeback;
 	pc->pc_writeback_ctx = ctx;
 
@@ -177,6 +164,7 @@ page_cache_create(unsigned int max_entries,
 	pc->pc_free = NULL;
 	for (i = 0; i < max_entries; i++) {
 		pc->pc_pool[i].pc_block = -1;
+		pc->pc_pool[i].pc_size = block_size;
 		pc->pc_pool[i].pc_hash_next = pc->pc_free;
 		pc->pc_free = &pc->pc_pool[i];
 	}
@@ -184,32 +172,65 @@ page_cache_create(unsigned int max_entries,
 	return pc;
 }
 
-void
+/*
+ * #599: a non-DMA cache owns one slab, cut into fixed slots at creation.
+ * It allocated a buffer per insertion and freed it at eviction, and the
+ * update path freed a buffer before an allocation that could fail -- a
+ * published entry with no data.  No slot moves or goes away now while the
+ * cache exists.
+ */
+struct page_cache *
+page_cache_create(unsigned int max_entries, vm_size_t block_size,
+		  page_cache_writeback_fn writeback, void *ctx)
+{
+	struct page_cache *pc = page_cache_alloc(max_entries, block_size,
+						 writeback, ctx);
+	unsigned int i;
+
+	if (pc == NULL)
+		return NULL;
+
+	pc->pc_slab_size = (vm_size_t)max_entries * block_size;
+	if (vm_allocate(mach_task_self(), &pc->pc_slab, pc->pc_slab_size,
+			TRUE) != KERN_SUCCESS) {
+		free(pc->pc_pool);
+		free(pc);
+		return NULL;
+	}
+	for (i = 0; i < max_entries; i++)
+		pc->pc_pool[i].pc_data = pc->pc_slab + (vm_offset_t)i *
+					 block_size;
+	return pc;
+}
+
+int
 page_cache_destroy(struct page_cache *pc)
 {
 	unsigned int i;
 
 	if (!pc)
-		return;
+		return 0;
 
-	/* Flush dirty blocks to disk before destroying */
-	for (i = 0; i < pc->pc_max_entries; i++) {
-		struct page_cache_entry *e = &pc->pc_pool[i];
-		if (e->pc_data && e->pc_block != (daddr_t)-1)
-			entry_writeback(pc, e);
-	}
+	/*
+	 * #599: refused, with nothing freed, while a block is dirty.  It wrote
+	 * each dirty block back and ignored the answer, then freed the lot --
+	 * the DMA pool included, which was never the cache's.
+	 */
+	pthread_mutex_lock(&pc->pc_lock);
+	for (i = 0; i < pc->pc_max_entries; i++)
+		if (pc->pc_pool[i].pc_block != (daddr_t)-1 &&
+		    (pc->pc_pool[i].pc_dirty || pc->pc_pool[i].pc_busy)) {
+			pthread_mutex_unlock(&pc->pc_lock);
+			return -1;
+		}
+	pthread_mutex_unlock(&pc->pc_lock);
 
-	if (pc->pc_dma_pool) {
-		/* Free the entire DMA pool at once */
-		vm_deallocate(mach_task_self(), pc->pc_dma_pool,
-			      pc->pc_dma_pool_size);
-	} else {
-		for (i = 0; i < pc->pc_max_entries; i++)
-			entry_free_data(pc, &pc->pc_pool[i]);
-	}
-
+	if (pc->pc_slab != 0)
+		(void) vm_deallocate(mach_task_self(), pc->pc_slab,
+				     pc->pc_slab_size);
 	free(pc->pc_pool);
 	free(pc);
+	return 0;
 }
 
 int
@@ -244,7 +265,6 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 {
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
-	vm_offset_t buf;
 
 	pthread_mutex_lock(&pc->pc_lock);
 
@@ -271,24 +291,9 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 		}
 	}
 
-	if (pc->pc_dma_pool) {
-		/* DMA mode: buffer is pre-allocated, just copy data in */
-		memcpy((void *)e->pc_data, (void *)data,
-		       size < e->pc_size ? size : e->pc_size);
-	} else {
-		/* Non-DMA: allocate a new buffer */
-		if (vm_allocate(mach_task_self(), &buf, size, TRUE)
-		    != KERN_SUCCESS) {
-			/* Return entry to free list */
-			e->pc_hash_next = pc->pc_free;
-			pc->pc_free = e;
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
-		memcpy((void *)buf, (void *)data, size);
-		e->pc_data = buf;
-		e->pc_size = size;
-	}
+	/* #599: a fixed slot in either kind of cache */
+	memcpy((void *)e->pc_data, (void *)data,
+	       size < e->pc_size ? size : e->pc_size);
 
 	/* Fill entry */
 	e->pc_block = block;
@@ -303,53 +308,6 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	lru_insert_mru(pc, e);
 	pc->pc_count++;
 
-	pthread_mutex_unlock(&pc->pc_lock);
-}
-
-void
-page_cache_invalidate(struct page_cache *pc, daddr_t block)
-{
-	unsigned int h = PC_HASH(block);
-	struct page_cache_entry *e;
-
-	pthread_mutex_lock(&pc->pc_lock);
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			entry_writeback(pc, e);
-			lru_remove(e);
-			hash_remove(pc, e);
-			entry_free_data(pc, e);
-			e->pc_block = -1;
-			/* Return to free list */
-			e->pc_hash_next = pc->pc_free;
-			pc->pc_free = e;
-			pc->pc_count--;
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
-	}
-	pthread_mutex_unlock(&pc->pc_lock);
-}
-
-void
-page_cache_flush(struct page_cache *pc)
-{
-	unsigned int i;
-
-	pthread_mutex_lock(&pc->pc_lock);
-	for (i = 0; i < pc->pc_max_entries; i++) {
-		struct page_cache_entry *e = &pc->pc_pool[i];
-		if (e->pc_data && e->pc_block != (daddr_t)-1) {
-			entry_writeback(pc, e);
-			lru_remove(e);
-			hash_remove(pc, e);
-			entry_free_data(pc, e);
-			e->pc_block = -1;
-			e->pc_hash_next = pc->pc_free;
-			pc->pc_free = e;
-		}
-	}
-	pc->pc_count = 0;
 	pthread_mutex_unlock(&pc->pc_lock);
 }
 
@@ -377,30 +335,15 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 {
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
-	vm_offset_t buf;
 
 	pthread_mutex_lock(&pc->pc_lock);
 
 	/* If block is already cached, update in place */
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
-			if (pc->pc_dma_pool || e->pc_size == size) {
-				/* DMA: fixed-size slot; non-DMA: same size */
-				vm_size_t copy = size < e->pc_size
-						? size : e->pc_size;
-				memcpy((void *)e->pc_data,
-				       (void *)data, copy);
-			} else {
-				entry_free_data(pc, e);
-				if (vm_allocate(mach_task_self(), &buf,
-						size, TRUE) != KERN_SUCCESS) {
-					pthread_mutex_unlock(&pc->pc_lock);
-					return;
-				}
-				memcpy((void *)buf, (void *)data, size);
-				e->pc_data = buf;
-				e->pc_size = size;
-			}
+			/* #599: a fixed slot in either kind of cache */
+			memcpy((void *)e->pc_data, (void *)data,
+			       size < e->pc_size ? size : e->pc_size);
 			e->pc_dirty = 1;
 			lru_remove(e);
 			lru_insert_mru(pc, e);
@@ -633,7 +576,7 @@ page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
 	if (max_entries > max_possible)
 		max_entries = max_possible;
 
-	pc = page_cache_create(max_entries, writeback, ctx);
+	pc = page_cache_alloc(max_entries, block_size, writeback, ctx);
 	if (!pc)
 		return NULL;
 

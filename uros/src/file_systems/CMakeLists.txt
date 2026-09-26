@@ -9,6 +9,7 @@ project(libsa_fs C)
 set(SA_FS_SOURCES
   file_system.c
   page_cache.c
+  page_cache_selftest.c
 )
 
 # Which filesystems this machine's boot path can read.

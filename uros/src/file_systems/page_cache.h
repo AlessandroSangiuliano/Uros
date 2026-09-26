@@ -79,6 +79,15 @@ struct page_cache_entry {
 struct page_cache {
 	pthread_mutex_t		pc_lock;	/* protects all fields below */
 	unsigned int		pc_max_entries;
+	/*
+	 * #599: every slot is this size, fixed at creation: pc_data, pc_size
+	 * and pc_phys never change after it.  A non-DMA cache owns one slab
+	 * (pc_slab) cut into the slots; a DMA cache's slots are the pool its
+	 * creator allocated, which is not the cache's to free.
+	 */
+	vm_size_t		pc_block_size;
+	vm_offset_t		pc_slab;	/* non-DMA slots, owned (0 = DMA) */
+	vm_size_t		pc_slab_size;
 	unsigned int		pc_count;
 	unsigned int		pc_hits;
 	unsigned int		pc_misses;
@@ -113,13 +122,26 @@ struct page_cache {
  * Returns NULL on allocation failure or without a writeback.
  */
 struct page_cache *page_cache_create(unsigned int max_entries,
+				     vm_size_t block_size,
 				     page_cache_writeback_fn writeback,
 				     void *ctx);
 
 /*
- * Destroy a page cache, freeing all cached data and the cache itself.
+ * Destroy a page cache and free what it owns: the slab of a non-DMA cache,
+ * the entries, the cache.  Never a DMA pool -- that belongs to whoever
+ * allocated it (device_dma_alloc_sg), and is theirs to free (#599).
+ *
+ * Refuses, freeing nothing, while any block is dirty: a cache that holds a
+ * filesystem's blocks cannot drop data it was given.  Returns 0 when
+ * destroyed, non-zero when refused.
  */
-void page_cache_destroy(struct page_cache *pc);
+int page_cache_destroy(struct page_cache *pc);
+
+/*
+ * #599: the page cache's self-test, run at ext_server's start; *ran counts
+ * the cases, *wrong the wrong answers.
+ */
+void page_cache_selftest(unsigned int *ran, unsigned int *wrong);
 
 /*
  * Look up a disk block in the cache.
@@ -131,22 +153,12 @@ int page_cache_lookup(struct page_cache *pc, daddr_t block,
 		      vm_offset_t *data_out, vm_size_t *size_out);
 
 /*
- * Insert a block into the cache.  The cache allocates its own buffer
- * and copies 'size' bytes from 'data'.  Caller retains ownership of 'data'.
- * If the cache is full, the LRU entry is evicted (its buffer is freed).
+ * Insert a block into the cache: 'size' bytes (at most a slot's) are copied
+ * from 'data' into a slot.  Caller retains ownership of 'data'.  If the cache
+ * is full, the LRU entry is evicted and its slot reused.
  */
 void page_cache_insert(struct page_cache *pc, daddr_t block,
 		       vm_offset_t data, vm_size_t size);
-
-/*
- * Invalidate a specific block, freeing its cached data.
- */
-void page_cache_invalidate(struct page_cache *pc, daddr_t block);
-
-/*
- * Flush the entire cache, freeing all cached data.
- */
-void page_cache_flush(struct page_cache *pc);
 
 /*
  * Mark a cached block as dirty.  Returns 0 on success, -1 if the
