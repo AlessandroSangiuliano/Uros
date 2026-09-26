@@ -1592,6 +1592,15 @@ struct dma_region {
 	struct {
 		natural_t	bdf;
 		vm_offset_t	dma;	/* address of page zero          */
+		/*
+		 * #599: how that device reaches the region.  identity: each
+		 * page at its own physical address, not at dma + page *
+		 * PAGE_SIZE.  reads/writes: the directions the capability
+		 * shown for it allows, which is what was mapped.
+		 */
+		unsigned char	identity;
+		unsigned char	reads;
+		unsigned char	writes;
 	} user[DEVICE_MAX_REGION_USERS];
 
 	/*
@@ -3541,12 +3550,13 @@ ds_master_device_dma_map_foreign(
 	mach_msg_type_number_t	tokenCnt,
 	vm_address_t		*dma_addr)
 {
-	kern_return_t		kr;
+	kern_return_t		kr, kr_write;
 	struct dma_region	*r;
 	struct uros_cap		cap;
 	unsigned int		page, u;
 	unsigned long		base = 0;
 	uint64_t		r_id = 0;
+	int			reads, writes, identity = 0;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -3585,14 +3595,30 @@ ds_master_device_dma_map_foreign(
 
 	memcpy(&cap, token, sizeof(cap));
 
-	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_DMA_DEVICE_WRITE,
-				 r->id);
-	if (kr != KERN_SUCCESS) {
+	/*
+	 * #599: r_id, the copy taken inside the read section above, and not
+	 * r->id: the slot may have been dropped and reused since, and the
+	 * check would then be made against another buffer's name.  The
+	 * re-check under device_table_lock below is what catches the reuse;
+	 * this makes the check and its message say the same thing it does.
+	 *
+	 * 🔑 And BOTH directions, each asked for.  This used to check the
+	 * device-write op alone and then map the region for reading and
+	 * writing, so a capability that allowed the device only to read the
+	 * buffer was refused for that, and one that allowed only writes was
+	 * given reads as well.  What is mapped is what the capability allows.
+	 */
+	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_DMA_DEVICE_READ, r_id);
+	reads = kr == KERN_SUCCESS;
+	kr_write = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_DMA_DEVICE_WRITE,
+				       r_id);
+	writes = kr_write == KERN_SUCCESS;
+	if (!reads && !writes) {
 		printf("device: %02x:%02x.%u showed no capability for DMA "
 		       "region %lu (kr=%d) — knowing an address is not being "
 		       "given the buffer\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 7), (unsigned long)r->id, (int)kr);
+		       (unsigned)(bdf & 7), (unsigned long)r_id, (int)kr_write);
 		return KERN_NO_ACCESS;
 	}
 
@@ -3621,8 +3647,29 @@ ds_master_device_dma_map_foreign(
 	for (u = 0; u < r->nusers; u++)
 		if (r->user[u].bdf == bdf) {
 			base = (unsigned long)r->user[u].dma;
+			identity = r->user[u].identity;
 			break;
 		}
+
+	/*
+	 * #599: a capability for a direction the existing mapping does not
+	 * have is refused, not widened.  Widening means re-mapping a window a
+	 * device may be using; every capability issued today allows both, and
+	 * this line is what would say so the day one does not.
+	 */
+	if (u < r->nusers &&
+	    ((reads && !r->user[u].reads) || (writes && !r->user[u].writes))) {
+		mutex_unlock(&device_table_lock);
+		printf("device: %02x:%02x.%u was mapped DMA region %lu for "
+		       "%s only, and a capability for %s arrived after — the "
+		       "mapping is not widened\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)r_id,
+		       r->user[u].reads ? "the device's reads"
+					: "the device's writes",
+		       r->user[u].reads ? "its writes" : "its reads");
+		return KERN_NO_ACCESS;
+	}
 	if (u < r->nusers)
 		mutex_unlock(&device_table_lock);
 
@@ -3637,11 +3684,9 @@ ds_master_device_dma_map_foreign(
 		 * caller asks page by page and pays for it once: everything
 		 * after this is the arithmetic below.
 		 */
-		int identity = 0;	/* read by the next commit (#599) */
-
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)r->pa,
-					       r->npages, TRUE, TRUE, &base,
+					       r->npages, reads, writes, &base,
 					       &identity)) {
 			mutex_unlock(&device_table_lock);
 			return KERN_FAILURE;
@@ -3649,6 +3694,9 @@ ds_master_device_dma_map_foreign(
 
 		r->user[r->nusers].bdf = bdf;
 		r->user[r->nusers].dma = (vm_offset_t)base;
+		r->user[r->nusers].identity = (unsigned char)identity;
+		r->user[r->nusers].reads = (unsigned char)reads;
+		r->user[r->nusers].writes = (unsigned char)writes;
 		publish_barrier();
 		r->nusers++;
 		mutex_unlock(&device_table_lock);
@@ -3660,7 +3708,19 @@ ds_master_device_dma_map_foreign(
 		       (unsigned)(bdf & 7), r->npages, base);
 	}
 
-	*dma_addr = (vm_address_t)(base + (unsigned long)page * PAGE_SIZE);
+	/*
+	 * #599: the byte asked for, not its page.  The offset inside the page
+	 * was dropped here, so a filesystem with blocks smaller than a page --
+	 * several cache slots to a page -- had every slot after the first read
+	 * into and written from the first; and in an identity domain the page
+	 * is at its own address, not at a window's base + page * PAGE_SIZE.
+	 */
+	if (identity)
+		*dma_addr = paddr;
+	else
+		*dma_addr = (vm_address_t)(base + (unsigned long)page *
+					   PAGE_SIZE +
+					   (paddr & (vm_address_t)PAGE_MASK));
 	return KERN_SUCCESS;
 }
 
