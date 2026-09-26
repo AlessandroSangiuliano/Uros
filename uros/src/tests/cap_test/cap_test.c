@@ -953,6 +953,73 @@ a_capability_is_its_handles(mach_port_t device_port, mach_port_t part_port,
 }
 
 /*
+ * [20] Revoking a buffer's capability takes the device's mapping down.
+ * Hand a page over, read into it (the grant is made then, on a machine that
+ * confines devices), count the devices it is mapped for, revoke, count again:
+ * 0.  And a read after the revocation is refused with the page untouched.
+ * On a machine that confines nothing no mapping exists to take down, and the
+ * count half says so rather than passing.
+ */
+static int
+revoking_a_capability_takes_the_mapping_down(mach_port_t device_port,
+                                             mach_port_t part_port,
+                                             const char *name)
+{
+    mach_port_t     h;
+    struct b2_page  r;
+    struct uros_cap t;
+    kern_return_t   kr, k1, k2, kr_rev, ku0, ku1;
+    natural_t       users0 = 0, users1 = 0;
+    unsigned        m1, m2;
+    int             i1, i2, ok;
+
+    memset(&t, 0, sizeof(t));
+    h = b2_open(part_port, name);
+    kr = (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) ? KERN_FAILURE
+       : cap_request(RESOURCE_DMA_BUFFER, r.region,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(h, (char *)&t, sizeof(t));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [20] %s — DID NOT RUN, no handed page (kr=%d)\n",
+               name, (int)kr);
+        b2_close(h);
+        b2_free(device_port, &r);
+        return 1;
+    }
+
+    k1 = b2_read(h, &r, &m1, &i1);
+    ku0 = device_dma_region_users(device_port, r.region, &users0);
+    kr_rev = cap_revoke(t.cap_id);
+    ku1 = device_dma_region_users(device_port, r.region, &users1);
+    k2 = b2_read(h, &r, &m2, &i2);
+    b2_close(h);
+    b2_free(device_port, &r);
+
+    ok = k1 == KERN_SUCCESS && m1 == 0xEF53u && kr_rev == KERN_SUCCESS &&
+         ku0 == KERN_SUCCESS && ku1 == KERN_SUCCESS && users1 == 0 &&
+         k2 != KERN_SUCCESS && i2;
+    if (!ok) {
+        printf("cap_test: [20] WRONG — %s: read %d 0x%x, users %d/%u, revoke "
+               "%d, users %d/%u, read after %d (page %s)\n", name, (int)k1,
+               m1, (int)ku0, (unsigned)users0, (int)kr_rev, (int)ku1,
+               (unsigned)users1, (int)k2, i2 ? "untouched" : "WRITTEN");
+        return 0;
+    }
+    if (users0 == 0)
+        printf("cap_test: [20] %s: the mapping half NOT APPLICABLE — no "
+               "device mapping exists here (users 0); a read after the "
+               "revocation refused (kr=%d), page untouched\n", name,
+               (int)k2);
+    else
+        printf("cap_test: [20] %s: revoking the capability took the "
+               "mapping down (users %u -> %u); a read after it refused "
+               "(kr=%d), page untouched\n", name, (unsigned)users0,
+               (unsigned)users1, (int)k2);
+    return 1;
+}
+
+/*
  * [21] A handle holds four capabilities and refuses a fifth rather than
  * evicting one; the same one handed again replaces itself; a new handle
  * starts empty.
@@ -2475,6 +2542,9 @@ main(int argc, char **argv)
         /* #599: once, on the first candidate that is there. */
         if (!b2_done) {
             if (!a_capability_is_its_handles(device_port, p, candidates[i]))
+                pass = 0;
+            if (!revoking_a_capability_takes_the_mapping_down(device_port, p,
+                                                              candidates[i]))
                 pass = 0;
             if (!a_handle_refuses_rather_than_evicts(device_port, p,
                                                      candidates[i]))

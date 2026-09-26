@@ -1609,6 +1609,12 @@ struct dma_region {
 		unsigned char	identity;
 		unsigned char	reads;
 		unsigned char	writes;
+		/*
+		 * #599: the capability the grant rests on; revoking it takes
+		 * the grant down (device_master_cap_revoked).  0 for a grant
+		 * made by the retired device_dma_map_foreign.
+		 */
+		uint64_t	cap_id;
 	} user[DEVICE_MAX_REGION_USERS];
 
 	/*
@@ -3740,6 +3746,7 @@ ds_master_device_dma_map_foreign(
 		r->user[r->nusers].identity = (unsigned char)identity;
 		r->user[r->nusers].reads = (unsigned char)reads;
 		r->user[r->nusers].writes = (unsigned char)writes;
+		r->user[r->nusers].cap_id = 0;	/* #599: rests on no id */
 		publish_barrier();
 		r->nusers++;
 		mutex_unlock(&device_table_lock);
@@ -3900,6 +3907,17 @@ ds_master_device_dma_map_foreign_op(
 		base = (unsigned long)r->user[u].dma;
 		identity = r->user[u].identity;
 	} else {
+		/*
+		 * #599: a capability revoked after the check above and
+		 * before this lock is refused here.  device_master_cap_revoked
+		 * takes grants down under this same lock, so a grant is either
+		 * recorded before it walks the table -- and taken down by it --
+		 * or refused now; none can rest on a revoked capability.
+		 */
+		if (cap_id_revoked(cap.cap_id)) {
+			mutex_unlock(&device_table_lock);
+			return CAP_ERR_REVOKED;
+		}
 		if (r->nusers >= DEVICE_MAX_REGION_USERS) {
 			mutex_unlock(&device_table_lock);
 			return KERN_RESOURCE_SHORTAGE;
@@ -3921,6 +3939,7 @@ ds_master_device_dma_map_foreign_op(
 		r->user[r->nusers].identity = (unsigned char)identity;
 		r->user[r->nusers].reads = (unsigned char)reads;
 		r->user[r->nusers].writes = (unsigned char)writes;
+		r->user[r->nusers].cap_id = cap.cap_id;
 		publish_barrier();
 		r->nusers++;
 		granted = 1;
@@ -4232,7 +4251,41 @@ ds_master_device_claim(
 void
 device_master_cap_revoked(uint64_t cap_id)
 {
-	unsigned i;
+	unsigned i, u, torn = 0;
+
+	/*
+	 * #599: first every foreign grant resting on the capability -- a
+	 * buffer's owner withdrawing what it handed a driver.  The mapping is
+	 * the capability materialised, so revoking the token without it
+	 * changed nothing the device could reach.  Revoked under
+	 * device_table_lock, in the order grants take (this lock, then the
+	 * IOMMU's), so "one grant per (region, device)" is true at every
+	 * instant; the slot is filled from the end.
+	 */
+	mutex_lock(&device_table_lock);
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
+		struct dma_region *r = &dma_region[i];
+
+		if (r->kva == 0)
+			continue;
+		for (u = 0; u < r->nusers; ) {
+			if (r->user[u].cap_id != cap_id || cap_id == 0) {
+				u++;
+				continue;
+			}
+			(void) device_md_dma_revoke(r->user[u].bdf,
+						    (unsigned long)r->pa[0],
+						    (unsigned long)r->size);
+			r->user[u] = r->user[r->nusers - 1];
+			r->nusers--;
+			torn++;
+		}
+	}
+	mutex_unlock(&device_table_lock);
+	if (torn != 0)
+		printf("device: capability %llu was revoked — %u device "
+		       "mapping%s of a buffer resting on it taken down\n",
+		       (unsigned long long)cap_id, torn, torn == 1 ? "" : "s");
 
 	for (i = 0; i < device_nclaims; i++) {
 		natural_t bdf;

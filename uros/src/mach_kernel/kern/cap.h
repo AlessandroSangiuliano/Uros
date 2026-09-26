@@ -66,6 +66,12 @@ extern kern_return_t cap_check_in_kernel(const struct uros_cap *token,
                                          uint32_t op,
                                          uint64_t resource_id);
 
+/*
+ * #599: has this capability been revoked?  Takes cap_lock, a leaf, so it
+ * may be called with device_table_lock held.
+ */
+extern boolean_t cap_id_revoked(uint64_t cap_id);
+
 extern kern_return_t urmach_cap_verify(const struct uros_cap *user_token,
                                        uint32_t op,
                                        uint64_t resource_id);

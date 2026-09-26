@@ -244,6 +244,19 @@ cap_check_in_kernel(const struct uros_cap *token,
     return kr;
 }
 
+boolean_t
+cap_id_revoked(uint64_t cap_id)
+{
+    struct cap_state_entry *e;
+    boolean_t               revoked;
+
+    simple_lock(&cap_lock);
+    e = cap_state_lookup(cap_id);
+    revoked = (e != NULL && (e->flags & CAP_FLAG_REVOKED)) ? TRUE : FALSE;
+    simple_unlock(&cap_lock);
+    return revoked;
+}
+
 /*
  * #599: the type check above, asked once the key exists.  A token signed
  * here for a PCI class must answer as PCI and must not answer as a DMA buffer

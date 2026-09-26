@@ -114,9 +114,10 @@ type dma_sg_addr_t = array[*:32] of vm_address_t;
  * no capability on the handle covers is refused before any DMA.
  *
  * ⚠️ The caller keeps the capability.  This is a delegation of USE, not of
- * ownership.  A capability revoked or a buffer freed is refused on the next
- * request; the device's mapping itself lasts until the buffer is freed, and a
- * transfer already programmed is not recalled.
+ * ownership.  Revoking the capability takes the device's mapping of the
+ * buffer down in the kernel, and freeing the buffer does too; either is
+ * refused on the next request.  A transfer already programmed is not
+ * recalled.
  */
 routine device_register_dma(
 		device		: mach_port_t;
