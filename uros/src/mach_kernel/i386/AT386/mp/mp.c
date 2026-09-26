@@ -609,6 +609,19 @@ cpu_start(int slot_num)
 		return KERN_SUCCESS;	/* the BSP is already running */
 
 	/*
+	 * #599: nor an AP that is.  processor_start() reaches here at run
+	 * time for any slot, and an INIT to a processor that is running
+	 * resets it in the middle of whatever it holds -- a lock, a TLB
+	 * shootdown's ack, its tick.  slave_machine_init() sets `running'
+	 * when the AP comes up (mp_stub.c).
+	 */
+	if (machine_slot[slot_num].running) {
+		printf("cpu_start(%d): already running, refusing the INIT\n",
+		       slot_num);
+		return KERN_SUCCESS;
+	}
+
+	/*
 	 * Copy the trampoline to its rendezvous address and seed the
 	 * entry-point slot.  Both addresses are in identity-mapped low
 	 * memory reachable through phystokv().
