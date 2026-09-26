@@ -3976,14 +3976,62 @@ ext2fs_create(struct device *dev, const char *path, int mode)
 	return rc;
 }
 
+/*
+ * Drop one link of `ino', whose name has just been removed from `parent'.
+ * At zero links its data blocks and the inode itself are freed -- accounted
+ * on the parent fp, so the group-descriptor and superblock dirty flags are
+ * flushed when it is closed.  The inode is read through a scratch fp that
+ * borrows the parent's fs, gd and device.
+ *
+ * #599: shared by unlink and by rename's overwrite, which removed the
+ * destination's name and never dropped its link, so the file it replaced
+ * kept its inode and its blocks for ever.  The name is already gone when
+ * this runs, so a failure here cannot be undone by the caller; it is said,
+ * with the inode number, instead of being ignored.
+ */
+static void
+inode_drop_link(struct ext2fs_file *parent, ino_t ino, const char *name)
+{
+	struct ext2fs_file target;
+	int links, freed = 0, rc;
+
+	memset(&target, 0, sizeof(target));
+	target.f_dev = parent->f_dev;
+	target.f_fs  = parent->f_fs;
+	target.f_gd  = parent->f_gd;
+	target.f_ic  = &target.f_ic_scratch;
+
+	rc = read_inode(ino, &target);
+	if (rc != 0) {
+		printf("ext2: \"%s\" was removed, and its inode %lu could not "
+		       "be read (rc=%d) — its link count is left as it was\n",
+		       name, (unsigned long)ino, rc);
+		free_file_buffers(&target);
+		return;
+	}
+
+	links = (int)target.f_ic->i_links_count - 1;
+	if (links <= 0) {
+		free_file_blocks(parent, target.f_ic->i_block, 0, &freed);
+		(void)write_new_inode(parent, ino, 0, NULL, 0, 0, 0);
+		inode_free(parent, ino, 0);
+	} else {
+		(void)write_new_inode(parent, ino,
+			target.f_ic->i_mode, target.f_ic->i_block,
+			target.f_ic->i_size, target.f_ic->i_blocks,
+			links);
+	}
+	free_file_buffers(&target);
+}
+
 int
 ext2fs_unlink(struct device *dev, const char *path)
 {
-	struct ext2fs_file parent, target;
+	struct ext2fs_file parent;
 	char leafbuf[PATH_MAX + 1];
 	const char *leaf;
 	ino_t ino = 0;
-	int rc, links, freed = 0;
+	int rc;
 
 	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
 	if (rc != 0)
@@ -3995,31 +4043,7 @@ ext2fs_unlink(struct device *dev, const char *path)
 		return rc;
 	}
 
-	/* Read the target inode through a scratch fp that borrows the
-	 * parent's fs/gd/dev, then drop a link.  At zero links free its
-	 * data blocks and the inode itself — accounted on the parent fp so
-	 * the gd/superblock dirty flags are flushed on close. */
-	memset(&target, 0, sizeof(target));
-	target.f_dev = parent.f_dev;
-	target.f_fs  = parent.f_fs;
-	target.f_gd  = parent.f_gd;
-	target.f_ic  = &target.f_ic_scratch;
-
-	if (read_inode(ino, &target) == 0) {
-		links = (int)target.f_ic->i_links_count - 1;
-		if (links <= 0) {
-			free_file_blocks(&parent, target.f_ic->i_block, 0,
-					 &freed);
-			(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
-			inode_free(&parent, ino, 0);
-		} else {
-			(void)write_new_inode(&parent, ino,
-				target.f_ic->i_mode, target.f_ic->i_block,
-				target.f_ic->i_size, target.f_ic->i_blocks,
-				links);
-		}
-	}
-	free_file_buffers(&target);
+	inode_drop_link(&parent, ino, leaf);
 
 	ext2fs_close_file((fs_private_t)&parent);
 	return 0;
@@ -4110,21 +4134,54 @@ ext2fs_rename(struct device *dev, const char *oldpath, const char *newpath)
 		ext2fs_close_file((fs_private_t)&oldp);
 		return rc;
 	}
-	if (search_directory((char *)newleaf, &newp, &victim) == 0) {
-		/* Destination exists — remove it first (POSIX overwrite). */
-		(void)dir_remove_entry(&newp, newleaf, &dummy);
+	/*
+	 * #599: the destination's answer is read, not assumed.  Any failure
+	 * but FS_NO_ENTRY stops here; an existing destination is removed, and
+	 * a removal that fails stops here too -- both were ignored, and a
+	 * second entry of the name was added beside the first.
+	 */
+	rc = search_directory((char *)newleaf, &newp, &victim);
+	if (rc == 0 && victim == ino) {
+		/* Both names already reach this inode: nothing moves. */
+		ext2fs_close_file((fs_private_t)&newp);
+		ext2fs_close_file((fs_private_t)&oldp);
+		return 0;
 	}
-	rc = dir_add_entry(&newp, newleaf, ino, file_type);
+	if (rc == 0) {
+		/*
+		 * Destination exists — remove it first (POSIX overwrite).
+		 * Not a directory: its blocks and its ".." link on the parent
+		 * need what rmdir does, which this does not, so that is
+		 * refused rather than half done.
+		 */
+		memset(&tmp, 0, sizeof(tmp));
+		tmp.f_dev = newp.f_dev; tmp.f_fs = newp.f_fs;
+		tmp.f_gd = newp.f_gd; tmp.f_ic = &tmp.f_ic_scratch;
+		rc = read_inode(victim, &tmp);
+		if (rc == 0 && (tmp.f_ic->i_mode & IFMT) == IFDIR)
+			rc = FS_INVALID_PARAMETER;
+		free_file_buffers(&tmp);
+		if (rc == 0)
+			rc = dir_remove_entry(&newp, newleaf, &dummy);
+		if (rc == 0)
+			inode_drop_link(&newp, victim, newleaf);
+	} else if (rc == FS_NO_ENTRY)
+		rc = 0;
+	if (rc == 0)
+		rc = dir_add_entry(&newp, newleaf, ino, file_type);
 	ext2fs_close_file((fs_private_t)&newp);
 	if (rc != 0) {
 		ext2fs_close_file((fs_private_t)&oldp);
 		return rc;
 	}
 
-	/* Drop the old name. */
-	(void)dir_remove_entry(&oldp, oldleaf, &dummy);
+	/*
+	 * Drop the old name.  #599: its failure is returned -- the file then
+	 * has both names, which is what the caller has to be told.
+	 */
+	rc = dir_remove_entry(&oldp, oldleaf, &dummy);
 	ext2fs_close_file((fs_private_t)&oldp);
-	return 0;
+	return rc;
 }
 
 int
