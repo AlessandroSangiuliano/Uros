@@ -757,28 +757,81 @@ unsigned int cons_port_release(void)
 }
 
 /*
- * #599: the port back, with LCR as the console left it.  No lock: the way
- * down calls this with the other processors stopped, one of them possibly
- * inside cons_tx_lock -- in cons_set_divisor with the latch open, which this
- * closes.
+ * #599: the way down takes the port back -- the flag, and nothing else.  It
+ * runs BEFORE the other processors are stopped (the ring has to drain while
+ * there is a whole machine to drain it), so it takes no lock and does not
+ * touch LCR: a write here could land inside a divisor sequence still running
+ * on another processor, or be undone by one that opens the latch after it.
+ * The latch is the stop's business: cons_ddb_session() for DDB, which also
+ * gives the port back to the driver on leaving, and cons_port_close_latch()
+ * for a halt.
  */
+static int	cons_port_taken_back;	/* from a driver that still holds it */
+
 static void cons_port_take_back(void)
 {
 	if (cons_port_given_away)
-		outb(COM1 + UART_LCR, cons_port_lcr);
+		cons_port_taken_back = 1;
 	cons_port_given_away = 0;
 }
 
 /*
  * A driver let the port go.  Under cons_tx_lock, so a divisor sequence of
- * the driver's still running on another processor ends before LCR is put
- * back under it.
+ * the driver's still running on another processor ends before LCR -- the
+ * word length, parity and stop bits the console had, not the divisor -- is
+ * put back under it.
  */
 void cons_port_reclaim(void)
 {
 	hw_lock_lock(&cons_tx_lock);
-	cons_port_take_back();
+	if (cons_port_given_away)
+		outb(COM1 + UART_LCR, cons_port_lcr);
+	cons_port_given_away = 0;
+	cons_port_taken_back = 0;
 	hw_lock_unlock(&cons_tx_lock);
+}
+
+/*
+ * #599: DDB's session on COM1, from after the others are stopped until before
+ * they are let go (ddb_enter), outermost only.  Entry saves LCR and closes the
+ * latch a processor parked in the middle of a divisor sequence may have left
+ * open; DDB then writes the port with no lock, which is why it has to be
+ * closed.  Exit puts LCR back exactly, so that sequence goes on where it
+ * meant to, and gives the port back to a driver the way down took it from --
+ * without that, the driver's input was read by the tick's poll and its
+ * divisor sequence raced a console writing THR with no lock, for the rest of
+ * the boot (found in review).  No lock at either end: a parked processor may
+ * hold cons_tx_lock.
+ */
+static int	cons_ddb_lcr = -1;
+
+void cons_ddb_session(int entering)
+{
+	if (entering) {
+		cons_ddb_lcr = inb(COM1 + UART_LCR);
+		if (cons_ddb_lcr & 0x80)
+			outb(COM1 + UART_LCR, (uint8_t)(cons_ddb_lcr & 0x7F));
+	} else if (cons_ddb_lcr >= 0) {
+		outb(COM1 + UART_LCR, (uint8_t)cons_ddb_lcr);
+		cons_ddb_lcr = -1;
+		if (cons_port_taken_back) {
+			cons_port_taken_back = 0;
+			cons_port_given_away = 1;
+		}
+	}
+}
+
+/*
+ * #599: the way down, after the others are stopped: the latch closed,
+ * whatever was in the middle of it, so the last words reach the wire as
+ * bytes and not as a divisor.  No lock, for cons_ddb_session()'s reason.
+ */
+void cons_port_close_latch(void)
+{
+	uint8_t lcr = inb(COM1 + UART_LCR);
+
+	if (lcr & 0x80)
+		outb(COM1 + UART_LCR, (uint8_t)(lcr & 0x7F));
 }
 
 int cons_port_is_ours(void)
@@ -1038,7 +1091,8 @@ int cons_getc_nowait(void)
  * that is still the console's, decided under the lock the handover is made
  * under.  Once a driver holds COM1 the byte is its input, and a poll that
  * read it every ten milliseconds took it from under the driver's interrupt.
- * A lock somebody holds -- this processor's own drain, interrupted -- is a
+ * A lock somebody holds -- another processor's drain or one of uart.so's RPCs;
+ * never this processor's own, which holds it with interrupts off -- is a
  * tick without a poll, and the next tick asks again.
  */
 int cons_poll_getc(void)

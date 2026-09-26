@@ -204,10 +204,12 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 	 * The console resuming is what keeps an automated run readable after a
 	 * driver has gone away.
 	 *
-	 * ⚠️ It does NOT reprogram the line.  The driver may have changed the
+	 * ⚠️ It does not reprogram the SPEED.  The driver may have changed the
 	 * divisor; the console adopts whatever it finds, which is what it has
 	 * always done on this target -- boot.S sets the speed and cons.c has
-	 * never asked what it is.
+	 * never asked what it is.  #599: LCR -- word length, parity, stop bits
+	 * and the latch -- is put back as the console had it when it let go,
+	 * so the console never writes THR into a latch left open.
 	 */
 	if (covers_com1(base, count))
 		cons_port_reclaim();

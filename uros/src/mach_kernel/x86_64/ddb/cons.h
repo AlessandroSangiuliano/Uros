@@ -132,10 +132,14 @@ void cons_flush(void);
  * second mouth, giving the port away made it MUTE -- every self-test verdict,
  * every panic.  That is why this issue waited for that one.
  *
- * cons_port_reclaim() is the way down, and it is a stated exception and not a
- * race: a panic takes the port back, because a message that arrives possibly
- * garbled beats a message that is lost.  A machine that is dying has no
- * further use for the property that two writers never meet.
+ * cons_port_reclaim() is a driver letting go: under the port's lock, with
+ * the console's LCR put back.  The way down is cons_async_set(0), which takes
+ * the port back with no lock -- a stated exception and not a race: a panic
+ * takes the port back, because a message that arrives possibly garbled beats
+ * a message that is lost.  A machine that is dying has no further use for the
+ * property that two writers never meet.  #599: the latch is closed only once
+ * the others are stopped (cons_ddb_session, cons_port_close_latch), and a
+ * DDB session that continues gives the port back to its driver.
  */
 /* Returns the klog cursor taken at the instant the port changed hands: the
  * forwarder's starting point (#497).  Idempotent; a second call returns the
@@ -143,6 +147,8 @@ void cons_flush(void);
 unsigned int cons_port_release(void);
 void cons_port_reclaim(void);
 int cons_port_is_ours(void);
+void cons_ddb_session(int entering);	/* #599: see cons.c */
+void cons_port_close_latch(void);	/* #599: the way down, after the stop */
 int cons_poll_getc(void);	/* #599: -1 unless the port is still ours */
 
 /*
