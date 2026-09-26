@@ -3395,6 +3395,27 @@ vnode_inode_block(struct ext2fs_file *fp, ino_t inumber, daddr_t disk_block)
 }
 
 /*
+ * #599: the inode cache answers read_inode when a vnode is made afresh, so
+ * once a vnode has written its inode the cache holds what was written, or
+ * nothing.  It kept the inode as first read: a directory whose vnode went
+ * away between a mkdir and an rmdir inside it came back with its link count
+ * from before the mkdir, and the rmdir wrote one link fewer than it had --
+ * hidden for as long as both flushes were being lost in silence.
+ */
+static void
+icache_follow(struct ext2fs_file *fp, int rc)
+{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+
+	if (m == NULL)
+		return;
+	if (rc == 0)
+		icache_insert(m, fp->f_vnode->v_ino, &fp->f_vnode->v_ic);
+	else
+		icache_invalidate(m, fp->f_vnode->v_ino);
+}
+
+/*
  * Write the inode back to disk using the cached inode block.
  */
 static int
@@ -3917,6 +3938,7 @@ flush_metadata_locked(struct ext2fs_file *fp)
 	if (n_dirty == 1 || !ext2_dev_has_batch(&fp->f_dev)) {
 		if (vn->v_inode_dirty) {
 			rc = write_inode(vn->v_ino, fp);
+			icache_follow(fp, rc);		/* #599 */
 			if (rc != 0) {
 				printf("ext2: flush: inode %lu not written "
 				       "(rc=%d)\n",
@@ -4129,6 +4151,8 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			vm_deallocate(mach_task_self(), concat, total_size);
 		}
 
+		if (vn->v_inode_dirty)
+			icache_follow(fp, rc);		/* #599 */
 		if (rc == KERN_SUCCESS) {
 			vn->v_inode_dirty = 0;
 			vn->v_gd_dirty = 0;
