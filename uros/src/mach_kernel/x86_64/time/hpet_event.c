@@ -44,6 +44,18 @@ _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
 #define	ABLATE_593_UNCHECKED	0
 #endif
 
+/*
+ * #593: ISA 8's input unmasked before the backend chooses its route, as a
+ * driver that had claimed the RTC's line would leave it -- so that
+ * LegacyReplacement must be refused, and a tick #594 moves off a named TSC
+ * must stay where it is and say so.  The entry keeps whatever vector
+ * ioapic_init() left, and nothing asserts the line: the RTC's interrupts
+ * are off.
+ */
+#ifndef	ABLATE_593_LINE_TAKEN
+#define	ABLATE_593_LINE_TAKEN	0
+#endif
+
 #define	NS_PER_SEC		1000000000ULL
 #define	FS_PER_NS		1000000ULL
 #define	BIT(c)			(1ULL << (c))
@@ -184,6 +196,12 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 {
 	struct hpet_comparator_caps caps;
 	unsigned n;
+
+#if ABLATE_593_LINE_TAKEN
+	if (!started && ioapic_present()
+	    && acpi_irq_to_gsi(8) < ioapic_pin_count())
+		ioapic_unmask(acpi_irq_to_gsi(8));
+#endif
 
 	*cap0 = 0;
 	for (n = 0; n < hpet_comparators(); n++) {

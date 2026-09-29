@@ -305,6 +305,11 @@ option(UROS_ABLATE_593_NO_APIC_TIMER "Build the #593 ablation: the local APIC ti
 # the watchdog names the TSC, and the tick must move from the TSC deadline to the
 # HPET while the system runs.  Never ON in a kernel anyone boots otherwise.
 option(UROS_ABLATE_593_NO_COUNTDOWN "Build the #593 ablation: only the local APIC timer's countdown is unusable" OFF)
+# #593: ISA 8's input unmasked before the HPET chooses its route, as a driver's
+# claim would leave it: LegacyReplacement must be refused, and with
+# UROS_ABLATE_594_TSC_SKEWS and UROS_ABLATE_593_NO_COUNTDOWN the tick must stay
+# on the named TSC and say so.  Never ON in a kernel anyone boots otherwise.
+option(UROS_ABLATE_593_LINE_TAKEN "Build the #593 ablation: the RTC's input is in use when the HPET chooses its route" OFF)
 option(UROS_ABLATE_593_BEHIND "Build the #593 ablation: every 128th HPET comparator write lands behind the counter" OFF)
 option(UROS_ABLATE_593_UNCHECKED "Build the #593 ablation: an HPET comparator write is not read back" OFF)
 # #593: the local APIC timer's two modes count each deadline from now again, as
@@ -608,6 +613,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_593_NO_COUNTDOWN)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NO_COUNTDOWN=1)
       message(STATUS "#593 ablation: only the local APIC timer's countdown is unusable (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_LINE_TAKEN)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_LINE_TAKEN=1)
+      message(STATUS "#593 ablation: the RTC's input is in use when the HPET chooses its route (x86_64)")
   endif()
   if(UROS_ABLATE_593_BEHIND)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_BEHIND=1)
