@@ -215,8 +215,15 @@ static void icr_wait_idle(void)
 
 #if ABLATE_593_ICR_OPEN
 #include <cpus.h>		/* NCPUS */
-#include <x86_64/cpu_number.h>
 
+/*
+ * ⚠️ Indexed by the APIC's own ID register and not by cpu_number(): that
+ * reads %gs, and a send is made from inside the swapgs window on purpose --
+ * the #440 test sends an NMI with the user's %gs loaded -- where a %gs read
+ * faults, and the faults nest until the stack is gone.  The first version of
+ * this counter did exactly that, and the ablated kernel never finished its
+ * boot: an instrument that changes the experiment.
+ */
 static volatile uint32_t	icr_inside[NCPUS];
 static volatile uint64_t	icr_nested_count;
 
@@ -250,7 +257,7 @@ static void icr_send(uint32_t apic_id, uint32_t command)
 	 */
 	interrupts_disable();
 #else
-	unsigned self = (unsigned)cpu_number();
+	unsigned self = lapic_read(LAPIC_ID) >> 24;
 
 	if (self < NCPUS) {
 		if (icr_inside[self])
