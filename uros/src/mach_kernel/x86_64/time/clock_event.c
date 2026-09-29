@@ -39,6 +39,7 @@
 #include <x86_64/cpu/percpu.h>		/* #594: percpu_intr_disable */
 #include <x86_64/time/hpet_event.h>	/* #593: the third backend */
 #include <x86_64/time/pmtimer.h>	/* #593: the ticks against a ruler */
+#include <x86_64/time/line.h>		/* #593: one printf per line */
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
@@ -910,62 +911,78 @@ static void
 tick_window_print(void)
 {
 	uint64_t	rate = tsc_hz();
-	uint64_t	tsc_ms, pm_ms;
 	unsigned	c;
+	struct line	l;
 
 	if (tw_pending != 1 || !__sync_bool_compare_and_swap(&tw_pending, 1, 2))
 		return;
 	smp_rmb();
 
-	tsc_ms = rate ? tw_report.tsc * 1000 / rate : 0;
-	pm_ms = tw_report.pm * 1000 / PMTIMER_HZ;
-	if (rate != 0 && tw_report.pm_valid)
-		printf("clock_event: window %u on %s, %llu ms by the TSC, %llu "
-		       "ms by the PM timer%s (#593)\n", tw_report.index,
-		       clock_event_name(), (unsigned long long) tsc_ms,
-		       (unsigned long long) pm_ms,
-		       tw_dropped ? "; windows were dropped while one waited "
-				    "to be printed" : "");
-	else if (rate != 0)
-		printf("clock_event: window %u on %s, %llu ms by the TSC, no PM "
-		       "timer to check it by%s (#593)\n", tw_report.index,
-		       clock_event_name(), (unsigned long long) tsc_ms,
-		       tw_dropped ? "; windows were dropped while one waited "
-				    "to be printed" : "");
-	else
-		printf("clock_event: window %u on %s, the TSC has no rate, "
-		       "%llu ms by the PM timer%s (#593)\n", tw_report.index,
-		       clock_event_name(), (unsigned long long) pm_ms,
-		       tw_dropped ? "; windows were dropped while one waited "
-				    "to be printed" : "");
+	/*
+	 * Three states of the PM timer, and they are said apart: absent; a
+	 * total a gap longer than its wrap made meaningless -- which is not
+	 * the same as absent, and printing "no PM timer" for it would be the
+	 * line lying about the machine; and a total that is a time.  Without
+	 * a TSC rate the gap cannot be seen at all, and the line says that
+	 * instead of vouching for the total.
+	 */
+	line_start(&l);
+	put_s(&l, "clock_event: window ");
+	put_u(&l, tw_report.index);
+	put_s(&l, " on ");
+	put_s(&l, clock_event_name());
+	put_s(&l, ", ");
+	if (rate != 0) {
+		put_u(&l, tw_report.tsc * 1000 / rate);
+		put_s(&l, " ms by the TSC, ");
+	} else {
+		put_s(&l, "the TSC has no rate, ");
+	}
+	if (!pmtimer_present()) {
+		put_s(&l, "no PM timer");
+	} else if (!tw_report.pm_valid) {
+		put_s(&l, "the PM timer wrapped inside a gap between two ticks");
+	} else {
+		put_u(&l, tw_report.pm * 1000 / PMTIMER_HZ);
+		put_s(&l, " ms by the PM timer");
+		if (rate == 0)
+			put_s(&l, ", which without a TSC rate cannot be "
+				  "checked for a gap longer than its wrap");
+	}
+	if (tw_dropped != 0)
+		put_s(&l, "; windows were dropped while one waited to be "
+			  "printed");
+	put_s(&l, " (#593)");
+	printf("%s\n", l.b);
 
 	for (c = 0; c < NCPUS; c++) {
 		uint64_t t = tw_report.ticks[c];
-		uint64_t by_tsc = rate && tw_report.tsc
-				  ? t * 1000 * rate
-				    / ((uint64_t) event_hz * tw_report.tsc) : 0;
-		uint64_t by_pm = tw_report.pm_valid && tw_report.pm
-				 ? t * 1000 * PMTIMER_HZ
-				   / ((uint64_t) event_hz * tw_report.pm) : 0;
 
 		if (t == 0 && tick_count[c] == 0)
 			continue;	/* not a processor that ticks here */
-		if (rate != 0 && tw_report.pm_valid)
-			printf("clock_event: cpu %u took %llu ticks in window "
-			       "%u, %llu per mille of nominal by the TSC, %llu "
-			       "by the PM timer\n", c, (unsigned long long) t,
-			       tw_report.index, (unsigned long long) by_tsc,
-			       (unsigned long long) by_pm);
-		else if (rate != 0)
-			printf("clock_event: cpu %u took %llu ticks in window "
-			       "%u, %llu per mille of nominal by the TSC\n", c,
-			       (unsigned long long) t, tw_report.index,
-			       (unsigned long long) by_tsc);
-		else
-			printf("clock_event: cpu %u took %llu ticks in window "
-			       "%u, %llu per mille of nominal by the PM timer\n",
-			       c, (unsigned long long) t, tw_report.index,
-			       (unsigned long long) by_pm);
+		line_start(&l);
+		put_s(&l, "clock_event: cpu ");
+		put_u(&l, c);
+		put_s(&l, " took ");
+		put_u(&l, t);
+		put_s(&l, " ticks in window ");
+		put_u(&l, tw_report.index);
+		if (rate != 0 && tw_report.tsc != 0) {
+			put_s(&l, ", ");
+			put_u(&l, t * 1000 * rate
+				  / ((uint64_t) event_hz * tw_report.tsc));
+			put_s(&l, " per mille of nominal by the TSC");
+		}
+		if (pmtimer_present() && tw_report.pm_valid
+		    && tw_report.pm != 0) {
+			put_s(&l, ", ");
+			put_u(&l, t * 1000 * PMTIMER_HZ
+				  / ((uint64_t) event_hz * tw_report.pm));
+			put_s(&l, rate != 0 ? " by the PM timer"
+					    : " per mille of nominal by the PM "
+					      "timer");
+		}
+		printf("%s\n", l.b);
 	}
 
 	smp_wmb();
