@@ -51,10 +51,10 @@ _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
 /*
  * The longest interval one arm may ask for: a quarter of the 32-bit wrap.
  *
- * Every comparison below is on the counter's low 32 bits, signed, so a
- * deadline has to lie within half a wrap of the moment it is compared; a
- * quarter leaves the other quarter for a handler that runs late.  At 100 MHz
- * that is 10.7 s, at 14.318 MHz 75 s -- far beyond a tick.  Longer requests
+ * Every comparison below is on the counter's low 32 bits, so a deadline has
+ * to lie within half a wrap of the moment it is compared; a quarter leaves
+ * the other quarter for a handler that runs late.  At 100 MHz that is
+ * 10.7 s, at 14.318 MHz 75 s -- far beyond a tick.  Longer requests
  * are clamped, for lapic_arm()'s reason: waking early is a wasted interrupt,
  * waking after a wrap is a deadline missed by minutes.
  */
@@ -70,7 +70,7 @@ _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
  */
 #define	HPET_EV_AHEAD_NS	1000ULL
 
-enum { ROUTE_NONE, ROUTE_FSB, ROUTE_LEGACY };
+enum { ROUTE_NONE, ROUTE_FSB, ROUTE_LEGACY, ROUTE_TAKEN };
 
 /*
  * Report windows, in seconds by the counter: the first says early whether
@@ -196,7 +196,19 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 		}
 	}
 	if (hpet_legacy_capable() && ioapic_present()
-	    && acpi_irq_to_gsi(0) < ioapic_pin_count()) {
+	    && acpi_irq_to_gsi(0) < ioapic_pin_count()
+	    && acpi_irq_to_gsi(8) < ioapic_pin_count()) {
+		/*
+		 * Not over a driver's line.  LegacyReplacement takes ISA 0's
+		 * input and silences the RTC's, and #594 can bring the tick
+		 * here while the system runs -- after a driver may have claimed
+		 * either, since device_md_irq_register() refuses them only once
+		 * the bit is on.  An unmasked input is one somebody is using;
+		 * this backend's own, once started, is nobody else's.
+		 */
+		if (!started && (!ioapic_is_masked(acpi_irq_to_gsi(0))
+				 || !ioapic_is_masked(acpi_irq_to_gsi(8))))
+			return ROUTE_TAKEN;
 		*which = 0;
 		return ROUTE_LEGACY;
 	}
@@ -373,11 +385,18 @@ static int hpet_ev_probe(void)
 		printf("clock_event: hpet: no local APIC to deliver to\n");
 		return 0;
 	}
-	if (choose_route(&n, &cap0) == ROUTE_NONE) {
+	switch (choose_route(&n, &cap0)) {
+	case ROUTE_NONE:
 		printf("clock_event: hpet: no comparator can send an FSB "
 		       "message and the block cannot take the 8254's line; "
 		       "comparator 0 can reach I/O APIC inputs 0x%x, and "
 		       "choosing among them is not written (#593)\n", cap0);
+		return 0;
+	case ROUTE_TAKEN:
+		printf("clock_event: hpet: no comparator can send an FSB "
+		       "message, and LegacyReplacement would take the 8254's "
+		       "or the RTC's input from the driver that routed it "
+		       "(#593)\n");
 		return 0;
 	}
 	return 1;
@@ -425,6 +444,7 @@ static void hpet_ev_intr(struct trap_frame *frame)
 static void hpet_ev_start(uint8_t vector)
 {
 	uint32_t	cap0;
+	unsigned	n;
 
 	if (started)
 		return;
@@ -441,6 +461,16 @@ static void hpet_ev_start(uint8_t vector)
 
 	route = choose_route(&comparator, &cap0);
 	trap_set_handler(HPET_EVENT_VECTOR, hpet_ev_intr);
+
+	/*
+	 * Every other comparator silenced.  The block is the kernel's from
+	 * here, and the firmware may have left one interrupting: an FSB
+	 * message aimed at a vector nobody chose, or an input nobody routed.
+	 * Linux does the same in hpet_enable(), for every channel.
+	 */
+	for (n = 0; n < hpet_comparators(); n++)
+		if (n != comparator)
+			hpet_comparator_off(n);
 
 	if (route == ROUTE_FSB) {
 		/*
