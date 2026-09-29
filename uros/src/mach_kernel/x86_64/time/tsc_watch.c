@@ -90,6 +90,51 @@
 #include <time/rulers.h>
 #include <time/tsc.h>
 
+/*
+ * #593: UROS_ABLATE_593_ICR_OPEN's load.  The ablation leaves an IPI send
+ * open to an interrupt between its halves, and counts the sends that began
+ * inside another -- but a processor sends from thread context with
+ * interrupts on only now and then, and 100 s of the HPET's broadcast at four
+ * processors found none.  So for one second this thread, bound to the boot
+ * processor where the broadcast's class-fifteen interrupt lands, does nothing
+ * but send, and says how many sends landed inside one of its own.
+ */
+#ifndef	ABLATE_593_ICR_OPEN
+#define	ABLATE_593_ICR_OPEN	0
+#endif
+#if ABLATE_593_ICR_OPEN
+#include <cpu/ipi.h>
+#include <cpu/lapic.h>
+#include <cpu/smp.h>
+
+static void icr_stress(void)
+{
+	uint64_t	rate = tsc_hz(), t0, sent = 0, before;
+	uint32_t	self = lapic_id(), target = self;
+	unsigned	c;
+
+	for (c = 0; c < SMP_MAX_CPUS; c++)
+		if (c != self && smp_is_online(c)) {
+			target = c;
+			break;
+		}
+	before = lapic_icr_nested();
+	t0 = rdtsc();
+	do {
+		if (target == self)
+			lapic_send_self(IPI_VECTOR_AST);
+		else
+			lapic_send_ipi(target, IPI_VECTOR_AST);
+		sent++;
+	} while (rate != 0 && rdtsc() - t0 < rate);
+	printf("UrMach x86-64: the ICR stress: %llu AST IPIs from thread "
+	       "context on cpu %u to cpu %u in a second, and %llu sends by an "
+	       "interrupt began inside one of them (UROS_ABLATE_593_ICR_OPEN, "
+	       "#593)\n", (unsigned long long)sent, self, target,
+	       (unsigned long long)(lapic_icr_nested() - before));
+}
+#endif
+
 #define WATCH_CONFIRM		3	/* windows in a row before naming */
 #define WATCH_SUMMARY		60	/* windows between summary lines */
 #define WATCH_RULERS_PPM	1000	/* between two rulers: 500 each */
@@ -513,6 +558,10 @@ void tsc_watch(void)
 #if	ABLATE_594_TSC_SKEWS
 		if (windows == 2)
 			skew_from = rdtsc_ordered();
+#endif
+#if	ABLATE_593_ICR_OPEN
+		if (windows == 3)
+			icr_stress();
 #endif
 #if	ABLATE_594_NTP_SLEW
 		slew_window(windows);
