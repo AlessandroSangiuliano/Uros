@@ -510,24 +510,49 @@ static void hpet_ev_setup(uint8_t vector)
  * made while the others were all between their kick and their re-arm found
  * nobody to join.
  */
-static uint32_t join_locked(unsigned self, uint32_t want, uint32_t counts)
+static uint32_t join_locked(unsigned self, uint32_t now, uint32_t want,
+			    uint32_t counts)
 {
 	uint64_t left = (armed | woken) & ~BIT(self);
 
 	while (left != 0) {
 		unsigned	c = (unsigned)__builtin_ctzll(left);
-		uint32_t	grid;
-		int32_t		after;
-		uint32_t	k;
+		uint32_t	grid, behind;
 
 		left &= left - 1;
 		if (interval[c] != counts)
 			continue;
-		grid = (armed & BIT(c)) ? due[c] : woken_for[c];
-		after = (int32_t)(want - grid);
-		k = after <= 0 ? 0 : ((uint32_t)after + counts - 1) / counts;
+		if (armed & BIT(c)) {
+			grid = due[c];
+		} else {
+			/*
+			 * Sent its tick an interval ago or more and not
+			 * re-armed since: held, or stopped.  Its grid is the
+			 * one it will leave when it does re-arm, and a stale
+			 * one would put this deadline in the past -- a tick
+			 * that fires at once, and then again, for ever.
+			 */
+			if ((uint32_t)(now - woken_for[c]) >= counts)
+				continue;
+			grid = woken_for[c];
+		}
+
+		/*
+		 * Unsigned, and bounded on both sides: a grid point a valid
+		 * processor offers lies less than two intervals before `want'
+		 * or at most one after it, and anything else is a deadline
+		 * gone stale across the 32-bit wrap, which a signed difference
+		 * would read as the near future.
+		 */
+		behind = want - grid;
+		if (behind == 0 || behind >= 2 * counts) {
+			if ((uint32_t)(grid - want) > counts)
+				continue;
+			w.joins++;
+			return grid;
+		}
 		w.joins++;
-		return grid + k * counts;
+		return grid + ((behind + counts - 1) / counts) * counts;
 	}
 	return want;
 }
@@ -569,7 +594,13 @@ static int hpet_ev_arm(uint64_t ns)
 		w.rearm_sum[self] += late;
 		if (late > w.rearm_max[self])
 			w.rearm_max[self] = late;
-		if ((int32_t)(woken_for[self] + counts - now) > (int32_t)ahead) {
+		/*
+		 * Unsigned, like join_locked()'s: a processor held between
+		 * 2^31 and 2^32 counts past its deadline -- 21 to 43 s at
+		 * 100 MHz -- reads as early to a signed difference, and would
+		 * be handed a base that far in the past.
+		 */
+		if (counts > ahead && late < counts - ahead) {
 			base = woken_for[self];
 			fresh = 0;
 		}
@@ -577,7 +608,7 @@ static int hpet_ev_arm(uint64_t ns)
 
 	due[self] = base + counts;
 	if (fresh)
-		due[self] = join_locked(self, due[self], counts);
+		due[self] = join_locked(self, now, due[self], counts);
 	interval[self] = counts;
 	armed |= BIT(self);
 	if (!programmed || (int32_t)(due[self] - programmed_at) < 0)
