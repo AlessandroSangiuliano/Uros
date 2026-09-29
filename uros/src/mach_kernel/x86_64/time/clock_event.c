@@ -90,6 +90,17 @@ static uint8_t		event_vector;
 #define	ABLATE_593_NO_APIC_TIMER	0
 #endif
 
+/*
+ * #593: only the countdown is unusable, and the deadline mode works -- the
+ * machine #594 could not move the tick off a named TSC on: "the local APIC
+ * timer has no rate, and there is no third backend".  With the TSC named
+ * (UROS_ABLATE_594_TSC_SKEWS), the tick must now move to the HPET while the
+ * system runs.
+ */
+#ifndef	ABLATE_593_NO_COUNTDOWN
+#define	ABLATE_593_NO_COUNTDOWN	0
+#endif
+
 /* ------------------------------------------------------ tsc-deadline ---- */
 
 #define	MSR_IA32_TSC_DEADLINE	0x6E0
@@ -259,6 +270,11 @@ static int lapic_probe_ev(void)
 #if ABLATE_593_NO_APIC_TIMER
 	printf("clock_event: lapic-oneshot: the APIC timer is unusable, by "
 	       "ablation (#593)\n");
+	return 0;
+#endif
+#if ABLATE_593_NO_COUNTDOWN
+	printf("clock_event: lapic-oneshot: the APIC timer's countdown is "
+	       "unusable, by ablation (#593)\n");
 	return 0;
 #endif
 	return lapic_present() && lapic_timer_hz() != 0;

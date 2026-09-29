@@ -301,6 +301,10 @@ option(UROS_ABLATE_593_ICR_OPEN "Build the #593 ablation: an IPI send may be int
 # processor's clock stops until the counter's low half wraps.  Never ON in a
 # kernel anyone boots for anything else.
 option(UROS_ABLATE_593_NO_APIC_TIMER "Build the #593 ablation: the local APIC timer is unusable in both modes" OFF)
+# #593: only the APIC timer's countdown is unusable; with UROS_ABLATE_594_TSC_SKEWS
+# the watchdog names the TSC, and the tick must move from the TSC deadline to the
+# HPET while the system runs.  Never ON in a kernel anyone boots otherwise.
+option(UROS_ABLATE_593_NO_COUNTDOWN "Build the #593 ablation: only the local APIC timer's countdown is unusable" OFF)
 option(UROS_ABLATE_593_BEHIND "Build the #593 ablation: every 128th HPET comparator write lands behind the counter" OFF)
 option(UROS_ABLATE_593_UNCHECKED "Build the #593 ablation: an HPET comparator write is not read back" OFF)
 # #593: the local APIC timer's two modes count each deadline from now again, as
@@ -600,6 +604,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_593_NO_APIC_TIMER)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NO_APIC_TIMER=1)
       message(STATUS "#593 ablation: the local APIC timer is unusable in both modes (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_NO_COUNTDOWN)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NO_COUNTDOWN=1)
+      message(STATUS "#593 ablation: only the local APIC timer's countdown is unusable (x86_64)")
   endif()
   if(UROS_ABLATE_593_BEHIND)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_BEHIND=1)
