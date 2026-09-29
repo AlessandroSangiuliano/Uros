@@ -956,7 +956,9 @@ tick_window_print(void)
 	printf("%s\n", l.b);
 
 	for (c = 0; c < NCPUS; c++) {
-		uint64_t t = tw_report.ticks[c];
+		uint64_t	t = tw_report.ticks[c];
+		int		judged = 0;
+		uint64_t	permille = 0;
 
 		if (t == 0 && tick_count[c] == 0)
 			continue;	/* not a processor that ticks here */
@@ -968,20 +970,43 @@ tick_window_print(void)
 		put_s(&l, " ticks in window ");
 		put_u(&l, tw_report.index);
 		if (rate != 0 && tw_report.tsc != 0) {
+			permille = t * 1000 * rate
+				   / ((uint64_t) event_hz * tw_report.tsc);
+			judged = 1;
 			put_s(&l, ", ");
-			put_u(&l, t * 1000 * rate
-				  / ((uint64_t) event_hz * tw_report.tsc));
+			put_u(&l, permille);
 			put_s(&l, " per mille of nominal by the TSC");
 		}
 		if (pmtimer_present() && tw_report.pm_valid
 		    && tw_report.pm != 0) {
+			uint64_t by_pm = t * 1000 * PMTIMER_HZ
+					 / ((uint64_t) event_hz * tw_report.pm);
+
+			if (!judged) {
+				permille = by_pm;
+				judged = 1;
+			}
 			put_s(&l, ", ");
-			put_u(&l, t * 1000 * PMTIMER_HZ
-				  / ((uint64_t) event_hz * tw_report.pm));
+			put_u(&l, by_pm);
 			put_s(&l, rate != 0 ? " by the PM timer"
 					    : " per mille of nominal by the PM "
 					      "timer");
 		}
+
+		/*
+		 * A verdict, and only for a clock that STOPPED.  The numbers
+		 * above are read rather than judged: a tick lost to a
+		 * processor held past its deadline is a fact of emulation and
+		 * of hardware alike.  But fewer than half the ticks a window
+		 * holds is not a rate that is off, it is a clock that did not
+		 * run -- UROS_ABLATE_593_UNCHECKED took every processor to 6
+		 * per mille for 43 s at a time, and the run was reported as
+		 * passed, because nothing here said so.  Window 0 is not
+		 * judged: it opens before every processor has started to tick.
+		 */
+		if (judged && tw_report.index > 0 && permille < 500)
+			put_s(&l, " -- WRONG: fewer than half the ticks the "
+				  "window holds, the clock stopped (#593)");
 		printf("%s\n", l.b);
 	}
 
