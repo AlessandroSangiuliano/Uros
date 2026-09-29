@@ -22,6 +22,7 @@
 #include <trap/trap.h>
 #include <time/hpet.h>
 #include <time/hpet_event.h>
+#include <time/line.h>		/* one printf per line (#578) */
 #include <time/pmtimer.h>
 #include <time/tsc.h>
 
@@ -650,37 +651,6 @@ const struct clock_event_ops hpet_event_ops = {
 /* ------------------------------------------------------------- report -- */
 
 /*
- * A line built in a local buffer and printed by ONE printf: a line made of
- * several is a line another processor's output can land inside (#578).  Not
- * the kernel's sprintf(), which writes through one static pointer and is not
- * for two processors at once.
- */
-struct line {
-	char		b[400];
-	unsigned	n;
-};
-
-static void put_s(struct line *l, const char *s)
-{
-	while (*s != '\0' && l->n < sizeof(l->b) - 1)
-		l->b[l->n++] = *s++;
-	l->b[l->n] = '\0';
-}
-
-static void put_u(struct line *l, uint64_t v)
-{
-	char	d[21];
-	char	*p = d + sizeof(d) - 1;
-
-	*p = '\0';
-	do {
-		*--p = (char)('0' + v % 10);
-		v /= 10;
-	} while (v != 0);
-	put_s(l, p);
-}
-
-/*
  * The window's line, and one per processor.  Claimed by compare-and-swap,
  * because the idle loop drains reports on every processor and two of them
  * finding the same window would print it twice.
@@ -697,7 +667,7 @@ void hpet_event_drain_report(void)
 		return;
 	smp_rmb();
 
-	l.n = 0;
+	line_start(&l);
 	put_s(&l, "clock_event: hpet: window ");
 	put_u(&l, r->index);
 	put_s(&l, ", ");
@@ -759,7 +729,7 @@ void hpet_event_drain_report(void)
 	for (c = 0; c < NCPUS; c++) {
 		if (r->w.rearm_n[c] == 0)
 			continue;
-		l.n = 0;
+		line_start(&l);
 		put_s(&l, "clock_event: hpet: cpu ");
 		put_u(&l, c);
 		put_s(&l, " re-armed ");
