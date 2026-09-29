@@ -81,7 +81,10 @@ struct clock_event_ops {
 	 * left in its APIC, not with what the boot processor configured. */
 	void		(*setup)(uint8_t vector);
 
-	/* Fire once, about `ns' from now.  Returns zero if the interval
+	/* Fire once, about `ns' from now -- or, when this processor is
+	 * re-arming just after its last deadline, `ns' after that deadline,
+	 * so that a periodic tick does not run slow by its own delivery time
+	 * (#593).  Returns zero if the interval
 	 * cannot be expressed, which the caller must treat as a failure to
 	 * arm rather than as "armed for zero" -- a countdown of zero means
 	 * STOPPED, and that failure looks exactly like a working kernel whose

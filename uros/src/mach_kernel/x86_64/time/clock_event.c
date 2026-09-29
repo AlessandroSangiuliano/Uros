@@ -153,6 +153,61 @@ static void tscdl_setup(uint8_t vector)
 	wrmsr(MSR_IA32_TSC_DEADLINE, 0);
 }
 
+/*
+ * 🔑 THE NEXT DEADLINE IS COUNTED FROM THE LAST ONE, NOT FROM NOW (#593).
+ *
+ * Counted from now, every period is the interval plus however long the tick
+ * took to be delivered and handled, so the tick runs slow by exactly that,
+ * every period -- and the kernel's time of day with it: utime_tick() advances
+ * `time' by one tick per tick of the boot processor, and REALTIME_CLOCK is
+ * `time' (clock_dev.c).  Measured on one binary at four processors, ten-second
+ * windows against the TSC and the PM timer: the TSC deadline delivered 985 to
+ * 991 ticks per thousand under KVM and the LAPIC countdown 951 to 970 under
+ * TCG -- a clock 1.5% and 3.5% slow -- while the HPET's broadcast, which
+ * counted from the deadline from the start, delivered 994 to 1000.  The boot
+ * line "10 ticks took ..." had been saying it since #459, in the other
+ * direction: more than a thousand per mille of nominal per tick.
+ *
+ * From the last deadline when this processor is re-arming after it: the
+ * deadline has passed, by less than the interval.  From now otherwise -- the
+ * first arm, one after the backend changed, or a tick held back so long that
+ * the next deadline has gone as well; the ticks lost there are the spl
+ * replay's business (#522), and a deadline is never armed in the past.
+ *
+ * In TSC counts, for both of the APIC timer's modes: the deadline mode
+ * writes TSC values anyway, and the countdown says nothing about when it
+ * reached zero, so the TSC is what it is measured by.  Zero: none yet, or one
+ * that no longer counts.
+ */
+static uint64_t	due_tsc[NCPUS];
+
+/* #593: the ablation that counts every deadline from now again. */
+#ifndef	ABLATE_593_FROM_NOW
+#define	ABLATE_593_FROM_NOW	0
+#endif
+
+static uint64_t next_due_tsc(uint64_t now, uint64_t ticks)
+{
+	unsigned cpu = cpu_number();
+	uint64_t last = cpu < NCPUS ? due_tsc[cpu] : 0;
+	uint64_t next = now + ticks;
+
+	if (!ABLATE_593_FROM_NOW
+	    && last != 0 && now >= last && now - last < ticks)
+		next = last + ticks;
+	if (cpu < NCPUS)
+		due_tsc[cpu] = next;
+	return next;
+}
+
+static void forget_due_tsc(void)
+{
+	unsigned cpu = cpu_number();
+
+	if (cpu < NCPUS)
+		due_tsc[cpu] = 0;
+}
+
 static int tscdl_arm(uint64_t ns)
 {
 	uint64_t ticks, now, rate = tsc_hz();
@@ -181,7 +236,7 @@ static int tscdl_arm(uint64_t ns)
 		ticks = 1;		/* never arm for "now or earlier" */
 
 	now = rdtsc();
-	wrmsr(MSR_IA32_TSC_DEADLINE, now + ticks);
+	wrmsr(MSR_IA32_TSC_DEADLINE, next_due_tsc(now, ticks));
 	return 1;
 }
 
@@ -190,6 +245,7 @@ static void tscdl_stop(void)
 	/* Zero disarms the deadline: architecturally defined, unlike the APIC
 	 * countdown where zero also means stopped but by a different route. */
 	wrmsr(MSR_IA32_TSC_DEADLINE, 0);
+	forget_due_tsc();
 }
 
 static const struct clock_event_ops tscdl_ops = {
@@ -216,10 +272,29 @@ static void lapic_setup_ev(uint8_t vector)
 static int lapic_arm(uint64_t ns)
 {
 	uint64_t hz = lapic_timer_hz();
+	uint64_t rate = tsc_hz();
 	uint64_t count;
 
 	if (hz == 0)
 		return 0;
+
+	/*
+	 * #593: counted from the last deadline, and the countdown cannot say
+	 * when it reached zero, so the TSC says how late this re-arm is and the
+	 * interval is shortened by it -- see next_due_tsc().  With no TSC rate
+	 * there is nothing to measure the lateness by, and the countdown is
+	 * counted from now.  The split below, for tscdl_arm()'s reason.
+	 */
+	if (rate != 0) {
+		uint64_t ticks = (ns / NS_PER_SEC) * rate
+			       + ((ns % NS_PER_SEC) * rate) / NS_PER_SEC;
+		uint64_t now = rdtsc();
+		uint64_t d = next_due_tsc(now, ticks ? ticks : 1) - now;
+
+		ns = (d / rate) * NS_PER_SEC + ((d % rate) * NS_PER_SEC) / rate;
+	} else {
+		forget_due_tsc();
+	}
 
 	/* Same split as above, same reason. */
 	count = (ns / NS_PER_SEC) * hz + ((ns % NS_PER_SEC) * hz) / NS_PER_SEC;
@@ -239,6 +314,7 @@ static int lapic_arm(uint64_t ns)
 static void lapic_stop_ev(void)
 {
 	lapic_timer_stop();
+	forget_due_tsc();
 }
 
 static const struct clock_event_ops lapic_ops = {
