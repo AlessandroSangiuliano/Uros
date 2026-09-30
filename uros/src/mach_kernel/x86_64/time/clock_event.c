@@ -34,6 +34,7 @@
 #include <sync/barrier.h>		/* #461: publish the tick reports */
 #include <kern/cpu_number.h>		/* cpu_number */
 #include <kern/cpu_data.h>		/* #459: disable_preemption */
+#include <mach/machine.h>		/* #593: machine_slot[], who is up */
 #include <kern/rcu.h>		/* the tick's quiescent state (#455) */
 #include <x86_64/cpu/ipi.h>		/* #594: every processor leaves the TSC */
 #include <x86_64/cpu/percpu.h>		/* #594: percpu_intr_disable */
@@ -992,8 +993,16 @@ tick_window_print(void)
 		int		judged = 0;
 		uint64_t	permille = 0;
 
-		if (t == 0 && tick_count[c] == 0)
-			continue;	/* not a processor that ticks here */
+		/*
+		 * Every processor that is up, and only those -- NOT "every
+		 * processor that has ticked".  That was the test here, and
+		 * it left out exactly the processor whose clock never started:
+		 * under UROS_ABLATE_593_NEVER_TICKS the lines named the other
+		 * three and the run passed.  Up the way the debugger asks it
+		 * (ddb.c): the slot is a processor and it is running.
+		 */
+		if (!machine_slot[c].is_cpu || !machine_slot[c].running)
+			continue;
 		line_start(&l);
 		put_s(&l, "clock_event: cpu ");
 		put_u(&l, c);
@@ -1036,7 +1045,11 @@ tick_window_print(void)
 		 * passed, because nothing here said so.  Window 0 is not
 		 * judged: it opens before every processor has started to tick.
 		 */
-		if (judged && tw_report.index > 0 && permille < 500)
+		if (judged && tw_report.index > 0 && tick_count[c] == 0)
+			put_s(&l, " -- WRONG: this processor is up and has "
+				  "never ticked, its clock never started "
+				  "(#593)");
+		else if (judged && tw_report.index > 0 && permille < 500)
 			put_s(&l, " -- WRONG: fewer than half the ticks the "
 				  "window holds, the clock stopped (#593)");
 		printf("%s\n", l.b);
