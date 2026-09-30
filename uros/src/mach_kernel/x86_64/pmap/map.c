@@ -354,6 +354,15 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
  *
  * Returns the size unmapped, which is what the caller has to flush.
  */
+/*
+ * #604: the removal back to a read of the entry and a plain store of zero,
+ * which two removers can both get through.  The -M bench's two-remover arm
+ * is what notices.
+ */
+#ifndef	ABLATE_604_UNMAP_STORE
+#define	ABLATE_604_UNMAP_STORE	0
+#endif
+
 uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 				 pt_entry_t *removed)
 {
@@ -386,7 +395,11 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 	 * itself: the frame the index must forget, and the hardware's
 	 * ACCESSED and DIRTY bits as of the removal (#606).
 	 */
-	old = atomic_swap64((volatile uint64_t *) entry, 0);
+	if (ABLATE_604_UNMAP_STORE) {
+		old = *entry;
+		*entry = 0;
+	} else
+		old = atomic_swap64((volatile uint64_t *) entry, 0);
 	pmap_read_leave(held);
 
 	if (!pte_is_valid(old))

@@ -709,6 +709,170 @@ static void bench_compare_arms(void)
 				     : 0));
 }
 
+/*
+ * ── Two removers, one entry (#604) ─────────────────────────────────────
+ *
+ * pmap_forget() removes a mapping from its address and the removal loop of
+ * pmap_page_protect() from its page, and #558's page lock excludes only the
+ * second -- so both can be in pmap_unmap_page_noflush() for the same entry at
+ * once.  The unmap walked to a valid entry and then stored zero, and both
+ * could get past the walk before either stored: each would answer that it had
+ * removed the mapping, and each would drop the resident count.
+ *
+ * So two processors unmap one entry, round after round, and each round is
+ * counted by who removed it.  Exactly one is the property; BOTH is the defect.
+ * The split between the two sides is what says they met at all: a side that
+ * always wins is a side that always went first, and then "never both" would
+ * test nothing.
+ *
+ * The side that opens a round waits a little longer each round before its
+ * own call -- up to RACE_SKEW turns of an empty loop -- so the two calls slide
+ * across each other instead of meeting at one fixed offset that might never
+ * fall inside the window.
+ */
+#define RACE_ROUNDS	50000
+#define RACE_SKEW	1024
+#define RACE_VA		((uint64_t) 13 << PML4_SHIFT)
+
+static pmap_t		race_pmap;
+static uint64_t		race_pa;
+static volatile int	race_go;	/* the round the opening side opened */
+static volatile int	race_back;	/* the round the other side finished */
+static volatile int	race_other_won;
+static volatile int	race_done;
+static unsigned		race_rounds, race_first, race_second;
+static unsigned		race_both, race_none;
+
+static void race_second_side(void)
+{
+	int r;
+
+	for (r = 1; r <= RACE_ROUNDS; r++) {
+		while (race_go != r && !race_done)
+			cpu_pause();
+		if (race_done)
+			break;
+
+		race_other_won =
+			pmap_unmap_page_noflush(race_pmap, RACE_VA, 0) != 0;
+		race_back = r;
+	}
+
+	thread_terminate_self();
+}
+
+static void race_first_side(void)
+{
+	int r;
+
+	for (r = 1; r <= RACE_ROUNDS; r++) {
+		volatile unsigned k;
+		int		  mine;
+
+		if (pmap_map_page(race_pmap, RACE_VA, race_pa, INTEL_PTE_NX,
+				  &race_pmap->collect_lock) != PMAP_MAP_OK)
+			break;
+
+		race_go = r;
+		for (k = 0; k < (unsigned) r % RACE_SKEW; k++)
+			;
+		mine = pmap_unmap_page_noflush(race_pmap, RACE_VA, 0) != 0;
+
+		while (race_back != r)
+			cpu_pause();
+
+		race_rounds++;
+		if (mine && race_other_won)
+			race_both++;
+		else if (mine)
+			race_first++;
+		else if (race_other_won)
+			race_second++;
+		else
+			race_none++;
+	}
+
+	race_done = 1;
+	thread_terminate_self();
+}
+
+static void bench_remove_race(void)
+{
+	processor_t	on[2];
+	int		n = 0, i, waits;
+
+	for (i = 0; i < NCPUS && n < 2; i++) {
+		processor_t p = cpu_to_processor(i);
+
+		if (p != PROCESSOR_NULL && p->state != PROCESSOR_OFF_LINE)
+			on[n++] = p;
+	}
+
+	/*
+	 * One processor is not a failure to race: a removal holds preemption
+	 * off inside its read section, so on one processor two removals never
+	 * overlap -- which is the uniprocessor's own answer, not a gap.
+	 */
+	if (n < 2) {
+		printf("pmap_bench: two removers on one entry -- one processor, "
+		       "so the two cannot overlap, nothing to race\n");
+		return;
+	}
+
+	race_pmap = pmap_create(0);
+	race_pa = pmap_table_frame();
+	if (race_pmap == PMAP_NULL || race_pa == 0) {
+		printf("pmap_bench: two removers on one entry -- no pmap or no "
+		       "frame to race on -- WRONG\n");
+		return;
+	}
+
+	race_go = race_back = race_other_won = race_done = 0;
+	race_rounds = race_first = race_second = race_both = race_none = 0;
+
+	if (bench_thread_bound(race_second_side, on[1]) == THREAD_NULL) {
+		printf("pmap_bench: two removers on one entry -- no thread -- "
+		       "WRONG\n");
+		return;
+	}
+	if (bench_thread_bound(race_first_side, on[0]) == THREAD_NULL) {
+		race_done = 1;
+		printf("pmap_bench: two removers on one entry -- no thread -- "
+		       "WRONG\n");
+		return;
+	}
+
+	for (waits = 0; waits < 20000 && !race_done; waits++)
+		mutex_pause();
+
+	/*
+	 * ⚠️ Not finished is not destroyed: the two threads may still be inside
+	 * this pmap, so it is left to leak rather than freed under them.
+	 */
+	if (!race_done) {
+		printf("pmap_bench: two removers on one entry -- not finished "
+		       "after %d waits, %u rounds -- WRONG\n", waits,
+		       race_rounds);
+		return;
+	}
+
+	printf("pmap_bench: two removers on one entry, %u rounds: the one "
+	       "that opened removed it %u times, the other %u, both %u, "
+	       "neither %u -- %s\n",
+	       race_rounds, race_first, race_second, race_both, race_none,
+	       race_both != 0
+	       ? "BOTH REMOVED ONE ENTRY -- WRONG"
+	       : race_none != 0 || race_rounds != RACE_ROUNDS
+	       ? "A MAPPING THAT WAS THERE WAS NOT REMOVED -- WRONG"
+	       : race_first == 0 || race_second == 0
+	       ? "one remover each time, but one side always won: "
+		 "IT NEVER RACED, this tests nothing"
+	       : "one remover each time, and either side could win");
+
+	pmap_destroy(race_pmap);
+	pmap_table_frame_free(race_pa);
+}
+
 void
 pmap_collect_bench(void)
 {
@@ -959,4 +1123,6 @@ pmap_collect_bench(void)
 	       pmap_table_frames_live == bench_frames_at_start
 	       ? "every table came back"
 	       : "the lost ones are UNREACHABLE: a walk cannot find them");
+
+	bench_remove_race();
 }
