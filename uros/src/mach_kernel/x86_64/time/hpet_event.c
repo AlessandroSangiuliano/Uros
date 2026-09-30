@@ -640,17 +640,29 @@ static uint32_t join_locked(unsigned self, uint32_t now, uint32_t want,
 
 static int hpet_ev_arm(uint64_t ns)
 {
-	unsigned	self = (unsigned)cpu_number();
+	unsigned	self;
 	uint64_t	kick = 0;
 	uint32_t	counts, now, base;
 	int		fresh = 1;
 
-	if (!started || self >= NCPUS)
+	if (!started)
 		return 0;
 
 	counts = ns_to_counts(ns);
 
+	/*
+	 * Which processor this is, read with interrupts off, and the ticks
+	 * sent before they are back on: a thread that moved in between would
+	 * arm another processor's deadline, or send its self-IPI to the wrong
+	 * one.  Every caller has them off already (clock_event.c); this does
+	 * not lean on it.
+	 */
 	percpu_intr_disable();
+	self = (unsigned)cpu_number();
+	if (self >= NCPUS) {
+		percpu_intr_enable();
+		return 0;
+	}
 	hw_lock_lock(&ev_lock);
 
 	now = hpet_read32();
@@ -701,17 +713,16 @@ static int hpet_ev_arm(uint64_t ns)
 		reprogram_locked(&kick);
 
 	hw_lock_unlock(&ev_lock);
-	percpu_intr_enable();
-
 	kick_send(kick);
+	percpu_intr_enable();
 	return 1;
 }
 
 static void hpet_ev_stop(void)
 {
-	unsigned self = (unsigned)cpu_number();
+	unsigned self;
 
-	if (!started || self >= NCPUS)
+	if (!started)
 		return;
 
 	/*
@@ -731,6 +742,11 @@ static void hpet_ev_stop(void)
 	 * tick ever comes back, routes it again.
 	 */
 	percpu_intr_disable();
+	self = (unsigned)cpu_number();	/* interrupts off: arm()'s reason */
+	if (self >= NCPUS) {
+		percpu_intr_enable();
+		return;
+	}
 	hw_lock_lock(&ev_lock);
 	armed &= ~BIT(self);
 	woken &= ~BIT(self);
