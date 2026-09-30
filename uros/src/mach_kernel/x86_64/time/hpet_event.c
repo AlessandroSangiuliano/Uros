@@ -224,8 +224,17 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 			return ROUTE_FSB;
 		}
 	}
+	/*
+	 * Only where ISA 0 arrives on input 2.  The specification sends timer
+	 * 0 to "IRQ2 in the I/O APIC" (2.3.5) whatever the tables say about
+	 * the 8254, and this routes ISA 0's input with ISA 0's flags: the same
+	 * pin wherever the MADT carries the usual override of ISA 0 to GSI 2,
+	 * as `pc' and `q35' do and every PC with an HPET does -- and a pin the
+	 * comparator never reaches where it does not.  Refused there, and
+	 * said, rather than written for a machine none of these is.
+	 */
 	if (hpet_legacy_capable() && ioapic_present()
-	    && acpi_irq_to_gsi(0) < ioapic_pin_count()
+	    && acpi_irq_to_gsi(0) == 2
 	    && acpi_irq_to_gsi(8) < ioapic_pin_count()) {
 		/*
 		 * Not over a driver's line.  LegacyReplacement takes ISA 0's
@@ -234,6 +243,13 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 		 * either, since device_md_irq_register() refuses them only once
 		 * the bit is on.  An unmasked input is one somebody is using;
 		 * this backend's own, once started, is nobody else's.
+		 *
+		 * ⚠️ Checked, not locked: a driver claiming ISA 0 or 8 between
+		 * this and the switch in hpet_ev_start() keeps a line that goes
+		 * silent.  No driver here claims either -- the drivers take PCI
+		 * inputs, MSI, and ISA 1 and 4 -- and the day one does, the
+		 * check and the claim go under one lock.  Until then the start
+		 * says so if it finds the line taken after all.
 		 */
 		if (!started && (!ioapic_is_masked(acpi_irq_to_gsi(0))
 				 || !ioapic_is_masked(acpi_irq_to_gsi(8))))
@@ -454,9 +470,14 @@ static int hpet_ev_probe(void)
 	switch (choose_route(&n, &cap0)) {
 	case ROUTE_NONE:
 		printf("clock_event: hpet: no comparator can send an FSB "
-		       "message and the block cannot take the 8254's line; "
-		       "comparator 0 can reach I/O APIC inputs 0x%x, and "
-		       "choosing among them is not written (#593)\n", cap0);
+		       "message, and LegacyReplacement is %s; comparator 0 can "
+		       "reach I/O APIC inputs 0x%x, and choosing among them is "
+		       "not written (#593)\n",
+		       !hpet_legacy_capable() ? "not in this block"
+		       : acpi_irq_to_gsi(0) != 2 ? "not where ISA 0 arrives "
+						  "here (its timer 0 goes to "
+						  "input 2)"
+		       : "without an I/O APIC input to reach", cap0);
 		return 0;
 	case ROUTE_TAKEN:
 		printf("clock_event: hpet: no comparator can send an FSB "
@@ -525,6 +546,25 @@ static void hpet_ev_start(uint8_t vector)
 	programmed = 0;
 
 	route = choose_route(&comparator, &cap0);
+
+	/*
+	 * The probe found a route a moment ago, and nothing it looked at
+	 * changes but the masks: only a driver that claimed ISA 0 or 8 in
+	 * between can take the route away (choose_route()).  The clock has to
+	 * run, so the line is taken anyway -- and said, because that driver's
+	 * device has just gone silent.  No route at all cannot follow a probe
+	 * that found one.
+	 */
+	if (route == ROUTE_TAKEN) {
+		printf("clock_event: hpet: WRONG -- ISA 0 or 8 was claimed "
+		       "between the probe and the start; LegacyReplacement "
+		       "takes it all the same (#593)\n");
+		route = ROUTE_LEGACY;
+		comparator = 0;
+	} else if (route == ROUTE_NONE) {
+		panic("clock_event: hpet: started with no route, where the "
+		      "probe had found one (#593)");
+	}
 	trap_set_handler(HPET_EVENT_VECTOR, hpet_ev_intr);
 
 	/*
