@@ -169,6 +169,30 @@ static inline void cpu_pause(void)
 }
 
 /*
+ * How many cpu_pause() turns a wait for another processor gets before it gives
+ * up and says so (#604).
+ *
+ * A count, not a time.  The architecture gives a pause no duration, and what it
+ * lasts depends on the processor, on what runs it, and on the clock.  On one
+ * machine a hundred thousand took 26.8 million TSC ticks under KVM and 113.6
+ * million under QEMU's TCG with the cores at 1.4 GHz, and about 9.2 and 42
+ * million at 4.0 GHz: the same budget lasted about 36 or 152 seconds at the
+ * low clock and 12 or 56 at the high one (#604).  It bounds "never", not a
+ * delay.  Every loop that uses it leaves the moment its answer arrives, and
+ * the count matters only when the answer is not coming.  The boot prints what
+ * it lasts where it runs (spin_budget_selftest() in boot_c.c).
+ *
+ * One number, because nothing chose two.  These waits counted to 400000000 or
+ * to 200000000.  The smaller was written first, for the processors arriving
+ * (#438), with no reason given.  The larger came the same day, for the
+ * cross-call, with one: a processor deep in a fault report can take a long
+ * time to answer.  Every later wait copied one or the other.  The larger is
+ * kept for its reason, and because its only price is paid when something has
+ * already gone wrong.
+ */
+#define CPU_SPIN_BUDGET		400000000ULL
+
+/*
  * Whether this processor will take an interrupt, and the two ways to change
  * the answer.
  *

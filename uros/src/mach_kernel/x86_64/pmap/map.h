@@ -66,20 +66,23 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 
 /*
  * Clear the mapping for va.  Returns the size of the page it removed, or
- * zero if va was not mapped.
+ * zero if va was not mapped -- or if another processor removed it first.
+ * When `removed' is not NULL it receives the entry as it was at the instant
+ * it went, frame and hardware bits included (#604).
  *
  * The intermediate tables are left in place: reclaiming a table once its
  * last entry goes away is collection, a separate operation with its own
  * bookkeeping, not something to fold into every unmap.
  */
-uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va);
+uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va, pt_entry_t *removed);
 
 /*
  * The same, with the TLB shootdown left to the caller (#558), for the walk that
  * removes every mapping of a page while holding that page's pv lock.  Its pair
  * for the protect side is pmap_protect_page_noflush() below.
  */
-uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va);
+uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
+				 pt_entry_t *removed);
 
 /*
  * Change the permission bits (INTEL_PTE_PERM) of the leaf mapping va,

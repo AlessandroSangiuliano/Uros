@@ -144,7 +144,7 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 	 * count is generous: a processor deep in a fault report can take a
 	 * long time to get round to this.
 	 */
-	for (spins = 0; spins < 400000000ULL; spins++) {
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_load64(&call_acks) >= targets)
 			break;
 		cpu_pause();
@@ -208,7 +208,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 			targets++;
 		}
 
-	for (spins = 0; spins < 400000000ULL; spins++) {
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_load64(&call_acks) >= targets)
 			break;
 		cpu_pause();

@@ -172,6 +172,7 @@ extern unsigned pmap_table_frames_live;
 
 #include <mach/boolean.h>
 #include <kern/rcu.h>		/* the read sections below (#455) */
+#include <pmap/layout.h>	/* va_is_kernel, pmap_read_enter_for (#604) */
 extern int pmap_initialized;
 
 /*
@@ -202,6 +203,23 @@ static __inline__ void pmap_read_leave(boolean_t held)
 {
 	if (held)
 		urmach_rcu_read_unlock();
+}
+
+/*
+ * The section a walk of `va' needs, and none in the upper half (#604).
+ *
+ * pmap_collect() takes tables only below KERNEL_HALF_BASE; the upper half is
+ * the kernel's, shared into every space and never collected.  So a lookup of
+ * a kernel address has nothing to be protected from -- and pmap_extract() is
+ * asked about kernel addresses by the fault reports (trap.c, ddb), which are
+ * careful not to read per-processor state they may not be able to trust.
+ * pmap_walk() checks the lower half.  Released with pmap_read_leave().
+ */
+static __inline__ boolean_t pmap_read_enter_for(uint64_t va)
+{
+	if (va_is_kernel(va))
+		return FALSE;
+	return pmap_read_enter();
 }
 
 /* #455: -C, what concurrency does to a pmap that has no locking. */

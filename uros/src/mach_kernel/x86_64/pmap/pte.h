@@ -140,4 +140,125 @@ typedef uint64_t	pt_entry_t;
  */
 #define pte_is_leaf(pte)	(((pte) & INTEL_PTE_PS) != 0)
 
+/*
+ * The PAT bit, which is not in the same place in every leaf (#604).  A 4 KiB
+ * leaf has it at bit 7; a 2 MiB or 1 GiB leaf spends bit 7 on PS and keeps PAT
+ * at bit 12, below its frame.
+ */
+#define INTEL_PTE_PAT_4K	0x0000000000000080ULL
+#define INTEL_PTE_PAT_LARGE	0x0000000000001000ULL
+
+/*
+ * What an interior entry the pmap builds carries: VALID, WRITE and USER, and NX
+ * clear -- so that the leaf decides.  next_table() in map.c gives the reason
+ * bit by bit.  One name for the pmap's two writers of interior entries (#604):
+ * pmap_split_page() wrote its own and left USER out.
+ *
+ * The direct map is the deliberate exception, and says so in direct.c: its
+ * PML4 entry sets NX and leaves USER clear, so the whole region is kernel-only
+ * and never executable whatever sits below.  A split inside it stays covered,
+ * because U/S is required at every level of the path and NX at any one of
+ * them is enough.
+ */
+#define INTEL_PTE_INTERIOR	(INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_USER)
+
+/*
+ * #604: a split back to what it wrote before -- the frame, VALID, the
+ * permission bits and PS, and an interior entry without USER.
+ */
+#ifndef	ABLATE_604_SPLIT_DROPS
+#define	ABLATE_604_SPLIT_DROPS	0
+#endif
+
+/*
+ * Entry `i' of the table that replaces the large leaf `large': the same
+ * mapping one size finer, and nothing else different (#604).
+ *
+ * Every bit but the frame crosses -- permissions, caching (PWT, PCD, PAT),
+ * global, wired, accessed, dirty -- and not as a courtesy.  Until the shootdown
+ * that follows a split, the processor may hold the large translation and the
+ * small ones together, and "a reference to a linear address in the address
+ * range may use any of these translations" (Intel SDM Vol. 3A, 253668-093US,
+ * 5.10.2.3).  5.10.4.2 allows a write that changes the page size without
+ * clearing P first only if it changes nothing else: not the frame, not the
+ * access rights, not the other attributes.  A split that drops a bit changes
+ * one.
+ */
+static inline pt_entry_t pte_split_leaf(pt_entry_t large, int from_1g,
+					unsigned i)
+{
+	uint64_t   frame_mask = from_1g ? INTEL_PTE_PFN_1G : INTEL_PTE_PFN_2M;
+	uint64_t   sub_size   = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
+	pt_entry_t frame      = (large & frame_mask) + (uint64_t) i * sub_size;
+	pt_entry_t keep;
+
+	if (ABLATE_604_SPLIT_DROPS)
+		return frame | INTEL_PTE_VALID | (large & INTEL_PTE_PERM)
+		     | (from_1g ? INTEL_PTE_PS : 0);
+
+	keep = large & ~(frame_mask | INTEL_PTE_PS | INTEL_PTE_PAT_LARGE);
+
+	/*
+	 * A 2 MiB sub-page is still a large leaf, at the PD: PS stays, and PAT
+	 * stays at bit 12.  A 4 KiB one is a PT entry, where bit 7 is PAT and
+	 * PS does not exist -- so PAT moves down.
+	 */
+	if (from_1g)
+		return frame | keep | INTEL_PTE_PS
+		     | (large & INTEL_PTE_PAT_LARGE);
+	return frame | keep
+	     | ((large & INTEL_PTE_PAT_LARGE) ? INTEL_PTE_PAT_4K : 0);
+}
+
+#include <sync/atomic.h>
+
+/*
+ * Set and clear bits in a live entry without losing what the hardware or
+ * another processor put there in between (#455).
+ *
+ * Here and not in pmap.c because the reason belongs to the entry, not to any
+ * one file: the processor sets ACCESSED and DIRTY in this word without notice,
+ * so every read-modify-write of a live entry has to be this loop.  vminit.c
+ * wrote `*entry |= INTEL_PTE_MOD' instead, where this was out of reach (#604).
+ *
+ * ⚠️ The retry reloads from cmpxchg's answer and never re-reads *entry:  what
+ * it hands back is what the word held at the instant it refused, and building
+ * the next attempt out of anything else is building it out of a value that was
+ * never in the word.
+ *
+ * 🔴 AN ENTRY THAT IS GONE STAYS GONE (#604).  The callers walk to a valid
+ * entry and then update it, and a removal on another processor can zero it in
+ * between.  The retry then built on zero and wrote `set' alone into the word:
+ * an entry that is neither valid nor zero.  No walk sees it, since the valid
+ * bit is clear, but pmap_collect() would: a table is empty only when every
+ * word is zero (collect_table_empty() in vminit.c), so the table holding that
+ * entry would be kept for ever.  A mapping that is gone has no bits left to
+ * change.
+ */
+#ifndef	ABLATE_604_UPDATE_GONE
+#define	ABLATE_604_UPDATE_GONE	0
+#endif
+
+static inline void pmap_pte_update(pt_entry_t *entry, uint64_t set,
+				   uint64_t clear)
+{
+	pt_entry_t found = *entry;
+
+	for (;;) {
+		pt_entry_t fresh = (found & ~clear) | set;
+		pt_entry_t seen;
+
+		if (!ABLATE_604_UPDATE_GONE && !pte_is_valid(found))
+			return;
+		if (fresh == found)
+			return;
+
+		seen = atomic_cmpxchg64((volatile uint64_t *) entry,
+					found, fresh);
+		if (seen == found)
+			return;
+		found = seen;
+	}
+}
+
 #endif	/* _X86_64_PTE_H_ */

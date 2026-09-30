@@ -170,6 +170,32 @@ static void pte_selftest(void)
 }
 
 /*
+ * pmap_pte_update() on the two words that matter (#604): a live entry gets the
+ * bit, and an entry that is gone stays zero.  The second is the state a
+ * removal on another processor leaves between a walk and the update; a word
+ * that came back non-zero would keep the table under it from ever being
+ * collected.
+ */
+static void pte_update_selftest(void)
+{
+	pt_entry_t live = INTEL_PTE_VALID | INTEL_PTE_WRITE;
+	pt_entry_t gone = 0;
+
+	pmap_pte_update(&live, INTEL_PTE_MOD, 0);
+	pmap_pte_update(&gone, INTEL_PTE_MOD, 0);
+
+	kputs("UrMach x86-64: pte update: a live entry reads ");
+	kputhex64(live);
+	kputs(", a gone one ");
+	kputhex64(gone);
+	kputs(live == (INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_MOD)
+	      && gone == 0
+	      ? " -- the gone entry stayed zero\r\n"
+	      : " -- WRONG, a gone entry must stay zero or its table is "
+		"never collected\r\n");
+}
+
+/*
  * layout.h pins its constants with _Static_assert at build time, so the
  * only thing left to establish here is the live fact: that the address we
  * are actually executing from falls inside the region the layout calls the
@@ -580,7 +606,7 @@ static void protect_unmap_selftest(void)
 	kputhex64(*page);
 	kputs(*page == 0xcafe ? " still\r\n" : " CORRUPT\r\n");
 
-	size = pmap_unmap_page(PMAP_NULL, va);
+	size = pmap_unmap_page(PMAP_NULL, va, 0);
 	e = pmap_walk(root, va, 0);
 	kputs("UrMach x86-64: unmap -> ");
 	kputs(size == PAGE_SIZE_4K && e == PT_ENTRY_NULL
@@ -603,11 +629,21 @@ static void split_selftest(void)
 	const volatile uint32_t *p = (const volatile uint32_t *)(uintptr_t)dva;
 	uint64_t before = 0, after = 0, s0 = 0, s1 = 0, newsz;
 	uint32_t read_before = *p, read_after;
+	pt_entry_t *above, *leaf, old;
+	int interior_ok, kept_ok;
+
+	/*
+	 * The large leaf's own word, kept by address: after the split the same
+	 * word is the interior entry above the new table (#604).
+	 */
+	above = pmap_walk(root, dva, 0);
+	old = above != PT_ENTRY_NULL ? *above : 0;
 
 	pmap_resolve(root, dva, &before, &s0);
 	newsz = pmap_split_page(PMAP_NULL, dva);
 	pmap_resolve(root, dva, &after, &s1);
 	read_after = *p;
+	leaf = pmap_walk(root, dva, 0);
 
 	kputs("UrMach x86-64: split direct page ");
 	kputdec(s0 / 1024);
@@ -622,6 +658,61 @@ static void split_selftest(void)
 	      && read_after == read_before && read_after == 0x5ec0ffee
 	      ? ", mapping intact\r\n"
 	      : ", SPLIT BROKE THE MAP\r\n");
+
+	/*
+	 * And what the two words say (#604).  The one above is interior: valid,
+	 * writable, user, no NX -- the leaf below decides.  The new leaf is the
+	 * old one a size finer, every bit but the frame the same; ACCESSED and
+	 * DIRTY are left out of the comparison, since the processor may set
+	 * either on the new leaf between the split and this line.
+	 */
+	interior_ok = above != PT_ENTRY_NULL
+		      && (*above & (INTEL_PTE_VALID | INTEL_PTE_PERM))
+			 == INTEL_PTE_INTERIOR;
+	kept_ok = leaf != PT_ENTRY_NULL && s1 != 0
+		  && ((*leaf ^ pte_split_leaf(old, s0 == PAGE_SIZE_1G,
+					      (unsigned) ((dva & (s0 - 1)) / s1)))
+		      & ~(INTEL_PTE_REF | INTEL_PTE_MOD)) == 0;
+
+	kputs("UrMach x86-64: split: the entry above reads ");
+	kputhex64(above != PT_ENTRY_NULL ? *above & ~INTEL_PTE_PFN : 0);
+	kputs(interior_ok ? " (interior)" : " (NOT an interior entry)");
+	kputs(", the new leaf ");
+	kputhex64(leaf != PT_ENTRY_NULL ? *leaf & ~INTEL_PTE_PFN : 0);
+	kputs(interior_ok && kept_ok
+	      ? " -- the old leaf's bits, one size finer\r\n"
+	      : " -- WRONG, a split must keep what it splits\r\n");
+}
+
+/*
+ * pte_split_leaf() on two large leaves that carry every attribute a leaf can
+ * (#604), against values written out by hand: the pages split today carry
+ * none of them, so only this says the attributes cross.
+ */
+static void pte_split_selftest(void)
+{
+	const pt_entry_t flags = INTEL_PTE_VALID | INTEL_PTE_WRITE
+			       | INTEL_PTE_USER | INTEL_PTE_WTHRU
+			       | INTEL_PTE_NCACHE | INTEL_PTE_REF
+			       | INTEL_PTE_MOD | INTEL_PTE_GLOBAL
+			       | INTEL_PTE_WIRED | INTEL_PTE_NX;
+	const pt_entry_t big = INTEL_PTE_PS | INTEL_PTE_PAT_LARGE;
+	pt_entry_t small = pte_split_leaf(0x40000000ULL | flags | big, 0, 3);
+	pt_entry_t mid   = pte_split_leaf(0x80000000ULL | flags | big, 1, 5);
+	pt_entry_t want_small = (0x40000000ULL + 3 * PAGE_SIZE_4K) | flags
+			      | INTEL_PTE_PAT_4K;
+	pt_entry_t want_mid   = (0x80000000ULL + 5 * PAGE_SIZE_2M) | flags
+			      | big;
+
+	kputs("UrMach x86-64: split leaf: 2 MiB -> 4 KiB ");
+	kputhex64(small);
+	kputs(", 1 GiB -> 2 MiB ");
+	kputhex64(mid);
+	kputs(small == want_small && mid == want_mid
+	      ? " -- every bit but the frame came across, PAT at bit 7 in "
+		"the 4 KiB one\r\n"
+	      : " -- WRONG, a split must keep what it splits (Intel SDM 3A "
+		"5.10.4.2)\r\n");
 }
 
 /*
@@ -3072,6 +3163,43 @@ static void tsc_source_selftest(void)
 	} else {
 		kputs(" — nothing measured, nothing adopted\r\n");
 	}
+}
+
+/*
+ * What CPU_SPIN_BUDGET lasts here (#604).  The budget is a count of pauses,
+ * and a pause lasts what the processor -- or the emulator -- makes it last,
+ * so the only way to say what a wait gave up after is to time some.  A
+ * hundred thousand of them against the calibrated clock, reported and not
+ * judged: there is no right answer to hold it to.
+ */
+#define SPIN_SAMPLE	100000ULL
+
+static void spin_budget_selftest(void)
+{
+	uint64_t hz = tsc_hz(), t0, t1, ticks;
+	uint64_t i;
+
+	t0 = rdtsc_ordered();
+	for (i = 0; i < SPIN_SAMPLE; i++)
+		cpu_pause();
+	t1 = rdtsc_ordered();
+	ticks = t1 - t0;
+
+	kputs("UrMach x86-64: spin budget ");
+	kputdec(CPU_SPIN_BUDGET);
+	kputs(" pauses; ");
+	kputdec(SPIN_SAMPLE);
+	kputs(" of them took ");
+	kputdec(ticks);
+	kputs(" TSC ticks");
+	if (hz < 1000) {
+		kputs(", and with no calibrated rate that is all there is to "
+		      "say\r\n");
+		return;
+	}
+	kputs(", so a wait that runs out gave up after about ");
+	kputdec(ticks * (CPU_SPIN_BUDGET / SPIN_SAMPLE) / (hz / 1000));
+	kputs(" ms on this processor\r\n");
 }
 
 static void tsc_selftest(void)
@@ -7025,6 +7153,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
 
 	pte_selftest();
+	pte_update_selftest();
 	layout_selftest();
 	phys_selftest();
 	cpu_selftest();
@@ -7036,6 +7165,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	map_selftest();
 	protect_unmap_selftest();
 	split_selftest();
+	pte_split_selftest();
 	pmap_selftest();
 	pmap_verbs_selftest();
 	pv_selftest(info);
@@ -7061,6 +7191,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	freq_census();
 	rulers_selftest();
 	tsc_selftest();
+	spin_budget_selftest();
 	rulers_kept_selftest();
 	timer_selftest();
 	pci_cfg_selftest();

@@ -722,7 +722,7 @@ void x86_64_backtrace(uint64_t rbp)
 	pmap_t kernel = pmap_kernel();
 	uint64_t spins;
 
-	for (spins = 0; spins < 200000000ULL; spins++) {
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_cmpxchg64(&backtrace_lock, 0, 1) == 0)
 			break;
 		cpu_pause();
