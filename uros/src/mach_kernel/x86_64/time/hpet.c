@@ -324,10 +324,14 @@ static void comparator_config(unsigned n, uint32_t set)
 }
 
 /*
- * Before interrupts are enabled, a comparator that cannot match for a whole
- * wrap: the reset value is all ones, which in 32-bit mode is a match at the
- * next wrap of the low half -- up to 43 s away at 100 MHz, or a few
- * microseconds.
+ * Before interrupts are enabled, a comparator whose MATCH is a whole wrap
+ * away, rather than whatever value was left in it -- one a few microseconds
+ * ahead of the counter would be an interrupt at once.  It does not make the
+ * comparator silent: in 32-bit one-shot mode the wrap of the low half
+ * interrupts too (2.3.9.2.1), and the wrap can be microseconds away as well;
+ * the reset value, all ones, matches in that same instant, so against it the
+ * park gains nothing.  The backend's handler takes either with nothing due,
+ * and counts it.
  */
 static void comparator_park(unsigned n)
 {

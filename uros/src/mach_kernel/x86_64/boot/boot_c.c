@@ -3170,20 +3170,6 @@ static void tsc_selftest(void)
 }
 
 /*
- * The two rulers the machine has besides the 8254 (#508, phase 2).
- *
- * Each is found, made readable, and asked one question: how fast the TSC
- * runs against it, over the same thirty milliseconds the 8254 calibration
- * uses.  Nothing takes the answer yet -- tsc_hz() is still the 8254's -- and
- * that is deliberate: three rulers read side by side are the evidence the
- * vote in phase 4 will be designed from, including the question phase 1
- * raised about whether an emulator's rulers are independent at all.
- *
- * The interval runs from an edge of the ruler to a later edge, and both are
- * seen by reading it, so nothing is programmed inside the interval.  In kHz,
- * not MHz, because the differences phase 1 found are a third of a percent.
- */
-/*
  * #593, for #318's question: what one read of each clock costs, in TSC cycles
  * -- the least of sixteen, because the least is the read nothing interrupted.
  * A timebase is read on every clock_gettime(), and under an emulator a

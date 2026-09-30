@@ -540,6 +540,13 @@ static void hpet_ev_start(uint8_t vector)
 	ahead = (uint32_t)((HPET_EV_AHEAD_NS * hz + NS_PER_SEC - 1) / NS_PER_SEC);
 	if (ahead < 2)
 		ahead = 2;
+	/*
+	 * A processor number used as an APIC id -- here for the FSB message's
+	 * destination and the I/O APIC entry's, in kick_send() for every IPI.
+	 * They are the same number on this target, which cause_ast_check()
+	 * and ddb_stop_others() rely on as well; said here too, because all of
+	 * them would have to change together.
+	 */
 	broadcaster = (uint32_t)cpu_number();
 	hw_lock_init(&ev_lock);
 	armed = woken = 0;
@@ -888,7 +895,8 @@ void hpet_event_drain_report(void)
 	if (reports_dropped != 0) {
 		put_s(&l, "; ");
 		put_u(&l, reports_dropped);
-		put_s(&l, " windows closed while one waited to be printed");
+		put_s(&l, " windows since boot closed while one waited to be "
+			  "printed");
 	}
 #if defined(ABLATE_593_ICR_OPEN) && ABLATE_593_ICR_OPEN
 	put_s(&l, "; since boot, ");
