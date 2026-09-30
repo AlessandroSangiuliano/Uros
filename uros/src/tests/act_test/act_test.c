@@ -51,6 +51,7 @@
  */
 #include <mach/mach_host.h>
 #include <mach/host_info.h>	/* #603: how many processors arm eight has */
+#include <mach/thread_info.h>	/* #603: arm seven's yardstick call */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -1376,6 +1377,18 @@ arm_six_non_canonical_return(void)
  * with a system call at each end.  A system call's own check is therefore at
  * most ARM7_PAGES touches away.
  *
+ * ⚠️ The count inside the call includes the time before the request reaches
+ * the thread -- the system call into the kernel, and the interrupt to the
+ * other processor -- in which it is entitled to run.  At several processors
+ * under TCG that was up to 49 pages with every fix in, against a threshold of
+ * 16, and a 256-page batch let a thread that ran on show no more than 256.
+ * So the batch is 4096 pages and the threshold 256: what a thread that runs
+ * on reaches is bounded by the batch, what one that stops reaches is bounded
+ * by time, and a larger batch moves only the first.  And the same count is
+ * taken around a call of the same shape that stops nothing -- thread_info()
+ * on the same thread -- and printed beside it, so the line says how much of
+ * what it counted was that time.
+ *
  * ⚠️ Counted DURING thread_suspend(), from just before the call to its
  * answer -- not after it.  thread_suspend() ends in thread_wait(), which
  * returns only once the thread is no longer running, so a count taken after
@@ -1387,9 +1400,9 @@ arm_six_non_canonical_return(void)
  * was in the middle of; one that runs on reaches the end of its megabyte.  And
  * after the answer, nothing at all, whichever it was.
  */
-#define	ARM7_PAGES	256
+#define	ARM7_PAGES	4096
 #define	ARM7_ROUNDS	20
-#define	ARM7_RAN_ON	16	/* more than a touch in flight, by far */
+#define	ARM7_RAN_ON	256	/* far beyond a call's own latency */
 
 static volatile mach_port_t	arm_seven_thread;
 static volatile unsigned long	arm_seven_touches;
@@ -1424,7 +1437,7 @@ static int
 arm_seven_suspend_in_page_faults(void)
 {
 	pthread_t	victim;
-	unsigned long	asked, answered, later, most = 0;
+	unsigned long	asked, answered, later, most = 0, yardstick = 0;
 	int		i, round, ran_on = 0, ran_after = 0;
 	kern_return_t	kr;
 
@@ -1443,6 +1456,16 @@ arm_seven_suspend_in_page_faults(void)
 	}
 
 	for (round = 0; round < ARM7_ROUNDS; round++) {
+		struct thread_basic_info	info;
+		mach_msg_type_number_t		count = THREAD_BASIC_INFO_COUNT;
+
+		asked = arm_seven_touches;
+		(void) thread_info(arm_seven_thread, THREAD_BASIC_INFO,
+				   (thread_info_t) &info, &count);
+		answered = arm_seven_touches;
+		if (answered - asked > yardstick)
+			yardstick = answered - asked;
+
 		asked = arm_seven_touches;
 		kr = thread_suspend(arm_seven_thread);
 		answered = arm_seven_touches;
@@ -1476,13 +1499,15 @@ arm_seven_suspend_in_page_faults(void)
 	if (ran_on != 0) {
 		printf("act_test: [7] in %d of %d rounds a thread that lives in "
 		       "page faults ran on after it was asked to stop: up to %lu "
-		       "pages touched inside thread_suspend — WRONG (#603)\n",
-		       ran_on, ARM7_ROUNDS, most);
+		       "pages touched inside thread_suspend, %lu inside "
+		       "thread_info — WRONG (#603)\n",
+		       ran_on, ARM7_ROUNDS, most, yardstick);
 		return 0;
 	}
 	printf("act_test: [7] a thread that lives in page faults stopped when "
 	       "asked: %d rounds, at most %lu pages touched inside "
-	       "thread_suspend and none after (#603)\n", ARM7_ROUNDS, most);
+	       "thread_suspend (%lu inside thread_info) and none after "
+	       "(#603)\n", ARM7_ROUNDS, most, yardstick);
 	return 1;
 }
 
