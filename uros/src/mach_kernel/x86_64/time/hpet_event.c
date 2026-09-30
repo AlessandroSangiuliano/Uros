@@ -11,7 +11,6 @@
 #include <cpus.h>			/* NCPUS */
 #include <kern/misc_protos.h>		/* printf */
 #include <kern/cpu_number.h>		/* cpu_number */
-#include <sync/barrier.h>		/* smp_wmb, smp_rmb */
 #include <sync/lock.h>
 
 #include <cpu/acpi.h>
@@ -23,6 +22,7 @@
 #include <time/hpet.h>
 #include <time/hpet_event.h>
 #include <time/line.h>		/* one printf per line (#578) */
+#include <time/window.h>		/* what both report windows share */
 #include <time/pmtimer.h>
 #include <time/rulers.h>		/* whether the counter has been named */
 #include <time/tsc.h>
@@ -94,15 +94,6 @@ _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
 
 enum { ROUTE_NONE, ROUTE_FSB, ROUTE_LEGACY, ROUTE_TAKEN };
 
-/*
- * Report windows, in seconds by the counter: the first says early whether
- * the rate is right at all, the second is long enough to catch what a
- * second hides, and after that one a minute.
- */
-#define	WINDOW_FIRST_S		1
-#define	WINDOW_SECOND_S		10
-#define	WINDOW_REST_S		60
-
 static int		started;
 static int		route;
 static unsigned		comparator;
@@ -148,11 +139,7 @@ static uint32_t		win_last;	/* the counter at the last fire */
 static uint64_t		win_counts;
 static uint64_t		win_length;
 static unsigned		win_index;
-static uint32_t		pm_last;
-static uint64_t		win_pm;
-static int		pm_gap;		/* a fire interval too long for the PM
-					   timer's wrap: its total is not a
-					   time */
+static struct pm_total	win_pm;
 static uint64_t		tsc0;
 
 /* The window closed, for the thread that prints it. */
@@ -352,25 +339,14 @@ static void kick_send(uint64_t kick)
 
 /* ------------------------------------------------------------ windows -- */
 
-static uint64_t window_length(unsigned index)
-{
-	if (index == 0)
-		return hz * WINDOW_FIRST_S;
-	if (index == 1)
-		return hz * WINDOW_SECOND_S;
-	return hz * WINDOW_REST_S;
-}
-
+/* Windows by the counter, as long as <time/window.h> says. */
 static void window_open(uint32_t now)
 {
 	w = (struct window){ .late_min = UINT32_MAX };
 	win_last = now;
 	win_counts = 0;
-	win_length = window_length(win_index);
-	win_pm = 0;
-	pm_gap = 0;
-	if (pmtimer_present())
-		pm_last = pmtimer_read();
+	win_length = hz * window_seconds(win_index);
+	pm_total_open(&win_pm);
 	tsc0 = rdtsc();
 }
 
@@ -386,29 +362,21 @@ static void window_account(uint32_t now)
 
 	win_counts += gap;
 	win_last = now;
-	if (gap > hz * 4)
-		pm_gap = 1;
-	if (pmtimer_present()) {
-		uint32_t pm = pmtimer_read();
-
-		win_pm += pmtimer_delta(pm_last, pm);
-		pm_last = pm;
-	}
+	pm_total_step(&win_pm, gap > hz * 4);
 
 	if (win_counts < win_length)
 		return;
 
-	if (report_pending) {
+	if (!handoff_free(&report_pending)) {
 		reports_dropped++;
 	} else {
 		report.w = w;
 		report.index = win_index;
 		report.counts = win_counts;
-		report.pm = win_pm;
-		report.pm_valid = pmtimer_present() && !pm_gap;
+		report.pm = win_pm.sum;
+		report.pm_valid = pm_total_valid(&win_pm);
 		report.tsc = rdtsc() - tsc0;
-		smp_wmb();
-		report_pending = 1;
+		handoff_publish(&report_pending);
 	}
 	win_index++;
 	window_open(now);
@@ -848,10 +816,8 @@ void hpet_event_drain_report(void)
 	unsigned	c;
 	struct line	l;
 
-	if (report_pending != 1
-	    || !__sync_bool_compare_and_swap(&report_pending, 1, 2))
+	if (!handoff_claim(&report_pending))
 		return;
-	smp_rmb();
 
 	line_start(&l);
 	put_s(&l, "clock_event: hpet: window ");
@@ -929,6 +895,5 @@ void hpet_event_drain_report(void)
 		printf("%s\n", l.b);
 	}
 
-	smp_wmb();
-	report_pending = 0;
+	handoff_release(&report_pending);
 }

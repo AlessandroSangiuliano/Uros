@@ -41,6 +41,7 @@
 #include <x86_64/time/hpet_event.h>	/* #593: the third backend */
 #include <x86_64/time/pmtimer.h>	/* #593: the ticks against a ruler */
 #include <x86_64/time/line.h>		/* #593: one printf per line */
+#include <x86_64/time/window.h>		/* #593: what both windows share */
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
@@ -856,9 +857,7 @@ static struct {
 	int		open;
 	unsigned	index;
 	uint64_t	tsc0, tsc_last;
-	uint32_t	pm_last;
-	uint64_t	pm;
-	int		pm_gap;
+	struct pm_total	pm;
 	unsigned long	ticks0[NCPUS];
 } tw;
 
@@ -872,12 +871,6 @@ static struct {
 static volatile int	tw_pending;
 static unsigned		tw_dropped;
 
-static uint64_t
-tick_window_seconds(unsigned index)
-{
-	return index == 0 ? 1 : index == 1 ? 10 : 60;
-}
-
 static void
 tick_window_open(uint64_t now)
 {
@@ -886,10 +879,7 @@ tick_window_open(uint64_t now)
 	for (c = 0; c < NCPUS; c++)
 		tw.ticks0[c] = tick_count[c];
 	tw.tsc0 = tw.tsc_last = now;
-	tw.pm = 0;
-	tw.pm_gap = 0;
-	if (pmtimer_present())
-		tw.pm_last = pmtimer_read();
+	pm_total_open(&tw.pm);
 	tw.open = 1;
 }
 
@@ -904,37 +894,29 @@ tick_window_account(void)
 		tick_window_open(now);
 		return;
 	}
-	if (pmtimer_present()) {
-		uint32_t pm = pmtimer_read();
-
-		tw.pm += pmtimer_delta(tw.pm_last, pm);
-		tw.pm_last = pm;
-	}
-	if (rate != 0 && now - tw.tsc_last > 4 * rate)
-		tw.pm_gap = 1;
+	pm_total_step(&tw.pm, rate != 0 && now - tw.tsc_last > 4 * rate);
 	tw.tsc_last = now;
 
-	want = tick_window_seconds(tw.index);
+	want = window_seconds(tw.index);
 	if (rate != 0)
 		closed = now - tw.tsc0 >= want * rate;
 	else if (pmtimer_present())
-		closed = tw.pm >= want * PMTIMER_HZ;
+		closed = tw.pm.sum >= want * PMTIMER_HZ;
 	else
 		return;		/* no clock to close a window by */
 	if (!closed)
 		return;
 
-	if (tw_pending) {
+	if (!handoff_free(&tw_pending)) {
 		tw_dropped++;
 	} else {
 		tw_report.index = tw.index;
 		tw_report.tsc = now - tw.tsc0;
-		tw_report.pm = tw.pm;
-		tw_report.pm_valid = pmtimer_present() && !tw.pm_gap;
+		tw_report.pm = tw.pm.sum;
+		tw_report.pm_valid = pm_total_valid(&tw.pm);
 		for (c = 0; c < NCPUS; c++)
 			tw_report.ticks[c] = tick_count[c] - tw.ticks0[c];
-		smp_wmb();
-		tw_pending = 1;
+		handoff_publish(&tw_pending);
 	}
 	tw.index++;
 	tick_window_open(now);
@@ -947,9 +929,8 @@ tick_window_print(void)
 	unsigned	c;
 	struct line	l;
 
-	if (tw_pending != 1 || !__sync_bool_compare_and_swap(&tw_pending, 1, 2))
+	if (!handoff_claim(&tw_pending))
 		return;
-	smp_rmb();
 
 	/*
 	 * Three states of the PM timer, and they are said apart: absent; a
@@ -1055,8 +1036,7 @@ tick_window_print(void)
 		printf("%s\n", l.b);
 	}
 
-	smp_wmb();
-	tw_pending = 0;
+	handoff_release(&tw_pending);
 }
 
 void
