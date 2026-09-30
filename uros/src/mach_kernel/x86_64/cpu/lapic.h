@@ -139,12 +139,13 @@ void lapic_send_ipi(uint32_t apic_id, uint8_t vector);
 
 /*
  * #593, only in the ablation that leaves a send open to an interrupt: how many
- * sends began on a processor that was already between the two halves of
- * another.  Without the ablation the case cannot happen, and there is nothing
- * to count.
+ * sends began on a processor that was already past the wait of another and
+ * not yet past its second write -- on every processor, or on one.  Without
+ * the ablation the case cannot happen, and there is nothing to count.
  */
 #if defined(ABLATE_593_ICR_OPEN) && ABLATE_593_ICR_OPEN
 uint64_t lapic_icr_nested(void);
+uint64_t lapic_icr_nested_on(uint32_t apic_id);
 #endif
 
 /*

@@ -837,8 +837,8 @@ void hpet_event_drain_report(void)
 #if defined(ABLATE_593_ICR_OPEN) && ABLATE_593_ICR_OPEN
 	put_s(&l, "; since boot, ");
 	put_u(&l, lapic_icr_nested());
-	put_s(&l, " IPI sends began inside another on the same processor "
-		  "(UROS_ABLATE_593_ICR_OPEN)");
+	put_s(&l, " IPI sends began between another's wait and its second "
+		  "write on the same processor (UROS_ABLATE_593_ICR_OPEN)");
 #endif
 	put_s(&l, " (#593)");
 	printf("%s\n", l.b);

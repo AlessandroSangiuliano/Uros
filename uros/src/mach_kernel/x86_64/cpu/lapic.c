@@ -207,7 +207,9 @@ static void icr_wait_idle(void)
 /*
  * #593: the ablation that leaves the send open to an interrupt, and the count
  * that shows what the opening lets in: a send begun on a processor that was
- * already between the two halves of another.
+ * already past the wait of another and not yet past its second write -- the
+ * window the masking closes.  A send begun during another's wait is harmless
+ * (the wait reads the register again) and is not counted.
  */
 #ifndef	ABLATE_593_ICR_OPEN
 #define	ABLATE_593_ICR_OPEN	0
@@ -225,11 +227,21 @@ static void icr_wait_idle(void)
  * boot: an instrument that changes the experiment.
  */
 static volatile uint32_t	icr_inside[NCPUS];
-static volatile uint64_t	icr_nested_count;
+static volatile uint64_t	icr_nested[NCPUS];	/* each by its own */
 
 uint64_t lapic_icr_nested(void)
 {
-	return icr_nested_count;
+	uint64_t	sum = 0;
+	unsigned	c;
+
+	for (c = 0; c < NCPUS; c++)
+		sum += icr_nested[c];
+	return sum;
+}
+
+uint64_t lapic_icr_nested_on(uint32_t apic_id)
+{
+	return apic_id < NCPUS ? icr_nested[apic_id] : 0;
 }
 #endif
 
@@ -257,16 +269,22 @@ static void icr_send(uint32_t apic_id, uint32_t command)
 	 */
 	interrupts_disable();
 #else
+	/*
+	 * Counted by the processor it happens on, so no two write one count:
+	 * a send that interrupts this one runs in a handler with interrupts
+	 * off, and nothing interrupts it in turn.
+	 */
 	unsigned self = lapic_read(LAPIC_ID) >> 24;
 
-	if (self < NCPUS) {
-		if (icr_inside[self])
-			icr_nested_count++;
-		icr_inside[self]++;
-	}
+	if (self < NCPUS && icr_inside[self])
+		icr_nested[self]++;
 #endif
 
 	icr_wait_idle();
+#if ABLATE_593_ICR_OPEN
+	if (self < NCPUS)
+		icr_inside[self]++;
+#endif
 
 	/*
 	 * The destination goes in the high half and the command in the low

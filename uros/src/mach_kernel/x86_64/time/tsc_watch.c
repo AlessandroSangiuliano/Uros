@@ -119,7 +119,7 @@ static void icr_stress(void)
 			target = c;
 			break;
 		}
-	before = lapic_icr_nested();
+	before = lapic_icr_nested_on(self);
 	t0 = rdtsc();
 	do {
 		if (target == self)
@@ -130,9 +130,10 @@ static void icr_stress(void)
 	} while (rate != 0 && rdtsc() - t0 < rate);
 	printf("UrMach x86-64: the ICR stress: %llu AST IPIs from thread "
 	       "context on cpu %u to cpu %u in a second, and %llu sends by an "
-	       "interrupt began inside one of them (UROS_ABLATE_593_ICR_OPEN, "
-	       "#593)\n", (unsigned long long)sent, self, target,
-	       (unsigned long long)(lapic_icr_nested() - before));
+	       "interrupt began between the wait and the second write of one "
+	       "of them (UROS_ABLATE_593_ICR_OPEN, #593)\n",
+	       (unsigned long long)sent, self, target,
+	       (unsigned long long)(lapic_icr_nested_on(self) - before));
 }
 #endif
 
