@@ -606,7 +606,7 @@ static void protect_unmap_selftest(void)
 	kputhex64(*page);
 	kputs(*page == 0xcafe ? " still\r\n" : " CORRUPT\r\n");
 
-	size = pmap_unmap_page(PMAP_NULL, va);
+	size = pmap_unmap_page(PMAP_NULL, va, 0);
 	e = pmap_walk(root, va, 0);
 	kputs("UrMach x86-64: unmap -> ");
 	kputs(size == PAGE_SIZE_4K && e == PT_ENTRY_NULL

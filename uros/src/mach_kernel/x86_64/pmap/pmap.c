@@ -866,14 +866,31 @@ static void pmap_resident_drop(pmap_t pmap, uint64_t va)
  * The index is only told about pages it tracks: a large mapping is the
  * kernel's own — the direct map, the image — and belongs to no VM object, so
  * nothing will ever ask which pmaps hold it.
+ *
+ * 🔴 ONE WALK, AND THE FRAME COMES FROM THE ENTRY THAT WENT (#604).  This
+ * used to resolve the address first and remove it second: two walks, the
+ * first outside any read section -- in the lower half, where pmap_collect()
+ * frees tables -- and the frame it handed pv_remove() taken from a different
+ * instant than the entry the second one cleared.  The unmap now answers with
+ * the entry it removed, inside its own section.
  */
+#ifndef	ABLATE_604_FORGET_TWO_WALKS
+#define	ABLATE_604_FORGET_TWO_WALKS	0
+#endif
+
 static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 {
+	pt_entry_t removed = 0;
 	uint64_t pa = 0;
 	uint64_t size;
 
-	pmap_resolve(pmap->root_pa, va, &pa, 0);
-	size = pmap_unmap_page(pmap, va);
+	if (ABLATE_604_FORGET_TWO_WALKS) {
+		pmap_resolve(pmap->root_pa, va, &pa, 0);
+		size = pmap_unmap_page(pmap, va, 0);
+	} else {
+		size = pmap_unmap_page(pmap, va, &removed);
+		pa = pte_to_pa(removed);
+	}
 
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
@@ -1273,7 +1290,7 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 				      (unsigned long) hva,
 				      (unsigned long) pa);
 
-			size = pmap_unmap_page_noflush(hpmap, hva);
+			size = pmap_unmap_page_noflush(hpmap, hva, 0);
 
 			/*
 			 * ⚠️ THE ENTRY GOES WHATEVER THE UNMAP ANSWERED, and

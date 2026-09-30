@@ -354,25 +354,52 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
  *
  * Returns the size unmapped, which is what the caller has to flush.
  */
-uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va)
+uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
+				 pt_entry_t *removed)
 {
 	uint64_t size = 0;
 	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(map_root_of(pmap), va, &size);
+	pt_entry_t old;
 
 	if (entry == PT_ENTRY_NULL) {
 		pmap_read_leave(held);
 		return 0;
 	}
 
-	*entry = 0;
+	/*
+	 * 🔴 AN EXCHANGE, SO THAT ONE REMOVER WINS (#604).
+	 *
+	 * The walk said the entry was valid, and `*entry = 0' then cleared it
+	 * -- two steps, and two removers could both take the first before
+	 * either took the second.  pmap_forget() and the removal loop of
+	 * pmap_page_protect() reach the same entry from the two ends, the
+	 * address and the page, and #558's page lock excludes only the second:
+	 * pmap_forget() clears first and takes that lock afterwards, in
+	 * pv_remove().  Both would answer with a size and both would drop the
+	 * resident count: below the truth, or from one past zero into
+	 * pmap_resident_drop()'s panic.  Found by reading, not seen happen.
+	 *
+	 * The exchange answers what was in the word at the instant it went.
+	 * Whoever gets a valid entry back removed the mapping; whoever gets
+	 * zero lost the race and did nothing.  And what came back is the entry
+	 * itself: the frame the index must forget, and the hardware's
+	 * ACCESSED and DIRTY bits as of the removal (#606).
+	 */
+	old = atomic_swap64((volatile uint64_t *) entry, 0);
 	pmap_read_leave(held);
+
+	if (!pte_is_valid(old))
+		return 0;
+
+	if (removed != 0)
+		*removed = old;
 	return size;
 }
 
-uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va)
+uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va, pt_entry_t *removed)
 {
-	uint64_t size = pmap_unmap_page_noflush(pmap, va);
+	uint64_t size = pmap_unmap_page_noflush(pmap, va, removed);
 
 	if (size != 0)
 		tlb_flush_range(pmap, va, size);
