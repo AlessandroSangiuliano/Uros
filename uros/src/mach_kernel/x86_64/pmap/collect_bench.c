@@ -728,9 +728,10 @@ static void bench_compare_arms(void)
  * ── Two removers, one entry (#604) ─────────────────────────────────────
  *
  * pmap_forget() removes a mapping from its address and the removal loop of
- * pmap_page_protect() from its page, and #558's page lock excludes only the
- * second -- so both can be in pmap_unmap_page_noflush() for the same entry at
- * once.  The unmap walked to a valid entry and then stored zero, and both
+ * pmap_page_protect() from its page.  #558's page lock does not keep them
+ * apart -- the loop holds it while it clears, pmap_forget() takes it only
+ * afterwards -- so both can be in pmap_unmap_page_noflush() for the same entry
+ * at once.  The unmap walked to a valid entry and then stored zero, and both
  * could get past the walk before either stored: each would answer that it had
  * removed the mapping, and each would drop the resident count.
  *

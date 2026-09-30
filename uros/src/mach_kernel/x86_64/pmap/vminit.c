@@ -369,8 +369,8 @@ static void collect_flush(struct collect_batch *b)
 	 * that waits for a grace period today, so here is where the wait begins.
 	 *
 	 * IF is the whole question: the cross-calls are in the one class no spl
-	 * level blocks (cpu/spl.h, SPLHI).  And the first reason above is checked
-	 * with it.
+	 * level blocks (cpu/spl.h, SPLHI).  The second check is the first reason
+	 * above, made a check as well.
 	 */
 	if (!interrupts_enabled())
 		panic("pmap_collect: waiting for a grace period with interrupts off "

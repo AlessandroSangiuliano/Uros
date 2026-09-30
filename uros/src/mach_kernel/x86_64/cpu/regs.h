@@ -175,7 +175,8 @@ static inline void cpu_pause(void)
  * A count, not a time.  The architecture gives a pause no duration, and what it
  * lasts depends on the processor and on what runs it: on one machine a hundred
  * thousand took 26.8 million TSC ticks under KVM and 113.6 million under QEMU's
- * TCG, so the same budget lasts about 36 seconds there, or 152 (#604).  It
+ * TCG, so on that machine the budget lasts about 36 seconds under KVM and 152
+ * under TCG (#604).  It
  * bounds "never", not a delay.  Every loop that uses it leaves the moment its
  * answer arrives, and the count matters only when the answer is not coming.
  * The boot prints what it lasts where it runs (spin_budget_selftest() in

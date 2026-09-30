@@ -228,11 +228,12 @@ static inline pt_entry_t pte_split_leaf(pt_entry_t large, int from_1g,
  *
  * 🔴 AN ENTRY THAT IS GONE STAYS GONE (#604).  The callers walk to a valid
  * entry and then update it, and a removal on another processor can zero it in
- * between.  The retry then builds on zero, and `set' alone went into the word
- * -- an entry that is neither valid nor zero.  No walk sees it, since the
- * valid bit is clear, but pmap_collect() does: a table is empty only when every
- * word is zero (collect_table_empty() in vminit.c), so the table under that
- * entry was kept for ever.  A mapping that is gone has no bits left to change.
+ * between.  The retry then built on zero and wrote `set' alone into the word:
+ * an entry that is neither valid nor zero.  No walk sees it, since the valid
+ * bit is clear, but pmap_collect() would: a table is empty only when every
+ * word is zero (collect_table_empty() in vminit.c), so the table holding that
+ * entry would be kept for ever.  A mapping that is gone has no bits left to
+ * change.
  */
 #ifndef	ABLATE_604_UPDATE_GONE
 #define	ABLATE_604_UPDATE_GONE	0

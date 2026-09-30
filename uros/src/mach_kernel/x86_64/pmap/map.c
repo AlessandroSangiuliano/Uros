@@ -341,6 +341,15 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 }
 
 /*
+ * #604: the removal back to a read of the entry and a plain store of zero,
+ * which two removers can both get through.  The -M bench's two-remover arm
+ * is what notices.
+ */
+#ifndef	ABLATE_604_UNMAP_STORE
+#define	ABLATE_604_UNMAP_STORE	0
+#endif
+
+/*
  * Drop the mapping and leave the shootdown to the caller (#558).
  *
  * 🔴 THE PAIR TO pmap_protect_page_noflush() BELOW, AND FOR THE SAME REASON.
@@ -358,15 +367,6 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
  *
  * Returns the size unmapped, which is what the caller has to flush.
  */
-/*
- * #604: the removal back to a read of the entry and a plain store of zero,
- * which two removers can both get through.  The -M bench's two-remover arm
- * is what notices.
- */
-#ifndef	ABLATE_604_UNMAP_STORE
-#define	ABLATE_604_UNMAP_STORE	0
-#endif
-
 uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 				 pt_entry_t *removed)
 {
@@ -387,11 +387,13 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 	 * -- two steps, and two removers could both take the first before
 	 * either took the second.  pmap_forget() and the removal loop of
 	 * pmap_page_protect() reach the same entry from the two ends, the
-	 * address and the page, and #558's page lock excludes only the second:
-	 * pmap_forget() clears first and takes that lock afterwards, in
-	 * pv_remove().  Both would answer with a size and both would drop the
-	 * resident count: below the truth, or from one past zero into
-	 * pmap_resident_drop()'s panic.  Found by reading, not seen happen.
+	 * address and the page, and #558's page lock does not keep them apart:
+	 * the loop holds it while it clears, and pmap_forget() clears first and
+	 * takes it only afterwards, in pv_remove().  Both would answer with a
+	 * size and both would drop the resident count: below the truth, or from
+	 * one past zero into pmap_resident_drop()'s panic.  Found by reading;
+	 * then seen, by the -M bench's two-remover arm with the plain store put
+	 * back: both removed the entry in 12 rounds of 50 000.
 	 *
 	 * The exchange answers what was in the word at the instant it went.
 	 * Whoever gets a valid entry back removed the mapping; whoever gets
