@@ -146,8 +146,7 @@ static pt_entry_t *next_table(pt_entry_t *entry, uint64_t *spare, int *err)
 	 * it removes it rather than making it rarer.
 	 */
 	{
-		pt_entry_t fresh = frame | INTEL_PTE_VALID | INTEL_PTE_WRITE
-				 | INTEL_PTE_USER;
+		pt_entry_t fresh = frame | INTEL_PTE_INTERIOR;
 
 		if (atomic_cmpxchg64((volatile uint64_t *) entry, 0, fresh) != 0)
 			continue;	/* somebody else published; look again */
@@ -488,12 +487,18 @@ uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
 	return size;
 }
 
+/* #604: the split's interior entry, and what it was before (see pte.h). */
+#define SPLIT_INTERIOR	(ABLATE_604_SPLIT_DROPS				\
+			 ? (INTEL_PTE_VALID | INTEL_PTE_WRITE)		\
+			 : INTEL_PTE_INTERIOR)
+
 uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 {
 	uint64_t size = 0;
-	uint64_t base, perm, sub_size, table_pa;
+	uint64_t sub_size, table_pa;
 	pt_entry_t *entry;
 	pt_entry_t *sub;
+	pt_entry_t found;
 	boolean_t held;
 	int from_1g;
 
@@ -513,6 +518,13 @@ uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 	 * large page is rare -- and it is i386's pmap_expand() shape: allocate
 	 * outside, decide inside, give the page back if you lost the argument.
 	 */
+	/*
+	 * Zero is already this function's way of saying "there was nothing to
+	 * split", so it cannot also mean "there was, and I could not".  The
+	 * caller would read the second as the first and carry on believing the
+	 * range is now fine-grained when it is still one large page — which is
+	 * how a section ends up sharing its permissions with its neighbour.
+	 */
 	table_pa = pmap_table_frame();
 	if (table_pa == 0)
 		panic("pmap: no frame to split a large page into");
@@ -528,36 +540,45 @@ uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 
 	from_1g = (size == PAGE_SIZE_1G);
 	sub_size = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
-
-	/* The frame is aligned to the leaf's own size, so mask by that. */
-	base = *entry & (from_1g ? INTEL_PTE_PFN_1G : INTEL_PTE_PFN_2M);
-	perm = *entry & INTEL_PTE_PERM;
+	sub = table_at(table_pa);
 
 	/*
-	 * Zero is already this function's way of saying "there was nothing to
-	 * split", so it cannot also mean "there was, and I could not".  The
-	 * caller would read the second as the first and carry on believing the
-	 * range is now fine-grained when it is still one large page — which is
-	 * how a section ends up sharing its permissions with its neighbour.
+	 * 🔴 ONE READ OF THE LEAF, AND THE TABLE PUBLISHED ONLY OVER THAT VALUE
+	 * (#604).  The leaf was read twice, for its frame and for its
+	 * permissions, and then overwritten with a plain store: a
+	 * read-modify-write of a word the processor sets ACCESSED and DIRTY in
+	 * without notice.  Now the new leaves are built from one value
+	 * (pte_split_leaf(), which carries every bit but the frame), and the
+	 * exchange publishes them only if the word still holds that value.  If
+	 * it does not, they are built again from what it holds.
+	 *
+	 * The interior entry is INTEL_PTE_INTERIOR, the one next_table()
+	 * writes.  This one said it "carries no policy of its own" and left
+	 * USER out -- and a clear U/S on the path is a policy: nothing below it
+	 * is reachable from ring 3.  Only kernel pages are split today, and
+	 * their leaves are supervisor-only anyway, so the access rights come
+	 * out the same either way.  pte_split_leaf() says why they have to.
 	 */
-	sub = table_at(table_pa);
-	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
-		pt_entry_t leaf = (base + (uint64_t)i * sub_size)
-				| INTEL_PTE_VALID | perm;
+	found = *entry;
+	for (;;) {
+		pt_entry_t seen;
 
-		/*
-		 * The 2 MiB sub-pages of a split gigabyte are still leaves —
-		 * at the PD, where PS marks a leaf.  The 4 KiB sub-pages of a
-		 * split 2 MiB page are PT entries, where PS is not defined.
-		 */
-		if (from_1g)
-			leaf |= INTEL_PTE_PS;
+		for (unsigned i = 0; i < PTES_PER_TABLE; i++)
+			sub[i] = pte_split_leaf(found, from_1g, i);
 
-		sub[i] = leaf;
+		seen = atomic_cmpxchg64((volatile uint64_t *) entry, found,
+					table_pa | SPLIT_INTERIOR);
+		if (seen == found)
+			break;
+
+		/* Removed, or split by somebody else: nothing left to split. */
+		if (!pte_is_valid(seen) || !pte_is_leaf(seen)) {
+			pmap_read_leave(held);
+			pmap_table_frame_free(table_pa);
+			return 0;
+		}
+		found = seen;
 	}
-
-	/* The interior entry replacing the leaf carries no policy of its own. */
-	*entry = table_pa | INTEL_PTE_VALID | INTEL_PTE_WRITE;
 
 	/*
 	 * One TLB entry covered the whole large page, and naming one sub-page
