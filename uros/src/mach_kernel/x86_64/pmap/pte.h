@@ -140,4 +140,40 @@ typedef uint64_t	pt_entry_t;
  */
 #define pte_is_leaf(pte)	(((pte) & INTEL_PTE_PS) != 0)
 
+#include <sync/atomic.h>
+
+/*
+ * Set and clear bits in a live entry without losing what the hardware or
+ * another processor put there in between (#455).
+ *
+ * Here and not in pmap.c because the reason belongs to the entry, not to any
+ * one file: the processor sets ACCESSED and DIRTY in this word without notice,
+ * so every read-modify-write of a live entry has to be this loop.  vminit.c
+ * wrote `*entry |= INTEL_PTE_MOD' instead, where this was out of reach (#604).
+ *
+ * ⚠️ The retry reloads from cmpxchg's answer and never re-reads *entry:  what
+ * it hands back is what the word held at the instant it refused, and building
+ * the next attempt out of anything else is building it out of a value that was
+ * never in the word.
+ */
+static inline void pmap_pte_update(pt_entry_t *entry, uint64_t set,
+				   uint64_t clear)
+{
+	pt_entry_t found = *entry;
+
+	for (;;) {
+		pt_entry_t fresh = (found & ~clear) | set;
+		pt_entry_t seen;
+
+		if (fresh == found)
+			return;
+
+		seen = atomic_cmpxchg64((volatile uint64_t *) entry,
+					found, fresh);
+		if (seen == found)
+			return;
+		found = seen;
+	}
+}
+
 #endif	/* _X86_64_PTE_H_ */

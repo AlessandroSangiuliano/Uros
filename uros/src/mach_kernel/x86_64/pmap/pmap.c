@@ -966,34 +966,6 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	return rc;
 }
 
-/*
- * Set and clear bits in a page-table entry without losing what the hardware
- * or another processor put there in between (#455).
- *
- * ⚠️ The retry reloads from cmpxchg's answer and never re-reads *entry:  what
- * it hands back is what the word held at the instant it refused, and building
- * the next attempt out of anything else is building it out of a value that was
- * never in the word.
- */
-static void pmap_pte_update(pt_entry_t *entry, uint64_t set, uint64_t clear)
-{
-	pt_entry_t found = *entry;
-
-	for (;;) {
-		pt_entry_t fresh = (found & ~clear) | set;
-		pt_entry_t seen;
-
-		if (fresh == found)
-			return;
-
-		seen = atomic_cmpxchg64((volatile uint64_t *) entry,
-					found, fresh);
-		if (seen == found)
-			return;
-		found = seen;
-	}
-}
-
 int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
 {
 	boolean_t held = pmap_read_enter();
