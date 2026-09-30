@@ -155,7 +155,19 @@ typedef uint64_t	pt_entry_t;
  * it hands back is what the word held at the instant it refused, and building
  * the next attempt out of anything else is building it out of a value that was
  * never in the word.
+ *
+ * 🔴 AN ENTRY THAT IS GONE STAYS GONE (#604).  The callers walk to a valid
+ * entry and then update it, and a removal on another processor can zero it in
+ * between.  The retry then builds on zero, and `set' alone went into the word
+ * -- an entry that is neither valid nor zero.  No walk sees it, since the
+ * valid bit is clear, but pmap_collect() does: a table is empty only when every
+ * word is zero (collect_table_empty() in vminit.c), so the table under that
+ * entry was kept for ever.  A mapping that is gone has no bits left to change.
  */
+#ifndef	ABLATE_604_UPDATE_GONE
+#define	ABLATE_604_UPDATE_GONE	0
+#endif
+
 static inline void pmap_pte_update(pt_entry_t *entry, uint64_t set,
 				   uint64_t clear)
 {
@@ -165,6 +177,8 @@ static inline void pmap_pte_update(pt_entry_t *entry, uint64_t set,
 		pt_entry_t fresh = (found & ~clear) | set;
 		pt_entry_t seen;
 
+		if (!ABLATE_604_UPDATE_GONE && !pte_is_valid(found))
+			return;
 		if (fresh == found)
 			return;
 

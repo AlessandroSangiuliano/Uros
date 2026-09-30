@@ -170,6 +170,32 @@ static void pte_selftest(void)
 }
 
 /*
+ * pmap_pte_update() on the two words that matter (#604): a live entry gets the
+ * bit, and an entry that is gone stays zero.  The second is the state a
+ * removal on another processor leaves between a walk and the update; a word
+ * that came back non-zero would keep the table under it from ever being
+ * collected.
+ */
+static void pte_update_selftest(void)
+{
+	pt_entry_t live = INTEL_PTE_VALID | INTEL_PTE_WRITE;
+	pt_entry_t gone = 0;
+
+	pmap_pte_update(&live, INTEL_PTE_MOD, 0);
+	pmap_pte_update(&gone, INTEL_PTE_MOD, 0);
+
+	kputs("UrMach x86-64: pte update: a live entry reads ");
+	kputhex64(live);
+	kputs(", a gone one ");
+	kputhex64(gone);
+	kputs(live == (INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_MOD)
+	      && gone == 0
+	      ? " -- the gone entry stayed zero\r\n"
+	      : " -- WRONG, a gone entry must stay zero or its table is "
+		"never collected\r\n");
+}
+
+/*
  * layout.h pins its constants with _Static_assert at build time, so the
  * only thing left to establish here is the live fact: that the address we
  * are actually executing from falls inside the region the layout calls the
@@ -7025,6 +7051,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
 
 	pte_selftest();
+	pte_update_selftest();
 	layout_selftest();
 	phys_selftest();
 	cpu_selftest();
