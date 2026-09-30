@@ -57,6 +57,20 @@ static int			legacy_capable;
 static unsigned			comparators;
 static uint16_t			vendor;
 static int			started_here;
+static int			taken;
+static int			legacy_found_on;
+static uint32_t			comparators_found_on;
+
+/*
+ * #593: the block as a firmware that drove its own tick with it would leave
+ * it -- LegacyReplacement on, and the last comparator interrupting -- for
+ * take_block() to find, silence and report.  QEMU's firmware leaves neither,
+ * so without this no boot would ever print those two findings, and a report
+ * that no boot prints is not known to work.
+ */
+#ifndef	ABLATE_593_FIRMWARE_LEFT
+#define	ABLATE_593_FIRMWARE_LEFT	0
+#endif
 
 /*
  * Every access is 32 bits wide and at an offset the specification allows
@@ -73,6 +87,60 @@ static uint32_t rd32(unsigned off)
 static void wr32(unsigned off, uint32_t v)
 {
 	*(volatile uint32_t *)(regs + off) = v;
+}
+
+static void comparator_config(unsigned n, uint32_t set);
+
+/*
+ * 🔴 THE BLOCK IS TAKEN AT THE FIRST LOOK, WHOEVER DRIVES IT LATER (#593).
+ *
+ * The firmware may have used the block for a tick of its own, and nothing
+ * obliges it to stop.  Left as found:
+ *
+ *   - a comparator still interrupting sends its FSB message, or pulses its
+ *     input, on a vector nobody here chose -- and an FSB message goes
+ *     straight to a local APIC, where no I/O APIC mask stops it.  The boot
+ *     that never puts its tick on the HPET is the one that would take it,
+ *     so this cannot wait for the HPET's backend to start.
+ *
+ *   - LegacyReplacement left on makes the routing of timers 0 and 1 "have no
+ *     impact" (2.3.5), FSB included: the backend's message from comparator 0
+ *     would never be sent, and every processor's clock would stop.  On
+ *     hardware only -- QEMU sends it anyway, so no boot here would show it.
+ *     And the 8254 and the RTC stay silent, which device_md_irq_register()
+ *     would blame on this kernel's clock.
+ *
+ * So every comparator is silenced first, before the switch below could send
+ * timer 0 or 1 to an input of its own, and then LegacyReplacement goes off.
+ * Linux does the same in hpet_enable(), FreeBSD in its attach.  Once only,
+ * because a second look after the backend has started would silence the
+ * backend; and what was found is only ever added to, for rulers_selftest()
+ * to say whichever look came first.
+ */
+static void take_block(void)
+{
+	uint32_t	conf;
+	unsigned	n;
+
+#if ABLATE_593_FIRMWARE_LEFT
+	if (legacy_capable)
+		wr32(HPET_GEN_CONF, rd32(HPET_GEN_CONF) | GEN_CONF_LEG_RT);
+	wr32(HPET_TN_CONF(comparators - 1),
+	     (rd32(HPET_TN_CONF(comparators - 1)) & TN_WRITABLE) | TN_INT_ENB);
+#endif
+
+	for (n = 0; n < comparators; n++) {
+		if (rd32(HPET_TN_CONF(n)) & TN_INT_ENB)
+			comparators_found_on |= 1U << n;
+		comparator_config(n, 0);
+	}
+
+	conf = rd32(HPET_GEN_CONF);
+	if (conf & GEN_CONF_LEG_RT) {
+		legacy_found_on = 1;
+		wr32(HPET_GEN_CONF, conf & ~GEN_CONF_LEG_RT);
+	}
+	taken = 1;
 }
 
 int hpet_init(void)
@@ -104,13 +172,17 @@ int hpet_init(void)
 	if (period_fs == 0 || period_fs > GCAP_PERIOD_MAX)
 		return 0;
 
+	if (!taken)
+		take_block();
+
 	/*
 	 * Start the counter if it is halted: read-modify-write, because every
-	 * other bit of this register is either reserved or the legacy routing
-	 * choice, and neither is this code's to change (2.3.5).
+	 * other bit of this register is reserved (2.3.5) but LegacyReplacement,
+	 * which take_block() has decided and which is the clock-event backend's
+	 * from then on.  Only ever set, like take_block()'s findings: rulers_find()
+	 * looks twice, and the second look finds the counter running.
 	 */
 	conf = rd32(HPET_GEN_CONF);
-	started_here = 0;
 	if ((conf & GEN_CONF_ENABLE) == 0) {
 		wr32(HPET_GEN_CONF, conf | GEN_CONF_ENABLE);
 		started_here = 1;
@@ -158,6 +230,16 @@ uint16_t hpet_vendor(void)
 int hpet_started_here(void)
 {
 	return started_here;
+}
+
+int hpet_legacy_found_on(void)
+{
+	return legacy_found_on;
+}
+
+uint32_t hpet_comparators_found_on(void)
+{
+	return comparators_found_on;
 }
 
 /*

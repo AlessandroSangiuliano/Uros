@@ -3266,8 +3266,15 @@ static void rulers_selftest(void)
 	kputdec(hpet_comparators());
 	kputs(" comparators, vendor ");
 	kputhex64(hpet_vendor());
-	kputs(hpet_started_here() ? ", started here\r\n"
-				  : ", already running\r\n");
+	kputs(hpet_started_here() ? ", started here" : ", already running");
+	if (hpet_legacy_found_on())
+		kputs("; LegacyReplacement was left on: switched off (#593)");
+	if (hpet_comparators_found_on() != 0) {
+		kputs("; comparators ");
+		kputhex64(hpet_comparators_found_on());
+		kputs(" (one bit each) were left interrupting: silenced (#593)");
+	}
+	kputs("\r\n");
 	read_costs();
 }
 

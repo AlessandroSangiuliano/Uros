@@ -462,7 +462,6 @@ static void hpet_ev_intr(struct trap_frame *frame)
 static void hpet_ev_start(uint8_t vector)
 {
 	uint32_t	cap0;
-	unsigned	n;
 
 	if (started)
 		return;
@@ -481,15 +480,11 @@ static void hpet_ev_start(uint8_t vector)
 	trap_set_handler(HPET_EVENT_VECTOR, hpet_ev_intr);
 
 	/*
-	 * Every other comparator silenced.  The block is the kernel's from
-	 * here, and the firmware may have left one interrupting: an FSB
-	 * message aimed at a vector nobody chose, or an input nobody routed.
-	 * Linux does the same in hpet_enable(), for every channel.
+	 * Every other comparator is silent, and LegacyReplacement off unless
+	 * the branch below turns it on: the block was taken from the firmware
+	 * at the first look (hpet.c, take_block()), not here -- a boot whose
+	 * tick never comes here needs it as much.
 	 */
-	for (n = 0; n < hpet_comparators(); n++)
-		if (n != comparator)
-			hpet_comparator_off(n);
-
 	if (route == ROUTE_FSB) {
 		/*
 		 * The compatibility-format message, as <device/device_machdep>

@@ -6,9 +6,11 @@
  *
  * The timer block's counter counts up at a period its own capability register
  * states in femtoseconds (IA-PC HPET 1.0a, 2.3.4), so, like the PM timer, it
- * is a ruler that needs no ruler.  This file reads it, and the only thing it
- * ever writes is the overall enable bit, when the firmware left the counter
- * halted: the specification's initial state is "halted and zeroed" (3.1).
+ * is a ruler that needs no ruler.  This file reads it, and writes the overall
+ * enable bit when the firmware left the counter halted: the specification's
+ * initial state is "halted and zeroed" (3.1).  And once, at the first look,
+ * it takes the block from the firmware: every comparator silenced and
+ * LegacyReplacement off, whatever was left interrupting (#593, take_block()).
  *
  * The comparators below are #593's, and only time/hpet_event.c drives them:
  * the clock-event backend for when the local APIC's timer cannot be used.
@@ -21,8 +23,8 @@
 
 /*
  * Find the block through the ACPI table, map it, check what its capability
- * register says, and start the counter if nobody has.  Returns 1 if there is
- * a usable counter.
+ * register says, take it from the firmware the first time, and start the
+ * counter if nobody has.  Returns 1 if there is a usable counter.
  */
 int hpet_init(void);
 
@@ -34,6 +36,8 @@ int hpet_counter_64(void);		/* COUNT_SIZE_CAP */
 unsigned hpet_comparators(void);	/* NUM_TIM_CAP + 1 */
 uint16_t hpet_vendor(void);
 int hpet_started_here(void);		/* the counter was halted and this started it */
+int hpet_legacy_found_on(void);		/* LegacyReplacement was left on (#593) */
+uint32_t hpet_comparators_found_on(void); /* left interrupting, a bit each */
 
 /* The counter.  A 32-bit counter reads as its low half, zero-extended. */
 uint64_t hpet_read(void);
@@ -53,7 +57,11 @@ uint32_t hpet_read32(void);
 /* LEG_RT_CAP: timer 0 can take the 8254's line and timer 1 the RTC's. */
 int hpet_legacy_capable(void);
 
-/* Whether this kernel has switched LegacyReplacement on (2.3.5). */
+/*
+ * Whether this kernel has switched LegacyReplacement on (2.3.5) -- this
+ * kernel's alone, because one the firmware left on is switched off when the
+ * block is taken.
+ */
 int hpet_legacy_routed(void);
 
 struct hpet_comparator_caps {
