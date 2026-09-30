@@ -339,11 +339,18 @@ static boolean_t collect_unlink(pt_entry_t *parent, uint64_t table_pa)
 /*
  * Steps 2 through 7 for everything marked so far.
  *
- * ⚠️ Runs OUTSIDE any read section, and every one of the three reasons is
- * fatal on its own: urmach_synchronize_rcu() would wait for this processor to
- * report a quiescent state it cannot report while holding one; tlb_flush_all()
- * waits for processors that may themselves be inside synchronize; and
- * pmap_table_frame_free() takes mutexes and may block.
+ * ⚠️ Runs OUTSIDE any read section, for two reasons, each fatal on its own.
+ * urmach_synchronize_rcu() skips the processor that calls it, so a grace
+ * period waited for inside a section would not cover that section -- and two
+ * collectors doing it at once would each wait for the other to leave a section
+ * neither can leave while it waits.  And pmap_table_frame_free() takes mutexes
+ * and may block.
+ *
+ * The shootdown in step 5 is NOT a third reason, though this comment used to
+ * say it was (#604): it waits for every processor to answer, and a processor
+ * spinning in urmach_synchronize_rcu() answers, because it spins with
+ * interrupts on.  #558's loops in pmap.c shoot down from inside a read section
+ * on exactly that.
  */
 static void collect_flush(struct collect_batch *b)
 {
@@ -351,6 +358,27 @@ static void collect_flush(struct collect_batch *b)
 
 	if (b->count == 0)
 		return;
+
+	/*
+	 * 🔴 CHECKED, NOT ASKED FOR (#604).  Every shootdown this pmap sends from
+	 * inside a read section -- pmap_page_protect() and pv_change_bits() since
+	 * #558, pmap_split_page() -- is safe only because the processors it
+	 * waits for can take the interrupt.  One that is waiting for a grace
+	 * period can, because it spins with interrupts on: kern/rcu.h asks for
+	 * that and nothing made it true.  This is the only place in the kernel
+	 * that waits for a grace period today, so here is where the wait begins.
+	 *
+	 * IF is the whole question: the cross-calls are in the one class no spl
+	 * level blocks (cpu/spl.h, SPLHI).  And the first reason above is checked
+	 * with it.
+	 */
+	if (!interrupts_enabled())
+		panic("pmap_collect: waiting for a grace period with interrupts off "
+		      "would never answer a shootdown sent from a read section "
+		      "(#604)");
+	if (urmach_rcu_read_held())
+		panic("pmap_collect: waiting for a grace period inside a read "
+		      "section (#604)");
 
 	/*
 	 * In the lock arm the tables are already unlinked: they were scanned

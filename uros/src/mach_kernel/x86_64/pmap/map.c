@@ -318,10 +318,15 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 	 * and it covers implementations that cache the absence of a mapping as
 	 * well as its presence.
 	 *
-	 * ⚠️ After the section, not inside it.  tlb_flush_range() waits for every
-	 * other processor to answer, and one of those may be spinning in
-	 * urmach_synchronize_rcu() waiting for this processor to leave the very
-	 * section we would be holding.
+	 * After the section, because nothing here needs it inside: the caller
+	 * owns this pmap, so the shootdown's read of `cpus_using' needs no grace
+	 * period to keep the struct alive.  Inside would not deadlock -- this
+	 * comment used to say it would (#604).  A processor waiting for a grace
+	 * period spins with interrupts on and answers the cross-call, which is
+	 * what #558's loops in pmap.c rely on when they shoot down from inside
+	 * one; collect_flush() in vminit.c checks it.  Holding the section
+	 * across the wait for the answers would only make every grace period
+	 * wait that much longer.
 	 */
 	if (rc == PMAP_MAP_OK) {
 		invlpg(va);
