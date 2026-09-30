@@ -320,6 +320,9 @@ option(UROS_ABLATE_593_FROM_NOW "Build the #593 ablation: the APIC timer's deadl
 # leave it -- LegacyReplacement on, the last comparator interrupting -- so that
 # the boot line saying what was found and silenced is printed at all.
 option(UROS_ABLATE_593_FIRMWARE_LEFT "Build the #593 ablation: the firmware left the HPET's LegacyReplacement on and a comparator interrupting" OFF)
+# #593: the last processor to leave the HPET's broadcast leaves the comparator
+# interrupting, so that the line read back after the move says WRONG.
+option(UROS_ABLATE_593_LEFT_ON "Build the #593 ablation: the HPET's comparator is left interrupting when the tick leaves it" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -641,6 +644,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_593_FIRMWARE_LEFT)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_FIRMWARE_LEFT=1)
       message(STATUS "#593 ablation: the firmware left the HPET's LegacyReplacement on and a comparator interrupting (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_LEFT_ON)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_LEFT_ON=1)
+      message(STATUS "#593 ablation: the HPET's comparator is left interrupting when the tick leaves it (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

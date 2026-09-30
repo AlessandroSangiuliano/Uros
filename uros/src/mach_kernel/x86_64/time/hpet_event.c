@@ -56,6 +56,15 @@ _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
 #define	ABLATE_593_LINE_TAKEN	0
 #endif
 
+/*
+ * #593: the last processor to leave the broadcast leaves the comparator
+ * interrupting, as before the tick could leave the HPET at all -- for the line
+ * that reads it back after the move to say so.
+ */
+#ifndef	ABLATE_593_LEFT_ON
+#define	ABLATE_593_LEFT_ON	0
+#endif
+
 #define	NS_PER_SEC		1000000000ULL
 #define	FS_PER_NS		1000000ULL
 #define	BIT(c)			(1ULL << (c))
@@ -114,6 +123,7 @@ static uint64_t		woken;		/* sent their tick, not re-armed yet */
 static uint32_t		woken_for[NCPUS];
 static uint32_t		interval[NCPUS];	/* each one's last request */
 static int		programmed;
+static int		silenced;	/* nobody left on it: see hpet_ev_stop() */
 static uint32_t		programmed_at;
 #if ABLATE_593_BEHIND
 static unsigned		behind_writes;
@@ -389,6 +399,27 @@ static void window_account(uint32_t now)
 
 /* ------------------------------------------------------------ backend -- */
 
+/*
+ * The chosen comparator configured for the chosen route and interrupting:
+ * when the backend starts, and again when a processor arms it after the last
+ * one had left (hpet_ev_stop()).  ev_lock held, or not shared yet.
+ *
+ * The FSB message is in the compatibility format, as <device/device_machdep>
+ * composes one for MSI-X: 0xFEE00000 with the destination APIC id at bit 12,
+ * physical, no redirection; the vector as the data, fixed delivery, edge.  No
+ * interrupt remapping is on in this kernel, on either vendor, so nothing
+ * translates it.
+ */
+static void comparator_route(void)
+{
+	if (route == ROUTE_FSB)
+		hpet_comparator_fsb(comparator,
+				    0xFEE00000U | (broadcaster << 12),
+				    HPET_EVENT_VECTOR);
+	else
+		(void)hpet_comparator_legacy(comparator);
+}
+
 static int hpet_ev_probe(void)
 {
 	unsigned	n;
@@ -485,20 +516,9 @@ static void hpet_ev_start(uint8_t vector)
 	 * at the first look (hpet.c, take_block()), not here -- a boot whose
 	 * tick never comes here needs it as much.
 	 */
-	if (route == ROUTE_FSB) {
-		/*
-		 * The compatibility-format message, as <device/device_machdep>
-		 * composes one for MSI-X: 0xFEE00000 with the destination APIC
-		 * id at bit 12, physical, no redirection; the vector as the
-		 * data, fixed delivery, edge.  No interrupt remapping is on in
-		 * this kernel, on either vendor, so nothing translates it.
-		 */
-		hpet_comparator_fsb(comparator,
-				    0xFEE00000U | (broadcaster << 12),
-				    HPET_EVENT_VECTOR);
-	} else {
+	comparator_route();
+	if (route != ROUTE_FSB) {
 		route_gsi = acpi_irq_to_gsi(0);
-		(void)hpet_comparator_legacy(comparator);
 		ioapic_route(route_gsi, HPET_EVENT_VECTOR, broadcaster,
 			     acpi_irq_flags(0));
 	}
@@ -650,6 +670,11 @@ static int hpet_ev_arm(uint64_t ns)
 		}
 	}
 
+	if (silenced) {
+		comparator_route();
+		silenced = 0;
+	}
+
 	due[self] = base + counts;
 	if (fresh)
 		due[self] = join_locked(self, now, due[self], counts);
@@ -677,13 +702,51 @@ static void hpet_ev_stop(void)
 	 * programmed for this processor alone, it fires once for nobody and
 	 * the handler programmes the next.  Cheaper than a rescan here, and
 	 * counted as a fire with nothing due.
+	 *
+	 * 🔴 BUT THE LAST ONE OUT SILENCES IT.  With nobody left -- the tick
+	 * has left the HPET (clock_event_leave()), or the burn-in is over --
+	 * a comparator left interrupting is not one fire for nobody: in 32-bit
+	 * one-shot mode the counter matches it again at every wrap, and the
+	 * wrap itself interrupts (2.3.9.2.1), so on hardware it would take the
+	 * boot processor every 43 s for good -- from a block the watchdog may
+	 * just have named broken.  QEMU re-arms a one-shot only when it is
+	 * written, so no boot here would have shown it.  The next arm, if the
+	 * tick ever comes back, routes it again.
 	 */
 	percpu_intr_disable();
 	hw_lock_lock(&ev_lock);
 	armed &= ~BIT(self);
 	woken &= ~BIT(self);
+	if (!ABLATE_593_LEFT_ON && (armed | woken) == 0 && !silenced) {
+		hpet_comparator_off(comparator);
+		programmed = 0;
+		silenced = 1;
+	}
 	hw_lock_unlock(&ev_lock);
 	percpu_intr_enable();
+}
+
+/*
+ * After every processor has left: what the block was left doing, read back
+ * from it rather than assumed.  Thread context.
+ */
+void hpet_event_left_report(void)
+{
+	struct line	l;
+
+	line_start(&l);
+	put_s(&l, "clock_event: hpet: no processor is left on the broadcast, "
+		  "and comparator ");
+	put_u(&l, comparator);
+	if (hpet_comparator_interrupting(comparator))
+		put_s(&l, " -- WRONG: is still interrupting, read back");
+	else
+		put_s(&l, " is silenced, read back");
+	if (route == ROUTE_LEGACY)
+		put_s(&l, "; LegacyReplacement stays on, so the 8254 and the "
+			  "RTC stay silent and ISA 0 and 8 stay refused");
+	put_s(&l, " (#593)");
+	printf("%s\n", l.b);
 }
 
 const struct clock_event_ops hpet_event_ops = {

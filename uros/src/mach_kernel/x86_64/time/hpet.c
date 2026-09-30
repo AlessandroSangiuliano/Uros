@@ -339,6 +339,11 @@ void hpet_comparator_off(unsigned n)
 	comparator_config(n, 0);
 }
 
+int hpet_comparator_interrupting(unsigned n)
+{
+	return (rd32(HPET_TN_CONF(n)) & TN_INT_ENB) != 0;
+}
+
 void hpet_comparator_fsb(unsigned n, uint32_t addr, uint32_t data)
 {
 	comparator_config(n, 0);

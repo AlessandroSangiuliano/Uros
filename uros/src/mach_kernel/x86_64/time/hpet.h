@@ -82,8 +82,9 @@ void hpet_comparator_caps(unsigned n, struct hpet_comparator_caps *out);
 void hpet_comparator_fsb(unsigned n, uint32_t addr, uint32_t data);
 int hpet_comparator_legacy(unsigned n);
 
-/* Stop comparator n from interrupting. */
+/* Stop comparator n from interrupting; and whether it does, read back. */
 void hpet_comparator_off(unsigned n);
+int hpet_comparator_interrupting(unsigned n);
 
 /* The match value, against the counter's low 32 bits. */
 void hpet_comparator_set(unsigned n, uint32_t value);

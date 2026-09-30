@@ -86,6 +86,7 @@
 #include <kern/misc_protos.h>
 
 #include <time/clock_event.h>
+#include <time/hpet_event.h>	/* #593: what the block was left doing */
 #include <time/ruler.h>
 #include <time/rulers.h>
 #include <time/tsc.h>
@@ -741,6 +742,7 @@ void tsc_watch(void)
 					printf("UrMach x86-64: the tick left the "
 					       "HPET for %s (#593)\n",
 					       clock_event_name());
+					hpet_event_left_report();
 					tick_after_move("HPET");
 				} else if (hpet_tick == CLOCK_EVENT_NOWHERE_TO_GO)
 					printf("UrMach x86-64: the tick STAYS on "

@@ -353,9 +353,9 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	 * never interrupts.
 	 */
 	if ((irq == 0 || irq == 8) && hpet_legacy_routed()) {
-		printf("device_md_irq_register: REFUSED -- ISA line %u was "
-		       "taken by the HPET's LegacyReplacement for the "
-		       "kernel's clock (#593)\n", irq);
+		printf("device_md_irq_register: REFUSED -- ISA line %u is "
+		       "the HPET's: this kernel switched LegacyReplacement "
+		       "on for its clock, and it stays on (#593)\n", irq);
 		return 0;
 	}
 

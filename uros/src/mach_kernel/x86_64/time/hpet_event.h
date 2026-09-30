@@ -65,4 +65,10 @@ extern const struct clock_event_ops hpet_event_ops;
  */
 void hpet_event_drain_report(void);
 
+/*
+ * Once the tick has left the HPET: whether the comparator is silent, read
+ * back from the block, and what LegacyReplacement keeps.  Thread context.
+ */
+void hpet_event_left_report(void);
+
 #endif	/* _X86_64_TIME_HPET_EVENT_H_ */
