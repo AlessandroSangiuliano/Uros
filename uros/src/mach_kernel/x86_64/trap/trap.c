@@ -45,6 +45,13 @@
 #ifndef ABLATE_467_ARM3
 #define ABLATE_467_ARM3	0	/* a ring-0 fault on a user address         */
 #endif
+/*
+ * #603: a return to ring 3 takes ASTs once, as it did before, instead of until
+ * none is pending.
+ */
+#ifndef ABLATE_603_ONE_PASS
+#define ABLATE_603_ONE_PASS	0
+#endif
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -1062,6 +1069,8 @@ void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
  */
 #define	AST_KERNEL_SAFE		AST_PREEMPT
 
+void thread_return_ast(void);		/* below: the loop both share */
+
 static void
 trap_take_ast(struct trap_frame *frame)
 {
@@ -1152,9 +1161,32 @@ trap_take_ast(struct trap_frame *frame)
 	 * takes it.  One tick of latency on a preemption that arrived inside a
 	 * critical section, against a section broken open.
 	 */
-	if ((frame->cs & 3) == USER_RPL)
+	if ((frame->cs & 3) == USER_RPL) {
+		/*
+		 * 🔴 UNTIL NONE IS PENDING, NOT ONCE (#603).
+		 *
+		 * ast_taken() takes what is pending when it looks, and after the
+		 * return handlers it leaves with "auto-retry will catch anything
+		 * new": it is written to be called in a loop.  i386's
+		 * return_from_trap jumps back into its own check, and
+		 * thread_return_ast() below loops, for the reason it gives.  This
+		 * took one pass -- and a thread preempted here blocks inside
+		 * ast_taken(), whose SAFE_EXCEPTION_RETURN is a sentinel and not
+		 * a continuation, so it resumes right here.  An AST_APC raised
+		 * while it was off the processor was set on its processor at
+		 * dispatch and never looked at: act_test's arm eight, at one
+		 * processor, counted a spinner asked to stop running up to 1.9
+		 * million turns inside thread_suspend().
+		 *
+		 * So a return to ring 3 is the same loop as the other four ways
+		 * back to ring 3, by being the same function.
+		 */
+		if (!ABLATE_603_ONE_PASS) {
+			thread_return_ast();
+			return;
+		}
 		take = AST_ALL;
-	else {
+	} else {
 		if (get_preemption_level() != 0)
 			return;
 		if (splget() != SPL0)
