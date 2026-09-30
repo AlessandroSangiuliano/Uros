@@ -655,9 +655,17 @@ pmap_modify_pages(pmap_t pmap, vm_offset_t s, vm_offset_t e)
 	 */
 	for (va = x86_64_trunc_page(s); va < x86_64_round_page(e);
 	     va += X86_64_PGBYTES) {
+		boolean_t	 held = pmap_read_enter_for(va);
 		pt_entry_t	*entry = pmap_walk(pmap->root_pa, va, 0);
 
-		if (entry != PT_ENTRY_NULL && pte_is_valid(*entry))
-			*entry |= INTEL_PTE_MOD;
+		/*
+		 * Through pmap_pte_update() and not `|=' (#604): the processor
+		 * sets ACCESSED in this word without asking, and a plain
+		 * read-modify-write throws away one it set in between.
+		 */
+		if (entry != PT_ENTRY_NULL)
+			pmap_pte_update(entry, INTEL_PTE_MOD, 0);
+
+		pmap_read_leave(held);
 	}
 }
