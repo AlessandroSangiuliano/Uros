@@ -53,6 +53,7 @@
 #include <vm/pmap.h>			/* pmap_collect (#455) */
 #include <vm/vm_page.h>			/* vm_page_free_count (#455) */
 
+#include <cpu/percpu.h>			/* percpu_intr_disable (#604) */
 #include <pmap/pmap.h>
 #include <pmap/map.h>
 #include <pmap/layout.h>
@@ -349,6 +350,10 @@ static pt_entry_t *bench_pd_entry(pmap_t p, uint64_t va)
 	return &table[pd_index(va)];
 }
 
+#ifndef	ABLATE_604_COLLECT_MASKED
+#define	ABLATE_604_COLLECT_MASKED	0
+#endif
+
 /* Collect until a call gives nothing back.  Answers how many tables went. */
 static unsigned bench_collect_all(pmap_t p, int *rounds_out)
 {
@@ -362,7 +367,17 @@ static unsigned bench_collect_all(pmap_t p, int *rounds_out)
 	for (rounds = 0; rounds < 64; rounds++) {
 		unsigned before = pmap_table_frames_live;
 
-		pmap_collect(p);
+		/*
+		 * #604: once with interrupts off, which collect_flush() must
+		 * refuse -- a waiter that cannot answer a cross-call.  The
+		 * boot is expected to stop here.
+		 */
+		if (ABLATE_604_COLLECT_MASKED) {
+			percpu_intr_disable();
+			pmap_collect(p);
+			percpu_intr_enable();
+		} else
+			pmap_collect(p);
 		if (pmap_table_frames_live == before)
 			break;
 	}

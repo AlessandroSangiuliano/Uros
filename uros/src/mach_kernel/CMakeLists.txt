@@ -347,6 +347,7 @@ option(UROS_ABLATE_604_UPDATE_GONE "Build the #604 ablation: pmap_pte_update() w
 option(UROS_ABLATE_604_FORGET_TWO_WALKS "Build the #604 ablation: pmap_forget() resolves outside a read section, then removes in a second walk" OFF)
 option(UROS_ABLATE_604_UNMAP_STORE "Build the #604 ablation: the unmap reads the entry and stores zero, and two removers can both get through" OFF)
 option(UROS_ABLATE_604_SPLIT_DROPS "Build the #604 ablation: a split keeps only the permission bits, and its interior entry has no USER" OFF)
+option(UROS_ABLATE_604_COLLECT_MASKED "Build the #604 probe: the -M bench collects once with interrupts off, and the check in collect_flush() must stop the boot" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -711,6 +712,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_604_SPLIT_DROPS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_604_SPLIT_DROPS=1)
       message(STATUS "#604 ablation: a split drops what it does not know, and its interior entry has no USER (x86_64)")
+  endif()
+  if(UROS_ABLATE_604_COLLECT_MASKED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_604_COLLECT_MASKED=1)
+      message(STATUS "#604 probe: the -M bench collects once with interrupts off (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)
