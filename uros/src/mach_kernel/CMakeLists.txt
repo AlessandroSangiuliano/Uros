@@ -326,6 +326,9 @@ option(UROS_ABLATE_593_LEFT_ON "Build the #593 ablation: the HPET's comparator i
 # #593: the HPET's counter is named before the clock is chosen, so that its
 # probe must refuse it.
 option(UROS_ABLATE_593_HPET_NAMED "Build the #593 ablation: the HPET's counter is named before the clock is chosen" OFF)
+# #593: processor 1's tick is never armed, so that the per-processor window
+# lines must say a processor never ticked.
+option(UROS_ABLATE_593_NEVER_TICKS "Build the #593 ablation: processor 1's tick is never armed" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -655,6 +658,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_593_HPET_NAMED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_593_HPET_NAMED=1)
       message(STATUS "#593 ablation: the HPET's counter is named before the clock is chosen (x86_64)")
+  endif()
+  if(UROS_ABLATE_593_NEVER_TICKS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NEVER_TICKS=1)
+      message(STATUS "#593 ablation: processor 1's tick is never armed (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

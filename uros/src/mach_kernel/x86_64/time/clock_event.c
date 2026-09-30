@@ -115,6 +115,15 @@ static uint8_t		event_vector;
 #include <x86_64/time/rulers.h>	/* rulers_distrust */
 #endif
 
+/*
+ * #593: processor 1's tick is never armed -- every arm of it claims success
+ * and arms nothing -- the shape of a first kick or a first IPI that is lost.
+ * The per-processor window lines must say so, not leave the processor out.
+ */
+#ifndef	ABLATE_593_NEVER_TICKS
+#define	ABLATE_593_NEVER_TICKS	0
+#endif
+
 /* ------------------------------------------------------ tsc-deadline ---- */
 
 #define	MSR_IA32_TSC_DEADLINE	0x6E0
@@ -487,6 +496,10 @@ clock_event_arm_ns(uint64_t ns)
 int
 clock_event_arm_tick(void)
 {
+#if ABLATE_593_NEVER_TICKS
+	if (cpu_number() == 1)
+		return 1;
+#endif
 	return clock_event_arm_ns(tick_ns);
 }
 
