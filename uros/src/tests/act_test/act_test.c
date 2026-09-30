@@ -24,6 +24,12 @@
  *   2. thread_abort()     on a thread asleep in mach_msg
  *   3. thread_suspend()/thread_resume() on a thread asleep in mach_msg
  *
+ * And two that came later, for #603 -- suspending a thread that is in no call
+ * at all, which is where a return to ring 3 has to take the AST by itself:
+ *
+ *   7. thread_suspend() on a thread that lives in page faults
+ *   8. thread_suspend() on a thread that spins, at one processor
+ *
  * ⚠️ And the task is expected to SURVIVE all three and print a summary.  A
  * report that a thread died is worth nothing from a program that died with
  * it: the last line is as much of the test as the arms are.
@@ -44,6 +50,8 @@
  * this target means five arguments passed to a prototype nobody checked.
  */
 #include <mach/mach_host.h>
+#include <mach/host_info.h>	/* #603: how many processors arm eight has */
+#include <mach/thread_info.h>	/* #603: arm seven's yardstick call */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -1352,11 +1360,287 @@ arm_six_non_canonical_return(void)
 	return 1;
 }
 
+/* ----------------------------------------------------------------
+ * Arm seven: suspend a thread that lives in page faults (#603)
+ * ----------------------------------------------------------------
+ *
+ * The arms above stop a thread inside a system call or an exception, and both
+ * of those leave the kernel through a path that takes pending ASTs.  A page
+ * fault the kernel resolves never reaches the task: vm_fault() maps the page
+ * and the instruction runs again -- and on x86-64 that return did not look at
+ * ASTs.  A thread suspended while inside one went back to its own code and ran
+ * on, to the next tick taken in ring 3 or its next system call, with
+ * thread_suspend() long since answered.
+ *
+ * The thread below does nothing but take such faults: it touches a fresh page,
+ * counts it, touches the next, a megabyte at a time, allocated and given back
+ * with a system call at each end.  A system call's own check is therefore at
+ * most ARM7_PAGES touches away.
+ *
+ * ⚠️ The count inside the call includes the time before the request reaches
+ * the thread -- the system call into the kernel, and the interrupt to the
+ * other processor -- in which it is entitled to run.  At several processors
+ * under TCG that was up to 49 pages with every fix in, against a threshold of
+ * 16, and a 256-page batch let a thread that ran on show no more than 256.
+ * So the batch is 4096 pages and the threshold 256: what a thread that runs
+ * on reaches is bounded by the batch, what one that stops reaches is bounded
+ * by time, and a larger batch moves only the first.  And the same count is
+ * taken around a call of the same shape that stops nothing -- thread_info()
+ * on the same thread -- and printed beside it, so the line says how much of
+ * what it counted was that time.
+ *
+ * ⚠️ Counted DURING thread_suspend(), from just before the call to its
+ * answer -- not after it.  thread_suspend() ends in thread_wait(), which
+ * returns only once the thread is no longer running, so a count taken after
+ * the answer is zero whether the thread stopped at once or ran on to the end
+ * of its megabyte first: the first version of this arm counted there, and
+ * passed on the kernel it was written to fail.  What the defect costs is the
+ * user code run between nudge() and the parking -- nudge() promises none --
+ * and that is inside the call.  One that stops touches at most the page it
+ * was in the middle of; one that runs on reaches the end of its megabyte.  And
+ * after the answer, nothing at all, whichever it was.
+ */
+#define	ARM7_PAGES	4096
+#define	ARM7_ROUNDS	20
+#define	ARM7_RAN_ON	256	/* far beyond a call's own latency */
+
+static volatile mach_port_t	arm_seven_thread;
+static volatile unsigned long	arm_seven_touches;
+static volatile int		arm_seven_stop;
+static volatile kern_return_t	arm_seven_kr = KERN_SUCCESS;
+
+static void *
+the_thread_that_lives_in_page_faults(void *arg)
+{
+	(void) arg;
+
+	arm_seven_thread = mach_thread_self();
+	while (!arm_seven_stop) {
+		vm_address_t	base = 0;
+		unsigned	i;
+
+		arm_seven_kr = vm_allocate(mach_task_self(), &base,
+					   ARM7_PAGES * vm_page_size, TRUE);
+		if (arm_seven_kr != KERN_SUCCESS)
+			break;
+		for (i = 0; i < ARM7_PAGES && !arm_seven_stop; i++) {
+			((volatile char *) base)[i * vm_page_size] = 1;
+			arm_seven_touches++;
+		}
+		(void) vm_deallocate(mach_task_self(), base,
+				     ARM7_PAGES * vm_page_size);
+	}
+	return NULL;
+}
+
+static int
+arm_seven_suspend_in_page_faults(void)
+{
+	pthread_t	victim;
+	unsigned long	asked, answered, later, most = 0, yardstick = 0;
+	int		i, round, ran_on = 0, ran_after = 0;
+	kern_return_t	kr;
+
+	if (pthread_create(&victim, NULL, the_thread_that_lives_in_page_faults,
+			   NULL) != 0) {
+		printf("act_test: [7] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	for (i = 0; i < PATIENCE && arm_seven_touches == 0; i++)
+		nap(100);
+	if (arm_seven_touches == 0) {
+		printf("act_test: [7] the thread never touched a page, its "
+		       "vm_allocate answering %d — WRONG\n", (int) arm_seven_kr);
+		arm_seven_stop = 1;
+		return 0;
+	}
+
+	for (round = 0; round < ARM7_ROUNDS; round++) {
+		struct thread_basic_info	info;
+		mach_msg_type_number_t		count = THREAD_BASIC_INFO_COUNT;
+
+		asked = arm_seven_touches;
+		(void) thread_info(arm_seven_thread, THREAD_BASIC_INFO,
+				   (thread_info_t) &info, &count);
+		answered = arm_seven_touches;
+		if (answered - asked > yardstick)
+			yardstick = answered - asked;
+
+		asked = arm_seven_touches;
+		kr = thread_suspend(arm_seven_thread);
+		answered = arm_seven_touches;
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [7] thread_suspend answered %d — "
+			       "WRONG\n", kr);
+			arm_seven_stop = 1;
+			(void) thread_resume(arm_seven_thread);
+			return 0;
+		}
+		nap(30);
+		later = arm_seven_touches;
+		if (answered - asked > most)
+			most = answered - asked;
+		if (answered - asked > ARM7_RAN_ON)
+			ran_on++;
+		if (later != answered)
+			ran_after++;
+		(void) thread_resume(arm_seven_thread);
+		nap(10);		/* back into its faults */
+	}
+	arm_seven_stop = 1;
+	(void) pthread_join(victim, NULL);
+
+	if (ran_after != 0) {
+		printf("act_test: [7] in %d of %d rounds the thread touched "
+		       "pages after thread_suspend had answered — WRONG (#603)\n",
+		       ran_after, ARM7_ROUNDS);
+		return 0;
+	}
+	if (ran_on != 0) {
+		printf("act_test: [7] in %d of %d rounds a thread that lives in "
+		       "page faults ran on after it was asked to stop: up to %lu "
+		       "pages touched inside thread_suspend, %lu inside "
+		       "thread_info — WRONG (#603)\n",
+		       ran_on, ARM7_ROUNDS, most, yardstick);
+		return 0;
+	}
+	printf("act_test: [7] a thread that lives in page faults stopped when "
+	       "asked: %d rounds, at most %lu pages touched inside "
+	       "thread_suspend (%lu inside thread_info) and none after "
+	       "(#603)\n", ARM7_ROUNDS, most, yardstick);
+	return 1;
+}
+
+/* ----------------------------------------------------------------
+ * Arm eight: suspend a thread that spins, at one processor (#603)
+ * ----------------------------------------------------------------
+ *
+ * The same promise, broken the other way.  A thread that only spins leaves the
+ * processor at a tick, from ring 3, blocked inside ast_taken() -- whose
+ * SAFE_EXCEPTION_RETURN is a sentinel and not a continuation, so the thread
+ * resumes right there.  A thread_suspend() issued while it was off the
+ * processor is set on its processor when it comes back, and x86-64 took ASTs
+ * once on that return where i386 loops back into the check: the thread spun
+ * on to the next tick.
+ *
+ * At one processor the answer is exact.  The suspender runs only while the
+ * spinner is off the processor, so the count it reads just before
+ * thread_suspend() is the spinner's last; a spinner that stops at its first
+ * return never adds to it, and one that goes back to ring 3 spins until its
+ * next tick while thread_suspend() -- which ends in thread_wait() -- waits
+ * for it to stop.  Counted inside the call, for arm seven's reason.  At more
+ * than one processor the suspend reaches a running spinner by an interrupt,
+ * whose return takes the AST even in one pass: the arm asks nothing there,
+ * and says so.
+ */
+#define	ARM8_ROUNDS	10
+#define	ARM8_NOT_ASKED	(-1)
+
+static volatile mach_port_t	arm_eight_thread;
+static volatile unsigned long	arm_eight_spins;
+static volatile int		arm_eight_stop;
+
+static void *
+the_thread_that_spins(void *arg)
+{
+	(void) arg;
+
+	arm_eight_thread = mach_thread_self();
+	while (!arm_eight_stop)
+		arm_eight_spins++;
+	return NULL;
+}
+
+static unsigned
+processors(void)
+{
+	host_basic_info_data_t	hi;
+	mach_msg_type_number_t	c = HOST_BASIC_INFO_COUNT;
+
+	if (host_info(mach_host_self(), HOST_BASIC_INFO, (host_info_t) &hi,
+		      &c) != KERN_SUCCESS)
+		return 0;
+	return hi.avail_cpus > 0 ? (unsigned) hi.avail_cpus : 0;
+}
+
+static int
+arm_eight_suspend_a_spinner(void)
+{
+	pthread_t	spinner;
+	unsigned long	asked, answered, later, most = 0;
+	unsigned	ncpu = processors();
+	int		i, round, ran_on = 0, ran_after = 0;
+	kern_return_t	kr;
+
+	if (ncpu != 1) {
+		printf("act_test: [8] NOT ASKED — %u processors: a suspend "
+		       "reaches a running spinner by an interrupt, whose return "
+		       "takes the AST in one pass, and the question is about a "
+		       "spinner that was off its processor (#603)\n", ncpu);
+		return ARM8_NOT_ASKED;
+	}
+
+	if (pthread_create(&spinner, NULL, the_thread_that_spins, NULL) != 0) {
+		printf("act_test: [8] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	for (i = 0; i < PATIENCE && arm_eight_spins == 0; i++)
+		nap(100);
+	if (arm_eight_spins == 0) {
+		printf("act_test: [8] the spinner never ran — WRONG\n");
+		arm_eight_stop = 1;
+		return 0;
+	}
+
+	for (round = 0; round < ARM8_ROUNDS; round++) {
+		nap(20);		/* it runs; this comes back at a tick */
+		asked = arm_eight_spins;
+		kr = thread_suspend(arm_eight_thread);
+		answered = arm_eight_spins;
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [8] thread_suspend answered %d — "
+			       "WRONG\n", kr);
+			arm_eight_stop = 1;
+			(void) thread_resume(arm_eight_thread);
+			return 0;
+		}
+		nap(30);
+		later = arm_eight_spins;
+		if (answered - asked > most)
+			most = answered - asked;
+		if (answered != asked)
+			ran_on++;
+		if (later != answered)
+			ran_after++;
+		(void) thread_resume(arm_eight_thread);
+	}
+	arm_eight_stop = 1;
+	(void) pthread_join(spinner, NULL);
+
+	if (ran_after != 0) {
+		printf("act_test: [8] in %d of %d rounds the spinner turned "
+		       "after thread_suspend had answered — WRONG (#603)\n",
+		       ran_after, ARM8_ROUNDS);
+		return 0;
+	}
+	if (ran_on != 0) {
+		printf("act_test: [8] in %d of %d rounds a spinner asked to stop "
+		       "while it was off its processor spun on: up to %lu turns "
+		       "inside thread_suspend — WRONG (#603)\n",
+		       ran_on, ARM8_ROUNDS, most);
+		return 0;
+	}
+	printf("act_test: [8] a spinner asked to stop while it was off its "
+	       "processor never turned again: %d rounds at one processor "
+	       "(#603)\n", ARM8_ROUNDS);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed;
+	int		passed = 0, arm_one_passed, arms = 8, r;
 
 	(void) argc;
 	(void) argv;
@@ -1376,6 +1660,18 @@ main(int argc, char **argv)
 	passed += arm_three_suspend_in_mach_msg();
 	passed += arm_four_state_of_a_thread_in_a_trap();
 	passed += arm_five_registers_a_trap_leaves();
+	passed += arm_seven_suspend_in_page_faults();
+
+	/*
+	 * An arm that was not asked is not an arm that passed: at more than
+	 * one processor this one says NOT ASKED, and the count below is of the
+	 * arms that were.
+	 */
+	r = arm_eight_suspend_a_spinner();
+	if (r == ARM8_NOT_ASKED)
+		arms--;
+	else
+		passed += r;
 
 	/*
 	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the
@@ -1399,7 +1695,7 @@ main(int argc, char **argv)
 			passed--;
 	}
 
-	printf("act_test: %d of 6 arms passed\n", passed);
+	printf("act_test: %d of %d arms passed\n", passed, arms);
 
 	/*
 	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
@@ -1413,5 +1709,5 @@ main(int argc, char **argv)
 	 * that had to say so.  It does now, so this is a plain return again --
 	 * which is what every other program in the bundle writes.
 	 */
-	return passed == 6 ? 0 : 1;
+	return passed == arms ? 0 : 1;
 }

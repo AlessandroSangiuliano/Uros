@@ -35,7 +35,7 @@
  * ── What happens next, on each kernel ─────────────────────────────────
  *
  * The thread then spins with interrupts on, so the timer tick certainly
- * arrives, and every trap return calls trap_take_ast().
+ * arrives, and every interrupt return calls trap_take_ast().
  *
  *   Without the fix, that return takes AST_ALL.  ast_taken() reaches
  *   act_execute_returnhandlers() -- which it tries BEFORE anything else and

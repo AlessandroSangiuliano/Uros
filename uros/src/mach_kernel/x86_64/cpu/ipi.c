@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <kern/misc_protos.h>	/* #461: halt_cpu, panic */
+#include <kern/ast.h>		/* #603: ast_check */
 
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
@@ -18,6 +19,14 @@
 #include <sync/barrier.h>
 #include <sync/lock.h>
 #include <trap/trap.h>
+
+
+/*
+ * #603: the AST interrupt back to an EOI and nothing else, as it was.
+ */
+#ifndef ABLATE_603_IPI_EMPTY
+#define ABLATE_603_IPI_EMPTY	0
+#endif
 
 /*
  * One call in flight at a time, and the lock is what makes that true.
@@ -215,17 +224,27 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 }
 
 /*
- * The AST interrupt does nothing, and that is the whole of it (#453).
+ * 🔴 THE AST INTERRUPT RUNS ast_check() (#603).
  *
- * The scheduler wanted a processor to reach a point where it checks its
- * pending asynchronous work.  Taking an interrupt and returning from it IS
- * that point -- the check lives on the return path, in machine-independent
- * code, and runs whatever the interrupt was for.  A handler that did
- * something here would be doing it twice.
+ * This said the interrupt did nothing and that was the whole of it (#453):
+ * "taking an interrupt and returning from it IS that point -- the check
+ * lives on the return path".  The return path, trap_take_ast(), looks at
+ * need_ast[cpu], and nothing had set it.  ast_check() is what does: it
+ * copies the running activation's ASTs into that word -- act_set_apc()
+ * reaches only its caller's own processor -- and raises AST_BLOCK when a
+ * switch is due.  i386's handler calls it ("MP_AST: cross-CPU reschedule
+ * request"); on this machine only the tick did.
+ *
+ * So cause_ast_check() asked for nothing.  A thread_suspend() of a thread
+ * running here waited for this processor's next tick -- act_test's arm
+ * seven, at four processors, touched up to 4324 pages inside the call --
+ * and so did a preemption asked from another processor.
  */
 static void ipi_ast_handler(struct trap_frame *frame)
 {
 	(void) frame;
+	if (!ABLATE_603_IPI_EMPTY)
+		ast_check();
 	lapic_eoi();
 }
 
