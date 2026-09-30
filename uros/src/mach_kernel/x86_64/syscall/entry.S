@@ -620,20 +620,13 @@ syscall_entry:
 	jmp	.Lreturn
 
 /*
- * The return that cannot use SYSRET.
+ * The return SYSRET cannot make.
  *
- * IRETQ costs several times what SYSRET does, which is exactly why it is
- * here and not above: it is correct for every case, and reaching for it
- * always would make every syscall in the system pay for a case that only
- * arises when a user program has already done something it had no reason
- * to do.
- *
- * The frame is built by hand from what the entry saved, in the order IRETQ
- * pops it.
- *
- * ⚠️ The stack pointer comes off this thread's stack, not out of the per-CPU
- * block (#473): TF_RSP, read from the frame the same way .Lreturn read the
- * flags and the resume address.  Nothing is popped anywhere along here.
+ * It was an IRETQ, built by hand from the frame the entry saved -- several
+ * times what SYSRET costs, which is why it was here and not above.  Since
+ * #518 the return is not attempted at all, for the reason below, and the
+ * IRETQ stayed behind the ud2 that ends this path, unreachable, until #603's
+ * audit found it: code that looked like a live fallback and could never run.
  */
 .Lreturn_the_slow_way:
 	/*
@@ -667,29 +660,3 @@ syscall_entry:
 	 */
 	call	syscall_return_noncanonical
 	ud2				/* exception() does not return */
-
-	cli
-	movq	TF_RSP(%rsp), %r10	/* the stack ring 3 came in on (#474) */
-	swapgs
-
-	/*
-	 * ⚠️ The five words below are pushed BELOW the frame, not into it: %rsp
-	 * is the frame's base, so these land in the working stack under it and
-	 * leave the saved user frame exactly as the entry wrote it.  Which is
-	 * what iretq wants anyway -- it consumes them from where they are.
-	 */
-
-	pushq	$USER_DS_RPL3		/* ss     */
-	pushq	%r10			/* rsp    */
-	pushq	%r11			/* rflags */
-	pushq	$USER_CS_RPL3		/* cs     */
-	pushq	%rcx			/* rip    */
-
-	/* ⚠️ After the pushes: r10 carries ring 3's stack pointer until one of
-	 * them has consumed it.  iretq takes rip and rflags off the stack, so
-	 * rcx and r11 need nothing here -- and they hold the frame's own
-	 * values, which are ring 3's. */
-	SYSCALL_PROFILE_RETURN
-	CLEAR_CLOBBERED
-
-	iretq
