@@ -422,32 +422,12 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
 	 * The same arbitration as next_table(), for the same reason: one
 	 * aligned 64-bit word, and cmpxchg tells the loser what it lost to.
 	 * Here the loser retries rather than gives up -- it still has a change
-	 * to apply, and it applies it to what it now finds.
-	 *
-	 * ⚠️ It reloads through `found' and never re-reads *entry.  Reading the
-	 * word again would open the same window one instruction wide: what
-	 * cmpxchg hands back is what the word held at the instant it refused,
-	 * and building the next attempt out of anything else is building it out
-	 * of a value that was never there.
+	 * to apply, and it applies it to what it now finds.  That loop is
+	 * pmap_pte_update() (pte.h); this was a copy of it, and the copy
+	 * wrote the permission bits into an entry a removal had just zeroed
+	 * (#604).
 	 */
-	{
-		pt_entry_t found = *entry;
-
-		for (;;) {
-			pt_entry_t fresh = (found & ~INTEL_PTE_PERM)
-					 | (flags & INTEL_PTE_PERM);
-			pt_entry_t seen;
-
-			if (fresh == found)
-				break;		/* already what it should be */
-
-			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
-						found, fresh);
-			if (seen == found)
-				break;
-			found = seen;
-		}
-	}
+	pmap_pte_update(entry, flags & INTEL_PTE_PERM, INTEL_PTE_PERM);
 
 	pmap_read_leave(held);
 
