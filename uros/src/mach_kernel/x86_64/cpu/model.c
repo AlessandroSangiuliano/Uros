@@ -165,7 +165,7 @@ halt_cpu(void)
 		 * because a processor that dies mid-message must not silence the
 		 * rest: after the wait the report is made anyway.
 		 */
-		for (spins = 0; spins < 200000000ULL && panicwait; spins++)
+		for (spins = 0; spins < CPU_SPIN_BUDGET && panicwait; spins++)
 			cpu_pause();
 
 		x86_64_backtrace((uint64_t)(uintptr_t)

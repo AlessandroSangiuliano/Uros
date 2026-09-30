@@ -169,6 +169,27 @@ static inline void cpu_pause(void)
 }
 
 /*
+ * How many cpu_pause() turns a wait for another processor gets before it gives
+ * up and says so (#604).
+ *
+ * A count, not a time.  The architecture gives a pause no duration, one
+ * processor may make it many times longer than another, and an emulator may
+ * make it almost nothing -- so this bounds "never", not a delay.  Every loop
+ * that uses it leaves the moment its answer arrives, and the count matters only
+ * when the answer is not coming.  What it lasts on the processor at hand is
+ * measured at boot and printed (spin_budget_selftest() in boot_c.c).
+ *
+ * One number, because nothing chose two.  These waits counted to 400000000 or
+ * to 200000000.  The smaller was written first, for the processors arriving
+ * (#438), with no reason given.  The larger came the same day, for the
+ * cross-call, with one: a processor deep in a fault report can take a long
+ * time to answer.  Every later wait copied one or the other.  The larger is
+ * kept for its reason, and because its only price is paid when something has
+ * already gone wrong.
+ */
+#define CPU_SPIN_BUDGET		400000000ULL
+
+/*
  * Whether this processor will take an interrupt, and the two ways to change
  * the answer.
  *

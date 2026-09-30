@@ -301,7 +301,7 @@ machine_processors_ready(void)
 		 * a wait that gave up silently would turn a wrong number into
 		 * no number.
 		 */
-		for (spins = 0; spins < 200000000U; spins++) {
+		for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 			idle = *(volatile int *) &default_pset.idle_count;
 			if (idle >= (int) (got - 1))
 				break;

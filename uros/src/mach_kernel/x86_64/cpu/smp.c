@@ -173,7 +173,7 @@ void ap_start_c(uint32_t apic_id)
 	if (atomic_cmpxchg64(&ap_call_claimed, 0, apic_id + 1) == 0) {
 		uint64_t spins;
 
-		for (spins = 0; spins < 400000000ULL; spins++) {
+		for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 			if (atomic_load64(&ap_call_gate) != 0)
 				break;
 			cpu_pause();
@@ -268,7 +268,7 @@ smp_ap_release_to_scheduler(void)
 	 * scheduler can say so.  Volatile because the writers are other
 	 * processors and this loop reads nothing else.
 	 */
-	for (spins = 0; spins < 400000000ULL; spins++) {
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if ((unsigned) *(volatile integer_t *) &machine_info.avail_cpus
 		    >= want)
 			break;
@@ -287,7 +287,7 @@ unsigned smp_ap_call_probe(void)
 
 	atomic_store64(&ap_call_gate, 1);
 
-	for (spins = 0; spins < 400000000ULL; spins++) {
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_load64(&ap_call_done) != 0)
 			break;
 		cpu_pause();
@@ -376,7 +376,7 @@ unsigned smp_start_others(void)
 	 * did — and with nothing shared in the trampoline, one that is stuck
 	 * there is stuck alone.
 	 */
-	for (spins = 0; spins < 200000000ULL; spins++) {
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_load64((volatile uint64_t *)&online_count) == asked)
 			break;
 		cpu_pause();
