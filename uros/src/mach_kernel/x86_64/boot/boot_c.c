@@ -3165,6 +3165,43 @@ static void tsc_source_selftest(void)
 	}
 }
 
+/*
+ * What CPU_SPIN_BUDGET lasts here (#604).  The budget is a count of pauses,
+ * and a pause lasts what the processor -- or the emulator -- makes it last,
+ * so the only way to say what a wait gave up after is to time some.  A
+ * hundred thousand of them against the calibrated clock, reported and not
+ * judged: there is no right answer to hold it to.
+ */
+#define SPIN_SAMPLE	100000ULL
+
+static void spin_budget_selftest(void)
+{
+	uint64_t hz = tsc_hz(), t0, t1, ticks;
+	uint64_t i;
+
+	t0 = rdtsc_ordered();
+	for (i = 0; i < SPIN_SAMPLE; i++)
+		cpu_pause();
+	t1 = rdtsc_ordered();
+	ticks = t1 - t0;
+
+	kputs("UrMach x86-64: spin budget ");
+	kputdec(CPU_SPIN_BUDGET);
+	kputs(" pauses; ");
+	kputdec(SPIN_SAMPLE);
+	kputs(" of them took ");
+	kputdec(ticks);
+	kputs(" TSC ticks");
+	if (hz < 1000) {
+		kputs(", and with no calibrated rate that is all there is to "
+		      "say\r\n");
+		return;
+	}
+	kputs(", so a wait that runs out gave up after about ");
+	kputdec(ticks * (CPU_SPIN_BUDGET / SPIN_SAMPLE) / (hz / 1000));
+	kputs(" ms on this processor\r\n");
+}
+
 static void tsc_selftest(void)
 {
 	const struct rulers_verdict	*v;
@@ -7154,6 +7191,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	freq_census();
 	rulers_selftest();
 	tsc_selftest();
+	spin_budget_selftest();
 	rulers_kept_selftest();
 	timer_selftest();
 	pci_cfg_selftest();
