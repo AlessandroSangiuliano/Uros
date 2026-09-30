@@ -102,6 +102,19 @@ static uint8_t		event_vector;
 #define	ABLATE_593_NO_COUNTDOWN	0
 #endif
 
+/*
+ * #593: the HPET's counter named before the clock is chosen, as the rulers'
+ * vote names one that disagrees -- so that the HPET's probe must refuse it.
+ * No boot here has seen the vote name the HPET (0 of 196), so without this
+ * the refusal would be code no boot runs.
+ */
+#ifndef	ABLATE_593_HPET_NAMED
+#define	ABLATE_593_HPET_NAMED	0
+#endif
+#if ABLATE_593_HPET_NAMED
+#include <x86_64/time/rulers.h>	/* rulers_distrust */
+#endif
+
 /* ------------------------------------------------------ tsc-deadline ---- */
 
 #define	MSR_IA32_TSC_DEADLINE	0x6E0
@@ -386,6 +399,12 @@ clock_event_init(uint8_t vector)
 	 */
 	forced_lapic = boot_flag('T');
 	forced_hpet = boot_flag('H');
+
+#if ABLATE_593_HPET_NAMED
+	rulers_distrust(RULER_HPET);
+	printf("clock_event: the HPET's counter is named before the clock is "
+	       "chosen, by ablation (#593)\n");
+#endif
 
 	ops = (const struct clock_event_ops *) 0;
 	for (i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {

@@ -24,6 +24,7 @@
 #include <time/hpet_event.h>
 #include <time/line.h>		/* one printf per line (#578) */
 #include <time/pmtimer.h>
+#include <time/rulers.h>		/* whether the counter has been named */
 #include <time/tsc.h>
 
 _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
@@ -428,6 +429,22 @@ static int hpet_ev_probe(void)
 	if (!hpet_present()) {
 		printf("clock_event: hpet: no timer block -- the ACPI table "
 		       "names none, or its period was out of range (#508)\n");
+		return 0;
+	}
+	/*
+	 * 🔴 NOT A COUNTER THAT HAS BEEN NAMED.  The rulers' vote at boot names
+	 * one that disagrees with the other two, the watchdog one that stopped
+	 * or drifted while the system ran (#594), and a ruler named is never
+	 * used again (tsc_watch.c).  The tick here runs on that same counter,
+	 * at the rate its table states: a tick at a rate the kernel has itself
+	 * judged wrong, and the time of day with it.  The TSC's side keeps the
+	 * same rule through its rate, which tsc_distrust() withdraws and
+	 * tscdl_probe() reads.
+	 */
+	if (rulers_get(RULER_HPET)->dissents) {
+		printf("clock_event: hpet: its counter has been named -- by the "
+		       "rulers' vote or by the watchdog -- and is not used "
+		       "(#593, #594)\n");
 		return 0;
 	}
 	if (!lapic_present()) {
