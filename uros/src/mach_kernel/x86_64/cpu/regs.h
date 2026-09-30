@@ -172,12 +172,14 @@ static inline void cpu_pause(void)
  * How many cpu_pause() turns a wait for another processor gets before it gives
  * up and says so (#604).
  *
- * A count, not a time.  The architecture gives a pause no duration, one
- * processor may make it many times longer than another, and an emulator may
- * make it almost nothing -- so this bounds "never", not a delay.  Every loop
- * that uses it leaves the moment its answer arrives, and the count matters only
- * when the answer is not coming.  What it lasts on the processor at hand is
- * measured at boot and printed (spin_budget_selftest() in boot_c.c).
+ * A count, not a time.  The architecture gives a pause no duration, and what it
+ * lasts depends on the processor and on what runs it: on one machine a hundred
+ * thousand took 26.8 million TSC ticks under KVM and 113.6 million under QEMU's
+ * TCG, so the same budget lasts about 36 seconds there, or 152 (#604).  It
+ * bounds "never", not a delay.  Every loop that uses it leaves the moment its
+ * answer arrives, and the count matters only when the answer is not coming.
+ * The boot prints what it lasts where it runs (spin_budget_selftest() in
+ * boot_c.c).
  *
  * One number, because nothing chose two.  These waits counted to 400000000 or
  * to 200000000.  The smaller was written first, for the processors arriving
