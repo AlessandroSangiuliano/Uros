@@ -1006,9 +1006,12 @@ int pmap_is_wired(pmap_t pmap, uint64_t va)
 
 uint64_t pmap_extract(pmap_t pmap, uint64_t va)
 {
-	uint64_t pa = 0;
+	boolean_t held = pmap_read_enter_for(va);
+	uint64_t  pa = 0;
+	int	  mapped = pmap_resolve(pmap->root_pa, va, &pa, 0);
 
-	return pmap_resolve(pmap->root_pa, va, &pa, 0) ? pa : 0;
+	pmap_read_leave(held);
+	return mapped ? pa : 0;
 }
 
 /*
