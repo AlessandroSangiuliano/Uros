@@ -76,6 +76,7 @@
 
 #include <boot/bootarg.h>
 #include <time/clock_event.h>	/* #459 */
+#include <time/line.h>		/* #593 */
 #include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
 #include <kern/misc_protos.h>	/* printf */
 #include <kern/fault_profile.h>	/* #482: arm the instrument once %gs is real */
@@ -6303,6 +6304,38 @@ static void panic_format_selftest(void)
 	kputs(wrong == 0 ? " wrong\r\n" : " WRONG\r\n");
 }
 
+/*
+ * #593: a report line that fits comes out whole, and one that does not ends
+ * in the mark that says it was cut -- which no report line in a working boot
+ * is long enough to show, so it is shown here.
+ */
+static void line_selftest(void)
+{
+	static struct line	l;	/* 512 bytes: not on this stack */
+	const unsigned		mark = sizeof(LINE_CUT_MARK) - 1;
+	unsigned		i, wrong = 0;
+
+	line_start(&l);
+	put_s(&l, "window ");
+	put_u(&l, 18446744073709551615ULL);
+	if (!str_equal(l.b, "window 18446744073709551615") || l.cut)
+		wrong++;
+
+	line_start(&l);
+	for (i = 0; i < 100; i++)
+		put_s(&l, "0123456789");
+	put_s(&l, "and more");
+	if (!l.cut || l.n != sizeof(l.b) - 1
+	    || !str_equal(l.b + l.n - mark, LINE_CUT_MARK))
+		wrong++;
+
+	kputs("UrMach x86-64: report lines: one that fits comes out whole, "
+	      "one of 1008 characters ends in \"" LINE_CUT_MARK "\" at ");
+	kputdec(l.n);
+	kputs(wrong == 0 ? " -- 2 cases, 0 wrong (#593)\r\n"
+			 : " -- 2 cases, WRONG (#593)\r\n");
+}
+
 static void msg_abi_selftest(void)
 {
 	/*
@@ -7045,6 +7078,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	lock_cost_bench();
 	device_master_irq_selftest();
 	panic_format_selftest();
+	line_selftest();
 	msg_abi_selftest();
 	port_name_selftest();
 	swapgs_window_selftest();
