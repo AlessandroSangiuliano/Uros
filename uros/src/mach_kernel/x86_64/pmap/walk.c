@@ -7,7 +7,11 @@
 
 #include <stdint.h>
 
+#include <mach_assert.h>
+#include <kern/misc_protos.h>		/* panic (#604) */
+#include <kern/rcu.h>			/* urmach_rcu_read_held (#604) */
 #include <pmap/layout.h>
+#include <pmap/pmap.h>			/* pmap_initialized (#604) */
 #include <pmap/pte.h>
 #include <pmap/walk.h>
 
@@ -25,6 +29,32 @@ pt_entry_t *pmap_walk(uint64_t root_pa, uint64_t va, uint64_t *page_size_out)
 {
 	pt_entry_t *table;
 	pt_entry_t *entry;
+
+	/*
+	 * 🔴 THE LOWER HALF IS WALKED INSIDE A READ SECTION (#604).
+	 *
+	 * pmap_collect() frees interior tables below KERNEL_HALF_BASE, in any
+	 * space but the kernel's, and waits only for readers inside a read
+	 * section (#455, step 6 in vminit.c).  A walk outside one can be
+	 * standing in a table it frees, and read the next level out of a page
+	 * that already belongs to somebody else.
+	 *
+	 * The upper half needs nothing: it is the kernel's, shared into every
+	 * space and never collected.  That is what lets a fault report ask
+	 * pmap_extract() about a kernel address without touching per-processor
+	 * state it may not be able to trust.
+	 *
+	 * Checked, not asked for: three walkers had forgotten, and the audit
+	 * that found two of them missed the third.  Before pmap_initialized
+	 * there is no collector and no per-CPU area to count a section in, so
+	 * the boot's own walks are exempt -- the boundary pmap_read_enter()
+	 * uses, for the same reason.
+	 */
+#if	MACH_ASSERT
+	if (va_is_user(va) && pmap_initialized && !urmach_rcu_read_held())
+		panic("pmap_walk: 0x%lx is in the lower half and was walked "
+		      "outside a read section (#604)", (unsigned long) va);
+#endif
 
 	/*
 	 * 🔴 A DESTROYED SPACE MAPS NOTHING — AND WITHOUT THIS IT MAPS PHYSICAL
