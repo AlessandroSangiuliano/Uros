@@ -385,10 +385,14 @@ syscall_entry:
 	 *
 	 * i386 gets it for nothing: its system call return joins
 	 * return_from_trap, whose first act is the AST check.  Here SYSCALL has
-	 * its own way out and the check was in the OTHER one -- trap/entry.S
-	 * tests it on every trap return and on the three thread-return entry
-	 * points -- so the whole of it was missing from the road every message
-	 * in the system travels.
+	 * its own way out and the check was on the OTHER ones -- the return from
+	 * an interrupt, and the three thread-return entry points in
+	 * trap/entry.S -- so the whole of it was missing from the road every
+	 * message in the system travels.
+	 *
+	 * ⚠️ This said "trap/entry.S tests it on every trap return", and it did
+	 * not: a page fault the kernel resolved went back to ring 3 without
+	 * looking, until #603, and the interrupt's own check took one pass.
 	 *
 	 * What that costs is not a missed opportunity, it is a promise the
 	 * kernel breaks.  AST_APC is how kern/thread_act.c stops a thread:
