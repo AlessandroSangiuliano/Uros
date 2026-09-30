@@ -149,10 +149,16 @@ typedef uint64_t	pt_entry_t;
 #define INTEL_PTE_PAT_LARGE	0x0000000000001000ULL
 
 /*
- * What an interior entry carries: VALID, WRITE and USER, and NX clear -- so
- * that the leaf decides.  next_table() in map.c gives the reason bit by bit.
- * One name for both writers of interior entries (#604): pmap_split_page() wrote
- * its own and left USER out.
+ * What an interior entry the pmap builds carries: VALID, WRITE and USER, and NX
+ * clear -- so that the leaf decides.  next_table() in map.c gives the reason
+ * bit by bit.  One name for the pmap's two writers of interior entries (#604):
+ * pmap_split_page() wrote its own and left USER out.
+ *
+ * The direct map is the deliberate exception, and says so in direct.c: its
+ * PML4 entry sets NX and leaves USER clear, so the whole region is kernel-only
+ * and never executable whatever sits below.  A split inside it stays covered,
+ * because U/S is required at every level of the path and NX at any one of
+ * them is enough.
  */
 #define INTEL_PTE_INTERIOR	(INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_USER)
 
