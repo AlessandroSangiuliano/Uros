@@ -341,6 +341,7 @@ option(UROS_ABLATE_593_NEVER_TICKS "Build the #593 ablation: processor 1's tick 
 # #603: the ways ASTs reach a return to ring 3, each with a way back out.
 option(UROS_ABLATE_603_IPI_EMPTY "Build the #603 ablation: the AST interrupt is an EOI and does not run ast_check()" OFF)
 option(UROS_ABLATE_603_ONE_PASS "Build the #603 ablation: a return to ring 3 takes ASTs once, not until none is pending" OFF)
+option(UROS_ABLATE_603_FAULT_AST "Build the #603 ablation: a page fault resolved for ring 3 returns without taking ASTs" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -685,6 +686,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_603_ONE_PASS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_603_ONE_PASS=1)
       message(STATUS "#603 ablation: a return to ring 3 takes ASTs once (x86_64)")
+  endif()
+  if(UROS_ABLATE_603_FAULT_AST)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_603_FAULT_AST=1)
+      message(STATUS "#603 ablation: a page fault resolved for ring 3 returns without taking ASTs (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

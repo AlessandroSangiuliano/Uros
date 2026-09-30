@@ -46,9 +46,14 @@
 #define ABLATE_467_ARM3	0	/* a ring-0 fault on a user address         */
 #endif
 /*
- * #603: a return to ring 3 takes ASTs once, as it did before, instead of until
- * none is pending.
+ * #603: the two halves of taking ASTs on the way back to ring 3, each with
+ * its own way back out.  FAULT_AST: a page fault resolved for ring 3 returns
+ * without looking.  ONE_PASS: a return to ring 3 takes them once, as it did
+ * before, instead of until none is pending.
  */
+#ifndef ABLATE_603_FAULT_AST
+#define ABLATE_603_FAULT_AST	0
+#endif
 #ifndef ABLATE_603_ONE_PASS
 #define ABLATE_603_ONE_PASS	0
 #endif
@@ -1868,6 +1873,26 @@ void trap_dispatch(struct trap_frame *frame)
 				 */
 				FP_MARK(FP_RETURN);
 				FP_COMMIT(frame);
+
+				/*
+				 * 🔴 AND THE ASTs, ON THE WAY BACK TO RING 3
+				 * (#603).  This is the one exception the kernel
+				 * handles and returns from: every other one goes
+				 * to the task through exception(), and comes back
+				 * through thread_exception_return, which checks.
+				 * This did not -- only the interrupt path called
+				 * trap_take_ast() -- so a thread asked to stop
+				 * while inside a fault went back to its own code
+				 * and ran on to its next system call or tick:
+				 * act_test's arm seven, at one processor, touched
+				 * up to 225 pages inside thread_suspend().  Ring 3
+				 * only: a fault taken at ring 0 goes back to kernel
+				 * code, where preempting is the interrupt path's
+				 * question, asked with IF known to be on.
+				 */
+				if (!ABLATE_603_FAULT_AST
+				    && (frame->cs & 3) == USER_RPL)
+					trap_take_ast(frame);
 				return;	/* the instruction runs again */
 			}
 		}
