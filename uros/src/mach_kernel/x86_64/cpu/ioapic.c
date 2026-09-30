@@ -9,7 +9,9 @@
 
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
+#include <cpu/regs.h>		/* read_rflags, cpu_pause */
 #include <pmap/pmap.h>
+#include <sync/atomic.h>	/* the window's lock below */
 #include <trap/trap.h>
 
 /*
@@ -41,16 +43,82 @@ static volatile uint8_t *io;
 static unsigned pins;
 static uint32_t base_gsi;
 
-static uint32_t ioapic_read(unsigned reg)
+/*
+ * 🔴 THE WINDOW IS TAKEN IN TURNS (#593).  A register is reached by writing
+ * its number to one address and then using the other, so a second processor
+ * selecting between the two makes the first read or write a DIFFERENT
+ * register -- a pin's destination written into its neighbour's, a mask bit
+ * read from somebody else's entry -- and nothing downstream can tell.
+ *
+ * <cpu/ioapic.h> used to say only the boot processor programmed pins, before
+ * the others were started.  It stopped being true when user-level drivers
+ * could claim a line (#457): device_intr_enable() unmasks a pin from thread
+ * context on whatever processor the driver's call runs on, while the line's
+ * interrupt masks it on the processor it is routed to (device_master.c), and
+ * #593 moves the tick onto the HPET's pin at run time.
+ *
+ * The same shape as the PCI port pair's lock (cpu/pci_cfg.c) and for the same
+ * two reasons: ioapic_init() runs before percpu_activate(), where the lock
+ * package cannot be used, and an interrupt landing between the two accesses
+ * on ONE processor is the same failure without any second processor at all.
+ * Read-modify-write sequences below take it once around both halves.
+ */
+static volatile uint8_t	window_lock;
+
+static uint64_t window_enter(void)
+{
+	uint64_t flags = read_rflags();
+
+	interrupts_disable();
+	while (atomic_swap8(&window_lock, 1) != 0)
+		cpu_pause();
+	return flags;
+}
+
+static void window_leave(uint64_t flags)
+{
+	__asm__ volatile("" ::: "memory");
+	window_lock = 0;
+	if (flags & RFLAGS_IF)
+		interrupts_enable();
+}
+
+static uint32_t window_read(unsigned reg)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
 	return *(volatile uint32_t *)(io + IOAPIC_WINDOW);
 }
 
-static void ioapic_write(unsigned reg, uint32_t value)
+static void window_write(unsigned reg, uint32_t value)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
 	*(volatile uint32_t *)(io + IOAPIC_WINDOW) = value;
+}
+
+static uint32_t ioapic_read(unsigned reg)
+{
+	uint64_t f = window_enter();
+	uint32_t v = window_read(reg);
+
+	window_leave(f);
+	return v;
+}
+
+static void ioapic_write(unsigned reg, uint32_t value)
+{
+	uint64_t f = window_enter();
+
+	window_write(reg, value);
+	window_leave(f);
+}
+
+/* Clear and set bits of one register, as one turn at the window. */
+static void ioapic_modify(unsigned reg, uint32_t clear, uint32_t set)
+{
+	uint64_t f = window_enter();
+
+	window_write(reg, (window_read(reg) & ~clear) | set);
+	window_leave(f);
 }
 
 int ioapic_present(void)
@@ -120,6 +188,7 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 {
 	unsigned reg = redir_reg(gsi);
 	uint32_t low = vector & RTE_VECTOR_MASK;
+	uint64_t f;
 
 	low |= RTE_DELIVERY_FIXED | RTE_DEST_PHYSICAL;
 
@@ -141,22 +210,20 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 	 * the destination it would use meanwhile is whatever the firmware
 	 * left.
 	 */
-	ioapic_write(reg + 1, apic_id << 24);
-	ioapic_write(reg, low);
+	f = window_enter();
+	window_write(reg + 1, apic_id << 24);
+	window_write(reg, low);
+	window_leave(f);
 }
 
 void ioapic_mask(uint32_t gsi)
 {
-	unsigned reg = redir_reg(gsi);
-
-	ioapic_write(reg, ioapic_read(reg) | RTE_MASKED);
+	ioapic_modify(redir_reg(gsi), 0, RTE_MASKED);
 }
 
 void ioapic_unmask(uint32_t gsi)
 {
-	unsigned reg = redir_reg(gsi);
-
-	ioapic_write(reg, ioapic_read(reg) & ~RTE_MASKED);
+	ioapic_modify(redir_reg(gsi), RTE_MASKED, 0);
 }
 
 int ioapic_is_masked(uint32_t gsi)

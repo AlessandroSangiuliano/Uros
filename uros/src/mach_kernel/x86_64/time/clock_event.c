@@ -34,9 +34,14 @@
 #include <sync/barrier.h>		/* #461: publish the tick reports */
 #include <kern/cpu_number.h>		/* cpu_number */
 #include <kern/cpu_data.h>		/* #459: disable_preemption */
+#include <mach/machine.h>		/* #593: machine_slot[], who is up */
 #include <kern/rcu.h>		/* the tick's quiescent state (#455) */
 #include <x86_64/cpu/ipi.h>		/* #594: every processor leaves the TSC */
 #include <x86_64/cpu/percpu.h>		/* #594: percpu_intr_disable */
+#include <x86_64/time/hpet_event.h>	/* #593: the third backend */
+#include <x86_64/time/pmtimer.h>	/* #593: the ticks against a ruler */
+#include <x86_64/time/line.h>		/* #593: one printf per line */
+#include <x86_64/time/window.h>		/* #593: what both windows share */
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
@@ -78,6 +83,49 @@ static unsigned		event_hz = CLOCK_EVENT_HZ;
 static uint64_t		tick_ns;
 static uint8_t		event_vector;
 
+/*
+ * #593: the local APIC's timer cannot be used at all -- neither of its two
+ * modes -- which is what a timer that stops, or a calibration that found no
+ * rate for either clock, leaves a machine with.  Before #593 that was the
+ * panic below; now the tick must run on the HPET and say so.
+ */
+#ifndef	ABLATE_593_NO_APIC_TIMER
+#define	ABLATE_593_NO_APIC_TIMER	0
+#endif
+
+/*
+ * #593: only the countdown is unusable, and the deadline mode works -- the
+ * machine #594 could not move the tick off a named TSC on: "the local APIC
+ * timer has no rate, and there is no third backend".  With the TSC named
+ * (UROS_ABLATE_594_TSC_SKEWS), the tick must now move to the HPET while the
+ * system runs.
+ */
+#ifndef	ABLATE_593_NO_COUNTDOWN
+#define	ABLATE_593_NO_COUNTDOWN	0
+#endif
+
+/*
+ * #593: the HPET's counter named before the clock is chosen, as the rulers'
+ * vote names one that disagrees -- so that the HPET's probe must refuse it.
+ * No boot here has seen the vote name the HPET (0 of 196), so without this
+ * the refusal would be code no boot runs.
+ */
+#ifndef	ABLATE_593_HPET_NAMED
+#define	ABLATE_593_HPET_NAMED	0
+#endif
+#if ABLATE_593_HPET_NAMED
+#include <x86_64/time/rulers.h>	/* rulers_distrust */
+#endif
+
+/*
+ * #593: processor 1's tick is never armed -- every arm of it claims success
+ * and arms nothing -- the shape of a first kick or a first IPI that is lost.
+ * The per-processor window lines must say so, not leave the processor out.
+ */
+#ifndef	ABLATE_593_NEVER_TICKS
+#define	ABLATE_593_NEVER_TICKS	0
+#endif
+
 /* ------------------------------------------------------ tsc-deadline ---- */
 
 #define	MSR_IA32_TSC_DEADLINE	0x6E0
@@ -87,6 +135,12 @@ static uint8_t		event_vector;
 static int tscdl_probe(void)
 {
 	uint32_t a, b, c, d;
+
+#if ABLATE_593_NO_APIC_TIMER
+	printf("clock_event: tsc-deadline: the APIC timer is unusable, by "
+	       "ablation (#593)\n");
+	return 0;
+#endif
 
 	/*
 	 * Two conditions, and both are needed for a REASON, not for symmetry:
@@ -135,6 +189,61 @@ static void tscdl_setup(uint8_t vector)
 	wrmsr(MSR_IA32_TSC_DEADLINE, 0);
 }
 
+/*
+ * 🔑 THE NEXT DEADLINE IS COUNTED FROM THE LAST ONE, NOT FROM NOW (#593).
+ *
+ * Counted from now, every period is the interval plus however long the tick
+ * took to be delivered and handled, so the tick runs slow by exactly that,
+ * every period -- and the kernel's time of day with it: utime_tick() advances
+ * `time' by one tick per tick of the boot processor, and REALTIME_CLOCK is
+ * `time' (clock_dev.c).  Measured on one binary at four processors, ten-second
+ * windows against the TSC and the PM timer: the TSC deadline delivered 985 to
+ * 991 ticks per thousand under KVM and the LAPIC countdown 951 to 970 under
+ * TCG -- a clock 1.5% and 3.5% slow -- while the HPET's broadcast, which
+ * counted from the deadline from the start, delivered 994 to 1000.  The boot
+ * line "10 ticks took ..." had been saying it since #459, in the other
+ * direction: more than a thousand per mille of nominal per tick.
+ *
+ * From the last deadline when this processor is re-arming after it: the
+ * deadline has passed, by less than the interval.  From now otherwise -- the
+ * first arm, one after the backend changed, or a tick held back so long that
+ * the next deadline has gone as well; the ticks lost there are the spl
+ * replay's business (#522), and a deadline is never armed in the past.
+ *
+ * In TSC counts, for both of the APIC timer's modes: the deadline mode
+ * writes TSC values anyway, and the countdown says nothing about when it
+ * reached zero, so the TSC is what it is measured by.  Zero: none yet, or one
+ * that no longer counts.
+ */
+static uint64_t	due_tsc[NCPUS];
+
+/* #593: the ablation that counts every deadline from now again. */
+#ifndef	ABLATE_593_FROM_NOW
+#define	ABLATE_593_FROM_NOW	0
+#endif
+
+static uint64_t next_due_tsc(uint64_t now, uint64_t ticks)
+{
+	unsigned cpu = cpu_number();
+	uint64_t last = cpu < NCPUS ? due_tsc[cpu] : 0;
+	uint64_t next = now + ticks;
+
+	if (!ABLATE_593_FROM_NOW
+	    && last != 0 && now >= last && now - last < ticks)
+		next = last + ticks;
+	if (cpu < NCPUS)
+		due_tsc[cpu] = next;
+	return next;
+}
+
+static void forget_due_tsc(void)
+{
+	unsigned cpu = cpu_number();
+
+	if (cpu < NCPUS)
+		due_tsc[cpu] = 0;
+}
+
 static int tscdl_arm(uint64_t ns)
 {
 	uint64_t ticks, now, rate = tsc_hz();
@@ -163,7 +272,7 @@ static int tscdl_arm(uint64_t ns)
 		ticks = 1;		/* never arm for "now or earlier" */
 
 	now = rdtsc();
-	wrmsr(MSR_IA32_TSC_DEADLINE, now + ticks);
+	wrmsr(MSR_IA32_TSC_DEADLINE, next_due_tsc(now, ticks));
 	return 1;
 }
 
@@ -172,16 +281,27 @@ static void tscdl_stop(void)
 	/* Zero disarms the deadline: architecturally defined, unlike the APIC
 	 * countdown where zero also means stopped but by a different route. */
 	wrmsr(MSR_IA32_TSC_DEADLINE, 0);
+	forget_due_tsc();
 }
 
 static const struct clock_event_ops tscdl_ops = {
-	"tsc-deadline", tscdl_probe, tscdl_setup, tscdl_arm, tscdl_stop
+	"tsc-deadline", tscdl_probe, tscdl_setup, tscdl_arm, tscdl_stop, 0
 };
 
 /* ----------------------------------------------------- lapic one-shot --- */
 
 static int lapic_probe_ev(void)
 {
+#if ABLATE_593_NO_APIC_TIMER
+	printf("clock_event: lapic-oneshot: the APIC timer is unusable, by "
+	       "ablation (#593)\n");
+	return 0;
+#endif
+#if ABLATE_593_NO_COUNTDOWN
+	printf("clock_event: lapic-oneshot: the APIC timer's countdown is "
+	       "unusable, by ablation (#593)\n");
+	return 0;
+#endif
 	return lapic_present() && lapic_timer_hz() != 0;
 }
 
@@ -193,10 +313,29 @@ static void lapic_setup_ev(uint8_t vector)
 static int lapic_arm(uint64_t ns)
 {
 	uint64_t hz = lapic_timer_hz();
+	uint64_t rate = tsc_hz();
 	uint64_t count;
 
 	if (hz == 0)
 		return 0;
+
+	/*
+	 * #593: counted from the last deadline, and the countdown cannot say
+	 * when it reached zero, so the TSC says how late this re-arm is and the
+	 * interval is shortened by it -- see next_due_tsc().  With no TSC rate
+	 * there is nothing to measure the lateness by, and the countdown is
+	 * counted from now.  The split below, for tscdl_arm()'s reason.
+	 */
+	if (rate != 0) {
+		uint64_t ticks = (ns / NS_PER_SEC) * rate
+			       + ((ns % NS_PER_SEC) * rate) / NS_PER_SEC;
+		uint64_t now = rdtsc();
+		uint64_t d = next_due_tsc(now, ticks ? ticks : 1) - now;
+
+		ns = (d / rate) * NS_PER_SEC + ((d % rate) * NS_PER_SEC) / rate;
+	} else {
+		forget_due_tsc();
+	}
 
 	/* Same split as above, same reason. */
 	count = (ns / NS_PER_SEC) * hz + ((ns % NS_PER_SEC) * hz) / NS_PER_SEC;
@@ -216,11 +355,12 @@ static int lapic_arm(uint64_t ns)
 static void lapic_stop_ev(void)
 {
 	lapic_timer_stop();
+	forget_due_tsc();
 }
 
 static const struct clock_event_ops lapic_ops = {
 	"lapic-oneshot", lapic_probe_ev, lapic_setup_ev, lapic_arm,
-	lapic_stop_ev
+	lapic_stop_ev, 0
 };
 
 /* --------------------------------------------------------- selection ---- */
@@ -231,17 +371,30 @@ static const struct clock_event_ops *ops;
  * Preference order, best first.  Kept as a table so that adding a backend is
  * adding a row, and so the boot log can say what was rejected as well as what
  * won -- "why did it pick that one" is a question that gets asked at 2am.
+ *
+ * #593: the HPET LAST, and argued rather than appended.  The two above are
+ * each processor's own timer, armed by one WRMSR or one APIC write on the
+ * processor that wants the interrupt.  The HPET is one device for the whole
+ * machine: every arm is a read of its counter and, often, a write to its
+ * comparator -- each an exit to the host under an emulator, where the APIC
+ * is emulated in the kernel's own module -- taken under a lock every
+ * processor shares, and every tick but the boot processor's arrives as an IPI
+ * the boot processor sends.  It costs more on every axis and gains nothing a
+ * working APIC timer lacks, so it is the backend for when the APIC timer
+ * cannot be used: the machine where that used to end the boot with the panic
+ * in clock_event_init().
  */
 static const struct clock_event_ops * const backends[] = {
 	&tscdl_ops,
 	&lapic_ops,
+	&hpet_event_ops,
 };
 
 void
 clock_event_init(uint8_t vector)
 {
 	unsigned i;
-	int forced_lapic;
+	int forced_lapic, forced_hpet;
 
 	tick_ns = NS_PER_SEC / event_hz;
 	event_vector = vector;
@@ -250,14 +403,30 @@ clock_event_init(uint8_t vector)
 	 * -T forces the LAPIC backend even where the deadline works, so the
 	 * two can be compared on the SAME binary.  An A/B across two builds
 	 * measures the builds as much as the change.
+	 *
+	 * -H (#593) forces the HPET the same way, past both of the APIC
+	 * timer's modes: the backend a machine reaches only when the APIC
+	 * timer cannot be used would otherwise be run by no boot at all.
 	 */
 	forced_lapic = boot_flag('T');
+	forced_hpet = boot_flag('H');
+
+#if ABLATE_593_HPET_NAMED
+	rulers_distrust(RULER_HPET);
+	printf("clock_event: the HPET's counter is named before the clock is "
+	       "chosen, by ablation (#593)\n");
+#endif
 
 	ops = (const struct clock_event_ops *) 0;
 	for (i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
 		const struct clock_event_ops *b = backends[i];
 		int usable = b->probe();
 
+		if (forced_hpet && b != &hpet_event_ops) {
+			printf("clock_event: %s %s, skipped by -H\n",
+			       b->name, usable ? "available" : "unavailable");
+			continue;
+		}
 		if (forced_lapic && b == &tscdl_ops) {
 			printf("clock_event: %s %s, skipped by -T\n",
 			       b->name, usable ? "available" : "unavailable");
@@ -280,6 +449,35 @@ clock_event_init(uint8_t vector)
 		      "would never preempt anything (#459)");
 	}
 
+	if (ops->start)
+		ops->start(vector);
+
+	/*
+	 * #593: whether the APIC timer keeps counting in the deep C-states
+	 * (ARAT, CPUID.06H:EAX[2]).  Without it a processor sleeping deeper
+	 * than C1 loses its tick, and needs a timer outside its core to wake it
+	 * -- the HPET's broadcast.  Printed so the question is answered per
+	 * machine rather than assumed: the idle loop only halts today, and C1
+	 * keeps the APIC timer counting whatever this says.
+	 */
+	{
+		uint32_t a, b, c, d;
+
+		cpuid(0, &a, &b, &c, &d);
+		if (a >= 6) {
+			cpuid(6, &a, &b, &c, &d);
+			printf("clock_event: the APIC timer %s in deep C-states "
+			       "(ARAT, CPUID.06H:EAX[2] = %u); the idle loop "
+			       "halts, in C1 (#593)\n",
+			       (a & 4) ? "keeps counting" : "STOPS",
+			       (a >> 2) & 1);
+		} else {
+			printf("clock_event: CPUID has no leaf 6, so nothing "
+			       "says whether the APIC timer counts in deep "
+			       "C-states; the idle loop halts, in C1 (#593)\n");
+		}
+	}
+
 	printf("clock_event: using %s at %u Hz (%llu ns per tick)\n",
 	       ops->name, event_hz, (unsigned long long) tick_ns);
 }
@@ -300,6 +498,10 @@ clock_event_arm_ns(uint64_t ns)
 int
 clock_event_arm_tick(void)
 {
+#if ABLATE_593_NEVER_TICKS
+	if (cpu_number() == 1)
+		return 1;
+#endif
 	return clock_event_arm_ns(tick_ns);
 }
 
@@ -311,49 +513,66 @@ clock_event_stop(void)
 }
 
 /*
- * #594: the tick leaves the TSC, because the watchdog has named it.
+ * #594, #593: the tick leaves a clock the watchdog has named -- the TSC, or
+ * the HPET's counter.
  *
- * Every processor has to do it for itself -- each has its own timer -- so this
- * processor does, and then asks the others by cross-call.  Each one, with
- * interrupts off: disarms the deadline, puts its timer in one-shot mode and
- * arms one tick.  A processor that was inside its tick handler when the
- * backend changed finished that handler first (interrupts are off in it) and
- * re-armed the deadline one last time; the cross-call arrives after, and
- * replaces it.
+ * Every processor has to do it for itself -- each has its own timer, or its
+ * own deadline in the HPET's broadcast -- so this processor does, and then
+ * asks the others by cross-call.  Each one, with interrupts off: takes its
+ * deadline out of the old backend, sets up the new one and arms one tick.  A
+ * processor that was inside its tick handler when the backend changed
+ * finished that handler first (interrupts are off in it) and re-armed the old
+ * backend one last time; the cross-call arrives after, and replaces it.
  *
  * ⚠️ The cross-call, not "each processor notices at its next tick".  The next
- * tick is a deadline on the counter that has just been found wrong, and a
- * counter that stopped would never deliver it: the processor would lose its
- * clock for good.
+ * tick is a deadline on the clock that has just been found wrong, and a clock
+ * that stopped would never deliver it: the processor would lose its clock for
+ * good.
  *
- * ⚠️ Called BEFORE the TSC's rate is withdrawn (tsc_distrust()), never after:
- * until every processor has answered, some may still re-arm the deadline, and
- * tscdl_arm() with a rate of zero refuses -- a processor whose re-arm is
- * refused has no clock.  ipi_call_others() returns only when all have done it.
+ * ⚠️ Called BEFORE the named clock's rate is withdrawn (tsc_distrust()), never
+ * after: until every processor has answered, some may still re-arm the old
+ * backend, and tscdl_arm() with a rate of zero refuses -- a processor whose
+ * re-arm is refused has no clock.  ipi_call_others() returns only when all
+ * have done it.
  *
- * Processors not yet online set themselves up with `ops' when they arrive,
- * which by then is this one.  If the local APIC timer has no rate there is
- * nowhere to go, and the tick stays on the TSC: a third backend is #593.
+ * The first other backend in the preference order that probes usable, and
+ * its start() before anything is pointed at it.  Processors not yet online
+ * set themselves up with `ops' when they arrive, which by then is the new one.
+ * If none can take the tick, it stays where it is, and the caller says so.
  */
+static const struct clock_event_ops *leaving;
+
 static void
 clock_event_resetup(void *arg)
 {
 	(void) arg;
-	tscdl_stop();
+	leaving->stop();
 	ops->setup(event_vector);
 	(void) ops->arm(tick_ns);
 }
 
-int
-clock_event_leave_tsc(void)
+static int
+clock_event_leave(const struct clock_event_ops *from)
 {
-	if (ops != &tscdl_ops)
-		return CLOCK_EVENT_NOT_ON_TSC;
-	if (!lapic_ops.probe())
+	const struct clock_event_ops	*to = 0;
+	unsigned			i;
+
+	if (ops != from)
+		return CLOCK_EVENT_NOT_ON;
+	for (i = 0; i < sizeof(backends) / sizeof(backends[0]); i++)
+		if (backends[i] != from && backends[i]->probe()) {
+			to = backends[i];
+			break;
+		}
+	if (to == 0)
 		return CLOCK_EVENT_NOWHERE_TO_GO;
 
+	if (to->start)
+		to->start(event_vector);
+
 	disable_preemption();
-	ops = &lapic_ops;
+	leaving = from;
+	ops = to;
 	barrier();
 
 	percpu_intr_disable();
@@ -363,7 +582,19 @@ clock_event_leave_tsc(void)
 	ipi_call_others(clock_event_resetup, (void *) 0);
 	enable_preemption();
 
-	return CLOCK_EVENT_LEFT_TSC;
+	return CLOCK_EVENT_LEFT;
+}
+
+int
+clock_event_leave_tsc(void)
+{
+	return clock_event_leave(&tscdl_ops);
+}
+
+int
+clock_event_leave_hpet(void)
+{
+	return clock_event_leave(&hpet_event_ops);
 }
 
 const char *
@@ -606,6 +837,208 @@ clock_selftest(unsigned cpu)
 	clock_report[cpu].pending |= CLOCK_REPORT_RATE;
 }
 
+/* ---------------------------------------------- the tick's windows ---- */
+
+/*
+ * #593: every processor's ticks against the TSC and the PM timer, in windows
+ * of 1 s, then 10 s, then a minute -- whatever the backend, so that two
+ * backends can be compared on one binary, -H against none.  The HPET's own
+ * report says how late its comparator matched; this says whether each
+ * processor got the ticks it was owed, which is the question for all three.
+ *
+ * Driven by the boot processor's tick, timed by the TSC -- or by the PM timer
+ * when the TSC has no rate (#594) -- closed in the tick and printed by
+ * clock_event_drain_reports().  The PM timer's total is added up a tick at a
+ * time, because at 24 bits it wraps every 4.7 s; a gap between two ticks
+ * longer than four seconds by the TSC makes that total no longer a time, and
+ * the line says so.
+ */
+static struct {
+	int		open;
+	unsigned	index;
+	uint64_t	tsc0, tsc_last;
+	struct pm_total	pm;
+	unsigned long	ticks0[NCPUS];
+} tw;
+
+static struct {
+	unsigned	index;
+	uint64_t	tsc, pm;
+	int		pm_valid;
+	unsigned long	ticks[NCPUS];
+} tw_report;
+
+static volatile int	tw_pending;
+static unsigned		tw_dropped;
+
+static void
+tick_window_open(uint64_t now)
+{
+	unsigned c;
+
+	for (c = 0; c < NCPUS; c++)
+		tw.ticks0[c] = tick_count[c];
+	tw.tsc0 = tw.tsc_last = now;
+	pm_total_open(&tw.pm);
+	tw.open = 1;
+}
+
+static void
+tick_window_account(void)
+{
+	uint64_t	rate = tsc_hz(), now = rdtsc(), want;
+	unsigned	c;
+	int		closed;
+
+	if (!tw.open) {
+		tick_window_open(now);
+		return;
+	}
+	pm_total_step(&tw.pm, rate != 0 && now - tw.tsc_last > 4 * rate);
+	tw.tsc_last = now;
+
+	want = window_seconds(tw.index);
+	if (rate != 0)
+		closed = now - tw.tsc0 >= want * rate;
+	else if (pmtimer_present())
+		closed = tw.pm.sum >= want * PMTIMER_HZ;
+	else
+		return;		/* no clock to close a window by */
+	if (!closed)
+		return;
+
+	if (!handoff_free(&tw_pending)) {
+		tw_dropped++;
+	} else {
+		tw_report.index = tw.index;
+		tw_report.tsc = now - tw.tsc0;
+		tw_report.pm = tw.pm.sum;
+		tw_report.pm_valid = pm_total_valid(&tw.pm);
+		for (c = 0; c < NCPUS; c++)
+			tw_report.ticks[c] = tick_count[c] - tw.ticks0[c];
+		handoff_publish(&tw_pending);
+	}
+	tw.index++;
+	tick_window_open(now);
+}
+
+static void
+tick_window_print(void)
+{
+	uint64_t	rate = tsc_hz();
+	unsigned	c;
+	struct line	l;
+
+	if (!handoff_claim(&tw_pending))
+		return;
+
+	/*
+	 * Three states of the PM timer, and they are said apart: absent; a
+	 * total a gap longer than its wrap made meaningless -- which is not
+	 * the same as absent, and printing "no PM timer" for it would be the
+	 * line lying about the machine; and a total that is a time.  Without
+	 * a TSC rate the gap cannot be seen at all, and the line says that
+	 * instead of vouching for the total.
+	 */
+	line_start(&l);
+	put_s(&l, "clock_event: window ");
+	put_u(&l, tw_report.index);
+	put_s(&l, " on ");
+	put_s(&l, clock_event_name());
+	put_s(&l, ", ");
+	if (rate != 0) {
+		put_u(&l, tw_report.tsc * 1000 / rate);
+		put_s(&l, " ms by the TSC, ");
+	} else {
+		put_s(&l, "the TSC has no rate, ");
+	}
+	if (!pmtimer_present()) {
+		put_s(&l, "no PM timer");
+	} else if (!tw_report.pm_valid) {
+		put_s(&l, "the PM timer wrapped inside a gap between two ticks");
+	} else {
+		put_u(&l, tw_report.pm * 1000 / PMTIMER_HZ);
+		put_s(&l, " ms by the PM timer");
+		if (rate == 0)
+			put_s(&l, ", which without a TSC rate cannot be "
+				  "checked for a gap longer than its wrap");
+	}
+	if (tw_dropped != 0)
+		put_s(&l, "; windows were dropped while one waited to be "
+			  "printed");
+	put_s(&l, " (#593)");
+	printf("%s\n", l.b);
+
+	for (c = 0; c < NCPUS; c++) {
+		uint64_t	t = tw_report.ticks[c];
+		int		judged = 0;
+		uint64_t	permille = 0;
+
+		/*
+		 * Every processor that is up, and only those -- NOT "every
+		 * processor that has ticked".  That was the test here, and
+		 * it left out exactly the processor whose clock never started:
+		 * under UROS_ABLATE_593_NEVER_TICKS the lines named the other
+		 * three and the run passed.  Up the way the debugger asks it
+		 * (ddb.c): the slot is a processor and it is running.
+		 */
+		if (!machine_slot[c].is_cpu || !machine_slot[c].running)
+			continue;
+		line_start(&l);
+		put_s(&l, "clock_event: cpu ");
+		put_u(&l, c);
+		put_s(&l, " took ");
+		put_u(&l, t);
+		put_s(&l, " ticks in window ");
+		put_u(&l, tw_report.index);
+		if (rate != 0 && tw_report.tsc != 0) {
+			permille = t * 1000 * rate
+				   / ((uint64_t) event_hz * tw_report.tsc);
+			judged = 1;
+			put_s(&l, ", ");
+			put_u(&l, permille);
+			put_s(&l, " per mille of nominal by the TSC");
+		}
+		if (pmtimer_present() && tw_report.pm_valid
+		    && tw_report.pm != 0) {
+			uint64_t by_pm = t * 1000 * PMTIMER_HZ
+					 / ((uint64_t) event_hz * tw_report.pm);
+
+			if (!judged) {
+				permille = by_pm;
+				judged = 1;
+			}
+			put_s(&l, ", ");
+			put_u(&l, by_pm);
+			put_s(&l, rate != 0 ? " by the PM timer"
+					    : " per mille of nominal by the PM "
+					      "timer");
+		}
+
+		/*
+		 * A verdict, and only for a clock that STOPPED.  The numbers
+		 * above are read rather than judged: a tick lost to a
+		 * processor held past its deadline is a fact of emulation and
+		 * of hardware alike.  But fewer than half the ticks a window
+		 * holds is not a rate that is off, it is a clock that did not
+		 * run -- UROS_ABLATE_593_UNCHECKED took every processor to 6
+		 * per mille for 43 s at a time, and the run was reported as
+		 * passed, because nothing here said so.  Window 0 is not
+		 * judged: it opens before every processor has started to tick.
+		 */
+		if (judged && tw_report.index > 0 && tick_count[c] == 0)
+			put_s(&l, " -- WRONG: this processor is up and has "
+				  "never ticked, its clock never started "
+				  "(#593)");
+		else if (judged && tw_report.index > 0 && permille < 500)
+			put_s(&l, " -- WRONG: fewer than half the ticks the "
+				  "window holds, the clock stopped (#593)");
+		printf("%s\n", l.b);
+	}
+
+	handoff_release(&tw_pending);
+}
+
 void
 clock_event_drain_reports(void)
 {
@@ -656,6 +1089,12 @@ clock_event_drain_reports(void)
 						   : 0),
 		       clock_event_name());
 	}
+
+	/* Every processor's ticks, whatever the backend (#593). */
+	tick_window_print();
+
+	/* And the HPET broadcast's own accounting, when it is the clock. */
+	hpet_event_drain_report();
 }
 
 void
@@ -789,6 +1228,8 @@ clock_event_tick(struct trap_frame *frame)
 	if (cpu < NCPUS)
 		tick_count[cpu]++;
 	clock_selftest(cpu);
+	if (cpu == (unsigned) master_cpu)
+		tick_window_account();
 
 	/*
 	 * Acknowledge, then re-arm.

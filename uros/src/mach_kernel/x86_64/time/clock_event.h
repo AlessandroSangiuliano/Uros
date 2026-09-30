@@ -81,7 +81,10 @@ struct clock_event_ops {
 	 * left in its APIC, not with what the boot processor configured. */
 	void		(*setup)(uint8_t vector);
 
-	/* Fire once, about `ns' from now.  Returns zero if the interval
+	/* Fire once, about `ns' from now -- or, when this processor is
+	 * re-arming just after its last deadline, `ns' after that deadline,
+	 * so that a periodic tick does not run slow by its own delivery time
+	 * (#593).  Returns zero if the interval
 	 * cannot be expressed, which the caller must treat as a failure to
 	 * arm rather than as "armed for zero" -- a countdown of zero means
 	 * STOPPED, and that failure looks exactly like a working kernel whose
@@ -89,6 +92,12 @@ struct clock_event_ops {
 	int		(*arm)(uint64_t ns);
 
 	void		(*stop)(void);
+
+	/* Once, on the boot processor, when this backend is chosen: whatever
+	 * the machine has only one of -- a device to route, a handler to
+	 * install (#593).  Null for a backend that is all per-processor
+	 * state.  Must be idempotent: a -C boot chooses the clock twice. */
+	void		(*start)(uint8_t vector);
 };
 
 /*
@@ -112,20 +121,21 @@ void		clock_event_stop(void);
 const char	*clock_event_name(void);
 
 /*
- * #594: move every processor's tick off the TSC, to the local APIC timer.
- * Thread context, interrupts on.  Three outcomes, and the caller has to tell
- * them apart: only after the first may the TSC's rate be withdrawn -- in the
- * third the tick still runs on the TSC, and a deadline with no rate is a
+ * #594, #593: move every processor's tick off the TSC, or off the HPET, to the
+ * first other backend in the preference order that can take it.  Thread
+ * context, interrupts on.  Three outcomes, and the caller has to tell them
+ * apart: only after the first may the named clock's rate be withdrawn -- in
+ * the third the tick still runs on it, and a deadline with no rate is a
  * processor with no clock.
  */
 enum {
-	CLOCK_EVENT_LEFT_TSC,		/* every processor now on the APIC */
-	CLOCK_EVENT_NOT_ON_TSC,		/* the tick was elsewhere already */
-	CLOCK_EVENT_NOWHERE_TO_GO,	/* on the TSC, and the APIC timer has
-					   no rate: there is no third backend
-					   yet (#593) */
+	CLOCK_EVENT_LEFT,		/* every processor now elsewhere */
+	CLOCK_EVENT_NOT_ON,		/* the tick was elsewhere already */
+	CLOCK_EVENT_NOWHERE_TO_GO,	/* on it still: no other backend
+					   can take the tick */
 };
 int		clock_event_leave_tsc(void);
+int		clock_event_leave_hpet(void);
 
 /* #594: how many ticks this processor has taken since boot. */
 unsigned long	clock_event_ticks(unsigned cpu);

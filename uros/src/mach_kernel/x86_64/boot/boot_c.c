@@ -76,6 +76,7 @@
 
 #include <boot/bootarg.h>
 #include <time/clock_event.h>	/* #459 */
+#include <time/line.h>		/* #593 */
 #include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
 #include <kern/misc_protos.h>	/* printf */
 #include <kern/fault_profile.h>	/* #482: arm the instrument once %gs is real */
@@ -3169,19 +3170,47 @@ static void tsc_selftest(void)
 }
 
 /*
- * The two rulers the machine has besides the 8254 (#508, phase 2).
- *
- * Each is found, made readable, and asked one question: how fast the TSC
- * runs against it, over the same thirty milliseconds the 8254 calibration
- * uses.  Nothing takes the answer yet -- tsc_hz() is still the 8254's -- and
- * that is deliberate: three rulers read side by side are the evidence the
- * vote in phase 4 will be designed from, including the question phase 1
- * raised about whether an emulator's rulers are independent at all.
- *
- * The interval runs from an edge of the ruler to a later edge, and both are
- * seen by reading it, so nothing is programmed inside the interval.  In kHz,
- * not MHz, because the differences phase 1 found are a third of a percent.
+ * #593, for #318's question: what one read of each clock costs, in TSC cycles
+ * -- the least of sixteen, because the least is the read nothing interrupted.
+ * A timebase is read on every clock_gettime(), and under an emulator a
+ * device register is an exit to the host where the TSC is an instruction.
  */
+static uint32_t tsc_read32(void)
+{
+	return (uint32_t)rdtsc();
+}
+
+static uint64_t read_cost(uint32_t (*rd)(void))
+{
+	uint64_t best = ~0ULL;
+
+	for (unsigned i = 0; i < 16; i++) {
+		uint64_t t0 = rdtsc_ordered();
+
+		(void)rd();
+		t0 = rdtsc_ordered() - t0;
+		if (t0 < best)
+			best = t0;
+	}
+	return best;
+}
+
+static void read_costs(void)
+{
+	kputs("UrMach x86-64: one read, in TSC cycles, the least of 16: the "
+	      "TSC ");
+	kputdec(read_cost(tsc_read32));
+	if (pmtimer_present()) {
+		kputs(", the PM timer ");
+		kputdec(read_cost(pmtimer_read));
+	}
+	if (hpet_present()) {
+		kputs(", the HPET ");
+		kputdec(read_cost(hpet_read32));
+	}
+	kputs(" (#593, for #318)\r\n");
+}
+
 /*
  * The rulers the machine has besides the 8254 (#508): found, made readable,
  * and described.  What the TSC measures against each, and their vote, is
@@ -3209,6 +3238,7 @@ static void rulers_selftest(void)
 	if (!hpet_present()) {
 		kputs("none — no table, or a block whose capability register "
 		      "does not add up\r\n");
+		read_costs();
 		return;
 	}
 	kputs("at ");
@@ -3223,8 +3253,16 @@ static void rulers_selftest(void)
 	kputdec(hpet_comparators());
 	kputs(" comparators, vendor ");
 	kputhex64(hpet_vendor());
-	kputs(hpet_started_here() ? ", started here\r\n"
-				  : ", already running\r\n");
+	kputs(hpet_started_here() ? ", started here" : ", already running");
+	if (hpet_legacy_found_on())
+		kputs("; LegacyReplacement was left on: switched off (#593)");
+	if (hpet_comparators_found_on() != 0) {
+		kputs("; comparators ");
+		kputhex64(hpet_comparators_found_on());
+		kputs(" (one bit each) were left interrupting: silenced (#593)");
+	}
+	kputs("\r\n");
+	read_costs();
 }
 
 /*
@@ -6262,6 +6300,38 @@ static void panic_format_selftest(void)
 	kputs(wrong == 0 ? " wrong\r\n" : " WRONG\r\n");
 }
 
+/*
+ * #593: a report line that fits comes out whole, and one that does not ends
+ * in the mark that says it was cut -- which no report line in a working boot
+ * is long enough to show, so it is shown here.
+ */
+static void line_selftest(void)
+{
+	static struct line	l;	/* 512 bytes: not on this stack */
+	const unsigned		mark = sizeof(LINE_CUT_MARK) - 1;
+	unsigned		i, wrong = 0;
+
+	line_start(&l);
+	put_s(&l, "window ");
+	put_u(&l, 18446744073709551615ULL);
+	if (!str_equal(l.b, "window 18446744073709551615") || l.cut)
+		wrong++;
+
+	line_start(&l);
+	for (i = 0; i < 100; i++)
+		put_s(&l, "0123456789");
+	put_s(&l, "and more");
+	if (!l.cut || l.n != sizeof(l.b) - 1
+	    || !str_equal(l.b + l.n - mark, LINE_CUT_MARK))
+		wrong++;
+
+	kputs("UrMach x86-64: report lines: one that fits comes out whole, "
+	      "one of 1008 characters ends in \"" LINE_CUT_MARK "\" at ");
+	kputdec(l.n);
+	kputs(wrong == 0 ? " -- 2 cases, 0 wrong (#593)\r\n"
+			 : " -- 2 cases, WRONG (#593)\r\n");
+}
+
 static void msg_abi_selftest(void)
 {
 	/*
@@ -7004,6 +7074,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	lock_cost_bench();
 	device_master_irq_selftest();
 	panic_format_selftest();
+	line_selftest();
 	msg_abi_selftest();
 	port_name_selftest();
 	swapgs_window_selftest();
