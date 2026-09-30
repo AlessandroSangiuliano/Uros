@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <kern/misc_protos.h>	/* #461: halt_cpu, panic */
+#include <kern/ast.h>		/* #603: ast_check */
 
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
@@ -19,7 +20,6 @@
 #include <sync/lock.h>
 #include <trap/trap.h>
 
-extern void	ast_check(void);	/* kern/ast.c (#603) */
 
 /*
  * #603: the AST interrupt back to an EOI and nothing else, as it was.
