@@ -1374,9 +1374,18 @@ arm_six_non_canonical_return(void)
  * The thread below does nothing but take such faults: it touches a fresh page,
  * counts it, touches the next, a megabyte at a time, allocated and given back
  * with a system call at each end.  A system call's own check is therefore at
- * most ARM7_PAGES touches away, and that is what a thread that runs on shows:
- * touches after the suspend, up to the end of its megabyte.  One that stops
- * shows at most the touch it was in the middle of.
+ * most ARM7_PAGES touches away.
+ *
+ * ⚠️ Counted DURING thread_suspend(), from just before the call to its
+ * answer -- not after it.  thread_suspend() ends in thread_wait(), which
+ * returns only once the thread is no longer running, so a count taken after
+ * the answer is zero whether the thread stopped at once or ran on to the end
+ * of its megabyte first: the first version of this arm counted there, and
+ * passed on the kernel it was written to fail.  What the defect costs is the
+ * user code run between nudge() and the parking -- nudge() promises none --
+ * and that is inside the call.  One that stops touches at most the page it
+ * was in the middle of; one that runs on reaches the end of its megabyte.  And
+ * after the answer, nothing at all, whichever it was.
  */
 #define	ARM7_PAGES	256
 #define	ARM7_ROUNDS	20
@@ -1415,8 +1424,8 @@ static int
 arm_seven_suspend_in_page_faults(void)
 {
 	pthread_t	victim;
-	unsigned long	before, after, most = 0;
-	int		i, round, ran_on = 0;
+	unsigned long	asked, answered, later, most = 0;
+	int		i, round, ran_on = 0, ran_after = 0;
 	kern_return_t	kr;
 
 	if (pthread_create(&victim, NULL, the_thread_that_lives_in_page_faults,
@@ -1434,7 +1443,9 @@ arm_seven_suspend_in_page_faults(void)
 	}
 
 	for (round = 0; round < ARM7_ROUNDS; round++) {
+		asked = arm_seven_touches;
 		kr = thread_suspend(arm_seven_thread);
+		answered = arm_seven_touches;
 		if (kr != KERN_SUCCESS) {
 			printf("act_test: [7] thread_suspend answered %d — "
 			       "WRONG\n", kr);
@@ -1442,29 +1453,36 @@ arm_seven_suspend_in_page_faults(void)
 			(void) thread_resume(arm_seven_thread);
 			return 0;
 		}
-		before = arm_seven_touches;
 		nap(30);
-		after = arm_seven_touches;
-		if (after - before > most)
-			most = after - before;
-		if (after - before > ARM7_RAN_ON)
+		later = arm_seven_touches;
+		if (answered - asked > most)
+			most = answered - asked;
+		if (answered - asked > ARM7_RAN_ON)
 			ran_on++;
+		if (later != answered)
+			ran_after++;
 		(void) thread_resume(arm_seven_thread);
 		nap(10);		/* back into its faults */
 	}
 	arm_seven_stop = 1;
 	(void) pthread_join(victim, NULL);
 
+	if (ran_after != 0) {
+		printf("act_test: [7] in %d of %d rounds the thread touched "
+		       "pages after thread_suspend had answered — WRONG (#603)\n",
+		       ran_after, ARM7_ROUNDS);
+		return 0;
+	}
 	if (ran_on != 0) {
-		printf("act_test: [7] in %d of %d rounds a thread suspended "
-		       "while it lived in page faults ran on: up to %lu pages "
-		       "touched after thread_suspend answered — WRONG (#603)\n",
+		printf("act_test: [7] in %d of %d rounds a thread that lives in "
+		       "page faults ran on after it was asked to stop: up to %lu "
+		       "pages touched inside thread_suspend — WRONG (#603)\n",
 		       ran_on, ARM7_ROUNDS, most);
 		return 0;
 	}
 	printf("act_test: [7] a thread that lives in page faults stopped when "
-	       "suspended: %d rounds, at most %lu pages touched after "
-	       "thread_suspend answered (#603)\n", ARM7_ROUNDS, most);
+	       "asked: %d rounds, at most %lu pages touched inside "
+	       "thread_suspend and none after (#603)\n", ARM7_ROUNDS, most);
 	return 1;
 }
 
@@ -1481,11 +1499,14 @@ arm_seven_suspend_in_page_faults(void)
  * on to the next tick.
  *
  * At one processor the answer is exact.  The suspender runs only while the
- * spinner is off the processor, so the count it reads after thread_suspend()
- * is the spinner's last, and a spinner that stops never adds to it.  At more
- * than one, the suspend reaches a running spinner by an interrupt, whose
- * return takes the AST even in one pass: the arm asks nothing there, and says
- * so.
+ * spinner is off the processor, so the count it reads just before
+ * thread_suspend() is the spinner's last; a spinner that stops at its first
+ * return never adds to it, and one that goes back to ring 3 spins until its
+ * next tick while thread_suspend() -- which ends in thread_wait() -- waits
+ * for it to stop.  Counted inside the call, for arm seven's reason.  At more
+ * than one processor the suspend reaches a running spinner by an interrupt,
+ * whose return takes the AST even in one pass: the arm asks nothing there,
+ * and says so.
  */
 #define	ARM8_ROUNDS	10
 #define	ARM8_NOT_ASKED	(-1)
@@ -1521,9 +1542,9 @@ static int
 arm_eight_suspend_a_spinner(void)
 {
 	pthread_t	spinner;
-	unsigned long	before, after, most = 0;
+	unsigned long	asked, answered, later, most = 0;
 	unsigned	ncpu = processors();
-	int		i, round, ran_on = 0;
+	int		i, round, ran_on = 0, ran_after = 0;
 	kern_return_t	kr;
 
 	if (ncpu != 1) {
@@ -1548,7 +1569,9 @@ arm_eight_suspend_a_spinner(void)
 
 	for (round = 0; round < ARM8_ROUNDS; round++) {
 		nap(20);		/* it runs; this comes back at a tick */
+		asked = arm_eight_spins;
 		kr = thread_suspend(arm_eight_thread);
+		answered = arm_eight_spins;
 		if (kr != KERN_SUCCESS) {
 			printf("act_test: [8] thread_suspend answered %d — "
 			       "WRONG\n", kr);
@@ -1556,26 +1579,33 @@ arm_eight_suspend_a_spinner(void)
 			(void) thread_resume(arm_eight_thread);
 			return 0;
 		}
-		before = arm_eight_spins;
 		nap(30);
-		after = arm_eight_spins;
-		if (after - before > most)
-			most = after - before;
-		if (after != before)
+		later = arm_eight_spins;
+		if (answered - asked > most)
+			most = answered - asked;
+		if (answered != asked)
 			ran_on++;
+		if (later != answered)
+			ran_after++;
 		(void) thread_resume(arm_eight_thread);
 	}
 	arm_eight_stop = 1;
 	(void) pthread_join(spinner, NULL);
 
+	if (ran_after != 0) {
+		printf("act_test: [8] in %d of %d rounds the spinner turned "
+		       "after thread_suspend had answered — WRONG (#603)\n",
+		       ran_after, ARM8_ROUNDS);
+		return 0;
+	}
 	if (ran_on != 0) {
-		printf("act_test: [8] in %d of %d rounds a spinner suspended "
+		printf("act_test: [8] in %d of %d rounds a spinner asked to stop "
 		       "while it was off its processor spun on: up to %lu turns "
-		       "after thread_suspend answered — WRONG (#603)\n",
+		       "inside thread_suspend — WRONG (#603)\n",
 		       ran_on, ARM8_ROUNDS, most);
 		return 0;
 	}
-	printf("act_test: [8] a spinner suspended while it was off its "
+	printf("act_test: [8] a spinner asked to stop while it was off its "
 	       "processor never turned again: %d rounds at one processor "
 	       "(#603)\n", ARM8_ROUNDS);
 	return 1;
