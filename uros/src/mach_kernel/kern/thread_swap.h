@@ -74,6 +74,14 @@ extern boolean_t
 		thread_swapin_blocking(thread_act_t thr_act);
 extern void	thread_swapout(thread_act_t thr_act);
 extern void	swapout_threads(boolean_t now);
+
+/*
+ * The swapper's scan, and how many scheduler ticks a thread must have slept
+ * before the scan takes it -- for the -Q test (#607), which runs the scan
+ * itself with the bar lowered rather than marking a thread by hand.
+ */
+extern void	swapout_scan(void);
+extern int	maxslp;
 extern void	thread_swapout_enqueue(thread_act_t thr_act);
 extern void	thread_swap_disable(thread_act_t thr_act);
 

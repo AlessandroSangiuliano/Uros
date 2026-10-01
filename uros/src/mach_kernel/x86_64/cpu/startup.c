@@ -41,6 +41,7 @@
 #include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
+#include <trap/handoff_test.h>	/* #607: -Q, the futex hand-off's wake */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
 #include <ddb/fbcons.h>	/* #568: the other output, mapped once the pmap is up */
@@ -435,6 +436,19 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('W') && want > 1)
 			kernel_wait_preempt_test();
+
+		/*
+		 * -Q: the futex hand-off and the waiters it must not switch
+		 * onto -- one the thread swapper has swapped out, one
+		 * thread_stop() has stopped (#607).
+		 *
+		 * NOT gated on `want > 1', unlike the two above: the waker and
+		 * the waiter take turns on one processor as well as on two, and
+		 * the uniprocessor is the configuration this project treats as
+		 * first class.  Returns, so the boot goes on.
+		 */
+		if (boot_flag('Q'))
+			handoff_wake_test();
 
 		/*
 		 * -M: what concurrency does to a pmap with no locking (#455).
