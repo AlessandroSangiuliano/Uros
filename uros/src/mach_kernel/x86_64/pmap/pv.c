@@ -376,8 +376,11 @@ pv_entry_t pv_head(uint64_t pa)
  * The record of what a page's mappings saw (#606): kept from an entry that is
  * going, asked, and cleared.  No-ops for a page the index does not cover.
  *
- * Nothing is kept from an entry that saw nothing, so the common removal of a
- * mapping that was never touched costs a test and no locked instruction.
+ * Nothing is kept from an entry that saw nothing: removing a mapping that was
+ * never touched costs a test and no locked instruction.  Most removals did see
+ * something and pay one `lock or'; the -M and fault benches showed no cost
+ * standing out of their noise, so it is not skipped when the record already
+ * holds the bits.
  */
 void pv_keep_bits(uint64_t pa, pt_entry_t entry)
 {
