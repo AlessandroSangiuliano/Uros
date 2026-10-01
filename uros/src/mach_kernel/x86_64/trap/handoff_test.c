@@ -34,13 +34,15 @@
  * as it always does.  A test that marked the waiter by hand would be testing
  * its own idea of what the swapper does.
  *
- * ⚠️ The swapped waiter belongs to a task made by kernel_task_create(),
- * because the kernel_task's threads are unswappable by construction:
- * kernel_thread() makes them so, and thread_swappable() panics if asked to
- * undo it for one of them.
+ * ⚠️ The swapped waiter is a kernel-mode thread of an ORDINARY task, made by
+ * task_create_local() with an empty user map.  The kernel_task's threads are
+ * unswappable by construction -- kernel_thread() makes them so, and
+ * thread_swappable() panics if asked to undo it for one of them -- and a task
+ * from kernel_task_create() is the one kind this machine refuses outright:
+ * x86-64 has no kernel-loaded tasks (#453), and the first version of this test
+ * found that out by panicking in pcb_user_to_kernel().  The thread never
+ * leaves the kernel and touches nothing of its task's but the task.
  */
-
-#include <mach/mach_server.h>		/* kernel_task_create() */
 
 #include <kern/lock.h>			/* mutex_pause() */
 #include <kern/misc_protos.h>
@@ -197,7 +199,7 @@ hq_swapped_arm(void)
 	int		old, out;
 	spl_t		s;
 
-	if (kernel_task_create(kernel_task, 0, 0, &task) != KERN_SUCCESS) {
+	if (task_create_local(kernel_task, FALSE, FALSE, &task) != KERN_SUCCESS) {
 		printf("handoff: WRONG — could not create a task for the waiter "
 		       "the swapper is to take (#607)\n");
 		return;
