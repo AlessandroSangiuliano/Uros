@@ -931,7 +931,13 @@ blk_phys_said(const struct blk_handle *h, const char *when)
 	unsigned permille = all ? (unsigned)((h->xlate_cyc * 1000) / all) : 0;
 
 	cap_u64_t asks, claim, mac, find, rest;
-	char kernel[192] = "";
+
+	printf("blk: %s: %s %llu physical requests, %llu pages: asking the "
+	       "kernel %llu cycles a page, the transfer %llu a request — "
+	       "asking is %u.%u%% of it\n", h->part ? h->part->name : "?",
+	       when, (unsigned long long)h->phys_req,
+	       (unsigned long long)h->phys_pages, (unsigned long long)per_page,
+	       (unsigned long long)per_req, permille / 10, permille % 10);
 
 	/*
 	 * #537: the kernel's part of each ask, split, read here and not printed
@@ -940,29 +946,26 @@ blk_phys_said(const struct blk_handle *h, const char *when)
 	 * counted as the ask's.  Its sums are over every ask since boot, this
 	 * handle's and any other's, so the RPC is the difference of two
 	 * averages and can come out a little either way.
+	 *
+	 * ⚠️ A line of its own: a print longer than 256 bytes leaves in two
+	 * writes, and another task's output can land between them -- the one
+	 * line this first was, about 290 bytes, was cut at byte 256 in 8 of 18.
 	 */
 	if (device_dma_ask_cost(master_device, &asks, &claim, &mac, &find,
 				&rest) == KERN_SUCCESS && asks != 0) {
 		uint64_t in_kernel = (claim + mac + find + rest) / asks;
 
-		snprintf(kernel, sizeof(kernel), "; in the kernel %llu over %llu "
-			 "asks (the claim %llu, the MAC %llu, the region and the "
-			 "page %llu, the rest %llu), the RPC the other %lld (#537)",
-			 (unsigned long long)in_kernel, (unsigned long long)asks,
-			 (unsigned long long)(claim / asks),
-			 (unsigned long long)(mac / asks),
-			 (unsigned long long)(find / asks),
-			 (unsigned long long)(rest / asks),
-			 (long long)per_page - (long long)in_kernel);
+		printf("blk: %s: in the kernel, over all %llu asks since boot: "
+		       "%llu cycles a page -- the claim %llu, the MAC %llu, the "
+		       "region and the page %llu, the rest %llu; the RPC about "
+		       "%lld (#537)\n", h->part ? h->part->name : "?",
+		       (unsigned long long)asks, (unsigned long long)in_kernel,
+		       (unsigned long long)(claim / asks),
+		       (unsigned long long)(mac / asks),
+		       (unsigned long long)(find / asks),
+		       (unsigned long long)(rest / asks),
+		       (long long)per_page - (long long)in_kernel);
 	}
-
-	printf("blk: %s: %s %llu physical requests, %llu pages: asking the "
-	       "kernel %llu cycles a page, the transfer %llu a request — "
-	       "asking is %u.%u%% of it%s\n", h->part ? h->part->name : "?",
-	       when, (unsigned long long)h->phys_req,
-	       (unsigned long long)h->phys_pages, (unsigned long long)per_page,
-	       (unsigned long long)per_req, permille / 10, permille % 10,
-	       kernel);
 }
 
 static void
