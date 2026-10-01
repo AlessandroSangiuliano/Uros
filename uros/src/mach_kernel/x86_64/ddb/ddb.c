@@ -887,9 +887,15 @@ static boolean_t claim_machine(void)
 {
 	unsigned me = cpu_number();
 
+	/*
+	 * #599: compared with what was expected.  atomic_cmpxchg64 answers
+	 * with the value it found, and this took that for a success flag: a
+	 * claim lost to any processor but 0 answered TRUE, and a second
+	 * processor walked into a session another one held (found in review).
+	 */
 	return atomic_cmpxchg64((volatile uint64_t *) &ddb_owner,
 				(uint64_t) DDB_NOBODY, (uint64_t) me)
-	       ? TRUE : FALSE;
+	       == (uint64_t) DDB_NOBODY;
 }
 
 static void ddb_stop_others(void)
