@@ -35,21 +35,45 @@
 #include <cpu/halt_test.h>
 #include <cpu/regs.h>
 #include <cpu/spl.h>
+#include <sync/atomic.h>
 
 /* The message both processors panic with; the check matches it whole. */
 #define DP_MESSAGE	"double_panic: two processors panic at once, this one " \
 			"is cpu %d (#599)"
 
-static volatile int	dp_ready;
-static volatile int	dp_go;
+/*
+ * The rendezvous, in one word, as -Y's: the second panicker moves it from
+ * WAITING to READY, this processor from READY to GO -- or to GIVEN_UP, from
+ * WAITING when the second did not arrive in time and from READY when it
+ * arrived with interrupts off.  A second panicker that finds GIVEN_UP parks.
+ */
+#define DP_WAITING	0u
+#define DP_READY	1u
+#define DP_GO		2u
+#define DP_GIVEN_UP	3u
+static volatile uint32_t	dp_state;
+static volatile int		dp_probe_if;	/* the second panicker's IF */
+static int			dp_parked;
 
 static void
 dp_probe_body(void)
 {
-	dp_ready = 1;
-	while (!dp_go)
-		cpu_pause();
-	panic(DP_MESSAGE, cpu_number());
+	dp_probe_if = interrupts_enabled();
+	if (atomic_cmpxchg32(&dp_state, DP_WAITING, DP_READY) == DP_WAITING) {
+		while (dp_state == DP_READY)
+			cpu_pause();
+		if (dp_state == DP_GO)
+			panic(DP_MESSAGE, cpu_number());
+	}
+
+	/* Given up: parked for ever in a wait nobody signals, as -S leaves its. */
+	for (;;) {
+		spl_t s = splsched();
+
+		assert_wait((event_t) &dp_parked, FALSE);
+		splx(s);
+		thread_block((void (*)(void)) 0);
+	}
 }
 
 void
@@ -76,9 +100,10 @@ double_panic_test(void)
 	}
 
 	/*
-	 * 🔑 Interrupts on, or the question is not posed: the halt IPI can cut
-	 * a panic message only where the panicking processor takes interrupts
-	 * between its printfs.
+	 * 🔑 Interrupts on, on BOTH, or the question is not posed: the halt
+	 * IPI can cut a panic message only where the panicking processor takes
+	 * interrupts between its printfs, and either of the two may be the one
+	 * that wins panic()'s lock.  This one is asked here, the other below.
 	 */
 	if (!interrupts_enabled()) {
 		printf("double_panic: NOT ASKED — interrupts are off here, so no "
@@ -108,19 +133,29 @@ double_panic_test(void)
 	act_deallocate(act);
 	thread_resume(act);
 
-	printf("double_panic: processors %d and %d panic at the same instant, "
-	       "interrupts on; the log must keep one whole panic message, the "
-	       "console's final copy whole after it, and one whole backtrace a "
-	       "processor (#599)\n", me, target->slot_num);
-
-	for (spins = 0; spins < CPU_SPIN_BUDGET && !dp_ready; spins++)
+	for (spins = 0; spins < CPU_SPIN_BUDGET && dp_state == DP_WAITING;
+	     spins++)
 		cpu_pause();
-	if (!dp_ready) {
+	if (atomic_cmpxchg32(&dp_state, DP_WAITING, DP_GIVEN_UP) ==
+	    DP_WAITING) {
 		printf("double_panic: WRONG — the second panicker never ran on "
-		       "processor %d (#599)\n", target->slot_num);
+		       "processor %d; if it runs now it parks (#599)\n",
+		       target->slot_num);
+		return;
+	}
+	if (!dp_probe_if) {
+		dp_state = DP_GIVEN_UP;
+		printf("double_panic: NOT ASKED — the second panicker on "
+		       "processor %d has interrupts off (#599)\n",
+		       target->slot_num);
 		return;
 	}
 
-	dp_go = 1;
+	printf("double_panic: processors %d and %d panic at the same instant, "
+	       "both with interrupts on; the log must keep one whole panic "
+	       "message, the console's final copy whole after it, and one whole "
+	       "backtrace a processor (#599)\n", me, target->slot_num);
+
+	dp_state = DP_GO;
 	panic(DP_MESSAGE, me);
 }
