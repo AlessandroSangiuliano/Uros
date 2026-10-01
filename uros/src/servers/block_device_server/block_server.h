@@ -331,9 +331,11 @@ struct blk_handle {
 	/*
 	 * #599: what asking the kernel for every page costs, against the
 	 * transfer it is asked for (TSC cycles).  Said at powers of two from
-	 * 1024 physical requests, and when the handle ends.
+	 * 1024 pages, and when the handle ends; phys_said_pages is the last
+	 * power said.
 	 */
 	uint64_t		phys_req, phys_pages, xlate_cyc, xfer_cyc;
+	uint64_t		phys_said_pages;
 };
 
 /* ================================================================

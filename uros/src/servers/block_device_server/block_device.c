@@ -915,9 +915,12 @@ static unsigned long long blk_tsc(void);
  * #599: the cost of asking.  Every page of a physical transfer is asked of
  * the kernel (device_dma_map_foreign_op): one RPC and one MAC a page.  This
  * keeps the cycles spent asking against the cycles of the transfer, per
- * handle, and says them at powers of two from 1024 requests and when the
+ * handle, and says them at powers of two from 1024 pages and when the
  * handle ends -- the number that decides whether the kernel needs a faster
- * path for the same answer.
+ * path for the same answer.  Pages and not requests (#599): the asking is
+ * per page, and ext_server's reads are many pages a request, so a mount
+ * that read 16 MB had made 256 requests and never said anything -- and a
+ * mount's handle does not end.
  */
 static void
 blk_phys_said(const struct blk_handle *h, const char *when)
@@ -944,8 +947,17 @@ blk_phys_account(struct blk_handle *h, unsigned int pages,
 	h->phys_pages += pages;
 	h->xlate_cyc += t1 - t0;
 	h->xfer_cyc += t2 - t1;
-	if (h->phys_req >= 1024 && (h->phys_req & (h->phys_req - 1)) == 0)
-		blk_phys_said(h, "after");
+	{
+		uint64_t next = h->phys_said_pages ? 2 * h->phys_said_pages
+						   : 1024;
+
+		if (h->phys_pages >= next) {
+			while (2 * next <= h->phys_pages)
+				next *= 2;
+			h->phys_said_pages = next;
+			blk_phys_said(h, "after");
+		}
+	}
 }
 
 /* A refusal the kernel will give again whatever is asked (#599). */
