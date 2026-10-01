@@ -10,6 +10,7 @@
 #include <kern/misc_protos.h>	/* #461: halt_cpu, panic */
 #include <kern/ast.h>		/* #603: ast_check */
 
+#include <cpu/answer_count.h>	/* #605: who answered, shared with tlb.c */
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
@@ -46,7 +47,78 @@ static void * volatile call_arg;
 static volatile uint64_t call_acks;
 
 /* Per-processor, so a silent one can be named rather than merely counted. */
-static volatile uint64_t served[SMP_MAX_CPUS];
+static struct answer_count served;
+
+/*
+ * 🔴 WHO DID NOT ANSWER (#605).
+ *
+ * The line above promised it, and the panic that fires when an answer never
+ * comes named nobody: the counter was read only by the boot self-tests.  So
+ * each call photographs its targets' counts before it sends -- under call_lock,
+ * one call in flight and so one photograph -- and a call that times out names
+ * every target whose count has not moved.  A targeted call photographs the one
+ * or two processors it names; a broadcast, every processor that answers one.
+ *
+ * The walk visits the set bits only: __builtin_ctzll is one instruction here
+ * and needs nothing from libgcc, which this kernel does not link (#415).
+ */
+static uint64_t call_before[SMP_MAX_CPUS];
+
+static void call_photograph(uint64_t targets)
+{
+	for (uint64_t m = targets; m != 0; m &= m - 1) {
+		unsigned id = (unsigned) __builtin_ctzll(m);
+
+		call_before[id] = answer_count_of(&served, id);
+	}
+}
+
+/* Name each target that did not answer, and say how many did not. */
+static unsigned call_name_silent(uint64_t targets)
+{
+	unsigned silent = 0;
+
+	for (uint64_t m = targets; m != 0; m &= m - 1) {
+		unsigned id = (unsigned) __builtin_ctzll(m);
+
+		if (answer_count_of(&served, id) == call_before[id]) {
+			printf("ipi: the processor with APIC id %u never answered "
+			       "this cross-call (#605)\n", id);
+			silent++;
+		}
+	}
+	return silent;
+}
+
+/*
+ * Wait for `targets' answers, bounded, and on a timeout name every processor
+ * in `who' that did not answer before stopping the machine (#605).  The
+ * broadcast and the targeted call each had this loop and this panic, differing
+ * only in the message; the message is one now, and says what was asked as well
+ * as who stayed silent.
+ *
+ * Bounded, because the failure worth catching is an answer that never comes,
+ * and waiting forever for it turns a report into a hang.  The count is
+ * generous: a processor deep in a fault report can take a long time to get
+ * round to this.
+ */
+static void ipi_wait_for_acks(uint64_t who, unsigned targets)
+{
+	uint64_t spins;
+
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
+		if (atomic_load64(&call_acks) >= targets)
+			return;
+		cpu_pause();
+	}
+	if (atomic_load64(&call_acks) >= targets)
+		return;
+
+	panic("ipi: %u of %u processors never answered a cross-call "
+	      "(targets 0x%llx, %llu answers arrived)",
+	      call_name_silent(who), targets, (unsigned long long) who,
+	      (unsigned long long) atomic_load64(&call_acks));
+}
 
 static void ipi_call_handler(struct trap_frame *frame)
 {
@@ -67,7 +139,7 @@ static void ipi_call_handler(struct trap_frame *frame)
 	if (fn != 0)
 		fn(arg);
 
-	served[percpu_apic_id()]++;
+	answer_count_mark(&served);
 
 	barrier();
 	atomic_inc64(&call_acks);
@@ -95,19 +167,23 @@ void ipi_init(void)
 
 uint64_t ipi_calls_served(uint32_t apic_id)
 {
-	if (apic_id >= SMP_MAX_CPUS)
-		return 0;
-
-	return atomic_load64(&served[apic_id]);
+	return answer_count_of(&served, apic_id);
 }
 
 void ipi_call_others(void (*fn)(void *), void *arg)
 {
 	unsigned targets = smp_online_count() - 1;
-	uint64_t spins;
+	uint32_t me;
+	uint64_t who;
 
 	if (targets == 0)
 		return;
+
+	/* Every processor that answers a broadcast, less this one. */
+	me = percpu_apic_id();
+	who = smp_answering_set();
+	if (me < SMP_MAX_CPUS)
+		who &= ~(1ULL << me);
 
 	/*
 	 * Checked rather than trusted.  A processor that waits for answers
@@ -121,6 +197,7 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 
 	hw_lock_lock(&call_lock);
 
+	call_photograph(who);
 	call_fn = fn;
 	call_arg = arg;
 	atomic_store64(&call_acks, 0);
@@ -138,27 +215,13 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 
 	lapic_broadcast_ipi(IPI_VECTOR_CALL);
 
-	/*
-	 * Bounded, because the failure worth catching is an answer that never
-	 * comes, and waiting forever for it turns a report into a hang.  The
-	 * count is generous: a processor deep in a fault report can take a
-	 * long time to get round to this.
-	 */
-	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
-		if (atomic_load64(&call_acks) >= targets)
-			break;
-		cpu_pause();
-	}
-
-	if (atomic_load64(&call_acks) < targets)
-		panic("ipi: a processor never answered a cross-call");
+	ipi_wait_for_acks(who, targets);
 
 	hw_lock_unlock(&call_lock);
 }
 
 void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 {
-	uint64_t spins;
 	unsigned targets;
 	unsigned id;
 
@@ -179,6 +242,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 
 	hw_lock_lock(&call_lock);
 
+	call_photograph(mask);
 	call_fn = fn;
 	call_arg = arg;
 	atomic_store64(&call_acks, 0);
@@ -208,17 +272,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 			targets++;
 		}
 
-	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
-		if (atomic_load64(&call_acks) >= targets)
-			break;
-		cpu_pause();
-	}
-
-	if (atomic_load64(&call_acks) < targets)
-		panic("ipi: a processor in a targeted cross-call never "
-		      "answered (mask 0x%llx, %u expected, %llu arrived)",
-		      (unsigned long long) mask, targets,
-		      (unsigned long long) atomic_load64(&call_acks));
+	ipi_wait_for_acks(mask, targets);
 
 	hw_lock_unlock(&call_lock);
 }

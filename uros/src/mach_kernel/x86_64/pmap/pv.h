@@ -52,6 +52,21 @@ int pv_managed(uint64_t pa);
 pv_entry_t pv_head(uint64_t pa);
 
 /*
+ * What the mappings of a page saw before they went (#606): ACCESSED and DIRTY,
+ * spelt as the entry spells them.  The hardware records them per entry, and a
+ * removed entry would take them with it.
+ *
+ * pv_keep_bits() is given the entry that is going, and must be called BEFORE
+ * the entry is cleared: then at every instant a bit is in the entry or in the
+ * record, and a reader that asks the live entries first and the record second
+ * cannot miss one.  pv_kept_bits() answers whether the record holds any of
+ * `bits'; pv_forget_bits() clears them.
+ */
+void pv_keep_bits(uint64_t pa, pt_entry_t entry);
+int  pv_kept_bits(uint64_t pa, uint64_t bits);
+void pv_forget_bits(uint64_t pa, uint64_t bits);
+
+/*
  * Record that `pmap` maps `pa` at `va`, and forget it again.  Both are
  * no-ops for a page the index does not cover, so callers do not have to
  * separate device memory from real memory before asking.

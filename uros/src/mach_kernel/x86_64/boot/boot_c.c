@@ -914,6 +914,29 @@ static void phys_ops_selftest(void)
 	      && pmap_extract(u, uva) == 0
 	      ? ", every mapping gone\r\n" : ", STILL MAPPED\r\n");
 
+	/*
+	 * 🔴 AND THE PAGE STILL KNOWS IT WAS WRITTEN (#606).  This is the
+	 * pageout's own order -- vm_pageout_scan() removes every mapping and
+	 * only then asks pmap_is_modified() -- and the write above lives in no
+	 * mapping any more.  Without the record it answered 0 here, and the
+	 * pageout freed such a page as clean.  Then a clear has to forget it.
+	 */
+	mod = pmap_is_modified(frame);
+	ref = pmap_is_referenced(frame);
+	pmap_clear_modify(frame);
+	pmap_clear_reference(frame);
+	kputs("UrMach x86-64: with no mapping left, modified=");
+	kputdec(mod);
+	kputs(" referenced=");
+	kputdec(ref);
+	kputs(", after clearing ");
+	kputdec(pmap_is_modified(frame));
+	kputdec(pmap_is_referenced(frame));
+	kputs(mod == 1 && ref == 1 && pmap_is_modified(frame) == 0
+	      && pmap_is_referenced(frame) == 0
+	      ? " -- what the mappings saw outlived them (#606)\r\n"
+	      : " -- WRONG, the bits went with the mappings (#606)\r\n");
+
 	pmap_destroy(u);
 }
 
@@ -6998,6 +7021,108 @@ static void tlb_shootdown_selftest(void)
  * counter that never moves proves nothing if it could not have moved.  The
  * same address, shot down with PMAP_NULL, must move every counter.
  */
+/*
+ * #605: a processor that cannot answer, and the cross-call that has to name it.
+ *
+ * The halt interrupt stops one application processor without an end of
+ * interrupt, so it takes no other; a targeted call to it then waits out
+ * CPU_SPIN_BUDGET and panics -- and the line before the panic must give its
+ * APIC id.  A build option (UROS_PROBE_605_SILENT), off by default: the boot
+ * it runs in ends there.
+ */
+#ifndef	PROBE_605_SILENT
+#define	PROBE_605_SILENT	0
+#endif
+
+#ifndef	PROBE_605_CALL_COST
+#define	PROBE_605_CALL_COST	0
+#endif
+
+#if	PROBE_605_SILENT || PROBE_605_CALL_COST
+static void silent_noop(void *arg)
+{
+	(void) arg;
+}
+#endif
+
+#if	PROBE_605_CALL_COST
+/*
+ * #605: what a broadcast cross-call costs, in TSC ticks, as five batches and
+ * their median -- run once with the answer counters packed eight to a cache
+ * line and once with UROS_PROBE_605_PADDED, so the difference is what the
+ * sharing costs.  An empty function, so the call is all that is measured.
+ */
+#define CALL_COST_BATCH	4000
+
+static void call_cost_probe(void)
+{
+	uint64_t per[5], t0;
+	unsigned b, i, j;
+
+	for (i = 0; i < 500; i++)			/* warm up */
+		ipi_call_others(silent_noop, 0);
+
+	for (b = 0; b < 5; b++) {
+		t0 = rdtsc_ordered();
+		for (i = 0; i < CALL_COST_BATCH; i++)
+			ipi_call_others(silent_noop, 0);
+		per[b] = (rdtsc_ordered() - t0) / CALL_COST_BATCH;
+	}
+	for (i = 1; i < 5; i++)				/* sort five */
+		for (j = i; j > 0 && per[j - 1] > per[j]; j--) {
+			uint64_t t = per[j]; per[j] = per[j - 1]; per[j - 1] = t;
+		}
+
+	kputs("UrMach x86-64: cross-call cost: a broadcast to ");
+	kputdec(smp_online_count() - 1);
+	kputs(" processors, TSC ticks each in five batches of ");
+	kputdec(CALL_COST_BATCH);
+	kputs(":");
+	for (b = 0; b < 5; b++) {
+		kputs(" ");
+		kputdec(per[b]);
+	}
+	kputs(", median ");
+	kputdec(per[2]);
+#if	PROBE_605_PADDED
+	kputs(" -- answer counters a line each (#605)\r\n");
+#else
+	kputs(" -- answer counters eight to a line (#605)\r\n");
+#endif
+}
+#endif	/* PROBE_605_CALL_COST */
+
+#if	PROBE_605_SILENT
+
+static void silent_cpu_probe(void)
+{
+	uint32_t me = lapic_id();
+	uint64_t others = smp_answering_set();
+	unsigned id;
+
+	if (me < SMP_MAX_CPUS)
+		others &= ~(1ULL << me);
+	if (others == 0) {
+		kputs("UrMach x86-64: silent processor probe: nobody else to "
+		      "silence (#605)\r\n");
+		return;
+	}
+
+	id = (unsigned) __builtin_ctzll(others);
+	kputs("UrMach x86-64: silent processor probe: halting APIC id ");
+	kputdec(id);
+	kputs(", then cross-calling it -- the panic must name it (#605)\r\n");
+
+	lapic_send_ipi(id, IPI_VECTOR_HALT);
+	for (unsigned i = 0; i < 1000000; i++)
+		cpu_pause();			/* let the halt land first */
+
+	ipi_call_mask(1ULL << id, silent_noop, 0);
+	kputs("UrMach x86-64: silent processor probe: the call came back "
+	      "-- WRONG, a halted processor answered\r\n");
+}
+#endif	/* PROBE_605_SILENT */
+
 static void tlb_targeted_selftest(void)
 {
 	pmap_t		u;
@@ -7299,6 +7424,12 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ap_to_bsp_selftest();
 	tlb_shootdown_selftest();
 	tlb_targeted_selftest();
+#if	PROBE_605_CALL_COST
+	call_cost_probe();
+#endif
+#if	PROBE_605_SILENT
+	silent_cpu_probe();
+#endif
 	smp_timer_selftest();
 
 	wx_enforcement_selftest();

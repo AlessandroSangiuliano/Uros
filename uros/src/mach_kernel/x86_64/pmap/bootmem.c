@@ -183,10 +183,21 @@ void boot_frame_init(uint32_t info_pa)
 	}
 }
 
+/*
+ * Zero `bytes' of physical memory at `pa', through the direct map.  The two
+ * allocators below each had this loop, and differed only in the bound (#605).
+ */
+static void zero_frames(uint64_t pa, uint64_t bytes)
+{
+	volatile uint64_t *w = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
+
+	for (uint64_t i = 0; i < bytes / sizeof(uint64_t); i++)
+		w[i] = 0;
+}
+
 uint64_t boot_frames_alloc(uint64_t count)
 {
 	uint64_t pa, bytes = count * PAGE_SIZE_4K;
-	volatile uint64_t *frames;
 
 	if (count == 0)
 		return 0;
@@ -224,9 +235,7 @@ uint64_t boot_frames_alloc(uint64_t count)
 	 * is far worse than a bad pointer: it sends the hardware walking into
 	 * memory nobody accounted for.
 	 */
-	frames = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
-	for (uint64_t i = 0; i < bytes / sizeof(uint64_t); i++)
-		frames[i] = 0;
+	zero_frames(pa, bytes);
 
 	return pa;
 }
@@ -243,7 +252,6 @@ void boot_frame_free(uint64_t pa)
 uint64_t boot_frame_alloc(void)
 {
 	uint64_t pa;
-	volatile uint64_t *frame;
 
 	if (free_list == 0)
 		return boot_frames_alloc(1);
@@ -258,9 +266,7 @@ uint64_t boot_frame_alloc(void)
 	 * owner left.  Callers are promised a zeroed frame, and a page table
 	 * built on stale entries walks into memory nobody accounted for.
 	 */
-	frame = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
-	for (unsigned i = 0; i < PAGE_SIZE_4K / sizeof(uint64_t); i++)
-		frame[i] = 0;
+	zero_frames(pa, PAGE_SIZE_4K);
 
 	return pa;
 }

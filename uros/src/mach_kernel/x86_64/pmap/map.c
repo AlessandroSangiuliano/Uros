@@ -17,9 +17,19 @@
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
+#include <pmap/pv.h>			/* pv_keep_bits (#606) */
 #include <pmap/tlb.h>
 #include <pmap/walk.h>
 #include <trap/trap.h>
+
+/*
+ * #606: a removal or a replacement that keeps nothing of the entry it takes
+ * away -- what this file did before the record in pv.c existed.
+ * phys_ops_selftest() in boot_c.c is what notices.
+ */
+#ifndef	ABLATE_606_FORGET_BITS
+#define	ABLATE_606_FORGET_BITS	0
+#endif
 
 static inline pt_entry_t *table_at(uint64_t table_pa)
 {
@@ -252,8 +262,32 @@ static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
 		return rc;
 
 	entry = &table[pt_index(va)];
-	*replaced = pte_is_valid(*entry);
-	*entry = pa_to_pte(pa) | INTEL_PTE_VALID | flags;
+
+	/*
+	 * Over whatever is there, keeping its bits first (#606).  pmap_enter()
+	 * removes the old mapping before it maps, so a valid entry is found
+	 * here only when another mapping of this address went in between --
+	 * and then what that one saw belongs to its page, by the rule
+	 * pmap_unmap_page_noflush() states: kept before the word changes, and
+	 * the word changed only while it still holds what was kept.
+	 */
+	{
+		pt_entry_t fresh = pa_to_pte(pa) | INTEL_PTE_VALID | flags;
+		pt_entry_t old = *entry;
+
+		for (;;) {
+			pt_entry_t seen;
+
+			if (pte_is_valid(old) && !ABLATE_606_FORGET_BITS)
+				pv_keep_bits(pte_to_pa(old), old);
+			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
+						old, fresh);
+			if (seen == old)
+				break;
+			old = seen;
+		}
+		*replaced = pte_is_valid(old);
+	}
 
 	return PMAP_MAP_OK;
 }
@@ -381,7 +415,7 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 	}
 
 	/*
-	 * 🔴 AN EXCHANGE, SO THAT ONE REMOVER WINS (#604).
+	 * 🔴 ONE REMOVER WINS (#604).
 	 *
 	 * The walk said the entry was valid, and `*entry = 0' then cleared it
 	 * -- two steps, and two removers could both take the first before
@@ -395,17 +429,41 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 	 * then seen, by the -M bench's two-remover arm with the plain store put
 	 * back: both removed the entry in 12 rounds of 50 000.
 	 *
-	 * The exchange answers what was in the word at the instant it went.
-	 * Whoever gets a valid entry back removed the mapping; whoever gets
-	 * zero lost the race and did nothing.  And what came back is the entry
-	 * itself: the frame the index must forget, and the hardware's
-	 * ACCESSED and DIRTY bits as of the removal (#606).
+	 * The entry goes by compare-and-exchange against the value just read.
+	 * Whoever's exchange takes a valid entry to zero removed the mapping;
+	 * whoever finds it already zero lost the race and did nothing.
+	 *
+	 * 🔴 AND THE BITS ARE KEPT BEFORE THE ENTRY GOES (#606).  The processor
+	 * records ACCESSED and DIRTY here and nowhere else, so the value read is
+	 * handed to pv_keep_bits() FIRST and cleared second.  At every instant
+	 * a bit the processor set is then in the entry or in the page's record,
+	 * and pv_test_bits(), which asks the live entries first and the record
+	 * second, cannot fall between the two.  An exchange would have cleared
+	 * first and kept second, and left an instant where the bit was in
+	 * neither.  When the compare fails, the processor set a bit after the
+	 * read or somebody else removed the entry: read again, keep again -- a
+	 * bit kept twice is the same bit.
+	 *
+	 * Only a 4 KiB leaf has a page in the index: a large one is the kernel's
+	 * own and belongs to no VM object.
 	 */
-	if (ABLATE_604_UNMAP_STORE) {
-		old = *entry;
-		*entry = 0;
-	} else
-		old = atomic_swap64((volatile uint64_t *) entry, 0);
+	old = *entry;
+	for (;;) {
+		pt_entry_t seen;
+
+		if (!pte_is_valid(old))
+			break;			/* somebody else removed it */
+		if (size == PAGE_SIZE_4K && !ABLATE_606_FORGET_BITS)
+			pv_keep_bits(pte_to_pa(old), old);
+		if (ABLATE_604_UNMAP_STORE) {
+			*entry = 0;
+			break;
+		}
+		seen = atomic_cmpxchg64((volatile uint64_t *) entry, old, 0);
+		if (seen == old)
+			break;
+		old = seen;
+	}
 	pmap_read_leave(held);
 
 	if (!pte_is_valid(old))
