@@ -344,11 +344,18 @@ hq_stopped_arm(void)
 	       "thread_unstop() let it go (#607)\n", after);
 }
 
+/*
+ * The stopped arm first, and not for tidiness.  The old wake put a waiter that
+ * was not parked on a run queue with thread_setrun(), which asserts the thread
+ * is not swapped out -- so under UROS_ABLATE_607_OLD_WAKE the swapped arm ends
+ * the boot in that assertion, and the stopped arm, run second, would never say
+ * what it is there to say.  In this order each ablation shows its own arm.
+ */
 void
 handoff_wake_test(void)
 {
-	printf("handoff: a futex waiter swapped out, then one stopped, each woken "
+	printf("handoff: a futex waiter stopped, then one swapped out, each woken "
 	       "through the hand-off (#607)\n");
-	hq_swapped_arm();
 	hq_stopped_arm();
+	hq_swapped_arm();
 }
