@@ -992,6 +992,72 @@ thread_stop_wait( thread_t thread )
 	return (FALSE);
 }
 
+/*
+ *	wake_dequeued:
+ *
+ *	What every wakeup does to a thread once it is off its wait queue: the
+ *	state change, and then the run queue -- or the swapin thread, for a
+ *	thread whose kernel stack the thread swapper has unwired.  Called at
+ *	splsched with the thread locked.  Answers FALSE when the thread was not
+ *	waiting at all, which its two callers judge differently: a wakeup that
+ *	dequeued it calls that impossible, an abort calls it nothing to do.
+ *
+ *	🔑 ONE COPY (#607).  thread_wakeup_prim() and clear_wait_locked() each
+ *	carried this switch, case for case, and the futex hand-off carried a third
+ *	that had drifted from both -- see thread_handoff_to_parked_waiter().
+ */
+static __inline__ boolean_t
+wake_dequeued(
+	register thread_t	thread,
+	int			result)
+{
+	register int	state = thread->state;
+
+	switch (state & TH_SCHED_STATE) {
+	    case	  TH_WAIT | TH_SUSP | TH_UNINT:
+	    case	  TH_WAIT           | TH_UNINT:
+	    case	  TH_WAIT:
+		/*
+		 *	Sleeping and not suspendable - put
+		 *	on run queue.
+		 */
+		thread->state = (state &~ TH_WAIT) | TH_RUN;
+		thread->wait_result = result;
+		/***** this test should not BE HERE
+		if (result != THREAD_INTERRUPTED)
+		 *****/
+			thread->at_safe_point = NOT_AT_SAFE_POINT;
+#if	THREAD_SWAPPER
+		if (thread->state & TH_SWAPPED_OUT)
+			thread_swapin(thread->top_act, FALSE);
+		else
+#endif	/* THREAD_SWAPPER */
+			thread_setrun(thread, TRUE, TAIL_Q);
+		return TRUE;
+
+	    case	  TH_WAIT | TH_SUSP :
+	    case TH_RUN | TH_WAIT | TH_SUSP | TH_UNINT:
+	    case TH_RUN | TH_WAIT	    | TH_UNINT:
+	    case TH_RUN | TH_WAIT | TH_SUSP:
+	    case TH_RUN | TH_WAIT:
+		/*
+		 *	Either already running, or suspended.
+		 */
+		thread->state = state &~ TH_WAIT;
+		thread->wait_result = result;
+		/***** this test should not BE HERE
+		if (result != THREAD_INTERRUPTED)
+		 *****/
+			thread->at_safe_point = NOT_AT_SAFE_POINT;
+		return TRUE;
+
+	    default:
+		/*
+		 *	Not waiting.
+		 */
+		return FALSE;
+	}
+}
 
 /*
  *	clear_wait_locked:
@@ -1058,54 +1124,8 @@ clear_wait_locked(
 		simple_unlock(lock);
 	}
 	if (event == NO_EVENT) {
-		register int	state = thread->state;
-
 		reset_timeout_check(&thread->timer);
-
-		switch (state & TH_SCHED_STATE) {
-		    case	  TH_WAIT | TH_SUSP | TH_UNINT:
-		    case	  TH_WAIT           | TH_UNINT:
-		    case	  TH_WAIT:
-			/*
-			 *	Sleeping and not suspendable - put
-			 *	on run queue.
-			 */
-			thread->state = (state &~ TH_WAIT) | TH_RUN;
-			thread->wait_result = result;
-			/***** this test should not BE HERE
-			if (result != THREAD_INTERRUPTED)
-			 *****/
-				thread->at_safe_point = NOT_AT_SAFE_POINT;
-#if	THREAD_SWAPPER
-			if (thread->state & TH_SWAPPED_OUT)
-				thread_swapin(thread->top_act, FALSE);
-			else
-#endif	/* THREAD_SWAPPER */
-				thread_setrun(thread, TRUE, TAIL_Q);
-			break;
-
-		    case	  TH_WAIT | TH_SUSP :
-		    case TH_RUN | TH_WAIT | TH_SUSP | TH_UNINT:
-		    case TH_RUN | TH_WAIT	    | TH_UNINT:
-		    case TH_RUN | TH_WAIT | TH_SUSP:
-		    case TH_RUN | TH_WAIT:
-			/*
-			 *	Either already running, or suspended.
-			 */
-			thread->state = state &~ TH_WAIT;
-			thread->wait_result = result;
-			/***** this test should not BE HERE
-			if (result != THREAD_INTERRUPTED)
-			 *****/
-				thread->at_safe_point = NOT_AT_SAFE_POINT;
-			break;
-
-		    default:
-			/*
-			 *	Not waiting.
-			 */
-			break;
-		}
+		(void) wake_dequeued(thread, result);
 	}
 }
 
@@ -1135,7 +1155,6 @@ thread_wakeup_prim(
 	register int		index;
 	register thread_t	thread, next_th;
 	register simple_lock_t	lock;
-	register int		state;
 	queue_head_t		wake_queue;
 	spl_t			s;
 
@@ -1184,50 +1203,8 @@ thread_wakeup_prim(
 #endif
 
 		reset_timeout_check(&thread->timer);
-		state = thread->state;
-		switch (state & TH_SCHED_STATE) {
-
-			    case          TH_WAIT | TH_SUSP | TH_UNINT:
-			    case	  TH_WAIT	    | TH_UNINT:
-			    case	  TH_WAIT:
-				/*
-				 *	Sleeping and not suspendable - put
-				 *	on run queue.
-				 */
-				thread->state = (state &~ TH_WAIT) | TH_RUN;
-				thread->wait_result = result;
-				/***** this test should not BE HERE
-				if (result != THREAD_INTERRUPTED)
-				 *****/
-				    thread->at_safe_point = NOT_AT_SAFE_POINT;
-#if	THREAD_SWAPPER
-				if (thread->state & TH_SWAPPED_OUT)
-					thread_swapin(thread->top_act, FALSE);
-				else
-#endif	/* THREAD_SWAPPER */
-					thread_setrun(thread, TRUE, TAIL_Q);
-				break;
-
-			    case TH_RUN | TH_WAIT | TH_SUSP | TH_UNINT:
-			    case TH_RUN | TH_WAIT | TH_SUSP:
-			    case	  TH_WAIT | TH_SUSP:
-			    case TH_RUN | TH_WAIT:
-			    case TH_RUN | TH_WAIT	    | TH_UNINT:
-				/*
-				 *	Either already running, or suspended.
-				 */
-				thread->state = state &~ TH_WAIT;
-				thread->wait_result = result;
-				/***** this test should not BE HERE
-				if (result != THREAD_INTERRUPTED)
-				 *****/
-				    thread->at_safe_point = NOT_AT_SAFE_POINT;
-				break;
-
-			default:
-				panic("thread_wakeup");
-				break;
-		}
+		if (!wake_dequeued(thread, result))
+			panic("thread_wakeup");
 		thread->wait_event = NO_EVENT;
 		thread_unlock(thread);
 	}
