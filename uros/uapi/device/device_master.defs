@@ -807,3 +807,24 @@ routine device_io_port_set_divisor(
 	in	divisor		: natural_t;
 	out	readback	: natural_t
 	);
+
+/*
+ * #537: what the answered asks of device_dma_map_foreign_op have cost in the
+ * kernel, summed over every processor since boot -- how many were answered,
+ * and the TSC cycles spent in the claim, in the capability's MAC, in finding
+ * the region and the page in it, and in the rest.  Read by the block server
+ * when it says its own count of the whole ask, which is outside the window it
+ * times: the kernel says nothing from inside an ask, because its caller is
+ * timing it, and a line printed there was counted as the ask's (2.6 ms a
+ * line).  Nothing here names a buffer, a device or a task.
+ */
+type dma_cost_t = unsigned64 ctype: cap_u64_t;
+
+routine device_dma_ask_cost(
+		master_port	: mach_port_t;
+	out	asks		: dma_cost_t;
+	out	claim		: dma_cost_t;
+	out	mac		: dma_cost_t;
+	out	find		: dma_cost_t;
+	out	rest		: dma_cost_t
+	);

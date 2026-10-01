@@ -117,7 +117,6 @@ decl_mutex_data(static, device_table_lock)
  * block runs under it; task_deallocate() is called after it is dropped.
  */
 decl_simple_lock_data(static, irq_forward_lock)
-decl_simple_lock_data(static, dma_ask_said_lock)	/* #537: who says the total */
 
 /* The grace-period callbacks that make a retired slot reusable (#538);
  * defined beside the tables they belong to. */
@@ -331,7 +330,6 @@ device_master_init(void)
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
 	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
-	simple_lock_init(&dma_ask_said_lock, ETAP_NO_TRACE);
 
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
@@ -3728,14 +3726,16 @@ claim_is_mine_locked(natural_t bdf)
  * Each processor adds into its own slot with preemption off, so the hot path
  * takes no lock and no two asks share a counter.  A slot carries a sequence
  * word, odd while its owner writes: on i386 a 64-bit counter is read in two
- * halves, and the processor that sums the slots must not take one half from
- * before an add and one from after it.  The total is said at powers of two
- * from 1024 answered asks, once each, by whichever processor first finds it
- * past the next one; a refused ask returns before it is counted.
+ * halves, and whoever sums the slots must not take one half from before an add
+ * and one from after it.  A refused ask returns before it is counted.
+ *
+ * 🔴 AND NOTHING IS SAID FROM HERE.  The first version printed the total at
+ * powers of two, from inside the ask that crossed one -- and the block server,
+ * which times every ask from outside, counted the line as that ask's: 2.6 ms,
+ * enough to move its per-page average from 15 400 cycles to 19 700 after the
+ * first line.  The sums are read instead (device_dma_ask_cost) by the block
+ * server, when it says its own count, outside the window it times.
  */
-#define	DMA_ASK_SAY_FIRST	1024
-#define	DMA_ASK_LOOK_EVERY	256	/* asks on one processor between looks */
-
 static struct dma_ask_cost {
 	volatile uint32_t	seq;	/* odd while the owner writes */
 	uint64_t		asks;
@@ -3744,8 +3744,6 @@ static struct dma_ask_cost {
 	uint64_t		find;	/* the region by id, the page in it */
 	uint64_t		rest;	/* the direction; with an IOMMU, the grant */
 } __attribute__((aligned(64))) dma_ask_cost[NCPUS];
-
-static uint64_t dma_ask_said;	/* the last power of two said, under dma_ask_said_lock */
 
 /* One slot, whole: read again while its owner is between the two seq writes. */
 static void
@@ -3765,48 +3763,6 @@ dma_ask_read(const struct dma_ask_cost *c, struct dma_ask_cost *into)
 	} while ((before & 1) != 0 || c->seq != before);
 }
 
-static void
-dma_ask_say(void)
-{
-	struct dma_ask_cost sum, one;
-	uint64_t next;
-	int i;
-
-	/* Somebody else is looking: this processor's asks are in their sum. */
-	if (!simple_lock_try(&dma_ask_said_lock))
-		return;
-
-	sum.asks = sum.claim = sum.mac = sum.find = sum.rest = 0;
-	for (i = 0; i < NCPUS; i++) {
-		dma_ask_read(&dma_ask_cost[i], &one);
-		sum.asks += one.asks;
-		sum.claim += one.claim;
-		sum.mac += one.mac;
-		sum.find += one.find;
-		sum.rest += one.rest;
-	}
-	next = dma_ask_said ? 2 * dma_ask_said : DMA_ASK_SAY_FIRST;
-	if (sum.asks < next) {
-		simple_unlock(&dma_ask_said_lock);
-		return;
-	}
-	while (2 * next <= sum.asks)
-		next *= 2;
-	dma_ask_said = next;
-	simple_unlock(&dma_ask_said_lock);
-
-	printf("device: after %llu pages asked for: the claim %llu cycles a "
-	       "page, the MAC %llu, the region and the page %llu, the rest "
-	       "%llu -- %llu in the kernel (#537)\n",
-	       (unsigned long long)sum.asks,
-	       (unsigned long long)(sum.claim / sum.asks),
-	       (unsigned long long)(sum.mac / sum.asks),
-	       (unsigned long long)(sum.find / sum.asks),
-	       (unsigned long long)(sum.rest / sum.asks),
-	       (unsigned long long)((sum.claim + sum.mac + sum.find +
-				     sum.rest) / sum.asks));
-}
-
 /* An answered ask: t0 at entry, t1 past the claim, t2 past the MAC, t3 past
  * the region and the page; the rest ends now. */
 static void
@@ -3814,7 +3770,6 @@ dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3)
 {
 	uint64_t t4 = urmach_tsc();
 	struct dma_ask_cost *c;
-	uint64_t asks;
 
 	disable_preemption();
 	c = &dma_ask_cost[cpu_number()];
@@ -3827,11 +3782,36 @@ dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3)
 	c->rest += t4 - t3;
 	publish_barrier();
 	c->seq++;
-	asks = c->asks;
 	enable_preemption();
+}
 
-	if (asks % DMA_ASK_LOOK_EVERY == 0)
-		dma_ask_say();
+kern_return_t
+ds_master_device_dma_ask_cost(
+	ipc_port_t	master_port,
+	cap_u64_t	*asks,
+	cap_u64_t	*claim,
+	cap_u64_t	*mac,
+	cap_u64_t	*find,
+	cap_u64_t	*rest)
+{
+	struct dma_ask_cost one;
+	kern_return_t kr;
+	int i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	*asks = *claim = *mac = *find = *rest = 0;
+	for (i = 0; i < NCPUS; i++) {
+		dma_ask_read(&dma_ask_cost[i], &one);
+		*asks += one.asks;
+		*claim += one.claim;
+		*mac += one.mac;
+		*find += one.find;
+		*rest += one.rest;
+	}
+	return KERN_SUCCESS;
 }
 
 /*
