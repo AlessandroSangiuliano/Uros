@@ -428,6 +428,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/idle.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic_race_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     # Configuration space: ECAM where the MCFG describes one, the port
     # pair where it does not -- two boards, not a bridge (#457).
