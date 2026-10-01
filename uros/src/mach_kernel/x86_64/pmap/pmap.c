@@ -866,14 +866,31 @@ static void pmap_resident_drop(pmap_t pmap, uint64_t va)
  * The index is only told about pages it tracks: a large mapping is the
  * kernel's own — the direct map, the image — and belongs to no VM object, so
  * nothing will ever ask which pmaps hold it.
+ *
+ * 🔴 ONE WALK, AND THE FRAME COMES FROM THE ENTRY THAT WENT (#604).  This
+ * used to resolve the address first and remove it second: two walks, the
+ * first outside any read section -- in the lower half, where pmap_collect()
+ * frees tables -- and the frame it handed pv_remove() taken from a different
+ * instant than the entry the second one cleared.  The unmap now answers with
+ * the entry it removed, inside its own section.
  */
+#ifndef	ABLATE_604_FORGET_TWO_WALKS
+#define	ABLATE_604_FORGET_TWO_WALKS	0
+#endif
+
 static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 {
+	pt_entry_t removed = 0;
 	uint64_t pa = 0;
 	uint64_t size;
 
-	pmap_resolve(pmap->root_pa, va, &pa, 0);
-	size = pmap_unmap_page(pmap, va);
+	if (ABLATE_604_FORGET_TWO_WALKS) {
+		pmap_resolve(pmap->root_pa, va, &pa, 0);
+		size = pmap_unmap_page(pmap, va, 0);
+	} else {
+		size = pmap_unmap_page(pmap, va, &removed);
+		pa = pte_to_pa(removed);
+	}
 
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
@@ -966,34 +983,6 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	return rc;
 }
 
-/*
- * Set and clear bits in a page-table entry without losing what the hardware
- * or another processor put there in between (#455).
- *
- * ⚠️ The retry reloads from cmpxchg's answer and never re-reads *entry:  what
- * it hands back is what the word held at the instant it refused, and building
- * the next attempt out of anything else is building it out of a value that was
- * never in the word.
- */
-static void pmap_pte_update(pt_entry_t *entry, uint64_t set, uint64_t clear)
-{
-	pt_entry_t found = *entry;
-
-	for (;;) {
-		pt_entry_t fresh = (found & ~clear) | set;
-		pt_entry_t seen;
-
-		if (fresh == found)
-			return;
-
-		seen = atomic_cmpxchg64((volatile uint64_t *) entry,
-					found, fresh);
-		if (seen == found)
-			return;
-		found = seen;
-	}
-}
-
 int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
 {
 	boolean_t held = pmap_read_enter();
@@ -1034,9 +1023,12 @@ int pmap_is_wired(pmap_t pmap, uint64_t va)
 
 uint64_t pmap_extract(pmap_t pmap, uint64_t va)
 {
-	uint64_t pa = 0;
+	boolean_t held = pmap_read_enter_for(va);
+	uint64_t  pa = 0;
+	int	  mapped = pmap_resolve(pmap->root_pa, va, &pa, 0);
 
-	return pmap_resolve(pmap->root_pa, va, &pa, 0) ? pa : 0;
+	pmap_read_leave(held);
+	return mapped ? pa : 0;
 }
 
 /*
@@ -1298,7 +1290,7 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 				      (unsigned long) hva,
 				      (unsigned long) pa);
 
-			size = pmap_unmap_page_noflush(hpmap, hva);
+			size = pmap_unmap_page_noflush(hpmap, hva, 0);
 
 			/*
 			 * ⚠️ THE ENTRY GOES WHATEVER THE UNMAP ANSWERED, and

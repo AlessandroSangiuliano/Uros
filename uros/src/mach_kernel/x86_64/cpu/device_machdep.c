@@ -35,6 +35,7 @@
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
 #include <ddb/cons.h>	/* #497: who owns COM1 */
 #include <time/pmtimer.h>	/* #508: a ruler is not lent */
+#include <time/hpet.h>		/* #593: the lines LegacyReplacement took */
 #include <sync/atomic.h>	/* #538: atomic_add32 / atomic_swap32 */
 #include <kern/misc_protos.h>	/* printf */
 #include <trap/trap.h>	/* the vector table, and the replay path */
@@ -410,7 +411,8 @@ device_md_irq_trampoline(struct trap_frame *frame)
  * put back what was there is kept by there being nothing.  i386 means it --
  * ddb's keyboard handler claims IRQ 1 in the kernel and the userspace driver
  * takes the line over from it -- but no in-kernel driver here claims a device
- * line: the clock is on the local APIC's own timer, not a pin.  The day one
+ * line: the clock is on the local APIC's own timer, not a pin -- and when
+ * it is on the HPET instead (#593), its line is refused below, not shared.  The day one
  * does, this is where the saving goes, and the overwrite below becomes wrong
  * in a way that would otherwise be silent.
  */
@@ -424,6 +426,23 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 
 	if (!ioapic_present())
 		return 0;
+
+	/*
+	 * 🔴 #593: THE LINES THE HPET TOOK ARE NOT LENT.  With LegacyReplacement
+	 * on, ISA 0's pin carries the HPET comparator that every processor's
+	 * tick comes from, and routing it to a driver's vector would stop every
+	 * clock in the machine; ISA 8's carries nothing, because the RTC no
+	 * longer interrupts at all (IA-PC HPET 1.0a, 2.4.2.1) -- a driver
+	 * handed it would wait for interrupts that cannot come.  Refused, and
+	 * said, since a refusal a driver cannot read looks like a device that
+	 * never interrupts.
+	 */
+	if ((irq == 0 || irq == 8) && hpet_legacy_routed()) {
+		printf("device_md_irq_register: REFUSED -- ISA line %u is "
+		       "the HPET's: this kernel switched LegacyReplacement "
+		       "on for its clock, and it stays on (#593)\n", irq);
+		return 0;
+	}
 
 	/*
 	 * The pin, which is not the line number.  The firmware is entitled to

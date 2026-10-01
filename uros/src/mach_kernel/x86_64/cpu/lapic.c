@@ -204,33 +204,103 @@ static void icr_wait_idle(void)
 		cpu_pause();
 }
 
+/*
+ * #593: the ablation that leaves the send open to an interrupt, and the count
+ * that shows what the opening lets in: a send begun on a processor that was
+ * already past the wait of another and not yet past its second write -- the
+ * window the masking closes.  A send begun during another's wait is harmless
+ * (the wait reads the register again) and is not counted.
+ */
+#ifndef	ABLATE_593_ICR_OPEN
+#define	ABLATE_593_ICR_OPEN	0
+#endif
+
+#if ABLATE_593_ICR_OPEN
+#include <cpus.h>		/* NCPUS */
+
+/*
+ * ⚠️ Indexed by the APIC's own ID register and not by cpu_number(): that
+ * reads %gs, and a send is made from inside the swapgs window on purpose --
+ * the #440 test sends an NMI with the user's %gs loaded -- where a %gs read
+ * faults, and the faults nest until the stack is gone.  The first version of
+ * this counter did exactly that, and the ablated kernel never finished its
+ * boot: an instrument that changes the experiment.
+ */
+static volatile uint32_t	icr_inside[NCPUS];
+static volatile uint64_t	icr_nested[NCPUS];	/* each by its own */
+
+uint64_t lapic_icr_nested(void)
+{
+	uint64_t	sum = 0;
+	unsigned	c;
+
+	for (c = 0; c < NCPUS; c++)
+		sum += icr_nested[c];
+	return sum;
+}
+
+uint64_t lapic_icr_nested_on(uint32_t apic_id)
+{
+	return apic_id < NCPUS ? icr_nested[apic_id] : 0;
+}
+#endif
+
 static void icr_send(uint32_t apic_id, uint32_t command)
 {
-	uint64_t	flags = read_rflags();
-	uint32_t	high;
+#if !ABLATE_593_ICR_OPEN
+	int was_enabled = interrupts_enabled();
+
+	/*
+	 * 🔴 NO INTERRUPT BETWEEN THE WAIT AND THE SECOND WRITE (#593).
+	 *
+	 * The register is one per processor and a send is three steps on it,
+	 * so an interrupt whose handler sends an IPI of its own, landing in
+	 * the middle, rewrites the destination under the interrupted send:
+	 * the interrupted command then leaves with the handler's destination,
+	 * and the processor it was meant for never hears it.  Landing after
+	 * the wait and before the writes is the same failure the wait exists
+	 * to prevent -- a second message written over a first still pending.
+	 *
+	 * The tick already sends from interrupt context (hertz_tick can wake a
+	 * thread and knock on the processor it is given to), and the HPET's
+	 * broadcast sends from a class no spl level holds back, a hundred
+	 * times a second.  Masked here and nowhere else, because this is the
+	 * one place that knows the register takes more than one write.
+	 */
+	interrupts_disable();
+#else
+	/*
+	 * Counted by the processor it happens on, so no two write one count:
+	 * a send that interrupts this one runs in a handler with interrupts
+	 * off, and nothing interrupts it in turn.
+	 */
+	unsigned self = lapic_read(LAPIC_ID) >> 24;
+
+	if (self < NCPUS && icr_inside[self])
+		icr_nested[self]++;
+#endif
+
+	icr_wait_idle();
+#if ABLATE_593_ICR_OPEN
+	if (self < NCPUS)
+		icr_inside[self]++;
+#endif
 
 	/*
 	 * The destination goes in the high half and the command in the low
 	 * half, and writing the low half is what sends it — so the order is
 	 * not a style question.
-	 *
-	 * #599: and the two halves are a pair.  Most callers already had
-	 * interrupts off, but the AP knock at boot (smp.c) runs with them on
-	 * and preemptible, so a tick that sent its own IPI -- or a migration --
-	 * between the halves could send the knock's command to another
-	 * destination.  So the pair is written with interrupts off here, where
-	 * the proof is local, and the high half found on entry is put back, so
-	 * that a nested sender (an NMI's) composes with the one it cut into.
 	 */
-	interrupts_disable();
-	icr_wait_idle();
-	high = lapic_read(LAPIC_ICR_HIGH);
 	lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
 	lapic_write(LAPIC_ICR_LOW, command);
-	icr_wait_idle();
-	lapic_write(LAPIC_ICR_HIGH, high);
-	if (flags & RFLAGS_IF)
+
+#if !ABLATE_593_ICR_OPEN
+	if (was_enabled)
 		interrupts_enable();
+#else
+	if (self < NCPUS)
+		icr_inside[self]--;
+#endif
 }
 
 void lapic_send_init(uint32_t apic_id)

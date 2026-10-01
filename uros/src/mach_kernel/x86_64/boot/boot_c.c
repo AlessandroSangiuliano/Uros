@@ -76,6 +76,7 @@
 
 #include <boot/bootarg.h>
 #include <time/clock_event.h>	/* #459 */
+#include <time/line.h>		/* #593 */
 #include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
 #include <kern/misc_protos.h>	/* printf */
 #include <kern/fault_profile.h>	/* #482: arm the instrument once %gs is real */
@@ -166,6 +167,32 @@ static void pte_selftest(void)
 	kputs(l4 == 511 && l3 == 510 && l2 == 0 && l1 == 0
 	      ? "] agrees with the live boot tables\r\n"
 	      : "] MISMATCH against the live boot tables\r\n");
+}
+
+/*
+ * pmap_pte_update() on the two words that matter (#604): a live entry gets the
+ * bit, and an entry that is gone stays zero.  The second is the state a
+ * removal on another processor leaves between a walk and the update; a word
+ * that came back non-zero would keep the table under it from ever being
+ * collected.
+ */
+static void pte_update_selftest(void)
+{
+	pt_entry_t live = INTEL_PTE_VALID | INTEL_PTE_WRITE;
+	pt_entry_t gone = 0;
+
+	pmap_pte_update(&live, INTEL_PTE_MOD, 0);
+	pmap_pte_update(&gone, INTEL_PTE_MOD, 0);
+
+	kputs("UrMach x86-64: pte update: a live entry reads ");
+	kputhex64(live);
+	kputs(", a gone one ");
+	kputhex64(gone);
+	kputs(live == (INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_MOD)
+	      && gone == 0
+	      ? " -- the gone entry stayed zero\r\n"
+	      : " -- WRONG, a gone entry must stay zero or its table is "
+		"never collected\r\n");
 }
 
 /*
@@ -579,7 +606,7 @@ static void protect_unmap_selftest(void)
 	kputhex64(*page);
 	kputs(*page == 0xcafe ? " still\r\n" : " CORRUPT\r\n");
 
-	size = pmap_unmap_page(PMAP_NULL, va);
+	size = pmap_unmap_page(PMAP_NULL, va, 0);
 	e = pmap_walk(root, va, 0);
 	kputs("UrMach x86-64: unmap -> ");
 	kputs(size == PAGE_SIZE_4K && e == PT_ENTRY_NULL
@@ -602,11 +629,21 @@ static void split_selftest(void)
 	const volatile uint32_t *p = (const volatile uint32_t *)(uintptr_t)dva;
 	uint64_t before = 0, after = 0, s0 = 0, s1 = 0, newsz;
 	uint32_t read_before = *p, read_after;
+	pt_entry_t *above, *leaf, old;
+	int interior_ok, kept_ok;
+
+	/*
+	 * The large leaf's own word, kept by address: after the split the same
+	 * word is the interior entry above the new table (#604).
+	 */
+	above = pmap_walk(root, dva, 0);
+	old = above != PT_ENTRY_NULL ? *above : 0;
 
 	pmap_resolve(root, dva, &before, &s0);
 	newsz = pmap_split_page(PMAP_NULL, dva);
 	pmap_resolve(root, dva, &after, &s1);
 	read_after = *p;
+	leaf = pmap_walk(root, dva, 0);
 
 	kputs("UrMach x86-64: split direct page ");
 	kputdec(s0 / 1024);
@@ -621,6 +658,61 @@ static void split_selftest(void)
 	      && read_after == read_before && read_after == 0x5ec0ffee
 	      ? ", mapping intact\r\n"
 	      : ", SPLIT BROKE THE MAP\r\n");
+
+	/*
+	 * And what the two words say (#604).  The one above is interior: valid,
+	 * writable, user, no NX -- the leaf below decides.  The new leaf is the
+	 * old one a size finer, every bit but the frame the same; ACCESSED and
+	 * DIRTY are left out of the comparison, since the processor may set
+	 * either on the new leaf between the split and this line.
+	 */
+	interior_ok = above != PT_ENTRY_NULL
+		      && (*above & (INTEL_PTE_VALID | INTEL_PTE_PERM))
+			 == INTEL_PTE_INTERIOR;
+	kept_ok = leaf != PT_ENTRY_NULL && s1 != 0
+		  && ((*leaf ^ pte_split_leaf(old, s0 == PAGE_SIZE_1G,
+					      (unsigned) ((dva & (s0 - 1)) / s1)))
+		      & ~(INTEL_PTE_REF | INTEL_PTE_MOD)) == 0;
+
+	kputs("UrMach x86-64: split: the entry above reads ");
+	kputhex64(above != PT_ENTRY_NULL ? *above & ~INTEL_PTE_PFN : 0);
+	kputs(interior_ok ? " (interior)" : " (NOT an interior entry)");
+	kputs(", the new leaf ");
+	kputhex64(leaf != PT_ENTRY_NULL ? *leaf & ~INTEL_PTE_PFN : 0);
+	kputs(interior_ok && kept_ok
+	      ? " -- the old leaf's bits, one size finer\r\n"
+	      : " -- WRONG, a split must keep what it splits\r\n");
+}
+
+/*
+ * pte_split_leaf() on two large leaves that carry every attribute a leaf can
+ * (#604), against values written out by hand: the pages split today carry
+ * none of them, so only this says the attributes cross.
+ */
+static void pte_split_selftest(void)
+{
+	const pt_entry_t flags = INTEL_PTE_VALID | INTEL_PTE_WRITE
+			       | INTEL_PTE_USER | INTEL_PTE_WTHRU
+			       | INTEL_PTE_NCACHE | INTEL_PTE_REF
+			       | INTEL_PTE_MOD | INTEL_PTE_GLOBAL
+			       | INTEL_PTE_WIRED | INTEL_PTE_NX;
+	const pt_entry_t big = INTEL_PTE_PS | INTEL_PTE_PAT_LARGE;
+	pt_entry_t small = pte_split_leaf(0x40000000ULL | flags | big, 0, 3);
+	pt_entry_t mid   = pte_split_leaf(0x80000000ULL | flags | big, 1, 5);
+	pt_entry_t want_small = (0x40000000ULL + 3 * PAGE_SIZE_4K) | flags
+			      | INTEL_PTE_PAT_4K;
+	pt_entry_t want_mid   = (0x80000000ULL + 5 * PAGE_SIZE_2M) | flags
+			      | big;
+
+	kputs("UrMach x86-64: split leaf: 2 MiB -> 4 KiB ");
+	kputhex64(small);
+	kputs(", 1 GiB -> 2 MiB ");
+	kputhex64(mid);
+	kputs(small == want_small && mid == want_mid
+	      ? " -- every bit but the frame came across, PAT at bit 7 in "
+		"the 4 KiB one\r\n"
+	      : " -- WRONG, a split must keep what it splits (Intel SDM 3A "
+		"5.10.4.2)\r\n");
 }
 
 /*
@@ -3074,6 +3166,43 @@ static void tsc_source_selftest(void)
 	}
 }
 
+/*
+ * What CPU_SPIN_BUDGET lasts here (#604).  The budget is a count of pauses,
+ * and a pause lasts what the processor -- or the emulator -- makes it last,
+ * so the only way to say what a wait gave up after is to time some.  A
+ * hundred thousand of them against the calibrated clock, reported and not
+ * judged: there is no right answer to hold it to.
+ */
+#define SPIN_SAMPLE	100000ULL
+
+static void spin_budget_selftest(void)
+{
+	uint64_t hz = tsc_hz(), t0, t1, ticks;
+	uint64_t i;
+
+	t0 = rdtsc_ordered();
+	for (i = 0; i < SPIN_SAMPLE; i++)
+		cpu_pause();
+	t1 = rdtsc_ordered();
+	ticks = t1 - t0;
+
+	kputs("UrMach x86-64: spin budget ");
+	kputdec(CPU_SPIN_BUDGET);
+	kputs(" pauses; ");
+	kputdec(SPIN_SAMPLE);
+	kputs(" of them took ");
+	kputdec(ticks);
+	kputs(" TSC ticks");
+	if (hz < 1000) {
+		kputs(", and with no calibrated rate that is all there is to "
+		      "say\r\n");
+		return;
+	}
+	kputs(", so a wait that runs out gave up after about ");
+	kputdec(ticks * (CPU_SPIN_BUDGET / SPIN_SAMPLE) / (hz / 1000));
+	kputs(" ms on this processor\r\n");
+}
+
 static void tsc_selftest(void)
 {
 	const struct rulers_verdict	*v;
@@ -3170,19 +3299,47 @@ static void tsc_selftest(void)
 }
 
 /*
- * The two rulers the machine has besides the 8254 (#508, phase 2).
- *
- * Each is found, made readable, and asked one question: how fast the TSC
- * runs against it, over the same thirty milliseconds the 8254 calibration
- * uses.  Nothing takes the answer yet -- tsc_hz() is still the 8254's -- and
- * that is deliberate: three rulers read side by side are the evidence the
- * vote in phase 4 will be designed from, including the question phase 1
- * raised about whether an emulator's rulers are independent at all.
- *
- * The interval runs from an edge of the ruler to a later edge, and both are
- * seen by reading it, so nothing is programmed inside the interval.  In kHz,
- * not MHz, because the differences phase 1 found are a third of a percent.
+ * #593, for #318's question: what one read of each clock costs, in TSC cycles
+ * -- the least of sixteen, because the least is the read nothing interrupted.
+ * A timebase is read on every clock_gettime(), and under an emulator a
+ * device register is an exit to the host where the TSC is an instruction.
  */
+static uint32_t tsc_read32(void)
+{
+	return (uint32_t)rdtsc();
+}
+
+static uint64_t read_cost(uint32_t (*rd)(void))
+{
+	uint64_t best = ~0ULL;
+
+	for (unsigned i = 0; i < 16; i++) {
+		uint64_t t0 = rdtsc_ordered();
+
+		(void)rd();
+		t0 = rdtsc_ordered() - t0;
+		if (t0 < best)
+			best = t0;
+	}
+	return best;
+}
+
+static void read_costs(void)
+{
+	kputs("UrMach x86-64: one read, in TSC cycles, the least of 16: the "
+	      "TSC ");
+	kputdec(read_cost(tsc_read32));
+	if (pmtimer_present()) {
+		kputs(", the PM timer ");
+		kputdec(read_cost(pmtimer_read));
+	}
+	if (hpet_present()) {
+		kputs(", the HPET ");
+		kputdec(read_cost(hpet_read32));
+	}
+	kputs(" (#593, for #318)\r\n");
+}
+
 /*
  * The rulers the machine has besides the 8254 (#508): found, made readable,
  * and described.  What the TSC measures against each, and their vote, is
@@ -3210,6 +3367,7 @@ static void rulers_selftest(void)
 	if (!hpet_present()) {
 		kputs("none — no table, or a block whose capability register "
 		      "does not add up\r\n");
+		read_costs();
 		return;
 	}
 	kputs("at ");
@@ -3224,8 +3382,16 @@ static void rulers_selftest(void)
 	kputdec(hpet_comparators());
 	kputs(" comparators, vendor ");
 	kputhex64(hpet_vendor());
-	kputs(hpet_started_here() ? ", started here\r\n"
-				  : ", already running\r\n");
+	kputs(hpet_started_here() ? ", started here" : ", already running");
+	if (hpet_legacy_found_on())
+		kputs("; LegacyReplacement was left on: switched off (#593)");
+	if (hpet_comparators_found_on() != 0) {
+		kputs("; comparators ");
+		kputhex64(hpet_comparators_found_on());
+		kputs(" (one bit each) were left interrupting: silenced (#593)");
+	}
+	kputs("\r\n");
+	read_costs();
 }
 
 /*
@@ -6302,6 +6468,38 @@ static void panic_format_selftest(void)
 	kputs(wrong == 0 ? " wrong\r\n" : " WRONG\r\n");
 }
 
+/*
+ * #593: a report line that fits comes out whole, and one that does not ends
+ * in the mark that says it was cut -- which no report line in a working boot
+ * is long enough to show, so it is shown here.
+ */
+static void line_selftest(void)
+{
+	static struct line	l;	/* 512 bytes: not on this stack */
+	const unsigned		mark = sizeof(LINE_CUT_MARK) - 1;
+	unsigned		i, wrong = 0;
+
+	line_start(&l);
+	put_s(&l, "window ");
+	put_u(&l, 18446744073709551615ULL);
+	if (!str_equal(l.b, "window 18446744073709551615") || l.cut)
+		wrong++;
+
+	line_start(&l);
+	for (i = 0; i < 100; i++)
+		put_s(&l, "0123456789");
+	put_s(&l, "and more");
+	if (!l.cut || l.n != sizeof(l.b) - 1
+	    || !str_equal(l.b + l.n - mark, LINE_CUT_MARK))
+		wrong++;
+
+	kputs("UrMach x86-64: report lines: one that fits comes out whole, "
+	      "one of 1008 characters ends in \"" LINE_CUT_MARK "\" at ");
+	kputdec(l.n);
+	kputs(wrong == 0 ? " -- 2 cases, 0 wrong (#593)\r\n"
+			 : " -- 2 cases, WRONG (#593)\r\n");
+}
+
 static void msg_abi_selftest(void)
 {
 	/*
@@ -6995,6 +7193,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
 
 	pte_selftest();
+	pte_update_selftest();
 	layout_selftest();
 	phys_selftest();
 	cpu_selftest();
@@ -7006,6 +7205,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	map_selftest();
 	protect_unmap_selftest();
 	split_selftest();
+	pte_split_selftest();
 	pmap_selftest();
 	pmap_verbs_selftest();
 	pv_selftest(info);
@@ -7031,6 +7231,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	freq_census();
 	rulers_selftest();
 	tsc_selftest();
+	spin_budget_selftest();
 	rulers_kept_selftest();
 	timer_selftest();
 	pci_cfg_selftest();
@@ -7044,6 +7245,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	lock_cost_bench();
 	device_master_irq_selftest();
 	panic_format_selftest();
+	line_selftest();
 	msg_abi_selftest();
 	port_name_selftest();
 	swapgs_window_selftest();

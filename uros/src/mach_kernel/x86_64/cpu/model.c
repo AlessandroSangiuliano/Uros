@@ -146,7 +146,7 @@ halt_cpu(void)
 		 * "(cpu N): ...", the string the harness knows a panic by (found
 		 * in review).
 		 */
-		for (spins = 0; spins < 200000000ULL && panicwait; spins++)
+		for (spins = 0; spins < CPU_SPIN_BUDGET && panicwait; spins++)
 			cpu_pause();
 
 		/*

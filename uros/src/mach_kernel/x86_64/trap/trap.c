@@ -45,6 +45,18 @@
 #ifndef ABLATE_467_ARM3
 #define ABLATE_467_ARM3	0	/* a ring-0 fault on a user address         */
 #endif
+/*
+ * #603: the two halves of taking ASTs on the way back to ring 3, each with
+ * its own way back out.  FAULT_AST: a page fault resolved for ring 3 returns
+ * without looking.  ONE_PASS: a return to ring 3 takes them once, as it did
+ * before, instead of until none is pending.
+ */
+#ifndef ABLATE_603_FAULT_AST
+#define ABLATE_603_FAULT_AST	0
+#endif
+#ifndef ABLATE_603_ONE_PASS
+#define ABLATE_603_ONE_PASS	0
+#endif
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -716,7 +728,7 @@ void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 	pmap_t kernel = pmap_kernel();
 	uint64_t spins;
 
-	for (spins = 0; spins < 200000000ULL; spins++) {
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_cmpxchg64(&backtrace_lock, 0, 1) == 0)
 			break;
 		cpu_pause();
@@ -1070,6 +1082,8 @@ void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
  */
 #define	AST_KERNEL_SAFE		AST_PREEMPT
 
+void thread_return_ast(void);		/* below: the loop both share */
+
 static void
 trap_take_ast(struct trap_frame *frame)
 {
@@ -1160,9 +1174,32 @@ trap_take_ast(struct trap_frame *frame)
 	 * takes it.  One tick of latency on a preemption that arrived inside a
 	 * critical section, against a section broken open.
 	 */
-	if ((frame->cs & 3) == USER_RPL)
+	if ((frame->cs & 3) == USER_RPL) {
+		/*
+		 * 🔴 UNTIL NONE IS PENDING, NOT ONCE (#603).
+		 *
+		 * ast_taken() takes what is pending when it looks, and after the
+		 * return handlers it leaves with "auto-retry will catch anything
+		 * new": it is written to be called in a loop.  i386's
+		 * return_from_trap jumps back into its own check, and
+		 * thread_return_ast() below loops, for the reason it gives.  This
+		 * took one pass -- and a thread preempted here blocks inside
+		 * ast_taken(), whose SAFE_EXCEPTION_RETURN is a sentinel and not
+		 * a continuation, so it resumes right here.  An AST_APC raised
+		 * while it was off the processor was set on its processor at
+		 * dispatch and never looked at: act_test's arm eight, at one
+		 * processor, counted a spinner asked to stop running up to 1.9
+		 * million turns inside thread_suspend().
+		 *
+		 * So a return to ring 3 is the same loop as the other four ways
+		 * back to ring 3, by being the same function.
+		 */
+		if (!ABLATE_603_ONE_PASS) {
+			thread_return_ast();
+			return;
+		}
 		take = AST_ALL;
-	else {
+	} else {
 		if (get_preemption_level() != 0)
 			return;
 		if (splget() != SPL0)
@@ -1844,6 +1881,26 @@ void trap_dispatch(struct trap_frame *frame)
 				 */
 				FP_MARK(FP_RETURN);
 				FP_COMMIT(frame);
+
+				/*
+				 * 🔴 AND THE ASTs, ON THE WAY BACK TO RING 3
+				 * (#603).  This is the one exception the kernel
+				 * handles and returns from: every other one goes
+				 * to the task through exception(), and comes back
+				 * through thread_exception_return, which checks.
+				 * This did not -- only the interrupt path called
+				 * trap_take_ast() -- so a thread asked to stop
+				 * while inside a fault went back to its own code
+				 * and ran on to its next system call or tick:
+				 * act_test's arm seven, at one processor, touched
+				 * up to 225 pages inside thread_suspend().  Ring 3
+				 * only: a fault taken at ring 0 goes back to kernel
+				 * code, where preempting is the interrupt path's
+				 * question, asked with IF known to be on.
+				 */
+				if (!ABLATE_603_FAULT_AST
+				    && (frame->cs & 3) == USER_RPL)
+					trap_take_ast(frame);
 				return;	/* the instruction runs again */
 			}
 		}

@@ -146,8 +146,7 @@ static pt_entry_t *next_table(pt_entry_t *entry, uint64_t *spare, int *err)
 	 * it removes it rather than making it rarer.
 	 */
 	{
-		pt_entry_t fresh = frame | INTEL_PTE_VALID | INTEL_PTE_WRITE
-				 | INTEL_PTE_USER;
+		pt_entry_t fresh = frame | INTEL_PTE_INTERIOR;
 
 		if (atomic_cmpxchg64((volatile uint64_t *) entry, 0, fresh) != 0)
 			continue;	/* somebody else published; look again */
@@ -319,10 +318,15 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 	 * and it covers implementations that cache the absence of a mapping as
 	 * well as its presence.
 	 *
-	 * ⚠️ After the section, not inside it.  tlb_flush_range() waits for every
-	 * other processor to answer, and one of those may be spinning in
-	 * urmach_synchronize_rcu() waiting for this processor to leave the very
-	 * section we would be holding.
+	 * After the section, because nothing here needs it inside: the caller
+	 * owns this pmap, so the shootdown's read of `cpus_using' needs no grace
+	 * period to keep the struct alive.  Inside would not deadlock -- this
+	 * comment used to say it would (#604).  A processor waiting for a grace
+	 * period spins with interrupts on and answers the cross-call, which is
+	 * what #558's loops in pmap.c rely on when they shoot down from inside
+	 * one; collect_flush() in vminit.c checks it.  Holding the section
+	 * across the wait for the answers would only make every grace period
+	 * wait that much longer.
 	 */
 	if (rc == PMAP_MAP_OK) {
 		invlpg(va);
@@ -335,6 +339,15 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 
 	return rc;
 }
+
+/*
+ * #604: the removal back to a read of the entry and a plain store of zero,
+ * which two removers can both get through.  The -M bench's two-remover arm
+ * is what notices.
+ */
+#ifndef	ABLATE_604_UNMAP_STORE
+#define	ABLATE_604_UNMAP_STORE	0
+#endif
 
 /*
  * Drop the mapping and leave the shootdown to the caller (#558).
@@ -354,25 +367,58 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
  *
  * Returns the size unmapped, which is what the caller has to flush.
  */
-uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va)
+uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
+				 pt_entry_t *removed)
 {
 	uint64_t size = 0;
 	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(map_root_of(pmap), va, &size);
+	pt_entry_t old;
 
 	if (entry == PT_ENTRY_NULL) {
 		pmap_read_leave(held);
 		return 0;
 	}
 
-	*entry = 0;
+	/*
+	 * 🔴 AN EXCHANGE, SO THAT ONE REMOVER WINS (#604).
+	 *
+	 * The walk said the entry was valid, and `*entry = 0' then cleared it
+	 * -- two steps, and two removers could both take the first before
+	 * either took the second.  pmap_forget() and the removal loop of
+	 * pmap_page_protect() reach the same entry from the two ends, the
+	 * address and the page, and #558's page lock does not keep them apart:
+	 * the loop holds it while it clears, and pmap_forget() clears first and
+	 * takes it only afterwards, in pv_remove().  Both would answer with a
+	 * size and both would drop the resident count: below the truth, or from
+	 * one past zero into pmap_resident_drop()'s panic.  Found by reading;
+	 * then seen, by the -M bench's two-remover arm with the plain store put
+	 * back: both removed the entry in 12 rounds of 50 000.
+	 *
+	 * The exchange answers what was in the word at the instant it went.
+	 * Whoever gets a valid entry back removed the mapping; whoever gets
+	 * zero lost the race and did nothing.  And what came back is the entry
+	 * itself: the frame the index must forget, and the hardware's
+	 * ACCESSED and DIRTY bits as of the removal (#606).
+	 */
+	if (ABLATE_604_UNMAP_STORE) {
+		old = *entry;
+		*entry = 0;
+	} else
+		old = atomic_swap64((volatile uint64_t *) entry, 0);
 	pmap_read_leave(held);
+
+	if (!pte_is_valid(old))
+		return 0;
+
+	if (removed != 0)
+		*removed = old;
 	return size;
 }
 
-uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va)
+uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va, pt_entry_t *removed)
 {
-	uint64_t size = pmap_unmap_page_noflush(pmap, va);
+	uint64_t size = pmap_unmap_page_noflush(pmap, va, removed);
 
 	if (size != 0)
 		tlb_flush_range(pmap, va, size);
@@ -422,32 +468,12 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
 	 * The same arbitration as next_table(), for the same reason: one
 	 * aligned 64-bit word, and cmpxchg tells the loser what it lost to.
 	 * Here the loser retries rather than gives up -- it still has a change
-	 * to apply, and it applies it to what it now finds.
-	 *
-	 * ⚠️ It reloads through `found' and never re-reads *entry.  Reading the
-	 * word again would open the same window one instruction wide: what
-	 * cmpxchg hands back is what the word held at the instant it refused,
-	 * and building the next attempt out of anything else is building it out
-	 * of a value that was never there.
+	 * to apply, and it applies it to what it now finds.  That loop is
+	 * pmap_pte_update() (pte.h); this was a copy of it, and the copy
+	 * wrote the permission bits into an entry a removal had just zeroed
+	 * (#604).
 	 */
-	{
-		pt_entry_t found = *entry;
-
-		for (;;) {
-			pt_entry_t fresh = (found & ~INTEL_PTE_PERM)
-					 | (flags & INTEL_PTE_PERM);
-			pt_entry_t seen;
-
-			if (fresh == found)
-				break;		/* already what it should be */
-
-			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
-						found, fresh);
-			if (seen == found)
-				break;
-			found = seen;
-		}
-	}
+	pmap_pte_update(entry, flags & INTEL_PTE_PERM, INTEL_PTE_PERM);
 
 	pmap_read_leave(held);
 
@@ -468,12 +494,18 @@ uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
 	return size;
 }
 
+/* #604: the split's interior entry, and what it was before (see pte.h). */
+#define SPLIT_INTERIOR	(ABLATE_604_SPLIT_DROPS				\
+			 ? (INTEL_PTE_VALID | INTEL_PTE_WRITE)		\
+			 : INTEL_PTE_INTERIOR)
+
 uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 {
 	uint64_t size = 0;
-	uint64_t base, perm, sub_size, table_pa;
+	uint64_t sub_size, table_pa;
 	pt_entry_t *entry;
 	pt_entry_t *sub;
+	pt_entry_t found;
 	boolean_t held;
 	int from_1g;
 
@@ -493,6 +525,13 @@ uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 	 * large page is rare -- and it is i386's pmap_expand() shape: allocate
 	 * outside, decide inside, give the page back if you lost the argument.
 	 */
+	/*
+	 * Zero is already this function's way of saying "there was nothing to
+	 * split", so it cannot also mean "there was, and I could not".  The
+	 * caller would read the second as the first and carry on believing the
+	 * range is now fine-grained when it is still one large page — which is
+	 * how a section ends up sharing its permissions with its neighbour.
+	 */
 	table_pa = pmap_table_frame();
 	if (table_pa == 0)
 		panic("pmap: no frame to split a large page into");
@@ -508,36 +547,45 @@ uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 
 	from_1g = (size == PAGE_SIZE_1G);
 	sub_size = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
-
-	/* The frame is aligned to the leaf's own size, so mask by that. */
-	base = *entry & (from_1g ? INTEL_PTE_PFN_1G : INTEL_PTE_PFN_2M);
-	perm = *entry & INTEL_PTE_PERM;
+	sub = table_at(table_pa);
 
 	/*
-	 * Zero is already this function's way of saying "there was nothing to
-	 * split", so it cannot also mean "there was, and I could not".  The
-	 * caller would read the second as the first and carry on believing the
-	 * range is now fine-grained when it is still one large page — which is
-	 * how a section ends up sharing its permissions with its neighbour.
+	 * 🔴 ONE READ OF THE LEAF, AND THE TABLE PUBLISHED ONLY OVER THAT VALUE
+	 * (#604).  The leaf was read twice, for its frame and for its
+	 * permissions, and then overwritten with a plain store: a
+	 * read-modify-write of a word the processor sets ACCESSED and DIRTY in
+	 * without notice.  Now the new leaves are built from one value
+	 * (pte_split_leaf(), which carries every bit but the frame), and the
+	 * exchange publishes them only if the word still holds that value.  If
+	 * it does not, they are built again from what it holds.
+	 *
+	 * The interior entry is INTEL_PTE_INTERIOR, the one next_table()
+	 * writes.  This one said it "carries no policy of its own" and left
+	 * USER out -- and a clear U/S on the path is a policy: nothing below it
+	 * is reachable from ring 3.  Only kernel pages are split today, and
+	 * their leaves are supervisor-only anyway, so the access rights come
+	 * out the same either way.  pte_split_leaf() says why they have to.
 	 */
-	sub = table_at(table_pa);
-	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
-		pt_entry_t leaf = (base + (uint64_t)i * sub_size)
-				| INTEL_PTE_VALID | perm;
+	found = *entry;
+	for (;;) {
+		pt_entry_t seen;
 
-		/*
-		 * The 2 MiB sub-pages of a split gigabyte are still leaves —
-		 * at the PD, where PS marks a leaf.  The 4 KiB sub-pages of a
-		 * split 2 MiB page are PT entries, where PS is not defined.
-		 */
-		if (from_1g)
-			leaf |= INTEL_PTE_PS;
+		for (unsigned i = 0; i < PTES_PER_TABLE; i++)
+			sub[i] = pte_split_leaf(found, from_1g, i);
 
-		sub[i] = leaf;
+		seen = atomic_cmpxchg64((volatile uint64_t *) entry, found,
+					table_pa | SPLIT_INTERIOR);
+		if (seen == found)
+			break;
+
+		/* Removed, or split by somebody else: nothing left to split. */
+		if (!pte_is_valid(seen) || !pte_is_leaf(seen)) {
+			pmap_read_leave(held);
+			pmap_table_frame_free(table_pa);
+			return 0;
+		}
+		found = seen;
 	}
-
-	/* The interior entry replacing the leaf carries no policy of its own. */
-	*entry = table_pa | INTEL_PTE_VALID | INTEL_PTE_WRITE;
 
 	/*
 	 * One TLB entry covered the whole large page, and naming one sub-page

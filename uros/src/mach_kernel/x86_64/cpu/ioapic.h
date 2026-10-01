@@ -23,11 +23,10 @@
  * Only two addresses are mapped. One selects a register by number and the
  * other reads or writes whichever is selected, so every access is two stores
  * or a store and a load, and none of them is atomic with respect to another
- * processor doing the same thing. This said it was a lock "the day two
- * processors program pins at once" and that only the boot processor did.
- * That day had come without anybody noticing: device_machdep.c masks and
- * unmasks from whichever processor handles the interrupt. So every sequence
- * holds ioapic_pair_lock (ioapic.c, #599).
+ * processor doing the same thing. This said the lock could wait, because
+ * only the boot processor programmed pins, before the others were started;
+ * that stopped being true when user-level drivers could claim a line (#457),
+ * and the window is now taken in turns -- see ioapic.c (#593).
  *
  * ── ⚠️ The trap that #381 already paid for ────────────────────────────
  *
