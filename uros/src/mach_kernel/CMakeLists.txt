@@ -350,6 +350,7 @@ option(UROS_ABLATE_604_SPLIT_DROPS "Build the #604 ablation: a split keeps only 
 option(UROS_ABLATE_604_COLLECT_MASKED "Build the #604 probe: the -M bench collects once with interrupts off, and the check in collect_flush() must stop the boot" OFF)
 # #606: what a page's mappings saw, kept when they go.
 option(UROS_ABLATE_606_FORGET_BITS "Build the #606 ablation: a removed or replaced entry keeps nothing of its ACCESSED and DIRTY bits" OFF)
+option(UROS_PROBE_606_PAGEOUT "Build the #606 probe: once a second, the counters vm_pageout_scan() keeps, printed when they move" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -722,6 +723,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_606_FORGET_BITS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_606_FORGET_BITS=1)
       message(STATUS "#606 ablation: a removed or replaced entry keeps nothing of its ACCESSED and DIRTY bits (x86_64)")
+  endif()
+  if(UROS_PROBE_606_PAGEOUT)
+      list(APPEND KERNEL_DEFINES_BARE PROBE_606_PAGEOUT=1)
+      message(STATUS "#606 probe: the pageout's counters, printed when they move (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)
