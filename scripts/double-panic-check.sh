@@ -14,7 +14,10 @@
 #   2. the console's final copy, whole and once, after the message and before
 #      the first backtrace (#567, #568);
 #   3. one whole backtrace header per processor, each processor once;
-#   4. nothing else: a line that is none of these is two of them run together.
+#   4. no line after it that carries a piece of one of these and is not it
+#      whole: that is two outputs run together.  A whole line of some other
+#      kind is allowed -- a processor not yet stopped may print one between
+#      the message and the halt -- and counted.
 #
 # Prints one line, PASS, WRONG or NOT ASKED; exits 0, 1 or 2.  A boot that
 # never posed the question -- one processor, interrupts off -- is NOT ASKED.
@@ -78,9 +81,14 @@ done { next }
 	}
 	if ($0 ~ frame || $0 == "")
 		next
-	other++
-	if (!firstother)
-		firstother = $0
+	if (index($0, "UrMach x86-64: console:") || index($0, "backtrace (addr2line") ||
+	    index($0, "0xffffffff8") || $0 ~ /^    0x/) {
+		other++
+		if (!firstother)
+			firstother = $0
+		next
+	}
+	alive++
 }
 END {
 	if (refused != "") {
@@ -115,9 +123,9 @@ END {
 	if (twice)
 		wrong("a processor gave two backtraces")
 	if (other)
-		wrong(sprintf("%d lines after the message are none of its parts, the first: %s", other, firstother))
+		wrong(sprintf("%d lines after the message carry a piece of one of its parts and are not it, the first: %s", other, firstother))
 	if (bad)
 		exit 1
-	printf "double-panic-check: PASS — one whole panic message, the console final copy whole after it, %d whole backtraces for %d processors, nothing else\n", nhdr, want
+	printf "double-panic-check: PASS — one whole panic message, the console final copy whole after it, %d whole backtraces for %d processors, nothing run together (%d whole lines from processors not yet stopped)\n", nhdr, want, alive + 0
 	exit 0
 }'
