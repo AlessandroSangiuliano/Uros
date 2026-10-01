@@ -90,6 +90,36 @@ static unsigned call_name_silent(uint64_t targets)
 	return silent;
 }
 
+/*
+ * Wait for `targets' answers, bounded, and on a timeout name every processor
+ * in `who' that did not answer before stopping the machine (#605).  The
+ * broadcast and the targeted call each had this loop and this panic, differing
+ * only in the message; the message is one now, and says what was asked as well
+ * as who stayed silent.
+ *
+ * Bounded, because the failure worth catching is an answer that never comes,
+ * and waiting forever for it turns a report into a hang.  The count is
+ * generous: a processor deep in a fault report can take a long time to get
+ * round to this.
+ */
+static void ipi_wait_for_acks(uint64_t who, unsigned targets)
+{
+	uint64_t spins;
+
+	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
+		if (atomic_load64(&call_acks) >= targets)
+			return;
+		cpu_pause();
+	}
+	if (atomic_load64(&call_acks) >= targets)
+		return;
+
+	panic("ipi: %u of %u processors never answered a cross-call "
+	      "(targets 0x%llx, %llu answers arrived)",
+	      call_name_silent(who), targets, (unsigned long long) who,
+	      (unsigned long long) atomic_load64(&call_acks));
+}
+
 static void ipi_call_handler(struct trap_frame *frame)
 {
 	void (*fn)(void *) = call_fn;
@@ -144,7 +174,7 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 {
 	unsigned targets = smp_online_count() - 1;
 	uint32_t me;
-	uint64_t who, spins;
+	uint64_t who;
 
 	if (targets == 0)
 		return;
@@ -185,28 +215,13 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 
 	lapic_broadcast_ipi(IPI_VECTOR_CALL);
 
-	/*
-	 * Bounded, because the failure worth catching is an answer that never
-	 * comes, and waiting forever for it turns a report into a hang.  The
-	 * count is generous: a processor deep in a fault report can take a
-	 * long time to get round to this.
-	 */
-	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
-		if (atomic_load64(&call_acks) >= targets)
-			break;
-		cpu_pause();
-	}
-
-	if (atomic_load64(&call_acks) < targets)
-		panic("ipi: %u of %u processors never answered a cross-call",
-		      call_name_silent(who), targets);
+	ipi_wait_for_acks(who, targets);
 
 	hw_lock_unlock(&call_lock);
 }
 
 void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 {
-	uint64_t spins;
 	unsigned targets;
 	unsigned id;
 
@@ -257,19 +272,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 			targets++;
 		}
 
-	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
-		if (atomic_load64(&call_acks) >= targets)
-			break;
-		cpu_pause();
-	}
-
-	if (atomic_load64(&call_acks) < targets) {
-		(void) call_name_silent(mask);
-		panic("ipi: a processor in a targeted cross-call never "
-		      "answered (mask 0x%llx, %u expected, %llu arrived)",
-		      (unsigned long long) mask, targets,
-		      (unsigned long long) atomic_load64(&call_acks));
-	}
+	ipi_wait_for_acks(mask, targets);
 
 	hw_lock_unlock(&call_lock);
 }
