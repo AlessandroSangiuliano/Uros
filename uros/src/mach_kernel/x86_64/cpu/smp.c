@@ -38,7 +38,10 @@ uint64_t ap_stack_top[SMP_MAX_CPUS];
 static volatile uint64_t online_mask;
 static volatile uint64_t online_count;
 
-/* The boot processor's APIC id, once smp_start_others() has run (#605). */
+/*
+ * The boot processor's bit in smp_answering_set(), set once smp_start_others()
+ * has run (#605).
+ */
 static volatile uint64_t bsp_bit;
 
 /*
