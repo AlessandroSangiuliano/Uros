@@ -378,6 +378,56 @@ int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
 int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out);
 
 /*
+ * ── #598: what a source writes so that its interrupt finds its entry ──
+ *
+ * Intel only, and that asymmetry is a design decision rather than a gap.
+ *
+ * On Intel the source must be reprogrammed: the message names its entry by a
+ * handle in the ADDRESS, in a format of its own (Rev 5.20 §5.1.2.2), and an
+ * old-style message is the very thing remapping is meant to block (fault 25h).
+ *
+ * 🔑 On AMD the message's DATA is the index -- bits 10:0 (Rev 3.11 §2.2.5,
+ * Figure 14) -- and the table belongs to the device.  So if entry N of every
+ * table delivers vector N, every message a source writes today is already the
+ * right one, and nothing about MSI-X or the I/O APIC changes.  It is also what
+ * keeps a level-triggered pin working under a broadcast EOI, which compares
+ * the delivered vector with the RTE's vector field (#598 point 3).
+ */
+
+/*
+ * An MSI or MSI-X message in remappable format for entry `index' (§5.1.5.2):
+ * 0xFEE in 31:20, index[14:0] in 19:5, the format bit 4, SHV in bit 3,
+ * index[15] in bit 2, and a data word of zero.  Answers zero for an index
+ * beyond the sixteen bits a handle has.
+ */
+int iommu_vtd_msi(uint32_t index, uint32_t *address, uint32_t *data);
+
+/*
+ * The entry a message will select, the way the engine computes it (§5.1.3):
+ * the handle, plus the data's subhandle when SHV is set.  Answers 1 for a
+ * remappable message, 0 for a compatibility one, -1 for one the engine
+ * refuses as malformed: not in the interrupt range, or reserved data bits set.
+ */
+int iommu_vtd_msi_decode(uint32_t address, uint32_t data, uint32_t *index);
+
+/*
+ * An I/O APIC redirection entry in remappable format (§5.1.5.1): index[14:0]
+ * in 63:49, the format bit 48, index[15] in bit 11, delivery 000b in 10:8 so
+ * that SHV is clear, and `vector' in 7:0, which must be the entry's own for a
+ * level-triggered pin under a broadcast EOI.
+ *
+ * As the two halves ioapic_route() writes: `lo' is bits 31:0, `hi' 63:32.
+ */
+int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
+			 int active_low, int masked, uint32_t *lo, uint32_t *hi);
+
+/*
+ * The entry a redirection entry will select: 1 remappable, 0 compatibility,
+ * -1 with a delivery mode other than fixed, which would set SHV.
+ */
+int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index);
+
+/*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────
  *
  * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make

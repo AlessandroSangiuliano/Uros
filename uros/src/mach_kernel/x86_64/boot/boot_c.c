@@ -4690,9 +4690,10 @@ static void iommu_selftest(void)
 		kputs(" interrupt remapping words encoded and decoded, ");
 		kputdec(wrong);
 		kputs(" wrong");
-		kputs(ok ? " — both vendors' empty entries refuse, and an intel"
+		kputs(ok ? " — both vendors' empty entries refuse, an intel"
 			   " entry that accepts any source is not one of"
-			   " ours\r\n"
+			   " ours, and an index's sixteenth bit travels"
+			   " apart\r\n"
 			 : " — WRONG, an interrupt would go somewhere the"
 			   " kernel did not send it\r\n");
 	}

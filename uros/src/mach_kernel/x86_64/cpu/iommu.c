@@ -2553,6 +2553,115 @@ static const struct irte_case irte_cases[] = {
 	  0x01410101ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
 };
 
+/*
+ * And the messages a source writes to reach its entry, Intel's only -- see
+ * <cpu/iommu_backend.h> for why AMD's do not change.  From Rev 5.20 Figures
+ * 5-2 to 5-4 by hand.
+ *
+ * 🔴 Two indices need the sixteenth bit, which lives apart from the other
+ * fifteen: bit 2 of an address, bit 11 of a redirection entry.
+ */
+struct msg_case {
+	const char	*what;
+	int		 rte;		/* an I/O APIC entry, not an MSI      */
+	uint32_t	 index;
+	uint8_t		 vector;	/* the RTE's; must be its entry's     */
+	int		 level;
+	int		 active_low;
+	int		 masked;
+	uint32_t	 a;		/* MSI address, or RTE bits 31:0      */
+	uint32_t	 b;		/* MSI data, or RTE bits 63:32        */
+	int		 decodes;	/* 1 remappable, 0 compatibility, -1 refused */
+	int		 encodes;	/* 1 must produce, -1 must refuse, 0 not */
+};
+
+static const struct msg_case msg_cases[] = {
+	/* 0xFEE, index 5 in 19:5, format and SHV, data zero. */
+	{ "intel msi, entry 5", 0, 5, 0, 0, 0, 0,
+	  0xFEE000B8u, 0, 1, 1 },
+	/* Index 0x8001: bit 15 is address bit 2. */
+	{ "intel msi, entry 0x8001", 0, 0x8001, 0, 0, 0, 0,
+	  0xFEE0003Cu, 0, 1, 1 },
+	/* The top of the fifteen-bit field: 19:5 all set. */
+	{ "intel msi, entry 0x7fff", 0, 0x7FFF, 0, 0, 0, 0,
+	  0xFEEFFFF8u, 0, 1, 1 },
+	/* A handle has sixteen bits and no more. */
+	{ "intel msi, entry 0x10000", 0, 0x10000, 0, 0, 0, 0,
+	  0, 0, 0, -1 },
+	/* Today's message to APIC id 1: compatibility format, bit 4 clear. */
+	{ "intel msi, compatibility format", 0, 0, 0, 0, 0, 0,
+	  0xFEE01000u, 0x41, 0, 0 },
+	/* SHV set and a subhandle of 3: the engine selects 5 + 3 (§5.1.3). */
+	{ "intel msi, a subhandle added (synthetic)", 0, 8, 0, 0, 0, 0,
+	  0xFEE000B8u, 3, 1, 0 },
+	/* With SHV set, data bits 31:16 are reserved (Table 14). */
+	{ "intel msi, reserved data bits (synthetic)", 0, 0, 0, 0, 0, 0,
+	  0xFEE000B8u, 0x10000, -1, 0 },
+	/* Not in the interrupt range at all. */
+	{ "intel msi, not an interrupt address (synthetic)", 0, 0, 0, 0, 0, 0,
+	  0xFED00018u, 0, -1, 0 },
+	/* SHV clear: the data is ignored and the handle is the index. */
+	{ "intel msi, no subhandle (synthetic)", 0, 5, 0, 0, 0, 0,
+	  0xFEE000B0u, 0x1234, 1, 0 },
+
+	/* Index 5 in 63:49, the format bit 48, vector 0x41, edge, high. */
+	{ "intel rte, entry 5", 1, 5, 0x41, 0, 0, 0,
+	  0x00000041u, 0x000B0000u, 1, 1 },
+	/*
+	 * Index 0x8002: bit 15 is RTE bit 11.  Level, active low, masked,
+	 * which are the RTE's own and untouched by remapping.
+	 */
+	{ "intel rte, entry 0x8002, level", 1, 0x8002, 0x42, 1, 1, 1,
+	  0x0001A842u, 0x00050000u, 1, 1 },
+	/* Today's entry to APIC id 1: compatibility format, bit 48 clear. */
+	{ "intel rte, compatibility format", 1, 0, 0, 0, 0, 0,
+	  0x00000041u, 0x01000000u, 0, 0 },
+	/* Lowest priority would set SHV and shift the index. */
+	{ "intel rte, lowest priority (synthetic)", 1, 0, 0, 0, 0, 0,
+	  0x00000141u, 0x000B0000u, -1, 0 },
+};
+
+static unsigned msg_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(msg_cases) / sizeof(msg_cases[0]);
+	     i++) {
+		const struct msg_case *c = &msg_cases[i];
+		uint32_t a = 0xA5A5A5A5u, b = 0xA5A5A5A5u;
+		uint32_t index = 0xA5A5A5A5u;
+		int got;
+
+		(*ran)++;
+
+		if (c->encodes != 0) {
+			got = c->rte
+			    ? iommu_vtd_ioapic_rte(c->index, c->vector,
+						   c->level, c->active_low,
+						   c->masked, &a, &b)
+			    : iommu_vtd_msi(c->index, &a, &b);
+
+			if (c->encodes < 0) {
+				if (got != 0)
+					bad++;
+				continue;
+			}
+			if (got != 1 || a != c->a || b != c->b) {
+				bad++;
+				continue;
+			}
+		}
+
+		got = c->rte ? iommu_vtd_ioapic_rte_decode(c->a, c->b, &index)
+			     : iommu_vtd_msi_decode(c->a, c->b, &index);
+
+		if (got != c->decodes || (got == 1 && index != c->index))
+			bad++;
+	}
+
+	return bad;
+}
+
 int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 {
 	unsigned n = 0, bad = 0;
@@ -2609,6 +2718,8 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 			     || d.source != c->e.source))
 			bad++;
 	}
+
+	bad += msg_check(&n);
 
 	if (ran)
 		*ran = n;

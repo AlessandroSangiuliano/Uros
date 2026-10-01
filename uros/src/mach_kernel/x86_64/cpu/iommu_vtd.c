@@ -1503,3 +1503,113 @@ int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
 	out->source = (uint16_t)(hi & 0xFFFF);
 	return 1;
 }
+
+/*
+ * ── #598: the message a source writes, in remappable format ──────────
+ *
+ * Rev 5.20 §5.1.2.2 (Figure 5-2, Tables 13 and 14), §5.1.3 for how the engine
+ * turns it into an index, §5.1.5.1 and §5.1.5.2 for what software programs.
+ *
+ * ⚠️ The handle is SIXTEEN bits split fifteen and one: 14:0 in address bits
+ * 19:5 and bit 15 apart, in address bit 2 -- and in bit 11 of a redirection
+ * entry.  The ablation drops the sixteenth, the slip that a field called
+ * "Handle[14:0]" invites, and the check must catch it on the two cases whose
+ * index needs it.
+ */
+#ifndef	ABLATE_598_INDEX15
+#define	ABLATE_598_INDEX15	0
+#endif
+
+#define	VTD_MSI_BASE		0xFEE00000u
+#define	VTD_MSI_ID_MASK		0xFFF00000u	/* 31:20, FEEh            */
+#define	VTD_MSI_FORMAT		(1u << 4)	/* 1: remappable          */
+#define	VTD_MSI_SHV		(1u << 3)
+#define	VTD_MSI_HANDLE15	(1u << 2)
+#define	VTD_MSI_HANDLE(a)	(((a) >> 5) & 0x7FFFu)
+
+#define	VTD_RTE_FORMAT		(1u << 16)	/* bit 48, in the high half */
+#define	VTD_RTE_INDEX15		(1u << 11)
+#define	VTD_RTE_DELIVERY_MASK	(7u << 8)
+#define	VTD_RTE_POLARITY_LOW	(1u << 13)
+#define	VTD_RTE_LEVEL		(1u << 15)
+#define	VTD_RTE_MASKED		(1u << 16)
+
+int iommu_vtd_msi(uint32_t index, uint32_t *address, uint32_t *data)
+{
+	if (index > 0xFFFFu || address == 0 || data == 0)
+		return 0;
+
+	*address = VTD_MSI_BASE | ((index & 0x7FFFu) << 5) | VTD_MSI_FORMAT
+		 | VTD_MSI_SHV;
+	if ((index & 0x8000u) && !ABLATE_598_INDEX15)
+		*address |= VTD_MSI_HANDLE15;
+
+	/*
+	 * Zero, with SHV set: the subhandle is zero and the handle is the
+	 * whole index, the first of the four encodings §5.1.5 lists for SHV=1.
+	 * A device with multiple-message MSI ORs its vector number into these
+	 * low bits, which is why SHV is set at all.
+	 */
+	*data = 0;
+	return 1;
+}
+
+int iommu_vtd_msi_decode(uint32_t address, uint32_t data, uint32_t *index)
+{
+	uint32_t handle;
+
+	if ((address & VTD_MSI_ID_MASK) != VTD_MSI_BASE)
+		return -1;
+	if (!(address & VTD_MSI_FORMAT))
+		return 0;
+
+	handle = VTD_MSI_HANDLE(address)
+	       | ((address & VTD_MSI_HANDLE15) ? 0x8000u : 0);
+
+	if (address & VTD_MSI_SHV) {
+		/* Table 14: with SHV set, data bits 31:16 are reserved. */
+		if (data & 0xFFFF0000u)
+			return -1;
+		*index = handle + (data & 0xFFFFu);
+	} else {
+		*index = handle;
+	}
+	return 1;
+}
+
+int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
+			 int active_low, int masked, uint32_t *lo, uint32_t *hi)
+{
+	if (index > 0xFFFFu || lo == 0 || hi == 0)
+		return 0;
+
+	*lo = vector;
+	if ((index & 0x8000u) && !ABLATE_598_INDEX15)
+		*lo |= VTD_RTE_INDEX15;
+	if (active_low)
+		*lo |= VTD_RTE_POLARITY_LOW;
+	if (level)
+		*lo |= VTD_RTE_LEVEL;
+	if (masked)
+		*lo |= VTD_RTE_MASKED;
+
+	*hi = ((index & 0x7FFFu) << 17) | VTD_RTE_FORMAT;
+	return 1;
+}
+
+int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index)
+{
+	if (!(hi & VTD_RTE_FORMAT))
+		return 0;
+
+	/*
+	 * A delivery mode other than fixed would set SHV in the message the
+	 * I/O APIC builds, and the index would then be shifted by a subhandle
+	 * nobody chose (§5.1.5.1).
+	 */
+	if (lo & VTD_RTE_DELIVERY_MASK)
+		return -1;
+
+	*index = (hi >> 17) | ((lo & VTD_RTE_INDEX15) ? 0x8000u : 0);
+	return 1;
+}
