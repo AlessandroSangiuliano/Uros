@@ -352,6 +352,8 @@ option(UROS_ABLATE_604_COLLECT_MASKED "Build the #604 probe: the -M bench collec
 option(UROS_ABLATE_606_FORGET_BITS "Build the #606 ablation: a removed or replaced entry keeps nothing of its ACCESSED and DIRTY bits" OFF)
 option(UROS_PROBE_606_PAGEOUT "Build the #606 probe: once a second, the counters vm_pageout_scan() keeps, printed when they move" OFF)
 option(UROS_ABLATE_606_PAGEOUT_WAIT "Build the #606 ablation: vm_pageout() asserts nobody is waiting after a scan, and sleeps with no end" OFF)
+# #605: the cross-call that times out names who did not answer.
+option(UROS_PROBE_605_SILENT "Build the #605 probe: halt one processor and cross-call it, so the panic has to name it" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -732,6 +734,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_606_PAGEOUT_WAIT)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_606_PAGEOUT_WAIT=1)
       message(STATUS "#606 ablation: vm_pageout() asserts nobody is waiting, and sleeps with no end (x86_64)")
+  endif()
+  if(UROS_PROBE_605_SILENT)
+      list(APPEND KERNEL_DEFINES_BARE PROBE_605_SILENT=1)
+      message(STATUS "#605 probe: one processor halted and cross-called (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

@@ -6981,6 +6981,54 @@ static void tlb_shootdown_selftest(void)
  * counter that never moves proves nothing if it could not have moved.  The
  * same address, shot down with PMAP_NULL, must move every counter.
  */
+/*
+ * #605: a processor that cannot answer, and the cross-call that has to name it.
+ *
+ * The halt interrupt stops one application processor without an end of
+ * interrupt, so it takes no other; a targeted call to it then waits out
+ * CPU_SPIN_BUDGET and panics -- and the line before the panic must give its
+ * APIC id.  A build option (UROS_PROBE_605_SILENT), off by default: the boot
+ * it runs in ends there.
+ */
+#ifndef	PROBE_605_SILENT
+#define	PROBE_605_SILENT	0
+#endif
+
+#if	PROBE_605_SILENT
+static void silent_noop(void *arg)
+{
+	(void) arg;
+}
+
+static void silent_cpu_probe(void)
+{
+	uint32_t me = lapic_id();
+	uint64_t others = smp_answering_set();
+	unsigned id;
+
+	if (me < SMP_MAX_CPUS)
+		others &= ~(1ULL << me);
+	if (others == 0) {
+		kputs("UrMach x86-64: silent processor probe: nobody else to "
+		      "silence (#605)\r\n");
+		return;
+	}
+
+	id = (unsigned) __builtin_ctzll(others);
+	kputs("UrMach x86-64: silent processor probe: halting APIC id ");
+	kputdec(id);
+	kputs(", then cross-calling it -- the panic must name it (#605)\r\n");
+
+	lapic_send_ipi(id, IPI_VECTOR_HALT);
+	for (unsigned i = 0; i < 1000000; i++)
+		cpu_pause();			/* let the halt land first */
+
+	ipi_call_mask(1ULL << id, silent_noop, 0);
+	kputs("UrMach x86-64: silent processor probe: the call came back "
+	      "-- WRONG, a halted processor answered\r\n");
+}
+#endif	/* PROBE_605_SILENT */
+
 static void tlb_targeted_selftest(void)
 {
 	pmap_t		u;
@@ -7282,6 +7330,9 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ap_to_bsp_selftest();
 	tlb_shootdown_selftest();
 	tlb_targeted_selftest();
+#if	PROBE_605_SILENT
+	silent_cpu_probe();
+#endif
 	smp_timer_selftest();
 
 	wx_enforcement_selftest();
