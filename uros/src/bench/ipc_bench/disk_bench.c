@@ -42,6 +42,8 @@
 #include <mach/mach_port.h>
 #include <mach/clock.h>
 #include <mach/clock_types.h>
+#include <mach/mach_traps.h>
+#include <mach/thread_switch.h>	/* #599: waiting for ext_server */
 #include <device/device.h>
 #include <device/device_types.h>
 #include <servers/netname.h>
@@ -2150,9 +2152,30 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		}
 	}
 
-	kr = netname_look_up(name_server_port, "", "ext_server", &ext2_port);
-	if (kr == KERN_SUCCESS) {
-		have_ext2 = 1;
+	/*
+	 * #599: waited for, within a minute.  It was asked once, and in a
+	 * bundle running only this suite (--bench disk) the question came
+	 * before ext_server had mounted and registered: the suite said
+	 * "skipped" for a server that was still starting, and the 4 MB
+	 * bench.dat that --bench puts on the disk was never read.
+	 */
+	{
+		int waited;
+
+		for (waited = 0; waited < 600; waited++) {
+			kr = netname_look_up(name_server_port, "", "ext_server",
+					     &ext2_port);
+			if (kr == KERN_SUCCESS)
+				break;
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, 100);
+		}
+		if (kr == KERN_SUCCESS) {
+			have_ext2 = 1;
+			if (waited > 0)
+				printf("  ext_server: registered after %d ms "
+				       "of waiting\n", waited * 100);
+		}
 	}
 
 	if (!have_ahci && !have_ext2) {
