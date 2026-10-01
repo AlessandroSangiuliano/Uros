@@ -1448,9 +1448,11 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 }
 
 /*
- * True if any mapping of the page carries the bits.  The hardware sets them
- * in whichever entry it walked, so a page read through one mapping is
- * referenced even though the others say nothing.
+ * True if any mapping of the page carries the bits, or any mapping that has
+ * gone did (#606).  The hardware sets them in whichever entry it walked, so a
+ * page read through one mapping is referenced even though the others say
+ * nothing -- and a page written through a mapping since removed is modified
+ * even though no mapping is left to say so.
  */
 static int pv_test_bits(uint64_t pa, uint64_t bits)
 {
@@ -1479,7 +1481,17 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 	pv_unlock_page(pa);
 	pmap_read_leave(held);
 
-	return 0;
+	/*
+	 * 🔴 THE RECORD SECOND, AFTER THE LIVE ENTRIES, AND THE ORDER IS THE
+	 * POINT (#606).  A removal keeps an entry's bits in the record BEFORE it
+	 * clears the entry (pmap_unmap_page_noflush()), and never under this
+	 * page's lock -- pmap_forget() takes it only afterwards.  Reading the
+	 * entries first and the record second means a bit the walk did not
+	 * find, because its entry had already been cleared, was in the record
+	 * by then.  The other order could read the record before the keep and
+	 * the entry after the clear, and miss it in both.
+	 */
+	return pv_kept_bits(pa, bits);
 }
 
 static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
@@ -1542,6 +1554,18 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		} else
 			foverflow = TRUE;
 	}
+
+	/*
+	 * And the record of what removed mappings saw (#606), after the live
+	 * entries: a clear takes away a bit a concurrent removal kept from an
+	 * entry this walk had not reached yet, which is what a clear is asked
+	 * to do.  A set lands in the record too, so pmap_set_modify() on a page
+	 * with no mapping left is not a set of nothing.
+	 */
+	if (set)
+		pv_keep_bits(pa, bits);
+	else
+		pv_forget_bits(pa, bits);
 	pv_unlock_page(pa);
 
 	if (foverflow)
