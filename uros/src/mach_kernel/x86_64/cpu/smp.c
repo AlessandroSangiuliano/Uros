@@ -39,6 +39,12 @@ static volatile uint64_t online_mask;
 static volatile uint64_t online_count;
 
 /*
+ * The boot processor's bit in smp_answering_set(), set once smp_start_others()
+ * has run (#605).
+ */
+static volatile uint64_t bsp_bit;
+
+/*
  * The other direction: one processor volunteers to send rather than serve.
  *
  * `claimed` is taken by whichever processor arrives first, so nothing here
@@ -307,11 +313,25 @@ int smp_is_online(uint32_t apic_id)
 		>> apic_id) & 1;
 }
 
+uint64_t smp_answering_set(void)
+{
+	return atomic_load64((volatile uint64_t *)&online_mask)
+	     | atomic_load64(&bsp_bit);
+}
+
 unsigned smp_start_others(void)
 {
 	uint32_t self = lapic_id();
 	unsigned asked = 0;
 	uint64_t spins;
+
+	/*
+	 * The boot processor answers broadcasts too, and is in no mask until it
+	 * is put in one here (#605).  An id past the table cannot be -- and then
+	 * a broadcast that times out cannot name it, which is all that costs.
+	 */
+	if (self < SMP_MAX_CPUS)
+		atomic_store64(&bsp_bit, 1ULL << self);
 
 	ap_trampoline_install();
 
