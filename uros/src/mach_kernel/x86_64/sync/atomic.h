@@ -139,6 +139,28 @@ static inline uint8_t atomic_swap8(volatile uint8_t *p, uint8_t v)
 	return v;
 }
 
+/*
+ * #606: set and clear bits in one byte that other processors set and clear
+ * too -- the per-page record of what a page's mappings saw (pmap/pv.c).  A
+ * plain `|=' would read, change and write back, and lose whatever another
+ * processor put in the byte in between.
+ */
+static inline void atomic_or8(volatile uint8_t *p, uint8_t v)
+{
+	__asm__ volatile("lock orb %1, %0"
+			 : "+m"(*p)
+			 : "iq"(v)
+			 : "memory", "cc");
+}
+
+static inline void atomic_and8(volatile uint8_t *p, uint8_t v)
+{
+	__asm__ volatile("lock andb %1, %0"
+			 : "+m"(*p)
+			 : "iq"(v)
+			 : "memory", "cc");
+}
+
 /* #538: the interrupt-pending counters are 32-bit and are TAKEN, not read. */
 static inline uint32_t atomic_swap32(volatile uint32_t *p, uint32_t v)
 {
