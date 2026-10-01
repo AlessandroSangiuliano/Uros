@@ -6994,11 +6994,65 @@ static void tlb_shootdown_selftest(void)
 #define	PROBE_605_SILENT	0
 #endif
 
-#if	PROBE_605_SILENT
+#ifndef	PROBE_605_CALL_COST
+#define	PROBE_605_CALL_COST	0
+#endif
+
+#if	PROBE_605_SILENT || PROBE_605_CALL_COST
 static void silent_noop(void *arg)
 {
 	(void) arg;
 }
+#endif
+
+#if	PROBE_605_CALL_COST
+/*
+ * #605: what a broadcast cross-call costs, in TSC ticks, as five batches and
+ * their median -- run once with the answer counters packed eight to a cache
+ * line and once with UROS_PROBE_605_PADDED, so the difference is what the
+ * sharing costs.  An empty function, so the call is all that is measured.
+ */
+#define CALL_COST_BATCH	4000
+
+static void call_cost_probe(void)
+{
+	uint64_t per[5], t0;
+	unsigned b, i, j;
+
+	for (i = 0; i < 500; i++)			/* warm up */
+		ipi_call_others(silent_noop, 0);
+
+	for (b = 0; b < 5; b++) {
+		t0 = rdtsc_ordered();
+		for (i = 0; i < CALL_COST_BATCH; i++)
+			ipi_call_others(silent_noop, 0);
+		per[b] = (rdtsc_ordered() - t0) / CALL_COST_BATCH;
+	}
+	for (i = 1; i < 5; i++)				/* sort five */
+		for (j = i; j > 0 && per[j - 1] > per[j]; j--) {
+			uint64_t t = per[j]; per[j] = per[j - 1]; per[j - 1] = t;
+		}
+
+	kputs("UrMach x86-64: cross-call cost: a broadcast to ");
+	kputdec(smp_online_count() - 1);
+	kputs(" processors, TSC ticks each in five batches of ");
+	kputdec(CALL_COST_BATCH);
+	kputs(":");
+	for (b = 0; b < 5; b++) {
+		kputs(" ");
+		kputdec(per[b]);
+	}
+	kputs(", median ");
+	kputdec(per[2]);
+#if	PROBE_605_PADDED
+	kputs(" -- answer counters a line each (#605)\r\n");
+#else
+	kputs(" -- answer counters eight to a line (#605)\r\n");
+#endif
+}
+#endif	/* PROBE_605_CALL_COST */
+
+#if	PROBE_605_SILENT
 
 static void silent_cpu_probe(void)
 {
@@ -7330,6 +7384,9 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ap_to_bsp_selftest();
 	tlb_shootdown_selftest();
 	tlb_targeted_selftest();
+#if	PROBE_605_CALL_COST
+	call_cost_probe();
+#endif
 #if	PROBE_605_SILENT
 	silent_cpu_probe();
 #endif

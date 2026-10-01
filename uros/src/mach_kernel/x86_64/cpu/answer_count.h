@@ -25,9 +25,29 @@
  * One slot per APIC id.  Each is written only by the processor it belongs to,
  * so the increment needs no atomic, and read by anybody, so the read takes the
  * whole word at once.
+ *
+ * ⚠️ Eight slots share a cache line, so a broadcast has up to eight answering
+ * processors writing the same line at once.  UROS_PROBE_605_PADDED gives every
+ * slot a line of its own, to measure what the sharing costs before deciding
+ * anything about it (#605).
  */
+#ifndef	PROBE_605_PADDED
+#define	PROBE_605_PADDED	0
+#endif
+
+struct answer_slot {
+	volatile uint64_t	n;
+#if	PROBE_605_PADDED
+	char			pad[56];
+#endif
+}
+#if	PROBE_605_PADDED
+__attribute__((aligned(64)))
+#endif
+;
+
 struct answer_count {
-	volatile uint64_t by_apic[SMP_MAX_CPUS];
+	struct answer_slot by_apic[SMP_MAX_CPUS];
 };
 
 /*
@@ -44,7 +64,7 @@ static inline void answer_count_mark(struct answer_count *c)
 	uint32_t id = percpu_apic_id();
 
 	if (id < SMP_MAX_CPUS)
-		c->by_apic[id]++;
+		c->by_apic[id].n++;
 }
 
 /* How many answers the processor with this APIC id has given; 0 past the table. */
@@ -54,7 +74,7 @@ static inline uint64_t answer_count_of(const struct answer_count *c,
 	if (apic_id >= SMP_MAX_CPUS)
 		return 0;
 
-	return atomic_load64(&c->by_apic[apic_id]);
+	return atomic_load64(&c->by_apic[apic_id].n);
 }
 
 #endif	/* _X86_64_CPU_ANSWER_COUNT_H_ */
