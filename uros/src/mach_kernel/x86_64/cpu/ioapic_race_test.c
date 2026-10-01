@@ -40,6 +40,7 @@
 #include <cpu/ioapic_race_test.h>
 #include <cpu/regs.h>
 #include <cpu/spl.h>
+#include <sync/atomic.h>
 #include <sync/barrier.h>
 
 /*
@@ -56,8 +57,19 @@
 
 static uint32_t			race_gsi[2];
 static uint32_t			race_low[2];	/* what each pin held */
-static volatile int		race_ready;
-static volatile int		race_go;
+/*
+ * The rendezvous, in one word: the second side moves it from WAITING to READY,
+ * the first from READY to GO -- or from WAITING to GIVEN_UP, when the second
+ * did not arrive in time.  One word, so that "it arrived" and "I gave up"
+ * cannot both win: a second side that comes late finds GIVEN_UP and parks
+ * without touching its pin.
+ */
+#define RACE_WAITING	0u
+#define RACE_READY	1u
+#define RACE_GO		2u
+#define RACE_GIVEN_UP	3u
+static volatile uint32_t	race_state;
+static volatile int		race_stop;	/* the first side's word to quit */
 static volatile int		race_done[2];
 static volatile uint32_t	race_inside[2];
 static volatile uint64_t	race_overlap[2];
@@ -73,7 +85,7 @@ race_side(int side)
 	uint32_t	mine = side ? RACE_TAG_1 : RACE_TAG_0;
 	uint32_t	theirs = side ? RACE_TAG_0 : RACE_TAG_1;
 
-	for (uint32_t n = 0; n < RACE_ROUNDS; n++) {
+	for (uint32_t n = 0; n < RACE_ROUNDS && !race_stop; n++) {
 		uint32_t want = mine + n % RACE_SPAN;
 		uint32_t got;
 
@@ -101,11 +113,13 @@ race_side(int side)
 static void
 race_probe_body(void)
 {
-	race_ready = 1;
-	while (!race_go)
-		cpu_pause();
-	race_side(1);
-	race_done[1] = 1;
+	if (atomic_cmpxchg32(&race_state, RACE_WAITING, RACE_READY) ==
+	    RACE_WAITING) {
+		while (race_state == RACE_READY)
+			cpu_pause();
+		race_side(1);
+		race_done[1] = 1;
+	}
 
 	/*
 	 * Parked for ever in a wait nobody signals, as -S and -G leave theirs:
@@ -190,30 +204,43 @@ ioapic_window_race_test(void)
 	 * Bounded: a side that never starts or never finishes is a verdict, and
 	 * a test that waited for ever would report it as silence.
 	 */
-	for (spins = 0; spins < CPU_SPIN_BUDGET && !race_ready; spins++)
+	for (spins = 0; spins < CPU_SPIN_BUDGET && race_state == RACE_WAITING;
+	     spins++)
 		cpu_pause();
-	if (!race_ready) {
+	if (atomic_cmpxchg32(&race_state, RACE_WAITING, RACE_GIVEN_UP) ==
+	    RACE_WAITING) {
 		printf("ioapic_race: WRONG — the second side never ran on "
-		       "processor %d (#599)\n", target->slot_num);
+		       "processor %d; if it runs now it parks without touching "
+		       "its pin (#599)\n", target->slot_num);
 		return;
 	}
 
-	race_go = 1;
+	race_state = RACE_GO;
 	race_side(0);
 	race_done[0] = 1;
 
+	/*
+	 * Told to stop if it has not finished in time, and waited for again:
+	 * the pins are put back only once neither side can touch them, as far
+	 * as that can be known.
+	 */
 	for (spins = 0; spins < CPU_SPIN_BUDGET && !race_done[1]; spins++)
 		cpu_pause();
+	if (!race_done[1]) {
+		race_stop = 1;
+		for (spins = 0; spins < CPU_SPIN_BUDGET && !race_done[1]; spins++)
+			cpu_pause();
+		ioapic_set_low_half(race_gsi[0], race_low[0]);
+		ioapic_set_low_half(race_gsi[1], race_low[1]);
+		printf("ioapic_race: WRONG — the second side did not finish its "
+		       "%u rounds in time on processor %d%s (#599)\n",
+		       RACE_ROUNDS, target->slot_num, race_done[1] ? "" :
+		       ", nor stop when told: its pin may change once more");
+		return;
+	}
 
 	ioapic_set_low_half(race_gsi[0], race_low[0]);
 	ioapic_set_low_half(race_gsi[1], race_low[1]);
-
-	if (!race_done[1]) {
-		printf("ioapic_race: WRONG — the second side never finished its "
-		       "%u rounds on processor %d (#599)\n", RACE_ROUNDS,
-		       target->slot_num);
-		return;
-	}
 
 	wrong = race_wrong[0] + race_wrong[1];
 	theirs = race_theirs[0] + race_theirs[1];
