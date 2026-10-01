@@ -4675,6 +4675,28 @@ static void iommu_selftest(void)
 			   " it is not\r\n");
 	}
 
+	/*
+	 * ⚠️ AND THE WORDS INTERRUPT REMAPPING IS MADE OF, ON EVERY BOARD
+	 * (#598).  An entry is written once and read only by an engine, so a
+	 * wrong bit is not a wrong answer here: it is an interrupt delivered
+	 * to the wrong processor, or one that any device can trigger.
+	 */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_interrupt_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" interrupt remapping words encoded and decoded, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — both vendors' empty entries refuse, and an intel"
+			   " entry that accepts any source is not one of"
+			   " ours\r\n"
+			 : " — WRONG, an interrupt would go somewhere the"
+			   " kernel did not send it\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");

@@ -2439,3 +2439,181 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
 
 	return bad == 0;
 }
+
+/*
+ * ── The words interrupt remapping is made of, against the figures (#598) ──
+ *
+ * Written by hand from Rev 5.20 Figure 9-9 and Rev 3.11 Figure 15.  Each case
+ * is a word and what it means; where `encodes' is set, the encoder must also
+ * produce exactly that word from those fields, or refuse them.
+ *
+ * 🔴 SEVERAL ARE WORDS NO ENCODER HERE PRODUCES, and they are the ones that
+ * keep the decoder honest: a posted entry, an entry that accepts any source,
+ * reserved bits set.  A decoder checked only on what its own encoder writes
+ * would agree with it about every bit, including a wrong one.
+ *
+ * ⚠️ And one Intel word appears twice, in xAPIC and in x2APIC mode, with two
+ * answers.  Bits 39:32 are reserved in one mode and part of the destination in
+ * the other, so the mode is part of the question, not a detail of it.
+ */
+struct irte_case {
+	const char	*what;
+	int		 amd;
+	int		 x2apic;	/* Intel's EIME                         */
+	uint64_t	 lo;		/* Intel's low word; AMD's entry        */
+	uint64_t	 hi;		/* Intel's high word                    */
+	int		 decodes;	/* 1 remaps, 0 refuses, -1 not ours     */
+	struct iommu_irte e;		/* the fields, when it remaps   */
+	int		 encodes;	/* 1 must produce, -1 must refuse, 0 not */
+};
+
+static const struct irte_case irte_cases[] = {
+	/*
+	 * Vector 0x41 to APIC id 1, edge, accepting 00:04.0 and nobody else:
+	 * P, V in 23:16, the id in 47:40, SVT 01b in 83:82, SID 0x0020.
+	 */
+	{ "intel, edge from 00:04.0", 0, 0,
+	  0x0000010000410001ULL, 0x0000000000040020ULL,
+	  1, { 0x41, 1, 0, 0x0020 }, 1 },
+
+	/*
+	 * Level-triggered, to the highest xAPIC id, accepting the source id an
+	 * I/O APIC would be given in a DMAR scope: TM set, the id 0xFF.
+	 */
+	{ "intel, level from an i/o apic", 0, 0,
+	  0x0000FF0000FE0011ULL, 0x000000000004F0F8ULL,
+	  1, { 0xFE, 0xFF, 1, 0xF0F8 }, 1 },
+
+	/* x2APIC mode: the destination is all of 63:32. */
+	{ "intel, x2apic id 0x12345", 0, 1,
+	  0x0001234500410001ULL, 0x0000000000040020ULL,
+	  1, { 0x41, 0x12345, 0, 0x0020 }, 1 },
+
+	/* An id that does not fit xAPIC mode is refused, not truncated. */
+	{ "intel, id 0x100 in xapic mode", 0, 0,
+	  0, 0, 0, { 0x41, 0x100, 0, 0x0020 }, -1 },
+
+	/* P clear refuses, whatever else the entry holds. */
+	{ "intel, not present", 0, 0,
+	  0x0000010000410000ULL, 0x0000000000040020ULL,
+	  0, { 0, 0, 0, 0 }, 0 },
+
+	/* IM set: a posted entry (§9.10), which this kernel never writes. */
+	{ "intel, posted (synthetic)", 0, 0,
+	  0x0000010000418001ULL, 0x0000000000040020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/*
+	 * 🔴 SVT 00b: the entry accepts ANY requester.  Legal, and exactly the
+	 * entry #598 point 2 is about -- so it must not read as one of ours.
+	 */
+	{ "intel, no source validation (synthetic)", 0, 0,
+	  0x0000010000410001ULL, 0x0000000000000020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/* Bit 84, the first of the high reserved bits. */
+	{ "intel, reserved bit set (synthetic)", 0, 0,
+	  0x0000010000410001ULL, 0x0000000000140020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/* Bit 32: reserved in xAPIC mode ... */
+	{ "intel, destination low byte in xapic mode", 0, 0,
+	  0x0000010100410001ULL, 0x0000000000040020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/* ... and part of id 0x101 in x2APIC mode. */
+	{ "intel, the same word in x2apic mode", 0, 1,
+	  0x0000010100410001ULL, 0x0000000000040020ULL,
+	  1, { 0x41, 0x101, 0, 0x0020 }, 1 },
+
+	/* AMD: RemapEn, the id in 15:8, the vector in 23:16. */
+	{ "amd, vector 0x41 to id 1", 1, 0,
+	  0x00410101ULL, 0, 1, { 0x41, 1, 0, 0 }, 1 },
+	{ "amd, vector 0xfe to id 0xff", 1, 0,
+	  0x00FEFF01ULL, 0, 1, { 0xFE, 0xFF, 0, 0 }, 1 },
+
+	/* Eight bits of destination and no more in the basic format. */
+	{ "amd, id 0x100", 1, 0,
+	  0, 0, 0, { 0x41, 0x100, 0, 0 }, -1 },
+
+	/* RemapEn clear: target aborted, whatever else the entry holds. */
+	{ "amd, remapping off", 1, 0,
+	  0x00410100ULL, 0, 0, { 0, 0, 0, 0 }, 0 },
+
+	/* GuestMode, the other format's entry (synthetic). */
+	{ "amd, guest mode (synthetic)", 1, 0,
+	  0x00410181ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
+
+	/* IntType 001b, arbitrated, which this kernel never asks for. */
+	{ "amd, arbitrated (synthetic)", 1, 0,
+	  0x00410105ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
+
+	/* Bits 31:24 are reserved. */
+	{ "amd, reserved bits set (synthetic)", 1, 0,
+	  0x01410101ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
+};
+
+int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
+{
+	unsigned n = 0, bad = 0;
+
+	for (unsigned i = 0;
+	     i < sizeof(irte_cases) / sizeof(irte_cases[0]); i++) {
+		const struct irte_case *c = &irte_cases[i];
+		uint64_t in[2] = { c->lo, c->hi };
+		struct iommu_irte d;
+		int got;
+
+		n++;
+
+		if (c->encodes != 0) {
+			uint64_t w[2] = { ~0ULL, ~0ULL };
+			uint32_t a = 0xFFFFFFFFu;
+
+			got = c->amd ? iommu_amd_irte(&c->e, &a)
+				     : iommu_vtd_irte(&c->e, c->x2apic, w);
+
+			if (c->encodes < 0) {
+				if (got != 0)
+					bad++;
+				continue;
+			}
+
+			if (got != 1
+			    || (c->amd ? a != (uint32_t)c->lo
+				       : w[0] != c->lo || w[1] != c->hi)) {
+				bad++;
+				continue;
+			}
+		}
+
+		/*
+		 * ⚠️ Filled with something that is not the answer first, so a
+		 * decoder that leaves a field alone fails here instead of
+		 * agreeing with whatever was on the stack.
+		 */
+		d.vector = 0x5A;
+		d.destination = 0xA5A5A5A5u;
+		d.level = -1;
+		d.source = 0xA5A5;
+
+		got = c->amd ? iommu_amd_irte_decode((uint32_t)c->lo, &d)
+			     : iommu_vtd_irte_decode(in, c->x2apic, &d);
+
+		if (got != c->decodes)
+			bad++;
+		else if (got == 1
+			 && (d.vector != c->e.vector
+			     || d.destination != c->e.destination
+			     || d.level != c->e.level
+			     || d.source != c->e.source))
+			bad++;
+	}
+
+	if (ran)
+		*ran = n;
+	if (wrong)
+		*wrong = bad;
+
+	return bad == 0;
+}

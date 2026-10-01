@@ -1398,3 +1398,108 @@ int iommu_vtd_read(void)
 
 	return 1;
 }
+
+/*
+ * ── #598: the interrupt remapping table entry ────────────────────────
+ *
+ * Rev 5.20 §9.9, Figure 9-9.  128 bits, low word first:
+ *
+ *	0	P	present
+ *	1	FPD	fault processing disable
+ *	2	DM	destination mode, 0 physical
+ *	3	RH	redirection hint
+ *	4	TM	trigger mode, 1 level
+ *	7:5	DLM	delivery mode, 000b fixed
+ *	15	IM	0 remapped, 1 posted (§9.10)
+ *	23:16	V	vector
+ *	63:32	DST	xAPIC: the id in 47:40, 63:48 and 39:32 reserved;
+ *			x2APIC: all 32 bits
+ *	79:64	SID	the source accepted
+ *	81:80	SQ	which bits of SID count
+ *	83:82	SVT	01b: verify the requester against SID and SQ
+ *
+ * Bits 14:12, 31:24 and 127:84 are reserved, and an entry with any of them set
+ * is refused with fault 24h when it is used.
+ *
+ * ⚠️ The ablation puts an xAPIC id at 39:32, where it is reserved -- DST[7:0]
+ * instead of DST[15:8], the slip a reader of "Destination ID" makes -- and the
+ * interrupt check must catch it on the cases that encode one.
+ */
+#ifndef	ABLATE_598_IRTE_DST
+#define	ABLATE_598_IRTE_DST	0
+#endif
+
+#define	VTD_IRTE_P		(1ULL << 0)
+#define	VTD_IRTE_FPD		(1ULL << 1)
+#define	VTD_IRTE_DM		(1ULL << 2)
+#define	VTD_IRTE_RH		(1ULL << 3)
+#define	VTD_IRTE_TM		(1ULL << 4)
+#define	VTD_IRTE_DLM_MASK	(7ULL << 5)
+#define	VTD_IRTE_IM		(1ULL << 15)
+#define	VTD_IRTE_VECTOR(v)	((uint64_t)(v) << 16)
+#define	VTD_IRTE_XAPIC_SHIFT	(ABLATE_598_IRTE_DST ? 32 : 40)
+#define	VTD_IRTE_RSVD_LO	((7ULL << 12) | (0xFFULL << 24))
+#define	VTD_IRTE_XAPIC_RSVD	((0xFFFFULL << 48) | (0xFFULL << 32))
+
+#define	VTD_IRTE_SVT_REQUESTER	(1ULL << 18)	/* bits 83:82 = 01b */
+#define	VTD_IRTE_SVT_MASK	(3ULL << 18)
+#define	VTD_IRTE_SQ_MASK	(3ULL << 16)	/* 00b: all 16 bits    */
+#define	VTD_IRTE_RSVD_HI	(~0ULL << 20)	/* bits 127:84         */
+
+int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2])
+{
+	uint64_t lo;
+
+	if (e == 0 || out == 0)
+		return 0;
+
+	if (!x2apic && e->destination > 0xFF)
+		return 0;
+
+	lo = VTD_IRTE_P | VTD_IRTE_VECTOR(e->vector);
+	if (e->level)
+		lo |= VTD_IRTE_TM;
+	lo |= x2apic ? (uint64_t)e->destination << 32
+		     : (uint64_t)e->destination << VTD_IRTE_XAPIC_SHIFT;
+
+	out[0] = lo;
+	out[1] = VTD_IRTE_SVT_REQUESTER | e->source;
+	return 1;
+}
+
+int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
+			  struct iommu_irte *out)
+{
+	uint64_t lo = in[0], hi = in[1];
+
+	/*
+	 * P clear refuses, whatever the rest says: every other field is
+	 * "evaluated by hardware only when the Present (P) field is Set".
+	 */
+	if (!(lo & VTD_IRTE_P))
+		return 0;
+
+	if ((lo & VTD_IRTE_RSVD_LO) || (hi & VTD_IRTE_RSVD_HI))
+		return -1;
+	if (!x2apic && (lo & VTD_IRTE_XAPIC_RSVD))
+		return -1;
+
+	/*
+	 * Everything below is legal and is not what this kernel writes, so a
+	 * table holding it was written by somebody else.  The last one is the
+	 * one that matters: an entry with SVT 00b accepts any requester.
+	 */
+	if (lo & (VTD_IRTE_IM | VTD_IRTE_FPD | VTD_IRTE_DM | VTD_IRTE_RH
+		  | VTD_IRTE_DLM_MASK))
+		return -1;
+	if ((hi & VTD_IRTE_SVT_MASK) != VTD_IRTE_SVT_REQUESTER
+	    || (hi & VTD_IRTE_SQ_MASK) != 0)
+		return -1;
+
+	out->vector = (uint8_t)((lo >> 16) & 0xFF);
+	out->destination = x2apic ? (uint32_t)(lo >> 32)
+				  : (uint32_t)((lo >> 40) & 0xFF);
+	out->level = (lo & VTD_IRTE_TM) != 0;
+	out->source = (uint16_t)(hi & 0xFFFF);
+	return 1;
+}

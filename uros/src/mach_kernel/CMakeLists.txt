@@ -359,6 +359,7 @@ option(UROS_PROBE_605_PADDED "Build the #605 probe: one cache line per answer-co
 # #598: interrupt remapping, each check with a way to see it catch.
 option(UROS_ABLATE_598_IRREQ_BIT "Build the #598 ablation: ECAP.IRREQ is read from EIMER's bit, and the iommu decode check must count the cases that tell them apart as wrong" OFF)
 option(UROS_ABLATE_598_INDEX_ALWAYS "Build the #598 ablation: an Intel interrupt fault names an entry even for the five reasons whose FI is undefined, and the fault decode check must count those cases as wrong" OFF)
+option(UROS_ABLATE_598_IRTE_DST "Build the #598 ablation: an Intel xAPIC destination is written at bits 39:32 instead of 47:40, and the interrupt check must count the entries that carry one as wrong" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -759,6 +760,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_598_INDEX_ALWAYS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_598_INDEX_ALWAYS=1)
       message(STATUS "#598 ablation: every Intel interrupt fault names an entry (x86_64)")
+  endif()
+  if(UROS_ABLATE_598_IRTE_DST)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_598_IRTE_DST=1)
+      message(STATUS "#598 ablation: Intel xAPIC destination at bits 39:32 (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

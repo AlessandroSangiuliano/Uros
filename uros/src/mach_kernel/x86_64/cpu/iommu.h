@@ -682,6 +682,17 @@ int iommu_fault_overflowed(void);
 int iommu_fault_decode_check(unsigned *ran, unsigned *wrong);
 
 /*
+ * Encode and decode the words interrupt remapping is made of, against values
+ * written from the two specifications, on every boot and every board (#598).
+ *
+ * The same argument as the two above, and the same reason it has to run where
+ * nothing is remapped: these words are written once and read only by an engine,
+ * so a wrong bit is not a wrong answer -- it is an interrupt delivered to the
+ * wrong processor, or one any device can trigger.
+ */
+int iommu_interrupt_check(unsigned *ran, unsigned *wrong);
+
+/*
  * ── Stage 3d: a domain of its own, for one device ────────────────────
  *
  * 🔴 THIS IS WHERE #432 STOPS BEING A DESCRIPTION.  Everything before it built

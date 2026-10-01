@@ -323,6 +323,61 @@ unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed);
 void iommu_record_fault(const struct iommu_fault *f);
 
 /*
+ * ── #598: the entry an interrupt is remapped through ─────────────────
+ *
+ * Rev 5.20 §9.9 Figure 9-9, 128 bits; Rev 3.11 §2.2.5.1 Figure 15, 32 bits in
+ * the basic format, which is the only one this kernel writes.  Pure, like every
+ * encoder above, and read back by decoders WRITTEN FROM THE FIGURES rather than
+ * by inverting the encoders, for the reason the page-table pair gives.
+ *
+ * 🔑 HERE BOTH VENDORS' EMPTY ENTRIES REFUSE.  Intel's P=0 and AMD's RemapEn=0
+ * both block the message and report it -- the opposite of the device table
+ * entry, where AMD's zero forwards.  So a zeroed interrupt table is closed on
+ * both, and the danger runs the other way: an entry still valid for a device
+ * that has since been given something else.
+ *
+ * Physical destination, fixed delivery, no redirection hint: the choices
+ * ioapic_route() and device_md_msi_register() already make, for the reason
+ * ioapic_route() gives.
+ */
+struct iommu_irte {
+	uint8_t		vector;
+	uint32_t	destination;	/* an APIC id */
+	int		level;		/* level-triggered; Intel's TM      */
+	uint16_t	source;		/* the requester accepted; Intel's SID */
+};
+
+/*
+ * Encode an entry delivering `vector' to `destination'.  Answers zero when the
+ * destination does not fit: wider than eight bits in Intel's xAPIC mode, and
+ * at all in AMD's basic format, which has eight bits and nothing else.
+ *
+ * 🔴 INTEL'S ALWAYS NAMES ITS SOURCE: SVT 01b, SQ 00b, SID = `source'.  Without
+ * that, an entry is usable by any device that writes its handle (§5.1.2.2), and
+ * remapping would hand out vectors without isolating anybody.  AMD needs no
+ * such field, because the table itself belongs to one device.
+ *
+ * ⚠️ AMD's basic entry has no trigger mode, so `level' is not written there:
+ * the trigger travels with the message, not in the entry.
+ */
+int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2]);
+int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out);
+
+/*
+ * Read an entry back.  Answers 1 when it remaps, 0 when it refuses, and -1
+ * when it is something this kernel never writes -- reserved bits set, a posted
+ * or guest-mode entry, a delivery other than fixed and physical, an Intel entry
+ * that does not name its source.  `out' is filled only on 1.
+ *
+ * ⚠️ `x2apic' is Intel's EIME, and it changes what the same word means: in
+ * xAPIC mode bits 63:48 and 39:32 of the entry are reserved, in x2APIC mode
+ * they are part of the destination.
+ */
+int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
+			  struct iommu_irte *out);
+int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out);
+
+/*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────
  *
  * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make

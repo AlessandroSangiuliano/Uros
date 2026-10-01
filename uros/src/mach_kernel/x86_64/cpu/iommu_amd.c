@@ -1641,3 +1641,58 @@ int iommu_amd_read(void)
 
 	return 1;
 }
+
+/*
+ * ── #598: the interrupt remapping table entry ────────────────────────
+ *
+ * Rev 3.11 §2.2.5.1, Figure 15 and Table 20, the basic format:
+ *
+ *	0	RemapEn		1 remapped, 0 target aborted
+ *	1	SupIOPF		suppress the IO_PAGE_FAULT event
+ *	4:2	IntType		000b fixed, 001b arbitrated
+ *	5	RqEoi		an EOI cycle is required
+ *	6	DM		1 logical, 0 physical
+ *	7	GuestMode	0 for this format (Figure 18 is the other)
+ *	15:8	Destination	an APIC id, eight bits
+ *	23:16	Vector
+ *	31:24	Reserved
+ *
+ * ⚠️ Eight bits of destination and nothing more.  An x2APIC id needs the
+ * 128-bit format and XTEn in the control register, neither of which this
+ * kernel writes -- so a wider id is refused by the encoder, not truncated
+ * into somebody else's.
+ */
+#define	AMD_IRTE_REMAP_EN	(1u << 0)
+#define	AMD_IRTE_SUP_IOPF	(1u << 1)
+#define	AMD_IRTE_INT_TYPE_MASK	(7u << 2)
+#define	AMD_IRTE_RQ_EOI		(1u << 5)
+#define	AMD_IRTE_DM		(1u << 6)
+#define	AMD_IRTE_GUEST_MODE	(1u << 7)
+#define	AMD_IRTE_RSVD		(0xFFu << 24)
+
+int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out)
+{
+	if (e == 0 || out == 0 || e->destination > 0xFF)
+		return 0;
+
+	*out = AMD_IRTE_REMAP_EN
+	     | ((uint32_t)e->destination << 8)
+	     | ((uint32_t)e->vector << 16);
+	return 1;
+}
+
+int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
+{
+	if (!(in & AMD_IRTE_REMAP_EN))
+		return 0;
+
+	if (in & (AMD_IRTE_RSVD | AMD_IRTE_GUEST_MODE | AMD_IRTE_INT_TYPE_MASK
+		  | AMD_IRTE_RQ_EOI | AMD_IRTE_DM | AMD_IRTE_SUP_IOPF))
+		return -1;
+
+	out->vector = (uint8_t)((in >> 16) & 0xFF);
+	out->destination = (in >> 8) & 0xFF;
+	out->level = 0;
+	out->source = 0;
+	return 1;
+}
