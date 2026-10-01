@@ -1132,7 +1132,32 @@ while kill -0 "$QPID" 2>/dev/null; do
 	# TWICE in this file is its own hazard: the first copy was corrected for
 	# act_test's fifth arm and this one would have gone on waiting.
 	if grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; then
-		sleep 1
+		# #599: a panic is not over at its first line.  The console's
+		# final copy and every processor's backtrace come after it, at
+		# the wire's pace -- four processors' worth is seconds of bytes
+		# on real hardware -- and the second ended one second after the
+		# line, whatever was still coming.  So a run that ends in a panic
+		# waits until its log has stopped growing for three seconds,
+		# within a minute; every other end is as it was.
+		if grep -aq 'panic(cpu' "$LOG"; then
+			_PANIC_SIZE=-1
+			_PANIC_STILL=0
+			_PANIC_WAITED=0
+			while [ "$_PANIC_STILL" -lt 3 ] && [ "$_PANIC_WAITED" -lt 60 ] &&
+			      kill -0 "$QPID" 2>/dev/null; do
+				_PANIC_NOW=$(stat -c %s "$LOG")
+				if [ "$_PANIC_NOW" = "$_PANIC_SIZE" ]; then
+					_PANIC_STILL=$((_PANIC_STILL + 1))
+				else
+					_PANIC_STILL=0
+					_PANIC_SIZE=$_PANIC_NOW
+				fi
+				sleep 1
+				_PANIC_WAITED=$((_PANIC_WAITED + 1))
+			done
+		else
+			sleep 1
+		fi
 		break
 	fi
 	NOW_PROGRESS=$(progress_count)
