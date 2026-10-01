@@ -84,6 +84,14 @@ void machine_slots_init(void);
 int smp_is_online(uint32_t apic_id);
 
 /*
+ * Every processor that answers a broadcast, one bit per APIC id: the ones that
+ * reported in AND the boot processor, which online_mask never holds because it
+ * never arrived anywhere (#605).  What a cross-call that times out has to
+ * compare against to say who did not answer.
+ */
+uint64_t smp_answering_set(void);
+
+/*
  * Let the application processors into the scheduler, and answer with how many
  * of them got there (#461).
  *
