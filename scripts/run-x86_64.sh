@@ -390,7 +390,7 @@ must_report 'state_test: the target is parked' 'state_test: PASS — 11' \
 	'thread_get_state() on a target that never stops waits for it for ever, and waiting for ever looks exactly like a short run (#408).'
 must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
-must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|NOT ASKED\)' \
+must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#599).'
 # ⚠️ The terminator matches any count, not `3 of 3'.  A run that reported "2 of
 # 3" DID finish and its failing arm is already caught as a WRONG line; asking
