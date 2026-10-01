@@ -271,6 +271,15 @@ option(UROS_ABLATE_599_COMPROBE_OLD_EXIT "Build the #599 ablation: i386's compro
 option(UROS_ABLATE_599_COM_NO_LOCK "Build the #599 ablation: i386's com_bank_lock is not taken -- THR writes and the divisor sequence race, as before the fix" OFF)
 set(UROS_ABLATE_599_WIDEN_DIVISOR "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between DLL and DLM in i386's divisor sequence (empty = off)")
 set(UROS_ABLATE_599_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads in each gap of the I/O APIC pair, other processors only (empty = off)")
+# #599: x86-64's I/O APIC window (x86_64/cpu/ioapic.c, the lock #593 put
+# there), for the -Y test that races it from two processors.  WINDOW_OPEN uses
+# the window without the lock -- interrupts are still masked, so what is left
+# is the race between processors -- and WINDOW_WIDEN puts N port 0x80 reads
+# between selecting a register and using it.  x86-64 only: i386's pair is
+# UROS_ABLATE_599_NO_LOCK and _WIDEN above.  Never ON in a kernel anyone boots
+# for anything else.
+option(UROS_ABLATE_599_WINDOW_OPEN "Build the #599 ablation: x86-64's I/O APIC window is used without its lock" OFF)
+set(UROS_ABLATE_599_WINDOW_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between selecting an x86-64 I/O APIC register and using it (empty = off)")
 option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
 # #508: an MMIO mapping is checked on its first page only, as it was before the
 # span was bounded, so irq_claim_test's arm [10] -- one page past the owned
@@ -629,6 +638,14 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   endif()
   if(UROS_ABLATE_599_I8042_SHARED OR UROS_ABLATE_599_COMPROBE_OLD_EXIT OR UROS_ABLATE_599_COM_NO_LOCK OR NOT UROS_ABLATE_599_WIDEN_DIVISOR STREQUAL "")
       message(FATAL_ERROR "UROS_ABLATE_599_I8042_SHARED, _COMPROBE_OLD_EXIT, _COM_NO_LOCK and _WIDEN_DIVISOR ablate i386's 8042 reader and com.c; x86-64 has neither")
+  endif()
+  if(UROS_ABLATE_599_WINDOW_OPEN)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_WINDOW_OPEN=1)
+      message(STATUS "#599 ablation: the I/O APIC window is used without its lock (x86_64)")
+  endif()
+  if(NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "")
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_WINDOW_WIDEN=${UROS_ABLATE_599_WINDOW_WIDEN})
+      message(STATUS "#599 ablation: ${UROS_ABLATE_599_WINDOW_WIDEN} port 0x80 reads between an I/O APIC select and its use (x86_64)")
   endif()
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
@@ -1303,6 +1320,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
 
   message(STATUS "x86-64 kernel: boot stub (#406) — MD contracts #407-#411 pending")
   return()
+endif()
+
+# #599: these ablate x86-64's I/O APIC window and have no i386 half -- i386's
+# pair is ablated by UROS_ABLATE_599_NO_LOCK and _WIDEN.
+if(UROS_ABLATE_599_WINDOW_OPEN OR NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "")
+    message(FATAL_ERROR "UROS_ABLATE_599_WINDOW_OPEN and _WINDOW_WIDEN ablate x86-64's I/O APIC window; i386's pair is UROS_ABLATE_599_NO_LOCK and _WIDEN")
 endif()
 
 # =============================================================================
