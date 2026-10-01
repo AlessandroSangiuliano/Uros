@@ -106,6 +106,22 @@ urmach_rcu_init(void)
 	 */
 }
 
+/*
+ *	Whether processor c still holds a grace period up: running, not idle,
+ *	and no quiescent state reported since `snap'.  The two waits ask it --
+ *	urmach_synchronize_rcu() spins on it, urmach_rcu_advance() checks it
+ *	once a tick -- and they asked it in two copies (#605).  A change to what
+ *	counts as quiescent made in one copy only would end a grace period early
+ *	in the other, which is a use after free, or never end it.
+ */
+static __inline__ boolean_t
+rcu_holds_up(int c, unsigned int snap)
+{
+	return machine_slot[c].running &&
+	       !cpu_data[c].rcu_cpu_idle &&
+	       cpu_data[c].rcu_qs_seq == snap;
+}
+
 void
 urmach_synchronize_rcu(void)
 {
@@ -183,9 +199,7 @@ urmach_synchronize_rcu(void)
 		 *	currently idle (idle == quiescent; an idle CPU may be HLTed
 		 *	and never tick, so we must not wait on its counter).
 		 */
-		while (machine_slot[c].running &&
-		       !cpu_data[c].rcu_cpu_idle &&
-		       cpu_data[c].rcu_qs_seq == snap[c]) {
+		while (rcu_holds_up(c, snap[c])) {
 			/*
 			 *	A CPU spinning here is itself a writer holding no
 			 *	read reference, i.e. quiescent -- so report our own
@@ -333,9 +347,7 @@ urmach_rcu_advance(void)
 	for (c = 0; c < NCPUS; c++) {
 		if (c == me)
 			continue;
-		if (machine_slot[c].running &&
-		    !cpu_data[c].rcu_cpu_idle &&
-		    cpu_data[c].rcu_qs_seq == rcu_snap[c]) {
+		if (rcu_holds_up(c, rcu_snap[c])) {
 			done = 0;
 			break;
 		}

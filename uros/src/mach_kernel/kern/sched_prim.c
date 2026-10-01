@@ -2333,11 +2333,13 @@ recompute_priorities(void)
 		spl_t s = splsched();
 		thread_lock(thread);
 		clear_wait_locked(thread, THREAD_AWAKENED, FALSE);
-		if (sched_tick - thread->sched_stamp > 1) {
-			if (sched_tick - thread->sched_stamp > 1) {
-				update_priority(thread);
-			}
-		}
+		/*
+		 * One test (#605).  It was written twice, nested, both copies
+		 * under the thread lock, so the inner one could never decide
+		 * anything the outer had not -- and invited an edit to one.
+		 */
+		if (sched_tick - thread->sched_stamp > 1)
+			update_priority(thread);
 		thread_unlock(thread);
 		splx(s);
 	}
