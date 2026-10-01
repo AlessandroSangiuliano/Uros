@@ -99,6 +99,16 @@ machine_boot_info(char *buf, vm_size_t buf_len)
  */
 static volatile uint64_t halt_broadcast;
 
+/*
+ * #599: the -Z test's ablation (cpu/halt_test.c): halt_cpu() in the order it
+ * had before #599's review rounds -- the console's final copy first, the halt
+ * broadcast before the wait for the panicking processor's message, interrupts
+ * left as they were.  What the test's check must catch.
+ */
+#ifndef	ABLATE_599_HALT_ORDER
+#define	ABLATE_599_HALT_ORDER	0
+#endif
+
 void
 halt_cpu(void)
 {
@@ -116,11 +126,17 @@ halt_cpu(void)
 	 * -- the backtrace included -- then reaches the port in this thread,
 	 * which is the only thread there will be.
 	 */
+	if (ABLATE_599_HALT_ORDER)
+		cons_ring_report();
 	cons_async_set(0);
 	fbcons_flush();		/* #568: and out of the write-combining buffers */
 
 	if (panicstr != (const char *) 0) {
 		uint64_t spins;
+
+		if (ABLATE_599_HALT_ORDER &&
+		    atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
+			ipi_halt_others();
 
 		/*
 		 * Let the processor that got there first finish saying what
@@ -162,7 +178,8 @@ halt_cpu(void)
 		 * others' requests.  The nesting count keeps it masked, since
 		 * it restores the flag it found (percpu_intr_enable).
 		 */
-		interrupts_disable();
+		if (!ABLATE_599_HALT_ORDER)
+			interrupts_disable();
 
 		/*
 		 * Stop the rest of the machine, once, from whoever gets here
@@ -181,7 +198,8 @@ halt_cpu(void)
 		 * processor arriving here through the stop interrupt must not
 		 * send another.
 		 */
-		if (atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
+		if (!ABLATE_599_HALT_ORDER &&
+		    atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
 			ipi_halt_others();
 		cons_port_close_latch();	/* #599: under the port's lock */
 

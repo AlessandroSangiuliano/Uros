@@ -280,6 +280,11 @@ set(UROS_ABLATE_599_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 
 # for anything else.
 option(UROS_ABLATE_599_WINDOW_OPEN "Build the #599 ablation: x86-64's I/O APIC window is used without its lock" OFF)
 set(UROS_ABLATE_599_WINDOW_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between selecting an x86-64 I/O APIC register and using it (empty = off)")
+# #599: x86-64's halt_cpu in the order it had before the review rounds, for
+# the -Z test: the console's final copy first, the halt broadcast before the
+# wait for the panicking processor's message, interrupts left as they were.
+# x86-64 only.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_599_HALT_ORDER "Build the #599 ablation: x86-64's halt_cpu in its old order -- the copy first, the stop before the panic's message ends" OFF)
 option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
 # #508: an MMIO mapping is checked on its first page only, as it was before the
 # span was bounded, so irq_claim_test's arm [10] -- one page past the owned
@@ -647,6 +652,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_599_WINDOW_WIDEN=${UROS_ABLATE_599_WINDOW_WIDEN})
       message(STATUS "#599 ablation: ${UROS_ABLATE_599_WINDOW_WIDEN} port 0x80 reads between an I/O APIC select and its use (x86_64)")
+  endif()
+  if(UROS_ABLATE_599_HALT_ORDER)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_HALT_ORDER=1)
+      message(STATUS "#599 ablation: halt_cpu in its old order (x86_64)")
   endif()
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
@@ -1323,10 +1332,11 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   return()
 endif()
 
-# #599: these ablate x86-64's I/O APIC window and have no i386 half -- i386's
-# pair is ablated by UROS_ABLATE_599_NO_LOCK and _WIDEN.
-if(UROS_ABLATE_599_WINDOW_OPEN OR NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "")
-    message(FATAL_ERROR "UROS_ABLATE_599_WINDOW_OPEN and _WINDOW_WIDEN ablate x86-64's I/O APIC window; i386's pair is UROS_ABLATE_599_NO_LOCK and _WIDEN")
+# #599: these ablate x86-64's I/O APIC window and halt_cpu, and have no i386
+# half -- i386's pair is ablated by UROS_ABLATE_599_NO_LOCK and _WIDEN, and its
+# halt path was not changed.
+if(UROS_ABLATE_599_WINDOW_OPEN OR NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "" OR UROS_ABLATE_599_HALT_ORDER)
+    message(FATAL_ERROR "UROS_ABLATE_599_WINDOW_OPEN, _WINDOW_WIDEN and _HALT_ORDER ablate x86-64's I/O APIC window and halt_cpu; i386's pair is UROS_ABLATE_599_NO_LOCK and _WIDEN")
 endif()
 
 # =============================================================================
