@@ -2095,6 +2095,76 @@ bench_cache_cold_warm(const char *filename)
 	}
 }
 
+/*
+ * #599: cold reads that readahead cannot serve.  A sequential cold read is
+ * filled mostly by ext2's readahead -- one copying device_read for a run of
+ * blocks -- so the page cache's own fill, the physical path on which the block
+ * server asks the kernel for every page (device_dma_map_foreign_op), carries
+ * only the first block of each run.  This reads every block of the file once,
+ * in a permutation whose step is prime and far from 1, so no read follows its
+ * neighbour and each is a miss filled on the physical path.  It is the
+ * workload that measures what the asking costs, which the block server says
+ * at powers of two of pages.  A file of its own, read by nothing else, so the
+ * reads are cold and the cold/warm numbers above are not disturbed.
+ */
+#define RAND_BLOCK	4096u
+#define RAND_STEP	1543u		/* prime: a permutation of any count it does not divide */
+
+static void
+bench_cache_random_cold(const char *filename)
+{
+	kern_return_t kr;
+	natural_t fid, file_size;
+	unsigned int nblocks, i, reads = 0, failed = 0;
+	tvalspec_t t0, t1;
+	unsigned long long us;
+
+	kr = ext2_open(ext2_port, filename, &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("  cache cold random: open(\"%s\") failed kr=%d "
+		       "(is it on the rootfs?)\n", filename, kr);
+		return;
+	}
+	kr = ext2_stat(ext2_port, fid, &file_size);
+	if (kr != KERN_SUCCESS || file_size < RAND_BLOCK) {
+		printf("  cache cold random: stat failed/empty\n");
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	nblocks = file_size / RAND_BLOCK;
+	if (nblocks % RAND_STEP == 0) {
+		printf("  cache cold random: NOT ASKED — %u blocks is a multiple "
+		       "of the step %u, not a permutation\n", nblocks, RAND_STEP);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	dget_time(&t0);
+	for (i = 0; i < nblocks; i++) {
+		unsigned int b = (unsigned int)
+			(((unsigned long long) i * RAND_STEP) % nblocks);
+		pointer_t data;
+		mach_msg_type_number_t n = 0;
+
+		kr = ext2_read(ext2_port, fid, b * RAND_BLOCK, RAND_BLOCK,
+			       &data, &n);
+		if (kr == KERN_SUCCESS && n != 0)
+			vm_deallocate(mach_task_self(), data, n);
+		if (kr != KERN_SUCCESS || n != RAND_BLOCK)
+			failed++;
+		else
+			reads++;
+	}
+	dget_time(&t1);
+	ext2_close(ext2_port, fid);
+
+	us = delapsed_ns(&t0, &t1) / 1000;
+	printf("  cache cold random (%s, %u KB, 4 KB reads, step %u): "
+	       "%llu us, %llu us a read (%u reads, %u failed)\n", filename,
+	       file_size / 1024, RAND_STEP, us,
+	       reads ? us / reads : 0ULL, reads, failed);
+}
+
 /* ===================================================================
  * Public entry point
  * =================================================================== */
@@ -2255,6 +2325,7 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		 * baseline (no eviction), 12 MB exercises the 16 MB cache. */
 		bench_cache_cold_warm("bench_4m.dat");
 		bench_cache_cold_warm("bench_large.dat");
+		bench_cache_random_cold("bench_rand.dat");	/* #599 */
 	}
 
 	if (have_ahci && have_ext2) {
