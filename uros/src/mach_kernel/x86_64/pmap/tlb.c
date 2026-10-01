@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <cpu/answer_count.h>	/* #605: who answered, shared with ipi.c */
 #include <cpu/ipi.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
@@ -22,7 +23,7 @@ struct tlb_request {
 	uint64_t size;		/* zero means everything */
 };
 
-static volatile uint64_t served[SMP_MAX_CPUS];
+static struct answer_count served;
 
 void tlb_flush_local_all(void)
 {
@@ -81,15 +82,12 @@ static void tlb_flush_handler(void *arg)
 	const struct tlb_request *r = arg;
 
 	tlb_flush_local_range(r->va, r->size);
-	served[percpu_apic_id()]++;
+	answer_count_mark(&served);
 }
 
 uint64_t tlb_flushes_served(uint32_t apic_id)
 {
-	if (apic_id >= SMP_MAX_CPUS)
-		return 0;
-
-	return atomic_load64(&served[apic_id]);
+	return answer_count_of(&served, apic_id);
 }
 
 void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)

@@ -10,6 +10,7 @@
 #include <kern/misc_protos.h>	/* #461: halt_cpu, panic */
 #include <kern/ast.h>		/* #603: ast_check */
 
+#include <cpu/answer_count.h>	/* #605: who answered, shared with tlb.c */
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
@@ -46,7 +47,7 @@ static void * volatile call_arg;
 static volatile uint64_t call_acks;
 
 /* Per-processor, so a silent one can be named rather than merely counted. */
-static volatile uint64_t served[SMP_MAX_CPUS];
+static struct answer_count served;
 
 static void ipi_call_handler(struct trap_frame *frame)
 {
@@ -67,7 +68,7 @@ static void ipi_call_handler(struct trap_frame *frame)
 	if (fn != 0)
 		fn(arg);
 
-	served[percpu_apic_id()]++;
+	answer_count_mark(&served);
 
 	barrier();
 	atomic_inc64(&call_acks);
@@ -95,10 +96,7 @@ void ipi_init(void)
 
 uint64_t ipi_calls_served(uint32_t apic_id)
 {
-	if (apic_id >= SMP_MAX_CPUS)
-		return 0;
-
-	return atomic_load64(&served[apic_id]);
+	return answer_count_of(&served, apic_id);
 }
 
 void ipi_call_others(void (*fn)(void *), void *arg)
