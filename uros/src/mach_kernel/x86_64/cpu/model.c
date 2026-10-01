@@ -141,12 +141,28 @@ halt_cpu(void)
 		 * #599: and BEFORE the stop below, which is an interrupt no spl
 		 * masks (class 15).  A second panicker that sent it first took
 		 * the panicking processor out of its own message as soon as its
-		 * first printf let go of the port lock: "panic" went out without
+		 * first printf let go of printf_lock, whose hold is the only
+		 * thing masking interrupts there: "panic" went out without
 		 * "(cpu N): ...", the string the harness knows a panic by (found
 		 * in review).
 		 */
 		for (spins = 0; spins < 200000000ULL && panicwait; spins++)
 			cpu_pause();
+
+		/*
+		 * #599: and no interrupt after it -- this processor never
+		 * returns from here.  Every processor that has waited races
+		 * for the stop below, and the ones that lose it go on to the
+		 * backtrace lock with interrupts open: the winner's stop,
+		 * arriving late, entered halt_cpu() a second time inside the
+		 * backtrace lock's hold, and the nested call spent its whole
+		 * bound on the lock its own outer frame held, with every other
+		 * processor waiting behind it (found in review).  Not before
+		 * the wait: a processor waiting there still answers the
+		 * others' requests.  The nesting count keeps it masked, since
+		 * it restores the flag it found (percpu_intr_enable).
+		 */
+		interrupts_disable();
 
 		/*
 		 * Stop the rest of the machine, once, from whoever gets here
