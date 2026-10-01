@@ -1696,3 +1696,90 @@ int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
 	out->source = 0;
 	return 1;
 }
+
+/*
+ * ── #598: the device table entry's interrupt half ────────────────────
+ *
+ * Rev 3.11 Table 7, the third word of the entry (bits 191:128):
+ *
+ *	0	IV		interrupt map valid
+ *	4:1	IntTabLen	2^n entries; 11xxb reserved
+ *	5	IG		do not log unmapped interrupts
+ *	51:6	root		the table, aligned to 128 bytes
+ *	56	InitPass, 57 EIntPass, 58 NMIPass
+ *	61:60	IntCtl		00b abort, 01b forward unmapped, 10b remap
+ *	62	Lint0Pass, 63 Lint1Pass
+ *
+ * ⚠️ The ablation writes IntCtl 01b, which forwards every fixed interrupt
+ * unmapped with IV set and a valid table in place: a table written, read back
+ * correctly and never consulted -- the shape of QEMU's dma-remap default.  The
+ * interrupt check must catch the word.
+ */
+#ifndef	ABLATE_598_INTCTL_FORWARD
+#define	ABLATE_598_INTCTL_FORWARD	0
+#endif
+
+#define	AMD_DTE_INT_IV		(1ULL << 0)
+#define	AMD_DTE_INT_LEN_SHIFT	1
+#define	AMD_DTE_INT_LEN_MASK	(0xFULL << 1)
+#define	AMD_DTE_INT_IG		(1ULL << 5)
+#define	AMD_DTE_INT_ROOT_MASK	0x000FFFFFFFFFFFC0ULL	/* bits 51:6 */
+#define	AMD_DTE_INT_PASS_MASK	((7ULL << 56) | (3ULL << 62))
+#define	AMD_DTE_INT_CTL_SHIFT	60
+#define	AMD_DTE_INT_CTL_MASK	(3ULL << 60)
+#define	AMD_DTE_INT_CTL_FORWARD	1ULL
+#define	AMD_DTE_INT_CTL_REMAP	2ULL
+
+int iommu_amd_dte_interrupts(uint64_t table_pa, unsigned log2_entries,
+			     uint64_t dte[4])
+{
+	/*
+	 * ⚠️ The field holds bits 51:6 and the table must be aligned to 128
+	 * bytes, so the field can say an address the table may not start at.
+	 * The check against the field alone accepted 0x...40, and the
+	 * interrupt check refused it on the first boot.
+	 */
+	if (dte == 0 || log2_entries > 11 || (table_pa & 0x7FULL) != 0
+	    || (table_pa & ~AMD_DTE_INT_ROOT_MASK) != 0)
+		return 0;
+
+	dte[2] = AMD_DTE_INT_IV
+	       | ((uint64_t)log2_entries << AMD_DTE_INT_LEN_SHIFT)
+	       | table_pa
+	       | ((ABLATE_598_INTCTL_FORWARD ? AMD_DTE_INT_CTL_FORWARD
+					     : AMD_DTE_INT_CTL_REMAP)
+		  << AMD_DTE_INT_CTL_SHIFT);
+	return 1;
+}
+
+int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
+				    unsigned *log2_entries)
+{
+	uint64_t w = dte[2];
+	uint64_t ctl = (w & AMD_DTE_INT_CTL_MASK) >> AMD_DTE_INT_CTL_SHIFT;
+	unsigned len = (unsigned)((w & AMD_DTE_INT_LEN_MASK)
+				  >> AMD_DTE_INT_LEN_SHIFT);
+
+	/* Table 10: with IV clear, every interrupt passes unmapped. */
+	if (!(w & AMD_DTE_INT_IV))
+		return 0;
+
+	/* "IntCtl=11b is reported as an event when IV=1", and 11xxb too. */
+	if (ctl == 3 || len > 11)
+		return -1;
+	if (w & (AMD_DTE_INT_PASS_MASK | AMD_DTE_INT_IG))
+		return -1;
+
+	/* A root the field can hold and the table may not start at. */
+	if (w & (1ULL << 6))
+		return -1;
+
+	if (ctl == AMD_DTE_INT_CTL_FORWARD)
+		return 0;
+	if (ctl != AMD_DTE_INT_CTL_REMAP)
+		return -1;	/* 00b, every fixed interrupt aborted */
+
+	*table_pa = w & AMD_DTE_INT_ROOT_MASK;
+	*log2_entries = len;
+	return 1;
+}

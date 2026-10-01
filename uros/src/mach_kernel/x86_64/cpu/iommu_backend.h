@@ -428,6 +428,38 @@ int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
 int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index);
 
 /*
+ * ── #598: the device table entry's interrupt half, on AMD ─────────────
+ *
+ * Rev 3.11 §2.2.2.1, Table 7, bits 191:128 -- the third word of the entry:
+ * IV, IntTabLen, IG, the interrupt table root, the pass bits, IntCtl.
+ *
+ * Written INTO an entry the page-table encoders above already produced, and
+ * touching only that word: the two halves of a device table entry answer two
+ * different questions, and an encoder for one must not decide the other.
+ *
+ * 🔴 AND THE CONVERSE IS A HAZARD TODAY.  Every encoder above writes this word
+ * as zero -- IV clear, "passed through unmapped" -- so once remapping is on, any
+ * path that rewrites a device's entry (an attach, a detach) would quietly turn
+ * that device's interrupt remapping off.  Whoever turns it on owns that.
+ *
+ * Remapped, with every pass bit clear: NMI, INIT, ExtInt and LINT0/1 from the
+ * device are target aborted, because a device that sends one of those has no
+ * business doing so, and IG clear so that a refusal is logged.  `log2_entries'
+ * is IntTabLen; the table must be aligned to 128 bytes.  Answers zero, and
+ * leaves the entry alone, when either is not encodable.
+ */
+int iommu_amd_dte_interrupts(uint64_t table_pa, unsigned log2_entries,
+			     uint64_t dte[4]);
+
+/*
+ * Read that half back: 1 remapped through a table, 0 passed through unmapped
+ * (IV clear, or IntCtl 01b), -1 anything this kernel does not write --
+ * interrupts aborted wholesale, a reserved IntCtl or IntTabLen, a pass bit set.
+ */
+int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
+				    unsigned *log2_entries);
+
+/*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────
  *
  * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make

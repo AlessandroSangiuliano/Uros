@@ -2662,6 +2662,110 @@ static unsigned msg_check(unsigned *ran)
 	return bad;
 }
 
+/*
+ * And AMD's device table entry, its interrupt half, from Rev 3.11 Table 7 by
+ * hand.  The encoder writes one word of four into an entry the page-table
+ * encoders already made, so the check also requires the other three to come
+ * back exactly as they went in.
+ */
+struct dte_case {
+	const char	*what;
+	uint64_t	 table;		/* what the encoder is given / decoder finds */
+	unsigned	 log2;
+	uint64_t	 word;		/* the third word of the entry          */
+	int		 decodes;	/* 1 remapped, 0 unmapped, -1 not ours  */
+	int		 encodes;	/* 1 must produce, -1 must refuse, 0 not */
+};
+
+static const struct dte_case dte_cases[] = {
+	/*
+	 * 256 entries at 0x12345680: IV, IntTabLen 1000b in 4:1, the root in
+	 * 51:6, IntCtl 10b in 61:60, every pass bit and IG clear.
+	 */
+	{ "amd dte, 256 entries remapped", 0x12345680ULL, 8,
+	  0x2000000012345691ULL, 1, 1 },
+	/* Aligned to 64 and not to 128: refused, not rounded. */
+	{ "amd dte, table not 128-byte aligned", 0x12345640ULL, 8,
+	  0, 0, -1 },
+	/* 2^12 entries does not exist; 1011b, 2048, is the largest. */
+	{ "amd dte, 4096 entries", 0x12345680ULL, 12, 0, 0, -1 },
+	/* IV clear: everything passes unmapped, today's word. */
+	{ "amd dte, iv clear", 0, 0, 0, 0, 0 },
+	/* IV set and IntCtl 01b: forwarded unmapped all the same. */
+	{ "amd dte, forwarded unmapped", 0, 0,
+	  0x1000000000000001ULL, 0, 0 },
+	/* IntCtl 11b is reported as an event (synthetic). */
+	{ "amd dte, intctl reserved (synthetic)", 0, 0,
+	  0x3000000012345691ULL, -1, 0 },
+	/* IntTabLen 1100b, the reserved 11xxb (synthetic). */
+	{ "amd dte, table length reserved (synthetic)", 0, 0,
+	  0x2000000012345699ULL, -1, 0 },
+	/* NMIPass: a device allowed to send NMIs (synthetic). */
+	{ "amd dte, nmi passed through (synthetic)", 0, 0,
+	  0x2400000012345691ULL, -1, 0 },
+	/*
+	 * Bit 6 of the root set: a word the field can hold, for a table
+	 * that would start on a 64-byte boundary (synthetic).  The encoder
+	 * refusing the address above is half of the rule; this is the other.
+	 */
+	{ "amd dte, root aligned to 64 only (synthetic)", 0, 0,
+	  0x20000000123456D1ULL, -1, 0 },
+};
+
+static unsigned dte_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(dte_cases) / sizeof(dte_cases[0]);
+	     i++) {
+		const struct dte_case *c = &dte_cases[i];
+		uint64_t dte[4];
+		uint64_t table = 0xA5A5A5A5A5A5A5A5ULL;
+		unsigned log2 = 99;
+		int got;
+
+		(*ran)++;
+
+		if (c->encodes != 0) {
+			/* The page-table half, which must come back untouched. */
+			iommu_amd_dte_passthrough(IOMMU_DOMAIN_PASSTHROUGH, dte);
+			dte[2] = 0xA5A5A5A5A5A5A5A5ULL;
+			dte[3] = 0x5A5A5A5A5A5A5A5AULL;
+
+			got = iommu_amd_dte_interrupts(c->table, c->log2, dte);
+
+			if (c->encodes < 0) {
+				if (got != 0
+				    || dte[2] != 0xA5A5A5A5A5A5A5A5ULL)
+					bad++;
+				continue;
+			}
+			{
+				uint64_t pt[4];
+
+				iommu_amd_dte_passthrough(
+					IOMMU_DOMAIN_PASSTHROUGH, pt);
+				if (got != 1 || dte[2] != c->word
+				    || dte[0] != pt[0] || dte[1] != pt[1]
+				    || dte[3] != 0x5A5A5A5A5A5A5A5AULL) {
+					bad++;
+					continue;
+				}
+			}
+		} else {
+			dte[0] = dte[1] = dte[3] = 0;
+			dte[2] = c->word;
+		}
+
+		got = iommu_amd_dte_interrupts_decode(dte, &table, &log2);
+		if (got != c->decodes
+		    || (got == 1 && (table != c->table || log2 != c->log2)))
+			bad++;
+	}
+
+	return bad;
+}
+
 int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 {
 	unsigned n = 0, bad = 0;
@@ -2720,6 +2824,7 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 	}
 
 	bad += msg_check(&n);
+	bad += dte_check(&n);
 
 	if (ran)
 		*ran = n;
