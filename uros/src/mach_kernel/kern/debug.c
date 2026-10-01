@@ -255,7 +255,8 @@ panic_init(void)
 /*
  * #599: the panic message, rendered before it is printed so that the whole
  * line is one printf (see panic()).  Written only by the processor that set
- * panicstr, once; a message longer than this is cut, and the line says so.
+ * panicstr -- again, after a debugger lets the boot go on and it panics once
+ * more; a message longer than this is cut, and the line says so.
  */
 static char	panic_line[512];
 static unsigned	panic_line_len;
@@ -351,6 +352,7 @@ panic(const char *str, ...)
 	 */
 	va_start(listp, str);
 	panic_line_len = 0;
+	panic_line_cut = 0;
 	_doprnt(str, &listp, panic_line_putc, 0);
 	va_end(listp);
 	panic_line[panic_line_len] = '\0';
