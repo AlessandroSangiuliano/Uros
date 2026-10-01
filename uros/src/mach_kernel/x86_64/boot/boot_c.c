@@ -4839,8 +4839,29 @@ static void iommu_selftest(void)
 				kputs("-level");
 			}
 		kputs(u->coherent_walk ? ", coherent walks" : ", NON-coherent walks");
-		kputs(u->interrupt_remapping ? ", remaps interrupts\r\n"
-					     : ", no interrupt remapping\r\n");
+
+		/*
+		 * ⚠️ What remapping interrupts would need, said before anything
+		 * tries to turn it on (#598).  An engine that cannot forget an
+		 * entry is said in capitals because the specification rules it
+		 * out, and one that blocks every message while remapping is
+		 * off is said because it makes the order of the boot matter.
+		 */
+		if (!u->interrupt_remapping) {
+			kputs(", no interrupt remapping\r\n");
+		} else {
+			kputs(", remaps interrupts to ");
+			kputs(u->interrupt.x2apic ? "32-bit" : "8-bit");
+			kputs(" apic ids");
+			if (!u->interrupt.can_forget)
+				kputs(" BUT CANNOT BE MADE TO FORGET AN ENTRY");
+			if (u->interrupt.x2apic_required)
+				kputs(", in x2apic mode only");
+			if (u->interrupt.required)
+				kputs(", and blocks every interrupt until it"
+				      " remaps");
+			kputs("\r\n");
+		}
 
 		kputs("UrMach x86-64:     caps ");
 		kputhex64(u->vendor_caps[0]);

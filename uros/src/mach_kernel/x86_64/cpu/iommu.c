@@ -158,6 +158,15 @@ void iommu_record_hardware(unsigned index, uint32_t version,
 	u->vendor_caps[1] = caps1;
 }
 
+void iommu_record_interrupt(unsigned index,
+			    const struct iommu_interrupt_caps *caps)
+{
+	if (index >= nunits || caps == 0)
+		return;
+
+	units[index].interrupt = *caps;
+}
+
 void iommu_record_vendor(enum iommu_vendor vendor)
 {
 	found_vendor = vendor;
@@ -430,6 +439,12 @@ struct decode_case {
 	uint32_t	 levels;
 	int		 ir;
 	int		 coherent;
+
+	/*
+	 * And what the interrupt decode must say of the same words (#598), in
+	 * the struct's order: can forget, x2apic, required, x2apic required.
+	 */
+	struct iommu_interrupt_caps interrupt;
 };
 
 /* Levels 1..N, which is what AMD's HATS means: a ceiling, not a set. */
@@ -443,23 +458,24 @@ static const struct decode_case decode_cases[] = {
 	 * read from that machine -- only the feature register was.
 	 */
 	{ "amd, real silicon", 1, 0x206d73ef22254adeULL, 1ULL << 10,
-	  64, UPTO(6), 1, 1 },
+	  64, UPTO(6), 1, 1, { 1, 1, 0, 0 } },
 
 	/* QEMU's amd-iommu, which our own boot reads as 0x29d3. */
-	{ "amd, qemu", 1, 0x29d3ULL, 1ULL << 10, 64, UPTO(6), 1, 1 },
+	{ "amd, qemu", 1, 0x29d3ULL, 1ULL << 10, 64, UPTO(6), 1, 1,
+	  { 1, 0, 0, 0 } },
 
 	/* Synthetic: the three HATS encodings no part we can reach reports. */
 	{ "amd, hats=4 levels (synthetic)", 1, 0x0ULL, 1ULL << 10,
-	  48, UPTO(4), 1, 1 },
+	  48, UPTO(4), 1, 1, { 1, 0, 0, 0 } },
 	{ "amd, hats=5 levels (synthetic)", 1, 1ULL << 10, 1ULL << 10,
-	  57, UPTO(5), 1, 1 },
+	  57, UPTO(5), 1, 1, { 1, 0, 0, 0 } },
 	/*
 	 * Reserved, and the answer must be a refusal.  A decode that clamped
 	 * this to the smallest plausible width would be inventing the
 	 * safest-looking number for an engine it does not understand.
 	 */
 	{ "amd, hats reserved (synthetic)", 1, 3ULL << 10, 1ULL << 10,
-	  0, 0, 0, 0 },
+	  0, 0, 0, 0, { 1, 0, 0, 0 } },
 
 	/*
 	 * QEMU's intel-iommu on q35, as our own boot reads it.  SAGAW 0x06 is
@@ -467,7 +483,7 @@ static const struct decode_case decode_cases[] = {
 	 * difference the description's bitmask exists to hold.
 	 */
 	{ "intel, qemu q35", 0, 0x80d2008c222f0606ULL, 0x0000000000f00f4aULL,
-	  48, (1u << 3) | (1u << 4), 1, 0 },
+	  48, (1u << 3) | (1u << 4), 1, 0, { 1, 0, 0, 0 } },
 
 	/*
 	 * 🔴 THE CASE THAT CAUGHT A DEFECT, and the reason synthetic cases
@@ -477,19 +493,39 @@ static const struct decode_case decode_cases[] = {
 	 * have claimed a two-level and a six-level table here -- while
 	 * agreeing perfectly with the only real value we can produce, whose
 	 * reserved bits are clear.
+	 *
+	 * ⚠️ Its ECAP also reports remapping without the queue, which §11.4.3
+	 * rules out -- and the interrupt decode must report exactly that
+	 * rather than repair it (#598).
 	 */
 	{ "intel, sagaw all bits set (synthetic)", 0,
 	  (0x1FULL << 8) | (47ULL << 16), 0x9ULL,
-	  48, (1u << 3) | (1u << 4) | (1u << 5), 1, 1 },
+	  48, (1u << 3) | (1u << 4) | (1u << 5), 1, 1, { 0, 0, 0, 0 } },
 
 	/* And 57-bit, five levels, which nothing we can run reports. */
 	{ "intel, 5-level 57-bit (synthetic)", 0,
 	  (0x8ULL << 8) | (56ULL << 16), 0x8ULL,
-	  57, 1u << 5, 1, 0 },
+	  57, 1u << 5, 1, 0, { 0, 0, 0, 0 } },
+
+	/*
+	 * 🔴 The two recent bits, each set where the other is clear (#598).
+	 * IRREQ and EIMER are neighbours, 62 and 61, and a decode that read
+	 * one from the other's place would agree with every engine we can
+	 * run -- all of them report both clear.  The second case also has EIM
+	 * set and EIMER clear, which is what tells those two apart.
+	 */
+	{ "intel, x2apic only (synthetic)", 0,
+	  0x80d2008c222f0606ULL,
+	  (1ULL << 61) | (1ULL << 4) | (1ULL << 3) | (1ULL << 1),
+	  48, (1u << 3) | (1u << 4), 1, 0, { 1, 1, 0, 1 } },
+	{ "intel, remapping required (synthetic)", 0,
+	  0x80d2008c222f0606ULL,
+	  (1ULL << 62) | (1ULL << 4) | (1ULL << 3) | (1ULL << 1),
+	  48, (1u << 3) | (1u << 4), 1, 0, { 1, 1, 1, 0 } },
 
 	/* Coherency is a bit, and a test that never sees it clear is not one. */
 	{ "amd, coherent turned off (synthetic)", 1, 0x29d3ULL, 0,
-	  64, UPTO(6), 1, 0 },
+	  64, UPTO(6), 1, 0, { 1, 0, 0, 0 } },
 };
 
 int iommu_decode_check(unsigned *ran, unsigned *wrong)
@@ -502,17 +538,32 @@ int iommu_decode_check(unsigned *ran, unsigned *wrong)
 		unsigned bits = 0;
 		uint32_t levels = 0;
 		int ir = 0, coherent = 0;
+		struct iommu_interrupt_caps in;
 
-		if (c->amd)
+		/*
+		 * ⚠️ Not an answer, so that a decode which leaves a field
+		 * untouched fails here instead of agreeing with a zero.
+		 */
+		in.can_forget = in.x2apic = -1;
+		in.required = in.x2apic_required = -1;
+
+		if (c->amd) {
 			iommu_amd_decode(c->a, c->b, &bits, &levels,
 					 &ir, &coherent);
-		else
+			iommu_amd_interrupt_decode(c->a, &in);
+		} else {
 			iommu_vtd_decode(c->a, c->b, &bits, &levels,
 					 &ir, &coherent);
+			iommu_vtd_interrupt_decode(c->b, &in);
+		}
 
 		n++;
 		if (bits != c->bits || levels != c->levels
-		    || ir != c->ir || coherent != c->coherent)
+		    || ir != c->ir || coherent != c->coherent
+		    || in.can_forget != c->interrupt.can_forget
+		    || in.x2apic != c->interrupt.x2apic
+		    || in.required != c->interrupt.required
+		    || in.x2apic_required != c->interrupt.x2apic_required)
 			bad++;
 	}
 

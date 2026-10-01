@@ -356,6 +356,8 @@ option(UROS_ABLATE_606_PAGEOUT_WAIT "Build the #606 ablation: vm_pageout() asser
 option(UROS_PROBE_605_SILENT "Build the #605 probe: halt one processor and cross-call it, so the panic has to name it" OFF)
 option(UROS_PROBE_605_CALL_COST "Build the #605 probe: time broadcast cross-calls at boot" OFF)
 option(UROS_PROBE_605_PADDED "Build the #605 probe: one cache line per answer-counter slot, to measure what sharing one costs" OFF)
+# #598: interrupt remapping, each check with a way to see it catch.
+option(UROS_ABLATE_598_IRREQ_BIT "Build the #598 ablation: ECAP.IRREQ is read from EIMER's bit, and the iommu decode check must count the cases that tell them apart as wrong" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -748,6 +750,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_PROBE_605_PADDED)
       list(APPEND KERNEL_DEFINES_BARE PROBE_605_PADDED=1)
       message(STATUS "#605 probe: answer-counter slots one cache line each (x86_64)")
+  endif()
+  if(UROS_ABLATE_598_IRREQ_BIT)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_598_IRREQ_BIT=1)
+      message(STATUS "#598 ablation: ECAP.IRREQ read from EIMER's bit (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

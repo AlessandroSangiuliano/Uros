@@ -161,6 +161,24 @@ _Static_assert(sizeof(struct dmar_scope) == 6, "a device scope header is six byt
 #define	VTD_ECAP_IR(e)		((((e) >> 3) & 0x1) != 0)
 
 /*
+ * The rest of what ECAP says about remapping interrupts (#598), Rev 5.20
+ * §11.4.3.  The last two are recent: an engine that blocks every message
+ * while remapping is off, and one that remaps only in x2APIC mode.
+ *
+ * ⚠️ The ablation reads IRREQ from EIMER's bit, so the decode check must
+ * report the cases that tell the two apart as wrong.
+ */
+#ifndef	ABLATE_598_IRREQ_BIT
+#define	ABLATE_598_IRREQ_BIT	0
+#endif
+
+#define	VTD_ECAP_QI(e)		((((e) >> 1) & 0x1) != 0)
+#define	VTD_ECAP_EIM(e)		((((e) >> 4) & 0x1) != 0)
+#define	VTD_ECAP_EIMER(e)	((((e) >> 61) & 0x1) != 0)
+#define	VTD_ECAP_IRREQ(e)	((((e) >> (ABLATE_598_IRREQ_BIT ? 61 : 62)) \
+				  & 0x1) != 0)
+
+/*
  * The engine's version, split as the specification does.  A major version of
  * zero is not a version: it is what a read of nothing looks like once the
  * all-ones case has been taken out, and both are how a wrong base address
@@ -274,6 +292,24 @@ void iommu_vtd_decode(uint64_t cap, uint64_t ecap,
 	*page_levels = levels;
 	*interrupt_remapping = VTD_ECAP_IR(ecap);
 	*coherent = VTD_ECAP_COHERENT(ecap);
+}
+
+/*
+ * What remapping interrupts would need from this engine (#598).
+ *
+ * ⚠️ Reported as read, not corrected.  §11.4.3 makes each of these imply the
+ * one before it -- no IR without QI, no EIM without IR, no EIMER without EIM
+ * -- so an engine reporting IR and no QI contradicts the document.  That is a
+ * finding about the engine, and it becomes a refusal where remapping is turned
+ * on, not a quiet repair here.
+ */
+void iommu_vtd_interrupt_decode(uint64_t ecap,
+				struct iommu_interrupt_caps *out)
+{
+	out->can_forget = VTD_ECAP_QI(ecap);
+	out->x2apic = VTD_ECAP_EIM(ecap);
+	out->required = VTD_ECAP_IRREQ(ecap);
+	out->x2apic_required = VTD_ECAP_EIMER(ecap);
 }
 
 /*
@@ -1156,6 +1192,7 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	uint32_t levels = 0;
 	unsigned bits = 0;
 	int ir = 0, coherent = 0;
+	struct iommu_interrupt_caps interrupt;
 
 	regs = (volatile uint8_t *)(uintptr_t)pmap_map_device(base, size);
 	if (regs == 0)
@@ -1176,9 +1213,11 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	ecap = *(volatile uint64_t *)(regs + VTD_ECAP);
 
 	iommu_vtd_decode(cap, ecap, &bits, &levels, &ir, &coherent);
+	iommu_vtd_interrupt_decode(ecap, &interrupt);
 
 	iommu_record_hardware(index, version, bits, levels, ir, coherent,
 			      cap, ecap);
+	iommu_record_interrupt(index, &interrupt);
 	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
 

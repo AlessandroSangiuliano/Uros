@@ -332,6 +332,27 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 }
 
 /*
+ * What remapping interrupts would need from this engine (#598).
+ *
+ * 🔑 Forgetting an entry is a command, and not an optional one.
+ * INVALIDATE_INTERRUPT_TABLE (Rev 3.11 §2.4.5) is stated with no condition,
+ * where the PREFETCH command beside it is "when supported" by a feature bit --
+ * so every engine that has a command buffer, which is every engine, takes it.
+ *
+ * ⚠️ And nothing here can say "required".  Every field of the feature register
+ * (MMIO 0030h) is a support bit, so there is no counterpart to Intel's IRREQ
+ * or EIMER to read -- zero is what the register says, not a default.
+ */
+void iommu_amd_interrupt_decode(uint64_t efr,
+				struct iommu_interrupt_caps *out)
+{
+	out->can_forget = 1;
+	out->x2apic = (int)AMD_EFR_XTSUP(efr);
+	out->required = 0;
+	out->x2apic_required = 0;
+}
+
+/*
  * ── The device table entry, which is stage 2's first structure ────────
  *
  * 32 bytes per device id, from Table 7 of Rev 3.11.  Only the fields a
@@ -1412,6 +1433,7 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	unsigned	bits = 0;
 	uint32_t	levels = 0;
 	int		ir = 0, coherent = 0;
+	struct iommu_interrupt_caps interrupt;
 
 	if (h->cap_offset < 0x40)
 		return;
@@ -1456,6 +1478,7 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	features = *(volatile uint64_t *)(regs + AMD_REG_EXT_FEATURE);
 
 	iommu_amd_decode(features, control, &bits, &levels, &ir, &coherent);
+	iommu_amd_interrupt_decode(features, &interrupt);
 
 	/*
 	 * ⚠️ Version zero, because there is no version register to read.  The
@@ -1466,6 +1489,7 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	 */
 	iommu_record_hardware(index, 0, bits, levels, ir, coherent,
 			      features, control);
+	iommu_record_interrupt(index, &interrupt);
 	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
 

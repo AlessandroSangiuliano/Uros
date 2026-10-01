@@ -120,6 +120,28 @@ struct iommu_scope {
 };
 
 /*
+ * What remapping INTERRUPTS needs from an engine, beyond whether it can (#598).
+ *
+ * Each of these decides something before the first entry is written: an
+ * engine that cannot be made to forget an entry is one whose entries can never
+ * change, and one that blocks every message until remapping is on is one whose
+ * boot order is part of its correctness.
+ */
+struct iommu_interrupt_caps {
+	/*
+	 * The engine can be made to forget a cached entry.  🔴 Not implied by
+	 * remapping on Intel: "Register-based invalidation cannot invalidate
+	 * the interrupt entry cache" (Rev 5.20 §6.5.1), so it is the queue or
+	 * nothing.  AMD does it with a command its command buffer always takes.
+	 */
+	int	can_forget;
+
+	int	x2apic;			/* destinations wider than 8 bits    */
+	int	required;		/* every message blocked while off   */
+	int	x2apic_required;	/* every message blocked unless wide */
+};
+
+/*
  * One remapping engine.
  *
  * The first half is what the firmware's table said.  The second half is what
@@ -179,12 +201,13 @@ struct iommu_unit {
 	uint32_t	page_levels;
 
 	int		interrupt_remapping;
+	struct iommu_interrupt_caps interrupt;	/* the rest of that answer */
 	int		coherent_walk;	/* the engine's page walks snoop caches */
 
 	/*
 	 * The vendor's own capability words, kept raw.
 	 *
-	 * ⚠️ Deliberately not decoded past the four fields above.  These are
+	 * ⚠️ Deliberately not decoded past the fields above.  These are
 	 * the evidence for that decode, and a reported number that came out of
 	 * the same arithmetic as the decode would agree with it whether or not
 	 * either was right.

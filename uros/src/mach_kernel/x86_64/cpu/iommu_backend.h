@@ -54,6 +54,20 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 		      int *interrupt_remapping, int *coherent);
 
 /*
+ * The same words asked a second question: what remapping interrupts would need
+ * from this engine (#598).  Pure, and checked by iommu_decode_check() against
+ * the same cases as the decode above.
+ *
+ * Separate from it rather than four more arguments, because the two answer for
+ * different stages and fail in different ways: a wrong width refuses a root
+ * pointer, a wrong one of these writes an entry the engine will not use.
+ */
+void iommu_vtd_interrupt_decode(uint64_t ecap,
+				struct iommu_interrupt_caps *out);
+void iommu_amd_interrupt_decode(uint64_t efr,
+				struct iommu_interrupt_caps *out);
+
+/*
  * ── The entries stage 2 will write ───────────────────────────────────
  *
  * Pure encoders, for the same reason the decoders are pure: they can be
@@ -404,6 +418,10 @@ void iommu_record_hardware(unsigned index, uint32_t version,
 			   unsigned address_bits, uint32_t page_levels,
 			   int interrupt_remapping, int coherent_walk,
 			   uint64_t caps0, uint64_t caps1);
+
+/* What the interrupt decode answered for that unit, beside the above. */
+void iommu_record_interrupt(unsigned index,
+			    const struct iommu_interrupt_caps *caps);
 
 /* Say which vendor's tables were the ones read. */
 void iommu_record_vendor(enum iommu_vendor vendor);
