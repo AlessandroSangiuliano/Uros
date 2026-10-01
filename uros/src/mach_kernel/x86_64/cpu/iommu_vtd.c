@@ -1057,8 +1057,60 @@ int iommu_vtd_flush(const struct iommu_domain *d)
 #define	VTD_FR_PAGE_ENTRY_RESERVED	0x0C	/* LSS.2                    */
 #define	VTD_FR_TRANSLATION_BLOCKED	0x0D	/* LCT.5                    */
 
+/*
+ * And Table 15, §5.1.4.1: the twelve ways an INTERRUPT is refused (#598).
+ *
+ * 🔑 All twelve read as one kind, because the question a caller branches on is
+ * whether an interrupt or a transfer was refused; which of the twelve is the
+ * raw code's job.  The one this issue sets out to provoke is 25h, a message in
+ * compatibility format arriving while those are blocked.
+ *
+ * ⚠️ The record names the entry for seven of them and not for the other five.
+ * §11.4.7.6 FI: for 20h, 25h, 29h, 2Ah and 2Bh "contents of this field is
+ * undefined", and for the rest bits 63:48 hold the interrupt_index.  The five
+ * are the ones refused BEFORE an entry was looked up -- a malformed request, a
+ * compatibility-format one, remapping not on -- so there is no entry to name,
+ * and reading one would be reading whatever the hardware left there.
+ *
+ * The ablation reads an index for every reason, which the decode check must
+ * catch on the cases that carry something in FI where the field is undefined.
+ */
+#ifndef	ABLATE_598_INDEX_ALWAYS
+#define	ABLATE_598_INDEX_ALWAYS	0
+#endif
+
+#define	VTD_FR_IR_FIRST			0x20
+#define	VTD_FR_IR_RESERVED		0x20	/* request's reserved field */
+#define	VTD_FR_IR_COMPATIBILITY		0x25	/* compatibility, blocked   */
+#define	VTD_FR_IR_INVALID_REQUEST	0x29	/* not a valid interrupt    */
+#define	VTD_FR_IR_EIME_REQUIRED		0x2A	/* EIMER and EIME clear     */
+#define	VTD_FR_IR_REQUIRED		0x2B	/* IRREQ and remapping off  */
+#define	VTD_FR_IR_LAST			0x2B
+
+#define	VTD_FR_IR_INDEX(l)		((uint32_t)((l) >> 48))
+
+static int vtd_fault_names_entry(uint8_t reason)
+{
+	if (ABLATE_598_INDEX_ALWAYS)
+		return 1;
+
+	switch (reason) {
+	case VTD_FR_IR_RESERVED:
+	case VTD_FR_IR_COMPATIBILITY:
+	case VTD_FR_IR_INVALID_REQUEST:
+	case VTD_FR_IR_EIME_REQUIRED:
+	case VTD_FR_IR_REQUIRED:
+		return 0;
+	default:
+		return 1;
+	}
+}
+
 static uint8_t vtd_fault_kind(uint8_t reason)
 {
+	if (reason >= VTD_FR_IR_FIRST && reason <= VTD_FR_IR_LAST)
+		return IOMMU_FAULT_INTERRUPT;
+
 	switch (reason) {
 	case VTD_FR_WRITE_DENIED:
 	case VTD_FR_READ_DENIED:
@@ -1101,6 +1153,22 @@ int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	out->kind = vtd_fault_kind(out->reason);
 	out->write = type == 0;
 	out->vendor = IOMMU_INTEL;
+	out->index = IOMMU_FAULT_NO_INDEX;
+
+	/*
+	 * 🔴 AN INTERRUPT'S RECORD HAS NO ADDRESS AND NO DIRECTION (#598).
+	 * FI holds the entry's index, or nothing, and T1/T2 are "relevant only
+	 * when the fault reason indicates one of the address translation fault
+	 * conditions" -- so the type bits that make every other record a read
+	 * or a write say nothing here, and reading them would report a write
+	 * that the record never claimed.
+	 */
+	if (out->kind == IOMMU_FAULT_INTERRUPT) {
+		out->address = 0;
+		out->write = 0;
+		if (vtd_fault_names_entry(out->reason))
+			out->index = VTD_FR_IR_INDEX(lo);
+	}
 	return 1;
 }
 

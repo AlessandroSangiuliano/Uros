@@ -1168,7 +1168,19 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	uint8_t kind;
 
 	switch (code) {
+	/*
+	 * 🔑 One event code for two kinds of refusal (#598).  An interrupt
+	 * blocked by its remapping entry arrives as an IO_PAGE_FAULT with I
+	 * set -- "transaction was an interrupt request" -- and its Address is
+	 * the one the device wrote, in the interrupt range.  Read as a page
+	 * fault, it would be a DMA refused at 0xFEExxxxx, which is an address
+	 * no domain can map and exactly the kind of answer that gets believed.
+	 */
 	case AMD_EVT_IO_PAGE_FAULT:
+		kind = (lo & AMD_EVT_I) ? IOMMU_FAULT_INTERRUPT
+					: IOMMU_FAULT_PAGE;
+		break;
+
 	case AMD_EVT_INVALID_DEVICE_REQUEST:
 		kind = IOMMU_FAULT_PAGE;
 		break;
@@ -1208,6 +1220,13 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	out->write = (lo & AMD_EVT_PR) && !(lo & AMD_EVT_TR)
 		     && !(lo & AMD_EVT_I) && (lo & AMD_EVT_RW);
 	out->vendor = IOMMU_AMD;
+
+	/*
+	 * Never an entry: the event names the device and the address it wrote,
+	 * and the entry was chosen by the message's data, which the event does
+	 * not carry (Rev 3.11 Table 57).
+	 */
+	out->index = IOMMU_FAULT_NO_INDEX;
 	return 1;
 }
 

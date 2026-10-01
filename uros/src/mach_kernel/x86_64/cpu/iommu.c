@@ -1575,6 +1575,7 @@ static const char *fault_kind_name(uint8_t kind)
 	case IOMMU_FAULT_PAGE:		return "no mapping, or no permission";
 	case IOMMU_FAULT_ENTRY:		return "the device's own entry";
 	case IOMMU_FAULT_HARDWARE:	return "the engine could not read a table";
+	case IOMMU_FAULT_INTERRUPT:	return "an interrupt its remapping refused";
 	default:			return "a reason this kernel does not read";
 	}
 }
@@ -1623,14 +1624,48 @@ unsigned iommu_fault_report(void)
 			if (f == 0 || first + i < reported)
 				continue;
 
-			printf("iommu: %02x:%02x.%u was REFUSED a %s at "
-			       "0x%lx — %s (reason 0x%02x)\n",
-			       (unsigned)(f->source >> 8),
-			       (unsigned)((f->source >> 3) & 0x1F),
-			       (unsigned)(f->source & 7),
-			       f->write ? "write" : "transfer",
-			       (unsigned long)f->address,
-			       fault_kind_name(f->kind), (unsigned)f->reason);
+			/*
+			 * An interrupt has no transfer to name (#598).  Intel
+			 * says which entry it went through, or nothing; AMD
+			 * says where the device wrote it.  One printf per
+			 * shape, because a line printed in pieces can be cut
+			 * by another processor's (#578).
+			 */
+			if (f->kind != IOMMU_FAULT_INTERRUPT)
+				printf("iommu: %02x:%02x.%u was REFUSED a %s at "
+				       "0x%lx — %s (reason 0x%02x)\n",
+				       (unsigned)(f->source >> 8),
+				       (unsigned)((f->source >> 3) & 0x1F),
+				       (unsigned)(f->source & 7),
+				       f->write ? "write" : "transfer",
+				       (unsigned long)f->address,
+				       fault_kind_name(f->kind),
+				       (unsigned)f->reason);
+			else if (f->index != IOMMU_FAULT_NO_INDEX)
+				printf("iommu: %02x:%02x.%u was REFUSED an "
+				       "interrupt through entry %u "
+				       "(reason 0x%02x)\n",
+				       (unsigned)(f->source >> 8),
+				       (unsigned)((f->source >> 3) & 0x1F),
+				       (unsigned)(f->source & 7),
+				       (unsigned)f->index, (unsigned)f->reason);
+			else if (f->address != 0)
+				printf("iommu: %02x:%02x.%u was REFUSED an "
+				       "interrupt written to 0x%lx "
+				       "(reason 0x%02x)\n",
+				       (unsigned)(f->source >> 8),
+				       (unsigned)((f->source >> 3) & 0x1F),
+				       (unsigned)(f->source & 7),
+				       (unsigned long)f->address,
+				       (unsigned)f->reason);
+			else
+				printf("iommu: %02x:%02x.%u was REFUSED an "
+				       "interrupt before any entry was read "
+				       "(reason 0x%02x)\n",
+				       (unsigned)(f->source >> 8),
+				       (unsigned)((f->source >> 3) & 0x1F),
+				       (unsigned)(f->source & 7),
+				       (unsigned)f->reason);
 			printed++;
 		}
 	}
@@ -1691,6 +1726,7 @@ struct fault_case {
 	uint8_t			 reason;
 	uint8_t			 kind;
 	uint8_t			 write;
+	uint32_t		 index;
 };
 
 static const struct fault_case fault_cases[] = {
@@ -1705,7 +1741,7 @@ static const struct fault_case fault_cases[] = {
 	  0x00000000deadb000ULL,
 	  (1ULL << 63) | (0x05ULL << 32) | 0x00FAULL,
 	  1, 0x00000000deadb000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x05, IOMMU_FAULT_PAGE, 1 },
+	  0x05, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * The same record with T1 set: a READ refused, and the ONLY difference
@@ -1716,7 +1752,7 @@ static const struct fault_case fault_cases[] = {
 	  0x00000000deadb000ULL,
 	  (1ULL << 63) | (1ULL << 62) | (0x06ULL << 32) | 0x00FAULL,
 	  1, 0x00000000deadb000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x06, IOMMU_FAULT_PAGE, 0 },
+	  0x06, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 T1 CLEAR AND T2 SET IS A PAGE REQUEST, NOT A WRITE.  This is the
@@ -1728,7 +1764,7 @@ static const struct fault_case fault_cases[] = {
 	  0x1000ULL,
 	  (1ULL << 63) | (1ULL << 28) | (0x05ULL << 32) | 0x00FAULL,
 	  1, 0x1000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x05, IOMMU_FAULT_PAGE, 0 },
+	  0x05, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* And 11b, an AtomicOp, which is likewise not a read. */
 	{ "intel, atomicop (synthetic)", 0,
@@ -1736,7 +1772,7 @@ static const struct fault_case fault_cases[] = {
 	  (1ULL << 63) | (1ULL << 62) | (1ULL << 28) | (0x06ULL << 32)
 	  | 0x00FAULL,
 	  1, 0x1000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x06, IOMMU_FAULT_PAGE, 0 },
+	  0x06, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 F CLEAR IS NOT A FAULT, whatever else the record holds.  Every
@@ -1747,23 +1783,23 @@ static const struct fault_case fault_cases[] = {
 	 */
 	{ "intel, F clear", 0,
 	  0x00000000deadb000ULL, (0x05ULL << 32) | 0x00FAULL,
-	  0, 0, 0, 0, 0, 0, 0 },
+	  0, 0, 0, 0, 0, 0, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* Ah is a ROOT entry's reserved field, and Ch is a page entry's. */
 	{ "intel, root reserved", 0,
 	  0x2000ULL, (1ULL << 63) | (0x0AULL << 32) | 0x0100ULL,
 	  1, 0x2000ULL, 0x0100, IOMMU_FAULT_NO_DOMAIN,
-	  0x0A, IOMMU_FAULT_ENTRY, 1 },
+	  0x0A, IOMMU_FAULT_ENTRY, 1, IOMMU_FAULT_NO_INDEX },
 	{ "intel, page entry reserved", 0,
 	  0x2000ULL, (1ULL << 63) | (0x0CULL << 32) | 0x0100ULL,
 	  1, 0x2000ULL, 0x0100, IOMMU_FAULT_NO_DOMAIN,
-	  0x0C, IOMMU_FAULT_PAGE, 1 },
+	  0x0C, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/* An engine that could not read its own table: neither of the above. */
 	{ "intel, context unreadable", 0,
 	  0x3000ULL, (1ULL << 63) | (0x09ULL << 32) | 0x0100ULL,
 	  1, 0x3000ULL, 0x0100, IOMMU_FAULT_NO_DOMAIN,
-	  0x09, IOMMU_FAULT_HARDWARE, 1 },
+	  0x09, IOMMU_FAULT_HARDWARE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * ⚠️ The low twelve bits of FI are RsvdZ and the address is a PAGE
@@ -1774,7 +1810,7 @@ static const struct fault_case fault_cases[] = {
 	{ "intel, low bits are not address", 0,
 	  0x0000000012345FFFULL, (1ULL << 63) | (0x05ULL << 32) | 0x00FAULL,
 	  1, 0x0000000012345000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x05, IOMMU_FAULT_PAGE, 1 },
+	  0x05, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * AMD, an IO_PAGE_FAULT for a page that is not present: PR clear, so
@@ -1785,21 +1821,21 @@ static const struct fault_case fault_cases[] = {
 	  (2ULL << 60) | (1ULL << 53) | (7ULL << 32) | 0x0102ULL,
 	  0x00000000deadb000ULL,
 	  1, 0x00000000deadb000ULL, 0x0102, 7,
-	  0x2, IOMMU_FAULT_PAGE, 0 },
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* Present, not a translation, not an interrupt, RW set: a write. */
 	{ "amd, write denied", 1,
 	  (2ULL << 60) | (1ULL << 53) | (1ULL << 52) | (7ULL << 32) | 0x0102ULL,
 	  0x00000000deadb000ULL,
 	  1, 0x00000000deadb000ULL, 0x0102, 7,
-	  0x2, IOMMU_FAULT_PAGE, 1 },
+	  0x2, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/* The same with RW clear: a read. */
 	{ "amd, read denied", 1,
 	  (2ULL << 60) | (1ULL << 52) | (7ULL << 32) | 0x0102ULL,
 	  0x00000000deadb000ULL,
 	  1, 0x00000000deadb000ULL, 0x0102, 7,
-	  0x2, IOMMU_FAULT_PAGE, 0 },
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 GN SET MAKES D/P A PASID, NOT A DOMAIN.  The sixteen bits are
@@ -1811,17 +1847,17 @@ static const struct fault_case fault_cases[] = {
 	  (2ULL << 60) | (1ULL << 52) | (1ULL << 48) | (7ULL << 32) | 0x0102ULL,
 	  0x1000ULL,
 	  1, 0x1000ULL, 0x0102, IOMMU_FAULT_NO_DOMAIN,
-	  0x2, IOMMU_FAULT_PAGE, 0 },
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* An unusable device table entry is not a page fault. */
 	{ "amd, illegal dte", 1,
 	  (1ULL << 60) | 0x0102ULL, 0x4000ULL,
-	  1, 0x4000ULL, 0x0102, 0, 0x1, IOMMU_FAULT_ENTRY, 0 },
+	  1, 0x4000ULL, 0x0102, 0, 0x1, IOMMU_FAULT_ENTRY, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* Nor is the engine failing to read the table at all. */
 	{ "amd, device table hardware error", 1,
 	  (3ULL << 60) | 0x0102ULL, 0x5000ULL,
-	  1, 0x5000ULL, 0x0102, 0, 0x3, IOMMU_FAULT_HARDWARE, 0 },
+	  1, 0x5000ULL, 0x0102, 0, 0x3, IOMMU_FAULT_HARDWARE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 AN ALL-ZERO ENTRY IS NOT AN EVENT.  This is what an unwritten
@@ -1829,7 +1865,7 @@ static const struct fault_case fault_cases[] = {
 	 * that accepted event code 0000b would turn every empty slot into a
 	 * fault at address zero from device 0000.
 	 */
-	{ "amd, empty ring slot", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+	{ "amd, empty ring slot", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * A code Table 42 reserves.  Reported with its raw number and no
@@ -1838,7 +1874,63 @@ static const struct fault_case fault_cases[] = {
 	 */
 	{ "amd, reserved event code (synthetic)", 1,
 	  (0xAULL << 60) | 0x0102ULL, 0x6000ULL,
-	  1, 0x6000ULL, 0x0102, 0, 0xA, IOMMU_FAULT_UNKNOWN, 0 },
+	  1, 0x6000ULL, 0x0102, 0, 0xA, IOMMU_FAULT_UNKNOWN, 0, IOMMU_FAULT_NO_INDEX },
+
+	/*
+	 * ── Interrupts refused (#598), from Rev 5.20 Table 15 and §11.4.7.6,
+	 * and Rev 3.11 Table 57 ──
+	 *
+	 * 🔴 25h WITH SOMETHING IN FI.  The field is undefined for this reason,
+	 * so the decode must report no entry whatever the low word holds -- the
+	 * bits here are what a reader that always took 63:48 would turn into
+	 * entry 5.  This is the refusal #598 sets out to provoke: a message in
+	 * compatibility format while those are blocked, from 00:04.0.
+	 */
+	{ "intel, compatibility format blocked", 0,
+	  (5ULL << 48) | 0xdead000ULL,
+	  (1ULL << 63) | (0x25ULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x25, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/* 22h names its entry: the one that was not present, here 5. */
+	{ "intel, entry not present", 0,
+	  5ULL << 48,
+	  (1ULL << 63) | (0x22ULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x22, IOMMU_FAULT_INTERRUPT, 0, 5 },
+
+	/*
+	 * 26h, a device using an entry that names another source -- the
+	 * refusal that makes remapping isolate at all.  The index has bit 15
+	 * set, the one the request carries apart from the other fifteen.
+	 *
+	 * ⚠️ T1 and T2 are CLEAR, which on any other record means a write.
+	 * Here they mean nothing, and the decode must not say write.
+	 */
+	{ "intel, source not accepted", 0,
+	  0x8001ULL << 48,
+	  (1ULL << 63) | (0x26ULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x26, IOMMU_FAULT_INTERRUPT, 0, 0x8001 },
+
+	/* 2Bh, refused because remapping is off where it is required. */
+	{ "intel, remapping required and off (synthetic)", 0,
+	  7ULL << 48,
+	  (1ULL << 63) | (0x2BULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x2B, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/*
+	 * AMD: an IO_PAGE_FAULT with I set and PR clear -- an interrupt whose
+	 * entry has RemapEn clear -- from 00:04.0 in domain 7, at the address
+	 * it wrote.  RW is set to catch a reader that takes a direction from
+	 * an interrupt; the specification gives one only when I is clear.
+	 */
+	{ "amd, interrupt blocked", 1,
+	  (2ULL << 60) | (1ULL << 53) | (1ULL << 51) | (7ULL << 32) | 0x0020ULL,
+	  0x00000000fee00000ULL,
+	  1, 0x00000000fee00000ULL, 0x0020, 7,
+	  0x2, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
 };
 
 /*
@@ -2317,6 +2409,7 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
 		f.kind = 0xFF;
 		f.write = 0xFF;
 		f.vendor = 0xFF;
+		f.index = 0;
 
 		got = c->amd ? iommu_amd_fault_decode(c->lo, c->hi, &f)
 			     : iommu_vtd_fault_decode(c->lo, c->hi, &f);
@@ -2334,6 +2427,7 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
 		if (f.address != c->address || f.source != c->source
 		    || f.domain != c->domain || f.reason != c->reason
 		    || f.kind != c->kind || f.write != c->write
+		    || f.index != c->index
 		    || f.vendor != (c->amd ? IOMMU_AMD : IOMMU_INTEL))
 			bad++;
 	}

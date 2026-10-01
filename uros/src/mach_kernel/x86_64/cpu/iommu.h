@@ -587,7 +587,8 @@ enum iommu_fault_kind {
 	IOMMU_FAULT_UNKNOWN = 0,
 	IOMMU_FAULT_PAGE,		/* no translation, or no permission  */
 	IOMMU_FAULT_ENTRY,		/* the device's own entry is unusable */
-	IOMMU_FAULT_HARDWARE		/* the engine failed to read a table  */
+	IOMMU_FAULT_HARDWARE,		/* the engine failed to read a table  */
+	IOMMU_FAULT_INTERRUPT		/* an interrupt message refused (#598) */
 };
 
 /*
@@ -607,7 +608,19 @@ struct iommu_fault {
 	uint8_t			kind;	   /* enum iommu_fault_kind           */
 	uint8_t			write;	   /* 1 a write, 0 a read             */
 	uint8_t			vendor;	   /* which encoding `reason' is in   */
+	uint32_t		index;	   /* or IOMMU_FAULT_NO_INDEX         */
 };
+
+/*
+ * The remapping entry a refused interrupt went through, when the record names
+ * one (#598).
+ *
+ * ⚠️ Intel names it for most of its interrupt reasons and leaves it undefined
+ * for five (Rev 5.20 §11.4.7.6, FI); AMD's event carries the address the
+ * device wrote and no entry at all.  A sentinel and not zero, because zero is
+ * the first entry of every table.
+ */
+#define	IOMMU_FAULT_NO_INDEX	0xFFFFFFFFu
 
 /*
  * Intel's fault record does not carry one, AMD's does.
