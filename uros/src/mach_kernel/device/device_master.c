@@ -66,6 +66,10 @@
 #include <kern/thread.h>
 #include <kern/kalloc.h>
 #include <kern/cap.h>		/* #432: a capability for a device's kind */
+#include <kern/tsc.h>		/* #537: what one per-page ask costs */
+#include <kern/cpu_data.h>	/* #537: disable_preemption */
+#include <kern/cpu_number.h>
+#include <cpus.h>		/* NCPUS */
 #include <kern/ipc_mig.h>
 /*
  * ⚠️ Declared here rather than found in a header: port_name_to_task is defined
@@ -113,6 +117,7 @@ decl_mutex_data(static, device_table_lock)
  * block runs under it; task_deallocate() is called after it is dropped.
  */
 decl_simple_lock_data(static, irq_forward_lock)
+decl_simple_lock_data(static, dma_ask_said_lock)	/* #537: who says the total */
 
 /* The grace-period callbacks that make a retired slot reusable (#538);
  * defined beside the tables they belong to. */
@@ -326,6 +331,7 @@ device_master_init(void)
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
 	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
+	simple_lock_init(&dma_ask_said_lock, ETAP_NO_TRACE);
 
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
@@ -3710,6 +3716,125 @@ claim_is_mine_locked(natural_t bdf)
 }
 
 /*
+ * ── What one per-page ask costs, and where it goes (#537) ────────────
+ *
+ * The block server asks for every page of a physical transfer and counts each
+ * ask whole, from its side: about 15 000 cycles a page at ~3.9 GHz, 47 000
+ * under a 1.4 GHz cap.  This splits the part spent here -- the claim, the
+ * capability's MAC, the region and the page in it, and the rest -- so the
+ * step that pays can be chosen; the RPC is what the block server's number has
+ * beyond the sum of these.
+ *
+ * Each processor adds into its own slot with preemption off, so the hot path
+ * takes no lock and no two asks share a counter.  A slot carries a sequence
+ * word, odd while its owner writes: on i386 a 64-bit counter is read in two
+ * halves, and the processor that sums the slots must not take one half from
+ * before an add and one from after it.  The total is said at powers of two
+ * from 1024 answered asks, once each, by whichever processor first finds it
+ * past the next one; a refused ask returns before it is counted.
+ */
+#define	DMA_ASK_SAY_FIRST	1024
+#define	DMA_ASK_LOOK_EVERY	256	/* asks on one processor between looks */
+
+static struct dma_ask_cost {
+	volatile uint32_t	seq;	/* odd while the owner writes */
+	uint64_t		asks;
+	uint64_t		claim;	/* the master port, the arguments, the claim */
+	uint64_t		mac;	/* the token copied and verified */
+	uint64_t		find;	/* the region by id, the page in it */
+	uint64_t		rest;	/* the direction; with an IOMMU, the grant */
+} __attribute__((aligned(64))) dma_ask_cost[NCPUS];
+
+static uint64_t dma_ask_said;	/* the last power of two said, under dma_ask_said_lock */
+
+/* One slot, whole: read again while its owner is between the two seq writes. */
+static void
+dma_ask_read(const struct dma_ask_cost *c, struct dma_ask_cost *into)
+{
+	uint32_t before;
+
+	do {
+		before = c->seq;
+		publish_barrier();
+		into->asks = c->asks;
+		into->claim = c->claim;
+		into->mac = c->mac;
+		into->find = c->find;
+		into->rest = c->rest;
+		publish_barrier();
+	} while ((before & 1) != 0 || c->seq != before);
+}
+
+static void
+dma_ask_say(void)
+{
+	struct dma_ask_cost sum, one;
+	uint64_t next;
+	int i;
+
+	/* Somebody else is looking: this processor's asks are in their sum. */
+	if (!simple_lock_try(&dma_ask_said_lock))
+		return;
+
+	sum.asks = sum.claim = sum.mac = sum.find = sum.rest = 0;
+	for (i = 0; i < NCPUS; i++) {
+		dma_ask_read(&dma_ask_cost[i], &one);
+		sum.asks += one.asks;
+		sum.claim += one.claim;
+		sum.mac += one.mac;
+		sum.find += one.find;
+		sum.rest += one.rest;
+	}
+	next = dma_ask_said ? 2 * dma_ask_said : DMA_ASK_SAY_FIRST;
+	if (sum.asks < next) {
+		simple_unlock(&dma_ask_said_lock);
+		return;
+	}
+	while (2 * next <= sum.asks)
+		next *= 2;
+	dma_ask_said = next;
+	simple_unlock(&dma_ask_said_lock);
+
+	printf("device: after %llu pages asked for: the claim %llu cycles a "
+	       "page, the MAC %llu, the region and the page %llu, the rest "
+	       "%llu -- %llu in the kernel (#537)\n",
+	       (unsigned long long)sum.asks,
+	       (unsigned long long)(sum.claim / sum.asks),
+	       (unsigned long long)(sum.mac / sum.asks),
+	       (unsigned long long)(sum.find / sum.asks),
+	       (unsigned long long)(sum.rest / sum.asks),
+	       (unsigned long long)((sum.claim + sum.mac + sum.find +
+				     sum.rest) / sum.asks));
+}
+
+/* An answered ask: t0 at entry, t1 past the claim, t2 past the MAC, t3 past
+ * the region and the page; the rest ends now. */
+static void
+dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3)
+{
+	uint64_t t4 = urmach_tsc();
+	struct dma_ask_cost *c;
+	uint64_t asks;
+
+	disable_preemption();
+	c = &dma_ask_cost[cpu_number()];
+	c->seq++;
+	publish_barrier();
+	c->asks++;
+	c->claim += t1 - t0;
+	c->mac += t2 - t1;
+	c->find += t3 - t2;
+	c->rest += t4 - t3;
+	publish_barrier();
+	c->seq++;
+	asks = c->asks;
+	enable_preemption();
+
+	if (asks % DMA_ASK_LOOK_EVERY == 0)
+		dma_ask_say();
+}
+
+/*
  * ── One page of somebody else's buffer, for one direction (#599) ─────
  *
  * See the note on device_dma_map_foreign_op in <device/device_master.defs>.
@@ -3745,6 +3870,7 @@ ds_master_device_dma_map_foreign_op(
 	uint64_t		rid;
 	int			reads, writes, identity = 0, granted = 0;
 	unsigned int		npages = 0;
+	uint64_t		t0 = urmach_tsc(), t1, t2, t3;	/* #537 */
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -3760,6 +3886,7 @@ ds_master_device_dma_map_foreign_op(
 	kr = check_claim(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
+	t1 = urmach_tsc();
 
 	memcpy(&cap, token, sizeof(cap));
 
@@ -3768,6 +3895,7 @@ ds_master_device_dma_map_foreign_op(
 	if (kr != KERN_SUCCESS)
 		return kr;
 	rid = cap.resource_id;
+	t2 = urmach_tsc();
 
 	/* The buffer it names, and the page inside it. */
 	urmach_rcu_read_lock();
@@ -3783,6 +3911,7 @@ ds_master_device_dma_map_foreign_op(
 				break;
 	}
 	urmach_rcu_read_unlock();
+	t3 = urmach_tsc();
 	if (r == 0)
 		return KERN_INVALID_ADDRESS;
 	if (page == npages)
@@ -3801,6 +3930,7 @@ ds_master_device_dma_map_foreign_op(
 	 */
 	if (!device_md_dma_isolates()) {
 		*dma_addr = paddr;
+		dma_ask_account(t0, t1, t2, t3);
 		return KERN_SUCCESS;
 	}
 
@@ -3882,6 +4012,7 @@ ds_master_device_dma_map_foreign_op(
 		*dma_addr = (vm_address_t)(base + (unsigned long)page *
 					   PAGE_SIZE +
 					   (paddr & (vm_address_t)PAGE_MASK));
+	dma_ask_account(t0, t1, t2, t3);
 	return KERN_SUCCESS;
 }
 
