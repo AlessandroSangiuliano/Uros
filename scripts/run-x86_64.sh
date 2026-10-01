@@ -554,6 +554,13 @@ fi
 if [ "$NBAD" -gt 0 ]; then
 	echo "  FAILED: $NBAD unexplained:"
 	printf '%s\n' "$BAD" | sed 's/^/    /'
+	# #599: -Z panics on purpose.  The panic is not its failure; whether
+	# halt_cpu kept the message, the console's copy and the backtraces whole
+	# is, and that is read from the log by its own check.
+	if grep -aq 'double_panic: processors' "$LOG"; then
+		echo "  (this boot panicked on purpose, -Z: its verdict is"
+		echo "   scripts/double-panic-check.sh $LOG)"
+	fi
 	echo "  log: $LOG"
 	exit 1
 fi

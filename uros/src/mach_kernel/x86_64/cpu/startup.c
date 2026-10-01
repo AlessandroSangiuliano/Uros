@@ -31,6 +31,7 @@
 #include <thread/fpu.h>
 #include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
+#include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
@@ -387,6 +388,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('Y') && want > 1)
 			ioapic_window_race_test();
+
+		/*
+		 * -Z: two processors panic at the same instant (#599).  The same
+		 * requirement of a second processor; does not return when it
+		 * runs, because the panic is the test (scripts/
+		 * double-panic-check.sh reads the log).
+		 */
+		if (boot_flag('Z') && want > 1)
+			double_panic_test();
 
 		/*
 		 * -M: what concurrency does to a pmap with no locking (#455).
