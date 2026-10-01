@@ -23,6 +23,30 @@ static pv_entry_t pv_head_table;	/* one entry per physical page */
 static uint64_t   pv_pages;		/* how many pages it covers */
 
 /*
+ * 🔴 WHAT A PAGE'S MAPPINGS SAW BEFORE THEY WENT (#606).
+ *
+ * The processor records ACCESSED and DIRTY in the page-table entry, and an
+ * entry that is removed takes them with it.  pmap_is_modified() used to ask
+ * only the mappings that still exist -- and the pageout asks it right after
+ * pmap_page_protect(VM_PROT_NONE) has removed every one (vm_pageout.c), with
+ * VM_FAULT_STATIC_CONFIG compiling out the path that would have marked the
+ * page dirty when it was entered writable.  So a page written through its
+ * mapping and nowhere else answered "not modified" there, and was freed as
+ * clean: the write was lost.
+ *
+ * One byte a page, holding the two bits as the entry spells them
+ * (INTEL_PTE_REF, INTEL_PTE_MOD).  It is i386's pmap_phys_attributes[]: the
+ * same question has the same answer, kept beside the index because the index
+ * is what already has one slot per managed page.
+ *
+ * ⚠️ Written with atomics and never under a lock, because the removal that
+ * keeps the bits does not hold this page's lock: pmap_forget() clears first
+ * and takes it afterwards, in pv_remove().  What makes that safe is the order
+ * on each side -- see pmap_unmap_page_noflush() and pv_test_bits().
+ */
+static volatile uint8_t *pv_seen;
+
+/*
  * Entries for the second and later mappings of a page.
  *
  * 🔥 THIS LIST IS GLOBAL, AND UNTIL #558 IT HAD NO LOCK AT ALL (09/2026).
@@ -306,6 +330,16 @@ void pv_bootstrap(uint64_t top_of_ram)
 	pv_head_table = (pv_entry_t)(uintptr_t)phys_to_direct(table_pa);
 	pv_pages = pages;
 
+	/*
+	 * The record of what the mappings saw (#606), a byte a page and zeroed
+	 * by the allocator -- which is right: a page nothing has mapped has
+	 * been neither read nor written through a mapping.
+	 */
+	table_pa = boot_frames_alloc((pages + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K);
+	if (table_pa == 0)
+		panic("pv: no memory for the record of what mappings saw (#606)");
+	pv_seen = (volatile uint8_t *)(uintptr_t)phys_to_direct(table_pa);
+
 	simple_lock_init(&pv_free_lock, ETAP_VM_PMAP_FREE);
 	for (unsigned i = 0; i < PV_LOCKS; i++)
 		pv_locks[i].l = 0;
@@ -336,6 +370,35 @@ pv_entry_t pv_head(uint64_t pa)
 		return PV_ENTRY_NULL;
 
 	return &pv_head_table[pa_index(pa)];
+}
+
+/*
+ * The record of what a page's mappings saw (#606): kept from an entry that is
+ * going, asked, and cleared.  No-ops for a page the index does not cover.
+ *
+ * Nothing is kept from an entry that saw nothing: removing a mapping that was
+ * never touched costs a test and no locked instruction.  Most removals did see
+ * something and pay one `lock or'; the -M and fault benches showed no cost
+ * standing out of their noise, so it is not skipped when the record already
+ * holds the bits.
+ */
+void pv_keep_bits(uint64_t pa, pt_entry_t entry)
+{
+	uint8_t bits = (uint8_t) (entry & (INTEL_PTE_REF | INTEL_PTE_MOD));
+
+	if (bits != 0 && pv_managed(pa))
+		atomic_or8(&pv_seen[pa_index(pa)], bits);
+}
+
+int pv_kept_bits(uint64_t pa, uint64_t bits)
+{
+	return pv_managed(pa) && (pv_seen[pa_index(pa)] & bits) != 0;
+}
+
+void pv_forget_bits(uint64_t pa, uint64_t bits)
+{
+	if (pv_managed(pa))
+		atomic_and8(&pv_seen[pa_index(pa)], (uint8_t) ~bits);
 }
 
 /*

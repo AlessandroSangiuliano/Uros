@@ -272,6 +272,66 @@ start_other_cpus(void)
  * THREAD_NULL means "use the one you were given".  Released one line earlier
  * and an AP finds THREAD_NULL where its first thread should be.
  */
+/*
+ * #606: does the pageout run on this target at all?
+ *
+ * The question #606 has to answer about itself: a page written only through
+ * its mapping was freed as clean, but only if vm_pageout_scan() reaches the
+ * page -- and that needs memory short enough to make it look.  Once a second
+ * this prints the counters the scan keeps, when they move.  The first line is
+ * printed at once, with the counters as they stand, so a run that shows only
+ * that line is a run where the probe was there and the scan did nothing.
+ *
+ * A build option (UROS_PROBE_606_PAGEOUT), off by default: a question asked of
+ * a few runs, not something every boot pays for.
+ */
+#ifndef	PROBE_606_PAGEOUT
+#define	PROBE_606_PAGEOUT	0
+#endif
+
+#if	PROBE_606_PAGEOUT
+#include <kern/thread.h>
+#include <kern/time_out.h>
+#include <vm/vm_page.h>
+
+extern unsigned int vm_pageout_inactive;
+extern unsigned int vm_pageout_inactive_clean;
+extern unsigned int vm_pageout_inactive_dirty;
+extern unsigned int vm_pageout_dirty_no_pager;
+
+static int pageout_probe_event;
+
+static void pageout_probe(void)
+{
+	unsigned int seen[4] = { ~0u, ~0u, ~0u, ~0u };
+
+	for (;;) {
+		unsigned int now[4];
+
+		now[0] = vm_pageout_inactive;
+		now[1] = vm_pageout_inactive_clean;
+		now[2] = vm_pageout_inactive_dirty;
+		now[3] = vm_pageout_dirty_no_pager;
+
+		if (now[0] != seen[0] || now[1] != seen[1]
+		    || now[2] != seen[2] || now[3] != seen[3]) {
+			printf("pageout probe (#606): %u inactive pages "
+			       "examined, %u freed as clean, %u sent to a "
+			       "pager, %u kept for want of one; %d free, "
+			       "target %d\n", now[0], now[1], now[2], now[3],
+			       vm_page_free_count, vm_page_free_target);
+			for (unsigned i = 0; i < 4; i++)
+				seen[i] = now[i];
+		}
+
+		assert_wait((event_t) &pageout_probe_event, FALSE);
+		thread_set_timeout(hz);
+		thread_block((void (*)(void)) 0);
+		reset_timeout_check(&current_thread()->timer);
+	}
+}
+#endif	/* PROBE_606_PAGEOUT */
+
 void
 machine_processors_ready(void)
 {
@@ -404,6 +464,10 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('M'))
 			pmap_collect_bench();
+
+#if	PROBE_606_PAGEOUT
+		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
+#endif
 
 		/*
 		 * -L: a thread blocked with a continuation, and the prompt

@@ -914,6 +914,29 @@ static void phys_ops_selftest(void)
 	      && pmap_extract(u, uva) == 0
 	      ? ", every mapping gone\r\n" : ", STILL MAPPED\r\n");
 
+	/*
+	 * 🔴 AND THE PAGE STILL KNOWS IT WAS WRITTEN (#606).  This is the
+	 * pageout's own order -- vm_pageout_scan() removes every mapping and
+	 * only then asks pmap_is_modified() -- and the write above lives in no
+	 * mapping any more.  Without the record it answered 0 here, and the
+	 * pageout freed such a page as clean.  Then a clear has to forget it.
+	 */
+	mod = pmap_is_modified(frame);
+	ref = pmap_is_referenced(frame);
+	pmap_clear_modify(frame);
+	pmap_clear_reference(frame);
+	kputs("UrMach x86-64: with no mapping left, modified=");
+	kputdec(mod);
+	kputs(" referenced=");
+	kputdec(ref);
+	kputs(", after clearing ");
+	kputdec(pmap_is_modified(frame));
+	kputdec(pmap_is_referenced(frame));
+	kputs(mod == 1 && ref == 1 && pmap_is_modified(frame) == 0
+	      && pmap_is_referenced(frame) == 0
+	      ? " -- what the mappings saw outlived them (#606)\r\n"
+	      : " -- WRONG, the bits went with the mappings (#606)\r\n");
+
 	pmap_destroy(u);
 }
 
