@@ -460,6 +460,39 @@ int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
 				    unsigned *log2_entries);
 
 /*
+ * ── #598: Intel's invalidation queue, the descriptors ─────────────────
+ *
+ * Rev 5.20 §6.5.2, the 128-bit versions.  🔴 THE QUEUE IS NOT OPTIONAL FOR
+ * REMAPPING INTERRUPTS: "Register-based invalidation cannot invalidate the
+ * interrupt entry cache" (§6.5.1), and once the queue is on, "software must
+ * submit invalidation commands only through the IQ" (§6.5.2) -- so #432's
+ * context-cache and IOTLB invalidations become descriptors too, at the same
+ * global granularity they use through the registers today.
+ *
+ * Encoders only.  The engine reads these and nothing in the kernel ever does,
+ * so there is no reading to check; the check is against words written from the
+ * figures, as entries_agree() does for the context and device table entries.
+ */
+void iommu_vtd_qi_context_global(uint64_t out[2]);	/* type 1, G 01b */
+void iommu_vtd_qi_iotlb_global(uint64_t out[2]);	/* type 2, G 01b */
+
+/*
+ * Type 4: the whole interrupt entry cache, or the 2^`mask_log2' entries from
+ * `index', which must be aligned to that many -- the engine ignores the low
+ * bits the mask covers, so an unaligned index would invalidate a block that
+ * does not start where the caller thinks.  Answers zero for either mistake.
+ */
+void iommu_vtd_qi_iec_global(uint64_t out[2]);
+int iommu_vtd_qi_iec(uint32_t index, unsigned mask_log2, uint64_t out[2]);
+
+/*
+ * Type 5 with Status Write: the engine writes `data' to `status_pa' once every
+ * descriptor before this one has completed.  The address must be four-byte
+ * aligned, its bits 1:0 not being part of the field.
+ */
+int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2]);
+
+/*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────
  *
  * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make

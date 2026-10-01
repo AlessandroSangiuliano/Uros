@@ -362,6 +362,7 @@ option(UROS_ABLATE_598_INDEX_ALWAYS "Build the #598 ablation: an Intel interrupt
 option(UROS_ABLATE_598_IRTE_DST "Build the #598 ablation: an Intel xAPIC destination is written at bits 39:32 instead of 47:40, and the interrupt check must count the entries that carry one as wrong" OFF)
 option(UROS_ABLATE_598_INDEX15 "Build the #598 ablation: an Intel message and redirection entry drop bit 15 of the index, and the interrupt check must count the two cases that need it as wrong" OFF)
 option(UROS_ABLATE_598_INTCTL_FORWARD "Build the #598 ablation: an AMD device table entry forwards interrupts unmapped beside a valid table, and the interrupt check must count the entry as wrong" OFF)
+option(UROS_ABLATE_598_IIDX_HIGH "Build the #598 ablation: an interrupt entry cache invalidation puts its index at 63:48, where a fault record keeps one, and the interrupt check must count the two index-selective cases as wrong" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -774,6 +775,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_598_INTCTL_FORWARD)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_598_INTCTL_FORWARD=1)
       message(STATUS "#598 ablation: AMD IntCtl 01b, interrupts forwarded unmapped (x86_64)")
+  endif()
+  if(UROS_ABLATE_598_IIDX_HIGH)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_598_IIDX_HIGH=1)
+      message(STATUS "#598 ablation: IEC invalidation index at 63:48 (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

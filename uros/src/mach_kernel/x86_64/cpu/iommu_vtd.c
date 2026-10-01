@@ -1613,3 +1613,80 @@ int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index)
 	*index = (hi >> 17) | ((lo & VTD_RTE_INDEX15) ? 0x8000u : 0);
 	return 1;
 }
+
+/*
+ * ── #598: the invalidation queue's descriptors ───────────────────────
+ *
+ * Rev 5.20 §6.5.2.1, 6.5.2.3, 6.5.2.8, 6.5.2.9 (Figures 6-1, 6-3, 6-8, 6-9).
+ * The type is seven bits split as 11:9 and 3:0; every type here fits the low
+ * four, so 11:9 stay zero.
+ *
+ *	context cache	type 1, G in 5:4
+ *	IOTLB		type 2, G in 5:4, DW 6, DR 7, DID 31:16
+ *	interrupt cache	type 4, G in bit 4 (1 = by index), IM 31:27, IIDX 47:32
+ *	wait		type 5, IF 4, SW 5, FN 6, data 63:32, address in the
+ *			high word
+ *
+ * ⚠️ The ablation puts IIDX at 63:48, where a fault record keeps its interrupt
+ * index (§11.4.7.6) -- the same number, sixteen bits higher.  The interrupt
+ * check must catch it on the two index-selective cases.
+ */
+#ifndef	ABLATE_598_IIDX_HIGH
+#define	ABLATE_598_IIDX_HIGH	0
+#endif
+
+#define	VTD_QI_TYPE_CONTEXT	0x1ULL
+#define	VTD_QI_TYPE_IOTLB	0x2ULL
+#define	VTD_QI_TYPE_IEC		0x4ULL
+#define	VTD_QI_TYPE_WAIT	0x5ULL
+#define	VTD_QI_G_GLOBAL		(1ULL << 4)	/* context and IOTLB: 01b */
+#define	VTD_QI_IEC_BY_INDEX	(1ULL << 4)
+#define	VTD_QI_IEC_IM(m)	((uint64_t)(m) << 27)
+#define	VTD_QI_IEC_IIDX(i)	((uint64_t)(i) << (ABLATE_598_IIDX_HIGH ? 48 : 32))
+#define	VTD_QI_WAIT_SW		(1ULL << 5)
+#define	VTD_QI_WAIT_DATA(d)	((uint64_t)(d) << 32)
+
+void iommu_vtd_qi_context_global(uint64_t out[2])
+{
+	out[0] = VTD_QI_TYPE_CONTEXT | VTD_QI_G_GLOBAL;
+	out[1] = 0;
+}
+
+/*
+ * Without DR or DW, as the register form #432 uses today: an engine of major
+ * version 2 or later drains before the next wait regardless (§6.5.2.3), and
+ * QEMU's is 1.0 and has nothing to drain.
+ */
+void iommu_vtd_qi_iotlb_global(uint64_t out[2])
+{
+	out[0] = VTD_QI_TYPE_IOTLB | VTD_QI_G_GLOBAL;
+	out[1] = 0;
+}
+
+void iommu_vtd_qi_iec_global(uint64_t out[2])
+{
+	out[0] = VTD_QI_TYPE_IEC;
+	out[1] = 0;
+}
+
+int iommu_vtd_qi_iec(uint32_t index, unsigned mask_log2, uint64_t out[2])
+{
+	if (index > 0xFFFFu || mask_log2 > 16
+	    || (index & ((1u << mask_log2) - 1u)) != 0)
+		return 0;
+
+	out[0] = VTD_QI_TYPE_IEC | VTD_QI_IEC_BY_INDEX
+	       | VTD_QI_IEC_IM(mask_log2) | VTD_QI_IEC_IIDX(index);
+	out[1] = 0;
+	return 1;
+}
+
+int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2])
+{
+	if ((status_pa & 3ULL) != 0)
+		return 0;
+
+	out[0] = VTD_QI_TYPE_WAIT | VTD_QI_WAIT_SW | VTD_QI_WAIT_DATA(data);
+	out[1] = status_pa;
+	return 1;
+}

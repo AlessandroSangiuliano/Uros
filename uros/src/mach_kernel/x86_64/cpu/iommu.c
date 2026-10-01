@@ -2766,6 +2766,90 @@ static unsigned dte_check(unsigned *ran)
 	return bad;
 }
 
+/*
+ * And the invalidation queue's descriptors, Intel's, from Rev 5.20 Figures
+ * 6-1, 6-3, 6-8 and 6-9 by hand.  Words only: nothing reads them but the
+ * engine, so the encoders are checked as entries_agree() checks the context
+ * and device table entries.
+ */
+enum { QI_CONTEXT, QI_IOTLB, QI_IEC_ALL, QI_IEC, QI_WAIT };
+
+struct qi_case {
+	const char	*what;
+	int		 kind;
+	uint64_t	 arg;		/* the index, or the status address  */
+	uint32_t	 arg2;		/* the mask, or the status data      */
+	int		 encodes;	/* 1 must produce lo/hi, -1 must refuse */
+	uint64_t	 lo;
+	uint64_t	 hi;
+};
+
+static const struct qi_case qi_cases[] = {
+	{ "intel qi, context cache, global", QI_CONTEXT, 0, 0, 1,
+	  0x0000000000000011ULL, 0 },
+	{ "intel qi, iotlb, global", QI_IOTLB, 0, 0, 1,
+	  0x0000000000000012ULL, 0 },
+	{ "intel qi, interrupt cache, global", QI_IEC_ALL, 0, 0, 1,
+	  0x0000000000000004ULL, 0 },
+	/* Entry 5 alone: G set, IM 0, IIDX 5 in 47:32. */
+	{ "intel qi, interrupt cache, entry 5", QI_IEC, 5, 0, 1,
+	  0x0000000500000014ULL, 0 },
+	/* Eight entries from 0x40: IM 3 in 31:27. */
+	{ "intel qi, interrupt cache, 8 from 0x40", QI_IEC, 0x40, 3, 1,
+	  0x0000004018000014ULL, 0 },
+	/* 0x41 with a mask of eight: the block would start at 0x40. */
+	{ "intel qi, interrupt cache, unaligned", QI_IEC, 0x41, 3, -1, 0, 0 },
+	{ "intel qi, interrupt cache, past 16 bits", QI_IEC, 0x10000, 0, -1,
+	  0, 0 },
+	/* SW, data 1 in 63:32, the address in the high word. */
+	{ "intel qi, wait, status write", QI_WAIT, 0x1000, 1, 1,
+	  0x0000000100000025ULL, 0x1000ULL },
+	{ "intel qi, wait, every data bit", QI_WAIT, 0x7FFFFFFCULL,
+	  0xFFFFFFFFu, 1, 0xFFFFFFFF00000025ULL, 0x7FFFFFFCULL },
+	/* Bits 1:0 of the address are not part of the field. */
+	{ "intel qi, wait, unaligned", QI_WAIT, 0x1002, 1, -1, 0, 0 },
+};
+
+static unsigned qi_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(qi_cases) / sizeof(qi_cases[0]); i++) {
+		const struct qi_case *c = &qi_cases[i];
+		uint64_t w[2] = { ~0ULL, ~0ULL };
+		int got = 1;
+
+		(*ran)++;
+
+		switch (c->kind) {
+		case QI_CONTEXT:
+			iommu_vtd_qi_context_global(w);
+			break;
+		case QI_IOTLB:
+			iommu_vtd_qi_iotlb_global(w);
+			break;
+		case QI_IEC_ALL:
+			iommu_vtd_qi_iec_global(w);
+			break;
+		case QI_IEC:
+			got = iommu_vtd_qi_iec((uint32_t)c->arg, c->arg2, w);
+			break;
+		default:
+			got = iommu_vtd_qi_wait(c->arg, c->arg2, w);
+			break;
+		}
+
+		if (c->encodes < 0) {
+			if (got != 0)
+				bad++;
+		} else if (got != 1 || w[0] != c->lo || w[1] != c->hi) {
+			bad++;
+		}
+	}
+
+	return bad;
+}
+
 int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 {
 	unsigned n = 0, bad = 0;
@@ -2825,6 +2909,7 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 
 	bad += msg_check(&n);
 	bad += dte_check(&n);
+	bad += qi_check(&n);
 
 	if (ran)
 		*ran = n;
