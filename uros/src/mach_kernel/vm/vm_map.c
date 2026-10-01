@@ -3149,6 +3149,63 @@ vm_map_remove(
 	return(result);
 }
 
+/*
+ *	vm_map_remove_frames:
+ *
+ *	Remove from the map the pages of [start, start + n * PAGE_SIZE) that
+ *	still map the frames the caller names, page i to pa[i], and leave every
+ *	other page alone (#599).
+ *
+ *	For the owner of a range the kernel mapped into a task and later takes
+ *	back -- a DMA buffer's user mapping.  The task may have deallocated
+ *	the range itself before that, and mapped something else at the same
+ *	address: the AHCI driver deallocates its buffers' user mappings before
+ *	it frees them, and the free removed [uva, uva + size) by address,
+ *	whatever occupied it by then.  A page is removed only while it still
+ *	maps its frame, and the runs are found and deleted under one hold of
+ *	the map lock, so nothing can be mapped into a run between the look and
+ *	the removal.
+ */
+kern_return_t
+vm_map_remove_frames(
+	vm_map_t		map,
+	vm_offset_t		start,
+	const vm_offset_t	*pa,
+	unsigned int		n,
+	boolean_t		flags)
+{
+	unsigned int	i, run;
+
+	/*
+	 * Refused rather than clamped, as VM_MAP_RANGE_CHECK would: page i is
+	 * compared with pa[i], and a start moved up would compare every page
+	 * with the wrong frame.
+	 */
+	if (start < vm_map_min(map) ||
+	    start + (vm_offset_t)n * PAGE_SIZE > vm_map_max(map) ||
+	    start + (vm_offset_t)n * PAGE_SIZE < start)
+		return KERN_INVALID_ADDRESS;
+
+	vm_map_lock(map);
+	for (i = 0; i < n; i = run) {
+		for (run = i; run < n; run++)
+			if (pmap_extract(vm_map_pmap(map),
+					 start + (vm_offset_t)run * PAGE_SIZE)
+			    != pa[run])
+				break;
+		if (run > i)
+			(void) vm_map_delete(map,
+					     start + (vm_offset_t)i * PAGE_SIZE,
+					     start + (vm_offset_t)run * PAGE_SIZE,
+					     flags);
+		else
+			run = i + 1;
+	}
+	vm_map_unlock(map);
+
+	return KERN_SUCCESS;
+}
+
 
 /*
  *	vm_map_copy_steal_pages:

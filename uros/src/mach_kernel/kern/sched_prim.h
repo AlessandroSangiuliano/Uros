@@ -202,8 +202,9 @@ extern void		clear_wait_locked(
  * assert_wait() disables preemption so that the thread cannot be put to sleep
  * between declaring its wait and releasing the lock it still holds; this is
  * what gives that back, and it is called from every way out of the window --
- * thread_block_reason() when it commits, and clear_wait() when the wait is
- * abandoned instead.
+ * thread_block_reason() when it commits, thread_run() and the futex hand-off
+ * (thread_handoff_to_parked_waiter) when they switch without it (#599), and
+ * clear_wait() when the wait is abandoned instead.
  *
  * ⚠️ It checks that the thread is the CURRENT one, because clear_wait() is
  * mostly called on somebody else: the level belongs to a processor, and the

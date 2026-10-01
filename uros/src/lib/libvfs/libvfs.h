@@ -71,6 +71,16 @@ int             vfs_init(void);
  */
 vfs_fd_t        vfs_open(const char *path, int flags, int mode);
 
+/*
+ * #599: vfs_open, answering why when it fails.  Returns KERN_SUCCESS and the
+ * fd in *fd_out, or the reason with *fd_out VFS_FD_INVALID: a VFS_ERR_* code
+ * from the filesystem (VFS_ERR_NOENT for a name that is not there, VFS_ERR_IO
+ * for a damaged directory or a device that failed), a KERN_* code, or a Mach
+ * send error when the server is gone.  vfs_open is this without the reason.
+ */
+kern_return_t   vfs_open_rc(const char *path, int flags, int mode,
+                            vfs_fd_t *fd_out);
+
 int             vfs_close(vfs_fd_t fd);
 
 ssize_t         vfs_read(vfs_fd_t fd, void *buf, size_t count);
@@ -78,6 +88,11 @@ ssize_t         vfs_write(vfs_fd_t fd, const void *buf, size_t count);
 
 off_t           vfs_lseek(vfs_fd_t fd, off_t offset, int whence);
 
+/*
+ * vfs_stat, vfs_fstat, vfs_unlink and vfs_rename return 0 on success and
+ * otherwise the reason, as vfs_open_rc does -- never a bare -1 (#599), so
+ * that a name that is absent and a directory that is damaged are two answers.
+ */
 int             vfs_stat(const char *path, vfs_stat_t *out);
 int             vfs_fstat(vfs_fd_t fd, vfs_stat_t *out);
 
@@ -100,6 +115,8 @@ int             vfs_mmap(vfs_fd_t fd, int prot, int flags,
 /*
  * Namespace operations (v0.3.0, #231).  Paths are absolute.
  *   vfs_unlink — remove a name.
+ *   vfs_mkdir  — make a directory; vfs_rmdir removes an empty one.
+ *                Both answer 0 or the reason, as vfs_unlink does.
  *   vfs_rename — move a name; same-mount uses the server's atomic
  *                rename, cross-mount is synthesized as copy + unlink
  *                (POSIX EXDEV semantics).
@@ -107,6 +124,8 @@ int             vfs_mmap(vfs_fd_t fd, int prot, int flags,
  *                within or across mounts.  Returns 0 / -1.
  */
 int             vfs_unlink(const char *path);
+int             vfs_mkdir(const char *path, int mode);
+int             vfs_rmdir(const char *path);
 int             vfs_rename(const char *oldpath, const char *newpath);
 int             vfs_copy(const char *src, const char *dst);
 

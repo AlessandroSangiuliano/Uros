@@ -20,12 +20,16 @@
 #include <mach/kern_return.h>
 #include <kern/misc_protos.h>
 #include <kern/lock.h>
+#include <kern/cpu_number.h>		/* printf_lock_holder, #599 */
 #include <device/conf.h>
 #include <device/io_req.h>
 #include <device/ds_routines.h>	/* device_write_get (#578) */
 #include <device/device_types.h>
 #include <i386/pio.h>
 #include <i386/AT386/fbcons.h>
+#ifdef	ABLATE_599_NESTED_PRINTF
+#include <i386/clock_watch.h>
+#endif
 
 extern void com_putc(char c);
 extern void cpu_shutdown(void);
@@ -40,6 +44,7 @@ extern void cpu_shutdown(void);
  * voluntary switch, so no interleaving is possible there anyway.
  */
 decl_simple_lock_data(extern, printf_lock)
+extern volatile int	printf_lock_holder;	/* kern/printf.c, #599 */
 
 /* ============================================================
  * Console primitives that used to live in kd.c.  Moved here so
@@ -200,8 +205,13 @@ consolewrite(dev_t dev, io_req_t ior)
 			}
 		n -= k;
 		simple_lock(&printf_lock);
+		printf_lock_holder = cpu_number();	/* #599: see printf.c */
+#ifdef ABLATE_599_NESTED_PRINTF
+		clock_watch_ablate_nested_printf();
+#endif
 		while (k--)
 			cnputc(*p++);
+		printf_lock_holder = -1;
 		simple_unlock(&printf_lock);
 	}
 

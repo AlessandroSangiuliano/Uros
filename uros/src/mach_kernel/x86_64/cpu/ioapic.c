@@ -65,12 +65,26 @@ static uint32_t base_gsi;
  */
 static volatile uint8_t	window_lock;
 
+/*
+ * #599: the -Y test's two ablations (ioapic_race_test.c).  WINDOW_OPEN uses
+ * the window without the lock and still with interrupts masked, so what it
+ * reopens is the race between processors; WINDOW_WIDEN puts that many port
+ * 0x80 reads between selecting a register and using it, so a second
+ * processor's select lands in the gap far more often.
+ */
+#ifndef	ABLATE_599_WINDOW_OPEN
+#define	ABLATE_599_WINDOW_OPEN	0
+#endif
+#ifndef	ABLATE_599_WINDOW_WIDEN
+#define	ABLATE_599_WINDOW_WIDEN	0
+#endif
+
 static uint64_t window_enter(void)
 {
 	uint64_t flags = read_rflags();
 
 	interrupts_disable();
-	while (atomic_swap8(&window_lock, 1) != 0)
+	while (!ABLATE_599_WINDOW_OPEN && atomic_swap8(&window_lock, 1) != 0)
 		cpu_pause();
 	return flags;
 }
@@ -83,15 +97,23 @@ static void window_leave(uint64_t flags)
 		interrupts_enable();
 }
 
+static void window_widen(void)
+{
+	for (unsigned i = 0; i < ABLATE_599_WINDOW_WIDEN; i++)
+		(void) inb(0x80);
+}
+
 static uint32_t window_read(unsigned reg)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
+	window_widen();
 	return *(volatile uint32_t *)(io + IOAPIC_WINDOW);
 }
 
 static void window_write(unsigned reg, uint32_t value)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
+	window_widen();
 	*(volatile uint32_t *)(io + IOAPIC_WINDOW) = value;
 }
 
@@ -229,4 +251,38 @@ void ioapic_unmask(uint32_t gsi)
 int ioapic_is_masked(uint32_t gsi)
 {
 	return (ioapic_read(redir_reg(gsi)) & RTE_MASKED) != 0;
+}
+
+/*
+ * #599: the -Y test's way in (ioapic_race_test.c), and nothing else's.  A pin
+ * whose low half is still exactly what ioapic_init() wrote has never been
+ * routed -- ioapic_route() always writes a vector -- so the test may use it,
+ * and puts the low half back when it is done.  The vector is changed by the
+ * same read-modify-write that masks and unmasks a pin, which is the sequence
+ * under test.
+ */
+int ioapic_pin_untouched(uint32_t gsi)
+{
+	return ioapic_present() && gsi >= base_gsi && gsi - base_gsi < pins &&
+	       ioapic_read(redir_reg(gsi)) == RTE_MASKED;
+}
+
+uint32_t ioapic_low_half(uint32_t gsi)
+{
+	return ioapic_read(redir_reg(gsi));
+}
+
+void ioapic_set_low_half(uint32_t gsi, uint32_t low)
+{
+	ioapic_write(redir_reg(gsi), low);
+}
+
+void ioapic_set_vector(uint32_t gsi, uint8_t vector)
+{
+	ioapic_modify(redir_reg(gsi), RTE_VECTOR_MASK, vector);
+}
+
+uint32_t ioapic_first_gsi(void)
+{
+	return base_gsi;
 }

@@ -245,6 +245,46 @@ option(UROS_ABLATE_586_NO_TICKS "Build the #586 ablation: the tick self-test cou
 # anything else.
 option(UROS_ABLATE_597_NO_LOCK "Build the #597 ablation: i386's PCI configuration access takes no lock" OFF)
 set(UROS_ABLATE_597_WIDEN "" CACHE STRING "Build the #597 ablation: N port 0x80 reads between the PCI address and data (empty = off)")
+# #599: stop processor 0's tick on purpose, 3000 ticks into the boot, to show
+# that the clock watch (i386/clock_watch.c) sees it and what the NMI's dump
+# says.  MASK_PIT masks the 8254's pin with nothing pending to unmask it, the
+# shape a lost I/O APIC read-modify-write leaves; CLI_SPIN takes the timeout
+# list's lock and spins processor 0 with interrupts off; SPIN_ONLY keeps the
+# watch off the tick, so that with CLI_SPIN only a spin can say so; SPL_LEAK
+# has a thread_switch on processor 0 return to user mode at splsched, the
+# second hypothesis, which return_to_user's check must say.  i386 with
+# UROS_NCPUS > 1 only: the watch runs on the other processors.  Never ON in a
+# kernel anyone boots for anything else.
+option(UROS_ABLATE_599_MASK_PIT "Build the #599 ablation: processor 0 masks the 8254's pin once, with nothing pending" OFF)
+option(UROS_ABLATE_599_CLI_SPIN "Build the #599 ablation: processor 0 takes the timeout list's lock and spins with interrupts off once" OFF)
+option(UROS_ABLATE_599_SPIN_ONLY "Build the #599 ablation: the clock watch runs only from inside spins, not from the tick" OFF)
+option(UROS_ABLATE_599_SPL_LEAK "Build the #599 ablation: a thread_switch on processor 0 returns to user mode at splsched once" OFF)
+# #599: the I/O APIC's select/window pair widened on the other processors by
+# N port 0x80 reads in each of its three gaps (i386/ioapic.c).  If the pair's
+# race is what stops processor 0's tick, this makes it frequent at four
+# processors and absent at one.  i386 SMP only; never ON otherwise.
+option(UROS_ABLATE_599_NESTED_PRINTF "Build the #599 ablation: processor 0 raises an unhandled line inside consolewrite's printf_lock hold once" OFF)
+option(UROS_ABLATE_599_PRINTF_WAITS "Build the #599 ablation: a printf nested inside printf_lock's holder waits for it, as before the fix" OFF)
+option(UROS_ABLATE_599_NO_LOCK "Build the #599 ablation: i386's I/O APIC select/window pair takes no lock, as before the fix" OFF)
+option(UROS_ABLATE_599_I8042_SHARED "Build the #599 ablation: i386's break-key reader keeps reading the 8042 while a task holds its ports" OFF)
+option(UROS_ABLATE_599_COMPROBE_OLD_EXIT "Build the #599 ablation: i386's comprobe/comattach clobber unit 0 on boots without -r, as before the fix" OFF)
+option(UROS_ABLATE_599_COM_NO_LOCK "Build the #599 ablation: i386's com_bank_lock is not taken -- THR writes and the divisor sequence race, as before the fix" OFF)
+set(UROS_ABLATE_599_WIDEN_DIVISOR "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between DLL and DLM in i386's divisor sequence (empty = off)")
+set(UROS_ABLATE_599_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads in each gap of the I/O APIC pair, other processors only (empty = off)")
+# #599: x86-64's I/O APIC window (x86_64/cpu/ioapic.c, the lock #593 put
+# there), for the -Y test that races it from two processors.  WINDOW_OPEN uses
+# the window without the lock -- interrupts are still masked, so what is left
+# is the race between processors -- and WINDOW_WIDEN puts N port 0x80 reads
+# between selecting a register and using it.  x86-64 only: i386's pair is
+# UROS_ABLATE_599_NO_LOCK and _WIDEN above.  Never ON in a kernel anyone boots
+# for anything else.
+option(UROS_ABLATE_599_WINDOW_OPEN "Build the #599 ablation: x86-64's I/O APIC window is used without its lock" OFF)
+set(UROS_ABLATE_599_WINDOW_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between selecting an x86-64 I/O APIC register and using it (empty = off)")
+# #599: x86-64's halt_cpu in the order it had before the review rounds, for
+# the -Z test: the console's final copy first, the halt broadcast before the
+# wait for the panicking processor's message, interrupts left as they were.
+# x86-64 only.  Never ON in a kernel anyone boots for anything else.
+option(UROS_ABLATE_599_HALT_ORDER "Build the #599 ablation: x86-64's halt_cpu in its old order -- the copy first, the stop before the panic's message ends" OFF)
 option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
 # #508: an MMIO mapping is checked on its first page only, as it was before the
 # span was bounded, so irq_claim_test's arm [10] -- one page past the owned
@@ -401,6 +441,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/idle.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic_race_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     # Configuration space: ECAM where the MCFG describes one, the port
     # pair where it does not -- two boards, not a bridge (#457).
@@ -408,11 +449,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     # What polices DMA, if anything: one vendor-neutral description and one
     # reader per vendor, so the second is a backend and not a rewrite (#432).
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/iommu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/iommu_fault.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/iommu_vtd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/iommu_amd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/conf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/console_cdev.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/machdep.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/halt_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/model.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
@@ -604,6 +647,24 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   list(APPEND KERNEL_DEFINES_BARE ${UROS_ABLATE_577_DEFS})
   if(UROS_ABLATE_597_NO_LOCK OR NOT UROS_ABLATE_597_WIDEN STREQUAL "")
       message(FATAL_ERROR "UROS_ABLATE_597_* ablate i386's PCI configuration lock; x86-64's is in x86_64/cpu/pci_cfg.c and is not touched by them")
+  endif()
+  if(UROS_ABLATE_599_MASK_PIT OR UROS_ABLATE_599_CLI_SPIN OR UROS_ABLATE_599_SPIN_ONLY OR UROS_ABLATE_599_SPL_LEAK OR UROS_ABLATE_599_NO_LOCK OR UROS_ABLATE_599_NESTED_PRINTF OR UROS_ABLATE_599_PRINTF_WAITS OR NOT UROS_ABLATE_599_WIDEN STREQUAL "")
+      message(FATAL_ERROR "UROS_ABLATE_599_* stop i386's 8254 tick for i386's clock watch; x86-64 has neither")
+  endif()
+  if(UROS_ABLATE_599_I8042_SHARED OR UROS_ABLATE_599_COMPROBE_OLD_EXIT OR UROS_ABLATE_599_COM_NO_LOCK OR NOT UROS_ABLATE_599_WIDEN_DIVISOR STREQUAL "")
+      message(FATAL_ERROR "UROS_ABLATE_599_I8042_SHARED, _COMPROBE_OLD_EXIT, _COM_NO_LOCK and _WIDEN_DIVISOR ablate i386's 8042 reader and com.c; x86-64 has neither")
+  endif()
+  if(UROS_ABLATE_599_WINDOW_OPEN)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_WINDOW_OPEN=1)
+      message(STATUS "#599 ablation: the I/O APIC window is used without its lock (x86_64)")
+  endif()
+  if(NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "")
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_WINDOW_WIDEN=${UROS_ABLATE_599_WINDOW_WIDEN})
+      message(STATUS "#599 ablation: ${UROS_ABLATE_599_WINDOW_WIDEN} port 0x80 reads between an I/O APIC select and its use (x86_64)")
+  endif()
+  if(UROS_ABLATE_599_HALT_ORDER)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_HALT_ORDER=1)
+      message(STATUS "#599 ablation: halt_cpu in its old order (x86_64)")
   endif()
   if(UROS_ABLATE_586_NO_TICKS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
@@ -1304,6 +1365,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   return()
 endif()
 
+# #599: these ablate x86-64's I/O APIC window and halt_cpu, and have no i386
+# half -- i386's pair is ablated by UROS_ABLATE_599_NO_LOCK and _WIDEN, and its
+# halt path was not changed.
+if(UROS_ABLATE_599_WINDOW_OPEN OR NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "" OR UROS_ABLATE_599_HALT_ORDER)
+    message(FATAL_ERROR "UROS_ABLATE_599_WINDOW_OPEN, _WINDOW_WIDEN and _HALT_ORDER ablate x86-64's I/O APIC window and halt_cpu; i386's pair is UROS_ABLATE_599_NO_LOCK and _WIDEN")
+endif()
+
 # =============================================================================
 # Kernel Configuration
 # =============================================================================
@@ -1496,6 +1564,64 @@ endif()
 if(NOT UROS_ABLATE_597_WIDEN STREQUAL "")
     list(APPEND KERNEL_DEFINES -DABLATE_597_WIDEN=${UROS_ABLATE_597_WIDEN})
     message(STATUS "#597 ablation: ${UROS_ABLATE_597_WIDEN} port 0x80 reads between the PCI address and data (i386)")
+endif()
+if(UROS_ABLATE_599_MASK_PIT OR UROS_ABLATE_599_CLI_SPIN OR UROS_ABLATE_599_SPIN_ONLY OR UROS_ABLATE_599_SPL_LEAK OR UROS_ABLATE_599_NO_LOCK OR UROS_ABLATE_599_NESTED_PRINTF OR UROS_ABLATE_599_PRINTF_WAITS OR NOT UROS_ABLATE_599_WIDEN STREQUAL "")
+    if(NOT UROS_NCPUS GREATER 1)
+        message(FATAL_ERROR "UROS_ABLATE_599_* need UROS_NCPUS > 1: the clock watch runs on the other processors, and without it the ablation would stop the clock with nothing to say so")
+    endif()
+endif()
+if(UROS_ABLATE_599_MASK_PIT)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_MASK_PIT=1)
+    message(STATUS "#599 ablation: processor 0 masks the 8254's pin at tick 3000, nothing pending (i386)")
+endif()
+if(UROS_ABLATE_599_CLI_SPIN)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_CLI_SPIN=1)
+    message(STATUS "#599 ablation: processor 0 takes the timeout list's lock and spins with interrupts off at tick 3000 (i386)")
+endif()
+if(UROS_ABLATE_599_SPIN_ONLY)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_SPIN_ONLY=1)
+    message(STATUS "#599 ablation: the clock watch runs only from inside spins (i386)")
+endif()
+if(UROS_ABLATE_599_SPL_LEAK)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_SPL_LEAK=1)
+    message(STATUS "#599 ablation: a thread_switch on processor 0 returns to user mode at splsched once (i386)")
+endif()
+if(UROS_ABLATE_599_NESTED_PRINTF)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_NESTED_PRINTF=1)
+    message(STATUS "#599 ablation: processor 0 raises an unhandled line inside consolewrite's printf_lock hold once (i386)")
+endif()
+if(UROS_ABLATE_599_PRINTF_WAITS)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_PRINTF_WAITS=1)
+    message(STATUS "#599 ablation: a nested printf waits for printf_lock, as before the fix (i386)")
+endif()
+if(UROS_ABLATE_599_NO_LOCK)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_NO_LOCK=1)
+    message(STATUS "#599 ablation: the I/O APIC select/window pair takes no lock (i386)")
+endif()
+# Not with the clock-watch set above: the 8042 window exists at one
+# processor too, which is where it shows.
+if(UROS_ABLATE_599_I8042_SHARED)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_I8042_SHARED=1)
+    message(STATUS "#599 ablation: the break-key reader keeps reading the 8042 while a task holds it (i386)")
+endif()
+if(UROS_ABLATE_599_COMPROBE_OLD_EXIT)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_COMPROBE_OLD_EXIT=1)
+    message(STATUS "#599 ablation: comprobe/comattach clobber unit 0 without -r (i386)")
+endif()
+# The divisor race needs two processors (com_divisor_test.c, -U), but the
+# lock is also what a uniprocessor boot takes, so neither is refused there:
+# a -U boot on one processor answers NOT ASKED by itself.
+if(UROS_ABLATE_599_COM_NO_LOCK)
+    list(APPEND KERNEL_DEFINES -DABLATE_599_COM_NO_LOCK=1)
+    message(STATUS "#599 ablation: com_bank_lock is not taken (i386)")
+endif()
+if(NOT UROS_ABLATE_599_WIDEN_DIVISOR STREQUAL "")
+    list(APPEND KERNEL_DEFINES -DABLATE_599_WIDEN_DIVISOR=${UROS_ABLATE_599_WIDEN_DIVISOR})
+    message(STATUS "#599 ablation: ${UROS_ABLATE_599_WIDEN_DIVISOR} port 0x80 reads between DLL and DLM (i386)")
+endif()
+if(NOT UROS_ABLATE_599_WIDEN STREQUAL "")
+    list(APPEND KERNEL_DEFINES -DABLATE_599_WIDEN=${UROS_ABLATE_599_WIDEN})
+    message(STATUS "#599 ablation: ${UROS_ABLATE_599_WIDEN} port 0x80 reads in each gap of the I/O APIC pair, other processors (i386)")
 endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
@@ -1947,6 +2073,9 @@ set(I386_C_SOURCES
     # #560 acceptance: does the switch carry a thread's floating-point
     # state?  Armed by the -F boot argument, inert otherwise.
     i386/fpu_stress.c
+    # #599: may a console byte land in COM1's divisor latch?  Armed by the
+    # -U boot argument, inert otherwise.
+    i386/AT386/com_divisor_test.c
     # The six operations device_master.c needs from the machine (#457).
     # NOT an SMP source: it used to sit in the UROS_NCPUS > 1 block, which
     # left the uniprocessor kernel with nineteen undefined device_md_*
@@ -1997,6 +2126,7 @@ if(UROS_NCPUS GREATER 1)
     list(APPEND AT386_SOURCES
         i386/mp_desc.c
         i386/lapic.c
+        i386/clock_watch.c
         i386/ioapic.c
         i386/AT386/mp/mp.c
         i386/AT386/mp/mp_stub.c

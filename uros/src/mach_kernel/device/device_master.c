@@ -101,6 +101,19 @@ extern task_t port_name_to_task(mach_port_t name);
 
 decl_mutex_data(static, device_table_lock)
 
+/*
+ * #599: irq_forward_table's check-then-act sections -- register, the
+ * message-signalled register, unregister, intr_enable, a task's death --
+ * were guarded by splhigh() alone, which is per processor.  Two processors
+ * registering one line both found it free, and two unregisters by one task
+ * both found themselves the owner and both dropped its reference.  This spin
+ * lock is taken inside splhigh() by every writer, and by the bottom half
+ * for the two fields it reads.  Not device_table_lock: that one is a mutex,
+ * and the sections below run with interrupts masked.  Nothing that can
+ * block runs under it; task_deallocate() is called after it is dropped.
+ */
+decl_simple_lock_data(static, irq_forward_lock)
+
 /* The grace-period callbacks that make a retired slot reusable (#538);
  * defined beside the tables they belong to. */
 static void	claim_slot_retired(struct urmach_rcu_head *h);
@@ -219,12 +232,15 @@ irq_forward_thread(void)
 			 * rather than left pending for ever.
 			 */
 			s = splhigh();
+			simple_lock(&irq_forward_lock);
 			pending = device_md_irq_pending_take(&irq_pending[irq]);
 			if (pending == 0 || !irq_forward_table[irq].active) {
+				simple_unlock(&irq_forward_lock);
 				splx(s);
 				continue;
 			}
 			notify = irq_forward_table[irq].notify_port;
+			simple_unlock(&irq_forward_lock);
 			splx(s);
 
 			if (notify == IP_NULL)
@@ -309,6 +325,7 @@ device_master_init(void)
 	int i;
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
+	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
 
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
@@ -1150,12 +1167,14 @@ ds_master_device_intr_register(
 	irq_forward_thread_start();
 
 	s = splhigh();
+	simple_lock(&irq_forward_lock);
 	/*
 	 * Inside the section and not before it (#538): read outside, two
 	 * registrations for one line could both find it free, and both would
 	 * write it and both would register a machine handler for it.
 	 */
 	if (irq_forward_table[irq].active) {
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		return KERN_RESOURCE_SHORTAGE;	/* already registered */
 	}
@@ -1181,11 +1200,13 @@ ds_master_device_intr_register(
 		irq_forward_table[irq].notify_port = IP_NULL;
 		irq_forward_table[irq].active = 0;
 		irq_forward_table[irq].owner = TASK_NULL;
-		task_deallocate(me);
+		simple_unlock(&irq_forward_lock);
 		splx(s);
+		task_deallocate(me);	/* outside the spin lock */
 		return KERN_FAILURE;
 	}
 
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -1245,10 +1266,17 @@ ds_master_device_msi_register(
 
 	irq_forward_thread_start();
 
+	/*
+	 * Under irq_forward_lock from the allocation on (#599): the machine's
+	 * slot counter (x86-64's msi_next) is a read and an increment, and two
+	 * processors allocating at once took the same slot.
+	 */
 	s = splhigh();
+	simple_lock(&irq_forward_lock);
 
 	if (!device_md_msi_register(bus, dev, func, entry,
 				    irq_forward_handler, &slot)) {
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		return KERN_FAILURE;
 	}
@@ -1261,6 +1289,7 @@ ds_master_device_msi_register(
 	 */
 	if (slot >= IRQ_FORWARD_MAX) {
 		device_md_msi_unregister(slot);
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		return KERN_FAILURE;
 	}
@@ -1281,6 +1310,7 @@ ds_master_device_msi_register(
 	irq_forward_table[slot].owner = me;
 	task_reference(me);
 
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	*slot_out = slot;
@@ -1302,8 +1332,20 @@ ds_master_device_intr_unregister(
 	if (irq >= IRQ_FORWARD_MAX)
 		return KERN_INVALID_ARGUMENT;
 
-	if (!irq_forward_table[irq].active)
+	/*
+	 * The two checks inside the lock, with what they decide (#599): read
+	 * before it, two unregisters of one line by one task both found it
+	 * active and both found themselves its owner, and both dropped the
+	 * owner's reference.
+	 */
+	s = splhigh();
+	simple_lock(&irq_forward_lock);
+
+	if (!irq_forward_table[irq].active) {
+		simple_unlock(&irq_forward_lock);
+		splx(s);
 		return KERN_INVALID_ARGUMENT;
+	}
 
 	/*
 	 * 🔑 THE LINE IS GIVEN BACK BY WHOEVER TOOK IT (#511).  Any active
@@ -1312,12 +1354,12 @@ ds_master_device_intr_unregister(
 	 * its notifications simply cease.
 	 */
 	if (irq_forward_table[irq].owner != current_task()) {
+		simple_unlock(&irq_forward_lock);
+		splx(s);
 		printf("device_intr_unregister: irq %u was registered by "
 		       "another task\n", irq);
 		return KERN_NO_ACCESS;
 	}
-
-	s = splhigh();
 
 	/*
 	 * The line first, the entry second -- the mirror of register, and for
@@ -1368,11 +1410,13 @@ ds_master_device_intr_unregister(
 		task_t owner = irq_forward_table[irq].owner;
 
 		irq_forward_table[irq].owner = TASK_NULL;
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 		task_deallocate(owner);
 		return KERN_SUCCESS;
 	}
 
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -1402,19 +1446,22 @@ ds_master_device_intr_enable(
 		return KERN_INVALID_ARGUMENT;
 
 	s = splhigh();
+	simple_lock(&irq_forward_lock);
 	/*
 	 * The same question as unregister's, for the same reason: unmasking a
 	 * line is an act on somebody's device.
 	 */
 	if (irq_forward_table[irq].owner != current_task()) {
+		simple_unlock(&irq_forward_lock);
+		splx(s);	/* #538: this return left the processor at SPLHI */
 		printf("device_intr_enable: irq %u was registered by another "
 		       "task\n", irq);
-		splx(s);	/* #538: this return left the processor at SPLHI */
 		return KERN_NO_ACCESS;
 	}
 
 	if (irq_forward_mask_safe((int)irq))
 		device_md_irq_unmask(irq);
+	simple_unlock(&irq_forward_lock);
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -1502,10 +1549,10 @@ struct dma_region {
 	 * ── What makes this buffer nameable, and whose it is (#432) ──
 	 *
 	 * 🔴 A REGION NEEDS AN IDENTITY BEFORE ANYONE CAN BE GIVEN A
-	 * CAPABILITY FOR IT.  device_dma_map_foreign takes a physical address
-	 * and checks only that the kernel allocated it for DMA -- so any
-	 * holder of the master port can put anybody's DMA buffer inside its
-	 * own device's reach.  That is narrower than "all of physical memory",
+	 * CAPABILITY FOR IT.  device_dma_map_foreign (retired by #599) took a
+	 * physical address and checked only that the kernel allocated it for
+	 * DMA -- so any holder of the master port could put anybody's DMA
+	 * buffer inside its own device's reach.  That is narrower than "all of physical memory",
 	 * which is where this started, and it is not "only what somebody
 	 * handed me".  Closing the difference means the buffer has a NAME a
 	 * capability can carry, and an OWNER whose consent that capability
@@ -1519,6 +1566,14 @@ struct dma_region {
 	 */
 	uint64_t	id;
 	task_t		owner;		/* who allocated it; holds a ref */
+
+	/*
+	 * #599: the device the owner allocated it for, or DEVICE_DMA_NO_BDF.
+	 * The free is checked against it, and the drop revokes the owner's
+	 * own grant from it -- so taking the grant back no longer depends on
+	 * the freeing caller naming the right device.
+	 */
+	natural_t	own_bdf;
 
 	/*
 	 * 🔥 WHERE ELSE THIS MEMORY IS MAPPED, AND A PANIC A USER TASK COULD
@@ -1545,6 +1600,22 @@ struct dma_region {
 	struct {
 		natural_t	bdf;
 		vm_offset_t	dma;	/* address of page zero          */
+		/*
+		 * #599: how that device reaches the region.  identity: each
+		 * page at its own physical address, not at dma + page *
+		 * PAGE_SIZE.  reads/writes: the directions the capability
+		 * shown for it allows, which is what was mapped.
+		 */
+		unsigned char	identity;
+		unsigned char	reads;
+		unsigned char	writes;
+		/*
+		 * #599: the capability the grant rests on; revoking it takes
+		 * the grant down (device_master_cap_revoked).  0 for a grant
+		 * made on no capability (none are, since #599 retired
+		 * device_dma_map_foreign).
+		 */
+		uint64_t	cap_id;
 	} user[DEVICE_MAX_REGION_USERS];
 
 	/*
@@ -1611,7 +1682,7 @@ static uint64_t dma_regions_freed;
 static kern_return_t
 dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	       unsigned int npages, task_t task, vm_offset_t uva,
-	       uint64_t *id_out)
+	       natural_t own_bdf, uint64_t *id_out)
 {
 	struct dma_region *r = 0;
 	vm_offset_t	  *pa_copy;
@@ -1666,6 +1737,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	r->uva = uva;
 	r->id = id = dma_region_next_id++;
 	r->owner = me;
+	r->own_bdf = own_bdf;
 	task_reference(me);
 	if (task != TASK_NULL)
 		task_reference(task);
@@ -1709,8 +1781,21 @@ dma_region_of(vm_offset_t pa, unsigned int *index)
  * stack while a disk can still write it -- which is the exact reach #432
  * exists to remove, reached by freeing in the wrong order.
  */
-static void
-dma_region_drop(vm_offset_t kva)
+/*
+ * #599: `owner' is who asks.  TASK_NULL is the kernel itself -- an
+ * allocation undoing its own record, a dying task's reclaim -- and nothing
+ * is checked.  Any other owner is a device_dma_free on behalf of that task,
+ * and the region must be one it owns, at the size and for the device it was
+ * allocated at: KERN_INVALID_ADDRESS for no such region, KERN_NO_ACCESS for
+ * somebody else's, KERN_INVALID_ARGUMENT for a size or a device that is not
+ * the allocation's.  Checked and unlinked in one hold, so two frees of one
+ * region cannot both pass.  Before this the free checked nothing: an unknown
+ * address was ignored here and kmem_free ran on it anyway, so any holder of
+ * the master port freed whatever kernel memory it named, and could free a
+ * buffer twice.
+ */
+static kern_return_t
+dma_region_drop(vm_offset_t kva, task_t owner, vm_size_t size, natural_t bdf)
 {
 	unsigned int i, u;
 	struct dma_region snap;
@@ -1721,6 +1806,16 @@ dma_region_drop(vm_offset_t kva)
 
 		if (r->kva != kva)
 			continue;
+
+		if (owner != TASK_NULL && r->owner != owner) {
+			mutex_unlock(&device_table_lock);
+			return KERN_NO_ACCESS;
+		}
+		if (owner != TASK_NULL &&
+		    (round_page(size) != r->size || bdf != r->own_bdf)) {
+			mutex_unlock(&device_table_lock);
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		/*
 		 * Snapshot, unlink under the lock, and do the slow half --
@@ -1746,22 +1841,43 @@ dma_region_drop(vm_offset_t kva)
 						    (unsigned long)snap.pa[0],
 						    (unsigned long)snap.size);
 
+		/*
+		 * #599: and the owner's own grant, from the record.  The free
+		 * path revoked it from the caller's bdf and a pmap_extract of
+		 * the first page; two of device_dma_alloc_sg's failure paths
+		 * never revoked it at all.
+		 */
+		if (snap.own_bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates())
+			(void) device_md_dma_revoke(snap.own_bdf,
+						    (unsigned long)snap.pa[0],
+						    (unsigned long)snap.size);
+
 		if (snap.task != TASK_NULL) {
-			/* uva == 0 is a reservation whose mapping never
-			 * completed (map_pages_into_task); nothing to unmap. */
+			/*
+			 * uva == 0 is a reservation whose mapping never
+			 * completed (map_pages_into_task); nothing to unmap.
+			 *
+			 * #599: only the pages that still map this region's
+			 * frames.  This removed [uva, uva + size) by address,
+			 * and the owner may have deallocated the range and
+			 * mapped something else there before freeing -- the
+			 * AHCI driver does exactly that -- which then went.
+			 */
 			if (snap.uva != 0)
-				(void) vm_map_remove(snap.task->map, snap.uva,
-						     snap.uva + snap.size,
-						     VM_MAP_NO_FLAGS);
+				(void) vm_map_remove_frames(snap.task->map,
+							    snap.uva, snap.pa,
+							    snap.npages,
+							    VM_MAP_NO_FLAGS);
 			task_deallocate(snap.task);
 		}
 		if (snap.owner != TASK_NULL)
 			task_deallocate(snap.owner);
 
 		urmach_call_rcu(&r->rcu, dma_slot_retired);
-		return;
+		return KERN_SUCCESS;
 	}
 	mutex_unlock(&device_table_lock);
+	return KERN_INVALID_ADDRESS;
 }
 
 
@@ -1889,7 +2005,7 @@ ds_master_device_dma_alloc(
 		for (i = 0; i < n; i++)
 			pages[i] = pa + (vm_offset_t)i * PAGE_SIZE;
 
-		kr = dma_region_add(kva, size, pages, n, TASK_NULL, 0,
+		kr = dma_region_add(kva, size, pages, n, TASK_NULL, 0, bdf,
 				    &region_id);
 		if (kr != KERN_SUCCESS) {
 			kmem_free(kernel_map, kva, size);
@@ -1903,7 +2019,7 @@ ds_master_device_dma_alloc(
 		if (!device_md_dma_grant(bdf, (unsigned long)pa,
 					 (unsigned long)size, TRUE, TRUE,
 					 &iova)) {
-			dma_region_drop(kva);
+			(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 			kmem_free(kernel_map, kva, size);
 			return KERN_FAILURE;
 		}
@@ -1943,30 +2059,18 @@ ds_master_device_dma_free(
 	 * 🔴 REVOKED BEFORE THE MEMORY IS GIVEN BACK, and the order is the
 	 * whole of it.  Freed first, the page returns to the VM and can be
 	 * handed to anything -- a task's stack, another driver's buffer --
-	 * while the device is still able to write it, and for as long as
-	 * nobody happens to revoke.  That is precisely the reach this issue
-	 * exists to remove, arrived at by tidying up in the wrong order.
+	 * while a device is still able to write it.  The drop takes back the
+	 * owner's own grant and every device the region was lent to (the
+	 * block server's disk still reaching a filesystem's page cache)
+	 * before this frees a byte.
 	 *
-	 * ⚠️ The physical address is extracted while the mapping still exists,
-	 * for the same reason.  After kmem_free there is nothing to ask.
+	 * #599: and only a live region this task owns, whole, for the device
+	 * it was allocated for, once -- the drop says which it is not, and
+	 * nothing is freed then.  This freed whatever it was handed.
 	 */
-	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
-		vm_offset_t pa = pmap_extract(pmap_kernel(),
-					      (vm_offset_t)vaddr);
-
-		if (pa != 0)
-			(void) device_md_dma_revoke(bdf, (unsigned long)pa,
-						    (unsigned long)size);
-	}
-
-	/*
-	 * 🔴 AND EVERY DEVICE THIS REGION WAS LENT TO, before the memory goes
-	 * back.  The owner's own grant is above; this is the block server's
-	 * disk still reaching a filesystem's page cache.  Freed with either
-	 * one still mapped, the page returns to the VM and can become a task's
-	 * stack while a device can still write it.
-	 */
-	dma_region_drop((vm_offset_t)vaddr);
+	kr = dma_region_drop((vm_offset_t)vaddr, current_task(), size, bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
 	dma_regions_freed++;
 
 	kmem_free(kernel_map, (vm_offset_t)vaddr, size);
@@ -2142,7 +2246,7 @@ ds_master_device_dma_alloc_sg(
 	 * on them.  One writer now, and it is the function that maps.
 	 */
 	kr = dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
-			    TASK_NULL, 0, &region_id);
+			    TASK_NULL, 0, bdf, &region_id);
 	if (kr != KERN_SUCCESS) {
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
@@ -2160,7 +2264,7 @@ ds_master_device_dma_alloc_sg(
 	kr = map_pages_into_task(task, 0, (const vm_offset_t *)list, n_pages,
 				 &uva);
 	if (kr != KERN_SUCCESS) {
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
 		kmem_free(ipc_kernel_map, list, list_size);
@@ -2171,17 +2275,19 @@ ds_master_device_dma_alloc_sg(
 
 	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
 		unsigned long iova = 0;
+		int identity = 0;
 
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)list,
-					       n_pages, TRUE, TRUE, &iova)) {
+					       n_pages, TRUE, TRUE, &iova,
+					       &identity)) {
 			/*
 			 * dma_region_drop() takes the user mapping down
 			 * itself now that the region records it (#531);
 			 * removing the range here as well would be a second
 			 * removal of a range that may since be somebody's.
 			 */
-			dma_region_drop(kva);
+			(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 			(void) vm_map_unwire(ipc_kernel_map, list,
 					     list + list_size, FALSE);
 			kmem_free(ipc_kernel_map, list, list_size);
@@ -2190,10 +2296,17 @@ ds_master_device_dma_alloc_sg(
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
-		for (i = 0; i < n_pages; i++)
-			((vm_address_t *)list)[i] =
-				(vm_address_t)(iova + (unsigned long)i
-					       * PAGE_SIZE);
+		/*
+		 * #599: in an identity domain each page is reached at its
+		 * own address, which is what the list already holds; the
+		 * rewrite into a window would hand the driver the frames that
+		 * follow the first one, which are somebody else's.
+		 */
+		if (!identity)
+			for (i = 0; i < n_pages; i++)
+				((vm_address_t *)list)[i] =
+					(vm_address_t)(iova + (unsigned long)i
+						       * PAGE_SIZE);
 	}
 
 	task_deallocate(task);
@@ -2203,7 +2316,7 @@ ds_master_device_dma_alloc_sg(
 		kmem_free(ipc_kernel_map, list, list_size);
 		/* The region owns the user mapping now, so it takes it down
 		 * along with itself (#531). */
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
@@ -2219,7 +2332,7 @@ ds_master_device_dma_alloc_sg(
 		kmem_free(ipc_kernel_map, list, list_size);
 		/* The region owns the user mapping now, so it takes it down
 		 * along with itself (#531). */
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
@@ -2841,6 +2954,73 @@ check_io_claim(unsigned int port)
 	return KERN_NO_ACCESS;
 }
 
+/* #599: does the caller hold a claim covering all of [base, base + count)? */
+static int
+holds_io_window(unsigned int base, unsigned int count)
+{
+	task_t		me = current_task();
+	unsigned int	i;
+	int		held = 0;
+
+	urmach_rcu_read_lock();
+	for (i = 0; i < IO_CLAIM_MAX && !held; i++) {
+		if (io_claim[i].task != me)
+			continue;
+		if (io_claim[i].base <= base &&
+		    base + count <= io_claim[i].base + io_claim[i].count)
+			held = 1;
+	}
+	urmach_rcu_read_unlock();
+	return held;
+}
+
+/*
+ * #599: see device_master.defs.  Refused to anyone but the holder of the
+ * whole window, so a divisor can be set only by the one driver the kernel's
+ * console knows is there.
+ */
+kern_return_t
+ds_master_device_io_port_set_divisor(
+	ipc_port_t		master_port,
+	natural_t		port,
+	natural_t		divisor,
+	natural_t		*readback)
+{
+	unsigned int	rb = 0;
+	kern_return_t	kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (divisor == 0 || divisor > 0xFFFFu)
+		return KERN_INVALID_ARGUMENT;
+	if (!holds_io_window(port, 8u))
+		return KERN_NO_ACCESS;
+	if (!device_md_io_set_divisor(port, divisor, &rb))
+		return KERN_INVALID_ARGUMENT;
+	*readback = (natural_t)rb;
+	return KERN_SUCCESS;
+}
+
+/* #599: see <device/device_machdep.h> */
+int
+device_io_port_held(unsigned int port)
+{
+	unsigned int	i;
+	int		held = 0;
+
+	urmach_rcu_read_lock();
+	for (i = 0; i < IO_CLAIM_MAX && !held; i++) {
+		if (io_claim[i].task == TASK_NULL)
+			continue;
+		if (io_claim[i].base <= port &&
+		    port < io_claim[i].base + io_claim[i].count)
+			held = 1;
+	}
+	urmach_rcu_read_unlock();
+	return held;
+}
+
 static kern_return_t
 check_io_port(unsigned int port, unsigned int size)
 {
@@ -2862,6 +3042,28 @@ check_io_port(unsigned int port, unsigned int size)
 	 */
 	if (device_md_io_reserved(port, size) != 0)
 		return KERN_NO_ACCESS;
+
+	/*
+	 * #599: a chip reached only by the task that claimed all of it.  An
+	 * unclaimed port falls through to check_io_claim() below, which lets
+	 * it through -- so any holder of the master port could write COM1's
+	 * LCR without claiming a thing.
+	 */
+	{
+		unsigned int wb, wc;
+
+		if (device_md_io_window(port, size, &wb, &wc)) {
+			/*
+			 * One byte at a time: a 16550 is byte-wide, and a
+			 * wider access reached LCR through outw/outl past
+			 * the latch refusal and the chip's lock (review).
+			 */
+			if (size != 1)
+				return KERN_INVALID_ARGUMENT;
+			if (!holds_io_window(wb, wc))
+				return KERN_NO_ACCESS;
+		}
+	}
 
 	urmach_rcu_read_lock();
 	n = device_nclaims;
@@ -2983,6 +3185,9 @@ ds_master_device_io_port_write(
 	kr = check_io_port(port, size);
 	if (kr != KERN_SUCCESS)
 		return kr;
+	/* #599: the divisor latch is opened only by set_divisor */
+	if (device_md_io_opens_latch(port, size, data))
+		return KERN_NO_ACCESS;
 
 	device_md_io_write(port, size, data);
 	return KERN_SUCCESS;
@@ -3251,21 +3456,29 @@ ds_master_device_dma_faults(
 	natural_t		bdf,
 	natural_t		*confined,
 	natural_t		*count,
-	vm_address_t		*address)
+	vm_address_t		*address,
+	natural_t		*lost,
+	natural_t		*undrained)
 {
+	struct device_md_faults a;
 	kern_return_t kr;
-	unsigned long last = 0;
-	unsigned n;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	n = device_md_dma_faults(bdf, &last);
+	/*
+	 * #599: a bdf that is not a device is refused.  It was answered
+	 * "confined 0, count 0" -- a question about nothing, answered as data.
+	 */
+	if (!device_md_dma_faults(bdf, &a))
+		return KERN_INVALID_ARGUMENT;
 
 	*confined = (natural_t)device_md_dma_confined(bdf);
-	*count = (natural_t)n;
-	*address = (vm_address_t)last;
+	*count = (natural_t)a.count;
+	*address = (vm_address_t)a.last;
+	*lost = (natural_t)a.lost;
+	*undrained = (natural_t)a.undrained;
 	return KERN_SUCCESS;
 }
 
@@ -3273,10 +3486,12 @@ ds_master_device_dma_faults(
  * ── A device that must be programmed with physical addresses (#432) ──
  *
  * 🔴 NOT AN OPT-OUT OF ISOLATION, and the distinction is the whole of why this
- * exists rather than a flag that says "leave me alone".  The device is still
- * confined: its domain contains what it has been granted and nothing else, and
- * every other address in the machine faults for it.  What it gives up is stage
- * 3e -- not knowing where its memory is.
+ * exists rather than a flag that says "leave me alone".  Its domain contains
+ * what it has been granted and nothing else, and every other address in the
+ * machine faults for it -- where its DMA goes through the IOMMU.  What it gives
+ * up is stage 3e -- not knowing where its memory is.  (#599: the one caller's
+ * device, QEMU's legacy virtio, does not put its DMA through the IOMMU at all;
+ * see the line printed below.)
  *
  * 🔑 AND IT IS A CONSTRAINT AND NOT A PREFERENCE.  A legacy virtio device is
  * SPECIFIED to take physical addresses: there is no VIRTIO_F_ACCESS_PLATFORM
@@ -3321,9 +3536,19 @@ ds_master_device_dma_identity(
 	if (!device_md_dma_identity(bdf))
 		return KERN_FAILURE;
 
+	/*
+	 * #599: the domain confines the device only if its DMA goes through
+	 * the IOMMU, and this cannot tell.  The one caller is the legacy virtio
+	 * driver, and QEMU sends a legacy virtio device's DMA straight to
+	 * memory: it cannot offer IOMMU_PLATFORM (#591), and without it
+	 * virtio_bus_device_plugged leaves dma_as at address_space_memory.
+	 * Measured: under --iommu amd a page never granted to virtio_blk0a
+	 * received the superblock.  This said "still confined".
+	 */
 	printf("iommu: %02x:%02x.%u asked to be programmed with PHYSICAL "
-	       "addresses — it is still confined to what it is granted, and "
-	       "it knows where that is\n",
+	       "addresses — its domain holds what it is granted, which "
+	       "confines it only if its DMA goes through the IOMMU: QEMU's "
+	       "legacy virtio does not (#591)\n",
 	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 	       (unsigned)(bdf & 7));
 
@@ -3470,33 +3695,65 @@ ds_master_device_dma_owned(
 }
 
 /*
- * ── The server that owns the device maps somebody else's buffer ──────
+ * #599: is `bdf' claimed by the calling task?  With device_table_lock held,
+ * which every claim writer takes, so the answer holds until it is dropped.
+ */
+static int
+claim_is_mine_locked(natural_t bdf)
+{
+	unsigned int i;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			return device_claim[i].task == current_task();
+	return 0;
+}
+
+/*
+ * ── One page of somebody else's buffer, for one direction (#599) ─────
  *
- * See the note on device_dma_map_foreign in <device/device_master.defs> for
- * why this exists.  In one line: the block server's disk has to read the
- * filesystem's page cache, and the filesystem owns no device to name.
+ * See the note on device_dma_map_foreign_op in <device/device_master.defs>.
+ * What changed from device_dma_map_foreign, which this replaces:
+ *
+ *  - the direction is the transfer's.  The old call checked no direction
+ *    per request, so a capability that let the device only read a buffer
+ *    was answered for a transfer that writes it, the engine refused the
+ *    write, the controller reported success, and the client got junk;
+ *  - the region is the one the capability names, found by its id, and the
+ *    page must be in it -- not the region the page happens to be in,
+ *    checked against every capability the caller holds in turn, which
+ *    printed one "showed no capability" line per wrong one;
+ *  - one MAC per call, not two: once the token verifies, its ops are the
+ *    issuer's, and the direction is read from them;
+ *  - refusals are silent: the caller says them, once, in its own words.
  */
 kern_return_t
-ds_master_device_dma_map_foreign(
+ds_master_device_dma_map_foreign_op(
 	ipc_port_t		master_port,
 	natural_t		bdf,
 	vm_address_t		paddr,
+	natural_t		op,
 	cap_token_t		token,
 	mach_msg_type_number_t	tokenCnt,
 	vm_address_t		*dma_addr)
 {
 	kern_return_t		kr;
-	struct dma_region	*r;
+	struct dma_region	*r = 0;
 	struct uros_cap		cap;
-	unsigned int		page, u;
+	unsigned int		i, page = 0, u;
 	unsigned long		base = 0;
-	uint64_t		r_id = 0;
+	uint64_t		rid;
+	int			reads, writes, identity = 0, granted = 0;
+	unsigned int		npages = 0;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
-
 	if (bdf == DEVICE_DMA_NO_BDF)
+		return KERN_INVALID_ARGUMENT;
+	if (op != CAP_OP_DMA_DEVICE_READ && op != CAP_OP_DMA_DEVICE_WRITE)
+		return KERN_INVALID_ARGUMENT;
+	if (tokenCnt != sizeof(struct uros_cap))
 		return KERN_INVALID_ARGUMENT;
 
 	/* A device has one driver, and only that driver may map for it. */
@@ -3504,47 +3761,43 @@ ds_master_device_dma_map_foreign(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	/*
-	 * 🔴 THE PAGE MUST BE ONE THIS KERNEL HANDED OUT FOR DMA.  Without
-	 * this the call is "put any physical address inside my device's
-	 * reach", which is the property the whole issue exists to create.
-	 */
+	memcpy(&cap, token, sizeof(cap));
+
+	/* The capability itself: authentic, a DMA buffer's, not revoked. */
+	kr = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER, 0, cap.resource_id);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	rid = cap.resource_id;
+
+	/* The buffer it names, and the page inside it. */
 	urmach_rcu_read_lock();
-	r = dma_region_of((vm_offset_t)paddr, &page);
-	if (r != 0)
-		r_id = r->id;
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].id == rid) {
+			r = &dma_region[i];
+			break;
+		}
+	if (r != 0) {
+		npages = r->npages;
+		for (page = 0; page < npages; page++)
+			if (r->pa[page] == (paddr & ~(vm_address_t)PAGE_MASK))
+				break;
+	}
 	urmach_rcu_read_unlock();
 	if (r == 0)
 		return KERN_INVALID_ADDRESS;
-
-	/*
-	 * 🔴 AND A CAPABILITY FOR THAT REGION, WHICH IS THE DELEGATION.
-	 * Knowing the address is not the same as having been given the buffer:
-	 * before this, a driver could put another server's page cache inside
-	 * its device's reach on the strength of an address it happened to see.
-	 * The token says the region's OWNER handed it over.
-	 */
-	if (tokenCnt != sizeof(struct uros_cap))
-		return KERN_INVALID_ARGUMENT;
-
-	memcpy(&cap, token, sizeof(cap));
-
-	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_DMA_DEVICE_WRITE,
-				 r->id);
-	if (kr != KERN_SUCCESS) {
-		printf("device: %02x:%02x.%u showed no capability for DMA "
-		       "region %lu (kr=%d) — knowing an address is not being "
-		       "given the buffer\n",
-		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 7), (unsigned long)r->id, (int)kr);
+	if (page == npages)
 		return KERN_NO_ACCESS;
-	}
+
+	/* The direction this transfer needs. */
+	if ((cap.allowed_ops & (uint64_t)op) == 0)
+		return KERN_PROTECTION_FAILURE;
+	reads = (cap.allowed_ops & CAP_OP_DMA_DEVICE_READ) != 0;
+	writes = (cap.allowed_ops & CAP_OP_DMA_DEVICE_WRITE) != 0;
 
 	/*
 	 * ⚠️ On a machine that polices nothing, the physical address IS the
-	 * answer and no mapping happens.  Reported as success because that is
-	 * what it is: the caller asked for an address its device can use, and
-	 * on such a machine every address is one.
+	 * answer and no mapping happens -- after every check above, which is
+	 * what makes it an answer and not a pass-through.
 	 */
 	if (!device_md_dma_isolates()) {
 		*dma_addr = paddr;
@@ -3552,56 +3805,116 @@ ds_master_device_dma_map_foreign(
 	}
 
 	/*
-	 * The user list is appended by whichever server asks first, and two
-	 * can ask at once (#538): searched and grown under the lock -- after
+	 * The user list is searched and grown under the lock (#538), after
 	 * checking that the slot still holds the region found above, by
-	 * identity, because the owner may have dropped it in between.
+	 * identity, and that the device is still this task's: the region may
+	 * have been dropped, and the claim released, in between.
 	 */
 	mutex_lock(&device_table_lock);
-	if (r->kva == 0 || r->id != r_id) {
+	if (r->kva == 0 || r->id != rid || !claim_is_mine_locked(bdf)) {
 		mutex_unlock(&device_table_lock);
 		return KERN_INVALID_ADDRESS;
 	}
 	for (u = 0; u < r->nusers; u++)
-		if (r->user[u].bdf == bdf) {
-			base = (unsigned long)r->user[u].dma;
+		if (r->user[u].bdf == bdf)
 			break;
+	if (u < r->nusers) {
+		if ((op == CAP_OP_DMA_DEVICE_READ && !r->user[u].reads) ||
+		    (op == CAP_OP_DMA_DEVICE_WRITE && !r->user[u].writes)) {
+			mutex_unlock(&device_table_lock);
+			return KERN_PROTECTION_FAILURE;
 		}
-	if (u < r->nusers)
-		mutex_unlock(&device_table_lock);
-
-	if (u == r->nusers) {
+		base = (unsigned long)r->user[u].dma;
+		identity = r->user[u].identity;
+	} else {
+		/*
+		 * #599: a capability revoked after the check above and
+		 * before this lock is refused here.  device_master_cap_revoked
+		 * takes grants down under this same lock, so a grant is either
+		 * recorded before it walks the table -- and taken down by it --
+		 * or refused now; none can rest on a revoked capability.
+		 */
+		if (cap_id_revoked(cap.cap_id)) {
+			mutex_unlock(&device_table_lock);
+			return CAP_ERR_REVOKED;
+		}
 		if (r->nusers >= DEVICE_MAX_REGION_USERS) {
 			mutex_unlock(&device_table_lock);
 			return KERN_RESOURCE_SHORTAGE;
 		}
-
 		/*
-		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses.  The
-		 * caller asks page by page and pays for it once: everything
-		 * after this is the arithmetic below.
+		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses (or
+		 * each page at its own, in an identity domain).  The caller
+		 * asks page by page and pays for the mapping once.
 		 */
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)r->pa,
-					       r->npages, TRUE, TRUE, &base)) {
+					       r->npages, reads, writes, &base,
+					       &identity)) {
 			mutex_unlock(&device_table_lock);
 			return KERN_FAILURE;
 		}
-
 		r->user[r->nusers].bdf = bdf;
 		r->user[r->nusers].dma = (vm_offset_t)base;
+		r->user[r->nusers].identity = (unsigned char)identity;
+		r->user[r->nusers].reads = (unsigned char)reads;
+		r->user[r->nusers].writes = (unsigned char)writes;
+		r->user[r->nusers].cap_id = cap.cap_id;
 		publish_barrier();
 		r->nusers++;
-		mutex_unlock(&device_table_lock);
-
-		printf("device: %02x:%02x.%u may now read a %u-page buffer it "
-		       "did not allocate, at 0x%lx — mapped by the server that "
-		       "owns the device, not by the one that owns the memory\n",
-		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 7), r->npages, base);
+		granted = 1;
 	}
+	mutex_unlock(&device_table_lock);
 
-	*dma_addr = (vm_address_t)(base + (unsigned long)page * PAGE_SIZE);
+	if (granted)
+		printf("device: %02x:%02x.%u may now reach a %u-page buffer it "
+		       "did not allocate, at 0x%lx (%s%s) — mapped by the server "
+		       "that owns the device, on a capability its owner handed "
+		       "over\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), npages, base,
+		       reads ? "reads" : "", writes ? (reads ? ", writes" :
+						       "writes") : "");
+
+	if (identity)
+		*dma_addr = paddr;
+	else
+		*dma_addr = (vm_address_t)(base + (unsigned long)page *
+					   PAGE_SIZE +
+					   (paddr & (vm_address_t)PAGE_MASK));
+	return KERN_SUCCESS;
+}
+
+/*
+ * How many devices this buffer is mapped for, asked by its owner (#599).
+ */
+kern_return_t
+ds_master_device_dma_region_users(
+	ipc_port_t		master_port,
+	cap_u64_t		region_id,
+	natural_t		*users)
+{
+	kern_return_t	kr;
+	unsigned int	i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	mutex_lock(&device_table_lock);
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].id == region_id)
+			break;
+	if (i == DEVICE_MAX_DMA_REGIONS) {
+		mutex_unlock(&device_table_lock);
+		return KERN_INVALID_ARGUMENT;
+	}
+	if (dma_region[i].owner != current_task()) {
+		mutex_unlock(&device_table_lock);
+		return KERN_NO_ACCESS;
+	}
+	*users = dma_region[i].nusers;
+	mutex_unlock(&device_table_lock);
 	return KERN_SUCCESS;
 }
 
@@ -3701,12 +4014,15 @@ ds_master_device_claim(
 	 * it, because a check that looks complete and is not is how this file
 	 * got the arrangement above.
 	 */
-	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
+	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+				 (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
 	if (kr != KERN_SUCCESS)
-		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_MMIO_MAP,
+		kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+					 (uint32_t)CAP_OP_PCI_MMIO_MAP,
 					 class_id);
 	if (kr != KERN_SUCCESS)
-		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_IRQ,
+		kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+					 (uint32_t)CAP_OP_PCI_IRQ,
 					 class_id);
 	if (kr != KERN_SUCCESS) {
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "
@@ -3826,6 +4142,37 @@ ds_master_device_claim(
 }
 
 /*
+ * #599: forget every foreign grant made for `bdf', whose claim is ending.
+ * With device_table_lock held, in the same hold as the claim's unlink, so no
+ * region names a device that has no driver.  The IOMMU side goes with the
+ * domain, which device_md_dma_release() detaches right after; this is the
+ * record.  A restarted driver found stale addresses here, and the user slots
+ * leaked until each region was freed.
+ */
+static unsigned int
+purge_grants_for_locked(natural_t bdf)
+{
+	unsigned int i, u, n = 0;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
+		struct dma_region *r = &dma_region[i];
+
+		if (r->kva == 0)
+			continue;
+		for (u = 0; u < r->nusers; ) {
+			if (r->user[u].bdf != bdf) {
+				u++;
+				continue;
+			}
+			r->user[u] = r->user[r->nusers - 1];
+			r->nusers--;
+			n++;
+		}
+	}
+	return n;
+}
+
+/*
  * ── A revoked capability takes the device with it (#432) ─────────────
  *
  * 🔴 THIS IS WHAT A MATERIALISED CAPABILITY OWES.  A capability that is
@@ -3855,7 +4202,41 @@ ds_master_device_claim(
 void
 device_master_cap_revoked(uint64_t cap_id)
 {
-	unsigned i;
+	unsigned i, u, torn = 0;
+
+	/*
+	 * #599: first every foreign grant resting on the capability -- a
+	 * buffer's owner withdrawing what it handed a driver.  The mapping is
+	 * the capability materialised, so revoking the token without it
+	 * changed nothing the device could reach.  Revoked under
+	 * device_table_lock, in the order grants take (this lock, then the
+	 * IOMMU's), so "one grant per (region, device)" is true at every
+	 * instant; the slot is filled from the end.
+	 */
+	mutex_lock(&device_table_lock);
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
+		struct dma_region *r = &dma_region[i];
+
+		if (r->kva == 0)
+			continue;
+		for (u = 0; u < r->nusers; ) {
+			if (r->user[u].cap_id != cap_id || cap_id == 0) {
+				u++;
+				continue;
+			}
+			(void) device_md_dma_revoke(r->user[u].bdf,
+						    (unsigned long)r->pa[0],
+						    (unsigned long)r->size);
+			r->user[u] = r->user[r->nusers - 1];
+			r->nusers--;
+			torn++;
+		}
+	}
+	mutex_unlock(&device_table_lock);
+	if (torn != 0)
+		printf("device: capability %llu was revoked — %u device "
+		       "mapping%s of a buffer resting on it taken down\n",
+		       (unsigned long long)cap_id, torn, torn == 1 ? "" : "s");
 
 	for (i = 0; i < device_nclaims; i++) {
 		natural_t bdf;
@@ -3885,6 +4266,7 @@ device_master_cap_revoked(uint64_t cap_id)
 		 * dead capability.
 		 */
 		device_claim[i].cap_id = 0;
+		(void) purge_grants_for_locked(bdf);		/* #599 */
 		mutex_unlock(&device_table_lock);
 
 		printf("device: the capability behind %02x:%02x.%u was revoked "
@@ -4001,6 +4383,13 @@ device_master_task_terminating(task_t task)
 			continue;
 
 		s = splhigh();
+		simple_lock(&irq_forward_lock);
+		if (irq_forward_table[i].owner != task) {
+			/* given back on another processor since the look above */
+			simple_unlock(&irq_forward_lock);
+			splx(s);
+			continue;
+		}
 		if (irq_forward_table[i].active) {
 			device_md_irq_mask(i);
 			irq_forward_table[i].active = 0;
@@ -4009,6 +4398,7 @@ device_master_task_terminating(task_t task)
 		}
 		owner = irq_forward_table[i].owner;
 		irq_forward_table[i].owner = TASK_NULL;
+		simple_unlock(&irq_forward_lock);
 		splx(s);
 
 		printf("device: task 0x%lx died holding irq %u — the line is "
@@ -4062,7 +4452,7 @@ device_master_task_terminating(task_t task)
 		 * this file's reference is one of the ones keeping it so, and
 		 * that is exactly why the hook cannot live on the free path.
 		 */
-		dma_region_drop(kva);
+		(void) dma_region_drop(kva, TASK_NULL, 0, 0);
 		kmem_free(kernel_map, kva, size);
 		dma_regions_reclaimed++;
 	}
@@ -4088,6 +4478,7 @@ device_master_task_terminating(task_t task)
 		publish_barrier();
 		device_claim[i].cap_id = 0;
 		device_claim[i].retiring = 1;
+		(void) purge_grants_for_locked(bdf);		/* #599 */
 		mutex_unlock(&device_table_lock);
 
 		printf("device: task 0x%lx died driving %02x:%02x.%u — the "

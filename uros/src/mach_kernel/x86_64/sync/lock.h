@@ -20,6 +20,7 @@
 #include <stdint.h>
 
 #include <sync/atomic.h>	/* atomic_add64, under the counters below */
+#include <kern/macro_help.h>	/* MACRO_BEGIN/END below: not the includer's job */
 
 typedef volatile uint8_t	hw_lock_data_t;
 typedef hw_lock_data_t		*hw_lock_t;

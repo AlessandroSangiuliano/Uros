@@ -94,10 +94,20 @@ machine_boot_info(char *buf, vm_size_t buf_len)
  * second panic() competing with the real one (#453).
  *
  * panicstr is what distinguishes the two ways in.  An orderly halt -- an
- * operator asking for one, the last processor in halt_all_cpus -- has nothing
- * to report and says nothing.
+ * operator asking for one, the last processor in halt_all_cpus -- has no
+ * backtrace to give: it says the console's final copy (#567) and stops.
  */
 static volatile uint64_t halt_broadcast;
+
+/*
+ * #599: the -Z test's ablation (cpu/halt_test.c): halt_cpu() in the order it
+ * had before #599's review rounds -- the console's final copy first, the halt
+ * broadcast before the wait for the panicking processor's message, interrupts
+ * left as they were.  What the test's check must catch.
+ */
+#ifndef	ABLATE_599_HALT_ORDER
+#define	ABLATE_599_HALT_ORDER	0
+#endif
 
 void
 halt_cpu(void)
@@ -115,19 +125,61 @@ halt_cpu(void)
 	 * First, and not after the backtrace: everything printed from here on
 	 * -- the backtrace included -- then reaches the port in this thread,
 	 * which is the only thread there will be.
-	 *
-	 * And one line before that, about where this boot's console bytes were
-	 * actually handed over.  It says itself once per boot, whether it is
-	 * reached from here or from a machine that went quiet first; it is
-	 * queued like any other line and the disarm below is what puts it on
-	 * the wire.
 	 */
-	cons_ring_report();
+	if (ABLATE_599_HALT_ORDER)
+		cons_ring_report();
 	cons_async_set(0);
 	fbcons_flush();		/* #568: and out of the write-combining buffers */
 
 	if (panicstr != (const char *) 0) {
 		uint64_t spins;
+
+		if (ABLATE_599_HALT_ORDER &&
+		    atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
+			ipi_halt_others();
+
+		/*
+		 * Let the processor that got there first finish saying what
+		 * happened (#461).
+		 *
+		 * Every processor but one arrives here through panic()'s
+		 * `somebody else is already panicking' arm, and arrives at once
+		 * -- the first boot with the application processors scheduling
+		 * had three of them fail identically in the same microsecond.
+		 * Their backtraces are worth having, and printed during the
+		 * message they destroy it: the run that produced them had not
+		 * one legible line of the panic itself.
+		 *
+		 * panicwait is what panic() raises around the message.  Bounded,
+		 * because a processor that dies mid-message must not silence the
+		 * rest: after the wait the report is made anyway.
+		 *
+		 * #599: and BEFORE the stop below, which is an interrupt no spl
+		 * masks (class 15).  A second panicker that sent it first took
+		 * the panicking processor out of its own message as soon as its
+		 * first printf let go of printf_lock, whose hold is the only
+		 * thing masking interrupts there: "panic" went out without
+		 * "(cpu N): ...", the string the harness knows a panic by (found
+		 * in review).
+		 */
+		for (spins = 0; spins < CPU_SPIN_BUDGET && panicwait; spins++)
+			cpu_pause();
+
+		/*
+		 * #599: and no interrupt after it -- this processor never
+		 * returns from here.  Every processor that has waited races
+		 * for the stop below, and the ones that lose it go on to the
+		 * backtrace lock with interrupts open: the winner's stop,
+		 * arriving late, entered halt_cpu() a second time inside the
+		 * backtrace lock's hold, and the nested call spent its whole
+		 * bound on the lock its own outer frame held, with every other
+		 * processor waiting behind it (found in review).  Not before
+		 * the wait: a processor waiting there still answers the
+		 * others' requests.  The nesting count keeps it masked, since
+		 * it restores the flag it found (percpu_intr_enable).
+		 */
+		if (!ABLATE_599_HALT_ORDER)
+			interrupts_disable();
 
 		/*
 		 * Stop the rest of the machine, once, from whoever gets here
@@ -146,30 +198,27 @@ halt_cpu(void)
 		 * processor arriving here through the stop interrupt must not
 		 * send another.
 		 */
-		if (atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
+		if (!ABLATE_599_HALT_ORDER &&
+		    atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
 			ipi_halt_others();
+		cons_port_close_latch();	/* #599: under the port's lock */
 
 		/*
-		 * Let the processor that got there first finish saying what
-		 * happened (#461).
-		 *
-		 * Every processor but one arrives here through panic()'s
-		 * `somebody else is already panicking' arm, and arrives at once
-		 * -- the first boot with the application processors scheduling
-		 * had three of them fail identically in the same microsecond.
-		 * Their backtraces are worth having, and printed during the
-		 * message they destroy it: the run that produced them had not
-		 * one legible line of the panic itself.
-		 *
-		 * panicwait is what panic() raises around the message.  Bounded,
-		 * because a processor that dies mid-message must not silence the
-		 * rest: after the wait the report is made anyway.
+		 * The console's final copy (#567), inside the backtrace lock's
+		 * hold: after the message, for the reason above, and not
+		 * through the backtraces of the processors the stop reaches,
+		 * which arrive here at once (found in review, #599).  Said
+		 * once, by whichever processor takes the lock first; the ring
+		 * is off by then, so it goes out as it is printed.
 		 */
-		for (spins = 0; spins < CPU_SPIN_BUDGET && panicwait; spins++)
-			cpu_pause();
-
-		x86_64_backtrace((uint64_t)(uintptr_t)
-				 __builtin_frame_address(0));
+		x86_64_backtrace_after((uint64_t)(uintptr_t)
+				       __builtin_frame_address(0),
+				       cons_ring_report);
+	} else {
+		/* The console's final copy (#567); an orderly halt has no
+		 * message to wait for. */
+		cons_ring_report();
+		fbcons_flush();
 	}
 
 	for (;;)
@@ -223,6 +272,7 @@ halt_all_cpus(boolean_t reboot)
 	 * consumed by nobody.
 	 */
 	ipi_halt_others();
+	cons_port_close_latch();	/* #599: under the port's lock */
 	halt_cpu();
 }
 

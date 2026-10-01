@@ -294,19 +294,80 @@ int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out);
 int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out);
 
 /*
- * Drain one engine's records, calling iommu_record_fault() for each.  Answers
- * how many were found; sets `*overflowed' when the engine says it dropped
- * some.
+ * #599: where a drain puts what it finds.  Complete only in iommu_fault.c;
+ * a live one exists only while iommu_fault_lock is held, and recording into
+ * it asserts that.
+ */
+struct iommu_fault_sink;
+
+/* One decoded refusal. */
+void iommu_fault_sink_record(struct iommu_fault_sink *s,
+			     const struct iommu_fault *f);
+
+/*
+ * The engine may have discarded refusals in this drain; `why' says how.
+ * Counted, never cleared: it is the "floor" every answer carries.
+ */
+#define	IOMMU_LOST_OVERFLOW	0x1u	/* the engine's own flag */
+#define	IOMMU_LOST_FULL		0x2u	/* its log was full, or filled while
+					   it was read */
+#define	IOMMU_LOST_EMPTY	0x4u	/* it logged an entry it never wrote */
+#define	IOMMU_LOST_STOPPED	0x8u	/* it was not logging */
+void iommu_fault_sink_lost(struct iommu_fault_sink *s, unsigned unit,
+			   unsigned why);
+
+/*
+ * #599: whether the unit's event log was found not running in this drain.
+ * One drain that finds it stopped restarts it; the next that still finds it
+ * stopped calls it blind, and every drain while blind counts a loss, until one
+ * finds it running again.  The states live in the ledger, not in the vendor.
+ */
+void iommu_fault_sink_stopped(struct iommu_fault_sink *s, unsigned unit,
+			      int stopped);
+
+/*
+ * Drain one engine's records into `s'.  Answers how many were found.  Called
+ * only from iommu_fault.c, with iommu_fault_lock held.
  *
  * ⚠️ The unit is passed by index and not by pointer because both readers need
  * its capability words as well as its register mapping, and a caller that
  * passed only the base address would have to re-derive where the records are.
  */
-unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed);
-unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed);
+unsigned iommu_vtd_fault_drain(unsigned unit, struct iommu_fault_sink *s);
+unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s);
 
-/* One decoded refusal, for the reader that found it. */
-void iommu_record_fault(const struct iommu_fault *f);
+/*
+ * #599: each drain is a core over a view of the registers it touches, so the
+ * cores can run against fabricated engines at boot as well as live ones.  On
+ * a live engine a write-one-to-clear goes to the register it reads
+ * (status_w1c == status, fsts_w1c == fsts); a fabricated one gives them
+ * separate words, so reads stay put and the check sees what was written.
+ * CONTROL is written by the restart twice, EventLogEn off and then on, and
+ * ends as it began, so a fabricated engine also keeps a log of the writes in
+ * order (control_log, IOMMU_AMD_CONTROL_LOG deep; NULL live): the check sees
+ * both writes and which came first (found in review: two separate words saw
+ * both, but not the order, and the order is the restart).
+ */
+#define	IOMMU_AMD_CONTROL_LOG	4
+
+struct iommu_amd_evtlog {
+	volatile uint64_t	*head, *tail, *status, *status_w1c, *control;
+	uint64_t		*control_log;	/* fabricated only */
+	unsigned		*control_logged;
+	volatile uint8_t	*log;
+	unsigned		 bytes;
+};
+struct iommu_vtd_records {
+	volatile uint32_t	*fsts, *fsts_w1c;
+	volatile uint8_t	*records;	/* 16 bytes each */
+	unsigned		 count;
+};
+int iommu_amd_evtlog_of(unsigned unit, struct iommu_amd_evtlog *v);
+unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
+				unsigned unit, struct iommu_fault_sink *s);
+int iommu_vtd_records_of(unsigned unit, struct iommu_vtd_records *v);
+unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
+				 unsigned unit, struct iommu_fault_sink *s);
 
 /*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────

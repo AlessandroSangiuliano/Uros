@@ -252,6 +252,25 @@ panic_init(void)
 #include <mach/kkt_request.h>
 #endif	/* DIPC */
 
+/*
+ * #599: the panic message, rendered before it is printed so that the whole
+ * line is one printf (see panic()).  Written only by the processor that set
+ * panicstr -- again, after a debugger lets the boot go on and it panics once
+ * more; a message longer than this is cut, and the line says so.
+ */
+static char	panic_line[512];
+static unsigned	panic_line_len;
+static int	panic_line_cut;
+
+static void
+panic_line_putc(char c)
+{
+	if (panic_line_len < sizeof(panic_line) - 1)
+		panic_line[panic_line_len++] = c;
+	else
+		panic_line_cut = 1;
+}
+
 void
 panic(const char *str, ...)
 {
@@ -318,18 +337,37 @@ panic(const char *str, ...)
 	panicwait = 1;
 
 	PANIC_UNLOCK();
-	printf("panic");
-#if	DIPC
-	printf("(node %d)", KKT_NODE_SELF());
-#endif
-#if	NCPUS > 1
-	printf("(cpu %d)", (unsigned) paniccpu);
-#endif
-	printf(": ");
+
+	/*
+	 * #599: ONE printf for the whole line.  It was five -- "panic", the
+	 * processor, ": ", the message through cnputc, "\n" -- and printf_lock
+	 * is held for one printf at a time, the message's part not at all: any
+	 * other processor's line landed between two of them.  A boot whose
+	 * first ticks were being reported at that moment printed "panic", then
+	 * "clock_event: cpu 3 -- first tick arrived", then "(cpu 1): ...", and
+	 * the harness, which knows a panic by "panic(cpu", waited out its
+	 * budget and called the run silent (found by -Z, under KVM).  So the
+	 * message is rendered first, into a buffer only the processor holding
+	 * panicstr writes, and the line goes out in one hold.
+	 */
 	va_start(listp, str);
-	_doprnt(str, &listp, cnputc, 0);
+	panic_line_len = 0;
+	panic_line_cut = 0;
+	_doprnt(str, &listp, panic_line_putc, 0);
 	va_end(listp);
-	printf("\n");
+	panic_line[panic_line_len] = '\0';
+#if	DIPC && NCPUS > 1
+	printf("panic(node %d)(cpu %d): %s%s\n", KKT_NODE_SELF(),
+	       (unsigned) paniccpu, panic_line, panic_line_cut ? " [...]" : "");
+#elif	DIPC
+	printf("panic(node %d): %s%s\n", KKT_NODE_SELF(), panic_line,
+	       panic_line_cut ? " [...]" : "");
+#elif	NCPUS > 1
+	printf("panic(cpu %d): %s%s\n", (unsigned) paniccpu, panic_line,
+	       panic_line_cut ? " [...]" : "");
+#else
+	printf("panic: %s%s\n", panic_line, panic_line_cut ? " [...]" : "");
+#endif
 
 	/*
 	 * Release panicwait indicator so that other cpus may call Debugger().

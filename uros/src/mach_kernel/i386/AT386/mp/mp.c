@@ -82,6 +82,7 @@
 #include <machine/AT386/mp/mp.h>
 #include <machine/AT386/mp/boot.h>		/* #300: MP_BOOT, MP_MACH_START */
 #include <i386/apic.h>				/* #300: LAPIC_ICR / LAPIC_ICRD */
+#include <i386/lapic.h>				/* #599: lapic_icr_send */
 #include <i386/setjmp.h>
 #include <i386/misc_protos.h>
 #include <i386/spl.h>				/* #302: splhi/splx for TSC calib */
@@ -226,7 +227,11 @@ extern unsigned int	mp_tsc_per_us;		/* rtclock.c: 0 = not calibrated */
 #define	MP_AP_SPEC_BUDGET_US	2000000u	/* 2 s    */
 #define	MP_AP_PIPE_BUDGET_US	100000u		/* 100 ms: all kicked APs */
 
-/* Latch + read 8254 counter 0; valid only with the clock IRQ masked. */
+/*
+ * Latch + read 8254 counter 0; valid only with the clock IRQ masked.  A pair
+ * with one context (#599): mp_tsc_calibrate() runs on the BSP at splhi before
+ * the first AP is kicked (mp_stub.c), so no other processor latches it.
+ */
 #define	MP_READ_8254(v)	{					\
 	outb(PITCTL_PORT, PIT_C0);				\
 	(v)  = inb(PITCTR0_PORT);				\
@@ -367,31 +372,24 @@ mp_poll_online(int slot, unsigned int budget_us)
 	return machine_slot[slot].running == TRUE;
 }
 
-static void
-mp_lapic_ipi_wait(void)
-{
-	while (LAPIC_REG32(LAPIC_ICR) & LAPIC_ICR_DS_PENDING)
-		;
-}
-
+/*
+ * INIT and STARTUP through the one sender that writes the destination and the
+ * command as a pair (lapic_icr_send, #599): cpu_start() runs at spl0 at
+ * bring-up and in processor_start(), where an interrupt that sends its own
+ * IPI could otherwise land between the two and take the INIT.
+ */
 static void
 mp_lapic_send_init(unsigned int dest_lapic_id)
 {
-	LAPIC_REG32(LAPIC_ICRD) =
-	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
-	LAPIC_REG32(LAPIC_ICR)  =
-	    LAPIC_ICR_DM_INIT | LAPIC_ICR_LEVEL_ASSERT;
-	mp_lapic_ipi_wait();
+	lapic_icr_send((unsigned char)dest_lapic_id,
+	    LAPIC_ICR_DM_INIT | LAPIC_ICR_LEVEL_ASSERT);
 }
 
 static void
 mp_lapic_send_sipi(unsigned int dest_lapic_id, unsigned int vector)
 {
-	LAPIC_REG32(LAPIC_ICRD) =
-	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
-	LAPIC_REG32(LAPIC_ICR)  =
-	    LAPIC_ICR_DM_STARTUP | (vector & LAPIC_ICR_VECTOR_MASK);
-	mp_lapic_ipi_wait();
+	lapic_icr_send((unsigned char)dest_lapic_id,
+	    LAPIC_ICR_DM_STARTUP | (vector & LAPIC_ICR_VECTOR_MASK));
 }
 
 /*
@@ -613,6 +611,19 @@ cpu_start(int slot_num)
 	}
 	if (dest_lapic == mp_bsp_lapic_id_get())
 		return KERN_SUCCESS;	/* the BSP is already running */
+
+	/*
+	 * #599: nor an AP that is.  processor_start() reaches here at run
+	 * time for any slot, and an INIT to a processor that is running
+	 * resets it in the middle of whatever it holds -- a lock, a TLB
+	 * shootdown's ack, its tick.  slave_machine_init() sets `running'
+	 * when the AP comes up (mp_stub.c).
+	 */
+	if (machine_slot[slot_num].running) {
+		printf("cpu_start(%d): already running, refusing the INIT\n",
+		       slot_num);
+		return KERN_SUCCESS;
+	}
 
 	/*
 	 * Copy the trampoline to its rendezvous address and seed the

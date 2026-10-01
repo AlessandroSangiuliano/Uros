@@ -204,25 +204,31 @@ get_time(tvalspec_t *tv)
 
 /*
  * Return elapsed nanoseconds between two tvalspec_t values.
+ *
+ * 64 bits, and so is every value computed from it: a 32-bit unsigned long
+ * wraps at 4.295 s on i386 and prints a plausible wrong number (#599).  Both
+ * differences are taken signed (tv_sec is unsigned), so a clock that steps
+ * back comes out right modulo 2^64.
  */
-static unsigned long
+static unsigned long long
 elapsed_ns(const tvalspec_t *before, const tvalspec_t *after)
 {
-    unsigned long ns;
-    ns  = (unsigned long)(after->tv_sec  - before->tv_sec)  * 1000000000UL;
-    ns += (unsigned long)(after->tv_nsec - before->tv_nsec);
+    unsigned long long ns;
+    ns  = (unsigned long long)((long long)after->tv_sec -
+			       (long long)before->tv_sec) * 1000000000ULL;
+    ns += (unsigned long long)(long long)(after->tv_nsec - before->tv_nsec);
     return ns;
 }
 
 static void
-print_result(const char *label, unsigned long total_ns, int iters)
+print_result(const char *label, unsigned long long total_ns, int iters)
 {
-    unsigned long ns_per_op = total_ns / (unsigned long)iters;
-    unsigned long us_whole  = ns_per_op / 1000;
-    unsigned long us_frac   = (ns_per_op % 1000) / 10;   /* 2 decimal digits */
-    unsigned long total_us  = total_ns / 1000;
+    unsigned long long ns_per_op = total_ns / (unsigned long)iters;
+    unsigned long long us_whole  = ns_per_op / 1000;
+    unsigned long long us_frac   = (ns_per_op % 1000) / 10;   /* 2 decimal digits */
+    unsigned long long total_us  = total_ns / 1000;
 
-    printf("  %-34s %5lu.%02lu us/op  (%d iters, %lu us total)\n",
+    printf("  %-34s %5llu.%02llu us/op  (%d iters, %llu us total)\n",
 	   label, us_whole, us_frac, iters, total_us);
 }
 
@@ -1184,7 +1190,7 @@ forkrace_watchdog(void *arg)
 	    get_time(&seen);
 	} else if (running && ++still == 5) {
 	    get_time(&now);
-	    printf("  !!! STALLED at %u of %d — no progress for %lu ms; the "
+	    printf("  !!! STALLED at %u of %d — no progress for %llu ms; the "
 		   "totals below come only if it resumes\n", n,
 		   FORKRACE_THREADS * FORKRACE_ITERS,
 		   elapsed_ns(&seen, &now) / 1000000);
@@ -1261,7 +1267,7 @@ bench_forkrace(void)
      * long, which is a different experiment wearing the same name.
      */
     printf("  %d threads x %d iters over %d KB, %d live children each: "
-	   "%u forked and destroyed, %u refused, %lu us\n",
+	   "%u forked and destroyed, %u refused, %llu us\n",
 	   FORKRACE_THREADS, FORKRACE_ITERS, FORKRACE_REGION / 1024,
 	   FORKRACE_LIVE, made, refused, elapsed_ns(&t0, &t1) / 1000);
 
@@ -2143,7 +2149,7 @@ bench_ool_ports(unsigned int nports)
     bench_oolp_recv_msg_t	recv_buf;
     kern_return_t		kr;
     tvalspec_t			t0, t1;
-    unsigned long		ns, per_op;
+    unsigned long long		ns, per_op;
     int				iters = oolp_iters_for(nports);
     unsigned int		i, made;
 
@@ -2225,7 +2231,7 @@ bench_ool_ports(unsigned int nports)
 
     ns = elapsed_ns(&t0, &t1);
     per_op = ns / (unsigned long) iters;
-    printf("  %5u %-11s %5lu.%02lu us/op  %6lu ns/port  (%d iters)\n",
+    printf("  %5u %-11s %5llu.%02llu us/op  %6llu ns/port  (%d iters)\n",
 	   nports, nports == 1 ? "port" : "ports",
 	   per_op / 1000, (per_op % 1000) / 10,
 	   per_op / (unsigned long) nports, iters);
@@ -2708,13 +2714,13 @@ cc_worker_func(void *arg)
  * (#319).  nthreads workers each do iters RPCs through a private echo thread,
  * all released together by the g_cc_go barrier.
  */
-static unsigned long
+static unsigned long long
 cc_run_once(int nthreads, int send_size, int iters_per_thread)
 {
     cc_worker_t		w[MAX_CC_THREADS];
     tvalspec_t		t0, t1;
     kern_return_t	kr;
-    unsigned long	total_ns;
+    unsigned long long	total_ns;
     int			i;
 
     if (nthreads > MAX_CC_THREADS)
@@ -2754,15 +2760,15 @@ cc_run_once(int nthreads, int send_size, int iters_per_thread)
 static void
 bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
 {
-    unsigned long	total_ns;
+    unsigned long long	total_ns;
     long		total_rpc;
 
     if (nthreads > MAX_CC_THREADS)
 	nthreads = MAX_CC_THREADS;
     total_ns  = cc_run_once(nthreads, send_size, iters_per_thread);
     total_rpc = (long)nthreads * iters_per_thread;
-    printf("  concurrent same-space x%d   %ld RPCs in %lu ns  "
-	   "(%lu ns/RPC aggregate)\n",
+    printf("  concurrent same-space x%d   %ld RPCs in %llu ns  "
+	   "(%llu ns/RPC aggregate)\n",
 	   nthreads, total_rpc, total_ns,
 	   total_ns / (total_rpc ? total_rpc : 1));
 }
@@ -2783,13 +2789,13 @@ bench_scale(void)
     static const int	tc[] = { 1, 2, 4, 6, 8, 12, 16, 24, 32 };
     int			ntc = (int)(sizeof(tc) / sizeof(tc[0]));
     int			send = (int)sizeof(bench_null_msg_t);
-    unsigned long	base_nspr = 0;
+    unsigned long long	base_nspr = 0;
     int			i, r, a, b;
 
     printf("    thr   med ns/RPC(aggr)   speedup vs 1\n");
     for (i = 0; i < ntc; i++) {
-	int		T = tc[i];
-	unsigned long	s[SCALE_RUNS], med, nspr, sx100;
+	int			T = tc[i];
+	unsigned long long	s[SCALE_RUNS], med, nspr, sx100;
 
 	if (T > MAX_CC_THREADS)
 	    break;
@@ -2799,7 +2805,7 @@ bench_scale(void)
 	    s[r] = cc_run_once(T, send, SCALE_ITERS);
 	/* insertion sort of SCALE_RUNS samples -> median (no qsort/stdlib) */
 	for (a = 1; a < SCALE_RUNS; a++) {
-	    unsigned long key = s[a];
+	    unsigned long long key = s[a];
 	    for (b = a - 1; b >= 0 && s[b] > key; b--)
 		s[b + 1] = s[b];
 	    s[b + 1] = key;
@@ -2811,7 +2817,7 @@ bench_scale(void)
 	if (i == 0)
 	    base_nspr = nspr;
 	sx100 = (unsigned long)T * base_nspr * 100 / nspr;	/* speedup x100 */
-	printf("    %-4d  %-15lu   %lu.%02lux\n",
+	printf("    %-4d  %-15llu   %llu.%02llux\n",
 	       T, nspr, sx100 / 100, sx100 % 100);
     }
 }
@@ -2910,11 +2916,11 @@ bench_fault_stress(int nthreads, int chunk_kb, int iters_per_thread)
     get_time(&t1);
 
     {
-	unsigned long	total_ns = elapsed_ns(&t0, &t1);
-	long		pages	 = (long)nthreads * iters_per_thread *
-				   ((long)chunk_kb / 4);
+	unsigned long long	total_ns = elapsed_ns(&t0, &t1);
+	long			pages	 = (long)nthreads * iters_per_thread *
+					   ((long)chunk_kb / 4);
 	printf("  fault-stress x%-2d  %dKB x %d iters  "
-	       "%ld page-faults in %lu ns  ->  %s\n",
+	       "%ld page-faults in %llu ns  ->  %s\n",
 	       nthreads, chunk_kb, iters_per_thread, pages, total_ns,
 	       g_fault_err ? "**CORRUPTION/ERROR**" : "ok");
     }

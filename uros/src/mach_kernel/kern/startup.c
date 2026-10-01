@@ -221,6 +221,7 @@
 #ifdef	__x86_64__
 #include <x86_64/thread/context.h>	/* #561 */
 #include <x86_64/time/tsc.h>		/* #508: the refinement */
+#include <x86_64/cpu/iommu.h>		/* #599: the fault reporter */
 #endif
 #include <kern/thread_swap.h>
 #include <kern/time_out.h>
@@ -493,6 +494,12 @@ start_kernel_threads(void)
 	 * boot reaches with a scheduler to wake it.
 	 */
 	tsc_refine_start();
+
+	/*
+	 * #599: and the thread that reads refusals out of the IOMMU engines,
+	 * which the idle loop used to do when a processor had nothing better.
+	 */
+	iommu_fault_reporter_start();
 #endif	/* __x86_64__ */
 
 	/*

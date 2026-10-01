@@ -599,17 +599,215 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
  * worked" -- so the verdict is read from whether the machine CAN refuse,
  * asked before the attempt rather than inferred from it.
  */
+/*
+ * #599: the verdict device_master.defs writes beside device_dma_faults, in one
+ * place.  Between two answers about a confined device: the count moved --
+ * refused; otherwise `lost' moved -- unknown, refusals may have gone
+ * uncounted; otherwise not refused.  Compared with != because the counts wrap
+ * modulo 2^32.
+ */
+enum ahci_dma_verdict { AHCI_NOT_REFUSED, AHCI_UNKNOWN, AHCI_REFUSED };
+
+static enum ahci_dma_verdict
+ahci_dma_verdict(natural_t count0, natural_t lost0, natural_t count1,
+		 natural_t lost1)
+{
+	if (count1 != count0)
+		return AHCI_REFUSED;
+	if (lost1 != lost0)
+		return AHCI_UNKNOWN;
+	return AHCI_NOT_REFUSED;
+}
+
+/* The whole time-stamp counter: EDX:EAX, never EAX alone (#523). */
+static unsigned long long
+ahci_tsc(void)
+{
+	unsigned int lo, hi;
+
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+/* One sector into `pa', which this controller was never granted. */
+static int
+ahci_read_into_ungranted(struct ahci_state *st, vm_address_t pa)
+{
+	struct ata_fis_h2d fis;
+
+	memset(&fis, 0, sizeof(fis));
+	fis.fis_type	= FIS_TYPE_H2D;
+	fis.flags	= FIS_H2D_FLAG_CMD;
+	fis.command	= ATA_CMD_READ_DMA_EXT;
+	fis.device	= ATA_DEV_LBA;
+	fis.sector_count = 1;
+	return ahci_submit_cmd(st, 0, &fis, pa, 512, 0);
+}
+
+/*
+ * #599 [iommu-spin]: a refusal the kernel had to be asked about is a failure.
+ * One more refused read into the page, then 2^32 time-stamp cycles spent
+ * here, in user mode and with no system call -- a processor that never goes
+ * idle -- and only then the question.  The count must have moved, and the
+ * refusal must already have been read out of the engines by something other
+ * than the question: `undrained' is how many the question itself had to
+ * read.  The idle loop was the only other reader, and a processor spinning
+ * in a driver never runs it.  Each line prints the values its verdict rests
+ * on, as read.
+ */
+static void
+ahci_iommu_spin(struct ahci_state *st, vm_address_t pa)
+{
+	natural_t	confined = 0, c0 = 0, c1 = 0, l0 = 0, l1 = 0;
+	natural_t	u0 = 0, u1 = 0;
+	vm_address_t	refused = 0;
+	unsigned long long t0;
+	kern_return_t	kr0, kr1;
+	int		rc;
+
+	kr0 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				&c0, &refused, &l0, &u0);
+	rc = ahci_read_into_ungranted(st, pa);
+	t0 = ahci_tsc();
+	while (ahci_tsc() - t0 < (1ULL << 32))
+		__asm__ volatile("pause");
+	kr1 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				&c1, &refused, &l1, &u1);
+
+	/*
+	 * #599: each outcome named for what it is (found in review: every
+	 * failure said "nothing had read the engines", including a count that
+	 * never moved and a failed call, and `lost' was never consulted).
+	 */
+	if (kr0 != KERN_SUCCESS || kr1 != KERN_SUCCESS)
+		printf("ahci: [iommu-spin] WRONG — device_dma_faults failed "
+		       "(kr %d, %d): the question was not answered\n",
+		       kr0, kr1);
+	else if (!confined)
+		printf("ahci: [iommu-spin] NOT ASKED — this controller is not "
+		       "confined, so nothing it reads is refused (#563)\n");
+	else if (c1 != c0 && u1 == 0)
+		printf("ahci: [iommu-spin] the refusal was read out while this "
+		       "driver spun 2^32 cycles: count %u -> %u, undrained 0, "
+		       "lost %u -> %u\n", (unsigned)c0, (unsigned)c1,
+		       (unsigned)l0, (unsigned)l1);
+	else if (c1 != c0)
+		printf("ahci: [iommu-spin] WRONG — after 2^32 cycles of "
+		       "spinning, count %u -> %u but the question itself read "
+		       "%u of them out: nothing had read the engines but the "
+		       "question\n", (unsigned)c0, (unsigned)c1, (unsigned)u1);
+	else if (l1 != l0)
+		printf("ahci: [iommu-spin] UNKNOWN — the count stood at %u and "
+		       "lost moved %u -> %u: the refusal may have been dropped "
+		       "(the read returned %d)\n", (unsigned)c1, (unsigned)l0,
+		       (unsigned)l1, rc);
+	else
+		printf("ahci: [iommu-spin] WRONG — the count stood at %u and "
+		       "lost at %u: the read left no record and nothing said "
+		       "one was lost -- refused unrecorded, or not refused at "
+		       "all (the [iommu] line says which it saw; the read "
+		       "returned %d)\n", (unsigned)c1, (unsigned)l1, rc);
+}
+
+/*
+ * #599 [iommu-burst]: a burst larger than the engine's log is recorded whole
+ * or counted as lost.  `e' is how many records one refused read made -- the
+ * first read's count, taken while `lost' stood still.  Eight refused reads
+ * back to back, then the question: the count must have grown by 8e, or `lost'
+ * must have moved.  An engine that made one record per read may be
+ * collapsing refusals (VT-d does), and there the question cannot be asked.
+ * Then one more read, which must still move the count: an engine that
+ * stopped logging would not.
+ */
+#define AHCI_BURST	8u
+
+static void
+ahci_iommu_burst(struct ahci_state *st, vm_address_t pa, natural_t e)
+{
+	natural_t	confined = 0, c0 = 0, c1 = 0, c2 = 0, l0 = 0, l1 = 0;
+	natural_t	u = 0;
+	vm_address_t	refused = 0;
+	natural_t	dc, dl;
+	kern_return_t	kr0, kr1, kr2;
+	unsigned	i;
+
+	if (e == 0) {
+		printf("ahci: [iommu-burst] NOT ASKED — the first refused read "
+		       "gave no count to scale by\n");
+		return;
+	}
+	kr0 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				&c0, &refused, &l0, &u);
+	for (i = 0; i < AHCI_BURST; i++)
+		(void) ahci_read_into_ungranted(st, pa);
+	kr1 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				&c1, &refused, &l1, &u);
+	if (kr0 != KERN_SUCCESS || kr1 != KERN_SUCCESS) {
+		/* #599: a failed call leaves zeros, which are not answers */
+		printf("ahci: [iommu-burst] WRONG — device_dma_faults failed "
+		       "(kr %d, %d): the question was not answered\n",
+		       kr0, kr1);
+		return;
+	}
+	dc = c1 - c0;
+	dl = l1 - l0;
+
+	if (dc == AHCI_BURST * e || dl != 0)
+		printf("ahci: [iommu-burst] %u refused reads of %u records "
+		       "each: %u recorded, lost %u -> %u — recorded whole, or "
+		       "counted as lost\n", AHCI_BURST, (unsigned)e,
+		       (unsigned)dc, (unsigned)l0, (unsigned)l1);
+	else if (e == 1)
+		printf("ahci: [iommu-burst] NOT ASKED — one record per read, so "
+		       "the engine may be collapsing them: %u reads, %u "
+		       "recorded\n", AHCI_BURST, (unsigned)dc);
+	else
+		printf("ahci: [iommu-burst] WRONG — %u refused reads of %u "
+		       "records each: %u recorded of %u, and lost stayed at %u: "
+		       "refusals went missing and nothing said so\n",
+		       AHCI_BURST, (unsigned)e, (unsigned)dc,
+		       (unsigned)(AHCI_BURST * e), (unsigned)l1);
+
+	(void) ahci_read_into_ungranted(st, pa);
+	kr2 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+				&c2, &refused, &l1, &u);
+	if (kr2 != KERN_SUCCESS)
+		printf("ahci: [iommu-burst] WRONG — device_dma_faults failed "
+		       "after the burst (kr %d)\n", kr2);
+	else if (c2 == c1)
+		printf("ahci: [iommu-burst] WRONG — a read after the burst moved "
+		       "nothing (count %u): the engine has stopped logging\n",
+		       (unsigned)c2);
+}
+
 static void
 ahci_iommu_selftest(struct ahci_state *st)
 {
 	vm_address_t	kva = 0, pa = 0;
 	natural_t	confined = 0, before = 0, after = 0;
+	natural_t	lost0 = 0, lost1 = 0, undrained = 0;
 	vm_address_t	refused = 0;
+	enum ahci_dma_verdict v;
 	kern_return_t	kr;
 	int		rc;
 
 	if (st->n_ports == 0)
 		return;
+
+	/*
+	 * #599 [iommu-bdf]: a bdf that is not a device is refused, not
+	 * answered "nothing refused, not confined".  Before the confined
+	 * check, so that every target asks it: i386 answers it too.
+	 */
+	kr = device_dma_faults(st->master_device, 0x10000, &confined, &before,
+			       &refused, &lost0, &undrained);
+	if (kr == KERN_INVALID_ARGUMENT)
+		printf("ahci: [iommu-bdf] a bdf that is not a device (0x10000) "
+		       "is refused (kr=%d)\n", kr);
+	else
+		printf("ahci: [iommu-bdf] WRONG — a bdf that is not a device "
+		       "(0x10000) was answered (kr=%d, confined %u, count %u)\n",
+		       kr, (unsigned)confined, (unsigned)before);
 
 	/*
 	 * 🔑 ASKED BEFORE, so that "no faults" afterwards means something.  A
@@ -618,7 +816,8 @@ ahci_iommu_selftest(struct ahci_state *st)
 	 * a machine that never refuses anything.
 	 */
 	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
-			       &confined, &before, &refused);
+			       &confined, &before, &refused, &lost0,
+			       &undrained);
 	if (kr != KERN_SUCCESS)
 		return;
 
@@ -643,21 +842,11 @@ ahci_iommu_selftest(struct ahci_state *st)
 	printf("ahci: [iommu] asking port 0 to read one sector into "
 	       "0x%08lX, a page granted to no device\n", (unsigned long)pa);
 
-	{
-		struct ata_fis_h2d fis;
-
-		memset(&fis, 0, sizeof(fis));
-		fis.fis_type	= FIS_TYPE_H2D;
-		fis.flags	= FIS_H2D_FLAG_CMD;
-		fis.command	= ATA_CMD_READ_DMA_EXT;
-		fis.device	= ATA_DEV_LBA;
-		fis.sector_count = 1;
-
-		rc = ahci_submit_cmd(st, 0, &fis, pa, 512, 0);
-	}
+	rc = ahci_read_into_ungranted(st, pa);
 
 	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
-			       &confined, &after, &refused);
+			       &confined, &after, &refused, &lost1, &undrained);
+	v = ahci_dma_verdict(before, lost0, after, lost1);
 
 	/*
 	 * 🔥 AND THE COMMAND REPORTS SUCCESS.  rc comes back 0: the controller
@@ -670,7 +859,7 @@ ahci_iommu_selftest(struct ahci_state *st)
 	 * symptom available to a driver says the transfer worked, so a driver
 	 * that could not ask the kernel would go looking for a corrupt disk.
 	 */
-	if (kr == KERN_SUCCESS && after > before && refused != 0)
+	if (kr == KERN_SUCCESS && v == AHCI_REFUSED && refused != 0)
 		printf("ahci: [iommu] REFUSED at 0x%08lX — and the command "
 		       "returned %d, so the DEVICE never noticed: the domain "
 		       "is enforced, and only the kernel can say so\n",
@@ -681,11 +870,20 @@ ahci_iommu_selftest(struct ahci_state *st)
 	 * address and would be read as one.  It is what QEMU's amd-iommu does:
 	 * the refusal is real and the address quadword of its event is zero.
 	 */
-	else if (kr == KERN_SUCCESS && after > before)
+	else if (kr == KERN_SUCCESS && v == AHCI_REFUSED)
 		printf("ahci: [iommu] REFUSED %u time(s), and the command "
 		       "returned %d — but the engine recorded no address, so "
 		       "the refusal is known and the page is not\n",
 		       (unsigned)(after - before), rc);
+	/*
+	 * #599: no refusal recorded, and the kernel says refusals may have
+	 * gone uncounted in between -- neither a pass nor a hole.
+	 */
+	else if (kr == KERN_SUCCESS && v == AHCI_UNKNOWN)
+		printf("ahci: [iommu] UNKNOWN — no refusal recorded, and the "
+		       "kernel may have lost some in between (lost %u -> %u); "
+		       "the command returned %d\n", (unsigned)lost0,
+		       (unsigned)lost1, rc);
 	else if (rc < 0)
 		printf("ahci: [iommu] the transfer failed (%d) and no refusal "
 		       "was recorded — blocked, but not by anything that "
@@ -695,6 +893,9 @@ ahci_iommu_selftest(struct ahci_state *st)
 		       "device was never granted, though the kernel says it "
 		       "is confined — THE DOMAIN IS BUILT AND NOT ENFORCED\n");
 
+	ahci_iommu_spin(st, pa);
+	ahci_iommu_burst(st, pa, kr == KERN_SUCCESS && v == AHCI_REFUSED &&
+				 lost1 == lost0 ? after - before : 0);
 	device_dma_free(st->master_device, DEVICE_DMA_NO_BDF, kva, 4096);
 }
 

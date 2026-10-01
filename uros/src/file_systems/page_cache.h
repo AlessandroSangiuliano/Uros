@@ -40,6 +40,7 @@
 #include <mach.h>
 #include <mach/vm_types.h>
 #include <pthread.h>
+#include <stdint.h>
 
 /*
  * Hash buckets.  Must scale with the entry count or lookups degrade into
@@ -51,6 +52,19 @@
 #define PAGE_CACHE_HASH_BUCKETS	4096
 
 /*
+ * #599: how many of the oldest entries eviction looks at for a clean one
+ * before it writes a dirty one back; the self-test builds its case around it.
+ */
+#define PAGE_CACHE_VICTIM_SCAN	64
+
+/*
+ * #599: page_cache_install's answers besides 0 and a kern_return_t: the key
+ * is held (cached or being read), or the bytes may be older than the disk.
+ */
+#define PAGE_CACHE_PRESENT	(-1)
+#define PAGE_CACHE_STALE	(-2)
+
+/*
  * Writeback callback: called when a dirty block must be flushed to disk.
  * Arguments: opaque context, block number, data pointer, data size,
  * physical address (non-zero for DMA-backed entries).
@@ -60,12 +74,63 @@ typedef int (*page_cache_writeback_fn)(void *ctx, daddr_t block,
 				       vm_offset_t data, vm_size_t size,
 				       vm_offset_t phys);
 
+/*
+ * #599: the fill a page_cache_get runs for a block it does not hold, with no
+ * lock of the cache's held.  It must read all `size' bytes of `block' into
+ * `data' (or through `phys', the slot's physical address, 0 for a slab slot)
+ * and answer 0, or answer why not.  It takes no lock, waits for nothing but
+ * its device, and never calls into a page cache.
+ */
+typedef int (*page_cache_fill_fn)(void *ctx, daddr_t block,
+				  vm_offset_t data, vm_size_t size,
+				  vm_offset_t phys);
+
+/*
+ * #599: an entry's state.  FREE: on the free list.  FILLING: keyed, being
+ * read by the page_cache_get that keyed it; not data yet -- nobody else may
+ * see its bytes, and every lookup of its key waits.  VALID: a cached block.
+ * ORPHAN: pinned when its block was discarded; no key, freed at the last put.
+ */
+#define PC_FREE		0
+#define PC_FILLING	1
+#define PC_VALID	2
+#define PC_ORPHAN	3
+
 struct page_cache_entry {
 	daddr_t			pc_block;	/* disk block number (key) */
 	vm_offset_t		pc_data;	/* cached block data */
 	vm_size_t		pc_size;	/* size of cached data */
-	vm_offset_t		pc_phys;	/* physical addr (0 = vm_allocate'd) */
+	vm_offset_t		pc_phys;	/* physical addr (0 = vm_allocate'd); full
+					   width: a page can be above 4 GiB (#599) */
 	int			pc_dirty;	/* block has been modified */
+	int			pc_wfail;	/* #599: its writeback failed,
+						   and it was said once */
+	int			pc_state;	/* #599: PC_FREE .. PC_ORPHAN */
+	/*
+	 * #599: pins -- pointers into pc_data held outside pc_lock (a
+	 * page_cache_get's caller, until page_cache_put).  A pinned entry is
+	 * never re-keyed or reused: a pin guards identity and lifetime, not
+	 * content.
+	 */
+	unsigned int		pc_refs;
+	/*
+	 * #599: pc_wgen counts the writes into the slot; a sync marks the
+	 * block clean only if it is the count it copied when it collected the
+	 * block, so a write that lands during the writeback keeps it dirty.
+	 * pc_dirty_seq is the cache's pc_seq when it went dirty (the sync's
+	 * horizon), pc_tried the sync call that last collected it.
+	 */
+	unsigned int		pc_wgen;
+	uint64_t		pc_dirty_seq;
+	unsigned int		pc_tried;
+	/*
+	 * #599: the cache's pc_seq when the disk last got bytes this copy
+	 * holds -- a writeback made it clean, or page_cache_wrote put the
+	 * bytes a write just gave the disk into it -- 0 if neither ever
+	 * happened.  Its copy leaving the cache raises pc_forget to it
+	 * (page_cache_install).
+	 */
+	uint64_t		pc_clean_seq;
 	int			pc_busy;	/* #384: writeback in flight —
 						   its data is being written
 						   outside pc_lock, so eviction
@@ -77,7 +142,41 @@ struct page_cache_entry {
 
 struct page_cache {
 	pthread_mutex_t		pc_lock;	/* protects all fields below */
+	/*
+	 * #599: one page_cache_sync at a time; taken before pc_lock, and
+	 * never with an ext2 lock held.  Two syncs -- the writeback thread's
+	 * and ds_ext2_sync's -- used to overwrite each other's marks.
+	 */
+	pthread_mutex_t		pc_sync_lock;
+	/*
+	 * #599: broadcast when a fill ends; every wait for a FILLING key is
+	 * on it, and the key is looked up again after the wait -- never the
+	 * old pointer.  pc_nwaiters counts the threads inside the wait (the
+	 * self-test watches it).
+	 */
+	pthread_cond_t		pc_cond;
+	unsigned int		pc_nwaiters;
+	uint64_t		pc_seq;		/* ticks at every clean->dirty,
+						   dirty->clean and wrote */
+	/*
+	 * #599: the newest pc_seq at which a copy holding bytes the disk got
+	 * after it was read left the cache -- evicted once written back, or
+	 * once page_cache_wrote updated it.  A readahead ticket older than it
+	 * may hold that block's old bytes, read from the disk before the write
+	 * landed.  64 bits: it never wraps.
+	 */
+	uint64_t		pc_forget;
+	unsigned int		pc_sync_calls;
 	unsigned int		pc_max_entries;
+	/*
+	 * #599: every slot is this size, fixed at creation: pc_data, pc_size
+	 * and pc_phys never change after it.  A non-DMA cache owns one slab
+	 * (pc_slab) cut into the slots; a DMA cache's slots are the pool its
+	 * creator allocated, which is not the cache's to free.
+	 */
+	vm_size_t		pc_block_size;
+	vm_offset_t		pc_slab;	/* non-DMA slots, owned (0 = DMA) */
+	vm_size_t		pc_slab_size;
 	unsigned int		pc_count;
 	unsigned int		pc_hits;
 	unsigned int		pc_misses;
@@ -90,14 +189,6 @@ struct page_cache {
 	/* DMA pool: pre-allocated wired pages with known physical addrs */
 	vm_offset_t		pc_dma_pool;	  /* base VA (0 = no DMA) */
 	vm_size_t		pc_dma_pool_size; /* total pool bytes */
-	/*
-	 * 🔴 vm_address_t since #520.  These feed pc_phys, which has always
-	 * been a vm_offset_t -- so the narrow half of the pair was silently
-	 * deciding how far a zero-copy read could reach.
-	 */
-	vm_address_t		pc_dma_pa[4096];  /* per-page physical addrs */
-	unsigned int		pc_dma_n_pages;	  /* number of DMA pages */
-	vm_size_t		pc_block_size;	  /* block size for slot calc */
 	struct page_cache_entry	*pc_hash[PAGE_CACHE_HASH_BUCKETS];
 	/* LRU sentinels: head.pc_lru_next = MRU, tail.pc_lru_prev = LRU */
 	struct page_cache_entry	pc_lru_head;
@@ -120,54 +211,134 @@ struct page_cache {
  * Returns NULL on allocation failure or without a writeback.
  */
 struct page_cache *page_cache_create(unsigned int max_entries,
+				     vm_size_t block_size,
 				     page_cache_writeback_fn writeback,
 				     void *ctx);
 
 /*
- * Destroy a page cache, freeing all cached data and the cache itself.
+ * Destroy a page cache and free what it owns: the slab of a non-DMA cache,
+ * the entries, the cache.  Never a DMA pool -- that belongs to whoever
+ * allocated it (device_dma_alloc_sg), and is theirs to free (#599).
+ *
+ * Refuses, freeing nothing, while any block is dirty: a cache that holds a
+ * filesystem's blocks cannot drop data it was given.  Returns 0 when
+ * destroyed, non-zero when refused.
  */
-void page_cache_destroy(struct page_cache *pc);
+int page_cache_destroy(struct page_cache *pc);
 
 /*
- * Look up a disk block in the cache.
- * On hit: sets *data_out and *size_out, moves entry to MRU, returns 0.
- * On miss: returns -1.
- * The returned pointer is owned by the cache — caller must copy if needed.
+ * #599: the page cache's self-test, run at ext_server's start; *ran counts
+ * the cases, *wrong the wrong answers, *failed which ones.
  */
-int page_cache_lookup(struct page_cache *pc, daddr_t block,
-		      vm_offset_t *data_out, vm_size_t *size_out);
+void page_cache_selftest(unsigned int *ran, unsigned int *wrong,
+			 unsigned int *failed);	/* bit n-1: case n failed */
 
 /*
- * Insert a block into the cache.  The cache allocates its own buffer
- * and copies 'size' bytes from 'data'.  Caller retains ownership of 'data'.
- * If the cache is full, the LRU entry is evicted (its buffer is freed).
+ * Set only by page_cache_selftest, while it runs at ext_server's start
+ * before any other thread: the failures it provokes on purpose are not
+ * printed, so that the boot log does not report a failing disk that is a
+ * passing test.
  */
-void page_cache_insert(struct page_cache *pc, daddr_t block,
-		       vm_offset_t data, vm_size_t size);
+extern int page_cache_quiet;
 
 /*
- * Invalidate a specific block, freeing its cached data.
+ * #599: the block, cached and pinned -- or read into the cache by `fill' and
+ * then pinned.
+ *
+ *  - held VALID: pinned, one hit;
+ *  - being read by another get: waits for that fill, then looks again;
+ *  - not held: a slot is keyed FILLING (one miss), `fill' runs with no lock
+ *    held, and the entry is published VALID and pinned -- or, if the fill
+ *    failed, withdrawn: an unread entry never leaves this function.
+ *
+ * Answers 0 and a pinned entry in *ep; 0 and NULL when there is no slot to
+ * give (fill not called: read uncached); or the fill's non-zero answer, with
+ * nothing cached.  Every pinned entry is given back with page_cache_put.
  */
-void page_cache_invalidate(struct page_cache *pc, daddr_t block);
+int page_cache_get(struct page_cache *pc, daddr_t block,
+		   page_cache_fill_fn fill, void *ctx,
+		   struct page_cache_entry **ep)
+	__attribute__((warn_unused_result));
+
+/* #599: give a pin back. */
+void page_cache_put(struct page_cache *pc, struct page_cache_entry *e);
 
 /*
- * Flush the entire cache, freeing all cached data.
+ * #599: is `block' held -- cached or being read?  A hint for readahead: no
+ * pin, no statistics.
  */
-void page_cache_flush(struct page_cache *pc);
+int page_cache_contains(struct page_cache *pc, daddr_t block);
 
 /*
- * Mark a cached block as dirty.  Returns 0 on success, -1 if the
- * block is not in the cache.
+ * #599: write `len' bytes at `off' into a block the caller holds pinned
+ * (page_cache_get), and mark it dirty, in one hold of the cache's lock.
+ * KERN_INVALID_ARGUMENT past the end of the slot; KERN_ABORTED if the block
+ * stopped being a cached block while pinned.
  */
-int page_cache_mark_dirty(struct page_cache *pc, daddr_t block);
+int page_cache_modify(struct page_cache *pc, struct page_cache_entry *e,
+		      vm_size_t off, vm_size_t len, vm_offset_t data)
+	__attribute__((warn_unused_result));
 
 /*
- * Update data in a cached block (or insert it) and mark it dirty.
- * Used for write operations: the caller provides new data, the cache
- * copies it, and the block is marked dirty for later writeback.
+ * #599: readahead's way in.  Take a ticket before reading the disk, then
+ * offer each block read with it.  page_cache_install copies `data' into a
+ * free or clean slot and caches it clean -- it never waits, never writes a
+ * block back to make room, and never overwrites: a key already held, cached
+ * or being read, answers PAGE_CACHE_PRESENT and is left as it is.
+ *
+ * The ticket is what keeps old bytes out.  A block dirty in the cache when
+ * the ticket was taken has newer bytes than the disk; readahead may have
+ * read the old ones.  While that copy stays cached the install finds it
+ * present.  Once it has been written back and evicted, pc_forget is past
+ * the ticket, and every install with that ticket answers PAGE_CACHE_STALE.
+ * Every way a copy leaves the cache raises pc_forget past any older ticket.
+ *
+ * Answers 0, PAGE_CACHE_PRESENT, PAGE_CACHE_STALE, KERN_RESOURCE_SHORTAGE
+ * (no free or clean slot) or KERN_INVALID_ARGUMENT (not a whole block).
+ * Caching a clean block is optional: readahead ignores the answer.
  */
-void page_cache_update(struct page_cache *pc, daddr_t block,
-		       vm_offset_t data, vm_size_t size);
+uint64_t page_cache_ticket(struct page_cache *pc);
+int page_cache_install(struct page_cache *pc, daddr_t block,
+		       vm_offset_t data, vm_size_t size, uint64_t ticket);
+
+/*
+ * Write a whole block into the cache (#599): the bytes are copied and the
+ * block marked dirty in one hold of the cache's lock, into the slot that
+ * holds it or into one taken for it -- or the write is refused and nothing
+ * changes.  'size' must be the cache's block size (KERN_INVALID_ARGUMENT
+ * otherwise).  KERN_RESOURCE_SHORTAGE when there is no slot to give.
+ *
+ * It replaces page_cache_update, which on a miss dropped the lock, inserted,
+ * then marked dirty: a readahead insert of the same block in between made
+ * the insert a no-op, and a full cache made it return in silence -- the
+ * write lost, and reported as done.
+ */
+int page_cache_write(struct page_cache *pc, daddr_t block,
+		     vm_offset_t data, vm_size_t size)
+	__attribute__((warn_unused_result));
+
+/*
+ * #599: the disk now holds exactly these bytes of `block', written there
+ * without the cache -- a directory block.  A cached copy takes them (its
+ * dirty bit left as it is; its write count moves, so a writeback of older
+ * bytes in flight does not mark it clean); a copy being read is waited out
+ * first.  With no copy, pc_forget rises: a readahead ticket taken before
+ * may hold what the disk had before this write.  KERN_INVALID_ARGUMENT for
+ * anything but a whole block, with nothing done.
+ */
+int page_cache_wrote(struct page_cache *pc, daddr_t block,
+		     vm_offset_t data, vm_size_t size)
+	__attribute__((warn_unused_result));
+
+/*
+ * #599: `block' is dead -- freed, or about to belong to another file -- and
+ * whatever the cache holds of it goes: a dirty copy is never written, and a
+ * copy being read or written back is waited out first.  A pinned copy loses
+ * its key and stays readable by whoever holds it (ORPHAN) until the last
+ * page_cache_put frees it.  Raises pc_forget, so no readahead ticket taken
+ * before brings the old bytes back.
+ */
+void page_cache_discard(struct page_cache *pc, daddr_t block);
 
 /*
  * Synchronize all dirty blocks to disk via the writeback callback.
@@ -202,15 +373,5 @@ struct page_cache *page_cache_create_dma(unsigned int max_entries,
 					 unsigned int n_pages,
 					 page_cache_writeback_fn writeback,
 					 void *ctx);
-
-/*
- * Allocate a cache entry for 'block' without populating data.
- * The entry is inserted into the hash/LRU and its pre-allocated
- * DMA buffer (pc_data/pc_phys) is ready for direct device I/O.
- * Returns NULL if the cache has no DMA pool or allocation fails.
- * Caller must hold NO locks — this function locks internally.
- */
-struct page_cache_entry *page_cache_alloc_entry(struct page_cache *pc,
-						daddr_t block);
 
 #endif /* _PAGE_CACHE_H_ */

@@ -13,6 +13,8 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <kern/kalloc.h>	/* an identity grant's page list, #599 */
+#include <kern/lock.h>		/* iommu_domain_lock, #599 */
 #include <kern/misc_protos.h>	/* printf, for the refusals (#432 stage 3d) */
 #include <pmap/layout.h>
 #include <pmap/pmap.h>		/* pmap_table_frame (#458) */
@@ -190,6 +192,25 @@ void iommu_record_reset(void)
 	found_vendor = IOMMU_NONE;
 }
 
+/*
+ * #599: every grant, revoke and domain change holds iommu_domain_lock.
+ *
+ * device_domains[], each domain's next_iova and grant list, the page tables
+ * and the command queue -- AMD-Vi's ring tail and completion token, VT-d's
+ * CCMD/IOTLB registers -- had no serialisation, and grant and revoke come
+ * from device_master's RPCs on any processor.  Two grants could take one
+ * slot or one IOVA, two commands one ring slot (an invalidation lost, a
+ * device keeping a window it was refused), and a release compacted the
+ * array under another processor's lookup.
+ *
+ * A mutex and not a spin lock: mapping can wait for a page-table frame
+ * (pmap_table_frame -> VM_PAGE_WAIT), and a completion wait spins for up to
+ * ten million turns.  Every caller is a thread; no interrupt handler submits
+ * a command.  The fault log is not under it: a device's refusal count lives
+ * in the log (#599) and never touches device_domains[].
+ */
+decl_mutex_data(static, iommu_domain_lock)
+
 enum iommu_vendor iommu_discover(void)
 {
 	/*
@@ -202,6 +223,7 @@ enum iommu_vendor iommu_discover(void)
 		return found_vendor;
 
 	discovered = 1;
+	mutex_init(&iommu_domain_lock, ETAP_MISC_MASTER);	/* #599 */
 
 	/*
 	 * ⚠️ The first reader to claim the machine ends it, on the assumption
@@ -1398,225 +1420,6 @@ int iommu_domain_check(unsigned *walked, unsigned *wrong)
 }
 
 /*
- * ── Stage 3d: the log of refusals ────────────────────────────────────
- *
- * A ring of the last IOMMU_FAULT_LOG, and a count that does not wrap with it.
- * Both are needed and they answer different questions -- see the note on
- * IOMMU_FAULT_LOG in <cpu/iommu.h>.
- *
- * ⚠️ No lock.  The only writer is iommu_fault_poll(), and the callers of that
- * are the boot self-test and, later, the fault interrupt -- so the day a
- * second processor can poll is the day this needs one, and it is called out
- * here rather than discovered then.  A ring whose entries are 24 bytes cannot
- * be made safe by making the index atomic.
- */
-static struct iommu_fault	fault_log[IOMMU_FAULT_LOG];
-static unsigned			fault_total;
-static int			fault_overflow;
-
-/*
- * Counted per device as well as kept in the ring, and the two are not the same
- * fact.
- *
- * 🔴 A COUNT THAT WRAPS IS NOT A COUNT.  The ring holds the last sixteen
- * refusals and says which; a driver comparing "how many before" with "how many
- * after" needs a number that only goes up, or its own two refusals could be
- * pushed out by a noisier device between the two calls and the comparison
- * would read as "not refused".  That is the one answer this must never give.
- */
-static void device_fault_seen(uint16_t bdf);
-static unsigned device_fault_count(uint16_t bdf);
-
-void iommu_record_fault(const struct iommu_fault *f)
-{
-	fault_log[fault_total % IOMMU_FAULT_LOG] = *f;
-	fault_total++;
-	device_fault_seen(f->source);
-}
-
-unsigned iommu_fault_count(void)
-{
-	return fault_total;
-}
-
-unsigned iommu_fault_logged(void)
-{
-	return fault_total < IOMMU_FAULT_LOG ? fault_total : IOMMU_FAULT_LOG;
-}
-
-/*
- * Oldest first, which for a wrapped ring is not element zero.
- *
- * 🔑 The caller counts 0..iommu_fault_logged()-1 and gets them in the order
- * they happened, whether or not the ring has wrapped -- which is the property
- * that lets a reporter be written once.  A reader handed the raw array would
- * have to know about the wrap, and every reader would have to know separately.
- */
-const struct iommu_fault *iommu_fault(unsigned index)
-{
-	unsigned logged = iommu_fault_logged();
-	unsigned first;
-
-	if (index >= logged)
-		return 0;
-
-	first = fault_total < IOMMU_FAULT_LOG
-		? 0 : fault_total % IOMMU_FAULT_LOG;
-
-	return &fault_log[(first + index) % IOMMU_FAULT_LOG];
-}
-
-int iommu_fault_overflowed(void)
-{
-	return fault_overflow;
-}
-
-unsigned iommu_fault_poll(void)
-{
-	unsigned found = 0;
-
-	/*
-	 * ⚠️ Nothing to read before the engines are running.  A unit's fault
-	 * registers are readable whether or not translation is on, and they
-	 * are meaningless then -- an engine that is not translating refuses
-	 * nothing.  Reading them anyway would report whatever the firmware
-	 * left behind as this kernel's own faults.
-	 */
-	if (!iommu_translating())
-		return 0;
-
-	for (unsigned i = 0; i < nunits; i++)
-		if (found_vendor == IOMMU_INTEL)
-			found += iommu_vtd_fault_drain(i, &fault_overflow);
-		else if (found_vendor == IOMMU_AMD)
-			found += iommu_amd_fault_drain(i, &fault_overflow);
-
-	return found;
-}
-
-/*
- * ── Saying it out loud ───────────────────────────────────────────────
- *
- * 🔑 `reported' AND `fault_total' are two counters and not one.  The ring can
- * wrap between two polls, and then the number of faults that happened is
- * larger than the number of records that survived -- so the reporter says how
- * many it could not show rather than showing the last sixteen and implying
- * that was all of them.
- */
-static unsigned reported;
-
-/*
- * 🔥 AND THERE IS NO RATE LIMIT IN HERE, WHICH IS WHERE ONE WAS PUT AND WAS
- * WRONG.  The idle loop calls this thousands of times a second and does want
- * one; a driver asking whether the IOMMU refused its transfer calls the SAME
- * function and must never be told no because the divider had not come round.
- * It was, for one run: the engine refused the DMA, QEMU said so on its own
- * console, and this kernel reported that nothing had been refused.
- *
- * 🔑 The limit belongs to the CALLER WITH THE FREQUENCY PROBLEM, which is the
- * idle loop, and it is there.  A function used by two callers with opposite
- * requirements cannot hold either one's policy.
- */
-
-static const char *fault_kind_name(uint8_t kind)
-{
-	switch (kind) {
-	case IOMMU_FAULT_PAGE:		return "no mapping, or no permission";
-	case IOMMU_FAULT_ENTRY:		return "the device's own entry";
-	case IOMMU_FAULT_HARDWARE:	return "the engine could not read a table";
-	default:			return "a reason this kernel does not read";
-	}
-}
-
-unsigned iommu_fault_report(void)
-{
-	unsigned before = fault_total;
-	unsigned printed = 0;
-	unsigned lost;
-
-	/*
-	 * ⚠️ Nothing to poll until a device is in a domain.  Under
-	 * pass-through nothing can be refused, so this is not an optimisation
-	 * that skips a check -- it is the check having a known answer, and it
-	 * is what keeps this off the idle path of every machine that is not
-	 * using the feature.
-	 */
-	if (iommu_domain_count() == 0)
-		return 0;
-
-	iommu_fault_poll();
-	if (fault_total == before)
-		return 0;
-
-	/*
-	 * How many the ring could not keep.  Two ways to lose one -- the
-	 * engine dropped it, which iommu_fault_overflowed() says, and this
-	 * ring wrapped, which only arithmetic says.
-	 */
-	lost = (fault_total - before) > IOMMU_FAULT_LOG
-	       ? (fault_total - before) - IOMMU_FAULT_LOG : 0;
-
-	/*
-	 * 🔑 The ring's element i is the (fault_total - logged + i)th fault of
-	 * the boot, and that number is what says whether it has been printed.
-	 * Comparing positions inside the ring could not: the ring's element
-	 * zero is a different fault after every wrap.
-	 */
-	{
-		unsigned logged = iommu_fault_logged();
-		unsigned first = fault_total - logged;
-
-		for (unsigned i = 0; i < logged; i++) {
-			const struct iommu_fault *f = iommu_fault(i);
-
-			if (f == 0 || first + i < reported)
-				continue;
-
-			printf("iommu: %02x:%02x.%u was REFUSED a %s at "
-			       "0x%lx — %s (reason 0x%02x)\n",
-			       (unsigned)(f->source >> 8),
-			       (unsigned)((f->source >> 3) & 0x1F),
-			       (unsigned)(f->source & 7),
-			       f->write ? "write" : "transfer",
-			       (unsigned long)f->address,
-			       fault_kind_name(f->kind), (unsigned)f->reason);
-			printed++;
-		}
-	}
-
-	reported = fault_total;
-
-	if (lost != 0)
-		printf("iommu: and %u more that this log had no room for\n",
-		       lost);
-	if (iommu_fault_overflowed())
-		printf("iommu: an engine ran out of fault records before"
-		       " anyone read them — the count above is a floor\n");
-
-	return printed;
-}
-
-unsigned iommu_faults_for(uint16_t bdf, uint64_t *last_address)
-{
-	/*
-	 * ⚠️ The COUNT comes from the per-device total and the ADDRESS from
-	 * the ring, which is the honest split: the first is a number that only
-	 * goes up, the second is a record that can be pushed out.  A caller
-	 * given a non-zero count and no address knows the refusal happened and
-	 * that this log no longer says where -- which is a worse answer than a
-	 * complete one and a much better answer than a wrong one.
-	 */
-	for (unsigned i = 0; i < iommu_fault_logged(); i++) {
-		const struct iommu_fault *f = iommu_fault(i);
-
-		if (f != 0 && f->source == bdf && last_address)
-			*last_address = f->address;
-	}
-
-	return device_fault_count(bdf);
-}
-
-/*
  * ── The fault decode, against the figures ────────────────────────────
  *
  * 🔴 THE ONLY CHECK THIS CODE CAN GET, ON ALMOST EVERY BOOT.  A fault record
@@ -1820,6 +1623,17 @@ struct iommu_granted {
 	uint64_t	pa;
 	uint64_t	iova;
 	uint64_t	size;
+
+	/*
+	 * #599: an identity domain's scatter-gather grant, page by page.  Its
+	 * frames are mapped where they are, so the range [pa, pa + size) is
+	 * not what was mapped, and a revoke that unmapped it would take pages
+	 * this device was given by somebody else and leave these reachable.
+	 * The grant keeps its own copy of the list (kalloc'd, `size' / 4096
+	 * entries), so that the revoke undoes exactly what the grant did
+	 * whoever calls it.  Zero for every other grant.
+	 */
+	uint64_t	*pages;
 };
 
 #define	IOMMU_MAX_GRANTS	16
@@ -1828,7 +1642,6 @@ struct device_domain {
 	uint16_t		bdf;
 	int			used;
 	int			identity;	/* iova == pa, by request */
-	unsigned		faults;		/* refusals, never wrapping */
 	unsigned		ngrants;
 	struct iommu_granted	grants[IOMMU_MAX_GRANTS];
 	struct iommu_domain	domain;
@@ -1861,29 +1674,6 @@ int iommu_can_isolate(void)
 	return 1;
 }
 
-/*
- * ⚠️ A refusal from a device that is in NO domain is counted nowhere, and that
- * is not a gap: a device passing through cannot be refused, so a fault naming
- * one is an engine translating by a description this kernel did not write --
- * which iommu_fault_report() prints, loudly, and no per-device counter would
- * make more legible.
- */
-static void device_fault_seen(uint16_t bdf)
-{
-	for (unsigned i = 0; i < ndevice_domains; i++)
-		if (device_domains[i].used && device_domains[i].bdf == bdf)
-			device_domains[i].faults++;
-}
-
-static unsigned device_fault_count(uint16_t bdf)
-{
-	for (unsigned i = 0; i < ndevice_domains; i++)
-		if (device_domains[i].used && device_domains[i].bdf == bdf)
-			return device_domains[i].faults;
-
-	return 0;
-}
-
 static struct device_domain *domain_slot(uint16_t bdf)
 {
 	for (unsigned i = 0; i < ndevice_domains; i++)
@@ -1893,11 +1683,14 @@ static struct device_domain *domain_slot(uint16_t bdf)
 	return 0;
 }
 
-const struct iommu_domain *iommu_domain_of(uint16_t bdf)
+int iommu_domain_confined(uint16_t bdf)
 {
-	struct device_domain *s = domain_slot(bdf);
+	int confined;
 
-	return s == 0 ? 0 : &s->domain;
+	mutex_lock(&iommu_domain_lock);
+	confined = domain_slot(bdf) != 0;
+	mutex_unlock(&iommu_domain_lock);
+	return confined;
 }
 
 unsigned iommu_domain_count(void)
@@ -1966,7 +1759,6 @@ static struct device_domain *domain_open(uint16_t bdf, int identity)
 	s->identity = identity;
 
 	s->ngrants = 0;
-	s->faults = 0;
 
 	if (!iommu_domain_create(&s->domain, found_vendor,
 				 (uint16_t)(ndevice_domains + 1u), levels))
@@ -2063,16 +1855,35 @@ static int iova_take(struct device_domain *s, uint64_t pa, uint64_t size,
 }
 
 static void grant_record(struct device_domain *s, uint64_t pa, uint64_t iova,
-			 uint64_t size)
+			 uint64_t size, uint64_t *pages)
 {
 	s->grants[s->ngrants].pa = pa;
 	s->grants[s->ngrants].iova = iova;
 	s->grants[s->ngrants].size = size;
+	s->grants[s->ngrants].pages = pages;
 	s->ngrants++;
 }
 
-int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
-		uint64_t *iova_out)
+/*
+ * Unmap an identity grant's frames, the first `n' of `pages'.  Used by the
+ * revoke and by a grant that fails part way: an identity address is the
+ * frame's own, so a page left mapped is reachable by the device whether or
+ * not anybody was told the address (#599).
+ */
+static int identity_unmap(struct device_domain *s, const uint64_t *pages,
+			  unsigned n)
+{
+	int	ok = 1;
+
+	for (unsigned i = 0; i < n; i++)
+		if (!iommu_domain_map(&s->domain, pages[i], pages[i], 4096u,
+				      0, 0))
+			ok = 0;
+	return ok;
+}
+
+static int grant_locked(uint16_t bdf, uint64_t pa, uint64_t size, int read,
+			int write, uint64_t *iova_out)
 {
 	struct device_domain *s = domain_for_grant(bdf);
 	uint64_t iova;
@@ -2089,18 +1900,30 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
 	if (!domain_flush(&s->domain))
 		return 0;
 
-	grant_record(s, pa, iova, size);
+	grant_record(s, pa, iova, size, 0);
 	*iova_out = iova;
 	return 1;
 }
 
-int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
-		      int read, int write, uint64_t *iova_out)
+int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
+		uint64_t *iova_out)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = grant_locked(bdf, pa, size, read, write, iova_out);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
+}
+
+static int grant_pages_locked(uint16_t bdf, const uint64_t *pa, unsigned n,
+			      int read, int write, uint64_t *iova_out,
+			      int *identity_out)
 {
 	struct device_domain *s = domain_for_grant(bdf);
 	uint64_t iova, size = (uint64_t)n * 4096u;
 
-	if (s == 0 || pa == 0 || n == 0 || iova_out == 0)
+	if (s == 0 || pa == 0 || n == 0 || iova_out == 0 || identity_out == 0)
 		return 0;
 
 	if (!iova_take(s, pa[0], size, &iova))
@@ -2109,23 +1932,43 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
 	/*
 	 * 🔴 AN IDENTITY DOMAIN CANNOT TAKE A CONTIGUOUS WINDOW, because its
 	 * addresses are the frames' own and those are scattered.  Each page is
-	 * mapped where it is, and the caller is answered the first one -- so a
-	 * caller must read the page list rather than assume base + i * 4096,
-	 * which is exactly what it had to do before any of this existed.
+	 * mapped where it is, and the caller is told so through *identity_out:
+	 * page i is then at pa[i], not at the answer + i * 4096.
+	 *
+	 * #599: this loop returned inside its first turn, so only pa[0] was
+	 * ever mapped, and the grant was recorded as the contiguous range
+	 * [pa[0], pa[0] + size).  Now every page is mapped, a failure part way
+	 * unmaps what was mapped (an identity address needs no telling to be
+	 * reached), and the record keeps the list for the revoke.
 	 */
-	if (s->identity)
-		for (unsigned i = 0; i < n; i++) {
+	if (s->identity) {
+		uint64_t *pages = (uint64_t *)kalloc((vm_size_t)n *
+						     sizeof(uint64_t));
+		unsigned  i;
+
+		if (pages == 0)
+			return 0;
+
+		for (i = 0; i < n; i++) {
+			pages[i] = pa[i];
 			if (!iommu_domain_map(&s->domain, pa[i], pa[i], 4096u,
 					      read, write))
-				return 0;
-
-			if (!domain_flush(&s->domain))
-				return 0;
-
-			grant_record(s, pa[0], pa[0], size);
-			*iova_out = pa[0];
-			return 1;
+				break;
 		}
+
+		if (i < n || !domain_flush(&s->domain)) {
+			(void) identity_unmap(s, pages, i);
+			(void) domain_flush(&s->domain);
+			kfree((vm_offset_t)pages,
+			      (vm_size_t)n * sizeof(uint64_t));
+			return 0;
+		}
+
+		grant_record(s, pa[0], pa[0], size, pages);
+		*iova_out = pa[0];
+		*identity_out = 1;
+		return 1;
+	}
 
 	/*
 	 * ⚠️ Fails PART WAY and says so, exactly as iommu_domain_map does: the
@@ -2142,9 +1985,23 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
 	if (!domain_flush(&s->domain))
 		return 0;
 
-	grant_record(s, pa[0], iova, size);
+	grant_record(s, pa[0], iova, size, 0);
 	*iova_out = iova;
+	*identity_out = 0;
 	return 1;
+}
+
+int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
+		      int read, int write, uint64_t *iova_out,
+		      int *identity_out)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = grant_pages_locked(bdf, pa, n, read, write, iova_out,
+				identity_out);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
 }
 
 /*
@@ -2159,7 +2016,7 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
  * a device is using at that moment.  What it costs is a table that only grows,
  * for a driver that maps and unmaps the same buffers.
  */
-int iommu_domain_identity(uint16_t bdf)
+static int domain_identity_locked(uint16_t bdf)
 {
 	if (!iommu_can_isolate())
 		return 0;
@@ -2176,7 +2033,17 @@ int iommu_domain_identity(uint16_t bdf)
 	return domain_open(bdf, 1) != 0;
 }
 
-int iommu_domain_release(uint16_t bdf)
+int iommu_domain_identity(uint16_t bdf)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = domain_identity_locked(bdf);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
+}
+
+static int domain_release_locked(uint16_t bdf)
 {
 	struct device_domain *s = domain_slot(bdf);
 	unsigned i;
@@ -2190,11 +2057,18 @@ int iommu_domain_release(uint16_t bdf)
 	if (!ok)
 		return 0;
 
+	/* An identity grant's page list goes with the slot (#599). */
+	for (i = 0; i < s->ngrants; i++)
+		if (s->grants[i].pages != 0)
+			kfree((vm_offset_t)s->grants[i].pages,
+			      (vm_size_t)(s->grants[i].size / 4096u) *
+			      sizeof(uint64_t));
+
 	/*
 	 * ⚠️ The slot goes even though the tables stay.  What the slot records
 	 * is that a device is IN a domain, and after the detach it is not --
-	 * leaving it would make iommu_domain_of() answer with a domain nothing
-	 * points at, which is a lie that reads like bookkeeping.
+	 * leaving it would make iommu_domain_confined() answer yes for a domain
+	 * nothing points at, which is a lie that reads like bookkeeping.
 	 */
 	for (i = 0; i < ndevice_domains; i++)
 		if (&device_domains[i] == s) {
@@ -2206,7 +2080,17 @@ int iommu_domain_release(uint16_t bdf)
 	return 1;
 }
 
-int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
+int iommu_domain_release(uint16_t bdf)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = domain_release_locked(bdf);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
+}
+
+static int revoke_locked(uint16_t bdf, uint64_t pa, uint64_t size)
 {
 	struct device_domain *s = domain_slot(bdf);
 	unsigned i;
@@ -2228,11 +2112,20 @@ int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
 	if (i == s->ngrants)
 		return 0;
 
-	if (!iommu_domain_map(&s->domain, s->grants[i].iova, pa, size, 0, 0))
+	if (s->grants[i].pages != 0) {
+		if (!identity_unmap(s, s->grants[i].pages,
+				    (unsigned)(size / 4096u)))
+			return 0;
+	} else if (!iommu_domain_map(&s->domain, s->grants[i].iova, pa, size,
+				     0, 0))
 		return 0;
 
 	if (!domain_flush(&s->domain))
 		return 0;
+
+	if (s->grants[i].pages != 0)
+		kfree((vm_offset_t)s->grants[i].pages,
+		      (vm_size_t)(size / 4096u) * sizeof(uint64_t));
 
 	/*
 	 * The record goes, and the ADDRESS does not come back.  See next_iova:
@@ -2242,6 +2135,16 @@ int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
 	s->grants[i] = s->grants[s->ngrants - 1];
 	s->ngrants--;
 	return 1;
+}
+
+int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
+{
+	int	ok;
+
+	mutex_lock(&iommu_domain_lock);
+	ok = revoke_locked(bdf, pa, size);
+	mutex_unlock(&iommu_domain_lock);
+	return ok;
 }
 
 int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)

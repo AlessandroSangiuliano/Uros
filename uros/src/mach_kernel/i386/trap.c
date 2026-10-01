@@ -235,6 +235,7 @@
 #include <string.h>
 
 #include <i386/io_emulate.h>
+#include <i386/cn_nolock.h>		/* #599: spl_to_user_seen */
 #if	CBUS
 #include <busses/cbus/cbus.h>
 #endif	/* CBUS */
@@ -1532,3 +1533,44 @@ db_i386_state(
 }
 
 #endif	/* MACH_KDB */
+
+/*
+ * #599: return_to_user (locore.S) found this processor above spllo on its way
+ * back to user mode.  Nothing lowers the level in user mode, and at a raised
+ * level every device interrupt that arrives -- processor 0's tick among them
+ * -- is deferred until the level drops, which in user mode it never does:
+ * the tick stops until the thread enters the kernel again, and stays
+ * stopped if it does not.  That is #599's second hypothesis.  Two paths in the
+ * tree return that way (kern/subsystem.c's last release and
+ * kern/eventcount.c's evc_wait), and neither is believed to run.
+ *
+ * This says so if one does: the first one, without a lock, and the rest are
+ * counted in spl_to_user_count.  It changes nothing.  Lowering the level here
+ * would keep the tick going and hide the path that left it raised -- the
+ * failure this is here to name.
+ */
+volatile unsigned int	spl_to_user_count;
+extern int		curr_ipl[];
+
+void
+spl_to_user_seen(
+	struct i386_saved_state	*regs)
+{
+	int	cpu = cpu_number();
+
+	if (__sync_fetch_and_add(&spl_to_user_count, 1) != 0)
+		return;
+	cn_puts("\nspl: returning to user mode at spl ");
+	cn_dec((unsigned int)curr_ipl[cpu]);
+	cn_puts(" on processor ");
+	cn_dec((unsigned int)cpu);
+	cn_puts(" after trap ");
+	cn_dec(regs->trapno);
+	cn_puts(" (user eip ");
+	cn_hex(regs->eip);
+	cn_puts(", eax ");
+	cn_hex(regs->eax);
+	cn_puts(", thread ");
+	cn_hex((unsigned int)current_thread());
+	cn_puts("); the next ones are counted, not said (#599)\n");
+}

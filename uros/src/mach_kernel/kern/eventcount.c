@@ -167,6 +167,7 @@ evc_wait(
 			assert_wait( 0, TRUE);	/* ifnot race */
 			simple_unlock(&ev->lock);
 			thread_block((void(*)(void))0);
+			splx(s);	/* #599: not back to user mode at splsched */
 			return(KERN_SUCCESS);
 		}
 		ret = KERN_NO_SPACE; /* XXX */

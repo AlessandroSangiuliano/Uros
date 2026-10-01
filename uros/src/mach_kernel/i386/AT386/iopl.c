@@ -142,13 +142,22 @@ io_reg_t iopl_port_list[] = {
 	 * Userspace char_server/ps2.so owns the keyboard; kd0's IRQ
 	 * is hijacked via device_intr_register at attach time. */
 	0x60, 0x64,
-	/* COM1 16550 — 8 register window starting at 0x3F8.
-	 * Userspace char_server/uart.so owns RX + IRQ 4; the kernel
-	 * still polled-writes here from cnputc → com_putc for printf
-	 * and panic, but userspace TX/RX happens here too (#207). */
-	0x3F8, 0x3F9, 0x3FA, 0x3FB, 0x3FC, 0x3FD, 0x3FE, 0x3FF,
-	/* configuration RAM */
-	0x70, 0x71,			/* XXX should not need! */
+	/*
+	 * COM1 16550, 0x3F8-0x3FF: no longer here (#599).  The kernel's
+	 * console writes the chip from any context, and LCR bit 7 turns THR
+	 * into the divisor latch under it, so every access to the chip holds
+	 * com_bank_lock.  A task reaches it through device_io_port_read/write
+	 * -- only the task that claimed the window, one byte at a time, under
+	 * that lock (device_master.c, i386/device_machdep.c) -- and sets the
+	 * divisor through device_io_port_set_divisor.  A bitmap here gave the
+	 * chip to whoever opened "iopl", claim or no claim, and past the lock.
+	 */
+	/*
+	 * configuration RAM, 0x70/0x71: no longer here (#599).  The kernel
+	 * keeps the pair (device_md_io_reserved), whose index port also masks
+	 * NMI, and nothing in userland used it -- this line said "XXX should
+	 * not need!".
+	 */
 	/* game port */
 	0x201,
 	/* sound board */
@@ -271,6 +280,21 @@ iopl_port_forbidden(
 	if (device_md_io_reserved((unsigned int)io_port, width) != 0)
 	    return TRUE;
 #endif	/* !ABLATE_594_UNCHECKED */
+
+	/*
+	 * #599: and the ports only a claimant reaches, through the RPC, under
+	 * the chip's lock: COM1's registers (device_md_io_window).  COM1 left
+	 * the bitmap, and a read here was then a bare inb by any holder of
+	 * the iopl device -- one that acknowledges uart.so's THRE interrupt
+	 * (IIR), takes a byte it was owed (RBR) or clears its line errors
+	 * (LSR) (found in review).
+	 */
+	{
+	    unsigned int wb, wc;
+
+	    if (device_md_io_window((unsigned int)io_port, width, &wb, &wc))
+		return TRUE;
+	}
 
 #if 0	/* we only read from these... it should be OK */
 

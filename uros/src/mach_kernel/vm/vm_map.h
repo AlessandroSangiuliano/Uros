@@ -693,6 +693,17 @@ extern kern_return_t	vm_map_remove(
 				vm_offset_t	end,
 				boolean_t	flags);
 
+/*
+ * Deallocate the pages of [start, start + n * PAGE_SIZE) that still map the
+ * frames pa[0..n-1], page for page, and nothing else (#599).
+ */
+extern kern_return_t	vm_map_remove_frames(
+				vm_map_t		map,
+				vm_offset_t		start,
+				const vm_offset_t	*pa,
+				unsigned int		n,
+				boolean_t		flags);
+
 /* Steal all the pages from a vm_map_copy page_list */
 extern void		vm_map_copy_steal_pages(
 				vm_map_copy_t	copy);

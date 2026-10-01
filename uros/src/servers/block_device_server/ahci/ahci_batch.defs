@@ -104,9 +104,20 @@ type dma_sg_addr_t = array[*:32] of vm_address_t;
  * request, so what is missing is only the consent, and consent does not change
  * between reads.
  *
+ * #599: ON THE HANDLE IT IS SENT ON, and used for that handle's transfers
+ * only -- another client of the same disk cannot spend it.  It must be a DMA
+ * buffer's capability (KERN_INVALID_ARGUMENT for a token of the wrong size,
+ * CAP_ERR_* for one that does not verify or names another kind); a handle
+ * holds four, and a fifth is KERN_NO_SPACE, never an eviction; the same
+ * capability sent again replaces itself.  Every page of every physical
+ * transfer is then asked of the kernel for the direction it needs, and a page
+ * no capability on the handle covers is refused before any DMA.
+ *
  * ⚠️ The caller keeps the capability.  This is a delegation of USE, not of
- * ownership: revoking the capability tears the mapping down through
- * urmach_cap_revoke, and this server is not asked and does not have to agree.
+ * ownership.  Revoking the capability takes the device's mapping of the
+ * buffer down in the kernel, and freeing the buffer does too; either is
+ * refused on the next request.  A transfer already programmed is not
+ * recalled.
  */
 routine device_register_dma(
 		device		: mach_port_t;

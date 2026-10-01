@@ -16,9 +16,22 @@
  * be safe from contexts that bypass printf() (panic prefix, kdb
  * single-step prints).  Holding a separate lock costs nothing on UP
  * and is correct on MP.
+ *
+ * 🔴 Except against the processor holding it (#599).  printf() runs in
+ * interrupt handlers, and on i386 the spin lock leaves interrupts as the
+ * caller had them: a handler whose printf() reached klog_putc while its own
+ * interrupted thread held klog_lock -- in klog_putc, or across klog_read()'s
+ * copy -- spun on it for ever before its EOI, and nothing in the interrupt's
+ * priority class, the tick included, was delivered again.  So the holder
+ * writes its number in klog_lock_holder, and a klog_putc that finds its own
+ * number is nested inside the holder and leaves the ring alone: that byte
+ * still reaches the console through klog_cnputc(), and the log misses it.
+ * Masking interrupts for the hold instead is not what splhigh()/splx() do
+ * here: splx() turns them back on, whatever the caller had.
  */
 
 #include <kern/lock.h>
+#include <kern/cpu_number.h>	/* klog_lock_holder, #599 */
 #include <kern/klog.h>
 #include <kern/host.h>
 #include <string.h>
@@ -29,6 +42,21 @@ static natural_t		klog_head;
 static natural_t		klog_tail;
 static int		klog_ready;
 decl_simple_lock_data(static, klog_lock)
+static volatile int	klog_lock_holder = -1;	/* #599, see above */
+
+static void
+klog_lock_take(void)
+{
+	simple_lock(&klog_lock);
+	klog_lock_holder = cpu_number();
+}
+
+static void
+klog_lock_drop(void)
+{
+	klog_lock_holder = -1;
+	simple_unlock(&klog_lock);
+}
 
 void
 klog_init(void)
@@ -45,12 +73,14 @@ klog_putc(char c)
 		 * old kernel had — these chars went only to serial. */
 		return;
 	}
-	simple_lock(&klog_lock);
+	if (klog_lock_holder == cpu_number())
+		return;		/* nested inside the holder: see above */
+	klog_lock_take();
 	klog_buf[klog_head % KLOG_BUF_SIZE] = c;
 	klog_head++;
 	if ((natural_t)(klog_head - klog_tail) > KLOG_BUF_SIZE)
 		klog_tail = klog_head - KLOG_BUF_SIZE;
-	simple_unlock(&klog_lock);
+	klog_lock_drop();
 }
 
 kern_return_t
@@ -71,7 +101,7 @@ klog_read(natural_t start,
 		return KERN_SUCCESS;
 	}
 
-	simple_lock(&klog_lock);
+	klog_lock_take();
 
 	/* If reader's cursor is outside [tail, head] (more than
 	 * KLOG_BUF_SIZE bytes behind, or ahead of head), snap it to
@@ -91,7 +121,7 @@ klog_read(natural_t start,
 	*count = want;
 	*next = start + want;
 
-	simple_unlock(&klog_lock);
+	klog_lock_drop();
 	return KERN_SUCCESS;
 }
 
@@ -102,9 +132,9 @@ klog_cursor(void)
 
 	if (!klog_ready)
 		return 0;
-	simple_lock(&klog_lock);
+	klog_lock_take();
 	now = klog_head;
-	simple_unlock(&klog_lock);
+	klog_lock_drop();
 	return now;
 }
 

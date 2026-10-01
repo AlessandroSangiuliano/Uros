@@ -147,6 +147,9 @@ extern void		user_trap(
 
 extern void		i386_astintr(int preemption);
 
+extern void		spl_to_user_seen(			/* #599 */
+				struct i386_saved_state	*regs);
+
 #endif	/* !ASSEMBLER && MACH_KERNEL */
 
 #endif	/* _I386_TRAP_H_ */

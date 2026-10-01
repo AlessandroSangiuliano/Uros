@@ -38,6 +38,8 @@
 #include <i386/pic.h>			/* master_ocw / slaves_ocw */
 #include <i386/io_map_entries.h>	/* io_map */
 #include <kern/misc_protos.h>		/* printf */
+#include <kern/cpu_number.h>		/* cpu_number, #599 counts */
+#include <i386/cn_nolock.h>		/* #599: said from interrupt context */
 
 extern unsigned int	mp_ioapic_phys_get(int idx);
 extern int		mp_ioapic_count_get(void);
@@ -49,10 +51,11 @@ extern i386_ioport_t	master_ocw, slaves_ocw;
 /*
  * Legacy ISA IRQ count.  We program one redirection-table entry per IRQ,
  * mapping GSI n -> vector 0x40+n (the PICM_VECTBASE the 8259 used, so the
- * interrupt.S dispatch is unchanged).  ISA interrupt-source overrides
- * (e.g. IRQ0 -> GSI2 on QEMU) are not applied: this kernel is event-driven
- * and never arms the PIT, so only the device lines (kbd/com/AHCI/mouse,
- * GSI == IRQ on every machine we target) matter.
+ * interrupt.S dispatch is unchanged).  One interrupt-source override is
+ * applied, hardcoded: IRQ0 -> GSI2, because the 8254 on IRQ 0 is processor
+ * 0's tick (rtclock.c) and arrives on pin 2 on every PC board (see
+ * gsi_for_irq).  The MADT's other overrides are not parsed; the device lines
+ * (kbd/com/AHCI/mouse) are GSI == IRQ on every machine we target.
  */
 #define IOAPIC_ISA_IRQS		16
 
@@ -74,6 +77,35 @@ static vm_offset_t	ioapic_base;	/* MMIO virtual base of I/O APIC #0 */
 static unsigned int	ioapic_redirs;	/* number of redirection entries */
 static unsigned char	ioapic_dest;	/* boot CPU physical APIC ID */
 
+#ifdef ABLATE_599_WIDEN
+/*
+ * #599 ablation: ABLATE_599_WIDEN reads of port 0x80 (each a VM exit under
+ * KVM) in each gap of the pair -- after a select, between a read and the
+ * select for the write -- on the other processors only.  Processor 0 keeps
+ * its own read-modify-writes, which are the tick's defer and replay, as
+ * short as they are.  If the pair's race is what stops the tick, this makes
+ * it frequent at four processors and leaves it absent at one.
+ */
+static void
+ioapic_widen(void)
+{
+	static int	said;
+	int		w;
+
+	if (cpu_number() == master_cpu)
+		return;
+	if (!said) {
+		said = 1;
+		cn_puts("\nioapic: #599 ablation -- the other processors wait in "
+			"each gap of the select/window pair\n");
+	}
+	for (w = 0; w < ABLATE_599_WIDEN; w++)
+		(void) inb(0x80);
+}
+#else
+#define	ioapic_widen()
+#endif
+
 /*
  * Indexed register access: write the register number to RSELECT, then read
  * or write the value through RWINDOW.
@@ -82,6 +114,7 @@ static unsigned int
 ioapic_read(unsigned int reg)
 {
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
+	ioapic_widen();
 	return *(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW);
 }
 
@@ -89,7 +122,110 @@ static void
 ioapic_write(unsigned int reg, unsigned int value)
 {
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
+	ioapic_widen();
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW) = value;
+}
+
+/*
+ * #599: how often the select/window pair is used for a read-modify-write, on
+ * which processor, and how often one started while another was still
+ * inside.  Nothing in this file serialises the pair, and that is #599's
+ * first hypothesis for processor 0's stopped tick: an interleaving can leave
+ * one pin holding another pin's entry.  An overlap is the precondition, not
+ * the corruption -- which entry ends where depends on how the two sequences
+ * interleave -- so it is counted in every boot, where a stop is too rare to
+ * wait for.  The first overlap of a boot is also said, without a lock.  Read
+ * by the clock watch's line and scripts/i386-clock-snapshot.py.
+ */
+unsigned int		ioapic_rmw_count[NCPUS];
+volatile unsigned int	ioapic_inside;
+volatile unsigned int	ioapic_overlaps;
+
+/*
+ * 🔴 THE PAIR IS ONE FOR THE WHOLE MACHINE, AND A READ-MODIFY-WRITE SELECTS
+ * TWICE (#599).  Two processors interleaving inside it each read or write the
+ * other's pin.  The widening arm (UROS_ABLATE_599_WIDEN) showed both ways it
+ * ends: pin 2 -- the 8254 -- holding pin 11's entry, so hardclock never ran
+ * again while everything else did; and AHCI's pin holding line 5's entry,
+ * whose vector had no handler and stopped the tick through intnull's printf.
+ * Processor 0 masks and unmasks from interrupt context (the deferral and its
+ * replay), and the others from thread context (device_intr_enable after every
+ * AHCI interrupt), so the race needs nothing unusual to happen.
+ *
+ * So every access sequence -- a read-modify-write, the two writes of an entry
+ * -- holds ioapic_pair_lock, with interrupts off, the pattern #597 gave the
+ * PCI configuration pair (i386/pci/pcibios.c):
+ *
+ *   - a leaf: nothing is taken or waited on while it is held, so it cannot
+ *     be part of a cycle;
+ *   - interrupts off for the hold, so an interrupt on the same processor
+ *     cannot start a sequence inside one (the deferral path masks from
+ *     interrupt context).  Every caller already had them off; this does not
+ *     rely on it.
+ *
+ * ioapic_lock_waits counts how often the lock was found taken: a lock nobody
+ * ever waits on is one whose absence could not have been noticed either.
+ * The overlap count above is taken inside the lock, where it can only stay 0.
+ */
+static volatile unsigned char	ioapic_pair_lock;
+volatile unsigned int		ioapic_lock_waits;
+
+static unsigned int
+ioapic_pair_enter(void)
+{
+	unsigned int	flags;
+	unsigned char	busy;
+	int		waited = 0;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+#ifndef ABLATE_599_NO_LOCK
+	for (;;) {
+		busy = 1;
+		__asm__ volatile("xchgb %0, %1"
+				 : "+q" (busy), "+m" (ioapic_pair_lock)
+				 : : "memory");
+		if (busy == 0)
+			break;
+		waited = 1;
+		__asm__ volatile("pause");
+	}
+	if (waited)
+		__sync_fetch_and_add(&ioapic_lock_waits, 1);
+#endif
+	return flags;
+}
+
+static void
+ioapic_pair_leave(unsigned int flags)
+{
+#ifndef ABLATE_599_NO_LOCK
+	__asm__ volatile("" : : : "memory");
+	ioapic_pair_lock = 0;
+#endif
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
+static __inline__ int
+ioapic_enter(void)
+{
+	ioapic_rmw_count[cpu_number()]++;
+	if (__sync_fetch_and_add(&ioapic_inside, 1) == 0)
+		return 0;
+	return __sync_fetch_and_add(&ioapic_overlaps, 1) == 0;
+}
+
+static void
+ioapic_leave(int first, unsigned int gsi)
+{
+	__sync_fetch_and_sub(&ioapic_inside, 1);
+	if (!first)
+		return;
+	cn_puts("\nioapic: a read-modify-write of pin ");
+	cn_dec(gsi);
+	cn_puts(" on processor ");
+	cn_dec((unsigned int)cpu_number());
+	cn_puts(" started while another was inside the select/window pair "
+		"(#599); the next ones are counted, not said\n");
 }
 
 /*
@@ -102,9 +238,12 @@ static void
 ioapic_write_rte(unsigned int irq, unsigned int low)
 {
 	unsigned int reg = IOA_R_REDIRECTION + 2 * irq;
+	unsigned int flags;
 
+	flags = ioapic_pair_enter();
 	ioapic_write(reg + 1, (unsigned int)ioapic_dest << 24);
 	ioapic_write(reg, low);
+	ioapic_pair_leave(flags);
 }
 
 /*
@@ -129,7 +268,8 @@ gsi_for_irq(unsigned int irq)
 void
 ioapic_mask_irq(unsigned int irq)
 {
-	unsigned int reg, low, gsi;
+	unsigned int reg, low, gsi, flags;
+	int first;
 
 	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
 		return;
@@ -137,14 +277,20 @@ ioapic_mask_irq(unsigned int irq)
 	if (gsi >= ioapic_redirs)
 		return;
 	reg = IOA_R_REDIRECTION + 2 * gsi;
+	flags = ioapic_pair_enter();
+	first = ioapic_enter();
 	low = ioapic_read(reg);
+	ioapic_widen();
 	ioapic_write(reg, low | IOA_R_R_MASKED);
+	ioapic_leave(first, gsi);
+	ioapic_pair_leave(flags);
 }
 
 void
 ioapic_unmask_irq(unsigned int irq)
 {
-	unsigned int reg, low, gsi;
+	unsigned int reg, low, gsi, flags;
+	int first;
 
 	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
 		return;
@@ -152,8 +298,13 @@ ioapic_unmask_irq(unsigned int irq)
 	if (gsi >= ioapic_redirs)
 		return;
 	reg = IOA_R_REDIRECTION + 2 * gsi;
+	flags = ioapic_pair_enter();
+	first = ioapic_enter();
 	low = ioapic_read(reg);
+	ioapic_widen();
 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
+	ioapic_leave(first, gsi);
+	ioapic_pair_leave(flags);
 }
 
 /*
@@ -206,7 +357,12 @@ ioapic_init(void)
 	ioapic_dest = mp_bsp_lapic_id_get();
 
 	/* Max redirection entry is in version reg bits 16-23 (count = max+1). */
-	version = ioapic_read(IOA_R_VERSION);
+	{
+		unsigned int	flags = ioapic_pair_enter();
+
+		version = ioapic_read(IOA_R_VERSION);
+		ioapic_pair_leave(flags);
+	}
 	ioapic_redirs = ((version >> IOA_R_VERSION_ME_SHIFT) &
 			 IOA_R_VERSION_ME_MASK) + 1;
 	if (ioapic_redirs > IOAPIC_ISA_IRQS)

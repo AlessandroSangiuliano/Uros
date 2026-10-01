@@ -328,8 +328,8 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(not_implemented, 0),		/* 35 */
 	MACH_TRAP(not_implemented, 0),		/* 36 */
 #endif	/* i386 */
-	MACH_TRAP(urmach_cap_verify, 4),	/* 37 */
-	MACH_TRAP(urmach_cap_use, 4),		/* 38 */
+	MACH_TRAP(urmach_cap_verify, 5),	/* 37: + type, #599 */
+	MACH_TRAP(urmach_cap_use, 5),		/* 38: + type, #599 */
 	MACH_TRAP(urmach_cap_revoke, 2),	/* 39 */
 
 	MACH_TRAP(urmach_cap_register, 1),	/* 40 */

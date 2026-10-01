@@ -44,7 +44,8 @@
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <cpu/quiet_census.h>
-#include <ddb/cons_cost.h>	/* #567: one line about the console, once a boot */
+#include <cpu/percpu.h>	/* #599: returns to ring 3, all processors */
+#include <ddb/cons_cost.h>	/* #567: the console's counts, with each report */
 
 /*
  * How long "quiet" is.
@@ -57,8 +58,8 @@
  * does not matter as long as it is far longer than any pause a working boot
  * takes.
  *
- * ⚠️ Reset by machine_idle_exit(), so a processor that finds work starts the
- * count again.  Without that reset this would eventually fire on a healthy
+ * ⚠️ Reset by work (quiet_work(): a return to ring 3 on any processor since
+ * the last pass -- #599), so the count starts again.  Without that reset this would eventually fire on a healthy
  * system that simply had a slow patch, and a census of a system that is about
  * to carry on is a false report.
  */
@@ -84,7 +85,9 @@
 #define	QUIET_PASSES	500
 
 /*
- * The one processor that owns the count, on both sides.
+ * The one processor that owns the count.  Since #599 the work that resets it
+ * is looked for on every processor -- by this processor, in its own pass --
+ * so there is still one writer.
  *
  * 🔥 The version before this counted here and let every processor reset, and
  * it reported nothing at all -- not even the line it printed about itself.
@@ -103,15 +106,49 @@ static int census_streq(const char *a, const char *b)
 }
 
 static unsigned long	quiet_passes;
+static unsigned long	quiet_all_passes;		/* #599: never reset */
+static unsigned long	quiet_next_report = QUIET_PASSES / 5;
 static unsigned long	quiet_resets;
 static unsigned long	quiet_peak;
 static int		quiet_said;
 
-void
-quiet_census_busy(int mycpu)
+/*
+ * #476, #599: what counts as work.  It used to be the idle loop handing
+ * processor 0 a thread, any thread -- and the kernel's own periodic threads,
+ * the TSC watchdog every second and the IOMMU fault reporter every 100 ms,
+ * wake it whatever the machine is doing (through the softclock thread, as
+ * every timed wakeup does).  The count never reached QUIET_PASSES: the boot
+ * that stopped with every thread waiting (599-caccia2-2) printed no census in
+ * 90 s of quiet, and only gdb named the lost wakeup.  Registering those two
+ * threads as exempt did not help, for the softclock reason (found in review).
+ *
+ * So the question is asked of ring 3, on every processor: a return to user
+ * mode since the last pass (percpu's user_returns, counted at the exits to
+ * ring 3 -- trap_common's, thread_frame_return and SYSRET's; not the NMI/#DB
+ * path's, which a user loop's tick makes up for).  A user loop that never
+ * calls the kernel returns at every tick that interrupts it; a user thread
+ * stuck in the kernel, spinning or asleep, does not.
+ *
+ * ⚠️ WHAT IT CANNOT SEE: a stop that leaves any user thread returning to
+ * ring 3.  The measure is summed over every processor, so a poller keeps it
+ * far below the threshold -- char_server's klog forwarder, which polls every
+ * 10 ms once uart.so holds COM1 on x86-64, is one (found in review): after
+ * each of its returns the count starts again and climbs only through the
+ * idle loop's spin before it halts (IDLE_HLT_GRACE, 64 passes), so the peak
+ * the census reports under it is about that.  The census
+ * names a machine on which ring 3 has gone quiet everywhere, which is the
+ * shape of 599-caccia2-2; a stop of some tasks while others poll needs a
+ * different instrument -- a wait that outlives a bound -- and is not this.  A first version
+ * asked whether a user task's thread was given a processor or was on one
+ * now, which a thread spinning in the kernel on another processor answered
+ * for ever, and which followed another processor's thread with nothing
+ * keeping it alive (found in review).  Kernel threads are not work here.
+ */
+static uint64_t	quiet_returns;
+
+static void
+quiet_work(void)
 {
-	if (mycpu != QUIET_CPU)
-		return;
 	if (quiet_passes > quiet_peak)
 		quiet_peak = quiet_passes;
 	quiet_resets++;
@@ -235,44 +272,65 @@ quiet_census_pass(int mycpu)
 	if (quiet_said)
 		return;
 
-	/*
-	 * ⚠️ A word about itself, rarely, because the first two versions of
-	 * this both reported NOTHING and an absence cannot say which of its
-	 * two causes it had: cpu 0 not reaching the threshold, or the shared
-	 * counter being reset out from under it by another processor finding
-	 * work.  The peak and the reset count separate those, and one line
-	 * every thousand passes is not enough output to matter.
-	 */
-	/*
-	 * ⚠️ Every hundred, not every thousand.  It was every thousand while
-	 * the threshold below was three thousand; lowering the threshold to
-	 * five hundred left this line unreachable -- the census fires first,
-	 * every time -- so the one thing that could explain a silent instrument
-	 * had become part of the silence.  The interval has to stay under the
-	 * threshold, which is why it is written in terms of it.
-	 */
-	if ((++quiet_passes % (QUIET_PASSES / 5)) == 0) {
-		printf("quiet_census: passes=%lu peak=%lu resets=%lu\n",
-		       quiet_passes, quiet_peak, quiet_resets);
+	{
+		uint64_t	r = percpu_user_returns();
 
-		/*
-		 * And, once, what the console did over this boot (#567).
-		 *
-		 * Here because this is where an ordinary run ends: the harness
-		 * stops a kernel that has nothing left to do rather than
-		 * waiting for it to halt, so halt_cpu()'s copy of this is
-		 * never reached by the runs that matter.  A machine with
-		 * enough idle passes behind it to print this line has had its
-		 * clock tick and its idle loop pass many times, which is
-		 * exactly the claim the line is there to check.
-		 */
-		cons_ring_report();
+		if (r != quiet_returns) {
+			quiet_returns = r;
+			quiet_work();
+		}
+	}
+
+	/*
+	 * ⚠️ A word about itself, rarely, because the first versions of this
+	 * reported NOTHING and an absence cannot say which cause it had: cpu 0
+	 * not reaching the threshold, or the count being reset by work.  The
+	 * peak and the reset count separate those -- but only if the line is
+	 * printed whatever the count does.  #599: it was printed when the count
+	 * reached a hundred, so a count that work kept resetting (a user poller
+	 * that returns to ring 3 every 10 ms: char_server's klog forwarder)
+	 * silenced the one line meant to explain a silent census (found in
+	 * review).  So it is driven by every idle pass since boot, which work
+	 * does not reset, a line per doubling: a long idle run costs a handful.
+	 *
+	 * ⚠️ And the first of them comes at a fifth of the threshold, written in
+	 * terms of it.  quiet_all_passes is never below quiet_passes, so the
+	 * first line always comes before the census can fire.  The first version
+	 * of this started at a thousand, above the threshold of five hundred: a
+	 * boot quiet from the start (-S, or a wedge early in the boot) fired the
+	 * census first, and quiet_said then kept this line from ever being
+	 * printed (found in review).  The same happened once before, when the
+	 * threshold came down from three thousand under an interval of a
+	 * thousand.
+	 *
+	 * With it, the console's counts so far (#567, #568), one line: the
+	 * kernel cannot tell which moment ends an ordinary run -- the harness
+	 * stops a kernel that has nothing left to do rather than waiting for it
+	 * to halt -- so each report carries them, and what came after the last
+	 * report is in none.  It begins with this line's word, so the harness
+	 * reads it as idle chatter: a line it counted as progress would put
+	 * off, at every doubling, its verdict on a boot that has stopped.
+	 * halt_cpu() says the final copy (cons_ring_report).
+	 */
+	quiet_passes++;
+	if (++quiet_all_passes == quiet_next_report) {
+		quiet_next_report *= 2;
+		printf("quiet_census: passes=%lu peak=%lu resets=%lu (after %lu "
+		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
+		       quiet_resets, quiet_all_passes);
+		cons_ring_so_far("quiet_census: ");
 	}
 
 	if (quiet_passes < QUIET_PASSES)
 		return;
 
 	quiet_said = 1;
+
+	/*
+	 * The console's counts first (#567): the census below is what a reader
+	 * of a stopped boot looks at, and the bytes still queued are part of it.
+	 */
+	cons_ring_so_far("quiet_census: ");
 
 	printf("quiet_census (#476): the machine has been idle for %lu idle "
 	       "passes; %d tasks and %d threads\n",
@@ -478,9 +536,10 @@ quiet_census_pass(int mycpu)
 	 * 🔥 AND WHO IS ON EACH PROCESSOR, WITHOUT WHICH "IDLE" IS HALF A WORD
 	 * (#558).
 	 *
-	 * The count above is cpu 0's alone -- quiet_census_busy() resets it when
-	 * THIS processor finds work -- so "the machine has been idle" is really
-	 * "cpu 0 has been idle".  A thread listed as TH_RUN on no run queue then
+	 * The count above is of cpu 0's idle passes, and since #599 it is reset
+	 * only by a return to ring 3 on ANY processor -- a thread running or
+	 * spinning in kernel mode, user task's or kernel's, resets nothing, so
+	 * either can be the one found RUNNING below.  A thread listed as TH_RUN on no run queue then
 	 * has two readings that the list cannot tell apart: lost between a
 	 * wakeup that claimed it and a dispatch that never came, or RUNNING on
 	 * another processor all along, spinning somewhere.

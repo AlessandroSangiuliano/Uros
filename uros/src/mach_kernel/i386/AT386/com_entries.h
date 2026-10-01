@@ -55,4 +55,7 @@ extern void		com_putc(
 extern int		com_getc(
 				boolean_t	wait);
 extern boolean_t	com_is_char(void);
+/* #599: DDB's outermost entry (1) and exit (0): LCR saved, DLAB closed, LCR restored */
+extern void		com_ddb_session(
+				int		entering);
 

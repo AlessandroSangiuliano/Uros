@@ -16,6 +16,7 @@
  */
 
 #include <cpu/regs.h>
+#include <cpu/percpu.h>	/* #599: PERCPU_USER_RETURNS */
 
 	.section .text
 	.code64
@@ -226,6 +227,7 @@ trap_common:
 	 */
 	testb	$3, 24(%rsp)
 	jz	2f
+	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
 2:
 	addq	$16, %rsp		/* drop the vector and error code */
@@ -519,6 +521,7 @@ restart_mach_syscall:
  */
 thread_frame_return:
 	RESTORE_REGS
+	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
 	addq	$16, %rsp		/* drop the vector and error code */
 	iretq

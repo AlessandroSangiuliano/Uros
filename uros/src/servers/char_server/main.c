@@ -279,8 +279,8 @@ main(int argc, char **argv)
 
 	/* Grant port-I/O privilege, where the target has any to grant.
 	 *
-	 * A module that executes its own `in'/`out' -- ps2.so, and uart.so on
-	 * i386 -- needs the I/O permission bitmap, and device_open("iopl") is
+	 * A module that executes its own `in'/`out' -- ps2.so and ps2_mouse.so
+	 * on i386 -- needs the I/O permission bitmap, and device_open("iopl") is
 	 * how it is asked for: the kernel checks for this send right before it
 	 * will map a port range into the thread's TSS.  Holding the port is
 	 * enough; no further calls are made on it.
@@ -291,7 +291,7 @@ main(int argc, char **argv)
 	 * modules will fault", which was true of every module when it was
 	 * written and is no longer true of uart.so: since #497 it reaches COM1
 	 * through device_io_port_read/write on the device master port, which
-	 * needs nothing from here.  A diagnostic that names a consequence has
+	 * needs nothing from here -- and since #599 it does so on i386 too.  A diagnostic that names a consequence has
 	 * to be corrected when the consequence stops following.
 	 */
 	{

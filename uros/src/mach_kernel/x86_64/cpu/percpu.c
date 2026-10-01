@@ -24,6 +24,26 @@ static uint64_t percpu_va(uint32_t cpu_id)
 	return PERCPU_BASE + (uint64_t)cpu_id * PAGE_SIZE_4K;
 }
 
+/*
+ * #476, #599: the quiet census's measure of work -- returns to ring 3, summed
+ * over the running processors.  Blocks are found by processor number, as
+ * context_fpu_counts() finds them: on this target the number is the APIC id
+ * and the block's index.  Only counters are read: no other processor's thread
+ * is followed, since one that exits can be freed under the reader.
+ */
+uint64_t percpu_user_returns(void)
+{
+	uint64_t n = 0;
+
+	for (int i = 0; i < NCPUS; i++) {
+		if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+			continue;
+		n += ((struct percpu *)(uintptr_t)percpu_va((uint32_t) i))
+			->user_returns;
+	}
+	return n;
+}
+
 void percpu_alloc(uint32_t cpu_id)
 {
 	uint64_t va = percpu_va(cpu_id);

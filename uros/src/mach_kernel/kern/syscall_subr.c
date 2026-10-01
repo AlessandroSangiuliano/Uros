@@ -153,6 +153,9 @@
 #include <kern/syscall_subr.h>
 #include <mach/mach_host_server.h>
 #include <mach/mach_syscalls.h>
+#ifdef	ABLATE_599_SPL_LEAK
+#include <i386/clock_watch.h>
+#endif
 
 /* Forwards */
 void	thread_depress_priority(
@@ -289,7 +292,14 @@ syscall_thread_switch(
 	    break;
 
 	case SWITCH_OPTION_WAIT:
-	    thread_will_wait_with_timeout(cur_thread, option_time);
+	    /*
+	     * #599: declared below, once the hint is dealt with.  The hint
+	     * path takes the space's lock, the port's mutex and the
+	     * activation's lock, any of which can sleep, and a thread that
+	     * sleeps with its own wait declared loses it to the lock's wakeup
+	     * -- and, with the preemption level that declaration now raises,
+	     * raises it a second time and gives it back once.
+	     */
 	    break;
 
 	default:
@@ -343,6 +353,9 @@ syscall_thread_switch(
 						mp_enable_preemption();
 					}
 					counter(c_thread_switch_handoff++);
+					if (option == SWITCH_OPTION_WAIT)
+						thread_will_wait_with_timeout(
+							cur_thread, option_time);
 					thread_run((void(*)(void))SAFE_THR_DEPRESS, thread);
 
 					did_handoff = 1;
@@ -367,6 +380,8 @@ syscall_thread_switch(
      *	of timesharing threads).
      */
     if (!did_handoff) {
+    if (option == SWITCH_OPTION_WAIT)
+	thread_will_wait_with_timeout(cur_thread, option_time);
     mp_disable_preemption();
     myprocessor = current_processor();
 #if	NCPUS > 1
@@ -374,8 +389,8 @@ syscall_thread_switch(
      * #460: the "nothing else is runnable, so don't bother blocking"
      * shortcut is only sound while THIS thread is still runnable.
      *
-     * SWITCH_OPTION_WAIT has already called thread_will_wait_with_timeout()
-     * above, which sets TH_WAIT and arms the timer.  Skipping the block then
+     * SWITCH_OPTION_WAIT has just called thread_will_wait_with_timeout(),
+     * which sets TH_WAIT and arms the timer.  Skipping the block then
      * returns to user space with TH_WAIT still set -- and the
      * reset_timeout_check() a few lines below immediately disarms the timer
      * that was the only thing left to wake it.  The thread keeps running,
@@ -422,6 +437,9 @@ syscall_thread_switch(
 	if (option == SWITCH_OPTION_IDLE)
 	    return(KERN_ABORTED);
     }
+#ifdef	ABLATE_599_SPL_LEAK
+    clock_watch_ablate_spl_leak();	/* #599, i386: leave the level raised once */
+#endif
     return(KERN_SUCCESS);
 }
 

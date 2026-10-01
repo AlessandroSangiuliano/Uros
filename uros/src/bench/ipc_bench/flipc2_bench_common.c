@@ -37,27 +37,36 @@ flipc2_get_time(tvalspec_t *tv)
     clock_get_time(flipc2_clock_port, tv);
 }
 
-unsigned long
+/*
+ * Elapsed nanoseconds between two tvalspec_t values.
+ *
+ * 64 bits, and so is every value computed from it: a 32-bit unsigned long
+ * wraps at 4.295 s on i386 and prints a plausible wrong number (#599).  Both
+ * differences are taken signed (tv_sec is unsigned), so a clock that steps
+ * back comes out right modulo 2^64.
+ */
+unsigned long long
 flipc2_elapsed_ns(const tvalspec_t *before, const tvalspec_t *after)
 {
-    unsigned long ns;
-    ns  = (unsigned long)(after->tv_sec  - before->tv_sec)  * 1000000000UL;
-    ns += (unsigned long)(after->tv_nsec - before->tv_nsec);
+    unsigned long long ns;
+    ns  = (unsigned long long)((long long)after->tv_sec -
+                               (long long)before->tv_sec) * 1000000000ULL;
+    ns += (unsigned long long)(long long)(after->tv_nsec - before->tv_nsec);
     return ns;
 }
 
 void
-flipc2_print_result(const char *label, unsigned long total_ns, int iters)
+flipc2_print_result(const char *label, unsigned long long total_ns, int iters)
 {
-    unsigned long ns_per_op = total_ns / (unsigned long)iters;
+    unsigned long long ns_per_op = total_ns / (unsigned long)iters;
 
     if (ns_per_op >= 1000) {
-        unsigned long us_whole = ns_per_op / 1000;
-        unsigned long us_frac  = (ns_per_op % 1000) / 10;
-        printf("  %-36s %5lu.%02lu us/op  (%d iters, %lu us)\n",
+        unsigned long long us_whole = ns_per_op / 1000;
+        unsigned long long us_frac  = (ns_per_op % 1000) / 10;
+        printf("  %-36s %5llu.%02llu us/op  (%d iters, %llu us)\n",
                label, us_whole, us_frac, iters, total_ns / 1000);
     } else {
-        printf("  %-36s %5lu    ns/op  (%d iters, %lu us)\n",
+        printf("  %-36s %5llu    ns/op  (%d iters, %llu us)\n",
                label, ns_per_op, iters, total_ns / 1000);
     }
 }
