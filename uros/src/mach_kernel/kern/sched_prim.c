@@ -1467,6 +1467,8 @@ thread_bind(
 #endif
 
 #if	S319_INSTRUMENT
+#include <kern/tsc.h>		/* urmach_tsc (#537) */
+
 struct s319_stat {
 	unsigned long long	psetlock_cyc;	/* cycles acquiring pset->runq.lock */
 	unsigned long		psetlock_cnt;	/* # acquisitions (thread_select) */
@@ -1477,13 +1479,11 @@ struct s319_stat {
 	char			pad[64];	/* isolate each entry to its own line */
 } s319[NCPUS] __attribute__((aligned(64)));
 
-static inline unsigned long long
-s319_rdtsc(void)
-{
-	unsigned int	lo, hi;
-	__asm__ volatile("rdtsc" : "=a" (lo), "=d" (hi));
-	return ((unsigned long long) hi << 32) | lo;
-}
+/*
+ * The clock is <kern/tsc.h>'s (#537).  This had its own copy, the one of three
+ * without the "memory" clobber or, on x86-64, the fence -- so a lock acquire's
+ * cycles were read by a different clock than the profiles' columns.
+ */
 
 void
 s319_dump(void)
@@ -1563,9 +1563,9 @@ thread_select(
 		unsigned long		_sd;
 		register int		_sc;
 
-		_s0 = s319_rdtsc();
+		_s0 = urmach_tsc();
 		simple_lock(&pset->runq.lock);
-		_s1 = s319_rdtsc();
+		_s1 = urmach_tsc();
 		_sd = (unsigned long) (_s1 - _s0);
 		_sc = cpu_number();
 		s319[_sc].psetlock_cyc += _sd;
