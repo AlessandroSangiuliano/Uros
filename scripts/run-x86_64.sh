@@ -1007,7 +1007,14 @@ QPID=$!
 # any output as progress would keep a wedged boot alive until the hard cap.
 # What is excluded is named here rather than pattern-matched loosely -- an
 # exclusion that grows silently is how a watchdog stops being one.
-IDLE_CHATTER='quiet_census:'
+#
+# #599: and the clock's own reports, which come from the tick whatever the
+# rest of the machine is doing -- clock_event's two lines every minute (#593)
+# and the TSC watchdog's every two (#594).  Counted as progress, they pushed
+# the deadline on for as long as the tick ran: a machine stopped with its
+# clock alive never went quiet, reached the hard cap, and was called a
+# livelock (a stay-up boot ran its full ten times SECS, every time).
+IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
 
 # The hard cap, which is still wall time and still needed: a livelock that
 # keeps printing meaningful lines forever is progress by this measure and has
