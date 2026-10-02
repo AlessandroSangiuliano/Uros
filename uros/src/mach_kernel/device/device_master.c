@@ -3926,14 +3926,16 @@ dma_ask_read(const struct dma_ask_cost *c, struct dma_ask_cost *into)
 }
 
 /*
- * An answered ask: t0 at entry, t1 past the claim, t2 past the MAC, t3 past
- * the region and the page; the rest ends now.  One that granted is counted
+ * An answered ask of `pages' pages -- one, or a batch's (#537 step 2), whose
+ * claim, MAC and region are paid once and so count as many pages' worth:
+ * t0 at entry, t1 past the claim, t2 past the MAC, t3 past the region and the
+ * pages; the rest ends now.  One that granted is counted
  * apart and whole: mapping a whole region costs as much as a thousand asks,
  * once, and in the averages since boot it hid what every other ask costs.
  */
 static void
 dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3,
-		int granted)
+		int granted, unsigned int pages)
 {
 	uint64_t t4 = urmach_tsc();
 	struct dma_ask_cost *c;
@@ -3946,7 +3948,7 @@ dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3,
 		c->grants++;
 		c->grant_cyc += t4 - t0;
 	} else {
-		c->asks++;
+		c->asks += pages;	/* a batched ask answers several */
 		c->claim += t1 - t0;
 		c->mac += t2 - t1;
 		c->find += t3 - t2;
@@ -4008,11 +4010,14 @@ ds_master_device_dma_ask_cost(
  *    issuer's, and the direction is read from them;
  *  - refusals are silent: the caller says them, once, in its own words.
  */
-kern_return_t
-ds_master_device_dma_map_foreign_op(
+#define	DMA_MAP_PAGES_MAX	32	/* dma_page_list_t's bound */
+
+static kern_return_t
+dma_map_foreign_pages(
 	ipc_port_t		master_port,
 	natural_t		bdf,
-	vm_address_t		paddr,
+	const vm_address_t	*paddr,
+	unsigned int		n,
 	natural_t		op,
 	cap_token_t		token,
 	mach_msg_type_number_t	tokenCnt,
@@ -4021,7 +4026,8 @@ ds_master_device_dma_map_foreign_op(
 	kern_return_t		kr;
 	struct dma_region	*r = 0;
 	struct uros_cap		cap;
-	unsigned int		i, page = 0, u;
+	unsigned int		i, k, u, page[DMA_MAP_PAGES_MAX];
+	int			missing = 0;
 	unsigned long		base = 0;
 	uint64_t		rid;
 	int			reads, writes, identity = 0, granted = 0;
@@ -4036,6 +4042,8 @@ ds_master_device_dma_map_foreign_op(
 	if (op != CAP_OP_DMA_DEVICE_READ && op != CAP_OP_DMA_DEVICE_WRITE)
 		return KERN_INVALID_ARGUMENT;
 	if (tokenCnt != sizeof(struct uros_cap))
+		return KERN_INVALID_ARGUMENT;
+	if (n == 0 || n > DMA_MAP_PAGES_MAX)
 		return KERN_INVALID_ARGUMENT;
 
 	/* A device has one driver, and only that driver may map for it. */
@@ -4062,13 +4070,18 @@ ds_master_device_dma_map_foreign_op(
 		}
 	if (r != 0) {
 		npages = r->npages;
-		page = dma_region_page(r, paddr & ~(vm_address_t)PAGE_MASK);
+		for (k = 0; k < n; k++) {
+			page[k] = dma_region_page(r, paddr[k] &
+						  ~(vm_address_t)PAGE_MASK);
+			if (page[k] == npages)
+				missing = 1;
+		}
 	}
 	urmach_rcu_read_unlock();
 	t3 = urmach_tsc();
 	if (r == 0)
 		return KERN_INVALID_ADDRESS;
-	if (page == npages)
+	if (missing)
 		return KERN_NO_ACCESS;
 
 	/* The direction this transfer needs. */
@@ -4083,8 +4096,9 @@ ds_master_device_dma_map_foreign_op(
 	 * what makes it an answer and not a pass-through.
 	 */
 	if (!device_md_dma_isolates()) {
-		*dma_addr = paddr;
-		dma_ask_account(t0, t1, t2, t3, 0);
+		for (k = 0; k < n; k++)
+			dma_addr[k] = paddr[k];
+		dma_ask_account(t0, t1, t2, t3, 0, n);
 		return KERN_SUCCESS;
 	}
 
@@ -4160,14 +4174,54 @@ ds_master_device_dma_map_foreign_op(
 		       reads ? "reads" : "", writes ? (reads ? ", writes" :
 						       "writes") : "");
 
-	if (identity)
-		*dma_addr = paddr;
-	else
-		*dma_addr = (vm_address_t)(base + (unsigned long)page *
-					   PAGE_SIZE +
-					   (paddr & (vm_address_t)PAGE_MASK));
-	dma_ask_account(t0, t1, t2, t3, granted);
+	for (k = 0; k < n; k++) {
+		if (identity)
+			dma_addr[k] = paddr[k];
+		else
+			dma_addr[k] = (vm_address_t)(base +
+				(unsigned long)page[k] * PAGE_SIZE +
+				(paddr[k] & (vm_address_t)PAGE_MASK));
+	}
+	dma_ask_account(t0, t1, t2, t3, granted, n);
 	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_master_device_dma_map_foreign_op(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	vm_address_t		paddr,
+	natural_t		op,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
+	vm_address_t		*dma_addr)
+{
+	return dma_map_foreign_pages(master_port, bdf, &paddr, 1, op, token,
+				     tokenCnt, dma_addr);
+}
+
+/*
+ * #537 step 2: the pages of one request in one ask -- see the note on
+ * device_dma_map_foreign_ops in <device/device_master.defs>.
+ */
+kern_return_t
+ds_master_device_dma_map_foreign_ops(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	vm_address_t		*paddrs,
+	mach_msg_type_number_t	paddrsCnt,
+	natural_t		op,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
+	vm_address_t		*dma_addrs,
+	mach_msg_type_number_t	*dma_addrsCnt)
+{
+	kern_return_t kr = dma_map_foreign_pages(master_port, bdf, paddrs,
+						 paddrsCnt, op, token,
+						 tokenCnt, dma_addrs);
+
+	*dma_addrsCnt = kr == KERN_SUCCESS ? paddrsCnt : 0;
+	return kr;
 }
 
 /*

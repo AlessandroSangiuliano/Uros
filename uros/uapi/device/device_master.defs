@@ -834,3 +834,23 @@ routine device_dma_ask_cost(
 	out	grants		: dma_cost_t;
 	out	grant_cycles	: dma_cost_t
 	);
+
+/*
+ * #537: device_dma_map_foreign_op for up to thirty-two pages of one buffer at
+ * once -- one RPC, one claim, one check of the capability and one look-up of
+ * the region for the block server's largest request, where thirty-two asks
+ * cost 12 - 17% of the transfer (cap_test [25]).  The answer is the device
+ * address of every page, in the order given, or a refusal for the request as a
+ * whole: the refusals of one page's ask, the first that applies.  Inline, as
+ * the per-I/O lists are (see dma_sg_addr_t above, and ahci_batch.defs).
+ */
+type dma_page_list_t = array[*:32] of vm_address_t;
+
+routine device_dma_map_foreign_ops(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	paddrs		: dma_page_list_t;
+	in	op		: natural_t;
+	in	token		: cap_token_t;
+	out	dma_addrs	: dma_page_list_t
+	);

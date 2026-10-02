@@ -268,6 +268,14 @@ target_compile_definitions(block_device_server PRIVATE
   MACH_IPC_COMPAT=0
 )
 
+# #537 step 2: the block server asks the kernel page by page always, as before
+# device_dma_map_foreign_ops -- cap_test [25]'s handle shows what it costs.
+option(UROS_ABLATE_537_NO_BATCH "Build the #537 ablation: the block server never asks for a request's pages in one call" OFF)
+if(UROS_ABLATE_537_NO_BATCH)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_BATCH=1)
+    message(STATUS "#537 ablation: the block server asks page by page")
+endif()
+
 target_include_directories(block_device_server PRIVATE ${BLK_INCLUDE_DIRS})
 
 target_link_libraries(block_device_server PRIVATE

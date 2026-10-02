@@ -1084,6 +1084,59 @@ blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
 }
 
 /*
+ * #537 step 2: every page of a request in one ask, when it has more than one.
+ * The handle's capabilities are tried as blk_dma_for() tries them, the one
+ * that answered last first, one call each for the whole request.  Anything
+ * but an answer for all the pages falls back to blk_dma_for() page by page,
+ * which finds the page refused, forgets a capability the kernel refuses for
+ * good, and is what blk_refused() has always been told about -- a request
+ * whose pages lie in two buffers is answered that way too.  On a refusal
+ * *refused is the page.  UROS_ABLATE_537_NO_BATCH asks page by page always.
+ */
+#ifndef BLK_ABLATE_537_NO_BATCH
+#define BLK_ABLATE_537_NO_BATCH 0
+#endif
+
+static kern_return_t
+blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
+		  unsigned int n, natural_t op, vm_address_t *dma,
+		  unsigned int *refused)
+{
+	struct blk_controller *ctrl = h->part->ctrl;
+	natural_t	bdf = (natural_t)((ctrl->pci_bus << 8) |
+					  (ctrl->pci_slot << 3) |
+					  ctrl->pci_func);
+	unsigned int	j, i, k;
+	kern_return_t	kr;
+
+	if (n > 1 && !BLK_ABLATE_537_NO_BATCH) {
+		for (j = 0; j < h->n_dma_caps; j++) {
+			mach_msg_type_number_t cnt = n;
+
+			i = (h->dma_last + j) % h->n_dma_caps;
+			kr = device_dma_map_foreign_ops(master_device, bdf,
+					(vm_address_t *)pa, n, op,
+					(char *)&h->dma_cap[i],
+					sizeof(h->dma_cap[i]), dma, &cnt);
+			if (kr == KERN_SUCCESS && cnt == n) {
+				h->dma_last = i;
+				return KERN_SUCCESS;
+			}
+			if (kr != KERN_NO_ACCESS)
+				break;		/* the per-page path judges it */
+		}
+	}
+	for (k = 0; k < n; k++) {
+		kr = blk_dma_for(h, pa[k], op, &dma[k]);
+		if (kr != KERN_SUCCESS) {
+			*refused = k;
+			return kr;
+		}
+	}
+	return KERN_SUCCESS;
+}
+
+/*
  * Say a refused physical transfer, per handle: at the first, at every power
  * of two, and whenever the reason changes (#599).
  */
@@ -1183,14 +1236,12 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		unsigned long long t0 = blk_tsc(), t1;
 		int rc;
 
-		for (i = 0; i < phys_addrsCnt; i++) {
-			kr = blk_dma_for(h, phys_addrs[i],
-					 CAP_OP_DMA_DEVICE_WRITE, &dma[i]);
-			if (kr != KERN_SUCCESS) {
-				blk_refused(h, phys_addrs[i],
-					    CAP_OP_DMA_DEVICE_WRITE, kr);
-				return kr;
-			}
+		kr = blk_dma_for_pages(h, phys_addrs, phys_addrsCnt,
+				       CAP_OP_DMA_DEVICE_WRITE, dma, &i);
+		if (kr != KERN_SUCCESS) {
+			blk_refused(h, phys_addrs[i], CAP_OP_DMA_DEVICE_WRITE,
+				    kr);
+			return kr;
 		}
 
 		t1 = blk_tsc();
@@ -1259,14 +1310,12 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		unsigned long long t0 = blk_tsc(), t1;
 		int rc;
 
-		for (i = 0; i < phys_addrsCnt; i++) {
-			kr = blk_dma_for(h, phys_addrs[i],
-					 CAP_OP_DMA_DEVICE_READ, &dma[i]);
-			if (kr != KERN_SUCCESS) {
-				blk_refused(h, phys_addrs[i],
-					    CAP_OP_DMA_DEVICE_READ, kr);
-				return kr;
-			}
+		kr = blk_dma_for_pages(h, phys_addrs, phys_addrsCnt,
+				       CAP_OP_DMA_DEVICE_READ, dma, &i);
+		if (kr != KERN_SUCCESS) {
+			blk_refused(h, phys_addrs[i], CAP_OP_DMA_DEVICE_READ,
+				    kr);
+			return kr;
 		}
 
 		t1 = blk_tsc();
