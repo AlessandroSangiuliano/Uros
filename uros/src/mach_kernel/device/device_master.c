@@ -4357,6 +4357,20 @@ ds_master_device_dma_map_foreign_region(
 		kmem_free(ipc_kernel_map, list, list_size);
 		return kr;
 	}
+
+	/*
+	 * 🔴 AN IDENTITY DOMAIN CONFINES NOTHING.  A device the IOMMU passes
+	 * through -- legacy virtio, whose DMA QEMU never translates (#591) --
+	 * reaches every physical page whatever this grant says, so a kept
+	 * translation would outlive a free exactly as it would with no IOMMU at
+	 * all.  "Isolated" is the device's answer, not the machine's: nothing to
+	 * keep here, and the server asks per transfer.
+	 */
+	if (id) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return KERN_SUCCESS;
+	}
+
 	kr = vm_map_copyin(ipc_kernel_map, list, list_bytes, TRUE, &list_copy);
 	if (kr != KERN_SUCCESS) {
 		kmem_free(ipc_kernel_map, list, list_size);

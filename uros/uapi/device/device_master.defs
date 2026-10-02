@@ -867,9 +867,10 @@ routine device_dma_map_foreign_ops(
  * free takes the grant down, and a translation used after it is a fault the
  * IOMMU refuses, not a transfer into somebody else's memory.
  *
- * Without isolation the answer is isolated = 0 and no pages, and the server
- * must keep asking: the pages a freed buffer gave back may be another task's
- * by the next transfer, and nothing would stop the device from writing them.
+ * Without isolation -- no IOMMU, or a device it passes through in an identity
+ * domain -- the answer is isolated = 0 and no pages, and the server must keep
+ * asking: the pages a freed buffer gave back may be another task's by the next
+ * transfer, and nothing would stop the device from writing them.
  *
  * ⚠️ The caller must vm_deallocate the pages it gets back.
  */
