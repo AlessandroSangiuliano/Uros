@@ -372,11 +372,15 @@ handoff_wake_test(void)
  * swapped-out threads during an ordinary run of the userland, where on any
  * other boot it would meet none.
  *
- * 🔑 WHAT IT EXISTS TO REACH IS COUNTED, and printed every fifteen scans:
- * threads swapped out and back in, receivers the IPC direct switch declined
- * because they were swapped out, waiters the futex hand-off declined for the
- * same reason.  A storm whose counts stay at zero has tested nothing, and the
- * line says that as plainly as it says the numbers.
+ * 🔑 WHAT IT EXISTS TO REACH IS COUNTED, and printed after every scan that
+ * changed a count: threads swapped out and back in, receivers the IPC direct
+ * switch declined because they were swapped out, waiters the futex hand-off
+ * declined for the same reason.  A storm whose counts stay at zero has tested
+ * nothing, and says so every thirty scans.
+ *
+ * ❌ The first version printed every fifteen scans, and a whole userland boot
+ * under KVM is over in about nineteen seconds: six runs passed without one
+ * count printed, which is six runs that proved nothing about swapping.
  */
 static int	storm_tick;
 
@@ -384,6 +388,7 @@ static void
 swapper_storm(void)
 {
 	unsigned int	scans = 0;
+	unsigned int	out = 0, in = 0, dts = 0, handoff = 0;
 
 	maxslp = 0;
 
@@ -397,18 +402,23 @@ swapper_storm(void)
 		thread_block((void (*)(void)) 0);
 
 		swapout_scan();
+		scans++;
 
-		if (++scans % 15 == 0)
-			printf("swapper storm: %u scans, %u threads swapped out, "
-			       "%u back in; declined while swapped out: %u by "
-			       "the IPC direct switch, %u by the futex hand-off"
-			       "%s (#607)\n",
-			       scans, thread_swapouts, thread_swapins,
-			       ipc_dts_declined_swapped,
-			       handoff_declined_swapped,
-			       thread_swapouts == 0
-			       ? " — NOTHING SWAPPED, so nothing was tested yet"
-			       : "");
+		if (thread_swapouts != out || thread_swapins != in
+		    || ipc_dts_declined_swapped != dts
+		    || handoff_declined_swapped != handoff) {
+			out = thread_swapouts;
+			in = thread_swapins;
+			dts = ipc_dts_declined_swapped;
+			handoff = handoff_declined_swapped;
+			printf("swapper storm: after %u scans, %u threads swapped "
+			       "out, %u back in; declined while swapped out: %u "
+			       "by the IPC direct switch, %u by the futex hand-off "
+			       "(#607)\n", scans, out, in, dts, handoff);
+		} else if (out == 0 && scans % 30 == 0) {
+			printf("swapper storm: %u scans and NOTHING SWAPPED, so "
+			       "nothing was tested yet (#607)\n", scans);
+		}
 	}
 }
 
