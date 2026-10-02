@@ -66,6 +66,8 @@ struct cap_state_entry {
 static struct cap_state_entry *cap_state_table[CAP_STATE_BUCKETS];
 
 static uint8_t   cap_hmac_key[CAP_HMAC_SIZE];
+/* #537: the key made ready when it is set -- its two padded blocks hashed once */
+static struct hmac_sha256_key cap_hmac_ready;
 static boolean_t cap_key_set = FALSE;
 static task_t    cap_server_task = TASK_NULL;
 
@@ -132,16 +134,67 @@ cap_state_get_or_create(uint64_t cap_id)
  * hmac[] field, and compare it against token->hmac in constant time.
  * Returns TRUE on match.
  */
+/*
+ * #537: UROS_ABLATE_537_HMAC_FULL makes the key's two blocks hashed again on
+ * every check, as they were -- the per-page split's MAC column is what shows
+ * the difference.
+ */
+#ifndef ABLATE_537_HMAC_FULL
+#define ABLATE_537_HMAC_FULL 0
+#endif
+
 static boolean_t
 cap_hmac_check(const struct uros_cap *token)
 {
     const size_t signed_len = sizeof(*token) - CAP_HMAC_SIZE;
     uint8_t expected[HMAC_SHA256_SIZE];
 
-    hmac_sha256(cap_hmac_key, CAP_HMAC_SIZE,
-                token, signed_len,
-                expected);
+    if (ABLATE_537_HMAC_FULL)
+        hmac_sha256(cap_hmac_key, CAP_HMAC_SIZE, token, signed_len, expected);
+    else
+        hmac_sha256_with(&cap_hmac_ready, token, signed_len, expected);
     return hmac_sha256_equal(expected, token->hmac) ? TRUE : FALSE;
+}
+
+/*
+ * #537: the HMAC with the key made ready once, and the one made ready for each
+ * message, against the answer RFC 4231 publishes (test case 2) -- so a check
+ * that verifies tokens fast verifies them RIGHT.  Both paths, because the
+ * token self-test below signs with one and checks with the other, and two
+ * paths that agree could still both be wrong.  The digest is printed as read.
+ */
+static void
+cap_hmac_selftest(void)
+{
+    static const uint8_t want[HMAC_SHA256_SIZE] = {
+        0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e,
+        0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75, 0xc7,
+        0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83,
+        0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec, 0x38, 0x43,
+    };
+    static const char key[] = "Jefe";
+    static const char msg[] = "what do ya want for nothing?";
+    struct hmac_sha256_key k;
+    uint8_t once[HMAC_SHA256_SIZE], each[HMAC_SHA256_SIZE];
+    char hex[2 * HMAC_SHA256_SIZE + 1];
+    static const char digits[] = "0123456789abcdef";
+
+    hmac_sha256_key_init(&k, key, sizeof(key) - 1);
+    hmac_sha256_with(&k, msg, sizeof(msg) - 1, once);
+    hmac_sha256(key, sizeof(key) - 1, msg, sizeof(msg) - 1, each);
+
+    for (unsigned i = 0; i < HMAC_SHA256_SIZE; i++) {
+        hex[2 * i] = digits[once[i] >> 4];
+        hex[2 * i + 1] = digits[once[i] & 0xF];
+    }
+    hex[2 * HMAC_SHA256_SIZE] = 0;
+
+    printf("cap: HMAC-SHA256 of RFC 4231 case 2 with the key made ready once: "
+           "%s -- %s (#537)\n", hex,
+           !hmac_sha256_equal(once, want) ? "WRONG, not the RFC's"
+           : !hmac_sha256_equal(each, want) ? "the RFC's, but the per-message "
+                                              "path disagrees: WRONG"
+           : "the RFC's, and so is the per-message path");
 }
 
 /*
@@ -214,6 +267,7 @@ cap_init(void)
     cap_key_set = FALSE;
     cap_server_task = TASK_NULL;
     printf("cap: subsystem initialized (slots 37-40)\n");
+    cap_hmac_selftest();			/* #537 */
 }
 
 /*
@@ -409,6 +463,7 @@ urmach_cap_register(const struct uros_cap *user_token)
         }
         for (unsigned i = 0; i < CAP_HMAC_SIZE; i++)
             cap_hmac_key[i] = t.hmac[i];
+        hmac_sha256_key_init(&cap_hmac_ready, cap_hmac_key, CAP_HMAC_SIZE);
         cap_key_set = TRUE;
         cap_server_task = caller;
         simple_unlock(&cap_lock);
