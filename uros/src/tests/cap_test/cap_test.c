@@ -1165,9 +1165,14 @@ a_buffer_capability_is_a_buffers(mach_port_t device_port,
  * between the device and the page.  On ahci0a, the controller behind it
  * (virtio is passed through, #591): hand a page over, read into it, revoke,
  * read again.  The page must hold what it held and the grant must be gone;
- * the read is refused (the notice came first, or nothing was kept) or, on an
- * isolated device only, answered with nothing written -- the IOMMU refused the
- * transfer, which the kernel says in an "iommu: ... REFUSED" line.
+ * the read must be refused.  Either the block server had forgotten the
+ * translation (the notice came first: KERN_NO_ACCESS, the kernel not asked), or
+ * it still held the capability and answered the revocation (CAP_ERR_REVOKED):
+ * asked of the kernel, or -- with a kept translation -- found when the epoch
+ * read after the transfer had moved, the device refused meanwhile by the IOMMU
+ * ("iommu: ... REFUSED" in the kernel's log).  A read answered 0 is WRONG: the
+ * controller's success for a transfer the IOMMU refused, reported to the
+ * client -- the window UROS_ABLATE_537_NO_EPOCH leaves open.
  */
 static int
 a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
@@ -1206,12 +1211,14 @@ a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
 
     ok = k1 == KERN_SUCCESS && m1 == 0xEF53u && kr_rev == KERN_SUCCESS &&
          ku0 == KERN_SUCCESS && ku1 == KERN_SUCCESS && users1 == 0 && i2 &&
-         (k2 != KERN_SUCCESS || users0 > 0);
+         k2 != KERN_SUCCESS;
     if (!ok) {
         printf("cap_test: [26] WRONG — %s: read %d 0x%x, users %d/%u, revoke "
-               "%d, users %d/%u, read after %d (page %s)\n", name, (int)k1,
+               "%d, users %d/%u, read after %d (page %s)%s\n", name, (int)k1,
                m1, (int)ku0, (unsigned)users0, (int)kr_rev, (int)ku1,
-               (unsigned)users1, (int)k2, i2 ? "untouched" : "WRITTEN");
+               (unsigned)users1, (int)k2, i2 ? "untouched" : "WRITTEN",
+               k2 == KERN_SUCCESS && i2
+               ? " — success reported for a transfer that wrote nothing" : "");
         return 0;
     }
     if (users0 == 0)
@@ -1219,16 +1226,16 @@ a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
                "confined here, so nothing is kept; a read after the "
                "revocation refused (kr=%d), page untouched (#537)\n", name,
                (int)k2);
-    else if (k2 != KERN_SUCCESS)
+    else if (k2 == CAP_ERR_REVOKED)
         printf("cap_test: [26] %s: after the revocation the grant was gone "
-               "(users %u -> 0) and a read was refused (kr=%d), page "
-               "untouched — the block server had forgotten the translation "
-               "(#537)\n", name, (unsigned)users0, (int)k2);
+               "(users %u -> 0) and a read was answered with the revocation "
+               "(kr=%d), page untouched — the block server still held the "
+               "capability (#537)\n", name, (unsigned)users0, (int)k2);
     else
         printf("cap_test: [26] %s: after the revocation the grant was gone "
-               "(users %u -> 0) and a read answered 0 with the page untouched "
-               "— the kept translation was used and the IOMMU refused it "
-               "(#537)\n", name, (unsigned)users0);
+               "(users %u -> 0) and a read was refused (kr=%d), page "
+               "untouched — the block server had forgotten the capability "
+               "(#537)\n", name, (unsigned)users0, (int)k2);
     return 1;
 }
 
