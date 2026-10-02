@@ -405,6 +405,10 @@ option(UROS_ABLATE_606_PAGEOUT_WAIT "Build the #606 ablation: vm_pageout() asser
 option(UROS_PROBE_605_SILENT "Build the #605 probe: halt one processor and cross-call it, so the panic has to name it" OFF)
 option(UROS_PROBE_605_CALL_COST "Build the #605 probe: time broadcast cross-calls at boot" OFF)
 option(UROS_PROBE_605_PADDED "Build the #605 probe: one cache line per answer-counter slot, to measure what sharing one costs" OFF)
+# #607: the futex hand-off wakes a waiter the way every other wakeup does.
+option(UROS_ABLATE_607_SWAPPED_PARKED "Build the #607 ablation: a swapped-out waiter counts as parked and the hand-off switches onto it, which -Q's first arm must catch" OFF)
+option(UROS_ABLATE_607_OLD_WAKE "Build the #607 ablation: the hand-off's old wake, which leaves a stopped waiter TH_RUN on no run queue, which -Q's second arm must catch" OFF)
+option(UROS_ABLATE_607_DTS_SWAPPED "Build the #607 ablation: the IPC direct thread switch switches onto a swapped-out receiver, which the -ON storm must catch" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -510,6 +514,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/ast_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/wait_preempt_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/handoff_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
@@ -832,6 +837,18 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_PROBE_605_PADDED)
       list(APPEND KERNEL_DEFINES_BARE PROBE_605_PADDED=1)
       message(STATUS "#605 probe: answer-counter slots one cache line each (x86_64)")
+  endif()
+  if(UROS_ABLATE_607_SWAPPED_PARKED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_607_SWAPPED_PARKED=1)
+      message(STATUS "#607 ablation: a swapped-out waiter counts as parked (x86_64)")
+  endif()
+  if(UROS_ABLATE_607_OLD_WAKE)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_607_OLD_WAKE=1)
+      message(STATUS "#607 ablation: the hand-off's old wake of a waiter it does not switch to (x86_64)")
+  endif()
+  if(UROS_ABLATE_607_DTS_SWAPPED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_607_DTS_SWAPPED=1)
+      message(STATUS "#607 ablation: the IPC direct switch takes a swapped-out receiver (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

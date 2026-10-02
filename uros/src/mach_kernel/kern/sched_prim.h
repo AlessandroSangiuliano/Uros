@@ -231,6 +231,9 @@ extern void	assert_wait_preempt_release(
 
 
 /* #324 futex direct hand-off: switch straight to a fully-parked waiter */
+/* Waiters the futex hand-off declined because they were swapped out (#607). */
+extern unsigned int	handoff_declined_swapped;
+
 extern boolean_t	thread_handoff_to_parked_waiter(
 				event_t		event);
 

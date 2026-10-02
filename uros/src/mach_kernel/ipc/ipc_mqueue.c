@@ -708,6 +708,39 @@ dstat_decl(unsigned int	c_imd_enqueued = 0;)
  * against baseline.  Same #337 trap as halt_in_debugger. */
 int	ipc_dts_smp __attribute__((section(".data"))) = 0;
 
+/*
+ * A receiver the Direct Thread Switch may switch onto: TH_WAIT and nothing
+ * else, and not swapped out (#607).
+ *
+ * 🔴 The mask was the futex hand-off's, which the comment below says it
+ * mirrors, and it shared that one's blind spot: TH_SWAPPED_OUT is not a
+ * scheduling state, so a receiver the thread swapper had swapped out passed,
+ * and thread_run() switched onto a kernel stack thread_swapout() had unwired.
+ * A server blocked in receive for ten seconds is exactly the thread the
+ * swapper takes.  A receiver that fails this goes to thread_go(), which swaps
+ * it in.
+ *
+ * The ablation puts the old mask back, for -O's storm to catch.
+ */
+#ifndef	ABLATE_607_DTS_SWAPPED
+#define	ABLATE_607_DTS_SWAPPED	0
+#endif
+
+#define	DTS_PARKED(th)							\
+	(((th)->state & (TH_SCHED_STATE |					\
+			 (ABLATE_607_DTS_SWAPPED ? 0 : TH_SWAPPED_OUT)))	\
+	 == TH_WAIT)
+#define	DTS_SWAPPED_WAITER(th)						\
+	(((th)->state & (TH_SCHED_STATE | TH_SWAPPED_OUT))			\
+	 == (TH_WAIT | TH_SWAPPED_OUT))
+
+/*
+ * Receivers the switch declined because they were swapped out, which -O
+ * prints: the evidence that the case it exists for happened (#607).  Counted
+ * under the receiver's lock but not atomically, so a figure, not a census.
+ */
+unsigned int	ipc_dts_declined_swapped;
+
 mach_msg_return_t
 ipc_mqueue_deliver(
 	register ipc_port_t	port,
@@ -866,16 +899,16 @@ ipc_mqueue_deliver(
 		 *
 		 * Correct version, mirroring thread_handoff_to_parked_waiter (#324):
 		 *   - take the direct switch ONLY if the receiver is *fully parked*
-		 *     ((state & TH_SCHED_STATE) == TH_WAIT, i.e. TH_RUN clear, which
-		 *     thread_dispatch() sets only after the receiver has switched
-		 *     away) -- so it is genuinely off-core;
+		 *     (DTS_PARKED: TH_WAIT within the scheduling bits, i.e. TH_RUN
+		 *     clear, which thread_dispatch() sets only after the receiver
+		 *     has switched away -- so it is genuinely off-core -- and, since
+		 *     #607, not swapped out);
 		 *   - keep splsched ACROSS thread_run (do NOT splx before the switch
 		 *     -- that low-spl window was the actual lost-wakeup hole);
 		 *   - otherwise fall back to the safe thread_go()/thread_setrun path.
 		 * Gated by ipc_dts_smp (default 0) so it can be A/B-measured.
 		 */
-		if (ipc_dts_smp &&
-		    (receiver->state & TH_SCHED_STATE) == TH_WAIT) {
+		if (ipc_dts_smp && DTS_PARKED(receiver)) {
 			receiver->state =
 				(receiver->state & ~TH_WAIT) | TH_RUN;
 			receiver->wait_result = THREAD_AWAKENED;
@@ -889,13 +922,15 @@ ipc_mqueue_deliver(
 			thread_run((void (*)(void)) 0, receiver);
 			splx(_s);
 		} else {
+			if (ipc_dts_smp && DTS_SWAPPED_WAITER(receiver))
+				ipc_dts_declined_swapped++;
 			thread_unlock(receiver);
 			splx(_s);
 			enable_preemption();
 			thread_go(receiver);
 		}
 #else	/* NCPUS > 1 */
-		if ((receiver->state & TH_SCHED_STATE) == TH_WAIT) {
+		if (DTS_PARKED(receiver)) {
 			receiver->state =
 				(receiver->state & ~TH_WAIT) | TH_RUN;
 			receiver->wait_result = THREAD_AWAKENED;
@@ -907,6 +942,8 @@ ipc_mqueue_deliver(
 			/* Sender resumes here when rescheduled */
 		} else {
 			/* Receiver state changed; fall back to normal wakeup */
+			if (DTS_SWAPPED_WAITER(receiver))
+				ipc_dts_declined_swapped++;
 			thread_unlock(receiver);
 			splx(_s);
 			enable_preemption();

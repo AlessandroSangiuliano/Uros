@@ -440,6 +440,28 @@ machine_startup(void)
 
 	printf(version);
 
+	/*
+	 * Whether the IPC Direct Thread Switch is on (#329), said where the
+	 * flag is READ rather than where -D sets it: parse_arguments() runs
+	 * before the BSS clear, which once wiped it back to 0 and made every
+	 * A/B of the switch compare the baseline with itself (#356).  A run's
+	 * log now says which switch it ran with -- x86-64 says the same for
+	 * its -N (#607).  A uniprocessor kernel takes the switch with or
+	 * without the flag.
+	 */
+#if	NCPUS > 1
+	{
+		extern int ipc_dts_smp;
+
+		if (ipc_dts_smp)
+			printf("startup: the IPC direct thread switch is on "
+			       "(-D, #329)\n");
+	}
+#else
+	printf("startup: the IPC direct thread switch is on "
+	       "(always, on one processor, #329)\n");
+#endif
+
 	machine_slot[0].is_cpu = TRUE;
 	machine_slot[0].running = TRUE;
 	machine_slot[0].cpu_type = cpuid_cputype(0);
