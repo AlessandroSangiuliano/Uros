@@ -1188,8 +1188,13 @@ many_pages_in_one_request(mach_port_t device_port, mach_port_t part_port,
     unsigned               r, p, bad_page = 0, done = 0;
     int                    ok = 0;
 
+    /*
+     * READ | WRITE although this arm only reads: ds_device_open_cap() asks
+     * a token for both whatever the mode (block_device.c), so a read-only
+     * token is refused even a read-only open.
+     */
     kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
-                     CAP_OP_BLK_READ, 0, &tok);
+                     CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [25] %s — DID NOT RUN, no block capability "
                "(kr=%d)\n", name, (int)kr);
