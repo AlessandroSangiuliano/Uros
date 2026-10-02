@@ -17,4 +17,11 @@
  */
 extern void	handoff_wake_test(void);
 
+/*
+ * -O: start a kernel thread that runs the thread swapper's scan every second
+ * with maxslp at zero, for the rest of the boot, and prints what it swapped
+ * and what the wake paths declined.  Returns at once.
+ */
+extern void	swapper_storm_start(void);
+
 #endif	/* _X86_64_TRAP_HANDOFF_TEST_H_ */

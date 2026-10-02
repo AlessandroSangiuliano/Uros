@@ -42,6 +42,7 @@
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
 #include <trap/handoff_test.h>	/* #607: -Q, the futex hand-off's wake */
+#include <ipc/ipc_mqueue.h>	/* ipc_dts_smp, for -N */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
 #include <ddb/fbcons.h>	/* #568: the other output, mapped once the pmap is up */
@@ -449,6 +450,26 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('Q'))
 			handoff_wake_test();
+
+		/*
+		 * -N: the IPC Direct Thread Switch on (#329) -- x86-64's
+		 * spelling of i386's -D, which this target already uses for
+		 * something else.  Off by default on both, and on here for
+		 * -O's sake: the switch is one of the wake paths that must
+		 * decline a swapped-out receiver (#607).
+		 *
+		 * -O: the thread swapper made aggressive for the rest of the
+		 * boot, so every wake path meets swapped-out threads (#607).
+		 * Both before bootstrap_create(), so the whole userland runs
+		 * under them.
+		 */
+		if (boot_flag('N')) {
+			ipc_dts_smp = 1;
+			printf("startup: the IPC direct thread switch is on (-N, "
+			       "#329)\n");
+		}
+		if (boot_flag('O'))
+			swapper_storm_start();
 
 		/*
 		 * -M: what concurrency does to a pmap with no locking (#455).

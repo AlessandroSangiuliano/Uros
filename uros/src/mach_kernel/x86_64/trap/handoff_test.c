@@ -54,6 +54,8 @@
 #include <kern/thread_swap.h>
 #include <kern/time_out.h>		/* hz */
 
+#include <ipc/ipc_mqueue.h>		/* ipc_dts_declined_swapped */
+
 #include <cpu/spl.h>
 #include <trap/handoff_test.h>
 
@@ -358,4 +360,63 @@ handoff_wake_test(void)
 	       "through the hand-off (#607)\n");
 	hq_stopped_arm();
 	hq_swapped_arm();
+}
+
+/*
+ * ── -O: the thread swapper, made aggressive (#607) ─────────────────────
+ *
+ * Every second, for the whole boot, the swapper's own scan with maxslp at zero:
+ * every user thread that has waited interruptibly for one scheduler tick is
+ * swapped out.  So every wake path in the system -- the futex hand-off, the
+ * IPC direct switch (with -N), thread_go(), clear_wait(), the timeouts -- meets
+ * swapped-out threads during an ordinary run of the userland, where on any
+ * other boot it would meet none.
+ *
+ * 🔑 WHAT IT EXISTS TO REACH IS COUNTED, and printed every fifteen scans:
+ * threads swapped out and back in, receivers the IPC direct switch declined
+ * because they were swapped out, waiters the futex hand-off declined for the
+ * same reason.  A storm whose counts stay at zero has tested nothing, and the
+ * line says that as plainly as it says the numbers.
+ */
+static int	storm_tick;
+
+static void
+swapper_storm(void)
+{
+	unsigned int	scans = 0;
+
+	maxslp = 0;
+
+	for (;;) {
+		spl_t	s;
+
+		s = splsched();
+		assert_wait((event_t) &storm_tick, FALSE);
+		thread_set_timeout(hz);
+		splx(s);
+		thread_block((void (*)(void)) 0);
+
+		swapout_scan();
+
+		if (++scans % 15 == 0)
+			printf("swapper storm: %u scans, %u threads swapped out, "
+			       "%u back in; declined while swapped out: %u by "
+			       "the IPC direct switch, %u by the futex hand-off"
+			       "%s (#607)\n",
+			       scans, thread_swapouts, thread_swapins,
+			       ipc_dts_declined_swapped,
+			       handoff_declined_swapped,
+			       thread_swapouts == 0
+			       ? " — NOTHING SWAPPED, so nothing was tested yet"
+			       : "");
+	}
+}
+
+void
+swapper_storm_start(void)
+{
+	printf("swapper storm: every second, the thread swapper's own scan with "
+	       "maxslp 0 -- every thread asleep for a tick is swapped out "
+	       "(#607)\n");
+	(void) kernel_thread(kernel_task, swapper_storm, (char *) 0);
 }

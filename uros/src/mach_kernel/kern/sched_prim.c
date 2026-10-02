@@ -1224,6 +1224,13 @@ thread_wakeup_prim(
 #endif
 
 /*
+ * Waiters the hand-off declined because they were swapped out, which -O
+ * prints: the evidence that the case #607 is about happened.  Counted under
+ * the victim's lock but not atomically, so a figure, not a census.
+ */
+unsigned int	handoff_declined_swapped;
+
+/*
  *	thread_handoff_to_parked_waiter:
  *
  *	Futex (#324) direct hand-off.  Find one thread waiting on `event`
@@ -1306,6 +1313,10 @@ thread_handoff_to_parked_waiter(
 		  == TH_WAIT);
 
 	if (!parked) {
+		if ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT))
+		    == (TH_WAIT | TH_SWAPPED_OUT))
+			handoff_declined_swapped++;
+
 		/*
 		 * Not cleanly parked: wake it the way every other wakeup does,
 		 * and let the caller block normally.

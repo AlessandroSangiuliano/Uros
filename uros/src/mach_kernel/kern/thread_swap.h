@@ -82,6 +82,10 @@ extern void	swapout_threads(boolean_t now);
  */
 extern void	swapout_scan(void);
 extern int	maxslp;
+
+/* How many threads this boot swapped out and back in (#607, for -O). */
+extern unsigned int	thread_swapouts;
+extern unsigned int	thread_swapins;
 extern void	thread_swapout_enqueue(thread_act_t thr_act);
 extern void	thread_swap_disable(thread_act_t thr_act);
 
