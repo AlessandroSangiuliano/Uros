@@ -4240,6 +4240,140 @@ ds_master_device_dma_map_foreign_ops(
 }
 
 /*
+ * #537 step 3: see the note on device_dma_map_foreign_region in
+ * <device/device_master.defs>.  The checks of one page's ask, the grant of
+ * dma_grant_locked(), and the region's pages copied out under the same hold
+ * of device_table_lock, so the list is the region the grant is for: a drop
+ * takes the lock to unlink it.  The list is filled wired and copied out
+ * unwired, as ds_master_device_dma_alloc_sg's.
+ */
+kern_return_t
+ds_master_device_dma_map_foreign_region(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
+	natural_t		*isolated,
+	natural_t		*identity,
+	vm_address_t		*base,
+	natural_t		*ops,
+	vm_address_t		**pages,
+	mach_msg_type_number_t	*pagesCnt)
+{
+	kern_return_t		kr;
+	struct dma_region	*r = 0;
+	struct uros_cap		cap;
+	unsigned int		i, npages = 0;
+	unsigned long		b = 0;
+	int			reads, writes, id = 0, granted = 0;
+	int			u_reads = 0, u_writes = 0;
+	vm_offset_t		list = 0;
+	vm_size_t		list_bytes, list_size;
+	vm_map_copy_t		list_copy;
+	uint64_t		rid;
+
+	*isolated = 0;
+	*identity = 0;
+	*base = 0;
+	*ops = 0;
+	*pages = 0;
+	*pagesCnt = 0;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (bdf == DEVICE_DMA_NO_BDF || tokenCnt != sizeof(struct uros_cap))
+		return KERN_INVALID_ARGUMENT;
+	kr = check_claim(bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	memcpy(&cap, token, sizeof(cap));
+	kr = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER, 0, cap.resource_id);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	rid = cap.resource_id;
+	reads = (cap.allowed_ops & CAP_OP_DMA_DEVICE_READ) != 0;
+	writes = (cap.allowed_ops & CAP_OP_DMA_DEVICE_WRITE) != 0;
+	if (!reads && !writes)
+		return KERN_PROTECTION_FAILURE;
+
+	urmach_rcu_read_lock();
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].id == rid) {
+			r = &dma_region[i];
+			npages = r->npages;
+			break;
+		}
+	urmach_rcu_read_unlock();
+	if (r == 0)
+		return KERN_INVALID_ADDRESS;
+
+	/* Nothing to keep where nothing would refuse a stale translation. */
+	if (!device_md_dma_isolates())
+		return KERN_SUCCESS;
+
+	list_bytes = npages * sizeof(vm_address_t);
+	list_size = round_page(list_bytes);
+	kr = kmem_alloc(ipc_kernel_map, &list, list_size);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	kr = vm_map_wire(ipc_kernel_map, list, list + list_size,
+			 VM_PROT_READ | VM_PROT_WRITE, FALSE);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+
+	mutex_lock(&device_table_lock);
+	if (r->kva == 0 || r->id != rid || r->npages != npages ||
+	    !claim_is_mine_locked(bdf))
+		kr = KERN_INVALID_ADDRESS;
+	else
+		kr = dma_grant_locked(r, bdf, &cap, reads, writes, &b, &id,
+				      &granted, &u_reads, &u_writes);
+	if (kr == KERN_SUCCESS)
+		for (i = 0; i < npages; i++)
+			((vm_address_t *)list)[i] = r->pa[i];
+	mutex_unlock(&device_table_lock);
+	if (kr != KERN_SUCCESS) {
+		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
+				     FALSE);
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+
+	if (granted)
+		printf("device: %02x:%02x.%u may now reach a %u-page buffer it "
+		       "did not allocate, at 0x%lx (%s%s) — mapped once for the "
+		       "server that owns the device, which keeps the translation "
+		       "(#537)\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), npages, b,
+		       reads ? "reads" : "", writes ? (reads ? ", writes" :
+						       "writes") : "");
+
+	kr = vm_map_unwire(ipc_kernel_map, list, list + list_size, FALSE);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+	kr = vm_map_copyin(ipc_kernel_map, list, list_bytes, TRUE, &list_copy);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+
+	*isolated = 1;
+	*identity = (natural_t)id;
+	*base = (vm_address_t)b;
+	*ops = (u_reads ? CAP_OP_DMA_DEVICE_READ : 0) |
+	       (u_writes ? CAP_OP_DMA_DEVICE_WRITE : 0);
+	*pages = (vm_address_t *)list_copy;
+	*pagesCnt = npages;
+	return KERN_SUCCESS;
+}
+
+/*
  * How many devices this buffer is mapped for, asked by its owner (#599).
  */
 kern_return_t

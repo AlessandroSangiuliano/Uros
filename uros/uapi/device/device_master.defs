@@ -854,3 +854,32 @@ routine device_dma_map_foreign_ops(
 	in	token		: cap_token_t;
 	out	dma_addrs	: dma_page_list_t
 	);
+
+/*
+ * #537 step 3: a whole buffer's translation, once, for a server that keeps it
+ * -- the block server, when a client hands it a buffer's capability.  The
+ * kernel grants the region to the device as the first ask does and, when the
+ * device is ISOLATED (an IOMMU between it and memory), answers the device
+ * address of the region's first page (the rest consecutive from there, or each
+ * page at its own physical address when `identity'), the directions granted,
+ * and the region's pages in order -- out of line, as dma_sg_addr_t: there can
+ * be thousands.  Kept, that table needs no ask per transfer: a revocation or a
+ * free takes the grant down, and a translation used after it is a fault the
+ * IOMMU refuses, not a transfer into somebody else's memory.
+ *
+ * Without isolation the answer is isolated = 0 and no pages, and the server
+ * must keep asking: the pages a freed buffer gave back may be another task's
+ * by the next transfer, and nothing would stop the device from writing them.
+ *
+ * ⚠️ The caller must vm_deallocate the pages it gets back.
+ */
+routine device_dma_map_foreign_region(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	token		: cap_token_t;
+	out	isolated	: natural_t;
+	out	identity	: natural_t;
+	out	base		: vm_address_t;
+	out	ops		: natural_t;
+	out	pages		: dma_sg_addr_t
+	);
