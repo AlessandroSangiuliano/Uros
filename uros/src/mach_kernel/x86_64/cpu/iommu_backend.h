@@ -554,6 +554,54 @@ int iommu_vtd_qi_iec(uint32_t index, unsigned mask_log2, uint64_t out[2]);
 int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2]);
 
 /*
+ * ── #598: Intel's invalidation queue, the ring ───────────────────────
+ *
+ * Rev 5.20 §6.5.2 and §11.4.9.  One page of 128-bit descriptors (IQA's QS 0,
+ * DW 0: 256 of them), a head the engine moves (IQH) and a tail software moves
+ * (IQT), both an index in bits 18:4.  Empty when the two are equal, full when
+ * the tail is one behind the head, so 255 at most are ever outstanding.
+ *
+ * A core over a view of the registers, as #599 made the fault drains: placing
+ * descriptors and reading the answer to a wait are things a fabricated engine
+ * can be asked about at every boot, and only ringing needs a real one.
+ *
+ * 🔑 A submission ends with a wait whose status write carries a number never
+ * used before, and the submission is over when that number is in the cell.
+ * Appendix A: the engine's reads of the ring and its status write are snooped
+ * whatever ECAP.C says, so both sides are plain memory to the processor.
+ */
+#define	IOMMU_VTD_QUEUE_SLOTS	256u
+
+struct iommu_vtd_queue {
+	volatile uint64_t	*iqh, *iqt;	/* the engine's head, our tail  */
+	volatile uint32_t	*fsts;		/* IQE and ITE stop the queue   */
+	volatile uint64_t	*ring;		/* the slots, two words each    */
+	volatile uint32_t	*status;	/* the wait's cell, as we read it */
+	uint64_t		 status_pa;	/* ... and as the engine writes it */
+	unsigned		 tail;		/* where the next descriptor goes */
+	uint32_t		 seq;		/* the last wait's data, never 0 */
+};
+
+/*
+ * Write `n' descriptors and a wait behind them at the tail, and answer the
+ * wait's data -- or zero, having written nothing, when the ring has no room
+ * for all n + 1.  The engine is not told: see iommu_vtd_queue_ring().
+ */
+uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
+			       const uint64_t (*desc)[2], unsigned n);
+
+/* Tell the engine where the tail is now. */
+void iommu_vtd_queue_ring(const struct iommu_vtd_queue *q);
+
+/*
+ * Wait for the wait whose data is `seq': 1 when its status write has arrived,
+ * -1 when the engine reports what stops the queue (IQE or ITE), 0 when
+ * `spins' rounds went by with neither.
+ */
+int iommu_vtd_queue_wait(const struct iommu_vtd_queue *q, uint32_t seq,
+			 unsigned spins);
+
+/*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────
  *
  * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make

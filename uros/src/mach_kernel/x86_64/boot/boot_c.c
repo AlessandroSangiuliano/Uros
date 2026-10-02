@@ -4737,6 +4737,27 @@ static void iommu_selftest(void)
 			   " kernel did not send it\r\n");
 	}
 
+	/*
+	 * ⚠️ AND THE QUEUE THOSE WORDS WILL BE FORGOTTEN THROUGH (#598), on a
+	 * fabricated engine, so it is asked here too and not only where an
+	 * intel engine exists.
+	 */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_queue_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" invalidation-queue cases on a fabricated engine, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — a full ring writes nothing, the end wraps to"
+			   " slot zero, and only a wait's own number answers"
+			   " it\r\n"
+			 : " — WRONG, the engine would read a descriptor nobody"
+			   " wrote, or a wait would end before its work\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");

@@ -1720,3 +1720,90 @@ int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2])
 	out[1] = status_pa;
 	return 1;
 }
+
+/*
+ * ── #598: the invalidation queue's ring, over a view ─────────────────
+ *
+ * Rev 5.20 §11.4.9: IQH at 080h, IQT at 088h, IQA at 090h; the head and the
+ * tail are an index in bits 18:4.  See <cpu/iommu_backend.h> for the shape.
+ */
+#define	VTD_IQH			0x80
+#define	VTD_IQT			0x88
+#define	VTD_IQA			0x90
+#define	VTD_IQ_INDEX(r)		((unsigned)(((r) >> 4) & 0x7FFFu))
+#define	VTD_FSTS_IQE		(1u << 4)	/* a descriptor it refused  */
+#define	VTD_FSTS_ITE		(1u << 6)	/* an answer that never came */
+
+uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
+			       const uint64_t (*desc)[2], unsigned n)
+{
+	unsigned head = VTD_IQ_INDEX(*q->iqh);
+	unsigned room, t = q->tail;
+	uint64_t wait[2];
+	uint32_t seq;
+
+	/*
+	 * A head outside the ring is not a position this kernel can count
+	 * room from, so nothing is written behind it.
+	 */
+	if (head >= IOMMU_VTD_QUEUE_SLOTS || t >= IOMMU_VTD_QUEUE_SLOTS)
+		return 0;
+
+	/*
+	 * One slot always stays empty.  A tail that caught up with the head
+	 * would read as an empty ring, and the engine would stop with every
+	 * descriptor still in it.
+	 */
+	room = (head + IOMMU_VTD_QUEUE_SLOTS - t - 1u) % IOMMU_VTD_QUEUE_SLOTS;
+	if (n >= room)
+		return 0;
+
+	/* Never zero: zero is what a cell nobody has written holds. */
+	seq = q->seq + 1u;
+	if (seq == 0)
+		seq = 1;
+	if (!iommu_vtd_qi_wait(q->status_pa, seq, wait))
+		return 0;
+
+	for (unsigned i = 0; i < n; i++) {
+		q->ring[2 * t + 0] = desc[i][0];
+		q->ring[2 * t + 1] = desc[i][1];
+		t = (t + 1u) % IOMMU_VTD_QUEUE_SLOTS;
+	}
+	q->ring[2 * t + 0] = wait[0];
+	q->ring[2 * t + 1] = wait[1];
+
+	q->tail = (t + 1u) % IOMMU_VTD_QUEUE_SLOTS;
+	q->seq = seq;
+	return seq;
+}
+
+/*
+ * ⚠️ After the slots, and nothing between: the slots are ordinary memory and
+ * the tail a register, both written through volatile pointers, so neither the
+ * compiler nor an x86 processor lets the engine see the new tail before the
+ * descriptors it covers.
+ */
+void iommu_vtd_queue_ring(const struct iommu_vtd_queue *q)
+{
+	*q->iqt = (uint64_t)q->tail << 4;
+}
+
+/*
+ * ICE is not here on purpose: a bad device-TLB answer is recorded and the
+ * engine "continues with processing of descriptors as normal" (§6.5.2.11),
+ * and this kernel sends no device-TLB invalidations to be answered.
+ */
+int iommu_vtd_queue_wait(const struct iommu_vtd_queue *q, uint32_t seq,
+			 unsigned spins)
+{
+	for (unsigned i = 0; i < spins; i++) {
+		if (*q->status == seq)
+			return 1;
+		if (*q->fsts & (VTD_FSTS_IQE | VTD_FSTS_ITE))
+			return -1;
+		__asm__ __volatile__("pause" : : : "memory");
+	}
+
+	return *q->status == seq ? 1 : 0;
+}

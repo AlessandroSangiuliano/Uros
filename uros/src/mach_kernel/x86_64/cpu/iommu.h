@@ -712,6 +712,15 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed);
 int iommu_interrupt_check(unsigned *ran, unsigned *wrong);
 
 /*
+ * #598: the arithmetic of Intel's invalidation queue, on a fabricated engine,
+ * at every boot and on every board -- where descriptors land, when the ring is
+ * full, what a wait carries and what answers it.  A ring that counts its room
+ * one slot wrong stops the engine with every descriptor still in it, or
+ * overwrites one the engine has not read.
+ */
+int iommu_queue_check(unsigned *ran, unsigned *wrong);
+
+/*
  * ── Stage 3d: a domain of its own, for one device ────────────────────
  *
  * 🔴 THIS IS WHERE #432 STOPS BEING A DESCRIPTION.  Everything before it built

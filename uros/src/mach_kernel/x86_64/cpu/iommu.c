@@ -2786,3 +2786,155 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 
 	return bad == 0;
 }
+
+/*
+ * ── #598: Intel's invalidation queue, on a fabricated engine ─────────
+ *
+ * At every boot and on every board: the slots are a static page, the head and
+ * tail registers two words, the fault status one, the cell one.  The check
+ * plays the engine by moving the head and writing the cell by hand, so what it
+ * asks is the arithmetic -- where descriptors land, when the ring counts as
+ * full, what the wait carries, what answers it.  Whether a real engine agrees
+ * is entry 16's question.
+ */
+#define	FAKE_IQ_IQE		(1u << 4)	/* FSTS */
+#define	FAKE_IQ_ICE		(1u << 5)
+#define	FAKE_IQ_ITE		(1u << 6)
+#define	FAKE_IQ_STATUS_PA	0x12340ULL	/* never written: the engine is fake */
+#define	FAKE_IQ_UNWRITTEN	0xDEADULL	/* no descriptor is this word */
+
+static uint64_t		fake_iq_ring[2 * IOMMU_VTD_QUEUE_SLOTS];
+
+struct fake_iq {
+	uint64_t		iqh, iqt;
+	uint32_t		fsts, status;
+	struct iommu_vtd_queue	q;
+};
+
+static void fake_iq_reset(struct fake_iq *f, unsigned head, unsigned tail)
+{
+	f->iqh = (uint64_t)head << 4;
+	f->iqt = (uint64_t)tail << 4;
+	f->fsts = 0;
+	f->status = 0;
+	f->q.iqh = &f->iqh;
+	f->q.iqt = &f->iqt;
+	f->q.fsts = &f->fsts;
+	f->q.ring = fake_iq_ring;
+	f->q.status = &f->status;
+	f->q.status_pa = FAKE_IQ_STATUS_PA;
+	f->q.tail = tail;
+	f->q.seq = 0;
+
+	for (unsigned i = 0; i < 2 * IOMMU_VTD_QUEUE_SLOTS; i++)
+		fake_iq_ring[i] = FAKE_IQ_UNWRITTEN;
+}
+
+static int fake_iq_holds(unsigned slot, const uint64_t d[2])
+{
+	return fake_iq_ring[2 * slot] == d[0]
+	       && fake_iq_ring[2 * slot + 1] == d[1];
+}
+
+int iommu_queue_check(unsigned *ran, unsigned *wrong)
+{
+	struct fake_iq f;
+	uint64_t a[2], b[2], w[2];
+	unsigned n = 0, bad = 0;
+	uint32_t seq;
+
+	iommu_vtd_qi_context_global(a);
+	iommu_vtd_qi_iotlb_global(b);
+	(void) iommu_vtd_qi_wait(FAKE_IQ_STATUS_PA, 1, w);
+
+	const uint64_t two[2][2] = { { a[0], a[1] }, { b[0], b[1] } };
+
+	/* An empty ring at zero: two descriptors, the wait, then the tail. */
+	fake_iq_reset(&f, 0, 0);
+	seq = iommu_vtd_queue_place(&f.q, two, 2);
+	n++;
+	if (seq != 1 || !fake_iq_holds(0, a) || !fake_iq_holds(1, b)
+	    || !fake_iq_holds(2, w) || f.q.tail != 3)
+		bad++;
+
+	/* Ringing puts the tail where the engine reads it, bits 18:4. */
+	iommu_vtd_queue_ring(&f.q);
+	n++;
+	if (f.iqt != (3ULL << 4))
+		bad++;
+
+	/* Round the end: the last two slots, and the wait in slot zero. */
+	fake_iq_reset(&f, 254, 254);
+	seq = iommu_vtd_queue_place(&f.q, two, 2);
+	n++;
+	if (seq != 1 || !fake_iq_holds(254, a) || !fake_iq_holds(255, b)
+	    || !fake_iq_holds(0, w) || f.q.tail != 1)
+		bad++;
+
+	/*
+	 * One free slot, and a descriptor needs two with its wait: refused,
+	 * with nothing written and nothing counted.
+	 */
+	fake_iq_reset(&f, 5, 3);
+	seq = iommu_vtd_queue_place(&f.q, two, 1);
+	n++;
+	if (seq != 0 || f.q.tail != 3 || f.q.seq != 0
+	    || fake_iq_ring[2 * 3] != FAKE_IQ_UNWRITTEN)
+		bad++;
+
+	/* ... while a wait alone fits in that slot. */
+	seq = iommu_vtd_queue_place(&f.q, 0, 0);
+	n++;
+	if (seq != 1 || !fake_iq_holds(3, w) || f.q.tail != 4)
+		bad++;
+
+	/* A head outside the ring is not a place to count room from. */
+	fake_iq_reset(&f, 0, 0);
+	f.iqh = 300ULL << 4;
+	n++;
+	if (iommu_vtd_queue_place(&f.q, 0, 0) != 0 || f.q.tail != 0)
+		bad++;
+
+	/* The wait's number goes round without passing through zero. */
+	fake_iq_reset(&f, 0, 0);
+	f.q.seq = 0xFFFFFFFFu;
+	n++;
+	if (iommu_vtd_queue_place(&f.q, 0, 0) != 1)
+		bad++;
+
+	/* What answers a wait is its own number in the cell... */
+	fake_iq_reset(&f, 0, 0);
+	f.status = 7;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != 1)
+		bad++;
+
+	/* ... and not the number the wait before it left there. */
+	f.status = 6;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != 0)
+		bad++;
+
+	/* A refused descriptor and a lost answer each stop the queue... */
+	f.fsts = FAKE_IQ_IQE;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != -1)
+		bad++;
+	f.fsts = FAKE_IQ_ITE;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != -1)
+		bad++;
+
+	/* ... and a bad device-TLB answer does not (§6.5.2.11). */
+	f.fsts = FAKE_IQ_ICE;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != 0)
+		bad++;
+
+	if (ran)
+		*ran = n;
+	if (wrong)
+		*wrong = bad;
+
+	return bad == 0;
+}
