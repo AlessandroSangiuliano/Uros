@@ -34,6 +34,7 @@
 #include <kern/processor.h>
 #include <kern/cpu_number.h>
 #include <kern/cpu_data.h>	/* #558: who is on each processor */
+#include <kern/sched_prim.h>	/* #615: sched_bound_displaced */
 #include <mach/machine.h>	/* machine_slot[] */
 #include <kern/misc_protos.h>
 #include <kern/lock.h>
@@ -378,6 +379,18 @@ quiet_census_pass(int mycpu)
 	       "passes; %d tasks and %d threads\n",
 	       quiet_passes, default_pset.task_count, default_pset.thread_count);
 
+	/*
+	 * #615: whether the scheduler ever queued a bound thread on a run queue
+	 * not its own processor's, where another processor may take it -- said
+	 * by every boot that reaches the census, not only by the bench whose
+	 * worker caught it.  Silent at zero; UROS_ABLATE_615_DISPLACED_TO_SET
+	 * is how it is seen to speak.
+	 */
+	if (sched_bound_displaced != 0)
+		printf("quiet_census: the scheduler queued %u bound thread(s) "
+		       "on a run queue not their processor's, the last bound "
+		       "to processor %d -- WRONG (#615)\n",
+		       sched_bound_displaced, sched_bound_displaced_slot);
 
 	/*
 	 * ⚠️ The NAME as well as the pointer (#425).
