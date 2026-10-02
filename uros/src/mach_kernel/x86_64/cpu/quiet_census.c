@@ -156,6 +156,48 @@ quiet_work(void)
 }
 
 /*
+ * #615: a census line built here and printed with ONE printf(), which
+ * printf_lock delivers whole.  The thread lines, the stack lines and the
+ * per-processor lines were each a dozen printf() calls, and another
+ * processor's line could land after any of them -- in three boots of one
+ * series it landed after the first: "state=0x1clock_event: cpu 1 -- 10
+ * ticks took ...", failed by the harness as GARBLED.  Only cpu 0 runs the
+ * census (QUIET_CPU), so one static line serves; what does not fit is cut,
+ * and the cut is said.
+ */
+static char	census_line[1024];
+static unsigned	census_len;
+static int	census_cut;
+
+static void
+census_putc(char c)
+{
+	if (census_len < sizeof(census_line) - 1)
+		census_line[census_len++] = c;
+	else
+		census_cut = 1;
+}
+
+static void
+census_add(const char *fmt, ...)
+{
+	va_list	ap;
+
+	va_start(ap, fmt);
+	_doprnt(fmt, &ap, census_putc, 16);
+	va_end(ap);
+}
+
+static void
+census_said(void)
+{
+	census_line[census_len] = '\0';
+	printf("%s%s\n", census_line, census_cut ? " [cut]" : "");
+	census_len = 0;
+	census_cut = 0;
+}
+
+/*
  * The states, spelled out.
  *
  * ⚠️ Names and not the hex, because the hex is what the log already could not
@@ -168,17 +210,17 @@ static void
 census_state(int state)
 {
 	if (state & TH_WAIT)
-		printf(" WAIT");
+		census_add(" WAIT");
 	if (state & TH_SUSP)
-		printf(" SUSP");
+		census_add(" SUSP");
 	if (state & TH_RUN)
-		printf(" RUN");
+		census_add(" RUN");
 	if (state & TH_UNINT)
-		printf(" UNINT");
+		census_add(" UNINT");
 	if (state & TH_IDLE)
-		printf(" IDLE");
+		census_add(" IDLE");
 	if (state == 0)
-		printf(" (none)");
+		census_add(" (none)");
 }
 
 /*
@@ -228,7 +270,7 @@ census_stack(thread_t th)
 	saved = (const uint64_t *) sp;
 	rbp = saved[CTX_RBP];
 
-	printf("quiet_census:     stack th=%p:", th);
+	census_add("quiet_census:     stack th=%p:", th);
 	for (depth = 0; depth < CENSUS_STACK_MAX; depth++) {
 		const uint64_t *frame;
 		uint64_t	next, ret;
@@ -250,15 +292,15 @@ census_stack(thread_t th)
 		/* the lookup on its own line: see report_symbol() in trap.c */
 		nm = ksym_lookup_call(ret, &off);
 		if (nm != 0)
-			printf(" %s+0x%lx", nm, (unsigned long) off);
+			census_add(" %s+0x%lx", nm, (unsigned long) off);
 		else
-			printf(" %p", (void *) ret);
+			census_add(" %p", (void *) ret);
 
 		if (next <= rbp)
 			break;
 		rbp = next;
 	}
-	printf("\n");
+	census_said();
 }
 
 void
@@ -336,6 +378,7 @@ quiet_census_pass(int mycpu)
 	       "passes; %d tasks and %d threads\n",
 	       quiet_passes, default_pset.task_count, default_pset.thread_count);
 
+
 	/*
 	 * ⚠️ The NAME as well as the pointer (#425).
 	 *
@@ -355,7 +398,7 @@ quiet_census_pass(int mycpu)
 	queue_iterate(&default_pset.threads, th, thread_t, pset_threads) {
 		int	walk = 0;
 
-		printf("quiet_census:   th=%p state=%#x", th, th->state);
+		census_add("quiet_census:   th=%p state=%#x", th, th->state);
 		census_state(th->state);
 		/*
 		 * #561: does this thread's vector state travel with it?  A
@@ -365,8 +408,8 @@ quiet_census_pass(int mycpu)
 		 */
 		if (th->top_act != THR_ACT_NULL
 		    && th->top_act->mact.pcb != PCB_NULL)
-			printf(" fpu=%d", th->top_act->mact.pcb->ctx.fpu_switch);
-		printf(" wait_event=%p", (void *) th->wait_event);
+			census_add(" fpu=%d", th->top_act->mact.pcb->ctx.fpu_switch);
+		census_add(" wait_event=%p", (void *) th->wait_event);
 
 		/*
 		 * 🔑 A RUNNABLE THREAD ON AN IDLE MACHINE IS TWO DEFECTS, AND
@@ -385,7 +428,7 @@ quiet_census_pass(int mycpu)
 		 * for them would add a column of noise to every census.
 		 */
 		if ((th->state & TH_RUN) && !(th->state & TH_IDLE))
-			printf(" runq=%p pri=%d/%d", (void *) th->runq,
+			census_add(" runq=%p pri=%d/%d", (void *) th->runq,
 			       (int) th->sched_pri, (int) th->priority);
 
 		/*
@@ -405,9 +448,9 @@ quiet_census_pass(int mycpu)
 					    (uint64_t) th->wait_from, &off);
 
 			if (nm != 0)
-				printf(" from=%s+0x%lx", nm, (unsigned long) off);
+				census_add(" from=%s+0x%lx", nm, (unsigned long) off);
 			else
-				printf(" from=%p", th->wait_from);
+				census_add(" from=%p", th->wait_from);
 
 			/*
 			 * 🔑 And when the sleeper is in vm_fault_page the event
@@ -437,7 +480,7 @@ quiet_census_pass(int mycpu)
 			 * only that they are eight different words.
 			 */
 			if (th->futex_uaddr != 0)
-				printf(" futex=%p", (void *) th->futex_uaddr);
+				census_add(" futex=%p", (void *) th->futex_uaddr);
 
 			if (nm != 0 && th->wait_event != 0 &&
 			    census_streq(nm, "mutex_lock_wait")) {
@@ -445,13 +488,13 @@ quiet_census_pass(int mycpu)
 				uint64_t    poff = 0;
 				const char *pn;
 
-				printf(" [mutex held-by=%p", (void *) mx->own_thr);
+				census_add(" [mutex held-by=%p", (void *) mx->own_thr);
 				pn = ksym_lookup_call((uint64_t) mx->own_pc, &poff);
 				if (pn != 0)
-					printf(" taken-at=%s+0x%lx", pn,
+					census_add(" taken-at=%s+0x%lx", pn,
 					       (unsigned long) poff);
 				else
-					printf(" taken-at=%p", (void *) mx->own_pc);
+					census_add(" taken-at=%p", (void *) mx->own_pc);
 				/*
 				 * ⚠️ And whether it is held at all.  held-by
 				 * is a note written beside the lock word, not
@@ -460,7 +503,7 @@ quiet_census_pass(int mycpu)
 				 * holder, and the note alone cannot tell them
 				 * apart.
 				 */
-				printf(" locked=%d waiters=%d]", (int) mx->locked,
+				census_add(" locked=%d waiters=%d]", (int) mx->locked,
 				       (int) mx->waiters);
 				walk = 1;
 			}
@@ -477,10 +520,10 @@ quiet_census_pass(int mycpu)
 				 * every one of these sites lives.
 				 */
 				if (m->busy && m->busy_line != 0)
-					printf(" busied-at=vm_fault.c:%u",
+					census_add(" busied-at=vm_fault.c:%u",
 					       m->busy_line);
 #endif	/* MACH_ASSERT */
-				printf(" [page busy=%d wanted=%d wire=%d"
+				census_add(" [page busy=%d wanted=%d wire=%d"
 				       " obj=%p off=0x%lx]",
 				       (int) m->busy, (int) m->wanted,
 				       (int) m->wire_count, m->object,
@@ -493,7 +536,7 @@ quiet_census_pass(int mycpu)
 				 * the stack below has to explain.
 				 */
 				if (m->object != VM_OBJECT_NULL)
-					printf(" [obj-lock locked=%d waiters=%d"
+					census_add(" [obj-lock locked=%d waiters=%d"
 					       " owner=%p]",
 					       (int) m->object->Lock.locked,
 					       (int) m->object->Lock.waiters,
@@ -516,15 +559,15 @@ quiet_census_pass(int mycpu)
 		 * outside, against the program's binary.
 		 */
 		if (th->top_act != THR_ACT_NULL) {
-			printf(" task=%p susp=%d",
+			census_add(" task=%p susp=%d",
 			       th->top_act->task, th->top_act->suspend_count);
 			if (th->top_act->mact.xxx_pcb.user != 0)
-				printf(" user-rip=%p",
+				census_add(" user-rip=%p",
 				       (void *) th->top_act->mact.xxx_pcb.user->rip);
 		}
 		if (th->name[0] != '\0')
-			printf(" name=\"%s\"", th->name);
-		printf("\n");
+			census_add(" name=\"%s\"", th->name);
+		census_said();
 		if (walk)
 			census_stack(th);
 		n++;
@@ -557,14 +600,14 @@ quiet_census_pass(int mycpu)
 				continue;
 
 			act = cpu_data[i].active_thread;
-			printf("quiet_census: cpu %d active=%p", i, act);
+			census_add("quiet_census: cpu %d active=%p", i, act);
 			if (act != THREAD_NULL) {
-				printf(" state=%#x", act->state);
+				census_add(" state=%#x", act->state);
 				census_state(act->state);
 				if (act->name[0] != '\0')
-					printf(" name=\"%s\"", act->name);
+					census_add(" name=\"%s\"", act->name);
 			}
-			printf("\n");
+			census_said();
 		}
 	}
 
