@@ -47,6 +47,18 @@
 #include <kern/cpu_number.h>
 #include <cpus.h>		/* NCPUS */
 
+#ifndef PROBE_537_CAP_CONCURRENCY
+#define PROBE_537_CAP_CONCURRENCY 0
+#endif
+#if PROBE_537_CAP_CONCURRENCY && NCPUS > 1
+#include <kern/processor.h>
+#include <kern/sched_prim.h>
+#include <kern/thread_act.h>
+#include <kern/thread_swap.h>
+#include <kern/tsc.h>
+#include <mach/machine.h>
+#endif
+
 #include <mach/etap_events.h>
 
 /* #432: a revoked capability must take its mappings with it. */
@@ -488,6 +500,166 @@ cap_id_revoked(uint64_t cap_id)
     return revoked;
 }
 
+#if PROBE_537_CAP_CONCURRENCY && NCPUS > 1
+/*
+ * #537: what the MAC outside cap_lock is for, asked of the machine.  One
+ * checker alone first -- this thread, K checks of a valid token on the path
+ * with no cache (cap_check_unlocked) -- then one kernel thread bound to every
+ * other running processor, all released together, each making the same K
+ * checks.  The cycles a check took, alone and together, are the answer: with
+ * the MAC under the lock (UROS_ABLATE_537_HMAC_LOCKED) checkers on different
+ * processors wait for each other, and a check together costs about as many
+ * times one alone as there are checkers.  Bounded waits, so a thread that
+ * never starts is a line, not a silence.  A build option, off by default.
+ */
+#define CAP_PROBE_ROUNDS	2000
+#define CAP_PROBE_PATIENCE	20000000000ULL	/* TSC cycles, seconds' worth */
+
+static struct uros_cap		cap_probe_token;
+static volatile uint32_t	cap_probe_go, cap_probe_ready, cap_probe_finished;
+static volatile uint32_t	cap_probe_refused;
+static uint64_t			cap_probe_cycles[NCPUS];
+static int			cap_probe_parked;
+decl_simple_lock_data(static, cap_probe_lock)
+
+static void
+cap_probe_body(void)
+{
+    uint32_t refused = 0;
+    uint64_t t0;
+
+    simple_lock(&cap_probe_lock);
+    cap_probe_ready++;
+    simple_unlock(&cap_probe_lock);
+    while (!cap_probe_go)
+        continue;
+
+    t0 = urmach_tsc();
+    for (unsigned k = 0; k < CAP_PROBE_ROUNDS; k++)
+        if (cap_check_unlocked(&cap_probe_token, RESOURCE_DMA_BUFFER,
+                               CAP_OP_DMA_DEVICE_READ, 0x537) != KERN_SUCCESS)
+            refused++;
+    cap_probe_cycles[cpu_number()] = urmach_tsc() - t0;
+
+    simple_lock(&cap_probe_lock);
+    cap_probe_refused += refused;
+    cap_probe_finished++;
+    simple_unlock(&cap_probe_lock);
+
+    for (;;) {			/* parked in a wait nobody signals */
+        spl_t s = splsched();
+
+        assert_wait((event_t)&cap_probe_parked, FALSE);
+        splx(s);
+        thread_block((void (*)(void))0);
+    }
+}
+
+static int
+cap_probe_start(processor_t p)
+{
+    thread_t th;
+    thread_act_t act;
+    spl_t s;
+
+    if (thread_create_at(kernel_task, &th, cap_probe_body) != KERN_SUCCESS)
+        return 0;
+    act = th->top_act;
+    thread_swappable(act, FALSE);
+    s = splsched();
+    thread_lock(th);
+    th->max_priority = BASEPRI_SYSTEM;
+    th->priority = BASEPRI_SYSTEM;
+    th->sched_pri = BASEPRI_SYSTEM;
+    thread_bind_locked(th, p);
+    th->state |= TH_RUN;
+    thread_setrun(th, TRUE, TAIL_Q);
+    thread_unlock(th);
+    splx(s);
+    act_deallocate(act);
+    thread_resume(act);
+    return 1;
+}
+
+static void
+cap_probe_run(void)
+{
+    uint64_t t0, alone, lo = ~0ULL, hi = 0;
+    uint32_t started = 0, refused = 0;
+    int me, i;
+
+    simple_lock_init(&cap_probe_lock, ETAP_NO_TRACE);
+    bzero((char *)&cap_probe_token, sizeof(cap_probe_token));
+    cap_probe_token.cap_id = ~0ULL - 2;
+    cap_probe_token.resource_type = RESOURCE_DMA_BUFFER;
+    cap_probe_token.resource_id = 0x537;
+    cap_probe_token.allowed_ops = CAP_OP_DMA_DEVICE_READ;
+    simple_lock(&cap_lock);
+    hmac_sha256_with(&cap_hmac_ready, &cap_probe_token,
+                     sizeof(cap_probe_token) - CAP_HMAC_SIZE,
+                     cap_probe_token.hmac);
+    simple_unlock(&cap_lock);
+
+    disable_preemption();
+    me = cpu_number();
+    t0 = urmach_tsc();
+    for (unsigned k = 0; k < CAP_PROBE_ROUNDS; k++)
+        if (cap_check_unlocked(&cap_probe_token, RESOURCE_DMA_BUFFER,
+                               CAP_OP_DMA_DEVICE_READ, 0x537) != KERN_SUCCESS)
+            refused++;
+    alone = (urmach_tsc() - t0) / CAP_PROBE_ROUNDS;
+    enable_preemption();
+
+    for (i = 0; i < NCPUS; i++) {
+        if (i == me || !machine_slot[i].is_cpu || !machine_slot[i].running)
+            continue;
+        started += cap_probe_start(cpu_to_processor(i));
+    }
+    if (started == 0) {
+        printf("cap: probe -- one checker alone: %llu cycles a check; NOT ASKED "
+               "together, no other processor is running (#537)\n",
+               (unsigned long long)alone);
+        return;
+    }
+
+    for (t0 = urmach_tsc(); cap_probe_ready < started &&
+         urmach_tsc() - t0 < CAP_PROBE_PATIENCE; )
+        continue;
+    if (cap_probe_ready < started) {
+        printf("cap: probe -- only %u of %u checker threads started; NOT ASKED "
+               "(#537)\n", cap_probe_ready, started);
+        return;
+    }
+    cap_probe_go = 1;
+    for (t0 = urmach_tsc(); cap_probe_finished < started &&
+         urmach_tsc() - t0 < CAP_PROBE_PATIENCE; )
+        continue;
+    if (cap_probe_finished < started) {
+        printf("cap: probe -- only %u of %u checkers finished their %u checks; "
+               "WRONG, or slower than seconds (#537)\n", cap_probe_finished,
+               started, CAP_PROBE_ROUNDS);
+        return;
+    }
+
+    for (i = 0; i < NCPUS; i++) {
+        uint64_t c = cap_probe_cycles[i] / CAP_PROBE_ROUNDS;
+
+        if (cap_probe_cycles[i] == 0)
+            continue;
+        if (c < lo)
+            lo = c;
+        if (c > hi)
+            hi = c;
+    }
+    printf("cap: probe -- one checker alone: %llu cycles a check; %u together, "
+           "one a processor: %llu-%llu cycles a check, %u refused; the MAC "
+           "%s cap_lock (#537)\n", (unsigned long long)alone, started,
+           (unsigned long long)lo, (unsigned long long)hi,
+           refused + cap_probe_refused,
+           ABLATE_537_HMAC_LOCKED ? "under" : "outside");
+}
+#endif	/* PROBE_537_CAP_CONCURRENCY && NCPUS > 1 */
+
 /*
  * #537: the cache asked once the key exists.  A token checked twice on one
  * processor is answered from the cache the second time -- the hit counted --
@@ -713,6 +885,9 @@ urmach_cap_register(const struct uros_cap *user_token)
                (unsigned)CAP_HMAC_SIZE);
         cap_type_selftest();			/* #599 */
         cap_cache_selftest();			/* #537 */
+#if PROBE_537_CAP_CONCURRENCY && NCPUS > 1
+        cap_probe_run();			/* #537 */
+#endif
         return KERN_SUCCESS;
     }
 
