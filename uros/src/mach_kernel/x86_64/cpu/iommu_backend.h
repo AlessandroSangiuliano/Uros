@@ -572,6 +572,12 @@ int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2]);
  */
 #define	IOMMU_VTD_QUEUE_SLOTS	256u
 
+/*
+ * The size of <cpu/iommu.c>'s unit table, here because each vendor keeps
+ * per-engine state sized by it too (#598: one queue per intel engine).
+ */
+#define	IOMMU_MAX_UNITS		8
+
 struct iommu_vtd_queue {
 	volatile uint64_t	*iqh, *iqt;	/* the engine's head, our tail  */
 	volatile uint32_t	*fsts;		/* IQE and ITE stop the queue   */

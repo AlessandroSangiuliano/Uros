@@ -5211,6 +5211,29 @@ static void iommu_selftest(void)
 				   " confirm it\r\n");
 
 			/*
+			 * #598: and how each intel engine is told to forget —
+			 * through its queue once that is on, which is then the
+			 * only way it may be told, or through two registers on
+			 * an engine that has no queue.  The waits are counted,
+			 * not assumed: the enable's own invalidation is one.
+			 */
+			if (on && iommu_vendor() == IOMMU_INTEL)
+				for (unsigned i = 0; i < iommu_unit_count(); i++) {
+					struct iommu_queue_counts c;
+
+					kputs("UrMach x86-64:   unit ");
+					kputdec(i);
+					if (iommu_queue_counts(i, &c)) {
+						kputs(" forgets through its invalidation"
+						      " queue, ");
+						kputdec((unsigned)c.waits);
+						kputs(" wait(s) answered so far\r\n");
+					} else
+						kputs(" forgets through its registers —"
+						      " it has no invalidation queue\r\n");
+				}
+
+			/*
 			 * 🔴 AND THE FIRST QUESTION AFTER TURNING IT ON IS
 			 * WHETHER ANYTHING WAS REFUSED (#432 stage 3d).  Under
 			 * pass-through the answer must be NONE — every device

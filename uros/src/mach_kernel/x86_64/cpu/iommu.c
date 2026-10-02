@@ -34,7 +34,6 @@
  * The cost of not panicking is that something downstream must check
  * iommu_truncated(), which is why that function exists and says so.
  */
-#define	IOMMU_MAX_UNITS		8
 #define	IOMMU_MAX_RESERVED	16
 #define	IOMMU_MAX_SCOPES	64
 
@@ -1893,6 +1892,54 @@ static int domain_flush(const struct iommu_domain *d)
 }
 
 /*
+ * Let iommu_domain_lock go, saying first what the engines' invalidation queues
+ * did (#598) -- here because the vendor code does not print, and on the way
+ * out of the lock because every path that reaches a queue holds it.  At eight
+ * waits answered and at every doubling after -- by a threshold and not by
+ * "a power of two", because one operation can send two submissions and step
+ * over the exact number -- which says the queue is the path in use, with how
+ * many times its tail went round; and once, the moment a queue stops, why.
+ */
+static void domain_unlock(void)
+{
+	static uint64_t	say_at[IOMMU_MAX_UNITS];
+	static unsigned	said_stop[IOMMU_MAX_UNITS];
+
+	for (unsigned i = 0; i < nunits; i++) {
+		struct iommu_queue_counts c;
+
+		if (!iommu_queue_counts(i, &c))
+			continue;
+
+		if (say_at[i] == 0)
+			say_at[i] = 8;
+		if (c.waits >= say_at[i]) {
+			say_at[i] = 2 * c.waits;
+			printf("iommu: unit %u's invalidation queue has answered "
+			       "%llu waits for %llu descriptors, and gone round "
+			       "its ring %llu time(s) (#598)\n", i,
+			       (unsigned long long)c.waits,
+			       (unsigned long long)c.descriptors,
+			       (unsigned long long)c.turns);
+		}
+
+		if (c.stopped != IOMMU_QUEUE_RUNNING && said_stop[i] == 0) {
+			said_stop[i] = c.stopped;
+			printf("iommu: unit %u's invalidation queue STOPPED — %s "
+			       "(fault status 0x%x, head %u, tail %u); every "
+			       "invalidation after it fails (#598)\n", i,
+			       c.stopped == IOMMU_QUEUE_NO_ROOM ? "no room"
+			       : c.stopped == IOMMU_QUEUE_REFUSED
+				 ? "the engine refused a descriptor or lost an answer"
+				 : "a wait's answer never came",
+			       c.fsts, c.head, c.tail);
+		}
+	}
+
+	mutex_unlock(&iommu_domain_lock);
+}
+
+/*
  * The domain this device is in, opened if it has none, with room to record one
  * more grant.  Null when any of those is not possible.
  *
@@ -2020,7 +2067,7 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
 
 	mutex_lock(&iommu_domain_lock);
 	ok = grant_locked(bdf, pa, size, read, write, iova_out);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2108,7 +2155,7 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
 	mutex_lock(&iommu_domain_lock);
 	ok = grant_pages_locked(bdf, pa, n, read, write, iova_out,
 				identity_out);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2147,7 +2194,7 @@ int iommu_domain_identity(uint16_t bdf)
 
 	mutex_lock(&iommu_domain_lock);
 	ok = domain_identity_locked(bdf);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2194,7 +2241,7 @@ int iommu_domain_release(uint16_t bdf)
 
 	mutex_lock(&iommu_domain_lock);
 	ok = domain_release_locked(bdf);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2251,7 +2298,7 @@ int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
 
 	mutex_lock(&iommu_domain_lock);
 	ok = revoke_locked(bdf, pa, size);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 

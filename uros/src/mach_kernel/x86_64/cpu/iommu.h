@@ -721,6 +721,30 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong);
 int iommu_queue_check(unsigned *ran, unsigned *wrong);
 
 /*
+ * #598: what an intel engine's invalidation queue has done, for whoever prints:
+ * whether it is on, how many waits it answered and descriptors it took, how
+ * many times its tail went round the ring -- and, kept from the first time,
+ * what stopped it, with the fault status and the two ends as they were then.
+ * Answers zero for a unit that is not an intel engine this kernel enabled.
+ */
+enum iommu_queue_stop {
+	IOMMU_QUEUE_RUNNING = 0,
+	IOMMU_QUEUE_NO_ROOM,		/* more descriptors than free slots */
+	IOMMU_QUEUE_SILENT,		/* the wait's number never arrived  */
+	IOMMU_QUEUE_REFUSED		/* IQE or ITE: the engine stopped it */
+};
+
+struct iommu_queue_counts {
+	int		on;		/* QIES read back set */
+	uint64_t	waits, descriptors, turns;
+	unsigned	stopped;	/* enum iommu_queue_stop */
+	uint32_t	fsts;		/* at the stop */
+	unsigned	head, tail;	/* at the stop */
+};
+
+int iommu_queue_counts(unsigned unit, struct iommu_queue_counts *out);
+
+/*
  * ── Stage 3d: a domain of its own, for one device ────────────────────
  *
  * 🔴 THIS IS WHERE #432 STOPS BEING A DESCRIPTION.  Everything before it built

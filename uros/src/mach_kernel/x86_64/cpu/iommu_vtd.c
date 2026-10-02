@@ -23,6 +23,7 @@
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
+#include <sync/lock.h>		/* hw_lock: each queue's own, #598 */
 
 #include <device/pci.h>		/* PCI_VENDOR_ID */
 
@@ -546,6 +547,8 @@ int iommu_vtd_build(void)
 #define	VTD_GCMD_SRTP	(1ULL << 30)	/* set root table pointer        */
 #define	VTD_GSTS_TES	(1ULL << 31)
 #define	VTD_GSTS_RTPS	(1ULL << 30)
+#define	VTD_GCMD_QIE	(1ULL << 26)	/* queued invalidation enable    */
+#define	VTD_GSTS_QIES	(1ULL << 26)
 
 /* The bits of GSTS that describe state worth carrying into the next GCMD. */
 #define	VTD_GSTS_KEEP	0x96FFFFFFu
@@ -577,6 +580,11 @@ static int wait_bit(volatile uint8_t *regs, unsigned off, uint64_t bit,
 	return 0;
 }
 
+/* #598: an engine's queue, and forgetting through it -- at the end of this file. */
+static int vtd_queue_start(unsigned unit, volatile uint8_t *regs, unsigned iro);
+static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
+		      int contexts);
+
 int iommu_vtd_enable(void)
 {
 	const struct iommu_tables *t = iommu_tables();
@@ -606,23 +614,26 @@ int iommu_vtd_enable(void)
 		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_RTPS, 1, 0))
 			return 0;
 
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+
+		/*
+		 * #598: the queue before the first invalidation, on an engine
+		 * that has one, so that the first is already a descriptor.
+		 * Started or not at all: an engine whose queue did not come
+		 * up is not one this kernel can tell to forget.
+		 */
+		if (VTD_ECAP_QI(u->vendor_caps[1])
+		    && !vtd_queue_start(i, regs, iro))
+			return 0;
+
 		/*
 		 * 🔴 INVALIDATE BEFORE ENABLING, both caches, globally.  The
 		 * engine may hold entries from whoever ran it before us --
 		 * firmware, or a previous boot that left it on -- and a
 		 * translation cached against a table we have replaced is a
-		 * device reaching memory by an old description.  Costs two
-		 * writes and two spins, once.
+		 * device reaching memory by an old description.  Once.
 		 */
-		*(volatile uint64_t *)(regs + VTD_CCMD) =
-			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
-		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
-			return 0;
-
-		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+		if (!vtd_forget(i, regs, iro, 1))
 			return 0;
 
 		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
@@ -811,7 +822,7 @@ int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
  *
  * ⚠️ Global, and not device-selective, which this engine also offers.  An
  * attach happens once per device, at its first grant, and a global
- * invalidation costs two register writes and two bounded spins -- against a
+ * invalidation costs two commands and a bounded wait -- against a
  * device-selective one whose SID and DID fields are two more chances to be
  * wrong in a way that produces a correct-looking machine.  The moment attach
  * is on a path that runs often, this is the thing to sharpen.
@@ -868,16 +879,9 @@ int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 			return 0;
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
-
-		*(volatile uint64_t *)(regs + VTD_CCMD) =
-			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
-		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
-			return 0;
-
 		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+
+		if (!vtd_forget(i, regs, iro, 1))
 			return 0;
 
 		attached++;
@@ -926,16 +930,9 @@ int iommu_vtd_detach(uint16_t bdf)
 			return 0;
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
-
-		*(volatile uint64_t *)(regs + VTD_CCMD) =
-			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
-		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
-			return 0;
-
 		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+
+		if (!vtd_forget(i, regs, iro, 1))
 			return 0;
 
 		detached++;
@@ -958,7 +955,7 @@ int iommu_vtd_detach(uint16_t bdf)
  * ⚠️ Global, though the domain is named and this engine offers a
  * domain-selective form -- IOTLB_REG's IIRG field with the DID beside it.  The
  * argument is the one on attach above: a field that is not written cannot be
- * written wrongly, and until grants are frequent the difference is two spins.
+ * written wrongly, and until grants are frequent the difference is one wait.
  */
 int iommu_vtd_flush(const struct iommu_domain *d)
 {
@@ -978,9 +975,7 @@ int iommu_vtd_flush(const struct iommu_domain *d)
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
 
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+		if (!vtd_forget(i, regs, iro, 0))
 			return 0;
 
 		flushed++;
@@ -1806,4 +1801,183 @@ int iommu_vtd_queue_wait(const struct iommu_vtd_queue *q, uint32_t seq,
 	}
 
 	return *q->status == seq ? 1 : 0;
+}
+
+/*
+ * ── #598 point 1: each engine's queue, live ──────────────────────────
+ *
+ * One ring per engine, each with its own IQA, and one status frame for all of
+ * them, a cache line each.  The lock is the ring's own and masks interrupts
+ * (hw_lock).  Every caller today also holds iommu_domain_lock, a mutex -- but
+ * the remapping phases will forget interrupt entries from paths that cannot
+ * sleep, and a ring two of those share must not depend on a lock they do not
+ * take.
+ */
+#define	VTD_QUEUE_SPINS		1000000u
+#define	VTD_STATUS_STRIDE	64u
+
+static struct iommu_vtd_queue		vtd_queue[IOMMU_MAX_UNITS];
+static struct iommu_queue_counts	vtd_counts[IOMMU_MAX_UNITS];
+static hw_lock_data_t			vtd_queue_lock[IOMMU_MAX_UNITS];
+static uint64_t				vtd_status_frame;
+
+/*
+ * Rev 5.20 §6.5.2, in its order: nothing in flight through the registers, the
+ * tail at zero, the ring's address and size, then QIE -- and QIES read back,
+ * because the queue is not on until the engine says so.
+ *
+ * ⚠️ A queue whoever ran before us left on is drained and turned off first.
+ * IQA "should not be modified while the invalidation queue is not empty", and
+ * turning the queue off is the only thing that puts IQH back to zero.  An
+ * engine whose old queue never drains -- an error left pending in it -- is
+ * not taken over at all.
+ */
+static int vtd_queue_start(unsigned unit, volatile uint8_t *regs, unsigned iro)
+{
+	struct iommu_vtd_queue *q;
+	uint64_t ring_pa;
+	uint32_t keep;
+
+	if (unit >= IOMMU_MAX_UNITS)
+		return 0;
+	q = &vtd_queue[unit];
+
+	if (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_QIES) {
+		unsigned spin = 0;
+
+		while (VTD_IQ_INDEX(*(volatile uint64_t *)(regs + VTD_IQH))
+		       != VTD_IQ_INDEX(*(volatile uint64_t *)(regs + VTD_IQT)))
+			if (++spin == VTD_QUEUE_SPINS)
+				return 0;
+
+		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+		*(volatile uint32_t *)(regs + VTD_GCMD) =
+			keep & ~(uint32_t)VTD_GCMD_QIE;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_QIES, 0, 0))
+			return 0;
+	}
+
+	if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1)
+	    || !wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+		return 0;
+
+	if (vtd_status_frame == 0)
+		vtd_status_frame = boot_frame_alloc();
+	ring_pa = boot_frame_alloc();
+	if (vtd_status_frame == 0 || ring_pa == 0)
+		return 0;
+
+	q->iqh = (volatile uint64_t *)(regs + VTD_IQH);
+	q->iqt = (volatile uint64_t *)(regs + VTD_IQT);
+	q->fsts = (volatile uint32_t *)(regs + VTD_FSTS);
+	q->ring = (volatile uint64_t *)(uintptr_t)phys_to_direct(ring_pa);
+	q->status_pa = vtd_status_frame + (uint64_t)unit * VTD_STATUS_STRIDE;
+	q->status = (volatile uint32_t *)(uintptr_t)phys_to_direct(q->status_pa);
+	q->tail = 0;
+	q->seq = 0;
+
+	*q->iqt = 0;
+	*(volatile uint64_t *)(regs + VTD_IQA) = ring_pa;	/* DW 0, QS 0 */
+
+	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_QIE;
+	if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_QIES, 1, 0))
+		return 0;
+
+	vtd_counts[unit].on = 1;
+	return 1;
+}
+
+/*
+ * Send `n' descriptors and return once the engine has done them.  A failure
+ * is kept, the first time, with the fault status and the two ends as they
+ * were, for whoever prints (iommu_queue_counts); this code does not print.
+ *
+ * ⚠️ A queue the engine stopped (IQE, ITE) stays stopped: every submission
+ * after it fails at once on the same bit, which is a loud failure and not a
+ * silent one.  Putting it back would mean finding and replacing the descriptor
+ * the engine refused, and that is not written yet.
+ */
+static int vtd_queue_submit(unsigned unit, const uint64_t (*desc)[2], unsigned n)
+{
+	struct iommu_vtd_queue *q = &vtd_queue[unit];
+	struct iommu_queue_counts *c = &vtd_counts[unit];
+	unsigned before;
+	uint32_t seq;
+	int answer = 0;
+
+	hw_lock_lock(&vtd_queue_lock[unit]);
+
+	before = q->tail;
+	seq = iommu_vtd_queue_place(q, desc, n);
+	if (seq != 0) {
+		iommu_vtd_queue_ring(q);
+		answer = iommu_vtd_queue_wait(q, seq, VTD_QUEUE_SPINS);
+	}
+
+	if (answer == 1) {
+		c->waits++;
+		c->descriptors += n + 1u;
+		if (q->tail < before)
+			c->turns++;
+	} else if (c->stopped == IOMMU_QUEUE_RUNNING) {
+		c->stopped = seq == 0 ? IOMMU_QUEUE_NO_ROOM
+			   : answer < 0 ? IOMMU_QUEUE_REFUSED
+			   : IOMMU_QUEUE_SILENT;
+		c->fsts = *q->fsts;
+		c->head = VTD_IQ_INDEX(*q->iqh);
+		c->tail = q->tail;
+	}
+
+	hw_lock_unlock(&vtd_queue_lock[unit]);
+	return answer == 1;
+}
+
+/*
+ * The context cache and the IOTLB, or the IOTLB alone, globally: through the
+ * queue once it is on, through the two registers on an engine that has none.
+ * The order needs no wait between the two descriptors: an IOTLB invalidation
+ * runs only after every context-cache one ahead of it (§6.5.2.12).
+ *
+ * 🔴 NEVER BOTH.  Once QIES is set, "software must submit invalidation
+ * commands only through the IQ" (§6.5.2) -- and QEMU's engine then ignores a
+ * register command and leaves its busy bit set, so the register form would not
+ * fail at once: it would spin to its bound and answer no.
+ */
+static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
+		      int contexts)
+{
+	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on) {
+		uint64_t cc[2], io[2];
+
+		iommu_vtd_qi_context_global(cc);
+		iommu_vtd_qi_iotlb_global(io);
+
+		const uint64_t both[2][2] = { { cc[0], cc[1] },
+					      { io[0], io[1] } };
+
+		return contexts ? vtd_queue_submit(unit, both, 2)
+				: vtd_queue_submit(unit, both + 1, 1);
+	}
+
+	if (contexts) {
+		*(volatile uint64_t *)(regs + VTD_CCMD) =
+			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
+		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
+			return 0;
+	}
+
+	*(volatile uint64_t *)(regs + iro + 8) = VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+	return wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1);
+}
+
+int iommu_queue_counts(unsigned unit, struct iommu_queue_counts *out)
+{
+	if (unit >= IOMMU_MAX_UNITS || out == 0 || !vtd_counts[unit].on)
+		return 0;
+
+	hw_lock_lock(&vtd_queue_lock[unit]);
+	*out = vtd_counts[unit];
+	hw_lock_unlock(&vtd_queue_lock[unit]);
+	return 1;
 }
