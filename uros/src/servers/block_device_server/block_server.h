@@ -316,6 +316,7 @@ struct blk_xlate {
 	natural_t		ops;
 	vm_address_t		base;
 	struct blk_xlate_page	*ix;
+	uint32_t		epoch;	/* urmach_cap_epoch() before it was taken */
 };
 
 struct blk_handle {

@@ -288,6 +288,13 @@ if(UROS_ABLATE_537_TABLE_KEPT)
     target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_TABLE_KEPT=1)
     message(STATUS "#537 ablation: translations kept through a revocation")
 endif()
+# #537: no epoch check after a transfer -- the window between a revocation and
+# its notice left open (with TABLE_KEPT, cap_test [26] is told success).
+option(UROS_ABLATE_537_NO_EPOCH "Build the #537 ablation: the block server does not read the revocation epoch after a transfer" OFF)
+if(UROS_ABLATE_537_NO_EPOCH)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_EPOCH=1)
+    message(STATUS "#537 ablation: no epoch check after a transfer")
+endif()
 
 target_include_directories(block_device_server PRIVATE ${BLK_INCLUDE_DIRS})
 

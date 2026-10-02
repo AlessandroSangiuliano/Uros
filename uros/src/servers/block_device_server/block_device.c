@@ -54,6 +54,9 @@
 #ifndef BLK_ABLATE_537_TABLE_KEPT
 #define BLK_ABLATE_537_TABLE_KEPT 0
 #endif
+#ifndef BLK_ABLATE_537_NO_EPOCH
+#define BLK_ABLATE_537_NO_EPOCH 0	/* no check after a transfer */
+#endif
 #define BLK_DMA_PAGE	4096u		/* the DMA regions' page, both targets */
 
 struct blk_handle;
@@ -1180,9 +1183,13 @@ blk_xlate_take(struct blk_handle *h, const struct uros_cap *t,
 	unsigned int	i;
 	kern_return_t	kr;
 
+	uint32_t	epoch;
+
 	blk_xlate_free(x);
 	if (BLK_ABLATE_537_NO_TABLE)
 		return;
+	/* Before the ask: a revocation after it moves the epoch past this. */
+	epoch = (uint32_t)urmach_cap_epoch();
 	kr = device_dma_map_foreign_region(master_device, bdf, (char *)t,
 					   sizeof(*t), &isolated, &identity,
 					   &base, &ops, &pages, &cnt);
@@ -1212,6 +1219,7 @@ blk_xlate_take(struct blk_handle *h, const struct uros_cap *t,
 		x->ops = ops;
 		x->base = base;
 		x->ix = ix;
+		x->epoch = epoch;
 		printf("blk: %s: buffer %llu translated once, %u pages kept on "
 		       "this handle -- its transfers ask the kernel nothing "
 		       "(#537)\n", h->part->name,
@@ -1221,7 +1229,8 @@ blk_xlate_take(struct blk_handle *h, const struct uros_cap *t,
 			    cnt * sizeof(vm_address_t));
 }
 
-/* The device address of `pa' for `op' from this handle's kept translations. */
+/* The device address of `pa' for `op' from this handle's kept translations:
+ * the slot it came from plus one, or 0 when no table has it. */
 static int
 blk_xlate_find(const struct blk_handle *h, vm_address_t pa, natural_t op,
 	       vm_address_t *dma)
@@ -1248,16 +1257,60 @@ blk_xlate_find(const struct blk_handle *h, vm_address_t pa, natural_t op,
 				: x->base + (vm_address_t)x->ix[lo].page *
 					    BLK_DMA_PAGE +
 				  (pa & (vm_address_t)(BLK_DMA_PAGE - 1));
-			return 1;
+			return (int)i + 1;
 		}
 	}
 	return 0;
 }
 
+/*
+ * #537: after a transfer that used kept translations -- did the capability
+ * each was granted on hold through it?  The epoch as it was when the
+ * translation was taken: no revocation happened, yes.  Moved: the capability
+ * is verified again; refused, its translation is forgotten and the transfer
+ * that used it is answered with the refusal.  The IOMMU may have refused the
+ * device while the controller reported success, and success must not be
+ * reported for what may not have happened -- the window between a revocation
+ * and its notice, closed.  An epoch moved by somebody else's revocation costs
+ * one verification, once.  UROS_ABLATE_537_NO_EPOCH leaves the window open.
+ */
+static kern_return_t
+blk_xlate_held(struct blk_handle *h, unsigned int used)
+{
+	kern_return_t	result = KERN_SUCCESS, kr;
+	uint32_t	now;
+	unsigned int	i;
+
+	if (used == 0 || BLK_ABLATE_537_NO_EPOCH)
+		return KERN_SUCCESS;
+	now = (uint32_t)urmach_cap_epoch();
+	for (i = 0; i < h->n_dma_caps; i++) {
+		struct blk_xlate *x = &h->dma_xlate[i];
+
+		if (x->npages == 0 || x->epoch == now)
+			continue;
+		kr = blk_token_check(&h->dma_cap[i], RESOURCE_DMA_BUFFER, 0,
+				     h->dma_cap[i].resource_id);
+		if (kr == KERN_SUCCESS) {
+			x->epoch = now;
+			continue;
+		}
+		printf("blk: %s: buffer %llu's capability no longer holds (kr=%d) "
+		       "— its translation forgotten%s (#537)\n", h->part->name,
+		       (unsigned long long)h->dma_cap[i].resource_id, (int)kr,
+		       (used & (1u << i)) ? ", and the transfer that used it "
+		       "answered with the refusal" : "");
+		blk_xlate_free(x);
+		if (used & (1u << i))
+			result = kr;
+	}
+	return result;
+}
+
 static kern_return_t
 blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
 		  unsigned int n, natural_t op, vm_address_t *dma,
-		  unsigned int *refused)
+		  unsigned int *refused, unsigned int *used)
 {
 	struct blk_controller *ctrl = h->part->ctrl;
 	natural_t	bdf = (natural_t)((ctrl->pci_bus << 8) |
@@ -1267,11 +1320,17 @@ blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
 	kern_return_t	kr;
 
 	/* #537 step 3: every page from a kept translation, or none of them. */
-	for (k = 0; k < n; k++)
-		if (!blk_xlate_find(h, pa[k], op, &dma[k]))
+	*used = 0;
+	for (k = 0; k < n; k++) {
+		int slot = blk_xlate_find(h, pa[k], op, &dma[k]);
+
+		if (slot == 0)
 			break;
+		*used |= 1u << (slot - 1);
+	}
 	if (k == n)
 		return KERN_SUCCESS;
+	*used = 0;
 
 	if (n > 1 && !BLK_ABLATE_537_NO_BATCH) {
 		for (j = 0; j < h->n_dma_caps; j++) {
@@ -1397,11 +1456,13 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		 * before the driver is called, so nothing is sent and nothing
 		 * reports success.
 		 */
-		unsigned long long t0 = blk_tsc(), t1;
+		unsigned long long t0 = blk_tsc(), t1, t2;
+		unsigned int used = 0;
+		kern_return_t hkr;
 		int rc;
 
 		kr = blk_dma_for_pages(h, phys_addrs, phys_addrsCnt,
-				       CAP_OP_DMA_DEVICE_WRITE, dma, &i);
+				       CAP_OP_DMA_DEVICE_WRITE, dma, &i, &used);
 		if (kr != KERN_SUCCESS) {
 			blk_refused(h, phys_addrs[i], CAP_OP_DMA_DEVICE_WRITE,
 				    kr);
@@ -1415,9 +1476,14 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 					  nsectors,
 					  dma, phys_addrsCnt,
 					  total);
-		blk_phys_account(h, phys_addrsCnt, t0, t1, blk_tsc());
+		t2 = blk_tsc();
+		hkr = blk_xlate_held(h, used);		/* #537 */
+		blk_phys_account(h, phys_addrsCnt, t0, t1, t2);
+		h->xlate_cyc += blk_tsc() - t2;		/* the check is asking */
 		if (rc < 0)
 			return D_IO_ERROR;
+		if (hkr != KERN_SUCCESS)
+			return hkr;
 	}
 
 	*bytes_read = bytes_wanted;
@@ -1471,11 +1537,13 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		 * direction (#599: a write needs the device to READ the page),
 		 * and refuse the same way: before the driver is called.
 		 */
-		unsigned long long t0 = blk_tsc(), t1;
+		unsigned long long t0 = blk_tsc(), t1, t2;
+		unsigned int used = 0;
+		kern_return_t hkr;
 		int rc;
 
 		kr = blk_dma_for_pages(h, phys_addrs, phys_addrsCnt,
-				       CAP_OP_DMA_DEVICE_READ, dma, &i);
+				       CAP_OP_DMA_DEVICE_READ, dma, &i, &used);
 		if (kr != KERN_SUCCESS) {
 			blk_refused(h, phys_addrs[i], CAP_OP_DMA_DEVICE_READ,
 				    kr);
@@ -1489,9 +1557,14 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 						   nsectors,
 						   dma, phys_addrsCnt,
 						   total);
-		blk_phys_account(h, phys_addrsCnt, t0, t1, blk_tsc());
+		t2 = blk_tsc();
+		hkr = blk_xlate_held(h, used);		/* #537 */
+		blk_phys_account(h, phys_addrsCnt, t0, t1, t2);
+		h->xlate_cyc += blk_tsc() - t2;		/* the check is asking */
 		if (rc < 0)
 			return D_IO_ERROR;
+		if (hkr != KERN_SUCCESS)
+			return hkr;
 	}
 
 	*bytes_written = bytes_to_write;
