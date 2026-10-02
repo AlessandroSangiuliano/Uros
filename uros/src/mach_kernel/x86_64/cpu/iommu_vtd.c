@@ -1729,6 +1729,22 @@ int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2])
 #define	VTD_FSTS_IQE		(1u << 4)	/* a descriptor it refused  */
 #define	VTD_FSTS_ITE		(1u << 6)	/* an answer that never came */
 
+/*
+ * #598's queue ablations, each with what must catch it:
+ *	QI_TAIL_UNSHIFTED	the tail written as an index and not in bits
+ *				18:4 -- the fabricated check's ringing case,
+ *				and on an engine a queue that never sees its
+ *				descriptors, so the enable fails;
+ *	QI_FLUSH_BY_REGISTER	a flush through the IOTLB register with the
+ *				queue on -- entry 16, whose grants then fail.
+ */
+#ifndef	ABLATE_598_QI_TAIL_UNSHIFTED
+#define	ABLATE_598_QI_TAIL_UNSHIFTED	0
+#endif
+#ifndef	ABLATE_598_QI_FLUSH_BY_REGISTER
+#define	ABLATE_598_QI_FLUSH_BY_REGISTER	0
+#endif
+
 uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
 			       const uint64_t (*desc)[2], unsigned n)
 {
@@ -1781,7 +1797,8 @@ uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
  */
 void iommu_vtd_queue_ring(const struct iommu_vtd_queue *q)
 {
-	*q->iqt = (uint64_t)q->tail << 4;
+	*q->iqt = ABLATE_598_QI_TAIL_UNSHIFTED ? (uint64_t)q->tail
+					       : (uint64_t)q->tail << 4;
 }
 
 /*
@@ -1947,7 +1964,8 @@ static int vtd_queue_submit(unsigned unit, const uint64_t (*desc)[2], unsigned n
 static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
 		      int contexts)
 {
-	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on) {
+	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on
+	    && !(ABLATE_598_QI_FLUSH_BY_REGISTER && !contexts)) {
 		uint64_t cc[2], io[2];
 
 		iommu_vtd_qi_context_global(cc);
