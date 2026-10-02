@@ -817,6 +817,22 @@ urmach_cap_use(const struct uros_cap *user_token,
     return KERN_SUCCESS;
 }
 
+/*
+ * #537: the revocation epoch, as a trap (45) -- what a server that keeps a
+ * buffer's translation reads after a transfer to know whether the capability
+ * it was granted on can have been revoked meanwhile.  cap_epoch moves with
+ * every revocation and every key installed; the same value before and after
+ * means no revocation happened in between, and a different one sends the
+ * server to verify its capability again.  No lock, no argument: thirty-two
+ * bits read whole on both targets.  Answered in the return word, as the
+ * epoch itself -- there is no failure to report.
+ */
+kern_return_t
+urmach_cap_epoch(void)
+{
+    return (kern_return_t)cap_epoch;
+}
+
 kern_return_t
 urmach_cap_revoke(uint64_t cap_id)
 {

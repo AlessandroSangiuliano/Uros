@@ -139,6 +139,14 @@ kernel_trap(urmach_cap_revoke,-39,2)
 kernel_trap(urmach_cap_register,-40,1)
 
 /*
+ *	#537: the revocation epoch, for a server that keeps a buffer's
+ *	translation (the block server, behind an IOMMU).  45, not 44: 44 is
+ *	rfs_make_symlink's below, a stub nothing implements, and a number two
+ *	stubs share is a call that lands in the wrong one.
+ */
+kernel_trap(urmach_cap_epoch,-45,0)
+
+/*
  *	urmach_thread_set_cleartid (#257) — register a user-space address
  *	the kernel zeroes when the calling thread terminates.  Kernel half
  *	of Linux CLONE_CHILD_CLEARTID; used by libposix-uros to wake a
