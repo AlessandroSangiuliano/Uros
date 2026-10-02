@@ -118,6 +118,8 @@ decl_mutex_data(static, device_table_lock)
  */
 decl_simple_lock_data(static, irq_forward_lock)
 
+static void dma_ix_selftest(void);	/* #537: the page index against the walk */
+
 /* The grace-period callbacks that make a retired slot reusable (#538);
  * defined beside the tables they belong to. */
 static void	claim_slot_retired(struct urmach_rcu_head *h);
@@ -330,6 +332,7 @@ device_master_init(void)
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
 	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
+	dma_ix_selftest();			/* #537 */
 
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
@@ -1543,11 +1546,18 @@ ds_master_device_intr_enable(
 #define	DEVICE_MAX_REGIONS_PER_TASK	16
 #define	DEVICE_MAX_REGION_USERS	4
 
+/* #537: one page of a region, as the region's sorted index holds it. */
+struct dma_page_ix {
+	vm_offset_t	pa;
+	unsigned int	page;
+};
+
 struct dma_region {
 	vm_offset_t	kva;		/* zero when the slot is free    */
 	vm_size_t	size;
 	unsigned int	npages;
 	vm_offset_t	*pa;		/* npages entries, kalloc'd      */
+	struct dma_page_ix *ix;		/* #537: the same pages by address */
 
 	/*
 	 * ── What makes this buffer nameable, and whose it is (#432) ──
@@ -1683,6 +1693,133 @@ static uint64_t dma_regions_freed;
  * diagnostic here fires three or four times a boot in runs that are entirely
  * healthy -- the caller is the one that knows whether being refused matters.
  */
+/*
+ * ── Which page of a region is at a physical address (#537) ───────────
+ *
+ * Every per-page DMA ask looked its page up by walking the region's pages in
+ * order: about two thousand comparisons in ext2's 4096-page page cache, a
+ * fifth of the ask on i386 and nearly a third on x86-64.  Each region now has
+ * its pages sorted by address beside them, built once when it is recorded --
+ * a heapsort, so no order of pages makes it slow -- and found by a binary
+ * search, twelve steps for 4096.  The index lives and dies with `pa': kalloc'd
+ * with it, published before `kva' with it, freed with it after the grace
+ * period.  UROS_ABLATE_537_PAGE_WALK puts the walk back.
+ */
+#ifndef ABLATE_537_PAGE_WALK
+#define ABLATE_537_PAGE_WALK 0
+#endif
+
+static void
+dma_ix_sift(struct dma_page_ix *ix, unsigned int root, unsigned int n)
+{
+	for (;;) {
+		unsigned int child = 2 * root + 1;
+		struct dma_page_ix t;
+
+		if (child >= n)
+			return;
+		if (child + 1 < n && ix[child + 1].pa > ix[child].pa)
+			child++;
+		if (ix[root].pa >= ix[child].pa)
+			return;
+		t = ix[root];
+		ix[root] = ix[child];
+		ix[child] = t;
+		root = child;
+	}
+}
+
+static void
+dma_ix_build(struct dma_page_ix *ix, const vm_offset_t *pa, unsigned int n)
+{
+	struct dma_page_ix t;
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		ix[i].pa = pa[i];
+		ix[i].page = i;
+	}
+	for (i = n / 2; i-- > 0; )
+		dma_ix_sift(ix, i, n);
+	for (i = n; i-- > 1; ) {
+		t = ix[0];
+		ix[0] = ix[i];
+		ix[i] = t;
+		dma_ix_sift(ix, 0, i);
+	}
+}
+
+/* Which page of `r' holds page-aligned `pa', or r->npages if none does. */
+static unsigned int
+dma_region_page(const struct dma_region *r, vm_offset_t pa)
+{
+	unsigned int lo = 0, hi = r->npages;
+
+	if (ABLATE_537_PAGE_WALK) {
+		for (lo = 0; lo < r->npages; lo++)
+			if (r->pa[lo] == pa)
+				break;
+		return lo;
+	}
+	while (lo < hi) {
+		unsigned int mid = lo + (hi - lo) / 2;
+
+		if (r->ix[mid].pa < pa)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return (lo < r->npages && r->ix[lo].pa == pa) ? r->ix[lo].page
+						       : r->npages;
+}
+
+/*
+ * #537: the index against the walk it replaces, on a buffer whose pages are
+ * not in address order -- every page found where the walk finds it, and an
+ * address that is not there found nowhere.  At init; the line says what it
+ * read.
+ */
+#define	DMA_IX_TEST_PAGES	1024
+
+static void
+dma_ix_selftest(void)
+{
+	static vm_offset_t pa[DMA_IX_TEST_PAGES];
+	static struct dma_page_ix ix[DMA_IX_TEST_PAGES];
+	struct dma_region r;
+	unsigned int i, found = 0, bad = DMA_IX_TEST_PAGES, absent;
+
+	/* 7919 is prime to 1024: a permutation, far from address order. */
+	for (i = 0; i < DMA_IX_TEST_PAGES; i++)
+		pa[i] = (vm_offset_t)0x10000000 +
+			(vm_offset_t)((i * 7919u) % DMA_IX_TEST_PAGES) * PAGE_SIZE;
+	dma_ix_build(ix, pa, DMA_IX_TEST_PAGES);
+	bzero((char *)&r, sizeof(r));
+	r.npages = DMA_IX_TEST_PAGES;
+	r.pa = pa;
+	r.ix = ix;
+
+	for (i = 0; i < DMA_IX_TEST_PAGES; i++) {
+		if (dma_region_page(&r, pa[i]) == i)
+			found++;
+		else if (bad == DMA_IX_TEST_PAGES)
+			bad = i;
+	}
+	absent = dma_region_page(&r, (vm_offset_t)0x10000000 +
+				 (vm_offset_t)DMA_IX_TEST_PAGES * PAGE_SIZE);
+
+	if (found == DMA_IX_TEST_PAGES && absent == DMA_IX_TEST_PAGES)
+		printf("device: the page index of a %u-page buffer in scrambled "
+		       "order: %u of %u addresses found at the page the walk "
+		       "finds, one that is not there found nowhere (#537)\n",
+		       DMA_IX_TEST_PAGES, found, DMA_IX_TEST_PAGES);
+	else
+		printf("device: the page index of a %u-page buffer: WRONG -- %u "
+		       "of %u found where the walk finds them (first wrong: page "
+		       "%u), the absent address answered %u (#537)\n",
+		       DMA_IX_TEST_PAGES, found, DMA_IX_TEST_PAGES, bad, absent);
+}
+
 static kern_return_t
 dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	       unsigned int npages, task_t task, vm_offset_t uva,
@@ -1690,6 +1827,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 {
 	struct dma_region *r = 0;
 	vm_offset_t	  *pa_copy;
+	struct dma_page_ix *ix;
 	task_t		   me = current_task();
 	unsigned int	   i, held = 0;
 	uint64_t	   id;
@@ -1699,8 +1837,14 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	pa_copy = (vm_offset_t *) kalloc(npages * sizeof(vm_offset_t));
 	if (pa_copy == 0)
 		return KERN_RESOURCE_SHORTAGE;
+	ix = (struct dma_page_ix *) kalloc(npages * sizeof(struct dma_page_ix));
+	if (ix == 0) {
+		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
+		return KERN_RESOURCE_SHORTAGE;
+	}
 	for (i = 0; i < npages; i++)
 		pa_copy[i] = pa[i];
+	dma_ix_build(ix, pa_copy, npages);
 
 	mutex_lock(&device_table_lock);
 
@@ -1715,6 +1859,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	if (held >= DEVICE_MAX_REGIONS_PER_TASK) {
 		mutex_unlock(&device_table_lock);
 		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
+		kfree((vm_offset_t)ix, npages * sizeof(struct dma_page_ix));
 		return KERN_NO_ACCESS;
 	}
 
@@ -1726,6 +1871,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	if (r == 0) {
 		mutex_unlock(&device_table_lock);
 		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
+		kfree((vm_offset_t)ix, npages * sizeof(struct dma_page_ix));
 		return KERN_NO_SPACE;
 	}
 
@@ -1734,6 +1880,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	 * tests for "in use", which used to be written FIRST.
 	 */
 	r->pa = pa_copy;
+	r->ix = ix;
 	r->size = size;
 	r->npages = npages;
 	r->nusers = 0;
@@ -1766,11 +1913,12 @@ dma_region_of(vm_offset_t pa, unsigned int *index)
 		if (dma_region[i].kva == 0)
 			continue;
 
-		for (p = 0; p < dma_region[i].npages; p++)
-			if (dma_region[i].pa[p] == (pa & ~(vm_offset_t)PAGE_MASK)) {
-				*index = p;
-				return &dma_region[i];
-			}
+		p = dma_region_page(&dma_region[i],
+				    pa & ~(vm_offset_t)PAGE_MASK);
+		if (p < dma_region[i].npages) {
+			*index = p;
+			return &dma_region[i];
+		}
 	}
 
 	return 0;
@@ -2913,7 +3061,10 @@ dma_slot_retired(struct urmach_rcu_head *h)
 
 	if (r->pa != 0)
 		kfree((vm_offset_t)r->pa, r->npages * sizeof(vm_offset_t));
+	if (r->ix != 0)
+		kfree((vm_offset_t)r->ix, r->npages * sizeof(struct dma_page_ix));
 	r->pa = 0;
+	r->ix = 0;
 	r->npages = 0;
 	publish_barrier();
 	r->retiring = 0;
@@ -3904,9 +4055,7 @@ ds_master_device_dma_map_foreign_op(
 		}
 	if (r != 0) {
 		npages = r->npages;
-		for (page = 0; page < npages; page++)
-			if (r->pa[page] == (paddr & ~(vm_address_t)PAGE_MASK))
-				break;
+		page = dma_region_page(r, paddr & ~(vm_address_t)PAGE_MASK);
 	}
 	urmach_rcu_read_unlock();
 	t3 = urmach_tsc();
