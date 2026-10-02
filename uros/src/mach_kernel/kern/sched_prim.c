@@ -2608,6 +2608,18 @@ extern int	real_ncpus;
 #endif	/* NCPUS > 1 */
 
 /*
+ * #615: a thread bound to a processor and waiting in that processor's
+ * next_thread, displaced by the unbound branch's preempt check in
+ * thread_setrun() below into the processor SET's run queue, where any
+ * processor may take it.  Counted without a lock of its own -- two
+ * processors displacing at once may lose an increment, which a count of
+ * presence can afford -- and read by pmap_bench, whose worker bound to
+ * processor 0 was caught running wholly on another processor.
+ */
+unsigned int	sched_bound_displaced;
+int		sched_bound_displaced_slot = -1;
+
+/*
  *	thread_setrun:
  *
  *	Make thread runnable; dispatch directly onto an idle processor
@@ -2795,6 +2807,11 @@ thread_setrun(
 		    cur_th = processor->next_thread;
 		    processor->next_thread = th;
 		    th = cur_th;
+		    if (th->bound_processor != PROCESSOR_NULL) {
+			sched_bound_displaced++;		/* #615 */
+			sched_bound_displaced_slot =
+			    th->bound_processor->slot_num;
+		    }
 		} else {
 		    processor->first_quantum = FALSE;
 		    ast_on(cpu_number(), ast_flags);

@@ -154,6 +154,7 @@ static volatile uint64_t bench_cycles[NCPUS];
  */
 static volatile int	bench_ran_first[NCPUS];
 static volatile int	bench_ran_last[NCPUS];
+static unsigned int	bench_displaced_at_start;	/* sched_bound_displaced */
 
 static int bench_slot(void)
 {
@@ -177,7 +178,24 @@ static void bench_slot_last(int slot)
 /* arm < 0 is the race, which has no arm number. */
 static void bench_said_where(int arm)
 {
-	int	i;
+	unsigned int	moved = sched_bound_displaced - bench_displaced_at_start;
+	int		i;
+
+	/*
+	 * #615: the scheduler's own count, beside the workers' -- a bound thread
+	 * put where any processor may take it is the defect whether or not the
+	 * worker it happened to was then taken by the wrong one.
+	 */
+	if (moved != 0 && arm < 0)
+		printf("pmap_bench: the race: the scheduler displaced %u bound "
+		       "thread(s) into the processor set's run queue, the last "
+		       "bound to processor %d -- WRONG (#615)\n", moved,
+		       sched_bound_displaced_slot);
+	else if (moved != 0)
+		printf("pmap_bench: arm %d: the scheduler displaced %u bound "
+		       "thread(s) into the processor set's run queue, the last "
+		       "bound to processor %d -- WRONG (#615)\n", arm, moved,
+		       sched_bound_displaced_slot);
 
 	for (i = 0; i < NCPUS; i++) {
 		int	first, last;
@@ -638,6 +656,7 @@ static uint64_t bench_arm_cost(int arm, int *want_out)
 		bench_ran_first[i] = 0;
 		bench_ran_last[i] = 0;
 	}
+	bench_displaced_at_start = sched_bound_displaced;
 	bench_start = 0;
 
 	for (i = 0; i < NCPUS; i++) {
@@ -985,6 +1004,7 @@ pmap_collect_bench(void)
 		bench_ran_first[i] = 0;
 		bench_ran_last[i] = 0;
 	}
+	bench_displaced_at_start = sched_bound_displaced;
 	bench_start = 0;
 
 	for (i = 0; i < NCPUS; i++) {
