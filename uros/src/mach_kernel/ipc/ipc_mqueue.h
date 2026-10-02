@@ -164,6 +164,13 @@ extern mach_msg_return_t ipc_mqueue_copyin(
 	ipc_object_t	*objectp);
 
 /* Receive a message from a message queue */
+/*
+ * The Direct Thread Switch's switch (#329), and how many receivers it declined
+ * because the thread swapper had swapped them out (#607).
+ */
+extern int		ipc_dts_smp;
+extern unsigned int	ipc_dts_declined_swapped;
+
 extern mach_msg_return_t ipc_mqueue_receive(
 	ipc_mqueue_t		mqueue,
 	mach_msg_option_t	option,

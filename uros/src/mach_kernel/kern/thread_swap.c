@@ -230,6 +230,13 @@ int thread_swap_debug = 0;
 
 int	maxslp = MAXSLP;
 
+/*
+ * How many threads this boot swapped out and brought back in, which -O prints
+ * (#607): a storm that swapped nothing has tested nothing.
+ */
+unsigned int	thread_swapouts;
+unsigned int	thread_swapins;
+
 #ifndef MAX_SWAP_RATE
 #define MAX_SWAP_RATE	60
 #endif
@@ -579,6 +586,7 @@ void thread_doswapin(
 	} else {
 		thr_act->swap_state = TH_SW_IN;
 	}
+	thread_swapins++;
 
 	if (thread != THREAD_NULL) {
 		if (thread->top_act == thr_act) {
@@ -716,12 +724,14 @@ void thread_swapout(
 	switch (thr_act->swap_state & TH_SW_STATE) {
 	    case TH_SW_GOING_OUT:
 		thr_act->swap_state = TH_SW_OUT;
+		thread_swapouts++;
 		break;
 
 	    case TH_SW_WANT_IN:
 		/* didn't get it out fast enough */
 		make_unswappable = thr_act->swap_state & TH_SW_MAKE_UNSWAPPABLE;
 		thr_act->swap_state = TH_SW_OUT;
+		thread_swapouts++;	/* its stack was unwired all the same */
 		thread_swapin(thr_act, make_unswappable);
 		collect = FALSE;	/* don't pmap_collect */
 		break;
