@@ -207,6 +207,7 @@
 #include <device/subrs.h>
 #include <i386/fpu.h>
 #include <i386/fpu_stress.h>	/* fpu_stress_run (#560, '-F') */
+#include <i386/AT386/com_divisor_test.h>	/* '-U' (#599) */
 #include <i386/hwp.h>		/* hwp_init_cpu (#358) */
 #include <i386/pmap.h>
 #include <i386/ipl.h>
@@ -438,6 +439,28 @@ machine_startup(void)
 	TR_INIT();
 
 	printf(version);
+
+	/*
+	 * Whether the IPC Direct Thread Switch is on (#329), said where the
+	 * flag is READ rather than where -D sets it: parse_arguments() runs
+	 * before the BSS clear, which once wiped it back to 0 and made every
+	 * A/B of the switch compare the baseline with itself (#356).  A run's
+	 * log now says which switch it ran with -- x86-64 says the same for
+	 * its -N (#607).  A uniprocessor kernel takes the switch with or
+	 * without the flag.
+	 */
+#if	NCPUS > 1
+	{
+		extern int ipc_dts_smp;
+
+		if (ipc_dts_smp)
+			printf("startup: the IPC direct thread switch is on "
+			       "(-D, #329)\n");
+	}
+#else
+	printf("startup: the IPC direct thread switch is on "
+	       "(always, on one processor, #329)\n");
+#endif
 
 	machine_slot[0].is_cpu = TRUE;
 	machine_slot[0].running = TRUE;
@@ -756,6 +779,11 @@ parse_arguments(void)
 				 * second of boot and runs only when asked. */
 		    fpu_stress_wanted = 1;
 		    break;
+		case 'U':	/* -U: may a console byte land in COM1's divisor
+				 * latch?  Processor 1 floods the console while
+				 * processor 0 sets the divisor (#599). */
+		    com_divisor_test_wanted = 1;
+		    break;
 		case 'D':	/* -D: enable the SMP Direct-Thread-Switch on the
 				 * IPC slow path (ipc_dts_smp).  Off by default;
 				 * this flag turns it on for a same-binary A/B of
@@ -958,9 +986,9 @@ machine_init(void)
 	probeio();
 
 	/*
-	 * #335: arm the PS/2 break-key (Ctrl+D -> DDB) when -K was given and
-	 * the console is not serial.  After probeio() so the PIC / I-O APIC
-	 * and all device IRQs are configured; IRQ 1 is still free here.
+	 * #335: arm the PS/2 break-key (Ctrl+D -> DDB) when -K was given --
+	 * on a serial console too, since #382.  After probeio() so the PIC /
+	 * I-O APIC and all device IRQs are configured; IRQ 1 is still free.
 	 */
 	{
 		extern void ddb_kbd_break_init(void);
@@ -1044,6 +1072,8 @@ machine_processors_ready(void)
 {
 	if (fpu_stress_wanted)
 		fpu_stress_run();	/* #560 acceptance, '-F' */
+	if (com_divisor_test_wanted)
+		com_divisor_test_start();	/* #599, '-U'; returns at once */
 }
 
 /*

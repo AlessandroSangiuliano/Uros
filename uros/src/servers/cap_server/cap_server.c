@@ -369,7 +369,13 @@ cap_acquire(mach_port_t             server,
 
     cap_sign(t);
 
-    e->sender = MACH_PORT_NULL;
+    /*
+     * #599: who it was issued to -- the per-task port the request came in
+     * on -- so that only that task, or one its capability descends from,
+     * may revoke it.  This was always written MACH_PORT_NULL, and any task
+     * could revoke any capability.
+     */
+    e->sender = g_request_local_port;
     cap_table_insert(e);
 
     memcpy(token, t, sizeof(*t));
@@ -425,7 +431,7 @@ cap_derive(mach_port_t             server,
     t->next_sibling_cap_id = parent_entry->token.first_child_cap_id;
 
     cap_sign(t);
-    e->sender = MACH_PORT_NULL;
+    e->sender = g_request_local_port;	/* #599: see cap_acquire */
     cap_table_insert(e);
 
     /* Link as new first child of parent (re-sign parent since
@@ -449,6 +455,29 @@ cap_derive(mach_port_t             server,
  * delegation tree is left-child right-sibling so we walk via
  * first_child_cap_id then next_sibling_cap_id.
  */
+/*
+ * #599: may the task asking revoke this capability?  Only the task it was
+ * issued to, or one a capability it descends from was issued to -- the
+ * delegation tree, walked up by parent_cap_id.  A well-known port or an
+ * unknown sender authorises nothing.
+ */
+static int
+cap_revoke_authorised(const struct cap_entry *e)
+{
+    unsigned int depth = 0;
+
+    if (g_request_local_port == MACH_PORT_NULL ||
+        g_request_local_port == cap_port)
+        return 0;
+    while (e != NULL && depth++ <= CAP_MAX_DEPTH) {
+        if (e->sender == g_request_local_port)
+            return 1;
+        e = e->token.parent_cap_id != 0
+          ? cap_table_find_by_id(e->token.parent_cap_id) : NULL;
+    }
+    return 0;
+}
+
 kern_return_t
 cap_revoke(mach_port_t server, uint64_t cap_id)
 {
@@ -456,6 +485,18 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
 
     struct cap_entry *root = cap_table_find_by_id(cap_id);
     if (!root) return CAP_ERR_INVALID_TOKEN;
+
+    /*
+     * #599: the revocation needed no authority at all, so any task could
+     * take any other's capability away -- ext_server's page-cache buffer,
+     * a driver's claim on its device.
+     */
+    if (!cap_revoke_authorised(root)) {
+        printf("cap: DENY revoke of cap %llu from port=0x%x — not the task "
+               "it was issued to, nor one it descends from\n",
+               (unsigned long long)cap_id, (unsigned)g_request_local_port);
+        return CAP_ERR_UNAUTHORIZED;
+    }
 
     uint64_t stack[CAP_MAX_DEPTH + 1];
     int top = 0;

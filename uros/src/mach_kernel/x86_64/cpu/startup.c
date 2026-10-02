@@ -30,6 +30,8 @@
 #include <pmap/pmap.h>
 #include <thread/fpu.h>
 #include <boot/bootarg.h>	/* #461: boot_flag */
+#include <cpu/ioapic_race_test.h>	/* #599: -Y */
+#include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
@@ -41,6 +43,8 @@
 #include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
+#include <trap/handoff_test.h>	/* #607: -Q, the futex hand-off's wake */
+#include <ipc/ipc_mqueue.h>	/* ipc_dts_smp, for -N */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
 #include <ddb/fbcons.h>	/* #568: the other output, mapped once the pmap is up */
@@ -435,6 +439,59 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('W') && want > 1)
 			kernel_wait_preempt_test();
+
+		/*
+		 * -Y: the I/O APIC's window raced from two processors (#599).
+		 * Here for the reason of the tests above -- the second side is
+		 * bound to a processor already in the scheduler.  The two pins
+		 * it takes are ones nothing has routed, and nothing routes one
+		 * while it runs: the drivers that claim lines come with
+		 * bootstrap.  Returns, so the boot goes on.
+		 */
+		if (boot_flag('Y') && want > 1)
+			ioapic_window_race_test();
+
+		/*
+		 * -Z: two processors panic at the same instant (#599).  The same
+		 * requirement of a second processor; does not return when it
+		 * runs, because the panic is the test (scripts/
+		 * double-panic-check.sh reads the log).
+		 */
+		if (boot_flag('Z') && want > 1)
+			double_panic_test();
+
+		/*
+		 * -Q: the futex hand-off and the waiters it must not switch
+		 * onto -- one the thread swapper has swapped out, one
+		 * thread_stop() has stopped (#607).
+		 *
+		 * NOT gated on `want > 1', unlike the two above: the waker and
+		 * the waiter take turns on one processor as well as on two, and
+		 * the uniprocessor is the configuration this project treats as
+		 * first class.  Returns, so the boot goes on.
+		 */
+		if (boot_flag('Q'))
+			handoff_wake_test();
+
+		/*
+		 * -N: the IPC Direct Thread Switch on (#329) -- x86-64's
+		 * spelling of i386's -D, which this target already uses for
+		 * something else.  Off by default on both, and on here for
+		 * -O's sake: the switch is one of the wake paths that must
+		 * decline a swapped-out receiver (#607).
+		 *
+		 * -O: the thread swapper made aggressive for the rest of the
+		 * boot, so every wake path meets swapped-out threads (#607).
+		 * Both before bootstrap_create(), so the whole userland runs
+		 * under them.
+		 */
+		if (boot_flag('N')) {
+			ipc_dts_smp = 1;
+			printf("startup: the IPC direct thread switch is on (-N, "
+			       "#329)\n");
+		}
+		if (boot_flag('O'))
+			swapper_storm_start();
 
 		/*
 		 * -M: what concurrency does to a pmap with no locking (#455).

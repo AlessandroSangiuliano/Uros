@@ -458,6 +458,7 @@ POSIX_SMOKE=$(mktemp -p "$TMPD")
 BENCH_DAT=$(mktemp -p "$TMPD")
 BENCH_LARGE=$(mktemp -p "$TMPD")
 BENCH_4M=$(mktemp -p "$TMPD")
+BENCH_RAND=$(mktemp -p "$TMPD")
 printf 'Hello from /mach_servers/ root\n' > "$HELLO_TXT"
 # Read-only fixture for hello_server's POSIX fd-layer smoke (#262).
 # Kept separate from hello.txt, which disk_bench uses as a write
@@ -471,6 +472,11 @@ dd if=/dev/urandom of="$BENCH_LARGE" bs=1M count=12 status=none
 # bench_4m.dat (#267): 4 MB — apples-to-apples with the historical
 # file-pool cached-read baseline (~930 MB/s at 64 KB, warm).
 dd if=/dev/urandom of="$BENCH_4M" bs=1M count=4 status=none
+# bench_rand.dat (#599): 12 MB read by nothing but disk_bench's cold random
+# arm, every block once in an order readahead cannot follow, so each read is a
+# page-cache miss on the physical path -- where the block server asks the
+# kernel for every page and says what that costs.
+dd if=/dev/urandom of="$BENCH_RAND" bs=1M count=12 status=none
 
 # hello_exec is optional (#228 v0.1.0): copy to / so exec_server can
 # load "/hello_exec" via libvfs.
@@ -559,6 +565,7 @@ write $POSIX_SMOKE posix_smoke.txt
 write $BENCH_DAT bench.dat
 write $BENCH_LARGE bench_large.dat
 write $BENCH_4M bench_4m.dat
+write $BENCH_RAND bench_rand.dat
 ${HELLO_EXEC_WRITE_LINE}
 ${FD_EXEC_TEST_WRITE_LINE}
 ${HELLO_WORLD_WRITE_LINE}

@@ -146,6 +146,11 @@ int	     rtc_print_lost_tick;	    /* print lost tick */
 #define	RTC_MAXRES	(RTC_MINRES / 20)	/* nsec per tick */
 #define	ZANO		(1000000000)
 #define ZHZ             (ZANO / (NSEC_PER_SEC / HZ))
+/*
+ * The 8254's latch command, then its two data bytes: a pair (#599).  Taken
+ * under LOCK_RTC, with the clock's interrupt masked, by rtc_gettime(), which
+ * on SMP reads it only until the TSC is calibrated (mp_tsc_per_us != 0).
+ */
 #define READ_8254(val)	{ \
         outb(PITCTL_PORT, PIT_C0);             \
 	(val) = inb(PITCTR0_PORT);               \
@@ -342,7 +347,15 @@ rtc_tick_pending(void)
 			 & (1u << (vec & 0x1f))) != 0);
 	}
 #endif	/* NCPUS > 1 */
-	outb(0x0a, 0x20);		/* OCW3: select master IRR for reading */
+	/*
+	 * OCW3 "read IRR" (0x0a) to the master's command port (0x20).  #599:
+	 * this was outb(0x0a, 0x20) -- outb takes (port, datum), so it wrote
+	 * 0x20 to DMA port 0x0a and never selected IRR, and the read below
+	 * returned whatever register was selected last: ISR after the first
+	 * master IRQ7, whose bit 0 is always clear here.  The wrap correction
+	 * above was lost, and a reading could step back by up to a tick.
+	 */
+	outb(0x20, 0x0a);		/* OCW3: select master IRR for reading */
 	return ((inb(0x20) & 1) != 0);	/* IRQ0 request pending? */
 }
 
@@ -397,15 +410,22 @@ rtc_div64_32(unsigned long long num, unsigned int den)
 static unsigned int
 rtc_subtick_nsec(void)
 {
-	unsigned int	delta, maxd, sub;
+	unsigned long long	since;
+	unsigned int		delta, maxd, sub;
 
 	if (mp_tsc_per_us == 0)
 		return 0;			/* not calibrated: mtime only */
-	delta = (unsigned int)(rtc_rdtsc() - rtclock_tsc_at_tick);
-	/* Cap the delta (~20 ms) so the divl quotient can't exceed 32 bits. */
+	/*
+	 * Cap the delta (~20 ms) so the divl quotient can't exceed 32 bits --
+	 * and cap it in 64 bits, BEFORE the cut to 32 (#599).  Cut first, a
+	 * delta past 2^32 cycles (1.3 s at 3.3 GHz) wrapped to a small number:
+	 * once the tick had stopped for that long, every reading fell back to
+	 * mtime and climbed again, so an interval could come out negative.
+	 * Capped first, a stale anchor reads as what it is: at least a tick.
+	 */
+	since = rtc_rdtsc() - rtclock_tsc_at_tick;
 	maxd = mp_tsc_per_us * 20000u;
-	if (maxd && delta > maxd)
-		delta = maxd;
+	delta = (maxd && since > maxd) ? maxd : (unsigned int)since;
 	sub = rtc_div64_32((unsigned long long)delta * 1000ULL, mp_tsc_per_us);
 	if ((int)sub > rtclock.intr_nsec)
 		sub = rtclock.intr_nsec;	/* never exceed one tick */
@@ -928,10 +948,22 @@ void
 test_delay(void)
 {
   	register int i;
+	int	s;
 
 	for (i = 0; i < 10; i++)
 		printf("%d, %d\n", i, measure_delay(i));
 	for (i = 10; i <= 100; i+=10)
 		printf("%d, %d\n", i, measure_delay(i));
+
+	/*
+	 * #599: measure_delay() leaves counter 0 loaded with 0xffff, so the
+	 * tick came back at 18.2 Hz instead of HZ and the clock ran 5.5 times
+	 * slow after a `call test_delay' in DDB.  Put the tick back.  Not
+	 * rtclock_reset(): that returns on any processor but the master, and
+	 * DDB may be on another one; the 8254 is one for the whole machine.
+	 */
+	LOCK_RTC(s);
+	RTCLOCK_RESET();
+	UNLOCK_RTC(s);
 }
 #endif	/* MACH_KDB */

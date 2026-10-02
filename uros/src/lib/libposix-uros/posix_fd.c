@@ -290,6 +290,31 @@ static int path_eq(const char *p, const char *s)
     return *p == 0 && *s == 0;
 }
 
+/*
+ * #599: the errno for what libvfs answered.  open and stat used to return
+ * ENOENT for every failure and fstat EIO, so a directory refused as damaged
+ * or a device that failed read as a missing file; libvfs now says which, and
+ * this is where it becomes the errno a POSIX caller branches on.
+ */
+static long vfs_errno(int rc)
+{
+    switch (rc) {
+    case VFS_ERR_NOENT:          return -ENOENT;
+    case VFS_ERR_EXIST:          return -EEXIST;
+    case VFS_ERR_NOTDIR:         return -ENOTDIR;
+    case VFS_ERR_ISDIR:          return -EISDIR;
+    case VFS_ERR_INVAL:          return -EINVAL;
+    case VFS_ERR_NOSPC:          return -ENOSPC;
+    case VFS_ERR_NAMETOOLONG:    return -ENAMETOOLONG;
+    case VFS_ERR_PERM:           return -EACCES;
+    case VFS_ERR_BADHANDLE:      return -EBADF;
+    case VFS_ERR_NOTEMPTY:       return -ENOTEMPTY;
+    case VFS_ERR_XDEV:           return -EXDEV;
+    case KERN_RESOURCE_SHORTAGE: return -ENOMEM;
+    default:                     return -EIO;
+    }
+}
+
 long __uros_open(const char *path, int flags, int mode)
 {
     if (!path)
@@ -302,9 +327,10 @@ long __uros_open(const char *path, int flags, int mode)
     if (path_eq(path, "/dev/tty"))
         return open_dev_tty(flags);
 
-    vfs_fd_t vfd = vfs_open(path, xlate_open_flags(flags), mode);
-    if (vfd == VFS_FD_INVALID)
-        return -ENOENT;
+    vfs_fd_t vfd;
+    int rc = vfs_open_rc(path, xlate_open_flags(flags), mode, &vfd);
+    if (rc != KERN_SUCCESS)
+        return vfs_errno(rc);                   /* #599 */
 
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
@@ -732,8 +758,9 @@ long __uros_statx(int dirfd, const char *path, int flags,
         if (err) return err;
         if (vfd == -2) { fill_statx_console(sx); return 0; }
         vfs_stat_t vs;
-        if (vfs_fstat(vfd, &vs) != 0)
-            return -EIO;
+        int rc = vfs_fstat(vfd, &vs);
+        if (rc != 0)
+            return vfs_errno(rc);               /* #599 */
         fill_statx(sx, &vs);
         return 0;
     }
@@ -744,8 +771,9 @@ long __uros_statx(int dirfd, const char *path, int flags,
     if (path[0] != '/')
         return -ENOENT;             /* no cwd for relative paths yet */
     vfs_stat_t vs;
-    if (vfs_stat(path, &vs) != 0)
-        return -ENOENT;
+    int rc = vfs_stat(path, &vs);
+    if (rc != 0)
+        return vfs_errno(rc);                   /* #599 */
     fill_statx(sx, &vs);
     return 0;
 }

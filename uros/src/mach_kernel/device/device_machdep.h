@@ -142,9 +142,51 @@ extern void		device_md_io_write(unsigned int port, unsigned int size,
  */
 extern int		device_md_io_claimed(unsigned int base,
 					     unsigned int count,
-					     unsigned int *klog_from);	/* 1: the console stepped back; *klog_from = where its log continues */
+					     unsigned int *klog_from);	/* 1: the kernel's own user of the range stepped back -- the console for COM1 (*klog_from = where its log continues), the break-key reader for the 8042 (#599) */
 extern void		device_md_io_unclaimed(unsigned int base,
 					       unsigned int count);
+
+/*
+ * #599: set the divisor of the 16550 at `base' under the lock the kernel's
+ * own writes to that chip take, and read it back.  Answers 1 when done, 0
+ * when this machine knows no such chip there.  The caller has checked the
+ * claim.
+ */
+extern int		device_md_io_set_divisor(unsigned int base,
+						 unsigned int divisor,
+						 unsigned int *readback);
+
+/*
+ * #599: a chip whose registers are reached only by the task that claimed all
+ * of them: answers 1 and the window to claim when [port, port + size) touches
+ * one of those registers.  An unclaimed port is otherwise open to every holder
+ * of the master port, and a task that wrote one register of COM1 -- LCR,
+ * opening the divisor latch -- reached the console's chip without claiming
+ * anything.  A register a probe must reach before it claims (COM1's scratch
+ * register) is not one of them.
+ */
+extern int		device_md_io_window(unsigned int port,
+					    unsigned int size,
+					    unsigned int *base,
+					    unsigned int *count);
+
+/*
+ * #599: a write that would open a 16550's divisor latch (LCR bit 7).  The
+ * divisor is set only by device_io_port_set_divisor, under the lock the
+ * kernel's own writes to the chip take.
+ */
+extern int		device_md_io_opens_latch(unsigned int port,
+						 unsigned int size,
+						 unsigned int data);
+
+/*
+ * #599: from device_master to the machine: whether some task holds a claim
+ * covering `port'.  For a machine layer whose own user of a port stands back
+ * while one does (i386's break-key reader and the 8042), asked after the
+ * table changed, so the last to ask reads the last change.  Takes no lock:
+ * an RCU read section, safe with interrupts off.
+ */
+extern int		device_io_port_held(unsigned int port);
 
 /*
  * Whether a range of legacy ports touches one the kernel keeps for itself,
@@ -334,7 +376,10 @@ extern int		device_md_dma_grant(unsigned int bdf,
 
 /*
  * The same for `n' frames that are not physically contiguous: they are made
- * reachable at CONSECUTIVE addresses starting from the one answered.
+ * reachable at CONSECUTIVE addresses starting from the one answered -- unless
+ * the device's domain is an identity one, where each frame is reachable at its
+ * own address and *identity is set (#599).  A caller computes page i as the
+ * answer + i * PAGE_SIZE only when *identity is zero, and as pa[i] otherwise.
  *
  * 🔑 One call and one window.  A scatter-gather buffer is scattered in
  * physical memory and there is no reason for it to be scattered in the
@@ -345,7 +390,8 @@ extern int		device_md_dma_grant_pages(unsigned int bdf,
 						  const unsigned long *pa,
 						  unsigned int n,
 						  int read, int write,
-						  unsigned long *dma_addr);
+						  unsigned long *dma_addr,
+						  int *identity);
 
 /*
  * Take a granted range back.  Answers non-zero when the device can no longer
@@ -360,17 +406,24 @@ extern int		device_md_dma_revoke(unsigned int bdf,
 					     unsigned long size);
 
 /*
- * How many of this device's DMA requests the machine has refused, and the last
- * address it refused.  Zero when it has refused none, and zero on a machine
- * that refuses nothing because it polices nothing.
+ * What the machine knows of this device's refused DMA requests (#599): how
+ * many since boot and the last address refused, how many times refusals may
+ * have gone uncounted, and how many of the count this call itself had to read
+ * out of the engines.  All zero on a machine that refuses nothing because it
+ * polices nothing.
  *
- * ⚠️ `*last' is left alone when the answer is zero, rather than being cleared.
- * A caller that ignored the count and read the address would then see whatever
- * it had put there itself -- which is a wrong answer it wrote, and far easier
- * to trace than a zero that looks like an address.
+ * Answers 0 when `bdf' is not a device (above 0xFFFF), and nothing is
+ * filled in; the caller refuses the question.  It used to answer "no
+ * refusals" to it.
  */
-extern unsigned		device_md_dma_faults(unsigned int bdf,
-					     unsigned long *last);
+struct device_md_faults {
+	unsigned	count;		/* since boot, modulo 2^32 */
+	unsigned long	last;		/* the last refused address, or 0 */
+	unsigned	lost;		/* times refusals may have gone uncounted */
+	unsigned	undrained;	/* read out of the engines by this call */
+};
+extern int		device_md_dma_faults(unsigned int bdf,
+					     struct device_md_faults *a);
 
 /*
  * Whether this device is confined to what it has been granted right now.

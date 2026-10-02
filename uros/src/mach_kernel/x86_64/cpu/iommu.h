@@ -644,10 +644,6 @@ struct iommu_fault {
  */
 #define	IOMMU_FAULT_LOG		16
 
-unsigned iommu_fault_count(void);
-const struct iommu_fault *iommu_fault(unsigned index);	/* oldest first */
-unsigned iommu_fault_logged(void);			/* how many the ring holds */
-
 /*
  * Drain every engine's fault registers into the log.  Answers how many new
  * ones were found.
@@ -660,13 +656,20 @@ unsigned iommu_fault_logged(void);			/* how many the ring holds */
 unsigned iommu_fault_poll(void);
 
 /*
- * An engine ran out of fault records before anyone drained them.
+ * How many times refusals may have gone uncounted, since boot: drains in
+ * which an engine said it dropped some OR the kernel saw it may have -- a
+ * full or filling log, an entry never written, a log that had stopped
+ * (0873fc75, 898764d4; QEMU's AMD-Vi, as this kernel sets it up, never
+ * raises EventOverflow, where QEMU's VT-d does raise PFO) -- and
+ * refusals from devices the per-device count had no room to name (#599).
+ * It only goes up.  A "may have": no count here says a refusal WAS lost.
  *
  * Reported rather than folded into the count, because the two are different
  * facts: the count says how many were read, and this says that the number is
- * a floor rather than a total.
+ * a floor rather than a total.  It was a flag that stuck at the first
+ * overflow.
  */
-int iommu_fault_overflowed(void);
+uint64_t iommu_fault_lost(void);
 
 /*
  * Decode fault records whose right answers were established from the
@@ -680,6 +683,22 @@ int iommu_fault_overflowed(void);
  * with no remapping hardware and on one that has never refused anything.
  */
 int iommu_fault_decode_check(unsigned *ran, unsigned *wrong);
+
+/*
+ * #599: the per-device refusal count, asked about itself on a scratch table:
+ * a table that is full counts a new device as unplaced rather than taking a
+ * named one's slot, and a device refused twice counts two and keeps the last
+ * address.
+ */
+int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong);
+
+/*
+ * #599: the vendors' drains, run against fabricated engines at every boot: a
+ * ring that wraps, a full one, an empty one flagged overflow, an entry never
+ * written; VT-d records with and without PFO.  What may have been lost is
+ * counted as lost, and nothing else is.
+ */
+int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed);
 
 /*
  * Encode and decode the words interrupt remapping is made of, against values
@@ -754,7 +773,11 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
 
 /*
  * The same for pages that are not physically contiguous: `n' frames, each
- * mapped at consecutive addresses starting from the one answered.
+ * mapped at consecutive addresses starting from the one answered -- except in
+ * an identity domain, where each frame is mapped at its own address and
+ * *identity_out says so (#599): page i is then at pa[i].  A caller that
+ * assumed the answer + i * 4096 there would program a device with the frames
+ * that follow pa[0], which are somebody else's.
  *
  * 🔑 ONE CALL AND ONE CONTIGUOUS WINDOW, not n grants.  A scatter-gather
  * buffer is scattered in PHYSICAL memory and there is no reason for it to be
@@ -764,17 +787,20 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
  * the grant one entry instead of a thousand.
  */
 int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
-		      int read, int write, uint64_t *iova_out);
+		      int read, int write, uint64_t *iova_out,
+		      int *identity_out);
 
 /*
  * This device must be programmed with physical addresses: map its grants at
  * the address the memory is really at.  Answers non-zero when the domain was
  * opened that way.
  *
- * 🔴 STILL CONFINED, and that is the whole distinction.  An identity domain
- * contains only what was granted, so every other address in the machine faults
- * for this device exactly as before -- what is lost is that the driver knows
- * where its buffer is.  #432 stage 3d is kept and stage 3e is given up, for a
+ * 🔴 STILL CONFINED -- where the device's DMA goes through the IOMMU, and that
+ * is the whole distinction.  An identity domain contains only what was
+ * granted, so every other address in the machine faults for this device
+ * exactly as before -- what is lost is that the driver knows where its buffer
+ * is.  #599: a device whose DMA bypasses the engine is confined by nothing,
+ * domain or not; QEMU's legacy virtio does (428001fc).  #432 stage 3d is kept and stage 3e is given up, for a
  * device that cannot accept what 3e hands out.
  *
  * ⚠️ Before the first grant only.  A domain that already holds translated
@@ -825,45 +851,58 @@ int iommu_domain_release(uint16_t bdf);
 int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size);
 
 /*
- * The domain a device is in, or null when it is still passing through.
+ * Whether a device is in a domain, or still passing through.
  *
- * 🔑 Null IS the answer for most devices, and it is the one worth reporting: a
+ * 🔑 "No" IS the answer for most devices, and it is the one worth reporting: a
  * device with no domain is a device this kernel is not policing, which is what
  * #432 exists to stop being invisible.
+ *
+ * #599: asked under iommu_domain_lock.  It was iommu_domain_of(), which
+ * handed out a pointer into device_domains[] with no lock, while a release
+ * compacts that array.
  */
-const struct iommu_domain *iommu_domain_of(uint16_t bdf);
+int iommu_domain_confined(uint16_t bdf);
 
 /* How many devices have been taken off pass-through. */
 unsigned iommu_domain_count(void);
 
 /*
- * Drain the engines and print anything new.
+ * The thread that drains every engine every 100 ms and prints what they
+ * refused -- the only printer of the fault log (#599).  NOT ASKED, said once,
+ * when no engine translates.
  *
- * 🔴 THIS IS "a diagnosable event, not silence" (#432), and it is a POLL
- * because the alternative is not ready.  An engine can raise a
- * message-signalled interrupt when it records a fault -- VT-d through
- * FECTL/FEDATA/FEADDR, AMD through its event-log interrupt -- and it should,
- * because a poll reports late and a fault that arrives while a driver is
- * spinning on a transfer is exactly the one it needs now.  What a poll does
- * give is that no refusal goes unreported, which is the property worth having
- * first.
- *
- * ⚠️ Answers how many were printed, and prints nothing when there is nothing.
- * Cheap to call: one uncached register read per engine when no fault is
- * pending, and none at all when no device is in a domain.
+ * 🔴 THIS IS "a diagnosable event, not silence" (#432).  It was a poll run by
+ * the idle loop, and #432 closed on "no refusal goes unreported": a processor
+ * spinning in a driver never idles, so a refusal nobody asked about waited for
+ * the spin to end, and a uniprocessor boot could wait for ever
+ * (ahci [iommu-spin]: 129 refusals undrained after 2^32 cycles).  A thread
+ * woken by a timer drains whether or not anything idles.  An engine's
+ * message-signalled interrupt would add latency, not correctness, and is a
+ * follow-up.
  */
-unsigned iommu_fault_report(void);
+void iommu_fault_reporter_start(void);
 
 /*
- * How many refusals this device has been given, and the last address it was
- * refused.  Answers zero when it has never been refused.
+ * What the log knows of one device's refusals, asked by the driver that owns
+ * it: the engines are drained first, in the same hold.
  *
  * 🔑 PER DEVICE, because that is the question a DRIVER asks.  A transfer that
  * failed has two ordinary explanations -- the device is broken, or the
  * driver programmed an address it was never granted -- and they are told apart
  * by nothing the device reports.  This is the second one, answered.
+ *
+ * #599: `recorded' only goes up, `lost' is iommu_fault_lost(), and
+ * `undrained' is how many of `recorded' this call had to drain -- refusals
+ * nothing had read out of the engines by the time the driver asked.  It never
+ * prints.
  */
-unsigned iommu_faults_for(uint16_t bdf, uint64_t *last_address);
+struct iommu_fault_answer {
+	uint64_t	recorded;
+	uint64_t	last_address;
+	uint64_t	lost;
+	uint64_t	undrained;
+};
+void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a);
 
 /*
  * Whether a domain could be given to a device at all on this machine.

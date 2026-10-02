@@ -29,6 +29,7 @@
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 #include <cpu/pci_cfg.h>
+#include <cpu/regs.h>		/* cpu_pause */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
@@ -474,9 +475,16 @@ int iommu_amd_build(void)
 	 * smallest either may be.  Allocated here rather than in stage 2b
 	 * because an engine cannot be enabled without them and finding that
 	 * out with translation half on is not a discovery anyone wants.
+	 *
+	 * #599: one event log PER UNIT, frames side by side.  Every unit was
+	 * pointed at the same frame, and two engines writing one ring each
+	 * overwrite the other's entries and move a head the other does not
+	 * own.  Units numbered 1 and above have never run: QEMU refuses a
+	 * second vIOMMU.  The command buffer is still shared -- a grant-path
+	 * question, not the fault log's.
 	 */
 	command = boot_frame_alloc();
-	event = boot_frame_alloc();
+	event = boot_frames_alloc(iommu_unit_count() ? iommu_unit_count() : 1);
 	if (command == 0 || event == 0)
 		return 0;
 
@@ -507,7 +515,8 @@ int iommu_amd_build(void)
 
 	iommu_record_tables(table, (uint64_t)AMD_DEVICE_TABLE_FRAMES * 4096u,
 			    command, event, written, 0,
-			    AMD_DEVICE_TABLE_FRAMES + 2u);
+			    AMD_DEVICE_TABLE_FRAMES + 1u +
+			    (iommu_unit_count() ? iommu_unit_count() : 1));
 	return 1;
 }
 
@@ -576,7 +585,8 @@ int iommu_amd_enable(void)
 		*(volatile uint64_t *)(regs + AMD_REG_CMDBUF) =
 			(t->command & AMD_BASE_MASK) | AMD_BUFLEN_256;
 		*(volatile uint64_t *)(regs + AMD_REG_EVTLOG) =
-			(t->event & AMD_BASE_MASK) | AMD_BUFLEN_256;
+			((t->event + (uint64_t)i * AMD_EVENT_LOG_BYTES)
+			 & AMD_BASE_MASK) | AMD_BUFLEN_256;	/* #599 */
 
 		/*
 		 * The ring pointers, written rather than trusted.  They reset
@@ -1241,15 +1251,14 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 
 #define	AMD_STATUS_EVT_OVERFLOW	(1ULL << 0)	/* RW1C */
 #define	AMD_STATUS_EVT_INT	(1ULL << 1)	/* RW1C */
+#define	AMD_STATUS_EVT_RUN	(1ULL << 3)	/* RO: events are being logged */
 
-unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
+/* #599: the live engine's view: its registers and its event log. */
+int iommu_amd_evtlog_of(unsigned unit, struct iommu_amd_evtlog *v)
 {
 	const struct iommu_unit *u = iommu_unit(unit);
 	const struct iommu_tables *t = iommu_tables();
 	volatile uint8_t *regs;
-	volatile uint8_t *log;
-	uint64_t head, tail, status;
-	unsigned found = 0;
 
 	if (u == 0 || !u->answered || u->register_va == 0)
 		return 0;
@@ -1257,24 +1266,74 @@ unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
 		return 0;
 
 	regs = (volatile uint8_t *)(uintptr_t)u->register_va;
-	log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event);
+	v->head = (volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD);
+	v->tail = (volatile uint64_t *)(regs + AMD_REG_EVTLOG_TAIL);
+	v->status = (volatile uint64_t *)(regs + AMD_REG_STATUS);
+	v->status_w1c = v->status;
+	v->control = (volatile uint64_t *)(regs + AMD_REG_CONTROL);
+	v->control_log = 0;
+	v->control_logged = 0;
+	v->log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event +
+			(uint64_t)unit * AMD_EVENT_LOG_BYTES);	/* its own */
+	v->bytes = AMD_EVENT_LOG_BYTES;
+	return 1;
+}
 
-	status = *(volatile uint64_t *)(regs + AMD_REG_STATUS);
-	if (status & AMD_STATUS_EVT_OVERFLOW && overflowed)
-		*overflowed = 1;
+unsigned iommu_amd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
+{
+	struct iommu_amd_evtlog v;
 
-	head = *(volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD)
-	       & AMD_RING_PTR_MASK;
-	tail = *(volatile uint64_t *)(regs + AMD_REG_EVTLOG_TAIL)
-	       & AMD_RING_PTR_MASK;
+	if (!iommu_amd_evtlog_of(unit, &v))
+		return 0;
+	return iommu_amd_evtlog_drain(&v, unit, s);
+}
 
-	while (head != tail) {
-		volatile uint64_t *e = (volatile uint64_t *)(log + head);
+/*
+ * #599: every entry between head and tail, and then what may have been lost
+ * while the engine was not read.  Three ways, each counted as an episode
+ * (a false one only ever produces "unknown", never a false "not refused"):
+ *  - FULL: the ring was full when read, or filled while it was being read.
+ *    QEMU's AMD-Vi discards events into a full ring and sets EventOverflow
+ *    only when EventIntEn is set, which this kernel never sets -- counting
+ *    losses by the flag alone counted none (ahci [iommu-burst]: 255 of 1032
+ *    recorded, nothing said);
+ *  - EMPTY: an entry the tail had passed that stayed zero.  Linux re-reads
+ *    such an entry, for an erratum where the tail moves before the entry is
+ *    written; it was consumed here in silence.  Re-read up to 1000 pauses,
+ *    then counted;
+ *  - OVERFLOW: the engine's own flag, read AFTER the drain, so a flag set
+ *    while the ring was being emptied is not missed.
+ */
+/* #599: a CONTROL write, logged in order on a fabricated engine */
+static void amd_evtlog_control(const struct iommu_amd_evtlog *v, uint64_t x)
+{
+	*v->control = x;
+	if (v->control_log != 0 &&
+	    *v->control_logged < IOMMU_AMD_CONTROL_LOG)
+		v->control_log[(*v->control_logged)++] = x;
+}
+
+unsigned iommu_amd_evtlog_drain(const struct iommu_amd_evtlog *v,
+				unsigned unit, struct iommu_fault_sink *s)
+{
+	uint64_t head, tail0, tail1, status;
+	unsigned found = 0, why = 0, consumed, since, spin;
+
+	head = *v->head & AMD_RING_PTR_MASK;
+	tail0 = *v->tail & AMD_RING_PTR_MASK;
+	consumed = (unsigned)((tail0 + v->bytes - head) % v->bytes / 16u);
+
+	while (head != tail0) {
+		volatile uint64_t *e = (volatile uint64_t *)(v->log + head);
 		struct iommu_fault f;
 
+		for (spin = 0; spin < 1000 && e[0] == 0 && e[1] == 0; spin++)
+			cpu_pause();
 		if (iommu_amd_fault_decode(e[0], e[1], &f)) {
-			iommu_record_fault(&f);
+			iommu_fault_sink_record(s, &f);
 			found++;
+		} else {
+			why |= IOMMU_LOST_EMPTY;
 		}
 
 		/*
@@ -1287,10 +1346,15 @@ unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
 		e[0] = 0;
 		e[1] = 0;
 
-		head = (head + 16u) % AMD_EVENT_LOG_BYTES;
+		head = (head + 16u) % v->bytes;
 	}
 
-	*(volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD) = head;
+	*v->head = head;
+
+	tail1 = *v->tail & AMD_RING_PTR_MASK;
+	since = (unsigned)((tail1 + v->bytes - tail0) % v->bytes / 16u);
+	if (consumed + since >= v->bytes / 16u - 1u)
+		why |= IOMMU_LOST_FULL;
 
 	/*
 	 * The overflow bit last, and only after the ring has been emptied:
@@ -1298,13 +1362,43 @@ unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
 	 * clearing it before making room would restart logging into a full
 	 * ring and set it again.
 	 */
+	status = *v->status;
 	if (status & AMD_STATUS_EVT_OVERFLOW)
-		*(volatile uint64_t *)(regs + AMD_REG_STATUS) =
-			AMD_STATUS_EVT_OVERFLOW;
-	if (status & AMD_STATUS_EVT_INT)
-		*(volatile uint64_t *)(regs + AMD_REG_STATUS) =
-			AMD_STATUS_EVT_INT;
+		why |= IOMMU_LOST_OVERFLOW;
 
+	/*
+	 * #599: a log that stopped is restarted.  48882 Rev 3.06 §2.5.1:
+	 * "event logging is disabled ... when the event log overflows", and the
+	 * restart is EventLogRun = 0, EventLogEn = 0, EventOverflow cleared
+	 * (W1C), EventLogEn = 1 -- which clears EventOverflow and sets
+	 * EventLogRun (MMIO 0018h bit 2).  Writing EventLogEn = 1 while it is
+	 * already 1 "has no effect", hence the 0 first.  Only a stopped log is
+	 * toggled, and Run is already 0 then: nothing is waited for under the
+	 * lock.  With Run = 1 clearing EventOverflow is enough: "When
+	 * EventOverflow = 1b, the IOMMU does not write new event log entries
+	 * even when EventLogRun = 1b" (MMIO 2020h bit 3).  Nothing else writes
+	 * CONTROL at run time; the command path never does.
+	 */
+	if (!(status & AMD_STATUS_EVT_RUN) &&
+	    (*v->control & AMD_CTL_EVENTLOG_EN)) {
+		uint64_t control = *v->control;
+
+		why |= IOMMU_LOST_STOPPED;
+		amd_evtlog_control(v, control & ~AMD_CTL_EVENTLOG_EN);
+		if (status & AMD_STATUS_EVT_OVERFLOW)
+			*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
+		amd_evtlog_control(v, control | AMD_CTL_EVENTLOG_EN);
+		iommu_fault_sink_stopped(s, unit, 1);
+	} else {
+		if (status & AMD_STATUS_EVT_OVERFLOW)
+			*v->status_w1c = AMD_STATUS_EVT_OVERFLOW;
+		iommu_fault_sink_stopped(s, unit, 0);
+	}
+	if (status & AMD_STATUS_EVT_INT)
+		*v->status_w1c = AMD_STATUS_EVT_INT;
+
+	if (why != 0)
+		iommu_fault_sink_lost(s, unit, why);
 	return found;
 }
 

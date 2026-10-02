@@ -10,7 +10,12 @@
 
 void cons_cost_report(void);
 
-/* Where this boot's console bytes were handed over (#567); at halt. */
+/* Where this boot's console bytes were handed over (#567): the final copy,
+ * once, at halt. */
 void cons_ring_report(void);
+
+/* The same counts so far, one line beginning with lead, every call (#599):
+ * the quiet census's. */
+void cons_ring_so_far(const char *lead);
 
 #endif	/* _X86_64_DDB_CONS_COST_H_ */

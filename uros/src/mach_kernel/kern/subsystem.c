@@ -268,12 +268,22 @@ subsystem_deallocate(
 
 	/* Check again, since we temporarily unlocked the subsystem: */
 	if (--subsystem->ref_count == 0) {
+		vm_size_t	size = subsystem->size;
 
 		task->subsystem_count--;
 		queue_remove(&task->subsystem_list, subsystem, subsystem_t,
 							subsystem_list);
-		kfree((vm_offset_t) subsystem, subsystem->size);
+		/*
+		 * #599: the lock and the level go back before the memory does.
+		 * This used to free the subsystem with its own lock held and
+		 * return at splsched -- to user mode, where nothing lowers the
+		 * level, so every device interrupt on this processor, the tick
+		 * included, stayed deferred until it next entered the kernel.
+		 */
+		subsystem_unlock(subsystem);
+		splx(s);
 		task_unlock(task);
+		kfree((vm_offset_t) subsystem, size);
 		return;
 	}
 

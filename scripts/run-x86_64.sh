@@ -122,6 +122,13 @@ KNOWN='no ruler produced a median\|WRONG, the runs disagree or the ruler never c
 # neither WRONG nor FAIL, so it falls out of that grep on its own.
 NOT_ASKED='NOT ASKED'
 
+# #599: and a fourth, for the same reason: "UNKNOWN -- the engine may have
+# dropped the refusal" (device_master.defs' verdict for a count that stood
+# while `lost' moved).  Not a failure and not a pass: the question was asked
+# and the machine could not answer it.  Counted and listed, or a boot whose
+# refusals went missing is green with no mention of it (found in review).
+UNKNOWN_VERDICT='\] UNKNOWN —'
+
 # There are two kinds of run now, and they end differently (#458).
 #
 # The `-D' run ends in the double-fault self-test, which breaks the stack
@@ -180,6 +187,7 @@ VACCEL=$(sed -n 's/^  accelerator:  //p' "$LOG" | head -1)
 TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
 EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
 UNASKED=$(grep -ac "$NOT_ASKED" "$LOG" || true)
+UNKNOWNS=$(grep -ac "$UNKNOWN_VERDICT" "$LOG" || true)
 # ⚠️ `^panic\(', not `^panic:'.  This kernel prints `panic(cpu 0): ...' --
 # kern/debug.c puts the processor number in parentheses -- so the old pattern
 # could never match a single panic this kernel has ever produced.  It was
@@ -220,6 +228,10 @@ NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 echo
 echo "=== verdict: $TESTS self-tests, under $VACCEL ==="
 [ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: the TSC could not be calibrated, and its consumers said NOT ASKED (#508, #586)"
+if [ "$UNKNOWNS" -gt 0 ]; then
+	echo "  $UNKNOWNS UNKNOWN: asked, and the machine could not answer (#599)"
+	grep -a "$UNKNOWN_VERDICT" "$LOG" | sed 's/^/    /'
+fi
 if [ "$UNASKED" -gt 0 ]; then
 	echo "  $UNASKED NOT ASKED: this machine could not pose the question (#563)"
 	grep -a "$NOT_ASKED" "$LOG" | sed 's/^/    /'
@@ -378,6 +390,8 @@ must_report 'state_test: the target is parked' 'state_test: PASS — 11' \
 	'thread_get_state() on a target that never stops waits for it for ever, and waiting for ever looks exactly like a short run (#408).'
 must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
+must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#599).'
 # ⚠️ The terminator matches any count, not `3 of 3'.  A run that reported "2 of
 # 3" DID finish and its failing arm is already caught as a WRONG line; asking
 # here for the passing count as well would report one defect as two, and would
@@ -489,6 +503,25 @@ must_report 'hal_bar: started' 'hal_bar: [0-9]* of [0-9]* arms passed' \
 # what keeps it from being reported as a pass.
 # ⚠️ Its own failure lines say `failed' in lower case, which the unexplained
 # scan above does not match -- this pair is the only thing judging it.
+# #599: the two self-tests ext_server runs before it reads a disk.  Their
+# WRONG lines fail the run by themselves; these pairs are what fail it when a
+# line never appears -- a self-test that stops printing is not one that passed.
+# ⚠️ The patterns take the WRONG form of each line too: matching only the
+# passing one made a WRONG answer read as "never did", a second reason that
+# was false.
+must_report '=== ext2 filesystem server' 'ext2: .*directory records' \
+	'ext_server asks the directory-record check about records built to break each rule before it reads a disk (#599).  No line means the check never ran.'
+must_report '=== ext2 filesystem server' 'ext2: .*block-I/O cases' \
+	'ext_server asks its block-I/O paths about a file whose device answers nothing (#599).  No line means they were never asked.'
+must_report 'iommu fault records decoded' 'fault-drain cases on fabricated engines' \
+	'The kernel runs its IOMMU fault drains against fabricated engines at every boot (#599).  No line means it was never asked.'
+
+must_report 'iommu fault records decoded' 'fault-log cases' \
+	'The kernel asks its per-device refusal count about a scratch table at every boot (#599).  No line means it was never asked.'
+
+must_report '=== ext2 filesystem server' 'ext2: .*page-cache cases' \
+	'ext_server asks the page cache about small caches of its own (#599).  No line means it was never asked.'
+
 must_report '=== ext2 filesystem server' 'ext2: ready, entering message loop' \
 	'It mounts ahci0a and serves it (#498).  Every way out of main() before that line is a failure -- a device it could not open, a capability it was refused, a superblock it could not read -- and each of them ends the task rather than printing a verdict.'
 
@@ -521,6 +554,13 @@ fi
 if [ "$NBAD" -gt 0 ]; then
 	echo "  FAILED: $NBAD unexplained:"
 	printf '%s\n' "$BAD" | sed 's/^/    /'
+	# #599: -Z panics on purpose.  The panic is not its failure; whether
+	# halt_cpu kept the message, the console's copy and the backtraces whole
+	# is, and that is read from the log by its own check.
+	if grep -aq 'double_panic: processors' "$LOG"; then
+		echo "  (this boot panicked on purpose, -Z: its verdict is"
+		echo "   scripts/double-panic-check.sh $LOG)"
+	fi
 	echo "  log: $LOG"
 	exit 1
 fi
@@ -967,7 +1007,14 @@ QPID=$!
 # any output as progress would keep a wedged boot alive until the hard cap.
 # What is excluded is named here rather than pattern-matched loosely -- an
 # exclusion that grows silently is how a watchdog stops being one.
-IDLE_CHATTER='quiet_census:'
+#
+# #599: and the clock's own reports, which come from the tick whatever the
+# rest of the machine is doing -- clock_event's two lines every minute (#593)
+# and the TSC watchdog's every two (#594).  Counted as progress, they pushed
+# the deadline on for as long as the tick ran: a machine stopped with its
+# clock alive never went quiet, reached the hard cap, and was called a
+# livelock (a stay-up boot ran its full ten times SECS, every time).
+IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
 
 # The hard cap, which is still wall time and still needed: a livelock that
 # keeps printing meaningful lines forever is progress by this measure and has
@@ -1092,7 +1139,32 @@ while kill -0 "$QPID" 2>/dev/null; do
 	# TWICE in this file is its own hazard: the first copy was corrected for
 	# act_test's fifth arm and this one would have gone on waiting.
 	if grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; then
-		sleep 1
+		# #599: a panic is not over at its first line.  The console's
+		# final copy and every processor's backtrace come after it, at
+		# the wire's pace -- four processors' worth is seconds of bytes
+		# on real hardware -- and the second ended one second after the
+		# line, whatever was still coming.  So a run that ends in a panic
+		# waits until its log has stopped growing for three seconds,
+		# within a minute; every other end is as it was.
+		if grep -aq 'panic(cpu' "$LOG"; then
+			_PANIC_SIZE=-1
+			_PANIC_STILL=0
+			_PANIC_WAITED=0
+			while [ "$_PANIC_STILL" -lt 3 ] && [ "$_PANIC_WAITED" -lt 60 ] &&
+			      kill -0 "$QPID" 2>/dev/null; do
+				_PANIC_NOW=$(stat -c %s "$LOG")
+				if [ "$_PANIC_NOW" = "$_PANIC_SIZE" ]; then
+					_PANIC_STILL=$((_PANIC_STILL + 1))
+				else
+					_PANIC_STILL=0
+					_PANIC_SIZE=$_PANIC_NOW
+				fi
+				sleep 1
+				_PANIC_WAITED=$((_PANIC_WAITED + 1))
+			done
+		else
+			sleep 1
+		fi
 		break
 	fi
 	NOW_PROGRESS=$(progress_count)

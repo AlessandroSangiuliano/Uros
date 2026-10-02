@@ -173,7 +173,7 @@ Entry(idt)
 
 EXCEPTION(0x00,t_zero_div)
 EXCEP_SPC(0x01,t_debug)
-NMI_INTR(0x02,t_nmi)		/* NMI -> alltraps -> kernel_trap T_NMI (#344) */
+NMI_INTR(0x02,t_nmi)		/* NMI -> t_nmi (locore.S), not alltraps (#344) */
 EXCEP_USR(0x03,t_int3)
 EXCEP_USR(0x04,t_into)
 EXCEP_USR(0x05,t_bounds)
@@ -442,7 +442,16 @@ INTERRUPT(0xeb)
 INTERRUPT(0xec)
 INTERRUPT(0xed)
 INTERRUPT(0xee)
+/*
+ * #599: the local APIC's spurious vector (LAPIC_SPURIOUS_VECTOR, lapic.h).
+ * It was 0xFF, which is t_preempt below: a spurious interrupt came in as a
+ * preemption trap and went through the trap path and its AST check.
+ */
+#if	NCPUS > 1
+	IDT_ENTRY(EXT(lapic_spurious_entry), K_INTR_GATE)
+#else
 INTERRUPT(0xef)
+#endif	/* NCPUS > 1 */
 
 /*
  * #302: IPI vectors get dedicated entry stubs (i386/ipi.S) instead of

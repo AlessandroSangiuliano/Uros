@@ -101,9 +101,10 @@ kern_return_t bench_child_thread_start(mach_port_t thread,
 				       vm_offset_t stack_top);
 
 void flipc2_get_time(tvalspec_t *tv);
-unsigned long flipc2_elapsed_ns(const tvalspec_t *before,
-                                const tvalspec_t *after);
-void flipc2_print_result(const char *label, unsigned long total_ns, int iters);
+unsigned long long flipc2_elapsed_ns(const tvalspec_t *before,
+                                     const tvalspec_t *after);
+void flipc2_print_result(const char *label, unsigned long long total_ns,
+                         int iters);
 
 /* Channel pair: fwd + rev with peer handles */
 struct flipc2_pair {

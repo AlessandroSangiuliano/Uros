@@ -132,10 +132,27 @@ void cons_flush(void);
  * second mouth, giving the port away made it MUTE -- every self-test verdict,
  * every panic.  That is why this issue waited for that one.
  *
- * cons_port_reclaim() is the way down, and it is a stated exception and not a
- * race: a panic takes the port back, because a message that arrives possibly
- * garbled beats a message that is lost.  A machine that is dying has no
- * further use for the property that two writers never meet.
+ * cons_port_reclaim() is a driver letting go: under the port's lock, with
+ * the console's LCR put back.  The way down is cons_async_set(0), which takes
+ * the port back with no lock -- a stated exception and not a race: a panic
+ * takes the port back, because a message that arrives possibly garbled beats
+ * a message that is lost.  A machine that is dying has no further use for the
+ * property that two writers never meet.  #599: DDB's session closes the latch
+ * after the others are stopped (cons_ddb_session), a halt closes it under
+ * the port's lock (cons_port_close_latch), and a DDB session that continues
+ * gives the port back to its driver.  Once the lock package can be used
+ * (cons_percpu_ready) a THR write is made under the port's lock, taken three
+ * ways.  cons_flush's drain, a task's register write and the way down's
+ * drain wait for it -- the way down's before the other processors are
+ * stopped, so a holder is running and lets go (cons_async_set(0) comes first
+ * in DDB's entry and in halt_cpu; a processor the halt reaches later finds
+ * the ring empty and takes nothing).  The tick's and the idle loop's drain
+ * only try it, and leave the byte queued when it is held.  cons_wire_byte
+ * (the ring off, the way down, the reporter), which must not wait for ever,
+ * waits with a bound, and after a failed wait writes without it if the
+ * divisor latch is closed: a holder that is parked or halted will never let
+ * go.  One write is made without it on purpose: cons_loopback_probe, at
+ * boot, on one processor with the ring off.
  */
 /* Returns the klog cursor taken at the instant the port changed hands: the
  * forwarder's starting point (#497).  Idempotent; a second call returns the
@@ -143,11 +160,16 @@ void cons_flush(void);
 unsigned int cons_port_release(void);
 void cons_port_reclaim(void);
 int cons_port_is_ours(void);
+void cons_ddb_session(int entering);	/* #599: see cons.c */
+void cons_port_close_latch(void);	/* #599: a halt, under the port's lock */
+void cons_percpu_ready(void);	/* #599: the boot processor's %gs is set */
+int cons_poll_getc(void);	/* #599: -1 unless the port is still ours */
 
 /*
  * Where the bytes of this boot were actually handed to the port, counted so
  * that a drain nobody ever reached is visible as the zero it is rather than
- * passing for support.  cons_cost_report() prints them.
+ * passing for support.  cons_ring_report() prints them at a halt, and
+ * cons_ring_so_far() with each of the quiet census's reports (#599).
  */
 enum {
 	CONS_DRAIN_WRITER = 0,	/* the thread that printed, after unlocking */

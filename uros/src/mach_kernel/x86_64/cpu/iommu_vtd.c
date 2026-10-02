@@ -1172,42 +1172,37 @@ int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	return 1;
 }
 
-unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
+/* #599: the live engine's view: FSTS and its fault-recording registers. */
+int iommu_vtd_records_of(unsigned unit, struct iommu_vtd_records *v)
 {
 	const struct iommu_unit *u = iommu_unit(unit);
 	volatile uint8_t *regs;
-	unsigned records, base, found = 0;
-	uint32_t status;
 
 	if (u == 0 || !u->answered || u->register_va == 0)
 		return 0;
 
 	regs = (volatile uint8_t *)(uintptr_t)u->register_va;
-	records = VTD_CAP_NFR(u->vendor_caps[0]);
-	base = VTD_CAP_FRO(u->vendor_caps[0]);
+	v->fsts = (volatile uint32_t *)(regs + VTD_FSTS);
+	v->fsts_w1c = v->fsts;
+	v->records = regs + VTD_CAP_FRO(u->vendor_caps[0]);
+	v->count = VTD_CAP_NFR(u->vendor_caps[0]);
+	return 1;
+}
 
-	status = *(volatile uint32_t *)(regs + VTD_FSTS);
-	if (status & VTD_FSTS_PFO) {
-		if (overflowed)
-			*overflowed = 1;
+unsigned iommu_vtd_fault_drain(unsigned unit, struct iommu_fault_sink *s)
+{
+	struct iommu_vtd_records v;
 
-		/*
-		 * 🔴 CLEARED, or the engine records nothing further.  §11.4.7.1
-		 * PFO: "When this field is Set, hardware does not record any
-		 * new faults until software clears this field" -- so a reader
-		 * that only reported the overflow would turn one lost fault
-		 * into every subsequent one.
-		 */
-		*(volatile uint32_t *)(regs + VTD_FSTS) = VTD_FSTS_PFO;
-	}
-
-	/*
-	 * PPF is the OR of every record's F, so a clear one means there is
-	 * nothing to walk -- one uncached read instead of NFR+1 of them, on
-	 * the path that runs on every poll and finds nothing almost always.
-	 */
-	if (!(status & VTD_FSTS_PPF))
+	if (!iommu_vtd_records_of(unit, &v))
 		return 0;
+	return iommu_vtd_records_drain(&v, unit, s);
+}
+
+/* Every record whose F is set, decoded, handed on and freed. */
+static unsigned vtd_walk_records(const struct iommu_vtd_records *v,
+				 struct iommu_fault_sink *s)
+{
+	unsigned found = 0;
 
 	/*
 	 * ⚠️ Every record, and not only the one FSTS.FRI names.  That field
@@ -1216,9 +1211,9 @@ unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
 	 * that treated it as one would drain a single record per poll and
 	 * leave the rest to overflow.
 	 */
-	for (unsigned i = 0; i < records; i++) {
+	for (unsigned i = 0; i < v->count; i++) {
 		volatile uint64_t *rec =
-			(volatile uint64_t *)(regs + base + i * 16u);
+			(volatile uint64_t *)(v->records + i * 16u);
 		uint64_t hi = rec[1];
 		struct iommu_fault f;
 
@@ -1228,7 +1223,7 @@ unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
 		if (!iommu_vtd_fault_decode(rec[0], hi, &f))
 			continue;
 
-		iommu_record_fault(&f);
+		iommu_fault_sink_record(s, &f);
 		found++;
 
 		/*
@@ -1241,6 +1236,41 @@ unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
 		rec[1] = VTD_FR_F;
 	}
 
+	return found;
+}
+
+unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
+				 unsigned unit, struct iommu_fault_sink *s)
+{
+	unsigned found = 0;
+	uint32_t status;
+
+	/*
+	 * PPF is the OR of every record's F, so a clear one means there is
+	 * nothing to walk -- one uncached read instead of NFR+1 of them, on
+	 * the path that runs on every poll and finds nothing almost always.
+	 */
+	status = *v->fsts;
+	if (status & VTD_FSTS_PPF)
+		found = vtd_walk_records(v, s);
+
+	/*
+	 * #599: PFO read AFTER the records are free, and cleared after that.
+	 * It was cleared first: with every record still full the engine could
+	 * drop another fault between the two, and the next drain would not
+	 * know.  Freeing the records first keeps the window in which it cannot
+	 * record as short as it can be.
+	 *
+	 * 🔴 CLEARED, or the engine records nothing further.  §11.4.7.1 PFO:
+	 * "When this field is Set, hardware does not record any new faults
+	 * until software clears this field" -- so a reader that only reported
+	 * the overflow would turn one lost fault into every subsequent one.
+	 */
+	status = *v->fsts;
+	if (status & VTD_FSTS_PFO) {
+		iommu_fault_sink_lost(s, unit, IOMMU_LOST_OVERFLOW);
+		*v->fsts_w1c = VTD_FSTS_PFO;
+	}
 	return found;
 }
 

@@ -67,15 +67,24 @@ extern vm_offset_t lapic_start;	/* set by mp_table.c via io_map() */
  */
 #define LAPIC_TIMER_VECTOR	0x3F
 
-#define LAPIC_SPURIOUS_VECTOR	0xFF
+/*
+ * #599: 0xEF, not 0xFF.  0xFF is t_preempt in idt.S, so a spurious interrupt
+ * was taken as a preemption trap.  The low four bits stay 1111, which the
+ * older local APICs require of this vector; its IDT entry is
+ * lapic_spurious_entry (ipi.S), which returns without an EOI, as the SDM
+ * says a spurious interrupt must.
+ */
+#define LAPIC_SPURIOUS_VECTOR	0xEF
 
 struct i386_interrupt_state;		/* <i386/thread.h>; only a pointer is used */
 
 extern void	lapic_enable(void);
 extern void	lapic_eoi(void);
+extern void	lapic_icr_send(unsigned char dest, unsigned int command); /* #599 */
 extern void	lapic_send_ipi(int slot, unsigned int vector);
 extern void	lapic_send_ipi_all_excluding_self(unsigned int vector);
 extern void	lapic_send_nmi_all_excluding_self(void);	/* #382 DDB park */
+extern void	lapic_send_nmi(int slot);			/* #599 clock watch */
 
 /* #312: per-CPU LAPIC timer.  lapic_timer_calibrate() measures the local
  * timer against the 8254 RTC and stores the per-HZ-tick INITIAL_COUNT (at

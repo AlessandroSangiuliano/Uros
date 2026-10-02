@@ -78,26 +78,6 @@ device_md_irq_is_level(unsigned int irq)
 		== ACPI_TRIGGER_LEVEL;
 }
 
-/*
- * ⚠️ The ISA interrupt number is translated to a global system interrupt
- * before the pin is touched.  They are not the same number: the firmware may
- * say that ISA 0 arrives on GSI 2, and it usually does.  Masking pin 0
- * because the caller said 0 would leave the timer running and silence
- * something else.
- */
-void
-device_md_irq_mask(unsigned int irq)
-{
-	if (ioapic_present())
-		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
-}
-
-void
-device_md_irq_unmask(unsigned int irq)
-{
-	if (ioapic_present())
-		ioapic_unmask(acpi_irq_to_gsi((uint8_t)irq));
-}
 
 void
 device_md_irq_pending_note(volatile unsigned int *p)
@@ -114,6 +94,11 @@ device_md_irq_pending_take(volatile unsigned int *p)
 unsigned int
 device_md_io_read(unsigned int port, unsigned int size)
 {
+	extern unsigned int cons_port_in(unsigned int port);
+
+	/* #599: COM1's registers go under the lock the divisor takes */
+	if (port >= 0x3F8 && port < 0x3F8 + 7 && size == 1)
+		return cons_port_in(port);
 	switch (size) {
 	case 1:	return inb((uint16_t)port);
 	case 2:	return inw((uint16_t)port);
@@ -125,6 +110,13 @@ device_md_io_read(unsigned int port, unsigned int size)
 void
 device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 {
+	extern void cons_port_out(unsigned int port, unsigned int value);
+
+	/* #599: COM1's registers go under the lock the divisor takes */
+	if (port >= 0x3F8 && port < 0x3F8 + 7 && size == 1) {
+		cons_port_out(port, value);
+		return;
+	}
 	switch (size) {
 	case 1:	outb((uint16_t)port, (uint8_t)value); break;
 	case 2:	outw((uint16_t)port, (uint16_t)value); break;
@@ -151,6 +143,45 @@ covers_com1(unsigned int base, unsigned int count)
 		&& base + count >= COM1_BASE + COM1_COUNT) ? TRUE : FALSE;
 }
 
+/*
+ * #599: see <device/device_machdep.h>.  COM1 is the one window known here,
+ * and its scratch register (0x3FF) is outside it: that is what a driver's
+ * probe writes before it claims, and nothing the chip does depends on it.
+ */
+int
+device_md_io_window(unsigned int port, unsigned int size, unsigned int *base,
+		    unsigned int *count)
+{
+	if (port < 0x3F8 + 7 && 0x3F8 < port + size) {
+		*base = 0x3F8;
+		*count = 8;
+		return 1;
+	}
+	return 0;
+}
+
+int
+device_md_io_opens_latch(unsigned int port, unsigned int size,
+			 unsigned int data)
+{
+	return port == 0x3FB && size == 1 && (data & 0x80u) != 0;
+}
+
+/* #599: see <device/device_machdep.h>; COM1 is the one 16550 known here. */
+int
+device_md_io_set_divisor(unsigned int base, unsigned int divisor,
+			 unsigned int *readback)
+{
+	extern unsigned int cons_set_divisor(unsigned int divisor);
+
+	if (base != 0x3F8)
+		return 0;
+	*readback = cons_set_divisor(divisor);
+	printf("cons: COM1 divisor 0x%04x written, 0x%04x read back (#599)\n",
+	       divisor, *readback);
+	return 1;
+}
+
 int
 device_md_io_claimed(unsigned int base, unsigned int count,
 		     unsigned int *klog_from)
@@ -174,18 +205,20 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 	 * The console resuming is what keeps an automated run readable after a
 	 * driver has gone away.
 	 *
-	 * ⚠️ It does NOT reprogram the line.  The driver may have changed the
+	 * ⚠️ It does not reprogram the SPEED.  The driver may have changed the
 	 * divisor; the console adopts whatever it finds, which is what it has
 	 * always done on this target -- boot.S sets the speed and cons.c has
-	 * never asked what it is.
+	 * never asked what it is.  #599: LCR -- word length, parity, stop bits
+	 * and the latch -- is put back as the console had it when it let go,
+	 * so the console never writes THR into a latch left open.
 	 */
 	if (covers_com1(base, count))
 		cons_port_reclaim();
 }
 
 /*
- * The legacy ports this kernel keeps (#508): its rulers, and the PCI
- * configuration ports (#597).
+ * The legacy ports this kernel keeps (#508): its rulers, the PCI
+ * configuration ports (#597), the CMOS and the 8259s (#599).
  *
  * The 8254's four registers and port 0x61, whose low bits gate channel 2 and
  * read its output -- that is how pit_delay_us() times an interval -- and the
@@ -208,6 +241,16 @@ static const struct {
 	 * reach every device's configuration space: kept either way.
 	 */
 	{ 0xCF8, 8, "the PCI configuration ports" },
+	/*
+	 * #599: the CMOS pair, serialised under time/rtc.c's cmos_pair_lock,
+	 * whose index port is also the NMI mask; and the 8259s and their
+	 * ELCR, which the kernel programs at boot and a task could unmask or
+	 * redirect underneath it.
+	 */
+	{ 0x70, 2, "the CMOS, whose index port is also the NMI mask" },
+	{ 0x20, 2, "the 8259 interrupt controllers" },
+	{ 0xA0, 2, "the 8259 interrupt controllers" },
+	{ 0x4D0, 2, "the 8259s' edge/level registers" },
 };
 
 static int
@@ -269,6 +312,40 @@ device_md_io_reserved(unsigned int base, unsigned int count)
  */
 #define	DEVICE_MD_IRQ_MAX	16
 #define	DEVICE_MD_VECTOR(irq)	(IOAPIC_ISA_VECTOR_BASE + (irq))
+
+/*
+ * ⚠️ The ISA interrupt number is translated to a global system interrupt
+ * before the pin is touched.  They are not the same number: the firmware may
+ * say that ISA 0 arrives on GSI 2, and it usually does.  Masking pin 0
+ * because the caller said 0 would leave the timer running and silence
+ * something else.
+ */
+void
+device_md_irq_mask(unsigned int irq)
+{
+	/*
+	 * #599: a line, and only a line, has a pin.  device_master.c's task
+	 * teardown asks this for every slot the task held, message-signalled
+	 * ones (16..31) included, and GSI 16..23 are other devices' pins: a
+	 * dead driver's MSI slot masked somebody else's line, and slot 24 and
+	 * up panicked in the I/O APIC's redir_reg().  An MSI slot is disarmed
+	 * in its device (device_md_msi_unregister) and its handler released;
+	 * there is nothing to mask here.
+	 */
+	if (irq >= DEVICE_MD_IRQ_MAX)
+		return;
+	if (ioapic_present())
+		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
+}
+
+void
+device_md_irq_unmask(unsigned int irq)
+{
+	if (irq >= DEVICE_MD_IRQ_MAX)
+		return;		/* no pin: see device_md_irq_mask() */
+	if (ioapic_present())
+		ioapic_unmask(acpi_irq_to_gsi((uint8_t)irq));
+}
 
 /*
  * ── And sixteen more that are not lines ──────────────────────────────
@@ -469,7 +546,7 @@ device_md_debugger_break(void)
 #define	MSI_ADDRESS_BASE	0xFEE00000ULL
 #define	MSI_ADDRESS_DEST(id)	(((unsigned long long)(id) & 0xFFu) << 12)
 
-static unsigned int	msi_next;	/* slots are handed out in order */
+static volatile unsigned int	msi_next;	/* slots are handed out in order */
 
 /*
  * Claim a vector and say what a device must write to reach it.
@@ -506,11 +583,23 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 	 * never used or one a device is still programmed to write to.  ⚠️ Which
 	 * makes unregister leave the slot spent -- see below.
 	 */
-	if (msi_next >= DEVICE_MD_MSI_MAX)
-		return 0;
+	/*
+	 * #599: taken with a compare-and-swap.  It was a read and an
+	 * increment, and two processors allocating at once got the same slot.
+	 * device_master.c calls this under its irq_forward_lock now, but the
+	 * boot self-test does not, and a counter safe only for some callers is
+	 * a proof kept in another file.
+	 */
+	for (;;) {
+		unsigned int	n = msi_next;
 
-	slot = DEVICE_MD_MSI_BASE + msi_next;
-	msi_next++;
+		if (n >= DEVICE_MD_MSI_MAX)
+			return 0;
+		if (__sync_bool_compare_and_swap(&msi_next, n, n + 1)) {
+			slot = DEVICE_MD_MSI_BASE + n;
+			break;
+		}
+	}
 	vector = DEVICE_MD_VECTOR(slot);
 
 	/*
@@ -732,11 +821,11 @@ device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
 int
 device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 			  unsigned int n, int read, int write,
-			  unsigned long *dma_addr)
+			  unsigned long *dma_addr, int *identity)
 {
 	uint64_t iova = 0;
 	unsigned before;
-	int ok;
+	int ok, id = 0;
 
 	if (bdf > 0xFFFFu)
 		return 0;
@@ -753,7 +842,7 @@ device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 
 	before = iommu_domain_count();
 	ok = iommu_grant_pages((uint16_t)bdf, (const uint64_t *)pa, n,
-			       read, write, &iova);
+			       read, write, &iova, &id);
 
 	if (ok && iommu_domain_count() != before)
 		printf("iommu: %02x:%02x.%u is now in a domain of its own, "
@@ -764,6 +853,8 @@ device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
 
 	if (ok && dma_addr != 0)
 		*dma_addr = (unsigned long)iova;
+	if (ok && identity != 0)
+		*identity = id;
 
 	return ok;
 }
@@ -777,30 +868,27 @@ device_md_dma_revoke(unsigned int bdf, unsigned long pa, unsigned long size)
 	return iommu_revoke((uint16_t)bdf, (uint64_t)pa, (uint64_t)size);
 }
 
-unsigned
-device_md_dma_faults(unsigned int bdf, unsigned long *last)
+int
+device_md_dma_faults(unsigned int bdf, struct device_md_faults *a)
 {
-	uint64_t address = 0;
-	unsigned n;
+	struct iommu_fault_answer f;
 
 	if (bdf > 0xFFFFu)
 		return 0;
 
 	/*
-	 * 🔴 DRAINED HERE, AND THAT IS THE POINT OF THE CALL.  The engines'
-	 * fault records are otherwise read when a processor next goes idle,
-	 * which is after the driver has given up -- so a driver asking "was I
-	 * refused" would be told no about the refusal it is asking about.
-	 * Reporting as well as draining, because the kernel's log is where
-	 * anybody reading this afterwards will look.
+	 * 🔴 DRAINED HERE, and in the same hold as the count is read, so the
+	 * answer is current.  #599: the reporter thread drains every 100 ms as
+	 * well -- `undrained' says how many this call still found -- and it is
+	 * the one that prints; a driver's question never does.
 	 */
-	(void) iommu_fault_report();
+	iommu_fault_ask((uint16_t)bdf, &f);
 
-	n = iommu_faults_for((uint16_t)bdf, &address);
-	if (n != 0 && last != 0)
-		*last = (unsigned long)address;
-
-	return n;
+	a->count = (unsigned)f.recorded;
+	a->last = (unsigned long)f.last_address;
+	a->lost = (unsigned)f.lost;
+	a->undrained = (unsigned)f.undrained;
+	return 1;
 }
 
 int
@@ -809,7 +897,7 @@ device_md_dma_confined(unsigned int bdf)
 	if (bdf > 0xFFFFu)
 		return 0;
 
-	return iommu_domain_of((uint16_t)bdf) != 0;
+	return iommu_domain_confined((uint16_t)bdf);	/* #599: locked */
 }
 
 int

@@ -42,6 +42,8 @@
 #include <mach/mach_port.h>
 #include <mach/clock.h>
 #include <mach/clock_types.h>
+#include <mach/mach_traps.h>
+#include <mach/thread_switch.h>	/* #599: waiting for ext_server */
 #include <device/device.h>
 #include <device/device_types.h>
 #include <servers/netname.h>
@@ -68,12 +70,21 @@ dget_time(tvalspec_t *tv)
 	clock_get_time(bench_clock_port, tv);
 }
 
-static unsigned long
+/*
+ * Elapsed nanoseconds between two tvalspec_t values.
+ *
+ * 64 bits, and so is every value computed from it: a 32-bit unsigned long
+ * wraps at 4.295 s on i386 and prints a plausible wrong number (#599).  Both
+ * differences are taken signed (tv_sec is unsigned), so a clock that steps
+ * back comes out right modulo 2^64.
+ */
+static unsigned long long
 delapsed_ns(const tvalspec_t *before, const tvalspec_t *after)
 {
-	unsigned long ns;
-	ns  = (unsigned long)(after->tv_sec  - before->tv_sec)  * 1000000000UL;
-	ns += (unsigned long)(after->tv_nsec - before->tv_nsec);
+	unsigned long long ns;
+	ns  = (unsigned long long)((long long)after->tv_sec -
+				   (long long)before->tv_sec) * 1000000000ULL;
+	ns += (unsigned long long)(long long)(after->tv_nsec - before->tv_nsec);
 	return ns;
 }
 
@@ -99,7 +110,7 @@ bench_raw_read(const char *label, unsigned int chunk_size,
 	       unsigned int total_bytes)
 {
 	tvalspec_t		t0, t1;
-	unsigned long		total_ns;
+	unsigned long long	total_ns;
 	unsigned int		sectors_per_chunk, total_sectors;
 	unsigned int		lba, iters, i;
 	io_buf_ptr_t		buf;
@@ -143,10 +154,10 @@ bench_raw_read(const char *label, unsigned int chunk_size,
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us_per_op = (total_ns / iters) / 1000;
-		unsigned long us_frac = ((total_ns / iters) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
-		unsigned long mbps = 0, mbps_frac = 0;
+		unsigned long long us_per_op = (total_ns / iters) / 1000;
+		unsigned long long us_frac = ((total_ns / iters) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
+		unsigned long long mbps = 0, mbps_frac = 0;
 
 		/* MB/s = total_bytes / total_seconds / (1024*1024)
 		 *      = total_bytes / total_us * 1000000 / 1048576
@@ -155,13 +166,13 @@ bench_raw_read(const char *label, unsigned int chunk_size,
 		 * x10 for one decimal place */
 		if (total_us > 0) {
 			unsigned long kb = total_bytes / 1024;
-			unsigned long x10 = kb * 9765 / total_us;
+			unsigned long long x10 = kb * 9765 / total_us;
 			mbps = x10 / 10;
 			mbps_frac = x10 % 10;
 		}
 
-		printf("  %-28s %5lu.%02lu us/op  "
-		       "(%u x %uB, %lu.%lu MB/s)\n",
+		printf("  %-28s %5llu.%02llu us/op  "
+		       "(%u x %uB, %llu.%llu MB/s)\n",
 		       label, us_per_op, us_frac, iters, chunk_size,
 		       mbps, mbps_frac);
 	}
@@ -181,7 +192,7 @@ bench_raw_write(const char *label, unsigned int chunk_size,
 		unsigned int total_bytes)
 {
 	tvalspec_t		t0, t1;
-	unsigned long		total_ns;
+	unsigned long long	total_ns;
 	unsigned int		sectors_per_chunk, total_sectors;
 	unsigned int		lba, iters, i;
 	kern_return_t		kr;
@@ -265,20 +276,20 @@ bench_raw_write(const char *label, unsigned int chunk_size,
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us_per_op = (total_ns / iters) / 1000;
-		unsigned long us_frac = ((total_ns / iters) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
-		unsigned long mbps = 0, mbps_frac = 0;
+		unsigned long long us_per_op = (total_ns / iters) / 1000;
+		unsigned long long us_frac = ((total_ns / iters) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
+		unsigned long long mbps = 0, mbps_frac = 0;
 
 		if (total_us > 0) {
 			unsigned long kb = total_bytes / 1024;
-			unsigned long x10 = kb * 9765 / total_us;
+			unsigned long long x10 = kb * 9765 / total_us;
 			mbps = x10 / 10;
 			mbps_frac = x10 % 10;
 		}
 
-		printf("  %-28s %5lu.%02lu us/op  "
-		       "(%u x %uB, %lu.%lu MB/s)\n",
+		printf("  %-28s %5llu.%02llu us/op  "
+		       "(%u x %uB, %llu.%llu MB/s)\n",
 		       label, us_per_op, us_frac, iters, chunk_size,
 		       mbps, mbps_frac);
 	}
@@ -297,7 +308,7 @@ bench_ext2_file_read(const char *label, char *filename,
 		     unsigned int read_chunk)
 {
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	kern_return_t	kr;
 	natural_t	fid, file_size;
 	unsigned int	offset, bytes_read;
@@ -366,13 +377,13 @@ bench_ext2_file_read(const char *label, char *filename,
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us_total = total_ns / 1000;
-		unsigned long us_per_read = reads ? (total_ns / reads) / 1000 : 0;
-		unsigned long us_frac = reads ?
+		unsigned long long us_total = total_ns / 1000;
+		unsigned long long us_per_read = reads ? (total_ns / reads) / 1000 : 0;
+		unsigned long long us_frac = reads ?
 			((total_ns / reads) % 1000) / 10 : 0;
 
-		printf("  %-28s %5lu.%02lu us/read  "
-		       "(%u bytes, %d reads, %lu us total)\n",
+		printf("  %-28s %5llu.%02llu us/read  "
+		       "(%u bytes, %d reads, %llu us total)\n",
 		       label, us_per_read, us_frac,
 		       bytes_read, reads, us_total);
 	}
@@ -514,7 +525,7 @@ static void
 bench_ext2_write(const char *label, char *filename)
 {
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	kern_return_t	kr;
 	natural_t	fid, file_size;
 	pointer_t	orig_data;
@@ -586,12 +597,12 @@ bench_ext2_write(const char *label, char *filename)
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us_per_op = (total_ns / i) / 1000;
-		unsigned long us_frac = ((total_ns / i) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
+		unsigned long long us_per_op = (total_ns / i) / 1000;
+		unsigned long long us_frac = ((total_ns / i) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
 
-		printf("  %-28s %5lu.%02lu us/write "
-		       "(%u bytes, %d writes, %lu us total)\n",
+		printf("  %-28s %5llu.%02llu us/write "
+		       "(%u bytes, %d writes, %llu us total)\n",
 		       label, us_per_op, us_frac,
 		       file_size, i, total_us);
 	}
@@ -607,7 +618,7 @@ static void
 bench_ext2_sync(const char *label)
 {
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	kern_return_t	kr;
 	int		i;
 
@@ -627,11 +638,11 @@ bench_ext2_sync(const char *label)
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us_per_op = (total_ns / i) / 1000;
-		unsigned long us_frac = ((total_ns / i) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
+		unsigned long long us_per_op = (total_ns / i) / 1000;
+		unsigned long long us_frac = ((total_ns / i) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
 
-		printf("  %-28s %5lu.%02lu us/sync  (%d iters, %lu us total)\n",
+		printf("  %-28s %5llu.%02llu us/sync  (%d iters, %llu us total)\n",
 		       label, us_per_op, us_frac, i, total_us);
 	}
 }
@@ -649,7 +660,7 @@ bench_dirty_list_sync(void)
 	kern_return_t	kr;
 	natural_t	fid1, fid2;
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	vm_offset_t	buf;
 	int		i;
 
@@ -669,10 +680,10 @@ bench_dirty_list_sync(void)
 	dget_time(&t1);
 	total_ns = delapsed_ns(&t0, &t1);
 	{
-		unsigned long us_per = (total_ns / SYNC_BENCH_ITERS) / 1000;
-		unsigned long us_fr = ((total_ns / SYNC_BENCH_ITERS) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
-		printf("  %-28s %5lu.%02lu us/sync  (%d iters, %lu us total)\n",
+		unsigned long long us_per = (total_ns / SYNC_BENCH_ITERS) / 1000;
+		unsigned long long us_fr = ((total_ns / SYNC_BENCH_ITERS) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
+		printf("  %-28s %5llu.%02llu us/sync  (%d iters, %llu us total)\n",
 		       "sync (2 open, 0 dirty)",
 		       us_per, us_fr, SYNC_BENCH_ITERS, total_us);
 	}
@@ -701,10 +712,10 @@ bench_dirty_list_sync(void)
 	vm_deallocate(mach_task_self(), buf, 4);
 	total_ns = delapsed_ns(&t0, &t1);
 	{
-		unsigned long us_per = (total_ns / SYNC_BENCH_ITERS) / 1000;
-		unsigned long us_fr = ((total_ns / SYNC_BENCH_ITERS) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
-		printf("  %-28s %5lu.%02lu us/op   (%d iters, %lu us total)\n",
+		unsigned long long us_per = (total_ns / SYNC_BENCH_ITERS) / 1000;
+		unsigned long long us_fr = ((total_ns / SYNC_BENCH_ITERS) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
+		printf("  %-28s %5llu.%02llu us/op   (%d iters, %llu us total)\n",
 		       "write+sync (2 open, 1 dirty)",
 		       us_per, us_fr, SYNC_BENCH_ITERS, total_us);
 	}
@@ -726,7 +737,7 @@ static void
 bench_ext2_write_sync(const char *label, char *filename)
 {
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	kern_return_t	kr;
 	natural_t	fid, file_size;
 	pointer_t	orig_data;
@@ -798,12 +809,12 @@ bench_ext2_write_sync(const char *label, char *filename)
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us_per_op = (total_ns / i) / 1000;
-		unsigned long us_frac = ((total_ns / i) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
+		unsigned long long us_per_op = (total_ns / i) / 1000;
+		unsigned long long us_frac = ((total_ns / i) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
 
-		printf("  %-28s %5lu.%02lu us/op   "
-		       "(%u bytes, %d iters, %lu us total)\n",
+		printf("  %-28s %5llu.%02llu us/op   "
+		       "(%u bytes, %d iters, %llu us total)\n",
 		       label, us_per_op, us_frac,
 		       file_size, i, total_us);
 	}
@@ -823,7 +834,7 @@ static void
 bench_ext2_merge_sync(const char *label, char *filename)
 {
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	kern_return_t	kr;
 	natural_t	fid, file_size;
 	pointer_t	orig_data;
@@ -899,10 +910,10 @@ bench_ext2_merge_sync(const char *label, char *filename)
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us = total_ns / 1000;
-		unsigned long us_frac = (total_ns % 1000) / 10;
+		unsigned long long us = total_ns / 1000;
+		unsigned long long us_frac = (total_ns % 1000) / 10;
 
-		printf("  %-28s %5lu.%02lu us "
+		printf("  %-28s %5llu.%02llu us "
 		       "(%u blocks)\n",
 		       label, us, us_frac,
 		       write_total / 1024);
@@ -923,7 +934,7 @@ static void
 bench_ext2_open_close(const char *label, char *filename)
 {
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	kern_return_t	kr;
 	natural_t	fid;
 	int		i;
@@ -952,11 +963,11 @@ bench_ext2_open_close(const char *label, char *filename)
 	total_ns = delapsed_ns(&t0, &t1);
 
 	{
-		unsigned long us_per_op = (total_ns / i) / 1000;
-		unsigned long us_frac = ((total_ns / i) % 1000) / 10;
-		unsigned long total_us = total_ns / 1000;
+		unsigned long long us_per_op = (total_ns / i) / 1000;
+		unsigned long long us_frac = ((total_ns / i) % 1000) / 10;
+		unsigned long long total_us = total_ns / 1000;
 
-		printf("  %-28s %5lu.%02lu us/op  (%d iters, %lu us total)\n",
+		printf("  %-28s %5llu.%02llu us/op  (%d iters, %llu us total)\n",
 		       label, us_per_op, us_frac, i, total_us);
 	}
 }
@@ -1579,7 +1590,7 @@ test_negative_dcache(void)
 	kern_return_t	kr;
 	natural_t	fid;
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	int		i, pass = 0, fail = 0;
 	const int	ITERS = 100;
 
@@ -1619,9 +1630,9 @@ test_negative_dcache(void)
 	dget_time(&t1);
 	total_ns = delapsed_ns(&t0, &t1);
 	{
-		unsigned long us = (total_ns / ITERS) / 1000;
-		unsigned long frac = ((total_ns / ITERS) % 1000) / 10;
-		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		unsigned long long us = (total_ns / ITERS) / 1000;
+		unsigned long long frac = ((total_ns / ITERS) % 1000) / 10;
+		printf("  %-28s %5llu.%02llu us/op  (%d iters)\n",
 		       "open non-existent (neg$)", us, frac, ITERS);
 	}
 }
@@ -1855,7 +1866,7 @@ test_batch_rpc(void)
 	pointer_t	data;
 	mach_msg_type_number_t data_count;
 	tvalspec_t	t0, t1;
-	unsigned long	total_ns;
+	unsigned long long total_ns;
 	int		i, pass = 0, fail = 0;
 	const int	ITERS = 100;
 
@@ -1934,9 +1945,9 @@ test_batch_rpc(void)
 	dget_time(&t1);
 	total_ns = delapsed_ns(&t0, &t1);
 	{
-		unsigned long us = (total_ns / i) / 1000;
-		unsigned long frac = ((total_ns / i) % 1000) / 10;
-		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		unsigned long long us = (total_ns / i) / 1000;
+		unsigned long long frac = ((total_ns / i) % 1000) / 10;
+		printf("  %-28s %5llu.%02llu us/op  (%d iters)\n",
 		       "open+read+close (3 RPC)", us, frac, i);
 	}
 
@@ -1962,9 +1973,9 @@ test_batch_rpc(void)
 	dget_time(&t1);
 	total_ns = delapsed_ns(&t0, &t1);
 	{
-		unsigned long us = (total_ns / i) / 1000;
-		unsigned long frac = ((total_ns / i) % 1000) / 10;
-		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		unsigned long long us = (total_ns / i) / 1000;
+		unsigned long long frac = ((total_ns / i) % 1000) / 10;
+		printf("  %-28s %5llu.%02llu us/op  (%d iters)\n",
 		       "open_read+close (2 RPC)", us, frac, i);
 	}
 
@@ -1991,9 +2002,9 @@ test_batch_rpc(void)
 	dget_time(&t1);
 	total_ns = delapsed_ns(&t0, &t1);
 	{
-		unsigned long us = (total_ns / i) / 1000;
-		unsigned long frac = ((total_ns / i) % 1000) / 10;
-		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		unsigned long long us = (total_ns / i) / 1000;
+		unsigned long long frac = ((total_ns / i) % 1000) / 10;
+		printf("  %-28s %5llu.%02llu us/op  (%d iters)\n",
 		       "open_read+read_close (2)", us, frac, i);
 	}
 }
@@ -2007,7 +2018,7 @@ test_batch_rpc(void)
  * speedup quantifies the 16 MB cache benefit.  Reads go ipc_bench ->
  * ext_server -> page cache -> AHCI, so this exercises the real cache.
  * =================================================================== */
-static unsigned long
+static unsigned long long
 read_whole_file(natural_t fid, unsigned int file_size, unsigned int chunk,
 		int *reads_out)
 {
@@ -2041,7 +2052,7 @@ bench_cache_cold_warm(const char *filename)
 {
 	kern_return_t kr;
 	natural_t fid, file_size;
-	unsigned long cold_ns, warm_ns;
+	unsigned long long cold_ns, warm_ns;
 	int rc, rw;
 	unsigned int chunk = 64 * 1024;
 
@@ -2065,24 +2076,93 @@ bench_cache_cold_warm(const char *filename)
 	ext2_close(ext2_port, fid);
 
 	{
-		unsigned long cold_us = cold_ns / 1000;
-		unsigned long warm_us = warm_ns / 1000;
+		unsigned long long cold_us = cold_ns / 1000;
+		unsigned long long warm_us = warm_ns / 1000;
 		/* bytes/us == MB/s */
-		unsigned long cold_mbps = cold_us ? file_size / cold_us : 0;
-		unsigned long warm_mbps = warm_us ? file_size / warm_us : 0;
-		/* Use us (not ns) to avoid 32-bit overflow in the *100. */
-		unsigned long speedup_x100 =
+		unsigned long long cold_mbps = cold_us ? file_size / cold_us : 0;
+		unsigned long long warm_mbps = warm_us ? file_size / warm_us : 0;
+		unsigned long long speedup_x100 =
 			warm_us ? (cold_us * 100UL) / warm_us : 0;
 
 		printf("  cache cold/warm (%s, %u KB, chunk 64 KB):\n",
 		       filename, file_size / 1024);
-		printf("    cold (miss->AHCI)   %6lu us  %4lu MB/s  (%d reads)\n",
+		printf("    cold (miss->AHCI)   %6llu us  %4llu MB/s  (%d reads)\n",
 		       cold_us, cold_mbps, rc);
-		printf("    warm (cache hit)    %6lu us  %4lu MB/s  (%d reads)\n",
+		printf("    warm (cache hit)    %6llu us  %4llu MB/s  (%d reads)\n",
 		       warm_us, warm_mbps, rw);
-		printf("    warm speedup        %lu.%02lux\n",
+		printf("    warm speedup        %llu.%02llux\n",
 		       speedup_x100 / 100, speedup_x100 % 100);
 	}
+}
+
+/*
+ * #599: cold reads that readahead cannot serve.  A sequential cold read is
+ * filled mostly by ext2's readahead -- one copying device_read for a run of
+ * blocks -- so the page cache's own fill, the physical path on which the block
+ * server asks the kernel for every page (device_dma_map_foreign_op), carries
+ * only the first block of each run.  This reads every block of the file once,
+ * in a permutation whose step is prime and far from 1, so no read follows its
+ * neighbour and each is a miss filled on the physical path.  It is the
+ * workload that measures what the asking costs, which the block server says
+ * at powers of two of pages.  A file of its own, read by nothing else, so the
+ * reads are cold and the cold/warm numbers above are not disturbed.
+ */
+#define RAND_BLOCK	4096u
+#define RAND_STEP	1543u		/* prime: a permutation of any count it does not divide */
+
+static void
+bench_cache_random_cold(const char *filename)
+{
+	kern_return_t kr;
+	natural_t fid, file_size;
+	unsigned int nblocks, i, reads = 0, failed = 0;
+	tvalspec_t t0, t1;
+	unsigned long long us;
+
+	kr = ext2_open(ext2_port, filename, &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("  cache cold random: open(\"%s\") failed kr=%d "
+		       "(is it on the rootfs?)\n", filename, kr);
+		return;
+	}
+	kr = ext2_stat(ext2_port, fid, &file_size);
+	if (kr != KERN_SUCCESS || file_size < RAND_BLOCK) {
+		printf("  cache cold random: stat failed/empty\n");
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	nblocks = file_size / RAND_BLOCK;
+	if (nblocks % RAND_STEP == 0) {
+		printf("  cache cold random: NOT ASKED — %u blocks is a multiple "
+		       "of the step %u, not a permutation\n", nblocks, RAND_STEP);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	dget_time(&t0);
+	for (i = 0; i < nblocks; i++) {
+		unsigned int b = (unsigned int)
+			(((unsigned long long) i * RAND_STEP) % nblocks);
+		pointer_t data;
+		mach_msg_type_number_t n = 0;
+
+		kr = ext2_read(ext2_port, fid, b * RAND_BLOCK, RAND_BLOCK,
+			       &data, &n);
+		if (kr == KERN_SUCCESS && n != 0)
+			vm_deallocate(mach_task_self(), data, n);
+		if (kr != KERN_SUCCESS || n != RAND_BLOCK)
+			failed++;
+		else
+			reads++;
+	}
+	dget_time(&t1);
+	ext2_close(ext2_port, fid);
+
+	us = delapsed_ns(&t0, &t1) / 1000;
+	printf("  cache cold random (%s, %u KB, 4 KB reads, step %u): "
+	       "%llu us, %llu us a read (%u reads, %u failed)\n", filename,
+	       file_size / 1024, RAND_STEP, us,
+	       reads ? us / reads : 0ULL, reads, failed);
 }
 
 /* ===================================================================
@@ -2142,9 +2222,30 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		}
 	}
 
-	kr = netname_look_up(name_server_port, "", "ext_server", &ext2_port);
-	if (kr == KERN_SUCCESS) {
-		have_ext2 = 1;
+	/*
+	 * #599: waited for, within a minute.  It was asked once, and in a
+	 * bundle running only this suite (--bench disk) the question came
+	 * before ext_server had mounted and registered: the suite said
+	 * "skipped" for a server that was still starting, and the 4 MB
+	 * bench.dat that --bench puts on the disk was never read.
+	 */
+	{
+		int waited;
+
+		for (waited = 0; waited < 600; waited++) {
+			kr = netname_look_up(name_server_port, "", "ext_server",
+					     &ext2_port);
+			if (kr == KERN_SUCCESS)
+				break;
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, 100);
+		}
+		if (kr == KERN_SUCCESS) {
+			have_ext2 = 1;
+			if (waited > 0)
+				printf("  ext_server: registered after %d ms "
+				       "of waiting\n", waited * 100);
+		}
 	}
 
 	if (!have_ahci && !have_ext2) {
@@ -2224,6 +2325,7 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		 * baseline (no eviction), 12 MB exercises the 16 MB cache. */
 		bench_cache_cold_warm("bench_4m.dat");
 		bench_cache_cold_warm("bench_large.dat");
+		bench_cache_random_cold("bench_rand.dat");	/* #599 */
 	}
 
 	if (have_ahci && have_ext2) {

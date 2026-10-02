@@ -169,6 +169,7 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
  */
 static kern_return_t
 cap_check_locked(const struct uros_cap *t,
+                 uint32_t resource_type,
                  uint32_t op,
                  uint64_t resource_id)
 {
@@ -176,6 +177,16 @@ cap_check_locked(const struct uros_cap *t,
         return CAP_ERR_INTERNAL;
     if (!cap_hmac_check(t))
         return CAP_ERR_INVALID_TOKEN;
+    /*
+     * #599: and the KIND of resource the token names, for every caller --
+     * the kernel's own and the two traps.  None compared it, so a token for
+     * one kind was accepted for another whose ids matched: a block-device
+     * capability carrying somebody's DMA region id passed
+     * device_dma_map_foreign.  The type is under the MAC, so once that
+     * verifies the field is the issuer's.
+     */
+    if (t->resource_type != resource_type)
+        return CAP_ERR_RESOURCE_MISMATCH;
     if (t->resource_id != resource_id)
         return CAP_ERR_RESOURCE_MISMATCH;
     if ((t->allowed_ops & (uint64_t)op) != (uint64_t)op)
@@ -219,19 +230,70 @@ cap_init(void)
  */
 kern_return_t
 cap_check_in_kernel(const struct uros_cap *token,
+                    uint32_t resource_type,
                     uint32_t op,
                     uint64_t resource_id)
 {
     kern_return_t kr;
 
     simple_lock(&cap_lock);
-    kr = cap_check_locked(token, op, resource_id);
+    kr = cap_check_locked(token, resource_type, op, resource_id);
     simple_unlock(&cap_lock);
     return kr;
 }
 
+boolean_t
+cap_id_revoked(uint64_t cap_id)
+{
+    struct cap_state_entry *e;
+    boolean_t               revoked;
+
+    simple_lock(&cap_lock);
+    e = cap_state_lookup(cap_id);
+    revoked = (e != NULL && (e->flags & CAP_FLAG_REVOKED)) ? TRUE : FALSE;
+    simple_unlock(&cap_lock);
+    return revoked;
+}
+
+/*
+ * #599: the type check above, asked once the key exists.  A token signed
+ * here for a PCI class must answer as PCI and must not answer as a DMA buffer
+ * with the same id.  cap_id ~0 is one cap_server never issues, so no
+ * revocation entry can shadow it.  One line either way, with both answers.
+ */
+static void
+cap_type_selftest(void)
+{
+    struct uros_cap t;
+    kern_return_t   as_pci, as_dma;
+
+    bzero((char *)&t, sizeof(t));
+    t.cap_id = ~0ULL;
+    t.resource_type = RESOURCE_PCI_DEVICE;
+    t.resource_id = 0x010601;
+    t.allowed_ops = 0x3;
+    simple_lock(&cap_lock);
+    hmac_sha256(cap_hmac_key, CAP_HMAC_SIZE, &t,
+                sizeof(t) - CAP_HMAC_SIZE, t.hmac);
+    simple_unlock(&cap_lock);
+
+    as_pci = cap_check_in_kernel(&t, RESOURCE_PCI_DEVICE, 0x1, 0x010601);
+    as_dma = cap_check_in_kernel(&t, RESOURCE_DMA_BUFFER, 0x1, 0x010601);
+    bzero((char *)&t, sizeof(t));	/* a signed token does not linger */
+
+    if (as_pci == KERN_SUCCESS && as_dma == CAP_ERR_RESOURCE_MISMATCH)
+        printf("cap: a capability answers for the kind it names — a PCI "
+               "token checked as PCI gives %d, as a DMA buffer with the same "
+               "id %d (#599)\n", as_pci, as_dma);
+    else
+        printf("cap: WRONG — a PCI token checked as PCI gives %d and as a "
+               "DMA buffer with the same id %d; the kind is not what is "
+               "checked (#599)\n", as_pci, as_dma);
+}
+
 kern_return_t
 urmach_cap_verify(const struct uros_cap *user_token,
+                  uint32_t resource_type,
                   uint32_t op,
                   uint64_t resource_id)
 {
@@ -241,13 +303,14 @@ urmach_cap_verify(const struct uros_cap *user_token,
         return kr;
 
     simple_lock(&cap_lock);
-    kr = cap_check_locked(&t, op, resource_id);
+    kr = cap_check_locked(&t, resource_type, op, resource_id);
     simple_unlock(&cap_lock);
     return kr;
 }
 
 kern_return_t
 urmach_cap_use(const struct uros_cap *user_token,
+               uint32_t resource_type,
                uint32_t op,
                uint64_t resource_id)
 {
@@ -257,7 +320,7 @@ urmach_cap_use(const struct uros_cap *user_token,
         return kr;
 
     simple_lock(&cap_lock);
-    kr = cap_check_locked(&t, op, resource_id);
+    kr = cap_check_locked(&t, resource_type, op, resource_id);
     if (kr != KERN_SUCCESS) {
         simple_unlock(&cap_lock);
         return kr;
@@ -351,6 +414,7 @@ urmach_cap_register(const struct uros_cap *user_token)
         simple_unlock(&cap_lock);
         printf("cap: hmac key registered (len=%u)\n",
                (unsigned)CAP_HMAC_SIZE);
+        cap_type_selftest();			/* #599 */
         return KERN_SUCCESS;
     }
 

@@ -573,6 +573,36 @@ search_directory(
 		return (rc);
 
 	    dp = (struct dirent *)buf;
+
+	    /*
+	     * #599: the record is checked before it is trusted, as ext2's
+	     * walks now are.  This advanced by d_reclen with no check, so a
+	     * zero held the server for ever, and the terminator below was
+	     * written wherever d_namlen pointed, inside the cached block or
+	     * past it.  A record lives inside its DIRBLKSIZ chunk: room for a
+	     * header, a length that is at least the smallest record, a multiple
+	     * of four and inside the chunk, a name (with its terminator) inside
+	     * the record, an inode number the filesystem has.
+	     */
+	    {
+		const vm_size_t hdr = sizeof(struct dirent) - 256;
+		vm_size_t room = DIRBLKSIZ - (offset % DIRBLKSIZ);
+
+		if (room > buf_size)
+		    room = buf_size;
+		if (room < hdr + 4 ||
+		    dp->d_reclen < hdr + 4 ||
+		    (dp->d_reclen & 3) != 0 ||
+		    dp->d_reclen > room ||
+		    DIRSIZ(dp) > dp->d_reclen ||
+		    dp->d_ino >= (ino_t)(fp->f_fs->fs_ipg * fp->f_fs->fs_ncg)) {
+		    printf("ufs: directory offset %lu: a damaged record "
+			   "(room %lu) — refused\n",
+			   (unsigned long)offset, (unsigned long)room);
+		    return (FS_CORRUPT);
+		}
+	    }
+
 	    if (dp->d_fileno != 0) {
 		dp->d_name[dp->d_namlen] = 0;
 		if (dp->d_namlen == length &&

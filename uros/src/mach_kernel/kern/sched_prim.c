@@ -638,11 +638,46 @@ thread_go(thread_t thread)
  *		Assert that the thread intends to block.
  */
 
+#if	MACHINE_PREEMPTION_LEVEL
+/*
+ * #599: assert_wait()'s rule (#490, #558), kept by its two siblings too: no
+ * instant at which this thread is TH_WAIT, the preemption level is zero AND
+ * the interrupt level is spllo -- the conditions under which a kernel-mode
+ * return takes an AST (trap_take_ast).
+ *
+ * The IPC paths declare their wait with thread_will_wait*() under the port's
+ * or the mqueue's lock -- a mutex -- and unlock after it.  A preemption between
+ * the TH_WAIT store and the unlock puts the thread to sleep holding that lock,
+ * and the thread that would have woken it waits on the lock for ever.  Caught
+ * live on an entry-16 boot at -smp 1 (599-caccia2-2-gdb.txt): bootstrap in
+ * ipc_mqueue_deliver -> _mutex_lock, asleep on the mqueue's mutex; the
+ * receiver asleep in ipc_mqueue_receive -> thread_will_wait -> splx ->
+ * ast_taken -> thread_block, holding it.  The IOMMU fault reporter's timed
+ * wakeups made the window easier to land in; they did not open it.
+ *
+ * Given back where the window ends: assert_wait_preempt_release() in
+ * thread_block_reason(), and in thread_run() for thread_switch's hand-off.
+ */
+static void
+will_wait_preempt_raise(thread_t thread)
+{
+	assert(thread == current_thread());
+	/* A wait inside a wait: see __assert_wait(), once per window. */
+	if (thread->wait_preempt)
+		return;
+	disable_preemption();
+	thread->wait_preempt = TRUE;
+}
+#endif	/* MACHINE_PREEMPTION_LEVEL */
+
 void
 thread_will_wait(thread_t thread)
 {
 	int	s;
 
+#if	MACHINE_PREEMPTION_LEVEL
+	will_wait_preempt_raise(thread);	/* #599: before TH_WAIT */
+#endif
 	s = splsched();
 	thread_lock(thread);
 
@@ -666,6 +701,9 @@ thread_will_wait_with_timeout(thread_t thread, mach_msg_timeout_t msecs)
 	unsigned int ticks = convert_ipc_timeout_to_ticks(msecs);
 	int s;
 
+#if	MACHINE_PREEMPTION_LEVEL
+	will_wait_preempt_raise(thread);	/* #599: before TH_WAIT */
+#endif
 	s = splsched();
 	thread_lock(thread);
 
@@ -770,12 +808,23 @@ __assert_wait(
 	 * the sleeper still held and its own waker was queued on.
 	 *
 	 * ⚠️ So the rule is about the STATE, not about any one way an interrupt
-	 * can arrive: no instant may exist at which this thread is TH_WAIT and
-	 * the level is zero.  Raising before the store makes that true however
-	 * the spin locks and splx() below behave.
+	 * can arrive: no instant may exist at which this thread is TH_WAIT, the
+	 * level is zero and the spl is spllo.  Raising before the store makes
+	 * that true however the spin locks and splx() below behave.  (The level
+	 * is given back at splsched in thread_block_reason() and thread_run(),
+	 * and reaches zero before thread_invoke() raises it again: there the
+	 * spl half of the rule is what holds -- #599.)
+	 *
+	 * #599: once per window.  A thread that has declared a wait and then
+	 * sleeps on a lock declares a second one inside it, and a second raise
+	 * would be given back once -- the block that ends both windows releases
+	 * one -- leaving this processor a level for good.  The one raise
+	 * already taken covers the inner window too.
 	 */
-	disable_preemption();
-	thread->wait_preempt = TRUE;
+	if (!thread->wait_preempt) {
+		disable_preemption();
+		thread->wait_preempt = TRUE;
+	}
 #endif	/* MACHINE_PREEMPTION_LEVEL */
 
 	s = splsched();
@@ -815,7 +864,7 @@ __assert_wait(
 #if	MACHINE_PREEMPTION_LEVEL
 /*
  * Give back what the assert above took.  See <kern/sched_prim.h> for why this
- * is one function called from both ways out of the window rather than a rule.
+ * is one function called from every way out of the window rather than a rule.
  */
 void
 assert_wait_preempt_release(thread_t thread)
@@ -834,11 +883,13 @@ assert_wait_preempt_release(thread_t thread)
 	thread->wait_preempt = FALSE;
 
 	/*
-	 * ⚠️ _no_check, deliberately.  The two callers are both about to do
-	 * their own AST work -- thread_block_reason() is on its way into the
-	 * scheduler and clear_wait()'s caller returns through a trap -- so
-	 * taking one here would be taking it in the middle of somebody's
-	 * critical section for no gain.  Whether the checking form should act
+	 * ⚠️ _no_check, deliberately.  thread_block_reason(), thread_run() and
+	 * the futex hand-off are on their way into the scheduler, and a thread
+	 * that clears its own wait usually returns through a trap soon after,
+	 * so taking one here would be taking it in the middle of somebody's
+	 * critical section for no gain.  A kernel thread that clears its own
+	 * wait and goes on (irq_forward_thread) leaves a pending AST for the
+	 * next return at spllo -- a delay, not a loss.  Whether the checking form should act
 	 * on an urgent AST at all is #462, and it is not this window.
 	 */
 	enable_preemption_no_check();
@@ -992,6 +1043,72 @@ thread_stop_wait( thread_t thread )
 	return (FALSE);
 }
 
+/*
+ *	wake_dequeued:
+ *
+ *	What every wakeup does to a thread once it is off its wait queue: the
+ *	state change, and then the run queue -- or the swapin thread, for a
+ *	thread whose kernel stack the thread swapper has unwired.  Called at
+ *	splsched with the thread locked.  Answers FALSE when the thread was not
+ *	waiting at all, which its two callers judge differently: a wakeup that
+ *	dequeued it calls that impossible, an abort calls it nothing to do.
+ *
+ *	🔑 ONE COPY (#607).  thread_wakeup_prim() and clear_wait_locked() each
+ *	carried this switch, case for case, and the futex hand-off carried a third
+ *	that had drifted from both -- see thread_handoff_to_parked_waiter().
+ */
+static __inline__ boolean_t
+wake_dequeued(
+	register thread_t	thread,
+	int			result)
+{
+	register int	state = thread->state;
+
+	switch (state & TH_SCHED_STATE) {
+	    case	  TH_WAIT | TH_SUSP | TH_UNINT:
+	    case	  TH_WAIT           | TH_UNINT:
+	    case	  TH_WAIT:
+		/*
+		 *	Sleeping and not suspendable - put
+		 *	on run queue.
+		 */
+		thread->state = (state &~ TH_WAIT) | TH_RUN;
+		thread->wait_result = result;
+		/***** this test should not BE HERE
+		if (result != THREAD_INTERRUPTED)
+		 *****/
+			thread->at_safe_point = NOT_AT_SAFE_POINT;
+#if	THREAD_SWAPPER
+		if (thread->state & TH_SWAPPED_OUT)
+			thread_swapin(thread->top_act, FALSE);
+		else
+#endif	/* THREAD_SWAPPER */
+			thread_setrun(thread, TRUE, TAIL_Q);
+		return TRUE;
+
+	    case	  TH_WAIT | TH_SUSP :
+	    case TH_RUN | TH_WAIT | TH_SUSP | TH_UNINT:
+	    case TH_RUN | TH_WAIT	    | TH_UNINT:
+	    case TH_RUN | TH_WAIT | TH_SUSP:
+	    case TH_RUN | TH_WAIT:
+		/*
+		 *	Either already running, or suspended.
+		 */
+		thread->state = state &~ TH_WAIT;
+		thread->wait_result = result;
+		/***** this test should not BE HERE
+		if (result != THREAD_INTERRUPTED)
+		 *****/
+			thread->at_safe_point = NOT_AT_SAFE_POINT;
+		return TRUE;
+
+	    default:
+		/*
+		 *	Not waiting.
+		 */
+		return FALSE;
+	}
+}
 
 /*
  *	clear_wait_locked:
@@ -1033,6 +1150,22 @@ clear_wait_locked(
 	** woken the thread.  We can just unlock and return.
 	*/
 
+	/*
+	 * #599: a thread clearing its OWN wait while a waker on another
+	 * processor is between taking it off the hash and waking it.  Returning
+	 * then left wait_event at WAKING_EVENT for the caller to carry on with:
+	 * irq_forward_thread cancelled its wait that way, took a mutex, and
+	 * mutex_lock_assert_safe() stopped a four-processor boot
+	 * (599-g2-x64char-smp4).  So the waker is let finish -- it needs only
+	 * this thread's lock -- and the clear goes on from what it left.  Not
+	 * seen on one processor: the waker there runs both halves at splsched.
+	 */
+	while (event == (event_t)WAKING_EVENT && thread == current_thread()) {
+		thread_unlock(thread);
+		__asm__ __volatile__("pause" : : : "memory");
+		thread_lock(thread);
+		event = thread->wait_event;
+	}
 	if (event == (event_t)WAKING_EVENT) {
 		return;
 	}
@@ -1058,54 +1191,8 @@ clear_wait_locked(
 		simple_unlock(lock);
 	}
 	if (event == NO_EVENT) {
-		register int	state = thread->state;
-
 		reset_timeout_check(&thread->timer);
-
-		switch (state & TH_SCHED_STATE) {
-		    case	  TH_WAIT | TH_SUSP | TH_UNINT:
-		    case	  TH_WAIT           | TH_UNINT:
-		    case	  TH_WAIT:
-			/*
-			 *	Sleeping and not suspendable - put
-			 *	on run queue.
-			 */
-			thread->state = (state &~ TH_WAIT) | TH_RUN;
-			thread->wait_result = result;
-			/***** this test should not BE HERE
-			if (result != THREAD_INTERRUPTED)
-			 *****/
-				thread->at_safe_point = NOT_AT_SAFE_POINT;
-#if	THREAD_SWAPPER
-			if (thread->state & TH_SWAPPED_OUT)
-				thread_swapin(thread->top_act, FALSE);
-			else
-#endif	/* THREAD_SWAPPER */
-				thread_setrun(thread, TRUE, TAIL_Q);
-			break;
-
-		    case	  TH_WAIT | TH_SUSP :
-		    case TH_RUN | TH_WAIT | TH_SUSP | TH_UNINT:
-		    case TH_RUN | TH_WAIT	    | TH_UNINT:
-		    case TH_RUN | TH_WAIT | TH_SUSP:
-		    case TH_RUN | TH_WAIT:
-			/*
-			 *	Either already running, or suspended.
-			 */
-			thread->state = state &~ TH_WAIT;
-			thread->wait_result = result;
-			/***** this test should not BE HERE
-			if (result != THREAD_INTERRUPTED)
-			 *****/
-				thread->at_safe_point = NOT_AT_SAFE_POINT;
-			break;
-
-		    default:
-			/*
-			 *	Not waiting.
-			 */
-			break;
-		}
+		(void) wake_dequeued(thread, result);
 	}
 }
 
@@ -1135,7 +1222,6 @@ thread_wakeup_prim(
 	register int		index;
 	register thread_t	thread, next_th;
 	register simple_lock_t	lock;
-	register int		state;
 	queue_head_t		wake_queue;
 	spl_t			s;
 
@@ -1184,55 +1270,32 @@ thread_wakeup_prim(
 #endif
 
 		reset_timeout_check(&thread->timer);
-		state = thread->state;
-		switch (state & TH_SCHED_STATE) {
-
-			    case          TH_WAIT | TH_SUSP | TH_UNINT:
-			    case	  TH_WAIT	    | TH_UNINT:
-			    case	  TH_WAIT:
-				/*
-				 *	Sleeping and not suspendable - put
-				 *	on run queue.
-				 */
-				thread->state = (state &~ TH_WAIT) | TH_RUN;
-				thread->wait_result = result;
-				/***** this test should not BE HERE
-				if (result != THREAD_INTERRUPTED)
-				 *****/
-				    thread->at_safe_point = NOT_AT_SAFE_POINT;
-#if	THREAD_SWAPPER
-				if (thread->state & TH_SWAPPED_OUT)
-					thread_swapin(thread->top_act, FALSE);
-				else
-#endif	/* THREAD_SWAPPER */
-					thread_setrun(thread, TRUE, TAIL_Q);
-				break;
-
-			    case TH_RUN | TH_WAIT | TH_SUSP | TH_UNINT:
-			    case TH_RUN | TH_WAIT | TH_SUSP:
-			    case	  TH_WAIT | TH_SUSP:
-			    case TH_RUN | TH_WAIT:
-			    case TH_RUN | TH_WAIT	    | TH_UNINT:
-				/*
-				 *	Either already running, or suspended.
-				 */
-				thread->state = state &~ TH_WAIT;
-				thread->wait_result = result;
-				/***** this test should not BE HERE
-				if (result != THREAD_INTERRUPTED)
-				 *****/
-				    thread->at_safe_point = NOT_AT_SAFE_POINT;
-				break;
-
-			default:
-				panic("thread_wakeup");
-				break;
-		}
+		if (!wake_dequeued(thread, result))
+			panic("thread_wakeup");
 		thread->wait_event = NO_EVENT;
 		thread_unlock(thread);
 	}
 	splx(s);
 }
+
+/*
+ * #607's two ablations, each the half of the old hand-off that its test arm
+ * (-Q) must catch: a swapped-out waiter counted as parked, and the old wake
+ * that left a stopped waiter TH_RUN on no run queue.
+ */
+#ifndef	ABLATE_607_SWAPPED_PARKED
+#define	ABLATE_607_SWAPPED_PARKED	0
+#endif
+#ifndef	ABLATE_607_OLD_WAKE
+#define	ABLATE_607_OLD_WAKE		0
+#endif
+
+/*
+ * Waiters the hand-off declined because they were swapped out, which -O
+ * prints: the evidence that the case #607 is about happened.  Counted under
+ * the victim's lock but not atomically, so a figure, not a census.
+ */
+unsigned int	handoff_declined_swapped;
 
 /*
  *	thread_handoff_to_parked_waiter:
@@ -1298,42 +1361,84 @@ thread_handoff_to_parked_waiter(
 	thread_lock(victim);
 	reset_timeout_check(&victim->timer);
 	victim->wait_event = NO_EVENT;
-	victim->wait_result = THREAD_AWAKENED;
-	victim->at_safe_point = NOT_AT_SAFE_POINT;
 
-	/* Snapshot the scheduling state BEFORE we stamp TH_RUN below: the
-	 * not-parked path must know whether the victim was already running. */
+	/*
+	 * Parked == TH_WAIT and nothing else: not running, not stopped, not
+	 * uninterruptible -- and not swapped out.
+	 *
+	 * 🔴 TH_SWAPPED_OUT IS NOT A SCHEDULING STATE (#607), so a mask built
+	 * from those did not name it, and a waiter the thread swapper had
+	 * swapped out counted as parked.  thread_invoke() then switched onto
+	 * it: onto a kernel stack thread_swapout() had unwired and the pageout
+	 * daemon may already have taken, with the thread still marked out.
+	 * Every other wakeup swaps such a thread in first, and now so does
+	 * this one, through wake_dequeued() below.
+	 */
 	ostate = victim->state;
-
-	/* Parked == TH_WAIT and nothing else (not running, suspended, etc.). */
-	parked = ((ostate & (TH_WAIT|TH_SUSP|TH_RUN|TH_UNINT)) == TH_WAIT);
-	victim->state = (ostate &~ TH_WAIT) | TH_RUN;
+	parked = ((ostate & (TH_SCHED_STATE |
+			     (ABLATE_607_SWAPPED_PARKED ? 0 : TH_SWAPPED_OUT)))
+		  == TH_WAIT);
 
 	if (!parked) {
+		if ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT))
+		    == (TH_WAIT | TH_SWAPPED_OUT))
+			handoff_declined_swapped++;
+
 		/*
-		 * Victim is not cleanly parked.  Mirror clear_wait_internal():
-		 * only a thread that is genuinely blocked (neither TH_RUN nor
-		 * TH_SUSP set) may be handed to thread_setrun().  If the victim
-		 * still has TH_RUN -- i.e. it is executing its own
-		 * assert_wait()->thread_block() window on another CPU -- calling
-		 * thread_setrun() here would dispatch a thread that is still
-		 * running, executing it on two CPUs at once (#360: the futex
-		 * ping-pong avalanched a single waiter onto up to 6 CPUs).
-		 * Clearing TH_WAIT above is sufficient: when the still-running
-		 * victim reaches thread_block() it sees itself runnable (TH_RUN,
-		 * no TH_WAIT) and simply does not block.
+		 * Not cleanly parked: wake it the way every other wakeup does,
+		 * and let the caller block normally.
+		 *
+		 * 🔴 THIS WAS A COPY OF THAT, AND THE COPY HAD DRIFTED (#607).  It
+		 * set TH_RUN on every victim, then put on a run queue only one
+		 * that had been neither running nor stopped -- so a STOPPED
+		 * waiter (thread_stop(), TH_WAIT|TH_SUSP) was left TH_RUN on no
+		 * run queue.  thread_unstop(), finding TH_RUN, only cleared
+		 * TH_SUSP, and the thread never ran again.  wake_dequeued() leaves
+		 * a stopped waiter TH_SUSP alone, which is what thread_unstop()
+		 * restarts -- the meaning TH_SUSP has above thread_stop().
+		 *
+		 * ⚠️ A victim still inside its own assert_wait()->thread_block()
+		 * window on another processor is TH_RUN|TH_WAIT, and only loses
+		 * TH_WAIT here: when it reaches thread_block() it sees itself
+		 * runnable and does not block.  Never thread_setrun() a thread
+		 * that is running -- #360's futex ping-pong ran one waiter on up
+		 * to six processors at once.
 		 */
+#if	ABLATE_607_OLD_WAKE
+		victim->wait_result = THREAD_AWAKENED;
+		victim->at_safe_point = NOT_AT_SAFE_POINT;
+		victim->state = (ostate &~ TH_WAIT) | TH_RUN;
 		if ((ostate & (TH_RUN | TH_SUSP)) == 0)
 			thread_setrun(victim, TRUE, TAIL_Q);
+#else
+		/* Dequeued off the wait hash, so it must have been waiting. */
+		if (!wake_dequeued(victim, THREAD_AWAKENED))
+			panic("thread_handoff_to_parked_waiter");
+#endif
 		thread_unlock(victim);
 		splx(s);
 		return FALSE;
 	}
+
+	victim->state = (ostate &~ TH_WAIT) | TH_RUN;
+	victim->wait_result = THREAD_AWAKENED;
+	victim->at_safe_point = NOT_AT_SAFE_POINT;
 	thread_unlock(victim);
 
 	/* Direct switch.  self (already TH_WAIT via the caller's assert_wait)
 	 * is disposed -- and so parked -- by the victim's own post-switch
 	 * thread_dispatch(); self resumes here when it is later woken. */
+#if	MACHINE_PREEMPTION_LEVEL
+	/*
+	 * #599: one of the ways out of assert_wait()'s window, beside
+	 * thread_block_reason(), thread_run() and clear_wait(): what the caller's
+	 * assert_wait() raised is given back here, at splsched, or this
+	 * processor keeps it and self leaves owing it.
+	 */
+	mp_disable_preemption();
+	assert_wait_preempt_release(self);
+	mp_enable_preemption();
+#endif
 	thread_invoke(self, victim, 0);
 
 	splx(s);
@@ -1926,12 +2031,16 @@ thread_block_reason(
 	mp_disable_preemption();
 
 	/*
-	 * 🔑 AFTER this function's own raise and not before, so the level never
-	 * passes through zero on the way (#490).  What assert_wait() took is
-	 * given back here because the window it was protecting ends exactly
-	 * here: from this point the thread is committed to the scheduler, which
-	 * is where being taken off the processor is the intended outcome rather
-	 * than the defect.
+	 * 🔑 AT splsched (#490).  What assert_wait() took is given back here
+	 * because the window it was protecting ends exactly here: from this
+	 * point the thread is committed to the scheduler, which is where being
+	 * taken off the processor is the intended outcome rather than the
+	 * defect.  #599: the level does reach zero before thread_invoke()
+	 * raises it again -- mp_enable_preemption() below -- and what keeps an
+	 * AST out of that stretch is the spl: trap_take_ast refuses a kernel-
+	 * mode AST when the interrupt level is not spllo.  On x86-64 the spl
+	 * is a software level and interrupts still arrive at splsched; only the
+	 * AST is refused.
 	 *
 	 * ⚠️ Unconditional, and it is a no-op for a thread that declared no
 	 * wait -- thread_block() is called by plenty that did not.
@@ -2097,6 +2206,22 @@ thread_run(
 #endif	/* MACH_ASSERT */
 
 	s = splsched();
+#if	MACHINE_PREEMPTION_LEVEL
+	/*
+	 * #599: as in thread_block_reason(), the wait window ends here, at
+	 * splsched(): the level does reach zero with TH_WAIT set before
+	 * thread_invoke() raises it again, and what keeps an AST out of that
+	 * stretch is the spl -- trap_take_ast refuses a kernel-mode AST when
+	 * the interrupt level is not spllo; interrupts themselves still arrive
+	 * on x86-64 -- as it is in thread_block_reason().  It used to be given
+	 * back before splsched, where a return could take the AST.  Only
+	 * thread_switch(SWITCH_OPTION_WAIT) with a hand-off hint reaches this
+	 * with a wait declared; a no-op for everyone else.
+	 */
+	mp_disable_preemption();
+	assert_wait_preempt_release(thread);
+	mp_enable_preemption();
+#endif
 	thread_lock(thread);
 	/* Apply same sentinel detection as thread_block_reason */
 	if ((vm_offset_t)continuation >= (vm_offset_t)-SAFE_POINT_SENTINEL_MAX) {

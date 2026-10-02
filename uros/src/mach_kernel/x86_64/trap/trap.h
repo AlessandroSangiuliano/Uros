@@ -517,6 +517,13 @@ extern char trap_probe_faulted[];
 void	x86_64_backtrace(uint64_t rbp);
 
 /*
+ * The same, with first() called before it inside the same hold of the
+ * backtrace lock (#599): what halt_cpu() says on the panic path goes out
+ * whole, and not through the other processors' backtraces.
+ */
+void	x86_64_backtrace_after(uint64_t rbp, void (*first)(void));
+
+/*
  * The same walk, answered rather than printed, so a backtrace can be CHECKED
  * (#409).
  *

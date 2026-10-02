@@ -51,6 +51,7 @@
 #if	NCPUS > 1
 #include <i386/lapic.h>
 #include <i386/apic.h>
+#include <i386/clock_watch.h>
 #endif	/* NCPUS > 1 */
 
 extern void cnputc(char);
@@ -112,6 +113,14 @@ int nmi_watchdog_enabled __attribute__((section(".data"))) = 0;
  * config.
  */
 volatile int ddb_nmi_park = 0;
+
+/*
+ * #599: how many processors are in the park spin below.  kdb_trap waits for
+ * all of them before DDB touches COM1's register bank, and puts the bank back
+ * before letting them go: a processor parked in the middle of a divisor
+ * sequence must find LCR as it left it.
+ */
+volatile int ddb_nmi_parked = 0;
 
 #if	NCPUS > 1
 
@@ -235,13 +244,24 @@ nmi_watchdog(struct i386_saved_state *regs)
 
 		__sync_fetch_and_or(&cpus_idle, me);
 		__sync_fetch_and_and(&cpus_active, ~me);
+		__sync_fetch_and_add(&ddb_nmi_parked, 1);
 		while (ddb_nmi_park)
 			__asm__ __volatile__("pause" : : : "memory");
+		__sync_fetch_and_sub(&ddb_nmi_parked, 1);
 		__sync_fetch_and_and(&cpus_idle, ~me);
 		pmap_tlb_shootdown_handler();
 		__sync_fetch_and_or(&cpus_active, me);
 		return;
 	}
+
+	/*
+	 * #599: an application processor saw processor 0's tick stop and sent
+	 * this to ask where processor 0 is.  Before the DDB door below, which
+	 * would otherwise take it for an NMI button with -K armed, and before
+	 * the -W watchdog, which would count it as one of its own.
+	 */
+	if (clock_watch_nmi(regs))
+		return;
 
 	/*
 	 * #382: emergency DDB door.  With -K armed but the perf-counter

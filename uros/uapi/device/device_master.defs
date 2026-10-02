@@ -227,9 +227,14 @@ routine device_intr_enable(
  * Declare that this device must be programmed with PHYSICAL addresses, so its
  * domain maps every grant at the address the memory is really at.
  *
- * 🔴 THIS IS NOT AN OPT-OUT OF ISOLATION.  The device is still confined: it
- * reaches what it has been granted and nothing else, and every other address
- * in the machine faults for it.  What it gives up is the second property #432
+ * 🔴 THIS IS NOT AN OPT-OUT OF ISOLATION -- where the device's DMA goes
+ * through the IOMMU.  There the device is still confined: it reaches what it
+ * has been granted and nothing else, and every other address in the machine
+ * faults for it.  #599: a device whose DMA bypasses the engine is confined by
+ * nothing, and QEMU's legacy virtio is one -- a page never granted to it
+ * received a disk block with translation on (428001fc).  The kernel cannot
+ * tell the two cases apart, and its line when this is called says so.  What
+ * it gives up is the second property #432
  * stage 3e added -- not knowing where its memory is.  Confinement stops a
  * device reaching elsewhere by accident; the IOVA stops it doing so on
  * purpose, and this keeps the first and loses the second.
@@ -482,52 +487,13 @@ routine device_ddb_break(
  * it, which is what the caller is asking.
  */
 /*
- * ── The server that owns the device does the mapping (#432) ──────────
- *
- * Make one page of a DMA buffer somebody ELSE allocated reachable by MY
- * device, and answer the address to program.
- *
- * 🔴 THIS IS THE `DEVICE_DMA_NO_BDF' HOLE CLOSED.  ext_server allocates
- * scatter-gather pages that the block server's disk reads, and names no device
- * because it owns none -- so once that disk is confined the pages are in
- * nobody's domain and every transfer into them is refused.  Correct,
- * diagnosable, and useless.  The shape this issue asks for is that the server
- * which owns the device maps them, and this is that call.
- *
- * 🔑 AND THE CALLER MUST PRESENT A CAPABILITY FOR THE BUFFER, which is what
- * makes this a delegation rather than an assertion.  `paddr' must belong to a
- * live region this kernel allocated, AND `token' must be a capability naming
- * that region -- issued by cap_server to the region's OWNER, who gave it away
- * on purpose.
- *
- * ⚠️ The address check alone was not enough and the difference is the point.
- * It narrowed "any physical page" to "any page the kernel allocated for DMA",
- * which is still every other server's buffers: a driver could put a
- * filesystem's page cache inside its device's reach without the filesystem
- * ever having offered it.  The capability is what turns "I know where it is"
- * into "somebody gave it to me".
- *
- * 🔑 And the WHOLE REGION is mapped on the first page of it, at consecutive
- * addresses.  So the caller asks per page and pays once: after the first
- * answer the rest are arithmetic, the kernel's record of the grant is one
- * entry rather than a thousand, and the region is revoked in one step when its
- * owner frees it.
- *
- * ⚠️ Only the task that drives `bdf' may call this — a device has one driver.
- *
- * ⚠️ It narrows and does not close.  Any holder of the master port can map any
- * page the kernel allocated for DMA: not any page in the machine, which is
- * where this started, but not only the ones somebody handed it either.  The
- * difference is a capability naming the BUFFER, which is the design cap_server
- * still owes this issue.
+ * Retired (#599): device_dma_map_foreign.  It mapped whatever region the page
+ * was in, checked no direction per request, and was tried by the block server
+ * with every capability any client of a controller had handed over.  Its
+ * successor, device_dma_map_foreign_op, is at the end of this file.  The
+ * number stays taken, so that no routine after it moves.
  */
-routine device_dma_map_foreign(
-		master_port	: mach_port_t;
-	in	bdf		: natural_t;
-	in	paddr		: vm_address_t;
-	in	token		: cap_token_t;
-	out	dma_addr	: vm_address_t
-	);
+skip;	/* was device_dma_map_foreign */
 
 /*
  * ── Claim a device, by presenting a capability for its KIND (#432) ───
@@ -587,12 +553,31 @@ routine device_dma_owned(
 	out	by_other	: natural_t
 	);
 
+/*
+ * #599: what the kernel knows of a device's refusals.  `count' is the
+ * refusals recorded since boot, `address' the last refused, `lost' how many
+ * times refusals may have gone uncounted (an engine said it dropped some, the
+ * kernel saw that it may have -- a full or filling log, an entry never
+ * written, a log that had stopped -- or a device could not be named), `undrained' how many of `count' this very call
+ * had to read out of the engines.  The counts wrap modulo 2^32: compare with
+ * !=.  A bdf above 0xFFFF is not a device: KERN_INVALID_ARGUMENT.
+ *
+ * Between two calls, on a confined device:
+ *   count moved                   -> REFUSED;
+ *   otherwise, lost moved         -> UNKNOWN;
+ *   otherwise                     -> NOT REFUSED.
+ *
+ * Grown in place, keeping its id: a client built before it fails loudly
+ * (MIG_TYPE_ERROR or MACH_RCV_TOO_LARGE), and ahci is its one caller.
+ */
 routine device_dma_faults(
 		master_port	: mach_port_t;
 	in	bdf		: natural_t;
 	out	confined	: natural_t;
 	out	count		: natural_t;
-	out	address		: vm_address_t
+	out	address		: vm_address_t;
+	out	lost		: natural_t;
+	out	undrained	: natural_t
 	);
 
 /*
@@ -736,16 +721,19 @@ routine device_io_port_claim(
  */
 
 /*
- * `console_released' is 1 when the kernel's own console gave up a port in
- * this range because of the claim, 0 when it did not -- and 0 is an honest
- * answer, not a failure.  On x86-64 a claim covering COM1 makes the console
- * step back; on i386 it does not (com.c writes the chip with its own `outb'
- * and #544 is where that changes).  A driver that gets 0 still owns the range
- * against every other TASK, but it shares the wire with the kernel, and it
- * must behave like a sharer: keep its lines tight, and forward nothing the
- * kernel is already sending itself.  Making the driver guess this from the
- * target it was compiled for would be a build expression answering a runtime
- * question.
+ * `console_released' is 1 when the kernel's own user of a port in this range
+ * stepped back because of the claim, 0 when it did not -- and 0 is an honest
+ * answer, not a failure.  Which user depends on the range and the target
+ * (#599): on x86-64 a claim covering COM1 makes the console step back, and
+ * `klog_from' then says where its log continues; on i386 a claim touching
+ * 0x60 or 0x64 makes the break-key reader of -K boots stand back, and
+ * `klog_from' is 0.  i386's console does not step back from COM1: it and the
+ * claimant share the chip under the kernel's lock.  A COM1 driver that gets 0
+ * still owns the range against every other TASK, but it shares the wire with
+ * the kernel, and it must behave like a sharer: keep its lines tight, and
+ * forward nothing the kernel is already sending itself.  Making the driver
+ * guess this from the target it was compiled for would be a build expression
+ * answering a runtime question.
  */
 
 /*
@@ -757,4 +745,65 @@ routine device_io_port_claim(
 routine device_io_port_unclaim(
 		master_port	: mach_port_t;
 	in	port		: natural_t
+	);
+
+/*
+ * ── Map one page of somebody else's buffer, for one direction (#599) ─────
+ *
+ * device_dma_map_foreign's successor.  The caller -- the server that drives
+ * `bdf' -- names the page, the direction the transfer needs (op is exactly
+ * CAP_OP_DMA_DEVICE_READ, the device reads the buffer, or
+ * CAP_OP_DMA_DEVICE_WRITE, it writes it), and the capability its client
+ * handed it for that buffer.  The kernel finds the region by the
+ * capability's own id, checks the page is in it and the direction is
+ * allowed, and answers the address the device reaches it at: the physical
+ * address on a machine that polices nothing, an IOVA on one that does.
+ *
+ * Asked for every page of every transfer: a server that keeps no answers
+ * has none that can go stale when a buffer is freed or a capability
+ * revoked.  Refusals are silent here and the caller says them: KERN_NO_ACCESS
+ * (the page is not in the buffer the capability names), KERN_INVALID_ADDRESS
+ * (that buffer is gone), KERN_PROTECTION_FAILURE (not for this direction), a
+ * CAP_ERR_* code (the capability itself), KERN_RESOURCE_SHORTAGE or
+ * KERN_FAILURE (the grant could not be made).
+ */
+routine device_dma_map_foreign_op(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	paddr		: vm_address_t;
+	in	op		: natural_t;
+	in	token		: cap_token_t;
+	out	dma_addr	: vm_address_t
+	);
+
+/*
+ * How many devices other than its owner's this buffer is mapped for.  Asked
+ * by the owner only (KERN_NO_ACCESS otherwise); a region that does not exist
+ * is KERN_INVALID_ARGUMENT, never 0.  So a test can see a revocation take a
+ * mapping down, rather than only a later transfer being refused (#599).
+ */
+routine device_dma_region_users(
+		master_port	: mach_port_t;
+	in	region_id	: dma_region_id_t;
+	out	users		: natural_t
+	);
+
+/*
+ * #599: set the divisor of the 16550 whose eight ports begin at `port', and
+ * say what the latch holds afterwards.  Only for the task that holds a claim
+ * on the whole eight-port window (KERN_NO_ACCESS otherwise); a divisor of 0
+ * or above 0xFFFF, or a port with no such chip this kernel knows, is
+ * KERN_INVALID_ARGUMENT.
+ *
+ * The divisor latch shares its two ports with THR and IER, switched by LCR
+ * bit 7, and the kernel's console writes THR from any context: a driver that
+ * opened the latch with its own writes could have a console byte land in it.
+ * The kernel does the whole sequence -- LCR with the bit set, DLL, DLM, the
+ * read back, LCR as it was -- under the lock its own THR write takes.
+ */
+routine device_io_port_set_divisor(
+		master_port	: mach_port_t;
+	in	port		: natural_t;
+	in	divisor		: natural_t;
+	out	readback	: natural_t
 	);

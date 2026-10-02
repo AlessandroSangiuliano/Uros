@@ -338,6 +338,9 @@ static struct baud_rate_info com_speeds[] = {
 	-1,	-1
 };
 
+extern unsigned int	com_set_divisor(unsigned int divisor);	/* #599 */
+extern void		com_port_out(unsigned int port, unsigned int value);
+
 int
 comprobe(
 	caddr_t			port,
@@ -353,9 +356,60 @@ comprobe(
 		printf("com %d out of range\n", unit);
 		return(0);
 	}
-	if (unit == 0 && cons_is_com1) {
+	/*
+	 * #599: unit 0 is adopted as found, with or without -r.  The probe
+	 * below leaves the chip it found with LCR at 0 (five data bits), DLM
+	 * at 0xFF over whatever DLL held, IER at 0 and the FIFO off -- on a boot
+	 * without -r, the chip the kernel's console writes and that uart.so
+	 * will adopt.  QEMU's chardev sends every byte whatever the divisor and
+	 * word length, so it never showed; on the metal the lines between here
+	 * and uart.so's attach would come out as noise.  A chip is there if its
+	 * scratch register holds a byte, saved and put back.
+	 *
+	 * A line somebody set up for a console -- eight data bits, the latch
+	 * closed -- is kept as it is, speed and all.  One nobody set up is
+	 * given 115200 8N1, x86-64's boot.S setting and uart.so's: under QEMU's
+	 * -kernel boot COM1 is found with LCR 0 (measured), five data bits,
+	 * and this kernel wrote its console into it until uart.so attached.
+	 * Before com_cons_init(), which reads the line to know what it has.
+	 *
+	 * ABLATE_599_COMPROBE_OLD_EXIT takes out the adoption and nothing
+	 * else: the line is still set up, and a boot without -r then runs the
+	 * probe below over it, as it used to.
+	 */
+	if (unit == 0) {
+		unsigned char scratch = inb(addr + 7);
+		unsigned int rb;
+		int there, lcr;
+
+		outb(addr + 7, 0x5a);
+		there = inb(addr + 7) == 0x5a;
+		outb(addr + 7, scratch);
+		if (!there)
+			return 0;
+		lcr = inb(LINE_CTL(addr));
+		if ((lcr & iDLAB) || (lcr & i8BITS) != i8BITS) {
+			rb = com_set_divisor(1);
+			com_port_out(LINE_CTL(addr), i8BITS);
+			printf("com0: found LCR 0x%02x, a line nobody set up for "
+			       "a console; set to 115200 8N1, the latch read back "
+			       "0x%04x%s (#599)\n", (unsigned)lcr, rb,
+			       rb == 1 ? "" : " -- WRONG, it does not hold 1");
+		} else
+			printf("com0: adopted as it was found, LCR 0x%02x "
+			       "(#599)\n", (unsigned)lcr);
+#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
 		com_cons_init();
 		return(1);
+#else
+		if (cons_is_com1) {
+			com_cons_init();
+			return(1);
+		}
+		printf("com0: ABLATE_599_COMPROBE_OLD_EXIT -- the old probe runs "
+		       "over the line above now, and comattach clears IER and "
+		       "MCR (#599)\n");
+#endif
 	}
 	oldctl = inb(LINE_CTL(addr));	 /* Save old value of LINE_CTL */
 	oldmsb = inb(BAUD_MSB(addr));	 /* Save old value of BAUD_MSB */
@@ -433,8 +487,18 @@ comattach(
 
 	ttychars(&com_tty[unit]);
 
+	/*
+	 * #599: unit 0's IER and MCR are left as found, with or without -r.
+	 * Since #207 the kernel is not this chip's driver: uart.so is, and
+	 * clearing MCR dropped DTR, RTS and OUT2 under it.
+	 */
+#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
+	if (unit == 0)
+		return;
+#else
 	if (unit == 0 && cons_is_com1)
 		return;
+#endif
 	
 	outb(INTR_ENAB(addr), 0);
 	outb(MODEM_CTL(addr), 0);
@@ -460,6 +524,15 @@ comopen(
 	at386_io_lock_state();
 
 	if (unit >= NCOM || (isai = cominfo[unit]) == 0 || isai->alive == 0)
+		return(D_NO_SUCH_DEVICE);
+	/*
+	 * #599: unit 0 is COM1, which is the kernel's console under
+	 * com_bank_lock and the device of the task that claims it (uart.so).
+	 * This tty driver reaches the chip with its own outb under nothing --
+	 * comparam opens the divisor latch, commctl rewrites LCR, comstart
+	 * writes THR -- so it does not open unit 0.
+	 */
+	if (unit == 0)
 		return(D_NO_SUCH_DEVICE);
 	tp = &com_tty[unit];
 	at386_io_lock(MP_DEV_WAIT);
@@ -1237,6 +1310,241 @@ comreset(void)
  * for panic's sake, like every word cons_putc() keeps on x86-64. */
 static int	com_tx_stuck;
 
+/*
+ * #599: the 16550's register bank.  LCR bit 7 (DLAB) turns 0x3F8 and 0x3F9
+ * from THR and IER into the divisor latch: a THR write that lands while it is
+ * set becomes a divisor byte.  The console writes THR from any context, and
+ * the divisor was set by uart.so with its own outb, under nothing the kernel
+ * knew about -- the census's DLAB row.  Now every access to the chip from
+ * this kernel holds com_bank_lock: the console's THR write (com_putc), the
+ * divisor sequence (com_set_divisor), and every register a task reaches
+ * through device_io_port_read/write (com_port_in/com_port_out).  The kernel's
+ * own tty driver for COM1 does not open (comopen), and a task's own `in' and
+ * `out' do not reach the chip (iopl.c).
+ *
+ * A leaf lock with interrupts off, whose word IS its holder: 0 when free, the
+ * holder's processor number plus one when held, taken by one cmpxchg and let
+ * go by one store, so there is no instant at which the lock is held and the
+ * holder not named (found in review: a holder mark set beside the lock left
+ * two such windows, and a mark set before the spin let a writer nested on a
+ * processor still waiting go past the lock).  A writer nested on the holder's
+ * own processor -- an NMI, a printf inside the hold -- takes nothing and
+ * writes THR only if DLAB is clear, counting what it drops; one nested on a
+ * processor that is only waiting waits too, and gets the lock in its turn.
+ *
+ * While a debugger is active anywhere (db_active), the console's writer
+ * (com_putc, and only it) does not wait on the lock without bound: DDB parks
+ * the other processors with an NMI, and one of them may be parked holding it.
+ * A bounded wait that fails is remembered until a wait succeeds, so the bytes
+ * after it do not each pay the bound; a byte that goes without the lock is
+ * written only if DLAB is clear, which DDB's session (below) makes sure of on
+ * kdb_trap.  Every other access waits (com_bank_enter_for).
+ */
+#define	COM_BANK_DDB_SPINS	1000000
+
+extern int			db_active;
+
+static volatile int		com_bank_owner;		/* 0, or cpu + 1 */
+static int			com_bank_gave_up;	/* ... while db_active */
+unsigned int			com_bank_dropped;	/* THR bytes not written:
+							   DLAB set, lock not ours */
+
+static int
+com_bank_try(int me)
+{
+	int old = 0;
+
+	__asm__ volatile("lock; cmpxchgl %2, %1"
+			 : "+a" (old), "+m" (com_bank_owner)
+			 : "r" (me + 1)
+			 : "memory", "cc");
+	return old == 0;
+}
+
+/*
+ * `console': the one caller allowed to give up -- com_putc, which has the
+ * DLAB check to fall back on.  Every other access to the bank (the divisor
+ * sequence, a task's register) waits for the lock whatever db_active says:
+ * it has no safe way to proceed without it (found in review: they ignored a
+ * failed wait and ran unlocked), and it runs in a thread on a processor that
+ * is not the debugger's, which waits out the session if parked.
+ */
+static int
+com_bank_enter_for(unsigned int *flags, int console)
+{
+	int me, i;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (*flags) : : "memory");
+	me = cpu_number();
+	if (com_bank_owner == me + 1)
+		return 0;			/* nested on the holder */
+#ifdef	ABLATE_599_COM_NO_LOCK
+	(void)i;
+	(void)console;
+	return 1;	/* as before #599: nothing taken, THR written regardless */
+#else
+	if (!db_active || !console) {
+		while (!com_bank_try(me))
+			__asm__ volatile("pause");
+		com_bank_gave_up = 0;
+		return 1;
+	}
+	for (i = 0; i < (com_bank_gave_up ? 1 : COM_BANK_DDB_SPINS); i++) {
+		if (com_bank_try(me)) {
+			com_bank_gave_up = 0;
+			return 1;
+		}
+		__asm__ volatile("pause");
+	}
+	com_bank_gave_up = 1;
+	return 0;
+#endif
+}
+
+static int
+com_bank_enter(unsigned int *flags)
+{
+	return com_bank_enter_for(flags, 0);
+}
+
+static void
+com_bank_leave(unsigned int flags, int took)
+{
+	if (took) {
+		__asm__ volatile("" : : : "memory");
+		com_bank_owner = 0;
+	}
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+}
+
+/*
+ * #599: DDB's session on the bank, on kdb_trap's outermost entry, after the
+ * other processors are parked (it waits for them) and until before they are
+ * let go.  One of them may have been parked in the middle of a divisor
+ * sequence with the latch open, and DDB's own bytes go without the lock when
+ * that one holds it: entry saves LCR and closes the latch, exit puts LCR back
+ * exactly, so the sequence goes on where it meant to.  The session takes no
+ * lock -- it waits for nobody -- and kdb_kentry, which parks no one, has
+ * none: there every processor takes the lock -- the console's writer with
+ * the bound above, every other access waiting for it.  Outside any NCPUS test: one processor can be caught
+ * half-way inside the hold as well, by a trap.
+ */
+static int	com_ddb_lcr = -1;
+
+void
+com_ddb_session(int entering)
+{
+	int lcr;
+
+	if (entering) {
+		lcr = inb(LINE_CTL(COM0_ADDR));
+		com_ddb_lcr = lcr;
+		if (lcr & iDLAB) {
+			outb(LINE_CTL(COM0_ADDR), lcr & ~iDLAB);
+			printf("ddb: COM1's divisor latch was open (LCR 0x%02x); "
+			       "closed for the session, reopened on the way out "
+			       "(#599)\n", (unsigned)lcr);
+		}
+	} else if (com_ddb_lcr >= 0) {
+		outb(LINE_CTL(COM0_ADDR), com_ddb_lcr);
+		com_ddb_lcr = -1;
+	}
+}
+
+/*
+ * #599: the divisor, set by the kernel for the task that holds COM1
+ * (device_io_port_set_divisor): LCR with DLAB, DLL, DLM, the latch read back
+ * while it is still open, LCR as it was -- all under com_bank_lock, which
+ * com_putc's THR write takes.  Answers what the latch held, and counts a
+ * read-back that differs (com_divisor_wrong); saying it is the caller's --
+ * device_md_io_set_divisor, comprobe and the -U test each do.
+ *
+ * ABLATE_599_WIDEN_DIVISOR holds the latch open for N port-0x80 reads
+ * between DLL and DLM, with the lock held, so a writer that ignored the lock
+ * would land in it.
+ */
+unsigned int	com_divisor_sets, com_divisor_wrong;
+
+unsigned int
+com_set_divisor(unsigned int divisor)
+{
+	unsigned int flags, readback;
+	int took, lcr;
+#ifdef	ABLATE_599_WIDEN_DIVISOR
+	int i;
+#endif
+
+	took = com_bank_enter(&flags);
+	lcr = inb(LINE_CTL(COM0_ADDR)) & ~iDLAB;
+	outb(LINE_CTL(COM0_ADDR), lcr | iDLAB);
+	outb(BAUD_LSB(COM0_ADDR), divisor & 0xFF);
+#ifdef	ABLATE_599_WIDEN_DIVISOR
+	for (i = 0; i < ABLATE_599_WIDEN_DIVISOR; i++)
+		(void)inb(0x80);
+#endif
+	outb(BAUD_MSB(COM0_ADDR), (divisor >> 8) & 0xFF);
+	readback = inb(BAUD_LSB(COM0_ADDR)) |
+		   ((unsigned int)inb(BAUD_MSB(COM0_ADDR)) << 8);
+	outb(LINE_CTL(COM0_ADDR), lcr);
+	com_divisor_sets++;
+	if (readback != divisor)
+		com_divisor_wrong++;
+	com_bank_leave(flags, took);
+	return readback;
+}
+
+/*
+ * #599: a COM1 register reached by a task (device_io_port_read/write, one
+ * byte -- check_io_port refuses a wider access to the window), under
+ * com_bank_lock, so it cannot land between the halves of a divisor sequence
+ * -- a THR write into DLL, an LCR write closing the latch before DLM, which
+ * would then be IER -- or be overwritten by the LCR that sequence puts back.
+ * LCR bit 7 is refused before this (device_md_io_opens_latch); it is cleared
+ * here as well, because a latch opened by one locked write and left open is
+ * a latch the next console byte lands in, whoever wrote it.
+ */
+unsigned int
+com_port_in(unsigned int port)
+{
+	unsigned int flags, v;
+	int took;
+
+	took = com_bank_enter(&flags);
+	v = inb(port);
+	com_bank_leave(flags, took);
+	return v;
+}
+
+void
+com_port_out(unsigned int port, unsigned int value)
+{
+	unsigned int flags;
+	int took;
+
+	if (port == LINE_CTL(COM0_ADDR))
+		value &= ~iDLAB;
+	took = com_bank_enter(&flags);
+	outb(port, value);
+	com_bank_leave(flags, took);
+}
+
+/* #599: what the latch holds, read under the same lock */
+unsigned int
+com_get_divisor(void)
+{
+	unsigned int flags, divisor;
+	int took, lcr;
+
+	took = com_bank_enter(&flags);
+	lcr = inb(LINE_CTL(COM0_ADDR)) & ~iDLAB;
+	outb(LINE_CTL(COM0_ADDR), lcr | iDLAB);
+	divisor = inb(BAUD_LSB(COM0_ADDR)) |
+		  ((unsigned int)inb(BAUD_MSB(COM0_ADDR)) << 8);
+	outb(LINE_CTL(COM0_ADDR), lcr);
+	com_bank_leave(flags, took);
+	return divisor;
+}
+
 void
 com_putc(
 	char		c)
@@ -1291,7 +1599,16 @@ com_putc(
 		}
 	}
 	com_tx_stuck = 0;
-	outb(TXRX(COM0_ADDR),  c);
+	{
+		unsigned int flags;
+		int took = com_bank_enter_for(&flags, 1);
+
+		if (took || !(inb(LINE_CTL(COM0_ADDR)) & iDLAB))
+			outb(TXRX(COM0_ADDR),  c);
+		else
+			com_bank_dropped++;
+		com_bank_leave(flags, took);
+	}
 }
 
 int
@@ -1300,7 +1617,11 @@ com_getc(
 {
 	unsigned char	c = 0;
 
-	outb(INTR_ENAB(COM0_ADDR), 0);
+	/*
+	 * #599: polled from LSR.DR, which works whatever IER holds.  This
+	 * wrote IER = 0 and then TX|RX around every character -- on -r boots,
+	 * DDB's input, over the IER uart.so had programmed.
+	 */
 	while (!(inb(LINE_STAT(COM0_ADDR)) & iDR)) {
 		if (!wait) {
 			c = (unsigned char) -1;
@@ -1309,7 +1630,6 @@ com_getc(
 	}
 	if (!c)
 		c = inb(TXRX(COM0_ADDR));
-	outb(INTR_ENAB(COM0_ADDR), iTX_ENAB|iRX_ENAB);
 	if (c == K_CR)
 	  	c = K_LF;
 	return(c);
@@ -1320,12 +1640,11 @@ com_is_char(void)
 {
 	boolean_t	rc;
 
-	outb(INTR_ENAB(COM0_ADDR), 0);
+	/* #599: as com_getc, LSR alone -- IER is uart.so's */
 	if (!(inb(LINE_STAT(COM0_ADDR)) & iDR))
 		rc = FALSE;
 	else
 		rc = TRUE;
-	outb(INTR_ENAB(COM0_ADDR), iTX_ENAB|iRX_ENAB);
 	return(rc);
 }
 
