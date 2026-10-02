@@ -1009,14 +1009,20 @@ blk_phys_said(const struct blk_handle *h, const char *when)
 	}
 }
 
+/*
+ * t0..t1 the asking, t1..t2 the transfer, t2..t3 the check after it (#537),
+ * counted as asking.  Every time is taken before this is called: it may
+ * print, and the first version of the check, timed after it, counted the
+ * line said at 1024 pages -- 21 to 44 ms at 1.4 GHz -- as asking at 2048.
+ */
 static void
 blk_phys_account(struct blk_handle *h, unsigned int pages,
 		 unsigned long long t0, unsigned long long t1,
-		 unsigned long long t2)
+		 unsigned long long t2, unsigned long long t3)
 {
 	h->phys_req++;
 	h->phys_pages += pages;
-	h->xlate_cyc += t1 - t0;
+	h->xlate_cyc += (t1 - t0) + (t3 - t2);
 	h->xfer_cyc += t2 - t1;
 	{
 		uint64_t next = h->phys_said_pages ? 2 * h->phys_said_pages
@@ -1478,8 +1484,7 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 					  total);
 		t2 = blk_tsc();
 		hkr = blk_xlate_held(h, used);		/* #537 */
-		blk_phys_account(h, phys_addrsCnt, t0, t1, t2);
-		h->xlate_cyc += blk_tsc() - t2;		/* the check is asking */
+		blk_phys_account(h, phys_addrsCnt, t0, t1, t2, blk_tsc());
 		if (rc < 0)
 			return D_IO_ERROR;
 		if (hkr != KERN_SUCCESS)
@@ -1559,8 +1564,7 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 						   total);
 		t2 = blk_tsc();
 		hkr = blk_xlate_held(h, used);		/* #537 */
-		blk_phys_account(h, phys_addrsCnt, t0, t1, t2);
-		h->xlate_cyc += blk_tsc() - t2;		/* the check is asking */
+		blk_phys_account(h, phys_addrsCnt, t0, t1, t2, blk_tsc());
 		if (rc < 0)
 			return D_IO_ERROR;
 		if (hkr != KERN_SUCCESS)
