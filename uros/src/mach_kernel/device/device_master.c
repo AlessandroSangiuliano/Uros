@@ -4010,6 +4010,62 @@ ds_master_device_dma_ask_cost(
  *    issuer's, and the direction is read from them;
  *  - refusals are silent: the caller says them, once, in its own words.
  */
+/*
+ * The device's grant on region `r' for this capability, with device_table_lock
+ * held and `r' checked to be the region found: the grant already recorded
+ * for the device -- its directions in *u_reads and *u_writes -- or, if there is
+ * none, one made now for the directions the capability allows (#599, #537).
+ *
+ * #599: a capability revoked after the caller's check and before this lock is
+ * refused here.  device_master_cap_revoked takes grants down under this same
+ * lock, so a grant is either recorded before it walks the table -- and taken
+ * down by it -- or refused now; none can rest on a revoked capability.
+ *
+ * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses (or each page at its
+ * own, in an identity domain): a caller that asks page by page pays for the
+ * mapping once, and one that keeps the region's translation (#537 step 3)
+ * keeps what this made.
+ */
+static kern_return_t
+dma_grant_locked(struct dma_region *r, natural_t bdf,
+		 const struct uros_cap *cap, int reads, int writes,
+		 unsigned long *base, int *identity, int *granted,
+		 int *u_reads, int *u_writes)
+{
+	unsigned int u;
+
+	for (u = 0; u < r->nusers; u++)
+		if (r->user[u].bdf == bdf)
+			break;
+	if (u < r->nusers) {
+		*base = (unsigned long)r->user[u].dma;
+		*identity = r->user[u].identity;
+		*u_reads = r->user[u].reads;
+		*u_writes = r->user[u].writes;
+		return KERN_SUCCESS;
+	}
+	if (cap_id_revoked(cap->cap_id))
+		return CAP_ERR_REVOKED;
+	if (r->nusers >= DEVICE_MAX_REGION_USERS)
+		return KERN_RESOURCE_SHORTAGE;
+	if (!device_md_dma_grant_pages(bdf, (const unsigned long *)r->pa,
+				       r->npages, reads, writes, base,
+				       identity))
+		return KERN_FAILURE;
+	r->user[r->nusers].bdf = bdf;
+	r->user[r->nusers].dma = (vm_offset_t)*base;
+	r->user[r->nusers].identity = (unsigned char)*identity;
+	r->user[r->nusers].reads = (unsigned char)reads;
+	r->user[r->nusers].writes = (unsigned char)writes;
+	r->user[r->nusers].cap_id = cap->cap_id;
+	publish_barrier();
+	r->nusers++;
+	*granted = 1;
+	*u_reads = reads;
+	*u_writes = writes;
+	return KERN_SUCCESS;
+}
+
 #define	DMA_MAP_PAGES_MAX	32	/* dma_page_list_t's bound */
 
 static kern_return_t
@@ -4026,8 +4082,8 @@ dma_map_foreign_pages(
 	kern_return_t		kr;
 	struct dma_region	*r = 0;
 	struct uros_cap		cap;
-	unsigned int		i, k, u, page[DMA_MAP_PAGES_MAX];
-	int			missing = 0;
+	unsigned int		i, k, page[DMA_MAP_PAGES_MAX];
+	int			missing = 0, u_reads = 0, u_writes = 0;
 	unsigned long		base = 0;
 	uint64_t		rid;
 	int			reads, writes, identity = 0, granted = 0;
@@ -4113,56 +4169,15 @@ dma_map_foreign_pages(
 		mutex_unlock(&device_table_lock);
 		return KERN_INVALID_ADDRESS;
 	}
-	for (u = 0; u < r->nusers; u++)
-		if (r->user[u].bdf == bdf)
-			break;
-	if (u < r->nusers) {
-		if ((op == CAP_OP_DMA_DEVICE_READ && !r->user[u].reads) ||
-		    (op == CAP_OP_DMA_DEVICE_WRITE && !r->user[u].writes)) {
-			mutex_unlock(&device_table_lock);
-			return KERN_PROTECTION_FAILURE;
-		}
-		base = (unsigned long)r->user[u].dma;
-		identity = r->user[u].identity;
-	} else {
-		/*
-		 * #599: a capability revoked after the check above and
-		 * before this lock is refused here.  device_master_cap_revoked
-		 * takes grants down under this same lock, so a grant is either
-		 * recorded before it walks the table -- and taken down by it --
-		 * or refused now; none can rest on a revoked capability.
-		 */
-		if (cap_id_revoked(cap.cap_id)) {
-			mutex_unlock(&device_table_lock);
-			return CAP_ERR_REVOKED;
-		}
-		if (r->nusers >= DEVICE_MAX_REGION_USERS) {
-			mutex_unlock(&device_table_lock);
-			return KERN_RESOURCE_SHORTAGE;
-		}
-		/*
-		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses (or
-		 * each page at its own, in an identity domain).  The caller
-		 * asks page by page and pays for the mapping once.
-		 */
-		if (!device_md_dma_grant_pages(bdf,
-					       (const unsigned long *)r->pa,
-					       r->npages, reads, writes, &base,
-					       &identity)) {
-			mutex_unlock(&device_table_lock);
-			return KERN_FAILURE;
-		}
-		r->user[r->nusers].bdf = bdf;
-		r->user[r->nusers].dma = (vm_offset_t)base;
-		r->user[r->nusers].identity = (unsigned char)identity;
-		r->user[r->nusers].reads = (unsigned char)reads;
-		r->user[r->nusers].writes = (unsigned char)writes;
-		r->user[r->nusers].cap_id = cap.cap_id;
-		publish_barrier();
-		r->nusers++;
-		granted = 1;
-	}
+	kr = dma_grant_locked(r, bdf, &cap, reads, writes, &base, &identity,
+			      &granted, &u_reads, &u_writes);
+	if (kr == KERN_SUCCESS &&
+	    ((op == CAP_OP_DMA_DEVICE_READ && !u_reads) ||
+	     (op == CAP_OP_DMA_DEVICE_WRITE && !u_writes)))
+		kr = KERN_PROTECTION_FAILURE;
 	mutex_unlock(&device_table_lock);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	if (granted)
 		printf("device: %02x:%02x.%u may now reach a %u-page buffer it "
