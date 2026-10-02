@@ -275,6 +275,19 @@ if(UROS_ABLATE_537_NO_BATCH)
     target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_BATCH=1)
     message(STATUS "#537 ablation: the block server asks page by page")
 endif()
+# #537 step 3: no translation kept, every transfer asks (the measure); or the
+# translations kept through a revocation notice, so a revoked buffer's
+# translation is used and the IOMMU's refusal can be seen (cap_test [26]).
+option(UROS_ABLATE_537_NO_TABLE "Build the #537 ablation: the block server keeps no buffer translation" OFF)
+option(UROS_ABLATE_537_TABLE_KEPT "Build the #537 ablation: a revocation notice leaves the buffer capabilities and their translations" OFF)
+if(UROS_ABLATE_537_NO_TABLE)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_TABLE=1)
+    message(STATUS "#537 ablation: the block server keeps no translation")
+endif()
+if(UROS_ABLATE_537_TABLE_KEPT)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_TABLE_KEPT=1)
+    message(STATUS "#537 ablation: translations kept through a revocation")
+endif()
 
 target_include_directories(block_device_server PRIVATE ${BLK_INCLUDE_DIRS})
 

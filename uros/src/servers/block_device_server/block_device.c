@@ -47,6 +47,20 @@
  */
 #include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
+/* #537 step 3: the kept translations -- see blk_xlate_take() below. */
+#ifndef BLK_ABLATE_537_NO_TABLE
+#define BLK_ABLATE_537_NO_TABLE 0
+#endif
+#ifndef BLK_ABLATE_537_TABLE_KEPT
+#define BLK_ABLATE_537_TABLE_KEPT 0
+#endif
+#define BLK_DMA_PAGE	4096u		/* the DMA regions' page, both targets */
+
+struct blk_handle;
+static void blk_xlate_free(struct blk_xlate *x);
+static void blk_xlate_take(struct blk_handle *h, const struct uros_cap *t,
+			   struct blk_xlate *x);
+
 /*
  * Linked list of every live blk_handle, used by the no-senders
  * notification path to find the handle by Mach port name (the kernel
@@ -135,19 +149,24 @@ blk_handles_revoke_by_cap_id(uint64_t cap_id)
 		 * when it happens, not at the next read.
 		 */
 		for (i = 0, kept = 0; i < h->n_dma_caps; i++) {
-			if (h->dma_cap[i].cap_id == cap_id) {
+			if (h->dma_cap[i].cap_id == cap_id &&
+			    !BLK_ABLATE_537_TABLE_KEPT) {
 				printf("blk: %s: capability %llu forgotten — "
 				       "cap_server says it was revoked\n",
 				       h->part ? h->part->name : "(unknown)",
 				       (unsigned long long)cap_id);
+				blk_xlate_free(&h->dma_xlate[i]);
 				h->dropped++;
 				n++;
 				continue;
 			}
+			h->dma_xlate[kept] = h->dma_xlate[i];
 			h->dma_cap[kept++] = h->dma_cap[i];
 		}
-		for (i = kept; i < h->n_dma_caps; i++)
+		for (i = kept; i < h->n_dma_caps; i++) {
 			memset(&h->dma_cap[i], 0, sizeof(h->dma_cap[i]));
+			memset(&h->dma_xlate[i], 0, sizeof(h->dma_xlate[i]));
+		}
 		h->n_dma_caps = kept;
 		if (h->dma_last >= kept)
 			h->dma_last = 0;
@@ -249,6 +268,8 @@ blk_handle_destroy(struct blk_handle *h, const char *how)
 
 	if (h->phys_req != 0)
 		blk_phys_said(h, "in all,");
+	for (unsigned int i = 0; i < h->n_dma_caps; i++)
+		blk_xlate_free(&h->dma_xlate[i]);	/* #537 */
 	memset(h->dma_cap, 0, sizeof(h->dma_cap));	/* #599 */
 	h->magic = 0;        /* poison so a stray msg can't reuse it */
 	blk_payload_release(h->payload);
@@ -873,6 +894,7 @@ ds_device_register_dma(mach_port_t device, mach_port_t reply,
 		h->n_dma_caps++;
 	}
 	h->dma_cap[i] = t;
+	blk_xlate_take(h, &t, &h->dma_xlate[i]);	/* #537 step 3 */
 
 	printf("blk: a client handed %s a capability for buffer %llu "
 	       "(%u on this handle)\n", h->part->name,
@@ -1067,13 +1089,17 @@ blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
 			       "says it is revoked, not genuine, not a buffer's, "
 			       "or its buffer is gone\n", h->part->name,
 			       (unsigned long long)h->dma_cap[i].cap_id);
+			blk_xlate_free(&h->dma_xlate[i]);	/* #537 */
 			h->dropped++;
 			continue;
 		}
+		h->dma_xlate[kept] = h->dma_xlate[i];
 		h->dma_cap[kept++] = h->dma_cap[i];
 	}
-	for (i = kept; i < n; i++)
+	for (i = kept; i < n; i++) {
 		memset(&h->dma_cap[i], 0, sizeof(h->dma_cap[i]));
+		memset(&h->dma_xlate[i], 0, sizeof(h->dma_xlate[i]));
+	}
 	h->n_dma_caps = kept;
 	h->dma_last = 0;
 	for (i = 0; i < kept; i++)
@@ -1097,6 +1123,137 @@ blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
 #define BLK_ABLATE_537_NO_BATCH 0
 #endif
 
+/*
+ * #537 step 3: a buffer's translation, kept per handle where the device is
+ * isolated (see struct blk_xlate).  UROS_ABLATE_537_NO_TABLE keeps none, so
+ * every transfer asks; UROS_ABLATE_537_TABLE_KEPT leaves the capabilities and
+ * their tables on a revocation notice, so a revoked buffer's translation is
+ * USED -- the IOMMU's refusal of it is what cap_test [26] asks about.
+ */
+
+static void
+blk_xlate_free(struct blk_xlate *x)
+{
+	if (x->ix != NULL)
+		free(x->ix);
+	memset(x, 0, sizeof(*x));
+}
+
+static void
+blk_xlate_sift(struct blk_xlate_page *ix, unsigned int root, unsigned int n)
+{
+	for (;;) {
+		unsigned int child = 2 * root + 1;
+		struct blk_xlate_page t;
+
+		if (child >= n)
+			return;
+		if (child + 1 < n && ix[child + 1].pa > ix[child].pa)
+			child++;
+		if (ix[root].pa >= ix[child].pa)
+			return;
+		t = ix[root];
+		ix[root] = ix[child];
+		ix[child] = t;
+		root = child;
+	}
+}
+
+/*
+ * Ask once for the translation of the buffer `t' names, and keep it in `x'.
+ * Nothing kept when the device is not isolated, or anything fails: the
+ * transfers then ask, as they always did.
+ */
+static void
+blk_xlate_take(struct blk_handle *h, const struct uros_cap *t,
+	       struct blk_xlate *x)
+{
+	struct blk_controller *ctrl = h->part->ctrl;
+	natural_t	bdf = (natural_t)((ctrl->pci_bus << 8) |
+					  (ctrl->pci_slot << 3) |
+					  ctrl->pci_func);
+	natural_t	isolated = 0, identity = 0, ops = 0;
+	vm_address_t	base = 0, *pages = NULL;
+	mach_msg_type_number_t cnt = 0;
+	struct blk_xlate_page *ix;
+	struct blk_xlate_page tmp;
+	unsigned int	i;
+	kern_return_t	kr;
+
+	blk_xlate_free(x);
+	if (BLK_ABLATE_537_NO_TABLE)
+		return;
+	kr = device_dma_map_foreign_region(master_device, bdf, (char *)t,
+					   sizeof(*t), &isolated, &identity,
+					   &base, &ops, &pages, &cnt);
+	if (kr != KERN_SUCCESS || !isolated || cnt == 0) {
+		if (pages != NULL && cnt > 0)
+			(void)vm_deallocate(mach_task_self(),
+					    (vm_address_t)pages,
+					    cnt * sizeof(vm_address_t));
+		return;
+	}
+	ix = (struct blk_xlate_page *)malloc(cnt * sizeof(*ix));
+	if (ix != NULL) {
+		for (i = 0; i < cnt; i++) {
+			ix[i].pa = pages[i];
+			ix[i].page = i;
+		}
+		for (i = cnt / 2; i-- > 0; )
+			blk_xlate_sift(ix, i, cnt);
+		for (i = cnt; i-- > 1; ) {
+			tmp = ix[0];
+			ix[0] = ix[i];
+			ix[i] = tmp;
+			blk_xlate_sift(ix, 0, i);
+		}
+		x->npages = cnt;
+		x->identity = (int)identity;
+		x->ops = ops;
+		x->base = base;
+		x->ix = ix;
+		printf("blk: %s: buffer %llu translated once, %u pages kept on "
+		       "this handle -- its transfers ask the kernel nothing "
+		       "(#537)\n", h->part->name,
+		       (unsigned long long)t->resource_id, (unsigned)cnt);
+	}
+	(void)vm_deallocate(mach_task_self(), (vm_address_t)pages,
+			    cnt * sizeof(vm_address_t));
+}
+
+/* The device address of `pa' for `op' from this handle's kept translations. */
+static int
+blk_xlate_find(const struct blk_handle *h, vm_address_t pa, natural_t op,
+	       vm_address_t *dma)
+{
+	vm_address_t page = pa & ~(vm_address_t)(BLK_DMA_PAGE - 1);
+	unsigned int i;
+
+	for (i = 0; i < h->n_dma_caps; i++) {
+		const struct blk_xlate *x = &h->dma_xlate[i];
+		unsigned int lo = 0, hi = x->npages;
+
+		if (x->npages == 0 || (x->ops & op) == 0)
+			continue;
+		while (lo < hi) {
+			unsigned int mid = lo + (hi - lo) / 2;
+
+			if (x->ix[mid].pa < page)
+				lo = mid + 1;
+			else
+				hi = mid;
+		}
+		if (lo < x->npages && x->ix[lo].pa == page) {
+			*dma = x->identity ? pa
+				: x->base + (vm_address_t)x->ix[lo].page *
+					    BLK_DMA_PAGE +
+				  (pa & (vm_address_t)(BLK_DMA_PAGE - 1));
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static kern_return_t
 blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
 		  unsigned int n, natural_t op, vm_address_t *dma,
@@ -1108,6 +1265,13 @@ blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
 					  ctrl->pci_func);
 	unsigned int	j, i, k;
 	kern_return_t	kr;
+
+	/* #537 step 3: every page from a kept translation, or none of them. */
+	for (k = 0; k < n; k++)
+		if (!blk_xlate_find(h, pa[k], op, &dma[k]))
+			break;
+	if (k == n)
+		return KERN_SUCCESS;
 
 	if (n > 1 && !BLK_ABLATE_537_NO_BATCH) {
 		for (j = 0; j < h->n_dma_caps; j++) {
