@@ -1154,6 +1154,139 @@ a_buffer_capability_is_a_buffers(mach_port_t device_port,
     return 1;
 }
 
+/*
+ * ── [25] Many pages in one request (#537) ─────────────────────────────
+ *
+ * Every physical request the bundle made was one page -- 649 of 649 lines of
+ * the block server's counter, on both targets (02/10): ext_server's only
+ * physical read is a page-cache miss, and its readahead reads by copy.  #537's
+ * batched ask is for requests of many pages, so this makes them: a 32-page
+ * buffer handed to the block server, read into 64 times at 64 places, 128 KB
+ * a request, every page compared with what a copying read of the same blocks
+ * returns -- an answer that put a page in the wrong place, or a page in none,
+ * is WRONG here.  The block server says what the asking cost on this handle:
+ * at 1024 and 2048 pages, and when it closes.
+ */
+#define CT25_PAGES	32
+#define CT25_ROUNDS	64
+
+static int
+many_pages_in_one_request(mach_port_t device_port, mach_port_t part_port,
+                          const char *name)
+{
+    struct uros_cap        tok, buf_cap;
+    security_token_t       null_sec = { { 0, 0 } };
+    char                   blob[CAP_TOKEN_MAX];
+    mach_port_t            handle = MACH_PORT_NULL;
+    kern_return_t          kr = KERN_SUCCESS;
+    vm_address_t           kva = 0, uva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    io_buf_len_t           got = 0;
+    uint64_t               region_id = 0;
+    const unsigned         bytes = CT25_PAGES * 4096;
+    unsigned               r, p, bad_page = 0, done = 0;
+    int                    ok = 0;
+
+    kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
+                     CAP_OP_BLK_READ, 0, &tok);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [25] %s — DID NOT RUN, no block capability "
+               "(kr=%d)\n", name, (int)kr);
+        return 1;
+    }
+    memcpy(blob, &tok, sizeof(tok));
+    kr = device_open_cap(part_port, MACH_PORT_NULL, D_READ, null_sec,
+                         (char *)name, blob,
+                         (mach_msg_type_number_t)sizeof(tok), &handle);
+    if (kr != KERN_SUCCESS || handle == MACH_PORT_NULL) {
+        printf("cap_test: [25] %s — DID NOT RUN, open refused (kr=%d)\n",
+               name, (int)kr);
+        return 1;
+    }
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, CT25_PAGES,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (kr != KERN_SUCCESS || pa_cnt != CT25_PAGES) {
+        printf("cap_test: [25] %s — DID NOT RUN, no %u-page buffer (kr=%d, "
+               "%u pages)\n", name, CT25_PAGES, (int)kr, (unsigned)pa_cnt);
+        if (pa_list != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                                pa_cnt * sizeof(vm_address_t));
+        (void)device_close(handle);
+        (void)mach_port_deallocate(mach_task_self(), handle);
+        return 1;
+    }
+
+    memset(&buf_cap, 0, sizeof(buf_cap));
+    kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
+                     0, &buf_cap);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [25] %s — DID NOT RUN, the buffer was not handed "
+               "over (kr=%d)\n", name, (int)kr);
+        ok = 1;
+        goto out;
+    }
+
+    for (r = 0; r < CT25_ROUNDS; r++) {
+        recnum_t rec = (recnum_t)(r * (bytes / 512));
+        io_buf_ptr_t copy = NULL;
+        mach_msg_type_number_t copied = 0;
+
+        /* A fill of its own each round: last round's bytes cannot pass. */
+        memset((void *)uva, (int)((r & 0xFF) ^ 0x5A), bytes);
+        got = 0;
+        kr = device_read_phys(handle, D_READ, rec, bytes, pa_list, pa_cnt,
+                              &got);
+        if (kr != KERN_SUCCESS || got != bytes)
+            break;
+        kr = device_read(handle, D_READ, rec, bytes, &copy, &copied);
+        if (kr != KERN_SUCCESS || copied != bytes) {
+            if (copy != NULL && copied > 0)
+                (void)vm_deallocate(mach_task_self(), (vm_offset_t)copy,
+                                    copied);
+            break;
+        }
+        for (p = 0; p < CT25_PAGES; p++)
+            if (memcmp((char *)uva + p * 4096, (char *)copy + p * 4096,
+                       4096) != 0)
+                break;
+        (void)vm_deallocate(mach_task_self(), (vm_offset_t)copy, copied);
+        if (p != CT25_PAGES) {
+            bad_page = p;
+            break;
+        }
+        done++;
+    }
+
+    if (done == CT25_ROUNDS) {
+        printf("cap_test: [25] %s: %u reads of %u pages each, every page "
+               "what a copying read of the same blocks returns — the block "
+               "server's lines for this handle say what asking cost (#537)\n",
+               name, CT25_ROUNDS, CT25_PAGES);
+        ok = 1;
+    } else if (kr != KERN_SUCCESS || got != bytes)
+        printf("cap_test: [25] WRONG — %s: read %u of %u refused or short "
+               "(kr=%d, %u of %u bytes)\n", name, done + 1, CT25_ROUNDS,
+               (int)kr, (unsigned)got, bytes);
+    else
+        printf("cap_test: [25] WRONG — %s: read %u of %u put page %u where a "
+               "copying read of the same blocks disagrees\n", name, done + 1,
+               CT25_ROUNDS, bad_page);
+
+out:
+    (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, bytes);
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                        pa_cnt * sizeof(vm_address_t));
+    (void)device_close(handle);
+    (void)mach_port_deallocate(mach_task_self(), handle);
+    return ok;
+}
+
 static int
 the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
                              const char *name, int scratch)
@@ -2594,6 +2727,8 @@ main(int argc, char **argv)
             if (!a_buffer_capability_is_a_buffers(device_port, p,
                                                   candidates[i]))
                 pass = 0;
+            if (!many_pages_in_one_request(device_port, p, candidates[i]))
+                pass = 0;		/* #537 */
             b2_done = 1;
         }
         (void)mach_port_deallocate(mach_task_self(), p);
