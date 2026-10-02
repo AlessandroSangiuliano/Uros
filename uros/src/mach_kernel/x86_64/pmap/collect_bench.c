@@ -142,6 +142,64 @@ static volatile int	bench_iter[NCPUS];
 static volatile uint64_t bench_cycles[NCPUS];
 
 /*
+ * #615: the slot a worker writes is the one it was given at creation -- the
+ * processor bench_thread_bound() bound it to -- and not the processor it
+ * reads.  The two are one while the binding holds.  When they were not, two
+ * workers wrote one slot, and the bench said "only 3 of 4 workers finished"
+ * about four workers that had all finished and terminated.  So the slot comes
+ * from the binding, and a cpu_number() that disagrees with it, at the
+ * worker's first line or its last, is kept (plus one, so 0 is "agreed") and
+ * said after the wait: the bench names where the worker ran instead of
+ * miscounting it.
+ */
+static volatile int	bench_ran_first[NCPUS];
+static volatile int	bench_ran_last[NCPUS];
+
+static int bench_slot(void)
+{
+	processor_t	bound = current_thread()->bound_processor;
+	int		here = cpu_number();
+	int		slot = bound != PROCESSOR_NULL ? bound->slot_num : here;
+
+	if (here != slot)
+		bench_ran_first[slot] = here + 1;
+	return slot;
+}
+
+static void bench_slot_last(int slot)
+{
+	int	here = cpu_number();
+
+	if (here != slot)
+		bench_ran_last[slot] = here + 1;
+}
+
+/* arm < 0 is the race, which has no arm number. */
+static void bench_said_where(int arm)
+{
+	int	i;
+
+	for (i = 0; i < NCPUS; i++) {
+		int	first, last;
+
+		if (bench_ran_first[i] == 0 && bench_ran_last[i] == 0)
+			continue;
+		first = bench_ran_first[i] ? bench_ran_first[i] - 1 : i;
+		last = bench_ran_last[i] ? bench_ran_last[i] - 1 : i;
+		if (arm < 0)
+			printf("pmap_bench: the race: the worker bound to "
+			       "processor %d read cpu_number() %d at its first "
+			       "line and %d at its last -- WRONG (#615)\n",
+			       i, first, last);
+		else
+			printf("pmap_bench: arm %d: the worker bound to "
+			       "processor %d read cpu_number() %d at its first "
+			       "line and %d at its last -- WRONG (#615)\n",
+			       arm, i, first, last);
+	}
+}
+
+/*
  * Mappings per worker in the cost arm, and eight leaf tables to put them in.
  *
  * Bigger than the safety arm's loop on purpose: what is being priced is a few
@@ -215,7 +273,7 @@ static uint64_t bench_witness_va(int worker)
 
 static void bench_worker(void)
 {
-	int	 me = cpu_number();
+	int	 me = bench_slot();		/* #615 */
 	uint64_t pa;
 	int	 i;
 
@@ -259,6 +317,7 @@ static void bench_worker(void)
 		pmap_remove(bench_pmap, va, va + PAGE_SIZE_4K);
 	}
 
+	bench_slot_last(me);
 	bench_done[me] = 1;
 	thread_terminate_self();
 }
@@ -489,7 +548,7 @@ static void bench_collect_quiet(void)
  */
 static void bench_cost_worker(void)
 {
-	int	 me = cpu_number();
+	int	 me = bench_slot();		/* #615 */
 	uint64_t pa;
 	int	 i;
 
@@ -530,6 +589,7 @@ static void bench_cost_worker(void)
 
 	bench_cycles[me] = rdtsc() - bench_cycles[me];
 
+	bench_slot_last(me);
 	bench_done[me] = 1;
 	thread_terminate_self();
 }
@@ -575,6 +635,8 @@ static uint64_t bench_arm_cost(int arm, int *want_out)
 		bench_iter[i] = 0;
 		bench_pa[i] = 0;
 		bench_cycles[i] = 0;
+		bench_ran_first[i] = 0;
+		bench_ran_last[i] = 0;
 	}
 	bench_start = 0;
 
@@ -612,6 +674,7 @@ static uint64_t bench_arm_cost(int arm, int *want_out)
 					       bench_iter[i],
 					       BENCH_COST_MAPS);
 		}
+		bench_said_where(arm);		/* #615 */
 	}
 
 	/*
@@ -917,8 +980,11 @@ pmap_collect_bench(void)
 	}
 
 	bench_frames_at_start = pmap_table_frames_live;
-	for (i = 0; i < NCPUS; i++)
+	for (i = 0; i < NCPUS; i++) {
 		bench_done[i] = 0;
+		bench_ran_first[i] = 0;
+		bench_ran_last[i] = 0;
+	}
 	bench_start = 0;
 
 	for (i = 0; i < NCPUS; i++) {
@@ -999,6 +1065,7 @@ pmap_collect_bench(void)
 				done += bench_done[k];
 		}
 
+		bench_said_where(-1);		/* #615 */
 		if (done < want) {
 			/*
 			 * ⚠️ How far each one got, not just how many finished.
