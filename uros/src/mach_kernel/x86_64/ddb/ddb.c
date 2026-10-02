@@ -524,7 +524,7 @@ void ddb_poll_console(struct trap_frame *frame)
 	if (!enabled)
 		return;
 
-	c = cons_getc_nowait();
+	c = cons_poll_getc();	/* #599: not a byte of a driver's input */
 	if (c >= 0)
 		(void) ddb_break_char(c);
 
@@ -887,9 +887,15 @@ static boolean_t claim_machine(void)
 {
 	unsigned me = cpu_number();
 
+	/*
+	 * #599: compared with what was expected.  atomic_cmpxchg64 answers
+	 * with the value it found, and this took that for a success flag: a
+	 * claim lost to any processor but 0 answered TRUE, and a second
+	 * processor walked into a session another one held (found in review).
+	 */
 	return atomic_cmpxchg64((volatile uint64_t *) &ddb_owner,
 				(uint64_t) DDB_NOBODY, (uint64_t) me)
-	       ? TRUE : FALSE;
+	       == (uint64_t) DDB_NOBODY;
 }
 
 static void ddb_stop_others(void)
@@ -1509,7 +1515,12 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 	 * drain, and then the flush below would wait for a lock nobody is left
 	 * to release.  Done here, while the machine is still whole, the ring
 	 * ends empty and disarmed -- and cons_drain() takes the port only when
-	 * the ring is not empty, so from this line on nobody takes it at all.
+	 * the ring is not empty, so from this line on the ring's side takes it
+	 * no more.  #599: other takers are still running until the stop -- the
+	 * tick's poll, and uart.so's register and divisor RPCs -- and one of
+	 * them can be parked holding the port's lock, which is why DDB's
+	 * session on COM1 (cons_ddb_session) comes after the stop and takes no
+	 * lock.
 	 *
 	 * Not put back on leaving, deliberately.  The machine reached a
 	 * debugger; the synchronous console is the one to leave it with, and
@@ -1544,15 +1555,19 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 	 * NMIs to processors already parked in one -- which they cannot take,
 	 * because an NMI is blocked until the first one returns.
 	 */
-	if (!was_in)
+	if (!was_in) {
 		ddb_stop_others();
+		cons_ddb_session(1);	/* #599: COM1's latch, after the stop */
+	}
 
 	ddb_enter_body(frame, why);
 
 	arm_breakpoints();
 
-	if (!was_in)
+	if (!was_in) {
+		cons_ddb_session(0);	/* #599: before the others go */
 		ddb_release_others();
+	}
 
 	in_ddb[me] = was_in;
 }

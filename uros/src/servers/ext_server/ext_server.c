@@ -299,8 +299,9 @@ of_op_end(struct mount_context *mnt, int idx)
 
 /*
  * Flush a dirty page cache block to disk via libblk.
- * If phys != 0, use zero-copy DMA write.
- * Otherwise fall back to regular write with data copy.
+ * If phys != 0 and the device has the physical path, a zero-copy DMA write;
+ * a DMA-pool page without that path is copied to the heap and written; any
+ * other block is written as it is.  Returns the device's answer (#599).
  */
 static int
 ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
@@ -312,29 +313,58 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 				     DEV_BSIZE / wb->dev->rec_size);
 	kern_return_t rc;
 
+	bytes_written = 0;
 	if (phys && blk_has_phys(wb->dev->blk)) {
 		/*
 		 * #520: whole.  `phys' is a vm_offset_t and this cast used to
 		 * narrow it -- on i386 harmlessly, since the two are the same
 		 * type there, and on x86-64 by dropping the top half of a page
 		 * address into a DMA write.
+		 *
+		 * #599: and a refusal is the answer -- no fallback.  The block
+		 * server refuses a page no capability covers; writing the same
+		 * page another way would be around the refusal, not through it.
 		 */
 		vm_address_t pa = phys;
 		rc = blk_write_phys(wb->dev->blk, recnum,
 				    (io_buf_len_t)size,
 				    &pa, 1, &bytes_written);
+	} else if (phys) {
+		/*
+		 * #599: a DMA-pool page on a device without the physical path
+		 * is copied to the heap first.  It went to blk_write as it
+		 * was, and the out-of-line device_write cannot take a page of
+		 * the DMA pool (see write_data_block in ext2fs.c, which states
+		 * the same rule for its callers) -- what reached the disk was
+		 * not the block.
+		 */
+		vm_offset_t copy = 0;
+
+		rc = vm_allocate(mach_task_self(), &copy, size, TRUE);
+		if (rc == KERN_SUCCESS) {
+			memcpy((void *)copy, (const void *)data, size);
+			rc = blk_write(wb->dev->blk, recnum, (io_buf_ptr_t)copy,
+				       (mach_msg_type_number_t)size,
+				       &bytes_written);
+			(void) vm_deallocate(mach_task_self(), copy, size);
+		}
 	} else {
 		rc = blk_write(wb->dev->blk, recnum,
 			       (io_buf_ptr_t)data,
 			       (mach_msg_type_number_t)size,
 			       &bytes_written);
 	}
-	if (rc != KERN_SUCCESS) {
-		printf("ext2: writeback block %ld failed: %d\n",
-		       (long)block, rc);
-		return -1;
-	}
-	return 0;
+	/* #599: a short write is not a write. */
+	if (rc == KERN_SUCCESS && bytes_written != (io_buf_len_t)size)
+		rc = D_IO_ERROR;
+	/*
+	 * #599: not printed here -- the page cache says a block it could not
+	 * write once, not at every retry of every sync.
+	 *
+	 * The device's answer, not -1: the page cache keeps the block dirty
+	 * on any non-zero, and a caller that reports it names the cause.
+	 */
+	return (int)rc;
 }
 
 /* ================================================================
@@ -402,9 +432,78 @@ writeback_thread(void *arg)
 	return NULL;
 }
 
+/*
+ * #599: hand the block server the capability for a mount's page cache, on
+ * the handle that mount reads through.
+ *
+ * The block server's disk fills the cache by DMA; on a machine that confines
+ * devices the kernel maps it for that disk only on a capability naming the
+ * buffer, issued by cap_server to its owner -- this server -- and handed
+ * over.  Nothing handed it over: under translation every zero-copy read was
+ * refused, and the mount spun on a directory block of zeros (menu entry 16).
+ * One line either way, naming the side that refused.
+ */
+static kern_return_t
+ext2_lend_buffer(struct mount_context *mnt, uint64_t region_id)
+{
+	struct uros_cap	t;
+	kern_return_t	kr;
+
+	memset(&t, 0, sizeof(t));
+	kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+			 CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
+	if (kr != KERN_SUCCESS) {
+		printf("ext2: cap_server would not issue a capability for "
+		       "page-cache buffer %llu (kr=%d) — the cache will copy\n",
+		       (unsigned long long)region_id, (int)kr);
+		return kr;
+	}
+	kr = device_register_dma(mnt->dev.dev_port, (char *)&t, sizeof(t));
+	memset(&t, 0, sizeof(t));
+	if (kr != KERN_SUCCESS) {
+		printf("ext2: the block server would not take the capability "
+		       "for page-cache buffer %llu (kr=%d) — the cache will "
+		       "copy\n", (unsigned long long)region_id, (int)kr);
+		return kr;
+	}
+	printf("ext2: handed the block server the capability for page-cache "
+	       "buffer %llu\n", (unsigned long long)region_id);
+	return KERN_SUCCESS;
+}
+
 /* ================================================================
  * MIG server routines  (ds_ prefix from ext2fs_server.defs)
  * ================================================================ */
+
+/*
+ * #599: what a client is told when the filesystem said no.
+ *
+ * Every failure used to go back as KERN_FAILURE: libvfs' VFS_ERR_* codes
+ * were defined, and a comment below said the caller "already receives
+ * VFS_ERR_NOENT", but nothing produced one.  So a directory refused as
+ * damaged, a read the device never did and a name that is simply not there
+ * were one answer, and xfile_read reported a damaged directory as "not on
+ * this disk".  The codes are the library's (vfs_types.h); anything that is
+ * not the filesystem's own verdict -- a device error, a refusal from the
+ * block server -- is VFS_ERR_IO, because to the client that is what it is.
+ */
+static kern_return_t
+fs_error(int rc)
+{
+	switch (rc) {
+	case 0:				return KERN_SUCCESS;
+	case FS_NO_ENTRY:		return VFS_ERR_NOENT;
+	case FS_NOT_DIRECTORY:		return VFS_ERR_NOTDIR;
+	case FS_IS_DIRECTORY:		return VFS_ERR_ISDIR;
+	case FS_NAME_TOO_LONG:		return VFS_ERR_NAMETOOLONG;
+	case FS_INVALID_PARAMETER:
+	case FS_NOT_IN_FILE:
+	case FS_SYMLINK_LOOP:		return VFS_ERR_INVAL;
+	case FS_NO_RESOURCES:
+	case KERN_RESOURCE_SHORTAGE:	return KERN_RESOURCE_SHORTAGE;
+	default:			return VFS_ERR_IO;
+	}
+}
 
 kern_return_t
 ds_ext2_open(
@@ -545,7 +644,8 @@ ds_ext2_open(
 			 * came from one benchmark measuring how fast a lookup
 			 * misses -- so the loudest thing in the log was a test
 			 * getting exactly the result it asked for.  The caller
-			 * already receives VFS_ERR_NOENT and every test that
+			 * receives VFS_ERR_NOENT (since #599; before, a bare
+			 * KERN_FAILURE for every failure) and every test that
 			 * cares reports its own verdict; nothing was learning
 			 * anything from the line.
 			 *
@@ -559,7 +659,7 @@ ds_ext2_open(
 			if (rc != FS_NO_ENTRY || ext2_verbose)
 				printf("ext2: open \"%s\" failed (rc=%d)\n",
 				       path, rc);
-			return KERN_FAILURE;
+			return fs_error(rc);		/* #599 */
 		}
 		pthread_mutex_lock(&mnt->of_lock);
 		mnt->open_files[fid].private = priv;
@@ -744,10 +844,23 @@ ds_ext2_write(
 		      (vm_size_t)data_count);
 
 	if (rc != 0) {
+		/*
+		 * #599: a write that failed part way can still have linked
+		 * blocks and grown the file, which leaves the inode dirty; it
+		 * goes on the dirty list like a write that succeeded, or no
+		 * sync would ever write it (found in review).  Not a write
+		 * refused for a directory: that one changed nothing, and a
+		 * directory's vnode stays off the writeback's list.
+		 */
+		if (rc != FS_IS_DIRECTORY && ext2fs_is_dirty(priv)) {
+			pthread_mutex_lock(&mnt->of_lock);
+			dirty_list_add(mnt, idx);
+			pthread_mutex_unlock(&mnt->of_lock);
+		}
 		of_op_end(mnt, idx);
 		printf("ext2: write fid=%u offset=%u count=%u failed: %d\n",
 		       fid, offset, data_count, rc);
-		return KERN_FAILURE;
+		return fs_error(rc);	/* #599: the reason, not "failed" */
 	}
 
 	/* Write sets dirty flags — track for efficient sync (#385: the
@@ -999,16 +1112,20 @@ vfs_open(
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
 		(void)mach_port_deallocate(mach_task_self(), client_task);
-		return KERN_FAILURE;
+		return VFS_ERR_EXIST;			/* #599 */
 	}
 
-	/* O_CREAT: create the file then reopen if it didn't exist. */
-	if (kr != KERN_SUCCESS && (flags & VFS_O_CREAT)) {
+	/*
+	 * O_CREAT: create the file then reopen if it didn't exist.  #599: only
+	 * if it did not exist -- any other failure (a damaged directory, an
+	 * I/O error) is the answer, not a reason to create beside it.
+	 */
+	if (kr == VFS_ERR_NOENT && (flags & VFS_O_CREAT)) {
 		int rc = ext2fs_create(&mnt->dev, path, mode ? mode : 0644);
 		if (rc != 0) {
 			/*
-			 * Said here, because the reply cannot: it carries
-			 * KERN_FAILURE, and the code below it is what names
+			 * Said here as well as in the reply: the reply carries
+			 * the kind (#599), and the code below it is what names
 			 * the cause (#498 -- the first create on x86-64 failed
 			 * and nothing on the console said why).
 			 */
@@ -1017,7 +1134,7 @@ vfs_open(
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
 			(void)mach_port_deallocate(mach_task_self(), client_task);
-			return KERN_FAILURE;
+			return fs_error(rc);		/* #599 */
 		}
 		kr = ds_ext2_open(fs_port, path, &fid);
 	}
@@ -1122,7 +1239,7 @@ vfs_truncate(mach_port_t fs_port, vfs_u64_t handle, vfs_u64_t length)
 	}
 	rc = ext2fs_truncate_file(priv, (vm_size_t)length);
 	vfs_op_end(mnt, handle);
-	return rc == 0 ? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(rc);				/* #599 */
 }
 
 kern_return_t
@@ -1210,7 +1327,7 @@ vfs_readdir(
 	vfs_op_end(mnt, dir_handle);
 	if (rc != 0) {
 		free(tmp);
-		return KERN_FAILURE;
+		return fs_error(rc);			/* #599 */
 	}
 
 	kr = vm_allocate(mach_task_self(), &buf,
@@ -1260,8 +1377,7 @@ vfs_unlink(mach_port_t fs_port, vfs_path_t path)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_unlink(&mnt->dev, path) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_unlink(&mnt->dev, path));	/* #599 */
 }
 
 kern_return_t
@@ -1272,8 +1388,7 @@ vfs_mkdir(mach_port_t fs_port, vfs_path_t path, int mode)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_mkdir(&mnt->dev, path, mode ? mode : 0755) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_mkdir(&mnt->dev, path, mode ? mode : 0755));	/* #599 */
 }
 
 kern_return_t
@@ -1284,8 +1399,7 @@ vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_rmdir(&mnt->dev, path) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_rmdir(&mnt->dev, path));	/* #599 */
 }
 
 kern_return_t
@@ -1296,8 +1410,7 @@ vfs_rename(mach_port_t fs_port, vfs_path_t old_path, vfs_path_t new_path)
 	if (mnt == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	return ext2fs_rename(&mnt->dev, old_path, new_path) == 0
-		? KERN_SUCCESS : KERN_FAILURE;
+	return fs_error(ext2fs_rename(&mnt->dev, old_path, new_path));	/* #599 */
 }
 
 kern_return_t
@@ -1721,13 +1834,25 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 			       kr, (unsigned long)kva,
 			       (unsigned long)uva, n_pages, pa_cnt);
 			if (kr == KERN_SUCCESS) {
-				dma_pc = page_cache_create_dma(
-					n_entries,
-					(vm_size_t)blksz,
-					(vm_offset_t)uva,
-					pa_list, pa_cnt,
-					ext2_writeback,
-					&mnt->wb);
+				/*
+				 * #599: the cache is built on the buffer
+				 * only once the block server holds its
+				 * capability; otherwise the buffer goes back
+				 * whole, through device_dma_free alone -- the
+				 * kernel takes its mapping down, and a
+				 * vm_deallocate here first used to leave the
+				 * region itself in the kernel for good.
+				 */
+				dma_pc = NULL;
+				if (ext2_lend_buffer(mnt, region_id) ==
+				    KERN_SUCCESS)
+					dma_pc = page_cache_create_dma(
+						n_entries,
+						(vm_size_t)blksz,
+						(vm_offset_t)uva,
+						pa_list, pa_cnt,
+						ext2_writeback,
+						&mnt->wb);
 				if (dma_pc) {
 					mnt->dev.cache = dma_pc;
 					printf("ext2: DMA page "
@@ -1737,14 +1862,13 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 					       dma_pc->pc_max_entries,
 					       pa_cnt);
 				} else {
-					printf("ext2: DMA cache "
-					       "create failed, "
-					       "using non-DMA\n");
-					vm_deallocate(
-						mach_task_self(),
-						(vm_offset_t)uva,
-						(vm_size_t)n_pages
-							* 4096);
+					printf("ext2: no DMA page cache, "
+					       "using non-DMA (the buffer "
+					       "freed: kr=%d)\n",
+					       (int)device_dma_free(
+						device_port,
+						DEVICE_DMA_NO_BDF, kva,
+						(vm_size_t)n_pages * 4096));
 				}
 			} else {
 				printf("ext2: DMA alloc failed "
@@ -1771,7 +1895,9 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 
 		/* ...otherwise a plain one, with the same write-back. */
 		if (mnt->dev.cache == NULL)
-			mnt->dev.cache = page_cache_create(8192, ext2_writeback,
+			mnt->dev.cache = page_cache_create(8192,
+							   (vm_size_t)blksz,
+							   ext2_writeback,
 							   &mnt->wb);
 		if (mnt->dev.cache == NULL)
 			printf("ext2: no page cache -- every block goes to the "
@@ -1955,6 +2081,15 @@ flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
 					(vm_size_t)count);
 				if (rc != 0) {
 					rep->status = VFS_FLIPC_ERR_IO;
+					/* #599: see ds_ext2_write */
+					if (rc != FS_IS_DIRECTORY &&
+					    ext2fs_is_dirty(priv)) {
+						pthread_mutex_lock(
+							&mnt->of_lock);
+						dirty_list_add(mnt, idx);
+						pthread_mutex_unlock(
+							&mnt->of_lock);
+					}
 				} else {
 					/* #388: the dirty list is shared with
 					 * close/sync/writeback — of_lock, like
@@ -2146,6 +2281,55 @@ main(int argc, char **argv)
 	(void)gpu_console_init("ext");
 
 	printf("\n=== ext2 filesystem server " EXT2_SERVER_VERSION_STRING " ===\n");
+
+	/*
+	 * #599: the check every directory walk makes, asked before any disk is
+	 * read.  One line either way, with the counts it read.
+	 */
+	{
+		unsigned int ran, wrong;
+
+		ext2_dirent_selftest(&ran, &wrong);
+		if (wrong == 0)
+			printf("ext2: %u directory records checked, the damaged "
+			       "ones refused and the well-formed ones accepted, "
+			       "0 wrong (#599)\n", ran);
+		else
+			printf("ext2: WRONG — %u of %u directory records "
+			       "misjudged by the check every directory walk "
+			       "makes (#599)\n", wrong, ran);
+	}
+
+	/*
+	 * #599: the block-I/O paths, on a file whose device answers nothing.
+	 * One line either way; the page-cache arms are added to it.
+	 */
+	{
+		unsigned int ran, wrong;
+
+		ext2_blockio_selftest(&ran, &wrong);
+		if (wrong == 0)
+			printf("ext2: %u block-I/O cases on a device that "
+			       "answers nothing, 0 wrong (#599)\n", ran);
+		else
+			printf("ext2: WRONG — %u of %u block-I/O cases on a "
+			       "device that answers nothing answered wrong "
+			       "(#599)\n", wrong, ran);
+	}
+
+	/* #599: the page cache, on small caches of its own. */
+	{
+		unsigned int ran, wrong, failed;
+
+		page_cache_selftest(&ran, &wrong, &failed);
+		if (wrong == 0)
+			printf("ext2: %u page-cache cases, 0 wrong (#599)\n",
+			       ran);
+		else
+			printf("ext2: WRONG — %u of %u page-cache cases "
+			       "answered wrong, P-mask 0x%x (#599)\n", wrong,
+			       ran, failed);
+	}
 
 	/* Create port set for all mount ports */
 	kr = mach_port_allocate(mach_task_self(),

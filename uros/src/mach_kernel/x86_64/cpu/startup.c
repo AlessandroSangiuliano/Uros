@@ -30,6 +30,8 @@
 #include <pmap/pmap.h>
 #include <thread/fpu.h>
 #include <boot/bootarg.h>	/* #461: boot_flag */
+#include <cpu/ioapic_race_test.h>	/* #599: -Y */
+#include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
@@ -437,6 +439,26 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('W') && want > 1)
 			kernel_wait_preempt_test();
+
+		/*
+		 * -Y: the I/O APIC's window raced from two processors (#599).
+		 * Here for the reason of the tests above -- the second side is
+		 * bound to a processor already in the scheduler.  The two pins
+		 * it takes are ones nothing has routed, and nothing routes one
+		 * while it runs: the drivers that claim lines come with
+		 * bootstrap.  Returns, so the boot goes on.
+		 */
+		if (boot_flag('Y') && want > 1)
+			ioapic_window_race_test();
+
+		/*
+		 * -Z: two processors panic at the same instant (#599).  The same
+		 * requirement of a second processor; does not return when it
+		 * runs, because the panic is the test (scripts/
+		 * double-panic-check.sh reads the log).
+		 */
+		if (boot_flag('Z') && want > 1)
+			double_panic_test();
 
 		/*
 		 * -Q: the futex hand-off and the waiters it must not switch

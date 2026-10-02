@@ -160,16 +160,17 @@ cons_cost_report(void)
  * few lines into setup_main and would report a boot that has barely started
  * -- and in particular before there has been a single tick to drain anything.
  *
- * 🔑 AND A RUN ON THIS TARGET HAS TWO ENDS, so it is said from both and said
- * ONCE.  halt_cpu() is one: a panic, a self-test that halts because the boot
- * WAS the test, an operator's halt; it says this before disarming the ring,
- * so the line itself still goes out.  The other is the machine going quiet
- * with everything finished, which is how an ordinary run ends -- the harness
- * stops a kernel that has nothing left to do rather than waiting for it to
- * halt, so a report that only halt_cpu() made would never be printed by the
- * runs that matter most.
+ * 🔑 AND THE KERNEL CANNOT KNOW WHICH MOMENT IS THE END.  This is the final
+ * copy, said ONCE, by halt_cpu(): a panic (after the panicking processor's
+ * message), a self-test that halts because the boot WAS the test, an
+ * operator's halt.  An ordinary run has no such moment -- the harness stops
+ * a kernel that has nothing left to do rather than waiting for it to halt --
+ * so the quiet census says the same counts with each of its reports and when
+ * it fires, one line each (cons_ring_so_far, below).  #599: the census used
+ * to say this copy itself, once, and a census whose first report came after
+ * it fired said none (found in review).
  *
- * ⚠️ A plain word and no atomic, so two processors arriving together can both
+ * ⚠️ A plain word and no atomic, so two processors halting together can both
  * print it.  That is the right way round for a report: a line said twice is a
  * reader's mild confusion, a line lost to a failed exchange is a boot with no
  * answer at all.
@@ -242,4 +243,44 @@ cons_ring_report(void)
 	       cons_drains(CONS_DRAIN_WRITER), cons_drains(CONS_DRAIN_DEFERRED),
 	       cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
 	       cons_queued());
+}
+
+/*
+ * The same counts so far, for the quiet census (#599): one line, beginning
+ * with the caller's lead, taken at each of its reports and when it fires.
+ *
+ * ⚠️ Counts only, and none of this file's usual words.  The census says one
+ * of these at every doubling of processor 0's idle passes, so its number
+ * depends on how long a run lasts; the harness counts "UrMach x86-64:" lines
+ * as self-tests and "NOT ASKED" lines as questions the machine could not
+ * pose, and each copy in the final report's form added two of the first per
+ * doubling, and one of the second on a boot with a framebuffer whose glyph
+ * time it could not give -- no calibrated TSC, or no glyph drawn (found in
+ * review).  The time a glyph takes is the final copy's.
+ *
+ * ⚠️ Not the run's figures, unless the census fired on a machine that had
+ * gone quiet: a run the harness ends between two doublings has console work
+ * after the last copy that no copy counts.
+ */
+void
+cons_ring_so_far(const char *lead)
+{
+	if (!fbcons_present())
+		printf("%sconsole so far: ring handed over %u/%u/%u times "
+		       "(writer/tick or idle/way down), %u writers paid for "
+		       "room, %u bytes queued; no framebuffer (#567)\n", lead,
+		       cons_drains(CONS_DRAIN_WRITER),
+		       cons_drains(CONS_DRAIN_DEFERRED),
+		       cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
+		       cons_queued());
+	else
+		printf("%sconsole so far: ring handed over %u/%u/%u times "
+		       "(writer/tick or idle/way down), %u writers paid for "
+		       "room, %u bytes queued; framebuffer %llu glyphs, %llu "
+		       "scrolls (#567, #568)\n", lead,
+		       cons_drains(CONS_DRAIN_WRITER),
+		       cons_drains(CONS_DRAIN_DEFERRED),
+		       cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
+		       cons_queued(), (unsigned long long) fbcons_glyphs(),
+		       (unsigned long long) fbcons_scrolls());
 }

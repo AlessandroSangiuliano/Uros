@@ -1722,6 +1722,7 @@ static void percpu_selftest(void)
 	 * those would take, so it stays inert until here.
 	 */
 	FP_READY();
+	cons_percpu_ready();	/* #599: the console may take its lock now */
 
 	kputs("UrMach x86-64: gs base was ");
 	kputhex64(before);
@@ -4675,6 +4676,44 @@ static void iommu_selftest(void)
 			   " it is not\r\n");
 	}
 
+	/* #599: the per-device refusal count, on a scratch table. */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_fault_ledger_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" fault-log cases, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — a device's refusals only ever go up, and one the"
+			   " log has no room to name is counted as unplaced\r\n"
+			 : " — WRONG, a driver asking whether it was refused"
+			   " could be told no\r\n");
+	}
+
+	/* #599: the drains, on fabricated engines. */
+	{
+		unsigned ran = 0, wrong = 0, failed = 0;
+		int ok = iommu_fault_drain_check(&ran, &wrong, &failed);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" fault-drain cases on fabricated engines, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		if (!ok) {
+			/* #599: bit n is the (n+1)th case; A6 has two */
+			kputs(" (bits: A1-A6, A6 again, A7, A8, V1-V3; failed mask ");
+			kputdec(failed);
+			kputs(")");
+		}
+		kputs(ok ? " — a full log, an overflow flag and an entry never"
+			   " written are each counted as a possible loss\r\n"
+			 : " — WRONG, refusals could go missing and nothing say"
+			   " so\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");
@@ -5124,8 +5163,9 @@ static void iommu_selftest(void)
 				kputs("UrMach x86-64:   ");
 				kputdec(faults);
 				kputs(" dma refusals recorded so far");
-				if (iommu_fault_overflowed())
-					kputs(" — AND THE ENGINE DROPPED SOME");
+				if (iommu_fault_lost() != 0)
+					kputs(" — and some may have gone "
+					      "uncounted (see iommu_fault_lost)");
 				kputs(faults == 0
 				      ? " — which under pass-through is the"
 					" only right answer\r\n"

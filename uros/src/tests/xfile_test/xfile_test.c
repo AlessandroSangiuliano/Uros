@@ -364,6 +364,473 @@ xf_check_contents(vfs_fd_t fd, int arm_hdr, int arm_body)
 	}
 }
 
+/*
+ * #599 X1: a block a write allocates starts as zeros.  A scratch file next to
+ * `path' is filled with 0xA5 over XF_FRESH_BLOCKS blocks, synced and removed;
+ * a second one gets one byte in the middle of each of as many blocks, and
+ * every other byte of them must read back as zero.  The second file's blocks
+ * are, as a rule, the first one's again, and that is the point: a partial
+ * write of a fresh block read the block first, and got its last owner's
+ * bytes from the cache or from the disk.
+ */
+#define XF_FRESH_BLOCKS	8u
+#define XF_FRESH_BYTE	0x5Au
+#define XF_OLD_BYTE	0xA5u
+
+static int
+xf_scratch_name(char *out, size_t len, const char *path, const char *leaf)
+{
+	const char	*slash = strrchr(path, '/');
+	size_t		 dir;
+
+	if (slash == NULL)
+		return -1;
+	dir = (size_t)(slash - path) + 1;
+	if (dir + strlen(leaf) + 1 > len)
+		return -1;
+	memcpy(out, path, dir);
+	strcpy(out + dir, leaf);
+	return 0;
+}
+
+/* The step that failed, or 0 when the file is there and read back. */
+static const char *
+xf_fresh_setup(const char *a, const char *b, uint32_t bs, vfs_fd_t *fdp)
+{
+	unsigned char	one = XF_FRESH_BYTE;
+	uint32_t	done, n, i;
+	vfs_fd_t	fd;
+
+	if (vfs_open_rc(a, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the first file";
+	memset(buf, XF_OLD_BYTE, sizeof(buf));
+	for (done = 0; done < XF_FRESH_BLOCKS * bs; done += n) {
+		n = XF_FRESH_BLOCKS * bs - done;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		if (vfs_write(fd, buf, n) != (ssize_t)n) {
+			(void)vfs_close(fd);
+			return "filling the first file";
+		}
+	}
+	if (vfs_sync(fd) != 0) {
+		(void)vfs_close(fd);
+		return "syncing the first file";
+	}
+	(void)vfs_close(fd);
+	if (vfs_unlink(a) != 0)
+		return "removing the first file";
+
+	if (vfs_open_rc(b, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the second file";
+	for (i = 0; i < XF_FRESH_BLOCKS; i++)
+		if (vfs_lseek(fd, (off_t)(i * bs + bs / 2), VFS_SEEK_SET) !=
+		    (off_t)(i * bs + bs / 2) || vfs_write(fd, &one, 1) != 1) {
+			(void)vfs_close(fd);
+			return "writing the second file";
+		}
+	if (vfs_lseek(fd, 0, VFS_SEEK_SET) != 0) {
+		(void)vfs_close(fd);
+		return "rewinding the second file";
+	}
+	*fdp = fd;
+	return 0;
+}
+
+static void
+xf_fresh_blocks(const char *path, int arm)
+{
+	char		 a[128], b[128];
+	vfs_stat_t	 st;
+	vfs_fd_t	 fd;
+	const char	*step;
+	uint32_t	 bs, size, off, n, i, bad = 0, first = 0;
+	unsigned char	 first_val = 0, want;
+	ssize_t		 r;
+
+	if (vfs_stat(path, &st) != 0 || st.st_blksize < 1024 ||
+	    st.st_blksize > 65536 ||
+	    (st.st_blksize & (st.st_blksize - 1)) != 0 ||
+	    xf_scratch_name(a, sizeof(a), path, "xf_fresh_a.dat") != 0 ||
+	    xf_scratch_name(b, sizeof(b), path, "xf_fresh_b.dat") != 0) {
+		printf("%s: [%d] WRONG — no block size or scratch names for "
+		       "the fresh-block arm next to %s\n", tag, arm, path);
+		failed++;
+		return;
+	}
+	bs = (uint32_t)st.st_blksize;
+	step = xf_fresh_setup(a, b, bs, &fd);
+	if (step != 0) {
+		printf("%s: [%d] WRONG — the fresh-block arm failed %s\n", tag,
+		       arm, step);
+		failed++;
+		(void)vfs_unlink(b);
+		return;
+	}
+
+	size = (XF_FRESH_BLOCKS - 1) * bs + bs / 2 + 1;
+	for (off = 0; off < size; off += n) {
+		n = size - off;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		r = vfs_read(fd, buf, n);
+		if (r != (ssize_t)n)
+			break;
+		for (i = 0; i < n; i++) {
+			want = (off + i) % bs == bs / 2 ? XF_FRESH_BYTE : 0;
+			if (buf[i] != want && bad++ == 0) {
+				first = off + i;
+				first_val = buf[i];
+			}
+		}
+	}
+	(void)vfs_close(fd);
+	(void)vfs_unlink(b);
+	if (off < size) {
+		printf("%s: [%d] WRONG — the read of %s at offset %u returned "
+		       "%ld of %u bytes\n", tag, arm, b, off, (long)r, n);
+		failed++;
+	} else if (bad != 0) {
+		printf("%s: [%d] WRONG — %u bytes of %u fresh blocks are not "
+		       "what was written, the first at offset %u (0x%02x): a "
+		       "new block kept its last owner's bytes (#599)\n", tag,
+		       arm, bad, XF_FRESH_BLOCKS, first, first_val);
+		failed++;
+	} else {
+		printf("%s: [%d] a byte in each of %u fresh blocks, and every "
+		       "other byte of them reads 0 -- none of the removed "
+		       "file's 0x%02x (#599)\n", tag, arm, XF_FRESH_BLOCKS,
+		       XF_OLD_BYTE);
+		passed++;
+	}
+}
+
+/*
+ * #599 X2: a directory made on the blocks of a file removed unsynced works.
+ * A scratch file next to `path' is written over XF_FRESH_BLOCKS blocks and
+ * removed with no sync, so its blocks go back to the bitmap with their bytes
+ * still in the cache, dirty; a directory made next, which as a rule takes one
+ * of them, must then take a file that can be created and looked up -- before
+ * a sync and after it.
+ *
+ * ⚠️ Since ee2c26e2 this no longer shows the discard it was written for: the
+ * directory's first block goes to the disk through write_data_block, whose
+ * page_cache_wrote replaces the stale copy, so the arm passes with
+ * block_free's and block_alloc's discards taken out (found in review).  The
+ * discard's own arm is X4 below, through a block written OUTSIDE the cache.
+ */
+#define XF_DEAD_BYTE	0xC7u
+
+/* The step that failed, with its answer in *rc, or 0. */
+static const char *
+xf_owner_steps(const char *dead, const char *dir, const char *inner,
+	       uint32_t bs, int *rc)
+{
+	uint32_t	done, n;
+	vfs_fd_t	fd;
+
+	*rc = vfs_open_rc(dead, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			  &fd);
+	if (*rc != KERN_SUCCESS)
+		return "creating the file to remove";
+	memset(buf, XF_DEAD_BYTE, sizeof(buf));
+	for (done = 0; done < XF_FRESH_BLOCKS * bs; done += n) {
+		n = XF_FRESH_BLOCKS * bs - done;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		if (vfs_write(fd, buf, n) != (ssize_t)n) {
+			(void)vfs_close(fd);
+			*rc = -1;
+			return "writing the file to remove";
+		}
+	}
+	(void)vfs_close(fd);
+	if ((*rc = vfs_unlink(dead)) != 0)
+		return "removing the file, unsynced";
+	if ((*rc = vfs_mkdir(dir, 0755)) != 0)
+		return "making the directory";
+	*rc = vfs_open_rc(inner, VFS_O_RDWR | VFS_O_CREAT, 0644, &fd);
+	if (*rc != KERN_SUCCESS)
+		return "creating a file in the new directory";
+	(void)vfs_close(fd);
+	{
+		vfs_stat_t st;
+
+		if ((*rc = vfs_stat(inner, &st)) != 0)
+			return "looking the file up, before a sync";
+	}
+	*rc = vfs_open_rc(inner, VFS_O_RDONLY, 0, &fd);
+	if (*rc != KERN_SUCCESS)
+		return "opening the file to sync";
+	*rc = vfs_sync(fd);
+	(void)vfs_close(fd);
+	if (*rc != 0)
+		return "syncing";
+	{
+		vfs_stat_t st;
+
+		if ((*rc = vfs_stat(inner, &st)) != 0)
+			return "looking the file up, after the sync";
+	}
+	return 0;
+}
+
+static void
+xf_owner_change(const char *path, int arm)
+{
+	char		 dead[128], dir[128], inner[128];
+	vfs_stat_t	 st;
+	const char	*step;
+	uint32_t	 bs;
+	int		 rc = 0;
+
+	if (vfs_stat(path, &st) != 0 || st.st_blksize < 1024 ||
+	    st.st_blksize > 65536 ||
+	    (st.st_blksize & (st.st_blksize - 1)) != 0 ||
+	    xf_scratch_name(dead, sizeof(dead), path, "xf_dead.dat") != 0 ||
+	    xf_scratch_name(dir, sizeof(dir), path, "xf_dir") != 0 ||
+	    xf_scratch_name(inner, sizeof(inner), path,
+			    "xf_dir/inner") != 0) {
+		printf("%s: [%d] WRONG — no block size or scratch names for "
+		       "the owner-change arm next to %s\n", tag, arm, path);
+		failed++;
+		return;
+	}
+	bs = (uint32_t)st.st_blksize;
+	/* Leftovers of an earlier boot on the same disk */
+	(void)vfs_unlink(inner);
+	(void)vfs_rmdir(dir);
+	(void)vfs_unlink(dead);
+
+	step = xf_owner_steps(dead, dir, inner, bs, &rc);
+	(void)vfs_unlink(inner);
+	(void)vfs_rmdir(dir);
+	if (step != 0) {
+		printf("%s: [%d] WRONG — %s failed (0x%x), after a file's "
+		       "blocks were freed with their bytes unsynced (#599)\n",
+		       tag, arm, step, (unsigned)rc);
+		failed++;
+	} else {
+		printf("%s: [%d] a directory made on the blocks of a file "
+		       "removed unsynced takes a file, found before a sync "
+		       "and after it (#599)\n", tag, arm);
+		passed++;
+	}
+}
+
+/*
+ * #599 X3: an inode written through a file kept open does not undo another
+ * inode written since in the same inode-table block.  A file is created and
+ * kept open; a second one is created, written and closed; then the first is
+ * written and synced.  Both stay on the disk: the host's e2fsck finds a name
+ * pointing at an unused inode if the first file's flush wrote back a copy of
+ * the block taken when it was opened.  The arm itself can only say what it
+ * did -- this server answers a stat of the second file from its caches.
+ */
+static void
+xf_neighbour_inodes(const char *path, int arm)
+{
+	char		 a[128], b[128];
+	unsigned char	 one = 0x11;
+	vfs_stat_t	 st;
+	vfs_fd_t	 fa = -1, fb;
+	const char	*step = 0;
+
+	if (xf_scratch_name(a, sizeof(a), path, "xf_keep_a.dat") != 0 ||
+	    xf_scratch_name(b, sizeof(b), path, "xf_keep_b.dat") != 0) {
+		printf("%s: [%d] WRONG — no scratch names next to %s\n", tag,
+		       arm, path);
+		failed++;
+		return;
+	}
+	(void)vfs_unlink(a);
+	(void)vfs_unlink(b);
+	if (vfs_open_rc(a, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fa) != KERN_SUCCESS)
+		step = "creating the file kept open";
+	else if (vfs_write(fa, &one, 1) != 1)
+		step = "writing the file kept open";
+	else if (vfs_open_rc(b, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			     &fb) != KERN_SUCCESS)
+		step = "creating the second file";
+	else {
+		if (vfs_write(fb, &one, 1) != 1 || vfs_sync(fb) != 0)
+			step = "writing the second file";
+		(void)vfs_close(fb);
+		if (step == 0 && (vfs_write(fa, &one, 1) != 1 ||
+				  vfs_sync(fa) != 0))
+			step = "writing the file kept open, again";
+		if (step == 0 && vfs_stat(b, &st) != 0)
+			step = "looking the second file up";
+	}
+	if (fa >= 0)
+		(void)vfs_close(fa);
+	if (step != 0) {
+		printf("%s: [%d] WRONG — %s failed\n", tag, arm, step);
+		failed++;
+		return;
+	}
+	printf("%s: [%d] %s kept open across the making of %s, then written "
+	       "and synced; both left for the host's e2fsck (#599)\n", tag,
+	       arm, a, b);
+	passed++;
+}
+
+/*
+ * #599 X4: a block that changes owner leaves nothing of its old owner in the
+ * cache -- the discard in block_free and block_alloc, seen through a block
+ * this server writes to the disk directly: an indirect block (indirect_set's
+ * write_disk_block).
+ *
+ * A scratch file of XF_DEAD_I_BLOCKS data blocks -- no indirect block -- is
+ * written and removed with no sync, so its blocks go back to the bitmap with
+ * their bytes still cached, dirty.  A second file then writes ONLY its file
+ * block 12 and 13: the allocator, lowest free first, hands out the data
+ * block for 12 and, right after it, the single-indirect block -- both from
+ * the removed file's blocks.  The data blocks go through the cache and
+ * replace their stale copies; the indirect block does not.  With the stale
+ * copy left in the cache, the sync writes the removed file's bytes over the
+ * indirect block, and the second file, opened again (so no private copy of
+ * the map answers), cannot read blocks 12 and 13.
+ *
+ * ⚠️ The first version wrote the second file from block 0, and its indirect
+ * block landed on the removed file's own indirect block, which was never in
+ * the cache: it passed with the discards taken out (found in review).
+ */
+#define XF_DEAD_I_BLOCKS	12u
+#define XF_IND_FIRST		12u	/* the first block through the indirect */
+#define XF_IND_COUNT		2u
+
+static unsigned char
+xf_ind_byte(uint32_t block)
+{
+	return (unsigned char)(0x21u + block);
+}
+
+/* The step that failed, or 0 when the second file reads back whole. */
+static const char *
+xf_indirect_steps(const char *dead, const char *ind, uint32_t bs,
+		  uint32_t *bad_block)
+{
+	uint32_t	done, n, b, i;
+	vfs_fd_t	fd;
+	ssize_t		r;
+
+	if (vfs_open_rc(dead, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the file to remove";
+	memset(buf, XF_DEAD_BYTE, sizeof(buf));
+	for (done = 0; done < XF_DEAD_I_BLOCKS * bs; done += n) {
+		n = XF_DEAD_I_BLOCKS * bs - done;
+		if (n > sizeof(buf))
+			n = sizeof(buf);
+		if (vfs_write(fd, buf, n) != (ssize_t)n) {
+			(void)vfs_close(fd);
+			return "writing the file to remove";
+		}
+	}
+	(void)vfs_close(fd);
+	if (vfs_unlink(dead) != 0)
+		return "removing the file, unsynced";
+
+	if (vfs_open_rc(ind, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			&fd) != KERN_SUCCESS)
+		return "creating the file with an indirect block";
+	if (vfs_lseek(fd, (off_t)(XF_IND_FIRST * bs), VFS_SEEK_SET) !=
+	    (off_t)(XF_IND_FIRST * bs)) {
+		(void)vfs_close(fd);
+		return "seeking to its first indirect block";
+	}
+	for (b = XF_IND_FIRST; b < XF_IND_FIRST + XF_IND_COUNT; b++)
+		for (done = 0; done < bs; done += n) {
+			n = bs - done;
+			if (n > sizeof(buf))
+				n = sizeof(buf);
+			memset(buf, xf_ind_byte(b), n);
+			if (vfs_write(fd, buf, n) != (ssize_t)n) {
+				(void)vfs_close(fd);
+				return "writing through its indirect block";
+			}
+		}
+	if (vfs_sync(fd) != 0) {
+		(void)vfs_close(fd);
+		return "syncing";
+	}
+	(void)vfs_close(fd);
+
+	if (vfs_open_rc(ind, VFS_O_RDONLY, 0, &fd) != KERN_SUCCESS)
+		return "opening it again";
+	if (vfs_lseek(fd, (off_t)(XF_IND_FIRST * bs), VFS_SEEK_SET) !=
+	    (off_t)(XF_IND_FIRST * bs)) {
+		(void)vfs_close(fd);
+		return "seeking to its first indirect block again";
+	}
+	for (b = XF_IND_FIRST; b < XF_IND_FIRST + XF_IND_COUNT; b++)
+		for (done = 0; done < bs; done += n) {
+			n = bs - done;
+			if (n > sizeof(buf))
+				n = sizeof(buf);
+			r = vfs_read(fd, buf, n);
+			if (r != (ssize_t)n) {
+				(void)vfs_close(fd);
+				*bad_block = b;
+				return "reading it back";
+			}
+			for (i = 0; i < n; i++)
+				if (buf[i] != xf_ind_byte(b)) {
+					(void)vfs_close(fd);
+					*bad_block = b;
+					return "comparing what it read";
+				}
+		}
+	(void)vfs_close(fd);
+	return 0;
+}
+
+static void
+xf_indirect_owner(const char *path, int arm)
+{
+	char		 dead[128], ind[128];
+	vfs_stat_t	 st;
+	const char	*step;
+	uint32_t	 bs, bad = 0;
+
+	if (vfs_stat(path, &st) != 0 || st.st_blksize < 1024 ||
+	    st.st_blksize > 65536 ||
+	    (st.st_blksize & (st.st_blksize - 1)) != 0 ||
+	    xf_scratch_name(dead, sizeof(dead), path, "xf_dead_i.dat") != 0 ||
+	    xf_scratch_name(ind, sizeof(ind), path, "xf_ind.dat") != 0) {
+		printf("%s: [%d] WRONG — no block size or scratch names for "
+		       "the indirect-block arm next to %s\n", tag, arm, path);
+		failed++;
+		return;
+	}
+	bs = (uint32_t)st.st_blksize;
+	(void)vfs_unlink(dead);		/* an earlier boot's */
+	(void)vfs_unlink(ind);
+	step = xf_indirect_steps(dead, ind, bs, &bad);
+	(void)vfs_unlink(ind);
+	if (step != 0 && bad != 0) {
+		printf("%s: [%d] WRONG — %s failed at file block %u: a file "
+		       "written through its indirect block, on the blocks of "
+		       "one removed unsynced, did not read back after a sync "
+		       "(#599)\n", tag, arm, step, bad);
+		failed++;
+	} else if (step != 0) {
+		printf("%s: [%d] WRONG — the indirect-block arm failed %s "
+		       "(#599)\n", tag, arm, step);
+		failed++;
+	} else {
+		printf("%s: [%d] file blocks %u..%u written through an indirect "
+		       "block, on the blocks of a file removed unsynced, read "
+		       "back after a sync, opened again (#599)\n", tag, arm,
+		       XF_IND_FIRST, XF_IND_FIRST + XF_IND_COUNT - 1);
+		passed++;
+	}
+}
+
 static void
 xf_write(const char *path)
 {
@@ -371,11 +838,13 @@ xf_write(const char *path)
 	vfs_fd_t	fd;
 	uint32_t	off = 0, n, i;
 	ssize_t		r = 0;
+	kern_return_t	rc;
 
-	fd = vfs_open(path, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644);
-	if (fd == VFS_FD_INVALID) {
+	rc = vfs_open_rc(path, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644,
+			 &fd);
+	if (rc != KERN_SUCCESS) {
 		printf("%s: [1] WRONG — %s could not be created, on a mount "
-		       "that is there\n", tag, path);
+		       "that is there (0x%x)\n", tag, path, (unsigned)rc);
 		failed++;
 		return;
 	}
@@ -425,6 +894,10 @@ xf_write(const char *path)
 	xf_check_contents(fd, 3, 4);
 	(void)vfs_close(fd);
 	xf_check_stat(path, 5);
+	xf_fresh_blocks(path, 6);
+	xf_owner_change(path, 7);
+	xf_neighbour_inodes(path, 8);
+	xf_indirect_owner(path, 9);
 }
 
 static void
@@ -432,18 +905,34 @@ xf_read(const char *path)
 {
 	vfs_stat_t	st;
 	vfs_fd_t	fd;
+	int		rc;
 
-	if (vfs_stat(path, &st) != 0) {
+	/*
+	 * #599: NOT ASKED only for a name that is not there.  Any other
+	 * failure is an answer about the disk, and it was reported as this:
+	 * on the entry-16 boot a directory refused as damaged read as "not on
+	 * this disk".  libvfs now says which (VFS_ERR_NOENT, or the reason),
+	 * and the value is printed as read.
+	 */
+	rc = vfs_stat(path, &st);
+	if (rc == VFS_ERR_NOENT) {
 		printf("%s: NOT ASKED — %s is not on this disk: nothing wrote "
 		       "it for this boot to read\n", tag, path);
 		return;
 	}
+	if (rc != 0) {
+		printf("%s: [1] WRONG — a stat of %s failed with 0x%x, which "
+		       "is not \"absent\": the disk answered, and not with "
+		       "the file\n", tag, path, (unsigned)rc);
+		failed++;
+		return;
+	}
 	xf_check_stat(path, 1);
 
-	fd = vfs_open(path, VFS_O_RDONLY, 0);
-	if (fd == VFS_FD_INVALID) {
+	rc = vfs_open_rc(path, VFS_O_RDONLY, 0, &fd);
+	if (rc != KERN_SUCCESS) {
 		printf("%s: [2] WRONG — %s answers a stat and refuses an "
-		       "open\n", tag, path);
+		       "open (0x%x)\n", tag, path, (unsigned)rc);
 		failed++;
 		return;
 	}

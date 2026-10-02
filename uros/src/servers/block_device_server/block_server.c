@@ -793,8 +793,9 @@ extern boolean_t blk_handle_no_senders(mach_msg_header_t *in,
 
 /*
  * Forward decl: handler in block_device.c that flips the revoked bit
- * on every blk_handle whose cap_id matches.  Returns the number of
- * handles affected (only used for diagnostics).
+ * on every blk_handle whose cap_id matches, and forgets every buffer
+ * capability of that id (#599).  Returns the number of handles and buffer
+ * capabilities affected (only used for diagnostics).
  */
 extern int blk_handles_revoke_by_cap_id(uint64_t cap_id);
 
@@ -809,7 +810,8 @@ cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
 	(void)notify_port;
 	int n = blk_handles_revoke_by_cap_id(cap_id);
 	if (n == 0)
-		printf("blk: cap_revoke_notify cap=%llu — no live handle\n",
+		printf("blk: cap_revoke_notify cap=%llu — no live handle and "
+		       "no buffer capability of that id\n",
 		       (unsigned long long)cap_id);
 	return KERN_SUCCESS;
 }

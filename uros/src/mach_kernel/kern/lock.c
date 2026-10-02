@@ -124,6 +124,14 @@
 #include <kern/ipc_sched.h>
 #include <kern/xpr.h>
 #include <kern/uslock_census.h>	/* #486: who holds a lock when the IPI lands */
+
+/*
+ * #599: a machine may watch its spins (i386's clock watch, <i386/lock.h>);
+ * the rest spin as before.
+ */
+#ifndef	MACHINE_SPIN_WATCH
+#define	MACHINE_SPIN_WATCH(turns, where)	((void)(turns))
+#endif
 #include <string.h>
 
 #if	MACH_KDB
@@ -299,6 +307,7 @@ usimple_lock(
 	int i;
 	unsigned int	timeouttb;				/* Used to convert time to timebase ticks */
 	pc_t		pc;
+	unsigned int	turns = 0;				/* #599 */
 #if	ETAP_LOCK_TRACE
 	etap_time_t	start_wait_time;
 	int		no_miss_info = 0;
@@ -317,6 +326,7 @@ usimple_lock(
 		ETAPCALL(if (no_miss_info++ == 0)
 			start_wait_time = etap_simplelock_miss(l));
 		while (hw_lock_held(&l->interlock)) {
+			MACHINE_SPIN_WATCH(turns, "a simple lock's spin");
 			/*
 			 *	Spin watching the lock value in cache,
 			 *	without consuming external bus cycles.

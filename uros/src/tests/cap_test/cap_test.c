@@ -786,6 +786,374 @@ out:
  */
 #define SCRATCH_BLOCK	30712u
 
+/*
+ * ── #599: a buffer capability belongs to the handle it was handed on ──────
+ *
+ * The block server kept the capabilities its clients handed over per
+ * controller and tried them for any client, so once one client handed its
+ * buffer over, every task with a handle on that controller could have had
+ * the disk read or write it.  Now they live in the handle, a full handle
+ * refuses rather than evicts, and only a DMA buffer's capability is taken.
+ * The helpers below open a handle, allocate one page, hand its capability to
+ * a handle, and read the partition's first 4 KiB into it.
+ */
+static mach_port_t
+b2_open(mach_port_t part_port, const char *name)
+{
+    struct uros_cap  tok;
+    security_token_t null_sec = { { 0, 0 } };
+    char             blob[CAP_TOKEN_MAX];
+    mach_port_t      handle = MACH_PORT_NULL;
+
+    memset(&tok, 0, sizeof(tok));
+    if (cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
+                    CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok)
+        != KERN_SUCCESS)
+        return MACH_PORT_NULL;
+    memcpy(blob, &tok, sizeof(tok));
+    if (device_open_cap(part_port, MACH_PORT_NULL, D_READ | D_WRITE,
+                        null_sec, (char *)name, blob,
+                        (mach_msg_type_number_t)sizeof(tok), &handle)
+        != KERN_SUCCESS)
+        return MACH_PORT_NULL;
+    return handle;
+}
+
+static void
+b2_close(mach_port_t handle)
+{
+    if (handle == MACH_PORT_NULL)
+        return;
+    (void)device_close(handle);
+    (void)mach_port_deallocate(mach_task_self(), handle);
+}
+
+struct b2_page {
+    vm_address_t kva, uva, pa;
+    uint64_t     region;
+};
+
+static int
+b2_alloc(mach_port_t device_port, struct b2_page *pg)
+{
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    kern_return_t          kr;
+
+    memset(pg, 0, sizeof(*pg));
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &pg->kva, &pg->uva, &pa_list,
+                             &pa_cnt, &pg->region);
+    if (kr == KERN_SUCCESS && pa_cnt == 1)
+        pg->pa = pa_list[0];
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+    return kr == KERN_SUCCESS && pg->pa != 0;
+}
+
+static void
+b2_free(mach_port_t device_port, struct b2_page *pg)
+{
+    if (pg->kva != 0)
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, pg->kva, 4096);
+    pg->kva = 0;
+}
+
+static kern_return_t
+b2_hand(mach_port_t handle, uint64_t region, uint32_t type)
+{
+    struct uros_cap t;
+    kern_return_t   kr;
+
+    memset(&t, 0, sizeof(t));
+    kr = cap_request(type, region,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
+    if (kr != KERN_SUCCESS)
+        return kr;
+    return device_register_dma(handle, (char *)&t, sizeof(t));
+}
+
+/* Fill the page with 0xA5, read 4 KiB into it: kr, and what +1080 holds. */
+static kern_return_t
+b2_read(mach_port_t handle, struct b2_page *pg, unsigned *magic, int *intact)
+{
+    io_buf_len_t  got = 0;
+    vm_address_t  pa = pg->pa;
+    kern_return_t kr;
+    unsigned      i;
+
+    memset((void *)pg->uva, 0xA5, 4096);
+    kr = device_read_phys(handle, D_READ, 0, 4096, &pa, 1, &got);
+    *magic = (unsigned)(((unsigned char *)pg->uva)[1080])
+           | ((unsigned)(((unsigned char *)pg->uva)[1081]) << 8);
+    *intact = 1;
+    for (i = 0; i < 4096; i++)
+        if (((unsigned char *)pg->uva)[i] != 0xA5)
+            *intact = 0;
+    return kr;
+}
+
+/*
+ * [12b] A page no capability covers is refused before any DMA (#599).  A
+ * fresh handle, handed nothing, reads into a page of this task's: the block
+ * server must refuse it and the page must hold what it held.  Until every
+ * client handed its buffers over, such a handle had its addresses passed
+ * through untranslated, and the superblock landed in the page -- also under
+ * --iommu, where this runs on virtio_blk0a, whose DMA QEMU never puts through
+ * the IOMMU (#591).  Which of the server's lines appears is not asked.
+ */
+static int
+a_page_nobody_granted_is_refused(mach_port_t device_port, mach_port_t part_port,
+                                 const char *name)
+{
+    mach_port_t    h;
+    struct b2_page r;
+    kern_return_t  kr;
+    unsigned       magic;
+    int            intact, ok;
+
+    h = b2_open(part_port, name);
+    if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
+        printf("cap_test: [12b] WRONG — no handle or no page to try\n");
+        b2_close(h);
+        return 0;
+    }
+    kr = b2_read(h, &r, &magic, &intact);
+    ok = kr != KERN_SUCCESS && intact;
+    if (ok)
+        printf("cap_test: [12b] a read into a page nobody granted refused "
+               "(kr=%d), the page untouched\n", (int)kr);
+    else
+        printf("cap_test: [12b] WRONG — a read into a page nobody granted "
+               "answered kr=%d, page %s, +1080 0x%x\n", (int)kr,
+               intact ? "untouched" : "WRITTEN", magic);
+    b2_free(device_port, &r);
+    b2_close(h);
+    return ok;
+}
+
+/*
+ * [19] A second client cannot spend the first one's capability.  Two handles
+ * on one partition, each handed its own page; the second reads into the
+ * first's page and must be refused with the page untouched, before and after
+ * the first has read into it (a translation kept per controller would have
+ * been primed by then); and each still reads its own.
+ */
+static int
+a_capability_is_its_handles(mach_port_t device_port, mach_port_t part_port,
+                            const char *name)
+{
+    mach_port_t    ha, hb;
+    struct b2_page r1, r2;
+    kern_return_t  k1, k2, k3, k4;
+    unsigned       m1, m2, m3, m4;
+    int            i1, i2, i3, i4, ok;
+
+    ha = b2_open(part_port, name);
+    hb = b2_open(part_port, name);
+    if (ha == MACH_PORT_NULL || hb == MACH_PORT_NULL ||
+        !b2_alloc(device_port, &r1) || !b2_alloc(device_port, &r2) ||
+        b2_hand(ha, r1.region, RESOURCE_DMA_BUFFER) != KERN_SUCCESS ||
+        b2_hand(hb, r2.region, RESOURCE_DMA_BUFFER) != KERN_SUCCESS) {
+        printf("cap_test: [19] %s — DID NOT RUN, two handles and two handed "
+               "pages were not all there\n", name);
+        b2_close(ha);
+        b2_close(hb);
+        b2_free(device_port, &r1);
+        b2_free(device_port, &r2);
+        return 1;
+    }
+
+    k1 = b2_read(hb, &r1, &m1, &i1);		/* the other's page */
+    k2 = b2_read(ha, &r1, &m2, &i2);		/* its own */
+    k3 = b2_read(hb, &r1, &m3, &i3);		/* the other's, again */
+    k4 = b2_read(hb, &r2, &m4, &i4);		/* its own */
+    ok = k1 != KERN_SUCCESS && i1 && k2 == KERN_SUCCESS && m2 == 0xEF53u &&
+         k3 != KERN_SUCCESS && i3 && k4 == KERN_SUCCESS && m4 == 0xEF53u;
+
+    b2_close(ha);
+    b2_close(hb);
+    b2_free(device_port, &r1);
+    b2_free(device_port, &r2);
+
+    if (!ok) {
+        printf("cap_test: [19] WRONG — %s: 2nd into 1st's page kr=%d (%s), "
+               "1st kr=%d 0x%x, 2nd again kr=%d (%s), 2nd own kr=%d 0x%x\n",
+               name, (int)k1, i1 ? "untouched" : "WRITTEN", (int)k2, m2,
+               (int)k3, i3 ? "untouched" : "WRITTEN", (int)k4, m4);
+        return 0;
+    }
+    printf("cap_test: [19] %s: a second handle refused the first's page "
+           "(kr=%d, kr=%d after the first read 0x%x), page untouched; own "
+           "page 0x%x — a capability is its handle's\n", name, (int)k1,
+           (int)k3, m2, m4);
+    return 1;
+}
+
+/*
+ * [20] Revoking a buffer's capability takes the device's mapping down.
+ * Hand a page over, read into it (the grant is made then, on a machine that
+ * confines devices), count the devices it is mapped for, revoke, count again:
+ * 0.  And a read after the revocation is refused with the page untouched.
+ * On a machine that confines nothing no mapping exists to take down, and the
+ * count half says so rather than passing.
+ */
+static int
+revoking_a_capability_takes_the_mapping_down(mach_port_t device_port,
+                                             mach_port_t part_port,
+                                             const char *name)
+{
+    mach_port_t     h;
+    struct b2_page  r;
+    struct uros_cap t;
+    kern_return_t   kr, k1, k2, kr_rev, ku0, ku1;
+    natural_t       users0 = 0, users1 = 0;
+    unsigned        m1, m2;
+    int             i1, i2, ok;
+
+    memset(&t, 0, sizeof(t));
+    h = b2_open(part_port, name);
+    kr = (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) ? KERN_FAILURE
+       : cap_request(RESOURCE_DMA_BUFFER, r.region,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(h, (char *)&t, sizeof(t));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [20] %s — DID NOT RUN, no handed page (kr=%d)\n",
+               name, (int)kr);
+        b2_close(h);
+        b2_free(device_port, &r);
+        return 1;
+    }
+
+    k1 = b2_read(h, &r, &m1, &i1);
+    ku0 = device_dma_region_users(device_port, r.region, &users0);
+    kr_rev = cap_revoke(t.cap_id);
+    ku1 = device_dma_region_users(device_port, r.region, &users1);
+    k2 = b2_read(h, &r, &m2, &i2);
+    b2_close(h);
+    b2_free(device_port, &r);
+
+    ok = k1 == KERN_SUCCESS && m1 == 0xEF53u && kr_rev == KERN_SUCCESS &&
+         ku0 == KERN_SUCCESS && ku1 == KERN_SUCCESS && users1 == 0 &&
+         k2 != KERN_SUCCESS && i2;
+    if (!ok) {
+        printf("cap_test: [20] WRONG — %s: read %d 0x%x, users %d/%u, revoke "
+               "%d, users %d/%u, read after %d (page %s)\n", name, (int)k1,
+               m1, (int)ku0, (unsigned)users0, (int)kr_rev, (int)ku1,
+               (unsigned)users1, (int)k2, i2 ? "untouched" : "WRITTEN");
+        return 0;
+    }
+    if (users0 == 0)
+        printf("cap_test: [20] %s: the mapping half NOT APPLICABLE — no "
+               "device mapping exists here (users 0); a read after the "
+               "revocation refused (kr=%d), page untouched\n", name,
+               (int)k2);
+    else
+        printf("cap_test: [20] %s: revoking the capability took the "
+               "mapping down (users %u -> %u); a read after it refused "
+               "(kr=%d), page untouched\n", name, (unsigned)users0,
+               (unsigned)users1, (int)k2);
+    return 1;
+}
+
+/*
+ * [21] A handle holds four capabilities and refuses a fifth rather than
+ * evicting one; the same one handed again replaces itself; a new handle
+ * starts empty.
+ */
+static int
+a_handle_refuses_rather_than_evicts(mach_port_t device_port,
+                                    mach_port_t part_port, const char *name)
+{
+    mach_port_t     h, h2;
+    struct b2_page  r;
+    struct uros_cap t[5];
+    kern_return_t   kr[5], kr_again, kr_read, kr_new;
+    unsigned        magic;
+    int             intact, i, ok;
+
+    h = b2_open(part_port, name);
+    if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
+        printf("cap_test: [21] %s — DID NOT RUN, no handle or no page\n",
+               name);
+        b2_close(h);
+        b2_free(device_port, &r);
+        return 1;
+    }
+    for (i = 0; i < 5; i++) {
+        memset(&t[i], 0, sizeof(t[i]));
+        kr[i] = cap_request(RESOURCE_DMA_BUFFER, r.region,
+                            CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
+                            0, &t[i]);
+        if (kr[i] == KERN_SUCCESS)
+            kr[i] = device_register_dma(h, (char *)&t[i], sizeof(t[i]));
+    }
+    kr_again = device_register_dma(h, (char *)&t[0], sizeof(t[0]));
+    kr_read = b2_read(h, &r, &magic, &intact);
+    b2_close(h);
+
+    h2 = b2_open(part_port, name);
+    kr_new = h2 == MACH_PORT_NULL ? KERN_FAILURE
+           : device_register_dma(h2, (char *)&t[4], sizeof(t[4]));
+    b2_close(h2);
+    b2_free(device_port, &r);
+
+    ok = kr[0] == 0 && kr[1] == 0 && kr[2] == 0 && kr[3] == 0 &&
+         kr[4] == KERN_NO_SPACE && kr_again == 0 && kr_read == 0 &&
+         magic == 0xEF53u && kr_new == 0;
+    if (!ok) {
+        printf("cap_test: [21] WRONG — %s: five on one handle %d %d %d %d "
+               "%d, first again %d, read %d 0x%x, fifth on a new handle %d; "
+               "want 0 0 0 0 %d, 0, 0 0xef53, 0\n", name, (int)kr[0],
+               (int)kr[1], (int)kr[2], (int)kr[3], (int)kr[4],
+               (int)kr_again, (int)kr_read, magic, (int)kr_new,
+               (int)KERN_NO_SPACE);
+        return 0;
+    }
+    printf("cap_test: [21] %s: four capabilities taken, the fifth refused "
+           "(kr=%d), the first again 0, a read 0x%x, a new handle took the "
+           "fifth — full refuses, never evicts\n", name, (int)kr[4], magic);
+    return 1;
+}
+
+/*
+ * [24] Only a DMA buffer's capability is taken for a buffer: a block-device
+ * capability that carries the buffer's id is refused.
+ */
+static int
+a_buffer_capability_is_a_buffers(mach_port_t device_port,
+                                 mach_port_t part_port, const char *name)
+{
+    mach_port_t    h;
+    struct b2_page r;
+    kern_return_t  kr;
+
+    h = b2_open(part_port, name);
+    if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
+        printf("cap_test: [24] %s — DID NOT RUN, no handle or no page\n",
+               name);
+        b2_close(h);
+        b2_free(device_port, &r);
+        return 1;
+    }
+    kr = b2_hand(h, r.region, RESOURCE_BLK_DEVICE);
+    b2_close(h);
+    b2_free(device_port, &r);
+
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [24] WRONG — %s took a block-device capability "
+               "carrying buffer %llu's id as that buffer's\n", name,
+               (unsigned long long)r.region);
+        return 0;
+    }
+    printf("cap_test: [24] %s refused a block-device capability carrying a "
+           "buffer's id (kr=%d) — the kind is checked, not only the id\n",
+           name, (int)kr);
+    return 1;
+}
+
 static int
 the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
                              const char *name, int scratch)
@@ -1001,6 +1369,10 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0xCF8, 8 },   /* the address and the data */
         { 0xCFC, 1 },   /* the data port alone */
         { 0xCF4, 5 },   /* from below, reaching the address port */
+        { 0x70,  2 },   /* the CMOS, whose index is the NMI mask (#599) */
+        { 0x20,  2 },   /* the master 8259 (#599) */
+        { 0xA0,  2 },   /* the slave 8259 (#599) */
+        { 0x4D0, 2 },   /* the 8259s' edge/level registers (#599) */
     };
     static const struct {
         unsigned int  port;
@@ -1011,6 +1383,8 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0xCFC,   4, KERN_NO_ACCESS },          /* the data port */
         { 0x10CFC, 4, KERN_INVALID_ARGUMENT },   /* 0xCFC above 16 bits */
         { 0x61,    1, KERN_NO_ACCESS },          /* the 8254's gate (#508) */
+        { 0x71,    1, KERN_NO_ACCESS },          /* the CMOS data (#599) */
+        { 0x21,    1, KERN_NO_ACCESS },          /* the 8259's mask (#599) */
     };
     unsigned int  i, released, klog_from, data, bad = 0;
     kern_return_t kr;
@@ -1024,8 +1398,9 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         if (kr == KERN_SUCCESS) {
             (void) device_io_port_unclaim(device_port, ask[i].port);
             printf("cap_test: [18] WRONG — a claim of 0x%x..0x%x was "
-                   "GRANTED, and it covers the PCI configuration ports "
-                   "(#597)\n", ask[i].port, ask[i].port + ask[i].count - 1);
+                   "GRANTED, and it covers ports the kernel keeps "
+                   "(#597, #599)\n", ask[i].port,
+                   ask[i].port + ask[i].count - 1);
         } else
             printf("cap_test: [18] WRONG — a claim of 0x%x..0x%x was "
                    "refused with kr=%d, not KERN_NO_ACCESS\n", ask[i].port,
@@ -1046,10 +1421,136 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
     if (bad != 0)
         return 0;
 
-    printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone and "
-           "0xcf4..0xcf8, and reads of 0xcf8, 0xcfc, 0x61 and 0x10cfc, "
-           "refused — the claim and read RPCs keep the ports the kernel "
-           "keeps (#508, #597)\n");
+    printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone, "
+           "0xcf4..0xcf8, the CMOS, both 8259s and the ELCR, and reads of "
+           "0xcf8, 0xcfc, 0x61, 0x71, 0x21 and 0x10cfc, refused — the claim "
+           "and read RPCs keep the ports the kernel keeps (#508, #597, "
+           "#599)\n");
+    return 1;
+}
+
+/*
+ * ── [22] A buffer is freed by its owner, whole, once (#599) ───────────────
+ *
+ * device_dma_free checked neither: an address that was no region's was
+ * ignored by the drop and kmem_free ran on it anyway, a region could be freed
+ * at half its size, and twice.  So any holder of the master port freed kernel
+ * memory it named.  The kernel now answers KERN_INVALID_ARGUMENT for a size
+ * that is not the allocation's -- and frees nothing, which the capability
+ * cap_server still issues for the region shows -- 0 for the right free, and
+ * KERN_INVALID_ADDRESS for the second.  Another task's region is
+ * dma_reclaim_test's to show, since it takes two tasks.
+ */
+static int
+a_buffer_is_freed_whole_and_once(mach_port_t device_port)
+{
+    kern_return_t   kr, kr_half, kr_alive, kr_whole, kr_again;
+    vm_address_t    kva = 0, uva = 0;
+    vm_address_t   *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    uint64_t        region_id = 0;
+    struct uros_cap tok;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 2,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [22] a buffer is freed whole and once — DID NOT "
+               "RUN, no two-page buffer (kr=%d)\n", (int)kr);
+        return 1;
+    }
+
+    kr_half = device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    memset(&tok, 0, sizeof(tok));
+    kr_alive = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                           CAP_OP_DMA_DEVICE_READ, 0, &tok);
+    kr_whole = kr_half == KERN_SUCCESS ? KERN_SUCCESS
+             : device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 8192);
+    kr_again = device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 8192);
+
+    if (kr_half != KERN_INVALID_ARGUMENT || kr_alive != KERN_SUCCESS ||
+        kr_whole != KERN_SUCCESS || kr_again != KERN_INVALID_ADDRESS) {
+        printf("cap_test: [22] WRONG — a 2-page buffer freed at 1 page %d, "
+               "then its capability %d, the whole free %d, a second free %d; "
+               "want %d, 0, 0, %d\n", (int)kr_half, (int)kr_alive,
+               (int)kr_whole, (int)kr_again, (int)KERN_INVALID_ARGUMENT,
+               (int)KERN_INVALID_ADDRESS);
+        return 0;
+    }
+    printf("cap_test: [22] a 2-page buffer freed at 1 page refused (kr=%d), "
+           "still issuable (kr=%d); whole free %d, again %d — freed by its "
+           "owner, whole, once\n", (int)kr_half, (int)kr_alive,
+           (int)kr_whole, (int)kr_again);
+    return 1;
+}
+
+/*
+ * ── [23] A free takes back the buffer's mapping, not the address (#599) ───
+ *
+ * The drop of a region removed the owner's user mapping by address, whatever
+ * occupied it by then -- and the AHCI driver deallocates its buffers' user
+ * mappings before it frees them.  So a task that gave the range back and
+ * mapped something else there lost that instead.  This deallocates a buffer's
+ * mapping, maps a page of its own at the same address, writes 0x5A, frees the
+ * buffer, and reads the page back: it must still be there, still 0x5A.
+ */
+static int
+a_free_takes_its_mapping_not_the_address(mach_port_t device_port)
+{
+    kern_return_t   kr, kr_free, kr_read;
+    vm_address_t    kva = 0, uva = 0, mine;
+    vm_address_t   *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0, got = 0;
+    uint64_t        region_id = 0;
+    vm_offset_t     data = 0;
+    unsigned char   seen = 0;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [23] a free takes its own mapping — DID NOT RUN, "
+               "no buffer (kr=%d)\n", (int)kr);
+        return 1;
+    }
+
+    (void)vm_deallocate(mach_task_self(), uva, 4096);
+    mine = uva;
+    kr = vm_allocate(mach_task_self(), &mine, 4096, FALSE);
+    if (kr != KERN_SUCCESS || mine != uva) {
+        printf("cap_test: [23] a free takes its own mapping — DID NOT RUN, "
+               "the address was not given back to this task (kr=%d)\n",
+               (int)kr);
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+        return 1;
+    }
+    *(volatile unsigned char *)mine = 0x5A;
+
+    kr_free = device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    kr_read = vm_read(mach_task_self(), mine, 4096, &data, &got);
+    if (kr_read == KERN_SUCCESS) {
+        seen = *(unsigned char *)data;
+        (void)vm_deallocate(mach_task_self(), data, got);
+    }
+    (void)vm_deallocate(mach_task_self(), mine, 4096);
+
+    if (kr_free != KERN_SUCCESS || kr_read != KERN_SUCCESS || seen != 0x5A) {
+        printf("cap_test: [23] WRONG — a buffer freed after its range was "
+               "remapped: free %d, the new page's read %d holding 0x%x — the "
+               "free took an address no longer the buffer's\n",
+               (int)kr_free, (int)kr_read, (unsigned)seen);
+        return 0;
+    }
+    printf("cap_test: [23] a buffer freed after its range was remapped (free "
+           "kr=%d): the new page still reads (kr=%d) 0x%x — the free took the "
+           "mapping, not the address\n", (int)kr_free, (int)kr_read,
+           (unsigned)seen);
     return 1;
 }
 
@@ -1693,7 +2194,7 @@ main(int argc, char **argv)
                 ctl_bad++;
 
             xmm_fill(pat);
-            kr = urmach_cap_verify(&bogus, 1, 0);
+            kr = urmach_cap_verify(&bogus, RESOURCE_BLK_DEVICE, 1, 0);
             xmm_read(got);
             if (kr != CAP_ERR_INTERNAL)
                 hmac_ran = 1;
@@ -2041,11 +2542,20 @@ main(int argc, char **argv)
     if (!the_pci_config_ports_are_the_kernels(device_port))
         pass = 0;
 
+    /* #599: a DMA buffer is freed by its owner, whole, once. */
+    if (!a_buffer_is_freed_whole_and_once(device_port))
+        pass = 0;
+
+    /* #599: and its free takes its mapping, not whatever is there now. */
+    if (!a_free_takes_its_mapping_not_the_address(device_port))
+        pass = 0;
+
     /*
      * #532 runs last and on every candidate.  By this point the name server
      * has had the whole test's worth of time, so a partition that is absent
      * here is absent, not late -- and a short budget is enough to say so.
      */
+    int b2_done = 0;		/* #599: the handle arms run once */
     for (unsigned i = 0;
          i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         mach_port_t p = MACH_PORT_NULL;
@@ -2068,6 +2578,24 @@ main(int argc, char **argv)
         if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
                                           is_the_boot_disk(p) == 0))
             pass = 0;
+        /* #599: once, on the first candidate that is there. */
+        if (!b2_done) {
+            if (!a_page_nobody_granted_is_refused(device_port, p,
+                                                  candidates[i]))
+                pass = 0;
+            if (!a_capability_is_its_handles(device_port, p, candidates[i]))
+                pass = 0;
+            if (!revoking_a_capability_takes_the_mapping_down(device_port, p,
+                                                              candidates[i]))
+                pass = 0;
+            if (!a_handle_refuses_rather_than_evicts(device_port, p,
+                                                     candidates[i]))
+                pass = 0;
+            if (!a_buffer_capability_is_a_buffers(device_port, p,
+                                                  candidates[i]))
+                pass = 0;
+            b2_done = 1;
+        }
         (void)mach_port_deallocate(mach_task_self(), p);
     }
 

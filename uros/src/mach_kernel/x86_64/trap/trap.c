@@ -232,8 +232,9 @@ static void tputc(char c)
 	 * ever, halted in every sense but the one the word means.  Past the
 	 * capture buffer on purpose -- a selftest that captures the console
 	 * must not swallow the one message read when everything has stopped
-	 * -- and needing no lock, which is why this path could never use
-	 * printf() and still cannot.
+	 * -- and needing no lock that could make it wait for ever, which is
+	 * why this path could never use printf() and still cannot.  (#599: the
+	 * port's lock is taken with a bound -- cons_tx_lock_bounded.)
 	 */
 	cons_putc_wire(c);
 }
@@ -719,6 +720,11 @@ static volatile uint64_t backtrace_lock;
 
 void x86_64_backtrace(uint64_t rbp)
 {
+	x86_64_backtrace_after(rbp, 0);
+}
+
+void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
+{
 	pmap_t kernel = pmap_kernel();
 	uint64_t spins;
 
@@ -728,6 +734,8 @@ void x86_64_backtrace(uint64_t rbp)
 		cpu_pause();
 	}
 
+	if (first != 0)
+		first();
 	tputs("  cpu ");
 	if (lapic_present())
 		tputdec(lapic_id());

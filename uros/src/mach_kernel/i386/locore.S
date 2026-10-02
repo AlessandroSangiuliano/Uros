@@ -932,12 +932,32 @@ LEXT(return_from_trap)
 					/* have to wait */
 
 /*
+ * #599: return_to_user found this processor above spllo.  Say so from C, on
+ * the kernel stack exactly as the AST above is taken (the PCB stack is the
+ * saved state and has no room below it), then carry on unchanged: see
+ * spl_to_user_seen() in trap.c for why nothing is lowered here.
+ */
+spl_to_user:
+	movl	%esp,%ecx		/* the saved state, on the PCB stack */
+	movl	CX(EXT(kernel_stack),%eax),%esp
+					/* switch to kernel stack */
+	pushl	%ecx			/* pass the saved state */
+	call	EXT(spl_to_user_seen)
+	addl	$4,%esp			/* pop it */
+	popl	%esp			/* switch back to PCB stack (w/exc link) */
+	CPU_NUMBER(%eax)		/* the call used %eax */
+	jmp	spl_to_user_said
+
+/*
  * Arrange the checks needed for kernel-loaded (or kernel-loading)
  * threads so that branch is taken in kernel-loaded case.
  */
 LEXT(return_to_user)
 	TIME_TRAP_UEXIT
 	CPU_NUMBER(%eax)
+	cmpl	$0,CX(EXT(curr_ipl),%eax)	/* #599: never above spllo in */
+	jne	spl_to_user			/* user mode */
+spl_to_user_said:
 	cmpl	$0,CX(EXT(active_kloaded),%eax)
 	jnz	EXT(return_xfer_stack)
 	movl	$CPD_ACTIVE_THREAD,%ebx

@@ -66,19 +66,24 @@ static char fb_buf[FB_BUF_BYTES];
 /* Timing + statistics                                                 */
 /* ------------------------------------------------------------------ */
 
-static unsigned long
+/* 64 bits, and so is every value computed from it: a 32-bit unsigned long
+ * wraps at 4.295 s on i386 and prints a plausible wrong number (#599).  Both
+ * differences are taken signed (tv_sec is unsigned), so a clock that steps
+ * back comes out right modulo 2^64. */
+static unsigned long long
 elapsed_ns(const tvalspec_t *t0, const tvalspec_t *t1)
 {
-	return (unsigned long)(t1->tv_sec - t0->tv_sec) * 1000000000UL
-	       + (unsigned long)(t1->tv_nsec - t0->tv_nsec);
+	return (unsigned long long)((long long)t1->tv_sec -
+	                            (long long)t0->tv_sec) * 1000000000ULL
+	       + (unsigned long long)(long long)(t1->tv_nsec - t0->tv_nsec);
 }
 
 /* Median of n samples (ascending insertion sort on a small array). */
-static unsigned long
-median_ns(unsigned long *s, int n)
+static unsigned long long
+median_ns(unsigned long long *s, int n)
 {
 	for (int i = 1; i < n; i++) {
-		unsigned long v = s[i];
+		unsigned long long v = s[i];
 		int j = i - 1;
 		while (j >= 0 && s[j] > v) {
 			s[j + 1] = s[j];
@@ -91,15 +96,15 @@ median_ns(unsigned long *s, int n)
 
 static void
 report_row(unsigned int chunk, unsigned long bytes,
-           unsigned long mach_ns, unsigned long flipc_ns)
+           unsigned long long mach_ns, unsigned long long flipc_ns)
 {
-	unsigned long mach_us  = mach_ns / 1000;
-	unsigned long flipc_us = flipc_ns / 1000;
-	unsigned long mach_mbps  = mach_us  ? bytes / mach_us  : 0;
-	unsigned long flipc_mbps = flipc_us ? bytes / flipc_us : 0;
-	unsigned long ratio = flipc_us ? (mach_us * 100) / flipc_us : 0;
+	unsigned long long mach_us  = mach_ns / 1000;
+	unsigned long long flipc_us = flipc_ns / 1000;
+	unsigned long long mach_mbps  = mach_us  ? bytes / mach_us  : 0;
+	unsigned long long flipc_mbps = flipc_us ? bytes / flipc_us : 0;
+	unsigned long long ratio = flipc_us ? (mach_us * 100) / flipc_us : 0;
 
-	printf("  %5uK   %9lu   %9lu     %lu.%02lux\n",
+	printf("  %5uK   %9llu   %9llu     %llu.%02llux\n",
 	       chunk / 1024, mach_mbps, flipc_mbps,
 	       ratio / 100, ratio % 100);
 }
@@ -108,7 +113,7 @@ report_row(unsigned int chunk, unsigned long bytes,
 /* Read / write whole-file workloads (one reopen each, position reset)  */
 /* ------------------------------------------------------------------ */
 
-static unsigned long
+static unsigned long long
 read_once(const char *path, unsigned int chunk, mach_port_t clock)
 {
 	tvalspec_t t0, t1;
@@ -126,7 +131,7 @@ read_once(const char *path, unsigned int chunk, mach_port_t clock)
 	return elapsed_ns(&t0, &t1);
 }
 
-static unsigned long
+static unsigned long long
 write_once(unsigned int chunk, unsigned long total, mach_port_t clock)
 {
 	tvalspec_t t0, t1;
@@ -151,21 +156,21 @@ write_once(unsigned int chunk, unsigned long total, mach_port_t clock)
 	return elapsed_ns(&t0, &t1);
 }
 
-static unsigned long
+static unsigned long long
 read_median(const char *path, unsigned int chunk, int runs, mach_port_t clock)
 {
-	unsigned long s[FB_MAX_RUNS];
+	unsigned long long s[FB_MAX_RUNS];
 	(void)read_once(path, chunk, clock);          /* warmup */
 	for (int i = 0; i < runs; i++)
 		s[i] = read_once(path, chunk, clock);
 	return median_ns(s, runs);
 }
 
-static unsigned long
+static unsigned long long
 write_median(unsigned int chunk, unsigned long total, int runs,
              mach_port_t clock)
 {
-	unsigned long s[FB_MAX_RUNS];
+	unsigned long long s[FB_MAX_RUNS];
 	(void)write_once(chunk, total, clock);        /* warmup */
 	for (int i = 0; i < runs; i++)
 		s[i] = write_once(chunk, total, clock);
@@ -205,7 +210,7 @@ bench_read(const char *path, const unsigned int *chunks, int nch,
 
 	for (int ci = 0; ci < nch; ci++) {
 		unsigned int chunk = chunks[ci];
-		unsigned long mach_ns, flipc_ns;
+		unsigned long long mach_ns, flipc_ns;
 
 		vfs_flipc_set_enabled(0);
 		mach_ns = read_median(path, chunk, runs, clock);
@@ -235,7 +240,7 @@ bench_write(const unsigned int *chunks, int nch, int runs, mach_port_t clock)
 
 	for (int ci = 0; ci < nch; ci++) {
 		unsigned int chunk = chunks[ci];
-		unsigned long mach_ns, flipc_ns;
+		unsigned long long mach_ns, flipc_ns;
 
 		vfs_flipc_set_enabled(0);
 		mach_ns = write_median(chunk, total, runs, clock);

@@ -111,4 +111,17 @@ void ioapic_unmask(uint32_t gsi);
  * merely assumed to be what it was last set to. */
 int ioapic_is_masked(uint32_t gsi);
 
+/*
+ * #599: for the -Y test only (ioapic_race_test.c).  A pin is "untouched" when
+ * its low half is still what ioapic_init() wrote -- masked, no vector -- which
+ * no routed pin is.  ioapic_set_vector() changes the vector by the same
+ * read-modify-write that masks and unmasks; the low half is put back with
+ * ioapic_set_low_half().
+ */
+int ioapic_pin_untouched(uint32_t gsi);
+uint32_t ioapic_low_half(uint32_t gsi);
+void ioapic_set_low_half(uint32_t gsi, uint32_t low);
+void ioapic_set_vector(uint32_t gsi, uint8_t vector);
+uint32_t ioapic_first_gsi(void);
+
 #endif	/* _X86_64_CPU_IOAPIC_H_ */

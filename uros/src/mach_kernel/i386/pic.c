@@ -290,6 +290,10 @@ picinit(void)
 
 	/* 
 	** 4.	Initialise master - send commands to master PIC
+	**
+	**	#599: the ICW sequence is an ordered set of writes the 8259
+	**	takes as one; it runs once, at boot, on the boot processor with
+	**	interrupts off, before the others start.
 	*/ 
 
 	outb ( master_icw, PICM_ICW1 );

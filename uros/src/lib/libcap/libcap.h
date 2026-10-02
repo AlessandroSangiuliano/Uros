@@ -102,8 +102,9 @@ kern_return_t cap_subscribe_revoke(mach_port_t notify_port);
  * cap_verify() when cap_server-specific policy is needed.
  */
 kern_return_t cap_verify_local(const struct uros_cap *token,
-                               uint32_t op,
-                               uint64_t resource_id);
+                              uint32_t resource_type, /* #599 */
+                              uint32_t op,
+                              uint64_t resource_id);
 
 /*
  * cap_use_local() — fast path for consume-one-use tokens.  Equivalent
@@ -112,8 +113,9 @@ kern_return_t cap_verify_local(const struct uros_cap *token,
  * counter and returns CAP_ERR_EXHAUSTED once it hits zero.
  */
 kern_return_t cap_use_local(const struct uros_cap *token,
-                            uint32_t op,
-                            uint64_t resource_id);
+                              uint32_t resource_type, /* #599 */
+                              uint32_t op,
+                              uint64_t resource_id);
 
 /*
  * cap_provision() — bootstrap-side wrapper around the

@@ -36,6 +36,8 @@
 
 #define PC_HASH(block) ((unsigned int)(block) % PAGE_CACHE_HASH_BUCKETS)
 
+int	page_cache_quiet;	/* see page_cache.h */
+
 /* Remove entry from LRU list */
 static void
 lru_remove(struct page_cache_entry *e)
@@ -71,82 +73,190 @@ hash_remove(struct page_cache *pc, struct page_cache_entry *e)
 	}
 }
 
-/* Free the data buffer of a cache entry.
- * In DMA mode the buffer is part of the pre-allocated pool —
- * do NOT vm_deallocate individual entries. */
-static void
-entry_free_data(struct page_cache *pc, struct page_cache_entry *e)
-{
-	if (!e->pc_data)
-		return;
-	if (pc->pc_dma_pool) {
-		/* DMA pool: buffer is permanent, just reset block key */
-		return;
-	}
-	vm_deallocate(mach_task_self(), e->pc_data, e->pc_size);
-	e->pc_data = 0;
-	e->pc_size = 0;
-}
+/*
+ * #599: how take_victim may make room.  PC_TAKE_CLEAN never writes a block
+ * back for it -- a readahead insert has no business costing a disk write --
+ * and PC_TAKE_ANY may write back up to PC_EVICT_TRIES dirty victims.
+ */
+#define PC_TAKE_CLEAN	0
+#define PC_TAKE_ANY	1
+#define PC_VICTIM_SCAN	PAGE_CACHE_VICTIM_SCAN
+#define PC_EVICT_TRIES	4
 
-/* Write back a dirty entry via the writeback callback */
+/* Can this entry's slot be taken?  #599: the one predicate eviction asks. */
 static int
-entry_writeback(struct page_cache *pc, struct page_cache_entry *e)
+evictable(const struct page_cache_entry *e)
 {
-	int ret;
-
-	if (!e->pc_dirty)
-		return 0;
-	/* Never NULL: page_cache_create refuses a cache without one (#573). */
-	ret = pc->pc_writeback(pc->pc_writeback_ctx, e->pc_block, e->pc_data,
-			       e->pc_size, e->pc_phys);
-	if (ret != 0)
-		return ret;
-	e->pc_dirty = 0;
-	pc->pc_writebacks++;
-	return 0;
+	/* #599: a cached block nobody holds a pointer into, not being written */
+	return e->pc_state == PC_VALID && e->pc_refs == 0 && !e->pc_busy;
 }
 
-/* Evict the LRU entry, returning it to the free list */
+/*
+ * The entry keyed `block' once no fill of it is in flight, or NULL; with
+ * pc_lock held, which the wait gives up and takes back.  #599: every lookup
+ * of a key waits out a FILLING entry -- its slot is not data yet -- and looks
+ * the key up again afterwards, since the fill may have failed and the entry
+ * gone.
+ */
 static struct page_cache_entry *
-evict_lru(struct page_cache *pc)
+find_ready(struct page_cache *pc, daddr_t block)
 {
-	struct page_cache_entry *victim = pc->pc_lru_tail.pc_lru_prev;
+	struct page_cache_entry *e;
 
-	/*
-	 * #384: skip entries whose data a page_cache_sync writeback is
-	 * using outside pc_lock — re-using (DMA) or freeing (non-DMA)
-	 * their buffer mid-write would flush another block's bytes, or
-	 * worse.  Busy entries are rare (one sync batch at a time).
-	 */
-	while (victim != &pc->pc_lru_head && victim->pc_busy)
-		victim = victim->pc_lru_prev;
+	for (;;) {
+		for (e = pc->pc_hash[PC_HASH(block)]; e; e = e->pc_hash_next)
+			if (e->pc_block == block)
+				break;
+		if (e == NULL || e->pc_state != PC_FILLING)
+			return e;
+		pc->pc_nwaiters++;
+		pthread_cond_wait(&pc->pc_cond, &pc->pc_lock);
+		pc->pc_nwaiters--;
+	}
+}
 
-	/* Don't evict the head sentinel */
-	if (victim == &pc->pc_lru_head)
-		return NULL;
+/* Key a slot for `block', in `state', at MRU. */
+static void
+key_entry(struct page_cache *pc, struct page_cache_entry *e, daddr_t block,
+	  int state)
+{
+	unsigned int h = PC_HASH(block);
 
-	/* Write back dirty data before evicting */
-	entry_writeback(pc, victim);
+	e->pc_block = block;
+	e->pc_state = state;
+	e->pc_busy = 0;
+	e->pc_dirty = 0;
+	e->pc_wfail = 0;
+	e->pc_clean_seq = 0;
+	e->pc_hash_next = pc->pc_hash[h];
+	pc->pc_hash[h] = e;
+	lru_insert_mru(pc, e);
+	pc->pc_count++;
+}
 
-	lru_remove(victim);
-	hash_remove(pc, victim);
-	entry_free_data(pc, victim);
+/* Back to the free list: unkeyed, unpinned, clean. */
+static void
+free_entry(struct page_cache *pc, struct page_cache_entry *e)
+{
+	e->pc_block = -1;
+	e->pc_state = PC_FREE;
+	e->pc_refs = 0;
+	e->pc_dirty = 0;
+	e->pc_hash_next = pc->pc_free;
+	pc->pc_free = e;
+}
+
+/*
+ * Detach an entry that is being taken, and count it.  #599: a copy the disk
+ * got bytes from, or bytes into (a writeback, page_cache_wrote), leaves the
+ * cache here, so pc_forget rises to when that happened (page_cache_install).
+ */
+static struct page_cache_entry *
+take_detach(struct page_cache *pc, struct page_cache_entry *e)
+{
+	if (e->pc_clean_seq > pc->pc_forget)
+		pc->pc_forget = e->pc_clean_seq;
+	e->pc_clean_seq = 0;
+	lru_remove(e);
+	hash_remove(pc, e);
 	pc->pc_count--;
 	pc->pc_evictions++;
-
-	return victim;
+	e->pc_block = -1;
+	e->pc_state = PC_FREE;
+	e->pc_refs = 0;
+	e->pc_dirty = 0;
+	e->pc_wfail = 0;
+	return e;
 }
 
-struct page_cache *
-page_cache_create(unsigned int max_entries,
-		  page_cache_writeback_fn writeback, void *ctx)
+/*
+ * A slot for a new block, under pc_lock; never waits.
+ *
+ * #599: the eviction this replaces wrote a dirty victim back, IGNORED THE
+ * ANSWER and took the slot anyway -- a block the device refused was dropped,
+ * with only a printf in ext_server to say so.  A dirty entry now leaves only
+ * once the disk has it: a failed writeback leaves it cached and dirty, moved
+ * to MRU so the next search does not start from it again, and said once
+ * (pc_wfail); its answer is kept in *wb_rc for a caller that ends up with no
+ * slot.
+ *
+ * The writeback runs under pc_lock, as it did.  It cannot deadlock: the
+ * callback takes no lock of the cache's, and the block server it calls is
+ * single-threaded and never calls back into ext_server.
+ *
+ * Order: the free list; a clean entry among the PC_VICTIM_SCAN oldest; (ANY)
+ * up to PC_EVICT_TRIES dirty victims written back; any clean entry at all;
+ * none.
+ */
+static struct page_cache_entry *
+take_victim(struct page_cache *pc, int mode, int *wb_rc)
+{
+	struct page_cache_entry *e, *prev;
+	unsigned int n;
+	int tries = 0, rc;
+
+	if (pc->pc_free) {
+		e = pc->pc_free;
+		pc->pc_free = e->pc_hash_next;
+		e->pc_hash_next = NULL;
+		return e;
+	}
+
+	for (e = pc->pc_lru_tail.pc_lru_prev, n = 0;
+	     e != &pc->pc_lru_head && n < PC_VICTIM_SCAN;
+	     e = e->pc_lru_prev, n++)
+		if (evictable(e) && !e->pc_dirty)
+			return take_detach(pc, e);
+
+	for (e = pc->pc_lru_tail.pc_lru_prev;
+	     mode == PC_TAKE_ANY && e != &pc->pc_lru_head &&
+	     tries < PC_EVICT_TRIES;
+	     e = prev) {
+		prev = e->pc_lru_prev;
+		if (!evictable(e) || !e->pc_dirty)
+			continue;
+		tries++;
+		rc = pc->pc_writeback(pc->pc_writeback_ctx, e->pc_block,
+				      e->pc_data, e->pc_size, e->pc_phys);
+		if (rc == 0) {
+			pc->pc_writebacks++;
+			e->pc_clean_seq = ++pc->pc_seq;
+			return take_detach(pc, e);
+		}
+		if (wb_rc != NULL)
+			*wb_rc = rc;
+		if (!e->pc_wfail && !page_cache_quiet)
+			printf("page cache: block %lu could not be written back "
+			       "(%d) — it stays cached and dirty, and is tried "
+			       "again at the next sync\n",
+			       (unsigned long)e->pc_block, rc);
+		e->pc_wfail = 1;
+		lru_remove(e);
+		lru_insert_mru(pc, e);
+	}
+
+	for (e = pc->pc_lru_tail.pc_lru_prev; e != &pc->pc_lru_head;
+	     e = e->pc_lru_prev)
+		if (evictable(e) && !e->pc_dirty)
+			return take_detach(pc, e);
+
+	return NULL;
+}
+
+/*
+ * The cache and its entries, with no slots yet: page_cache_create gives it a
+ * slab, page_cache_create_dma the caller's pool.
+ */
+static struct page_cache *
+page_cache_alloc(unsigned int max_entries, vm_size_t block_size,
+		 page_cache_writeback_fn writeback, void *ctx)
 {
 	struct page_cache *pc;
 	unsigned int i;
 
 	/* #573: see page_cache.h -- a cache that could lose dirty blocks is
 	 * not one this function makes. */
-	if (writeback == NULL)
+	if (writeback == NULL || max_entries == 0 || block_size == 0)
 		return NULL;
 
 	pc = (struct page_cache *)malloc(sizeof(*pc));
@@ -155,7 +265,10 @@ page_cache_create(unsigned int max_entries,
 
 	memset(pc, 0, sizeof(*pc));
 	pthread_mutex_init(&pc->pc_lock, NULL);
+	pthread_mutex_init(&pc->pc_sync_lock, NULL);	/* #599 */
+	pthread_cond_init(&pc->pc_cond, NULL);		/* #599 */
 	pc->pc_max_entries = max_entries;
+	pc->pc_block_size = block_size;
 	pc->pc_writeback = writeback;
 	pc->pc_writeback_ctx = ctx;
 
@@ -177,6 +290,7 @@ page_cache_create(unsigned int max_entries,
 	pc->pc_free = NULL;
 	for (i = 0; i < max_entries; i++) {
 		pc->pc_pool[i].pc_block = -1;
+		pc->pc_pool[i].pc_size = block_size;
 		pc->pc_pool[i].pc_hash_next = pc->pc_free;
 		pc->pc_free = &pc->pc_pool[i];
 	}
@@ -184,245 +298,336 @@ page_cache_create(unsigned int max_entries,
 	return pc;
 }
 
-void
+/*
+ * #599: a non-DMA cache owns one slab, cut into fixed slots at creation.
+ * It allocated a buffer per insertion and freed it at eviction, and the
+ * update path freed a buffer before an allocation that could fail -- a
+ * published entry with no data.  No slot moves or goes away now while the
+ * cache exists.
+ */
+struct page_cache *
+page_cache_create(unsigned int max_entries, vm_size_t block_size,
+		  page_cache_writeback_fn writeback, void *ctx)
+{
+	struct page_cache *pc = page_cache_alloc(max_entries, block_size,
+						 writeback, ctx);
+	unsigned int i;
+
+	if (pc == NULL)
+		return NULL;
+
+	pc->pc_slab_size = (vm_size_t)max_entries * block_size;
+	if (vm_allocate(mach_task_self(), &pc->pc_slab, pc->pc_slab_size,
+			TRUE) != KERN_SUCCESS) {
+		free(pc->pc_pool);
+		free(pc);
+		return NULL;
+	}
+	for (i = 0; i < max_entries; i++)
+		pc->pc_pool[i].pc_data = pc->pc_slab + (vm_offset_t)i *
+					 block_size;
+	return pc;
+}
+
+int
 page_cache_destroy(struct page_cache *pc)
 {
 	unsigned int i;
 
 	if (!pc)
-		return;
+		return 0;
 
-	/* Flush dirty blocks to disk before destroying */
-	for (i = 0; i < pc->pc_max_entries; i++) {
-		struct page_cache_entry *e = &pc->pc_pool[i];
-		if (e->pc_data && e->pc_block != (daddr_t)-1)
-			entry_writeback(pc, e);
-	}
+	/*
+	 * #599: refused, with nothing freed, while a block is dirty.  It wrote
+	 * each dirty block back and ignored the answer, then freed the lot --
+	 * the DMA pool included, which was never the cache's.
+	 */
+	pthread_mutex_lock(&pc->pc_lock);
+	for (i = 0; i < pc->pc_max_entries; i++)
+		if (pc->pc_pool[i].pc_state != PC_FREE &&
+		    (pc->pc_pool[i].pc_dirty || pc->pc_pool[i].pc_busy ||
+		     pc->pc_pool[i].pc_refs != 0 ||
+		     pc->pc_pool[i].pc_state != PC_VALID)) {
+			pthread_mutex_unlock(&pc->pc_lock);
+			return -1;
+		}
+	pthread_mutex_unlock(&pc->pc_lock);
 
-	if (pc->pc_dma_pool) {
-		/* Free the entire DMA pool at once */
-		vm_deallocate(mach_task_self(), pc->pc_dma_pool,
-			      pc->pc_dma_pool_size);
-	} else {
-		for (i = 0; i < pc->pc_max_entries; i++)
-			entry_free_data(pc, &pc->pc_pool[i]);
-	}
-
+	if (pc->pc_slab != 0)
+		(void) vm_deallocate(mach_task_self(), pc->pc_slab,
+				     pc->pc_slab_size);
 	free(pc->pc_pool);
 	free(pc);
+	return 0;
+}
+
+/*
+ * #599: see page_cache.h.  It replaces the partial write's lookup, which
+ * handed back a pointer into a slot with no hold on it and copied out of it
+ * with the lock dropped.
+ */
+int
+page_cache_modify(struct page_cache *pc, struct page_cache_entry *e,
+		  vm_size_t off, vm_size_t len, vm_offset_t data)
+{
+	if (off > e->pc_size || len > e->pc_size - off)
+		return KERN_INVALID_ARGUMENT;
+
+	pthread_mutex_lock(&pc->pc_lock);
+	if (e->pc_state != PC_VALID) {
+		pthread_mutex_unlock(&pc->pc_lock);
+		return KERN_ABORTED;
+	}
+	memcpy((void *)(e->pc_data + off), (void *)data, len);
+	if (!e->pc_dirty)
+		e->pc_dirty_seq = ++pc->pc_seq;
+	e->pc_wgen++;
+	e->pc_dirty = 1;
+	lru_remove(e);
+	lru_insert_mru(pc, e);
+	pthread_mutex_unlock(&pc->pc_lock);
+	return KERN_SUCCESS;
+}
+
+uint64_t
+page_cache_ticket(struct page_cache *pc)
+{
+	uint64_t t;
+
+	pthread_mutex_lock(&pc->pc_lock);
+	t = pc->pc_seq;
+	pthread_mutex_unlock(&pc->pc_lock);
+	return t;
+}
+
+/*
+ * #599: see page_cache.h.  It replaces page_cache_insert, which waited out a
+ * key being read, wrote nothing back but took any clean slot, and could not
+ * tell bytes read before a writeback from bytes read after it.
+ */
+int
+page_cache_install(struct page_cache *pc, daddr_t block, vm_offset_t data,
+		   vm_size_t size, uint64_t ticket)
+{
+	struct page_cache_entry *e;
+
+	if (size != pc->pc_block_size)
+		return KERN_INVALID_ARGUMENT;
+
+	pthread_mutex_lock(&pc->pc_lock);
+	if (pc->pc_forget > ticket) {
+		pthread_mutex_unlock(&pc->pc_lock);
+		return PAGE_CACHE_STALE;
+	}
+	/* Held, cached or being read: left alone, and never waited for */
+	for (e = pc->pc_hash[PC_HASH(block)]; e; e = e->pc_hash_next)
+		if (e->pc_block == block) {
+			pthread_mutex_unlock(&pc->pc_lock);
+			return PAGE_CACHE_PRESENT;
+		}
+
+	/* A free or clean slot: an install never costs a writeback */
+	e = take_victim(pc, PC_TAKE_CLEAN, NULL);
+	if (e == NULL) {
+		pthread_mutex_unlock(&pc->pc_lock);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	memcpy((void *)e->pc_data, (void *)data, size);
+	key_entry(pc, e, block, PC_VALID);
+	pthread_mutex_unlock(&pc->pc_lock);
+	return 0;
 }
 
 int
-page_cache_lookup(struct page_cache *pc, daddr_t block,
-		  vm_offset_t *data_out, vm_size_t *size_out)
+page_cache_write(struct page_cache *pc, daddr_t block, vm_offset_t data,
+		 vm_size_t size)
 {
-	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
+	if (size != pc->pc_block_size)
+		return KERN_INVALID_ARGUMENT;
+
 	pthread_mutex_lock(&pc->pc_lock);
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			/* Hit — move to MRU */
-			lru_remove(e);
-			lru_insert_mru(pc, e);
-			*data_out = e->pc_data;
-			*size_out = e->pc_size;
-			pc->pc_hits++;
+	/* #599: a key being read is waited out, so the write lands after it */
+	e = find_ready(pc, block);
+
+	if (e != NULL) {
+		lru_remove(e);
+		lru_insert_mru(pc, e);
+	} else {
+		int wb_rc = KERN_RESOURCE_SHORTAGE;
+
+		/*
+		 * #599: no slot is the last refused writeback's answer, or a
+		 * shortage -- the write fails and nothing is lost.
+		 */
+		e = take_victim(pc, PC_TAKE_ANY, &wb_rc);
+		if (!e) {
 			pthread_mutex_unlock(&pc->pc_lock);
-			return 0;
+			return wb_rc;
 		}
+		key_entry(pc, e, block, PC_VALID);
+	}
+
+	/* #599: the copy and the dirty bit in the same hold */
+	memcpy((void *)e->pc_data, (void *)data, size);
+	if (!e->pc_dirty)
+		e->pc_dirty_seq = ++pc->pc_seq;
+	e->pc_wgen++;
+	e->pc_dirty = 1;
+	pthread_mutex_unlock(&pc->pc_lock);
+	return KERN_SUCCESS;
+}
+
+/*
+ * #599: see page_cache.h.  The fill runs outside pc_lock on a slot keyed
+ * FILLING and pinned by this call: every other lookup of the key waits
+ * (find_ready), eviction skips it (evictable), and it is published VALID or
+ * withdrawn to the free list in one hold, with a broadcast either way.
+ */
+int
+page_cache_get(struct page_cache *pc, daddr_t block, page_cache_fill_fn fill,
+	       void *ctx, struct page_cache_entry **ep)
+{
+	struct page_cache_entry *e;
+	int rc;
+
+	*ep = NULL;
+	pthread_mutex_lock(&pc->pc_lock);
+	e = find_ready(pc, block);
+	if (e != NULL) {
+		e->pc_refs++;
+		lru_remove(e);
+		lru_insert_mru(pc, e);
+		pc->pc_hits++;
+		pthread_mutex_unlock(&pc->pc_lock);
+		*ep = e;
+		return 0;
 	}
 
 	pc->pc_misses++;
+	e = take_victim(pc, PC_TAKE_ANY, NULL);
+	if (e == NULL) {
+		pthread_mutex_unlock(&pc->pc_lock);
+		return 0;		/* no slot: the caller reads uncached */
+	}
+	key_entry(pc, e, block, PC_FILLING);
+	e->pc_refs = 1;
 	pthread_mutex_unlock(&pc->pc_lock);
-	return -1;
-}
 
-void
-page_cache_insert(struct page_cache *pc, daddr_t block,
-		  vm_offset_t data, vm_size_t size)
-{
-	unsigned int h = PC_HASH(block);
-	struct page_cache_entry *e;
-	vm_offset_t buf;
+	rc = fill(ctx, block, e->pc_data, e->pc_size, e->pc_phys);
 
 	pthread_mutex_lock(&pc->pc_lock);
-
-	/* Check if already cached (update data if so) */
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			lru_remove(e);
-			lru_insert_mru(pc, e);
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
-	}
-
-	/* Get a free entry, evicting if necessary */
-	if (pc->pc_free) {
-		e = pc->pc_free;
-		pc->pc_free = e->pc_hash_next;
-		e->pc_hash_next = NULL;
+	if (rc == 0) {
+		e->pc_state = PC_VALID;
+		*ep = e;
 	} else {
-		e = evict_lru(pc);
-		if (!e) {
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
+		lru_remove(e);
+		hash_remove(pc, e);
+		pc->pc_count--;
+		free_entry(pc, e);
 	}
-
-	if (pc->pc_dma_pool) {
-		/* DMA mode: buffer is pre-allocated, just copy data in */
-		memcpy((void *)e->pc_data, (void *)data,
-		       size < e->pc_size ? size : e->pc_size);
-	} else {
-		/* Non-DMA: allocate a new buffer */
-		if (vm_allocate(mach_task_self(), &buf, size, TRUE)
-		    != KERN_SUCCESS) {
-			/* Return entry to free list */
-			e->pc_hash_next = pc->pc_free;
-			pc->pc_free = e;
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
-		memcpy((void *)buf, (void *)data, size);
-		e->pc_data = buf;
-		e->pc_size = size;
-	}
-
-	/* Fill entry */
-	e->pc_block = block;
-	e->pc_dirty = 0;
-	e->pc_busy = 0;
-
-	/* Insert into hash chain */
-	e->pc_hash_next = pc->pc_hash[h];
-	pc->pc_hash[h] = e;
-
-	/* Insert at MRU */
-	lru_insert_mru(pc, e);
-	pc->pc_count++;
-
+	pthread_cond_broadcast(&pc->pc_cond);
 	pthread_mutex_unlock(&pc->pc_lock);
+	return rc;
 }
 
 void
-page_cache_invalidate(struct page_cache *pc, daddr_t block)
+page_cache_put(struct page_cache *pc, struct page_cache_entry *e)
 {
-	unsigned int h = PC_HASH(block);
+	pthread_mutex_lock(&pc->pc_lock);
+	if (e->pc_refs > 0)
+		e->pc_refs--;
+	if (e->pc_state == PC_ORPHAN && e->pc_refs == 0)
+		free_entry(pc, e);
+	pthread_mutex_unlock(&pc->pc_lock);
+}
+
+/* #599: see page_cache.h. */
+int
+page_cache_wrote(struct page_cache *pc, daddr_t block, vm_offset_t data,
+		 vm_size_t size)
+{
 	struct page_cache_entry *e;
 
+	if (size != pc->pc_block_size)
+		return KERN_INVALID_ARGUMENT;
+
 	pthread_mutex_lock(&pc->pc_lock);
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			entry_writeback(pc, e);
-			lru_remove(e);
-			hash_remove(pc, e);
-			entry_free_data(pc, e);
-			e->pc_block = -1;
-			/* Return to free list */
-			e->pc_hash_next = pc->pc_free;
-			pc->pc_free = e;
-			pc->pc_count--;
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
+	e = find_ready(pc, block);
+	if (e != NULL) {
+		memcpy((void *)e->pc_data, (void *)data, size);
+		e->pc_wgen++;
+		/*
+		 * The copy now holds bytes the disk got after any ticket
+		 * taken before this, so its leaving the cache must raise
+		 * pc_forget past them -- as a writeback's clean copy does
+		 * (found in review: a clean copy kept pc_clean_seq 0, its
+		 * eviction raised nothing, and an older readahead installed
+		 * the pre-write block).  A dirty copy keeps its dirty
+		 * sequence: its sync will stamp it.
+		 */
+		if (!e->pc_dirty)
+			e->pc_clean_seq = ++pc->pc_seq;
+	} else {
+		pc->pc_forget = ++pc->pc_seq;
 	}
 	pthread_mutex_unlock(&pc->pc_lock);
+	return KERN_SUCCESS;
 }
 
+/*
+ * #599: see page_cache.h.  It waits for a fill (the slot is not data yet,
+ * and the filler publishes it) and for a writeback (the sync holds the entry
+ * by pointer and marks it when the write lands) -- on pc_cond, which both
+ * broadcast.  Neither needs anything the caller may hold: the filler needs
+ * its device and pc_lock, the sync thread holds only pc_sync_lock.
+ */
 void
-page_cache_flush(struct page_cache *pc)
+page_cache_discard(struct page_cache *pc, daddr_t block)
 {
-	unsigned int i;
+	struct page_cache_entry *e;
 
 	pthread_mutex_lock(&pc->pc_lock);
-	for (i = 0; i < pc->pc_max_entries; i++) {
-		struct page_cache_entry *e = &pc->pc_pool[i];
-		if (e->pc_data && e->pc_block != (daddr_t)-1) {
-			entry_writeback(pc, e);
-			lru_remove(e);
-			hash_remove(pc, e);
-			entry_free_data(pc, e);
+	for (;;) {
+		for (e = pc->pc_hash[PC_HASH(block)]; e; e = e->pc_hash_next)
+			if (e->pc_block == block)
+				break;
+		if (e == NULL || (e->pc_state != PC_FILLING && !e->pc_busy))
+			break;
+		pc->pc_nwaiters++;
+		pthread_cond_wait(&pc->pc_cond, &pc->pc_lock);
+		pc->pc_nwaiters--;
+	}
+	if (e != NULL) {
+		lru_remove(e);
+		hash_remove(pc, e);
+		pc->pc_count--;
+		e->pc_dirty = 0;
+		e->pc_wfail = 0;
+		e->pc_clean_seq = 0;
+		if (e->pc_refs > 0) {
 			e->pc_block = -1;
-			e->pc_hash_next = pc->pc_free;
-			pc->pc_free = e;
+			e->pc_state = PC_ORPHAN;
+		} else {
+			free_entry(pc, e);
 		}
 	}
-	pc->pc_count = 0;
+	pc->pc_forget = ++pc->pc_seq;
 	pthread_mutex_unlock(&pc->pc_lock);
 }
 
 int
-page_cache_mark_dirty(struct page_cache *pc, daddr_t block)
+page_cache_contains(struct page_cache *pc, daddr_t block)
 {
-	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
 	pthread_mutex_lock(&pc->pc_lock);
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			e->pc_dirty = 1;
-			pthread_mutex_unlock(&pc->pc_lock);
-			return 0;
-		}
-	}
+	for (e = pc->pc_hash[PC_HASH(block)]; e; e = e->pc_hash_next)
+		if (e->pc_block == block)
+			break;
 	pthread_mutex_unlock(&pc->pc_lock);
-	return -1;
-}
-
-void
-page_cache_update(struct page_cache *pc, daddr_t block,
-		  vm_offset_t data, vm_size_t size)
-{
-	unsigned int h = PC_HASH(block);
-	struct page_cache_entry *e;
-	vm_offset_t buf;
-
-	/* #384: refuse garbage keys (see page_cache_alloc_entry). */
-	if (block < 0) {
-		printf("page_cache: rejecting negative block %ld update\n",
-		       (long)block);
-		return;
-	}
-
-	pthread_mutex_lock(&pc->pc_lock);
-
-	/* If block is already cached, update in place */
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			if (pc->pc_dma_pool || e->pc_size == size) {
-				/* DMA: fixed-size slot; non-DMA: same size */
-				vm_size_t copy = size < e->pc_size
-						? size : e->pc_size;
-				memcpy((void *)e->pc_data,
-				       (void *)data, copy);
-			} else {
-				entry_free_data(pc, e);
-				if (vm_allocate(mach_task_self(), &buf,
-						size, TRUE) != KERN_SUCCESS) {
-					pthread_mutex_unlock(&pc->pc_lock);
-					return;
-				}
-				memcpy((void *)buf, (void *)data, size);
-				e->pc_data = buf;
-				e->pc_size = size;
-			}
-			e->pc_dirty = 1;
-			lru_remove(e);
-			lru_insert_mru(pc, e);
-			pthread_mutex_unlock(&pc->pc_lock);
-			return;
-		}
-	}
-
-	pthread_mutex_unlock(&pc->pc_lock);
-
-	/* Not cached — insert as new dirty entry
-	 * (page_cache_insert and page_cache_mark_dirty acquire their own lock)
-	 */
-	page_cache_insert(pc, block, data, size);
-	page_cache_mark_dirty(pc, block);
+	return e != NULL;
 }
 
 /*
@@ -432,6 +637,8 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 #define SYNC_BATCH	64
 
 struct sync_entry {
+	struct page_cache_entry *e;	/* #599: the entry itself, pinned busy */
+	unsigned int	wgen;		/* its write count when collected */
 	daddr_t		block;
 	vm_offset_t	data;
 	vm_size_t	size;
@@ -457,31 +664,39 @@ batch_sort(struct sync_entry *b, int n)
 }
 
 /*
- * Post-writeback bookkeeping for a range of blocks, under lock:
- * always drop the busy pin; mark clean only if the write landed.
- * (#384: an entry that vanished meanwhile — invalidated — is fine;
- * its busy flag is reset when the entry is reused.)
+ * Post-writeback bookkeeping for `count' collected entries, under lock:
+ * always drop the busy pin; mark an entry clean only if the write landed and
+ * nothing wrote into it since it was collected (#599: by the entry pointer
+ * and its write count -- by block number, a write that landed during the
+ * writeback was marked clean without ever reaching the disk).
  */
 static void
-mark_range_done(struct page_cache *pc, daddr_t first, int count, int success)
+mark_range_done(struct page_cache *pc, const struct sync_entry *b, int count,
+		int success)
 {
 	int i;
 
 	pthread_mutex_lock(&pc->pc_lock);
 	for (i = 0; i < count; i++) {
-		unsigned int h = PC_HASH(first + i);
-		struct page_cache_entry *ce;
-		for (ce = pc->pc_hash[h]; ce; ce = ce->pc_hash_next) {
-			if (ce->pc_block == first + i) {
-				ce->pc_busy = 0;
-				if (success) {
-					ce->pc_dirty = 0;
-					pc->pc_writebacks++;
-				}
-				break;
-			}
+		struct page_cache_entry *ce = b[i].e;
+
+		ce->pc_busy = 0;
+		if (success && ce->pc_wgen == b[i].wgen) {
+			ce->pc_dirty = 0;
+			ce->pc_wfail = 0;
+			ce->pc_clean_seq = ++pc->pc_seq;	/* #599 */
+			pc->pc_writebacks++;
+		} else if (!success && !ce->pc_wfail) {
+			/* #599: said once, not every 5 s */
+			if (!page_cache_quiet)
+				printf("page cache: block %lu could not be "
+				       "written back — it stays dirty, and "
+				       "is tried again at the next sync\n",
+				       (unsigned long)ce->pc_block);
+			ce->pc_wfail = 1;
 		}
 	}
+	pthread_cond_broadcast(&pc->pc_cond);	/* #599: discard waits on busy */
 	pthread_mutex_unlock(&pc->pc_lock);
 }
 
@@ -490,41 +705,46 @@ page_cache_sync(struct page_cache *pc)
 {
 	struct sync_entry batch[SYNC_BATCH];
 	int n, i, failures = 0;
-	int skip_failed;
+	uint64_t horizon;
+	unsigned int call;
 	struct page_cache_entry *e;
 
 	/*
-	 * #384: the old version kept a resume CURSOR (an entry pointer)
-	 * and the batch's DATA pointers across the pc_lock release while
-	 * it wrote the batch out.  Concurrent producers could evict,
-	 * re-key or free those entries meanwhile: the resumed LRU walk
-	 * then wandered through re-used memory, and the writeback pushed
-	 * other blocks' bytes.  Now every batch restarts from the LRU
-	 * tail (written entries turn clean, so the scan makes progress
-	 * by itself; permanently-failing entries are skipped by count),
-	 * and batch entries are pinned busy so eviction leaves their
-	 * buffers alone until the write lands.
+	 * #599: one sync at a time (pc_sync_lock), and each dirty block that
+	 * was dirty when this call began is tried once by it: the horizon is
+	 * pc_seq now, and pc_tried is this call's number.  That is what ends
+	 * the loop -- a block that fails, or one re-dirtied behind the sync,
+	 * is not collected again by the same call.  The old skip-by-count
+	 * guessed at the same thing and was wrong when another sync ran.
+	 *
+	 * #384: batch entries are pinned busy, so eviction leaves their slots
+	 * alone until the write lands, and every batch restarts from the LRU
+	 * tail.
 	 */
-	skip_failed = 0;
-	for (;;) {
-		int seen_failed = 0;
+	pthread_mutex_lock(&pc->pc_sync_lock);
+	pthread_mutex_lock(&pc->pc_lock);
+	horizon = pc->pc_seq;
+	call = ++pc->pc_sync_calls;
+	pthread_mutex_unlock(&pc->pc_lock);
 
+	for (;;) {
 		/* Phase 1: collect dirty entries under lock, pin them */
 		n = 0;
 		pthread_mutex_lock(&pc->pc_lock);
 		e = pc->pc_lru_tail.pc_lru_prev;
 		while (e != &pc->pc_lru_head && n < SYNC_BATCH) {
-			if (e->pc_dirty && !e->pc_busy) {
-				if (seen_failed < skip_failed) {
-					seen_failed++;
-				} else {
-					e->pc_busy = 1;
-					batch[n].block = e->pc_block;
-					batch[n].data  = e->pc_data;
-					batch[n].size  = e->pc_size;
-					batch[n].phys  = e->pc_phys;
-					n++;
-				}
+			if (e->pc_state == PC_VALID && e->pc_dirty &&
+			    !e->pc_busy &&
+			    e->pc_dirty_seq <= horizon && e->pc_tried != call) {
+				e->pc_busy = 1;
+				e->pc_tried = call;
+				batch[n].e     = e;
+				batch[n].wgen  = e->pc_wgen;
+				batch[n].block = e->pc_block;
+				batch[n].data  = e->pc_data;
+				batch[n].size  = e->pc_size;
+				batch[n].phys  = e->pc_phys;
+				n++;
 			}
 			e = e->pc_lru_prev;
 		}
@@ -560,7 +780,7 @@ page_cache_sync(struct page_cache *pc)
 					batch[i].phys);
 				if (ret != 0)
 					failures++;
-				mark_range_done(pc, run_start, 1, ret == 0);
+				mark_range_done(pc, &batch[i], 1, ret == 0);
 				i++;
 			} else {
 				/* Merged write: copy into contiguous
@@ -584,7 +804,7 @@ page_cache_sync(struct page_cache *pc)
 						if (ret != 0)
 							failures++;
 						mark_range_done(pc,
-						    batch[i + j].block, 1,
+						    &batch[i + j], 1,
 						    ret == 0);
 					}
 					i += run_len;
@@ -605,21 +825,14 @@ page_cache_sync(struct page_cache *pc)
 
 				if (ret != 0)
 					failures += run_len;
-				mark_range_done(pc, run_start, run_len,
+				mark_range_done(pc, &batch[i], run_len,
 						ret == 0);
 				i += run_len;
 			}
 		}
-
-		/*
-		 * Entries that failed stay dirty: skip that many on the
-		 * next pass so the scan keeps making forward progress
-		 * instead of re-collecting the same failing blocks
-		 * forever within one sync call.
-		 */
-		skip_failed = failures;
 	}
 
+	pthread_mutex_unlock(&pc->pc_sync_lock);
 	return failures;
 }
 
@@ -640,20 +853,23 @@ page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
 	if (max_entries > max_possible)
 		max_entries = max_possible;
 
-	pc = page_cache_create(max_entries, writeback, ctx);
+	pc = page_cache_alloc(max_entries, block_size, writeback, ctx);
 	if (!pc)
 		return NULL;
 
 	/* Set up DMA pool metadata */
 	pc->pc_dma_pool = pool_va;
 	pc->pc_dma_pool_size = (vm_size_t)n_pages * 4096;
-	pc->pc_dma_n_pages = n_pages;
-	pc->pc_block_size = block_size;
-	if (n_pages > 4096)
-		n_pages = 4096;
-	memcpy(pc->pc_dma_pa, pa_list, n_pages * sizeof(unsigned int));
 
-	/* Pre-assign data buffers and physical addresses to each entry */
+	/*
+	 * Pre-assign data buffers and physical addresses to each entry.
+	 *
+	 * #599: pa_list is read here and nowhere after.  A copy of it, kept in
+	 * the cache beside two sizes, was written at half its width (a
+	 * sizeof(unsigned int) left over from before #520) and read by nothing;
+	 * it went, with the sizes.  pc_phys is the only record of a page's
+	 * address, and it is as wide as the list it comes from.
+	 */
 	for (i = 0; i < max_entries; i++) {
 		unsigned int page_idx = i / entries_per_page;
 		unsigned int offset = (i % entries_per_page) *
@@ -665,68 +881,6 @@ page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
 	}
 
 	return pc;
-}
-
-struct page_cache_entry *
-page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
-{
-	unsigned int h;
-	struct page_cache_entry *e;
-
-	if (!pc->pc_dma_pool)
-		return NULL;
-
-	/* #384: refuse garbage keys — a negative block is always a bug
-	 * in the caller (stale/corrupt block map) and would become an
-	 * unflushable dirty entry hammering the device forever. */
-	if (block < 0) {
-		printf("page_cache: rejecting negative block %ld\n",
-		       (long)block);
-		return NULL;
-	}
-
-	pthread_mutex_lock(&pc->pc_lock);
-
-	/* Check if already cached */
-	h = PC_HASH(block);
-	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
-		if (e->pc_block == block) {
-			lru_remove(e);
-			lru_insert_mru(pc, e);
-			pc->pc_hits++;
-			pthread_mutex_unlock(&pc->pc_lock);
-			return e;
-		}
-	}
-
-	pc->pc_misses++;
-
-	/* Get a free entry or evict */
-	if (pc->pc_free) {
-		e = pc->pc_free;
-		pc->pc_free = e->pc_hash_next;
-		e->pc_hash_next = NULL;
-	} else {
-		e = evict_lru(pc);
-		if (!e) {
-			pthread_mutex_unlock(&pc->pc_lock);
-			return NULL;
-		}
-	}
-
-	/* Set up the entry (data/phys already assigned from pool) */
-	e->pc_block = block;
-	e->pc_dirty = 0;
-	e->pc_busy = 0;
-
-	/* Insert into hash and LRU */
-	e->pc_hash_next = pc->pc_hash[h];
-	pc->pc_hash[h] = e;
-	lru_insert_mru(pc, e);
-	pc->pc_count++;
-
-	pthread_mutex_unlock(&pc->pc_lock);
-	return e;
 }
 
 void

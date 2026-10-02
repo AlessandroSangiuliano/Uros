@@ -61,13 +61,20 @@ mget_time(tvalspec_t *tv)
 	clock_get_time(mem_clock_port, tv);
 }
 
-static unsigned long
+/*
+ * 64 bits, and so is every value computed from it (#599).  The difference is
+ * summed in nanoseconds, signed, before the divide: dividing the unsigned
+ * form of a negative tv_nsec difference made a run that crossed a second
+ * read 4.295 s too long on i386, and far more on x86-64.
+ */
+static unsigned long long
 melapsed_us(const tvalspec_t *before, const tvalspec_t *after)
 {
-	unsigned long us;
-	us  = (unsigned long)(after->tv_sec  - before->tv_sec)  * 1000000UL;
-	us += (unsigned long)(after->tv_nsec - before->tv_nsec) / 1000UL;
-	return us;
+	unsigned long long ns;
+	ns  = (unsigned long long)((long long)after->tv_sec -
+				   (long long)before->tv_sec) * 1000000000ULL;
+	ns += (unsigned long long)(long long)(after->tv_nsec - before->tv_nsec);
+	return ns / 1000ULL;
 }
 
 /* ===================================================================
@@ -176,13 +183,13 @@ run_bench(const char *name, mem_op_fn fn,
 	  void *dst, const void *src, const struct bench_size *bs)
 {
 	tvalspec_t	t0, t1;
-	unsigned long	best_us, run_us, throughput;
+	unsigned long long best_us, run_us, throughput;
 	int		r;
 
 	/* warmup */
 	fn(dst, src, bs->size, 100);
 
-	best_us = 0xFFFFFFFFUL;
+	best_us = ~0ULL;
 	for (r = 0; r < NRUNS; r++) {
 		mget_time(&t0);
 		fn(dst, src, bs->size, bs->iters);
@@ -195,10 +202,10 @@ run_bench(const char *name, mem_op_fn fn,
 	if (best_us == 0)
 		best_us = 1;
 
-	throughput = (unsigned long)bs->iters * (bs->size / 1024) * 1000 /
+	throughput = (unsigned long long)bs->iters * (bs->size / 1024) * 1000 /
 		     best_us * 1000 / 1024;
 
-	printf("  %-14s %-6s  %8lu us  (%u iters, best of %d, %lu MB/s)\n",
+	printf("  %-14s %-6s  %8llu us  (%u iters, best of %d, %llu MB/s)\n",
 	       name, bs->label, best_us, bs->iters, NRUNS, throughput);
 }
 

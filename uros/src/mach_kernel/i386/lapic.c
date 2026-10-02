@@ -50,6 +50,8 @@
 #include <i386/pit.h>			/* PIT ports for 8254 calibration ref */
 #include <i386/pio.h>			/* inb/outb */
 #include <kern/uslock_census.h>		/* #486: uslock_census_sample */
+#include <i386/clock_watch.h>		/* #599: clock_watch_tick/init */
+#include <kern/rcu.h>			/* urmach_rcu_quiescent_state */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
@@ -215,18 +217,21 @@ lapic_timer_calibrate(void)
 	 * and on the BSP before any AP arms -- the AP isn't scheduling yet, so
 	 * the brief gap with neither source is harmless.
 	 */
-	if (lapic_timer_count != 0)
+	if (lapic_timer_count != 0) {
 		lapic_timer_enabled = 1;
+		clock_watch_init();	/* #599: the APs' ticks watch the BSP's */
+	}
 }
 
 /*
  * lapic_timer_start() — arm this CPU's LAPIC timer to fire LAPIC_TIMER_VECTOR
  * periodically at the HZ rate, using the count calibrated above.  Called by
  * each AP from slave_machine_init() once its local APIC is enabled.  The
- * timer keeps counting in hardware even while masked by the TPR; the LAPIC
- * holds at most one tick pending in the IRR and delivers it when this CPU
- * drops back to spllo, so a CPU that spends a stretch at high spl coalesces
- * the missed ticks into one -- the same behaviour the masked device clock has.
+ * timer keeps counting in hardware whatever the level.  A tick that arrives
+ * above spllo is deferred in software since #322 -- the TPR stays 0 --
+ * and one tick is replayed when this CPU drops back to spllo, so a CPU that
+ * spends a stretch at high spl coalesces the missed ticks into one: the same
+ * behaviour the deferred device clock has (softspl_replay).
  */
 void
 lapic_timer_start(void)
@@ -248,11 +253,11 @@ lapic_timer_start(void)
  * stays master-only on the BSP's device clock; an AP only needs the per-CPU
  * quantum/usage accounting hertz_tick() does.
  *
- * Because LAPIC_TIMER_VECTOR sits in TPR class 3, the LAPIC delivered this
- * only because the CPU is at spllo; we therefore CANNOT be nested inside a
- * scheduler lock holder (those raise spl to splsched -> TPR 0x40, which masks
- * class 3).  So thread_quantum_update() may take thread_lock the ordinary way
- * -- none of the #317 cross-CPU trylock hazard applies.
+ * The ipi.S stub runs this only at spllo: above it the tick is deferred and
+ * replayed (#322; before that, the TPR masked class 3 at splsched).  So we
+ * CANNOT be nested inside a scheduler lock holder, and thread_quantum_update()
+ * may take thread_lock the ordinary way -- none of the #317 cross-CPU trylock
+ * hazard applies.
  *
  * Preemption is held off across hertz_tick for the same reason as
  * ipi_mp_handler (#316): hertz_tick's internal balanced enable_preemption
@@ -276,12 +281,56 @@ lapic_timer_handler(struct i386_interrupt_state *regs)
 	/* #355: also bump THIS cpu's own tick, so the NMI can detect a partial
 	 * (single-cpu) wedge instead of only a total clock-stop. */
 	nmi_cpu_tick[cpu_number()]++;
+	/* #599: and watch processor 0's, which nothing else can see stop. */
+	clock_watch_tick(cpu_number());
 
 	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
 	hertz_tick(usermode, (vm_offset_t)regs->eip);
 
+	/*
+	 * #331's per-processor RCU backstop, which hardclock gives processor 0
+	 * (#599): without it an application processor reported a quiescent
+	 * state only when it switched threads or idled, so one spinning on a
+	 * lock held a grace period open.  x86-64's tick does the same
+	 * (x86_64/time/clock_event.c).
+	 */
+	urmach_rcu_quiescent_state();
+
 	lapic_eoi();
 	mp_enable_preemption_no_check();
+}
+
+/*
+ * #599: every command with a destination goes through here.
+ *
+ * The destination (ICRD) and the command (ICR) are two registers, and the
+ * ICR write is what sends.  A sender interrupted between the two by a handler
+ * that sends its own IPI -- or by an NMI into DDB, which sends to the other
+ * processors, and which cli does not keep out -- found that handler's
+ * destination in ICRD, and its own command went there: a lost AST, a lost
+ * doorbell, an INIT to the wrong processor.  So the pair is written with
+ * interrupts off, and the destination that was in ICRD is put back before
+ * returning.  That second half is what makes a nested sender compose with
+ * the one it interrupted, NMI included: whoever cut in restores the ICRD the
+ * interrupted sender had written.
+ *
+ * Callers check lapic_start.  The shorthand senders (DSS_SELF, DSS_OTHERS)
+ * write ICR only, and ICRD means nothing to them.
+ */
+void
+lapic_icr_send(unsigned char dest, unsigned int command)
+{
+	unsigned int	flags, icrd;
+
+	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+	lapic_ipi_wait();
+	icrd = LAPIC_REG32(LAPIC_ICRD);
+	LAPIC_REG32(LAPIC_ICRD) =
+	    ((unsigned int)dest & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG32(LAPIC_ICR) = command;
+	lapic_ipi_wait();
+	LAPIC_REG32(LAPIC_ICRD) = icrd;
+	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
 }
 
 void
@@ -296,15 +345,11 @@ lapic_send_ipi(int slot, unsigned int vector)
 	if (lapic_dest == 0xFF)
 		return;		/* slot unknown — silent, callers check ncpus */
 
-	lapic_ipi_wait();
-	LAPIC_REG32(LAPIC_ICRD) =
-	    ((unsigned int)lapic_dest & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
-	LAPIC_REG32(LAPIC_ICR)  =
+	lapic_icr_send(lapic_dest,
 	    LAPIC_ICR_DM_FIXED
 	    | LAPIC_ICR_LEVEL_ASSERT
 	    | LAPIC_ICR_DSS_DEST
-	    | (vector & LAPIC_ICR_VECTOR_MASK);
-	lapic_ipi_wait();
+	    | (vector & LAPIC_ICR_VECTOR_MASK));
 }
 
 void
@@ -341,6 +386,31 @@ lapic_send_nmi_all_excluding_self(void)
 	    | LAPIC_ICR_LEVEL_ASSERT
 	    | LAPIC_ICR_DSS_OTHERS;
 	lapic_ipi_wait();
+}
+
+/*
+ * #599: an NMI to one processor, so that the clock watch (clock_watch.c) can
+ * ask processor 0 where it is once its tick has stopped.  An NMI ignores IF,
+ * the TPR and the in-service bits, so it reaches a processor that no maskable
+ * interrupt can.  It is sent from an interrupt, which is why the pair goes
+ * through lapic_icr_send().
+ */
+void
+lapic_send_nmi(int slot)
+{
+	unsigned char	lapic_dest;
+
+	if (lapic_start == 0)
+		return;
+
+	lapic_dest = mp_cpu_lapic_id_get(slot);
+	if (lapic_dest == 0xFF)
+		return;
+
+	lapic_icr_send(lapic_dest,
+	    LAPIC_ICR_DM_NMI
+	    | LAPIC_ICR_LEVEL_ASSERT
+	    | LAPIC_ICR_DSS_DEST);
 }
 
 /*
@@ -396,8 +466,11 @@ lapic_send_self_ipi(unsigned int vector)
  * spllo.  A deferred device IRQ had its RTE masked at defer time to stop a
  * level-triggered line from storming; unmask it and self-IPI so the line is
  * re-armed and the (possibly edge) interrupt is re-delivered.  The clock is
- * re-injected the same way so timekeeping does not lose the tick.  Bits
- * 0..15 are device IRQs (vector 0x40+irq); SOFTSPL_CLOCK_BIT is the timer.
+ * re-injected the same way, ONCE, however many ticks arrived while it was
+ * deferred: the 8254's edges are lost while its pin is masked, and the LAPIC
+ * timer keeps one pending, so a long stretch at a raised level costs ticks
+ * (#599).  Bits 0..15 are device IRQs (vector 0x40+irq); SOFTSPL_CLOCK_BIT
+ * is the timer.
  */
 void
 softspl_replay(int cpu)
@@ -425,9 +498,12 @@ softspl_replay(int cpu)
  * self-test (start_other_cpus sends a CALL_FUNC to the BSP) and as room
  * for future directed sends; their handlers stay minimal.
  *
- * All IPI handlers run with interrupts disabled (K_INTR_GATE in the IDT),
- * %gs = CPU_DATA, on the stack the LAPIC interrupted — no kmsg pool / no
- * sleeping, exactly like any other hardware interrupt handler.
+ * All IPI handlers are entered with interrupts disabled (K_INTR_GATE in the
+ * IDT), %gs = CPU_DATA, on the stack the LAPIC interrupted — no kmsg pool /
+ * no sleeping, exactly like any other hardware interrupt handler.  They do
+ * not stay disabled: ast_check()'s splx() ends in sti, as every i386 splx()
+ * does.  What keeps maskable interrupts out until the EOI is the vector in
+ * service, whose class is above every other (#599).
  */
 void
 ipi_resched_handler(void)

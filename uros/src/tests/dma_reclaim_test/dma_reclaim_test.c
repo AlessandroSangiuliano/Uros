@@ -249,9 +249,14 @@ struct reclaim_msg {
 	natural_t		held;
 };
 
-/* Room for the trailer the kernel appends on the receiving side. */
+/*
+ * Room for the trailer the kernel appends on the receiving side -- and for
+ * the larger offer of arm [6] (#599), which comes down the same port and is
+ * received here if it arrives late, to be skipped by its id.
+ */
 struct reclaim_rcv {
 	struct reclaim_msg	msg;
+	char			room[32];
 	mach_msg_trailer_t	trailer;
 };
 
@@ -292,17 +297,82 @@ hear_from_the_holder(mach_port_t mine, unsigned *held)
 	if (mine == MACH_PORT_NULL)
 		return 0;
 
-	memset(&r, 0, sizeof(r));
+	/*
+	 * #599: the offer below comes down the same port first, and a late
+	 * one would otherwise be read here as a table count of garbage.
+	 */
+	do {
+		memset(&r, 0, sizeof(r));
+		if (mach_msg(&r.msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			     sizeof(r), mine, 5000, MACH_PORT_NULL)
+		    != MACH_MSG_SUCCESS)
+			return 0;
+	} while (r.msg.head.msgh_id != RECLAIM_MSG_ID);
 
-	if (mach_msg(&r.msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
-		     sizeof(r), mine, 5000, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
-		return 0;
-
-	if (r.msg.head.msgh_id != RECLAIM_MSG_ID || r.msg.held == 0)
+	if (r.msg.held == 0)
 		return 0;
 
 	*held = (unsigned) r.msg.held;
 	return 1;
+}
+
+/*
+ * ── [6] Another task's buffer is not this task's to free (#599) ─────────
+ *
+ * device_dma_free checked no owner: any holder of the master port freed any
+ * region it named.  That takes two tasks to show, and these two are already
+ * joined: the holder, before it takes the table, offers the checker one of
+ * its own regions by address and waits for an answer; the checker frees it
+ * and must be told KERN_NO_ACCESS; the holder then frees it itself, as its
+ * owner, and carries on exactly as before.
+ */
+#define VICTIM_MSG_ID	531
+#define VICTIM_ACK_ID	532
+
+struct victim_msg {
+	mach_msg_header_t	head;
+	NDR_record_t		ndr;
+	vm_address_t		kva;
+	natural_t		kr;	/* in the ack: what the free answered */
+	uint64_t		cap_id;	/* [8]: a capability of the holder's */
+};
+
+struct victim_rcv {
+	struct victim_msg	msg;
+	mach_msg_trailer_t	trailer;
+};
+
+static kern_return_t	victim_kr = KERN_SUCCESS;
+static int		victim_ran;
+static kern_return_t	revoke_kr = KERN_SUCCESS;	/* [8] */
+static int		revoke_ran;
+
+static void
+victim_send(mach_port_t to, mach_msg_id_t id, vm_address_t kva,
+	    kern_return_t kr, uint64_t cap_id)
+{
+	struct victim_msg m;
+
+	memset(&m, 0, sizeof(m));
+	m.cap_id = cap_id;
+	m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.head.msgh_size = sizeof(m);
+	m.head.msgh_remote_port = to;
+	m.head.msgh_id = id;
+	m.ndr = NDR_record;
+	m.kva = kva;
+	m.kr = (natural_t)kr;
+	(void) mach_msg(&m.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m),
+			0, MACH_PORT_NULL, 1000, MACH_PORT_NULL);
+}
+
+static int
+victim_receive(mach_port_t on, mach_msg_id_t id, struct victim_rcv *r)
+{
+	memset(r, 0, sizeof(*r));
+	return mach_msg(&r->msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			sizeof(*r), on, 5000, MACH_PORT_NULL)
+		== MACH_MSG_SUCCESS && r->msg.head.msgh_id == id;
 }
 
 /* Take one slot.  Answers zero and leaves nothing behind on a refusal. */
@@ -447,6 +517,8 @@ become_a_driver(void)
  * Take the host bridge from the kernel, the way a driver does: a capability for
  * the CLASS out of this program's manifest, and a claim on the instance.
  */
+static uint64_t	bridge_claim_cap;	/* #599 [7]: the claim's capability */
+
 static int
 claim_the_bridge(void)
 {
@@ -477,7 +549,70 @@ claim_the_bridge(void)
 		return 0;
 	}
 
+	bridge_claim_cap = tok.cap_id;
 	return 1;
+}
+
+/*
+ * ── [7] A claim that ends takes its device's grants with it (#599) ───────
+ *
+ * Holding the bridge, map one page of a buffer for it through
+ * device_dma_map_foreign_op, count the devices the buffer is mapped for,
+ * revoke the CLAIM's capability, count again: 0.  The grants made for a
+ * device outlived its claim, so a restarted driver found stale addresses and
+ * the slots leaked until the buffer went.  Where no device mapping exists
+ * (a machine that confines nothing) the arm says NOT APPLICABLE.
+ */
+static void
+a_claim_takes_its_grants(void)
+{
+	vm_address_t	kva = 0, uva = 0, dma = 0;
+	vm_address_t	*pa_list = NULL;
+	mach_msg_type_number_t pa_cnt = 0;
+	uint64_t	rid = 0;
+	struct uros_cap	t;
+	kern_return_t	kr, kr_map = KERN_FAILURE, kr_rev = KERN_FAILURE;
+	natural_t	u0 = 0, u1 = 0;
+
+	kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+				 mach_task_self(), &kva, &uva, &pa_list,
+				 &pa_cnt, &rid);
+	if (kr != KERN_SUCCESS || pa_cnt != 1) {
+		printf("dma_reclaim: [7] a claim takes its grants — DID NOT "
+		       "RUN, no buffer (kr=%d)\n", (int)kr);
+		if (pa_list != NULL)
+			(void) vm_deallocate(mach_task_self(),
+					     (vm_address_t)pa_list,
+					     pa_cnt * sizeof(vm_address_t));
+		return;
+	}
+	memset(&t, 0, sizeof(t));
+	kr = cap_request(RESOURCE_DMA_BUFFER, rid,
+			 CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
+			 &t);
+	if (kr == KERN_SUCCESS)
+		kr_map = device_dma_map_foreign_op(device_port, BRIDGE_BDF,
+						   pa_list[0],
+						   CAP_OP_DMA_DEVICE_WRITE,
+						   (char *)&t, sizeof(t), &dma);
+	(void) device_dma_region_users(device_port, rid, &u0);
+	if (kr_map == KERN_SUCCESS)
+		kr_rev = cap_revoke(bridge_claim_cap);
+	(void) device_dma_region_users(device_port, rid, &u1);
+	(void) vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+			     pa_cnt * sizeof(vm_address_t));
+	(void) device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+
+	printf("dma_reclaim: [7] a page mapped for 0:0.0 (kr=%d): users %u; "
+	       "the claim revoked (kr=%d): users %u\n", (int)kr_map,
+	       (unsigned)u0, (int)kr_rev, (unsigned)u1);
+	if (kr_map == KERN_SUCCESS && kr_rev == KERN_SUCCESS && u0 == 0)
+		printf("dma_reclaim: [7] a claim takes its grants — NOT "
+		       "APPLICABLE, no device mapping exists here\n");
+	else
+		arm(7, "a claim that ends takes its device's grants",
+		    kr_map == KERN_SUCCESS && kr_rev == KERN_SUCCESS &&
+		    u0 == 1 && u1 == 0);
 }
 
 
@@ -544,6 +679,30 @@ wait_for_the_holder_to_go(mach_port_t *keep)
 		return 0;
 
 	*keep = mine;
+
+	/* #599 [6]: the holder's offer, while the holder is alive. */
+	{
+		struct victim_rcv offer;
+
+		if (victim_receive(mine, VICTIM_MSG_ID, &offer)) {
+			if (offer.msg.kva != 0) {
+				victim_kr = device_dma_free(device_port,
+							    DEVICE_DMA_NO_BDF,
+							    offer.msg.kva,
+							    REGION_BYTES);
+				victim_ran = 1;
+			}
+			/*
+			 * #599 [8]: and a capability issued to the holder is
+			 * not this task's to revoke.
+			 */
+			if (offer.msg.cap_id != 0) {
+				revoke_kr = cap_revoke(offer.msg.cap_id);
+				revoke_ran = 1;
+			}
+			victim_send(p, VICTIM_ACK_ID, offer.msg.kva, victim_kr, 0);
+		}
+	}
 
 	for (t = 0; t < RECLAIM_TRIES; t++) {
 		mach_port_type_t type = 0;
@@ -635,6 +794,43 @@ main(int argc, char **argv)
 			printf("dma_reclaim: the checker never appeared — "
 			       "taking nothing\n");
 			die();
+		}
+
+		/* #599 [6]: one of this task's regions, offered and taken
+		 * back.  After the rendezvous, before the table. */
+		{
+			vm_address_t	vkva = 0;
+			uint64_t	vid = 0;
+			struct victim_rcv ack;
+			struct uros_cap	vtok;
+
+			memset(&vtok, 0, sizeof(vtok));
+			if (take_one(&vkva, &vid)) {
+				/* [8]: a capability of this task's, offered
+				 * for the checker to try to revoke. */
+				(void) cap_request(RESOURCE_DMA_BUFFER, vid,
+						   CAP_OP_DMA_DEVICE_READ, 0,
+						   &vtok);
+				victim_send(peer, VICTIM_MSG_ID, vkva, 0, vtok.cap_id);
+				if (!victim_receive(holder_port, VICTIM_ACK_ID,
+						    &ack))
+					printf("dma_reclaim: the checker never "
+					       "answered the offer\n");
+				printf("dma_reclaim: the holder frees the "
+				       "region it offered, as its owner "
+				       "(kr=%d)\n",
+				       (int)device_dma_free(device_port,
+						DEVICE_DMA_NO_BDF, vkva,
+						REGION_BYTES));
+			} else {
+				/* Offered empty, so the checker's first
+				 * message is always the offer. */
+				victim_send(peer, VICTIM_MSG_ID, 0, 0, 0);
+				(void) victim_receive(holder_port,
+						      VICTIM_ACK_ID, &ack);
+				printf("dma_reclaim: no region to offer the "
+				       "checker\n");
+			}
 		}
 
 		printf("dma_reclaim: the checker is watching; taking "
@@ -1009,10 +1205,35 @@ main(int argc, char **argv)
 			       "inherited it",
 			    kr_before == KERN_NO_ACCESS && claimed
 			    && kr_after == KERN_SUCCESS);
+
+		/* #599 [7]: while the claim is held. */
+		if (claimed)
+			a_claim_takes_its_grants();
+		else
+			printf("dma_reclaim: [7] a claim takes its grants — "
+			       "DID NOT RUN, the bridge was not claimed\n");
 	} else {
 		printf("dma_reclaim: [4] and [5] cannot run: no HAL\n");
 		n_fail += 2;
 	}
+
+	if (victim_ran) {
+		printf("dma_reclaim: [6] freeing the holder's region from here "
+		       "answered %d\n", (int)victim_kr);
+		arm(6, "another task's buffer is not this task's to free",
+		    victim_kr == KERN_NO_ACCESS);
+	} else
+		printf("dma_reclaim: [6] another task's buffer — DID NOT RUN, "
+		       "the holder offered none\n");
+
+	if (revoke_ran) {
+		printf("dma_reclaim: [8] revoking the holder's capability from "
+		       "here answered %d\n", (int)revoke_kr);
+		arm(8, "another task's capability is not this task's to revoke",
+		    revoke_kr == CAP_ERR_UNAUTHORIZED);
+	} else
+		printf("dma_reclaim: [8] another task's capability — DID NOT "
+		       "RUN, the holder offered none\n");
 
 	printf("dma_reclaim: %d of %d arms passed\n", n_pass, n_pass + n_fail);
 	die();
