@@ -3742,7 +3742,9 @@ static struct dma_ask_cost {
 	uint64_t		claim;	/* the master port, the arguments, the claim */
 	uint64_t		mac;	/* the token copied and verified */
 	uint64_t		find;	/* the region by id, the page in it */
-	uint64_t		rest;	/* the direction; with an IOMMU, the grant */
+	uint64_t		rest;	/* the direction; with an IOMMU, the user list */
+	uint64_t		grants;	/* asks that granted, counted apart... */
+	uint64_t		grant_cyc;	/* ...whole, in none of the four */
 } __attribute__((aligned(64))) dma_ask_cost[NCPUS];
 
 /* One slot, whole: read again while its owner is between the two seq writes. */
@@ -3759,14 +3761,21 @@ dma_ask_read(const struct dma_ask_cost *c, struct dma_ask_cost *into)
 		into->mac = c->mac;
 		into->find = c->find;
 		into->rest = c->rest;
+		into->grants = c->grants;
+		into->grant_cyc = c->grant_cyc;
 		publish_barrier();
 	} while ((before & 1) != 0 || c->seq != before);
 }
 
-/* An answered ask: t0 at entry, t1 past the claim, t2 past the MAC, t3 past
- * the region and the page; the rest ends now. */
+/*
+ * An answered ask: t0 at entry, t1 past the claim, t2 past the MAC, t3 past
+ * the region and the page; the rest ends now.  One that granted is counted
+ * apart and whole: mapping a whole region costs as much as a thousand asks,
+ * once, and in the averages since boot it hid what every other ask costs.
+ */
 static void
-dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3)
+dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3,
+		int granted)
 {
 	uint64_t t4 = urmach_tsc();
 	struct dma_ask_cost *c;
@@ -3775,11 +3784,16 @@ dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3)
 	c = &dma_ask_cost[cpu_number()];
 	c->seq++;
 	publish_barrier();
-	c->asks++;
-	c->claim += t1 - t0;
-	c->mac += t2 - t1;
-	c->find += t3 - t2;
-	c->rest += t4 - t3;
+	if (granted) {
+		c->grants++;
+		c->grant_cyc += t4 - t0;
+	} else {
+		c->asks++;
+		c->claim += t1 - t0;
+		c->mac += t2 - t1;
+		c->find += t3 - t2;
+		c->rest += t4 - t3;
+	}
 	publish_barrier();
 	c->seq++;
 	enable_preemption();
@@ -3792,7 +3806,9 @@ ds_master_device_dma_ask_cost(
 	cap_u64_t	*claim,
 	cap_u64_t	*mac,
 	cap_u64_t	*find,
-	cap_u64_t	*rest)
+	cap_u64_t	*rest,
+	cap_u64_t	*grants,
+	cap_u64_t	*grant_cycles)
 {
 	struct dma_ask_cost one;
 	kern_return_t kr;
@@ -3802,7 +3818,7 @@ ds_master_device_dma_ask_cost(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	*asks = *claim = *mac = *find = *rest = 0;
+	*asks = *claim = *mac = *find = *rest = *grants = *grant_cycles = 0;
 	for (i = 0; i < NCPUS; i++) {
 		dma_ask_read(&dma_ask_cost[i], &one);
 		*asks += one.asks;
@@ -3810,6 +3826,8 @@ ds_master_device_dma_ask_cost(
 		*mac += one.mac;
 		*find += one.find;
 		*rest += one.rest;
+		*grants += one.grants;
+		*grant_cycles += one.grant_cyc;
 	}
 	return KERN_SUCCESS;
 }
@@ -3910,7 +3928,7 @@ ds_master_device_dma_map_foreign_op(
 	 */
 	if (!device_md_dma_isolates()) {
 		*dma_addr = paddr;
-		dma_ask_account(t0, t1, t2, t3);
+		dma_ask_account(t0, t1, t2, t3, 0);
 		return KERN_SUCCESS;
 	}
 
@@ -3992,7 +4010,7 @@ ds_master_device_dma_map_foreign_op(
 		*dma_addr = (vm_address_t)(base + (unsigned long)page *
 					   PAGE_SIZE +
 					   (paddr & (vm_address_t)PAGE_MASK));
-	dma_ask_account(t0, t1, t2, t3);
+	dma_ask_account(t0, t1, t2, t3, granted);
 	return KERN_SUCCESS;
 }
 

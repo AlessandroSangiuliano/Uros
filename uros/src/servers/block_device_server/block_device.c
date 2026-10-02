@@ -930,7 +930,7 @@ blk_phys_said(const struct blk_handle *h, const char *when)
 	uint64_t all = h->xlate_cyc + h->xfer_cyc;
 	unsigned permille = all ? (unsigned)((h->xlate_cyc * 1000) / all) : 0;
 
-	cap_u64_t asks, claim, mac, find, rest;
+	cap_u64_t asks, claim, mac, find, rest, grants, grant_cyc;
 
 	printf("blk: %s: %s %llu physical requests, %llu pages: asking the "
 	       "kernel %llu cycles a page, the transfer %llu a request — "
@@ -952,19 +952,35 @@ blk_phys_said(const struct blk_handle *h, const char *when)
 	 * line this first was, about 290 bytes, was cut at byte 256 in 8 of 18.
 	 */
 	if (device_dma_ask_cost(master_device, &asks, &claim, &mac, &find,
-				&rest) == KERN_SUCCESS && asks != 0) {
+				&rest, &grants, &grant_cyc) == KERN_SUCCESS &&
+	    asks != 0) {
 		uint64_t in_kernel = (claim + mac + find + rest) / asks;
+		char rpc[48];
+
+		/*
+		 * The asks that granted are apart in the kernel's sums and inside
+		 * this handle's count -- its own first ask granted -- and the
+		 * kernel's grants are not told apart by handle.  So the RPC is the
+		 * difference only on a boot with no grant; with an IOMMU it is the
+		 * one a boot without measured, the path being the same.
+		 */
+		if (grants == 0)
+			snprintf(rpc, sizeof(rpc), "the RPC about %lld",
+				 (long long)per_page - (long long)in_kernel);
+		else
+			snprintf(rpc, sizeof(rpc), "the RPC not separable");
 
 		printf("blk: %s: in the kernel, over all %llu asks since boot: "
 		       "%llu cycles a page -- the claim %llu, the MAC %llu, the "
-		       "region and the page %llu, the rest %llu; the RPC about "
-		       "%lld (#537)\n", h->part ? h->part->name : "?",
+		       "region and the page %llu, the rest %llu; %s; %llu grants, "
+		       "%llu cycles (#537)\n", h->part ? h->part->name : "?",
 		       (unsigned long long)asks, (unsigned long long)in_kernel,
 		       (unsigned long long)(claim / asks),
 		       (unsigned long long)(mac / asks),
 		       (unsigned long long)(find / asks),
-		       (unsigned long long)(rest / asks),
-		       (long long)per_page - (long long)in_kernel);
+		       (unsigned long long)(rest / asks), rpc,
+		       (unsigned long long)grants,
+		       (unsigned long long)grant_cyc);
 	}
 }
 

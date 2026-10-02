@@ -816,7 +816,11 @@ routine device_io_port_set_divisor(
  * when it says its own count of the whole ask, which is outside the window it
  * times: the kernel says nothing from inside an ask, because its caller is
  * timing it, and a line printed there was counted as the ask's (2.6 ms a
- * line).  Nothing here names a buffer, a device or a task.
+ * line).  The asks that GRANTED -- with an IOMMU the first for each region and
+ * device maps the whole region, once -- are counted apart, whole, in `grants'
+ * and `grant_cycles', and in none of the four: one of them cost about as much
+ * as a thousand ordinary asks, and in an average since boot it hid the rest.
+ * Nothing here names a buffer, a device or a task.
  */
 type dma_cost_t = unsigned64 ctype: cap_u64_t;
 
@@ -826,5 +830,7 @@ routine device_dma_ask_cost(
 	out	claim		: dma_cost_t;
 	out	mac		: dma_cost_t;
 	out	find		: dma_cost_t;
-	out	rest		: dma_cost_t
+	out	rest		: dma_cost_t;
+	out	grants		: dma_cost_t;
+	out	grant_cycles	: dma_cost_t
 	);
