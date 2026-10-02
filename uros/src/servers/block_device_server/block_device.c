@@ -964,6 +964,21 @@ blk_phys_said(const struct blk_handle *h, const char *when)
 	       (unsigned long long)h->phys_pages, (unsigned long long)per_page,
 	       (unsigned long long)per_req, permille / 10, permille % 10);
 
+	/* #537: what the check after a transfer on kept translations costs. */
+	if (h->held_n != 0)
+		printf("blk: %s: kept translations: %llu checks after a "
+		       "transfer, %llu cycles each reading the epoch; it had "
+		       "moved and a capability was verified again %llu times, "
+		       "%llu cycles each; the epoch now %u (#537)\n",
+		       h->part ? h->part->name : "?",
+		       (unsigned long long)h->held_n,
+		       (unsigned long long)((h->held_cyc - h->held_moved_cyc) /
+					    h->held_n),
+		       (unsigned long long)h->held_moved,
+		       (unsigned long long)(h->held_moved ?
+			   h->held_moved_cyc / h->held_moved : 0),
+		       (unsigned)h->held_epoch);
+
 	/*
 	 * #537: the kernel's part of each ask, split, read here and not printed
 	 * by the kernel: this runs after the transfer, outside the window the
@@ -1279,36 +1294,56 @@ blk_xlate_find(const struct blk_handle *h, vm_address_t pa, natural_t op,
  * reported for what may not have happened -- the window between a revocation
  * and its notice, closed.  An epoch moved by somebody else's revocation costs
  * one verification, once.  UROS_ABLATE_537_NO_EPOCH leaves the window open.
+ *
+ * t2 is the transfer's end; *t3 is set to the check's before anything is
+ * printed or freed, for blk_phys_account().
  */
 static kern_return_t
-blk_xlate_held(struct blk_handle *h, unsigned int used)
+blk_xlate_held(struct blk_handle *h, unsigned int used,
+	       unsigned long long t2, unsigned long long *t3)
 {
-	kern_return_t	result = KERN_SUCCESS, kr;
+	kern_return_t	result = KERN_SUCCESS;
+	kern_return_t	why[BLK_HANDLE_DMA_CAPS] = { KERN_SUCCESS };
+	unsigned long long r;
+	unsigned int	i, refused = 0;
 	uint32_t	now;
-	unsigned int	i;
 
-	if (used == 0 || BLK_ABLATE_537_NO_EPOCH)
+	if (used == 0 || BLK_ABLATE_537_NO_EPOCH) {
+		*t3 = blk_tsc();
 		return KERN_SUCCESS;
+	}
 	now = (uint32_t)urmach_cap_epoch();
 	for (i = 0; i < h->n_dma_caps; i++) {
 		struct blk_xlate *x = &h->dma_xlate[i];
 
 		if (x->npages == 0 || x->epoch == now)
 			continue;
-		kr = blk_token_check(&h->dma_cap[i], RESOURCE_DMA_BUFFER, 0,
-				     h->dma_cap[i].resource_id);
-		if (kr == KERN_SUCCESS) {
+		r = blk_tsc();
+		why[i] = blk_token_check(&h->dma_cap[i], RESOURCE_DMA_BUFFER,
+					 0, h->dma_cap[i].resource_id);
+		h->held_moved++;
+		h->held_moved_cyc += blk_tsc() - r;
+		if (why[i] == KERN_SUCCESS)
 			x->epoch = now;
+		else
+			refused |= 1u << i;
+	}
+	*t3 = blk_tsc();
+	h->held_n++;
+	h->held_cyc += *t3 - t2;
+	h->held_epoch = now;
+
+	for (i = 0; i < h->n_dma_caps; i++) {
+		if ((refused & (1u << i)) == 0)
 			continue;
-		}
 		printf("blk: %s: buffer %llu's capability no longer holds (kr=%d) "
 		       "— its translation forgotten%s (#537)\n", h->part->name,
-		       (unsigned long long)h->dma_cap[i].resource_id, (int)kr,
-		       (used & (1u << i)) ? ", and the transfer that used it "
-		       "answered with the refusal" : "");
-		blk_xlate_free(x);
+		       (unsigned long long)h->dma_cap[i].resource_id,
+		       (int)why[i], (used & (1u << i)) ? ", and the transfer "
+		       "that used it answered with the refusal" : "");
+		blk_xlate_free(&h->dma_xlate[i]);
 		if (used & (1u << i))
-			result = kr;
+			result = why[i];
 	}
 	return result;
 }
@@ -1462,7 +1497,7 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		 * before the driver is called, so nothing is sent and nothing
 		 * reports success.
 		 */
-		unsigned long long t0 = blk_tsc(), t1, t2;
+		unsigned long long t0 = blk_tsc(), t1, t2, t3;
 		unsigned int used = 0;
 		kern_return_t hkr;
 		int rc;
@@ -1483,8 +1518,8 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 					  dma, phys_addrsCnt,
 					  total);
 		t2 = blk_tsc();
-		hkr = blk_xlate_held(h, used);		/* #537 */
-		blk_phys_account(h, phys_addrsCnt, t0, t1, t2, blk_tsc());
+		hkr = blk_xlate_held(h, used, t2, &t3);	/* #537 */
+		blk_phys_account(h, phys_addrsCnt, t0, t1, t2, t3);
 		if (rc < 0)
 			return D_IO_ERROR;
 		if (hkr != KERN_SUCCESS)
@@ -1542,7 +1577,7 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		 * direction (#599: a write needs the device to READ the page),
 		 * and refuse the same way: before the driver is called.
 		 */
-		unsigned long long t0 = blk_tsc(), t1, t2;
+		unsigned long long t0 = blk_tsc(), t1, t2, t3;
 		unsigned int used = 0;
 		kern_return_t hkr;
 		int rc;
@@ -1563,8 +1598,8 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 						   dma, phys_addrsCnt,
 						   total);
 		t2 = blk_tsc();
-		hkr = blk_xlate_held(h, used);		/* #537 */
-		blk_phys_account(h, phys_addrsCnt, t0, t1, t2, blk_tsc());
+		hkr = blk_xlate_held(h, used, t2, &t3);	/* #537 */
+		blk_phys_account(h, phys_addrsCnt, t0, t1, t2, t3);
 		if (rc < 0)
 			return D_IO_ERROR;
 		if (hkr != KERN_SUCCESS)

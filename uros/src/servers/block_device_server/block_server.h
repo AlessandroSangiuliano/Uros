@@ -364,6 +364,15 @@ struct blk_handle {
 	 */
 	uint64_t		phys_req, phys_pages, xlate_cyc, xfer_cyc;
 	uint64_t		phys_said_pages;
+
+	/*
+	 * #537: the checks after transfers on kept translations -- how many
+	 * and their cycles (inside xlate_cyc too), how many times a table's
+	 * capability was verified again because the epoch had moved and what
+	 * that cost, and the epoch as last read.
+	 */
+	uint64_t		held_n, held_cyc, held_moved, held_moved_cyc;
+	uint32_t		held_epoch;
 };
 
 /* ================================================================
