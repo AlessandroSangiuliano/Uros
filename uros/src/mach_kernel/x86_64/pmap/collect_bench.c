@@ -187,14 +187,14 @@ static void bench_said_where(int arm)
 	 * worker it happened to was then taken by the wrong one.
 	 */
 	if (moved != 0 && arm < 0)
-		printf("pmap_bench: the race: the scheduler displaced %u bound "
-		       "thread(s) into the processor set's run queue, the last "
-		       "bound to processor %d -- WRONG (#615)\n", moved,
+		printf("pmap_bench: the race: the scheduler queued %u bound "
+		       "thread(s) on a run queue not their processor's, the "
+		       "last bound to processor %d -- WRONG (#615)\n", moved,
 		       sched_bound_displaced_slot);
 	else if (moved != 0)
-		printf("pmap_bench: arm %d: the scheduler displaced %u bound "
-		       "thread(s) into the processor set's run queue, the last "
-		       "bound to processor %d -- WRONG (#615)\n", arm, moved,
+		printf("pmap_bench: arm %d: the scheduler queued %u bound "
+		       "thread(s) on a run queue not their processor's, the "
+		       "last bound to processor %d -- WRONG (#615)\n", arm, moved,
 		       sched_bound_displaced_slot);
 
 	for (i = 0; i < NCPUS; i++) {
