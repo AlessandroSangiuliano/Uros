@@ -2628,6 +2628,11 @@ extern int	real_ncpus;
 unsigned int	sched_bound_displaced;
 int		sched_bound_displaced_slot = -1;
 
+/* #615's ablation: the displaced bound thread goes to the set's queue again. */
+#ifndef	ABLATE_615_DISPLACED_TO_SET
+#define	ABLATE_615_DISPLACED_TO_SET	0
+#endif
+
 /*
  *	thread_setrun:
  *
@@ -2821,8 +2826,22 @@ thread_setrun(
 		    ast_on(cpu_number(), ast_flags);
 		}
 	    }
+
+	    /*
+	     * #615: the thread displaced from next_thread just above may be
+	     * bound -- the bound branch below hands a bound thread to its idle
+	     * processor exactly so -- and the set's queue is where any
+	     * processor may take it.  Under TCG at 1.4 GHz a worker bound to
+	     * processor 0 was taken by processor 1, 2 or 3 in about one boot
+	     * in three.  It goes back to its own processor's queue: this one,
+	     * whose next_thread it was.
+	     */
+	    if (th->bound_processor != PROCESSOR_NULL &&
+		!ABLATE_615_DISPLACED_TO_SET)
+		rq = &th->bound_processor->runq;
 #if	S319_INSTRUMENT
-	    s319[cpu_number()].psetenq++;
+	    if (rq == &pset->runq)
+		s319[cpu_number()].psetenq++;
 #endif
 	    (void)run_queue_enqueue(rq, th, tail);
 	}
