@@ -89,6 +89,8 @@ option(UROS_SYSCALL_PROFILE "Build the #411 Mach trap phase profile, which #392 
 # #537, both targets: the capability check hashes the HMAC key's two blocks
 # again on every token, as it did before the key was made ready once.
 option(UROS_ABLATE_537_HMAC_FULL "Build the #537 ablation: every capability check hashes the HMAC key's padded blocks again" OFF)
+option(UROS_ABLATE_537_MAC_EVERY_TIME "Build the #537 ablation: the in-kernel capability check never answers from the verified-token cache" OFF)
+option(UROS_ABLATE_537_EPOCH_KEPT "Build the #537 ablation: a revocation leaves the cache epoch, so the cache outlives it (the self-test must say WRONG)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -615,6 +617,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_537_HMAC_FULL=1)
       message(STATUS "#537 ablation: the HMAC key's blocks hashed on every check (x86_64)")
   endif()
+  foreach(_a MAC_EVERY_TIME EPOCH_KEPT)
+      if(UROS_ABLATE_537_${_a})
+          list(APPEND KERNEL_DEFINES_BARE ABLATE_537_${_a}=1)
+          message(STATUS "#537 ablation: ${_a} (x86_64)")
+      endif()
+  endforeach()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
       message(STATUS "#558 ablation: the pv per-page lock is OFF (x86_64)")
@@ -1556,6 +1564,12 @@ if(UROS_ABLATE_537_HMAC_FULL)
     list(APPEND KERNEL_DEFINES -DABLATE_537_HMAC_FULL=1)
     message(STATUS "#537 ablation: the HMAC key's blocks hashed on every check (i386)")
 endif()
+foreach(_a MAC_EVERY_TIME EPOCH_KEPT)
+    if(UROS_ABLATE_537_${_a})
+        list(APPEND KERNEL_DEFINES -DABLATE_537_${_a}=1)
+        message(STATUS "#537 ablation: ${_a} (i386)")
+    endif()
+endforeach()
 
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)
     list(APPEND KERNEL_DEFINES -D${_d})

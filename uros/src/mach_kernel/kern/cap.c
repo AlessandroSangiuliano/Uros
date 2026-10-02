@@ -43,6 +43,9 @@
 #include <kern/misc_protos.h>
 #include <kern/task.h>
 #include <kern/thread.h>
+#include <kern/cpu_data.h>	/* #537: disable_preemption */
+#include <kern/cpu_number.h>
+#include <cpus.h>		/* NCPUS */
 
 #include <mach/etap_events.h>
 
@@ -68,6 +71,40 @@ static struct cap_state_entry *cap_state_table[CAP_STATE_BUCKETS];
 static uint8_t   cap_hmac_key[CAP_HMAC_SIZE];
 /* #537: the key made ready when it is set -- its two padded blocks hashed once */
 static struct hmac_sha256_key cap_hmac_ready;
+
+/*
+ * #537: the MAC checked once per token.  A DMA ask carries the same token for
+ * every page of a buffer, and its MAC was computed again for each -- about
+ * half of what an ask costs.  So each processor keeps the last token it
+ * verified, whole, with the epoch it was verified in, and a token identical
+ * to it in all its bytes, compared in constant time, under the same epoch, is
+ * not verified again.  What is skipped is what cannot change while the bytes
+ * and the epoch do not: the MAC, and the look-up among the revoked.  The
+ * fields are checked on every call, against that call's arguments -- the token
+ * may have been verified for another operation.
+ *
+ * cap_epoch moves, under cap_lock, with every revocation and every key
+ * installed, so an entry made before either is an entry no longer matched.
+ * It is read without the lock: an ask that read it just before a revocation
+ * is an ask answered just before it, as one that finished then would be.
+ * Thirty-two bits, read whole on both targets; a match across a wrap would
+ * take four thousand million revocations between two asks of one processor.
+ */
+static volatile uint32_t cap_epoch;
+
+#ifndef ABLATE_537_MAC_EVERY_TIME
+#define ABLATE_537_MAC_EVERY_TIME 0	/* the cache never used */
+#endif
+#ifndef ABLATE_537_EPOCH_KEPT
+#define ABLATE_537_EPOCH_KEPT 0		/* a revocation leaves the epoch */
+#endif
+
+static struct cap_verified {
+    struct uros_cap token;
+    uint32_t        epoch;
+    uint32_t        valid;
+    uint64_t        hits;
+} __attribute__((aligned(64))) cap_verified[NCPUS];
 static boolean_t cap_key_set = FALSE;
 static task_t    cap_server_task = TASK_NULL;
 
@@ -220,16 +257,42 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
  *   - not revoked
  * Must be called with cap_lock held.
  */
+static kern_return_t cap_fields_check(const struct uros_cap *, uint32_t,
+                                      uint32_t, uint64_t);
+
 static kern_return_t
 cap_check_locked(const struct uros_cap *t,
                  uint32_t resource_type,
                  uint32_t op,
                  uint64_t resource_id)
 {
+    kern_return_t kr;
+
     if (!cap_key_set)
         return CAP_ERR_INTERNAL;
     if (!cap_hmac_check(t))
         return CAP_ERR_INVALID_TOKEN;
+    kr = cap_fields_check(t, resource_type, op, resource_id);
+    if (kr != KERN_SUCCESS)
+        return kr;
+
+    struct cap_state_entry *e = cap_state_lookup(t->cap_id);
+    if (e != NULL && (e->flags & CAP_FLAG_REVOKED))
+        return CAP_ERR_REVOKED;
+
+    return KERN_SUCCESS;
+}
+
+/*
+ * The fields against the caller's arguments: the token's own bytes and nothing
+ * else, so no lock (#537 checks them on every call, the cache's hits too).
+ */
+static kern_return_t
+cap_fields_check(const struct uros_cap *t,
+                 uint32_t resource_type,
+                 uint32_t op,
+                 uint64_t resource_id)
+{
     /*
      * #599: and the KIND of resource the token names, for every caller --
      * the kernel's own and the two traps.  None compared it, so a token for
@@ -246,11 +309,6 @@ cap_check_locked(const struct uros_cap *t,
         return CAP_ERR_OP_NOT_ALLOWED;
     if (t->revoked)
         return CAP_ERR_REVOKED;
-
-    struct cap_state_entry *e = cap_state_lookup(t->cap_id);
-    if (e != NULL && (e->flags & CAP_FLAG_REVOKED))
-        return CAP_ERR_REVOKED;
-
     return KERN_SUCCESS;
 }
 
@@ -288,11 +346,49 @@ cap_check_in_kernel(const struct uros_cap *token,
                     uint32_t op,
                     uint64_t resource_id)
 {
+    uint32_t epoch = cap_epoch;
+    struct cap_verified *v;
+    const uint8_t *a, *b;
+    uint8_t diff = 0;
     kern_return_t kr;
+
+    /*
+     * #537: the token this processor verified last, in this epoch?  Every
+     * byte, the MAC's included, and in constant time: a comparison that
+     * stopped at the first difference would say how many leading bytes of a
+     * guess were right.
+     */
+    if (!ABLATE_537_MAC_EVERY_TIME) {
+        disable_preemption();
+        v = &cap_verified[cpu_number()];
+        a = (const uint8_t *)&v->token;
+        b = (const uint8_t *)token;
+        for (size_t i = 0; i < sizeof(*token); i++)
+            diff |= a[i] ^ b[i];
+        if (v->valid && v->epoch == epoch && diff == 0) {
+            v->hits++;
+            enable_preemption();
+            return cap_fields_check(token, resource_type, op, resource_id);
+        }
+        enable_preemption();
+    }
 
     simple_lock(&cap_lock);
     kr = cap_check_locked(token, resource_type, op, resource_id);
     simple_unlock(&cap_lock);
+
+    /*
+     * Kept with the epoch read BEFORE the check: a revocation during it moves
+     * the epoch past the entry, which then matches nothing.
+     */
+    if (kr == KERN_SUCCESS && !ABLATE_537_MAC_EVERY_TIME) {
+        disable_preemption();
+        v = &cap_verified[cpu_number()];
+        v->token = *token;
+        v->epoch = epoch;
+        v->valid = 1;
+        enable_preemption();
+    }
     return kr;
 }
 
@@ -307,6 +403,60 @@ cap_id_revoked(uint64_t cap_id)
     revoked = (e != NULL && (e->flags & CAP_FLAG_REVOKED)) ? TRUE : FALSE;
     simple_unlock(&cap_lock);
     return revoked;
+}
+
+/*
+ * #537: the cache asked once the key exists.  A token checked twice on one
+ * processor is answered from the cache the second time -- the hit counted --
+ * and once revoked through the real path, urmach_cap_revoke(), its next check
+ * is refused, the cache notwithstanding.  cap_id ~0 - 1 is one cap_server
+ * never issues; its revocation entry stays, and shadows nothing.  Run in
+ * cap_server's registration, so urmach_cap_revoke() finds its caller allowed.
+ * UROS_ABLATE_537_EPOCH_KEPT is how this is shown able to say WRONG.
+ */
+static void
+cap_cache_selftest(void)
+{
+    struct uros_cap t;
+    struct cap_verified *v;
+    kern_return_t first, second, after;
+    uint64_t hits0, hits1;
+
+    bzero((char *)&t, sizeof(t));
+    t.cap_id = ~0ULL - 1;
+    t.resource_type = RESOURCE_DMA_BUFFER;
+    t.resource_id = 0x537;
+    t.allowed_ops = CAP_OP_DMA_DEVICE_READ;
+    simple_lock(&cap_lock);
+    hmac_sha256_with(&cap_hmac_ready, &t, sizeof(t) - CAP_HMAC_SIZE, t.hmac);
+    simple_unlock(&cap_lock);
+
+    disable_preemption();
+    v = &cap_verified[cpu_number()];
+    first = cap_check_in_kernel(&t, RESOURCE_DMA_BUFFER,
+                                CAP_OP_DMA_DEVICE_READ, 0x537);
+    hits0 = v->hits;
+    second = cap_check_in_kernel(&t, RESOURCE_DMA_BUFFER,
+                                 CAP_OP_DMA_DEVICE_READ, 0x537);
+    hits1 = v->hits;
+    enable_preemption();
+
+    (void)urmach_cap_revoke(t.cap_id);
+    after = cap_check_in_kernel(&t, RESOURCE_DMA_BUFFER,
+                                CAP_OP_DMA_DEVICE_READ, 0x537);
+
+    printf("cap: a token checked twice on one processor: answers %d and %d, "
+           "%llu from the cache; revoked, its next check answers %d -- %s "
+           "(#537)\n", first, second, (unsigned long long)(hits1 - hits0),
+           after,
+           (ABLATE_537_MAC_EVERY_TIME && first == KERN_SUCCESS &&
+            second == KERN_SUCCESS && after == CAP_ERR_REVOKED)
+           ? "NOT ASKED, the cache is ablated"
+           : (first != KERN_SUCCESS || second != KERN_SUCCESS)
+           ? "WRONG, a valid token was refused"
+           : hits1 - hits0 != 1 ? "WRONG, the second check did not hit"
+           : after != CAP_ERR_REVOKED ? "WRONG, the cache outlived the revocation"
+           : "the cache answered, and followed the revocation");
 }
 
 /*
@@ -423,6 +573,8 @@ urmach_cap_revoke(uint64_t cap_id)
         return CAP_ERR_NO_MEMORY;
     }
     e->flags |= CAP_FLAG_REVOKED;
+    if (!ABLATE_537_EPOCH_KEPT)
+        cap_epoch++;			/* #537: no verified token outlives it */
     simple_unlock(&cap_lock);
 
     /*
@@ -464,12 +616,14 @@ urmach_cap_register(const struct uros_cap *user_token)
         for (unsigned i = 0; i < CAP_HMAC_SIZE; i++)
             cap_hmac_key[i] = t.hmac[i];
         hmac_sha256_key_init(&cap_hmac_ready, cap_hmac_key, CAP_HMAC_SIZE);
+        cap_epoch++;			/* #537: nor any key */
         cap_key_set = TRUE;
         cap_server_task = caller;
         simple_unlock(&cap_lock);
         printf("cap: hmac key registered (len=%u)\n",
                (unsigned)CAP_HMAC_SIZE);
         cap_type_selftest();			/* #599 */
+        cap_cache_selftest();			/* #537 */
         return KERN_SUCCESS;
     }
 
