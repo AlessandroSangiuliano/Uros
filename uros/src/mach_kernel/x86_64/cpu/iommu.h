@@ -745,6 +745,13 @@ struct iommu_queue_counts {
 int iommu_queue_counts(unsigned unit, struct iommu_queue_counts *out);
 
 /*
+ * Send `n' waits one at a time through an intel engine's queue and answer how
+ * many came back -- for the boot, to take the tail round the ring on the real
+ * engine.  Zero for a unit without a queue this kernel started.
+ */
+unsigned iommu_queue_exercise(unsigned unit, unsigned n);
+
+/*
  * ── Stage 3d: a domain of its own, for one device ────────────────────
  *
  * 🔴 THIS IS WHERE #432 STOPS BEING A DESCRIPTION.  Everything before it built

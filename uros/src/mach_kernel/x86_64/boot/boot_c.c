@@ -4591,6 +4591,14 @@ static void pci_cap_selftest(void)
  * misread FIELD.  The register read is what catches the second, which is why
  * both are here and neither is enough.
  */
+
+/*
+ * #598: waits sent through each intel queue under -I, one submission each --
+ * more than the 256 slots of its ring, so the tail goes round it on the real
+ * engine at least once.
+ */
+#define	QUEUE_TRIP	300u
+
 static void iommu_selftest(void)
 {
 	unsigned		units;
@@ -5214,23 +5222,44 @@ static void iommu_selftest(void)
 			 * #598: and how each intel engine is told to forget —
 			 * through its queue once that is on, which is then the
 			 * only way it may be told, or through two registers on
-			 * an engine that has no queue.  The waits are counted,
-			 * not assumed: the enable's own invalidation is one.
+			 * an engine that has no queue.
+			 *
+			 * ⚠️ And the queue taken round its ring on the real
+			 * engine: QUEUE_TRIP waits, one submission each, are
+			 * more than its 256 slots.  The fabricated check asks
+			 * the arithmetic; only an engine can say what its head
+			 * reads after it wraps.  Counted, not assumed.
 			 */
 			if (on && iommu_vendor() == IOMMU_INTEL)
 				for (unsigned i = 0; i < iommu_unit_count(); i++) {
 					struct iommu_queue_counts c;
+					uint64_t turns;
+					unsigned back;
 
 					kputs("UrMach x86-64:   unit ");
 					kputdec(i);
-					if (iommu_queue_counts(i, &c)) {
-						kputs(" forgets through its invalidation"
-						      " queue, ");
-						kputdec((unsigned)c.waits);
-						kputs(" wait(s) answered so far\r\n");
-					} else
+					if (!iommu_queue_counts(i, &c)) {
 						kputs(" forgets through its registers —"
 						      " it has no invalidation queue\r\n");
+						continue;
+					}
+
+					turns = c.turns;
+					back = iommu_queue_exercise(i, QUEUE_TRIP);
+					(void) iommu_queue_counts(i, &c);
+
+					kputs(" forgets through its invalidation"
+					      " queue: ");
+					kputdec(back);
+					kputs(" of ");
+					kputdec(QUEUE_TRIP);
+					kputs(" waits sent one by one came back, and"
+					      " its ring went round ");
+					kputdec((unsigned)(c.turns - turns));
+					kputs(back == QUEUE_TRIP && c.turns > turns
+					      ? " time(s)\r\n"
+					      : " time(s) — WRONG, the queue did not"
+						" carry them all round\r\n");
 				}
 
 			/*

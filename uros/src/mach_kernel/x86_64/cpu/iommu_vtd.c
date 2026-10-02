@@ -1981,3 +1981,22 @@ int iommu_queue_counts(unsigned unit, struct iommu_queue_counts *out)
 	hw_lock_unlock(&vtd_queue_lock[unit]);
 	return 1;
 }
+
+/*
+ * Send `n' waits through unit's queue, one submission each, and answer how
+ * many came back.  For the boot: enough of them take the tail round the ring,
+ * and the head a real engine reports after it wraps is the one thing the
+ * fabricated check can only assume.
+ */
+unsigned iommu_queue_exercise(unsigned unit, unsigned n)
+{
+	unsigned answered = 0;
+
+	if (unit >= IOMMU_MAX_UNITS || !vtd_counts[unit].on)
+		return 0;
+
+	for (unsigned i = 0; i < n; i++)
+		answered += (unsigned)vtd_queue_submit(unit, 0, 0);
+
+	return answered;
+}
