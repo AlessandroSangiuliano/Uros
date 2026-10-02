@@ -1155,6 +1155,84 @@ a_buffer_capability_is_a_buffers(mach_port_t device_port,
 }
 
 /*
+ * ── [26] A revoked buffer's kept translation is refused by the IOMMU (#537) ─
+ *
+ * Step 3: where the device is isolated the block server translates a handed
+ * buffer once and keeps the table.  A revocation takes the kernel's grant down
+ * at once, but reaches the block server as a notice, which can be read after
+ * the next transfer -- and in UROS_ABLATE_537_TABLE_KEPT's build is ignored.
+ * Then the revoked buffer's translation is USED, and only the IOMMU stands
+ * between the device and the page.  On ahci0a, the controller behind it
+ * (virtio is passed through, #591): hand a page over, read into it, revoke,
+ * read again.  The page must hold what it held and the grant must be gone;
+ * the read is refused (the notice came first, or nothing was kept) or, on an
+ * isolated device only, answered with nothing written -- the IOMMU refused the
+ * transfer, which the kernel says in an "iommu: ... REFUSED" line.
+ */
+static int
+a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
+                                 const char *name)
+{
+    mach_port_t     h;
+    struct b2_page  r;
+    struct uros_cap t;
+    kern_return_t   kr, k1, k2, kr_rev, ku0, ku1;
+    natural_t       users0 = 0, users1 = 0;
+    unsigned        m1, m2;
+    int             i1, i2, ok;
+
+    memset(&t, 0, sizeof(t));
+    h = b2_open(part_port, name);
+    kr = (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) ? KERN_FAILURE
+       : cap_request(RESOURCE_DMA_BUFFER, r.region,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0, &t);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(h, (char *)&t, sizeof(t));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [26] %s — DID NOT RUN, no handed page (kr=%d)\n",
+               name, (int)kr);
+        b2_close(h);
+        b2_free(device_port, &r);
+        return 1;
+    }
+
+    k1 = b2_read(h, &r, &m1, &i1);
+    ku0 = device_dma_region_users(device_port, r.region, &users0);
+    kr_rev = cap_revoke(t.cap_id);
+    ku1 = device_dma_region_users(device_port, r.region, &users1);
+    k2 = b2_read(h, &r, &m2, &i2);
+    b2_close(h);
+    b2_free(device_port, &r);
+
+    ok = k1 == KERN_SUCCESS && m1 == 0xEF53u && kr_rev == KERN_SUCCESS &&
+         ku0 == KERN_SUCCESS && ku1 == KERN_SUCCESS && users1 == 0 && i2 &&
+         (k2 != KERN_SUCCESS || users0 > 0);
+    if (!ok) {
+        printf("cap_test: [26] WRONG — %s: read %d 0x%x, users %d/%u, revoke "
+               "%d, users %d/%u, read after %d (page %s)\n", name, (int)k1,
+               m1, (int)ku0, (unsigned)users0, (int)kr_rev, (int)ku1,
+               (unsigned)users1, (int)k2, i2 ? "untouched" : "WRITTEN");
+        return 0;
+    }
+    if (users0 == 0)
+        printf("cap_test: [26] %s: NOT APPLICABLE — the device is not "
+               "confined here, so nothing is kept; a read after the "
+               "revocation refused (kr=%d), page untouched (#537)\n", name,
+               (int)k2);
+    else if (k2 != KERN_SUCCESS)
+        printf("cap_test: [26] %s: after the revocation the grant was gone "
+               "(users %u -> 0) and a read was refused (kr=%d), page "
+               "untouched — the block server had forgotten the translation "
+               "(#537)\n", name, (unsigned)users0, (int)k2);
+    else
+        printf("cap_test: [26] %s: after the revocation the grant was gone "
+               "(users %u -> 0) and a read answered 0 with the page untouched "
+               "— the kept translation was used and the IOMMU refused it "
+               "(#537)\n", name, (unsigned)users0);
+    return 1;
+}
+
+/*
  * ── [25] Many pages in one request (#537) ─────────────────────────────
  *
  * Every physical request the bundle made was one page -- 649 of 649 lines of
@@ -2715,6 +2793,10 @@ main(int argc, char **argv)
          */
         if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
                                           is_the_boot_disk(p) == 0))
+            pass = 0;
+        /* #537 step 3: on the controller behind the IOMMU, whichever is first. */
+        if (strcmp(candidates[i], "ahci0a") == 0 &&
+            !a_revoked_translation_is_refused(device_port, p, candidates[i]))
             pass = 0;
         /* #599: once, on the first candidate that is there. */
         if (!b2_done) {
