@@ -288,6 +288,7 @@
 
 #include <stdint.h>
 #include <cpus.h>			/* NCPUS */
+#include <kern/tsc.h>			/* urmach_tsc (#537) */
 #include <kern/cpu_number.h>
 
 /*
@@ -329,33 +330,12 @@ struct fault_profile_cpu {
 extern struct fault_profile_cpu	fault_profile[NCPUS];
 
 /*
- * The clock.
- *
- * 🔴 NOT cpuid+rdtsc, which is the textbook way to serialise this and is a VM
- * exit: #439 measured one at 1,920 cycles against 1 for the ordinary read --
- * a third of an entire copy-on-write fault, charged to whichever phase was
- * open.  An instrument that costs a third of its subject is not measuring it.
- *
- * lfence orders the earlier loads and costs a handful of cycles.  It is SSE2,
- * so it is written only for the target that is guaranteed to have it; the
- * other x86 target takes the unserialised read, which is honest for what runs
- * there -- nothing commits a sample on i386, because the hook that opens one
- * lives in the x86-64 trap path.
+ * The clock is <kern/tsc.h>'s urmach_tsc(), the one reader every instrument
+ * above the machine layer uses (#537); why lfence and not cpuid, and why i386
+ * reads the counter unordered, is written there.  Unordered is honest for what
+ * runs there: nothing commits a sample on i386, because the hook that opens
+ * one lives in the x86-64 trap path.
  */
-static __inline__ uint64_t
-fault_profile_tsc(void)
-{
-	uint32_t	lo, hi;
-
-#if	defined(__x86_64__)
-	__asm__ __volatile__("lfence; rdtsc" : "=a" (lo), "=d" (hi) :: "memory");
-#elif	defined(__i386__)
-	__asm__ __volatile__("rdtsc" : "=a" (lo), "=d" (hi) :: "memory");
-#else
-#error	"fault_profile has no time source on this machine"
-#endif
-	return ((uint64_t) hi << 32) | lo;
-}
 
 /*
  * Whether asking which processor this is, is a question with an answer yet.
@@ -442,7 +422,7 @@ fault_profile_begin(const void *token)
 		fp->slice[i] = 0;
 	fp->cow = 0;
 	fp->owner = token;
-	fp->cursor = fp->first = fault_profile_tsc();
+	fp->cursor = fp->first = urmach_tsc();
 }
 
 /*
@@ -458,7 +438,7 @@ fault_profile_mark(int phase)
 	if (fp == (struct fault_profile_cpu *) 0)
 		return;
 
-	now = fault_profile_tsc();
+	now = urmach_tsc();
 	fp->slice[phase] += (uint32_t) (now - fp->cursor);
 	fp->cursor = now;
 }

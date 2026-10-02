@@ -451,7 +451,20 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # those -- which is exactly the mistake a table of both invites.
   option(UROS_BUNDLE_BENCH_ONLY
          "Bundle only name_server + ipc_bench, the way the baselines were taken" OFF)
-  if(UROS_BUNDLE_IPC_BENCH)
+  # #537: and which of its suites, in this bundle.  Empty is ipc_bench's own
+  # default, every suite -- forty minutes and more.  The disk suite is how the
+  # per-page DMA ask is measured on this target, and it needs ext_server, which
+  # the bench-only bundle does not have:
+  #
+  #	cmake -DUROS_BUNDLE_IPC_BENCH=ON -DUROS_BUNDLE_IPC_BENCH_SUITES=disk
+  #
+  # make-disk-x86_64.sh puts the disk suite's files on the root disk whenever
+  # this conf names ipc_bench, so the disk follows the configuration.
+  set(UROS_BUNDLE_IPC_BENCH_SUITES "" CACHE STRING
+      "Which ipc_bench suites the full x86-64 bundle runs (empty: all)")
+  if(UROS_BUNDLE_IPC_BENCH AND UROS_BUNDLE_IPC_BENCH_SUITES)
+    set(_IPC_BENCH_LINE "ipc_bench ipc_bench ${UROS_BUNDLE_IPC_BENCH_SUITES}\n")
+  elseif(UROS_BUNDLE_IPC_BENCH)
     set(_IPC_BENCH_LINE "ipc_bench ipc_bench\n")
   else()
     set(_IPC_BENCH_LINE "")

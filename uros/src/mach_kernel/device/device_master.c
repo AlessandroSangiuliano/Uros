@@ -66,6 +66,10 @@
 #include <kern/thread.h>
 #include <kern/kalloc.h>
 #include <kern/cap.h>		/* #432: a capability for a device's kind */
+#include <kern/tsc.h>		/* #537: what one per-page ask costs */
+#include <kern/cpu_data.h>	/* #537: disable_preemption */
+#include <kern/cpu_number.h>
+#include <cpus.h>		/* NCPUS */
 #include <kern/ipc_mig.h>
 /*
  * ⚠️ Declared here rather than found in a header: port_name_to_task is defined
@@ -113,6 +117,8 @@ decl_mutex_data(static, device_table_lock)
  * block runs under it; task_deallocate() is called after it is dropped.
  */
 decl_simple_lock_data(static, irq_forward_lock)
+
+static void dma_ix_selftest(void);	/* #537: the page index against the walk */
 
 /* The grace-period callbacks that make a retired slot reusable (#538);
  * defined beside the tables they belong to. */
@@ -326,6 +332,7 @@ device_master_init(void)
 
 	mutex_init(&device_table_lock, ETAP_NO_TRACE);
 	simple_lock_init(&irq_forward_lock, ETAP_NO_TRACE);
+	dma_ix_selftest();			/* #537 */
 
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
@@ -1539,11 +1546,18 @@ ds_master_device_intr_enable(
 #define	DEVICE_MAX_REGIONS_PER_TASK	16
 #define	DEVICE_MAX_REGION_USERS	4
 
+/* #537: one page of a region, as the region's sorted index holds it. */
+struct dma_page_ix {
+	vm_offset_t	pa;
+	unsigned int	page;
+};
+
 struct dma_region {
 	vm_offset_t	kva;		/* zero when the slot is free    */
 	vm_size_t	size;
 	unsigned int	npages;
 	vm_offset_t	*pa;		/* npages entries, kalloc'd      */
+	struct dma_page_ix *ix;		/* #537: the same pages by address */
 
 	/*
 	 * ── What makes this buffer nameable, and whose it is (#432) ──
@@ -1679,6 +1693,140 @@ static uint64_t dma_regions_freed;
  * diagnostic here fires three or four times a boot in runs that are entirely
  * healthy -- the caller is the one that knows whether being refused matters.
  */
+/*
+ * ── Which page of a region is at a physical address (#537) ───────────
+ *
+ * Every per-page DMA ask looked its page up by walking the region's pages in
+ * order: about two thousand comparisons in ext2's 4096-page page cache, a
+ * fifth of the ask on i386 and nearly a third on x86-64.  Each region now has
+ * its pages sorted by address beside them, built once when it is recorded --
+ * a heapsort, so no order of pages makes it slow -- and found by a binary
+ * search, twelve steps for 4096.  The index lives and dies with `pa': kalloc'd
+ * with it, published before `kva' with it, freed with it after the grace
+ * period.  UROS_ABLATE_537_PAGE_WALK puts the walk back.
+ */
+#ifndef ABLATE_537_PAGE_WALK
+#define ABLATE_537_PAGE_WALK 0
+#endif
+/* The index left in the order the pages came in: dma_ix_selftest() must say
+ * WRONG -- how it is shown able to. */
+#ifndef ABLATE_537_IX_UNSORTED
+#define ABLATE_537_IX_UNSORTED 0
+#endif
+
+static void
+dma_ix_sift(struct dma_page_ix *ix, unsigned int root, unsigned int n)
+{
+	for (;;) {
+		unsigned int child = 2 * root + 1;
+		struct dma_page_ix t;
+
+		if (child >= n)
+			return;
+		if (child + 1 < n && ix[child + 1].pa > ix[child].pa)
+			child++;
+		if (ix[root].pa >= ix[child].pa)
+			return;
+		t = ix[root];
+		ix[root] = ix[child];
+		ix[child] = t;
+		root = child;
+	}
+}
+
+static void
+dma_ix_build(struct dma_page_ix *ix, const vm_offset_t *pa, unsigned int n)
+{
+	struct dma_page_ix t;
+	unsigned int i;
+
+	for (i = 0; i < n; i++) {
+		ix[i].pa = pa[i];
+		ix[i].page = i;
+	}
+	if (ABLATE_537_IX_UNSORTED)
+		return;
+	for (i = n / 2; i-- > 0; )
+		dma_ix_sift(ix, i, n);
+	for (i = n; i-- > 1; ) {
+		t = ix[0];
+		ix[0] = ix[i];
+		ix[i] = t;
+		dma_ix_sift(ix, 0, i);
+	}
+}
+
+/* Which page of `r' holds page-aligned `pa', or r->npages if none does. */
+static unsigned int
+dma_region_page(const struct dma_region *r, vm_offset_t pa)
+{
+	unsigned int lo = 0, hi = r->npages;
+
+	if (ABLATE_537_PAGE_WALK) {
+		for (lo = 0; lo < r->npages; lo++)
+			if (r->pa[lo] == pa)
+				break;
+		return lo;
+	}
+	while (lo < hi) {
+		unsigned int mid = lo + (hi - lo) / 2;
+
+		if (r->ix[mid].pa < pa)
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return (lo < r->npages && r->ix[lo].pa == pa) ? r->ix[lo].page
+						       : r->npages;
+}
+
+/*
+ * #537: the index against the walk it replaces, on a buffer whose pages are
+ * not in address order -- every page found where the walk finds it, and an
+ * address that is not there found nowhere.  At init; the line says what it
+ * read.
+ */
+#define	DMA_IX_TEST_PAGES	1024
+
+static void
+dma_ix_selftest(void)
+{
+	static vm_offset_t pa[DMA_IX_TEST_PAGES];
+	static struct dma_page_ix ix[DMA_IX_TEST_PAGES];
+	struct dma_region r;
+	unsigned int i, found = 0, bad = DMA_IX_TEST_PAGES, absent;
+
+	/* 7919 is prime to 1024: a permutation, far from address order. */
+	for (i = 0; i < DMA_IX_TEST_PAGES; i++)
+		pa[i] = (vm_offset_t)0x10000000 +
+			(vm_offset_t)((i * 7919u) % DMA_IX_TEST_PAGES) * PAGE_SIZE;
+	dma_ix_build(ix, pa, DMA_IX_TEST_PAGES);
+	bzero((char *)&r, sizeof(r));
+	r.npages = DMA_IX_TEST_PAGES;
+	r.pa = pa;
+	r.ix = ix;
+
+	for (i = 0; i < DMA_IX_TEST_PAGES; i++) {
+		if (dma_region_page(&r, pa[i]) == i)
+			found++;
+		else if (bad == DMA_IX_TEST_PAGES)
+			bad = i;
+	}
+	absent = dma_region_page(&r, (vm_offset_t)0x10000000 +
+				 (vm_offset_t)DMA_IX_TEST_PAGES * PAGE_SIZE);
+
+	if (found == DMA_IX_TEST_PAGES && absent == DMA_IX_TEST_PAGES)
+		printf("device: the page index of a %u-page buffer in scrambled "
+		       "order: %u of %u addresses found at the page the walk "
+		       "finds, one that is not there found nowhere (#537)\n",
+		       DMA_IX_TEST_PAGES, found, DMA_IX_TEST_PAGES);
+	else
+		printf("device: the page index of a %u-page buffer: WRONG -- %u "
+		       "of %u found where the walk finds them (first wrong: page "
+		       "%u), the absent address answered %u (#537)\n",
+		       DMA_IX_TEST_PAGES, found, DMA_IX_TEST_PAGES, bad, absent);
+}
+
 static kern_return_t
 dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	       unsigned int npages, task_t task, vm_offset_t uva,
@@ -1686,6 +1834,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 {
 	struct dma_region *r = 0;
 	vm_offset_t	  *pa_copy;
+	struct dma_page_ix *ix;
 	task_t		   me = current_task();
 	unsigned int	   i, held = 0;
 	uint64_t	   id;
@@ -1695,8 +1844,14 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	pa_copy = (vm_offset_t *) kalloc(npages * sizeof(vm_offset_t));
 	if (pa_copy == 0)
 		return KERN_RESOURCE_SHORTAGE;
+	ix = (struct dma_page_ix *) kalloc(npages * sizeof(struct dma_page_ix));
+	if (ix == 0) {
+		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
+		return KERN_RESOURCE_SHORTAGE;
+	}
 	for (i = 0; i < npages; i++)
 		pa_copy[i] = pa[i];
+	dma_ix_build(ix, pa_copy, npages);
 
 	mutex_lock(&device_table_lock);
 
@@ -1711,6 +1866,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	if (held >= DEVICE_MAX_REGIONS_PER_TASK) {
 		mutex_unlock(&device_table_lock);
 		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
+		kfree((vm_offset_t)ix, npages * sizeof(struct dma_page_ix));
 		return KERN_NO_ACCESS;
 	}
 
@@ -1722,6 +1878,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	if (r == 0) {
 		mutex_unlock(&device_table_lock);
 		kfree((vm_offset_t)pa_copy, npages * sizeof(vm_offset_t));
+		kfree((vm_offset_t)ix, npages * sizeof(struct dma_page_ix));
 		return KERN_NO_SPACE;
 	}
 
@@ -1730,6 +1887,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	 * tests for "in use", which used to be written FIRST.
 	 */
 	r->pa = pa_copy;
+	r->ix = ix;
 	r->size = size;
 	r->npages = npages;
 	r->nusers = 0;
@@ -1762,11 +1920,12 @@ dma_region_of(vm_offset_t pa, unsigned int *index)
 		if (dma_region[i].kva == 0)
 			continue;
 
-		for (p = 0; p < dma_region[i].npages; p++)
-			if (dma_region[i].pa[p] == (pa & ~(vm_offset_t)PAGE_MASK)) {
-				*index = p;
-				return &dma_region[i];
-			}
+		p = dma_region_page(&dma_region[i],
+				    pa & ~(vm_offset_t)PAGE_MASK);
+		if (p < dma_region[i].npages) {
+			*index = p;
+			return &dma_region[i];
+		}
 	}
 
 	return 0;
@@ -2909,7 +3068,10 @@ dma_slot_retired(struct urmach_rcu_head *h)
 
 	if (r->pa != 0)
 		kfree((vm_offset_t)r->pa, r->npages * sizeof(vm_offset_t));
+	if (r->ix != 0)
+		kfree((vm_offset_t)r->ix, r->npages * sizeof(struct dma_page_ix));
 	r->pa = 0;
+	r->ix = 0;
 	r->npages = 0;
 	publish_barrier();
 	r->retiring = 0;
@@ -3710,6 +3872,127 @@ claim_is_mine_locked(natural_t bdf)
 }
 
 /*
+ * ── What one per-page ask costs, and where it goes (#537) ────────────
+ *
+ * The block server asks for every page of a physical transfer and counts each
+ * ask whole, from its side: about 15 000 cycles a page at ~3.9 GHz, 47 000
+ * under a 1.4 GHz cap.  This splits the part spent here -- the claim, the
+ * capability's MAC, the region and the page in it, and the rest -- so the
+ * step that pays can be chosen; the RPC is what the block server's number has
+ * beyond the sum of these.
+ *
+ * Each processor adds into its own slot with preemption off, so the hot path
+ * takes no lock and no two asks share a counter.  A slot carries a sequence
+ * word, odd while its owner writes: on i386 a 64-bit counter is read in two
+ * halves, and whoever sums the slots must not take one half from before an add
+ * and one from after it.  A refused ask returns before it is counted.
+ *
+ * 🔴 AND NOTHING IS SAID FROM HERE.  The first version printed the total at
+ * powers of two, from inside the ask that crossed one -- and the block server,
+ * which times every ask from outside, counted the line as that ask's: 2.6 ms,
+ * enough to move its per-page average from 15 400 cycles to 19 700 after the
+ * first line.  The sums are read instead (device_dma_ask_cost) by the block
+ * server, when it says its own count, outside the window it times.
+ */
+static struct dma_ask_cost {
+	volatile uint32_t	seq;	/* odd while the owner writes */
+	uint64_t		asks;
+	uint64_t		claim;	/* the master port, the arguments, the claim */
+	uint64_t		mac;	/* the token copied and verified */
+	uint64_t		find;	/* the region by id, the page in it */
+	uint64_t		rest;	/* the direction; with an IOMMU, the user list */
+	uint64_t		grants;	/* asks that granted, counted apart... */
+	uint64_t		grant_cyc;	/* ...whole, in none of the four */
+} __attribute__((aligned(64))) dma_ask_cost[NCPUS];
+
+/* One slot, whole: read again while its owner is between the two seq writes. */
+static void
+dma_ask_read(const struct dma_ask_cost *c, struct dma_ask_cost *into)
+{
+	uint32_t before;
+
+	do {
+		before = c->seq;
+		publish_barrier();
+		into->asks = c->asks;
+		into->claim = c->claim;
+		into->mac = c->mac;
+		into->find = c->find;
+		into->rest = c->rest;
+		into->grants = c->grants;
+		into->grant_cyc = c->grant_cyc;
+		publish_barrier();
+	} while ((before & 1) != 0 || c->seq != before);
+}
+
+/*
+ * An answered ask of `pages' pages -- one, or a batch's (#537 step 2), whose
+ * claim, MAC and region are paid once and so count as many pages' worth:
+ * t0 at entry, t1 past the claim, t2 past the MAC, t3 past the region and the
+ * pages; the rest ends now.  One that granted is counted
+ * apart and whole: mapping a whole region costs as much as a thousand asks,
+ * once, and in the averages since boot it hid what every other ask costs.
+ */
+static void
+dma_ask_account(uint64_t t0, uint64_t t1, uint64_t t2, uint64_t t3,
+		int granted, unsigned int pages)
+{
+	uint64_t t4 = urmach_tsc();
+	struct dma_ask_cost *c;
+
+	disable_preemption();
+	c = &dma_ask_cost[cpu_number()];
+	c->seq++;
+	publish_barrier();
+	if (granted) {
+		c->grants++;
+		c->grant_cyc += t4 - t0;
+	} else {
+		c->asks += pages;	/* a batched ask answers several */
+		c->claim += t1 - t0;
+		c->mac += t2 - t1;
+		c->find += t3 - t2;
+		c->rest += t4 - t3;
+	}
+	publish_barrier();
+	c->seq++;
+	enable_preemption();
+}
+
+kern_return_t
+ds_master_device_dma_ask_cost(
+	ipc_port_t	master_port,
+	cap_u64_t	*asks,
+	cap_u64_t	*claim,
+	cap_u64_t	*mac,
+	cap_u64_t	*find,
+	cap_u64_t	*rest,
+	cap_u64_t	*grants,
+	cap_u64_t	*grant_cycles)
+{
+	struct dma_ask_cost one;
+	kern_return_t kr;
+	int i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	*asks = *claim = *mac = *find = *rest = *grants = *grant_cycles = 0;
+	for (i = 0; i < NCPUS; i++) {
+		dma_ask_read(&dma_ask_cost[i], &one);
+		*asks += one.asks;
+		*claim += one.claim;
+		*mac += one.mac;
+		*find += one.find;
+		*rest += one.rest;
+		*grants += one.grants;
+		*grant_cycles += one.grant_cyc;
+	}
+	return KERN_SUCCESS;
+}
+
+/*
  * ── One page of somebody else's buffer, for one direction (#599) ─────
  *
  * See the note on device_dma_map_foreign_op in <device/device_master.defs>.
@@ -3727,11 +4010,70 @@ claim_is_mine_locked(natural_t bdf)
  *    issuer's, and the direction is read from them;
  *  - refusals are silent: the caller says them, once, in its own words.
  */
-kern_return_t
-ds_master_device_dma_map_foreign_op(
+/*
+ * The device's grant on region `r' for this capability, with device_table_lock
+ * held and `r' checked to be the region found: the grant already recorded
+ * for the device -- its directions in *u_reads and *u_writes -- or, if there is
+ * none, one made now for the directions the capability allows (#599, #537).
+ *
+ * #599: a capability revoked after the caller's check and before this lock is
+ * refused here.  device_master_cap_revoked takes grants down under this same
+ * lock, so a grant is either recorded before it walks the table -- and taken
+ * down by it -- or refused now; none can rest on a revoked capability.
+ *
+ * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses (or each page at its
+ * own, in an identity domain): a caller that asks page by page pays for the
+ * mapping once, and one that keeps the region's translation (#537 step 3)
+ * keeps what this made.
+ */
+static kern_return_t
+dma_grant_locked(struct dma_region *r, natural_t bdf,
+		 const struct uros_cap *cap, int reads, int writes,
+		 unsigned long *base, int *identity, int *granted,
+		 int *u_reads, int *u_writes)
+{
+	unsigned int u;
+
+	for (u = 0; u < r->nusers; u++)
+		if (r->user[u].bdf == bdf)
+			break;
+	if (u < r->nusers) {
+		*base = (unsigned long)r->user[u].dma;
+		*identity = r->user[u].identity;
+		*u_reads = r->user[u].reads;
+		*u_writes = r->user[u].writes;
+		return KERN_SUCCESS;
+	}
+	if (cap_id_revoked(cap->cap_id))
+		return CAP_ERR_REVOKED;
+	if (r->nusers >= DEVICE_MAX_REGION_USERS)
+		return KERN_RESOURCE_SHORTAGE;
+	if (!device_md_dma_grant_pages(bdf, (const unsigned long *)r->pa,
+				       r->npages, reads, writes, base,
+				       identity))
+		return KERN_FAILURE;
+	r->user[r->nusers].bdf = bdf;
+	r->user[r->nusers].dma = (vm_offset_t)*base;
+	r->user[r->nusers].identity = (unsigned char)*identity;
+	r->user[r->nusers].reads = (unsigned char)reads;
+	r->user[r->nusers].writes = (unsigned char)writes;
+	r->user[r->nusers].cap_id = cap->cap_id;
+	publish_barrier();
+	r->nusers++;
+	*granted = 1;
+	*u_reads = reads;
+	*u_writes = writes;
+	return KERN_SUCCESS;
+}
+
+#define	DMA_MAP_PAGES_MAX	32	/* dma_page_list_t's bound */
+
+static kern_return_t
+dma_map_foreign_pages(
 	ipc_port_t		master_port,
 	natural_t		bdf,
-	vm_address_t		paddr,
+	const vm_address_t	*paddr,
+	unsigned int		n,
 	natural_t		op,
 	cap_token_t		token,
 	mach_msg_type_number_t	tokenCnt,
@@ -3740,11 +4082,13 @@ ds_master_device_dma_map_foreign_op(
 	kern_return_t		kr;
 	struct dma_region	*r = 0;
 	struct uros_cap		cap;
-	unsigned int		i, page = 0, u;
+	unsigned int		i, k, page[DMA_MAP_PAGES_MAX];
+	int			missing = 0, u_reads = 0, u_writes = 0;
 	unsigned long		base = 0;
 	uint64_t		rid;
 	int			reads, writes, identity = 0, granted = 0;
 	unsigned int		npages = 0;
+	uint64_t		t0 = urmach_tsc(), t1, t2, t3;	/* #537 */
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -3755,11 +4099,14 @@ ds_master_device_dma_map_foreign_op(
 		return KERN_INVALID_ARGUMENT;
 	if (tokenCnt != sizeof(struct uros_cap))
 		return KERN_INVALID_ARGUMENT;
+	if (n == 0 || n > DMA_MAP_PAGES_MAX)
+		return KERN_INVALID_ARGUMENT;
 
 	/* A device has one driver, and only that driver may map for it. */
 	kr = check_claim(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
+	t1 = urmach_tsc();
 
 	memcpy(&cap, token, sizeof(cap));
 
@@ -3768,6 +4115,7 @@ ds_master_device_dma_map_foreign_op(
 	if (kr != KERN_SUCCESS)
 		return kr;
 	rid = cap.resource_id;
+	t2 = urmach_tsc();
 
 	/* The buffer it names, and the page inside it. */
 	urmach_rcu_read_lock();
@@ -3778,14 +4126,18 @@ ds_master_device_dma_map_foreign_op(
 		}
 	if (r != 0) {
 		npages = r->npages;
-		for (page = 0; page < npages; page++)
-			if (r->pa[page] == (paddr & ~(vm_address_t)PAGE_MASK))
-				break;
+		for (k = 0; k < n; k++) {
+			page[k] = dma_region_page(r, paddr[k] &
+						  ~(vm_address_t)PAGE_MASK);
+			if (page[k] == npages)
+				missing = 1;
+		}
 	}
 	urmach_rcu_read_unlock();
+	t3 = urmach_tsc();
 	if (r == 0)
 		return KERN_INVALID_ADDRESS;
-	if (page == npages)
+	if (missing)
 		return KERN_NO_ACCESS;
 
 	/* The direction this transfer needs. */
@@ -3800,7 +4152,9 @@ ds_master_device_dma_map_foreign_op(
 	 * what makes it an answer and not a pass-through.
 	 */
 	if (!device_md_dma_isolates()) {
-		*dma_addr = paddr;
+		for (k = 0; k < n; k++)
+			dma_addr[k] = paddr[k];
+		dma_ask_account(t0, t1, t2, t3, 0, n);
 		return KERN_SUCCESS;
 	}
 
@@ -3815,56 +4169,15 @@ ds_master_device_dma_map_foreign_op(
 		mutex_unlock(&device_table_lock);
 		return KERN_INVALID_ADDRESS;
 	}
-	for (u = 0; u < r->nusers; u++)
-		if (r->user[u].bdf == bdf)
-			break;
-	if (u < r->nusers) {
-		if ((op == CAP_OP_DMA_DEVICE_READ && !r->user[u].reads) ||
-		    (op == CAP_OP_DMA_DEVICE_WRITE && !r->user[u].writes)) {
-			mutex_unlock(&device_table_lock);
-			return KERN_PROTECTION_FAILURE;
-		}
-		base = (unsigned long)r->user[u].dma;
-		identity = r->user[u].identity;
-	} else {
-		/*
-		 * #599: a capability revoked after the check above and
-		 * before this lock is refused here.  device_master_cap_revoked
-		 * takes grants down under this same lock, so a grant is either
-		 * recorded before it walks the table -- and taken down by it --
-		 * or refused now; none can rest on a revoked capability.
-		 */
-		if (cap_id_revoked(cap.cap_id)) {
-			mutex_unlock(&device_table_lock);
-			return CAP_ERR_REVOKED;
-		}
-		if (r->nusers >= DEVICE_MAX_REGION_USERS) {
-			mutex_unlock(&device_table_lock);
-			return KERN_RESOURCE_SHORTAGE;
-		}
-		/*
-		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses (or
-		 * each page at its own, in an identity domain).  The caller
-		 * asks page by page and pays for the mapping once.
-		 */
-		if (!device_md_dma_grant_pages(bdf,
-					       (const unsigned long *)r->pa,
-					       r->npages, reads, writes, &base,
-					       &identity)) {
-			mutex_unlock(&device_table_lock);
-			return KERN_FAILURE;
-		}
-		r->user[r->nusers].bdf = bdf;
-		r->user[r->nusers].dma = (vm_offset_t)base;
-		r->user[r->nusers].identity = (unsigned char)identity;
-		r->user[r->nusers].reads = (unsigned char)reads;
-		r->user[r->nusers].writes = (unsigned char)writes;
-		r->user[r->nusers].cap_id = cap.cap_id;
-		publish_barrier();
-		r->nusers++;
-		granted = 1;
-	}
+	kr = dma_grant_locked(r, bdf, &cap, reads, writes, &base, &identity,
+			      &granted, &u_reads, &u_writes);
+	if (kr == KERN_SUCCESS &&
+	    ((op == CAP_OP_DMA_DEVICE_READ && !u_reads) ||
+	     (op == CAP_OP_DMA_DEVICE_WRITE && !u_writes)))
+		kr = KERN_PROTECTION_FAILURE;
 	mutex_unlock(&device_table_lock);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	if (granted)
 		printf("device: %02x:%02x.%u may now reach a %u-page buffer it "
@@ -3876,12 +4189,201 @@ ds_master_device_dma_map_foreign_op(
 		       reads ? "reads" : "", writes ? (reads ? ", writes" :
 						       "writes") : "");
 
-	if (identity)
-		*dma_addr = paddr;
+	for (k = 0; k < n; k++) {
+		if (identity)
+			dma_addr[k] = paddr[k];
+		else
+			dma_addr[k] = (vm_address_t)(base +
+				(unsigned long)page[k] * PAGE_SIZE +
+				(paddr[k] & (vm_address_t)PAGE_MASK));
+	}
+	dma_ask_account(t0, t1, t2, t3, granted, n);
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_master_device_dma_map_foreign_op(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	vm_address_t		paddr,
+	natural_t		op,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
+	vm_address_t		*dma_addr)
+{
+	return dma_map_foreign_pages(master_port, bdf, &paddr, 1, op, token,
+				     tokenCnt, dma_addr);
+}
+
+/*
+ * #537 step 2: the pages of one request in one ask -- see the note on
+ * device_dma_map_foreign_ops in <device/device_master.defs>.
+ */
+kern_return_t
+ds_master_device_dma_map_foreign_ops(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	vm_address_t		*paddrs,
+	mach_msg_type_number_t	paddrsCnt,
+	natural_t		op,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
+	vm_address_t		*dma_addrs,
+	mach_msg_type_number_t	*dma_addrsCnt)
+{
+	kern_return_t kr = dma_map_foreign_pages(master_port, bdf, paddrs,
+						 paddrsCnt, op, token,
+						 tokenCnt, dma_addrs);
+
+	*dma_addrsCnt = kr == KERN_SUCCESS ? paddrsCnt : 0;
+	return kr;
+}
+
+/*
+ * #537 step 3: see the note on device_dma_map_foreign_region in
+ * <device/device_master.defs>.  The checks of one page's ask, the grant of
+ * dma_grant_locked(), and the region's pages copied out under the same hold
+ * of device_table_lock, so the list is the region the grant is for: a drop
+ * takes the lock to unlink it.  The list is filled wired and copied out
+ * unwired, as ds_master_device_dma_alloc_sg's.
+ */
+kern_return_t
+ds_master_device_dma_map_foreign_region(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
+	natural_t		*isolated,
+	natural_t		*identity,
+	vm_address_t		*base,
+	natural_t		*ops,
+	vm_address_t		**pages,
+	mach_msg_type_number_t	*pagesCnt)
+{
+	kern_return_t		kr;
+	struct dma_region	*r = 0;
+	struct uros_cap		cap;
+	unsigned int		i, npages = 0;
+	unsigned long		b = 0;
+	int			reads, writes, id = 0, granted = 0;
+	int			u_reads = 0, u_writes = 0;
+	vm_offset_t		list = 0;
+	vm_size_t		list_bytes, list_size;
+	vm_map_copy_t		list_copy;
+	uint64_t		rid;
+
+	*isolated = 0;
+	*identity = 0;
+	*base = 0;
+	*ops = 0;
+	*pages = 0;
+	*pagesCnt = 0;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	if (bdf == DEVICE_DMA_NO_BDF || tokenCnt != sizeof(struct uros_cap))
+		return KERN_INVALID_ARGUMENT;
+	kr = check_claim(bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	memcpy(&cap, token, sizeof(cap));
+	kr = cap_check_in_kernel(&cap, RESOURCE_DMA_BUFFER, 0, cap.resource_id);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	rid = cap.resource_id;
+	reads = (cap.allowed_ops & CAP_OP_DMA_DEVICE_READ) != 0;
+	writes = (cap.allowed_ops & CAP_OP_DMA_DEVICE_WRITE) != 0;
+	if (!reads && !writes)
+		return KERN_PROTECTION_FAILURE;
+
+	urmach_rcu_read_lock();
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].id == rid) {
+			r = &dma_region[i];
+			npages = r->npages;
+			break;
+		}
+	urmach_rcu_read_unlock();
+	if (r == 0)
+		return KERN_INVALID_ADDRESS;
+
+	/* Nothing to keep where nothing would refuse a stale translation. */
+	if (!device_md_dma_isolates())
+		return KERN_SUCCESS;
+
+	list_bytes = npages * sizeof(vm_address_t);
+	list_size = round_page(list_bytes);
+	kr = kmem_alloc(ipc_kernel_map, &list, list_size);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	kr = vm_map_wire(ipc_kernel_map, list, list + list_size,
+			 VM_PROT_READ | VM_PROT_WRITE, FALSE);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+
+	mutex_lock(&device_table_lock);
+	if (r->kva == 0 || r->id != rid || r->npages != npages ||
+	    !claim_is_mine_locked(bdf))
+		kr = KERN_INVALID_ADDRESS;
 	else
-		*dma_addr = (vm_address_t)(base + (unsigned long)page *
-					   PAGE_SIZE +
-					   (paddr & (vm_address_t)PAGE_MASK));
+		kr = dma_grant_locked(r, bdf, &cap, reads, writes, &b, &id,
+				      &granted, &u_reads, &u_writes);
+	if (kr == KERN_SUCCESS)
+		for (i = 0; i < npages; i++)
+			((vm_address_t *)list)[i] = r->pa[i];
+	mutex_unlock(&device_table_lock);
+	if (kr != KERN_SUCCESS) {
+		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
+				     FALSE);
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+
+	if (granted)
+		printf("device: %02x:%02x.%u may now reach a %u-page buffer it "
+		       "did not allocate, at 0x%lx (%s%s) — mapped once for the "
+		       "server that owns the device, which keeps the translation "
+		       "(#537)\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), npages, b,
+		       reads ? "reads" : "", writes ? (reads ? ", writes" :
+						       "writes") : "");
+
+	kr = vm_map_unwire(ipc_kernel_map, list, list + list_size, FALSE);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+
+	/*
+	 * 🔴 AN IDENTITY DOMAIN CONFINES NOTHING.  A device the IOMMU passes
+	 * through -- legacy virtio, whose DMA QEMU never translates (#591) --
+	 * reaches every physical page whatever this grant says, so a kept
+	 * translation would outlive a free exactly as it would with no IOMMU at
+	 * all.  "Isolated" is the device's answer, not the machine's: nothing to
+	 * keep here, and the server asks per transfer.
+	 */
+	if (id) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return KERN_SUCCESS;
+	}
+
+	kr = vm_map_copyin(ipc_kernel_map, list, list_bytes, TRUE, &list_copy);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		return kr;
+	}
+
+	*isolated = 1;
+	*identity = (natural_t)id;
+	*base = (vm_address_t)b;
+	*ops = (u_reads ? CAP_OP_DMA_DEVICE_READ : 0) |
+	       (u_writes ? CAP_OP_DMA_DEVICE_WRITE : 0);
+	*pages = (vm_address_t *)list_copy;
+	*pagesCnt = npages;
 	return KERN_SUCCESS;
 }
 

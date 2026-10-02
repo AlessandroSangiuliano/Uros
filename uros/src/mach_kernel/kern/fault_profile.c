@@ -89,8 +89,8 @@ fp_measure_self(void)
 	int		i;
 
 	for (i = 0; i < 9; i++) {
-		uint64_t	a = fault_profile_tsc();
-		uint64_t	b = fault_profile_tsc();
+		uint64_t	a = urmach_tsc();
+		uint64_t	b = urmach_tsc();
 
 		d[i] = (uint32_t) (b - a);
 	}

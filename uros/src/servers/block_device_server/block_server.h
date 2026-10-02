@@ -297,6 +297,28 @@ struct blk_partition {
  * the client drops the last send right (cleanup via no-senders
  * notification — see comment in ds_device_open_cap).
  */
+/*
+ * #537 step 3: a buffer's translation, kept.  The device address of its first
+ * page (`base'; the rest consecutive, or each page at its own physical address
+ * when `identity'), the directions the grant allows, and its pages sorted by
+ * physical address with their place in the buffer.  npages == 0: nothing kept,
+ * the kernel is asked per transfer.  Kept only where the device is isolated:
+ * a revocation or a free takes the grant down, and the IOMMU refuses what a
+ * stale entry would send.
+ */
+struct blk_xlate_page {
+	vm_address_t		pa;
+	unsigned int		page;
+};
+struct blk_xlate {
+	unsigned int		npages;
+	int			identity;
+	natural_t		ops;
+	vm_address_t		base;
+	struct blk_xlate_page	*ix;
+	uint32_t		epoch;	/* urmach_cap_epoch() before it was taken */
+};
+
 struct blk_handle {
 	uint32_t		magic;		/* BLK_MAGIC_HANDLE */
 	struct blk_partition	*part;
@@ -318,6 +340,12 @@ struct blk_handle {
 	 */
 #define BLK_HANDLE_DMA_CAPS	4
 	struct uros_cap		dma_cap[BLK_HANDLE_DMA_CAPS];
+	/*
+	 * #537 step 3: beside dma_cap[i], what device_dma_map_foreign_region
+	 * answered for it when the device is isolated -- moved and freed with
+	 * the capability, wherever that one is moved or forgotten.
+	 */
+	struct blk_xlate	dma_xlate[BLK_HANDLE_DMA_CAPS];
 	unsigned int		n_dma_caps;
 	unsigned int		dma_last;	/* answered last: tried first */
 	unsigned int		dropped;	/* capabilities forgotten */
@@ -336,6 +364,15 @@ struct blk_handle {
 	 */
 	uint64_t		phys_req, phys_pages, xlate_cyc, xfer_cyc;
 	uint64_t		phys_said_pages;
+
+	/*
+	 * #537: the checks after transfers on kept translations -- how many
+	 * and their cycles (inside xlate_cyc too), how many times a table's
+	 * capability was verified again because the epoch had moved and what
+	 * that cost, and the epoch as last read.
+	 */
+	uint64_t		held_n, held_cyc, held_moved, held_moved_cyc;
+	uint32_t		held_epoch;
 };
 
 /* ================================================================
