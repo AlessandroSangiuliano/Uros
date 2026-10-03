@@ -7491,8 +7491,26 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 * before the second sample.
 	 */
 	if (boot_flag('C')) {
+		int was_on = interrupts_enabled(), now;
+
 		clock_event_init(LAPIC_TIMER_VECTOR);
 		clock_event_burnin(2);
+
+		/*
+		 * #612: asked here, by the caller, and not by the burn-in of
+		 * itself.  The burn-in returned with interrupts off whatever
+		 * it was given, and nothing said so until a cross-call at more
+		 * than one processor stopped the boot inside setup_main().
+		 */
+		now = interrupts_enabled();
+		kputs("UrMach x86-64: the burn-in found interrupts ");
+		kputs(was_on ? "on" : "off");
+		kputs(" and left them ");
+		kputs(now ? "on" : "off");
+		kputs(now == was_on
+		      ? ", as it found them (#612)\r\n"
+		      : " -- WRONG, it must give back the state it was given "
+			"(#612)\r\n");
 	}
 
 	kputs("UrMach x86-64: entering setup_main (#458)\r\n");

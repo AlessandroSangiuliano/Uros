@@ -635,13 +635,28 @@ clock_event_tick_ns(void)
  */
 static volatile unsigned long	burnin_ticks;
 
+/*
+ * #612: the handler re-arms only while the burn-in runs.  The burn-in now
+ * gives interrupts back as it found them -- on, on the boot path -- and a tick
+ * that fired between its `cli' and the stop is delivered then, to this
+ * handler, which is the vector's until machine_init() installs the real one.
+ * Re-arming from there would keep the timer running into setup_main(), where
+ * machine_init() counts on nothing being able to tick yet.
+ */
+static volatile int		burnin_running;
+
+#ifndef	ABLATE_612_BURNIN_CLI
+#define	ABLATE_612_BURNIN_CLI	0
+#endif
+
 static void
 burnin_handler(struct trap_frame *frame)
 {
 	(void) frame;
 	burnin_ticks++;
 	lapic_eoi();
-	(void) clock_event_arm_tick();
+	if (burnin_running)
+		(void) clock_event_arm_tick();
 
 	/*
 	 * _no_check: the balanced re-enable, WITHOUT the preemption check it
@@ -657,6 +672,7 @@ clock_event_burnin(unsigned seconds)
 {
 	uint64_t	t0, t1, expect, got;
 	unsigned long	want = (unsigned long) event_hz * seconds;
+	int		was_on = interrupts_enabled();
 
 	if (tsc_hz() == 0) {
 		printf("clock_event: burn-in skipped — no calibrated TSC to "
@@ -668,9 +684,11 @@ clock_event_burnin(unsigned seconds)
 	trap_set_handler(event_vector, burnin_handler);
 	clock_event_setup_cpu();
 	burnin_ticks = 0;
+	burnin_running = 1;
 
 	t0 = rdtsc();
 	if (!clock_event_arm_tick()) {
+		burnin_running = 0;
 		printf("clock_event: burn-in could not arm %s\n",
 		       clock_event_name());
 		return;
@@ -690,6 +708,7 @@ clock_event_burnin(unsigned seconds)
 	} while (t1 - t0 < expect);
 	__asm__ __volatile__("cli");
 
+	burnin_running = 0;
 	clock_event_stop();
 	got = burnin_ticks;
 
@@ -701,6 +720,16 @@ clock_event_burnin(unsigned seconds)
 	if (got == 0)
 		panic("clock_event: the timer armed and never fired — the "
 		      "kernel would have no clock at all (#459)");
+
+	/*
+	 * 🔴 Interrupts back as they were found (#612).  The `cli' above closes
+	 * the measurement and used to be the end of it, so every caller got
+	 * them back off: boot reaches here with them on, and at more than one
+	 * processor setup_main()'s first cross-call, from pmap_steal_memory(),
+	 * met ipi_call_others()'s check and stopped the boot.
+	 */
+	if (was_on && !ABLATE_612_BURNIN_CLI)
+		__asm__ __volatile__("sti");
 }
 
 /* ------------------------------------------------------- the tick ------ */
