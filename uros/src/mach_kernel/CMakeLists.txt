@@ -95,6 +95,9 @@ option(UROS_ABLATE_537_PAGE_WALK "Build the #537 ablation: a DMA page is found b
 option(UROS_ABLATE_537_IX_UNSORTED "Build the #537 ablation: the page index is left unsorted (the self-test must say WRONG)" OFF)
 option(UROS_ABLATE_537_HMAC_LOCKED "Build the #537 ablation: the capability MAC is computed with cap_lock held, as before" OFF)
 option(UROS_PROBE_537_CAP_CONCURRENCY "Build the #537 probe: capability checks timed alone and on every processor at once" OFF)
+# #615, both targets: thread_setrun()'s unbound branch puts the bound thread it
+# displaces from a processor's next_thread on the processor set's queue again.
+option(UROS_ABLATE_615_DISPLACED_TO_SET "Build the #615 ablation: a bound thread displaced from its processor's next_thread goes to the set's run queue, where any processor may take it (pmap_bench, -M, must say WRONG)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -635,6 +638,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_PROBE_537_CAP_CONCURRENCY)
       list(APPEND KERNEL_DEFINES_BARE PROBE_537_CAP_CONCURRENCY=1)
       message(STATUS "#537 probe: capability checks alone and on every processor at once (x86_64)")
+  endif()
+  if(UROS_ABLATE_615_DISPLACED_TO_SET)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_615_DISPLACED_TO_SET=1)
+      message(STATUS "#615 ablation: a displaced bound thread goes to the set's run queue (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
@@ -1598,6 +1605,10 @@ endforeach()
 if(UROS_PROBE_537_CAP_CONCURRENCY)
     list(APPEND KERNEL_DEFINES -DPROBE_537_CAP_CONCURRENCY=1)
     message(STATUS "#537 probe: capability checks alone and on every processor at once (i386)")
+endif()
+if(UROS_ABLATE_615_DISPLACED_TO_SET)
+    list(APPEND KERNEL_DEFINES -DABLATE_615_DISPLACED_TO_SET=1)
+    message(STATUS "#615 ablation: a displaced bound thread goes to the set's run queue (i386)")
 endif()
 
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)

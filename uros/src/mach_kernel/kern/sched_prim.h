@@ -263,6 +263,10 @@ extern void		thread_bind(
 #define thread_bind_locked(thread,processor)
 #endif	/*NCPUS > 1*/
 
+/* #615: bound threads queued anywhere but their own processor's run queue. */
+extern unsigned int	sched_bound_displaced;
+extern int		sched_bound_displaced_slot;
+
 /* Select a thread to run on a particular processor */
 extern thread_t		thread_select(
 				processor_t	myprocessor);

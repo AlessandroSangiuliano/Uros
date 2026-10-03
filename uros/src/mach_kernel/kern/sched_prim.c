@@ -2557,6 +2557,13 @@ run_queue_enqueue(
 	if (whichq < 0 || whichq > MINPRI) {
 		panic("run_queue_enqueue: bad pri (%d)\n", whichq);
 	}
+#if	NCPUS > 1
+	if (th->bound_processor != PROCESSOR_NULL &&
+	    rq != &th->bound_processor->runq) {
+		sched_bound_displaced++;			/* #615 */
+		sched_bound_displaced_slot = th->bound_processor->slot_num;
+	}
+#endif	/* NCPUS > 1 */
 
 	simple_lock(&(rq)->lock);	/* lock the run queue */
 #if	DEBUG
@@ -2606,6 +2613,25 @@ run_queue_enqueue(
 int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
 extern int	real_ncpus;
 #endif	/* NCPUS > 1 */
+
+/*
+ * #615: a bound thread queued on a run queue other than its own processor's,
+ * where a processor it is not bound to may take it -- counted by
+ * run_queue_enqueue() wherever it happens.  thread_setrun()'s unbound branch
+ * did it: a bound thread waiting in its processor's next_thread, displaced by
+ * a more urgent unbound one, went to the processor SET's queue, and
+ * pmap_bench caught its worker bound to processor 0 running wholly on
+ * another.  Counted without a lock of its own -- two processors at once may
+ * lose an increment, which a count of presence can afford -- and read by
+ * pmap_bench after each arm.
+ */
+unsigned int	sched_bound_displaced;
+int		sched_bound_displaced_slot = -1;
+
+/* #615's ablation: the displaced bound thread goes to the set's queue again. */
+#ifndef	ABLATE_615_DISPLACED_TO_SET
+#define	ABLATE_615_DISPLACED_TO_SET	0
+#endif
 
 /*
  *	thread_setrun:
@@ -2800,8 +2826,22 @@ thread_setrun(
 		    ast_on(cpu_number(), ast_flags);
 		}
 	    }
+
+	    /*
+	     * #615: the thread displaced from next_thread just above may be
+	     * bound -- the bound branch below hands a bound thread to its idle
+	     * processor exactly so -- and the set's queue is where any
+	     * processor may take it.  Under TCG at 1.4 GHz a worker bound to
+	     * processor 0 was taken by processor 1, 2 or 3 in about one boot
+	     * in three.  It goes back to its own processor's queue: this one,
+	     * whose next_thread it was.
+	     */
+	    if (th->bound_processor != PROCESSOR_NULL &&
+		!ABLATE_615_DISPLACED_TO_SET)
+		rq = &th->bound_processor->runq;
 #if	S319_INSTRUMENT
-	    s319[cpu_number()].psetenq++;
+	    if (rq == &pset->runq)
+		s319[cpu_number()].psetenq++;
 #endif
 	    (void)run_queue_enqueue(rq, th, tail);
 	}
