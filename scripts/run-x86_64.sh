@@ -62,6 +62,9 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 # about the wrong thing.
 BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
+# The line that separates the guest's output from qemu's own messages, which
+# are kept apart while the guest runs and appended after it (#613).
+QEMU_STDERR_HEADER="=== qemu's own messages (its stderr, kept apart while the guest ran, #613) ==="
 
 # What the run was taken under, written into the LOG rather than only shouted
 # at the terminal (#516).  Shared with run-qemu.sh, because each of the two
@@ -297,7 +300,9 @@ elif grep -aq "$TERMINATOR" "$LOG"; then
 		done
 	echo "  log: $LOG"
 	exit 1
-elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: '; then
+elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: ' ||
+     { head -1 "$LOG" | grep -qxF "$QEMU_STDERR_HEADER" &&
+       sed -n 2p "$LOG" | grep -q '^qemu-system-x86_64: '; }; then
 	# 🔴 A REFUSAL TO START IS NOT A RESULT, and it used to be reported as
 	# one.  QEMU rejects a command line by printing one line and exiting,
 	# and every check below reads a log that never had a kernel in it --
@@ -313,12 +318,13 @@ elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: '; then
 	# argument.  Nothing about the kernel was involved.
 	echo "  FAILED: qemu refused to start — this says nothing about the"
 	echo "          kernel, and the command line is where to look:"
-	sed -n '1,3p' "$LOG" | sed 's/^/    /'
+	grep -vxF "$QEMU_STDERR_HEADER" "$LOG" | sed -n '1,3p' | sed 's/^/    /'
 	echo "    (arguments passed through: $RUN_ARGS)"
 	echo "  log: $LOG"
 	exit 3
-elif [ ! -s "$LOG" ]; then
-	# Started, said nothing at all.  A third thing again: not a refusal,
+elif [ ! -s "$LOG" ] || head -1 "$LOG" | grep -qxF "$QEMU_STDERR_HEADER"; then
+	# Started, said nothing at all -- the guest, that is: qemu's own lines,
+	# kept apart since #613, are no output of the kernel's.  A third thing again: not a refusal,
 	# because qemu printed no complaint, and not a truncated boot, because
 	# there is nothing to truncate.
 	echo "  FAILED: qemu started and produced no output whatsoever — the"
@@ -977,9 +983,19 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-drive file=$AHCI_DISK2,if=none,id=ahcidisk1,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
+# 🔴 QEMU'S OWN STDERR APART FROM THE GUEST'S SERIAL OUTPUT (#613).  One file
+# for both had two writers that know nothing of each other's lines: the intel
+# IOMMU model warns on every DMA fault, and under KVM one of its warnings
+# landed inside dma_reclaim_test's last line -- "dma" ... "_r" ... "eclaim: 8
+# of 8 arms passed" -- so the harness, which matches whole lines, waited out
+# its budget for a line that was there and called a finished run silent.
+# Kept in a file of its own while the guest runs, and put after the guest's
+# output, under a header of its own, once qemu has exited.
+QERR="$LOG.qemu-stderr"
+: > "$QERR"
 # shellcheck disable=SC2086
 qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS "$@" \
-	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
+	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
 # Watch the log, not the clock.
@@ -1190,6 +1206,15 @@ done
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+
+# qemu's own messages, after everything the guest said (#613).  The header is
+# what the readers below and double-panic-check.sh take for the end of the
+# guest's output.
+if [ -s "$QERR" ]; then
+	echo "$QEMU_STDERR_HEADER" >> "$LOG"
+	cat "$QERR" >> "$LOG"
+fi
+rm -f "$QERR"
 
 # ── The host reads what the boot wrote (#498) ─────────────────────────────
 #
