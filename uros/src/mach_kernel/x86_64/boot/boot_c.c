@@ -2163,7 +2163,12 @@ static void user_reachable_selftest(void)
 	      ? ") — the kernel half stays out of reach\r\n"
 	      : ") — WRONG\r\n");
 
-	pmap_remove(space, va, PAGE_SIZE_4K);
+	/*
+	 * An end, not a size (#612).  With PAGE_SIZE_4K for the end, below the
+	 * start, this removed nothing, and pmap_destroy() struck the leaf
+	 * instead -- which is why nothing was left, and why nothing said so.
+	 */
+	pmap_remove(space, va, va + PAGE_SIZE_4K);
 	pmap_destroy(space);
 	boot_frame_free(frame);
 }
@@ -2936,8 +2941,9 @@ static void ring3_selftest(void)
 	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
 	      : " — WRONG, the syscall window is not covered\r\n");
 
-	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
-	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);
+	/* Ends, not sizes (#612): see user_reachable_selftest(). */
+	pmap_remove(space, USER_PROBE_CODE_VA, USER_PROBE_CODE_VA + PAGE_SIZE_4K);
+	pmap_remove(space, USER_PROBE_DATA_VA, USER_PROBE_DATA_VA + PAGE_SIZE_4K);
 	pmap_destroy(space);
 	boot_frame_free(code_frame);
 	boot_frame_free(data_frame);
@@ -7259,7 +7265,7 @@ static void tlb_targeted_selftest(void)
 	      : " — WRONG, the counter cannot see one and the zero above "
 		"means nothing\r\n");
 
-	pmap_remove(u, va, PAGE_SIZE_4K);
+	pmap_remove(u, va, va + PAGE_SIZE_4K);	/* an end, not a size (#612) */
 	pmap_destroy(u);
 }
 
