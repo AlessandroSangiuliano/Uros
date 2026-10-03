@@ -1240,6 +1240,272 @@ a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
 }
 
 /*
+ * ── [27] A handle moves data only the way it was opened (#614) ─────────────
+ *
+ * A read-only block capability opens D_READ, and the same capability is
+ * refused a D_READ | D_WRITE open: the open asks the token for what the mode
+ * needs.  The D_READ handle reads, and is refused by each of the four ways
+ * of writing -- copying, batched, physical, and inband, which is a stub
+ * today.  The mirror: a write-only capability's D_WRITE handle is refused
+ * both ways of reading.
+ *
+ * ⚠️ The writes go to the scratch block of a disk [14] may write, and each
+ * carries the block's own bytes, read just before.  Should a check be
+ * missing (UROS_ABLATE_614_NO_MODE_CHECK) the write lands and changes
+ * nothing, and the arm says WRONG for its having been accepted.  The opens
+ * and the mirror write nothing and run on every disk.
+ */
+#define CT27_BYTES	4096u
+
+/* A block capability for `ops' and an open for `mode' with it: the open's
+ * answer, or *no_cap set when cap_server gave no capability at all. */
+static kern_return_t
+ct27_open(mach_port_t part_port, const char *name, uint32_t ops,
+          dev_mode_t mode, mach_port_t *handle, int *no_cap)
+{
+    struct uros_cap  tok;
+    security_token_t null_sec = { { 0, 0 } };
+    char             blob[CAP_TOKEN_MAX];
+
+    *handle = MACH_PORT_NULL;
+    *no_cap = 0;
+    if (cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name), ops, 0, &tok)
+        != KERN_SUCCESS) {
+        *no_cap = 1;
+        return KERN_FAILURE;
+    }
+    memcpy(blob, &tok, sizeof(tok));
+    return device_open_cap(part_port, MACH_PORT_NULL, mode, null_sec,
+                           (char *)name, blob,
+                           (mach_msg_type_number_t)sizeof(tok), handle);
+}
+
+static void
+ct27_close(mach_port_t handle)
+{
+    (void)device_close(handle);
+    (void)mach_port_deallocate(mach_task_self(), handle);
+}
+
+/* One scatter-gather page handed over to `handle', for the physical paths. */
+static kern_return_t
+ct27_buffer(mach_port_t device_port, mach_port_t handle, vm_address_t *kva,
+            vm_address_t **pa_list, mach_msg_type_number_t *pa_cnt)
+{
+    struct uros_cap buf_cap;
+    vm_address_t    uva = 0;
+    uint64_t        region_id = 0;
+    kern_return_t   kr;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), kva, &uva, pa_list, pa_cnt,
+                             &region_id);
+    if (kr != KERN_SUCCESS)
+        return kr;
+    memset(&buf_cap, 0, sizeof(buf_cap));
+    kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
+                     &buf_cap);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+    return kr;
+}
+
+static void
+ct27_buffer_free(mach_port_t device_port, vm_address_t kva,
+                 vm_address_t *pa_list, mach_msg_type_number_t pa_cnt)
+{
+    if (kva != 0)
+        (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    if (pa_list != NULL)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                            pa_cnt * sizeof(vm_address_t));
+}
+
+/* Each way of writing, offered the block's own bytes: none may be taken. */
+static int
+ct27_read_only_writes_nothing(mach_port_t device_port, mach_port_t h,
+                              const char *name)
+{
+    io_buf_ptr_t           data = NULL;
+    mach_msg_type_number_t cnt = 0;
+    io_buf_len_t           wr = 0, got = 0;
+    recnum_t               rec = SCRATCH_BLOCK;
+    unsigned32             size = CT27_BYTES;
+    vm_address_t           kva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    kern_return_t          kr;
+    int                    ok = 1;
+
+    kr = device_read(h, D_READ, SCRATCH_BLOCK, CT27_BYTES, &data, &cnt);
+    if (kr != KERN_SUCCESS || cnt != CT27_BYTES) {
+        printf("cap_test: [27] WRONG — %s: a D_READ handle could not read "
+               "the scratch block (kr=%d, %u bytes)\n", name, (int)kr,
+               (unsigned)cnt);
+        if (kr == KERN_SUCCESS && data != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)data, cnt);
+        return 0;
+    }
+
+    kr = device_write(h, D_WRITE, SCRATCH_BLOCK, data, cnt, &wr);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [27] WRONG — %s: a D_READ handle wrote %u bytes "
+               "through device_write\n", name, (unsigned)wr);
+        ok = 0;
+    }
+    kr = device_write_batch(h, D_WRITE, &rec, 1, &size, 1, data, cnt, &wr);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [27] WRONG — %s: a D_READ handle wrote %u bytes "
+               "through device_write_batch\n", name, (unsigned)wr);
+        ok = 0;
+    }
+    kr = device_write_inband(h, D_WRITE, SCRATCH_BLOCK, (const char *)data,
+                             IO_INBAND_MAX, &wr);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [27] WRONG — %s: a D_READ handle wrote %u bytes "
+               "through device_write_inband\n", name, (unsigned)wr);
+        ok = 0;
+    }
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)data, cnt);
+
+    kr = ct27_buffer(device_port, h, &kva, &pa_list, &pa_cnt);
+    if (kr == KERN_SUCCESS)
+        kr = device_read_phys(h, D_READ, SCRATCH_BLOCK, CT27_BYTES, pa_list,
+                              pa_cnt, &got);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [27] WRONG — %s: a D_READ handle could not read "
+               "the scratch block into a page it handed over (kr=%d), so "
+               "the physical write was not offered\n", name, (int)kr);
+        ok = 0;
+    } else {
+        kr = device_write_phys(h, D_WRITE, SCRATCH_BLOCK, CT27_BYTES,
+                               pa_list, pa_cnt, &got);
+        if (kr == KERN_SUCCESS) {
+            printf("cap_test: [27] WRONG — %s: a D_READ handle wrote %u "
+                   "bytes through device_write_phys\n", name, (unsigned)got);
+            ok = 0;
+        }
+    }
+    ct27_buffer_free(device_port, kva, pa_list, pa_cnt);
+    return ok;
+}
+
+/* The mirror: a write-only handle reads nothing, either way. */
+static int
+ct27_write_only_reads_nothing(mach_port_t device_port, mach_port_t h,
+                              const char *name)
+{
+    io_buf_ptr_t           data = NULL;
+    mach_msg_type_number_t cnt = 0;
+    io_buf_len_t           got = 0;
+    vm_address_t           kva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    kern_return_t          kr;
+    int                    ok = 1;
+
+    kr = device_read(h, D_READ, SCRATCH_BLOCK, CT27_BYTES, &data, &cnt);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [27] WRONG — %s: a D_WRITE handle read %u bytes "
+               "through device_read\n", name, (unsigned)cnt);
+        if (data != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)data, cnt);
+        ok = 0;
+    }
+
+    kr = ct27_buffer(device_port, h, &kva, &pa_list, &pa_cnt);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [27] WRONG — %s: a D_WRITE handle could not hand a "
+               "page over (kr=%d), so the physical read was not offered\n",
+               name, (int)kr);
+        ok = 0;
+    } else {
+        kr = device_read_phys(h, D_READ, SCRATCH_BLOCK, CT27_BYTES, pa_list,
+                              pa_cnt, &got);
+        if (kr == KERN_SUCCESS) {
+            printf("cap_test: [27] WRONG — %s: a D_WRITE handle read %u "
+                   "bytes through device_read_phys\n", name, (unsigned)got);
+            ok = 0;
+        }
+    }
+    ct27_buffer_free(device_port, kva, pa_list, pa_cnt);
+    return ok;
+}
+
+static int
+a_handle_moves_data_only_its_way(mach_port_t device_port,
+                                 mach_port_t part_port, const char *name,
+                                 int scratch)
+{
+    mach_port_t   rh = MACH_PORT_NULL, both = MACH_PORT_NULL;
+    mach_port_t   wh = MACH_PORT_NULL;
+    int           no_cap = 0, ok = 1;
+    kern_return_t kr;
+
+    kr = ct27_open(part_port, name, CAP_OP_BLK_READ, D_READ, &rh, &no_cap);
+    if (no_cap) {
+        printf("cap_test: [27] %s — DID NOT RUN, no read-only block "
+               "capability\n", name);
+        return 1;
+    }
+    if (kr != KERN_SUCCESS || rh == MACH_PORT_NULL) {
+        printf("cap_test: [27] WRONG — %s: a read-only capability was "
+               "refused a D_READ open (kr=%d)\n", name, (int)kr);
+        return 0;
+    }
+
+    kr = ct27_open(part_port, name, CAP_OP_BLK_READ, D_READ | D_WRITE, &both,
+                   &no_cap);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [27] WRONG — %s: a read-only capability opened "
+               "D_READ | D_WRITE\n", name);
+        ct27_close(both);
+        ok = 0;
+    }
+
+    /*
+     * The writes only where [14] may write: should a check be missing they
+     * land.  The opens and the mirror below write nothing, so they run on
+     * every disk -- on i386 the only candidate is the boot disk.
+     */
+    if (!scratch)
+        printf("cap_test: [27] %s is the boot disk, or cannot be told apart "
+               "from it — the four writes are not offered here, a missing "
+               "check would let them through\n", name);
+    else if (!ct27_read_only_writes_nothing(device_port, rh, name))
+        ok = 0;
+    ct27_close(rh);
+
+    kr = ct27_open(part_port, name, CAP_OP_BLK_WRITE, D_WRITE, &wh, &no_cap);
+    if (no_cap) {
+        printf("cap_test: [27] WRONG — %s: no write-only block capability, "
+               "so the mirror did not run\n", name);
+        ok = 0;
+    } else if (kr != KERN_SUCCESS || wh == MACH_PORT_NULL) {
+        printf("cap_test: [27] WRONG — %s: a write-only capability was "
+               "refused a D_WRITE open (kr=%d)\n", name, (int)kr);
+        ok = 0;
+    } else {
+        if (!ct27_write_only_reads_nothing(device_port, wh, name))
+            ok = 0;
+        ct27_close(wh);
+    }
+
+    if (ok && scratch)
+        printf("cap_test: [27] %s: a read-only capability opened D_READ and "
+               "not D_READ | D_WRITE, read, and was refused by each way of "
+               "writing -- copying, batched, physical, inband; a write-only "
+               "one was refused both ways of reading (#614)\n", name);
+    else if (ok)
+        printf("cap_test: [27] %s: a read-only capability opened D_READ and "
+               "not D_READ | D_WRITE; a write-only one was refused both ways "
+               "of reading -- the writes are offered on a disk that may take "
+               "them (#614)\n", name);
+    return ok;
+}
+
+/*
  * ── [25] Many pages in one request (#537) ─────────────────────────────
  *
  * Every physical request the bundle made was one page -- 649 of 649 lines of
@@ -1274,12 +1540,11 @@ many_pages_in_one_request(mach_port_t device_port, mach_port_t part_port,
     int                    ok = 0;
 
     /*
-     * READ | WRITE although this arm only reads: ds_device_open_cap() asks
-     * a token for both whatever the mode (block_device.c), so a read-only
-     * token is refused even a read-only open.
+     * Read-only, as this arm only reads.  It asked READ | WRITE until #614:
+     * ds_device_open_cap() asked every token for both whatever the mode.
      */
     kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
-                     CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok);
+                     CAP_OP_BLK_READ, 0, &tok);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [25] %s — DID NOT RUN, no block capability "
                "(kr=%d)\n", name, (int)kr);
@@ -2801,6 +3066,9 @@ main(int argc, char **argv)
         if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
                                           is_the_boot_disk(p) == 0))
             pass = 0;
+        if (!a_handle_moves_data_only_its_way(device_port, p, candidates[i],
+                                              is_the_boot_disk(p) == 0))
+            pass = 0;		/* #614 */
         /* #537 step 3: on the controller behind the IOMMU, whichever is first. */
         if (strcmp(candidates[i], "ahci0a") == 0 &&
             !a_revoked_translation_is_refused(device_port, p, candidates[i]))
