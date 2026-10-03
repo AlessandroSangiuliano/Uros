@@ -1036,9 +1036,24 @@ uint64_t pmap_extract(pmap_t pmap, uint64_t va)
  * reports skips a large page in one stride instead of touching its every
  * 4 KiB; where nothing is mapped, 4 KiB is the step that cannot overshoot a
  * mapping that starts partway through.
+ *
+ * 🔴 An end below the start is refused, not walked as nothing (#612).  Four
+ * boot self-tests passed PAGE_SIZE_4K where the end belongs; each removed
+ * nothing and said nothing, and one of them left a page in the VM's range.
+ * An empty range is s == e, so no caller means anything by an end below the
+ * start: it can only be a size passed for an end.
  */
+static void pmap_range_check(const char *who, uint64_t s, uint64_t e)
+{
+	if (e < s)
+		panic("%s: the end 0x%lx is below the start 0x%lx -- a size "
+		      "where the end belongs? (#612)", who, (unsigned long) e,
+		      (unsigned long) s);
+}
+
 void pmap_remove(pmap_t pmap, uint64_t s, uint64_t e)
 {
+	pmap_range_check("pmap_remove", s, e);
 	while (s < e) {
 		uint64_t sz = pmap_forget(pmap, s);
 
@@ -1050,6 +1065,7 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 {
 	uint64_t flags = pmap_flags_for_prot(prot);
 
+	pmap_range_check("pmap_protect", s, e);
 	while (s < e) {
 		uint64_t sz;
 

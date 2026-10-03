@@ -74,9 +74,92 @@ pmap_free_pages(void)
  * something else.  <pmap/layout.h> is where those boundaries live and this
  * is the one range it leaves free.
  */
+/*
+ * 🔴 What is already mapped in the range about to be handed over (#612).
+ *
+ * The VM takes this range as its own and asks nothing about it:
+ * pmap_steal_memory() maps its first page at KERNEL_HEAP_BASE without looking,
+ * and kmem's pageable memory counts on an address it has not yet entered to
+ * fault.  A boot self-test that left a page here broke both.  The VM's first
+ * pmap_enter() replaced the self-test's mapping, which at more than one
+ * processor is a cross-call before the kernel has a single thread.  And an
+ * access that should have faulted would have read the self-test's frame,
+ * which nothing would have said.  So the range is walked once, as it is
+ * handed over, and whatever is mapped in it is named.
+ *
+ * Walked through the tables that exist rather than address by address: the
+ * range is 32 TiB, and at this point only the few tables a self-test built
+ * are below it.
+ */
+#define	HEAP_NAMED	4		/* how many leftovers are named */
+
+struct heap_seen {
+	unsigned	mappings;
+	uint64_t	va[HEAP_NAMED];
+	uint64_t	pa[HEAP_NAMED];
+};
+
+static void
+heap_scan(const pt_entry_t *table, unsigned level, uint64_t va_base,
+	  unsigned first, unsigned last, struct heap_seen *seen)
+{
+	unsigned	shift = PT_SHIFT + 9 * (level - 1);
+
+	for (unsigned i = first; i < last; i++) {
+		pt_entry_t	e = table[i];
+		uint64_t	va = va_base + ((uint64_t)(i - first) << shift);
+
+		if (!pte_is_valid(e))
+			continue;
+
+		/* A large page is a leaf too: no table under it. */
+		if (level == 1 || pte_is_leaf(e)) {
+			if (seen->mappings < HEAP_NAMED) {
+				seen->va[seen->mappings] = va;
+				seen->pa[seen->mappings] = pte_to_pa(e);
+			}
+			seen->mappings++;
+			continue;
+		}
+
+		heap_scan((const pt_entry_t *)(uintptr_t)
+			  phys_to_direct(pte_to_pa(e)),
+			  level - 1, va, 0, PTES_PER_TABLE, seen);
+	}
+}
+
+static void
+heap_say_mapped(void)
+{
+	const pt_entry_t *root = (const pt_entry_t *)(uintptr_t)
+				 phys_to_direct(pmap_kernel()->root_pa);
+	unsigned	first = (unsigned)((KERNEL_HEAP_BASE >> PML4_SHIFT)
+					   & (PTES_PER_TABLE - 1));
+	struct heap_seen seen = { 0 };
+
+	heap_scan(root, 4, KERNEL_HEAP_BASE, first,
+		  first + (unsigned)(KERNEL_HEAP_SIZE >> PML4_SHIFT), &seen);
+
+	if (seen.mappings == 0) {
+		printf("pmap: the VM's range 0x%lx..0x%lx is empty as it is "
+		       "handed over (#612)\n", (unsigned long) KERNEL_HEAP_BASE,
+		       (unsigned long) (KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE - 1));
+		return;
+	}
+
+	printf("pmap: WRONG — %u mapping%s already in the VM's range as it is "
+	       "handed over, left by the boot (#612)\n", seen.mappings,
+	       seen.mappings == 1 ? "" : "s");
+	for (unsigned i = 0; i < seen.mappings && i < HEAP_NAMED; i++)
+		printf("pmap:   0x%lx -> frame 0x%lx\n",
+		       (unsigned long) seen.va[i], (unsigned long) seen.pa[i]);
+}
+
 void
 pmap_virtual_space(vm_offset_t *startp, vm_offset_t *endp)
 {
+	heap_say_mapped();
+
 	*startp = (vm_offset_t) KERNEL_HEAP_BASE;
 	*endp   = (vm_offset_t) (KERNEL_HEAP_BASE + KERNEL_HEAP_SIZE);
 }

@@ -520,6 +520,15 @@ static void bootmem_selftest(uint32_t info)
 }
 
 /*
+ * #612: the self-tests that map in the VM's range leave their pages there
+ * again (map_selftest, tlb_shootdown_selftest), for pmap_virtual_space() to
+ * name.
+ */
+#ifndef	ABLATE_612_LEAVE_MAPPED
+#define	ABLATE_612_LEAVE_MAPPED	0
+#endif
+
+/*
  * Map a page where the walk just proved nothing was mapped, then establish
  * that it is really there — by writing through the new address and finding
  * the value on the physical frame via the direct map, and by having the walk
@@ -573,6 +582,22 @@ static void map_selftest(void)
 	kputs("UrMach x86-64: map over a large page ");
 	kputs(rc == PMAP_MAP_BLOCKED ? "correctly refused\r\n"
 				     : "NOT refused?!\r\n");
+
+	/*
+	 * 🔴 And gone again, frame and all (#612).  KERNEL_HEAP_BASE is the
+	 * first address pmap_virtual_space() gives the VM, and the page stayed:
+	 * pmap_steal_memory()'s first pmap_enter() replaced it, which at more
+	 * than one processor is a cross-call before the kernel has a thread.
+	 * pmap_virtual_space() now says what it finds there.
+	 */
+	if (ABLATE_612_LEAVE_MAPPED)
+		return;
+	pmap_unmap_page(PMAP_NULL, va, 0);
+	kputs("UrMach x86-64: unmapped again, ");
+	kputs(pmap_walk(root, va, 0) == PT_ENTRY_NULL
+	      ? "the walk finds nothing -- the frame goes back\r\n"
+	      : "STILL MAPPED -- the VM will find it\r\n");
+	boot_frame_free(frame);
 }
 
 /*
@@ -612,6 +637,7 @@ static void protect_unmap_selftest(void)
 	kputs(size == PAGE_SIZE_4K && e == PT_ENTRY_NULL
 	      ? "cleared, walk finds nothing\r\n"
 	      : "STILL MAPPED?!\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -620,6 +646,10 @@ static void protect_unmap_selftest(void)
  * physical page, one size class finer, and reading through the direct map
  * still returns the witness.  CPU-independent — a 1 GiB leaf becomes 2 MiB,
  * a 2 MiB leaf becomes 4 KiB — so both models exercise a different level.
+ *
+ * #612: the split stays, and that is all it leaves.  The direct map maps
+ * what it mapped, one size finer, and the table the split took is the
+ * kernel's for good.  None of it is in the VM's range.
  */
 static void split_selftest(void)
 {
@@ -782,6 +812,7 @@ static void pmap_verbs_selftest(void)
 	kputs("UrMach x86-64: pmap_remove -> extract ");
 	kputhex64(got);
 	kputs(got == 0 ? ", gone\r\n" : ", STILL MAPPED?!\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -839,6 +870,7 @@ static void pv_selftest(uint32_t info)
 				   : ", STILL LISTED\r\n");
 
 	pmap_destroy(u);
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -938,6 +970,7 @@ static void phys_ops_selftest(void)
 	      : " -- WRONG, the bits went with the mappings (#606)\r\n");
 
 	pmap_destroy(u);
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -1345,6 +1378,7 @@ static void user_pmap_selftest(void)
 	kputs("UrMach x86-64: pmap_destroy -> ");
 	kputs(u->ref_count == 0 && u->root_pa == 0 ? "space released\r\n"
 						   : "STILL HELD?!\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 
 	/*
 	 * #456: and one space that is NOT destroyed here.  It is held until
@@ -1397,6 +1431,11 @@ static void user_pmap_selftest(void)
 			      ? " -- pmap_collect gives back none of them (#455)\r\n"
 			      : " -- UNEXPECTED\r\n");
 
+			/*
+			 * #612: the space goes and its leaves with it; the
+			 * eight pages it mapped came from the table allocator
+			 * and are kept, as #455's measurement has them.
+			 */
 			pmap_destroy(sp);
 		}
 	}
@@ -1671,6 +1710,7 @@ static void reclaim_selftest(void)
 	kputs(pv_count(frame) == 0
 	      ? ", and left no entry in the index\r\n"
 	      : ", AND LEFT A STALE INDEX ENTRY\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -2138,7 +2178,12 @@ static void user_reachable_selftest(void)
 	      ? ") — the kernel half stays out of reach\r\n"
 	      : ") — WRONG\r\n");
 
-	pmap_remove(space, va, PAGE_SIZE_4K);
+	/*
+	 * An end, not a size (#612).  With PAGE_SIZE_4K for the end, below the
+	 * start, this removed nothing, and pmap_destroy() struck the leaf
+	 * instead -- which is why nothing was left, and why nothing said so.
+	 */
+	pmap_remove(space, va, va + PAGE_SIZE_4K);
 	pmap_destroy(space);
 	boot_frame_free(frame);
 }
@@ -2911,8 +2956,9 @@ static void ring3_selftest(void)
 	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
 	      : " — WRONG, the syscall window is not covered\r\n");
 
-	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
-	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);
+	/* Ends, not sizes (#612): see user_reachable_selftest(). */
+	pmap_remove(space, USER_PROBE_CODE_VA, USER_PROBE_CODE_VA + PAGE_SIZE_4K);
+	pmap_remove(space, USER_PROBE_DATA_VA, USER_PROBE_DATA_VA + PAGE_SIZE_4K);
 	pmap_destroy(space);
 	boot_frame_free(code_frame);
 	boot_frame_free(data_frame);
@@ -5512,6 +5558,9 @@ static void msix_table_selftest(void)
 		volatile uint32_t	*regs;
 		uint64_t		before = msi_hits;
 
+		/* #612: the device region is a bump that never gives back,
+		 * and it is not the VM's range: this mapping stays, as every
+		 * driver's does. */
 		regs = (volatile uint32_t *)(uintptr_t)
 		       pmap_map_device(msix_regs_base, 0x20000);
 		if (regs == 0) {
@@ -6999,7 +7048,29 @@ static void tlb_shootdown_selftest(void)
 	      ? " see the new page — every processor let go of it\r\n"
 	      : " see the new page — WRONG\r\n");
 
-	pmap_remove(pmap_kernel(), probe.va, PAGE_SIZE_4K);
+	/*
+	 * 🔴 Taken down, both frames back (#612).  This was
+	 * `pmap_remove(pmap_kernel(), probe.va, PAGE_SIZE_4K)': a size where
+	 * the end belongs, an end below the start, so nothing was removed, and
+	 * the page stayed in the VM's range for the VM to find.
+	 *
+	 * ⚠️ The entry goes back to old_frame first.  Step 2 repointed it by
+	 * hand, and the pv index still says old_frame is mapped here -- it is
+	 * what pmap_enter() recorded.  pmap_remove() strikes from the index the
+	 * frame the entry names, so with new_frame there it would look for an
+	 * index entry that never existed and leave old_frame's behind.
+	 */
+	if (ABLATE_612_LEAVE_MAPPED)
+		return;
+	*entry = pa_to_pte(old_frame) | (*entry & ~INTEL_PTE_PFN);
+	pmap_remove(pmap_kernel(), probe.va, probe.va + PAGE_SIZE_4K);
+	kputs("UrMach x86-64: shootdown probe taken down, ");
+	kputs(pmap_walk(root, probe.va, 0) == PT_ENTRY_NULL
+	      && pv_count(old_frame) == 0 && pv_count(new_frame) == 0
+	      ? "no entry and no index entry left -- both frames go back\r\n"
+	      : "WRONG -- an entry or an index entry is left\r\n");
+	boot_frame_free(old_frame);
+	boot_frame_free(new_frame);
 }
 
 /*
@@ -7212,8 +7283,9 @@ static void tlb_targeted_selftest(void)
 	      : " — WRONG, the counter cannot see one and the zero above "
 		"means nothing\r\n");
 
-	pmap_remove(u, va, PAGE_SIZE_4K);
+	pmap_remove(u, va, va + PAGE_SIZE_4K);	/* an end, not a size (#612) */
 	pmap_destroy(u);
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -7491,8 +7563,26 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 * before the second sample.
 	 */
 	if (boot_flag('C')) {
+		int was_on = interrupts_enabled(), now;
+
 		clock_event_init(LAPIC_TIMER_VECTOR);
 		clock_event_burnin(2);
+
+		/*
+		 * #612: asked here, by the caller, and not by the burn-in of
+		 * itself.  The burn-in returned with interrupts off whatever
+		 * it was given, and nothing said so until a cross-call at more
+		 * than one processor stopped the boot inside setup_main().
+		 */
+		now = interrupts_enabled();
+		kputs("UrMach x86-64: the burn-in found interrupts ");
+		kputs(was_on ? "on" : "off");
+		kputs(" and left them ");
+		kputs(now ? "on" : "off");
+		kputs(now == was_on
+		      ? ", as it found them (#612)\r\n"
+		      : " -- WRONG, it must give back the state it was given "
+			"(#612)\r\n");
 	}
 
 	kputs("UrMach x86-64: entering setup_main (#458)\r\n");
