@@ -295,6 +295,13 @@ if(UROS_ABLATE_537_NO_EPOCH)
     target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_EPOCH=1)
     message(STATUS "#537 ablation: no epoch check after a transfer")
 endif()
+# #614: the open asks the token only for the mode's rights, and the transfers do
+# not check the mode -- a read-only token writes (cap_test [27] must say WRONG).
+option(UROS_ABLATE_614_NO_MODE_CHECK "Build the #614 ablation: no transfer checks the direction its handle was opened for" OFF)
+if(UROS_ABLATE_614_NO_MODE_CHECK)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_614_NO_MODE_CHECK=1)
+    message(STATUS "#614 ablation: transfers ignore the handle's mode")
+endif()
 
 target_include_directories(block_device_server PRIVATE ${BLK_INCLUDE_DIRS})
 

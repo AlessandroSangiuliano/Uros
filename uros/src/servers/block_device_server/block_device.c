@@ -57,6 +57,9 @@
 #ifndef BLK_ABLATE_537_NO_EPOCH
 #define BLK_ABLATE_537_NO_EPOCH 0	/* no check after a transfer */
 #endif
+#ifndef BLK_ABLATE_614_NO_MODE_CHECK
+#define BLK_ABLATE_614_NO_MODE_CHECK 0	/* transfers ignore the handle's mode */
+#endif
 #define BLK_DMA_PAGE	4096u		/* the DMA regions' page, both targets */
 
 struct blk_handle;
@@ -101,10 +104,38 @@ blk_authed_handle(mach_port_t device)
 	return h;
 }
 
-static struct blk_partition *
-blk_part_from_authed_handle(mach_port_t device)
+/*
+ * #614: the handle, when it was opened for the direction `dir' names --
+ * D_READ for a transfer from the disk, D_WRITE for one toward it.  The open
+ * asks the token for what the mode needs and nothing more, so a handle
+ * opened D_READ holds no write right and one opened D_WRITE no read right.
+ * Every data path names its direction because this takes one: a routine
+ * that moved data without saying which way could not be written.
+ */
+static struct blk_handle *
+blk_handle_for(mach_port_t device, dev_mode_t dir)
 {
 	struct blk_handle *h = blk_authed_handle(device);
+
+	if (h == NULL)
+		return NULL;
+	if ((h->mode & dir) != dir && !BLK_ABLATE_614_NO_MODE_CHECK) {
+		if (!h->said_mode) {
+			h->said_mode = 1;
+			printf("blk: %s: a %s on a handle opened without %s, "
+			       "refused (#614)\n", h->part->name,
+			       dir == D_WRITE ? "write" : "read",
+			       dir == D_WRITE ? "D_WRITE" : "D_READ");
+		}
+		return NULL;
+	}
+	return h;
+}
+
+static struct blk_partition *
+blk_part_from_authed_handle(mach_port_t device, dev_mode_t dir)
+{
+	struct blk_handle *h = blk_handle_for(device, dir);
 
 	return h ? h->part : NULL;
 }
@@ -339,7 +370,23 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	struct uros_cap token;
 	memcpy(&token, token_blob, sizeof(token));
 
-	uint32_t op = CAP_OP_BLK_READ | CAP_OP_BLK_WRITE;
+	/*
+	 * #614: the token is asked for what the mode needs.  It was asked for
+	 * reading AND writing whatever the mode, so a client holding a read-only
+	 * capability was refused even a read-only open -- a policy giving a task
+	 * read access to a disk could be expressed by cap_server and not obeyed
+	 * here.  The handle keeps the mode, and every transfer checks it
+	 * (blk_handle_for()): relaxing the open alone would have let a read-only
+	 * token write.
+	 */
+	uint32_t op = 0;
+
+	if (mode & D_READ)
+		op |= CAP_OP_BLK_READ;
+	if (mode & D_WRITE)
+		op |= CAP_OP_BLK_WRITE;
+	if (op == 0)
+		return D_INVALID_OPERATION;	/* an open for neither direction */
 
 	/*
 	 * Per Issue #184 a partition is reachable under two names: the
@@ -382,6 +429,7 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	h->part      = part;
 	h->cap_id    = token.cap_id;
 	h->revoked   = 0;
+	h->mode      = mode & (D_READ | D_WRITE);	/* #614 */
 
 	mach_port_t hport = MACH_PORT_NULL;
 	kr = mach_port_allocate(mach_task_self(),
@@ -482,7 +530,7 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 	       io_buf_len_t bytes_wanted,
 	       io_buf_ptr_t *data, mach_msg_type_number_t *data_count)
 {
-	struct blk_partition *part = blk_part_from_authed_handle(device);
+	struct blk_partition *part = blk_part_from_authed_handle(device, D_READ);
 	if (!part)
 		return KERN_NO_ACCESS;
 	struct blk_controller *ctrl = part->ctrl;
@@ -649,7 +697,7 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		io_buf_ptr_t data, mach_msg_type_number_t data_count,
 		io_buf_len_t *bytes_written)
 {
-	struct blk_partition *part = blk_part_from_authed_handle(device);
+	struct blk_partition *part = blk_part_from_authed_handle(device, D_WRITE);
 	if (!part) {
 		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 		return KERN_NO_ACCESS;
@@ -719,7 +767,7 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 		      mach_msg_type_number_t data_count,
 		      io_buf_len_t *bytes_written)
 {
-	struct blk_partition *part = blk_part_from_authed_handle(device);
+	struct blk_partition *part = blk_part_from_authed_handle(device, D_WRITE);
 	if (!part) {
 		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 		return KERN_NO_ACCESS;
@@ -859,7 +907,7 @@ ds_device_register_dma(mach_port_t device, mach_port_t reply,
 		       mach_msg_type_name_t reply_poly,
 		       char *token, mach_msg_type_number_t tokenCnt)
 {
-	struct blk_handle	*h = blk_authed_handle(device);
+	struct blk_handle	*h = blk_authed_handle(device);	/* #614: moves no data, so no direction */
 	struct uros_cap		t;
 	kern_return_t		kr;
 	unsigned int		i;
@@ -1461,7 +1509,7 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		    mach_msg_type_number_t phys_addrsCnt,
 		    io_buf_len_t *bytes_read)
 {
-	struct blk_handle *h = blk_authed_handle(device);
+	struct blk_handle *h = blk_handle_for(device, D_READ);
 	if (!h)
 		return KERN_NO_ACCESS;
 	struct blk_partition *part = h->part;
@@ -1539,7 +1587,7 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		     mach_msg_type_number_t phys_addrsCnt,
 		     io_buf_len_t *bytes_written)
 {
-	struct blk_handle *h = blk_authed_handle(device);
+	struct blk_handle *h = blk_handle_for(device, D_WRITE);
 	if (!h)
 		return KERN_NO_ACCESS;
 	struct blk_partition *part = h->part;

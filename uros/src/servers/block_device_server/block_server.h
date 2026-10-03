@@ -36,6 +36,7 @@
 #include <pci_bar.h>		/* #427: struct pci_bar_region */
 #include <mach/mach_types.h>
 #include <mach/cap_types.h>	/* struct uros_cap in a handle, #599 */
+#include <device/device_types.h>	/* dev_mode_t in a handle, #614 */
 #include <stdint.h>
 
 /* ================================================================
@@ -326,6 +327,14 @@ struct blk_handle {
 	natural_t		payload;	/* names it to blk_object_for() */
 	uint64_t		cap_id;		/* matched against cap_revoke_notify */
 	int			revoked;	/* set by blk_cap_revoke_notify (#183) */
+	/*
+	 * #614: what the handle was opened for, D_READ and D_WRITE as the open
+	 * asked them -- the token was checked for exactly those, so a transfer
+	 * in a direction not named here holds no right to it.  said_mode keeps
+	 * the refusal to one line a handle.
+	 */
+	dev_mode_t		mode;
+	int			said_mode;
 	struct blk_handle	*next;		/* linked-list link, head in block_device.c */
 
 	/*
