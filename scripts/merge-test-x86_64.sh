@@ -95,8 +95,11 @@ ENTRIES="
 26 harness
 27 harness
 28 harness
+3 harness
 3 harness - 1
+4 harness
 4 harness - 1
+20 harness
 20 harness - 1
 "
 
@@ -107,7 +110,6 @@ SKIPPED="
 11: -rL opens the debugger's prompt on a thread with a continuation and waits
 12: -rS stays up for the console door and never ends
 19: -B panics on purpose; it needs a verdict of its own
-3, 4, 20 at more than one processor: the clock burn-in panics there, #612
 "
 
 judge() {	# entry verdict log-of-the-harness full-log
