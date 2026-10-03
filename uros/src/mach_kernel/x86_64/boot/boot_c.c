@@ -520,6 +520,15 @@ static void bootmem_selftest(uint32_t info)
 }
 
 /*
+ * #612: the self-tests that map in the VM's range leave their pages there
+ * again (map_selftest, tlb_shootdown_selftest), for pmap_virtual_space() to
+ * name.
+ */
+#ifndef	ABLATE_612_LEAVE_MAPPED
+#define	ABLATE_612_LEAVE_MAPPED	0
+#endif
+
+/*
  * Map a page where the walk just proved nothing was mapped, then establish
  * that it is really there — by writing through the new address and finding
  * the value on the physical frame via the direct map, and by having the walk
@@ -573,6 +582,22 @@ static void map_selftest(void)
 	kputs("UrMach x86-64: map over a large page ");
 	kputs(rc == PMAP_MAP_BLOCKED ? "correctly refused\r\n"
 				     : "NOT refused?!\r\n");
+
+	/*
+	 * 🔴 And gone again, frame and all (#612).  KERNEL_HEAP_BASE is the
+	 * first address pmap_virtual_space() gives the VM, and the page stayed:
+	 * pmap_steal_memory()'s first pmap_enter() replaced it, which at more
+	 * than one processor is a cross-call before the kernel has a thread.
+	 * pmap_virtual_space() now says what it finds there.
+	 */
+	if (ABLATE_612_LEAVE_MAPPED)
+		return;
+	pmap_unmap_page(PMAP_NULL, va, 0);
+	kputs("UrMach x86-64: unmapped again, ");
+	kputs(pmap_walk(root, va, 0) == PT_ENTRY_NULL
+	      ? "the walk finds nothing -- the frame goes back\r\n"
+	      : "STILL MAPPED -- the VM will find it\r\n");
+	boot_frame_free(frame);
 }
 
 /*
