@@ -61,7 +61,18 @@
 #include <cpu/regs.h>			/* cpu_pause */
 #include <pmap/pmap.h>
 
-#define	RCU_BENCH_SECONDS	2	/* the busy run: two hundred ticks */
+/*
+ * 🔴 PACED, AND THE PACE IS PART OF THE QUESTION.  The first version created
+ * and destroyed as fast as it could: under KVM it made 4096 spaces in one
+ * millisecond, less than a tick, before any grace period could end -- and hit
+ * the limit with the drain thread and without it alike.  It was measuring how
+ * fast a loop can call pmap_destroy(), which no drain whose latency is a tick
+ * or two can match and none needs to.  So: RCU_BENCH_PER_TICK spaces, then a
+ * tick asleep, for RCU_BENCH_TICKS ticks.  While this thread sleeps, the
+ * spinner bound to its processor holds it, so the machine stays busy.
+ */
+#define	RCU_BENCH_TICKS		200	/* the busy run, about two seconds */
+#define	RCU_BENCH_PER_TICK	20	/* spaces created and destroyed a tick */
 #define	RCU_BENCH_LIMIT		4096	/* waiting at once: the run stops */
 
 static volatile int		rcu_bench_stop;
@@ -142,9 +153,9 @@ void
 rcu_busy_bench(void)
 {
 	uint64_t	hz = tsc_hz(), t0, ms;
-	uint32_t	want = 0, made = 0, most = 0, waiting = 0;
+	uint32_t	want = 0, made = 0, most = 0, waiting = 0, tick, k;
 	unsigned	q0, ri0, rt0, q1, r1, ri1, rt1, after;
-	boolean_t	limit_hit = FALSE;
+	boolean_t	limit_hit = FALSE, create_failed = FALSE;
 	int		i;
 
 	if (hz == 0) {
@@ -191,24 +202,27 @@ rcu_busy_bench(void)
 	rt0 = urmach_rcu_retired_thread;
 
 	t0 = rdtsc();
-	while (rdtsc() - t0 < hz * RCU_BENCH_SECONDS) {
-		pmap_t	p = pmap_create(0);
+	for (tick = 0; tick < RCU_BENCH_TICKS && !limit_hit && !create_failed;
+	     tick++) {
+		for (k = 0; k < RCU_BENCH_PER_TICK; k++) {
+			pmap_t	p = pmap_create(0);
 
-		if (p == PMAP_NULL) {
-			printf("rcu_bench: pmap_create failed after %u spaces\n",
-			       (unsigned) made);
-			break;
-		}
-		pmap_destroy(p);
-		made++;
+			if (p == PMAP_NULL) {
+				create_failed = TRUE;
+				break;
+			}
+			pmap_destroy(p);
+			made++;
 
-		waiting = urmach_rcu_queued - urmach_rcu_retired;
-		if (waiting > most)
-			most = waiting;
-		if (waiting >= RCU_BENCH_LIMIT) {
-			limit_hit = TRUE;
-			break;
+			waiting = urmach_rcu_queued - urmach_rcu_retired;
+			if (waiting > most)
+				most = waiting;
+			if (waiting >= RCU_BENCH_LIMIT) {
+				limit_hit = TRUE;
+				break;
+			}
 		}
+		mutex_pause();
 	}
 	ms = (rdtsc() - t0) * 1000 / hz;
 
@@ -231,7 +245,10 @@ rcu_busy_bench(void)
 	       "the end\n", q1 - q0, rt1 - rt0, ri1 - ri0,
 	       (unsigned) most, (unsigned) waiting);
 
-	if (ri1 != ri0)
+	if (create_failed)
+		printf("rcu_bench: WRONG — pmap_create() failed after %u "
+		       "spaces (#608)\n", (unsigned) made);
+	else if (ri1 != ri0)
 		printf("rcu_bench: NOT ASKED — the idle loop handed back %u "
 		       "during the run, so a processor idled and the drain "
 		       "thread was not the only way out (#563)\n", ri1 - ri0);
