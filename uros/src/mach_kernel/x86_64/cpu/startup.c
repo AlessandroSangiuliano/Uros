@@ -522,6 +522,15 @@ machine_processors_ready(void)
 		if (boot_flag('M'))
 			pmap_collect_bench();
 
+		/*
+		 * -R: the RCU queue with every processor kept busy (#608).
+		 * Here for the same reason as -M: the spinners are bound to
+		 * processors already in the scheduler.  Off the ordinary boot
+		 * because it holds every processor for two seconds.
+		 */
+		if (boot_flag('R'))
+			rcu_busy_bench();
+
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
 #endif
