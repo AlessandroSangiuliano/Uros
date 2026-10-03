@@ -7024,7 +7024,29 @@ static void tlb_shootdown_selftest(void)
 	      ? " see the new page — every processor let go of it\r\n"
 	      : " see the new page — WRONG\r\n");
 
-	pmap_remove(pmap_kernel(), probe.va, PAGE_SIZE_4K);
+	/*
+	 * 🔴 Taken down, both frames back (#612).  This was
+	 * `pmap_remove(pmap_kernel(), probe.va, PAGE_SIZE_4K)': a size where
+	 * the end belongs, an end below the start, so nothing was removed, and
+	 * the page stayed in the VM's range for the VM to find.
+	 *
+	 * ⚠️ The entry goes back to old_frame first.  Step 2 repointed it by
+	 * hand, and the pv index still says old_frame is mapped here -- it is
+	 * what pmap_enter() recorded.  pmap_remove() strikes from the index the
+	 * frame the entry names, so with new_frame there it would look for an
+	 * index entry that never existed and leave old_frame's behind.
+	 */
+	if (ABLATE_612_LEAVE_MAPPED)
+		return;
+	*entry = pa_to_pte(old_frame) | (*entry & ~INTEL_PTE_PFN);
+	pmap_remove(pmap_kernel(), probe.va, probe.va + PAGE_SIZE_4K);
+	kputs("UrMach x86-64: shootdown probe taken down, ");
+	kputs(pmap_walk(root, probe.va, 0) == PT_ENTRY_NULL
+	      && pv_count(old_frame) == 0 && pv_count(new_frame) == 0
+	      ? "no entry and no index entry left -- both frames go back\r\n"
+	      : "WRONG -- an entry or an index entry is left\r\n");
+	boot_frame_free(old_frame);
+	boot_frame_free(new_frame);
 }
 
 /*
