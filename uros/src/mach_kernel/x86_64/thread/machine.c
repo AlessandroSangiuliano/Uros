@@ -254,6 +254,11 @@ thread_begin_trampoline(void *unused)
 	/*NOTREACHED*/
 }
 
+/* #616's ablation: every thread gets a user frame again, kernel threads too. */
+#ifndef	ABLATE_616_KERNEL_FRAME
+#define	ABLATE_616_KERNEL_FRAME	0
+#endif
+
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -390,10 +395,21 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * ⚠️ The address is derived and not chosen; trap.h's KERNEL_STACK_USER_FRAME
 	 * says why, and act_machine_set_state() below uses the same expression
 	 * because it is the same claim about the same bytes.
+	 *
+	 * 🔴 FOR A THREAD OF A USER TASK ONLY (#616).  A kernel thread never
+	 * reaches ring 3, so it keeps pcb_init()'s honest state -- no frame --
+	 * and thread_get_state() refuses it, where a zeroed frame answered as
+	 * its registers: "a thread stopped at address zero, which is a lie a
+	 * debugger would repeat".  The loader asks about a user thread that has
+	 * not run yet, and that one still has its frame.  Given to every thread
+	 * from #422 on, and state_test's check on it -- written five days
+	 * before -- failed unseen until #615 ran entry 7.
 	 */
-	pcb->user = (struct trap_frame *)
-		KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
-	thread_frame_init(pcb->user);
+	if (thr_act->task != kernel_task || ABLATE_616_KERNEL_FRAME) {
+		pcb->user = (struct trap_frame *)
+			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+		thread_frame_init(pcb->user);
+	}
 
 	return KERN_SUCCESS;
 }
