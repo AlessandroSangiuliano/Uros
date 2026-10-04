@@ -57,6 +57,10 @@
 #include <cpu/smp.h>			/* real_ncpus */
 #include <power_save.h>
 #include <sync/barrier.h>
+#include <cpu/percpu.h>		/* #526: raised_by, raised_on */
+#include <cpu/spl.h>			/* #526: splget */
+#include <ddb/ksym.h>			/* #526: the raise, by name */
+#include <kern/misc_protos.h>		/* printf */
 
 /*
  * How many fruitless passes of the idle loop before halting.
@@ -87,10 +91,55 @@ struct idle_state {
 	uint32_t		dry;
 	uint64_t		naps;		/* times this one halted */
 	uint64_t		knocks;		/* doorbells this one sent */
-	uint8_t			pad[64 - 24];
+	uint32_t		said_level;	/* #526: said once */
+	uint8_t			pad[64 - 28];
 } __attribute__((aligned(64)));
 
 static struct idle_state idle_state[NCPUS];
+
+/*
+ * 🔴 An idle processor whose level is above zero (#526).
+ *
+ * The idle loop restores the level it finds -- `s = splsched(); ... splx(s)'
+ * -- and does not force zero, and the check that would have said so is under
+ * `#if 0' in kern/sched_prim.c.  A level that reaches it at SPLHI stays
+ * there: the processor's own tick is deferred for ever, and when that
+ * processor is the master, timeout_tick() never runs again and every timed
+ * wait in the machine sleeps for good.  That is how #526's boots stopped,
+ * read on a live kernel: processor 0 idle at 14, the tick pending,
+ * timeout_ticks frozen.
+ *
+ * So the first time a processor comes here above zero, it says so, with the
+ * raise from zero that was never lowered (splx() keeps it in raised_by).
+ * Said rather than mended: lowering the level here would let the boot go on
+ * and leave the path that leaked it unknown.
+ */
+static void
+idle_say_level(int mycpu, struct idle_state *st)
+{
+	struct percpu	*p = percpu();
+	spl_t		level = splget();
+	const char	*nm;
+	uint64_t	off = 0;
+
+	if (level == SPL0 || st->said_level)
+		return;
+	st->said_level = 1;
+
+	nm = ksym_lookup_call(p->raised_by, &off);
+	if (nm != 0)
+		printf("idle: processor %d idles at level %u, which defers its "
+		       "own tick -- WRONG; the level was raised from zero by "
+		       "%s+0x%lx on thread %p and never lowered (#526)\n",
+		       mycpu, (unsigned) level, nm, (unsigned long) off,
+		       p->raised_on);
+	else
+		printf("idle: processor %d idles at level %u, which defers its "
+		       "own tick -- WRONG; the level was raised from zero at "
+		       "%p on thread %p and never lowered (#526)\n", mycpu,
+		       (unsigned) level, (void *)(uintptr_t) p->raised_by,
+		       p->raised_on);
+}
 
 void
 machine_idle(int mycpu)
@@ -118,6 +167,9 @@ machine_idle(int mycpu)
 	 * script.
 	 */
 	quiet_census_pass(mycpu);
+
+	/* #526: and whether this processor came here with its level raised. */
+	idle_say_level(mycpu, st);
 
 	/*
 	 * #599: refusals an engine recorded are no longer read here.  A

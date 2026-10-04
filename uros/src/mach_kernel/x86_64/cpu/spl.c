@@ -152,6 +152,12 @@ spl_t splx(spl_t level)
 	if (level == old)
 		return old;
 
+	/* #526: a raise from zero, recorded for the idle loop to name. */
+	if (old == SPL0) {
+		p->raised_by = (uint64_t)(uintptr_t) __builtin_return_address(0);
+		p->raised_on = p->active_thread;
+	}
+
 	/*
 	 * The level and the queue are this processor's, but an interrupt
 	 * arriving between reading one and writing the other would see a state

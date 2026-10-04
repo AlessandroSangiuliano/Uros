@@ -309,6 +309,17 @@ struct percpu {
 	 */
 	uint64_t user_returns;
 
+	/*
+	 * #526: the last raise of this processor's level from zero -- where it
+	 * was asked for, and on which thread.  A level left raised never comes
+	 * back to zero, so after such a leak no later raise from zero overwrites
+	 * these: they name the raise that was never lowered.  Per processor
+	 * because splx() writes them, on a path #392 measured; after the
+	 * asserted fields so that no offset the assembly knows moves.
+	 */
+	uint64_t raised_by;
+	void	*raised_on;
+
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is
