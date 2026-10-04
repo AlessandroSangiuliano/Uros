@@ -111,6 +111,8 @@ option(UROS_ABLATE_526_IDLE_RESTORES "Build the #526 ablation: the idle loop res
 # #617, x86_64: a TEST option, not an ablation -- the window in thread_return_ast() widened, so
 # that the test can show what happens inside it with the fix and without.
 option(UROS_WIDEN_617_WINDOW "Build for #617's test: a thread making its first return to ring 3 spins for 50 us between reading its processor's number and reading that processor's AST word (with the window open, pthread_test [31] loses its embryo threads to ring 3)" OFF)
+# #617, x86_64: thread_return_ast() takes its last look with interrupts on again.
+option(UROS_ABLATE_617_RETURN_AST "Build the #617 ablation: thread_return_ast() checks need_ast with interrupts on, so a thread preempted between reading its processor's number and that processor's AST word reads another's (with UROS_WIDEN_617_WINDOW, pthread_test [31] must lose embryos to ring 3 and the return check say WRONG)" OFF)
 # #526, x86_64: splx() finds the per-CPU block before it turns interrupts off again.
 option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this processor's block with interrupts still on, so a thread preempted at level zero finishes its raise in the block of the processor it left (x86-64 -E, GRUB entry 30: must say WRONG)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
@@ -679,6 +681,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_526_IDLE_RESTORES)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_526_IDLE_RESTORES=1)
       message(STATUS "#526 ablation: the idle loop restores the level it found (x86_64)")
+  endif()
+  if(UROS_ABLATE_617_RETURN_AST)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_617_RETURN_AST=1)
+      message(STATUS "#617 ablation: thread_return_ast() looks with interrupts on (x86_64)")
   endif()
   if(UROS_WIDEN_617_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE WIDEN_617_WINDOW=1)

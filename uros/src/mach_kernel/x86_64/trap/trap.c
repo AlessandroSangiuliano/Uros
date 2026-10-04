@@ -69,6 +69,15 @@
 #define WIDEN_617_WINDOW	0
 #endif
 #define	WIDEN_617_US		50
+/*
+ * #617: the switch that puts the old thread_return_ast() back -- its check
+ * made with interrupts on, so a thread preempted between reading its
+ * processor's number and reading that processor's AST word resumes elsewhere
+ * and reads the word of the processor it left.
+ */
+#ifndef ABLATE_617_RETURN_AST
+#define ABLATE_617_RETURN_AST	0
+#endif
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -1267,6 +1276,32 @@ trap_take_ast(struct trap_frame *frame)
  * If the handler blocks instead of returning, this stack is discarded and the
  * thread resumes at its continuation -- thread_bootstrap_return, which arrives
  * back here.  Either road ends with nothing pending.
+ *
+ * 🔴 THE LAST LOOK IS TAKEN WITH INTERRUPTS OFF, AND THEY STAY OFF (#617).
+ *
+ * need_ast[cpu_number()] is two reads, the processor's number and then its
+ * word, and they were made at level zero with interrupts on -- where this
+ * kernel preempts, and a preempted thread may resume on any processor.  One
+ * preempted between the two read the word of the processor it had left.
+ * Caught live under TCG, where in one build the second read crossed a page
+ * boundary and so began a translation block of its own: an embryo from
+ * thread_create(), which takes its first AST_APC here to suspend itself,
+ * found nothing in the other processor's word and went to ring 3 with a
+ * frame of zeros.  Its task died of a fault at address 0 while its creator
+ * waited in thread_stop_wait() for it to stop -- and that wait is what
+ * preempts it there: thread_stop() sets TH_SUSP and thread_wait() knocks.
+ *
+ * With interrupts off nothing can take the thread away between the two
+ * reads, and an AST another processor raises after the last look waits, as
+ * an interrupt, until iretq has put the thread in ring 3, where it is taken
+ * on the way back.  i386 never needed this: its kernel does not preempt.
+ *
+ * ⚠️ So this RETURNS WITH INTERRUPTS OFF, and its callers count on it: the
+ * three tails in trap/entry.S go to iretq through act_user_frame, which
+ * does not block, and reach swapgs with the flag still clear -- an interrupt
+ * between swapgs and iretq would find a ring-0 frame and the user's %gs; the
+ * syscall return clears it itself a few instructions later; trap_take_ast()
+ * was called with it clear and goes back to an interrupt return.
  */
 /*
  * #617: a return to ring 3 that leaves with an AST still pending on the
@@ -1342,12 +1377,16 @@ thread_return_ast(void)
 	int	cpu;
 
 	for (;;) {
+		if (!ABLATE_617_RETURN_AST)
+			interrupts_disable();
 		cpu = cpu_number();
 #if	WIDEN_617_WINDOW
 		return_ast_widen();
 #endif
 		if ((need_ast[cpu] & AST_ALL) == 0)
 			break;
+		if (!ABLATE_617_RETURN_AST)
+			interrupts_enable();
 		ast_taken(FALSE, AST_ALL, splsched());
 	}
 	return_ast_check(cpu);
