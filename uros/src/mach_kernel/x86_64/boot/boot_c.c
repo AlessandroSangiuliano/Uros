@@ -1084,6 +1084,21 @@ static void wx_selftest(void)
 		      : (cr4 & CR4_SMAP) ? "on" : "OFFERED BUT OFF");
 		kputs((on & cr4) == on ? "\r\n" : " MISMATCH\r\n");
 	}
+
+	/*
+	 * Global pages (#437), after the image is split and narrowed: the
+	 * kernel half's translations now survive a CR3 load, and every
+	 * whole-TLB flush has to reach them -- tlb_flush_local_all() and
+	 * pmap_pat_install() do.  The census (#639) asks the others for it.
+	 */
+	{
+		uint64_t on = pmap_enable_global_pages();
+
+		kputs("UrMach x86-64: global pages ");
+		kputs(!cpu_has_pge() ? "not offered by this cpu\r\n"
+		      : (read_cr4() & CR4_PGE) && on ? "on\r\n"
+		      : "OFFERED BUT OFF\r\n");
+	}
 }
 
 /*

@@ -142,12 +142,13 @@ void ap_start_c(uint32_t apic_id)
 	 * Clearing both is the architecture's whole recipe for turning caching
 	 * on: nothing can be dirty in a cache that never filled.
 	 *
-	 * Then CR0.WP, SMEP and SMAP, as the boot processor turned them on:
-	 * every boot until this ran three of four processors without them.
+	 * Then CR0.WP and the CR4 bits, as the boot processor turned them on
+	 * (SMEP, SMAP, and PGE for #437): every boot until this ran three of
+	 * four processors without the first three.
 	 */
 	if (!ABLATE_639_AP_CONTROL) {
 		write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
-		pmap_protections_here();
+		pmap_control_regs_here();
 	}
 
 	/* Per-CPU state; nothing below is shared with another processor. */

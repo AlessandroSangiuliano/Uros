@@ -539,6 +539,20 @@ static inline int cpu_has_cmpxchg16b(void)
  * clac — for the places the kernel really does mean to touch user memory.
  * Nothing needs it yet: no mapping this kernel makes sets the user bit.
  */
+/*
+ * Whether this processor honours the global bit (#437): CPUID.1:EDX[13].
+ * Every long-mode processor built has it, and it is asked anyway, the way
+ * SMEP below is, so that a model without it gets today's TLB and not a
+ * CR4 write that faults.
+ */
+static inline int cpu_has_pge(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (d & (1U << 13)) != 0;
+}
+
 static inline int cpu_has_smep(void)
 {
 	uint32_t a, b, c, d;

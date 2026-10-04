@@ -1103,7 +1103,7 @@ static uint64_t device_next = DEVICE_MAP_BASE;
 
 static void pmap_pat_install(uint64_t pat)
 {
-	uint64_t cr0, cr3;
+	uint64_t cr0, cr3, cr4;
 
 	/*
 	 * The sequence the SDM gives for changing a memory-type register, and
@@ -1121,14 +1121,28 @@ static void pmap_pat_install(uint64_t pat)
 	cr0 = read_cr0();
 	write_cr0((cr0 & ~CR0_NW) | CR0_CD);	/* no-fill cache mode */
 	wbinvd();
+
+	/*
+	 * ⚠️ The flush the SDM names depends on CR4.PGE (#437).  With global
+	 * pages on, a CR3 reload leaves every global entry where it is, carrying
+	 * the old memory type: PGE is cleared instead, which discards them all,
+	 * and stays clear until the table is in, so that no new global entry is
+	 * made in between.  With it off, the reload is the whole flush.
+	 */
 	cr3 = read_cr3();
-	write_cr3(cr3);				/* flush the TLB */
+	cr4 = read_cr4();
+	if (cr4 & CR4_PGE)
+		write_cr4(cr4 & ~CR4_PGE);
+	else
+		write_cr3(cr3);			/* flush the TLB */
 
 	wrmsr(IA32_PAT_MSR, pat);
 
 	wbinvd();
-	write_cr3(cr3);
+	write_cr3(cr3);				/* PGE clear here: everything */
 	write_cr0(cr0);
+	if (cr4 & CR4_PGE)
+		write_cr4(cr4);
 
 	__asm__ volatile("sti" : : : "memory");
 }
@@ -1628,10 +1642,10 @@ extern char __kdata_start[], __kernel_end[];
 
 /*
  * What the boot processor turned on, for every other processor to apply on its
- * own way up: pmap_protections_here() (#639).
+ * own way up: pmap_control_regs_here() (#639, #437).
  */
 static int pmap_wp_on;
-static uint64_t pmap_cr4_protections;
+static uint64_t pmap_cr4_on;
 
 void pmap_protect_kernel(void)
 {
@@ -1719,17 +1733,27 @@ uint64_t pmap_enable_smep_smap(void)
 		pmap_smap_on = 1;
 	}
 
-	pmap_cr4_protections = want;
+	pmap_cr4_on |= want;
 	if (want)
 		write_cr4(read_cr4() | want);
 
 	return want;
 }
 
-void pmap_protections_here(void)
+uint64_t pmap_enable_global_pages(void)
+{
+	if (!cpu_has_pge())
+		return 0;
+
+	pmap_cr4_on |= CR4_PGE;
+	write_cr4(read_cr4() | CR4_PGE);
+	return CR4_PGE;
+}
+
+void pmap_control_regs_here(void)
 {
 	if (pmap_wp_on)
 		write_cr0(read_cr0() | CR0_WP);
-	if (pmap_cr4_protections != 0)
-		write_cr4(read_cr4() | pmap_cr4_protections);
+	if (pmap_cr4_on != 0)
+		write_cr4(read_cr4() | pmap_cr4_on);
 }
