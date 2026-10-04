@@ -1480,6 +1480,7 @@ static void wx_enforcement_selftest(void)
 	wx_data_probe = 0;
 	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
 	refused = trap_probe_write(rw);
+	trap_expect_cancel();		/* the control does not fault (#639) */
 
 	kputs("UrMach x86-64: the same probe on .bss ");
 	kputs(!refused && wx_data_probe == TRAP_PROBE_PATTERN

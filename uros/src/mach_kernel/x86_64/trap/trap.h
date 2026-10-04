@@ -367,6 +367,17 @@ int trap_in_replay(void);
 void trap_expect(uint64_t vector, uint64_t resume_rip);
 
 /*
+ * Withdraw an expectation that did not fire.
+ *
+ * A probe armed for a fault that the machine then allowed -- the control half
+ * of a protection test, or a protection that is off -- leaves the expectation
+ * standing, and the next real fault of that vector, anywhere, would be taken
+ * for it and resumed at the probe's address.  The tests that left one standing
+ * were safe only because the next test armed again and fired (#639).
+ */
+void trap_expect_cancel(void);
+
+/*
  * Resume at the instruction the trap arrived on, rather than somewhere else.
  *
  * For the faults trap_expect() was written for, resuming where they happened
