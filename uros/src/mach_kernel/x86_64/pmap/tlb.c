@@ -23,6 +23,8 @@
 struct tlb_request {
 	uint64_t va;
 	uint64_t size;		/* zero means everything */
+	uint64_t ctx_id;	/* #412: the user space it is for, or 0 */
+	uint64_t gen;		/* #412: the generation it brings that space to */
 };
 
 static struct answer_count served;
@@ -53,6 +55,18 @@ void tlb_flush_local_all(void)
 	 * own answer for this.  One read of a control register to be right in
 	 * both worlds.
 	 */
+	/*
+	 * #412: with INVPCID, one instruction that discards every PCID's
+	 * entries and the global ones, instead of two CR4 writes.  Without it
+	 * the PGE toggle below already reaches every PCID: a CR4 write that
+	 * changes PGE flushes the whole TLB, whatever CR3 names.
+	 */
+	if (pmap_pcid_mode == PMAP_PCID_INVPCID
+	    && !ABLATE_437_FLUSH_KEEPS_GLOBALS) {
+		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
+		return;
+	}
+
 	if ((cr4 & CR4_PGE) && !ABLATE_437_FLUSH_KEEPS_GLOBALS) {
 		write_cr4(cr4 & ~CR4_PGE);
 		write_cr4(cr4);
@@ -87,11 +101,72 @@ void tlb_flush_local_range(uint64_t va, uint64_t size)
 	}
 }
 
+/* Whether a range is flushed page by page, the way tlb_flush_local_range() decides. */
+static int tlb_range_by_pages(uint64_t va, uint64_t size)
+{
+	uint64_t pages = (((va & (PAGE_SIZE_4K - 1)) + size) + PAGE_SIZE_4K - 1)
+			 / PAGE_SIZE_4K;
+
+	return size != 0 && pages <= TLB_FLUSH_PAGE_LIMIT;
+}
+
+/*
+ * One request, on this processor: the local half of a shootdown, and the
+ * whole of what the handler does.
+ *
+ * A kernel-half request (ctx_id 0), or any request without PCID, is the flush
+ * it always was: kernel entries are global, and invlpg reaches a global entry
+ * in every PCID.  A user space's request concerns this processor only if that
+ * space is the one CR3 names -- asked of CR3 and not of loaded_pmap, which runs
+ * ahead of CR3 for a few instructions inside pmap_activate().  Then it brings
+ * that PCID's generation forward:
+ *
+ *   - by the range alone, if it is the very next generation;
+ *   - by discarding the whole PCID, if a generation in between has not
+ *     arrived yet.  Two shootdowns of one space can reach a processor in
+ *     either order, and advancing past one whose pages were never flushed
+ *     here is how a stale entry would come to be trusted (#412).
+ *
+ * A space this processor only caches is left alone: its slot is behind the
+ * space's generation, and the next switch into it discards its entries.
+ * Interrupts off, so that a request landing in the middle cannot see the slot
+ * and CR3 disagree either.
+ */
+static void tlb_flush_request_here(const struct tlb_request *r)
+{
+	struct percpu	*pc;
+	uint64_t	 pcid, *gen;
+	int		 was;
+
+	if (r->ctx_id == 0 || pmap_pcid_mode == PMAP_PCID_OFF) {
+		tlb_flush_local_range(r->va, r->size);
+		return;
+	}
+
+	was = interrupts_enabled();
+	interrupts_disable();
+
+	pc = percpu();
+	pcid = read_cr3() & CR3_PCID_MASK;
+	if (pcid != 0 && pcid <= PCID_SLOTS
+	    && pc->pcid_slot[pcid - 1].ctx_id == r->ctx_id) {
+		gen = &pc->pcid_slot[pcid - 1].gen;
+		if (*gen + 1 == r->gen && tlb_range_by_pages(r->va, r->size)) {
+			tlb_flush_local_range(r->va, r->size);
+			*gen = r->gen;
+		} else if (*gen < r->gen) {
+			write_cr3(read_cr3());	/* this PCID, globals kept */
+			*gen = r->gen;
+		}
+	}
+
+	if (was)
+		interrupts_enable();
+}
+
 static void tlb_flush_handler(void *arg)
 {
-	const struct tlb_request *r = arg;
-
-	tlb_flush_local_range(r->va, r->size);
+	tlb_flush_request_here(arg);
 	answer_count_mark(&served);
 }
 
@@ -133,7 +208,7 @@ static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
 		disable_preemption();
 	}
 
-	tlb_flush_local_range(r->va, r->size);
+	tlb_flush_request_here(r);
 
 #if	WIDEN_638_WINDOW
 	if (ABLATE_638_FLUSH_UNPINNED)
@@ -156,7 +231,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * one reason: the cross-call does not return until every one of them
 	 * has finished with it, so this frame outlives every reader of it.
 	 */
-	struct tlb_request r = { va, size };
+	struct tlb_request r = { va, size, 0, 0 };
 
 	uint64_t using;
 
@@ -227,6 +302,23 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * A processor LEAVING after this load still gets its interrupt and
 	 * flushes something it no longer needs, which costs a message.
 	 */
+	/*
+	 * 🔴 THE GENERATION FIRST, THEN THE SET (#412).  A processor switching
+	 * into this space joins cpus_using and then reads tlb_gen; this side
+	 * increments tlb_gen and then reads cpus_using.  Both are locked
+	 * operations, full barriers here, so at least one side sees the other:
+	 * either the switch finds the new generation and discards the space's
+	 * entries, or this shootdown finds the processor and interrupts it.
+	 * Reading the set first would let a processor slip between the two,
+	 * keep its stale entries, and never be told -- FreeBSD shipped that
+	 * order once (EN-22:04).  Without PCID the generation is never read,
+	 * and is not touched.
+	 */
+	if (pmap_pcid_mode != PMAP_PCID_OFF) {
+		r.ctx_id = pmap->ctx_id;
+		r.gen = atomic_add64(&pmap->tlb_gen, 1) + 1;
+	}
+
 	using = atomic_load64(&pmap->cpus_using);
 
 	/*

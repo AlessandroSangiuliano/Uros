@@ -767,11 +767,65 @@ void pmap_activate_boot(pmap_t pmap)
 		write_cr3(pmap->root_pa);
 }
 
+#ifndef	ABLATE_412_GEN_CHECK
+#define	ABLATE_412_GEN_CHECK	0
+#endif
+
+/*
+ * The CR3 that loads `pmap' on this processor (#412).  Called with interrupts
+ * off and after this processor has joined pmap->cpus_using; see pmap.h's
+ * tlb_gen for why that order.
+ *
+ * Without PCID, and for the kernel's own space, PCID 0 and no keeping:
+ * exactly the load this kernel always did.  Otherwise the space's slot:
+ *
+ *   found, and its generation is the space's -> keep (CR3_NOFLUSH): every
+ *	change since this processor last flushed it has reached it;
+ *   found, but behind -> load without keeping, which discards this PCID's
+ *	entries, and the slot is current again;
+ *   not found -> the next slot round the ring changes hands, and the load
+ *	discards whatever the previous owner left under that PCID.
+ *
+ * A PCID therefore changes owner only here, on this processor, with its
+ * entries discarded in the same instruction -- there is no path by which one
+ * space's entries reach another, and none that needs every processor's
+ * agreement.  UROS_ABLATE_412_GEN_CHECK keeps a found slot's entries whatever
+ * its generation says.
+ */
+static uint64_t pmap_cr3_for(struct percpu *pc, pmap_t pmap)
+{
+	uint64_t gen;
+	unsigned s;
+
+	if (pmap_pcid_mode == PMAP_PCID_OFF || pmap == pmap_kernel())
+		return pmap->root_pa;
+
+	gen = atomic_load64(&pmap->tlb_gen);
+	for (s = 0; s < PCID_SLOTS; s++)
+		if (pc->pcid_slot[s].ctx_id == pmap->ctx_id)
+			break;
+
+	if (s == PCID_SLOTS) {
+		s = pc->pcid_victim;
+		pc->pcid_victim = (s + 1) % PCID_SLOTS;
+		pc->pcid_slot[s].ctx_id = pmap->ctx_id;
+		pc->pcid_slot[s].gen = gen;
+		return pmap->root_pa | (s + 1);
+	}
+
+	if (pc->pcid_slot[s].gen >= gen || ABLATE_412_GEN_CHECK)
+		return pmap->root_pa | (s + 1) | CR3_NOFLUSH;
+
+	pc->pcid_slot[s].gen = gen;
+	return pmap->root_pa | (s + 1);
+}
+
 void pmap_activate(pmap_t pmap)
 {
 	struct percpu	*pc;
 	pmap_t		 old;
 	unsigned	 bit;
+	int		 was;
 
 	if (pmap == PMAP_NULL)
 		return;
@@ -824,9 +878,19 @@ void pmap_activate(pmap_t pmap)
 	 * holds translations nobody knows to shoot down.
 	 */
 	(void) atomic_test_and_set_bit(&pmap->cpus_using, bit);
-	pc->loaded_pmap = pmap;
 
-	write_cr3(pmap->root_pa);
+	/*
+	 * #412: from reading the space's generation to the CR3 write, with
+	 * interrupts off.  A shootdown handler that ran in between would find
+	 * CR3 still naming the old space, or the slot already claiming a
+	 * generation the load has not yet made true.
+	 */
+	was = interrupts_enabled();
+	interrupts_disable();
+	pc->loaded_pmap = pmap;
+	write_cr3(pmap_cr3_for(pc, pmap));
+	if (was)
+		interrupts_enable();
 
 	if (old != PMAP_NULL)
 		(void) atomic_test_and_clear_bit(&old->cpus_using, bit);
