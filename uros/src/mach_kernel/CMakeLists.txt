@@ -106,6 +106,15 @@ option(UROS_ABLATE_612_BURNIN_CLI "Build the #612 ablation: the clock burn-in en
 option(UROS_ABLATE_612_LEAVE_MAPPED "Build the #612 ablation: map_selftest and tlb_shootdown_selftest leave their pages in the VM's range (every x86-64 boot: pmap_virtual_space() must say WRONG and name them)" OFF)
 # #608, both targets: the RCU drain thread is not started, so only the idle loop runs callbacks.
 option(UROS_ABLATE_608_NO_DRAIN_THREAD "Build the #608 ablation: no RCU drain thread, only the idle loop runs callbacks (x86-64 -R: with every processor busy the queue must grow and the bench say WRONG)" OFF)
+# #526, both targets: the idle loop restores the level it found again, instead of waiting at zero.
+option(UROS_ABLATE_526_IDLE_RESTORES "Build the #526 ablation: the idle loop restores the level it found (a raised one is held for ever; entry 22 under TCG at 1.4 GHz stalls about once in 30 boots)" OFF)
+# #617, x86_64: a TEST option, not an ablation -- the window in thread_return_ast() widened, so
+# that the test can show what happens inside it with the fix and without.
+option(UROS_WIDEN_617_WINDOW "Build for #617's test: a thread making its first return to ring 3 spins for 50 us between reading its processor's number and reading that processor's AST word (with the window open, pthread_test [31] loses its embryo threads to ring 3)" OFF)
+# #617, x86_64: thread_return_ast() takes its last look with interrupts on again.
+option(UROS_ABLATE_617_RETURN_AST "Build the #617 ablation: thread_return_ast() checks need_ast with interrupts on, so a thread preempted between reading its processor's number and that processor's AST word reads another's (with UROS_WIDEN_617_WINDOW, pthread_test [31] must lose embryos to ring 3 and the return check say WRONG)" OFF)
+# #526, x86_64: splx() finds the per-CPU block before it turns interrupts off again.
+option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this processor's block with interrupts still on, so a thread preempted at level zero finishes its raise in the block of the processor it left (x86-64 -E, GRUB entry 30: must say WRONG)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -485,6 +494,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/startup.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/smp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/collect_bench.c
@@ -667,6 +677,22 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_608_NO_DRAIN_THREAD)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_608_NO_DRAIN_THREAD=1)
       message(STATUS "#608 ablation: no RCU drain thread (x86_64)")
+  endif()
+  if(UROS_ABLATE_526_IDLE_RESTORES)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_526_IDLE_RESTORES=1)
+      message(STATUS "#526 ablation: the idle loop restores the level it found (x86_64)")
+  endif()
+  if(UROS_ABLATE_617_RETURN_AST)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_617_RETURN_AST=1)
+      message(STATUS "#617 ablation: thread_return_ast() looks with interrupts on (x86_64)")
+  endif()
+  if(UROS_WIDEN_617_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE WIDEN_617_WINDOW=1)
+      message(STATUS "#617 test: the return-to-user AST window widened (x86_64)")
+  endif()
+  if(UROS_ABLATE_526_SPLX_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_526_SPLX_WINDOW=1)
+      message(STATUS "#526 ablation: splx() finds the per-CPU block with interrupts on (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
@@ -1638,6 +1664,10 @@ endif()
 if(UROS_ABLATE_608_NO_DRAIN_THREAD)
     list(APPEND KERNEL_DEFINES -DABLATE_608_NO_DRAIN_THREAD=1)
     message(STATUS "#608 ablation: no RCU drain thread (i386)")
+endif()
+if(UROS_ABLATE_526_IDLE_RESTORES)
+    list(APPEND KERNEL_DEFINES -DABLATE_526_IDLE_RESTORES=1)
+    message(STATUS "#526 ablation: the idle loop restores the level it found (i386)")
 endif()
 
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)
