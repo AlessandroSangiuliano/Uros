@@ -57,6 +57,18 @@
 #ifndef ABLATE_603_ONE_PASS
 #define ABLATE_603_ONE_PASS	0
 #endif
+/*
+ * #617: the window between reading this processor's number and reading its
+ * AST word in thread_return_ast(), widened for the test that has to show what
+ * happens inside it.  Off, and off is the shipping answer.  On, a thread
+ * making its first return to ring 3 -- a frame of zeros, which only a thread
+ * nobody has given a state has -- spins there for WIDEN_617_US microseconds.
+ * Only those: every other return would pay it too, and the boot would crawl.
+ */
+#ifndef WIDEN_617_WINDOW
+#define WIDEN_617_WINDOW	0
+#endif
+#define	WIDEN_617_US		50
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -76,6 +88,7 @@
 #include <sync/atomic.h>	/* #461: one backtrace at a time */
 #include <trap/extable.h>
 #include <trap/trap.h>
+#include <time/tsc.h>		/* #617: the widened window's clock */
 
 /*
  * A 64-bit gate: sixteen bytes, against the eight an i386 gate takes, with
@@ -1255,11 +1268,89 @@ trap_take_ast(struct trap_frame *frame)
  * thread resumes at its continuation -- thread_bootstrap_return, which arrives
  * back here.  Either road ends with nothing pending.
  */
+/*
+ * #617: a return to ring 3 that leaves with an AST still pending on the
+ * processor it leaves from.  Counted, and the first one kept, for the idle
+ * loop to say in thread context -- this is the way out of the kernel, the
+ * wrong place to print from.
+ */
+static volatile uint32_t	return_ast_left;
+static volatile uint32_t	return_ast_said;
+static void			*return_ast_thread;
+static uint32_t			return_ast_bits;
+static int			return_ast_read_on, return_ast_left_on;
+
+static void
+return_ast_check(int read_on)
+{
+	int	now = cpu_number();
+	ast_t	left = need_ast[now] & AST_ALL;
+
+	if (left == AST_NONE)
+		return;
+	if (atomic_add32(&return_ast_left, 1) == 0) {
+		return_ast_thread = (void *) current_thread();
+		return_ast_bits = (uint32_t) left;
+		return_ast_read_on = read_on;
+		return_ast_left_on = now;
+	}
+}
+
+void
+thread_return_ast_report(void)
+{
+	if (return_ast_left == 0 || return_ast_said)
+		return;
+	return_ast_said = 1;
+	printf("trap: %u return(s) to ring 3 left with an AST pending -- WRONG; "
+	       "the first, thread %p, left processor %d with AST 0x%x after "
+	       "reading the word of processor %d (#617)\n",
+	       (unsigned) return_ast_left, return_ast_thread,
+	       return_ast_left_on, (unsigned) return_ast_bits,
+	       return_ast_read_on);
+}
+
+#if	WIDEN_617_WINDOW
+static void
+return_ast_widen(void)
+{
+	thread_t		th = current_thread();
+	const struct trap_frame	*f;
+	uint64_t		t0, span;
+
+	/*
+	 * ⚠️ The boot's own syscall self-test comes through here before there
+	 * is a thread (a NULL activation was the first thing this option ever
+	 * did, w1, 04/10).
+	 */
+	if (th == THREAD_NULL || th->top_act == THR_ACT_NULL ||
+	    th->top_act->mact.pcb == PCB_NULL)
+		return;
+	f = th->top_act->mact.pcb->user;
+	if (f == (const struct trap_frame *) 0 || f->rip != 0 || f->rsp != 0)
+		return;
+	span = tsc_hz() / 1000000 * WIDEN_617_US;
+	t0 = rdtsc();
+	while (rdtsc() - t0 < span)
+		cpu_pause();
+}
+#endif
+
 void
 thread_return_ast(void)
 {
-	while (need_ast[cpu_number()] & AST_ALL)
+	int	cpu;
+
+	for (;;) {
+		cpu = cpu_number();
+#if	WIDEN_617_WINDOW
+		return_ast_widen();
+#endif
+		if ((need_ast[cpu] & AST_ALL) == 0)
+			break;
 		ast_taken(FALSE, AST_ALL, splsched());
+	}
+	return_ast_check(cpu);
 }
 
 

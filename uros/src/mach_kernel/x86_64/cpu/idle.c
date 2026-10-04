@@ -61,6 +61,7 @@
 #include <cpu/spl.h>			/* #526: splget */
 #include <ddb/ksym.h>			/* #526: the raise, by name */
 #include <kern/misc_protos.h>		/* printf */
+#include <trap/trap.h>			/* #617: thread_return_ast_report */
 
 /*
  * How many fruitless passes of the idle loop before halting.
@@ -191,6 +192,9 @@ machine_idle(int mycpu)
 
 	/* #526: and whether the idle loop found this processor's level raised. */
 	idle_say_level(mycpu, st);
+
+	/* #617: and whether a return to ring 3 left with an AST pending. */
+	thread_return_ast_report();
 
 	/*
 	 * #599: refusals an engine recorded are no longer read here.  A
