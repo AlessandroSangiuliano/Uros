@@ -1504,8 +1504,12 @@ static void wx_enforcement_selftest(void)
  *   the census	CR0's protection bits, all of CR4 and EFER's, read on every
  *		processor and compared with the boot processor's;
  *   the probes	on every processor, a store to a user page and a call into
- *		one, from the kernel and outside the access bracket.  With
- *		SMAP the store faults; with SMEP the call does.
+ *		one, from the kernel and outside the access bracket, and a
+ *		store inside the bracket to a user page mapped read-only.
+ *		With SMAP the first store faults, with SMEP the call does,
+ *		and with CR0.WP the last store does: without WP the kernel
+ *		writes through a read-only mapping, and copyout() relies on
+ *		that fault to break copy-on-write.
  *
  * Each application processor is asked alone, by a targeted cross-call, and
  * answers into its own slot.  Alone because trap_expect() holds one
@@ -1521,12 +1525,13 @@ static void wx_enforcement_selftest(void)
 struct cr_seen {
 	uint64_t	cr0, cr4, efer;
 	int		answered;
-	int		smap_fault, smep_fault;
+	int		smap_fault, smep_fault, wp_fault;
 };
 
 static struct cr_seen cr_seen[SMP_MAX_CPUS];
 static uint64_t cr_probe_root;		/* the scratch space every probe loads */
 static uint64_t cr_probe_want;		/* SMEP|SMAP, as the boot processor set */
+static int cr_probe_wp;			/* and CR0.WP */
 
 static void cr_read_here(void *arg)
 {
@@ -1564,26 +1569,50 @@ static void cr_probe_here(void *arg)
 		s->smep_fault = fetch();
 		trap_expect_cancel();
 	}
+	if (cr_probe_wp) {
+		pmap_user_access_begin();
+		trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+		s->wp_fault = trap_probe_write(	/* clear of the code */
+			(volatile void *)(uintptr_t)(CR_PROBE_VA + PAGE_SIZE_4K
+						     + 128));
+		trap_expect_cancel();
+		pmap_user_access_end();
+	}
 
 	write_cr3(own);
 }
 
-/* Name every CR4 bit in `bits', the known ones by name. */
-static void cr4_put_bits(uint64_t bits)
-{
-	static const struct { uint64_t bit; const char *name; } names[] = {
-		{ CR4_PAE, "PAE" }, { CR4_PGE, "PGE" }, { CR4_OSFXSR, "OSFXSR" },
-		{ CR4_OSXMMEXCPT, "OSXMMEXCPT" }, { CR4_FSGSBASE, "FSGSBASE" },
-		{ CR4_PCIDE, "PCIDE" }, { CR4_OSXSAVE, "OSXSAVE" },
-		{ CR4_SMEP, "SMEP" }, { CR4_SMAP, "SMAP" },
-	};
+struct cr_bit_name {
+	uint64_t	bit;
+	const char	*name;
+};
 
+static const struct cr_bit_name cr0_names[] = {
+	{ CR0_PG, "PG" }, { CR0_WP, "WP" }, { CR0_NE, "NE" }, { CR0_CD, "CD" },
+	{ CR0_NW, "NW" }, { CR0_EM, "EM" }, { CR0_MP, "MP" }, { 0, 0 }
+};
+
+static const struct cr_bit_name cr4_names[] = {
+	{ CR4_PAE, "PAE" }, { CR4_PGE, "PGE" }, { CR4_OSFXSR, "OSFXSR" },
+	{ CR4_OSXMMEXCPT, "OSXMMEXCPT" }, { CR4_FSGSBASE, "FSGSBASE" },
+	{ CR4_PCIDE, "PCIDE" }, { CR4_OSXSAVE, "OSXSAVE" },
+	{ CR4_SMEP, "SMEP" }, { CR4_SMAP, "SMAP" }, { 0, 0 }
+};
+
+static const struct cr_bit_name efer_names[] = {
+	{ EFER_SCE, "SCE" }, { EFER_LME, "LME" }, { EFER_LMA, "LMA" },
+	{ EFER_NXE, "NXE" }, { 0, 0 }
+};
+
+/* Name every bit in `bits', the known ones by name. */
+static void cr_put_bits(uint64_t bits, const struct cr_bit_name *names)
+{
 	for (unsigned b = 0; b < 64; b++) {
 		const char *name = 0;
 
 		if ((bits & (1ULL << b)) == 0)
 			continue;
-		for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+		for (unsigned i = 0; names[i].name != 0; i++)
 			if (names[i].bit == (1ULL << b))
 				name = names[i].name;
 		kputs(" ");
@@ -1593,6 +1622,24 @@ static void cr4_put_bits(uint64_t bits)
 			kputs("bit ");
 			kputdec(b);
 		}
+	}
+}
+
+/* What one register lacks and has, against the boot processor's. */
+static void cr_put_diff(const char *reg, uint64_t diff, uint64_t boot,
+			uint64_t here, const struct cr_bit_name *names)
+{
+	if (diff & boot) {
+		kputs(": ");
+		kputs(reg);
+		kputs(" lacks");
+		cr_put_bits(diff & boot, names);
+	}
+	if (diff & here) {
+		kputs(": ");
+		kputs(reg);
+		kputs(" has, unlike the boot processor,");
+		cr_put_bits(diff & here, names);
 	}
 }
 
@@ -1607,6 +1654,7 @@ static void control_regs_selftest(void)
 
 	cr_read_here(&boot);
 	cr_probe_want = boot.cr4 & (CR4_SMEP | CR4_SMAP);
+	cr_probe_wp = (boot.cr0 & CR0_WP) != 0;
 
 	/* The census. */
 	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
@@ -1630,22 +1678,9 @@ static void control_regs_selftest(void)
 		differ++;
 		kputs("UrMach x86-64: processor ");
 		kputdec(c->apic_id);
-		if (d4 & boot.cr4) {
-			kputs(": CR4 lacks");
-			cr4_put_bits(d4 & boot.cr4);
-		}
-		if (d4 & s->cr4) {
-			kputs(": CR4 has, unlike the boot processor,");
-			cr4_put_bits(d4 & s->cr4);
-		}
-		if (d0) {
-			kputs(": CR0 differs in ");
-			kputhex64(d0);
-		}
-		if (de) {
-			kputs(": EFER differs in ");
-			kputhex64(de);
-		}
+		cr_put_diff("CR0", d0, boot.cr0, s->cr0, cr0_names);
+		cr_put_diff("CR4", d4, boot.cr4, s->cr4, cr4_names);
+		cr_put_diff("EFER", de, boot.efer, s->efer, efer_names);
 		kputs(" — WRONG (#639)\r\n");
 	}
 
@@ -1654,18 +1689,24 @@ static void control_regs_selftest(void)
 	kputs(differ == 0 ? " processors: each carries the boot processor's bits\r\n"
 			  : " processors: some differ from the boot processor's, WRONG (#639)\r\n");
 
-	if (cr_probe_want == 0) {
-		kputs("UrMach x86-64: SMEP and SMAP are not offered by this cpu, so "
-		      "no processor can be asked to enforce them (#639)\r\n");
+	if (cr_probe_want == 0 && !cr_probe_wp) {
+		kputs("UrMach x86-64: neither SMEP, SMAP nor CR0.WP is on the boot "
+		      "processor, so no processor can be asked to enforce them "
+		      "(#639)\r\n");
 		return;
 	}
 
-	/* The probes: one user page, executable, in a space of its own. */
+	/*
+	 * The probes: one user page, executable, and the same frame again
+	 * one page up, read-only, in a space of its own.
+	 */
 	frame = boot_frame_alloc();
 	scratch = pmap_create(0);
 	if (frame == 0 || scratch == PMAP_NULL
 	    || pmap_enter(scratch, CR_PROBE_VA, frame, VM_PROT_READ
-			  | VM_PROT_WRITE | VM_PROT_EXECUTE, 0) != PMAP_MAP_OK) {
+			  | VM_PROT_WRITE | VM_PROT_EXECUTE, 0) != PMAP_MAP_OK
+	    || pmap_enter(scratch, CR_PROBE_VA + PAGE_SIZE_4K, frame,
+			  VM_PROT_READ, 0) != PMAP_MAP_OK) {
 		kputs("UrMach x86-64: no scratch space for the SMEP and SMAP "
 		      "probes — NOT ASKED (#639)\r\n");
 		if (scratch != PMAP_NULL)
@@ -1699,29 +1740,34 @@ static void control_regs_selftest(void)
 		if (c->apic_id >= SMP_MAX_CPUS || !smp_is_online(c->apic_id))
 			continue;
 		if (((cr_probe_want & CR4_SMAP) && !s->smap_fault)
-		    || ((cr_probe_want & CR4_SMEP) && !s->smep_fault)) {
+		    || ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
+		    || (cr_probe_wp && !s->wp_fault)) {
 			unenforced++;
 			kputs("UrMach x86-64: processor ");
 			kputdec(c->apic_id);
 			if ((cr_probe_want & CR4_SMAP) && !s->smap_fault)
-				kputs(" stored to a user page");
+				kputs(" stored to a user page,");
 			if ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
-				kputs(" ran code from a user page");
+				kputs(" ran code from a user page,");
+			if (cr_probe_wp && !s->wp_fault)
+				kputs(" wrote through a read-only mapping,");
 			kputs(" without a fault — WRONG (#639)\r\n");
 		}
 	}
 
-	kputs("UrMach x86-64: ");
-	kputs((cr_probe_want & CR4_SMEP) ? "SMEP" : "");
-	kputs(cr_probe_want == (CR4_SMEP | CR4_SMAP) ? " and " : "");
-	kputs((cr_probe_want & CR4_SMAP) ? "SMAP" : "");
-	kputs(" on ");
+	kputs("UrMach x86-64: SMEP ");
+	kputs((cr_probe_want & CR4_SMEP) ? "on" : "not offered");
+	kputs(", SMAP ");
+	kputs((cr_probe_want & CR4_SMAP) ? "on" : "not offered");
+	kputs(", CR0.WP ");
+	kputs(cr_probe_wp ? "on" : "off");
+	kputs(" — probed on ");
 	kputdec(asked);
 	kputs(unenforced == 0
-	      ? " processors: each faulted where the kernel touched a user page\r\n"
+	      ? " processors: every probe faulted on every one\r\n"
 	      : " processors: not enforced on some, WRONG (#639)\r\n");
 
-	pmap_remove(scratch, CR_PROBE_VA, CR_PROBE_VA + PAGE_SIZE_4K);
+	pmap_remove(scratch, CR_PROBE_VA, CR_PROBE_VA + 2 * PAGE_SIZE_4K);
 	pmap_destroy(scratch);
 	boot_frame_free(frame);
 }
