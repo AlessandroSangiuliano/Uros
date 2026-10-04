@@ -1945,20 +1945,23 @@ static void global_split_selftest(void)
  * 🔴 WHAT A PCID KEEPS, AND WHAT IT MUST NOT (#412).
  *
  * With PCID a switch keeps the entries of the space it leaves, so two things
- * that used to be free now have to be earned, and each is asked here on one
- * application processor, X, driven by targeted cross-calls:
+ * that used to come free now have to be earned.  Each is asked on one
+ * application processor, X, driven by targeted cross-calls, with two spaces
+ * that map the same address to frames of their own:
  *
- *   [1] a space changed while X only CACHES it.  X enters S1 and reads a
- *	 page, moves to S2, and the boot processor then points S1's page at
- *	 another frame.  X is no longer in S1's cpus_using, so the shootdown
- *	 does not interrupt it; S1's generation moves on instead.  Back in S1,
- *	 X must read the new frame -- the old one means a translation kept
- *	 across a change it was never told of.
- *   [2] a PCID changing hands.  X goes through one space more than it has
- *	 PCIDs, each mapping the same address to a frame of its own, so a slot
- *	 must be taken from one space and given to another; then it goes back
- *	 to the first.  Every read must find the space's own frame.  Another
- *	 space's frame is one address space reading another's memory.
+ *   [1] a space changed while X only CACHES it.  X enters S1 and reads the
+ *	 page, moves to S2, and the boot processor then points S1's page at a
+ *	 third frame.  X is no longer in S1's cpus_using, so the shootdown does
+ *	 not interrupt it; S1's generation moves on instead.  Back in S1, X must
+ *	 read the third frame -- S1's old one means a translation kept across a
+ *	 change it was never told of.
+ *   [2] a PCID changing hands.  X reads S1's page again, leaving S1's entry
+ *	 under S1's PCID; then, on X, S2 loses its slot and the next miss is
+ *	 aimed at S1's.  X enters S2, which takes S1's PCID: S2 must read its
+ *	 own frame.  S1's frame is one address space reading another's memory.
+ *	 With nine spaces this happens by itself once eight PCIDs are taken;
+ *	 the boot's pool of spaces holds fewer, so the eviction is aimed, and
+ *	 pmap_cr3_for() takes the same miss either way.
  *
  * Without PCID every switch discards everything and neither question can
  * arise: NOT ASKED.  UROS_ABLATE_412_GEN_CHECK must make [1] say WRONG and
@@ -1966,19 +1969,40 @@ static void global_split_selftest(void)
  * PCID).
  */
 #define XS_VA		0x0000000300000000ULL	/* lower half, nobody else's */
-#define XS_SPACES	(PCID_SLOTS + 1)
 #define XS_MARK(i)	(0x5143a000ULL + (uint64_t)(i))
 
 struct xs_step {
 	pmap_t		space;
 	int		read;
+	pmap_t		evict_from;	/* [2]: this space's slot is the next miss's */
+	pmap_t		forget;		/* [2]: and this one's slot is cleared */
 	uint64_t	seen;
 };
 
-/* On X: enter the space, and read the page if asked to, inside the bracket. */
+/* The slot `space' holds on this processor, or PCID_SLOTS. */
+static unsigned xs_slot_of(struct percpu *pc, pmap_t space)
+{
+	unsigned s;
+
+	for (s = 0; s < PCID_SLOTS; s++)
+		if (pc->pcid_slot[s].ctx_id == space->ctx_id)
+			break;
+	return s;
+}
+
+/* On X: aim the eviction if asked, enter the space, read the page if asked. */
 static void xs_step_here(void *arg)
 {
 	struct xs_step *st = arg;
+	struct percpu *pc = percpu();
+	unsigned s;
+
+	if (st->forget != PMAP_NULL
+	    && (s = xs_slot_of(pc, st->forget)) < PCID_SLOTS)
+		pc->pcid_slot[s].ctx_id = 0;
+	if (st->evict_from != PMAP_NULL
+	    && (s = xs_slot_of(pc, st->evict_from)) < PCID_SLOTS)
+		pc->pcid_victim = s;
 
 	pmap_activate(st->space);
 	if (st->read) {
@@ -1988,9 +2012,10 @@ static void xs_step_here(void *arg)
 	}
 }
 
-static uint64_t xs_on(uint32_t x, pmap_t space, int read)
+static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
+		      pmap_t forget)
 {
-	struct xs_step st = { space, read, 0 };
+	struct xs_step st = { space, read, evict_from, forget, 0 };
 
 	ipi_call_mask(1ULL << x, xs_step_here, &st);
 	return st.seen;
@@ -1998,10 +2023,10 @@ static uint64_t xs_on(uint32_t x, pmap_t space, int read)
 
 static void pcid_selftest(void)
 {
-	pmap_t space[XS_SPACES] = { 0 };
-	uint64_t frame[XS_SPACES + 1] = { 0 }, seen;
+	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
+	uint64_t frame[3] = { 0 }, seen;
 	uint32_t self = cpu_apic_id(), x = SMP_MAX_CPUS;
-	unsigned i, wrong = 0;
+	unsigned i;
 
 	if (pmap_pcid_mode == PMAP_PCID_OFF) {
 		kputs("pcid_test: NOT ASKED — no PCID here: every switch "
@@ -2023,35 +2048,34 @@ static void pcid_selftest(void)
 		return;
 	}
 
-	/* XS_SPACES spaces, each with its own frame at XS_VA; one frame spare. */
-	for (i = 0; i <= XS_SPACES; i++) {
+	for (i = 0; i < 3; i++) {
 		frame[i] = boot_frame_alloc();
-		if (frame[i] == 0)
-			break;
-		*(volatile uint64_t *)(uintptr_t) phys_to_direct(frame[i])
-			= XS_MARK(i);
+		if (frame[i] != 0)
+			*(volatile uint64_t *)(uintptr_t) phys_to_direct(frame[i])
+				= XS_MARK(i);
 	}
-	for (i = 0; i < XS_SPACES && frame[i] != 0; i++) {
-		space[i] = pmap_create(0);
-		if (space[i] == PMAP_NULL
-		    || pmap_enter(space[i], XS_VA, frame[i],
-				  VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK)
-			break;
-	}
-	if (i < XS_SPACES || frame[XS_SPACES] == 0) {
-		kputs("pcid_test: NOT ASKED — could not build the spaces (#412)\r\n");
+	s1 = pmap_create(0);
+	s2 = pmap_create(0);
+	if (frame[0] == 0 || frame[1] == 0 || frame[2] == 0
+	    || s1 == PMAP_NULL || s2 == PMAP_NULL
+	    || pmap_enter(s1, XS_VA, frame[0], VM_PROT_READ | VM_PROT_WRITE, 0)
+	       != PMAP_MAP_OK
+	    || pmap_enter(s2, XS_VA, frame[1], VM_PROT_READ | VM_PROT_WRITE, 0)
+	       != PMAP_MAP_OK) {
+		kputs("pcid_test: NOT ASKED — could not build the two spaces "
+		      "(#412)\r\n");
 	} else {
 		/* [1] */
-		seen = xs_on(x, space[0], 1);
-		(void) xs_on(x, space[1], 1);
-		(void) pmap_enter(space[0], XS_VA, frame[XS_SPACES],
+		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+		(void) xs_on(x, s2, 1, PMAP_NULL, PMAP_NULL);
+		(void) pmap_enter(s1, XS_VA, frame[2],
 				  VM_PROT_READ | VM_PROT_WRITE, 0);
-		seen = xs_on(x, space[0], 1);
+		seen = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
 		kputs("pcid_test: [1] a space changed while processor ");
 		kputdec(x);
 		kputs(" only cached it reads ");
 		kputhex64(seen);
-		if (seen == XS_MARK(XS_SPACES))
+		if (seen == XS_MARK(2))
 			kputs(", its new frame — PASS (#412)\r\n");
 		else {
 			kputs(seen == XS_MARK(0)
@@ -2059,44 +2083,36 @@ static void pcid_selftest(void)
 			      : ", neither frame");
 			kputs(" — WRONG (#412)\r\n");
 		}
-		(void) pmap_enter(space[0], XS_VA, frame[0],
-				  VM_PROT_READ | VM_PROT_WRITE, 0);
 
-		/* [2] */
-		for (i = 0; i < XS_SPACES; i++) {
-			seen = xs_on(x, space[i], 1);
-			if (seen != XS_MARK(i) && wrong++ == 0) {
-				kputs("pcid_test:   space ");
-				kputdec(i);
-				kputs(" read ");
-				kputhex64(seen);
-				kputs(" instead of its own frame\r\n");
-			}
+		/* [2]: S1's entry under S1's PCID, then that PCID to S2. */
+		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+		seen = xs_on(x, s2, 1, s1, s2);
+		kputs("pcid_test: [2] a space given another's PCID on processor ");
+		kputdec(x);
+		kputs(" reads ");
+		kputhex64(seen);
+		if (seen == XS_MARK(1))
+			kputs(", its own frame — PASS (#412)\r\n");
+		else {
+			kputs(seen == XS_MARK(2)
+			      ? ", the other space's frame: one space read another's"
+				" memory"
+			      : ", neither frame");
+			kputs(" — WRONG (#412)\r\n");
 		}
-		seen = xs_on(x, space[0], 1);
-		if (seen != XS_MARK(0) && wrong++ == 0) {
-			kputs("pcid_test:   space 0, back after its slot was "
-			      "taken, read ");
-			kputhex64(seen);
-			kputs("\r\n");
-		}
-		kputs("pcid_test: [2] ");
-		kputdec(XS_SPACES);
-		kputs(" spaces through ");
-		kputdec(PCID_SLOTS);
-		kputs(wrong == 0
-		      ? " PCIDs: every read found the space's own frame — PASS (#412)\r\n"
-		      : " PCIDs: a space read another's frame — WRONG (#412)\r\n");
 	}
 
-	/* X back on the kernel's tables, out of every scratch space's set. */
-	(void) xs_on(x, pmap_kernel(), 0);
-	for (i = 0; i < XS_SPACES; i++)
-		if (space[i] != PMAP_NULL) {
-			pmap_remove(space[i], XS_VA, XS_VA + PAGE_SIZE_4K);
-			pmap_destroy(space[i]);
-		}
-	for (i = 0; i <= XS_SPACES; i++)
+	/* X back on the kernel's tables, out of both spaces' sets. */
+	(void) xs_on(x, pmap_kernel(), 0, PMAP_NULL, PMAP_NULL);
+	if (s1 != PMAP_NULL) {
+		pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
+		pmap_destroy(s1);
+	}
+	if (s2 != PMAP_NULL) {
+		pmap_remove(s2, XS_VA, XS_VA + PAGE_SIZE_4K);
+		pmap_destroy(s2);
+	}
+	for (i = 0; i < 3; i++)
 		if (frame[i] != 0)
 			boot_frame_free(frame[i]);
 }

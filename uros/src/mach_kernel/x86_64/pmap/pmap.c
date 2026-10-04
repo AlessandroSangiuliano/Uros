@@ -66,12 +66,18 @@ void pmap_bootstrap(void)
  * build and tear down before the VM is up.  Sixteen was never a count of
  * anything; it was what somebody wrote when nothing could be allocated.
  *
- * Four rather than one because the pool costs 4 * 24 bytes of BSS and a
+ * Four rather than one because the pool costs a few bytes of BSS a slot and a
  * self-test that wants two spaces at once should not have to come back here.
  * And if it ever does run out, pmap_alloc() now says so by name and by number
  * instead of returning PMAP_NULL into a resource error that mentions neither.
+ *
+ * ⚠️ Six, and it did come back here (#412): a destroyed space keeps its slot
+ * until a grace period has passed, and no boot self-test lives to see one, so
+ * every earlier test's space is still holding a slot when the PCID test asks
+ * for its two.  It ran out at four; the line pmap_init() prints says how many
+ * the boot really used.
  */
-#define PMAP_BOOT_MAX	4
+#define PMAP_BOOT_MAX	6
 
 static struct pmap	pmap_pool[PMAP_BOOT_MAX];
 static zone_t		pmap_zone;		/* ZONE_NULL until pmap_init() */
