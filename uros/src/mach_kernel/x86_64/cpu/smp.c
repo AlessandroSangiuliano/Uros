@@ -27,6 +27,14 @@
 #include <syscall/syscall.h>
 #include <thread/fpu.h>
 #include <sync/atomic.h>
+
+/*
+ * #639: the application processors keep the control registers the trampoline
+ * left them -- caches disabled, and no WP, SMEP or SMAP -- as every boot did.
+ */
+#ifndef	ABLATE_639_AP_CONTROL
+#define	ABLATE_639_AP_CONTROL	0
+#endif
 #include <trap/trap.h>
 
 extern char __trampoline_start[], __trampoline_end[];
@@ -122,6 +130,25 @@ void ap_start_c(uint32_t apic_id)
 	 * one failure that leaves nothing on the wire to read afterwards.
 	 */
 	desc_activate(apic_id);
+
+	/*
+	 * 🔴 Caches on, and the boot processor's protections (#639).
+	 *
+	 * INIT leaves CR0 at its reset value, CD and NW set: a processor that
+	 * caches nothing.  The trampoline adds PE and PG and nothing else, so
+	 * until this line the processor runs uncached -- on bare metal at a
+	 * fraction of its speed, under KVM as the hypervisor decides, and under
+	 * TCG as if nothing were wrong, which is where it was finally read.
+	 * Clearing both is the architecture's whole recipe for turning caching
+	 * on: nothing can be dirty in a cache that never filled.
+	 *
+	 * Then CR0.WP, SMEP and SMAP, as the boot processor turned them on:
+	 * every boot until this ran three of four processors without them.
+	 */
+	if (!ABLATE_639_AP_CONTROL) {
+		write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
+		pmap_protections_here();
+	}
 
 	/* Per-CPU state; nothing below is shared with another processor. */
 	percpu_activate(apic_id);

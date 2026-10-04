@@ -118,6 +118,8 @@ option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this p
 # #638, x86_64: a TEST option, not an ablation -- the shootdown's two windows widened, so that
 # the test can show what a thread moved inside them does, with the fixes and without.
 option(UROS_WIDEN_638_WINDOW "Build for #638's test: while -J runs, a shootdown spins for 50 us between deciding which processor it is on and acting on it (a thread moved inside the spin: -J arm [1] must find a stale translation, arm [2] a cross-call to its own sender)" OFF)
+# #639, x86_64: the application processors keep the control registers the trampoline left them again.
+option(UROS_ABLATE_639_AP_CONTROL "Build the #639 ablation: the application processors keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before (the boot self-test must name them on every application processor, in the census and in the probes)" OFF)
 # #638, x86_64: tlb_flush_range() flushes this processor and cross-calls the others with preemption on again.
 option(UROS_ABLATE_638_FLUSH_UNPINNED "Build the #638 ablation: tlb_flush_range() flushes this processor and cross-calls the others with preemption on, so a thread moved between the two leaves the processor it arrived at unflushed (with UROS_WIDEN_638_WINDOW, -J arm [1] must say WRONG)" OFF)
 # #638, x86_64: ipi_call_mask() strikes its own bit with preemption on again.
@@ -705,6 +707,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_WIDEN_638_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE WIDEN_638_WINDOW=1)
       message(STATUS "#638 test: the shootdown's windows widened while -J runs (x86_64)")
+  endif()
+  if(UROS_ABLATE_639_AP_CONTROL)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_639_AP_CONTROL=1)
+      message(STATUS "#639 ablation: the application processors keep the trampoline's control registers (x86_64)")
   endif()
   if(UROS_ABLATE_638_FLUSH_UNPINNED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_638_FLUSH_UNPINNED=1)
