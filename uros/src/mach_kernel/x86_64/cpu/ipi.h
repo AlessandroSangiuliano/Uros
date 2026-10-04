@@ -115,6 +115,34 @@ void ipi_call_others(void (*fn)(void *), void *arg);
 void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg);
 
 /*
+ * #638's test option (UROS_WIDEN_638_WINDOW), and not an ablation: a shootdown
+ * spins for WIDEN_638_US microseconds between deciding which processor it is
+ * on and acting on the answer -- tlb_flush_range() between its local flush and
+ * its cross-call, ipi_call_mask() between striking its own bit and sending.
+ * With a fix in, the same spin runs just before the thread stops moving,
+ * where a move is harmless, and each fix's ablation puts it back between
+ * deciding and acting.  Only while -J has armed it, so that the rest of the
+ * boot runs at its own speed.
+ *
+ * ⚠️ ONE SPIN, AND WHERE IT IS DECIDES WHAT THE TEST SEES.  A preemption that
+ * arrives while the thread cannot move is not lost: it is taken at the first
+ * interrupt after the thread can.  The cross-call holds call_lock for most of
+ * a shootdown, so the moves pile up at the first stretch where moving is
+ * allowed again.  A first version spun twice, once before deciding and once
+ * after, and the moves went to the first spin: arm [1] said PASS on the
+ * defect it exists to show (#638).
+ */
+#ifndef	WIDEN_638_WINDOW
+#define	WIDEN_638_WINDOW	0
+#endif
+#define	WIDEN_638_US		50
+
+#if	WIDEN_638_WINDOW
+extern volatile int	shootdown_widen_armed;
+void			shootdown_widen(void);
+#endif
+
+/*
  * Ask one processor to look at its asynchronous work.  Returns at once --
  * there is nothing to wait for, and waiting would be the caller blocking on
  * a processor it has just asked to go and do something.

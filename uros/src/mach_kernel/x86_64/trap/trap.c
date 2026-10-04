@@ -983,6 +983,11 @@ void trap_expect(uint64_t vector, uint64_t resume_rip)
 	last_trap.caught = 0;
 }
 
+void trap_expect_cancel(void)
+{
+	expect_armed = 0;
+}
+
 /* The same idea for the faults that arrive from ring 3; see <trap/trap.h>. */
 static uint64_t user_resume_rip;
 static uint64_t user_resume_rsp;

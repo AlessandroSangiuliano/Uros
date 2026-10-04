@@ -33,6 +33,7 @@
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
 #include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/spl_test.h>	/* #526: -E */
+#include <pmap/shootdown_test.h>	/* #638: -J */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
@@ -540,6 +541,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('E'))
 			spl_raise_split_test();
+
+		/*
+		 * -J: a shootdown whose thread is moved half-way (#638).  -E's
+		 * reasons; returns, so the boot goes on -- unless its second
+		 * arm finds the defect, which ends the boot with the panic
+		 * that names it.
+		 */
+		if (boot_flag('J'))
+			shootdown_moved_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

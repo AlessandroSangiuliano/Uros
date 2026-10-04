@@ -400,6 +400,10 @@ must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#599).'
 must_report 'spl_test: starting' 'spl_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every thread stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside the raises, which is the face of #526 that stops a machine (#526).'
+must_report 'shootdown_test: \[1\] starting' 'shootdown_test: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every remapper stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside a shootdown (#638).'
+must_report 'shootdown_test: \[2\] starting' 'shootdown_test: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'A cross-call sent to its own sender never returns: it ends the boot with a panic that names it.  A run that stops after the start line without that panic has stopped somewhere else inside the calls (#638).'
 # ⚠️ The terminator matches any count, not `3 of 3'.  A run that reported "2 of
 # 3" DID finish and its failing arm is already caught as a WRONG line; asking
 # here for the passing count as well would report one defect as two, and would

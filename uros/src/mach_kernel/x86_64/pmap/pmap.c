@@ -1626,6 +1626,13 @@ extern char __ktext_start[], __ktext_end[];
 extern char __krodata_start[], __krodata_end[];
 extern char __kdata_start[], __kernel_end[];
 
+/*
+ * What the boot processor turned on, for every other processor to apply on its
+ * own way up: pmap_protections_here() (#639).
+ */
+static int pmap_wp_on;
+static uint64_t pmap_cr4_protections;
+
 void pmap_protect_kernel(void)
 {
 	pmap_t k = pmap_kernel();
@@ -1656,6 +1663,7 @@ void pmap_protect_kernel(void)
 	 * .text and .rodata protections from advisory into real.
 	 */
 	write_cr0(read_cr0() | CR0_WP);
+	pmap_wp_on = 1;
 }
 
 /*
@@ -1711,8 +1719,17 @@ uint64_t pmap_enable_smep_smap(void)
 		pmap_smap_on = 1;
 	}
 
+	pmap_cr4_protections = want;
 	if (want)
 		write_cr4(read_cr4() | want);
 
 	return want;
+}
+
+void pmap_protections_here(void)
+{
+	if (pmap_wp_on)
+		write_cr0(read_cr0() | CR0_WP);
+	if (pmap_cr4_protections != 0)
+		write_cr4(read_cr4() | pmap_cr4_protections);
 }
