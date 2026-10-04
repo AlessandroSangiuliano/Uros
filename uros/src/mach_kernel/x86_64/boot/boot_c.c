@@ -1489,6 +1489,244 @@ static void wx_enforcement_selftest(void)
 }
 
 /*
+ * 🔴 EVERY PROCESSOR CARRIES THE BOOT PROCESSOR'S PROTECTIONS (#639).
+ *
+ * CR0, CR4 and EFER belong to the processor that loads them, and each
+ * processor's bring-up has to set its own.  SMEP and SMAP were set on the
+ * boot processor alone: the three application processors of a four-processor
+ * boot ran with neither, and nothing said so -- a protection that is missing
+ * does not fail, it just lets things through.  #437 (PGE) and #412 (PCIDE) add
+ * bits of the same kind, so this is asked of every bit, not only of the two
+ * that were missing.
+ *
+ * Two questions, because a register is a claim and a fault is a fact:
+ *
+ *   the census	CR0's protection bits, all of CR4 and EFER's, read on every
+ *		processor and compared with the boot processor's;
+ *   the probes	on every processor, a store to a user page and a call into
+ *		one, from the kernel and outside the access bracket.  With
+ *		SMAP the store faults; with SMEP the call does.
+ *
+ * Each application processor is asked alone, by a targeted cross-call, and
+ * answers into its own slot.  Alone because trap_expect() holds one
+ * expectation for the whole machine.
+ */
+#define CR_CENSUS_CR0	(CR0_PG | CR0_WP | CR0_NE | CR0_CD | CR0_NW	\
+			 | CR0_EM | CR0_MP)
+#define CR_CENSUS_EFER	(EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE)
+
+/* Lower half, beyond the boot identity map and USER_TEST_VA: nobody's. */
+#define CR_PROBE_VA	0x0000000200000000ULL
+
+struct cr_seen {
+	uint64_t	cr0, cr4, efer;
+	int		answered;
+	int		smap_fault, smep_fault;
+};
+
+static struct cr_seen cr_seen[SMP_MAX_CPUS];
+static uint64_t cr_probe_root;		/* the scratch space every probe loads */
+static uint64_t cr_probe_want;		/* SMEP|SMAP, as the boot processor set */
+
+static void cr_read_here(void *arg)
+{
+	struct cr_seen *s = arg;
+
+	s->cr0 = read_cr0();
+	s->cr4 = read_cr4();
+	s->efer = rdmsr(MSR_EFER);
+	s->answered = 1;
+}
+
+/*
+ * The probes, on whichever processor runs this: load the scratch space, try
+ * the store and the call under an expectation, put the processor's own space
+ * back.  The page holds `xor %eax, %eax; ret', so a call that is allowed
+ * returns 0, and one that faults resumes at trap_probe_faulted, which returns
+ * 1 through the same return address.
+ */
+static void cr_probe_here(void *arg)
+{
+	struct cr_seen *s = arg;
+	uint64_t own = read_cr3();
+	int (*fetch)(void) = (int (*)(void))(uintptr_t) CR_PROBE_VA;
+
+	write_cr3(cr_probe_root);
+
+	if (cr_probe_want & CR4_SMAP) {
+		trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+		s->smap_fault = trap_probe_write(
+			(volatile void *)(uintptr_t)(CR_PROBE_VA + 64));
+		trap_expect_cancel();
+	}
+	if (cr_probe_want & CR4_SMEP) {
+		trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+		s->smep_fault = fetch();
+		trap_expect_cancel();
+	}
+
+	write_cr3(own);
+}
+
+/* Name every CR4 bit in `bits', the known ones by name. */
+static void cr4_put_bits(uint64_t bits)
+{
+	static const struct { uint64_t bit; const char *name; } names[] = {
+		{ CR4_PAE, "PAE" }, { CR4_PGE, "PGE" }, { CR4_OSFXSR, "OSFXSR" },
+		{ CR4_OSXMMEXCPT, "OSXMMEXCPT" }, { CR4_FSGSBASE, "FSGSBASE" },
+		{ CR4_PCIDE, "PCIDE" }, { CR4_OSXSAVE, "OSXSAVE" },
+		{ CR4_SMEP, "SMEP" }, { CR4_SMAP, "SMAP" },
+	};
+
+	for (unsigned b = 0; b < 64; b++) {
+		const char *name = 0;
+
+		if ((bits & (1ULL << b)) == 0)
+			continue;
+		for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+			if (names[i].bit == (1ULL << b))
+				name = names[i].name;
+		kputs(" ");
+		if (name != 0)
+			kputs(name);
+		else {
+			kputs("bit ");
+			kputdec(b);
+		}
+	}
+}
+
+static void control_regs_selftest(void)
+{
+	uint32_t self = cpu_apic_id();
+	struct cr_seen boot;
+	unsigned asked = 1, differ = 0, unenforced = 0;
+	pmap_t scratch;
+	uint64_t frame;
+	uint8_t *code;
+
+	cr_read_here(&boot);
+	cr_probe_want = boot.cr4 & (CR4_SMEP | CR4_SMAP);
+
+	/* The census. */
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+		struct cr_seen *s;
+		uint64_t d0, d4, de;
+
+		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
+		    || !smp_is_online(c->apic_id))
+			continue;
+		s = &cr_seen[c->apic_id];
+		ipi_call_mask(1ULL << c->apic_id, cr_read_here, s);
+		asked++;
+
+		d0 = (s->cr0 ^ boot.cr0) & CR_CENSUS_CR0;
+		d4 = s->cr4 ^ boot.cr4;
+		de = (s->efer ^ boot.efer) & CR_CENSUS_EFER;
+		if (!s->answered || (d0 | d4 | de) == 0)
+			continue;
+
+		differ++;
+		kputs("UrMach x86-64: processor ");
+		kputdec(c->apic_id);
+		if (d4 & boot.cr4) {
+			kputs(": CR4 lacks");
+			cr4_put_bits(d4 & boot.cr4);
+		}
+		if (d4 & s->cr4) {
+			kputs(": CR4 has, unlike the boot processor,");
+			cr4_put_bits(d4 & s->cr4);
+		}
+		if (d0) {
+			kputs(": CR0 differs in ");
+			kputhex64(d0);
+		}
+		if (de) {
+			kputs(": EFER differs in ");
+			kputhex64(de);
+		}
+		kputs(" — WRONG (#639)\r\n");
+	}
+
+	kputs("UrMach x86-64: CR0, CR4 and EFER on ");
+	kputdec(asked);
+	kputs(differ == 0 ? " processors: each carries the boot processor's bits\r\n"
+			  : " processors: some differ from the boot processor's, WRONG (#639)\r\n");
+
+	if (cr_probe_want == 0) {
+		kputs("UrMach x86-64: SMEP and SMAP are not offered by this cpu, so "
+		      "no processor can be asked to enforce them (#639)\r\n");
+		return;
+	}
+
+	/* The probes: one user page, executable, in a space of its own. */
+	frame = boot_frame_alloc();
+	scratch = pmap_create(0);
+	if (frame == 0 || scratch == PMAP_NULL
+	    || pmap_enter(scratch, CR_PROBE_VA, frame, VM_PROT_READ
+			  | VM_PROT_WRITE | VM_PROT_EXECUTE, 0) != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: no scratch space for the SMEP and SMAP "
+		      "probes — NOT ASKED (#639)\r\n");
+		if (scratch != PMAP_NULL)
+			pmap_destroy(scratch);
+		if (frame != 0)
+			boot_frame_free(frame);
+		return;
+	}
+	code = (uint8_t *)(uintptr_t) phys_to_direct(frame);
+	code[0] = 0x31;		/* xor %eax, %eax */
+	code[1] = 0xc0;
+	code[2] = 0xc3;		/* ret */
+	cr_probe_root = scratch->root_pa;
+
+	cr_probe_here(&boot);
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
+		    || !smp_is_online(c->apic_id))
+			continue;
+		ipi_call_mask(1ULL << c->apic_id, cr_probe_here,
+			      &cr_seen[c->apic_id]);
+	}
+
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+		struct cr_seen *s = c->apic_id == self ? &boot
+				  : &cr_seen[c->apic_id];
+
+		if (c->apic_id >= SMP_MAX_CPUS || !smp_is_online(c->apic_id))
+			continue;
+		if (((cr_probe_want & CR4_SMAP) && !s->smap_fault)
+		    || ((cr_probe_want & CR4_SMEP) && !s->smep_fault)) {
+			unenforced++;
+			kputs("UrMach x86-64: processor ");
+			kputdec(c->apic_id);
+			if ((cr_probe_want & CR4_SMAP) && !s->smap_fault)
+				kputs(" stored to a user page");
+			if ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
+				kputs(" ran code from a user page");
+			kputs(" without a fault — WRONG (#639)\r\n");
+		}
+	}
+
+	kputs("UrMach x86-64: ");
+	kputs((cr_probe_want & CR4_SMEP) ? "SMEP" : "");
+	kputs(cr_probe_want == (CR4_SMEP | CR4_SMAP) ? " and " : "");
+	kputs((cr_probe_want & CR4_SMAP) ? "SMAP" : "");
+	kputs(" on ");
+	kputdec(asked);
+	kputs(unenforced == 0
+	      ? " processors: each faulted where the kernel touched a user page\r\n"
+	      : " processors: not enforced on some, WRONG (#639)\r\n");
+
+	pmap_remove(scratch, CR_PROBE_VA, CR_PROBE_VA + PAGE_SIZE_4K);
+	pmap_destroy(scratch);
+	boot_frame_free(frame);
+}
+
+/*
  * Ask the firmware which processors exist.
  *
  * The count is the whole point: it is what #438 will start, and getting it
@@ -7508,6 +7746,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
 	trap_entry_test();
+	control_regs_selftest();
 
 	/*
 	 * The double-fault self-test is TERMINAL, and that is why it is behind
