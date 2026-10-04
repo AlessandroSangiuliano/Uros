@@ -119,8 +119,10 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg);
  * spins for WIDEN_638_US microseconds between deciding which processor it is
  * on and acting on the answer -- tlb_flush_range() between its local flush and
  * its cross-call, ipi_call_mask() between striking its own bit and sending.
- * Only while -J has armed it, so that the rest of the boot runs at its own
- * speed.
+ * With a fix in, the same spin runs just before the thread stops moving,
+ * where a move is harmless, and each fix's ablation puts it back between
+ * deciding and acting.  Only while -J has armed it, so that the rest of the
+ * boot runs at its own speed.
  *
  * ⚠️ ONE SPIN, AND WHERE IT IS DECIDES WHAT THE TEST SEES.  A preemption that
  * arrives while the thread cannot move is not lost: it is taken at the first
