@@ -29,6 +29,7 @@
 #define PERCPU_KERNEL_RSP	16
 #define PERCPU_USER_RSP		24
 #define PERCPU_PREEMPT_LEVEL	48
+#define PERCPU_IPL		56
 #define PERCPU_SYSCALL_TSC	120
 #define PERCPU_SYSCALL_RET_CYC	128
 #define PERCPU_SYSCALL_RET_CNT	136
@@ -351,6 +352,8 @@ _Static_assert(__builtin_offsetof(struct percpu, kernel_rsp) == PERCPU_KERNEL_RS
 	       "percpu kernel_rsp moved");
 _Static_assert(__builtin_offsetof(struct percpu, preemption_level)
 	       == PERCPU_PREEMPT_LEVEL, "percpu preemption_level moved");
+_Static_assert(__builtin_offsetof(struct percpu, ipl) == PERCPU_IPL,
+	       "percpu ipl moved");
 _Static_assert(__builtin_offsetof(struct percpu, user_rsp) == PERCPU_USER_RSP,
 	       "percpu user_rsp moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_tsc)
@@ -455,6 +458,25 @@ static inline uint32_t percpu_preempt_level(void)
 	__asm__ volatile("movl %%gs:%c1, %0"
 			 : "=r"(d) : "i"(PERCPU_PREEMPT_LEVEL));
 	return d;
+}
+
+/*
+ * This processor's interrupt priority level, in one instruction (#526).
+ *
+ * One instruction is the whole point, and percpu()->ipl is two: the block's
+ * address, then the field.  A thread preempted between them reads the level
+ * of the processor it left.  An interrupt cannot land inside one
+ * instruction, so this answers for the processor the thread is on when it
+ * reads -- and a thread that moves after reading was at level zero, which
+ * it is on whichever processor it resumes.
+ */
+static inline uint32_t percpu_ipl(void)
+{
+	uint32_t l;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(l) : "i"(PERCPU_IPL));
+	return l;
 }
 
 /*

@@ -22,9 +22,13 @@
 #define	ABLATE_454_EARLYOUT	0
 #endif
 
+/*
+ * #526: percpu_ipl(), one instruction.  percpu()->ipl was two, and a thread
+ * preempted between them read the level of the processor it had left.
+ */
 spl_t splget(void)
 {
-	return percpu()->ipl;
+	return percpu_ipl();
 }
 
 int spl_defer(unsigned vector)
