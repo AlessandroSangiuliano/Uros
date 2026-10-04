@@ -9,6 +9,7 @@
 
 #include <kern/misc_protos.h>	/* #461: halt_cpu, panic */
 #include <kern/ast.h>		/* #603: ast_check */
+#include <kern/cpu_data.h>	/* #638: disable_preemption */
 
 #include <cpu/answer_count.h>	/* #605: who answered, shared with tlb.c */
 #include <cpu/ipi.h>
@@ -217,12 +218,6 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 	if (targets == 0)
 		return;
 
-	/* Every processor that answers a broadcast, less this one. */
-	me = percpu_apic_id();
-	who = smp_answering_set();
-	if (me < SMP_MAX_CPUS)
-		who &= ~(1ULL << me);
-
 	/*
 	 * Checked rather than trusted.  A processor that waits for answers
 	 * with interrupts off cannot give one, and if a second processor is
@@ -234,6 +229,20 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 		panic("ipi: a cross-call with interrupts off would deadlock");
 
 	hw_lock_lock(&call_lock);
+
+	/*
+	 * Every processor that answers a broadcast, less this one -- asked
+	 * under the lock, whose hold keeps this thread on this processor
+	 * (#638).  Asked before it, "this one" could be the processor the
+	 * thread had just left.  The broadcast still reached the right ones,
+	 * since the shorthand leaves out whoever sends it, but the photograph
+	 * below, and the names a timeout prints, were taken for the wrong
+	 * processor.
+	 */
+	me = percpu_apic_id();
+	who = smp_answering_set();
+	if (me < SMP_MAX_CPUS)
+		who &= ~(1ULL << me);
 
 	call_photograph(who);
 	call_fn = fn;
@@ -258,25 +267,21 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 	hw_lock_unlock(&call_lock);
 }
 
-void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+#ifndef	ABLATE_638_STRIKE_UNPINNED
+#define	ABLATE_638_STRIKE_UNPINNED	0
+#endif
+
+/*
+ * Send to every processor in `mask', which no longer names this one, and wait
+ * for all of them.
+ */
+static void ipi_call_targets(uint64_t mask, void (*fn)(void *), void *arg)
 {
 	unsigned targets;
 	unsigned id;
 
-	/*
-	 * Never ourselves.  A processor inside this function is not going to
-	 * take the interrupt it just sent, so a bit for the caller would be a
-	 * target that can never acknowledge — the wait below would spin out
-	 * its budget and panic, on a mask that was perfectly correct.
-	 */
-	mask &= ~(1ULL << (percpu_apic_id() & 63));
-
 	if (mask == 0)
 		return;
-
-#if	WIDEN_638_WINDOW
-	shootdown_widen();		/* between deciding and sending */
-#endif
 
 	/* Same reason as ipi_call_others(): see the comment there. */
 	if (!interrupts_enabled())
@@ -317,6 +322,44 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 	ipi_wait_for_acks(mask, targets);
 
 	hw_lock_unlock(&call_lock);
+}
+
+void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+{
+	/*
+	 * Never ourselves.  A processor inside this function is not going to
+	 * take the interrupt it just sent, so a bit for the caller would be a
+	 * target that can never acknowledge — the wait below would spin out
+	 * its budget and panic, on a mask that was perfectly correct.
+	 *
+	 * 🔴 AND "OURSELVES" IS ASKED WHERE IT CANNOT CHANGE (#638).  Struck at
+	 * level zero, the bit could be the processor the thread was about to
+	 * leave: moved before it took the lock, the thread sent the call to
+	 * the processor it had arrived at -- itself -- and waited, interrupts
+	 * masked by the hold, for an answer only it could give.  So preemption
+	 * goes off before the bit is struck and comes back after the call.
+	 * Not call_lock instead: a mask that names only this processor is the
+	 * common case, and it would then take the machine's one cross-call
+	 * lock to send nothing.  UROS_ABLATE_638_STRIKE_UNPINNED strikes the
+	 * bit with preemption on again.
+	 */
+	if (ABLATE_638_STRIKE_UNPINNED) {
+		mask &= ~(1ULL << (percpu_apic_id() & 63));
+#if	WIDEN_638_WINDOW
+		if (mask != 0)
+			shootdown_widen();	/* between deciding and sending */
+#endif
+		ipi_call_targets(mask, fn, arg);
+		return;
+	}
+
+#if	WIDEN_638_WINDOW
+	shootdown_widen();		/* before deciding: a move is harmless */
+#endif
+	disable_preemption();
+	mask &= ~(1ULL << (percpu_apic_id() & 63));
+	ipi_call_targets(mask, fn, arg);
+	enable_preemption();
 }
 
 /*

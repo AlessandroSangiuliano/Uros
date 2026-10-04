@@ -120,6 +120,8 @@ option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this p
 option(UROS_WIDEN_638_WINDOW "Build for #638's test: while -J runs, a shootdown spins for 50 us between deciding which processor it is on and acting on it (a thread moved inside the spin: -J arm [1] must find a stale translation, arm [2] a cross-call to its own sender)" OFF)
 # #638, x86_64: tlb_flush_range() flushes this processor and cross-calls the others with preemption on again.
 option(UROS_ABLATE_638_FLUSH_UNPINNED "Build the #638 ablation: tlb_flush_range() flushes this processor and cross-calls the others with preemption on, so a thread moved between the two leaves the processor it arrived at unflushed (with UROS_WIDEN_638_WINDOW, -J arm [1] must say WRONG)" OFF)
+# #638, x86_64: ipi_call_mask() strikes its own bit with preemption on again.
+option(UROS_ABLATE_638_STRIKE_UNPINNED "Build the #638 ablation: ipi_call_mask() strikes this processor's bit with preemption on, so a thread moved before it sends sends to itself (with UROS_WIDEN_638_WINDOW, -J arm [2] must end in the panic that names it)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -707,6 +709,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_638_FLUSH_UNPINNED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_638_FLUSH_UNPINNED=1)
       message(STATUS "#638 ablation: tlb_flush_range() flushes and cross-calls with preemption on (x86_64)")
+  endif()
+  if(UROS_ABLATE_638_STRIKE_UNPINNED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_638_STRIKE_UNPINNED=1)
+      message(STATUS "#638 ablation: ipi_call_mask() strikes its own bit with preemption on (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
