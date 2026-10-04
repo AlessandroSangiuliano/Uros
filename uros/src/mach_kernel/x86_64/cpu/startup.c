@@ -32,6 +32,7 @@
 #include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
 #include <cpu/halt_test.h>	/* #599: -Z */
+#include <cpu/spl_test.h>	/* #526: -E */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
@@ -530,6 +531,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('R'))
 			rcu_busy_bench();
+
+		/*
+		 * -E: a raise from level zero, preempted half-way (#526).  Not
+		 * gated on `want > 1', like -R: on one processor it says why
+		 * the question does not arise there.  Returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('E'))
+			spl_raise_split_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
