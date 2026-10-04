@@ -247,6 +247,30 @@ static inline int interrupts_enabled(void)
 	return (read_rflags() & RFLAGS_IF) != 0;
 }
 
+/*
+ * CR3 under CR4.PCIDE (#412).  The low twelve bits are the PCID, and bit 63 on
+ * a load says "keep this PCID's entries" -- it is never stored, so CR3 never
+ * reads back with it.
+ */
+#define CR3_PCID_MASK	0xfffULL
+#define CR3_NOFLUSH	(1ULL << 63)
+
+/*
+ * INVPCID (#412), the four invalidation types the SDM defines.  Only where
+ * cpu_has_invpcid() said yes: the opcode faults elsewhere.
+ */
+#define INVPCID_ADDRESS		0	/* one address, one PCID          */
+#define INVPCID_CONTEXT		1	/* one PCID, global entries kept  */
+#define INVPCID_ALL_GLOBAL	2	/* every PCID, global entries too */
+#define INVPCID_ALL		3	/* every PCID, global entries kept */
+
+static inline void invpcid(uint64_t type, uint64_t pcid, uint64_t va)
+{
+	struct { uint64_t pcid, va; } desc = { pcid, va };
+
+	__asm__ volatile("invpcid %0, %1" : : "m"(desc), "r"(type) : "memory");
+}
+
 static inline uint64_t read_cr4(void)
 {
 	uint64_t v;

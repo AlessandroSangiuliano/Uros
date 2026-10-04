@@ -89,13 +89,25 @@ struct pmap {
 	 * able to reach it"; the bit clears when CR3 is written to something
 	 * else, which is the moment the translations actually go.
 	 *
-	 * ⚠️ PCID (#412) is where this stops being true, and it is worth
-	 * saying here rather than discovering it there: with PCID a space's
-	 * entries survive on a processor that has switched away, so the
-	 * question becomes what is CACHED and not what is current, and this
-	 * field's meaning changes with it.
+	 * ⚠️ PCID (#412): a space's entries survive on a processor that has
+	 * switched away.  This set still says what is CURRENT, and is still who
+	 * a shootdown interrupts; what is only CACHED is answered by tlb_gen
+	 * below, at the processor's next switch into the space.
 	 */
 	volatile uint64_t cpus_using;
+
+	/*
+	 * PCID (#412).  ctx_id names the space for as long as the machine
+	 * runs, unlike its address, which the pool hands out again.  tlb_gen
+	 * counts the changes that needed a shootdown: each one increments it
+	 * BEFORE reading cpus_using, and a processor switching in reads it AFTER
+	 * joining cpus_using -- so either the shootdown sees the processor and
+	 * interrupts it, or the processor sees the new generation and discards
+	 * the space's entries.  That order is the whole correctness argument,
+	 * and FreeBSD's EN-22:04 is what getting it wrong looks like.
+	 */
+	uint64_t ctx_id;
+	volatile uint64_t tlb_gen;
 };
 
 typedef struct pmap *pmap_t;

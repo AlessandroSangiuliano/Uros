@@ -44,6 +44,11 @@
 
 #include <cpu/regs.h>
 
+/* #412: PCIDs this processor deals out, round robin; measured, not believed. */
+#ifndef	PCID_SLOTS
+#define	PCID_SLOTS	8
+#endif
+
 struct percpu {
 	/*
 	 * First on purpose: %gs-relative addressing can reach a field, but
@@ -330,6 +335,22 @@ struct percpu {
 	uint64_t raised_by;
 	void	*raised_on;
 
+	/*
+	 * PCID (#412): which address space each of this processor's PCIDs
+	 * holds, and up to which of that space's generations its entries are
+	 * known good.  PCID = slot + 1; PCID 0 is the kernel's and "none".  The
+	 * space is named by its ctx_id, never by its address: the pmap pool
+	 * reuses addresses, and a new space born where a dead one lived must not
+	 * find the dead one's entries.  Written by this processor only, with
+	 * interrupts off, so that the shootdown handler never sees a slot and a
+	 * CR3 that disagree.
+	 */
+	struct {
+		uint64_t ctx_id;
+		uint64_t gen;
+	} pcid_slot[PCID_SLOTS];
+	uint32_t pcid_victim;		/* the slot the next miss takes */
+
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is
@@ -355,6 +376,8 @@ struct percpu {
  */
 _Static_assert(__builtin_offsetof(struct percpu, self) == PERCPU_SELF,
 	       "percpu self moved");
+_Static_assert(sizeof(struct percpu) <= 4096,
+	       "percpu outgrew its page (percpu_va() gives each processor one)");
 _Static_assert(__builtin_offsetof(struct percpu, cpu_id) == PERCPU_CPU_ID,
 	       "percpu cpu_id moved");
 _Static_assert(__builtin_offsetof(struct percpu, kernel_rsp) == PERCPU_KERNEL_RSP,

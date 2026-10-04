@@ -451,6 +451,9 @@ static void pmap_free(pmap_t pmap)
 
 _Static_assert(KERNEL_PML4_FIRST == 256, "the halves are not evenly split");
 
+/* #412: ctx_id 0 is the kernel's, and never a slot's owner. */
+static volatile uint64_t pmap_ctx_next = 1;
+
 pmap_t pmap_create(uint64_t size)
 {
 	const pt_entry_t *kroot;
@@ -496,6 +499,14 @@ pmap_t pmap_create(uint64_t size)
 	 * panic rather than the fact of it.
 	 */
 	pmap->cpus_using = 0;
+
+	/*
+	 * #412: a name no slot on any processor can already hold, and a
+	 * generation above every slot's zero -- so the first switch into the
+	 * space misses and discards what its PCID held before.
+	 */
+	pmap->ctx_id = atomic_add64(&pmap_ctx_next, 1);
+	pmap->tlb_gen = 1;
 
 	/*
 	 * 🔥 pmap_table_frame() and not boot_frame_alloc(), which is what this
