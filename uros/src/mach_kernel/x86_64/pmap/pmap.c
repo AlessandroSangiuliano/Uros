@@ -9,6 +9,7 @@
 
 
 #include <cpu/regs.h>
+#include <boot/bootarg.h>	/* #412: boot_flag */
 #include <cpu/percpu.h>		/* which space this processor has loaded (#439) */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
@@ -1748,6 +1749,27 @@ uint64_t pmap_enable_global_pages(void)
 	pmap_cr4_on |= CR4_PGE;
 	write_cr4(read_cr4() | CR4_PGE);
 	return CR4_PGE;
+}
+
+int pmap_pcid_mode = PMAP_PCID_OFF;
+
+uint64_t pmap_enable_pcid(void)
+{
+	if (!cpu_has_pcid() || boot_flag('p'))
+		return 0;
+
+	pmap_pcid_mode = cpu_has_invpcid() && !boot_flag('i')
+		       ? PMAP_PCID_INVPCID : PMAP_PCID_NO_INVPCID;
+
+	/*
+	 * Allowed only with CR3's low twelve bits zero, which they are: every
+	 * root is a page, and nothing has loaded a PCID into CR3 yet.  From here
+	 * those bits ARE the PCID -- still 0 in every CR3 this kernel writes, so
+	 * a load without bit 63 discards exactly what it discarded before.
+	 */
+	pmap_cr4_on |= CR4_PCIDE;
+	write_cr4(read_cr4() | CR4_PCIDE);
+	return CR4_PCIDE;
 }
 
 void pmap_control_regs_here(void)

@@ -553,6 +553,32 @@ static inline int cpu_has_pge(void)
 	return (d & (1U << 13)) != 0;
 }
 
+/*
+ * Process-context identifiers (#412): CPUID.1:ECX[17], and the instruction
+ * that invalidates by one, CPUID.7.0:EBX[10].  pavillion's and victus's Ryzens
+ * have no PCID at all -- victus has INVPCID without it -- so the two are asked
+ * apart and the kernel works with either answer.
+ */
+static inline int cpu_has_pcid(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (c & (1U << 17)) != 0;
+}
+
+static inline int cpu_has_invpcid(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	if (a < 7)
+		return 0;
+
+	cpuid_count(7, 0, &a, &b, &c, &d);
+	return (b & (1U << 10)) != 0;
+}
+
 static inline int cpu_has_smep(void)
 {
 	uint32_t a, b, c, d;

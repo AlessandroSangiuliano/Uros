@@ -1099,6 +1099,29 @@ static void wx_selftest(void)
 		      : (read_cr4() & CR4_PGE) && on ? "on\r\n"
 		      : "OFFERED BUT OFF\r\n");
 	}
+
+	/*
+	 * PCID (#412): the mode, and why it is that one.  -p turns it off and -i
+	 * pretends there is no INVPCID, so that each of the three modes can be
+	 * run on a processor that has both.
+	 */
+	{
+		uint64_t on = pmap_enable_pcid();
+
+		kputs("UrMach x86-64: PCID ");
+		if (!cpu_has_pcid())
+			kputs("not offered by this cpu");
+		else if (pmap_pcid_mode == PMAP_PCID_OFF)
+			kputs("off, as -p asks");
+		else if (!(read_cr4() & CR4_PCIDE) || !on)
+			kputs("OFFERED BUT OFF");
+		else if (pmap_pcid_mode == PMAP_PCID_INVPCID)
+			kputs("on, with INVPCID");
+		else
+			kputs(cpu_has_invpcid() ? "on, without INVPCID, as -i asks"
+			      : "on, without INVPCID, which this cpu lacks");
+		kputs("\r\n");
+	}
 }
 
 /*

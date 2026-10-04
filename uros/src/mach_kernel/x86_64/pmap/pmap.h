@@ -487,6 +487,25 @@ uint64_t pmap_enable_smep_smap(void);
 uint64_t pmap_enable_global_pages(void);
 
 /*
+ * PCID (#412), decided once on the boot processor and applied on the others by
+ * pmap_control_regs_here().  Three modes, as agreed on #412:
+ *
+ *   PMAP_PCID_OFF		no PCID on this processor, or -p: today's path
+ *   PMAP_PCID_NO_INVPCID	PCID, and no INVPCID -- or -i pretending so
+ *   PMAP_PCID_INVPCID	both
+ *
+ * So far CR4.PCIDE is set and every CR3 load still names PCID 0, which
+ * discards what it always discarded: the modes exist, and nothing yet keeps a
+ * space's entries across a switch.  Returns the CR4 bit it set, or 0.
+ */
+#define	PMAP_PCID_OFF		0
+#define	PMAP_PCID_NO_INVPCID	1
+#define	PMAP_PCID_INVPCID	2
+
+extern int	pmap_pcid_mode;
+uint64_t	pmap_enable_pcid(void);
+
+/*
  * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor
  * that loads them, and pmap_protect_kernel(), pmap_enable_smep_smap() and
  * pmap_enable_global_pages() run on the boot processor alone: the application
