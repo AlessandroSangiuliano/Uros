@@ -489,6 +489,29 @@ static inline uint32_t percpu_ipl(void)
 }
 
 /*
+ * The two syscall words from C, one instruction each, for percpu_ipl()'s
+ * reason (#526): percpu()->kernel_rsp is the block's address and then the
+ * field, and a thread preempted between them reads -- or writes -- the
+ * block of the processor it left.  kernel_rsp is set at every switch for
+ * the thread coming in, so read in one instruction it is this thread's on
+ * whichever processor it runs.
+ */
+static inline uint64_t percpu_kernel_rsp(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("movq %%gs:%c1, %0"
+			 : "=r"(v) : "i"(PERCPU_KERNEL_RSP));
+	return v;
+}
+
+static inline void percpu_set_user_rsp(uint64_t v)
+{
+	__asm__ volatile("movq %0, %%gs:%c1"
+			 : : "r"(v), "i"(PERCPU_USER_RSP) : "memory");
+}
+
+/*
  * Masking this processor's interrupts for the length of a critical section,
  * and letting them back in when the last one ends (#528).
  *
