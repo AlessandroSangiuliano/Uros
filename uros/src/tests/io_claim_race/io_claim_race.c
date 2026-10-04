@@ -541,6 +541,31 @@ ask_bar_overlap(mach_port_t device, int *passed, int *arms)
 	(*passed)++;
 }
 
+/*
+ * #602: the odd losers, named.  The count alone could not tell the two cases
+ * the comment at [2] lists -- a full table and a bad argument -- apart, and it
+ * was all [2] ever kept.
+ */
+#define	ODD_NAMED	8
+
+struct odd_loser {
+	unsigned	round;
+	char		who;		/* 'a' or 'b' */
+	kern_return_t	code;
+};
+
+static const char *
+claim_code_name(kern_return_t code)
+{
+	switch (code) {
+	case KERN_RESOURCE_SHORTAGE:	return "KERN_RESOURCE_SHORTAGE";
+	case KERN_INVALID_ARGUMENT:	return "KERN_INVALID_ARGUMENT";
+	case KERN_NO_ACCESS:		return "KERN_NO_ACCESS";
+	case KERN_SUCCESS:		return "KERN_SUCCESS";
+	default:			return "a code this test does not name";
+	}
+}
+
 int
 main(int argc, char **argv)
 {
@@ -552,6 +577,7 @@ main(int argc, char **argv)
 	kern_return_t	kr;
 	unsigned	round, ncpu;
 	unsigned	torn = 0, empty = 0, starved = 0, odd_refusal = 0;
+	struct odd_loser odd[ODD_NAMED];
 	unsigned	behaved = 0;
 	unsigned	my_wins = 0;
 	unsigned	t0, elapsed = 0;
@@ -670,8 +696,15 @@ main(int argc, char **argv)
 					? (kern_return_t)peer_kr : kr;
 
 				behaved++;
-				if (loser != KERN_NO_ACCESS)
+				if (loser != KERN_NO_ACCESS) {
+					if (odd_refusal < ODD_NAMED) {
+						odd[odd_refusal].round = round;
+						odd[odd_refusal].who =
+						    (kr == KERN_SUCCESS) ? 'b' : 'a';
+						odd[odd_refusal].code = loser;
+					}
 					odd_refusal++;
+				}
 			} else if (wins == 2)
 				torn++;
 			else if (kr == KERN_RESOURCE_SHORTAGE
@@ -741,10 +774,19 @@ main(int argc, char **argv)
 			printf("io_claim_race: [2] every loser was refused "
 			       "with KERN_NO_ACCESS and nothing else\n");
 			passed++;
-		} else
+		} else {
+			unsigned i;
+
 			printf("io_claim_race: [2] WRONG — %u loser%s refused "
 			       "with a code other than KERN_NO_ACCESS\n",
 			       odd_refusal, odd_refusal == 1 ? " was" : "s were");
+			for (i = 0; i < odd_refusal && i < ODD_NAMED; i++)
+				printf("io_claim_race:     round %u: %c lost and "
+				       "was refused with %s (kr=%d) (#602)\n",
+				       odd[i].round, odd[i].who,
+				       claim_code_name(odd[i].code),
+				       (int) odd[i].code);
+		}
 	}
 
 	/*
