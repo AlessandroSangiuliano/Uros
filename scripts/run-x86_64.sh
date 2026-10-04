@@ -179,6 +179,19 @@ DOUBLE_FAULT='breaking the stack on purpose'
 # silently continuing to pass.
 EXPECTED_END='No bootstrap code loaded with the kernel'
 
+# 🔴 A PANIC, IN EITHER OF ITS TWO SHAPES (#624).
+#
+# `panic(cpu' is the first line, and the one line of a panic that is NOT sure to
+# arrive whole: another processor's output can land inside it ("thread_ipnfanic(cpu
+# 1): Debugoger..." on OMEGA, entry 22).  Every processor's `cpu N backtrace
+# (addr2line ...)' header comes after it, from x86_64_backtrace_after(), which only
+# the two ways of dying call -- halt_cpu()'s panic branch and the fatal trap report
+# -- and each is printed under the backtrace lock, so it arrives whole.  Either
+# shape is a panic.
+PANIC_RE='panic\(cpu|cpu [0-9]+ backtrace \(addr2line'
+# Defined here, above verdict() and the --judge path that calls it before the
+# rest of this file has run.
+
 verdict() {
 # 🔑 Read out of the LOG and not out of the live variable, so that --judge on a
 # log taken weeks ago says what made it.  A log with no conditions block is one
@@ -222,6 +235,14 @@ UNKNOWNS=$(grep -ac "$UNKNOWN_VERDICT" "$LOG" || true)
 BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
 	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
+# #624: a panic whose first line arrived in pieces still leaves its backtraces
+# whole.  One of them names it -- once, and only when no whole `panic(cpu' line
+# does, so a panic is still one unexplained line and not one per processor.
+if ! grep -aq 'panic(cpu' "$LOG"; then
+	SHREDDED=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
+	[ -n "$SHREDDED" ] && BAD=$(printf '%s\n%s' "$BAD" \
+		"PANIC (#624), its first line in pieces: $SHREDDED" | sed '/^$/d')
+fi
 # #578: a line that carries two programs' output is a failure too, and it is
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
@@ -1156,7 +1177,13 @@ while kill -0 "$QPID" 2>/dev/null; do
 	# for the same reason -- see the note there.  🔥 That they are written
 	# TWICE in this file is its own hazard: the first copy was corrected for
 	# act_test's fifth arm and this one would have gone on waiting.
-	if grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; then
+	# 🔴 A PANIC ENDS THE RUN, whatever tests it cut short (#624).  The test
+	# that was running when the machine died will never print its last line,
+	# and waiting for it -- all_reported -- held every panicking run for its
+	# whole quiet budget, twenty minutes under TCG, after the machine had
+	# stopped.  The wait below still lets the backtraces finish.
+	if grep -aqE "$PANIC_RE" "$LOG" \
+	   || { grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; }; then
 		# #599: a panic is not over at its first line.  The console's
 		# final copy and every processor's backtrace come after it, at
 		# the wire's pace -- four processors' worth is seconds of bytes
@@ -1164,7 +1191,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		# line, whatever was still coming.  So a run that ends in a panic
 		# waits until its log has stopped growing for three seconds,
 		# within a minute; every other end is as it was.
-		if grep -aq 'panic(cpu' "$LOG"; then
+		if grep -aqE "$PANIC_RE" "$LOG"; then
 			_PANIC_SIZE=-1
 			_PANIC_STILL=0
 			_PANIC_WAITED=0
