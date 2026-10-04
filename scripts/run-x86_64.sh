@@ -1206,6 +1206,20 @@ while kill -0 "$QPID" 2>/dev/null; do
 	sleep 0.2
 done
 
+# 🔴 A run cut short with the gdb stub on is walked before it is killed (#526).
+#
+# The kill below throws away the one thing a stall leaves: the machine in the
+# state it stopped in.  A run started with -s and then killed anyway is a
+# capture asked for and thrown away -- which is how #526's first A/B lost its
+# chance, and why the user had to ask why the stub was not on from the start.
+# So with the stub on qemu's command line, the threads are walked first, into
+# a file beside the log, and the kill comes after.
+if [ "$CUT_SHORT" = 1 ] && printf '%s\n' "$@" | grep -qx -- '-s'; then
+	timeout 180 gdb -batch -x "$REPO/scripts/x86_64-walk-threads.py" \
+		"$BUILD/export/uros/boot/mach_kernel" > "$LOG.walk.txt" 2>&1
+	echo "  cut short with the stub on: the threads were walked before the kill, $LOG.walk.txt"
+fi
+
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 
