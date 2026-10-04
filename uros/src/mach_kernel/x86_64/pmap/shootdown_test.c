@@ -30,10 +30,11 @@
  *     repoints the entry in place -- never through an empty entry, which a
  *     reader would fault on -- and calls tlb_flush_range().  Then it reads
  *     the page, on whatever processor it is on now: anything but the number
- *     it wrote is a translation that outlived the shootdown.  Readers bound
- *     one to each processor read every page without pause, so that whichever
- *     processor a remapper arrives at holds the old translation, and check
- *     it themselves whenever no remap of that page is in flight.
+ *     it wrote is a translation that outlived the shootdown.  Every remapper
+ *     reads every page before each remap, and readers bound one to each
+ *     processor read them all without pause, so that whichever processor a
+ *     remapper arrives at holds the old translation; the readers check it
+ *     themselves whenever no remap of that page is in flight.
  * [2] Threads call ipi_call_mask() with every processor in the set, their
  *     own included, for the call to strike.  A call sent to its own sender
  *     ends the boot with #638's panic, which names it -- so [2] runs last.
@@ -158,6 +159,7 @@ shoot_remap_body(void)
 {
 	struct shoot_page	*p = &shoot_pages[atomic_add32(&shoot_claimed, 1)];
 	uint64_t		ops = 0, stale = 0;
+	uint32_t		k;
 
 	atomic_add32(&shoot_started, 1);
 	while (!shoot_go)
@@ -169,6 +171,17 @@ shoot_remap_body(void)
 		pt_entry_t	e = *p->entry;
 		int		before, after;
 		uint64_t	seen;
+
+		/*
+		 * Every page first, so that whichever processor this is holds
+		 * a translation for each -- and a remapper that arrives here
+		 * half-way through its shootdown finds its own page's old one.
+		 * The readers alone did not see to it: a reader has its
+		 * processor about a third of the time, and with the window
+		 * open only 3 of 25 moved remaps found the old translation.
+		 */
+		for (k = 0; k < shoot_npages; k++)
+			(void) *(volatile uint64_t *) shoot_pages[k].base;
 
 		*(volatile uint64_t *) (p->base + (i + 1) * PAGE_SIZE_4K) = n;
 		p->gen_begin = n;
