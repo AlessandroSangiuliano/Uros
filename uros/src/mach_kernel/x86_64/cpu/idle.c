@@ -151,15 +151,15 @@ idle_say_level(int mycpu, struct idle_state *st)
 	if (nm != 0)
 		printf("idle: processor %d went to wait at level %u, %u time(s) "
 		       "so far -- WRONG; it was raised from zero by %s+0x%lx on "
-		       "thread %p and never lowered; the idle loop waits at zero "
-		       "now (#526)\n", mycpu, st->found_level, st->levels_found,
-		       nm, (unsigned long) off, st->found_on);
+		       "thread %p and never lowered (#526)\n", mycpu,
+		       st->found_level, st->levels_found, nm,
+		       (unsigned long) off, st->found_on);
 	else
 		printf("idle: processor %d went to wait at level %u, %u time(s) "
 		       "so far -- WRONG; it was raised from zero at %p on thread "
-		       "%p and never lowered; the idle loop waits at zero now "
-		       "(#526)\n", mycpu, st->found_level, st->levels_found,
-		       (void *)(uintptr_t) st->found_by, st->found_on);
+		       "%p and never lowered (#526)\n", mycpu, st->found_level,
+		       st->levels_found, (void *)(uintptr_t) st->found_by,
+		       st->found_on);
 }
 
 void
