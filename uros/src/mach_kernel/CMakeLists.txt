@@ -115,6 +115,9 @@ option(UROS_WIDEN_617_WINDOW "Build for #617's test: a thread making its first r
 option(UROS_ABLATE_617_RETURN_AST "Build the #617 ablation: thread_return_ast() checks need_ast with interrupts on, so a thread preempted between reading its processor's number and that processor's AST word reads another's (with UROS_WIDEN_617_WINDOW, pthread_test [31] must lose embryos to ring 3 and the return check say WRONG)" OFF)
 # #526, x86_64: splx() finds the per-CPU block before it turns interrupts off again.
 option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this processor's block with interrupts still on, so a thread preempted at level zero finishes its raise in the block of the processor it left (x86-64 -E, GRUB entry 30: must say WRONG)" OFF)
+# #638, x86_64: a TEST option, not an ablation -- the shootdown's two windows widened, so that
+# the test can show what a thread moved inside them does, with the fixes and without.
+option(UROS_WIDEN_638_WINDOW "Build for #638's test: while -J runs, a shootdown spins for 50 us between deciding which processor it is on and acting on it (a thread moved inside the spin: -J arm [1] must find a stale translation, arm [2] a cross-call to its own sender)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -693,6 +696,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_526_SPLX_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_526_SPLX_WINDOW=1)
       message(STATUS "#526 ablation: splx() finds the per-CPU block with interrupts on (x86_64)")
+  endif()
+  if(UROS_WIDEN_638_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE WIDEN_638_WINDOW=1)
+      message(STATUS "#638 test: the shootdown's windows widened while -J runs (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)

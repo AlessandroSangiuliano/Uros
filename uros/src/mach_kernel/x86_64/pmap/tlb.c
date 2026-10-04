@@ -156,6 +156,9 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 		 * Costs nothing while there is nobody else: ipi_call_others()
 		 * returns at once when this is the only processor online.
 		 */
+#if	WIDEN_638_WINDOW
+		shootdown_widen();	/* between the local flush and the call */
+#endif
 		ipi_call_others(tlb_flush_handler, &r);
 		return;
 	}
@@ -191,6 +194,9 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	if (using == 0)
 		return;
 
+#if	WIDEN_638_WINDOW
+	shootdown_widen();		/* between the local flush and the call */
+#endif
 	ipi_call_mask(using, tlb_flush_handler, &r);
 }
 

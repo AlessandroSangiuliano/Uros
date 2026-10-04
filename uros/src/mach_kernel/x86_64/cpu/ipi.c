@@ -19,6 +19,7 @@
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
+#include <time/tsc.h>		/* #638: the widened windows' clock */
 #include <trap/trap.h>
 
 
@@ -189,6 +190,24 @@ uint64_t ipi_calls_served(uint32_t apic_id)
 	return answer_count_of(&served, apic_id);
 }
 
+#if	WIDEN_638_WINDOW
+volatile int shootdown_widen_armed;
+
+/* #638's test only: see <cpu/ipi.h>.  Nothing before the TSC is calibrated. */
+void shootdown_widen(void)
+{
+	uint64_t span, t0;
+
+	if (!shootdown_widen_armed || tsc_hz() == 0)
+		return;
+
+	span = tsc_hz() / 1000000 * WIDEN_638_US;
+	t0 = rdtsc();
+	while (rdtsc() - t0 < span)
+		cpu_pause();
+}
+#endif
+
 void ipi_call_others(void (*fn)(void *), void *arg)
 {
 	unsigned targets = smp_online_count() - 1;
@@ -254,6 +273,10 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 
 	if (mask == 0)
 		return;
+
+#if	WIDEN_638_WINDOW
+	shootdown_widen();		/* between deciding and sending */
+#endif
 
 	/* Same reason as ipi_call_others(): see the comment there. */
 	if (!interrupts_enabled())
