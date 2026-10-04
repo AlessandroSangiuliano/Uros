@@ -73,9 +73,10 @@ void pmap_bootstrap(void)
  *
  * ⚠️ Six, and it did come back here (#412): a destroyed space keeps its slot
  * until a grace period has passed, and no boot self-test lives to see one, so
- * every earlier test's space is still holding a slot when the PCID test asks
- * for its two.  It ran out at four; the line pmap_init() prints says how many
- * the boot really used.
+ * every earlier test's space still holds a slot when a later one asks.  The
+ * PCID test's first version wanted nine spaces and ran out at four; the one
+ * that asks with two brings the boot to three (the line pmap_init() prints,
+ * omen, 04/10/2026), and six leaves room for the next test that wants two.
  */
 #define PMAP_BOOT_MAX	6
 
