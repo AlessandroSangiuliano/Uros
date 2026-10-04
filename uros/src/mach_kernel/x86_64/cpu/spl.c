@@ -23,6 +23,15 @@
 #endif
 
 /*
+ * The switch that puts #526's window back: splx() finds this processor's
+ * block with interrupts still on.  -E (GRUB entry 30) has to say WRONG with
+ * it, which is how the correction is shown to be the thing that matters.
+ */
+#ifndef	ABLATE_526_SPLX_WINDOW
+#define	ABLATE_526_SPLX_WINDOW	0
+#endif
+
+/*
  * #526: percpu_ipl(), one instruction.  percpu()->ipl was two, and a thread
  * preempted between them read the level of the processor it had left.
  */
@@ -149,30 +158,66 @@ static void spl_replay(struct percpu *p)
 
 spl_t splx(spl_t level)
 {
-	struct percpu *p = percpu();
-	spl_t old = p->ipl;
-	int enabled = interrupts_enabled();
+	struct percpu	*p;
+	spl_t		old;
+	int		enabled;
 
+#if	ABLATE_526_SPLX_WINDOW
+	/* #526's ablation: the block found with interrupts still on. */
+	p = percpu();
+	old = p->ipl;
+	enabled = interrupts_enabled();
 	if (level == old)
 		return old;
-
-	/* #526: a raise from zero, recorded for the idle loop to name. */
-	if (old == SPL0) {
-		p->raised_by = (uint64_t)(uintptr_t) __builtin_return_address(0);
-		p->raised_on = p->active_thread;
-	}
+	interrupts_disable();
+#else
+	/*
+	 * Nothing to change, answered in one instruction and with nothing
+	 * turned off.  The answer cannot go stale: a thread can be moved to
+	 * another processor only at level zero (trap_take_ast() asks), and a
+	 * thread at level zero is at level zero wherever it resumes.
+	 */
+	if (percpu_ipl() == level)
+		return level;
 
 	/*
-	 * The level and the queue are this processor's, but an interrupt
-	 * arriving between reading one and writing the other would see a state
-	 * that is neither. Interrupts off across the transition costs two
-	 * instructions and removes the case entirely.
+	 * 🔴 INTERRUPTS OFF BEFORE THE BLOCK IS FOUND, NOT AFTER (#526).
+	 *
+	 * The level and the queue are this processor's, and "this processor"
+	 * is a question whose answer changes at level zero: an interrupt that
+	 * lands there may preempt the thread, and it may resume anywhere.
+	 * This used to find the block first and turn interrupts off only for
+	 * the write, so a raise preempted in between finished on another
+	 * processor, through a pointer to the block it had left.  That
+	 * processor went on at SPLHI under somebody else's thread, with
+	 * nobody to lower it, deferring its own tick -- on the master,
+	 * timeout_tick() stopped and every timed wait slept for good.  And the
+	 * thread itself went on at level zero, believing it was at SPLHI.
+	 * -E (cpu/spl_test.c) counts both faces; it found 15 split raises in
+	 * 17 moves on the first boot it was given.
+	 *
+	 * With interrupts off nothing can take the thread off this processor,
+	 * so the block found is the block written.
 	 */
+	enabled = interrupts_enabled();
 	interrupts_disable();
-	p->ipl = level;
+	p = percpu();
+	old = p->ipl;
+#endif
 
-	if (level < old)
-		spl_replay(p);
+	if (level != old) {
+		/* #526: a raise from zero, recorded for the idle loop to name. */
+		if (old == SPL0) {
+			p->raised_by =
+			    (uint64_t)(uintptr_t) __builtin_return_address(0);
+			p->raised_on = p->active_thread;
+		}
+
+		p->ipl = level;
+
+		if (level < old)
+			spl_replay(p);
+	}
 
 	if (enabled)
 		interrupts_enable();

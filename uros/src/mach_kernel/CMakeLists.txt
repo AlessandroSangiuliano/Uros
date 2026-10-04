@@ -108,6 +108,8 @@ option(UROS_ABLATE_612_LEAVE_MAPPED "Build the #612 ablation: map_selftest and t
 option(UROS_ABLATE_608_NO_DRAIN_THREAD "Build the #608 ablation: no RCU drain thread, only the idle loop runs callbacks (x86-64 -R: with every processor busy the queue must grow and the bench say WRONG)" OFF)
 # #526, both targets: the idle loop restores the level it found again, instead of waiting at zero.
 option(UROS_ABLATE_526_IDLE_RESTORES "Build the #526 ablation: the idle loop restores the level it found (a raised one is held for ever; entry 22 under TCG at 1.4 GHz stalls about once in 30 boots)" OFF)
+# #526, x86_64: splx() finds the per-CPU block before it turns interrupts off again.
+option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this processor's block with interrupts still on, so a thread preempted at level zero finishes its raise in the block of the processor it left (x86-64 -E, GRUB entry 30: must say WRONG)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -674,6 +676,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_526_IDLE_RESTORES)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_526_IDLE_RESTORES=1)
       message(STATUS "#526 ablation: the idle loop restores the level it found (x86_64)")
+  endif()
+  if(UROS_ABLATE_526_SPLX_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_526_SPLX_WINDOW=1)
+      message(STATUS "#526 ablation: splx() finds the per-CPU block with interrupts on (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)

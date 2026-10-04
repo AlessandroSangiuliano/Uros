@@ -136,9 +136,18 @@ struct percpu {
 	 * (#409/#322).
 	 *
 	 * Here rather than in a static array indexed by processor, because the
-	 * whole point of the software level is that reading and writing it
-	 * costs one %gs-relative instruction — an array would cost the index
-	 * first, and the index is the thing %gs already is.
+	 * whole point of the software level is that reading it costs one
+	 * %gs-relative instruction — an array would cost the index first, and
+	 * the index is the thing %gs already is.
+	 *
+	 * 🔴 READ IN ONE INSTRUCTION, WRITTEN WITH INTERRUPTS OFF (#526).  This
+	 * comment used to say reading AND writing cost one instruction, and
+	 * splx() did neither: it found the block, then read and wrote through
+	 * the pointer, with interrupts on until the write.  At level zero a
+	 * thread can be preempted between the two and resume on another
+	 * processor, and it then wrote SPLHI into the block of the one it had
+	 * left.  percpu_ipl() is the one-instruction read; a change is made in
+	 * splx() with interrupts already off when the block is found.
 	 *
 	 * One bit per vector, so deferral is exact: a class-wide flag would
 	 * replay every vector in a class because one of them arrived.
