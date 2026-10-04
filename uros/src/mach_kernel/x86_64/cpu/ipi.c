@@ -105,6 +105,7 @@ static unsigned call_name_silent(uint64_t targets)
 static void ipi_wait_for_acks(uint64_t who, unsigned targets)
 {
 	uint64_t spins;
+	uint32_t me;
 
 	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_load64(&call_acks) >= targets)
@@ -113,6 +114,24 @@ static void ipi_wait_for_acks(uint64_t who, unsigned targets)
 	}
 	if (atomic_load64(&call_acks) >= targets)
 		return;
+
+	/*
+	 * 🔴 A CALL THAT NAMES ITS OWN SENDER (#638).
+	 *
+	 * The sender waits with call_lock held, and the hold masks interrupts,
+	 * so a target set that includes it can only time out -- and the line
+	 * below then reports a processor that "never answered" when it was
+	 * never able to.  Both callers strike their own bit before sending, so
+	 * the bit can only be here if the strike was made as another processor:
+	 * the thread decided who it was and was moved before it sent.  Asked
+	 * here, under the lock, where this thread can no longer move.
+	 */
+	me = percpu_apic_id();
+	if (me < SMP_MAX_CPUS && (who & (1ULL << me)) != 0)
+		printf("ipi: this cross-call names the processor sending it "
+		       "(APIC id %u): its targets were decided on another "
+		       "processor, before the thread was moved here (#638)\n",
+		       me);
 
 	panic("ipi: %u of %u processors never answered a cross-call "
 	      "(targets 0x%llx, %llu answers arrived)",
