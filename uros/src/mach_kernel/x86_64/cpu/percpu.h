@@ -29,6 +29,7 @@
 #define PERCPU_KERNEL_RSP	16
 #define PERCPU_USER_RSP		24
 #define PERCPU_PREEMPT_LEVEL	48
+#define PERCPU_IPL		56
 #define PERCPU_SYSCALL_TSC	120
 #define PERCPU_SYSCALL_RET_CYC	128
 #define PERCPU_SYSCALL_RET_CNT	136
@@ -135,9 +136,18 @@ struct percpu {
 	 * (#409/#322).
 	 *
 	 * Here rather than in a static array indexed by processor, because the
-	 * whole point of the software level is that reading and writing it
-	 * costs one %gs-relative instruction — an array would cost the index
-	 * first, and the index is the thing %gs already is.
+	 * whole point of the software level is that reading it costs one
+	 * %gs-relative instruction — an array would cost the index first, and
+	 * the index is the thing %gs already is.
+	 *
+	 * 🔴 READ IN ONE INSTRUCTION, WRITTEN WITH INTERRUPTS OFF (#526).  This
+	 * comment used to say reading AND writing cost one instruction, and
+	 * splx() did neither: it found the block, then read and wrote through
+	 * the pointer, with interrupts on until the write.  At level zero a
+	 * thread can be preempted between the two and resume on another
+	 * processor, and it then wrote SPLHI into the block of the one it had
+	 * left.  percpu_ipl() is the one-instruction read; a change is made in
+	 * splx() with interrupts already off when the block is found.
 	 *
 	 * One bit per vector, so deferral is exact: a class-wide flag would
 	 * replay every vector in a class because one of them arrived.
@@ -309,6 +319,17 @@ struct percpu {
 	 */
 	uint64_t user_returns;
 
+	/*
+	 * #526: the last raise of this processor's level from zero -- where it
+	 * was asked for, and on which thread.  A level left raised never comes
+	 * back to zero, so after such a leak no later raise from zero overwrites
+	 * these: they name the raise that was never lowered.  Per processor
+	 * because splx() writes them, on a path #392 measured; after the
+	 * asserted fields so that no offset the assembly knows moves.
+	 */
+	uint64_t raised_by;
+	void	*raised_on;
+
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is
@@ -340,6 +361,8 @@ _Static_assert(__builtin_offsetof(struct percpu, kernel_rsp) == PERCPU_KERNEL_RS
 	       "percpu kernel_rsp moved");
 _Static_assert(__builtin_offsetof(struct percpu, preemption_level)
 	       == PERCPU_PREEMPT_LEVEL, "percpu preemption_level moved");
+_Static_assert(__builtin_offsetof(struct percpu, ipl) == PERCPU_IPL,
+	       "percpu ipl moved");
 _Static_assert(__builtin_offsetof(struct percpu, user_rsp) == PERCPU_USER_RSP,
 	       "percpu user_rsp moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_tsc)
@@ -444,6 +467,48 @@ static inline uint32_t percpu_preempt_level(void)
 	__asm__ volatile("movl %%gs:%c1, %0"
 			 : "=r"(d) : "i"(PERCPU_PREEMPT_LEVEL));
 	return d;
+}
+
+/*
+ * This processor's interrupt priority level, in one instruction (#526).
+ *
+ * One instruction is the whole point, and percpu()->ipl is two: the block's
+ * address, then the field.  A thread preempted between them reads the level
+ * of the processor it left.  An interrupt cannot land inside one
+ * instruction, so this answers for the processor the thread is on when it
+ * reads -- and a thread that moves after reading was at level zero, which
+ * it is on whichever processor it resumes.
+ */
+static inline uint32_t percpu_ipl(void)
+{
+	uint32_t l;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(l) : "i"(PERCPU_IPL));
+	return l;
+}
+
+/*
+ * The two syscall words from C, one instruction each, for percpu_ipl()'s
+ * reason (#526): percpu()->kernel_rsp is the block's address and then the
+ * field, and a thread preempted between them reads -- or writes -- the
+ * block of the processor it left.  kernel_rsp is set at every switch for
+ * the thread coming in, so read in one instruction it is this thread's on
+ * whichever processor it runs.
+ */
+static inline uint64_t percpu_kernel_rsp(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("movq %%gs:%c1, %0"
+			 : "=r"(v) : "i"(PERCPU_KERNEL_RSP));
+	return v;
+}
+
+static inline void percpu_set_user_rsp(uint64_t v)
+{
+	__asm__ volatile("movq %0, %%gs:%c1"
+			 : : "r"(v), "i"(PERCPU_USER_RSP) : "memory");
 }
 
 /*

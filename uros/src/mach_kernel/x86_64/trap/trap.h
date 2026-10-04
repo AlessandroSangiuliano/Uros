@@ -439,6 +439,12 @@ struct trap_paranoid_record {
 
 const struct trap_paranoid_record *trap_last_paranoid(void);
 
+/*
+ * #617: says, once, if a return to ring 3 left with an AST pending.  The idle
+ * loop calls it, from thread context.
+ */
+void thread_return_ast_report(void);
+
 /* Forget the last one, so that "it happened" can be distinguished from "it
  * happened earlier".  A test that only checks the contents of this record
  * would pass on a stale one from a previous experiment. */

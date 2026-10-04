@@ -3273,6 +3273,18 @@ idle_thread_continue(void)
 int
 idle_thread_loop(int idle_thread_type)
 #else	/* FAST_IDLE */
+/*
+ * #526: the idle loop restores the level it found again, as it did before.
+ */
+#ifndef	ABLATE_526_IDLE_RESTORES
+#define	ABLATE_526_IDLE_RESTORES	0
+#endif
+#if	ABLATE_526_IDLE_RESTORES
+#define	IDLE_WAIT_SPL(s)	(s)
+#else
+#define	IDLE_WAIT_SPL(s)	MACHINE_IDLE_SPL
+#endif
+
 void
 idle_thread_continue(void)
 #endif	/* FAST_IDLE */
@@ -3375,6 +3387,7 @@ idle_thread_continue(void)
 		urmach_rcu_idle_enter();
 
 		s = splsched();
+		machine_idle_found_level(s);	/* #526: see below */
 		while ((*threadp == (volatile thread_t)THREAD_NULL) &&
 #if	FAST_IDLE
 		       (idle_thread_type == REAL_IDLE_THREAD ||
@@ -3407,7 +3420,7 @@ idle_thread_continue(void)
 			if (need_ast[mycpu] &~ AST_SCHEDULING) {
 				/* don't allow scheduling ASTs */
 				need_ast[mycpu] &= ~AST_SCHEDULING;
-				ast_taken(FALSE, AST_ALL, s
+				ast_taken(FALSE, AST_ALL, IDLE_WAIT_SPL(s)
 #if	FAST_IDLE
 					  ,idle_thread_type
 #endif	/* FAST_IDLE */
@@ -3415,7 +3428,25 @@ idle_thread_continue(void)
 				/* back at spllo */
 			}
 			else
-				splx(s);
+				/*
+				 * 🔴 Zero, not `s' (#526).  `s' is whatever
+				 * level this processor had when the loop looked,
+				 * and restoring it is right for every thread but
+				 * this one: the idle thread holds nothing, and a
+				 * raised level it found and put back was held for
+				 * ever -- each pass sampled it again and restored
+				 * it again.  At SPLHI that defers the processor's
+				 * own tick; on the master, timeout_tick() then
+				 * never runs and every timed wait in the machine
+				 * sleeps.  Seen as `s' = 14 in this frame on a
+				 * wedged kernel, and 0 on the other processors.
+				 * The level found is said by
+				 * machine_idle_found_level(), not mended in
+				 * silence.  (This was also the intent of the
+				 * `Idle thread at spl > 0?' check above, which
+				 * was never compiled.)
+				 */
+				splx(IDLE_WAIT_SPL(s));
 
 			/* #319: spin-wait hint (rep;nop) -- eases the memory
 			 * pipeline and the SMT sibling while idle-polling. */
@@ -3429,6 +3460,7 @@ idle_thread_continue(void)
 			machine_idle(mycpu);
 #endif /* POWER_SAVE */
 			s = splsched();
+			machine_idle_found_level(s);	/* #526 */
 		}
 
 		/* #331 step 2: leaving idle -- about to run a real thread. */
@@ -3598,7 +3630,14 @@ idle_thread_continue(void)
 		break;	/* unreachable, all branches above return or panic */
 	    } /* end for(;;) retry */
 
-		splx(s);
+		/*
+		 * #526: back from a thread_run() or thread_block() without a
+		 * continuation, at the level of whoever handed this processor
+		 * back.  Zero, for the reason given at the wait above: `s' was
+		 * sampled before the hand-off, and a raised value carried across
+		 * it was put back afterwards.
+		 */
+		splx(IDLE_WAIT_SPL(s));
 	}
 }
 

@@ -398,6 +398,8 @@ must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
 must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#599).'
+must_report 'spl_test: starting' 'spl_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every thread stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside the raises, which is the face of #526 that stops a machine (#526).'
 # ⚠️ The terminator matches any count, not `3 of 3'.  A run that reported "2 of
 # 3" DID finish and its failing arm is already caught as a WRONG line; asking
 # here for the passing count as well would report one defect as two, and would
@@ -1203,6 +1205,20 @@ while kill -0 "$QPID" 2>/dev/null; do
 	fi
 	sleep 0.2
 done
+
+# 🔴 A run cut short with the gdb stub on is walked before it is killed (#526).
+#
+# The kill below throws away the one thing a stall leaves: the machine in the
+# state it stopped in.  A run started with -s and then killed anyway is a
+# capture asked for and thrown away -- which is how #526's first A/B lost its
+# chance, and why the user had to ask why the stub was not on from the start.
+# So with the stub on qemu's command line, the threads are walked first, into
+# a file beside the log, and the kill comes after.
+if [ "$CUT_SHORT" = 1 ] && printf '%s\n' "$@" | grep -qx -- '-s'; then
+	timeout 180 gdb -batch -x "$REPO/scripts/x86_64-walk-threads.py" \
+		"$BUILD/export/uros/boot/mach_kernel" > "$LOG.walk.txt" 2>&1
+	echo "  cut short with the stub on: the threads were walked before the kill, $LOG.walk.txt"
+fi
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true

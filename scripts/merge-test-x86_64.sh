@@ -31,10 +31,12 @@
 # judge, why they are not run.  An entry added to grub.cfg and to nothing here
 # is an entry no merge will run: say it here, one way or the other.
 #
-# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."]
+# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G]
 #   -a  accelerator(s), default both     -s  processors, default 4
 #   -o  directory for the logs, default ./merge-test-logs
 #   -e  only these entries (to see one fail, or to rerun one); a merge runs them all
+#   -G  no gdb stub; by default every run has one (-s, port 1234), so a run cut
+#       short is walked by run-x86_64.sh before it is killed
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
 # default is tested the same way.  The exit status is the number of entries
 # judged wrong (0: every judged entry as it should be).
@@ -44,12 +46,14 @@ ACC=both
 SMP=4
 OUT=./merge-test-logs
 ONLY=""
-while getopts "a:s:o:e:" o; do
+STUB="-s"	# every run with the gdb stub: a run cut short is walked before it is killed (#526); -G turns it off
+while getopts "a:s:o:e:G" o; do
 	case $o in
 	a) ACC=$OPTARG ;;
 	s) SMP=$OPTARG ;;
 	o) OUT=$OPTARG ;;
 	e) ONLY=" $OPTARG " ;;
+	G) STUB="" ;;
 	*) sed -n '/^# Usage:/,/^# judged wrong/p' "$0"; exit 2 ;;
 	esac
 done
@@ -97,6 +101,8 @@ ENTRIES="
 28 harness
 29 harness
 29 harness - 1
+30 harness
+30 harness - 1
 3 harness
 3 harness - 1
 4 harness
@@ -124,7 +130,12 @@ judge() {	# entry verdict log-of-the-harness full-log
 	esac
 }
 
-echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}"
+# The stub listens on one port, and a qemu already on it would make every run here refuse to start.
+if [ -n "$STUB" ] && ss -ltn 2>/dev/null | grep -q ':1234 '; then
+	echo "merge-test: port 1234 is in use, so no run could start with the gdb stub -- free it, or -G to run without" >&2
+	exit 2
+fi
+echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}${STUB:+, gdb stub on every run}"
 echo "$SKIPPED" | sed '/^$/d; s/^/merge-test: not run -- /'
 while read -r e v opt cpus; do
 	[ -n "$e" ] || continue
@@ -139,7 +150,7 @@ while read -r e v opt cpus; do
 		tag="e$e-$a$n${opt:+-${opt##* }}"
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
-		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" ) > "$h" 2>&1
+		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
 		if judge "$e" "$v" "$h" "$f"; then
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
 		else
