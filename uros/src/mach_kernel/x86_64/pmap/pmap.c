@@ -770,6 +770,9 @@ void pmap_activate_boot(pmap_t pmap)
 #ifndef	ABLATE_412_GEN_CHECK
 #define	ABLATE_412_GEN_CHECK	0
 #endif
+#ifndef	ABLATE_412_REUSE_KEEPS
+#define	ABLATE_412_REUSE_KEEPS	0
+#endif
 
 /*
  * The CR3 that loads `pmap' on this processor (#412).  Called with interrupts
@@ -790,7 +793,8 @@ void pmap_activate_boot(pmap_t pmap)
  * entries discarded in the same instruction -- there is no path by which one
  * space's entries reach another, and none that needs every processor's
  * agreement.  UROS_ABLATE_412_GEN_CHECK keeps a found slot's entries whatever
- * its generation says.
+ * its generation says, and UROS_ABLATE_412_REUSE_KEEPS keeps the previous
+ * owner's entries when a slot changes hands.
  */
 static uint64_t pmap_cr3_for(struct percpu *pc, pmap_t pmap)
 {
@@ -810,7 +814,8 @@ static uint64_t pmap_cr3_for(struct percpu *pc, pmap_t pmap)
 		pc->pcid_victim = (s + 1) % PCID_SLOTS;
 		pc->pcid_slot[s].ctx_id = pmap->ctx_id;
 		pc->pcid_slot[s].gen = gen;
-		return pmap->root_pa | (s + 1);
+		return pmap->root_pa | (s + 1)
+		       | (ABLATE_412_REUSE_KEEPS ? CR3_NOFLUSH : 0);
 	}
 
 	if (pc->pcid_slot[s].gen >= gen || ABLATE_412_GEN_CHECK)

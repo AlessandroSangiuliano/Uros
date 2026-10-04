@@ -120,6 +120,8 @@ option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this p
 option(UROS_WIDEN_638_WINDOW "Build for #638's test: while -J runs, a shootdown spins for 50 us between deciding which processor it is on and acting on it (a thread moved inside the spin: -J arm [1] must find a stale translation, arm [2] a cross-call to its own sender)" OFF)
 # #412, x86_64: a switch keeps a PCID's entries whenever the space has a slot, whatever its generation says.
 option(UROS_ABLATE_412_GEN_CHECK "Build the #412 ablation: pmap_activate() keeps a found slot's entries without asking the space's generation, so a change made while the space was only cached survives the switch back (the cross-space self-test must say WRONG under KVM with PCID; TCG has no PCID)" OFF)
+# #412, x86_64: a slot that changes hands keeps the previous owner's entries.
+option(UROS_ABLATE_412_REUSE_KEEPS "Build the #412 ablation: a PCID given to a new space keeps the entries of the space that held it, so one space can read another's memory through them (the cross-space self-test's arm [2] must say WRONG under KVM with PCID)" OFF)
 # #437, x86_64: tlb_flush_local_all() reloads CR3 only, and leaves global entries where they are.
 option(UROS_ABLATE_437_FLUSH_KEEPS_GLOBALS "Build the #437 ablation: the whole-TLB flush is a bare CR3 reload, which keeps global entries (under KVM or on the metal, the global split probe must name processors that wrote through a page narrowed after its split; TCG reloads everything on a CR3 write and cannot)" OFF)
 # #639, x86_64: the application processors keep the control registers the trampoline left them again.
@@ -711,6 +713,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_WIDEN_638_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE WIDEN_638_WINDOW=1)
       message(STATUS "#638 test: the shootdown's windows widened while -J runs (x86_64)")
+  endif()
+  if(UROS_ABLATE_412_REUSE_KEEPS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_412_REUSE_KEEPS=1)
+      message(STATUS "#412 ablation: a PCID changing hands keeps the old owner's entries (x86_64)")
   endif()
   if(UROS_ABLATE_412_GEN_CHECK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_412_GEN_CHECK=1)
