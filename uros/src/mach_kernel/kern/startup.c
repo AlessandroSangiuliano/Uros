@@ -248,6 +248,11 @@
 extern int task_swap_on;
 #endif	/* TASK_SWAPPER */
 
+/* #608: the RCU drain thread is not started; only the idle loop drains. */
+#ifndef	ABLATE_608_NO_DRAIN_THREAD
+#define	ABLATE_608_NO_DRAIN_THREAD	0
+#endif
+
 /* Externs */
 extern	void rtclock_reset(void);
 
@@ -457,6 +462,14 @@ start_kernel_threads(void)
 #endif	/* TASK_SWAPPER */
 	(void) kernel_thread(kernel_task, sched_thread, (char *) 0);
 	(void) kernel_thread(kernel_task, timeout_thread, (char *) 0);
+
+	/*
+	 * #608: the thread that runs RCU callbacks on a machine that never
+	 * idles -- the idle loop was the only thing that ran them.
+	 */
+	if (!ABLATE_608_NO_DRAIN_THREAD)
+		(void) kernel_thread(kernel_task, urmach_rcu_drain_thread,
+				     (char *) 0);
 #if	NORMA_VM
 	(void) kernel_thread(kernel_task, vm_object_thread, (char *) 0);
 #endif	/* NORMA_VM */

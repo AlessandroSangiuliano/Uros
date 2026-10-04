@@ -251,15 +251,26 @@ extern void	urmach_rcu_advance(void);
 
 /*
  *	Run whatever is ready.  THREAD CONTEXT ONLY -- a callback frees memory
- *	and may take the zone lock.  The idle loop calls it, and so does any
- *	writer about to block in a grace period, so that a machine which never
- *	goes idle still retires its queue.
+ *	and may take the zone lock.  The idle loop calls it on every pass.
+ *
+ *	🔴 And the idle loop is not enough (#608): a machine whose every
+ *	processor stays busy never runs it.  urmach_rcu_drain_thread() is the
+ *	other way out -- the tick wakes it whenever it completes a grace period
+ *	with callbacks queued.  (This comment used to say that a writer about
+ *	to block in a grace period drained too.  None did.)
  */
 extern void	urmach_rcu_drain(void);
 
-/* How many callbacks are waiting and how many have been handed back. */
+/* The drain's own thread, started with the kernel's threads (#608). */
+extern void	urmach_rcu_drain_thread(void);
+
+/* How many callbacks are waiting and how many have been handed back -- and,
+ * of those handed back, how many by the idle loop and how many by the drain
+ * thread (#608). */
 extern unsigned int	urmach_rcu_queued;
 extern unsigned int	urmach_rcu_retired;
+extern unsigned int	urmach_rcu_retired_idle;
+extern unsigned int	urmach_rcu_retired_thread;
 
 /* One-time init (counters live in BSS-zeroed cpu_data[], so this is a stub). */
 extern void	urmach_rcu_init(void);

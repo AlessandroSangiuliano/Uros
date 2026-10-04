@@ -30,6 +30,12 @@
 #include <kern/cpu_data.h>
 #include <kern/misc_protos.h>		/* printf */
 #include <kern/lock.h>			/* #566: the callback queue */
+#include <kern/processor.h>		/* #608: the drain thread's policy */
+#include <kern/sched.h>			/* #608: BASEPRI_KERNEL */
+#include <kern/sched_prim.h>		/* #608: assert_wait, thread_wakeup */
+#include <kern/thread.h>		/* #608: current_thread */
+#include <kern/thread_swap.h>		/* #608: thread_swappable */
+#include <mach/mach_host_server.h>	/* #608: thread_set_policy */
 
 /*
  *	Full memory fence (SSE2 mfence).  Used once per grace period as the
@@ -84,6 +90,9 @@ static int			 rcu_active;
  * idle loop pays a load instead of a lock.
  */
 static unsigned int		 rcu_drained_gp;
+
+/* #608: what the drain thread waits on and the tick wakes; never read. */
+static int			 rcu_drain_event;
 
 /*
  *	#331 step 2 bring-up watchdog.  A correct grace period ends within a
@@ -359,15 +368,39 @@ urmach_rcu_advance(void)
 	}
 
 	hw_lock_unlock(&rcu_cb_lock);
+
+	/*
+	 * #608: a grace period ended with callbacks waiting, so wake the thread
+	 * that runs them -- after the lock, never under it, as timeout_tick()
+	 * wakes the timeout thread from this same tick.
+	 */
+	if (done && rcu_cb_list != 0)
+		thread_wakeup((event_t) &rcu_drain_event);
 }
 
-void
-urmach_rcu_drain(void)
+/* Whether a grace period has completed since the last drain, with callbacks
+ * queued: the only time a drain can find anything ready. */
+static __inline__ boolean_t
+rcu_drain_due(void)
+{
+	return rcu_cb_list != 0 && rcu_gp != rcu_drained_gp;
+}
+
+/*
+ * Who handed callbacks back: the idle loop or the drain thread (#608).  Kept
+ * apart because the question #608 asks is whether a machine that never idles
+ * still retires its queue, and a total cannot say who retired it.
+ */
+unsigned int	urmach_rcu_retired_idle;
+unsigned int	urmach_rcu_retired_thread;
+
+static void
+rcu_drain_into(unsigned int *by)
 {
 	struct urmach_rcu_head	*ready = 0, *keep = 0, *h, *next;
 	unsigned int		 gp;
 
-	if (rcu_cb_list == 0 || rcu_gp == rcu_drained_gp)
+	if (!rcu_drain_due())
 		return;
 
 	hw_lock_lock(&rcu_cb_lock);
@@ -381,6 +414,7 @@ urmach_rcu_drain(void)
 			h->next = ready;
 			ready = h;
 			urmach_rcu_retired++;
+			(*by)++;
 		} else {
 			h->next = keep;
 			keep = h;
@@ -400,5 +434,72 @@ urmach_rcu_drain(void)
 		next = ready->next;
 		ready->func(ready);
 		ready = next;
+	}
+}
+
+void
+urmach_rcu_drain(void)
+{
+	rcu_drain_into(&urmach_rcu_retired_idle);
+}
+
+/*
+ * 🔴 THE DRAIN'S OWN THREAD (#608).  urmach_rcu_drain() had one caller, the
+ * idle loop, while rcu.h said a writer about to block in a grace period
+ * drained too, so that a machine which never idles would still retire its
+ * queue.  No writer did.  On a machine whose every processor stays busy,
+ * every callback stayed queued until something idled: a destroyed space's
+ * pmap struct, a DMA region's arrays, a retiring I/O or PCI claim slot.  A
+ * claim table "full of retiring slots" refuses with KERN_RESOURCE_SHORTAGE
+ * while those slots are past their grace period, and io_claim_race counts
+ * such rounds (#602).
+ *
+ * So the tick, which completes grace periods, wakes this thread when it
+ * completes one with callbacks queued, and the thread runs what is ready:
+ * thread context, which a callback needs, on a busy machine too, within a
+ * tick or so of the grace period.  It runs at the timeout thread's priority,
+ * above every user thread.  The idle loop still drains as well -- it is
+ * free there, and sooner.
+ *
+ * ⚠️ The wait is asserted BEFORE the last look.  A wakeup that arrives
+ * after assert_wait() makes thread_block() return; one that arrived before
+ * it is gone, and the look after it is what catches that case.
+ */
+void
+urmach_rcu_drain_thread(void)
+{
+	thread_t			self = current_thread();
+	kern_return_t			ret;
+	struct policy_fifo_base		fifo_base;
+	struct policy_fifo_limit	fifo_limit;
+
+	/*
+	 * Not swappable: it is how memory comes back, and a stack it had to
+	 * swap in before handing anything back would be asking for memory
+	 * first.
+	 */
+	thread_swappable(current_act(), FALSE);
+
+	fifo_base.base_priority = BASEPRI_KERNEL + 1;
+	fifo_limit.max_priority = BASEPRI_KERNEL + 1;
+	ret = thread_set_policy(self->top_act, self->processor_set,
+				POLICY_FIFO,
+				(policy_base_t) &fifo_base,
+				POLICY_FIFO_BASE_COUNT,
+				(policy_limit_t) &fifo_limit,
+				POLICY_FIFO_LIMIT_COUNT);
+	if (ret != KERN_SUCCESS)
+		printf("urmach_rcu: the drain thread could not take its "
+		       "priority (kr=%d) and is timeshared (#608)\n", ret);
+
+	for (;;) {
+		rcu_drain_into(&urmach_rcu_retired_thread);
+
+		assert_wait((event_t) &rcu_drain_event, FALSE);
+		if (rcu_drain_due()) {
+			clear_wait(self, THREAD_AWAKENED, FALSE);
+			continue;
+		}
+		thread_block((void (*)(void)) 0);
 	}
 }
