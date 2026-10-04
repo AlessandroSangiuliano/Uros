@@ -30,7 +30,8 @@
  * threads in the one place where the window is most of what they do: a loop
  * of raises from zero, with two threads for every processor so that a quantum
  * running out moves them, and checks the contract after each raise -- the
- * processor the thread is on now is at SPLHI.
+ * processor the thread is on now is at SPLHI.  It runs until twenty raises
+ * have moved, or thirty seconds.
  *
  * Two counts are faces of the defect:
  *
@@ -67,15 +68,23 @@
 #include <time/tsc.h>
 
 #define	SPL_TEST_PER_CPU	2	/* threads a processor: enough to rotate */
-#define	SPL_TEST_SECONDS	2
 
 /*
- * Moves below this and a clean run is NOT ASKED.  Each move is a chance for
- * the window to be the place the thread was taken off, not a certainty, so a
- * handful of moves without a fault says little about a defect that strikes
- * only a share of them.
+ * The run lasts until this many raises have moved, and a clean run with
+ * fewer is NOT ASKED.  Each move is a chance for the window to be the place
+ * the thread was taken off, not a certainty.  With the window open (the
+ * #526 ablation, 13 boots on 04/10/2026) 91 of 98 counted moves split the
+ * raise; twenty moves leave a defect that strikes even a third of them a
+ * chance under one in a thousand of going unseen.
+ *
+ * 🔴 A COUNT, NOT A DURATION.  The first version ran for two seconds, and a
+ * move comes only when a quantum runs out at level zero and another
+ * processor picks the thread up: 1 to 15 counted moves in two seconds, so
+ * every corrected boot said NOT ASKED.  The rate depends on the accelerator
+ * and the clock, and the question does not.
  */
 #define	SPL_TEST_MIN_MOVED	20
+#define	SPL_TEST_MAX_SECONDS	30	/* and NOT ASKED if it takes longer */
 
 static volatile int		spl_test_go;
 static volatile uint32_t	spl_test_started;
@@ -83,7 +92,7 @@ static volatile uint32_t	spl_test_finished;
 static volatile uint64_t	spl_test_deadline;
 
 static volatile uint64_t	spl_test_raises;
-static volatile uint64_t	spl_test_moved;
+static volatile uint64_t	spl_test_moved;		/* as they happen */
 static volatile uint64_t	spl_test_wrong;
 static volatile uint64_t	spl_test_inherited;
 
@@ -98,17 +107,19 @@ static spl_t			spl_test_inherited_level;
 static void
 spl_test_body(void)
 {
-	uint64_t	raises = 0, moved = 0, wrong = 0, inherited = 0;
+	uint64_t	raises = 0, wrong = 0, inherited = 0;
 
 	atomic_add32(&spl_test_started, 1);
 	while (!spl_test_go)
 		cpu_pause();
 
 	/*
-	 * ⚠️ Nothing in the loop but the raise and the check, and the clock
-	 * read only every 64 rounds: time spent at zero outside splx() is time
-	 * in which a preemption lands somewhere harmless, and the point is to
-	 * make the window most of the loop.
+	 * ⚠️ Nothing in the loop but the raise and the check, and the end
+	 * looked for only every 64 rounds: time spent at zero outside splx() is
+	 * time in which a preemption lands somewhere harmless, and the point is
+	 * to make the window most of the loop.  A move is counted where it
+	 * happens, because the moves are what end the run; there are tens of
+	 * them, so the shared counter costs nothing.
 	 */
 	for (;;) {
 		int	before = cpu_number();
@@ -120,7 +131,7 @@ spl_test_body(void)
 		raises++;
 
 		if (after != before)
-			moved++;
+			atomic_add64(&spl_test_moved, 1);
 		if (now != SPLHI) {
 			wrong++;
 			if (atomic_cmpxchg32(&spl_test_wrong_said, 0, 1) == 0) {
@@ -138,12 +149,13 @@ spl_test_body(void)
 			}
 		}
 
-		if ((raises & 63) == 0 && rdtsc() >= spl_test_deadline)
+		if ((raises & 63) == 0
+		    && (spl_test_moved >= SPL_TEST_MIN_MOVED
+			|| rdtsc() >= spl_test_deadline))
 			break;
 	}
 
 	atomic_add64(&spl_test_raises, raises);
-	atomic_add64(&spl_test_moved, moved);
 	atomic_add64(&spl_test_wrong, wrong);
 	atomic_add64(&spl_test_inherited, inherited);
 	atomic_add32(&spl_test_finished, 1);
@@ -258,16 +270,21 @@ spl_raise_split_test(void)
 		return;
 	}
 
+	printf("spl_test: starting: %u threads on %u processors raise from "
+	       "zero to SPLHI until %u raises have moved, for %u s at most "
+	       "(#526)\n", (unsigned) want, (unsigned) ncpu, SPL_TEST_MIN_MOVED,
+	       SPL_TEST_MAX_SECONDS);
+
 	t0 = rdtsc();
-	spl_test_deadline = t0 + hz * SPL_TEST_SECONDS;
+	spl_test_deadline = t0 + hz * SPL_TEST_MAX_SECONDS;
 	spl_test_go = 1;
 
 	if (!spl_test_wait(&spl_test_finished, want, hz,
-			   SPL_TEST_SECONDS + 5)) {
+			   SPL_TEST_MAX_SECONDS + 5)) {
 		printf("spl_test: WRONG — %u of %u threads came back in %u s: "
 		       "a processor stopped scheduling (#526)\n",
 		       (unsigned) spl_test_finished, (unsigned) want,
-		       SPL_TEST_SECONDS + 5);
+		       SPL_TEST_MAX_SECONDS + 5);
 		return;
 	}
 	ms = (rdtsc() - t0) * 1000 / hz;
@@ -298,9 +315,10 @@ spl_raise_split_test(void)
 		       "in the block of the processor it had left (#526)\n");
 	} else if (spl_test_moved < SPL_TEST_MIN_MOVED)
 		printf("spl_test: NOT ASKED — %lu raises were split by a move "
-		       "to another processor, fewer than %u: a raise split "
-		       "half-way had too little chance to show (#563)\n",
-		       (unsigned long) spl_test_moved, SPL_TEST_MIN_MOVED);
+		       "to another processor in %u s, fewer than %u: a raise "
+		       "split half-way had too little chance to show (#563)\n",
+		       (unsigned long) spl_test_moved, SPL_TEST_MAX_SECONDS,
+		       SPL_TEST_MIN_MOVED);
 	else
 		printf("spl_test: PASS — every raise landed on the processor "
 		       "that made it, %lu of them across a move to another "

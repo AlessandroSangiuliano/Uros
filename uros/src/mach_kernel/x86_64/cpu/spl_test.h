@@ -10,8 +10,9 @@
 
 /*
  * Threads that are free to move between processors raise their level from
- * zero to SPLHI and back, as fast as they can, for two seconds, and check
- * after every raise that the processor they are on is the one at SPLHI.
+ * zero to SPLHI and back, as fast as they can, until twenty raises have moved
+ * to another processor (thirty seconds at most), and check after every raise
+ * that the processor they are on is the one at SPLHI.
  * Prints "spl_test: PASS", "WRONG" or "NOT ASKED", and returns: the boot goes
  * on.
  */
