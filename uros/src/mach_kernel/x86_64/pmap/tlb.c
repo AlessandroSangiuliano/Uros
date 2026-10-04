@@ -27,6 +27,14 @@ struct tlb_request {
 
 static struct answer_count served;
 
+/*
+ * #437: the whole-TLB flush back to a bare CR3 reload, which leaves global
+ * entries in place -- the flush this file says not to be wrong about.
+ */
+#ifndef	ABLATE_437_FLUSH_KEEPS_GLOBALS
+#define	ABLATE_437_FLUSH_KEEPS_GLOBALS	0
+#endif
+
 void tlb_flush_local_all(void)
 {
 	uint64_t cr4 = read_cr4();
@@ -45,7 +53,7 @@ void tlb_flush_local_all(void)
 	 * own answer for this.  One read of a control register to be right in
 	 * both worlds.
 	 */
-	if (cr4 & CR4_PGE) {
+	if ((cr4 & CR4_PGE) && !ABLATE_437_FLUSH_KEEPS_GLOBALS) {
 		write_cr4(cr4 & ~CR4_PGE);
 		write_cr4(cr4);
 		return;

@@ -118,6 +118,8 @@ option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this p
 # #638, x86_64: a TEST option, not an ablation -- the shootdown's two windows widened, so that
 # the test can show what a thread moved inside them does, with the fixes and without.
 option(UROS_WIDEN_638_WINDOW "Build for #638's test: while -J runs, a shootdown spins for 50 us between deciding which processor it is on and acting on it (a thread moved inside the spin: -J arm [1] must find a stale translation, arm [2] a cross-call to its own sender)" OFF)
+# #437, x86_64: tlb_flush_local_all() reloads CR3 only, and leaves global entries where they are.
+option(UROS_ABLATE_437_FLUSH_KEEPS_GLOBALS "Build the #437 ablation: the whole-TLB flush is a bare CR3 reload, which keeps global entries (under KVM or on the metal, the global split probe must name processors that wrote through a page narrowed after its split; TCG reloads everything on a CR3 write and cannot)" OFF)
 # #639, x86_64: the application processors keep the control registers the trampoline left them again.
 option(UROS_ABLATE_639_AP_CONTROL "Build the #639 ablation: the application processors keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before (the boot self-test must name them on every application processor, in the census and in the probes)" OFF)
 # #638, x86_64: tlb_flush_range() flushes this processor and cross-calls the others with preemption on again.
@@ -707,6 +709,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_WIDEN_638_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE WIDEN_638_WINDOW=1)
       message(STATUS "#638 test: the shootdown's windows widened while -J runs (x86_64)")
+  endif()
+  if(UROS_ABLATE_437_FLUSH_KEEPS_GLOBALS)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_437_FLUSH_KEEPS_GLOBALS=1)
+      message(STATUS "#437 ablation: the whole-TLB flush keeps global entries (x86_64)")
   endif()
   if(UROS_ABLATE_639_AP_CONTROL)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_639_AP_CONTROL=1)
