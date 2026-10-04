@@ -1788,6 +1788,137 @@ static void control_regs_selftest(void)
 }
 
 /*
+ * 🔴 A SPLIT WITH GLOBAL PAGES ON (#437).
+ *
+ * The direct map's leaves are global, so a processor that has used one keeps
+ * its large translation across every CR3 load.  Splitting that large page and
+ * then narrowing one of its small pages is only real if the split's flush took
+ * the large translation off every processor -- a CR3 reload does not, and a
+ * processor that kept it would still write where the table now says it may
+ * not.  #437's body names the place this matters most: W^X narrowed after a
+ * split, looking applied while not being applied.
+ *
+ * So: every processor reads a page of the direct map that sits in a large
+ * leaf, which leaves the large, global, writable translation in its TLB; the
+ * boot processor splits it down to 4 KiB and narrows that one page to
+ * read-only WITHOUT telling anyone -- an invlpg anywhere inside the large page
+ * would discard the large translation by itself and hide a broken split flush;
+ * and every processor then writes the page.  Each must fault.  The page is a
+ * frame of this test's own, so nothing else is denied anything meanwhile.
+ *
+ * TCG reloads its whole TLB on every CR3 write, global or not, so there the
+ * answer is the same with and without the flush that reaches globals; only a
+ * real TLB -- KVM, or the metal -- can say WRONG.
+ */
+static volatile uint64_t gs_va;
+
+static void gs_warm_here(void *arg)
+{
+	(void) arg;
+	(void) *(volatile uint32_t *)(uintptr_t) gs_va;
+}
+
+static void gs_probe_here(void *arg)
+{
+	int *faulted = arg;
+
+	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+	*faulted = trap_probe_write((volatile void *)(uintptr_t) gs_va);
+	trap_expect_cancel();
+}
+
+static void global_split_selftest(void)
+{
+	uint32_t self = cpu_apic_id();
+	uint64_t root = pmap_kernel()->root_pa, size = 0, frame;
+	int faulted[SMP_MAX_CPUS] = { 0 }, boot_faulted = 0;
+	unsigned asked = 1, through = 0;
+	pt_entry_t *leaf;
+
+	if ((read_cr4() & CR4_PGE) == 0) {
+		kputs("UrMach x86-64: global pages are off, so a split cannot "
+		      "leave a global translation behind — NOT ASKED (#437)\r\n");
+		return;
+	}
+	frame = boot_frame_alloc();
+	if (frame == 0) {
+		kputs("UrMach x86-64: no frame for the global split probe — "
+		      "NOT ASKED (#437)\r\n");
+		return;
+	}
+	gs_va = phys_to_direct(frame);
+	leaf = pmap_walk(root, gs_va, &size);
+	if (leaf == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
+		kputs("UrMach x86-64: the direct map is already 4 KiB under the "
+		      "probe's frame, so there is no large translation to keep — "
+		      "NOT ASKED (#437)\r\n");
+		boot_frame_free(frame);
+		return;
+	}
+
+	/* Every processor caches the large, global, writable translation. */
+	gs_warm_here(0);
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
+		    || !smp_is_online(c->apic_id))
+			continue;
+		ipi_call_mask(1ULL << c->apic_id, gs_warm_here, 0);
+		asked++;
+	}
+
+	/* Down to 4 KiB: each split flushes every processor's TLB. */
+	while (size != PAGE_SIZE_4K && pmap_split_page(PMAP_NULL, gs_va) != 0)
+		(void) pmap_walk(root, gs_va, &size);
+	leaf = pmap_walk(root, gs_va, &size);
+	if (leaf == PT_ENTRY_NULL || size != PAGE_SIZE_4K) {
+		kputs("UrMach x86-64: the probe's page did not split to 4 KiB — "
+		      "WRONG (#437)\r\n");
+		boot_frame_free(frame);
+		return;
+	}
+
+	/* Narrowed, and told to nobody. */
+	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
+
+	gs_probe_here(&boot_faulted);
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
+		    || !smp_is_online(c->apic_id))
+			continue;
+		ipi_call_mask(1ULL << c->apic_id, gs_probe_here,
+			      &faulted[c->apic_id]);
+	}
+
+	/* Writable again, and this time said. */
+	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
+	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
+
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id >= SMP_MAX_CPUS || !smp_is_online(c->apic_id)
+		    || (c->apic_id == self ? boot_faulted : faulted[c->apic_id]))
+			continue;
+		through++;
+		kputs("UrMach x86-64: processor ");
+		kputdec(c->apic_id);
+		kputs(" wrote a page narrowed after its large page was split: "
+		      "the large global translation outlived the split's flush — "
+		      "WRONG (#437)\r\n");
+	}
+	kputs("UrMach x86-64: a page narrowed after a split, with global pages "
+	      "on, on ");
+	kputdec(asked);
+	kputs(through == 0 ? " processors: every write faulted\r\n"
+			   : " processors: some wrote through, WRONG (#437)\r\n");
+	boot_frame_free(frame);
+}
+
+/*
  * Ask the firmware which processors exist.
  *
  * The count is the whole point: it is what #438 will start, and getting it
@@ -7808,6 +7939,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	trap_vectors_selftest();
 	trap_entry_test();
 	control_regs_selftest();
+	global_split_selftest();
 
 	/*
 	 * The double-fault self-test is TERMINAL, and that is why it is behind
