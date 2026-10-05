@@ -1045,8 +1045,8 @@ static mach_port_t		arm_six_port;
  * SYSRET's fault-at-CPL-0 behaviour is Intel's.  On an AMD part the same
  * instruction with the same non-canonical %rcx faults in ring 3, where a fault
  * is ordinary -- so on AMD this arm passes whether the guard in entry.S is
- * there or not.  Measured, not assumed: with -DABLATE_411_CANONICAL=1 the arm
- * still reported six of six on an AMD model, and the same ablated kernel under
+ * there or not.  Measured, not assumed: with ablations/411-canonical.patch the
+ * arm still reported six of six on an AMD model, and the same ablated kernel under
  * `-cpu Skylake-Client' died in a double fault with `instruction: sysret' and
  * the kernel standing on a ring-3 stack.
  *
