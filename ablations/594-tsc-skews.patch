@@ -5,10 +5,10 @@ Run: --entry 12 180 -smp 4
 Expect: the TSC watchdog .*WRONG: (over the last [0-9]+ s the TSC kept time|the TSC ran -?[0-9]+ ppm from its rate)
 
 diff --git a/uros/src/mach_kernel/x86_64/time/tsc_watch.c b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
-index a9a27aa4..74bb5899 100644
+index 72939918..da4f417e 100644
 --- a/uros/src/mach_kernel/x86_64/time/tsc_watch.c
 +++ b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
-@@ -177,9 +177,20 @@ struct watched {
+@@ -131,9 +131,20 @@ struct watched {
  
  static int watch_wakeup;	/* posted by nobody: the timeout ends the wait */
  
@@ -30,12 +30,13 @@ index a9a27aa4..74bb5899 100644
  }
  
  static void watch_sleep(void)
-@@ -469,6 +480,8 @@ void tsc_watch(void)
+@@ -423,6 +434,9 @@ void tsc_watch(void)
  		 */
  		clock_event_drain_reports();
  
 +		if (windows == 2)
 +			skew_from = rdtsc_ordered();
- #if	ABLATE_593_ICR_OPEN
- 		if (windows == 3)
- 			icr_stress();
++
+ 		live = 0;
+ 		for (i = 0; i < n; i++) {
+ 			if (!w[i].live)

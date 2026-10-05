@@ -24,10 +24,10 @@ index 09241537..65831493 100644
  			       &source);
  	if (adopted != 0)
 diff --git a/uros/src/mach_kernel/x86_64/time/tsc_watch.c b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
-index a9a27aa4..bfeaa1d1 100644
+index 72939918..7de540aa 100644
 --- a/uros/src/mach_kernel/x86_64/time/tsc_watch.c
 +++ b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
-@@ -182,6 +182,51 @@ static uint64_t subject_tsc(void)
+@@ -136,6 +136,51 @@ static uint64_t subject_tsc(void)
  	return rdtsc_ordered();
  }
  
@@ -79,7 +79,7 @@ index a9a27aa4..bfeaa1d1 100644
  static void watch_sleep(void)
  {
  	assert_wait((event_t) &watch_wakeup, FALSE);
-@@ -449,6 +494,11 @@ void tsc_watch(void)
+@@ -403,6 +448,11 @@ void tsc_watch(void)
  		       n > 1 ? " and " : "", n > 1 ? w[1].name : "",
  		       WATCH_CONFIRM, bound);
  
@@ -91,11 +91,12 @@ index a9a27aa4..bfeaa1d1 100644
  	for (i = 0; i < n; i++)
  		ruler_point(&w[i].r, subject_tsc, &w[i].prev);
  
-@@ -473,6 +523,7 @@ void tsc_watch(void)
- 		if (windows == 3)
- 			icr_stress();
- #endif
-+		slew_window(windows);
+@@ -423,6 +473,8 @@ void tsc_watch(void)
+ 		 */
+ 		clock_event_drain_reports();
  
++		slew_window(windows);
++
  		live = 0;
  		for (i = 0; i < n; i++) {
+ 			if (!w[i].live)
