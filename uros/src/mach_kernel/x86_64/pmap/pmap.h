@@ -478,6 +478,19 @@ void pmap_protect_kernel(void);
 uint64_t pmap_enable_smep_smap(void);
 
 /*
+ * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor
+ * that loads them, and pmap_protect_kernel() and pmap_enable_smep_smap() run on
+ * the boot processor alone: the application processors of every boot ran
+ * without CR0.WP, SMEP or SMAP.  Without WP the kernel writes through
+ * read-only mappings -- .text's and .rodata's, and the copy-on-write ones
+ * copyout() relies on faulting -- and the access brackets, which read one
+ * global, went on as if SMAP held everywhere.  Each application processor
+ * calls this on its way up, and it applies what the boot processor turned on
+ * instead of deciding again.
+ */
+void pmap_protections_here(void);
+
+/*
  * Make `size` bytes of device registers at physical `pa` reachable, and
  * answer with the address to reach them at.
  *

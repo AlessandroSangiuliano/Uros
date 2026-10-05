@@ -24,4 +24,7 @@ extern void	handoff_wake_test(void);
  */
 extern void	swapper_storm_start(void);
 
+/* An activation's swap state as a word: "coming in", "out" (#642's arms too). */
+extern const char	*swap_state_name(int state);
+
 #endif	/* _X86_64_TRAP_HANDOFF_TEST_H_ */

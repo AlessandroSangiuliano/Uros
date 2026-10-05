@@ -33,6 +33,7 @@
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
 #include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/spl_test.h>	/* #526: -E */
+#include <pmap/shootdown_test.h>	/* #638: -J */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
@@ -45,6 +46,7 @@
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
 #include <trap/handoff_test.h>	/* #607: -Q, the futex hand-off's wake */
+#include <trap/swap_disable_test.h>	/* #642: -Q, thread_swap_disable() */
 #include <ipc/ipc_mqueue.h>	/* ipc_dts_smp, for -N */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
@@ -462,17 +464,21 @@ machine_processors_ready(void)
 			double_panic_test();
 
 		/*
-		 * -Q: the futex hand-off and the waiters it must not switch
-		 * onto -- one the thread swapper has swapped out, one
-		 * thread_stop() has stopped (#607).
+		 * -Q: the thread swapper's races.  The futex hand-off and the
+		 * waiters it must not switch onto -- one the thread swapper has
+		 * swapped out, one thread_stop() has stopped (#607); then
+		 * thread_swap_disable() on an activation the swapper is moving
+		 * (#642).
 		 *
 		 * NOT gated on `want > 1', unlike the two above: the waker and
 		 * the waiter take turns on one processor as well as on two, and
 		 * the uniprocessor is the configuration this project treats as
 		 * first class.  Returns, so the boot goes on.
 		 */
-		if (boot_flag('Q'))
+		if (boot_flag('Q')) {
 			handoff_wake_test();
+			swap_disable_test();
+		}
 
 		/*
 		 * -N: the IPC Direct Thread Switch on (#329) -- x86-64's
@@ -540,6 +546,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('E'))
 			spl_raise_split_test();
+
+		/*
+		 * -J: a shootdown whose thread is moved half-way (#638).  -E's
+		 * reasons; returns, so the boot goes on -- unless its second
+		 * arm finds the defect, which ends the boot with the panic
+		 * that names it.
+		 */
+		if (boot_flag('J'))
+			shootdown_moved_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

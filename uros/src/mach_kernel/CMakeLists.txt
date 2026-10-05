@@ -115,6 +115,15 @@ option(UROS_WIDEN_617_WINDOW "Build for #617's test: a thread making its first r
 option(UROS_ABLATE_617_RETURN_AST "Build the #617 ablation: thread_return_ast() checks need_ast with interrupts on, so a thread preempted between reading its processor's number and that processor's AST word reads another's (with UROS_WIDEN_617_WINDOW, pthread_test [31] must lose embryos to ring 3 and the return check say WRONG)" OFF)
 # #526, x86_64: splx() finds the per-CPU block before it turns interrupts off again.
 option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this processor's block with interrupts still on, so a thread preempted at level zero finishes its raise in the block of the processor it left (x86-64 -E, GRUB entry 30: must say WRONG)" OFF)
+# #638, x86_64: a TEST option, not an ablation -- the shootdown's two windows widened, so that
+# the test can show what a thread moved inside them does, with the fixes and without.
+option(UROS_WIDEN_638_WINDOW "Build for #638's test: while -J runs, a shootdown spins for 50 us between deciding which processor it is on and acting on it (a thread moved inside the spin: -J arm [1] must find a stale translation, arm [2] a cross-call to its own sender)" OFF)
+# #639, x86_64: the application processors keep the control registers the trampoline left them again.
+option(UROS_ABLATE_639_AP_CONTROL "Build the #639 ablation: the application processors keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before (the boot self-test must name them on every application processor, in the census and in the probes)" OFF)
+# #638, x86_64: tlb_flush_range() flushes this processor and cross-calls the others with preemption on again.
+option(UROS_ABLATE_638_FLUSH_UNPINNED "Build the #638 ablation: tlb_flush_range() flushes this processor and cross-calls the others with preemption on, so a thread moved between the two leaves the processor it arrived at unflushed (with UROS_WIDEN_638_WINDOW, -J arm [1] must say WRONG)" OFF)
+# #638, x86_64: ipi_call_mask() strikes its own bit with preemption on again.
+option(UROS_ABLATE_638_STRIKE_UNPINNED "Build the #638 ablation: ipi_call_mask() strikes this processor's bit with preemption on, so a thread moved before it sends sends to itself (with UROS_WIDEN_638_WINDOW, -J arm [2] must end in the panic that names it)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -499,6 +508,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/collect_bench.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/rcu_bench.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/shootdown_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/direct.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/phys.c
@@ -537,6 +547,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/ast_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/wait_preempt_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/handoff_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/swap_disable_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
@@ -693,6 +704,22 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_526_SPLX_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_526_SPLX_WINDOW=1)
       message(STATUS "#526 ablation: splx() finds the per-CPU block with interrupts on (x86_64)")
+  endif()
+  if(UROS_WIDEN_638_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE WIDEN_638_WINDOW=1)
+      message(STATUS "#638 test: the shootdown's windows widened while -J runs (x86_64)")
+  endif()
+  if(UROS_ABLATE_639_AP_CONTROL)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_639_AP_CONTROL=1)
+      message(STATUS "#639 ablation: the application processors keep the trampoline's control registers (x86_64)")
+  endif()
+  if(UROS_ABLATE_638_FLUSH_UNPINNED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_638_FLUSH_UNPINNED=1)
+      message(STATUS "#638 ablation: tlb_flush_range() flushes and cross-calls with preemption on (x86_64)")
+  endif()
+  if(UROS_ABLATE_638_STRIKE_UNPINNED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_638_STRIKE_UNPINNED=1)
+      message(STATUS "#638 ablation: ipi_call_mask() strikes its own bit with preemption on (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
