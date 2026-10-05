@@ -165,14 +165,6 @@ option(UROS_ABLATE_566_NO_GRACE "Build the #566 ablation: pmap_destroy does not 
 # shootdown standing still until every other processor has acknowledged.
 # UNSAFE: the caller goes on with stale translations elsewhere.
 option(UROS_ABLATE_566_NO_IPI_WAIT "Build the #566 ablation: ipi_call_others does not wait for the acknowledgements" OFF)
-# #567: one byte per look at the transmitter, which is what this tree did
-# before the FIFO was used.  The other arm of that measurement.
-option(UROS_ABLATE_567_NO_FIFO "Build the #567 ablation: one byte per look at the transmitter" OFF)
-# #567: refuse to arm the console ring, so every byte goes to the port in the
-# caller's thread under printf_lock, which is the console this target had
-# before.  The other arm of the hold measurement, in a binary that differs in
-# nothing else.
-option(UROS_ABLATE_567_NO_RING "Build the #567 ablation: the console writes the wire in the caller's thread" OFF)
 # #570: make the device master REFUSE the holder of a PCI I/O BAR its own
 # registers, after N allowed accesses, so that a driver's refusal path is asked
 # on a real boot instead of argued.  0 refuses the probe; a larger N lets the
@@ -636,14 +628,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_566_NO_IPI_WAIT)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_IPI_WAIT=1)
       message(STATUS "#566 ablation: ipi_call_others does not wait for acks (x86_64)")
-  endif()
-  if(UROS_ABLATE_567_NO_FIFO)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_FIFO=1)
-      message(STATUS "#567 ablation: one byte per look at the transmitter (x86_64)")
-  endif()
-  if(UROS_ABLATE_567_NO_RING)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_567_NO_RING=1)
-      message(STATUS "#567 ablation: the console writes the wire in the caller's thread (x86_64)")
   endif()
   if(NOT UROS_ABLATE_570_REFUSE_IOBAR STREQUAL "")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_570_REFUSE_IOBAR=${UROS_ABLATE_570_REFUSE_IOBAR})

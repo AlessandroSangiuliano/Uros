@@ -320,17 +320,8 @@ void cons_putc(char c)
  */
 static void cons_fifo_probe(void)
 {
-#if	ABLATE_567_NO_FIFO
-	/*
-	 * The old depth of one, which is what this file did before: the FIFO
-	 * enabled and one slot of it used.  The other arm of the measurement,
-	 * in a binary that differs in nothing else.
-	 */
-	cons_fifo_depth = 1;
-#else
 	cons_fifo_depth = ((inb(COM1 + UART_IIR) & IIR_FIFO_ON) == IIR_FIFO_ON)
 			  ? CONS_FIFO_DEPTH : 1;
-#endif
 	cons_fifo_room = 0;
 }
 
@@ -971,9 +962,6 @@ static void cons_queue(char c)
  */
 void cons_async_set(int on)
 {
-#if	ABLATE_567_NO_RING
-	on = 0;
-#endif
 	if (!on) {
 		/*
 		 * 🔴 AND THE PORT COMES BACK (#497), BEFORE THE DRAIN.
