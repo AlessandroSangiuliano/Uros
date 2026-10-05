@@ -133,14 +133,6 @@ option(UROS_IPC_PORT_TRACK "Build the port allocation tracking (a global mutex p
 # Same both-arms rule as above.
 option(UROS_USLOCK_CENSUS "Build the #486 simple-lock census (hooks on every simple lock)" OFF)
 
-# #563: do not open the copy's window before the probe that tests whether a
-# trap inherits it.  One switch, two outcomes, and that is the point: on a
-# processor WITH SMAP the self-test must go WRONG, because there the window is
-# the thing under test; on one WITHOUT it the boot must stay green and keep
-# saying the processor has no SMAP, because there nothing changed.  A third
-# answer that could not be told from the other two by taking it away would not
-# be worth having.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is never opened" OFF)
 # #570: make the device master REFUSE the holder of a PCI I/O BAR its own
 # registers, after N allowed accesses, so that a driver's refusal path is asked
 # on a real boot instead of argued.  0 refuses the probe; a larger N lets the
@@ -185,150 +177,11 @@ if(NOT UROS_ABLATE_577_REFUSE_CFG STREQUAL "")
     endif()
     message(STATUS "#577 ablation: config access ${_a577nth} (write=${_a577w}) of register ${_a577reg} on BDF ${_a577bdf} is ${_a577what} (${UROS_TARGET_ARCH})")
 endif()
-# #563: make the five tests that need a second processor believe they are alone,
-# so the line that DECLINES the question can be executed.  There is no boot flag
-# capping the processor count on this target and an AP cannot be made to fail to
-# arrive on demand, so without this the correction would ship unexercised --
-# which is the objection #561 was built on.  Never ON in a kernel anyone boots
-# for anything else.
-option(UROS_ABLATE_563_ALONE "Build the #563 ablation: every test believes it is alone" OFF)
-# #586: make tsc_calibrate() decline, the way it does on its own about once in
-# 280 boots under TCG -- the first of its two runs reads high and they disagree.
-# Every consumer of tsc_hz() then has to answer a missing rate, and they are all
-# asked at once, which waiting for the natural refusal would take hundreds of
-# boots to do.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_586_TSC_DISAGREE "Build the #586 ablation: no two of the TSC calibration's runs agree, so it declines" OFF)
-# #586: the tick self-test's handler acknowledges each tick and counts none of
-# them, so the period line meets a calibrated TSC with no gap to measure -- the
-# branch that must stay WRONG, which the calibration ablation cannot reach.
-# Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_586_NO_TICKS "Build the #586 ablation: the tick self-test counts no ticks" OFF)
-# #508: the kernel keeps none of its rulers' ports, so a claim takes the 8254,
-# its gate and the PM timer -- and io_claim_race's arm [5] and the boot's
-# "legacy ports the kernel keeps" line must both say WRONG.  Never ON in a
-# kernel anyone boots for anything else.
-# #597: i386's two-port PCI configuration access without its lock, as it was
-# before #597, and/or with its window widened by N reads of port 0x80 between
-# the address and the data (each one a VM exit under KVM).  NO_LOCK alone is
-# the old kernel; NO_LOCK with WIDEN makes the race frequent at -smp 4, and
-# WIDEN alone shows the lock closing even a wide window.  i386 only: x86-64
-# has had its own lock since 1b4c138d.  Never ON in a kernel anyone boots for
-# anything else.
-option(UROS_ABLATE_597_NO_LOCK "Build the #597 ablation: i386's PCI configuration access takes no lock" OFF)
-set(UROS_ABLATE_597_WIDEN "" CACHE STRING "Build the #597 ablation: N port 0x80 reads between the PCI address and data (empty = off)")
-# #599: stop processor 0's tick on purpose, 3000 ticks into the boot, to show
-# that the clock watch (i386/clock_watch.c) sees it and what the NMI's dump
-# says.  MASK_PIT masks the 8254's pin with nothing pending to unmask it, the
-# shape a lost I/O APIC read-modify-write leaves; CLI_SPIN takes the timeout
-# list's lock and spins processor 0 with interrupts off; SPIN_ONLY keeps the
-# watch off the tick, so that with CLI_SPIN only a spin can say so; SPL_LEAK
-# has a thread_switch on processor 0 return to user mode at splsched, the
-# second hypothesis, which return_to_user's check must say.  i386 with
-# UROS_NCPUS > 1 only: the watch runs on the other processors.  Never ON in a
-# kernel anyone boots for anything else.
-option(UROS_ABLATE_599_MASK_PIT "Build the #599 ablation: processor 0 masks the 8254's pin once, with nothing pending" OFF)
-option(UROS_ABLATE_599_CLI_SPIN "Build the #599 ablation: processor 0 takes the timeout list's lock and spins with interrupts off once" OFF)
-option(UROS_ABLATE_599_SPIN_ONLY "Build the #599 ablation: the clock watch runs only from inside spins, not from the tick" OFF)
-option(UROS_ABLATE_599_SPL_LEAK "Build the #599 ablation: a thread_switch on processor 0 returns to user mode at splsched once" OFF)
-# #599: the I/O APIC's select/window pair widened on the other processors by
-# N port 0x80 reads in each of its three gaps (i386/ioapic.c).  If the pair's
-# race is what stops processor 0's tick, this makes it frequent at four
-# processors and absent at one.  i386 SMP only; never ON otherwise.
-option(UROS_ABLATE_599_NESTED_PRINTF "Build the #599 ablation: processor 0 raises an unhandled line inside consolewrite's printf_lock hold once" OFF)
-option(UROS_ABLATE_599_PRINTF_WAITS "Build the #599 ablation: a printf nested inside printf_lock's holder waits for it, as before the fix" OFF)
-option(UROS_ABLATE_599_NO_LOCK "Build the #599 ablation: i386's I/O APIC select/window pair takes no lock, as before the fix" OFF)
-option(UROS_ABLATE_599_I8042_SHARED "Build the #599 ablation: i386's break-key reader keeps reading the 8042 while a task holds its ports" OFF)
-option(UROS_ABLATE_599_COMPROBE_OLD_EXIT "Build the #599 ablation: i386's comprobe/comattach clobber unit 0 on boots without -r, as before the fix" OFF)
-option(UROS_ABLATE_599_COM_NO_LOCK "Build the #599 ablation: i386's com_bank_lock is not taken -- THR writes and the divisor sequence race, as before the fix" OFF)
-set(UROS_ABLATE_599_WIDEN_DIVISOR "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between DLL and DLM in i386's divisor sequence (empty = off)")
-set(UROS_ABLATE_599_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads in each gap of the I/O APIC pair, other processors only (empty = off)")
-# #599: x86-64's I/O APIC window (x86_64/cpu/ioapic.c, the lock #593 put
-# there), for the -Y test that races it from two processors.  WINDOW_OPEN uses
-# the window without the lock -- interrupts are still masked, so what is left
-# is the race between processors -- and WINDOW_WIDEN puts N port 0x80 reads
-# between selecting a register and using it.  x86-64 only: i386's pair is
-# UROS_ABLATE_599_NO_LOCK and _WIDEN above.  Never ON in a kernel anyone boots
-# for anything else.
-option(UROS_ABLATE_599_WINDOW_OPEN "Build the #599 ablation: x86-64's I/O APIC window is used without its lock" OFF)
-set(UROS_ABLATE_599_WINDOW_WIDEN "" CACHE STRING "Build the #599 ablation: N port 0x80 reads between selecting an x86-64 I/O APIC register and using it (empty = off)")
-# #599: x86-64's halt_cpu in the order it had before the review rounds, for
-# the -Z test: the console's final copy first, the halt broadcast before the
-# wait for the panicking processor's message, interrupts left as they were.
-# x86-64 only.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_599_HALT_ORDER "Build the #599 ablation: x86-64's halt_cpu in its old order -- the copy first, the stop before the panic's message ends" OFF)
-option(UROS_ABLATE_508_LEND_RULERS "Build the #508 ablation: the kernel keeps none of its rulers' ports" OFF)
-# #508: an MMIO mapping is checked on its first page only, as it was before the
-# span was bounded, so irq_claim_test's arm [10] -- one page past the owned
-# card's region -- must say WRONG.  Never ON in a kernel anyone boots for
-# anything else.
-# #508: one of the TSC calibration's three runs reads one part in thirty-two
-# high, the shape of every refusal the old calibration took on its own, so the
-# median can be seen setting it aside.  Never ON in a kernel anyone boots for
-# anything else.
-option(UROS_ABLATE_508_ONE_RUN_OUT "Build the #508 ablation: one TSC calibration run reads 1/32 high" OFF)
-# #508: the end of the first run of every calibration attempt is read ~3 ms
-# late, so its bracket is wider than the tolerance and the run must be set
-# aside before the vote -- for the TSC and the LAPIC timer alike, since they
-# share the rule.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_508_END_DELAYED "Build the #508 ablation: one calibration run's end is read ~3 ms late" OFF)
-# #508: the PM timer's rate is taken 1/32 high, a ruler that lies, so the vote
-# must name it and nothing measure against it.  Never ON otherwise.
-option(UROS_ABLATE_508_RULER_LIES "Build the #508 ablation: the PM timer's rate is taken 1/32 high" OFF)
-# #508: the ACPI HPET table is withheld, a board without an HPET, so two
-# rulers vote and the refinement uses the PM timer.  Never ON otherwise.
-option(UROS_ABLATE_508_NO_HPET "Build the #508 ablation: the ACPI HPET table is withheld" OFF)
-# #508: no exact source is seen, so the measured path runs on a machine that
-# has one.  Never ON otherwise.
-option(UROS_ABLATE_508_EXACT_HIDDEN "Build the #508 ablation: the exact TSC sources are not seen" OFF)
-# #508: the first exact source that states a rate states it a quarter high, so
-# the rulers contradict it and it is WRONG -- a quarter because under a
-# hypervisor a contradiction has to exceed the host's NTP slew, 12.5% (#594).
-# Never ON otherwise.
-option(UROS_ABLATE_508_EXACT_LIES "Build the #508 ablation: the first exact TSC source states a quarter high" OFF)
-# #508: the processor states CPUID 0x15 as OMEGA's does, so the path that
-# adopts it -- which no guest can reach -- runs.  Never ON otherwise.
-option(UROS_ABLATE_508_CPUID_15 "Build the #508 ablation: CPUID 0x15 states OMEGA's crystal and ratio" OFF)
-option(UROS_ABLATE_508_SPAN_UNBOUNDED "Build the #508 ablation: an MMIO mapping is checked on its first page only" OFF)
-# #594: CPUID 0x15 states the crystal as the timing leaf's bus clock and the
-# TSC's ratio to it, as a hypervisor following the SDM would -- no QEMU does --
-# so the LAPIC timer adopts 0x15's crystal in a guest.  Boot it with +invtsc.
-# Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_594_CRYSTAL_IS_BUS "Build the #594 ablation: CPUID 0x15 states the timing leaf's bus as the crystal" OFF)
-# #594: from the watchdog's second window, the TSC as it reads it runs 1/32
-# fast, so both rulers disagree with it: the watchdog must name the TSC, move
-# the tick to the local APIC timer and withdraw the TSC's rate -- and the boot
-# must go on.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_594_TSC_SKEWS "Build the #594 ablation: the TSC runs 1/32 fast as the watchdog reads it" OFF)
-# #594: from the watchdog's second window, the HPET as it reads it stops, so the
-# watchdog must name the HPET and go on with the PM timer.  Never ON otherwise.
-option(UROS_ABLATE_594_HPET_STOPS "Build the #594 ablation: the HPET stops as the watchdog reads it" OFF)
-# #594: the rulers carry a host's NTP slew -- in the watchdog, 0.4 s offsets
-# drained at an eighth a second, the sign alternating every 32 windows; at
-# boot, the rulers' answer 5% low -- which is what a host converging after a
-# reboot does to a guest.  Nothing may be named, and the exact source must
-# still be adopted.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_594_NTP_SLEW "Build the #594 ablation: the rulers carry a host's NTP phase slew" OFF)
 option(UROS_PROBE_606_PAGEOUT "Build the #606 probe: once a second, the counters vm_pageout_scan() keeps, printed when they move" OFF)
 # #605: the cross-call that times out names who did not answer.
 option(UROS_PROBE_605_SILENT "Build the #605 probe: halt one processor and cross-call it, so the panic has to name it" OFF)
 option(UROS_PROBE_605_CALL_COST "Build the #605 probe: time broadcast cross-calls at boot" OFF)
 option(UROS_PROBE_605_PADDED "Build the #605 probe: one cache line per answer-counter slot, to measure what sharing one costs" OFF)
-# #594, i386 only: the two halves of closing i386's other doors to the 8254.
-# REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
-# i386_io_port_add() must refuse the device whole and kernel242_test's control
-# port must fault.  UNCHECKED stops i386_io_port_add() and the iopl #GP
-# emulation asking device_md_io_reserved(), and brings back the emulated
-# channel-2 write to 0x43, so the emulated read of 0x40 must succeed.  Both
-# together are the kernel before #594: the bitmap grants the 8254.  Never ON
-# in a kernel anyone boots for anything else.
-option(UROS_ABLATE_594_IOPL_REOPEN "Build the #594 ablation (i386): the iopl device lists the 8254 and its gate again" OFF)
-option(UROS_ABLATE_594_UNCHECKED "Build the #594 ablation (i386): the bitmap and the iopl emulation do not ask device_md_io_reserved" OFF)
-# #563: withhold the MADT's I/O APIC entries while leaving the processor census
-# alone, so the tests that route through one see the board a firmware without an
-# I/O APIC describes -- and the discriminator they use, the other half of the
-# same table, still answers.  qemu offers no machine that gives one without the
-# other.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_563_NO_IOAPIC "Build the #563 ablation: the MADT lists no I/O APIC" OFF)
 
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
@@ -544,80 +397,11 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       list(APPEND KERNEL_DEFINES_BARE PROBE_537_CAP_CONCURRENCY=1)
       message(STATUS "#537 probe: capability checks alone and on every processor at once (x86_64)")
   endif()
-  if(UROS_ABLATE_563_WINDOW)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_WINDOW=1)
-      message(STATUS "#563 ablation: the copy's window is never opened (x86_64)")
-  endif()
   if(NOT UROS_ABLATE_570_REFUSE_IOBAR STREQUAL "")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_570_REFUSE_IOBAR=${UROS_ABLATE_570_REFUSE_IOBAR})
       message(STATUS "#570 ablation: a PCI I/O BAR is refused to its holder after ${UROS_ABLATE_570_REFUSE_IOBAR} accesses (x86_64)")
   endif()
   list(APPEND KERNEL_DEFINES_BARE ${UROS_ABLATE_577_DEFS})
-  if(UROS_ABLATE_597_NO_LOCK OR NOT UROS_ABLATE_597_WIDEN STREQUAL "")
-      message(FATAL_ERROR "UROS_ABLATE_597_* ablate i386's PCI configuration lock; x86-64's is in x86_64/cpu/pci_cfg.c and is not touched by them")
-  endif()
-  if(UROS_ABLATE_599_MASK_PIT OR UROS_ABLATE_599_CLI_SPIN OR UROS_ABLATE_599_SPIN_ONLY OR UROS_ABLATE_599_SPL_LEAK OR UROS_ABLATE_599_NO_LOCK OR UROS_ABLATE_599_NESTED_PRINTF OR UROS_ABLATE_599_PRINTF_WAITS OR NOT UROS_ABLATE_599_WIDEN STREQUAL "")
-      message(FATAL_ERROR "UROS_ABLATE_599_* stop i386's 8254 tick for i386's clock watch; x86-64 has neither")
-  endif()
-  if(UROS_ABLATE_599_I8042_SHARED OR UROS_ABLATE_599_COMPROBE_OLD_EXIT OR UROS_ABLATE_599_COM_NO_LOCK OR NOT UROS_ABLATE_599_WIDEN_DIVISOR STREQUAL "")
-      message(FATAL_ERROR "UROS_ABLATE_599_I8042_SHARED, _COMPROBE_OLD_EXIT, _COM_NO_LOCK and _WIDEN_DIVISOR ablate i386's 8042 reader and com.c; x86-64 has neither")
-  endif()
-  if(UROS_ABLATE_599_WINDOW_OPEN)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_WINDOW_OPEN=1)
-      message(STATUS "#599 ablation: the I/O APIC window is used without its lock (x86_64)")
-  endif()
-  if(NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "")
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_WINDOW_WIDEN=${UROS_ABLATE_599_WINDOW_WIDEN})
-      message(STATUS "#599 ablation: ${UROS_ABLATE_599_WINDOW_WIDEN} port 0x80 reads between an I/O APIC select and its use (x86_64)")
-  endif()
-  if(UROS_ABLATE_599_HALT_ORDER)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_599_HALT_ORDER=1)
-      message(STATUS "#599 ablation: halt_cpu in its old order (x86_64)")
-  endif()
-  if(UROS_ABLATE_586_NO_TICKS)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_586_NO_TICKS=1)
-      message(STATUS "#586 ablation: the tick self-test counts no ticks (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_ONE_RUN_OUT)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_ONE_RUN_OUT=1)
-      message(STATUS "#508 ablation: one TSC calibration run reads 1/32 high (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_END_DELAYED)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_END_DELAYED=1)
-      message(STATUS "#508 ablation: one calibration run's end is read ~3 ms late (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_RULER_LIES)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_RULER_LIES=1)
-      message(STATUS "#508 ablation: the PM timer's rate is taken 1/32 high (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_NO_HPET)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_NO_HPET=1)
-      message(STATUS "#508 ablation: the ACPI HPET table is withheld (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_EXACT_HIDDEN)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_EXACT_HIDDEN=1)
-      message(STATUS "#508 ablation: the exact TSC sources are not seen (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_EXACT_LIES)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_EXACT_LIES=1)
-      message(STATUS "#508 ablation: the first exact TSC source states a quarter high (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_CPUID_15)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_CPUID_15=1)
-      message(STATUS "#508 ablation: CPUID 0x15 states OMEGA's crystal and ratio (x86_64)")
-  endif()
-  if(UROS_ABLATE_594_TSC_SKEWS)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_TSC_SKEWS=1)
-      message(STATUS "#594 ablation: the TSC runs 1/32 fast as the watchdog reads it (x86_64)")
-  endif()
-  if(UROS_ABLATE_594_NTP_SLEW)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_NTP_SLEW=1)
-      message(STATUS "#594 ablation: the rulers carry a host's NTP phase slew (x86_64)")
-  endif()
-  if(UROS_ABLATE_594_HPET_STOPS)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)
-      message(STATUS "#594 ablation: the HPET stops as the watchdog reads it (x86_64)")
-  endif()
   if(UROS_PROBE_606_PAGEOUT)
       list(APPEND KERNEL_DEFINES_BARE PROBE_606_PAGEOUT=1)
       message(STATUS "#606 probe: the pageout's counters, printed when they move (x86_64)")
@@ -633,30 +417,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_PROBE_605_PADDED)
       list(APPEND KERNEL_DEFINES_BARE PROBE_605_PADDED=1)
       message(STATUS "#605 probe: answer-counter slots one cache line each (x86_64)")
-  endif()
-  if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)
-      message(STATUS "#594 ablation: CPUID 0x15 states the timing leaf's bus as the crystal (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_SPAN_UNBOUNDED)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_SPAN_UNBOUNDED=1)
-      message(STATUS "#508 ablation: an MMIO mapping is checked on its first page only (x86_64)")
-  endif()
-  if(UROS_ABLATE_508_LEND_RULERS)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_508_LEND_RULERS=1)
-      message(STATUS "#508 ablation: the kernel keeps none of its rulers' ports (x86_64)")
-  endif()
-  if(UROS_ABLATE_586_TSC_DISAGREE)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_586_TSC_DISAGREE=1)
-      message(STATUS "#586 ablation: each TSC calibration run reads a different 1/32 high, so none agree and it declines (x86_64)")
-  endif()
-  if(UROS_ABLATE_563_ALONE)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_ALONE=1)
-      message(STATUS "#563 ablation: every test believes it is alone (x86_64)")
-  endif()
-  if(UROS_ABLATE_563_NO_IOAPIC)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_563_NO_IOAPIC=1)
-      message(STATUS "#563 ablation: the MADT lists no I/O APIC (x86_64)")
   endif()
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
@@ -1189,13 +949,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   return()
 endif()
 
-# #599: these ablate x86-64's I/O APIC window and halt_cpu, and have no i386
-# half -- i386's pair is ablated by UROS_ABLATE_599_NO_LOCK and _WIDEN, and its
-# halt path was not changed.
-if(UROS_ABLATE_599_WINDOW_OPEN OR NOT UROS_ABLATE_599_WINDOW_WIDEN STREQUAL "" OR UROS_ABLATE_599_HALT_ORDER)
-    message(FATAL_ERROR "UROS_ABLATE_599_WINDOW_OPEN, _WINDOW_WIDEN and _HALT_ORDER ablate x86-64's I/O APIC window and halt_cpu; i386's pair is UROS_ABLATE_599_NO_LOCK and _WIDEN")
-endif()
-
 # =============================================================================
 # Kernel Configuration
 # =============================================================================
@@ -1387,80 +1140,6 @@ endif()
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)
     list(APPEND KERNEL_DEFINES -D${_d})
 endforeach()
-if(UROS_ABLATE_594_IOPL_REOPEN)
-    list(APPEND KERNEL_DEFINES -DABLATE_594_IOPL_REOPEN=1)
-    message(STATUS "#594 ablation: the iopl device lists the 8254 and its gate again (i386)")
-endif()
-if(UROS_ABLATE_594_UNCHECKED)
-    list(APPEND KERNEL_DEFINES -DABLATE_594_UNCHECKED=1)
-    message(STATUS "#594 ablation: the bitmap and the iopl emulation do not ask device_md_io_reserved (i386)")
-endif()
-if(UROS_ABLATE_597_NO_LOCK)
-    list(APPEND KERNEL_DEFINES -DABLATE_597_NO_LOCK=1)
-    message(STATUS "#597 ablation: the PCI configuration access takes no lock (i386)")
-endif()
-if(NOT UROS_ABLATE_597_WIDEN STREQUAL "")
-    list(APPEND KERNEL_DEFINES -DABLATE_597_WIDEN=${UROS_ABLATE_597_WIDEN})
-    message(STATUS "#597 ablation: ${UROS_ABLATE_597_WIDEN} port 0x80 reads between the PCI address and data (i386)")
-endif()
-if(UROS_ABLATE_599_MASK_PIT OR UROS_ABLATE_599_CLI_SPIN OR UROS_ABLATE_599_SPIN_ONLY OR UROS_ABLATE_599_SPL_LEAK OR UROS_ABLATE_599_NO_LOCK OR UROS_ABLATE_599_NESTED_PRINTF OR UROS_ABLATE_599_PRINTF_WAITS OR NOT UROS_ABLATE_599_WIDEN STREQUAL "")
-    if(NOT UROS_NCPUS GREATER 1)
-        message(FATAL_ERROR "UROS_ABLATE_599_* need UROS_NCPUS > 1: the clock watch runs on the other processors, and without it the ablation would stop the clock with nothing to say so")
-    endif()
-endif()
-if(UROS_ABLATE_599_MASK_PIT)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_MASK_PIT=1)
-    message(STATUS "#599 ablation: processor 0 masks the 8254's pin at tick 3000, nothing pending (i386)")
-endif()
-if(UROS_ABLATE_599_CLI_SPIN)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_CLI_SPIN=1)
-    message(STATUS "#599 ablation: processor 0 takes the timeout list's lock and spins with interrupts off at tick 3000 (i386)")
-endif()
-if(UROS_ABLATE_599_SPIN_ONLY)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_SPIN_ONLY=1)
-    message(STATUS "#599 ablation: the clock watch runs only from inside spins (i386)")
-endif()
-if(UROS_ABLATE_599_SPL_LEAK)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_SPL_LEAK=1)
-    message(STATUS "#599 ablation: a thread_switch on processor 0 returns to user mode at splsched once (i386)")
-endif()
-if(UROS_ABLATE_599_NESTED_PRINTF)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_NESTED_PRINTF=1)
-    message(STATUS "#599 ablation: processor 0 raises an unhandled line inside consolewrite's printf_lock hold once (i386)")
-endif()
-if(UROS_ABLATE_599_PRINTF_WAITS)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_PRINTF_WAITS=1)
-    message(STATUS "#599 ablation: a nested printf waits for printf_lock, as before the fix (i386)")
-endif()
-if(UROS_ABLATE_599_NO_LOCK)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_NO_LOCK=1)
-    message(STATUS "#599 ablation: the I/O APIC select/window pair takes no lock (i386)")
-endif()
-# Not with the clock-watch set above: the 8042 window exists at one
-# processor too, which is where it shows.
-if(UROS_ABLATE_599_I8042_SHARED)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_I8042_SHARED=1)
-    message(STATUS "#599 ablation: the break-key reader keeps reading the 8042 while a task holds it (i386)")
-endif()
-if(UROS_ABLATE_599_COMPROBE_OLD_EXIT)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_COMPROBE_OLD_EXIT=1)
-    message(STATUS "#599 ablation: comprobe/comattach clobber unit 0 without -r (i386)")
-endif()
-# The divisor race needs two processors (com_divisor_test.c, -U), but the
-# lock is also what a uniprocessor boot takes, so neither is refused there:
-# a -U boot on one processor answers NOT ASKED by itself.
-if(UROS_ABLATE_599_COM_NO_LOCK)
-    list(APPEND KERNEL_DEFINES -DABLATE_599_COM_NO_LOCK=1)
-    message(STATUS "#599 ablation: com_bank_lock is not taken (i386)")
-endif()
-if(NOT UROS_ABLATE_599_WIDEN_DIVISOR STREQUAL "")
-    list(APPEND KERNEL_DEFINES -DABLATE_599_WIDEN_DIVISOR=${UROS_ABLATE_599_WIDEN_DIVISOR})
-    message(STATUS "#599 ablation: ${UROS_ABLATE_599_WIDEN_DIVISOR} port 0x80 reads between DLL and DLM (i386)")
-endif()
-if(NOT UROS_ABLATE_599_WIDEN STREQUAL "")
-    list(APPEND KERNEL_DEFINES -DABLATE_599_WIDEN=${UROS_ABLATE_599_WIDEN})
-    message(STATUS "#599 ablation: ${UROS_ABLATE_599_WIDEN} port 0x80 reads in each gap of the I/O APIC pair, other processors (i386)")
-endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
     message(STATUS "#385 free-page poison: ON (i386)")
