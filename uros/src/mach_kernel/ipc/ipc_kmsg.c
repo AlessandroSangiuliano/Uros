@@ -1128,6 +1128,100 @@ ipc_kmsg_put_to_kernel(
 }
 
 /*
+ * #602: a send refused for its reply port, said once it has been refused.
+ *
+ * io_claim_race's arm [2] saw MACH_SEND_INVALID_REPLY, once in a few hundred
+ * boots, in a task with one thread and one reply port that nothing in it had
+ * destroyed.  The refusal comes from ipc_kmsg_copyin_header() alone: under the
+ * space's lock, the reply name named no entry, or an entry without a receive
+ * right.  What that entry held, and what the sending thread's port cache
+ * (#331) still says about the name, tells a right that is really gone from a
+ * table and a port that disagree with each other.  The port is read without
+ * its lock: ports are type-stable, so the read cannot fault, and a stale value
+ * is still evidence.  The first few refusals of a boot are said; all are
+ * counted, under no lock, so the count is a figure and not a census.
+ */
+struct reply_refusal {
+	mach_port_t		name;
+	boolean_t		found;		/* the name names an entry */
+	ipc_entry_bits_t	bits;		/* and these are its bits */
+	natural_t		generation;	/* the space's, when refused */
+	ipc_port_t		cached;		/* what the port cache maps it to */
+	natural_t		cached_generation;
+	boolean_t		cached_active;
+	mach_port_t		cached_name;	/* where that port says it lives */
+	ipc_space_t		cached_space;
+};
+
+unsigned int	ipc_reply_refusals;
+#define	REPLY_REFUSALS_SAID	8
+
+static void
+reply_refusal_note(
+	ipc_space_t		space,
+	mach_port_t		name,
+	struct reply_refusal	*r)
+{
+	thread_t	self = current_thread();
+	ipc_entry_t	entry = ipc_entry_lookup(space, name);
+	int		j;
+
+	r->name = name;
+	r->found = (entry != IE_NULL);
+	r->bits = (entry != IE_NULL) ? entry->ie_bits : 0;
+	r->generation = space->is_generation;
+	r->cached = IP_NULL;
+	for (j = 0; j < IPC_PORT_CACHE_N; j++) {
+		if (self->ith_port_cache[j].ipc_name != name ||
+		    self->ith_port_cache[j].ipc_space != space)
+			continue;
+		r->cached = self->ith_port_cache[j].ipc_port;
+		r->cached_generation = self->ith_port_cache[j].ipc_gen;
+	}
+	if (r->cached != IP_NULL) {
+		r->cached_active = ip_active(r->cached);
+		r->cached_name = r->cached->ip_receiver_name;
+		r->cached_space = r->cached->ip_receiver;
+	}
+}
+
+static void
+reply_refusal_say(
+	ipc_space_t		space,
+	struct reply_refusal	*r)
+{
+	if (++ipc_reply_refusals > REPLY_REFUSALS_SAID)
+		return;
+	if (r->found)
+		printf("ipc: task %p: a send was refused for its reply name "
+		       "0x%x, whose entry has bits 0x%x and no receive right, "
+		       "at generation %u (#602)\n", (void *) current_task(),
+		       r->name, r->bits, r->generation);
+	else
+		printf("ipc: task %p: a send was refused for its reply name "
+		       "0x%x, which names nothing in its space, at generation "
+		       "%u (#602)\n", (void *) current_task(), r->name,
+		       r->generation);
+	if (r->cached == IP_NULL)
+		printf("ipc:   the sending thread's port cache does not hold "
+		       "0x%x (#602)\n", r->name);
+	else if (r->cached_name != MACH_PORT_NULL)
+		printf("ipc:   the sending thread's port cache maps 0x%x to "
+		       "port %p, cached at generation %u, %s, which says it is "
+		       "received under 0x%x in space %p; the sender's space is "
+		       "%p (#602)\n", r->name, (void *) r->cached,
+		       r->cached_generation,
+		       r->cached_active ? "active" : "dead", r->cached_name,
+		       (void *) r->cached_space, (void *) space);
+	else
+		printf("ipc:   the sending thread's port cache maps 0x%x to "
+		       "port %p, cached at generation %u, %s, which says it is "
+		       "in no space (#602)\n", r->name, (void *) r->cached,
+		       r->cached_generation,
+		       r->cached_active ? "active" : "dead");
+}
+
+/*
  *	Routine:	ipc_kmsg_copyin_header
  *	Purpose:
  *		"Copy-in" port rights in the header of a message.
@@ -1181,6 +1275,7 @@ ipc_kmsg_copyin_header(
 	mach_port_t dest_name = msg->msgh_remote_port;
 	mach_port_t reply_name = msg->msgh_local_port;
 	kern_return_t kr;
+	struct reply_refusal refusal;
 
     {
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
@@ -1577,7 +1672,9 @@ ipc_kmsg_copyin_header(
 	return MACH_SEND_INVALID_DEST;
 
     invalid_reply:
+	reply_refusal_note(space, reply_name, &refusal);
 	is_write_unlock(space);
+	reply_refusal_say(space, &refusal);
 	return MACH_SEND_INVALID_REPLY;
 }
 
