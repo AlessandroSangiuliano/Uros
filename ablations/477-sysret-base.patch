@@ -1,0 +1,39 @@
+Kind: ablation
+Issue: #477
+Takes out: the ring bits in SYSRET's selector base, and the strict assertions that make the old base fail to compile -- SYSRET loads SS without RPL3, which KVM enforces on the next iretq (TCG lets it pass: run with --accel kvm)
+Run: --entry 0 600 -smp 4
+Expect: panic\(cpu
+Expect: double fault
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/desc.c b/uros/src/mach_kernel/x86_64/cpu/desc.c
+index 9cc7adc7..e70561d3 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/desc.c
++++ b/uros/src/mach_kernel/x86_64/cpu/desc.c
+@@ -54,10 +54,10 @@ _Static_assert(KERNEL_DS_SELECTOR == KERNEL_CS_SELECTOR + 8,
+  * iretq will accept afterwards.  The assertion that catches that is the one
+  * about the whole selector.
+  */
+-_Static_assert(USER_DS_RPL3 == SYSRET_SELECTOR_BASE + 8,
+-	       "SYSRET composes SS as the STAR base + 8, ring bits included");
+-_Static_assert(USER_CS_RPL3 == SYSRET_SELECTOR_BASE + 16,
+-	       "SYSRET composes CS as the STAR base + 16, ring bits included");
++_Static_assert(USER_DS_SELECTOR == SYSRET_SELECTOR_BASE + 8,
++	       "SYSRET loads SS from the STAR base + 8");
++_Static_assert(USER_CS_SELECTOR == SYSRET_SELECTOR_BASE + 16,
++	       "SYSRET loads CS from the STAR base + 16");
+ _Static_assert(GDT_FIXED_SLOTS * 8 > USER_CS_SELECTOR,
+ 	       "the fixed slots do not cover the selectors they must hold");
+ 
+diff --git a/uros/src/mach_kernel/x86_64/cpu/desc.h b/uros/src/mach_kernel/x86_64/cpu/desc.h
+index 0e27e80a..eef129a5 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/desc.h
++++ b/uros/src/mach_kernel/x86_64/cpu/desc.h
+@@ -95,7 +95,7 @@
+  * -- so the layout above still says what it said.
+  */
+ 
+-#define SYSRET_SELECTOR_BASE	(USER_CS32_SELECTOR | USER_RPL)
++#define SYSRET_SELECTOR_BASE	USER_CS32_SELECTOR
+ 
+ #ifndef __ASSEMBLER__
+ 
