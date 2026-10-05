@@ -89,6 +89,9 @@ extern unsigned int	thread_swapins;
 extern void	thread_swapout_enqueue(thread_act_t thr_act);
 extern void	thread_swap_disable(thread_act_t thr_act);
 
+/* Calls of thread_swap_disable() that waited for the swapper (#642, for -Q). */
+extern unsigned int	thread_swap_disable_waits;
+
 extern void	thread_swappable(thread_act_t thr_act, boolean_t swappable);
 
 #else	/* THREAD_SWAPPER */
