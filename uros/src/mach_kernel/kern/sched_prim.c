@@ -3245,17 +3245,7 @@ idle_thread_continue(void)
 int
 idle_thread_loop(int idle_thread_type)
 #else	/* FAST_IDLE */
-/*
- * #526: the idle loop restores the level it found again, as it did before.
- */
-#ifndef	ABLATE_526_IDLE_RESTORES
-#define	ABLATE_526_IDLE_RESTORES	0
-#endif
-#if	ABLATE_526_IDLE_RESTORES
-#define	IDLE_WAIT_SPL(s)	(s)
-#else
 #define	IDLE_WAIT_SPL(s)	MACHINE_IDLE_SPL
-#endif
 
 void
 idle_thread_continue(void)

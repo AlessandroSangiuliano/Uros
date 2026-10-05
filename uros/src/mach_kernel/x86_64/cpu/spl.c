@@ -14,15 +14,6 @@
 #include <trap/trap.h>
 
 /*
- * The switch that puts #526's window back: splx() finds this processor's
- * block with interrupts still on.  -E (GRUB entry 30) has to say WRONG with
- * it, which is how the correction is shown to be the thing that matters.
- */
-#ifndef	ABLATE_526_SPLX_WINDOW
-#define	ABLATE_526_SPLX_WINDOW	0
-#endif
-
-/*
  * #526: percpu_ipl(), one instruction.  percpu()->ipl was two, and a thread
  * preempted between them read the level of the processor it had left.
  */
@@ -151,15 +142,6 @@ spl_t splx(spl_t level)
 	spl_t		old;
 	int		enabled;
 
-#if	ABLATE_526_SPLX_WINDOW
-	/* #526's ablation: the block found with interrupts still on. */
-	p = percpu();
-	old = p->ipl;
-	enabled = interrupts_enabled();
-	if (level == old)
-		return old;
-	interrupts_disable();
-#else
 	/*
 	 * Nothing to change, answered in one instruction and with nothing
 	 * turned off.  The answer cannot go stale: a thread can be moved to
@@ -192,7 +174,6 @@ spl_t splx(spl_t level)
 	interrupts_disable();
 	p = percpu();
 	old = p->ipl;
-#endif
 
 	if (level != old) {
 		/* #526: a raise from zero, recorded for the idle loop to name. */

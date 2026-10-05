@@ -95,10 +95,6 @@ option(UROS_ABLATE_537_PAGE_WALK "Build the #537 ablation: a DMA page is found b
 option(UROS_ABLATE_537_IX_UNSORTED "Build the #537 ablation: the page index is left unsorted (the self-test must say WRONG)" OFF)
 option(UROS_ABLATE_537_HMAC_LOCKED "Build the #537 ablation: the capability MAC is computed with cap_lock held, as before" OFF)
 option(UROS_PROBE_537_CAP_CONCURRENCY "Build the #537 probe: capability checks timed alone and on every processor at once" OFF)
-# #526, both targets: the idle loop restores the level it found again, instead of waiting at zero.
-option(UROS_ABLATE_526_IDLE_RESTORES "Build the #526 ablation: the idle loop restores the level it found (a raised one is held for ever; entry 22 under TCG at 1.4 GHz stalls about once in 30 boots)" OFF)
-# #526, x86_64: splx() finds the per-CPU block before it turns interrupts off again.
-option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this processor's block with interrupts still on, so a thread preempted at level zero finishes its raise in the block of the processor it left (x86-64 -E, GRUB entry 30: must say WRONG)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -626,14 +622,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_PROBE_537_CAP_CONCURRENCY)
       list(APPEND KERNEL_DEFINES_BARE PROBE_537_CAP_CONCURRENCY=1)
       message(STATUS "#537 probe: capability checks alone and on every processor at once (x86_64)")
-  endif()
-  if(UROS_ABLATE_526_IDLE_RESTORES)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_526_IDLE_RESTORES=1)
-      message(STATUS "#526 ablation: the idle loop restores the level it found (x86_64)")
-  endif()
-  if(UROS_ABLATE_526_SPLX_WINDOW)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_526_SPLX_WINDOW=1)
-      message(STATUS "#526 ablation: splx() finds the per-CPU block with interrupts on (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
@@ -1545,10 +1533,6 @@ endforeach()
 if(UROS_PROBE_537_CAP_CONCURRENCY)
     list(APPEND KERNEL_DEFINES -DPROBE_537_CAP_CONCURRENCY=1)
     message(STATUS "#537 probe: capability checks alone and on every processor at once (i386)")
-endif()
-if(UROS_ABLATE_526_IDLE_RESTORES)
-    list(APPEND KERNEL_DEFINES -DABLATE_526_IDLE_RESTORES=1)
-    message(STATUS "#526 ablation: the idle loop restores the level it found (i386)")
 endif()
 
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)
