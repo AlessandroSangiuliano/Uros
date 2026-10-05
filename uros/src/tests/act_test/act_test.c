@@ -229,15 +229,6 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 	 * something other than KERN_SUCCESS (libmach/mach_msg_server.c:100-115).
 	 * It is asked here, at once, because "at once" is the question.
 	 */
-#ifdef ABLATE_507_ASK_LATE_MS
-	/*
-	 * #507's ablation: let the teardown run on before asking.  The nap
-	 * blocks, so the killed thread and the reaper get the processor.
-	 */
-	printf("act_test: [1] #507 ablation — asking %d ms after the kill "
-	       "(nap answered %d)\n", ABLATE_507_ASK_LATE_MS,
-	       (int) nap(ABLATE_507_ASK_LATE_MS));
-#endif
 	arm_one_after_kr = thread_suspend(thread);
 
 	/*
