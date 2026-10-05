@@ -645,10 +645,6 @@ static volatile unsigned long	burnin_ticks;
  */
 static volatile int		burnin_running;
 
-#ifndef	ABLATE_612_BURNIN_CLI
-#define	ABLATE_612_BURNIN_CLI	0
-#endif
-
 static void
 burnin_handler(struct trap_frame *frame)
 {
@@ -728,7 +724,7 @@ clock_event_burnin(unsigned seconds)
 	 * processor setup_main()'s first cross-call, from pmap_steal_memory(),
 	 * met ipi_call_others()'s check and stopped the boot.
 	 */
-	if (was_on && !ABLATE_612_BURNIN_CLI)
+	if (was_on)
 		__asm__ __volatile__("sti");
 }
 

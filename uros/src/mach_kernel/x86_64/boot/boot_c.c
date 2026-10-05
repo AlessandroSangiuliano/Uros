@@ -520,15 +520,6 @@ static void bootmem_selftest(uint32_t info)
 }
 
 /*
- * #612: the self-tests that map in the VM's range leave their pages there
- * again (map_selftest, tlb_shootdown_selftest), for pmap_virtual_space() to
- * name.
- */
-#ifndef	ABLATE_612_LEAVE_MAPPED
-#define	ABLATE_612_LEAVE_MAPPED	0
-#endif
-
-/*
  * Map a page where the walk just proved nothing was mapped, then establish
  * that it is really there — by writing through the new address and finding
  * the value on the physical frame via the direct map, and by having the walk
@@ -590,8 +581,6 @@ static void map_selftest(void)
 	 * than one processor is a cross-call before the kernel has a thread.
 	 * pmap_virtual_space() now says what it finds there.
 	 */
-	if (ABLATE_612_LEAVE_MAPPED)
-		return;
 	pmap_unmap_page(PMAP_NULL, va, 0);
 	kputs("UrMach x86-64: unmapped again, ");
 	kputs(pmap_walk(root, va, 0) == PT_ENTRY_NULL
@@ -7345,8 +7334,6 @@ static void tlb_shootdown_selftest(void)
 	 * frame the entry names, so with new_frame there it would look for an
 	 * index entry that never existed and leave old_frame's behind.
 	 */
-	if (ABLATE_612_LEAVE_MAPPED)
-		return;
 	*entry = pa_to_pte(old_frame) | (*entry & ~INTEL_PTE_PFN);
 	pmap_remove(pmap_kernel(), probe.va, probe.va + PAGE_SIZE_4K);
 	kputs("UrMach x86-64: shootdown probe taken down, ");
