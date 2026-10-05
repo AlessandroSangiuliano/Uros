@@ -308,47 +308,6 @@ option(UROS_ABLATE_594_HPET_STOPS "Build the #594 ablation: the HPET stops as th
 # reboot does to a guest.  Nothing may be named, and the exact source must
 # still be adopted.  Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_594_NTP_SLEW "Build the #594 ablation: the rulers carry a host's NTP phase slew" OFF)
-# #593: icr_send() leaves the interrupt command register open to an interrupt
-# between its wait and its second write, as it did before #593, and counts the
-# sends that began on a processor already between the two halves of another.
-# Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_593_ICR_OPEN "Build the #593 ablation: an IPI send may be interrupted between its two register writes" OFF)
-# #593: NO_APIC_TIMER makes the local APIC's timer unusable in either mode, so
-# the tick must run on the HPET's broadcast and the boot lines must say so.
-# BEHIND lands every 128th HPET comparator write after the counter has passed
-# the deadline it carries; UNCHECKED takes away the read-back that notices.
-# BEHIND alone must cost late ticks and a count; with UNCHECKED, every
-# processor's clock stops until the counter's low half wraps.  Never ON in a
-# kernel anyone boots for anything else.
-option(UROS_ABLATE_593_NO_APIC_TIMER "Build the #593 ablation: the local APIC timer is unusable in both modes" OFF)
-# #593: only the APIC timer's countdown is unusable; with UROS_ABLATE_594_TSC_SKEWS
-# the watchdog names the TSC, and the tick must move from the TSC deadline to the
-# HPET while the system runs.  Never ON in a kernel anyone boots otherwise.
-option(UROS_ABLATE_593_NO_COUNTDOWN "Build the #593 ablation: only the local APIC timer's countdown is unusable" OFF)
-# #593: ISA 8's input unmasked before the HPET chooses its route, as a driver's
-# claim would leave it: LegacyReplacement must be refused, and with
-# UROS_ABLATE_594_TSC_SKEWS and UROS_ABLATE_593_NO_COUNTDOWN the tick must stay
-# on the named TSC and say so.  Never ON in a kernel anyone boots otherwise.
-option(UROS_ABLATE_593_LINE_TAKEN "Build the #593 ablation: the RTC's input is in use when the HPET chooses its route" OFF)
-option(UROS_ABLATE_593_BEHIND "Build the #593 ablation: every 128th HPET comparator write lands behind the counter" OFF)
-option(UROS_ABLATE_593_UNCHECKED "Build the #593 ablation: an HPET comparator write is not read back" OFF)
-# #593: the local APIC timer's two modes count each deadline from now again, as
-# before #593, so the tick runs slow by its own delivery time and the kernel's
-# time of day with it.  Never ON in a kernel anyone boots for anything else.
-option(UROS_ABLATE_593_FROM_NOW "Build the #593 ablation: the APIC timer's deadlines are counted from now, not from the last one" OFF)
-# #593: the HPET block as a firmware that drove its own tick with it would
-# leave it -- LegacyReplacement on, the last comparator interrupting -- so that
-# the boot line saying what was found and silenced is printed at all.
-option(UROS_ABLATE_593_FIRMWARE_LEFT "Build the #593 ablation: the firmware left the HPET's LegacyReplacement on and a comparator interrupting" OFF)
-# #593: the last processor to leave the HPET's broadcast leaves the comparator
-# interrupting, so that the line read back after the move says WRONG.
-option(UROS_ABLATE_593_LEFT_ON "Build the #593 ablation: the HPET's comparator is left interrupting when the tick leaves it" OFF)
-# #593: the HPET's counter is named before the clock is chosen, so that its
-# probe must refuse it.
-option(UROS_ABLATE_593_HPET_NAMED "Build the #593 ablation: the HPET's counter is named before the clock is chosen" OFF)
-# #593: processor 1's tick is never armed, so that the per-processor window
-# lines must say a processor never ticked.
-option(UROS_ABLATE_593_NEVER_TICKS "Build the #593 ablation: processor 1's tick is never armed" OFF)
 option(UROS_PROBE_606_PAGEOUT "Build the #606 probe: once a second, the counters vm_pageout_scan() keeps, printed when they move" OFF)
 # #605: the cross-call that times out names who did not answer.
 option(UROS_PROBE_605_SILENT "Build the #605 probe: halt one processor and cross-call it, so the panic has to name it" OFF)
@@ -658,50 +617,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_594_HPET_STOPS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_HPET_STOPS=1)
       message(STATUS "#594 ablation: the HPET stops as the watchdog reads it (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_NO_APIC_TIMER)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NO_APIC_TIMER=1)
-      message(STATUS "#593 ablation: the local APIC timer is unusable in both modes (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_NO_COUNTDOWN)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NO_COUNTDOWN=1)
-      message(STATUS "#593 ablation: only the local APIC timer's countdown is unusable (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_LINE_TAKEN)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_LINE_TAKEN=1)
-      message(STATUS "#593 ablation: the RTC's input is in use when the HPET chooses its route (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_BEHIND)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_BEHIND=1)
-      message(STATUS "#593 ablation: every 128th HPET comparator write lands behind the counter (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_UNCHECKED)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_UNCHECKED=1)
-      message(STATUS "#593 ablation: an HPET comparator write is not read back (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_FROM_NOW)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_FROM_NOW=1)
-      message(STATUS "#593 ablation: the APIC timer's deadlines are counted from now, not from the last one (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_ICR_OPEN)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_ICR_OPEN=1)
-      message(STATUS "#593 ablation: an IPI send may be interrupted between its two register writes (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_FIRMWARE_LEFT)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_FIRMWARE_LEFT=1)
-      message(STATUS "#593 ablation: the firmware left the HPET's LegacyReplacement on and a comparator interrupting (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_LEFT_ON)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_LEFT_ON=1)
-      message(STATUS "#593 ablation: the HPET's comparator is left interrupting when the tick leaves it (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_HPET_NAMED)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_HPET_NAMED=1)
-      message(STATUS "#593 ablation: the HPET's counter is named before the clock is chosen (x86_64)")
-  endif()
-  if(UROS_ABLATE_593_NEVER_TICKS)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_593_NEVER_TICKS=1)
-      message(STATUS "#593 ablation: processor 1's tick is never armed (x86_64)")
   endif()
   if(UROS_PROBE_606_PAGEOUT)
       list(APPEND KERNEL_DEFINES_BARE PROBE_606_PAGEOUT=1)
