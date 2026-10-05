@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #639
+Takes out: the application processors' own control registers -- they keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before the fix
+Run: --entry 0 600 -smp 4
+Expect: WRONG \(#639\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/smp.c b/uros/src/mach_kernel/x86_64/cpu/smp.c
+index eb837b55..846f9532 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/smp.c
++++ b/uros/src/mach_kernel/x86_64/cpu/smp.c
+@@ -138,8 +138,6 @@ void ap_start_c(uint32_t apic_id)
+ 	 * Then CR0.WP, SMEP and SMAP, as the boot processor turned them on:
+ 	 * every boot until this ran three of four processors without them.
+ 	 */
+-	write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
+-	pmap_protections_here();
+ 
+ 	/* Per-CPU state; nothing below is shared with another processor. */
+ 	percpu_activate(apic_id);

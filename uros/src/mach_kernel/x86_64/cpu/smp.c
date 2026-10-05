@@ -28,13 +28,6 @@
 #include <thread/fpu.h>
 #include <sync/atomic.h>
 
-/*
- * #639: the application processors keep the control registers the trampoline
- * left them -- caches disabled, and no WP, SMEP or SMAP -- as every boot did.
- */
-#ifndef	ABLATE_639_AP_CONTROL
-#define	ABLATE_639_AP_CONTROL	0
-#endif
 #include <trap/trap.h>
 
 extern char __trampoline_start[], __trampoline_end[];
@@ -145,10 +138,8 @@ void ap_start_c(uint32_t apic_id)
 	 * Then CR0.WP, SMEP and SMAP, as the boot processor turned them on:
 	 * every boot until this ran three of four processors without them.
 	 */
-	if (!ABLATE_639_AP_CONTROL) {
-		write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
-		pmap_protections_here();
-	}
+	write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
+	pmap_protections_here();
 
 	/* Per-CPU state; nothing below is shared with another processor. */
 	percpu_activate(apic_id);
