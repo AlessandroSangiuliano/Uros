@@ -42,6 +42,13 @@
 # is not passed for having started none; and no line may say WRONG, FAIL or
 # panic.  A run that stops printing for QUIET seconds, or goes on past CAP, is
 # stopped and said to be so.
+#
+# QUIET must outlast the longest stretch in which a healthy boot prints
+# nothing, and that is ipc_bench's fault-stress x32, which reports only at its
+# end: on a 1.4 GHz host, up to 75 s under KVM and 304 s under TCG at four
+# processors.  So QUIET is 300 s under KVM and 900 s under TCG, and CAP, at
+# 1200 s and 3600 s, is over twice the longest healthy boot seen: 250 s and
+# 1645 s.
 set -u
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -182,8 +189,8 @@ for run in "${RUNS[@]}"; do
 		why=$(grep -aE 'FAIL|timed out|TIMEOUT' "$OUT/$n-$run.out" | head -3 | sed 's/^/    /')
 		;;
 	bundle)
-		quiet=180 capsec=1200
-		[ "$accel" = tcg ] && { quiet=300; capsec=2400; }
+		quiet=300 capsec=1200
+		[ "$accel" = tcg ] && { quiet=900; capsec=3600; }
 		(cd "$REPO" && UROS_BUILD_DIR=$BUILD exec ./scripts/run-qemu.sh --fresh-disk $tcg \
 			--smp "$smp" -display none -serial mon:stdio > "$log" 2>&1 < /dev/null) &
 		pid=$!
