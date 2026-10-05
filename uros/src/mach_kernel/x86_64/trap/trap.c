@@ -45,18 +45,6 @@
 #ifndef ABLATE_467_ARM3
 #define ABLATE_467_ARM3	0	/* a ring-0 fault on a user address         */
 #endif
-/*
- * #603: the two halves of taking ASTs on the way back to ring 3, each with
- * its own way back out.  FAULT_AST: a page fault resolved for ring 3 returns
- * without looking.  ONE_PASS: a return to ring 3 takes them once, as it did
- * before, instead of until none is pending.
- */
-#ifndef ABLATE_603_FAULT_AST
-#define ABLATE_603_FAULT_AST	0
-#endif
-#ifndef ABLATE_603_ONE_PASS
-#define ABLATE_603_ONE_PASS	0
-#endif
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -1200,11 +1188,8 @@ trap_take_ast(struct trap_frame *frame)
 		 * So a return to ring 3 is the same loop as the other four ways
 		 * back to ring 3, by being the same function.
 		 */
-		if (!ABLATE_603_ONE_PASS) {
-			thread_return_ast();
-			return;
-		}
-		take = AST_ALL;
+		thread_return_ast();
+		return;
 	} else {
 		if (get_preemption_level() != 0)
 			return;
@@ -1981,8 +1966,7 @@ void trap_dispatch(struct trap_frame *frame)
 				 * code, where preempting is the interrupt path's
 				 * question, asked with IF known to be on.
 				 */
-				if (!ABLATE_603_FAULT_AST
-				    && (frame->cs & 3) == USER_RPL)
+				if ((frame->cs & 3) == USER_RPL)
 					trap_take_ast(frame);
 				return;	/* the instruction runs again */
 			}

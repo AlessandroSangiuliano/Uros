@@ -25,13 +25,6 @@
 
 
 /*
- * #603: the AST interrupt back to an EOI and nothing else, as it was.
- */
-#ifndef ABLATE_603_IPI_EMPTY
-#define ABLATE_603_IPI_EMPTY	0
-#endif
-
-/*
  * One call in flight at a time, and the lock is what makes that true.
  *
  * A per-processor mailbox would let several run at once, and is what this
@@ -347,8 +340,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 static void ipi_ast_handler(struct trap_frame *frame)
 {
 	(void) frame;
-	if (!ABLATE_603_IPI_EMPTY)
-		ast_check();
+	ast_check();
 	lapic_eoi();
 }
 
