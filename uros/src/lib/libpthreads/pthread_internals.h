@@ -120,7 +120,7 @@ typedef struct _pthread
 	void	       *arg;	      /* Argment for child routine */
 	int	       cancel_state;  /* Whether thread can be cancelled */
 	struct _pthread_handler_rec *cleanup_stack;
-	int		err_no;		/* thread-local errno */
+	struct mach_thread_state mach_state; /* libmach's: reply port, errno (#645) */
 	char	       name[16];      /* Thread name (NUL-terminated, 15 usable) */
 	unsigned long  sigmask;	      /* Blocked signal set */
 	unsigned long  sigpending;    /* Pending signal set */
