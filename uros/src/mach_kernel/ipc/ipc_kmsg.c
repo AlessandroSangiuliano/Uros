@@ -1151,6 +1151,8 @@ struct reply_refusal {
 	boolean_t		cached_active;
 	mach_port_t		cached_name;	/* where that port says it lives */
 	ipc_space_t		cached_space;
+	boolean_t		user;		/* the sender's ring-3 frame was read */
+	vm_offset_t		urip, ursp, urbp;
 };
 
 unsigned int	ipc_reply_refusals;
@@ -1183,6 +1185,25 @@ reply_refusal_note(
 		r->cached_name = r->cached->ip_receiver_name;
 		r->cached_space = r->cached->ip_receiver;
 	}
+
+	/*
+	 * Where in the sender the name came from: its registers as it entered
+	 * the kernel.  Only read here, under the lock; the stack they point at
+	 * is copied in after it, where a fault is allowed.
+	 */
+	r->user = FALSE;
+#if	defined(__x86_64__)
+	{
+		struct trap_frame *tf = current_act()->mact.pcb->user;
+
+		if (tf != (struct trap_frame *) 0) {
+			r->user = TRUE;
+			r->urip = tf->rip;
+			r->ursp = tf->rsp;
+			r->urbp = tf->rbp;
+		}
+	}
+#endif	/* __x86_64__ */
 }
 
 static void
@@ -1219,6 +1240,38 @@ reply_refusal_say(
 		       "in no space (#602)\n", r->name, (void *) r->cached,
 		       r->cached_generation,
 		       r->cached_active ? "active" : "dead");
+
+#if	defined(__x86_64__)
+	/*
+	 * The "generation" above is the space's: how many times a right in it
+	 * was removed or changed.  The name and its entry carry generations of
+	 * their own, and a name whose generation is not its entry's is a name
+	 * kept after its right went.
+	 */
+	if (r->found)
+		printf("ipc:   the name's generation is %u and its entry's %u "
+		       "(#602)\n",
+		       (unsigned) (r->name & ((1U << MACH_PORT_GEN_BITS) - 1)),
+		       (unsigned) (IE_BITS_GEN(r->bits) >> MACH_PORT_GEN_SHIFT));
+	if (r->user) {
+		uint64_t	w[16];
+		int		i;
+
+		printf("ipc:   sent from ring 3 at rip 0x%lx, rsp 0x%lx, "
+		       "rbp 0x%lx (#602)\n", (unsigned long) r->urip,
+		       (unsigned long) r->ursp, (unsigned long) r->urbp);
+		if (copyin((const char *) r->ursp, (char *) w, sizeof w) == 0)
+			for (i = 0; i < 16; i += 4)
+				printf("ipc:   rsp+0x%02x: 0x%lx 0x%lx 0x%lx 0x%lx "
+				       "(#602)\n", i * 8, (unsigned long) w[i],
+				       (unsigned long) w[i + 1],
+				       (unsigned long) w[i + 2],
+				       (unsigned long) w[i + 3]);
+		else
+			printf("ipc:   the words at rsp could not be read "
+			       "(#602)\n");
+	}
+#endif	/* __x86_64__ */
 }
 
 /*
