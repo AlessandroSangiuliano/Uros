@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #508
+Takes out: nothing -- a probe: the first exact source that states a TSC rate states it a quarter high, so the rulers must contradict it and the boot line say WRONG; KVM only, where KVM's clock is a source -- under TCG nothing states a rate, and nothing lies
+Run: --entry 14 600 -smp 4
+Expect: the TSC's exact sources: .*WRONG: [0-9]+ ppm from the rulers, who allow [0-9]+
+
+diff --git a/uros/src/mach_kernel/x86_64/time/freq_source.c b/uros/src/mach_kernel/x86_64/time/freq_source.c
+index 30a70be0..ba37550a 100644
+--- a/uros/src/mach_kernel/x86_64/time/freq_source.c
++++ b/uros/src/mach_kernel/x86_64/time/freq_source.c
+@@ -225,6 +225,20 @@ void freq_exact_read(struct freq_exact *out)
+ 	if (hv.has_timing && hv.bus_khz != 0)
+ 		out->lapic_hz[FREQ_TIMING] = (uint64_t)hv.bus_khz * 1000;
+ 	out->tsc_hz[FREQ_KVMCLOCK] = hv.kvmclock_tsc_hz;
++
++	/*
++	 * #508: the first source that states a rate states it a quarter high,
++	 * so the measurement can be seen contradicting it.  A quarter and not
++	 * the thirty-second it was: under a hypervisor a contradiction now has
++	 * to exceed what the host's NTP can do to the rulers, 12.5% (exact.c,
++	 * #594), and a lie inside that is one this check cannot tell from a
++	 * host converging.
++	 */
++	for (unsigned i = 0; i < FREQ_EXACT; i++)
++		if (out->tsc_hz[i] != 0) {
++			out->tsc_hz[i] += out->tsc_hz[i] / 4;
++			break;
++		}
+ }
+ 
+ const char *freq_exact_name(unsigned id)

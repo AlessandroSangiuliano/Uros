@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #508
+Takes out: nothing -- a probe: the processor states CPUID 0x15 as OMEGA's does (crystal 38.4 MHz, ratio 156/2), so the path that adopts it, which no guest reaches, runs; the TSC adopts it, and the LAPIC timer, which in a guest counts a bus that is not that crystal, must find it WRONG
+Run: --entry 14 600 -smp 4
+Expect: CPUID 0x15 2995200 kHz, [0-9]+ ppm from the rulers: adopted
+Expect: CPUID 0x15 2400 kHz, WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/time/freq_source.c b/uros/src/mach_kernel/x86_64/time/freq_source.c
+index 121dc19a..60408463 100644
+--- a/uros/src/mach_kernel/x86_64/time/freq_source.c
++++ b/uros/src/mach_kernel/x86_64/time/freq_source.c
+@@ -197,6 +197,15 @@ void freq_exact_read(struct freq_exact *out)
+ 
+ 	*out = (struct freq_exact){ { 0 }, { 0 } };
+ 	freq_cpuid_read(&cpu);
++	/*
++	 * #508: the processor states 0x15 as OMEGA's does (crystal 38.4 MHz,
++	 * TSC/crystal 156/2), because no guest offers the leaf filled in and
++	 * this is the only way the path that adopts it runs.
++	 */
++	cpu.has_15 = 1;
++	cpu.crystal_hz = 38400000;
++	cpu.tsc_numerator = 156;
++	cpu.tsc_denominator = 2;
+ 	freq_hypervisor_read(&hv);
+ #if	ABLATE_594_CRYSTAL_IS_BUS
+ 	/*
