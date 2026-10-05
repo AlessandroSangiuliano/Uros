@@ -152,3 +152,29 @@ mig_reset_after_fork(void)
 	extern mach_port_t mach_task_self(void);
 	mach_task_self_ = mach_task_self();
 }
+
+/*
+ * Lightweight reinit for a child task created with task_create(inherit_memory):
+ * the child of a fork(), and a raw thread started in a task that inherited its
+ * parent's memory.  The cached task port still names the parent's, and the
+ * reply port is the parent's; both are reset.  Port registration, the page
+ * size and the RPC glue are inherited and left alone.
+ *
+ * It lives here and not in mach_init.c, where it was.  A caller outside libmach
+ * that names a function in mach_init.c pulls that file into libc.so beside
+ * mach_init_sa.c, which defines the same globals, and the link fails -- the
+ * reason mig_reset_after_fork() was put here (#645).
+ *
+ * mach_task_self() in <mach_init.h> is a macro that reads the cached global, so
+ * it is undefined here and the trap stub runs, returning a name that is valid
+ * in the child's space (#269).
+ */
+#undef mach_task_self
+extern mach_port_t mach_task_self(void);
+
+void
+mach_task_self_init(void)
+{
+	mach_task_self_ = mach_task_self();
+	mig_init(0);
+}
