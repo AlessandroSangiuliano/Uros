@@ -47,10 +47,10 @@
  * ── The widened window ────────────────────────────────────────────────
  *
  * Each window is a few instructions, and #638 was seen once in 120 boots.
- * UROS_WIDEN_638_WINDOW makes a shootdown spin for 50 us between deciding
- * which processor it is on and acting on it, while an arm runs (<cpu/ipi.h>,
- * which also says why it is one spin and not two).  Without the option the
- * arms still run, and say what they saw.
+ * ablations/638-widen-window.patch makes a shootdown spin for 50 us between
+ * deciding which processor it is on and acting on it, while an arm runs (the
+ * patch also says why it is one spin and not two).  Without it the arms still
+ * run, and say what they saw.
  */
 
 #include <stdint.h>
@@ -400,11 +400,7 @@ shoot_pages_fini(uint32_t n)
 static void
 shoot_arm_window(int on)
 {
-#if	WIDEN_638_WINDOW
-	shootdown_widen_armed = on;
-#else
 	(void) on;
-#endif
 }
 
 static void

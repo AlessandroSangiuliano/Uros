@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #638
+Takes out: the pin in tlb_flush_range() -- it flushes this processor and cross-calls the others with preemption on, so a thread moved between the two leaves the processor it arrived at unflushed
+Run: --entry 31 1200 -smp 4
+Expect: shootdown_test: \[1\] WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
+index e9eaccf9..665443f0 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
++++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
+@@ -114,17 +114,16 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
+ static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
+ 				     uint64_t using)
+ {
+-	shootdown_widen();	/* before deciding: a move is harmless */
+-	disable_preemption();
+ 
+ 	tlb_flush_local_range(r->va, r->size);
+ 
++	shootdown_widen();	/* between the local flush and the call */
++
+ 	if (broadcast)
+ 		ipi_call_others(tlb_flush_handler, r);
+ 	else
+ 		ipi_call_mask(using, tlb_flush_handler, r);
+ 
+-	enable_preemption();
+ }
+ 
+ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)

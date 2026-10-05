@@ -92,10 +92,6 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
 	return answer_count_of(&served, apic_id);
 }
 
-#ifndef	ABLATE_638_FLUSH_UNPINNED
-#define	ABLATE_638_FLUSH_UNPINNED	0
-#endif
-
 /*
  * Flush this processor, and have the others flush too: every one in `using',
  * or every one at all when `broadcast' is set.
@@ -106,8 +102,8 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
  * thread moved between the two had flushed the processor it left and left out
  * the one it arrived at, which nobody flushed.  That one can hold the
  * translation: a switch between two threads with the same map does not reload
- * CR3.  So both halves run with preemption off.  UROS_ABLATE_638_FLUSH_UNPINNED
- * runs them with it on again.
+ * CR3.  So both halves run with preemption off.
+ * ablations/638-flush-unpinned.patch runs them with it on again.
  *
  * The local flush still goes first.  Not for correctness — the order between
  * the local flush and the remote ones does not matter, since the entry is
@@ -118,27 +114,16 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
 static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
 				     uint64_t using)
 {
-	if (!ABLATE_638_FLUSH_UNPINNED) {
-#if	WIDEN_638_WINDOW
-		shootdown_widen();	/* before deciding: a move is harmless */
-#endif
-		disable_preemption();
-	}
+	disable_preemption();
 
 	tlb_flush_local_range(r->va, r->size);
-
-#if	WIDEN_638_WINDOW
-	if (ABLATE_638_FLUSH_UNPINNED)
-		shootdown_widen();	/* between the local flush and the call */
-#endif
 
 	if (broadcast)
 		ipi_call_others(tlb_flush_handler, r);
 	else
 		ipi_call_mask(using, tlb_flush_handler, r);
 
-	if (!ABLATE_638_FLUSH_UNPINNED)
-		enable_preemption();
+	enable_preemption();
 }
 
 void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
