@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #599
+Over: 599-nested-printf.patch
 Takes out: printf_nested() -- a printf nested inside printf_lock's holder waits for the lock again, so the handler spins before its EOI and processor 0's tick stops behind the vector in service; applied over 599-nested-printf.patch
 Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
 Expect: clock: processor 0's tick has not run for

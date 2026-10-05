@@ -9,6 +9,11 @@
 # about, builds it with the main build's configuration, boots it with
 # run-x86_64.sh, and reads each log for what the ablation says must be there.
 #
+# A patch that must go over another says so with `Over: NAME.patch' in its
+# header, and is applied over it whether or not it was given: the bases come
+# first, each once.  Only the patches given are read for Expect: lines -- a base
+# that is itself an ablation would otherwise catch the run on its own.
+#
 # Usage:
 #   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --check [--base REV] PATCH...
@@ -20,7 +25,8 @@
 #   --ab         alternate every ablated boot with a boot of the fixed tree:
 #                the widen patches, without the ablations
 #   --keep       keep the worktrees and their builds afterwards
-#   --check      only say whether every patch still applies to REV
+#   --check      only say whether each patch still applies to REV, over its
+#                bases, each on its own
 #   --make       print the reverse of COMMIT's changes to the PATHs, under a
 #                header to fill in
 #   RUN-ARGS     what run-x86_64.sh is given after the accelerator; the
@@ -108,12 +114,31 @@ done
 REV=$(git -C "$REPO" rev-parse -q --verify "$BASE^{commit}") || die 2 "no revision $BASE"
 SHORT=$(git -C "$REPO" rev-parse --short "$REV")
 
+# A patch, after the bases its Over: lines name (theirs first), each once.
+with_bases() {
+	local p=$1 b
+
+	case " ${EXPANDED[*]} " in
+	*" $p "*) return ;;
+	esac
+	[ -r "$p" ] || die 2 "cannot read $p"
+	grep -q '^diff --git ' "$p" || die 2 "$p is not a patch: it has no diff"
+	for b in $(header "$p" Over); do
+		[ -r "$(dirname "$p")/$b" ] ||
+			die 2 "$(basename "$p") goes over $b, which is not next to it"
+		with_bases "$(realpath "$(dirname "$p")/$b")"
+	done
+	EXPANDED+=("$p")
+}
+EXPANDED=()
+for p in "${PATCHES[@]}"; do
+	with_bases "$p"
+done
+
 # Every patch says what it is, and the fixed arm takes only the widen ones.
 WIDENS=()
 ABLATIONS=0
-for p in "${PATCHES[@]}"; do
-	[ -r "$p" ] || die 2 "cannot read $p"
-	grep -q '^diff --git ' "$p" || die 2 "$p is not a patch: it has no diff"
+for p in "${EXPANDED[@]}"; do
 	kind=$(header "$p" Kind | head -n 1)
 	case "$kind" in
 	ablation)	ABLATIONS=$((ABLATIONS + 1)) ;;
@@ -145,16 +170,23 @@ check_applies() {
 	return $bad
 }
 
+# Each patch on its own, over its bases: a patch is not checked over the
+# unrelated ones given beside it, which may touch the same lines.
 if [ $CHECK = 1 ]; then
-	check_applies "${PATCHES[@]}" || exit 2
-	exit 0
+	bad=0
+	for p in "${PATCHES[@]}"; do
+		EXPANDED=()
+		with_bases "$p"
+		check_applies "${EXPANDED[@]}" || bad=1
+	done
+	exit $((bad * 2))
 fi
 
 [ $ABLATIONS -gt 0 ] || die 2 "no ablation among the patches: there is nothing for a test to catch"
-check_applies "${PATCHES[@]}" || exit 2
+check_applies "${EXPANDED[@]}" || exit 2
 
 if [ ${#RUN[@]} -eq 0 ]; then
-	run=$(for p in "${PATCHES[@]}"; do header "$p" Run; done | head -n 1)
+	run=$(for p in "${PATCHES[@]}" "${EXPANDED[@]}"; do header "$p" Run; done | head -n 1)
 	[ -n "$run" ] || die 2 "no Run: line in the patches, and no RUN-ARGS after --"
 	read -r -a RUN <<< "$run"
 fi
@@ -187,7 +219,7 @@ trap cleanup EXIT
 
 # The build is configured with every OSFMK_* and UROS_* option of the main
 # build, because this tree's configuration cannot be reproduced from the
-# defaults -- except the in-kernel ablations and widenings, which stay off.
+# defaults.
 configure() {
 	local wt=$1 cache="$REF/CMakeCache.txt" gen bt l n rest t v opts=()
 
@@ -199,11 +231,6 @@ configure() {
 		rest=${l#*:}
 		t=${rest%%=*}
 		v=${rest#*=}
-		case "$n" in
-		UROS_ABLATE_*|UROS_WIDEN_*)
-			[ "$v" = ON ] && echo "note: $n is ON in $REF, and is left off here"
-			continue ;;
-		esac
 		opts+=("-D$n:$t=$v")
 	done < <(grep -E '^(OSFMK|UROS)_[A-Z0-9_]*:(BOOL|STRING|UNINITIALIZED)=' "$cache" | grep -v '_LAST:')
 	echo "configuring with ${#opts[@]} options of $REF"
@@ -216,7 +243,7 @@ for arm in "${ARMS[@]}"; do
 	wt="$RUNDIR/$arm"
 	git -C "$REPO" worktree add -q --detach "$wt" "$REV"
 	if [ "$arm" = ablated ]; then
-		apply=("${PATCHES[@]}")
+		apply=("${EXPANDED[@]}")
 	else
 		apply=("${WIDENS[@]}")
 	fi
@@ -233,7 +260,7 @@ done
 CSV="$DIR/ablate.csv"
 [ -s "$CSV" ] ||
 	echo "date,time,host,base,patches,arm,boot,accel,run,clock_mhz,power,harness_status,verdict,log" > "$CSV"
-names=$(for p in "${PATCHES[@]}"; do basename "$p" .patch; done | paste -sd+)
+names=$(for p in "${EXPANDED[@]}"; do basename "$p" .patch; done | paste -sd+)
 host=$(hostname)
 
 caught=0 missed=0 passed=0 failed=0

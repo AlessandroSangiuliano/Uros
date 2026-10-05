@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #599
+Over: 599-widen-divisor.patch
 Takes out: com_bank_lock -- com_putc()'s THR write and the divisor sequence no longer exclude each other, and console bytes land in the divisor latch
 Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio -append -U
 Expect: com: \[divisor-race\] WRONG .* divisor sequences read back something other than

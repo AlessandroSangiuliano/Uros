@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #599
+Over: 599-window-widen.patch
 Takes out: window_lock -- the I/O APIC's window is used with interrupts masked and nothing else, so two processors' selects and accesses interleave and each side reads back the other pin's vector
 Run: --entry 23 1200 -smp 4
 Expect: ioapic_race: WRONG .* read-backs were not what their side wrote

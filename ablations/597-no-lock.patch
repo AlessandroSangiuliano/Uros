@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #597
+Over: 597-widen.patch
 Takes out: pci_cfg_port_lock -- the configuration access is two port accesses with nothing held, as before #597, so another processor's access moves 0xCF8 in between and the read answers about another device; applied over 597-widen.patch
 Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
 Expect: hal_bar: \[5\] .*WRONG

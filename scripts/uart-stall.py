@@ -37,8 +37,8 @@
 #      and went nowhere.
 #
 # 🔴 Run it against BOTH kernels.  The bounded one passing means nothing until
-# the unbounded one (UROS_ABLATE_551_UNBOUNDED=ON, in a build tree of its own)
-# has been seen failing here, in the word this script uses: STOPPED.  A test
+# the unbounded one (ablations/551-unbounded.patch, applied to a tree of its
+# own) has been seen failing here, in the word this script uses: STOPPED.  A test
 # whose failure has never been observed has not been shown to be a test.
 #
 # Usage:

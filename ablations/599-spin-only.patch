@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #599
+Over: 599-cli-spin.patch
 Takes out: the clock watch from the other processors' own ticks -- applied over 599-cli-spin.patch, only the watch inside a spin (clock_watch_spin) can say processor 0's tick stopped
 Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
 Expect: ms \(watched by processor [0-9]+, spinning in 

@@ -23,18 +23,21 @@ Run: --entry 25 600 -smp 4
 Expect: <thread_doswapin\+0x
 ```
 
+- `Over:` names a patch this one is applied over: a widen it needs, or a probe it extends. `ablate.sh` applies the bases first, each once, whether or not they were given.
 - `Takes out:` (an ablation) or `Holds open:` (a widen patch) says in one line what the patch does.
 - `Run:` is what `scripts/run-x86_64.sh` is given after the accelerator.
-- `Expect:` is an extended regular expression, matched line by line against the run's log. There may be several, and any one match means the test caught the defect. Expectations are read only from ablation patches.
+- `Expect:` is an extended regular expression, matched line by line against the run's log. There may be several, and any one match means the test caught the defect. Expectations are read only from the ablation patches given on the command line, not from the bases `Over:` brings in: a base that is itself an ablation would otherwise catch the run on its own.
 - `Measure:` replaces `Expect:` in an ablation that no test catches, because it brings back a cost rather than a defect. It names the number that must move. `ablate.sh` checks that such a patch applies, but does not judge a run with it: the bench is read by hand, against the same tree without the patch.
 
 ## Running one
 
 ```
-scripts/ablate.sh ablations/642-widen-swap.patch ablations/642-direct-swapin.patch
-scripts/ablate.sh --ab --boots 5 --accel tcg,kvm ablations/642-widen-swap.patch ablations/642-direct-swapin.patch
+scripts/ablate.sh ablations/642-direct-swapin.patch
+scripts/ablate.sh --ab --boots 5 --accel tcg,kvm ablations/642-direct-swapin.patch
 scripts/ablate.sh --check ablations/*.patch
 ```
+
+The first two apply `642-widen-swap.patch` too, because `642-direct-swapin.patch` goes over it. `--check` asks each patch on its own, over its bases: patches given together are not stacked, since unrelated ones may touch the same lines.
 
 Each run takes place in a worktree under `$UROS_ABLATE_DIR` (default `~/uros-tests/ablations`). The build there is configured with the options of `$UROS_ABLATE_REF_BUILD` (default `uros/build-x86_64`), because this tree's configuration cannot be reproduced from the defaults. Every boot adds one line to `ablate.csv` in the same directory: tree, patches, arm, accelerator, the clock and power source the harness recorded, its exit status, and the verdict.
 

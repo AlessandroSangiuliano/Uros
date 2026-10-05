@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #617
+Over: 617-widen-window.patch
 Takes out: the interrupts thread_return_ast() turns off around its last look -- a thread preempted between reading its processor's number and that processor's AST word reads another's, and goes to ring 3 with its AST pending
 Run: --entry 14 1200 -smp 4
 Expect: left with an AST pending -- WRONG

@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #638
+Over: 638-widen-window.patch
 Takes out: the pin in ipi_call_mask() -- it strikes its own bit with preemption on, so a thread moved before it sends cross-calls the processor it arrived at, itself, and waits for an answer only it could give
 Run: --entry 31 1200 -smp 4
 Expect: names the processor sending it

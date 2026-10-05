@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #593
+Over: 593-widen-behind.patch
 Takes out: the read-back of every HPET comparator write -- one that lands behind the counter matches only when the low 32 bits come round again, and every processor's clock stops until then, 43 s at QEMU's 100 MHz; over 593-widen-behind.patch, which makes such writes happen
 Run: --entry 22 1200 -smp 4
 Expect: WRONG: fewer than half the ticks the window holds, the clock stopped
