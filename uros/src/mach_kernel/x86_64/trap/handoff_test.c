@@ -177,8 +177,8 @@ hq_wake(int bound_ticks)
 	return handed;
 }
 
-static const char *
-hq_swap_name(int state)
+const char *
+swap_state_name(int state)
 {
 	switch (state & TH_SW_STATE) {
 	case TH_SW_UNSWAPPABLE:	return "unswappable";
@@ -249,7 +249,7 @@ hq_swapped_arm(void)
 		printf("handoff: NOT ASKED — the swapper's scan did not take the "
 		       "waiter (state 0x%x, swap state %s), so nothing was asked "
 		       "of the hand-off (#607)\n",
-		       th->state, hq_swap_name(act->swap_state));
+		       th->state, swap_state_name(act->swap_state));
 		return;
 	}
 
@@ -269,7 +269,7 @@ hq_swapped_arm(void)
 		       "swapped out, and it ran with state 0x%x and swap state "
 		       "%s: on a kernel stack thread_swapout() had unwired "
 		       "(#607)\n", handed ? "switched onto" : "woke",
-		       hq_state, hq_swap_name(hq_swap));
+		       hq_state, swap_state_name(hq_swap));
 		return;
 	}
 
