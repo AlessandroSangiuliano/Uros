@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #617
+Takes out: the interrupts thread_return_ast() turns off around its last look -- a thread preempted between reading its processor's number and that processor's AST word reads another's, and goes to ring 3 with its AST pending
+Run: --entry 0 1200 -smp 4
+Expect: left with an AST pending -- WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 4eb8dba5..8e6cfa85 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1368,12 +1368,10 @@ thread_return_ast(void)
+ 	int	cpu;
+ 
+ 	for (;;) {
+-		interrupts_disable();
+ 		cpu = cpu_number();
+ 		return_ast_widen();
+ 		if ((need_ast[cpu] & AST_ALL) == 0)
+ 			break;
+-		interrupts_enable();
+ 		ast_taken(FALSE, AST_ALL, splsched());
+ 	}
+ 	return_ast_check(cpu);
