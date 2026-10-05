@@ -95,8 +95,6 @@ option(UROS_ABLATE_537_PAGE_WALK "Build the #537 ablation: a DMA page is found b
 option(UROS_ABLATE_537_IX_UNSORTED "Build the #537 ablation: the page index is left unsorted (the self-test must say WRONG)" OFF)
 option(UROS_ABLATE_537_HMAC_LOCKED "Build the #537 ablation: the capability MAC is computed with cap_lock held, as before" OFF)
 option(UROS_PROBE_537_CAP_CONCURRENCY "Build the #537 probe: capability checks timed alone and on every processor at once" OFF)
-# #616, x86_64: every thread is born with a user frame again, kernel threads too.
-option(UROS_ABLATE_616_KERNEL_FRAME "Build the #616 ablation: a kernel thread gets a zeroed user frame, so thread_get_state answers for it (state_test, entry 7, must say WRONG)" OFF)
 # #612, x86_64: the clock burn-in returns with interrupts off again, whatever it was given.
 option(UROS_ABLATE_612_BURNIN_CLI "Build the #612 ablation: the clock burn-in ends with interrupts off whatever its caller had (entries 3, 4, 20: the line after the burn-in must say WRONG, and at more than one processor the boot stops in setup_main)" OFF)
 # #612, x86_64: the boot self-tests that map in the VM's range leave their pages there again.
@@ -649,10 +647,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_PROBE_537_CAP_CONCURRENCY)
       list(APPEND KERNEL_DEFINES_BARE PROBE_537_CAP_CONCURRENCY=1)
       message(STATUS "#537 probe: capability checks alone and on every processor at once (x86_64)")
-  endif()
-  if(UROS_ABLATE_616_KERNEL_FRAME)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_616_KERNEL_FRAME=1)
-      message(STATUS "#616 ablation: kernel threads are born with a user frame (x86_64)")
   endif()
   if(UROS_ABLATE_612_BURNIN_CLI)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_612_BURNIN_CLI=1)

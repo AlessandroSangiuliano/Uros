@@ -254,11 +254,6 @@ thread_begin_trampoline(void *unused)
 	/*NOTREACHED*/
 }
 
-/* #616's ablation: every thread gets a user frame again, kernel threads too. */
-#ifndef	ABLATE_616_KERNEL_FRAME
-#define	ABLATE_616_KERNEL_FRAME	0
-#endif
-
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -405,7 +400,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * from #422 on, and state_test's check on it -- written five days
 	 * before -- failed unseen until #615 ran entry 7.
 	 */
-	if (thr_act->task != kernel_task || ABLATE_616_KERNEL_FRAME) {
+	if (thr_act->task != kernel_task) {
 		pcb->user = (struct trap_frame *)
 			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
 		thread_frame_init(pcb->user);
