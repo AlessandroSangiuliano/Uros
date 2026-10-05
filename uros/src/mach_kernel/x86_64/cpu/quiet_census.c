@@ -383,7 +383,7 @@ quiet_census_pass(int mycpu)
 	 * #615: whether the scheduler ever queued a bound thread on a run queue
 	 * not its own processor's, where another processor may take it -- said
 	 * by every boot that reaches the census, not only by the bench whose
-	 * worker caught it.  Silent at zero; UROS_ABLATE_615_DISPLACED_TO_SET
+	 * worker caught it.  Silent at zero; ablations/615-displaced-to-set.patch
 	 * is how it is seen to speak.
 	 */
 	if (sched_bound_displaced != 0)

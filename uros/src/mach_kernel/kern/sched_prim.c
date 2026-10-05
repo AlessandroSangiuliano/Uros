@@ -2628,11 +2628,6 @@ extern int	real_ncpus;
 unsigned int	sched_bound_displaced;
 int		sched_bound_displaced_slot = -1;
 
-/* #615's ablation: the displaced bound thread goes to the set's queue again. */
-#ifndef	ABLATE_615_DISPLACED_TO_SET
-#define	ABLATE_615_DISPLACED_TO_SET	0
-#endif
-
 /*
  *	thread_setrun:
  *
@@ -2836,8 +2831,7 @@ thread_setrun(
 	     * in three.  It goes back to its own processor's queue: this one,
 	     * whose next_thread it was.
 	     */
-	    if (th->bound_processor != PROCESSOR_NULL &&
-		!ABLATE_615_DISPLACED_TO_SET)
+	    if (th->bound_processor != PROCESSOR_NULL)
 		rq = &th->bound_processor->runq;
 #if	S319_INSTRUMENT
 	    if (rq == &pset->runq)
