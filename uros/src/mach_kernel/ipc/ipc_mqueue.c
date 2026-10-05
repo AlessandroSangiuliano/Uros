@@ -719,17 +719,10 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
  * A server blocked in receive for ten seconds is exactly the thread the
  * swapper takes.  A receiver that fails this goes to thread_go(), which swaps
  * it in.
- *
- * The ablation puts the old mask back, for -O's storm to catch.
  */
-#ifndef	ABLATE_607_DTS_SWAPPED
-#define	ABLATE_607_DTS_SWAPPED	0
-#endif
 
 #define	DTS_PARKED(th)							\
-	(((th)->state & (TH_SCHED_STATE |					\
-			 (ABLATE_607_DTS_SWAPPED ? 0 : TH_SWAPPED_OUT)))	\
-	 == TH_WAIT)
+	(((th)->state & (TH_SCHED_STATE | TH_SWAPPED_OUT)) == TH_WAIT)
 #define	DTS_SWAPPED_WAITER(th)						\
 	(((th)->state & (TH_SCHED_STATE | TH_SWAPPED_OUT))			\
 	 == (TH_WAIT | TH_SWAPPED_OUT))
