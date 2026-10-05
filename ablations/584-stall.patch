@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #584
+Takes out: nothing -- a probe: every fork-race worker blocks for good halfway, asleep and not runnable, the stall a DEPRESS round cannot time; the heartbeat, a thread of its own that sleeps, must report it in real seconds
+Run: --entry 14 600 -smp 4
+Measure: the fork-race heartbeat's STALLED line, at half the total after about five seconds of real sleep (600 of 1200 in 4999 ms, KVM -smp 4; the DEPRESS heartbeat said 239 of 1200 in 0 ms) -- in a bundle that runs forkrace, which the default one does not: UROS_BUNDLE_BENCH_ONLY=ON, UROS_BENCH_SUITES=forkrace and UROS_FORKRACE_ITERS=150 in the build ablate.sh copies its configuration from
+
+diff --git a/uros/src/bench/ipc_bench/ipc_bench.c b/uros/src/bench/ipc_bench/ipc_bench.c
+index 9d426ea9..13827321 100644
+--- a/uros/src/bench/ipc_bench/ipc_bench.c
++++ b/uros/src/bench/ipc_bench/ipc_bench.c
+@@ -1060,6 +1060,10 @@ forkrace_worker_func(void *arg)
+     for (i = 0; i < w->iters; i++) {
+ 	mach_port_t	child;
+ 
++	/* #584: blocked for good halfway -- asleep, not runnable. */
++	if (i == w->iters / 2)
++	    for (;;)
++		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
+ 	if (!forkrace_spawn_live(&child)) {
+ 	    w->refused++;
+ 	    continue;
+@@ -1094,6 +1098,10 @@ forkrace_worker_func(void *arg)
+ 	mach_port_t	child;
+ 	kern_return_t	kr;
+ 
++	/* #584: blocked for good halfway -- asleep, not runnable. */
++	if (i == w->iters / 2)
++	    for (;;)
++		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1000);
+ 	kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
+ 			 TRUE, &child);
+ 	if (kr != KERN_SUCCESS) {
