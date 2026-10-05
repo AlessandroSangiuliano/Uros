@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #537
-Takes out: the epoch a revocation moves -- a token verified before its revocation is still answered from the cache after it
-Run: --entry 14 1200 -smp 4
+Takes out: the epoch a revocation moves -- a token verified before its revocation is still answered from the cache after it; one processor, because the self-test's check after the revocation is not held to the processor whose cache it filled, and on another it misses and is refused by the MAC path
+Run: --entry 14 1200 -smp 1
 Expect: WRONG, the cache outlived the revocation
 
 diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
