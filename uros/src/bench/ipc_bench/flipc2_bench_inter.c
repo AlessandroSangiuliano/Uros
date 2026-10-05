@@ -28,12 +28,14 @@
 #include <string.h>
 
 /*
- * libpthreads mig_support.c: non-static so we can vm_write it to 0 in
- * child tasks.  Without this, the child inherits _mig_multithreaded=1
- * and pthread_self() returns garbage (no pthread control block on the
- * child's raw stack), crashing in mig_get_reply_port.
+ * Every child entry below starts with mach_task_self_init().  The child runs a
+ * raw thread in a task that inherited the parent's memory, libmach's state
+ * included: the parent's task port name, its reply port, and the hand-over to
+ * libpthreads, whose pthread_self() on the child's raw stack is garbage.
+ * mach_task_self_init() gives the child the task's own state before any RPC
+ * (#645); the parent used to write libpthreads' _mig_multithreaded to 0 in the
+ * child with vm_write instead.
  */
-extern int _mig_multithreaded;
 
 /* ===================================================================
  * Shared child args (inherited via task_create + patched via vm_write)
@@ -49,6 +51,8 @@ volatile struct flipc2_child_args flipc2_child_args_storage;
 void __attribute__((noreturn, used))
 flipc2_child_echo_entry(void)
 {
+    mach_task_self_init();
+
     volatile struct flipc2_child_args *args = &flipc2_child_args_storage;
     uint8_t *fwd_base = (uint8_t *)args->fwd_base;
     uint8_t *rev_base = (uint8_t *)args->rev_base;
@@ -135,6 +139,8 @@ flipc2_child_echo_entry(void)
 void __attribute__((noreturn, used))
 flipc2_child_echo_futex_entry(void)
 {
+    mach_task_self_init();
+
     volatile struct flipc2_child_args *args = &flipc2_child_args_storage;
     uint8_t *fwd_base = (uint8_t *)args->fwd_base;
     uint8_t *rev_base = (uint8_t *)args->rev_base;
@@ -203,6 +209,8 @@ flipc2_child_echo_futex_entry(void)
 void __attribute__((noreturn, used))
 flipc2_child_batch_echo_entry(void)
 {
+    mach_task_self_init();
+
     volatile struct flipc2_child_args *args = &flipc2_child_args_storage;
     uint8_t *fwd_base = (uint8_t *)args->fwd_base;
     uint8_t *rev_base = (uint8_t *)args->rev_base;
@@ -279,14 +287,16 @@ flipc2_child_batch_echo_entry(void)
  * frees the slot, sends null reply.
  * No library API — direct struct access + CAS for bufgroup_free.
  *
- * NOTE: the child task has no pthread runtime, but the parent resets
- * _mig_multithreaded=0 via vm_write before starting the child, so
- * MIG stubs (semaphore_wait/signal) use the global reply port.
+ * NOTE: the child task has no pthread runtime; mach_task_self_init()
+ * gives it the task's reply port, which MIG stubs (semaphore_wait/signal)
+ * then use.
  * =================================================================== */
 
 void __attribute__((noreturn, used))
 flipc2_child_bg_echo_entry(void)
 {
+    mach_task_self_init();
+
     volatile struct flipc2_child_args *args = &flipc2_child_args_storage;
     uint8_t *fwd_base = (uint8_t *)args->fwd_base;
     uint8_t *rev_base = (uint8_t *)args->rev_base;
@@ -426,22 +436,6 @@ flipc2_inter_setup(flipc2_channel_t fwd_ch, flipc2_channel_t rev_ch,
     if (kr) {
         printf("  %s: task_create failed %d\n", label, kr);
         return -1;
-    }
-
-    /*
-     * The child inherits _mig_multithreaded=1 from the parent.
-     * Its raw thread has no pthread control block, so pthread_self()
-     * would return garbage and crash in mig_get_reply_port().
-     * Reset to 0 so MIG stubs use the global reply port instead.
-     */
-    {
-        int zero = 0;
-        kr = vm_write(child_task,
-                      (vm_address_t)&_mig_multithreaded,
-                      (vm_address_t)&zero, sizeof(zero));
-        if (kr)
-            printf("  %s: vm_write _mig_multithreaded failed %d\n",
-                   label, kr);
     }
 
     /* Share channels as true shared memory via library API */
@@ -883,13 +877,6 @@ bench_flipc2_isolated_inter_rpc(const char *label, int data_size, int iters)
         flipc2_channel_destroy(rev_ch);
         flipc2_channel_destroy(fwd_ch);
         return;
-    }
-
-    /* Reset _mig_multithreaded in child (see flipc2_inter_setup) */
-    {
-        int zero = 0;
-        vm_write(child_task, (vm_address_t)&_mig_multithreaded,
-                 (vm_address_t)&zero, sizeof(zero));
     }
 
     /* Share with per-role page protections:

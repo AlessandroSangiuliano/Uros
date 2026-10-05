@@ -14,8 +14,6 @@
 
 #include "flipc2_bench.h"
 
-/* See flipc2_bench_inter.c — reset in child tasks */
-extern int _mig_multithreaded;
 #include <mach.h>
 #include <mach/mach_port.h>
 #include <mach/mach_traps.h>
@@ -312,13 +310,6 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
         return;
     }
 
-    /* Reset _mig_multithreaded in child (see flipc2_bench_inter.c) */
-    {
-        int zero = 0;
-        vm_write(child_task, (vm_address_t)&_mig_multithreaded,
-                 (vm_address_t)&zero, sizeof(zero));
-    }
-
     /* Share channels via vm_remap */
     ret = flipc2_channel_share(fwd_ch, child_task, &child_fwd_addr);
     if (ret != FLIPC2_SUCCESS) {
@@ -440,9 +431,9 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
 
     /*
      * Both parent and child use semaphore-based wait/signal.
-     * The child can use MIG stubs because the parent resets
-     * _mig_multithreaded=0 via vm_write, so mig_get_reply_port
-     * falls back to the global reply port.
+     * The child can use MIG stubs because it starts with
+     * mach_task_self_init(), which gives it the task's reply port
+     * (flipc2_bench_inter.c).
      */
 
     /* Warmup */

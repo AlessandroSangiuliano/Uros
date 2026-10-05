@@ -52,7 +52,6 @@
 #include <mach/mach_host.h>
 #include <machine/ndr_def.h>
 
-extern void mig_init(void *);
 extern void mach_init_ports(void);
 
 mach_port_t	mach_task_self_ = MACH_PORT_NULL;
