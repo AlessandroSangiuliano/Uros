@@ -24,10 +24,14 @@
 # boots the minimal bundle, where no self-test runs, and asks only that the
 # shell comes up, runs a program in the background and powers off.
 #
-# Usage: suite-i386.sh [-o DIR] [-r "RUN..."]
+# Usage: suite-i386.sh [--battery] [-o DIR] [-r "RUN..."]
 #        suite-i386.sh --judge LOG     judge a bundle boot's log already written
-#   -o DIR    where the logs go (default ~/uros-tests/suite-i386/<time>-<tree>)
-#   -r RUNS   these runs instead of the eight
+#   -o DIR      where the logs go (default ~/uros-tests/suite-i386/<time>-<tree>)
+#   -r RUNS     these runs instead of the eight
+#   --battery   start on battery.  Without it a laptop off its charger refuses:
+#               the supply moves the clock, and with it which races open, so
+#               boots on battery are not comparable with boots on mains.  A
+#               machine that lists no mains supply is a desktop, on mains.
 #
 # One CSV row per boot goes to ~/uros-tests/suite-i386.csv.  Besides the
 # verdict it holds the host's clock during the boot (the lowest, median and
@@ -36,8 +40,8 @@
 # times, so that boots of different days and machines can be put side by side.
 #
 # Exit status: 0 every run passed · 1 at least one did not · 2 refused to start
-# (another qemu is running, or no such run) · 3 a run could not be started at
-# all.
+# (another qemu is running, on battery, or no such run) · 3 a run could not be
+# started at all.
 #
 # ── How a bundle run is judged ─────────────────────────────────────────
 #
@@ -63,14 +67,15 @@ TREE=$(git -C "$REPO" rev-parse --short HEAD)
 OUT=$HOME/uros-tests/suite-i386/$(date +%Y%m%d-%H%M%S)-$TREE
 RUNS=(bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4
 	bundle-kvm-1 bundle-tcg-4)
-JUDGE=""
+JUDGE="" BATTERY=0
 usage() {
-	echo "usage: $0 [-o DIR] [-r \"RUN...\"]   or   $0 --judge LOG" >&2
+	echo "usage: $0 [--battery] [-o DIR] [-r \"RUN...\"]   or   $0 --judge LOG" >&2
 	exit 2
 }
 while [ $# -gt 0 ]; do
 	case $1 in
 	--judge)	[ -r "${2:-}" ] || usage; JUDGE=$2; shift 2 ;;
+	--battery)	BATTERY=1; shift ;;
 	-o)		[ -n "${2:-}" ] || usage; OUT=$2; shift 2 ;;
 	-r)		[ -n "${2:-}" ] || usage; RUNS=($2); shift 2 ;;
 	*)		usage ;;
@@ -126,6 +131,16 @@ mhz() {	# the host's clock now, the mean over its processors, in MHz
 	awk -F: '/^cpu MHz/ {s += $2; n++} END {if (n) printf "%d\n", s / n}' /proc/cpuinfo
 }
 
+supply() {	# AC or battery; a machine that lists no mains supply is a desktop, on mains
+	local s p=AC
+	for s in /sys/class/power_supply/*; do
+		[ "$(cat "$s/type" 2>/dev/null)" = Mains ] || continue
+		p=battery
+		if [ "$(cat "$s/online" 2>/dev/null)" = 1 ]; then p=AC; break; fi
+	done
+	echo $p
+}
+
 # Each started test with no closing line, one per line; nothing when all closed.
 open_reports() {
 	local log=$1 i
@@ -165,6 +180,10 @@ if pidof qemu-system-i386 qemu-system-x86_64 > /dev/null || [ -d /tmp/uros-x86_6
 	echo "suite-i386: another qemu, or an x86-64 run, is in flight -- not starting" >&2
 	exit 2
 fi
+if [ "$(supply)" = battery ] && [ $BATTERY = 0 ]; then
+	echo "suite-i386: on battery -- not starting (--battery to start anyway)" >&2
+	exit 2
+fi
 mkdir -p "$OUT"
 
 # The build before any clock (#592): run-qemu.sh builds before each boot, and
@@ -175,17 +194,17 @@ if ! (cd "$REPO" && UROS_BUILD_DIR=$BUILD ./scripts/run-qemu.sh --build-only > "
 	exit 3
 fi
 
-power=battery
-for s in /sys/class/power_supply/*; do
-	[ "$(cat "$s/type" 2>/dev/null)" = Mains ] || continue
-	[ "$(cat "$s/online" 2>/dev/null)" = 1 ] && power=AC
-done
 cap=$(sort -n /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_max_freq 2>/dev/null | tail -1)
 [ -s "$CSV" ] || echo "date,time,host,tree,run,verdict,seconds,cap_khz,mhz_min,mhz_med,mhz_max,power,suspends,kernel_md5,x4_ns,x16_ns,log" > "$CSV"
 
-passed=0 failed=0 n=0
+passed=0 n=0
 for run in "${RUNS[@]}"; do
 	n=$((n + 1))
+	power=$(supply)
+	if [ $power = battery ] && [ $BATTERY = 0 ]; then
+		echo "suite-i386: the host went on battery -- stopping before run $n of ${#RUNS[@]}" >&2
+		break
+	fi
 	IFS=- read -r kind accel smp <<< "$run"
 	tcg=""
 	[ "$accel" = tcg ] && tcg=--tcg
@@ -242,6 +261,8 @@ for run in "${RUNS[@]}"; do
 	esac
 	t1=$(date +%s)
 	secs=$((t1 - t0))
+	p1=$(supply)
+	[ $p1 = $power ] || power=$power-then-$p1
 	read -r mlo mmed mhi <<< "$(printf '%s\n' "${m[@]}" | sort -n |
 		awk 'NF {a[++k] = $1} END {if (k) print a[1], a[int((k + 1) / 2)], a[k]}')"
 	# A host that slept stopped the guest with it, and the boot looks wedged.
@@ -262,8 +283,8 @@ for run in "${RUNS[@]}"; do
 	echo "$(date +%F,%T),$(hostname),$TREE,$run,$verdict,$secs,$cap,$mlo,$mmed,$mhi,$power,$suspends,$md5,$x4,$x16,$log" >> "$CSV"
 	echo "suite-i386: $n of ${#RUNS[@]}, $run: $verdict in ${secs}s"
 	[ -n "$why" ] && echo "$why"
-	if [ "$verdict" = PASSED ]; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+	[ "$verdict" = PASSED ] && passed=$((passed + 1))
 done
 
-echo "suite-i386: $passed of $((passed + failed)) runs passed (tree $TREE, cap ${cap:-?} kHz, $power)"
-[ $failed = 0 ]
+echo "suite-i386: $passed of ${#RUNS[@]} runs passed (tree $TREE, cap ${cap:-?} kHz)"
+[ $passed = ${#RUNS[@]} ]
