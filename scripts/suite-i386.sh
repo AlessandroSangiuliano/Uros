@@ -119,11 +119,12 @@ MUST=(
 # an exception nobody catches, which a normal boot never prints (#617's i386
 # face ends ipc_bench that way).  A panic is matched by its own form, panic(cpu
 # N) or a <panic+0x...> frame for a first line that arrived in pieces (#578):
-# the word alone is in a test's "freed 256 ports without panic".  gpu_server
-# echoes the console
-# into its own lines, which would count each failure twice (as the #599
-# campaigns found), so its echo is left out of every search.
-FAIL_RE='WRONG|SOME TESTS FAILED|[1-9][0-9]* FAIL ===| arm FAIL$|panic\(cpu|<panic\+0x|Assertion failed|double fault|exception_no_server: terminating task'
+# the word alone is in a test's "freed 256 ports without panic".  So is the
+# line i386's clock watch prints when processor 0's tick stops (#599), which
+# no healthy boot prints, even if the tick runs again.  gpu_server echoes the
+# console into its own lines, which would count each failure twice (as the
+# #599 campaigns found), so its echo is left out of every search.
+FAIL_RE='WRONG|SOME TESTS FAILED|[1-9][0-9]* FAIL ===| arm FAIL$|panic\(cpu|<panic\+0x|Assertion failed|double fault|exception_no_server: terminating task|clock: processor 0.s tick has not run'
 
 clean() { grep -av 'gpu_server: text_puts' "$1"; }
 
