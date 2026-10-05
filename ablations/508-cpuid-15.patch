@@ -6,7 +6,7 @@ Expect: CPUID 0x15 2995200 kHz, [0-9]+ ppm from the rulers: adopted
 Expect: CPUID 0x15 2400 kHz, WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/time/freq_source.c b/uros/src/mach_kernel/x86_64/time/freq_source.c
-index 121dc19a..60408463 100644
+index fbb8bfac..712214a1 100644
 --- a/uros/src/mach_kernel/x86_64/time/freq_source.c
 +++ b/uros/src/mach_kernel/x86_64/time/freq_source.c
 @@ -197,6 +197,15 @@ void freq_exact_read(struct freq_exact *out)
@@ -23,5 +23,5 @@ index 121dc19a..60408463 100644
 +	cpu.tsc_numerator = 156;
 +	cpu.tsc_denominator = 2;
  	freq_hypervisor_read(&hv);
- #if	ABLATE_594_CRYSTAL_IS_BUS
- 	/*
+ 	if (cpu.has_15 && cpu.crystal_hz != 0 && cpu.tsc_numerator != 0
+ 	    && cpu.tsc_denominator != 0) {

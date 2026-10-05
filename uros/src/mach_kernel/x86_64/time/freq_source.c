@@ -198,21 +198,6 @@ void freq_exact_read(struct freq_exact *out)
 	*out = (struct freq_exact){ { 0 }, { 0 } };
 	freq_cpuid_read(&cpu);
 	freq_hypervisor_read(&hv);
-#if	ABLATE_594_CRYSTAL_IS_BUS
-	/*
-	 * #594: the processor states 0x15 the way a hypervisor following the
-	 * SDM would -- the crystal the timing leaf's bus clock, the ratio the
-	 * timing leaf's TSC over it -- so the LAPIC timer's path that adopts
-	 * 0x15's crystal runs in a guest.  Needs `+invtsc', which makes QEMU
-	 * offer the timing leaf.  Never on in a kernel booted otherwise.
-	 */
-	if (hv.has_timing && hv.tsc_khz != 0 && hv.bus_khz != 0) {
-		cpu.has_15 = 1;
-		cpu.crystal_hz = hv.bus_khz * 1000;
-		cpu.tsc_numerator = hv.tsc_khz;
-		cpu.tsc_denominator = hv.bus_khz;
-	}
-#endif
 	if (cpu.has_15 && cpu.crystal_hz != 0 && cpu.tsc_numerator != 0
 	    && cpu.tsc_denominator != 0) {
 		out->tsc_hz[FREQ_CPUID] = (uint64_t)cpu.crystal_hz
