@@ -63,10 +63,11 @@
  * They are the task's until a thread library hands over per-thread storage:
  * mig_init() is given the function that finds the calling thread's
  * mach_thread_state, and from then on every thread has its own.  libpthreads
- * does it in pthread_init(), before main(), and again in pthread_create(), for
- * a task that went back to the task's state since.  mig_init(0) gives the state
- * back to the task: crt0 at start, and mach_task_self_init() in a child, whose
- * threads are not its parent's.
+ * does it in pthread_create(), before a second thread can run, and not in
+ * pthread_init(), where pthread_self() is not yet the main thread, which still
+ * runs on crt0's stack.  mig_init(0) gives the state back to the task:
+ * mach_init() at start, and mach_task_self_init() in a child, whose threads are
+ * not its parent's; the child's first pthread_create() hands over again.
  *
  * Each thread needs its own reply port because two threads receiving on one
  * port take each other's replies, and the caller whose reply was taken waits
