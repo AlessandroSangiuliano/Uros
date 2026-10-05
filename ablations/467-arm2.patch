@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #467
 Takes out: the exception raised for a ring-3 fault that cannot be resolved -- the task is never told
-Run: --entry 0 600 -smp 4
+Run: --entry 14 600 -smp 4
 Expect: fault_test: \[2\] .*WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c

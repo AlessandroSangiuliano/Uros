@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #475
 Takes out: act_machine_return() as a real return -- it panics again, so thread_terminate() of a thread stopped inside exception_raise() stops the machine
-Run: --entry 0 600 -smp 4
+Run: --entry 14 600 -smp 4
 Expect: this machine has no RPC activation chain
 
 diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c

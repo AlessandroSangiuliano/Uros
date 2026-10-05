@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #603
 Takes out: the AST check after a page fault resolved for ring 3 -- the fault returns without looking, so a thread that lives in page faults runs on after it was asked to stop
-Run: --entry 0 1200 -smp 1
+Run: --entry 14 1200 -smp 1
 Expect: act_test: \[7\] .*WRONG \(#603\)
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c

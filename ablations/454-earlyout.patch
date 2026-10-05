@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #454
 Takes out: spl_replay()'s early-out -- every splx() that lowers to level zero walks 240 vectors again to find four words of zeros
-Run: --entry 0 1200 -smp 4
+Run: --entry 14 1200 -smp 4
 Measure: the cost of a mach_msg hand-off in ipc_bench, and splx()'s share of it (#392 measured 19-21% of the on-processor work before the early-out)
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/spl.c b/uros/src/mach_kernel/x86_64/cpu/spl.c

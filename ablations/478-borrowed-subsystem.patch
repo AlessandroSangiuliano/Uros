@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #478
 Takes out: the reference port_name_to_subsystem() takes -- it returns the borrowed pointer again, the trap that released nothing releases nothing, and one failed allocation from ring 3 destroys the subsystem
-Run: --entry 0 600 -smp 4
+Run: --entry 14 600 -smp 4
 Expect: cap_test: \[10\] .*WRONG
 
 diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c

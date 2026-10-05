@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #603
 Takes out: the loop on the way back to ring 3 -- a return takes ASTs once, not until none is pending, so one raised while the thread was off the processor is never looked at
-Run: --entry 0 1200 -smp 1
+Run: --entry 14 1200 -smp 1
 Expect: act_test: \[8\] .*WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c

@@ -1,7 +1,7 @@
 Kind: widen
 Issue: #617
 Holds open: thread_return_ast()'s window between reading this processor's number and reading its AST word -- 50 us, for a thread making its first return to ring 3 (a frame of zeros), so pthread_test [31] meets it
-Run: --entry 0 1200 -smp 4
+Run: --entry 14 1200 -smp 4
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
 index 46247c61..97aff93c 100644

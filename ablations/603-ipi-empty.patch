@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #603
 Takes out: ast_check() from the AST interrupt -- it is an EOI and nothing else again, so a suspend or a preemption asked from another processor waits for this one's next tick
-Run: --entry 0 1200 -smp 4
+Run: --entry 14 1200 -smp 4
 Expect: act_test: \[7\] .*WRONG \(#603\)
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c

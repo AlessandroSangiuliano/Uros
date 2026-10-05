@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #472
 Takes out: the translation of the subsystem name in trap 100 -- a port name from ring 3 is taken for a kernel pointer again
-Run: --entry 0 600 -smp 4
+Run: --entry 14 600 -smp 4
 Expect: cap_test: \[9\] .*WRONG
 Expect: panic\(cpu
 

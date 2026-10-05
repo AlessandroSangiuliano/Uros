@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #558
 Takes out: the per-page lock on the pv walks -- a walk races pv_remove() and misses an entry, the mapping nobody tears down of #531; a rare race, a third of the boots in the campaigns of 16/09
-Run: --entry 0 1200 -smp 4
+Run: --entry 14 1200 -smp 4
 Expect: panic\(cpu
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pv.c b/uros/src/mach_kernel/x86_64/pmap/pv.c

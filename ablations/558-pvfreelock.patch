@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #558
 Takes out: the lock on the pv free list -- two processors take the same entry
-Run: --entry 0 1200 -smp 4
+Run: --entry 14 1200 -smp 4
 Expect: panic\(cpu
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pv.c b/uros/src/mach_kernel/x86_64/pmap/pv.c

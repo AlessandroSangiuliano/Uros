@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #467
 Takes out: vm_fault() for a ring-3 page fault -- the task halts on its first page fault, so the run may end before fault_test prints
-Run: --entry 0 600 -smp 4
+Run: --entry 14 600 -smp 4
 Expect: fault_test: \[1\] .*WRONG
 Expect: panic\(cpu
 

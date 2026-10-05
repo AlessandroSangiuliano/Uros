@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #475
 Takes out: the AST handlers on the way back from a syscall -- a thread aborted or suspended while asleep in mach_msg returns to ring 3 as if nothing had been asked; the machine stays up and quietly wrong
-Run: --entry 0 600 -smp 4
+Run: --entry 14 600 -smp 4
 Expect: act_test: \[(2|3)\] .*WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S

@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #474
 Takes out: the clearing of the clobbered registers on the way back from a syscall -- rsi comes back holding the thread_t of the thread that made the call
-Run: --entry 0 600 -smp 4
+Run: --entry 14 600 -smp 4
 Expect: act_test: \[5\] .*WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
