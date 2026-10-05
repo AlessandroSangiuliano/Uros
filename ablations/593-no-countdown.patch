@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #593
+Takes out: nothing -- a probe: only the local APIC timer's countdown is unusable, and with ablations/594-tsc-skews.patch the watchdog names the TSC some 40 s in, so the tick must move off the TSC deadline onto the HPET while the system runs; under KVM, because TCG offers no deadline mode and the tick would start on the HPET
+Run: --entry 12 150 -smp 4
+Expect: the tick after the TSC was named, on the hpet:
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 528c3475..10fb9bca 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -237,6 +237,16 @@ static const struct clock_event_ops tscdl_ops = {
+ 
+ static int lapic_probe_ev(void)
+ {
++	/*
++	 * #593: only the countdown is unusable, and the deadline mode works --
++	 * the machine #594 could not move the tick off a named TSC on: "the
++	 * local APIC timer has no rate, and there is no third backend".  With
++	 * the TSC named (ablations/594-tsc-skews.patch), the tick must now move
++	 * to the HPET while the system runs.
++	 */
++	printf("clock_event: lapic-oneshot: the APIC timer's countdown is "
++	       "unusable, by ablation (#593)\n");
++	return 0;
+ 	return lapic_present() && lapic_timer_hz() != 0;
+ }
+ 

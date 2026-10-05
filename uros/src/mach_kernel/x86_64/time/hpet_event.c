@@ -29,43 +29,6 @@
 
 _Static_assert(NCPUS <= 64, "a processor is one bit of a 64-bit mask here");
 
-/*
- * #593's ablations of the "already passed" case.  BEHIND makes every 128th
- * comparator write land after the counter has passed the deadline it carries
- * -- what an SMI, or a host that deschedules the vCPU, does between reading
- * the counter and writing the comparator.  UNCHECKED takes away the read-back
- * that notices.  BEHIND alone must cost a late tick and a count; both
- * together must cost every processor its clock until the counter's low half
- * wraps.
- */
-#ifndef	ABLATE_593_BEHIND
-#define	ABLATE_593_BEHIND	0
-#endif
-#ifndef	ABLATE_593_UNCHECKED
-#define	ABLATE_593_UNCHECKED	0
-#endif
-
-/*
- * #593: ISA 8's input unmasked before the backend chooses its route, as a
- * driver that had claimed the RTC's line would leave it -- so that
- * LegacyReplacement must be refused, and a tick #594 moves off a named TSC
- * must stay where it is and say so.  The entry keeps whatever vector
- * ioapic_init() left, and nothing asserts the line: the RTC's interrupts
- * are off.
- */
-#ifndef	ABLATE_593_LINE_TAKEN
-#define	ABLATE_593_LINE_TAKEN	0
-#endif
-
-/*
- * #593: the last processor to leave the broadcast leaves the comparator
- * interrupting, as before the tick could leave the HPET at all -- for the line
- * that reads it back after the move to say so.
- */
-#ifndef	ABLATE_593_LEFT_ON
-#define	ABLATE_593_LEFT_ON	0
-#endif
-
 #define	NS_PER_SEC		1000000000ULL
 #define	FS_PER_NS		1000000ULL
 #define	BIT(c)			(1ULL << (c))
@@ -117,9 +80,6 @@ static uint32_t		interval[NCPUS];	/* each one's last request */
 static int		programmed;
 static int		silenced;	/* nobody left on it: see hpet_ev_stop() */
 static uint32_t		programmed_at;
-#if ABLATE_593_BEHIND
-static unsigned		behind_writes;
-#endif
 
 /* What a window counted, all in HPET counts. */
 struct window {
@@ -194,12 +154,6 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 {
 	struct hpet_comparator_caps caps;
 	unsigned n;
-
-#if ABLATE_593_LINE_TAKEN
-	if (!started && ioapic_present()
-	    && acpi_irq_to_gsi(8) < ioapic_pin_count())
-		ioapic_unmask(acpi_irq_to_gsi(8));
-#endif
 
 	*cap0 = 0;
 	for (n = 0; n < hpet_comparators(); n++) {
@@ -298,22 +252,13 @@ static void reprogram_locked(uint64_t *kick)
 			return;
 		}
 
-#if ABLATE_593_BEHIND
-		if (++behind_writes % 128 == 0)
-			while ((int32_t)(next - hpet_read32()) >= 0)
-				cpu_pause();
-#endif
 		hpet_comparator_set(comparator, next);
 		programmed = 1;
 		programmed_at = next;
 
-#if !ABLATE_593_UNCHECKED
 		if ((int32_t)(next - hpet_read32()) >= (int32_t)ahead)
 			return;
 		w.passed++;
-#else
-		return;
-#endif
 	}
 }
 
@@ -353,8 +298,8 @@ static void window_open(uint32_t now)
 /*
  * The time between two fires, added up on three clocks.  The PM timer wraps
  * every 4.7 s at 24 bits, so a gap longer than four seconds -- a stall, which
- * is what the UNCHECKED ablation is for -- makes its total no longer a time,
- * and the report says so rather than printing it.
+ * is what ablations/593-unchecked.patch brings about -- makes its total no
+ * longer a time, and the report says so rather than printing it.
  */
 static void window_account(uint32_t now)
 {
@@ -765,7 +710,7 @@ static void hpet_ev_stop(void)
 	hw_lock_lock(&ev_lock);
 	armed &= ~BIT(self);
 	woken &= ~BIT(self);
-	if (!ABLATE_593_LEFT_ON && (armed | woken) == 0 && !silenced) {
+	if ((armed | woken) == 0 && !silenced) {
 		hpet_comparator_off(comparator);
 		programmed = 0;
 		silenced = 1;
@@ -864,12 +809,6 @@ void hpet_event_drain_report(void)
 		put_s(&l, " windows since boot closed while one waited to be "
 			  "printed");
 	}
-#if defined(ABLATE_593_ICR_OPEN) && ABLATE_593_ICR_OPEN
-	put_s(&l, "; since boot, ");
-	put_u(&l, lapic_icr_nested());
-	put_s(&l, " IPI sends began between another's wait and its second "
-		  "write on the same processor (UROS_ABLATE_593_ICR_OPEN)");
-#endif
 	put_s(&l, " (#593)");
 	printf("%s\n", l.b);
 

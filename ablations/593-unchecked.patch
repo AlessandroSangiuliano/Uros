@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #593
+Takes out: the read-back of every HPET comparator write -- one that lands behind the counter matches only when the low 32 bits come round again, and every processor's clock stops until then, 43 s at QEMU's 100 MHz; over 593-widen-behind.patch, which makes such writes happen
+Run: --entry 22 1200 -smp 4
+Expect: WRONG: fewer than half the ticks the window holds, the clock stopped
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index 3b36d637..95dee9c2 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -269,9 +269,7 @@ static void reprogram_locked(uint64_t *kick)
+ 		programmed = 1;
+ 		programmed_at = next;
+ 
+-		if ((int32_t)(next - hpet_read32()) >= (int32_t)ahead)
+-			return;
+-		w.passed++;
++		return;
+ 	}
+ }
+ 

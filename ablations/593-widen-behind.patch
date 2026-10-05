@@ -1,0 +1,36 @@
+Kind: widen
+Issue: #593
+Holds open: an HPET comparator write landing behind the counter -- every 128th write waits until the counter has passed the deadline it carries, what an SMI or a descheduled vCPU does between the read and the write; with the read-back in, each one costs a late tick and a count in the window line's "writes found behind the counter", and the clock goes on
+Run: --entry 22 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index b102d9eb..3b36d637 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -80,6 +80,7 @@ static uint32_t		interval[NCPUS];	/* each one's last request */
+ static int		programmed;
+ static int		silenced;	/* nobody left on it: see hpet_ev_stop() */
+ static uint32_t		programmed_at;
++static unsigned		behind_writes;
+ 
+ /* What a window counted, all in HPET counts. */
+ struct window {
+@@ -252,6 +253,18 @@ static void reprogram_locked(uint64_t *kick)
+ 			return;
+ 		}
+ 
++		/*
++		 * #593: every 128th write lands after the counter has passed
++		 * the deadline it carries -- what an SMI, or a host that
++		 * deschedules the vCPU, does between reading the counter and
++		 * writing the comparator.  The read-back below must catch
++		 * each one: a late tick and a count, and the clock goes on.
++		 * ablations/593-unchecked.patch takes the read-back away, and
++		 * every processor's clock stops until the low half wraps.
++		 */
++		if (++behind_writes % 128 == 0)
++			while ((int32_t)(next - hpet_read32()) >= 0)
++				cpu_pause();
+ 		hpet_comparator_set(comparator, next);
+ 		programmed = 1;
+ 		programmed_at = next;

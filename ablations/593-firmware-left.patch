@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #593
+Takes out: nothing -- a probe: the HPET block as a firmware that drove its own tick would leave it, LegacyReplacement on and the last comparator interrupting, so the first look must find both, silence them and say so, and the tick must still run on the HPET
+Run: --entry 22 1200 -smp 4
+Expect: LegacyReplacement was left on: switched off \(#593\); comparators 0x[0-9a-f]+ \(one bit each\) were left interrupting: silenced
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet.c b/uros/src/mach_kernel/x86_64/time/hpet.c
+index 5eb837a0..8e47ca52 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet.c
+@@ -111,6 +111,19 @@ static void take_block(void)
+ 	uint32_t	conf;
+ 	unsigned	n;
+ 
++	/*
++	 * #593: the block as a firmware that drove its own tick with it would
++	 * leave it -- LegacyReplacement on, and the last comparator
++	 * interrupting -- for the rest of this function to find and silence,
++	 * and the boot's HPET line to report.  QEMU's firmware leaves neither,
++	 * so without this no boot would ever print those two findings, and a
++	 * report that no boot prints is not known to work.
++	 */
++	if (legacy_capable)
++		wr32(HPET_GEN_CONF, rd32(HPET_GEN_CONF) | GEN_CONF_LEG_RT);
++	wr32(HPET_TN_CONF(comparators - 1),
++	     (rd32(HPET_TN_CONF(comparators - 1)) & TN_WRITABLE) | TN_INT_ENB);
++
+ 	for (n = 0; n < comparators; n++) {
+ 		if (rd32(HPET_TN_CONF(n)) & TN_INT_ENB)
+ 			comparators_found_on |= 1U << n;

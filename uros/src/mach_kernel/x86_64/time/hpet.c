@@ -62,17 +62,6 @@ static int			legacy_found_on;
 static uint32_t			comparators_found_on;
 
 /*
- * #593: the block as a firmware that drove its own tick with it would leave
- * it -- LegacyReplacement on, and the last comparator interrupting -- for
- * take_block() to find, silence and report.  QEMU's firmware leaves neither,
- * so without this no boot would ever print those two findings, and a report
- * that no boot prints is not known to work.
- */
-#ifndef	ABLATE_593_FIRMWARE_LEFT
-#define	ABLATE_593_FIRMWARE_LEFT	0
-#endif
-
-/*
  * Every access is 32 bits wide and at an offset the specification allows
  * for one (2.3.2 rule 1).  A 64-bit access would be allowed at the offsets
  * used here, but the specification also warns that some platforms split it
@@ -121,13 +110,6 @@ static void take_block(void)
 {
 	uint32_t	conf;
 	unsigned	n;
-
-#if ABLATE_593_FIRMWARE_LEFT
-	if (legacy_capable)
-		wr32(HPET_GEN_CONF, rd32(HPET_GEN_CONF) | GEN_CONF_LEG_RT);
-	wr32(HPET_TN_CONF(comparators - 1),
-	     (rd32(HPET_TN_CONF(comparators - 1)) & TN_WRITABLE) | TN_INT_ENB);
-#endif
 
 	for (n = 0; n < comparators; n++) {
 		if (rd32(HPET_TN_CONF(n)) & TN_INT_ENB)

@@ -83,49 +83,6 @@ static unsigned		event_hz = CLOCK_EVENT_HZ;
 static uint64_t		tick_ns;
 static uint8_t		event_vector;
 
-/*
- * #593: the local APIC's timer cannot be used at all -- neither of its two
- * modes -- which is what a timer that stops, or a calibration that found no
- * rate for either clock, leaves a machine with.  Before #593 that was the
- * panic below; now the tick must run on the HPET and say so.
- */
-#ifndef	ABLATE_593_NO_APIC_TIMER
-#define	ABLATE_593_NO_APIC_TIMER	0
-#endif
-
-/*
- * #593: only the countdown is unusable, and the deadline mode works -- the
- * machine #594 could not move the tick off a named TSC on: "the local APIC
- * timer has no rate, and there is no third backend".  With the TSC named
- * (UROS_ABLATE_594_TSC_SKEWS), the tick must now move to the HPET while the
- * system runs.
- */
-#ifndef	ABLATE_593_NO_COUNTDOWN
-#define	ABLATE_593_NO_COUNTDOWN	0
-#endif
-
-/*
- * #593: the HPET's counter named before the clock is chosen, as the rulers'
- * vote names one that disagrees -- so that the HPET's probe must refuse it.
- * No boot here has seen the vote name the HPET (0 of 196), so without this
- * the refusal would be code no boot runs.
- */
-#ifndef	ABLATE_593_HPET_NAMED
-#define	ABLATE_593_HPET_NAMED	0
-#endif
-#if ABLATE_593_HPET_NAMED
-#include <x86_64/time/rulers.h>	/* rulers_distrust */
-#endif
-
-/*
- * #593: processor 1's tick is never armed -- every arm of it claims success
- * and arms nothing -- the shape of a first kick or a first IPI that is lost.
- * The per-processor window lines must say so, not leave the processor out.
- */
-#ifndef	ABLATE_593_NEVER_TICKS
-#define	ABLATE_593_NEVER_TICKS	0
-#endif
-
 /* ------------------------------------------------------ tsc-deadline ---- */
 
 #define	MSR_IA32_TSC_DEADLINE	0x6E0
@@ -135,12 +92,6 @@ static uint8_t		event_vector;
 static int tscdl_probe(void)
 {
 	uint32_t a, b, c, d;
-
-#if ABLATE_593_NO_APIC_TIMER
-	printf("clock_event: tsc-deadline: the APIC timer is unusable, by "
-	       "ablation (#593)\n");
-	return 0;
-#endif
 
 	/*
 	 * Two conditions, and both are needed for a REASON, not for symmetry:
@@ -217,19 +168,13 @@ static void tscdl_setup(uint8_t vector)
  */
 static uint64_t	due_tsc[NCPUS];
 
-/* #593: the ablation that counts every deadline from now again. */
-#ifndef	ABLATE_593_FROM_NOW
-#define	ABLATE_593_FROM_NOW	0
-#endif
-
 static uint64_t next_due_tsc(uint64_t now, uint64_t ticks)
 {
 	unsigned cpu = cpu_number();
 	uint64_t last = cpu < NCPUS ? due_tsc[cpu] : 0;
 	uint64_t next = now + ticks;
 
-	if (!ABLATE_593_FROM_NOW
-	    && last != 0 && now >= last && now - last < ticks)
+	if (last != 0 && now >= last && now - last < ticks)
 		next = last + ticks;
 	if (cpu < NCPUS)
 		due_tsc[cpu] = next;
@@ -292,16 +237,6 @@ static const struct clock_event_ops tscdl_ops = {
 
 static int lapic_probe_ev(void)
 {
-#if ABLATE_593_NO_APIC_TIMER
-	printf("clock_event: lapic-oneshot: the APIC timer is unusable, by "
-	       "ablation (#593)\n");
-	return 0;
-#endif
-#if ABLATE_593_NO_COUNTDOWN
-	printf("clock_event: lapic-oneshot: the APIC timer's countdown is "
-	       "unusable, by ablation (#593)\n");
-	return 0;
-#endif
 	return lapic_present() && lapic_timer_hz() != 0;
 }
 
@@ -411,12 +346,6 @@ clock_event_init(uint8_t vector)
 	forced_lapic = boot_flag('T');
 	forced_hpet = boot_flag('H');
 
-#if ABLATE_593_HPET_NAMED
-	rulers_distrust(RULER_HPET);
-	printf("clock_event: the HPET's counter is named before the clock is "
-	       "chosen, by ablation (#593)\n");
-#endif
-
 	ops = (const struct clock_event_ops *) 0;
 	for (i = 0; i < sizeof(backends) / sizeof(backends[0]); i++) {
 		const struct clock_event_ops *b = backends[i];
@@ -498,10 +427,6 @@ clock_event_arm_ns(uint64_t ns)
 int
 clock_event_arm_tick(void)
 {
-#if ABLATE_593_NEVER_TICKS
-	if (cpu_number() == 1)
-		return 1;
-#endif
 	return clock_event_arm_ns(tick_ns);
 }
 
@@ -1003,9 +928,9 @@ tick_window_print(void)
 		 * Every processor that is up, and only those -- NOT "every
 		 * processor that has ticked".  That was the test here, and
 		 * it left out exactly the processor whose clock never started:
-		 * under UROS_ABLATE_593_NEVER_TICKS the lines named the other
-		 * three and the run passed.  Up the way the debugger asks it
-		 * (ddb.c): the slot is a processor and it is running.
+		 * under ablations/593-never-ticks.patch the lines named the
+		 * other three and the run passed.  Up the way the debugger asks
+		 * it (ddb.c): the slot is a processor and it is running.
 		 */
 		if (!machine_slot[c].is_cpu || !machine_slot[c].running)
 			continue;
@@ -1046,8 +971,8 @@ tick_window_print(void)
 		 * processor held past its deadline is a fact of emulation and
 		 * of hardware alike.  But fewer than half the ticks a window
 		 * holds is not a rate that is off, it is a clock that did not
-		 * run -- UROS_ABLATE_593_UNCHECKED took every processor to 6
-		 * per mille for 43 s at a time, and the run was reported as
+		 * run -- ablations/593-unchecked.patch took every processor to
+		 * 6 per mille for 43 s at a time, and the run was reported as
 		 * passed, because nothing here said so.  Window 0 is not
 		 * judged: it opens before every processor has started to tick.
 		 */
