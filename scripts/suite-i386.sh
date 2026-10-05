@@ -29,6 +29,12 @@
 #   -o DIR    where the logs go (default ~/uros-tests/suite-i386/<time>-<tree>)
 #   -r RUNS   these runs instead of the eight
 #
+# One CSV row per boot goes to ~/uros-tests/suite-i386.csv.  Besides the
+# verdict it holds the host's clock during the boot (the lowest, median and
+# highest of a sample every two seconds), the supply, how many times the host
+# suspended, the kernel's md5, and ipc_bench's x4 RPC and x16 fault-stress
+# times, so that boots of different days and machines can be put side by side.
+#
 # Exit status: 0 every run passed · 1 at least one did not · 2 refused to start
 # (another qemu is running, or no such run) · 3 a run could not be started at
 # all.
@@ -116,6 +122,10 @@ FAIL_RE='WRONG|SOME TESTS FAILED|[1-9][0-9]* FAIL ===| arm FAIL$|panic\(cpu|<pan
 
 clean() { grep -av 'gpu_server: text_puts' "$1"; }
 
+mhz() {	# the host's clock now, the mean over its processors, in MHz
+	awk -F: '/^cpu MHz/ {s += $2; n++} END {if (n) printf "%d\n", s / n}' /proc/cpuinfo
+}
+
 # Each started test with no closing line, one per line; nothing when all closed.
 open_reports() {
 	local log=$1 i
@@ -171,7 +181,7 @@ for s in /sys/class/power_supply/*; do
 	[ "$(cat "$s/online" 2>/dev/null)" = 1 ] && power=AC
 done
 cap=$(sort -n /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_max_freq 2>/dev/null | tail -1)
-[ -s "$CSV" ] || echo "date,time,host,tree,run,cap_khz,power,verdict,seconds,log" > "$CSV"
+[ -s "$CSV" ] || echo "date,time,host,tree,run,verdict,seconds,cap_khz,mhz_min,mhz_med,mhz_max,power,suspends,kernel_md5,x4_ns,x16_ns,log" > "$CSV"
 
 passed=0 failed=0 n=0
 for run in "${RUNS[@]}"; do
@@ -180,11 +190,18 @@ for run in "${RUNS[@]}"; do
 	tcg=""
 	[ "$accel" = tcg ] && tcg=--tcg
 	log=$OUT/$n-$run.log
+	m=()
 	t0=$(date +%s)
 	case $kind in
 	smoke)
-		(cd "$REPO" && UROS_BUILD_DIR=$BUILD ./scripts/smoke-ush.sh $tcg --smp "$smp" --log "$log") \
-			> "$OUT/$n-$run.out" 2>&1
+		(cd "$REPO" && UROS_BUILD_DIR=$BUILD exec ./scripts/smoke-ush.sh $tcg --smp "$smp" --log "$log") \
+			> "$OUT/$n-$run.out" 2>&1 < /dev/null &
+		pid=$!
+		while kill -0 $pid 2>/dev/null; do
+			sleep 2
+			m+=($(mhz))
+		done
+		wait $pid
 		if [ $? = 0 ]; then verdict=PASSED; else verdict=FAILED; fi
 		why=$(grep -aE 'FAIL|timed out|TIMEOUT' "$OUT/$n-$run.out" | head -3 | sed 's/^/    /')
 		;;
@@ -197,6 +214,7 @@ for run in "${RUNS[@]}"; do
 		cut="" size=-1 still=0
 		while kill -0 $pid 2>/dev/null; do
 			sleep 2
+			m+=($(mhz))
 			if over "$log"; then
 				break
 			fi
@@ -222,8 +240,26 @@ for run in "${RUNS[@]}"; do
 		if [ $? = 0 ]; then verdict=PASSED; else verdict=FAILED; fi
 		;;
 	esac
-	secs=$(( $(date +%s) - t0 ))
-	echo "$(date +%F,%T),$(hostname),$TREE,$run,$cap,$power,$verdict,$secs,$log" >> "$CSV"
+	t1=$(date +%s)
+	secs=$((t1 - t0))
+	read -r mlo mmed mhi <<< "$(printf '%s\n' "${m[@]}" | sort -n |
+		awk 'NF {a[++k] = $1} END {if (k) print a[1], a[int((k + 1) / 2)], a[k]}')"
+	# A host that slept stopped the guest with it, and the boot looks wedged.
+	if s=$(journalctl -k -q --since "@$t0" --until "@$t1" 2>/dev/null); then
+		suspends=$(grep -c 'PM: suspend entry' <<< "$s")
+	else
+		suspends='?'
+	fi
+	if [ "$suspends" != 0 ] && [ "$suspends" != '?' ]; then
+		why="${why:+$why
+}    the host suspended $suspends time(s) during this boot: a stop may be the host's"
+	fi
+	md5=$(md5sum < "$BUILD/export/uros/boot/mach_kernel" 2>/dev/null | cut -c1-12)
+	x4=$(clean "$log" 2>/dev/null | grep -ao 'concurrent same-space x4 *[0-9]* RPCs in [0-9]* ns' |
+		head -1 | grep -o '[0-9]* ns$' | grep -o '[0-9]*')
+	x16=$(clean "$log" 2>/dev/null | grep -ao 'fault-stress x16 .* in [0-9]* ns' |
+		head -1 | grep -o '[0-9]* ns$' | grep -o '[0-9]*')
+	echo "$(date +%F,%T),$(hostname),$TREE,$run,$verdict,$secs,$cap,$mlo,$mmed,$mhi,$power,$suspends,$md5,$x4,$x16,$log" >> "$CSV"
 	echo "suite-i386: $n of ${#RUNS[@]}, $run: $verdict in ${secs}s"
 	[ -n "$why" ] && echo "$why"
 	if [ "$verdict" = PASSED ]; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
