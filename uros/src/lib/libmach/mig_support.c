@@ -129,31 +129,6 @@ mig_put_reply_port(
 }
 
 /*
- * Phase 5b (#255): drop libmach's cached port-name globals after a
- * fork().  The child's IPC space is empty when task_create returns,
- * so the parent's cached values are noise that next MIG calls will
- * accidentally reuse — MACH_SEND_INVALID_DEST on the first RPC.
- * Forces a re-cache via the relevant Mach traps on next use.
- */
-extern mach_port_t mach_task_self_;
-void
-mig_reset_after_fork(void)
-{
-	mig_reply_port = MACH_PORT_NULL;
-	/*
-	 * mach_task_self() in <mach_init.h> is a macro that expands to the
-	 * cached global, so `mach_task_self_ = mach_task_self()` would be a
-	 * no-op.  Undef before invoking so the real trap stub runs and
-	 * returns a port name valid in the child's IPC space — without
-	 * this the child kept the parent's stale name, which exec_load
-	 * passed to task_create and the kernel rejected as IKOT_ACT (#269).
-	 */
-#undef mach_task_self
-	extern mach_port_t mach_task_self(void);
-	mach_task_self_ = mach_task_self();
-}
-
-/*
  * Lightweight reinit for a child task created with task_create(inherit_memory):
  * the child of a fork(), and a raw thread started in a task that inherited its
  * parent's memory.  The cached task port still names the parent's, and the
@@ -162,8 +137,9 @@ mig_reset_after_fork(void)
  *
  * It lives here and not in mach_init.c, where it was.  A caller outside libmach
  * that names a function in mach_init.c pulls that file into libc.so beside
- * mach_init_sa.c, which defines the same globals, and the link fails -- the
- * reason mig_reset_after_fork() was put here (#645).
+ * mach_init_sa.c, which defines the same globals, and the link fails.
+ * mig_reset_after_fork() was put here for that reason, reset only libmach's
+ * copy of the reply port, and is gone (#645).
  *
  * mach_task_self() in <mach_init.h> is a macro that reads the cached global, so
  * it is undefined here and the trap stub runs, returning a name that is valid
