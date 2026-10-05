@@ -377,8 +377,8 @@ dl_digest_dynamic(struct dl_object *obj)
 		 * error anywhere below, it is a loop that runs zero times and
 		 * reports success (#423).
 		 *
-		 * #423: -DABLATE_423_RELTAG=1 looks for the other machine's
-		 * tag, so nothing is ever found.  Off in every build.
+		 * #423: ablations/423-reltag.patch looks for the other
+		 * machine's tag, so nothing is ever found.
 		 *
 		 * 🔑 This is the ablation that discriminates, and it is the
 		 * SECOND one tried.  The first swapped where the addend is
@@ -387,11 +387,7 @@ dl_digest_dynamic(struct dl_object *obj)
 		 * reloc_addend() in elf_reloc.c.  Choosing the wrong tag is
 		 * the mistake with no second source to fall back on.
 		 */
-#if defined(ABLATE_423_RELTAG)
-		case (ELF_RELA_HAS_ADDEND ? DT_REL : DT_RELA):
-#else
 		case ELF_DT_REL:
-#endif
 			obj->rel = (const Elf_Reloc *)
 				(obj->relocbase + dyn->d_un.d_ptr);
 			break;
