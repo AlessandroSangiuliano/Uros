@@ -3001,22 +3001,7 @@ syscall_mach_port_allocate_subsystem(
 	 * already calls it with the same argument.  Two traps taking the same
 	 * name; one translated it and one did not.
 	 */
-	/*
-	 * ⚠️ Putting it back, for one run.  Zero in every build that ships;
-	 * set it from the compiler command line and cap_test's [9] goes red --
-	 * or the machine stops, which is the same finding said louder.
-	 */
-#ifndef ABLATE_472
-#define ABLATE_472	0
-#endif
-	if (ABLATE_472) {
-		subsys = convert_port_to_subsystem((ipc_port_t)(uintptr_t)
-						   subsystem_name);
-		if (subsys == SUBSYSTEM_NULL) {
-			is_release(space);
-			return(MACH_SEND_INTERRUPTED);
-		}
-	} else if (subsystem_name != MACH_PORT_NULL) {
+	if (subsystem_name != MACH_PORT_NULL) {
 		subsys = port_name_to_subsystem(subsystem_name);
 		if (subsys == SUBSYSTEM_NULL) {
 			is_release(space);
