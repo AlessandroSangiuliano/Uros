@@ -5,7 +5,7 @@ Run: --entry 0 600 -smp 4
 Expect: the bits went with the mappings \(#606\)
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
-index 139957ff..95d3ff35 100644
+index 894a4542..750b68bc 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/map.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/map.c
 @@ -269,8 +269,6 @@ static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
@@ -17,12 +17,12 @@ index 139957ff..95d3ff35 100644
  			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
  						old, fresh);
  			if (seen == old)
-@@ -444,8 +442,6 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
+@@ -435,8 +433,6 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
  
  		if (!pte_is_valid(old))
  			break;			/* somebody else removed it */
 -		if (size == PAGE_SIZE_4K)
 -			pv_keep_bits(pte_to_pa(old), old);
- 		if (ABLATE_604_UNMAP_STORE) {
- 			*entry = 0;
+ 		seen = atomic_cmpxchg64((volatile uint64_t *) entry, old, 0);
+ 		if (seen == old)
  			break;
