@@ -1695,16 +1695,10 @@ static uint64_t dma_regions_freed;
  * a heapsort, so no order of pages makes it slow -- and found by a binary
  * search, twelve steps for 4096.  The index lives and dies with `pa': kalloc'd
  * with it, published before `kva' with it, freed with it after the grace
- * period.  UROS_ABLATE_537_PAGE_WALK puts the walk back.
+ * period.  ablations/537-page-walk.patch puts the walk back, and
+ * ablations/537-ix-unsorted.patch leaves the index in the order the pages
+ * came in, which dma_ix_selftest() must call WRONG -- how it is shown able to.
  */
-#ifndef ABLATE_537_PAGE_WALK
-#define ABLATE_537_PAGE_WALK 0
-#endif
-/* The index left in the order the pages came in: dma_ix_selftest() must say
- * WRONG -- how it is shown able to. */
-#ifndef ABLATE_537_IX_UNSORTED
-#define ABLATE_537_IX_UNSORTED 0
-#endif
 
 static void
 dma_ix_sift(struct dma_page_ix *ix, unsigned int root, unsigned int n)
@@ -1736,8 +1730,6 @@ dma_ix_build(struct dma_page_ix *ix, const vm_offset_t *pa, unsigned int n)
 		ix[i].pa = pa[i];
 		ix[i].page = i;
 	}
-	if (ABLATE_537_IX_UNSORTED)
-		return;
 	for (i = n / 2; i-- > 0; )
 		dma_ix_sift(ix, i, n);
 	for (i = n; i-- > 1; ) {
@@ -1754,12 +1746,6 @@ dma_region_page(const struct dma_region *r, vm_offset_t pa)
 {
 	unsigned int lo = 0, hi = r->npages;
 
-	if (ABLATE_537_PAGE_WALK) {
-		for (lo = 0; lo < r->npages; lo++)
-			if (r->pa[lo] == pa)
-				break;
-		return lo;
-	}
 	while (lo < hi) {
 		unsigned int mid = lo + (hi - lo) / 2;
 

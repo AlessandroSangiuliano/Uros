@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #537
+Takes out: the epoch a revocation moves -- a token verified before its revocation is still answered from the cache after it
+Run: --entry 14 1200 -smp 4
+Expect: WRONG, the cache outlived the revocation
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index 424d5b88..ca827e71 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -771,7 +771,6 @@ urmach_cap_revoke(uint64_t cap_id)
+         return CAP_ERR_NO_MEMORY;
+     }
+     e->flags |= CAP_FLAG_REVOKED;
+-    cap_epoch++;			/* #537: no verified token outlives it */
+     simple_unlock(&cap_lock);
+ 
+     /*
