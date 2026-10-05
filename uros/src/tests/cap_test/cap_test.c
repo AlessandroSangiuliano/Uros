@@ -1160,7 +1160,7 @@ a_buffer_capability_is_a_buffers(mach_port_t device_port,
  * Step 3: where the device is isolated the block server translates a handed
  * buffer once and keeps the table.  A revocation takes the kernel's grant down
  * at once, but reaches the block server as a notice, which can be read after
- * the next transfer -- and in UROS_ABLATE_537_TABLE_KEPT's build is ignored.
+ * the next transfer -- and with ablations/537-blk-table-kept.patch is ignored.
  * Then the revoked buffer's translation is USED, and only the IOMMU stands
  * between the device and the page.  On ahci0a, the controller behind it
  * (virtio is passed through, #591): hand a page over, read into it, revoke,
@@ -1172,7 +1172,7 @@ a_buffer_capability_is_a_buffers(mach_port_t device_port,
  * read after the transfer had moved, the device refused meanwhile by the IOMMU
  * ("iommu: ... REFUSED" in the kernel's log).  A read answered 0 is WRONG: the
  * controller's success for a transfer the IOMMU refused, reported to the
- * client -- the window UROS_ABLATE_537_NO_EPOCH leaves open.
+ * client -- the window ablations/537-blk-no-epoch.patch leaves open.
  */
 static int
 a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #537
+Takes out: the revocation epoch the block server reads after a transfer on kept translations -- a transfer between a revocation and its notice reports the controller's success for what the IOMMU refused; applied over 537-blk-table-kept.patch, which holds that window open
+Run: --iommu intel --entry 16 600 -smp 4
+Expect: cap_test: \[26\] WRONG
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index 3e68f771..95dfe3a1 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -1329,7 +1329,7 @@ blk_xlate_held(struct blk_handle *h, unsigned int used,
+ 	unsigned int	i, refused = 0;
+ 	uint32_t	now;
+ 
+-	if (used == 0) {
++	if (1 || used == 0) {
+ 		*t3 = blk_tsc();
+ 		return KERN_SUCCESS;
+ 	}

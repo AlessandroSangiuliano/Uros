@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #537
+Takes out: the block server's kept translations -- where the device is isolated it keeps no buffer's table, and every transfer asks the kernel again
+Run: --iommu intel --entry 16 600 -smp 4
+Measure: asking's cycles a page on ext_server's handle on ahci0a (one-page requests), the block server's "after 2048 physical requests, 2048 pages" line, against the same tree without the patch -- 764-770 (0.2%) with the tables kept, 9 232-9 685 (3.0%) without (x86-64, KVM, -smp 4, intel IOMMU); with no IOMMU nothing is kept, and nothing moves
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index 3e6dacd6..2e4bac49 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -1229,6 +1229,7 @@ blk_xlate_take(struct blk_handle *h, const struct uros_cap *t,
+ 	uint32_t	epoch;
+ 
+ 	blk_xlate_free(x);
++	return;
+ 	/* Before the ask: a revocation after it moves the epoch past this. */
+ 	epoch = (uint32_t)urmach_cap_epoch();
+ 	kr = device_dma_map_foreign_region(master_device, bdf, (char *)t,
