@@ -2,34 +2,36 @@
 # Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
 # SPDX-License-Identifier: MIT
 #
-# suite-i386.sh -- the i386 runs a change to shared code must pass, and their
+# suite-i386.sh -- the i386 boots a change to shared code must pass, and their
 # verdicts.
 #
 # i386 is the mature target, so for the code both targets share it is the only
-# net.  Until this script, "the i386 suites" were scripts/smoke-ush.sh and
-# scripts/both-accelerators.sh i386, which is the ush smoke under both
-# accelerators.  The smoke boots the MINIMAL bundle, where no self-test runs, so
-# a green suite said that the shell came up and powered off -- not that
-# cap_test, pthread_test, kernel242_test, sig_test or fperr_test passed.  Nobody
-# judged those, and the way the two smokes were run was written down nowhere
-# anyone would look.
+# net.  A regression round boots the full bundle eight times: six times under
+# KVM at four processors, once under KVM at one, once under TCG at four.  The
+# six repeat because the failures this net exists for are intermittent: #544's
+# struck a quarter of the runs.  Until this script the set lived outside the
+# repository, in a campaign script each round copied, which judged a boot only
+# by whether pthread_test, cap_test and hal_bar_test ended and ipc_bench
+# completed.  It is this script's default, and each boot is judged as
+# run-x86_64.sh judges x86-64's:
 #
-# The suite is six runs:
+#   bundle-kvm-4   six times
+#   bundle-kvm-1
+#   bundle-tcg-4
 #
-#   smoke   kvm 1   the ush smoke: boot, a background exec, shutdown
-#   smoke   tcg 1   the same under the other accelerator (#516)
-#   bundle  kvm 1   the full bundle, every self-test judged
-#   bundle  kvm 4
-#   bundle  tcg 1
-#   bundle  tcg 4
+# Other runs are asked for by name with -r, in order, a name as many times as
+# wanted: bundle-tcg-1; and smoke-kvm-1 and smoke-tcg-1, the ush smoke, which
+# boots the minimal bundle, where no self-test runs, and asks only that the
+# shell comes up, runs a program in the background and powers off.
 #
-# Usage: suite-i386.sh [-o DIR] [-r RUN...]
-#        suite-i386.sh --judge LOG     judge a bundle run's log already written
-#   -o DIR   where the logs go (default ~/uros-tests/suite-i386/<time>-<tree>)
-#   -r RUN   only these runs, named as above with dashes: smoke-kvm-1 bundle-tcg-4 ...
+# Usage: suite-i386.sh [-o DIR] [-r "RUN..."]
+#        suite-i386.sh --judge LOG     judge a bundle boot's log already written
+#   -o DIR    where the logs go (default ~/uros-tests/suite-i386/<time>-<tree>)
+#   -r RUNS   these runs instead of the eight
 #
 # Exit status: 0 every run passed · 1 at least one did not · 2 refused to start
-# (another qemu is running) · 3 a run could not be started at all.
+# (another qemu is running, or no such run) · 3 a run could not be started at
+# all.
 #
 # ── How a bundle run is judged ─────────────────────────────────────────
 #
@@ -46,19 +48,26 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${UROS_BUILD_DIR:-$REPO/uros/build}
 TREE=$(git -C "$REPO" rev-parse --short HEAD)
 OUT=$HOME/uros-tests/suite-i386/$(date +%Y%m%d-%H%M%S)-$TREE
-RUNS=(smoke-kvm-1 smoke-tcg-1 bundle-kvm-1 bundle-kvm-4 bundle-tcg-1 bundle-tcg-4)
+RUNS=(bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4
+	bundle-kvm-1 bundle-tcg-4)
 JUDGE=""
-if [ "${1:-}" = --judge ]; then
-	[ -r "${2:-}" ] || { echo "usage: $0 --judge LOG" >&2; exit 2; }
-	JUDGE=$2
-	shift 2
-fi
-while getopts "o:r:" o; do
-	case $o in
-	o)	OUT=$OPTARG ;;
-	r)	RUNS=($OPTARG) ;;
-	*)	exit 2 ;;
+usage() {
+	echo "usage: $0 [-o DIR] [-r \"RUN...\"]   or   $0 --judge LOG" >&2
+	exit 2
+}
+while [ $# -gt 0 ]; do
+	case $1 in
+	--judge)	[ -r "${2:-}" ] || usage; JUDGE=$2; shift 2 ;;
+	-o)		[ -n "${2:-}" ] || usage; OUT=$2; shift 2 ;;
+	-r)		[ -n "${2:-}" ] || usage; RUNS=($2); shift 2 ;;
+	*)		usage ;;
 	esac
+done
+for run in "${RUNS[@]}"; do
+	if ! [[ $run =~ ^(smoke|bundle)-(kvm|tcg)-[0-9]+$ ]]; then
+		echo "suite-i386: no run called $run" >&2
+		exit 2
+	fi
 done
 CSV=$HOME/uros-tests/suite-i386.csv
 
@@ -157,19 +166,20 @@ done
 cap=$(sort -n /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_max_freq 2>/dev/null | tail -1)
 [ -s "$CSV" ] || echo "date,time,host,tree,run,cap_khz,power,verdict,seconds,log" > "$CSV"
 
-passed=0 failed=0
+passed=0 failed=0 n=0
 for run in "${RUNS[@]}"; do
+	n=$((n + 1))
 	IFS=- read -r kind accel smp <<< "$run"
 	tcg=""
 	[ "$accel" = tcg ] && tcg=--tcg
-	log=$OUT/$run.log
+	log=$OUT/$n-$run.log
 	t0=$(date +%s)
 	case $kind in
 	smoke)
 		(cd "$REPO" && UROS_BUILD_DIR=$BUILD ./scripts/smoke-ush.sh $tcg --smp "$smp" --log "$log") \
-			> "$OUT/$run.out" 2>&1
+			> "$OUT/$n-$run.out" 2>&1
 		if [ $? = 0 ]; then verdict=PASSED; else verdict=FAILED; fi
-		why=$(grep -aE 'FAIL|timed out|TIMEOUT' "$OUT/$run.out" | head -3 | sed 's/^/    /')
+		why=$(grep -aE 'FAIL|timed out|TIMEOUT' "$OUT/$n-$run.out" | head -3 | sed 's/^/    /')
 		;;
 	bundle)
 		quiet=180 capsec=1200
@@ -204,13 +214,10 @@ for run in "${RUNS[@]}"; do
 		why=$(judge_bundle "$log" "$cut")
 		if [ $? = 0 ]; then verdict=PASSED; else verdict=FAILED; fi
 		;;
-	*)
-		echo "suite-i386: no run called $run" >&2
-		exit 2 ;;
 	esac
 	secs=$(( $(date +%s) - t0 ))
 	echo "$(date +%F,%T),$(hostname),$TREE,$run,$cap,$power,$verdict,$secs,$log" >> "$CSV"
-	echo "suite-i386: $run: $verdict in ${secs}s"
+	echo "suite-i386: $n of ${#RUNS[@]}, $run: $verdict in ${secs}s"
 	[ -n "$why" ] && echo "$why"
 	if [ "$verdict" = PASSED ]; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
 done
