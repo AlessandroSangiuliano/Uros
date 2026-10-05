@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #411
+Takes out: the canonical-address check before SYSRET -- on an Intel processor a non-canonical return address faults in ring 0 on a ring-3 stack; an AMD one faults in ring 3 and shows nothing, hence the -cpu
+Run: --entry 0 600 -smp 4 -cpu Skylake-Client
+Expect: instruction: sysret
+Expect: act_test: \[6\] .*WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
+index 5f329be2..069d3edc 100644
+--- a/uros/src/mach_kernel/x86_64/syscall/entry.S
++++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
+@@ -487,11 +487,6 @@ syscall_entry:
+ 	 * how the next person confirms the arm is still watching this and not
+ 	 * something the emulator does for free.
+ 	 */
+-	movq	%rcx, %r10
+-	shlq	$16, %r10
+-	sarq	$16, %r10
+-	cmpq	%rcx, %r10
+-	jne	.Lreturn_the_slow_way
+ 
+ 
+ /*

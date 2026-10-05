@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #474
+Takes out: the clearing of the clobbered registers on the way back from a syscall -- rsi comes back holding the thread_t of the thread that made the call
+Run: --entry 0 600 -smp 4
+Expect: act_test: \[5\] .*WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
+index 35c2d813..3c9e4d3f 100644
+--- a/uros/src/mach_kernel/x86_64/syscall/entry.S
++++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
+@@ -533,12 +533,6 @@ syscall_entry:
+  * on an ablation that could not have seen the event it was measuring.
+  */
+ 	.macro CLEAR_CLOBBERED
+-	xorl	%edi, %edi
+-	xorl	%esi, %esi
+-	xorl	%edx, %edx
+-	xorl	%r8d, %r8d
+-	xorl	%r9d, %r9d
+-	xorl	%r10d, %r10d
+ 	.endm
+ 
+ 	/*
