@@ -1,0 +1,96 @@
+Kind: ablation
+Issue: #599
+Takes out: nothing -- a probe: after tick 3000 one thread_switch on processor 0 returns to user mode at splsched, #599's second hypothesis, and return_to_user's check must say so
+Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Expect: spl: returning to user mode at spl
+
+diff --git a/uros/src/mach_kernel/i386/clock_watch.c b/uros/src/mach_kernel/i386/clock_watch.c
+index c4f1e049..ed759ed2 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.c
++++ b/uros/src/mach_kernel/i386/clock_watch.c
+@@ -69,6 +69,7 @@
+ #include <i386/lapic.h>
+ #include <i386/apic.h>
+ #include <i386/clock_watch.h>
++#include <kern/spl.h>			/* splsched */
+ #include <i386/cn_nolock.h>		/* the stopped processor may hold the console lock */
+ 
+ extern int			db_active;		/* a processor is in DDB */
+@@ -83,6 +84,7 @@ extern volatile unsigned int	ioapic_overlaps;	/* ioapic.c */
+ #define	CW_STOP_TICKS	200	/* ... and for this many of the watcher's own */
+ #define	CW_REPEAT_MS	10000	/* the line again, while the stop lasts */
+ #define	CW_CONFIRM_MS	100	/* a spin's second look, see clock_watch_spin */
++#define	CW_ABLATE_AT	3000	/* processor 0's ticks, for the #599 ablations */
+ 
+ /*
+  * One per watcher.  Each is written only by its own processor, from its own
+@@ -168,6 +170,9 @@ clock_watch_init(void)
+ {
+ 	printf("clock: the other processors watch processor 0's tick, and say "
+ 	       "so when it has not run for %u ms (#599)\n", CW_STOP_MS);
++	printf("clock: #599 ablation -- after tick %u a thread_switch on "
++	       "processor 0 returns to user mode at splsched, once\n",
++	       CW_ABLATE_AT);
+ }
+ 
+ /*
+@@ -243,6 +248,28 @@ cw_watch(int cpu, const char *where)
+ 	}
+ }
+ 
++/*
++ * #599's second hypothesis, on purpose: processor 0 goes back to user mode
++ * with its level raised, the way kern/subsystem.c's last release and
++ * kern/eventcount.c's evc_wait would.  A boot with it shows that
++ * return_to_user's check (spl_to_user_seen, trap.c) says so, and whether a
++ * raised level on processor 0 is enough to stop the tick, and for how long:
++ * the next switch to another thread may lower it.
++ */
++void
++clock_watch_ablate_spl_leak(void)
++{
++	static int	done;
++
++	if (cpu_number() != master_cpu || done ||
++	    nmi_cpu_tick[master_cpu] < CW_ABLATE_AT)
++		return;
++	done = 1;
++	cn_puts("\nclock: #599 ablation -- this thread_switch returns to user "
++		"mode at splsched now\n");
++	(void) splsched();
++}
++
+ void
+ clock_watch_tick(int cpu)
+ {
+diff --git a/uros/src/mach_kernel/i386/clock_watch.h b/uros/src/mach_kernel/i386/clock_watch.h
+index 8d2b05e2..a285b306 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.h
++++ b/uros/src/mach_kernel/i386/clock_watch.h
+@@ -41,4 +41,6 @@ extern void	clock_watch_tick(int cpu);
+ extern void	clock_watch_spin(const char *where);
+ extern int	clock_watch_nmi(struct i386_saved_state *regs);
+ 
++extern void	clock_watch_ablate_spl_leak(void); /* from thread_switch */
++
+ #endif	/* _I386_CLOCK_WATCH_H_ */
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index a4283f35..039d42e3 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -153,6 +153,7 @@
+ #include <kern/syscall_subr.h>
+ #include <mach/mach_host_server.h>
+ #include <mach/mach_syscalls.h>
++#include <i386/clock_watch.h>
+ 
+ /* Forwards */
+ void	thread_depress_priority(
+@@ -434,6 +435,7 @@ syscall_thread_switch(
+ 	if (option == SWITCH_OPTION_IDLE)
+ 	    return(KERN_ABORTED);
+     }
++    clock_watch_ablate_spl_leak();	/* #599, i386: leave the level raised once */
+     return(KERN_SUCCESS);
+ }
+ 

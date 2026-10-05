@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #599
+Takes out: printf_nested() -- a printf nested inside printf_lock's holder waits for the lock again, so the handler spins before its EOI and processor 0's tick stops behind the vector in service; applied over 599-nested-printf.patch
+Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Expect: clock: processor 0's tick has not run for
+
+diff --git a/uros/src/mach_kernel/i386/clock_watch.c b/uros/src/mach_kernel/i386/clock_watch.c
+index 573dffa0..2946e98d 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.c
++++ b/uros/src/mach_kernel/i386/clock_watch.c
+@@ -172,6 +172,8 @@ clock_watch_init(void)
+ 	printf("clock: #599 ablation -- after tick %u processor 0 raises a line "
+ 	       "nobody handles while consolewrite holds printf_lock, once\n",
+ 	       CW_ABLATE_AT);
++	printf("clock: #599 ablation -- a nested printf waits for printf_lock, "
++	       "as before the fix\n");
+ }
+ 
+ /*
+diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
+index b172bc14..b1ab4f6b 100644
+--- a/uros/src/mach_kernel/kern/printf.c
++++ b/uros/src/mach_kernel/kern/printf.c
+@@ -989,7 +989,7 @@ volatile int	printf_lock_holder = -1;
+ static __inline__ int
+ printf_nested(void)
+ {
+-	return printf_lock_holder == cpu_number();
++	return 0;	/* #599 ablation: a nested printf waits, as before */
+ }
+ 
+ /*

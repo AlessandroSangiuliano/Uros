@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #599
+Takes out: window_lock -- the I/O APIC's window is used with interrupts masked and nothing else, so two processors' selects and accesses interleave and each side reads back the other pin's vector
+Run: --entry 23 1200 -smp 4
+Expect: ioapic_race: WRONG .* read-backs were not what their side wrote
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic.c b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+index c8fe4953..cd9e7dda 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ioapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+@@ -72,8 +72,6 @@ static uint64_t window_enter(void)
+ 	uint64_t flags = read_rflags();
+ 
+ 	interrupts_disable();
+-	while (atomic_swap8(&window_lock, 1) != 0)
+-		cpu_pause();
+ 	return flags;
+ }
+ 

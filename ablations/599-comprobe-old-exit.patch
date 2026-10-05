@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #599
+Takes out: comprobe()'s adoption of unit 0 on a boot without -r, and nothing else -- the line is still set up, then the old probe runs over it and comattach() clears IER and MCR under uart.so, as before
+Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Expect: uart: COM1 found with LCR 0x[0-9a-f]{2}, MCR 0x00,
+
+diff --git a/uros/src/mach_kernel/i386/AT386/com.c b/uros/src/mach_kernel/i386/AT386/com.c
+index 582baba4..e1ccdac6 100644
+--- a/uros/src/mach_kernel/i386/AT386/com.c
++++ b/uros/src/mach_kernel/i386/AT386/com.c
+@@ -398,8 +398,13 @@ comprobe(
+ 		} else
+ 			printf("com0: adopted as it was found, LCR 0x%02x "
+ 			       "(#599)\n", (unsigned)lcr);
+-		com_cons_init();
+-		return(1);
++		if (cons_is_com1) {
++			com_cons_init();
++			return(1);
++		}
++		printf("com0: ABLATE_599_COMPROBE_OLD_EXIT -- the old probe runs "
++		       "over the line above now, and comattach clears IER and "
++		       "MCR (#599)\n");
+ 	}
+ 	oldctl = inb(LINE_CTL(addr));	 /* Save old value of LINE_CTL */
+ 	oldmsb = inb(BAUD_MSB(addr));	 /* Save old value of BAUD_MSB */
+@@ -482,7 +487,7 @@ comattach(
+ 	 * Since #207 the kernel is not this chip's driver: uart.so is, and
+ 	 * clearing MCR dropped DTR, RTS and OUT2 under it.
+ 	 */
+-	if (unit == 0)
++	if (unit == 0 && cons_is_com1)
+ 		return;
+ 	
+ 	outb(INTR_ENAB(addr), 0);

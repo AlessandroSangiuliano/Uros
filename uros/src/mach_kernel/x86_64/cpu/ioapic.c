@@ -61,30 +61,18 @@ static uint32_t base_gsi;
  * two reasons: ioapic_init() runs before percpu_activate(), where the lock
  * package cannot be used, and an interrupt landing between the two accesses
  * on ONE processor is the same failure without any second processor at all.
- * Read-modify-write sequences below take it once around both halves.
+ * Read-modify-write sequences below take it once around both halves.  The -Y
+ * test (ioapic_race_test.c) shows what it keeps apart, with
+ * ablations/599-window-open.patch.
  */
 static volatile uint8_t	window_lock;
-
-/*
- * #599: the -Y test's two ablations (ioapic_race_test.c).  WINDOW_OPEN uses
- * the window without the lock and still with interrupts masked, so what it
- * reopens is the race between processors; WINDOW_WIDEN puts that many port
- * 0x80 reads between selecting a register and using it, so a second
- * processor's select lands in the gap far more often.
- */
-#ifndef	ABLATE_599_WINDOW_OPEN
-#define	ABLATE_599_WINDOW_OPEN	0
-#endif
-#ifndef	ABLATE_599_WINDOW_WIDEN
-#define	ABLATE_599_WINDOW_WIDEN	0
-#endif
 
 static uint64_t window_enter(void)
 {
 	uint64_t flags = read_rflags();
 
 	interrupts_disable();
-	while (!ABLATE_599_WINDOW_OPEN && atomic_swap8(&window_lock, 1) != 0)
+	while (atomic_swap8(&window_lock, 1) != 0)
 		cpu_pause();
 	return flags;
 }
@@ -97,23 +85,15 @@ static void window_leave(uint64_t flags)
 		interrupts_enable();
 }
 
-static void window_widen(void)
-{
-	for (unsigned i = 0; i < ABLATE_599_WINDOW_WIDEN; i++)
-		(void) inb(0x80);
-}
-
 static uint32_t window_read(unsigned reg)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
-	window_widen();
 	return *(volatile uint32_t *)(io + IOAPIC_WINDOW);
 }
 
 static void window_write(unsigned reg, uint32_t value)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
-	window_widen();
 	*(volatile uint32_t *)(io + IOAPIC_WINDOW) = value;
 }
 

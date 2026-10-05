@@ -1,0 +1,44 @@
+Kind: ablation
+Issue: #599
+Takes out: halt_cpu()'s order -- the console's final copy first, the halt broadcast before the wait for the panicking processor's message, and interrupts left open after the wait, as before #599's review rounds
+Run: --entry 24 900 -smp 4
+Measure: not a line of the log -- scripts/double-panic-check.sh reads the -Z log and must say WRONG (the console's final copy not whole after the message, a processor's backtrace missing, lines run together); a -Z boot panics on purpose with the fix too, so the harness's status says nothing
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/model.c b/uros/src/mach_kernel/x86_64/cpu/model.c
+index 163c08b3..296f30fe 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/model.c
++++ b/uros/src/mach_kernel/x86_64/cpu/model.c
+@@ -116,12 +116,16 @@ halt_cpu(void)
+ 	 * -- the backtrace included -- then reaches the port in this thread,
+ 	 * which is the only thread there will be.
+ 	 */
++	cons_ring_report();
+ 	cons_async_set(0);
+ 	fbcons_flush();		/* #568: and out of the write-combining buffers */
+ 
+ 	if (panicstr != (const char *) 0) {
+ 		uint64_t spins;
+ 
++		if (atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
++			ipi_halt_others();
++
+ 		/*
+ 		 * Let the processor that got there first finish saying what
+ 		 * happened (#461).
+@@ -162,7 +166,6 @@ halt_cpu(void)
+ 		 * others' requests.  The nesting count keeps it masked, since
+ 		 * it restores the flag it found (percpu_intr_enable).
+ 		 */
+-		interrupts_disable();
+ 
+ 		/*
+ 		 * Stop the rest of the machine, once, from whoever gets here
+@@ -181,8 +184,6 @@ halt_cpu(void)
+ 		 * processor arriving here through the stop interrupt must not
+ 		 * send another.
+ 		 */
+-		if (atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
+-			ipi_halt_others();
+ 		cons_port_close_latch();	/* #599: under the port's lock */
+ 
+ 		/*

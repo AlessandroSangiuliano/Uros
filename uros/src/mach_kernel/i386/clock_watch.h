@@ -41,14 +41,4 @@ extern void	clock_watch_tick(int cpu);
 extern void	clock_watch_spin(const char *where);
 extern int	clock_watch_nmi(struct i386_saved_state *regs);
 
-#if defined(ABLATE_599_MASK_PIT) || defined(ABLATE_599_CLI_SPIN)
-extern void	clock_watch_ablate(int cpu);	/* from hardclock */
-#endif
-#ifdef ABLATE_599_SPL_LEAK
-extern void	clock_watch_ablate_spl_leak(void); /* from thread_switch */
-#endif
-#ifdef ABLATE_599_NESTED_PRINTF
-extern void	clock_watch_ablate_nested_printf(void); /* from consolewrite */
-#endif
-
 #endif	/* _I386_CLOCK_WATCH_H_ */

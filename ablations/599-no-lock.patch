@@ -1,0 +1,42 @@
+Kind: ablation
+Issue: #599
+Takes out: ioapic_pair_lock -- the select/window pair is used with interrupts off and nothing else, so two processors' read-modify-writes interleave and can leave the 8254's pin holding another pin's entry, processor 0's tick stopped for good
+Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Expect: inside the select/window pair \(#599\)
+Expect: clock: processor 0's tick has not run for
+
+diff --git a/uros/src/mach_kernel/i386/ioapic.c b/uros/src/mach_kernel/i386/ioapic.c
+index edc7fd6b..f1ff1b70 100644
+--- a/uros/src/mach_kernel/i386/ioapic.c
++++ b/uros/src/mach_kernel/i386/ioapic.c
+@@ -170,30 +170,14 @@ static unsigned int
+ ioapic_pair_enter(void)
+ {
+ 	unsigned int	flags;
+-	unsigned char	busy;
+-	int		waited = 0;
+ 
+ 	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+-	for (;;) {
+-		busy = 1;
+-		__asm__ volatile("xchgb %0, %1"
+-				 : "+q" (busy), "+m" (ioapic_pair_lock)
+-				 : : "memory");
+-		if (busy == 0)
+-			break;
+-		waited = 1;
+-		__asm__ volatile("pause");
+-	}
+-	if (waited)
+-		__sync_fetch_and_add(&ioapic_lock_waits, 1);
+ 	return flags;
+ }
+ 
+ static void
+ ioapic_pair_leave(unsigned int flags)
+ {
+-	__asm__ volatile("" : : : "memory");
+-	ioapic_pair_lock = 0;
+ 	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
+ }
+ 

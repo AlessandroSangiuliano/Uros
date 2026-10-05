@@ -1,0 +1,73 @@
+Kind: widen
+Issue: #599
+Holds open: the I/O APIC's select/window pair -- 1000 reads of port 0x80 in each of its gaps, on the processors other than 0, so that two read-modify-writes meet inside it at four processors and never at one
+Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+
+diff --git a/uros/src/mach_kernel/i386/ioapic.c b/uros/src/mach_kernel/i386/ioapic.c
+index 9c543827..edc7fd6b 100644
+--- a/uros/src/mach_kernel/i386/ioapic.c
++++ b/uros/src/mach_kernel/i386/ioapic.c
+@@ -77,6 +77,31 @@ static vm_offset_t	ioapic_base;	/* MMIO virtual base of I/O APIC #0 */
+ static unsigned int	ioapic_redirs;	/* number of redirection entries */
+ static unsigned char	ioapic_dest;	/* boot CPU physical APIC ID */
+ 
++/*
++ * #599's widened window: 1000 reads of port 0x80 (each a VM exit under KVM)
++ * in each gap of the pair -- after a select, between a read and the select
++ * for the write -- on the other processors only.  Processor 0 keeps its own
++ * read-modify-writes, which are the tick's defer and replay, as short as they
++ * are.  If the pair's race is what stops the tick, this makes it frequent at
++ * four processors and leaves it absent at one.
++ */
++static void
++ioapic_widen(void)
++{
++	static int	said;
++	int		w;
++
++	if (cpu_number() == master_cpu)
++		return;
++	if (!said) {
++		said = 1;
++		cn_puts("\nioapic: #599 ablation -- the other processors wait in "
++			"each gap of the select/window pair\n");
++	}
++	for (w = 0; w < 1000; w++)
++		(void) inb(0x80);
++}
++
+ /*
+  * Indexed register access: write the register number to RSELECT, then read
+  * or write the value through RWINDOW.
+@@ -85,6 +110,7 @@ static unsigned int
+ ioapic_read(unsigned int reg)
+ {
+ 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
++	ioapic_widen();
+ 	return *(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW);
+ }
+ 
+@@ -92,6 +118,7 @@ static void
+ ioapic_write(unsigned int reg, unsigned int value)
+ {
+ 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
++	ioapic_widen();
+ 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW) = value;
+ }
+ 
+@@ -245,6 +272,7 @@ ioapic_mask_irq(unsigned int irq)
+ 	flags = ioapic_pair_enter();
+ 	first = ioapic_enter();
+ 	low = ioapic_read(reg);
++	ioapic_widen();
+ 	ioapic_write(reg, low | IOA_R_R_MASKED);
+ 	ioapic_leave(first, gsi);
+ 	ioapic_pair_leave(flags);
+@@ -265,6 +293,7 @@ ioapic_unmask_irq(unsigned int irq)
+ 	flags = ioapic_pair_enter();
+ 	first = ioapic_enter();
+ 	low = ioapic_read(reg);
++	ioapic_widen();
+ 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
+ 	ioapic_leave(first, gsi);
+ 	ioapic_pair_leave(flags);

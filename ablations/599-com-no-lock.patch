@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #599
+Takes out: com_bank_lock -- com_putc()'s THR write and the divisor sequence no longer exclude each other, and console bytes land in the divisor latch
+Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio -append -U
+Expect: com: \[divisor-race\] WRONG .* divisor sequences read back something other than
+
+diff --git a/uros/src/mach_kernel/i386/AT386/com.c b/uros/src/mach_kernel/i386/AT386/com.c
+index fdc10a37..a22c0154 100644
+--- a/uros/src/mach_kernel/i386/AT386/com.c
++++ b/uros/src/mach_kernel/i386/AT386/com.c
+@@ -1363,21 +1363,9 @@ com_bank_enter_for(unsigned int *flags, int console)
+ 	me = cpu_number();
+ 	if (com_bank_owner == me + 1)
+ 		return 0;			/* nested on the holder */
+-	if (!db_active || !console) {
+-		while (!com_bank_try(me))
+-			__asm__ volatile("pause");
+-		com_bank_gave_up = 0;
+-		return 1;
+-	}
+-	for (i = 0; i < (com_bank_gave_up ? 1 : COM_BANK_DDB_SPINS); i++) {
+-		if (com_bank_try(me)) {
+-			com_bank_gave_up = 0;
+-			return 1;
+-		}
+-		__asm__ volatile("pause");
+-	}
+-	com_bank_gave_up = 1;
+-	return 0;
++	(void)i;
++	(void)console;
++	return 1;	/* as before #599: nothing taken, THR written regardless */
+ }
+ 
+ static int

@@ -989,11 +989,7 @@ volatile int	printf_lock_holder = -1;
 static __inline__ int
 printf_nested(void)
 {
-#ifdef ABLATE_599_PRINTF_WAITS
-	return 0;	/* #599 ablation: a nested printf waits, as before */
-#else
 	return printf_lock_holder == cpu_number();
-#endif
 }
 
 /*
