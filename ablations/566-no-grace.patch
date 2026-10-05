@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #566
+Takes out: the wait in a grace period -- every one returns at once, which is UNSAFE, to answer whether the wait is what the trap sweep pays a clock tick for
+Run: --entry 0 1200 -smp 4
+Measure: what task_create and task_terminate cost on more than one processor (#566, #548's trap sweep), against the same tree without the patch
+
+diff --git a/uros/src/mach_kernel/kern/rcu.c b/uros/src/mach_kernel/kern/rcu.c
+index 01d557f8..332df989 100644
+--- a/uros/src/mach_kernel/kern/rcu.c
++++ b/uros/src/mach_kernel/kern/rcu.c
+@@ -138,6 +138,21 @@ urmach_synchronize_rcu(void)
+ 	int		c;
+ 	int		me = cpu_number();
+ 
++	/*
++	 * Every grace period returns at once, which is UNSAFE -- a reader may still hold what the caller is about to
++	 * free -- and exists to answer one question: is the wait what the
++	 * #548 trap sweep pays a clock tick for on more than one processor?
++	 *
++	 * 🔑 HERE AND NOT AT A CALL SITE.  The first version of this ablation
++	 * removed the call in pmap_destroy() alone and changed nothing, which
++	 * read as "the grace period is innocent" -- wrongly: pmap_collect()
++	 * takes two more per batch (x86_64/pmap/vminit.c), and the sampler
++	 * was showing a processor inside THIS function a quarter of the time.
++	 * An ablation of one caller answers about that caller; the question
++	 * was about the wait.
++	 */
++	return;
++
+ 	/*
+ 	 *	#336 LANDMINE, DISARMED: `me` used to be read without disabling
+ 	 *	preemption, safe only while the kernel could not preempt in kernel

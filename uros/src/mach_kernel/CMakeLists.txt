@@ -141,14 +141,6 @@ option(UROS_USLOCK_CENSUS "Build the #486 simple-lock census (hooks on every sim
 # answer that could not be told from the other two by taking it away would not
 # be worth having.  Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is never opened" OFF)
-# #566: remove the grace period from pmap_destroy, to find out whether it is
-# what the trap sweep pays a clock tick for on more than one processor.  UNSAFE
-# -- a reader may still hold the pmap.  Measurement only.
-option(UROS_ABLATE_566_NO_GRACE "Build the #566 ablation: pmap_destroy does not wait a grace period" OFF)
-# #566: and the other wait a processor can spend a trap inside -- the TLB
-# shootdown standing still until every other processor has acknowledged.
-# UNSAFE: the caller goes on with stale translations elsewhere.
-option(UROS_ABLATE_566_NO_IPI_WAIT "Build the #566 ablation: ipi_call_others does not wait for the acknowledgements" OFF)
 # #570: make the device master REFUSE the holder of a PCI I/O BAR its own
 # registers, after N allowed accesses, so that a driver's refusal path is asked
 # on a real boot instead of argued.  0 refuses the probe; a larger N lets the
@@ -596,14 +588,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_563_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_WINDOW=1)
       message(STATUS "#563 ablation: the copy's window is never opened (x86_64)")
-  endif()
-  if(UROS_ABLATE_566_NO_GRACE)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_GRACE=1)
-      message(STATUS "#566 ablation: pmap_destroy does not wait a grace period (x86_64)")
-  endif()
-  if(UROS_ABLATE_566_NO_IPI_WAIT)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_IPI_WAIT=1)
-      message(STATUS "#566 ablation: ipi_call_others does not wait for acks (x86_64)")
   endif()
   if(NOT UROS_ABLATE_570_REFUSE_IOBAR STREQUAL "")
       list(APPEND KERNEL_DEFINES_BARE ABLATE_570_REFUSE_IOBAR=${UROS_ABLATE_570_REFUSE_IOBAR})
