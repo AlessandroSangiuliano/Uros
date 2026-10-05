@@ -576,7 +576,7 @@ main(int argc, char **argv)
 	mach_port_t	mine = MACH_PORT_NULL, peer;
 	kern_return_t	kr;
 	unsigned	round, ncpu;
-	unsigned	torn = 0, empty = 0, starved = 0, odd_refusal = 0;
+	unsigned	torn = 0, empty = 0, starved = 0, half_starved = 0, odd_refusal = 0;
 	struct odd_loser odd[ODD_NAMED];
 	unsigned	behaved = 0;
 	unsigned	my_wins = 0;
@@ -696,7 +696,9 @@ main(int argc, char **argv)
 					? (kern_return_t)peer_kr : kr;
 
 				behaved++;
-				if (loser != KERN_NO_ACCESS) {
+				if (loser == KERN_RESOURCE_SHORTAGE)
+					half_starved++;
+				else if (loser != KERN_NO_ACCESS) {
 					if (odd_refusal < ODD_NAMED) {
 						odd[odd_refusal].round = round;
 						odd[odd_refusal].who =
@@ -757,22 +759,38 @@ main(int argc, char **argv)
 		       "winner each — two writers never took one slot\n",
 		       round, ncpu);
 		printf("io_claim_race:     a won %u, b won %u, %u rounds found "
-		       "the table full of retiring slots\n",
-		       my_wins, behaved - my_wins, starved);
+		       "the table full of retiring slots, and in %u more the "
+		       "loser found it full and the winner a slot that had just "
+		       "retired\n", my_wins, behaved - my_wins, starved,
+		       half_starved);
 		passed++;
 	}
 
 	/*
 	 * [2] The loser was told WHY.  A refusal for the right reason is
 	 * KERN_NO_ACCESS -- "another task holds it".  Any other code would
-	 * mean the loser hit a full table or a bad argument, which is a
-	 * different defect wearing the same outcome.
+	 * mean a bad argument or a defect wearing the same outcome.
+	 *
+	 * Except one, and it is not a refusal of this round's claim: the
+	 * table full, KERN_RESOURCE_SHORTAGE, beside a winner (#602).  The
+	 * two claims are scanned one after the other under device_table_lock.
+	 * The first found no claim to overlap and every free slot still
+	 * retiring, and was told so; a slot finished retiring before the
+	 * second scanned, and the second won.  Counted apart, like the rounds
+	 * where both found the table full, and said beside them in [1].
 	 */
 	if (!peer_gone) {
 		arms++;
-		if (odd_refusal == 0) {
+		if (odd_refusal == 0 && half_starved == 0) {
 			printf("io_claim_race: [2] every loser was refused "
 			       "with KERN_NO_ACCESS and nothing else\n");
+			passed++;
+		} else if (odd_refusal == 0) {
+			printf("io_claim_race: [2] every loser was refused "
+			       "with KERN_NO_ACCESS, or found the table full "
+			       "before the winner found a slot that had just "
+			       "retired (%u round%s, #602)\n", half_starved,
+			       half_starved == 1 ? "" : "s");
 			passed++;
 		} else {
 			unsigned i;
