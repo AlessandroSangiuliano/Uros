@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #614
+Takes out: the direction check on every transfer -- the open still asks the token only for its mode's rights, and then a handle opened D_READ writes and one opened D_WRITE reads
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[27\] WRONG
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index 6c48ba58..0b991a38 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -116,7 +116,7 @@ blk_handle_for(mach_port_t device, dev_mode_t dir)
+ 
+ 	if (h == NULL)
+ 		return NULL;
+-	if ((h->mode & dir) != dir) {
++	if (0 && (h->mode & dir) != dir) {
+ 		if (!h->said_mode) {
+ 			h->said_mode = 1;
+ 			printf("blk: %s: a %s on a handle opened without %s, "

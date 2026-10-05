@@ -1251,7 +1251,7 @@ a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
  *
  * ⚠️ The writes go to the scratch block of a disk [14] may write, and each
  * carries the block's own bytes, read just before.  Should a check be
- * missing (UROS_ABLATE_614_NO_MODE_CHECK) the write lands and changes
+ * missing (ablations/614-no-mode-check.patch) the write lands and changes
  * nothing, and the arm says WRONG for its having been accepted.  The opens
  * and the mirror write nothing and run on every disk.
  */

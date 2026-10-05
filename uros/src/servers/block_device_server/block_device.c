@@ -57,9 +57,6 @@
 #ifndef BLK_ABLATE_537_NO_EPOCH
 #define BLK_ABLATE_537_NO_EPOCH 0	/* no check after a transfer */
 #endif
-#ifndef BLK_ABLATE_614_NO_MODE_CHECK
-#define BLK_ABLATE_614_NO_MODE_CHECK 0	/* transfers ignore the handle's mode */
-#endif
 #define BLK_DMA_PAGE	4096u		/* the DMA regions' page, both targets */
 
 struct blk_handle;
@@ -119,7 +116,7 @@ blk_handle_for(mach_port_t device, dev_mode_t dir)
 
 	if (h == NULL)
 		return NULL;
-	if ((h->mode & dir) != dir && !BLK_ABLATE_614_NO_MODE_CHECK) {
+	if ((h->mode & dir) != dir) {
 		if (!h->said_mode) {
 			h->said_mode = 1;
 			printf("blk: %s: a %s on a handle opened without %s, "
