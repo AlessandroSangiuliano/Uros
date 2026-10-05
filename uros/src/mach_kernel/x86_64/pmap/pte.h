@@ -163,14 +163,6 @@ typedef uint64_t	pt_entry_t;
 #define INTEL_PTE_INTERIOR	(INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_USER)
 
 /*
- * #604: a split back to what it wrote before -- the frame, VALID, the
- * permission bits and PS, and an interior entry without USER.
- */
-#ifndef	ABLATE_604_SPLIT_DROPS
-#define	ABLATE_604_SPLIT_DROPS	0
-#endif
-
-/*
  * Entry `i' of the table that replaces the large leaf `large': the same
  * mapping one size finer, and nothing else different (#604).
  *
@@ -191,10 +183,6 @@ static inline pt_entry_t pte_split_leaf(pt_entry_t large, int from_1g,
 	uint64_t   sub_size   = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
 	pt_entry_t frame      = (large & frame_mask) + (uint64_t) i * sub_size;
 	pt_entry_t keep;
-
-	if (ABLATE_604_SPLIT_DROPS)
-		return frame | INTEL_PTE_VALID | (large & INTEL_PTE_PERM)
-		     | (from_1g ? INTEL_PTE_PS : 0);
 
 	keep = large & ~(frame_mask | INTEL_PTE_PS | INTEL_PTE_PAT_LARGE);
 
@@ -235,9 +223,6 @@ static inline pt_entry_t pte_split_leaf(pt_entry_t large, int from_1g,
  * entry would be kept for ever.  A mapping that is gone has no bits left to
  * change.
  */
-#ifndef	ABLATE_604_UPDATE_GONE
-#define	ABLATE_604_UPDATE_GONE	0
-#endif
 
 static inline void pmap_pte_update(pt_entry_t *entry, uint64_t set,
 				   uint64_t clear)
@@ -248,7 +233,7 @@ static inline void pmap_pte_update(pt_entry_t *entry, uint64_t set,
 		pt_entry_t fresh = (found & ~clear) | set;
 		pt_entry_t seen;
 
-		if (!ABLATE_604_UPDATE_GONE && !pte_is_valid(found))
+		if (!pte_is_valid(found))
 			return;
 		if (fresh == found)
 			return;

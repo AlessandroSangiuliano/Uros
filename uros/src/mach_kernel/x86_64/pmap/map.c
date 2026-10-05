@@ -366,15 +366,6 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 }
 
 /*
- * #604: the removal back to a read of the entry and a plain store of zero,
- * which two removers can both get through.  The -M bench's two-remover arm
- * is what notices.
- */
-#ifndef	ABLATE_604_UNMAP_STORE
-#define	ABLATE_604_UNMAP_STORE	0
-#endif
-
-/*
  * Drop the mapping and leave the shootdown to the caller (#558).
  *
  * 🔴 THE PAIR TO pmap_protect_page_noflush() BELOW, AND FOR THE SAME REASON.
@@ -446,10 +437,6 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 			break;			/* somebody else removed it */
 		if (size == PAGE_SIZE_4K)
 			pv_keep_bits(pte_to_pa(old), old);
-		if (ABLATE_604_UNMAP_STORE) {
-			*entry = 0;
-			break;
-		}
 		seen = atomic_cmpxchg64((volatile uint64_t *) entry, old, 0);
 		if (seen == old)
 			break;
@@ -543,10 +530,8 @@ uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
 	return size;
 }
 
-/* #604: the split's interior entry, and what it was before (see pte.h). */
-#define SPLIT_INTERIOR	(ABLATE_604_SPLIT_DROPS				\
-			 ? (INTEL_PTE_VALID | INTEL_PTE_WRITE)		\
-			 : INTEL_PTE_INTERIOR)
+/* #604: the interior entry a split writes, USER included (see pte.h). */
+#define SPLIT_INTERIOR	INTEL_PTE_INTERIOR
 
 uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 {
