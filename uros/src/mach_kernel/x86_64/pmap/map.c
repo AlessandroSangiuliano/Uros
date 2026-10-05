@@ -22,15 +22,6 @@
 #include <pmap/walk.h>
 #include <trap/trap.h>
 
-/*
- * #606: a removal or a replacement that keeps nothing of the entry it takes
- * away -- what this file did before the record in pv.c existed.
- * phys_ops_selftest() in boot_c.c is what notices.
- */
-#ifndef	ABLATE_606_FORGET_BITS
-#define	ABLATE_606_FORGET_BITS	0
-#endif
-
 static inline pt_entry_t *table_at(uint64_t table_pa)
 {
 	return (pt_entry_t *)(uintptr_t)phys_to_direct(table_pa);
@@ -278,7 +269,7 @@ static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
 		for (;;) {
 			pt_entry_t seen;
 
-			if (pte_is_valid(old) && !ABLATE_606_FORGET_BITS)
+			if (pte_is_valid(old))
 				pv_keep_bits(pte_to_pa(old), old);
 			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
 						old, fresh);
@@ -453,7 +444,7 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 
 		if (!pte_is_valid(old))
 			break;			/* somebody else removed it */
-		if (size == PAGE_SIZE_4K && !ABLATE_606_FORGET_BITS)
+		if (size == PAGE_SIZE_4K)
 			pv_keep_bits(pte_to_pa(old), old);
 		if (ABLATE_604_UNMAP_STORE) {
 			*entry = 0;
