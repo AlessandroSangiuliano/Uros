@@ -1291,19 +1291,21 @@ static void user_pmap_selftest(void)
 		 * USER_TEST_VA — bumps it without this probe doing anything at
 		 * all.  Read absolutely, "0 arrived" and "the window opened and
 		 * something else counted first" are the same number, and the
-		 * ablation below could not tell them apart either.
+		 * ablation named below could not tell them apart either.
 		 */
 		before = trap_smap_lifted_count();
 
 		trap_expect(T_INVALID_OPCODE,
 			    (uint64_t)(uintptr_t)trap_probe_faulted);
 
-#if	!ABLATE_563_WINDOW
+		/*
+		 * ablations/563-window.patch leaves the window shut, and this
+		 * must then go WRONG on a processor that HAS SMAP and stay
+		 * green on one that has not.  Those two outcomes from one patch
+		 * are the whole of what this correction does, and the only way
+		 * to see it from outside.
+		 */
 		pmap_user_access_begin();
-#endif	/* !ABLATE_563_WINDOW — build with -DABLATE_563_WINDOW=1 and this
-	 * must go WRONG on a processor that HAS SMAP and stay green on one
-	 * that has not.  Those two outcomes from one switch are the whole of
-	 * what this correction does, and the only way to see it from outside. */
 		(void) trap_probe_ud();
 		pmap_user_access_end();
 

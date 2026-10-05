@@ -1,0 +1,106 @@
+Kind: ablation
+Issue: #563
+Takes out: every processor but this one, as the five tests that need a second one see it -- the line that declines the question runs, which no boot flag reaches on this target; the five are entries 5, 6, 7, 8 and 17, each must say NOT ASKED and the harness must pass
+Run: --entry 5 600 -smp 4
+Expect: (preempt_test|fpu_stress|state_test|ast_test|wait_preempt): NOT ASKED .*alone
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/fpu_stress.c b/uros/src/mach_kernel/x86_64/thread/fpu_stress.c
+index 492e0db6..a2ade0f0 100644
+--- a/uros/src/mach_kernel/x86_64/thread/fpu_stress.c
++++ b/uros/src/mach_kernel/x86_64/thread/fpu_stress.c
+@@ -115,6 +115,15 @@ fpu_stress_run(void)
+ 		break;
+ 	}
+ 
++	/*
++	 * #563: pretend this processor is the only one running, so the line
++	 * that declines the question can be walked on a machine where it
++	 * would otherwise be unreachable -- there is no boot flag that caps
++	 * the processor count on this target, and an application processor
++	 * cannot be made to fail to arrive on demand.  A branch nobody has
++	 * executed is not support.
++	 */
++	target = PROCESSOR_NULL;
+ 	/*
+ 	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+ 	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
+diff --git a/uros/src/mach_kernel/x86_64/thread/state_test.c b/uros/src/mach_kernel/x86_64/thread/state_test.c
+index 12d96c31..b9ffea8f 100644
+--- a/uros/src/mach_kernel/x86_64/thread/state_test.c
++++ b/uros/src/mach_kernel/x86_64/thread/state_test.c
+@@ -693,6 +693,15 @@ thread_state_entry_test(void)
+ 
+ 	target = another_processor();
+ 
++	/*
++	 * #563: pretend this processor is the only one running, so the line
++	 * that declines the question can be walked on a machine where it
++	 * would otherwise be unreachable -- there is no boot flag that caps
++	 * the processor count on this target, and an application processor
++	 * cannot be made to fail to arrive on demand.  A branch nobody has
++	 * executed is not support.
++	 */
++	target = PROCESSOR_NULL;
+ 	/*
+ 	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+ 	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
+diff --git a/uros/src/mach_kernel/x86_64/time/preempt_test.c b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+index a3c3f270..a6a0e942 100644
+--- a/uros/src/mach_kernel/x86_64/time/preempt_test.c
++++ b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+@@ -433,6 +433,15 @@ preempt_test_run_remote(void)
+ 		break;
+ 	}
+ 
++	/*
++	 * #563: pretend this processor is the only one running, so the line
++	 * that declines the question can be walked on a machine where it
++	 * would otherwise be unreachable -- there is no boot flag that caps
++	 * the processor count on this target, and an application processor
++	 * cannot be made to fail to arrive on demand.  A branch nobody has
++	 * executed is not support.
++	 */
++	target = PROCESSOR_NULL;
+ 	/*
+ 	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+ 	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
+diff --git a/uros/src/mach_kernel/x86_64/trap/ast_test.c b/uros/src/mach_kernel/x86_64/trap/ast_test.c
+index 6fcbaad9..102996a6 100644
+--- a/uros/src/mach_kernel/x86_64/trap/ast_test.c
++++ b/uros/src/mach_kernel/x86_64/trap/ast_test.c
+@@ -190,6 +190,15 @@ kernel_ast_test(void)
+ 		break;
+ 	}
+ 
++	/*
++	 * #563: pretend this processor is the only one running, so the line
++	 * that declines the question can be walked on a machine where it
++	 * would otherwise be unreachable -- there is no boot flag that caps
++	 * the processor count on this target, and an application processor
++	 * cannot be made to fail to arrive on demand.  A branch nobody has
++	 * executed is not support.
++	 */
++	target = PROCESSOR_NULL;
+ 	/*
+ 	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+ 	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
+diff --git a/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c b/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c
+index e19ea525..b78c958c 100644
+--- a/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c
++++ b/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c
+@@ -235,6 +235,15 @@ kernel_wait_preempt_test(void)
+ 		break;
+ 	}
+ 
++	/*
++	 * #563: pretend this processor is the only one running, so the line
++	 * that declines the question can be walked on a machine where it
++	 * would otherwise be unreachable -- there is no boot flag that caps
++	 * the processor count on this target, and an application processor
++	 * cannot be made to fail to arrive on demand.  A branch nobody has
++	 * executed is not support.
++	 */
++	target = PROCESSOR_NULL;
+ 	/*
+ 	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
+ 	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
