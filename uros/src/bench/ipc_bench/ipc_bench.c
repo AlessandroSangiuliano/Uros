@@ -978,6 +978,15 @@ forkrace_child_entry(void)
     unsigned long	 off;
     int			 pass;
 
+    /*
+     * The task's own libmach state before any RPC, as every child in
+     * flipc2_bench_inter.c has: this child inherited the parent's memory, so
+     * the task_terminate() below named the PARENT's task port, and found its
+     * reply port through the parent's hand-over to libpthreads, whose
+     * pthread_self() on this raw stack is garbage (#645).
+     */
+    mach_task_self_init();
+
     for (pass = 0; pass < FORKRACE_CHILD_PASSES; pass++) {
 	for (off = 0; off < FORKRACE_REGION; off += FORKRACE_PAGE)
 	    (void) p[off];
