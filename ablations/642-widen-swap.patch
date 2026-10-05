@@ -1,0 +1,83 @@
+Kind: widen
+Issue: #642
+Holds open: thread_doswapin() just after it marks the stack in, and thread_swapout() just before it unwires it, for 100 ms each, for the activation of the -Q arm that is running -- so [2] and [3] meet their state every time, and the fixed tree must still pass with the windows open
+Run: --entry 25 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/thread_swap.c b/uros/src/mach_kernel/kern/thread_swap.c
+index 59416950..6653e587 100644
+--- a/uros/src/mach_kernel/kern/thread_swap.c
++++ b/uros/src/mach_kernel/kern/thread_swap.c
+@@ -237,6 +237,13 @@ int	maxslp = MAXSLP;
+ unsigned int	thread_swapouts;
+ unsigned int	thread_swapins;
+ 
++/*
++ * ablations/642-widen-swap.patch: the activation whose swap-in and swap-out
++ * are held open, and the spin that holds them (in -Q's test).
++ */
++thread_act_t	swap_widen_act;
++extern void	swap_widen_spin(void);
++
+ #ifndef MAX_SWAP_RATE
+ #define MAX_SWAP_RATE	60
+ #endif
+@@ -491,6 +498,8 @@ void thread_doswapin(
+ 		assert(thr_act->kernel_stack_swapped_in == FALSE);
+ 		thr_act->kernel_stack_swapped_in = TRUE;
+ #endif	/* MACH_ASSERT */
++		if (thr_act == swap_widen_act)
++			swap_widen_spin();
+ 		for (;;) {
+ 			kr = vm_map_wire(kernel_map, trunc_page(addr),
+ 					 round_page(addr + KERNEL_STACK_SIZE),
+@@ -647,6 +656,8 @@ void thread_swapout(
+ 	if (thread_swap_unwire_stack && (thread = thr_act->thread)) {
+ 		assert(KERNEL_STACK_SIZE % page_size == 0);
+ 		addr = thread->kernel_stack;
++		if (thr_act == swap_widen_act)
++			swap_widen_spin();
+ #if	THREAD_SW_DEBUG
+ 		if (thread_swap_debug) {
+ 			printf("thread_swapout(%p):unwiring stack %lx\n",
+diff --git a/uros/src/mach_kernel/x86_64/trap/swap_disable_test.c b/uros/src/mach_kernel/x86_64/trap/swap_disable_test.c
+index bccf6559..696376f4 100644
+--- a/uros/src/mach_kernel/x86_64/trap/swap_disable_test.c
++++ b/uros/src/mach_kernel/x86_64/trap/swap_disable_test.c
+@@ -49,7 +49,9 @@
+ #include <kern/thread_swap.h>
+ #include <kern/time_out.h>		/* hz */
+ 
++#include <cpu/regs.h>			/* cpu_pause() */
+ #include <cpu/spl.h>
++#include <time/tsc.h>			/* the widened windows' clock */
+ #include <trap/handoff_test.h>		/* swap_state_name() */
+ #include <trap/swap_disable_test.h>
+ 
+@@ -104,10 +106,26 @@ sd_park(void)
+  * Where ablations/642-widen-swap.patch tells the swapper which activation to
+  * hold open.  Nothing, without it.
+  */
++extern thread_act_t	swap_widen_act;
++
+ static void
+ sd_window(thread_act_t act)
+ {
+-	(void) act;
++	swap_widen_act = act;
++}
++
++/* 100 ms, preemptible: ten ticks and more for a thread that looks once a tick. */
++void
++swap_widen_spin(void)
++{
++	uint64_t	span, t0;
++
++	if (tsc_hz() == 0)
++		return;
++	span = tsc_hz() / 10;
++	t0 = rdtsc();
++	while (rdtsc() - t0 < span)
++		cpu_pause();
+ }
+ 
+ static int
