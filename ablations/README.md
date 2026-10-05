@@ -23,6 +23,7 @@ Run: --entry 25 600 -smp 4
 Expect: <thread_doswapin\+0x
 ```
 
+- `Takes out:` (an ablation) or `Holds open:` (a widen patch) says in one line what the patch does.
 - `Run:` is what `scripts/run-x86_64.sh` is given after the accelerator.
 - `Expect:` is an extended regular expression, matched line by line against the run's log. There may be several, and any one match means the test caught the defect. Expectations are read only from ablation patches.
 
