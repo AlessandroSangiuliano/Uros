@@ -157,12 +157,6 @@ option(UROS_ABLATE_558_PVFREELOCK "Build the #558 ablation: pv free list with no
 # answer that could not be told from the other two by taking it away would not
 # be worth having.  Never ON in a kernel anyone boots for anything else.
 option(UROS_ABLATE_563_WINDOW "Build the #563 ablation: the copy's window is never opened" OFF)
-# #551: put the unbounded UART spin back.  A bound nothing has ever hit is
-# untested code; scripts/uart-stall.py stops the transmitter on purpose, and
-# this is the kernel that has to be seen NOT coming back for the bounded one's
-# coming back to mean anything.  Never ON in a kernel anyone boots for anything
-# else.
-option(UROS_ABLATE_551_UNBOUNDED "Build the #551 ablation: cons_putc waits for the transmitter for ever" OFF)
 # #566: remove the grace period from pmap_destroy, to find out whether it is
 # what the trap sweep pays a clock tick for on more than one processor.  UNSAFE
 # -- a reader may still hold the pmap.  Measurement only.
@@ -634,10 +628,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_563_WINDOW)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_563_WINDOW=1)
       message(STATUS "#563 ablation: the copy's window is never opened (x86_64)")
-  endif()
-  if(UROS_ABLATE_551_UNBOUNDED)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_551_UNBOUNDED=1)
-      message(STATUS "#551 ablation: cons_putc waits for the transmitter for ever (x86_64)")
   endif()
   if(UROS_ABLATE_566_NO_GRACE)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_566_NO_GRACE=1)
