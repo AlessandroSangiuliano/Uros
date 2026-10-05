@@ -1,0 +1,34 @@
+Kind: ablation
+Issue: #642
+Takes out: thread_swap_disable() asking the swapper for the swap-in -- it swaps in, itself, an activation the swapper may already be moving, as it did before fc9bb15d
+Run: --entry 25 600 -smp 4
+Expect: <thread_doswapin\+0x
+
+diff --git a/uros/src/mach_kernel/kern/thread_swap.c b/uros/src/mach_kernel/kern/thread_swap.c
+index 59416950..98a6ce6d 100644
+--- a/uros/src/mach_kernel/kern/thread_swap.c
++++ b/uros/src/mach_kernel/kern/thread_swap.c
+@@ -1142,19 +1142,15 @@ thread_swap_disable(
+ 				thread_swap_disable_waits++;
+ 				waited = TRUE;
+ 			}
+-			thread_swapin(thr_act, TRUE);
+-			assert_wait((event_t) &thr_act->swap_state, FALSE);
++			thr_act->swap_state |= TH_SW_MAKE_UNSWAPPABLE;
+ 			if (thread) {
+ 				thread_unlock(thread);
+ 				splx(s);
+ 			}
+ 			act_unlock_thread(thr_act);
+-			thread_block((void (*)(void)) 0);
+-			thread = act_lock_thread(thr_act);
+-			if (thread) {
+-				s = splsched();
+-				thread_lock(thread);
+-			}
++			thread_doswapin(thr_act);
++			assert(thr_act->swap_state == TH_SW_UNSWAPPABLE);
++			return;
+ 		}
+ 		assert(thr_act->swap_state == TH_SW_UNSWAPPABLE);
+ 	}
