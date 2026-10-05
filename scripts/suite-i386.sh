@@ -57,8 +57,9 @@
 # nothing, and that is ipc_bench's fault-stress x32, which reports only at its
 # end: on a 1.4 GHz host, up to 75 s under KVM and 304 s under TCG at four
 # processors.  So QUIET is 300 s under KVM and 900 s under TCG, and CAP, at
-# 1200 s and 3600 s, is over twice the longest healthy boot seen: 250 s and
-# 1645 s.
+# 1200 s and 3600 s, is about twice the longest healthy boot seen: 250 s and
+# 1850 s.  Under TCG the same kernel at the same clock has taken 1199 s and
+# 1850 s, so a TCG boot's length says little on its own.
 set -u
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
