@@ -1469,6 +1469,29 @@ thread_bind(
 	thread_unlock(thread);
 	splx(s);
 }
+
+/*
+ *	thread_bind_here:
+ *
+ *	Bind the calling thread to the processor it is running on, and answer
+ *	which one (#646).  The read and the bind happen with preemption off,
+ *	so the answer is the processor the thread stays on.  A caller that
+ *	read cpu_number() bare and then counted on running there -- choosing
+ *	"a processor that is not this one" for a test, say -- held a number
+ *	that could already name a processor it had left.  Undone with
+ *	thread_bind(current_thread(), PROCESSOR_NULL).
+ */
+int
+thread_bind_here(void)
+{
+	int	cpu;
+
+	disable_preemption();
+	cpu = cpu_number();
+	thread_bind(current_thread(), cpu_to_processor(cpu));
+	enable_preemption();
+	return cpu;
+}
 #endif	/*NCPUS > 1*/
 
 /*
