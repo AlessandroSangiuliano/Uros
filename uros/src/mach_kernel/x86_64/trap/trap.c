@@ -1493,7 +1493,10 @@ uint64_t trap_smap_after_last(void)
  * points -- so the state the handler reads is the state that faulted, and the
  * state it writes back is what resumes.  That is not a coincidence to rely on
  * quietly: trap.h derives both from one expression precisely so there is one
- * claim about those bytes.
+ * claim about those bytes.  A vector with an interrupt stack of its own lands
+ * elsewhere, and #DB, the one of them raised from here, is moved by its stub
+ * (#650); user_frame_is_saved() below stops the machine rather than hand a
+ * handler a frame that is not the thread's.
  */
 static void
 x86_64_exception(int exc, int code, int subcode)
@@ -1531,6 +1534,27 @@ x86_64_exception(int exc, int code, int subcode)
 
 	exception(exc, codes, 2);
 	/*NOTREACHED*/
+}
+
+/*
+ * The frame of a trap from ring 3 that is about to block in exception() has to
+ * be the thread's own at pcb->user (#650): that is where the handler reads and
+ * writes, and what the way back to ring 3 resumes.  One that is not -- a frame
+ * left on an interrupt stack -- would have the thread block on a stack the
+ * next trap there starts again from, and the handler shown an earlier entry's
+ * state.  Asked of pcb->user itself, not of the per-CPU word #DB's stub copies
+ * to, so that the two are checked against each other.
+ */
+static void
+user_frame_is_saved(const struct trap_frame *frame)
+{
+	struct trap_frame *saved = act_user_frame();
+
+	if (frame != saved)
+		panic("trap: vector %lu from ring 3 has its frame at %p and not "
+		      "at the thread's pcb->user %p, where exception() needs it "
+		      "(#650)", (unsigned long) frame->vector, (void *) frame,
+		      (void *) saved);
 }
 
 /*
@@ -2064,12 +2088,14 @@ void trap_dispatch(struct trap_frame *frame)
 			 * exactly what i386 passes from
 			 * user_page_fault_continue().
 			 */
+			user_frame_is_saved(frame);
 			x86_64_exception(EXC_BAD_ACCESS, (int) fault_kr,
 					 (int) read_cr2());
 			/*NOTREACHED*/
 		}
 
 		if (user_fault_exception(frame, &exc, &code, &subcode)) {
+			user_frame_is_saved(frame);
 			x86_64_exception(exc, code, subcode);
 			/*NOTREACHED*/
 		}
