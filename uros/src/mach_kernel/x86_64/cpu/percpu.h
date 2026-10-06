@@ -28,6 +28,7 @@
 #define PERCPU_CPU_ID		8
 #define PERCPU_KERNEL_RSP	16
 #define PERCPU_USER_RSP		24
+#define PERCPU_ACTIVE_THREAD	40
 #define PERCPU_PREEMPT_LEVEL	48
 #define PERCPU_IPL		56
 #define PERCPU_SYSCALL_TSC	120
@@ -359,6 +360,8 @@ _Static_assert(__builtin_offsetof(struct percpu, cpu_id) == PERCPU_CPU_ID,
 	       "percpu cpu_id moved");
 _Static_assert(__builtin_offsetof(struct percpu, kernel_rsp) == PERCPU_KERNEL_RSP,
 	       "percpu kernel_rsp moved");
+_Static_assert(__builtin_offsetof(struct percpu, active_thread)
+	       == PERCPU_ACTIVE_THREAD, "percpu active_thread moved");
 _Static_assert(__builtin_offsetof(struct percpu, preemption_level)
 	       == PERCPU_PREEMPT_LEVEL, "percpu preemption_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, ipl) == PERCPU_IPL,
@@ -413,6 +416,32 @@ static inline struct percpu *percpu(void)
 	return p;
 }
 
+/*
+ * The thread running on this processor, in ONE %gs-relative load (#646).
+ *
+ * 🔴 NOT percpu()->active_thread.  percpu() loads the block's own address and
+ * the field is a second load, so a thread preempted and moved between the two
+ * reads the processor it LEFT, whose active thread is somebody else.  The same
+ * was true of cpu_data[cpu_number()].active_thread, which is what
+ * current_thread() used to be.  One instruction addressed through %gs cannot
+ * be split by a migration: it reads the block of the processor it executes
+ * on, and the thread active there is the caller.
+ */
+static inline void *percpu_active_thread(void)
+{
+	void *t;
+
+	__asm__ volatile("movq %%gs:%c1, %0"
+			 : "=r"(t) : "i"(PERCPU_ACTIVE_THREAD));
+	return t;
+}
+
+static inline void percpu_set_active_thread(void *t)
+{
+	__asm__ volatile("movq %0, %%gs:%c1"
+			 : : "r"(t), "i"(PERCPU_ACTIVE_THREAD) : "memory");
+}
+
 
 /*
  * This processor's local APIC id, without paying CPUID for it (#439).
@@ -425,13 +454,22 @@ static inline struct percpu *percpu(void)
  * a machine with one processor sends none.
  *
  * percpu_activate() is handed the APIC id and stores it, so the answer is
- * already here and reading it is one %gs-relative load.  CPUID remains the
- * right call exactly once per processor -- when there is no block yet to read
- * it from, which is how it got in there.
+ * already here and reading it is one %gs-relative load -- the same field
+ * cpu_number() reads.  CPUID remains the right call exactly once per processor
+ * -- when there is no block yet to read it from, which is how it got in there.
+ *
+ * ⚠️ One load, written as one (#646).  This was percpu()->cpu_id, which is the
+ * block's address and then the field, while this comment already said one
+ * load: a caller moved between the two would have read the processor it left.
+ * Every caller today holds preemption or interrupts off, so nothing broke.
  */
 static inline uint32_t percpu_apic_id(void)
 {
-	return percpu()->cpu_id;
+	uint32_t id;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(id) : "i"(PERCPU_CPU_ID));
+	return id;
 }
 
 /*

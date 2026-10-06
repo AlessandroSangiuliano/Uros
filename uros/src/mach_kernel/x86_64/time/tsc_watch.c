@@ -509,8 +509,8 @@ void tsc_watch(void)
 	}
 
 #if	NCPUS > 1
-	thread_bind(current_thread(), master_processor);
-	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
+	/* Bound by its thread before the refinement ran (tsc_refine.c, #646). */
+	assert(current_thread()->bound_processor == master_processor);
 #endif
 
 	if (vm)

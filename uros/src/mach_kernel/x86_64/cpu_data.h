@@ -78,6 +78,35 @@ static __inline__ int get_preemption_level(void)
 	return (int) percpu_preempt_level();
 }
 
+/*
+ * #646: current_thread() in ONE %gs-relative load.
+ *
+ * <kern/cpu_data.h>'s current_thread() is cpu_data[cpu_number()].active_thread:
+ * a load of this processor's number, then a load from the array.  This kernel
+ * preempts in ring 0 (#459), so a thread can be moved between the two and read
+ * the processor it left, whose active thread is another thread.  That was
+ * caught as assertions (thread_will_wait, mutex_lock_assert_safe), as a device
+ * claim recorded for a bystander, as a holder refused its own device, and as
+ * mach_msg looking a header up in another task's space (#602).  The per-CPU
+ * block keeps the same pointer, written beside cpu_data[] by
+ * thread_machine_set_current(), and one instruction through %gs reads the
+ * block of the processor it executes on.  Same precondition as above.
+ */
+#define	MACHINE_CURRENT_THREAD	1
+
+struct thread_shuttle;
+
+static __inline__ struct thread_shuttle *machine_current_thread(void)
+{
+	return (struct thread_shuttle *) percpu_active_thread();
+}
+
+/* The per-CPU copy, for a machine-independent writer of cpu_data[]. */
+static __inline__ void machine_set_current_thread(struct thread_shuttle *t)
+{
+	percpu_set_active_thread((void *) t);
+}
+
 static __inline__ void disable_preemption(void)
 {
 	percpu_preempt_disable();

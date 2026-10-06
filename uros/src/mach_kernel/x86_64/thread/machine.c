@@ -949,9 +949,9 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	 * this issue made it.
 	 *
 	 * ⚠️ Same shape as the defect #458 records in thread_machine_set_current
-	 * below: current_thread() is cpu_data[cpu_number()].active_thread, the
-	 * machine-independent array, and a thread that starts while that still
-	 * names somebody else reads its own fields through the wrong pointer.
+	 * below: current_thread() reads this processor's record of its thread,
+	 * and a thread that starts while that still names somebody else reads
+	 * its own fields through the wrong pointer.
 	 * The symptom was a call through a null function pointer into the low
 	 * physical page -- rip 0x3, with the interrupt vector table
 	 * disassembling as instructions.
@@ -1089,24 +1089,25 @@ void
 thread_machine_set_current(thread_t thread)
 {
 	/*
-	 * ⚠️ TWO places, and the machine-independent one is the one that
-	 * counts (#458).
+	 * ⚠️ TWO places, and they must agree (#458, #646).
 	 *
-	 * current_thread() is `cpu_data[cpu_number()].active_thread' --
-	 * <kern/cpu_data.h>, an array the shared kernel owns.  This function
-	 * used to set only the per-CPU block below, so the whole
-	 * machine-independent tree asked cpu_data[] and got NULL: the first
-	 * thread reached thread_continue(), read self->continuation through a
-	 * null self, and called whatever the low physical page happened to
-	 * hold.  Two halves that never met, again.
+	 * current_thread() reads the per-CPU block, in one %gs-relative load
+	 * (<machine/cpu_data.h>), so the thread's identity changes with the
+	 * first store below, which an interrupt cannot land inside -- and the
+	 * tick can arrive here, being class 15 above SPLHI.  cpu_data[] is the
+	 * machine-independent tree's array, read by processor number (ddb, the
+	 * quiet census), and is written second.  The syscall entry reads the
+	 * block's copy too, out of %gs before it has a stack.
 	 *
-	 * The per-CPU copy is kept, and is not redundant: the syscall entry
-	 * path reads it out of %gs before it has a stack to index an array
-	 * with.  It is a cache of the line above, and this is the one place
-	 * that writes either.
+	 * Before #458 this function set only the block, while current_thread()
+	 * read cpu_data[]: the first thread read its continuation through a
+	 * null self and called into the low physical page.  Before #646
+	 * current_thread() read cpu_data[cpu_number()], two loads a migration
+	 * could split.  The only other writer is processor_doshutdown(), which
+	 * clears both.
 	 */
+	percpu_set_active_thread((void *) thread);
 	cpu_data[cpu_number()].active_thread = thread;
-	percpu()->active_thread = (void *) thread;
 }
 
 /*
