@@ -393,6 +393,15 @@ must_report() {
 	fi
 	echo "  FAILED: '$1' appeared and '$2' never did."
 	echo "          $3"
+	# #624: a test a panic cut short never reports, and a run that fails here
+	# never reaches the list of unexplained lines where the panic is named --
+	# so it is named here, whole or by the backtrace its shredded first line
+	# left, where the reader is looking.
+	_panic=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
+	if [ -n "$_panic" ]; then
+		echo "          the machine had panicked (#624):"
+		echo "            $_panic"
+	fi
 	# #578: "never did" is also what a line looks like when it arrived in two
 	# pieces with another program's output between them.  If the wire has
 	# such lines, they are shown here, where the reader is looking.
