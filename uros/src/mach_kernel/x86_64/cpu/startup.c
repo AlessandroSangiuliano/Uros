@@ -38,6 +38,7 @@
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
+#include <time/rcu_tick_test.h>	/* #649: -U */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -555,6 +556,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('J'))
 			shootdown_moved_test();
+
+		/*
+		 * -U: a read section held across clock ticks while a callback
+		 * waits (#649).  -E's reasons, and the reader is bound to a
+		 * processor already in the scheduler; returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('U'))
+			rcu_tick_reader_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

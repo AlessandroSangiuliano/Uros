@@ -105,6 +105,8 @@ ENTRIES="
 30 harness - 1
 31 harness
 31 harness - 1
+32 harness
+32 harness - 1
 3 harness
 3 harness - 1
 4 harness
