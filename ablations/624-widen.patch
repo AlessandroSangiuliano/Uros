@@ -1,0 +1,56 @@
+Kind: widen
+Issue: #624
+Holds open: the two loads of a current_thread() without #646's fix, in mutex_lock_assert_safe(), for 250 us of the TSC rather than a count of pause instructions, which under TCG lasts as many times longer as the host is slower -- so a preemption and a move between them is likely, and the fixed tree, one load after the same wait, must still pass
+Run: --entry 22 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/lock.c b/uros/src/mach_kernel/kern/lock.c
+index 1f10039a..70cf1d56 100644
+--- a/uros/src/mach_kernel/kern/lock.c
++++ b/uros/src/mach_kernel/kern/lock.c
+@@ -2143,11 +2143,45 @@ etap_mutex_unlock(
+  * means the first read named another processor's thread, as the two loads
+  * of #646 could.  The passing path reads the thread and its event once each.
+  */
++#if	MACH_ASSERT
++/*
++ * ablations/624-widen.patch: the two loads of a current_thread() without
++ * #646's fix, held apart in the check #624 saw fail, so that a preemption and
++ * a move between them is likely rather than rare.  With the fix there is one
++ * load, and the same wait before it opens no window.  The wait is a time on
++ * the TSC and not a count of pause instructions: under TCG every pause leaves
++ * the translated code, so a count lasts as many times longer as the host is
++ * slower, and with 1000 of them a boot of entry 22 took 29 minutes at 1.4 GHz
++ * against 22 seconds without.  Until the TSC is calibrated tsc_hz() is zero,
++ * and there is no wait.
++ */
++#include <x86_64/time/tsc.h>
++
++#define	WIDEN_624_US	250
++
++static thread_t
++widen_624_current_thread(void)
++{
++	uint64_t	end = rdtsc() + tsc_hz() / 1000000 * WIDEN_624_US;
++#if	MACHINE_CURRENT_THREAD
++	while (rdtsc() < end)
++		__asm__ volatile("pause");
++	return current_thread();
++#else
++	int		cpu = cpu_number();
++
++	while (rdtsc() < end)
++		__asm__ volatile("pause");
++	return cpu_data[cpu].active_thread;
++#endif
++}
++#endif	/* MACH_ASSERT */
++
+ void
+ mutex_lock_assert_safe(void)
+ {
+ #if	MACH_ASSERT
+-	thread_t	self = current_thread();
++	thread_t	self = widen_624_current_thread();
+ 	thread_t	again;
+ 	event_t		event;
+ 
