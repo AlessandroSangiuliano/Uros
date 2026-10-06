@@ -1525,13 +1525,10 @@ int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
  *
  * ⚠️ The handle is SIXTEEN bits split fifteen and one: 14:0 in address bits
  * 19:5 and bit 15 apart, in address bit 2 -- and in bit 11 of a redirection
- * entry.  The ablation drops the sixteenth, the slip that a field called
- * "Handle[14:0]" invites, and the check must catch it on the two cases whose
- * index needs it.
+ * entry.  ablations/598-index15.patch drops the sixteenth, the slip that a
+ * field called "Handle[14:0]" invites, and the check must catch it on the two
+ * cases whose index needs it.
  */
-#ifndef	ABLATE_598_INDEX15
-#define	ABLATE_598_INDEX15	0
-#endif
 
 #define	VTD_MSI_BASE		0xFEE00000u
 #define	VTD_MSI_ID_MASK		0xFFF00000u	/* 31:20, FEEh            */
@@ -1554,7 +1551,7 @@ int iommu_vtd_msi(uint32_t index, uint32_t *address, uint32_t *data)
 
 	*address = VTD_MSI_BASE | ((index & 0x7FFFu) << 5) | VTD_MSI_FORMAT
 		 | VTD_MSI_SHV;
-	if ((index & 0x8000u) && !ABLATE_598_INDEX15)
+	if (index & 0x8000u)
 		*address |= VTD_MSI_HANDLE15;
 
 	/*
@@ -1597,7 +1594,7 @@ int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
 		return 0;
 
 	*lo = vector;
-	if ((index & 0x8000u) && !ABLATE_598_INDEX15)
+	if (index & 0x8000u)
 		*lo |= VTD_RTE_INDEX15;
 	if (active_low)
 		*lo |= VTD_RTE_POLARITY_LOW;

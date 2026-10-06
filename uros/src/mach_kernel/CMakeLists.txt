@@ -440,7 +440,6 @@ option(UROS_ABLATE_607_OLD_WAKE "Build the #607 ablation: the hand-off's old wak
 option(UROS_ABLATE_607_DTS_SWAPPED "Build the #607 ablation: the IPC direct thread switch switches onto a swapped-out receiver, which the -ON storm must catch" OFF)
 
 # #598: interrupt remapping, each check with a way to see it catch.
-option(UROS_ABLATE_598_INDEX15 "Build the #598 ablation: an Intel message and redirection entry drop bit 15 of the index, and the interrupt check must count the two cases that need it as wrong" OFF)
 option(UROS_ABLATE_598_INTCTL_FORWARD "Build the #598 ablation: an AMD device table entry forwards interrupts unmapped beside a valid table, and the interrupt check must count the entry as wrong" OFF)
 option(UROS_ABLATE_598_IIDX_HIGH "Build the #598 ablation: an interrupt entry cache invalidation puts its index at 63:48, where a fault record keeps one, and the interrupt check must count the two index-selective cases as wrong" OFF)
 option(UROS_ABLATE_598_QI_TAIL_UNSHIFTED "Build the #598 ablation: the invalidation queue's tail is written as an index and not in bits 18:4, and the fabricated queue check must count one wrong while a real Intel engine never sees its descriptors" OFF)
@@ -942,10 +941,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_607_DTS_SWAPPED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_607_DTS_SWAPPED=1)
       message(STATUS "#607 ablation: the IPC direct switch takes a swapped-out receiver (x86_64)")
-  endif()
-  if(UROS_ABLATE_598_INDEX15)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_598_INDEX15=1)
-      message(STATUS "#598 ablation: Intel messages drop bit 15 of the index (x86_64)")
   endif()
   if(UROS_ABLATE_598_INTCTL_FORWARD)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_598_INTCTL_FORWARD=1)

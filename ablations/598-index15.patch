@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #598
+Takes out: bit 15 of an Intel interrupt index, which travels apart from the other fifteen -- a message and a redirection entry drop it, and entry 0x8001 is reached as entry 1
+Run: --entry 0 300
+Expect: interrupt remapping words encoded and decoded, 2 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 4ee03417..a89ba8c6 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1551,8 +1551,6 @@ int iommu_vtd_msi(uint32_t index, uint32_t *address, uint32_t *data)
+ 
+ 	*address = VTD_MSI_BASE | ((index & 0x7FFFu) << 5) | VTD_MSI_FORMAT
+ 		 | VTD_MSI_SHV;
+-	if (index & 0x8000u)
+-		*address |= VTD_MSI_HANDLE15;
+ 
+ 	/*
+ 	 * Zero, with SHV set: the subhandle is zero and the handle is the
+@@ -1594,8 +1592,6 @@ int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
+ 		return 0;
+ 
+ 	*lo = vector;
+-	if (index & 0x8000u)
+-		*lo |= VTD_RTE_INDEX15;
+ 	if (active_low)
+ 		*lo |= VTD_RTE_POLARITY_LOW;
+ 	if (level)
