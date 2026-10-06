@@ -166,18 +166,13 @@ _Static_assert(sizeof(struct dmar_scope) == 6, "a device scope header is six byt
  * §11.4.3.  The last two are recent: an engine that blocks every message
  * while remapping is off, and one that remaps only in x2APIC mode.
  *
- * ⚠️ The ablation reads IRREQ from EIMER's bit, so the decode check must
- * report the cases that tell the two apart as wrong.
+ * ⚠️ ablations/598-irreq-bit.patch reads IRREQ from EIMER's bit, and the
+ * decode check must report the cases that tell the two apart as wrong.
  */
-#ifndef	ABLATE_598_IRREQ_BIT
-#define	ABLATE_598_IRREQ_BIT	0
-#endif
-
 #define	VTD_ECAP_QI(e)		((((e) >> 1) & 0x1) != 0)
 #define	VTD_ECAP_EIM(e)		((((e) >> 4) & 0x1) != 0)
 #define	VTD_ECAP_EIMER(e)	((((e) >> 61) & 0x1) != 0)
-#define	VTD_ECAP_IRREQ(e)	((((e) >> (ABLATE_598_IRREQ_BIT ? 61 : 62)) \
-				  & 0x1) != 0)
+#define	VTD_ECAP_IRREQ(e)	((((e) >> 62) & 0x1) != 0)
 
 /*
  * The engine's version, split as the specification does.  A major version of
