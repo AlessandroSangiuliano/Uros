@@ -431,6 +431,68 @@ const struct iommu_interrupt_tables *iommu_interrupt_tables(void)
 	return &interrupt_tables;
 }
 
+/* ------------------------------------------------------------------ */
+/*  #598: what a source writes, through remapping or around it          */
+/* ------------------------------------------------------------------ */
+
+int iommu_interrupts_remapped(void)
+{
+	return found_vendor == IOMMU_INTEL && iommu_vtd_remapping();
+}
+
+int iommu_ioapic_source(uint8_t id, uint16_t *source)
+{
+	for (unsigned i = 0; i < nunits; i++)
+		for (unsigned s = 0; s < units[i].scope_count; s++) {
+			const struct iommu_scope *sc =
+				&scopes[units[i].scope_first + s];
+
+			if (sc->kind != IOMMU_SCOPE_IOAPIC
+			    || sc->enumeration_id != id)
+				continue;
+			if (sc->depth != 1)
+				return 0;
+			*source = (uint16_t)((sc->bus << 8) | (sc->dev << 3)
+					     | sc->func);
+			return 1;
+		}
+
+	return 0;
+}
+
+/*
+ * The pin's controller is the first and only one this kernel drives
+ * (<cpu/ioapic.h>), so its MADT id is the one a table must name.
+ */
+int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
+		    int level, int active_low, uint32_t *lo, uint32_t *hi)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	uint16_t source;
+
+	if (!iommu_interrupts_remapped() || a == 0
+	    || !iommu_ioapic_source(a->id, &source))
+		return 0;
+
+	return iommu_vtd_remap_pin(pin, source, vector, apic_id, level,
+				   active_low, lo, hi);
+}
+
+int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
+		    uint32_t apic_id, uint64_t *address, uint32_t *data)
+{
+	if (!iommu_interrupts_remapped())
+		return 0;
+
+	return iommu_vtd_remap_msi(slot, bdf, vector, apic_id, address, data);
+}
+
+void iommu_forget_msi(unsigned slot)
+{
+	if (iommu_interrupts_remapped())
+		iommu_vtd_forget_msi(slot);
+}
+
 unsigned iommu_platform_address_bits(void)
 {
 	return platform_address_bits;

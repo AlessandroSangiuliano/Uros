@@ -142,6 +142,19 @@ int iommu_amd_irt_build(void);
 void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t);
 
 /*
+ * #598: Intel's half of <cpu/iommu.h>'s iommu_remap_pin() and its siblings,
+ * with the source the entry will name already found.  Remapping is on when
+ * any engine confirmed IRES for this kernel.
+ */
+int iommu_vtd_remapping(void);
+int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
+			uint32_t apic_id, int level, int active_low,
+			uint32_t *lo, uint32_t *hi);
+int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
+			uint32_t apic_id, uint64_t *address, uint32_t *data);
+void iommu_vtd_forget_msi(unsigned slot);
+
+/*
  * ── Stage 3: page-table entries ──────────────────────────────────────
  *
  * 🔴 TWO ENCODERS BECAUSE THEY ARE TWO FORMATS, not for symmetry.  The bit

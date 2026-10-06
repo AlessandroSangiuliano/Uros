@@ -9,6 +9,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
+#include <cpu/iommu.h>		/* a pin through its remapping entry, #598 */
 #include <cpu/regs.h>		/* read_rflags, cpu_pause */
 #include <pmap/pmap.h>
 #include <sync/atomic.h>	/* the window's lock below */
@@ -209,7 +210,9 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 		  uint16_t flags)
 {
 	unsigned reg = redir_reg(gsi);
-	uint32_t low = vector & RTE_VECTOR_MASK;
+	int active_low = (flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW;
+	int level = (flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL;
+	uint32_t low = vector & RTE_VECTOR_MASK, high = apic_id << 24;
 	uint64_t f;
 
 	low |= RTE_DELIVERY_FIXED | RTE_DEST_PHYSICAL;
@@ -220,20 +223,33 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 	 * default" is zero in both fields, and for ISA that default *is* edge
 	 * triggered and active high, which is what the bits already say.
 	 */
-	if ((flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW)
+	if (active_low)
 		low |= RTE_POLARITY_LOW;
-	if ((flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL)
+	if (level)
 		low |= RTE_TRIGGER_LEVEL;
+
+	/*
+	 * #598: with interrupts remapped, the same pin in the remappable
+	 * format -- its entry written first, and the pair below only selecting
+	 * it.  A pin that cannot have an entry cannot be routed at all: every
+	 * message it sent in the old format would be refused.
+	 */
+	if (iommu_interrupts_remapped()
+	    && !iommu_remap_pin(gsi - base_gsi, vector, apic_id, level,
+				active_low, &low, &high))
+		panic("ioapic: pin %u has no remapping entry, and interrupts "
+		      "are remapped (#598)", gsi - base_gsi);
 
 	/*
 	 * Destination first, then the low half, and the order is the whole
 	 * point: unmasking lives in the low half, so writing it first would
 	 * open the pin for the interval before the destination is set — and
 	 * the destination it would use meanwhile is whatever the firmware
-	 * left.
+	 * left.  Remapped, the high half is the entry's index instead, and the
+	 * same order holds for the same reason.
 	 */
 	f = window_enter();
-	window_write(reg + 1, apic_id << 24);
+	window_write(reg + 1, high);
 	window_write(reg, low);
 	window_leave(f);
 }

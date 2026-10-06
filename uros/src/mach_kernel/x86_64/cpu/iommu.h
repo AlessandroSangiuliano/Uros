@@ -484,6 +484,55 @@ int iommu_build_interrupt_tables(void);
 const struct iommu_interrupt_tables *iommu_interrupt_tables(void);
 
 /*
+ * ── #598: what a source writes, through remapping or around it ───────
+ *
+ * The question every source asks before it is programmed: an I/O APIC pin in
+ * ioapic_route(), a device's MSI-X entry in device_md_msi_register().  While
+ * nothing is remapped -- every boot without -i, and every machine whose
+ * engines cannot -- the answer is no, the source writes today's words, and
+ * nothing here writes anything.
+ *
+ * 🔴 ONCE IT IS YES, A SOURCE THAT DOES NOT COME THROUGH HERE IS DEAD.  A
+ * message in compatibility format is refused (Intel with CFI clear, fault
+ * 25h), so every pin and every slot must name an entry this kernel wrote.
+ */
+int iommu_interrupts_remapped(void);
+
+/*
+ * Write the entry a pin or an MSI slot delivers through, and answer the words
+ * the source must hold to select it: the two halves ioapic_route() writes,
+ * or the address and data an MSI-X table entry is given.  The fields are the
+ * ones the source would have written in compatibility format -- vector,
+ * destination APIC id, trigger and polarity -- and the entry is made to stick
+ * before this returns: one 16-byte store, flushed for an engine whose reads
+ * do not snoop, and forgotten by every engine that remaps.
+ *
+ * On Intel the entry also names who may use it (#598 point 2): the I/O APIC's
+ * source-id from the DMAR for a pin, the function's bus/device/function for
+ * a slot.  Answers zero, having written no source's words, when the source
+ * has no entry -- a pin past the map, an id wider than eight bits, an I/O
+ * APIC no table names.
+ */
+int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
+		    int level, int active_low, uint32_t *lo, uint32_t *hi);
+int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
+		    uint32_t apic_id, uint64_t *address, uint32_t *data);
+
+/*
+ * The slot given up: its entry stops remapping, so the device that held it
+ * is refused rather than delivered to whoever is given the vector next.
+ */
+void iommu_forget_msi(unsigned slot);
+
+/*
+ * The requester id an I/O APIC's messages carry, from the firmware's table:
+ * the DMAR's device scope, or the IVRS's special entry, whose enumeration id
+ * is the MADT's id for that controller.  Answers zero when no table names it,
+ * or names it only by a path through bridges this kernel does not walk.
+ */
+int iommu_ioapic_source(uint8_t id, uint16_t *source);
+
+/*
  * ── Stage 2b: point the engines at those tables and let them run ─────
  *
  * 🔴 THE FIRST THING IN #432 THAT CAN STOP A MACHINE, and therefore the first

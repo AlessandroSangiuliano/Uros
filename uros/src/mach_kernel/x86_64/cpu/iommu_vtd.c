@@ -24,6 +24,7 @@
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <sync/lock.h>		/* hw_lock: each queue's own, #598 */
+#include <sync/atomic.h>	/* one 16-byte store per entry, #598 */
 
 #include <device/pci.h>		/* PCI_VENDOR_ID */
 
@@ -2097,4 +2098,126 @@ unsigned iommu_queue_exercise(unsigned unit, unsigned n)
 		answered += (unsigned)vtd_queue_submit(unit, 0, 0);
 
 	return answered;
+}
+
+/*
+ * ── #598: entries written while the engines may be reading them ──────
+ *
+ * Which engines remap is this kernel's record, set for each engine that
+ * confirmed IRES when remapping was turned on -- not a register read on every
+ * write, because an engine this kernel did not turn on is not one whose cache
+ * it may assume anything about.
+ */
+static int	vtd_remapping[IOMMU_MAX_UNITS];
+static int	vtd_irt_uncached;	/* a remapping engine has ECAP.C clear */
+
+int iommu_vtd_remapping(void)
+{
+	for (unsigned i = 0; i < IOMMU_MAX_UNITS; i++)
+		if (vtd_remapping[i])
+			return 1;
+	return 0;
+}
+
+/*
+ * One line out of the processor's caches, for an engine whose reads of the
+ * table do not snoop them (#598's C7): it reads memory, and the store is still
+ * in a line it never looks at.  The fence orders the flush before whatever
+ * tells the engine to read.
+ */
+static void vtd_flush_line(const volatile void *p)
+{
+	__asm__ volatile("clflush %0" : : "m"(*(const volatile uint8_t *)p)
+			 : "memory");
+	__asm__ volatile("mfence" : : : "memory");
+}
+
+/*
+ * 🔴 ONE 16-BYTE STORE (#598's C20).  An engine reads an entry whole, "as
+ * software may change the contents of the IRTE atomically" (§5.1.4), so a
+ * present entry rewritten in two stores is, between them, an entry nobody
+ * wrote: the new vector to the old destination, or the old source let in.
+ * Then the line out of the caches for an engine that does not snoop, and every
+ * engine that remaps told to forget the entry, each through its own queue --
+ * register-based invalidation cannot reach the interrupt entry cache (§6.5.1).
+ *
+ * ⚠️ cpu_has_cmpxchg16b() is asked once, when remapping is turned on, not
+ * here: no engine is told to remap on a processor without the instruction.
+ */
+static int vtd_irte_write(uint32_t index, const uint64_t e[2])
+{
+	const struct iommu_interrupt_tables *t = iommu_interrupt_tables();
+	volatile struct atomic128 *slot;
+	struct atomic128 was, now = { e[0], e[1] };
+	uint64_t d[2];
+
+	if (t->intel_table == 0 || index >= VTD_IRT_ENTRIES
+	    || !iommu_vtd_qi_iec(index, 0, d))
+		return 0;
+
+	const uint64_t iec[1][2] = { { d[0], d[1] } };
+
+	slot = (volatile struct atomic128 *)(uintptr_t)
+		phys_to_direct(t->intel_table + (uint64_t)index * 16u);
+	was.lo = slot->lo;
+	was.hi = slot->hi;
+	while (!atomic_cmpxchg128(slot, &was, now))
+		;
+
+	if (vtd_irt_uncached)
+		vtd_flush_line(slot);
+
+	for (unsigned u = 0; u < IOMMU_MAX_UNITS; u++)
+		if (vtd_remapping[u] && !vtd_queue_submit(u, iec, 1))
+			return 0;
+	return 1;
+}
+
+/*
+ * A pin's entry names the I/O APIC as its only source, so the pin's own
+ * redirection entry is the one thing that can use it -- edge or level as the
+ * pin is, because a level-triggered pin's entry and redirection entry must
+ * agree on the vector for the broadcast EOI to clear it (§5.1.5.1).
+ */
+int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
+			uint32_t apic_id, int level, int active_low,
+			uint32_t *lo, uint32_t *hi)
+{
+	struct iommu_irte e = { vector, apic_id, level, source };
+	uint32_t index;
+	uint64_t w[2];
+
+	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_PIN, pin, &index)
+	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w))
+		return 0;
+
+	return iommu_vtd_ioapic_rte(index, vector, level, active_low, 0,
+				    lo, hi);
+}
+
+/* A slot's entry names the function given it, and is always edge (MSI). */
+int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
+			uint32_t apic_id, uint64_t *address, uint32_t *data)
+{
+	struct iommu_irte e = { vector, apic_id, 0, source };
+	uint32_t index, a, dw;
+	uint64_t w[2];
+
+	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index)
+	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w)
+	    || !iommu_vtd_msi(index, &a, &dw))
+		return 0;
+
+	*address = a;
+	*data = dw;
+	return 1;
+}
+
+void iommu_vtd_forget_msi(unsigned slot)
+{
+	static const uint64_t absent[2] = { 0, 0 };
+	uint32_t index;
+
+	if (iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index))
+		(void) vtd_irte_write(index, absent);
 }

@@ -683,6 +683,30 @@ device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
 		return 0;
 
 	/*
+	 * #598: with interrupts remapped, the message that selects the slot's
+	 * entry instead of the one msi_claim_vector() composed -- the entry
+	 * written first, naming this function as the only source that may use
+	 * it, from the claim's own vector and destination.  A slot that cannot
+	 * have an entry is not given out: its message in the old format would
+	 * be refused.
+	 */
+	if (iommu_interrupts_remapped()) {
+		uint64_t	ra;
+		uint32_t	rd;
+
+		if (!iommu_remap_msi(slot - DEVICE_MD_MSI_BASE,
+				     (uint16_t)((bus << 8) | (dev << 3) | func),
+				     (uint8_t)data,
+				     (uint32_t)((addr >> 12) & 0xFFu),
+				     &ra, &rd)) {
+			msi_release_vector(slot);
+			return 0;
+		}
+		addr = ra;
+		data = rd;
+	}
+
+	/*
 	 * The table before the enable, so the device cannot be let loose on an
 	 * entry that has not been written yet -- and the entry is armed by
 	 * pci_msix_arm()'s last store, which is what makes "written" a moment
@@ -721,6 +745,14 @@ device_md_msi_unregister(unsigned int slot)
 
 		pci_msix_disarm(&msi_device[i], msi_entry_of[i]);
 		msi_device[i].table = 0;
+
+		/*
+		 * #598: and the slot's remapping entry, after the device stops
+		 * using it -- so that the device, told to stop and not doing
+		 * so, is refused instead of reaching whoever holds the vector
+		 * next.
+		 */
+		iommu_forget_msi(i);
 
 		/*
 		 * 🔴 AND THE FUNCTION'S OWN ENABLE BIT, which nothing used to
