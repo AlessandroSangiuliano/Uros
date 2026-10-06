@@ -404,6 +404,8 @@ must_report 'shootdown_test: \[1\] starting' 'shootdown_test: \[1\] \(PASS\|WRON
 	'Every remapper stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside a shootdown (#638).'
 must_report 'shootdown_test: \[2\] starting' 'shootdown_test: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
 	'A cross-call sent to its own sender never returns: it ends the boot with a panic that names it.  A run that stops after the start line without that panic has stopped somewhere else inside the calls (#638).'
+must_report 'rcu_tick: starting' 'rcu_tick: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait on either side is bounded and the verdict is printed either way; a run that stops after the start line has stopped inside a read section or in a grace period that does not end (#649).'
 must_report 'swap_disable: \[1\] starting' 'swap_disable: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every wait in the arm is bounded and the verdict is printed either way.  A second swap-in of the same stack ends the boot in the assertion of thread_doswapin(); a run that stops after the start line without that panic has stopped inside thread_swap_disable() (#642).'
 must_report 'swap_disable: \[2\] starting' 'swap_disable: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
