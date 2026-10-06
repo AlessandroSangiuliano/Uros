@@ -5537,18 +5537,40 @@ static void iommu_selftest(void)
 		 * them.  Pointing the engines at them comes after, and is the
 		 * first step that can stop an interrupt.
 		 */
-		if (iommu_vendor() == IOMMU_INTEL) {
+		{
 			int built = iommu_build_interrupt_tables();
 			const struct iommu_interrupt_tables *it =
 				iommu_interrupt_tables();
 
-			kputs("UrMach x86-64:   interrupt remapping table ");
+			kputs("UrMach x86-64:   interrupt remapping ");
 			if (it->engines == 0) {
-				kputs("not built — no engine remaps interrupts\r\n");
+				kputs("tables not built — no engine remaps"
+				      " interrupts\r\n");
+			} else if (iommu_vendor() == IOMMU_AMD) {
+				kputs("tables: ");
+				kputdec(it->tables);
+				kputs(" of 256 entries, ");
+				kputdec(it->entries);
+				kputs(" read back not present, ");
+				kputdec(it->wrong);
+				kputs(" wrong — ");
+				kputdec(it->named);
+				kputs(" for sources the ivrs names (");
+				kputdec(it->ioapics);
+				kputs(" i/o apic)");
+				kputs(built ? " and 1 closed for every other device,"
+					      " nothing points at them yet\r\n"
+					    : " — WRONG, no frame or no room, or an"
+					      " entry nobody wrote would be read as"
+					      " one\r\n");
+				if (built && it->ioapics == 0)
+					kputs("UrMach x86-64:   the ivrs names no i/o"
+					      " apic — its pins could not be remapped"
+					      " here\r\n");
 			} else if (it->tables == 0) {
-				kputs("COULD NOT BE BUILT — no frame\r\n");
+				kputs("table COULD NOT BE BUILT — no frame\r\n");
 			} else {
-				kputs("at ");
+				kputs("table at ");
 				kputhex64(it->intel_table);
 				kputs(", ");
 				kputdec(it->entries);

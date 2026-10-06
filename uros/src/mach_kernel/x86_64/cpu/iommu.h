@@ -454,6 +454,12 @@ const struct iommu_tables *iommu_tables(void);
  * divided once for the machine.  The price is that changing an entry means
  * telling every engine to forget it, each through its own queue.
  *
+ * On AMD a table belongs to a device (Rev 3.11 §2.2.2.1): one for each source
+ * the IVRS names in a special entry -- I/O APIC, HPET -- and one closed table
+ * for every other device, so that a device nobody gave an interrupt is refused
+ * and logged rather than passed unmapped.  ⚠️ An IVRS that names no I/O APIC
+ * is a real one -- QEMU's under KVM -- and leaves its pins with no table.
+ *
  * All zero when nothing was built.  `engines' zero says why: no engine remaps
  * interrupts, which is a machine and not a failure.
  */
@@ -465,6 +471,8 @@ struct iommu_interrupt_tables {
 	unsigned	frames;		/* what they cost, in 4K frames       */
 	uint64_t	intel_table;	/* the one every intel engine shares  */
 	uint64_t	intel_irta;	/* ... and the word IRTA_REG will get */
+	unsigned	named;		/* AMD: of a source the IVRS names    */
+	unsigned	ioapics;	/* ... of which I/O APICs             */
 };
 
 /*

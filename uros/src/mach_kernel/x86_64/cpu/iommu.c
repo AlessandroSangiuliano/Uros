@@ -419,6 +419,8 @@ int iommu_build_interrupt_tables(void)
 		interrupt_tables_tried = 1;
 		if (found_vendor == IOMMU_INTEL)
 			interrupt_tables_built = iommu_vtd_irt_build();
+		else if (found_vendor == IOMMU_AMD)
+			interrupt_tables_built = iommu_amd_irt_build();
 	}
 
 	return interrupt_tables_built;

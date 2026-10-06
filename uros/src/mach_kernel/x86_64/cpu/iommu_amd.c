@@ -1877,3 +1877,131 @@ int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
 	*log2_entries = len;
 	return 1;
 }
+
+/*
+ * ── #598: the interrupt tables, built and read back ──────────────────
+ *
+ * Rev 3.11 §2.2.5: the table belongs to the DEVICE -- its root is in the
+ * device's entry (Table 7) -- and the index is the message's data, bits 10:0.
+ * This kernel's data is the vector, so every table has 256 entries and entry
+ * N will deliver vector N (<cpu/iommu_backend.h>).  An index past the end is
+ * refused like an empty entry (Table 44), and that is where an arbitrated
+ * message's 256-511 lands.
+ *
+ * Built now: a table for each source the IVRS names in a special entry -- the
+ * I/O APIC, the HPET -- and ONE CLOSED TABLE for every other device to point
+ * at.  🔑 That one answers "and a device nobody gave an interrupt?": with IV
+ * set and an empty table its every message is refused AND logged, an
+ * IO_PAGE_FAULT with I set, where IV clear passes it unmapped -- today's hole.
+ * A device given MSI vectors gets a table of its own when it is given them.
+ *
+ * One frame per table, though a table is a kilobyte: the 128-byte alignment
+ * comes for nothing, and there is no allocator inside the allocator.
+ *
+ * 🔴 Nothing points at them.  No device table entry's interrupt half is
+ * written and no INVALIDATE_INTERRUPT_TABLE is sent: that is the next step.
+ */
+#define	AMD_IRT_ENTRIES		256u
+#define	AMD_IRT_SOURCES		8u
+
+static struct {
+	uint16_t	device;		/* the DeviceID its messages carry   */
+	uint8_t		kind;		/* IOMMU_SCOPE_IOAPIC or _HPET       */
+	uint8_t		id;		/* the I/O APIC's id, the HPET's number */
+	uint64_t	table;
+} amd_irt[AMD_IRT_SOURCES];
+
+static unsigned	amd_irt_count;
+static uint64_t	amd_irt_closed;
+
+/*
+ * A table written refusing and read back as written, counted into `t'.
+ * Zero when there is no frame.
+ */
+static uint64_t amd_irt_table(struct iommu_interrupt_tables *t)
+{
+	uint64_t pa = boot_frame_alloc();
+	volatile uint32_t *e;
+
+	if (pa == 0)
+		return 0;
+
+	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(pa);
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+		e[i] = 0;
+
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+		if (e[i] == 0)
+			t->entries++;
+		else
+			t->wrong++;
+
+	t->tables++;
+	t->frames++;
+	return pa;
+}
+
+/*
+ * The source's table, built if no table has its DeviceID yet: an engine
+ * named in two IVHD blocks names its I/O APIC twice.  Zero when there is no
+ * room or no frame.
+ */
+static int amd_irt_source(const struct iommu_scope *s,
+			  struct iommu_interrupt_tables *t)
+{
+	uint16_t device = (uint16_t)((s->bus << 8) | (s->dev << 3) | s->func);
+	unsigned k;
+
+	for (k = 0; k < amd_irt_count; k++)
+		if (amd_irt[k].device == device)
+			return 1;
+
+	if (amd_irt_count == AMD_IRT_SOURCES)
+		return 0;
+
+	amd_irt[k].table = amd_irt_table(t);
+	if (amd_irt[k].table == 0)
+		return 0;
+
+	amd_irt[k].device = device;
+	amd_irt[k].kind = s->kind;
+	amd_irt[k].id = s->enumeration_id;
+	amd_irt_count++;
+
+	t->named++;
+	if (s->kind == IOMMU_SCOPE_IOAPIC)
+		t->ioapics++;
+	return 1;
+}
+
+int iommu_amd_irt_build(void)
+{
+	struct iommu_interrupt_tables t = { 0 };
+	int ok = 1;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (iommu_unit(i)->answered
+		    && iommu_unit(i)->interrupt_remapping)
+			t.engines++;
+
+	for (unsigned i = 0; i < iommu_unit_count() && t.engines && ok; i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+
+		for (unsigned s = 0; s < u->scope_count && ok; s++) {
+			const struct iommu_scope *sc =
+				iommu_scope(u->scope_first + s);
+
+			if (sc->kind == IOMMU_SCOPE_IOAPIC
+			    || sc->kind == IOMMU_SCOPE_HPET)
+				ok = amd_irt_source(sc, &t);
+		}
+	}
+
+	if (t.engines && ok) {
+		amd_irt_closed = amd_irt_table(&t);
+		ok = amd_irt_closed != 0;
+	}
+
+	iommu_record_interrupt_tables(&t);
+	return t.engines && ok && t.wrong == 0;
+}
