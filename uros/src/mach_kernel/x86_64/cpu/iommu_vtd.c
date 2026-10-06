@@ -1719,13 +1719,10 @@ int iommu_vtd_irt_build(void)
  *	wait		type 5, IF 4, SW 5, FN 6, data 63:32, address in the
  *			high word
  *
- * ⚠️ The ablation puts IIDX at 63:48, where a fault record keeps its interrupt
- * index (§11.4.7.6) -- the same number, sixteen bits higher.  The interrupt
- * check must catch it on the two index-selective cases.
+ * ⚠️ ablations/598-iidx-high.patch puts IIDX at 63:48, where a fault record
+ * keeps its interrupt index (§11.4.7.6) -- the same number, sixteen bits
+ * higher.  The interrupt check must catch it on the two index-selective cases.
  */
-#ifndef	ABLATE_598_IIDX_HIGH
-#define	ABLATE_598_IIDX_HIGH	0
-#endif
 
 #define	VTD_QI_TYPE_CONTEXT	0x1ULL
 #define	VTD_QI_TYPE_IOTLB	0x2ULL
@@ -1734,7 +1731,7 @@ int iommu_vtd_irt_build(void)
 #define	VTD_QI_G_GLOBAL		(1ULL << 4)	/* context and IOTLB: 01b */
 #define	VTD_QI_IEC_BY_INDEX	(1ULL << 4)
 #define	VTD_QI_IEC_IM(m)	((uint64_t)(m) << 27)
-#define	VTD_QI_IEC_IIDX(i)	((uint64_t)(i) << (ABLATE_598_IIDX_HIGH ? 48 : 32))
+#define	VTD_QI_IEC_IIDX(i)	((uint64_t)(i) << 32)
 #define	VTD_QI_WAIT_SW		(1ULL << 5)
 #define	VTD_QI_WAIT_DATA(d)	((uint64_t)(d) << 32)
 
