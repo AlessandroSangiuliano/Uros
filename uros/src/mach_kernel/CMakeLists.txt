@@ -521,6 +521,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_dev.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/delay.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/exact.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/freq_source.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/hpet.c
