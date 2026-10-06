@@ -28,6 +28,7 @@
 #define PERCPU_CPU_ID		8
 #define PERCPU_KERNEL_RSP	16
 #define PERCPU_USER_RSP		24
+#define PERCPU_ACTIVE_THREAD	40
 #define PERCPU_PREEMPT_LEVEL	48
 #define PERCPU_IPL		56
 #define PERCPU_SYSCALL_TSC	120
@@ -359,6 +360,8 @@ _Static_assert(__builtin_offsetof(struct percpu, cpu_id) == PERCPU_CPU_ID,
 	       "percpu cpu_id moved");
 _Static_assert(__builtin_offsetof(struct percpu, kernel_rsp) == PERCPU_KERNEL_RSP,
 	       "percpu kernel_rsp moved");
+_Static_assert(__builtin_offsetof(struct percpu, active_thread)
+	       == PERCPU_ACTIVE_THREAD, "percpu active_thread moved");
 _Static_assert(__builtin_offsetof(struct percpu, preemption_level)
 	       == PERCPU_PREEMPT_LEVEL, "percpu preemption_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, ipl) == PERCPU_IPL,
@@ -411,6 +414,32 @@ static inline struct percpu *percpu(void)
 
 	__asm__ volatile("movq %%gs:0, %0" : "=r"(p));
 	return p;
+}
+
+/*
+ * The thread running on this processor, in ONE %gs-relative load (#646).
+ *
+ * 🔴 NOT percpu()->active_thread.  percpu() loads the block's own address and
+ * the field is a second load, so a thread preempted and moved between the two
+ * reads the processor it LEFT, whose active thread is somebody else.  The same
+ * was true of cpu_data[cpu_number()].active_thread, which is what
+ * current_thread() used to be.  One instruction addressed through %gs cannot
+ * be split by a migration: it reads the block of the processor it executes
+ * on, and the thread active there is the caller.
+ */
+static inline void *percpu_active_thread(void)
+{
+	void *t;
+
+	__asm__ volatile("movq %%gs:%c1, %0"
+			 : "=r"(t) : "i"(PERCPU_ACTIVE_THREAD));
+	return t;
+}
+
+static inline void percpu_set_active_thread(void *t)
+{
+	__asm__ volatile("movq %0, %%gs:%c1"
+			 : : "r"(t), "i"(PERCPU_ACTIVE_THREAD) : "memory");
 }
 
 
