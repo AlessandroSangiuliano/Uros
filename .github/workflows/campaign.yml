@@ -1,0 +1,214 @@
+# Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# SPDX-License-Identifier: MIT
+#
+# The campaign on the epic (#653).  The short A/B and the merge test run on a
+# batch of branches save machine time and find fewer rare races by chance, so
+# the boots saved are spent here: the merge test's entries, round after round,
+# on GitHub's free runners.  scripts/ci/job.sh is one job of it, and
+# scripts/ci/pull-results.sh brings the rows and the failed logs into
+# ~/uros-tests.  The runner's clock is not ours to set, so rows are compared
+# within one job only.
+#
+# ⚠️ schedule and workflow_dispatch run only from a workflow file on the default
+# branch, master, and whether this file lives there is the repository owner's
+# decision.  Until it does, it runs on pushes to the epic, from the epic's copy.
+# ⚠️ A public repository's runs are public, their logs and artifacts included.
+name: campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to boot (empty: the branch this is run from)"
+        type: string
+        required: false
+      entries:
+        description: "Only these merge-test entries, e.g. 14 16 (empty: all of them)"
+        type: string
+        required: false
+      rounds:
+        description: "Merge-test rounds per job (empty: 3)"
+        type: string
+        required: false
+      jobs:
+        description: "Jobs side by side, 1 to 20 (empty: 4)"
+        type: string
+        required: false
+      mode:
+        description: "arch: the Arch Linux container; ubuntu: the runner's own packages; both: each job in both, to compare them (empty: arch)"
+        type: string
+        required: false
+  push:
+    branches:
+      - epic/v0.3.0-x86-64    # the branch EPIC below names
+  schedule:
+    - cron: "23 1 * * *"
+
+permissions:
+  contents: read
+
+env:
+  # The tree a nightly run boots: a scheduled run starts on master.
+  EPIC: epic/v0.3.0-x86-64
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      rounds: ${{ steps.plan.outputs.rounds }}
+      entries: ${{ steps.plan.outputs.entries }}
+      modes: ${{ steps.plan.outputs.modes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || (github.event_name == 'schedule' && env.EPIC) || github.sha }}
+
+      # The tree is resolved once, here, so that every job boots the same one
+      # even if the branch moves while they start.  The defaults live here and
+      # nowhere else, and job.sh --dry-run refuses a bad entry or round, and
+      # prints the plan, before twenty runners are spent on it.
+      - name: Plan
+        id: plan
+        env:
+          JOBS: ${{ inputs.jobs }}
+          ROUNDS: ${{ inputs.rounds }}
+          ENTRIES: ${{ inputs.entries }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          # Which toolchain builds and boots: ours, from Arch, in a container,
+          # or Ubuntu's own, GCC and qemu several versions older -- both side
+          # by side is how the first run decides whether the container is
+          # needed at all (#653).
+          case "${MODE:-arch}" in
+          arch) modes='["arch"]' ;;
+          ubuntu) modes='["ubuntu"]' ;;
+          both) modes='["arch","ubuntu"]' ;;
+          *) echo "::error::mode is arch, ubuntu or both, not '$MODE'"; exit 1 ;;
+          esac
+          jobs=${JOBS:-4}
+          rounds=${ROUNDS:-3}
+          case "$jobs" in
+          ''|*[!0-9]*) echo "::error::jobs is a number from 1 to 20, not '$jobs'"; exit 1 ;;
+          esac
+          if [ "$jobs" -lt 1 ] || [ "$jobs" -gt 20 ]; then
+            echo "::error::jobs is a number from 1 to 20, not '$jobs'"
+            exit 1
+          fi
+          # Checked here as well as by job.sh because it goes to GITHUB_OUTPUT,
+          # where a newline would start an output of its own.
+          case "$ENTRIES" in
+          *[!0-9\ ,]*) echo "::error::entries are entry numbers, not '$ENTRIES'"; exit 1 ;;
+          esac
+          scripts/ci/job.sh --dry-run --no-install --rounds "$rounds" ${ENTRIES:+--entries "$ENTRIES"}
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "matrix=[$(seq -s, 1 "$jobs")]"
+            echo "rounds=$rounds"
+            echo "entries=$ENTRIES"
+            echo "modes=$modes"
+          } >> "$GITHUB_OUTPUT"
+
+  boot:
+    needs: plan
+    runs-on: ubuntu-latest
+    # Under the six hours GitHub gives a job, with room left for the upload
+    # after the boots' step has been stopped by its own limit.
+    timeout-minutes: 345
+    strategy:
+      # A WRONG boot fails its job, and must not cancel the others.
+      fail-fast: false
+      matrix:
+        job: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        mode: ${{ fromJSON(needs.plan.outputs.modes) }}
+    outputs:
+      kvm: ${{ steps.kvm.outputs.available }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      # The rule GitHub documents for the runner's /dev/kvm.  Whether a
+      # standard runner has one is among the things this campaign finds out,
+      # so the answer is the job's output, a notice and a line of the summary.
+      - name: Make /dev/kvm usable
+        id: kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          if [ -c /dev/kvm ] && [ -w /dev/kvm ]; then
+            available=yes
+          else
+            available=no
+          fi
+          ls -l /dev/kvm 2>&1 || true
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+          echo "::notice::job ${{ matrix.job }}: KVM available: $available"
+          echo "job ${{ matrix.job }}: KVM available: $available" >> "$GITHUB_STEP_SUMMARY"
+
+      # The workspace is mounted, so what job.sh writes in ci-out is where the
+      # upload looks for it.  --init passes the stop of a timed-out step on to
+      # job.sh, which as PID 1 a shell would ignore.  The device is passed only
+      # where it can be written, so the job's own test of /dev/kvm decides
+      # whether its boots run under KVM as well.
+      - name: Build and boot in an Arch Linux container
+        if: matrix.mode == 'arch'
+        timeout-minutes: 330
+        env:
+          JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
+          ROUNDS: ${{ needs.plan.outputs.rounds }}
+          ENTRIES: ${{ needs.plan.outputs.entries }}
+          KVM: ${{ steps.kvm.outputs.available }}
+        run: |
+          kvm=()
+          if [ "$KVM" = yes ]; then
+            kvm=(--device /dev/kvm)
+          fi
+          docker run --rm --init "${kvm[@]}" \
+            -v "$GITHUB_WORKSPACE:/work" -w /work \
+            -e GITHUB_RUN_ID -e JOB_INDEX \
+            archlinux:latest \
+            scripts/ci/job.sh --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
+
+      # The same job on the runner itself, with Ubuntu's packages: the other
+      # half of the comparison.  If its compiler cannot build the tree with no
+      # warning, or its kernel or its boots differ from the container's, the
+      # container is what the campaign keeps.
+      - name: Build and boot on the runner's own Ubuntu
+        if: matrix.mode == 'ubuntu'
+        timeout-minutes: 330
+        env:
+          JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
+          ROUNDS: ${{ needs.plan.outputs.rounds }}
+          ENTRIES: ${{ needs.plan.outputs.entries }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc binutils cmake ninja-build bison flex \
+            python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
+            iproute2 psmisc gdb
+          scripts/ci/job.sh --no-install --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
+
+      - name: Say what the job found
+        if: always()
+        run: |
+          if [ -f ci-out/job.txt ]; then
+            { echo '```'; cat ci-out/job.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Whatever the boots said: a WRONG boot is the reason to keep them.  The
+      # logs of the boots that were as they should be stay on the runner.
+      - name: Keep the rows and the failed boots' logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: campaign-job-${{ matrix.job }}-${{ matrix.mode }}
+          path: |
+            ci-out/
+            !ci-out/logs/
+          if-no-files-found: warn
+          retention-days: 30
+          overwrite: true
