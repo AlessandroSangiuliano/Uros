@@ -15,6 +15,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
+#include <cpu/iommu.h>		/* #598: no FSB message while remapped */
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
@@ -190,6 +191,8 @@ static uint64_t counts_to_ns(uint64_t counts)
  * inputs its capability names are not chosen from, and code that no machine
  * here would run is not written.
  */
+static int	fsb_passed_over;	/* #598: an FSB comparator, not taken */
+
 static int choose_route(unsigned *which, uint32_t *cap0)
 {
 	struct hpet_comparator_caps caps;
@@ -202,11 +205,25 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 #endif
 
 	*cap0 = 0;
+	fsb_passed_over = 0;
 	for (n = 0; n < hpet_comparators(); n++) {
 		hpet_comparator_caps(n, &caps);
 		if (n == 0)
 			*cap0 = caps.route_cap;
 		if (caps.fsb) {
+			/*
+			 * #598 point 4: not while interrupts are remapped.  The
+			 * message is composed here in compatibility format,
+			 * which the engine refuses, so the tick would stop the
+			 * moment remapping is on -- and QEMU's HPET writes it
+			 * past the IOMMU anyway, so a remapped one could only
+			 * be checked on hardware (#595).  The I/O APIC's pin
+			 * below is remapped like any other.
+			 */
+			if (iommu_interrupts_remapped()) {
+				fsb_passed_over = 1;
+				continue;
+			}
 			*which = n;
 			return ROUTE_FSB;
 		}
@@ -391,9 +408,9 @@ static void window_account(uint32_t now)
  *
  * The FSB message is in the compatibility format, as <device/device_machdep>
  * composes one for MSI-X: 0xFEE00000 with the destination APIC id at bit 12,
- * physical, no redirection; the vector as the data, fixed delivery, edge.  No
- * interrupt remapping is on in this kernel, on either vendor, so nothing
- * translates it.
+ * physical, no redirection; the vector as the data, fixed delivery, edge.
+ * Nothing translates it, because no FSB route is chosen while interrupts are
+ * remapped (choose_route(), #598).
  */
 static void comparator_route(void)
 {
@@ -569,8 +586,10 @@ static void hpet_ev_start(uint8_t vector)
 		       "bits, LegacyReplacement to I/O APIC input %u, cpu %u "
 		       "on vector 0x%x -- the 8254 and the RTC interrupt no "
 		       "more; each processor's tick sent by IPI on 0x%x "
-		       "(#593)\n", comparator, hpet_comparators(), route_gsi,
-		       broadcaster, HPET_EVENT_VECTOR, vector);
+		       "(#593)%s\n", comparator, hpet_comparators(), route_gsi,
+		       broadcaster, HPET_EVENT_VECTOR, vector,
+		       fsb_passed_over ? " -- not the FSB message, which would"
+		       " go round interrupt remapping (#598)" : "");
 }
 
 static void hpet_ev_setup(uint8_t vector)
