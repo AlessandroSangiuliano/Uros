@@ -440,7 +440,6 @@ option(UROS_ABLATE_607_OLD_WAKE "Build the #607 ablation: the hand-off's old wak
 option(UROS_ABLATE_607_DTS_SWAPPED "Build the #607 ablation: the IPC direct thread switch switches onto a swapped-out receiver, which the -ON storm must catch" OFF)
 
 # #598: interrupt remapping, each check with a way to see it catch.
-option(UROS_ABLATE_598_INDEX_ALWAYS "Build the #598 ablation: an Intel interrupt fault names an entry even for the five reasons whose FI is undefined, and the fault decode check must count those cases as wrong" OFF)
 option(UROS_ABLATE_598_IRTE_DST "Build the #598 ablation: an Intel xAPIC destination is written at bits 39:32 instead of 47:40, and the interrupt check must count the entries that carry one as wrong" OFF)
 option(UROS_ABLATE_598_INDEX15 "Build the #598 ablation: an Intel message and redirection entry drop bit 15 of the index, and the interrupt check must count the two cases that need it as wrong" OFF)
 option(UROS_ABLATE_598_INTCTL_FORWARD "Build the #598 ablation: an AMD device table entry forwards interrupts unmapped beside a valid table, and the interrupt check must count the entry as wrong" OFF)
@@ -944,10 +943,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_607_DTS_SWAPPED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_607_DTS_SWAPPED=1)
       message(STATUS "#607 ablation: the IPC direct switch takes a swapped-out receiver (x86_64)")
-  endif()
-  if(UROS_ABLATE_598_INDEX_ALWAYS)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_598_INDEX_ALWAYS=1)
-      message(STATUS "#598 ablation: every Intel interrupt fault names an entry (x86_64)")
   endif()
   if(UROS_ABLATE_598_IRTE_DST)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_598_IRTE_DST=1)

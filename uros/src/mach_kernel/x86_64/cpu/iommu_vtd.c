@@ -1062,12 +1062,10 @@ int iommu_vtd_flush(const struct iommu_domain *d)
  * compatibility-format one, remapping not on -- so there is no entry to name,
  * and reading one would be reading whatever the hardware left there.
  *
- * The ablation reads an index for every reason, which the decode check must
- * catch on the cases that carry something in FI where the field is undefined.
+ * ablations/598-index-always.patch reads an index for every reason, which the
+ * decode check must catch on the cases that carry something in FI where the
+ * field is undefined.
  */
-#ifndef	ABLATE_598_INDEX_ALWAYS
-#define	ABLATE_598_INDEX_ALWAYS	0
-#endif
 
 #define	VTD_FR_IR_FIRST			0x20
 #define	VTD_FR_IR_RESERVED		0x20	/* request's reserved field */
@@ -1081,9 +1079,6 @@ int iommu_vtd_flush(const struct iommu_domain *d)
 
 static int vtd_fault_names_entry(uint8_t reason)
 {
-	if (ABLATE_598_INDEX_ALWAYS)
-		return 1;
-
 	switch (reason) {
 	case VTD_FR_IR_RESERVED:
 	case VTD_FR_IR_COMPATIBILITY:
