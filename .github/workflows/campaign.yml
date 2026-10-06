@@ -140,6 +140,10 @@ jobs:
             sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm || true
+          # The trigger returns before udev has applied the mode: the first run
+          # tested /dev/kvm a moment too early, found it unwritable, and listed
+          # it crw-rw-rw- on the next line.  settle waits for the queue.
+          sudo udevadm settle || true
           if [ -c /dev/kvm ] && [ -w /dev/kvm ]; then
             available=yes
           else
