@@ -402,9 +402,18 @@ void Debugger(const char *message)
 		      "asked for — boot with -r to stop here instead (#428)",
 		      message ? message : "");
 
+	/*
+	 * The store and the trap on ONE processor (#646).  The trap handler
+	 * looks for the message in the slot of the processor the int3 runs
+	 * on; a caller moved in between trapped where the slot was empty,
+	 * and the machine halted with a fault report instead of opening the
+	 * prompt, leaving a stale message for the next int3 on the processor
+	 * it left.  Assert() re-enables preemption before calling here.
+	 */
+	disable_preemption();
 	debugger_why[cpu_number()] = message && *message ? message : "Debugger";
-
 	__asm__ volatile ("int3");
+	enable_preemption();
 }
 
 /*
