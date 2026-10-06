@@ -364,6 +364,7 @@ extern int	syscall_profile_trap;
 #if	SYSCALL_PROFILE
 
 #include <stdint.h>
+#include <kern/tsc.h>		/* urmach_tsc (#537) */
 
 /*
  * One per thread, hung off struct thread, and therefore safe across the
@@ -457,19 +458,9 @@ struct syscall_profile_thread {
 };
 
 /*
- * The clock.
- *
- * 🔴 NOT cpuid+rdtsc.  #439 measured a CPUID at 1,920 cycles against 1 for the
- * ordinary read -- and a Mach trap is a few hundred cycles all told, so the
- * textbook serialisation would cost several times the entire subject.  lfence
- * orders the earlier loads for a handful of cycles.
- *
- * ⚠️ On i386 there is no lfence to lean on -- it is SSE2 -- so that target
- * reads the counter unordered.  What that costs is a few cycles of slop at a
- * phase boundary, in one direction on each side of it, and it is named here
- * rather than hidden: a column on i386 is a little softer than the same column
- * on x86-64, and a DIFFERENCE of a few cycles between the two targets is not a
- * finding.  A difference of hundreds is, which is the size #554 is about.
+ * The clock is <kern/tsc.h>'s urmach_tsc(), the one reader every instrument
+ * above the machine layer uses (#537); why lfence and not cpuid, and why i386
+ * reads the counter unordered, is written there.
  *
  * ❌ This said "x86-64 only, deliberately ... nothing on i386 opens a sample".
  * That was true and it made the switch beside it a lie: kern/CMakeLists gives
@@ -477,20 +468,6 @@ struct syscall_profile_thread {
  * switch only one of them can turn on" -- while turning it on for i386 did not
  * compile at all.  #554 needs the comparison, so i386 gets a clock.
  */
-static __inline__ uint64_t
-syscall_profile_tsc(void)
-{
-	uint32_t	lo, hi;
-
-#if	defined(__x86_64__)
-	__asm__ __volatile__("lfence; rdtsc" : "=a" (lo), "=d" (hi) :: "memory");
-#elif	defined(__i386__)
-	__asm__ __volatile__("rdtsc" : "=a" (lo), "=d" (hi) :: "memory");
-#else
-#error	"syscall_profile has no time source on this machine"
-#endif
-	return ((uint64_t) hi << 32) | lo;
-}
 
 extern void	syscall_profile_dump(struct syscall_profile_thread *);
 
@@ -539,7 +516,7 @@ syscall_profile_begin(struct syscall_profile_thread *p, uint64_t entry_tsc)
 	 * first slice the whole age of the counter.
 	 */
 	if (entry_tsc == 0) {
-		entry_tsc = syscall_profile_tsc();
+		entry_tsc = urmach_tsc();
 		p->entry_unknown = 1;
 	} else
 		p->entry_unknown = 0;
@@ -578,7 +555,7 @@ syscall_profile_mark(struct syscall_profile_thread *p, int phase)
 	if (!p->open)
 		return;
 
-	now = syscall_profile_tsc();
+	now = urmach_tsc();
 	p->slice[phase] += (uint32_t) (now - p->cursor);
 	p->cursor = now;
 }
@@ -613,7 +590,7 @@ static __inline__ void
 syscall_profile_switch_out(struct syscall_profile_thread *p,
 			   struct syscall_profile_thread *next, int phase)
 {
-	uint64_t	now = syscall_profile_tsc();
+	uint64_t	now = urmach_tsc();
 
 	/*
 	 * The stamp is written whether or not the OUTGOING thread is being
@@ -692,7 +669,7 @@ syscall_profile_resumed(struct syscall_profile_thread *p)
 static __inline__ void
 syscall_profile_made_runnable(struct syscall_profile_thread *p)
 {
-	p->runnable_at = syscall_profile_tsc();
+	p->runnable_at = urmach_tsc();
 }
 
 /*

@@ -9,6 +9,7 @@
 
 #include <kern/misc_protos.h>	/* #461: halt_cpu, panic */
 #include <kern/ast.h>		/* #603: ast_check */
+#include <kern/cpu_data.h>	/* #638: disable_preemption */
 
 #include <cpu/answer_count.h>	/* #605: who answered, shared with tlb.c */
 #include <cpu/ipi.h>
@@ -19,6 +20,7 @@
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
+#include <time/tsc.h>		/* #638: the widened windows' clock */
 #include <trap/trap.h>
 
 
@@ -105,6 +107,7 @@ static unsigned call_name_silent(uint64_t targets)
 static void ipi_wait_for_acks(uint64_t who, unsigned targets)
 {
 	uint64_t spins;
+	uint32_t me;
 
 	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
 		if (atomic_load64(&call_acks) >= targets)
@@ -113,6 +116,24 @@ static void ipi_wait_for_acks(uint64_t who, unsigned targets)
 	}
 	if (atomic_load64(&call_acks) >= targets)
 		return;
+
+	/*
+	 * 🔴 A CALL THAT NAMES ITS OWN SENDER (#638).
+	 *
+	 * The sender waits with call_lock held, and the hold masks interrupts,
+	 * so a target set that includes it can only time out -- and the line
+	 * below then reports a processor that "never answered" when it was
+	 * never able to.  Both callers strike their own bit before sending, so
+	 * the bit can only be here if the strike was made as another processor:
+	 * the thread decided who it was and was moved before it sent.  Asked
+	 * here, under the lock, where this thread can no longer move.
+	 */
+	me = percpu_apic_id();
+	if (me < SMP_MAX_CPUS && (who & (1ULL << me)) != 0)
+		printf("ipi: this cross-call names the processor sending it "
+		       "(APIC id %u): its targets were decided on another "
+		       "processor, before the thread was moved here (#638)\n",
+		       me);
 
 	panic("ipi: %u of %u processors never answered a cross-call "
 	      "(targets 0x%llx, %llu answers arrived)",
@@ -170,6 +191,24 @@ uint64_t ipi_calls_served(uint32_t apic_id)
 	return answer_count_of(&served, apic_id);
 }
 
+#if	WIDEN_638_WINDOW
+volatile int shootdown_widen_armed;
+
+/* #638's test only: see <cpu/ipi.h>.  Nothing before the TSC is calibrated. */
+void shootdown_widen(void)
+{
+	uint64_t span, t0;
+
+	if (!shootdown_widen_armed || tsc_hz() == 0)
+		return;
+
+	span = tsc_hz() / 1000000 * WIDEN_638_US;
+	t0 = rdtsc();
+	while (rdtsc() - t0 < span)
+		cpu_pause();
+}
+#endif
+
 void ipi_call_others(void (*fn)(void *), void *arg)
 {
 	unsigned targets = smp_online_count() - 1;
@@ -178,12 +217,6 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 
 	if (targets == 0)
 		return;
-
-	/* Every processor that answers a broadcast, less this one. */
-	me = percpu_apic_id();
-	who = smp_answering_set();
-	if (me < SMP_MAX_CPUS)
-		who &= ~(1ULL << me);
 
 	/*
 	 * Checked rather than trusted.  A processor that waits for answers
@@ -196,6 +229,20 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 		panic("ipi: a cross-call with interrupts off would deadlock");
 
 	hw_lock_lock(&call_lock);
+
+	/*
+	 * Every processor that answers a broadcast, less this one -- asked
+	 * under the lock, whose hold keeps this thread on this processor
+	 * (#638).  Asked before it, "this one" could be the processor the
+	 * thread had just left.  The broadcast still reached the right ones,
+	 * since the shorthand leaves out whoever sends it, but the photograph
+	 * below, and the names a timeout prints, were taken for the wrong
+	 * processor.
+	 */
+	me = percpu_apic_id();
+	who = smp_answering_set();
+	if (me < SMP_MAX_CPUS)
+		who &= ~(1ULL << me);
 
 	call_photograph(who);
 	call_fn = fn;
@@ -220,18 +267,18 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 	hw_lock_unlock(&call_lock);
 }
 
-void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+#ifndef	ABLATE_638_STRIKE_UNPINNED
+#define	ABLATE_638_STRIKE_UNPINNED	0
+#endif
+
+/*
+ * Send to every processor in `mask', which no longer names this one, and wait
+ * for all of them.
+ */
+static void ipi_call_targets(uint64_t mask, void (*fn)(void *), void *arg)
 {
 	unsigned targets;
 	unsigned id;
-
-	/*
-	 * Never ourselves.  A processor inside this function is not going to
-	 * take the interrupt it just sent, so a bit for the caller would be a
-	 * target that can never acknowledge — the wait below would spin out
-	 * its budget and panic, on a mask that was perfectly correct.
-	 */
-	mask &= ~(1ULL << (percpu_apic_id() & 63));
 
 	if (mask == 0)
 		return;
@@ -275,6 +322,44 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 	ipi_wait_for_acks(mask, targets);
 
 	hw_lock_unlock(&call_lock);
+}
+
+void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+{
+	/*
+	 * Never ourselves.  A processor inside this function is not going to
+	 * take the interrupt it just sent, so a bit for the caller would be a
+	 * target that can never acknowledge — the wait below would spin out
+	 * its budget and panic, on a mask that was perfectly correct.
+	 *
+	 * 🔴 AND "OURSELVES" IS ASKED WHERE IT CANNOT CHANGE (#638).  Struck at
+	 * level zero, the bit could be the processor the thread was about to
+	 * leave: moved before it took the lock, the thread sent the call to
+	 * the processor it had arrived at -- itself -- and waited, interrupts
+	 * masked by the hold, for an answer only it could give.  So preemption
+	 * goes off before the bit is struck and comes back after the call.
+	 * Not call_lock instead: a mask that names only this processor is the
+	 * common case, and it would then take the machine's one cross-call
+	 * lock to send nothing.  UROS_ABLATE_638_STRIKE_UNPINNED strikes the
+	 * bit with preemption on again.
+	 */
+	if (ABLATE_638_STRIKE_UNPINNED) {
+		mask &= ~(1ULL << (percpu_apic_id() & 63));
+#if	WIDEN_638_WINDOW
+		if (mask != 0)
+			shootdown_widen();	/* between deciding and sending */
+#endif
+		ipi_call_targets(mask, fn, arg);
+		return;
+	}
+
+#if	WIDEN_638_WINDOW
+	shootdown_widen();		/* before deciding: a move is harmless */
+#endif
+	disable_preemption();
+	mask &= ~(1ULL << (percpu_apic_id() & 63));
+	ipi_call_targets(mask, fn, arg);
+	enable_preemption();
 }
 
 /*

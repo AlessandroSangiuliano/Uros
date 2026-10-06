@@ -76,13 +76,28 @@ dp_probe_body(void)
 	}
 }
 
+static void double_panic_test_body(int me);
+
+/*
+ * The driver stays on the processor it chose from (#646).  It read
+ * cpu_number() bare, on an unbound thread, and then counted on running
+ * there; a move in between left `me' naming a processor it had left.
+ */
 void
 double_panic_test(void)
+{
+	processor_t	was = current_thread()->bound_processor;
+
+	double_panic_test_body(thread_bind_here());
+	thread_bind(current_thread(), was);
+}
+
+static void
+double_panic_test_body(int me)
 {
 	thread_t	th;
 	thread_act_t	act;
 	processor_t	target = PROCESSOR_NULL;
-	int		me = cpu_number();
 	uint64_t	spins;
 	spl_t		s;
 

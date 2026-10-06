@@ -106,5 +106,7 @@ extern kern_return_t urmach_cap_revoke(uint64_t cap_id);
  *     (e.g. populating kernel-side metadata); v1 accepts and ignores it.
  */
 extern kern_return_t urmach_cap_register(const struct uros_cap *user_token);
+/* #537: the revocation epoch, for a server that keeps translations (trap 45) */
+extern kern_return_t urmach_cap_epoch(void);
 
 #endif /* _KERN_CAP_H_ */

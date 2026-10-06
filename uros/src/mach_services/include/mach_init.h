@@ -70,9 +70,24 @@ extern	mach_port_t	mach_task_self_;
 /*
  * Reinitialize the cached task port and MIG reply port.
  * Must be called by child tasks created with task_create(inherit_memory)
- * before making any MIG RPC calls.
+ * before making any MIG RPC calls -- the child of a fork() included, and a
+ * raw thread started in a task that inherited its parent's memory.
  */
 extern	void		mach_task_self_init(void);
+
+/*
+ * What libmach keeps for each thread (#645): the reply port MIG's stubs use,
+ * and errno.  It is the task's until a thread library hands over per-thread
+ * storage, by giving mig_init() the function that finds the calling thread's;
+ * mig_init(0) gives it back to the task, as crt0 does at start and
+ * mach_task_self_init() does in a child.
+ */
+struct mach_thread_state {
+	mach_port_t	reply_port;
+	int		err_no;
+};
+
+extern	void		mig_init(struct mach_thread_state *(*)(void));
 
 /*
  *	Other important ports in the Mach user environment

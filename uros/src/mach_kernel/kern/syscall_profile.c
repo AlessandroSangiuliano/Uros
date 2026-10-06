@@ -182,8 +182,8 @@ sp_measure_self(void)
 	int		i;
 
 	for (i = 0; i < 9; i++) {
-		uint64_t	a = syscall_profile_tsc();
-		uint64_t	b = syscall_profile_tsc();
+		uint64_t	a = urmach_tsc();
+		uint64_t	b = urmach_tsc();
 
 		d[i] = (uint32_t) (b - a);
 	}
@@ -536,7 +536,7 @@ syscall_profile_blocked(thread_t old, thread_t next, int phase)
 
 	if (old == THREAD_NULL) {
 		if (np != (struct syscall_profile_thread *) 0)
-			np->switch_in = syscall_profile_tsc();
+			np->switch_in = urmach_tsc();
 		return;
 	}
 

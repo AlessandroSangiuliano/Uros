@@ -346,7 +346,7 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(urmach_dma_region_owner, 3),	/* 43 (#432) */
 
 	MACH_TRAP(not_implemented, 0),		/* 44 */
-	MACH_TRAP(not_implemented, 0),		/* 45 */
+	MACH_TRAP(urmach_cap_epoch, 0),		/* 45 (#537) */
 	MACH_TRAP(not_implemented, 0),		/* 46 */
 	MACH_TRAP(not_implemented, 0),		/* 47 */
 	MACH_TRAP(not_implemented, 0),		/* 48 */

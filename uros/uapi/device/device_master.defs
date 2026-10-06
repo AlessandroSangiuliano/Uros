@@ -807,3 +807,80 @@ routine device_io_port_set_divisor(
 	in	divisor		: natural_t;
 	out	readback	: natural_t
 	);
+
+/*
+ * #537: what the answered asks of device_dma_map_foreign_op have cost in the
+ * kernel, summed over every processor since boot -- how many were answered,
+ * and the TSC cycles spent in the claim, in the capability's MAC, in finding
+ * the region and the page in it, and in the rest.  Read by the block server
+ * when it says its own count of the whole ask, which is outside the window it
+ * times: the kernel says nothing from inside an ask, because its caller is
+ * timing it, and a line printed there was counted as the ask's (2.6 ms a
+ * line).  The asks that GRANTED -- with an IOMMU the first for each region and
+ * device maps the whole region, once -- are counted apart, whole, in `grants'
+ * and `grant_cycles', and in none of the four: one of them cost about as much
+ * as a thousand ordinary asks, and in an average since boot it hid the rest.
+ * Nothing here names a buffer, a device or a task.
+ */
+type dma_cost_t = unsigned64 ctype: cap_u64_t;
+
+routine device_dma_ask_cost(
+		master_port	: mach_port_t;
+	out	asks		: dma_cost_t;
+	out	claim		: dma_cost_t;
+	out	mac		: dma_cost_t;
+	out	find		: dma_cost_t;
+	out	rest		: dma_cost_t;
+	out	grants		: dma_cost_t;
+	out	grant_cycles	: dma_cost_t
+	);
+
+/*
+ * #537: device_dma_map_foreign_op for up to thirty-two pages of one buffer at
+ * once -- one RPC, one claim, one check of the capability and one look-up of
+ * the region for the block server's largest request, where thirty-two asks
+ * cost 12 - 17% of the transfer (cap_test [25]).  The answer is the device
+ * address of every page, in the order given, or a refusal for the request as a
+ * whole: the refusals of one page's ask, the first that applies.  Inline, as
+ * the per-I/O lists are (see dma_sg_addr_t above, and ahci_batch.defs).
+ */
+type dma_page_list_t = array[*:32] of vm_address_t;
+
+routine device_dma_map_foreign_ops(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	paddrs		: dma_page_list_t;
+	in	op		: natural_t;
+	in	token		: cap_token_t;
+	out	dma_addrs	: dma_page_list_t
+	);
+
+/*
+ * #537 step 3: a whole buffer's translation, once, for a server that keeps it
+ * -- the block server, when a client hands it a buffer's capability.  The
+ * kernel grants the region to the device as the first ask does and, when the
+ * device is ISOLATED (an IOMMU between it and memory), answers the device
+ * address of the region's first page (the rest consecutive from there, or each
+ * page at its own physical address when `identity'), the directions granted,
+ * and the region's pages in order -- out of line, as dma_sg_addr_t: there can
+ * be thousands.  Kept, that table needs no ask per transfer: a revocation or a
+ * free takes the grant down, and a translation used after it is a fault the
+ * IOMMU refuses, not a transfer into somebody else's memory.
+ *
+ * Without isolation -- no IOMMU, or a device it passes through in an identity
+ * domain -- the answer is isolated = 0 and no pages, and the server must keep
+ * asking: the pages a freed buffer gave back may be another task's by the next
+ * transfer, and nothing would stop the device from writing them.
+ *
+ * ⚠️ The caller must vm_deallocate the pages it gets back.
+ */
+routine device_dma_map_foreign_region(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	token		: cap_token_t;
+	out	isolated	: natural_t;
+	out	identity	: natural_t;
+	out	base		: vm_address_t;
+	out	ops		: natural_t;
+	out	pages		: dma_sg_addr_t
+	);

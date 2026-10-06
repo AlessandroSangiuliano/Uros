@@ -300,20 +300,41 @@ dd if="$PART_IMG" of="$DISK" bs="$SECT" seek="$PART_START" conv=notrunc status=n
 #
 # ⚠️ Different labels, because the read-back self-test prints the label it
 # finds and two disks with the same one would make a wrong port look right.
-AHCI_MB=16
-AHCI_PART_SECTS=$(( AHCI_MB * 1024 * 1024 / SECT - PART_START ))
+#
+# #537: and the disk suite's files on the first, the root ext_server mounts, when
+# this build's bootstrap.conf names ipc_bench -- the disk follows the
+# configuration, as the bundle does (#584).  The same files make-disk-image.sh
+# writes for i386, made the same way; 28 MB of them, so that disk grows to 48.
+# Without ipc_bench in the conf nothing here changes.
+BENCH_FILES=""
+if grep -q '^ipc_bench ' "$BUILD/src/servers/bootstrap/bootstrap.conf" 2>/dev/null; then
+	printf 'Hello from /mach_servers/ root\n' > "$WORK/hello.txt"
+	dd if=/dev/urandom of="$WORK/bench.dat" bs=1K count=1 status=none
+	dd if=/dev/urandom of="$WORK/bench_4m.dat" bs=1M count=4 status=none
+	dd if=/dev/urandom of="$WORK/bench_large.dat" bs=1M count=12 status=none
+	dd if=/dev/urandom of="$WORK/bench_rand.dat" bs=1M count=12 status=none
+	BENCH_FILES="hello.txt bench.dat bench_4m.dat bench_large.dat bench_rand.dat"
+fi
 
 ahci_disk_n=0
 for AHCI_DISK in $AHCI_DISKS; do
 	ahci_disk_n=$(( ahci_disk_n + 1 ))
 	AHCI_LABEL="ahci_test$ahci_disk_n"
 	AHCI_PART="$WORK/ahci-part$ahci_disk_n.img"
+	AHCI_MB=16
+	[ $ahci_disk_n = 1 ] && [ -n "$BENCH_FILES" ] && AHCI_MB=48
+	AHCI_PART_SECTS=$(( AHCI_MB * 1024 * 1024 / SECT - PART_START ))
 
 	truncate -s $(( AHCI_PART_SECTS * SECT )) "$AHCI_PART"
 	mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -L "$AHCI_LABEL" \
 		-O filetype "$AHCI_PART"
 
 	{
+		if [ $ahci_disk_n = 1 ]; then
+			for f in $BENCH_FILES; do
+				echo "write $WORK/$f $f"
+			done
+		fi
 		echo "mkdir /mach_servers"
 		echo "cd /mach_servers"
 		for s in $DISK_SERVERS; do
@@ -332,6 +353,9 @@ EOF
 
 	echo "make-disk-x86_64: $AHCI_DISK — no grub, one ext2 partition at"
 	echo "                  LBA $PART_START (label $AHCI_LABEL), AHCI port $(( ahci_disk_n - 1 ))"
+	if [ $ahci_disk_n = 1 ] && [ -n "$BENCH_FILES" ]; then
+		echo "                  ${AHCI_MB} MB, with ipc_bench's disk files at / (#537): $BENCH_FILES"
+	fi
 done
 echo "make-disk-x86_64: $DISK — bootable, grub core at LBA 1 ($CORE_SECTS sectors),"
 echo "                  one ext2 partition at LBA $PART_START (label $PART_LABEL) holding:"

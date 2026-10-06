@@ -7,6 +7,8 @@
 
 #include <stdint.h>
 
+#include <kern/cpu_data.h>	/* #638: disable_preemption */
+
 #include <cpu/answer_count.h>	/* #605: who answered, shared with ipi.c */
 #include <cpu/ipi.h>
 #include <cpu/percpu.h>
@@ -90,6 +92,55 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
 	return answer_count_of(&served, apic_id);
 }
 
+#ifndef	ABLATE_638_FLUSH_UNPINNED
+#define	ABLATE_638_FLUSH_UNPINNED	0
+#endif
+
+/*
+ * Flush this processor, and have the others flush too: every one in `using',
+ * or every one at all when `broadcast' is set.
+ *
+ * 🔴 ONE PROCESSOR FOR BOTH HALVES (#638).  The local flush and the cross-call
+ * each mean "this processor": the first flushes it, the second leaves it out.
+ * They must mean the same one, and at level zero they did not have to -- a
+ * thread moved between the two had flushed the processor it left and left out
+ * the one it arrived at, which nobody flushed.  That one can hold the
+ * translation: a switch between two threads with the same map does not reload
+ * CR3.  So both halves run with preemption off.  UROS_ABLATE_638_FLUSH_UNPINNED
+ * runs them with it on again.
+ *
+ * The local flush still goes first.  Not for correctness — the order between
+ * the local flush and the remote ones does not matter, since the entry is
+ * already gone from the table by the time either happens — but because the
+ * cross-call spends the wait spinning, and doing the local work first means it
+ * is done by the time the answers arrive.
+ */
+static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
+				     uint64_t using)
+{
+	if (!ABLATE_638_FLUSH_UNPINNED) {
+#if	WIDEN_638_WINDOW
+		shootdown_widen();	/* before deciding: a move is harmless */
+#endif
+		disable_preemption();
+	}
+
+	tlb_flush_local_range(r->va, r->size);
+
+#if	WIDEN_638_WINDOW
+	if (ABLATE_638_FLUSH_UNPINNED)
+		shootdown_widen();	/* between the local flush and the call */
+#endif
+
+	if (broadcast)
+		ipi_call_others(tlb_flush_handler, r);
+	else
+		ipi_call_mask(using, tlb_flush_handler, r);
+
+	if (!ABLATE_638_FLUSH_UNPINNED)
+		enable_preemption();
+}
+
 void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 {
 	/*
@@ -100,15 +151,6 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	struct tlb_request r = { va, size };
 
 	uint64_t using;
-
-	/*
-	 * This processor first.  Not for correctness — the order between the
-	 * local flush and the remote ones does not matter, since the entry is
-	 * already gone from the table by the time either happens — but because
-	 * the cross-call spends the wait spinning, and doing the local work
-	 * first means it is done by the time the answers arrive.
-	 */
-	tlb_flush_local_range(va, size);
 
 	/*
 	 * ── Who else has to be told (#439) ────────────────────────────────
@@ -153,10 +195,17 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 
 	if (ABLATE_439 || pmap == PMAP_NULL || pmap == pmap_kernel()) {
 		/*
-		 * Costs nothing while there is nobody else: ipi_call_others()
-		 * returns at once when this is the only processor online.
+		 * With only this processor online there is nobody to tell and
+		 * nowhere to be moved to, so the flush here is the whole job.
+		 * It is also the only case before percpu_activate(), where %gs
+		 * is based at zero and raising the preemption count would
+		 * write at address zero's page (#638).
 		 */
-		ipi_call_others(tlb_flush_handler, &r);
+		if (smp_online_count() <= 1) {
+			tlb_flush_local_range(va, size);
+			return;
+		}
+		tlb_flush_here_and_there(&r, 1, 0);
 		return;
 	}
 
@@ -173,25 +222,27 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	using = atomic_load64(&pmap->cpus_using);
 
 	/*
-	 * Nobody has this space loaded, so the local flush above was the whole
-	 * job.  This is the ORDINARY case, not an edge one: a freshly forked
+	 * Nobody has this space loaded, so the flush here is the whole job.
+	 * This is the ORDINARY case, not an edge one: a freshly forked
 	 * address space is loaded on the processor doing the forking and on no
 	 * other, and that processor's own bit is not in the set it would send
 	 * to anyway.
 	 *
 	 * ⚠️ It is also what keeps the boot self-tests working, and that is
 	 * worth naming rather than leaving as a happy accident.  They build
-	 * pmaps and unmap from them before percpu_activate() has run, and
-	 * ipi_call_mask() needs this processor's APIC id to strike its own bit
-	 * out -- which it reads from the per-CPU block that does not exist yet.
-	 * Returning here means it is never asked.  A pmap can only have a bit
-	 * set by pmap_activate(), which cannot run before that block exists, so
-	 * "the set is empty" and "there is no block" cannot come apart.
+	 * pmaps and unmap from them before percpu_activate() has run, and both
+	 * holding this processor (#638) and ipi_call_mask() reach the per-CPU
+	 * block, which does not exist yet.  Returning here means neither is
+	 * asked.  A pmap can only have a bit set by pmap_activate(), which
+	 * cannot run before that block exists, so "the set is empty" and
+	 * "there is no block" cannot come apart.
 	 */
-	if (using == 0)
+	if (using == 0) {
+		tlb_flush_local_range(va, size);
 		return;
+	}
 
-	ipi_call_mask(using, tlb_flush_handler, &r);
+	tlb_flush_here_and_there(&r, 0, using);
 }
 
 void tlb_flush_all(struct pmap *pmap)

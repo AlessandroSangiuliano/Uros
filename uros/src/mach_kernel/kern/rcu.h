@@ -147,16 +147,22 @@ urmach_rcu_read_unlock(void)
  *	Whether the caller is inside a read section -- for a check that a
  *	rule is kept, not for deciding anything (#604).
  *
- *	⚠️ It can miss, and it cannot lie the other way.  A caller inside a
- *	section cannot migrate (the section holds preemption off), so it
- *	always reads its own depth.  A caller outside one can be moved between
- *	cpu_number() and the load and read another processor's depth -- which
- *	may hide a violation for that one call, and never invents one.
+ *	⚠️ Read with preemption off (#646).  A caller inside a section cannot
+ *	migrate anyway, but one outside it could be moved between cpu_number()
+ *	and the load and read ANOTHER processor's depth -- not only hiding a
+ *	violation but inventing one, when a reader is in a section there.
+ *	This comment used to say it never invents one, and pmap_collect()
+ *	panics on its answer: a false panic, on a check meant to keep a rule.
  */
 static __inline__ boolean_t
 urmach_rcu_read_held(void)
 {
-	return cpu_data[cpu_number()].rcu_read_depth != 0;
+	boolean_t	held;
+
+	disable_preemption();
+	held = (cpu_data[cpu_number()].rcu_read_depth != 0);
+	enable_preemption();
+	return held;
 }
 
 /*
@@ -251,15 +257,26 @@ extern void	urmach_rcu_advance(void);
 
 /*
  *	Run whatever is ready.  THREAD CONTEXT ONLY -- a callback frees memory
- *	and may take the zone lock.  The idle loop calls it, and so does any
- *	writer about to block in a grace period, so that a machine which never
- *	goes idle still retires its queue.
+ *	and may take the zone lock.  The idle loop calls it on every pass.
+ *
+ *	🔴 And the idle loop is not enough (#608): a machine whose every
+ *	processor stays busy never runs it.  urmach_rcu_drain_thread() is the
+ *	other way out -- the tick wakes it whenever it completes a grace period
+ *	with callbacks queued.  (This comment used to say that a writer about
+ *	to block in a grace period drained too.  None did.)
  */
 extern void	urmach_rcu_drain(void);
 
-/* How many callbacks are waiting and how many have been handed back. */
+/* The drain's own thread, started with the kernel's threads (#608). */
+extern void	urmach_rcu_drain_thread(void);
+
+/* How many callbacks are waiting and how many have been handed back -- and,
+ * of those handed back, how many by the idle loop and how many by the drain
+ * thread (#608). */
 extern unsigned int	urmach_rcu_queued;
 extern unsigned int	urmach_rcu_retired;
+extern unsigned int	urmach_rcu_retired_idle;
+extern unsigned int	urmach_rcu_retired_thread;
 
 /* One-time init (counters live in BSS-zeroed cpu_data[], so this is a stub). */
 extern void	urmach_rcu_init(void);

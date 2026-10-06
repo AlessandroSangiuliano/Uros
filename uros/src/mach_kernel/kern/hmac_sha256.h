@@ -33,6 +33,24 @@ void hmac_sha256(const void *key, size_t key_len,
                  const void *msg, size_t msg_len,
                  uint8_t out[HMAC_SHA256_SIZE]);
 
+/*
+ * #537: a key made ready once.  HMAC hashes the key's inner and outer padded
+ * blocks ahead of every message, and those two blocks depend on the key
+ * alone -- for a 160-byte capability token they are two of the six SHA-256
+ * compressions a verification takes.  So they are hashed when the key is set,
+ * the two contexts kept, and every message starts from copies of them.
+ */
+struct hmac_sha256_key {
+    struct sha256_ctx inner;    /* after the key XOR ipad block */
+    struct sha256_ctx outer;    /* after the key XOR opad block */
+};
+
+void hmac_sha256_key_init(struct hmac_sha256_key *k,
+                          const void *key, size_t key_len);
+void hmac_sha256_with(const struct hmac_sha256_key *k,
+                      const void *msg, size_t msg_len,
+                      uint8_t out[HMAC_SHA256_SIZE]);
+
 int  hmac_sha256_equal(const uint8_t a[HMAC_SHA256_SIZE],
                        const uint8_t b[HMAC_SHA256_SIZE]);
 

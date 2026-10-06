@@ -57,29 +57,50 @@
 #include <mach/mach_traps.h>
 #include "externs.h"
 
-static mach_port_t	mig_reply_port = MACH_PORT_NULL;
-
 /*
- * #299: these four entry points are also defined, with a per-thread
- * (pthread-TSD) implementation, in libpthreads/mig_support.c.  A program
- * that links BOTH libmach and libpthreads (i.e. any multithreaded server)
- * must use the per-thread version: otherwise every thread shares this one
- * static mig_reply_port, two threads receive on the same reply port, and
- * ipc_mqueue_deliver hands an RPC reply to the wrong thread — the caller
- * hangs forever (only visible under real concurrency, i.e. SMP 4+ CPUs;
- * gpu_server's render worker was the first victim).  Mark libmach's copies
- * WEAK so the strong libpthreads definitions win whenever both are linked;
- * pure single-threaded programs (libmach only) still get these as the sole,
- * weak-but-present definitions.
+ * The reply port, and errno beside it, are kept here and nowhere else (#645).
+ *
+ * They are the task's until a thread library hands over per-thread storage:
+ * mig_init() is given the function that finds the calling thread's
+ * mach_thread_state, and from then on every thread has its own.  libpthreads
+ * does it in pthread_create(), before a second thread can run, and not in
+ * pthread_init(), where pthread_self() is not yet the main thread, which still
+ * runs on crt0's stack.  mig_init(0) gives the state back to the task:
+ * mach_init() at start, and mach_task_self_init() in a child, whose threads are
+ * not its parent's; the child's first pthread_create() hands over again.
+ *
+ * Each thread needs its own reply port because two threads receiving on one
+ * port take each other's replies, and the caller whose reply was taken waits
+ * for good (#299: gpu_server's render worker).  These functions used to exist
+ * twice: here, weak, with one port for the task, and in libpthreads, strong,
+ * with a port per thread.  The linker chose which copy a program got, and the
+ * reset of a forked child cleared this copy only, so a child of a program with
+ * the other kept its parent's reply-port name (#645).
  */
+static struct mach_thread_state	task_state = { MACH_PORT_NULL, 0 };
+static struct mach_thread_state	*(*thread_state)(void);
 
-__attribute__((weak))
+struct mach_thread_state *
+mach_thread_state(void)
+{
+	return (thread_state != 0) ? (*thread_state)() : &task_state;
+}
+
 void
 mig_init(
-	void		*first)
+	struct mach_thread_state	*(*per_thread)(void))
 {
-	if (first == (void *) 0)
-		mig_reply_port = MACH_PORT_NULL;
+	if (per_thread == 0) {
+		task_state.reply_port = MACH_PORT_NULL;
+		thread_state = 0;
+		return;
+	}
+	if (thread_state == per_thread)
+		return;
+	/* The calling thread keeps the port and the errno it was using. */
+	*(*per_thread)() = task_state;
+	task_state.reply_port = MACH_PORT_NULL;
+	thread_state = per_thread;
 }
 
 /********************************************************
@@ -87,14 +108,15 @@ mig_init(
  *  Used to provide the same interface as multi-threaded tasks need.
  ********************************************************/
 
-__attribute__((weak))
 mach_port_t
 mig_get_reply_port(void)
 {
-	if (mig_reply_port == MACH_PORT_NULL)
-		mig_reply_port = mach_reply_port();
+	struct mach_thread_state *state = mach_thread_state();
 
-	return mig_reply_port;
+	if (state->reply_port == MACH_PORT_NULL)
+		state->reply_port = mach_reply_port();
+
+	return state->reply_port;
 }
 
 /*************************************************************
@@ -102,18 +124,19 @@ mig_get_reply_port(void)
  *  Could be called by user.
  ***********************************************************/
 
-__attribute__((weak))
 void
 mig_dealloc_reply_port(
 	mach_port_t	reply_port)
 {
+	struct mach_thread_state *state = mach_thread_state();
 	mach_port_t port;
 
-	port = mig_reply_port;
-	mig_reply_port = MACH_PORT_NULL;
+	port = state->reply_port;
+	state->reply_port = MACH_PORT_NULL;
 
-	(void) mach_port_mod_refs(mach_task_self(), port,
-				  MACH_PORT_RIGHT_RECEIVE, -1);
+	if (port != MACH_PORT_NULL)
+		(void) mach_port_mod_refs(mach_task_self(), port,
+					  MACH_PORT_RIGHT_RECEIVE, -1);
 }
 
 /*************************************************************
@@ -121,7 +144,6 @@ mig_dealloc_reply_port(
  *  Could be called by user.
  ***********************************************************/
 
-__attribute__((weak))
 void
 mig_put_reply_port(
 	mach_port_t	reply_port)
@@ -129,26 +151,29 @@ mig_put_reply_port(
 }
 
 /*
- * Phase 5b (#255): drop libmach's cached port-name globals after a
- * fork().  The child's IPC space is empty when task_create returns,
- * so the parent's cached values are noise that next MIG calls will
- * accidentally reuse — MACH_SEND_INVALID_DEST on the first RPC.
- * Forces a re-cache via the relevant Mach traps on next use.
+ * Lightweight reinit for a child task created with task_create(inherit_memory):
+ * the child of a fork(), and a raw thread started in a task that inherited its
+ * parent's memory.  The cached task port still names the parent's, and the
+ * reply port and the per-thread hand-over are the parent's; both are reset.
+ * Port registration, the page size and the RPC glue are inherited and left
+ * alone.
+ *
+ * It lives here and not in mach_init.c, where it was.  A caller outside libmach
+ * that names a function in mach_init.c pulls that file into libc.so beside
+ * mach_init_sa.c, which defines the same globals, and the link fails.
+ * mig_reset_after_fork() was put here for that reason, reset only libmach's
+ * copy of the reply port, and is gone (#645).
+ *
+ * mach_task_self() in <mach_init.h> is a macro that reads the cached global, so
+ * it is undefined here and the trap stub runs, returning a name that is valid
+ * in the child's space (#269).
  */
-extern mach_port_t mach_task_self_;
-void
-mig_reset_after_fork(void)
-{
-	mig_reply_port = MACH_PORT_NULL;
-	/*
-	 * mach_task_self() in <mach_init.h> is a macro that expands to the
-	 * cached global, so `mach_task_self_ = mach_task_self()` would be a
-	 * no-op.  Undef before invoking so the real trap stub runs and
-	 * returns a port name valid in the child's IPC space — without
-	 * this the child kept the parent's stale name, which exec_load
-	 * passed to task_create and the kernel rejected as IKOT_ACT (#269).
-	 */
 #undef mach_task_self
-	extern mach_port_t mach_task_self(void);
+extern mach_port_t mach_task_self(void);
+
+void
+mach_task_self_init(void)
+{
 	mach_task_self_ = mach_task_self();
+	mig_init(0);
 }

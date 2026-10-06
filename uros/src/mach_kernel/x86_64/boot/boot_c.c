@@ -520,6 +520,15 @@ static void bootmem_selftest(uint32_t info)
 }
 
 /*
+ * #612: the self-tests that map in the VM's range leave their pages there
+ * again (map_selftest, tlb_shootdown_selftest), for pmap_virtual_space() to
+ * name.
+ */
+#ifndef	ABLATE_612_LEAVE_MAPPED
+#define	ABLATE_612_LEAVE_MAPPED	0
+#endif
+
+/*
  * Map a page where the walk just proved nothing was mapped, then establish
  * that it is really there — by writing through the new address and finding
  * the value on the physical frame via the direct map, and by having the walk
@@ -573,6 +582,22 @@ static void map_selftest(void)
 	kputs("UrMach x86-64: map over a large page ");
 	kputs(rc == PMAP_MAP_BLOCKED ? "correctly refused\r\n"
 				     : "NOT refused?!\r\n");
+
+	/*
+	 * 🔴 And gone again, frame and all (#612).  KERNEL_HEAP_BASE is the
+	 * first address pmap_virtual_space() gives the VM, and the page stayed:
+	 * pmap_steal_memory()'s first pmap_enter() replaced it, which at more
+	 * than one processor is a cross-call before the kernel has a thread.
+	 * pmap_virtual_space() now says what it finds there.
+	 */
+	if (ABLATE_612_LEAVE_MAPPED)
+		return;
+	pmap_unmap_page(PMAP_NULL, va, 0);
+	kputs("UrMach x86-64: unmapped again, ");
+	kputs(pmap_walk(root, va, 0) == PT_ENTRY_NULL
+	      ? "the walk finds nothing -- the frame goes back\r\n"
+	      : "STILL MAPPED -- the VM will find it\r\n");
+	boot_frame_free(frame);
 }
 
 /*
@@ -612,6 +637,7 @@ static void protect_unmap_selftest(void)
 	kputs(size == PAGE_SIZE_4K && e == PT_ENTRY_NULL
 	      ? "cleared, walk finds nothing\r\n"
 	      : "STILL MAPPED?!\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -620,6 +646,10 @@ static void protect_unmap_selftest(void)
  * physical page, one size class finer, and reading through the direct map
  * still returns the witness.  CPU-independent — a 1 GiB leaf becomes 2 MiB,
  * a 2 MiB leaf becomes 4 KiB — so both models exercise a different level.
+ *
+ * #612: the split stays, and that is all it leaves.  The direct map maps
+ * what it mapped, one size finer, and the table the split took is the
+ * kernel's for good.  None of it is in the VM's range.
  */
 static void split_selftest(void)
 {
@@ -782,6 +812,7 @@ static void pmap_verbs_selftest(void)
 	kputs("UrMach x86-64: pmap_remove -> extract ");
 	kputhex64(got);
 	kputs(got == 0 ? ", gone\r\n" : ", STILL MAPPED?!\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -839,6 +870,7 @@ static void pv_selftest(uint32_t info)
 				   : ", STILL LISTED\r\n");
 
 	pmap_destroy(u);
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -938,6 +970,7 @@ static void phys_ops_selftest(void)
 	      : " -- WRONG, the bits went with the mappings (#606)\r\n");
 
 	pmap_destroy(u);
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -1345,6 +1378,7 @@ static void user_pmap_selftest(void)
 	kputs("UrMach x86-64: pmap_destroy -> ");
 	kputs(u->ref_count == 0 && u->root_pa == 0 ? "space released\r\n"
 						   : "STILL HELD?!\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 
 	/*
 	 * #456: and one space that is NOT destroyed here.  It is held until
@@ -1397,6 +1431,11 @@ static void user_pmap_selftest(void)
 			      ? " -- pmap_collect gives back none of them (#455)\r\n"
 			      : " -- UNEXPECTED\r\n");
 
+			/*
+			 * #612: the space goes and its leaves with it; the
+			 * eight pages it mapped came from the table allocator
+			 * and are kept, as #455's measurement has them.
+			 */
 			pmap_destroy(sp);
 		}
 	}
@@ -1441,11 +1480,296 @@ static void wx_enforcement_selftest(void)
 	wx_data_probe = 0;
 	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
 	refused = trap_probe_write(rw);
+	trap_expect_cancel();		/* the control does not fault (#639) */
 
 	kputs("UrMach x86-64: the same probe on .bss ");
 	kputs(!refused && wx_data_probe == TRAP_PROBE_PATTERN
 	      ? "went through and left its pattern, so the refusal was real\r\n"
 	      : "MISBEHAVED — the control says nothing\r\n");
+}
+
+/*
+ * 🔴 EVERY PROCESSOR CARRIES THE BOOT PROCESSOR'S PROTECTIONS (#639).
+ *
+ * CR0, CR4 and EFER belong to the processor that loads them, and each
+ * processor's bring-up has to set its own.  SMEP and SMAP were set on the
+ * boot processor alone: the three application processors of a four-processor
+ * boot ran with neither, and nothing said so -- a protection that is missing
+ * does not fail, it just lets things through.  #437 (PGE) and #412 (PCIDE) add
+ * bits of the same kind, so this is asked of every bit, not only of the two
+ * that were missing.
+ *
+ * Two questions, because a register is a claim and a fault is a fact:
+ *
+ *   the census	CR0's protection bits, all of CR4 and EFER's, read on every
+ *		processor and compared with the boot processor's;
+ *   the probes	on every processor, a store to a user page and a call into
+ *		one, from the kernel and outside the access bracket, and a
+ *		store inside the bracket to a user page mapped read-only.
+ *		With SMAP the first store faults, with SMEP the call does,
+ *		and with CR0.WP the last store does: without WP the kernel
+ *		writes through a read-only mapping, and copyout() relies on
+ *		that fault to break copy-on-write.
+ *
+ * Each application processor is asked alone, by a targeted cross-call, and
+ * answers into its own slot.  Alone because trap_expect() holds one
+ * expectation for the whole machine.
+ */
+#define CR_CENSUS_CR0	(CR0_PG | CR0_WP | CR0_NE | CR0_CD | CR0_NW	\
+			 | CR0_EM | CR0_MP)
+#define CR_CENSUS_EFER	(EFER_SCE | EFER_LME | EFER_LMA | EFER_NXE)
+
+/* Lower half, beyond the boot identity map and USER_TEST_VA: nobody's. */
+#define CR_PROBE_VA	0x0000000200000000ULL
+
+struct cr_seen {
+	uint64_t	cr0, cr4, efer;
+	int		answered;
+	int		smap_fault, smep_fault, wp_fault;
+};
+
+static struct cr_seen cr_seen[SMP_MAX_CPUS];
+static uint64_t cr_probe_root;		/* the scratch space every probe loads */
+static uint64_t cr_probe_want;		/* SMEP|SMAP, as the boot processor set */
+static int cr_probe_wp;			/* and CR0.WP */
+
+static void cr_read_here(void *arg)
+{
+	struct cr_seen *s = arg;
+
+	s->cr0 = read_cr0();
+	s->cr4 = read_cr4();
+	s->efer = rdmsr(MSR_EFER);
+	s->answered = 1;
+}
+
+/*
+ * The probes, on whichever processor runs this: load the scratch space, try
+ * the store and the call under an expectation, put the processor's own space
+ * back.  The page holds `xor %eax, %eax; ret', so a call that is allowed
+ * returns 0, and one that faults resumes at trap_probe_faulted, which returns
+ * 1 through the same return address.
+ */
+static void cr_probe_here(void *arg)
+{
+	struct cr_seen *s = arg;
+	uint64_t own = read_cr3();
+	int (*fetch)(void) = (int (*)(void))(uintptr_t) CR_PROBE_VA;
+
+	write_cr3(cr_probe_root);
+
+	if (cr_probe_want & CR4_SMAP) {
+		trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+		s->smap_fault = trap_probe_write(
+			(volatile void *)(uintptr_t)(CR_PROBE_VA + 64));
+		trap_expect_cancel();
+	}
+	if (cr_probe_want & CR4_SMEP) {
+		trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+		s->smep_fault = fetch();
+		trap_expect_cancel();
+	}
+	if (cr_probe_wp) {
+		pmap_user_access_begin();
+		trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+		s->wp_fault = trap_probe_write(	/* clear of the code */
+			(volatile void *)(uintptr_t)(CR_PROBE_VA + PAGE_SIZE_4K
+						     + 128));
+		trap_expect_cancel();
+		pmap_user_access_end();
+	}
+
+	write_cr3(own);
+}
+
+struct cr_bit_name {
+	uint64_t	bit;
+	const char	*name;
+};
+
+static const struct cr_bit_name cr0_names[] = {
+	{ CR0_PG, "PG" }, { CR0_WP, "WP" }, { CR0_NE, "NE" }, { CR0_CD, "CD" },
+	{ CR0_NW, "NW" }, { CR0_EM, "EM" }, { CR0_MP, "MP" }, { 0, 0 }
+};
+
+static const struct cr_bit_name cr4_names[] = {
+	{ CR4_PAE, "PAE" }, { CR4_PGE, "PGE" }, { CR4_OSFXSR, "OSFXSR" },
+	{ CR4_OSXMMEXCPT, "OSXMMEXCPT" }, { CR4_FSGSBASE, "FSGSBASE" },
+	{ CR4_PCIDE, "PCIDE" }, { CR4_OSXSAVE, "OSXSAVE" },
+	{ CR4_SMEP, "SMEP" }, { CR4_SMAP, "SMAP" }, { 0, 0 }
+};
+
+static const struct cr_bit_name efer_names[] = {
+	{ EFER_SCE, "SCE" }, { EFER_LME, "LME" }, { EFER_LMA, "LMA" },
+	{ EFER_NXE, "NXE" }, { 0, 0 }
+};
+
+/* Name every bit in `bits', the known ones by name. */
+static void cr_put_bits(uint64_t bits, const struct cr_bit_name *names)
+{
+	for (unsigned b = 0; b < 64; b++) {
+		const char *name = 0;
+
+		if ((bits & (1ULL << b)) == 0)
+			continue;
+		for (unsigned i = 0; names[i].name != 0; i++)
+			if (names[i].bit == (1ULL << b))
+				name = names[i].name;
+		kputs(" ");
+		if (name != 0)
+			kputs(name);
+		else {
+			kputs("bit ");
+			kputdec(b);
+		}
+	}
+}
+
+/* What one register lacks and has, against the boot processor's. */
+static void cr_put_diff(const char *reg, uint64_t diff, uint64_t boot,
+			uint64_t here, const struct cr_bit_name *names)
+{
+	if (diff & boot) {
+		kputs(": ");
+		kputs(reg);
+		kputs(" lacks");
+		cr_put_bits(diff & boot, names);
+	}
+	if (diff & here) {
+		kputs(": ");
+		kputs(reg);
+		kputs(" has, unlike the boot processor,");
+		cr_put_bits(diff & here, names);
+	}
+}
+
+static void control_regs_selftest(void)
+{
+	uint32_t self = cpu_apic_id();
+	struct cr_seen boot;
+	unsigned asked = 1, differ = 0, unenforced = 0;
+	pmap_t scratch;
+	uint64_t frame;
+	uint8_t *code;
+
+	cr_read_here(&boot);
+	cr_probe_want = boot.cr4 & (CR4_SMEP | CR4_SMAP);
+	cr_probe_wp = (boot.cr0 & CR0_WP) != 0;
+
+	/* The census. */
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+		struct cr_seen *s;
+		uint64_t d0, d4, de;
+
+		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
+		    || !smp_is_online(c->apic_id))
+			continue;
+		s = &cr_seen[c->apic_id];
+		ipi_call_mask(1ULL << c->apic_id, cr_read_here, s);
+		asked++;
+
+		d0 = (s->cr0 ^ boot.cr0) & CR_CENSUS_CR0;
+		d4 = s->cr4 ^ boot.cr4;
+		de = (s->efer ^ boot.efer) & CR_CENSUS_EFER;
+		if (!s->answered || (d0 | d4 | de) == 0)
+			continue;
+
+		differ++;
+		kputs("UrMach x86-64: processor ");
+		kputdec(c->apic_id);
+		cr_put_diff("CR0", d0, boot.cr0, s->cr0, cr0_names);
+		cr_put_diff("CR4", d4, boot.cr4, s->cr4, cr4_names);
+		cr_put_diff("EFER", de, boot.efer, s->efer, efer_names);
+		kputs(" — WRONG (#639)\r\n");
+	}
+
+	kputs("UrMach x86-64: CR0, CR4 and EFER on ");
+	kputdec(asked);
+	kputs(differ == 0 ? " processors: each carries the boot processor's bits\r\n"
+			  : " processors: some differ from the boot processor's, WRONG (#639)\r\n");
+
+	if (cr_probe_want == 0 && !cr_probe_wp) {
+		kputs("UrMach x86-64: neither SMEP, SMAP nor CR0.WP is on the boot "
+		      "processor, so no processor can be asked to enforce them "
+		      "(#639)\r\n");
+		return;
+	}
+
+	/*
+	 * The probes: one user page, executable, and the same frame again
+	 * one page up, read-only, in a space of its own.
+	 */
+	frame = boot_frame_alloc();
+	scratch = pmap_create(0);
+	if (frame == 0 || scratch == PMAP_NULL
+	    || pmap_enter(scratch, CR_PROBE_VA, frame, VM_PROT_READ
+			  | VM_PROT_WRITE | VM_PROT_EXECUTE, 0) != PMAP_MAP_OK
+	    || pmap_enter(scratch, CR_PROBE_VA + PAGE_SIZE_4K, frame,
+			  VM_PROT_READ, 0) != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: no scratch space for the SMEP and SMAP "
+		      "probes — NOT ASKED (#639)\r\n");
+		if (scratch != PMAP_NULL)
+			pmap_destroy(scratch);
+		if (frame != 0)
+			boot_frame_free(frame);
+		return;
+	}
+	code = (uint8_t *)(uintptr_t) phys_to_direct(frame);
+	code[0] = 0x31;		/* xor %eax, %eax */
+	code[1] = 0xc0;
+	code[2] = 0xc3;		/* ret */
+	cr_probe_root = scratch->root_pa;
+
+	cr_probe_here(&boot);
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
+		    || !smp_is_online(c->apic_id))
+			continue;
+		ipi_call_mask(1ULL << c->apic_id, cr_probe_here,
+			      &cr_seen[c->apic_id]);
+	}
+
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+		struct cr_seen *s = c->apic_id == self ? &boot
+				  : &cr_seen[c->apic_id];
+
+		if (c->apic_id >= SMP_MAX_CPUS || !smp_is_online(c->apic_id))
+			continue;
+		if (((cr_probe_want & CR4_SMAP) && !s->smap_fault)
+		    || ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
+		    || (cr_probe_wp && !s->wp_fault)) {
+			unenforced++;
+			kputs("UrMach x86-64: processor ");
+			kputdec(c->apic_id);
+			if ((cr_probe_want & CR4_SMAP) && !s->smap_fault)
+				kputs(" stored to a user page,");
+			if ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
+				kputs(" ran code from a user page,");
+			if (cr_probe_wp && !s->wp_fault)
+				kputs(" wrote through a read-only mapping,");
+			kputs(" without a fault — WRONG (#639)\r\n");
+		}
+	}
+
+	kputs("UrMach x86-64: SMEP ");
+	kputs((cr_probe_want & CR4_SMEP) ? "on" : "not offered");
+	kputs(", SMAP ");
+	kputs((cr_probe_want & CR4_SMAP) ? "on" : "not offered");
+	kputs(", CR0.WP ");
+	kputs(cr_probe_wp ? "on" : "off");
+	kputs(" — probed on ");
+	kputdec(asked);
+	kputs(unenforced == 0
+	      ? " processors: every probe faulted on every one\r\n"
+	      : " processors: not enforced on some, WRONG (#639)\r\n");
+
+	pmap_remove(scratch, CR_PROBE_VA, CR_PROBE_VA + 2 * PAGE_SIZE_4K);
+	pmap_destroy(scratch);
+	boot_frame_free(frame);
 }
 
 /*
@@ -1671,6 +1995,7 @@ static void reclaim_selftest(void)
 	kputs(pv_count(frame) == 0
 	      ? ", and left no entry in the index\r\n"
 	      : ", AND LEFT A STALE INDEX ENTRY\r\n");
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -2138,7 +2463,12 @@ static void user_reachable_selftest(void)
 	      ? ") — the kernel half stays out of reach\r\n"
 	      : ") — WRONG\r\n");
 
-	pmap_remove(space, va, PAGE_SIZE_4K);
+	/*
+	 * An end, not a size (#612).  With PAGE_SIZE_4K for the end, below the
+	 * start, this removed nothing, and pmap_destroy() struck the leaf
+	 * instead -- which is why nothing was left, and why nothing said so.
+	 */
+	pmap_remove(space, va, va + PAGE_SIZE_4K);
 	pmap_destroy(space);
 	boot_frame_free(frame);
 }
@@ -2911,8 +3241,9 @@ static void ring3_selftest(void)
 	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
 	      : " — WRONG, the syscall window is not covered\r\n");
 
-	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
-	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);
+	/* Ends, not sizes (#612): see user_reachable_selftest(). */
+	pmap_remove(space, USER_PROBE_CODE_VA, USER_PROBE_CODE_VA + PAGE_SIZE_4K);
+	pmap_remove(space, USER_PROBE_DATA_VA, USER_PROBE_DATA_VA + PAGE_SIZE_4K);
 	pmap_destroy(space);
 	boot_frame_free(code_frame);
 	boot_frame_free(data_frame);
@@ -5629,6 +5960,9 @@ static void msix_table_selftest(void)
 		volatile uint32_t	*regs;
 		uint64_t		before = msi_hits;
 
+		/* #612: the device region is a bump that never gives back,
+		 * and it is not the VM's range: this mapping stays, as every
+		 * driver's does. */
 		regs = (volatile uint32_t *)(uintptr_t)
 		       pmap_map_device(msix_regs_base, 0x20000);
 		if (regs == 0) {
@@ -7116,7 +7450,29 @@ static void tlb_shootdown_selftest(void)
 	      ? " see the new page — every processor let go of it\r\n"
 	      : " see the new page — WRONG\r\n");
 
-	pmap_remove(pmap_kernel(), probe.va, PAGE_SIZE_4K);
+	/*
+	 * 🔴 Taken down, both frames back (#612).  This was
+	 * `pmap_remove(pmap_kernel(), probe.va, PAGE_SIZE_4K)': a size where
+	 * the end belongs, an end below the start, so nothing was removed, and
+	 * the page stayed in the VM's range for the VM to find.
+	 *
+	 * ⚠️ The entry goes back to old_frame first.  Step 2 repointed it by
+	 * hand, and the pv index still says old_frame is mapped here -- it is
+	 * what pmap_enter() recorded.  pmap_remove() strikes from the index the
+	 * frame the entry names, so with new_frame there it would look for an
+	 * index entry that never existed and leave old_frame's behind.
+	 */
+	if (ABLATE_612_LEAVE_MAPPED)
+		return;
+	*entry = pa_to_pte(old_frame) | (*entry & ~INTEL_PTE_PFN);
+	pmap_remove(pmap_kernel(), probe.va, probe.va + PAGE_SIZE_4K);
+	kputs("UrMach x86-64: shootdown probe taken down, ");
+	kputs(pmap_walk(root, probe.va, 0) == PT_ENTRY_NULL
+	      && pv_count(old_frame) == 0 && pv_count(new_frame) == 0
+	      ? "no entry and no index entry left -- both frames go back\r\n"
+	      : "WRONG -- an entry or an index entry is left\r\n");
+	boot_frame_free(old_frame);
+	boot_frame_free(new_frame);
 }
 
 /*
@@ -7329,8 +7685,9 @@ static void tlb_targeted_selftest(void)
 	      : " — WRONG, the counter cannot see one and the zero above "
 		"means nothing\r\n");
 
-	pmap_remove(u, va, PAGE_SIZE_4K);
+	pmap_remove(u, va, va + PAGE_SIZE_4K);	/* an end, not a size (#612) */
 	pmap_destroy(u);
+	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
 /*
@@ -7552,6 +7909,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
 	trap_entry_test();
+	control_regs_selftest();
 
 	/*
 	 * The double-fault self-test is TERMINAL, and that is why it is behind
@@ -7608,8 +7966,26 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 * before the second sample.
 	 */
 	if (boot_flag('C')) {
+		int was_on = interrupts_enabled(), now;
+
 		clock_event_init(LAPIC_TIMER_VECTOR);
 		clock_event_burnin(2);
+
+		/*
+		 * #612: asked here, by the caller, and not by the burn-in of
+		 * itself.  The burn-in returned with interrupts off whatever
+		 * it was given, and nothing said so until a cross-call at more
+		 * than one processor stopped the boot inside setup_main().
+		 */
+		now = interrupts_enabled();
+		kputs("UrMach x86-64: the burn-in found interrupts ");
+		kputs(was_on ? "on" : "off");
+		kputs(" and left them ");
+		kputs(now ? "on" : "off");
+		kputs(now == was_on
+		      ? ", as it found them (#612)\r\n"
+		      : " -- WRONG, it must give back the state it was given "
+			"(#612)\r\n");
 	}
 
 	kputs("UrMach x86-64: entering setup_main (#458)\r\n");

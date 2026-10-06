@@ -63,7 +63,6 @@ extern mach_port_t  __uros_exec_port;     /* defined as static — fwd here via 
 extern unsigned int __uros_my_pid;
 extern __uros_port_t __cached_task_self;  /* in handlers.c */
 extern void          __uros_post_fork_init(void);
-extern void          mig_reset_after_fork(void);  /* libmach_core */
 
 /* posix_exec.c keeps __uros_exec_port file-static for lookup caching.
  * Expose a thin getter+setter so fork can inherit + the child can
@@ -151,11 +150,11 @@ __uros_fork(void)
          */
         __cached_task_self = 0;
         /* Reset the MIG caches (reply port + task-self) BEFORE anything
-         * that issues an RPC: the parent's mig_reply_port is meaningless
+         * that issues an RPC: the parent's reply port is meaningless
          * in our fresh IPC space.  __uros_set_thread_area_tp installs the
          * LDT via the i386_set_ldt MIG RPC, so the reset must precede it.
          * __uros_post_fork_init re-runs this (idempotent). */
-        mig_reset_after_fork();
+        mach_task_self_init();
         /* Reinstall our TLS: thread_create_running forced %gs to USER_DS,
          * so the canary, errno and stdio locks are unusable until the LDT
          * descriptor is back.  The TP was captured by the parent below

@@ -413,7 +413,12 @@ static void note_boot_args(uint64_t a1, uint64_t argc, uint64_t name,
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
-	uint64_t base = percpu()->kernel_rsp;
+	/*
+	 * #526: one instruction.  This runs after the entry's sti, at level
+	 * zero, where percpu()->kernel_rsp could be read from the block of a
+	 * processor the thread had been moved away from.
+	 */
+	uint64_t base = percpu_kernel_rsp();
 	const struct trap_frame *saved = (const struct trap_frame *)(uintptr_t) base;
 
 	probe_gs_base = rdmsr(MSR_GS_BASE);
@@ -455,7 +460,7 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 	 * Safe to leave poisoned: the slot is scratch across two instructions
 	 * of the next entry, which writes it before anything reads it.
 	 */
-	percpu()->user_rsp = USER_PROBE_STOLEN_RSP;
+	percpu_set_user_rsp(USER_PROBE_STOLEN_RSP);	/* #526: this processor's */
 
 	note_boot_image(a1, a6);
 	note_boot_ipc(a1, a2, a3, a4, a5, a6);

@@ -187,6 +187,13 @@ typedef int		*dev_status_t;	/* Variable-length array of integers */
 typedef vm_address_t	*dma_sg_addr_t;
 #define	DMA_SG_ADDR_MAX	(256)		/* Maximum pages (1 MB) */
 
+/*
+ * #537: the pages of one request for device_dma_map_foreign_ops -- inline and
+ * at most thirty-two, the block server's largest request.
+ */
+typedef vm_address_t	*dma_page_list_t;
+#define	DMA_PAGE_LIST_MAX	(32)
+
 typedef int		dev_status_data_t[DEV_STATUS_MAX];
 
 /*

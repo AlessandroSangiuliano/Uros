@@ -33,6 +33,22 @@
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
+#include <cpu/spl.h>		/* #526: SPL0 */
+
+/*
+ * #526: the level the idle loop waits at, whatever level it found.  The idle
+ * thread holds nothing when a pass starts, so zero is always right for it --
+ * and a raised level it restored instead was held for ever: the processor's
+ * own tick deferred, and on the master every timeout in the machine with it.
+ */
+#define	MACHINE_IDLE_SPL	SPL0
+
+/*
+ * #526: the idle loop found this processor's level above MACHINE_IDLE_SPL as
+ * it went to wait.  Recorded, with the raise from zero that left it there,
+ * for machine_idle() to say once; called at splsched, so it only records.
+ */
+void		machine_idle_found_level(unsigned level);
 
 /* One fruitless pass of the idle loop; may halt once it has had enough. */
 void		machine_idle(int mycpu);

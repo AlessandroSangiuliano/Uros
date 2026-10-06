@@ -268,6 +268,41 @@ target_compile_definitions(block_device_server PRIVATE
   MACH_IPC_COMPAT=0
 )
 
+# #537 step 2: the block server asks the kernel page by page always, as before
+# device_dma_map_foreign_ops -- cap_test [25]'s handle shows what it costs.
+option(UROS_ABLATE_537_NO_BATCH "Build the #537 ablation: the block server never asks for a request's pages in one call" OFF)
+if(UROS_ABLATE_537_NO_BATCH)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_BATCH=1)
+    message(STATUS "#537 ablation: the block server asks page by page")
+endif()
+# #537 step 3: no translation kept, every transfer asks (the measure); or the
+# translations kept through a revocation notice, so a revoked buffer's
+# translation is used and the IOMMU's refusal can be seen (cap_test [26]).
+option(UROS_ABLATE_537_NO_TABLE "Build the #537 ablation: the block server keeps no buffer translation" OFF)
+option(UROS_ABLATE_537_TABLE_KEPT "Build the #537 ablation: a revocation notice leaves the buffer capabilities and their translations" OFF)
+if(UROS_ABLATE_537_NO_TABLE)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_TABLE=1)
+    message(STATUS "#537 ablation: the block server keeps no translation")
+endif()
+if(UROS_ABLATE_537_TABLE_KEPT)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_TABLE_KEPT=1)
+    message(STATUS "#537 ablation: translations kept through a revocation")
+endif()
+# #537: no epoch check after a transfer -- the window between a revocation and
+# its notice left open (with TABLE_KEPT, cap_test [26] is told success).
+option(UROS_ABLATE_537_NO_EPOCH "Build the #537 ablation: the block server does not read the revocation epoch after a transfer" OFF)
+if(UROS_ABLATE_537_NO_EPOCH)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_537_NO_EPOCH=1)
+    message(STATUS "#537 ablation: no epoch check after a transfer")
+endif()
+# #614: the open asks the token only for the mode's rights, and the transfers do
+# not check the mode -- a read-only token writes (cap_test [27] must say WRONG).
+option(UROS_ABLATE_614_NO_MODE_CHECK "Build the #614 ablation: no transfer checks the direction its handle was opened for" OFF)
+if(UROS_ABLATE_614_NO_MODE_CHECK)
+    target_compile_definitions(block_device_server PRIVATE BLK_ABLATE_614_NO_MODE_CHECK=1)
+    message(STATUS "#614 ablation: transfers ignore the handle's mode")
+endif()
+
 target_include_directories(block_device_server PRIVATE ${BLK_INCLUDE_DIRS})
 
 target_link_libraries(block_device_server PRIVATE

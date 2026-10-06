@@ -32,10 +32,13 @@
 #include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
 #include <cpu/halt_test.h>	/* #599: -Z */
+#include <cpu/spl_test.h>	/* #526: -E */
+#include <pmap/shootdown_test.h>	/* #638: -J */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
+#include <time/rcu_tick_test.h>	/* #649: -U */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -44,6 +47,7 @@
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
 #include <trap/handoff_test.h>	/* #607: -Q, the futex hand-off's wake */
+#include <trap/swap_disable_test.h>	/* #642: -Q, thread_swap_disable() */
 #include <ipc/ipc_mqueue.h>	/* ipc_dts_smp, for -N */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
@@ -461,17 +465,21 @@ machine_processors_ready(void)
 			double_panic_test();
 
 		/*
-		 * -Q: the futex hand-off and the waiters it must not switch
-		 * onto -- one the thread swapper has swapped out, one
-		 * thread_stop() has stopped (#607).
+		 * -Q: the thread swapper's races.  The futex hand-off and the
+		 * waiters it must not switch onto -- one the thread swapper has
+		 * swapped out, one thread_stop() has stopped (#607); then
+		 * thread_swap_disable() on an activation the swapper is moving
+		 * (#642).
 		 *
 		 * NOT gated on `want > 1', unlike the two above: the waker and
 		 * the waiter take turns on one processor as well as on two, and
 		 * the uniprocessor is the configuration this project treats as
 		 * first class.  Returns, so the boot goes on.
 		 */
-		if (boot_flag('Q'))
+		if (boot_flag('Q')) {
 			handoff_wake_test();
+			swap_disable_test();
+		}
 
 		/*
 		 * -N: the IPC Direct Thread Switch on (#329) -- x86-64's
@@ -521,6 +529,42 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('M'))
 			pmap_collect_bench();
+
+		/*
+		 * -R: the RCU queue with every processor kept busy (#608).
+		 * Here for the same reason as -M: the spinners are bound to
+		 * processors already in the scheduler.  Off the ordinary boot
+		 * because it holds every processor for two seconds.
+		 */
+		if (boot_flag('R'))
+			rcu_busy_bench();
+
+		/*
+		 * -E: a raise from level zero, preempted half-way (#526).  Not
+		 * gated on `want > 1', like -R: on one processor it says why
+		 * the question does not arise there.  Returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('E'))
+			spl_raise_split_test();
+
+		/*
+		 * -J: a shootdown whose thread is moved half-way (#638).  -E's
+		 * reasons; returns, so the boot goes on -- unless its second
+		 * arm finds the defect, which ends the boot with the panic
+		 * that names it.
+		 */
+		if (boot_flag('J'))
+			shootdown_moved_test();
+
+		/*
+		 * -U: a read section held across clock ticks while a callback
+		 * waits (#649).  -E's reasons, and the reader is bound to a
+		 * processor already in the scheduler; returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('U'))
+			rcu_tick_reader_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

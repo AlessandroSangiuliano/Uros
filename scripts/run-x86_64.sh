@@ -62,6 +62,9 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 # about the wrong thing.
 BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
+# The line that separates the guest's output from qemu's own messages, which
+# are kept apart while the guest runs and appended after it (#613).
+QEMU_STDERR_HEADER="=== qemu's own messages (its stderr, kept apart while the guest ran, #613) ==="
 
 # What the run was taken under, written into the LOG rather than only shouted
 # at the terminal (#516).  Shared with run-qemu.sh, because each of the two
@@ -297,7 +300,9 @@ elif grep -aq "$TERMINATOR" "$LOG"; then
 		done
 	echo "  log: $LOG"
 	exit 1
-elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: '; then
+elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: ' ||
+     { head -1 "$LOG" | grep -qxF "$QEMU_STDERR_HEADER" &&
+       sed -n 2p "$LOG" | grep -q '^qemu-system-x86_64: '; }; then
 	# 🔴 A REFUSAL TO START IS NOT A RESULT, and it used to be reported as
 	# one.  QEMU rejects a command line by printing one line and exiting,
 	# and every check below reads a log that never had a kernel in it --
@@ -313,12 +318,13 @@ elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: '; then
 	# argument.  Nothing about the kernel was involved.
 	echo "  FAILED: qemu refused to start — this says nothing about the"
 	echo "          kernel, and the command line is where to look:"
-	sed -n '1,3p' "$LOG" | sed 's/^/    /'
+	grep -vxF "$QEMU_STDERR_HEADER" "$LOG" | sed -n '1,3p' | sed 's/^/    /'
 	echo "    (arguments passed through: $RUN_ARGS)"
 	echo "  log: $LOG"
 	exit 3
-elif [ ! -s "$LOG" ]; then
-	# Started, said nothing at all.  A third thing again: not a refusal,
+elif [ ! -s "$LOG" ] || head -1 "$LOG" | grep -qxF "$QEMU_STDERR_HEADER"; then
+	# Started, said nothing at all -- the guest, that is: qemu's own lines,
+	# kept apart since #613, are no output of the kernel's.  A third thing again: not a refusal,
 	# because qemu printed no complaint, and not a truncated boot, because
 	# there is nothing to truncate.
 	echo "  FAILED: qemu started and produced no output whatsoever — the"
@@ -392,6 +398,20 @@ must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
 must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#599).'
+must_report 'spl_test: starting' 'spl_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every thread stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside the raises, which is the face of #526 that stops a machine (#526).'
+must_report 'shootdown_test: \[1\] starting' 'shootdown_test: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every remapper stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside a shootdown (#638).'
+must_report 'shootdown_test: \[2\] starting' 'shootdown_test: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'A cross-call sent to its own sender never returns: it ends the boot with a panic that names it.  A run that stops after the start line without that panic has stopped somewhere else inside the calls (#638).'
+must_report 'rcu_tick: starting' 'rcu_tick: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait on either side is bounded and the verdict is printed either way; a run that stops after the start line has stopped inside a read section or in a grace period that does not end (#649).'
+must_report 'swap_disable: \[1\] starting' 'swap_disable: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait in the arm is bounded and the verdict is printed either way.  A second swap-in of the same stack ends the boot in the assertion of thread_doswapin(); a run that stops after the start line without that panic has stopped inside thread_swap_disable() (#642).'
+must_report 'swap_disable: \[2\] starting' 'swap_disable: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait in the arm is bounded and the verdict is printed either way.  A run that stops after the start line has stopped inside the swapper scan or inside thread_swap_disable() (#642).'
+must_report 'swap_disable: \[3\] starting' 'swap_disable: \[3\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait in the arm is bounded and the verdict is printed either way.  A run that stops after the start line has stopped inside thread_swap_disable() or the swap-in it waits for (#642).'
 # ⚠️ The terminator matches any count, not `3 of 3'.  A run that reported "2 of
 # 3" DID finish and its failing arm is already caught as a WRONG line; asking
 # here for the passing count as well would report one defect as two, and would
@@ -977,9 +997,19 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-drive file=$AHCI_DISK2,if=none,id=ahcidisk1,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
+# 🔴 QEMU'S OWN STDERR APART FROM THE GUEST'S SERIAL OUTPUT (#613).  One file
+# for both had two writers that know nothing of each other's lines: the intel
+# IOMMU model warns on every DMA fault, and under KVM one of its warnings
+# landed inside dma_reclaim_test's last line -- "dma" ... "_r" ... "eclaim: 8
+# of 8 arms passed" -- so the harness, which matches whole lines, waited out
+# its budget for a line that was there and called a finished run silent.
+# Kept in a file of its own while the guest runs, and put after the guest's
+# output, under a header of its own, once qemu has exited.
+QERR="$LOG.qemu-stderr"
+: > "$QERR"
 # shellcheck disable=SC2086
 qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS "$@" \
-	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
+	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
 # Watch the log, not the clock.
@@ -1188,8 +1218,31 @@ while kill -0 "$QPID" 2>/dev/null; do
 	sleep 0.2
 done
 
+# 🔴 A run cut short with the gdb stub on is walked before it is killed (#526).
+#
+# The kill below throws away the one thing a stall leaves: the machine in the
+# state it stopped in.  A run started with -s and then killed anyway is a
+# capture asked for and thrown away -- which is how #526's first A/B lost its
+# chance, and why the user had to ask why the stub was not on from the start.
+# So with the stub on qemu's command line, the threads are walked first, into
+# a file beside the log, and the kill comes after.
+if [ "$CUT_SHORT" = 1 ] && printf '%s\n' "$@" | grep -qx -- '-s'; then
+	timeout 180 gdb -batch -x "$REPO/scripts/x86_64-walk-threads.py" \
+		"$BUILD/export/uros/boot/mach_kernel" > "$LOG.walk.txt" 2>&1
+	echo "  cut short with the stub on: the threads were walked before the kill, $LOG.walk.txt"
+fi
+
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+
+# qemu's own messages, after everything the guest said (#613).  The header is
+# what the readers below and double-panic-check.sh take for the end of the
+# guest's output.
+if [ -s "$QERR" ]; then
+	echo "$QEMU_STDERR_HEADER" >> "$LOG"
+	cat "$QERR" >> "$LOG"
+fi
+rm -f "$QERR"
 
 # ── The host reads what the boot wrote (#498) ─────────────────────────────
 #

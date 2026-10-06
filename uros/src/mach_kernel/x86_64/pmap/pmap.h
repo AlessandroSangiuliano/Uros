@@ -225,6 +225,9 @@ static __inline__ boolean_t pmap_read_enter_for(uint64_t va)
 /* #455: -C, what concurrency does to a pmap that has no locking. */
 void pmap_collect_bench(void);
 
+/* #608: -R, the RCU queue with every processor busy (rcu_bench.c). */
+void rcu_busy_bench(void);
+
 /*
  * The per-pmap spin lock of PMAP_ARM_PMAP_LOCK, and nothing at all in the
  * other arm -- so the branch is what the measurement is measuring.
@@ -473,6 +476,19 @@ void pmap_protect_kernel(void);
  * offers it.  Returns the CR4 bits it actually turned on.
  */
 uint64_t pmap_enable_smep_smap(void);
+
+/*
+ * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor
+ * that loads them, and pmap_protect_kernel() and pmap_enable_smep_smap() run on
+ * the boot processor alone: the application processors of every boot ran
+ * without CR0.WP, SMEP or SMAP.  Without WP the kernel writes through
+ * read-only mappings -- .text's and .rodata's, and the copy-on-write ones
+ * copyout() relies on faulting -- and the access brackets, which read one
+ * global, went on as if SMAP held everywhere.  Each application processor
+ * calls this on its way up, and it applies what the boot processor turned on
+ * instead of deciding again.
+ */
+void pmap_protections_here(void);
 
 /*
  * Make `size` bytes of device registers at physical `pa` reachable, and

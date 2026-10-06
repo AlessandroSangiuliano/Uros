@@ -43,7 +43,7 @@ BEGIN {
 	hdr = "^  cpu [0-9]+ backtrace \\(addr2line for file and line\\):$"
 	frame = "^    0x[0-9a-f]+( <[^<>]+>)?$"
 }
-/^qemu-system-x86_64:/ || /^=== run conditions/ { done = 1 }
+/^qemu-system-x86_64:/ || /^=== run conditions/ || /^=== qemu.s own messages/ { done = 1 }
 done { next }
 /^startup: [0-9]+ processors in the scheduler/ { cpus = $2 }
 /^double_panic: NOT ASKED/ { declined = $0 }

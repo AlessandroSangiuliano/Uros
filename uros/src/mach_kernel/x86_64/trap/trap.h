@@ -170,6 +170,8 @@ struct trap_frame {
  * field above moves the real offsets and stops the build on the line below,
  * rather than in a boot three weeks later.
  */
+_Static_assert(TF_VECTOR == __builtin_offsetof(struct trap_frame, vector),
+	       "TF_VECTOR and struct trap_frame disagree");
 _Static_assert(TF_RIP    == __builtin_offsetof(struct trap_frame, rip),
 	       "TF_RIP and struct trap_frame disagree");
 _Static_assert(TF_CS     == __builtin_offsetof(struct trap_frame, cs),
@@ -279,6 +281,13 @@ void trap_init(void);
 void trap_dispatch(struct trap_frame *frame);
 
 /*
+ * The running thread's saved user frame, pcb->user (cpu/machdep.c).  Called
+ * from the return paths in entry.S, and from the trap path to check that a
+ * frame about to block in exception() is that one (#650).
+ */
+struct trap_frame *act_user_frame(void);
+
+/*
  * Entry from the four stubs that cannot decide from the saved code segment
  * (#440): #DB, NMI, #DF and #MC.  See trap/entry.S for why those four and no
  * others, and for how the decision is made.
@@ -367,6 +376,17 @@ int trap_in_replay(void);
 void trap_expect(uint64_t vector, uint64_t resume_rip);
 
 /*
+ * Withdraw an expectation that did not fire.
+ *
+ * A probe armed for a fault that the machine then allowed -- the control half
+ * of a protection test, or a protection that is off -- leaves the expectation
+ * standing, and the next real fault of that vector, anywhere, would be taken
+ * for it and resumed at the probe's address.  The tests that left one standing
+ * were safe only because the next test armed again and fired (#639).
+ */
+void trap_expect_cancel(void);
+
+/*
  * Resume at the instruction the trap arrived on, rather than somewhere else.
  *
  * For the faults trap_expect() was written for, resuming where they happened
@@ -438,6 +458,12 @@ struct trap_paranoid_record {
 };
 
 const struct trap_paranoid_record *trap_last_paranoid(void);
+
+/*
+ * #617: says, once, if a return to ring 3 left with an AST pending.  The idle
+ * loop calls it, from thread context.
+ */
+void thread_return_ast_report(void);
 
 /* Forget the last one, so that "it happened" can be distinguished from "it
  * happened earlier".  A test that only checks the contents of this record

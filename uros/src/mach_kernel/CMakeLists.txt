@@ -86,6 +86,44 @@ endif()
 # look exactly like a measuring build and behave like an ordinary one.
 option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF)
 option(UROS_SYSCALL_PROFILE "Build the #411 Mach trap phase profile, which #392 consumes" OFF)
+# #537, both targets: the capability check hashes the HMAC key's two blocks
+# again on every token, as it did before the key was made ready once.
+option(UROS_ABLATE_537_HMAC_FULL "Build the #537 ablation: every capability check hashes the HMAC key's padded blocks again" OFF)
+option(UROS_ABLATE_537_MAC_EVERY_TIME "Build the #537 ablation: the in-kernel capability check never answers from the verified-token cache" OFF)
+option(UROS_ABLATE_537_EPOCH_KEPT "Build the #537 ablation: a revocation leaves the cache epoch, so the cache outlives it (the self-test must say WRONG)" OFF)
+option(UROS_ABLATE_537_PAGE_WALK "Build the #537 ablation: a DMA page is found by walking its region, not by the sorted index" OFF)
+option(UROS_ABLATE_537_IX_UNSORTED "Build the #537 ablation: the page index is left unsorted (the self-test must say WRONG)" OFF)
+option(UROS_ABLATE_537_HMAC_LOCKED "Build the #537 ablation: the capability MAC is computed with cap_lock held, as before" OFF)
+option(UROS_PROBE_537_CAP_CONCURRENCY "Build the #537 probe: capability checks timed alone and on every processor at once" OFF)
+# #615, both targets: thread_setrun()'s unbound branch puts the bound thread it
+# displaces from a processor's next_thread on the processor set's queue again.
+option(UROS_ABLATE_615_DISPLACED_TO_SET "Build the #615 ablation: a bound thread displaced from its processor's next_thread goes to the set's run queue, where any processor may take it (pmap_bench, -M, must say WRONG)" OFF)
+# #616, x86_64: every thread is born with a user frame again, kernel threads too.
+option(UROS_ABLATE_616_KERNEL_FRAME "Build the #616 ablation: a kernel thread gets a zeroed user frame, so thread_get_state answers for it (state_test, entry 7, must say WRONG)" OFF)
+# #612, x86_64: the clock burn-in returns with interrupts off again, whatever it was given.
+option(UROS_ABLATE_612_BURNIN_CLI "Build the #612 ablation: the clock burn-in ends with interrupts off whatever its caller had (entries 3, 4, 20: the line after the burn-in must say WRONG, and at more than one processor the boot stops in setup_main)" OFF)
+# #612, x86_64: the boot self-tests that map in the VM's range leave their pages there again.
+option(UROS_ABLATE_612_LEAVE_MAPPED "Build the #612 ablation: map_selftest and tlb_shootdown_selftest leave their pages in the VM's range (every x86-64 boot: pmap_virtual_space() must say WRONG and name them)" OFF)
+# #608, both targets: the RCU drain thread is not started, so only the idle loop runs callbacks.
+option(UROS_ABLATE_608_NO_DRAIN_THREAD "Build the #608 ablation: no RCU drain thread, only the idle loop runs callbacks (x86-64 -R: with every processor busy the queue must grow and the bench say WRONG)" OFF)
+# #526, both targets: the idle loop restores the level it found again, instead of waiting at zero.
+option(UROS_ABLATE_526_IDLE_RESTORES "Build the #526 ablation: the idle loop restores the level it found (a raised one is held for ever; entry 22 under TCG at 1.4 GHz stalls about once in 30 boots)" OFF)
+# #617, x86_64: a TEST option, not an ablation -- the window in thread_return_ast() widened, so
+# that the test can show what happens inside it with the fix and without.
+option(UROS_WIDEN_617_WINDOW "Build for #617's test: a thread making its first return to ring 3 spins for 50 us between reading its processor's number and reading that processor's AST word (with the window open, pthread_test [31] loses its embryo threads to ring 3)" OFF)
+# #617, x86_64: thread_return_ast() takes its last look with interrupts on again.
+option(UROS_ABLATE_617_RETURN_AST "Build the #617 ablation: thread_return_ast() checks need_ast with interrupts on, so a thread preempted between reading its processor's number and that processor's AST word reads another's (with UROS_WIDEN_617_WINDOW, pthread_test [31] must lose embryos to ring 3 and the return check say WRONG)" OFF)
+# #526, x86_64: splx() finds the per-CPU block before it turns interrupts off again.
+option(UROS_ABLATE_526_SPLX_WINDOW "Build the #526 ablation: splx() finds this processor's block with interrupts still on, so a thread preempted at level zero finishes its raise in the block of the processor it left (x86-64 -E, GRUB entry 30: must say WRONG)" OFF)
+# #638, x86_64: a TEST option, not an ablation -- the shootdown's two windows widened, so that
+# the test can show what a thread moved inside them does, with the fixes and without.
+option(UROS_WIDEN_638_WINDOW "Build for #638's test: while -J runs, a shootdown spins for 50 us between deciding which processor it is on and acting on it (a thread moved inside the spin: -J arm [1] must find a stale translation, arm [2] a cross-call to its own sender)" OFF)
+# #639, x86_64: the application processors keep the control registers the trampoline left them again.
+option(UROS_ABLATE_639_AP_CONTROL "Build the #639 ablation: the application processors keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before (the boot self-test must name them on every application processor, in the census and in the probes)" OFF)
+# #638, x86_64: tlb_flush_range() flushes this processor and cross-calls the others with preemption on again.
+option(UROS_ABLATE_638_FLUSH_UNPINNED "Build the #638 ablation: tlb_flush_range() flushes this processor and cross-calls the others with preemption on, so a thread moved between the two leaves the processor it arrived at unflushed (with UROS_WIDEN_638_WINDOW, -J arm [1] must say WRONG)" OFF)
+# #638, x86_64: ipi_call_mask() strikes its own bit with preemption on again.
+option(UROS_ABLATE_638_STRIKE_UNPINNED "Build the #638 ablation: ipi_call_mask() strikes this processor's bit with preemption on, so a thread moved before it sends sends to itself (with UROS_WIDEN_638_WINDOW, -J arm [2] must end in the panic that names it)" OFF)
 # 🔴 How often the #561 vector-state exemption fires.  OFF, and off is the
 # shipping answer: counting it is three increments on EVERY context switch, for
 # ever, to learn something that is learned once -- on a path whose saving is
@@ -475,9 +513,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/startup.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/smp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/collect_bench.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/rcu_bench.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/shootdown_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/direct.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/phys.c
@@ -504,6 +545,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_event.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/preempt_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rcu_tick_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu.c
@@ -516,6 +558,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/ast_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/wait_preempt_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/handoff_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/swap_disable_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
@@ -622,6 +665,72 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_FAULT_PROFILE)
       list(APPEND KERNEL_DEFINES_BARE FAULT_PROFILE=1)
       message(STATUS "#482 copy-on-write fault phase profile: ON (x86_64)")
+  endif()
+  if(UROS_ABLATE_537_HMAC_FULL)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_537_HMAC_FULL=1)
+      message(STATUS "#537 ablation: the HMAC key's blocks hashed on every check (x86_64)")
+  endif()
+  foreach(_a MAC_EVERY_TIME EPOCH_KEPT PAGE_WALK IX_UNSORTED HMAC_LOCKED)
+      if(UROS_ABLATE_537_${_a})
+          list(APPEND KERNEL_DEFINES_BARE ABLATE_537_${_a}=1)
+          message(STATUS "#537 ablation: ${_a} (x86_64)")
+      endif()
+  endforeach()
+  if(UROS_PROBE_537_CAP_CONCURRENCY)
+      list(APPEND KERNEL_DEFINES_BARE PROBE_537_CAP_CONCURRENCY=1)
+      message(STATUS "#537 probe: capability checks alone and on every processor at once (x86_64)")
+  endif()
+  if(UROS_ABLATE_615_DISPLACED_TO_SET)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_615_DISPLACED_TO_SET=1)
+      message(STATUS "#615 ablation: a displaced bound thread goes to the set's run queue (x86_64)")
+  endif()
+  if(UROS_ABLATE_616_KERNEL_FRAME)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_616_KERNEL_FRAME=1)
+      message(STATUS "#616 ablation: kernel threads are born with a user frame (x86_64)")
+  endif()
+  if(UROS_ABLATE_612_BURNIN_CLI)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_612_BURNIN_CLI=1)
+      message(STATUS "#612 ablation: the clock burn-in returns with interrupts off (x86_64)")
+  endif()
+  if(UROS_ABLATE_612_LEAVE_MAPPED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_612_LEAVE_MAPPED=1)
+      message(STATUS "#612 ablation: boot self-tests leave pages in the VM's range (x86_64)")
+  endif()
+  if(UROS_ABLATE_608_NO_DRAIN_THREAD)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_608_NO_DRAIN_THREAD=1)
+      message(STATUS "#608 ablation: no RCU drain thread (x86_64)")
+  endif()
+  if(UROS_ABLATE_526_IDLE_RESTORES)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_526_IDLE_RESTORES=1)
+      message(STATUS "#526 ablation: the idle loop restores the level it found (x86_64)")
+  endif()
+  if(UROS_ABLATE_617_RETURN_AST)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_617_RETURN_AST=1)
+      message(STATUS "#617 ablation: thread_return_ast() looks with interrupts on (x86_64)")
+  endif()
+  if(UROS_WIDEN_617_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE WIDEN_617_WINDOW=1)
+      message(STATUS "#617 test: the return-to-user AST window widened (x86_64)")
+  endif()
+  if(UROS_ABLATE_526_SPLX_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_526_SPLX_WINDOW=1)
+      message(STATUS "#526 ablation: splx() finds the per-CPU block with interrupts on (x86_64)")
+  endif()
+  if(UROS_WIDEN_638_WINDOW)
+      list(APPEND KERNEL_DEFINES_BARE WIDEN_638_WINDOW=1)
+      message(STATUS "#638 test: the shootdown's windows widened while -J runs (x86_64)")
+  endif()
+  if(UROS_ABLATE_639_AP_CONTROL)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_639_AP_CONTROL=1)
+      message(STATUS "#639 ablation: the application processors keep the trampoline's control registers (x86_64)")
+  endif()
+  if(UROS_ABLATE_638_FLUSH_UNPINNED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_638_FLUSH_UNPINNED=1)
+      message(STATUS "#638 ablation: tlb_flush_range() flushes and cross-calls with preemption on (x86_64)")
+  endif()
+  if(UROS_ABLATE_638_STRIKE_UNPINNED)
+      list(APPEND KERNEL_DEFINES_BARE ABLATE_638_STRIKE_UNPINNED=1)
+      message(STATUS "#638 ablation: ipi_call_mask() strikes its own bit with preemption on (x86_64)")
   endif()
   if(UROS_ABLATE_558_PVLOCK)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_558_PVLOCK=1)
@@ -1603,6 +1712,32 @@ endif()
 if(UROS_FAULT_PROFILE)
     list(APPEND KERNEL_DEFINES -DFAULT_PROFILE=1)
     message(STATUS "#482 copy-on-write fault phase profile: ON (i386)")
+endif()
+if(UROS_ABLATE_537_HMAC_FULL)
+    list(APPEND KERNEL_DEFINES -DABLATE_537_HMAC_FULL=1)
+    message(STATUS "#537 ablation: the HMAC key's blocks hashed on every check (i386)")
+endif()
+foreach(_a MAC_EVERY_TIME EPOCH_KEPT PAGE_WALK IX_UNSORTED HMAC_LOCKED)
+    if(UROS_ABLATE_537_${_a})
+        list(APPEND KERNEL_DEFINES -DABLATE_537_${_a}=1)
+        message(STATUS "#537 ablation: ${_a} (i386)")
+    endif()
+endforeach()
+if(UROS_PROBE_537_CAP_CONCURRENCY)
+    list(APPEND KERNEL_DEFINES -DPROBE_537_CAP_CONCURRENCY=1)
+    message(STATUS "#537 probe: capability checks alone and on every processor at once (i386)")
+endif()
+if(UROS_ABLATE_615_DISPLACED_TO_SET)
+    list(APPEND KERNEL_DEFINES -DABLATE_615_DISPLACED_TO_SET=1)
+    message(STATUS "#615 ablation: a displaced bound thread goes to the set's run queue (i386)")
+endif()
+if(UROS_ABLATE_608_NO_DRAIN_THREAD)
+    list(APPEND KERNEL_DEFINES -DABLATE_608_NO_DRAIN_THREAD=1)
+    message(STATUS "#608 ablation: no RCU drain thread (i386)")
+endif()
+if(UROS_ABLATE_526_IDLE_RESTORES)
+    list(APPEND KERNEL_DEFINES -DABLATE_526_IDLE_RESTORES=1)
+    message(STATUS "#526 ablation: the idle loop restores the level it found (i386)")
 endif()
 
 foreach(_d IN LISTS UROS_ABLATE_577_DEFS)

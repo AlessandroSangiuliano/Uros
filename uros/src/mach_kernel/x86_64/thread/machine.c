@@ -254,6 +254,11 @@ thread_begin_trampoline(void *unused)
 	/*NOTREACHED*/
 }
 
+/* #616's ablation: every thread gets a user frame again, kernel threads too. */
+#ifndef	ABLATE_616_KERNEL_FRAME
+#define	ABLATE_616_KERNEL_FRAME	0
+#endif
+
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -390,10 +395,21 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * ⚠️ The address is derived and not chosen; trap.h's KERNEL_STACK_USER_FRAME
 	 * says why, and act_machine_set_state() below uses the same expression
 	 * because it is the same claim about the same bytes.
+	 *
+	 * 🔴 FOR A THREAD OF A USER TASK ONLY (#616).  A kernel thread never
+	 * reaches ring 3, so it keeps pcb_init()'s honest state -- no frame --
+	 * and thread_get_state() refuses it, where a zeroed frame answered as
+	 * its registers: "a thread stopped at address zero, which is a lie a
+	 * debugger would repeat".  The loader asks about a user thread that has
+	 * not run yet, and that one still has its frame.  Given to every thread
+	 * from #422 on, and state_test's check on it -- written five days
+	 * before -- failed unseen until #615 ran entry 7.
 	 */
-	pcb->user = (struct trap_frame *)
-		KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
-	thread_frame_init(pcb->user);
+	if (thr_act->task != kernel_task || ABLATE_616_KERNEL_FRAME) {
+		pcb->user = (struct trap_frame *)
+			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+		thread_frame_init(pcb->user);
+	}
 
 	return KERN_SUCCESS;
 }
@@ -933,9 +949,9 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	 * this issue made it.
 	 *
 	 * ⚠️ Same shape as the defect #458 records in thread_machine_set_current
-	 * below: current_thread() is cpu_data[cpu_number()].active_thread, the
-	 * machine-independent array, and a thread that starts while that still
-	 * names somebody else reads its own fields through the wrong pointer.
+	 * below: current_thread() reads this processor's record of its thread,
+	 * and a thread that starts while that still names somebody else reads
+	 * its own fields through the wrong pointer.
 	 * The symptom was a call through a null function pointer into the low
 	 * physical page -- rip 0x3, with the interrupt vector table
 	 * disassembling as instructions.
@@ -1073,24 +1089,25 @@ void
 thread_machine_set_current(thread_t thread)
 {
 	/*
-	 * ⚠️ TWO places, and the machine-independent one is the one that
-	 * counts (#458).
+	 * ⚠️ TWO places, and they must agree (#458, #646).
 	 *
-	 * current_thread() is `cpu_data[cpu_number()].active_thread' --
-	 * <kern/cpu_data.h>, an array the shared kernel owns.  This function
-	 * used to set only the per-CPU block below, so the whole
-	 * machine-independent tree asked cpu_data[] and got NULL: the first
-	 * thread reached thread_continue(), read self->continuation through a
-	 * null self, and called whatever the low physical page happened to
-	 * hold.  Two halves that never met, again.
+	 * current_thread() reads the per-CPU block, in one %gs-relative load
+	 * (<machine/cpu_data.h>), so the thread's identity changes with the
+	 * first store below, which an interrupt cannot land inside -- and the
+	 * tick can arrive here, being class 15 above SPLHI.  cpu_data[] is the
+	 * machine-independent tree's array, read by processor number (ddb, the
+	 * quiet census), and is written second.  The syscall entry reads the
+	 * block's copy too, out of %gs before it has a stack.
 	 *
-	 * The per-CPU copy is kept, and is not redundant: the syscall entry
-	 * path reads it out of %gs before it has a stack to index an array
-	 * with.  It is a cache of the line above, and this is the one place
-	 * that writes either.
+	 * Before #458 this function set only the block, while current_thread()
+	 * read cpu_data[]: the first thread read its continuation through a
+	 * null self and called into the low physical page.  Before #646
+	 * current_thread() read cpu_data[cpu_number()], two loads a migration
+	 * could split.  The only other writer is processor_doshutdown(), which
+	 * clears both.
 	 */
+	percpu_set_active_thread((void *) thread);
 	cpu_data[cpu_number()].active_thread = thread;
-	percpu()->active_thread = (void *) thread;
 }
 
 /*

@@ -57,6 +57,11 @@
 #include <cpu/smp.h>			/* real_ncpus */
 #include <power_save.h>
 #include <sync/barrier.h>
+#include <cpu/percpu.h>		/* #526: raised_by, raised_on */
+#include <cpu/spl.h>			/* #526: splget */
+#include <ddb/ksym.h>			/* #526: the raise, by name */
+#include <kern/misc_protos.h>		/* printf */
+#include <trap/trap.h>			/* #617: thread_return_ast_report */
 
 /*
  * How many fruitless passes of the idle loop before halting.
@@ -87,10 +92,76 @@ struct idle_state {
 	uint32_t		dry;
 	uint64_t		naps;		/* times this one halted */
 	uint64_t		knocks;		/* doorbells this one sent */
-	uint8_t			pad[64 - 24];
+	uint32_t		said_level;	/* #526: said once */
+	uint32_t		found_level;	/* #526: the first level found */
+	uint64_t		found_by;	/* ... the raise that left it */
+	void			*found_on;	/* ... and on which thread */
+	uint32_t		levels_found;	/* #526: how many times */
+	uint8_t			pad[64 - 52];
 } __attribute__((aligned(64)));
 
 static struct idle_state idle_state[NCPUS];
+
+/*
+ * 🔴 An idle processor whose level was above zero (#526).
+ *
+ * The idle loop used to restore the level it found -- `s = splsched(); ...
+ * splx(s)' -- and a raised one was held for ever: each pass sampled it again
+ * and restored it again.  At SPLHI that defers the processor's own tick, and
+ * when that processor is the master, timeout_tick() never runs again and every
+ * timed wait in the machine sleeps for good.  That is how #526's boots stopped,
+ * read on a live kernel: processor 0 idle at 14, `s' = 14 in the idle loop's
+ * frame, the tick pending, timeout_ticks frozen.
+ *
+ * The loop now waits at zero (kern/sched_prim.c).  What it found is still a
+ * defect -- somebody left a level raised that the idle thread then inherited --
+ * so it is recorded here with the raise from zero that splx() kept, and said
+ * once by machine_idle(), at level zero.  Said, then mended: a mend alone would
+ * let the boot go on and leave the path unknown.
+ */
+void
+machine_idle_found_level(unsigned level)
+{
+	int			mycpu = cpu_number();
+	struct idle_state	*st;
+	struct percpu		*p = percpu();
+
+	if (level == SPL0 || mycpu < 0 || mycpu >= NCPUS)
+		return;
+
+	st = &idle_state[mycpu];
+	st->levels_found++;
+	if (st->found_level != 0)
+		return;				/* the first one is the one said */
+	st->found_level = level;
+	st->found_by = p->raised_by;
+	st->found_on = p->raised_on;
+}
+
+static void
+idle_say_level(int mycpu, struct idle_state *st)
+{
+	const char	*nm;
+	uint64_t	off = 0;
+
+	if (st->found_level == 0 || st->said_level)
+		return;
+	st->said_level = 1;
+
+	nm = ksym_lookup_call(st->found_by, &off);
+	if (nm != 0)
+		printf("idle: processor %d went to wait at level %u, %u time(s) "
+		       "so far -- WRONG; it was raised from zero by %s+0x%lx on "
+		       "thread %p and never lowered (#526)\n", mycpu,
+		       st->found_level, st->levels_found, nm,
+		       (unsigned long) off, st->found_on);
+	else
+		printf("idle: processor %d went to wait at level %u, %u time(s) "
+		       "so far -- WRONG; it was raised from zero at %p on thread "
+		       "%p and never lowered (#526)\n", mycpu, st->found_level,
+		       st->levels_found, (void *)(uintptr_t) st->found_by,
+		       st->found_on);
+}
 
 void
 machine_idle(int mycpu)
@@ -118,6 +189,12 @@ machine_idle(int mycpu)
 	 * script.
 	 */
 	quiet_census_pass(mycpu);
+
+	/* #526: and whether the idle loop found this processor's level raised. */
+	idle_say_level(mycpu, st);
+
+	/* #617: and whether a return to ring 3 left with an AST pending. */
+	thread_return_ast_report();
 
 	/*
 	 * #599: refusals an engine recorded are no longer read here.  A

@@ -1469,6 +1469,29 @@ thread_bind(
 	thread_unlock(thread);
 	splx(s);
 }
+
+/*
+ *	thread_bind_here:
+ *
+ *	Bind the calling thread to the processor it is running on, and answer
+ *	which one (#646).  The read and the bind happen with preemption off,
+ *	so the answer is the processor the thread stays on.  A caller that
+ *	read cpu_number() bare and then counted on running there -- choosing
+ *	"a processor that is not this one" for a test, say -- held a number
+ *	that could already name a processor it had left.  Undone with
+ *	thread_bind(current_thread(), PROCESSOR_NULL).
+ */
+int
+thread_bind_here(void)
+{
+	int	cpu;
+
+	disable_preemption();
+	cpu = cpu_number();
+	thread_bind(current_thread(), cpu_to_processor(cpu));
+	enable_preemption();
+	return cpu;
+}
 #endif	/*NCPUS > 1*/
 
 /*
@@ -1494,6 +1517,8 @@ thread_bind(
 #endif
 
 #if	S319_INSTRUMENT
+#include <kern/tsc.h>		/* urmach_tsc (#537) */
+
 struct s319_stat {
 	unsigned long long	psetlock_cyc;	/* cycles acquiring pset->runq.lock */
 	unsigned long		psetlock_cnt;	/* # acquisitions (thread_select) */
@@ -1504,13 +1529,11 @@ struct s319_stat {
 	char			pad[64];	/* isolate each entry to its own line */
 } s319[NCPUS] __attribute__((aligned(64)));
 
-static inline unsigned long long
-s319_rdtsc(void)
-{
-	unsigned int	lo, hi;
-	__asm__ volatile("rdtsc" : "=a" (lo), "=d" (hi));
-	return ((unsigned long long) hi << 32) | lo;
-}
+/*
+ * The clock is <kern/tsc.h>'s (#537).  This had its own copy, the one of three
+ * without the "memory" clobber or, on x86-64, the fence -- so a lock acquire's
+ * cycles were read by a different clock than the profiles' columns.
+ */
 
 void
 s319_dump(void)
@@ -1590,9 +1613,9 @@ thread_select(
 		unsigned long		_sd;
 		register int		_sc;
 
-		_s0 = s319_rdtsc();
+		_s0 = urmach_tsc();
 		simple_lock(&pset->runq.lock);
-		_s1 = s319_rdtsc();
+		_s1 = urmach_tsc();
 		_sd = (unsigned long) (_s1 - _s0);
 		_sc = cpu_number();
 		s319[_sc].psetlock_cyc += _sd;
@@ -2557,6 +2580,13 @@ run_queue_enqueue(
 	if (whichq < 0 || whichq > MINPRI) {
 		panic("run_queue_enqueue: bad pri (%d)\n", whichq);
 	}
+#if	NCPUS > 1
+	if (th->bound_processor != PROCESSOR_NULL &&
+	    rq != &th->bound_processor->runq) {
+		sched_bound_displaced++;			/* #615 */
+		sched_bound_displaced_slot = th->bound_processor->slot_num;
+	}
+#endif	/* NCPUS > 1 */
 
 	simple_lock(&(rq)->lock);	/* lock the run queue */
 #if	DEBUG
@@ -2606,6 +2636,25 @@ run_queue_enqueue(
 int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
 extern int	real_ncpus;
 #endif	/* NCPUS > 1 */
+
+/*
+ * #615: a bound thread queued on a run queue other than its own processor's,
+ * where a processor it is not bound to may take it -- counted by
+ * run_queue_enqueue() wherever it happens.  thread_setrun()'s unbound branch
+ * did it: a bound thread waiting in its processor's next_thread, displaced by
+ * a more urgent unbound one, went to the processor SET's queue, and
+ * pmap_bench caught its worker bound to processor 0 running wholly on
+ * another.  Counted without a lock of its own -- two processors at once may
+ * lose an increment, which a count of presence can afford -- and read by
+ * pmap_bench after each arm.
+ */
+unsigned int	sched_bound_displaced;
+int		sched_bound_displaced_slot = -1;
+
+/* #615's ablation: the displaced bound thread goes to the set's queue again. */
+#ifndef	ABLATE_615_DISPLACED_TO_SET
+#define	ABLATE_615_DISPLACED_TO_SET	0
+#endif
 
 /*
  *	thread_setrun:
@@ -2800,8 +2849,22 @@ thread_setrun(
 		    ast_on(cpu_number(), ast_flags);
 		}
 	    }
+
+	    /*
+	     * #615: the thread displaced from next_thread just above may be
+	     * bound -- the bound branch below hands a bound thread to its idle
+	     * processor exactly so -- and the set's queue is where any
+	     * processor may take it.  Under TCG at 1.4 GHz a worker bound to
+	     * processor 0 was taken by processor 1, 2 or 3 in about one boot
+	     * in three.  It goes back to its own processor's queue: this one,
+	     * whose next_thread it was.
+	     */
+	    if (th->bound_processor != PROCESSOR_NULL &&
+		!ABLATE_615_DISPLACED_TO_SET)
+		rq = &th->bound_processor->runq;
 #if	S319_INSTRUMENT
-	    s319[cpu_number()].psetenq++;
+	    if (rq == &pset->runq)
+		s319[cpu_number()].psetenq++;
 #endif
 	    (void)run_queue_enqueue(rq, th, tail);
 	}
@@ -3233,6 +3296,18 @@ idle_thread_continue(void)
 int
 idle_thread_loop(int idle_thread_type)
 #else	/* FAST_IDLE */
+/*
+ * #526: the idle loop restores the level it found again, as it did before.
+ */
+#ifndef	ABLATE_526_IDLE_RESTORES
+#define	ABLATE_526_IDLE_RESTORES	0
+#endif
+#if	ABLATE_526_IDLE_RESTORES
+#define	IDLE_WAIT_SPL(s)	(s)
+#else
+#define	IDLE_WAIT_SPL(s)	MACHINE_IDLE_SPL
+#endif
+
 void
 idle_thread_continue(void)
 #endif	/* FAST_IDLE */
@@ -3335,6 +3410,7 @@ idle_thread_continue(void)
 		urmach_rcu_idle_enter();
 
 		s = splsched();
+		machine_idle_found_level(s);	/* #526: see below */
 		while ((*threadp == (volatile thread_t)THREAD_NULL) &&
 #if	FAST_IDLE
 		       (idle_thread_type == REAL_IDLE_THREAD ||
@@ -3367,7 +3443,7 @@ idle_thread_continue(void)
 			if (need_ast[mycpu] &~ AST_SCHEDULING) {
 				/* don't allow scheduling ASTs */
 				need_ast[mycpu] &= ~AST_SCHEDULING;
-				ast_taken(FALSE, AST_ALL, s
+				ast_taken(FALSE, AST_ALL, IDLE_WAIT_SPL(s)
 #if	FAST_IDLE
 					  ,idle_thread_type
 #endif	/* FAST_IDLE */
@@ -3375,7 +3451,25 @@ idle_thread_continue(void)
 				/* back at spllo */
 			}
 			else
-				splx(s);
+				/*
+				 * 🔴 Zero, not `s' (#526).  `s' is whatever
+				 * level this processor had when the loop looked,
+				 * and restoring it is right for every thread but
+				 * this one: the idle thread holds nothing, and a
+				 * raised level it found and put back was held for
+				 * ever -- each pass sampled it again and restored
+				 * it again.  At SPLHI that defers the processor's
+				 * own tick; on the master, timeout_tick() then
+				 * never runs and every timed wait in the machine
+				 * sleeps.  Seen as `s' = 14 in this frame on a
+				 * wedged kernel, and 0 on the other processors.
+				 * The level found is said by
+				 * machine_idle_found_level(), not mended in
+				 * silence.  (This was also the intent of the
+				 * `Idle thread at spl > 0?' check above, which
+				 * was never compiled.)
+				 */
+				splx(IDLE_WAIT_SPL(s));
 
 			/* #319: spin-wait hint (rep;nop) -- eases the memory
 			 * pipeline and the SMT sibling while idle-polling. */
@@ -3389,6 +3483,7 @@ idle_thread_continue(void)
 			machine_idle(mycpu);
 #endif /* POWER_SAVE */
 			s = splsched();
+			machine_idle_found_level(s);	/* #526 */
 		}
 
 		/* #331 step 2: leaving idle -- about to run a real thread. */
@@ -3558,7 +3653,14 @@ idle_thread_continue(void)
 		break;	/* unreachable, all branches above return or panic */
 	    } /* end for(;;) retry */
 
-		splx(s);
+		/*
+		 * #526: back from a thread_run() or thread_block() without a
+		 * continuation, at the level of whoever handed this processor
+		 * back.  Zero, for the reason given at the wait above: `s' was
+		 * sampled before the hand-off, and a raised value carried across
+		 * it was put back afterwards.
+		 */
+		splx(IDLE_WAIT_SPL(s));
 	}
 }
 
