@@ -324,7 +324,6 @@ void
 urmach_rcu_advance(void)
 {
 	int	c, done = 1;
-	int	me = cpu_number();
 
 	if (rcu_cb_list == 0 && !rcu_active)
 		return;
@@ -353,9 +352,23 @@ urmach_rcu_advance(void)
 		return;
 	}
 
+	/*
+	 * 🔴 EVERY PROCESSOR, THIS ONE INCLUDED (#649).  The caller is the
+	 * clock tick, and read sections leave interrupts on, so the code the
+	 * tick interrupted may be a reader -- the one still holding this grace
+	 * period up.  This loop used to skip the processor it runs on, as
+	 * urmach_synchronize_rcu() does; there the caller is a writer outside
+	 * any section, here it is not, and the skip ended the grace period
+	 * under the reader and woke the drain while the reader still held the
+	 * pointer (-U, under TCG at four processors and 1.4 GHz: in 8 rounds
+	 * of 8).  It was a third copy of what counts as quiescent, the one
+	 * that disagreed (#605).
+	 *
+	 * Nothing waits longer for it: the tick reported this processor
+	 * quiescent just before calling here, unless the code it interrupted
+	 * is in a section, and a processor that reported is not holding up.
+	 */
 	for (c = 0; c < NCPUS; c++) {
-		if (c == me)
-			continue;
 		if (rcu_holds_up(c, rcu_snap[c])) {
 			done = 0;
 			break;
