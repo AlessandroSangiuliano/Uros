@@ -1,6 +1,6 @@
 Kind: widen
 Issue: #624
-Holds open: the two loads of a current_thread() without #646's fix, in mutex_lock_assert_safe(), for delay(250) -- a time and not a count of pause instructions, which under TCG lasts as many times longer as the host is slower -- so a preemption and a move between them is likely, and the fixed tree, one load after the same wait, must still pass
+Holds open: the two loads of a current_thread() without #646's fix, in mutex_lock_assert_safe(), for delay(160), what 1000 pause instructions lasted at OMEGA's maximum clock -- a time and not a count, which under TCG lasts as many times longer as the host is slower (about 1 ms at 1.4 GHz) -- so a preemption and a move between them is likely, and the fixed tree, one load after the same wait, must still pass
 Run: --entry 22 1200 -smp 4
 
 diff --git a/uros/src/mach_kernel/kern/lock.c b/uros/src/mach_kernel/kern/lock.c
@@ -26,7 +26,7 @@ index 1f10039a..300a1399 100644
 + */
 +#include <x86_64/time/tsc.h>
 +
-+#define	WIDEN_624_US	250
++#define	WIDEN_624_US	160
 +
 +static thread_t
 +widen_624_current_thread(void)
