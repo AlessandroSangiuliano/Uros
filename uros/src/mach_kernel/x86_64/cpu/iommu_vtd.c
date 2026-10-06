@@ -1436,13 +1436,11 @@ int iommu_vtd_read(void)
  * Bits 14:12, 31:24 and 127:84 are reserved, and an entry with any of them set
  * is refused with fault 24h when it is used.
  *
- * ⚠️ The ablation puts an xAPIC id at 39:32, where it is reserved -- DST[7:0]
- * instead of DST[15:8], the slip a reader of "Destination ID" makes -- and the
- * interrupt check must catch it on the cases that encode one.
+ * ⚠️ ablations/598-irte-dst.patch puts an xAPIC id at 39:32, where it is
+ * reserved -- DST[7:0] instead of DST[15:8], the slip a reader of "Destination
+ * ID" makes -- and the interrupt check must catch it on the cases that encode
+ * one.
  */
-#ifndef	ABLATE_598_IRTE_DST
-#define	ABLATE_598_IRTE_DST	0
-#endif
 
 #define	VTD_IRTE_P		(1ULL << 0)
 #define	VTD_IRTE_FPD		(1ULL << 1)
@@ -1452,7 +1450,7 @@ int iommu_vtd_read(void)
 #define	VTD_IRTE_DLM_MASK	(7ULL << 5)
 #define	VTD_IRTE_IM		(1ULL << 15)
 #define	VTD_IRTE_VECTOR(v)	((uint64_t)(v) << 16)
-#define	VTD_IRTE_XAPIC_SHIFT	(ABLATE_598_IRTE_DST ? 32 : 40)
+#define	VTD_IRTE_XAPIC_SHIFT	40
 #define	VTD_IRTE_RSVD_LO	((7ULL << 12) | (0xFFULL << 24))
 #define	VTD_IRTE_XAPIC_RSVD	((0xFFFFULL << 48) | (0xFFULL << 32))
 

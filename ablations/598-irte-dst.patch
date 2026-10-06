@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: an Intel xAPIC destination at bits 47:40 of the entry -- it is written at 39:32, where it is reserved, and the interrupt goes nowhere it was sent
+Run: --entry 0 300
+Expect: interrupt remapping words encoded and decoded, 2 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index ad7389fa..229dd7c5 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1450,7 +1450,7 @@ int iommu_vtd_read(void)
+ #define	VTD_IRTE_DLM_MASK	(7ULL << 5)
+ #define	VTD_IRTE_IM		(1ULL << 15)
+ #define	VTD_IRTE_VECTOR(v)	((uint64_t)(v) << 16)
+-#define	VTD_IRTE_XAPIC_SHIFT	40
++#define	VTD_IRTE_XAPIC_SHIFT	32
+ #define	VTD_IRTE_RSVD_LO	((7ULL << 12) | (0xFFULL << 24))
+ #define	VTD_IRTE_XAPIC_RSVD	((0xFFFFULL << 48) | (0xFFULL << 32))
+ 
