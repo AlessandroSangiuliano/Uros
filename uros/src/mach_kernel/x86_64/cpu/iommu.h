@@ -442,6 +442,40 @@ int iommu_build_passthrough(void);
 const struct iommu_tables *iommu_tables(void);
 
 /*
+ * ── #598: the interrupt tables, built and read back, hardware untouched ──
+ *
+ * Stage 2a's shape for interrupts: allocated, every entry written refusing
+ * and read back, and not one register or device table entry touched -- so a
+ * machine that booted before boots after.  Pointing the engines at them is
+ * the step after, and the first that can stop an interrupt.
+ *
+ * On Intel, ONE table that every engine remapping interrupts will share: Rev
+ * 5.20 §5.1.3 lets units share one, and then the indices are a single space
+ * divided once for the machine.  The price is that changing an entry means
+ * telling every engine to forget it, each through its own queue.
+ *
+ * All zero when nothing was built.  `engines' zero says why: no engine remaps
+ * interrupts, which is a machine and not a failure.
+ */
+struct iommu_interrupt_tables {
+	unsigned	engines;	/* engines that remap interrupts      */
+	unsigned	tables;		/* built                              */
+	unsigned	entries;	/* read back as written: not present  */
+	unsigned	wrong;		/* read back as anything else         */
+	unsigned	frames;		/* what they cost, in 4K frames       */
+	uint64_t	intel_table;	/* the one every intel engine shares  */
+	uint64_t	intel_irta;	/* ... and the word IRTA_REG will get */
+};
+
+/*
+ * Build them, once.  Answers non-zero when every table was built and every
+ * entry read back as written.
+ */
+int iommu_build_interrupt_tables(void);
+
+const struct iommu_interrupt_tables *iommu_interrupt_tables(void);
+
+/*
  * ── Stage 2b: point the engines at those tables and let them run ─────
  *
  * 🔴 THE FIRST THING IN #432 THAT CAN STOP A MACHINE, and therefore the first

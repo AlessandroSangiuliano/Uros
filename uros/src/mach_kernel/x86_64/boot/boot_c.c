@@ -5532,6 +5532,39 @@ static void iommu_selftest(void)
 		}
 
 		/*
+		 * #598: and the interrupt tables the same way — built, every
+		 * entry written refusing and read back, nothing pointed at
+		 * them.  Pointing the engines at them comes after, and is the
+		 * first step that can stop an interrupt.
+		 */
+		if (iommu_vendor() == IOMMU_INTEL) {
+			int built = iommu_build_interrupt_tables();
+			const struct iommu_interrupt_tables *it =
+				iommu_interrupt_tables();
+
+			kputs("UrMach x86-64:   interrupt remapping table ");
+			if (it->engines == 0) {
+				kputs("not built — no engine remaps interrupts\r\n");
+			} else if (it->tables == 0) {
+				kputs("COULD NOT BE BUILT — no frame\r\n");
+			} else {
+				kputs("at ");
+				kputhex64(it->intel_table);
+				kputs(", ");
+				kputdec(it->entries);
+				kputs(" entries read back not present, ");
+				kputdec(it->wrong);
+				kputs(" wrong, for ");
+				kputdec(it->engines);
+				kputs(" engine(s) to share — IRTA_REG will be ");
+				kputhex64(it->intel_irta);
+				kputs(built ? ", nothing points at it yet\r\n"
+					    : " — WRONG, an entry nobody wrote would"
+					      " be read as one\r\n");
+			}
+		}
+
+		/*
 		 * 🔴 AND ONLY NOW, AND ONLY IF ASKED.  `-I' on the boot
 		 * command line is what turns translation on.  A default boot
 		 * builds and enables nothing, so a machine this cannot survive

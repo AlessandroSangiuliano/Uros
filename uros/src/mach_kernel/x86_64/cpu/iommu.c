@@ -400,6 +400,35 @@ const struct iommu_tables *iommu_tables(void)
 	return &built;
 }
 
+/* ------------------------------------------------------------------ */
+/*  #598: the interrupt tables, built and read back, hardware untouched */
+/* ------------------------------------------------------------------ */
+
+static struct iommu_interrupt_tables	interrupt_tables;
+static int				interrupt_tables_tried;
+static int				interrupt_tables_built;
+
+void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t)
+{
+	interrupt_tables = *t;
+}
+
+int iommu_build_interrupt_tables(void)
+{
+	if (!interrupt_tables_tried) {
+		interrupt_tables_tried = 1;
+		if (found_vendor == IOMMU_INTEL)
+			interrupt_tables_built = iommu_vtd_irt_build();
+	}
+
+	return interrupt_tables_built;
+}
+
+const struct iommu_interrupt_tables *iommu_interrupt_tables(void)
+{
+	return &interrupt_tables;
+}
+
 unsigned iommu_platform_address_bits(void)
 {
 	return platform_address_bits;

@@ -1664,6 +1664,64 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
 }
 
 /*
+ * ── #598: the one interrupt table, built and read back ───────────────
+ *
+ * 256 entries of sixteen bytes: one frame, and IRTA's S is 7.  Room for what
+ * this kernel programs -- one I/O APIC's pins, DEVICE_MD_MSI_MAX MSI slots,
+ * the HPET's comparators -- with the division of the indices left to the step
+ * that writes the first entry.
+ *
+ * 🔴 EVERY ENTRY WRITTEN, and read back as the two words written.  Not
+ * present refuses whatever else an entry holds, so asking the decoder what
+ * the entries mean would accept garbage beside a clear P -- garbage that
+ * becomes an interrupt the day something sets that P.
+ *
+ * In xAPIC mode, EIME clear: this kernel's APIC ids have eight bits, and
+ * whether x2APIC follows is #598's last question.  The word IRTA_REG will be
+ * given is composed here, so that the encoder meets a real address before an
+ * engine does; nothing is written to it yet.
+ */
+#define	VTD_IRT_ENTRIES		256u
+
+int iommu_vtd_irt_build(void)
+{
+	struct iommu_interrupt_tables t = { 0 };
+	volatile uint64_t *irt;
+	uint64_t pa;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (iommu_unit(i)->answered
+		    && iommu_unit(i)->interrupt_remapping)
+			t.engines++;
+
+	pa = t.engines ? boot_frame_alloc() : 0;
+	if (pa == 0 || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, 0, &t.intel_irta)) {
+		iommu_record_interrupt_tables(&t);
+		return 0;
+	}
+
+	t.intel_table = pa;
+	t.tables = 1;
+	t.frames = 1;
+
+	irt = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
+	for (unsigned i = 0; i < VTD_IRT_ENTRIES; i++) {
+		irt[i * VTD_ENTRY_WORDS + 0] = 0;
+		irt[i * VTD_ENTRY_WORDS + 1] = 0;
+	}
+
+	for (unsigned i = 0; i < VTD_IRT_ENTRIES; i++)
+		if (irt[i * VTD_ENTRY_WORDS + 0] == 0
+		    && irt[i * VTD_ENTRY_WORDS + 1] == 0)
+			t.entries++;
+		else
+			t.wrong++;
+
+	iommu_record_interrupt_tables(&t);
+	return t.wrong == 0;
+}
+
+/*
  * ── #598: the invalidation queue's descriptors ───────────────────────
  *
  * Rev 5.20 §6.5.2.1, 6.5.2.3, 6.5.2.8, 6.5.2.9 (Figures 6-1, 6-3, 6-8, 6-9).

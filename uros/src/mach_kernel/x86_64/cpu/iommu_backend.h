@@ -133,6 +133,14 @@ void iommu_record_tables(uint64_t root, uint64_t root_bytes,
 			 unsigned devices, unsigned contexts, unsigned frames);
 
 /*
+ * #598: build the interrupt tables, every entry written refusing and read
+ * back, and record them, for <cpu/iommu.h>'s iommu_build_interrupt_tables().
+ * Answers non-zero when everything was built and read back as written.
+ */
+int iommu_vtd_irt_build(void);
+void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t);
+
+/*
  * ── Stage 3: page-table entries ──────────────────────────────────────
  *
  * 🔴 TWO ENCODERS BECAUSE THEY ARE TWO FORMATS, not for symmetry.  The bit
