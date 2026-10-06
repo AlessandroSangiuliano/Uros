@@ -578,6 +578,7 @@ static int wait_bit(volatile uint8_t *regs, unsigned off, uint64_t bit,
 
 /* #598: an engine's queue, and forgetting through it -- at the end of this file. */
 static int vtd_queue_start(unsigned unit, volatile uint8_t *regs, unsigned iro);
+static int vtd_queue_running(unsigned unit);
 static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
 		      int contexts);
 
@@ -618,7 +619,7 @@ int iommu_vtd_enable(void)
 		 * Started or not at all: an engine whose queue did not come
 		 * up is not one this kernel can tell to forget.
 		 */
-		if (VTD_ECAP_QI(u->vendor_caps[1])
+		if (VTD_ECAP_QI(u->vendor_caps[1]) && !vtd_queue_running(i)
 		    && !vtd_queue_start(i, regs, iro))
 			return 0;
 
@@ -1986,6 +1987,15 @@ static int vtd_queue_start(unsigned unit, volatile uint8_t *regs, unsigned iro)
 }
 
 /*
+ * Started by this kernel, by translation (-I) or by remapping (-i), whichever
+ * came first: the second must not take over a queue the first is using.
+ */
+static int vtd_queue_running(unsigned unit)
+{
+	return unit < IOMMU_MAX_UNITS && vtd_counts[unit].on;
+}
+
+/*
  * Send `n' descriptors and return once the engine has done them.  A failure
  * is kept, the first time, with the fault status and the two ends as they
  * were, for whoever prints (iommu_queue_counts); this code does not print.
@@ -2220,4 +2230,124 @@ void iommu_vtd_forget_msi(unsigned slot)
 
 	if (iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index))
 		(void) vtd_irte_write(index, absent);
+}
+
+/*
+ * ── #598 phase 4: remapping turned on ────────────────────────────────
+ *
+ * Rev 5.20 §11.4.4 and §11.4.10, per engine: the queue first -- the only way
+ * the interrupt entry cache can be told anything -- then the table out of the
+ * caches for an engine whose reads do not snoop, IRTA, SIRTP and IRTPS read
+ * back, the whole interrupt entry cache forgotten unless ESIRTPS says SIRTP
+ * did it, CFI clear, and IRE with IRES read back.
+ *
+ * 🔴 CFI CLEAR IS THE POINT.  With it clear a message in compatibility format
+ * is refused (fault 25h) -- the raw write #598 is about.  A firmware that left
+ * it set would have every such message pass, and the carried-over status in
+ * VTD_GSTS_KEEP would keep it set on every later command; so it is cleared,
+ * and read back clear, before remapping is turned on.
+ *
+ * ⚠️ ALL OR NOTHING over the machine.  One table and one format for every
+ * source: a remappable message reaching an engine that does not remap is not
+ * a remapped interrupt.  An engine that fails turns off the ones turned on
+ * before it.
+ */
+#define	VTD_IRTA_REG		0xB8
+#define	VTD_GCMD_IRE		(1ULL << 25)	/* interrupt remapping enable */
+#define	VTD_GSTS_IRES		(1ULL << 25)
+#define	VTD_GCMD_SIRTP		(1ULL << 24)	/* set interrupt table pointer */
+#define	VTD_GSTS_IRTPS		(1ULL << 24)
+#define	VTD_GCMD_CFI		(1ULL << 23)	/* compatibility format passes */
+#define	VTD_GSTS_CFIS		(1ULL << 23)
+#define	VTD_CAP_ESIRTPS(c)	((((c) >> 62) & 0x1) != 0)
+
+static void vtd_ir_off(volatile uint8_t *regs)
+{
+	uint32_t keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep & ~(uint32_t)VTD_GCMD_IRE;
+	(void) wait_bit(regs, VTD_GSTS, VTD_GSTS_IRES, 0, 0);
+}
+
+static int vtd_ir_on(unsigned unit, volatile uint8_t *regs,
+		     const struct iommu_unit *u,
+		     const struct iommu_interrupt_tables *t)
+{
+	uint32_t keep;
+
+	if (!vtd_queue_running(unit)
+	    && !vtd_queue_start(unit, regs, VTD_ECAP_IRO(u->vendor_caps[1])))
+		return 0;
+
+	if (!VTD_ECAP_COHERENT(u->vendor_caps[1])) {
+		vtd_irt_uncached = 1;
+		for (uint64_t off = 0; off < 4096u; off += 64u)
+			vtd_flush_line((const volatile void *)(uintptr_t)
+				       phys_to_direct(t->intel_table + off));
+	}
+
+	*(volatile uint64_t *)(regs + VTD_IRTA_REG) = t->intel_irta;
+	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_SIRTP;
+	if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_IRTPS, 1, 0))
+		return 0;
+
+	if (!VTD_CAP_ESIRTPS(u->vendor_caps[0])) {
+		uint64_t d[2];
+
+		iommu_vtd_qi_iec_global(d);
+
+		const uint64_t all[1][2] = { { d[0], d[1] } };
+
+		if (!vtd_queue_submit(unit, all, 1))
+			return 0;
+	}
+
+	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+	if (keep & VTD_GSTS_CFIS) {
+		keep &= ~(uint32_t)VTD_GCMD_CFI;
+		*(volatile uint32_t *)(regs + VTD_GCMD) = keep;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_CFIS, 0, 0))
+			return 0;
+	}
+
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_IRE;
+	return wait_bit(regs, VTD_GSTS, VTD_GSTS_IRES, 1, 0);
+}
+
+unsigned iommu_vtd_ir_enable(void)
+{
+	const struct iommu_interrupt_tables *t = iommu_interrupt_tables();
+	unsigned on = 0;
+
+	if (t->intel_table == 0 || iommu_unit_count() > IOMMU_MAX_UNITS)
+		return 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (regs != 0 && vtd_ir_on(i, regs, u, t)) {
+			vtd_remapping[i] = 1;
+			on++;
+			continue;
+		}
+
+		if (regs != 0)
+			vtd_ir_off(regs);
+		for (unsigned j = 0; j < i; j++) {
+			vtd_ir_off((volatile uint8_t *)(uintptr_t)
+				   iommu_unit(j)->register_va);
+			vtd_remapping[j] = 0;
+		}
+		return 0;
+	}
+
+	return on;
+}
+
+int iommu_vtd_unit_remapping(unsigned unit)
+{
+	return unit < IOMMU_MAX_UNITS && vtd_remapping[unit];
 }

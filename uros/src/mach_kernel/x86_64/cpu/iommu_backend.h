@@ -155,6 +155,13 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 void iommu_vtd_forget_msi(unsigned slot);
 
 /*
+ * #598 phase 4: turn remapping on in every Intel engine, all or nothing, and
+ * answer how many remap; whether one engine does.
+ */
+unsigned iommu_vtd_ir_enable(void);
+int iommu_vtd_unit_remapping(unsigned unit);
+
+/*
  * ── Stage 3: page-table entries ──────────────────────────────────────
  *
  * 🔴 TWO ENCODERS BECAUSE THEY ARE TWO FORMATS, not for symmetry.  The bit

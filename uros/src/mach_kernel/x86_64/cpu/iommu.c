@@ -13,6 +13,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
 #include <kern/kalloc.h>	/* an identity grant's page list, #599 */
 #include <kern/lock.h>		/* iommu_domain_lock, #599 */
 #include <kern/misc_protos.h>	/* printf, for the refusals (#432 stage 3d) */
@@ -491,6 +492,75 @@ void iommu_forget_msi(unsigned slot)
 {
 	if (iommu_interrupts_remapped())
 		iommu_vtd_forget_msi(slot);
+}
+
+unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	unsigned remapping = 0, on;
+	uint16_t source;
+
+	*asked = 0;
+	if (found_vendor == IOMMU_AMD) {
+		*why = "not yet on amd-vi";
+		return 0;
+	}
+	if (found_vendor != IOMMU_INTEL) {
+		*why = "no engine";
+		return 0;
+	}
+
+	for (unsigned i = 0; i < nunits; i++)
+		if (units[i].answered && units[i].interrupt_remapping)
+			remapping++;
+
+	if (remapping == 0) {
+		*why = "no engine remaps interrupts";
+		return 0;
+	}
+	if (remapping != nunits) {
+		*why = "some engines cannot remap, and one table serves them all";
+		return 0;
+	}
+	if (platform_interrupt_remapping != 1) {
+		*why = "the dmar says the platform cannot";
+		return 0;
+	}
+	for (unsigned i = 0; i < nunits; i++) {
+		if (units[i].interrupt.x2apic_required) {
+			*why = "an engine remaps only in x2apic mode";
+			return 0;
+		}
+		if (!units[i].interrupt.can_forget) {
+			*why = "an engine has no invalidation queue, so no entry"
+			       " could ever change";
+			return 0;
+		}
+	}
+	if (!cpu_has_cmpxchg16b()) {
+		*why = "the processor has no 16-byte compare-and-exchange";
+		return 0;
+	}
+	if (a != 0 && !iommu_ioapic_source(a->id, &source)) {
+		*why = "no table names the i/o apic, whose pins would be refused";
+		return 0;
+	}
+
+	*asked = 1;
+	if (!interrupt_tables_built) {
+		*why = "the interrupt table was not built";
+		return 0;
+	}
+
+	on = iommu_vtd_ir_enable();
+	if (on == 0)
+		*why = "an engine did not confirm it";
+	return on;
+}
+
+int iommu_unit_remaps(unsigned unit)
+{
+	return found_vendor == IOMMU_INTEL && iommu_vtd_unit_remapping(unit);
 }
 
 unsigned iommu_platform_address_bits(void)

@@ -533,6 +533,26 @@ void iommu_forget_msi(unsigned slot);
 int iommu_ioapic_source(uint8_t id, uint16_t *source);
 
 /*
+ * ── #598 phase 4: remapping turned on, behind `-i' ────────────────────
+ *
+ * 🔴 THE FIRST STEP OF #598 THAT CAN STOP AN INTERRUPT, so it is asked for,
+ * as translation is with `-I': a default boot remaps nothing.
+ *
+ * Where the platform and every engine say they can, and only all of them:
+ * the DMAR's flag set, every engine reporting remapping and a queue, none
+ * demanding x2APIC mode, a processor with a 16-byte compare-and-exchange, and
+ * a table naming the I/O APIC whose pins will need entries.  Answers how many
+ * engines remap.  On zero, `why' says what stopped it, and `asked' says
+ * whether the machine could be asked at all: zero for one that cannot remap
+ * the way this kernel does -- the boot says NOT ASKED -- and one for an
+ * engine that was asked and did not confirm.
+ */
+unsigned iommu_enable_interrupt_remapping(const char **why, int *asked);
+
+/* Whether that engine remaps interrupts, as this kernel turned it on. */
+int iommu_unit_remaps(unsigned unit);
+
+/*
  * ── Stage 2b: point the engines at those tables and let them run ─────
  *
  * 🔴 THE FIRST THING IN #432 THAT CAN STOP A MACHINE, and therefore the first

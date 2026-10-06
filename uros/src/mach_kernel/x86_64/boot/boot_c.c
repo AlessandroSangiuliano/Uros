@@ -5392,13 +5392,17 @@ static void iommu_selftest(void)
 		 * page — so a driver holding the master port can map the MSI-X
 		 * BAR and write its own entry.  Closing THAT is #511 and #513,
 		 * it is needed whether or not the hardware ever remaps, and it
-		 * is where the work goes.
+		 * is where the work went.
+		 *
+		 * #598 is the follow-on: the interrupt tables are built below
+		 * on every boot, and -i turns remapping on.  Without it, this
+		 * line is still the whole answer.
 		 */
-		kputs("UrMach x86-64:   interrupt remapping is NOT turned on"
-		      " — a message-signalled interrupt is a write the"
-		      " hardware exempts from every domain (#432), and what"
-		      " keeps the table honest is that the kernel writes it"
-		      " (#511, #513)\r\n");
+		kputs("UrMach x86-64:   interrupt remapping is #598's, and on"
+		      " only with -i — a message-signalled interrupt is a"
+		      " write the hardware exempts from every domain (#432),"
+		      " and without remapping what keeps the table honest is"
+		      " that the kernel writes it (#511, #513)\r\n");
 	}
 
 	/*
@@ -5697,6 +5701,51 @@ static void iommu_selftest(void)
 		} else if (ok) {
 			kputs("UrMach x86-64:   translation left OFF (pass"
 			      " -I to enable it) — nothing programmed\r\n");
+		}
+
+		/*
+		 * #598 phase 4: interrupt remapping, only if asked, and after
+		 * translation, so that a queue -I started is the one it uses.
+		 * Every source is programmed after this point — the I/O
+		 * APIC's pins, the HPET, each driver's MSI-X — so each one
+		 * goes through an entry from its first message.
+		 */
+		if (boot_flag('i')) {
+			const char *why = "";
+			int asked = 0;
+			unsigned n = iommu_enable_interrupt_remapping(&why,
+								      &asked);
+			const struct acpi_ioapic *io = acpi_ioapic(0);
+			uint16_t sid;
+
+			kputs("UrMach x86-64:   -i given: interrupt remapping ");
+			if (n == 0) {
+				kputs(asked ? "COULD NOT BE TURNED ON — WRONG, "
+					    : "NOT ASKED — ");
+				kputs(why);
+				kputs("\r\n");
+			} else {
+				kputs("IS ON — every pin and MSI-X slot"
+				      " through an entry this kernel wrote, a"
+				      " message in the old format refused\r\n");
+				for (unsigned i = 0; i < iommu_unit_count(); i++) {
+					kputs("UrMach x86-64:   unit ");
+					kputdec(i);
+					kputs(iommu_unit_remaps(i)
+					      ? " remaps interrupts\r\n"
+					      : " does not remap — WRONG\r\n");
+				}
+				if (io != 0 && iommu_ioapic_source(io->id, &sid)) {
+					kputs("UrMach x86-64:   the i/o apic's"
+					      " entries accept only ");
+					kputdec(sid >> 8);
+					kputs(":");
+					kputdec((sid >> 3) & 0x1F);
+					kputs(".");
+					kputdec(sid & 0x7);
+					kputs(", its source-id in the dmar\r\n");
+				}
+			}
 		}
 	}
 
