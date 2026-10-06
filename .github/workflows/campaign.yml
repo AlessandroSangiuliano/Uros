@@ -34,6 +34,10 @@ on:
         description: "Jobs side by side, 1 to 20 (empty: 4)"
         type: string
         required: false
+      mode:
+        description: "arch: the Arch Linux container; ubuntu: the runner's own packages; both: each job in both, to compare them (empty: arch)"
+        type: string
+        required: false
   push:
     branches:
       - epic/v0.3.0-x86-64    # the branch EPIC below names
@@ -56,6 +60,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       rounds: ${{ steps.plan.outputs.rounds }}
       entries: ${{ steps.plan.outputs.entries }}
+      modes: ${{ steps.plan.outputs.modes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,7 +76,18 @@ jobs:
           JOBS: ${{ inputs.jobs }}
           ROUNDS: ${{ inputs.rounds }}
           ENTRIES: ${{ inputs.entries }}
+          MODE: ${{ inputs.mode }}
         run: |
+          # Which toolchain builds and boots: ours, from Arch, in a container,
+          # or Ubuntu's own, GCC and qemu several versions older -- both side
+          # by side is how the first run decides whether the container is
+          # needed at all (#653).
+          case "${MODE:-arch}" in
+          arch) modes='["arch"]' ;;
+          ubuntu) modes='["ubuntu"]' ;;
+          both) modes='["arch","ubuntu"]' ;;
+          *) echo "::error::mode is arch, ubuntu or both, not '$MODE'"; exit 1 ;;
+          esac
           jobs=${JOBS:-4}
           rounds=${ROUNDS:-3}
           case "$jobs" in
@@ -92,6 +108,7 @@ jobs:
             echo "matrix=[$(seq -s, 1 "$jobs")]"
             echo "rounds=$rounds"
             echo "entries=$ENTRIES"
+            echo "modes=$modes"
           } >> "$GITHUB_OUTPUT"
 
   boot:
@@ -105,6 +122,7 @@ jobs:
       fail-fast: false
       matrix:
         job: ${{ fromJSON(needs.plan.outputs.matrix) }}
+        mode: ${{ fromJSON(needs.plan.outputs.modes) }}
     outputs:
       kvm: ${{ steps.kvm.outputs.available }}
     steps:
@@ -138,9 +156,10 @@ jobs:
       # where it can be written, so the job's own test of /dev/kvm decides
       # whether its boots run under KVM as well.
       - name: Build and boot in an Arch Linux container
+        if: matrix.mode == 'arch'
         timeout-minutes: 330
         env:
-          JOB_INDEX: ${{ matrix.job }}
+          JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
           ENTRIES: ${{ needs.plan.outputs.entries }}
           KVM: ${{ steps.kvm.outputs.available }}
@@ -155,6 +174,24 @@ jobs:
             archlinux:latest \
             scripts/ci/job.sh --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
 
+      # The same job on the runner itself, with Ubuntu's packages: the other
+      # half of the comparison.  If its compiler cannot build the tree with no
+      # warning, or its kernel or its boots differ from the container's, the
+      # container is what the campaign keeps.
+      - name: Build and boot on the runner's own Ubuntu
+        if: matrix.mode == 'ubuntu'
+        timeout-minutes: 330
+        env:
+          JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
+          ROUNDS: ${{ needs.plan.outputs.rounds }}
+          ENTRIES: ${{ needs.plan.outputs.entries }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc binutils cmake ninja-build bison flex \
+            python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
+            iproute2 psmisc gdb
+          scripts/ci/job.sh --no-install --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
+
       - name: Say what the job found
         if: always()
         run: |
@@ -168,7 +205,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: campaign-job-${{ matrix.job }}
+          name: campaign-job-${{ matrix.job }}-${{ matrix.mode }}
           path: |
             ci-out/
             !ci-out/logs/
