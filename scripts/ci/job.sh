@@ -56,9 +56,10 @@ JOB=${JOB_INDEX:-0}
 # build's own checks and xfile-verify.py; git names the tree; grub, e2fsprogs
 # and util-linux are make-disk-x86_64.sh's grub-mkimage, mke2fs, debugfs and
 # sfdisk; iproute2 is merge-test's look at port 1234, psmisc run-x86_64.sh's
-# killall, and gdb walks the threads of a run cut short with the stub on.
+# killall, gdb walks the threads of a run cut short with the stub on, and
+# lib32-glibc and lib32-gcc-libs let the host tests build for -m32 as well.
 PACKAGES=(gcc binutils cmake ninja bison flex python git qemu-system-x86
-	grub e2fsprogs util-linux iproute2 psmisc gdb)
+	grub e2fsprogs util-linux iproute2 psmisc gdb lib32-glibc lib32-gcc-libs)
 
 die() {
 	echo "job: $2" >&2
@@ -166,6 +167,10 @@ if [ $DRY = 0 ]; then
 	if [ $INSTALL = 1 ]; then
 		[ "$(id -u)" = 0 ] || die 3 "installing needs root: run this in the container, or with --no-install"
 		echo "job: installing the packages ($OUT/install.log)"
+		# The x86-64 build also builds host tests for -m32 (pci_bar_test_m32,
+		# both ABIs on purpose), so it needs 32-bit glibc and libgcc: they come
+		# from [multilib], which the archlinux image leaves commented out.
+		sed -i '/^#\[multilib\]$/{s/^#//;n;s/^#//}' /etc/pacman.conf
 		if ! { pacman -Sy --noconfirm --needed archlinux-keyring &&
 		       pacman -Su --noconfirm --needed "${PACKAGES[@]}"; } > "$OUT/install.log" 2>&1; then
 			tail -n 30 "$OUT/install.log"
