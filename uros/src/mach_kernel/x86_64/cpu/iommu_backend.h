@@ -489,6 +489,26 @@ int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
 int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index);
 
 /*
+ * ── #598: where an intel engine finds its interrupt table ────────────
+ *
+ * Rev 5.20 §11.4.10, IRTA_REG at 0B8h: the table's address in 63:12, EIME in
+ * bit 11, and in 3:0 a size S that is neither the number of entries nor its
+ * logarithm but one less: the table has 2^(S+1) entries.
+ *
+ * 🔴 ONE TOO LARGE IS THE SILENT WAY TO BE WRONG.  The engine then takes the
+ * table to run on into the next frame, and an index past the real end selects
+ * bytes nobody wrote as an entry -- present or not by accident, and never
+ * invalidated because nobody knows it is one.  One too small refuses the top
+ * half of the indices (21h), which at least says so.
+ *
+ * Answers zero for a table not aligned to 4 Kbytes, or a count that is not a
+ * power of two from 2 to 65536.  ⚠️ `x2apic' is EIME, reserved-zero on an
+ * engine reporting EIM clear: whether to set it is the engine's question.
+ */
+int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
+		   uint64_t *out);
+
+/*
  * ── #598: the device table entry's interrupt half, on AMD ─────────────
  *
  * Rev 3.11 §2.2.2.1, Table 7, bits 191:128 -- the third word of the entry:

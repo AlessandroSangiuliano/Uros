@@ -1640,6 +1640,30 @@ int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index)
 }
 
 /*
+ * ── #598: the interrupt table's address register ─────────────────────
+ *
+ * Rev 5.20 §11.4.10, Figure 11-30: IRTA 63:12, EIME 11, reserved 10:4, S 3:0
+ * with 2^(S+1) entries.
+ */
+#define	VTD_IRTA_EIME		(1ULL << 11)
+
+int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
+		   uint64_t *out)
+{
+	unsigned s = 0;
+
+	if (out == 0 || (table_pa & 0xFFFULL) != 0 || entries < 2
+	    || entries > 65536u || (entries & (entries - 1u)) != 0)
+		return 0;
+
+	while ((2u << s) < entries)
+		s++;
+
+	*out = table_pa | (x2apic ? VTD_IRTA_EIME : 0) | s;
+	return 1;
+}
+
+/*
  * ── #598: the invalidation queue's descriptors ───────────────────────
  *
  * Rev 5.20 §6.5.2.1, 6.5.2.3, 6.5.2.8, 6.5.2.9 (Figures 6-1, 6-3, 6-8, 6-9).

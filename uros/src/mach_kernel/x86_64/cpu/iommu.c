@@ -2765,6 +2765,63 @@ static unsigned qi_check(unsigned *ran)
 	return bad;
 }
 
+/*
+ * And the word IRTA_REG is given, from Rev 5.20 Figure 11-30 by hand.
+ *
+ * 🔴 S is one less than the logarithm, and the three cases that encode are the
+ * three places where taking it for the logarithm shows: 256 entries say 7 and
+ * not 8, two say 0 and not 1, and 65536 say 15 -- a 16 would not even fit.
+ */
+struct irta_case {
+	const char	*what;
+	uint64_t	 table;
+	unsigned	 entries;
+	int		 x2apic;
+	int		 encodes;	/* 1 must produce `word', -1 must refuse */
+	uint64_t	 word;
+};
+
+static const struct irta_case irta_cases[] = {
+	/* One frame of sixteen-byte entries: S 7. */
+	{ "intel irta, 256 entries", 0x12345000ULL, 256, 0, 1,
+	  0x0000000012345007ULL },
+	/* The fewest a table can have: S 0. */
+	{ "intel irta, 2 entries", 0x1000ULL, 2, 0, 1, 0x1000ULL },
+	/* The most, in x2APIC mode: S 15 and EIME in bit 11. */
+	{ "intel irta, 65536 entries, x2apic", 0x123456789000ULL, 65536, 1, 1,
+	  0x000012345678980FULL },
+	{ "intel irta, 300 entries", 0x12345000ULL, 300, 0, -1, 0 },
+	{ "intel irta, 1 entry", 0x12345000ULL, 1, 0, -1, 0 },
+	{ "intel irta, 131072 entries", 0x12345000ULL, 131072, 0, -1, 0 },
+	/* Bits 11:0 are not the address's: refused, not rounded. */
+	{ "intel irta, on a 2K boundary", 0x12345800ULL, 256, 0, -1, 0 },
+};
+
+static unsigned irta_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(irta_cases) / sizeof(irta_cases[0]);
+	     i++) {
+		const struct irta_case *c = &irta_cases[i];
+		uint64_t w = ~0ULL;
+		int got;
+
+		(*ran)++;
+
+		got = iommu_vtd_irta(c->table, c->entries, c->x2apic, &w);
+
+		if (c->encodes < 0) {
+			if (got != 0)
+				bad++;
+		} else if (got != 1 || w != c->word) {
+			bad++;
+		}
+	}
+
+	return bad;
+}
+
 int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 {
 	unsigned n = 0, bad = 0;
@@ -2825,6 +2882,7 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 	bad += msg_check(&n);
 	bad += dte_check(&n);
 	bad += qi_check(&n);
+	bad += irta_check(&n);
 
 	if (ran)
 		*ran = n;
