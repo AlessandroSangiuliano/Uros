@@ -136,7 +136,7 @@ urmach_synchronize_rcu(void)
 {
 	unsigned int	snap[NCPUS];
 	int		c;
-	int		me = cpu_number();
+	int		me;
 
 	/*
 	 * ABLATE_566_NO_GRACE makes every grace period return at once, which
@@ -173,8 +173,14 @@ urmach_synchronize_rcu(void)
 	 *	going to spin here either way, and being moved off it in the middle
 	 *	would not have made the wait shorter -- it would have made the
 	 *	answer wrong.
+	 *
+	 *	🔴 And `me' is read AFTER it (#646).  The remedy above was taken
+	 *	with `me' still initialised at its declaration, one instruction
+	 *	before this line: the window this comment describes, narrowed to a
+	 *	single instruction and left open.
 	 */
 	disable_preemption();
+	me = cpu_number();
 
 	/*
 	 *	Publish the unlink before sampling: after this fence no CPU can

@@ -255,11 +255,15 @@ extern void		thread_bind(
 				thread_t	thread,
 				processor_t	processor);
 
+/* Bind the caller to the processor it is on, and answer which (#646) */
+extern int		thread_bind_here(void);
+
 #define thread_bind_locked(thread,processor)	\
 		(thread)->bound_processor = (processor)
 
 #else	/*NCPUS > 1*/
 #define thread_bind(thread,processor)
+#define thread_bind_here()			(0)
 #define thread_bind_locked(thread,processor)
 #endif	/*NCPUS > 1*/
 
