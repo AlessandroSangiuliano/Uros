@@ -662,10 +662,8 @@ victim_body(void)
  * dressed as a timeout.
  */
 static processor_t
-another_processor(void)
+another_processor(int me)
 {
-	int	me = cpu_number();
-
 	for (int i = 0; i < NCPUS; i++) {
 		if (i == me)
 			continue;
@@ -676,8 +674,24 @@ another_processor(void)
 	return PROCESSOR_NULL;
 }
 
+static void thread_state_entry_test_body(int me);
+
+/*
+ * The driver stays on the processor it chose from (#646).  It read
+ * cpu_number() bare, on an unbound thread, then spun waiting for a
+ * target on "another" processor -- which a move could make its own.
+ */
 void
 thread_state_entry_test(void)
+{
+	processor_t	was = current_thread()->bound_processor;
+
+	thread_state_entry_test_body(thread_bind_here());
+	thread_bind(current_thread(), was);
+}
+
+static void
+thread_state_entry_test_body(int me)
 {
 	struct x86_64_thread_state	*out = (struct x86_64_thread_state *) buf;
 	struct x86_64_thread_state	first, second;
@@ -691,7 +705,7 @@ thread_state_entry_test(void)
 	checks = 0;
 	bad = 0;
 
-	target = another_processor();
+	target = another_processor(me);
 #if	ABLATE_563_ALONE
 	/*
 	 * #563: pretend this processor is the only one running, so the line

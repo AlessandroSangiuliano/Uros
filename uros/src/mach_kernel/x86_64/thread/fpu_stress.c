@@ -93,12 +93,27 @@ fpu_stress_thread(void)
 		cpu_pause();
 }
 
+static void fpu_stress_run_body(int me);
+
+/*
+ * The driver stays on the processor it chose from (#646).  It read
+ * cpu_number() bare, on an unbound thread, and then counted on running
+ * there; a move in between left `me' naming a processor it had left.
+ */
 void
 fpu_stress_run(void)
 {
+	processor_t	was = current_thread()->bound_processor;
+
+	fpu_stress_run_body(thread_bind_here());
+	thread_bind(current_thread(), was);
+}
+
+static void
+fpu_stress_run_body(int me)
+{
 	processor_t	target = PROCESSOR_NULL;
 	uint64_t	t0, limit;
-	int		me = cpu_number();
 	int		i, bad = 0;
 
 	/*

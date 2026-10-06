@@ -140,9 +140,20 @@ static void tsc_refine(void)
  * One thread for both: the refinement once, then the watchdog for as long as
  * there is something to watch (#594).  The watchdog starts from the rate the
  * refinement left, whatever it decided.
+ *
+ * ⚠️ Bound to the boot processor BEFORE the refinement (#646).  Both take
+ * two-point windows, and tsc_watch() explains why a thread that moved between
+ * two points reads two processors' TSCs -- a rate error that is really an
+ * offset.  The bind used to be the watchdog's first act, after the
+ * refinement had already slept a second between its two points unbound,
+ * across the moment the application processors are let into the scheduler.
  */
 static void tsc_time_thread(void)
 {
+#if	NCPUS > 1
+	thread_bind(current_thread(), master_processor);
+	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
+#endif
 	tsc_refine();
 	tsc_watch();
 	thread_terminate_self();
