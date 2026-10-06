@@ -155,6 +155,25 @@ esac
 	die 3 "kvm was asked for and /dev/kvm cannot be opened here"
 PER_ROUND=$((NLINES * (HAS_TCG + HAS_KVM)))
 
+# The packages before anything reads the tree: git is one of them, and the
+# archlinux image has none -- #653's first run stopped on that very line.  The
+# keyring first: an image older than the key a package was signed with refuses
+# the package, and the archlinux image is rebuilt only now and then.  A dry run
+# installs nothing and writes nothing.
+if [ $DRY = 0 ]; then
+	[ -e "$CSV" ] && die 2 "$CSV already holds a job's rows: give another --out"
+	mkdir -p "$OUT" || die 3 "cannot create $OUT"
+	if [ $INSTALL = 1 ]; then
+		[ "$(id -u)" = 0 ] || die 3 "installing needs root: run this in the container, or with --no-install"
+		echo "job: installing the packages ($OUT/install.log)"
+		if ! { pacman -Sy --noconfirm --needed archlinux-keyring &&
+		       pacman -Su --noconfirm --needed "${PACKAGES[@]}"; } > "$OUT/install.log" 2>&1; then
+			tail -n 30 "$OUT/install.log"
+			die 3 "pacman failed: $OUT/install.log"
+		fi
+	fi
+fi
+
 # The checkout belongs to the runner's user and the container runs as root, and
 # git will not read a repository somebody else owns unless it is named safe.
 if ! git -C "$REPO" rev-parse -q --verify HEAD >/dev/null 2>&1 &&
@@ -194,22 +213,9 @@ if [ $DRY = 1 ]; then
 	exit 0
 fi
 
-[ -e "$CSV" ] && die 2 "$CSV already holds a job's rows: give another --out"
-mkdir -p "$OUT" || die 3 "cannot create $OUT"
 
 # ----------------------------------------------------------------- toolchain
 #
-# The keyring first: an image older than the key a package was signed with
-# refuses the package, and the archlinux image is rebuilt only now and then.
-if [ $INSTALL = 1 ]; then
-	[ "$(id -u)" = 0 ] || die 3 "installing needs root: run this in the container, or with --no-install"
-	echo "job: installing the packages ($OUT/install.log)"
-	if ! { pacman -Sy --noconfirm --needed archlinux-keyring &&
-	       pacman -Su --noconfirm --needed "${PACKAGES[@]}"; } > "$OUT/install.log" 2>&1; then
-		tail -n 30 "$OUT/install.log"
-		die 3 "pacman failed: $OUT/install.log"
-	fi
-fi
 
 # What the rows were produced with, kept beside them: an image that moved under
 # the campaign is otherwise a change nobody can date.
