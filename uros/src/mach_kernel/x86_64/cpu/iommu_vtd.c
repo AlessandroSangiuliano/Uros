@@ -1793,22 +1793,6 @@ int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2])
 #define	VTD_FSTS_IQE		(1u << 4)	/* a descriptor it refused  */
 #define	VTD_FSTS_ITE		(1u << 6)	/* an answer that never came */
 
-/*
- * #598's queue ablations, each with what must catch it:
- *	QI_TAIL_UNSHIFTED	the tail written as an index and not in bits
- *				18:4 -- the fabricated check's ringing case,
- *				and on an engine a queue that never sees its
- *				descriptors, so the enable fails;
- *	QI_FLUSH_BY_REGISTER	a flush through the IOTLB register with the
- *				queue on -- entry 16, whose grants then fail.
- */
-#ifndef	ABLATE_598_QI_TAIL_UNSHIFTED
-#define	ABLATE_598_QI_TAIL_UNSHIFTED	0
-#endif
-#ifndef	ABLATE_598_QI_FLUSH_BY_REGISTER
-#define	ABLATE_598_QI_FLUSH_BY_REGISTER	0
-#endif
-
 uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
 			       const uint64_t (*desc)[2], unsigned n)
 {
@@ -1858,11 +1842,14 @@ uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
  * the tail a register, both written through volatile pointers, so neither the
  * compiler nor an x86 processor lets the engine see the new tail before the
  * descriptors it covers.
+ *
+ * ⚠️ ablations/598-qi-tail-unshifted.patch writes the tail as an index and
+ * not in bits 18:4: the fabricated check's ringing case must count it wrong,
+ * and an engine never sees its descriptors, so the enable fails.
  */
 void iommu_vtd_queue_ring(const struct iommu_vtd_queue *q)
 {
-	*q->iqt = ABLATE_598_QI_TAIL_UNSHIFTED ? (uint64_t)q->tail
-					       : (uint64_t)q->tail << 4;
+	*q->iqt = (uint64_t)q->tail << 4;
 }
 
 /*
@@ -2024,12 +2011,13 @@ static int vtd_queue_submit(unsigned unit, const uint64_t (*desc)[2], unsigned n
  * commands only through the IQ" (§6.5.2) -- and QEMU's engine then ignores a
  * register command and leaves its busy bit set, so the register form would not
  * fail at once: it would spin to its bound and answer no.
+ * ablations/598-qi-flush-by-register.patch does that for a flush, and entry
+ * 16's grants must then fail.
  */
 static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
 		      int contexts)
 {
-	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on
-	    && !(ABLATE_598_QI_FLUSH_BY_REGISTER && !contexts)) {
+	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on) {
 		uint64_t cc[2], io[2];
 
 		iommu_vtd_qi_context_global(cc);

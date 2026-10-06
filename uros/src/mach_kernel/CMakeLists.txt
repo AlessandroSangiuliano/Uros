@@ -439,9 +439,6 @@ option(UROS_ABLATE_607_SWAPPED_PARKED "Build the #607 ablation: a swapped-out wa
 option(UROS_ABLATE_607_OLD_WAKE "Build the #607 ablation: the hand-off's old wake, which leaves a stopped waiter TH_RUN on no run queue, which -Q's second arm must catch" OFF)
 option(UROS_ABLATE_607_DTS_SWAPPED "Build the #607 ablation: the IPC direct thread switch switches onto a swapped-out receiver, which the -ON storm must catch" OFF)
 
-# #598: interrupt remapping, each check with a way to see it catch.
-option(UROS_ABLATE_598_QI_TAIL_UNSHIFTED "Build the #598 ablation: the invalidation queue's tail is written as an index and not in bits 18:4, and the fabricated queue check must count one wrong while a real Intel engine never sees its descriptors" OFF)
-option(UROS_ABLATE_598_QI_FLUSH_BY_REGISTER "Build the #598 ablation: a flush goes through the IOTLB register although the invalidation queue is on, and entry 16's grants must fail on an Intel engine" OFF)
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -939,14 +936,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_ABLATE_607_DTS_SWAPPED)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_607_DTS_SWAPPED=1)
       message(STATUS "#607 ablation: the IPC direct switch takes a swapped-out receiver (x86_64)")
-  endif()
-  if(UROS_ABLATE_598_QI_TAIL_UNSHIFTED)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_598_QI_TAIL_UNSHIFTED=1)
-      message(STATUS "#598 ablation: the queue's tail written as an index (x86_64)")
-  endif()
-  if(UROS_ABLATE_598_QI_FLUSH_BY_REGISTER)
-      list(APPEND KERNEL_DEFINES_BARE ABLATE_598_QI_FLUSH_BY_REGISTER=1)
-      message(STATUS "#598 ablation: a flush through the IOTLB register with the queue on (x86_64)")
   endif()
   if(UROS_ABLATE_594_CRYSTAL_IS_BUS)
       list(APPEND KERNEL_DEFINES_BARE ABLATE_594_CRYSTAL_IS_BUS=1)

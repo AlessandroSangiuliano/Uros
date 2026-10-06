@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: every invalidation through the queue once it is on -- a flush goes through the IOTLB register, which QEMU ignores, and a grant fails
+Run: --iommu intel --entry 16 600 -smp 1
+Expect: dma_reclaim: \[7\] a claim that ends takes its device's grants +FAIL
+Expect: should not use register-based invalidation
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 214aeecd..ce008faf 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2017,7 +2017,7 @@ static int vtd_queue_submit(unsigned unit, const uint64_t (*desc)[2], unsigned n
+ static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
+ 		      int contexts)
+ {
+-	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on) {
++	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on && contexts) {
+ 		uint64_t cc[2], io[2];
+ 
+ 		iommu_vtd_qi_context_global(cc);
