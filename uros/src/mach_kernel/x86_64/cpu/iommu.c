@@ -2828,6 +2828,50 @@ static const struct irta_case irta_cases[] = {
 	{ "intel irta, on a 2K boundary", 0x12345800ULL, 256, 0, -1, 0 },
 };
 
+/*
+ * And which entry is whose: the two ends of each range and the first past it.
+ * A map whose ranges touched would give a pin's entry to an MSI slot -- an
+ * interrupt delivered where the other source's vector says.
+ */
+struct irt_index_case {
+	const char	*what;
+	enum iommu_vtd_irt_source kind;
+	unsigned	 n;
+	int		 maps;		/* 1 to `index', 0 refused */
+	uint32_t	 index;
+};
+
+static const struct irt_index_case irt_index_cases[] = {
+	{ "intel irt, pin 0", IOMMU_VTD_IRT_PIN, 0, 1, 0 },
+	{ "intel irt, pin 23", IOMMU_VTD_IRT_PIN, 23, 1, 23 },
+	{ "intel irt, pin 127", IOMMU_VTD_IRT_PIN, 127, 1, 127 },
+	{ "intel irt, pin 128", IOMMU_VTD_IRT_PIN, 128, 0, 0 },
+	{ "intel irt, msi slot 0", IOMMU_VTD_IRT_MSI, 0, 1, 128 },
+	{ "intel irt, msi slot 15", IOMMU_VTD_IRT_MSI, 15, 1, 143 },
+	{ "intel irt, msi slot 127", IOMMU_VTD_IRT_MSI, 127, 1, 255 },
+	{ "intel irt, msi slot 128", IOMMU_VTD_IRT_MSI, 128, 0, 0 },
+};
+
+static unsigned irt_index_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0;
+	     i < sizeof(irt_index_cases) / sizeof(irt_index_cases[0]); i++) {
+		const struct irt_index_case *c = &irt_index_cases[i];
+		uint32_t index = 0xA5A5A5A5u;
+		int got;
+
+		(*ran)++;
+
+		got = iommu_vtd_irt_index(c->kind, c->n, &index);
+		if (got != c->maps || (got == 1 && index != c->index))
+			bad++;
+	}
+
+	return bad;
+}
+
 static unsigned irta_check(unsigned *ran)
 {
 	unsigned bad = 0;
@@ -2914,6 +2958,7 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 	bad += dte_check(&n);
 	bad += qi_check(&n);
 	bad += irta_check(&n);
+	bad += irt_index_check(&n);
 
 	if (ran)
 		*ran = n;

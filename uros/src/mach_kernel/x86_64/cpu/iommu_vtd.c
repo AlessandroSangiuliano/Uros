@@ -1625,6 +1625,30 @@ int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index)
 }
 
 /*
+ * ── #598: which entry is whose ───────────────────────────────────────
+ */
+#define	VTD_IRT_PINS		128u
+#define	VTD_IRT_MSI_FIRST	128u
+#define	VTD_IRT_MSI_SLOTS	128u
+
+int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
+			uint32_t *index)
+{
+	if (index == 0)
+		return 0;
+
+	if (kind == IOMMU_VTD_IRT_PIN && n < VTD_IRT_PINS) {
+		*index = n;
+		return 1;
+	}
+	if (kind == IOMMU_VTD_IRT_MSI && n < VTD_IRT_MSI_SLOTS) {
+		*index = VTD_IRT_MSI_FIRST + n;
+		return 1;
+	}
+	return 0;
+}
+
+/*
  * ── #598: the interrupt table's address register ─────────────────────
  *
  * Rev 5.20 §11.4.10, Figure 11-30: IRTA 63:12, EIME 11, reserved 10:4, S 3:0
@@ -1667,6 +1691,10 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
  * engine does; nothing is written to it yet.
  */
 #define	VTD_IRT_ENTRIES		256u
+
+_Static_assert(VTD_IRT_PINS <= VTD_IRT_MSI_FIRST
+	       && VTD_IRT_MSI_FIRST + VTD_IRT_MSI_SLOTS <= VTD_IRT_ENTRIES,
+	       "the index map's two ranges overlap, or run past the table");
 
 int iommu_vtd_irt_build(void)
 {

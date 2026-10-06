@@ -498,6 +498,30 @@ int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
 int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index);
 
 /*
+ * ── #598: which entry of intel's one table is whose ──────────────────
+ *
+ * Divided once, here, between the two kinds of source this kernel programs:
+ * an I/O APIC pin's entry is its pin number, 0 to 127, and MSI slot s is
+ * entry 128 + s.  Fixed rather than allocated, because the sources are fixed
+ * already -- a pin, one of DEVICE_MD_MSI_MAX slots -- and a map with no state
+ * cannot be left disagreeing with itself by a source that went away.
+ *
+ * The HPET has no range: while interrupts are remapped its comparator is
+ * routed through its I/O APIC pin (#598 point 4), never as a message of its
+ * own.
+ *
+ * Answers zero for a source past its range, which a caller must take as
+ * "this source cannot be remapped" and never as entry zero.
+ */
+enum iommu_vtd_irt_source {
+	IOMMU_VTD_IRT_PIN,
+	IOMMU_VTD_IRT_MSI
+};
+
+int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
+			uint32_t *index);
+
+/*
  * ── #598: where an intel engine finds its interrupt table ────────────
  *
  * Rev 5.20 §11.4.10, IRTA_REG at 0B8h: the table's address in 63:12, EIME in
