@@ -1084,7 +1084,13 @@ QPID=$!
 # the deadline on for as long as the tick ran: a machine stopped with its
 # clock alive never went quiet, reached the hard cap, and was called a
 # livelock (a stay-up boot ran its full ten times SECS, every time).
-IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
+#
+# #624: and, when the tick comes from the HPET, that backend's own two lines
+# beside clock_event's, its window and each processor's re-arm (hpet_event.c,
+# #593).  Missing here, they kept OMEGA's basso2-g12-e22-tcg4-2 going for
+# 2 h 27 min after the machine had stopped in its third minute, until it was
+# killed by hand: its last line that meant something is line 778 of 2604.
+IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^clock_event: hpet: window [0-9]*, \|^clock_event: hpet: cpu [0-9]* re-armed \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
 
 # The hard cap, which is still wall time and still needed: a livelock that
 # keeps printing meaningful lines forever is progress by this measure and has
