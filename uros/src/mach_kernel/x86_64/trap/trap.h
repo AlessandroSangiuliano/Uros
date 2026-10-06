@@ -170,6 +170,8 @@ struct trap_frame {
  * field above moves the real offsets and stops the build on the line below,
  * rather than in a boot three weeks later.
  */
+_Static_assert(TF_VECTOR == __builtin_offsetof(struct trap_frame, vector),
+	       "TF_VECTOR and struct trap_frame disagree");
 _Static_assert(TF_RIP    == __builtin_offsetof(struct trap_frame, rip),
 	       "TF_RIP and struct trap_frame disagree");
 _Static_assert(TF_CS     == __builtin_offsetof(struct trap_frame, cs),
