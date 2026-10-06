@@ -52,6 +52,13 @@
 #define WITNESS		0x5eeded1eafULL
 
 /*
+ * How many arms there are: the summary line says it and the exit status
+ * compares with it, so it is said once.  The two used to be written apart and
+ * disagreed -- "of 4 arms passed" printed, and an exit status that asked for 3.
+ */
+#define FT_ARMS		4
+
+/*
  * Where the second arm faults, and why this address.
  *
  * The lower half is the task's to have and this task does not have this piece
@@ -505,7 +512,7 @@ main(int argc, char **argv)
 	passed += arm_four_copy_that_must_fail();
 	passed += arm_two_exception_to_the_task();
 
-	printf("fault_test: %d of 4 arms passed\n", passed);
+	printf("fault_test: %d of %d arms passed\n", passed, FT_ARMS);
 
 	/*
 	 * 🔴 IT ENDS, and the note that used to be here said it must not.
@@ -526,5 +533,5 @@ main(int argc, char **argv)
 	 *
 	 * The exception thread is joined in arm two, so this is the last one.
 	 */
-	return passed == 3 ? 0 : 1;
+	return passed == FT_ARMS ? 0 : 1;
 }
