@@ -1804,14 +1804,11 @@ int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
  *	61:60	IntCtl		00b abort, 01b forward unmapped, 10b remap
  *	62	Lint0Pass, 63 Lint1Pass
  *
- * ⚠️ The ablation writes IntCtl 01b, which forwards every fixed interrupt
- * unmapped with IV set and a valid table in place: a table written, read back
- * correctly and never consulted -- the shape of QEMU's dma-remap default.  The
- * interrupt check must catch the word.
+ * ⚠️ ablations/598-intctl-forward.patch writes IntCtl 01b, which forwards
+ * every fixed interrupt unmapped with IV set and a valid table in place: a
+ * table written, read back correctly and never consulted -- the shape of
+ * QEMU's dma-remap default.  The interrupt check must catch the word.
  */
-#ifndef	ABLATE_598_INTCTL_FORWARD
-#define	ABLATE_598_INTCTL_FORWARD	0
-#endif
 
 #define	AMD_DTE_INT_IV		(1ULL << 0)
 #define	AMD_DTE_INT_LEN_SHIFT	1
@@ -1840,9 +1837,7 @@ int iommu_amd_dte_interrupts(uint64_t table_pa, unsigned log2_entries,
 	dte[2] = AMD_DTE_INT_IV
 	       | ((uint64_t)log2_entries << AMD_DTE_INT_LEN_SHIFT)
 	       | table_pa
-	       | ((ABLATE_598_INTCTL_FORWARD ? AMD_DTE_INT_CTL_FORWARD
-					     : AMD_DTE_INT_CTL_REMAP)
-		  << AMD_DTE_INT_CTL_SHIFT);
+	       | (AMD_DTE_INT_CTL_REMAP << AMD_DTE_INT_CTL_SHIFT);
 	return 1;
 }
 
