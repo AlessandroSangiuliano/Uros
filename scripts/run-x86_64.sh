@@ -243,6 +243,14 @@ if ! grep -aq 'panic(cpu' "$LOG"; then
 	[ -n "$SHREDDED" ] && BAD=$(printf '%s\n%s' "$BAD" \
 		"PANIC (#624), its first line in pieces: $SHREDDED" | sed '/^$/d')
 fi
+# #624: a task the kernel killed because nothing would take its exception.
+# exception_no_server() says so in one line, the task is gone, and nothing else
+# in the log has to fail for it: in #645's forkrace test without its fix, ten
+# children died of EXC_BAD_ACCESS and the run was reported passed.  No test
+# kills a task this way on purpose -- of 3493 logs, the 18 with the line are
+# ablations and runs that failed anyway -- so every one is unexplained.
+DEATHS=$(grep -a 'exception_no_server: terminating task' "$LOG" || true)
+[ -n "$DEATHS" ] && BAD=$(printf '%s\n%s' "$BAD" "$DEATHS" | sed '/^$/d')
 # #578: a line that carries two programs' output is a failure too, and it is
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
