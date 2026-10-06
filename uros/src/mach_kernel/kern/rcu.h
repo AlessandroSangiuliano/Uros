@@ -147,16 +147,22 @@ urmach_rcu_read_unlock(void)
  *	Whether the caller is inside a read section -- for a check that a
  *	rule is kept, not for deciding anything (#604).
  *
- *	⚠️ It can miss, and it cannot lie the other way.  A caller inside a
- *	section cannot migrate (the section holds preemption off), so it
- *	always reads its own depth.  A caller outside one can be moved between
- *	cpu_number() and the load and read another processor's depth -- which
- *	may hide a violation for that one call, and never invents one.
+ *	⚠️ Read with preemption off (#646).  A caller inside a section cannot
+ *	migrate anyway, but one outside it could be moved between cpu_number()
+ *	and the load and read ANOTHER processor's depth -- not only hiding a
+ *	violation but inventing one, when a reader is in a section there.
+ *	This comment used to say it never invents one, and pmap_collect()
+ *	panics on its answer: a false panic, on a check meant to keep a rule.
  */
 static __inline__ boolean_t
 urmach_rcu_read_held(void)
 {
-	return cpu_data[cpu_number()].rcu_read_depth != 0;
+	boolean_t	held;
+
+	disable_preemption();
+	held = (cpu_data[cpu_number()].rcu_read_depth != 0);
+	enable_preemption();
+	return held;
 }
 
 /*
