@@ -1241,6 +1241,17 @@ reply_refusal_say(
 		       r->cached_generation,
 		       r->cached_active ? "active" : "dead");
 
+	/*
+	 * #646: mach_msg finds the space through current_thread(), which can
+	 * read another processor's thread.  The header is then looked up in
+	 * someone else's space, and a reply port of ours can be a send right
+	 * there.  The task is read again here, after the refusal.
+	 */
+	printf("ipc:   the space used was %p and the sending task's own is %p "
+	       "-- %s (#602, #646)\n", (void *) space,
+	       (void *) current_task()->itk_space,
+	       space == current_task()->itk_space ? "the same" : "DIFFERENT");
+
 #if	defined(__x86_64__)
 	/*
 	 * The "generation" above is the space's: how many times a right in it
@@ -1272,6 +1283,28 @@ reply_refusal_say(
 			       "(#602)\n");
 	}
 #endif	/* __x86_64__ */
+}
+
+/*
+ * #602, #646: a destination refused in a space that is not the sender's own.
+ * Only that case is said, because a send to a dead name is an ordinary answer
+ * and this one never is.  io_claim_race's arm [2] saw MACH_SEND_INVALID_DEST
+ * once (05/10, OMEGA, with #645 in), from a task whose destination was the
+ * master device port it held for the whole run.
+ */
+static void
+dest_refusal_say(
+	ipc_space_t	space,
+	mach_port_t	name)
+{
+	static unsigned int	said;
+	ipc_space_t		own = current_task()->itk_space;
+
+	if (space == own || ++said > REPLY_REFUSALS_SAID)
+		return;
+	printf("ipc: task %p: a send was refused for its destination name "
+	       "0x%x in space %p, which is not its own %p (#602, #646)\n",
+	       (void *) current_task(), name, (void *) space, (void *) own);
 }
 
 /*
@@ -1722,6 +1755,7 @@ ipc_kmsg_copyin_header(
 
     invalid_dest:
 	is_write_unlock(space);
+	dest_refusal_say(space, dest_name);
 	return MACH_SEND_INVALID_DEST;
 
     invalid_reply:
