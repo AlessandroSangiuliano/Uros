@@ -5939,6 +5939,35 @@ static void msi_selftest(void)
 	if (!had_interrupts)
 		interrupts_disable();
 	device_md_msi_unregister(slot);
+
+	/*
+	 * And a message after the slot is given back (#598).  A device can have
+	 * one on its way when its driver lets go -- the card in irq_claim_test's
+	 * [12] did, under KVM -- and msi_release_vector() promises it is
+	 * acknowledged and lost.  It used to take the vector away instead, and
+	 * an unclaimed vector halts the machine.  So the released vector is
+	 * raised once more, the way the first was.
+	 */
+	{
+		uint64_t	before = msi_hits;
+
+		had_interrupts = interrupts_enabled();
+		interrupts_enable();
+		lapic_send_self((uint8_t)data);
+		for (unsigned spin = 0; spin < 1000000u; spin++)
+			cpu_pause();
+		if (!had_interrupts)
+			interrupts_disable();
+
+		kputs("UrMach x86-64: a message after slot ");
+		kputdec(slot);
+		kputs(" was given back ran its handler ");
+		kputdec((unsigned)(msi_hits - before));
+		kputs(msi_hits == before
+		      ? " times — acknowledged and lost, not a halt\r\n"
+		      : " times — WRONG, a slot given back still runs its"
+			" handler\r\n");
+	}
 }
 
 /*

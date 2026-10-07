@@ -480,8 +480,14 @@ device_md_irq_unregister(unsigned int irq)
 	if (ioapic_present())
 		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
 
+	/*
+	 * #598: the handler goes and the trampoline stays, as for a message
+	 * slot (msi_release_vector()).  Masking stops the pin, not an
+	 * interrupt it already sent: one pending while the caller holds the
+	 * level high arrives after this returns, and must find something to
+	 * acknowledge it rather than an unclaimed vector.
+	 */
 	irq_handler[irq] = 0;
-	trap_set_handler(DEVICE_MD_VECTOR(irq), 0);
 }
 
 /*
@@ -633,6 +639,14 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
  * acknowledged, which is a lost interrupt and not a wild call -- and the slot
  * is not reused.  Sixteen of them, and reclaiming one honestly means the
  * kernel owning the device's table, which is where #457 is going anyway.
+ *
+ * 🔴 #598: AND THE TRAMPOLINE STAYS, which is what keeps that promise.  This
+ * used to take the vector's handler away as well, so an arriving message
+ * found no trampoline to acknowledge it: an unclaimed vector, and an
+ * unclaimed vector halts the machine.  A device can have a message on its
+ * way when its driver lets go -- the card in irq_claim_test's [12] did, under
+ * KVM -- and device_md_irq_trampoline() already acknowledges a slot with no
+ * handler.
  */
 static void
 msi_release_vector(unsigned int slot)
@@ -641,7 +655,6 @@ msi_release_vector(unsigned int slot)
 		return;
 
 	irq_handler[slot] = 0;
-	trap_set_handler(DEVICE_MD_VECTOR(slot), 0);
 }
 
 /*
