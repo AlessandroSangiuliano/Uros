@@ -2066,7 +2066,7 @@ static unsigned			ndevice_domains;
 int iommu_can_isolate(void)
 {
 	/*
-	 * ⚠️ Four separate noes, and the truncation one is the one that would
+	 * ⚠️ Five separate noes, and the truncation one is the one that would
 	 * be missed.  A description that did not fit is a set of engines
 	 * nobody programs, and iommu_truncated() says so -- promising
 	 * isolation on such a machine would be promising it for the devices
@@ -2083,6 +2083,14 @@ int iommu_can_isolate(void)
 	for (unsigned i = 0; i < nunits; i++)
 		if (!units[i].answered || units[i].register_va == 0)
 			return 0;
+
+	/*
+	 * And on Intel the instruction a present context entry changes with
+	 * (#598's C20): without it attach writes nothing, and a yes here would
+	 * promise a confinement no device gets.
+	 */
+	if (found_vendor == IOMMU_INTEL && !cpu_has_cmpxchg16b())
+		return 0;
 
 	return 1;
 }

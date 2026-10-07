@@ -5696,7 +5696,7 @@ static void iommu_selftest(void)
 			 * 🔴 AND WHETHER A DEVICE COULD BE CONFINED, ASKED OUT
 			 * LOUD.  Everything above says the hardware is there
 			 * and the tables are right; this is the one question a
-			 * driver's DMA path actually asks, and it has four
+			 * driver's DMA path actually asks, and it has five
 			 * separate ways to answer no.  Without it, a machine
 			 * on which no device is ever confined looks exactly
 			 * like one on which none needed to be — which is a
@@ -5707,7 +5707,7 @@ static void iommu_selftest(void)
 			      " what it is granted: ");
 			kputs(iommu_can_isolate()
 			      ? "yes — the next dma allocation moves one\r\n"
-			      : "NO — see the four conditions in"
+			      : "NO — see the conditions in"
 				" iommu_can_isolate()\r\n");
 		} else if (ok) {
 			kputs("UrMach x86-64:   translation left OFF (pass"

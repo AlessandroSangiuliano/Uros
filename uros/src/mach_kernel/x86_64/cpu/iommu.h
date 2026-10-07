@@ -1073,12 +1073,13 @@ void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a);
 /*
  * Whether a domain could be given to a device at all on this machine.
  *
- * ⚠️ Asked rather than assumed, because there are four separate ways for the
+ * ⚠️ Asked rather than assumed, because there are five separate ways for the
  * answer to be no and each of them is a real machine: no engine at all, an
- * engine that did not answer, a description that was truncated, and
- * translation not turned on.  A grant that failed for one of those is not a
- * bug in the caller, and a caller that cannot tell them apart will report it
- * as one.
+ * engine that did not answer, a description that was truncated, translation
+ * not turned on, and on Intel a processor without cmpxchg16b, which a present
+ * context entry is changed with (#598's C20).  A grant that failed for one of
+ * those is not a bug in the caller, and a caller that cannot tell them apart
+ * will report it as one.
  */
 int iommu_can_isolate(void);
 

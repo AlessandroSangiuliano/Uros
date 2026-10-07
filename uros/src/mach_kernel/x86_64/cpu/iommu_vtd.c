@@ -20,6 +20,7 @@
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 #include <cpu/pci_cfg.h>
+#include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
@@ -824,6 +825,29 @@ int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
  * wrong in a way that produces a correct-looking machine.  The moment attach
  * is on a path that runs often, this is the thing to sharpen.
  */
+/*
+ * 🔴 ONE 16-BYTE STORE (#598's C20), for an entry an engine may be reading:
+ * a context entry -- "software performing an SSPTPTR or Translation Type (TT)
+ * field update must use a 16-Byte aligned atomic operation" (§6.2.2.1) -- or
+ * an interrupt remapping entry, which hardware reads whole "as software may
+ * change the contents of the IRTE atomically" (§5.1.4).  Written as two
+ * stores, a present entry is, between them, an entry nobody wrote.  On a
+ * processor without the instruction it answers no, and nothing is written.
+ */
+static int vtd_store_entry(volatile uint64_t *at, const uint64_t e[2])
+{
+	volatile struct atomic128 *slot = (volatile struct atomic128 *)at;
+	struct atomic128 was, now = { e[0], e[1] };
+
+	if (!cpu_has_cmpxchg16b())
+		return 0;
+	was.lo = slot->lo;
+	was.hi = slot->hi;
+	while (!atomic_cmpxchg128(slot, &was, now))
+		;
+	return 1;
+}
+
 int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 {
 	const struct iommu_tables *t = iommu_tables();
@@ -854,14 +878,14 @@ int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 	iommu_vtd_context_domain(d->id, d->levels, d->root, entry);
 
 	/*
-	 * 🔴 THE HIGH WORD BEFORE THE LOW ONE, because the low one carries
-	 * Present.  Written the other way round, an engine that read the entry
-	 * between the two stores would find it present, pointing at this
-	 * domain's root, with a domain id and address width that are still the
-	 * pass-through entry's -- a valid-looking entry nobody wrote.
+	 * The pass-through entry this replaces is present, so it changes in
+	 * one store.  It used to be two, high word first: between them an
+	 * engine read a present pass-through entry carrying this domain's id
+	 * and address width -- the entry nobody wrote, which the order was
+	 * meant to avoid and only moved (C20).
 	 */
-	ctx[devfn * VTD_ENTRY_WORDS + 1] = entry[1];
-	ctx[devfn * VTD_ENTRY_WORDS + 0] = entry[0];
+	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
+		return 0;
 
 	if (ctx[devfn * VTD_ENTRY_WORDS + 0] != entry[0]
 	    || ctx[devfn * VTD_ENTRY_WORDS + 1] != entry[1])
@@ -908,15 +932,9 @@ int iommu_vtd_detach(uint16_t bdf)
 
 	iommu_vtd_context_blocked(entry);
 
-	/*
-	 * 🔴 THE PRESENT BIT FIRST HERE, WHICH IS THE OPPOSITE OF ATTACH.
-	 * Attaching writes the pointer before the bit that makes it live;
-	 * detaching must clear that bit before the pointer, or an engine
-	 * reading between the two stores finds an entry that is still present
-	 * and no longer points anywhere.
-	 */
-	ctx[devfn * VTD_ENTRY_WORDS + 0] = entry[0];
-	ctx[devfn * VTD_ENTRY_WORDS + 1] = entry[1];
+	/* One store, as in attach (C20). */
+	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
+		return 0;
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
 		const struct iommu_unit *u = iommu_unit(i);
@@ -2143,22 +2161,17 @@ static void vtd_flush_line(const volatile void *p)
 }
 
 /*
- * 🔴 ONE 16-BYTE STORE (#598's C20).  An engine reads an entry whole, "as
- * software may change the contents of the IRTE atomically" (§5.1.4), so a
- * present entry rewritten in two stores is, between them, an entry nobody
- * wrote: the new vector to the old destination, or the old source let in.
- * Then the line out of the caches for an engine that does not snoop, and every
- * engine that remaps told to forget the entry, each through its own queue --
- * register-based invalidation cannot reach the interrupt entry cache (§6.5.1).
- *
- * ⚠️ cpu_has_cmpxchg16b() is asked once, when remapping is turned on, not
- * here: no engine is told to remap on a processor without the instruction.
+ * One 16-byte store (vtd_store_entry(), C20): a present entry rewritten in two
+ * would be, between them, the new vector to the old destination, or the old
+ * source let in.  Then the line out of the caches for an engine that does not
+ * snoop, and every engine that remaps told to forget the entry, each through
+ * its own queue -- register-based invalidation cannot reach the interrupt
+ * entry cache (§6.5.1).
  */
 static int vtd_irte_write(uint32_t index, const uint64_t e[2])
 {
 	const struct iommu_interrupt_tables *t = iommu_interrupt_tables();
-	volatile struct atomic128 *slot;
-	struct atomic128 was, now = { e[0], e[1] };
+	volatile uint64_t *slot;
 	uint64_t d[2];
 
 	if (t->intel_table == 0 || index >= VTD_IRT_ENTRIES
@@ -2167,12 +2180,10 @@ static int vtd_irte_write(uint32_t index, const uint64_t e[2])
 
 	const uint64_t iec[1][2] = { { d[0], d[1] } };
 
-	slot = (volatile struct atomic128 *)(uintptr_t)
+	slot = (volatile uint64_t *)(uintptr_t)
 		phys_to_direct(t->intel_table + (uint64_t)index * 16u);
-	was.lo = slot->lo;
-	was.hi = slot->hi;
-	while (!atomic_cmpxchg128(slot, &was, now))
-		;
+	if (!vtd_store_entry(slot, e))
+		return 0;
 
 	if (vtd_irt_uncached)
 		vtd_flush_line(slot);
