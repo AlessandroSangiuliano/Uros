@@ -12,6 +12,7 @@
 # Usage:
 #   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --check [--base REV] PATCH...
+#   ablate.sh --plan [--base REV] [--boots N] [--accel L] [--ab] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --make COMMIT PATH...
 #
 #   --base REV   the tree to take the fix out of (default HEAD)
@@ -21,6 +22,8 @@
 #                the widen patches, without the ablations
 #   --keep       keep the worktrees and their builds afterwards
 #   --check      only say whether every patch still applies to REV
+#   --plan       say what the same command without --plan would build and
+#                boot, and refuse what it would refuse, building nothing
 #   --make       print the reverse of COMMIT's changes to the PATHs, under a
 #                header to fill in
 #   RUN-ARGS     what run-x86_64.sh is given after the accelerator; the
@@ -74,6 +77,7 @@ ACCEL=tcg
 AB=0
 KEEP=0
 CHECK=0
+PLAN=0
 PATCHES=()
 RUN=()
 while [ $# -gt 0 ]; do
@@ -89,6 +93,7 @@ while [ $# -gt 0 ]; do
 	--ab)		AB=1; shift ;;
 	--keep)		KEEP=1; shift ;;
 	--check)	CHECK=1; shift ;;
+	--plan)		PLAN=1; shift ;;
 	--)		shift; RUN=("$@"); break ;;
 	-*)		die 2 "unknown option $1" ;;
 	*)		[ -e "$1" ] || die 2 "no patch $1"
@@ -161,20 +166,43 @@ if [ ${#RUN[@]} -eq 0 ]; then
 	read -r -a RUN <<< "$run"
 fi
 
-RUNDIR="$DIR/runs/$(date +%Y%m%d-%H%M%S)-$SHORT"
-mkdir -p "$RUNDIR"
-for p in "${PATCHES[@]}"; do
+EXPECT=$(for p in "${PATCHES[@]}"; do
 	if [ "$(header "$p" Kind | head -n 1)" = ablation ]; then
 		header "$p" Expect
 	fi
-done > "$RUNDIR/expect"
-[ -s "$RUNDIR/expect" ] || die 2 "no Expect: line in the ablation patches: nothing would say the test caught it"
+done)
+[ -n "$EXPECT" ] || die 2 "no Expect: line in the ablation patches: nothing would say the test caught it"
 
 if [ $AB = 1 ]; then
 	ARMS=(fixed ablated)
 else
 	ARMS=(ablated)
 fi
+
+# Everything a run refuses has been refused by now, before anything is built:
+# a plan is the run up to here, and what it would do after (#656).
+if [ $PLAN = 1 ]; then
+	for p in "${PATCHES[@]}"; do
+		what=$(header "$p" 'Takes out'; header "$p" 'Holds open')
+		echo "ablate: plan: $(basename "$p"): $(header "$p" Kind | head -n 1)," \
+			"$(header "$p" Issue | head -n 1): ${what:-says nothing of what it does}"
+	done
+	echo "ablate: plan: run-x86_64.sh is given: ${RUN[*]}"
+	while IFS= read -r e; do
+		echo "ablate: plan: caught if a line of the log matches: $e"
+	done <<< "$EXPECT"
+	if [ $AB = 1 ]; then
+		echo "ablate: plan: the fixed arm is $SHORT with the ${#WIDENS[@]} widen patch(es), the ablated arm with all ${#PATCHES[@]}"
+	else
+		echo "ablate: plan: one arm, $SHORT with all ${#PATCHES[@]} patch(es)"
+	fi
+	echo "ablate: plan: $BOOTS boot(s) per arm under each of ${ACCELS[*]}, $((BOOTS * ${#ACCELS[@]} * ${#ARMS[@]})) in all"
+	exit 0
+fi
+
+RUNDIR="$DIR/runs/$(date +%Y%m%d-%H%M%S)-$SHORT"
+mkdir -p "$RUNDIR"
+printf '%s\n' "$EXPECT" > "$RUNDIR/expect"
 
 cleanup() {
 	local arm
