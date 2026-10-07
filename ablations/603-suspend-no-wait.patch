@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #603
-Takes out: thread_suspend()'s wait for the thread to stop, so it answers while the thread may still be running its own code
+Takes out: thread_suspend()'s wait for the thread to stop, so it answers while the thread may still be running its own code -- seen only with the stop held late as well, so give 603-ast-interrupt-late.patch and 603-act-ast.patch before it, whose kernel line then catches it too: with the stop as prompt as the fix makes it, the thread stops within a few pages of the asking, before act_test reads its count
 Run: --entry 14 600 -smp 4
 Expect: act_test: \[7\] in [0-9]+ of [0-9]+ rounds the thread touched pages after thread_suspend had answered .*WRONG \(#603\)
 
