@@ -1015,6 +1015,14 @@ int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
 	iommu_amd_dte_domain(d->id, d->levels, d->root, want);
 
 	/*
+	 * #598: and the interrupt half as it is.  The encoder writes that word
+	 * as zero -- IV clear, "passed through unmapped" -- and it is not the
+	 * encoder's to decide: once interrupts are remapped, an attach that
+	 * wrote it would quietly stop remapping this device's interrupts.
+	 */
+	want[2] = dt[bdf * AMD_DTE_WORDS + 2];
+
+	/*
 	 * 🔴 THE THREE HIGH WORDS BEFORE THE ONE THAT CARRIES V, for the same
 	 * reason Intel's Present goes last -- and §3.2.2.1 asks for exactly
 	 * this: change the entry, then set V, then invalidate.  An engine that
@@ -1081,6 +1089,7 @@ int iommu_amd_detach(uint16_t bdf)
 	 */
 	iommu_amd_dte_blocked((uint16_t)(dt[bdf * AMD_DTE_WORDS + 1] & 0xFFFF),
 			      want);
+	want[2] = dt[bdf * AMD_DTE_WORDS + 2];	/* #598: see attach */
 
 	/* Valid last on attach; valid FIRST to go here.  See the VT-d note. */
 	dt[bdf * AMD_DTE_WORDS + 0] = want[0];

@@ -571,10 +571,12 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
  * touching only that word: the two halves of a device table entry answer two
  * different questions, and an encoder for one must not decide the other.
  *
- * 🔴 AND THE CONVERSE IS A HAZARD TODAY.  Every encoder above writes this word
- * as zero -- IV clear, "passed through unmapped" -- so once remapping is on, any
+ * 🔴 AND THE CONVERSE WAS A HAZARD.  Every encoder above writes this word as
+ * zero -- IV clear, "passed through unmapped" -- so once remapping is on, any
  * path that rewrites a device's entry (an attach, a detach) would quietly turn
- * that device's interrupt remapping off.  Whoever turns it on owns that.
+ * that device's interrupt remapping off.  So iommu_amd_attach() and
+ * iommu_amd_detach() keep the word as they find it, and only the remapping
+ * code writes it.
  *
  * Remapped, with every pass bit clear: NMI, INIT, ExtInt and LINT0/1 from the
  * device are target aborted, because a device that sends one of those has no
