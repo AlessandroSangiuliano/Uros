@@ -4,7 +4,8 @@
 #
 # ci/job.sh -- one job of the campaign on the epic (#653): the toolchain, the
 # x86-64 build from the preset with no warning, then the merge test round after
-# round, one CSV row per boot.
+# round, one CSV row per boot.  Or, with --ablate, an A/B of fixes taken out in
+# place of the merge test (#656).
 #
 # Why.  The short A/B and the merge test run on a batch of branches save hours
 # of machine time, and they also find fewer rare races by chance: #651, #519
@@ -15,12 +16,23 @@
 # merge-test-x86_64.sh and the entries are its own list, read out of it: a
 # second copy of either would be a second half free to disagree with the first.
 #
+# A defect some runners show and the home machines do not -- #603's, on the AMD
+# EPYC 9V45 under KVM -- can only be taken out and put back where it shows, and
+# that is what --ablate is for: scripts/ablate.sh --ab on this tree, with the
+# patches of ablations/ named, the fixed tree and the tree with the fixes taken
+# out booted one after the other, the same build checks before them.
+#
 # Usage:
 #   scripts/ci/job.sh [--entries "N ..."] [--rounds R] [--accel L] [--out DIR]
+#                     [--no-install] [--dry-run]
+#   scripts/ci/job.sh --ablate "P ..." [--boots N] [--accel L] [--out DIR]
 #                     [--no-install] [--dry-run]
 #
 #   --entries "N ..."  only these merge-test entries (default: its whole list)
 #   --rounds R         merge-test rounds, one after the other (default 1)
+#   --ablate "P ..."   an A/B instead of the merge test, with these patches of
+#                      ablations/, named without the directory or ".patch"
+#   --boots N          with --ablate, boots per arm and accelerator (default 1)
 #   --accel L          tcg, kvm or tcg,kvm (default: tcg, and kvm as well when
 #                      /dev/kvm can be opened)
 #   --out DIR          rows, logs and the job's record (default ./ci-out)
@@ -31,13 +43,17 @@
 # run and the job in every row, and UROS_BUILD_DIR is honoured as by the
 # harness.  OUT/boots.csv gets one row per boot, its times in UTC; the logs of
 # every WRONG boot are copied to OUT/failed/rN/; OUT/job.txt says what the job
-# ran on and with which tools.
+# ran on and with which tools.  With --ablate, OUT/ablate.csv gets the rows
+# instead, one per boot of either arm, and every boot's log stays in
+# OUT/ablate/, where ablate.sh works.
 #
-# Exit status: 0 every boot as it should be · 1 at least one boot WRONG · 2 the
-# command line is wrong · 3 the job could not boot, or could not read its
-# boots: the packages, the configure or the build failed, the build had a
-# warning, a round did not report every boot it was meant to, or a boot's log
-# was not where the merge test puts it.
+# Exit status: 0 every boot as it should be -- with --ablate, every ablated boot
+# caught and every fixed boot passed · 1 at least one boot WRONG, not caught or
+# failed · 2 the command line is wrong, or a patch does not apply · 3 the job
+# could not boot, or could not read its boots: the packages, the configure or
+# the build failed, the build had a warning, a round or the A/B did not report
+# every boot it was meant to, or a boot's log was not where the merge test puts
+# it.
 set -u
 # The container has no locale but C, and a run outside it reads the same words:
 # under another locale the compilers translate the very `warning:' the build's
@@ -48,6 +64,7 @@ REPO=$(cd "$(dirname "$0")/../.." && pwd)
 MT=$REPO/scripts/merge-test-x86_64.sh
 PRESET=$REPO/uros/cmake/presets/x86_64.cmake
 HEADER=date,time,run_id,job,round,tree,cpu_model,mhz,accel,entry,smp,opt,verdict,log
+AB_HEADER=date,time,run_id,job,tree,cpu_model,mhz,patches,arm,boot,accel,run,harness_status,verdict,log
 RUN_ID=${GITHUB_RUN_ID:-local}
 JOB=${JOB_INDEX:-0}
 
@@ -68,24 +85,30 @@ die() {
 
 ENTRIES=""
 ROUNDS=1
+ROUNDS_SET=0
+ABLATE=""
+BOOTS=1
+BOOTS_SET=0
 ACCEL=auto
 OUT=ci-out
 INSTALL=1
 DRY=0
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--entries|--rounds|--accel|--out)
+	--entries|--rounds|--accel|--out|--ablate|--boots)
 		[ $# -ge 2 ] || die 2 "$1 needs a value"
 		case "$1" in
 		--entries)	ENTRIES=$2 ;;
-		--rounds)	ROUNDS=$2 ;;
+		--rounds)	ROUNDS=$2; ROUNDS_SET=1 ;;
+		--ablate)	ABLATE=$2 ;;
+		--boots)	BOOTS=$2; BOOTS_SET=1 ;;
 		--accel)	ACCEL=$2 ;;
 		--out)		OUT=$2 ;;
 		esac
 		shift 2 ;;
 	--no-install)	INSTALL=0; shift ;;
 	--dry-run)	DRY=1; shift ;;
-	-h|--help)	sed -n '/^# Usage:/,/^# was not where/p' "$0"; exit 0 ;;
+	-h|--help)	sed -n '/^# Usage:/,/^# it\.$/p' "$0"; exit 0 ;;
 	*)		die 2 "unknown argument '$1' (--help says what it takes)" ;;
 	esac
 done
@@ -100,27 +123,52 @@ for e in "${WANT[@]}"; do
 	esac
 done
 ENTRIES="${WANT[*]}"
+# The patches of an A/B, by name, out of this tree's ablations/ and nowhere
+# else: the name comes from a workflow input, and a path would reach outside.
+PATCHES=()
+if [ -n "$ABLATE" ]; then
+	[ $ROUNDS_SET = 0 ] && [ -z "$ENTRIES" ] ||
+		die 2 "--entries and --rounds choose the merge test's boots, and --ablate boots what its patches' Run: line says: give one or the other"
+	case "$BOOTS" in
+	''|*[!0-9]*|0)	die 2 "--boots takes a number of boots, not '$BOOTS'" ;;
+	esac
+	read -r -a NAMES <<< "$(tr ',\n\t' '   ' <<< "$ABLATE")"
+	for n in "${NAMES[@]}"; do
+		case "$n" in
+		.*|*[!A-Za-z0-9._-]*)	die 2 "--ablate takes the names of patches in ablations/, not '$n'" ;;
+		esac
+		n=${n%.patch}
+		[ -f "$REPO/ablations/$n.patch" ] || die 2 "this tree has no ablations/$n.patch"
+		PATCHES+=("$REPO/ablations/$n.patch")
+	done
+	[ ${#PATCHES[@]} -gt 0 ] || die 2 "--ablate names no patch"
+elif [ $BOOTS_SET = 1 ]; then
+	die 2 "--boots counts the boots of an A/B, and goes with --ablate"
+fi
 case "$OUT" in
 /*)	;;
 *)	OUT=$PWD/$OUT ;;
 esac
 OUT=${OUT%/}
 CSV=$OUT/boots.csv
+[ -z "$ABLATE" ] || CSV=$OUT/ablate.csv
 
 # The merge test's own list, one boot per line and accelerator.  Empty means its
 # ENTRIES block changed shape under this reader, which is a refusal and not a
-# plan with nothing in it.
-LIST=$(sed -n '/^ENTRIES="$/,/^"$/{/^[0-9]/p}' "$MT")
-[ -n "$LIST" ] || die 3 "read no entries out of $MT: its ENTRIES block has changed shape, and this script reads it"
-PLAN=$LIST
-if [ -n "$ENTRIES" ]; then
-	for e in "${WANT[@]}"; do
-		awk -v e="$e" '$1 == e { f = 1 } END { exit !f }' <<< "$LIST" ||
-			die 2 "entry $e is not in the merge test's list; merge-test-x86_64.sh says why the entries it leaves out are not run"
-	done
-	PLAN=$(awk -v want=" $ENTRIES " 'index(want, " " $1 " ")' <<< "$LIST")
+# plan with nothing in it.  An A/B boots what its patches say instead.
+if [ -z "$ABLATE" ]; then
+	LIST=$(sed -n '/^ENTRIES="$/,/^"$/{/^[0-9]/p}' "$MT")
+	[ -n "$LIST" ] || die 3 "read no entries out of $MT: its ENTRIES block has changed shape, and this script reads it"
+	PLAN=$LIST
+	if [ -n "$ENTRIES" ]; then
+		for e in "${WANT[@]}"; do
+			awk -v e="$e" '$1 == e { f = 1 } END { exit !f }' <<< "$LIST" ||
+				die 2 "entry $e is not in the merge test's list; merge-test-x86_64.sh says why the entries it leaves out are not run"
+		done
+		PLAN=$(awk -v want=" $ENTRIES " 'index(want, " " $1 " ")' <<< "$LIST")
+	fi
+	NLINES=$(wc -l <<< "$PLAN")
 fi
-NLINES=$(wc -l <<< "$PLAN")
 
 # Opened and not only looked at: as root, test -w says yes to a node the
 # container's device list refuses, and a qemu that cannot open it turns every
@@ -154,7 +202,7 @@ case $HAS_TCG$HAS_KVM in
 esac
 [ $HAS_KVM = 0 ] || [ "$KVM" = "can be opened" ] ||
 	die 3 "kvm was asked for and /dev/kvm cannot be opened here"
-PER_ROUND=$((NLINES * (HAS_TCG + HAS_KVM)))
+[ -n "$ABLATE" ] || PER_ROUND=$((NLINES * (HAS_TCG + HAS_KVM)))
 
 # The packages before anything reads the tree: git is one of them, and the
 # archlinux image has none -- #653's first run stopped on that very line.  The
@@ -195,6 +243,22 @@ NPROC=$(nproc)
 BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 export UROS_BUILD_DIR=$BUILD
 
+# What an A/B will build and boot, said by ablate.sh itself and refused here if
+# it would refuse it, before anything is built: on twenty runners, a patch that
+# no longer applies is twenty builds for nothing.  Its scratch index goes.
+if [ -n "$ABLATE" ]; then
+	scratch=$(mktemp -d) || die 3 "cannot create a scratch directory"
+	AB_PLAN=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --plan --ab \
+		--boots "$BOOTS" --accel "$ACCEL" "${PATCHES[@]}" 2>&1)
+	rc=$?
+	rm -rf "$scratch"
+	if [ $rc != 0 ]; then
+		printf '%s\n' "$AB_PLAN" >&2
+		[ $rc = 2 ] && die 2 "ablate.sh refuses this A/B"
+		die 3 "ablate.sh could not plan this A/B (status $rc)"
+	fi
+fi
+
 echo "job: tree $TREE, run $RUN_ID, job $JOB; here: $CPU, $NPROC processors, /dev/kvm $KVM"
 if [ $INSTALL = 1 ]; then
 	echo "job: install: pacman -Sy archlinux-keyring, then pacman -Su --needed ${PACKAGES[*]}"
@@ -206,13 +270,19 @@ echo "job: build: ninja -C $BUILD, refused on any 'warning:' line but bison's pa
 # The plan of a job started elsewhere, as the workflow's is, was made on a
 # machine whose /dev/kvm may not be that job's.
 [ $AUTO = 0 ] || echo "job: accelerators: tcg, and kvm wherever /dev/kvm can be opened; here it $KVM"
-echo "job: $ROUNDS round(s) of $MT -a $MT_ACC -o $OUT/logs/rN${ENTRIES:+ -e \"$ENTRIES\"}"
-echo "job: $PER_ROUND boots a round ($NLINES of the merge test's lines x $ACCS), $((PER_ROUND * ROUNDS)) in all, each at the merge test's -smp unless it names one:"
-while read -r e v opt cpus; do
-	[ "$opt" = - ] && opt=""
-	echo "job:   entry $e${opt:+ (${opt//_/ })}${cpus:+ -smp $cpus}, judged by '$v'"
-done <<< "$PLAN"
-echo "job: rows: $CSV; logs of WRONG boots: $OUT/failed/"
+if [ -n "$ABLATE" ]; then
+	echo "job: an A/B instead of the merge test: scripts/ablate.sh --ab --boots $BOOTS --accel $ACCEL ${PATCHES[*]##*/}"
+	sed 's/^/job:   /' <<< "$AB_PLAN"
+	echo "job: rows: $CSV; every boot's log: $OUT/ablate/runs/"
+else
+	echo "job: $ROUNDS round(s) of $MT -a $MT_ACC -o $OUT/logs/rN${ENTRIES:+ -e \"$ENTRIES\"}"
+	echo "job: $PER_ROUND boots a round ($NLINES of the merge test's lines x $ACCS), $((PER_ROUND * ROUNDS)) in all, each at the merge test's -smp unless it names one:"
+	while read -r e v opt cpus; do
+		[ "$opt" = - ] && opt=""
+		echo "job:   entry $e${opt:+ (${opt//_/ })}${cpus:+ -smp $cpus}, judged by '$v'"
+	done <<< "$PLAN"
+	echo "job: rows: $CSV; logs of WRONG boots: $OUT/failed/"
+fi
 if [ $DRY = 1 ]; then
 	echo "job: dry run: nothing installed, built or booted"
 	exit 0
@@ -292,6 +362,40 @@ clock_of() {	# full-log
 		echo "?"
 	fi
 }
+
+# ------------------------------------------------------------------- the A/B
+#
+# ablate.sh builds both arms from this build's configuration -- UROS_BUILD_DIR,
+# exported above, is its main build -- and boots each arm from its own build.
+# Its rows become the job's, with the run, the job, the tree and the processor
+# a runner's row needs, and are counted: an A/B that stopped short, or changed
+# the shape of its rows, would otherwise pass as fewer boots with nothing wrong.
+if [ -n "$ABLATE" ]; then
+	echo "job: the A/B ($OUT/ablate.out)"
+	UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --ab --boots "$BOOTS" \
+		--accel "$ACCEL" "${PATCHES[@]}" 2>&1 | tee "$OUT/ablate.out"
+	rc=${PIPESTATUS[0]}
+	echo "$AB_HEADER" > "$CSV"
+	n=0
+	if [ -f "$OUT/ablate/ablate.csv" ]; then
+		while IFS=, read -r d t _host _base names arm boot a run _clock _power hs verdict log; do
+			echo "$d,$t,$RUN_ID,$JOB,$TREE,$CPU,$(clock_of "$log"),$names,$arm,$boot,$a,$run,$hs,$verdict,${log#"$OUT"/}" >> "$CSV"
+			n=$((n + 1))
+		done < <(tail -n +2 "$OUT/ablate/ablate.csv")
+	fi
+	want=$((BOOTS * (HAS_TCG + HAS_KVM) * 2))
+	{
+		echo "ablate:   ${PATCHES[*]##*/}, $BOOTS boot(s) per arm and accelerator, $n of $want boots reported, ablate.sh status $rc"
+		grep '^ablate: \(ablated tree caught\|fixed tree passed\)' "$OUT/ablate.out" | sed 's/^ablate: /result:   /'
+	} >> "$OUT/job.txt"
+	echo "job: the A/B reported $n of $want boots, ablate.sh status $rc -- tree $TREE, $CPU, $ACCS"
+	case $rc in
+	0|1)	[ $n = $want ] || die 3 "the A/B reported $n of the $want boots it was meant to: $OUT/ablate.out"
+		exit $rc ;;
+	2)	exit 2 ;;
+	*)	exit 3 ;;
+	esac
+fi
 
 WRONGS=()
 UNFOUND=0
