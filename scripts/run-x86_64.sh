@@ -446,6 +446,8 @@ must_report 'rcu_tick: starting' 'rcu_tick: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every wait on either side is bounded and the verdict is printed either way; a run that stops after the start line has stopped inside a read section or in a grace period that does not end (#649).'
 must_report 'sprintf_test: starting' 'sprintf_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Both sides make a fixed number of calls and the verdict is printed either way; a run that stops after the start line has stopped inside sprintf(), whose lock one side never gave back (#655).'
+must_report 'clear_wait_test: starting' 'clear_wait_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'The rounds are a fixed number and the waker stops on a flag, so the verdict is printed either way; a run that stops after the start line has stopped in a clear that waits for a waker that never finishes, or has panicked in assert_wait() on a wait left behind (#599).'
 must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
 must_report 'boot_probe: the startup handed me argv\[0\]' 'boot_probe: the startup handed me argv\[0\] = boot_probe' \
