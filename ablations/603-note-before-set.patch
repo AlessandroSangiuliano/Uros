@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #603
+Takes out: the note taken after the set: it goes back before install_special_handler(), and with 603-asker-late.patch the kernel must then say a stop came late that was not
+Run: --entry 14 600 -smp 4
+Expect: thread_suspend: activation .* resolved [0-9]+ page faults from ring 3 between the stop being asked and the stop -- WRONG \(#603\)
+
+diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
+--- a/uros/src/mach_kernel/kern/thread_act.c
++++ b/uros/src/mach_kernel/kern/thread_act.c
+@@ -410,6 +410,8 @@
+ 	}
+ 	if (thr_act->user_stop_count++ == 0 &&
+ 		thr_act->suspend_count++ == 0 ) {
++		thr_act->stop_asked_at = thr_act->user_faults;
++		thr_act->stop_asked = TRUE;
+ 		delay(20000);	/* #603: the asker held before the set */
+ 		install_special_handler(thr_act);
+ 		/*
+@@ -427,8 +429,6 @@
+ 		 * thread stops at its next fault.  What the set-then-note order
+ 		 * can miss is the fault in progress when the set lands.
+ 		 */
+-		thr_act->stop_asked_at = thr_act->user_faults;
+-		thr_act->stop_asked = TRUE;
+ 		if (thread &&
+ 			thr_act == thread->top_act && thread != current_thread()) {
+ 			nudge(thr_act);
