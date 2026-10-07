@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #519
+Takes out: the read of the count at level zero after the raise, putting it back before the gap, so that a front landing there counts as a second run of the one replay
+Run: --entry 0 300 -smp 4
+Expect: lowering ran the held interrupt [2-9][0-9]* time from 1 replay
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -6200,6 +6200,7 @@
+ 
+ 	/* One: the whole path, at a level that holds nothing. */
+ 	pit_delay_us(20000);
++	at_spl0 = dm_irqs;
+ 
+ 	/*
+ 	 * ablations/519-widen-gap.patch: two of the PIT's 1 ms periods at level
+@@ -6224,8 +6225,7 @@
+ 	 * passing boot's, with level zero read at 19 instead of 20.
+ 	 */
+ 	old = splx(SPL_DEVICE);
+-	at_spl0 = dm_irqs;
+-	while_raised = at_spl0;
++	while_raised = dm_irqs;
+ 	pit_delay_us(20000);
+ 	while_raised = dm_irqs - while_raised;
+ 
