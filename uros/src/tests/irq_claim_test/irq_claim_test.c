@@ -683,8 +683,9 @@ arm_seven_the_card_rings(void)
 					 &slot);
 	if (kr != KERN_SUCCESS) {
 		printf("irq_claim_test: [11] NOT ASKED — the owned card gave no "
-		       "message-signalled interrupt (kr=%d), which is a board "
-		       "whose card has no MSI-X table\n", (int)kr);
+		       "message-signalled interrupt (kr=%d), which a card with no "
+		       "MSI-X table answers, and so do other refusals (#590)\n",
+		       (int)kr);
 		printf("irq_claim_test: [12] NOT ASKED — so it cannot ring "
 		       "one\n");
 		(void) device_mmio_unmap(master_device, uva,
