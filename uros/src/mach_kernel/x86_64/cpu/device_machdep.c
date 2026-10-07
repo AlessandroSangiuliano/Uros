@@ -404,6 +404,19 @@ device_md_irq_trampoline(struct trap_frame *frame)
 
 	if (!trap_in_replay())
 		lapic_eoi();
+
+	/*
+	 * #598 point 3: and a level line's controller told directly.  The
+	 * processor's broadcast EOI clears the pin's Remote IRR only when the
+	 * interrupt arrived marked level and its vector is the redirection
+	 * entry's -- and QEMU's amd-iommu delivers a remapped message marked
+	 * edge whatever it was (hw/i386/amd_iommu.c, lines 2094-2098 in 11.1.1,
+	 * set no trigger mode), so no broadcast comes and the line is silent
+	 * after its first interrupt.  The handler ran first, so the device has
+	 * been told; a level line the forwarder masked stays masked.
+	 */
+	if (irq < DEVICE_MD_IRQ_MAX && device_md_irq_is_level(irq))
+		ioapic_eoi((uint8_t)frame->vector);
 }
 
 /*

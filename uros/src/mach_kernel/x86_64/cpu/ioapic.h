@@ -112,6 +112,16 @@ void ioapic_unmask(uint32_t gsi);
 int ioapic_is_masked(uint32_t gsi);
 
 /*
+ * #598 point 3: tell the controller directly that the interrupt on `vector'
+ * was handled, which clears Remote IRR on the level pins carrying it -- for
+ * when the processor's broadcast EOI does not come, or does not match.  The
+ * register is version 0x20's; on an older controller this does nothing, and
+ * ioapic_direct_eoi() says so.
+ */
+int ioapic_direct_eoi(void);
+void ioapic_eoi(uint8_t vector);
+
+/*
  * #599: for the -Y test only (ioapic_race_test.c).  A pin is "untouched" when
  * its low half is still what ioapic_init() wrote -- masked, no vector -- which
  * no routed pin is.  ioapic_set_vector() changes the vector by the same

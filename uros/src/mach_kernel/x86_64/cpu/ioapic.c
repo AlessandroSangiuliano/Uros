@@ -25,6 +25,7 @@
 #define IOAPIC_REG_ID		0x00
 #define IOAPIC_REG_VERSION	0x01
 #define IOAPIC_REG_REDIR	0x10	/* two registers per pin, from here */
+#define IOAPIC_EOI		0x40	/* version 0x20 and up: EOI by vector */
 
 /*
  * A redirection entry is sixty-four bits across two thirty-two bit
@@ -42,6 +43,7 @@
 
 static volatile uint8_t *io;
 static unsigned pins;
+static uint32_t version;	/* read once, at ioapic_init() */
 static uint32_t base_gsi;
 
 /*
@@ -191,6 +193,7 @@ int ioapic_init(void)
 	 * with more.
 	 */
 	pins = ((ioapic_read(IOAPIC_REG_VERSION) >> 16) & 0xFF) + 1;
+	version = ioapic_read(IOAPIC_REG_VERSION) & 0xFF;
 
 	/*
 	 * Every pin masked, because the firmware does not hand over a blank
@@ -267,6 +270,18 @@ void ioapic_unmask(uint32_t gsi)
 int ioapic_is_masked(uint32_t gsi)
 {
 	return (ioapic_read(redir_reg(gsi)) & RTE_MASKED) != 0;
+}
+
+int ioapic_direct_eoi(void)
+{
+	return ioapic_present() && version >= 0x20;
+}
+
+/* Its own register, not one behind the window: no lock to take. */
+void ioapic_eoi(uint8_t vector)
+{
+	if (ioapic_direct_eoi())
+		*(volatile uint32_t *)(io + IOAPIC_EOI) = vector;
 }
 
 /*
