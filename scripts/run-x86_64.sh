@@ -444,6 +444,8 @@ must_report 'shootdown_test: \[2\] starting' 'shootdown_test: \[2\] \(PASS\|WRON
 	'A cross-call sent to its own sender never returns: it ends the boot with a panic that names it.  A run that stops after the start line without that panic has stopped somewhere else inside the calls (#638).'
 must_report 'rcu_tick: starting' 'rcu_tick: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every wait on either side is bounded and the verdict is printed either way; a run that stops after the start line has stopped inside a read section or in a grace period that does not end (#649).'
+must_report 'sprintf_test: starting' 'sprintf_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Both sides make a fixed number of calls and the verdict is printed either way; a run that stops after the start line has stopped inside sprintf(), whose lock one side never gave back (#655).'
 must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
 must_report 'boot_probe: the startup handed me argv\[0\]' 'boot_probe: the startup handed me argv\[0\] = boot_probe' \

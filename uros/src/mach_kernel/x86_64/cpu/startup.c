@@ -39,6 +39,7 @@
 #include <time/clock_event.h>	/* #459: the scheduler clock */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <time/rcu_tick_test.h>	/* #649: -U */
+#include <cpu/sprintf_test.h>	/* #655: -K */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -565,6 +566,14 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('U'))
 			rcu_tick_reader_test();
+
+		/*
+		 * -K: two processors call sprintf() at once (#655).  -E's
+		 * reasons, and the second thread is bound to a processor already
+		 * in the scheduler; returns, so the boot goes on.
+		 */
+		if (boot_flag('K'))
+			sprintf_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
