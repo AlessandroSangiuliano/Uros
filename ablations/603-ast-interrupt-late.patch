@@ -1,0 +1,18 @@
+Kind: widen
+Issue: #603
+Holds open: the AST interrupt's handler does nothing, so the copy of a remote activation's ASTs into its processor's need_ast[] waits for the tick, as it came hundreds of faults late under KVM on the GitHub runners with an AMD EPYC 9V45 -- the fixed tree looks at the activation on the way back to ring 3 and must still stop arm seven's thread at its next fault
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+index 63fe121e..189af149 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+@@ -382,8 +382,6 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+ static void ipi_ast_handler(struct trap_frame *frame)
+ {
+ 	(void) frame;
+-	if (!ABLATE_603_IPI_EMPTY)
+-		ast_check();
+ 	lapic_eoi();
+ }
+ 
