@@ -6160,7 +6160,7 @@ static void dm_irq_handler(int irq)
 static void device_master_irq_selftest(void)
 {
 	uint64_t	at_spl0, while_raised, after_lowering, after_release;
-	uint64_t	replays, acks, deferrals;
+	uint64_t	replays, arrivals, acks, deferrals;
 	int		had_interrupts;
 	spl_t		old;
 
@@ -6229,10 +6229,12 @@ static void device_master_irq_selftest(void)
 	 */
 	pit_periodic_stop();
 	replays = dm_replayed;
+	arrivals = dm_arrived;
 
 	splx(old);
 	after_lowering = dm_irqs - at_spl0 - while_raised;
 	replays = dm_replayed - replays;
+	arrivals = dm_arrived - arrivals;
 
 	/* Three: given up, and the line goes quiet with the device running. */
 	device_md_irq_unregister(0);
@@ -6257,14 +6259,30 @@ static void device_master_irq_selftest(void)
 	      ? " — the claim and the release both take effect\r\n"
 	      : " — WRONG, the line does not follow the claim\r\n");
 
+	/*
+	 * 🔑 THE RUNS ON THE WAY DOWN ARE ARRIVALS OR REPLAYS, AND NOTHING ELSE
+	 * (#519).  With the device stopped before the lowering, every run counted
+	 * there entered by one road or the other while the test was looking; a
+	 * count that is neither ran where the test was NOT looking, and says the
+	 * windows are wrong, not the deferral.  The test once read its count at
+	 * level zero before the raise, and the front that landed in between
+	 * came out here as a second run of the one replay -- blamed on the
+	 * deferral for weeks, in boots whose last line said one replay.
+	 */
 	kputs("UrMach x86-64: lowering ran the held interrupt ");
 	kputdec((unsigned)after_lowering);
 	kputs(" time from ");
 	kputdec((unsigned)replays);
 	kputs(" replay");
-	kputs(after_lowering == 1 && replays == 1
-	      ? " — one, however many fronts were held\r\n"
-	      : " — WRONG, the deferral is not replayed exactly once\r\n");
+	if (after_lowering != arrivals + replays) {
+		kputs(" and ");
+		kputdec((unsigned)arrivals);
+		kputs(" arrival — WRONG, the counts do not add up: a run"
+		      " fell outside the windows this test reads\r\n");
+	} else
+		kputs(after_lowering == 1 && replays == 1
+		      ? " — one, however many fronts were held\r\n"
+		      : " — WRONG, the deferral is not replayed exactly once\r\n");
 
 	kputs("UrMach x86-64: of ");
 	kputdec((unsigned)dm_irqs);
