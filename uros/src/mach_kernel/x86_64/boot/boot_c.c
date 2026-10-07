@@ -5276,7 +5276,20 @@ static void iommu_selftest(void)
 				kputdec(l);
 				kputs("-level");
 			}
-		kputs(u->coherent_walk ? ", coherent walks" : ", NON-coherent walks");
+		/*
+		 * #598's C7: on AMD the control register's Coherent bit is the
+		 * device table's, not the walks' -- those follow a DTE's SD,
+		 * clear in every entry written here.
+		 */
+		if (iommu_vendor() == IOMMU_AMD)
+			kputs(iommu_amd_devtab_snooped(i)
+			      ? ", page walks snooped (sd clear), the device"
+				" table too, as its ivhd recommends"
+			      : ", page walks snooped (sd clear), the device"
+				" table NOT, as its ivhd recommends");
+		else
+			kputs(u->coherent_walk ? ", coherent walks"
+					       : ", NON-coherent walks");
 
 		/*
 		 * ⚠️ What remapping interrupts would need, said before anything
@@ -5556,21 +5569,30 @@ static void iommu_selftest(void)
 			 * caches, on an engine whose walks do not snoop them --
 			 * counted, so a frame the build forgot is a number short.
 			 */
+			uint64_t want = iommu_tables_uncached()
+					? (uint64_t)t->frames * 64u
+					: iommu_amd_devtab_uncached()
+					? t->root_bytes / 64u : 0;
+
 			flushed = iommu_table_lines_flushed() - flushed;
-			if (!iommu_tables_uncached())
+			if (want == 0)
 				kputs("\r\n");
-			else if (flushed == (uint64_t)t->frames * 64u) {
+			else if (flushed == want) {
 				kputs(" and out of the caches, ");
 				kputdec((unsigned)flushed);
-				kputs(" lines — the walks do not snoop them"
-				      " (ECAP.C clear)\r\n");
+				kputs(iommu_vendor() == IOMMU_AMD
+				      ? " lines — the device table is read"
+					" without snooping, as the ivhd"
+					" recommends\r\n"
+				      : " lines — the walks do not snoop them"
+					" (ECAP.C clear)\r\n");
 			} else {
 				kputs(" — WRONG, ");
 				kputdec((unsigned)flushed);
 				kputs(" of ");
-				kputdec(t->frames * 64u);
-				kputs(" lines left the caches, and the walks do"
-				      " not snoop them\r\n");
+				kputdec((unsigned)want);
+				kputs(" lines left the caches, and the engine"
+				      " does not snoop them\r\n");
 			}
 		}
 

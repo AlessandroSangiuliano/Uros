@@ -1081,6 +1081,16 @@ uint64_t iommu_table_lines_flushed(void);
 int iommu_flush_check(unsigned *expected, unsigned *made);
 
 /*
+ * #598's C7 on AMD: whether a unit's device table is read with snooping, as
+ * its IVHD recommends (the control register's Coherent bit is set to match),
+ * and whether any unit's is not -- in which case every device table line this
+ * kernel writes is flushed.  Page walks are snooped on AMD, SD being clear in
+ * every entry written here.
+ */
+int iommu_amd_devtab_snooped(unsigned unit);
+int iommu_amd_devtab_uncached(void);
+
+/*
  * Whether a domain could be given to a device at all on this machine.
  *
  * ⚠️ Asked rather than assumed, because there are five separate ways for the

@@ -227,6 +227,38 @@ _Static_assert(sizeof(struct ivmd_header) == 32, "an IVMD is thirty-two bytes");
  */
 #define	AMD_CONTROL_COHERENT(c)	(((c) >> 10) & 1)
 
+/*
+ * ── #598's C7 on this vendor: the device table, and only it ──────────
+ *
+ * Page walks follow a DTE's SD, which no entry this kernel writes sets, and
+ * the interrupt tables and the command buffer are always coherent (§2.2.5).
+ * What the control register's Coherent bit decides is whether the engine
+ * snoops its reads of the DEVICE TABLE, and the IVHD recommends a value for
+ * it: Table 92, flag bit 5, "The recommended value is 1b".  QEMU's IVHD sets
+ * HtTunEn, IotlbSup, PrefSup and PPRSup, and not this.  So the bit is set as
+ * recommended, and a device table read without snooping has every line this
+ * kernel writes into it flushed before the engine is told.
+ */
+#define	AMD_CTL_COHERENT	(1ULL << 10)
+#define	IVHD_FLAG_COHERENT	(1u << 5)
+
+static uint8_t	amd_devtab_snooped[IOMMU_MAX_UNITS];	/* as recommended */
+
+int iommu_amd_devtab_snooped(unsigned unit)
+{
+	return unit < IOMMU_MAX_UNITS && amd_devtab_snooped[unit];
+}
+
+int iommu_amd_devtab_uncached(void)
+{
+	if (iommu_vendor() != IOMMU_AMD)
+		return 0;
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (iommu_unit(i)->answered && !iommu_amd_devtab_snooped(i))
+			return 1;
+	return 0;
+}
+
 static int is_ivhd(uint8_t type)
 {
 	return type == IVRS_IVHD_10 || type == IVRS_IVHD_11
@@ -461,6 +493,20 @@ void iommu_amd_dte_blocked(uint16_t domain, uint64_t out[4])
 _Static_assert(AMD_DEVICE_TABLE_FRAMES == 512,
 	       "the device table is two megabytes, which is its architectural maximum");
 
+/* Entries [first, first + count) of a device table written: out of the caches. */
+static void amd_devtab_written(volatile uint64_t *dt, unsigned first,
+			       unsigned count)
+{
+	uintptr_t at, end;
+
+	if (!iommu_amd_devtab_uncached())
+		return;
+	at = (uintptr_t)&dt[(uint64_t)first * AMD_DTE_WORDS] & ~(uintptr_t)63;
+	end = (uintptr_t)&dt[(uint64_t)(first + count) * AMD_DTE_WORDS];
+	for (; at < end; at += 64u)
+		iommu_flush_line((const volatile void *)at);
+}
+
 int iommu_amd_build(void)
 {
 	uint64_t table, command, event;
@@ -514,6 +560,7 @@ int iommu_amd_build(void)
 		    || dt[i * AMD_DTE_WORDS + 2] != want[2]
 		    || dt[i * AMD_DTE_WORDS + 3] != want[3])
 			return 0;
+	amd_devtab_written(dt, 0, AMD_DEVICE_IDS);	/* C7 */
 
 	iommu_record_tables(table, (uint64_t)AMD_DEVICE_TABLE_FRAMES * 4096u,
 			    command, event, written, 0,
@@ -607,6 +654,9 @@ int iommu_amd_enable(void)
 		 * silent.
 		 */
 		control |= AMD_CTL_CMDBUF_EN | AMD_CTL_EVENTLOG_EN;
+		control &= ~AMD_CTL_COHERENT;
+		if (iommu_amd_devtab_snooped(i))	/* C7, as the IVHD says */
+			control |= AMD_CTL_COHERENT;
 		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
 
 		control |= AMD_CTL_IOMMU_EN;
@@ -614,10 +664,14 @@ int iommu_amd_enable(void)
 
 		/*
 		 * Read back, because a write that was accepted and ignored is
-		 * the failure this cannot afford to call success.
+		 * the failure this cannot afford to call success.  A device
+		 * table meant to be snooped that is not would be read stale:
+		 * nothing was flushed for it.
 		 */
 		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
 		if (!(control & AMD_CTL_IOMMU_EN))
+			return 0;
+		if (iommu_amd_devtab_snooped(i) && !(control & AMD_CTL_COHERENT))
 			return 0;
 
 		enabled++;
@@ -1034,6 +1088,7 @@ int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
 	dt[bdf * AMD_DTE_WORDS + 2] = want[2];
 	dt[bdf * AMD_DTE_WORDS + 3] = want[3];
 	dt[bdf * AMD_DTE_WORDS + 0] = want[0];
+	amd_devtab_written(dt, bdf, 1);			/* C7 */
 
 	if (dt[bdf * AMD_DTE_WORDS + 0] != want[0]
 	    || dt[bdf * AMD_DTE_WORDS + 1] != want[1])
@@ -1097,6 +1152,7 @@ int iommu_amd_detach(uint16_t bdf)
 	dt[bdf * AMD_DTE_WORDS + 1] = want[1];
 	dt[bdf * AMD_DTE_WORDS + 2] = want[2];
 	dt[bdf * AMD_DTE_WORDS + 3] = want[3];
+	amd_devtab_written(dt, bdf, 1);			/* C7 */
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
 		const struct iommu_unit *u = iommu_unit(i);
@@ -1665,6 +1721,9 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	 */
 	iommu_record_hardware(index, 0, bits, levels, ir, coherent,
 			      features, control);
+	if (index < IOMMU_MAX_UNITS)	/* C7 */
+		amd_devtab_snooped[index] =
+			(h->block.flags & IVHD_FLAG_COHERENT) != 0;
 	iommu_record_interrupt(index, &interrupt);
 	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
@@ -2168,6 +2227,7 @@ int iommu_amd_ir_prepare(void)
 			return amd_prepare_fail(&t);
 		dt[amd_irt[k].device * AMD_DTE_WORDS + 2] = dte[2];
 	}
+	amd_devtab_written(dt, 0, AMD_DEVICE_IDS);	/* C7 */
 
 	for (unsigned id = 0; id < AMD_DEVICE_IDS; id++) {
 		int k = amd_irt_find((uint16_t)id);
