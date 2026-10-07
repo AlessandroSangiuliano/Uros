@@ -22,6 +22,6 @@
  */
 extern void	quiet_census_pass(int mycpu);
 /* The census's walk, under the processor set's lock, for a caller that may sleep (#657: -c). */
-extern int	quiet_census_walk(unsigned int *unreadable);
+extern int	quiet_census_walk(int *had, unsigned int *unreadable);
 
 #endif	/* _KERN_QUIET_CENSUS_H_ */

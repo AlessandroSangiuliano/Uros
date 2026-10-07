@@ -51,7 +51,7 @@ void
 census_test(void)
 {
 	uint64_t	hz = tsc_hz(), t0;
-	int		i, me, ncpu = 0, n;
+	int		i, me, ncpu = 0, n, had;
 	unsigned int	ended, unreadable;
 
 	for (i = 0; i < NCPUS; i++) {
@@ -99,13 +99,27 @@ census_test(void)
 	       "processor %d walks the census (#657)\n", CENSUS_TEST_VICTIMS,
 	       me);
 	thread_wakeup((event_t) &census_test_event);
-	n = quiet_census_walk(&unreadable);
+	n = quiet_census_walk(&had, &unreadable);
 	ended = census_test_ending;
 	thread_bind(current_thread(), PROCESSOR_NULL);
 
-	printf("census_test: PASS — the census walked %d threads under the "
-	       "processor set's lock while %u of the %u woken threads had "
-	       "already run on to their end, and skipped %u pointers out of "
-	       "them as not readable (#657)\n", n, ended, CENSUS_TEST_VICTIMS,
-	       unreadable);
+	/*
+	 * 🔑 The count the set had and the count the walk listed are the same
+	 * number when nothing leaves the list during the walk -- which the lock
+	 * is for.  Without it, the threads that ended were taken off the list
+	 * ahead of the walk and it listed fewer; a walk standing on one as it
+	 * was freed would follow a pointer out of freed memory instead.
+	 */
+	if (n != had)
+		printf("census_test: WRONG — the census listed %d of the %d "
+		       "threads the processor set had when it began, while %u "
+		       "of the %u woken threads ran on to their end: threads "
+		       "were taken off the list under the walk (#657)\n", n,
+		       had, ended, CENSUS_TEST_VICTIMS);
+	else
+		printf("census_test: PASS — the census listed all %d threads "
+		       "the processor set had when it began, while %u of the %u "
+		       "woken threads had already run on to their end, and "
+		       "skipped %u pointers out of them as not readable "
+		       "(#657)\n", n, ended, CENSUS_TEST_VICTIMS, unreadable);
 }

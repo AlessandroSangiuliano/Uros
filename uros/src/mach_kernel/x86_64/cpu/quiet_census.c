@@ -601,15 +601,19 @@ census_threads(void)
 
 /*
  * The walk for a caller that may sleep: -c (#657).  Answers how many threads it
- * listed, and in *unreadable how many pointers out of them it skipped.
+ * listed; *had is how many the processor set had when the walk began, and
+ * *unreadable how many pointers out of them it skipped.  Under the lock the
+ * first two are the same number: no thread joins or leaves the list while it
+ * is held.
  */
 int
-quiet_census_walk(unsigned int *unreadable)
+quiet_census_walk(int *had, unsigned int *unreadable)
 {
 	unsigned int	before;
 	int		n;
 
 	pset_lock(&default_pset);
+	*had = default_pset.thread_count;
 	before = census_unreadable;
 	n = census_threads();
 	*unreadable = census_unreadable - before;
