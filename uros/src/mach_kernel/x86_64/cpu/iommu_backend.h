@@ -162,6 +162,18 @@ unsigned iommu_vtd_ir_enable(void);
 int iommu_vtd_unit_remapping(unsigned unit);
 
 /*
+ * #598: AMD's half.  Prepare writes every device table entry's interrupt
+ * half with the engine off; enable answers how many engines remap once one
+ * is on.  An entry is written into the table of the DeviceID given -- the
+ * I/O APIC's, or a function's -- at the vector's index, and forgotten there.
+ */
+int iommu_amd_ir_prepare(void);
+unsigned iommu_amd_ir_enable(void);
+int iommu_amd_remapping(void);
+int iommu_amd_remap_entry(uint16_t device, uint8_t vector, uint32_t apic_id);
+void iommu_amd_forget_entry(uint16_t device, uint8_t vector);
+
+/*
  * ── Stage 3: page-table entries ──────────────────────────────────────
  *
  * 🔴 TWO ENCODERS BECAUSE THEY ARE TWO FORMATS, not for symmetry.  The bit

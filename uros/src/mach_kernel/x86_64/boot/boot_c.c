@@ -5591,6 +5591,16 @@ static void iommu_selftest(void)
 		}
 
 		/*
+		 * #598: what remapping must do before translation is on.  On
+		 * AMD that is every device table entry's interrupt half, which
+		 * an engine already running could have cached; on Intel there
+		 * is nothing.  Whether it worked is asked again by the turning
+		 * on below, which says so.
+		 */
+		if (boot_flag('i'))
+			(void) iommu_prepare_interrupt_remapping();
+
+		/*
 		 * 🔴 AND ONLY NOW, AND ONLY IF ASKED.  `-I' on the boot
 		 * command line is what turns translation on.  A default boot
 		 * builds and enables nothing, so a machine this cannot survive
@@ -5712,11 +5722,16 @@ static void iommu_selftest(void)
 		 */
 		if (boot_flag('i')) {
 			const char *why = "";
-			int asked = 0;
+			int asked = 0, was_on = iommu_translating();
 			unsigned n = iommu_enable_interrupt_remapping(&why,
 								      &asked);
 			const struct acpi_ioapic *io = acpi_ioapic(0);
 			uint16_t sid;
+
+			if (n != 0 && !was_on && iommu_translating())
+				kputs("UrMach x86-64:   -i turned the engine on,"
+				      " every device passing through — amd-vi"
+				      " remaps only with it on\r\n");
 
 			kputs("UrMach x86-64:   -i given: interrupt remapping ");
 			if (n == 0) {
@@ -5725,9 +5740,15 @@ static void iommu_selftest(void)
 				kputs(why);
 				kputs("\r\n");
 			} else {
-				kputs("IS ON — every pin and MSI-X slot"
-				      " through an entry this kernel wrote, a"
-				      " message in the old format refused\r\n");
+				kputs(iommu_vendor() == IOMMU_AMD
+				      ? "IS ON — every pin and MSI-X slot"
+					" through an entry this kernel wrote,"
+					" and a message with no entry refused"
+					"\r\n"
+				      : "IS ON — every pin and MSI-X slot"
+					" through an entry this kernel wrote, a"
+					" message in the old format refused"
+					"\r\n");
 				for (unsigned i = 0; i < iommu_unit_count(); i++) {
 					kputs("UrMach x86-64:   unit ");
 					kputdec(i);
@@ -5736,14 +5757,22 @@ static void iommu_selftest(void)
 					      : " does not remap — WRONG\r\n");
 				}
 				if (io != 0 && iommu_ioapic_source(io->id, &sid)) {
-					kputs("UrMach x86-64:   the i/o apic's"
-					      " entries accept only ");
+					int amd = iommu_vendor() == IOMMU_AMD;
+
+					kputs(amd ? "UrMach x86-64:   the i/o"
+						    " apic's table belongs to "
+						  : "UrMach x86-64:   the i/o"
+						    " apic's entries accept only ");
 					kputdec(sid >> 8);
 					kputs(":");
 					kputdec((sid >> 3) & 0x1F);
 					kputs(".");
 					kputdec(sid & 0x7);
-					kputs(", its source-id in the dmar\r\n");
+					kputs(amd ? ", its deviceid in the ivrs, and"
+						    " its entry n delivers vector n"
+						    "\r\n"
+						  : ", its source-id in the dmar"
+						    "\r\n");
 				}
 			}
 		}

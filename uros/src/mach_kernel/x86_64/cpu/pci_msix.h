@@ -183,8 +183,8 @@ extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
  * 🔴 EVERY CALLER OF msi_claim_vector() THAT PROGRAMS A DEVICE CALLS THIS
  * between the two.  A message in compatibility format is refused once
  * interrupts are remapped -- and the boot's own table test armed one without
- * asking, which QEMU's intel-iommu let through only because it refuses
- * nothing in that format.
+ * asking, which QEMU's intel-iommu let through (it does not refuse that
+ * format) and its amd-iommu did not.
  *
  * msi_unremap_vector() is its other half: after the device's entry is
  * disarmed, the slot's remapping entry stops remapping.

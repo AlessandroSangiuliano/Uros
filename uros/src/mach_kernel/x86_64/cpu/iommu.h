@@ -503,7 +503,9 @@ int iommu_interrupts_remapped(void);
  * the source must hold to select it: the two halves ioapic_route() writes,
  * or the address and data an MSI-X table entry is given.  🔴 The words come
  * IN holding the compatibility-format ones and go out holding the ones to
- * write, which a vendor may leave as they came.  The fields are the
+ * write -- on Intel the remappable format, on AMD the very same words, since
+ * there the vector is the index and only the entry is written.  A caller
+ * that passed fresh variables would hand a device garbage on AMD, and did.  The fields are the
  * ones the source would have written in compatibility format -- vector,
  * destination APIC id, trigger and polarity -- and the entry is made to stick
  * before this returns: one 16-byte store, flushed for an engine whose reads
@@ -523,7 +525,7 @@ int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 /*
  * The slot given up: its entry stops remapping, so the device that held it
  * is refused rather than delivered to whoever is given the vector next.  The
- * function and the vector too, for a vendor whose entry is the vector's in
+ * function and the vector too, because on AMD the entry is the vector's in
  * that function's own table.
  */
 void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector);
@@ -552,6 +554,15 @@ int iommu_ioapic_source(uint8_t id, uint16_t *source);
  * engine that was asked and did not confirm.
  */
 unsigned iommu_enable_interrupt_remapping(const char **why, int *asked);
+
+/*
+ * The part that must come before translation is turned on, called first when
+ * -i is given.  On AMD it writes every device table entry's interrupt half,
+ * which an engine already on may have cached; on Intel there is nothing to
+ * do before.  Answers zero when that could not be done, and then remapping
+ * is not turned on.
+ */
+int iommu_prepare_interrupt_remapping(void);
 
 /* Whether that engine remaps interrupts, as this kernel turned it on. */
 int iommu_unit_remaps(unsigned unit);

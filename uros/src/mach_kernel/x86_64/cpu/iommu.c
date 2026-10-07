@@ -438,7 +438,11 @@ const struct iommu_interrupt_tables *iommu_interrupt_tables(void)
 
 int iommu_interrupts_remapped(void)
 {
-	return found_vendor == IOMMU_INTEL && iommu_vtd_remapping();
+	if (found_vendor == IOMMU_INTEL)
+		return iommu_vtd_remapping();
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remapping();
+	return 0;
 }
 
 int iommu_ioapic_source(uint8_t id, uint16_t *source)
@@ -475,6 +479,13 @@ int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
 	    || !iommu_ioapic_source(a->id, &source))
 		return 0;
 
+	/*
+	 * On AMD the words stay as they are -- the vector is the index into
+	 * the I/O APIC's own table -- and only the entry is written.
+	 */
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remap_entry(source, vector, apic_id);
+
 	return iommu_vtd_remap_pin(pin, source, vector, apic_id, level,
 				   active_low, lo, hi);
 }
@@ -485,15 +496,83 @@ int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 	if (!iommu_interrupts_remapped())
 		return 0;
 
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remap_entry(bdf, vector, apic_id);
+
 	return iommu_vtd_remap_msi(slot, bdf, vector, apic_id, address, data);
 }
 
 void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector)
 {
-	(void) bdf;
-	(void) vector;
-	if (iommu_interrupts_remapped())
+	if (!iommu_interrupts_remapped())
+		return;
+
+	if (found_vendor == IOMMU_AMD)
+		iommu_amd_forget_entry(bdf, vector);
+	else
 		iommu_vtd_forget_msi(slot);
+}
+
+int iommu_prepare_interrupt_remapping(void)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	uint16_t source;
+
+	if (found_vendor != IOMMU_AMD)
+		return 1;
+	if (!interrupt_tables_built
+	    || (a != 0 && !iommu_ioapic_source(a->id, &source)))
+		return 0;
+
+	return iommu_amd_ir_prepare();
+}
+
+/*
+ * AMD: the IVRS must name the I/O APIC -- QEMU names it only where it can
+ * remap (hw/i386/acpi-build.c), so this is also how a board that cannot is
+ * told from one that can -- and the entries must have been prepared before
+ * the engine was turned on.  The engine is turned on here when -I did not:
+ * this vendor remaps only with it on, so asking for remapping is asking for
+ * the engine, with every device passing through.
+ */
+static unsigned enable_amd(const char **why, int *asked)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	unsigned on;
+	uint16_t source;
+
+	for (unsigned i = 0; i < nunits; i++)
+		if (!units[i].answered || !units[i].interrupt_remapping) {
+			*why = "an engine did not answer";
+			return 0;
+		}
+	if (nunits == 0) {
+		*why = "no engine";
+		return 0;
+	}
+	if (a != 0 && !iommu_ioapic_source(a->id, &source)) {
+		*why = "the ivrs names no i/o apic, whose pins would be refused";
+		return 0;
+	}
+
+	*asked = 1;
+	if (!interrupt_tables_built) {
+		*why = "the interrupt tables were not built";
+		return 0;
+	}
+	if (!iommu_amd_remapping() && !iommu_prepare_interrupt_remapping()) {
+		*why = "the device table entries could not be prepared";
+		return 0;
+	}
+	if (!translating && !iommu_enable_passthrough()) {
+		*why = "the engine did not turn on";
+		return 0;
+	}
+
+	on = iommu_amd_ir_enable();
+	if (on == 0)
+		*why = "the engine is not on";
+	return on;
 }
 
 unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
@@ -503,10 +582,8 @@ unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
 	uint16_t source;
 
 	*asked = 0;
-	if (found_vendor == IOMMU_AMD) {
-		*why = "not yet on amd-vi";
-		return 0;
-	}
+	if (found_vendor == IOMMU_AMD)
+		return enable_amd(why, asked);
 	if (found_vendor != IOMMU_INTEL) {
 		*why = "no engine";
 		return 0;
@@ -562,6 +639,8 @@ unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
 
 int iommu_unit_remaps(unsigned unit)
 {
+	if (found_vendor == IOMMU_AMD)
+		return unit < nunits && iommu_amd_remapping();
 	return found_vendor == IOMMU_INTEL && iommu_vtd_unit_remapping(unit);
 }
 

@@ -92,6 +92,9 @@ ENTRIES="
 33 harness --iommu_intel
 34 harness --iommu_intel
 35 harness --iommu_intel
+33 harness --iommu_amd
+34 harness --iommu_amd
+35 harness --iommu_amd
 17 harness
 18 harness
 21 harness
