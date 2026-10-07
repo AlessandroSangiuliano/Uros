@@ -488,8 +488,10 @@ int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 	return iommu_vtd_remap_msi(slot, bdf, vector, apic_id, address, data);
 }
 
-void iommu_forget_msi(unsigned slot)
+void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector)
 {
+	(void) bdf;
+	(void) vector;
 	if (iommu_interrupts_remapped())
 		iommu_vtd_forget_msi(slot);
 }

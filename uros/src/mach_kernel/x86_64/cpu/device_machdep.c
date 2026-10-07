@@ -661,6 +661,45 @@ msi_release_vector(unsigned int slot)
 static struct pci_msix	msi_device[DEVICE_MD_MSI_MAX];
 static unsigned int	msi_entry_of[DEVICE_MD_MSI_MAX];
 
+/*
+ * #598: <cpu/pci_msix.h> says why every programmer of a device calls these.
+ * The slot's remapping entry is the slot's: its index in the map is the
+ * slot's number among the MSI slots, and its vector is the slot's.
+ */
+int
+msi_remap_vector(unsigned int slot, unsigned int bus, unsigned int dev,
+		 unsigned int func, unsigned long long *address,
+		 unsigned int *data)
+{
+	uint64_t	ra = *address;
+	uint32_t	rd = *data;
+
+	if (!iommu_interrupts_remapped())
+		return 1;
+	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS
+	    || !iommu_remap_msi(slot - DEVICE_MD_MSI_BASE,
+				(uint16_t)((bus << 8) | (dev << 3) | func),
+				(uint8_t)*data,
+				(uint32_t)((*address >> 12) & 0xFFu),
+				&ra, &rd))
+		return 0;
+
+	*address = ra;
+	*data = rd;
+	return 1;
+}
+
+void
+msi_unremap_vector(unsigned int slot, unsigned int bus, unsigned int dev,
+		   unsigned int func)
+{
+	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS)
+		return;
+	iommu_forget_msi(slot - DEVICE_MD_MSI_BASE,
+			 (uint16_t)((bus << 8) | (dev << 3) | func),
+			 (uint8_t)DEVICE_MD_VECTOR(slot));
+}
+
 int
 device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
 		       unsigned int entry, device_md_intr_t handler,
@@ -683,27 +722,13 @@ device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
 		return 0;
 
 	/*
-	 * #598: with interrupts remapped, the message that selects the slot's
-	 * entry instead of the one msi_claim_vector() composed -- the entry
-	 * written first, naming this function as the only source that may use
-	 * it, from the claim's own vector and destination.  A slot that cannot
-	 * have an entry is not given out: its message in the old format would
-	 * be refused.
+	 * #598: and as the device must be given it.  A slot that cannot have a
+	 * remapping entry is not given out: its message in the old format
+	 * would be refused.
 	 */
-	if (iommu_interrupts_remapped()) {
-		uint64_t	ra;
-		uint32_t	rd;
-
-		if (!iommu_remap_msi(slot - DEVICE_MD_MSI_BASE,
-				     (uint16_t)((bus << 8) | (dev << 3) | func),
-				     (uint8_t)data,
-				     (uint32_t)((addr >> 12) & 0xFFu),
-				     &ra, &rd)) {
-			msi_release_vector(slot);
-			return 0;
-		}
-		addr = ra;
-		data = rd;
+	if (!msi_remap_vector(slot, bus, dev, func, &addr, &data)) {
+		msi_release_vector(slot);
+		return 0;
 	}
 
 	/*
@@ -752,7 +777,7 @@ device_md_msi_unregister(unsigned int slot)
 		 * so, is refused instead of reaching whoever holds the vector
 		 * next.
 		 */
-		iommu_forget_msi(i);
+		msi_unremap_vector(slot, gone.bus, gone.dev, gone.func);
 
 		/*
 		 * 🔴 AND THE FUNCTION'S OWN ENABLE BIT, which nothing used to

@@ -6010,6 +6010,20 @@ static void msix_table_selftest(void)
 		return;
 	}
 
+	/*
+	 * #598: through the slot's remapping entry when interrupts are
+	 * remapped, as every programmer of a device must (<cpu/pci_msix.h>).
+	 * This test armed the old format without asking, and QEMU's
+	 * intel-iommu let it through only because it refuses nothing in that
+	 * format.
+	 */
+	if (!msi_remap_vector(slot, 0, nic, 0, &addr, &data)) {
+		kputs("UrMach x86-64: the slot could not be given a remapping"
+		      " entry — WRONG\r\n");
+		device_md_msi_unregister(slot);
+		return;
+	}
+
 	pci_msix_arm(&m, 0, addr, data);
 	pci_msix_read(&m, 0, &back_addr, &back_data, &back_ctl);
 	pci_msix_enable(&m);
@@ -6131,6 +6145,7 @@ static void msix_table_selftest(void)
 	 * bit in the table the kernel owns, and it stops the write at source.
 	 */
 	pci_msix_disarm(&m, 0);
+	msi_unremap_vector(slot, 0, nic, 0);
 	device_md_msi_unregister(slot);
 }
 

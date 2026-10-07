@@ -501,7 +501,9 @@ int iommu_interrupts_remapped(void);
 /*
  * Write the entry a pin or an MSI slot delivers through, and answer the words
  * the source must hold to select it: the two halves ioapic_route() writes,
- * or the address and data an MSI-X table entry is given.  The fields are the
+ * or the address and data an MSI-X table entry is given.  🔴 The words come
+ * IN holding the compatibility-format ones and go out holding the ones to
+ * write, which a vendor may leave as they came.  The fields are the
  * ones the source would have written in compatibility format -- vector,
  * destination APIC id, trigger and polarity -- and the entry is made to stick
  * before this returns: one 16-byte store, flushed for an engine whose reads
@@ -520,9 +522,11 @@ int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 
 /*
  * The slot given up: its entry stops remapping, so the device that held it
- * is refused rather than delivered to whoever is given the vector next.
+ * is refused rather than delivered to whoever is given the vector next.  The
+ * function and the vector too, for a vendor whose entry is the vector's in
+ * that function's own table.
  */
-void iommu_forget_msi(unsigned slot);
+void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector);
 
 /*
  * The requester id an I/O APIC's messages carry, from the firmware's table:

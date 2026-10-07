@@ -173,4 +173,26 @@ extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
 			    unsigned long long *address_out,
 			    unsigned int *data_out);
 
+/*
+ * #598: that message as the device must be given it.  Unchanged while
+ * nothing is remapped; otherwise through the slot's remapping entry, written
+ * here and naming the function at bus/dev/func as the only source that may
+ * use it.  Answers zero when the slot cannot have an entry, and then the slot
+ * must not be given to the device.
+ *
+ * 🔴 EVERY CALLER OF msi_claim_vector() THAT PROGRAMS A DEVICE CALLS THIS
+ * between the two.  A message in compatibility format is refused once
+ * interrupts are remapped -- and the boot's own table test armed one without
+ * asking, which QEMU's intel-iommu let through only because it refuses
+ * nothing in that format.
+ *
+ * msi_unremap_vector() is its other half: after the device's entry is
+ * disarmed, the slot's remapping entry stops remapping.
+ */
+extern int msi_remap_vector(unsigned int slot, unsigned int bus,
+			    unsigned int dev, unsigned int func,
+			    unsigned long long *address, unsigned int *data);
+extern void msi_unremap_vector(unsigned int slot, unsigned int bus,
+			       unsigned int dev, unsigned int func);
+
 #endif	/* _X86_64_CPU_PCI_MSIX_H_ */
