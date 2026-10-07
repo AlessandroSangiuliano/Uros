@@ -380,6 +380,8 @@ arm_four_what_is_refused(void)
  * zero size when the card was not owned or has none.
  */
 static struct pci_bar_region	nic_region;
+static natural_t		nic_bdf;	/* the owned card, for [11] (#598) */
+static int			nic_owned;
 
 static int
 own_the_network_card(natural_t *bdf_out)
@@ -482,7 +484,10 @@ arm_five_an_interrupt_with_no_wire(void)
 	natural_t	bdf = 0;
 	int		released_ok = 1;
 
-	if (!own_the_network_card(&bdf)) {
+	if (own_the_network_card(&bdf)) {
+		nic_bdf = bdf;
+		nic_owned = 1;
+	} else {
 		printf("irq_claim_test: [7] DID NOT RUN — no device of class "
 		       "0x%06x this task may own, so a message-signalled "
 		       "interrupt cannot be asked for without writing to "
@@ -600,6 +605,140 @@ arm_six_a_mapping_ends_with_its_region(void)
 	return ok;
 }
 
+/*
+ * [11] and [12]: the owned card rings, and the ring arrives (#598).
+ *
+ * [7] asks for a message-signalled interrupt and gives it back, which shows
+ * that the kernel writes the card's table entry -- and, with interrupts
+ * remapped, the remapping entry -- but not that a message the CARD sends
+ * reaches anybody.  Here the card sends one.  An 82574L raises its "other"
+ * causes on the MSI-X entry its IVAR register names for them, and a link
+ * status change written into ICS is one of those causes (QEMU's model of it:
+ * e1000e_raise_interrupts() and e1000e_msix_notify() in hw/net/e1000e_core.c).
+ * So: every cause masked and cleared, entry 0 asked for, IVAR's "other" field
+ * pointed at it, the port looked at once and found quiet -- then LSC
+ * unmasked and set, and the slot's notification must come.
+ *
+ * 🔑 With interrupts remapped (-i) the message goes through the entry the
+ * kernel wrote for this slot, which names this card as its only source: an
+ * entry missing, or naming another function, is refused, and this is the
+ * arm that notices.
+ */
+#define	E1000_ICR		0x000C0u	/* cause read; a written 1 clears */
+#define	E1000_ICS		0x000C8u	/* cause set                      */
+#define	E1000_IMS		0x000D0u	/* mask set                       */
+#define	E1000_IMC		0x000D8u	/* mask clear                     */
+#define	E1000_IVAR		0x000E4u	/* the MSI-X entry of each cause  */
+#define	E1000_ICR_LSC		0x00000004u
+#define	E1000_ICR_OTHER		0x01000000u
+#define	E1000_IVAR_OTHER_ENTRY0	(0x8u << 16)	/* "other" causes: entry 0, valid */
+#define	IQ_NOTIFY_BASE		3000		/* <device/device_master.h> */
+#define	IQ_PAGE			4096u
+
+static void
+nic_write(volatile uint32_t *regs, unsigned int off, uint32_t value)
+{
+	regs[off / 4] = value;
+}
+
+static int
+arm_seven_the_card_rings(void)
+{
+	volatile uint32_t	*regs;
+	vm_address_t		uva = 0;
+	mach_port_t		port = MACH_PORT_NULL;
+	struct {
+		mach_msg_header_t	h;
+		mach_msg_trailer_t	t;
+	}			msg;
+	kern_return_t		kr, quiet, rang;
+	unsigned int		slot = 0;
+	int			ok = 0;
+
+	if (!nic_owned || nic_region.size == 0) {
+		printf("irq_claim_test: [11] DID NOT RUN — no owned card with "
+		       "registers to ring\n");
+		printf("irq_claim_test: [12] DID NOT RUN — so nothing rang\n");
+		return 2;
+	}
+
+	kr = device_mmio_map(master_device, (vm_address_t)nic_region.base,
+			     (vm_size_t)IQ_PAGE, mach_task_self(), &uva);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: [11] WRONG — the owned card's registers "
+		       "would not map (kr=%d)\n", (int)kr);
+		printf("irq_claim_test: [12] DID NOT RUN — nothing to ring\n");
+		return 0;
+	}
+	regs = (volatile uint32_t *)uva;
+	nic_write(regs, E1000_IMC, 0xFFFFFFFFu);
+	nic_write(regs, E1000_ICR, 0xFFFFFFFFu);
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr == KERN_SUCCESS)
+		kr = device_msi_register(master_device, (nic_bdf >> 8),
+					 (nic_bdf >> 3) & 0x1F, nic_bdf & 0x7,
+					 0, port, MACH_MSG_TYPE_MAKE_SEND,
+					 &slot);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: [11] NOT ASKED — the owned card gave no "
+		       "message-signalled interrupt (kr=%d), which is a board "
+		       "whose card has no MSI-X table\n", (int)kr);
+		printf("irq_claim_test: [12] NOT ASKED — so it cannot ring "
+		       "one\n");
+		(void) device_mmio_unmap(master_device, uva,
+					 (vm_size_t)IQ_PAGE, mach_task_self());
+		release(port);
+		return 2;
+	}
+
+	nic_write(regs, E1000_IVAR, E1000_IVAR_OTHER_ENTRY0);
+
+	quiet = mach_msg(&msg.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			 sizeof(msg), port, 0, MACH_PORT_NULL);
+
+	nic_write(regs, E1000_IMS, E1000_ICR_OTHER | E1000_ICR_LSC);
+	nic_write(regs, E1000_ICS, E1000_ICR_LSC);
+
+	rang = mach_msg(&msg.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			sizeof(msg), port, 1000, MACH_PORT_NULL);
+
+	nic_write(regs, E1000_IMC, 0xFFFFFFFFu);
+	nic_write(regs, E1000_ICR, 0xFFFFFFFFu);
+	nic_write(regs, E1000_IVAR, 0);
+	(void) device_intr_unregister(master_device, slot);
+	(void) device_mmio_unmap(master_device, uva, (vm_size_t)IQ_PAGE,
+				 mach_task_self());
+	release(port);
+
+	printf("irq_claim_test: [11] before the card was told to ring, slot %u's"
+	       " port answered 0x%x — %s\n", slot, quiet,
+	       quiet == MACH_RCV_TIMED_OUT
+	       ? "quiet, so what arrives next is the ring's"
+	       : "WRONG, something arrived unasked");
+	if (quiet == MACH_RCV_TIMED_OUT)
+		ok++;
+
+	if (rang == MACH_MSG_SUCCESS
+	    && msg.h.msgh_id == (mach_msg_id_t)(IQ_NOTIFY_BASE + slot)) {
+		printf("irq_claim_test: [12] told to ring its other causes on "
+		       "entry 0, %u:%u.%u's MSI-X arrived as slot %u's "
+		       "notification\n", (unsigned)(nic_bdf >> 8),
+		       (unsigned)((nic_bdf >> 3) & 0x1F),
+		       (unsigned)(nic_bdf & 0x7), slot);
+		ok++;
+	} else
+		printf("irq_claim_test: [12] WRONG — told to ring its other "
+		       "causes on entry 0, %u:%u.%u's MSI-X never reached slot "
+		       "%u (receive 0x%x, id %d)\n", (unsigned)(nic_bdf >> 8),
+		       (unsigned)((nic_bdf >> 3) & 0x1F),
+		       (unsigned)(nic_bdf & 0x7), slot, rang,
+		       rang == MACH_MSG_SUCCESS ? (int)msg.h.msgh_id : -1);
+
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -649,7 +788,8 @@ main(int argc, char **argv)
 
 	passed += arm_five_an_interrupt_with_no_wire();
 	passed += arm_six_a_mapping_ends_with_its_region();
-	printf("irq_claim_test: %d of 4 message-signalled and mapping arms "
+	passed += arm_seven_the_card_rings();
+	printf("irq_claim_test: %d of 6 message-signalled and mapping arms "
 	       "passed\n", passed);
-	return passed == 4 ? 0 : 1;
+	return passed == 6 ? 0 : 1;
 }
