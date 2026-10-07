@@ -122,11 +122,11 @@ int ioapic_direct_eoi(void);
 void ioapic_eoi(uint8_t vector);
 
 /*
- * #599: for the -Y test only (ioapic_race_test.c).  A pin is "untouched" when
- * its low half is still what ioapic_init() wrote -- masked, no vector -- which
- * no routed pin is.  ioapic_set_vector() changes the vector by the same
- * read-modify-write that masks and unmasks; the low half is put back with
- * ioapic_set_low_half().
+ * #599: for the -Y test (ioapic_race_test.c), and #598: -i asks it of every
+ * pin before turning remapping on.  A pin is "untouched" when its low half is
+ * still what ioapic_init() wrote -- masked, no vector -- which no routed pin
+ * is.  ioapic_set_vector() changes the vector by the same read-modify-write
+ * that masks and unmasks; the low half is put back with ioapic_set_low_half().
  */
 int ioapic_pin_untouched(uint32_t gsi);
 uint32_t ioapic_low_half(uint32_t gsi);

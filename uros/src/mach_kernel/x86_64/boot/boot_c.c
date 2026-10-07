@@ -5719,7 +5719,9 @@ static void iommu_selftest(void)
 		 * translation, so that a queue -I started is the one it uses.
 		 * Every source is programmed after this point — the I/O
 		 * APIC's pins, the HPET, each driver's MSI-X — so each one
-		 * goes through an entry from its first message.
+		 * goes through an entry from its first message.  The
+		 * controller was masked before it, and turning remapping on
+		 * refuses, WRONG, if it was not or if a pin is routed already.
 		 */
 		if (boot_flag('i')) {
 			const char *why = "";
@@ -6215,14 +6217,15 @@ static void ioapic_selftest(void)
 	uint64_t while_masked, after_routing;
 	int had_interrupts;
 
-	if (!ioapic_init()) {
+	if (!ioapic_present()) {
 		/*
 		 * 🔑 WHICH OF THE TWO SILENCES (#563).
 		 *
-		 * ioapic_init() has exactly ONE way to fail: acpi_ioapic(0) yielded
-		 * nothing, which is the MADT saying this machine has no I/O APIC.
-		 * It does not fail for a mapping that went wrong or a version
-		 * register that read back oddly -- there is one `return 0' in it.
+		 * ioapic_init(), which ran before iommu_selftest() (#598), has
+		 * exactly ONE way to fail: acpi_ioapic(0) yielded nothing, which
+		 * is the MADT saying this machine has no I/O APIC.  It does not
+		 * fail for a mapping that went wrong or a version register that
+		 * read back oddly -- there is one `return 0' in it.
 		 *
 		 * So the only question left is whether the table was READ at all,
 		 * and the same walk answers it: the processor census comes from
@@ -8187,6 +8190,13 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	pci_cfg_selftest();
 	pci_cap_selftest();
+	/*
+	 * #598: the I/O APIC is masked before -i can turn remapping on, so
+	 * whatever the firmware left routed never reaches an engine that
+	 * remaps, and -i can read every pin and find none routed yet.
+	 * ioapic_selftest() says what was found.
+	 */
+	(void) ioapic_init();
 	iommu_selftest();
 	msi_selftest();
 	msix_table_selftest();

@@ -13,6 +13,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/ioapic.h>		/* no pin routed before -i, #598 */
 #include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
 #include <kern/kalloc.h>	/* an identity grant's page list, #599 */
 #include <kern/lock.h>		/* iommu_domain_lock, #599 */
@@ -528,6 +529,32 @@ int iommu_prepare_interrupt_remapping(void)
 }
 
 /*
+ * Why the I/O APIC's pins could not go through remapping, or 0.
+ *
+ * A pin routed before remapping is on holds its words in the old format, and
+ * nothing rewrites them: an Intel engine with CFI clear refuses them, and the
+ * I/O APIC's AMD table has no entry for them.  A controller not yet
+ * initialised still carries whatever routing the firmware left in it.  The
+ * boot masks the controller before -i and routes every pin after it, and this
+ * is what makes both facts rather than an order of calls.
+ */
+static const char *pins_not_ready(void)
+{
+	uint32_t first;
+
+	if (acpi_ioapic(0) == 0)
+		return 0;
+	if (!ioapic_present())
+		return "the i/o apic was never initialised, so the firmware's"
+		       " routing is still in it";
+	first = ioapic_first_gsi();
+	for (unsigned p = 0; p < ioapic_pin_count(); p++)
+		if (!ioapic_pin_untouched(first + p))
+			return "a pin was routed before -i, in the old format";
+	return 0;
+}
+
+/*
  * AMD: the IVRS must name the I/O APIC -- QEMU names it only where it can
  * remap (hw/i386/acpi-build.c), so this is also how a board that cannot is
  * told from one that can -- and the entries must have been prepared before
@@ -538,6 +565,7 @@ int iommu_prepare_interrupt_remapping(void)
 static unsigned enable_amd(const char **why, int *asked)
 {
 	const struct acpi_ioapic *a = acpi_ioapic(0);
+	const char *pins;
 	unsigned on;
 	uint16_t source;
 
@@ -556,6 +584,10 @@ static unsigned enable_amd(const char **why, int *asked)
 	}
 
 	*asked = 1;
+	if ((pins = pins_not_ready()) != 0) {
+		*why = pins;
+		return 0;
+	}
 	if (!interrupt_tables_built) {
 		*why = "the interrupt tables were not built";
 		return 0;
@@ -578,6 +610,7 @@ static unsigned enable_amd(const char **why, int *asked)
 unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
 {
 	const struct acpi_ioapic *a = acpi_ioapic(0);
+	const char *pins;
 	unsigned remapping = 0, on;
 	uint16_t source;
 
@@ -626,6 +659,10 @@ unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
 	}
 
 	*asked = 1;
+	if ((pins = pins_not_ready()) != 0) {
+		*why = pins;
+		return 0;
+	}
 	if (!interrupt_tables_built) {
 		*why = "the interrupt table was not built";
 		return 0;
