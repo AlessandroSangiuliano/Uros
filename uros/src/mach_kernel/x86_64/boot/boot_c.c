@@ -6300,6 +6300,180 @@ static void ioapic_selftest(void)
 }
 
 /*
+ * A level-triggered line, rung and quieted again and again (#598 point 3).
+ *
+ * ioapic_selftest() above routes IRQ 0, which is edge.  A LEVEL line is held
+ * by the I/O APIC after it is sent -- Remote IRR -- until the processor's EOI
+ * comes back carrying a vector equal to the redirection entry's.  That
+ * comparison is what interrupt remapping can break.  On AMD the entry's
+ * vector field is also its INDEX into the I/O APIC's own table, so the vector
+ * the table delivers must equal the index -- this kernel makes entry n
+ * deliver vector n -- or the EOI never matches, Remote IRR never clears, and
+ * the line is silent after its first interrupt.  Intel says the same in its
+ * own terms: a level pin's redirection entry and remapping entry name one
+ * vector (Rev 5.20 §5.1.5.1).
+ *
+ * The network card is the level source.  With MSI-X off, an 82574L or an
+ * 82540EM raises its INTx when a cause is set in ICS and IMS lets it
+ * through, and reading ICR drops it.  The line the firmware gave the card is
+ * claimed as a driver claims one, device_md_irq_register(), so what answers
+ * it is the trampoline every driver's line goes through: the handler reads
+ * ICR, then the processor and the controller are told.  Rung LEVEL_RINGS
+ * times, and every ring must arrive.
+ *
+ * 🔑 Under QEMU's amd-iommu the broadcast EOI never comes -- it delivers a
+ * remapped message marked edge -- so what keeps this line alive there is the
+ * controller's own EOI register (device_md_irq_trampoline()).
+ *
+ * ⚠️ Only where the card is one this knows how to ring and the firmware says
+ * its line is level-triggered; elsewhere it says why it did not ask.  The
+ * card's registers stay mapped, as msix_table_selftest() leaves them (#612).
+ */
+#define	LEVEL_RINGS		4u
+#define	NIC_ICR			0x00C0u		/* read clears, INTx drops */
+#define	NIC_ICS			0x00C8u
+#define	NIC_IMS			0x00D0u
+#define	NIC_IMC			0x00D8u
+#define	NIC_ICR_LSC		0x00000004u
+
+static volatile uint32_t	*level_nic;
+static volatile uint64_t	level_hits;
+
+/* A driver's handler: the card told it was heard, by reading ICR. */
+static void level_irq(int irq)
+{
+	(void)irq;
+
+	level_hits++;
+	if (level_nic != 0)
+		(void) level_nic[NIC_ICR / 4];
+}
+
+static void ioapic_level_selftest(void)
+{
+	struct pci_msix		m;
+	uint32_t		id = 0, slots[PCI_NUM_BAR_SLOTS], command, gsi;
+	struct pci_bar_region	r[PCI_NUM_BAR_SLOTS];
+	uint64_t		regs_base = 0;
+	unsigned		dev, nic = 0, found = 0, rang = 0, n, i;
+	uint8_t			line;
+	uint16_t		flags;
+	volatile uint32_t	*regs;
+	int			had_interrupts;
+
+	if (!ioapic_present()) {
+		kputs("UrMach x86-64: a level-triggered line: NOT ASKED — no"
+		      " I/O APIC\r\n");
+		return;
+	}
+
+	for (dev = 0; dev < 32 && !found; dev++) {
+		id = pci_cfg_read(0, 0, (uint8_t)dev, 0, PCI_VENDOR_ID);
+		if (id == 0x10D38086u || id == 0x100E8086u) {
+			nic = dev;
+			found = 1;
+		}
+	}
+	if (!found) {
+		kputs("UrMach x86-64: a level-triggered line: NOT ASKED — no"
+		      " network card here that this knows how to ring\r\n");
+		return;
+	}
+
+	line = (uint8_t)(pci_cfg_read(0, 0, (uint8_t)nic, 0,
+				      PCI_INTERRUPT_LINE) & 0xFF);
+	gsi = acpi_irq_to_gsi(line);
+	flags = acpi_irq_flags(line);
+	if (line == 0 || line >= 16
+	    || (flags & ACPI_TRIGGER_MASK) != ACPI_TRIGGER_LEVEL
+	    || gsi < ioapic_first_gsi()
+	    || gsi - ioapic_first_gsi() >= ioapic_pin_count()) {
+		kputs("UrMach x86-64: a level-triggered line: NOT ASKED — the"
+		      " card's line is not one the firmware says is"
+		      " level-triggered on this I/O APIC\r\n");
+		return;
+	}
+
+	for (i = 0; i < PCI_NUM_BAR_SLOTS; i++)
+		slots[i] = pci_cfg_read(0, 0, (uint8_t)nic, 0, PCI_BAR(i));
+	n = pci_bars_decode(slots, PCI_NUM_BAR_SLOTS, r, PCI_NUM_BAR_SLOTS);
+	for (i = 0; i < n; i++)
+		if (r[i].slot == 0 && !(r[i].flags & PCI_REGION_IO))
+			regs_base = r[i].base;
+	regs = regs_base != 0
+	       ? (volatile uint32_t *)(uintptr_t)pmap_map_device(regs_base,
+								 0x20000)
+	       : 0;
+	if (regs == 0) {
+		kputs("UrMach x86-64: a level-triggered line: the card's"
+		      " registers could not be mapped — WRONG\r\n");
+		return;
+	}
+
+	/*
+	 * MSI-X off -- msix_table_selftest() disarmed its entry and left the
+	 * function enabled, and an enabled card never raises INTx -- and INTx
+	 * let through.  The command is written with the status half zero: its
+	 * bits clear when a one is written, and a zero leaves them (C21).
+	 */
+	if (pci_msix_probe(0, 0, (uint8_t)nic, 0, &m))
+		pci_msix_disable(&m);
+	command = pci_cfg_read(0, 0, (uint8_t)nic, 0, PCI_COMMAND) & 0xFFFFu;
+	pci_cfg_write(0, 0, (uint8_t)nic, 0, PCI_COMMAND,
+		      (command | PCI_CMD_MEM_ENABLE) & ~PCI_CMD_INTX_DISABLE);
+
+	regs[NIC_IMC / 4] = 0xFFFFFFFFu;
+	(void) regs[NIC_ICR / 4];
+	level_nic = regs;
+	level_hits = 0;
+
+	if (!device_md_irq_register(line, level_irq)) {
+		kputs("UrMach x86-64: a level-triggered line: irq ");
+		kputdec(line);
+		kputs(" could not be claimed as a driver claims one — WRONG\r\n");
+		level_nic = 0;
+		return;
+	}
+
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+	regs[NIC_IMS / 4] = NIC_ICR_LSC;
+	for (i = 0; i < LEVEL_RINGS; i++) {
+		uint64_t	before = level_hits;
+
+		regs[NIC_ICS / 4] = NIC_ICR_LSC;
+		for (unsigned spin = 0; spin < 2000000u && level_hits == before;
+		     spin++)
+			cpu_pause();
+		if (level_hits != before)
+			rang++;
+	}
+	regs[NIC_IMC / 4] = 0xFFFFFFFFu;
+	(void) regs[NIC_ICR / 4];
+	if (!had_interrupts)
+		interrupts_disable();
+	device_md_irq_unregister(line);
+	level_nic = 0;
+
+	kputs("UrMach x86-64: a level-triggered line, irq ");
+	kputdec(line);
+	kputs(" on pin ");
+	kputdec(gsi - ioapic_first_gsi());
+	kputs(", rung ");
+	kputdec(LEVEL_RINGS);
+	kputs(" times: ");
+	kputdec(rang);
+	kputs(" arrived");
+	kputs(ioapic_direct_eoi() ? " (the controller takes a direct EOI)"
+				  : " (no EOI register: the broadcast alone)");
+	kputs(rang == LEVEL_RINGS
+	      ? " — each EOI matched its redirection entry and let the next"
+		" one through\r\n"
+	      : " — WRONG, the line went silent: an EOI did not match its"
+		" redirection entry's vector\r\n");
+}
+
+/*
  * A line claimed the way a user-space driver claims one (#457).
  *
  * ioapic_selftest() above routes a pin by hand, which proves the controller.
@@ -8016,6 +8190,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	msi_selftest();
 	msix_table_selftest();
 	ioapic_selftest();
+	ioapic_level_selftest();
 	spl_selftest();
 	intr_nest_selftest();
 	lock_cost_bench();
