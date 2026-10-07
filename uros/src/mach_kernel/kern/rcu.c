@@ -287,7 +287,7 @@ unsigned int	urmach_rcu_retired;
 void
 urmach_call_rcu(struct urmach_rcu_head *h, void (*f)(struct urmach_rcu_head *))
 {
-	int	c, me = cpu_number();
+	int	c, me;
 
 	h->func = f;
 
@@ -304,10 +304,20 @@ urmach_call_rcu(struct urmach_rcu_head *h, void (*f)(struct urmach_rcu_head *))
 	 * processor that is not running cannot be holding a read reference, and
 	 * this one is the writer.  So the callback is already safe, and running
 	 * it here is what synchronize_rcu() would have done in no time at all.
+	 *
+	 * ⚠️ `me' under disable_preemption(), as in urmach_synchronize_rcu()
+	 * (#336, #646).  It was read at its declaration, at level zero with
+	 * preemption allowed.  A thread moved after the read came to the same
+	 * answer -- with two processors running there is another whichever one
+	 * `me' names, and with one the thread cannot move -- but only by that
+	 * argument, and the development kernel's check named it (#626).
 	 */
+	disable_preemption();
+	me = cpu_number();
 	for (c = 0; c < NCPUS; c++)
 		if (c != me && machine_slot[c].running)
 			break;
+	enable_preemption();
 	if (c == NCPUS) {
 		f(h);
 		return;
