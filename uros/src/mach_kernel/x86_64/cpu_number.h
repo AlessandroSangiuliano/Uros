@@ -52,11 +52,11 @@ static __inline__ __attribute__((always_inline)) int cpu_number(void)
 /*
  * The same read, not asked whether the thread can still move (#626).
  *
- * For a caller that uses the number only as a hint -- a statistic, a place to
- * start looking -- for which the number of the processor it has just left is
- * as good as its own.  Each caller says in a comment why it is only a hint.
- * One that indexes something it then writes, or compares the number with
- * another processor's, is not using a hint.
+ * For a caller that wants the number of the processor it is on at that
+ * instant and knows it may be left at once: a statistic, a place to start
+ * looking, or a test that reads it on both sides of something to see whether
+ * the thread moved.  Each caller says which in a comment.  One that indexes
+ * this processor's data with it, and writes there, is none of these.
  */
 static __inline__ int cpu_number_hint(void)
 {
