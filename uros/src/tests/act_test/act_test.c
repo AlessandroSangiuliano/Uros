@@ -1412,6 +1412,13 @@ arm_six_non_canonical_return(void)
  * counts from the asking: the thread_suspend line of the special handler in
  * kern/thread_act.c, WRONG past two faults.  What is still judged here is the
  * promise thread_suspend() makes to its caller: nothing after its answer.
+ *
+ * ⚠️ And this arm sees that promise broken only when the stop is late as
+ * well.  With thread_wait() taken out of thread_suspend() and the stop as
+ * prompt as the fix makes it, the thread stopped within 1 to 4 pages of the
+ * asking, before this thread read its count, in 4 boots of 4; with the stop
+ * held late too, the arm said WRONG in 18 to 20 rounds of 20, in 4 boots of
+ * 4 (ablations/603-suspend-no-wait.patch).
  */
 #define	ARM7_PAGES	4096
 #define	ARM7_ROUNDS	20
