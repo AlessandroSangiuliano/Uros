@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: a slot's entry written on AMD -- the card keeps its message and its entry in its own table stays empty, which the engine refuses
+Run: --iommu amd --entry 33 400 -smp 1
+Expect: the card was asked to raise a link change, and slot [0-9]+ ran 0 times
+Expect: irq_claim_test: \[12\] WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index 62808c6c..6121a19c 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -497,7 +497,7 @@ int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
+ 		return 0;
+ 
+ 	if (found_vendor == IOMMU_AMD)
+-		return iommu_amd_remap_entry(bdf, vector, apic_id);
++		return 1;
+ 
+ 	return iommu_vtd_remap_msi(slot, bdf, vector, apic_id, address, data);
+ }
