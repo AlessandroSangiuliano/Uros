@@ -2076,6 +2076,8 @@ void trap_dispatch(struct trap_frame *frame)
 				 * code, where preempting is the interrupt path's
 				 * question, asked with IF known to be on.
 				 */
+				if ((frame->cs & 3) == USER_RPL)
+					act->user_faults++;	/* #603 */
 				if (!ABLATE_603_FAULT_AST
 				    && (frame->cs & 3) == USER_RPL)
 					trap_take_ast(frame);

@@ -1399,10 +1399,30 @@ arm_six_non_canonical_return(void)
  * and that is inside the call.  One that stops touches at most the page it
  * was in the middle of; one that runs on reaches the end of its megabyte.  And
  * after the answer, nothing at all, whichever it was.
+ *
+ * 🔴 (07/10) BUT THE COUNT INSIDE THE CALL IS NOT THE STOP'S LATENCY.  It
+ * also holds the time before the stop is asked: the call's way into the
+ * kernel, and whatever keeps the asker from getting there -- a processor
+ * the host stops under TCG, or a quantum given to another thread.  With a
+ * 20 ms wait put in thread_suspend() before the asking, the stop path
+ * untouched, this arm failed in 4 boots of 4 at up to 4096 pages, and the
+ * kernel saw every stop within two faults of its asking; three boots under
+ * TCG on GitHub had failed it at 258 to 301 pages, about a tick of faults.
+ * So the count is printed, and the stop is judged by the kernel, which
+ * counts from the asking: the thread_suspend line of the special handler in
+ * kern/thread_act.c, WRONG past two faults.  What is still judged here is the
+ * promise thread_suspend() makes to its caller: nothing after its answer.
+ *
+ * ⚠️ And this arm sees that promise broken only when the stop is late as
+ * well.  With thread_wait() taken out of thread_suspend() and the stop as
+ * prompt as the fix makes it, the thread stopped within 1 to 4 pages of the
+ * asking, before this thread read its count, in 4 boots of 4; with the stop
+ * held late too, the arm said WRONG in 18 to 20 rounds of 20, in 4 boots of
+ * 4 (ablations/603-suspend-no-wait.patch).
  */
 #define	ARM7_PAGES	4096
 #define	ARM7_ROUNDS	20
-#define	ARM7_RAN_ON	256	/* far beyond a call's own latency */
+#define	ARM7_RAN_ON	256	/* rounds past it are counted and printed */
 
 static volatile mach_port_t	arm_seven_thread;
 static volatile unsigned long	arm_seven_touches;
@@ -1496,18 +1516,16 @@ arm_seven_suspend_in_page_faults(void)
 		       ran_after, ARM7_ROUNDS);
 		return 0;
 	}
-	if (ran_on != 0) {
-		printf("act_test: [7] in %d of %d rounds a thread that lives in "
-		       "page faults ran on after it was asked to stop: up to %lu "
-		       "pages touched inside thread_suspend, %lu inside "
-		       "thread_info — WRONG (#603)\n",
-		       ran_on, ARM7_ROUNDS, most, yardstick);
-		return 0;
-	}
+	/*
+	 * ⚠️ Under 256 bytes: a longer line leaves in two writes, and another
+	 * task's line landed between them once (#578).  The kernel's
+	 * thread_suspend line is the one that judges the stop.
+	 */
 	printf("act_test: [7] a thread that lives in page faults stopped when "
-	       "asked: %d rounds, at most %lu pages touched inside "
-	       "thread_suspend (%lu inside thread_info) and none after "
-	       "(#603)\n", ARM7_ROUNDS, most, yardstick);
+	       "asked: %d rounds, none after thread_suspend answered; inside "
+	       "it at most %lu pages (%lu in thread_info), past %u in %d, the "
+	       "wait for the asking included (#603)\n", ARM7_ROUNDS, most,
+	       yardstick, ARM7_RAN_ON, ran_on);
 	return 1;
 }
 
