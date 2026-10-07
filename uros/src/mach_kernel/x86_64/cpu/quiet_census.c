@@ -261,16 +261,19 @@ census_state(int state)
  * it cannot answer, and a line read through a stale pointer is a wrong line,
  * which the census already says of its stacks.
  */
+static unsigned int	census_unreadable;	/* pointers skipped, since boot */
+
 static boolean_t
 census_readable(const void *p, size_t len)
 {
 	pmap_t		kernel = pmap_kernel();
 	vm_offset_t	a = (vm_offset_t) p;
 
-	if (a < VM_MIN_KERNEL_ADDRESS || a + len < a)
-		return FALSE;
-	return pmap_extract(kernel, a) != 0 &&
-	       pmap_extract(kernel, a + len - 1) != 0;
+	if (a >= VM_MIN_KERNEL_ADDRESS && a + len >= a &&
+	    pmap_extract(kernel, a) != 0 && pmap_extract(kernel, a + len - 1) != 0)
+		return TRUE;
+	census_unreadable++;
+	return FALSE;
 }
 
 static void
@@ -332,112 +335,20 @@ census_stack(thread_t th)
 	census_said();
 }
 
-void
-quiet_census_pass(int mycpu)
+/*
+ * The census's walk: every thread of the processor set, a line each, then who
+ * is on each processor.  Answers how many threads it listed.
+ *
+ * 🔴 The caller holds the processor set's lock (#657): it is what keeps every
+ * thread on the list from being freed under the walk.  quiet_census_pass()
+ * tries it from the idle thread; quiet_census_walk() waits for it, and -c
+ * walks through it while other processors end threads.
+ */
+static int
+census_threads(void)
 {
 	thread_t	th;
 	int		n = 0;
-
-	if (mycpu != QUIET_CPU)
-		return;
-	if (quiet_said)
-		return;
-
-	{
-		uint64_t	r = percpu_user_returns();
-
-		if (r != quiet_returns) {
-			quiet_returns = r;
-			quiet_work();
-		}
-	}
-
-	/*
-	 * ⚠️ A word about itself, rarely, because the first versions of this
-	 * reported NOTHING and an absence cannot say which cause it had: cpu 0
-	 * not reaching the threshold, or the count being reset by work.  The
-	 * peak and the reset count separate those -- but only if the line is
-	 * printed whatever the count does.  #599: it was printed when the count
-	 * reached a hundred, so a count that work kept resetting (a user poller
-	 * that returns to ring 3 every 10 ms: char_server's klog forwarder)
-	 * silenced the one line meant to explain a silent census (found in
-	 * review).  So it is driven by every idle pass since boot, which work
-	 * does not reset, a line per doubling: a long idle run costs a handful.
-	 *
-	 * ⚠️ And the first of them comes at a fifth of the threshold, written in
-	 * terms of it.  quiet_all_passes is never below quiet_passes, so the
-	 * first line always comes before the census can fire.  The first version
-	 * of this started at a thousand, above the threshold of five hundred: a
-	 * boot quiet from the start (-S, or a wedge early in the boot) fired the
-	 * census first, and quiet_said then kept this line from ever being
-	 * printed (found in review).  The same happened once before, when the
-	 * threshold came down from three thousand under an interval of a
-	 * thousand.
-	 *
-	 * With it, the console's counts so far (#567, #568), one line: the
-	 * kernel cannot tell which moment ends an ordinary run -- the harness
-	 * stops a kernel that has nothing left to do rather than waiting for it
-	 * to halt -- so each report carries them, and what came after the last
-	 * report is in none.  It begins with this line's word, so the harness
-	 * reads it as idle chatter: a line it counted as progress would put
-	 * off, at every doubling, its verdict on a boot that has stopped.
-	 * halt_cpu() says the final copy (cons_ring_report).
-	 */
-	quiet_passes++;
-	if (++quiet_all_passes == quiet_next_report) {
-		quiet_next_report *= 2;
-		printf("quiet_census: passes=%lu peak=%lu resets=%lu (after %lu "
-		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
-		       quiet_resets, quiet_all_passes);
-		cons_ring_so_far("quiet_census: ");
-	}
-
-	if (quiet_passes < QUIET_PASSES)
-		return;
-
-	/*
-	 * 🔴 THE THREADS ARE WALKED UNDER THEIR PROCESSOR SET'S LOCK (#657).
-	 *
-	 * thread_deallocate() takes a thread off default_pset.threads under this
-	 * lock and frees it after; the walk below took no lock, and on the
-	 * campaign it read a thread freed under it -- an activation pointer of
-	 * 0xf000ff53f000ff53, the real-mode vector table's bytes, and a general
-	 * protection fault in the census of a boot that had nothing wrong in it
-	 * (run 37601446776, entry 22, forty threads dying after act_test).  The
-	 * lock is a mutex and this is the idle thread, which must not sleep: so
-	 * it is tried, and a busy lock puts the census off to the next idle
-	 * pass, counted and said in the census's first line.
-	 */
-	if (!pset_lock_try(&default_pset)) {
-		quiet_lock_busy++;
-		return;
-	}
-	quiet_said = 1;
-
-	/*
-	 * The console's counts first (#567): the census below is what a reader
-	 * of a stopped boot looks at, and the bytes still queued are part of it.
-	 */
-	cons_ring_so_far("quiet_census: ");
-
-	printf("quiet_census (#476): the machine has been idle for %lu idle "
-	       "passes; %d tasks and %d threads, walked under the processor "
-	       "set's lock, found busy %u times (#657)\n",
-	       quiet_passes, default_pset.task_count, default_pset.thread_count,
-	       quiet_lock_busy);
-
-	/*
-	 * #615: whether the scheduler ever queued a bound thread on a run queue
-	 * not its own processor's, where another processor may take it -- said
-	 * by every boot that reaches the census, not only by the bench whose
-	 * worker caught it.  Silent at zero; UROS_ABLATE_615_DISPLACED_TO_SET
-	 * is how it is seen to speak.
-	 */
-	if (sched_bound_displaced != 0)
-		printf("quiet_census: the scheduler queued %u bound thread(s) "
-		       "on a run queue not their processor's, the last bound "
-		       "to processor %d -- WRONG (#615)\n",
-		       sched_bound_displaced, sched_bound_displaced_slot);
 
 	/*
 	 * ⚠️ The NAME as well as the pointer (#425).
@@ -685,6 +596,132 @@ quiet_census_pass(int mycpu)
 			census_said();
 		}
 	}
+	return n;
+}
+
+/*
+ * The walk for a caller that may sleep: -c (#657).  Answers how many threads it
+ * listed, and in *unreadable how many pointers out of them it skipped.
+ */
+int
+quiet_census_walk(unsigned int *unreadable)
+{
+	unsigned int	before;
+	int		n;
+
+	pset_lock(&default_pset);
+	before = census_unreadable;
+	n = census_threads();
+	*unreadable = census_unreadable - before;
+	pset_unlock(&default_pset);
+	return n;
+}
+
+void
+quiet_census_pass(int mycpu)
+{
+	if (mycpu != QUIET_CPU)
+		return;
+	if (quiet_said)
+		return;
+
+	{
+		uint64_t	r = percpu_user_returns();
+
+		if (r != quiet_returns) {
+			quiet_returns = r;
+			quiet_work();
+		}
+	}
+
+	/*
+	 * ⚠️ A word about itself, rarely, because the first versions of this
+	 * reported NOTHING and an absence cannot say which cause it had: cpu 0
+	 * not reaching the threshold, or the count being reset by work.  The
+	 * peak and the reset count separate those -- but only if the line is
+	 * printed whatever the count does.  #599: it was printed when the count
+	 * reached a hundred, so a count that work kept resetting (a user poller
+	 * that returns to ring 3 every 10 ms: char_server's klog forwarder)
+	 * silenced the one line meant to explain a silent census (found in
+	 * review).  So it is driven by every idle pass since boot, which work
+	 * does not reset, a line per doubling: a long idle run costs a handful.
+	 *
+	 * ⚠️ And the first of them comes at a fifth of the threshold, written in
+	 * terms of it.  quiet_all_passes is never below quiet_passes, so the
+	 * first line always comes before the census can fire.  The first version
+	 * of this started at a thousand, above the threshold of five hundred: a
+	 * boot quiet from the start (-S, or a wedge early in the boot) fired the
+	 * census first, and quiet_said then kept this line from ever being
+	 * printed (found in review).  The same happened once before, when the
+	 * threshold came down from three thousand under an interval of a
+	 * thousand.
+	 *
+	 * With it, the console's counts so far (#567, #568), one line: the
+	 * kernel cannot tell which moment ends an ordinary run -- the harness
+	 * stops a kernel that has nothing left to do rather than waiting for it
+	 * to halt -- so each report carries them, and what came after the last
+	 * report is in none.  It begins with this line's word, so the harness
+	 * reads it as idle chatter: a line it counted as progress would put
+	 * off, at every doubling, its verdict on a boot that has stopped.
+	 * halt_cpu() says the final copy (cons_ring_report).
+	 */
+	quiet_passes++;
+	if (++quiet_all_passes == quiet_next_report) {
+		quiet_next_report *= 2;
+		printf("quiet_census: passes=%lu peak=%lu resets=%lu (after %lu "
+		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
+		       quiet_resets, quiet_all_passes);
+		cons_ring_so_far("quiet_census: ");
+	}
+
+	if (quiet_passes < QUIET_PASSES)
+		return;
+
+	/*
+	 * 🔴 THE THREADS ARE WALKED UNDER THEIR PROCESSOR SET'S LOCK (#657).
+	 *
+	 * thread_deallocate() takes a thread off default_pset.threads under this
+	 * lock and frees it after; the walk below took no lock, and on the
+	 * campaign it read a thread freed under it -- an activation pointer of
+	 * 0xf000ff53f000ff53, the real-mode vector table's bytes, and a general
+	 * protection fault in the census of a boot that had nothing wrong in it
+	 * (run 37601446776, entry 22, forty threads dying after act_test).  The
+	 * lock is a mutex and this is the idle thread, which must not sleep: so
+	 * it is tried, and a busy lock puts the census off to the next idle
+	 * pass, counted and said in the census's first line.
+	 */
+	if (!pset_lock_try(&default_pset)) {
+		quiet_lock_busy++;
+		return;
+	}
+	quiet_said = 1;
+
+	/*
+	 * The console's counts first (#567): the census below is what a reader
+	 * of a stopped boot looks at, and the bytes still queued are part of it.
+	 */
+	cons_ring_so_far("quiet_census: ");
+
+	printf("quiet_census (#476): the machine has been idle for %lu idle "
+	       "passes; %d tasks and %d threads, walked under the processor "
+	       "set's lock, found busy %u times (#657)\n",
+	       quiet_passes, default_pset.task_count, default_pset.thread_count,
+	       quiet_lock_busy);
+
+	/*
+	 * #615: whether the scheduler ever queued a bound thread on a run queue
+	 * not its own processor's, where another processor may take it -- said
+	 * by every boot that reaches the census, not only by the bench whose
+	 * worker caught it.  Silent at zero; UROS_ABLATE_615_DISPLACED_TO_SET
+	 * is how it is seen to speak.
+	 */
+	if (sched_bound_displaced != 0)
+		printf("quiet_census: the scheduler queued %u bound thread(s) "
+		       "on a run queue not their processor's, the last bound "
+		       "to processor %d -- WRONG (#615)\n",
+		       sched_bound_displaced, sched_bound_displaced_slot);
+
+	(void) census_threads();
 	pset_unlock(&default_pset);
 
 	/*
