@@ -91,6 +91,7 @@ ENTRIES="
 16 harness --iommu_intel
 33 harness --iommu_intel
 34 harness --iommu_intel
+35 harness --iommu_intel
 17 harness
 18 harness
 21 harness
