@@ -267,6 +267,17 @@ typedef struct thread_activation {
 	/* User-visible scheduling state */
 	int		user_stop_count;	/* outstanding stops */
 
+	/*
+	 * #603: page faults from ring 3 this activation had resolved, and that
+	 * count when thread_suspend() last asked it to stop.  The stop path says
+	 * how many it took between the asking and the stopping, which is the
+	 * stop's own latency: a count taken from user space also holds the time
+	 * before the asking, when the thread is entitled to run.
+	 */
+	unsigned int	user_faults;
+	unsigned int	stop_asked_at;
+	boolean_t	stop_asked;
+
 	/* ast is needed - see ast.h */
 	int		ast;
 
