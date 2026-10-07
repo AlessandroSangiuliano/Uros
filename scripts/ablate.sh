@@ -271,7 +271,10 @@ CSV="$DIR/ablate.csv"
 [ -s "$CSV" ] ||
 	echo "date,time,host,base,patches,arm,boot,accel,run,clock_mhz,power,harness_status,verdict,log" > "$CSV"
 names=$(for p in "${PATCHES[@]}"; do basename "$p" .patch; done | paste -sd+)
-host=$(hostname)
+# uname and not hostname: the Arch Linux container the campaign runs in has
+# no hostname, which is in inetutils, and this line under set -e ended its
+# first A/B with both arms built and no boot (#656).
+host=$(uname -n)
 
 caught=0 missed=0 passed=0 failed=0
 for i in $(seq 1 "$BOOTS"); do
