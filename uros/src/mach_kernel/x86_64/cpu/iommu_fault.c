@@ -5,7 +5,7 @@
  * The log of DMA refusals (#432 stage 3d), and each device's count of them
  * (#599): drained out of the engines by the vendor code, kept here, printed
  * from here.  It reaches the unit table only through iommu_vendor(),
- * iommu_unit_count() and iommu_translating().
+ * iommu_unit_count(), iommu_translating() and iommu_interrupts_remapped().
  */
 
 #include <stdint.h>
@@ -473,15 +473,24 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
  *
  * ⚠️ Nothing to read before the engines are running.  A unit's fault
  * registers are readable whether or not translation is on, and they are
- * meaningless then -- an engine that is not translating refuses nothing.
- * Reading them anyway would report whatever the firmware left behind as this
- * kernel's own faults.
+ * meaningless then -- an engine that neither translates nor remaps refuses
+ * nothing.  Reading them anyway would report whatever the firmware left
+ * behind as this kernel's own faults.
+ *
+ * 🔴 #598: OR REMAPS.  An engine remapping interrupts refuses messages with no
+ * DMA domain anywhere, so "is anything translating" was the wrong question
+ * the day -i could be given without -I.
  */
+static int engines_refuse(void)
+{
+	return iommu_translating() || iommu_interrupts_remapped();
+}
+
 static unsigned drain_all_locked(void)
 {
 	struct iommu_fault_sink s = { &ledger, 1, 0 };
 
-	if (!iommu_translating())
+	if (!engines_refuse())
 		return 0;
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++)
@@ -742,9 +751,10 @@ static void iommu_fault_reporter(void)
 
 void iommu_fault_reporter_start(void)
 {
-	if (!iommu_translating()) {
-		printf("iommu: the fault reporter: NOT ASKED — no engine is "
-		       "translating, so nothing can be refused (#599)\n");
+	if (!engines_refuse()) {
+		printf("iommu: the fault reporter: NOT ASKED — no engine "
+		       "translates or remaps, so nothing can be refused (#599, "
+		       "#598)\n");
 		return;
 	}
 	(void) kernel_thread(kernel_task, iommu_fault_reporter, (char *) 0);
