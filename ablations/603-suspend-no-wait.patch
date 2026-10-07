@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #603
+Takes out: thread_suspend()'s wait for the thread to stop, so it answers while the thread may still be running its own code
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[7\] in [0-9]+ of [0-9]+ rounds the thread touched pages after thread_suspend had answered .*WRONG \(#603\)
+
+diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
+--- a/uros/src/mach_kernel/kern/thread_act.c
++++ b/uros/src/mach_kernel/kern/thread_act.c
+@@ -421,7 +421,6 @@
+ 			thr_act == thread->top_act && thread != current_thread()) {
+ 			nudge(thr_act);
+ 			act_unlock_thread(thr_act);
+-			(void)thread_wait(thread);
+ 		}
+ 		else {
+ 			/*
