@@ -257,9 +257,14 @@ for arm in "${ARMS[@]}"; do
 		die 3 "$arm: the configuration failed, see $RUNDIR/$arm-configure.log"
 	ninja -C "$wt/uros/build-x86_64" > "$RUNDIR/$arm-build.log" 2>&1 ||
 		die 3 "$arm: the tree does not build, see $RUNDIR/$arm-build.log"
+	# Which kernel the arm built, by its code: the md5 of the whole file
+	# changes from one build of the same tree to the next, the md5 of .text
+	# does not, so the two arms' lines say whether their kernels differ.
 	kernel="$wt/uros/build-x86_64/export/uros/boot/mach_kernel"
-	[ -r "$kernel" ] || die 3 "$arm: the build left no kernel at $kernel"
-	echo "ablate: $arm tree built ($SHORT + ${#apply[@]} patches), kernel md5 $(md5sum "$kernel" | cut -c1-12)"
+	objcopy -O binary --only-section=.text "$kernel" "$RUNDIR/$arm.text" 2>/dev/null ||
+		die 3 "$arm: no kernel text to read at $kernel"
+	echo "ablate: $arm tree built ($SHORT + ${#apply[@]} patches), kernel .text md5 $(md5sum < "$RUNDIR/$arm.text" | cut -c1-12)"
+	rm -f "$RUNDIR/$arm.text"
 done
 
 CSV="$DIR/ablate.csv"
