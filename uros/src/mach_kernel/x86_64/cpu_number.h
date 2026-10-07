@@ -15,6 +15,13 @@
  * being pinned: the segment base is what makes it this processor's.  One
  * instruction, no memory the other processors can touch.
  *
+ * 🔴 But what the caller DOES with it depends on the caller being pinned
+ * (#626).  The read is right when it is made; a thread moved after it holds
+ * the number of a processor it is no longer on, and indexes that processor's
+ * data.  So the development kernel asks, at every call, whether the thread can
+ * still move -- see percpu_pinned_check() in <cpu/percpu.h> -- and a caller
+ * that wants the number only as a hint says so with cpu_number_hint().
+ *
  * i386 reads the same thing from %gs at a hard-coded offset (12).  Here the
  * offset comes from PERCPU_CPU_ID in <cpu/percpu.h>, which is also what the
  * assembly entry paths use, so the struct and the reads cannot drift apart.
@@ -31,7 +38,27 @@
 
 #ifndef __ASSEMBLER__
 
-static __inline__ int cpu_number(void)
+static __inline__ __attribute__((always_inline)) int cpu_number(void)
+{
+	int cpu;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(cpu)
+			 : "i"(PERCPU_CPU_ID));
+	percpu_pinned_check(PERCPU_ASKED_NUMBER);	/* #626 */
+	return cpu;
+}
+
+/*
+ * The same read, not asked whether the thread can still move (#626).
+ *
+ * For a caller that uses the number only as a hint -- a statistic, a place to
+ * start looking -- for which the number of the processor it has just left is
+ * as good as its own.  Each caller says in a comment why it is only a hint.
+ * One that indexes something it then writes, or compares the number with
+ * another processor's, is not using a hint.
+ */
+static __inline__ int cpu_number_hint(void)
 {
 	int cpu;
 
