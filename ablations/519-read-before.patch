@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #519
 Takes out: the read of the count at level zero after the raise, putting it back before the gap, so that a front landing there counts as a second run of the one replay
 Run: --entry 0 300 -smp 4
-Expect: lowering ran the held interrupt [2-9][0-9]* time from 1 replay
+Expect: lowering ran the held interrupt [0-9]+ time from 1 replay and 0 arrival — WRONG, the counts do not add up
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
 --- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
