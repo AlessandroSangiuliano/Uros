@@ -40,6 +40,7 @@
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <time/rcu_tick_test.h>	/* #649: -U */
 #include <cpu/sprintf_test.h>	/* #655: -K */
+#include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -574,6 +575,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('K'))
 			sprintf_test();
+
+		/*
+		 * -V: a thread clears its own wait while another processor
+		 * wakes it (#599).  -E's reasons, and the waker is bound to a
+		 * processor already in the scheduler; returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('V'))
+			clear_wait_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
