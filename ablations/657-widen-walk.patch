@@ -4,7 +4,7 @@ Holds open: the census's walk, delay(3000) per thread between taking it off the 
 Run: --entry 35 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/census_test.c b/uros/src/mach_kernel/x86_64/cpu/census_test.c
-index c962101d..f594afe5 100644
+index c3b7b9d2..08223f06 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/census_test.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/census_test.c
 @@ -33,6 +33,8 @@
@@ -31,13 +31,13 @@ index c962101d..f594afe5 100644
  	       "processor %d walks the census (#657)\n", CENSUS_TEST_VICTIMS,
  	       me);
  	thread_wakeup((event_t) &census_test_event);
- 	n = quiet_census_walk(&unreadable);
+ 	n = quiet_census_walk(&had, &unreadable);
 +	zfree_clear = FALSE;	/* ablations/657-widen-walk.patch: the walk only */
  	ended = census_test_ending;
  	thread_bind(current_thread(), PROCESSOR_NULL);
  
 diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
-index f729522b..eb39290d 100644
+index 3d48a0a2..b2cff163 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
 @@ -263,6 +263,8 @@ census_state(int state)
