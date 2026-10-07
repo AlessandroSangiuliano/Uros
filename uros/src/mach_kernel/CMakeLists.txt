@@ -539,6 +539,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rcu_tick_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/sprintf_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/clear_wait_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/census_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu.c
