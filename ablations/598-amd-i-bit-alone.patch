@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #598
+Takes out: the address check on AMD's I bit -- every address counts as an interrupt address, so I alone decides, and QEMU's refused DMA, which carries I and no address, reads as a refused interrupt again
+Run: --iommu amd --entry 33 600 -smp 1
+Expect: iommu fault records decoded, [1-9][0-9]* wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+index 390120cb..db7d87b8 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -1222,9 +1222,8 @@ int iommu_amd_flush(const struct iommu_domain *d)
+ 
+ static int amd_interrupt_address(uint64_t a)
+ {
+-	return (a >= IOMMU_INTERRUPT_RANGE_BASE
+-		&& a <= IOMMU_INTERRUPT_RANGE_LIMIT)
+-	    || (a >= AMD_HT_INTERRUPT_BASE && a <= AMD_HT_INTERRUPT_LIMIT);
++	(void)a;
++	return 1;
+ }
+ 
+ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
