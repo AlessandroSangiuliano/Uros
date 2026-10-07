@@ -41,6 +41,7 @@
 #include <time/rcu_tick_test.h>	/* #649: -U */
 #include <cpu/sprintf_test.h>	/* #655: -K */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
+#include <cpu/census_test.h>	/* #657: -c */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -584,6 +585,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('V'))
 			clear_wait_test();
+
+		/*
+		 * -c: the quiet census walks the threads while other
+		 * processors end them (#657).  -E's reasons, and the victims
+		 * run where the scheduler puts them; returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('c'))
+			census_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
