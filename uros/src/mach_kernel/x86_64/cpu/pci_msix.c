@@ -171,7 +171,6 @@ void
 pci_msix_enable(const struct pci_msix *m)
 {
 	uint16_t	control;
-	uint32_t	command;
 
 	if (m == 0 || m->table == 0)
 		return;
@@ -182,10 +181,8 @@ pci_msix_enable(const struct pci_msix *m)
 	 * that is not a bus master cannot issue one -- which reads as a wrong
 	 * address rather than as a device that was never allowed to speak.
 	 */
-	command = pci_cfg_read(m->segment, m->bus, m->dev, m->func,
-			       PCI_COMMAND);
-	pci_cfg_write(m->segment, m->bus, m->dev, m->func, PCI_COMMAND,
-		      command | PCI_CMD_BUS_MASTER | PCI_CMD_MEM_ENABLE);
+	pci_cfg_command(m->segment, m->bus, m->dev, m->func,
+			PCI_CMD_BUS_MASTER | PCI_CMD_MEM_ENABLE, 0);
 
 	control = pci_cfg_read16(m->segment, m->bus, m->dev, m->func,
 				 (uint16_t)(m->cap + PCI_MSIX_CONTROL));

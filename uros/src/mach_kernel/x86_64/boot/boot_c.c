@@ -4610,6 +4610,28 @@ static void pci_cfg_selftest(void)
 	kputs(id != 0xFFFFFFFFu && id != 0
 	      ? " — a vendor answered, so the mechanism reaches the bus\r\n"
 	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
+
+	/*
+	 * #598's C21: the command register written with its status half zero.
+	 * Asked of the arithmetic, because no device QEMU emulates sets a
+	 * status error bit that a careless write could be seen to clear.  The
+	 * statuses are every error bit set, and the capability list's.
+	 */
+	{
+		unsigned ok = 0;
+
+		ok += pci_cfg_command_dword(0xF9100002u, PCI_CMD_BUS_MASTER, 0)
+		      == 0x00000006u;
+		ok += pci_cfg_command_dword(0xF9100406u, 0,
+					    PCI_CMD_INTX_DISABLE)
+		      == 0x00000006u;
+		kputs("UrMach x86-64: the command register written with its"
+		      " status half zero, ");
+		kputdec(ok);
+		kputs(ok == 2 ? " of 2 — a pending error stays pending\r\n"
+			      : " of 2 — WRONG, a write would clear the"
+				" device's pending errors\r\n");
+	}
 }
 
 /*
@@ -6482,9 +6504,8 @@ static void ioapic_level_selftest(void)
 	 */
 	if (pci_msix_probe(0, 0, (uint8_t)nic, 0, &m))
 		pci_msix_disable(&m);
-	command = pci_cfg_read(0, 0, (uint8_t)nic, 0, PCI_COMMAND) & 0xFFFFu;
-	pci_cfg_write(0, 0, (uint8_t)nic, 0, PCI_COMMAND,
-		      (command | PCI_CMD_MEM_ENABLE) & ~PCI_CMD_INTX_DISABLE);
+	pci_cfg_command(0, 0, (uint8_t)nic, 0, PCI_CMD_MEM_ENABLE,
+			PCI_CMD_INTX_DISABLE);
 
 	regs[NIC_IMC / 4] = 0xFFFFFFFFu;
 	(void) regs[NIC_ICR / 4];
