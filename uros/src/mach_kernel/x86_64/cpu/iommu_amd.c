@@ -34,6 +34,7 @@
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <kern/misc_protos.h>
+#include <sync/lock.h>		/* hw_lock: the command ring's own, #598 */
 
 /* ------------------------------------------------------------------ */
 /*  The table                                                           */
@@ -940,6 +941,40 @@ static int amd_completion_wait(volatile uint8_t *regs,
 }
 
 /*
+ * #598: the ring's own lock, and one call for a whole sequence.
+ *
+ * Every caller used to hold iommu_domain_lock, a mutex, and that was the
+ * ring's only protection.  Interrupt remapping sends commands from paths that
+ * hold no such lock and some that cannot sleep -- a pin routed as the HPET's
+ * tick starts, a slot given out from an RPC -- and a ring they share must not
+ * depend on a lock they do not take.  So the commands of one sequence and the
+ * wait behind them go in under a lock that masks interrupts, as Intel's queue
+ * does, and no other sequence lands between them.
+ *
+ * ⚠️ The semaphore's frame is found before the lock is taken: finding it the
+ * first time allocates, and nothing that allocates runs with interrupts off.
+ */
+static hw_lock_data_t	amd_cmd_lock;
+
+static int amd_send(volatile uint8_t *regs, const struct iommu_tables *t,
+		    const uint64_t (*cmds)[2], unsigned n)
+{
+	int ok = 1;
+
+	if (amd_wait_cell() == 0)
+		return 0;
+
+	hw_lock_lock(&amd_cmd_lock);
+	for (unsigned i = 0; i < n && ok; i++)
+		ok = amd_command(regs, t, cmds[i][0], cmds[i][1]);
+	if (ok)
+		ok = amd_completion_wait(regs, t);
+	hw_lock_unlock(&amd_cmd_lock);
+
+	return ok;
+}
+
+/*
  * 🔴🔴 IT ONLY POLICES WHEN ASKED, AND THAT IS THE EMULATOR AND NOT THE
  * SPECIFICATION.  QEMU's `-device amd-iommu' takes `dma-remap', and it
  * defaults to OFF -- so with the plain device this engine accepts the device
@@ -1011,17 +1046,13 @@ int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
 		 * from a domain, software must issue INVALIDATE_IOMMU_PAGES
 		 * for the associated DomainID."
 		 */
-		if (!amd_command(regs, t, AMD_CMD_INVALIDATE_DEVTAB | bdf, 0))
-			return 0;
+		const uint64_t cmds[2][2] = {
+			{ AMD_CMD_INVALIDATE_DEVTAB | bdf, 0 },
+			{ AMD_CMD_INVALIDATE_PAGES | ((uint64_t)d->id << 32),
+			  AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S | AMD_CMD_PAGES_PDE }
+		};
 
-		if (!amd_command(regs, t,
-				 AMD_CMD_INVALIDATE_PAGES
-				 | ((uint64_t)d->id << 32),
-				 AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S
-				 | AMD_CMD_PAGES_PDE))
-			return 0;
-
-		if (!amd_completion_wait(regs, t))
+		if (!amd_send(regs, t, cmds, 2))
 			return 0;
 
 		attached++;
@@ -1066,10 +1097,11 @@ int iommu_amd_detach(uint16_t bdf)
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 
-		if (!amd_command(regs, t, AMD_CMD_INVALIDATE_DEVTAB | bdf, 0))
-			return 0;
+		const uint64_t cmds[1][2] = {
+			{ AMD_CMD_INVALIDATE_DEVTAB | bdf, 0 }
+		};
 
-		if (!amd_completion_wait(regs, t))
+		if (!amd_send(regs, t, cmds, 1))
 			return 0;
 
 		detached++;
@@ -1105,14 +1137,12 @@ int iommu_amd_flush(const struct iommu_domain *d)
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 
-		if (!amd_command(regs, t,
-				 AMD_CMD_INVALIDATE_PAGES
-				 | ((uint64_t)d->id << 32),
-				 AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S
-				 | AMD_CMD_PAGES_PDE))
-			return 0;
+		const uint64_t cmds[1][2] = {
+			{ AMD_CMD_INVALIDATE_PAGES | ((uint64_t)d->id << 32),
+			  AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S | AMD_CMD_PAGES_PDE }
+		};
 
-		if (!amd_completion_wait(regs, t))
+		if (!amd_send(regs, t, cmds, 1))
 			return 0;
 
 		flushed++;
