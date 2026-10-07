@@ -34,7 +34,9 @@ set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 DIR=${UROS_ABLATE_DIR:-$HOME/uros-tests/ablations}
-REF=${UROS_ABLATE_REF_BUILD:-$REPO/uros/build-x86_64}
+# The main build, whose configuration each arm takes: the one the harness would
+# boot for this tree, so UROS_BUILD_DIR when the caller has set it (#656).
+REF=${UROS_ABLATE_REF_BUILD:-${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}}
 
 die() {
 	echo "ablate: $2" >&2
@@ -227,7 +229,9 @@ for arm in "${ARMS[@]}"; do
 		die 3 "$arm: the configuration failed, see $RUNDIR/$arm-configure.log"
 	ninja -C "$wt/uros/build-x86_64" > "$RUNDIR/$arm-build.log" 2>&1 ||
 		die 3 "$arm: the tree does not build, see $RUNDIR/$arm-build.log"
-	echo "ablate: $arm tree built ($SHORT + ${#apply[@]} patches)"
+	kernel="$wt/uros/build-x86_64/export/uros/boot/mach_kernel"
+	[ -r "$kernel" ] || die 3 "$arm: the build left no kernel at $kernel"
+	echo "ablate: $arm tree built ($SHORT + ${#apply[@]} patches), kernel md5 $(md5sum "$kernel" | cut -c1-12)"
 done
 
 CSV="$DIR/ablate.csv"
@@ -243,8 +247,16 @@ for i in $(seq 1 "$BOOTS"); do
 			log="$RUNDIR/$arm-$acc-$i.log"
 			kvm=()
 			[ "$acc" = kvm ] && kvm=(--kvm)
+			# 🔴 EACH ARM BOOTS ITS OWN BUILD (#656).  run-x86_64.sh takes
+			# UROS_BUILD_DIR from the environment when it finds one there, and
+			# the caller's environment reaches both arms.  scripts/ci/job.sh
+			# exports it, so both arms would boot the one build it names: an
+			# A/B of a tree against itself, which no log would show, because a
+			# log does not say which tree it booted (#587).  So every boot is
+			# handed its arm's build here.
 			set +e
-			UROS_X86_64_LOG=$log "$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
+			UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" UROS_X86_64_LOG=$log \
+				"$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
 				> "$RUNDIR/$arm-$acc-$i.out" 2>&1
 			rc=$?
 			set -e
