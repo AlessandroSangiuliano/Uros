@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #598
+Takes out: the page entry's flush in iommu_domain_map() -- on an engine with ECAP.C clear the entry stays in the caches, and the engine walks the old one
+Run: --entry 0 600 -smp 1
+Expect: scratch domain's one page flushed [0-9]+ of [0-9]+ lines an engine with ECAP.C clear would read — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index bfb8b0b6..9b2473ec 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -1378,7 +1378,6 @@ int iommu_domain_map(struct iommu_domain *d, uint64_t iova, uint64_t pa,
+ 
+ 		table_at(table)[level_index(here, 1)]
+ 			= pt_pte(d->vendor, pa + off, read, write);
+-		iommu_table_written(&table_at(table)[level_index(here, 1)]);
+ 		d->pages++;
+ 	}
+ 
