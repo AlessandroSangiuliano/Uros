@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: the boot's order -- the I/O APIC's last pin is given a vector before -i, still masked, as a pin routed too early would be
+Run: --iommu intel --entry 33 600 -smp 1
+Expect: interrupt remapping COULD NOT BE TURNED ON — WRONG, a pin was routed before -i
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 4648f21f..205ef8ea 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -5714,6 +5714,8 @@ static void iommu_selftest(void)
+ 			      " -I to enable it) — nothing programmed\r\n");
+ 		}
+ 
++		ioapic_set_vector(ioapic_first_gsi() + ioapic_pin_count() - 1,
++				  0x30);
+ 		/*
+ 		 * #598 phase 4: interrupt remapping, only if asked, and after
+ 		 * translation, so that a queue -I started is the one it uses.
