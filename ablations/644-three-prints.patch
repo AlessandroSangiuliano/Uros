@@ -1,0 +1,46 @@
+Kind: ablation
+Issue: #644
+Takes out: the argv[0] line put together in one buffer -- three mach_print() calls again, the prefix, the name and the newline, with a wait of 2 billion TSC cycles after the prefix, about 0.7 s, which covers the clock_event burn-in lines the other processors print a tenth of a second after their first tick
+Run: --entry 0 600 -smp 4
+Expect: the startup handed me argv\[0\] = ($|[^b])
+Expect: the startup handed me argv\[0\] = boot_probe[a-zA-Z]
+
+diff --git a/uros/src/tests/boot_probe/boot_probe.S b/uros/src/tests/boot_probe/boot_probe.S
+index 7e8cf253..4bf3fd31 100644
+--- a/uros/src/tests/boot_probe/boot_probe.S
++++ b/uros/src/tests/boot_probe/boot_probe.S
+@@ -293,17 +293,23 @@ main:
+ 	 * call whole, so the line is put together here, bounded, and printed
+ 	 * once.
+ 	 */
+-	leaq	argv0_line(%rip), %rdi
+-	leaq	argv0_line+ARGV0_LINE_SIZE-3(%rip), %rdx	/* "\r\n" and NUL fit */
+-	leaq	argv0_prefix(%rip), %rsi
+-	call	append
+-	movq	(%r12), %rsi
+-	call	append
+-	leaq	argv0_line+ARGV0_LINE_SIZE-1(%rip), %rdx
+-	leaq	newline(%rip), %rsi
+-	call	append
+-	movb	$0, (%rdi)
+-	leaq	argv0_line(%rip), %rdi
++	leaq	argv0_prefix(%rip), %rdi
++	call	mach_print
++	rdtsc
++	shlq	$32, %rdx
++	orq	%rax, %rdx
++	movq	%rdx, %rcx
++3:
++	pause
++	rdtsc
++	shlq	$32, %rdx
++	orq	%rax, %rdx
++	subq	%rcx, %rdx
++	cmpq	$2000000000, %rdx
++	jb	3b
++	movq	(%r12), %rdi
++	call	mach_print
++	leaq	newline(%rip), %rdi
+ 	call	mach_print
+ 
+ 	call	mach_null
