@@ -6198,7 +6198,6 @@ static void device_master_irq_selftest(void)
 
 	/* One: the whole path, at a level that holds nothing. */
 	pit_delay_us(20000);
-	at_spl0 = dm_irqs;
 
 	/*
 	 * Two: raised to the device class.  splbio() and spltty() are this
@@ -6208,9 +6207,17 @@ static void device_master_irq_selftest(void)
 	 * ⚠️ Raise first and read after, for the reason spl_selftest() found
 	 * the hard way: an interrupt landing between the reading and the raise
 	 * is handled legitimately and counted against the raised level.
+	 *
+	 * 🔴 BOTH counts are read after the raise, the one at level zero too
+	 * (#519).  Read before it, a front landing in the gap ran at level zero
+	 * and was in neither count, so it came out on the way down as a second
+	 * run of the one replay: "2 time from 1 replay" in boots whose last line
+	 * said 21 entries, 20 arrivals and 1 replay -- the same entries as a
+	 * passing boot's, with level zero read at 19 instead of 20.
 	 */
 	old = splx(SPL_DEVICE);
-	while_raised = dm_irqs;
+	at_spl0 = dm_irqs;
+	while_raised = at_spl0;
 	pit_delay_us(20000);
 	while_raised = dm_irqs - while_raised;
 
