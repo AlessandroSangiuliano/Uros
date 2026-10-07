@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #603
 Takes out: the look at the running activation's ASTs on the way back to ring 3, so a stop asked from another processor waits for that processor's AST interrupt or its tick again
 Run: --entry 14 600 -smp 4
-Expect: act_test: \[7\] in [0-9]+ of [0-9]+ rounds
+Expect: thread_suspend: activation .* resolved [0-9]+ page faults from ring 3 between the stop being asked and the stop -- WRONG \(#603\)
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
 index 1a8cbd2d..7448c59d 100644
