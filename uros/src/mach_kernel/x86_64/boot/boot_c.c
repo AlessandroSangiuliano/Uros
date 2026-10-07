@@ -4991,6 +4991,21 @@ static void iommu_selftest(void)
 			   " back the way it was written\r\n");
 	}
 
+	/* #598's C7, on every board for the same reason. */
+	{
+		unsigned expected = 0, made = 0;
+		int ok = iommu_flush_check(&expected, &made);
+
+		kputs("UrMach x86-64: a scratch domain's one page flushed ");
+		kputdec(made);
+		kputs(" of ");
+		kputdec(expected);
+		kputs(ok ? " lines an engine with ECAP.C clear would read — each"
+			   " new table whole, and each entry written\r\n"
+			 : " lines an engine with ECAP.C clear would read — WRONG,"
+			   " it would walk a line still in the caches\r\n");
+	}
+
 	/*
 	 * ⚠️ AND THIS ONE ESPECIALLY ON EVERY BOARD (#432 stage 3d).  A fault
 	 * record is read exactly when something has already gone wrong, so on
@@ -5519,6 +5534,7 @@ static void iommu_selftest(void)
 	 * in the same boot as the arithmetic it depends on.
 	 */
 	{
+		uint64_t flushed = iommu_table_lines_flushed();
 		int ok = iommu_build_passthrough();
 		const struct iommu_tables *t = iommu_tables();
 
@@ -5533,7 +5549,29 @@ static void iommu_selftest(void)
 			kputdec(t->devices);
 			kputs(" entries in ");
 			kputdec(t->frames);
-			kputs(" frames, every one read back\r\n");
+			kputs(" frames, every one read back");
+
+			/*
+			 * #598's C7: and every line of every frame out of the
+			 * caches, on an engine whose walks do not snoop them --
+			 * counted, so a frame the build forgot is a number short.
+			 */
+			flushed = iommu_table_lines_flushed() - flushed;
+			if (!iommu_tables_uncached())
+				kputs("\r\n");
+			else if (flushed == (uint64_t)t->frames * 64u) {
+				kputs(" and out of the caches, ");
+				kputdec((unsigned)flushed);
+				kputs(" lines — the walks do not snoop them"
+				      " (ECAP.C clear)\r\n");
+			} else {
+				kputs(" — WRONG, ");
+				kputdec((unsigned)flushed);
+				kputs(" of ");
+				kputdec(t->frames * 64u);
+				kputs(" lines left the caches, and the walks do"
+				      " not snoop them\r\n");
+			}
 		}
 
 		/*

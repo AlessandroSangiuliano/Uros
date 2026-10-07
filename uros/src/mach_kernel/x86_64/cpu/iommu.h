@@ -1071,6 +1071,16 @@ struct iommu_fault_answer {
 void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a);
 
 /*
+ * #598's C7: whether an engine here reads its tables from memory, so that each
+ * line written must leave the processor's caches first (Intel, ECAP.C clear);
+ * how many lines have been flushed for it since boot; and the check that a
+ * scratch domain's one page flushes every line it should.
+ */
+int iommu_tables_uncached(void);
+uint64_t iommu_table_lines_flushed(void);
+int iommu_flush_check(unsigned *expected, unsigned *made);
+
+/*
  * Whether a domain could be given to a device at all on this machine.
  *
  * ⚠️ Asked rather than assumed, because there are five separate ways for the

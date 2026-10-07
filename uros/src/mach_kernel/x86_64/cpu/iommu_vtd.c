@@ -516,11 +516,14 @@ int iommu_vtd_build(void)
 			    || ctx[i * VTD_ENTRY_WORDS + 1] != entry[1])
 				return 0;
 
+		iommu_table_frame_written(ctx_pa);	/* C7 */
+
 		iommu_vtd_root_entry(ctx_pa, entry);
 		root[bus * VTD_ENTRY_WORDS + 0] = entry[0];
 		root[bus * VTD_ENTRY_WORDS + 1] = entry[1];
 		contexts++;
 	}
+	iommu_table_frame_written(root_pa);
 
 	iommu_record_tables(root_pa, 4096, 0, 0, devices, contexts, frames);
 	return 1;
@@ -886,6 +889,7 @@ int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 	 */
 	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
 		return 0;
+	iommu_table_written(&ctx[devfn * VTD_ENTRY_WORDS]);	/* C7 */
 
 	if (ctx[devfn * VTD_ENTRY_WORDS + 0] != entry[0]
 	    || ctx[devfn * VTD_ENTRY_WORDS + 1] != entry[1])
@@ -932,9 +936,10 @@ int iommu_vtd_detach(uint16_t bdf)
 
 	iommu_vtd_context_blocked(entry);
 
-	/* One store, as in attach (C20). */
+	/* One store, as in attach (C20), and out of the caches (C7). */
 	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
 		return 0;
+	iommu_table_written(&ctx[devfn * VTD_ENTRY_WORDS]);
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
 		const struct iommu_unit *u = iommu_unit(i);
@@ -2148,19 +2153,6 @@ int iommu_vtd_remapping(void)
 }
 
 /*
- * One line out of the processor's caches, for an engine whose reads of the
- * table do not snoop them (#598's C7): it reads memory, and the store is still
- * in a line it never looks at.  The fence orders the flush before whatever
- * tells the engine to read.
- */
-static void vtd_flush_line(const volatile void *p)
-{
-	__asm__ volatile("clflush %0" : : "m"(*(const volatile uint8_t *)p)
-			 : "memory");
-	__asm__ volatile("mfence" : : : "memory");
-}
-
-/*
  * One 16-byte store (vtd_store_entry(), C20): a present entry rewritten in two
  * would be, between them, the new vector to the old destination, or the old
  * source let in.  Then the line out of the caches for an engine that does not
@@ -2186,7 +2178,7 @@ static int vtd_irte_write(uint32_t index, const uint64_t e[2])
 		return 0;
 
 	if (vtd_irt_uncached)
-		vtd_flush_line(slot);
+		iommu_flush_line(slot);
 
 	for (unsigned u = 0; u < IOMMU_MAX_UNITS; u++)
 		if (vtd_remapping[u] && !vtd_queue_submit(u, iec, 1))
@@ -2293,7 +2285,7 @@ static int vtd_ir_on(unsigned unit, volatile uint8_t *regs,
 	if (!VTD_ECAP_COHERENT(u->vendor_caps[1])) {
 		vtd_irt_uncached = 1;
 		for (uint64_t off = 0; off < 4096u; off += 64u)
-			vtd_flush_line((const volatile void *)(uintptr_t)
+			iommu_flush_line((const volatile void *)(uintptr_t)
 				       phys_to_direct(t->intel_table + off));
 	}
 

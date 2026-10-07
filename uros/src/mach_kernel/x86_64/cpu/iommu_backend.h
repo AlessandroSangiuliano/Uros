@@ -326,6 +326,17 @@ void iommu_amd_dte_domain(uint16_t domain, unsigned levels, uint64_t root_pa,
 #define	IOMMU_INTERRUPT_RANGE_LIMIT	0xFEEFFFFFULL
 
 /*
+ * #598's C7: a table line written, out of the processor's caches when an
+ * engine reads its tables from memory (iommu_tables_uncached()), and fenced,
+ * so that the invalidation which follows cannot overtake it.  A whole frame is
+ * every one of its 64 lines.  iommu_flush_line() flushes unconditionally, for
+ * a table whose own reader decides, as the interrupt remapping table's does.
+ */
+void iommu_flush_line(const volatile void *p);
+void iommu_table_written(const volatile void *entry);
+void iommu_table_frame_written(uint64_t pa);
+
+/*
  * ── Stage 3d: reading a refusal out of an engine ─────────────────────
  *
  * The two vendors do not merely use different bit positions here: Intel keeps

@@ -1198,6 +1198,68 @@ static volatile uint64_t *table_at(uint64_t pa)
 }
 
 /*
+ * ── #598's C7: tables an engine reads from memory ────────────────────
+ *
+ * An Intel engine whose ECAP.C is clear reads its root, context and
+ * second-stage tables, and the interrupt remapping table, without snooping the
+ * processor's caches (Rev 5.20 Appendix A), so a line this kernel wrote is, to
+ * it, still the old one until the line leaves the caches.  So every line
+ * written goes out before the invalidation that tells the engine to read it.
+ * The invalidation queue is always snooped, and AMD's page walks snoop while a
+ * DTE's SD is clear, which this kernel never sets: neither is flushed.
+ *
+ * ⚠️ Asked of the engines each time rather than recorded once, so that the
+ * answer does not depend on whether the vendor or the units were recorded
+ * first.  flush_forced is the check's, below.
+ */
+static int		flush_forced;
+static uint64_t		lines_flushed;
+
+int iommu_tables_uncached(void)
+{
+	if (flush_forced)
+		return 1;
+	if (found_vendor != IOMMU_INTEL)
+		return 0;
+	for (unsigned i = 0; i < nunits; i++)
+		if (units[i].answered && !units[i].coherent_walk)
+			return 1;
+	return 0;
+}
+
+uint64_t iommu_table_lines_flushed(void)
+{
+	return lines_flushed;
+}
+
+/* One line out of the caches; the fence orders it before what follows. */
+void iommu_flush_line(const volatile void *p)
+{
+	__asm__ volatile("clflush %0" : : "m"(*(const volatile uint8_t *)p)
+			 : "memory");
+	__asm__ volatile("mfence" : : : "memory");
+	lines_flushed++;
+}
+
+/* A table entry written, out of the caches if an engine reads memory. */
+void iommu_table_written(const volatile void *entry)
+{
+	if (iommu_tables_uncached())
+		iommu_flush_line(entry);
+}
+
+/* A whole table written -- zeroed, or built -- every line of it. */
+void iommu_table_frame_written(uint64_t pa)
+{
+	volatile uint8_t *f = (volatile uint8_t *)table_at(pa);
+
+	if (!iommu_tables_uncached())
+		return;
+	for (unsigned off = 0; off < 4096u; off += 64u)
+		iommu_flush_line(f + off);
+}
+
+/*
  * A frame for a page table, from whichever allocator owns physical memory
  * right now.
  *
@@ -1230,6 +1292,7 @@ int iommu_domain_create(struct iommu_domain *d, enum iommu_vendor vendor,
 	d->root = domain_frame();
 	if (d->root == 0)
 		return 0;
+	iommu_table_frame_written(d->root);	/* zeroed by the processor */
 
 	d->vendor = vendor;
 	d->levels = levels;
@@ -1304,15 +1367,18 @@ int iommu_domain_map(struct iommu_domain *d, uint64_t iova, uint64_t pa,
 			below = domain_frame();
 			if (below == 0)
 				return 0;
+			iommu_table_frame_written(below);
 
 			d->frames++;
 			entries[index] = pt_pde(d->vendor, below, level - 1u);
+			iommu_table_written(&entries[index]);
 			table = below;
 			level--;
 		}
 
 		table_at(table)[level_index(here, 1)]
 			= pt_pte(d->vendor, pa + off, read, write);
+		iommu_table_written(&table_at(table)[level_index(here, 1)]);
 		d->pages++;
 	}
 
@@ -1733,6 +1799,31 @@ static unsigned check_one_vendor(enum iommu_vendor vendor, unsigned *walked)
 	}
 
 	return bad + check_skipping(&d, probe, walked);
+}
+
+/*
+ * #598's C7, asked of a scratch domain: with an engine that reads its tables
+ * from memory, every line of every new table and every entry written must
+ * have left the caches -- 64 lines a frame, the root's included, one for each
+ * directory entry that links a new table, and one for each page entry.  Forced
+ * on for the question, so the answer does not depend on the board.  What a
+ * boot can show is that the flushes are made; QEMU models no caches, so not
+ * that they were needed.
+ */
+int iommu_flush_check(unsigned *expected, unsigned *made)
+{
+	struct iommu_domain d;
+	uint64_t before = lines_flushed;
+	int ok;
+
+	flush_forced = 1;
+	ok = iommu_domain_create(&d, IOMMU_INTEL, 1, 4)
+	     && iommu_domain_map(&d, 0x40000000ULL, 0x200000ULL, 4096u, 1, 1);
+	flush_forced = 0;
+
+	*expected = ok ? d.frames * 64u + (d.frames - 1u) + d.pages : 0;
+	*made = (unsigned)(lines_flushed - before);
+	return ok && *made == *expected;
 }
 
 int iommu_domain_check(unsigned *walked, unsigned *wrong)
