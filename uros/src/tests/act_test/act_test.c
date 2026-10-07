@@ -1509,12 +1509,15 @@ arm_seven_suspend_in_page_faults(void)
 		       ran_after, ARM7_ROUNDS);
 		return 0;
 	}
+	/*
+	 * ⚠️ Under 256 bytes: a longer line leaves in two writes, and another
+	 * task's line landed between them once (#578).  The kernel's
+	 * thread_suspend line is the one that judges the stop.
+	 */
 	printf("act_test: [7] a thread that lives in page faults stopped when "
-	       "asked: %d rounds, none touching a page after thread_suspend "
-	       "answered; inside the call at most %lu pages (%lu inside "
-	       "thread_info), past %u in %d rounds -- a count that holds the "
-	       "wait for the asking too, so the stop's own latency is the "
-	       "kernel's thread_suspend line (#603)\n", ARM7_ROUNDS, most,
+	       "asked: %d rounds, none after thread_suspend answered; inside "
+	       "it at most %lu pages (%lu in thread_info), past %u in %d, the "
+	       "wait for the asking included (#603)\n", ARM7_ROUNDS, most,
 	       yardstick, ARM7_RAN_ON, ran_on);
 	return 1;
 }
