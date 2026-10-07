@@ -707,6 +707,25 @@ arm_seven_the_card_rings(void)
 	nic_write(regs, E1000_IMC, 0xFFFFFFFFu);
 	nic_write(regs, E1000_ICR, 0xFFFFFFFFu);
 	nic_write(regs, E1000_IVAR, 0);
+
+	/*
+	 * ⚠️ Quiet before the slot is given back.  One ring can bring more
+	 * than one message -- the boot's own card test counts two -- and one
+	 * still on its way when the handler is taken away arrives at a vector
+	 * nobody claims, which halts the machine.  Under KVM one did.  So the
+	 * port is drained until it has been silent for 200 ms.
+	 */
+	{
+		struct {
+			mach_msg_header_t	h;
+			mach_msg_trailer_t	t;
+		} late;
+
+		while (mach_msg(&late.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+				sizeof(late), port, 200, MACH_PORT_NULL)
+		       == MACH_MSG_SUCCESS)
+			;
+	}
 	(void) device_intr_unregister(master_device, slot);
 	(void) device_mmio_unmap(master_device, uva, (vm_size_t)IQ_PAGE,
 				 mach_task_self());
