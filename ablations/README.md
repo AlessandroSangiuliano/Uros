@@ -33,9 +33,12 @@ Expect: <thread_doswapin\+0x
 scripts/ablate.sh ablations/642-widen-swap.patch ablations/642-direct-swapin.patch
 scripts/ablate.sh --ab --boots 5 --accel tcg,kvm ablations/642-widen-swap.patch ablations/642-direct-swapin.patch
 scripts/ablate.sh --check ablations/*.patch
+scripts/ablate.sh --plan --ab --boots 5 --accel tcg,kvm ablations/642-widen-swap.patch ablations/642-direct-swapin.patch
 ```
 
-Each run takes place in a worktree under `$UROS_ABLATE_DIR` (default `~/uros-tests/ablations`). The build there is configured with the options of `$UROS_ABLATE_REF_BUILD` (default `uros/build-x86_64`), because this tree's configuration cannot be reproduced from the defaults. Every boot adds one line to `ablate.csv` in the same directory: tree, patches, arm, accelerator, the clock and power source the harness recorded, its exit status, and the verdict.
+`--plan` says what the same command without it would build and boot, and refuses what it would refuse, building nothing. The campaign on GitHub asks it before a run that takes fixes out starts on twenty runners (#656).
+
+Each run takes place in a worktree under `$UROS_ABLATE_DIR` (default `~/uros-tests/ablations`). The build there is configured with the options of `$UROS_ABLATE_REF_BUILD` (default `$UROS_BUILD_DIR` if it is set, otherwise `uros/build-x86_64`), because this tree's configuration cannot be reproduced from the defaults. Each arm boots the build of its own worktree, whatever `UROS_BUILD_DIR` the caller exported. Every boot adds one line to `ablate.csv` in the same directory: tree, patches, arm, accelerator, the clock and power source the harness recorded, its exit status, and the verdict.
 
 `--ab` alternates each boot of the ablated tree with one of the fixed tree, which has the widen patches but not the ablation. The ablated arm must be CAUGHT and the fixed arm must pass.
 
