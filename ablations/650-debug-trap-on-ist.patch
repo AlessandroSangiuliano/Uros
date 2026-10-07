@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #650
+Takes out: #DB's move off its interrupt stack -- vector 1 takes the paranoid stub from ring 3 again, and the frame stays on IST_DEBUG
+Run: --entry 14 300 -smp 4
+Expect: from ring 3 has its frame at .* and not at the thread's pcb->user
+Expect: fault_test: \[5\] WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
+index ccb8ad39..9c7d81fa 100644
+--- a/uros/src/mach_kernel/x86_64/trap/entry.S
++++ b/uros/src/mach_kernel/x86_64/trap/entry.S
+@@ -137,7 +137,7 @@ isr_\vec:
+ 	.endm
+ 
+ 	ISR_NOERR 0
+-	ISR_DEBUG 1
++	ISR_PARANOID_NOERR 1
+ 	ISR_PARANOID_NOERR 2
+ 	ISR_NOERR 3
+ 	ISR_NOERR 4

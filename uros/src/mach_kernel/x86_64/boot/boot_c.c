@@ -70,6 +70,7 @@
 #include <time/freq_source.h>	/* #508 */
 #include <time/pmtimer.h>	/* #508 */
 #include <time/hpet.h>		/* #508 */
+#include <time/delay.h>		/* #624 */
 #include <time/ruler.h>		/* #508 */
 #include <time/rulers.h>	/* #508 */
 #include <trap/trap.h>
@@ -3746,6 +3747,114 @@ static void rulers_selftest(void)
 	}
 	kputs("\r\n");
 	read_costs();
+}
+
+/*
+ * delay() (#624, time/delay.c): each of its three waits, timed by a counter
+ * other than its own, must last at least what it was asked.  Two counters
+ * agree to the calibration's ppm and each reads to a fraction of a
+ * microsecond, so a right wait can measure up to 0.1% and 1 us short; one
+ * that returned early, or counted in the wrong unit, is far outside that.
+ * The order of the counters is delay()'s own: the TSC, the HPET, the PM timer.
+ */
+#define DELAY_TEST_US	2000
+
+static const char *const delay_counter[] = {
+	"the TSC", "the HPET", "the PM timer"
+};
+
+static int delay_counter_present(int c)
+{
+	switch (c) {
+	case 0:		return tsc_hz() != 0;
+	case 1:		return hpet_present();
+	default:	return pmtimer_present();
+	}
+}
+
+static uint64_t delay_counter_read(int c)
+{
+	switch (c) {
+	case 0:		return rdtsc_ordered();
+	case 1:		return hpet_read32();
+	default:	return pmtimer_read();
+	}
+}
+
+static uint64_t delay_counter_us(int c, uint64_t from, uint64_t to)
+{
+	switch (c) {
+	case 0:
+		return (to - from) * 1000000 / tsc_hz();
+	case 1:
+		return (uint64_t)(uint32_t)(to - from) * 1000000 / hpet_hz();
+	default:
+		return (uint64_t)pmtimer_delta((uint32_t)from, (uint32_t)to) *
+		    1000000 / PMTIMER_HZ;
+	}
+}
+
+static void delay_selftest(void)
+{
+	static int (*const wait[])(unsigned) = {
+		delay_tsc_us, delay_hpet_us, delay_pmtimer_us
+	};
+	const unsigned	floor = DELAY_TEST_US - DELAY_TEST_US / 1000 - 1;
+	unsigned	asked = 0, short_waits = 0;
+	uint64_t	t0, t1, us;
+	int		w, by;
+
+	kputs("delay: starting -- each of its waits timed by another counter (#624)\r\n");
+	for (w = 0; w < 3; w++) {
+		kputs("delay: [");
+		kputdec(w + 1);
+		kputs("] ");
+		kputs(delay_counter[w]);
+		if (!delay_counter_present(w)) {
+			kputs(" is not there -- not asked\r\n");
+			continue;
+		}
+		for (by = 0; by < 3; by++)
+			if (by != w && delay_counter_present(by))
+				break;
+		if (by == 3) {
+			kputs(": nothing else to time its wait by -- not asked\r\n");
+			continue;
+		}
+		t0 = delay_counter_read(by);
+		(void) wait[w](DELAY_TEST_US);
+		t1 = delay_counter_read(by);
+		us = delay_counter_us(by, t0, t1);
+		asked++;
+		kputs("'s ");
+		kputdec(DELAY_TEST_US);
+		kputs(" us took ");
+		kputdec(us);
+		kputs(" us by ");
+		kputs(delay_counter[by]);
+		if (us < floor) {
+			short_waits++;
+			kputs(" -- short");
+		}
+		kputs("\r\n");
+	}
+	if (short_waits != 0) {
+		kputs("delay: WRONG -- ");
+		kputdec(short_waits);
+		kputs(" of ");
+		kputdec(asked);
+		kputs(" waits lasted less than they were asked\r\n");
+	} else if (asked != 0) {
+		kputs("delay: PASS -- ");
+		kputdec(asked);
+		kputs(" waits of ");
+		kputdec(asked);
+		kputs(" lasted at least ");
+		kputdec(DELAY_TEST_US);
+		kputs(" us by another counter\r\n");
+	} else {
+		kputs("delay: NOT ASKED -- no wait had a second counter to be timed by\r\n");
+	}
 }
 
 /*
@@ -7713,6 +7822,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	freq_census();
 	rulers_selftest();
 	tsc_selftest();
+	delay_selftest();
 	spin_budget_selftest();
 	rulers_kept_selftest();
 	timer_selftest();

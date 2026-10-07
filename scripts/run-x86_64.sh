@@ -179,6 +179,19 @@ DOUBLE_FAULT='breaking the stack on purpose'
 # silently continuing to pass.
 EXPECTED_END='No bootstrap code loaded with the kernel'
 
+# 🔴 A PANIC, IN EITHER OF ITS TWO SHAPES (#624).
+#
+# `panic(cpu' is the first line, and the one line of a panic that is NOT sure to
+# arrive whole: another processor's output can land inside it ("thread_ipnfanic(cpu
+# 1): Debugoger..." on OMEGA, entry 22).  Every processor's `cpu N backtrace
+# (addr2line ...)' header comes after it, from x86_64_backtrace_after(), which only
+# the two ways of dying call -- halt_cpu()'s panic branch and the fatal trap report
+# -- and each is printed under the backtrace lock, so it arrives whole.  Either
+# shape is a panic.
+PANIC_RE='panic\(cpu|cpu [0-9]+ backtrace \(addr2line'
+# Defined here, above verdict() and the --judge path that calls it before the
+# rest of this file has run.
+
 verdict() {
 # 🔑 Read out of the LOG and not out of the live variable, so that --judge on a
 # log taken weeks ago says what made it.  A log with no conditions block is one
@@ -222,6 +235,22 @@ UNKNOWNS=$(grep -ac "$UNKNOWN_VERDICT" "$LOG" || true)
 BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
 	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
+# #624: a panic whose first line arrived in pieces still leaves its backtraces
+# whole.  One of them names it -- once, and only when no whole `panic(cpu' line
+# does, so a panic is still one unexplained line and not one per processor.
+if ! grep -aq 'panic(cpu' "$LOG"; then
+	SHREDDED=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
+	[ -n "$SHREDDED" ] && BAD=$(printf '%s\n%s' "$BAD" \
+		"PANIC (#624), its first line in pieces: $SHREDDED" | sed '/^$/d')
+fi
+# #624: a task the kernel killed because nothing would take its exception.
+# exception_no_server() says so in one line, the task is gone, and nothing else
+# in the log has to fail for it: in #645's forkrace test without its fix, ten
+# children died of EXC_BAD_ACCESS and the run was reported passed.  No test
+# kills a task this way on purpose -- of 3493 logs, the 18 with the line are
+# ablations and runs that failed anyway -- so every one is unexplained.
+DEATHS=$(grep -a 'exception_no_server: terminating task' "$LOG" || true)
+[ -n "$DEATHS" ] && BAD=$(printf '%s\n%s' "$BAD" "$DEATHS" | sed '/^$/d')
 # #578: a line that carries two programs' output is a failure too, and it is
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
@@ -372,6 +401,15 @@ must_report() {
 	fi
 	echo "  FAILED: '$1' appeared and '$2' never did."
 	echo "          $3"
+	# #624: a test a panic cut short never reports, and a run that fails here
+	# never reaches the list of unexplained lines where the panic is named --
+	# so it is named here, whole or by the backtrace its shredded first line
+	# left, where the reader is looking.
+	_panic=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
+	if [ -n "$_panic" ]; then
+		echo "          the machine had panicked (#624):"
+		echo "            $_panic"
+	fi
 	# #578: "never did" is also what a line looks like when it arrived in two
 	# pieces with another program's output between them.  If the wire has
 	# such lines, they are shown here, where the reader is looking.
@@ -404,6 +442,10 @@ must_report 'shootdown_test: \[1\] starting' 'shootdown_test: \[1\] \(PASS\|WRON
 	'Every remapper stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside a shootdown (#638).'
 must_report 'shootdown_test: \[2\] starting' 'shootdown_test: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
 	'A cross-call sent to its own sender never returns: it ends the boot with a panic that names it.  A run that stops after the start line without that panic has stopped somewhere else inside the calls (#638).'
+must_report 'rcu_tick: starting' 'rcu_tick: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait on either side is bounded and the verdict is printed either way; a run that stops after the start line has stopped inside a read section or in a grace period that does not end (#649).'
+must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
 must_report 'swap_disable: \[1\] starting' 'swap_disable: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every wait in the arm is bounded and the verdict is printed either way.  A second swap-in of the same stack ends the boot in the assertion of thread_doswapin(); a run that stops after the start line without that panic has stopped inside thread_swap_disable() (#642).'
 must_report 'swap_disable: \[2\] starting' 'swap_disable: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
@@ -1042,7 +1084,13 @@ QPID=$!
 # the deadline on for as long as the tick ran: a machine stopped with its
 # clock alive never went quiet, reached the hard cap, and was called a
 # livelock (a stay-up boot ran its full ten times SECS, every time).
-IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
+#
+# #624: and, when the tick comes from the HPET, that backend's own two lines
+# beside clock_event's, its window and each processor's re-arm (hpet_event.c,
+# #593).  Missing here, they kept OMEGA's basso2-g12-e22-tcg4-2 going for
+# 2 h 27 min after the machine had stopped in its third minute, until it was
+# killed by hand: its last line that meant something is line 778 of 2604.
+IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^clock_event: hpet: window [0-9]*, \|^clock_event: hpet: cpu [0-9]* re-armed \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
 
 # The hard cap, which is still wall time and still needed: a livelock that
 # keeps printing meaningful lines forever is progress by this measure and has
@@ -1166,7 +1214,13 @@ while kill -0 "$QPID" 2>/dev/null; do
 	# for the same reason -- see the note there.  🔥 That they are written
 	# TWICE in this file is its own hazard: the first copy was corrected for
 	# act_test's fifth arm and this one would have gone on waiting.
-	if grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; then
+	# 🔴 A PANIC ENDS THE RUN, whatever tests it cut short (#624).  The test
+	# that was running when the machine died will never print its last line,
+	# and waiting for it -- all_reported -- held every panicking run for its
+	# whole quiet budget, twenty minutes under TCG, after the machine had
+	# stopped.  The wait below still lets the backtraces finish.
+	if grep -aqE "$PANIC_RE" "$LOG" \
+	   || { grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; }; then
 		# #599: a panic is not over at its first line.  The console's
 		# final copy and every processor's backtrace come after it, at
 		# the wire's pace -- four processors' worth is seconds of bytes
@@ -1174,7 +1228,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		# line, whatever was still coming.  So a run that ends in a panic
 		# waits until its log has stopped growing for three seconds,
 		# within a minute; every other end is as it was.
-		if grep -aq 'panic(cpu' "$LOG"; then
+		if grep -aqE "$PANIC_RE" "$LOG"; then
 			_PANIC_SIZE=-1
 			_PANIC_STILL=0
 			_PANIC_WAITED=0
