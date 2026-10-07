@@ -6160,7 +6160,7 @@ static void dm_irq_handler(int irq)
 static void device_master_irq_selftest(void)
 {
 	uint64_t	at_spl0, while_raised, after_lowering, after_release;
-	uint64_t	replays, acks, deferrals;
+	uint64_t	replays, arrivals, acks, deferrals;
 	int		had_interrupts;
 	spl_t		old;
 
@@ -6198,7 +6198,6 @@ static void device_master_irq_selftest(void)
 
 	/* One: the whole path, at a level that holds nothing. */
 	pit_delay_us(20000);
-	at_spl0 = dm_irqs;
 
 	/*
 	 * Two: raised to the device class.  splbio() and spltty() are this
@@ -6208,9 +6207,17 @@ static void device_master_irq_selftest(void)
 	 * ⚠️ Raise first and read after, for the reason spl_selftest() found
 	 * the hard way: an interrupt landing between the reading and the raise
 	 * is handled legitimately and counted against the raised level.
+	 *
+	 * 🔴 BOTH counts are read after the raise, the one at level zero too
+	 * (#519).  Read before it, a front landing in the gap ran at level zero
+	 * and was in neither count, so it came out on the way down as a second
+	 * run of the one replay: "2 time from 1 replay" in boots whose last line
+	 * said 21 entries, 20 arrivals and 1 replay -- the same entries as a
+	 * passing boot's, with level zero read at 19 instead of 20.
 	 */
 	old = splx(SPL_DEVICE);
-	while_raised = dm_irqs;
+	at_spl0 = dm_irqs;
+	while_raised = at_spl0;
 	pit_delay_us(20000);
 	while_raised = dm_irqs - while_raised;
 
@@ -6222,10 +6229,12 @@ static void device_master_irq_selftest(void)
 	 */
 	pit_periodic_stop();
 	replays = dm_replayed;
+	arrivals = dm_arrived;
 
 	splx(old);
 	after_lowering = dm_irqs - at_spl0 - while_raised;
 	replays = dm_replayed - replays;
+	arrivals = dm_arrived - arrivals;
 
 	/* Three: given up, and the line goes quiet with the device running. */
 	device_md_irq_unregister(0);
@@ -6250,14 +6259,30 @@ static void device_master_irq_selftest(void)
 	      ? " — the claim and the release both take effect\r\n"
 	      : " — WRONG, the line does not follow the claim\r\n");
 
+	/*
+	 * 🔑 THE RUNS ON THE WAY DOWN ARE ARRIVALS OR REPLAYS, AND NOTHING ELSE
+	 * (#519).  With the device stopped before the lowering, every run counted
+	 * there entered by one road or the other while the test was looking; a
+	 * count that is neither ran where the test was NOT looking, and says the
+	 * windows are wrong, not the deferral.  The test once read its count at
+	 * level zero before the raise, and the front that landed in between
+	 * came out here as a second run of the one replay -- blamed on the
+	 * deferral for weeks, in boots whose last line said one replay.
+	 */
 	kputs("UrMach x86-64: lowering ran the held interrupt ");
 	kputdec((unsigned)after_lowering);
 	kputs(" time from ");
 	kputdec((unsigned)replays);
 	kputs(" replay");
-	kputs(after_lowering == 1 && replays == 1
-	      ? " — one, however many fronts were held\r\n"
-	      : " — WRONG, the deferral is not replayed exactly once\r\n");
+	if (after_lowering != arrivals + replays) {
+		kputs(" and ");
+		kputdec((unsigned)arrivals);
+		kputs(" arrival — WRONG, the counts do not add up: a run"
+		      " fell outside the windows this test reads\r\n");
+	} else
+		kputs(after_lowering == 1 && replays == 1
+		      ? " — one, however many fronts were held\r\n"
+		      : " — WRONG, the deferral is not replayed exactly once\r\n");
 
 	kputs("UrMach x86-64: of ");
 	kputdec((unsigned)dm_irqs);
