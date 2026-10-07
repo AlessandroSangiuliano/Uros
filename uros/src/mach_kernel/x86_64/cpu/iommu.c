@@ -1942,6 +1942,31 @@ static const struct fault_case fault_cases[] = {
 	  0x00000000fee00000ULL,
 	  1, 0x00000000fee00000ULL, 0x0020, 7,
 	  0x2, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/* The same through the HyperTransport window, Table 3's other one. */
+	{ "amd, interrupt blocked, hypertransport window", 1,
+	  (2ULL << 60) | (1ULL << 51) | (7ULL << 32) | 0x0020ULL,
+	  0x000000fdf8001000ULL,
+	  1, 0x000000fdf8001000ULL, 0x0020, 7,
+	  0x2, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/*
+	 * 🔴 A WORD AN ENGINE WE RUN DOES PRODUCE: QEMU 11.1.1's amd-iommu
+	 * refusing 00:04.0's DMA on entry 33, read off a boot.  I is set and
+	 * the address is zero, and an interrupt request is a write to an
+	 * interrupt address, so this is the memory request it was (#598).
+	 */
+	{ "amd, qemu's refused dma, i set and no address", 1,
+	  0x200a000000000020ULL, 0,
+	  1, 0, 0x0020, 0,
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
+
+	/* I set one byte past the interrupt range: not an interrupt either. */
+	{ "amd, i set just past the interrupt range", 1,
+	  (2ULL << 60) | (1ULL << 51) | (7ULL << 32) | 0x0020ULL,
+	  0x00000000fef00000ULL,
+	  1, 0x00000000fef00000ULL, 0x0020, 7,
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 };
 
 /*

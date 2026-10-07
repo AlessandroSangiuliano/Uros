@@ -5010,7 +5010,8 @@ static void iommu_selftest(void)
 		kputs(" wrong");
 		kputs(ok ? " — intel's two type bits told apart, amd's"
 			   " direction refused where the entry does not carry"
-			   " one, and a refused interrupt read as one\r\n"
+			   " one, and a refused interrupt read as one, on amd"
+			   " only at an interrupt address\r\n"
 			 : " — WRONG, a refusal would be reported as something"
 			   " it is not\r\n");
 	}

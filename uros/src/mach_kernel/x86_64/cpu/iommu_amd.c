@@ -1212,6 +1212,21 @@ int iommu_amd_flush(const struct iommu_domain *d)
 #define	AMD_EVT_PAGE_TAB_HW_ERROR	0x4
 #define	AMD_EVT_INVALID_DEVICE_REQUEST	0x8
 
+/*
+ * Table 3: the HyperTransport window whose requests are "Interrupt/EOI",
+ * controlled by IntCtl and the interrupt remapping tables -- the other place
+ * besides IOMMU_INTERRUPT_RANGE_BASE an interrupt request can write.
+ */
+#define	AMD_HT_INTERRUPT_BASE		0xFDF8000000ULL
+#define	AMD_HT_INTERRUPT_LIMIT		0xFDF8FFFFFFULL
+
+static int amd_interrupt_address(uint64_t a)
+{
+	return (a >= IOMMU_INTERRUPT_RANGE_BASE
+		&& a <= IOMMU_INTERRUPT_RANGE_LIMIT)
+	    || (a >= AMD_HT_INTERRUPT_BASE && a <= AMD_HT_INTERRUPT_LIMIT);
+}
+
 int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 {
 	unsigned code = AMD_EVT_CODE(lo);
@@ -1225,10 +1240,18 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	 * the one the device wrote, in the interrupt range.  Read as a page
 	 * fault, it would be a DMA refused at 0xFEExxxxx, which is an address
 	 * no domain can map and exactly the kind of answer that gets believed.
+	 *
+	 * 🔴 AND I ALONE IS NOT BELIEVED.  A request is an interrupt because
+	 * of where it writes (Table 3), and Table 57's Address is "the DVA
+	 * that the peripheral was attempting to access", so a refused
+	 * interrupt carries an interrupt address.  QEMU's amd-iommu sets I on
+	 * every IO_PAGE_FAULT it logs (hw/i386/amd_iommu.c line 355 in 11.1.1)
+	 * and leaves the address zero: believing I alone printed AHCI's
+	 * refused DMA as 48 refused interrupts a boot.
 	 */
 	case AMD_EVT_IO_PAGE_FAULT:
-		kind = (lo & AMD_EVT_I) ? IOMMU_FAULT_INTERRUPT
-					: IOMMU_FAULT_PAGE;
+		kind = (lo & AMD_EVT_I) && amd_interrupt_address(hi)
+			? IOMMU_FAULT_INTERRUPT : IOMMU_FAULT_PAGE;
 		break;
 
 	case AMD_EVT_INVALID_DEVICE_REQUEST:
