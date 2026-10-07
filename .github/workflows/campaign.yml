@@ -9,6 +9,10 @@
 # ~/uros-tests.  The runner's clock is not ours to set, so rows are compared
 # within one job only.
 #
+# Run by hand with `ablate`, every job takes fixes out instead: scripts/ablate.sh
+# --ab with the patches of ablations/ named, for a defect only some runners
+# show -- #603's showed only on the AMD EPYC 9V45 under KVM (#656).
+#
 # ⚠️ schedule and workflow_dispatch run only from a workflow file on the default
 # branch, master, and whether this file lives there is the repository owner's
 # decision.  Until it does, it runs on pushes to the epic, from the epic's copy.
@@ -38,6 +42,14 @@ on:
         description: "arch: the Arch Linux container; ubuntu: the runner's own packages; both: each job in both, to compare them (empty: arch)"
         type: string
         required: false
+      ablate:
+        description: "An A/B instead of the merge test: patches of ablations/ by name, e.g. 603-ast-interrupt-late 603-act-ast (empty: the merge test)"
+        type: string
+        required: false
+      boots:
+        description: "With ablate: boots per arm and accelerator in each job (empty: 3)"
+        type: string
+        required: false
   push:
     branches:
       - epic/v0.3.0-x86-64    # the branch EPIC below names
@@ -61,6 +73,8 @@ jobs:
       rounds: ${{ steps.plan.outputs.rounds }}
       entries: ${{ steps.plan.outputs.entries }}
       modes: ${{ steps.plan.outputs.modes }}
+      ablate: ${{ steps.plan.outputs.ablate }}
+      boots: ${{ steps.plan.outputs.boots }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -77,6 +91,8 @@ jobs:
           ROUNDS: ${{ inputs.rounds }}
           ENTRIES: ${{ inputs.entries }}
           MODE: ${{ inputs.mode }}
+          ABLATE: ${{ inputs.ablate }}
+          BOOTS: ${{ inputs.boots }}
         run: |
           # Which toolchain builds and boots: ours, from Arch, in a container,
           # or Ubuntu's own, GCC and qemu several versions older -- both side
@@ -102,13 +118,36 @@ jobs:
           case "$ENTRIES" in
           *[!0-9\ ,]*) echo "::error::entries are entry numbers, not '$ENTRIES'"; exit 1 ;;
           esac
-          scripts/ci/job.sh --dry-run --no-install --rounds "$rounds" ${ENTRIES:+--entries "$ENTRIES"}
+          case "$ABLATE" in
+          *[!A-Za-z0-9._\ ,-]*) echo "::error::ablate names patches of ablations/, not '$ABLATE'"; exit 1 ;;
+          esac
+          boots=${BOOTS:-3}
+          case "$boots" in
+          ''|*[!0-9]*) echo "::error::boots is a number of boots, not '$boots'"; exit 1 ;;
+          esac
+          # An A/B replaces the merge test: what it boots is its patches'
+          # Run: line, so the merge test's two inputs would mean nothing.
+          if [ -n "$ABLATE" ]; then
+            if [ -n "$ENTRIES$ROUNDS" ]; then
+              echo "::error::entries and rounds choose the merge test's boots, and ablate replaces the merge test: leave them empty"
+              exit 1
+            fi
+            scripts/ci/job.sh --dry-run --no-install --ablate "$ABLATE" --boots "$boots"
+          else
+            if [ -n "$BOOTS" ]; then
+              echo "::error::boots counts the boots of an A/B, and goes with ablate"
+              exit 1
+            fi
+            scripts/ci/job.sh --dry-run --no-install --rounds "$rounds" ${ENTRIES:+--entries "$ENTRIES"}
+          fi
           {
             echo "sha=$(git rev-parse HEAD)"
             echo "matrix=[$(seq -s, 1 "$jobs")]"
             echo "rounds=$rounds"
             echo "entries=$ENTRIES"
             echo "modes=$modes"
+            echo "ablate=$ABLATE"
+            echo "boots=$boots"
           } >> "$GITHUB_OUTPUT"
 
   boot:
@@ -166,17 +205,24 @@ jobs:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
           ENTRIES: ${{ needs.plan.outputs.entries }}
+          ABLATE: ${{ needs.plan.outputs.ablate }}
+          BOOTS: ${{ needs.plan.outputs.boots }}
           KVM: ${{ steps.kvm.outputs.available }}
         run: |
           kvm=()
           if [ "$KVM" = yes ]; then
             kvm=(--device /dev/kvm)
           fi
+          if [ -n "$ABLATE" ]; then
+            what=(--ablate "$ABLATE" --boots "$BOOTS")
+          else
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
+          fi
           docker run --rm --init "${kvm[@]}" \
             -v "$GITHUB_WORKSPACE:/work" -w /work \
             -e GITHUB_RUN_ID -e JOB_INDEX \
             archlinux:latest \
-            scripts/ci/job.sh --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
+            scripts/ci/job.sh "${what[@]}" --out ci-out
 
       # The same job on the runner itself, with Ubuntu's packages: the other
       # half of the comparison.  If its compiler cannot build the tree with no
@@ -189,12 +235,19 @@ jobs:
           JOB_INDEX: ${{ matrix.job }}-${{ matrix.mode }}
           ROUNDS: ${{ needs.plan.outputs.rounds }}
           ENTRIES: ${{ needs.plan.outputs.entries }}
+          ABLATE: ${{ needs.plan.outputs.ablate }}
+          BOOTS: ${{ needs.plan.outputs.boots }}
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q gcc binutils cmake ninja-build bison flex \
             python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
             iproute2 psmisc gdb
-          scripts/ci/job.sh --no-install --rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"} --out ci-out
+          if [ -n "$ABLATE" ]; then
+            what=(--ablate "$ABLATE" --boots "$BOOTS")
+          else
+            what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
+          fi
+          scripts/ci/job.sh --no-install "${what[@]}" --out ci-out
 
       - name: Say what the job found
         if: always()
@@ -204,7 +257,10 @@ jobs:
           fi
 
       # Whatever the boots said: a WRONG boot is the reason to keep them.  The
-      # logs of the boots that were as they should be stay on the runner.
+      # logs of the merge test's boots that were as they should be stay on the
+      # runner; an A/B keeps every boot's, few and all of them evidence.  Its
+      # two worktrees go when ablate.sh ends, and are left out in case a
+      # stopped job left them.
       - name: Keep the rows and the failed boots' logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -213,6 +269,8 @@ jobs:
           path: |
             ci-out/
             !ci-out/logs/
+            !ci-out/ablate/runs/*/fixed/
+            !ci-out/ablate/runs/*/ablated/
           if-no-files-found: warn
           retention-days: 30
           overwrite: true
