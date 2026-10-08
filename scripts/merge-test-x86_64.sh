@@ -77,6 +77,8 @@ WRONG=0
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
+# Entries 36 and 37 run in x2APIC mode: turned on by the kernel (-2), and left on
+# by GRUB before the kernel, as a firmware that hands over in it does (#659).
 ENTRIES="
 0 harness
 1 harness
@@ -122,6 +124,10 @@ ENTRIES="
 4 harness - 1
 20 harness
 20 harness - 1
+36 harness
+36 harness - 1
+37 harness
+37 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
