@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #660
+Takes out: the creator's reference thread_create_running() drops on a refusal, on both of its refusal paths: act_test's arm nine must say the threads its 300 refused calls made are still held
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[9\] [0-9]+ refused thread_create_running calls: .* still held
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index c723c5be..a7b7451d 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -1492,14 +1492,12 @@ thread_create_running(
+                                new_state_count);
+         if (ret != KERN_SUCCESS) {
+                 (void) thread_terminate(*child_act);
+-                act_deallocate(*child_act);
+                 return(ret);
+         }
+ 
+         ret = thread_resume(*child_act);
+         if (ret != KERN_SUCCESS) {
+                 (void) thread_terminate(*child_act);
+-                act_deallocate(*child_act);
+                 return(ret);
+         }
+ 
