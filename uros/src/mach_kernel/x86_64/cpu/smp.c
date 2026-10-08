@@ -289,7 +289,7 @@ smp_ap_release_to_scheduler(void)
 	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
 		const struct acpi_cpu *c = acpi_cpu(i);
 
-		if (!c->usable || c->apic_id == lapic_id())
+		if (c->apic_id == lapic_id())
 			continue;
 		if (smp_is_online(c->apic_id))
 			ipi_ast_check(c->apic_id);
@@ -366,7 +366,7 @@ unsigned smp_start_others(void)
 		const struct acpi_cpu *c = acpi_cpu(i);
 		uint64_t frame;
 
-		if (!c->usable || c->apic_id == self)
+		if (c->apic_id == self)
 			continue;
 
 		if (c->apic_id >= SMP_MAX_CPUS)
@@ -408,7 +408,7 @@ unsigned smp_start_others(void)
 	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
 		const struct acpi_cpu *c = acpi_cpu(i);
 
-		if (!c->usable || c->apic_id == self)
+		if (c->apic_id == self)
 			continue;
 
 		lapic_send_init(c->apic_id);

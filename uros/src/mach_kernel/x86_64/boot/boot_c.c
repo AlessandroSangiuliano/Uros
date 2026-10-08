@@ -1797,18 +1797,16 @@ static void acpi_selftest(uint32_t info)
 
 	kputs("UrMach x86-64: acpi reports ");
 	kputdec(acpi_cpu_count());
-	kputs(" processors, ");
-	kputdec(acpi_usable_cpu_count());
-	kputs(" startable, local apic at ");
+	kputs(" startable processors, ");
+	kputdec(acpi_cpus_passed_over());
+	kputs(" entries passed over (not enabled, or listed twice), ");
+	kputdec(acpi_cpus_left_out());
+	kputs(" left out past the table (#663), local apic at ");
 	kputhex64(acpi_lapic_base());
 	kputs("\r\nUrMach x86-64:   apic ids");
 	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
 		kputs(" ");
-		kputdec(c->apic_id);
-		if (!c->usable)
-			kputs("(off)");
+		kputdec(acpi_cpu(i)->apic_id);
 	}
 	kputs("\r\n");
 
@@ -7904,7 +7902,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	self_ipi_selftest();
 	ipi_init();
 	{
-		unsigned asked = acpi_usable_cpu_count();
+		unsigned asked = acpi_cpu_count();
 		unsigned up = smp_start_others();
 
 		kputs("UrMach x86-64: woke ");

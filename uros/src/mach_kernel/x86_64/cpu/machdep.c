@@ -107,7 +107,7 @@ machine_slots_init(void)
 	for (i = 0; i < acpi_cpu_count(); i++) {
 		const struct acpi_cpu *c = acpi_cpu(i);
 
-		if (!c->usable || c->apic_id == self)
+		if (c->apic_id == self)
 			continue;
 		if (!smp_is_online(c->apic_id))
 			continue;
