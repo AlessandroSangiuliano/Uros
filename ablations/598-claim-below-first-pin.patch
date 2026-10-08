@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: the claim's range check -- the pin count again, which says nothing about a GSI below the controller's first pin, so ISA 4 is routed into redir_reg()'s panic
+Run: --entry 0 600 -smp 1
+Expect: ioapic: asked about a pin this controller does not own
+Expect: ISA 4 claimed with the first pin moved to GSI 24 — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index 20b854c4..6b4e5337 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -462,7 +462,7 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
+ 	 * say that ISA 0 arrives on GSI 2, and on a PC it does.
+ 	 */
+ 	gsi = acpi_irq_to_gsi((uint8_t)irq);
+-	if (!ioapic_owns(gsi))		/* the range, not the count: #598's C12 */
++	if (gsi >= ioapic_pin_count())
+ 		return 0;
+ 
+ 	/*
