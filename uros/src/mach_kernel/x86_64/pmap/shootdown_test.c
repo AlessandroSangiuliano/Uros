@@ -188,9 +188,10 @@ shoot_remap_body(void)
 		atomic_store64((volatile uint64_t *) p->entry,
 			       pa_to_pte(p->frame[i]) | (e & ~INTEL_PTE_PFN));
 
-		before = cpu_number();
+		/* cpu_number_hint(): read where the thread can move, to count the moves (#626) */
+		before = cpu_number_hint();
 		tlb_flush_range(pmap_kernel(), p->base, PAGE_SIZE_4K);
-		after = cpu_number();
+		after = cpu_number_hint();
 		seen = *(volatile uint64_t *) p->base;
 		p->gen_end = n;
 		ops++;
@@ -274,12 +275,13 @@ shoot_call_body(void)
 	while (!shoot_go)
 		cpu_pause();
 
+	/* cpu_number_hint(): read where the thread can move, to count the moves (#626) */
 	for (;;) {
-		int	before = cpu_number();
+		int	before = cpu_number_hint();
 
 		ipi_call_mask(shoot_everyone, shoot_noop, 0);
 		ops++;
-		if (cpu_number() != before)
+		if (cpu_number_hint() != before)
 			atomic_add64(&shoot_moved, 1);
 
 		if ((ops & 15) == 0

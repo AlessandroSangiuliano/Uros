@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #626
+Takes out: #617's fix: thread_return_ast() reads its processor's number and that processor's AST word with interrupts on -- the check must name thread_return_ast() on every boot that returns to ring 3
+Run: --entry 0 300 -smp 4
+Expect: percpu: cpu_number\(\) read where the thread can still move to another processor -- WRONG, at thread_return_ast\+0x
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 83c60cc3..921a3318 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1401,16 +1401,12 @@ thread_return_ast(void)
+ 	int	cpu;
+ 
+ 	for (;;) {
+-		if (!ABLATE_617_RETURN_AST)
+-			interrupts_disable();
+ 		cpu = cpu_number();
+ #if	WIDEN_617_WINDOW
+ 		return_ast_widen();
+ #endif
+ 		if ((need_ast[cpu] & AST_ALL) == 0)
+ 			break;
+-		if (!ABLATE_617_RETURN_AST)
+-			interrupts_enable();
+ 		ast_taken(FALSE, AST_ALL, splsched());
+ 	}
+ 	return_ast_check(cpu);

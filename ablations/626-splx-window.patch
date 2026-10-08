@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #626
+Takes out: #526's fix, through its switch in splx(): the block is found with interrupts still on, at the caller's level -- the check must name splx() on every boot that raises from level zero
+Run: --entry 0 300 -smp 4
+Expect: percpu: percpu\(\) read where the thread can still move to another processor -- WRONG, at splx\+0x
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/spl.c b/uros/src/mach_kernel/x86_64/cpu/spl.c
+index f7e019b7..aa36336b 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/spl.c
++++ b/uros/src/mach_kernel/x86_64/cpu/spl.c
+@@ -162,7 +162,7 @@ spl_t splx(spl_t level)
+ 	spl_t		old;
+ 	int		enabled;
+ 
+-#if	ABLATE_526_SPLX_WINDOW
++#if	1	/* ABLATE_526_SPLX_WINDOW */
+ 	/* #526's ablation: the block found with interrupts still on. */
+ 	p = percpu();
+ 	old = p->ipl;

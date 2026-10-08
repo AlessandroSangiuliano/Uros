@@ -43,6 +43,8 @@
 
 #include <stdint.h>
 
+#include <cpus.h>			/* #626: NCPUS */
+#include <mach_assert.h>		/* #626: the development kernel asks */
 #include <cpu/regs.h>
 
 struct percpu {
@@ -407,12 +409,62 @@ void percpu_activate(uint32_t cpu_id);
 /* #476, #599: returns to ring 3 since boot, all processors; see percpu.c */
 uint64_t percpu_user_returns(void);
 
+/*
+ * 🔴 IS THE THREAD THAT ASKS PINNED TO THIS PROCESSOR? (#626)
+ *
+ * A per-CPU index or pointer is good only while the thread that read it stays
+ * on the processor it read it on.  This kernel preempts in ring 0 (#459), so
+ * that holds only where something stops the move: interrupts off, a level
+ * above SPL0, or the preemption level above zero -- the three things
+ * trap_take_ast() asks before it takes a processor away from kernel code.
+ * The class kept coming back, and quietly: splx() found its block before it
+ * turned interrupts off (#526), thread_return_ast() read
+ * need_ast[cpu_number()] in two steps (#617), syscall_probe() the same again.
+ *
+ * So in the development kernel cpu_number() and percpu() ask, and a read where
+ * none of the three holds goes to percpu_unpinned(), which says WRONG once per
+ * call site, by name.  The question costs two %gs loads where most reads are
+ * made, with preemption or the level up, and the flags only when both are
+ * down.  The release kernel does not ask, and neither does a kernel built for
+ * one processor, where there is nowhere to move to.
+ *
+ * ⚠️ always_inline, here and in the accessors: percpu_unpinned() names its
+ * caller by its own return address, which is the call site only if every
+ * layer in between was inlined into it.  An out-of-line copy of cpu_number()
+ * would name itself in every report.
+ *
+ * Not asked by the one-instruction reads below -- percpu_active_thread(),
+ * percpu_ipl(), percpu_preempt_level() and the like.  Each reads the
+ * processor it executes on in an instruction a migration cannot split, and
+ * says in its comment why the value is right even if the thread moves after.
+ */
+#if MACH_ASSERT && NCPUS > 1
+#define	PERCPU_ASKED_NUMBER	0	/* cpu_number() */
+#define	PERCPU_ASKED_BLOCK	1	/* percpu() */
+
+void percpu_unpinned(int what);		/* x86_64/cpu/percpu_check.c */
+
+static inline uint32_t percpu_preempt_level(void);
+static inline uint32_t percpu_ipl(void);
+
+static inline __attribute__((always_inline)) void percpu_pinned_check(int what)
+{
+	/* 0 is SPL0; percpu_check.c asserts it, this header cannot include spl.h */
+	if (__builtin_expect(percpu_preempt_level() == 0 && percpu_ipl() == 0 &&
+			     (read_rflags() & RFLAGS_IF) != 0, 0))
+		percpu_unpinned(what);
+}
+#else
+#define	percpu_pinned_check(what)	((void) 0)
+#endif
+
 /* This CPU's block, via the pointer it keeps at offset zero. */
-static inline struct percpu *percpu(void)
+static inline __attribute__((always_inline)) struct percpu *percpu(void)
 {
 	struct percpu *p;
 
 	__asm__ volatile("movq %%gs:0, %0" : "=r"(p));
+	percpu_pinned_check(PERCPU_ASKED_BLOCK);
 	return p;
 }
 
