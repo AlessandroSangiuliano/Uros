@@ -56,11 +56,11 @@ struct acpi_header {
  */
 const struct acpi_header *acpi_find_table(const char *signature);
 
-/* What one processor's MADT entry says about it. */
+/* What one processor's MADT entry says about it: one the firmware says may be
+ * started, since nothing else is recorded (#663). */
 struct acpi_cpu {
 	uint32_t apic_id;
 	uint32_t acpi_id;
-	int      usable;	/* the firmware says this one may be started */
 };
 
 /*
@@ -74,12 +74,14 @@ struct acpi_cpu {
  */
 unsigned acpi_find_cpus(uint32_t mb2_info_pa);
 
-/* How many the walk found, and the details of each. */
+/* How many startable processors the walk found, and the details of each. */
 unsigned acpi_cpu_count(void);
 const struct acpi_cpu *acpi_cpu(unsigned index);
 
-/* How many of those the firmware says are startable. */
-unsigned acpi_usable_cpu_count(void);
+/* The entries it passed over -- not enabled, or an id listed twice -- and the
+ * startable processors past its table, which it left out (#663). */
+unsigned acpi_cpus_passed_over(void);
+unsigned acpi_cpus_left_out(void);
 
 /* Physical address of the local APIC, from the MADT.  Zero if unknown. */
 uint64_t acpi_lapic_base(void);

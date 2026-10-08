@@ -84,8 +84,8 @@ static unsigned call_name_silent(uint64_t targets)
 		unsigned id = (unsigned) __builtin_ctzll(m);
 
 		if (answer_count_of(&served, id) == call_before[id]) {
-			printf("ipi: the processor with APIC id %u never answered "
-			       "this cross-call (#605)\n", id);
+			printf("ipi: processor %u (APIC id %u) never answered "
+			       "this cross-call (#605)\n", id, cpu_to_apic(id));
 			silent++;
 		}
 	}
@@ -128,12 +128,12 @@ static void ipi_wait_for_acks(uint64_t who, unsigned targets)
 	 * the thread decided who it was and was moved before it sent.  Asked
 	 * here, under the lock, where this thread can no longer move.
 	 */
-	me = percpu_apic_id();
-	if (me < SMP_MAX_CPUS && (who & (1ULL << me)) != 0)
+	me = cpu_number();
+	if ((who & (1ULL << me)) != 0)
 		printf("ipi: this cross-call names the processor sending it "
-		       "(APIC id %u): its targets were decided on another "
-		       "processor, before the thread was moved here (#638)\n",
-		       me);
+		       "(processor %u, APIC id %u): its targets were decided on "
+		       "another processor, before the thread was moved here "
+		       "(#638)\n", me, cpu_to_apic(me));
 
 	panic("ipi: %u of %u processors never answered a cross-call "
 	      "(targets 0x%llx, %llu answers arrived)",
@@ -186,9 +186,9 @@ void ipi_init(void)
 	trap_set_handler(IPI_VECTOR_HALT, ipi_halt_handler);
 }
 
-uint64_t ipi_calls_served(uint32_t apic_id)
+uint64_t ipi_calls_served(unsigned cpu)
 {
-	return answer_count_of(&served, apic_id);
+	return answer_count_of(&served, cpu);
 }
 
 #if	WIDEN_638_WINDOW
@@ -239,10 +239,8 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 	 * below, and the names a timeout prints, were taken for the wrong
 	 * processor.
 	 */
-	me = percpu_apic_id();
-	who = smp_answering_set();
-	if (me < SMP_MAX_CPUS)
-		who &= ~(1ULL << me);
+	me = cpu_number();
+	who = smp_answering_set() & ~(1ULL << me);
 
 	call_photograph(who);
 	call_fn = fn;
@@ -315,7 +313,8 @@ static void ipi_call_targets(uint64_t mask, void (*fn)(void *), void *arg)
 	targets = 0;
 	for (id = 0; id < 64; id++)
 		if (mask & (1ULL << id)) {
-			lapic_send_ipi((uint32_t) id, IPI_VECTOR_CALL);
+			/* The mask is by number, the hardware by id (#663). */
+			lapic_send_ipi(cpu_to_apic(id), IPI_VECTOR_CALL);
 			targets++;
 		}
 
@@ -344,7 +343,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 	 * bit with preemption on again.
 	 */
 	if (ABLATE_638_STRIKE_UNPINNED) {
-		mask &= ~(1ULL << (percpu_apic_id() & 63));
+		mask &= ~(1ULL << cpu_number());
 #if	WIDEN_638_WINDOW
 		if (mask != 0)
 			shootdown_widen();	/* between deciding and sending */
@@ -357,7 +356,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 	shootdown_widen();		/* before deciding: a move is harmless */
 #endif
 	disable_preemption();
-	mask &= ~(1ULL << (percpu_apic_id() & 63));
+	mask &= ~(1ULL << cpu_number());
 	ipi_call_targets(mask, fn, arg);
 	enable_preemption();
 }
@@ -387,9 +386,9 @@ static void ipi_ast_handler(struct trap_frame *frame)
 	lapic_eoi();
 }
 
-void ipi_ast_check(uint32_t apic_id)
+void ipi_ast_check(unsigned cpu)
 {
-	lapic_send_ipi(apic_id, IPI_VECTOR_AST);
+	lapic_send_ipi(cpu_to_apic(cpu), IPI_VECTOR_AST);
 }
 
 /*

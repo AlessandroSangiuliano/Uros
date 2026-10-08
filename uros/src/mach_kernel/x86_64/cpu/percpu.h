@@ -496,33 +496,18 @@ static inline void percpu_set_active_thread(void *t)
 
 
 /*
- * This processor's local APIC id, without paying CPUID for it (#439).
+ * This processor's number is cpu_number() (#663), one %gs-relative load from
+ * the block percpu_activate() filled.  It used to be read here as the APIC id,
+ * which was the same value; it is the processor's number now, and the APIC id
+ * is smp.c's to translate, where the hardware is addressed.
  *
- * 🔥 cpu_apic_id() in <cpu/regs.h> asks the hardware, and asking costs a
+ * 🔥 And not cpu_apic_id() in <cpu/regs.h>, which asks the hardware with a
  * CPUID -- unconditionally serialising, and under KVM an exit to the
- * hypervisor every single time.  It was on the shootdown path and on the
- * address-space switch, and it cost about 45% of a copy-on-write fault on ONE
- * processor: a measurement that says nothing about shootdowns at all, because
- * a machine with one processor sends none.
- *
- * percpu_activate() is handed the APIC id and stores it, so the answer is
- * already here and reading it is one %gs-relative load -- the same field
- * cpu_number() reads.  CPUID remains the right call exactly once per processor
- * -- when there is no block yet to read it from, which is how it got in there.
- *
- * ⚠️ One load, written as one (#646).  This was percpu()->cpu_id, which is the
- * block's address and then the field, while this comment already said one
- * load: a caller moved between the two would have read the processor it left.
- * Every caller today holds preemption or interrupts off, so nothing broke.
+ * hypervisor every single time (#439).  On the shootdown path and the
+ * address-space switch it cost about 45% of a copy-on-write fault on ONE
+ * processor.  CPUID is the right call once per processor, before there is a
+ * block to read anything from.
  */
-static inline uint32_t percpu_apic_id(void)
-{
-	uint32_t id;
-
-	__asm__ volatile("movl %%gs:%c1, %0"
-			 : "=r"(id) : "i"(PERCPU_CPU_ID));
-	return id;
-}
 
 /*
  * Entering and leaving a spin-lock section (#461).

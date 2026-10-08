@@ -7,7 +7,7 @@
 # ISO on -cdrom, with a separate data disk beside it; it is now the disk
 # itself, which is the whole of what QEMU is handed (#520).
 #
-# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [--kvm] [seconds] [qemu args...]
+# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
 #   run-x86_64.sh
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
@@ -700,6 +700,7 @@ fi
 IOMMU_ARGS=""
 IOMMU_NAME="none"
 KVM_ARGS=""
+SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
 # run was actually driven (#516).  A condition nobody can reproduce the command
@@ -734,6 +735,18 @@ while :; do
 		# Asked for here, before the positionals, it cannot land in the
 		# wrong slot at all.
 		KVM_ARGS="-enable-kvm"
+		shift ;;
+	--socket1-cpu)
+		# 🔑 A PROCESSOR WHOSE APIC ID IS NOT ITS NUMBER (#663).
+		#
+		# QEMU numbers its processors 0 to N-1 and gives processor N
+		# the APIC id N, so a kernel that used the id as the number
+		# passed every run here.  OMEGA's E-cores have ids 64 to 94.
+		# This adds one processor at socket 1, core 0: with the -smp
+		# the caller gives -- sockets=2,cores=64 and a maxcpus of 128,
+		# say -- that is APIC id 64, beside the boot processor's 0, and
+		# a MADT of 128 entries of which two are enabled.
+		SOCKET1_CPU=1
 		shift ;;
 	*)
 		break ;;
@@ -917,6 +930,14 @@ case " $* " in
 *)		CPU_ARGS="-cpu max" ;;
 esac
 
+# The added processor's type has to be the -cpu model's, and only the default
+# is known here: refused rather than guessed for a model the caller named (#663).
+SOCKET1_ARGS=""
+if [ "$SOCKET1_CPU" = 1 ]; then
+	[ -n "$CPU_ARGS" ] || { echo "run-x86_64: --socket1-cpu adds a processor of the default model, -cpu max, and the command line names another" >&2; exit 2; }
+	SOCKET1_ARGS="-device max-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"
+fi
+
 # ── How much memory, and it was never said (#427) ─────────────────────
 #
 # 🔴 THIS SCRIPT PASSED NO -m AT ALL, so every x86-64 run this port has made
@@ -1056,7 +1077,7 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 QERR="$LOG.qemu-stderr"
 : > "$QERR"
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
@@ -1357,7 +1378,7 @@ UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
 	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
 	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
-	"cpu:          ${CPU_ARGS:-from the command line}" \
+	"cpu:          ${CPU_ARGS:-from the command line}${SOCKET1_ARGS:+, and $SOCKET1_ARGS (#663)}" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
 	"entry:        ${UROS_X86_64_BOOT_ENTRY:-from grub.cfg default}" \
 	"budget:       ${SECS}s" \

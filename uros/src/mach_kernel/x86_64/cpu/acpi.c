@@ -144,7 +144,8 @@ struct madt_local_x2apic {
 
 static struct acpi_cpu cpus[ACPI_MAX_CPUS];
 static unsigned ncpus;
-static unsigned nusable;
+static unsigned passed_over;	/* not enabled, or an id listed twice (#663) */
+static unsigned left_out;	/* enabled, past the table (#663) */
 static uint64_t lapic_base;
 
 /*
@@ -221,16 +222,37 @@ static int signature_is(const char *field, const char *want, unsigned n)
 	return 1;
 }
 
+/*
+ * 🔑 ONLY A PROCESSOR THAT CAN BE STARTED IS RECORDED (#663).
+ *
+ * A firmware may list every processor the board could hold, the absent ones
+ * not enabled -- QEMU lists `maxcpus' of them -- and those used to count
+ * against the table: a machine with two processors and a MADT of 128 entries
+ * panicked at the 65th.  An entry not enabled is absent now and hot-plug at
+ * most, which this kernel does not start, so it is counted and passed over.
+ * So is an id already recorded: the same processor listed in both forms
+ * would otherwise be woken twice under two numbers.  An enabled processor
+ * past the table is counted as left out and said, not a reason to stop.
+ */
 static void record_cpu(uint32_t apic_id, uint32_t acpi_id, uint32_t flags)
 {
-	if (ncpus == ACPI_MAX_CPUS)
-		panic("acpi: more processors than this kernel can record");
+	unsigned i;
 
+	if (!(flags & MADT_CPU_ENABLED)) {
+		passed_over++;
+		return;
+	}
+	for (i = 0; i < ncpus; i++)
+		if (cpus[i].apic_id == apic_id) {
+			passed_over++;
+			return;
+		}
+	if (ncpus == ACPI_MAX_CPUS) {
+		left_out++;
+		return;
+	}
 	cpus[ncpus].apic_id = apic_id;
 	cpus[ncpus].acpi_id = acpi_id;
-	cpus[ncpus].usable = (flags & MADT_CPU_ENABLED) != 0;
-	if (cpus[ncpus].usable)
-		nusable++;
 	ncpus++;
 }
 
@@ -414,9 +436,14 @@ unsigned acpi_cpu_count(void)
 	return ncpus;
 }
 
-unsigned acpi_usable_cpu_count(void)
+unsigned acpi_cpus_passed_over(void)
 {
-	return nusable;
+	return passed_over;
+}
+
+unsigned acpi_cpus_left_out(void)
+{
+	return left_out;
 }
 
 const struct acpi_cpu *acpi_cpu(unsigned index)
