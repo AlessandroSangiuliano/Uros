@@ -3814,7 +3814,7 @@ static void delay_selftest(void)
 	const struct exact_choice *src = tsc_source();
 	uint64_t	apart = 0;
 	unsigned	floor, asked = 0, short_waits = 0;
-	uint64_t	t0, t1, us;
+	uint64_t	t0, t1, us, least = ~0ULL;
 	int		w, by;
 
 	if (freq_under_hypervisor() && src->adopted >= 0)
@@ -3851,6 +3851,8 @@ static void delay_selftest(void)
 		t1 = delay_counter_read(by);
 		us = delay_counter_us(by, t0, t1);
 		asked++;
+		if (us < least)
+			least = us;
 		kputs("'s ");
 		kputdec(DELAY_TEST_US);
 		kputs(" us took ");
@@ -3870,13 +3872,20 @@ static void delay_selftest(void)
 		kputdec(asked);
 		kputs(" waits lasted less than they were asked\r\n");
 	} else if (asked != 0) {
+		/* the value read, not the one asked: with the allowance they differ (#658) */
 		kputs("delay: PASS -- ");
 		kputdec(asked);
 		kputs(" waits of ");
-		kputdec(asked);
-		kputs(" lasted at least ");
 		kputdec(DELAY_TEST_US);
-		kputs(" us by another counter\r\n");
+		kputs(" us lasted at least ");
+		kputdec(least);
+		kputs(" us by another counter");
+		if (apart != 0) {
+			kputs(", the floor ");
+			kputdec(floor);
+			kputs(" us with the rulers' distance allowed (#658)");
+		}
+		kputs("\r\n");
 	} else {
 		kputs("delay: NOT ASKED -- no wait had a second counter to be timed by\r\n");
 	}
