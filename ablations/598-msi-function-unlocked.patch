@@ -1,0 +1,50 @@
+Kind: ablation
+Issue: #598
+Takes out: the machine layer's lock around a slot's attach and detach -- a detach's "was that the last?" can be answered before the other's record and clear the enable after its arm
+Run: --iommu intel --entry 36 600 -smp 2
+Expect: msi_race: WRONG — in [0-9]+ of [0-9]+ rounds the function's MSI-X enable was found clear
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index 746ddcb2..c8300476 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -761,7 +761,6 @@ msi_unremap_vector(unsigned int slot, unsigned int bus, unsigned int dev,
+  * A leaf, taken by callers at splhigh() with irq_forward_lock held, and by
+  * the boot's tests: nothing below it takes this lock again.
+  */
+-static hw_lock_data_t	msi_function_lock;
+ 
+ void
+ msi_attach(unsigned int slot, const struct pci_msix *m, unsigned int entry,
+@@ -769,7 +768,6 @@ msi_attach(unsigned int slot, const struct pci_msix *m, unsigned int entry,
+ {
+ 	unsigned int i = slot - DEVICE_MD_MSI_BASE;
+ 
+-	hw_lock_lock(&msi_function_lock);
+ 	msi_device[i] = *m;
+ 	msi_entry_of[i] = entry;
+ 
+@@ -781,7 +779,6 @@ msi_attach(unsigned int slot, const struct pci_msix *m, unsigned int entry,
+ 	 */
+ 	pci_msix_arm(m, entry, addr, data);
+ 	pci_msix_enable(m);
+-	hw_lock_unlock(&msi_function_lock);
+ }
+ 
+ int
+@@ -790,7 +787,6 @@ msi_detach(unsigned int slot, struct pci_msix *gone)
+ 	unsigned int	i = slot - DEVICE_MD_MSI_BASE, j;
+ 	int		last = 1, had;
+ 
+-	hw_lock_lock(&msi_function_lock);
+ 	had = msi_device[i].table != 0;
+ 	if (had) {
+ 		*gone = msi_device[i];
+@@ -835,7 +831,6 @@ msi_detach(unsigned int slot, struct pci_msix *gone)
+ 		if (last)
+ 			pci_msix_disable(gone);
+ 	}
+-	hw_lock_unlock(&msi_function_lock);
+ 	return had;
+ }
+ 

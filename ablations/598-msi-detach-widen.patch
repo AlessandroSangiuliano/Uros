@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #598
+Holds open: the window between a detach's question "was that the function's last?" and its clearing of the enable -- a spin, so that the other processor's attach can land inside it on demand
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index 746ddcb2..369988d8 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -832,6 +832,8 @@ msi_detach(unsigned int slot, struct pci_msix *gone)
+ 				break;
+ 			}
+ 
++		for (volatile unsigned int w = 0; w < 100000u; w++)
++			cpu_pause();
+ 		if (last)
+ 			pci_msix_disable(gone);
+ 	}
