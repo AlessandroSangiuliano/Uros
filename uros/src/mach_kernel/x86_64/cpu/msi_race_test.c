@@ -42,14 +42,20 @@
 #include <sync/barrier.h>
 
 /*
- * How many rounds each side makes, and how many times it reads the enable
- * while attached.  A round costs a few configuration accesses, each a few
- * microseconds of emulated MMIO; enough rounds for an unlocked kernel with its
- * window held open to be caught many times, few enough that a boot does not
- * notice.
+ * How many rounds each side makes, and how many times at most it reads the
+ * enable while attached.  A round costs a few configuration accesses, each a
+ * few microseconds of emulated MMIO; enough rounds for an unlocked kernel with
+ * its window held open to be caught many times, few enough that a boot does
+ * not notice.
+ *
+ * ⚠️ HOW MANY varies from round to round, and differently on each side.  With
+ * a fixed count the two sides ran rounds of one length, so whatever phase
+ * they started in they kept: an unlocked kernel was caught in one boot of two,
+ * three rounds of 4000, and passed the other.  A count that varies sweeps the
+ * phase, so each side's attach lands across the whole of the other's detach.
  */
 #define RACE_ROUNDS	2000
-#define RACE_LOOKS	32
+#define RACE_LOOKS	256
 
 /*
  * The rendezvous, in one word, as in ioapic_race_test.c: the second side moves
@@ -95,6 +101,7 @@ static void
 race_side(int side)
 {
 	struct pci_msix	gone;
+	uint32_t	looks;
 
 	for (uint32_t n = 0; n < RACE_ROUNDS && !race_stop; n++) {
 		/*
@@ -108,7 +115,9 @@ race_side(int side)
 
 		msi_attach(race_slot[side], &race_m, 1u + (unsigned int)side,
 			   race_addr[side], race_data[side]);
-		for (unsigned int k = 0; k < RACE_LOOKS; k++)
+		looks = 1u + ((n + 1u) * 2654435761u
+			      >> (side ? 19 : 23)) % RACE_LOOKS;
+		for (unsigned int k = 0; k < looks; k++)
 			if (!race_enabled()) {
 				race_lost[side]++;
 				break;
