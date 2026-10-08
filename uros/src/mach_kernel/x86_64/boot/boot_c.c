@@ -3756,6 +3756,18 @@ static void rulers_selftest(void)
  * microsecond, so a right wait can measure up to 0.1% and 1 us short; one
  * that returned early, or counted in the wrong unit, is far outside that.
  * The order of the counters is delay()'s own: the TSC, the HPET, the PM timer.
+ *
+ * 🔴 UNDER A HYPERVISOR THE TWO COUNTERS NEED NOT AGREE SO WELL (#658).  The
+ * HPET and the PM timer run on the host's clock, which the host's NTP may be
+ * slewing (time/exact.c), while the TSC's rate is the exact source's.  Every
+ * pair here has the TSC on one side and a ruler on the other, so a right wait
+ * can come out as far apart as this boot measured the rulers from that
+ * source.  On OMEGA, with the host's timesyncd correcting over a noisy path,
+ * that was 14374 ppm: the TSC's 2000 us took 1973 by the HPET, and the
+ * HPET's and the PM timer's took 2031 by the TSC, where 2002 is the usual.
+ * So under a hypervisor, with an exact source adopted, the floor also allows
+ * that distance, and the starting line says how much.  On bare metal the
+ * rulers are crystals, and the floor stays where it was.
  */
 #define DELAY_TEST_US	2000
 
@@ -3799,12 +3811,25 @@ static void delay_selftest(void)
 	static int (*const wait[])(unsigned) = {
 		delay_tsc_us, delay_hpet_us, delay_pmtimer_us
 	};
-	const unsigned	floor = DELAY_TEST_US - DELAY_TEST_US / 1000 - 1;
-	unsigned	asked = 0, short_waits = 0;
-	uint64_t	t0, t1, us;
+	const struct exact_choice *src = tsc_source();
+	uint64_t	apart = 0;
+	unsigned	floor, asked = 0, short_waits = 0;
+	uint64_t	t0, t1, us, least = ~0ULL;
 	int		w, by;
 
-	kputs("delay: starting -- each of its waits timed by another counter (#624)\r\n");
+	if (freq_under_hypervisor() && src->adopted >= 0)
+		apart = src->ppm[src->adopted];
+	floor = DELAY_TEST_US - DELAY_TEST_US / 1000 - 1 -
+	    (unsigned)(DELAY_TEST_US * apart / 1000000);
+
+	kputs("delay: starting -- each of its waits timed by another counter (#624)");
+	if (apart != 0) {
+		kputs("; under a hypervisor the rulers were ");
+		kputdec(apart);
+		kputs(" ppm from the TSC's exact source, and a wait may come "
+		      "out that much short (#658)");
+	}
+	kputs("\r\n");
 	for (w = 0; w < 3; w++) {
 		kputs("delay: [");
 		kputdec(w + 1);
@@ -3826,6 +3851,8 @@ static void delay_selftest(void)
 		t1 = delay_counter_read(by);
 		us = delay_counter_us(by, t0, t1);
 		asked++;
+		if (us < least)
+			least = us;
 		kputs("'s ");
 		kputdec(DELAY_TEST_US);
 		kputs(" us took ");
@@ -3845,13 +3872,20 @@ static void delay_selftest(void)
 		kputdec(asked);
 		kputs(" waits lasted less than they were asked\r\n");
 	} else if (asked != 0) {
+		/* the value read, not the one asked: with the allowance they differ (#658) */
 		kputs("delay: PASS -- ");
 		kputdec(asked);
 		kputs(" waits of ");
-		kputdec(asked);
-		kputs(" lasted at least ");
 		kputdec(DELAY_TEST_US);
-		kputs(" us by another counter\r\n");
+		kputs(" us lasted at least ");
+		kputdec(least);
+		kputs(" us by another counter");
+		if (apart != 0) {
+			kputs(", the floor ");
+			kputdec(floor);
+			kputs(" us with the rulers' distance allowed (#658)");
+		}
+		kputs("\r\n");
 	} else {
 		kputs("delay: NOT ASKED -- no wait had a second counter to be timed by\r\n");
 	}

@@ -80,6 +80,8 @@ extern int	master_cpu;	/* 'master' processor - keeps time */
 #if	NCPUS == 1
 	/* cpu number is always 0 on a single processor system */
 #define	cpu_number()	(0)
+	/* and so is a hint of it (#626: x86-64's <machine/cpu_number.h>) */
+#define	cpu_number_hint()	(0)
 
 #else	/* NCPUS == 1 */
 	/* get cpu_number definition from machine-dependent code */

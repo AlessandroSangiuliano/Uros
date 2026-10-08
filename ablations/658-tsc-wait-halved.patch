@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #658
+Takes out: half of every TSC wait: delay_tsc_us() returns after half the time asked, and the self-test must still say so with the allowance at its widest (658-kvmclock-low.patch under KVM) and without it (TCG)
+Run: --entry 0 300 -smp 4
+Expect: delay: WRONG -- [0-9]+ of [0-9]+ waits lasted less than they were asked
+
+diff --git a/uros/src/mach_kernel/x86_64/time/delay.c b/uros/src/mach_kernel/x86_64/time/delay.c
+index da9f7a6e..bd21e1cb 100644
+--- a/uros/src/mach_kernel/x86_64/time/delay.c
++++ b/uros/src/mach_kernel/x86_64/time/delay.c
+@@ -56,7 +56,7 @@ delay_tsc_us(unsigned us)
+ 
+ 	if (hz == 0)
+ 		return 0;
+-	cycles = ticks_in(us, hz);
++	cycles = ticks_in(us / 2, hz);
+ 	disable_preemption();
+ 	cpu = cpu_number();
+ 	start = rdtsc_ordered();
