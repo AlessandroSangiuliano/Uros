@@ -2337,9 +2337,15 @@ test_trap_sweep(void)
 	 * nobody counted.  Each row now says how many of its 200 were
 	 * refused, and with what.
 	 */
+	/*
+	 * The send right each thread_create() hands back is kept and released
+	 * after the row, outside the timed loop: the rows time the calls they
+	 * name, and the rights are still ours to give back.
+	 */
 	{
-		int		refused = 0;
-		kern_return_t	last = KERN_SUCCESS;
+		static mach_port_t	made[200];
+		int			refused = 0, n = 0, j;
+		kern_return_t		last = KERN_SUCCESS;
 
 		SWEEP("thread_create", 200, ({ mach_port_t th;
 			mach_note_thread_created();
@@ -2347,11 +2353,15 @@ test_trap_sweep(void)
 			if (r == KERN_SUCCESS) {
 				kern_return_t t = thread_terminate(th);
 				if (t != KERN_SUCCESS) { refused++; last = t; }
+				made[n++] = th;
 			} r; }));
+		for (j = 0; j < n; j++)
+			(void) mach_port_deallocate(me, made[j]);
 		printf("  sweep thread_create: %d of 200 thread_terminate "
 		       "calls refused, the last with kr=%d (#660)\n",
 		       refused, (int)last);
 		refused = 0;
+		n = 0;
 		last = KERN_SUCCESS;
 		SWEEP("thread_terminate", 200, ({ mach_port_t th;
 			mach_note_thread_created();
@@ -2359,7 +2369,10 @@ test_trap_sweep(void)
 			if (r == KERN_SUCCESS) {
 				r = thread_terminate(th);
 				if (r != KERN_SUCCESS) { refused++; last = r; }
+				made[n++] = th;
 			} r; }));
+		for (j = 0; j < n; j++)
+			(void) mach_port_deallocate(me, made[j]);
 		printf("  sweep thread_terminate: %d of 200 thread_terminate "
 		       "calls refused, the last with kr=%d (#660)\n",
 		       refused, (int)last);
