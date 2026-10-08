@@ -161,9 +161,26 @@ ap_trampoline_end:
 	.code64
 	.globl	ap_entry64
 ap_entry64:
-	movl	$1, %eax
+	/*
+	 * The id as cpu_apic_id() reads it (#659): leaf 0BH's 32-bit x2APIC
+	 * id where the leaf enumerates one -- EBX[15:0] not zero at subleaf
+	 * 0 -- else leaf 1's eight bits, which agree with it below 256.
+	 */
+	xorl	%eax, %eax
+	cpuid
+	cmpl	$0xb, %eax
+	jb	4f
+	movl	$0xb, %eax
+	xorl	%ecx, %ecx
+	cpuid
+	testw	%bx, %bx
+	jz	4f
+	movl	%edx, %ebx			/* leaf 0BH: EDX = x2APIC id */
+	jmp	5f
+4:	movl	$1, %eax
 	cpuid
 	shrl	$24, %ebx			/* leaf 1: EBX[31:24] = APIC id */
+5:
 
 	/*
 	 * Its number is the index of its id in smp_cpu_apic[] (#663): the id
