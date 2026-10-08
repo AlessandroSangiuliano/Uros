@@ -74,6 +74,7 @@ WRONG=0
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in
 #   ioapic    -Y's own line: "ioapic_race: PASS"
+#   msirace   -V's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
 ENTRIES="
 0 harness
@@ -100,6 +101,7 @@ ENTRIES="
 21 harness
 22 harness
 23 ioapic
+36 msirace --iommu_intel
 24 panic2
 25 harness
 26 harness
@@ -136,6 +138,7 @@ judge() {	# entry verdict log-of-the-harness full-log
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
+	msirace) grep -aq 'msi_race: PASS' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
 	esac
 }

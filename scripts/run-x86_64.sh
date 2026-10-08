@@ -398,6 +398,8 @@ must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
 must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#599).'
+must_report 'msi_race: racing' 'msi_race: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#598).'
 must_report 'spl_test: starting' 'spl_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every thread stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside the raises, which is the face of #526 that stops a machine (#526).'
 must_report 'shootdown_test: \[1\] starting' 'shootdown_test: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
