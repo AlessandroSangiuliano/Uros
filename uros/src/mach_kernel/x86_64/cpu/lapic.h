@@ -27,6 +27,25 @@
 void lapic_init(uint64_t madt_base);
 
 /*
+ * xAPIC or x2APIC mode, and how it came to be (#659).  lapic_init() keeps an
+ * x2APIC mode the firmware left on; lapic_choose_mode() is the one decision,
+ * made on the boot processor once the DMAR has been read, and every processor
+ * runs the mode it settles on (lapic_enable()).  The boot says which.
+ */
+enum lapic_mode {
+	LAPIC_MODE_XAPIC,			/* not asked, or nothing to keep */
+	LAPIC_MODE_X2APIC_KEPT,			/* the firmware left it on */
+	LAPIC_MODE_X2APIC_KEPT_OPTED_OUT,	/* ...and its DMAR asks for none */
+	LAPIC_MODE_X2APIC_TURNED_ON,		/* -2, under a hypervisor */
+	LAPIC_MODE_X2APIC_ABSENT,		/* -2, and CPUID offers none */
+	LAPIC_MODE_X2APIC_OPTED_OUT,		/* -2, and the DMAR asks for none */
+	LAPIC_MODE_X2APIC_NOT_ON_METAL		/* -2 on bare metal, no remapping */
+};
+void		lapic_choose_mode(void);
+enum lapic_mode	lapic_mode(void);
+int		lapic_x2apic(void);
+
+/*
  * The vector the local APIC delivers when it has decided, after the fact,
  * that it had nothing to deliver — a line that dropped between the decision
  * to interrupt and the interrupt itself.

@@ -1819,7 +1819,9 @@ static void acpi_selftest(uint32_t info)
 			if (acpi_cpu(i)->apic_id == id)
 				listed = 1;
 
-		kputs("UrMach x86-64: local apic mapped, this cpu is id ");
+		kputs(lapic_x2apic()
+		      ? "UrMach x86-64: local apic in x2APIC mode, left on by the firmware (#659), this cpu is id "
+		      : "UrMach x86-64: local apic mapped, this cpu is id ");
 		kputdec(id);
 		kputs(lapic_is_bsp() ? " (the boot processor)" : " (NOT the bsp?!)");
 		kputs(listed ? ", and acpi lists it\r\n"
@@ -1832,9 +1834,12 @@ static void acpi_selftest(uint32_t info)
 		 * where there is no device and no cache to be wrong about, and
 		 * fails on hardware in ways that look like the device is
 		 * broken.  This is the only place the mistake is visible while
-		 * it is still cheap.
+		 * it is still cheap.  In x2APIC mode there is no page to map:
+		 * the registers are MSRs (#659).
 		 */
-		{
+		if (lapic_x2apic())
+			kputs("UrMach x86-64: no mapping to check: its registers are MSRs\r\n");
+		else {
 			extern uint64_t lapic_probe_va(void);
 			uint64_t va = lapic_probe_va();
 			pt_entry_t *e = pmap_walk(pmap_kernel()->root_pa, va, 0);
@@ -7881,6 +7886,35 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	pci_cfg_selftest();
 	pci_cap_selftest();
 	iommu_selftest();
+
+	/*
+	 * xAPIC or x2APIC mode, decided once the DMAR has been read, before
+	 * any other processor is started in it (#659).
+	 */
+	lapic_choose_mode();
+	switch (lapic_mode()) {
+	case LAPIC_MODE_XAPIC:
+		kputs("UrMach x86-64: local apic in xAPIC mode: x2APIC not asked for, and every id fits in eight bits (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_KEPT:
+		kputs("UrMach x86-64: local apic in x2APIC mode, kept as the firmware left it (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_KEPT_OPTED_OUT:
+		kputs("UrMach x86-64: local apic in x2APIC mode, kept as the firmware left it, though its DMAR asks for no x2APIC -- said, not resolved (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_TURNED_ON:
+		kputs("UrMach x86-64: local apic in x2APIC mode, turned on by -2 under a hypervisor (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_ABSENT:
+		kputs("UrMach x86-64: local apic in xAPIC mode: -2 asked for x2APIC, and CPUID offers none (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_OPTED_OUT:
+		kputs("UrMach x86-64: local apic in xAPIC mode: -2 asked for x2APIC, and the DMAR asks for none (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_NOT_ON_METAL:
+		kputs("UrMach x86-64: local apic in xAPIC mode: -2 asked for x2APIC, which without interrupt remapping is a guest's (SDM 13.12.6, #598) (#659)\r\n");
+		break;
+	}
 	msi_selftest();
 	msix_table_selftest();
 	ioapic_selftest();
