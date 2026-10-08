@@ -195,6 +195,18 @@ extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
  * msi_unremap_vector() is its other half: after the device's entry is
  * disarmed, the slot's remapping entry stops remapping.
  */
+/*
+ * #598's C10: a claimed slot's entry armed and its function enabled, recorded
+ * as the function's; and the reverse, which answers what it detached and
+ * clears the function's enable only when no other slot of it is recorded.
+ * One lock of the machine layer's own keeps the record and that question
+ * apart.  device_md_msi_register(), its unregister, and the -V race test.
+ */
+extern void msi_attach(unsigned int slot, const struct pci_msix *m,
+		       unsigned int entry, unsigned long long addr,
+		       unsigned int data);
+extern int msi_detach(unsigned int slot, struct pci_msix *gone);
+
 extern int msi_remap_vector(unsigned int slot, unsigned int bus,
 			    unsigned int dev, unsigned int func,
 			    unsigned long long *address, unsigned int *data);
