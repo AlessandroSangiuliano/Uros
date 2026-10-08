@@ -75,6 +75,8 @@ WRONG=0
 #             above it to answer the check-in
 #   ioapic    -Y's own line: "ioapic_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
+# A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
+# two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 ENTRIES="
 0 harness
 1 harness
@@ -86,6 +88,7 @@ ENTRIES="
 13 stop13
 14 harness
 14 harness - 1
+14 harness --socket1-cpu 1,sockets=2,cores=64,maxcpus=128
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
