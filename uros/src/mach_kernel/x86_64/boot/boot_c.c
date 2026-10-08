@@ -6147,6 +6147,24 @@ static void msix_table_selftest(void)
 		return;
 	}
 
+	/*
+	 * #598's C11: the same table probed again is the same mapping.  The
+	 * device region gives nothing back, so a probe that mapped each time
+	 * would run a driver registering in a loop out of it.
+	 */
+	{
+		struct pci_msix again;
+		int same = pci_msix_probe(0, 0, (uint8_t)nic, 0, &again)
+			   && again.table == m.table;
+
+		kputs(same ? "UrMach x86-64: its MSI-X table probed twice and"
+			     " mapped once — the device region spent on it"
+			     " once\r\n"
+			   : "UrMach x86-64: its MSI-X table probed twice — WRONG,"
+			     " mapped twice, and the device region gives nothing"
+			     " back\r\n");
+	}
+
 	if (!msi_claim_vector(msi_handler, &slot, &addr, &data)) {
 		kputs("UrMach x86-64: no message-signalled slot left to give"
 		      " the device — WRONG\r\n");

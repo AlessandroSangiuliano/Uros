@@ -16,8 +16,53 @@
 #include <device/pci.h>
 #include <kern/misc_protos.h>
 #include <pmap/pmap.h>
+#include <sync/lock.h>	/* the mapped tables' own, #598 */
 
 #include "pci_bar.h"	/* the decode hal_server uses, and now so does this */
+
+/*
+ * ── #598's C11: each table mapped once ───────────────────────────────
+ *
+ * The device region gives no page back, and a probe that mapped on every call
+ * -- before its caller's checks, so a refused registration too -- ran a
+ * driver registering in a loop into panic("pmap: the device region is full").
+ * Keyed by the table's first page and its length: the same table asked again
+ * answers the mapping it has.  Full is refused, and said, rather than grown.
+ */
+#define	PCI_MSIX_MAPPED_MAX	32u
+
+static struct {
+	uint64_t	pa;		/* the first page */
+	uint64_t	bytes;
+	uint64_t	va;
+} msix_mapped[PCI_MSIX_MAPPED_MAX];
+static unsigned		msix_mapped_n;
+static hw_lock_data_t	msix_mapped_lock;
+
+static uint64_t
+msix_map_once(uint64_t pa, uint64_t bytes)
+{
+	uint64_t	va = 0;
+	unsigned int	i;
+
+	hw_lock_lock(&msix_mapped_lock);
+	for (i = 0; i < msix_mapped_n && va == 0; i++)
+		if (msix_mapped[i].pa == pa && msix_mapped[i].bytes >= bytes)
+			va = msix_mapped[i].va;
+	if (va == 0 && msix_mapped_n < PCI_MSIX_MAPPED_MAX) {
+		va = pmap_map_device(pa, bytes);
+		if (va != 0) {
+			msix_mapped[msix_mapped_n].pa = pa;
+			msix_mapped[msix_mapped_n].bytes = bytes;
+			msix_mapped[msix_mapped_n].va = va;
+			msix_mapped_n++;
+		}
+	} else if (va == 0)
+		printf("pci: %u MSI-X tables are mapped already, and that is "
+		       "all this kernel keeps (#598)\n", PCI_MSIX_MAPPED_MAX);
+	hw_lock_unlock(&msix_mapped_lock);
+	return va;
+}
 
 int
 pci_msix_probe(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
@@ -95,9 +140,9 @@ pci_msix_probe(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
 	 */
 	need = offset + (uint64_t)out->vectors * PCI_MSIX_ENTRY_SIZE;
 
-	va = pmap_map_device(base + (offset & ~0xFFFULL),
-			     ((need - (offset & ~0xFFFULL)) + 0xFFFULL)
-			     & ~0xFFFULL);
+	va = msix_map_once(base + (offset & ~0xFFFULL),
+			   ((need - (offset & ~0xFFFULL)) + 0xFFFULL)
+			   & ~0xFFFULL);
 	if (va == 0) {
 		printf("pci: %04x:%02x:%02x.%u MSI-X table at 0x%x could not "
 		       "be mapped\n", segment, bus, dev, func,
