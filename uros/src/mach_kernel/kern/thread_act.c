@@ -410,13 +410,24 @@ thread_suspend(
 	}
 	if (thr_act->user_stop_count++ == 0 &&
 		thr_act->suspend_count++ == 0 ) {
+		install_special_handler(thr_act);
 		/*
-		 * #603: the faults it has resolved so far, BEFORE the stop is
-		 * set, so that the stop path counts only what came after it.
+		 * #603: the faults it has resolved so far, noted once the stop
+		 * is SET -- install_special_handler() has put AST_APC on the
+		 * activation, which its next return to ring 3 propagates -- and
+		 * under the activation's lock, which special_handler() takes
+		 * before it reads the note, so the stop cannot be judged
+		 * against a note not yet written.
+		 *
+		 * ⚠️ It was noted before the set, and then the count also held
+		 * whatever kept this thread between the note and the set: once
+		 * 21 faults in a boot under KVM at -smp 4 whose thread_info()
+		 * yardstick had 14 (#626's merge test), where after the set the
+		 * thread stops at its next fault.  What the set-then-note order
+		 * can miss is the fault in progress when the set lands.
 		 */
 		thr_act->stop_asked_at = thr_act->user_faults;
 		thr_act->stop_asked = TRUE;
-		install_special_handler(thr_act);
 		if (thread &&
 			thr_act == thread->top_act && thread != current_thread()) {
 			nudge(thr_act);
