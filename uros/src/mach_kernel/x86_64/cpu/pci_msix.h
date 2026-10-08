@@ -169,6 +169,12 @@ extern void pci_msix_disable(const struct pci_msix *m);
  * but who may call them: this one is for the kernel, and for the boot
  * self-test that has no device to program.  A driver reaches the other.
  */
+/*
+ * The address a message to processor `apic_id' is written to, or no: an id
+ * past eight bits does not fit the compatibility format (#598's C16).
+ */
+extern int msi_destination(uint32_t apic_id, unsigned long long *address);
+
 extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
 			    unsigned long long *address_out,
 			    unsigned int *data_out);

@@ -151,9 +151,29 @@ int ioapic_present(void)
 	return io != 0;
 }
 
+/*
+ * The controller's id as the MADT gives it, eight bits: the number the DMAR's
+ * and the IVRS's scopes name it by.  This used to be the ID register's field
+ * read as four bits, which cut any id above 15 to its low nibble (#598's C16).
+ */
 uint32_t ioapic_id(void)
 {
-	return ioapic_present() ? (ioapic_read(IOAPIC_REG_ID) >> 24) & 0xF : 0;
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+
+	return ioapic_present() && a != 0 ? a->id : 0;
+}
+
+/*
+ * A redirection entry's destination: the APIC id in bits 63:56, eight of them.
+ * An id that does not fit is refused, where a shift would have dropped its
+ * high bits and delivered to whichever processor has the rest (#598's C16).
+ */
+int ioapic_rte_destination(uint32_t apic_id, uint32_t *high)
+{
+	if (apic_id > 0xFFu)
+		return 0;
+	*high = apic_id << 24;
+	return 1;
 }
 
 uint32_t ioapic_version(void)
@@ -225,9 +245,12 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 	unsigned reg = redir_reg(gsi);
 	int active_low = (flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW;
 	int level = (flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL;
-	uint32_t low = vector & RTE_VECTOR_MASK, high = apic_id << 24;
+	uint32_t low = vector & RTE_VECTOR_MASK, high;
 	uint64_t f;
 
+	if (!ioapic_rte_destination(apic_id, &high))
+		panic("ioapic: apic id %u does not fit a redirection entry "
+		      "(#598)", apic_id);
 	low |= RTE_DELIVERY_FIXED | RTE_DEST_PHYSICAL;
 
 	/*

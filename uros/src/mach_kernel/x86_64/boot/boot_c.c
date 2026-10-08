@@ -6377,6 +6377,31 @@ static void ioapic_selftest(void)
 			" nothing\r\n");
 	}
 
+	/*
+	 * #598's C16: an APIC id past eight bits is refused by a redirection
+	 * entry and by a message address, not cut to its low byte.  Asked of
+	 * the arithmetic: this kernel reads xAPIC ids, which cannot pass eight
+	 * bits, and whether x2APIC follows is still #598's open question.
+	 */
+	{
+		uint32_t high = 0;
+		unsigned long long address = 0;
+		unsigned ok = 0;
+
+		ok += ioapic_rte_destination(3, &high) && high == 0x03000000u;
+		ok += ioapic_rte_destination(255, &high) && high == 0xFF000000u;
+		ok += !ioapic_rte_destination(256, &high);
+		ok += msi_destination(3, &address) && address == 0xFEE03000ULL;
+		ok += !msi_destination(256, &address);
+		kputs("UrMach x86-64: an apic id past eight bits refused by a"
+		      " redirection entry and a message address, not cut to its"
+		      " low byte: ");
+		kputdec(ok);
+		kputs(ok == 5 ? " of 5\r\n"
+			      : " of 5 — WRONG, it would reach the processor"
+				" that has its low byte\r\n");
+	}
+
 	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, device_irq);
 	device_irqs = 0;
 

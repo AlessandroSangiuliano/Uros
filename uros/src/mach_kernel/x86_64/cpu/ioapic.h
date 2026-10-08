@@ -121,6 +121,13 @@ int ioapic_is_masked(uint32_t gsi);
 int ioapic_owns(uint32_t gsi);
 
 /*
+ * A redirection entry's destination word for a processor, or no: an APIC id
+ * past eight bits does not fit, and is refused rather than cut (#598's C16).
+ * ioapic_route() panics on one; a caller that can refuse asks first.
+ */
+int ioapic_rte_destination(uint32_t apic_id, uint32_t *high);
+
+/*
  * #598 point 3: tell the controller directly that the interrupt on `vector'
  * was handled, which clears Remote IRR on the level pins carrying it -- for
  * when the processor's broadcast EOI does not come, or does not match.  The

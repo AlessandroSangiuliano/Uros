@@ -432,7 +432,7 @@ device_md_irq_trampoline(struct trap_frame *frame)
 int
 device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 {
-	uint32_t	gsi;
+	uint32_t	gsi, high;
 
 	if (irq >= DEVICE_MD_IRQ_MAX || handler == 0)
 		return 0;
@@ -463,6 +463,8 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	 */
 	gsi = acpi_irq_to_gsi((uint8_t)irq);
 	if (!ioapic_owns(gsi))		/* the range, not the count: #598's C12 */
+		return 0;
+	if (!ioapic_rte_destination(lapic_id(), &high))	/* C16 */
 		return 0;
 
 	/*
@@ -563,7 +565,19 @@ device_md_debugger_break(void)
  *             an edge line applies here in full.
  */
 #define	MSI_ADDRESS_BASE	0xFEE00000ULL
-#define	MSI_ADDRESS_DEST(id)	(((unsigned long long)(id) & 0xFFu) << 12)
+
+/*
+ * A message's address for a processor: its APIC id in bits 19:12, eight of
+ * them.  An id that does not fit is refused, where a mask would have cut it to
+ * its low byte and delivered to whichever processor has that (#598's C16).
+ */
+int msi_destination(uint32_t apic_id, unsigned long long *address)
+{
+	if (apic_id > 0xFFu)
+		return 0;
+	*address = MSI_ADDRESS_BASE | ((unsigned long long)apic_id << 12);
+	return 1;
+}
 
 static volatile unsigned int	msi_next;	/* slots are handed out in order */
 
@@ -582,6 +596,7 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 {
 	unsigned int	slot;
 	unsigned int	vector;
+	unsigned long long address;
 
 	if (handler == 0 || slot_out == 0 || addr_out == 0 || data_out == 0)
 		return 0;
@@ -593,6 +608,10 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 	 * machine that has no APIC there.
 	 */
 	if (!lapic_present())
+		return 0;
+
+	/* Before a slot is spent on it: an id the message cannot carry. */
+	if (!msi_destination(lapic_id(), &address))
 		return 0;
 
 	/*
@@ -631,7 +650,7 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 	trap_set_handler(vector, device_md_irq_trampoline);
 
 	*slot_out = slot;
-	*addr_out = MSI_ADDRESS_BASE | MSI_ADDRESS_DEST(lapic_id());
+	*addr_out = address;
 	*data_out = vector;
 
 	return 1;
