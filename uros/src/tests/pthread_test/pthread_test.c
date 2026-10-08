@@ -2331,14 +2331,52 @@ test_trap_sweep(void)
 	      task_set_exception_ports(child, EXC_MASK_BAD_ACCESS,
 				       MACH_PORT_NULL, EXCEPTION_DEFAULT, 0));
 	SWEEP("task_set_port_space", 500, task_set_port_space(child, 64));
-	SWEEP("thread_create", 200, ({ mach_port_t th;
-		mach_note_thread_created();
-		kern_return_t r = thread_create(child, &th);
-		if (r == KERN_SUCCESS) (void)thread_terminate(th); r; }));
-	SWEEP("thread_terminate", 200, ({ mach_port_t th;
-		mach_note_thread_created();
-		kern_return_t r = thread_create(child, &th);
-		if (r == KERN_SUCCESS) r = thread_terminate(th); r; }));
+	/*
+	 * #660: both rows end every thread they make, and the row that times
+	 * thread_create used to drop thread_terminate's answer -- a refusal
+	 * nobody counted.  Each row now says how many of its 200 were
+	 * refused, and with what.
+	 */
+	/*
+	 * The send right each thread_create() hands back is kept and released
+	 * after the row, outside the timed loop: the rows time the calls they
+	 * name, and the rights are still ours to give back.
+	 */
+	{
+		static mach_port_t	made[200];
+		int			refused = 0, n = 0, j;
+		kern_return_t		last = KERN_SUCCESS;
+
+		SWEEP("thread_create", 200, ({ mach_port_t th;
+			mach_note_thread_created();
+			kern_return_t r = thread_create(child, &th);
+			if (r == KERN_SUCCESS) {
+				kern_return_t t = thread_terminate(th);
+				if (t != KERN_SUCCESS) { refused++; last = t; }
+				made[n++] = th;
+			} r; }));
+		for (j = 0; j < n; j++)
+			(void) mach_port_deallocate(me, made[j]);
+		printf("  sweep thread_create: %d of 200 thread_terminate "
+		       "calls refused, the last with kr=%d (#660)\n",
+		       refused, (int)last);
+		refused = 0;
+		n = 0;
+		last = KERN_SUCCESS;
+		SWEEP("thread_terminate", 200, ({ mach_port_t th;
+			mach_note_thread_created();
+			kern_return_t r = thread_create(child, &th);
+			if (r == KERN_SUCCESS) {
+				r = thread_terminate(th);
+				if (r != KERN_SUCCESS) { refused++; last = r; }
+				made[n++] = th;
+			} r; }));
+		for (j = 0; j < n; j++)
+			(void) mach_port_deallocate(me, made[j]);
+		printf("  sweep thread_terminate: %d of 200 thread_terminate "
+		       "calls refused, the last with kr=%d (#660)\n",
+		       refused, (int)last);
+	}
 	SWEEP("thread_create_running", 200, ({ mach_port_t th;
 		natural_t st[4] = { 0, 0, 0, 0 };
 		mach_note_thread_created();

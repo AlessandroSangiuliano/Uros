@@ -1476,16 +1476,30 @@ thread_create_running(
         if (ret != KERN_SUCCESS)
                 return(ret);
 
+        /*
+         * 🔴 ON A REFUSAL THE CREATOR'S REFERENCE IS OURS TO DROP (#660).
+         *
+         * thread_create() hands back the activation with a reference for
+         * whoever asked.  On success it goes to our caller, which turns it
+         * into the port it answers with; on a refusal nobody takes it, and
+         * thread_terminate() drops only the reference for being active.
+         * Kept, it held the activation, the activation its thread and its
+         * task, and all three outlived the task: 200 threads in every boot's
+         * census, one for each refused call in pthread_test's sweep.
+         * thread_create()'s own refusal drops it the same way.
+         */
         ret = act_set_state(*child_act, flavor, new_state,
                                new_state_count);
         if (ret != KERN_SUCCESS) {
                 (void) thread_terminate(*child_act);
+                act_deallocate(*child_act);
                 return(ret);
         }
 
         ret = thread_resume(*child_act);
         if (ret != KERN_SUCCESS) {
                 (void) thread_terminate(*child_act);
+                act_deallocate(*child_act);
                 return(ret);
         }
 
