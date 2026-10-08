@@ -111,29 +111,35 @@
 static void icr_stress(void)
 {
 	uint64_t	rate = tsc_hz(), t0, sent = 0, before;
-	uint32_t	self = lapic_id(), target = self;
+	uint32_t	self_apic = lapic_id();
+	int		self = apic_to_cpu(self_apic), target = self;
 	unsigned	c;
 
-	for (c = 0; c < SMP_MAX_CPUS; c++)
-		if (c != self && smp_is_online(c)) {
-			target = c;
+	/*
+	 * Processors by number, the hardware by id (#663); the ablation's
+	 * count is by id, since it is kept where %gs cannot be read.
+	 */
+	for (c = 0; c < smp_cpu_count(); c++)
+		if ((int) c != self && smp_is_online(c)) {
+			target = (int) c;
 			break;
 		}
-	before = lapic_icr_nested_on(self);
+	before = lapic_icr_nested_on(self_apic);
 	t0 = rdtsc();
 	do {
 		if (target == self)
 			lapic_send_self(IPI_VECTOR_AST);
 		else
-			lapic_send_ipi(target, IPI_VECTOR_AST);
+			lapic_send_ipi(cpu_to_apic((unsigned) target),
+				       IPI_VECTOR_AST);
 		sent++;
 	} while (rate != 0 && rdtsc() - t0 < rate);
 	printf("UrMach x86-64: the ICR stress: %llu AST IPIs from thread "
 	       "context on cpu %u to cpu %u in a second, and %llu sends by an "
 	       "interrupt began between the wait and the second write of one "
 	       "of them (UROS_ABLATE_593_ICR_OPEN, #593)\n",
-	       (unsigned long long)sent, self, target,
-	       (unsigned long long)(lapic_icr_nested_on(self) - before));
+	       (unsigned long long)sent, (unsigned) self, (unsigned) target,
+	       (unsigned long long)(lapic_icr_nested_on(self_apic) - before));
 }
 #endif
 

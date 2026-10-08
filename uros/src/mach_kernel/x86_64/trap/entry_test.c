@@ -10,6 +10,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
+#include <kern/cpu_number.h>	/* #663: the IST stacks by processor number */
 #include <cpu/ioapic.h>
 #include <cpu/lapic.h>
 #include <cpu/regs.h>
@@ -168,8 +169,8 @@ static void report(const struct entry_check *c, uint64_t want_vector,
 	 * either way — the gate itself says nothing at the time it is used.
 	 */
 	frame_ok = on_own_stack
-		 ? desc_on_ist_stack(cpu_apic_id(), ist_slot, c->frame)
-		   && !desc_on_ist_stack(cpu_apic_id(), ist_slot, c->rsp)
+		 ? desc_on_ist_stack(cpu_number(), ist_slot, c->frame)
+		   && !desc_on_ist_stack(cpu_number(), ist_slot, c->rsp)
 		 : c->frame == frame_should_be(c->rsp);
 
 	/*
@@ -454,8 +455,8 @@ __attribute__((noinline)) static void nmi_delivery_test(void)
 	entry_probe_spin(SPIN_FAST);
 
 	t = trap_last();
-	on_ist = desc_on_ist_stack(cpu_apic_id(), IST_NMI, t->frame);
-	rsp_elsewhere = !desc_on_ist_stack(cpu_apic_id(), IST_NMI, t->rsp);
+	on_ist = desc_on_ist_stack(cpu_number(), IST_NMI, t->frame);
+	rsp_elsewhere = !desc_on_ist_stack(cpu_number(), IST_NMI, t->rsp);
 
 	cons_puts("UrMach x86-64: an NMI arrived at rip ");
 	cons_puthex64(t->rip);

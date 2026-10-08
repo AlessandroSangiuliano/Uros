@@ -19,6 +19,7 @@
 
 #include <cpu/percpu.h>
 #include <cpu/smp.h>
+#include <kern/cpu_number.h>	/* #663: counted by processor number */
 #include <sync/atomic.h>
 
 /*
@@ -47,34 +48,30 @@ __attribute__((aligned(64)))
 ;
 
 struct answer_count {
-	struct answer_slot by_apic[SMP_MAX_CPUS];
+	struct answer_slot by_cpu[SMP_MAX_CPUS];
 };
 
 /*
- * Count one answer from the processor running this.
+ * Count one answer from the processor running this, by its number (#663).
  *
- * ⚠️ Bounded on the write as well as on the read.  The two copies checked only
- * the read.  smp.c refuses an application processor whose id is past the
- * table, but nothing asks that of the boot processor, and the boot processor
- * answers too -- the calls the others send it -- so an id past the table would
- * have written past the array.  The check costs a compare.
+ * The write needs no bound: a number is below SMP_MAX_CPUS by construction,
+ * which is what smp_number_cpus() keeps.  It used to be the APIC id, which
+ * nothing bounded for the boot processor, and the check here stood in for
+ * that.  The read keeps its bound, since a caller may ask about any number.
  */
 static inline void answer_count_mark(struct answer_count *c)
 {
-	uint32_t id = percpu_apic_id();
-
-	if (id < SMP_MAX_CPUS)
-		c->by_apic[id].n++;
+	c->by_cpu[cpu_number()].n++;
 }
 
-/* How many answers the processor with this APIC id has given; 0 past the table. */
+/* How many answers the processor numbered `cpu' has given; 0 past the table. */
 static inline uint64_t answer_count_of(const struct answer_count *c,
-				       uint32_t apic_id)
+				       unsigned cpu)
 {
-	if (apic_id >= SMP_MAX_CPUS)
+	if (cpu >= SMP_MAX_CPUS)
 		return 0;
 
-	return atomic_load64(&c->by_apic[apic_id].n);
+	return atomic_load64(&c->by_cpu[cpu].n);
 }
 
 #endif	/* _X86_64_CPU_ANSWER_COUNT_H_ */

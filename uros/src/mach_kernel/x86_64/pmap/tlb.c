@@ -87,9 +87,9 @@ static void tlb_flush_handler(void *arg)
 	answer_count_mark(&served);
 }
 
-uint64_t tlb_flushes_served(uint32_t apic_id)
+uint64_t tlb_flushes_served(unsigned cpu)
 {
-	return answer_count_of(&served, apic_id);
+	return answer_count_of(&served, cpu);
 }
 
 #ifndef	ABLATE_638_FLUSH_UNPINNED

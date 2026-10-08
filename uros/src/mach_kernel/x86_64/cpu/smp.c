@@ -39,8 +39,60 @@
 
 extern char __trampoline_start[], __trampoline_end[];
 
-/* Where each processor's first stack is.  Indexed by APIC id. */
+/* Where each processor's first stack is.  Indexed by processor number. */
 uint64_t ap_stack_top[SMP_MAX_CPUS];
+
+/*
+ * Number to APIC id (#663), and how many are numbered.  Not static: the
+ * trampoline searches the table for its own id to learn its number before it
+ * has a stack to call anything with.
+ */
+uint32_t smp_cpu_apic[SMP_MAX_CPUS];
+uint32_t smp_cpu_numbered;
+
+void smp_number_bsp(uint32_t apic_id)
+{
+	smp_cpu_apic[0] = apic_id;
+	smp_cpu_numbered = 1;
+}
+
+unsigned smp_number_cpus(void)
+{
+	unsigned left_out = 0;
+
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		uint32_t id = acpi_cpu(i)->apic_id;
+
+		if (id == smp_cpu_apic[0])
+			continue;
+		if (smp_cpu_numbered == SMP_MAX_CPUS) {
+			left_out++;
+			continue;
+		}
+		smp_cpu_apic[smp_cpu_numbered++] = id;
+	}
+	return left_out;
+}
+
+unsigned smp_cpu_count(void)
+{
+	return smp_cpu_numbered;
+}
+
+uint32_t cpu_to_apic(unsigned cpu)
+{
+	if (cpu >= smp_cpu_numbered)
+		panic("smp: no processor numbered %u (#663)", cpu);
+	return smp_cpu_apic[cpu];
+}
+
+int apic_to_cpu(uint32_t apic_id)
+{
+	for (unsigned cpu = 0; cpu < smp_cpu_numbered; cpu++)
+		if (smp_cpu_apic[cpu] == apic_id)
+			return (int) cpu;
+	return -1;
+}
 
 /* One bit per processor that has reached C.  Read by the boot processor. */
 static volatile uint64_t online_mask;
@@ -120,7 +172,7 @@ void ap_trampoline_install(void)
  */
 void ap_entry64(void);
 
-void ap_start_c(uint32_t apic_id)
+void ap_start_c(uint32_t cpu)
 {
 	/*
 	 * Off the trampoline's sixteen bytes of descriptor table and onto the
@@ -129,7 +181,7 @@ void ap_start_c(uint32_t apic_id)
 	 * report a fault — it can only triple-fault and reset, which is the
 	 * one failure that leaves nothing on the wire to read afterwards.
 	 */
-	desc_activate(apic_id);
+	desc_activate(cpu);
 
 	/*
 	 * 🔴 Caches on, and the boot processor's protections (#639).
@@ -151,7 +203,7 @@ void ap_start_c(uint32_t apic_id)
 	}
 
 	/* Per-CPU state; nothing below is shared with another processor. */
-	percpu_activate(apic_id);
+	percpu_activate(cpu);
 
 	/*
 	 * And its own interrupt controller, which comes out of a startup
@@ -176,7 +228,7 @@ void ap_start_c(uint32_t apic_id)
 	 */
 	fpu_init();
 
-	atomic_test_and_set_bit((volatile uint64_t *)&online_mask, apic_id);
+	atomic_test_and_set_bit((volatile uint64_t *)&online_mask, cpu);
 	atomic_inc64((volatile uint64_t *)&online_count);
 
 	/*
@@ -203,7 +255,7 @@ void ap_start_c(uint32_t apic_id)
 	 * the gate into a hung machine, which says less than a probe that
 	 * comes back zero.
 	 */
-	if (atomic_cmpxchg64(&ap_call_claimed, 0, apic_id + 1) == 0) {
+	if (atomic_cmpxchg64(&ap_call_claimed, 0, cpu + 1) == 0) {
 		uint64_t spins;
 
 		for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
@@ -260,7 +312,7 @@ void ap_start_c(uint32_t apic_id)
 	slave_main();
 
 	panic("smp: slave_main returned on processor %u — it must not (#461)",
-	      apic_id);
+	      cpu);
 }
 
 unsigned
@@ -286,13 +338,12 @@ smp_ap_release_to_scheduler(void)
 	 * return path it creates, which is exactly what is wanted from a
 	 * processor that has to wake up and re-read a word in memory.
 	 */
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
+	{
+		int self = apic_to_cpu(lapic_id());
 
-		if (!c->usable || c->apic_id == lapic_id())
-			continue;
-		if (smp_is_online(c->apic_id))
-			ipi_ast_check(c->apic_id);
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++)
+			if ((int) cpu != self && smp_is_online(cpu))
+				ipi_ast_check(cpu);
 	}
 
 	/*
@@ -334,10 +385,10 @@ unsigned smp_online_count(void)
 	return (unsigned)atomic_load64((volatile uint64_t *)&online_count) + 1;
 }
 
-int smp_is_online(uint32_t apic_id)
+int smp_is_online(unsigned cpu)
 {
-	return (atomic_load64((volatile uint64_t *)&online_mask)
-		>> apic_id) & 1;
+	return cpu < 64 && ((atomic_load64((volatile uint64_t *)&online_mask)
+			     >> cpu) & 1);
 }
 
 uint64_t smp_answering_set(void)
@@ -348,41 +399,30 @@ uint64_t smp_answering_set(void)
 
 unsigned smp_start_others(void)
 {
-	uint32_t self = lapic_id();
 	unsigned asked = 0;
 	uint64_t spins;
 
 	/*
 	 * The boot processor answers broadcasts too, and is in no mask until it
-	 * is put in one here (#605).  An id past the table cannot be -- and then
-	 * a broadcast that times out cannot name it, which is all that costs.
+	 * is put in one here (#605).  It is number 0 (#663).
 	 */
-	if (self < SMP_MAX_CPUS)
-		atomic_store64(&bsp_bit, 1ULL << self);
+	atomic_store64(&bsp_bit, 1ULL);
 
 	ap_trampoline_install();
 
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
+	for (unsigned cpu = 1; cpu < smp_cpu_count(); cpu++) {
 		uint64_t frame;
-
-		if (!c->usable || c->apic_id == self)
-			continue;
-
-		if (c->apic_id >= SMP_MAX_CPUS)
-			panic("smp: an APIC id past the stack table");
 
 		/*
 		 * A stack each, before anyone is woken.  This is the whole of
-		 * the arrangement: the processor finds its own by id, so there
-		 * is nothing to hand over and nothing to take turns with.
+		 * the arrangement: the processor finds its own by number, so
+		 * there is nothing to hand over and nothing to take turns with.
 		 */
 		frame = boot_frames_alloc(4);
 		if (frame == 0)
 			panic("smp: no memory for a processor's first stack");
 
-		ap_stack_top[c->apic_id] =
-			phys_to_direct(frame) + 4 * PAGE_SIZE_4K;
+		ap_stack_top[cpu] = phys_to_direct(frame) + 4 * PAGE_SIZE_4K;
 
 		/*
 		 * And its per-CPU page, here rather than on arrival: mapping
@@ -390,7 +430,7 @@ unsigned smp_start_others(void)
 		 * that at the moment it wakes is the one race this design
 		 * would otherwise have.
 		 */
-		percpu_alloc(c->apic_id);
+		percpu_alloc(cpu);
 
 		/*
 		 * Its task-state segment and the stacks a fault will land on,
@@ -398,22 +438,20 @@ unsigned smp_start_others(void)
 		 * descriptor table, and it allocates.  Neither is something to
 		 * have several processors doing at the moment they arrive.
 		 */
-		desc_alloc(c->apic_id);
+		desc_alloc(cpu);
 	}
 
 	/*
 	 * Every stack is in place, so every processor can be woken without
-	 * waiting for the one before it.
+	 * waiting for the one before it.  Woken by APIC id, which is what the
+	 * hardware is addressed by.
 	 */
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
+	for (unsigned cpu = 1; cpu < smp_cpu_count(); cpu++) {
+		uint32_t id = cpu_to_apic(cpu);
 
-		if (!c->usable || c->apic_id == self)
-			continue;
-
-		lapic_send_init(c->apic_id);
-		lapic_send_startup(c->apic_id, AP_TRAMPOLINE_BASE);
-		lapic_send_startup(c->apic_id, AP_TRAMPOLINE_BASE);
+		lapic_send_init(id);
+		lapic_send_startup(id, AP_TRAMPOLINE_BASE);
+		lapic_send_startup(id, AP_TRAMPOLINE_BASE);
 		asked++;
 	}
 

@@ -12,6 +12,7 @@
 #include <ddb/cons.h>
 #include <ddb/disasm.h>
 #include <cpu/lapic.h>
+#include <cpu/smp.h>		/* #663: the processor's number */
 #include <kern/ast.h>		/* #459: need_ast, ast_taken */
 #include <kern/thread.h>		/* #467: current_act */
 #include <kern/thread_act.h>
@@ -758,9 +759,14 @@ void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 
 	if (first != 0)
 		first();
+	/*
+	 * The processor's number, found from the id its own APIC answers with
+	 * (#663): %gs may be anything when this runs, and the table is not.
+	 * Numbered before the APIC is mapped, so a present APIC has one.
+	 */
 	tputs("  cpu ");
-	if (lapic_present())
-		tputdec(lapic_id());
+	if (lapic_present() && apic_to_cpu(lapic_id()) >= 0)
+		tputdec((unsigned) apic_to_cpu(lapic_id()));
 	else
 		tputc('?');
 	tputs(" backtrace (addr2line for file and line):\r\n");

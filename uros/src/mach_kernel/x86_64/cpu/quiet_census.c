@@ -549,6 +549,30 @@ census_threads(void)
 					    sizeof *ta->mact.xxx_pcb.user))
 				census_add(" user-rip=%p",
 				       (void *) ta->mact.xxx_pcb.user->rip);
+			/*
+			 * 🔑 A HALTED THREAD STILL ON THIS LIST IS ONE NOBODY
+			 * FREED, AND WHO HOLDS IT IS IN ITS COUNTS (#660).
+			 *
+			 * thread_terminate_self() leaves one reference on the
+			 * thread for the reaper, and the reaper drops the
+			 * activation's two; a thread leaves the list only when
+			 * the last of those goes.  The task's own state says
+			 * whether it was still alive when the thread ended:
+			 * an activation is unhooked from its task there only
+			 * while the task is active.
+			 */
+			if ((th->state & TH_HALTED) != 0) {
+				census_add(" thr_ref=%d act_ref=%d act_active=%d",
+					   th->ref_count, ta->ref_count,
+					   ta->active);
+				if (ta->task != TASK_NULL &&
+				    census_readable(ta->task, sizeof *ta->task))
+					census_add(" [task active=%d ref=%d"
+						   " acts=%d]",
+						   (int) ta->task->active,
+						   ta->task->ref_count,
+						   ta->task->thr_act_count);
+			}
 		}
 		if (th->name[0] != '\0')
 			census_add(" name=\"%s\"", th->name);
