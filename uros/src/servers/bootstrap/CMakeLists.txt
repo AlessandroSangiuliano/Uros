@@ -748,4 +748,48 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})
+
+  # 🔴 AND A BUNDLE THAT CANNOT REACH A DISK, FOR A REAL MACHINE (#595).
+  #
+  # The bundle above starts block_device_server with the AHCI and virtio
+  # drivers, and its tests write scratch blocks (cap_test [14] and [27], #596)
+  # and claim the interrupts, BARs, I/O ports and DMA of the devices they find.
+  # Under QEMU those devices are QEMU's; on omen they are the owner's disks and
+  # controllers.  This one keeps what drives no device: the IPC, thread,
+  # activation, fault, FPU, loader and copy-on-write tests, cap_server, the HAL
+  # (which only reads configuration space) and char_server, which owns the
+  # keyboard.  scripts/make-baremetal-x86_64.sh puts it on its image, and asks
+  # for it by name: it is not part of ALL.
+  set(_NODISK_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap-nodisk.bundle)
+  set(_NODISK_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-nodisk.conf)
+  file(GENERATE OUTPUT ${_NODISK_CONF}
+       CONTENT "name_server name_server\nnetname_test netname_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\n${_CHAR_LINE}")
+  add_custom_command(
+    OUTPUT ${_NODISK_BUNDLE}
+    COMMAND $<TARGET_FILE:mkbundle> -o ${_NODISK_BUNDLE}
+            bootstrap.conf:${_NODISK_CONF}
+            bootstrap.cmf:${_BOOTSTRAP_CMF}
+            hal_server.cmf:${_HAL_CMF}
+            name_server:${_SBIN}/name_server
+            netname_test:${_SBIN}/netname_test
+            cap_server:${_SBIN}/cap_server
+            pthread_test:${_SBIN}/pthread_test
+            msg_server_test:${_SBIN}/msg_server_test
+            dl_test:${_SBIN}/dl_test
+            fault_test:${_SBIN}/fault_test
+            fperr_test:${_SBIN}/fperr_test
+            act_test:${_SBIN}/act_test
+            cow_test:${_SBIN}/cow_test
+            hal_server:${_SBIN}/hal_server
+            modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
+            ${_CHAR_FILES}
+    DEPENDS mkbundle ${_BOOTSTRAP_CMF} ${_HAL_CMF}
+            name_server_bin netname_test_bin cap_server_bin pthread_test_server
+            msg_server_test_bin dl_test_bin fault_test_bin fperr_test_bin
+            act_test_bin cow_test_bin hal_server hal_pci_scan_module
+            ${_CHAR_DEP}
+            ${_NODISK_CONF}
+    COMMENT "Bundle for a real machine: nothing in it reaches a disk (#595)"
+    VERBATIM)
+  add_custom_target(bootstrap_bundle_nodisk DEPENDS ${_NODISK_BUNDLE})
 endif()
