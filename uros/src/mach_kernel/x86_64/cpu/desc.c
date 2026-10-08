@@ -160,10 +160,7 @@ static void load_gdt(void)
 
 void desc_init_bsp(void)
 {
-	uint32_t self = cpu_apic_id();
-
-	if (self >= SMP_MAX_CPUS)
-		panic("desc: the boot processor's APIC id is past the tables");
+	uint32_t self = 0;	/* the boot processor's number (#663) */
 
 	gdt[0] = 0;
 	gdt[1] = 0x00209A0000000000ULL;		/* code: L, present, DPL0, R/X */

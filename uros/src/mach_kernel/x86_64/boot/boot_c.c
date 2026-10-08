@@ -44,6 +44,7 @@
 #include <cpu/percpu.h>
 #include <cpu/pic.h>
 #include <cpu/smp.h>
+#include <kern/cpu_number.h>	/* #663: per-processor tables by number */
 #include <cpu/spl.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
@@ -2025,13 +2026,14 @@ static void percpu_selftest(void)
 	struct percpu *p;
 	uint64_t swapped, restored;
 	/*
-	 * The boot processor's own id, not zero.  Nothing guarantees the
-	 * firmware started the processor numbered zero — and if it did not,
-	 * taking zero here hands the boot processor the block that belongs to
-	 * whichever processor really is zero, and the two write over each
-	 * other the moment it wakes.
+	 * Number 0, which smp_number_bsp() gave the boot processor whatever
+	 * its APIC id (#663).  This used to be its APIC id, because the two
+	 * were the same number: nothing guaranteed the firmware started the
+	 * processor with id zero, and zero would then have been another's
+	 * block.  The numbers are this kernel's now, so 0 is the boot
+	 * processor's by construction.
 	 */
-	uint32_t self = cpu_apic_id();
+	uint32_t self = 0;
 
 	percpu_alloc(self);
 	percpu_activate(self);
@@ -7779,6 +7781,12 @@ static void double_fault_selftest(void)
  */
 static void descriptor_tables_init(void)
 {
+	/*
+	 * The boot processor is number 0 from here on, whatever its APIC id
+	 * (#663): nothing has indexed a table by processor yet, and the first
+	 * thing that does is the line below.
+	 */
+	smp_number_bsp(cpu_apic_id());
 	desc_init_bsp();
 
 	/*
@@ -7801,7 +7809,7 @@ static void descriptor_tables_init(void)
 	pic_disable();
 
 	kputs("UrMach x86-64: GDT + TSS + IDT installed for cpu ");
-	kputdec(cpu_apic_id());
+	kputdec(cpu_number());
 	kputs(", faults are now reported\r\n");
 }
 
@@ -7902,16 +7910,22 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	self_ipi_selftest();
 	ipi_init();
 	{
-		unsigned asked = acpi_cpu_count();
+		unsigned left = smp_number_cpus();
 		unsigned up = smp_start_others();
 
 		kputs("UrMach x86-64: woke ");
-		kputdec(asked ? asked - 1 : 0);
+		kputdec(smp_cpu_count() - 1);
 		kputs(" processors, ");
 		kputdec(up);
 		kputs(" reported in — ");
 		kputdec(smp_online_count());
-		kputs(" online\r\n");
+		kputs(" online");
+		if (left != 0) {
+			kputs(", ");
+			kputdec(left);
+			kputs(" more left out past the table of 64 (#663)");
+		}
+		kputs("\r\n");
 
 		/*
 		 * Now, and not earlier: real_ncpus is what was FOUND, and
@@ -7928,16 +7942,19 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 		 */
 		machine_slots_init();
 
-		if (asked > 1) {
-			kputs("UrMach x86-64:   awake:");
-			for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-				const struct acpi_cpu *c = acpi_cpu(i);
-
-				if (c->apic_id == lapic_id())
-					continue;
+		/*
+		 * Number and APIC id, both: the number is what every table
+		 * here is indexed by, the id what the hardware answers to, and
+		 * a processor that stays silent is named by both (#663).
+		 */
+		if (smp_cpu_count() > 1) {
+			kputs("UrMach x86-64:   awake, number:apic id:");
+			for (unsigned cpu = 1; cpu < smp_cpu_count(); cpu++) {
 				kputs(" ");
-				kputdec(c->apic_id);
-				if (!smp_is_online(c->apic_id))
+				kputdec(cpu);
+				kputs(":");
+				kputdec(cpu_to_apic(cpu));
+				if (!smp_is_online(cpu))
 					kputs("(silent)");
 			}
 			kputs("\r\n");
