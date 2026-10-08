@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #659
+Takes out: keeping the x2APIC mode a firmware left on: lapic_init() panics on it again, as it did before, and entry 37, where GRUB turns it on before the kernel, must stop there
+Run: --entry 37 600 -smp 4
+Expect: lapic: x2APIC mode is on and the MSR interface is not written yet
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+index 181c6731..c6ecda65 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/lapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+@@ -128,12 +128,8 @@ void lapic_init(uint64_t madt_base)
+ 	 * firmware that chose it may have had a reason.  The registers are
+ 	 * MSRs from here on.
+ 	 */
+-	if (msr & APIC_BASE_X2APIC) {
+-		x2apic = 1;
+-		present = 1;
+-		lapic_mode_reached = LAPIC_MODE_X2APIC_KEPT;
+-		return;
+-	}
++	if (msr & APIC_BASE_X2APIC)
++		panic("lapic: x2APIC mode is on and the MSR interface is not written yet");
+ 
+ 	/*
+ 	 * Two sources, and the MSR wins: the MADT records where the firmware
