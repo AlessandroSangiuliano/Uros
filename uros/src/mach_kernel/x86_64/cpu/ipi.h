@@ -147,7 +147,7 @@ void			shootdown_widen(void);
  * there is nothing to wait for, and waiting would be the caller blocking on
  * a processor it has just asked to go and do something.
  */
-void ipi_ast_check(uint32_t apic_id);
+void ipi_ast_check(unsigned cpu);
 
 /*
  * Stop every other processor, and do not wait for any of them (#461).
@@ -163,6 +163,6 @@ void ipi_halt_others(void);
  * that the messages arrive at all, and afterwards for anyone wondering
  * whether a processor has stopped listening.
  */
-uint64_t ipi_calls_served(uint32_t apic_id);
+uint64_t ipi_calls_served(unsigned cpu);
 
 #endif	/* _X86_64_CPU_IPI_H_ */

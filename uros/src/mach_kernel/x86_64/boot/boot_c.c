@@ -1647,7 +1647,7 @@ static void cr_put_diff(const char *reg, uint64_t diff, uint64_t boot,
 
 static void control_regs_selftest(void)
 {
-	uint32_t self = cpu_apic_id();
+	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 	struct cr_seen boot;
 	unsigned asked = 1, differ = 0, unenforced = 0;
 	pmap_t scratch;
@@ -1659,16 +1659,14 @@ static void control_regs_selftest(void)
 	cr_probe_wp = (boot.cr0 & CR0_WP) != 0;
 
 	/* The census. */
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 		struct cr_seen *s;
 		uint64_t d0, d4, de;
 
-		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
-		    || !smp_is_online(c->apic_id))
+		if (cpu == self || !smp_is_online(cpu))
 			continue;
-		s = &cr_seen[c->apic_id];
-		ipi_call_mask(1ULL << c->apic_id, cr_read_here, s);
+		s = &cr_seen[cpu];
+		ipi_call_mask(1ULL << cpu, cr_read_here, s);
 		asked++;
 
 		d0 = (s->cr0 ^ boot.cr0) & CR_CENSUS_CR0;
@@ -1679,7 +1677,7 @@ static void control_regs_selftest(void)
 
 		differ++;
 		kputs("UrMach x86-64: processor ");
-		kputdec(c->apic_id);
+		kputdec(cpu);
 		cr_put_diff("CR0", d0, boot.cr0, s->cr0, cr0_names);
 		cr_put_diff("CR4", d4, boot.cr4, s->cr4, cr4_names);
 		cr_put_diff("EFER", de, boot.efer, s->efer, efer_names);
@@ -1724,29 +1722,23 @@ static void control_regs_selftest(void)
 	cr_probe_root = scratch->root_pa;
 
 	cr_probe_here(&boot);
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
-		    || !smp_is_online(c->apic_id))
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
 			continue;
-		ipi_call_mask(1ULL << c->apic_id, cr_probe_here,
-			      &cr_seen[c->apic_id]);
+		ipi_call_mask(1ULL << cpu, cr_probe_here, &cr_seen[cpu]);
 	}
 
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-		struct cr_seen *s = c->apic_id == self ? &boot
-				  : &cr_seen[c->apic_id];
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		struct cr_seen *s = cpu == self ? &boot : &cr_seen[cpu];
 
-		if (c->apic_id >= SMP_MAX_CPUS || !smp_is_online(c->apic_id))
+		if (!smp_is_online(cpu))
 			continue;
 		if (((cr_probe_want & CR4_SMAP) && !s->smap_fault)
 		    || ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
 		    || (cr_probe_wp && !s->wp_fault)) {
 			unenforced++;
 			kputs("UrMach x86-64: processor ");
-			kputdec(c->apic_id);
+			kputdec(cpu);
 			if ((cr_probe_want & CR4_SMAP) && !s->smap_fault)
 				kputs(" stored to a user page,");
 			if ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
@@ -2328,7 +2320,7 @@ static void ipi_selftest(void)
 {
 	unsigned others = smp_online_count() - 1;
 	unsigned answered = 0;
-	uint32_t self = cpu_apic_id();
+	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 
 	if (others == 0) {
 		kputs("UrMach x86-64: alone — no processor to cross-call\r\n");
@@ -2338,12 +2330,10 @@ static void ipi_selftest(void)
 	for (unsigned round = 0; round < CROSS_CALL_ROUNDS; round++)
 		ipi_call_others(cross_call_mark, (void *)&cross_call_marks);
 
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id == self || !smp_is_online(c->apic_id))
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
 			continue;
-		if (ipi_calls_served(c->apic_id) == CROSS_CALL_ROUNDS)
+		if (ipi_calls_served(cpu) == CROSS_CALL_ROUNDS)
 			answered++;
 	}
 
@@ -2360,18 +2350,16 @@ static void ipi_selftest(void)
 	      ? " served every round\r\n" : " served every round — WRONG\r\n");
 
 	/* Name anybody who did not, since the counters can say who. */
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id == self || !smp_is_online(c->apic_id))
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
 			continue;
-		if (ipi_calls_served(c->apic_id) == CROSS_CALL_ROUNDS)
+		if (ipi_calls_served(cpu) == CROSS_CALL_ROUNDS)
 			continue;
 
 		kputs("UrMach x86-64:   cpu ");
-		kputdec(c->apic_id);
+		kputdec(cpu);
 		kputs(" served ");
-		kputdec((unsigned)ipi_calls_served(c->apic_id));
+		kputdec((unsigned)ipi_calls_served(cpu));
 		kputs("\r\n");
 	}
 }
@@ -2564,7 +2552,7 @@ static void context_selftest(void)
 	 * desc_rsp0() is where the top actually lives, and is what the syscall
 	 * probe below compares against for the same reason.
 	 */
-	uint64_t boot_stack_top = desc_rsp0(cpu_apic_id());
+	uint64_t boot_stack_top = desc_rsp0(cpu_number());
 	void *fpu_a, *fpu_b, *fpu_main;
 
 	if (stack_a == 0 || stack_b == 0 || fpu_frames == 0) {
@@ -3018,7 +3006,7 @@ static void ring3_selftest(void)
 	 */
 	{
 		uint64_t want_rip = USER_PROBE_FAULT_VA;
-		uint64_t want_frame = (desc_rsp0(cpu_apic_id()) & ~15ULL) - 176;
+		uint64_t want_frame = (desc_rsp0(cpu_number()) & ~15ULL) - 176;
 		int rip_ok = first.rip == want_rip;
 		int rsp_ok = first.rsp == USER_PROBE_STACK_TOP;
 		int frame_ok = first.frame == want_frame;
@@ -3067,7 +3055,7 @@ static void ring3_selftest(void)
 	 */
 	{
 		uint64_t want_rip = USER_PROBE_AFTER_SYSCALL_VA;
-		uint64_t rsp0 = desc_rsp0(cpu_apic_id());
+		uint64_t rsp0 = desc_rsp0(cpu_number());
 		int rip_ok = syscall_probe_saved_rip() == want_rip;
 		int stack_ok = syscall_probe_kernel_rsp()
 			       == KERNEL_STACK_USER_FRAME(rsp0);
@@ -4008,7 +3996,7 @@ static volatile uint32_t gap_cpu;
 
 static void timer_tick(struct trap_frame *frame)
 {
-	uint32_t id = cpu_apic_id();
+	uint32_t id = (uint32_t) cpu_number();	/* by number (#663) */
 	uint64_t now = rdtsc();
 	uint64_t prev = last_tsc[id];
 
@@ -4086,7 +4074,7 @@ static void tick_reset(void)
 		last_tsc[id] = 0;
 	}
 	ngaps = 0;
-	gap_cpu = cpu_apic_id();
+	gap_cpu = (uint32_t) cpu_number();
 }
 
 /*
@@ -4138,7 +4126,7 @@ static void tick_window(void)
 static void timer_selftest(void)
 {
 	uint32_t rate = lapic_timer_calibrate();
-	uint32_t me = cpu_apic_id();
+	uint32_t me = (uint32_t) cpu_number();
 	uint64_t got, off, want = TICK_WANT, period, expected;
 	int had_interrupts;
 
@@ -6384,7 +6372,7 @@ static void spl_selftest(void)
 	uint64_t handled_before, handled_while, handled_after;
 	uint64_t deferred_before, deferred_after, replayed_before, ran_at_spl0;
 	unsigned int owed_ticks;
-	uint32_t me = cpu_apic_id();
+	uint32_t me = (uint32_t) cpu_number();
 	spl_t old;
 
 	if (lapic_timer_hz() == 0) {
@@ -6746,7 +6734,7 @@ static void smp_timer_selftest(void)
 	ipi_call_others(ap_timer_stop, 0);
 
 	kputs("UrMach x86-64: ticks per processor:");
-	for (unsigned id = 0; id < SMP_MAX_CPUS; id++) {
+	for (unsigned id = 0; id < smp_cpu_count(); id++) {
 		uint64_t got, off;
 
 		/*
@@ -6757,7 +6745,7 @@ static void smp_timer_selftest(void)
 		 * about the one processor whose timer everything else was
 		 * calibrated from.
 		 */
-		if (!smp_is_online(id) && id != lapic_id())
+		if (!smp_is_online(id) && id != (unsigned) cpu_number())
 			continue;
 
 		got = ticks[id];
@@ -7336,7 +7324,7 @@ static void gdt_layout_selftest(void)
  */
 static void ap_to_bsp_selftest(void)
 {
-	uint32_t self = cpu_apic_id();
+	uint32_t self = (uint32_t) cpu_number();
 	uint64_t before = ipi_calls_served(self);
 	unsigned reached;
 
@@ -7402,7 +7390,7 @@ static void tlb_probe_read(void *arg)
 {
 	struct tlb_probe *p = arg;
 
-	p->seen[cpu_apic_id()] = *(volatile uint64_t *)(uintptr_t)p->va;
+	p->seen[cpu_number()] = *(volatile uint64_t *)(uintptr_t)p->va;
 }
 
 /* How many other processors reported `want`, and how many reported anything. */
@@ -7411,12 +7399,10 @@ static unsigned tlb_probe_count(const struct tlb_probe *p, uint64_t want,
 {
 	unsigned n = 0;
 
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id == self || !smp_is_online(c->apic_id))
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
 			continue;
-		if (p->seen[c->apic_id] == want)
+		if (p->seen[cpu] == want)
 			n++;
 	}
 	return n;
@@ -7425,7 +7411,7 @@ static unsigned tlb_probe_count(const struct tlb_probe *p, uint64_t want,
 static void tlb_shootdown_selftest(void)
 {
 	static struct tlb_probe probe;
-	uint32_t self = cpu_apic_id();
+	uint32_t self = (uint32_t) cpu_number();
 	unsigned others = smp_online_count() - 1;
 	uint64_t old_frame, new_frame;
 	uint64_t root = read_cr3() & INTEL_PTE_PFN;
@@ -7620,12 +7606,11 @@ static void call_cost_probe(void)
 
 static void silent_cpu_probe(void)
 {
-	uint32_t me = lapic_id();
+	uint32_t me = (uint32_t) cpu_number();	/* masks are by number (#663) */
 	uint64_t others = smp_answering_set();
 	unsigned id;
 
-	if (me < SMP_MAX_CPUS)
-		others &= ~(1ULL << me);
+	others &= ~(1ULL << me);
 	if (others == 0) {
 		kputs("UrMach x86-64: silent processor probe: nobody else to "
 		      "silence (#605)\r\n");
@@ -7633,9 +7618,11 @@ static void silent_cpu_probe(void)
 	}
 
 	id = (unsigned) __builtin_ctzll(others);
-	kputs("UrMach x86-64: silent processor probe: halting APIC id ");
+	kputs("UrMach x86-64: silent processor probe: halting processor ");
 	kputdec(id);
-	kputs(", then cross-calling it -- the panic must name it (#605)\r\n");
+	kputs(" (APIC id ");
+	kputdec(cpu_to_apic(id));
+	kputs("), then cross-calling it -- the panic must name it (#605)\r\n");
 
 	lapic_send_ipi(id, IPI_VECTOR_HALT);
 	for (unsigned i = 0; i < 1000000; i++)
