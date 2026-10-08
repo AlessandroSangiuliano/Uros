@@ -410,13 +410,23 @@ thread_suspend(
 	}
 	if (thr_act->user_stop_count++ == 0 &&
 		thr_act->suspend_count++ == 0 ) {
+		install_special_handler(thr_act);
+
 		/*
-		 * #603: the faults it has resolved so far, BEFORE the stop is
+		 * #603: the faults it has resolved so far, once the stop is
 		 * set, so that the stop path counts only what came after it.
+		 *
+		 * 🔴 AFTER install_special_handler(), not before (#598).  That
+		 * takes the target's thread lock, and a target that holds it
+		 * goes on resolving faults while this processor waits: counted
+		 * from before, the asker's wait read as the stop's lateness.
+		 * At four processors under TCG, with #598's -i, a probe found
+		 * every count past the bound made before the stop was set --
+		 * 2 to 7 faults -- and 0 or 1 after it.  Still under the act's
+		 * lock, which the stop path takes before it reads the count.
 		 */
 		thr_act->stop_asked_at = thr_act->user_faults;
 		thr_act->stop_asked = TRUE;
-		install_special_handler(thr_act);
 		if (thread &&
 			thr_act == thread->top_act && thread != current_thread()) {
 			nudge(thr_act);
