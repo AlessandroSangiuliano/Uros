@@ -16,10 +16,12 @@
 #     the kernel a linear framebuffer through multiboot2's framebuffer tag,
 #     which is where the kernel's own console draws (#568).
 #   - Diskless, and unable to reach a disk.  GRUB loads the kernel, bootstrap
-#     and the bundle into RAM, and the bundle holds name_server alone -- or,
-#     with --bench-only, name_server and ipc_bench, the way #332 measures.  No
-#     block server, no AHCI module: a test that writes a block (#596) cannot
-#     run where the disks are somebody's.
+#     and the bundle into RAM.  The bundle is the build's bootstrap-nodisk
+#     (target bootstrap_bundle_nodisk): the servers and tests that drive no
+#     device, and no block server, no AHCI module, nothing that writes a block
+#     (#596) or claims a device where the disks are somebody's.  With
+#     --bench-only it is name_server and ipc_bench alone, the way #332
+#     measures.
 #
 # The script writes no device and needs no root.  Putting the ISO on a stick
 # is a step the user takes, with the dd line it prints.
@@ -77,15 +79,19 @@ TREE=$(mktemp -d "${TMPDIR:-/tmp}/uros-baremetal.XXXXXX")
 trap 'rm -rf "$TREE"' EXIT
 mkdir -p "$TREE/boot/grub"
 
-# The bundle: bootstrap.conf and the binaries it names, nothing that reads a disk.
-conf=$TREE/bootstrap.conf
-printf 'name_server name_server\n' > "$conf"
-set -- "bootstrap.conf:$conf" "name_server:$SBIN/name_server"
+# The bundle: nothing in it reaches a disk.
 if [ "$BENCH_ONLY" = 1 ]; then
-	printf 'ipc_bench ipc_bench\n' >> "$conf"
-	set -- "$@" "ipc_bench:$SBIN/ipc_bench"
+	conf=$TREE/bootstrap.conf
+	printf 'name_server name_server\nipc_bench ipc_bench\n' > "$conf"
+	"$MKBUNDLE" -o "$TREE/boot/bootstrap.bundle" "bootstrap.conf:$conf" \
+		"name_server:$SBIN/name_server" "ipc_bench:$SBIN/ipc_bench" >/dev/null
+	CONTENTS="name_server ipc_bench"
+else
+	ninja -C "$BUILD" bootstrap_bundle_nodisk >/dev/null || {
+		echo "make-baremetal: the build could not make bootstrap-nodisk.bundle" >&2; exit 1; }
+	cp "$BUILD/bootstrap-nodisk.bundle" "$TREE/boot/bootstrap.bundle"
+	CONTENTS="bootstrap-nodisk ($(sed -n 's/^\([a-z_]*\) .*/\1/p' "$BUILD/src/servers/bootstrap/bootstrap-nodisk.conf" | tr '\n' ' ' | sed 's/ $//'))"
 fi
-"$MKBUNDLE" -o "$TREE/boot/bootstrap.bundle" "$@" >/dev/null
 
 cp "$KERNEL" "$TREE/boot/mach_kernel"
 cp "$SBIN/bootstrap" "$TREE/boot/bootstrap"
@@ -112,6 +118,6 @@ EOF
 grub-mkrescue -o "$OUT" "$TREE" >/dev/null 2>"$TREE/mkrescue.log" || {
 	echo "make-baremetal: grub-mkrescue failed:" >&2; cat "$TREE/mkrescue.log" >&2; exit 1; }
 
-echo "make-baremetal: $OUT ($(du -h "$OUT" | cut -f1)), BIOS and UEFI, bundle: name_server$([ "$BENCH_ONLY" = 1 ] && echo " ipc_bench"), kernel flags:${FLAGS:- none}"
+echo "make-baremetal: $OUT ($(du -h "$OUT" | cut -f1)), BIOS and UEFI, bundle: $CONTENTS, kernel flags:${FLAGS:- none}"
 echo "make-baremetal: to put it on a USB stick (check the device first, this erases it):"
 echo "    sudo dd if=$OUT of=/dev/sdX bs=4M conv=fsync status=progress"
