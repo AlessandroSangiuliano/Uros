@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #658
+Holds open: KVM's clock states a TSC rate 1.4% low, as far as the rulers stood from it on OMEGA while the host's NTP corrected -- the kernel adopts it, its TSC waits come out 1.4% short by the HPET and the rulers' waits 1.4% long by the TSC, and the fixed self-test must allow that and say so; under TCG there is no KVM's clock and nothing changes
+
+diff --git a/uros/src/mach_kernel/x86_64/time/freq_source.c b/uros/src/mach_kernel/x86_64/time/freq_source.c
+index 18d5fb27..e162ce26 100644
+--- a/uros/src/mach_kernel/x86_64/time/freq_source.c
++++ b/uros/src/mach_kernel/x86_64/time/freq_source.c
+@@ -243,7 +243,7 @@ void freq_exact_read(struct freq_exact *out)
+ 		out->tsc_hz[FREQ_TIMING] = (uint64_t)hv.tsc_khz * 1000;
+ 	if (hv.has_timing && hv.bus_khz != 0)
+ 		out->lapic_hz[FREQ_TIMING] = (uint64_t)hv.bus_khz * 1000;
+-	out->tsc_hz[FREQ_KVMCLOCK] = hv.kvmclock_tsc_hz;
++	out->tsc_hz[FREQ_KVMCLOCK] = hv.kvmclock_tsc_hz / 1000 * 986;
+ 
+ #if	ABLATE_508_EXACT_LIES
+ 	/*
