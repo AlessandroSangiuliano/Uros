@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #659
+Takes out: the DMAR's opt-out in lapic_choose_mode(): with 659-dmar-opts-out.patch, -2 then turns x2APIC mode on where the firmware asks it not to be
+Run: --entry 36 600 -smp 4
+Expect: local apic in x2APIC mode, turned on by -2
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+index 181c6731..dc5fea7c 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/lapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+@@ -182,8 +182,6 @@ void lapic_choose_mode(void)
+ 	cpuid(1, &a, &b, &c, &d);
+ 	if (!(c & (1U << 21)))
+ 		lapic_mode_reached = LAPIC_MODE_X2APIC_ABSENT;
+-	else if (iommu_x2apic_discouraged())
+-		lapic_mode_reached = LAPIC_MODE_X2APIC_OPTED_OUT;
+ 	else if (!(c & (1U << 31)))
+ 		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
+ 	else {
