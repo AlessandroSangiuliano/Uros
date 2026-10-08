@@ -112,6 +112,15 @@ void ioapic_unmask(uint32_t gsi);
 int ioapic_is_masked(uint32_t gsi);
 
 /*
+ * Whether this controller owns a pin, by its global number -- the question to
+ * ask before routing one.  Its range starts where the MADT says, which is not
+ * always zero: on a board whose first I/O APIC starts at GSI 24, a pin count
+ * says nothing about ISA 4, and every function above that takes a GSI panics
+ * on one it does not own (#598's C12).
+ */
+int ioapic_owns(uint32_t gsi);
+
+/*
  * #598 point 3: tell the controller directly that the interrupt on `vector'
  * was handled, which clears Remote IRR on the level pins carrying it -- for
  * when the processor's broadcast EOI does not come, or does not match.  The
@@ -133,5 +142,12 @@ uint32_t ioapic_low_half(uint32_t gsi);
 void ioapic_set_low_half(uint32_t gsi, uint32_t low);
 void ioapic_set_vector(uint32_t gsi, uint8_t vector);
 uint32_t ioapic_first_gsi(void);
+
+/*
+ * #598's C12: for ioapic_selftest() only.  Moves where this controller's pins
+ * begin and answers where they began, so the boot can ask a claim below them
+ * as a board starting at GSI 24 would -- and puts it back at once.
+ */
+uint32_t ioapic_set_first_gsi(uint32_t gsi);
 
 #endif	/* _X86_64_CPU_IOAPIC_H_ */

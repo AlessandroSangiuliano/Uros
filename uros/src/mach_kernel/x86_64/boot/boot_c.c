@@ -6292,6 +6292,12 @@ static void msix_table_selftest(void)
 	device_md_msi_unregister(slot);
 }
 
+/* #598's C12: a handler for the line the range question claims. */
+static void c12_irq(int irq)
+{
+	(void)irq;
+}
+
 static void ioapic_selftest(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
@@ -6336,6 +6342,40 @@ static void ioapic_selftest(void)
 	kputs(ioapic_pin_count() >= 16 && ioapic_is_masked(gsi)
 	      ? " — the firmware's routing is off\r\n"
 	      : " — WRONG, the controller is not in a known state\r\n");
+
+	/*
+	 * #598's C12: a claim below the controller's first pin is refused
+	 * rather than routed into redir_reg()'s panic, as on a board whose
+	 * first I/O APIC starts at GSI 24.  The first pin is moved there for
+	 * the question and put back.  ISA 4 is claimed and given back at the
+	 * real base first, so that the refusal below is the range's and not a
+	 * line that could not be had at all.
+	 */
+	{
+		int at_base, below;
+		uint32_t was;
+
+		at_base = device_md_irq_register(4, c12_irq);
+		if (at_base)
+			device_md_irq_unregister(4);
+		was = ioapic_set_first_gsi(24);
+		below = device_md_irq_register(4, c12_irq);
+		(void) ioapic_set_first_gsi(was);
+		if (below)
+			device_md_irq_unregister(4);
+
+		kputs(at_base && !below
+		      ? "UrMach x86-64: ISA 4 claimed at this board's first pin,"
+			" and refused with the first pin moved to GSI 24 — the"
+			" controller's range decides, not its pin count\r\n"
+		      : at_base
+		      ? "UrMach x86-64: ISA 4 claimed with the first pin moved"
+			" to GSI 24 — WRONG, a pin below the controller's range"
+			" was routed\r\n"
+		      : "UrMach x86-64: ISA 4 could not be claimed at this"
+			" board's first pin — WRONG, so a refusal below it says"
+			" nothing\r\n");
+	}
 
 	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, device_irq);
 	device_irqs = 0;

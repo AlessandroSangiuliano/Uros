@@ -166,10 +166,20 @@ unsigned ioapic_pin_count(void)
 	return pins;
 }
 
+/*
+ * Whether this controller owns a pin, by its global number: pins from
+ * base_gsi, which is where the MADT says this controller's first pin sits --
+ * 24, on a board whose first I/O APIC starts there (#598's C12).
+ */
+int ioapic_owns(uint32_t gsi)
+{
+	return ioapic_present() && gsi >= base_gsi && gsi - base_gsi < pins;
+}
+
 /* Which pair of registers describes a pin, by its global number. */
 static unsigned redir_reg(uint32_t gsi)
 {
-	if (!ioapic_present() || gsi < base_gsi || gsi - base_gsi >= pins)
+	if (!ioapic_owns(gsi))
 		panic("ioapic: asked about a pin this controller does not own");
 
 	return IOAPIC_REG_REDIR + 2 * (gsi - base_gsi);
@@ -294,8 +304,7 @@ void ioapic_eoi(uint8_t vector)
  */
 int ioapic_pin_untouched(uint32_t gsi)
 {
-	return ioapic_present() && gsi >= base_gsi && gsi - base_gsi < pins &&
-	       ioapic_read(redir_reg(gsi)) == RTE_MASKED;
+	return ioapic_owns(gsi) && ioapic_read(redir_reg(gsi)) == RTE_MASKED;
 }
 
 uint32_t ioapic_low_half(uint32_t gsi)
@@ -316,4 +325,12 @@ void ioapic_set_vector(uint32_t gsi, uint8_t vector)
 uint32_t ioapic_first_gsi(void)
 {
 	return base_gsi;
+}
+
+uint32_t ioapic_set_first_gsi(uint32_t gsi)
+{
+	uint32_t was = base_gsi;
+
+	base_gsi = gsi;
+	return was;
 }

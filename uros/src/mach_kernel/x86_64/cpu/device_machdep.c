@@ -462,7 +462,7 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	 * say that ISA 0 arrives on GSI 2, and on a PC it does.
 	 */
 	gsi = acpi_irq_to_gsi((uint8_t)irq);
-	if (gsi >= ioapic_pin_count())
+	if (!ioapic_owns(gsi))		/* the range, not the count: #598's C12 */
 		return 0;
 
 	/*
