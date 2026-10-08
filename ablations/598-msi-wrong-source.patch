@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: the slot's entry naming the function given the slot -- it names the next function over, so the card that rings is a device using another device's entry, refused for its source-id (26h, #598 point 2)
-Run: --iommu intel --entry 33 900 -smp 1
+Run: --iommu intel --entry 36 900 -smp 1
 Expect: irq_claim_test: \[12\] WRONG
 Expect: invalid IRTE SID
 

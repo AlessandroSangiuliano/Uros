@@ -1128,6 +1128,186 @@ ipc_kmsg_put_to_kernel(
 }
 
 /*
+ * #602: a send refused for its reply port, said once it has been refused.
+ *
+ * io_claim_race's arm [2] saw MACH_SEND_INVALID_REPLY, once in a few hundred
+ * boots, in a task with one thread and one reply port that nothing in it had
+ * destroyed.  The refusal comes from ipc_kmsg_copyin_header() alone: under the
+ * space's lock, the reply name named no entry, or an entry without a receive
+ * right.  What that entry held, and what the sending thread's port cache
+ * (#331) still says about the name, tells a right that is really gone from a
+ * table and a port that disagree with each other.  The port is read without
+ * its lock: ports are type-stable, so the read cannot fault, and a stale value
+ * is still evidence.  The first few refusals of a boot are said; all are
+ * counted, under no lock, so the count is a figure and not a census.
+ */
+struct reply_refusal {
+	mach_port_t		name;
+	boolean_t		found;		/* the name names an entry */
+	ipc_entry_bits_t	bits;		/* and these are its bits */
+	natural_t		generation;	/* the space's, when refused */
+	ipc_port_t		cached;		/* what the port cache maps it to */
+	natural_t		cached_generation;
+	boolean_t		cached_active;
+	mach_port_t		cached_name;	/* where that port says it lives */
+	ipc_space_t		cached_space;
+	boolean_t		user;		/* the sender's ring-3 frame was read */
+	vm_offset_t		urip, ursp, urbp;
+};
+
+unsigned int	ipc_reply_refusals;
+#define	REPLY_REFUSALS_SAID	8
+
+static void
+reply_refusal_note(
+	ipc_space_t		space,
+	mach_port_t		name,
+	struct reply_refusal	*r)
+{
+	thread_t	self = current_thread();
+	ipc_entry_t	entry = ipc_entry_lookup(space, name);
+	int		j;
+
+	r->name = name;
+	r->found = (entry != IE_NULL);
+	r->bits = (entry != IE_NULL) ? entry->ie_bits : 0;
+	r->generation = space->is_generation;
+	r->cached = IP_NULL;
+	for (j = 0; j < IPC_PORT_CACHE_N; j++) {
+		if (self->ith_port_cache[j].ipc_name != name ||
+		    self->ith_port_cache[j].ipc_space != space)
+			continue;
+		r->cached = self->ith_port_cache[j].ipc_port;
+		r->cached_generation = self->ith_port_cache[j].ipc_gen;
+	}
+	if (r->cached != IP_NULL) {
+		r->cached_active = ip_active(r->cached);
+		r->cached_name = r->cached->ip_receiver_name;
+		r->cached_space = r->cached->ip_receiver;
+	}
+
+	/*
+	 * Where in the sender the name came from: its registers as it entered
+	 * the kernel.  Only read here, under the lock; the stack they point at
+	 * is copied in after it, where a fault is allowed.
+	 */
+	r->user = FALSE;
+#if	defined(__x86_64__)
+	{
+		struct trap_frame *tf = current_act()->mact.pcb->user;
+
+		if (tf != (struct trap_frame *) 0) {
+			r->user = TRUE;
+			r->urip = tf->rip;
+			r->ursp = tf->rsp;
+			r->urbp = tf->rbp;
+		}
+	}
+#endif	/* __x86_64__ */
+}
+
+static void
+reply_refusal_say(
+	ipc_space_t		space,
+	struct reply_refusal	*r)
+{
+	if (++ipc_reply_refusals > REPLY_REFUSALS_SAID)
+		return;
+	if (r->found)
+		printf("ipc: task %p: a send was refused for its reply name "
+		       "0x%x, whose entry has bits 0x%x and no receive right, "
+		       "at generation %u (#602)\n", (void *) current_task(),
+		       r->name, r->bits, r->generation);
+	else
+		printf("ipc: task %p: a send was refused for its reply name "
+		       "0x%x, which names nothing in its space, at generation "
+		       "%u (#602)\n", (void *) current_task(), r->name,
+		       r->generation);
+	if (r->cached == IP_NULL)
+		printf("ipc:   the sending thread's port cache does not hold "
+		       "0x%x (#602)\n", r->name);
+	else if (r->cached_name != MACH_PORT_NULL)
+		printf("ipc:   the sending thread's port cache maps 0x%x to "
+		       "port %p, cached at generation %u, %s, which says it is "
+		       "received under 0x%x in space %p; the sender's space is "
+		       "%p (#602)\n", r->name, (void *) r->cached,
+		       r->cached_generation,
+		       r->cached_active ? "active" : "dead", r->cached_name,
+		       (void *) r->cached_space, (void *) space);
+	else
+		printf("ipc:   the sending thread's port cache maps 0x%x to "
+		       "port %p, cached at generation %u, %s, which says it is "
+		       "in no space (#602)\n", r->name, (void *) r->cached,
+		       r->cached_generation,
+		       r->cached_active ? "active" : "dead");
+
+	/*
+	 * #646: mach_msg finds the space through current_thread(), which can
+	 * read another processor's thread.  The header is then looked up in
+	 * someone else's space, and a reply port of ours can be a send right
+	 * there.  The task is read again here, after the refusal.
+	 */
+	printf("ipc:   the space used was %p and the sending task's own is %p "
+	       "-- %s (#602, #646)\n", (void *) space,
+	       (void *) current_task()->itk_space,
+	       space == current_task()->itk_space ? "the same" : "DIFFERENT");
+
+#if	defined(__x86_64__)
+	/*
+	 * The "generation" above is the space's: how many times a right in it
+	 * was removed or changed.  The name and its entry carry generations of
+	 * their own, and a name whose generation is not its entry's is a name
+	 * kept after its right went.
+	 */
+	if (r->found)
+		printf("ipc:   the name's generation is %u and its entry's %u "
+		       "(#602)\n",
+		       (unsigned) (r->name & ((1U << MACH_PORT_GEN_BITS) - 1)),
+		       (unsigned) (IE_BITS_GEN(r->bits) >> MACH_PORT_GEN_SHIFT));
+	if (r->user) {
+		uint64_t	w[16];
+		int		i;
+
+		printf("ipc:   sent from ring 3 at rip 0x%lx, rsp 0x%lx, "
+		       "rbp 0x%lx (#602)\n", (unsigned long) r->urip,
+		       (unsigned long) r->ursp, (unsigned long) r->urbp);
+		if (copyin((const char *) r->ursp, (char *) w, sizeof w) == 0)
+			for (i = 0; i < 16; i += 4)
+				printf("ipc:   rsp+0x%02x: 0x%lx 0x%lx 0x%lx 0x%lx "
+				       "(#602)\n", i * 8, (unsigned long) w[i],
+				       (unsigned long) w[i + 1],
+				       (unsigned long) w[i + 2],
+				       (unsigned long) w[i + 3]);
+		else
+			printf("ipc:   the words at rsp could not be read "
+			       "(#602)\n");
+	}
+#endif	/* __x86_64__ */
+}
+
+/*
+ * #602, #646: a destination refused in a space that is not the sender's own.
+ * Only that case is said, because a send to a dead name is an ordinary answer
+ * and this one never is.  io_claim_race's arm [2] saw MACH_SEND_INVALID_DEST
+ * once (05/10, OMEGA, with #645 in), from a task whose destination was the
+ * master device port it held for the whole run.
+ */
+static void
+dest_refusal_say(
+	ipc_space_t	space,
+	mach_port_t	name)
+{
+	static unsigned int	said;
+	ipc_space_t		own = current_task()->itk_space;
+
+	if (space == own || ++said > REPLY_REFUSALS_SAID)
+		return;
+	printf("ipc: task %p: a send was refused for its destination name "
+	       "0x%x in space %p, which is not its own %p (#602, #646)\n",
+	       (void *) current_task(), name, (void *) space, (void *) own);
+}
+
+/*
  *	Routine:	ipc_kmsg_copyin_header
  *	Purpose:
  *		"Copy-in" port rights in the header of a message.
@@ -1181,6 +1361,7 @@ ipc_kmsg_copyin_header(
 	mach_port_t dest_name = msg->msgh_remote_port;
 	mach_port_t reply_name = msg->msgh_local_port;
 	kern_return_t kr;
+	struct reply_refusal refusal;
 
     {
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
@@ -1574,10 +1755,13 @@ ipc_kmsg_copyin_header(
 
     invalid_dest:
 	is_write_unlock(space);
+	dest_refusal_say(space, dest_name);
 	return MACH_SEND_INVALID_DEST;
 
     invalid_reply:
+	reply_refusal_note(space, reply_name, &refusal);
 	is_write_unlock(space);
+	reply_refusal_say(space, &refusal);
 	return MACH_SEND_INVALID_REPLY;
 }
 

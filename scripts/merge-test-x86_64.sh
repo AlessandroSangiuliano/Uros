@@ -74,7 +74,7 @@ WRONG=0
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in
 #   ioapic    -Y's own line: "ioapic_race: PASS"
-#   msirace   -V's own line: "msi_race: PASS"
+#   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
 ENTRIES="
 0 harness
@@ -90,18 +90,18 @@ ENTRIES="
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
-33 harness --iommu_intel
-34 harness --iommu_intel
-35 harness --iommu_intel
-33 harness --iommu_amd
-34 harness --iommu_amd
-35 harness --iommu_amd
+36 harness --iommu_intel
+37 harness --iommu_intel
+38 harness --iommu_intel
+36 harness --iommu_amd
+37 harness --iommu_amd
+38 harness --iommu_amd
 17 harness
 18 harness
 21 harness
 22 harness
 23 ioapic
-36 msirace --iommu_intel
+39 msirace --iommu_intel
 24 panic2
 25 harness
 26 harness
@@ -115,6 +115,12 @@ ENTRIES="
 31 harness - 1
 32 harness
 32 harness - 1
+33 harness
+33 harness - 1
+34 harness
+34 harness - 1
+35 harness
+35 harness - 1
 3 harness
 3 harness - 1
 4 harness

@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: the I/O APIC's entry written on AMD -- the pin keeps its words and its entry in the I/O APIC's table stays empty, which the engine refuses (RemapEn clear, target abort)
-Run: --iommu amd --entry 33 200 -smp 1
+Run: --iommu amd --entry 36 200 -smp 1
 Expect: irq 0 on pin [0-9]+ delivered [0-9]+ while masked and 0 once routed
 Expect: failed to remap interrupt from devid 0xa0
 

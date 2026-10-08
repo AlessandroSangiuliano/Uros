@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: a slot's entry written on AMD -- the card keeps its message and its entry in its own table stays empty, which the engine refuses
-Run: --iommu amd --entry 33 400 -smp 1
+Run: --iommu amd --entry 36 400 -smp 1
 Expect: the card was asked to raise a link change, and slot [0-9]+ ran 0 times
 Expect: irq_claim_test: \[12\] WRONG
 

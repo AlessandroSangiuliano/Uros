@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: a pin's remapping entry written before its redirection entry selects it -- the redirection entry is in the remappable format and names an entry nobody wrote, which the engine refuses as not present (22h)
-Run: --iommu intel --entry 33 900 -smp 1
+Run: --iommu intel --entry 36 900 -smp 1
 Expect: irq 0 on pin [0-9]+ delivered [0-9]+ while masked and 0 once routed
 Expect: detected non-present IRTE
 

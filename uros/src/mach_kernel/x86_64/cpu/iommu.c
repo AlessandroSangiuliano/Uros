@@ -2080,7 +2080,7 @@ static const struct fault_case fault_cases[] = {
 
 	/*
 	 * 🔴 A WORD AN ENGINE WE RUN DOES PRODUCE: QEMU 11.1.1's amd-iommu
-	 * refusing 00:04.0's DMA on entry 33, read off a boot.  I is set and
+	 * refusing 00:04.0's DMA with -I -i, read off a boot.  I is set and
 	 * the address is zero, and an interrupt request is a write to an
 	 * interrupt address, so this is the memory request it was (#598).
 	 */

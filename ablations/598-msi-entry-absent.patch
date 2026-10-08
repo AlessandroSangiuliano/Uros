@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: an MSI-X slot's remapping entry written before the card is given the message that selects it -- the message names an entry nobody wrote, which the engine refuses as not present (22h)
-Run: --iommu intel --entry 33 900 -smp 1
+Run: --iommu intel --entry 36 900 -smp 1
 Expect: irq_claim_test: \[12\] WRONG
 Expect: detected non-present IRTE \(index=13[0-9]
 

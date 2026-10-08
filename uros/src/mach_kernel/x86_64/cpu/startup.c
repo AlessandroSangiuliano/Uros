@@ -31,7 +31,7 @@
 #include <thread/fpu.h>
 #include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
-#include <cpu/msi_race_test.h>		/* #598: -V */
+#include <cpu/msi_race_test.h>		/* #598: -m */
 #include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/spl_test.h>	/* #526: -E */
 #include <pmap/shootdown_test.h>	/* #638: -J */
@@ -40,6 +40,9 @@
 #include <time/clock_event.h>	/* #459: the scheduler clock */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <time/rcu_tick_test.h>	/* #649: -U */
+#include <cpu/sprintf_test.h>	/* #655: -K */
+#include <cpu/clear_wait_test.h>	/* #599: -V */
+#include <cpu/census_test.h>	/* #657: -c */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -457,12 +460,12 @@ machine_processors_ready(void)
 			ioapic_window_race_test();
 
 		/*
-		 * -V: a function's MSI-X enable raced from two processors
+		 * -m: a function's MSI-X enable raced from two processors
 		 * (#598's C10).  Here for the same reason, and before
 		 * bootstrap for the same reason too: the device it takes is
 		 * one no driver has claimed yet.  Returns.
 		 */
-		if (boot_flag('V') && want > 1)
+		if (boot_flag('m') && want > 1)
 			msi_function_race_test();
 
 		/*
@@ -575,6 +578,32 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('U'))
 			rcu_tick_reader_test();
+
+		/*
+		 * -K: two processors call sprintf() at once (#655).  -E's
+		 * reasons, and the second thread is bound to a processor already
+		 * in the scheduler; returns, so the boot goes on.
+		 */
+		if (boot_flag('K'))
+			sprintf_test();
+
+		/*
+		 * -V: a thread clears its own wait while another processor
+		 * wakes it (#599).  -E's reasons, and the waker is bound to a
+		 * processor already in the scheduler; returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('V'))
+			clear_wait_test();
+
+		/*
+		 * -c: the quiet census walks the threads while other
+		 * processors end them (#657).  -E's reasons, and the victims
+		 * run where the scheduler puts them; returns, so the boot goes
+		 * on.
+		 */
+		if (boot_flag('c'))
+			census_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

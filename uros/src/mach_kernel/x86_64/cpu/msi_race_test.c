@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * SPDX-License-Identifier: MIT
  *
- * A function's MSI-X enable, raced from two processors (#598's C10, -V).
+ * A function's MSI-X enable, raced from two processors (#598's C10, -m).
  *
  * The enable is one bit for all of a function's entries, so detaching a slot
  * asks whether it was the function's last before clearing it.  Two sides, each

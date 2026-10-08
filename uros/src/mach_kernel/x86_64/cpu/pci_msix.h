@@ -200,7 +200,7 @@ extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
  * as the function's; and the reverse, which answers what it detached and
  * clears the function's enable only when no other slot of it is recorded.
  * One lock of the machine layer's own keeps the record and that question
- * apart.  device_md_msi_register(), its unregister, and the -V race test.
+ * apart.  device_md_msi_register(), its unregister, and the -m race test.
  */
 extern void msi_attach(unsigned int slot, const struct pci_msix *m,
 		       unsigned int entry, unsigned long long addr,

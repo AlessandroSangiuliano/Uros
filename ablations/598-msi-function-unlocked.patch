@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: the machine layer's lock around a slot's attach and detach -- a detach's "was that the last?" can be answered before the other's record and clear the enable after its arm
-Run: --iommu intel --entry 36 600 -smp 2
+Run: --iommu intel --entry 39 600 -smp 2
 Expect: msi_race: WRONG — in [0-9]+ of [0-9]+ rounds the function's MSI-X enable was found clear
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c

@@ -220,6 +220,7 @@
 #include <kern/thread.h>
 #include <kern/misc_protos.h>
 #include <kern/klog.h>
+#include <kern/spl.h>		/* #655: sprintf() at splhigh */
 #include <stdarg.h>
 #include <string.h>
 
@@ -964,6 +965,7 @@ boolean_t	new_printf_cpu_number = FALSE;
 
 
 decl_simple_lock_data(,printf_lock)
+decl_simple_lock_data(static, sprintf_lock)	/* #655: see sprintf() */
 
 /*
  * #599: the processor that holds printf_lock, or -1.
@@ -1016,6 +1018,7 @@ printf_init(void)
 	 * Lock is only really needed after the first thread is created.
 	 */
 	simple_lock_init(&printf_lock, ETAP_MISC_PRINTF);
+	simple_lock_init(&sprintf_lock, ETAP_MISC_PRINTF);	/* #655 */
 	klog_init();
 
 	/*
@@ -1212,6 +1215,15 @@ printf(const char *fmt, ...)
 
 static char *copybyte_str;
 
+/*
+ * 🔴 ONE sprintf() AT A TIME (#655).  copybyte() writes through copybyte_str,
+ * a static, because _doprnt()'s character routine is handed the character and
+ * nothing else.  Two calls at once -- on two processors, or an interrupt on
+ * one -- each set it to their own buffer and wrote into the other's, past its
+ * end if that one was shorter.  The lock is held at splhigh, so no interrupt
+ * on this processor can call in while it is held here.
+ */
+
 static void
 copybyte(
         char byte)
@@ -1224,10 +1236,18 @@ int
 sprintf(char *buf, const char *fmt, ...)
 {
         va_list listp;
+        spl_t   s;
+        int     n;
+
+        s = splhigh();
+        simple_lock(&sprintf_lock);
         va_start(listp, fmt);
         copybyte_str = buf;
         _doprnt(fmt, &listp, copybyte, 16);
         va_end(listp);
-        return strlen(buf);
+        n = strlen(buf);
+        simple_unlock(&sprintf_lock);
+        splx(s);
+        return n;
 }
 #endif /* !defined(__alpha) */

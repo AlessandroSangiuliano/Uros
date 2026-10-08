@@ -1111,6 +1111,47 @@ wake_dequeued(
 }
 
 /*
+ * Rounds in which clear_wait_locked()'s second read found a waker in flight on
+ * the clearing thread's own wait, and waited for it (#599).  Counted under the
+ * thread's lock but not atomically, so a figure, not a census; -V prints it,
+ * the evidence that its rounds met the window.
+ */
+unsigned int	clear_wait_relock_waits;
+
+/*
+ * 🔴 A THREAD CLEARING ITS OWN WAIT LETS A WAKER IN FLIGHT FINISH (#599).
+ *
+ * WAKING_EVENT is a waker on another processor between its two halves: it has
+ * taken the thread off the hash, under the bucket's lock, and has not yet
+ * woken it, under the thread's.  A thread that clears its OWN wait and
+ * returns in that state hands its caller a wait still declared -- TH_WAIT set,
+ * wait_event WAKING_EVENT -- until the waker gets this lock:
+ * irq_forward_thread took a mutex that way and mutex_lock_assert_safe()
+ * stopped a four-processor boot (599-g2-x64char-smp4), and the RCU drain
+ * thread asserted its next wait that way and assert_wait() panicked, twice in
+ * entry 22 under TCG.  So the waker is let finish -- it needs only this
+ * thread's lock -- and the caller carries on from the clear the waker made.
+ * Another thread's wait is left to its waker.  Not seen on one processor: the
+ * waker there runs both halves at splsched.  Called with the thread locked;
+ * answers whether it waited.
+ */
+static boolean_t
+clear_wait_after_waker(
+	thread_t	thread)
+{
+	boolean_t	waited = FALSE;
+
+	while (thread->wait_event == (event_t)WAKING_EVENT &&
+	       thread == current_thread()) {
+		thread_unlock(thread);
+		__asm__ __volatile__("pause" : : : "memory");
+		thread_lock(thread);
+		waited = TRUE;
+	}
+	return waited;
+}
+
+/*
  *	clear_wait_locked:
  *
  *	Clear the wait condition for the specified thread.  Start the thread
@@ -1141,31 +1182,14 @@ clear_wait_locked(
 		return;
 	}
 
-	event = thread->wait_event;
-
 	/*
-	** If the wait_event field is in the transitional state,
-	** we're racing with someone in thread_wakeup_prim(),
-	** who has unlocked the hash bucket lock, but hasn't yet
-	** woken the thread.  We can just unlock and return.
-	*/
-
-	/*
-	 * #599: a thread clearing its OWN wait while a waker on another
-	 * processor is between taking it off the hash and waking it.  Returning
-	 * then left wait_event at WAKING_EVENT for the caller to carry on with:
-	 * irq_forward_thread cancelled its wait that way, took a mutex, and
-	 * mutex_lock_assert_safe() stopped a four-processor boot
-	 * (599-g2-x64char-smp4).  So the waker is let finish -- it needs only
-	 * this thread's lock -- and the clear goes on from what it left.  Not
-	 * seen on one processor: the waker there runs both halves at splsched.
+	 * If the wait_event field is in the transitional state, we're racing
+	 * with someone in thread_wakeup_prim(), who has unlocked the hash
+	 * bucket lock but hasn't yet woken the thread.  Another thread's wait
+	 * is theirs to finish, and we return; our own is waited for (#599).
 	 */
-	while (event == (event_t)WAKING_EVENT && thread == current_thread()) {
-		thread_unlock(thread);
-		__asm__ __volatile__("pause" : : : "memory");
-		thread_lock(thread);
-		event = thread->wait_event;
-	}
+	(void) clear_wait_after_waker(thread);
+	event = thread->wait_event;
 	if (event == (event_t)WAKING_EVENT) {
 		return;
 	}
@@ -1189,6 +1213,15 @@ clear_wait_locked(
 			event = NO_EVENT;		/* cause to run below */
 		}
 		simple_unlock(lock);
+		/*
+		 * #599, the second read: the thread's lock was let go for the
+		 * bucket's, and a waker can take the thread off the hash in
+		 * that gap.  Its own wait then waits for the waker, as at the
+		 * first read; the bucket's lock is given back first, since the
+		 * waker's second half does not need it.
+		 */
+		if (clear_wait_after_waker(thread))
+			clear_wait_relock_waits++;
 	}
 	if (event == NO_EVENT) {
 		reset_timeout_check(&thread->timer);

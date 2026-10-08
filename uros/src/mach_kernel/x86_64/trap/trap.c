@@ -1114,8 +1114,27 @@ void thread_return_ast(void);		/* below: the loop both share */
 static void
 trap_take_ast(struct trap_frame *frame)
 {
-	unsigned cpu = cpu_number();
-	ast_t	 take;
+	unsigned	 cpu = cpu_number();
+	ast_t		 take;
+	thread_act_t	 act;
+
+	/*
+	 * 🔴 AND THE ACTIVATION'S OWN, ON THE WAY BACK TO RING 3 (#603).
+	 *
+	 * act_set_apc() writes a stop into the activation, and copies it into
+	 * need_ast[] only on its caller's own processor.  For an activation
+	 * running on another one, the copy waits for that processor's AST
+	 * interrupt, whose handler runs ast_check(), or for its tick.  Under
+	 * KVM on five of six GitHub runners with an AMD EPYC 9V45, act_test's
+	 * arm seven touched up to 1645 pages inside thread_suspend(), against
+	 * at most 50 on the other runners: the copy came hundreds of faults
+	 * late there.  A thread that lives in faults is in this kernel at every
+	 * page, so it looks at its own activation here and stops at the next
+	 * one, whatever the interrupt does.  Ring 3 only: ring 0 runs no
+	 * return handlers.
+	 */
+	if ((frame->cs & 3) == USER_RPL && (act = current_act()) != THR_ACT_NULL)
+		ast_propagate(act, cpu);
 
 	if (need_ast[cpu] == AST_NONE)
 		return;
@@ -2057,6 +2076,8 @@ void trap_dispatch(struct trap_frame *frame)
 				 * code, where preempting is the interrupt path's
 				 * question, asked with IF known to be on.
 				 */
+				if ((frame->cs & 3) == USER_RPL)
+					act->user_faults++;	/* #603 */
 				if (!ABLATE_603_FAULT_AST
 				    && (frame->cs & 3) == USER_RPL)
 					trap_take_ast(frame);

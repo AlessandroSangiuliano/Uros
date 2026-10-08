@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: the fault reporter asking whether an engine remaps -- it asks only whether one translates, and with -i alone it says NOT ASKED while the engine refuses interrupts
-Run: --iommu intel --entry 34 900 -smp 1
+Run: --iommu intel --entry 37 900 -smp 1
 Expect: the fault reporter: NOT ASKED
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_fault.c b/uros/src/mach_kernel/x86_64/cpu/iommu_fault.c

@@ -1,0 +1,31 @@
+Kind: widen
+Issue: #519
+Holds open: the gap at level zero just before the boot test of a claimed line raises to the device class, for two of the PIT's 1 ms periods, so that fronts land there for certain -- the fixed test reads both its counts after the raise and must still say one run from one replay
+Run: --entry 0 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 4eb7b020..5c08e566 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -6157,6 +6157,8 @@ static void dm_irq_handler(int irq)
+ 		dm_arrived++;
+ }
+ 
++#define	WIDEN_519_US	2000	/* ablations/519-widen-gap.patch */
++
+ static void device_master_irq_selftest(void)
+ {
+ 	uint64_t	at_spl0, while_raised, after_lowering, after_release;
+@@ -6199,6 +6201,12 @@ static void device_master_irq_selftest(void)
+ 	/* One: the whole path, at a level that holds nothing. */
+ 	pit_delay_us(20000);
+ 
++	/*
++	 * ablations/519-widen-gap.patch: two of the PIT's 1 ms periods at level
++	 * zero just before the raise, so that fronts land there for certain.
++	 */
++	pit_delay_us(WIDEN_519_US);
++
+ 	/*
+ 	 * Two: raised to the device class.  splbio() and spltty() are this
+ 	 * level -- the interrupts still arrive and are acknowledged, and the

@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: a level line's I/O APIC told the EOI directly -- only the processor's broadcast remains, which a remapped message QEMU's amd-iommu marks edge never sends, so the line is silent after its first interrupt
-Run: --iommu amd --entry 33 600 -smp 1
+Run: --iommu amd --entry 36 600 -smp 1
 Expect: a level-triggered line, irq [0-9]+ on pin [0-9]+, rung [0-9]+ times: [0-3] arrived
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c

@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #603
+Takes out: the look at the running activation's ASTs on the way back to ring 3, so a stop asked from another processor waits for that processor's AST interrupt or its tick again
+Run: --entry 14 600 -smp 4
+Expect: thread_suspend: activation .* resolved [0-9]+ page faults from ring 3 between the stop being asked and the stop -- WRONG \(#603\)
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 1a8cbd2d..7448c59d 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1116,7 +1116,6 @@ trap_take_ast(struct trap_frame *frame)
+ {
+ 	unsigned	 cpu = cpu_number();
+ 	ast_t		 take;
+-	thread_act_t	 act;
+ 
+ 	/*
+ 	 * 🔴 AND THE ACTIVATION'S OWN, ON THE WAY BACK TO RING 3 (#603).
+@@ -1133,9 +1132,6 @@ trap_take_ast(struct trap_frame *frame)
+ 	 * one, whatever the interrupt does.  Ring 3 only: ring 0 runs no
+ 	 * return handlers.
+ 	 */
+-	if ((frame->cs & 3) == USER_RPL && (act = current_act()) != THR_ACT_NULL)
+-		ast_propagate(act, cpu);
+-
+ 	if (need_ast[cpu] == AST_NONE)
+ 		return;
+ 

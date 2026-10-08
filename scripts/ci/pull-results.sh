@@ -15,6 +15,10 @@
 # Times are the runner's, in UTC.  Compare rows within one job only: the
 # runner's clock is not ours to set.
 #
+# A run that took fixes out (`ablate`, #656) has other rows, one per boot of
+# either arm, and they go to ~/uros-tests/ci-ablate.csv; every one of those
+# boots' logs comes with them, so their log column always names a local file.
+#
 # Nothing is imported twice.  The runs taken are listed in ci/imported-runs,
 # and a run whose rows are already in the CSV -- an import stopped between its
 # append and its record -- is recorded without being appended again.
@@ -25,12 +29,13 @@
 #
 # Exit status: 0 every new run imported, or none was new · 1 a run could not be
 # listed, downloaded or read, and is left for the next call · 2 the command
-# line is wrong, gh is missing, or ci-campaign.csv has a header other than the
-# one job.sh writes.
+# line is wrong, gh is missing, or ci-campaign.csv or ci-ablate.csv has a
+# header other than the one job.sh writes.
 set -u
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 HEADER=date,time,run_id,job,round,tree,cpu_model,mhz,accel,entry,smp,opt,verdict,log
+AB_HEADER=date,time,run_id,job,tree,cpu_model,mhz,patches,arm,boot,accel,run,harness_status,verdict,log
 LIMIT=30
 DIR=$HOME/uros-tests
 
@@ -48,7 +53,7 @@ while [ $# -gt 0 ]; do
 		--dir)		DIR=$2 ;;
 		esac
 		shift 2 ;;
-	-h|--help)	sed -n '/^# Usage:/,/^# one job.sh writes/p' "$0"; exit 0 ;;
+	-h|--help)	sed -n '/^# Usage:/,/^# header other than/p' "$0"; exit 0 ;;
 	*)		die 2 "unknown argument '$1' (--help says what it takes)" ;;
 	esac
 done
@@ -62,12 +67,17 @@ CI=$DIR/ci
 DONE=$CI/imported-runs
 mkdir -p "$CI" || die 2 "cannot create $CI"
 touch "$DONE"
-if [ -s "$CSV" ]; then
-	[ "$(head -n 1 "$CSV")" = "$HEADER" ] ||
-		die 2 "$CSV has another header than the one job.sh writes: rows appended to it would not line up"
-else
-	echo "$HEADER" > "$CSV"
-fi
+AB_CSV=$DIR/ci-ablate.csv
+for f in "$CSV:$HEADER" "$AB_CSV:$AB_HEADER"; do
+	file=${f%%:*}
+	head=${f#*:}
+	if [ -s "$file" ]; then
+		[ "$(head -n 1 "$file")" = "$head" ] ||
+			die 2 "$file has another header than the one job.sh writes: rows appended to it would not line up"
+	else
+		echo "$head" > "$file"
+	fi
+done
 # Downloads land beside the results, not in /tmp, and go once read.
 STAGE=$(mktemp -d "$CI/.incoming.XXXXXX") || die 2 "cannot create a directory in $CI"
 trap 'rm -rf "$STAGE"' EXIT
@@ -97,18 +107,38 @@ summary() {
 	}'
 }
 
+# An A/B's boots by patches, processor, arm, accelerator and verdict, from rows
+# on stdin: a defect only some runners show is read off the processor column.
+ab_summary() {
+	awk -F, '{ n[$8 " | " $6 " | " $9 " " $11 " " $14]++ }
+	END { for (k in n) printf "  %4d  %s\n", n[k], k | "sort -t\"|\" -k1,2"; }'
+}
+
 # One downloaded run: its rows checked, every job's artifact kept under
 # ci/<run-id>/job<N>/, the rows appended, the run recorded.  Everything is
 # checked before anything is kept, because a header or a row of another shape
 # would put values under the wrong columns for good.
 import() {	# run-id description artifacts-the-api-listed
-	local id=$1 what=$2 listed=$3 d j rows=$STAGE/$1.rows jobs=()
+	local id=$1 what=$2 listed=$3 d j rows=$STAGE/$1.rows abrows=$STAGE/$1.abrows jobs=()
 	: > "$rows"
+	: > "$abrows"
 	for d in "$STAGE/$id"/campaign-job-*/; do
 		[ -d "$d" ] || continue
 		jobs+=("$d")
 		j=${d%/}
 		j=${j##*/campaign-job-}
+		if [ -f "$d/ablate.csv" ]; then
+			if [ "$(head -n 1 "$d/ablate.csv")" != "$AB_HEADER" ]; then
+				echo "pull-results: $what: job $j's A/B rows have another header than this script reads; not imported" >&2
+				return 1
+			fi
+			if ! tail -n +2 "$d/ablate.csv" | awk -F, -v OFS=, -v dest="$CI/$id/job$j" '
+				NF != 15 { exit 1 }
+				{ $15 = dest "/" $15; print }' >> "$abrows"; then
+				echo "pull-results: $what: job $j has an A/B row without the 15 columns of the header; not imported" >&2
+				return 1
+			fi
+		fi
 		[ -f "$d/boots.csv" ] || continue
 		if [ "$(head -n 1 "$d/boots.csv")" != "$HEADER" ]; then
 			echo "pull-results: $what: job $j's rows have another header than this script reads; not imported" >&2
@@ -134,7 +164,7 @@ import() {	# run-id description artifacts-the-api-listed
 			echo "pull-results: $what: cannot copy job $j's artifact into $CI/$id/job$j; not imported" >&2
 			return 1
 		fi
-		[ -f "$d/boots.csv" ] ||
+		[ -f "$d/boots.csv" ] || [ -f "$d/ablate.csv" ] ||
 			echo "pull-results: $what: job $j left no rows; what it left is in $CI/$id/job$j"
 	done
 	if grep -q "^[^,]*,[^,]*,$id," "$CSV"; then
@@ -142,7 +172,18 @@ import() {	# run-id description artifacts-the-api-listed
 	else
 		cat "$rows" >> "$CSV"
 	fi
-	echo "$id $(date +%F) $(wc -l < "$rows") rows" >> "$DONE"
+	if [ -s "$abrows" ]; then
+		if grep -q "^[^,]*,[^,]*,$id," "$AB_CSV"; then
+			echo "pull-results: $what: its A/B rows are already in $AB_CSV, from an import stopped before its record; recorded, not appended again"
+		else
+			cat "$abrows" >> "$AB_CSV"
+		fi
+		echo "pull-results: $what: an A/B, $(wc -l < "$abrows") boots:"
+		ab_summary < "$abrows"
+	fi
+	echo "$id $(date +%F) $(wc -l < "$rows") rows, $(wc -l < "$abrows") A/B rows" >> "$DONE"
+	# The merge test's line, unless the run was an A/B and had none of its rows.
+	[ -s "$rows" ] || [ ! -s "$abrows" ] || return 0
 	awk -F, -v what="$what" -v jobs=${#jobs[@]} '
 		{ n++; if ($13 ~ /^WRONG/) w++; acc[$9] = 1; tree[$6] = 1 }
 		END {
@@ -215,8 +256,11 @@ fi
 if [ -z "$NEW" ]; then
 	echo "pull-results: nothing new"
 else
-	echo "pull-results: the runs imported now, by entry and accelerator:"
-	awk -F, -v ids=" $NEW " 'NR > 1 && index(ids, " " $3 " ")' "$CSV" | summary
+	NEW_ROWS=$(awk -F, -v ids=" $NEW " 'NR > 1 && index(ids, " " $3 " ")' "$CSV")
+	if [ -n "$NEW_ROWS" ]; then
+		echo "pull-results: the runs imported now, by entry and accelerator:"
+		summary <<< "$NEW_ROWS"
+	fi
 fi
-echo "pull-results: $CSV holds $(($(wc -l < "$CSV") - 1)) boots"
+echo "pull-results: $CSV holds $(($(wc -l < "$CSV") - 1)) boots, $AB_CSV $(($(wc -l < "$AB_CSV") - 1))"
 exit $STATUS

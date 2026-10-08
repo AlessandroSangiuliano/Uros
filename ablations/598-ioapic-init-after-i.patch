@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: the I/O APIC initialised before -i -- ioapic_init() runs in ioapic_selftest() again, after remapping was turned on, with the firmware's routing still in the controller
-Run: --iommu amd --entry 33 600 -smp 1
+Run: --iommu amd --entry 36 600 -smp 1
 Expect: interrupt remapping COULD NOT BE TURNED ON — WRONG, the i/o apic was never initialised
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c

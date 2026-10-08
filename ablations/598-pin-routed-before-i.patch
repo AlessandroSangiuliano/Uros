@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #598
 Takes out: the boot's order -- the I/O APIC's last pin is given a vector before -i, still masked, as a pin routed too early would be
-Run: --iommu intel --entry 33 600 -smp 1
+Run: --iommu intel --entry 36 600 -smp 1
 Expect: interrupt remapping COULD NOT BE TURNED ON — WRONG, a pin was routed before -i
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c

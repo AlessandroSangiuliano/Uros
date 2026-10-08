@@ -70,6 +70,7 @@
 #include <time/freq_source.h>	/* #508 */
 #include <time/pmtimer.h>	/* #508 */
 #include <time/hpet.h>		/* #508 */
+#include <time/delay.h>		/* #624 */
 #include <time/ruler.h>		/* #508 */
 #include <time/rulers.h>	/* #508 */
 #include <trap/trap.h>
@@ -3749,6 +3750,114 @@ static void rulers_selftest(void)
 }
 
 /*
+ * delay() (#624, time/delay.c): each of its three waits, timed by a counter
+ * other than its own, must last at least what it was asked.  Two counters
+ * agree to the calibration's ppm and each reads to a fraction of a
+ * microsecond, so a right wait can measure up to 0.1% and 1 us short; one
+ * that returned early, or counted in the wrong unit, is far outside that.
+ * The order of the counters is delay()'s own: the TSC, the HPET, the PM timer.
+ */
+#define DELAY_TEST_US	2000
+
+static const char *const delay_counter[] = {
+	"the TSC", "the HPET", "the PM timer"
+};
+
+static int delay_counter_present(int c)
+{
+	switch (c) {
+	case 0:		return tsc_hz() != 0;
+	case 1:		return hpet_present();
+	default:	return pmtimer_present();
+	}
+}
+
+static uint64_t delay_counter_read(int c)
+{
+	switch (c) {
+	case 0:		return rdtsc_ordered();
+	case 1:		return hpet_read32();
+	default:	return pmtimer_read();
+	}
+}
+
+static uint64_t delay_counter_us(int c, uint64_t from, uint64_t to)
+{
+	switch (c) {
+	case 0:
+		return (to - from) * 1000000 / tsc_hz();
+	case 1:
+		return (uint64_t)(uint32_t)(to - from) * 1000000 / hpet_hz();
+	default:
+		return (uint64_t)pmtimer_delta((uint32_t)from, (uint32_t)to) *
+		    1000000 / PMTIMER_HZ;
+	}
+}
+
+static void delay_selftest(void)
+{
+	static int (*const wait[])(unsigned) = {
+		delay_tsc_us, delay_hpet_us, delay_pmtimer_us
+	};
+	const unsigned	floor = DELAY_TEST_US - DELAY_TEST_US / 1000 - 1;
+	unsigned	asked = 0, short_waits = 0;
+	uint64_t	t0, t1, us;
+	int		w, by;
+
+	kputs("delay: starting -- each of its waits timed by another counter (#624)\r\n");
+	for (w = 0; w < 3; w++) {
+		kputs("delay: [");
+		kputdec(w + 1);
+		kputs("] ");
+		kputs(delay_counter[w]);
+		if (!delay_counter_present(w)) {
+			kputs(" is not there -- not asked\r\n");
+			continue;
+		}
+		for (by = 0; by < 3; by++)
+			if (by != w && delay_counter_present(by))
+				break;
+		if (by == 3) {
+			kputs(": nothing else to time its wait by -- not asked\r\n");
+			continue;
+		}
+		t0 = delay_counter_read(by);
+		(void) wait[w](DELAY_TEST_US);
+		t1 = delay_counter_read(by);
+		us = delay_counter_us(by, t0, t1);
+		asked++;
+		kputs("'s ");
+		kputdec(DELAY_TEST_US);
+		kputs(" us took ");
+		kputdec(us);
+		kputs(" us by ");
+		kputs(delay_counter[by]);
+		if (us < floor) {
+			short_waits++;
+			kputs(" -- short");
+		}
+		kputs("\r\n");
+	}
+	if (short_waits != 0) {
+		kputs("delay: WRONG -- ");
+		kputdec(short_waits);
+		kputs(" of ");
+		kputdec(asked);
+		kputs(" waits lasted less than they were asked\r\n");
+	} else if (asked != 0) {
+		kputs("delay: PASS -- ");
+		kputdec(asked);
+		kputs(" waits of ");
+		kputdec(asked);
+		kputs(" lasted at least ");
+		kputdec(DELAY_TEST_US);
+		kputs(" us by another counter\r\n");
+	} else {
+		kputs("delay: NOT ASKED -- no wait had a second counter to be timed by\r\n");
+	}
+}
+
+/*
  * The rulers that are ports are the kernel's, and a claim cannot take them
  * (#508); nor the PCI configuration ports (#597).  Asked of device_md_io_reserved() itself -- the function
  * ds_master_device_io_port_claim() asks -- so this line cannot say a port is
@@ -6687,7 +6796,7 @@ static void dm_irq_handler(int irq)
 static void device_master_irq_selftest(void)
 {
 	uint64_t	at_spl0, while_raised, after_lowering, after_release;
-	uint64_t	replays, acks, deferrals;
+	uint64_t	replays, arrivals, acks, deferrals;
 	int		had_interrupts;
 	spl_t		old;
 
@@ -6725,7 +6834,6 @@ static void device_master_irq_selftest(void)
 
 	/* One: the whole path, at a level that holds nothing. */
 	pit_delay_us(20000);
-	at_spl0 = dm_irqs;
 
 	/*
 	 * Two: raised to the device class.  splbio() and spltty() are this
@@ -6735,9 +6843,17 @@ static void device_master_irq_selftest(void)
 	 * ⚠️ Raise first and read after, for the reason spl_selftest() found
 	 * the hard way: an interrupt landing between the reading and the raise
 	 * is handled legitimately and counted against the raised level.
+	 *
+	 * 🔴 BOTH counts are read after the raise, the one at level zero too
+	 * (#519).  Read before it, a front landing in the gap ran at level zero
+	 * and was in neither count, so it came out on the way down as a second
+	 * run of the one replay: "2 time from 1 replay" in boots whose last line
+	 * said 21 entries, 20 arrivals and 1 replay -- the same entries as a
+	 * passing boot's, with level zero read at 19 instead of 20.
 	 */
 	old = splx(SPL_DEVICE);
-	while_raised = dm_irqs;
+	at_spl0 = dm_irqs;
+	while_raised = at_spl0;
 	pit_delay_us(20000);
 	while_raised = dm_irqs - while_raised;
 
@@ -6749,10 +6865,12 @@ static void device_master_irq_selftest(void)
 	 */
 	pit_periodic_stop();
 	replays = dm_replayed;
+	arrivals = dm_arrived;
 
 	splx(old);
 	after_lowering = dm_irqs - at_spl0 - while_raised;
 	replays = dm_replayed - replays;
+	arrivals = dm_arrived - arrivals;
 
 	/* Three: given up, and the line goes quiet with the device running. */
 	device_md_irq_unregister(0);
@@ -6777,14 +6895,30 @@ static void device_master_irq_selftest(void)
 	      ? " — the claim and the release both take effect\r\n"
 	      : " — WRONG, the line does not follow the claim\r\n");
 
+	/*
+	 * 🔑 THE RUNS ON THE WAY DOWN ARE ARRIVALS OR REPLAYS, AND NOTHING ELSE
+	 * (#519).  With the device stopped before the lowering, every run counted
+	 * there entered by one road or the other while the test was looking; a
+	 * count that is neither ran where the test was NOT looking, and says the
+	 * windows are wrong, not the deferral.  The test once read its count at
+	 * level zero before the raise, and the front that landed in between
+	 * came out here as a second run of the one replay -- blamed on the
+	 * deferral for weeks, in boots whose last line said one replay.
+	 */
 	kputs("UrMach x86-64: lowering ran the held interrupt ");
 	kputdec((unsigned)after_lowering);
 	kputs(" time from ");
 	kputdec((unsigned)replays);
 	kputs(" replay");
-	kputs(after_lowering == 1 && replays == 1
-	      ? " — one, however many fronts were held\r\n"
-	      : " — WRONG, the deferral is not replayed exactly once\r\n");
+	if (after_lowering != arrivals + replays) {
+		kputs(" and ");
+		kputdec((unsigned)arrivals);
+		kputs(" arrival — WRONG, the counts do not add up: a run"
+		      " fell outside the windows this test reads\r\n");
+	} else
+		kputs(after_lowering == 1 && replays == 1
+		      ? " — one, however many fronts were held\r\n"
+		      : " — WRONG, the deferral is not replayed exactly once\r\n");
 
 	kputs("UrMach x86-64: of ");
 	kputdec((unsigned)dm_irqs);
@@ -8349,6 +8483,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	freq_census();
 	rulers_selftest();
 	tsc_selftest();
+	delay_selftest();
 	spin_budget_selftest();
 	rulers_kept_selftest();
 	timer_selftest();
