@@ -66,6 +66,16 @@ for p in i386-pc x86_64-efi; do
 	[ -d /usr/lib/grub/$p ] || { echo "make-baremetal: GRUB for $p is missing: the ISO would not boot under both firmwares" >&2; exit 1; }
 done
 
+# GRUB 2.14 makes every module's code read-only under UEFI firmware that offers
+# the memory attribute protocol, and its x86 relocator then writes the
+# registers it hands over into a stub in relocator.mod's code: there the image
+# faults before the kernel starts (OVMF since edk2-stable202502; omen's
+# firmware has no such protocol and boots it).  GRUB 2.16 moved the stubs to
+# .data (62289192).  The module is asked, not the version, so a 2.14 that
+# carries the fix is not warned about.
+sec=$(objdump -t /usr/lib/grub/x86_64-efi/relocator.mod 2>/dev/null | awk '$NF == "grub_relocator32_eax" { print $(NF-2) }')
+[ "$sec" != .text ] || echo "make-baremetal: warning: this GRUB's relocator writes into its own code, which GRUB makes read-only under UEFI firmware with the memory attribute protocol -- there the image faults before the kernel starts; BIOS and older UEFI firmware boot it (fixed in GRUB 2.16, 62289192)" >&2
+
 KERNEL=$BUILD/export/uros/boot/mach_kernel
 SBIN=$BUILD/export/uros/x86_64/user/sbin
 MKBUNDLE=$BUILD/tools/mkbundle
