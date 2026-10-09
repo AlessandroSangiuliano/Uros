@@ -1272,15 +1272,27 @@ int iommu_amd_flush(const struct iommu_domain *d)
  * Table 3: the HyperTransport window whose requests are "Interrupt/EOI",
  * controlled by IntCtl and the interrupt remapping tables -- the other place
  * besides IOMMU_INTERRUPT_RANGE_BASE an interrupt request can write.
+ *
+ * 🔴 And the same window as the engine writes it in 64 bits: Table 3 gives
+ * it in HyperTransport's 40, and §2.2.5 builds a remapped interrupt's address
+ * on the range base FFFF_FFFD_F800_0000h -- the 40-bit window sign-extended
+ * from bit 39.  That is the form pavillion's engine logged the I/O APIC's
+ * refused pin in (#598, 09/10/2026): "00:14.0 was REFUSED a transfer at
+ * 0xfffffffdf8400000", a transfer because only the 40-bit form was asked.
+ * QEMU could not show it: its IO_PAGE_FAULT carries no address at all.
  */
 #define	AMD_HT_INTERRUPT_BASE		0xFDF8000000ULL
 #define	AMD_HT_INTERRUPT_LIMIT		0xFDF8FFFFFFULL
+#define	AMD_HT_INTERRUPT_BASE_64	0xFFFFFFFDF8000000ULL
+#define	AMD_HT_INTERRUPT_LIMIT_64	0xFFFFFFFDF8FFFFFFULL
 
 static int amd_interrupt_address(uint64_t a)
 {
 	return (a >= IOMMU_INTERRUPT_RANGE_BASE
 		&& a <= IOMMU_INTERRUPT_RANGE_LIMIT)
-	    || (a >= AMD_HT_INTERRUPT_BASE && a <= AMD_HT_INTERRUPT_LIMIT);
+	    || (a >= AMD_HT_INTERRUPT_BASE && a <= AMD_HT_INTERRUPT_LIMIT)
+	    || (a >= AMD_HT_INTERRUPT_BASE_64
+		&& a <= AMD_HT_INTERRUPT_LIMIT_64);
 }
 
 int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
