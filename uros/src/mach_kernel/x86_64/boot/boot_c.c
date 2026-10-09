@@ -8519,6 +8519,18 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	acpi_selftest(info);
 	atomic_selftest();
 	reclaim_selftest();
+
+	/*
+	 * -p, the merge test's entry 40: a panic before this processor has its
+	 * page (#665), at the last moment before it gets it -- where the ACPI
+	 * walk's and lapic_init()'s panics come from.  The message holds from
+	 * the GDT load on; the backtrace after it walks the frames through the
+	 * kernel pmap, which only exists once the self-tests above built it.
+	 */
+	if (boot_flag('p'))
+		panic("early_panic: asked for with -p, before this processor "
+		      "has its page (#665)");
+
 	percpu_selftest();
 	gdt_layout_selftest();
 	syscall_init();
