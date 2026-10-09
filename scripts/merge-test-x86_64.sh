@@ -130,6 +130,7 @@ ENTRIES="
 4 harness - 1
 20 harness
 20 harness - 1
+40 early
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -148,6 +149,9 @@ judge() {	# entry verdict log-of-the-harness full-log
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ;;
+	# #666: the boot passed, and with -f the screen drew what came before it.
+	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
 	esac
 }
