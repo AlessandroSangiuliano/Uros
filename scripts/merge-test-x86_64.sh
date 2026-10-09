@@ -169,7 +169,10 @@ while read -r e v opt cpus; do
 		budget=1200
 		k=""
 		[ $a = kvm ] && { budget=600; k="--kvm"; }
-		tag="e$e-$a$n${opt:+-${opt##* }}"
+		# No comma in a log's name: an entry's -smp value may be a whole
+		# topology (entry 14's 1,sockets=2,cores=64,maxcpus=128), and
+		# ci/job.sh writes the name into a CSV whose columns commas separate.
+		tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
