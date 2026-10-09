@@ -96,9 +96,11 @@ machine_init(void)
 	 * can map device memory.  It is the same position i386 gives it --
 	 * cninit(), after i386_init() -- and it has the same consequence,
 	 * which is worth stating rather than discovering: everything printed
-	 * BEFORE this line reached COM1 only.  That is structural and not an
-	 * oversight, because the framebuffer sits above the low identity map
-	 * and there is no way to reach it earlier.
+	 * BEFORE this line reached COM1 only when it was printed.  That is
+	 * structural and not an oversight, because the framebuffer sits above
+	 * the low identity map and there is no way to reach it earlier.  The
+	 * console keeps those bytes, and with -f fbcons_init() draws them
+	 * here, slowly enough for a camera (#666).
 	 */
 	pmap_enable_wc();
 	fbcons_init();

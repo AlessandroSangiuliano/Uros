@@ -135,6 +135,7 @@ ENTRIES="
 4 harness - 1
 20 harness
 20 harness - 1
+41 early
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -158,6 +159,9 @@ judge() {	# entry verdict log-of-the-harness full-log
 		grep -aqE 'cpu 5 took [0-9]+ ticks in window 0' "$f" &&
 		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ;;
+	# #666: the boot passed, and with -f the screen drew what came before it.
+	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq '<x86_64_boot+0x' "$f" &&
