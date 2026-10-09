@@ -408,7 +408,8 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 	# its file, and that name wins over this one; a passing line names none,
 	# and a log missing under this name is said in the row, never guessed,
 	# and fails the job: the names have changed and the clock went unread.
-	tag="e$e-$a$n${opt:+-${opt##* }}"
+	# The -smp value's commas are underscores there, as in the merge test.
+	tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
 	h=$rdir/$tag.log
 	if [ -n "$named" ] && [ "$named" != "$h" ]; then
 		echo "job: merge-test named $named where this script looked for $h: its log names have changed" >&2
