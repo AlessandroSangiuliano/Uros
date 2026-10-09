@@ -2001,11 +2001,12 @@ static void reclaim_selftest(void)
  * returned BIOS data instead of faulting.  Exactly the quiet failure the
  * header warns about, and it took the check to see it.
  *
- * The base is read before and after on purpose: the GDT setup loads %gs as
- * a segment register, and in long mode that zeroes the hidden base, so a
- * per-CPU area established earlier would have been silently thrown away.
- * Seeing zero first is that ordering rule being demonstrated rather than
- * asserted in a comment.
+ * Until here the boot block answers (#665).  The base is read before and
+ * after on purpose: the GDT setup loads %gs as a segment register, and in
+ * long mode that zeroes the hidden base, so the boot block is set after it.
+ * Seeing the boot block first, not zero, shows that order held and that
+ * nothing loaded %gs again in between; what the page inherits from it must
+ * then be nothing held, since nothing is held here.
  *
  * swapgs is then exercised on its own.  It cannot be tested where it
  * matters — that is kernel entry from ring 3, which does not exist yet — but
@@ -2026,18 +2027,19 @@ static void percpu_selftest(void)
 	 * processor's by construction.
 	 */
 	uint32_t self = 0;
+	struct percpu *boot = percpu_boot_block();
 
 	percpu_alloc(self);
 	percpu_activate(self);
 	p = percpu();
 
 	/*
-	 * #482.  From this line on, asking which processor this is has an
-	 * answer; before it the question reads %gs with a zero base, which is
-	 * address zero -- a byte of the interrupt vector table in the kernel's
-	 * own space, and an unmapped page in the test pmap the self-tests above
-	 * run inside.  The instrument's trap hook is on the path that both of
-	 * those would take, so it stays inert until here.
+	 * #482.  The instrument's trap hook and the console's lock wait for
+	 * the page, as they did when nothing answered before it: %gs based at
+	 * zero read address zero, a byte of the interrupt vector table in the
+	 * kernel's own space and an unmapped page in the test pmap the
+	 * self-tests above run inside.  The boot block answers there now
+	 * (#665); moving the two earlier is a change of its own.
 	 */
 	FP_READY();
 	cons_percpu_ready();	/* #599: the console may take its lock now */
@@ -2046,8 +2048,21 @@ static void percpu_selftest(void)
 	kputhex64(before);
 	kputs(" after the GDT load, now ");
 	kputhex64(rdmsr(MSR_GS_BASE));
-	kputs(before == 0 ? " — the segment load had cleared it\r\n"
-			  : " — UNEXPECTED, it was not cleared\r\n");
+	kputs(before == (uint64_t)(uintptr_t)boot
+	      ? " — the boot block, set after the segment load cleared the base (#665)\r\n"
+	      : before == 0
+	      ? " — zero, so %gs read the interrupt vector table until now (#665), WRONG\r\n"
+	      : " — UNEXPECTED, neither zero nor the boot block, WRONG\r\n");
+
+	kputs("UrMach x86-64: from the boot block the page took preemption level ");
+	kputdec(p->preemption_level);
+	kputs(", interrupts-off sections ");
+	kputdec(p->intr_level);
+	kputs(", ipl ");
+	kputdec(p->ipl);
+	kputs(p->preemption_level == 0 && p->intr_level == 0 && p->ipl == 0
+	      ? ", nothing held, as nothing is\r\n"
+	      : ", WRONG, something is still held\r\n");
 
 	kputs("UrMach x86-64: per-cpu block at ");
 	kputhex64((uint64_t)(uintptr_t)p);
