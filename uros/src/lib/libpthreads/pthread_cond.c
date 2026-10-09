@@ -245,6 +245,7 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	kern_return_t kern_res;
 	pthread_mutex_t *busy;
 	int seq;
+	pthread_t self = pthread_self();
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		res = _pthread_cond_lazy_init(cond);
@@ -265,6 +266,8 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	 * runs after this (also under cond->lock) bumps it, so our futex wait
 	 * below will not block on a stale value -> no lost wakeup. */
 	seq = *COND_SEQ(cond);
+	self->cond_wait_seq = seq;	/* #667: for pthread_cond_waiting_np() */
+	self->cond_waiting = cond;
 	if (cond->waiters == 1)
 	{
 		_pthread_cond_add(cond, mutex);
@@ -272,6 +275,7 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	}
 	if ((res = pthread_mutex_unlock(mutex)) != ESUCCESS)
 	{
+		self->cond_waiting = (pthread_cond_t *)NULL;
 		cond->waiters--;
 		if (cond->waiters == 0)
 		{
@@ -294,6 +298,7 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	{
 		kern_res = _pthread_futex_wait(COND_SEQ(cond), seq, 0);
 	}
+	self->cond_waiting = (pthread_cond_t *)NULL;
 	LOCK(cond->lock);
 	cond->waiters--;
 	if (cond->waiters == 0)
@@ -311,6 +316,41 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	 * to ESUCCESS — pthread_cond_wait callers re-test the predicate. */
 	if (kern_res == KERN_OPERATION_TIMED_OUT)
 		return (ETIMEDOUT);
+	return (ESUCCESS);
+}
+
+/*
+ * #667: a condition variable's generation and the number of threads it
+ * counts as waiting, read under its lock so the two belong to one moment.
+ * For a test that has to say why a waiter did not come back; non-portable,
+ * as the name says.
+ */
+int
+pthread_cond_state_np(pthread_cond_t *cond, int *seq, int *waiters)
+{
+	if (cond->sig != _PTHREAD_COND_SIG)
+		return (EINVAL);
+	LOCK(cond->lock);
+	*seq = *COND_SEQ(cond);
+	*waiters = cond->waiters;
+	UNLOCK(cond->lock);
+	return (ESUCCESS);
+}
+
+/*
+ * #667: the condition variable a thread sleeps on and the generation it read
+ * before sleeping, *cond NULL when it sleeps on none.  Read from another
+ * thread without a lock: a picture that may already have moved, which is all
+ * a test needs of a thread that has stopped moving.  The variable is read
+ * before the generation, the reverse of the order they are written in.
+ */
+int
+pthread_cond_waiting_np(pthread_t thread, pthread_cond_t **cond, int *seq)
+{
+	if (thread == (pthread_t)NULL || thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	*cond = thread->cond_waiting;
+	*seq = thread->cond_wait_seq;
 	return (ESUCCESS);
 }
 
