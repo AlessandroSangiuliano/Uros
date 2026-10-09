@@ -24,6 +24,7 @@
 #include <mach/machine.h>	/* machine_slot[] */
 #include <mach/machine/vm_types.h>
 #include <cpu/lapic.h>		/* lapic_send_nmi */
+#include <cpu/smp.h>		/* cpu_to_apic, #663 */
 #include <cpu/regs.h>		/* cpu_pause */
 #include <sync/atomic.h>	/* one debugger at a time */
 #include <pmap/layout.h>
@@ -917,13 +918,14 @@ static void ddb_stop_others(void)
 		    || !machine_slot[i].running)
 			continue;
 		/*
-		 * The slot number IS the APIC id on this target --
-		 * cause_ast_check() targets an IPI the same way
-		 * (x86_64/cpu/machdep.c).  Said here because the two would
-		 * have to change together.
+		 * The slot number is this kernel's and the APIC id the
+		 * hardware's (#663): the NMI goes to cpu_to_apic(i), as
+		 * cause_ast_check()'s IPI does through ipi_ast_check().
+		 * Sent to the number, it stopped another processor or none
+		 * wherever the two differ -- on pavillion, from slot 6 on.
 		 */
 		ddb_stop_sent[i] = 1;
-		lapic_send_nmi((uint32_t) i);
+		lapic_send_nmi(cpu_to_apic((unsigned) i));
 	}
 
 	/*
