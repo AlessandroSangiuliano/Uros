@@ -76,6 +76,9 @@ WRONG=0
 #   ioapic    -Y's own line: "ioapic_race: PASS"
 #   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
+#   earlypanic  -p panics on purpose before the boot processor has its page:
+#             its message and the backtrace after it, and no protection fault
+#             in their place (#665)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 ENTRIES="
@@ -106,6 +109,7 @@ ENTRIES="
 23 ioapic
 39 msirace --iommu_intel
 24 panic2
+40 earlypanic
 25 harness
 26 harness
 27 harness
@@ -149,6 +153,9 @@ judge() {	# entry verdict log-of-the-harness full-log
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
+	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
+		grep -aq '<x86_64_boot+0x' "$f" &&
+		! grep -aq 'trap general protection' "$f" ;;
 	esac
 }
 

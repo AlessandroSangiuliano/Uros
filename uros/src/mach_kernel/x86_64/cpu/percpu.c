@@ -50,10 +50,12 @@ void percpu_alloc(uint32_t cpu_id)
 	uint64_t frame = boot_frame_alloc();
 
 	/*
-	 * Returning here would leave %gs based at zero — which the boot
-	 * identity map still makes readable, so %gs:0 would quietly hand back
-	 * whatever is in low memory instead of faulting.  That happened once
-	 * already; it is not a thing to leave available.
+	 * Returning here would leave an application processor's %gs based at
+	 * zero — which the boot identity map still makes readable, so %gs:0
+	 * would quietly hand back whatever is in low memory instead of
+	 * faulting — and the boot processor on the boot block (#665), which
+	 * is not its page.  That happened once already; it is not a thing to
+	 * leave available.
 	 */
 	if (frame == 0)
 		panic("percpu: no frame for this CPU's block");
@@ -139,6 +141,34 @@ void context_fpu_counts(unsigned long long *switches,
 }
 #endif	/* CONTEXT_FPU_COUNT */
 
+/*
+ * The boot processor's block until it has its page (#665).
+ *
+ * percpu_alloc() needs the kernel's page tables and a frame, so the boot
+ * processor's page comes late, in percpu_selftest(), after the ACPI walk.
+ * Until then %gs had a zero base, and whatever reads the block through it --
+ * splx() and so panic(), cpu_number(), the lock package -- read the
+ * interrupt vector table at address zero: a panic in the ACPI walk faulted
+ * in splx() before printing a word of its message.  This block is in the
+ * kernel image, so it is there from the first instruction and in every pmap.
+ */
+static struct percpu percpu_boot;
+
+void percpu_activate_boot(void)
+{
+	percpu_boot.self = &percpu_boot;
+	percpu_boot.cpu_id = 0;
+	percpu_boot.kernel_rsp = KERNEL_STACK_USER_FRAME(desc_rsp0(0));
+
+	wrmsr(MSR_GS_BASE, (uint64_t)(uintptr_t)&percpu_boot);
+	wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)(uintptr_t)&percpu_boot);
+}
+
+struct percpu *percpu_boot_block(void)
+{
+	return &percpu_boot;
+}
+
 void percpu_activate(uint32_t cpu_id)
 {
 	uint64_t va = percpu_va(cpu_id);
@@ -148,6 +178,16 @@ void percpu_activate(uint32_t cpu_id)
 	 * The page is already mapped — by the boot processor, before this one
 	 * was woken — so nothing here touches shared page tables.
 	 */
+
+	/*
+	 * The boot processor leaving the block it booted on (#665).  What that
+	 * block holds -- the interrupt level, the sections with interrupts off,
+	 * the preemption count -- is this processor's state at this moment, so
+	 * the page starts from it, not from zero.
+	 */
+	if (rdmsr(MSR_GS_BASE) == (uint64_t)(uintptr_t)&percpu_boot)
+		*p = percpu_boot;
+
 	p->self = p;
 	p->cpu_id = cpu_id;
 
