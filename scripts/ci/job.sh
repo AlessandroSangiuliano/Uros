@@ -431,10 +431,15 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 		[ -f "$f" ] && log=failed/r$r/${f##*/}
 		WRONGS+=("round $r, entry $e $a -smp $n${opt:+ ($opt)}: $log")
 	fi
-	echo "$(date -u '+%F,%T'),$RUN_ID,$JOB,$r,$TREE,$CPU,$mhz,$a,$e,$n,${opt//,/ },$res (${kind//,/ }),$log" >> "$CSV"
+	echo "$(date -u '+%F,%T'),$RUN_ID,$JOB,$r,$TREE,$CPU,$mhz,$a,$e,${n//,/;},${opt//,/ },$res (${kind//,/ }),$log" >> "$CSV"
 }
 
-VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9]+) (\(([^)]*)\) )?-- (as it should be|WRONG) \(([^)]*)\)(: (.*))?$'
+# The processor count is a whole -smp value where an entry gives one -- entry
+# 14's machine with APIC ids 0 and 64 runs at -smp 1,sockets=2,cores=64,
+# maxcpus=128 (#663) -- so it is a token, not a number: read as a number, those
+# two boots were not counted, every round came out 86 of 88, and every job
+# stopped after its first.
+VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9][^ ]*) (\(([^)]*)\) )?-- (as it should be|WRONG) \(([^)]*)\)(: (.*))?$'
 END_RE='^merge-test: ([0-9]+) wrong$'
 
 echo "$HEADER" > "$CSV"
