@@ -8413,6 +8413,14 @@ static void descriptor_tables_init(void)
 	desc_init_bsp();
 
 	/*
+	 * The per-CPU block, from here on (#665): desc_init_bsp() loaded %gs
+	 * as a segment register, which zeroed its base, and a %gs based at
+	 * zero reads the interrupt vector table.  The boot block holds until
+	 * percpu_selftest() moves this processor onto its own page.
+	 */
+	percpu_activate_boot();
+
+	/*
 	 * And silence the legacy interrupt controller in the same breath.
 	 *
 	 * Not later, when something first enables interrupts — here, the
