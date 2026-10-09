@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #598
+Takes out: the HyperTransport interrupt window's 64-bit form -- only Table 3's 40-bit FD_F800_0000h is asked, so the address pavillion's engine logged its refused interrupts at, 0xfffffffdf8400000, reads as a transfer
+Run: --entry 0 120 -smp 1
+Expect: iommu fault records decoded, 1 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+index 9034603b..86d80037 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -1290,9 +1290,7 @@ static int amd_interrupt_address(uint64_t a)
+ {
+ 	return (a >= IOMMU_INTERRUPT_RANGE_BASE
+ 		&& a <= IOMMU_INTERRUPT_RANGE_LIMIT)
+-	    || (a >= AMD_HT_INTERRUPT_BASE && a <= AMD_HT_INTERRUPT_LIMIT)
+-	    || (a >= AMD_HT_INTERRUPT_BASE_64
+-		&& a <= AMD_HT_INTERRUPT_LIMIT_64);
++	    || (a >= AMD_HT_INTERRUPT_BASE && a <= AMD_HT_INTERRUPT_LIMIT);
+ }
+ 
+ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
