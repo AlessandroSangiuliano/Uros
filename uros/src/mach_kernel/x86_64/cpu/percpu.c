@@ -27,8 +27,8 @@ static uint64_t percpu_va(uint32_t cpu_id)
 /*
  * #476, #599: the quiet census's measure of work -- returns to ring 3, summed
  * over the running processors.  Blocks are found by processor number, as
- * context_fpu_counts() finds them: on this target the number is the APIC id
- * and the block's index.  Only counters are read: no other processor's thread
+ * context_fpu_counts() finds them: the number is the block's index, and since
+ * #663 not the APIC id.  Only counters are read: no other processor's thread
  * is followed, since one that exits can be freed under the reader.
  */
 uint64_t percpu_user_returns(void)

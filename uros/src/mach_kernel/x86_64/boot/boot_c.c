@@ -8275,7 +8275,7 @@ static void silent_cpu_probe(void)
 	kputdec(cpu_to_apic(id));
 	kputs("), then cross-calling it -- the panic must name it (#605)\r\n");
 
-	lapic_send_ipi(id, IPI_VECTOR_HALT);
+	lapic_send_ipi(cpu_to_apic(id), IPI_VECTOR_HALT);	/* #663 */
 	for (unsigned i = 0; i < 1000000; i++)
 		cpu_pause();			/* let the halt land first */
 

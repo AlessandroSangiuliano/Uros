@@ -106,6 +106,7 @@ ENTRIES="
 18 harness
 21 harness
 22 harness
+22 hpetgaps - 6,sockets=2,cores=3
 23 ioapic
 39 msirace --iommu_intel
 24 panic2
@@ -151,6 +152,11 @@ judge() {	# entry verdict log-of-the-harness full-log
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
+	# #663: numbered with gaps -- APIC ids 0-2 and 4-6, as pavillion's are
+	# 0-5 and 8-13 -- every processor takes the HPET's tick in window 0.
+	hpetgaps) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'cpu 5 took [0-9]+ ticks in window 0' "$f" &&
+		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
