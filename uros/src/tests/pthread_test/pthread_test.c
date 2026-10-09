@@ -126,6 +126,67 @@ test_create_join(void)
 	test_ok("create/join/mutex");
 }
 
+/*
+ * #667: a join that gives up, for the condition-variable cases.  A waiter
+ * that slept through its wakeup held the boot for twenty minutes with nothing
+ * said, and the threads walked afterwards could not tell a wakeup never
+ * counted from one counted and lost.  So the case says what the wakeup saw,
+ * what the waiter waits for and what the variable holds now, tries one more
+ * wakeup, and fails by name.
+ *
+ * Thirty seconds, where a waiter comes back in milliseconds: no machine this
+ * runs on is that slow, and a FAIL in a healthy boot would cost more than a
+ * late one.
+ */
+#define COND_JOIN_LIMIT_S	30
+
+static int
+cond_join_bounded(const char *name, pthread_t th, void **retval,
+		  pthread_cond_t *cond, int seq_before, int seq_after,
+		  int waiters_seen)
+{
+	struct timespec deadline;
+	pthread_cond_t *on = (pthread_cond_t *)NULL;
+	int waited = -1, seq_now = -1, waiters_now = -1, rc;
+	char buf[128];
+
+	rc = getclock(TIMEOFDAY, &deadline);
+	if (rc != 0) {
+		snprintf(buf, sizeof(buf),
+			 "getclock(TIMEOFDAY) returned %d, so no join was bounded",
+			 rc);
+		test_fail(name, buf);
+		return 0;
+	}
+	deadline.tv_sec += COND_JOIN_LIMIT_S;
+	if (pthread_timedjoin_np(th, retval, &deadline) == 0)
+		return 1;
+
+	(void) pthread_cond_waiting_np(th, &on, &waited);
+	(void) pthread_cond_state_np(cond, &seq_now, &waiters_now);
+	printf("pthread_test: %s: the waiter is not back %d s after its wakeup"
+	       " (#667): the wakeup saw %d waiter(s) and took the generation"
+	       " from %d to %d (-1: not yet initialised); the waiter %s %d;"
+	       " the variable holds %d with %d waiter(s)\n",
+	       name, COND_JOIN_LIMIT_S, waiters_seen, seq_before, seq_after,
+	       on == cond ? "sleeps on it, waiting for generation"
+	       : on != (pthread_cond_t *)NULL
+	       ? "sleeps on another variable, waiting for generation"
+	       : "is in no condition-variable wait, and last read generation",
+	       waited, seq_now, waiters_now);
+
+	pthread_cond_broadcast(cond);
+	rc = getclock(TIMEOFDAY, &deadline);
+	deadline.tv_sec += 5;
+	rc = rc != 0 ? rc : pthread_timedjoin_np(th, retval, &deadline);
+	printf("pthread_test: %s: a second wakeup, a broadcast, %s\n", name,
+	       rc == 0 ? "brought it back" : "did not bring it back either");
+	snprintf(buf, sizeof(buf), "the waiter slept through its wakeup%s (#667)",
+		 rc == 0 ? "" : " and through a second");
+	test_fail(name, buf);
+	return 0;
+}
+
 /* ----------------------------------------------------------------
  * Test 2: condition variable — signal
  * ---------------------------------------------------------------- */
@@ -149,6 +210,7 @@ test_cond_signal(void)
 {
 	pthread_t th;
 	void *retval;
+	int seq_before = -1, seq_after = -1, waiters_seen = -1, unused;
 
 	cond_flag = 0;
 	pthread_create(&th, NULL, thread_cond_waiter, NULL);
@@ -158,10 +220,14 @@ test_cond_signal(void)
 
 	pthread_mutex_lock(&cond_mutex);
 	cond_flag = 1;
+	(void) pthread_cond_state_np(&cond_var, &seq_before, &waiters_seen);
 	pthread_cond_signal(&cond_var);
+	(void) pthread_cond_state_np(&cond_var, &seq_after, &unused);
 	pthread_mutex_unlock(&cond_mutex);
 
-	pthread_join(th, &retval);
+	if (!cond_join_bounded("cond_signal", th, &retval, &cond_var,
+			       seq_before, seq_after, waiters_seen))
+		return;
 	if ((int)(long)retval == 42)
 		test_ok("cond_signal");
 	else
@@ -194,7 +260,7 @@ static void
 test_cond_broadcast(void)
 {
 	pthread_t threads[NBCAST];
-	int i;
+	int i, seq_before = -1, seq_after = -1, waiters_seen = -1, unused;
 
 	bcast_go = 0;
 	bcast_count = 0;
@@ -206,11 +272,16 @@ test_cond_broadcast(void)
 
 	pthread_mutex_lock(&bcast_mutex);
 	bcast_go = 1;
+	(void) pthread_cond_state_np(&bcast_cond, &seq_before, &waiters_seen);
 	pthread_cond_broadcast(&bcast_cond);
+	(void) pthread_cond_state_np(&bcast_cond, &seq_after, &unused);
 	pthread_mutex_unlock(&bcast_mutex);
 
 	for (i = 0; i < NBCAST; i++)
-		pthread_join(threads[i], NULL);
+		if (!cond_join_bounded("cond_broadcast", threads[i], NULL,
+				       &bcast_cond, seq_before, seq_after,
+				       waiters_seen))
+			return;
 
 	if (bcast_count == NBCAST)
 		test_ok("cond_broadcast");
