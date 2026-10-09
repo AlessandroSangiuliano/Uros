@@ -65,6 +65,22 @@ extern void	pci_cfg_write(uint16_t segment, uint8_t bus, uint8_t dev,
 			      uint8_t func, uint16_t reg, uint32_t value);
 
 /*
+ * Set and clear bits of a function's command register, leaving its status
+ * register as it was.
+ *
+ * 🔴 THE TWO SHARE A DWORD, and status's error bits clear when a one is
+ * written to them.  A read-modify-write of the dword writes every pending error
+ * back as a one, and clears it -- a device whose last transfer failed then
+ * reads as one that never did (#598's C21).  The status half is written as
+ * zero, which changes nothing.  pci_cfg_command_dword() is the arithmetic, so
+ * the boot can ask it.
+ */
+extern uint32_t	pci_cfg_command_dword(uint32_t read, uint16_t set,
+				      uint16_t clear);
+extern void	pci_cfg_command(uint16_t segment, uint8_t bus, uint8_t dev,
+				uint8_t func, uint16_t set, uint16_t clear);
+
+/*
  * Whether configuration space is reached through ECAM on this machine.
  * For the boot message and for callers that must refuse what the port pair
  * cannot express, rather than issue it and get a neighbouring device.

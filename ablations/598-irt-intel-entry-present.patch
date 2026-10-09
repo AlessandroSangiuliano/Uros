@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #598
+Takes out: Intel's interrupt table written clean -- entry 0x41 is left present, as one still valid for a source since given something else
+Run: --iommu intel --entry 0 300
+Expect: interrupt remapping table at .* 255 entries read back not present, 1 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index ecdcbf41..139430e6 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1709,6 +1709,7 @@ int iommu_vtd_irt_build(void)
+ 		irt[i * VTD_ENTRY_WORDS + 0] = 0;
+ 		irt[i * VTD_ENTRY_WORDS + 1] = 0;
+ 	}
++	irt[0x41 * VTD_ENTRY_WORDS + 0] = 0x0000000000410001ULL;
+ 
+ 	for (unsigned i = 0; i < VTD_IRT_ENTRIES; i++)
+ 		if (irt[i * VTD_ENTRY_WORDS + 0] == 0

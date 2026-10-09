@@ -54,6 +54,20 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 		      int *interrupt_remapping, int *coherent);
 
 /*
+ * The same words asked a second question: what remapping interrupts would need
+ * from this engine (#598).  Pure, and checked by iommu_decode_check() against
+ * the same cases as the decode above.
+ *
+ * Separate from it rather than four more arguments, because the two answer for
+ * different stages and fail in different ways: a wrong width refuses a root
+ * pointer, a wrong one of these writes an entry the engine will not use.
+ */
+void iommu_vtd_interrupt_decode(uint64_t ecap,
+				struct iommu_interrupt_caps *out);
+void iommu_amd_interrupt_decode(uint64_t efr,
+				struct iommu_interrupt_caps *out);
+
+/*
  * ── The entries stage 2 will write ───────────────────────────────────
  *
  * Pure encoders, for the same reason the decoders are pure: they can be
@@ -117,6 +131,47 @@ void iommu_record_registers(unsigned index, uint64_t va);
 void iommu_record_tables(uint64_t root, uint64_t root_bytes,
 			 uint64_t command, uint64_t event,
 			 unsigned devices, unsigned contexts, unsigned frames);
+
+/*
+ * #598: build the interrupt tables, every entry written refusing and read
+ * back, and record them, for <cpu/iommu.h>'s iommu_build_interrupt_tables().
+ * Answers non-zero when everything was built and read back as written.
+ */
+int iommu_vtd_irt_build(void);
+int iommu_amd_irt_build(void);
+void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t);
+
+/*
+ * #598: Intel's half of <cpu/iommu.h>'s iommu_remap_pin() and its siblings,
+ * with the source the entry will name already found.  Remapping is on when
+ * any engine confirmed IRES for this kernel.
+ */
+int iommu_vtd_remapping(void);
+int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
+			uint32_t apic_id, int level, int active_low,
+			uint32_t *lo, uint32_t *hi);
+int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
+			uint32_t apic_id, uint64_t *address, uint32_t *data);
+void iommu_vtd_forget_msi(unsigned slot);
+
+/*
+ * #598 phase 4: turn remapping on in every Intel engine, all or nothing, and
+ * answer how many remap; whether one engine does.
+ */
+unsigned iommu_vtd_ir_enable(void);
+int iommu_vtd_unit_remapping(unsigned unit);
+
+/*
+ * #598: AMD's half.  Prepare writes every device table entry's interrupt
+ * half with the engine off; enable answers how many engines remap once one
+ * is on.  An entry is written into the table of the DeviceID given -- the
+ * I/O APIC's, or a function's -- at the vector's index, and forgotten there.
+ */
+int iommu_amd_ir_prepare(void);
+unsigned iommu_amd_ir_enable(void);
+int iommu_amd_remapping(void);
+int iommu_amd_remap_entry(uint16_t device, uint8_t vector, uint32_t apic_id);
+void iommu_amd_forget_entry(uint16_t device, uint8_t vector);
 
 /*
  * ── Stage 3: page-table entries ──────────────────────────────────────
@@ -271,6 +326,17 @@ void iommu_amd_dte_domain(uint16_t domain, unsigned levels, uint64_t root_pa,
 #define	IOMMU_INTERRUPT_RANGE_LIMIT	0xFEEFFFFFULL
 
 /*
+ * #598's C7: a table line written, out of the processor's caches when an
+ * engine reads its tables from memory (iommu_tables_uncached()), and fenced,
+ * so that the invalidation which follows cannot overtake it.  A whole frame is
+ * every one of its 64 lines.  iommu_flush_line() flushes unconditionally, for
+ * a table whose own reader decides, as the interrupt remapping table's does.
+ */
+void iommu_flush_line(const volatile void *p);
+void iommu_table_written(const volatile void *entry);
+void iommu_table_frame_written(uint64_t pa);
+
+/*
  * ── Stage 3d: reading a refusal out of an engine ─────────────────────
  *
  * The two vendors do not merely use different bit positions here: Intel keeps
@@ -370,6 +436,276 @@ unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
 				 unsigned unit, struct iommu_fault_sink *s);
 
 /*
+ * ── #598: the entry an interrupt is remapped through ─────────────────
+ *
+ * Rev 5.20 §9.9 Figure 9-9, 128 bits; Rev 3.11 §2.2.5.1 Figure 15, 32 bits in
+ * the basic format, which is the only one this kernel writes.  Pure, like every
+ * encoder above, and read back by decoders WRITTEN FROM THE FIGURES rather than
+ * by inverting the encoders, for the reason the page-table pair gives.
+ *
+ * 🔑 HERE BOTH VENDORS' EMPTY ENTRIES REFUSE.  Intel's P=0 and AMD's RemapEn=0
+ * both block the message and report it -- the opposite of the device table
+ * entry, where AMD's zero forwards.  So a zeroed interrupt table is closed on
+ * both, and the danger runs the other way: an entry still valid for a device
+ * that has since been given something else.
+ *
+ * Physical destination, fixed delivery, no redirection hint: the choices
+ * ioapic_route() and device_md_msi_register() already make, for the reason
+ * ioapic_route() gives.
+ */
+struct iommu_irte {
+	uint8_t		vector;
+	uint32_t	destination;	/* an APIC id */
+	int		level;		/* level-triggered; Intel's TM      */
+	uint16_t	source;		/* the requester accepted; Intel's SID */
+};
+
+/*
+ * Encode an entry delivering `vector' to `destination'.  Answers zero when the
+ * destination does not fit: wider than eight bits in Intel's xAPIC mode, and
+ * at all in AMD's basic format, which has eight bits and nothing else.
+ *
+ * 🔴 INTEL'S ALWAYS NAMES ITS SOURCE: SVT 01b, SQ 00b, SID = `source'.  Without
+ * that, an entry is usable by any device that writes its handle (§5.1.2.2), and
+ * remapping would hand out vectors without isolating anybody.  AMD needs no
+ * such field, because the table itself belongs to one device.
+ *
+ * ⚠️ AMD's basic entry has no trigger mode, so `level' is not written there:
+ * the trigger travels with the message, not in the entry.
+ */
+int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2]);
+int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out);
+
+/*
+ * Read an entry back.  Answers 1 when it remaps, 0 when it refuses, and -1
+ * when it is something this kernel never writes -- reserved bits set, a posted
+ * or guest-mode entry, a delivery other than fixed and physical, an Intel entry
+ * that does not name its source.  `out' is filled only on 1.
+ *
+ * ⚠️ `x2apic' is Intel's EIME, and it changes what the same word means: in
+ * xAPIC mode bits 63:48 and 39:32 of the entry are reserved, in x2APIC mode
+ * they are part of the destination.
+ */
+int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
+			  struct iommu_irte *out);
+int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out);
+
+/*
+ * ── #598: what a source writes so that its interrupt finds its entry ──
+ *
+ * Intel only, and that asymmetry is a design decision rather than a gap.
+ *
+ * On Intel the source must be reprogrammed: the message names its entry by a
+ * handle in the ADDRESS, in a format of its own (Rev 5.20 §5.1.2.2), and an
+ * old-style message is the very thing remapping is meant to block (fault 25h).
+ *
+ * 🔑 On AMD the message's DATA is the index -- bits 10:0 (Rev 3.11 §2.2.5,
+ * Figure 14) -- and the table belongs to the device.  So if entry N of every
+ * table delivers vector N, every message a source writes today is already the
+ * right one, and nothing about MSI-X or the I/O APIC changes.  It is also what
+ * keeps a level-triggered pin working under a broadcast EOI, which compares
+ * the delivered vector with the RTE's vector field (#598 point 3).
+ */
+
+/*
+ * An MSI or MSI-X message in remappable format for entry `index' (§5.1.5.2):
+ * 0xFEE in 31:20, index[14:0] in 19:5, the format bit 4, SHV in bit 3,
+ * index[15] in bit 2, and a data word of zero.  Answers zero for an index
+ * beyond the sixteen bits a handle has.
+ */
+int iommu_vtd_msi(uint32_t index, uint32_t *address, uint32_t *data);
+
+/*
+ * The entry a message will select, the way the engine computes it (§5.1.3):
+ * the handle, plus the data's subhandle when SHV is set.  Answers 1 for a
+ * remappable message, 0 for a compatibility one, -1 for one the engine
+ * refuses as malformed: not in the interrupt range, or reserved data bits set.
+ */
+int iommu_vtd_msi_decode(uint32_t address, uint32_t data, uint32_t *index);
+
+/*
+ * An I/O APIC redirection entry in remappable format (§5.1.5.1): index[14:0]
+ * in 63:49, the format bit 48, index[15] in bit 11, delivery 000b in 10:8 so
+ * that SHV is clear, and `vector' in 7:0, which must be the entry's own for a
+ * level-triggered pin under a broadcast EOI.
+ *
+ * As the two halves ioapic_route() writes: `lo' is bits 31:0, `hi' 63:32.
+ */
+int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
+			 int active_low, int masked, uint32_t *lo, uint32_t *hi);
+
+/*
+ * The entry a redirection entry will select: 1 remappable, 0 compatibility,
+ * -1 with a delivery mode other than fixed, which would set SHV.
+ */
+int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index);
+
+/*
+ * ── #598: which entry of intel's one table is whose ──────────────────
+ *
+ * Divided once, here, between the two kinds of source this kernel programs:
+ * an I/O APIC pin's entry is its pin number, 0 to 127, and MSI slot s is
+ * entry 128 + s.  Fixed rather than allocated, because the sources are fixed
+ * already -- a pin, one of DEVICE_MD_MSI_MAX slots -- and a map with no state
+ * cannot be left disagreeing with itself by a source that went away.
+ *
+ * The HPET has no range: while interrupts are remapped its comparator is
+ * routed through its I/O APIC pin (#598 point 4), never as a message of its
+ * own.
+ *
+ * Answers zero for a source past its range, which a caller must take as
+ * "this source cannot be remapped" and never as entry zero.
+ */
+enum iommu_vtd_irt_source {
+	IOMMU_VTD_IRT_PIN,
+	IOMMU_VTD_IRT_MSI
+};
+
+int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
+			uint32_t *index);
+
+/*
+ * ── #598: where an intel engine finds its interrupt table ────────────
+ *
+ * Rev 5.20 §11.4.10, IRTA_REG at 0B8h: the table's address in 63:12, EIME in
+ * bit 11, and in 3:0 a size S that is neither the number of entries nor its
+ * logarithm but one less: the table has 2^(S+1) entries.
+ *
+ * 🔴 ONE TOO LARGE IS THE SILENT WAY TO BE WRONG.  The engine then takes the
+ * table to run on into the next frame, and an index past the real end selects
+ * bytes nobody wrote as an entry -- present or not by accident, and never
+ * invalidated because nobody knows it is one.  One too small refuses the top
+ * half of the indices (21h), which at least says so.
+ *
+ * Answers zero for a table not aligned to 4 Kbytes, or a count that is not a
+ * power of two from 2 to 65536.  ⚠️ `x2apic' is EIME, reserved-zero on an
+ * engine reporting EIM clear: whether to set it is the engine's question.
+ */
+int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
+		   uint64_t *out);
+
+/*
+ * ── #598: the device table entry's interrupt half, on AMD ─────────────
+ *
+ * Rev 3.11 §2.2.2.1, Table 7, bits 191:128 -- the third word of the entry:
+ * IV, IntTabLen, IG, the interrupt table root, the pass bits, IntCtl.
+ *
+ * Written INTO an entry the page-table encoders above already produced, and
+ * touching only that word: the two halves of a device table entry answer two
+ * different questions, and an encoder for one must not decide the other.
+ *
+ * 🔴 AND THE CONVERSE WAS A HAZARD.  Every encoder above writes this word as
+ * zero -- IV clear, "passed through unmapped" -- so once remapping is on, any
+ * path that rewrites a device's entry (an attach, a detach) would quietly turn
+ * that device's interrupt remapping off.  So iommu_amd_attach() and
+ * iommu_amd_detach() keep the word as they find it, and only the remapping
+ * code writes it.
+ *
+ * Remapped, with every pass bit clear: NMI, INIT, ExtInt and LINT0/1 from the
+ * device are target aborted, because a device that sends one of those has no
+ * business doing so, and IG clear so that a refusal is logged.  `log2_entries'
+ * is IntTabLen; the table must be aligned to 128 bytes.  Answers zero, and
+ * leaves the entry alone, when either is not encodable.
+ */
+int iommu_amd_dte_interrupts(uint64_t table_pa, unsigned log2_entries,
+			     uint64_t dte[4]);
+
+/*
+ * Read that half back: 1 remapped through a table, 0 passed through unmapped
+ * (IV clear, or IntCtl 01b), -1 anything this kernel does not write --
+ * interrupts aborted wholesale, a reserved IntCtl or IntTabLen, a pass bit set.
+ */
+int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
+				    unsigned *log2_entries);
+
+/*
+ * ── #598: Intel's invalidation queue, the descriptors ─────────────────
+ *
+ * Rev 5.20 §6.5.2, the 128-bit versions.  🔴 THE QUEUE IS NOT OPTIONAL FOR
+ * REMAPPING INTERRUPTS: "Register-based invalidation cannot invalidate the
+ * interrupt entry cache" (§6.5.1), and once the queue is on, "software must
+ * submit invalidation commands only through the IQ" (§6.5.2) -- so #432's
+ * context-cache and IOTLB invalidations become descriptors too, at the same
+ * global granularity they use through the registers today.
+ *
+ * Encoders only.  The engine reads these and nothing in the kernel ever does,
+ * so there is no reading to check; the check is against words written from the
+ * figures, as entries_agree() does for the context and device table entries.
+ */
+void iommu_vtd_qi_context_global(uint64_t out[2]);	/* type 1, G 01b */
+void iommu_vtd_qi_iotlb_global(uint64_t out[2]);	/* type 2, G 01b */
+
+/*
+ * Type 4: the whole interrupt entry cache, or the 2^`mask_log2' entries from
+ * `index', which must be aligned to that many -- the engine ignores the low
+ * bits the mask covers, so an unaligned index would invalidate a block that
+ * does not start where the caller thinks.  Answers zero for either mistake.
+ */
+void iommu_vtd_qi_iec_global(uint64_t out[2]);
+int iommu_vtd_qi_iec(uint32_t index, unsigned mask_log2, uint64_t out[2]);
+
+/*
+ * Type 5 with Status Write: the engine writes `data' to `status_pa' once every
+ * descriptor before this one has completed.  The address must be four-byte
+ * aligned, its bits 1:0 not being part of the field.
+ */
+int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2]);
+
+/*
+ * ── #598: Intel's invalidation queue, the ring ───────────────────────
+ *
+ * Rev 5.20 §6.5.2 and §11.4.9.  One page of 128-bit descriptors (IQA's QS 0,
+ * DW 0: 256 of them), a head the engine moves (IQH) and a tail software moves
+ * (IQT), both an index in bits 18:4.  Empty when the two are equal, full when
+ * the tail is one behind the head, so 255 at most are ever outstanding.
+ *
+ * A core over a view of the registers, as #599 made the fault drains: placing
+ * descriptors and reading the answer to a wait are things a fabricated engine
+ * can be asked about at every boot, and only ringing needs a real one.
+ *
+ * 🔑 A submission ends with a wait whose status write carries a number never
+ * used before, and the submission is over when that number is in the cell.
+ * Appendix A: the engine's reads of the ring and its status write are snooped
+ * whatever ECAP.C says, so both sides are plain memory to the processor.
+ */
+#define	IOMMU_VTD_QUEUE_SLOTS	256u
+
+/*
+ * The size of <cpu/iommu.c>'s unit table, here because each vendor keeps
+ * per-engine state sized by it too (#598: one queue per intel engine).
+ */
+#define	IOMMU_MAX_UNITS		8
+
+struct iommu_vtd_queue {
+	volatile uint64_t	*iqh, *iqt;	/* the engine's head, our tail  */
+	volatile uint32_t	*fsts;		/* IQE and ITE stop the queue   */
+	volatile uint64_t	*ring;		/* the slots, two words each    */
+	volatile uint32_t	*status;	/* the wait's cell, as we read it */
+	uint64_t		 status_pa;	/* ... and as the engine writes it */
+	unsigned		 tail;		/* where the next descriptor goes */
+	uint32_t		 seq;		/* the last wait's data, never 0 */
+};
+
+/*
+ * Write `n' descriptors and a wait behind them at the tail, and answer the
+ * wait's data -- or zero, having written nothing, when the ring has no room
+ * for all n + 1.  The engine is not told: see iommu_vtd_queue_ring().
+ */
+uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
+			       const uint64_t (*desc)[2], unsigned n);
+
+/* Tell the engine where the tail is now. */
+void iommu_vtd_queue_ring(const struct iommu_vtd_queue *q);
+
+/*
+ * Wait for the wait whose data is `seq': 1 when its status write has arrived,
+ * -1 when the engine reports what stops the queue (IQE or ITE), 0 when
+ * `spins' rounds went by with neither.
+ */
+int iommu_vtd_queue_wait(const struct iommu_vtd_queue *q, uint32_t seq,
+			 unsigned spins);
+
+/*
  * ── Stage 3d: pointing a live engine at a new table ──────────────────
  *
  * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make
@@ -465,6 +801,10 @@ void iommu_record_hardware(unsigned index, uint32_t version,
 			   unsigned address_bits, uint32_t page_levels,
 			   int interrupt_remapping, int coherent_walk,
 			   uint64_t caps0, uint64_t caps1);
+
+/* What the interrupt decode answered for that unit, beside the above. */
+void iommu_record_interrupt(unsigned index,
+			    const struct iommu_interrupt_caps *caps);
 
 /* Say which vendor's tables were the ones read. */
 void iommu_record_vendor(enum iommu_vendor vendor);

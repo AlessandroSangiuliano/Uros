@@ -20,9 +20,12 @@
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 #include <cpu/pci_cfg.h>
+#include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
+#include <sync/lock.h>		/* hw_lock: each queue's own, #598 */
+#include <sync/atomic.h>	/* one 16-byte store per entry, #598 */
 
 #include <device/pci.h>		/* PCI_VENDOR_ID */
 
@@ -161,6 +164,19 @@ _Static_assert(sizeof(struct dmar_scope) == 6, "a device scope header is six byt
 #define	VTD_ECAP_IR(e)		((((e) >> 3) & 0x1) != 0)
 
 /*
+ * The rest of what ECAP says about remapping interrupts (#598), Rev 5.20
+ * §11.4.3.  The last two are recent: an engine that blocks every message
+ * while remapping is off, and one that remaps only in x2APIC mode.
+ *
+ * ⚠️ ablations/598-irreq-bit.patch reads IRREQ from EIMER's bit, and the
+ * decode check must report the cases that tell the two apart as wrong.
+ */
+#define	VTD_ECAP_QI(e)		((((e) >> 1) & 0x1) != 0)
+#define	VTD_ECAP_EIM(e)		((((e) >> 4) & 0x1) != 0)
+#define	VTD_ECAP_EIMER(e)	((((e) >> 61) & 0x1) != 0)
+#define	VTD_ECAP_IRREQ(e)	((((e) >> 62) & 0x1) != 0)
+
+/*
  * The engine's version, split as the specification does.  A major version of
  * zero is not a version: it is what a read of nothing looks like once the
  * all-ones case has been taken out, and both are how a wrong base address
@@ -274,6 +290,24 @@ void iommu_vtd_decode(uint64_t cap, uint64_t ecap,
 	*page_levels = levels;
 	*interrupt_remapping = VTD_ECAP_IR(ecap);
 	*coherent = VTD_ECAP_COHERENT(ecap);
+}
+
+/*
+ * What remapping interrupts would need from this engine (#598).
+ *
+ * ⚠️ Reported as read, not corrected.  §11.4.3 makes each of these imply the
+ * one before it -- no IR without QI, no EIM without IR, no EIMER without EIM
+ * -- so an engine reporting IR and no QI contradicts the document.  That is a
+ * finding about the engine, and it becomes a refusal where remapping is turned
+ * on, not a quiet repair here.
+ */
+void iommu_vtd_interrupt_decode(uint64_t ecap,
+				struct iommu_interrupt_caps *out)
+{
+	out->can_forget = VTD_ECAP_QI(ecap);
+	out->x2apic = VTD_ECAP_EIM(ecap);
+	out->required = VTD_ECAP_IRREQ(ecap);
+	out->x2apic_required = VTD_ECAP_EIMER(ecap);
 }
 
 /*
@@ -482,11 +516,14 @@ int iommu_vtd_build(void)
 			    || ctx[i * VTD_ENTRY_WORDS + 1] != entry[1])
 				return 0;
 
+		iommu_table_frame_written(ctx_pa);	/* C7 */
+
 		iommu_vtd_root_entry(ctx_pa, entry);
 		root[bus * VTD_ENTRY_WORDS + 0] = entry[0];
 		root[bus * VTD_ENTRY_WORDS + 1] = entry[1];
 		contexts++;
 	}
+	iommu_table_frame_written(root_pa);
 
 	iommu_record_tables(root_pa, 4096, 0, 0, devices, contexts, frames);
 	return 1;
@@ -510,6 +547,8 @@ int iommu_vtd_build(void)
 #define	VTD_GCMD_SRTP	(1ULL << 30)	/* set root table pointer        */
 #define	VTD_GSTS_TES	(1ULL << 31)
 #define	VTD_GSTS_RTPS	(1ULL << 30)
+#define	VTD_GCMD_QIE	(1ULL << 26)	/* queued invalidation enable    */
+#define	VTD_GSTS_QIES	(1ULL << 26)
 
 /* The bits of GSTS that describe state worth carrying into the next GCMD. */
 #define	VTD_GSTS_KEEP	0x96FFFFFFu
@@ -541,6 +580,12 @@ static int wait_bit(volatile uint8_t *regs, unsigned off, uint64_t bit,
 	return 0;
 }
 
+/* #598: an engine's queue, and forgetting through it -- at the end of this file. */
+static int vtd_queue_start(unsigned unit, volatile uint8_t *regs, unsigned iro);
+static int vtd_queue_running(unsigned unit);
+static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
+		      int contexts);
+
 int iommu_vtd_enable(void)
 {
 	const struct iommu_tables *t = iommu_tables();
@@ -570,23 +615,26 @@ int iommu_vtd_enable(void)
 		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_RTPS, 1, 0))
 			return 0;
 
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+
+		/*
+		 * #598: the queue before the first invalidation, on an engine
+		 * that has one, so that the first is already a descriptor.
+		 * Started or not at all: an engine whose queue did not come
+		 * up is not one this kernel can tell to forget.
+		 */
+		if (VTD_ECAP_QI(u->vendor_caps[1]) && !vtd_queue_running(i)
+		    && !vtd_queue_start(i, regs, iro))
+			return 0;
+
 		/*
 		 * 🔴 INVALIDATE BEFORE ENABLING, both caches, globally.  The
 		 * engine may hold entries from whoever ran it before us --
 		 * firmware, or a previous boot that left it on -- and a
 		 * translation cached against a table we have replaced is a
-		 * device reaching memory by an old description.  Costs two
-		 * writes and two spins, once.
+		 * device reaching memory by an old description.  Once.
 		 */
-		*(volatile uint64_t *)(regs + VTD_CCMD) =
-			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
-		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
-			return 0;
-
-		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+		if (!vtd_forget(i, regs, iro, 1))
 			return 0;
 
 		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
@@ -775,11 +823,34 @@ int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
  *
  * ⚠️ Global, and not device-selective, which this engine also offers.  An
  * attach happens once per device, at its first grant, and a global
- * invalidation costs two register writes and two bounded spins -- against a
+ * invalidation costs two commands and a bounded wait -- against a
  * device-selective one whose SID and DID fields are two more chances to be
  * wrong in a way that produces a correct-looking machine.  The moment attach
  * is on a path that runs often, this is the thing to sharpen.
  */
+/*
+ * 🔴 ONE 16-BYTE STORE (#598's C20), for an entry an engine may be reading:
+ * a context entry -- "software performing an SSPTPTR or Translation Type (TT)
+ * field update must use a 16-Byte aligned atomic operation" (§6.2.2.1) -- or
+ * an interrupt remapping entry, which hardware reads whole "as software may
+ * change the contents of the IRTE atomically" (§5.1.4).  Written as two
+ * stores, a present entry is, between them, an entry nobody wrote.  On a
+ * processor without the instruction it answers no, and nothing is written.
+ */
+static int vtd_store_entry(volatile uint64_t *at, const uint64_t e[2])
+{
+	volatile struct atomic128 *slot = (volatile struct atomic128 *)at;
+	struct atomic128 was, now = { e[0], e[1] };
+
+	if (!cpu_has_cmpxchg16b())
+		return 0;
+	was.lo = slot->lo;
+	was.hi = slot->hi;
+	while (!atomic_cmpxchg128(slot, &was, now))
+		;
+	return 1;
+}
+
 int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 {
 	const struct iommu_tables *t = iommu_tables();
@@ -810,14 +881,15 @@ int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 	iommu_vtd_context_domain(d->id, d->levels, d->root, entry);
 
 	/*
-	 * 🔴 THE HIGH WORD BEFORE THE LOW ONE, because the low one carries
-	 * Present.  Written the other way round, an engine that read the entry
-	 * between the two stores would find it present, pointing at this
-	 * domain's root, with a domain id and address width that are still the
-	 * pass-through entry's -- a valid-looking entry nobody wrote.
+	 * The pass-through entry this replaces is present, so it changes in
+	 * one store.  It used to be two, high word first: between them an
+	 * engine read a present pass-through entry carrying this domain's id
+	 * and address width -- the entry nobody wrote, which the order was
+	 * meant to avoid and only moved (C20).
 	 */
-	ctx[devfn * VTD_ENTRY_WORDS + 1] = entry[1];
-	ctx[devfn * VTD_ENTRY_WORDS + 0] = entry[0];
+	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
+		return 0;
+	iommu_table_written(&ctx[devfn * VTD_ENTRY_WORDS]);	/* C7 */
 
 	if (ctx[devfn * VTD_ENTRY_WORDS + 0] != entry[0]
 	    || ctx[devfn * VTD_ENTRY_WORDS + 1] != entry[1])
@@ -832,16 +904,9 @@ int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 			return 0;
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
-
-		*(volatile uint64_t *)(regs + VTD_CCMD) =
-			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
-		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
-			return 0;
-
 		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+
+		if (!vtd_forget(i, regs, iro, 1))
 			return 0;
 
 		attached++;
@@ -871,15 +936,10 @@ int iommu_vtd_detach(uint16_t bdf)
 
 	iommu_vtd_context_blocked(entry);
 
-	/*
-	 * 🔴 THE PRESENT BIT FIRST HERE, WHICH IS THE OPPOSITE OF ATTACH.
-	 * Attaching writes the pointer before the bit that makes it live;
-	 * detaching must clear that bit before the pointer, or an engine
-	 * reading between the two stores finds an entry that is still present
-	 * and no longer points anywhere.
-	 */
-	ctx[devfn * VTD_ENTRY_WORDS + 0] = entry[0];
-	ctx[devfn * VTD_ENTRY_WORDS + 1] = entry[1];
+	/* One store, as in attach (C20), and out of the caches (C7). */
+	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
+		return 0;
+	iommu_table_written(&ctx[devfn * VTD_ENTRY_WORDS]);
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
 		const struct iommu_unit *u = iommu_unit(i);
@@ -890,16 +950,9 @@ int iommu_vtd_detach(uint16_t bdf)
 			return 0;
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
-
-		*(volatile uint64_t *)(regs + VTD_CCMD) =
-			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
-		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
-			return 0;
-
 		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+
+		if (!vtd_forget(i, regs, iro, 1))
 			return 0;
 
 		detached++;
@@ -922,7 +975,7 @@ int iommu_vtd_detach(uint16_t bdf)
  * ⚠️ Global, though the domain is named and this engine offers a
  * domain-selective form -- IOTLB_REG's IIRG field with the DID beside it.  The
  * argument is the one on attach above: a field that is not written cannot be
- * written wrongly, and until grants are frequent the difference is two spins.
+ * written wrongly, and until grants are frequent the difference is one wait.
  */
 int iommu_vtd_flush(const struct iommu_domain *d)
 {
@@ -942,9 +995,7 @@ int iommu_vtd_flush(const struct iommu_domain *d)
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
 
-		*(volatile uint64_t *)(regs + iro + 8) =
-			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
-		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+		if (!vtd_forget(i, regs, iro, 0))
 			return 0;
 
 		flushed++;
@@ -1021,8 +1072,55 @@ int iommu_vtd_flush(const struct iommu_domain *d)
 #define	VTD_FR_PAGE_ENTRY_RESERVED	0x0C	/* LSS.2                    */
 #define	VTD_FR_TRANSLATION_BLOCKED	0x0D	/* LCT.5                    */
 
+/*
+ * And Table 15, §5.1.4.1: the twelve ways an INTERRUPT is refused (#598).
+ *
+ * 🔑 All twelve read as one kind, because the question a caller branches on is
+ * whether an interrupt or a transfer was refused; which of the twelve is the
+ * raw code's job.  The one this issue sets out to provoke is 25h, a message in
+ * compatibility format arriving while those are blocked.
+ *
+ * ⚠️ The record names the entry for seven of them and not for the other five.
+ * §11.4.7.6 FI: for 20h, 25h, 29h, 2Ah and 2Bh "contents of this field is
+ * undefined", and for the rest bits 63:48 hold the interrupt_index.  The five
+ * are the ones refused BEFORE an entry was looked up -- a malformed request, a
+ * compatibility-format one, remapping not on -- so there is no entry to name,
+ * and reading one would be reading whatever the hardware left there.
+ *
+ * ablations/598-index-always.patch reads an index for every reason, which the
+ * decode check must catch on the cases that carry something in FI where the
+ * field is undefined.
+ */
+
+#define	VTD_FR_IR_FIRST			0x20
+#define	VTD_FR_IR_RESERVED		0x20	/* request's reserved field */
+#define	VTD_FR_IR_COMPATIBILITY		0x25	/* compatibility, blocked   */
+#define	VTD_FR_IR_INVALID_REQUEST	0x29	/* not a valid interrupt    */
+#define	VTD_FR_IR_EIME_REQUIRED		0x2A	/* EIMER and EIME clear     */
+#define	VTD_FR_IR_REQUIRED		0x2B	/* IRREQ and remapping off  */
+#define	VTD_FR_IR_LAST			0x2B
+
+#define	VTD_FR_IR_INDEX(l)		((uint32_t)((l) >> 48))
+
+static int vtd_fault_names_entry(uint8_t reason)
+{
+	switch (reason) {
+	case VTD_FR_IR_RESERVED:
+	case VTD_FR_IR_COMPATIBILITY:
+	case VTD_FR_IR_INVALID_REQUEST:
+	case VTD_FR_IR_EIME_REQUIRED:
+	case VTD_FR_IR_REQUIRED:
+		return 0;
+	default:
+		return 1;
+	}
+}
+
 static uint8_t vtd_fault_kind(uint8_t reason)
 {
+	if (reason >= VTD_FR_IR_FIRST && reason <= VTD_FR_IR_LAST)
+		return IOMMU_FAULT_INTERRUPT;
+
 	switch (reason) {
 	case VTD_FR_WRITE_DENIED:
 	case VTD_FR_READ_DENIED:
@@ -1065,6 +1163,22 @@ int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	out->kind = vtd_fault_kind(out->reason);
 	out->write = type == 0;
 	out->vendor = IOMMU_INTEL;
+	out->index = IOMMU_FAULT_NO_INDEX;
+
+	/*
+	 * 🔴 AN INTERRUPT'S RECORD HAS NO ADDRESS AND NO DIRECTION (#598).
+	 * FI holds the entry's index, or nothing, and T1/T2 are "relevant only
+	 * when the fault reason indicates one of the address translation fault
+	 * conditions" -- so the type bits that make every other record a read
+	 * or a write say nothing here, and reading them would report a write
+	 * that the record never claimed.
+	 */
+	if (out->kind == IOMMU_FAULT_INTERRUPT) {
+		out->address = 0;
+		out->write = 0;
+		if (vtd_fault_names_entry(out->reason))
+			out->index = VTD_FR_IR_INDEX(lo);
+	}
 	return 1;
 }
 
@@ -1186,6 +1300,7 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	uint32_t levels = 0;
 	unsigned bits = 0;
 	int ir = 0, coherent = 0;
+	struct iommu_interrupt_caps interrupt;
 
 	regs = (volatile uint8_t *)(uintptr_t)pmap_map_device(base, size);
 	if (regs == 0)
@@ -1206,9 +1321,11 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	ecap = *(volatile uint64_t *)(regs + VTD_ECAP);
 
 	iommu_vtd_decode(cap, ecap, &bits, &levels, &ir, &coherent);
+	iommu_vtd_interrupt_decode(ecap, &interrupt);
 
 	iommu_record_hardware(index, version, bits, levels, ir, coherent,
 			      cap, ecap);
+	iommu_record_interrupt(index, &interrupt);
 	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
 
@@ -1320,4 +1437,920 @@ int iommu_vtd_read(void)
 	}
 
 	return 1;
+}
+
+/*
+ * ── #598: the interrupt remapping table entry ────────────────────────
+ *
+ * Rev 5.20 §9.9, Figure 9-9.  128 bits, low word first:
+ *
+ *	0	P	present
+ *	1	FPD	fault processing disable
+ *	2	DM	destination mode, 0 physical
+ *	3	RH	redirection hint
+ *	4	TM	trigger mode, 1 level
+ *	7:5	DLM	delivery mode, 000b fixed
+ *	15	IM	0 remapped, 1 posted (§9.10)
+ *	23:16	V	vector
+ *	63:32	DST	xAPIC: the id in 47:40, 63:48 and 39:32 reserved;
+ *			x2APIC: all 32 bits
+ *	79:64	SID	the source accepted
+ *	81:80	SQ	which bits of SID count
+ *	83:82	SVT	01b: verify the requester against SID and SQ
+ *
+ * Bits 14:12, 31:24 and 127:84 are reserved, and an entry with any of them set
+ * is refused with fault 24h when it is used.
+ *
+ * ⚠️ ablations/598-irte-dst.patch puts an xAPIC id at 39:32, where it is
+ * reserved -- DST[7:0] instead of DST[15:8], the slip a reader of "Destination
+ * ID" makes -- and the interrupt check must catch it on the cases that encode
+ * one.
+ */
+
+#define	VTD_IRTE_P		(1ULL << 0)
+#define	VTD_IRTE_FPD		(1ULL << 1)
+#define	VTD_IRTE_DM		(1ULL << 2)
+#define	VTD_IRTE_RH		(1ULL << 3)
+#define	VTD_IRTE_TM		(1ULL << 4)
+#define	VTD_IRTE_DLM_MASK	(7ULL << 5)
+#define	VTD_IRTE_IM		(1ULL << 15)
+#define	VTD_IRTE_VECTOR(v)	((uint64_t)(v) << 16)
+#define	VTD_IRTE_XAPIC_SHIFT	40
+#define	VTD_IRTE_RSVD_LO	((7ULL << 12) | (0xFFULL << 24))
+#define	VTD_IRTE_XAPIC_RSVD	((0xFFFFULL << 48) | (0xFFULL << 32))
+
+#define	VTD_IRTE_SVT_REQUESTER	(1ULL << 18)	/* bits 83:82 = 01b */
+#define	VTD_IRTE_SVT_MASK	(3ULL << 18)
+#define	VTD_IRTE_SQ_MASK	(3ULL << 16)	/* 00b: all 16 bits    */
+#define	VTD_IRTE_RSVD_HI	(~0ULL << 20)	/* bits 127:84         */
+
+int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2])
+{
+	uint64_t lo;
+
+	if (e == 0 || out == 0)
+		return 0;
+
+	if (!x2apic && e->destination > 0xFF)
+		return 0;
+
+	lo = VTD_IRTE_P | VTD_IRTE_VECTOR(e->vector);
+	if (e->level)
+		lo |= VTD_IRTE_TM;
+	lo |= x2apic ? (uint64_t)e->destination << 32
+		     : (uint64_t)e->destination << VTD_IRTE_XAPIC_SHIFT;
+
+	out[0] = lo;
+	out[1] = VTD_IRTE_SVT_REQUESTER | e->source;
+	return 1;
+}
+
+int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
+			  struct iommu_irte *out)
+{
+	uint64_t lo = in[0], hi = in[1];
+
+	/*
+	 * P clear refuses, whatever the rest says: every other field is
+	 * "evaluated by hardware only when the Present (P) field is Set".
+	 */
+	if (!(lo & VTD_IRTE_P))
+		return 0;
+
+	if ((lo & VTD_IRTE_RSVD_LO) || (hi & VTD_IRTE_RSVD_HI))
+		return -1;
+	if (!x2apic && (lo & VTD_IRTE_XAPIC_RSVD))
+		return -1;
+
+	/*
+	 * Everything below is legal and is not what this kernel writes, so a
+	 * table holding it was written by somebody else.  The last one is the
+	 * one that matters: an entry with SVT 00b accepts any requester.
+	 */
+	if (lo & (VTD_IRTE_IM | VTD_IRTE_FPD | VTD_IRTE_DM | VTD_IRTE_RH
+		  | VTD_IRTE_DLM_MASK))
+		return -1;
+	if ((hi & VTD_IRTE_SVT_MASK) != VTD_IRTE_SVT_REQUESTER
+	    || (hi & VTD_IRTE_SQ_MASK) != 0)
+		return -1;
+
+	out->vector = (uint8_t)((lo >> 16) & 0xFF);
+	out->destination = x2apic ? (uint32_t)(lo >> 32)
+				  : (uint32_t)((lo >> 40) & 0xFF);
+	out->level = (lo & VTD_IRTE_TM) != 0;
+	out->source = (uint16_t)(hi & 0xFFFF);
+	return 1;
+}
+
+/*
+ * ── #598: the message a source writes, in remappable format ──────────
+ *
+ * Rev 5.20 §5.1.2.2 (Figure 5-2, Tables 13 and 14), §5.1.3 for how the engine
+ * turns it into an index, §5.1.5.1 and §5.1.5.2 for what software programs.
+ *
+ * ⚠️ The handle is SIXTEEN bits split fifteen and one: 14:0 in address bits
+ * 19:5 and bit 15 apart, in address bit 2 -- and in bit 11 of a redirection
+ * entry.  ablations/598-index15.patch drops the sixteenth, the slip that a
+ * field called "Handle[14:0]" invites, and the check must catch it on the two
+ * cases whose index needs it.
+ */
+
+#define	VTD_MSI_BASE		0xFEE00000u
+#define	VTD_MSI_ID_MASK		0xFFF00000u	/* 31:20, FEEh            */
+#define	VTD_MSI_FORMAT		(1u << 4)	/* 1: remappable          */
+#define	VTD_MSI_SHV		(1u << 3)
+#define	VTD_MSI_HANDLE15	(1u << 2)
+#define	VTD_MSI_HANDLE(a)	(((a) >> 5) & 0x7FFFu)
+
+#define	VTD_RTE_FORMAT		(1u << 16)	/* bit 48, in the high half */
+#define	VTD_RTE_INDEX15		(1u << 11)
+#define	VTD_RTE_DELIVERY_MASK	(7u << 8)
+#define	VTD_RTE_POLARITY_LOW	(1u << 13)
+#define	VTD_RTE_LEVEL		(1u << 15)
+#define	VTD_RTE_MASKED		(1u << 16)
+
+int iommu_vtd_msi(uint32_t index, uint32_t *address, uint32_t *data)
+{
+	if (index > 0xFFFFu || address == 0 || data == 0)
+		return 0;
+
+	*address = VTD_MSI_BASE | ((index & 0x7FFFu) << 5) | VTD_MSI_FORMAT
+		 | VTD_MSI_SHV;
+	if (index & 0x8000u)
+		*address |= VTD_MSI_HANDLE15;
+
+	/*
+	 * Zero, with SHV set: the subhandle is zero and the handle is the
+	 * whole index, the first of the four encodings §5.1.5 lists for SHV=1.
+	 * A device with multiple-message MSI ORs its vector number into these
+	 * low bits, which is why SHV is set at all.
+	 */
+	*data = 0;
+	return 1;
+}
+
+int iommu_vtd_msi_decode(uint32_t address, uint32_t data, uint32_t *index)
+{
+	uint32_t handle;
+
+	if ((address & VTD_MSI_ID_MASK) != VTD_MSI_BASE)
+		return -1;
+	if (!(address & VTD_MSI_FORMAT))
+		return 0;
+
+	handle = VTD_MSI_HANDLE(address)
+	       | ((address & VTD_MSI_HANDLE15) ? 0x8000u : 0);
+
+	if (address & VTD_MSI_SHV) {
+		/* Table 14: with SHV set, data bits 31:16 are reserved. */
+		if (data & 0xFFFF0000u)
+			return -1;
+		*index = handle + (data & 0xFFFFu);
+	} else {
+		*index = handle;
+	}
+	return 1;
+}
+
+int iommu_vtd_ioapic_rte(uint32_t index, uint8_t vector, int level,
+			 int active_low, int masked, uint32_t *lo, uint32_t *hi)
+{
+	if (index > 0xFFFFu || lo == 0 || hi == 0)
+		return 0;
+
+	*lo = vector;
+	if (index & 0x8000u)
+		*lo |= VTD_RTE_INDEX15;
+	if (active_low)
+		*lo |= VTD_RTE_POLARITY_LOW;
+	if (level)
+		*lo |= VTD_RTE_LEVEL;
+	if (masked)
+		*lo |= VTD_RTE_MASKED;
+
+	*hi = ((index & 0x7FFFu) << 17) | VTD_RTE_FORMAT;
+	return 1;
+}
+
+int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index)
+{
+	if (!(hi & VTD_RTE_FORMAT))
+		return 0;
+
+	/*
+	 * A delivery mode other than fixed would set SHV in the message the
+	 * I/O APIC builds, and the index would then be shifted by a subhandle
+	 * nobody chose (§5.1.5.1).
+	 */
+	if (lo & VTD_RTE_DELIVERY_MASK)
+		return -1;
+
+	*index = (hi >> 17) | ((lo & VTD_RTE_INDEX15) ? 0x8000u : 0);
+	return 1;
+}
+
+/*
+ * ── #598: which entry is whose ───────────────────────────────────────
+ */
+#define	VTD_IRT_PINS		128u
+#define	VTD_IRT_MSI_FIRST	128u
+#define	VTD_IRT_MSI_SLOTS	128u
+
+int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
+			uint32_t *index)
+{
+	if (index == 0)
+		return 0;
+
+	if (kind == IOMMU_VTD_IRT_PIN && n < VTD_IRT_PINS) {
+		*index = n;
+		return 1;
+	}
+	if (kind == IOMMU_VTD_IRT_MSI && n < VTD_IRT_MSI_SLOTS) {
+		*index = VTD_IRT_MSI_FIRST + n;
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * ── #598: the interrupt table's address register ─────────────────────
+ *
+ * Rev 5.20 §11.4.10, Figure 11-30: IRTA 63:12, EIME 11, reserved 10:4, S 3:0
+ * with 2^(S+1) entries.
+ */
+#define	VTD_IRTA_EIME		(1ULL << 11)
+
+int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
+		   uint64_t *out)
+{
+	unsigned s = 0;
+
+	if (out == 0 || (table_pa & 0xFFFULL) != 0 || entries < 2
+	    || entries > 65536u || (entries & (entries - 1u)) != 0)
+		return 0;
+
+	while ((2u << s) < entries)
+		s++;
+
+	*out = table_pa | (x2apic ? VTD_IRTA_EIME : 0) | s;
+	return 1;
+}
+
+/*
+ * ── #598: the one interrupt table, built and read back ───────────────
+ *
+ * 256 entries of sixteen bytes: one frame, and IRTA's S is 7.  Room for what
+ * this kernel programs -- one I/O APIC's pins, DEVICE_MD_MSI_MAX MSI slots,
+ * the HPET's comparators -- with the division of the indices left to the step
+ * that writes the first entry.
+ *
+ * 🔴 EVERY ENTRY WRITTEN, and read back as the two words written.  Not
+ * present refuses whatever else an entry holds, so asking the decoder what
+ * the entries mean would accept garbage beside a clear P -- garbage that
+ * becomes an interrupt the day something sets that P.
+ *
+ * In xAPIC mode, EIME clear: this kernel's APIC ids have eight bits, and
+ * whether x2APIC follows is #598's last question.  The word IRTA_REG will be
+ * given is composed here, so that the encoder meets a real address before an
+ * engine does; nothing is written to it yet.
+ */
+#define	VTD_IRT_ENTRIES		256u
+
+_Static_assert(VTD_IRT_PINS <= VTD_IRT_MSI_FIRST
+	       && VTD_IRT_MSI_FIRST + VTD_IRT_MSI_SLOTS <= VTD_IRT_ENTRIES,
+	       "the index map's two ranges overlap, or run past the table");
+
+int iommu_vtd_irt_build(void)
+{
+	struct iommu_interrupt_tables t = { 0 };
+	volatile uint64_t *irt;
+	uint64_t pa;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (iommu_unit(i)->answered
+		    && iommu_unit(i)->interrupt_remapping)
+			t.engines++;
+
+	pa = t.engines ? boot_frame_alloc() : 0;
+	if (pa == 0 || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, 0, &t.intel_irta)) {
+		iommu_record_interrupt_tables(&t);
+		return 0;
+	}
+
+	t.intel_table = pa;
+	t.tables = 1;
+	t.frames = 1;
+
+	irt = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
+	for (unsigned i = 0; i < VTD_IRT_ENTRIES; i++) {
+		irt[i * VTD_ENTRY_WORDS + 0] = 0;
+		irt[i * VTD_ENTRY_WORDS + 1] = 0;
+	}
+
+	for (unsigned i = 0; i < VTD_IRT_ENTRIES; i++)
+		if (irt[i * VTD_ENTRY_WORDS + 0] == 0
+		    && irt[i * VTD_ENTRY_WORDS + 1] == 0)
+			t.entries++;
+		else
+			t.wrong++;
+
+	iommu_record_interrupt_tables(&t);
+	return t.wrong == 0;
+}
+
+/*
+ * ── #598: the invalidation queue's descriptors ───────────────────────
+ *
+ * Rev 5.20 §6.5.2.1, 6.5.2.3, 6.5.2.8, 6.5.2.9 (Figures 6-1, 6-3, 6-8, 6-9).
+ * The type is seven bits split as 11:9 and 3:0; every type here fits the low
+ * four, so 11:9 stay zero.
+ *
+ *	context cache	type 1, G in 5:4
+ *	IOTLB		type 2, G in 5:4, DW 6, DR 7, DID 31:16
+ *	interrupt cache	type 4, G in bit 4 (1 = by index), IM 31:27, IIDX 47:32
+ *	wait		type 5, IF 4, SW 5, FN 6, data 63:32, address in the
+ *			high word
+ *
+ * ⚠️ ablations/598-iidx-high.patch puts IIDX at 63:48, where a fault record
+ * keeps its interrupt index (§11.4.7.6) -- the same number, sixteen bits
+ * higher.  The interrupt check must catch it on the two index-selective cases.
+ */
+
+#define	VTD_QI_TYPE_CONTEXT	0x1ULL
+#define	VTD_QI_TYPE_IOTLB	0x2ULL
+#define	VTD_QI_TYPE_IEC		0x4ULL
+#define	VTD_QI_TYPE_WAIT	0x5ULL
+#define	VTD_QI_G_GLOBAL		(1ULL << 4)	/* context and IOTLB: 01b */
+#define	VTD_QI_IEC_BY_INDEX	(1ULL << 4)
+#define	VTD_QI_IEC_IM(m)	((uint64_t)(m) << 27)
+#define	VTD_QI_IEC_IIDX(i)	((uint64_t)(i) << 32)
+#define	VTD_QI_WAIT_SW		(1ULL << 5)
+#define	VTD_QI_WAIT_DATA(d)	((uint64_t)(d) << 32)
+
+void iommu_vtd_qi_context_global(uint64_t out[2])
+{
+	out[0] = VTD_QI_TYPE_CONTEXT | VTD_QI_G_GLOBAL;
+	out[1] = 0;
+}
+
+/*
+ * Without DR or DW, as the register form #432 uses today: an engine of major
+ * version 2 or later drains before the next wait regardless (§6.5.2.3), and
+ * QEMU's is 1.0 and has nothing to drain.
+ */
+void iommu_vtd_qi_iotlb_global(uint64_t out[2])
+{
+	out[0] = VTD_QI_TYPE_IOTLB | VTD_QI_G_GLOBAL;
+	out[1] = 0;
+}
+
+void iommu_vtd_qi_iec_global(uint64_t out[2])
+{
+	out[0] = VTD_QI_TYPE_IEC;
+	out[1] = 0;
+}
+
+int iommu_vtd_qi_iec(uint32_t index, unsigned mask_log2, uint64_t out[2])
+{
+	if (index > 0xFFFFu || mask_log2 > 16
+	    || (index & ((1u << mask_log2) - 1u)) != 0)
+		return 0;
+
+	out[0] = VTD_QI_TYPE_IEC | VTD_QI_IEC_BY_INDEX
+	       | VTD_QI_IEC_IM(mask_log2) | VTD_QI_IEC_IIDX(index);
+	out[1] = 0;
+	return 1;
+}
+
+int iommu_vtd_qi_wait(uint64_t status_pa, uint32_t data, uint64_t out[2])
+{
+	if ((status_pa & 3ULL) != 0)
+		return 0;
+
+	out[0] = VTD_QI_TYPE_WAIT | VTD_QI_WAIT_SW | VTD_QI_WAIT_DATA(data);
+	out[1] = status_pa;
+	return 1;
+}
+
+/*
+ * ── #598: the invalidation queue's ring, over a view ─────────────────
+ *
+ * Rev 5.20 §11.4.9: IQH at 080h, IQT at 088h, IQA at 090h; the head and the
+ * tail are an index in bits 18:4.  See <cpu/iommu_backend.h> for the shape.
+ */
+#define	VTD_IQH			0x80
+#define	VTD_IQT			0x88
+#define	VTD_IQA			0x90
+#define	VTD_IQ_INDEX(r)		((unsigned)(((r) >> 4) & 0x7FFFu))
+#define	VTD_FSTS_IQE		(1u << 4)	/* a descriptor it refused  */
+#define	VTD_FSTS_ITE		(1u << 6)	/* an answer that never came */
+
+uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
+			       const uint64_t (*desc)[2], unsigned n)
+{
+	unsigned head = VTD_IQ_INDEX(*q->iqh);
+	unsigned room, t = q->tail;
+	uint64_t wait[2];
+	uint32_t seq;
+
+	/*
+	 * A head outside the ring is not a position this kernel can count
+	 * room from, so nothing is written behind it.
+	 */
+	if (head >= IOMMU_VTD_QUEUE_SLOTS || t >= IOMMU_VTD_QUEUE_SLOTS)
+		return 0;
+
+	/*
+	 * One slot always stays empty.  A tail that caught up with the head
+	 * would read as an empty ring, and the engine would stop with every
+	 * descriptor still in it.
+	 */
+	room = (head + IOMMU_VTD_QUEUE_SLOTS - t - 1u) % IOMMU_VTD_QUEUE_SLOTS;
+	if (n >= room)
+		return 0;
+
+	/* Never zero: zero is what a cell nobody has written holds. */
+	seq = q->seq + 1u;
+	if (seq == 0)
+		seq = 1;
+	if (!iommu_vtd_qi_wait(q->status_pa, seq, wait))
+		return 0;
+
+	for (unsigned i = 0; i < n; i++) {
+		q->ring[2 * t + 0] = desc[i][0];
+		q->ring[2 * t + 1] = desc[i][1];
+		t = (t + 1u) % IOMMU_VTD_QUEUE_SLOTS;
+	}
+	q->ring[2 * t + 0] = wait[0];
+	q->ring[2 * t + 1] = wait[1];
+
+	q->tail = (t + 1u) % IOMMU_VTD_QUEUE_SLOTS;
+	q->seq = seq;
+	return seq;
+}
+
+/*
+ * ⚠️ After the slots, and nothing between: the slots are ordinary memory and
+ * the tail a register, both written through volatile pointers, so neither the
+ * compiler nor an x86 processor lets the engine see the new tail before the
+ * descriptors it covers.
+ *
+ * ⚠️ ablations/598-qi-tail-unshifted.patch writes the tail as an index and
+ * not in bits 18:4: the fabricated check's ringing case must count it wrong,
+ * and an engine never sees its descriptors, so the enable fails.
+ */
+void iommu_vtd_queue_ring(const struct iommu_vtd_queue *q)
+{
+	*q->iqt = (uint64_t)q->tail << 4;
+}
+
+/*
+ * ICE is not here on purpose: a bad device-TLB answer is recorded and the
+ * engine "continues with processing of descriptors as normal" (§6.5.2.11),
+ * and this kernel sends no device-TLB invalidations to be answered.
+ */
+int iommu_vtd_queue_wait(const struct iommu_vtd_queue *q, uint32_t seq,
+			 unsigned spins)
+{
+	for (unsigned i = 0; i < spins; i++) {
+		if (*q->status == seq)
+			return 1;
+		if (*q->fsts & (VTD_FSTS_IQE | VTD_FSTS_ITE))
+			return -1;
+		__asm__ __volatile__("pause" : : : "memory");
+	}
+
+	return *q->status == seq ? 1 : 0;
+}
+
+/*
+ * ── #598 point 1: each engine's queue, live ──────────────────────────
+ *
+ * One ring per engine, each with its own IQA, and one status frame for all of
+ * them, a cache line each.  The lock is the ring's own and masks interrupts
+ * (hw_lock).  Every caller today also holds iommu_domain_lock, a mutex -- but
+ * the remapping phases will forget interrupt entries from paths that cannot
+ * sleep, and a ring two of those share must not depend on a lock they do not
+ * take.
+ */
+#define	VTD_QUEUE_SPINS		1000000u
+#define	VTD_STATUS_STRIDE	64u
+
+static struct iommu_vtd_queue		vtd_queue[IOMMU_MAX_UNITS];
+static struct iommu_queue_counts	vtd_counts[IOMMU_MAX_UNITS];
+static hw_lock_data_t			vtd_queue_lock[IOMMU_MAX_UNITS];
+static uint64_t				vtd_status_frame;
+
+/*
+ * Rev 5.20 §6.5.2, in its order: nothing in flight through the registers, the
+ * tail at zero, the ring's address and size, then QIE -- and QIES read back,
+ * because the queue is not on until the engine says so.
+ *
+ * ⚠️ A queue whoever ran before us left on is drained and turned off first.
+ * IQA "should not be modified while the invalidation queue is not empty", and
+ * turning the queue off is the only thing that puts IQH back to zero.  An
+ * engine whose old queue never drains -- an error left pending in it -- is
+ * not taken over at all.
+ */
+static int vtd_queue_start(unsigned unit, volatile uint8_t *regs, unsigned iro)
+{
+	struct iommu_vtd_queue *q;
+	uint64_t ring_pa;
+	uint32_t keep;
+
+	if (unit >= IOMMU_MAX_UNITS)
+		return 0;
+	q = &vtd_queue[unit];
+
+	if (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_QIES) {
+		unsigned spin = 0;
+
+		while (VTD_IQ_INDEX(*(volatile uint64_t *)(regs + VTD_IQH))
+		       != VTD_IQ_INDEX(*(volatile uint64_t *)(regs + VTD_IQT)))
+			if (++spin == VTD_QUEUE_SPINS)
+				return 0;
+
+		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+		*(volatile uint32_t *)(regs + VTD_GCMD) =
+			keep & ~(uint32_t)VTD_GCMD_QIE;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_QIES, 0, 0))
+			return 0;
+	}
+
+	if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1)
+	    || !wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+		return 0;
+
+	if (vtd_status_frame == 0)
+		vtd_status_frame = boot_frame_alloc();
+	ring_pa = boot_frame_alloc();
+	if (vtd_status_frame == 0 || ring_pa == 0)
+		return 0;
+
+	q->iqh = (volatile uint64_t *)(regs + VTD_IQH);
+	q->iqt = (volatile uint64_t *)(regs + VTD_IQT);
+	q->fsts = (volatile uint32_t *)(regs + VTD_FSTS);
+	q->ring = (volatile uint64_t *)(uintptr_t)phys_to_direct(ring_pa);
+	q->status_pa = vtd_status_frame + (uint64_t)unit * VTD_STATUS_STRIDE;
+	q->status = (volatile uint32_t *)(uintptr_t)phys_to_direct(q->status_pa);
+	q->tail = 0;
+	q->seq = 0;
+
+	*q->iqt = 0;
+	*(volatile uint64_t *)(regs + VTD_IQA) = ring_pa;	/* DW 0, QS 0 */
+
+	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_QIE;
+	if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_QIES, 1, 0))
+		return 0;
+
+	vtd_counts[unit].on = 1;
+	return 1;
+}
+
+/*
+ * Started by this kernel, by translation (-I) or by remapping (-i), whichever
+ * came first: the second must not take over a queue the first is using.
+ */
+static int vtd_queue_running(unsigned unit)
+{
+	return unit < IOMMU_MAX_UNITS && vtd_counts[unit].on;
+}
+
+/*
+ * Send `n' descriptors and return once the engine has done them.  A failure
+ * is kept, the first time, with the fault status and the two ends as they
+ * were, for whoever prints (iommu_queue_counts); this code does not print.
+ *
+ * ⚠️ A queue the engine stopped (IQE, ITE) stays stopped: every submission
+ * after it fails at once on the same bit, which is a loud failure and not a
+ * silent one.  Putting it back would mean finding and replacing the descriptor
+ * the engine refused, and that is not written yet.
+ */
+static int vtd_queue_submit(unsigned unit, const uint64_t (*desc)[2], unsigned n)
+{
+	struct iommu_vtd_queue *q = &vtd_queue[unit];
+	struct iommu_queue_counts *c = &vtd_counts[unit];
+	unsigned before;
+	uint32_t seq;
+	int answer = 0;
+
+	hw_lock_lock(&vtd_queue_lock[unit]);
+
+	before = q->tail;
+	seq = iommu_vtd_queue_place(q, desc, n);
+	if (seq != 0) {
+		iommu_vtd_queue_ring(q);
+		answer = iommu_vtd_queue_wait(q, seq, VTD_QUEUE_SPINS);
+	}
+
+	if (answer == 1) {
+		c->waits++;
+		c->descriptors += n + 1u;
+		if (q->tail < before)
+			c->turns++;
+	} else if (c->stopped == IOMMU_QUEUE_RUNNING) {
+		c->stopped = seq == 0 ? IOMMU_QUEUE_NO_ROOM
+			   : answer < 0 ? IOMMU_QUEUE_REFUSED
+			   : IOMMU_QUEUE_SILENT;
+		c->fsts = *q->fsts;
+		c->head = VTD_IQ_INDEX(*q->iqh);
+		c->tail = q->tail;
+	}
+
+	hw_lock_unlock(&vtd_queue_lock[unit]);
+	return answer == 1;
+}
+
+/*
+ * The context cache and the IOTLB, or the IOTLB alone, globally: through the
+ * queue once it is on, through the two registers on an engine that has none.
+ * The order needs no wait between the two descriptors: an IOTLB invalidation
+ * runs only after every context-cache one ahead of it (§6.5.2.12).
+ *
+ * 🔴 NEVER BOTH.  Once QIES is set, "software must submit invalidation
+ * commands only through the IQ" (§6.5.2) -- and QEMU's engine then ignores a
+ * register command and leaves its busy bit set, so the register form would not
+ * fail at once: it would spin to its bound and answer no.
+ * ablations/598-qi-flush-by-register.patch does that for a flush, and entry
+ * 16's grants must then fail.
+ */
+static int vtd_forget(unsigned unit, volatile uint8_t *regs, unsigned iro,
+		      int contexts)
+{
+	if (unit < IOMMU_MAX_UNITS && vtd_counts[unit].on) {
+		uint64_t cc[2], io[2];
+
+		iommu_vtd_qi_context_global(cc);
+		iommu_vtd_qi_iotlb_global(io);
+
+		const uint64_t both[2][2] = { { cc[0], cc[1] },
+					      { io[0], io[1] } };
+
+		return contexts ? vtd_queue_submit(unit, both, 2)
+				: vtd_queue_submit(unit, both + 1, 1);
+	}
+
+	if (contexts) {
+		*(volatile uint64_t *)(regs + VTD_CCMD) =
+			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
+		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
+			return 0;
+	}
+
+	*(volatile uint64_t *)(regs + iro + 8) = VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+	return wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1);
+}
+
+int iommu_queue_counts(unsigned unit, struct iommu_queue_counts *out)
+{
+	if (unit >= IOMMU_MAX_UNITS || out == 0 || !vtd_counts[unit].on)
+		return 0;
+
+	hw_lock_lock(&vtd_queue_lock[unit]);
+	*out = vtd_counts[unit];
+	hw_lock_unlock(&vtd_queue_lock[unit]);
+	return 1;
+}
+
+/*
+ * Send `n' waits through unit's queue, one submission each, and answer how
+ * many came back.  For the boot: enough of them take the tail round the ring,
+ * and the head a real engine reports after it wraps is the one thing the
+ * fabricated check can only assume.
+ */
+unsigned iommu_queue_exercise(unsigned unit, unsigned n)
+{
+	unsigned answered = 0;
+
+	if (unit >= IOMMU_MAX_UNITS || !vtd_counts[unit].on)
+		return 0;
+
+	for (unsigned i = 0; i < n; i++)
+		answered += (unsigned)vtd_queue_submit(unit, 0, 0);
+
+	return answered;
+}
+
+/*
+ * ── #598: entries written while the engines may be reading them ──────
+ *
+ * Which engines remap is this kernel's record, set for each engine that
+ * confirmed IRES when remapping was turned on -- not a register read on every
+ * write, because an engine this kernel did not turn on is not one whose cache
+ * it may assume anything about.
+ */
+static int	vtd_remapping[IOMMU_MAX_UNITS];
+static int	vtd_irt_uncached;	/* a remapping engine has ECAP.C clear */
+
+int iommu_vtd_remapping(void)
+{
+	for (unsigned i = 0; i < IOMMU_MAX_UNITS; i++)
+		if (vtd_remapping[i])
+			return 1;
+	return 0;
+}
+
+/*
+ * One 16-byte store (vtd_store_entry(), C20): a present entry rewritten in two
+ * would be, between them, the new vector to the old destination, or the old
+ * source let in.  Then the line out of the caches for an engine that does not
+ * snoop, and every engine that remaps told to forget the entry, each through
+ * its own queue -- register-based invalidation cannot reach the interrupt
+ * entry cache (§6.5.1).
+ */
+static int vtd_irte_write(uint32_t index, const uint64_t e[2])
+{
+	const struct iommu_interrupt_tables *t = iommu_interrupt_tables();
+	volatile uint64_t *slot;
+	uint64_t d[2];
+
+	if (t->intel_table == 0 || index >= VTD_IRT_ENTRIES
+	    || !iommu_vtd_qi_iec(index, 0, d))
+		return 0;
+
+	const uint64_t iec[1][2] = { { d[0], d[1] } };
+
+	slot = (volatile uint64_t *)(uintptr_t)
+		phys_to_direct(t->intel_table + (uint64_t)index * 16u);
+	if (!vtd_store_entry(slot, e))
+		return 0;
+
+	if (vtd_irt_uncached)
+		iommu_flush_line(slot);
+
+	for (unsigned u = 0; u < IOMMU_MAX_UNITS; u++)
+		if (vtd_remapping[u] && !vtd_queue_submit(u, iec, 1))
+			return 0;
+	return 1;
+}
+
+/*
+ * A pin's entry names the I/O APIC as its only source, so the pin's own
+ * redirection entry is the one thing that can use it -- edge or level as the
+ * pin is, because a level-triggered pin's entry and redirection entry must
+ * agree on the vector for the broadcast EOI to clear it (§5.1.5.1).
+ */
+int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
+			uint32_t apic_id, int level, int active_low,
+			uint32_t *lo, uint32_t *hi)
+{
+	struct iommu_irte e = { vector, apic_id, level, source };
+	uint32_t index;
+	uint64_t w[2];
+
+	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_PIN, pin, &index)
+	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w))
+		return 0;
+
+	return iommu_vtd_ioapic_rte(index, vector, level, active_low, 0,
+				    lo, hi);
+}
+
+/* A slot's entry names the function given it, and is always edge (MSI). */
+int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
+			uint32_t apic_id, uint64_t *address, uint32_t *data)
+{
+	struct iommu_irte e = { vector, apic_id, 0, source };
+	uint32_t index, a, dw;
+	uint64_t w[2];
+
+	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index)
+	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w)
+	    || !iommu_vtd_msi(index, &a, &dw))
+		return 0;
+
+	*address = a;
+	*data = dw;
+	return 1;
+}
+
+void iommu_vtd_forget_msi(unsigned slot)
+{
+	static const uint64_t absent[2] = { 0, 0 };
+	uint32_t index;
+
+	if (iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index))
+		(void) vtd_irte_write(index, absent);
+}
+
+/*
+ * ── #598 phase 4: remapping turned on ────────────────────────────────
+ *
+ * Rev 5.20 §11.4.4 and §11.4.10, per engine: the queue first -- the only way
+ * the interrupt entry cache can be told anything -- then the table out of the
+ * caches for an engine whose reads do not snoop, IRTA, SIRTP and IRTPS read
+ * back, the whole interrupt entry cache forgotten unless ESIRTPS says SIRTP
+ * did it, CFI clear, and IRE with IRES read back.
+ *
+ * 🔴 CFI CLEAR IS THE POINT.  With it clear a message in compatibility format
+ * is refused (fault 25h) -- the raw write #598 is about.  A firmware that left
+ * it set would have every such message pass, and the carried-over status in
+ * VTD_GSTS_KEEP would keep it set on every later command; so it is cleared,
+ * and read back clear, before remapping is turned on.
+ *
+ * ⚠️ ALL OR NOTHING over the machine.  One table and one format for every
+ * source: a remappable message reaching an engine that does not remap is not
+ * a remapped interrupt.  An engine that fails turns off the ones turned on
+ * before it.
+ */
+#define	VTD_IRTA_REG		0xB8
+#define	VTD_GCMD_IRE		(1ULL << 25)	/* interrupt remapping enable */
+#define	VTD_GSTS_IRES		(1ULL << 25)
+#define	VTD_GCMD_SIRTP		(1ULL << 24)	/* set interrupt table pointer */
+#define	VTD_GSTS_IRTPS		(1ULL << 24)
+#define	VTD_GCMD_CFI		(1ULL << 23)	/* compatibility format passes */
+#define	VTD_GSTS_CFIS		(1ULL << 23)
+#define	VTD_CAP_ESIRTPS(c)	((((c) >> 62) & 0x1) != 0)
+
+static void vtd_ir_off(volatile uint8_t *regs)
+{
+	uint32_t keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep & ~(uint32_t)VTD_GCMD_IRE;
+	(void) wait_bit(regs, VTD_GSTS, VTD_GSTS_IRES, 0, 0);
+}
+
+static int vtd_ir_on(unsigned unit, volatile uint8_t *regs,
+		     const struct iommu_unit *u,
+		     const struct iommu_interrupt_tables *t)
+{
+	uint32_t keep;
+
+	if (!vtd_queue_running(unit)
+	    && !vtd_queue_start(unit, regs, VTD_ECAP_IRO(u->vendor_caps[1])))
+		return 0;
+
+	if (!VTD_ECAP_COHERENT(u->vendor_caps[1])) {
+		vtd_irt_uncached = 1;
+		for (uint64_t off = 0; off < 4096u; off += 64u)
+			iommu_flush_line((const volatile void *)(uintptr_t)
+				       phys_to_direct(t->intel_table + off));
+	}
+
+	*(volatile uint64_t *)(regs + VTD_IRTA_REG) = t->intel_irta;
+	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_SIRTP;
+	if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_IRTPS, 1, 0))
+		return 0;
+
+	if (!VTD_CAP_ESIRTPS(u->vendor_caps[0])) {
+		uint64_t d[2];
+
+		iommu_vtd_qi_iec_global(d);
+
+		const uint64_t all[1][2] = { { d[0], d[1] } };
+
+		if (!vtd_queue_submit(unit, all, 1))
+			return 0;
+	}
+
+	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+	if (keep & VTD_GSTS_CFIS) {
+		keep &= ~(uint32_t)VTD_GCMD_CFI;
+		*(volatile uint32_t *)(regs + VTD_GCMD) = keep;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_CFIS, 0, 0))
+			return 0;
+	}
+
+	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_IRE;
+	return wait_bit(regs, VTD_GSTS, VTD_GSTS_IRES, 1, 0);
+}
+
+unsigned iommu_vtd_ir_enable(void)
+{
+	const struct iommu_interrupt_tables *t = iommu_interrupt_tables();
+	unsigned on = 0;
+
+	if (t->intel_table == 0 || iommu_unit_count() > IOMMU_MAX_UNITS)
+		return 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (regs != 0 && vtd_ir_on(i, regs, u, t)) {
+			vtd_remapping[i] = 1;
+			on++;
+			continue;
+		}
+
+		if (regs != 0)
+			vtd_ir_off(regs);
+		for (unsigned j = 0; j < i; j++) {
+			vtd_ir_off((volatile uint8_t *)(uintptr_t)
+				   iommu_unit(j)->register_va);
+			vtd_remapping[j] = 0;
+		}
+		return 0;
+	}
+
+	return on;
+}
+
+int iommu_vtd_unit_remapping(unsigned unit)
+{
+	return unit < IOMMU_MAX_UNITS && vtd_remapping[unit];
 }

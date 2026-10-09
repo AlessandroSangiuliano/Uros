@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #598
+Takes out: the I/O APIC initialised before -i -- ioapic_init() runs in ioapic_selftest() again, after remapping was turned on, with the firmware's routing still in the controller
+Run: --iommu amd --entry 36 600 -smp 1
+Expect: interrupt remapping COULD NOT BE TURNED ON — WRONG, the i/o apic was never initialised
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 4648f21f..078df013 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -6217,7 +6217,7 @@ static void ioapic_selftest(void)
+ 	uint64_t while_masked, after_routing;
+ 	int had_interrupts;
+ 
+-	if (!ioapic_present()) {
++	if (!ioapic_init()) {
+ 		/*
+ 		 * 🔑 WHICH OF THE TWO SILENCES (#563).
+ 		 *
+@@ -8190,13 +8190,6 @@ void x86_64_boot(uint32_t magic, uint32_t info)
+ 	timer_selftest();
+ 	pci_cfg_selftest();
+ 	pci_cap_selftest();
+-	/*
+-	 * #598: the I/O APIC is masked before -i can turn remapping on, so
+-	 * whatever the firmware left routed never reaches an engine that
+-	 * remaps, and -i can read every pin and find none routed yet.
+-	 * ioapic_selftest() says what was found.
+-	 */
+-	(void) ioapic_init();
+ 	iommu_selftest();
+ 	msi_selftest();
+ 	msix_table_selftest();

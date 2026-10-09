@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #598
+Takes out: a released message slot keeping its trampoline -- the vector loses its handler too, and a message after the release is an unclaimed vector, which halts the machine
+Run: --entry 0 300
+Expect: unclaimed interrupt \(vector
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index 8ee2bbc7..91456c97 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -655,6 +655,7 @@ msi_release_vector(unsigned int slot)
+ 		return;
+ 
+ 	irq_handler[slot] = 0;
++	trap_set_handler(DEVICE_MD_VECTOR(slot), 0);
+ }
+ 
+ /*

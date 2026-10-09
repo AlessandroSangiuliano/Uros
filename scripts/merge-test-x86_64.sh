@@ -74,6 +74,7 @@ WRONG=0
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in
 #   ioapic    -Y's own line: "ioapic_race: PASS"
+#   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
@@ -92,11 +93,18 @@ ENTRIES="
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
+36 harness --iommu_intel
+37 harness --iommu_intel
+38 harness --iommu_intel
+36 harness --iommu_amd
+37 harness --iommu_amd
+38 harness --iommu_amd
 17 harness
 18 harness
 21 harness
 22 harness
 23 ioapic
+39 msirace --iommu_intel
 24 panic2
 25 harness
 26 harness
@@ -139,6 +147,7 @@ judge() {	# entry verdict log-of-the-harness full-log
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
+	msirace) grep -aq 'msi_race: PASS' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
 	esac
 }

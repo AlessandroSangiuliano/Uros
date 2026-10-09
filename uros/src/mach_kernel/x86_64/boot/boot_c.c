@@ -4741,6 +4741,28 @@ static void pci_cfg_selftest(void)
 	kputs(id != 0xFFFFFFFFu && id != 0
 	      ? " — a vendor answered, so the mechanism reaches the bus\r\n"
 	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
+
+	/*
+	 * #598's C21: the command register written with its status half zero.
+	 * Asked of the arithmetic, because no device QEMU emulates sets a
+	 * status error bit that a careless write could be seen to clear.  The
+	 * statuses are every error bit set, and the capability list's.
+	 */
+	{
+		unsigned ok = 0;
+
+		ok += pci_cfg_command_dword(0xF9100002u, PCI_CMD_BUS_MASTER, 0)
+		      == 0x00000006u;
+		ok += pci_cfg_command_dword(0xF9100406u, 0,
+					    PCI_CMD_INTX_DISABLE)
+		      == 0x00000006u;
+		kputs("UrMach x86-64: the command register written with its"
+		      " status half zero, ");
+		kputdec(ok);
+		kputs(ok == 2 ? " of 2 — a pending error stays pending\r\n"
+			      : " of 2 — WRONG, a write would clear the"
+				" device's pending errors\r\n");
+	}
 }
 
 /*
@@ -5053,6 +5075,14 @@ static void pci_cap_selftest(void)
  * misread FIELD.  The register read is what catches the second, which is why
  * both are here and neither is enough.
  */
+
+/*
+ * #598: waits sent through each intel queue under -I, one submission each --
+ * more than the 256 slots of its ring, so the tail goes round it on the real
+ * engine at least once.
+ */
+#define	QUEUE_TRIP	300u
+
 static void iommu_selftest(void)
 {
 	unsigned		units;
@@ -5114,6 +5144,21 @@ static void iommu_selftest(void)
 			   " back the way it was written\r\n");
 	}
 
+	/* #598's C7, on every board for the same reason. */
+	{
+		unsigned expected = 0, made = 0;
+		int ok = iommu_flush_check(&expected, &made);
+
+		kputs("UrMach x86-64: a scratch domain's one page flushed ");
+		kputdec(made);
+		kputs(" of ");
+		kputdec(expected);
+		kputs(ok ? " lines an engine with ECAP.C clear would read — each"
+			   " new table whole, and each entry written\r\n"
+			 : " lines an engine with ECAP.C clear would read — WRONG,"
+			   " it would walk a line still in the caches\r\n");
+	}
+
 	/*
 	 * ⚠️ AND THIS ONE ESPECIALLY ON EVERY BOARD (#432 stage 3d).  A fault
 	 * record is read exactly when something has already gone wrong, so on
@@ -5131,9 +5176,10 @@ static void iommu_selftest(void)
 		kputs(" iommu fault records decoded, ");
 		kputdec(wrong);
 		kputs(" wrong");
-		kputs(ok ? " — intel's two type bits told apart, and amd's"
+		kputs(ok ? " — intel's two type bits told apart, amd's"
 			   " direction refused where the entry does not carry"
-			   " one\r\n"
+			   " one, and a refused interrupt read as one, on amd"
+			   " only at an interrupt address\r\n"
 			 : " — WRONG, a refusal would be reported as something"
 			   " it is not\r\n");
 	}
@@ -5174,6 +5220,50 @@ static void iommu_selftest(void)
 			   " written are each counted as a possible loss\r\n"
 			 : " — WRONG, refusals could go missing and nothing say"
 			   " so\r\n");
+	}
+
+	/*
+	 * ⚠️ AND THE WORDS INTERRUPT REMAPPING IS MADE OF, ON EVERY BOARD
+	 * (#598).  An entry is written once and read only by an engine, so a
+	 * wrong bit is not a wrong answer here: it is an interrupt delivered
+	 * to the wrong processor, or one that any device can trigger.
+	 */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_interrupt_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" interrupt remapping words encoded and decoded, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — both vendors' empty entries refuse, an intel"
+			   " entry that accepts any source is not one of"
+			   " ours, and an index's sixteenth bit travels"
+			   " apart\r\n"
+			 : " — WRONG, an interrupt would go somewhere the"
+			   " kernel did not send it\r\n");
+	}
+
+	/*
+	 * ⚠️ AND THE QUEUE THOSE WORDS WILL BE FORGOTTEN THROUGH (#598), on a
+	 * fabricated engine, so it is asked here too and not only where an
+	 * intel engine exists.
+	 */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_queue_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" invalidation-queue cases on a fabricated engine, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — a full ring writes nothing, the end wraps to"
+			   " slot zero, and only a wait's own number answers"
+			   " it\r\n"
+			 : " — WRONG, the engine would read a descriptor nobody"
+			   " wrote, or a wait would end before its work\r\n");
 	}
 
 	if (iommu_vendor() == IOMMU_NONE) {
@@ -5339,9 +5429,43 @@ static void iommu_selftest(void)
 				kputdec(l);
 				kputs("-level");
 			}
-		kputs(u->coherent_walk ? ", coherent walks" : ", NON-coherent walks");
-		kputs(u->interrupt_remapping ? ", remaps interrupts\r\n"
-					     : ", no interrupt remapping\r\n");
+		/*
+		 * #598's C7: on AMD the control register's Coherent bit is the
+		 * device table's, not the walks' -- those follow a DTE's SD,
+		 * clear in every entry written here.
+		 */
+		if (iommu_vendor() == IOMMU_AMD)
+			kputs(iommu_amd_devtab_snooped(i)
+			      ? ", page walks snooped (sd clear), the device"
+				" table too, as its ivhd recommends"
+			      : ", page walks snooped (sd clear), the device"
+				" table NOT, as its ivhd recommends");
+		else
+			kputs(u->coherent_walk ? ", coherent walks"
+					       : ", NON-coherent walks");
+
+		/*
+		 * ⚠️ What remapping interrupts would need, said before anything
+		 * tries to turn it on (#598).  An engine that cannot forget an
+		 * entry is said in capitals because the specification rules it
+		 * out, and one that blocks every message while remapping is
+		 * off is said because it makes the order of the boot matter.
+		 */
+		if (!u->interrupt_remapping) {
+			kputs(", no interrupt remapping\r\n");
+		} else {
+			kputs(", remaps interrupts to ");
+			kputs(u->interrupt.x2apic ? "32-bit" : "8-bit");
+			kputs(" apic ids");
+			if (!u->interrupt.can_forget)
+				kputs(" BUT CANNOT BE MADE TO FORGET AN ENTRY");
+			if (u->interrupt.x2apic_required)
+				kputs(", in x2apic mode only");
+			if (u->interrupt.required)
+				kputs(", and blocks every interrupt until it"
+				      " remaps");
+			kputs("\r\n");
+		}
 
 		kputs("UrMach x86-64:     caps ");
 		kputhex64(u->vendor_caps[0]);
@@ -5450,13 +5574,17 @@ static void iommu_selftest(void)
 		 * page — so a driver holding the master port can map the MSI-X
 		 * BAR and write its own entry.  Closing THAT is #511 and #513,
 		 * it is needed whether or not the hardware ever remaps, and it
-		 * is where the work goes.
+		 * is where the work went.
+		 *
+		 * #598 is the follow-on: the interrupt tables are built below
+		 * on every boot, and -i turns remapping on.  Without it, this
+		 * line is still the whole answer.
 		 */
-		kputs("UrMach x86-64:   interrupt remapping is NOT turned on"
-		      " — a message-signalled interrupt is a write the"
-		      " hardware exempts from every domain (#432), and what"
-		      " keeps the table honest is that the kernel writes it"
-		      " (#511, #513)\r\n");
+		kputs("UrMach x86-64:   interrupt remapping is #598's, and on"
+		      " only with -i — a message-signalled interrupt is a"
+		      " write the hardware exempts from every domain (#432),"
+		      " and without remapping what keeps the table honest is"
+		      " that the kernel writes it (#511, #513)\r\n");
 	}
 
 	/*
@@ -5572,6 +5700,7 @@ static void iommu_selftest(void)
 	 * in the same boot as the arithmetic it depends on.
 	 */
 	{
+		uint64_t flushed = iommu_table_lines_flushed();
 		int ok = iommu_build_passthrough();
 		const struct iommu_tables *t = iommu_tables();
 
@@ -5586,8 +5715,104 @@ static void iommu_selftest(void)
 			kputdec(t->devices);
 			kputs(" entries in ");
 			kputdec(t->frames);
-			kputs(" frames, every one read back\r\n");
+			kputs(" frames, every one read back");
+
+			/*
+			 * #598's C7: and every line of every frame out of the
+			 * caches, on an engine whose walks do not snoop them --
+			 * counted, so a frame the build forgot is a number short.
+			 */
+			uint64_t want = iommu_tables_uncached()
+					? (uint64_t)t->frames * 64u
+					: iommu_amd_devtab_uncached()
+					? t->root_bytes / 64u : 0;
+
+			flushed = iommu_table_lines_flushed() - flushed;
+			if (want == 0)
+				kputs("\r\n");
+			else if (flushed == want) {
+				kputs(" and out of the caches, ");
+				kputdec((unsigned)flushed);
+				kputs(iommu_vendor() == IOMMU_AMD
+				      ? " lines — the device table is read"
+					" without snooping, as the ivhd"
+					" recommends\r\n"
+				      : " lines — the walks do not snoop them"
+					" (ECAP.C clear)\r\n");
+			} else {
+				kputs(" — WRONG, ");
+				kputdec((unsigned)flushed);
+				kputs(" of ");
+				kputdec((unsigned)want);
+				kputs(" lines left the caches, and the engine"
+				      " does not snoop them\r\n");
+			}
 		}
+
+		/*
+		 * #598: and the interrupt tables the same way — built, every
+		 * entry written refusing and read back, nothing pointed at
+		 * them.  Pointing the engines at them comes after, and is the
+		 * first step that can stop an interrupt.
+		 */
+		{
+			int built = iommu_build_interrupt_tables();
+			const struct iommu_interrupt_tables *it =
+				iommu_interrupt_tables();
+
+			kputs("UrMach x86-64:   interrupt remapping ");
+			if (it->engines == 0) {
+				kputs("tables not built — no engine remaps"
+				      " interrupts\r\n");
+			} else if (iommu_vendor() == IOMMU_AMD) {
+				kputs("tables: ");
+				kputdec(it->tables);
+				kputs(" of 256 entries, ");
+				kputdec(it->entries);
+				kputs(" read back not present, ");
+				kputdec(it->wrong);
+				kputs(" wrong — ");
+				kputdec(it->named);
+				kputs(" for sources the ivrs names (");
+				kputdec(it->ioapics);
+				kputs(" i/o apic)");
+				kputs(built ? " and 1 closed for every other device,"
+					      " nothing points at them yet\r\n"
+					    : " — WRONG, no frame or no room, or an"
+					      " entry nobody wrote would be read as"
+					      " one\r\n");
+				if (built && it->ioapics == 0)
+					kputs("UrMach x86-64:   the ivrs names no i/o"
+					      " apic — its pins could not be remapped"
+					      " here\r\n");
+			} else if (it->tables == 0) {
+				kputs("table COULD NOT BE BUILT — no frame\r\n");
+			} else {
+				kputs("table at ");
+				kputhex64(it->intel_table);
+				kputs(", ");
+				kputdec(it->entries);
+				kputs(" entries read back not present, ");
+				kputdec(it->wrong);
+				kputs(" wrong, for ");
+				kputdec(it->engines);
+				kputs(" engine(s) to share — IRTA_REG will be ");
+				kputhex64(it->intel_irta);
+				kputs(built ? ", nothing points at it yet\r\n"
+					    : " — WRONG, an entry nobody wrote would"
+					      " be read as one\r\n");
+			}
+		}
+
+		/*
+		 * #598: what remapping must do before translation is on.  On
+		 * AMD that is every device table entry's interrupt half, which
+		 * an engine already running could have cached; on Intel there
+		 * is nothing.  Whether it worked is asked again by the turning
+		 * on below, which says so.
+		 */
+		if (boot_flag('i'))
+			(void) iommu_prepare_interrupt_remapping();
 
 		/*
 		 * 🔴 AND ONLY NOW, AND ONLY IF ASKED.  `-I' on the boot
@@ -5606,6 +5831,50 @@ static void iommu_selftest(void)
 				   " and the hardware says so\r\n"
 				 : "COULD NOT BE ENABLED — the engine did not"
 				   " confirm it\r\n");
+
+			/*
+			 * #598: and how each intel engine is told to forget —
+			 * through its queue once that is on, which is then the
+			 * only way it may be told, or through two registers on
+			 * an engine that has no queue.
+			 *
+			 * ⚠️ And the queue taken round its ring on the real
+			 * engine: QUEUE_TRIP waits, one submission each, are
+			 * more than its 256 slots.  The fabricated check asks
+			 * the arithmetic; only an engine can say what its head
+			 * reads after it wraps.  Counted, not assumed.
+			 */
+			if (on && iommu_vendor() == IOMMU_INTEL)
+				for (unsigned i = 0; i < iommu_unit_count(); i++) {
+					struct iommu_queue_counts c;
+					uint64_t turns;
+					unsigned back;
+
+					kputs("UrMach x86-64:   unit ");
+					kputdec(i);
+					if (!iommu_queue_counts(i, &c)) {
+						kputs(" forgets through its registers —"
+						      " it has no invalidation queue\r\n");
+						continue;
+					}
+
+					turns = c.turns;
+					back = iommu_queue_exercise(i, QUEUE_TRIP);
+					(void) iommu_queue_counts(i, &c);
+
+					kputs(" forgets through its invalidation"
+					      " queue: ");
+					kputdec(back);
+					kputs(" of ");
+					kputdec(QUEUE_TRIP);
+					kputs(" waits sent one by one came back, and"
+					      " its ring went round ");
+					kputdec((unsigned)(c.turns - turns));
+					kputs(back == QUEUE_TRIP && c.turns > turns
+					      ? " time(s)\r\n"
+					      : " time(s) — WRONG, the queue did not"
+						" carry them all round\r\n");
+				}
 
 			/*
 			 * 🔴 AND THE FIRST QUESTION AFTER TURNING IT ON IS
@@ -5640,7 +5909,7 @@ static void iommu_selftest(void)
 			 * 🔴 AND WHETHER A DEVICE COULD BE CONFINED, ASKED OUT
 			 * LOUD.  Everything above says the hardware is there
 			 * and the tables are right; this is the one question a
-			 * driver's DMA path actually asks, and it has four
+			 * driver's DMA path actually asks, and it has five
 			 * separate ways to answer no.  Without it, a machine
 			 * on which no device is ever confined looks exactly
 			 * like one on which none needed to be — which is a
@@ -5651,11 +5920,77 @@ static void iommu_selftest(void)
 			      " what it is granted: ");
 			kputs(iommu_can_isolate()
 			      ? "yes — the next dma allocation moves one\r\n"
-			      : "NO — see the four conditions in"
+			      : "NO — see the conditions in"
 				" iommu_can_isolate()\r\n");
 		} else if (ok) {
 			kputs("UrMach x86-64:   translation left OFF (pass"
 			      " -I to enable it) — nothing programmed\r\n");
+		}
+
+		/*
+		 * #598 phase 4: interrupt remapping, only if asked, and after
+		 * translation, so that a queue -I started is the one it uses.
+		 * Every source is programmed after this point — the I/O
+		 * APIC's pins, the HPET, each driver's MSI-X — so each one
+		 * goes through an entry from its first message.  The
+		 * controller was masked before it, and turning remapping on
+		 * refuses, WRONG, if it was not or if a pin is routed already.
+		 */
+		if (boot_flag('i')) {
+			const char *why = "";
+			int asked = 0, was_on = iommu_translating();
+			unsigned n = iommu_enable_interrupt_remapping(&why,
+								      &asked);
+			const struct acpi_ioapic *io = acpi_ioapic(0);
+			uint16_t sid;
+
+			if (n != 0 && !was_on && iommu_translating())
+				kputs("UrMach x86-64:   -i turned the engine on,"
+				      " every device passing through — amd-vi"
+				      " remaps only with it on\r\n");
+
+			kputs("UrMach x86-64:   -i given: interrupt remapping ");
+			if (n == 0) {
+				kputs(asked ? "COULD NOT BE TURNED ON — WRONG, "
+					    : "NOT ASKED — ");
+				kputs(why);
+				kputs("\r\n");
+			} else {
+				kputs(iommu_vendor() == IOMMU_AMD
+				      ? "IS ON — every pin and MSI-X slot"
+					" through an entry this kernel wrote,"
+					" and a message with no entry refused"
+					"\r\n"
+				      : "IS ON — every pin and MSI-X slot"
+					" through an entry this kernel wrote, a"
+					" message in the old format refused"
+					"\r\n");
+				for (unsigned i = 0; i < iommu_unit_count(); i++) {
+					kputs("UrMach x86-64:   unit ");
+					kputdec(i);
+					kputs(iommu_unit_remaps(i)
+					      ? " remaps interrupts\r\n"
+					      : " does not remap — WRONG\r\n");
+				}
+				if (io != 0 && iommu_ioapic_source(io->id, &sid)) {
+					int amd = iommu_vendor() == IOMMU_AMD;
+
+					kputs(amd ? "UrMach x86-64:   the i/o"
+						    " apic's table belongs to "
+						  : "UrMach x86-64:   the i/o"
+						    " apic's entries accept only ");
+					kputdec(sid >> 8);
+					kputs(":");
+					kputdec((sid >> 3) & 0x1F);
+					kputs(".");
+					kputdec(sid & 0x7);
+					kputs(amd ? ", its deviceid in the ivrs, and"
+						    " its entry n delivers vector n"
+						    "\r\n"
+						  : ", its source-id in the dmar"
+						    "\r\n");
+				}
+			}
 		}
 	}
 
@@ -5820,6 +6155,35 @@ static void msi_selftest(void)
 	if (!had_interrupts)
 		interrupts_disable();
 	device_md_msi_unregister(slot);
+
+	/*
+	 * And a message after the slot is given back (#598).  A device can have
+	 * one on its way when its driver lets go -- the card in irq_claim_test's
+	 * [12] did, under KVM -- and msi_release_vector() promises it is
+	 * acknowledged and lost.  It used to take the vector away instead, and
+	 * an unclaimed vector halts the machine.  So the released vector is
+	 * raised once more, the way the first was.
+	 */
+	{
+		uint64_t	before = msi_hits;
+
+		had_interrupts = interrupts_enabled();
+		interrupts_enable();
+		lapic_send_self((uint8_t)data);
+		for (unsigned spin = 0; spin < 1000000u; spin++)
+			cpu_pause();
+		if (!had_interrupts)
+			interrupts_disable();
+
+		kputs("UrMach x86-64: a message after slot ");
+		kputdec(slot);
+		kputs(" was given back ran its handler ");
+		kputdec((unsigned)(msi_hits - before));
+		kputs(msi_hits == before
+		      ? " times — acknowledged and lost, not a halt\r\n"
+		      : " times — WRONG, a slot given back still runs its"
+			" handler\r\n");
+	}
 }
 
 /*
@@ -5914,9 +6278,41 @@ static void msix_table_selftest(void)
 		return;
 	}
 
+	/*
+	 * #598's C11: the same table probed again is the same mapping.  The
+	 * device region gives nothing back, so a probe that mapped each time
+	 * would run a driver registering in a loop out of it.
+	 */
+	{
+		struct pci_msix again;
+		int same = pci_msix_probe(0, 0, (uint8_t)nic, 0, &again)
+			   && again.table == m.table;
+
+		kputs(same ? "UrMach x86-64: its MSI-X table probed twice and"
+			     " mapped once — the device region spent on it"
+			     " once\r\n"
+			   : "UrMach x86-64: its MSI-X table probed twice — WRONG,"
+			     " mapped twice, and the device region gives nothing"
+			     " back\r\n");
+	}
+
 	if (!msi_claim_vector(msi_handler, &slot, &addr, &data)) {
 		kputs("UrMach x86-64: no message-signalled slot left to give"
 		      " the device — WRONG\r\n");
+		return;
+	}
+
+	/*
+	 * #598: through the slot's remapping entry when interrupts are
+	 * remapped, as every programmer of a device must (<cpu/pci_msix.h>).
+	 * This test armed the old format without asking, and QEMU's
+	 * intel-iommu let it through only because it refuses nothing in that
+	 * format.
+	 */
+	if (!msi_remap_vector(slot, 0, nic, 0, &addr, &data)) {
+		kputs("UrMach x86-64: the slot could not be given a remapping"
+		      " entry — WRONG\r\n");
+		device_md_msi_unregister(slot);
 		return;
 	}
 
@@ -6041,7 +6437,14 @@ static void msix_table_selftest(void)
 	 * bit in the table the kernel owns, and it stops the write at source.
 	 */
 	pci_msix_disarm(&m, 0);
+	msi_unremap_vector(slot, 0, nic, 0);
 	device_md_msi_unregister(slot);
+}
+
+/* #598's C12: a handler for the line the range question claims. */
+static void c12_irq(int irq)
+{
+	(void)irq;
 }
 
 static void ioapic_selftest(void)
@@ -6051,14 +6454,15 @@ static void ioapic_selftest(void)
 	uint64_t while_masked, after_routing;
 	int had_interrupts;
 
-	if (!ioapic_init()) {
+	if (!ioapic_present()) {
 		/*
 		 * 🔑 WHICH OF THE TWO SILENCES (#563).
 		 *
-		 * ioapic_init() has exactly ONE way to fail: acpi_ioapic(0) yielded
-		 * nothing, which is the MADT saying this machine has no I/O APIC.
-		 * It does not fail for a mapping that went wrong or a version
-		 * register that read back oddly -- there is one `return 0' in it.
+		 * ioapic_init(), which ran before iommu_selftest() (#598), has
+		 * exactly ONE way to fail: acpi_ioapic(0) yielded nothing, which
+		 * is the MADT saying this machine has no I/O APIC.  It does not
+		 * fail for a mapping that went wrong or a version register that
+		 * read back oddly -- there is one `return 0' in it.
 		 *
 		 * So the only question left is whether the table was READ at all,
 		 * and the same walk answers it: the processor census comes from
@@ -6087,6 +6491,65 @@ static void ioapic_selftest(void)
 	kputs(ioapic_pin_count() >= 16 && ioapic_is_masked(gsi)
 	      ? " — the firmware's routing is off\r\n"
 	      : " — WRONG, the controller is not in a known state\r\n");
+
+	/*
+	 * #598's C12: a claim below the controller's first pin is refused
+	 * rather than routed into redir_reg()'s panic, as on a board whose
+	 * first I/O APIC starts at GSI 24.  The first pin is moved there for
+	 * the question and put back.  ISA 4 is claimed and given back at the
+	 * real base first, so that the refusal below is the range's and not a
+	 * line that could not be had at all.
+	 */
+	{
+		int at_base, below;
+		uint32_t was;
+
+		at_base = device_md_irq_register(4, c12_irq);
+		if (at_base)
+			device_md_irq_unregister(4);
+		was = ioapic_set_first_gsi(24);
+		below = device_md_irq_register(4, c12_irq);
+		(void) ioapic_set_first_gsi(was);
+		if (below)
+			device_md_irq_unregister(4);
+
+		kputs(at_base && !below
+		      ? "UrMach x86-64: ISA 4 claimed at this board's first pin,"
+			" and refused with the first pin moved to GSI 24 — the"
+			" controller's range decides, not its pin count\r\n"
+		      : at_base
+		      ? "UrMach x86-64: ISA 4 claimed with the first pin moved"
+			" to GSI 24 — WRONG, a pin below the controller's range"
+			" was routed\r\n"
+		      : "UrMach x86-64: ISA 4 could not be claimed at this"
+			" board's first pin — WRONG, so a refusal below it says"
+			" nothing\r\n");
+	}
+
+	/*
+	 * #598's C16: an APIC id past eight bits is refused by a redirection
+	 * entry and by a message address, not cut to its low byte.  Asked of
+	 * the arithmetic: this kernel reads xAPIC ids, which cannot pass eight
+	 * bits, and whether x2APIC follows is still #598's open question.
+	 */
+	{
+		uint32_t high = 0;
+		unsigned long long address = 0;
+		unsigned ok = 0;
+
+		ok += ioapic_rte_destination(3, &high) && high == 0x03000000u;
+		ok += ioapic_rte_destination(255, &high) && high == 0xFF000000u;
+		ok += !ioapic_rte_destination(256, &high);
+		ok += msi_destination(3, &address) && address == 0xFEE03000ULL;
+		ok += !msi_destination(256, &address);
+		kputs("UrMach x86-64: an apic id past eight bits refused by a"
+		      " redirection entry and a message address, not cut to its"
+		      " low byte: ");
+		kputdec(ok);
+		kputs(ok == 5 ? " of 5\r\n"
+			      : " of 5 — WRONG, it would reach the processor"
+				" that has its low byte\r\n");
+	}
 
 	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, device_irq);
 	device_irqs = 0;
@@ -6134,6 +6597,179 @@ static void ioapic_selftest(void)
 	kputs(while_masked == 0 && after_routing > 0
 	      ? " — a device interrupt arrives, and only through the pin\r\n"
 	      : " — WRONG, the routing is not what delivered it\r\n");
+}
+
+/*
+ * A level-triggered line, rung and quieted again and again (#598 point 3).
+ *
+ * ioapic_selftest() above routes IRQ 0, which is edge.  A LEVEL line is held
+ * by the I/O APIC after it is sent -- Remote IRR -- until the processor's EOI
+ * comes back carrying a vector equal to the redirection entry's.  That
+ * comparison is what interrupt remapping can break.  On AMD the entry's
+ * vector field is also its INDEX into the I/O APIC's own table, so the vector
+ * the table delivers must equal the index -- this kernel makes entry n
+ * deliver vector n -- or the EOI never matches, Remote IRR never clears, and
+ * the line is silent after its first interrupt.  Intel says the same in its
+ * own terms: a level pin's redirection entry and remapping entry name one
+ * vector (Rev 5.20 §5.1.5.1).
+ *
+ * The network card is the level source.  With MSI-X off, an 82574L or an
+ * 82540EM raises its INTx when a cause is set in ICS and IMS lets it
+ * through, and reading ICR drops it.  The line the firmware gave the card is
+ * claimed as a driver claims one, device_md_irq_register(), so what answers
+ * it is the trampoline every driver's line goes through: the handler reads
+ * ICR, then the processor and the controller are told.  Rung LEVEL_RINGS
+ * times, and every ring must arrive.
+ *
+ * 🔑 Under QEMU's amd-iommu the broadcast EOI never comes -- it delivers a
+ * remapped message marked edge -- so what keeps this line alive there is the
+ * controller's own EOI register (device_md_irq_trampoline()).
+ *
+ * ⚠️ Only where the card is one this knows how to ring and the firmware says
+ * its line is level-triggered; elsewhere it says why it did not ask.  The
+ * card's registers stay mapped, as msix_table_selftest() leaves them (#612).
+ */
+#define	LEVEL_RINGS		4u
+#define	NIC_ICR			0x00C0u		/* read clears, INTx drops */
+#define	NIC_ICS			0x00C8u
+#define	NIC_IMS			0x00D0u
+#define	NIC_IMC			0x00D8u
+#define	NIC_ICR_LSC		0x00000004u
+
+static volatile uint32_t	*level_nic;
+static volatile uint64_t	level_hits;
+
+/* A driver's handler: the card told it was heard, by reading ICR. */
+static void level_irq(int irq)
+{
+	(void)irq;
+
+	level_hits++;
+	if (level_nic != 0)
+		(void) level_nic[NIC_ICR / 4];
+}
+
+static void ioapic_level_selftest(void)
+{
+	struct pci_msix		m;
+	uint32_t		id = 0, slots[PCI_NUM_BAR_SLOTS], command, gsi;
+	struct pci_bar_region	r[PCI_NUM_BAR_SLOTS];
+	uint64_t		regs_base = 0;
+	unsigned		dev, nic = 0, found = 0, rang = 0, n, i;
+	uint8_t			line;
+	uint16_t		flags;
+	volatile uint32_t	*regs;
+	int			had_interrupts;
+
+	if (!ioapic_present()) {
+		kputs("UrMach x86-64: a level-triggered line: NOT ASKED — no"
+		      " I/O APIC\r\n");
+		return;
+	}
+
+	for (dev = 0; dev < 32 && !found; dev++) {
+		id = pci_cfg_read(0, 0, (uint8_t)dev, 0, PCI_VENDOR_ID);
+		if (id == 0x10D38086u || id == 0x100E8086u) {
+			nic = dev;
+			found = 1;
+		}
+	}
+	if (!found) {
+		kputs("UrMach x86-64: a level-triggered line: NOT ASKED — no"
+		      " network card here that this knows how to ring\r\n");
+		return;
+	}
+
+	line = (uint8_t)(pci_cfg_read(0, 0, (uint8_t)nic, 0,
+				      PCI_INTERRUPT_LINE) & 0xFF);
+	gsi = acpi_irq_to_gsi(line);
+	flags = acpi_irq_flags(line);
+	if (line == 0 || line >= 16
+	    || (flags & ACPI_TRIGGER_MASK) != ACPI_TRIGGER_LEVEL
+	    || gsi < ioapic_first_gsi()
+	    || gsi - ioapic_first_gsi() >= ioapic_pin_count()) {
+		kputs("UrMach x86-64: a level-triggered line: NOT ASKED — the"
+		      " card's line is not one the firmware says is"
+		      " level-triggered on this I/O APIC\r\n");
+		return;
+	}
+
+	for (i = 0; i < PCI_NUM_BAR_SLOTS; i++)
+		slots[i] = pci_cfg_read(0, 0, (uint8_t)nic, 0, PCI_BAR(i));
+	n = pci_bars_decode(slots, PCI_NUM_BAR_SLOTS, r, PCI_NUM_BAR_SLOTS);
+	for (i = 0; i < n; i++)
+		if (r[i].slot == 0 && !(r[i].flags & PCI_REGION_IO))
+			regs_base = r[i].base;
+	regs = regs_base != 0
+	       ? (volatile uint32_t *)(uintptr_t)pmap_map_device(regs_base,
+								 0x20000)
+	       : 0;
+	if (regs == 0) {
+		kputs("UrMach x86-64: a level-triggered line: the card's"
+		      " registers could not be mapped — WRONG\r\n");
+		return;
+	}
+
+	/*
+	 * MSI-X off -- msix_table_selftest() disarmed its entry and left the
+	 * function enabled, and an enabled card never raises INTx -- and INTx
+	 * let through.  The command is written with the status half zero: its
+	 * bits clear when a one is written, and a zero leaves them (C21).
+	 */
+	if (pci_msix_probe(0, 0, (uint8_t)nic, 0, &m))
+		pci_msix_disable(&m);
+	pci_cfg_command(0, 0, (uint8_t)nic, 0, PCI_CMD_MEM_ENABLE,
+			PCI_CMD_INTX_DISABLE);
+
+	regs[NIC_IMC / 4] = 0xFFFFFFFFu;
+	(void) regs[NIC_ICR / 4];
+	level_nic = regs;
+	level_hits = 0;
+
+	if (!device_md_irq_register(line, level_irq)) {
+		kputs("UrMach x86-64: a level-triggered line: irq ");
+		kputdec(line);
+		kputs(" could not be claimed as a driver claims one — WRONG\r\n");
+		level_nic = 0;
+		return;
+	}
+
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+	regs[NIC_IMS / 4] = NIC_ICR_LSC;
+	for (i = 0; i < LEVEL_RINGS; i++) {
+		uint64_t	before = level_hits;
+
+		regs[NIC_ICS / 4] = NIC_ICR_LSC;
+		for (unsigned spin = 0; spin < 2000000u && level_hits == before;
+		     spin++)
+			cpu_pause();
+		if (level_hits != before)
+			rang++;
+	}
+	regs[NIC_IMC / 4] = 0xFFFFFFFFu;
+	(void) regs[NIC_ICR / 4];
+	if (!had_interrupts)
+		interrupts_disable();
+	device_md_irq_unregister(line);
+	level_nic = 0;
+
+	kputs("UrMach x86-64: a level-triggered line, irq ");
+	kputdec(line);
+	kputs(" on pin ");
+	kputdec(gsi - ioapic_first_gsi());
+	kputs(", rung ");
+	kputdec(LEVEL_RINGS);
+	kputs(" times: ");
+	kputdec(rang);
+	kputs(" arrived");
+	kputs(ioapic_direct_eoi() ? " (the controller takes a direct EOI)"
+				  : " (no EOI register: the broadcast alone)");
+	kputs(rang == LEVEL_RINGS
+	      ? " — each EOI matched its redirection entry and let the next"
+		" one through\r\n"
+	      : " — WRONG, the line went silent: an EOI did not match its"
+		" redirection entry's vector\r\n");
 }
 
 /*
@@ -7880,10 +8516,18 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	pci_cfg_selftest();
 	pci_cap_selftest();
+	/*
+	 * #598: the I/O APIC is masked before -i can turn remapping on, so
+	 * whatever the firmware left routed never reaches an engine that
+	 * remaps, and -i can read every pin and find none routed yet.
+	 * ioapic_selftest() says what was found.
+	 */
+	(void) ioapic_init();
 	iommu_selftest();
 	msi_selftest();
 	msix_table_selftest();
 	ioapic_selftest();
+	ioapic_level_selftest();
 	spl_selftest();
 	intr_nest_selftest();
 	lock_cost_bench();

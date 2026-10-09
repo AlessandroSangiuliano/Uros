@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: the status half written as zero -- the command dword goes back as it was read, and every pending error with it, as a one that clears it
+Run: --entry 0 600 -smp 1
+Expect: the command register written with its status half zero, [0-1] of 2
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pci_cfg.c b/uros/src/mach_kernel/x86_64/cpu/pci_cfg.c
+index ab4a110e..32db6588 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/pci_cfg.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pci_cfg.c
+@@ -356,7 +356,7 @@ pci_cfg_find_cap(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
+ uint32_t
+ pci_cfg_command_dword(uint32_t read, uint16_t set, uint16_t clear)
+ {
+-	return ((read | set) & ~(uint32_t)clear) & 0xFFFFu;
++	return (read | set) & ~(uint32_t)clear;
+ }
+ 
+ void

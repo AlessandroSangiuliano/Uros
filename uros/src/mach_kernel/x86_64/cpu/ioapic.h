@@ -112,16 +112,49 @@ void ioapic_unmask(uint32_t gsi);
 int ioapic_is_masked(uint32_t gsi);
 
 /*
- * #599: for the -Y test only (ioapic_race_test.c).  A pin is "untouched" when
- * its low half is still what ioapic_init() wrote -- masked, no vector -- which
- * no routed pin is.  ioapic_set_vector() changes the vector by the same
- * read-modify-write that masks and unmasks; the low half is put back with
- * ioapic_set_low_half().
+ * Whether this controller owns a pin, by its global number -- the question to
+ * ask before routing one.  Its range starts where the MADT says, which is not
+ * always zero: on a board whose first I/O APIC starts at GSI 24, a pin count
+ * says nothing about ISA 4, and every function above that takes a GSI panics
+ * on one it does not own (#598's C12).
+ */
+int ioapic_owns(uint32_t gsi);
+
+/*
+ * A redirection entry's destination word for a processor, or no: an APIC id
+ * past eight bits does not fit, and is refused rather than cut (#598's C16).
+ * ioapic_route() panics on one; a caller that can refuse asks first.
+ */
+int ioapic_rte_destination(uint32_t apic_id, uint32_t *high);
+
+/*
+ * #598 point 3: tell the controller directly that the interrupt on `vector'
+ * was handled, which clears Remote IRR on the level pins carrying it -- for
+ * when the processor's broadcast EOI does not come, or does not match.  The
+ * register is version 0x20's; on an older controller this does nothing, and
+ * ioapic_direct_eoi() says so.
+ */
+int ioapic_direct_eoi(void);
+void ioapic_eoi(uint8_t vector);
+
+/*
+ * #599: for the -Y test (ioapic_race_test.c), and #598: -i asks it of every
+ * pin before turning remapping on.  A pin is "untouched" when its low half is
+ * still what ioapic_init() wrote -- masked, no vector -- which no routed pin
+ * is.  ioapic_set_vector() changes the vector by the same read-modify-write
+ * that masks and unmasks; the low half is put back with ioapic_set_low_half().
  */
 int ioapic_pin_untouched(uint32_t gsi);
 uint32_t ioapic_low_half(uint32_t gsi);
 void ioapic_set_low_half(uint32_t gsi, uint32_t low);
 void ioapic_set_vector(uint32_t gsi, uint8_t vector);
 uint32_t ioapic_first_gsi(void);
+
+/*
+ * #598's C12: for ioapic_selftest() only.  Moves where this controller's pins
+ * begin and answers where they began, so the boot can ask a claim below them
+ * as a board starting at GSI 24 would -- and puts it back at once.
+ */
+uint32_t ioapic_set_first_gsi(uint32_t gsi);
 
 #endif	/* _X86_64_CPU_IOAPIC_H_ */

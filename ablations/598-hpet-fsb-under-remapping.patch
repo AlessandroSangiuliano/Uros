@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #598
+Takes out: the HPET passing over its FSB route while interrupts are remapped -- it composes the message in compatibility format again.  On QEMU the tick still runs, because QEMU's HPET writes the message past the IOMMU; on hardware the engine would refuse it and the tick would stop.  So what is caught here is the choice, said on the start line
+Run: --iommu intel --entry 38 900 -smp 1 -global hpet.msi=on
+Expect: clock_event: hpet: comparator [0-9]+ of [0-9]+, one-shot, 32 bits, FSB message to cpu
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index 72d61f61..8b8bc5ca 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -220,10 +220,6 @@ static int choose_route(unsigned *which, uint32_t *cap0)
+ 			 * be checked on hardware (#595).  The I/O APIC's pin
+ 			 * below is remapped like any other.
+ 			 */
+-			if (iommu_interrupts_remapped()) {
+-				fsb_passed_over = 1;
+-				continue;
+-			}
+ 			*which = n;
+ 			return ROUTE_FSB;
+ 		}

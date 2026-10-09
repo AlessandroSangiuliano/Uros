@@ -13,6 +13,8 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/ioapic.h>		/* no pin routed before -i, #598 */
+#include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
 #include <kern/kalloc.h>	/* an identity grant's page list, #599 */
 #include <kern/lock.h>		/* iommu_domain_lock, #599 */
 #include <kern/misc_protos.h>	/* printf, for the refusals (#432 stage 3d) */
@@ -34,7 +36,6 @@
  * The cost of not panicking is that something downstream must check
  * iommu_truncated(), which is why that function exists and says so.
  */
-#define	IOMMU_MAX_UNITS		8
 #define	IOMMU_MAX_RESERVED	16
 #define	IOMMU_MAX_SCOPES	64
 
@@ -158,6 +159,15 @@ void iommu_record_hardware(unsigned index, uint32_t version,
 	u->coherent_walk = coherent_walk;
 	u->vendor_caps[0] = caps0;
 	u->vendor_caps[1] = caps1;
+}
+
+void iommu_record_interrupt(unsigned index,
+			    const struct iommu_interrupt_caps *caps)
+{
+	if (index >= nunits || caps == 0)
+		return;
+
+	units[index].interrupt = *caps;
 }
 
 void iommu_record_vendor(enum iommu_vendor vendor)
@@ -392,6 +402,285 @@ const struct iommu_tables *iommu_tables(void)
 	return &built;
 }
 
+/* ------------------------------------------------------------------ */
+/*  #598: the interrupt tables, built and read back, hardware untouched */
+/* ------------------------------------------------------------------ */
+
+static struct iommu_interrupt_tables	interrupt_tables;
+static int				interrupt_tables_tried;
+static int				interrupt_tables_built;
+
+void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t)
+{
+	interrupt_tables = *t;
+}
+
+int iommu_build_interrupt_tables(void)
+{
+	if (!interrupt_tables_tried) {
+		interrupt_tables_tried = 1;
+		if (found_vendor == IOMMU_INTEL)
+			interrupt_tables_built = iommu_vtd_irt_build();
+		else if (found_vendor == IOMMU_AMD)
+			interrupt_tables_built = iommu_amd_irt_build();
+	}
+
+	return interrupt_tables_built;
+}
+
+const struct iommu_interrupt_tables *iommu_interrupt_tables(void)
+{
+	return &interrupt_tables;
+}
+
+/* ------------------------------------------------------------------ */
+/*  #598: what a source writes, through remapping or around it          */
+/* ------------------------------------------------------------------ */
+
+int iommu_interrupts_remapped(void)
+{
+	if (found_vendor == IOMMU_INTEL)
+		return iommu_vtd_remapping();
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remapping();
+	return 0;
+}
+
+int iommu_ioapic_source(uint8_t id, uint16_t *source)
+{
+	for (unsigned i = 0; i < nunits; i++)
+		for (unsigned s = 0; s < units[i].scope_count; s++) {
+			const struct iommu_scope *sc =
+				&scopes[units[i].scope_first + s];
+
+			if (sc->kind != IOMMU_SCOPE_IOAPIC
+			    || sc->enumeration_id != id)
+				continue;
+			if (sc->depth != 1)
+				return 0;
+			*source = (uint16_t)((sc->bus << 8) | (sc->dev << 3)
+					     | sc->func);
+			return 1;
+		}
+
+	return 0;
+}
+
+/*
+ * The pin's controller is the first and only one this kernel drives
+ * (<cpu/ioapic.h>), so its MADT id is the one a table must name.
+ */
+int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
+		    int level, int active_low, uint32_t *lo, uint32_t *hi)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	uint16_t source;
+
+	if (!iommu_interrupts_remapped() || a == 0
+	    || !iommu_ioapic_source(a->id, &source))
+		return 0;
+
+	/*
+	 * On AMD the words stay as they are -- the vector is the index into
+	 * the I/O APIC's own table -- and only the entry is written.
+	 */
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remap_entry(source, vector, apic_id);
+
+	return iommu_vtd_remap_pin(pin, source, vector, apic_id, level,
+				   active_low, lo, hi);
+}
+
+int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
+		    uint32_t apic_id, uint64_t *address, uint32_t *data)
+{
+	if (!iommu_interrupts_remapped())
+		return 0;
+
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remap_entry(bdf, vector, apic_id);
+
+	return iommu_vtd_remap_msi(slot, bdf, vector, apic_id, address, data);
+}
+
+void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector)
+{
+	if (!iommu_interrupts_remapped())
+		return;
+
+	if (found_vendor == IOMMU_AMD)
+		iommu_amd_forget_entry(bdf, vector);
+	else
+		iommu_vtd_forget_msi(slot);
+}
+
+int iommu_prepare_interrupt_remapping(void)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	uint16_t source;
+
+	if (found_vendor != IOMMU_AMD)
+		return 1;
+	if (!interrupt_tables_built
+	    || (a != 0 && !iommu_ioapic_source(a->id, &source)))
+		return 0;
+
+	return iommu_amd_ir_prepare();
+}
+
+/*
+ * Why the I/O APIC's pins could not go through remapping, or 0.
+ *
+ * A pin routed before remapping is on holds its words in the old format, and
+ * nothing rewrites them: an Intel engine with CFI clear refuses them, and the
+ * I/O APIC's AMD table has no entry for them.  A controller not yet
+ * initialised still carries whatever routing the firmware left in it.  The
+ * boot masks the controller before -i and routes every pin after it, and this
+ * is what makes both facts rather than an order of calls.
+ */
+static const char *pins_not_ready(void)
+{
+	uint32_t first;
+
+	if (acpi_ioapic(0) == 0)
+		return 0;
+	if (!ioapic_present())
+		return "the i/o apic was never initialised, so the firmware's"
+		       " routing is still in it";
+	first = ioapic_first_gsi();
+	for (unsigned p = 0; p < ioapic_pin_count(); p++)
+		if (!ioapic_pin_untouched(first + p))
+			return "a pin was routed before -i, in the old format";
+	return 0;
+}
+
+/*
+ * AMD: the IVRS must name the I/O APIC -- QEMU names it only where it can
+ * remap (hw/i386/acpi-build.c), so this is also how a board that cannot is
+ * told from one that can -- and the entries must have been prepared before
+ * the engine was turned on.  The engine is turned on here when -I did not:
+ * this vendor remaps only with it on, so asking for remapping is asking for
+ * the engine, with every device passing through.
+ */
+static unsigned enable_amd(const char **why, int *asked)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	const char *pins;
+	unsigned on;
+	uint16_t source;
+
+	for (unsigned i = 0; i < nunits; i++)
+		if (!units[i].answered || !units[i].interrupt_remapping) {
+			*why = "an engine did not answer";
+			return 0;
+		}
+	if (nunits == 0) {
+		*why = "no engine";
+		return 0;
+	}
+	if (a != 0 && !iommu_ioapic_source(a->id, &source)) {
+		*why = "the ivrs names no i/o apic, whose pins would be refused";
+		return 0;
+	}
+
+	*asked = 1;
+	if ((pins = pins_not_ready()) != 0) {
+		*why = pins;
+		return 0;
+	}
+	if (!interrupt_tables_built) {
+		*why = "the interrupt tables were not built";
+		return 0;
+	}
+	if (!iommu_amd_remapping() && !iommu_prepare_interrupt_remapping()) {
+		*why = "the device table entries could not be prepared";
+		return 0;
+	}
+	if (!translating && !iommu_enable_passthrough()) {
+		*why = "the engine did not turn on";
+		return 0;
+	}
+
+	on = iommu_amd_ir_enable();
+	if (on == 0)
+		*why = "the engine is not on";
+	return on;
+}
+
+unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
+{
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+	const char *pins;
+	unsigned remapping = 0, on;
+	uint16_t source;
+
+	*asked = 0;
+	if (found_vendor == IOMMU_AMD)
+		return enable_amd(why, asked);
+	if (found_vendor != IOMMU_INTEL) {
+		*why = "no engine";
+		return 0;
+	}
+
+	for (unsigned i = 0; i < nunits; i++)
+		if (units[i].answered && units[i].interrupt_remapping)
+			remapping++;
+
+	if (remapping == 0) {
+		*why = "no engine remaps interrupts";
+		return 0;
+	}
+	if (remapping != nunits) {
+		*why = "some engines cannot remap, and one table serves them all";
+		return 0;
+	}
+	if (platform_interrupt_remapping != 1) {
+		*why = "the dmar says the platform cannot";
+		return 0;
+	}
+	for (unsigned i = 0; i < nunits; i++) {
+		if (units[i].interrupt.x2apic_required) {
+			*why = "an engine remaps only in x2apic mode";
+			return 0;
+		}
+		if (!units[i].interrupt.can_forget) {
+			*why = "an engine has no invalidation queue, so no entry"
+			       " could ever change";
+			return 0;
+		}
+	}
+	if (!cpu_has_cmpxchg16b()) {
+		*why = "the processor has no 16-byte compare-and-exchange";
+		return 0;
+	}
+	if (a != 0 && !iommu_ioapic_source(a->id, &source)) {
+		*why = "no table names the i/o apic, whose pins would be refused";
+		return 0;
+	}
+
+	*asked = 1;
+	if ((pins = pins_not_ready()) != 0) {
+		*why = pins;
+		return 0;
+	}
+	if (!interrupt_tables_built) {
+		*why = "the interrupt table was not built";
+		return 0;
+	}
+
+	on = iommu_vtd_ir_enable();
+	if (on == 0)
+		*why = "an engine did not confirm it";
+	return on;
+}
+
+int iommu_unit_remaps(unsigned unit)
+{
+	if (found_vendor == IOMMU_AMD)
+		return unit < nunits && iommu_amd_remapping();
+	return found_vendor == IOMMU_INTEL && iommu_vtd_unit_remapping(unit);
+}
+
 unsigned iommu_platform_address_bits(void)
 {
 	return platform_address_bits;
@@ -452,6 +741,12 @@ struct decode_case {
 	uint32_t	 levels;
 	int		 ir;
 	int		 coherent;
+
+	/*
+	 * And what the interrupt decode must say of the same words (#598), in
+	 * the struct's order: can forget, x2apic, required, x2apic required.
+	 */
+	struct iommu_interrupt_caps interrupt;
 };
 
 /* Levels 1..N, which is what AMD's HATS means: a ceiling, not a set. */
@@ -465,23 +760,24 @@ static const struct decode_case decode_cases[] = {
 	 * read from that machine -- only the feature register was.
 	 */
 	{ "amd, real silicon", 1, 0x206d73ef22254adeULL, 1ULL << 10,
-	  64, UPTO(6), 1, 1 },
+	  64, UPTO(6), 1, 1, { 1, 1, 0, 0 } },
 
 	/* QEMU's amd-iommu, which our own boot reads as 0x29d3. */
-	{ "amd, qemu", 1, 0x29d3ULL, 1ULL << 10, 64, UPTO(6), 1, 1 },
+	{ "amd, qemu", 1, 0x29d3ULL, 1ULL << 10, 64, UPTO(6), 1, 1,
+	  { 1, 0, 0, 0 } },
 
 	/* Synthetic: the three HATS encodings no part we can reach reports. */
 	{ "amd, hats=4 levels (synthetic)", 1, 0x0ULL, 1ULL << 10,
-	  48, UPTO(4), 1, 1 },
+	  48, UPTO(4), 1, 1, { 1, 0, 0, 0 } },
 	{ "amd, hats=5 levels (synthetic)", 1, 1ULL << 10, 1ULL << 10,
-	  57, UPTO(5), 1, 1 },
+	  57, UPTO(5), 1, 1, { 1, 0, 0, 0 } },
 	/*
 	 * Reserved, and the answer must be a refusal.  A decode that clamped
 	 * this to the smallest plausible width would be inventing the
 	 * safest-looking number for an engine it does not understand.
 	 */
 	{ "amd, hats reserved (synthetic)", 1, 3ULL << 10, 1ULL << 10,
-	  0, 0, 0, 0 },
+	  0, 0, 0, 0, { 1, 0, 0, 0 } },
 
 	/*
 	 * QEMU's intel-iommu on q35, as our own boot reads it.  SAGAW 0x06 is
@@ -489,7 +785,7 @@ static const struct decode_case decode_cases[] = {
 	 * difference the description's bitmask exists to hold.
 	 */
 	{ "intel, qemu q35", 0, 0x80d2008c222f0606ULL, 0x0000000000f00f4aULL,
-	  48, (1u << 3) | (1u << 4), 1, 0 },
+	  48, (1u << 3) | (1u << 4), 1, 0, { 1, 0, 0, 0 } },
 
 	/*
 	 * 🔴 THE CASE THAT CAUGHT A DEFECT, and the reason synthetic cases
@@ -499,19 +795,39 @@ static const struct decode_case decode_cases[] = {
 	 * have claimed a two-level and a six-level table here -- while
 	 * agreeing perfectly with the only real value we can produce, whose
 	 * reserved bits are clear.
+	 *
+	 * ⚠️ Its ECAP also reports remapping without the queue, which §11.4.3
+	 * rules out -- and the interrupt decode must report exactly that
+	 * rather than repair it (#598).
 	 */
 	{ "intel, sagaw all bits set (synthetic)", 0,
 	  (0x1FULL << 8) | (47ULL << 16), 0x9ULL,
-	  48, (1u << 3) | (1u << 4) | (1u << 5), 1, 1 },
+	  48, (1u << 3) | (1u << 4) | (1u << 5), 1, 1, { 0, 0, 0, 0 } },
 
 	/* And 57-bit, five levels, which nothing we can run reports. */
 	{ "intel, 5-level 57-bit (synthetic)", 0,
 	  (0x8ULL << 8) | (56ULL << 16), 0x8ULL,
-	  57, 1u << 5, 1, 0 },
+	  57, 1u << 5, 1, 0, { 0, 0, 0, 0 } },
+
+	/*
+	 * 🔴 The two recent bits, each set where the other is clear (#598).
+	 * IRREQ and EIMER are neighbours, 62 and 61, and a decode that read
+	 * one from the other's place would agree with every engine we can
+	 * run -- all of them report both clear.  The second case also has EIM
+	 * set and EIMER clear, which is what tells those two apart.
+	 */
+	{ "intel, x2apic only (synthetic)", 0,
+	  0x80d2008c222f0606ULL,
+	  (1ULL << 61) | (1ULL << 4) | (1ULL << 3) | (1ULL << 1),
+	  48, (1u << 3) | (1u << 4), 1, 0, { 1, 1, 0, 1 } },
+	{ "intel, remapping required (synthetic)", 0,
+	  0x80d2008c222f0606ULL,
+	  (1ULL << 62) | (1ULL << 4) | (1ULL << 3) | (1ULL << 1),
+	  48, (1u << 3) | (1u << 4), 1, 0, { 1, 1, 1, 0 } },
 
 	/* Coherency is a bit, and a test that never sees it clear is not one. */
 	{ "amd, coherent turned off (synthetic)", 1, 0x29d3ULL, 0,
-	  64, UPTO(6), 1, 0 },
+	  64, UPTO(6), 1, 0, { 1, 0, 0, 0 } },
 };
 
 int iommu_decode_check(unsigned *ran, unsigned *wrong)
@@ -524,17 +840,32 @@ int iommu_decode_check(unsigned *ran, unsigned *wrong)
 		unsigned bits = 0;
 		uint32_t levels = 0;
 		int ir = 0, coherent = 0;
+		struct iommu_interrupt_caps in;
 
-		if (c->amd)
+		/*
+		 * ⚠️ Not an answer, so that a decode which leaves a field
+		 * untouched fails here instead of agreeing with a zero.
+		 */
+		in.can_forget = in.x2apic = -1;
+		in.required = in.x2apic_required = -1;
+
+		if (c->amd) {
 			iommu_amd_decode(c->a, c->b, &bits, &levels,
 					 &ir, &coherent);
-		else
+			iommu_amd_interrupt_decode(c->a, &in);
+		} else {
 			iommu_vtd_decode(c->a, c->b, &bits, &levels,
 					 &ir, &coherent);
+			iommu_vtd_interrupt_decode(c->b, &in);
+		}
 
 		n++;
 		if (bits != c->bits || levels != c->levels
-		    || ir != c->ir || coherent != c->coherent)
+		    || ir != c->ir || coherent != c->coherent
+		    || in.can_forget != c->interrupt.can_forget
+		    || in.x2apic != c->interrupt.x2apic
+		    || in.required != c->interrupt.required
+		    || in.x2apic_required != c->interrupt.x2apic_required)
 			bad++;
 	}
 
@@ -867,6 +1198,68 @@ static volatile uint64_t *table_at(uint64_t pa)
 }
 
 /*
+ * ── #598's C7: tables an engine reads from memory ────────────────────
+ *
+ * An Intel engine whose ECAP.C is clear reads its root, context and
+ * second-stage tables, and the interrupt remapping table, without snooping the
+ * processor's caches (Rev 5.20 Appendix A), so a line this kernel wrote is, to
+ * it, still the old one until the line leaves the caches.  So every line
+ * written goes out before the invalidation that tells the engine to read it.
+ * The invalidation queue is always snooped, and AMD's page walks snoop while a
+ * DTE's SD is clear, which this kernel never sets: neither is flushed.
+ *
+ * ⚠️ Asked of the engines each time rather than recorded once, so that the
+ * answer does not depend on whether the vendor or the units were recorded
+ * first.  flush_forced is the check's, below.
+ */
+static int		flush_forced;
+static uint64_t		lines_flushed;
+
+int iommu_tables_uncached(void)
+{
+	if (flush_forced)
+		return 1;
+	if (found_vendor != IOMMU_INTEL)
+		return 0;
+	for (unsigned i = 0; i < nunits; i++)
+		if (units[i].answered && !units[i].coherent_walk)
+			return 1;
+	return 0;
+}
+
+uint64_t iommu_table_lines_flushed(void)
+{
+	return lines_flushed;
+}
+
+/* One line out of the caches; the fence orders it before what follows. */
+void iommu_flush_line(const volatile void *p)
+{
+	__asm__ volatile("clflush %0" : : "m"(*(const volatile uint8_t *)p)
+			 : "memory");
+	__asm__ volatile("mfence" : : : "memory");
+	lines_flushed++;
+}
+
+/* A table entry written, out of the caches if an engine reads memory. */
+void iommu_table_written(const volatile void *entry)
+{
+	if (iommu_tables_uncached())
+		iommu_flush_line(entry);
+}
+
+/* A whole table written -- zeroed, or built -- every line of it. */
+void iommu_table_frame_written(uint64_t pa)
+{
+	volatile uint8_t *f = (volatile uint8_t *)table_at(pa);
+
+	if (!iommu_tables_uncached())
+		return;
+	for (unsigned off = 0; off < 4096u; off += 64u)
+		iommu_flush_line(f + off);
+}
+
+/*
  * A frame for a page table, from whichever allocator owns physical memory
  * right now.
  *
@@ -899,6 +1292,7 @@ int iommu_domain_create(struct iommu_domain *d, enum iommu_vendor vendor,
 	d->root = domain_frame();
 	if (d->root == 0)
 		return 0;
+	iommu_table_frame_written(d->root);	/* zeroed by the processor */
 
 	d->vendor = vendor;
 	d->levels = levels;
@@ -973,15 +1367,18 @@ int iommu_domain_map(struct iommu_domain *d, uint64_t iova, uint64_t pa,
 			below = domain_frame();
 			if (below == 0)
 				return 0;
+			iommu_table_frame_written(below);
 
 			d->frames++;
 			entries[index] = pt_pde(d->vendor, below, level - 1u);
+			iommu_table_written(&entries[index]);
 			table = below;
 			level--;
 		}
 
 		table_at(table)[level_index(here, 1)]
 			= pt_pte(d->vendor, pa + off, read, write);
+		iommu_table_written(&table_at(table)[level_index(here, 1)]);
 		d->pages++;
 	}
 
@@ -1404,6 +1801,31 @@ static unsigned check_one_vendor(enum iommu_vendor vendor, unsigned *walked)
 	return bad + check_skipping(&d, probe, walked);
 }
 
+/*
+ * #598's C7, asked of a scratch domain: with an engine that reads its tables
+ * from memory, every line of every new table and every entry written must
+ * have left the caches -- 64 lines a frame, the root's included, one for each
+ * directory entry that links a new table, and one for each page entry.  Forced
+ * on for the question, so the answer does not depend on the board.  What a
+ * boot can show is that the flushes are made; QEMU models no caches, so not
+ * that they were needed.
+ */
+int iommu_flush_check(unsigned *expected, unsigned *made)
+{
+	struct iommu_domain d;
+	uint64_t before = lines_flushed;
+	int ok;
+
+	flush_forced = 1;
+	ok = iommu_domain_create(&d, IOMMU_INTEL, 1, 4)
+	     && iommu_domain_map(&d, 0x40000000ULL, 0x200000ULL, 4096u, 1, 1);
+	flush_forced = 0;
+
+	*expected = ok ? d.frames * 64u + (d.frames - 1u) + d.pages : 0;
+	*made = (unsigned)(lines_flushed - before);
+	return ok && *made == *expected;
+}
+
 int iommu_domain_check(unsigned *walked, unsigned *wrong)
 {
 	unsigned n = 0, bad = 0;
@@ -1443,6 +1865,7 @@ struct fault_case {
 	uint8_t			 reason;
 	uint8_t			 kind;
 	uint8_t			 write;
+	uint32_t		 index;
 };
 
 static const struct fault_case fault_cases[] = {
@@ -1457,7 +1880,7 @@ static const struct fault_case fault_cases[] = {
 	  0x00000000deadb000ULL,
 	  (1ULL << 63) | (0x05ULL << 32) | 0x00FAULL,
 	  1, 0x00000000deadb000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x05, IOMMU_FAULT_PAGE, 1 },
+	  0x05, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * The same record with T1 set: a READ refused, and the ONLY difference
@@ -1468,7 +1891,7 @@ static const struct fault_case fault_cases[] = {
 	  0x00000000deadb000ULL,
 	  (1ULL << 63) | (1ULL << 62) | (0x06ULL << 32) | 0x00FAULL,
 	  1, 0x00000000deadb000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x06, IOMMU_FAULT_PAGE, 0 },
+	  0x06, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 T1 CLEAR AND T2 SET IS A PAGE REQUEST, NOT A WRITE.  This is the
@@ -1480,7 +1903,7 @@ static const struct fault_case fault_cases[] = {
 	  0x1000ULL,
 	  (1ULL << 63) | (1ULL << 28) | (0x05ULL << 32) | 0x00FAULL,
 	  1, 0x1000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x05, IOMMU_FAULT_PAGE, 0 },
+	  0x05, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* And 11b, an AtomicOp, which is likewise not a read. */
 	{ "intel, atomicop (synthetic)", 0,
@@ -1488,7 +1911,7 @@ static const struct fault_case fault_cases[] = {
 	  (1ULL << 63) | (1ULL << 62) | (1ULL << 28) | (0x06ULL << 32)
 	  | 0x00FAULL,
 	  1, 0x1000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x06, IOMMU_FAULT_PAGE, 0 },
+	  0x06, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 F CLEAR IS NOT A FAULT, whatever else the record holds.  Every
@@ -1499,23 +1922,23 @@ static const struct fault_case fault_cases[] = {
 	 */
 	{ "intel, F clear", 0,
 	  0x00000000deadb000ULL, (0x05ULL << 32) | 0x00FAULL,
-	  0, 0, 0, 0, 0, 0, 0 },
+	  0, 0, 0, 0, 0, 0, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* Ah is a ROOT entry's reserved field, and Ch is a page entry's. */
 	{ "intel, root reserved", 0,
 	  0x2000ULL, (1ULL << 63) | (0x0AULL << 32) | 0x0100ULL,
 	  1, 0x2000ULL, 0x0100, IOMMU_FAULT_NO_DOMAIN,
-	  0x0A, IOMMU_FAULT_ENTRY, 1 },
+	  0x0A, IOMMU_FAULT_ENTRY, 1, IOMMU_FAULT_NO_INDEX },
 	{ "intel, page entry reserved", 0,
 	  0x2000ULL, (1ULL << 63) | (0x0CULL << 32) | 0x0100ULL,
 	  1, 0x2000ULL, 0x0100, IOMMU_FAULT_NO_DOMAIN,
-	  0x0C, IOMMU_FAULT_PAGE, 1 },
+	  0x0C, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/* An engine that could not read its own table: neither of the above. */
 	{ "intel, context unreadable", 0,
 	  0x3000ULL, (1ULL << 63) | (0x09ULL << 32) | 0x0100ULL,
 	  1, 0x3000ULL, 0x0100, IOMMU_FAULT_NO_DOMAIN,
-	  0x09, IOMMU_FAULT_HARDWARE, 1 },
+	  0x09, IOMMU_FAULT_HARDWARE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * ⚠️ The low twelve bits of FI are RsvdZ and the address is a PAGE
@@ -1526,7 +1949,7 @@ static const struct fault_case fault_cases[] = {
 	{ "intel, low bits are not address", 0,
 	  0x0000000012345FFFULL, (1ULL << 63) | (0x05ULL << 32) | 0x00FAULL,
 	  1, 0x0000000012345000ULL, 0x00FA, IOMMU_FAULT_NO_DOMAIN,
-	  0x05, IOMMU_FAULT_PAGE, 1 },
+	  0x05, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * AMD, an IO_PAGE_FAULT for a page that is not present: PR clear, so
@@ -1537,21 +1960,21 @@ static const struct fault_case fault_cases[] = {
 	  (2ULL << 60) | (1ULL << 53) | (7ULL << 32) | 0x0102ULL,
 	  0x00000000deadb000ULL,
 	  1, 0x00000000deadb000ULL, 0x0102, 7,
-	  0x2, IOMMU_FAULT_PAGE, 0 },
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* Present, not a translation, not an interrupt, RW set: a write. */
 	{ "amd, write denied", 1,
 	  (2ULL << 60) | (1ULL << 53) | (1ULL << 52) | (7ULL << 32) | 0x0102ULL,
 	  0x00000000deadb000ULL,
 	  1, 0x00000000deadb000ULL, 0x0102, 7,
-	  0x2, IOMMU_FAULT_PAGE, 1 },
+	  0x2, IOMMU_FAULT_PAGE, 1, IOMMU_FAULT_NO_INDEX },
 
 	/* The same with RW clear: a read. */
 	{ "amd, read denied", 1,
 	  (2ULL << 60) | (1ULL << 52) | (7ULL << 32) | 0x0102ULL,
 	  0x00000000deadb000ULL,
 	  1, 0x00000000deadb000ULL, 0x0102, 7,
-	  0x2, IOMMU_FAULT_PAGE, 0 },
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 GN SET MAKES D/P A PASID, NOT A DOMAIN.  The sixteen bits are
@@ -1563,17 +1986,17 @@ static const struct fault_case fault_cases[] = {
 	  (2ULL << 60) | (1ULL << 52) | (1ULL << 48) | (7ULL << 32) | 0x0102ULL,
 	  0x1000ULL,
 	  1, 0x1000ULL, 0x0102, IOMMU_FAULT_NO_DOMAIN,
-	  0x2, IOMMU_FAULT_PAGE, 0 },
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* An unusable device table entry is not a page fault. */
 	{ "amd, illegal dte", 1,
 	  (1ULL << 60) | 0x0102ULL, 0x4000ULL,
-	  1, 0x4000ULL, 0x0102, 0, 0x1, IOMMU_FAULT_ENTRY, 0 },
+	  1, 0x4000ULL, 0x0102, 0, 0x1, IOMMU_FAULT_ENTRY, 0, IOMMU_FAULT_NO_INDEX },
 
 	/* Nor is the engine failing to read the table at all. */
 	{ "amd, device table hardware error", 1,
 	  (3ULL << 60) | 0x0102ULL, 0x5000ULL,
-	  1, 0x5000ULL, 0x0102, 0, 0x3, IOMMU_FAULT_HARDWARE, 0 },
+	  1, 0x5000ULL, 0x0102, 0, 0x3, IOMMU_FAULT_HARDWARE, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * 🔴 AN ALL-ZERO ENTRY IS NOT AN EVENT.  This is what an unwritten
@@ -1581,7 +2004,7 @@ static const struct fault_case fault_cases[] = {
 	 * that accepted event code 0000b would turn every empty slot into a
 	 * fault at address zero from device 0000.
 	 */
-	{ "amd, empty ring slot", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+	{ "amd, empty ring slot", 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
 	 * A code Table 42 reserves.  Reported with its raw number and no
@@ -1590,7 +2013,88 @@ static const struct fault_case fault_cases[] = {
 	 */
 	{ "amd, reserved event code (synthetic)", 1,
 	  (0xAULL << 60) | 0x0102ULL, 0x6000ULL,
-	  1, 0x6000ULL, 0x0102, 0, 0xA, IOMMU_FAULT_UNKNOWN, 0 },
+	  1, 0x6000ULL, 0x0102, 0, 0xA, IOMMU_FAULT_UNKNOWN, 0, IOMMU_FAULT_NO_INDEX },
+
+	/*
+	 * ── Interrupts refused (#598), from Rev 5.20 Table 15 and §11.4.7.6,
+	 * and Rev 3.11 Table 57 ──
+	 *
+	 * 🔴 25h WITH SOMETHING IN FI.  The field is undefined for this reason,
+	 * so the decode must report no entry whatever the low word holds -- the
+	 * bits here are what a reader that always took 63:48 would turn into
+	 * entry 5.  This is the refusal #598 sets out to provoke: a message in
+	 * compatibility format while those are blocked, from 00:04.0.
+	 */
+	{ "intel, compatibility format blocked", 0,
+	  (5ULL << 48) | 0xdead000ULL,
+	  (1ULL << 63) | (0x25ULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x25, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/* 22h names its entry: the one that was not present, here 5. */
+	{ "intel, entry not present", 0,
+	  5ULL << 48,
+	  (1ULL << 63) | (0x22ULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x22, IOMMU_FAULT_INTERRUPT, 0, 5 },
+
+	/*
+	 * 26h, a device using an entry that names another source -- the
+	 * refusal that makes remapping isolate at all.  The index has bit 15
+	 * set, the one the request carries apart from the other fifteen.
+	 *
+	 * ⚠️ T1 and T2 are CLEAR, which on any other record means a write.
+	 * Here they mean nothing, and the decode must not say write.
+	 */
+	{ "intel, source not accepted", 0,
+	  0x8001ULL << 48,
+	  (1ULL << 63) | (0x26ULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x26, IOMMU_FAULT_INTERRUPT, 0, 0x8001 },
+
+	/* 2Bh, refused because remapping is off where it is required. */
+	{ "intel, remapping required and off (synthetic)", 0,
+	  7ULL << 48,
+	  (1ULL << 63) | (0x2BULL << 32) | 0x0020ULL,
+	  1, 0, 0x0020, IOMMU_FAULT_NO_DOMAIN,
+	  0x2B, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/*
+	 * AMD: an IO_PAGE_FAULT with I set and PR clear -- an interrupt whose
+	 * entry has RemapEn clear -- from 00:04.0 in domain 7, at the address
+	 * it wrote.  RW is set to catch a reader that takes a direction from
+	 * an interrupt; the specification gives one only when I is clear.
+	 */
+	{ "amd, interrupt blocked", 1,
+	  (2ULL << 60) | (1ULL << 53) | (1ULL << 51) | (7ULL << 32) | 0x0020ULL,
+	  0x00000000fee00000ULL,
+	  1, 0x00000000fee00000ULL, 0x0020, 7,
+	  0x2, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/* The same through the HyperTransport window, Table 3's other one. */
+	{ "amd, interrupt blocked, hypertransport window", 1,
+	  (2ULL << 60) | (1ULL << 51) | (7ULL << 32) | 0x0020ULL,
+	  0x000000fdf8001000ULL,
+	  1, 0x000000fdf8001000ULL, 0x0020, 7,
+	  0x2, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/*
+	 * 🔴 A WORD AN ENGINE WE RUN DOES PRODUCE: QEMU 11.1.1's amd-iommu
+	 * refusing 00:04.0's DMA with -I -i, read off a boot.  I is set and
+	 * the address is zero, and an interrupt request is a write to an
+	 * interrupt address, so this is the memory request it was (#598).
+	 */
+	{ "amd, qemu's refused dma, i set and no address", 1,
+	  0x200a000000000020ULL, 0,
+	  1, 0, 0x0020, 0,
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
+
+	/* I set one byte past the interrupt range: not an interrupt either. */
+	{ "amd, i set just past the interrupt range", 1,
+	  (2ULL << 60) | (1ULL << 51) | (7ULL << 32) | 0x0020ULL,
+	  0x00000000fef00000ULL,
+	  1, 0x00000000fef00000ULL, 0x0020, 7,
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
 };
 
 /*
@@ -1653,7 +2157,7 @@ static unsigned			ndevice_domains;
 int iommu_can_isolate(void)
 {
 	/*
-	 * ⚠️ Four separate noes, and the truncation one is the one that would
+	 * ⚠️ Five separate noes, and the truncation one is the one that would
 	 * be missed.  A description that did not fit is a set of engines
 	 * nobody programs, and iommu_truncated() says so -- promising
 	 * isolation on such a machine would be promising it for the devices
@@ -1670,6 +2174,14 @@ int iommu_can_isolate(void)
 	for (unsigned i = 0; i < nunits; i++)
 		if (!units[i].answered || units[i].register_va == 0)
 			return 0;
+
+	/*
+	 * And on Intel the instruction a present context entry changes with
+	 * (#598's C20): without it attach writes nothing, and a yes here would
+	 * promise a confinement no device gets.
+	 */
+	if (found_vendor == IOMMU_INTEL && !cpu_has_cmpxchg16b())
+		return 0;
 
 	return 1;
 }
@@ -1782,6 +2294,54 @@ static int domain_flush(const struct iommu_domain *d)
 {
 	return found_vendor == IOMMU_INTEL ? iommu_vtd_flush(d)
 					   : iommu_amd_flush(d);
+}
+
+/*
+ * Let iommu_domain_lock go, saying first what the engines' invalidation queues
+ * did (#598) -- here because the vendor code does not print, and on the way
+ * out of the lock because every path that reaches a queue holds it.  At eight
+ * waits answered and at every doubling after -- by a threshold and not by
+ * "a power of two", because one operation can send two submissions and step
+ * over the exact number -- which says the queue is the path in use, with how
+ * many times its tail went round; and once, the moment a queue stops, why.
+ */
+static void domain_unlock(void)
+{
+	static uint64_t	say_at[IOMMU_MAX_UNITS];
+	static unsigned	said_stop[IOMMU_MAX_UNITS];
+
+	for (unsigned i = 0; i < nunits; i++) {
+		struct iommu_queue_counts c;
+
+		if (!iommu_queue_counts(i, &c))
+			continue;
+
+		if (say_at[i] == 0)
+			say_at[i] = 8;
+		if (c.waits >= say_at[i]) {
+			say_at[i] = 2 * c.waits;
+			printf("iommu: unit %u's invalidation queue has answered "
+			       "%llu waits for %llu descriptors, and gone round "
+			       "its ring %llu time(s) (#598)\n", i,
+			       (unsigned long long)c.waits,
+			       (unsigned long long)c.descriptors,
+			       (unsigned long long)c.turns);
+		}
+
+		if (c.stopped != IOMMU_QUEUE_RUNNING && said_stop[i] == 0) {
+			said_stop[i] = c.stopped;
+			printf("iommu: unit %u's invalidation queue STOPPED — %s "
+			       "(fault status 0x%x, head %u, tail %u); every "
+			       "invalidation after it fails (#598)\n", i,
+			       c.stopped == IOMMU_QUEUE_NO_ROOM ? "no room"
+			       : c.stopped == IOMMU_QUEUE_REFUSED
+				 ? "the engine refused a descriptor or lost an answer"
+				 : "a wait's answer never came",
+			       c.fsts, c.head, c.tail);
+		}
+	}
+
+	mutex_unlock(&iommu_domain_lock);
 }
 
 /*
@@ -1912,7 +2472,7 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
 
 	mutex_lock(&iommu_domain_lock);
 	ok = grant_locked(bdf, pa, size, read, write, iova_out);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2000,7 +2560,7 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
 	mutex_lock(&iommu_domain_lock);
 	ok = grant_pages_locked(bdf, pa, n, read, write, iova_out,
 				identity_out);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2039,7 +2599,7 @@ int iommu_domain_identity(uint16_t bdf)
 
 	mutex_lock(&iommu_domain_lock);
 	ok = domain_identity_locked(bdf);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2086,7 +2646,7 @@ int iommu_domain_release(uint16_t bdf)
 
 	mutex_lock(&iommu_domain_lock);
 	ok = domain_release_locked(bdf);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2143,7 +2703,7 @@ int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
 
 	mutex_lock(&iommu_domain_lock);
 	ok = revoke_locked(bdf, pa, size);
-	mutex_unlock(&iommu_domain_lock);
+	domain_unlock();
 	return ok;
 }
 
@@ -2169,6 +2729,7 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
 		f.kind = 0xFF;
 		f.write = 0xFF;
 		f.vendor = 0xFF;
+		f.index = 0;
 
 		got = c->amd ? iommu_amd_fault_decode(c->lo, c->hi, &f)
 			     : iommu_vtd_fault_decode(c->lo, c->hi, &f);
@@ -2186,9 +2747,744 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
 		if (f.address != c->address || f.source != c->source
 		    || f.domain != c->domain || f.reason != c->reason
 		    || f.kind != c->kind || f.write != c->write
+		    || f.index != c->index
 		    || f.vendor != (c->amd ? IOMMU_AMD : IOMMU_INTEL))
 			bad++;
 	}
+
+	if (ran)
+		*ran = n;
+	if (wrong)
+		*wrong = bad;
+
+	return bad == 0;
+}
+
+/*
+ * ── The words interrupt remapping is made of, against the figures (#598) ──
+ *
+ * Written by hand from Rev 5.20 Figure 9-9 and Rev 3.11 Figure 15.  Each case
+ * is a word and what it means; where `encodes' is set, the encoder must also
+ * produce exactly that word from those fields, or refuse them.
+ *
+ * 🔴 SEVERAL ARE WORDS NO ENCODER HERE PRODUCES, and they are the ones that
+ * keep the decoder honest: a posted entry, an entry that accepts any source,
+ * reserved bits set.  A decoder checked only on what its own encoder writes
+ * would agree with it about every bit, including a wrong one.
+ *
+ * ⚠️ And one Intel word appears twice, in xAPIC and in x2APIC mode, with two
+ * answers.  Bits 39:32 are reserved in one mode and part of the destination in
+ * the other, so the mode is part of the question, not a detail of it.
+ */
+struct irte_case {
+	const char	*what;
+	int		 amd;
+	int		 x2apic;	/* Intel's EIME                         */
+	uint64_t	 lo;		/* Intel's low word; AMD's entry        */
+	uint64_t	 hi;		/* Intel's high word                    */
+	int		 decodes;	/* 1 remaps, 0 refuses, -1 not ours     */
+	struct iommu_irte e;		/* the fields, when it remaps   */
+	int		 encodes;	/* 1 must produce, -1 must refuse, 0 not */
+};
+
+static const struct irte_case irte_cases[] = {
+	/*
+	 * Vector 0x41 to APIC id 1, edge, accepting 00:04.0 and nobody else:
+	 * P, V in 23:16, the id in 47:40, SVT 01b in 83:82, SID 0x0020.
+	 */
+	{ "intel, edge from 00:04.0", 0, 0,
+	  0x0000010000410001ULL, 0x0000000000040020ULL,
+	  1, { 0x41, 1, 0, 0x0020 }, 1 },
+
+	/*
+	 * Level-triggered, to the highest xAPIC id, accepting the source id an
+	 * I/O APIC would be given in a DMAR scope: TM set, the id 0xFF.
+	 */
+	{ "intel, level from an i/o apic", 0, 0,
+	  0x0000FF0000FE0011ULL, 0x000000000004F0F8ULL,
+	  1, { 0xFE, 0xFF, 1, 0xF0F8 }, 1 },
+
+	/* x2APIC mode: the destination is all of 63:32. */
+	{ "intel, x2apic id 0x12345", 0, 1,
+	  0x0001234500410001ULL, 0x0000000000040020ULL,
+	  1, { 0x41, 0x12345, 0, 0x0020 }, 1 },
+
+	/* An id that does not fit xAPIC mode is refused, not truncated. */
+	{ "intel, id 0x100 in xapic mode", 0, 0,
+	  0, 0, 0, { 0x41, 0x100, 0, 0x0020 }, -1 },
+
+	/* P clear refuses, whatever else the entry holds. */
+	{ "intel, not present", 0, 0,
+	  0x0000010000410000ULL, 0x0000000000040020ULL,
+	  0, { 0, 0, 0, 0 }, 0 },
+
+	/* IM set: a posted entry (§9.10), which this kernel never writes. */
+	{ "intel, posted (synthetic)", 0, 0,
+	  0x0000010000418001ULL, 0x0000000000040020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/*
+	 * 🔴 SVT 00b: the entry accepts ANY requester.  Legal, and exactly the
+	 * entry #598 point 2 is about -- so it must not read as one of ours.
+	 */
+	{ "intel, no source validation (synthetic)", 0, 0,
+	  0x0000010000410001ULL, 0x0000000000000020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/* Bit 84, the first of the high reserved bits. */
+	{ "intel, reserved bit set (synthetic)", 0, 0,
+	  0x0000010000410001ULL, 0x0000000000140020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/* Bit 32: reserved in xAPIC mode ... */
+	{ "intel, destination low byte in xapic mode", 0, 0,
+	  0x0000010100410001ULL, 0x0000000000040020ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/* ... and part of id 0x101 in x2APIC mode. */
+	{ "intel, the same word in x2apic mode", 0, 1,
+	  0x0000010100410001ULL, 0x0000000000040020ULL,
+	  1, { 0x41, 0x101, 0, 0x0020 }, 1 },
+
+	/* AMD: RemapEn, the id in 15:8, the vector in 23:16. */
+	{ "amd, vector 0x41 to id 1", 1, 0,
+	  0x00410101ULL, 0, 1, { 0x41, 1, 0, 0 }, 1 },
+	{ "amd, vector 0xfe to id 0xff", 1, 0,
+	  0x00FEFF01ULL, 0, 1, { 0xFE, 0xFF, 0, 0 }, 1 },
+
+	/* Eight bits of destination and no more in the basic format. */
+	{ "amd, id 0x100", 1, 0,
+	  0, 0, 0, { 0x41, 0x100, 0, 0 }, -1 },
+
+	/* RemapEn clear: target aborted, whatever else the entry holds. */
+	{ "amd, remapping off", 1, 0,
+	  0x00410100ULL, 0, 0, { 0, 0, 0, 0 }, 0 },
+
+	/* GuestMode, the other format's entry (synthetic). */
+	{ "amd, guest mode (synthetic)", 1, 0,
+	  0x00410181ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
+
+	/* IntType 001b, arbitrated, which this kernel never asks for. */
+	{ "amd, arbitrated (synthetic)", 1, 0,
+	  0x00410105ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
+
+	/* Bits 31:24 are reserved. */
+	{ "amd, reserved bits set (synthetic)", 1, 0,
+	  0x01410101ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
+};
+
+/*
+ * And the messages a source writes to reach its entry, Intel's only -- see
+ * <cpu/iommu_backend.h> for why AMD's do not change.  From Rev 5.20 Figures
+ * 5-2 to 5-4 by hand.
+ *
+ * 🔴 Two indices need the sixteenth bit, which lives apart from the other
+ * fifteen: bit 2 of an address, bit 11 of a redirection entry.
+ */
+struct msg_case {
+	const char	*what;
+	int		 rte;		/* an I/O APIC entry, not an MSI      */
+	uint32_t	 index;
+	uint8_t		 vector;	/* the RTE's; must be its entry's     */
+	int		 level;
+	int		 active_low;
+	int		 masked;
+	uint32_t	 a;		/* MSI address, or RTE bits 31:0      */
+	uint32_t	 b;		/* MSI data, or RTE bits 63:32        */
+	int		 decodes;	/* 1 remappable, 0 compatibility, -1 refused */
+	int		 encodes;	/* 1 must produce, -1 must refuse, 0 not */
+};
+
+static const struct msg_case msg_cases[] = {
+	/* 0xFEE, index 5 in 19:5, format and SHV, data zero. */
+	{ "intel msi, entry 5", 0, 5, 0, 0, 0, 0,
+	  0xFEE000B8u, 0, 1, 1 },
+	/* Index 0x8001: bit 15 is address bit 2. */
+	{ "intel msi, entry 0x8001", 0, 0x8001, 0, 0, 0, 0,
+	  0xFEE0003Cu, 0, 1, 1 },
+	/* The top of the fifteen-bit field: 19:5 all set. */
+	{ "intel msi, entry 0x7fff", 0, 0x7FFF, 0, 0, 0, 0,
+	  0xFEEFFFF8u, 0, 1, 1 },
+	/* A handle has sixteen bits and no more. */
+	{ "intel msi, entry 0x10000", 0, 0x10000, 0, 0, 0, 0,
+	  0, 0, 0, -1 },
+	/* Today's message to APIC id 1: compatibility format, bit 4 clear. */
+	{ "intel msi, compatibility format", 0, 0, 0, 0, 0, 0,
+	  0xFEE01000u, 0x41, 0, 0 },
+	/* SHV set and a subhandle of 3: the engine selects 5 + 3 (§5.1.3). */
+	{ "intel msi, a subhandle added (synthetic)", 0, 8, 0, 0, 0, 0,
+	  0xFEE000B8u, 3, 1, 0 },
+	/* With SHV set, data bits 31:16 are reserved (Table 14). */
+	{ "intel msi, reserved data bits (synthetic)", 0, 0, 0, 0, 0, 0,
+	  0xFEE000B8u, 0x10000, -1, 0 },
+	/* Not in the interrupt range at all. */
+	{ "intel msi, not an interrupt address (synthetic)", 0, 0, 0, 0, 0, 0,
+	  0xFED00018u, 0, -1, 0 },
+	/* SHV clear: the data is ignored and the handle is the index. */
+	{ "intel msi, no subhandle (synthetic)", 0, 5, 0, 0, 0, 0,
+	  0xFEE000B0u, 0x1234, 1, 0 },
+
+	/* Index 5 in 63:49, the format bit 48, vector 0x41, edge, high. */
+	{ "intel rte, entry 5", 1, 5, 0x41, 0, 0, 0,
+	  0x00000041u, 0x000B0000u, 1, 1 },
+	/*
+	 * Index 0x8002: bit 15 is RTE bit 11.  Level, active low, masked,
+	 * which are the RTE's own and untouched by remapping.
+	 */
+	{ "intel rte, entry 0x8002, level", 1, 0x8002, 0x42, 1, 1, 1,
+	  0x0001A842u, 0x00050000u, 1, 1 },
+	/* Today's entry to APIC id 1: compatibility format, bit 48 clear. */
+	{ "intel rte, compatibility format", 1, 0, 0, 0, 0, 0,
+	  0x00000041u, 0x01000000u, 0, 0 },
+	/* Lowest priority would set SHV and shift the index. */
+	{ "intel rte, lowest priority (synthetic)", 1, 0, 0, 0, 0, 0,
+	  0x00000141u, 0x000B0000u, -1, 0 },
+};
+
+static unsigned msg_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(msg_cases) / sizeof(msg_cases[0]);
+	     i++) {
+		const struct msg_case *c = &msg_cases[i];
+		uint32_t a = 0xA5A5A5A5u, b = 0xA5A5A5A5u;
+		uint32_t index = 0xA5A5A5A5u;
+		int got;
+
+		(*ran)++;
+
+		if (c->encodes != 0) {
+			got = c->rte
+			    ? iommu_vtd_ioapic_rte(c->index, c->vector,
+						   c->level, c->active_low,
+						   c->masked, &a, &b)
+			    : iommu_vtd_msi(c->index, &a, &b);
+
+			if (c->encodes < 0) {
+				if (got != 0)
+					bad++;
+				continue;
+			}
+			if (got != 1 || a != c->a || b != c->b) {
+				bad++;
+				continue;
+			}
+		}
+
+		got = c->rte ? iommu_vtd_ioapic_rte_decode(c->a, c->b, &index)
+			     : iommu_vtd_msi_decode(c->a, c->b, &index);
+
+		if (got != c->decodes || (got == 1 && index != c->index))
+			bad++;
+	}
+
+	return bad;
+}
+
+/*
+ * And AMD's device table entry, its interrupt half, from Rev 3.11 Table 7 by
+ * hand.  The encoder writes one word of four into an entry the page-table
+ * encoders already made, so the check also requires the other three to come
+ * back exactly as they went in.
+ */
+struct dte_case {
+	const char	*what;
+	uint64_t	 table;		/* what the encoder is given / decoder finds */
+	unsigned	 log2;
+	uint64_t	 word;		/* the third word of the entry          */
+	int		 decodes;	/* 1 remapped, 0 unmapped, -1 not ours  */
+	int		 encodes;	/* 1 must produce, -1 must refuse, 0 not */
+};
+
+static const struct dte_case dte_cases[] = {
+	/*
+	 * 256 entries at 0x12345680: IV, IntTabLen 1000b in 4:1, the root in
+	 * 51:6, IntCtl 10b in 61:60, every pass bit and IG clear.
+	 */
+	{ "amd dte, 256 entries remapped", 0x12345680ULL, 8,
+	  0x2000000012345691ULL, 1, 1 },
+	/* Aligned to 64 and not to 128: refused, not rounded. */
+	{ "amd dte, table not 128-byte aligned", 0x12345640ULL, 8,
+	  0, 0, -1 },
+	/* 2^12 entries does not exist; 1011b, 2048, is the largest. */
+	{ "amd dte, 4096 entries", 0x12345680ULL, 12, 0, 0, -1 },
+	/* IV clear: everything passes unmapped, today's word. */
+	{ "amd dte, iv clear", 0, 0, 0, 0, 0 },
+	/* IV set and IntCtl 01b: forwarded unmapped all the same. */
+	{ "amd dte, forwarded unmapped", 0, 0,
+	  0x1000000000000001ULL, 0, 0 },
+	/* IntCtl 11b is reported as an event (synthetic). */
+	{ "amd dte, intctl reserved (synthetic)", 0, 0,
+	  0x3000000012345691ULL, -1, 0 },
+	/* IntTabLen 1100b, the reserved 11xxb (synthetic). */
+	{ "amd dte, table length reserved (synthetic)", 0, 0,
+	  0x2000000012345699ULL, -1, 0 },
+	/* NMIPass: a device allowed to send NMIs (synthetic). */
+	{ "amd dte, nmi passed through (synthetic)", 0, 0,
+	  0x2400000012345691ULL, -1, 0 },
+	/*
+	 * Bit 6 of the root set: a word the field can hold, for a table
+	 * that would start on a 64-byte boundary (synthetic).  The encoder
+	 * refusing the address above is half of the rule; this is the other.
+	 */
+	{ "amd dte, root aligned to 64 only (synthetic)", 0, 0,
+	  0x20000000123456D1ULL, -1, 0 },
+};
+
+static unsigned dte_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(dte_cases) / sizeof(dte_cases[0]);
+	     i++) {
+		const struct dte_case *c = &dte_cases[i];
+		uint64_t dte[4];
+		uint64_t table = 0xA5A5A5A5A5A5A5A5ULL;
+		unsigned log2 = 99;
+		int got;
+
+		(*ran)++;
+
+		if (c->encodes != 0) {
+			/* The page-table half, which must come back untouched. */
+			iommu_amd_dte_passthrough(IOMMU_DOMAIN_PASSTHROUGH, dte);
+			dte[2] = 0xA5A5A5A5A5A5A5A5ULL;
+			dte[3] = 0x5A5A5A5A5A5A5A5AULL;
+
+			got = iommu_amd_dte_interrupts(c->table, c->log2, dte);
+
+			if (c->encodes < 0) {
+				if (got != 0
+				    || dte[2] != 0xA5A5A5A5A5A5A5A5ULL)
+					bad++;
+				continue;
+			}
+			{
+				uint64_t pt[4];
+
+				iommu_amd_dte_passthrough(
+					IOMMU_DOMAIN_PASSTHROUGH, pt);
+				if (got != 1 || dte[2] != c->word
+				    || dte[0] != pt[0] || dte[1] != pt[1]
+				    || dte[3] != 0x5A5A5A5A5A5A5A5AULL) {
+					bad++;
+					continue;
+				}
+			}
+		} else {
+			dte[0] = dte[1] = dte[3] = 0;
+			dte[2] = c->word;
+		}
+
+		got = iommu_amd_dte_interrupts_decode(dte, &table, &log2);
+		if (got != c->decodes
+		    || (got == 1 && (table != c->table || log2 != c->log2)))
+			bad++;
+	}
+
+	return bad;
+}
+
+/*
+ * And the invalidation queue's descriptors, Intel's, from Rev 5.20 Figures
+ * 6-1, 6-3, 6-8 and 6-9 by hand.  Words only: nothing reads them but the
+ * engine, so the encoders are checked as entries_agree() checks the context
+ * and device table entries.
+ */
+enum { QI_CONTEXT, QI_IOTLB, QI_IEC_ALL, QI_IEC, QI_WAIT };
+
+struct qi_case {
+	const char	*what;
+	int		 kind;
+	uint64_t	 arg;		/* the index, or the status address  */
+	uint32_t	 arg2;		/* the mask, or the status data      */
+	int		 encodes;	/* 1 must produce lo/hi, -1 must refuse */
+	uint64_t	 lo;
+	uint64_t	 hi;
+};
+
+static const struct qi_case qi_cases[] = {
+	{ "intel qi, context cache, global", QI_CONTEXT, 0, 0, 1,
+	  0x0000000000000011ULL, 0 },
+	{ "intel qi, iotlb, global", QI_IOTLB, 0, 0, 1,
+	  0x0000000000000012ULL, 0 },
+	{ "intel qi, interrupt cache, global", QI_IEC_ALL, 0, 0, 1,
+	  0x0000000000000004ULL, 0 },
+	/* Entry 5 alone: G set, IM 0, IIDX 5 in 47:32. */
+	{ "intel qi, interrupt cache, entry 5", QI_IEC, 5, 0, 1,
+	  0x0000000500000014ULL, 0 },
+	/* Eight entries from 0x40: IM 3 in 31:27. */
+	{ "intel qi, interrupt cache, 8 from 0x40", QI_IEC, 0x40, 3, 1,
+	  0x0000004018000014ULL, 0 },
+	/* 0x41 with a mask of eight: the block would start at 0x40. */
+	{ "intel qi, interrupt cache, unaligned", QI_IEC, 0x41, 3, -1, 0, 0 },
+	{ "intel qi, interrupt cache, past 16 bits", QI_IEC, 0x10000, 0, -1,
+	  0, 0 },
+	/* SW, data 1 in 63:32, the address in the high word. */
+	{ "intel qi, wait, status write", QI_WAIT, 0x1000, 1, 1,
+	  0x0000000100000025ULL, 0x1000ULL },
+	{ "intel qi, wait, every data bit", QI_WAIT, 0x7FFFFFFCULL,
+	  0xFFFFFFFFu, 1, 0xFFFFFFFF00000025ULL, 0x7FFFFFFCULL },
+	/* Bits 1:0 of the address are not part of the field. */
+	{ "intel qi, wait, unaligned", QI_WAIT, 0x1002, 1, -1, 0, 0 },
+};
+
+static unsigned qi_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(qi_cases) / sizeof(qi_cases[0]); i++) {
+		const struct qi_case *c = &qi_cases[i];
+		uint64_t w[2] = { ~0ULL, ~0ULL };
+		int got = 1;
+
+		(*ran)++;
+
+		switch (c->kind) {
+		case QI_CONTEXT:
+			iommu_vtd_qi_context_global(w);
+			break;
+		case QI_IOTLB:
+			iommu_vtd_qi_iotlb_global(w);
+			break;
+		case QI_IEC_ALL:
+			iommu_vtd_qi_iec_global(w);
+			break;
+		case QI_IEC:
+			got = iommu_vtd_qi_iec((uint32_t)c->arg, c->arg2, w);
+			break;
+		default:
+			got = iommu_vtd_qi_wait(c->arg, c->arg2, w);
+			break;
+		}
+
+		if (c->encodes < 0) {
+			if (got != 0)
+				bad++;
+		} else if (got != 1 || w[0] != c->lo || w[1] != c->hi) {
+			bad++;
+		}
+	}
+
+	return bad;
+}
+
+/*
+ * And the word IRTA_REG is given, from Rev 5.20 Figure 11-30 by hand.
+ *
+ * 🔴 S is one less than the logarithm, and the three cases that encode are the
+ * three places where taking it for the logarithm shows: 256 entries say 7 and
+ * not 8, two say 0 and not 1, and 65536 say 15 -- a 16 would not even fit.
+ */
+struct irta_case {
+	const char	*what;
+	uint64_t	 table;
+	unsigned	 entries;
+	int		 x2apic;
+	int		 encodes;	/* 1 must produce `word', -1 must refuse */
+	uint64_t	 word;
+};
+
+static const struct irta_case irta_cases[] = {
+	/* One frame of sixteen-byte entries: S 7. */
+	{ "intel irta, 256 entries", 0x12345000ULL, 256, 0, 1,
+	  0x0000000012345007ULL },
+	/* The fewest a table can have: S 0. */
+	{ "intel irta, 2 entries", 0x1000ULL, 2, 0, 1, 0x1000ULL },
+	/* The most, in x2APIC mode: S 15 and EIME in bit 11. */
+	{ "intel irta, 65536 entries, x2apic", 0x123456789000ULL, 65536, 1, 1,
+	  0x000012345678980FULL },
+	{ "intel irta, 300 entries", 0x12345000ULL, 300, 0, -1, 0 },
+	{ "intel irta, 1 entry", 0x12345000ULL, 1, 0, -1, 0 },
+	{ "intel irta, 131072 entries", 0x12345000ULL, 131072, 0, -1, 0 },
+	/* Bits 11:0 are not the address's: refused, not rounded. */
+	{ "intel irta, on a 2K boundary", 0x12345800ULL, 256, 0, -1, 0 },
+};
+
+/*
+ * And which entry is whose: the two ends of each range and the first past it.
+ * A map whose ranges touched would give a pin's entry to an MSI slot -- an
+ * interrupt delivered where the other source's vector says.
+ */
+struct irt_index_case {
+	const char	*what;
+	enum iommu_vtd_irt_source kind;
+	unsigned	 n;
+	int		 maps;		/* 1 to `index', 0 refused */
+	uint32_t	 index;
+};
+
+static const struct irt_index_case irt_index_cases[] = {
+	{ "intel irt, pin 0", IOMMU_VTD_IRT_PIN, 0, 1, 0 },
+	{ "intel irt, pin 23", IOMMU_VTD_IRT_PIN, 23, 1, 23 },
+	{ "intel irt, pin 127", IOMMU_VTD_IRT_PIN, 127, 1, 127 },
+	{ "intel irt, pin 128", IOMMU_VTD_IRT_PIN, 128, 0, 0 },
+	{ "intel irt, msi slot 0", IOMMU_VTD_IRT_MSI, 0, 1, 128 },
+	{ "intel irt, msi slot 15", IOMMU_VTD_IRT_MSI, 15, 1, 143 },
+	{ "intel irt, msi slot 127", IOMMU_VTD_IRT_MSI, 127, 1, 255 },
+	{ "intel irt, msi slot 128", IOMMU_VTD_IRT_MSI, 128, 0, 0 },
+};
+
+static unsigned irt_index_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0;
+	     i < sizeof(irt_index_cases) / sizeof(irt_index_cases[0]); i++) {
+		const struct irt_index_case *c = &irt_index_cases[i];
+		uint32_t index = 0xA5A5A5A5u;
+		int got;
+
+		(*ran)++;
+
+		got = iommu_vtd_irt_index(c->kind, c->n, &index);
+		if (got != c->maps || (got == 1 && index != c->index))
+			bad++;
+	}
+
+	return bad;
+}
+
+static unsigned irta_check(unsigned *ran)
+{
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(irta_cases) / sizeof(irta_cases[0]);
+	     i++) {
+		const struct irta_case *c = &irta_cases[i];
+		uint64_t w = ~0ULL;
+		int got;
+
+		(*ran)++;
+
+		got = iommu_vtd_irta(c->table, c->entries, c->x2apic, &w);
+
+		if (c->encodes < 0) {
+			if (got != 0)
+				bad++;
+		} else if (got != 1 || w != c->word) {
+			bad++;
+		}
+	}
+
+	return bad;
+}
+
+int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
+{
+	unsigned n = 0, bad = 0;
+
+	for (unsigned i = 0;
+	     i < sizeof(irte_cases) / sizeof(irte_cases[0]); i++) {
+		const struct irte_case *c = &irte_cases[i];
+		uint64_t in[2] = { c->lo, c->hi };
+		struct iommu_irte d;
+		int got;
+
+		n++;
+
+		if (c->encodes != 0) {
+			uint64_t w[2] = { ~0ULL, ~0ULL };
+			uint32_t a = 0xFFFFFFFFu;
+
+			got = c->amd ? iommu_amd_irte(&c->e, &a)
+				     : iommu_vtd_irte(&c->e, c->x2apic, w);
+
+			if (c->encodes < 0) {
+				if (got != 0)
+					bad++;
+				continue;
+			}
+
+			if (got != 1
+			    || (c->amd ? a != (uint32_t)c->lo
+				       : w[0] != c->lo || w[1] != c->hi)) {
+				bad++;
+				continue;
+			}
+		}
+
+		/*
+		 * ⚠️ Filled with something that is not the answer first, so a
+		 * decoder that leaves a field alone fails here instead of
+		 * agreeing with whatever was on the stack.
+		 */
+		d.vector = 0x5A;
+		d.destination = 0xA5A5A5A5u;
+		d.level = -1;
+		d.source = 0xA5A5;
+
+		got = c->amd ? iommu_amd_irte_decode((uint32_t)c->lo, &d)
+			     : iommu_vtd_irte_decode(in, c->x2apic, &d);
+
+		if (got != c->decodes)
+			bad++;
+		else if (got == 1
+			 && (d.vector != c->e.vector
+			     || d.destination != c->e.destination
+			     || d.level != c->e.level
+			     || d.source != c->e.source))
+			bad++;
+	}
+
+	bad += msg_check(&n);
+	bad += dte_check(&n);
+	bad += qi_check(&n);
+	bad += irta_check(&n);
+	bad += irt_index_check(&n);
+
+	if (ran)
+		*ran = n;
+	if (wrong)
+		*wrong = bad;
+
+	return bad == 0;
+}
+
+/*
+ * ── #598: Intel's invalidation queue, on a fabricated engine ─────────
+ *
+ * At every boot and on every board: the slots are a static page, the head and
+ * tail registers two words, the fault status one, the cell one.  The check
+ * plays the engine by moving the head and writing the cell by hand, so what it
+ * asks is the arithmetic -- where descriptors land, when the ring counts as
+ * full, what the wait carries, what answers it.  Whether a real engine agrees
+ * is entry 16's question.
+ */
+#define	FAKE_IQ_IQE		(1u << 4)	/* FSTS */
+#define	FAKE_IQ_ICE		(1u << 5)
+#define	FAKE_IQ_ITE		(1u << 6)
+#define	FAKE_IQ_STATUS_PA	0x12340ULL	/* never written: the engine is fake */
+#define	FAKE_IQ_UNWRITTEN	0xDEADULL	/* no descriptor is this word */
+
+static uint64_t		fake_iq_ring[2 * IOMMU_VTD_QUEUE_SLOTS];
+
+struct fake_iq {
+	uint64_t		iqh, iqt;
+	uint32_t		fsts, status;
+	struct iommu_vtd_queue	q;
+};
+
+static void fake_iq_reset(struct fake_iq *f, unsigned head, unsigned tail)
+{
+	f->iqh = (uint64_t)head << 4;
+	f->iqt = (uint64_t)tail << 4;
+	f->fsts = 0;
+	f->status = 0;
+	f->q.iqh = &f->iqh;
+	f->q.iqt = &f->iqt;
+	f->q.fsts = &f->fsts;
+	f->q.ring = fake_iq_ring;
+	f->q.status = &f->status;
+	f->q.status_pa = FAKE_IQ_STATUS_PA;
+	f->q.tail = tail;
+	f->q.seq = 0;
+
+	for (unsigned i = 0; i < 2 * IOMMU_VTD_QUEUE_SLOTS; i++)
+		fake_iq_ring[i] = FAKE_IQ_UNWRITTEN;
+}
+
+static int fake_iq_holds(unsigned slot, const uint64_t d[2])
+{
+	return fake_iq_ring[2 * slot] == d[0]
+	       && fake_iq_ring[2 * slot + 1] == d[1];
+}
+
+int iommu_queue_check(unsigned *ran, unsigned *wrong)
+{
+	struct fake_iq f;
+	uint64_t a[2], b[2], w[2];
+	unsigned n = 0, bad = 0;
+	uint32_t seq;
+
+	iommu_vtd_qi_context_global(a);
+	iommu_vtd_qi_iotlb_global(b);
+	(void) iommu_vtd_qi_wait(FAKE_IQ_STATUS_PA, 1, w);
+
+	const uint64_t two[2][2] = { { a[0], a[1] }, { b[0], b[1] } };
+
+	/* An empty ring at zero: two descriptors, the wait, then the tail. */
+	fake_iq_reset(&f, 0, 0);
+	seq = iommu_vtd_queue_place(&f.q, two, 2);
+	n++;
+	if (seq != 1 || !fake_iq_holds(0, a) || !fake_iq_holds(1, b)
+	    || !fake_iq_holds(2, w) || f.q.tail != 3)
+		bad++;
+
+	/* Ringing puts the tail where the engine reads it, bits 18:4. */
+	iommu_vtd_queue_ring(&f.q);
+	n++;
+	if (f.iqt != (3ULL << 4))
+		bad++;
+
+	/* Round the end: the last two slots, and the wait in slot zero. */
+	fake_iq_reset(&f, 254, 254);
+	seq = iommu_vtd_queue_place(&f.q, two, 2);
+	n++;
+	if (seq != 1 || !fake_iq_holds(254, a) || !fake_iq_holds(255, b)
+	    || !fake_iq_holds(0, w) || f.q.tail != 1)
+		bad++;
+
+	/*
+	 * One free slot, and a descriptor needs two with its wait: refused,
+	 * with nothing written and nothing counted.
+	 */
+	fake_iq_reset(&f, 5, 3);
+	seq = iommu_vtd_queue_place(&f.q, two, 1);
+	n++;
+	if (seq != 0 || f.q.tail != 3 || f.q.seq != 0
+	    || fake_iq_ring[2 * 3] != FAKE_IQ_UNWRITTEN)
+		bad++;
+
+	/* ... while a wait alone fits in that slot. */
+	seq = iommu_vtd_queue_place(&f.q, 0, 0);
+	n++;
+	if (seq != 1 || !fake_iq_holds(3, w) || f.q.tail != 4)
+		bad++;
+
+	/* A head outside the ring is not a place to count room from. */
+	fake_iq_reset(&f, 0, 0);
+	f.iqh = 300ULL << 4;
+	n++;
+	if (iommu_vtd_queue_place(&f.q, 0, 0) != 0 || f.q.tail != 0)
+		bad++;
+
+	/* The wait's number goes round without passing through zero. */
+	fake_iq_reset(&f, 0, 0);
+	f.q.seq = 0xFFFFFFFFu;
+	n++;
+	if (iommu_vtd_queue_place(&f.q, 0, 0) != 1)
+		bad++;
+
+	/* What answers a wait is its own number in the cell... */
+	fake_iq_reset(&f, 0, 0);
+	f.status = 7;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != 1)
+		bad++;
+
+	/* ... and not the number the wait before it left there. */
+	f.status = 6;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != 0)
+		bad++;
+
+	/* A refused descriptor and a lost answer each stop the queue... */
+	f.fsts = FAKE_IQ_IQE;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != -1)
+		bad++;
+	f.fsts = FAKE_IQ_ITE;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != -1)
+		bad++;
+
+	/* ... and a bad device-TLB answer does not (§6.5.2.11). */
+	f.fsts = FAKE_IQ_ICE;
+	n++;
+	if (iommu_vtd_queue_wait(&f.q, 7, 4) != 0)
+		bad++;
 
 	if (ran)
 		*ran = n;

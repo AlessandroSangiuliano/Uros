@@ -31,6 +31,7 @@
 #include <thread/fpu.h>
 #include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
+#include <cpu/msi_race_test.h>		/* #598: -m */
 #include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/spl_test.h>	/* #526: -E */
 #include <pmap/shootdown_test.h>	/* #638: -J */
@@ -457,6 +458,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('Y') && want > 1)
 			ioapic_window_race_test();
+
+		/*
+		 * -m: a function's MSI-X enable raced from two processors
+		 * (#598's C10).  Here for the same reason, and before
+		 * bootstrap for the same reason too: the device it takes is
+		 * one no driver has claimed yet.  Returns.
+		 */
+		if (boot_flag('m') && want > 1)
+			msi_function_race_test();
 
 		/*
 		 * -Z: two processors panic at the same instant (#599).  The same

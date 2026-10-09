@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: the invalidation queue's tail written in bits 18:4 -- it is written as an index, and an engine never sees its descriptors
+Run: --iommu intel --entry 16 600 -smp 1
+Expect: invalidation-queue cases on a fabricated engine, 1 wrong
+Expect: translation COULD NOT BE ENABLED
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 214aeecd..52d646da 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1849,7 +1849,7 @@ uint32_t iommu_vtd_queue_place(struct iommu_vtd_queue *q,
+  */
+ void iommu_vtd_queue_ring(const struct iommu_vtd_queue *q)
+ {
+-	*q->iqt = (uint64_t)q->tail << 4;
++	*q->iqt = (uint64_t)q->tail;
+ }
+ 
+ /*

@@ -30,10 +30,12 @@
 #include <cpu/iommu_backend.h>
 #include <cpu/pci_cfg.h>
 #include <cpu/regs.h>		/* cpu_pause */
+#include <device/pci.h>		/* PCI_VENDOR_ID, #598 */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <kern/misc_protos.h>
+#include <sync/lock.h>		/* hw_lock: the command ring's own, #598 */
 
 /* ------------------------------------------------------------------ */
 /*  The table                                                           */
@@ -225,6 +227,38 @@ _Static_assert(sizeof(struct ivmd_header) == 32, "an IVMD is thirty-two bytes");
  */
 #define	AMD_CONTROL_COHERENT(c)	(((c) >> 10) & 1)
 
+/*
+ * ── #598's C7 on this vendor: the device table, and only it ──────────
+ *
+ * Page walks follow a DTE's SD, which no entry this kernel writes sets, and
+ * the interrupt tables and the command buffer are always coherent (§2.2.5).
+ * What the control register's Coherent bit decides is whether the engine
+ * snoops its reads of the DEVICE TABLE, and the IVHD recommends a value for
+ * it: Table 92, flag bit 5, "The recommended value is 1b".  QEMU's IVHD sets
+ * HtTunEn, IotlbSup, PrefSup and PPRSup, and not this.  So the bit is set as
+ * recommended, and a device table read without snooping has every line this
+ * kernel writes into it flushed before the engine is told.
+ */
+#define	AMD_CTL_COHERENT	(1ULL << 10)
+#define	IVHD_FLAG_COHERENT	(1u << 5)
+
+static uint8_t	amd_devtab_snooped[IOMMU_MAX_UNITS];	/* as recommended */
+
+int iommu_amd_devtab_snooped(unsigned unit)
+{
+	return unit < IOMMU_MAX_UNITS && amd_devtab_snooped[unit];
+}
+
+int iommu_amd_devtab_uncached(void)
+{
+	if (iommu_vendor() != IOMMU_AMD)
+		return 0;
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (iommu_unit(i)->answered && !iommu_amd_devtab_snooped(i))
+			return 1;
+	return 0;
+}
+
 static int is_ivhd(uint8_t type)
 {
 	return type == IVRS_IVHD_10 || type == IVRS_IVHD_11
@@ -333,6 +367,27 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 }
 
 /*
+ * What remapping interrupts would need from this engine (#598).
+ *
+ * 🔑 Forgetting an entry is a command, and not an optional one.
+ * INVALIDATE_INTERRUPT_TABLE (Rev 3.11 §2.4.5) is stated with no condition,
+ * where the PREFETCH command beside it is "when supported" by a feature bit --
+ * so every engine that has a command buffer, which is every engine, takes it.
+ *
+ * ⚠️ And nothing here can say "required".  Every field of the feature register
+ * (MMIO 0030h) is a support bit, so there is no counterpart to Intel's IRREQ
+ * or EIMER to read -- zero is what the register says, not a default.
+ */
+void iommu_amd_interrupt_decode(uint64_t efr,
+				struct iommu_interrupt_caps *out)
+{
+	out->can_forget = 1;
+	out->x2apic = (int)AMD_EFR_XTSUP(efr);
+	out->required = 0;
+	out->x2apic_required = 0;
+}
+
+/*
  * ── The device table entry, which is stage 2's first structure ────────
  *
  * 32 bytes per device id, from Table 7 of Rev 3.11.  Only the fields a
@@ -438,6 +493,20 @@ void iommu_amd_dte_blocked(uint16_t domain, uint64_t out[4])
 _Static_assert(AMD_DEVICE_TABLE_FRAMES == 512,
 	       "the device table is two megabytes, which is its architectural maximum");
 
+/* Entries [first, first + count) of a device table written: out of the caches. */
+static void amd_devtab_written(volatile uint64_t *dt, unsigned first,
+			       unsigned count)
+{
+	uintptr_t at, end;
+
+	if (!iommu_amd_devtab_uncached())
+		return;
+	at = (uintptr_t)&dt[(uint64_t)first * AMD_DTE_WORDS] & ~(uintptr_t)63;
+	end = (uintptr_t)&dt[(uint64_t)(first + count) * AMD_DTE_WORDS];
+	for (; at < end; at += 64u)
+		iommu_flush_line((const volatile void *)at);
+}
+
 int iommu_amd_build(void)
 {
 	uint64_t table, command, event;
@@ -491,6 +560,7 @@ int iommu_amd_build(void)
 		    || dt[i * AMD_DTE_WORDS + 2] != want[2]
 		    || dt[i * AMD_DTE_WORDS + 3] != want[3])
 			return 0;
+	amd_devtab_written(dt, 0, AMD_DEVICE_IDS);	/* C7 */
 
 	iommu_record_tables(table, (uint64_t)AMD_DEVICE_TABLE_FRAMES * 4096u,
 			    command, event, written, 0,
@@ -584,6 +654,9 @@ int iommu_amd_enable(void)
 		 * silent.
 		 */
 		control |= AMD_CTL_CMDBUF_EN | AMD_CTL_EVENTLOG_EN;
+		control &= ~AMD_CTL_COHERENT;
+		if (iommu_amd_devtab_snooped(i))	/* C7, as the IVHD says */
+			control |= AMD_CTL_COHERENT;
 		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
 
 		control |= AMD_CTL_IOMMU_EN;
@@ -591,10 +664,14 @@ int iommu_amd_enable(void)
 
 		/*
 		 * Read back, because a write that was accepted and ignored is
-		 * the failure this cannot afford to call success.
+		 * the failure this cannot afford to call success.  A device
+		 * table meant to be snooped that is not would be read stale:
+		 * nothing was flushed for it.
 		 */
 		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
 		if (!(control & AMD_CTL_IOMMU_EN))
+			return 0;
+		if (iommu_amd_devtab_snooped(i) && !(control & AMD_CTL_COHERENT))
 			return 0;
 
 		enabled++;
@@ -919,6 +996,40 @@ static int amd_completion_wait(volatile uint8_t *regs,
 }
 
 /*
+ * #598: the ring's own lock, and one call for a whole sequence.
+ *
+ * Every caller used to hold iommu_domain_lock, a mutex, and that was the
+ * ring's only protection.  Interrupt remapping sends commands from paths that
+ * hold no such lock and some that cannot sleep -- a pin routed as the HPET's
+ * tick starts, a slot given out from an RPC -- and a ring they share must not
+ * depend on a lock they do not take.  So the commands of one sequence and the
+ * wait behind them go in under a lock that masks interrupts, as Intel's queue
+ * does, and no other sequence lands between them.
+ *
+ * ⚠️ The semaphore's frame is found before the lock is taken: finding it the
+ * first time allocates, and nothing that allocates runs with interrupts off.
+ */
+static hw_lock_data_t	amd_cmd_lock;
+
+static int amd_send(volatile uint8_t *regs, const struct iommu_tables *t,
+		    const uint64_t (*cmds)[2], unsigned n)
+{
+	int ok = 1;
+
+	if (amd_wait_cell() == 0)
+		return 0;
+
+	hw_lock_lock(&amd_cmd_lock);
+	for (unsigned i = 0; i < n && ok; i++)
+		ok = amd_command(regs, t, cmds[i][0], cmds[i][1]);
+	if (ok)
+		ok = amd_completion_wait(regs, t);
+	hw_lock_unlock(&amd_cmd_lock);
+
+	return ok;
+}
+
+/*
  * 🔴🔴 IT ONLY POLICES WHEN ASKED, AND THAT IS THE EMULATOR AND NOT THE
  * SPECIFICATION.  QEMU's `-device amd-iommu' takes `dma-remap', and it
  * defaults to OFF -- so with the plain device this engine accepts the device
@@ -959,6 +1070,14 @@ int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
 	iommu_amd_dte_domain(d->id, d->levels, d->root, want);
 
 	/*
+	 * #598: and the interrupt half as it is.  The encoder writes that word
+	 * as zero -- IV clear, "passed through unmapped" -- and it is not the
+	 * encoder's to decide: once interrupts are remapped, an attach that
+	 * wrote it would quietly stop remapping this device's interrupts.
+	 */
+	want[2] = dt[bdf * AMD_DTE_WORDS + 2];
+
+	/*
 	 * 🔴 THE THREE HIGH WORDS BEFORE THE ONE THAT CARRIES V, for the same
 	 * reason Intel's Present goes last -- and §3.2.2.1 asks for exactly
 	 * this: change the entry, then set V, then invalidate.  An engine that
@@ -969,6 +1088,7 @@ int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
 	dt[bdf * AMD_DTE_WORDS + 2] = want[2];
 	dt[bdf * AMD_DTE_WORDS + 3] = want[3];
 	dt[bdf * AMD_DTE_WORDS + 0] = want[0];
+	amd_devtab_written(dt, bdf, 1);			/* C7 */
 
 	if (dt[bdf * AMD_DTE_WORDS + 0] != want[0]
 	    || dt[bdf * AMD_DTE_WORDS + 1] != want[1])
@@ -990,17 +1110,13 @@ int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
 		 * from a domain, software must issue INVALIDATE_IOMMU_PAGES
 		 * for the associated DomainID."
 		 */
-		if (!amd_command(regs, t, AMD_CMD_INVALIDATE_DEVTAB | bdf, 0))
-			return 0;
+		const uint64_t cmds[2][2] = {
+			{ AMD_CMD_INVALIDATE_DEVTAB | bdf, 0 },
+			{ AMD_CMD_INVALIDATE_PAGES | ((uint64_t)d->id << 32),
+			  AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S | AMD_CMD_PAGES_PDE }
+		};
 
-		if (!amd_command(regs, t,
-				 AMD_CMD_INVALIDATE_PAGES
-				 | ((uint64_t)d->id << 32),
-				 AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S
-				 | AMD_CMD_PAGES_PDE))
-			return 0;
-
-		if (!amd_completion_wait(regs, t))
+		if (!amd_send(regs, t, cmds, 2))
 			return 0;
 
 		attached++;
@@ -1029,12 +1145,14 @@ int iommu_amd_detach(uint16_t bdf)
 	 */
 	iommu_amd_dte_blocked((uint16_t)(dt[bdf * AMD_DTE_WORDS + 1] & 0xFFFF),
 			      want);
+	want[2] = dt[bdf * AMD_DTE_WORDS + 2];	/* #598: see attach */
 
 	/* Valid last on attach; valid FIRST to go here.  See the VT-d note. */
 	dt[bdf * AMD_DTE_WORDS + 0] = want[0];
 	dt[bdf * AMD_DTE_WORDS + 1] = want[1];
 	dt[bdf * AMD_DTE_WORDS + 2] = want[2];
 	dt[bdf * AMD_DTE_WORDS + 3] = want[3];
+	amd_devtab_written(dt, bdf, 1);			/* C7 */
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
 		const struct iommu_unit *u = iommu_unit(i);
@@ -1045,10 +1163,11 @@ int iommu_amd_detach(uint16_t bdf)
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 
-		if (!amd_command(regs, t, AMD_CMD_INVALIDATE_DEVTAB | bdf, 0))
-			return 0;
+		const uint64_t cmds[1][2] = {
+			{ AMD_CMD_INVALIDATE_DEVTAB | bdf, 0 }
+		};
 
-		if (!amd_completion_wait(regs, t))
+		if (!amd_send(regs, t, cmds, 1))
 			return 0;
 
 		detached++;
@@ -1084,14 +1203,12 @@ int iommu_amd_flush(const struct iommu_domain *d)
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 
-		if (!amd_command(regs, t,
-				 AMD_CMD_INVALIDATE_PAGES
-				 | ((uint64_t)d->id << 32),
-				 AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S
-				 | AMD_CMD_PAGES_PDE))
-			return 0;
+		const uint64_t cmds[1][2] = {
+			{ AMD_CMD_INVALIDATE_PAGES | ((uint64_t)d->id << 32),
+			  AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S | AMD_CMD_PAGES_PDE }
+		};
 
-		if (!amd_completion_wait(regs, t))
+		if (!amd_send(regs, t, cmds, 1))
 			return 0;
 
 		flushed++;
@@ -1151,13 +1268,48 @@ int iommu_amd_flush(const struct iommu_domain *d)
 #define	AMD_EVT_PAGE_TAB_HW_ERROR	0x4
 #define	AMD_EVT_INVALID_DEVICE_REQUEST	0x8
 
+/*
+ * Table 3: the HyperTransport window whose requests are "Interrupt/EOI",
+ * controlled by IntCtl and the interrupt remapping tables -- the other place
+ * besides IOMMU_INTERRUPT_RANGE_BASE an interrupt request can write.
+ */
+#define	AMD_HT_INTERRUPT_BASE		0xFDF8000000ULL
+#define	AMD_HT_INTERRUPT_LIMIT		0xFDF8FFFFFFULL
+
+static int amd_interrupt_address(uint64_t a)
+{
+	return (a >= IOMMU_INTERRUPT_RANGE_BASE
+		&& a <= IOMMU_INTERRUPT_RANGE_LIMIT)
+	    || (a >= AMD_HT_INTERRUPT_BASE && a <= AMD_HT_INTERRUPT_LIMIT);
+}
+
 int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 {
 	unsigned code = AMD_EVT_CODE(lo);
 	uint8_t kind;
 
 	switch (code) {
+	/*
+	 * 🔑 One event code for two kinds of refusal (#598).  An interrupt
+	 * blocked by its remapping entry arrives as an IO_PAGE_FAULT with I
+	 * set -- "transaction was an interrupt request" -- and its Address is
+	 * the one the device wrote, in the interrupt range.  Read as a page
+	 * fault, it would be a DMA refused at 0xFEExxxxx, which is an address
+	 * no domain can map and exactly the kind of answer that gets believed.
+	 *
+	 * 🔴 AND I ALONE IS NOT BELIEVED.  A request is an interrupt because
+	 * of where it writes (Table 3), and Table 57's Address is "the DVA
+	 * that the peripheral was attempting to access", so a refused
+	 * interrupt carries an interrupt address.  QEMU's amd-iommu sets I on
+	 * every IO_PAGE_FAULT it logs (hw/i386/amd_iommu.c line 355 in 11.1.1)
+	 * and leaves the address zero: believing I alone printed AHCI's
+	 * refused DMA as 48 refused interrupts a boot.
+	 */
 	case AMD_EVT_IO_PAGE_FAULT:
+		kind = (lo & AMD_EVT_I) && amd_interrupt_address(hi)
+			? IOMMU_FAULT_INTERRUPT : IOMMU_FAULT_PAGE;
+		break;
+
 	case AMD_EVT_INVALID_DEVICE_REQUEST:
 		kind = IOMMU_FAULT_PAGE;
 		break;
@@ -1197,6 +1349,13 @@ int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
 	out->write = (lo & AMD_EVT_PR) && !(lo & AMD_EVT_TR)
 		     && !(lo & AMD_EVT_I) && (lo & AMD_EVT_RW);
 	out->vendor = IOMMU_AMD;
+
+	/*
+	 * Never an entry: the event names the device and the address it wrote,
+	 * and the entry was chosen by the message's data, which the event does
+	 * not carry (Rev 3.11 Table 57).
+	 */
+	out->index = IOMMU_FAULT_NO_INDEX;
 	return 1;
 }
 
@@ -1506,6 +1665,7 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	unsigned	bits = 0;
 	uint32_t	levels = 0;
 	int		ir = 0, coherent = 0;
+	struct iommu_interrupt_caps interrupt;
 
 	if (h->cap_offset < 0x40)
 		return;
@@ -1550,6 +1710,7 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	features = *(volatile uint64_t *)(regs + AMD_REG_EXT_FEATURE);
 
 	iommu_amd_decode(features, control, &bits, &levels, &ir, &coherent);
+	iommu_amd_interrupt_decode(features, &interrupt);
 
 	/*
 	 * ⚠️ Version zero, because there is no version register to read.  The
@@ -1560,6 +1721,10 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	 */
 	iommu_record_hardware(index, 0, bits, levels, ir, coherent,
 			      features, control);
+	if (index < IOMMU_MAX_UNITS)	/* C7 */
+		amd_devtab_snooped[index] =
+			(h->block.flags & IVHD_FLAG_COHERENT) != 0;
+	iommu_record_interrupt(index, &interrupt);
 	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
 
@@ -1691,4 +1856,459 @@ int iommu_amd_read(void)
 	iommu_record_walk(exact);
 
 	return 1;
+}
+
+/*
+ * ── #598: the interrupt remapping table entry ────────────────────────
+ *
+ * Rev 3.11 §2.2.5.1, Figure 15 and Table 20, the basic format:
+ *
+ *	0	RemapEn		1 remapped, 0 target aborted
+ *	1	SupIOPF		suppress the IO_PAGE_FAULT event
+ *	4:2	IntType		000b fixed, 001b arbitrated
+ *	5	RqEoi		an EOI cycle is required
+ *	6	DM		1 logical, 0 physical
+ *	7	GuestMode	0 for this format (Figure 18 is the other)
+ *	15:8	Destination	an APIC id, eight bits
+ *	23:16	Vector
+ *	31:24	Reserved
+ *
+ * ⚠️ Eight bits of destination and nothing more.  An x2APIC id needs the
+ * 128-bit format and XTEn in the control register, neither of which this
+ * kernel writes -- so a wider id is refused by the encoder, not truncated
+ * into somebody else's.
+ */
+#define	AMD_IRTE_REMAP_EN	(1u << 0)
+#define	AMD_IRTE_SUP_IOPF	(1u << 1)
+#define	AMD_IRTE_INT_TYPE_MASK	(7u << 2)
+#define	AMD_IRTE_RQ_EOI		(1u << 5)
+#define	AMD_IRTE_DM		(1u << 6)
+#define	AMD_IRTE_GUEST_MODE	(1u << 7)
+#define	AMD_IRTE_RSVD		(0xFFu << 24)
+
+int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out)
+{
+	if (e == 0 || out == 0 || e->destination > 0xFF)
+		return 0;
+
+	*out = AMD_IRTE_REMAP_EN
+	     | ((uint32_t)e->destination << 8)
+	     | ((uint32_t)e->vector << 16);
+	return 1;
+}
+
+int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
+{
+	if (!(in & AMD_IRTE_REMAP_EN))
+		return 0;
+
+	if (in & (AMD_IRTE_RSVD | AMD_IRTE_GUEST_MODE | AMD_IRTE_INT_TYPE_MASK
+		  | AMD_IRTE_RQ_EOI | AMD_IRTE_DM | AMD_IRTE_SUP_IOPF))
+		return -1;
+
+	out->vector = (uint8_t)((in >> 16) & 0xFF);
+	out->destination = (in >> 8) & 0xFF;
+	out->level = 0;
+	out->source = 0;
+	return 1;
+}
+
+/*
+ * ── #598: the device table entry's interrupt half ────────────────────
+ *
+ * Rev 3.11 Table 7, the third word of the entry (bits 191:128):
+ *
+ *	0	IV		interrupt map valid
+ *	4:1	IntTabLen	2^n entries; 11xxb reserved
+ *	5	IG		do not log unmapped interrupts
+ *	51:6	root		the table, aligned to 128 bytes
+ *	56	InitPass, 57 EIntPass, 58 NMIPass
+ *	61:60	IntCtl		00b abort, 01b forward unmapped, 10b remap
+ *	62	Lint0Pass, 63 Lint1Pass
+ *
+ * ⚠️ ablations/598-intctl-forward.patch writes IntCtl 01b, which forwards
+ * every fixed interrupt unmapped with IV set and a valid table in place: a
+ * table written, read back correctly and never consulted -- the shape of
+ * QEMU's dma-remap default.  The interrupt check must catch the word.
+ */
+
+#define	AMD_DTE_INT_IV		(1ULL << 0)
+#define	AMD_DTE_INT_LEN_SHIFT	1
+#define	AMD_DTE_INT_LEN_MASK	(0xFULL << 1)
+#define	AMD_DTE_INT_IG		(1ULL << 5)
+#define	AMD_DTE_INT_ROOT_MASK	0x000FFFFFFFFFFFC0ULL	/* bits 51:6 */
+#define	AMD_DTE_INT_PASS_MASK	((7ULL << 56) | (3ULL << 62))
+#define	AMD_DTE_INT_CTL_SHIFT	60
+#define	AMD_DTE_INT_CTL_MASK	(3ULL << 60)
+#define	AMD_DTE_INT_CTL_FORWARD	1ULL
+#define	AMD_DTE_INT_CTL_REMAP	2ULL
+
+int iommu_amd_dte_interrupts(uint64_t table_pa, unsigned log2_entries,
+			     uint64_t dte[4])
+{
+	/*
+	 * ⚠️ The field holds bits 51:6 and the table must be aligned to 128
+	 * bytes, so the field can say an address the table may not start at.
+	 * The check against the field alone accepted 0x...40, and the
+	 * interrupt check refused it on the first boot.
+	 */
+	if (dte == 0 || log2_entries > 11 || (table_pa & 0x7FULL) != 0
+	    || (table_pa & ~AMD_DTE_INT_ROOT_MASK) != 0)
+		return 0;
+
+	dte[2] = AMD_DTE_INT_IV
+	       | ((uint64_t)log2_entries << AMD_DTE_INT_LEN_SHIFT)
+	       | table_pa
+	       | (AMD_DTE_INT_CTL_REMAP << AMD_DTE_INT_CTL_SHIFT);
+	return 1;
+}
+
+int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
+				    unsigned *log2_entries)
+{
+	uint64_t w = dte[2];
+	uint64_t ctl = (w & AMD_DTE_INT_CTL_MASK) >> AMD_DTE_INT_CTL_SHIFT;
+	unsigned len = (unsigned)((w & AMD_DTE_INT_LEN_MASK)
+				  >> AMD_DTE_INT_LEN_SHIFT);
+
+	/* Table 10: with IV clear, every interrupt passes unmapped. */
+	if (!(w & AMD_DTE_INT_IV))
+		return 0;
+
+	/* "IntCtl=11b is reported as an event when IV=1", and 11xxb too. */
+	if (ctl == 3 || len > 11)
+		return -1;
+	if (w & (AMD_DTE_INT_PASS_MASK | AMD_DTE_INT_IG))
+		return -1;
+
+	/* A root the field can hold and the table may not start at. */
+	if (w & (1ULL << 6))
+		return -1;
+
+	if (ctl == AMD_DTE_INT_CTL_FORWARD)
+		return 0;
+	if (ctl != AMD_DTE_INT_CTL_REMAP)
+		return -1;	/* 00b, every fixed interrupt aborted */
+
+	*table_pa = w & AMD_DTE_INT_ROOT_MASK;
+	*log2_entries = len;
+	return 1;
+}
+
+/*
+ * ── #598: the interrupt tables, built and read back ──────────────────
+ *
+ * Rev 3.11 §2.2.5: the table belongs to the DEVICE -- its root is in the
+ * device's entry (Table 7) -- and the index is the message's data, bits 10:0.
+ * This kernel's data is the vector, so every table has 256 entries and entry
+ * N will deliver vector N (<cpu/iommu_backend.h>).  An index past the end is
+ * refused like an empty entry (Table 44), and that is where an arbitrated
+ * message's 256-511 lands.
+ *
+ * Built now: a table for each source the IVRS names in a special entry -- the
+ * I/O APIC, the HPET -- and ONE CLOSED TABLE for every other device to point
+ * at.  🔑 That one answers "and a device nobody gave an interrupt?": with IV
+ * set and an empty table its every message is refused AND logged, an
+ * IO_PAGE_FAULT with I set, where IV clear passes it unmapped -- today's hole.
+ * Every PCI function present gets a table of its own when remapping is asked
+ * for (iommu_amd_ir_prepare(), below).
+ *
+ * Four tables to a frame: a table is a kilobyte, and starting on a kilobyte
+ * gives the 128-byte alignment for nothing.
+ *
+ * 🔴 Nothing points at them until -i: only then is a device table entry's
+ * interrupt half written, and an INVALIDATE_INTERRUPT_TABLE ever sent.
+ */
+#define	AMD_IRT_ENTRIES		256u
+#define	AMD_IRT_BYTES		(AMD_IRT_ENTRIES * 4u)
+#define	AMD_IRT_TABLES		256u
+#define	AMD_CMD_INVALIDATE_INTR	(5ULL << 60)	/* Rev 3.11 §2.4.5, Figure 48 */
+
+static struct {
+	uint16_t	device;		/* the DeviceID its messages carry   */
+	uint8_t		kind;		/* IOMMU_SCOPE_IOAPIC, _HPET, _ENDPOINT */
+	uint8_t		id;		/* the I/O APIC's id, the HPET's number */
+	uint64_t	table;
+} amd_irt[AMD_IRT_TABLES];
+
+static unsigned	amd_irt_count;
+static uint64_t	amd_irt_closed;
+static uint64_t	amd_irt_frame;		/* the frame tables are cut from */
+static unsigned	amd_irt_in_frame;	/* ... and how many it holds     */
+
+/*
+ * A table written refusing and read back as written, counted into `t'.
+ * Zero when there is no frame.
+ */
+static uint64_t amd_irt_table(struct iommu_interrupt_tables *t)
+{
+	volatile uint32_t *e;
+	uint64_t pa;
+
+	if (amd_irt_frame == 0 || amd_irt_in_frame == 4096u / AMD_IRT_BYTES) {
+		amd_irt_frame = boot_frame_alloc();
+		amd_irt_in_frame = 0;
+		if (amd_irt_frame == 0)
+			return 0;
+		t->frames++;
+	}
+	pa = amd_irt_frame + (uint64_t)amd_irt_in_frame++ * AMD_IRT_BYTES;
+
+	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(pa);
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+		e[i] = 0;
+
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+		if (e[i] == 0)
+			t->entries++;
+		else
+			t->wrong++;
+
+	t->tables++;
+	return pa;
+}
+
+/* Which table belongs to `device', or -1. */
+static int amd_irt_find(uint16_t device)
+{
+	for (unsigned k = 0; k < amd_irt_count; k++)
+		if (amd_irt[k].device == device)
+			return (int)k;
+	return -1;
+}
+
+/*
+ * A table for `device' unless one has its DeviceID already: an engine named
+ * in two IVHD blocks names its I/O APIC twice.  Zero when there is no room
+ * or no frame.
+ */
+static int amd_irt_add(uint16_t device, uint8_t kind, uint8_t id,
+		       struct iommu_interrupt_tables *t)
+{
+	uint64_t pa;
+
+	if (amd_irt_find(device) >= 0)
+		return 1;
+	if (amd_irt_count == AMD_IRT_TABLES)
+		return 0;
+
+	pa = amd_irt_table(t);
+	if (pa == 0)
+		return 0;
+
+	amd_irt[amd_irt_count].device = device;
+	amd_irt[amd_irt_count].kind = kind;
+	amd_irt[amd_irt_count].id = id;
+	amd_irt[amd_irt_count].table = pa;
+	amd_irt_count++;
+	return 1;
+}
+
+static int amd_irt_source(const struct iommu_scope *s,
+			  struct iommu_interrupt_tables *t)
+{
+	uint16_t device = (uint16_t)((s->bus << 8) | (s->dev << 3) | s->func);
+	unsigned before = amd_irt_count;
+
+	if (!amd_irt_add(device, s->kind, s->enumeration_id, t))
+		return 0;
+
+	if (amd_irt_count > before) {
+		t->named++;
+		if (s->kind == IOMMU_SCOPE_IOAPIC)
+			t->ioapics++;
+	}
+	return 1;
+}
+
+int iommu_amd_irt_build(void)
+{
+	struct iommu_interrupt_tables t = { 0 };
+	int ok = 1;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (iommu_unit(i)->answered
+		    && iommu_unit(i)->interrupt_remapping)
+			t.engines++;
+
+	for (unsigned i = 0; i < iommu_unit_count() && t.engines && ok; i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+
+		for (unsigned s = 0; s < u->scope_count && ok; s++) {
+			const struct iommu_scope *sc =
+				iommu_scope(u->scope_first + s);
+
+			if (sc->kind == IOMMU_SCOPE_IOAPIC
+			    || sc->kind == IOMMU_SCOPE_HPET)
+				ok = amd_irt_source(sc, &t);
+		}
+	}
+
+	if (t.engines && ok) {
+		amd_irt_closed = amd_irt_table(&t);
+		ok = amd_irt_closed != 0;
+	}
+
+	iommu_record_interrupt_tables(&t);
+	return t.engines && ok && t.wrong == 0;
+}
+
+/*
+ * ── #598 phases 4 and 5: remapping on AMD ────────────────────────────
+ *
+ * No switch.  Rev 3.11 has no global enable for remapping, only each device's
+ * entry -- IV, IntTabLen, the table's root, IntCtl -- and an engine that is
+ * on to read them.  So remapping is the interrupt half of all 65536 entries,
+ * written while the engine is OFF and read back:
+ *
+ *  - every PCI function present gets a table of its own, empty, so that a
+ *    slot given to it later is one entry written -- nothing allocated, no
+ *    device table entry rewritten, on a path that may be an RPC holding a
+ *    lock;
+ *  - each source the IVRS names keeps the table phase 3 built for it;
+ *  - every other DeviceID points at the closed table.
+ *
+ * IV set and IntCtl 10b everywhere, so a message from any device is remapped
+ * or refused and never passed unmapped.  The words a source writes do not
+ * change: its data is the vector, and the vector is the index
+ * (<cpu/iommu_backend.h>).
+ *
+ * ⚠️ An engine already on may have cached entries, which would need
+ * forgetting one DeviceID at a time; the boot never needs that, because -i
+ * prepares before -I turns the engine on, and a call that finds it on
+ * refuses.
+ *
+ * ⚠️ A function behind a bridge may reach the engine under its bridge's
+ * DeviceID, which the IVRS's alias entries say and this does not read: its
+ * messages would land on the alias's entry.  No board here has one.
+ */
+static int	amd_prepared;
+static int	amd_remapping;
+
+static int amd_prepare_fail(const struct iommu_interrupt_tables *t)
+{
+	iommu_record_interrupt_tables(t);
+	return 0;
+}
+
+int iommu_amd_ir_prepare(void)
+{
+	const struct iommu_tables *dtab = iommu_tables();
+	struct iommu_interrupt_tables t = *iommu_interrupt_tables();
+	volatile uint64_t *dt;
+	uint64_t dte[AMD_DTE_WORDS], closed;
+
+	if (amd_prepared)
+		return 1;
+	if (dtab->root == 0 || amd_irt_closed == 0 || iommu_translating())
+		return 0;
+
+	for (unsigned bus = 0; bus < 256u; bus++)
+		for (unsigned d = 0; d < 32u; d++)
+			for (unsigned f = 0; f < 8u; f++)
+				if (pci_cfg_read(0, (uint8_t)bus, (uint8_t)d,
+						 (uint8_t)f, PCI_VENDOR_ID)
+				    != 0xFFFFFFFFu
+				    && !amd_irt_add((uint16_t)((bus << 8)
+							       | (d << 3) | f),
+						    IOMMU_SCOPE_ENDPOINT, 0, &t))
+					return amd_prepare_fail(&t);
+
+	if (!iommu_amd_dte_interrupts(amd_irt_closed, 8, dte))
+		return amd_prepare_fail(&t);
+	closed = dte[2];
+
+	dt = (volatile uint64_t *)(uintptr_t)phys_to_direct(dtab->root);
+	for (unsigned id = 0; id < AMD_DEVICE_IDS; id++)
+		dt[id * AMD_DTE_WORDS + 2] = closed;
+
+	for (unsigned k = 0; k < amd_irt_count; k++) {
+		if (!iommu_amd_dte_interrupts(amd_irt[k].table, 8, dte))
+			return amd_prepare_fail(&t);
+		dt[amd_irt[k].device * AMD_DTE_WORDS + 2] = dte[2];
+	}
+	amd_devtab_written(dt, 0, AMD_DEVICE_IDS);	/* C7 */
+
+	for (unsigned id = 0; id < AMD_DEVICE_IDS; id++) {
+		int k = amd_irt_find((uint16_t)id);
+		uint64_t want = closed;
+
+		if (k >= 0 && iommu_amd_dte_interrupts(amd_irt[k].table, 8,
+							dte))
+			want = dte[2];
+		if (dt[id * AMD_DTE_WORDS + 2] != want)
+			t.wrong++;
+	}
+
+	iommu_record_interrupt_tables(&t);
+	if (t.wrong != 0)
+		return 0;
+
+	amd_prepared = 1;
+	return 1;
+}
+
+/*
+ * Remapping is on once the engine is: the entries say so already.  Answers
+ * how many engines remap.
+ */
+unsigned iommu_amd_ir_enable(void)
+{
+	if (!amd_prepared || !iommu_translating())
+		return 0;
+
+	amd_remapping = 1;
+	return iommu_unit_count();
+}
+
+int iommu_amd_remapping(void)
+{
+	return amd_remapping;
+}
+
+/*
+ * One entry of `device''s table, then every engine told to forget that
+ * device's interrupts.  One 32-bit store is the whole entry, and the
+ * engine's interrupt table walks are always coherent (§2.2.5), so nothing
+ * is flushed.
+ */
+static int amd_irt_write(uint16_t device, uint8_t vector, uint32_t value)
+{
+	const struct iommu_tables *t = iommu_tables();
+	volatile uint32_t *e;
+	int k = amd_irt_find(device);
+
+	if (k < 0)
+		return 0;
+
+	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(amd_irt[k].table);
+	e[vector] = value;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		const uint64_t cmds[1][2] = {
+			{ AMD_CMD_INVALIDATE_INTR | device, 0 }
+		};
+
+		if (u->register_va == 0
+		    || !amd_send((volatile uint8_t *)(uintptr_t)u->register_va,
+				 t, cmds, 1))
+			return 0;
+	}
+	return 1;
+}
+
+int iommu_amd_remap_entry(uint16_t device, uint8_t vector, uint32_t apic_id)
+{
+	struct iommu_irte e = { vector, apic_id, 0, 0 };
+	uint32_t w;
+
+	if (!iommu_amd_irte(&e, &w))
+		return 0;
+	return amd_irt_write(device, vector, w);
+}
+
+void iommu_amd_forget_entry(uint16_t device, uint8_t vector)
+{
+	(void) amd_irt_write(device, vector, 0);
 }

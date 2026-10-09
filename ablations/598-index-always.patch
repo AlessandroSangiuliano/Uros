@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: an Intel interrupt fault naming an entry only for the seven reasons whose FI holds one -- it names one for all twelve, and reads what the hardware left in an undefined field
+Run: --entry 0 300
+Expect: iommu fault records decoded, 2 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index f7b6f3a6..ab47d692 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1085,7 +1085,7 @@ static int vtd_fault_names_entry(uint8_t reason)
+ 	case VTD_FR_IR_INVALID_REQUEST:
+ 	case VTD_FR_IR_EIME_REQUIRED:
+ 	case VTD_FR_IR_REQUIRED:
+-		return 0;
++		return 1;
+ 	default:
+ 		return 1;
+ 	}

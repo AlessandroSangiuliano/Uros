@@ -352,3 +352,19 @@ pci_cfg_find_cap(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
 	       segment, bus, dev, func, PCI_CAP_MAX_HOPS);
 	return 0;
 }
+
+uint32_t
+pci_cfg_command_dword(uint32_t read, uint16_t set, uint16_t clear)
+{
+	return ((read | set) & ~(uint32_t)clear) & 0xFFFFu;
+}
+
+void
+pci_cfg_command(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
+		uint16_t set, uint16_t clear)
+{
+	pci_cfg_write(segment, bus, dev, func, PCI_COMMAND,
+		      pci_cfg_command_dword(pci_cfg_read(segment, bus, dev,
+							 func, PCI_COMMAND),
+					    set, clear));
+}
