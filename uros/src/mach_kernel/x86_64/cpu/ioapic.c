@@ -62,7 +62,8 @@ static uint32_t base_gsi;
  *
  * The same shape as the PCI port pair's lock (cpu/pci_cfg.c) and for the same
  * two reasons: ioapic_init() runs before percpu_activate(), where the lock
- * package cannot be used, and an interrupt landing between the two accesses
+ * package could not be used until the boot block (#665), and an interrupt
+ * landing between the two accesses
  * on ONE processor is the same failure without any second processor at all.
  * Read-modify-write sequences below take it once around both halves.
  */

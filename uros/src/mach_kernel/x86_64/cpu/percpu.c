@@ -50,10 +50,12 @@ void percpu_alloc(uint32_t cpu_id)
 	uint64_t frame = boot_frame_alloc();
 
 	/*
-	 * Returning here would leave %gs based at zero — which the boot
-	 * identity map still makes readable, so %gs:0 would quietly hand back
-	 * whatever is in low memory instead of faulting.  That happened once
-	 * already; it is not a thing to leave available.
+	 * Returning here would leave an application processor's %gs based at
+	 * zero — which the boot identity map still makes readable, so %gs:0
+	 * would quietly hand back whatever is in low memory instead of
+	 * faulting — and the boot processor on the boot block (#665), which
+	 * is not its page.  That happened once already; it is not a thing to
+	 * leave available.
 	 */
 	if (frame == 0)
 		panic("percpu: no frame for this CPU's block");

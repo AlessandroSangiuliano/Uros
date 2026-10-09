@@ -444,12 +444,13 @@ static int	cons_tx_gave_up;
 /*
  * #599: whether the lock package can be used at all.  hw_lock reaches the
  * per-CPU block through %gs for its preemption and interrupt counters, and
- * before the boot processor's percpu_activate() %gs has a zero base: address
- * zero, a page of the interrupt vector table in the kernel's own space and
- * an unmapped one in the self-tests' pmap (found in review: the first early
- * byte through the locked path would have faulted there).  Until then there
- * is one processor and nothing to exclude, and the console takes no lock --
- * the rule pci_cfg.c and ioapic.c follow for the same reason.
+ * before the boot processor had a block %gs had a zero base: address zero, a
+ * page of the interrupt vector table in the kernel's own space and an
+ * unmapped one in the self-tests' pmap (found in review: the first early byte
+ * through the locked path would have faulted there).  The boot block answers
+ * there now (#665), but until percpu_selftest() there is still one processor
+ * and nothing to exclude, and the console takes no lock -- the rule pci_cfg.c
+ * and ioapic.c follow for the same reason.
  */
 static int	cons_locks_usable;
 
