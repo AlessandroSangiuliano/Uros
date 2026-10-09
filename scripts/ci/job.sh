@@ -52,8 +52,8 @@
 # failed · 2 the command line is wrong, or a patch does not apply · 3 the job
 # could not boot, or could not read its boots: the packages, the configure or
 # the build failed, the build had a warning, a round or the A/B did not report
-# every boot it was meant to, or a boot's log was not where the merge test puts
-# it.
+# every boot it was meant to, a boot's log was not where the merge test puts
+# it, or a boot's row had a comma inside a field and was not written.
 set -u
 # The container has no locale but C, and a run outside it reads the same words:
 # under another locale the compilers translate the very `warning:' the build's
@@ -399,11 +399,13 @@ fi
 
 WRONGS=()
 UNFOUND=0
+MALFORMED=()
+HEADER_COMMAS=${HEADER//[^,]/}
 # One boot's row.  The verdict is the merge test's words, its kind of judgement
 # included.  A WRONG boot's logs are copied where the artifact keeps them.
 row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 	local r=$1 e=$2 a=$3 n=$4 opt=$5 res=$6 kind=$7 named=$8
-	local rdir=$OUT/logs/r$r tag h f log mhz x
+	local rdir=$OUT/logs/r$r tag h f log mhz x line commas
 	# The name merge-test-x86_64.sh gives a boot's logs.  A WRONG line names
 	# its file, and that name wins over this one; a passing line names none,
 	# and a log missing under this name is said in the row, never guessed,
@@ -432,7 +434,17 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 		[ -f "$f" ] && log=failed/r$r/${f##*/}
 		WRONGS+=("round $r, entry $e $a -smp $n${opt:+ ($opt)}: $log")
 	fi
-	echo "$(date -u '+%F,%T'),$RUN_ID,$JOB,$r,$TREE,$CPU,$mhz,$a,$e,${n//,/;},${opt//,/ },$res (${kind//,/ }),$log" >> "$CSV"
+	line="$(date -u '+%F,%T'),$RUN_ID,$JOB,$r,$TREE,$CPU,$mhz,$a,$e,${n//,/;},${opt//,/ },$res (${kind//,/ }),$log"
+	# As many columns as the header: one comma inside a field shifts every
+	# column after it, and ci/pull-results.sh then refuses the whole run --
+	# as it did when entry 14's log names held its -smp value (#663).
+	commas=${line//[^,]/}
+	if [ ${#commas} -ne ${#HEADER_COMMAS} ]; then
+		echo "job: a row with a comma inside a field, not written: $line" >&2
+		MALFORMED+=("$line")
+		return
+	fi
+	echo "$line" >> "$CSV"
 }
 
 # The processor count is a whole -smp value where an entry gives one -- entry
@@ -488,12 +500,16 @@ done
 	done
 	[ $SHORT = 0 ] || echo "short:    round $((DONE_ROUNDS + 1)) did not report every boot"
 	[ $UNFOUND = 0 ] || echo "unfound:  $UNFOUND boot(s) left no log under the name merge-test gives it"
+	for m in "${MALFORMED[@]}"; do
+		echo "malformed: $m"
+	done
 } >> "$OUT/job.txt"
 echo "job: $BOOTS boots in $DONE_ROUNDS of $ROUNDS round(s), $WRONG WRONG -- tree $TREE, $CPU, $ACCS"
 for w in "${WRONGS[@]}"; do
 	echo "job:   WRONG: $w"
 done
 [ $UNFOUND = 0 ] || echo "job: $UNFOUND boot(s) left no log under the name merge-test gives it: see the rows' log column" >&2
+[ ${#MALFORMED[@]} = 0 ] || echo "job: ${#MALFORMED[@]} row(s) with a comma inside a field were not written: see job.txt" >&2
 [ $WRONG = 0 ] || exit 1
-[ $SHORT = 0 ] && [ $UNFOUND = 0 ] || exit 3
+[ $SHORT = 0 ] && [ $UNFOUND = 0 ] && [ ${#MALFORMED[@]} = 0 ] || exit 3
 exit 0
