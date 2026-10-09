@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #666
 Takes out: the drawing of what was kept -- -f still walks the kept bytes, counts their lines and pauses after each, and says they are drawn above, but draws none of them
-Run: --entry 40 120 -smp 1
+Run: --entry 41 120 -smp 1
 Expect: drawn above: [0-9]+ bytes, 0 glyphs
 
 diff --git a/uros/src/mach_kernel/x86_64/ddb/fbcons.c b/uros/src/mach_kernel/x86_64/ddb/fbcons.c

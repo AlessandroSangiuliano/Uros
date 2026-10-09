@@ -41,8 +41,9 @@
  *
  * ⚠️ It does NOT use simple_lock, and that is deliberate: this runs before
  * percpu_activate(), and the machine-independent lock package reaches %gs for
- * its preemption and interrupt counters.  A lock that cannot be taken during
- * early enumeration is a lock this file cannot use.  The flag is saved and
+ * its preemption and interrupt counters, which until the boot block (#665)
+ * read address zero.  A lock that could not be taken during early
+ * enumeration was a lock this file could not use.  The flag is saved and
  * restored by hand for the same reason -- and it also closes the case that has
  * nothing to do with SMP: an interrupt landing between the two instructions on
  * one processor.

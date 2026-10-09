@@ -406,6 +406,16 @@ _Static_assert(__builtin_offsetof(struct percpu, user_returns)
 void percpu_alloc(uint32_t cpu_id);
 void percpu_activate(uint32_t cpu_id);
 
+/*
+ * The boot processor's block before its page exists (#665): in the kernel
+ * image, pointed at by descriptor_tables_init() right after the GDT load, so
+ * %gs is never based at zero from there on.  percpu_activate(0) copies it
+ * into the page.  An application processor has no such block: it activates
+ * its page first thing (ap_start_c()).
+ */
+void percpu_activate_boot(void);
+struct percpu *percpu_boot_block(void);
+
 /* #476, #599: returns to ring 3 since boot, all processors; see percpu.c */
 uint64_t percpu_user_returns(void);
 

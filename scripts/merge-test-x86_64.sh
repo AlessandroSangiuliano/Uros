@@ -76,6 +76,9 @@ WRONG=0
 #   ioapic    -Y's own line: "ioapic_race: PASS"
 #   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
+#   earlypanic  -p panics on purpose before the boot processor has its page:
+#             its message and the backtrace after it, and no protection fault
+#             in their place (#665)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 ENTRIES="
@@ -106,6 +109,7 @@ ENTRIES="
 23 ioapic
 39 msirace --iommu_intel
 24 panic2
+40 earlypanic
 25 harness
 26 harness
 27 harness
@@ -130,7 +134,7 @@ ENTRIES="
 4 harness - 1
 20 harness
 20 harness - 1
-40 early
+41 early
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -153,6 +157,9 @@ judge() {	# entry verdict log-of-the-harness full-log
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
+	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
+		grep -aq '<x86_64_boot+0x' "$f" &&
+		! grep -aq 'trap general protection' "$f" ;;
 	esac
 }
 
@@ -173,7 +180,10 @@ while read -r e v opt cpus; do
 		budget=1200
 		k=""
 		[ $a = kvm ] && { budget=600; k="--kvm"; }
-		tag="e$e-$a$n${opt:+-${opt##* }}"
+		# No comma in a log's name: an entry's -smp value may be a whole
+		# topology (entry 14's 1,sockets=2,cores=64,maxcpus=128), and
+		# ci/job.sh writes the name into a CSV whose columns commas separate.
+		tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
