@@ -2079,6 +2079,27 @@ static const struct fault_case fault_cases[] = {
 	  0x2, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
 
 	/*
+	 * 🔴 The window as a real engine wrote it: pavillion's, refusing the
+	 * I/O APIC's pin (00:14.0) whose entry had been left empty, logged the
+	 * address sign-extended from bit 39 (§2.2.5's FFFF_FFFD_F800_0000h),
+	 * and before the 64-bit form was asked this read as a transfer (#598,
+	 * 09/10/2026).  The line gave the device, the code and the address;
+	 * I is set here because an interrupt is what the pin sends.
+	 */
+	{ "amd, the i/o apic's pin refused, as pavillion logged it", 1,
+	  (2ULL << 60) | (1ULL << 51) | 0x00a0ULL,
+	  0xfffffffdf8400000ULL,
+	  1, 0xfffffffdf8400000ULL, 0x00a0, 0,
+	  0x2, IOMMU_FAULT_INTERRUPT, 0, IOMMU_FAULT_NO_INDEX },
+
+	/* I set one byte past the window's 64-bit form: not an interrupt. */
+	{ "amd, i set just past the 64-bit hypertransport window", 1,
+	  (2ULL << 60) | (1ULL << 51) | 0x00a0ULL,
+	  0xfffffffdf9000000ULL,
+	  1, 0xfffffffdf9000000ULL, 0x00a0, 0,
+	  0x2, IOMMU_FAULT_PAGE, 0, IOMMU_FAULT_NO_INDEX },
+
+	/*
 	 * 🔴 A WORD AN ENGINE WE RUN DOES PRODUCE: QEMU 11.1.1's amd-iommu
 	 * refusing 00:04.0's DMA with -I -i, read off a boot.  I is set and
 	 * the address is zero, and an interrupt request is a write to an
