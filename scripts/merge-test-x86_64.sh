@@ -102,11 +102,13 @@ ENTRIES="
 36 harness --iommu_amd
 37 harness --iommu_amd
 38 harness --iommu_amd
+38 hpetfsb --iommu_intel_--hpet_fsb
 17 harness
 18 harness
 21 harness
 22 harness
 22 hpetgaps - 6,sockets=2,cores=3
+22 hpetfsb --hpet_fsb
 23 ioapic
 39 msirace --iommu_intel
 24 panic2
@@ -163,6 +165,16 @@ judge() {	# entry verdict log-of-the-harness full-log
 		grep -aqE 'cpu 5 took [0-9]+ ticks in window 0' "$f" &&
 		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ;;
+	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
+	# while interrupts are remapped takes its pin instead, for the reason
+	# it gives: QEMU's tables name no HPET, and its message could not go
+	# through an entry of its own.  On q35 under KVM nothing is remapped.
+	hpetfsb) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		if grep -aq 'interrupt remapping IS ON' "$f"; then
+			grep -aq 'not the FSB message: no table names the HPET for interrupt remapping' "$f"
+		else
+			grep -aqE 'FSB message to cpu [0-9]+ \(APIC id [0-9]+\) on vector 0x[0-9a-f]+; each' "$f"
+		fi ;;
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
