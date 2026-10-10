@@ -148,7 +148,8 @@ if [ ${#ENTRIES[@]} -eq 0 ]; then
 	TIMEOUT=5
 else
 	[ "$FLAGS" = " -f" ] || { echo "make-baremetal: flags after -- and --entry together: give each entry its flags" >&2; exit 2; }
-	TIMEOUT=-1	# several cases on one stick: wait for the choice
+	TIMEOUT=5
+	[ ${#ENTRIES[@]} -eq 1 ] || TIMEOUT=-1	# several cases on one stick: wait for the choice
 fi
 LIST=()
 
