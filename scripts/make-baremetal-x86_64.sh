@@ -106,7 +106,11 @@ done
 
 [ -n "$OUT" ] || OUT=$BUILD/uros-baremetal-x86_64.iso
 TREE=$(mktemp -d "${TMPDIR:-/tmp}/uros-baremetal.XXXXXX")
-trap 'rm -rf "$TREE"' EXIT
+# grub-mkrescue's log beside the tree and not in it: xorriso images the tree
+# while the log is being written, and a file that grows under it is a MISHAP
+# that fails the run -- with the ISO written all the same (10/10/2026).
+MKLOG=$(mktemp "${TMPDIR:-/tmp}/uros-baremetal-mkrescue.XXXXXX")
+trap 'rm -rf "$TREE" "$MKLOG"' EXIT
 mkdir -p "$TREE/boot/grub"
 
 # The bundle: nothing in it reaches a disk.
@@ -181,8 +185,8 @@ LIST=()
 	done
 } > "$TREE/boot/grub/grub.cfg" || exit $?
 
-grub-mkrescue -o "$OUT" "$TREE" >/dev/null 2>"$TREE/mkrescue.log" || {
-	echo "make-baremetal: grub-mkrescue failed:" >&2; cat "$TREE/mkrescue.log" >&2; exit 1; }
+grub-mkrescue -o "$OUT" "$TREE" >/dev/null 2>"$MKLOG" || {
+	echo "make-baremetal: grub-mkrescue failed:" >&2; cat "$MKLOG" >&2; exit 1; }
 
 echo "make-baremetal: $OUT ($(du -h "$OUT" | cut -f1)), BIOS and UEFI, bundle: $CONTENTS"
 for i in "${!LIST[@]}"; do
