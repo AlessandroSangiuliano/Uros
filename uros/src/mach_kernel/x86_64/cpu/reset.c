@@ -21,11 +21,16 @@
 
 #include <stdint.h>
 #include <kern/misc_protos.h>
+#include <kern/thread.h>
+#include <kern/sched_prim.h>
+#include <kern/time_out.h>
+#include <boot/bootarg.h>
 #include <cpu/acpi.h>
 #include <cpu/regs.h>
 #include <cpu/reset.h>
 #include <pmap/pmap.h>
 #include <time/delay.h>
+#include <time/tsc.h>		/* rdtsc_ordered, for the wait before the rulers */
 
 static struct acpi_reset	rr;
 static int			rr_usable;
@@ -139,14 +144,22 @@ void reset_init(void)
 /*
  * A wait that does not depend on the boot having got far: a reset can come
  * from a panic before the rulers were found, where delay() itself panics.
- * Then a count of pauses stands in, long by any measure, which is the safe
- * side for a wait whose only job is to be long enough.
+ * Then the TSC, uncalibrated, as if it ran at 5 GHz: no x86-64 processor's
+ * runs faster, so the wait is at least as long as asked, and on a slower one
+ * longer -- the safe side for a wait whose only job is to be long enough.
+ * Not a count of pauses: under a hypervisor a run of them is what makes the
+ * processor exit to it, and how long that takes is not this kernel's to say.
  */
-static void reset_wait_us(unsigned us)
+#define	RESET_TSC_PER_US_MAX	5000ULL
+
+void reset_wait_us(unsigned us)
 {
+	uint64_t	t0;
+
 	if (delay_tsc_us(us) || delay_hpet_us(us) || delay_pmtimer_us(us))
 		return;
-	for (uint64_t i = 0; i < (uint64_t)us * 100; i++)
+	t0 = rdtsc_ordered();
+	while (rdtsc_ordered() - t0 < (uint64_t)us * RESET_TSC_PER_US_MAX)
 		cpu_pause();
 }
 
@@ -164,6 +177,58 @@ static void reset_write_register(void)
 		     | (RR_PCI_FN(rr.reg.address) << 8) | (off & 0xfc));
 		outb((uint16_t)(PCI_CONFIG_DATA + (off & 3)), rr.value);
 	}
+}
+
+/*
+ * -b's deadline.  -b restarts the machine after the quiet census, which comes
+ * only once ring 3 has gone quiet everywhere: a whole system keeps servers
+ * that poll, and boot_probe stays in ring 3 when it is done, so neither ever
+ * has one.  A thread asleep for reset_after= seconds covers them, and a boot
+ * that stopped somewhere a timer still runs: it takes the processor from any
+ * user task, being a kernel thread, and restarts from thread context, the
+ * best there is for it.  A boot whose timers have stopped, or with interrupts
+ * off for good, is not one it can restart.
+ */
+#define	RESET_AFTER_DEFAULT	300	/* seconds */
+
+static uint64_t	reset_after;
+static int	reset_deadline_event;
+
+static void reset_deadline_thread(void)
+{
+	assert_wait((event_t) &reset_deadline_event, FALSE);
+	thread_set_timeout((int)(reset_after * hz));
+	thread_block((void (*)(void)) 0);
+	reset_timeout_check(&current_thread()->timer);
+
+	printf("reset: -b: %llu seconds since the scheduler started and the "
+	       "boot has not ended; restarting the machine (#373)\n",
+	       (unsigned long long)reset_after);
+	halt_all_cpus(TRUE);
+}
+
+void reset_deadline_start(void)
+{
+	uint64_t	s;
+	int		r;
+
+	if (!boot_flag('b'))
+		return;
+	r = boot_value("reset_after", &s);
+	/* A tick count is an int: a deadline past it is no deadline. */
+	if (r == 1 && s > 0 && s <= 0x7fffffffULL / (uint64_t)hz)
+		reset_after = s;
+	else {
+		reset_after = RESET_AFTER_DEFAULT;
+		if (r != 0)
+			printf("reset: reset_after= is not a number of seconds "
+			       "this kernel can wait; -b's deadline is %u "
+			       "(#373)\n", RESET_AFTER_DEFAULT);
+	}
+	printf("reset: -b: the machine restarts after the quiet census, five "
+	       "seconds after a panic, or in %llu seconds (#373)\n",
+	       (unsigned long long)reset_after);
+	(void) kernel_thread(kernel_task, reset_deadline_thread, (char *) 0);
 }
 
 void reset_machine(void)

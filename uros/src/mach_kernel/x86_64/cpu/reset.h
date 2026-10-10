@@ -24,4 +24,18 @@ void	reset_init(void);
  */
 void	reset_machine(void) __attribute__((noreturn));
 
+/*
+ * A wait that does not depend on the boot having got far, for the waits
+ * around a reset: delay() panics before the rulers are found, and a reset
+ * can come from a panic before then.
+ */
+void	reset_wait_us(unsigned us);
+
+/*
+ * -b: a thread that restarts the machine reset_after= seconds from now (300
+ * when not given), for a boot that neither ends in a census nor panics.  Once
+ * the scheduler can wake it; nothing without -b.
+ */
+void	reset_deadline_start(void);
+
 #endif	/* _X86_64_CPU_RESET_H_ */

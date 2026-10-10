@@ -28,6 +28,7 @@
 #include <trap/trap.h>		/* x86_64_backtrace on the panic path */
 #include <kern/boot_modules.h>
 #include <cpu/reset.h>		/* #373: halt_all_cpus(TRUE) */
+#include <boot/bootarg.h>	/* #373: -b */
 
 /*
  * How much physical memory this machine has, in bytes.
@@ -102,6 +103,12 @@ static volatile uint64_t halt_broadcast;
 
 /* #373: how many processors have stopped in halt_cpu(), for a restart to wait on. */
 static volatile uint32_t cpus_halted;
+
+/* #373: -b after a panic -- one processor restarts the machine, and when. */
+static volatile uint64_t panic_reset_claim;
+#define	PANIC_RESET_SECONDS	5
+
+static void halt_wait_others(void);
 
 /*
  * #599: the -Z test's ablation (cpu/halt_test.c): halt_cpu() in the order it
@@ -218,6 +225,24 @@ halt_cpu(void)
 		x86_64_backtrace_after((uint64_t)(uintptr_t)
 				       __builtin_frame_address(0),
 				       cons_ring_report);
+
+		/*
+		 * -b: and then the machine restarts (#373), so that a panic on a
+		 * machine nobody is watching does not sit there, and what
+		 * survives the restart -- the zone Linux reads back -- ends with
+		 * it.  Once, by whichever processor gets here first, after the
+		 * others' backtraces and a few seconds for a reader of the
+		 * screen.  Not with the debugger armed: panic() has gone there
+		 * instead, and the operator decides.
+		 */
+		if (boot_flag('b') &&
+		    atomic_cmpxchg64(&panic_reset_claim, 0, 1) == 0) {
+			halt_wait_others();
+			printf("panic: -b: restarting the machine in %u seconds "
+			       "(#373)\n", PANIC_RESET_SECONDS);
+			reset_wait_us(PANIC_RESET_SECONDS * 1000000u);
+			reset_machine();
+		}
 	} else {
 		/* The console's final copy (#567); an orderly halt has no
 		 * message to wait for. */

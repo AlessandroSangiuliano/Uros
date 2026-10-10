@@ -45,6 +45,7 @@
 #include <pmap/pmap.h>
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
+#include <boot/bootarg.h>	/* #373: -b */
 #include <cpu/quiet_census.h>
 #include <cpu/percpu.h>	/* #599: returns to ring 3, all processors */
 #include <ddb/cons_cost.h>	/* #567: the console's counts, with each report */
@@ -822,4 +823,23 @@ quiet_census_pass(int mycpu)
 	       (void *) vm_page_queue_lock.own_thr,
 	       (void *) vm_page_queue_lock.own_pc);
 #endif	/* MUTEX_OWNER_TRACK */
+
+	/*
+	 * -b: the census is the kernel's own word that the boot has finished,
+	 * or has stopped making progress, and either way there is nothing more
+	 * to wait for: the machine restarts (#373).  On the bare metal of #595
+	 * that is a machine nobody has to go and reset, and with #373's zone a
+	 * log that survives it.
+	 *
+	 * Here, after the processor set's lock was let go and the last line
+	 * printed: this processor holds nothing, and halt_all_cpus() stops the
+	 * others only where they hold nothing either.  The idle thread must not
+	 * sleep, and nothing on the way down does -- the console's waits spin
+	 * within #551's bound.
+	 */
+	if (boot_flag('b')) {
+		printf("quiet_census: -b: the boot is over; restarting the "
+		       "machine (#373)\n");
+		halt_all_cpus(TRUE);
+	}
 }
