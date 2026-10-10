@@ -27,6 +27,7 @@
 #include <sync/atomic.h>	/* #461: one stop broadcast, not four */
 #include <trap/trap.h>		/* x86_64_backtrace on the panic path */
 #include <kern/boot_modules.h>
+#include <cpu/reset.h>		/* #373: halt_all_cpus(TRUE) */
 
 /*
  * How much physical memory this machine has, in bytes.
@@ -98,6 +99,9 @@ machine_boot_info(char *buf, vm_size_t buf_len)
  * backtrace to give: it says the console's final copy (#567) and stops.
  */
 static volatile uint64_t halt_broadcast;
+
+/* #373: how many processors have stopped in halt_cpu(), for a restart to wait on. */
+static volatile uint32_t cpus_halted;
 
 /*
  * #599: the -Z test's ablation (cpu/halt_test.c): halt_cpu() in the order it
@@ -221,30 +225,51 @@ halt_cpu(void)
 		fbcons_flush();
 	}
 
+	atomic_add32(&cpus_halted, 1);	/* #373: see halt_wait_others() */
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }
 
 /*
+ * Until every other processor online has stopped in halt_cpu(), or the bound
+ * runs out (#373).  A restart written while one of them is still printing --
+ * the console's final copy, a panic's backtrace -- cuts its line, in the one
+ * record of the boot that survives the restart.  Bounded, because a processor
+ * that never takes the stop must not keep the machine from restarting.
+ */
+static void
+halt_wait_others(void)
+{
+	unsigned	others = smp_online_count() - 1;
+	uint64_t	spins;
+
+	for (spins = 0; spins < CPU_SPIN_BUDGET && cpus_halted < others;
+	     spins++)
+		cpu_pause();
+}
+
+static void __attribute__((noreturn))
+halt_all_cpus_then_reset(void)
+{
+	halt_wait_others();
+	cons_port_close_latch();
+	fbcons_flush();
+	reset_machine();
+}
+
+/*
  * Stop the machine, or restart it.
  *
- * ⚠️ The reboot half is not implemented and says so rather than halting
- * quietly.  A caller that asked for a reboot and got a halt is left looking
- * at a machine that stopped, with no way to tell whether the reboot failed
- * or the halt was what it asked for -- and on a headless machine that is the
- * difference between a reboot loop and a service that never comes back.
- *
- * When it arrives it is a triple fault or the ACPI reset register, and which
- * one is a decision: the reset register is the correct mechanism and is not
- * present on every machine, so the real answer is to try it and fall back.
+ * The restart is #373's: the processors are stopped exactly as for a halt,
+ * and then, instead of this one halting too, it waits for them and the
+ * machine is reset the way the FADT says, with the fallbacks after it
+ * (cpu/reset.c).  Until #373 this panicked rather than halt quietly -- a
+ * caller that asked for a reboot and got a halt cannot tell a reboot that
+ * failed from the halt it did not ask for.
  */
 void
 halt_all_cpus(boolean_t reboot)
 {
-	if (reboot)
-		panic("halt_all_cpus: reboot is not implemented on this "
-		      "machine yet (#453)");
-
 	/*
 	 * Before the others are stopped (#567): a processor that is stopped
 	 * while the console still buffers is a processor that will not come
@@ -272,6 +297,8 @@ halt_all_cpus(boolean_t reboot)
 	 * consumed by nobody.
 	 */
 	ipi_halt_others();
+	if (reboot)
+		halt_all_cpus_then_reset();
 	cons_port_close_latch();	/* #599: under the port's lock */
 	halt_cpu();
 }

@@ -473,6 +473,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/string.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
+    # The machine restarted the way the FADT says, and the older ways after (#373).
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/reset.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons_cost.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/fbcons.c

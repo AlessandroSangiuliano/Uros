@@ -47,6 +47,7 @@
 #include <kern/cpu_number.h>	/* #663: per-processor tables by number */
 #include <cpu/spl.h>
 #include <cpu/regs.h>
+#include <cpu/reset.h>		/* #373 */
 #include <cpu/tss.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
@@ -8517,6 +8518,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	user_pmap_selftest();
 
 	acpi_selftest(info);
+	reset_init();		/* #373: the FADT's reset register, said */
 	atomic_selftest();
 	reclaim_selftest();
 
