@@ -586,7 +586,8 @@ uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus)
 
 /* ------------------------------------------------------------------ */
 /*
- * The FADT, as far as the power-management timer (ACPI 6.5, 5.2.9).
+ * The FADT, as far as the power-management timer and the reset register
+ * (ACPI 6.5, 5.2.9, Table 5.9).
  *
  * Only the fields this reads are named; the rest are spans of bytes whose
  * offsets are asserted below, because a packed structure that is off by one
@@ -601,7 +602,9 @@ struct acpi_fadt {
 	uint8_t			pm_tmr_len;		/*  91 */
 	uint8_t			to_flags[20];
 	uint32_t		flags;			/* 112 */
-	uint8_t			to_x_pm_tmr_blk[92];
+	struct acpi_gas		reset_reg;		/* 116 */
+	uint8_t			reset_value;		/* 128 */
+	uint8_t			to_x_pm_tmr_blk[79];
 	struct acpi_gas		x_pm_tmr_blk;		/* 208 */
 } __attribute__((packed));
 
@@ -613,10 +616,22 @@ _Static_assert(__builtin_offsetof(struct acpi_fadt, pm_tmr_len) == 91,
 	       "PM_TMR_LEN is at byte 91 of the FADT");
 _Static_assert(__builtin_offsetof(struct acpi_fadt, flags) == 112,
 	       "the fixed feature flags are at byte 112 of the FADT");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, reset_reg) == 116,
+	       "RESET_REG is at byte 116 of the FADT");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, reset_value) == 128,
+	       "RESET_VALUE is at byte 128 of the FADT");
 _Static_assert(__builtin_offsetof(struct acpi_fadt, x_pm_tmr_blk) == 208,
 	       "X_PM_TMR_BLK is at byte 208 of the FADT");
 
+/*
+ * ACPI 1.0's FADT ended at byte 116, which is where 2.0 put RESET_REG: the
+ * fields before it are in every FADT, the ones from it on only in a table
+ * that is long enough to hold them.
+ */
+#define FADT_V1_LENGTH		__builtin_offsetof(struct acpi_fadt, reset_reg)
+
 #define FADT_TMR_VAL_EXT	(1U << 8)
+#define FADT_RESET_REG_SUP	(1U << 10)
 #define FADT_HW_REDUCED_ACPI	(1U << 20)
 
 void acpi_pm_timer(struct acpi_pm_timer *out)
@@ -634,7 +649,7 @@ void acpi_pm_timer(struct acpi_pm_timer *out)
 	 * The two fixed fields are within the ACPI 1.0 table, 116 bytes; a
 	 * table shorter than that is not a FADT this can read.
 	 */
-	if (fadt->header.length < __builtin_offsetof(struct acpi_fadt, to_x_pm_tmr_blk))
+	if (fadt->header.length < FADT_V1_LENGTH)
 		return;
 
 	out->hw_reduced = (fadt->flags & FADT_HW_REDUCED_ACPI) != 0;
@@ -659,6 +674,33 @@ void acpi_pm_timer(struct acpi_pm_timer *out)
 		out->space_id = ACPI_GAS_IO;
 		out->address = out->blk;
 	}
+}
+
+void acpi_reset_reg(struct acpi_reset *out)
+{
+	const struct acpi_fadt *fadt;
+
+	*out = (struct acpi_reset){ 0 };
+
+	fadt = (const struct acpi_fadt *)acpi_find_table("FACP");
+	if (fadt == 0)
+		return;
+	out->fadt_found = 1;
+	out->revision = fadt->header.revision;
+
+	/*
+	 * RESET_REG came with the FADT's revision 2, in the bytes after 1.0's
+	 * 116: in an older table, or a shorter one, those bytes are whatever
+	 * follows the table, and a register read out of them would be written
+	 * to at the moment the machine is meant to restart.
+	 */
+	if (fadt->header.revision < 2
+	    || fadt->header.length < __builtin_offsetof(struct acpi_fadt, to_x_pm_tmr_blk))
+		return;
+	out->in_table = 1;
+	out->supported = (fadt->flags & FADT_RESET_REG_SUP) != 0;
+	out->reg = fadt->reset_reg;
+	out->value = fadt->reset_value;
 }
 
 /*
