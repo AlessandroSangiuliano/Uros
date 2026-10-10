@@ -136,6 +136,10 @@ ENTRIES="
 20 harness
 20 harness - 1
 41 early
+42 restart
+42 restart --iommu_intel
+43 restartcensus
+44 restartpanic
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -166,7 +170,26 @@ judge() {	# entry verdict log-of-the-harness full-log
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq '<x86_64_boot+0x' "$f" &&
 		! grep -aq 'trap general protection' "$f" ;;
+	# #373: -b restarted the machine for the reason the entry gives it --
+	# its deadline, the quiet census, a panic -- and the zone Linux reads
+	# back after the restart read back first as ramoops would read it.
+	restart) grep -aq 'reset: -b: 20 seconds since the scheduler started' "$f" &&
+		zone_kept "$f" ;;
+	restartcensus) grep -aq 'quiet_census: -b: the boot is over; restarting the machine' "$f" &&
+		zone_kept "$f" ;;
+	restartpanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
+		grep -aq 'panic: -b: restarting the machine in 5 seconds' "$f" &&
+		zone_kept "$f" ;;
 	esac
+}
+
+# #373: the zone's check said it reads back as ramoops would read it, nothing
+# was dropped, and the reset was written after it -- the FADT's register, or
+# 0xcf9 on a board whose FADT has none.
+zone_kept() {
+	grep -aqE 'reset: the zone at 0x[0-9a-f]+ reads back as ramoops would read it: signature, start [0-9]+ and size [1-9][0-9]* as written, the [1-9][0-9]* bytes hashing as written and beginning with the [1-9][0-9]* kept before it existed, 0 dropped' "$1" &&
+		grep -aqE '^reset: (writing 0x[0-9a-f]+ to the FADT.s reset register|port 0xcf9, )' "$1" &&
+		! grep -aq 'does NOT read back as ramoops would read it' "$1"
 }
 
 # The stub listens on one port, and a qemu already on it would make every run here refuse to start.

@@ -236,11 +236,11 @@ def main():
                     print(f"  serial | {l.decode(errors='replace')}")
             return 1
         addr = int(m.group(1), 16)
-        hmp(mon, f"pmemsave {addr:#x} {RAMOOPS_CONSOLE:#x} {zone_file}",
-            timeout=30.0)
+        said = hmp(mon, f"pmemsave {addr:#x} {RAMOOPS_CONSOLE:#x} "
+                        f"\"{zone_file}\"", timeout=30.0)
         if not os.path.exists(zone_file):
-            print("ramoops-readback: the monitor saved no zone",
-                  file=sys.stderr)
+            print(f"ramoops-readback: the monitor saved no zone"
+                  + (f": {said}" if said else ""), file=sys.stderr)
             return 2
         raw = open(zone_file, "rb").read()
         verdict, text = parse_zone(raw)
