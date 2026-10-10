@@ -36,6 +36,9 @@
 #                 FLAGS ("" for none).  The first is GRUB's default; with more
 #                 than one, GRUB waits for a choice, so one stick and one dd
 #                 serve every case a session on the machine asks for
+#   --before      a GRUB command the next --entry runs before the kernel, such
+#                 as "wrmsr 0x1b 0xfee00d00" for a boot processor already in
+#                 x2APIC mode, as some firmware hands it over (#659)
 #   KERNEL-FLAGS  without --entry, the one entry's flags after -f
 #
 # The build is UROS_BUILD_DIR when set, else uros/build-x86_64, and must be an
@@ -57,6 +60,8 @@ FLAGS=" -f"
 KNAMES=()
 KPATHS=()
 ENTRIES=()
+BEFORES=()
+BEFORE=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -65,7 +70,8 @@ while [ $# -gt 0 ]; do
 	--kernel)	kv=${2:?--kernel needs NAME=PATH}
 			KNAMES+=("${kv%%=*}"); KPATHS+=("${kv#*=}"); shift 2 ;;
 	--entry)	[ $# -ge 2 ] || { echo "make-baremetal: --entry needs [NAME:]FLAGS" >&2; exit 2; }
-			ENTRIES+=("$2"); shift 2 ;;
+			ENTRIES+=("$2"); BEFORES+=("$BEFORE"); BEFORE=""; shift 2 ;;
+	--before)	BEFORE=${2:?--before needs a GRUB command}; shift 2 ;;
 	--)		shift; FLAGS="$FLAGS $*"; break ;;
 	*)		echo "usage: $0 [--bench-only] [-o OUT.iso] [--kernel NAME=PATH]... [--entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]" >&2; exit 2 ;;
 	esac
@@ -135,8 +141,10 @@ done
 # The entries: one per --entry, or the one the command line's flags make.
 # "NAME:FLAGS" boots NAME's kernel, and a NAME no --kernel gave is refused
 # rather than taken for flags.
+[ -z "$BEFORE" ] || { echo "make-baremetal: --before with no --entry after it" >&2; exit 2; }
 if [ ${#ENTRIES[@]} -eq 0 ]; then
 	ENTRIES=("${FLAGS# -f}")
+	BEFORES=("")
 	TIMEOUT=5
 else
 	[ "$FLAGS" = " -f" ] || { echo "make-baremetal: flags after -- and --entry together: give each entry its flags" >&2; exit 2; }
@@ -149,7 +157,8 @@ LIST=()
 # so the kernel is handed a framebuffer in either case.
 {
 	printf 'set timeout=%s\nset default=0\nterminal_input console\nterminal_output console\ninsmod all_video\nset gfxpayload=auto\n' "$TIMEOUT"
-	for e in "${ENTRIES[@]}"; do
+	for i in "${!ENTRIES[@]}"; do
+		e=${ENTRIES[$i]} b=${BEFORES[$i]}
 		k=mach_kernel f=$e
 		if [[ $e =~ ^([A-Za-z0-9._-]+):(.*)$ ]]; then
 			k=${BASH_REMATCH[1]} f=${BASH_REMATCH[2]}
@@ -160,8 +169,13 @@ LIST=()
 		title="UrMach x86-64, bare metal: -f${f:+ $f}"
 		[ "$k" = mach_kernel ] || title="$title, kernel $k"
 		[ "$BENCH_ONLY" = 1 ] && title="$title, ipc_bench"
-		printf '\nmenuentry "%s" {\n\tmultiboot2 /boot/%s -f%s\n\tmodule2 /boot/bootstrap bootstrap\n\tmodule2 /boot/bootstrap.bundle bootstrap.bundle\n\tboot\n}\n' \
-			"$title" "$k" "${f:+ $f}"
+		[ -z "$b" ] || title="$title, after GRUB's $b"
+		printf '\nmenuentry "%s" {\n' "$title"
+		# A command of a module: loaded by name first, so the line does not
+		# depend on GRUB finding the command in its list of modules.
+		[ -z "$b" ] || printf '\tinsmod %s\n\t%s\n' "${b%% *}" "$b"
+		printf '\tmultiboot2 /boot/%s -f%s\n\tmodule2 /boot/bootstrap bootstrap\n\tmodule2 /boot/bootstrap.bundle bootstrap.bundle\n\tboot\n}\n' \
+			"$k" "${f:+ $f}"
 		LIST+=("$title")
 	done
 } > "$TREE/boot/grub/grub.cfg" || exit $?
