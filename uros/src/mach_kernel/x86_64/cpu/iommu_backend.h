@@ -152,6 +152,8 @@ int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
 			uint32_t *lo, uint32_t *hi);
 int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 			uint32_t apic_id, uint64_t *address, uint32_t *data);
+int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
+			 uint32_t apic_id, uint32_t *address, uint32_t *data);
 void iommu_vtd_forget_msi(unsigned slot);
 
 /*

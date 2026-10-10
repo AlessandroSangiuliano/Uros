@@ -519,6 +519,22 @@ int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 	return iommu_vtd_remap_msi(slot, bdf, vector, apic_id, address, data);
 }
 
+int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+		     uint32_t apic_id, uint32_t *address, uint32_t *data)
+{
+	uint16_t source;
+
+	if (!iommu_interrupts_remapped() || !iommu_hpet_source(number, &source))
+		return 0;
+
+	/* AMD: the HPET's own table, entry `vector'; the words stay as they are. */
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remap_entry(source, vector, apic_id);
+
+	return iommu_vtd_remap_hpet(comparator, source, vector, apic_id,
+				    address, data);
+}
+
 void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector)
 {
 	if (!iommu_interrupts_remapped())

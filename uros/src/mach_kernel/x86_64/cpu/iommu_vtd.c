@@ -2232,6 +2232,27 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 	return 1;
 }
 
+/*
+ * The HPET's comparator, whose FSB message carries the requester id the
+ * DMAR's HPET scope names; edge, like every message.  The words given back are
+ * the remappable format of entry 240 + n, for its FSB route register (#598).
+ * The source is matched exactly (SQ 00b), as every entry here is: whether a
+ * platform's HPET sends with the function its scope names is for the fault
+ * reporter on hardware to say, and Linux's answer -- ignore the function --
+ * is taken only if one does not.
+ */
+int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
+			 uint32_t apic_id, uint32_t *address, uint32_t *data)
+{
+	struct iommu_irte e = { vector, apic_id, 0, source };
+	uint32_t index;
+	uint64_t w[2];
+
+	return iommu_vtd_irt_index(IOMMU_VTD_IRT_HPET, comparator, &index)
+	       && iommu_vtd_irte(&e, 0, w) && vtd_irte_write(index, w)
+	       && iommu_vtd_msi(index, address, data);
+}
+
 void iommu_vtd_forget_msi(unsigned slot)
 {
 	static const uint64_t absent[2] = { 0, 0 };

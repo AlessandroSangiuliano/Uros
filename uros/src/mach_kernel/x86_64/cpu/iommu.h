@@ -521,6 +521,15 @@ int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
 		    int level, int active_low, uint32_t *lo, uint32_t *hi);
 int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 		    uint32_t apic_id, uint64_t *address, uint32_t *data);
+/*
+ * The HPET's comparator, for its FSB message, by the HPET's ACPI sequence
+ * number (#598): the same convention, the words being the FSB route
+ * register's, and the source the one iommu_hpet_source() finds.  Zero when no
+ * table names the HPET, or the comparator is past intel's range: then the
+ * message has no entry, and the comparator stays on its I/O APIC pin.
+ */
+int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+		     uint32_t apic_id, uint32_t *address, uint32_t *data);
 
 /*
  * The slot given up: its entry stops remapping, so the device that held it
