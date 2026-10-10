@@ -15,9 +15,11 @@
 
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
+#include <cpu/iommu.h>		/* #598: no FSB message while remapped */
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
+#include <cpu/smp.h>		/* cpu_to_apic, #663 */
 #include <trap/trap.h>
 #include <time/hpet.h>
 #include <time/hpet_event.h>
@@ -98,7 +100,8 @@ static int		started;
 static int		route;
 static unsigned		comparator;
 static uint32_t		route_gsi;
-static uint32_t		broadcaster;	/* the APIC id the comparator reaches */
+static uint32_t		broadcaster;	/* the processor the comparator reaches */
+static uint32_t		broadcaster_apic; /* its APIC id: the hardware's (#663) */
 static uint8_t		tick_vector;
 static uint64_t		hz;
 static uint32_t		ahead;
@@ -190,6 +193,8 @@ static uint64_t counts_to_ns(uint64_t counts)
  * inputs its capability names are not chosen from, and code that no machine
  * here would run is not written.
  */
+static int	fsb_passed_over;	/* #598: an FSB comparator, not taken */
+
 static int choose_route(unsigned *which, uint32_t *cap0)
 {
 	struct hpet_comparator_caps caps;
@@ -202,11 +207,25 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 #endif
 
 	*cap0 = 0;
+	fsb_passed_over = 0;
 	for (n = 0; n < hpet_comparators(); n++) {
 		hpet_comparator_caps(n, &caps);
 		if (n == 0)
 			*cap0 = caps.route_cap;
 		if (caps.fsb) {
+			/*
+			 * #598 point 4: not while interrupts are remapped.  The
+			 * message is composed here in compatibility format,
+			 * which the engine refuses, so the tick would stop the
+			 * moment remapping is on -- and QEMU's HPET writes it
+			 * past the IOMMU anyway, so a remapped one could only
+			 * be checked on hardware (#595).  The I/O APIC's pin
+			 * below is remapped like any other.
+			 */
+			if (iommu_interrupts_remapped()) {
+				fsb_passed_over = 1;
+				continue;
+			}
 			*which = n;
 			return ROUTE_FSB;
 		}
@@ -333,7 +352,7 @@ static void kick_send(uint64_t kick)
 		if (c == self)
 			lapic_send_self(tick_vector);
 		else
-			lapic_send_ipi(c, tick_vector);
+			lapic_send_ipi(cpu_to_apic(c), tick_vector);
 	}
 }
 
@@ -391,15 +410,15 @@ static void window_account(uint32_t now)
  *
  * The FSB message is in the compatibility format, as <device/device_machdep>
  * composes one for MSI-X: 0xFEE00000 with the destination APIC id at bit 12,
- * physical, no redirection; the vector as the data, fixed delivery, edge.  No
- * interrupt remapping is on in this kernel, on either vendor, so nothing
- * translates it.
+ * physical, no redirection; the vector as the data, fixed delivery, edge.
+ * Nothing translates it, because no FSB route is chosen while interrupts are
+ * remapped (choose_route(), #598).
  */
 static void comparator_route(void)
 {
 	if (route == ROUTE_FSB)
 		hpet_comparator_fsb(comparator,
-				    0xFEE00000U | (broadcaster << 12),
+				    0xFEE00000U | (broadcaster_apic << 12),
 				    HPET_EVENT_VECTOR);
 	else
 		(void)hpet_comparator_legacy(comparator);
@@ -509,13 +528,15 @@ static void hpet_ev_start(uint8_t vector)
 	if (ahead < 2)
 		ahead = 2;
 	/*
-	 * A processor number used as an APIC id -- here for the FSB message's
-	 * destination and the I/O APIC entry's, in kick_send() for every IPI.
-	 * They are the same number on this target, which cause_ast_check()
-	 * and ddb_stop_others() rely on as well; said here too, because all of
-	 * them would have to change together.
+	 * #663: the number is this kernel's and the APIC id the hardware's.
+	 * The FSB message, the I/O APIC entry and every IPI kick_send() sends
+	 * are given the id.  They were given the number, which since #663 is
+	 * not the id: on pavillion, ids 0 to 5 and 8 to 13, -H stopped the
+	 * tick of processors 6 to 11 -- 0 ticks in a 10 s window, while 0 to 5
+	 * took 1001.
 	 */
 	broadcaster = (uint32_t)cpu_number();
+	broadcaster_apic = cpu_to_apic(broadcaster);
 	hw_lock_init(&ev_lock);
 	armed = woken = 0;
 	programmed = 0;
@@ -551,7 +572,7 @@ static void hpet_ev_start(uint8_t vector)
 	comparator_route();
 	if (route != ROUTE_FSB) {
 		route_gsi = acpi_irq_to_gsi(0);
-		ioapic_route(route_gsi, HPET_EVENT_VECTOR, broadcaster,
+		ioapic_route(route_gsi, HPET_EVENT_VECTOR, broadcaster_apic,
 			     acpi_irq_flags(0));
 	}
 
@@ -560,17 +581,20 @@ static void hpet_ev_start(uint8_t vector)
 
 	if (route == ROUTE_FSB)
 		printf("clock_event: hpet: comparator %u of %u, one-shot, 32 "
-		       "bits, FSB message to cpu %u on vector 0x%x; each "
-		       "processor's tick sent by IPI on 0x%x (#593)\n",
-		       comparator, hpet_comparators(), broadcaster,
-		       HPET_EVENT_VECTOR, vector);
+		       "bits, FSB message to cpu %u (APIC id %u) on vector "
+		       "0x%x; each processor's tick sent by IPI on 0x%x "
+		       "(#593)\n", comparator, hpet_comparators(), broadcaster,
+		       broadcaster_apic, HPET_EVENT_VECTOR, vector);
 	else
 		printf("clock_event: hpet: comparator %u of %u, one-shot, 32 "
 		       "bits, LegacyReplacement to I/O APIC input %u, cpu %u "
-		       "on vector 0x%x -- the 8254 and the RTC interrupt no "
-		       "more; each processor's tick sent by IPI on 0x%x "
-		       "(#593)\n", comparator, hpet_comparators(), route_gsi,
-		       broadcaster, HPET_EVENT_VECTOR, vector);
+		       "(APIC id %u) on vector 0x%x -- the 8254 and the RTC "
+		       "interrupt no more; each processor's tick sent by IPI on "
+		       "0x%x (#593)%s\n", comparator, hpet_comparators(),
+		       route_gsi, broadcaster, broadcaster_apic,
+		       HPET_EVENT_VECTOR, vector,
+		       fsb_passed_over ? " -- not the FSB message, which would"
+		       " go round interrupt remapping (#598)" : "");
 }
 
 static void hpet_ev_setup(uint8_t vector)

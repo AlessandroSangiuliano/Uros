@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: the slot's entry naming the function given the slot -- it names the next function over, so the card that rings is a device using another device's entry, refused for its source-id (26h, #598 point 2)
+Run: --iommu intel --entry 36 900 -smp 1
+Expect: irq_claim_test: \[12\] WRONG
+Expect: invalid IRTE SID
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 93a5ee8b..7dad7361 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2209,7 +2209,7 @@ int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
+ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
+ 			uint32_t apic_id, uint64_t *address, uint32_t *data)
+ {
+-	struct iommu_irte e = { vector, apic_id, 0, source };
++	struct iommu_irte e = { vector, apic_id, 0, (uint16_t)(source ^ 1u) };
+ 	uint32_t index, a, dw;
+ 	uint64_t w[2];
+ 

@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: a pin's remapping entry written before its redirection entry selects it -- the redirection entry is in the remappable format and names an entry nobody wrote, which the engine refuses as not present (22h)
+Run: --iommu intel --entry 36 900 -smp 1
+Expect: irq 0 on pin [0-9]+ delivered [0-9]+ while masked and 0 once routed
+Expect: detected non-present IRTE
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 93a5ee8b..6cebe264 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2198,7 +2198,7 @@ int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
+ 	uint64_t w[2];
+ 
+ 	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_PIN, pin, &index)
+-	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w))
++	    || !iommu_vtd_irte(&e, 0, w))
+ 		return 0;
+ 
+ 	return iommu_vtd_ioapic_rte(index, vector, level, active_low, 0,

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #663
+Takes out: the HPET tick's translation to an APIC id -- kick_send() sends each processor's tick to its number, which on a machine numbered with gaps (pavillion's ids 0-5 and 8-13; QEMU's 0-2 and 4-6 with sockets=2,cores=3) is another processor's id or nobody's
+Run: --entry 22 150 -smp 6,sockets=2,cores=3
+Expect: took [0-9] ticks in window 0,
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index afc1cafa..308ab8a0 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -352,7 +352,7 @@ static void kick_send(uint64_t kick)
+ 		if (c == self)
+ 			lapic_send_self(tick_vector);
+ 		else
+-			lapic_send_ipi(cpu_to_apic(c), tick_vector);
++			lapic_send_ipi(c, tick_vector);
+ 	}
+ }
+ 

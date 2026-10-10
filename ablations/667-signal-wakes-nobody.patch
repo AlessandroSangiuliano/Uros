@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #667
+Takes out: the wake in pthread_cond_signal(), which still moves the generation: a waiter already asleep is never woken, the lost wakeup #667 is about, on demand -- pthread_test's case [2] must name it and fail rather than hold the boot
+Run: --entry 14 600 -smp 4
+Expect: cond_signal: the waiter is not back 30 s after its wakeup
+
+diff --git a/uros/src/lib/libpthreads/pthread_cond.c b/uros/src/lib/libpthreads/pthread_cond.c
+index 9f49b887..6f7c3d31 100644
+--- a/uros/src/lib/libpthreads/pthread_cond.c
++++ b/uros/src/lib/libpthreads/pthread_cond.c
+@@ -188,7 +188,6 @@ pthread_cond_signal(pthread_cond_t *cond)
+ 		}
+ 		(*COND_SEQ(cond))++;	/* new generation; wakes one waiter */
+ 		UNLOCK(cond->lock);
+-		_pthread_futex_wake_one(COND_SEQ(cond));
+ 		return (ESUCCESS);
+ 	} else
+ 		return (EINVAL); /* Not a condition variable */

@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #659
 Takes out: keeping the x2APIC mode a firmware left on: lapic_init() panics on it again, as it did before, and entry 37, where GRUB turns it on before the kernel, must stop there
-Run: --entry 37 600 -smp 4
+Run: --entry 43 600 -smp 4
 Expect: <lapic_init\+0x
 Note: the panic's own message is lost before the per-CPU block exists (#665): panic() faults in splx(), and the trap report's backtrace, with lapic_init in it, is what the boot leaves
 

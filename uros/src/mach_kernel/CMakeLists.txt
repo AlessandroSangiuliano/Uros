@@ -438,6 +438,7 @@ option(UROS_PROBE_605_PADDED "Build the #605 probe: one cache line per answer-co
 option(UROS_ABLATE_607_SWAPPED_PARKED "Build the #607 ablation: a swapped-out waiter counts as parked and the hand-off switches onto it, which -Q's first arm must catch" OFF)
 option(UROS_ABLATE_607_OLD_WAKE "Build the #607 ablation: the hand-off's old wake, which leaves a stopped waiter TH_RUN on no run queue, which -Q's second arm must catch" OFF)
 option(UROS_ABLATE_607_DTS_SWAPPED "Build the #607 ablation: the IPC direct thread switch switches onto a swapped-out receiver, which the -ON storm must catch" OFF)
+
 # #594, i386 only: the two halves of closing i386's other doors to the 8254.
 # REOPEN puts 0x40, 0x42 and 0x61 back in the iopl device's port list, so
 # i386_io_port_add() must refuse the device whole and kernel242_test's control
@@ -484,6 +485,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic_race_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/msi_race_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     # Configuration space: ECAM where the MCFG describes one, the port
     # pair where it does not -- two boards, not a bridge (#457).

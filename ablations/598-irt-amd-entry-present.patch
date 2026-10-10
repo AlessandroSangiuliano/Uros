@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #598
+Takes out: AMD's interrupt tables written clean -- entry 0x41 of each is left remapping, as one still valid for a source since given something else
+Run: --iommu amd --entry 0 300
+Expect: interrupt remapping tables: [0-9]+ of 256 entries, [0-9]+ read back not present, [1-9][0-9]* wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+index d3e1b612..6248a3f2 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -1929,6 +1929,7 @@ static uint64_t amd_irt_table(struct iommu_interrupt_tables *t)
+ 	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(pa);
+ 	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+ 		e[i] = 0;
++	e[0x41] = 0x00410001u;
+ 
+ 	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+ 		if (e[i] == 0)

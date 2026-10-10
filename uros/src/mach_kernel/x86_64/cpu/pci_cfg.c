@@ -41,8 +41,9 @@
  *
  * ⚠️ It does NOT use simple_lock, and that is deliberate: this runs before
  * percpu_activate(), and the machine-independent lock package reaches %gs for
- * its preemption and interrupt counters.  A lock that cannot be taken during
- * early enumeration is a lock this file cannot use.  The flag is saved and
+ * its preemption and interrupt counters, which until the boot block (#665)
+ * read address zero.  A lock that could not be taken during early
+ * enumeration was a lock this file could not use.  The flag is saved and
  * restored by hand for the same reason -- and it also closes the case that has
  * nothing to do with SMP: an interrupt landing between the two instructions on
  * one processor.
@@ -351,4 +352,20 @@ pci_cfg_find_cap(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
 	       "— giving up rather than following it\n",
 	       segment, bus, dev, func, PCI_CAP_MAX_HOPS);
 	return 0;
+}
+
+uint32_t
+pci_cfg_command_dword(uint32_t read, uint16_t set, uint16_t clear)
+{
+	return ((read | set) & ~(uint32_t)clear) & 0xFFFFu;
+}
+
+void
+pci_cfg_command(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
+		uint16_t set, uint16_t clear)
+{
+	pci_cfg_write(segment, bus, dev, func, PCI_COMMAND,
+		      pci_cfg_command_dword(pci_cfg_read(segment, bus, dev,
+							 func, PCI_COMMAND),
+					    set, clear));
 }

@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #598
+Takes out: the build's flush of AMD's device table -- read without snooping, as QEMU's IVHD recommends, it would be read stale when the engine is turned on
+Run: --iommu amd --entry 0 600 -smp 1
+Expect: passthrough tables at .* every one read back — WRONG, [0-9]+ of [0-9]+ lines left the caches
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+index 63ffa69b..4b2bc6cf 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -560,7 +560,6 @@ int iommu_amd_build(void)
+ 		    || dt[i * AMD_DTE_WORDS + 2] != want[2]
+ 		    || dt[i * AMD_DTE_WORDS + 3] != want[3])
+ 			return 0;
+-	amd_devtab_written(dt, 0, AMD_DEVICE_IDS);	/* C7 */
+ 
+ 	iommu_record_tables(table, (uint64_t)AMD_DEVICE_TABLE_FRAMES * 4096u,
+ 			    command, event, written, 0,

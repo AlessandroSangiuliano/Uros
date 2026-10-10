@@ -31,6 +31,7 @@
 #include <thread/fpu.h>
 #include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/ioapic_race_test.h>	/* #599: -Y */
+#include <cpu/msi_race_test.h>		/* #598: -m */
 #include <cpu/halt_test.h>	/* #599: -Z */
 #include <cpu/spl_test.h>	/* #526: -E */
 #include <pmap/shootdown_test.h>	/* #638: -J */
@@ -95,9 +96,11 @@ machine_init(void)
 	 * can map device memory.  It is the same position i386 gives it --
 	 * cninit(), after i386_init() -- and it has the same consequence,
 	 * which is worth stating rather than discovering: everything printed
-	 * BEFORE this line reached COM1 only.  That is structural and not an
-	 * oversight, because the framebuffer sits above the low identity map
-	 * and there is no way to reach it earlier.
+	 * BEFORE this line reached COM1 only when it was printed.  That is
+	 * structural and not an oversight, because the framebuffer sits above
+	 * the low identity map and there is no way to reach it earlier.  The
+	 * console keeps those bytes, and with -f fbcons_init() draws them
+	 * here, slowly enough for a camera (#666).
 	 */
 	pmap_enable_wc();
 	fbcons_init();
@@ -457,6 +460,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('Y') && want > 1)
 			ioapic_window_race_test();
+
+		/*
+		 * -m: a function's MSI-X enable raced from two processors
+		 * (#598's C10).  Here for the same reason, and before
+		 * bootstrap for the same reason too: the device it takes is
+		 * one no driver has claimed yet.  Returns.
+		 */
+		if (boot_flag('m') && want > 1)
+			msi_function_race_test();
 
 		/*
 		 * -Z: two processors panic at the same instant (#599).  The same

@@ -161,6 +161,16 @@ def main():
                          "the screen is where a kernel whose serial line "
                          "has stopped still says what it did (#538)")
     ap.add_argument("--out", default=None, help="where to leave the dump")
+    ap.add_argument("--freeze", action="store_true",
+                    help="stop the machine as soon as --wait-for is seen, so "
+                         "the screen is dumped as it was then: a screen that "
+                         "goes on scrolling loses what it drew a moment ago "
+                         "(#666)")
+    ap.add_argument("--expect", action="append", default=[],
+                    help="text that must be ON THE SCREEN; may be given more "
+                         "than once.  Matching the serial log says the panel "
+                         "and the wire agree, not that the panel shows a "
+                         "given line (#666)")
     a = ap.parse_args()
 
     build = os.path.realpath(a.build)
@@ -247,7 +257,7 @@ def main():
             pass
         return serial_raw.decode(errors="replace")
 
-    def wait_for(text, budget):
+    def wait_for(text, budget, step=0.25):
         end = time.time() + budget
         while time.time() < end:
             if q.poll() is not None:
@@ -255,17 +265,27 @@ def main():
                 return text in pump()
             if text in pump():
                 return True
-            time.sleep(0.25)
+            time.sleep(step)
         return False
 
     try:
-        if not wait_for(a.wait_for, a.budget):
+        if not wait_for(a.wait_for, a.budget, 0.02 if a.freeze else 0.25):
             err = (q.stderr.read() if q.poll() is not None else "").strip()
             print(f"fbcons-readback: never saw {a.wait_for!r} on the serial "
                   f"line in {a.budget:.0f}s — that says nothing about the "
                   f"framebuffer, the boot did not get there"
                   + (f": {err}" if err else ""), file=sys.stderr)
             return 2
+
+        if a.freeze:
+            f = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            f.settimeout(10.0)
+            f.connect(mon)
+            f.recv(65536)
+            f.sendall(b"stop\n")
+            time.sleep(0.5)
+            f.close()
+            print(f"fbcons-readback: stopped the machine on {a.wait_for!r}")
 
         if a.send is not None:
             time.sleep(1.0)
@@ -281,7 +301,8 @@ def main():
         # A moment for the last lines to be drawn as well as sent -- or, with
         # --settle, long enough for a machine whose wire went quiet to write
         # whatever it is going to write on the screen alone.
-        time.sleep(a.settle)
+        if not a.freeze:
+            time.sleep(a.settle)
         open(log, "w").write(pump())
 
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -316,6 +337,16 @@ def main():
                   f"not a glyph of this font — the blitter draws, but not "
                   f"what the font says")
             return 1
+
+        absent = [t for t in a.expect if not any(t in l for l in lines)]
+        if absent:
+            print(f"fbcons-readback: {len(absent)} of {len(a.expect)} "
+                  f"expected texts are NOT ON THE SCREEN:")
+            for t in absent:
+                print(f"  not on screen | {t}")
+            return 1
+        for t in a.expect:
+            print(f"fbcons-readback: on screen as expected | {t}")
 
         # Every row long enough to be distinctive must be somewhere in the log.
         checked = [l.strip() for l in drawn if len(l.strip()) >= 20]

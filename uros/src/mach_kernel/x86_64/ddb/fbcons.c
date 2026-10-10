@@ -13,6 +13,9 @@
 #include <cpu/regs.h>
 #include <pmap/pmap.h>
 #include <time/tsc.h>
+#include <sync/atomic.h>
+#include <boot/bootarg.h>	/* #666: boot_flag('f') */
+#include <kern/misc_protos.h>	/* #666: delay() */
 
 #define FONT_W		8
 #define FONT_H		16
@@ -96,6 +99,38 @@ static uint8_t		 fb_cell[FB_MAX_ROWS * FB_MAX_COLS];
 static uint64_t		 fb_cycles;
 static uint64_t		 fb_glyphs;
 static uint64_t		 fb_scrolls;
+
+/*
+ * ── What was printed before there was a screen (#666) ──────────────────
+ *
+ * fbcons_init() cannot run before the pmap can map device memory, so every
+ * byte the boot prints before machine_init() -- the self-tests in boot_c.c
+ * among them -- went to COM1 and nowhere else.  On a machine with no serial
+ * port that is everything up to setup_main(): on pavillion the screen stayed
+ * black for 2.3 s after GRUB, and the interrupt remapping lines of #598 were
+ * never seen.  klog does not have them either: klog_putc() drops what comes
+ * before klog_init(), and kputs() reaches the console without passing it.
+ *
+ * So the bytes this console is handed while it cannot draw are kept here,
+ * and with -f fbcons_init() draws them once it can, a line at a time slowly
+ * enough for a camera, before it goes on live.  Without -f they are counted
+ * and not drawn, and the screen starts as it always did.
+ *
+ * ⚠️ No lock, like the rest of this file: a writer takes its slot with one
+ * atomic add, so two processors cannot be handed the same one.  What that
+ * leaves is a slot taken and not yet written when the drawing reaches it,
+ * and a byte offered after the drawing has looked for the last time: one
+ * wrong or missing glyph, on a screen the line below says is incomplete.
+ *
+ * Static, and so for the life of the system: this kernel has no way to give
+ * memory of its own image back to the VM.
+ */
+#define FB_EARLY_SIZE		65536u
+#define FB_EARLY_LINE_US	8000	/* the pause after each line, with -f */
+
+static char		 fb_early[FB_EARLY_SIZE];
+static volatile uint32_t fb_early_len;	/* bytes offered: may pass the size */
+static volatile int	 fb_early_closed;
 
 void fbcons_remember(const struct mb2_framebuffer *fb)
 {
@@ -252,13 +287,8 @@ static void fbcons_newline(void)
 		fbcons_scroll();	/* and it decides where the cursor lands */
 }
 
-void fbcons_putc(char ch)
+static void fbcons_draw(uint8_t c)
 {
-	uint8_t c = (uint8_t)ch;
-
-	if (!fb_ready)
-		return;
-
 	switch (c) {
 	case '\r':
 		fb_col = 0;
@@ -272,7 +302,7 @@ void fbcons_putc(char ch)
 		return;
 	case '\t':
 		do {
-			fbcons_putc(' ');
+			fbcons_draw(' ');
 		} while ((fb_col & 7) != 0 && fb_col != 0);
 		return;
 	default:
@@ -293,6 +323,27 @@ void fbcons_putc(char ch)
 
 	draw_cell(c, fb_col, fb_row);
 	fb_col++;
+}
+
+/* Kept for fbcons_init() to draw, while there is no screen (#666). */
+static void fbcons_keep(char c)
+{
+	uint32_t slot;
+
+	if (fb_early_closed)
+		return;
+	slot = atomic_add32(&fb_early_len, 1);
+	if (slot < FB_EARLY_SIZE)
+		fb_early[slot] = c;
+}
+
+void fbcons_putc(char ch)
+{
+	if (!fb_ready) {
+		fbcons_keep(ch);
+		return;
+	}
+	fbcons_draw((uint8_t)ch);
 }
 
 /*
@@ -346,13 +397,14 @@ static const char *fbcons_memtype_name(unsigned t)
 	}
 }
 
-void fbcons_init(void)
+/* The screen, mapped and cleared: 1 when it can be drawn on. */
+static int fbcons_open(void)
 {
 	uint64_t	va, size;
 	unsigned	r, c;
 
 	if (!fbcons_fb.present)
-		return;
+		return 0;
 
 	/*
 	 * 🔴 The depths this can draw, and a refusal that says so.  A mode
@@ -367,7 +419,7 @@ void fbcons_init(void)
 			    "is %u bits a pixel, which this cannot draw into "
 			    "— screen output is off, COM1 is unaffected "
 			    "(#568)\n", (unsigned) fbcons_fb.bpp);
-		return;
+		return 0;
 	}
 
 	fb_cols = fbcons_fb.width / FONT_W;
@@ -380,7 +432,7 @@ void fbcons_init(void)
 		cons_printf("UrMach x86-64: fbcons: %ux%u is smaller than one "
 			    "character — screen output is off (#568)\n",
 			    fbcons_fb.width, fbcons_fb.height);
-		return;
+		return 0;
 	}
 
 	/*
@@ -408,7 +460,7 @@ void fbcons_init(void)
 			    "framebuffer at %llx — screen output is off "
 			    "(#568)\n",
 			    (unsigned long long) fbcons_fb.addr);
-		return;
+		return 0;
 	}
 	fb_base = (uint8_t *)(uintptr_t)va;
 
@@ -439,5 +491,68 @@ void fbcons_init(void)
 
 	fb_col = 0;
 	fb_row = 0;
+	return 1;
+}
+
+/*
+ * What the console was handed while it could not draw, and what becomes of it
+ * (#666).  With -f it is drawn in order, and after each line the boot waits
+ * FB_EARLY_LINE_US, so that a camera pointed at a machine with no serial port
+ * can read it; without -f only its size is said.  Either way the keeping stops
+ * here: from now on a byte is drawn, or there is no screen to draw it on.
+ *
+ * ⚠️ fb_ready stays clear while the kept bytes are drawn, so a line printed
+ * meanwhile -- the pauses are long, and an interrupt may print -- is kept
+ * behind them and drawn in its turn, not in the middle of one of them.
+ */
+static void fbcons_early_draw(void)
+{
+	uint32_t	drawn = 0, lines = 0, kept, offered;
+	int		paced = boot_flag('f');
+	uint64_t	glyphs = fb_glyphs;
+	uint8_t		c;
+
+	if (paced)
+		for (;;) {
+			kept = fb_early_len;
+			if (kept > FB_EARLY_SIZE)
+				kept = FB_EARLY_SIZE;
+			if (drawn == kept)
+				break;
+			c = (uint8_t) fb_early[drawn++];
+			fbcons_draw(c);
+			if (c == '\n') {
+				lines++;
+				delay(FB_EARLY_LINE_US);
+			}
+		}
+
+	fb_early_closed = 1;
 	fb_ready = 1;
+	offered = fb_early_len;
+	glyphs = fb_glyphs - glyphs;	/* read, not inferred from the bytes */
+
+	if (!paced) {
+		cons_printf("UrMach x86-64: fbcons: %u bytes were printed before "
+			    "the screen existed and went to COM1 only; -f draws "
+			    "them here (#666)\n", offered);
+		return;
+	}
+	cons_printf("UrMach x86-64: fbcons: -f: the %u lines printed before the "
+		    "screen existed are drawn above: %u bytes, %llu glyphs, one "
+		    "line every %u ms (#666)\n", lines, drawn,
+		    (unsigned long long) glyphs, FB_EARLY_LINE_US / 1000);
+	if (offered > drawn)
+		cons_printf("UrMach x86-64: fbcons: %u bytes printed before the "
+			    "screen existed are not on it (this keeps %u), and "
+			    "COM1 had them (#666)\n", offered - drawn,
+			    FB_EARLY_SIZE);
+}
+
+void fbcons_init(void)
+{
+	if (fbcons_open())
+		fbcons_early_draw();
+	else
+		fb_early_closed = 1;
 }

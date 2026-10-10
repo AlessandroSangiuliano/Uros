@@ -26,9 +26,11 @@
  * offset comes from PERCPU_CPU_ID in <cpu/percpu.h>, which is also what the
  * assembly entry paths use, so the struct and the reads cannot drift apart.
  *
- * ⚠️ Valid only after percpu_activate() has run on this processor.  Before
- * that %gs's base is zero, and early in boot address zero is mapped, so a
- * premature call returns a plausible small number instead of faulting.
+ * ⚠️ Valid only once this processor has a block: the boot processor from
+ * descriptor_tables_init() on, through the boot block (#665), and the others
+ * from percpu_activate() in ap_start_c().  Before that %gs's base is zero,
+ * and early in boot address zero is mapped, so a premature call returns a
+ * plausible small number instead of faulting.
  */
 
 #ifndef _X86_64_CPU_NUMBER_H_

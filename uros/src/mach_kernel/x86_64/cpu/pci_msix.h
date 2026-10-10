@@ -169,8 +169,48 @@ extern void pci_msix_disable(const struct pci_msix *m);
  * but who may call them: this one is for the kernel, and for the boot
  * self-test that has no device to program.  A driver reaches the other.
  */
+/*
+ * The address a message to processor `apic_id' is written to, or no: an id
+ * past eight bits does not fit the compatibility format (#598's C16).
+ */
+extern int msi_destination(uint32_t apic_id, unsigned long long *address);
+
 extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
 			    unsigned long long *address_out,
 			    unsigned int *data_out);
+
+/*
+ * #598: that message as the device must be given it.  Unchanged while
+ * nothing is remapped; otherwise through the slot's remapping entry, written
+ * here and naming the function at bus/dev/func as the only source that may
+ * use it.  Answers zero when the slot cannot have an entry, and then the slot
+ * must not be given to the device.
+ *
+ * 🔴 EVERY CALLER OF msi_claim_vector() THAT PROGRAMS A DEVICE CALLS THIS
+ * between the two.  A message in compatibility format is refused once
+ * interrupts are remapped -- and the boot's own table test armed one without
+ * asking, which QEMU's intel-iommu let through (it does not refuse that
+ * format) and its amd-iommu did not.
+ *
+ * msi_unremap_vector() is its other half: after the device's entry is
+ * disarmed, the slot's remapping entry stops remapping.
+ */
+/*
+ * #598's C10: a claimed slot's entry armed and its function enabled, recorded
+ * as the function's; and the reverse, which answers what it detached and
+ * clears the function's enable only when no other slot of it is recorded.
+ * One lock of the machine layer's own keeps the record and that question
+ * apart.  device_md_msi_register(), its unregister, and the -m race test.
+ */
+extern void msi_attach(unsigned int slot, const struct pci_msix *m,
+		       unsigned int entry, unsigned long long addr,
+		       unsigned int data);
+extern int msi_detach(unsigned int slot, struct pci_msix *gone);
+
+extern int msi_remap_vector(unsigned int slot, unsigned int bus,
+			    unsigned int dev, unsigned int func,
+			    unsigned long long *address, unsigned int *data);
+extern void msi_unremap_vector(unsigned int slot, unsigned int bus,
+			       unsigned int dev, unsigned int func);
 
 #endif	/* _X86_64_CPU_PCI_MSIX_H_ */

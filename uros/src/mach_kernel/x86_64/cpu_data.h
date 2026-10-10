@@ -65,10 +65,11 @@
 #ifndef __ASSEMBLER__
 
 /*
- * ⚠️ Valid only after percpu_activate() has run on this processor -- the same
- * condition <machine/cpu_number.h> carries, and for the same reason: before it,
- * %gs's base is zero and address zero is mapped this early, so a premature call
- * answers a plausible number instead of faulting.
+ * ⚠️ Valid only once this processor has a block -- the same condition
+ * <machine/cpu_number.h> carries (the boot block from descriptor_tables_init()
+ * on, #665), and for the same reason: before it, %gs's base is zero and address
+ * zero is mapped this early, so a premature call answers a plausible number
+ * instead of faulting.
  *
  * Early boot is single-threaded and has no scheduler, so nothing there can be
  * preempted anyway; the window is real but there is nothing in it.

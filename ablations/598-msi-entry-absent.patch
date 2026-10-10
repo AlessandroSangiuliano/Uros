@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: an MSI-X slot's remapping entry written before the card is given the message that selects it -- the message names an entry nobody wrote, which the engine refuses as not present (22h)
+Run: --iommu intel --entry 36 900 -smp 1
+Expect: irq_claim_test: \[12\] WRONG
+Expect: detected non-present IRTE \(index=13[0-9]
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 93a5ee8b..de9bd386 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2214,7 +2214,7 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
+ 	uint64_t w[2];
+ 
+ 	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index)
+-	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w)
++	    || !iommu_vtd_irte(&e, 0, w)
+ 	    || !iommu_vtd_msi(index, &a, &dw))
+ 		return 0;
+ 

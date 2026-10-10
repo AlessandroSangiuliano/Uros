@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #598
+Takes out: the lookup of a table already mapped -- every probe maps again, and the device region gives nothing back
+Run: --iommu intel --entry 0 600 -smp 1
+Expect: its MSI-X table probed twice — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pci_msix.c b/uros/src/mach_kernel/x86_64/cpu/pci_msix.c
+index 4e5f91f7..58ef1fdd 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/pci_msix.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pci_msix.c
+@@ -46,9 +46,7 @@ msix_map_once(uint64_t pa, uint64_t bytes)
+ 	unsigned int	i;
+ 
+ 	hw_lock_lock(&msix_mapped_lock);
+-	for (i = 0; i < msix_mapped_n && va == 0; i++)
+-		if (msix_mapped[i].pa == pa && msix_mapped[i].bytes >= bytes)
+-			va = msix_mapped[i].va;
++	(void)i;
+ 	if (va == 0 && msix_mapped_n < PCI_MSIX_MAPPED_MAX) {
+ 		va = pmap_map_device(pa, bytes);
+ 		if (va != 0) {

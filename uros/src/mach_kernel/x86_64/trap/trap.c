@@ -733,9 +733,11 @@ static void report_return_symbol(uint64_t ret)
  * serialised output and far better than none.
  *
  * ⚠️ The label is asked of the interrupt controller, not of cpu_number().
- * cpu_number() reads this processor's per-CPU block through %gs, and before
- * percpu_activate() the segment base is zero -- which early in boot is mapped,
- * so it answers a small plausible number rather than faulting.  A backtrace
+ * cpu_number() reads this processor's per-CPU block through %gs, and before a
+ * processor has one -- the boot processor before its GDT load (#665), the
+ * others before ap_start_c() activates theirs -- the segment base is zero,
+ * which early in boot is mapped, so it answers a small plausible number rather
+ * than faulting.  A backtrace
  * labelled with a processor that is not the one that died is worse than one
  * with no label at all.
  */

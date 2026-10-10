@@ -54,15 +54,20 @@ void fbcons_remember(const struct mb2_framebuffer *fb);
  * boot that drew nothing because this is broken look identical otherwise.
  *
  * ⚠️ Must run after the pmap can map device memory, which on this target means
- * machine_init() or later.  Everything printed before that reaches COM1 only,
- * exactly as on i386 -- structural, not an oversight: the framebuffer is above
- * the low identity map and there is no way to reach it earlier.
+ * machine_init() or later.  Nothing printed before that can be drawn when it
+ * is printed -- structural, not an oversight: the framebuffer is above the low
+ * identity map and there is no way to reach it earlier.  It is kept instead,
+ * and with -f this draws it, a line at a time and slowly enough for a camera,
+ * before the console goes on live; without -f it says only how many bytes
+ * went to COM1 alone (#666).
  */
 void fbcons_init(void);
 
 /*
- * One character.  A no-op until fbcons_init() has succeeded, so every writer
- * may call it unconditionally.
+ * One character, so every writer may call it unconditionally.  Drawn once
+ * fbcons_init() has succeeded; before that, kept for fbcons_init() to draw
+ * (the first 64 KiB, #666); after an fbcons_init() that found no screen, a
+ * no-op.
  */
 void fbcons_putc(char c);
 

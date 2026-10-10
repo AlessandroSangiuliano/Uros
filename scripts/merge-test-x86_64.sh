@@ -74,7 +74,11 @@ WRONG=0
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in
 #   ioapic    -Y's own line: "ioapic_race: PASS"
+#   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
+#   earlypanic  -p panics on purpose before the boot processor has its page:
+#             its message and the backtrace after it, and no protection fault
+#             in their place (#665)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 36 and 37 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -94,12 +98,21 @@ ENTRIES="
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
+36 harness --iommu_intel
+37 harness --iommu_intel
+38 harness --iommu_intel
+36 harness --iommu_amd
+37 harness --iommu_amd
+38 harness --iommu_amd
 17 harness
 18 harness
 21 harness
 22 harness
+22 hpetgaps - 6,sockets=2,cores=3
 23 ioapic
+39 msirace --iommu_intel
 24 panic2
+40 earlypanic
 25 harness
 26 harness
 27 harness
@@ -124,10 +137,11 @@ ENTRIES="
 4 harness - 1
 20 harness
 20 harness - 1
-36 harness
-36 harness - 1
-37 harness
-37 harness - 1
+41 early
+42 harness
+42 harness - 1
+43 harness
+43 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -145,7 +159,19 @@ judge() {	# entry verdict log-of-the-harness full-log
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
+	# #663: numbered with gaps -- APIC ids 0-2 and 4-6, as pavillion's are
+	# 0-5 and 8-13 -- every processor takes the HPET's tick in window 0.
+	hpetgaps) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'cpu 5 took [0-9]+ ticks in window 0' "$f" &&
+		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
+	msirace) grep -aq 'msi_race: PASS' "$f" ;;
+	# #666: the boot passed, and with -f the screen drew what came before it.
+	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
+	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
+		grep -aq '<x86_64_boot+0x' "$f" &&
+		! grep -aq 'trap general protection' "$f" ;;
 	esac
 }
 
@@ -166,7 +192,10 @@ while read -r e v opt cpus; do
 		budget=1200
 		k=""
 		[ $a = kvm ] && { budget=600; k="--kvm"; }
-		tag="e$e-$a$n${opt:+-${opt##* }}"
+		# No comma in a log's name: an entry's -smp value may be a whole
+		# topology (entry 14's 1,sockets=2,cores=64,maxcpus=128), and
+		# ci/job.sh writes the name into a CSV whose columns commas separate.
+		tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
