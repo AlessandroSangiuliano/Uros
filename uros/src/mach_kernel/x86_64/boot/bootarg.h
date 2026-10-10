@@ -2,11 +2,14 @@
  * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * SPDX-License-Identifier: MIT
  *
- * Boot flags, read from the command line the loader passed (#458).
+ * Boot flags, read from the command line the loader passed (#458), and
+ * `name=value' words whose value is a number (#373).
  */
 
 #ifndef	_X86_64_BOOT_BOOTARG_H_
 #define	_X86_64_BOOT_BOOTARG_H_
+
+#include <stdint.h>
 
 /*
  * Was `-<c>' given on the boot command line?
@@ -19,5 +22,12 @@
  * such hazard, and the string is read a handful of times at boot.
  */
 int	boot_flag(char c);
+
+/*
+ * Was `name=<number>' given?  1 and the number when it was, 0 when no word
+ * has that name, -1 when one does and its value is not a number (#373).
+ * Read the same way as boot_flag(), for the same reason.
+ */
+int	boot_value(const char *name, uint64_t *out);
 
 #endif	/* _X86_64_BOOT_BOOTARG_H_ */
