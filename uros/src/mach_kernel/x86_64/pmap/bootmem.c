@@ -9,6 +9,8 @@
 
 #include <boot/multiboot2.h>
 #include <ddb/ksym.h>
+#include <ddb/ramoops.h>	/* #373: the zone cut out */
+#include <kern/misc_protos.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
 #include <pmap/layout.h>
@@ -36,6 +38,16 @@ static uint64_t low_water;
 
 /* Frames handed back, threaded through their own first word. */
 static uint64_t free_list;
+
+/*
+ * #373: the one range cut out of a region rather than left below the low
+ * water mark: the megabyte Linux reserves at ramoops=ADDR and reads back
+ * after this kernel's reset (ddb/ramoops.c).  It is near the top of memory,
+ * where a mark cannot reach, so the region holding it is split in two around
+ * it -- the range-splitting low_water's comment below declines, needed for
+ * this one range.  Zero end: not cut.
+ */
+static uint64_t cut_start, cut_end;
 
 /* Physical extent of the loaded image, from the linker. */
 extern char __kernel_end[];
@@ -136,10 +148,23 @@ static uint64_t compute_low_water(uint32_t info_pa)
 	return round_up_page(mark);
 }
 
+static void add_region(uint64_t start, uint64_t stop)
+{
+	if (start >= stop || nregions == BOOT_MAX_REGIONS)
+		return;
+
+	regions[nregions].next = start;
+	regions[nregions].end = stop;
+	nregions++;
+	frames_total += (stop - start) / PAGE_SIZE_4K;
+}
+
 void boot_frame_init(uint32_t info_pa)
 {
 	const struct mb2_tag_mmap *mm;
 	const uint8_t *p, *end;
+	uint64_t zone = 0;
+	int want_zone = ramoops_wanted(&zone) == 1;
 
 	low_water = compute_low_water(info_pa);
 
@@ -173,14 +198,38 @@ void boot_frame_init(uint32_t info_pa)
 		if (stop > direct_map_covered)
 			stop = direct_map_covered;
 
-		if (start >= stop || nregions == BOOT_MAX_REGIONS)
-			continue;
+		/*
+		 * #373: the zone, cut out of the region that holds all of it,
+		 * here where every frame this kernel will own is first counted
+		 * -- the VM takes its pages through boot_frame_alloc() and
+		 * nothing else -- so none of its frames is ever handed out,
+		 * cleared or made a page table.  Only whole: a zone that runs
+		 * past a region's end, or below the low water mark into the
+		 * kernel and its modules, is not cut, and ddb/ramoops.c then
+		 * writes nothing there.  Nor when the split would need a slot
+		 * there is not: the zone goes rather than the memory past it.
+		 */
+		if (want_zone && cut_end == 0 && zone >= start
+		    && zone + RAMOOPS_RESERVED <= stop) {
+			unsigned need = (zone > start)
+					+ (zone + RAMOOPS_RESERVED < stop);
 
-		regions[nregions].next = start;
-		regions[nregions].end = stop;
-		nregions++;
-		frames_total += (stop - start) / PAGE_SIZE_4K;
+			if (nregions + need <= BOOT_MAX_REGIONS) {
+				add_region(start, zone);
+				add_region(zone + RAMOOPS_RESERVED, stop);
+				cut_start = zone;
+				cut_end = zone + RAMOOPS_RESERVED;
+				continue;
+			}
+		}
+
+		add_region(start, stop);
 	}
+}
+
+int boot_frames_cut(uint64_t pa, uint64_t len)
+{
+	return cut_end != 0 && pa == cut_start && pa + len == cut_end;
 }
 
 /*
@@ -227,6 +276,19 @@ uint64_t boot_frames_alloc(uint64_t count)
 		pa = regions[i].next;
 		regions[i].next += bytes;
 	}
+
+	/*
+	 * #373: never a frame of the zone.  Once it is cut out nothing here can
+	 * reach one, so this is what says the cut took: a cut recorded and not
+	 * made leaves the frames in their region, the VM's startup takes every
+	 * frame there is through this function, and the boot stops here naming
+	 * them -- which is how ablations/373-zone-not-cut.patch is caught.
+	 */
+	if (cut_end != 0 && pa < cut_end && pa + bytes > cut_start)
+		panic("boot_frames_alloc: frames 0x%llx..0x%llx are inside the "
+		      "megabyte cut out for ramoops at 0x%llx (#373)",
+		      (unsigned long long)pa, (unsigned long long)(pa + bytes - 1),
+		      (unsigned long long)cut_start);
 
 	frames_used += count;
 

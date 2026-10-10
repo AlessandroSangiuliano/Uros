@@ -182,7 +182,8 @@ uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus);
 /* ------------------------------------------------------------------ */
 /*
  * Where a register lives: ACPI's Generic Address Structure (ACPI 6.5,
- * 5.2.3.2), twelve bytes.  Only two address spaces are ever read here.
+ * 5.2.3.2), twelve bytes.  Only three address spaces are ever used here,
+ * and the third only by the reset register.
  */
 struct acpi_gas {
 	uint8_t  space_id;
@@ -194,6 +195,12 @@ struct acpi_gas {
 
 #define ACPI_GAS_MEMORY		0x00
 #define ACPI_GAS_IO		0x01
+/*
+ * Segment 0, bus 0 only, and the address is three fields (Table 5.2): the
+ * offset in bits 0-15, the function in 16-31, the device in 32-47, and the
+ * top word reserved, zero.
+ */
+#define ACPI_GAS_PCI_CONFIG	0x02
 
 /*
  * The power-management timer, as the FADT states it (#508).
@@ -218,6 +225,30 @@ struct acpi_pm_timer {
 };
 
 void acpi_pm_timer(struct acpi_pm_timer *out);
+
+/*
+ * The reset register, as the FADT states it (#373).
+ *
+ * ACPI 6.5, Table 5.9: RESET_REG at byte 116 and RESET_VALUE at byte 128,
+ * both new in the FADT's revision 2; Table 5.10: RESET_REG_SUP is bit 10 of
+ * the flags.  4.8.3.6: an 8-bit register in system I/O, system memory or PCI
+ * configuration space on bus 0, and the machine resets on the write.
+ *
+ * Kept as the table gave it: whether it describes a register that can be
+ * written is the caller's question, and so is what to do when it does not.
+ * `in_table' is zero when the table is older than revision 2 or too short to
+ * hold the two fields, and then nothing below it was read.
+ */
+struct acpi_reset {
+	int		fadt_found;
+	uint8_t		revision;	/* the FADT's */
+	int		in_table;
+	int		supported;	/* RESET_REG_SUP, flag bit 10 */
+	struct acpi_gas	reg;		/* RESET_REG */
+	uint8_t		value;		/* RESET_VALUE */
+};
+
+void acpi_reset_reg(struct acpi_reset *out);
 
 /*
  * The HPET, as its ACPI table states it (#508; IA-PC HPET 1.0a, 3.2.4).

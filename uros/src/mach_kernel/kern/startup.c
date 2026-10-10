@@ -222,6 +222,7 @@
 #include <x86_64/thread/context.h>	/* #561 */
 #include <x86_64/time/tsc.h>		/* #508: the refinement */
 #include <x86_64/cpu/iommu.h>		/* #599: the fault reporter */
+#include <x86_64/cpu/reset.h>		/* #373: -b's deadline */
 #endif
 #include <kern/thread_swap.h>
 #include <kern/time_out.h>
@@ -513,6 +514,12 @@ start_kernel_threads(void)
 	 * which the idle loop used to do when a processor had nothing better.
 	 */
 	iommu_fault_reporter_start();
+
+	/*
+	 * #373: with -b, the thread that restarts the machine reset_after=
+	 * seconds from here if nothing has before -- the census, a panic.
+	 */
+	reset_deadline_start();
 #endif	/* __x86_64__ */
 
 	/*
