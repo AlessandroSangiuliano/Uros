@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #373
+Takes out: the split of the region around the zone, with the zone still recorded as cut out: its frames stay in the region, the VM's startup takes every frame through boot_frames_alloc(), and its check must stop the boot naming them
+Run: --entry 42 300
+Expect: boot_frames_alloc: frames 0x[0-9a-f]+\.\.0x[0-9a-f]+ are inside the megabyte cut out for ramoops
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/bootmem.c b/uros/src/mach_kernel/x86_64/pmap/bootmem.c
+index 2a5dbd5e..ebee67e3 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/bootmem.c
++++ b/uros/src/mach_kernel/x86_64/pmap/bootmem.c
+@@ -215,8 +215,7 @@ void boot_frame_init(uint32_t info_pa)
+ 					+ (zone + RAMOOPS_RESERVED < stop);
+ 
+ 			if (nregions + need <= BOOT_MAX_REGIONS) {
+-				add_region(start, zone);
+-				add_region(zone + RAMOOPS_RESERVED, stop);
++				add_region(start, stop);
+ 				cut_start = zone;
+ 				cut_end = zone + RAMOOPS_RESERVED;
+ 				continue;

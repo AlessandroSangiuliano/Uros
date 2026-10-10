@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #373
+Takes out: the copy of what #666 kept before the zone existed: the zone begins at its own first byte, without the boot's first lines, and the zone's check before the reset must say so
+Run: --entry 42 300
+Expect: does NOT read back as ramoops would read it -- it does not begin with the bytes kept before it existed
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/ramoops.c b/uros/src/mach_kernel/x86_64/ddb/ramoops.c
+index 1fcef2d4..491112a6 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/ramoops.c
++++ b/uros/src/mach_kernel/x86_64/ddb/ramoops.c
+@@ -246,7 +246,7 @@ void ramoops_init(void)
+ 	int		r = ramoops_wanted(&pa);
+ 	unsigned	uncached;
+ 	const char	*early;
+-	uint32_t	kept, offered, i;
++	uint32_t	kept, offered;
+ 
+ 	if (r == 0)
+ 		return;
+@@ -296,8 +296,6 @@ void ramoops_init(void)
+ 	rz->sig = RAMOOPS_SIG;
+ 
+ 	kept = fbcons_early(&early, &offered);
+-	for (i = 0; i < kept; i++)
+-		zone_put(early[i]);
+ 	rz_seeded = kept;
+ 	rz_live = 1;
+ 
