@@ -3259,8 +3259,12 @@ static const struct irt_index_case irt_index_cases[] = {
 	{ "intel irt, pin 128", IOMMU_VTD_IRT_PIN, 128, 0, 0 },
 	{ "intel irt, msi slot 0", IOMMU_VTD_IRT_MSI, 0, 1, 128 },
 	{ "intel irt, msi slot 15", IOMMU_VTD_IRT_MSI, 15, 1, 143 },
-	{ "intel irt, msi slot 127", IOMMU_VTD_IRT_MSI, 127, 1, 255 },
-	{ "intel irt, msi slot 128", IOMMU_VTD_IRT_MSI, 128, 0, 0 },
+	{ "intel irt, msi slot 111", IOMMU_VTD_IRT_MSI, 111, 1, 239 },
+	{ "intel irt, msi slot 112", IOMMU_VTD_IRT_MSI, 112, 0, 0 },
+	/* #598: the HPET's comparators, past the MSI slots. */
+	{ "intel irt, hpet comparator 0", IOMMU_VTD_IRT_HPET, 0, 1, 240 },
+	{ "intel irt, hpet comparator 15", IOMMU_VTD_IRT_HPET, 15, 1, 255 },
+	{ "intel irt, hpet comparator 16", IOMMU_VTD_IRT_HPET, 16, 0, 0 },
 };
 
 static unsigned irt_index_check(unsigned *ran)

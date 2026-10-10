@@ -543,22 +543,26 @@ int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index);
 /*
  * ── #598: which entry of intel's one table is whose ──────────────────
  *
- * Divided once, here, between the two kinds of source this kernel programs:
- * an I/O APIC pin's entry is its pin number, 0 to 127, and MSI slot s is
- * entry 128 + s.  Fixed rather than allocated, because the sources are fixed
- * already -- a pin, one of DEVICE_MD_MSI_MAX slots -- and a map with no state
- * cannot be left disagreeing with itself by a source that went away.
+ * Divided once, here, between the three kinds of source this kernel programs:
+ * an I/O APIC pin's entry is its pin number, 0 to 127, MSI slot s is entry
+ * 128 + s for s up to 111, and the HPET's comparator n is entry 240 + n for n
+ * up to 15.  Fixed rather than allocated, because the sources are fixed
+ * already -- a pin, one of DEVICE_MD_MSI_MAX slots, a comparator -- and a map
+ * with no state cannot be left disagreeing with itself by a source that went
+ * away.
  *
- * The HPET has no range: while interrupts are remapped its comparator is
- * routed through its I/O APIC pin (#598 point 4), never as a message of its
- * own.
+ * The HPET's range is its FSB message's, which goes through remapping only
+ * when a table names the HPET (#598); without one its comparator stays on its
+ * I/O APIC pin, whose entry is the pin's.  The MSI range gave up the sixteen:
+ * it had 128 for DEVICE_MD_MSI_MAX's 16.
  *
  * Answers zero for a source past its range, which a caller must take as
  * "this source cannot be remapped" and never as entry zero.
  */
 enum iommu_vtd_irt_source {
 	IOMMU_VTD_IRT_PIN,
-	IOMMU_VTD_IRT_MSI
+	IOMMU_VTD_IRT_MSI,
+	IOMMU_VTD_IRT_HPET
 };
 
 int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,

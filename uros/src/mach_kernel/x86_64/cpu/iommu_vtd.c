@@ -1654,7 +1654,9 @@ int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index)
  */
 #define	VTD_IRT_PINS		128u
 #define	VTD_IRT_MSI_FIRST	128u
-#define	VTD_IRT_MSI_SLOTS	128u
+#define	VTD_IRT_MSI_SLOTS	112u	/* DEVICE_MD_MSI_MAX is 16 */
+#define	VTD_IRT_HPET_FIRST	240u
+#define	VTD_IRT_HPET_SLOTS	16u	/* comparators 0 to 15 */
 
 int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
 			uint32_t *index)
@@ -1668,6 +1670,10 @@ int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
 	}
 	if (kind == IOMMU_VTD_IRT_MSI && n < VTD_IRT_MSI_SLOTS) {
 		*index = VTD_IRT_MSI_FIRST + n;
+		return 1;
+	}
+	if (kind == IOMMU_VTD_IRT_HPET && n < VTD_IRT_HPET_SLOTS) {
+		*index = VTD_IRT_HPET_FIRST + n;
 		return 1;
 	}
 	return 0;
@@ -1702,8 +1708,7 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
  *
  * 256 entries of sixteen bytes: one frame, and IRTA's S is 7.  Room for what
  * this kernel programs -- one I/O APIC's pins, DEVICE_MD_MSI_MAX MSI slots,
- * the HPET's comparators -- with the division of the indices left to the step
- * that writes the first entry.
+ * the HPET's comparators -- divided by iommu_vtd_irt_index() above.
  *
  * 🔴 EVERY ENTRY WRITTEN, and read back as the two words written.  Not
  * present refuses whatever else an entry holds, so asking the decoder what
@@ -1718,8 +1723,9 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
 #define	VTD_IRT_ENTRIES		256u
 
 _Static_assert(VTD_IRT_PINS <= VTD_IRT_MSI_FIRST
-	       && VTD_IRT_MSI_FIRST + VTD_IRT_MSI_SLOTS <= VTD_IRT_ENTRIES,
-	       "the index map's two ranges overlap, or run past the table");
+	       && VTD_IRT_MSI_FIRST + VTD_IRT_MSI_SLOTS <= VTD_IRT_HPET_FIRST
+	       && VTD_IRT_HPET_FIRST + VTD_IRT_HPET_SLOTS <= VTD_IRT_ENTRIES,
+	       "the index map's three ranges overlap, or run past the table");
 
 int iommu_vtd_irt_build(void)
 {
