@@ -454,8 +454,9 @@ const struct iommu_tables *iommu_tables(void);
  * divided once for the machine.  The price is that changing an entry means
  * telling every engine to forget it, each through its own queue.
  *
- * On AMD a table belongs to a device (Rev 3.11 §2.2.2.1): one for each source
- * the IVRS names in a special entry -- I/O APIC, HPET -- and one closed table
+ * On AMD a table belongs to a device (Rev 3.11 §2.2.2.1): one for each
+ * DeviceID the IVRS names in a special entry -- I/O APIC, HPET, two of which
+ * may share one -- and one closed table
  * for every other device, so that a device nobody gave an interrupt is refused
  * and logged rather than passed unmapped.  ⚠️ An IVRS that names no I/O APIC
  * is a real one -- QEMU's under KVM -- and leaves its pins with no table.
@@ -471,8 +472,9 @@ struct iommu_interrupt_tables {
 	unsigned	frames;		/* what they cost, in 4K frames       */
 	uint64_t	intel_table;	/* the one every intel engine shares  */
 	uint64_t	intel_irta;	/* ... and the word IRTA_REG will get */
-	unsigned	named;		/* AMD: of a source the IVRS names    */
-	unsigned	ioapics;	/* ... of which I/O APICs             */
+	unsigned	named;		/* AMD: for the sources the IVRS names */
+	unsigned	ioapics;	/* ... which are I/O APICs            */
+	unsigned	hpets;		/* ... and HPETs, once per DeviceID   */
 };
 
 /*

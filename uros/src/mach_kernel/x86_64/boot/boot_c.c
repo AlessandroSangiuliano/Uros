@@ -5790,9 +5790,12 @@ static void iommu_selftest(void)
 				kputdec(it->wrong);
 				kputs(" wrong — ");
 				kputdec(it->named);
-				kputs(" for sources the ivrs names (");
+				kputs(" for the sources the ivrs names, a table"
+				      " per device id (");
 				kputdec(it->ioapics);
-				kputs(" i/o apic)");
+				kputs(" i/o apic, ");
+				kputdec(it->hpets);
+				kputs(" hpet)");
 				kputs(built ? " and 1 closed for every other device,"
 					      " nothing points at them yet\r\n"
 					    : " — WRONG, no frame or no room, or an"
