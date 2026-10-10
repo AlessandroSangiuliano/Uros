@@ -69,4 +69,11 @@ uint64_t boot_frames_total(void);
  */
 uint64_t boot_frame_low_water(void);
 
+/*
+ * Was [pa, pa + len) cut out of the usable regions, so that no frame of it is
+ * ever handed out (#373)?  Only ramoops=ADDR's megabyte ever is, and only
+ * when all of it lay inside one region the loader called usable.
+ */
+int boot_frames_cut(uint64_t pa, uint64_t len);
+
 #endif	/* _X86_64_PMAP_BOOTMEM_H_ */
