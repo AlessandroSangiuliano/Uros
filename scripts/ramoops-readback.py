@@ -135,9 +135,17 @@ def main():
 
     env = dict(os.environ, UROS_BUILD_DIR=build,
                UROS_X86_64_BOOT_ENTRY=str(a.entry))
-    subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
-                   env=env, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    made = subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
+                          env=env, stdout=subprocess.DEVNULL,
+                          stderr=subprocess.PIPE, text=True)
+    if made.returncode != 0:
+        print("ramoops-readback: make-disk-x86_64.sh could not make the disk "
+              "-- a build without its targets (the harness builds them: "
+              "mach_kernel boot_probe name_server_bin bootstrap_server "
+              "bootstrap_bundle)" +
+              (f": {made.stderr.strip().splitlines()[-1]}"
+               if made.stderr.strip() else ""), file=sys.stderr)
+        return 2
 
     try:
         os.mkdir(LOCK)
