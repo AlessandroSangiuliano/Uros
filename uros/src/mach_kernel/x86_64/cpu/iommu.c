@@ -446,15 +446,21 @@ int iommu_interrupts_remapped(void)
 	return 0;
 }
 
-int iommu_ioapic_source(uint8_t id, uint16_t *source)
+/*
+ * The requester id of a source the tables name by an enumeration id rather
+ * than by its place on a bus: an I/O APIC by its MADT id, the HPET by its
+ * sequence number (#598).  Both readers file them the same way -- the DMAR's
+ * device scope of type 3 or 4, the IVRS's special entry of variety 1 or 2 --
+ * so one walk answers for both kinds and both vendors.
+ */
+static int named_source(uint8_t kind, uint8_t id, uint16_t *source)
 {
 	for (unsigned i = 0; i < nunits; i++)
 		for (unsigned s = 0; s < units[i].scope_count; s++) {
 			const struct iommu_scope *sc =
 				&scopes[units[i].scope_first + s];
 
-			if (sc->kind != IOMMU_SCOPE_IOAPIC
-			    || sc->enumeration_id != id)
+			if (sc->kind != kind || sc->enumeration_id != id)
 				continue;
 			if (sc->depth != 1)
 				return 0;
@@ -464,6 +470,16 @@ int iommu_ioapic_source(uint8_t id, uint16_t *source)
 		}
 
 	return 0;
+}
+
+int iommu_ioapic_source(uint8_t id, uint16_t *source)
+{
+	return named_source(IOMMU_SCOPE_IOAPIC, id, source);
+}
+
+int iommu_hpet_source(uint8_t number, uint16_t *source)
+{
+	return named_source(IOMMU_SCOPE_HPET, number, source);
 }
 
 /*

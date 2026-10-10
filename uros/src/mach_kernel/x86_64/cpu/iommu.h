@@ -539,6 +539,14 @@ void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector);
 int iommu_ioapic_source(uint8_t id, uint16_t *source);
 
 /*
+ * The same for the HPET (#598), whose DMAR scope (type 4) and IVRS special
+ * entry (variety 2) carry its sequence number, the ACPI HPET table's
+ * `number'.  Zero means no table names it: its FSB message has no entry to
+ * go through, and the comparator stays on its I/O APIC pin.
+ */
+int iommu_hpet_source(uint8_t number, uint16_t *source);
+
+/*
  * ── #598 phase 4: remapping turned on, behind `-i' ────────────────────
  *
  * 🔴 THE FIRST STEP OF #598 THAT CAN STOP AN INTERRUPT, so it is asked for,
