@@ -25,6 +25,7 @@
 #include <kern/sched_prim.h>
 #include <kern/time_out.h>
 #include <boot/bootarg.h>
+#include <ddb/ramoops.h>
 #include <cpu/acpi.h>
 #include <cpu/regs.h>
 #include <cpu/reset.h>
@@ -233,7 +234,20 @@ void reset_deadline_start(void)
 
 void reset_machine(void)
 {
+	uint64_t	zone;
+	uint32_t	bytes, dropped;
+
 	interrupts_disable();
+
+	/*
+	 * What survives this, if anything (#373), checked the way Linux will
+	 * read it and said into the zone itself.
+	 */
+	if (ramoops_live(&zone, &bytes, &dropped))
+		ramoops_check();
+	else
+		printf("reset: no zone: this boot's console is not kept across "
+		       "the reset (#373)\n");
 
 	/*
 	 * A reset does not write a write-back cache to memory, and what is read
