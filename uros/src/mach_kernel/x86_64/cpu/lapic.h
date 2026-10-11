@@ -33,7 +33,8 @@ void lapic_init(uint64_t madt_base);
  * remapping engine is written, since the mode is part of what an engine is
  * given; lapic_x2apic_planned() is what it decided.  lapic_choose_mode() makes
  * the switch the plan says, and every processor runs the mode it settles on
- * (lapic_enable()).  The boot says which.
+ * (lapic_enable()).  The boot says which.  "-2" below is also the MADT listing
+ * an id past 255 with nobody asking, lapic_x2apic_needed() -- zero otherwise.
  */
 enum lapic_mode {
 	LAPIC_MODE_XAPIC,			/* not asked, or nothing to keep */
@@ -42,13 +43,24 @@ enum lapic_mode {
 	LAPIC_MODE_X2APIC_TURNED_ON,		/* -2, under a hypervisor */
 	LAPIC_MODE_X2APIC_ABSENT,		/* -2, and CPUID offers none */
 	LAPIC_MODE_X2APIC_OPTED_OUT,		/* -2, and the DMAR asks for none */
-	LAPIC_MODE_X2APIC_NOT_ON_METAL		/* -2 on bare metal, no remapping */
+	LAPIC_MODE_X2APIC_NOT_ON_METAL,		/* -2 on bare metal, no remapping
+						   to 32-bit ids */
+	LAPIC_MODE_X2APIC_TURNED_ON_REMAPPED	/* -2, remapped to 32-bit ids */
 };
 void		lapic_plan_mode(void);
 int		lapic_x2apic_planned(void);
+uint32_t	lapic_x2apic_needed(void);
 void		lapic_choose_mode(void);
 enum lapic_mode	lapic_mode(void);
 int		lapic_x2apic(void);
+
+/*
+ * #659: the command register's destination word for `apic_id' in the mode
+ * given (1 for x2APIC), or no: in xAPIC mode an id past eight bits does not
+ * fit, and is refused rather than cut to its low byte.
+ */
+int		lapic_icr_destination(uint32_t apic_id, int x2apic_mode,
+				      uint32_t *high);
 
 /*
  * The vector the local APIC delivers when it has decided, after the fact,

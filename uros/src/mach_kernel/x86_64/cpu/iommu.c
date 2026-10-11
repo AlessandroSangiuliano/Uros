@@ -432,15 +432,22 @@ static int every_engine_x2apic(void)
 	return 1;
 }
 
+/*
+ * #659: and a 16-byte store, which an entry for 32-bit ids takes on AMD as on
+ * Intel (iommu_store_entry16()), and on Intel a DMAR that says the platform
+ * can remap.  What could be; what was is iommu_remaps_x2apic().
+ */
+int iommu_can_remap_x2apic(void)
+{
+	return every_engine_x2apic() && cpu_has_cmpxchg16b()
+	       && (found_vendor != IOMMU_INTEL
+		   || platform_interrupt_remapping == 1);
+}
+
 int iommu_build_interrupt_tables(void)
 {
 	if (!interrupt_tables_tried) {
-		/*
-		 * #659: and a 16-byte store, which an entry for 32-bit ids
-		 * takes on AMD as on Intel (iommu_store_entry16()).
-		 */
-		int x2apic = lapic_x2apic_planned() && every_engine_x2apic()
-			     && cpu_has_cmpxchg16b();
+		int x2apic = lapic_x2apic_planned() && iommu_can_remap_x2apic();
 
 		interrupt_tables_tried = 1;
 		if (found_vendor == IOMMU_INTEL)

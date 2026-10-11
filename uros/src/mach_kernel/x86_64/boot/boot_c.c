@@ -6637,8 +6637,9 @@ static void ioapic_selftest(void)
 	/*
 	 * #598's C16: an APIC id past eight bits is refused by a redirection
 	 * entry and by a message address, not cut to its low byte.  Asked of
-	 * the arithmetic: this kernel reads xAPIC ids, which cannot pass eight
-	 * bits, and whether x2APIC follows is still #598's open question.
+	 * the arithmetic: these are the old format's words, which cannot carry
+	 * more, and an x2APIC id is reached through a remapping entry for 32-bit
+	 * ids instead (#659, irq_reach_selftest() below).
 	 */
 	{
 		uint32_t high = 0;
@@ -6657,6 +6658,27 @@ static void ioapic_selftest(void)
 		kputs(ok == 5 ? " of 5\r\n"
 			      : " of 5 — WRONG, it would reach the processor"
 				" that has its low byte\r\n");
+	}
+
+	/*
+	 * #659: and the command register, which C16 did not look at -- in
+	 * xAPIC mode an INIT for processor 256 went to processor 0.
+	 */
+	{
+		uint32_t high = 0;
+		unsigned ok = 0;
+
+		ok += lapic_icr_destination(3, 0, &high) && high == 0x03000000u;
+		ok += lapic_icr_destination(255, 0, &high) && high == 0xFF000000u;
+		ok += !lapic_icr_destination(256, 0, &high);
+		ok += lapic_icr_destination(256, 1, &high) && high == 256u;
+		kputs("UrMach x86-64: an apic id past eight bits refused by the"
+		      " command register in xAPIC mode and carried whole in"
+		      " x2APIC mode: ");
+		kputdec(ok);
+		kputs(ok == 4 ? " of 4 (#659)\r\n"
+			      : " of 4 — WRONG, an interrupt for it would reach"
+				" the processor that has its low byte (#659)\r\n");
 	}
 
 	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, device_irq);
@@ -8710,6 +8732,39 @@ static void double_fault_selftest(void)
 }
 
 /*
+ * #659: why the local APIC's mode line says x2APIC mode was wanted -- -2, or
+ * an id past eight bits the MADT lists with nobody asking -- and the rest of
+ * the line.
+ */
+static void lapic_mode_by(const char *rest)
+{
+	uint32_t needed = lapic_x2apic_needed();
+
+	if (needed == 0) {
+		kputs("by -2");
+	} else {
+		kputs("for apic id ");
+		kputdec(needed);
+		kputs(", which is past eight bits,");
+	}
+	kputs(rest);
+}
+
+static void lapic_mode_asked(const char *rest)
+{
+	uint32_t needed = lapic_x2apic_needed();
+
+	if (needed == 0) {
+		kputs("-2 asked for x2APIC");
+	} else {
+		kputs("apic id ");
+		kputdec(needed);
+		kputs(" needs x2APIC");
+	}
+	kputs(rest);
+}
+
+/*
  * The descriptor tables, which now belong to a processor rather than to the
  * boot.
  *
@@ -8889,16 +8944,26 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 		kputs("UrMach x86-64: local apic in x2APIC mode, kept as the firmware left it, though its DMAR asks for no x2APIC -- said, not resolved (#659)\r\n");
 		break;
 	case LAPIC_MODE_X2APIC_TURNED_ON:
-		kputs("UrMach x86-64: local apic in x2APIC mode, turned on by -2 under a hypervisor (#659)\r\n");
+		kputs("UrMach x86-64: local apic in x2APIC mode, turned on ");
+		lapic_mode_by(" under a hypervisor (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_TURNED_ON_REMAPPED:
+		kputs("UrMach x86-64: local apic in x2APIC mode, turned on ");
+		lapic_mode_by(" with interrupts remapped to 32-bit ids (#659)\r\n");
 		break;
 	case LAPIC_MODE_X2APIC_ABSENT:
-		kputs("UrMach x86-64: local apic in xAPIC mode: -2 asked for x2APIC, and CPUID offers none (#659)\r\n");
+		kputs("UrMach x86-64: local apic in xAPIC mode: ");
+		lapic_mode_asked(", and CPUID offers none (#659)\r\n");
 		break;
 	case LAPIC_MODE_X2APIC_OPTED_OUT:
-		kputs("UrMach x86-64: local apic in xAPIC mode: -2 asked for x2APIC, and the DMAR asks for none (#659)\r\n");
+		kputs("UrMach x86-64: local apic in xAPIC mode: ");
+		lapic_mode_asked(", and the DMAR asks for none (#659)\r\n");
 		break;
 	case LAPIC_MODE_X2APIC_NOT_ON_METAL:
-		kputs("UrMach x86-64: local apic in xAPIC mode: -2 asked for x2APIC, which without interrupt remapping is a guest's (SDM 13.12.6, #598) (#659)\r\n");
+		kputs("UrMach x86-64: local apic in xAPIC mode: ");
+		lapic_mode_asked(", which on bare metal needs interrupts remapped"
+				 " to 32-bit ids, and they are not (SDM 13.12.6)"
+				 " (#659)\r\n");
 		break;
 	}
 	msi_selftest();

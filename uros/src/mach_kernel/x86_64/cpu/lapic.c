@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <boot/bootarg.h>	/* #659: -2 */
+#include <cpu/acpi.h>		/* #659: the widest id the MADT lists */
 #include <cpu/iommu.h>		/* #659: the DMAR's opt-out */
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>	/* #457: where the acknowledgement count lives */
@@ -94,6 +95,7 @@ static volatile uint8_t *lapic;
 
 static int x2apic;
 static int x2apic_planned;		/* #659: what the engines are written for */
+static uint32_t x2apic_needed;		/* #659: an id past 255, unasked */
 static int present;
 static enum lapic_mode lapic_mode_reached = LAPIC_MODE_XAPIC;
 
@@ -154,14 +156,16 @@ void lapic_init(uint64_t madt_base)
  * 🔑 ONE DECISION, ONCE THE DMAR HAS BEEN READ (#659).
  *
  * Kept when the firmware left it on -- lapic_init() found that.  Turned on
- * only when asked (-2), since no APIC id this kernel numbers needs it: an id
- * past 255 is the reason to run in x2APIC mode, and reaching one needs
- * interrupt remapping (#598).  Without remapping, x2APIC mode is
+ * when asked (-2), or when the MADT lists a processor whose id is past 255,
+ * which xAPIC mode cannot reach at all (lapic_icr_destination()).  Reaching
+ * such an id with a device's interrupt takes remapping entries for 32-bit ids
+ * (iommu_remaps_x2apic()), and without remapping x2APIC mode is
  * architecturally a guest's: "Intel VT-d Interrupt Remapping is a
  * prerequisite for using the x2APIC mode" (SDM 13.12.6), and Linux turns it on
- * without remapping only under a hypervisor, so -2 does the same.  Never
- * turned on where the DMAR opts out; a firmware that opts out and left it on
- * anyway is said, not resolved.
+ * without remapping only under a hypervisor.  So on bare metal it is planned
+ * only with -i and engines that can carry 32-bit ids, and switched on only
+ * once remapping came on with them.  Never turned on where the DMAR opts out;
+ * a firmware that opts out and left it on anyway is said, not resolved.
  *
  * Made in two steps, because the mode is part of what the remapping engines
  * are given -- EIME on Intel; XTEn, GAEn and the 128-bit entry on AMD -- and
@@ -184,7 +188,13 @@ void lapic_plan_mode(void)
 			lapic_mode_reached = LAPIC_MODE_X2APIC_KEPT_OPTED_OUT;
 		return;
 	}
-	if (!boot_flag('2'))
+
+	/* The widest id the MADT lists, when nobody asked: the boot says which. */
+	for (unsigned i = 0; i < acpi_cpu_count() && !boot_flag('2'); i++)
+		if (acpi_cpu(i)->apic_id > 0xFFu
+		    && acpi_cpu(i)->apic_id > x2apic_needed)
+			x2apic_needed = acpi_cpu(i)->apic_id;
+	if (!boot_flag('2') && x2apic_needed == 0)
 		return;
 
 	cpuid(1, &a, &b, &c, &d);
@@ -192,7 +202,8 @@ void lapic_plan_mode(void)
 		lapic_mode_reached = LAPIC_MODE_X2APIC_ABSENT;
 	else if (iommu_x2apic_discouraged())
 		lapic_mode_reached = LAPIC_MODE_X2APIC_OPTED_OUT;
-	else if (!(c & (1U << 31)))
+	else if (!(c & (1U << 31))
+		 && !(boot_flag('i') && iommu_can_remap_x2apic()))
 		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
 	else
 		x2apic_planned = 1;
@@ -200,17 +211,37 @@ void lapic_plan_mode(void)
 
 void lapic_choose_mode(void)
 {
+	uint32_t a, b, c, d;
+	int remapped = iommu_interrupts_remapped() && iommu_remaps_x2apic();
+
 	if (x2apic || !x2apic_planned)
 		return;
 
+	/*
+	 * On bare metal only once remapping came on with entries for 32-bit
+	 * ids: the plan could see only that it might.  Entries built for them
+	 * by engines that then did not turn on are entries nothing reads.
+	 */
+	cpuid(1, &a, &b, &c, &d);
+	if (!(c & (1U << 31)) && !remapped) {
+		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
+		return;
+	}
+
 	wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
 	x2apic = 1;
-	lapic_mode_reached = LAPIC_MODE_X2APIC_TURNED_ON;
+	lapic_mode_reached = remapped ? LAPIC_MODE_X2APIC_TURNED_ON_REMAPPED
+				      : LAPIC_MODE_X2APIC_TURNED_ON;
 }
 
 int lapic_x2apic_planned(void)
 {
 	return x2apic_planned;
+}
+
+uint32_t lapic_x2apic_needed(void)
+{
+	return x2apic_needed;
 }
 
 enum lapic_mode lapic_mode(void)
@@ -378,8 +409,36 @@ uint64_t lapic_icr_nested_on(uint32_t apic_id)
 }
 #endif
 
+/*
+ * #659: the command register's destination for `apic_id', in the mode given:
+ * all 32 bits in x2APIC mode, the 64-bit register's high half (SDM 13.12.9),
+ * and eight in xAPIC mode, in the high half's 31:24.  An id past eight bits is
+ * refused there: shifted into those eight it kept its low byte, and an INIT
+ * for processor 256 was an INIT for processor 0 -- #598's C16 had looked at
+ * the routing words and not at this one.
+ */
+int lapic_icr_destination(uint32_t apic_id, int x2apic_mode, uint32_t *high)
+{
+	if (x2apic_mode) {
+		*high = apic_id;
+		return 1;
+	}
+	if (apic_id > 0xFFu)
+		return 0;
+	*high = apic_id << 24;
+	return 1;
+}
+
 static void icr_send(uint32_t apic_id, uint32_t command)
 {
+	uint32_t high = 0;
+
+	/* Before anything is written: see lapic_icr_destination(). */
+	if (!lapic_icr_destination(apic_id, x2apic, &high))
+		panic("lapic: apic id %u does not fit the command register in "
+		      "xAPIC mode, and would reach the processor with its low "
+		      "byte (#659)", apic_id);
+
 #if !ABLATE_593_ICR_OPEN
 	int was_enabled = interrupts_enabled();
 
@@ -431,14 +490,14 @@ static void icr_send(uint32_t apic_id, uint32_t command)
 		 * cross-call could arrive before the request it announces.
 		 */
 		__asm__ volatile("mfence; lfence" : : : "memory");
-		wrmsr(MSR_X2APIC_ICR, ((uint64_t) apic_id << 32) | command);
+		wrmsr(MSR_X2APIC_ICR, ((uint64_t) high << 32) | command);
 	} else {
 		/*
 		 * The destination goes in the high half and the command in
 		 * the low half, and writing the low half is what sends it —
 		 * so the order is not a style question.
 		 */
-		lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
+		lapic_write(LAPIC_ICR_HIGH, high);
 		lapic_write(LAPIC_ICR_LOW, command);
 	}
 

@@ -499,6 +499,14 @@ const struct iommu_interrupt_tables *iommu_interrupt_tables(void);
 int iommu_remaps_x2apic(void);
 
 /*
+ * #659: whether they could be -- every engine able to carry an x2APIC id, a
+ * 16-byte store for the entries, and on Intel a DMAR that says the platform
+ * can remap.  For lapic_plan_mode(), which on bare metal plans x2APIC mode only
+ * where remapping could carry it, before any table is built.
+ */
+int iommu_can_remap_x2apic(void);
+
+/*
  * ── #598: what a source writes, through remapping or around it ───────
  *
  * The question every source asks before it is programmed: an I/O APIC pin in

@@ -445,9 +445,22 @@ unsigned smp_start_others(void)
 	 * Every stack is in place, so every processor can be woken without
 	 * waiting for the one before it.  Woken by APIC id, which is what the
 	 * hardware is addressed by.
+	 *
+	 * #659: one whose id the command register cannot carry in the mode
+	 * the boot settled on -- past eight bits, in xAPIC mode, which
+	 * lapic_plan_mode() turns x2APIC mode on for wherever it can -- is not
+	 * woken, and not counted as asked.  Said: its INIT used to go to the
+	 * processor with its id's low byte.
 	 */
 	for (unsigned cpu = 1; cpu < smp_cpu_count(); cpu++) {
-		uint32_t id = cpu_to_apic(cpu);
+		uint32_t id = cpu_to_apic(cpu), high;
+
+		if (!lapic_icr_destination(id, lapic_x2apic(), &high)) {
+			printf("smp: processor %u, apic id %u, is not woken: "
+			       "xAPIC mode cannot address an id past eight "
+			       "bits (#659)\n", cpu, id);
+			continue;
+		}
 
 		lapic_send_init(id);
 		lapic_send_startup(id, AP_TRAMPOLINE_BASE);
