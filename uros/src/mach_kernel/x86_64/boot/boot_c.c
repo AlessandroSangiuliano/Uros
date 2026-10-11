@@ -8626,11 +8626,20 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 * ioapic_selftest() says what was found.
 	 */
 	(void) ioapic_init();
+
+	/*
+	 * xAPIC or x2APIC mode, decided once the DMAR has been read -- the
+	 * discovery reads its opt-out, and iommu_selftest() asks again to be
+	 * answered from what was recorded -- and before any remapping engine
+	 * is written, since the mode is part of what an engine is given (#659).
+	 */
+	(void) iommu_discover();
+	lapic_plan_mode();
 	iommu_selftest();
 
 	/*
-	 * xAPIC or x2APIC mode, decided once the DMAR has been read, before
-	 * any other processor is started in it (#659).
+	 * And the switch the plan says, before any other processor is started
+	 * in it (#659).
 	 */
 	lapic_choose_mode();
 	switch (lapic_mode()) {

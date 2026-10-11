@@ -93,6 +93,7 @@ static volatile uint8_t *lapic;
 #define MSR_X2APIC_ICR		0x830U
 
 static int x2apic;
+static int x2apic_planned;		/* #659: what the engines are written for */
 static int present;
 static enum lapic_mode lapic_mode_reached = LAPIC_MODE_XAPIC;
 
@@ -162,16 +163,23 @@ void lapic_init(uint64_t madt_base)
  * turned on where the DMAR opts out; a firmware that opts out and left it on
  * anyway is said, not resolved.
  *
+ * Made in two steps, because the mode is part of what the remapping engines
+ * are given -- EIME on Intel; XTEn, GAEn and the 128-bit entry on AMD -- and
+ * the engines are written before the switch.  lapic_plan_mode() decides, once
+ * the DMAR has been read and before any engine is; lapic_choose_mode() makes
+ * the switch the plan says, and nothing else.
+ *
  * xAPIC to x2APIC keeps the registers software set, but the logical
  * destination, an id written to the ID register and the command register's
  * high half (SDM 13.12.5) -- none of which this kernel keeps -- so the switch
  * can come after the timer and the self-tests have run in xAPIC mode.
  */
-void lapic_choose_mode(void)
+void lapic_plan_mode(void)
 {
 	uint32_t a, b, c, d;
 
 	if (x2apic) {
+		x2apic_planned = 1;
 		if (iommu_x2apic_discouraged())
 			lapic_mode_reached = LAPIC_MODE_X2APIC_KEPT_OPTED_OUT;
 		return;
@@ -186,11 +194,23 @@ void lapic_choose_mode(void)
 		lapic_mode_reached = LAPIC_MODE_X2APIC_OPTED_OUT;
 	else if (!(c & (1U << 31)))
 		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
-	else {
-		wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
-		x2apic = 1;
-		lapic_mode_reached = LAPIC_MODE_X2APIC_TURNED_ON;
-	}
+	else
+		x2apic_planned = 1;
+}
+
+void lapic_choose_mode(void)
+{
+	if (x2apic || !x2apic_planned)
+		return;
+
+	wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
+	x2apic = 1;
+	lapic_mode_reached = LAPIC_MODE_X2APIC_TURNED_ON;
+}
+
+int lapic_x2apic_planned(void)
+{
+	return x2apic_planned;
 }
 
 enum lapic_mode lapic_mode(void)
