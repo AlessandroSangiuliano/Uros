@@ -12,9 +12,19 @@
 # 🔑 THE FONT IS THE KEY, AND IT IS THE KERNEL'S OWN.  Every glyph is eight
 # pixels by sixteen and comes from device/fbcons_font.h, which this script
 # parses rather than reimplements.  So each 8x16 cell of the screendump can be
-# turned back into the exact byte that produced it: not an OCR that might be
+# turned back into the exact glyph that produced it: not an OCR that might be
 # wrong, an inversion of a table both sides share.  What comes back is compared
 # against the serial log of the same boot.
+#
+# 🔑 AND SO IS WHAT EACH GLYPH IS (#661).  The console decodes the UTF-8 it is
+# handed and draws the glyph the font's Unicode table names, from the same
+# header; this parses that table too, reads every cell as the character its
+# glyph is, and passes the serial log through the same table before comparing.
+# An em dash is glyph 0xC4 on the panel, which the table says U+2500 is too:
+# both sides read it as U+2500, and a line agrees when the screen shows what
+# the wire said.  A character the font has no glyph for is drawn as ■ and
+# stays itself on the wire's side, so that line disagrees: it does not read
+# on the screen as on the wire.
 #
 # That makes the failures distinguishable, which is the whole point:
 #
@@ -63,6 +73,7 @@ GLYPH_W, GLYPH_H = 8, 16
 def load_font(path):
     """The kernel's own table, parsed rather than reimplemented."""
     text = open(path).read()
+    text = text[:text.index("fbcons_font_unicode[]")]
     rows = re.findall(r"\{((?:\s*0x[0-9a-fA-F]{2}\s*,?){16})\}", text)
     if len(rows) != 256:
         raise SystemExit(f"fbcons-readback: {path} gave {len(rows)} glyphs, "
@@ -72,6 +83,47 @@ def load_font(path):
     for r in rows:
         font.append(tuple(int(b, 16) for b in re.findall(r"0x([0-9a-fA-F]{2})", r)))
     return font
+
+
+def load_map(path):
+    """What each glyph is (#661): the font's Unicode table, code point ->
+    glyph, for every code point above ASCII.  Parsed, like the glyphs."""
+    text = open(path).read()
+    text = text[text.index("fbcons_font_unicode[]"):]
+    table = {int(cp, 16): int(g, 16) for cp, g in
+             re.findall(r"\{ 0x([0-9a-f]{4,6}), 0x([0-9a-f]{2}) \}", text)}
+    if 0x2014 not in table:
+        raise SystemExit(f"fbcons-readback: {path} gave {len(table)} code "
+                         f"points and no em dash — the table's shape changed "
+                         f"and this parser has to change with it")
+    return table
+
+
+def reading(font, table):
+    """What each bitmap reads as, and how a character of the log is read.
+
+    A bitmap is read as ASCII where ASCII draws it, else as the highest code
+    point the table gives it -- U+2500 for 0xC4, which the em dash also is,
+    and U+FFFD for 0xFE, the replacement -- and a blank one as a space.  A
+    character of the log is read as the bitmap it would be drawn with, so
+    both sides of the comparison go through the one table.  One with no glyph
+    stays as it is, and matches nothing on the screen."""
+    by_bitmap = {tuple([0] * GLYPH_H): " "}
+    for g in range(0x20, 0x7F):
+        by_bitmap.setdefault(tuple(font[g]), chr(g))
+    for cp, g in sorted(table.items(), reverse=True):
+        by_bitmap.setdefault(tuple(font[g]), chr(cp))
+    for g in range(256):
+        by_bitmap.setdefault(tuple(font[g]), chr(g))
+
+    def fold(text):
+        out = []
+        for ch in text:
+            o = ord(ch)
+            g = o if 0x20 <= o <= 0x7F else table.get(o)
+            out.append(ch if g is None else by_bitmap[tuple(font[g])])
+        return "".join(out)
+    return by_bitmap, fold
 
 
 def read_ppm(path):
@@ -120,23 +172,19 @@ def lit_pixels(w, h, pix):
     return (chans[0] | chans[1] | chans[2]).to_bytes(w * h, "big")
 
 
-def cell_to_byte(lit, w, col, row, font_index):
-    """Turn one 8x16 cell back into the byte that drew it, or None."""
+def cell_to_char(lit, w, col, row, by_bitmap):
+    """Turn one 8x16 cell back into what its glyph is, or None."""
     bits = []
     for gy in range(GLYPH_H):
         o = (row * GLYPH_H + gy) * w + col * GLYPH_W
         bits.append(_PACK[lit[o : o + GLYPH_W]])
-    return font_index.get(tuple(bits))
+    return by_bitmap.get(tuple(bits))
 
 
-def screen_lines(ppm, font):
+def screen_lines(ppm, by_bitmap):
     w, h, pix = read_ppm(ppm)
     lit = lit_pixels(w, h, pix)
-    index = {}
-    for code, g in enumerate(font):
-        index.setdefault(tuple(g), code)
-
-    # 🔴 AND THE BLANK GLYPH IS A SPACE, said explicitly.
+    # 🔴 AND THE BLANK GLYPH IS A SPACE, said explicitly, by reading().
     #
     # Several codes draw nothing at all, and the lowest of them is 0x00 -- so
     # taking the first match turned every untouched cell into a NUL, which
@@ -144,27 +192,23 @@ def screen_lines(ppm, font):
     # the comparison below for a reason that was entirely this script's: the
     # first shape of it reported fifty disagreements on a screen that was
     # correct.
-    index[tuple([0] * GLYPH_H)] = 0x20
+    #
+    # 🔑 CHARACTERS, not bytes (#661).  Until the console decoded UTF-8 an em
+    # dash was three glyphs, one a byte, and a row was read back as bytes and
+    # decoded; that made a screen showing "ÔÇö" agree with a wire saying "—",
+    # and is why this script never saw it.  A cell is a glyph now, and a glyph
+    # is what the table says it is.
     cols, rows = w // GLYPH_W, h // GLYPH_H
     out, unknown = [], 0
     for r in range(rows):
-        # 🔑 BYTES, NOT CHARACTERS, and only then decoded as UTF-8.
-        #
-        # The kernel writes UTF-8 and fbcons draws one CP437 glyph per BYTE, so
-        # an em-dash is three glyphs on the panel.  Recovering a character cell
-        # by cell would turn every one of them into mojibake, and the
-        # comparison below would report a disagreement that is entirely this
-        # script's.  Read back as the byte string it really is, a row decodes
-        # to exactly what the kernel emitted.
-        line = bytearray()
+        line = []
         for c in range(cols):
-            code = cell_to_byte(lit, w, c, r, index)
-            if code is None:
+            ch = cell_to_char(lit, w, c, r, by_bitmap)
+            if ch is None:
                 unknown += 1
-                line.append(0x3F)
-            else:
-                line.append(code)
-        out.append(line.decode("utf-8", errors="replace").rstrip())
+                ch = "?"
+            line.append(ch)
+        out.append("".join(line).rstrip())
     return out, unknown, cols, rows
 
 
@@ -220,6 +264,7 @@ def main():
         return 2
 
     font = load_font(os.path.join(REPO, FONT_H))
+    by_bitmap, fold = reading(font, load_map(os.path.join(REPO, FONT_H)))
 
     env = dict(os.environ, UROS_BUILD_DIR=build,
                UROS_X86_64_BOOT_ENTRY=str(a.entry))
@@ -344,7 +389,8 @@ def main():
                 raw = open(ppm, "rb").read()
                 if raw != last:
                     last = raw
-                    if any(text in l for l in screen_lines(ppm, font)[0]):
+                    if any(fold(text) in l
+                           for l in screen_lines(ppm, by_bitmap)[0]):
                         return True
                 hmp(m, "cont")
             return False
@@ -411,8 +457,8 @@ def main():
                   file=sys.stderr)
             return 2
 
-        lines, unknown, cols, rows = screen_lines(ppm, font)
-        serial = pump()
+        lines, unknown, cols, rows = screen_lines(ppm, by_bitmap)
+        serial = fold(pump())
         drawn = [l for l in lines if l.strip()]
 
         print(f"fbcons-readback: {cols}x{rows} cells, {len(drawn)} non-blank "
@@ -431,7 +477,7 @@ def main():
                   f"what the font says")
             return 1
 
-        absent = [t for t in a.expect if not any(t in l for l in lines)]
+        absent = [t for t in a.expect if not any(fold(t) in l for l in lines)]
         if absent:
             print(f"fbcons-readback: {len(absent)} of {len(a.expect)} "
                   f"expected texts are NOT ON THE SCREEN:")
