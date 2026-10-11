@@ -2866,10 +2866,10 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
  */
 struct irte_case {
 	const char	*what;
-	int		 amd;
-	int		 x2apic;	/* Intel's EIME                         */
+	int		 amd;		/* 1 the basic entry, 2 the 128-bit one */
+	int		 x2apic;	/* Intel's EIME; AMD's XTEn             */
 	uint64_t	 lo;		/* Intel's low word; AMD's entry        */
-	uint64_t	 hi;		/* Intel's high word                    */
+	uint64_t	 hi;		/* Intel's high word; AMD 128-bit's     */
 	int		 decodes;	/* 1 remaps, 0 refuses, -1 not ours     */
 	struct iommu_irte e;		/* the fields, when it remaps   */
 	int		 encodes;	/* 1 must produce, -1 must refuse, 0 not */
@@ -2959,6 +2959,37 @@ static const struct irte_case irte_cases[] = {
 	/* Bits 31:24 are reserved. */
 	{ "amd, reserved bits set (synthetic)", 1, 0,
 	  0x01410101ULL, 0, -1, { 0, 0, 0, 0 }, 0 },
+
+	/*
+	 * #659: AMD's 128-bit entry (Figure 19), the low word first.  The
+	 * destination's low 24 bits in 31:8, its high eight in the high
+	 * word's 63:56, the vector in its 7:0; with XTEn clear everything past
+	 * the destination's eighth bit must be zero, so the same two words
+	 * have two answers here too.
+	 */
+	{ "amd 128-bit, vector 0x41 to id 1", 2, 0,
+	  0x0000000000000101ULL, 0x0000000000000041ULL,
+	  1, { 0x41, 1, 0, 0 }, 1 },
+	{ "amd 128-bit, vector 0xfe to id 0x12345678, xten", 2, 1,
+	  0x0000000034567801ULL, 0x12000000000000FEULL,
+	  1, { 0xFE, 0x12345678, 0, 0 }, 1 },
+	{ "amd 128-bit, the same words without xten", 2, 0,
+	  0x0000000034567801ULL, 0x12000000000000FEULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, id 0x100 without xten", 2, 0,
+	  0, 0, 0, { 0x41, 0x100, 0, 0 }, -1 },
+	{ "amd 128-bit, remapping off", 2, 1,
+	  0x0000000000000100ULL, 0x0000000000000041ULL,
+	  0, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, guest mode (synthetic)", 2, 1,
+	  0x0000000000000181ULL, 0x0000000000000041ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, reserved bit 32 (synthetic)", 2, 1,
+	  0x0000000100000101ULL, 0x0000000000000041ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, reserved bit 72 (synthetic)", 2, 1,
+	  0x0000000000000101ULL, 0x0000000000000141ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
 };
 
 /*
@@ -3445,8 +3476,9 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 			uint64_t w[2] = { ~0ULL, ~0ULL };
 			uint32_t a = 0xFFFFFFFFu;
 
-			got = c->amd ? iommu_amd_irte(&c->e, &a)
-				     : iommu_vtd_irte(&c->e, c->x2apic, w);
+			got = c->amd == 2 ? iommu_amd_irte_ga(&c->e, c->x2apic, w)
+			    : c->amd ? iommu_amd_irte(&c->e, &a)
+			    : iommu_vtd_irte(&c->e, c->x2apic, w);
 
 			if (c->encodes < 0) {
 				if (got != 0)
@@ -3455,8 +3487,8 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 			}
 
 			if (got != 1
-			    || (c->amd ? a != (uint32_t)c->lo
-				       : w[0] != c->lo || w[1] != c->hi)) {
+			    || (c->amd == 1 ? a != (uint32_t)c->lo
+					    : w[0] != c->lo || w[1] != c->hi)) {
 				bad++;
 				continue;
 			}
@@ -3472,8 +3504,9 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 		d.level = -1;
 		d.source = 0xA5A5;
 
-		got = c->amd ? iommu_amd_irte_decode((uint32_t)c->lo, &d)
-			     : iommu_vtd_irte_decode(in, c->x2apic, &d);
+		got = c->amd == 2 ? iommu_amd_irte_ga_decode(in, c->x2apic, &d)
+		    : c->amd ? iommu_amd_irte_decode((uint32_t)c->lo, &d)
+		    : iommu_vtd_irte_decode(in, c->x2apic, &d);
 
 		if (got != c->decodes)
 			bad++;

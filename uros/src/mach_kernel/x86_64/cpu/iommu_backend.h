@@ -484,6 +484,13 @@ int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2]);
 int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out);
 
 /*
+ * #659: AMD's 128-bit entry, GuestMode clear, the one every entry has once
+ * GAEn is set (Rev 3.11 §2.2.5.3).  `x2apic' is XTEn: with it the destination
+ * has 32 bits, without it eight, as in the basic format.
+ */
+int iommu_amd_irte_ga(const struct iommu_irte *e, int x2apic, uint64_t out[2]);
+
+/*
  * Read an entry back.  Answers 1 when it remaps, 0 when it refuses, and -1
  * when it is something this kernel never writes -- reserved bits set, a posted
  * or guest-mode entry, a delivery other than fixed and physical, an Intel entry
@@ -496,6 +503,8 @@ int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out);
 int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
 			  struct iommu_irte *out);
 int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out);
+int iommu_amd_irte_ga_decode(const uint64_t in[2], int x2apic,
+			     struct iommu_irte *out);
 
 /*
  * ── #598: what a source writes so that its interrupt finds its entry ──

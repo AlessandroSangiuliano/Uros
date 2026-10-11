@@ -1893,9 +1893,8 @@ int iommu_amd_read(void)
  *	31:24	Reserved
  *
  * ⚠️ Eight bits of destination and nothing more.  An x2APIC id needs the
- * 128-bit format and XTEn in the control register, neither of which this
- * kernel writes -- so a wider id is refused by the encoder, not truncated
- * into somebody else's.
+ * 128-bit format below and XTEn in the control register -- so a wider id is
+ * refused by this encoder, not truncated into somebody else's.
  */
 #define	AMD_IRTE_REMAP_EN	(1u << 0)
 #define	AMD_IRTE_SUP_IOPF	(1u << 1)
@@ -1927,6 +1926,70 @@ int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
 
 	out->vector = (uint8_t)((in >> 16) & 0xFF);
 	out->destination = (in >> 8) & 0xFF;
+	out->level = 0;
+	out->source = 0;
+	return 1;
+}
+
+/*
+ * ── #659: the 128-bit entry, GuestMode clear ─────────────────────────
+ *
+ * Rev 3.11 §2.2.5.3, Figure 19: the format every entry has once GAEn is set,
+ * which x2APIC mode requires ("Even if Guest Virtual APIC will not be used,
+ * software must set MMIO 0x18[GAEn]=1 ... with IRTE[GuestMode]=0").  The low
+ * word keeps the basic entry's bits 7:0 and widens the destination:
+ *
+ *	low	0	RemapEn		as in the basic format
+ *		1	SupIOPF
+ *		4:2	IntType		000b fixed
+ *		5	RqEoi
+ *		6	DM		0 physical
+ *		7	GuestMode	0: this figure, not Figure 20
+ *		31:8	Destination[23:0]
+ *		63:32	Reserved
+ *	high	7:0	Vector		(bits 71:64)
+ *		55:8	Reserved	(bits 119:72)
+ *		63:56	Destination[31:24] (bits 127:120)
+ *
+ * "Destination[31:8] are reserved and MSZ when MMIO 0x30[XTSup]=0 or MMIO
+ * 0x18[XTEn]=0", so `x2apic' -- XTEn -- decides how wide the destination may
+ * be, and with it clear an id past eight bits is refused here as it is by the
+ * basic encoder.
+ */
+#define	AMD_IRTE_GA_LO_RSVD	0xFFFFFFFF00000000ULL
+#define	AMD_IRTE_GA_LO_DEST_HI	0x00000000FFFF0000ULL	/* Destination[23:8] */
+#define	AMD_IRTE_GA_HI_RSVD	0x00FFFFFFFFFFFF00ULL
+#define	AMD_IRTE_GA_HI_DEST	0xFF00000000000000ULL	/* Destination[31:24] */
+
+int iommu_amd_irte_ga(const struct iommu_irte *e, int x2apic, uint64_t out[2])
+{
+	if (e == 0 || out == 0 || (!x2apic && e->destination > 0xFF))
+		return 0;
+
+	out[0] = AMD_IRTE_REMAP_EN
+	       | ((uint64_t)(e->destination & 0xFFFFFFu) << 8);
+	out[1] = (uint64_t)e->vector
+	       | ((uint64_t)(e->destination >> 24) << 56);
+	return 1;
+}
+
+int iommu_amd_irte_ga_decode(const uint64_t in[2], int x2apic,
+			     struct iommu_irte *out)
+{
+	if (!(in[0] & AMD_IRTE_REMAP_EN))
+		return 0;
+
+	if ((in[0] & (AMD_IRTE_GA_LO_RSVD | AMD_IRTE_GUEST_MODE
+		      | AMD_IRTE_INT_TYPE_MASK | AMD_IRTE_RQ_EOI
+		      | AMD_IRTE_DM | AMD_IRTE_SUP_IOPF))
+	    || (in[1] & AMD_IRTE_GA_HI_RSVD)
+	    || (!x2apic && ((in[0] & AMD_IRTE_GA_LO_DEST_HI)
+			    || (in[1] & AMD_IRTE_GA_HI_DEST))))
+		return -1;
+
+	out->vector = (uint8_t)(in[1] & 0xFF);
+	out->destination = (uint32_t)((in[0] >> 8) & 0xFFFFFFu)
+			 | (uint32_t)((in[1] >> 56) << 24);
 	out->level = 0;
 	out->source = 0;
 	return 1;
