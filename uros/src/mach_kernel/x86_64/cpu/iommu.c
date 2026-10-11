@@ -582,6 +582,24 @@ void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector)
 		iommu_vtd_forget_msi(slot);
 }
 
+/*
+ * #659: on bare metal a local APIC the firmware left in x2APIC mode is
+ * remapped only through entries for 32-bit ids
+ * (lapic_remapping_needs_x2apic_entries()): the reason, when the tables were
+ * built for eight-bit ones -- an engine without EIM, an AMD one with XTSup and
+ * no GASup -- and zero otherwise.  Asked before an AMD engine's device table
+ * is prepared, too, so that a refusal leaves nothing pointing at the tables.
+ */
+static const char *x2apic_entries_missing(void)
+{
+	if (lapic_remapping_needs_x2apic_entries() && interrupt_tables_built
+	    && !iommu_remaps_x2apic())
+		return "the local apic is in x2APIC mode, which on bare metal"
+		       " remapping must carry 32-bit ids for, and an engine"
+		       " cannot (SDM 13.12.7, #659)";
+	return 0;
+}
+
 int iommu_prepare_interrupt_remapping(void)
 {
 	const struct acpi_ioapic *a = acpi_ioapic(0);
@@ -590,7 +608,8 @@ int iommu_prepare_interrupt_remapping(void)
 	if (found_vendor != IOMMU_AMD)
 		return 1;
 	if (!interrupt_tables_built
-	    || (a != 0 && !iommu_ioapic_source(a->id, &source)))
+	    || (a != 0 && !iommu_ioapic_source(a->id, &source))
+	    || x2apic_entries_missing() != 0)
 		return 0;
 
 	return iommu_amd_ir_prepare();
@@ -648,6 +667,10 @@ static unsigned enable_amd(const char **why, int *asked)
 	}
 	if (a != 0 && !iommu_ioapic_source(a->id, &source)) {
 		*why = "the ivrs names no i/o apic, whose pins would be refused";
+		return 0;
+	}
+	if (x2apic_entries_missing() != 0) {
+		*why = x2apic_entries_missing();
 		return 0;
 	}
 
@@ -725,6 +748,10 @@ unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
 	}
 	if (a != 0 && !iommu_ioapic_source(a->id, &source)) {
 		*why = "no table names the i/o apic, whose pins would be refused";
+		return 0;
+	}
+	if (x2apic_entries_missing() != 0) {
+		*why = x2apic_entries_missing();
 		return 0;
 	}
 

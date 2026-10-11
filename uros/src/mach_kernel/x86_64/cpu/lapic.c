@@ -257,6 +257,25 @@ int lapic_x2apic(void)
 }
 
 /*
+ * #659: remapping may come on only with entries for 32-bit ids -- the local
+ * APIC already in x2APIC mode, kept from the firmware, on bare metal, where
+ * "software must enable this interrupt remapping with Extended Interrupt Mode
+ * Enabled before it enabling x2APIC mode" (SDM 13.12.7) and AMD's engines
+ * "must set MMIO 0x18[XTEn]=1 and MMIO 0x18[GAEn]=1" for it (Rev 3.11
+ * §2.2.5.3).  Under a hypervisor x2APIC mode with eight-bit entries is the
+ * guest's practice, as it is without remapping (lapic_plan_mode()).
+ */
+int lapic_remapping_needs_x2apic_entries(void)
+{
+	uint32_t a, b, c, d;
+
+	if (!x2apic)
+		return 0;
+	cpuid(1, &a, &b, &c, &d);
+	return !(c & (1U << 31));
+}
+
+/*
  * The boot processor's mode on this one too (#659): an application processor
  * comes out of INIT in the mode it was in before, which is xAPIC unless the
  * firmware chose otherwise, and every register here is an MSR or a page

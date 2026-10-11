@@ -56,6 +56,13 @@ enum lapic_mode	lapic_mode(void);
 int		lapic_x2apic(void);
 
 /*
+ * #659: whether interrupt remapping may come on only with entries for 32-bit
+ * ids: the local APIC is in x2APIC mode already, and the machine is bare
+ * metal, where the SDM has remapping with EIME come first (13.12.7).
+ */
+int		lapic_remapping_needs_x2apic_entries(void);
+
+/*
  * 🔴 THE HIGHEST APIC ID AN EIGHT-BIT DESTINATION NAMES ONE PROCESSOR BY (#659).
  *
  * FEH, not FFH: in physical destination mode FFH is every processor -- "either
