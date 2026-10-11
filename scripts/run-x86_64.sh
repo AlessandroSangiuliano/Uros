@@ -7,7 +7,7 @@
 # ISO on -cdrom, with a separate data disk beside it; it is now the disk
 # itself, which is the whole of what QEMU is handed (#520).
 #
-# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
+# Usage: run-x86_64.sh [--iommu intel|amd] [--hpet fsb] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
 #   run-x86_64.sh
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
@@ -702,6 +702,7 @@ fi
 IOMMU_ARGS=""
 IOMMU_NAME="none"
 KVM_ARGS=""
+HPET_ARGS=""
 SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
@@ -724,6 +725,18 @@ while :; do
 			exit 2 ;;
 		esac
 		IOMMU_NAME=$2
+		shift 2 ;;
+	--hpet)
+		# #598: an HPET whose comparators can send an FSB message, the
+		# route -H takes wherever one can.  QEMU's can only with
+		# hpet.msi=on, so without this no run here took that route, or
+		# passed it over under -i.  An option and not a pass-through,
+		# so that the merge test, which gives options, can ask for it.
+		case "${2:-}" in
+		fsb)	HPET_ARGS="-global hpet.msi=on" ;;
+		*)	echo "usage: $0 [--iommu intel|amd] [--hpet fsb] [--entry <n>] [seconds] [qemu args]" >&2
+			exit 2 ;;
+		esac
 		shift 2 ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
@@ -846,6 +859,18 @@ done
 # its own PASS — and NOT as a bare alternative, which would let the FIRST test
 # to decline, hundreds of lines early, be read as the end of the boot.
 DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
+
+# 🔑 A BOOT THAT RESTARTS ITSELF ENDS AT THE RESTART (#373).  With -b the
+# kernel resets the machine after the quiet census, on reset_after='s deadline
+# or five seconds after a panic, and says so first: `reset: -b: the machine
+# restarts ...' while it starts, `panic: -b: restarting the machine ...' on the
+# way down.  From that line on, neither a done line nor a panic is the end --
+# the restart is, which with -no-reboot is qemu leaving by itself, the zone's
+# check of what Linux will read among its last lines.  Ended at the done line,
+# as every other boot is, entry 42 was cut off fifteen seconds before its
+# deadline, and entry 44 inside the five seconds after its panic, where the log
+# had stopped growing.  The quiet budget and the wall cap still bound it.
+RESTART_RE='reset: -b: the machine restarts|panic: -b: restarting the machine'
 
 SECS_IN=${1:-90}
 [ $# -gt 0 ] && shift
@@ -1079,7 +1104,7 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 QERR="$LOG.qemu-stderr"
 : > "$QERR"
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
@@ -1250,8 +1275,9 @@ while kill -0 "$QPID" 2>/dev/null; do
 	# and waiting for it -- all_reported -- held every panicking run for its
 	# whole quiet budget, twenty minutes under TCG, after the machine had
 	# stopped.  The wait below still lets the backtraces finish.
-	if grep -aqE "$PANIC_RE" "$LOG" \
-	   || { grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; }; then
+	if ! grep -aqE "$RESTART_RE" "$LOG" &&
+	   { grep -aqE "$PANIC_RE" "$LOG" \
+	     || { grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; }; }; then
 		# #599: a panic is not over at its first line.  The console's
 		# final copy and every processor's backtrace come after it, at
 		# the wire's pace -- four processors' worth is seconds of bytes

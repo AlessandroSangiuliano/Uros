@@ -1,0 +1,39 @@
+Kind: ablation
+Issue: #598
+Takes out: the FSB guard and LegacyReplacement at once -- the double fault hpet_ev_start()'s no-route panic is for.  With interrupts remapped and no table naming the HPET, choose_route() takes the FSB message anyway, fsb_compose() finds no entry it can write, and legacy_route() has nothing to fall back to.  The panic must name that cause, not "where the probe had found one"
+Run: --iommu intel --hpet fsb --entry 38 900 -smp 1
+Expect: panic\(cpu [0-9]+\): clock_event: hpet: no route -- comparator [0-9]+'s entry for its FSB message could not be written, and there is no LegacyReplacement to fall back to
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index 6e264822..de5acbe4 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -208,7 +208,6 @@ static int legacy_route(unsigned *which);
+ static int choose_route(unsigned *which, uint32_t *cap0)
+ {
+ 	struct hpet_comparator_caps caps;
+-	uint16_t source;
+ 	unsigned n;
+ 
+ #if ABLATE_593_LINE_TAKEN
+@@ -237,11 +236,6 @@ static int choose_route(unsigned *which, uint32_t *cap0)
+ 			 * pin is taken, and the remapped message is checked on
+ 			 * hardware (#595).
+ 			 */
+-			if (iommu_interrupts_remapped()
+-			    && !iommu_hpet_source(hpet_number(), &source)) {
+-				fsb_passed_over = 1;
+-				continue;
+-			}
+ 			*which = n;
+ 			return ROUTE_FSB;
+ 		}
+@@ -261,7 +255,7 @@ static int legacy_route(unsigned *which)
+ 	 * comparator never reaches where it does not.  Refused there, and
+ 	 * said, rather than written for a machine none of these is.
+ 	 */
+-	if (hpet_legacy_capable() && ioapic_present()
++	if (0 && ioapic_present()
+ 	    && acpi_irq_to_gsi(0) == 2
+ 	    && acpi_irq_to_gsi(8) < ioapic_pin_count()) {
+ 		/*

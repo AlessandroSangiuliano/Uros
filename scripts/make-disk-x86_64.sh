@@ -119,7 +119,7 @@ BOOT_ENTRY="${UROS_X86_64_BOOT_ENTRY:-0}"
 #   multiboot2                 both `multiboot2' and `module2'
 #   boot serial terminal       the rest of what grub.cfg actually says
 #   echo test ls cat halt      for the person at a rescue prompt
-#   wrmsr                      entry 43: x2APIC mode left on before the kernel,
+#   wrmsr                      entry 47: x2APIC mode left on before the kernel,
 #                              as a firmware that hands over in it does (#659)
 #   search*                    NOT used by the boot -- see the prefix comment
 #                              below -- but kept for the rescue prompt, where

@@ -72,6 +72,14 @@ void fbcons_init(void);
 void fbcons_putc(char c);
 
 /*
+ * The bytes kept while there was no screen, so far (#666), for #373's zone to
+ * start from: how many are kept, the bytes themselves in *bytes, and in
+ * *offered how many were handed over in all -- more than kept once the 64 KiB
+ * filled.
+ */
+uint32_t fbcons_early(const char **bytes, uint32_t *offered);
+
+/*
  * Make sure what has been drawn is actually on the panel.
  *
  * 🔴 WRITE-COMBINING MEANS STORES MAY STILL BE IN A BUFFER.  That is the point

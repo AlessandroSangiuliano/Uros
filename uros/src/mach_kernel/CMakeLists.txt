@@ -473,9 +473,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/string.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
+    # The machine restarted the way the FADT says, and the older ways after (#373).
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/reset.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons_cost.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/fbcons.c
+    # The console kept in RAM for Linux's ramoops after a reset (#373).
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ramoops.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ddb.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cont_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/disasm.c

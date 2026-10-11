@@ -151,8 +151,10 @@ void cons_flush(void);
  * (the ring off, the way down, the reporter), which must not wait for ever,
  * waits with a bound, and after a failed wait writes without it if the
  * divisor latch is closed: a holder that is parked or halted will never let
- * go.  One write is made without it on purpose: cons_loopback_probe, at
- * boot, on one processor with the ring off.
+ * go.  Two writes are made without it on purpose, both at boot:
+ * cons_loopback_probe, on one processor with the ring off, and
+ * cons_uart_present, to the scratch register, which no other writer here
+ * touches (#670).
  */
 /* Returns the klog cursor taken at the instant the port changed hands: the
  * forwarder's starting point (#497).  Idempotent; a second call returns the
@@ -241,6 +243,15 @@ int cons_getc(void);
  * it returns.
  */
 int cons_loopback_probe(uint8_t byte);
+
+/*
+ * Whether a UART answers at COM1, asked of its scratch register (#670): 1 if
+ * both patterns written there read back, else 0 with the pattern written and
+ * the byte read back in its place.  Without a UART every register reads 0xFF,
+ * and cons_loopback_probe() would take that for a receiver that answered
+ * wrongly; this is the question to ask first.
+ */
+int cons_uart_present(uint8_t *wrote, uint8_t *read);
 
 /* One byte, two digits — for instruction bytes the decoder declined. */
 void cons_puthex8(uint8_t v);

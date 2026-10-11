@@ -446,15 +446,21 @@ int iommu_interrupts_remapped(void)
 	return 0;
 }
 
-int iommu_ioapic_source(uint8_t id, uint16_t *source)
+/*
+ * The requester id of a source the tables name by an enumeration id rather
+ * than by its place on a bus: an I/O APIC by its MADT id, the HPET by its
+ * sequence number (#598).  Both readers file them the same way -- the DMAR's
+ * device scope of type 3 or 4, the IVRS's special entry of variety 1 or 2 --
+ * so one walk answers for both kinds and both vendors.
+ */
+static int named_source(uint8_t kind, uint8_t id, uint16_t *source)
 {
 	for (unsigned i = 0; i < nunits; i++)
 		for (unsigned s = 0; s < units[i].scope_count; s++) {
 			const struct iommu_scope *sc =
 				&scopes[units[i].scope_first + s];
 
-			if (sc->kind != IOMMU_SCOPE_IOAPIC
-			    || sc->enumeration_id != id)
+			if (sc->kind != kind || sc->enumeration_id != id)
 				continue;
 			if (sc->depth != 1)
 				return 0;
@@ -464,6 +470,16 @@ int iommu_ioapic_source(uint8_t id, uint16_t *source)
 		}
 
 	return 0;
+}
+
+int iommu_ioapic_source(uint8_t id, uint16_t *source)
+{
+	return named_source(IOMMU_SCOPE_IOAPIC, id, source);
+}
+
+int iommu_hpet_source(uint8_t number, uint16_t *source)
+{
+	return named_source(IOMMU_SCOPE_HPET, number, source);
 }
 
 /*
@@ -501,6 +517,22 @@ int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 		return iommu_amd_remap_entry(bdf, vector, apic_id);
 
 	return iommu_vtd_remap_msi(slot, bdf, vector, apic_id, address, data);
+}
+
+int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+		     uint32_t apic_id, uint32_t *address, uint32_t *data)
+{
+	uint16_t source;
+
+	if (!iommu_interrupts_remapped() || !iommu_hpet_source(number, &source))
+		return 0;
+
+	/* AMD: the HPET's own table, entry `vector'; the words stay as they are. */
+	if (found_vendor == IOMMU_AMD)
+		return iommu_amd_remap_entry(source, vector, apic_id);
+
+	return iommu_vtd_remap_hpet(comparator, source, vector, apic_id,
+				    address, data);
 }
 
 void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector)
@@ -3243,8 +3275,12 @@ static const struct irt_index_case irt_index_cases[] = {
 	{ "intel irt, pin 128", IOMMU_VTD_IRT_PIN, 128, 0, 0 },
 	{ "intel irt, msi slot 0", IOMMU_VTD_IRT_MSI, 0, 1, 128 },
 	{ "intel irt, msi slot 15", IOMMU_VTD_IRT_MSI, 15, 1, 143 },
-	{ "intel irt, msi slot 127", IOMMU_VTD_IRT_MSI, 127, 1, 255 },
-	{ "intel irt, msi slot 128", IOMMU_VTD_IRT_MSI, 128, 0, 0 },
+	{ "intel irt, msi slot 111", IOMMU_VTD_IRT_MSI, 111, 1, 239 },
+	{ "intel irt, msi slot 112", IOMMU_VTD_IRT_MSI, 112, 0, 0 },
+	/* #598: the HPET's comparators, past the MSI slots. */
+	{ "intel irt, hpet comparator 0", IOMMU_VTD_IRT_HPET, 0, 1, 240 },
+	{ "intel irt, hpet comparator 15", IOMMU_VTD_IRT_HPET, 15, 1, 255 },
+	{ "intel irt, hpet comparator 16", IOMMU_VTD_IRT_HPET, 16, 0, 0 },
 };
 
 static unsigned irt_index_check(unsigned *ran)
@@ -3287,6 +3323,64 @@ static unsigned irta_check(unsigned *ran)
 		} else if (got != 1 || w != c->word) {
 			bad++;
 		}
+	}
+
+	return bad;
+}
+
+/*
+ * #598: the HPET's entry and FSB message as iommu_vtd_remap_hpet() composes
+ * them, for an invented source, read back with the decoders the cases above
+ * trust.  QEMU's tables name no HPET, so no boot under it writes this entry,
+ * and a slip in the composition -- a field in another's place, a handle that
+ * is not the comparator's entry -- would reach only the bare metal.  AMD's
+ * HPET entry is iommu_amd_remap_entry()'s, the same as every MSI-X slot's,
+ * and its message keeps the words the FSB route is given without remapping:
+ * both run under QEMU already.
+ */
+static unsigned hpet_check(unsigned *ran)
+{
+	static const struct {
+		unsigned	comparator;
+		uint8_t		vector;
+		uint32_t	apic_id;
+		int		maps;
+	} cases[] = {
+		{  0, 0xF0, 0x00, 1 },
+		{ 15, 0x31, 0xFF, 1 },
+		{ 16, 0xF0, 0x00, 0 },	/* one past the comparators' entries */
+	};
+	const uint16_t source = 0xF0F9;		/* f0:1f.1, nobody's */
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		uint32_t index = 0xA5A5A5A5u, address = 0xA5A5A5A5u;
+		uint32_t data = 0xA5A5A5A5u, back = 0xA5A5A5A5u;
+		uint64_t w[2] = { ~0ULL, ~0ULL };
+		struct iommu_irte d = { 0x5A, 0xA5A5A5A5u, -1, 0xA5A5 };
+		int got;
+
+		(*ran)++;
+
+		got = iommu_vtd_hpet_words(cases[i].comparator, source,
+					   cases[i].vector, cases[i].apic_id,
+					   &index, w, &address, &data);
+		if (got != cases[i].maps) {
+			bad++;
+			continue;
+		}
+		if (got == 0)
+			continue;
+
+		/* The decoder takes only SVT 01b with SQ 00b: one source. */
+		if (index != 240u + cases[i].comparator
+		    || iommu_vtd_irte_decode(w, 0, &d) != 1
+		    || d.vector != cases[i].vector
+		    || d.destination != cases[i].apic_id
+		    || d.level != 0 || d.source != source
+		    || iommu_vtd_msi_decode(address, data, &back) != 1
+		    || back != index)
+			bad++;
 	}
 
 	return bad;
@@ -3354,6 +3448,7 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 	bad += qi_check(&n);
 	bad += irta_check(&n);
 	bad += irt_index_check(&n);
+	bad += hpet_check(&n);
 
 	if (ran)
 		*ran = n;

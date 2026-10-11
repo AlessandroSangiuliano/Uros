@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #598
+Takes out: a pin's redirection entry in the remappable format while interrupts are remapped -- the pin stays in the old format, which an engine with CFI clear refuses with fault reason 25h.  QEMU's intel-iommu copies such a message through (hw/i386/intel_iommu.c 4377-4380, 11.1.1), so ablate.sh says NOT CAUGHT there and only bare metal shows it: on omen, 10/10/2026, booted with -f -i, the pin delivered 0 once routed and the engine logged "f0:1f.0 was REFUSED an interrupt before any entry was read (reason 0x25)", box 6's Intel half
+Run: --iommu intel --entry 37 120 -smp 1
+Expect: irq 0 on pin [0-9]+ delivered [0-9]+ while masked and 0 once routed
+Expect: was REFUSED an interrupt before any entry was read \(reason 0x25\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic.c b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+index 7298bf3b..a04f9c4a 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ioapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+@@ -246,7 +246,7 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
+ 	unsigned reg = redir_reg(gsi);
+ 	int active_low = (flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW;
+ 	int level = (flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL;
+-	uint32_t low = vector & RTE_VECTOR_MASK, high;
++	uint32_t low = vector & RTE_VECTOR_MASK, high = 0;
+ 	uint64_t f;
+ 
+ 	if (!ioapic_rte_destination(apic_id, &high))
+@@ -271,11 +271,6 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
+ 	 * it.  A pin that cannot have an entry cannot be routed at all: every
+ 	 * message it sent in the old format would be refused.
+ 	 */
+-	if (iommu_interrupts_remapped()
+-	    && !iommu_remap_pin(gsi - base_gsi, vector, apic_id, level,
+-				active_low, &low, &high))
+-		panic("ioapic: pin %u has no remapping entry, and interrupts "
+-		      "are remapped (#598)", gsi - base_gsi);
+ 
+ 	/*
+ 	 * Destination first, then the low half, and the order is the whole

@@ -1654,7 +1654,9 @@ int iommu_vtd_ioapic_rte_decode(uint32_t lo, uint32_t hi, uint32_t *index)
  */
 #define	VTD_IRT_PINS		128u
 #define	VTD_IRT_MSI_FIRST	128u
-#define	VTD_IRT_MSI_SLOTS	128u
+#define	VTD_IRT_MSI_SLOTS	112u	/* DEVICE_MD_MSI_MAX is 16 */
+#define	VTD_IRT_HPET_FIRST	240u
+#define	VTD_IRT_HPET_SLOTS	16u	/* comparators 0 to 15 */
 
 int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
 			uint32_t *index)
@@ -1668,6 +1670,10 @@ int iommu_vtd_irt_index(enum iommu_vtd_irt_source kind, unsigned n,
 	}
 	if (kind == IOMMU_VTD_IRT_MSI && n < VTD_IRT_MSI_SLOTS) {
 		*index = VTD_IRT_MSI_FIRST + n;
+		return 1;
+	}
+	if (kind == IOMMU_VTD_IRT_HPET && n < VTD_IRT_HPET_SLOTS) {
+		*index = VTD_IRT_HPET_FIRST + n;
 		return 1;
 	}
 	return 0;
@@ -1702,8 +1708,7 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
  *
  * 256 entries of sixteen bytes: one frame, and IRTA's S is 7.  Room for what
  * this kernel programs -- one I/O APIC's pins, DEVICE_MD_MSI_MAX MSI slots,
- * the HPET's comparators -- with the division of the indices left to the step
- * that writes the first entry.
+ * the HPET's comparators -- divided by iommu_vtd_irt_index() above.
  *
  * 🔴 EVERY ENTRY WRITTEN, and read back as the two words written.  Not
  * present refuses whatever else an entry holds, so asking the decoder what
@@ -1718,8 +1723,9 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
 #define	VTD_IRT_ENTRIES		256u
 
 _Static_assert(VTD_IRT_PINS <= VTD_IRT_MSI_FIRST
-	       && VTD_IRT_MSI_FIRST + VTD_IRT_MSI_SLOTS <= VTD_IRT_ENTRIES,
-	       "the index map's two ranges overlap, or run past the table");
+	       && VTD_IRT_MSI_FIRST + VTD_IRT_MSI_SLOTS <= VTD_IRT_HPET_FIRST
+	       && VTD_IRT_HPET_FIRST + VTD_IRT_HPET_SLOTS <= VTD_IRT_ENTRIES,
+	       "the index map's three ranges overlap, or run past the table");
 
 int iommu_vtd_irt_build(void)
 {
@@ -2223,6 +2229,52 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 
 	*address = a;
 	*data = dw;
+	return 1;
+}
+
+/*
+ * The HPET's comparator, whose FSB message carries the requester id the
+ * DMAR's HPET scope names; edge, like every message.  The words given back are
+ * the remappable format of entry 240 + n, for its FSB route register (#598).
+ * The source is matched exactly (SQ 00b), as every entry here is: whether a
+ * platform's HPET sends with the function its scope names is for the engine
+ * to say, and Linux's answer -- ignore the function -- is taken only if one
+ * does not.  Said where it can be: a refused tick stops a -H -i boot before
+ * the fault reporter's thread runs, and -C's burn-in reads the engines out
+ * before its panic (iommu_fault_report_now()).
+ *
+ * Composed by iommu_vtd_hpet_words() and only then written: the words alone
+ * are what the boot's self-test decodes back for an invented source
+ * (iommu_interrupt_check()), since no QEMU table names an HPET.
+ */
+int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
+			 uint32_t apic_id, uint32_t *index, uint64_t irte[2],
+			 uint32_t *address, uint32_t *data)
+{
+	struct iommu_irte e = { vector, apic_id, 0, source };
+
+	return iommu_vtd_irt_index(IOMMU_VTD_IRT_HPET, comparator, index)
+	       && iommu_vtd_irte(&e, 0, irte)
+	       && iommu_vtd_msi(*index, address, data);
+}
+
+int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
+			 uint32_t apic_id, uint32_t *address, uint32_t *data)
+{
+	uint32_t index, a, d;
+	uint64_t w[2];
+
+	/*
+	 * The caller's words only once the entry is written: a zero answer
+	 * leaves them as they came in, as <cpu/iommu.h> has these calls do,
+	 * and not naming an entry nobody wrote.
+	 */
+	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
+				  &index, w, &a, &d)
+	    || !vtd_irte_write(index, w))
+		return 0;
+	*address = a;
+	*data = d;
 	return 1;
 }
 

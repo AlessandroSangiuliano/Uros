@@ -11,6 +11,7 @@
 #include <cpu/regs.h>
 #include <ddb/cons.h>
 #include <ddb/fbcons.h>
+#include <ddb/ramoops.h>	/* #373: the third keeper of what is said */
 #include <kern/lock.h>
 #include <kern/klog.h>	/* #497: the cursor the forwarder starts from */
 #include <time/tsc.h>
@@ -29,6 +30,7 @@ decl_simple_lock_data(extern, printf_lock)
 #define UART_MCR	4
 #define UART_IIR	2	/* read: interrupt id, and whether the FIFO is on */
 #define UART_LSR	5
+#define UART_SCR	7	/* scratch: the chip keeps it, and uses it for nothing */
 
 #define IIR_FIFO_ON	0xC0	/* both bits: a 16550 with a working FIFO */
 
@@ -430,7 +432,17 @@ static unsigned cons_tx_room(int may_wait)
  * There are three places a byte is handed over -- here, the drain, and the
  * queue that a stuck port throws away -- and each draws once, so no path draws
  * twice and none draws nothing.
+ *
+ * #373: and the zone Linux reads back after a reset keeps the same bytes, so
+ * it is handed them at the same three places, for the same reasons, through
+ * one name.  ramoops_putc() does nothing until the zone is started, and never
+ * waits long.
  */
+static inline void cons_said(char c)
+{
+	fbcons_putc(c);
+	ramoops_putc(c);
+}
 /*
  * #599: cons_tx_lock for a writer that must not wait for ever -- the ring
  * off, the way down, a debugger -- where a processor parked or halted with the
@@ -482,7 +494,7 @@ static void cons_wire_byte(char c)
 	 * the only output there is, dropping it from the screen because a wire
 	 * nobody is reading would not take it is the wrong way round.
 	 */
-	fbcons_putc(c);
+	cons_said(c);
 
 	/*
 	 * Somebody else drives this chip now (#497).  fbcons above has the
@@ -584,6 +596,15 @@ void cons_port_out(unsigned int port, unsigned int value)
 		value &= ~0x80u;
 	hw_lock_lock(&cons_tx_lock);
 	outb((uint16_t)port, (uint8_t)value);
+	/*
+	 * #373: a byte the task holding COM1 sent -- uart.so's output, which
+	 * never passes the three places above -- is the console's all the same,
+	 * and the zone keeps it.  A write to the data register here is a byte
+	 * and never a divisor: the latch cannot be open, since the LCR write
+	 * above clears bit 7 and cons_set_divisor() closes it inside its hold.
+	 */
+	if (port == COM1 + UART_DATA)
+		ramoops_putc((char)value);
 	hw_lock_unlock(&cons_tx_lock);
 }
 
@@ -648,7 +669,7 @@ static int cons_tx_one(int may_wait)
 			 */
 			hw_lock_lock(&cons_ring_lock);
 			while (cons_ring_head != cons_ring_tail) {
-				fbcons_putc(cons_ring[cons_ring_tail++ %
+				cons_said(cons_ring[cons_ring_tail++ %
 						      CONS_RING_SIZE]);
 				cons_tx_dropped_count++;
 			}
@@ -666,7 +687,7 @@ static int cons_tx_one(int may_wait)
 	hw_lock_unlock(&cons_ring_lock);
 
 	if (went) {
-		fbcons_putc(c);			/* the other output (#568) */
+		cons_said(c);			/* the screen, the zone (#568, #373) */
 		/* And not to the port, if it is no longer ours (#497). */
 		if (!cons_port_given_away) {
 			outb(COM1 + UART_DATA, (uint8_t)c);
@@ -1200,6 +1221,40 @@ int cons_getc(void)
 		cpu_pause();
 
 	return c;
+}
+
+/*
+ * Whether a UART answers at COM1 at all (#670).
+ *
+ * With none, every inb returns 0xFF, and every other register reads as an
+ * answer: LSR says the transmitter is empty and a byte is waiting, and the
+ * byte is 0xFF.  The scratch register is the one that can tell the two apart,
+ * because a chip keeps whatever is written there and an empty bus keeps
+ * nothing.  Two patterns, so that a register stuck at either one cannot pass.
+ * The same question, asked the same way, that uart.so's probe asks before it
+ * claims the port (uart_scratch_test() in servers/char_server/modules/uart.c),
+ * so the kernel and the driver mean one thing by "a UART is there".
+ *
+ * ⚠️ At boot, before the port can be handed over (#497): the scratch register
+ * is outside the window a driver claims (device_md_io_window()), and nothing
+ * else here ever writes it, so this takes no lock.
+ */
+int cons_uart_present(uint8_t *wrote, uint8_t *read)
+{
+	static const uint8_t patterns[] = { 0x55, 0xAA };
+
+	for (unsigned i = 0; i < sizeof(patterns); i++) {
+		uint8_t got;
+
+		outb(COM1 + UART_SCR, patterns[i]);
+		got = inb(COM1 + UART_SCR);
+		if (got != patterns[i]) {
+			*wrote = patterns[i];
+			*read = got;
+			return 0;
+		}
+	}
+	return 1;
 }
 
 /*

@@ -347,6 +347,22 @@ void fbcons_putc(char ch)
 }
 
 /*
+ * What was kept so far, for the other reader of the same bytes: #373's zone,
+ * which starts after the first of them were said and before fbcons_init()
+ * closes the buffer.  How many are in it, and in *offered how many were
+ * handed over in all, which is more once the buffer has filled.  Read on the
+ * boot processor before any other runs, so no slot is taken and unwritten.
+ */
+uint32_t fbcons_early(const char **bytes, uint32_t *offered)
+{
+	uint32_t len = fb_early_len;
+
+	*bytes = fb_early;
+	*offered = len;
+	return len < FB_EARLY_SIZE ? len : FB_EARLY_SIZE;
+}
+
+/*
  * What the range registers say about the framebuffer's aperture.
  *
  * 🔑 REPORTED, NOT ACTED ON, and that is a deliberate difference from i386.

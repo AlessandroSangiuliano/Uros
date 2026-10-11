@@ -454,8 +454,9 @@ const struct iommu_tables *iommu_tables(void);
  * divided once for the machine.  The price is that changing an entry means
  * telling every engine to forget it, each through its own queue.
  *
- * On AMD a table belongs to a device (Rev 3.11 §2.2.2.1): one for each source
- * the IVRS names in a special entry -- I/O APIC, HPET -- and one closed table
+ * On AMD a table belongs to a device (Rev 3.11 §2.2.2.1): one for each
+ * DeviceID the IVRS names in a special entry -- I/O APIC, HPET, two of which
+ * may share one -- and one closed table
  * for every other device, so that a device nobody gave an interrupt is refused
  * and logged rather than passed unmapped.  ⚠️ An IVRS that names no I/O APIC
  * is a real one -- QEMU's under KVM -- and leaves its pins with no table.
@@ -471,8 +472,9 @@ struct iommu_interrupt_tables {
 	unsigned	frames;		/* what they cost, in 4K frames       */
 	uint64_t	intel_table;	/* the one every intel engine shares  */
 	uint64_t	intel_irta;	/* ... and the word IRTA_REG will get */
-	unsigned	named;		/* AMD: of a source the IVRS names    */
-	unsigned	ioapics;	/* ... of which I/O APICs             */
+	unsigned	named;		/* AMD: for the sources the IVRS names */
+	unsigned	ioapics;	/* ... which are I/O APICs            */
+	unsigned	hpets;		/* ... and HPETs, once per DeviceID   */
 };
 
 /*
@@ -521,6 +523,15 @@ int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
 		    int level, int active_low, uint32_t *lo, uint32_t *hi);
 int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
 		    uint32_t apic_id, uint64_t *address, uint32_t *data);
+/*
+ * The HPET's comparator, for its FSB message, by the HPET's ACPI sequence
+ * number (#598): the same convention, the words being the FSB route
+ * register's, and the source the one iommu_hpet_source() finds.  Zero when no
+ * table names the HPET, or the comparator is past intel's range: then the
+ * message has no entry, and the comparator stays on its I/O APIC pin.
+ */
+int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+		     uint32_t apic_id, uint32_t *address, uint32_t *data);
 
 /*
  * The slot given up: its entry stops remapping, so the device that held it
@@ -537,6 +548,14 @@ void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector);
  * or names it only by a path through bridges this kernel does not walk.
  */
 int iommu_ioapic_source(uint8_t id, uint16_t *source);
+
+/*
+ * The same for the HPET (#598), whose DMAR scope (type 4) and IVRS special
+ * entry (variety 2) carry its sequence number, the ACPI HPET table's
+ * `number'.  Zero means no table names it: its FSB message has no entry to
+ * go through, and the comparator stays on its I/O APIC pin.
+ */
+int iommu_hpet_source(uint8_t number, uint16_t *source);
 
 /*
  * ── #598 phase 4: remapping turned on, behind `-i' ────────────────────
@@ -1034,8 +1053,9 @@ unsigned iommu_domain_count(void);
 
 /*
  * The thread that drains every engine every 100 ms and prints what they
- * refused -- the only printer of the fault log (#599).  NOT ASKED, said once,
- * when no engine translates.
+ * refused -- the only printer of the fault log once it is asked for (#599);
+ * before that, iommu_fault_report_now() below, for a boot that stops first
+ * (#598).  NOT ASKED, said once, when no engine translates.
  *
  * 🔴 THIS IS "a diagnosable event, not silence" (#432).  It was a poll run by
  * the idle loop, and #432 closed on "no refusal goes unreported": a processor
@@ -1047,6 +1067,19 @@ unsigned iommu_domain_count(void);
  * follow-up.
  */
 void iommu_fault_reporter_start(void);
+
+/*
+ * #598: drain the engines and print what they recorded, now, in the caller's
+ * context -- for a boot about to stop before the reporter's thread can exist
+ * or run.  The burn-in's "the timer armed and never fired" was one: under -H
+ * -i the tick that never came is first an HPET message an engine refused, and
+ * its reason (22h, 26h, an IO_PAGE_FAULT) stayed in the engine's registers.
+ * Answers how many lines it printed, as the reporter counts them; zero where
+ * no engine translates or remaps, or none recorded anything -- and zero, with
+ * nothing printed, once iommu_fault_reporter_start() has run: the reporter is
+ * then the one printer, whose cursors are its own.
+ */
+unsigned iommu_fault_report_now(void);
 
 /*
  * What the log knows of one device's refusals, asked by the driver that owns

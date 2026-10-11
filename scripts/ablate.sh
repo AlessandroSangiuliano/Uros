@@ -8,6 +8,8 @@
 # in ablations/README.md.  This applies them to a worktree of the tree asked
 # about, builds it with the main build's configuration, boots it with
 # run-x86_64.sh, and reads each log for what the ablation says must be there.
+# A patch with Screen: lines is booted by fbcons-readback.py instead, and what
+# that script read off the screen is read the same way (#670).
 #
 # Usage:
 #   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
@@ -160,7 +162,14 @@ fi
 [ $ABLATIONS -gt 0 ] || die 2 "no ablation among the patches: there is nothing for a test to catch"
 check_applies "${PATCHES[@]}" || exit 2
 
-if [ ${#RUN[@]} -eq 0 ]; then
+# #670: a test read off the screen.  Screen: lines, one argument of
+# fbcons-readback.py each so that none needs quoting, boot every arm with that
+# script and its build instead of with run-x86_64.sh, and Expect: is matched
+# against what the script printed.  The way to catch an ablation on a machine
+# with no UART, which has no serial log to read.
+mapfile -t SCREEN < <(for p in "${PATCHES[@]}"; do header "$p" Screen; done)
+
+if [ ${#RUN[@]} -eq 0 ] && [ ${#SCREEN[@]} -eq 0 ]; then
 	run=$(for p in "${PATCHES[@]}"; do header "$p" Run; done | head -n 1)
 	[ -n "$run" ] || die 2 "no Run: line in the patches, and no RUN-ARGS after --"
 	read -r -a RUN <<< "$run"
@@ -187,9 +196,15 @@ if [ $PLAN = 1 ]; then
 		echo "ablate: plan: $(basename "$p"): $(header "$p" Kind | head -n 1)," \
 			"$(header "$p" Issue | head -n 1): ${what:-says nothing of what it does}"
 	done
-	echo "ablate: plan: run-x86_64.sh is given: ${RUN[*]}"
+	if [ ${#SCREEN[@]} -gt 0 ]; then
+		echo "ablate: plan: fbcons-readback.py is given: ${SCREEN[*]}"
+		read_from="what fbcons-readback.py printed"
+	else
+		echo "ablate: plan: run-x86_64.sh is given: ${RUN[*]}"
+		read_from="the log"
+	fi
 	while IFS= read -r e; do
-		echo "ablate: plan: caught if a line of the log matches: $e"
+		echo "ablate: plan: caught if a line of $read_from matches: $e"
 	done <<< "$EXPECT"
 	if [ $AB = 1 ]; then
 		echo "ablate: plan: the fixed arm is $SHORT with the ${#WIDENS[@]} widen patch(es), the ablated arm with all ${#PATCHES[@]}"
@@ -291,9 +306,21 @@ for i in $(seq 1 "$BOOTS"); do
 			# log does not say which tree it booted (#587).  So every boot is
 			# handed its arm's build here.
 			set +e
-			UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" UROS_X86_64_LOG=$log \
-				"$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
-				> "$RUNDIR/$arm-$acc-$i.out" 2>&1
+			if [ ${#SCREEN[@]} -gt 0 ]; then
+				# #670: its own build again, read off its screen; the
+				# script's exit 2 is a run it could not make, as the
+				# harness's is.
+				log="$RUNDIR/$arm-$acc-$i.out"
+				mkdir -p "$RUNDIR/$arm-$acc-$i"
+				python3 "$RUNDIR/$arm/scripts/fbcons-readback.py" "${kvm[@]}" \
+					--build "$RUNDIR/$arm/uros/build-x86_64" \
+					--out "$RUNDIR/$arm-$acc-$i" "${SCREEN[@]}" \
+					> "$log" 2>&1
+			else
+				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" UROS_X86_64_LOG=$log \
+					"$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
+					> "$RUNDIR/$arm-$acc-$i.out" 2>&1
+			fi
 			rc=$?
 			set -e
 			case $rc in
@@ -318,7 +345,9 @@ for i in $(seq 1 "$BOOTS"); do
 			fi
 			clock=$(sed -n 's/.*clock in run: median \([0-9]*\)MHz.*/\1/p' "$log" | head -n 1)
 			power=$(sed -n 's/.*host start:.* power=\([^ ]*\).*/\1/p' "$log" | head -n 1)
-			echo "$(date +%F,%T),$host,$SHORT,$names,$arm,$i,$acc,\"${RUN[*]}\",$clock,$power,$rc,$verdict,$log" >> "$CSV"
+			runcol="${RUN[*]}"
+			[ ${#SCREEN[@]} -gt 0 ] && runcol="fbcons-readback.py ${SCREEN[*]}"
+			echo "$(date +%F,%T),$host,$SHORT,$names,$arm,$i,$acc,\"$runcol\",$clock,$power,$rc,$verdict,$log" >> "$CSV"
 			echo "ablate: $arm, $acc, boot $i: $verdict (harness status $rc, ${clock:-?} MHz, power ${power:-?})"
 		done
 	done

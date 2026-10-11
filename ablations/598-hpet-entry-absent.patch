@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #598
+Takes out: the HPET's own remapping entry, written when its FSB message goes through remapping -- the message still names intel's entry 240 + n, or on AMD the entry its vector indexes in the HPET's table, and nothing is there: the engine refuses every tick, the burn-in counts none, and before its panic it says what the engine recorded (22h on intel, an IO_PAGE_FAULT with I set on AMD).  QEMU cannot catch it, and Run: is QEMU's, where it is NOT CAUGHT: its DMAR and IVRS name no HPET, so a -H -i boot takes the I/O APIC pin and never reaches the entry.  It is caught on the bare metal of #595 whose table names the HPET, booted with -H -i -C, and with -b and ramoops= so that the panic restarts the machine and Linux reads the log back
+Run: --iommu intel --entry 38 900 -smp 1 -global hpet.msi=on
+Expect: was REFUSED an interrupt.*reason 0x22
+Expect: was REFUSED an interrupt written to
+Expect: clock_event: the timer armed and never fired
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index 41a47131..abd0b3de 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -529,7 +529,7 @@ int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+ 
+ 	/* AMD: the HPET's own table, entry `vector'; the words stay as they are. */
+ 	if (found_vendor == IOMMU_AMD)
+-		return iommu_amd_remap_entry(source, vector, apic_id);
++		return 1;
+ 
+ 	return iommu_vtd_remap_hpet(comparator, source, vector, apic_id,
+ 				    address, data);
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index bd9e8c0d..d9b8a432 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2270,8 +2270,7 @@ int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
+ 	 * and not naming an entry nobody wrote.
+ 	 */
+ 	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
+-				  &index, w, &a, &d)
+-	    || !vtd_irte_write(index, w))
++				  &index, w, &a, &d))
+ 		return 0;
+ 	*address = a;
+ 	*data = d;

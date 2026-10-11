@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #373
+Takes out: the header of the zone after each byte: start and size stay at zero, a zone ramoops makes no record of, and the zone's check before the reset must say so
+Run: --entry 42 300
+Expect: does NOT read back as ramoops would read it -- start and size are not the ones written
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/ramoops.c b/uros/src/mach_kernel/x86_64/ddb/ramoops.c
+index 1fcef2d4..ed8b687a 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/ramoops.c
++++ b/uros/src/mach_kernel/x86_64/ddb/ramoops.c
+@@ -199,8 +199,6 @@ static void zone_put(char c)
+ 	rz_hash = (rz_hash ^ (uint8_t)c) * FNV_PRIME;
+ 	n++;
+ 	rz_n = n;
+-	rz->size = n < rz_cap ? n : rz_cap;
+-	rz->start = n % rz_cap;
+ }
+ 
+ static int zone_enter(uint32_t me)

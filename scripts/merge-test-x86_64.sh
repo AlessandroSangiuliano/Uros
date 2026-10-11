@@ -81,7 +81,7 @@ WRONG=0
 #             in their place (#665)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
-# Entries 36 and 37 run in x2APIC mode: turned on by the kernel (-2), and left on
+# Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
 # by GRUB before the kernel, as a firmware that hands over in it does (#659).
 ENTRIES="
 0 harness
@@ -104,11 +104,15 @@ ENTRIES="
 36 harness --iommu_amd
 37 harness --iommu_amd
 38 harness --iommu_amd
+38 hpetfsb --iommu_intel_--hpet_fsb
+45 harness --iommu_intel
+45 harness --iommu_amd
 17 harness
 18 harness
 21 harness
 22 harness
 22 hpetgaps - 6,sockets=2,cores=3
+22 hpetfsb --hpet_fsb
 23 ioapic
 39 msirace --iommu_intel
 24 panic2
@@ -138,10 +142,14 @@ ENTRIES="
 20 harness
 20 harness - 1
 41 early
-42 harness
-42 harness - 1
-43 harness
-43 harness - 1
+42 restart
+42 restart --iommu_intel
+43 restartcensus
+44 restartpanic
+46 harness
+46 harness - 1
+47 harness
+47 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -165,6 +173,16 @@ judge() {	# entry verdict log-of-the-harness full-log
 		grep -aqE 'cpu 5 took [0-9]+ ticks in window 0' "$f" &&
 		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
 	msirace) grep -aq 'msi_race: PASS' "$f" ;;
+	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
+	# while interrupts are remapped takes its pin instead, for the reason
+	# it gives: QEMU's tables name no HPET, and its message could not go
+	# through an entry of its own.  On q35 under KVM nothing is remapped.
+	hpetfsb) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		if grep -aq 'interrupt remapping IS ON' "$f"; then
+			grep -aq 'not the FSB message: no table names the HPET for interrupt remapping' "$f"
+		else
+			grep -aqE 'FSB message to cpu [0-9]+ \(APIC id [0-9]+\) on vector 0x[0-9a-f]+; each' "$f"
+		fi ;;
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
@@ -172,7 +190,26 @@ judge() {	# entry verdict log-of-the-harness full-log
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq '<x86_64_boot+0x' "$f" &&
 		! grep -aq 'trap general protection' "$f" ;;
+	# #373: -b restarted the machine for the reason the entry gives it --
+	# its deadline, the quiet census, a panic -- and the zone Linux reads
+	# back after the restart read back first as ramoops would read it.
+	restart) grep -aq 'reset: -b: 20 seconds since the scheduler started' "$f" &&
+		zone_kept "$f" ;;
+	restartcensus) grep -aq 'quiet_census: -b: the boot is over; restarting the machine' "$f" &&
+		zone_kept "$f" ;;
+	restartpanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
+		grep -aq 'panic: -b: restarting the machine in 5 seconds' "$f" &&
+		zone_kept "$f" ;;
 	esac
+}
+
+# #373: the zone's check said it reads back as ramoops would read it, nothing
+# was dropped, and the reset was written after it -- the FADT's register, or
+# 0xcf9 on a board whose FADT has none.
+zone_kept() {
+	grep -aqE 'reset: the zone at 0x[0-9a-f]+ reads back as ramoops would read it: signature, start [0-9]+ and size [1-9][0-9]* as written, the [1-9][0-9]* bytes hashing as written and beginning with the [1-9][0-9]* kept before it existed, 0 dropped' "$1" &&
+		grep -aqE '^reset: (writing 0x[0-9a-f]+ to the FADT.s reset register|port 0xcf9, )' "$1" &&
+		! grep -aq 'does NOT read back as ramoops would read it' "$1"
 }
 
 # The stub listens on one port, and a qemu already on it would make every run here refuse to start.

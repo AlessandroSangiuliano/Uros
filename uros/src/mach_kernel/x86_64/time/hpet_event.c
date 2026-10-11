@@ -102,6 +102,14 @@ static unsigned		comparator;
 static uint32_t		route_gsi;
 static uint32_t		broadcaster;	/* the processor the comparator reaches */
 static uint32_t		broadcaster_apic; /* its APIC id: the hardware's (#663) */
+/*
+ * #598: the FSB message's two words, composed once when the backend starts --
+ * compatibility format, or the remappable one of the HPET's own entry -- and
+ * only written again by comparator_route(), which can run under ev_lock with
+ * interrupts off, where an entry cannot be written.
+ */
+static uint32_t		fsb_address, fsb_data;
+static int		fsb_remapped;
 static uint8_t		tick_vector;
 static uint64_t		hz;
 static uint32_t		ahead;
@@ -195,9 +203,12 @@ static uint64_t counts_to_ns(uint64_t counts)
  */
 static int	fsb_passed_over;	/* #598: an FSB comparator, not taken */
 
+static int legacy_route(unsigned *which);
+
 static int choose_route(unsigned *which, uint32_t *cap0)
 {
 	struct hpet_comparator_caps caps;
+	uint16_t source;
 	unsigned n;
 
 #if ABLATE_593_LINE_TAKEN
@@ -214,15 +225,20 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 			*cap0 = caps.route_cap;
 		if (caps.fsb) {
 			/*
-			 * #598 point 4: not while interrupts are remapped.  The
-			 * message is composed here in compatibility format,
-			 * which the engine refuses, so the tick would stop the
-			 * moment remapping is on -- and QEMU's HPET writes it
-			 * past the IOMMU anyway, so a remapped one could only
-			 * be checked on hardware (#595).  The I/O APIC's pin
-			 * below is remapped like any other.
+			 * #598: while interrupts are remapped, only through the
+			 * HPET's own entry, which needs a table that names the
+			 * HPET -- the DMAR's scope, the IVRS's special entry --
+			 * for the requester id its message carries.  Without
+			 * one the message would reach the engine in
+			 * compatibility format, which it refuses, and the tick
+			 * would stop; the I/O APIC's pin below is remapped like
+			 * any other.  QEMU's tables name no HPET, and its HPET
+			 * writes the message past the IOMMU anyway: there the
+			 * pin is taken, and the remapped message is checked on
+			 * hardware (#595).
 			 */
-			if (iommu_interrupts_remapped()) {
+			if (iommu_interrupts_remapped()
+			    && !iommu_hpet_source(hpet_number(), &source)) {
 				fsb_passed_over = 1;
 				continue;
 			}
@@ -230,6 +246,12 @@ static int choose_route(unsigned *which, uint32_t *cap0)
 			return ROUTE_FSB;
 		}
 	}
+	return legacy_route(which);
+}
+
+/* LegacyReplacement on comparator 0, where it can be taken (#593). */
+static int legacy_route(unsigned *which)
+{
 	/*
 	 * Only where ISA 0 arrives on input 2.  The specification sends timer
 	 * 0 to "IRQ2 in the I/O APIC" (2.3.5) whatever the tables say about
@@ -408,20 +430,37 @@ static void window_account(uint32_t now)
  * when the backend starts, and again when a processor arms it after the last
  * one had left (hpet_ev_stop()).  ev_lock held, or not shared yet.
  *
- * The FSB message is in the compatibility format, as <device/device_machdep>
- * composes one for MSI-X: 0xFEE00000 with the destination APIC id at bit 12,
- * physical, no redirection; the vector as the data, fixed delivery, edge.
- * Nothing translates it, because no FSB route is chosen while interrupts are
- * remapped (choose_route(), #598).
+ * The FSB message's words are fsb_compose()'s, written here as they are.
  */
 static void comparator_route(void)
 {
 	if (route == ROUTE_FSB)
-		hpet_comparator_fsb(comparator,
-				    0xFEE00000U | (broadcaster_apic << 12),
-				    HPET_EVENT_VECTOR);
+		hpet_comparator_fsb(comparator, fsb_address, fsb_data);
 	else
 		(void)hpet_comparator_legacy(comparator);
+}
+
+/*
+ * The FSB message's two words, once, when the backend starts (#598).  The
+ * compatibility format, as <device/device_machdep> composes one for MSI-X:
+ * 0xFEE00000 with the destination APIC id at bit 12, physical, no
+ * redirection; the vector as the data, fixed delivery, edge.  While
+ * interrupts are remapped, through the HPET's own entry instead --
+ * choose_route() took FSB only where a table names the HPET -- and zero if
+ * that entry could not be written.
+ */
+static int fsb_compose(void)
+{
+	fsb_address = 0xFEE00000U | (broadcaster_apic << 12);
+	fsb_data = HPET_EVENT_VECTOR;
+	fsb_remapped = 0;
+	if (!iommu_interrupts_remapped())
+		return 1;
+	if (!iommu_remap_hpet(hpet_number(), comparator, HPET_EVENT_VECTOR,
+			      broadcaster_apic, &fsb_address, &fsb_data))
+		return 0;
+	fsb_remapped = 1;
+	return 1;
 }
 
 static int hpet_ev_probe(void)
@@ -518,6 +557,7 @@ static void hpet_ev_intr(struct trap_frame *frame)
 static void hpet_ev_start(uint8_t vector)
 {
 	uint32_t	cap0;
+	unsigned	fsb_unwritable = 0;	/* #598: its comparator + 1 */
 
 	if (started)
 		return;
@@ -544,19 +584,50 @@ static void hpet_ev_start(uint8_t vector)
 	route = choose_route(&comparator, &cap0);
 
 	/*
+	 * #598: an FSB route under remapping whose entry could not be written
+	 * would send a message the engine refuses -- so the pin, said.
+	 */
+	if (route == ROUTE_FSB && !fsb_compose()) {
+		printf("clock_event: hpet: WRONG -- comparator %u's entry for "
+		       "its FSB message could not be written; its I/O APIC pin "
+		       "instead (#598)\n", comparator);
+		fsb_unwritable = comparator + 1;
+		route = legacy_route(&comparator);
+	}
+
+	/*
 	 * The probe found a route a moment ago, and nothing it looked at
 	 * changes but the masks: only a driver that claimed ISA 0 or 8 in
-	 * between can take the route away (choose_route()).  The clock has to
-	 * run, so the line is taken anyway -- and said, because that driver's
-	 * device has just gone silent.  No route at all cannot follow a probe
-	 * that found one.
+	 * between can take the route away (choose_route()) -- or, after an FSB
+	 * entry that could not be written, one that held it before the probe,
+	 * which took the FSB message and never looked at the masks (#598).  The
+	 * clock has to run, so the line is taken anyway -- and said, because
+	 * that driver's device has just gone silent.
+	 *
+	 * No route at all follows a probe that found one in one case only: the
+	 * probe found the FSB message, its entry could not be written (above),
+	 * and the board has no LegacyReplacement to fall back to (#598).  With
+	 * neither there is no clock, so the panic stands -- naming that cause,
+	 * and not the probe.
 	 */
-	if (route == ROUTE_TAKEN) {
+	if (route == ROUTE_TAKEN && fsb_unwritable) {
+		printf("clock_event: hpet: WRONG -- comparator %u's FSB entry "
+		       "could not be written, and ISA 0 or 8 is in a driver's "
+		       "use; LegacyReplacement takes it all the same (#598)\n",
+		       fsb_unwritable - 1);
+		route = ROUTE_LEGACY;
+		comparator = 0;
+	} else if (route == ROUTE_TAKEN) {
 		printf("clock_event: hpet: WRONG -- ISA 0 or 8 was claimed "
 		       "between the probe and the start; LegacyReplacement "
 		       "takes it all the same (#593)\n");
 		route = ROUTE_LEGACY;
 		comparator = 0;
+	} else if (route == ROUTE_NONE && fsb_unwritable) {
+		panic("clock_event: hpet: no route -- comparator %u's entry for "
+		      "its FSB message could not be written, and there is no "
+		      "LegacyReplacement to fall back to (#598)",
+		      fsb_unwritable - 1);
 	} else if (route == ROUTE_NONE) {
 		panic("clock_event: hpet: started with no route, where the "
 		      "probe had found one (#593)");
@@ -579,7 +650,22 @@ static void hpet_ev_start(uint8_t vector)
 	window_open(hpet_read32());
 	started = 1;
 
-	if (route == ROUTE_FSB)
+	if (route == ROUTE_FSB && fsb_remapped) {
+		uint16_t s = 0;
+
+		(void)iommu_hpet_source(hpet_number(), &s);
+		printf("clock_event: hpet: comparator %u of %u, one-shot, 32 "
+		       "bits, FSB message to cpu %u (APIC id %u) on vector "
+		       "0x%x through interrupt remapping: HPET %u is "
+		       "%02x:%02x.%x in the %s, its message written as "
+		       "0x%08x/0x%x; each processor's tick sent by IPI on 0x%x "
+		       "(#593, #598)\n", comparator, hpet_comparators(),
+		       broadcaster, broadcaster_apic, HPET_EVENT_VECTOR,
+		       hpet_number(), s >> 8, (s >> 3) & 0x1f, s & 7,
+		       iommu_vendor() == IOMMU_AMD ? "IVRS's special entry"
+						   : "DMAR's scope",
+		       fsb_address, fsb_data, vector);
+	} else if (route == ROUTE_FSB)
 		printf("clock_event: hpet: comparator %u of %u, one-shot, 32 "
 		       "bits, FSB message to cpu %u (APIC id %u) on vector "
 		       "0x%x; each processor's tick sent by IPI on 0x%x "
@@ -593,8 +679,8 @@ static void hpet_ev_start(uint8_t vector)
 		       "0x%x (#593)%s\n", comparator, hpet_comparators(),
 		       route_gsi, broadcaster, broadcaster_apic,
 		       HPET_EVENT_VECTOR, vector,
-		       fsb_passed_over ? " -- not the FSB message, which would"
-		       " go round interrupt remapping (#598)" : "");
+		       fsb_passed_over ? " -- not the FSB message: no table names"
+		       " the HPET for interrupt remapping (#598)" : "");
 }
 
 static void hpet_ev_setup(uint8_t vector)

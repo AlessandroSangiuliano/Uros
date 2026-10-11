@@ -47,6 +47,8 @@
 #include <kern/cpu_number.h>	/* #663: per-processor tables by number */
 #include <cpu/spl.h>
 #include <cpu/regs.h>
+#include <cpu/reset.h>		/* #373 */
+#include <ddb/ramoops.h>	/* #373 */
 #include <cpu/tss.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
@@ -4374,7 +4376,38 @@ static void timer_selftest(void)
 
 static void cons_selftest(void)
 {
-	int got = cons_loopback_probe(CONS_PROBE_BYTE);
+	uint8_t wrote, read;
+	int got;
+
+	/*
+	 * 🔑 FIRST WHETHER THERE IS A PORT AT ALL (#670).
+	 *
+	 * With no UART at COM1 every inb returns 0xFF: LSR reads all ones, so
+	 * THR_EMPTY appears set and the write does not hang, DATA_READY appears
+	 * set too, and the byte read back is 0xFF rather than the 0xA5 sent --
+	 * WRONG, for a machine that simply has no serial port.  The scratch
+	 * register tells the two apart (cons_uart_present()).  A machine without
+	 * one could not be asked the question, which is NOT ASKED (#563), said
+	 * with what the register gave back.
+	 *
+	 * This kept WRONG until #670, because nobody could have read the other
+	 * answer: the log left through the very port whose absence it would
+	 * report.  #666 ended that.  With -f the screen draws what was printed
+	 * before it existed, and pavillion, omen and OMEGA, none of which has a
+	 * UART at COM1, drew this line saying WRONG.
+	 */
+	if (!cons_uart_present(&wrote, &read)) {
+		kputs("UrMach x86-64: did not send 0xa5 to the serial port's own "
+		      "receiver — NOT ASKED, no UART answers at COM1: its scratch "
+		      "register gave back ");
+		kputhex64(read);
+		kputs(" for ");
+		kputhex64(wrote);
+		kputs(" (#670)\r\n");
+		return;
+	}
+
+	got = cons_loopback_probe(CONS_PROBE_BYTE);
 
 	kputs("UrMach x86-64: sent 0xa5 to the serial port's own receiver and got ");
 	if (got < 0)
@@ -4383,20 +4416,9 @@ static void cons_selftest(void)
 		kputhex64((uint64_t)got);
 
 	/*
-	 * 🔑 THIS ONE KEEPS WRONG, AND THE REASON IS NOT THAT IT IS UNAMBIGUOUS
-	 * (#563).  It is that the other case cannot be observed.
-	 *
-	 * With no UART at COM1 every inb returns 0xFF: LSR reads all ones, so
-	 * THR_EMPTY appears set and the write does not hang, DATA_READY appears
-	 * set too, and the byte read back is 0xFF rather than the 0xA5 sent.
-	 * The verdict is then WRONG for a machine that simply has no serial
-	 * port, which is the shape this issue is about -- and a scratch-register
-	 * presence test would tell the two apart.
-	 *
-	 * ⚠️ But it would be a branch nobody can ever read.  This log travels
-	 * out of the very port whose absence it would report: on any machine
-	 * where the line can be seen, the UART is there.  A NOT ASKED that
-	 * cannot reach a reader is worth less than the WRONG it replaced.
+	 * And with a UART there, WRONG means what it says: a chip that keeps
+	 * what is written in its scratch register and does not hear its own
+	 * transmitter.
 	 */
 	kputs(got == CONS_PROBE_BYTE
 	      ? " — the console can hear\r\n"
@@ -5793,9 +5815,12 @@ static void iommu_selftest(void)
 				kputdec(it->wrong);
 				kputs(" wrong — ");
 				kputdec(it->named);
-				kputs(" for sources the ivrs names (");
+				kputs(" for the sources the ivrs names, a table"
+				      " per device id (");
 				kputdec(it->ioapics);
-				kputs(" i/o apic)");
+				kputs(" i/o apic, ");
+				kputdec(it->hpets);
+				kputs(" hpet)");
 				kputs(built ? " and 1 closed for every other device,"
 					      " nothing points at them yet\r\n"
 					    : " — WRONG, no frame or no room, or an"
@@ -5822,6 +5847,42 @@ static void iommu_selftest(void)
 					    : " — WRONG, an entry nobody wrote would"
 					      " be read as one\r\n");
 			}
+		}
+
+		/*
+		 * #598: and whether the HPET's FSB message could be remapped --
+		 * only through an entry of its own, which needs a table naming
+		 * the HPET, the DMAR's scope or the IVRS's special entry, for
+		 * the requester id it carries; where none does, -H under -i
+		 * takes the HPET's I/O APIC pin (time/hpet_event.c).  On every
+		 * boot, with how many comparators can send the message at all:
+		 * otherwise only a -H boot would say either.
+		 */
+		if (iommu_interrupt_tables()->engines != 0 && hpet_present()) {
+			struct hpet_comparator_caps caps;
+			unsigned fsb = 0;
+			uint16_t source;
+			int named = iommu_hpet_source(hpet_number(), &source);
+
+			for (unsigned n = 0; n < hpet_comparators(); n++) {
+				hpet_comparator_caps(n, &caps);
+				if (caps.fsb)
+					fsb++;
+			}
+			kputs("UrMach x86-64:   HPET ");
+			kputdec(hpet_number());
+			kputs(named ? " is named in the " : " is not named in the ");
+			kputs(iommu_vendor() == IOMMU_AMD ? "ivrs" : "dmar");
+			kputs(", and ");
+			kputdec(fsb);
+			kputs(" of its ");
+			kputdec(hpet_comparators());
+			kputs(" comparators can send an FSB message");
+			kputs(fsb == 0 ? " — no message to remap (#598)\r\n"
+			      : named ? " — under -H -i, through an entry of its"
+					" own (#598)\r\n"
+			      : " — under -i it could not be remapped, and -H"
+				" takes its I/O APIC pin (#598)\r\n");
 		}
 
 		/*
@@ -8514,6 +8575,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	split_selftest();
 	pte_split_selftest();
 	pmap_selftest();
+	ramoops_init();		/* #373: the zone, once the direct map can be split */
 	pmap_verbs_selftest();
 	pv_selftest(info);
 	phys_ops_selftest();
@@ -8522,6 +8584,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	user_pmap_selftest();
 
 	acpi_selftest(info);
+	reset_init();		/* #373: the FADT's reset register, said */
 	atomic_selftest();
 	reclaim_selftest();
 
