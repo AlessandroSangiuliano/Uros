@@ -625,15 +625,31 @@ static uint32_t			msi_target[DEVICE_MD_MSI_MAX];	/* #659 */
  * contract above refuses to hand out -- the difference between the two is
  * exactly who is trusted with it, and the answer is "this file and the test
  * that has no device".
+ *
+ * #659: msi_claim_vector() gives the slot to irq_target()'s processor;
+ * msi_claim_vector_to() to the one named, for the self-test that aims a slot
+ * at the highest APIC id, and refuses one the words in use cannot name.
  */
 int
 msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 		 unsigned long long *addr_out, unsigned int *data_out)
 {
+	uint32_t	target;
+
+	if (!lapic_present() || !irq_target(&target))
+		return 0;
+	return msi_claim_vector_to(target, handler, slot_out, addr_out,
+				   data_out);
+}
+
+int
+msi_claim_vector_to(uint32_t target, device_md_intr_t handler,
+		    unsigned int *slot_out, unsigned long long *addr_out,
+		    unsigned int *data_out)
+{
 	unsigned int	slot;
 	unsigned int	vector;
 	unsigned long long address;
-	uint32_t	target;
 
 	if (handler == 0 || slot_out == 0 || addr_out == 0 || data_out == 0)
 		return 0;
@@ -649,19 +665,19 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 
 	/*
 	 * Before a slot is spent on it: a processor the message can name
-	 * (irq_target(), #659).  An id past eight bits is named only by the
-	 * slot's remapping entry, written by msi_remap_vector(), which every
+	 * (#659).  An id past eight bits is named only by the slot's remapping
+	 * entry for 32-bit ids, written by msi_remap_vector(), which every
 	 * programmer of a device calls next (<cpu/pci_msix.h>) -- so the address
 	 * handed out for one is the old format's base, which names APIC id 0.
 	 * Not a guess that can land: with entries for 32-bit ids, Intel refuses
 	 * a message in the old format (EIME), and AMD finds no entry for a slot
 	 * nobody remapped.
 	 */
-	if (!irq_target(&target))
-		return 0;
-	if (target > 0xFFu)
+	if (target > 0xFFu) {
+		if (!(iommu_interrupts_remapped() && iommu_remaps_x2apic()))
+			return 0;
 		address = MSI_ADDRESS_BASE;
-	else if (!msi_destination(target, &address))
+	} else if (!msi_destination(target, &address))
 		return 0;
 
 	/*

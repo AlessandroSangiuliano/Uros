@@ -6316,6 +6316,9 @@ static void msi_selftest(void)
  * wants all sixteen, reclaiming one honestly means the kernel owning the
  * device's table, which is where #457 is going anyway.
  */
+static volatile uint32_t	*msix_card_regs;	/* #659: an 82574L's */
+static unsigned			 msix_card_dev;		/* ... at 00:dev.0  */
+
 static void msix_table_selftest(void)
 {
 	struct pci_msix		m;
@@ -6484,6 +6487,8 @@ static void msix_table_selftest(void)
 			device_md_msi_unregister(slot);
 			return;
 		}
+		msix_card_regs = regs;		/* #659: rung again later */
+		msix_card_dev = nic;
 
 		regs[0x00E4 / 4] = 0x00080808u;	/* every cause -> entry 0  */
 		regs[0x00D0 / 4] = 0x01000004u;	/* link change, and Other  */
@@ -7406,6 +7411,215 @@ static void intr_nest_selftest(void)
 	      ? " — the mask is the processor's count, not a flag in the "
 		"lock\r\n"
 	      : " — WRONG, the pairing is not what percpu.h says it is\r\n");
+}
+
+/*
+ * 🔑 #659: AN INTERRUPT ARRIVES AT THE PROCESSOR ITS ENTRY NAMES.
+ *
+ * A pin and an MSI-X slot, routed to the processor with the highest APIC id
+ * the words in use can name -- any once the remapping entries carry 32-bit
+ * ids, eight bits otherwise -- and counted by where they land: the handler
+ * reads lapic_id().  The tests before this one route to the boot processor,
+ * whose id is 0 on every machine here, and 0 is 0 in every format there is:
+ * the old one's eight bits, Intel's xAPIC field and its x2APIC one, AMD's
+ * basic entry and its 128-bit one.  A destination written in the wrong place,
+ * or read in the wrong mode (EIME, XTEn), delivered there all the same.
+ * Aimed at QEMU's processor 256 (--socket1-cpu with sockets=2,cores=256),
+ * an interrupt must arrive at 256 and nowhere else.
+ *
+ * After the other processors are up, as the tick on every processor is: an
+ * interrupt aimed at one still waiting for its startup would wait with it.
+ * The pin is ISA 0's, the 8254, where the HPET did not take it (#593), as in
+ * ioapic_selftest(); the slot is the 82574L's that msix_table_selftest()
+ * rang, on its registers as that test left them mapped (#612), and one more
+ * MSI slot is spent on it for good (device_md_msi_unregister()).
+ */
+static volatile uint32_t	reach_want;
+static volatile uint32_t	reach_there, reach_elsewhere, reach_other;
+
+static void reach_count(void)
+{
+	uint32_t here = lapic_id();
+
+	if (here == reach_want)
+		__sync_fetch_and_add(&reach_there, 1);
+	else {
+		reach_other = here;
+		__sync_fetch_and_add(&reach_elsewhere, 1);
+	}
+}
+
+static void reach_pin(struct trap_frame *frame)
+{
+	(void)frame;
+	reach_count();
+	lapic_eoi();
+}
+
+static void reach_msi(int slot)
+{
+	(void)slot;
+	reach_count();
+}
+
+/* What one source did: there and nowhere else, elsewhere, or never. */
+static void reach_said(const char *source, uint32_t target)
+{
+	kputs("UrMach x86-64: ");
+	kputs(source);
+	kputs(" aimed at apic id ");
+	kputdec(target);
+	kputs(" arrived there ");
+	kputdec(reach_there);
+	kputs(" times and elsewhere ");
+	kputdec(reach_elsewhere);
+	if (reach_there > 0 && reach_elsewhere == 0) {
+		kputs(" — it reaches the processor its entry names (#659)\r\n");
+	} else if (reach_elsewhere != 0) {
+		kputs(" — WRONG, it reached apic id ");
+		kputdec(reach_other);
+		kputs(" instead (#659)\r\n");
+	} else {
+		kputs(" — WRONG, it never arrived (#659)\r\n");
+	}
+}
+
+static void reach_pin_selftest(uint32_t target)
+{
+	uint32_t gsi = acpi_irq_to_gsi(0);
+	uint16_t flags = acpi_irq_flags(0);
+	int had_interrupts;
+
+	if (!ioapic_present() || hpet_legacy_routed()) {
+		kputs(!ioapic_present()
+		      ? "UrMach x86-64: where irq 0 arrives: NOT ASKED, no I/O"
+			" APIC (#659)\r\n"
+		      : "UrMach x86-64: where irq 0 arrives: NOT ASKED, ISA 0"
+			" is the HPET's, LegacyReplacement on (#593, #659)\r\n");
+		return;
+	}
+
+	reach_want = target;
+	reach_there = reach_elsewhere = 0;
+	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, reach_pin);
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	if (!pit_periodic_start(IRQ0_TEST_HZ)) {
+		kputs("UrMach x86-64: the 8254 refused the requested rate"
+		      " — WRONG (#659)\r\n");
+	} else {
+		ioapic_route(gsi, IOAPIC_ISA_VECTOR_BASE, target, flags);
+		pit_delay_us(20000);
+		ioapic_mask(gsi);
+		pit_periodic_stop();
+
+		/* One period more, for a message already on its way. */
+		pit_delay_us(1000);
+		reach_said("irq 0", target);
+	}
+
+	if (!had_interrupts)
+		interrupts_disable();
+	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, 0);
+}
+
+static void reach_msix_selftest(uint32_t target)
+{
+	volatile uint32_t *regs = msix_card_regs;
+	unsigned nic = msix_card_dev, slot = 0, data = 0;
+	unsigned long long addr = 0;
+	struct pci_msix m;
+	uint16_t control;
+	int had_interrupts;
+
+	if (regs == 0) {
+		kputs("UrMach x86-64: where an MSI-X slot's interrupt arrives:"
+		      " NOT ASKED, no 82574L was rung at boot (#659)\r\n");
+		return;
+	}
+	if (!pci_msix_probe(0, 0, (uint8_t)nic, 0, &m)
+	    || !msi_claim_vector_to(target, reach_msi, &slot, &addr, &data)) {
+		kputs("UrMach x86-64: the 82574L's slot could not be aimed at"
+		      " apic id ");
+		kputdec(target);
+		kputs(" — WRONG (#659)\r\n");
+		return;
+	}
+	if (!msi_remap_vector(slot, 0, nic, 0, &addr, &data)) {
+		kputs("UrMach x86-64: the slot aimed at apic id ");
+		kputdec(target);
+		kputs(" could not be given a remapping entry — WRONG (#659)\r\n");
+		device_md_msi_unregister(slot);
+		return;
+	}
+
+	control = pci_cfg_read16(0, 0, (uint8_t)nic, 0,
+				 (uint16_t)(m.cap + PCI_MSIX_CONTROL));
+	reach_want = target;
+	reach_there = reach_elsewhere = 0;
+	pci_msix_arm(&m, 0, addr, data);
+	pci_msix_enable(&m);
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	regs[0x00E4 / 4] = 0x00080808u;		/* every cause -> entry 0  */
+	regs[NIC_IMS / 4] = 0x01000004u;	/* link change, and Other  */
+	(void) regs[NIC_ICR / 4];		/* ICR reads clear         */
+	regs[NIC_ICS / 4] = NIC_ICR_LSC;	/* ring it                 */
+	for (unsigned spin = 0; spin < 5000000u
+	     && reach_there + reach_elsewhere == 0; spin++)
+		cpu_pause();
+	regs[NIC_IMC / 4] = 0xFFFFFFFFu;	/* and be quiet again      */
+	pit_delay_us(1000);
+
+	pci_msix_disarm(&m, 0);
+	if (!(control & PCI_MSIX_CTL_ENABLE))
+		pci_msix_disable(&m);
+	msi_unremap_vector(slot, 0, nic, 0);
+	device_md_msi_unregister(slot);
+	if (!had_interrupts)
+		interrupts_disable();
+
+	reach_said("the 82574L's MSI-X slot", target);
+}
+
+static void irq_reach_selftest(void)
+{
+	int wide = iommu_interrupts_remapped() && iommu_remaps_x2apic();
+	uint32_t boot = cpu_to_apic(0), target = boot, highest = boot;
+	unsigned cpus = smp_cpu_count();
+
+	for (unsigned i = 1; i < cpus; i++) {
+		uint32_t id = cpu_to_apic(i);
+
+		if (id > highest)
+			highest = id;
+		if ((wide || id <= 0xFFu) && id > target)
+			target = id;
+	}
+
+	if (cpus < 2 || smp_online_count() != cpus || target == boot) {
+		kputs("UrMach x86-64: where an interrupt arrives: NOT ASKED, ");
+		kputs(cpus < 2 ? "one processor, whose id every format names"
+				 " alike (#659)\r\n"
+		      : smp_online_count() != cpus
+			       ? "a processor did not report in (#659)\r\n"
+			       : "no other processor the entries can name"
+				 " (#659)\r\n");
+		return;
+	}
+	if (highest != target) {
+		kputs("UrMach x86-64:   apic id ");
+		kputdec(highest);
+		kputs(" is past eight bits and the entries do not carry 32, so"
+		      " the interrupts are aimed at apic id ");
+		kputdec(target);
+		kputs(" (#659)\r\n");
+	}
+
+	reach_pin_selftest(target);
+	reach_msix_selftest(target);
 }
 
 /*
@@ -8766,6 +8980,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	silent_cpu_probe();
 #endif
 	smp_timer_selftest();
+	irq_reach_selftest();
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();

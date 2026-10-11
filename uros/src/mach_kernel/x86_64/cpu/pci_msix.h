@@ -182,6 +182,17 @@ extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
 			    unsigned int *data_out);
 
 /*
+ * #659: the same slot for processor `apic_id', named rather than chosen --
+ * for the boot self-test that aims one at the highest APIC id.  Refuses an
+ * id the words in use cannot name: past eight bits without remapping entries
+ * for 32-bit ids.
+ */
+extern int msi_claim_vector_to(uint32_t apic_id, void (*handler)(int),
+			       unsigned int *slot_out,
+			       unsigned long long *address_out,
+			       unsigned int *data_out);
+
+/*
  * #598: that message as the device must be given it.  Unchanged while
  * nothing is remapped; otherwise through the slot's remapping entry, written
  * here and naming the function at bus/dev/func as the only source that may
