@@ -9064,6 +9064,27 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 			}
 			kputs("\r\n");
 		}
+
+		/*
+		 * #659: and each in the boot processor's APIC mode from the
+		 * moment it could report a fault (ap_start_c()), where a report
+		 * would otherwise have touched the other mode's registers.
+		 */
+		if (up != 0) {
+			unsigned late = smp_ap_mode_late();
+
+			kputs("UrMach x86-64:   ");
+			kputdec(late <= up ? up - late : 0);
+			kputs(" of ");
+			kputdec(up);
+			kputs(late == 0
+			      ? " in the boot processor's apic mode from their first"
+				" reportable fault on (#659)\r\n"
+			      : " in the boot processor's apic mode from their first"
+				" reportable fault on — WRONG, a fault reported"
+				" before the switch reads the other mode's"
+				" registers (#659)\r\n");
+		}
 	}
 
 	ipi_selftest();

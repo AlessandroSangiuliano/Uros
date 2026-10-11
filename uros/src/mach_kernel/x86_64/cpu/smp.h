@@ -76,6 +76,14 @@ unsigned smp_ap_call_probe(void);
 unsigned smp_online_count(void);
 
 /*
+ * #659: how many application processors were not in the boot processor's
+ * APIC mode at the moment they could first report a fault, where
+ * ap_start_c() switches them: a fault report there would have touched the
+ * other mode's registers.
+ */
+unsigned smp_ap_mode_late(void);
+
+/*
  * Publish that count as real_ncpus, which the machine-independent scheduler
  * reads to decide when the machine is up.  Called once, after the others
  * have reported in -- there is nothing to count before that (#453).

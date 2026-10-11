@@ -256,28 +256,45 @@ int lapic_x2apic(void)
 	return x2apic;
 }
 
-void lapic_enable(void)
+/*
+ * The boot processor's mode on this one too (#659): an application processor
+ * comes out of INIT in the mode it was in before, which is xAPIC unless the
+ * firmware chose otherwise, and every register here is an MSR or a page
+ * according to the boot processor's choice.  xAPIC to x2APIC is one write
+ * (SDM 13.12.5).  The other way is not, and a processor left in x2APIC mode
+ * behind a boot processor that is not would answer none of the page's
+ * addresses: said, since nothing here could be believed after it.
+ *
+ * 🔴 The first thing an application processor does once it can report a
+ * fault (ap_start_c()), not the last before its interrupts: the accessors
+ * follow the boot processor's choice, not the mode of the processor running
+ * them, so until this ran a fault report's lapic_id() or a panic's halting
+ * IPI was an x2APIC MSR on a processor in xAPIC mode, which "causes a
+ * general-protection exception" (SDM 13.12.2) inside the report.
+ */
+void lapic_mode_here(void)
 {
 	uint64_t msr = rdmsr(MSR_APIC_BASE);
 
 	if (!present)
 		panic("lapic: asked to enable an APIC that was never mapped");
 
-	/*
-	 * The boot processor's mode on this one too (#659): an application
-	 * processor comes out of INIT in the mode it was in before, which is
-	 * xAPIC unless the firmware chose otherwise, and the registers below
-	 * are MSRs or a page according to the boot processor's choice.  xAPIC
-	 * to x2APIC is one write (SDM 13.12.5).  The other way is not, and a
-	 * processor left in x2APIC mode behind a boot processor that is not
-	 * would answer none of the page's addresses: said, since nothing here
-	 * could be believed after it.
-	 */
 	if (x2apic && !(msr & APIC_BASE_X2APIC))
 		wrmsr(MSR_APIC_BASE, msr | APIC_BASE_X2APIC);
 	else if (!x2apic && (msr & APIC_BASE_X2APIC))
 		panic("lapic: this processor is in x2APIC mode and the boot "
 		      "processor is not (#659)");
+}
+
+int lapic_mode_matches(void)
+{
+	return ((rdmsr(MSR_APIC_BASE) & APIC_BASE_X2APIC) != 0) == (x2apic != 0);
+}
+
+void lapic_enable(void)
+{
+	/* Nothing to do on a processor ap_start_c() switched already. */
+	lapic_mode_here();
 
 	/*
 	 * Accept every priority.  Reset leaves this at zero, which is what we

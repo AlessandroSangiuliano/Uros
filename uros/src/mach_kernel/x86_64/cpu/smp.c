@@ -98,6 +98,9 @@ int apic_to_cpu(uint32_t apic_id)
 static volatile uint64_t online_mask;
 static volatile uint64_t online_count;
 
+/* #659: processors not in the accessors' APIC mode when they could fault. */
+static volatile uint64_t ap_mode_late;
+
 /*
  * The boot processor's bit in smp_answering_set(), set once smp_start_others()
  * has run (#605).
@@ -182,6 +185,17 @@ void ap_start_c(uint32_t cpu)
 	 * one failure that leaves nothing on the wire to read afterwards.
 	 */
 	desc_activate(cpu);
+
+	/*
+	 * 🔴 And at once the boot processor's APIC mode (#659): from here a
+	 * fault is reported, and the report reads lapic_id() and a panic sends
+	 * its halting IPI through accessors that follow the boot processor's
+	 * mode.  An x2APIC MSR on a processor still in xAPIC mode is a #GP
+	 * inside the report.  Counted when it does not hold, for the boot to say.
+	 */
+	lapic_mode_here();
+	if (!lapic_mode_matches())
+		atomic_inc64((volatile uint64_t *)&ap_mode_late);
 
 	/*
 	 * 🔴 Caches on, and the boot processor's protections (#639).
@@ -383,6 +397,11 @@ unsigned smp_ap_call_probe(void)
 unsigned smp_online_count(void)
 {
 	return (unsigned)atomic_load64((volatile uint64_t *)&online_count) + 1;
+}
+
+unsigned smp_ap_mode_late(void)
+{
+	return (unsigned)atomic_load64((volatile uint64_t *)&ap_mode_late);
 }
 
 int smp_is_online(unsigned cpu)

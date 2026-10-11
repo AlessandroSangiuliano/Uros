@@ -106,6 +106,16 @@ int		lapic_icr_destination(uint32_t apic_id, int x2apic_mode,
 void lapic_enable(void);
 
 /*
+ * #659: this processor in the boot processor's mode -- xAPIC or x2APIC --
+ * which every accessor in lapic.c assumes; lapic_enable() makes sure of it,
+ * and an application processor does it first, as soon as it can report a
+ * fault.  lapic_mode_matches() says whether this processor's IA32_APIC_BASE
+ * agrees with the accessors now.
+ */
+void lapic_mode_here(void);
+int lapic_mode_matches(void);
+
+/*
  * Say the current interrupt has been dealt with.
  *
  * Not a formality: the APIC holds the vector's priority level busy until
