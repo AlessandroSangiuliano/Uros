@@ -19,6 +19,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/lapic.h>		/* LAPIC_XAPIC_ID_MAX, #659 */
 #include <cpu/pci_cfg.h>
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
@@ -1466,7 +1467,11 @@ int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2])
 	if (e == 0 || out == 0)
 		return 0;
 
-	if (!x2apic && e->destination > 0xFF)
+	/*
+	 * In xAPIC mode eight bits, and FFH among them is every processor
+	 * (LAPIC_XAPIC_ID_MAX, #659): an entry the kernel writes names one.
+	 */
+	if (!x2apic && e->destination > LAPIC_XAPIC_ID_MAX)
 		return 0;
 
 	lo = VTD_IRTE_P | VTD_IRTE_VECTOR(e->vector);

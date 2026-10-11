@@ -477,8 +477,9 @@ struct iommu_irte {
 
 /*
  * Encode an entry delivering `vector' to `destination'.  Answers zero when the
- * destination does not fit: wider than eight bits in Intel's xAPIC mode, and
- * at all in AMD's basic format, which has eight bits and nothing else.
+ * destination names no single processor in the format: above
+ * LAPIC_XAPIC_ID_MAX in Intel's xAPIC mode and in AMD's basic format, which has
+ * eight bits and nothing else, FFH among them being every processor (#659).
  *
  * 🔴 INTEL'S ALWAYS NAMES ITS SOURCE: SVT 01b, SQ 00b, SID = `source'.  Without
  * that, an entry is usable by any device that writes its handle (§5.1.2.2), and

@@ -2924,12 +2924,13 @@ static const struct irte_case irte_cases[] = {
 	  1, { 0x41, 1, 0, 0x0020 }, 1 },
 
 	/*
-	 * Level-triggered, to the highest xAPIC id, accepting the source id an
-	 * I/O APIC would be given in a DMAR scope: TM set, the id 0xFF.
+	 * Level-triggered, to the highest id an xAPIC destination names one
+	 * processor by (LAPIC_XAPIC_ID_MAX), accepting the source id an I/O
+	 * APIC would be given in a DMAR scope: TM set, the id 0xFE.
 	 */
 	{ "intel, level from an i/o apic", 0, 0,
-	  0x0000FF0000FE0011ULL, 0x000000000004F0F8ULL,
-	  1, { 0xFE, 0xFF, 1, 0xF0F8 }, 1 },
+	  0x0000FE0000FE0011ULL, 0x000000000004F0F8ULL,
+	  1, { 0xFE, 0xFE, 1, 0xF0F8 }, 1 },
 
 	/* x2APIC mode: the destination is all of 63:32. */
 	{ "intel, x2apic id 0x12345", 0, 1,
@@ -2939,6 +2940,17 @@ static const struct irte_case irte_cases[] = {
 	/* An id that does not fit xAPIC mode is refused, not truncated. */
 	{ "intel, id 0x100 in xapic mode", 0, 0,
 	  0, 0, 0, { 0x41, 0x100, 0, 0x0020 }, -1 },
+
+	/*
+	 * #659: and 0xFF, which fits and is every processor in physical
+	 * mode (SDM 13.6.2.1) -- refused in xAPIC mode, a processor like any
+	 * other in x2APIC mode.
+	 */
+	{ "intel, id 0xff in xapic mode, the broadcast", 0, 0,
+	  0, 0, 0, { 0x41, 0xFF, 0, 0x0020 }, -1 },
+	{ "intel, x2apic id 0xff, a processor", 0, 1,
+	  0x000000FF00410001ULL, 0x0000000000040020ULL,
+	  1, { 0x41, 0xFF, 0, 0x0020 }, 1 },
 
 	/* P clear refuses, whatever else the entry holds. */
 	{ "intel, not present", 0, 0,
@@ -2976,12 +2988,17 @@ static const struct irte_case irte_cases[] = {
 	/* AMD: RemapEn, the id in 15:8, the vector in 23:16. */
 	{ "amd, vector 0x41 to id 1", 1, 0,
 	  0x00410101ULL, 0, 1, { 0x41, 1, 0, 0 }, 1 },
-	{ "amd, vector 0xfe to id 0xff", 1, 0,
-	  0x00FEFF01ULL, 0, 1, { 0xFE, 0xFF, 0, 0 }, 1 },
+	{ "amd, vector 0xfe to id 0xfe", 1, 0,
+	  0x00FEFE01ULL, 0, 1, { 0xFE, 0xFE, 0, 0 }, 1 },
 
-	/* Eight bits of destination and no more in the basic format. */
+	/*
+	 * Eight bits of destination and no more in the basic format -- and
+	 * not 0xFF, the broadcast (#659).
+	 */
 	{ "amd, id 0x100", 1, 0,
 	  0, 0, 0, { 0x41, 0x100, 0, 0 }, -1 },
+	{ "amd, id 0xff, the broadcast", 1, 0,
+	  0, 0, 0, { 0x41, 0xFF, 0, 0 }, -1 },
 
 	/* RemapEn clear: target aborted, whatever else the entry holds. */
 	{ "amd, remapping off", 1, 0,
@@ -3017,6 +3034,11 @@ static const struct irte_case irte_cases[] = {
 	  -1, { 0, 0, 0, 0 }, 0 },
 	{ "amd 128-bit, id 0x100 without xten", 2, 0,
 	  0, 0, 0, { 0x41, 0x100, 0, 0 }, -1 },
+	{ "amd 128-bit, id 0xff without xten, the broadcast", 2, 0,
+	  0, 0, 0, { 0x41, 0xFF, 0, 0 }, -1 },
+	{ "amd 128-bit, id 0xff with xten, a processor", 2, 1,
+	  0x000000000000FF01ULL, 0x0000000000000041ULL,
+	  1, { 0x41, 0xFF, 0, 0 }, 1 },
 	{ "amd 128-bit, remapping off", 2, 1,
 	  0x0000000000000100ULL, 0x0000000000000041ULL,
 	  0, { 0, 0, 0, 0 }, 0 },
@@ -3444,7 +3466,8 @@ static unsigned irta_check(unsigned *ran)
  * both run under QEMU already.
  *
  * #659: and in x2APIC mode, EIME set, where an id past eight bits fits the
- * destination and the same id with EIME clear is refused, not cut.
+ * destination and the same id with EIME clear is refused, not cut; and 0xFF,
+ * refused with EIME clear, where it is every processor (LAPIC_XAPIC_ID_MAX).
  */
 static unsigned hpet_check(unsigned *ran)
 {
@@ -3456,10 +3479,12 @@ static unsigned hpet_check(unsigned *ran)
 		int		maps;
 	} cases[] = {
 		{  0, 0xF0, 0x000, 0, 1 },
-		{ 15, 0x31, 0x0FF, 0, 1 },
+		{ 15, 0x31, 0x0FE, 0, 1 },
 		{ 16, 0xF0, 0x000, 0, 0 },  /* one past the comparators' entries */
 		{  1, 0x41, 0x100, 1, 1 },  /* #659: past eight bits, EIME set */
 		{  2, 0x41, 0x100, 0, 0 },  /* ... and with EIME clear */
+		{  3, 0x41, 0x0FF, 0, 0 },  /* #659: the broadcast, EIME clear */
+		{  4, 0x41, 0x0FF, 1, 1 },  /* ... a processor, EIME set */
 	};
 	const uint16_t source = 0xF0F9;		/* f0:1f.1, nobody's */
 	unsigned bad = 0;

@@ -447,18 +447,18 @@ unsigned smp_start_others(void)
 	 * hardware is addressed by.
 	 *
 	 * #659: one whose id the command register cannot carry in the mode
-	 * the boot settled on -- past eight bits, in xAPIC mode, which
+	 * the boot settled on -- above LAPIC_XAPIC_ID_MAX, in xAPIC mode, which
 	 * lapic_plan_mode() turns x2APIC mode on for wherever it can -- is not
 	 * woken, and not counted as asked.  Said: its INIT used to go to the
-	 * processor with its id's low byte.
+	 * processor with its id's low byte, and for 255 to every processor.
 	 */
 	for (unsigned cpu = 1; cpu < smp_cpu_count(); cpu++) {
 		uint32_t id = cpu_to_apic(cpu), high;
 
 		if (!lapic_icr_destination(id, lapic_x2apic(), &high)) {
 			printf("smp: processor %u, apic id %u, is not woken: "
-			       "xAPIC mode cannot address an id past eight "
-			       "bits (#659)\n", cpu, id);
+			       "xAPIC mode names no processor above apic id "
+			       "%u (#659)\n", cpu, id, LAPIC_XAPIC_ID_MAX);
 			continue;
 		}
 

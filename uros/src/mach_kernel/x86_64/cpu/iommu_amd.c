@@ -28,6 +28,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/lapic.h>		/* LAPIC_XAPIC_ID_MAX, #659 */
 #include <cpu/pci_cfg.h>
 #include <cpu/regs.h>		/* cpu_pause */
 #include <device/pci.h>		/* PCI_VENDOR_ID, #598 */
@@ -1917,7 +1918,8 @@ int iommu_amd_read(void)
  *
  * ⚠️ Eight bits of destination and nothing more.  An x2APIC id needs the
  * 128-bit format below and XTEn in the control register -- so a wider id is
- * refused by this encoder, not truncated into somebody else's.
+ * refused by this encoder, not truncated into somebody else's; and so is FFH,
+ * which in physical mode is every processor (LAPIC_XAPIC_ID_MAX, #659).
  */
 #define	AMD_IRTE_REMAP_EN	(1u << 0)
 #define	AMD_IRTE_SUP_IOPF	(1u << 1)
@@ -1929,7 +1931,7 @@ int iommu_amd_read(void)
 
 int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out)
 {
-	if (e == 0 || out == 0 || e->destination > 0xFF)
+	if (e == 0 || out == 0 || e->destination > LAPIC_XAPIC_ID_MAX)
 		return 0;
 
 	*out = AMD_IRTE_REMAP_EN
@@ -1976,8 +1978,8 @@ int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
  *
  * "Destination[31:8] are reserved and MSZ when MMIO 0x30[XTSup]=0 or MMIO
  * 0x18[XTEn]=0", so `x2apic' -- XTEn -- decides how wide the destination may
- * be, and with it clear an id past eight bits is refused here as it is by the
- * basic encoder.
+ * be, and with it clear an id above LAPIC_XAPIC_ID_MAX is refused here as it
+ * is by the basic encoder.
  */
 #define	AMD_IRTE_GA_LO_RSVD	0xFFFFFFFF00000000ULL
 #define	AMD_IRTE_GA_LO_DEST_HI	0x00000000FFFF0000ULL	/* Destination[23:8] */
@@ -1986,7 +1988,8 @@ int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
 
 int iommu_amd_irte_ga(const struct iommu_irte *e, int x2apic, uint64_t out[2])
 {
-	if (e == 0 || out == 0 || (!x2apic && e->destination > 0xFF))
+	if (e == 0 || out == 0
+	    || (!x2apic && e->destination > LAPIC_XAPIC_ID_MAX))
 		return 0;
 
 	out[0] = AMD_IRTE_REMAP_EN

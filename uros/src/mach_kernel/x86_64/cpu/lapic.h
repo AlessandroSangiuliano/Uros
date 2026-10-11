@@ -34,7 +34,8 @@ void lapic_init(uint64_t madt_base);
  * given; lapic_x2apic_planned() is what it decided.  lapic_choose_mode() makes
  * the switch the plan says, and every processor runs the mode it settles on
  * (lapic_enable()).  The boot says which.  "-2" below is also the MADT listing
- * an id past 255 with nobody asking, lapic_x2apic_needed() -- zero otherwise.
+ * an id xAPIC mode cannot name (above LAPIC_XAPIC_ID_MAX) with nobody asking,
+ * lapic_x2apic_needed() -- zero otherwise.
  */
 enum lapic_mode {
 	LAPIC_MODE_XAPIC,			/* not asked, or nothing to keep */
@@ -55,9 +56,25 @@ enum lapic_mode	lapic_mode(void);
 int		lapic_x2apic(void);
 
 /*
+ * 🔴 THE HIGHEST APIC ID AN EIGHT-BIT DESTINATION NAMES ONE PROCESSOR BY (#659).
+ *
+ * FEH, not FFH: in physical destination mode FFH is every processor -- "either
+ * a single destination (local APIC IDs 00H through FEH) or a broadcast to all
+ * APICs (the APIC ID is FFH)" (SDM Vol. 3A 253668-093US 13.6.2.1).  The same
+ * eight bits are the command register's in xAPIC mode, a redirection entry's
+ * 63:56, a message address's 19:12 (13.11.1) and a remapping entry's
+ * destination when its engine is not in x2APIC mode, so one limit serves them
+ * all; it is also why firmware hands over in x2APIC mode once any id is "255
+ * or greater" (13.12.7).  An id of 255 written into any of them would have
+ * interrupted every processor.
+ */
+#define	LAPIC_XAPIC_ID_MAX	0xFEu
+
+/*
  * #659: the command register's destination word for `apic_id' in the mode
- * given (1 for x2APIC), or no: in xAPIC mode an id past eight bits does not
- * fit, and is refused rather than cut to its low byte.
+ * given (1 for x2APIC), or no: in xAPIC mode an id above LAPIC_XAPIC_ID_MAX
+ * names no single processor, and is refused rather than cut to its low byte
+ * or sent to all of them.
  */
 int		lapic_icr_destination(uint32_t apic_id, int x2apic_mode,
 				      uint32_t *high);

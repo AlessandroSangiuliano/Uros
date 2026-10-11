@@ -450,10 +450,11 @@ static void comparator_route(void)
  * choose_route() took FSB only where a table names the HPET -- and zero if
  * that entry could not be written.
  *
- * #659: and zero, not remapped, for an APIC id past eight bits, which the
- * compatibility format cannot name: msi_destination() refuses it, where the
- * id shifted in at bit 12 used to leave 0xFEExxxxx -- 256 made 0xFEF00000, a
- * write to memory and no interrupt.  Remapped, the entry names the processor
+ * #659: and zero, not remapped, for an APIC id above LAPIC_XAPIC_ID_MAX,
+ * which the compatibility format cannot name: msi_destination() refuses it,
+ * where the id shifted in at bit 12 used to leave 0xFEExxxxx -- 256 made
+ * 0xFEF00000, a write to memory and no interrupt, and 255 would have been the
+ * broadcast.  Remapped, the entry names the processor
  * with all 32 bits, and the old format's words are only the base, as for an
  * MSI slot (msi_claim_vector_to()).
  */
@@ -469,7 +470,7 @@ static int fsb_compose(void)
 		if (!msi_destination(broadcaster_apic, &address)) {
 			fsb_refusal = "FSB message cannot name its processor "
 				      "in the old format, the apic id being "
-				      "past eight bits";
+				      "above 254";
 			return 0;
 		}
 		fsb_address = (uint32_t)address;

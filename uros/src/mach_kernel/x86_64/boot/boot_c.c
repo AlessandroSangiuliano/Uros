@@ -6636,10 +6636,11 @@ static void ioapic_selftest(void)
 
 	/*
 	 * #598's C16: an APIC id past eight bits is refused by a redirection
-	 * entry and by a message address, not cut to its low byte.  Asked of
-	 * the arithmetic: these are the old format's words, which cannot carry
-	 * more, and an x2APIC id is reached through a remapping entry for 32-bit
-	 * ids instead (#659, irq_reach_selftest() below).
+	 * entry and by a message address, not cut to its low byte -- and 255,
+	 * which fits them and is their broadcast (LAPIC_XAPIC_ID_MAX, #659).
+	 * Asked of the arithmetic: these are the old format's words, which
+	 * cannot carry more, and an x2APIC id is reached through a remapping
+	 * entry for 32-bit ids instead (#659, irq_reach_selftest() below).
 	 */
 	{
 		uint32_t high = 0;
@@ -6647,38 +6648,46 @@ static void ioapic_selftest(void)
 		unsigned ok = 0;
 
 		ok += ioapic_rte_destination(3, &high) && high == 0x03000000u;
-		ok += ioapic_rte_destination(255, &high) && high == 0xFF000000u;
+		ok += ioapic_rte_destination(254, &high) && high == 0xFE000000u;
+		ok += !ioapic_rte_destination(255, &high);
 		ok += !ioapic_rte_destination(256, &high);
 		ok += msi_destination(3, &address) && address == 0xFEE03000ULL;
+		ok += msi_destination(254, &address) && address == 0xFEEFE000ULL;
+		ok += !msi_destination(255, &address);
 		ok += !msi_destination(256, &address);
-		kputs("UrMach x86-64: an apic id past eight bits refused by a"
-		      " redirection entry and a message address, not cut to its"
-		      " low byte: ");
+		kputs("UrMach x86-64: apic ids 255 and above refused by a"
+		      " redirection entry and a message address, not sent to all"
+		      " or cut to the low byte: ");
 		kputdec(ok);
-		kputs(ok == 5 ? " of 5\r\n"
-			      : " of 5 — WRONG, it would reach the processor"
-				" that has its low byte\r\n");
+		kputs(ok == 8 ? " of 8\r\n"
+			      : " of 8 — WRONG, it would reach every processor"
+				" or the one that has its low byte\r\n");
 	}
 
 	/*
 	 * #659: and the command register, which C16 did not look at -- in
-	 * xAPIC mode an INIT for processor 256 went to processor 0.
+	 * xAPIC mode an INIT for processor 256 went to processor 0, and one
+	 * for 255 would have gone to every processor.  In x2APIC mode both
+	 * are processors like any other.
 	 */
 	{
 		uint32_t high = 0;
 		unsigned ok = 0;
 
 		ok += lapic_icr_destination(3, 0, &high) && high == 0x03000000u;
-		ok += lapic_icr_destination(255, 0, &high) && high == 0xFF000000u;
+		ok += lapic_icr_destination(254, 0, &high) && high == 0xFE000000u;
+		ok += !lapic_icr_destination(255, 0, &high);
 		ok += !lapic_icr_destination(256, 0, &high);
+		ok += lapic_icr_destination(255, 1, &high) && high == 255u;
 		ok += lapic_icr_destination(256, 1, &high) && high == 256u;
-		kputs("UrMach x86-64: an apic id past eight bits refused by the"
-		      " command register in xAPIC mode and carried whole in"
-		      " x2APIC mode: ");
+		kputs("UrMach x86-64: apic ids 255 and above refused by the"
+		      " command register in xAPIC mode, not sent to all or cut to"
+		      " the low byte, and carried whole in x2APIC mode: ");
 		kputdec(ok);
-		kputs(ok == 4 ? " of 4 (#659)\r\n"
-			      : " of 4 — WRONG, an interrupt for it would reach"
-				" the processor that has its low byte (#659)\r\n");
+		kputs(ok == 6 ? " of 6 (#659)\r\n"
+			      : " of 6 — WRONG, an interrupt for it would reach"
+				" every processor or the one that has its low byte"
+				" (#659)\r\n");
 	}
 
 	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, device_irq);
@@ -7440,12 +7449,12 @@ static void intr_nest_selftest(void)
  *
  * A pin and an MSI-X slot, routed to the processor with the highest APIC id
  * the words in use can name -- any once the remapping entries carry 32-bit
- * ids, eight bits otherwise -- and counted by where they land: the handler
- * reads lapic_id().  The tests before this one route to the boot processor,
- * whose id is 0 on every machine here, and 0 is 0 in every format there is:
- * the old one's eight bits, Intel's xAPIC field and its x2APIC one, AMD's
- * basic entry and its 128-bit one.  A destination written in the wrong place,
- * or read in the wrong mode (EIME, XTEn), delivered there all the same.
+ * ids, up to LAPIC_XAPIC_ID_MAX otherwise -- and counted by where they land:
+ * the handler reads lapic_id().  The tests before this one route to the boot
+ * processor, whose id is 0 on every machine here, and 0 is 0 in every format
+ * there is: the old one's eight bits, Intel's xAPIC field and its x2APIC one,
+ * AMD's basic entry and its 128-bit one.  A destination written in the wrong
+ * place, or read in the wrong mode (EIME, XTEn), delivered there all the same.
  * Aimed at QEMU's processor 256 (--socket1-cpu with sockets=2,cores=256),
  * an interrupt must arrive at 256 and nowhere else.
  *
@@ -7617,7 +7626,7 @@ static void irq_reach_selftest(void)
 
 		if (id > highest)
 			highest = id;
-		if ((wide || id <= 0xFFu) && id > target)
+		if ((wide || id <= LAPIC_XAPIC_ID_MAX) && id > target)
 			target = id;
 	}
 
@@ -7634,7 +7643,7 @@ static void irq_reach_selftest(void)
 	if (highest != target) {
 		kputs("UrMach x86-64:   apic id ");
 		kputdec(highest);
-		kputs(" is past eight bits and the entries do not carry 32, so"
+		kputs(" is above 254 and the entries do not carry 32 bits, so"
 		      " the interrupts are aimed at apic id ");
 		kputdec(target);
 		kputs(" (#659)\r\n");
@@ -8733,8 +8742,8 @@ static void double_fault_selftest(void)
 
 /*
  * #659: why the local APIC's mode line says x2APIC mode was wanted -- -2, or
- * an id past eight bits the MADT lists with nobody asking -- and the rest of
- * the line.
+ * an id xAPIC mode cannot name (above LAPIC_XAPIC_ID_MAX) the MADT lists with
+ * nobody asking -- and the rest of the line.
  */
 static void lapic_mode_by(const char *rest)
 {
@@ -8745,7 +8754,7 @@ static void lapic_mode_by(const char *rest)
 	} else {
 		kputs("for apic id ");
 		kputdec(needed);
-		kputs(", which is past eight bits,");
+		kputs(", which xAPIC mode cannot name,");
 	}
 	kputs(rest);
 }
@@ -8935,7 +8944,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	lapic_choose_mode();
 	switch (lapic_mode()) {
 	case LAPIC_MODE_XAPIC:
-		kputs("UrMach x86-64: local apic in xAPIC mode: x2APIC not asked for, and every id fits in eight bits (#659)\r\n");
+		kputs("UrMach x86-64: local apic in xAPIC mode: x2APIC not asked for, and xAPIC mode names every id the MADT lists (#659)\r\n");
 		break;
 	case LAPIC_MODE_X2APIC_KEPT:
 		kputs("UrMach x86-64: local apic in x2APIC mode, kept as the firmware left it (#659)\r\n");

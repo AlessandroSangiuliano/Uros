@@ -10,6 +10,7 @@
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
 #include <cpu/iommu.h>		/* a pin through its remapping entry, #598 */
+#include <cpu/lapic.h>		/* LAPIC_XAPIC_ID_MAX, #659 */
 #include <cpu/regs.h>		/* read_rflags, cpu_pause */
 #include <pmap/pmap.h>
 #include <sync/atomic.h>	/* the window's lock below */
@@ -166,12 +167,13 @@ uint32_t ioapic_id(void)
 
 /*
  * A redirection entry's destination: the APIC id in bits 63:56, eight of them.
- * An id that does not fit is refused, where a shift would have dropped its
- * high bits and delivered to whichever processor has the rest (#598's C16).
+ * An id they do not name one processor by is refused: past them a shift would
+ * have dropped its high bits and delivered to whichever processor has the
+ * rest (#598's C16), and 255 is the broadcast (LAPIC_XAPIC_ID_MAX, #659).
  */
 int ioapic_rte_destination(uint32_t apic_id, uint32_t *high)
 {
-	if (apic_id > 0xFFu)
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
 		return 0;
 	*high = apic_id << 24;
 	return 1;

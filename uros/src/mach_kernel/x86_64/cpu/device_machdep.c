@@ -424,12 +424,13 @@ device_md_irq_trampoline(struct trap_frame *frame)
 /*
  * #659: the processor a device interrupt is given.  The one registering it,
  * as it always was, when the words in use can name it: any id once the
- * remapping entries carry 32-bit ids, eight bits otherwise -- a redirection
- * entry's destination, a message's address (#598's C16).  Where they cannot,
- * the boot processor, said once: a free line refused because of where the
- * asking thread ran was irq_claim_test's [1] WRONG on a processor numbered
- * 256 (QEMU's sockets=2,cores=256, x2APIC left on by the firmware, no -i).
- * Zero when neither fits.
+ * remapping entries carry 32-bit ids, up to LAPIC_XAPIC_ID_MAX otherwise -- a
+ * redirection entry's destination, a message's address (#598's C16), where
+ * 255 is the broadcast.  Where they cannot, the boot processor, said once: a
+ * free line refused because of where the asking thread ran was
+ * irq_claim_test's [1] WRONG on a processor numbered 256 (QEMU's
+ * sockets=2,cores=256, x2APIC left on by the firmware, no -i).  Zero when
+ * neither fits.
  */
 static int	irq_target_said;
 
@@ -437,12 +438,12 @@ static int irq_target(uint32_t *apic_id)
 {
 	uint32_t self = lapic_id(), boot = cpu_to_apic(0);
 
-	if (self <= 0xFFu
+	if (self <= LAPIC_XAPIC_ID_MAX
 	    || (iommu_interrupts_remapped() && iommu_remaps_x2apic())) {
 		*apic_id = self;
 		return 1;
 	}
-	if (boot > 0xFFu)
+	if (boot > LAPIC_XAPIC_ID_MAX)
 		return 0;
 
 	if (__sync_bool_compare_and_swap(&irq_target_said, 0, 1))
@@ -603,12 +604,13 @@ device_md_debugger_break(void)
 
 /*
  * A message's address for a processor: its APIC id in bits 19:12, eight of
- * them.  An id that does not fit is refused, where a mask would have cut it to
- * its low byte and delivered to whichever processor has that (#598's C16).
+ * them.  An id they do not name one processor by is refused: past them a mask
+ * would have cut it to its low byte and delivered to whichever processor has
+ * that (#598's C16), and 255 is the broadcast (LAPIC_XAPIC_ID_MAX, #659).
  */
 int msi_destination(uint32_t apic_id, unsigned long long *address)
 {
-	if (apic_id > 0xFFu)
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
 		return 0;
 	*address = MSI_ADDRESS_BASE | ((unsigned long long)apic_id << 12);
 	return 1;
@@ -665,15 +667,16 @@ msi_claim_vector_to(uint32_t target, device_md_intr_t handler,
 
 	/*
 	 * Before a slot is spent on it: a processor the message can name
-	 * (#659).  An id past eight bits is named only by the slot's remapping
-	 * entry for 32-bit ids, written by msi_remap_vector(), which every
-	 * programmer of a device calls next (<cpu/pci_msix.h>) -- so the address
-	 * handed out for one is the old format's base, which names APIC id 0.
+	 * (#659).  An id above LAPIC_XAPIC_ID_MAX is named only by the slot's
+	 * remapping entry for 32-bit ids, written by msi_remap_vector(), which
+	 * every programmer of a device calls next (<cpu/pci_msix.h>) -- so the
+	 * address handed out for one is the old format's base, which names APIC
+	 * id 0.
 	 * Not a guess that can land: with entries for 32-bit ids, Intel refuses
 	 * a message in the old format (EIME), and AMD finds no entry for a slot
 	 * nobody remapped.
 	 */
-	if (target > 0xFFu) {
+	if (target > LAPIC_XAPIC_ID_MAX) {
 		if (!(iommu_interrupts_remapped() && iommu_remaps_x2apic()))
 			return 0;
 		address = MSI_ADDRESS_BASE;

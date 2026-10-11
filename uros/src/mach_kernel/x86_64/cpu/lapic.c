@@ -95,7 +95,7 @@ static volatile uint8_t *lapic;
 
 static int x2apic;
 static int x2apic_planned;		/* #659: what the engines are written for */
-static uint32_t x2apic_needed;		/* #659: an id past 255, unasked */
+static uint32_t x2apic_needed;		/* #659: an id xAPIC cannot name */
 static int present;
 static enum lapic_mode lapic_mode_reached = LAPIC_MODE_XAPIC;
 
@@ -156,8 +156,10 @@ void lapic_init(uint64_t madt_base)
  * 🔑 ONE DECISION, ONCE THE DMAR HAS BEEN READ (#659).
  *
  * Kept when the firmware left it on -- lapic_init() found that.  Turned on
- * when asked (-2), or when the MADT lists a processor whose id is past 255,
- * which xAPIC mode cannot reach at all (lapic_icr_destination()).  Reaching
+ * when asked (-2), or when the MADT lists a processor whose id is 255 or past
+ * it, which xAPIC mode cannot name at all (LAPIC_XAPIC_ID_MAX,
+ * lapic_icr_destination()) -- the ids a firmware hands over in x2APIC mode
+ * for, unless it chose otherwise (SDM 13.12.7).  Reaching
  * such an id with a device's interrupt takes remapping entries for 32-bit ids
  * (iommu_remaps_x2apic()), and without remapping x2APIC mode is
  * architecturally a guest's: "Intel VT-d Interrupt Remapping is a
@@ -191,7 +193,7 @@ void lapic_plan_mode(void)
 
 	/* The widest id the MADT lists, when nobody asked: the boot says which. */
 	for (unsigned i = 0; i < acpi_cpu_count() && !boot_flag('2'); i++)
-		if (acpi_cpu(i)->apic_id > 0xFFu
+		if (acpi_cpu(i)->apic_id > LAPIC_XAPIC_ID_MAX
 		    && acpi_cpu(i)->apic_id > x2apic_needed)
 			x2apic_needed = acpi_cpu(i)->apic_id;
 	if (!boot_flag('2') && x2apic_needed == 0)
@@ -412,10 +414,11 @@ uint64_t lapic_icr_nested_on(uint32_t apic_id)
 /*
  * #659: the command register's destination for `apic_id', in the mode given:
  * all 32 bits in x2APIC mode, the 64-bit register's high half (SDM 13.12.9),
- * and eight in xAPIC mode, in the high half's 31:24.  An id past eight bits is
- * refused there: shifted into those eight it kept its low byte, and an INIT
- * for processor 256 was an INIT for processor 0 -- #598's C16 had looked at
- * the routing words and not at this one.
+ * and eight in xAPIC mode, in the high half's 31:24.  An id above
+ * LAPIC_XAPIC_ID_MAX is refused there: shifted into those eight an id past
+ * them kept its low byte, and an INIT for processor 256 was an INIT for
+ * processor 0 -- #598's C16 had looked at the routing words and not at this
+ * one -- and 255 is the broadcast, an INIT for every processor.
  */
 int lapic_icr_destination(uint32_t apic_id, int x2apic_mode, uint32_t *high)
 {
@@ -423,7 +426,7 @@ int lapic_icr_destination(uint32_t apic_id, int x2apic_mode, uint32_t *high)
 		*high = apic_id;
 		return 1;
 	}
-	if (apic_id > 0xFFu)
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
 		return 0;
 	*high = apic_id << 24;
 	return 1;
