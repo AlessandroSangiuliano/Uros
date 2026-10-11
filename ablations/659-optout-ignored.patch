@@ -7,12 +7,12 @@ Expect: local apic in x2APIC mode, turned on by -2
 diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_64/cpu/lapic.c
 --- a/uros/src/mach_kernel/x86_64/cpu/lapic.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/lapic.c
-@@ -190,8 +190,6 @@
+@@ -200,8 +200,6 @@
  	cpuid(1, &a, &b, &c, &d);
  	if (!(c & (1U << 21)))
  		lapic_mode_reached = LAPIC_MODE_X2APIC_ABSENT;
 -	else if (iommu_x2apic_discouraged())
 -		lapic_mode_reached = LAPIC_MODE_X2APIC_OPTED_OUT;
- 	else if (!(c & (1U << 31)))
+ 	else if (!(c & (1U << 31))
+ 		 && !(boot_flag('i') && iommu_can_remap_x2apic()))
  		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
- 	else

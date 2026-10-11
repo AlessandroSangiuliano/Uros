@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #659
+Takes out: the command register's refusal of an id past eight bits in xAPIC mode -- the id is shifted into the high half's eight bits again, as before b0471bdc, and an INIT for processor 256 would go to processor 0
+Run: --entry 0 300 -smp 1
+Expect: refused by the command register in xAPIC mode and carried whole in x2APIC mode: [0-3] of 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+--- a/uros/src/mach_kernel/x86_64/cpu/lapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+@@ -423,8 +423,6 @@
+ 		*high = apic_id;
+ 		return 1;
+ 	}
+-	if (apic_id > 0xFFu)
+-		return 0;
+ 	*high = apic_id << 24;
+ 	return 1;
+ }

@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #659
+Takes out: bare metal's condition on x2APIC mode -- -2 turns it on with no remapping to 32-bit ids, on an engine without EIM, with the hypervisor bit taken away so that QEMU reads as bare metal
+Run: --iommu intel --entry 48 600 -smp 4 -cpu max,hypervisor=off
+Expect: local apic in x2APIC mode, turned on by -2
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+--- a/uros/src/mach_kernel/x86_64/cpu/lapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+@@ -202,9 +202,6 @@
+ 		lapic_mode_reached = LAPIC_MODE_X2APIC_ABSENT;
+ 	else if (iommu_x2apic_discouraged())
+ 		lapic_mode_reached = LAPIC_MODE_X2APIC_OPTED_OUT;
+-	else if (!(c & (1U << 31))
+-		 && !(boot_flag('i') && iommu_can_remap_x2apic()))
+-		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
+ 	else
+ 		x2apic_planned = 1;
+ }
+@@ -223,10 +220,6 @@
+ 	 * by engines that then did not turn on are entries nothing reads.
+ 	 */
+ 	cpuid(1, &a, &b, &c, &d);
+-	if (!(c & (1U << 31)) && !remapped) {
+-		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
+-		return;
+-	}
+ 
+ 	wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
+ 	x2apic = 1;

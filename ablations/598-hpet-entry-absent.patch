@@ -7,10 +7,9 @@ Expect: was REFUSED an interrupt written to
 Expect: clock_event: the timer armed and never fired
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
-index 41a47131..abd0b3de 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
-@@ -529,7 +529,7 @@ int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+@@ -565,7 +565,7 @@
  
  	/* AMD: the HPET's own table, entry `vector'; the words stay as they are. */
  	if (found_vendor == IOMMU_AMD)
@@ -20,16 +19,15 @@ index 41a47131..abd0b3de 100644
  	return iommu_vtd_remap_hpet(comparator, source, vector, apic_id,
  				    address, data);
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
-index bd9e8c0d..d9b8a432 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
-@@ -2270,8 +2270,7 @@ int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
+@@ -2253,8 +2253,7 @@
  	 * and not naming an entry nobody wrote.
  	 */
  	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
--				  &index, w, &a, &d)
+-				  vtd_x2apic, &index, w, &a, &d)
 -	    || !vtd_irte_write(index, w))
-+				  &index, w, &a, &d))
++				  vtd_x2apic, &index, w, &a, &d))
  		return 0;
  	*address = a;
  	*data = d;
