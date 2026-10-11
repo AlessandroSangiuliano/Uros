@@ -2261,12 +2261,21 @@ int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
 int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
 			 uint32_t apic_id, uint32_t *address, uint32_t *data)
 {
-	uint32_t index;
+	uint32_t index, a, d;
 	uint64_t w[2];
 
-	return iommu_vtd_hpet_words(comparator, source, vector, apic_id,
-				    &index, w, address, data)
-	       && vtd_irte_write(index, w);
+	/*
+	 * The caller's words only once the entry is written: a zero answer
+	 * leaves them as they came in, as <cpu/iommu.h> has these calls do,
+	 * and not naming an entry nobody wrote.
+	 */
+	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
+				  &index, w, &a, &d)
+	    || !vtd_irte_write(index, w))
+		return 0;
+	*address = a;
+	*data = d;
+	return 1;
 }
 
 void iommu_vtd_forget_msi(unsigned slot)
