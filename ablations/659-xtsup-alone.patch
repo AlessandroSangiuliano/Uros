@@ -7,7 +7,7 @@ Expect: iommu words decoded and encoded, 1 wrong
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
-@@ -390,6 +390,6 @@ void iommu_amd_interrupt_decode(uint64_t efr,
+@@ -390,7 +390,7 @@
  				struct iommu_interrupt_caps *out)
  {
  	out->can_forget = 1;

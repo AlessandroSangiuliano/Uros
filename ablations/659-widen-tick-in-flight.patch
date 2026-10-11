@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #659
+Holds open: a tick another processor took before ISA 0 was masked and dispatches only after the reach test gave the vector back -- vector 0x40 sent to the target by IPI once reach_pin_selftest() has returned, with a millisecond to land
+Run: --entry 0 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -7682,6 +7682,8 @@
+ 	}
+ 
+ 	reach_pin_selftest(target);
++	lapic_send_ipi(target, IOAPIC_ISA_VECTOR_BASE);
++	pit_delay_us(1000);
+ 	reach_msix_selftest(target);
+ }
+ 

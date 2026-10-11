@@ -1,13 +1,12 @@
-Kind: ablation
+Kind: widen
 Issue: #659
-Takes out: EIME in IRTA_REG -- the entries keep their 32-bit destinations, and the engine reads them in xAPIC mode, the destination from bits 47:40: an interrupt aimed at processor 256 must not arrive there
+Holds open: IRTA's word composed without EIME, as a composer that dropped the bit would compose it -- the entries' format must then follow the word the engines are given, eight bits, and not the decision that asked for 32
 Run: --iommu intel-eim --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
-Expect: aimed at apic id [0-9]+ arrived there [0-9]+ times and elsewhere [0-9]+ — WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
-@@ -1720,7 +1720,7 @@
+@@ -1740,7 +1740,7 @@
  
  	pa = t.engines ? boot_frame_alloc() : 0;
  	if (pa == 0

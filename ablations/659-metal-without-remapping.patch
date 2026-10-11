@@ -7,7 +7,7 @@ Expect: local apic in x2APIC mode, turned on by -2
 diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_64/cpu/lapic.c
 --- a/uros/src/mach_kernel/x86_64/cpu/lapic.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/lapic.c
-@@ -202,9 +202,6 @@
+@@ -213,9 +213,6 @@
  		lapic_mode_reached = LAPIC_MODE_X2APIC_ABSENT;
  	else if (iommu_x2apic_discouraged())
  		lapic_mode_reached = LAPIC_MODE_X2APIC_OPTED_OUT;
@@ -17,7 +17,7 @@ diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_
  	else
  		x2apic_planned = 1;
  }
-@@ -223,10 +220,6 @@
+@@ -234,10 +231,6 @@
  	 * by engines that then did not turn on are entries nothing reads.
  	 */
  	cpuid(1, &a, &b, &c, &d);
@@ -26,5 +26,5 @@ diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_
 -		return;
 -	}
  
- 	wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
- 	x2apic = 1;
+ 	/*
+ 	 * Read back, as every mode line says what it read (#659): EN was set

@@ -1,18 +1,29 @@
 Kind: ablation
 Issue: #598
-Takes out: the refusal of an APIC id past eight bits -- the redirection entry's shift and the message's mask cut it again, to whichever processor has its low byte
+Takes out: the refusal of an APIC id the eight-bit words cannot name -- the redirection entry's shift and the message's mask cut an id past eight bits again, to whichever processor has its low byte, and take 255, their broadcast, as a processor
 Run: --entry 0 600 -smp 1
-Expect: an apic id past eight bits refused by a redirection entry and a message address, not cut to its low byte: [0-4] of 5
+Expect: apic ids 255 and above refused by a redirection entry and a message address, not sent to all or cut to the low byte: [0-7] of 8
 
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic.c b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+--- a/uros/src/mach_kernel/x86_64/cpu/ioapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+@@ -173,8 +173,6 @@
+  */
+ int ioapic_rte_destination(uint32_t apic_id, uint32_t *high)
+ {
+-	if (apic_id > LAPIC_XAPIC_ID_MAX)
+-		return 0;
+ 	*high = apic_id << 24;
+ 	return 1;
+ }
 diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
-index 6c1674e6..f91012b8 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
-@@ -573,9 +573,8 @@ device_md_debugger_break(void)
+@@ -609,9 +609,8 @@
   */
  int msi_destination(uint32_t apic_id, unsigned long long *address)
  {
--	if (apic_id > 0xFFu)
+-	if (apic_id > LAPIC_XAPIC_ID_MAX)
 -		return 0;
 -	*address = MSI_ADDRESS_BASE | ((unsigned long long)apic_id << 12);
 +	*address = MSI_ADDRESS_BASE | (((unsigned long long)apic_id & 0xFFu)
@@ -20,16 +31,3 @@ index 6c1674e6..f91012b8 100644
  	return 1;
  }
  
-diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic.c b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
-index d0c85bec..12be04b9 100644
---- a/uros/src/mach_kernel/x86_64/cpu/ioapic.c
-+++ b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
-@@ -170,8 +170,6 @@ uint32_t ioapic_id(void)
-  */
- int ioapic_rte_destination(uint32_t apic_id, uint32_t *high)
- {
--	if (apic_id > 0xFFu)
--		return 0;
- 	*high = apic_id << 24;
- 	return 1;
- }

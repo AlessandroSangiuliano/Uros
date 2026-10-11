@@ -7,7 +7,7 @@ Expect: aimed at apic id [0-9]+ arrived there [0-9]+ times and elsewhere [0-9]+ 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
-@@ -680,7 +680,7 @@
+@@ -707,7 +707,7 @@
  		 */
  		control &= ~(AMD_CTL_GA_EN | AMD_CTL_XT_EN);
  		if (amd_ir_x2apic())
@@ -16,13 +16,13 @@ diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/
  		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
  
  		control |= AMD_CTL_IOMMU_EN;
-@@ -698,8 +698,7 @@
- 		if (!(control & AMD_CTL_IOMMU_EN))
- 			return 0;
- 		if (amd_ir_x2apic()
--		    && (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
--		       != (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
-+		    && (control & AMD_CTL_GA_EN) != AMD_CTL_GA_EN)
- 			return 0;
- 		if (iommu_amd_devtab_snooped(i) && !(control & AMD_CTL_COHERENT))
- 			return 0;
+@@ -725,8 +725,7 @@
+ 		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
+ 		if (!(control & AMD_CTL_IOMMU_EN)
+ 		    || (amd_ir_x2apic()
+-			&& (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
+-			   != (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
++			&& (control & AMD_CTL_GA_EN) != AMD_CTL_GA_EN)
+ 		    || (iommu_amd_devtab_snooped(i)
+ 			&& !(control & AMD_CTL_COHERENT))) {
+ 			amd_engines_off(i);
