@@ -7,7 +7,7 @@
 # ISO on -cdrom, with a separate data disk beside it; it is now the disk
 # itself, which is the whole of what QEMU is handed (#520).
 #
-# Usage: run-x86_64.sh [--iommu intel|amd] [--hpet fsb] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
+# Usage: run-x86_64.sh [--iommu intel|amd|intel-eim|amd-xt] [--hpet fsb] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
 #   run-x86_64.sh
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
@@ -721,7 +721,16 @@ while :; do
 		case "${2:-}" in
 		intel)	IOMMU_ARGS="-device intel-iommu" ;;
 		amd)	IOMMU_ARGS="-device amd-iommu,dma-remap=on" ;;
-		*)	echo "usage: $0 [--iommu intel|amd] [--entry <n>] [seconds] [qemu args]" >&2
+		# #659: engines that take x2APIC ids.  QEMU's intel-iommu reports
+		# EIM under TCG only with eim=on, and takes eim=on only with
+		# intremap=on (vtd_decide_config() in hw/i386/intel_iommu.c,
+		# 11.1.1); its amd-iommu reports XTSup with xtsup=on, beside the
+		# GASup it always reports.  Under KVM both need a split irqchip,
+		# which no run here asks for, so these are TCG's.
+		intel-eim)
+			IOMMU_ARGS="-device intel-iommu,intremap=on,eim=on" ;;
+		amd-xt)	IOMMU_ARGS="-device amd-iommu,dma-remap=on,xtsup=on" ;;
+		*)	echo "usage: $0 [--iommu intel|amd|intel-eim|amd-xt] [--entry <n>] [seconds] [qemu args]" >&2
 			exit 2 ;;
 		esac
 		IOMMU_NAME=$2
