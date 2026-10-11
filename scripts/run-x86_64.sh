@@ -725,8 +725,8 @@ while :; do
 		# EIM under TCG only with eim=on, and takes eim=on only with
 		# intremap=on (vtd_decide_config() in hw/i386/intel_iommu.c,
 		# 11.1.1); its amd-iommu reports XTSup with xtsup=on, beside the
-		# GASup it always reports.  Under KVM both need a split irqchip,
-		# which no run here asks for, so these are TCG's.
+		# GASup it always reports.  Under KVM both need the split irqchip,
+		# which the board below then asks for.
 		intel-eim)
 			IOMMU_ARGS="-device intel-iommu,intremap=on,eim=on" ;;
 		amd-xt)	IOMMU_ARGS="-device amd-iommu,dma-remap=on,xtsup=on" ;;
@@ -1026,10 +1026,20 @@ echo "=== accelerator: $ACCEL ==="
 # ⚠️ Only then.  `intel-iommu' requires q35 and the default `pc' is a 1996
 # i440FX; a caller who named a machine on purpose gets theirs, and qemu's own
 # refusal, which says more than this silently overriding them would.
+#
+# #659: and under KVM, an engine that takes x2APIC ids asks for the split
+# irqchip -- QEMU refuses intremap with the I/O APIC in the host kernel, and
+# eim=on or xtsup=on with KVM need its X2APIC_API, which only the split
+# irqchip enables (vtd_decide_config(), amdvi_sysbus_realize() in 11.1.1).
+# The plain engines keep the full one, and remap nothing under KVM, as before.
 if [ -n "$IOMMU_ARGS" ]; then
+	BOARD="q35"
+	case "$IOMMU_NAME:$KVM_ARGS" in
+	intel-eim:?*|amd-xt:?*)	BOARD="q35,kernel-irqchip=split" ;;
+	esac
 	case " $* " in
 	*" -machine "*|*" -M "*)	: ;;
-	*)				IOMMU_ARGS="-machine q35 $IOMMU_ARGS" ;;
+	*)				IOMMU_ARGS="-machine $BOARD $IOMMU_ARGS" ;;
 	esac
 fi
 
