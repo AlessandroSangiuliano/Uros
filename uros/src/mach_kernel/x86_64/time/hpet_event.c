@@ -557,6 +557,7 @@ static void hpet_ev_intr(struct trap_frame *frame)
 static void hpet_ev_start(uint8_t vector)
 {
 	uint32_t	cap0;
+	unsigned	fsb_unwritable = 0;	/* #598: its comparator + 1 */
 
 	if (started)
 		return;
@@ -590,6 +591,7 @@ static void hpet_ev_start(uint8_t vector)
 		printf("clock_event: hpet: WRONG -- comparator %u's entry for "
 		       "its FSB message could not be written; its I/O APIC pin "
 		       "instead (#598)\n", comparator);
+		fsb_unwritable = comparator + 1;
 		route = legacy_route(&comparator);
 	}
 
@@ -598,8 +600,13 @@ static void hpet_ev_start(uint8_t vector)
 	 * changes but the masks: only a driver that claimed ISA 0 or 8 in
 	 * between can take the route away (choose_route()).  The clock has to
 	 * run, so the line is taken anyway -- and said, because that driver's
-	 * device has just gone silent.  No route at all cannot follow a probe
-	 * that found one.
+	 * device has just gone silent.
+	 *
+	 * No route at all follows a probe that found one in one case only: the
+	 * probe found the FSB message, its entry could not be written (above),
+	 * and the board has no LegacyReplacement to fall back to (#598).  With
+	 * neither there is no clock, so the panic stands -- naming that cause,
+	 * and not the probe.
 	 */
 	if (route == ROUTE_TAKEN) {
 		printf("clock_event: hpet: WRONG -- ISA 0 or 8 was claimed "
@@ -607,6 +614,11 @@ static void hpet_ev_start(uint8_t vector)
 		       "takes it all the same (#593)\n");
 		route = ROUTE_LEGACY;
 		comparator = 0;
+	} else if (route == ROUTE_NONE && fsb_unwritable) {
+		panic("clock_event: hpet: no route -- comparator %u's entry for "
+		      "its FSB message could not be written, and there is no "
+		      "LegacyReplacement to fall back to (#598)",
+		      fsb_unwritable - 1);
 	} else if (route == ROUTE_NONE) {
 		panic("clock_event: hpet: started with no route, where the "
 		      "probe had found one (#593)");
