@@ -2315,11 +2315,28 @@ static void vtd_ir_off(volatile uint8_t *regs)
 	(void) wait_bit(regs, VTD_GSTS, VTD_GSTS_IRES, 0, 0);
 }
 
+static unsigned vtd_ir_found_on;	/* #659: engines a predecessor left on */
+
 static int vtd_ir_on(unsigned unit, volatile uint8_t *regs,
 		     const struct iommu_unit *u,
 		     const struct iommu_interrupt_tables *t)
 {
 	uint32_t keep;
+
+	/*
+	 * Off first, where whoever ran before us left remapping on (#659):
+	 * EIME "must not" be modified while it is active (IRES=1, Rev 5.20
+	 * §11.4.10), and the table it reads is about to be replaced.  Linux,
+	 * outside kdump, turns a remapping it finds on off before programming
+	 * it.  Counted, for the boot to say: QEMU never leaves it on, so only
+	 * a firmware can show this path.
+	 */
+	if (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES) {
+		vtd_ir_found_on++;
+		vtd_ir_off(regs);
+		if (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES)
+			return 0;
+	}
 
 	if (!vtd_queue_running(unit)
 	    && !vtd_queue_start(unit, regs, VTD_ECAP_IRO(u->vendor_caps[1])))
@@ -2406,4 +2423,9 @@ unsigned iommu_vtd_ir_enable(void)
 int iommu_vtd_unit_remapping(unsigned unit)
 {
 	return unit < IOMMU_MAX_UNITS && vtd_remapping[unit];
+}
+
+unsigned iommu_vtd_ir_found_on(void)
+{
+	return vtd_ir_found_on;
 }

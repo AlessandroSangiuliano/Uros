@@ -751,6 +751,11 @@ int iommu_unit_remaps(unsigned unit)
 	return found_vendor == IOMMU_INTEL && iommu_vtd_unit_remapping(unit);
 }
 
+unsigned iommu_remapping_found_on(void)
+{
+	return found_vendor == IOMMU_INTEL ? iommu_vtd_ir_found_on() : 0;
+}
+
 unsigned iommu_platform_address_bits(void)
 {
 	return platform_address_bits;

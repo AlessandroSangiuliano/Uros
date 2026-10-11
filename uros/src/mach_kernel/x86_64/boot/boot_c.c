@@ -6030,6 +6030,15 @@ static void iommu_selftest(void)
 				      " every device passing through — amd-vi"
 				      " remaps only with it on\r\n");
 
+			/* #659: only a firmware can leave one on; QEMU never does. */
+			if (iommu_remapping_found_on() != 0) {
+				kputs("UrMach x86-64:   remapping was already on in ");
+				kputdec(iommu_remapping_found_on());
+				kputs(" engine(s), left by whoever ran before:"
+				      " turned off before this kernel's table was"
+				      " given (#659)\r\n");
+			}
+
 			kputs("UrMach x86-64:   -i given: interrupt remapping ");
 			if (n == 0) {
 				kputs(asked ? "COULD NOT BE TURNED ON — WRONG, "

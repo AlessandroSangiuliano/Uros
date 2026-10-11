@@ -609,6 +609,14 @@ int iommu_prepare_interrupt_remapping(void);
 int iommu_unit_remaps(unsigned unit);
 
 /*
+ * #659: how many engines were remapping already when -i came -- left on by
+ * whoever ran before, and turned off before this kernel's table was given,
+ * since EIME may not change under a running engine.  Intel's: AMD's engines
+ * are all turned off before they are programmed, remapping or not.
+ */
+unsigned iommu_remapping_found_on(void);
+
+/*
  * ── Stage 2b: point the engines at those tables and let them run ─────
  *
  * 🔴 THE FIRST THING IN #432 THAT CAN STOP A MACHINE, and therefore the first

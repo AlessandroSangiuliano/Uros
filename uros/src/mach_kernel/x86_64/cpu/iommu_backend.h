@@ -163,10 +163,13 @@ void iommu_vtd_forget_msi(unsigned slot);
 
 /*
  * #598 phase 4: turn remapping on in every Intel engine, all or nothing, and
- * answer how many remap; whether one engine does.
+ * answer how many remap; whether one engine does; and (#659) how many were
+ * found remapping already, left on by whoever ran before, and turned off
+ * before their table was given.
  */
 unsigned iommu_vtd_ir_enable(void);
 int iommu_vtd_unit_remapping(unsigned unit);
+unsigned iommu_vtd_ir_found_on(void);
 
 /*
  * #598: AMD's half.  Prepare writes every device table entry's interrupt
