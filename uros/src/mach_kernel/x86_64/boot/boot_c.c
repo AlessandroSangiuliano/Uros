@@ -6316,8 +6316,9 @@ static void msi_selftest(void)
  * MSI-X is a 2009 property.  The board that has none must say so rather than
  * report a test that did not run as one that passed.
  *
- * ⚠️ THIS BOOT SPENDS TWO OF SIXTEEN MSI SLOTS, one here and one in the test
- * above, and never gets them back.  That is not a leak but the rule in
+ * ⚠️ THIS BOOT SPENDS THREE OF SIXTEEN MSI SLOTS, one here, one in the test
+ * above and one in irq_reach_selftest() (#659), and never gets them back.
+ * That is not a leak but the rule in
  * device_md_msi_unregister(): a slot is spent because this side cannot know
  * whether some device is still programmed to write to it.  Here it CAN know,
  * because the disarm below is what makes it so -- and the interface has no way

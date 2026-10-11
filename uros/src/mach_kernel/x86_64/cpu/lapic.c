@@ -87,8 +87,10 @@ static volatile uint8_t *lapic;
  * slot of the xAPIC page -- MSR 800H + offset / 16 -- with three exceptions
  * this file meets one of: the two halves of the command register are one
  * 64-bit MSR, 830H, and there is no 831H (SDM Vol. 3A 253668-093US 13.12.1.2,
- * Table 13-6).  The page is not mapped then; the mode is the processor's,
- * set in its IA32_APIC_BASE, and every processor runs the boot processor's.
+ * Table 13-6).  The page is never mapped in a mode kept from the firmware,
+ * and after lapic_choose_mode()'s switch it stays mapped and unread; the mode
+ * is the processor's, set in its IA32_APIC_BASE, and every processor runs the
+ * boot processor's.
  */
 #define MSR_X2APIC(reg)		(0x800U + ((reg) >> 4))
 #define MSR_X2APIC_ICR		0x830U
@@ -173,7 +175,10 @@ void lapic_init(uint64_t madt_base)
  * are given -- EIME on Intel; XTEn, GAEn and the 128-bit entry on AMD -- and
  * the engines are written before the switch.  lapic_plan_mode() decides, once
  * the DMAR has been read and before any engine is; lapic_choose_mode() makes
- * the switch the plan says, and nothing else.
+ * the switch the plan says, unless on bare metal remapping did not come on
+ * with entries for 32-bit ids: then it stays in xAPIC mode and says so, the
+ * plan -- what the engines were written for -- unchanged, and the entries
+ * read by nobody.
  *
  * xAPIC to x2APIC keeps the registers software set, but the logical
  * destination, an id written to the ID register and the command register's
@@ -825,10 +830,12 @@ void lapic_timer_stop(void)
  * to 10b.  The countdown registers are ignored in this mode; the MSR is the
  * whole interface, and clock_event.c owns it.
  *
- * ⚠️ The SDM requires an MFENCE between the mode write and the first deadline
- * write: without it the WRMSR can be observed before the mode is in effect,
- * and the deadline is then read by a timer still in one-shot mode -- an arm
- * that appears to succeed and never fires.
+ * ⚠️ In xAPIC mode the SDM requires an MFENCE between the mode write and the
+ * first deadline write: without it the WRMSR can be observed before the mode
+ * is in effect, and the deadline is then read by a timer still in one-shot
+ * mode -- an arm that appears to succeed and never fires.  In x2APIC mode the
+ * mode write is a WRMSR too, which "the processor ensures the ordering of ...
+ * no fencing is required" (SDM 13.5.4.1, #659); the fence stays, harmless.
  */
 void lapic_timer_deadline_setup(uint8_t vector)
 {

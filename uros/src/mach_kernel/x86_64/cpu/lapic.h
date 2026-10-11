@@ -23,6 +23,10 @@
  * says where the firmware put it, the MSR says where it is now, and they
  * differ on any machine where it has been relocated.  The MADT value is
  * still worth having as a cross-check, which is why the caller passes it.
+ *
+ * #659: in an x2APIC mode the firmware left on there is nothing to map --
+ * the registers are MSRs -- so neither the mapping nor the cross-check is
+ * done, and the mode is kept.
  */
 void lapic_init(uint64_t madt_base);
 
@@ -32,8 +36,10 @@ void lapic_init(uint64_t madt_base);
  * made on the boot processor once the DMAR has been read and before any
  * remapping engine is written, since the mode is part of what an engine is
  * given; lapic_x2apic_planned() is what it decided.  lapic_choose_mode() makes
- * the switch the plan says, and every processor runs the mode it settles on
- * (lapic_enable()).  The boot says which.  "-2" below is also the MADT listing
+ * the switch the plan says -- except on bare metal where remapping did not
+ * come on with entries for 32-bit ids, when it stays in xAPIC mode and says so
+ * -- and every processor runs the mode it settles on (lapic_mode_here(),
+ * lapic_enable()).  The boot says which.  "-2" below is also the MADT listing
  * an id xAPIC mode cannot name (above LAPIC_XAPIC_ID_MAX) with nobody asking,
  * lapic_x2apic_needed() -- zero otherwise.
  */
@@ -143,9 +149,10 @@ void lapic_eoi(void);
  * that says so, because "the acknowledgement is not given twice" is otherwise
  * a claim about code paths rather than an observation.
  *
- * ⚠️ A register read, which is an MMIO access and under virtualisation a trip
- * out of the guest -- the cost #322 rearranged the whole priority mechanism
- * to avoid.  Not for the interrupt path.
+ * ⚠️ A register read -- an MMIO access in xAPIC mode, an RDMSR in x2APIC mode
+ * (#659) -- and under virtualisation a trip out of the guest either way, the
+ * cost #322 rearranged the whole priority mechanism to avoid.  Not for the
+ * interrupt path.
  */
 int lapic_in_service(uint8_t vector);
 
@@ -202,7 +209,9 @@ void lapic_send_self(uint8_t vector);
  * with the last of them delivered long after the first.
  *
  * Neither waits for the interrupt to be *handled*, only for the message to
- * be accepted for delivery.  What the target did about it is the caller's
+ * be accepted for delivery -- in xAPIC mode.  In x2APIC mode there is nothing
+ * to wait for: the command register has no delivery status (SDM 13.12.9), and
+ * the write is the send (#659).  What the target did about it is the caller's
  * question, and the reason the layer above this one counts answers.
  */
 void lapic_send_ipi(uint32_t apic_id, uint8_t vector);
