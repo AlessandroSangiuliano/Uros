@@ -901,7 +901,15 @@ unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
 		uint64_t next, ret;
 		const char *name;
 
-		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+		/*
+		 * A kernel address, as the printer asks (#518), and not merely a
+		 * canonical one: since #659 this runs in the handler, for traps
+		 * from ring 3 too, where the live cr3 is a task's and a low
+		 * frame pointer the kernel's pmap calls mapped -- the identity
+		 * map of the low gigabyte -- is read through the task's, or is
+		 * a user page read with AC clear: a fault inside the handler.
+		 */
+		if ((rbp & 7) != 0 || !va_is_kernel(rbp))
 			break;
 		if (pmap_extract(kernel, rbp) == 0
 		    || pmap_extract(kernel, rbp + 8) == 0)
