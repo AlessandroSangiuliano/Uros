@@ -438,12 +438,11 @@ static int irq_target(uint32_t *apic_id)
 {
 	uint32_t self = lapic_id(), boot = cpu_to_apic(0);
 
-	if (self <= LAPIC_XAPIC_ID_MAX
-	    || (iommu_interrupts_remapped() && iommu_remaps_x2apic())) {
+	if (iommu_names_apic_id(self)) {
 		*apic_id = self;
 		return 1;
 	}
-	if (boot > LAPIC_XAPIC_ID_MAX)
+	if (!iommu_names_apic_id(boot))
 		return 0;
 
 	if (__sync_bool_compare_and_swap(&irq_target_said, 0, 1))
@@ -667,20 +666,22 @@ msi_claim_vector_to(uint32_t target, device_md_intr_t handler,
 
 	/*
 	 * Before a slot is spent on it: a processor the message can name
-	 * (#659).  An id above LAPIC_XAPIC_ID_MAX is named only by the slot's
-	 * remapping entry for 32-bit ids, written by msi_remap_vector(), which
-	 * every programmer of a device calls next (<cpu/pci_msix.h>) -- so the
-	 * address handed out for one is the old format's base, which names APIC
-	 * id 0.
-	 * Not a guess that can land: with entries for 32-bit ids, Intel refuses
-	 * a message in the old format (EIME), and AMD finds no entry for a slot
-	 * nobody remapped.
+	 * (#659, iommu_names_apic_id()).  An id above LAPIC_XAPIC_ID_MAX is
+	 * named only by the slot's remapping entry for 32-bit ids, written by
+	 * msi_remap_vector(), which every programmer of a device calls next
+	 * (<cpu/pci_msix.h>) -- so the address handed out for one is the old
+	 * format's base, which names APIC id 0.  On hardware not a guess that
+	 * can land: with entries for 32-bit ids, Intel refuses a message in the
+	 * old format (EIME, Rev 5.20 §5.1.4), and AMD finds no entry for a slot
+	 * nobody remapped.  QEMU passes a message in the old format through
+	 * whatever EIME says (intel_iommu.c, vtd_interrupt_remap_msi()), so
+	 * there a forgotten msi_remap_vector() lands on APIC id 0.
 	 */
-	if (target > LAPIC_XAPIC_ID_MAX) {
-		if (!(iommu_interrupts_remapped() && iommu_remaps_x2apic()))
-			return 0;
+	if (!iommu_names_apic_id(target))
+		return 0;
+	if (target > LAPIC_XAPIC_ID_MAX)
 		address = MSI_ADDRESS_BASE;
-	} else if (!msi_destination(target, &address))
+	else if (!msi_destination(target, &address))
 		return 0;
 
 	/*

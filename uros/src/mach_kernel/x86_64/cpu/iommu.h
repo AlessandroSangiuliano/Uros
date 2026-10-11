@@ -499,6 +499,15 @@ const struct iommu_interrupt_tables *iommu_interrupt_tables(void);
 int iommu_remaps_x2apic(void);
 
 /*
+ * #659: whether an interrupt routed now can name processor `apic_id': any id
+ * once interrupts are remapped through entries for 32-bit ids, and otherwise
+ * one up to LAPIC_XAPIC_ID_MAX -- the old format's words and an eight-bit
+ * entry's destination, where 255 is the broadcast.  The one answer for
+ * irq_target(), an MSI slot's claim, the reach test and the HPET's probe.
+ */
+int iommu_names_apic_id(uint32_t apic_id);
+
+/*
  * #659: whether they could be -- every engine able to carry an x2APIC id, a
  * 16-byte store for the entries, and on Intel a DMAR that says the platform
  * can remap.  For lapic_plan_mode(), which on bare metal plans x2APIC mode only

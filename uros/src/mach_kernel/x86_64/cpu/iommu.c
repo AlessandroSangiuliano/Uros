@@ -469,6 +469,12 @@ int iommu_remaps_x2apic(void)
 	return interrupt_tables_built && interrupt_tables.x2apic;
 }
 
+int iommu_names_apic_id(uint32_t apic_id)
+{
+	return apic_id <= LAPIC_XAPIC_ID_MAX
+	       || (iommu_interrupts_remapped() && iommu_remaps_x2apic());
+}
+
 /* ------------------------------------------------------------------ */
 /*  #598: what a source writes, through remapping or around it          */
 /* ------------------------------------------------------------------ */

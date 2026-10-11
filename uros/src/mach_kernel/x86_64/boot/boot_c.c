@@ -7640,7 +7640,6 @@ static void reach_msix_selftest(uint32_t target)
 
 static void irq_reach_selftest(void)
 {
-	int wide = iommu_interrupts_remapped() && iommu_remaps_x2apic();
 	uint32_t boot = cpu_to_apic(0), target = boot, highest = boot;
 	unsigned cpus = smp_cpu_count();
 
@@ -7649,7 +7648,7 @@ static void irq_reach_selftest(void)
 
 		if (id > highest)
 			highest = id;
-		if ((wide || id <= LAPIC_XAPIC_ID_MAX) && id > target)
+		if (iommu_names_apic_id(id) && id > target)
 			target = id;
 	}
 
