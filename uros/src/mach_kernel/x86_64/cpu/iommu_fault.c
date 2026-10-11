@@ -532,7 +532,11 @@ uint64_t iommu_fault_lost(void)
  * that was all of them.
  *
  * #599: printed by one thread only, the reporter below, and the cursors are
- * its own: nothing else can print these lines or move them.  The idle loop
+ * its own: nothing else can print these lines or move them.  Before the
+ * reporter is asked for, a boot that stops first -- the burn-in's panic --
+ * prints them in its own context through iommu_fault_report_now(), with no
+ * reporter to race; once it is asked for, that call prints nothing (#598).
+ * The idle loop
  * used to print them, once every 4096 passes, and a driver's question too --
  * a processor spinning in a driver never idles, so a refusal nobody asked
  * about waited for the spin to end, and a uniprocessor boot could wait for
@@ -682,8 +686,17 @@ static unsigned fault_report_print(void)
 	return printed + (lost != 0) + (unplaced != 0) + (episodes != 0);
 }
 
+/*
+ * #598: set when the reporter is asked for, before its thread can exist, so
+ * that from then on it is the one printer of the fault log, as its cursors
+ * and said_blind need: iommu_fault_report_now() prints nothing after it.
+ */
+static int reporter_asked;
+
 unsigned iommu_fault_report_now(void)
 {
+	if (reporter_asked)
+		return 0;
 	return fault_report_print();
 }
 
@@ -756,6 +769,7 @@ static void iommu_fault_reporter(void)
 
 void iommu_fault_reporter_start(void)
 {
+	reporter_asked = 1;
 	if (!engines_refuse()) {
 		printf("iommu: the fault reporter: NOT ASKED — no engine "
 		       "translates or remaps, so nothing can be refused (#599, "
