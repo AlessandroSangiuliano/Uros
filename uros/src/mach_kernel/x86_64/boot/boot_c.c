@@ -4371,7 +4371,38 @@ static void timer_selftest(void)
 
 static void cons_selftest(void)
 {
-	int got = cons_loopback_probe(CONS_PROBE_BYTE);
+	uint8_t wrote, read;
+	int got;
+
+	/*
+	 * 🔑 FIRST WHETHER THERE IS A PORT AT ALL (#670).
+	 *
+	 * With no UART at COM1 every inb returns 0xFF: LSR reads all ones, so
+	 * THR_EMPTY appears set and the write does not hang, DATA_READY appears
+	 * set too, and the byte read back is 0xFF rather than the 0xA5 sent --
+	 * WRONG, for a machine that simply has no serial port.  The scratch
+	 * register tells the two apart (cons_uart_present()).  A machine without
+	 * one could not be asked the question, which is NOT ASKED (#563), said
+	 * with what the register gave back.
+	 *
+	 * This kept WRONG until #670, because nobody could have read the other
+	 * answer: the log left through the very port whose absence it would
+	 * report.  #666 ended that.  With -f the screen draws what was printed
+	 * before it existed, and pavillion, omen and OMEGA, none of which has a
+	 * UART at COM1, drew this line saying WRONG.
+	 */
+	if (!cons_uart_present(&wrote, &read)) {
+		kputs("UrMach x86-64: did not send 0xa5 to the serial port's own "
+		      "receiver — NOT ASKED, no UART answers at COM1: its scratch "
+		      "register gave back ");
+		kputhex64(read);
+		kputs(" for ");
+		kputhex64(wrote);
+		kputs(" (#670)\r\n");
+		return;
+	}
+
+	got = cons_loopback_probe(CONS_PROBE_BYTE);
 
 	kputs("UrMach x86-64: sent 0xa5 to the serial port's own receiver and got ");
 	if (got < 0)
@@ -4380,20 +4411,9 @@ static void cons_selftest(void)
 		kputhex64((uint64_t)got);
 
 	/*
-	 * 🔑 THIS ONE KEEPS WRONG, AND THE REASON IS NOT THAT IT IS UNAMBIGUOUS
-	 * (#563).  It is that the other case cannot be observed.
-	 *
-	 * With no UART at COM1 every inb returns 0xFF: LSR reads all ones, so
-	 * THR_EMPTY appears set and the write does not hang, DATA_READY appears
-	 * set too, and the byte read back is 0xFF rather than the 0xA5 sent.
-	 * The verdict is then WRONG for a machine that simply has no serial
-	 * port, which is the shape this issue is about -- and a scratch-register
-	 * presence test would tell the two apart.
-	 *
-	 * ⚠️ But it would be a branch nobody can ever read.  This log travels
-	 * out of the very port whose absence it would report: on any machine
-	 * where the line can be seen, the UART is there.  A NOT ASKED that
-	 * cannot reach a reader is worth less than the WRONG it replaced.
+	 * And with a UART there, WRONG means what it says: a chip that keeps
+	 * what is written in its scratch register and does not hear its own
+	 * transmitter.
 	 */
 	kputs(got == CONS_PROBE_BYTE
 	      ? " — the console can hear\r\n"
