@@ -736,10 +736,16 @@ unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
 		return 0;
 	}
 	for (unsigned i = 0; i < nunits; i++) {
-		if (units[i].interrupt.x2apic_required
+		/*
+		 * #659: what was built, not why -- the local APIC not planned
+		 * for x2APIC ids, another engine without EIM, no 16-byte
+		 * compare-and-exchange.  A table that was not built at all is
+		 * said below, as itself.
+		 */
+		if (units[i].interrupt.x2apic_required && interrupt_tables_built
 		    && !iommu_remaps_x2apic()) {
 			*why = "an engine remaps only in x2apic mode, and the"
-			       " local apic is not planned for it";
+			       " entries were built for 8-bit apic ids";
 			return 0;
 		}
 		if (!units[i].interrupt.can_forget) {
@@ -3518,8 +3524,9 @@ static unsigned irta_check(unsigned *ran)
  * and a slip in the composition -- a field in another's place, a handle that
  * is not the comparator's entry -- would reach only the bare metal.  AMD's
  * HPET entry is iommu_amd_remap_entry()'s, the same as every MSI-X slot's,
- * and its message keeps the words the FSB route is given without remapping:
- * both run under QEMU already.
+ * and its message is the old format's base with the vector as the data, the
+ * entry naming the processor (fsb_compose(), #659): both run under QEMU
+ * already.
  *
  * #659: and in x2APIC mode, EIME set, where an id past eight bits fits the
  * destination and the same id with EIME clear is refused, not cut; and 0xFF,

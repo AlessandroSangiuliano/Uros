@@ -595,9 +595,13 @@ int iommu_hpet_source(uint8_t number, uint16_t *source);
  * as translation is with `-I': a default boot remaps nothing.
  *
  * Where the platform and every engine say they can, and only all of them:
- * the DMAR's flag set, every engine reporting remapping and a queue, none
- * demanding x2APIC mode, a processor with a 16-byte compare-and-exchange, and
- * a table naming the I/O APIC whose pins will need entries.  Answers how many
+ * the DMAR's flag set, every engine reporting remapping and a queue, an
+ * engine that demands extended interrupt mode (EIMER) only with entries
+ * built for 32-bit ids (#659), a processor with a 16-byte
+ * compare-and-exchange, and a table naming the I/O APIC whose pins will need
+ * entries -- and, on bare metal, entries for 32-bit ids under a local APIC
+ * already in x2APIC mode (#659, lapic_remapping_needs_x2apic_entries()).
+ * Answers how many
  * engines remap.  On zero, `why' says what stopped it, and `asked' says
  * whether the machine could be asked at all: zero for one that cannot remap
  * the way this kernel does -- the boot says NOT ASKED -- and one for an

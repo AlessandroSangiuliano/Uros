@@ -463,9 +463,11 @@ unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
  * ── #598: the entry an interrupt is remapped through ─────────────────
  *
  * Rev 5.20 §9.9 Figure 9-9, 128 bits; Rev 3.11 §2.2.5.1 Figure 15, 32 bits in
- * the basic format, which is the only one this kernel writes.  Pure, like every
- * encoder above, and read back by decoders WRITTEN FROM THE FIGURES rather than
- * by inverting the encoders, for the reason the page-table pair gives.
+ * the basic format, and since #659 the 128-bit entry of §2.2.5.3 Figure 19,
+ * which an AMD engine reads once GAEn is set (iommu_amd_irte_ga()).  Pure,
+ * like every encoder above, and read back by decoders WRITTEN FROM THE
+ * FIGURES rather than by inverting the encoders, for the reason the
+ * page-table pair gives.
  *
  * 🔑 HERE BOTH VENDORS' EMPTY ENTRIES REFUSE.  Intel's P=0 and AMD's RemapEn=0
  * both block the message and report it -- the opposite of the device table
