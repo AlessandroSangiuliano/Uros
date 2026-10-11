@@ -7528,6 +7528,7 @@ static void reach_pin_selftest(uint32_t target)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
 	uint16_t flags = acpi_irq_flags(0);
+	trap_handler_t found;
 	int had_interrupts;
 
 	if (!ioapic_present() || hpet_legacy_routed()) {
@@ -7541,6 +7542,7 @@ static void reach_pin_selftest(uint32_t target)
 
 	reach_want = target;
 	reach_there = reach_elsewhere = 0;
+	found = trap_get_handler(IOAPIC_ISA_VECTOR_BASE);
 	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, reach_pin);
 	had_interrupts = interrupts_enabled();
 	interrupts_enable();
@@ -7561,7 +7563,19 @@ static void reach_pin_selftest(uint32_t target)
 
 	if (!had_interrupts)
 		interrupts_disable();
-	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, 0);
+
+	/*
+	 * And the vector back as it was found: on a boot whose
+	 * device_master_irq_selftest() registered irq 0, the device layer's
+	 * trampoline, which acknowledges what nobody claims.  Not zero.  The
+	 * pin is masked, but a tick another processor's local APIC took just
+	 * before is that processor's to dispatch whenever it next runs -- a
+	 * halted vCPU waits for the host, a core for its SMI -- and the period
+	 * above is no bound on it; with zero there it found no handler and the
+	 * machine halted (device_md_irq_unregister() keeps its trampoline for
+	 * the same reason).
+	 */
+	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, found);
 }
 
 static void reach_msix_selftest(uint32_t target)

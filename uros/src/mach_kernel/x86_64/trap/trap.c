@@ -186,6 +186,14 @@ void trap_set_handler(unsigned vector, trap_handler_t handler)
 	ext_handler[vector - T_EXTERNAL_FIRST] = handler;
 }
 
+trap_handler_t trap_get_handler(unsigned vector)
+{
+	if (vector < T_EXTERNAL_FIRST || vector >= IDT_VECTORS)
+		panic("trap: only the vectors above the exceptions are claimed");
+
+	return ext_handler[vector - T_EXTERNAL_FIRST];
+}
+
 static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
 {
 	struct idt_gate *g = &idt[vector];

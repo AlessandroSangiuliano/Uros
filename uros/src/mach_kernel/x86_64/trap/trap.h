@@ -325,6 +325,13 @@ typedef void (*trap_handler_t)(struct trap_frame *frame);
 void trap_set_handler(unsigned vector, trap_handler_t handler);
 
 /*
+ * #659: what claims `vector' now, for a test that borrows one and must give
+ * back what it found -- not zero, which turns an interrupt still on its way
+ * to another processor into "no handler" and a halt.
+ */
+trap_handler_t trap_get_handler(unsigned vector);
+
+/*
  * Run the handler for `vector` as though it had just arrived.
  *
  * For the priority level (<cpu/spl.h>) to replay what it deferred.
