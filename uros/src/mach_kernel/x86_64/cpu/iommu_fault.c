@@ -682,6 +682,11 @@ static unsigned fault_report_print(void)
 	return printed + (lost != 0) + (unplaced != 0) + (episodes != 0);
 }
 
+unsigned iommu_fault_report_now(void)
+{
+	return fault_report_print();
+}
+
 void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a)
 {
 	/*

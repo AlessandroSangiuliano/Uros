@@ -1068,6 +1068,17 @@ unsigned iommu_domain_count(void);
 void iommu_fault_reporter_start(void);
 
 /*
+ * #598: drain the engines and print what they recorded, now, in the caller's
+ * context -- for a boot about to stop before the reporter's thread can exist
+ * or run.  The burn-in's "the timer armed and never fired" was one: under -H
+ * -i the tick that never came is first an HPET message an engine refused, and
+ * its reason (22h, 26h, an IO_PAGE_FAULT) stayed in the engine's registers.
+ * Answers how many lines it printed, as the reporter counts them; zero where
+ * no engine translates or remaps, or none recorded anything.
+ */
+unsigned iommu_fault_report_now(void);
+
+/*
  * What the log knows of one device's refusals, asked by the driver that owns
  * it: the engines are drained first, in the same hold.
  *
