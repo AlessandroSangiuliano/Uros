@@ -69,6 +69,11 @@
 # scrolled away between two looks, or never drawn, which a shorter --poll
 # tells apart.
 #
+# ⚠️ Under TCG.  The bare-metal image under KVM, paused every 10 ms from the
+# kernel's first line, had drawn nothing on its screen after ten minutes;
+# unpaused it reached the quiet census in seconds.  Why is not known: what a
+# pause does to a KVM guest's clocks is the first place to look.
+#
 # --cdrom boots an image instead of the harness's disk: the one made for bare
 # metal (#595), whose GRUB has no serial terminal and whose kernel has -f, so
 # that what the screen shows is what a machine with no serial port shows.  The
@@ -449,7 +454,11 @@ def main():
         the kernel's graphics mode before it jumps, so from that line on the
         screen is black or the kernel's.  Not fbcons_open()'s line: it goes
         through the console's ring and can reach the wire after -f's replay
-        has drawn and scrolled away the lines before it.
+        has drawn and scrolled away the lines before it.  Nor is the machine
+        paused before it: there is nothing to look at, and under KVM a pause
+        every 10 ms kept SeaBIOS and GRUB from ever handing over (20 minutes,
+        49 MB of the guest's memory touched), where the same image booted
+        unpaused in seconds.
 
         🔑 And a row is judged only when two looks in a row show it.  A pause
         can fall inside a scroll, which rewrites the screen row by row, or
@@ -491,12 +500,11 @@ def main():
             hmp(m)				# the banner, up to the first prompt
             while time.time() < end and q.poll() is None:
                 time.sleep(a.poll)
+                if KERNEL_FIRST not in pump():
+                    skipped += 1
+                    continue
                 hmp(m, "stop")
                 wire = pump()
-                if KERNEL_FIRST not in wire:
-                    skipped += 1
-                    hmp(m, "cont")
-                    continue
                 look()
                 if text in wire:
                     hmp(m, "cont")
@@ -542,9 +550,9 @@ def main():
             if not all(p == "" or p in seen for p in pieces):
                 missed.append(w)
         print(f"fbcons-readback: --all-lines: {looks} looks at the screen, "
-              f"the machine run {a.poll} s between two, after {skipped} "
-              f"before the kernel's first line; {len(seen)} distinct rows "
-              f"seen, {len(stable)} of them in two looks in a row, "
+              f"the machine run {a.poll} s between two, from the kernel's "
+              f"first line ({skipped} polls before it); {len(seen)} distinct "
+              f"rows seen, {len(stable)} of them in two looks in a row, "
               f"{len(seen) - len(stable)} caught once (a scroll or a line "
               f"under way, or gone by the next look)")
         if unknown:
