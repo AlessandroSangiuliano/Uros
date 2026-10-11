@@ -1053,8 +1053,9 @@ unsigned iommu_domain_count(void);
 
 /*
  * The thread that drains every engine every 100 ms and prints what they
- * refused -- the only printer of the fault log (#599).  NOT ASKED, said once,
- * when no engine translates.
+ * refused -- the only printer of the fault log once it is asked for (#599);
+ * before that, iommu_fault_report_now() below, for a boot that stops first
+ * (#598).  NOT ASKED, said once, when no engine translates.
  *
  * 🔴 THIS IS "a diagnosable event, not silence" (#432).  It was a poll run by
  * the idle loop, and #432 closed on "no refusal goes unreported": a processor
@@ -1066,6 +1067,19 @@ unsigned iommu_domain_count(void);
  * follow-up.
  */
 void iommu_fault_reporter_start(void);
+
+/*
+ * #598: drain the engines and print what they recorded, now, in the caller's
+ * context -- for a boot about to stop before the reporter's thread can exist
+ * or run.  The burn-in's "the timer armed and never fired" was one: under -H
+ * -i the tick that never came is first an HPET message an engine refused, and
+ * its reason (22h, 26h, an IO_PAGE_FAULT) stayed in the engine's registers.
+ * Answers how many lines it printed, as the reporter counts them; zero where
+ * no engine translates or remaps, or none recorded anything -- and zero, with
+ * nothing printed, once iommu_fault_reporter_start() has run: the reporter is
+ * then the one printer, whose cursors are its own.
+ */
+unsigned iommu_fault_report_now(void);
 
 /*
  * What the log knows of one device's refusals, asked by the driver that owns

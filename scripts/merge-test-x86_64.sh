@@ -103,6 +103,8 @@ ENTRIES="
 37 harness --iommu_amd
 38 harness --iommu_amd
 38 hpetfsb --iommu_intel_--hpet_fsb
+45 harness --iommu_intel
+45 harness --iommu_amd
 17 harness
 18 harness
 21 harness

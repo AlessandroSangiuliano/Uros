@@ -2237,20 +2237,45 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
  * DMAR's HPET scope names; edge, like every message.  The words given back are
  * the remappable format of entry 240 + n, for its FSB route register (#598).
  * The source is matched exactly (SQ 00b), as every entry here is: whether a
- * platform's HPET sends with the function its scope names is for the fault
- * reporter on hardware to say, and Linux's answer -- ignore the function --
- * is taken only if one does not.
+ * platform's HPET sends with the function its scope names is for the engine
+ * to say, and Linux's answer -- ignore the function -- is taken only if one
+ * does not.  Said where it can be: a refused tick stops a -H -i boot before
+ * the fault reporter's thread runs, and -C's burn-in reads the engines out
+ * before its panic (iommu_fault_report_now()).
+ *
+ * Composed by iommu_vtd_hpet_words() and only then written: the words alone
+ * are what the boot's self-test decodes back for an invented source
+ * (iommu_interrupt_check()), since no QEMU table names an HPET.
  */
+int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
+			 uint32_t apic_id, uint32_t *index, uint64_t irte[2],
+			 uint32_t *address, uint32_t *data)
+{
+	struct iommu_irte e = { vector, apic_id, 0, source };
+
+	return iommu_vtd_irt_index(IOMMU_VTD_IRT_HPET, comparator, index)
+	       && iommu_vtd_irte(&e, 0, irte)
+	       && iommu_vtd_msi(*index, address, data);
+}
+
 int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
 			 uint32_t apic_id, uint32_t *address, uint32_t *data)
 {
-	struct iommu_irte e = { vector, apic_id, 0, source };
-	uint32_t index;
+	uint32_t index, a, d;
 	uint64_t w[2];
 
-	return iommu_vtd_irt_index(IOMMU_VTD_IRT_HPET, comparator, &index)
-	       && iommu_vtd_irte(&e, 0, w) && vtd_irte_write(index, w)
-	       && iommu_vtd_msi(index, address, data);
+	/*
+	 * The caller's words only once the entry is written: a zero answer
+	 * leaves them as they came in, as <cpu/iommu.h> has these calls do,
+	 * and not naming an entry nobody wrote.
+	 */
+	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
+				  &index, w, &a, &d)
+	    || !vtd_irte_write(index, w))
+		return 0;
+	*address = a;
+	*data = d;
+	return 1;
 }
 
 void iommu_vtd_forget_msi(unsigned slot)
