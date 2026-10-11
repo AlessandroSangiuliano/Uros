@@ -1285,12 +1285,24 @@ while kill -0 "$QPID" 2>/dev/null; do
 		# line, whatever was still coming.  So a run that ends in a panic
 		# waits until its log has stopped growing for three seconds,
 		# within a minute; every other end is as it was.
+		#
+		# 🔴 #676: AND A PANIC SEEN BEFORE ITS RESTART LINE IS NOT THE END.
+		# With -b the kernel says `panic: -b: restarting the machine' after
+		# the backtrace, so a poll can find the panic with the restart line
+		# not yet written.  This wait ended at three still seconds and
+		# never looked again, and the kernel's five seconds before its reset
+		# are still: on GitHub's slower runners entry 44 was cut there, in
+		# one or two boots a campaign, the zone's check and the reset never
+		# reached.  The wait now watches for the restart line too, and a
+		# boot that says it restarts goes back to waiting for qemu to leave,
+		# within the quiet budget and the wall cap like any other.
 		if grep -aqE "$PANIC_RE" "$LOG"; then
 			_PANIC_SIZE=-1
 			_PANIC_STILL=0
 			_PANIC_WAITED=0
 			while [ "$_PANIC_STILL" -lt 3 ] && [ "$_PANIC_WAITED" -lt 60 ] &&
 			      kill -0 "$QPID" 2>/dev/null; do
+				grep -aqE "$RESTART_RE" "$LOG" && break
 				_PANIC_NOW=$(stat -c %s "$LOG")
 				if [ "$_PANIC_NOW" = "$_PANIC_SIZE" ]; then
 					_PANIC_STILL=$((_PANIC_STILL + 1))
@@ -1301,6 +1313,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 				sleep 1
 				_PANIC_WAITED=$((_PANIC_WAITED + 1))
 			done
+			grep -aqE "$RESTART_RE" "$LOG" && continue
 		else
 			sleep 1
 		fi
