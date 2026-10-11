@@ -3328,6 +3328,64 @@ static unsigned irta_check(unsigned *ran)
 	return bad;
 }
 
+/*
+ * #598: the HPET's entry and FSB message as iommu_vtd_remap_hpet() composes
+ * them, for an invented source, read back with the decoders the cases above
+ * trust.  QEMU's tables name no HPET, so no boot under it writes this entry,
+ * and a slip in the composition -- a field in another's place, a handle that
+ * is not the comparator's entry -- would reach only the bare metal.  AMD's
+ * HPET entry is iommu_amd_remap_entry()'s, the same as every MSI-X slot's,
+ * and its message keeps the words the FSB route is given without remapping:
+ * both run under QEMU already.
+ */
+static unsigned hpet_check(unsigned *ran)
+{
+	static const struct {
+		unsigned	comparator;
+		uint8_t		vector;
+		uint32_t	apic_id;
+		int		maps;
+	} cases[] = {
+		{  0, 0xF0, 0x00, 1 },
+		{ 15, 0x31, 0xFF, 1 },
+		{ 16, 0xF0, 0x00, 0 },	/* one past the comparators' entries */
+	};
+	const uint16_t source = 0xF0F9;		/* f0:1f.1, nobody's */
+	unsigned bad = 0;
+
+	for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+		uint32_t index = 0xA5A5A5A5u, address = 0xA5A5A5A5u;
+		uint32_t data = 0xA5A5A5A5u, back = 0xA5A5A5A5u;
+		uint64_t w[2] = { ~0ULL, ~0ULL };
+		struct iommu_irte d = { 0x5A, 0xA5A5A5A5u, -1, 0xA5A5 };
+		int got;
+
+		(*ran)++;
+
+		got = iommu_vtd_hpet_words(cases[i].comparator, source,
+					   cases[i].vector, cases[i].apic_id,
+					   &index, w, &address, &data);
+		if (got != cases[i].maps) {
+			bad++;
+			continue;
+		}
+		if (got == 0)
+			continue;
+
+		/* The decoder takes only SVT 01b with SQ 00b: one source. */
+		if (index != 240u + cases[i].comparator
+		    || iommu_vtd_irte_decode(w, 0, &d) != 1
+		    || d.vector != cases[i].vector
+		    || d.destination != cases[i].apic_id
+		    || d.level != 0 || d.source != source
+		    || iommu_vtd_msi_decode(address, data, &back) != 1
+		    || back != index)
+			bad++;
+	}
+
+	return bad;
+}
+
 int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 {
 	unsigned n = 0, bad = 0;
@@ -3390,6 +3448,7 @@ int iommu_interrupt_check(unsigned *ran, unsigned *wrong)
 	bad += qi_check(&n);
 	bad += irta_check(&n);
 	bad += irt_index_check(&n);
+	bad += hpet_check(&n);
 
 	if (ran)
 		*ran = n;
