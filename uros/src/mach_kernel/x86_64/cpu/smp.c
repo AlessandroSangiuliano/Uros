@@ -416,6 +416,21 @@ uint64_t smp_answering_set(void)
 	     | atomic_load64(&bsp_bit);
 }
 
+int smp_wakeable(unsigned cpu)
+{
+	uint32_t high;
+
+	return cpu < smp_cpu_count()
+	       && lapic_icr_destination(cpu_to_apic(cpu), lapic_x2apic(), &high);
+}
+
+static unsigned smp_asked;		/* #659: sent INIT and SIPI */
+
+unsigned smp_woken_count(void)
+{
+	return smp_asked;
+}
+
 unsigned smp_start_others(void)
 {
 	unsigned asked = 0;
@@ -472,9 +487,9 @@ unsigned smp_start_others(void)
 	 * processor with its id's low byte, and for 255 to every processor.
 	 */
 	for (unsigned cpu = 1; cpu < smp_cpu_count(); cpu++) {
-		uint32_t id = cpu_to_apic(cpu), high;
+		uint32_t id = cpu_to_apic(cpu);
 
-		if (!lapic_icr_destination(id, lapic_x2apic(), &high)) {
+		if (!smp_wakeable(cpu)) {
 			printf("smp: processor %u, apic id %u, is not woken: "
 			       "xAPIC mode names no processor above apic id "
 			       "%u (#659)\n", cpu, id, LAPIC_XAPIC_ID_MAX);
@@ -486,6 +501,7 @@ unsigned smp_start_others(void)
 		lapic_send_startup(id, AP_TRAMPOLINE_BASE);
 		asked++;
 	}
+	smp_asked = asked;
 
 	/*
 	 * Wait for the count, not for a sequence.  A processor that never

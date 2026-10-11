@@ -113,6 +113,15 @@ void machine_slots_init(void);
 int smp_is_online(unsigned cpu);
 
 /*
+ * #659: whether the processor numbered `cpu' can be woken in the APIC mode
+ * the boot settled on -- the command register can name its id -- and how
+ * many smp_start_others() woke.  One it could not name was not woken, and is
+ * not "silent": it was never asked.
+ */
+int smp_wakeable(unsigned cpu);
+unsigned smp_woken_count(void);
+
+/*
  * Every processor that answers a broadcast, one bit per processor number: the
  * ones that reported in AND the boot processor, which online_mask never holds
  * because it never arrived anywhere (#605).  What a cross-call that times out

@@ -7642,27 +7642,36 @@ static void irq_reach_selftest(void)
 {
 	uint32_t boot = cpu_to_apic(0), target = boot, highest = boot;
 	unsigned cpus = smp_cpu_count();
+	int other = 0;
 
+	/*
+	 * The highest id among the processors that reported in, other than
+	 * the boot processor's whatever its own id: one the boot did not wake
+	 * (smp_wakeable()) or that stayed silent is no target, and is not a
+	 * reason to aim at nobody either.
+	 */
 	for (unsigned i = 1; i < cpus; i++) {
 		uint32_t id = cpu_to_apic(i);
 
 		if (id > highest)
 			highest = id;
-		if (iommu_names_apic_id(id) && id > target)
+		if (!smp_is_online(i) || !iommu_names_apic_id(id))
+			continue;
+		if (!other || id > target) {
 			target = id;
+			other = 1;
+		}
 	}
 
-	if (cpus < 2 || smp_online_count() != cpus || target == boot) {
+	if (!other) {
 		kputs("UrMach x86-64: where an interrupt arrives: NOT ASKED, ");
 		kputs(cpus < 2 ? "one processor, whose id every format names"
 				 " alike (#659)\r\n"
-		      : smp_online_count() != cpus
-			       ? "a processor did not report in (#659)\r\n"
-			       : "no other processor the entries can name"
-				 " (#659)\r\n");
+		      : "no other processor online that the entries can name"
+			" (#659)\r\n");
 		return;
 	}
-	if (highest != target) {
+	if (!iommu_names_apic_id(highest)) {
 		kputs("UrMach x86-64:   apic id ");
 		kputdec(highest);
 		kputs(" is above 254 and the entries do not carry 32 bits, so"
@@ -9018,12 +9027,18 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 		unsigned up = smp_start_others();
 
 		kputs("UrMach x86-64: woke ");
-		kputdec(smp_cpu_count() - 1);
+		kputdec(smp_woken_count());
 		kputs(" processors, ");
 		kputdec(up);
 		kputs(" reported in — ");
 		kputdec(smp_online_count());
 		kputs(" online");
+		if (smp_woken_count() + 1 < smp_cpu_count()) {
+			kputs(", ");
+			kputdec(smp_cpu_count() - 1 - smp_woken_count());
+			kputs(" not woken, their ids above what xAPIC mode names"
+			      " (#659)");
+		}
 		if (left != 0) {
 			kputs(", ");
 			kputdec(left);
@@ -9058,7 +9073,9 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 				kputdec(cpu);
 				kputs(":");
 				kputdec(cpu_to_apic(cpu));
-				if (!smp_is_online(cpu))
+				if (!smp_wakeable(cpu))
+					kputs("(not woken)");
+				else if (!smp_is_online(cpu))
 					kputs("(silent)");
 			}
 			kputs("\r\n");
