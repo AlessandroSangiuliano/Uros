@@ -136,8 +136,10 @@ void iommu_record_tables(uint64_t root, uint64_t root_bytes,
  * #598: build the interrupt tables, every entry written refusing and read
  * back, and record them, for <cpu/iommu.h>'s iommu_build_interrupt_tables().
  * Answers non-zero when everything was built and read back as written.
+ * #659: `x2apic' says the entries are for x2APIC ids, which the front end
+ * decided: the local APIC planned for them, and every engine able to.
  */
-int iommu_vtd_irt_build(void);
+int iommu_vtd_irt_build(int x2apic);
 int iommu_amd_irt_build(void);
 void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t);
 
@@ -155,8 +157,8 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
 			 uint32_t apic_id, uint32_t *address, uint32_t *data);
 int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
-			 uint32_t apic_id, uint32_t *index, uint64_t irte[2],
-			 uint32_t *address, uint32_t *data);
+			 uint32_t apic_id, int x2apic, uint32_t *index,
+			 uint64_t irte[2], uint32_t *address, uint32_t *data);
 void iommu_vtd_forget_msi(unsigned slot);
 
 /*

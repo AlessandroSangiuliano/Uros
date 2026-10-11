@@ -14,6 +14,7 @@
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 #include <cpu/ioapic.h>		/* no pin routed before -i, #598 */
+#include <cpu/lapic.h>		/* the mode the entries are for, #659 */
 #include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
 #include <kern/kalloc.h>	/* an identity grant's page list, #599 */
 #include <kern/lock.h>		/* iommu_domain_lock, #599 */
@@ -415,12 +416,29 @@ void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t)
 	interrupt_tables = *t;
 }
 
+/*
+ * #659: whether every engine can carry an x2APIC id, so that one table -- or
+ * one format -- serves them all.  No engine is no.
+ */
+static int every_engine_x2apic(void)
+{
+	if (nunits == 0)
+		return 0;
+	for (unsigned i = 0; i < nunits; i++)
+		if (!units[i].answered || !units[i].interrupt_remapping
+		    || units[i].interrupt.x2apic != 1)
+			return 0;
+	return 1;
+}
+
 int iommu_build_interrupt_tables(void)
 {
 	if (!interrupt_tables_tried) {
+		int x2apic = lapic_x2apic_planned() && every_engine_x2apic();
+
 		interrupt_tables_tried = 1;
 		if (found_vendor == IOMMU_INTEL)
-			interrupt_tables_built = iommu_vtd_irt_build();
+			interrupt_tables_built = iommu_vtd_irt_build(x2apic);
 		else if (found_vendor == IOMMU_AMD)
 			interrupt_tables_built = iommu_amd_irt_build();
 	}
@@ -431,6 +449,11 @@ int iommu_build_interrupt_tables(void)
 const struct iommu_interrupt_tables *iommu_interrupt_tables(void)
 {
 	return &interrupt_tables;
+}
+
+int iommu_remaps_x2apic(void)
+{
+	return interrupt_tables_built && interrupt_tables.x2apic;
 }
 
 /* ------------------------------------------------------------------ */
@@ -671,8 +694,10 @@ unsigned iommu_enable_interrupt_remapping(const char **why, int *asked)
 		return 0;
 	}
 	for (unsigned i = 0; i < nunits; i++) {
-		if (units[i].interrupt.x2apic_required) {
-			*why = "an engine remaps only in x2apic mode";
+		if (units[i].interrupt.x2apic_required
+		    && !iommu_remaps_x2apic()) {
+			*why = "an engine remaps only in x2apic mode, and the"
+			       " local apic is not planned for it";
 			return 0;
 		}
 		if (!units[i].interrupt.can_forget) {
@@ -3347,6 +3372,9 @@ static unsigned irta_check(unsigned *ran)
  * HPET entry is iommu_amd_remap_entry()'s, the same as every MSI-X slot's,
  * and its message keeps the words the FSB route is given without remapping:
  * both run under QEMU already.
+ *
+ * #659: and in x2APIC mode, EIME set, where an id past eight bits fits the
+ * destination and the same id with EIME clear is refused, not cut.
  */
 static unsigned hpet_check(unsigned *ran)
 {
@@ -3354,11 +3382,14 @@ static unsigned hpet_check(unsigned *ran)
 		unsigned	comparator;
 		uint8_t		vector;
 		uint32_t	apic_id;
+		int		x2apic;
 		int		maps;
 	} cases[] = {
-		{  0, 0xF0, 0x00, 1 },
-		{ 15, 0x31, 0xFF, 1 },
-		{ 16, 0xF0, 0x00, 0 },	/* one past the comparators' entries */
+		{  0, 0xF0, 0x000, 0, 1 },
+		{ 15, 0x31, 0x0FF, 0, 1 },
+		{ 16, 0xF0, 0x000, 0, 0 },  /* one past the comparators' entries */
+		{  1, 0x41, 0x100, 1, 1 },  /* #659: past eight bits, EIME set */
+		{  2, 0x41, 0x100, 0, 0 },  /* ... and with EIME clear */
 	};
 	const uint16_t source = 0xF0F9;		/* f0:1f.1, nobody's */
 	unsigned bad = 0;
@@ -3374,7 +3405,8 @@ static unsigned hpet_check(unsigned *ran)
 
 		got = iommu_vtd_hpet_words(cases[i].comparator, source,
 					   cases[i].vector, cases[i].apic_id,
-					   &index, w, &address, &data);
+					   cases[i].x2apic, &index, w, &address,
+					   &data);
 		if (got != cases[i].maps) {
 			bad++;
 			continue;
@@ -3384,7 +3416,7 @@ static unsigned hpet_check(unsigned *ran)
 
 		/* The decoder takes only SVT 01b with SQ 00b: one source. */
 		if (index != 240u + cases[i].comparator
-		    || iommu_vtd_irte_decode(w, 0, &d) != 1
+		    || iommu_vtd_irte_decode(w, cases[i].x2apic, &d) != 1
 		    || d.vector != cases[i].vector
 		    || d.destination != cases[i].apic_id
 		    || d.level != 0 || d.source != source

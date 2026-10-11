@@ -1715,10 +1715,13 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
  * the entries mean would accept garbage beside a clear P -- garbage that
  * becomes an interrupt the day something sets that P.
  *
- * In xAPIC mode, EIME clear: this kernel's APIC ids have eight bits, and
- * whether x2APIC follows is #598's last question.  The word IRTA_REG will be
- * given is composed here, so that the encoder meets a real address before an
- * engine does; nothing is written to it yet.
+ * EIME as the front end decided (#659): set when the local APIC is planned for
+ * x2APIC mode and every engine has EIM, and then every entry's destination is
+ * all of 63:32 (Rev 5.20 §9.9); clear otherwise, and then only 47:40 is read.
+ * vtd_x2apic keeps the decision for the entries written later, since EIME
+ * "must not" change while remapping is on (§11.4.10).  The word IRTA_REG will
+ * be given is composed here, so that the encoder meets a real address before
+ * an engine does; nothing is written to it yet.
  */
 #define	VTD_IRT_ENTRIES		256u
 
@@ -1727,7 +1730,9 @@ _Static_assert(VTD_IRT_PINS <= VTD_IRT_MSI_FIRST
 	       && VTD_IRT_HPET_FIRST + VTD_IRT_HPET_SLOTS <= VTD_IRT_ENTRIES,
 	       "the index map's three ranges overlap, or run past the table");
 
-int iommu_vtd_irt_build(void)
+static int vtd_x2apic;			/* #659: the entries carry 32 bits */
+
+int iommu_vtd_irt_build(int x2apic)
 {
 	struct iommu_interrupt_tables t = { 0 };
 	volatile uint64_t *irt;
@@ -1739,11 +1744,13 @@ int iommu_vtd_irt_build(void)
 			t.engines++;
 
 	pa = t.engines ? boot_frame_alloc() : 0;
-	if (pa == 0 || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, 0, &t.intel_irta)) {
+	if (pa == 0
+	    || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, x2apic, &t.intel_irta)) {
 		iommu_record_interrupt_tables(&t);
 		return 0;
 	}
 
+	vtd_x2apic = t.x2apic = x2apic != 0;
 	t.intel_table = pa;
 	t.tables = 1;
 	t.frames = 1;
@@ -2207,7 +2214,7 @@ int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
 	uint64_t w[2];
 
 	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_PIN, pin, &index)
-	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w))
+	    || !iommu_vtd_irte(&e, vtd_x2apic, w) || !vtd_irte_write(index, w))
 		return 0;
 
 	return iommu_vtd_ioapic_rte(index, vector, level, active_low, 0,
@@ -2223,7 +2230,7 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 	uint64_t w[2];
 
 	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index)
-	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w)
+	    || !iommu_vtd_irte(&e, vtd_x2apic, w) || !vtd_irte_write(index, w)
 	    || !iommu_vtd_msi(index, &a, &dw))
 		return 0;
 
@@ -2245,16 +2252,17 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
  *
  * Composed by iommu_vtd_hpet_words() and only then written: the words alone
  * are what the boot's self-test decodes back for an invented source
- * (iommu_interrupt_check()), since no QEMU table names an HPET.
+ * (iommu_interrupt_check()), since no QEMU table names an HPET -- in both
+ * modes, which is why the mode is an argument and not the table's (#659).
  */
 int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
-			 uint32_t apic_id, uint32_t *index, uint64_t irte[2],
-			 uint32_t *address, uint32_t *data)
+			 uint32_t apic_id, int x2apic, uint32_t *index,
+			 uint64_t irte[2], uint32_t *address, uint32_t *data)
 {
 	struct iommu_irte e = { vector, apic_id, 0, source };
 
 	return iommu_vtd_irt_index(IOMMU_VTD_IRT_HPET, comparator, index)
-	       && iommu_vtd_irte(&e, 0, irte)
+	       && iommu_vtd_irte(&e, x2apic, irte)
 	       && iommu_vtd_msi(*index, address, data);
 }
 
@@ -2270,7 +2278,7 @@ int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
 	 * and not naming an entry nobody wrote.
 	 */
 	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
-				  &index, w, &a, &d)
+				  vtd_x2apic, &index, w, &a, &d)
 	    || !vtd_irte_write(index, w))
 		return 0;
 	*address = a;

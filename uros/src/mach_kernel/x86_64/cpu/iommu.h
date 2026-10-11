@@ -475,15 +475,28 @@ struct iommu_interrupt_tables {
 	unsigned	named;		/* AMD: for the sources the IVRS names */
 	unsigned	ioapics;	/* ... which are I/O APICs            */
 	unsigned	hpets;		/* ... and HPETs, once per DeviceID   */
+	int		x2apic;		/* #659: entries for 32-bit apic ids  */
 };
 
 /*
  * Build them, once.  Answers non-zero when every table was built and every
  * entry read back as written.
+ *
+ * #659: for x2APIC ids when the local APIC is planned for them
+ * (lapic_x2apic_planned()) and every engine can take them -- Intel's EIM, AMD's
+ * XTSup and GASup.  Then Intel's IRTA carries EIME and every entry a 32-bit
+ * destination (Rev 5.20 §9.9), and with EIME set a message in the old format is
+ * refused (§5.1.4).
  */
 int iommu_build_interrupt_tables(void);
 
 const struct iommu_interrupt_tables *iommu_interrupt_tables(void);
+
+/*
+ * #659: whether the entries were built for x2APIC ids; zero before they are
+ * built, and where nothing was.  Remapping on is iommu_interrupts_remapped().
+ */
+int iommu_remaps_x2apic(void);
 
 /*
  * ── #598: what a source writes, through remapping or around it ───────
@@ -516,8 +529,9 @@ int iommu_interrupts_remapped(void);
  * On Intel the entry also names who may use it (#598 point 2): the I/O APIC's
  * source-id from the DMAR for a pin, the function's bus/device/function for
  * a slot.  Answers zero, having written no source's words, when the source
- * has no entry -- a pin past the map, an id wider than eight bits, an I/O
- * APIC no table names.
+ * has no entry -- a pin past the map, an id wider than the entries carry
+ * (eight bits, unless they were built for x2APIC ids: iommu_remaps_x2apic(),
+ * #659), an I/O APIC no table names.
  */
 int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
 		    int level, int active_low, uint32_t *lo, uint32_t *hi);

@@ -6053,6 +6053,28 @@ static void iommu_selftest(void)
 					      ? " remaps interrupts\r\n"
 					      : " does not remap — WRONG\r\n");
 				}
+				/*
+				 * #659: what the entries' destinations
+				 * hold, which the local APIC's mode must
+				 * match once lapic_choose_mode() switches.
+				 */
+				kputs("UrMach x86-64:   entries for ");
+				if (iommu_remaps_x2apic())
+					kputs(iommu_vendor() == IOMMU_AMD
+					      ? "32-bit apic ids, XTEn and GAEn"
+						" set: the local apic is planned"
+						" for x2APIC mode (#659)\r\n"
+					      : "32-bit apic ids, EIME set: the"
+						" local apic is planned for x2APIC"
+						" mode (#659)\r\n");
+				else if (lapic_x2apic_planned())
+					kputs("8-bit apic ids: the local apic is"
+					      " planned for x2APIC mode, and an"
+					      " engine cannot carry its ids"
+					      " (#659)\r\n");
+				else
+					kputs("8-bit apic ids: the local apic"
+					      " stays in xAPIC mode (#659)\r\n");
 				if (io != 0 && iommu_ioapic_source(io->id, &sid)) {
 					int amd = iommu_vendor() == IOMMU_AMD;
 
