@@ -16,6 +16,7 @@
 #include <cpu/ioapic.h>		/* no pin routed before -i, #598 */
 #include <cpu/lapic.h>		/* the mode the entries are for, #659 */
 #include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
+#include <sync/atomic.h>	/* iommu_store_entry16(), #598's C20 */
 #include <kern/kalloc.h>	/* an identity grant's page list, #599 */
 #include <kern/lock.h>		/* iommu_domain_lock, #599 */
 #include <kern/misc_protos.h>	/* printf, for the refusals (#432 stage 3d) */
@@ -434,13 +435,18 @@ static int every_engine_x2apic(void)
 int iommu_build_interrupt_tables(void)
 {
 	if (!interrupt_tables_tried) {
-		int x2apic = lapic_x2apic_planned() && every_engine_x2apic();
+		/*
+		 * #659: and a 16-byte store, which an entry for 32-bit ids
+		 * takes on AMD as on Intel (iommu_store_entry16()).
+		 */
+		int x2apic = lapic_x2apic_planned() && every_engine_x2apic()
+			     && cpu_has_cmpxchg16b();
 
 		interrupt_tables_tried = 1;
 		if (found_vendor == IOMMU_INTEL)
 			interrupt_tables_built = iommu_vtd_irt_build(x2apic);
 		else if (found_vendor == IOMMU_AMD)
-			interrupt_tables_built = iommu_amd_irt_build();
+			interrupt_tables_built = iommu_amd_irt_build(x2apic);
 	}
 
 	return interrupt_tables_built;
@@ -1297,6 +1303,32 @@ int iommu_tables_uncached(void)
 uint64_t iommu_table_lines_flushed(void)
 {
 	return lines_flushed;
+}
+
+/*
+ * 🔴 ONE 16-BYTE STORE (#598's C20), for an entry an engine may be reading:
+ * Intel's context entry -- "software performing an SSPTPTR or Translation
+ * Type (TT) field update must use a 16-Byte aligned atomic operation" (VT-d
+ * Rev 5.20 §6.2.2.1) -- or an interrupt remapping entry, which VT-d hardware
+ * reads whole "as software may change the contents of the IRTE atomically"
+ * (§5.1.4), and AMD's 128-bit one (#659), whose RemapEn is in one half and
+ * whose vector and destination's high byte are in the other (Rev 3.11
+ * Figure 19).  Written as two stores, a present entry is, between them, an
+ * entry nobody wrote.  On a processor without the instruction it answers no,
+ * and nothing is written.
+ */
+int iommu_store_entry16(volatile uint64_t *at, const uint64_t e[2])
+{
+	volatile struct atomic128 *slot = (volatile struct atomic128 *)at;
+	struct atomic128 was, now = { e[0], e[1] };
+
+	if (!cpu_has_cmpxchg16b())
+		return 0;
+	was.lo = slot->lo;
+	was.hi = slot->hi;
+	while (!atomic_cmpxchg128(slot, &was, now))
+		;
+	return 1;
 }
 
 /* One line out of the caches; the fence orders it before what follows. */

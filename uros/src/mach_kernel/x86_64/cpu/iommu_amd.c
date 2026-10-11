@@ -606,6 +606,10 @@ int iommu_amd_build(void)
 #define	AMD_CTL_IOMMU_EN	(1ULL << 0)
 #define	AMD_CTL_EVENTLOG_EN	(1ULL << 2)
 #define	AMD_CTL_CMDBUF_EN	(1ULL << 12)
+#define	AMD_CTL_GA_EN		(1ULL << 17)	/* #659: 128-bit entries */
+#define	AMD_CTL_XT_EN		(1ULL << 50)	/* #659: 32-bit ids in them */
+
+static int amd_ir_x2apic(void);
 
 int iommu_amd_enable(void)
 {
@@ -664,6 +668,19 @@ int iommu_amd_enable(void)
 		control &= ~AMD_CTL_COHERENT;
 		if (iommu_amd_devtab_snooped(i))	/* C7, as the IVHD says */
 			control |= AMD_CTL_COHERENT;
+
+		/*
+		 * #659: the entries' format, before the engine reads one.
+		 * x2APIC mode "must set MMIO 0x18[XTEn]=1 and MMIO
+		 * 0x18[GAEn]=1" (Rev 3.11 §2.2.5.3): GAEn for the 128-bit
+		 * entry the tables were built with, XTEn for its 32-bit
+		 * destination.  IntCapXTEn is not set: it is for the engine's
+		 * own interrupts, and EventIntEn, which would send them, is
+		 * never set here.
+		 */
+		control &= ~(AMD_CTL_GA_EN | AMD_CTL_XT_EN);
+		if (amd_ir_x2apic())
+			control |= AMD_CTL_GA_EN | AMD_CTL_XT_EN;
 		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
 
 		control |= AMD_CTL_IOMMU_EN;
@@ -673,10 +690,16 @@ int iommu_amd_enable(void)
 		 * Read back, because a write that was accepted and ignored is
 		 * the failure this cannot afford to call success.  A device
 		 * table meant to be snooped that is not would be read stale:
-		 * nothing was flushed for it.
+		 * nothing was flushed for it.  GAEn is a bit whose writes are
+		 * ignored without GASup (#659): 128-bit entries read as four
+		 * four-byte ones would be entries nobody wrote.
 		 */
 		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
 		if (!(control & AMD_CTL_IOMMU_EN))
+			return 0;
+		if (amd_ir_x2apic()
+		    && (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
+		       != (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
 			return 0;
 		if (iommu_amd_devtab_snooped(i) && !(control & AMD_CTL_COHERENT))
 			return 0;
@@ -2096,15 +2119,24 @@ int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
  * for (iommu_amd_ir_prepare(), below).
  *
  * Four tables to a frame: a table is a kilobyte, and starting on a kilobyte
- * gives the 128-byte alignment for nothing.
+ * gives the 128-byte alignment for nothing.  #659: or one, when the tables are
+ * built for x2APIC ids -- amd_x2apic -- whose entries are the 128-bit ones
+ * (Figure 19), sixteen bytes each; the same 256 entries, indexed the same way.
  *
  * 🔴 Nothing points at them until -i: only then is a device table entry's
  * interrupt half written, and an INVALIDATE_INTERRUPT_TABLE ever sent.
  */
 #define	AMD_IRT_ENTRIES		256u
-#define	AMD_IRT_BYTES		(AMD_IRT_ENTRIES * 4u)
 #define	AMD_IRT_TABLES		256u
 #define	AMD_CMD_INVALIDATE_INTR	(5ULL << 60)	/* Rev 3.11 §2.4.5, Figure 48 */
+
+static int	amd_x2apic;		/* #659: 128-bit entries, XTEn */
+
+/* Bytes in an entry, four or sixteen, and so in a table. */
+static unsigned amd_irte_bytes(void)
+{
+	return amd_x2apic ? 16u : 4u;
+}
 
 static struct {
 	uint16_t	device;		/* the DeviceID its messages carry   */
@@ -2124,27 +2156,34 @@ static unsigned	amd_irt_in_frame;	/* ... and how many it holds     */
  */
 static uint64_t amd_irt_table(struct iommu_interrupt_tables *t)
 {
+	unsigned words = amd_irte_bytes() / 4u;	/* in an entry */
+	unsigned bytes = AMD_IRT_ENTRIES * amd_irte_bytes();
 	volatile uint32_t *e;
 	uint64_t pa;
 
-	if (amd_irt_frame == 0 || amd_irt_in_frame == 4096u / AMD_IRT_BYTES) {
+	if (amd_irt_frame == 0 || amd_irt_in_frame == 4096u / bytes) {
 		amd_irt_frame = boot_frame_alloc();
 		amd_irt_in_frame = 0;
 		if (amd_irt_frame == 0)
 			return 0;
 		t->frames++;
 	}
-	pa = amd_irt_frame + (uint64_t)amd_irt_in_frame++ * AMD_IRT_BYTES;
+	pa = amd_irt_frame + (uint64_t)amd_irt_in_frame++ * bytes;
 
 	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(pa);
-	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES * words; i++)
 		e[i] = 0;
 
-	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
-		if (e[i] == 0)
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++) {
+		uint32_t any = 0;
+
+		for (unsigned w = 0; w < words; w++)
+			any |= e[i * words + w];
+		if (any == 0)
 			t->entries++;
 		else
 			t->wrong++;
+	}
 
 	t->tables++;
 	return pa;
@@ -2217,10 +2256,13 @@ static int amd_irt_source(const struct iommu_scope *s,
 	return 1;
 }
 
-int iommu_amd_irt_build(void)
+int iommu_amd_irt_build(int x2apic)
 {
 	struct iommu_interrupt_tables t = { 0 };
 	int ok = 1;
+
+	/* #659: every table in one format, decided before the first. */
+	amd_x2apic = t.x2apic = x2apic != 0;
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++)
 		if (iommu_unit(i)->answered
@@ -2280,6 +2322,16 @@ int iommu_amd_irt_build(void)
  */
 static int	amd_prepared;
 static int	amd_remapping;
+
+/*
+ * #659: whether the engine is to read the 128-bit entries with 32-bit ids:
+ * the tables were built so, and -i prepared them -- an engine -I turns on
+ * with nothing prepared remaps nothing, and keeps the reset format.
+ */
+static int amd_ir_x2apic(void)
+{
+	return amd_x2apic && amd_prepared;
+}
 
 static int amd_prepare_fail(const struct iommu_interrupt_tables *t)
 {
@@ -2364,21 +2416,26 @@ int iommu_amd_remapping(void)
 
 /*
  * One entry of `device''s table, then every engine told to forget that
- * device's interrupts.  One 32-bit store is the whole entry, and the
- * engine's interrupt table walks are always coherent (§2.2.5), so nothing
- * is flushed.
+ * device's interrupts.  One 32-bit store is the whole basic entry -- `e[0]''s
+ * low half -- and one 16-byte store the whole 128-bit one (#659,
+ * iommu_store_entry16()); the engine's interrupt table walks are always
+ * coherent (§2.2.5), so nothing is flushed.
  */
-static int amd_irt_write(uint16_t device, uint8_t vector, uint32_t value)
+static int amd_irt_write(uint16_t device, uint8_t vector, const uint64_t e[2])
 {
 	const struct iommu_tables *t = iommu_tables();
-	volatile uint32_t *e;
+	uint64_t base;
 	int k = amd_irt_find(device);
 
 	if (k < 0)
 		return 0;
 
-	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(amd_irt[k].table);
-	e[vector] = value;
+	base = phys_to_direct(amd_irt[k].table);
+	if (!amd_x2apic)
+		((volatile uint32_t *)(uintptr_t)base)[vector] = (uint32_t)e[0];
+	else if (!iommu_store_entry16((volatile uint64_t *)(uintptr_t)
+				      (base + (uint64_t)vector * 16u), e))
+		return 0;
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
 		const struct iommu_unit *u = iommu_unit(i);
@@ -2397,14 +2454,23 @@ static int amd_irt_write(uint16_t device, uint8_t vector, uint32_t value)
 int iommu_amd_remap_entry(uint16_t device, uint8_t vector, uint32_t apic_id)
 {
 	struct iommu_irte e = { vector, apic_id, 0, 0 };
-	uint32_t w;
+	uint64_t w[2] = { 0, 0 };
+	uint32_t basic;
 
-	if (!iommu_amd_irte(&e, &w))
-		return 0;
+	if (amd_x2apic) {
+		if (!iommu_amd_irte_ga(&e, 1, w))
+			return 0;
+	} else {
+		if (!iommu_amd_irte(&e, &basic))
+			return 0;
+		w[0] = basic;
+	}
 	return amd_irt_write(device, vector, w);
 }
 
 void iommu_amd_forget_entry(uint16_t device, uint8_t vector)
 {
-	(void) amd_irt_write(device, vector, 0);
+	const uint64_t none[2] = { 0, 0 };
+
+	(void) amd_irt_write(device, vector, none);
 }

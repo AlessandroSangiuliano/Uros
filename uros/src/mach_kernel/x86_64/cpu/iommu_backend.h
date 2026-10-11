@@ -140,7 +140,7 @@ void iommu_record_tables(uint64_t root, uint64_t root_bytes,
  * decided: the local APIC planned for them, and every engine able to.
  */
 int iommu_vtd_irt_build(int x2apic);
-int iommu_amd_irt_build(void);
+int iommu_amd_irt_build(int x2apic);
 void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t);
 
 /*
@@ -342,6 +342,14 @@ void iommu_amd_dte_domain(uint16_t domain, unsigned levels, uint64_t root_pa,
 void iommu_flush_line(const volatile void *p);
 void iommu_table_written(const volatile void *entry);
 void iommu_table_frame_written(uint64_t pa);
+
+/*
+ * #598's C20: a 16-byte entry an engine may be reading, written in one
+ * atomic store -- Intel's context and remapping entries, AMD's 128-bit
+ * remapping entry (#659).  Answers zero, writing nothing, on a processor
+ * without CMPXCHG16B.
+ */
+int iommu_store_entry16(volatile uint64_t *at, const uint64_t e[2]);
 
 /*
  * ── Stage 3d: reading a refusal out of an engine ─────────────────────
