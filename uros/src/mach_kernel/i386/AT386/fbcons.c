@@ -41,6 +41,7 @@
 #include <vm/vm_kern.h>			/* kmem_alloc, kernel_map (#372 shadow) */
 #include "fbcons.h"
 #include <device/fbcons_font.h>	/* #568: one copy, shared with x86-64 */
+#include <device/fbcons_utf8.h>	/* #661: and one decoder */
 
 #define FONT_W		8
 #define FONT_H		16
@@ -67,8 +68,7 @@ static unsigned int	fb_cols, fb_rows;	/* size in characters         */
 static unsigned int	fb_scale;	/* glyph magnification (1 or 2, #371) */
 static unsigned int	cur_col, cur_row;
 static int		fb_active;
-static int		utf8_left;	/* UTF-8 continuation bytes still due (#372) */
-static unsigned int	utf8_cp;	/* accumulated UTF-8 codepoint (#372)      */
+static struct fbcons_utf8 fb_utf8;	/* the UTF-8 being decoded (#661) */
 
 /* #372: optional RAM pixel shadow, kmem_alloc'd once the allocator is up
  * (fbcons_late_init).  When present, scrolling is one bulk bcopy(shadow->fb)
@@ -378,35 +378,10 @@ fb_putchar(unsigned char c)
 		fb_newline();
 }
 
-void
-fbcons_putc(char ch)
+/* An ASCII byte, control codes acted on. */
+static void
+fb_putbyte(unsigned char c)
 {
-	unsigned char c = (unsigned char)ch;
-
-	if (!fb_active)
-		return;
-
-	/* #372: the font is 8-bit but boot strings carry UTF-8 (e.g. the em-dash
-	 * "—" = E2 80 94), which would render as three garbage glyphs ("OCo").
-	 * Decode the sequence: map the en/em/horizontal-bar dashes to the CP437
-	 * full-width line glyph 0xC4 (a real long dash), anything else to '-'. */
-	if (c >= 0xc0) {			/* UTF-8 lead byte -- start a sequence */
-		if (c >= 0xf0)		{ utf8_left = 3; utf8_cp = c & 0x07; }
-		else if (c >= 0xe0)	{ utf8_left = 2; utf8_cp = c & 0x0f; }
-		else			{ utf8_left = 1; utf8_cp = c & 0x1f; }
-		return;
-	}
-	if (c >= 0x80) {			/* UTF-8 continuation byte */
-		if (utf8_left == 0)
-			return;			/* stray continuation, ignore */
-		utf8_cp = (utf8_cp << 6) | (c & 0x3f);
-		if (--utf8_left != 0)
-			return;			/* more bytes still due */
-		c = (utf8_cp == 0x2013 || utf8_cp == 0x2014 ||
-		     utf8_cp == 0x2015) ? 0xc4 : '-';
-		/* sequence complete -- fall through and render c */
-	}
-
 	switch (c) {
 	case '\n':
 		fb_newline();
@@ -428,6 +403,29 @@ fbcons_putc(char ch)
 	}
 
 	fb_putchar(c);
+}
+
+void
+fbcons_putc(char ch)
+{
+	unsigned int	out[2];
+	unsigned int	n, i;
+
+	if (!fb_active)
+		return;
+
+	/* #372 decoded the UTF-8 the boot strings carry -- the em dash's E2 80
+	 * 94 would be three glyphs, "ÔÇö" -- and drew the dashes as 0xC4 and
+	 * everything else as '-'.  #661: decoded by the decoder x86-64 uses,
+	 * against the font's own Unicode table, the dashes' alias kept: an
+	 * e-acute is its glyph now, not a hyphen, and what the font cannot draw
+	 * is the visible replacement. */
+	n = fbcons_utf8_feed(&fb_utf8, (unsigned char)ch, out);
+	for (i = 0; i < n; i++)
+		if (out[i] & FBCONS_UTF8_GLYPH)
+			fb_putchar((unsigned char)out[i]);
+		else
+			fb_putbyte((unsigned char)out[i]);
 }
 
 void
