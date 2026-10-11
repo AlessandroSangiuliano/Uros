@@ -42,6 +42,7 @@
 #   scripts/fbcons-readback.py [--build DIR] [--entry N] [--kvm] [--smp N]
 #                              [--wait-for TEXT] [--budget S] [--out DIR]
 #                              [--no-uart [--poll S]]
+#                              [--cdrom ISO] [--all-lines [--poll S]]
 #
 # Exit:  0  the screen's text was found in the serial log
 #        1  the screen disagreed with the log, or is blank
@@ -58,6 +59,22 @@
 # machine that went on running while each dump was read would scroll it away
 # between two looks.  Exit 0 then means the --expect texts are on the screen.
 #
+# 🔑 --all-lines IS EVERY LINE OF A BOOT, not the last screenful (#661).  One
+# screendump shows what is on the panel at the end, and the rows that scrolled
+# away before it were never compared with anything.  So the screen is looked
+# at every --poll seconds from the start, the machine paused while each look
+# is read, as --no-uart does, until --wait-for is on the wire; every row ever
+# seen is kept, each must be in the log, and each line of the log must have
+# been seen, whole, on some look.  A line no look caught is named: drawn and
+# scrolled away between two looks, or never drawn, which a shorter --poll
+# tells apart.
+#
+# --cdrom boots an image instead of the harness's disk: the one made for bare
+# metal (#595), whose GRUB has no serial terminal and whose kernel has -f, so
+# that what the screen shows is what a machine with no serial port shows.  The
+# serial line is still captured, for the comparison: the kernel writes COM1
+# whether or not anything listens.
+#
 # ⚠️ One run at a time, with the harness's own lock: two qemus on one machine
 # manufacture each other's failures (run-x86_64.sh says why).
 
@@ -67,6 +84,8 @@ REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 LOCK = "/tmp/uros-x86_64-run.lock"
 
 FONT_H = "uros/src/mach_kernel/device/fbcons_font.h"
+# The kernel's first line, which boot.S says before anything else (#661).
+KERNEL_FIRST = "UrMach x86-64: reached 32-bit multiboot entry"
 GLYPH_W, GLYPH_H = 8, 16
 
 
@@ -181,7 +200,7 @@ def cell_to_char(lit, w, col, row, by_bitmap):
     return by_bitmap.get(tuple(bits))
 
 
-def screen_lines(ppm, by_bitmap):
+def screen_lines(ppm, by_bitmap, mark="?"):
     w, h, pix = read_ppm(ppm)
     lit = lit_pixels(w, h, pix)
     # 🔴 AND THE BLANK GLYPH IS A SPACE, said explicitly, by reading().
@@ -206,7 +225,7 @@ def screen_lines(ppm, by_bitmap):
             ch = cell_to_char(lit, w, c, r, by_bitmap)
             if ch is None:
                 unknown += 1
-                ch = "?"
+                ch = mark
             line.append(ch)
         out.append("".join(line).rstrip())
     return out, unknown, cols, rows
@@ -250,11 +269,23 @@ def main():
                          "for on the screen, with the machine paused while "
                          "each dump is read (#670)")
     ap.add_argument("--poll", type=float, default=0.05,
-                    help="with --no-uart, the seconds the machine runs "
-                         "between two looks at its screen")
+                    help="with --no-uart or --all-lines, the seconds the "
+                         "machine runs between two looks at its screen")
+    ap.add_argument("--all-lines", action="store_true",
+                    help="look at the screen through the whole boot, until "
+                         "--wait-for is on the wire, and require every row "
+                         "seen to be in the log and every line of the log to "
+                         "have been seen (#661)")
+    ap.add_argument("--cdrom", default=None,
+                    help="boot this image instead of the harness's disk -- "
+                         "the bare-metal one (#595); --entry is then its "
+                         "GRUB's business")
     a = ap.parse_args()
     if a.no_uart and a.send is not None:
         ap.error("--send types at the serial line, and --no-uart has none")
+    if a.all_lines and (a.no_uart or a.send is not None or a.freeze):
+        ap.error("--all-lines compares the whole boot with the serial line, "
+                 "and is not given with --no-uart, --send or --freeze")
 
     build = os.path.realpath(a.build)
     out = a.out or build
@@ -266,11 +297,15 @@ def main():
     font = load_font(os.path.join(REPO, FONT_H))
     by_bitmap, fold = reading(font, load_map(os.path.join(REPO, FONT_H)))
 
-    env = dict(os.environ, UROS_BUILD_DIR=build,
-               UROS_X86_64_BOOT_ENTRY=str(a.entry))
-    subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
-                   env=env, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if a.cdrom is None:
+        env = dict(os.environ, UROS_BUILD_DIR=build,
+                   UROS_X86_64_BOOT_ENTRY=str(a.entry))
+        subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
+                       env=env, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif not os.path.exists(a.cdrom):
+        print(f"fbcons-readback: no image at {a.cdrom}", file=sys.stderr)
+        return 2
 
     try:
         os.mkdir(LOCK)
@@ -299,8 +334,10 @@ def main():
         except FileNotFoundError:
             pass
 
-    argv = ["qemu-system-x86_64", "-cpu", "max", "-m", "512M",
-            "-smp", str(a.smp),
+    if a.cdrom is not None:
+        disks = ["-cdrom", os.path.realpath(a.cdrom), "-boot", "d"]
+    else:
+        disks = [
             "-drive", f"file={build}/disk-x86_64.img,if=none,id=urosdisk,"
                       f"format=raw",
             "-device", "virtio-blk-pci,drive=urosdisk,bootindex=0",
@@ -310,7 +347,9 @@ def main():
             "-device", "ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1",
             "-drive", f"file={build}/disk-x86_64-ahci2.img,if=none,"
                       f"id=ahcidisk1,format=raw",
-            "-device", "ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2",
+            "-device", "ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"]
+    argv = ["qemu-system-x86_64", "-cpu", "max", "-m", "512M",
+            "-smp", str(a.smp)] + disks + [
             "-vga", "std", "-display", "none",
             "-serial", "none" if a.no_uart else f"pipe:{fifo}",
             "-monitor", f"unix:{mon},server=on,wait=off", "-no-reboot"]
@@ -397,7 +436,141 @@ def main():
         finally:
             m.close()
 
+    def watch(text, budget):
+        """--all-lines: run, pause, look, keeping every row seen, until
+        text is on the wire (#661).  The wire is read while the machine is
+        paused, before its screen is, so the look that finds the text has
+        drawn it too: both are written at one place.
+
+        🔑 Only once the wire has the kernel's first line.  Before it the
+        panel is the firmware's and the loader's -- SeaBIOS's text mode,
+        QEMU's own "Guest has not initialized the display" -- and the first
+        shape of this read them as rows the wire never had.  The loader sets
+        the kernel's graphics mode before it jumps, so from that line on the
+        screen is black or the kernel's.  Not fbcons_open()'s line: it goes
+        through the console's ring and can reach the wire after -f's replay
+        has drawn and scrolled away the lines before it.
+
+        🔑 And a row is judged only when two looks in a row show it.  A pause
+        can fall inside a scroll, which rewrites the screen row by row, or
+        inside a glyph: what that look shows is half of two lines, true for
+        a moment and in no log.  The last look is taken after --settle, the
+        boot quiet, and its rows are what stays."""
+        seen, stable, prev = {}, set(), set()
+        looks, skipped, cols = 0, 0, None
+        end = time.time() + budget
+        m = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        m.settimeout(30.0)
+        while True:
+            try:
+                m.connect(mon)
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.time() > end or q.poll() is not None:
+                    return False, seen, stable, looks, skipped, cols
+                time.sleep(0.05)
+
+        def look():
+            nonlocal prev, looks, cols
+            hmp(m, f"screendump {ppm}")
+            lines, _unk, cols, _rows = screen_lines(ppm, by_bitmap, "\0")
+            looks += 1
+            now = {l for l in lines if l.strip()}
+            for l in now:
+                seen.setdefault(l, looks)
+            stable.update(now & prev)
+            prev = now
+            return now
+        try:
+            hmp(m)				# the banner, up to the first prompt
+            while time.time() < end and q.poll() is None:
+                time.sleep(a.poll)
+                hmp(m, "stop")
+                wire = pump()
+                if KERNEL_FIRST not in wire:
+                    skipped += 1
+                    hmp(m, "cont")
+                    continue
+                look()
+                if text in wire:
+                    hmp(m, "cont")
+                    time.sleep(a.settle)
+                    hmp(m, "stop")
+                    pump()
+                    stable.update(look())
+                    return True, seen, stable, looks, skipped, cols
+                hmp(m, "cont")
+            return False, seen, stable, looks, skipped, cols
+        finally:
+            m.close()
+
+    def every_line():
+        """--all-lines' verdict: every row two looks agreed on is in the
+        log, and every line of the log was seen (#661)."""
+        found, seen, stable, looks, skipped, cols = watch(a.wait_for,
+                                                          a.budget)
+        raw = pump()
+        open(log, "w").write(raw)
+        if not found:
+            print(f"fbcons-readback: never saw {a.wait_for!r} on the serial "
+                  f"line in {a.budget:.0f}s, after {looks} looks at the "
+                  f"screen — the boot did not get there", file=sys.stderr)
+            return 2
+        serial = fold(raw)
+        unknown = [l for l in stable if "\0" in l]
+        only = [l for l in stable if "\0" not in l and l.strip() not in serial]
+        # Each line the wire finished, as the screen draws it: no escape
+        # sequence (a terminal's, which this console does not have), no
+        # control code but the tab, which is drawn as spaces to the next
+        # stop of eight, and cut at the screen's width where it wraps.
+        missed, nlines = [], 0
+        start = serial.find(KERNEL_FIRST)
+        for w in serial[start:].split("\n")[:-1]:
+            w = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", w)
+            w = "".join(ch for ch in w if ch == "\t" or ord(ch) >= 0x20)
+            w = w.expandtabs(8).rstrip()
+            if not w:
+                continue
+            nlines += 1
+            pieces = [w[i:i + cols].rstrip() for i in range(0, len(w), cols)]
+            if not all(p == "" or p in seen for p in pieces):
+                missed.append(w)
+        print(f"fbcons-readback: --all-lines: {looks} looks at the screen, "
+              f"the machine run {a.poll} s between two, after {skipped} "
+              f"before the kernel's first line; {len(seen)} distinct rows "
+              f"seen, {len(stable)} of them in two looks in a row, "
+              f"{len(seen) - len(stable)} caught once (a scroll or a line "
+              f"under way, or gone by the next look)")
+        if unknown:
+            print(f"fbcons-readback: {len(unknown)} rows two looks agreed on "
+                  f"hold cells that are not a glyph of this font:")
+            for l in unknown[:5]:
+                print(f"  not a glyph | {l.replace(chr(0), '?')}")
+        if only:
+            print(f"fbcons-readback: {len(only)} of {len(stable)} rows two "
+                  f"looks agreed on are NOT in the serial log — the screen "
+                  f"and the wire disagree:")
+            for l in only[:5]:
+                print(f"  only on screen | {l}")
+        if missed:
+            print(f"fbcons-readback: {len(missed)} of {nlines} lines of the "
+                  f"serial log were NEVER SEEN whole on the screen — drawn "
+                  f"and scrolled away between two looks, or not drawn: a "
+                  f"shorter --poll tells which:")
+            for l in missed[:5]:
+                print(f"  only on the wire | {l}")
+        if only or missed or unknown:
+            return 1
+        print(f"fbcons-readback: PASS — every one of the {nlines} lines of the "
+              f"serial log from the kernel's first was seen on the screen, "
+              f"and every one of the {len(stable)} rows two looks agreed on "
+              f"is in the log")
+        return 0
+
     try:
+        if a.all_lines:
+            rc = every_line()
+            return rc
         if a.no_uart:
             if not screen_wait_for(a.wait_for, a.budget):
                 err = (q.stderr.read() if q.poll() is not None else "").strip()
