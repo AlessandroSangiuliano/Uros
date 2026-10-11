@@ -246,10 +246,17 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 	unsigned reg = redir_reg(gsi);
 	int active_low = (flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW;
 	int level = (flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL;
-	uint32_t low = vector & RTE_VECTOR_MASK, high;
+	uint32_t low = vector & RTE_VECTOR_MASK, high = 0;
 	uint64_t f;
 
-	if (!ioapic_rte_destination(apic_id, &high))
+	/*
+	 * #659: remapped to 32-bit ids, the destination is the entry's alone
+	 * -- Intel's pair below then holds the entry's index, and AMD's engine
+	 * reads the destination from the entry the vector indexes -- so an id
+	 * past eight bits needs no room here, and the high half starts empty.
+	 */
+	if (!(iommu_interrupts_remapped() && iommu_remaps_x2apic())
+	    && !ioapic_rte_destination(apic_id, &high))
 		panic("ioapic: apic id %u does not fit a redirection entry "
 		      "(#598)", apic_id);
 	low |= RTE_DELIVERY_FIXED | RTE_DEST_PHYSICAL;

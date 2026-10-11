@@ -171,7 +171,9 @@ extern void pci_msix_disable(const struct pci_msix *m);
  */
 /*
  * The address a message to processor `apic_id' is written to, or no: an id
- * past eight bits does not fit the compatibility format (#598's C16).
+ * past eight bits does not fit the compatibility format (#598's C16).  Such an
+ * id is reached only through a remapping entry for 32-bit ids, which
+ * msi_claim_vector() records for msi_remap_vector() (#659).
  */
 extern int msi_destination(uint32_t apic_id, unsigned long long *address);
 

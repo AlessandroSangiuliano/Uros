@@ -123,7 +123,9 @@ int ioapic_owns(uint32_t gsi);
 /*
  * A redirection entry's destination word for a processor, or no: an APIC id
  * past eight bits does not fit, and is refused rather than cut (#598's C16).
- * ioapic_route() panics on one; a caller that can refuse asks first.
+ * ioapic_route() panics on one, unless interrupts are remapped to 32-bit ids,
+ * where the destination is the remapping entry's (#659); a caller that can
+ * refuse asks first.
  */
 int ioapic_rte_destination(uint32_t apic_id, uint32_t *high);
 
