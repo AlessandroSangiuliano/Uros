@@ -1698,10 +1698,13 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
  * EIME as the front end decided (#659): set when the local APIC is planned for
  * x2APIC mode and every engine has EIM, and then every entry's destination is
  * all of 63:32 (Rev 5.20 §9.9); clear otherwise, and then only 47:40 is read.
- * vtd_x2apic keeps the decision for the entries written later, since EIME
- * "must not" change while remapping is on (§11.4.10).  The word IRTA_REG will
- * be given is composed here, so that the encoder meets a real address before
- * an engine does; nothing is written to it yet.
+ * The word IRTA_REG will be given is composed here, so that the encoder meets
+ * a real address before an engine does; nothing is written to it yet.  🔑 The
+ * entries' format is read off that word, not off the decision: what the
+ * engines are told and how every entry is encoded are one bit, EIME, and
+ * vtd_x2apic keeps it for the entries written later, since EIME "must not"
+ * change while remapping is on (§11.4.10).  vtd_ir_on() reads the word back
+ * from every engine before the table is used.
  */
 #define	VTD_IRT_ENTRIES		256u
 
@@ -1730,7 +1733,7 @@ int iommu_vtd_irt_build(int x2apic)
 		return 0;
 	}
 
-	vtd_x2apic = t.x2apic = x2apic != 0;
+	vtd_x2apic = t.x2apic = (t.intel_irta & VTD_IRTA_EIME) != 0;
 	t.intel_table = pa;
 	t.tables = 1;
 	t.frames = 1;
@@ -2333,6 +2336,16 @@ static int vtd_ir_on(unsigned unit, volatile uint8_t *regs,
 	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
 	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_SIRTP;
 	if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_IRTPS, 1, 0))
+		return 0;
+
+	/*
+	 * Read back (#659): IRTA_REG is RW (Rev 5.20 §11.4.10), and the word it
+	 * holds is this engine's format -- EIME says how wide it reads every
+	 * entry's destination, and is RsvdZ on an engine without EIM -- which
+	 * the boot then names as read.  An engine that did not take the word as
+	 * written is not given the table.
+	 */
+	if (*(volatile uint64_t *)(regs + VTD_IRTA_REG) != t->intel_irta)
 		return 0;
 
 	if (!VTD_CAP_ESIRTPS(u->vendor_caps[0])) {

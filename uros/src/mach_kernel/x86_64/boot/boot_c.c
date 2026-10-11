@@ -6062,11 +6062,11 @@ static void iommu_selftest(void)
 				if (iommu_remaps_x2apic())
 					kputs(iommu_vendor() == IOMMU_AMD
 					      ? "32-bit apic ids, XTEn and GAEn"
+						" read back set: the local apic is"
+						" planned for x2APIC mode (#659)\r\n"
+					      : "32-bit apic ids, EIME read back"
 						" set: the local apic is planned"
-						" for x2APIC mode (#659)\r\n"
-					      : "32-bit apic ids, EIME set: the"
-						" local apic is planned for x2APIC"
-						" mode (#659)\r\n");
+						" for x2APIC mode (#659)\r\n");
 				else if (lapic_x2apic_planned())
 					kputs("8-bit apic ids: the local apic is"
 					      " planned for x2APIC mode, and an"
