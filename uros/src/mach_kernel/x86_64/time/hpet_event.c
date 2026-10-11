@@ -454,9 +454,10 @@ static void comparator_route(void)
  * which the compatibility format cannot name: msi_destination() refuses it,
  * where the id shifted in at bit 12 used to leave 0xFEExxxxx -- 256 made
  * 0xFEF00000, a write to memory and no interrupt, and 255 would have been the
- * broadcast.  Remapped, the entry names the processor
- * with all 32 bits, and the old format's words are only the base, as for an
- * MSI slot (msi_claim_vector_to()).
+ * broadcast.  hpet_ev_probe() refuses such a processor before any start, so
+ * this stays as the encoder's own guard.  Remapped, the entry names the
+ * processor with all 32 bits, and the old format's words are only the base,
+ * as for an MSI slot (msi_claim_vector_to()).
  */
 static const char *fsb_refusal;	/* why it answered zero, for the WRONGs */
 
@@ -514,6 +515,22 @@ static int hpet_ev_probe(void)
 	}
 	if (!lapic_present()) {
 		printf("clock_event: hpet: no local APIC to deliver to\n");
+		return 0;
+	}
+	/*
+	 * #659: the processor the start makes the broadcaster -- this one:
+	 * probe() and start() run back to back (clock_event.c) -- must be one
+	 * the comparator's interrupt can name.  Above LAPIC_XAPIC_ID_MAX
+	 * without entries for 32-bit ids neither the FSB message nor the I/O
+	 * APIC's pin can (iommu_names_apic_id()), and the start, which cannot
+	 * refuse, fell from the one to the other into ioapic_route()'s panic,
+	 * a redirection entry blamed for what the probe could have said.
+	 */
+	if (!iommu_names_apic_id(cpu_to_apic(cpu_number()))) {
+		printf("clock_event: hpet: cpu %u is APIC id %u, which neither an "
+		       "FSB message nor an I/O APIC pin names without interrupts "
+		       "remapped to 32-bit ids (#659)\n", cpu_number(),
+		       cpu_to_apic(cpu_number()));
 		return 0;
 	}
 	switch (choose_route(&n, &cap0)) {
@@ -608,9 +625,10 @@ static void hpet_ev_start(uint8_t vector)
 
 	/*
 	 * #598: an FSB route under remapping whose entry could not be written
-	 * would send a message the engine refuses -- so the pin, said.  #659:
-	 * and so would one, not remapped, to a processor the old format cannot
-	 * name; fsb_refusal says which.
+	 * would send a message the engine refuses -- so the pin, said, which is
+	 * remapped like any other.  #659: a processor neither route can name
+	 * was refused by the probe, so fsb_refusal names the entry here; its
+	 * other wording is the encoder's guard (fsb_compose()).
 	 */
 	if (route == ROUTE_FSB && !fsb_compose()) {
 		printf("clock_event: hpet: WRONG -- comparator %u's %s; its I/O "
@@ -629,11 +647,10 @@ static void hpet_ev_start(uint8_t vector)
 	 * that driver's device has just gone silent.
 	 *
 	 * No route at all follows a probe that found one in one case only: the
-	 * probe found the FSB message, its entry could not be written or, not
-	 * remapped, it could not name its processor (above, #659), and the
-	 * board has no LegacyReplacement to fall back to (#598).  With
-	 * neither there is no clock, so the panic stands -- naming that cause,
-	 * and not the probe.
+	 * probe found the FSB message, its entry could not be written, and the
+	 * board has no LegacyReplacement to fall back to (#598).  With neither
+	 * there is no clock, so the panic stands -- naming that cause, and not
+	 * the probe.
 	 */
 	if (route == ROUTE_TAKEN && fsb_unwritable) {
 		printf("clock_event: hpet: WRONG -- comparator %u's %s, and ISA "
