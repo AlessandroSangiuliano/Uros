@@ -54,6 +54,9 @@ struct entry_check {
 	uint64_t	 rflags;
 	uint64_t	 frame;		/* where the frame itself was built       */
 	uint64_t	 rbp;		/* and what a backtrace walks from        */
+	unsigned	 bt_depth;	/* #659: that walk, made in the handler   */
+	const char	*bt_first;
+	int		 bt_reached_boot;
 	uint64_t	 vector;
 	uint64_t	 error;
 	uint64_t	 handler_flags;	/* the flags the HANDLER ran with         */
@@ -100,6 +103,8 @@ static void note(struct entry_check *c, const struct trap_frame *f)
 	c->rflags = f->rflags;
 	c->frame = (uint64_t)(uintptr_t)f;
 	c->rbp = f->rbp;
+	c->bt_depth = x86_64_backtrace_probe(f->rbp, &c->bt_first,
+					     "x86_64_boot", &c->bt_reached_boot);
 	c->vector = f->vector;
 	c->error = f->error;
 	c->handler_flags = interrupts_enabled();
@@ -252,14 +257,18 @@ static void report(const struct entry_check *c, uint64_t want_vector,
  * was one frame long and really was complete.  The test was measuring the
  * optimiser.  They are noinline now so the walk has something to walk, but what
  * is CHECKED is the name at the far end, which no inlining decision can move.
+ *
+ * 🔴 #659: AND THE WALK IS THE HANDLER'S, made while the frames were the stack
+ * (note(), trap_record_frame()).  This used to walk `rbp' here, after the
+ * entry had returned, through frames the calls since had written over: it
+ * passed while the entry landed one call below the test -- every call the
+ * test made rewrote that dead frame with its own rbp and a return into the
+ * test -- and an NMI one call deeper, inside an icr_send() no longer inlined,
+ * read "1 frames from (no name)".
  */
-static void report_backtrace(const char *what, uint64_t rbp)
+static void report_backtrace(const char *what, unsigned depth,
+			     const char *first, int found)
 {
-	const char *first = 0;
-	int found = 0;
-	unsigned depth = x86_64_backtrace_probe(rbp, &first, "x86_64_boot",
-						&found);
-
 	cons_puts("UrMach x86-64: the backtrace from ");
 	cons_puts(what);
 	cons_puts(" is ");
@@ -315,7 +324,8 @@ __attribute__((noinline)) static void kernel_fault_entry(void)
 		cons_puts("\r\n");
 	}
 
-	report_backtrace("a kernel fault", t->rbp);
+	report_backtrace("a kernel fault", t->bt_depth, t->bt_first,
+			 t->bt_reached_boot);
 }
 
 /*
@@ -365,7 +375,8 @@ __attribute__((noinline)) static void timer_entry_test(void)
 		interrupts_disable();
 
 	report(&timer_seen, LAPIC_TIMER_VECTOR, 0, 0);
-	report_backtrace("a timer interrupt", timer_seen.rbp);
+	report_backtrace("a timer interrupt", timer_seen.bt_depth,
+			 timer_seen.bt_first, timer_seen.bt_reached_boot);
 }
 
 __attribute__((noinline)) static void device_entry_test(void)
@@ -417,7 +428,8 @@ __attribute__((noinline)) static void device_entry_test(void)
 		interrupts_disable();
 
 	report(&device_seen, IOAPIC_ISA_VECTOR_BASE, 0, 0);
-	report_backtrace("a device interrupt", device_seen.rbp);
+	report_backtrace("a device interrupt", device_seen.bt_depth,
+			 device_seen.bt_first, device_seen.bt_reached_boot);
 }
 
 /*
@@ -469,7 +481,8 @@ __attribute__((noinline)) static void nmi_delivery_test(void)
 		  ? " — the gate switched stacks, which is what the slot is for\r\n"
 		  : " — WRONG, it did not run on the stack the table names\r\n");
 
-	report_backtrace("an NMI", t->rbp);
+	report_backtrace("an NMI", t->bt_depth, t->bt_first,
+			 t->bt_reached_boot);
 }
 
 __attribute__((noinline)) static void nmi_gate_test(void)
@@ -501,7 +514,8 @@ __attribute__((noinline)) static void nmi_gate_test(void)
 	c.rbp = t->rbp;
 
 	report(&c, T_NMI, 1, IST_NMI);
-	report_backtrace("vector 2", c.rbp);
+	report_backtrace("vector 2", t->bt_depth, t->bt_first,
+			 t->bt_reached_boot);
 }
 
 void trap_entry_test(void)

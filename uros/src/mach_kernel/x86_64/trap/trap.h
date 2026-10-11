@@ -429,6 +429,17 @@ struct trap_record {
 	uint64_t rsp;
 	uint64_t frame;
 	uint64_t rbp;		/* what a backtrace has to be walked from     */
+	/*
+	 * And that backtrace, walked by the handler while those frames were
+	 * still the stack (#659): how deep, the first name, and whether it
+	 * reached x86_64_boot.  Walked from `rbp' after the trap returned, it
+	 * read frames the calls since had written over -- and passed only
+	 * while the trap landed one call below the test, where every call the
+	 * test made rewrote the dead frame with the same two words.
+	 */
+	unsigned	bt_depth;
+	const char     *bt_first;
+	int		bt_reached_boot;
 	int      caught;
 };
 

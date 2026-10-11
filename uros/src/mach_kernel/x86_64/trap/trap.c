@@ -980,6 +980,11 @@ static void trap_record_frame(const struct trap_frame *frame)
 	last_trap.rsp = frame->rsp;
 	last_trap.frame = (uint64_t)(uintptr_t)frame;
 	last_trap.rbp = frame->rbp;
+	/* #659: walked now, while it is the stack; see <trap/trap.h>. */
+	last_trap.bt_depth = x86_64_backtrace_probe(frame->rbp,
+						    &last_trap.bt_first,
+						    "x86_64_boot",
+						    &last_trap.bt_reached_boot);
 	last_trap.caught = 1;
 }
 
