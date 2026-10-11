@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #661
+Takes out: the em dash's alias in the font's table -- the font has no glyph for U+2014, so every em dash the kernel and the tests print is drawn as the replacement, counted, and the census line says how many and that the first was U+2014; run-x86_64.sh fails such a boot as NO GLYPH
+Run: --entry 0 300 -smp 4
+Expect: [1-9][0-9]* without a glyph \(the first U\+2014\)
+
+diff --git a/uros/src/mach_kernel/device/fbcons_font.h b/uros/src/mach_kernel/device/fbcons_font.h
+index 01f0ec44..a59ea850 100644
+--- a/uros/src/mach_kernel/device/fbcons_font.h
++++ b/uros/src/mach_kernel/device/fbcons_font.h
+@@ -413,7 +413,6 @@ static const struct fbcons_font_map {
+   { 0x2009, 0x20 }, /* THIN SPACE */
+   { 0x200a, 0x20 }, /* HAIR SPACE */
+   { 0x2013, 0xc4 }, /* EN DASH */
+-  { 0x2014, 0xc4 }, /* EM DASH */
+   { 0x2015, 0xc4 }, /* HORIZONTAL BAR */
+   { 0x2017, 0xf2 }, /* DOUBLE LOW LINE */
+   { 0x2022, 0x07 }, /* BULLET */
