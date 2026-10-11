@@ -114,4 +114,7 @@ uint64_t fbcons_scrolls(void);		/* times the screen scrolled */
 uint32_t fbcons_no_glyph(uint32_t *first);
 uint32_t fbcons_not_utf8(void);
 
+/* The decoder against known sequences, said as a self-test line (#661). */
+void fbcons_utf8_selftest(void);
+
 #endif	/* _X86_64_DDB_FBCONS_H_ */

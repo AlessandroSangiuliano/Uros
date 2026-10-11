@@ -393,6 +393,89 @@ void fbcons_putc(char ch)
 }
 
 /*
+ * The decoder against sequences whose answer is known (#661), at every boot
+ * and before anything is drawn with it.  On a state of its own: the console's
+ * is the screen's, and a test that left a sequence open in it would break the
+ * first character drawn after.
+ *
+ * The cases are the ones the decoder has to tell apart.  The em dash, which
+ * the font has no glyph for and an alias gives one, and is why this exists;
+ * U+2192, a glyph whose number is a control code's; a code point the font
+ * cannot draw, and the first of them kept; and broken bytes, replaced one
+ * maximal subpart at a time -- an overlong form and a surrogate, three each,
+ * since their second byte is out of the first's range (Table 3-7), and a
+ * sequence an ASCII byte cut short, one and the byte.
+ */
+#define G	FBCONS_UTF8_GLYPH
+#define R	(FBCONS_UTF8_GLYPH | FBCONS_FONT_REPLACEMENT)
+
+static const struct {
+	const char	*in;
+	unsigned int	 want[4];	/* what is drawn, then zero */
+	unsigned int	 no_glyph;	/* and the counts after it */
+	unsigned int	 first;
+	unsigned int	 not_utf8;
+} fb_utf8_cases[] = {
+	{ "\xe2\x80\x94",	{ G | 0xc4 },		0, 0, 0 },	/* — */
+	{ "\xe2\x86\x92",	{ G | 0x1a },		0, 0, 0 },	/* → */
+	{ "\xc3\xa9",		{ G | 0x82 },		0, 0, 0 },	/* é */
+	{ "\xc2\xa0",		{ G | 0xff },		0, 0, 0 },	/* nbsp */
+	{ "A\t\n",		{ 'A', '\t', '\n' },	0, 0, 0 },
+	{ "\xe2\x9a\xa0",	{ R },			1, 0x26a0, 0 },	/* ⚠ */
+	{ "\xf0\x9f\x98\x80",	{ R },			1, 0x1f600, 0 },
+	{ "\xe0\x80\x80",	{ R, R, R },		0, 0, 3 },	/* overlong */
+	{ "\xed\xa0\x80",	{ R, R, R },		0, 0, 3 },	/* surrogate */
+	{ "\xe2\x80" "A",	{ R, 'A' },		0, 0, 1 },	/* cut short */
+	{ "\x94",		{ R },			0, 0, 1 },	/* alone */
+};
+
+#undef G
+#undef R
+
+void fbcons_utf8_selftest(void)
+{
+	unsigned int	nc = sizeof(fb_utf8_cases) / sizeof(fb_utf8_cases[0]);
+	unsigned int	i, j, k, n, due, got[8], out[2];
+
+	for (i = 0; i < nc; i++) {
+		struct fbcons_utf8	 u = { 0 };
+		const char		*p;
+		int			 same;
+
+		n = 0;
+		for (p = fb_utf8_cases[i].in; *p; p++) {
+			k = fbcons_utf8_feed(&u, (unsigned char) *p, out);
+			for (j = 0; j < k && n < 8; j++)
+				got[n++] = out[j];
+		}
+		for (due = 0; due < 4 && fb_utf8_cases[i].want[due]; due++)
+			;
+		same = n == due && u.need == 0 &&
+		       u.no_glyph == fb_utf8_cases[i].no_glyph &&
+		       u.first_no_glyph == fb_utf8_cases[i].first &&
+		       u.not_utf8 == fb_utf8_cases[i].not_utf8;
+		for (j = 0; same && j < n; j++)
+			same = got[j] == fb_utf8_cases[i].want[j];
+		if (same)
+			continue;
+		cons_printf("UrMach x86-64: fbcons: the UTF-8 decoder drew case "
+			    "%u of %u as %u glyphs or bytes, the first %x, "
+			    "where %u were due, the first %x; %u without a glyph "
+			    "(the first %x) and %u not UTF-8, where %u (%x) and "
+			    "%u were — WRONG (#661)\n",
+			    i, nc, n, n ? got[0] : 0, due,
+			    fb_utf8_cases[i].want[0], u.no_glyph,
+			    u.first_no_glyph, u.not_utf8,
+			    fb_utf8_cases[i].no_glyph, fb_utf8_cases[i].first,
+			    fb_utf8_cases[i].not_utf8);
+		return;
+	}
+	cons_printf("UrMach x86-64: fbcons: the UTF-8 decoder drew all %u "
+		    "cases as the font's table and Unicode's maximal subparts "
+		    "say (#661)\n", nc);
+}
+
+/*
  * What was kept so far, for the other reader of the same bytes: #373's zone,
  * which starts after the first of them were said and before fbcons_init()
  * closes the buffer.  How many are in it, and in *offered how many were
