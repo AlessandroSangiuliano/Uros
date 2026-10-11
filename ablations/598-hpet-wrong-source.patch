@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: the source-id the DMAR's HPET scope names, in the HPET's intel entry -- the entry names the function next to it (omen's 00:1f.0 becomes 00:1f.1, OMEGA's 00:1e.6 becomes 00:1e.7, its I/O APIC's), so the engine refuses the HPET's message for its source (26h), the burn-in counts no tick, and before its panic it says the refusal: the case a platform whose HPET sends another source-id than its scope names would be.  QEMU cannot catch it, and Run: is QEMU's, where it is NOT CAUGHT: its DMAR names no HPET.  Caught on intel bare metal booted with -H -i -C, with -b and ramoops=
+Run: --iommu intel --entry 38 900 -smp 1 -global hpet.msi=on
+Expect: was REFUSED an interrupt.*reason 0x26
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index 41a47131..aa213441 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -531,7 +531,7 @@ int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+ 	if (found_vendor == IOMMU_AMD)
+ 		return iommu_amd_remap_entry(source, vector, apic_id);
+ 
+-	return iommu_vtd_remap_hpet(comparator, source, vector, apic_id,
++	return iommu_vtd_remap_hpet(comparator, source ^ 1, vector, apic_id,
+ 				    address, data);
+ }
+ 
