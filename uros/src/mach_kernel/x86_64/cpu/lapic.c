@@ -184,6 +184,10 @@ void lapic_plan_mode(void)
 {
 	uint32_t a, b, c, d;
 
+	/* No local APIC found (lapic_init() never ran): nothing to plan. */
+	if (!present)
+		return;
+
 	if (x2apic) {
 		x2apic_planned = 1;
 		if (iommu_x2apic_discouraged())
@@ -216,7 +220,7 @@ void lapic_choose_mode(void)
 	uint32_t a, b, c, d;
 	int remapped = iommu_interrupts_remapped() && iommu_remaps_x2apic();
 
-	if (x2apic || !x2apic_planned)
+	if (!present || x2apic || !x2apic_planned)
 		return;
 
 	/*
@@ -230,7 +234,16 @@ void lapic_choose_mode(void)
 		return;
 	}
 
+	/*
+	 * Read back, as every mode line says what it read (#659): EN was set
+	 * when lapic_init() looked, and xAPIC to x2APIC is the one write SDM
+	 * 13.12.5 allows, so a register that did not take it is a processor
+	 * this kernel cannot drive -- every accessor from here on would be an
+	 * MSR it refuses.
+	 */
 	wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
+	if (!(rdmsr(MSR_APIC_BASE) & APIC_BASE_X2APIC))
+		panic("lapic: IA32_APIC_BASE did not take x2APIC mode (#659)");
 	x2apic = 1;
 	lapic_mode_reached = remapped ? LAPIC_MODE_X2APIC_TURNED_ON_REMAPPED
 				      : LAPIC_MODE_X2APIC_TURNED_ON;
