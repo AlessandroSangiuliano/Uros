@@ -3113,6 +3113,36 @@ static const struct irte_case irte_cases[] = {
 	{ "amd 128-bit, reserved bit 72 (synthetic)", 2, 1,
 	  0x0000000000000101ULL, 0x0000000000000141ULL,
 	  -1, { 0, 0, 0, 0 }, 0 },
+
+	/*
+	 * Destination[31:24] alone, in the high word's 63:56: refused without
+	 * XTEn, where "Destination[31:8] are reserved and MSZ", and id
+	 * 0x01000001 with it.  The low word's 31:16 are clear, so only the
+	 * high word's check can decide the first.
+	 */
+	{ "amd 128-bit, destination 31:24 without xten (synthetic)", 2, 0,
+	  0x0000000000000101ULL, 0x0100000000000041ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, destination 31:24 with xten", 2, 1,
+	  0x0000000000000101ULL, 0x0100000000000041ULL,
+	  1, { 0x41, 0x01000001, 0, 0 }, 1 },
+
+	/*
+	 * And the low word's other fields, each alone, none of which this
+	 * kernel writes: SupIOPF, IntType 001b, RqEoi, DM logical.
+	 */
+	{ "amd 128-bit, supiopf (synthetic)", 2, 1,
+	  0x0000000000000103ULL, 0x0000000000000041ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, arbitrated (synthetic)", 2, 1,
+	  0x0000000000000105ULL, 0x0000000000000041ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, rqeoi (synthetic)", 2, 1,
+	  0x0000000000000121ULL, 0x0000000000000041ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
+	{ "amd 128-bit, logical (synthetic)", 2, 1,
+	  0x0000000000000141ULL, 0x0000000000000041ULL,
+	  -1, { 0, 0, 0, 0 }, 0 },
 };
 
 /*
