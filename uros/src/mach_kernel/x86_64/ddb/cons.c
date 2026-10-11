@@ -443,6 +443,21 @@ static inline void cons_said(char c)
 	fbcons_putc(c);
 	ramoops_putc(c);
 }
+
+/*
+ * Bytes the wire already has, for the other outputs (#661).
+ *
+ * boot.S says its first line in 32-bit mode, where nothing in this file can
+ * be called, and writes it to the port itself.  It hands the same line here
+ * from the higher half, before anything else is said, so that the screen and
+ * #373's zone have it too, in its place.  On a machine with no serial port
+ * that line went nowhere at all, and #666's replay never had it.
+ */
+void cons_said_already(const char *s)
+{
+	for (; *s; s++)
+		cons_said(*s);
+}
 /*
  * #599: cons_tx_lock for a writer that must not wait for ever -- the ring
  * off, the way down, a debugger -- where a processor parked or halted with the
