@@ -62,6 +62,18 @@ struct dmar_table {
 _Static_assert(sizeof(struct dmar_table) == 48,
 	       "the DMAR header is forty-eight bytes before its structures");
 
+/*
+ * #659: bit 1 counts only beside bit 0 -- X2APIC_OPT_OUT "is valid only when
+ * the INTR_REMAP field (bit 0) is Set" (Rev 5.20 §8.1).  Read alone, a DMAR
+ * with no remapping and the bit set refused -2 under a hypervisor, where
+ * x2APIC mode needs no remapping at all.
+ */
+int iommu_vtd_dmar_opts_out(uint8_t flags)
+{
+	return (flags & (DMAR_FLAG_INTR_REMAP | DMAR_FLAG_X2APIC_OPT_OUT))
+	       == (DMAR_FLAG_INTR_REMAP | DMAR_FLAG_X2APIC_OPT_OUT);
+}
+
 struct dmar_entry {
 	uint16_t	type;
 	uint16_t	length;
@@ -1329,7 +1341,7 @@ int iommu_vtd_read(void)
 	iommu_record_platform(dmar->host_address_width
 			      ? dmar->host_address_width + 1u : 0u,
 			      (dmar->flags & DMAR_FLAG_INTR_REMAP) != 0,
-			      (dmar->flags & DMAR_FLAG_X2APIC_OPT_OUT) != 0);
+			      iommu_vtd_dmar_opts_out(dmar->flags));
 
 	first_unit = iommu_unit_count();
 	exact = 1;

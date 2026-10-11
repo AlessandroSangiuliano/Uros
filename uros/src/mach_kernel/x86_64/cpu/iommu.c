@@ -996,6 +996,24 @@ int iommu_decode_check(unsigned *ran, unsigned *wrong)
 	if (!entries_agree())
 		bad++;
 
+	/*
+	 * #659: the DMAR's x2APIC opt-out, which counts only beside
+	 * INTR_REMAP (Rev 5.20 §8.1): bit 1 alone is a flag nobody may read,
+	 * and the bits above are other flags.
+	 */
+	{
+		static const struct { uint8_t flags; int out; } f[] = {
+			{ 0x0, 0 }, { 0x1, 0 }, { 0x2, 0 }, { 0x3, 1 },
+			{ 0x6, 0 }, { 0x7, 1 },
+		};
+
+		for (unsigned i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
+			n++;
+			if (iommu_vtd_dmar_opts_out(f[i].flags) != f[i].out)
+				bad++;
+		}
+	}
+
 	if (ran)
 		*ran = n;
 	if (wrong)
