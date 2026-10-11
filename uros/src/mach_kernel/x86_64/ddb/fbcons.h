@@ -104,4 +104,14 @@ uint64_t fbcons_cycles(void);		/* cycles spent drawing, this boot */
 uint64_t fbcons_glyphs(void);		/* glyphs drawn, this boot */
 uint64_t fbcons_scrolls(void);		/* times the screen scrolled */
 
+/*
+ * What was drawn as the replacement glyph, ■, instead of itself (#661): code
+ * points the font has no glyph for, the first of them in *first, and the
+ * maximal subparts of bytes that were not UTF-8.  The first is a line that
+ * does not read on the screen as it does on the wire; the second is broken on
+ * both alike.
+ */
+uint32_t fbcons_no_glyph(uint32_t *first);
+uint32_t fbcons_not_utf8(void);
+
 #endif	/* _X86_64_DDB_FBCONS_H_ */

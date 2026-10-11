@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <device/fbcons_font.h>
+#include <device/fbcons_utf8.h>	/* #661 */
 #include <ddb/cons.h>
 #include <ddb/fbcons.h>
 #include <cpu/regs.h>
@@ -101,6 +102,14 @@ static uint64_t		 fb_glyphs;
 static uint64_t		 fb_scrolls;
 
 /*
+ * The UTF-8 being decoded, and what could not be drawn as itself (#661).
+ * One for the console, live and replayed alike: the bytes kept before the
+ * screen existed are drawn first, and a sequence they leave open is finished
+ * by the live bytes after them, which is the order the wire had.
+ */
+static struct fbcons_utf8 fb_utf8;
+
+/*
  * ── What was printed before there was a screen (#666) ──────────────────
  *
  * fbcons_init() cannot run before the pmap can map device memory, so every
@@ -165,6 +174,17 @@ uint64_t fbcons_glyphs(void)
 uint64_t fbcons_scrolls(void)
 {
 	return fb_scrolls;
+}
+
+uint32_t fbcons_no_glyph(uint32_t *first)
+{
+	*first = fb_utf8.first_no_glyph;
+	return fb_utf8.no_glyph;
+}
+
+uint32_t fbcons_not_utf8(void)
+{
+	return fb_utf8.not_utf8;
 }
 
 /*
@@ -287,6 +307,19 @@ static void fbcons_newline(void)
 		fbcons_scroll();	/* and it decides where the cursor lands */
 }
 
+/*
+ * A glyph where the cursor is.  Its number is the font's, not a byte's: the
+ * decoder hands over 0x1A for U+2192, which as a byte is a control code.
+ */
+static void fbcons_put(uint8_t glyph)
+{
+	if (fb_col >= fb_cols)
+		fbcons_newline();
+
+	draw_cell(glyph, fb_col, fb_row);
+	fb_col++;
+}
+
 static void fbcons_draw(uint8_t c)
 {
 	switch (c) {
@@ -318,11 +351,24 @@ static void fbcons_draw(uint8_t c)
 	if (c < 0x20)
 		return;
 
-	if (fb_col >= fb_cols)
-		fbcons_newline();
+	fbcons_put(c);
+}
 
-	draw_cell(c, fb_col, fb_row);
-	fb_col++;
+/*
+ * A byte as the console is handed it, through the decoder (#661): an ASCII
+ * byte acted on as above, and a glyph for what the bytes before it spelled.
+ */
+static void fbcons_byte(uint8_t b)
+{
+	unsigned int	out[2];
+	unsigned int	n, i;
+
+	n = fbcons_utf8_feed(&fb_utf8, b, out);
+	for (i = 0; i < n; i++)
+		if (out[i] & FBCONS_UTF8_GLYPH)
+			fbcons_put((uint8_t) out[i]);
+		else
+			fbcons_draw((uint8_t) out[i]);
 }
 
 /* Kept for fbcons_init() to draw, while there is no screen (#666). */
@@ -343,7 +389,7 @@ void fbcons_putc(char ch)
 		fbcons_keep(ch);
 		return;
 	}
-	fbcons_draw((uint8_t)ch);
+	fbcons_byte((uint8_t)ch);
 }
 
 /*
@@ -536,7 +582,7 @@ static void fbcons_early_draw(void)
 			if (drawn == kept)
 				break;
 			c = (uint8_t) fb_early[drawn++];
-			fbcons_draw(c);
+			fbcons_byte(c);
 			if (c == '\n') {
 				lines++;
 				delay(FB_EARLY_LINE_US);
