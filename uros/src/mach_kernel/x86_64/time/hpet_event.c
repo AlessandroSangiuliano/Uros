@@ -17,6 +17,7 @@
 #include <cpu/ioapic.h>
 #include <cpu/iommu.h>		/* #598: no FSB message while remapped */
 #include <cpu/lapic.h>
+#include <cpu/pci_msix.h>	/* msi_destination: eight bits, #659 */
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>		/* cpu_to_apic, #663 */
@@ -448,17 +449,38 @@ static void comparator_route(void)
  * interrupts are remapped, through the HPET's own entry instead --
  * choose_route() took FSB only where a table names the HPET -- and zero if
  * that entry could not be written.
+ *
+ * #659: and zero, not remapped, for an APIC id past eight bits, which the
+ * compatibility format cannot name: msi_destination() refuses it, where the
+ * id shifted in at bit 12 used to leave 0xFEExxxxx -- 256 made 0xFEF00000, a
+ * write to memory and no interrupt.  Remapped, the entry names the processor
+ * with all 32 bits, and the old format's words are only the base, as for an
+ * MSI slot (msi_claim_vector_to()).
  */
+static const char *fsb_refusal;	/* why it answered zero, for the WRONGs */
+
 static int fsb_compose(void)
 {
-	fsb_address = 0xFEE00000U | (broadcaster_apic << 12);
+	unsigned long long address = 0xFEE00000ULL;
+
 	fsb_data = HPET_EVENT_VECTOR;
 	fsb_remapped = 0;
-	if (!iommu_interrupts_remapped())
+	if (!iommu_interrupts_remapped()) {
+		if (!msi_destination(broadcaster_apic, &address)) {
+			fsb_refusal = "FSB message cannot name its processor "
+				      "in the old format, the apic id being "
+				      "past eight bits";
+			return 0;
+		}
+		fsb_address = (uint32_t)address;
 		return 1;
+	}
+	fsb_address = (uint32_t)address;
 	if (!iommu_remap_hpet(hpet_number(), comparator, HPET_EVENT_VECTOR,
-			      broadcaster_apic, &fsb_address, &fsb_data))
+			      broadcaster_apic, &fsb_address, &fsb_data)) {
+		fsb_refusal = "entry for its FSB message could not be written";
 		return 0;
+	}
 	fsb_remapped = 1;
 	return 1;
 }
@@ -585,12 +607,13 @@ static void hpet_ev_start(uint8_t vector)
 
 	/*
 	 * #598: an FSB route under remapping whose entry could not be written
-	 * would send a message the engine refuses -- so the pin, said.
+	 * would send a message the engine refuses -- so the pin, said.  #659:
+	 * and so would one, not remapped, to a processor the old format cannot
+	 * name; fsb_refusal says which.
 	 */
 	if (route == ROUTE_FSB && !fsb_compose()) {
-		printf("clock_event: hpet: WRONG -- comparator %u's entry for "
-		       "its FSB message could not be written; its I/O APIC pin "
-		       "instead (#598)\n", comparator);
+		printf("clock_event: hpet: WRONG -- comparator %u's %s; its I/O "
+		       "APIC pin instead (#598)\n", comparator, fsb_refusal);
 		fsb_unwritable = comparator + 1;
 		route = legacy_route(&comparator);
 	}
@@ -605,16 +628,16 @@ static void hpet_ev_start(uint8_t vector)
 	 * that driver's device has just gone silent.
 	 *
 	 * No route at all follows a probe that found one in one case only: the
-	 * probe found the FSB message, its entry could not be written (above),
-	 * and the board has no LegacyReplacement to fall back to (#598).  With
+	 * probe found the FSB message, its entry could not be written or, not
+	 * remapped, it could not name its processor (above, #659), and the
+	 * board has no LegacyReplacement to fall back to (#598).  With
 	 * neither there is no clock, so the panic stands -- naming that cause,
 	 * and not the probe.
 	 */
 	if (route == ROUTE_TAKEN && fsb_unwritable) {
-		printf("clock_event: hpet: WRONG -- comparator %u's FSB entry "
-		       "could not be written, and ISA 0 or 8 is in a driver's "
-		       "use; LegacyReplacement takes it all the same (#598)\n",
-		       fsb_unwritable - 1);
+		printf("clock_event: hpet: WRONG -- comparator %u's %s, and ISA "
+		       "0 or 8 is in a driver's use; LegacyReplacement takes it "
+		       "all the same (#598)\n", fsb_unwritable - 1, fsb_refusal);
 		route = ROUTE_LEGACY;
 		comparator = 0;
 	} else if (route == ROUTE_TAKEN) {
@@ -624,10 +647,9 @@ static void hpet_ev_start(uint8_t vector)
 		route = ROUTE_LEGACY;
 		comparator = 0;
 	} else if (route == ROUTE_NONE && fsb_unwritable) {
-		panic("clock_event: hpet: no route -- comparator %u's entry for "
-		      "its FSB message could not be written, and there is no "
-		      "LegacyReplacement to fall back to (#598)",
-		      fsb_unwritable - 1);
+		panic("clock_event: hpet: no route -- comparator %u's %s, and "
+		      "there is no LegacyReplacement to fall back to (#598)",
+		      fsb_unwritable - 1, fsb_refusal);
 	} else if (route == ROUTE_NONE) {
 		panic("clock_event: hpet: started with no route, where the "
 		      "probe had found one (#593)");
