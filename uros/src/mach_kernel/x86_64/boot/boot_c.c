@@ -5790,9 +5790,12 @@ static void iommu_selftest(void)
 				kputdec(it->wrong);
 				kputs(" wrong — ");
 				kputdec(it->named);
-				kputs(" for sources the ivrs names (");
+				kputs(" for the sources the ivrs names, a table"
+				      " per device id (");
 				kputdec(it->ioapics);
-				kputs(" i/o apic)");
+				kputs(" i/o apic, ");
+				kputdec(it->hpets);
+				kputs(" hpet)");
 				kputs(built ? " and 1 closed for every other device,"
 					      " nothing points at them yet\r\n"
 					    : " — WRONG, no frame or no room, or an"
@@ -5819,6 +5822,42 @@ static void iommu_selftest(void)
 					    : " — WRONG, an entry nobody wrote would"
 					      " be read as one\r\n");
 			}
+		}
+
+		/*
+		 * #598: and whether the HPET's FSB message could be remapped --
+		 * only through an entry of its own, which needs a table naming
+		 * the HPET, the DMAR's scope or the IVRS's special entry, for
+		 * the requester id it carries; where none does, -H under -i
+		 * takes the HPET's I/O APIC pin (time/hpet_event.c).  On every
+		 * boot, with how many comparators can send the message at all:
+		 * otherwise only a -H boot would say either.
+		 */
+		if (iommu_interrupt_tables()->engines != 0 && hpet_present()) {
+			struct hpet_comparator_caps caps;
+			unsigned fsb = 0;
+			uint16_t source;
+			int named = iommu_hpet_source(hpet_number(), &source);
+
+			for (unsigned n = 0; n < hpet_comparators(); n++) {
+				hpet_comparator_caps(n, &caps);
+				if (caps.fsb)
+					fsb++;
+			}
+			kputs("UrMach x86-64:   HPET ");
+			kputdec(hpet_number());
+			kputs(named ? " is named in the " : " is not named in the ");
+			kputs(iommu_vendor() == IOMMU_AMD ? "ivrs" : "dmar");
+			kputs(", and ");
+			kputdec(fsb);
+			kputs(" of its ");
+			kputdec(hpet_comparators());
+			kputs(" comparators can send an FSB message");
+			kputs(fsb == 0 ? " — no message to remap (#598)\r\n"
+			      : named ? " — under -H -i, through an entry of its"
+					" own (#598)\r\n"
+			      : " — under -i it could not be remapped, and -H"
+				" takes its I/O APIC pin (#598)\r\n");
 		}
 
 		/*

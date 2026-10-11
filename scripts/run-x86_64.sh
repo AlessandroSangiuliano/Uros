@@ -7,7 +7,7 @@
 # ISO on -cdrom, with a separate data disk beside it; it is now the disk
 # itself, which is the whole of what QEMU is handed (#520).
 #
-# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
+# Usage: run-x86_64.sh [--iommu intel|amd] [--hpet fsb] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
 #   run-x86_64.sh
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
@@ -702,6 +702,7 @@ fi
 IOMMU_ARGS=""
 IOMMU_NAME="none"
 KVM_ARGS=""
+HPET_ARGS=""
 SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
@@ -724,6 +725,18 @@ while :; do
 			exit 2 ;;
 		esac
 		IOMMU_NAME=$2
+		shift 2 ;;
+	--hpet)
+		# #598: an HPET whose comparators can send an FSB message, the
+		# route -H takes wherever one can.  QEMU's can only with
+		# hpet.msi=on, so without this no run here took that route, or
+		# passed it over under -i.  An option and not a pass-through,
+		# so that the merge test, which gives options, can ask for it.
+		case "${2:-}" in
+		fsb)	HPET_ARGS="-global hpet.msi=on" ;;
+		*)	echo "usage: $0 [--iommu intel|amd] [--hpet fsb] [--entry <n>] [seconds] [qemu args]" >&2
+			exit 2 ;;
+		esac
 		shift 2 ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
@@ -1091,7 +1104,7 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 QERR="$LOG.qemu-stderr"
 : > "$QERR"
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 

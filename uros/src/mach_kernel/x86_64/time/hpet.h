@@ -35,6 +35,12 @@ uint64_t hpet_hz(void);			/* 10^15 / period, rounded down */
 int hpet_counter_64(void);		/* COUNT_SIZE_CAP */
 unsigned hpet_comparators(void);	/* NUM_TIM_CAP + 1 */
 uint16_t hpet_vendor(void);
+/*
+ * The ACPI HPET table's sequence number: what the DMAR's HPET scope (its
+ * enumeration id) and the IVRS's special entry (its handle) name this block
+ * by, so what finds the requester id its FSB messages carry (#598).
+ */
+uint8_t hpet_number(void);
 int hpet_started_here(void);		/* the counter was halted and this started it */
 int hpet_legacy_found_on(void);		/* LegacyReplacement was left on (#593) */
 uint32_t hpet_comparators_found_on(void); /* left interrupting, a bit each */

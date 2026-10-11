@@ -2038,8 +2038,8 @@ int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
 
 static struct {
 	uint16_t	device;		/* the DeviceID its messages carry   */
-	uint8_t		kind;		/* IOMMU_SCOPE_IOAPIC, _HPET, _ENDPOINT */
-	uint8_t		id;		/* the I/O APIC's id, the HPET's number */
+	uint8_t		kinds;		/* 1 << IOMMU_SCOPE_*, for each kind
+					   of source sending them */
 	uint64_t	table;
 } amd_irt[AMD_IRT_TABLES];
 
@@ -2090,17 +2090,20 @@ static int amd_irt_find(uint16_t device)
 }
 
 /*
- * A table for `device' unless one has its DeviceID already: an engine named
- * in two IVHD blocks names its I/O APIC twice.  Zero when there is no room
- * or no frame.
+ * A table for `device' unless one has its DeviceID already, and `kind' --
+ * an IOMMU_SCOPE_* -- among the sources it serves.  Zero when there is no
+ * room or no frame.
  */
-static int amd_irt_add(uint16_t device, uint8_t kind, uint8_t id,
+static int amd_irt_add(uint16_t device, uint8_t kind,
 		       struct iommu_interrupt_tables *t)
 {
+	int k = amd_irt_find(device);
 	uint64_t pa;
 
-	if (amd_irt_find(device) >= 0)
+	if (k >= 0) {
+		amd_irt[k].kinds |= (uint8_t)(1u << kind);
 		return 1;
+	}
 	if (amd_irt_count == AMD_IRT_TABLES)
 		return 0;
 
@@ -2109,27 +2112,38 @@ static int amd_irt_add(uint16_t device, uint8_t kind, uint8_t id,
 		return 0;
 
 	amd_irt[amd_irt_count].device = device;
-	amd_irt[amd_irt_count].kind = kind;
-	amd_irt[amd_irt_count].id = id;
+	amd_irt[amd_irt_count].kinds = (uint8_t)(1u << kind);
 	amd_irt[amd_irt_count].table = pa;
 	amd_irt_count++;
 	return 1;
 }
 
+/*
+ * A source the IVRS names, counted by kind once for its DeviceID -- the one
+ * thing the engine tells messages apart by, and so the one a table belongs
+ * to.  Two kinds can share one: pavillion's IVRS names its HPET and its
+ * first I/O APIC both 00:14.0, and counting tables called that 1 I/O APIC of
+ * the 2 it names.  The same source named twice, by an engine in two IVHD
+ * blocks, counts once.
+ */
 static int amd_irt_source(const struct iommu_scope *s,
 			  struct iommu_interrupt_tables *t)
 {
 	uint16_t device = (uint16_t)((s->bus << 8) | (s->dev << 3) | s->func);
 	unsigned before = amd_irt_count;
+	int k = amd_irt_find(device);
 
-	if (!amd_irt_add(device, s->kind, s->enumeration_id, t))
+	if (k >= 0 && (amd_irt[k].kinds & (1u << s->kind)))
+		return 1;
+	if (!amd_irt_add(device, s->kind, t))
 		return 0;
 
-	if (amd_irt_count > before) {
+	if (amd_irt_count > before)
 		t->named++;
-		if (s->kind == IOMMU_SCOPE_IOAPIC)
-			t->ioapics++;
-	}
+	if (s->kind == IOMMU_SCOPE_IOAPIC)
+		t->ioapics++;
+	else
+		t->hpets++;
 	return 1;
 }
 
@@ -2223,7 +2237,7 @@ int iommu_amd_ir_prepare(void)
 				    != 0xFFFFFFFFu
 				    && !amd_irt_add((uint16_t)((bus << 8)
 							       | (d << 3) | f),
-						    IOMMU_SCOPE_ENDPOINT, 0, &t))
+						    IOMMU_SCOPE_ENDPOINT, &t))
 					return amd_prepare_fail(&t);
 
 	if (!iommu_amd_dte_interrupts(amd_irt_closed, 8, dte))
