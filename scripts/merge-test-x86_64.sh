@@ -76,6 +76,8 @@ WRONG=0
 #   ioapic    -Y's own line: "ioapic_race: PASS"
 #   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
+#   reach     the harness's verdict, entries for 32-bit apic ids, and a pin and an
+#             MSI-X slot seen arriving at the processor they were aimed at (#659)
 #   earlypanic  -p panics on purpose before the boot processor has its page:
 #             its message and the backtrace after it, and no protection fault
 #             in their place (#665)
@@ -83,6 +85,10 @@ WRONG=0
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
 # by GRUB before the kernel, as a firmware that hands over in it does (#659).
+# Entry 48 adds -i with engines that take x2APIC ids (--iommu intel-eim, amd-xt),
+# and 37 runs on processors 0 and 256, x2APIC mode left on by SeaBIOS, so that
+# the interrupts aimed at 256 need all 32 bits; under KVM the harness asks
+# those engines for the split irqchip.
 ENTRIES="
 0 harness
 1 harness
@@ -150,6 +156,10 @@ ENTRIES="
 46 harness - 1
 47 harness
 47 harness - 1
+48 reach --iommu_intel-eim
+48 reach --iommu_amd-xt
+37 reach --socket1-cpu_--iommu_intel-eim 1,sockets=2,cores=256,maxcpus=512
+37 reach --socket1-cpu_--iommu_amd-xt 1,sockets=2,cores=256,maxcpus=512
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -183,6 +193,14 @@ judge() {	# entry verdict log-of-the-harness full-log
 		else
 			grep -aqE 'FSB message to cpu [0-9]+ \(APIC id [0-9]+\) on vector 0x[0-9a-f]+; each' "$f"
 		fi ;;
+	# #659: the boot passed, entries for 32-bit apic ids were built, and
+	# irq 0 and the 82574L's MSI-X slot, aimed at a processor other than
+	# the boot processor's id 0 -- 0 is 0 in every format -- arrived there
+	# and nowhere else (irq_reach_selftest()).  A NOT ASKED would pass the
+	# harness and test nothing, so the two lines are asked for.
+	reach) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aq 'entries for 32-bit apic ids' "$f" &&
+		[ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ;;
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
