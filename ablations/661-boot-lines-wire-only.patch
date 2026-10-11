@@ -1,0 +1,121 @@
+Kind: ablation
+Issue: #661
+Takes out: boot.S's lines through the console -- it writes them to COM1 itself again, the higher half's two by its own putc64 and the 32-bit one not handed to the other outputs, so the screen never shows them, not even in -f's replay; caught by reading every line of the boot off the screen, entry 41 being -f, up to the replay's own line
+Screen: --entry=41
+Screen: --all-lines
+Screen: --poll=0.01
+Screen: --budget=600
+Screen: --wait-for=fbcons: -f: the
+Expect: only on the wire \| UrMach x86-64: reached 32-bit multiboot entry
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot.S b/uros/src/mach_kernel/x86_64/boot/boot.S
+index 51bed99d..d72d884a 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot.S
++++ b/uros/src/mach_kernel/x86_64/boot/boot.S
+@@ -272,26 +272,17 @@ high_entry:
+ 	 * only for the transition; C runs on this one. */
+ 	leaq	kernel_stack_top(%rip), %rsp
+ 
+-	/* #661: from here every byte goes through cons.c, as the C after it
+-	 * does (#551), and reaches every output the console has -- the screen
+-	 * and #373's zone as well as the wire.  This file wrote its own two
+-	 * lines to the port, and on a machine with no serial port they went
+-	 * nowhere.  The 32-bit line above could not be said any other way; the
+-	 * wire has it, and the other outputs are handed it here, first, which
+-	 * is its place.  msg_boot is low and still identity-mapped. */
+-	movabsq	$msg_boot, %rdi
+-	call	cons_said_already
+-	leaq	msg_long(%rip), %rdi
+-	call	cons_puts
++	leaq	msg_long(%rip), %rsi
++	call	serial_puts64
+ 
+ 	/* Proof of higher-half: print our own runtime address.  high_entry is
+ 	 * linked high, and %rip is now high, so leaq yields 0xffffffff80... */
+-	leaq	msg_hh(%rip), %rdi
+-	call	cons_puts
++	leaq	msg_hh(%rip), %rsi
++	call	serial_puts64
+ 	leaq	high_entry(%rip), %rdi
+-	call	cons_puthex64
+-	leaq	msg_crlf(%rip), %rdi
+-	call	cons_puts
++	call	serial_puthex64
++	leaq	msg_crlf(%rip), %rsi
++	call	serial_puts64
+ 
+ 	/* Hand off to C (x86_64_boot).  SysV: %edi = magic, %esi = info.
+ 	 * boot_magic/boot_info are low (.boot.data) — reach them by absolute
+@@ -307,6 +298,72 @@ hang64:
+ 	hlt
+ 	jmp	hang64
+ 
++/*
++ * putc64 — write %al to COM1, waiting for the transmit holding reg empty.
++ * Preserves %rax's caller value is NOT expected; clobbers %al only here.
++ */
++putc64:
++	pushq	%rdx
++	pushq	%rcx
++	pushq	%r8
++	movb	%al, %cl			/* stash the char */
++	movl	$CONS_THRE_SPINS, %r8d		/* bounded (#551), as serial_puts32 */
++	movw	$COM1+5, %dx			/* wait THR empty (LSR bit 5) */
++1:	inb	%dx, %al
++	testb	$0x20, %al
++	jnz	2f
++	decl	%r8d
++	jnz	1b
++	jmp	3f				/* no room: the byte is dropped */
++2:	movb	%cl, %al
++	movw	$COM1+0, %dx
++	outb	%al, %dx
++3:	popq	%r8
++	popq	%rcx
++	popq	%rdx
++	ret
++
++/*
++ * serial_puts64 — write a NUL-terminated string to COM1.  in: %rsi.
++ */
++serial_puts64:
++	pushq	%rsi
++	pushq	%rax
++1:	movb	(%rsi), %al
++	testb	%al, %al
++	jz	2f
++	call	putc64
++	incq	%rsi
++	jmp	1b
++2:	popq	%rax
++	popq	%rsi
++	ret
++
++/*
++ * serial_puthex64 — print %rdi as "0x" followed by 16 hex digits.  in: %rdi.
++ */
++serial_puthex64:
++	pushq	%rdi
++	pushq	%rcx
++	pushq	%rax
++	movb	$'0', %al ; call putc64
++	movb	$'x', %al ; call putc64
++	movl	$16, %ecx			/* 16 nibbles, most significant first */
++1:	rolq	$4, %rdi			/* bring the top nibble to the bottom */
++	movb	%dil, %al
++	andb	$0x0F, %al
++	cmpb	$9, %al
++	jbe	2f
++	addb	$('a' - 10), %al
++	jmp	3f
++2:	addb	$'0', %al
++3:	call	putc64
++	loop	1b
++	popq	%rax
++	popq	%rcx
++	popq	%rdi
++	ret
++
+ /* ------------------------------------------------------------------ */
+ 	.section .rodata, "a"
+ msg_long:
