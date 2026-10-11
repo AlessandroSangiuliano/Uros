@@ -20,16 +20,16 @@ index 41a47131..abd0b3de 100644
  	return iommu_vtd_remap_hpet(comparator, source, vector, apic_id,
  				    address, data);
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
-index e90fb2cb..c138f018 100644
+index bd9e8c0d..d9b8a432 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
-@@ -2265,8 +2265,7 @@ int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
- 	uint64_t w[2];
- 
- 	return iommu_vtd_hpet_words(comparator, source, vector, apic_id,
--				    &index, w, address, data)
--	       && vtd_irte_write(index, w);
-+				    &index, w, address, data);
- }
- 
- void iommu_vtd_forget_msi(unsigned slot)
+@@ -2270,8 +2270,7 @@ int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
+ 	 * and not naming an entry nobody wrote.
+ 	 */
+ 	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
+-				  &index, w, &a, &d)
+-	    || !vtd_irte_write(index, w))
++				  &index, w, &a, &d))
+ 		return 0;
+ 	*address = a;
+ 	*data = d;
