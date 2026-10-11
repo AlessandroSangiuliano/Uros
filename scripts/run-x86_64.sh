@@ -255,17 +255,17 @@ DEATHS=$(grep -a 'exception_no_server: terminating task' "$LOG" || true)
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
 [ -n "$GARBLED" ] && BAD=$(printf '%s\n%s' "$BAD" "$GARBLED" | sed '/^$/d')
-# #661: a character the screen drew as the replacement, because its font has
-# no glyph for it.  That line does not read on the screen as on the wire, and
-# on a machine with no serial port the screen is all there is.  The kernel
-# counts them through the boot and says the count so far, "N without a glyph",
-# in the quiet census's console line and in the report at a halt (cons_cost.c):
-# the last one in the log is the one read.
-NOGLYPH=$(grep -aoE '[0-9]+ without a glyph( \(the first U\+[0-9A-F]+\))?' "$LOG" | tail -1)
-case $NOGLYPH in
-''|0\ *) ;;
-*) BAD=$(printf '%s\n%s' "$BAD" "NO GLYPH (#661): the framebuffer drew the replacement for $NOGLYPH" | sed '/^$/d') ;;
-esac
+# #661: a line with a character the screen draws as the replacement, because
+# its font has no glyph for it.  That line does not read on the screen as on
+# the wire, and on a machine with no serial port the screen is all there is.
+# Read off the log, against the font's own table, by fbcons-no-glyph.py.
+#
+# 🔴 NOT FROM THE KERNEL'S COUNT, which is where this read it first.  The
+# kernel counts them, but says the count when the quiet census reports, and a
+# line printed after its last report was counted where nobody could read it:
+# entry 9's "⚠️", which the bench prints after the census's last word, passed.
+NOGLYPH=$(python3 "$REPO/scripts/fbcons-no-glyph.py" "$LOG" | sed 's/^/NO GLYPH (#661): line /')
+[ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
