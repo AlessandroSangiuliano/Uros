@@ -377,12 +377,19 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
  * ⚠️ And nothing here can say "required".  Every field of the feature register
  * (MMIO 0030h) is a support bit, so there is no counterpart to Intel's IRREQ
  * or EIMER to read -- zero is what the register says, not a default.
+ *
+ * #659: x2APIC ids take XTSup AND GASup.  "In systems with x2APIC enabled,
+ * software must set MMIO 0x18[XTEn]=1 and MMIO 0x18[GAEn]=1", for the 128-bit
+ * entry whose destination has 32 bits (Rev 3.11 §2.2.5.3), and GAEn is one of
+ * the control bits whose "writes ... are ignored when MMIO Offset 0030h[GASup]
+ * = 0" (MMIO 0018h, bit 17).  An engine with XTSup alone would take XTEn and
+ * keep reading four-byte entries with eight bits of destination.
  */
 void iommu_amd_interrupt_decode(uint64_t efr,
 				struct iommu_interrupt_caps *out)
 {
 	out->can_forget = 1;
-	out->x2apic = (int)AMD_EFR_XTSUP(efr);
+	out->x2apic = (int)(AMD_EFR_XTSUP(efr) && AMD_EFR_GASUP(efr));
 	out->required = 0;
 	out->x2apic_required = 0;
 }

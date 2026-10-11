@@ -798,6 +798,16 @@ static const struct decode_case decode_cases[] = {
 	{ "amd, qemu", 1, 0x29d3ULL, 1ULL << 10, 64, UPTO(6), 1, 1,
 	  { 1, 0, 0, 0 } },
 
+	/*
+	 * #659: x2APIC ids take XTSup and GASup both.  QEMU's xtsup=on adds bit
+	 * 2 to the word above, whose GASup, bit 7, is already set; the second
+	 * word clears GASup again, and with it the 128-bit entry.
+	 */
+	{ "amd, qemu with xtsup=on", 1, 0x29d7ULL, 1ULL << 10, 64, UPTO(6),
+	  1, 1, { 1, 1, 0, 0 } },
+	{ "amd, xtsup without gasup (synthetic)", 1, 0x2957ULL, 1ULL << 10,
+	  64, UPTO(6), 1, 1, { 1, 0, 0, 0 } },
+
 	/* Synthetic: the three HATS encodings no part we can reach reports. */
 	{ "amd, hats=4 levels (synthetic)", 1, 0x0ULL, 1ULL << 10,
 	  48, UPTO(4), 1, 1, { 1, 0, 0, 0 } },
