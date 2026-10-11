@@ -30,6 +30,7 @@ decl_simple_lock_data(extern, printf_lock)
 #define UART_MCR	4
 #define UART_IIR	2	/* read: interrupt id, and whether the FIFO is on */
 #define UART_LSR	5
+#define UART_SCR	7	/* scratch: the chip keeps it, and uses it for nothing */
 
 #define IIR_FIFO_ON	0xC0	/* both bits: a 16550 with a working FIFO */
 
@@ -1220,6 +1221,40 @@ int cons_getc(void)
 		cpu_pause();
 
 	return c;
+}
+
+/*
+ * Whether a UART answers at COM1 at all (#670).
+ *
+ * With none, every inb returns 0xFF, and every other register reads as an
+ * answer: LSR says the transmitter is empty and a byte is waiting, and the
+ * byte is 0xFF.  The scratch register is the one that can tell the two apart,
+ * because a chip keeps whatever is written there and an empty bus keeps
+ * nothing.  Two patterns, so that a register stuck at either one cannot pass.
+ * The same question, asked the same way, that uart.so's probe asks before it
+ * claims the port (uart_scratch_test() in servers/char_server/modules/uart.c),
+ * so the kernel and the driver mean one thing by "a UART is there".
+ *
+ * ⚠️ At boot, before the port can be handed over (#497): the scratch register
+ * is outside the window a driver claims (device_md_io_window()), and nothing
+ * else here ever writes it, so this takes no lock.
+ */
+int cons_uart_present(uint8_t *wrote, uint8_t *read)
+{
+	static const uint8_t patterns[] = { 0x55, 0xAA };
+
+	for (unsigned i = 0; i < sizeof(patterns); i++) {
+		uint8_t got;
+
+		outb(COM1 + UART_SCR, patterns[i]);
+		got = inb(COM1 + UART_SCR);
+		if (got != patterns[i]) {
+			*wrote = patterns[i];
+			*read = got;
+			return 0;
+		}
+	}
+	return 1;
 }
 
 /*

@@ -31,10 +31,22 @@
 # Usage:
 #   scripts/fbcons-readback.py [--build DIR] [--entry N] [--kvm] [--smp N]
 #                              [--wait-for TEXT] [--budget S] [--out DIR]
+#                              [--no-uart [--poll S]]
 #
 # Exit:  0  the screen's text was found in the serial log
 #        1  the screen disagreed with the log, or is blank
 #        2  the experiment could not be run (no qemu, no monitor, no boot)
+#
+# 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
+# QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
+# a -serial it was given) and an empty port reads all ones (system/ioport.c,
+# unassigned_io_read()): what pavillion, omen and OMEGA are.  There is no wire
+# to wait on or to compare with, so --wait-for is looked for ON THE SCREEN:
+# the machine runs --poll seconds, is paused, and its screen dumped and read;
+# where the text is, it stays paused, which is --freeze.  A line the screen
+# draws during -f's replay is there for a few tenths of a second, so a
+# machine that went on running while each dump was read would scroll it away
+# between two looks.  Exit 0 then means the --expect texts are on the screen.
 #
 # ⚠️ One run at a time, with the harness's own lock: two qemus on one machine
 # manufacture each other's failures (run-x86_64.sh says why).
@@ -83,26 +95,43 @@ def read_ppm(path):
         i = j
     i += 1
     w, h, _maxval = fields
+    # A dump cut short is refused here: lit_pixels() would pad it with dark
+    # pixels, and its missing rows would read as a blank part of the screen.
+    if len(data) - i < w * h * 3:
+        raise SystemExit(f"fbcons-readback: the screendump holds "
+                         f"{len(data) - i} bytes of pixels, not the "
+                         f"{w * h * 3} of a {w}x{h} screen")
     return w, h, data[i : i + w * h * 3]
 
 
-def cell_to_byte(pix, w, col, row, font_index):
+# White on black: a pixel is foreground when any of its channels is above
+# 127.  The test is made by bytes.translate() on each channel and an OR of the
+# three, in C, and not by a loop over every pixel: --no-uart reads the screen
+# again and again while the machine is paused (#670).  On a 160x50 screen the
+# loop took 0.29 s a dump and this takes 0.07 s, giving the same rows.
+_LIT = bytes(0 if v <= 127 else 1 for v in range(256))
+# Eight such flags, leftmost pixel first, back to the byte the font stores.
+_PACK = {bytes((v >> (7 - i)) & 1 for i in range(8)): v for v in range(256)}
+
+
+def lit_pixels(w, h, pix):
+    """One byte per pixel, 1 where any channel is lit."""
+    chans = [int.from_bytes(pix[k::3].translate(_LIT), "big") for k in range(3)]
+    return (chans[0] | chans[1] | chans[2]).to_bytes(w * h, "big")
+
+
+def cell_to_byte(lit, w, col, row, font_index):
     """Turn one 8x16 cell back into the byte that drew it, or None."""
     bits = []
     for gy in range(GLYPH_H):
-        b = 0
-        base = ((row * GLYPH_H + gy) * w + col * GLYPH_W) * 3
-        for gx in range(GLYPH_W):
-            o = base + gx * 3
-            # white on black: any lit channel is foreground.
-            if pix[o] > 127 or pix[o + 1] > 127 or pix[o + 2] > 127:
-                b |= 0x80 >> gx
-        bits.append(b)
+        o = (row * GLYPH_H + gy) * w + col * GLYPH_W
+        bits.append(_PACK[lit[o : o + GLYPH_W]])
     return font_index.get(tuple(bits))
 
 
 def screen_lines(ppm, font):
     w, h, pix = read_ppm(ppm)
+    lit = lit_pixels(w, h, pix)
     index = {}
     for code, g in enumerate(font):
         index.setdefault(tuple(g), code)
@@ -129,7 +158,7 @@ def screen_lines(ppm, font):
         # to exactly what the kernel emitted.
         line = bytearray()
         for c in range(cols):
-            code = cell_to_byte(pix, w, c, r, index)
+            code = cell_to_byte(lit, w, c, r, index)
             if code is None:
                 unknown += 1
                 line.append(0x3F)
@@ -171,7 +200,17 @@ def main():
                          "than once.  Matching the serial log says the panel "
                          "and the wire agree, not that the panel shows a "
                          "given line (#666)")
+    ap.add_argument("--no-uart", action="store_true",
+                    help="boot with no UART at COM1 (-serial none), as on a "
+                         "machine without a serial port: --wait-for is looked "
+                         "for on the screen, with the machine paused while "
+                         "each dump is read (#670)")
+    ap.add_argument("--poll", type=float, default=0.05,
+                    help="with --no-uart, the seconds the machine runs "
+                         "between two looks at its screen")
     a = ap.parse_args()
+    if a.no_uart and a.send is not None:
+        ap.error("--send types at the serial line, and --no-uart has none")
 
     build = os.path.realpath(a.build)
     out = a.out or build
@@ -228,7 +267,7 @@ def main():
                       f"id=ahcidisk1,format=raw",
             "-device", "ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2",
             "-vga", "std", "-display", "none",
-            "-serial", f"pipe:{fifo}",
+            "-serial", "none" if a.no_uart else f"pipe:{fifo}",
             "-monitor", f"unix:{mon},server=on,wait=off", "-no-reboot"]
     if a.kvm:
         argv.insert(1, "-enable-kvm")
@@ -268,8 +307,62 @@ def main():
             time.sleep(step)
         return False
 
+    def hmp(m, cmd=None):
+        """A monitor command, and its answer up to the next prompt: a
+        screendump is on disk when the prompt comes back."""
+        if cmd is not None:
+            m.sendall(cmd.encode() + b"\n")
+        buf = b""
+        while not buf.rstrip().endswith(b"(qemu)"):
+            chunk = m.recv(65536)
+            if not chunk:
+                raise OSError("the monitor closed")
+            buf += chunk
+        return buf
+
+    def screen_wait_for(text, budget):
+        """--no-uart: run, pause, read the screen; left paused where the
+        text is (#670)."""
+        end = time.time() + budget
+        m = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        m.settimeout(30.0)
+        while True:
+            try:
+                m.connect(mon)
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                if time.time() > end or q.poll() is not None:
+                    return False
+                time.sleep(0.05)
+        try:
+            hmp(m)				# the banner, up to the first prompt
+            last = None
+            while time.time() < end and q.poll() is None:
+                time.sleep(a.poll)
+                hmp(m, "stop")
+                hmp(m, f"screendump {ppm}")
+                raw = open(ppm, "rb").read()
+                if raw != last:
+                    last = raw
+                    if any(text in l for l in screen_lines(ppm, font)[0]):
+                        return True
+                hmp(m, "cont")
+            return False
+        finally:
+            m.close()
+
     try:
-        if not wait_for(a.wait_for, a.budget, 0.02 if a.freeze else 0.25):
+        if a.no_uart:
+            if not screen_wait_for(a.wait_for, a.budget):
+                err = (q.stderr.read() if q.poll() is not None else "").strip()
+                print(f"fbcons-readback: never saw {a.wait_for!r} on the "
+                      f"screen in {a.budget:.0f}s — with no UART the screen is "
+                      f"all there is, and it never drew that"
+                      + (f": {err}" if err else ""), file=sys.stderr)
+                return 2
+            print(f"fbcons-readback: stopped the machine on {a.wait_for!r}, "
+                  f"read off its screen: no UART (--no-uart)")
+        elif not wait_for(a.wait_for, a.budget, 0.02 if a.freeze else 0.25):
             err = (q.stderr.read() if q.poll() is not None else "").strip()
             print(f"fbcons-readback: never saw {a.wait_for!r} on the serial "
                   f"line in {a.budget:.0f}s — that says nothing about the "
@@ -277,7 +370,7 @@ def main():
                   + (f": {err}" if err else ""), file=sys.stderr)
             return 2
 
-        if a.freeze:
+        if a.freeze and not a.no_uart:
             f = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             f.settimeout(10.0)
             f.connect(mon)
@@ -301,7 +394,7 @@ def main():
         # A moment for the last lines to be drawn as well as sent -- or, with
         # --settle, long enough for a machine whose wire went quiet to write
         # whatever it is going to write on the screen alone.
-        if not a.freeze:
+        if not a.freeze and not a.no_uart:
             time.sleep(a.settle)
         open(log, "w").write(pump())
 
@@ -347,6 +440,12 @@ def main():
             return 1
         for t in a.expect:
             print(f"fbcons-readback: on screen as expected | {t}")
+
+        if a.no_uart:
+            print("fbcons-readback: PASS — read off the screen of a machine "
+                  "with no UART; comparing it with a serial log is NOT "
+                  "ASKED, there is none")
+            return 0
 
         # Every row long enough to be distinctive must be somewhere in the log.
         checked = [l.strip() for l in drawn if len(l.strip()) >= 20]
