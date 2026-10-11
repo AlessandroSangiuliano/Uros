@@ -1028,14 +1028,17 @@ echo "=== accelerator: $ACCEL ==="
 # refusal, which says more than this silently overriding them would.
 #
 # #659: and under KVM, an engine that takes x2APIC ids asks for the split
-# irqchip -- QEMU refuses intremap with the I/O APIC in the host kernel, and
-# eim=on or xtsup=on with KVM need its X2APIC_API, which only the split
-# irqchip enables (vtd_decide_config(), amdvi_sysbus_realize() in 11.1.1).
-# The plain engines keep the full one, and remap nothing under KVM, as before.
+# irqchip.  QEMU remaps interrupts only with the I/O APIC out of the host
+# kernel: under the full irqchip intremap defaults to off, and intremap=on is
+# refused (x86_iommu_realize() in hw/i386/x86-iommu.c, 11.1.1); and under the
+# split one, eim=on and xtsup=on need KVM's X2APIC_API (vtd_decide_config(),
+# amdvi_sysbus_realize()).  Decided by $ACCEL above, which reads -enable-kvm
+# and -accel wherever they came from (#567).  The plain engines keep the full
+# irqchip, and remap nothing under KVM, as before.
 if [ -n "$IOMMU_ARGS" ]; then
 	BOARD="q35"
-	case "$IOMMU_NAME:$KVM_ARGS" in
-	intel-eim:?*|amd-xt:?*)	BOARD="q35,kernel-irqchip=split" ;;
+	case "$IOMMU_NAME:$ACCEL" in
+	intel-eim:KVM*|amd-xt:KVM*)	BOARD="q35,kernel-irqchip=split" ;;
 	esac
 	case " $* " in
 	*" -machine "*|*" -M "*)	: ;;
