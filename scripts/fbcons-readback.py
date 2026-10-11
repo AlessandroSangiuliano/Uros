@@ -454,8 +454,14 @@ def main():
         🔑 And a row is judged only when two looks in a row show it.  A pause
         can fall inside a scroll, which rewrites the screen row by row, or
         inside a glyph: what that look shows is half of two lines, true for
-        a moment and in no log.  The last look is taken after --settle, the
-        boot quiet, and its rows are what stays."""
+        a moment and in no log.  So one look more is taken after the one
+        that found the text, --poll later.
+
+        🔴 The lines a look must have seen are the wire's up to that look,
+        and no further: those after it were printed while nothing looked.
+        The first shape of this let the machine run --settle seconds and
+        looked once, and with the text in the middle of a boot it asked for
+        a second and a half of lines that one look could not hold."""
         seen, stable, prev = {}, set(), set()
         looks, skipped, cols = 0, 0, None
         end = time.time() + budget
@@ -467,7 +473,7 @@ def main():
                 break
             except (FileNotFoundError, ConnectionRefusedError):
                 if time.time() > end or q.poll() is not None:
-                    return False, seen, stable, looks, skipped, cols
+                    return False, seen, stable, looks, skipped, cols, 0
                 time.sleep(0.05)
 
         def look():
@@ -494,21 +500,20 @@ def main():
                 look()
                 if text in wire:
                     hmp(m, "cont")
-                    time.sleep(a.settle)
+                    time.sleep(a.poll)
                     hmp(m, "stop")
-                    pump()
-                    stable.update(look())
-                    return True, seen, stable, looks, skipped, cols
+                    look()
+                    return True, seen, stable, looks, skipped, cols, len(wire)
                 hmp(m, "cont")
-            return False, seen, stable, looks, skipped, cols
+            return False, seen, stable, looks, skipped, cols, 0
         finally:
             m.close()
 
     def every_line():
         """--all-lines' verdict: every row two looks agreed on is in the
         log, and every line of the log was seen (#661)."""
-        found, seen, stable, looks, skipped, cols = watch(a.wait_for,
-                                                          a.budget)
+        found, seen, stable, looks, skipped, cols, upto = watch(a.wait_for,
+                                                                a.budget)
         raw = pump()
         open(log, "w").write(raw)
         if not found:
@@ -524,8 +529,9 @@ def main():
         # control code but the tab, which is drawn as spaces to the next
         # stop of eight, and cut at the screen's width where it wraps.
         missed, nlines = [], 0
-        start = serial.find(KERNEL_FIRST)
-        for w in serial[start:].split("\n")[:-1]:
+        looked = fold(raw[:upto])
+        start = looked.find(KERNEL_FIRST)
+        for w in looked[start:].split("\n")[:-1]:
             w = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", w)
             w = "".join(ch for ch in w if ch == "\t" or ord(ch) >= 0x20)
             w = w.expandtabs(8).rstrip()
