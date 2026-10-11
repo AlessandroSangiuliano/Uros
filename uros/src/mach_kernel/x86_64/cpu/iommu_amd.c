@@ -612,6 +612,30 @@ int iommu_amd_build(void)
 
 static int amd_ir_x2apic(void);
 
+/*
+ * 🔴 OFF AGAIN, every engine up to `last', when one is refused (#659).  A
+ * refusal that left IommuEn set left the engine translating and remapping
+ * through tables the kernel then counts as not in use: every device
+ * interrupt the boot routes in the old format target-aborted by entries it
+ * believes are not there.  And the engines turned on before it would keep
+ * entries of a size it may not share -- "Software must program all IOMMUs in
+ * a system to use the same size of IRTE" (Rev 3.11 §2.2.5.2).
+ */
+static void amd_engines_off(unsigned last)
+{
+	for (unsigned j = 0; j <= last && j < iommu_unit_count(); j++) {
+		const struct iommu_unit *u = iommu_unit(j);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (regs == 0)
+			continue;
+		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) =
+			*(volatile uint64_t *)(regs + AMD_REG_CONTROL)
+			& ~AMD_CTL_IOMMU_EN;
+	}
+}
+
 int iommu_amd_enable(void)
 {
 	const struct iommu_tables *t = iommu_tables();
@@ -622,8 +646,10 @@ int iommu_amd_enable(void)
 		volatile uint8_t *regs;
 		uint64_t control;
 
-		if (!u->answered || u->register_va == 0)
+		if (!u->answered || u->register_va == 0) {
+			amd_engines_off(i);
 			return 0;
+		}
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 
@@ -693,17 +719,19 @@ int iommu_amd_enable(void)
 		 * table meant to be snooped that is not would be read stale:
 		 * nothing was flushed for it.  GAEn is a bit whose writes are
 		 * ignored without GASup (#659): 128-bit entries read as four
-		 * four-byte ones would be entries nobody wrote.
+		 * four-byte ones would be entries nobody wrote.  A refusal
+		 * turns this engine off again, and every one before it.
 		 */
 		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
-		if (!(control & AMD_CTL_IOMMU_EN))
+		if (!(control & AMD_CTL_IOMMU_EN)
+		    || (amd_ir_x2apic()
+			&& (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
+			   != (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
+		    || (iommu_amd_devtab_snooped(i)
+			&& !(control & AMD_CTL_COHERENT))) {
+			amd_engines_off(i);
 			return 0;
-		if (amd_ir_x2apic()
-		    && (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
-		       != (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
-			return 0;
-		if (iommu_amd_devtab_snooped(i) && !(control & AMD_CTL_COHERENT))
-			return 0;
+		}
 
 		enabled++;
 	}
