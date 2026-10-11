@@ -26,6 +26,7 @@ Expect: <thread_doswapin\+0x
 - `Takes out:` (an ablation) or `Holds open:` (a widen patch) says in one line what the patch does.
 - `Run:` is what `scripts/run-x86_64.sh` is given after the accelerator.
 - `Expect:` is an extended regular expression, matched line by line against the run's log. There may be several, and any one match means the test caught the defect. Expectations are read only from ablation patches.
+- `With:` names a widen patch in the same directory that the patch needs to mean anything, one per line. `scripts/ablate.sh` takes it in, before the patch, when the command line did not name it. An ablation whose `Expect:` matches the fixed tree too unless its widen is applied would otherwise report CAUGHT on every boot, fixed or not (#659).
 - `Screen:` lines boot each arm with `scripts/fbcons-readback.py` instead of `run-x86_64.sh`, one argument of that script per line, written as `--option=value` so that nothing needs quoting. `Expect:` is then matched against what the script printed, and `Run:` is not needed. This is how a test is caught where there is no serial log to read, on a machine with no UART (`--no-uart`, #670):
 
 ```

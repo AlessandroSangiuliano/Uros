@@ -117,6 +117,35 @@ done
 REV=$(git -C "$REPO" rev-parse -q --verify "$BASE^{commit}") || die 2 "no revision $BASE"
 SHORT=$(git -C "$REPO" rev-parse --short "$REV")
 
+# A patch's With: lines name the widen patches it needs to mean anything, in
+# its own directory; each comes in before it, once, unless already named.  An
+# ablation whose Expect matches the fixed tree too without its widen reported
+# CAUGHT on every boot when given alone (#659).
+listed() {
+	local want=$1 p
+	shift
+	for p in "$@"; do
+		[ "$p" = "$want" ] && return 0
+	done
+	return 1
+}
+WITH=()
+for p in "${PATCHES[@]}"; do
+	while IFS= read -r w; do
+		[ -n "$w" ] || continue
+		[ -e "$(dirname "$p")/$w" ] ||
+			die 2 "$(basename "$p"): its With: names $w, which is not in $(dirname "$p")"
+		w=$(realpath "$(dirname "$p")/$w")
+		if ! listed "$w" "${WITH[@]}"; then
+			listed "$w" "${PATCHES[@]}" ||
+				echo "ablate: $(basename "$p") brings $(basename "$w") with it (With:)"
+			WITH+=("$w")
+		fi
+	done <<< "$(header "$p" With)"
+	listed "$p" "${WITH[@]}" || WITH+=("$p")
+done
+PATCHES=("${WITH[@]}")
+
 # Every patch says what it is, and the fixed arm takes only the widen ones.
 WIDENS=()
 ABLATIONS=0

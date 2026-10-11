@@ -2,6 +2,7 @@ Kind: ablation
 Issue: #603
 Takes out: the note taken after the set: it goes back before install_special_handler(), and with 603-asker-late.patch the kernel must then say a stop came late that was not
 Run: --entry 14 600 -smp 4
+With: 603-asker-late.patch
 Expect: thread_suspend: activation .* resolved [0-9]+ page faults from ring 3 between the stop being asked and the stop -- WRONG \(#603\)
 
 diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
