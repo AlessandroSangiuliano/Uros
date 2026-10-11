@@ -177,6 +177,35 @@ cons_cost_report(void)
  */
 static int	cons_ring_said;
 
+/*
+ * What the framebuffer drew as ■ instead of itself (#661), in the words the
+ * census line uses too, "N without a glyph", so that run-x86_64.sh reads the
+ * boot's last count from whichever of the two came last.  A code point the
+ * font cannot draw is a line that does not read on the screen as on the wire,
+ * which the harness fails; bytes that were not UTF-8 are as broken on the wire
+ * as here, and are only counted.
+ *
+ * ⚠️ One printf a line, never pieces: another processor's line can come
+ * between two calls, and a line carrying two writers' output fails the run on
+ * its own (#578).  And not sprintf() into a buffer, which takes a lock this
+ * report, said on the way down, must not wait for (#655).
+ */
+static void
+fbcons_replaced_report(void)
+{
+	uint32_t first;
+	uint32_t n = fbcons_no_glyph(&first);
+
+	if (n == 0)
+		printf("UrMach x86-64: console: the framebuffer drew every "
+		       "character it was handed: 0 without a glyph, %u not "
+		       "UTF-8 (#661)\n", fbcons_not_utf8());
+	else
+		printf("UrMach x86-64: console: the framebuffer drew ■ for %u "
+		       "without a glyph (the first U+%04X), %u not UTF-8 (#661)"
+		       "\n", n, first, fbcons_not_utf8());
+}
+
 void
 cons_ring_report(void)
 {
@@ -234,6 +263,7 @@ cons_ring_report(void)
 					((cyc / g) * 1000000000ULL / hz),
 			       fbcons_cols(), fbcons_rows(),
 			       (unsigned long long) fbcons_scrolls());
+		fbcons_replaced_report();
 	}
 
 	printf("UrMach x86-64: console: over this boot the ring was handed "
@@ -273,14 +303,37 @@ cons_ring_so_far(const char *lead)
 		       cons_drains(CONS_DRAIN_DEFERRED),
 		       cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
 		       cons_queued());
-	else
-		printf("%sconsole so far: ring handed over %u/%u/%u times "
-		       "(writer/tick or idle/way down), %u writers paid for "
-		       "room, %u bytes queued; framebuffer %llu glyphs, %llu "
-		       "scrolls (#567, #568)\n", lead,
-		       cons_drains(CONS_DRAIN_WRITER),
-		       cons_drains(CONS_DRAIN_DEFERRED),
-		       cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
-		       cons_queued(), (unsigned long long) fbcons_glyphs(),
-		       (unsigned long long) fbcons_scrolls());
+	else {
+		uint32_t first;
+		uint32_t n = fbcons_no_glyph(&first);
+
+		/* #661: the count run-x86_64.sh reads; see above. */
+		if (n == 0)
+			printf("%sconsole so far: ring handed over %u/%u/%u "
+			       "times (writer/tick or idle/way down), %u "
+			       "writers paid for room, %u bytes queued; "
+			       "framebuffer %llu glyphs, %llu scrolls, 0 without "
+			       "a glyph, %u not UTF-8 (#567, #568, #661)\n",
+			       lead, cons_drains(CONS_DRAIN_WRITER),
+			       cons_drains(CONS_DRAIN_DEFERRED),
+			       cons_drains(CONS_DRAIN_DOWN),
+			       cons_backpressure(), cons_queued(),
+			       (unsigned long long) fbcons_glyphs(),
+			       (unsigned long long) fbcons_scrolls(),
+			       fbcons_not_utf8());
+		else
+			printf("%sconsole so far: ring handed over %u/%u/%u "
+			       "times (writer/tick or idle/way down), %u "
+			       "writers paid for room, %u bytes queued; "
+			       "framebuffer %llu glyphs, %llu scrolls, %u "
+			       "without a glyph (the first U+%04X), %u not "
+			       "UTF-8 (#567, #568, #661)\n",
+			       lead, cons_drains(CONS_DRAIN_WRITER),
+			       cons_drains(CONS_DRAIN_DEFERRED),
+			       cons_drains(CONS_DRAIN_DOWN),
+			       cons_backpressure(), cons_queued(),
+			       (unsigned long long) fbcons_glyphs(),
+			       (unsigned long long) fbcons_scrolls(),
+			       n, first, fbcons_not_utf8());
+	}
 }
