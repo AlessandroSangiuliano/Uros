@@ -4,7 +4,7 @@ Takes out: turning a refused AMD engine off again -- the read-back's refusal ret
 Run: --iommu amd-xt --entry 48 900 -smp 4
 With: 659-widen-gaen-ignored.patch
 Expect: delivered 0 while masked and 0 once routed to vector 0x40 — WRONG
-Note: with the widen alone the engine is refused and turned off, and the boot says "interrupt remapping COULD NOT BE TURNED ON — WRONG, the engine did not turn on", as it should for an engine that ignored GAEn: the fixed arm of --ab fails on that line, and what it must not show is the Expect -- the pins and slots, routed in the old format, arrive
+Note: QEMU cannot show this, and its Run is QEMU's: Rev 3.11 says IommuEn=0 means "no upstream transactions are translated or remapped", and QEMU 11.1.1's amdvi_int_remap_msi() remaps through the device table whatever IommuEn says -- it asks only that a table is set and the entry's IV -- so under QEMU the fixed tree, which turns the engine off, loses the pins and slots as the ablated one does, and both print the Expect (on GitHub, run 38205921729: 8 of 8 each). On bare metal with an AMD engine that ignores GAEn the fixed tree's interrupts arrive; with the widen alone the boot also says "interrupt remapping COULD NOT BE TURNED ON — WRONG", as it should
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
