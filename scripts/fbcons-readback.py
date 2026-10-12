@@ -1086,21 +1086,19 @@ def main():
 
 
 if __name__ == "__main__":
-    # An OSError past main()'s own handlers, with everything given back by
-    # its finally: a report that could not be written -- stderr into a tee
-    # the same Ctrl-C killed, a terminal hung up -- or the lock that would not
-    # be taken or given back, which the run no longer held alone.  A run not
-    # made, said where it still can be, and still one whose stop, if it was
-    # asked for, is below (#661's review, ten rounds).
+    # An OSError past main()'s own handlers: a report that could not be
+    # written -- stderr into a tee the same Ctrl-C killed, a terminal hung up
+    # --, the lock that could not be made for a reason other than another
+    # run's, before anything was taken, or a file of the run's in /tmp that
+    # the final cleanup could not remove for a reason other than its being
+    # gone, which leaves the lock behind as well.  A run not made, said where
+    # it still can be, after what stdout holds, and still one whose stop, if
+    # it was asked for, is below (#661's review, eleven rounds).
     try:
         rc = main()
     except OSError as e:
         rc = 2
-        try:
-            print(f"fbcons-readback: the experiment broke: {e}",
-                  file=sys.stderr)
-        except OSError:
-            pass
+        say_last(f"fbcons-readback: the experiment broke: {e}")
     # A run asked to stop has given everything back by now, and dies by the
     # signal it was sent, so the shell that started it sees a signal and a
     # loop of readbacks ends at Ctrl-C (#661's review, eight rounds);
