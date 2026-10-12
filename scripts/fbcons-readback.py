@@ -113,30 +113,46 @@ F_DRAWN = "fbcons: -f: the "
 COM1_ONLY = "went to COM1 only; -f draws them here"
 
 
-def as_drawn(line):
-    """A line of the wire as the console draws it, fbcons_draw()'s rules:
-    \\r back to the first column, \\b back one, \\t spaces to the next stop
-    of eight and at least one, any other control code nothing (#661's
-    review, three rounds)."""
-    cells, col = [], 0
+def as_drawn(line, cols=0):
+    """A line of the wire as the console draws it: its rows on a screen
+    `cols' wide (0, one row however long), by fbcons_put() and
+    fbcons_draw()'s rules -- a glyph past the last column goes to the next
+    row first, \\r back to the row's first column, \\b back one within the
+    row, \\t spaces to the next stop of eight and at least one (across a
+    wrap, to the stop on the new row), any other control code nothing
+    (#661's review, four rounds)."""
+    rows, col = [[]], 0
 
     def put(ch):
         nonlocal col
-        cells.extend(" " * (col + 1 - len(cells)))
-        cells[col] = ch
+        if cols and col >= cols:
+            rows.append([])
+            col = 0
+        row = rows[-1]
+        row.extend(" " * (col + 1 - len(row)))
+        row[col] = ch
         col += 1
     for ch in line:
         if ch == "\r":
             col = 0
         elif ch == "\b":
-            col = max(0, col - 1)
+            if col > 0:
+                col -= 1
         elif ch == "\t":
             put(" ")
-            while col % 8:
+            while col % 8 and col != 0:
                 put(" ")
         elif ord(ch) >= 0x20:
             put(ch)
-    return "".join(cells).rstrip()
+    return ["".join(r).rstrip() for r in rows]
+
+
+# A kernel whose screen never opened says so, in one of these (#568, #567):
+# the loader gave no framebuffer, fbcons_open() refused it, or a census or a
+# halt found none drawn.
+NEVER_OPENED = re.compile(r"[^\n]*(NO usable framebuffer from the loader|"
+                          r"screen output is off|; no framebuffer \(#567\)|"
+                          r"no framebuffer was drawn)[^\n]*")
 
 
 def entry_has_f(entry):
@@ -387,7 +403,8 @@ def main():
                 [os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
                 env=env, check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (OSError, SystemExit, subprocess.CalledProcessError) as e:
+    except (OSError, SystemExit, ValueError,
+            subprocess.CalledProcessError) as e:
         print(f"fbcons-readback: the experiment could not be set up: {e}",
               file=sys.stderr)
         return 2
@@ -415,17 +432,26 @@ def main():
         fifos with it: left behind, the lock refused every later run of the
         harness until somebody removed it by hand (#661's review, three
         rounds)."""
-        print(f"fbcons-readback: the experiment could not start: {e}",
-              file=sys.stderr)
         for fd in (fd_out, fd_in):
             if fd is not None:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
         for path in (fifo + ".in", fifo + ".out"):
             try:
                 os.unlink(path)
-            except FileNotFoundError:
+            except OSError:
                 pass
-        os.rmdir(LOCK)
+        try:
+            os.rmdir(LOCK)
+        except OSError:
+            pass
+        try:
+            print(f"fbcons-readback: the experiment could not start: {e}",
+                  file=sys.stderr)
+        except OSError:
+            pass
         return 2
 
     try:
@@ -645,12 +671,20 @@ def main():
         raw = pump()
         open(log, "w").write(raw)
         if not found:
+            # Waiting for a line only a screen prints, a screen that never
+            # opened is still a blank screen (#661's review, four rounds).
+            off = NEVER_OPENED.search(raw)
+            if off:
+                print(f"fbcons-readback: THE SCREEN NEVER OPENED — "
+                      f"{off.group(0).strip()}")
+                return 1
             print(f"fbcons-readback: never saw {a.wait_for!r} on the serial "
                   f"line in {a.budget:.0f}s, after {looks} looks at the "
                   f"screen — the boot did not get there", file=sys.stderr)
             return 2
         # As the screen draws it, on this side too (#661's review).
-        serial = "\n".join(as_drawn(l) for l in fold(raw).split("\n"))
+        serial = "\n".join(r for l in fold(raw).split("\n")
+                           for r in as_drawn(l, cols))
         unknown = [l for l in stable if "\0" in l]
         only = [l for l in stable if "\0" not in l and l.strip() not in serial]
         # Each line the wire finished, as the screen draws it (as_drawn():
@@ -680,8 +714,7 @@ def main():
         if want_f and drawn_early < 0 or not want_f and com1 < 0:
             # A screen that never opened is a blank screen, not a look taken
             # too soon (#661's review, three rounds).
-            off = re.search(r"[^\n]*(screen output is off|; no framebuffer "
-                            r"\(#567\)|no framebuffer was drawn)[^\n]*", raw)
+            off = NEVER_OPENED.search(raw)
             if off:
                 print(f"fbcons-readback: THE SCREEN NEVER OPENED — "
                       f"{off.group(0).strip()}")
@@ -693,15 +726,14 @@ def main():
         if not want_f:
             start = looked.rfind("\n", 0, com1) + 1
         for w in looked[start:].split("\n")[:-1]:
-            w = as_drawn(w)
-            if not w:
+            pieces = as_drawn(w, cols)
+            if not any(pieces):
                 continue
             nlines += 1
-            distinct.add(w)
-            pieces = [w[i:i + cols].rstrip() for i in range(0, len(w), cols)]
+            distinct.add(tuple(pieces))
             if not all(p == "" or p in seen for p in pieces):
-                missed.append(w)
-        if nlines == 0:
+                missed.append("".join(pieces))
+        if nlines == 0 and not only and not unknown:
             print(f"fbcons-readback: no line of the serial log was there to "
                   f"compare, up to {a.wait_for!r}: wait for a later line",
                   file=sys.stderr)
@@ -804,7 +836,8 @@ def main():
             return 2
 
         lines, unknown, cols, rows = screen_lines(ppm, by_bitmap)
-        serial = "\n".join(as_drawn(l) for l in fold(pump()).split("\n"))
+        serial = "\n".join(r for l in fold(pump()).split("\n")
+                           for r in as_drawn(l, cols))
         drawn = [l for l in lines if l.strip()]
 
         print(f"fbcons-readback: {cols}x{rows} cells, {len(drawn)} non-blank "
@@ -814,8 +847,8 @@ def main():
 
         if not drawn:
             print("fbcons-readback: THE SCREEN IS BLANK — the kernel printed "
-                  f"{len(serial)} bytes to the serial line and drew none of "
-                  f"them")
+                  f"{serial.count(chr(10))} lines to the serial line and drew "
+                  f"none of them")
             return 1
         if unknown:
             print(f"fbcons-readback: {unknown} cells hold something that is "
