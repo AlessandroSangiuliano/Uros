@@ -702,8 +702,10 @@ int iommu_amd_enable(void)
 		 * 0x18[GAEn]=1" (Rev 3.11 §2.2.5.3): GAEn for the 128-bit
 		 * entry the tables were built with, XTEn for its 32-bit
 		 * destination.  IntCapXTEn is not set: it is for the engine's
-		 * own interrupts, and EventIntEn, which would send them, is
-		 * never set here.
+		 * own interrupts, which this kernel never asks for --
+		 * EventIntEn, which would send them, is not set here.  One a
+		 * firmware left set is kept, as is every bit of this word
+		 * enable does not name (#611).
 		 */
 		control &= ~(AMD_CTL_GA_EN | AMD_CTL_XT_EN);
 		if (amd_ir_x2apic())
