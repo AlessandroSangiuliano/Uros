@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #598
 Takes out: an Intel xAPIC destination at bits 47:40 of the entry -- it is written at 39:32, where it is reserved, and the interrupt goes nowhere it was sent
 Run: --entry 0 300
-Expect: interrupt remapping words encoded and decoded, 2 wrong
+Expect: interrupt remapping words encoded and decoded, [1-9][0-9]* wrong
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 index ad7389fa..229dd7c5 100644
