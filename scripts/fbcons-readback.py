@@ -1002,7 +1002,14 @@ def main():
 
 
 if __name__ == "__main__":
-    rc = main()
+    # A report that could not be written leaves main() past its own handlers
+    # -- stderr into a tee the same Ctrl-C killed, a terminal hung up -- with
+    # everything given back by its finally: a run not made, and still one
+    # whose stop, if it was asked for, is below (#661's review, nine rounds).
+    try:
+        rc = main()
+    except OSError:
+        rc = 2
     # A run asked to stop has given everything back by now, and dies by the
     # signal it was sent, so the shell that started it sees a signal and a
     # loop of readbacks ends at Ctrl-C (#661's review, eight rounds);
