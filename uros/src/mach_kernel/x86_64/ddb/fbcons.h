@@ -64,7 +64,8 @@ void fbcons_remember(const struct mb2_framebuffer *fb);
 void fbcons_init(void);
 
 /*
- * One character, so every writer may call it unconditionally.  Drawn once
+ * One byte, of a character or of its UTF-8 sequence (#661), so every writer
+ * may call it unconditionally.  Drawn once
  * fbcons_init() has succeeded; before that, kept for fbcons_init() to draw
  * (the first 64 KiB, #666); after an fbcons_init() that found no screen, a
  * no-op.
@@ -103,5 +104,18 @@ unsigned fbcons_rows(void);
 uint64_t fbcons_cycles(void);		/* cycles spent drawing, this boot */
 uint64_t fbcons_glyphs(void);		/* glyphs drawn, this boot */
 uint64_t fbcons_scrolls(void);		/* times the screen scrolled */
+
+/*
+ * What was drawn as the replacement glyph, ■, instead of itself (#661): code
+ * points the font has no glyph for, the first of them in *first, and the
+ * maximal subparts of bytes that were not UTF-8.  The first is a line that
+ * does not read on the screen as it does on the wire; the second is broken on
+ * both alike.
+ */
+uint32_t fbcons_no_glyph(uint32_t *first);
+uint32_t fbcons_not_utf8(void);
+
+/* The decoder against known sequences, said as a self-test line (#661). */
+void fbcons_utf8_selftest(void);
 
 #endif	/* _X86_64_DDB_FBCONS_H_ */

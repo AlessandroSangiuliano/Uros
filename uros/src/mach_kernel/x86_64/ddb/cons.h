@@ -60,6 +60,10 @@
 void cons_putc(char c);
 void cons_puts(const char *s);
 
+/* What the wire was given before this could be called: boot.S's 32-bit line,
+ * for the screen and the zone (#661). */
+void cons_said_already(const char *s);
+
 /*
  * The same write, straight to the wire, past the capture buffer (#551).  For
  * the trap path's reporting, whose one message must reach a reader when

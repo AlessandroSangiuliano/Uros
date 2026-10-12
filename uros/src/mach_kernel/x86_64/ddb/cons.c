@@ -426,8 +426,12 @@ static unsigned cons_tx_room(int may_wait)
  * outside that lock when the ring is armed, and in the caller's thread when it
  * is not, which is exactly the rule the wire follows.
  *
- * ⚠️ It also means order on the screen is order on the wire, because the
- * port's lock is what serialises both.
+ * ⚠️ Order on the screen is order on the wire only where the port's lock
+ * serialises both: the drain and the stuck port's queue draw under it, in ring
+ * order.  cons_wire_byte() draws before it takes the lock -- a byte the port
+ * refuses is still a byte said -- so with the ring off, from the trap reporter
+ * and on the way down, two processors can reach the screen in one order and
+ * the wire in the other (#661).
  *
  * There are three places a byte is handed over -- here, the drain, and the
  * queue that a stuck port throws away -- and each draws once, so no path draws
@@ -442,6 +446,21 @@ static inline void cons_said(char c)
 {
 	fbcons_putc(c);
 	ramoops_putc(c);
+}
+
+/*
+ * Bytes the wire already has, for the other outputs (#661).
+ *
+ * boot.S says its first line in 32-bit mode, where nothing in this file can
+ * be called, and writes it to the port itself.  It hands the same line here
+ * from the higher half, before anything else is said, so that the screen and
+ * #373's zone have it too, in its place.  On a machine with no serial port
+ * that line went nowhere at all, and #666's replay never had it.
+ */
+void cons_said_already(const char *s)
+{
+	for (; *s; s++)
+		cons_said(*s);
 }
 /*
  * #599: cons_tx_lock for a writer that must not wait for ever -- the ring

@@ -180,7 +180,9 @@ judge() {	# entry verdict log-of-the-harness full-log
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
-	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
+	# Its verdict line, not any "PASS": a WRONG quotes the log's line, and
+	# a line run together with "xfile_test: PASS" passed (#661's review).
+	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q '^double-panic-check: PASS' ;;
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq '<x86_64_boot+0x' "$f" &&
 		! grep -aq 'trap general protection' "$f" ;;
@@ -230,11 +232,37 @@ while read -r e v opt cpus; do
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
-		if judge "$e" "$v" "$h" "$f"; then
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
-		else
+		# #661: and no line the screen cannot draw, whoever judges the
+		# entry.  Asked of the full log itself: the harness names one as
+		# NO GLYPH only where its verdict gets that far, which neither an
+		# entry that panics before setup_main (40, 44) nor a run cut short
+		# reaches, and only the judges that ask for its verdict read it --
+		# so a panic or a restart passed with an undrawable line in
+		# exactly the messages a machine with no serial port needs most
+		# (#661's review, two rounds).  A check that cannot run is said as
+		# such.  For an entry its judge passed, what it found goes into the
+		# log the verdict points at -- which for 40 and 44 the harness's own
+		# verdict never reached -- and before the verdict, on which
+		# ci/job.sh copies that log.
+		ng_rc=0
+		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
+		if ! judge "$e" "$v" "$h" "$f"; then
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v): $h"
 			WRONG=$((WRONG + 1))
+		elif [ $ng_rc -ne 0 ]; then
+			# One line, the last, which says why: ci/job.sh reads the
+			# verdict a line at a time.
+			why=$(printf '%s\n' "$ng" | tail -n 1)
+			[ -n "$why" ] || why="nothing said on its output"
+			printf 'NO GLYPH (#661): the check could not run (exit %s): %s\n' "$ng_rc" "$why" >> "$h"
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
+			WRONG=$((WRONG + 1))
+		elif [ -n "$ng" ]; then
+			printf '%s\n' "$ng" | sed 's/^/NO GLYPH (#661): line /' >> "$h"
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
+			WRONG=$((WRONG + 1))
+		else
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
 		fi
 	done
 done <<< "$ENTRIES"

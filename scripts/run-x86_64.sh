@@ -255,6 +255,27 @@ DEATHS=$(grep -a 'exception_no_server: terminating task' "$LOG" || true)
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
 [ -n "$GARBLED" ] && BAD=$(printf '%s\n%s' "$BAD" "$GARBLED" | sed '/^$/d')
+# #661: a line with a character the screen draws as the replacement, because
+# its font has no glyph for it.  That line does not read on the screen as on
+# the wire, and on a machine with no serial port the screen is all there is.
+# Read off the log, against the font's own table, by fbcons-no-glyph.py.
+#
+# 🔴 NOT FROM THE KERNEL'S COUNT, which is where this read it first.  The
+# kernel counts them, but says the count when the quiet census reports, and a
+# line printed after its last report was counted where nobody could read it:
+# entry 9's "⚠️", which the bench prints after the census's last word, passed.
+#
+# 🔴 And its exit status is read, not only what it printed: through a pipe it
+# was lost, and a check that could not read the table printed nothing, which
+# passed (#661's review).  It says why on the one line it prints.
+NOGLYPH_RC=0
+NOGLYPH=$(python3 "$REPO/scripts/fbcons-no-glyph.py" "$LOG") || NOGLYPH_RC=$?
+if [ "$NOGLYPH_RC" -ne 0 ]; then
+	NOGLYPH="NO GLYPH (#661): the check could not run (exit $NOGLYPH_RC): $(printf '%s\n' "$NOGLYPH" | tail -n 1)"
+else
+	NOGLYPH=$(printf '%s\n' "$NOGLYPH" | sed '/^$/d; s/^/NO GLYPH (#661): line /')
+fi
+[ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -1356,6 +1377,16 @@ fi
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+
+# 🔴 What is appended below starts on a line of its own.  The readers of the
+# log -- double-panic-check.sh, fbcons-no-glyph.py -- take a line that begins
+# with qemu's header or "=== run conditions" for the end of the guest's output,
+# and a guest whose last line had no newline, cut off by the kill, glued the
+# header to it: the readers went on into the harness's own lines, "⚠️ THE CLOCK
+# MOVED" among them (#661's review).
+# Counted with wc -l, which a NUL as the last byte cannot hide the way it
+# vanishes from a command substitution (#661's review, two rounds).
+[ -s "$LOG" ] && [ "$(tail -c 1 "$LOG" | wc -l)" -eq 0 ] && printf '\n' >> "$LOG"
 
 # qemu's own messages, after everything the guest said (#613).  The header is
 # what the readers below and double-panic-check.sh take for the end of the

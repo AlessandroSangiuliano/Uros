@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <device/fbcons_font.h>
+#include <device/fbcons_utf8.h>	/* #661 */
 #include <ddb/cons.h>
 #include <ddb/fbcons.h>
 #include <cpu/regs.h>
@@ -101,6 +102,16 @@ static uint64_t		 fb_glyphs;
 static uint64_t		 fb_scrolls;
 
 /*
+ * The UTF-8 being decoded, and what could not be drawn as itself (#661).
+ * One for the console, live and replayed alike: the bytes kept before the
+ * screen existed are drawn first, and a sequence they leave open is finished
+ * by the live bytes after them, which is the order the wire had -- unless
+ * bytes between the two were not kept, past FB_EARLY_SIZE, and then
+ * fbcons_early_draw() closes it first.
+ */
+static struct fbcons_utf8 fb_utf8;
+
+/*
  * ── What was printed before there was a screen (#666) ──────────────────
  *
  * fbcons_init() cannot run before the pmap can map device memory, so every
@@ -165,6 +176,20 @@ uint64_t fbcons_glyphs(void)
 uint64_t fbcons_scrolls(void)
 {
 	return fb_scrolls;
+}
+
+uint32_t fbcons_no_glyph(uint32_t *first)
+{
+	uint32_t n = fb_utf8.no_glyph;
+
+	barrier();		/* the count, then the first it names: #661 */
+	*first = fb_utf8.first_no_glyph;
+	return n;
+}
+
+uint32_t fbcons_not_utf8(void)
+{
+	return fb_utf8.not_utf8;
 }
 
 /*
@@ -287,6 +312,19 @@ static void fbcons_newline(void)
 		fbcons_scroll();	/* and it decides where the cursor lands */
 }
 
+/*
+ * A glyph where the cursor is.  Its number is the font's, not a byte's: the
+ * decoder hands over 0x1A for U+2192, which as a byte is a control code.
+ */
+static void fbcons_put(uint8_t glyph)
+{
+	if (fb_col >= fb_cols)
+		fbcons_newline();
+
+	draw_cell(glyph, fb_col, fb_row);
+	fb_col++;
+}
+
 static void fbcons_draw(uint8_t c)
 {
 	switch (c) {
@@ -318,11 +356,24 @@ static void fbcons_draw(uint8_t c)
 	if (c < 0x20)
 		return;
 
-	if (fb_col >= fb_cols)
-		fbcons_newline();
+	fbcons_put(c);
+}
 
-	draw_cell(c, fb_col, fb_row);
-	fb_col++;
+/*
+ * A byte as the console is handed it, through the decoder (#661): an ASCII
+ * byte acted on as above, and a glyph for what the bytes before it spelled.
+ */
+static void fbcons_byte(uint8_t b)
+{
+	unsigned int	out[2];
+	unsigned int	n, i;
+
+	n = fbcons_utf8_feed(&fb_utf8, b, out);
+	for (i = 0; i < n; i++)
+		if (out[i] & FBCONS_UTF8_GLYPH)
+			fbcons_put((uint8_t) out[i]);
+		else
+			fbcons_draw((uint8_t) out[i]);
 }
 
 /* Kept for fbcons_init() to draw, while there is no screen (#666). */
@@ -343,7 +394,90 @@ void fbcons_putc(char ch)
 		fbcons_keep(ch);
 		return;
 	}
-	fbcons_draw((uint8_t)ch);
+	fbcons_byte((uint8_t)ch);
+}
+
+/*
+ * The decoder against sequences whose answer is known (#661), at every boot
+ * and before anything is drawn with it.  On a state of its own: the console's
+ * is the screen's, and a test that left a sequence open in it would break the
+ * first character drawn after.
+ *
+ * The cases are the ones the decoder has to tell apart.  The em dash, which
+ * the font has no glyph for and an alias gives one, and is why this exists;
+ * U+2192, a glyph whose number is a control code's; a code point the font
+ * cannot draw, and the first of them kept; and broken bytes, replaced one
+ * maximal subpart at a time -- an overlong form and a surrogate, three each,
+ * since their second byte is out of the first's range (Table 3-7), and a
+ * sequence an ASCII byte cut short, one and the byte.
+ */
+#define G	FBCONS_UTF8_GLYPH
+#define R	(FBCONS_UTF8_GLYPH | FBCONS_FONT_REPLACEMENT)
+
+static const struct {
+	const char	*in;
+	unsigned int	 want[4];	/* what is drawn, then zero */
+	unsigned int	 no_glyph;	/* and the counts after it */
+	unsigned int	 first;
+	unsigned int	 not_utf8;
+} fb_utf8_cases[] = {
+	{ "\xe2\x80\x94",	{ G | 0xc4 },		0, 0, 0 },	/* — */
+	{ "\xe2\x86\x92",	{ G | 0x1a },		0, 0, 0 },	/* → */
+	{ "\xc3\xa9",		{ G | 0x82 },		0, 0, 0 },	/* é */
+	{ "\xc2\xa0",		{ G | 0xff },		0, 0, 0 },	/* nbsp */
+	{ "A\t\n",		{ 'A', '\t', '\n' },	0, 0, 0 },
+	{ "\xe2\x9a\xa0",	{ R },			1, 0x26a0, 0 },	/* ⚠ */
+	{ "\xf0\x9f\x98\x80",	{ R },			1, 0x1f600, 0 },
+	{ "\xe0\x80\x80",	{ R, R, R },		0, 0, 3 },	/* overlong */
+	{ "\xed\xa0\x80",	{ R, R, R },		0, 0, 3 },	/* surrogate */
+	{ "\xe2\x80" "A",	{ R, 'A' },		0, 0, 1 },	/* cut short */
+	{ "\x94",		{ R },			0, 0, 1 },	/* alone */
+};
+
+#undef G
+#undef R
+
+void fbcons_utf8_selftest(void)
+{
+	unsigned int	nc = sizeof(fb_utf8_cases) / sizeof(fb_utf8_cases[0]);
+	unsigned int	i, j, k, n, due, got[8], out[2];
+
+	for (i = 0; i < nc; i++) {
+		struct fbcons_utf8	 u = { 0 };
+		const char		*p;
+		int			 same;
+
+		n = 0;
+		for (p = fb_utf8_cases[i].in; *p; p++) {
+			k = fbcons_utf8_feed(&u, (unsigned char) *p, out);
+			for (j = 0; j < k && n < 8; j++)
+				got[n++] = out[j];
+		}
+		for (due = 0; due < 4 && fb_utf8_cases[i].want[due]; due++)
+			;
+		same = n == due && u.need == 0 &&
+		       u.no_glyph == fb_utf8_cases[i].no_glyph &&
+		       u.first_no_glyph == fb_utf8_cases[i].first &&
+		       u.not_utf8 == fb_utf8_cases[i].not_utf8;
+		for (j = 0; same && j < n; j++)
+			same = got[j] == fb_utf8_cases[i].want[j];
+		if (same)
+			continue;
+		cons_printf("UrMach x86-64: fbcons: the UTF-8 decoder drew case "
+			    "%u of %u as %u glyphs or bytes, the first %x, "
+			    "where %u were due, the first %x; %u without a glyph "
+			    "(the first %x) and %u not UTF-8, where %u (%x) and "
+			    "%u were — WRONG (#661)\n",
+			    i, nc, n, n ? got[0] : 0, due,
+			    fb_utf8_cases[i].want[0], u.no_glyph,
+			    u.first_no_glyph, u.not_utf8,
+			    fb_utf8_cases[i].no_glyph, fb_utf8_cases[i].first,
+			    fb_utf8_cases[i].not_utf8);
+		return;
+	}
+	cons_printf("UrMach x86-64: fbcons: the UTF-8 decoder drew all %u "
+		    "cases as the font's table and Unicode's maximal subparts "
+		    "say (#661)\n", nc);
 }
 
 /*
@@ -536,7 +670,7 @@ static void fbcons_early_draw(void)
 			if (drawn == kept)
 				break;
 			c = (uint8_t) fb_early[drawn++];
-			fbcons_draw(c);
+			fbcons_byte(c);
 			if (c == '\n') {
 				lines++;
 				delay(FB_EARLY_LINE_US);
@@ -544,8 +678,17 @@ static void fbcons_early_draw(void)
 		}
 
 	fb_early_closed = 1;
-	fb_ready = 1;
 	offered = fb_early_len;
+	/*
+	 * #661: bytes were offered past those kept, and a sequence the last
+	 * kept byte left open was finished among them -- the wire had it
+	 * whole.  It is closed here, while nothing else draws, and not by the
+	 * first live byte, which would draw a ■ for it and count it as not
+	 * UTF-8 in every report after; the screen says what it lost below.
+	 */
+	if (paced && offered > drawn)
+		fb_utf8.need = 0;
+	fb_ready = 1;
 	glyphs = fb_glyphs - glyphs;	/* read, not inferred from the bytes */
 
 	if (!paced) {

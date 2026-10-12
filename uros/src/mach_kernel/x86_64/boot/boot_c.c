@@ -8603,6 +8603,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	user_reachable_selftest();
 	ring3_selftest();
 	cons_selftest();
+	fbcons_utf8_selftest();		/* #661 */
 	ksym_selftest();
 	ioapic_madt_selftest();
 	freq_census();
