@@ -1378,6 +1378,14 @@ fi
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
 
+# 🔴 What is appended below starts on a line of its own.  The readers of the
+# log -- double-panic-check.sh, fbcons-no-glyph.py -- take a line that begins
+# with qemu's header or "=== run conditions" for the end of the guest's output,
+# and a guest whose last line had no newline, cut off by the kill, glued the
+# header to it: the readers went on into the harness's own lines, "⚠️ THE CLOCK
+# MOVED" among them (#661's review).
+[ -s "$LOG" ] && [ -n "$(tail -c 1 "$LOG")" ] && printf '\n' >> "$LOG"
+
 # qemu's own messages, after everything the guest said (#613).  The header is
 # what the readers below and double-panic-check.sh take for the end of the
 # guest's output.
