@@ -230,11 +230,20 @@ while read -r e v opt cpus; do
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
-		if judge "$e" "$v" "$h" "$f"; then
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
-		else
+		# #661: and no line the screen cannot draw, whoever judges the
+		# entry.  The harness names one as NO GLYPH in its own verdict,
+		# which only the 'harness' judge reads: an entry judged by its own
+		# lines -- a panic, a restart -- passed with an undrawable line in
+		# exactly the messages a machine with no serial port needs most
+		# (#661's review).
+		if ! judge "$e" "$v" "$h" "$f"; then
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v): $h"
 			WRONG=$((WRONG + 1))
+		elif grep -aq 'NO GLYPH (#661)' "$h"; then
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
+			WRONG=$((WRONG + 1))
+		else
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
 		fi
 	done
 done <<< "$ENTRIES"
