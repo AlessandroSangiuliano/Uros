@@ -179,11 +179,13 @@ static int	cons_ring_said;
 
 /*
  * What the framebuffer drew as ■ instead of itself (#661), in the words the
- * census line uses too, "N without a glyph", so that run-x86_64.sh reads the
- * boot's last count from whichever of the two came last.  A code point the
- * font cannot draw is a line that does not read on the screen as on the wire,
- * which the harness fails; bytes that were not UTF-8 are as broken on the wire
- * as here, and are only counted.
+ * census line uses too, "N without a glyph".  For the reader of a log, and for
+ * 661-em-dash-no-glyph, which catches its ablation by this count: the harness
+ * does not read it.  run-x86_64.sh judges every line of the log against the
+ * font's table (scripts/fbcons-no-glyph.py), because a count taken at the
+ * last report never saw a line printed after it -- entry 9's warning sign.
+ * Bytes that were not UTF-8 are as broken on the wire as here, and are only
+ * counted.
  *
  * ⚠️ One printf a line, never pieces: another processor's line can come
  * between two calls, and a line carrying two writers' output fails the run on
@@ -307,7 +309,7 @@ cons_ring_so_far(const char *lead)
 		uint32_t first;
 		uint32_t n = fbcons_no_glyph(&first);
 
-		/* #661: the count run-x86_64.sh reads; see above. */
+		/* #661: the count above, for the reader; the harness reads the log. */
 		if (n == 0)
 			printf("%sconsole so far: ring handed over %u/%u/%u "
 			       "times (writer/tick or idle/way down), %u "
