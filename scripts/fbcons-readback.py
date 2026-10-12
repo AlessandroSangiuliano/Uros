@@ -225,6 +225,10 @@ def lock_owner():
     return (st.st_dev, st.st_ino, st.st_ctime_ns)
 
 
+class NotOurLock(Exception):
+    """The lock was not the run's any more when the run ended."""
+
+
 def give_lock_back(mine):
     """The lock removed only while it is still the one this run made, and
     whether it was: one removed by hand and taken again -- by run-x86_64.sh,
@@ -1075,13 +1079,15 @@ def main():
             except FileNotFoundError:
                 pass
         # Two qemus on one machine manufacture each other's failures, so a
-        # run whose lock was taken from it is not made, whatever it found.
+        # run whose lock was taken from it is not made, whatever it found --
+        # raised, since a finally cannot change what the try already returned,
+        # and every mode but plain's PASS returns from inside it (#661's
+        # review, twelve rounds).
         if not give_lock_back(mine):
-            say_last(f"fbcons-readback: the lock was not this run's any more "
-                     f"when it ended -- removed by hand, perhaps taken by "
-                     f"another run since ({LOCK}): left as it is, and the run "
-                     f"did not hold the machine alone")
-            rc = 2
+            raise NotOurLock(f"the lock was not this run's any more when it "
+                             f"ended -- removed by hand, perhaps taken by "
+                             f"another run since ({LOCK}): left as it is, and "
+                             f"the run did not hold the machine alone")
     return rc
 
 
@@ -1091,12 +1097,14 @@ if __name__ == "__main__":
     # --, the lock that could not be made for a reason other than another
     # run's, before anything was taken, or a file of the run's in /tmp that
     # the final cleanup could not remove for a reason other than its being
-    # gone, which leaves the lock behind as well.  A run not made, said where
-    # it still can be, after what stdout holds, and still one whose stop, if
-    # it was asked for, is below (#661's review, eleven rounds).
+    # gone, which leaves the lock behind as well; and NotOurLock, the lock
+    # taken from the run, which only a raise gets past a try's return.  A run
+    # not made, said where it still can be, after what stdout holds, and
+    # still one whose stop, if it was asked for, is below (#661's review,
+    # twelve rounds).
     try:
         rc = main()
-    except OSError as e:
+    except (OSError, NotOurLock) as e:
         rc = 2
         say_last(f"fbcons-readback: the experiment broke: {e}")
     # A run asked to stop has given everything back by now, and dies by the
