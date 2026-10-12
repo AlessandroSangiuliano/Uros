@@ -1018,6 +1018,8 @@ if __name__ == "__main__":
     # status into Python's 120.
     asked = signal.sigpending() & STOP
     for stream in (sys.stdout, sys.stderr):
+        if stream is None:		# closed when the run was started
+            continue
         try:
             stream.flush()
         except OSError:
