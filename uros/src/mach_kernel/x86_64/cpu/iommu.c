@@ -3555,8 +3555,12 @@ static unsigned irta_check(unsigned *ran)
  * is not the comparator's entry -- would reach only the bare metal.  AMD's
  * HPET entry is iommu_amd_remap_entry()'s, the same as every MSI-X slot's,
  * and its message is the old format's base with the vector as the data, the
- * entry naming the processor (fsb_compose(), #659): both run under QEMU
- * already.
+ * entry naming the processor (fsb_compose(), #659): both are what every
+ * MSI-X slot's runs under QEMU.  The HPET's own entry is not: it is written
+ * only where the IVRS names an HPET, and QEMU's names only the I/O APIC
+ * (hw/i386/acpi-build.c in 11.1.1).  Pavillion's names one, and #598's box 8
+ * ran it there (10/10/2026) in the 32-bit format; in the 128-bit one no HPET
+ * entry has been written anywhere yet.
  *
  * #659: and in x2APIC mode, EIME set, where an id past eight bits fits the
  * destination and the same id with EIME clear is refused, not cut; and 0xFF,
