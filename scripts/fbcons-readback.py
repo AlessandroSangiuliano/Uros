@@ -71,8 +71,14 @@
 #
 # ⚠️ Under TCG.  The bare-metal image under KVM, paused every 10 ms from the
 # kernel's first line, had drawn nothing on its screen after ten minutes;
-# unpaused it reached the quiet census in seconds.  Why is not known: what a
-# pause does to a KVM guest's clocks is the first place to look.
+# unpaused it reached the quiet census in seconds.  QEMU's and Linux's sources
+# say why, though no run here has measured it: under KVM the 8254 lives in the
+# host's kernel, and at every cont QEMU writes it back (KVM_SET_PIT2), which
+# loads each channel's count again and starts it from nothing.  A countdown
+# longer than one run slice never ends, and the kernel's self-tests wait on
+# 8254 countdowns of 20 and 50 ms, with no bound, before the screen exists
+# (#679).  TCG's 8254 counts on QEMU's virtual clock, which stops with the
+# machine, so there a pause is invisible.
 #
 # --cdrom boots an image instead of the harness's disk: the one made for bare
 # metal (#595), whose GRUB has no serial terminal and whose kernel has -f, so
@@ -458,7 +464,9 @@ def main():
         paused before it: there is nothing to look at, and under KVM a pause
         every 10 ms kept SeaBIOS and GRUB from ever handing over (20 minutes,
         49 MB of the guest's memory touched), where the same image booted
-        unpaused in seconds.
+        unpaused in seconds: GRUB calibrates the TSC on a 55 ms countdown of
+        the 8254, which every cont starts again, as the header's ⚠️ says of
+        the kernel's (read in GRUB's sources, not measured).
 
         🔑 And a row is judged only when two looks in a row show it.  A pause
         can fall inside a scroll, which rewrites the screen row by row, or
