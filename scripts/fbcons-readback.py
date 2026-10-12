@@ -182,8 +182,9 @@ NEVER_OPENED = re.compile(r"[^\n]*(NO usable framebuffer from the loader|"
 STOP = set()
 
 
-def stop_asked():
-    """The stop the run was sent, in the words it says it with, or None.
+def stop_asked(cont=True):
+    """The stop the run was sent, in the words it says it with, or None;
+    with cont false, TERM, HUP and INT only.
 
     🔴 And a stop it was continued from: SIGCONT, blocked with the others
     and pending once the run runs again (a Ctrl-Z and fg, a STOP and a
@@ -194,13 +195,13 @@ def stop_asked():
     eleven rounds).  What it saw may no longer say what the machine did, so
     it is a run not made -- even where the machine stood paused by the run
     itself, which this does not tell apart -- and the end of the script does
-    not die by it.  One before the machine exists is dropped (main())."""
+    not die by it.  One before the machine is started is dropped (main())."""
     pending = signal.sigpending()
     asked = pending & STOP
     if asked:
         return "stopped by " + " and ".join(
             sorted(signal.Signals(sig).name for sig in asked))
-    if signal.SIGCONT in pending:
+    if cont and signal.SIGCONT in pending:
         return ("stopped and continued (SIGCONT): its waits are the wall "
                 "clock's, and the time it was stopped may have passed for them "
                 "and not for the machine, so what it saw may no longer say "
@@ -208,11 +209,11 @@ def stop_asked():
     return None
 
 
-def stop_if_asked():
+def stop_if_asked(cont=True):
     """A run asked to stop leaves from here, the way every other end does:
     a SystemExit, which the run's own handlers turn into 2 and its finally
     into a clean exit; the end of the script then dies by the signal."""
-    asked = stop_asked()
+    asked = stop_asked(cont)
     if asked:
         raise SystemExit(asked)
 
@@ -557,11 +558,10 @@ def main():
                 [os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
                 env=env, check=True, preexec_fn=child_signals,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # A stop and continue before there is a machine has shortened no
-        # wait the verdict rests on: dropped, not reported (#661's review,
-        # twelve rounds).
-        signal.sigtimedwait({signal.SIGCONT}, 0)
-        stop_if_asked()
+        # TERM, HUP and INT: a stop and continue before there is a machine
+        # has shortened no wait the verdict rests on, and is dropped just
+        # before qemu starts (#661's review, twelve and thirteen rounds).
+        stop_if_asked(cont=False)
     except (OSError, SystemExit, ValueError, subprocess.SubprocessError) as e:
         # The lock first: a print to a pipe or a terminal the same signal
         # took away fails, and left it behind (#661's review, eight rounds).
@@ -659,6 +659,11 @@ def main():
         fcntl.fcntl(fd_out, 1031, 1 << 20)	# F_SETPIPE_SZ: a whole boot
         fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
         parent = os.getpid()
+        # A stop and continue so far is dropped: there is no machine yet,
+        # and none of the waits the verdict rests on has begun.  Here and not
+        # after the disk, which left the fifos' few milliseconds, where one
+        # still ended the run (#661's review, thirteen rounds).
+        signal.sigtimedwait({signal.SIGCONT}, 0)
         q = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.PIPE, text=True,
