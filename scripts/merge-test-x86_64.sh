@@ -231,15 +231,23 @@ while read -r e v opt cpus; do
 		f="$OUT/$tag-full.log"
 		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
 		# #661: and no line the screen cannot draw, whoever judges the
-		# entry.  The harness names one as NO GLYPH in its own verdict,
-		# which only the 'harness' judge reads: an entry judged by its own
-		# lines -- a panic, a restart -- passed with an undrawable line in
+		# entry.  Asked of the full log itself: the harness names one as
+		# NO GLYPH only where its verdict gets that far, which neither an
+		# entry that panics before setup_main (40, 44) nor a run cut short
+		# reaches, and only the judges that ask for its verdict read it --
+		# so a panic or a restart passed with an undrawable line in
 		# exactly the messages a machine with no serial port needs most
-		# (#661's review).
+		# (#661's review, two rounds).  A check that cannot run is said as
+		# such.
+		ng_rc=0
+		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
 		if ! judge "$e" "$v" "$h" "$f"; then
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v): $h"
 			WRONG=$((WRONG + 1))
-		elif grep -aq 'NO GLYPH (#661)' "$h"; then
+		elif [ $ng_rc -ne 0 ]; then
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (the no-glyph check could not run: ${ng//[()]/}): $h"
+			WRONG=$((WRONG + 1))
+		elif [ -n "$ng" ]; then
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
 			WRONG=$((WRONG + 1))
 		else
