@@ -45,8 +45,11 @@
 #                              [--cdrom ISO] [--all-lines [--poll S]]
 #
 # Exit:  0  the screen's text was found in the serial log
-#        1  the screen disagreed with the log, or is blank
-#        2  the experiment could not be run (no qemu, no monitor, no boot)
+#        1  the screen disagreed with the log -- a row the log does not have,
+#           or, with --all-lines, a line of the log no look saw -- or is blank
+#        2  the experiment could not be run: no qemu, no monitor, no boot, a
+#           monitor or a screendump that broke under --all-lines, which is
+#           not given with --kvm either
 #
 # 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
 # QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
@@ -62,12 +65,17 @@
 # 🔑 --all-lines IS EVERY LINE OF A BOOT, not the last screenful (#661).  One
 # screendump shows what is on the panel at the end, and the rows that scrolled
 # away before it were never compared with anything.  So the screen is looked
-# at every --poll seconds from the start, the machine paused while each look
-# is read, as --no-uart does, until --wait-for is on the wire; every row ever
-# seen is kept, each must be in the log, and each line of the log must have
-# been seen, whole, on some look.  A line no look caught is named: drawn and
-# scrolled away between two looks, or never drawn, which a shorter --poll
-# tells apart.
+# at every --poll seconds from the kernel's first line on the wire, the
+# machine paused while each look is read, as --no-uart does, until --wait-for
+# is on the wire; every row two looks in a row agreed on must be in the log,
+# and each line of the log must have been seen, whole, on some look -- from
+# the kernel's first line with -f, which draws what was printed before the
+# screen existed, and without it from the line saying that went to COM1 only.
+# A line no look caught is named: drawn and scrolled away between two looks,
+# or never drawn, which a shorter --poll tells apart.  A line is matched by
+# its text and not by where it was: one printed twice is credited by either
+# copy and a wrapped tail by any equal row, so what is counted is distinct
+# lines (#661's review).
 #
 # ⚠️ Under TCG.  The bare-metal image under KVM, paused every 10 ms from the
 # kernel's first line, had drawn nothing on its screen after ten minutes;
@@ -285,8 +293,9 @@ def main():
     ap.add_argument("--all-lines", action="store_true",
                     help="look at the screen through the whole boot, until "
                          "--wait-for is on the wire, and require every row "
-                         "seen to be in the log and every line of the log to "
-                         "have been seen (#661)")
+                         "two looks agreed on to be in the log and every line "
+                         "of the log to have been seen (#661); under TCG, "
+                         "the header says why")
     ap.add_argument("--cdrom", default=None,
                     help="boot this image instead of the harness's disk -- "
                          "the bare-metal one (#595); --entry is then its "
@@ -297,6 +306,11 @@ def main():
     if a.all_lines and (a.no_uart or a.send is not None or a.freeze):
         ap.error("--all-lines compares the whole boot with the serial line, "
                  "and is not given with --no-uart, --send or --freeze")
+    if a.all_lines and a.kvm:
+        ap.error("--all-lines stops the machine between looks, and under KVM "
+                 "every resume starts the in-kernel 8254's countdowns again, "
+                 "so a boot waiting on one never gets past it (the header's "
+                 "warning, #679): run it under TCG")
 
     build = os.path.realpath(a.build)
     out = a.out or build
@@ -528,8 +542,16 @@ def main():
     def every_line():
         """--all-lines' verdict: every row two looks agreed on is in the
         log, and every line of the log was seen (#661)."""
-        found, seen, stable, looks, skipped, cols, upto = watch(a.wait_for,
-                                                                a.budget)
+        # The instrument breaking is not the screen disagreeing: a monitor
+        # that closed or timed out, or a screendump cut short, is a run that
+        # could not be made (#661's review).
+        try:
+            found, seen, stable, looks, skipped, cols, upto = watch(a.wait_for,
+                                                                    a.budget)
+        except (OSError, SystemExit) as e:
+            print(f"fbcons-readback: the looks could not go on: {e}",
+                  file=sys.stderr)
+            return 2
         raw = pump()
         open(log, "w").write(raw)
         if not found:
@@ -540,20 +562,26 @@ def main():
         serial = fold(raw)
         unknown = [l for l in stable if "\0" in l]
         only = [l for l in stable if "\0" not in l and l.strip() not in serial]
-        # Each line the wire finished, as the screen draws it: no escape
-        # sequence (a terminal's, which this console does not have), no
-        # control code but the tab, which is drawn as spaces to the next
-        # stop of eight, and cut at the screen's width where it wraps.
-        missed, nlines = [], 0
+        # Each line the wire finished, as the screen draws it: no control
+        # code but the tab, which is drawn as spaces to the next stop of
+        # eight -- an escape is dropped and what follows it drawn, as this
+        # console does, having no terminal's sequences -- and cut at the
+        # screen's width where it wraps.
+        missed, nlines, distinct = [], 0, set()
         looked = fold(raw[:upto])
         start = looked.find(KERNEL_FIRST)
+        # Without -f the screen starts at the line that says what went to
+        # COM1 only: the lines before it were never meant to be drawn.
+        com1 = looked.find("went to COM1 only; -f draws them here", start)
+        if com1 >= 0:
+            start = looked.rfind("\n", 0, com1) + 1
         for w in looked[start:].split("\n")[:-1]:
-            w = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", w)
             w = "".join(ch for ch in w if ch == "\t" or ord(ch) >= 0x20)
             w = w.expandtabs(8).rstrip()
             if not w:
                 continue
             nlines += 1
+            distinct.add(w)
             pieces = [w[i:i + cols].rstrip() for i in range(0, len(w), cols)]
             if not all(p == "" or p in seen for p in pieces):
                 missed.append(w)
@@ -583,10 +611,12 @@ def main():
                 print(f"  only on the wire | {l}")
         if only or missed or unknown:
             return 1
-        print(f"fbcons-readback: PASS — every one of the {nlines} lines of the "
-              f"serial log from the kernel's first was seen on the screen, "
-              f"and every one of the {len(stable)} rows two looks agreed on "
-              f"is in the log")
+        print(f"fbcons-readback: PASS — every one of the {len(distinct)} "
+              f"distinct lines of the serial log ({nlines} lines) from "
+              f"{'the line saying what went to COM1 only' if com1 >= 0 else 'the kernel' + chr(39) + 's first'} "
+              f"was seen on the screen, a line printed more than once credited "
+              f"by any of its copies, and every one of the {len(stable)} rows "
+              f"two looks agreed on is in the log")
         return 0
 
     try:
