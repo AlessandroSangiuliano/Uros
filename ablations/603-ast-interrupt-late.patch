@@ -4,15 +4,14 @@ Holds open: the AST interrupt's handler does nothing, so the copy of a remote ac
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-index 63fe121e..189af149 100644
+index acedc379..7477b9e7 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-@@ -382,8 +382,6 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+@@ -340,7 +340,6 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
  static void ipi_ast_handler(struct trap_frame *frame)
  {
  	(void) frame;
--	if (!ABLATE_603_IPI_EMPTY)
--		ast_check();
+-	ast_check();
  	lapic_eoi();
  }
  
