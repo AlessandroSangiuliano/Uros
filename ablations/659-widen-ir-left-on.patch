@@ -1,0 +1,25 @@
+Kind: widen
+Issue: #659
+Holds open: an engine a firmware left remapping -- this kernel's own -i sequence turns remapping on in every Intel engine just before the boot without -i looks, and its bookkeeping is reset, as if someone else had -- so that the boot without -i finds IRES set, which QEMU never leaves
+Run: --iommu intel --entry 0 300 -smp 1
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 731eec9e..707bbd14 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2450,6 +2450,15 @@ unsigned iommu_vtd_ir_found_on(void)
+  */
+ void iommu_vtd_ir_off_inherited(void)
+ {
++	/*
++	 * widen 659-widen-ir-left-on: a firmware that left remapping on --
++	 * this kernel's own -i sequence standing in for its, then forgotten
++	 * as this kernel's -- since QEMU never leaves one on.
++	 */
++	if (iommu_vtd_ir_enable() != 0)
++		for (unsigned j = 0; j < IOMMU_MAX_UNITS; j++)
++			vtd_remapping[j] = 0;
++
+ 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+ 		const struct iommu_unit *u = iommu_unit(i);
+ 		volatile uint8_t *regs =
