@@ -11,7 +11,9 @@
 #
 # Run by hand with `ablate`, every job takes fixes out instead: scripts/ablate.sh
 # --ab with the patches of ablations/ named, for a defect only some runners
-# show -- #603's showed only on the AMD EPYC 9V45 under KVM (#656).
+# show -- #603's showed only on the AMD EPYC 9V45 under KVM (#656).  Or with
+# `sweep`, the jobs share out the patches and run each once, the ablated arm
+# alone: whether every patch still applies, builds and is caught (#643).
 #
 # ⚠️ schedule and workflow_dispatch run only from a workflow file on the default
 # branch, master, and whether this file lives there is the repository owner's
@@ -50,6 +52,10 @@ on:
         description: "With ablate: boots per arm and accelerator in each job (empty: 3)"
         type: string
         required: false
+      sweep:
+        description: "Each patch once instead of the merge test, shared out among the jobs: all (every ablation with an Expect: line) or patch names (empty: no sweep)"
+        type: string
+        required: false
   push:
     branches:
       - epic/v0.3.0-x86-64    # the branch EPIC below names
@@ -75,6 +81,8 @@ jobs:
       modes: ${{ steps.plan.outputs.modes }}
       ablate: ${{ steps.plan.outputs.ablate }}
       boots: ${{ steps.plan.outputs.boots }}
+      sweep: ${{ steps.plan.outputs.sweep }}
+      jobs: ${{ steps.plan.outputs.jobs }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,6 +101,7 @@ jobs:
           MODE: ${{ inputs.mode }}
           ABLATE: ${{ inputs.ablate }}
           BOOTS: ${{ inputs.boots }}
+          SWEEP: ${{ inputs.sweep }}
         run: |
           # Which toolchain builds and boots: ours, from Arch, in a container,
           # or Ubuntu's own, GCC and qemu several versions older -- both side
@@ -121,13 +130,27 @@ jobs:
           case "$ABLATE" in
           *[!A-Za-z0-9._\ ,-]*) echo "::error::ablate names patches of ablations/, not '$ABLATE'"; exit 1 ;;
           esac
+          case "$SWEEP" in
+          *[!A-Za-z0-9._\ ,-]*) echo "::error::sweep is all or names patches of ablations/, not '$SWEEP'"; exit 1 ;;
+          esac
           boots=${BOOTS:-3}
           case "$boots" in
           ''|*[!0-9]*) echo "::error::boots is a number of boots, not '$boots'"; exit 1 ;;
           esac
+          # A sweep replaces the merge test and an A/B alike, and boots each
+          # patch once.  Every patch is planned here, and the last job's share
+          # asked for, so that a patch ablate.sh refuses, or more jobs than
+          # patches, stops the run before the runners start.
+          if [ -n "$SWEEP" ]; then
+            if [ -n "$ABLATE$ENTRIES$ROUNDS$BOOTS" ]; then
+              echo "::error::sweep boots each patch once, in place of the merge test and an A/B: leave entries, rounds, ablate and boots empty"
+              exit 1
+            fi
+            scripts/ci/job.sh --dry-run --no-install --sweep "$SWEEP"
+            scripts/ci/job.sh --dry-run --no-install --sweep "$SWEEP" --share "$jobs/$jobs" > /dev/null
           # An A/B replaces the merge test: what it boots is its patches'
           # Run: line, so the merge test's two inputs would mean nothing.
-          if [ -n "$ABLATE" ]; then
+          elif [ -n "$ABLATE" ]; then
             if [ -n "$ENTRIES$ROUNDS" ]; then
               echo "::error::entries and rounds choose the merge test's boots, and ablate replaces the merge test: leave them empty"
               exit 1
@@ -148,6 +171,8 @@ jobs:
             echo "modes=$modes"
             echo "ablate=$ABLATE"
             echo "boots=$boots"
+            echo "sweep=$SWEEP"
+            echo "jobs=$jobs"
           } >> "$GITHUB_OUTPUT"
 
   boot:
@@ -207,13 +232,17 @@ jobs:
           ENTRIES: ${{ needs.plan.outputs.entries }}
           ABLATE: ${{ needs.plan.outputs.ablate }}
           BOOTS: ${{ needs.plan.outputs.boots }}
+          SWEEP: ${{ needs.plan.outputs.sweep }}
+          SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
           KVM: ${{ steps.kvm.outputs.available }}
         run: |
           kvm=()
           if [ "$KVM" = yes ]; then
             kvm=(--device /dev/kvm)
           fi
-          if [ -n "$ABLATE" ]; then
+          if [ -n "$SWEEP" ]; then
+            what=(--sweep "$SWEEP" --share "$SHARE")
+          elif [ -n "$ABLATE" ]; then
             what=(--ablate "$ABLATE" --boots "$BOOTS")
           else
             what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
@@ -237,12 +266,16 @@ jobs:
           ENTRIES: ${{ needs.plan.outputs.entries }}
           ABLATE: ${{ needs.plan.outputs.ablate }}
           BOOTS: ${{ needs.plan.outputs.boots }}
+          SWEEP: ${{ needs.plan.outputs.sweep }}
+          SHARE: ${{ matrix.job }}/${{ needs.plan.outputs.jobs }}
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q gcc binutils cmake ninja-build bison flex \
             python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
             iproute2 psmisc gdb
-          if [ -n "$ABLATE" ]; then
+          if [ -n "$SWEEP" ]; then
+            what=(--sweep "$SWEEP" --share "$SHARE")
+          elif [ -n "$ABLATE" ]; then
             what=(--ablate "$ABLATE" --boots "$BOOTS")
           else
             what=(--rounds "$ROUNDS" ${ENTRIES:+--entries "$ENTRIES"})
