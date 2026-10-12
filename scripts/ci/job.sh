@@ -64,7 +64,7 @@
 # Exit status: 0 every boot as it should be -- with --ablate, every ablated boot
 # caught and every fixed boot passed; with --sweep, every patch caught · 1 at
 # least one boot WRONG, not caught or failed · 2 the command line is wrong, or a
-# patch does not apply · 3 the job
+# patch does not apply -- with the merge test, any patch of ablations/ · 3 the job
 # could not boot, or could not read its boots: the packages, the configure or
 # the build failed, the build had a warning, a round or the A/B did not report
 # every boot it was meant to, a boot's log was not where the merge test puts
@@ -392,6 +392,7 @@ else
 		echo "job:   entry $e${opt:+ (${opt//_/ })}${cpus:+ -smp $cpus}, judged by '$v'"
 	done <<< "$PLAN"
 	echo "job: rows: $CSV; logs of WRONG boots: $OUT/failed/"
+	echo "job: and every patch of ablations/ asked whether it still applies to the tree (scripts/ablate.sh --check)"
 fi
 if [ $DRY = 1 ]; then
 	echo "job: dry run: nothing installed, built or booted"
@@ -624,6 +625,28 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9][^ ]*) (\(([^)]*)\) )?-- (as it should be|WRONG) \(([^)]*)\)(: (.*))?$'
 END_RE='^merge-test: ([0-9]+) wrong$'
 
+# Every patch of ablations/ asked whether it still applies to this tree (#643).
+# A merge that moves the code under a patch rots it, and #661's merge rotted
+# 666-early-not-drawn with nothing to say so until a sweep asked, three days
+# later.  A rotted patch is named, and fails the job once its boots are done.
+scratch=$(mktemp -d) || die 3 "cannot create a scratch directory"
+CHECK=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --check "$REPO"/ablations/*.patch 2>&1)
+CHECK_RC=$?
+rm -rf "$scratch"
+NPATCHES=$(ls "$REPO"/ablations/*.patch | wc -l)
+ROTTED=$(sed -n 's/^ablate: \([^ ]*\) NO LONGER APPLIES.*/\1/p' <<< "$CHECK" | sort -u | paste -sd' ')
+if [ $CHECK_RC != 0 ] && [ -z "$ROTTED" ]; then
+	printf '%s\n' "$CHECK" | tail -n 20 >&2
+	die 3 "ablate.sh --check failed (status $CHECK_RC) without naming a patch"
+fi
+if [ -n "$ROTTED" ]; then
+	echo "job: ablations: patches that no longer apply to $TREE -- regenerate them: $ROTTED"
+	echo "rotted:   $ROTTED" >> "$OUT/job.txt"
+else
+	echo "job: ablations: all $NPATCHES patches still apply to $TREE"
+	echo "patches:  all $NPATCHES of ablations/ still apply" >> "$OUT/job.txt"
+fi
+
 echo "$HEADER" > "$CSV"
 BOOTS=0
 WRONG=0
@@ -679,6 +702,8 @@ for w in "${WRONGS[@]}"; do
 done
 [ $UNFOUND = 0 ] || echo "job: $UNFOUND boot(s) left no log under the name merge-test gives it: see the rows' log column" >&2
 [ ${#MALFORMED[@]} = 0 ] || echo "job: ${#MALFORMED[@]} row(s) with a comma inside a field were not written: see job.txt" >&2
+[ -z "$ROTTED" ] || echo "job: ablations: no longer apply: $ROTTED" >&2
 [ $WRONG = 0 ] || exit 1
 [ $SHORT = 0 ] && [ $UNFOUND = 0 ] && [ ${#MALFORMED[@]} = 0 ] || exit 3
+[ -z "$ROTTED" ] || exit 2
 exit 0
