@@ -29,7 +29,11 @@
 # does.
 #
 # Usage:  scripts/fbcons-no-glyph.py LOG
-# Exit:   0, whatever it found; 2 when the table or the log cannot be read.
+# Exit:   0, whatever it found; 2 when it could not read: the table, the log,
+#         or a log without the kernel's first line, which leaves nothing to
+#         read.  Then its one line of output says why, and run-x86_64.sh fails
+#         the run for it -- a check that cannot run must not pass by printing
+#         nothing, which is what it did when the harness read only its output.
 
 import importlib.util, os, re, sys
 
@@ -44,19 +48,28 @@ def main():
         print("usage: fbcons-no-glyph.py LOG", file=sys.stderr)
         return 2
     sys.dont_write_bytecode = True		# nothing left in scripts/
-    spec = importlib.util.spec_from_file_location(
-        "fbcons_readback", os.path.join(REPO, "scripts/fbcons-readback.py"))
-    rb = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(rb)
-    table = rb.load_map(os.path.join(REPO, rb.FONT_H))
+    # The parser's own refusals are SystemExit, which "except Exception"
+    # would let through: caught by name, with whatever else goes wrong in it.
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "fbcons_readback",
+            os.path.join(REPO, "scripts/fbcons-readback.py"))
+        rb = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rb)
+        table = rb.load_map(os.path.join(REPO, rb.FONT_H))
+    except (Exception, SystemExit) as e:
+        print(f"fbcons-no-glyph: the font's table could not be read: {e}")
+        return 2
     try:
         text = open(sys.argv[1], "rb").read().decode("utf-8", errors="replace")
     except OSError as e:
-        print(f"fbcons-no-glyph: {e}", file=sys.stderr)
+        print(f"fbcons-no-glyph: {e}")
         return 2
     start = text.find(rb.KERNEL_FIRST)
     if start < 0:
-        return 0
+        print(f"fbcons-no-glyph: no \"{rb.KERNEL_FIRST}\" in the log, so no "
+              f"line of it was read")
+        return 2
     first = text.count("\n", 0, start) + 1
     for n, line in enumerate(text[start:].split("\n"), first):
         if APPENDED.match(line):

@@ -264,7 +264,17 @@ GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#5
 # kernel counts them, but says the count when the quiet census reports, and a
 # line printed after its last report was counted where nobody could read it:
 # entry 9's "⚠️", which the bench prints after the census's last word, passed.
-NOGLYPH=$(python3 "$REPO/scripts/fbcons-no-glyph.py" "$LOG" | sed 's/^/NO GLYPH (#661): line /')
+#
+# 🔴 And its exit status is read, not only what it printed: through a pipe it
+# was lost, and a check that could not read the table printed nothing, which
+# passed (#661's review).  It says why on the one line it prints.
+NOGLYPH_RC=0
+NOGLYPH=$(python3 "$REPO/scripts/fbcons-no-glyph.py" "$LOG") || NOGLYPH_RC=$?
+if [ "$NOGLYPH_RC" -ne 0 ]; then
+	NOGLYPH="NO GLYPH (#661): the check could not run (exit $NOGLYPH_RC): $(printf '%s\n' "$NOGLYPH" | tail -n 1)"
+else
+	NOGLYPH=$(printf '%s\n' "$NOGLYPH" | sed '/^$/d; s/^/NO GLYPH (#661): line /')
+fi
 [ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
