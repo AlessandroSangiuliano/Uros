@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #661
-Takes out: the em dash's alias in the font's table -- the font has no glyph for U+2014, so every em dash the kernel and the tests print is drawn as the replacement, counted, and the census line says how many and that the first was U+2014; run-x86_64.sh fails such a boot as NO GLYPH
+Takes out: the em dash's alias in the font's table -- the font has no glyph for U+2014, so every em dash the kernel and the tests print is drawn as the replacement, counted, and the census line says how many and that the first was U+2014, which is what catches it; run-x86_64.sh's line-by-line check (fbcons-no-glyph.py) cannot read a table without U+2014 and fails the run for that, since 98194286, in the harness's verdict, which ablate.sh does not read
 Run: --entry 0 300 -smp 4
 Expect: [1-9][0-9]* without a glyph \(the first U\+2014\)
 

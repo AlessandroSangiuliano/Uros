@@ -7,6 +7,8 @@ Screen: --poll=0.01
 Screen: --budget=600
 Screen: --wait-for=fbcons: -f: the
 Expect: only on the wire \| UrMach x86-64: reached 32-bit multiboot entry
+Accel: tcg
+Note: under TCG only: --all-lines stops the machine between looks, and under KVM every resume starts the in-kernel 8254's countdowns again, so the boot never reaches its screen (fbcons-readback.py's header, #679); the tool refuses --all-lines with --kvm, and ablate.sh boots only what Accel: names, since #659's
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot.S b/uros/src/mach_kernel/x86_64/boot/boot.S
 index 51bed99d..d72d884a 100644
