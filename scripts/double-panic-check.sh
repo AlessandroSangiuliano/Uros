@@ -12,7 +12,8 @@
 #      panic at once, this one is cpu N (#599)", the same N twice -- and no
 #      line that starts one and does not finish it;
 #   2. the console's final copy, whole and once, after the message and before
-#      the first backtrace (#567, #568);
+#      the first backtrace (#567, #568): the framebuffer's line, the glyphs'
+#      line where a framebuffer was drawn (#661), and the ring's;
 #   3. one whole backtrace header per processor, each processor once;
 #   4. no line after it that carries a piece of one of these and is not it
 #      whole: that is two outputs run together.  A whole line of some other
@@ -39,6 +40,7 @@ function wrong(why) {
 BEGIN {
 	msg = "^panic\\(cpu [0-9]+\\): double_panic: two processors panic at once, this one is cpu [0-9]+ \\(#599\\)$"
 	fb = "^UrMach x86-64: console: (the framebuffer drew [0-9]+ glyphs in [0-9]+ cycles( = [0-9]+ ns a glyph)? on a [0-9]+x[0-9]+ screen, [0-9]+ scrolls( — NOT ASKED for the time, no calibrated TSC)? \\(#568\\)|no framebuffer was drawn on this boot — COM1 was the only output there was \\(#568\\))$"
+	glyph = "^UrMach x86-64: console: the framebuffer drew (every character it was handed: 0 without a glyph|■ for [0-9]+ without a glyph \\(the first U\\+[0-9A-F]+\\)), [0-9]+ not UTF-8 \\(#661\\)$"
 	ring = "^UrMach x86-64: console: over this boot the ring was handed over [0-9]+ times by the thread that printed, [0-9]+ by a tick or an idle processor, [0-9]+ on the way down; [0-9]+ writers paid for room, [0-9]+ bytes are still queued \\(#567\\)$"
 	hdr = "^  cpu [0-9]+ backtrace \\(addr2line for file and line\\):$"
 	frame = "^    0x[0-9a-f]+( <[^<>]+>)?$"
@@ -69,7 +71,8 @@ done { next }
 	}
 	if (!at)
 		next
-	if ($0 ~ fb) { nfb++; if (nhdr) late++; next }
+	if ($0 ~ fb) { nfb++; if (index($0, "no framebuffer") == 0) drawn++; if (nhdr) late++; next }
+	if ($0 ~ glyph) { nglyph++; if (nhdr) late++; next }
 	if ($0 ~ ring) { nring++; if (nhdr) late++; next }
 	if ($0 ~ hdr) {
 		id = $2
@@ -114,8 +117,8 @@ END {
 		wrong("a panic message names two processors")
 	if (cut)
 		wrong(sprintf("%d lines start a panic message and do not finish it, the first: %s", cut, firstcut))
-	if (nfb != 1 || nring != 1)
-		wrong(sprintf("the console final copy came %d and %d times (framebuffer, ring), once each wanted", nfb, nring))
+	if (nfb != 1 || nring != 1 || nglyph != (drawn ? 1 : 0))
+		wrong(sprintf("the console final copy came %d, %d and %d times (framebuffer, glyphs, ring), once each wanted, the glyphs only where a framebuffer was drawn", nfb, nglyph, nring))
 	if (late)
 		wrong("the console final copy came after a backtrace had started")
 	if (nhdr != want)
