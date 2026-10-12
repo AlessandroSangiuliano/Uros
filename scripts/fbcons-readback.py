@@ -187,17 +187,20 @@ def stop_asked():
     stopped passed for its sleeps, its budgets and its monitor's timeouts,
     and not -- or not as much -- for the machine: a settle, or the --poll
     between the two looks a row needs, came out as nothing (#661's review,
-    eleven rounds).  What it saw no longer says what the machine did, so it
-    is a run not made, and the end of the script does not die by it."""
+    eleven rounds).  What it saw may no longer say what the machine did, so
+    it is a run not made -- even where the machine stood paused by the run
+    itself, which this does not tell apart -- and the end of the script does
+    not die by it.  One before the machine exists is dropped (main())."""
     pending = signal.sigpending()
     asked = pending & STOP
     if asked:
         return "stopped by " + " and ".join(
             sorted(signal.Signals(sig).name for sig in asked))
     if signal.SIGCONT in pending:
-        return ("stopped and continued (SIGCONT): its waits counted the time "
-                "it was stopped as time the machine ran, so what it saw no "
-                "longer says what the machine did -- run it again")
+        return ("stopped and continued (SIGCONT): its waits are the wall "
+                "clock's, and the time it was stopped may have passed for them "
+                "and not for the machine, so what it saw may no longer say "
+                "what the machine did -- run it again")
     return None
 
 
@@ -550,6 +553,10 @@ def main():
                 [os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
                 env=env, check=True, preexec_fn=child_signals,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # A stop and continue before there is a machine has shortened no
+        # wait the verdict rests on: dropped, not reported (#661's review,
+        # twelve rounds).
+        signal.sigtimedwait({signal.SIGCONT}, 0)
         stop_if_asked()
     except (OSError, SystemExit, ValueError, subprocess.SubprocessError) as e:
         # The lock first: a print to a pipe or a terminal the same signal
