@@ -6,16 +6,16 @@ Run: --entry 31 1200 -smp 4
 Expect: names the processor sending it
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-index 99c01d4e..b2a7c3c9 100644
+index ad7cd115..a817fbdb 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-@@ -337,11 +337,10 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+@@ -329,11 +329,10 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
  	 * lock to send nothing.  ablations/638-strike-unpinned.patch strikes
  	 * the bit with preemption on again.
  	 */
 -	shootdown_widen();		/* before deciding: a move is harmless */
 -	disable_preemption();
- 	mask &= ~(1ULL << (percpu_apic_id() & 63));
+ 	mask &= ~(1ULL << cpu_number());
 +	if (mask != 0)
 +		shootdown_widen();	/* between deciding and sending */
  	ipi_call_targets(mask, fn, arg);

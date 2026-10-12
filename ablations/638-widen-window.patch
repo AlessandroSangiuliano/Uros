@@ -4,11 +4,11 @@ Holds open: a shootdown's window between deciding which processor it is on and a
 Run: --entry 31 1200 -smp 4
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-index 55d4b36c..99c01d4e 100644
+index 06500d3b..ad7cd115 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-@@ -191,6 +191,22 @@ uint64_t ipi_calls_served(uint32_t apic_id)
- 	return answer_count_of(&served, apic_id);
+@@ -184,6 +184,22 @@ uint64_t ipi_calls_served(unsigned cpu)
+ 	return answer_count_of(&served, cpu);
  }
  
 +volatile int shootdown_widen_armed;
@@ -30,16 +30,16 @@ index 55d4b36c..99c01d4e 100644
  void ipi_call_others(void (*fn)(void *), void *arg)
  {
  	unsigned targets = smp_online_count() - 1;
-@@ -321,6 +337,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+@@ -313,6 +329,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
  	 * lock to send nothing.  ablations/638-strike-unpinned.patch strikes
  	 * the bit with preemption on again.
  	 */
 +	shootdown_widen();		/* before deciding: a move is harmless */
  	disable_preemption();
- 	mask &= ~(1ULL << (percpu_apic_id() & 63));
+ 	mask &= ~(1ULL << cpu_number());
  	ipi_call_targets(mask, fn, arg);
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.h b/uros/src/mach_kernel/x86_64/cpu/ipi.h
-index 6417541e..5fab8777 100644
+index 24407126..72af1675 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/ipi.h
 +++ b/uros/src/mach_kernel/x86_64/cpu/ipi.h
 @@ -114,6 +114,28 @@ void ipi_call_others(void (*fn)(void *), void *arg);
@@ -72,10 +72,10 @@ index 6417541e..5fab8777 100644
   * Ask one processor to look at its asynchronous work.  Returns at once --
   * there is nothing to wait for, and waiting would be the caller blocking on
 diff --git a/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c b/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c
-index cfbf2d8d..4ece2c15 100644
+index 8aa648ab..7d3b06d3 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c
-@@ -400,7 +400,7 @@ shoot_pages_fini(uint32_t n)
+@@ -402,7 +402,7 @@ shoot_pages_fini(uint32_t n)
  static void
  shoot_arm_window(int on)
  {
@@ -85,10 +85,10 @@ index cfbf2d8d..4ece2c15 100644
  
  static void
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index 8e56e4cb..e9eaccf9 100644
+index c9ed9bfc..d5e851a8 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -114,6 +114,7 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
+@@ -114,6 +114,7 @@ uint64_t tlb_flushes_served(unsigned cpu)
  static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
  				     uint64_t using)
  {
