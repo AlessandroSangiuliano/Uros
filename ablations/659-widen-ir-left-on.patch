@@ -1,7 +1,7 @@
 Kind: widen
 Issue: #659
 Holds open: an engine a firmware left remapping -- this kernel's own -i sequence turns remapping on in every Intel engine just before the boot without -i looks, and its bookkeeping is reset, as if someone else had -- so that the boot without -i finds IRES set, which QEMU never leaves
-Run: --iommu intel --entry 0 300 -smp 1
+Run: --iommu intel-eim --entry 0 300 -smp 1
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 index 731eec9e..707bbd14 100644
