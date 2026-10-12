@@ -21,7 +21,10 @@
 #      the message and the halt -- and counted.
 #
 # Prints one line, PASS, WRONG or NOT ASKED; exits 0, 1 or 2.  A boot that
-# never posed the question -- one processor, interrupts off -- is NOT ASKED.
+# never posed the question -- one processor, interrupts off -- is NOT ASKED,
+# and so is a log whose every part is whole from a kernel before #661, whose
+# drawn framebuffer has no glyphs line to count: it says no UTF-8 decoder
+# line at boot either.
 #
 #   ./scripts/double-panic-check.sh LOG [processors]
 #
@@ -113,20 +116,20 @@ END {
 		exit 2
 	}
 	# #661: a kernel from before the glyphs line has no decoder to say it
-	# drew with, and no glyphs line to count; its log is not asked about
-	# that, rather than called WRONG for it -- and not passed either, so a
-	# kernel that lost both lines is not passed by their absence.
-	if (drawn && !utf8 && nglyph == 0) {
-		printf "double-panic-check: NOT ASKED — the framebuffer was drawn and no UTF-8 decoder line (#661) is in this log: a kernel from before it, whose console final copy has no glyphs line to count\n"
-		exit 2
-	}
+	# drew with, and no glyphs line to count.  Every other part is judged
+	# as before, and a WRONG is WRONG; if nothing else is, the log is not
+	# asked about the glyphs line rather than called WRONG for it -- and
+	# not passed either, so a kernel that lost both lines is not passed by
+	# their absence (the review of #661, two rounds: the first answer left at
+	# once and judged nothing else).
+	old = (drawn && !utf8 && nglyph == 0)
 	if (whole != 1)
 		wrong(sprintf("%d whole panic messages, one wanted", whole))
 	if (mixed)
 		wrong("a panic message names two processors")
 	if (cut)
 		wrong(sprintf("%d lines start a panic message and do not finish it, the first: %s", cut, firstcut))
-	if (nfb != 1 || nring != 1 || nglyph != (drawn ? 1 : 0))
+	if (nfb != 1 || nring != 1 || nglyph != (drawn && !old ? 1 : 0))
 		wrong(sprintf("the console final copy came %d, %d and %d times (framebuffer, glyphs, ring), once each wanted, the glyphs only where a framebuffer was drawn", nfb, nglyph, nring))
 	if (late)
 		wrong("the console final copy came after a backtrace had started")
@@ -138,6 +141,10 @@ END {
 		wrong(sprintf("%d lines after the message carry a piece of one of its parts and are not it, the first: %s", other, firstother))
 	if (bad)
 		exit 1
+	if (old) {
+		printf "double-panic-check: NOT ASKED — every part judged is whole, but the framebuffer was drawn and no UTF-8 decoder line (#661) is in this log: a kernel from before it, whose console final copy has no glyphs line to count\n"
+		exit 2
+	}
 	printf "double-panic-check: PASS — one whole panic message, the console final copy whole after it, %d whole backtraces for %d processors, nothing run together (%d whole lines from processors not yet stopped)\n", nhdr, want, alive + 0
 	exit 0
 }'
