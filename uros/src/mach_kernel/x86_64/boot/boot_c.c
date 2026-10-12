@@ -6103,6 +6103,36 @@ static void iommu_selftest(void)
 						    "\r\n");
 				}
 			}
+		} else if (iommu_vendor() == IOMMU_INTEL) {
+			/*
+			 * #659: without -i every pin and MSI-X slot below is
+			 * sent in the old format, and an engine left remapping
+			 * blocks that format when EIME is set or CFIS clear
+			 * (VT-d 5.20 §5.1.4) -- the state a firmware that hands
+			 * over in x2APIC mode leaves, having turned remapping on
+			 * with EIME first (SDM 13.12.7).  Turned off, then read
+			 * from the engines' status, not from this kernel.
+			 */
+			unsigned on;
+
+			iommu_turn_off_inherited_remapping();
+			on = iommu_engines_remapping();
+			kputs("UrMach x86-64:   no -i: interrupt remapping ");
+			if (on != 0) {
+				kputs("still ON in ");
+				kputdec(on);
+				kputs(" engine(s) — WRONG, a message in the old"
+				      " format may be refused (#659)\r\n");
+			} else if (iommu_remapping_found_on() != 0) {
+				kputs("was on in ");
+				kputdec(iommu_remapping_found_on());
+				kputs(" engine(s), left by whoever ran before:"
+				      " turned off, the old format being what"
+				      " every pin and slot here is sent in"
+				      " (#659)\r\n");
+			} else {
+				kputs("off in every engine, as found (#659)\r\n");
+			}
 		}
 	}
 

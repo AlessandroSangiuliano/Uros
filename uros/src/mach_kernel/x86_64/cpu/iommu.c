@@ -795,6 +795,17 @@ unsigned iommu_remapping_found_on(void)
 	return found_vendor == IOMMU_INTEL ? iommu_vtd_ir_found_on() : 0;
 }
 
+void iommu_turn_off_inherited_remapping(void)
+{
+	if (found_vendor == IOMMU_INTEL)
+		iommu_vtd_ir_off_inherited();
+}
+
+unsigned iommu_engines_remapping(void)
+{
+	return found_vendor == IOMMU_INTEL ? iommu_vtd_ir_running() : 0;
+}
+
 unsigned iommu_platform_address_bits(void)
 {
 	return platform_address_bits;

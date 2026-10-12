@@ -172,6 +172,13 @@ int iommu_vtd_unit_remapping(unsigned unit);
 unsigned iommu_vtd_ir_found_on(void);
 
 /*
+ * #659: and, in a boot without -i, every engine found remapping turned off
+ * and counted with those; and how many remap now, read from their status.
+ */
+void iommu_vtd_ir_off_inherited(void);
+unsigned iommu_vtd_ir_running(void);
+
+/*
  * #659: whether a DMAR's flags byte opts out of x2APIC mode -- bit 1, valid
  * only with bit 0 set (Rev 5.20 §8.1).  Pure, for iommu_decode_check().
  */

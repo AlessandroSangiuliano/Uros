@@ -2441,3 +2441,41 @@ unsigned iommu_vtd_ir_found_on(void)
 {
 	return vtd_ir_found_on;
 }
+
+/*
+ * #659: a boot without -i, whose messages are all in the old format: every
+ * engine a predecessor left remapping turned off, as Linux turns it off
+ * outside kdump, and counted with vtd_ir_on()'s finds.  EIME and CFI are
+ * left as found: with IRES clear neither is read (§5.1.4).
+ */
+void iommu_vtd_ir_off_inherited(void)
+{
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (!u->answered || regs == 0
+		    || !(*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES))
+			continue;
+		vtd_ir_found_on++;
+		vtd_ir_off(regs);
+	}
+}
+
+/* How many engines remap now, by their own status rather than this kernel's. */
+unsigned iommu_vtd_ir_running(void)
+{
+	unsigned on = 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (u->answered && regs != 0
+		    && (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES))
+			on++;
+	}
+	return on;
+}
