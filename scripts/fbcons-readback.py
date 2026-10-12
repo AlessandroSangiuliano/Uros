@@ -1036,8 +1036,8 @@ if __name__ == "__main__":
     # loop of readbacks ends at Ctrl-C (#661's review, eight rounds);
     # ablate.sh takes a status above 128 for a run not made.  Flushed by
     # hand: a pipe or terminal gone with the same signal must not turn the
-    # status into Python's 120.
-    asked = signal.sigpending() & STOP
+    # status into Python's 120.  Asked after, since a flush into a full pipe
+    # can take as long as its reader does.
     for stream in (sys.stdout, sys.stderr):
         if stream is None:		# closed when the run was started
             continue
@@ -1045,6 +1045,7 @@ if __name__ == "__main__":
             stream.flush()
         except OSError:
             pass
+    asked = signal.sigpending() & STOP
     if asked:
         sig = min(asked)
         signal.signal(sig, signal.SIG_DFL)
