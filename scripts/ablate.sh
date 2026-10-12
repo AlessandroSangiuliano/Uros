@@ -13,8 +13,11 @@
 #
 # A patch that must go over another says so with `Over: NAME.patch' in its
 # header, and is applied over it whether or not it was given: the bases come
-# first, each once.  Only the patches given are read for Expect: lines -- a base
-# that is itself an ablation would otherwise catch the run on its own.
+# first, each once.  A base is a widen the patch needs to mean anything -- an
+# ablation whose Expect matched the fixed tree too without its widen reported
+# CAUGHT on every boot when given alone (#659) -- a probe it extends, or a patch
+# its diff is written over.  Only the patches given are read for Expect: lines:
+# a base that is itself an ablation would otherwise catch the run on its own.
 #
 # Usage:
 #   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
@@ -123,52 +126,35 @@ done
 REV=$(git -C "$REPO" rev-parse -q --verify "$BASE^{commit}") || die 2 "no revision $BASE"
 SHORT=$(git -C "$REPO" rev-parse --short "$REV")
 
-# A patch's With: lines name the widen patches it needs to mean anything, in
-# its own directory; each comes in before it, once, unless already named.  An
-# ablation whose Expect matches the fixed tree too without its widen reported
-# CAUGHT on every boot when given alone (#659).
-listed() {
-	local want=$1 p
-	shift
-	for p in "$@"; do
-		[ "$p" = "$want" ] && return 0
-	done
-	return 1
-}
-WITH=()
-for p in "${PATCHES[@]}"; do
-	while IFS= read -r w; do
-		[ -n "$w" ] || continue
-		[ -e "$(dirname "$p")/$w" ] ||
-			die 2 "$(basename "$p"): its With: names $w, which is not in $(dirname "$p")"
-		w=$(realpath "$(dirname "$p")/$w")
-		if ! listed "$w" "${WITH[@]}"; then
-			listed "$w" "${PATCHES[@]}" ||
-				echo "ablate: $(basename "$p") brings $(basename "$w") with it (With:)"
-			WITH+=("$w")
-		fi
-	done <<< "$(header "$p" With)"
-	listed "$p" "${WITH[@]}" || WITH+=("$p")
-done
-PATCHES=("${WITH[@]}")
-
-# A patch, after the bases its Over: lines name (theirs first), each once.
+# A patch, after the bases its Over: lines name (theirs first), each once.  A
+# base the command line did not name is said: the run is not then the patches
+# given alone.
 with_bases() {
 	local p=$1 b
 
 	case " ${EXPANDED[*]} " in
 	*" $p "*) return ;;
 	esac
+	case " ${VISITING[*]} " in
+	*" $p "*) die 2 "$(basename "$p") goes over itself, through the Over: lines of its bases" ;;
+	esac
+	VISITING+=("$p")
 	[ -r "$p" ] || die 2 "cannot read $p"
 	grep -q '^diff --git ' "$p" || die 2 "$p is not a patch: it has no diff"
 	for b in $(header "$p" Over); do
 		[ -r "$(dirname "$p")/$b" ] ||
 			die 2 "$(basename "$p") goes over $b, which is not next to it"
-		with_bases "$(realpath "$(dirname "$p")/$b")"
+		b=$(realpath "$(dirname "$p")/$b")
+		case " ${PATCHES[*]} ${EXPANDED[*]} " in
+		*" $b "*) ;;
+		*) echo "ablate: $(basename "$p") goes over $(basename "$b"), which comes in first (Over:)" ;;
+		esac
+		with_bases "$b"
 	done
 	EXPANDED+=("$p")
 }
 EXPANDED=()
+VISITING=()
 for p in "${PATCHES[@]}"; do
 	with_bases "$p"
 done
@@ -236,6 +222,7 @@ if [ $CHECK = 1 ]; then
 	bad=0
 	for p in "${PATCHES[@]}"; do
 		EXPANDED=()
+		VISITING=()
 		with_bases "$p"
 		check_applies "${EXPANDED[@]}" || bad=1
 	done

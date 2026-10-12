@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #661
 Takes out: closing the sequence the -f replay's cut left open -- the first live byte breaks it again, as before b2db93c2: a ■ after the replayed lines, and the screen's every report after it says 1 not UTF-8 of a wire that had none
 Run: --entry 41 600 -smp 4
-With: 661-widen-replay-cut.patch
+Over: 661-widen-replay-cut.patch
 Expect: [1-9][0-9]* not UTF-8 \(#
 Note: the census's line ends in "N not UTF-8 (#567, #568, #661)" -- entry 41 prints no halt report, which a boot that halts adds, ending "N not UTF-8 (#661)"; with the sequence closed N is 0, as the wire is valid UTF-8
 

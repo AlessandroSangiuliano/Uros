@@ -23,13 +23,12 @@ Run: --entry 25 600 -smp 4
 Expect: <thread_doswapin\+0x
 ```
 
-- `Over:` names a patch this one is applied over: a widen it needs, or a probe it extends. `ablate.sh` applies the bases first, each once, whether or not they were given.
+- `Over:` names a patch in the same directory that this one is applied over, one per line: a widen it needs to mean anything, a probe it extends, or a patch its diff is written over. `scripts/ablate.sh` applies the bases first, theirs before them, each once, and says so when the command line did not name them. An ablation whose `Expect:` matches the fixed tree too unless its widen is applied would otherwise report CAUGHT on every boot, fixed or not (#659).
 - `Takes out:` (an ablation) or `Holds open:` (a widen patch) says in one line what the patch does.
 - `Run:` is what `scripts/run-x86_64.sh` is given after the accelerator.
 - `Expect:` is an extended regular expression, matched line by line against the run's log. There may be several, and any one match means the test caught the defect. Expectations are read only from the ablation patches given on the command line, not from the bases `Over:` brings in: a base that is itself an ablation would otherwise catch the run on its own.
 - `Measure:` replaces `Expect:` in an ablation that no test catches, because it brings back a cost rather than a defect. It names the number that must move. `ablate.sh` checks that such a patch applies, but does not judge a run with it: the bench is read by hand, against the same tree without the patch.
 - `Accel:` names the accelerators, `tcg`, `kvm` or both, the patch can show anything under. `scripts/ablate.sh` boots only those of the ones asked for, says so, and refuses a command line that leaves none; `scripts/ci/job.sh` counts the boots it waits for from ablate.sh's plan. Under KVM's full irqchip QEMU's plain `intel-iommu` remaps nothing, and the pauses of `fbcons-readback.py` restart KVM's in-kernel 8254 (#659, #661).
-- `With:` names a widen patch in the same directory that the patch needs to mean anything, one per line. `scripts/ablate.sh` takes it in, before the patch, when the command line did not name it. An ablation whose `Expect:` matches the fixed tree too unless its widen is applied would otherwise report CAUGHT on every boot, fixed or not (#659).
 - `Screen:` lines boot each arm with `scripts/fbcons-readback.py` instead of `run-x86_64.sh`, one argument of that script per line, written as `--option=value` so that nothing needs quoting. `Expect:` is then matched against what the script printed, and `Run:` is not needed. This is how a test is caught where there is no serial log to read, on a machine with no UART (`--no-uart`, #670):
 
 ```
@@ -46,10 +45,10 @@ Expect: not on screen \| NOT ASKED, no UART answers at COM1
 scripts/ablate.sh ablations/642-direct-swapin.patch
 scripts/ablate.sh --ab --boots 5 --accel tcg,kvm ablations/642-direct-swapin.patch
 scripts/ablate.sh --check ablations/*.patch
-scripts/ablate.sh --plan --ab --boots 5 --accel tcg,kvm ablations/642-widen-swap.patch ablations/642-direct-swapin.patch
+scripts/ablate.sh --plan --ab --boots 5 --accel tcg,kvm ablations/642-direct-swapin.patch
 ```
 
-The first two apply `642-widen-swap.patch` too, because `642-direct-swapin.patch` goes over it. `--check` asks each patch on its own, over its bases: patches given together are not stacked, since unrelated ones may touch the same lines.
+The first two and the last apply `642-widen-swap.patch` too, because `642-direct-swapin.patch` goes over it. `--check` asks each patch on its own, over its bases: patches given together are not stacked, since unrelated ones may touch the same lines.
 
 `--plan` says what the same command without it would build and boot, and refuses what it would refuse, building nothing. The campaign on GitHub asks it before a run that takes fixes out starts on twenty runners (#656).
 
