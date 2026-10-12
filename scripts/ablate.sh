@@ -376,6 +376,12 @@ for i in $(seq 1 "$BOOTS"); do
 			power=$(sed -n 's/.*host start:.* power=\([^ ]*\).*/\1/p' "$log" | head -n 1)
 			runcol="${RUN[*]}"
 			[ ${#SCREEN[@]} -gt 0 ] && runcol="fbcons-readback.py ${SCREEN[*]}"
+			# No comma inside a field: scripts/ci/job.sh and
+			# pull-results.sh split a row on every comma, quotes or
+			# not, and "-smp 1,sockets=2,..." or "-cpu max,hypervisor=off"
+			# made a row of more columns, refused (#659).  The merge
+			# test writes its topology the same way, with ';'.
+			runcol=${runcol//,/;}
 			echo "$(date +%F,%T),$host,$SHORT,$names,$arm,$i,$acc,\"$runcol\",$clock,$power,$rc,$verdict,$log" >> "$CSV"
 			echo "ablate: $arm, $acc, boot $i: $verdict (harness status $rc, ${clock:-?} MHz, power ${power:-?})"
 		done
