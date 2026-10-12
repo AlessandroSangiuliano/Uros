@@ -4,6 +4,7 @@ Takes out: the vector given back as it was found -- reach_pin_selftest() leaves 
 Run: --entry 0 600 -smp 4
 With: 659-widen-tick-in-flight.patch
 Expect: UrMach x86-64: no handler — halted
+Expect: UrMach x86-64: trap unclaimed interrupt
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
 --- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
