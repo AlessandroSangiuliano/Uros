@@ -52,7 +52,8 @@
 #           no monitor, no boot, a monitor or a screendump that broke, an
 #           entry grub.cfg does not have, a --wait-for found before the
 #           screen existed, a run that was stopped and continued (a Ctrl-Z
-#           and fg); --all-lines is not given with --kvm either
+#           and fg), a lock that was not this run's any more when it ended;
+#           --all-lines is not given with --kvm either
 #  128+n    stopped by TERM, HUP or INT: the run gives the lock, the fifos,
 #           the monitor's socket and qemu back, then dies by that signal, as
 #           a shell expects; a signal it was started with ignored (nohup's
@@ -214,6 +215,43 @@ def stopped_or(e):
     pending, since `e' is then its consequence -- qemu gone, the monitor
     closed under the run (#661's review, nine rounds)."""
     return stop_asked() or e
+
+
+def lock_owner():
+    """The lock as this run made it: its directory's device, inode and
+    change time, which a lock removed and made again does not share even
+    where the inode comes back.  Nothing writes inside it."""
+    st = os.stat(LOCK)
+    return (st.st_dev, st.st_ino, st.st_ctime_ns)
+
+
+def give_lock_back(mine):
+    """The lock removed only while it is still the one this run made, and
+    whether it was: one removed by hand and taken again -- by run-x86_64.sh,
+    say -- is the other run's, and removing it let a third run in under it
+    (#661's review, eleven rounds)."""
+    try:
+        if lock_owner() != mine:
+            return False
+    except FileNotFoundError:
+        return False
+    os.rmdir(LOCK)
+    return True
+
+
+def say_last(msg):
+    """msg on stderr after whatever stdout holds, so that a log taking both
+    reads in the order things happened; nothing if neither can be written
+    now (#661's review, eleven rounds)."""
+    try:
+        if sys.stdout is not None:
+            sys.stdout.flush()
+    except OSError:
+        pass
+    try:
+        print(msg, file=sys.stderr)
+    except OSError:
+        pass
 
 
 def child_signals():
@@ -487,6 +525,7 @@ def main():
         print(f"fbcons-readback: another run is in flight ({LOCK}) — refusing "
               f"to interleave", file=sys.stderr)
         return 2
+    mine = lock_owner()
 
     # Nothing below has looked at a screen yet, so whatever breaks here is a
     # run that could not be made, 2 -- a parser's refusal, a grub.cfg that
@@ -512,7 +551,7 @@ def main():
         # The lock first: a print to a pipe or a terminal the same signal
         # took away fails, and left it behind (#661's review, eight rounds).
         try:
-            os.rmdir(LOCK)
+            give_lock_back(mine)
         except OSError:
             pass
         try:
@@ -547,7 +586,7 @@ def main():
             except OSError:
                 pass
         try:
-            os.rmdir(LOCK)
+            give_lock_back(mine)
         except OSError:
             pass
         try:
@@ -1035,7 +1074,14 @@ def main():
                 os.unlink(path)
             except FileNotFoundError:
                 pass
-        os.rmdir(LOCK)
+        # Two qemus on one machine manufacture each other's failures, so a
+        # run whose lock was taken from it is not made, whatever it found.
+        if not give_lock_back(mine):
+            say_last(f"fbcons-readback: the lock was not this run's any more "
+                     f"when it ended -- removed by hand, perhaps taken by "
+                     f"another run since ({LOCK}): left as it is, and the run "
+                     f"did not hold the machine alone")
+            rc = 2
     return rc
 
 
