@@ -5,10 +5,9 @@ Run: --iommu amd --entry 36 600 -smp 1
 Expect: interrupt remapping COULD NOT BE TURNED ON — WRONG, the i/o apic was never initialised
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
-index 4648f21f..078df013 100644
 --- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
 +++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
-@@ -6217,7 +6217,7 @@ static void ioapic_selftest(void)
+@@ -6562,7 +6562,7 @@
  	uint64_t while_masked, after_routing;
  	int had_interrupts;
  
@@ -17,7 +16,7 @@ index 4648f21f..078df013 100644
  		/*
  		 * 🔑 WHICH OF THE TWO SILENCES (#563).
  		 *
-@@ -8190,13 +8190,6 @@ void x86_64_boot(uint32_t magic, uint32_t info)
+@@ -8910,13 +8910,6 @@
  	timer_selftest();
  	pci_cfg_selftest();
  	pci_cap_selftest();
@@ -28,6 +27,6 @@ index 4648f21f..078df013 100644
 -	 * ioapic_selftest() says what was found.
 -	 */
 -	(void) ioapic_init();
- 	iommu_selftest();
- 	msi_selftest();
- 	msix_table_selftest();
+ 
+ 	/*
+ 	 * xAPIC or x2APIC mode, decided once the DMAR has been read -- the

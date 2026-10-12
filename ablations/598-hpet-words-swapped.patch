@@ -5,15 +5,14 @@ Run: --entry 0 300 -smp 1
 Expect: interrupt remapping words encoded and decoded, [1-9][0-9]* wrong
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
-index e90fb2cb..38d38648 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
-@@ -2251,7 +2251,7 @@ int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
- 			 uint32_t apic_id, uint32_t *index, uint64_t irte[2],
- 			 uint32_t *address, uint32_t *data)
+@@ -2234,7 +2234,7 @@
+ 			 uint32_t apic_id, int x2apic, uint32_t *index,
+ 			 uint64_t irte[2], uint32_t *address, uint32_t *data)
  {
 -	struct iommu_irte e = { vector, apic_id, 0, source };
 +	struct iommu_irte e = { apic_id, vector, 0, source };
  
  	return iommu_vtd_irt_index(IOMMU_VTD_IRT_HPET, comparator, index)
- 	       && iommu_vtd_irte(&e, 0, irte)
+ 	       && iommu_vtd_irte(&e, x2apic, irte)

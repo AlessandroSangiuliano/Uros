@@ -117,6 +117,57 @@ done
 REV=$(git -C "$REPO" rev-parse -q --verify "$BASE^{commit}") || die 2 "no revision $BASE"
 SHORT=$(git -C "$REPO" rev-parse --short "$REV")
 
+# A patch's With: lines name the widen patches it needs to mean anything, in
+# its own directory; each comes in before it, once, unless already named.  An
+# ablation whose Expect matches the fixed tree too without its widen reported
+# CAUGHT on every boot when given alone (#659).
+listed() {
+	local want=$1 p
+	shift
+	for p in "$@"; do
+		[ "$p" = "$want" ] && return 0
+	done
+	return 1
+}
+WITH=()
+for p in "${PATCHES[@]}"; do
+	while IFS= read -r w; do
+		[ -n "$w" ] || continue
+		[ -e "$(dirname "$p")/$w" ] ||
+			die 2 "$(basename "$p"): its With: names $w, which is not in $(dirname "$p")"
+		w=$(realpath "$(dirname "$p")/$w")
+		if ! listed "$w" "${WITH[@]}"; then
+			listed "$w" "${PATCHES[@]}" ||
+				echo "ablate: $(basename "$p") brings $(basename "$w") with it (With:)"
+			WITH+=("$w")
+		fi
+	done <<< "$(header "$p" With)"
+	listed "$p" "${WITH[@]}" || WITH+=("$p")
+done
+PATCHES=("${WITH[@]}")
+
+# A patch's Accel: line names the accelerators it can show anything under,
+# and the run takes only those (#659): under KVM's full irqchip QEMU's plain
+# intel-iommu remaps nothing, so 659-kept-mode-eight-bit's ablated tree has
+# nothing to print there and was NOT CAUGHT on every KVM boot; and
+# fbcons-readback.py's pauses restart KVM's in-kernel 8254 (#661).  A command
+# line that leaves a patch none of its accelerators is refused.
+for p in "${PATCHES[@]}"; do
+	allow=$(header "$p" Accel | tr ',' ' ')
+	[ -n "$allow" ] || continue
+	kept=()
+	for acc in "${ACCELS[@]}"; do
+		case " $allow " in
+		*" $acc "*)	kept+=("$acc") ;;
+		esac
+	done
+	[ ${#kept[@]} -gt 0 ] ||
+		die 2 "$(basename "$p") shows something only under $allow (its Accel:), and --accel asked for ${ACCELS[*]}"
+	[ ${#kept[@]} = ${#ACCELS[@]} ] ||
+		echo "ablate: $(basename "$p") is booted under ${kept[*]} only (Accel:)"
+	ACCELS=("${kept[@]}")
+done
+
 # Every patch says what it is, and the fixed arm takes only the widen ones.
 WIDENS=()
 ABLATIONS=0
@@ -351,6 +402,12 @@ for i in $(seq 1 "$BOOTS"); do
 			power=$(sed -n 's/.*host start:.* power=\([^ ]*\).*/\1/p' "$log" | head -n 1)
 			runcol="${RUN[*]}"
 			[ ${#SCREEN[@]} -gt 0 ] && runcol="fbcons-readback.py ${SCREEN[*]}"
+			# No comma inside a field: scripts/ci/job.sh and
+			# pull-results.sh split a row on every comma, quotes or
+			# not, and "-smp 1,sockets=2,..." or "-cpu max,hypervisor=off"
+			# made a row of more columns, refused (#659).  The merge
+			# test writes its topology the same way, with ';'.
+			runcol=${runcol//,/;}
 			echo "$(date +%F,%T),$host,$SHORT,$names,$arm,$i,$acc,\"$runcol\",$clock,$power,$rc,$verdict,$log" >> "$CSV"
 			echo "ablate: $arm, $acc, boot $i: $verdict (harness status $rc, ${clock:-?} MHz, power ${power:-?})"
 		done

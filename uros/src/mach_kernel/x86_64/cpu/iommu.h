@@ -475,15 +475,45 @@ struct iommu_interrupt_tables {
 	unsigned	named;		/* AMD: for the sources the IVRS names */
 	unsigned	ioapics;	/* ... which are I/O APICs            */
 	unsigned	hpets;		/* ... and HPETs, once per DeviceID   */
+	int		x2apic;		/* #659: entries for 32-bit apic ids  */
 };
 
 /*
  * Build them, once.  Answers non-zero when every table was built and every
  * entry read back as written.
+ *
+ * #659: for x2APIC ids when the local APIC is planned for them
+ * (lapic_x2apic_planned()) and every engine can take them -- Intel's EIM, AMD's
+ * XTSup and GASup.  Then Intel's IRTA carries EIME and every entry a 32-bit
+ * destination (Rev 5.20 §9.9), and with EIME set a message in the old format is
+ * refused (§5.1.4).
  */
 int iommu_build_interrupt_tables(void);
 
 const struct iommu_interrupt_tables *iommu_interrupt_tables(void);
+
+/*
+ * #659: whether the entries were built for x2APIC ids; zero before they are
+ * built, and where nothing was.  Remapping on is iommu_interrupts_remapped().
+ */
+int iommu_remaps_x2apic(void);
+
+/*
+ * #659: whether an interrupt routed now can name processor `apic_id': any id
+ * once interrupts are remapped through entries for 32-bit ids, and otherwise
+ * one up to LAPIC_XAPIC_ID_MAX -- the old format's words and an eight-bit
+ * entry's destination, where 255 is the broadcast.  The one answer for
+ * irq_target(), an MSI slot's claim, the reach test and the HPET's probe.
+ */
+int iommu_names_apic_id(uint32_t apic_id);
+
+/*
+ * #659: whether they could be -- every engine able to carry an x2APIC id, a
+ * 16-byte store for the entries, and on Intel a DMAR that says the platform
+ * can remap.  For lapic_plan_mode(), which on bare metal plans x2APIC mode only
+ * where remapping could carry it, before any table is built.
+ */
+int iommu_can_remap_x2apic(void);
 
 /*
  * ── #598: what a source writes, through remapping or around it ───────
@@ -516,8 +546,9 @@ int iommu_interrupts_remapped(void);
  * On Intel the entry also names who may use it (#598 point 2): the I/O APIC's
  * source-id from the DMAR for a pin, the function's bus/device/function for
  * a slot.  Answers zero, having written no source's words, when the source
- * has no entry -- a pin past the map, an id wider than eight bits, an I/O
- * APIC no table names.
+ * has no entry -- a pin past the map, an id wider than the entries carry
+ * (eight bits, unless they were built for x2APIC ids: iommu_remaps_x2apic(),
+ * #659), an I/O APIC no table names.
  */
 int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
 		    int level, int active_low, uint32_t *lo, uint32_t *hi);
@@ -564,9 +595,13 @@ int iommu_hpet_source(uint8_t number, uint16_t *source);
  * as translation is with `-I': a default boot remaps nothing.
  *
  * Where the platform and every engine say they can, and only all of them:
- * the DMAR's flag set, every engine reporting remapping and a queue, none
- * demanding x2APIC mode, a processor with a 16-byte compare-and-exchange, and
- * a table naming the I/O APIC whose pins will need entries.  Answers how many
+ * the DMAR's flag set, every engine reporting remapping and a queue, an
+ * engine that demands extended interrupt mode (EIMER) only with entries
+ * built for 32-bit ids (#659), a processor with a 16-byte
+ * compare-and-exchange, and a table naming the I/O APIC whose pins will need
+ * entries -- and, on bare metal, entries for 32-bit ids under a local APIC
+ * already in x2APIC mode (#659, lapic_remapping_needs_x2apic_entries()).
+ * Answers how many
  * engines remap.  On zero, `why' says what stopped it, and `asked' says
  * whether the machine could be asked at all: zero for one that cannot remap
  * the way this kernel does -- the boot says NOT ASKED -- and one for an
@@ -585,6 +620,24 @@ int iommu_prepare_interrupt_remapping(void);
 
 /* Whether that engine remaps interrupts, as this kernel turned it on. */
 int iommu_unit_remaps(unsigned unit);
+
+/*
+ * #659: how many engines were remapping already -- left on by whoever ran
+ * before, and turned off: under -i before this kernel's table was given,
+ * since EIME may not change under a running engine, and without -i because
+ * every message is then in the old format, which such an engine may refuse
+ * (iommu_turn_off_inherited_remapping()).  Intel's: AMD's engines are all
+ * turned off before -i programs them, remapping or not, and one left running
+ * in a boot without -i is #677's.
+ */
+unsigned iommu_remapping_found_on(void);
+
+/*
+ * #659: the boot without -i -- every engine found remapping turned off, and
+ * how many remap now, read from their own status for the boot to say.
+ */
+void iommu_turn_off_inherited_remapping(void);
+unsigned iommu_engines_remapping(void);
 
 /*
  * ── Stage 2b: point the engines at those tables and let them run ─────

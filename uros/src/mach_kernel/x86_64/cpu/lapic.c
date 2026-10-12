@@ -7,6 +7,9 @@
 
 #include <stdint.h>
 
+#include <boot/bootarg.h>	/* #659: -2 */
+#include <cpu/acpi.h>		/* #659: the widest id the MADT lists */
+#include <cpu/iommu.h>		/* #659: the DMAR's opt-out */
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>	/* #457: where the acknowledgement count lives */
 #include <cpu/regs.h>
@@ -77,13 +80,40 @@
 
 static volatile uint8_t *lapic;
 
+/*
+ * 🔑 x2APIC MODE: THE SAME REGISTERS, AS MSRs (#659).
+ *
+ * In x2APIC mode the registers are MSRs 800H to 8FFH, one for each 16-byte
+ * slot of the xAPIC page -- MSR 800H + offset / 16 -- with three exceptions
+ * this file meets one of: the two halves of the command register are one
+ * 64-bit MSR, 830H, and there is no 831H (SDM Vol. 3A 253668-093US 13.12.1.2,
+ * Table 13-6).  The page is never mapped in a mode kept from the firmware,
+ * and after lapic_choose_mode()'s switch it stays mapped and unread; the mode
+ * is the processor's, set in its IA32_APIC_BASE, and every processor runs the
+ * boot processor's.
+ */
+#define MSR_X2APIC(reg)		(0x800U + ((reg) >> 4))
+#define MSR_X2APIC_ICR		0x830U
+
+static int x2apic;
+static int x2apic_planned;		/* #659: what the engines are written for */
+static uint32_t x2apic_needed;		/* #659: an id xAPIC cannot name */
+static int present;
+static enum lapic_mode lapic_mode_reached = LAPIC_MODE_XAPIC;
+
 static uint32_t lapic_read(unsigned reg)
 {
+	if (x2apic)
+		return (uint32_t) rdmsr(MSR_X2APIC(reg));
 	return *(volatile uint32_t *)(lapic + reg);
 }
 
 static void lapic_write(unsigned reg, uint32_t value)
 {
+	if (x2apic) {
+		wrmsr(MSR_X2APIC(reg), value);
+		return;
+	}
 	*(volatile uint32_t *)(lapic + reg) = value;
 }
 
@@ -97,13 +127,18 @@ void lapic_init(uint64_t madt_base)
 
 	/*
 	 * x2APIC replaces the memory-mapped registers with MSRs entirely, so
-	 * the mapping below would be reading nothing.  Nothing enables it yet;
-	 * finding it already on means the firmware did, and the register
-	 * access here has to grow the other form before anything else can be
-	 * believed.
+	 * the page below would be reading nothing.  Found on, the firmware
+	 * turned it on, and it is kept (#659): it could be left only through
+	 * the disabled state, losing every register (SDM 13.12.5), and a
+	 * firmware that chose it may have had a reason.  The registers are
+	 * MSRs from here on.
 	 */
-	if (msr & APIC_BASE_X2APIC)
-		panic("lapic: x2APIC mode is on and the MSR interface is not written yet");
+	if (msr & APIC_BASE_X2APIC) {
+		x2apic = 1;
+		present = 1;
+		lapic_mode_reached = LAPIC_MODE_X2APIC_KEPT;
+		return;
+	}
 
 	/*
 	 * Two sources, and the MSR wins: the MADT records where the firmware
@@ -116,12 +151,187 @@ void lapic_init(uint64_t madt_base)
 		panic("lapic: the MADT and IA32_APIC_BASE disagree about the base");
 
 	lapic = (volatile uint8_t *)(uintptr_t)pmap_map_device(base, 0x1000);
+	present = 1;
+}
+
+/*
+ * 🔑 ONE DECISION, ONCE THE DMAR HAS BEEN READ (#659).
+ *
+ * Kept when the firmware left it on -- lapic_init() found that.  Turned on
+ * when asked (-2), or when the MADT lists a processor whose id is 255 or past
+ * it, which xAPIC mode cannot name at all (LAPIC_XAPIC_ID_MAX,
+ * lapic_icr_destination()) -- the ids a firmware hands over in x2APIC mode
+ * for, unless it chose otherwise (SDM 13.12.7).  Reaching
+ * such an id with a device's interrupt takes remapping entries for 32-bit ids
+ * (iommu_remaps_x2apic()), and without remapping x2APIC mode is
+ * architecturally a guest's: "Intel VT-d Interrupt Remapping is a
+ * prerequisite for using the x2APIC mode" (SDM 13.12.6), and Linux turns it on
+ * without remapping only under a hypervisor.  So on bare metal it is planned
+ * only with -i and engines that can carry 32-bit ids, and switched on only
+ * once remapping came on with them.  Never turned on where the DMAR opts out;
+ * a firmware that opts out and left it on anyway is said, not resolved.
+ *
+ * Made in two steps, because the mode is part of what the remapping engines
+ * are given -- EIME on Intel; XTEn, GAEn and the 128-bit entry on AMD -- and
+ * the engines are written before the switch.  lapic_plan_mode() decides, once
+ * the DMAR has been read and before any engine is; lapic_choose_mode() makes
+ * the switch the plan says, unless on bare metal remapping did not come on
+ * with entries for 32-bit ids: then it stays in xAPIC mode and says so, the
+ * plan -- what the engines were written for -- unchanged, and the entries
+ * read by nobody.
+ *
+ * xAPIC to x2APIC keeps the registers software set, but the logical
+ * destination, an id written to the ID register and the command register's
+ * high half (SDM 13.12.5) -- none of which this kernel keeps -- so the switch
+ * can come after the timer and the self-tests have run in xAPIC mode.
+ */
+void lapic_plan_mode(void)
+{
+	uint32_t a, b, c, d;
+
+	/* No local APIC found (lapic_init() never ran): nothing to plan. */
+	if (!present)
+		return;
+
+	if (x2apic) {
+		x2apic_planned = 1;
+		if (iommu_x2apic_discouraged())
+			lapic_mode_reached = LAPIC_MODE_X2APIC_KEPT_OPTED_OUT;
+		return;
+	}
+
+	/* The widest id the MADT lists, when nobody asked: the boot says which. */
+	for (unsigned i = 0; i < acpi_cpu_count() && !boot_flag('2'); i++)
+		if (acpi_cpu(i)->apic_id > LAPIC_XAPIC_ID_MAX
+		    && acpi_cpu(i)->apic_id > x2apic_needed)
+			x2apic_needed = acpi_cpu(i)->apic_id;
+	if (!boot_flag('2') && x2apic_needed == 0)
+		return;
+
+	cpuid(1, &a, &b, &c, &d);
+	if (!(c & (1U << 21)))
+		lapic_mode_reached = LAPIC_MODE_X2APIC_ABSENT;
+	else if (iommu_x2apic_discouraged())
+		lapic_mode_reached = LAPIC_MODE_X2APIC_OPTED_OUT;
+	else if (!(c & (1U << 31))
+		 && !(boot_flag('i') && iommu_can_remap_x2apic()))
+		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
+	else
+		x2apic_planned = 1;
+}
+
+void lapic_choose_mode(void)
+{
+	uint32_t a, b, c, d;
+	int remapped = iommu_interrupts_remapped() && iommu_remaps_x2apic();
+
+	if (!present || x2apic || !x2apic_planned)
+		return;
+
+	/*
+	 * On bare metal only once remapping came on with entries for 32-bit
+	 * ids: the plan could see only that it might.  Entries built for them
+	 * by engines that then did not turn on are entries nothing reads.
+	 */
+	cpuid(1, &a, &b, &c, &d);
+	if (!(c & (1U << 31)) && !remapped) {
+		lapic_mode_reached = LAPIC_MODE_X2APIC_NOT_ON_METAL;
+		return;
+	}
+
+	/*
+	 * Read back, as every mode line says what it read (#659): EN was set
+	 * when lapic_init() looked, and xAPIC to x2APIC is the one write SDM
+	 * 13.12.5 allows, so a register that did not take it is a processor
+	 * this kernel cannot drive -- every accessor from here on would be an
+	 * MSR it refuses.
+	 */
+	wrmsr(MSR_APIC_BASE, rdmsr(MSR_APIC_BASE) | APIC_BASE_X2APIC);
+	if (!(rdmsr(MSR_APIC_BASE) & APIC_BASE_X2APIC))
+		panic("lapic: IA32_APIC_BASE did not take x2APIC mode (#659)");
+	x2apic = 1;
+	lapic_mode_reached = remapped ? LAPIC_MODE_X2APIC_TURNED_ON_REMAPPED
+				      : LAPIC_MODE_X2APIC_TURNED_ON;
+}
+
+int lapic_x2apic_planned(void)
+{
+	return x2apic_planned;
+}
+
+uint32_t lapic_x2apic_needed(void)
+{
+	return x2apic_needed;
+}
+
+enum lapic_mode lapic_mode(void)
+{
+	return lapic_mode_reached;
+}
+
+int lapic_x2apic(void)
+{
+	return x2apic;
+}
+
+/*
+ * #659: remapping may come on only with entries for 32-bit ids -- the local
+ * APIC already in x2APIC mode, kept from the firmware, on bare metal, where
+ * "software must enable this interrupt remapping with Extended Interrupt Mode
+ * Enabled before it enabling x2APIC mode" (SDM 13.12.7) and AMD's engines
+ * "must set MMIO 0x18[XTEn]=1 and MMIO 0x18[GAEn]=1" for it (Rev 3.11
+ * §2.2.5.3).  Under a hypervisor x2APIC mode with eight-bit entries is the
+ * guest's practice, as it is without remapping (lapic_plan_mode()).
+ */
+int lapic_remapping_needs_x2apic_entries(void)
+{
+	uint32_t a, b, c, d;
+
+	if (!x2apic)
+		return 0;
+	cpuid(1, &a, &b, &c, &d);
+	return !(c & (1U << 31));
+}
+
+/*
+ * The boot processor's mode on this one too (#659): an application processor
+ * comes out of INIT in the mode it was in before, which is xAPIC unless the
+ * firmware chose otherwise, and every register here is an MSR or a page
+ * according to the boot processor's choice.  xAPIC to x2APIC is one write
+ * (SDM 13.12.5).  The other way is not, and a processor left in x2APIC mode
+ * behind a boot processor that is not would answer none of the page's
+ * addresses: said, since nothing here could be believed after it.
+ *
+ * 🔴 The first thing an application processor does once it can report a
+ * fault (ap_start_c()), not the last before its interrupts: the accessors
+ * follow the boot processor's choice, not the mode of the processor running
+ * them, so until this ran a fault report's lapic_id() or a panic's halting
+ * IPI was an x2APIC MSR on a processor in xAPIC mode, which "causes a
+ * general-protection exception" (SDM 13.12.2) inside the report.
+ */
+void lapic_mode_here(void)
+{
+	uint64_t msr = rdmsr(MSR_APIC_BASE);
+
+	if (!present)
+		panic("lapic: asked to enable an APIC that was never mapped");
+
+	if (x2apic && !(msr & APIC_BASE_X2APIC))
+		wrmsr(MSR_APIC_BASE, msr | APIC_BASE_X2APIC);
+	else if (!x2apic && (msr & APIC_BASE_X2APIC))
+		panic("lapic: this processor is in x2APIC mode and the boot "
+		      "processor is not (#659)");
+}
+
+int lapic_mode_matches(void)
+{
+	return ((rdmsr(MSR_APIC_BASE) & APIC_BASE_X2APIC) != 0) == (x2apic != 0);
 }
 
 void lapic_enable(void)
 {
-	if (lapic == 0)
-		panic("lapic: asked to enable an APIC that was never mapped");
+	/* Nothing to do on a processor ap_start_c() switched already. */
+	lapic_mode_here();
 
 	/*
 	 * Accept every priority.  Reset leaves this at zero, which is what we
@@ -174,16 +384,19 @@ uint64_t lapic_probe_va(void)
 
 int lapic_present(void)
 {
-	return lapic != 0;
+	return present;
 }
 
 uint32_t lapic_id(void)
 {
 	/*
-	 * The id sits in the top byte of the register, not the bottom: the
-	 * low bits are reserved, and reading the word as an id would give a
-	 * number no CPU has.
+	 * In x2APIC mode the register is the whole 32-bit id (SDM 13.12.5.1).
+	 * In xAPIC mode the id sits in the top byte, not the bottom: the low
+	 * bits are reserved, and reading the word as an id would give a number
+	 * no CPU has.
 	 */
+	if (x2apic)
+		return lapic_read(LAPIC_ID);
 	return lapic_read(LAPIC_ID) >> 24;
 }
 
@@ -200,6 +413,13 @@ int lapic_is_bsp(void)
  */
 static void icr_wait_idle(void)
 {
+	/*
+	 * Nothing to wait for in x2APIC mode: the delivery status bit is gone,
+	 * and "system software no longer has a reason to read the ICR"
+	 * (SDM 13.12.9) -- what a read returns need not be what was written.
+	 */
+	if (x2apic)
+		return;
 	while (lapic_read(LAPIC_ICR_LOW) & ICR_DELIVERY_PENDING)
 		cpu_pause();
 }
@@ -245,8 +465,37 @@ uint64_t lapic_icr_nested_on(uint32_t apic_id)
 }
 #endif
 
+/*
+ * #659: the command register's destination for `apic_id', in the mode given:
+ * all 32 bits in x2APIC mode, the 64-bit register's high half (SDM 13.12.9),
+ * and eight in xAPIC mode, in the high half's 31:24.  An id above
+ * LAPIC_XAPIC_ID_MAX is refused there: shifted into those eight an id past
+ * them kept its low byte, and an INIT for processor 256 was an INIT for
+ * processor 0 -- #598's C16 had looked at the routing words and not at this
+ * one -- and 255 is the broadcast, an INIT for every processor.
+ */
+int lapic_icr_destination(uint32_t apic_id, int x2apic_mode, uint32_t *high)
+{
+	if (x2apic_mode) {
+		*high = apic_id;
+		return 1;
+	}
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
+		return 0;
+	*high = apic_id << 24;
+	return 1;
+}
+
 static void icr_send(uint32_t apic_id, uint32_t command)
 {
+	uint32_t high = 0;
+
+	/* Before anything is written: see lapic_icr_destination(). */
+	if (!lapic_icr_destination(apic_id, x2apic, &high))
+		panic("lapic: apic id %u does not fit the command register in "
+		      "xAPIC mode, and would reach the processor with its low "
+		      "byte (#659)", apic_id);
+
 #if !ABLATE_593_ICR_OPEN
 	int was_enabled = interrupts_enabled();
 
@@ -274,7 +523,7 @@ static void icr_send(uint32_t apic_id, uint32_t command)
 	 * a send that interrupts this one runs in a handler with interrupts
 	 * off, and nothing interrupts it in turn.
 	 */
-	unsigned self = lapic_read(LAPIC_ID) >> 24;
+	unsigned self = lapic_id();
 
 	if (self < NCPUS && icr_inside[self])
 		icr_nested[self]++;
@@ -286,13 +535,28 @@ static void icr_send(uint32_t apic_id, uint32_t command)
 		icr_inside[self]++;
 #endif
 
-	/*
-	 * The destination goes in the high half and the command in the low
-	 * half, and writing the low half is what sends it — so the order is
-	 * not a style question.
-	 */
-	lapic_write(LAPIC_ICR_HIGH, apic_id << 24);
-	lapic_write(LAPIC_ICR_LOW, command);
+	if (x2apic) {
+		/*
+		 * One 64-bit write, the destination in its high half
+		 * (SDM 13.12.9) -- and a fence before it, because unlike a
+		 * store to an uncached page it is not serializing: "A WRMSR
+		 * to an APIC register may complete before all preceding
+		 * stores are globally visible; software can prevent this by
+		 * inserting a serializing instruction or the sequence
+		 * MFENCE;LFENCE before the WRMSR" (13.12.3).  Without it a
+		 * cross-call could arrive before the request it announces.
+		 */
+		__asm__ volatile("mfence; lfence" : : : "memory");
+		wrmsr(MSR_X2APIC_ICR, ((uint64_t) high << 32) | command);
+	} else {
+		/*
+		 * The destination goes in the high half and the command in
+		 * the low half, and writing the low half is what sends it —
+		 * so the order is not a style question.
+		 */
+		lapic_write(LAPIC_ICR_HIGH, high);
+		lapic_write(LAPIC_ICR_LOW, command);
+	}
 
 #if !ABLATE_593_ICR_OPEN
 	if (was_enabled)
@@ -566,10 +830,12 @@ void lapic_timer_stop(void)
  * to 10b.  The countdown registers are ignored in this mode; the MSR is the
  * whole interface, and clock_event.c owns it.
  *
- * ⚠️ The SDM requires an MFENCE between the mode write and the first deadline
- * write: without it the WRMSR can be observed before the mode is in effect,
- * and the deadline is then read by a timer still in one-shot mode -- an arm
- * that appears to succeed and never fires.
+ * ⚠️ In xAPIC mode the SDM requires an MFENCE between the mode write and the
+ * first deadline write: without it the WRMSR can be observed before the mode
+ * is in effect, and the deadline is then read by a timer still in one-shot
+ * mode -- an arm that appears to succeed and never fires.  In x2APIC mode the
+ * mode write is a WRMSR too, which "the processor ensures the ordering of ...
+ * no fencing is required" (SDM 13.5.4.1, #659); the fence stays, harmless.
  */
 void lapic_timer_deadline_setup(uint8_t vector)
 {

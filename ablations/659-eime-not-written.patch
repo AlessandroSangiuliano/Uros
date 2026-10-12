@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #659
+Holds open: IRTA's word composed without EIME, as a composer that dropped the bit would compose it -- the entries' format must then follow the word the engines are given, eight bits, and not the decision that asked for 32
+Run: --iommu intel-eim --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1740,7 +1740,7 @@
+ 
+ 	pa = t.engines ? boot_frame_alloc() : 0;
+ 	if (pa == 0
+-	    || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, x2apic, &t.intel_irta)) {
++	    || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, 0, &t.intel_irta)) {
+ 		iommu_record_interrupt_tables(&t);
+ 		return 0;
+ 	}

@@ -171,13 +171,27 @@ extern void pci_msix_disable(const struct pci_msix *m);
  */
 /*
  * The address a message to processor `apic_id' is written to, or no: an id
- * past eight bits does not fit the compatibility format (#598's C16).
+ * above LAPIC_XAPIC_ID_MAX names no single processor in the compatibility
+ * format -- past eight bits it does not fit (#598's C16), and 255 is the
+ * broadcast.  Such an id is reached only through a remapping entry for 32-bit
+ * ids, which msi_claim_vector() records for msi_remap_vector() (#659).
  */
 extern int msi_destination(uint32_t apic_id, unsigned long long *address);
 
 extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
 			    unsigned long long *address_out,
 			    unsigned int *data_out);
+
+/*
+ * #659: the same slot for processor `apic_id', named rather than chosen --
+ * for the boot self-test that aims one at the highest APIC id.  Refuses an
+ * id the words in use cannot name: above LAPIC_XAPIC_ID_MAX without remapping
+ * entries for 32-bit ids.
+ */
+extern int msi_claim_vector_to(uint32_t apic_id, void (*handler)(int),
+			       unsigned int *slot_out,
+			       unsigned long long *address_out,
+			       unsigned int *data_out);
 
 /*
  * #598: that message as the device must be given it.  Unchanged while

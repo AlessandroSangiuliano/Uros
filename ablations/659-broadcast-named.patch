@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #659
+Takes out: the broadcast from the eight-bit limit -- LAPIC_XAPIC_ID_MAX is 0xFF, as every refusal was before 885871de, and 255 is written into a command register, a redirection entry, a message address and an eight-bit remapping entry as if it named one processor, where SDM 13.6.2.1 makes it every processor
+Run: --entry 0 300 -smp 1
+Expect: refused by the command register in xAPIC mode, not sent to all or cut to the low byte, and carried whole in x2APIC mode: 5 of 6
+Expect: apic ids 255 and above refused by a redirection entry and a message address, not sent to all or cut to the low byte: 6 of 8
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.h b/uros/src/mach_kernel/x86_64/cpu/lapic.h
+--- a/uros/src/mach_kernel/x86_64/cpu/lapic.h
++++ b/uros/src/mach_kernel/x86_64/cpu/lapic.h
+@@ -81,7 +81,7 @@
+  * or greater" (13.12.7).  An id of 255 written into any of them would have
+  * interrupted every processor.
+  */
+-#define	LAPIC_XAPIC_ID_MAX	0xFEu
++#define	LAPIC_XAPIC_ID_MAX	0xFFu
+ 
+ /*
+  * #659: the command register's destination word for `apic_id' in the mode

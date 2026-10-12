@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #659
+Takes out: the GASup half of an AMD engine's x2APIC capability -- XTSup alone answers yes again, as it did before, and the decode self-test's word with XTSup and no GASup must say so
+Run: --entry 0 300 -smp 1
+Expect: iommu words decoded and encoded, 1 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -390,7 +390,7 @@
+ 				struct iommu_interrupt_caps *out)
+ {
+ 	out->can_forget = 1;
+-	out->x2apic = (int)(AMD_EFR_XTSUP(efr) && AMD_EFR_GASUP(efr));
++	out->x2apic = (int)AMD_EFR_XTSUP(efr);
+ 	out->required = 0;
+ 	out->x2apic_required = 0;
+ }

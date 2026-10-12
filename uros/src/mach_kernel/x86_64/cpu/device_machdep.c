@@ -31,6 +31,7 @@
 #include <cpu/lapic.h>	/* lapic_eoi, and which processor to route to */
 #include <cpu/pci_cfg.h>
 #include <cpu/pci_msix.h>	/* #457: a device's own table */
+#include <cpu/smp.h>		/* #659: the boot processor's apic id */
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
 #include <ddb/cons.h>	/* #497: who owns COM1 */
@@ -421,6 +422,39 @@ device_md_irq_trampoline(struct trap_frame *frame)
 }
 
 /*
+ * #659: the processor a device interrupt is given.  The one registering it,
+ * as it always was, when the words in use can name it: any id once the
+ * remapping entries carry 32-bit ids, up to LAPIC_XAPIC_ID_MAX otherwise -- a
+ * redirection entry's destination, a message's address (#598's C16), where
+ * 255 is the broadcast.  Where they cannot, the boot processor, said once: a
+ * free line refused because of where the asking thread ran was
+ * irq_claim_test's [1] WRONG on a processor numbered 256 (QEMU's
+ * sockets=2,cores=256, x2APIC left on by the firmware, no -i).  Zero when
+ * neither fits.
+ */
+static int	irq_target_said;
+
+static int irq_target(uint32_t *apic_id)
+{
+	uint32_t self = lapic_id(), boot = cpu_to_apic(0);
+
+	if (iommu_names_apic_id(self)) {
+		*apic_id = self;
+		return 1;
+	}
+	if (!iommu_names_apic_id(boot))
+		return 0;
+
+	if (__sync_bool_compare_and_swap(&irq_target_said, 0, 1))
+		printf("device_md: apic id %u cannot be named without "
+		       "interrupts remapped to 32-bit ids, so a device "
+		       "interrupt registered there goes to the boot "
+		       "processor, apic id %u (#659)\n", self, boot);
+	*apic_id = boot;
+	return 1;
+}
+
+/*
  * ⚠️ Nothing is ever displaced on this machine, and the contract's promise to
  * put back what was there is kept by there being nothing.  i386 means it --
  * ddb's keyboard handler claims IRQ 1 in the kernel and the userspace driver
@@ -433,7 +467,7 @@ device_md_irq_trampoline(struct trap_frame *frame)
 int
 device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 {
-	uint32_t	gsi, high;
+	uint32_t	gsi, target;
 
 	if (irq >= DEVICE_MD_IRQ_MAX || handler == 0)
 		return 0;
@@ -465,7 +499,7 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	gsi = acpi_irq_to_gsi((uint8_t)irq);
 	if (!ioapic_owns(gsi))		/* the range, not the count: #598's C12 */
 		return 0;
-	if (!ioapic_rte_destination(lapic_id(), &high))	/* C16 */
+	if (!irq_target(&target))	/* C16, #659 */
 		return 0;
 
 	/*
@@ -477,7 +511,7 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	 */
 	irq_handler[irq] = handler;
 	trap_set_handler(DEVICE_MD_VECTOR(irq), device_md_irq_trampoline);
-	ioapic_route(gsi, (uint8_t)DEVICE_MD_VECTOR(irq), lapic_id(),
+	ioapic_route(gsi, (uint8_t)DEVICE_MD_VECTOR(irq), target,
 		     acpi_irq_flags((uint8_t)irq));
 
 	return 1;
@@ -569,18 +603,20 @@ device_md_debugger_break(void)
 
 /*
  * A message's address for a processor: its APIC id in bits 19:12, eight of
- * them.  An id that does not fit is refused, where a mask would have cut it to
- * its low byte and delivered to whichever processor has that (#598's C16).
+ * them.  An id they do not name one processor by is refused: past them a mask
+ * would have cut it to its low byte and delivered to whichever processor has
+ * that (#598's C16), and 255 is the broadcast (LAPIC_XAPIC_ID_MAX, #659).
  */
 int msi_destination(uint32_t apic_id, unsigned long long *address)
 {
-	if (apic_id > 0xFFu)
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
 		return 0;
 	*address = MSI_ADDRESS_BASE | ((unsigned long long)apic_id << 12);
 	return 1;
 }
 
 static volatile unsigned int	msi_next;	/* slots are handed out in order */
+static uint32_t			msi_target[DEVICE_MD_MSI_MAX];	/* #659 */
 
 /*
  * Claim a vector and say what a device must write to reach it.
@@ -590,10 +626,27 @@ static volatile unsigned int	msi_next;	/* slots are handed out in order */
  * contract above refuses to hand out -- the difference between the two is
  * exactly who is trusted with it, and the answer is "this file and the test
  * that has no device".
+ *
+ * #659: msi_claim_vector() gives the slot to irq_target()'s processor;
+ * msi_claim_vector_to() to the one named, for the self-test that aims a slot
+ * at the highest APIC id, and refuses one the words in use cannot name.
  */
 int
 msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 		 unsigned long long *addr_out, unsigned int *data_out)
+{
+	uint32_t	target;
+
+	if (!lapic_present() || !irq_target(&target))
+		return 0;
+	return msi_claim_vector_to(target, handler, slot_out, addr_out,
+				   data_out);
+}
+
+int
+msi_claim_vector_to(uint32_t target, device_md_intr_t handler,
+		    unsigned int *slot_out, unsigned long long *addr_out,
+		    unsigned int *data_out)
 {
 	unsigned int	slot;
 	unsigned int	vector;
@@ -611,8 +664,24 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 	if (!lapic_present())
 		return 0;
 
-	/* Before a slot is spent on it: an id the message cannot carry. */
-	if (!msi_destination(lapic_id(), &address))
+	/*
+	 * Before a slot is spent on it: a processor the message can name
+	 * (#659, iommu_names_apic_id()).  An id above LAPIC_XAPIC_ID_MAX is
+	 * named only by the slot's remapping entry for 32-bit ids, written by
+	 * msi_remap_vector(), which every programmer of a device calls next
+	 * (<cpu/pci_msix.h>) -- so the address handed out for one is the old
+	 * format's base, which names APIC id 0.  On hardware not a guess that
+	 * can land: with entries for 32-bit ids, Intel refuses a message in the
+	 * old format (EIME, Rev 5.20 §5.1.4), and AMD finds no entry for a slot
+	 * nobody remapped.  QEMU passes a message in the old format through
+	 * whatever EIME says (intel_iommu.c, vtd_interrupt_remap_msi()), so
+	 * there a forgotten msi_remap_vector() lands on APIC id 0.
+	 */
+	if (!iommu_names_apic_id(target))
+		return 0;
+	if (target > LAPIC_XAPIC_ID_MAX)
+		address = MSI_ADDRESS_BASE;
+	else if (!msi_destination(target, &address))
 		return 0;
 
 	/*
@@ -640,6 +709,7 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 		}
 	}
 	vector = DEVICE_MD_VECTOR(slot);
+	msi_target[slot - DEVICE_MD_MSI_BASE] = target;	/* #659: all 32 bits */
 
 	/*
 	 * The handler before the address, for the reason register does it in
@@ -710,7 +780,9 @@ static unsigned int	msi_entry_of[DEVICE_MD_MSI_MAX];
 /*
  * #598: <cpu/pci_msix.h> says why every programmer of a device calls these.
  * The slot's remapping entry is the slot's: its index in the map is the
- * slot's number among the MSI slots, and its vector is the slot's.
+ * slot's number among the MSI slots, and its vector is the slot's.  Its
+ * destination is the one msi_claim_vector() chose, all 32 bits of it (#659):
+ * it was read back out of the address's eight, which cannot hold an x2APIC id.
  */
 int
 msi_remap_vector(unsigned int slot, unsigned int bus, unsigned int dev,
@@ -726,7 +798,7 @@ msi_remap_vector(unsigned int slot, unsigned int bus, unsigned int dev,
 	    || !iommu_remap_msi(slot - DEVICE_MD_MSI_BASE,
 				(uint16_t)((bus << 8) | (dev << 3) | func),
 				(uint8_t)*data,
-				(uint32_t)((*address >> 12) & 0xFFu),
+				msi_target[slot - DEVICE_MD_MSI_BASE],
 				&ra, &rd))
 		return 0;
 

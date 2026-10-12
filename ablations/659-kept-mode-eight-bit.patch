@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #659
+Takes out: the bare-metal rule for a kept x2APIC mode -- remapping comes on again with entries for eight-bit ids under processors already in x2APIC mode, as before a811c6c7, against SDM 13.12.7
+Run: --iommu intel --entry 49 900 -smp 4 -cpu max,hypervisor=off
+Accel: tcg
+Expect: entries for 8-bit apic ids: the local apic is planned for x2APIC mode
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -598,6 +598,7 @@
+  */
+ static const char *x2apic_entries_missing(void)
+ {
++	return 0;
+ 	if (lapic_remapping_needs_x2apic_entries() && interrupt_tables_built
+ 	    && !iommu_remaps_x2apic())
+ 		return "the local apic is in x2APIC mode, which on bare metal"

@@ -98,6 +98,9 @@ int apic_to_cpu(uint32_t apic_id)
 static volatile uint64_t online_mask;
 static volatile uint64_t online_count;
 
+/* #659: processors not in the accessors' APIC mode when they could fault. */
+static volatile uint64_t ap_mode_late;
+
 /*
  * The boot processor's bit in smp_answering_set(), set once smp_start_others()
  * has run (#605).
@@ -182,6 +185,17 @@ void ap_start_c(uint32_t cpu)
 	 * one failure that leaves nothing on the wire to read afterwards.
 	 */
 	desc_activate(cpu);
+
+	/*
+	 * 🔴 And at once the boot processor's APIC mode (#659): from here a
+	 * fault is reported, and the report reads lapic_id() and a panic sends
+	 * its halting IPI through accessors that follow the boot processor's
+	 * mode.  An x2APIC MSR on a processor still in xAPIC mode is a #GP
+	 * inside the report.  Counted when it does not hold, for the boot to say.
+	 */
+	lapic_mode_here();
+	if (!lapic_mode_matches())
+		atomic_inc64((volatile uint64_t *)&ap_mode_late);
 
 	/*
 	 * 🔴 Caches on, and the boot processor's protections (#639).
@@ -385,6 +399,11 @@ unsigned smp_online_count(void)
 	return (unsigned)atomic_load64((volatile uint64_t *)&online_count) + 1;
 }
 
+unsigned smp_ap_mode_late(void)
+{
+	return (unsigned)atomic_load64((volatile uint64_t *)&ap_mode_late);
+}
+
 int smp_is_online(unsigned cpu)
 {
 	return cpu < 64 && ((atomic_load64((volatile uint64_t *)&online_mask)
@@ -395,6 +414,21 @@ uint64_t smp_answering_set(void)
 {
 	return atomic_load64((volatile uint64_t *)&online_mask)
 	     | atomic_load64(&bsp_bit);
+}
+
+int smp_wakeable(unsigned cpu)
+{
+	uint32_t high;
+
+	return cpu < smp_cpu_count()
+	       && lapic_icr_destination(cpu_to_apic(cpu), lapic_x2apic(), &high);
+}
+
+static unsigned smp_asked;		/* #659: sent INIT and SIPI */
+
+unsigned smp_woken_count(void)
+{
+	return smp_asked;
 }
 
 unsigned smp_start_others(void)
@@ -445,15 +479,29 @@ unsigned smp_start_others(void)
 	 * Every stack is in place, so every processor can be woken without
 	 * waiting for the one before it.  Woken by APIC id, which is what the
 	 * hardware is addressed by.
+	 *
+	 * #659: one whose id the command register cannot carry in the mode
+	 * the boot settled on -- above LAPIC_XAPIC_ID_MAX, in xAPIC mode, which
+	 * lapic_plan_mode() turns x2APIC mode on for wherever it can -- is not
+	 * woken, and not counted as asked.  Said: its INIT used to go to the
+	 * processor with its id's low byte, and for 255 to every processor.
 	 */
 	for (unsigned cpu = 1; cpu < smp_cpu_count(); cpu++) {
 		uint32_t id = cpu_to_apic(cpu);
+
+		if (!smp_wakeable(cpu)) {
+			printf("smp: processor %u, apic id %u, is not woken: "
+			       "xAPIC mode names no processor above apic id "
+			       "%u (#659)\n", cpu, id, LAPIC_XAPIC_ID_MAX);
+			continue;
+		}
 
 		lapic_send_init(id);
 		lapic_send_startup(id, AP_TRAMPOLINE_BASE);
 		lapic_send_startup(id, AP_TRAMPOLINE_BASE);
 		asked++;
 	}
+	smp_asked = asked;
 
 	/*
 	 * Wait for the count, not for a sequence.  A processor that never

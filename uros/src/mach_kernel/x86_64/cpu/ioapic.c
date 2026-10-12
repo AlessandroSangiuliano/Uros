@@ -10,6 +10,7 @@
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
 #include <cpu/iommu.h>		/* a pin through its remapping entry, #598 */
+#include <cpu/lapic.h>		/* LAPIC_XAPIC_ID_MAX, #659 */
 #include <cpu/regs.h>		/* read_rflags, cpu_pause */
 #include <pmap/pmap.h>
 #include <sync/atomic.h>	/* the window's lock below */
@@ -166,12 +167,13 @@ uint32_t ioapic_id(void)
 
 /*
  * A redirection entry's destination: the APIC id in bits 63:56, eight of them.
- * An id that does not fit is refused, where a shift would have dropped its
- * high bits and delivered to whichever processor has the rest (#598's C16).
+ * An id they do not name one processor by is refused: past them a shift would
+ * have dropped its high bits and delivered to whichever processor has the
+ * rest (#598's C16), and 255 is the broadcast (LAPIC_XAPIC_ID_MAX, #659).
  */
 int ioapic_rte_destination(uint32_t apic_id, uint32_t *high)
 {
-	if (apic_id > 0xFFu)
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
 		return 0;
 	*high = apic_id << 24;
 	return 1;
@@ -246,10 +248,17 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 	unsigned reg = redir_reg(gsi);
 	int active_low = (flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW;
 	int level = (flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL;
-	uint32_t low = vector & RTE_VECTOR_MASK, high;
+	uint32_t low = vector & RTE_VECTOR_MASK, high = 0;
 	uint64_t f;
 
-	if (!ioapic_rte_destination(apic_id, &high))
+	/*
+	 * #659: remapped to 32-bit ids, the destination is the entry's alone
+	 * -- Intel's pair below then holds the entry's index, and AMD's engine
+	 * reads the destination from the entry the vector indexes -- so an id
+	 * past eight bits needs no room here, and the high half starts empty.
+	 */
+	if (!(iommu_interrupts_remapped() && iommu_remaps_x2apic())
+	    && !ioapic_rte_destination(apic_id, &high))
 		panic("ioapic: apic id %u does not fit a redirection entry "
 		      "(#598)", apic_id);
 	low |= RTE_DELIVERY_FIXED | RTE_DEST_PHYSICAL;

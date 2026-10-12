@@ -136,9 +136,11 @@ void iommu_record_tables(uint64_t root, uint64_t root_bytes,
  * #598: build the interrupt tables, every entry written refusing and read
  * back, and record them, for <cpu/iommu.h>'s iommu_build_interrupt_tables().
  * Answers non-zero when everything was built and read back as written.
+ * #659: `x2apic' says the entries are for x2APIC ids, which the front end
+ * decided: the local APIC planned for them, and every engine able to.
  */
-int iommu_vtd_irt_build(void);
-int iommu_amd_irt_build(void);
+int iommu_vtd_irt_build(int x2apic);
+int iommu_amd_irt_build(int x2apic);
 void iommu_record_interrupt_tables(const struct iommu_interrupt_tables *t);
 
 /*
@@ -155,16 +157,32 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
 			 uint32_t apic_id, uint32_t *address, uint32_t *data);
 int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
-			 uint32_t apic_id, uint32_t *index, uint64_t irte[2],
-			 uint32_t *address, uint32_t *data);
+			 uint32_t apic_id, int x2apic, uint32_t *index,
+			 uint64_t irte[2], uint32_t *address, uint32_t *data);
 void iommu_vtd_forget_msi(unsigned slot);
 
 /*
  * #598 phase 4: turn remapping on in every Intel engine, all or nothing, and
- * answer how many remap; whether one engine does.
+ * answer how many remap; whether one engine does; and (#659) how many were
+ * found remapping already, left on by whoever ran before, and turned off
+ * before their table was given.
  */
 unsigned iommu_vtd_ir_enable(void);
 int iommu_vtd_unit_remapping(unsigned unit);
+unsigned iommu_vtd_ir_found_on(void);
+
+/*
+ * #659: and, in a boot without -i, every engine found remapping turned off
+ * and counted with those; and how many remap now, read from their status.
+ */
+void iommu_vtd_ir_off_inherited(void);
+unsigned iommu_vtd_ir_running(void);
+
+/*
+ * #659: whether a DMAR's flags byte opts out of x2APIC mode -- bit 1, valid
+ * only with bit 0 set (Rev 5.20 §8.1).  Pure, for iommu_decode_check().
+ */
+int iommu_vtd_dmar_opts_out(uint8_t flags);
 
 /*
  * #598: AMD's half.  Prepare writes every device table entry's interrupt
@@ -342,6 +360,14 @@ void iommu_table_written(const volatile void *entry);
 void iommu_table_frame_written(uint64_t pa);
 
 /*
+ * #598's C20: a 16-byte entry an engine may be reading, written in one
+ * atomic store -- Intel's context and remapping entries, AMD's 128-bit
+ * remapping entry (#659).  Answers zero, writing nothing, on a processor
+ * without CMPXCHG16B.
+ */
+int iommu_store_entry16(volatile uint64_t *at, const uint64_t e[2]);
+
+/*
  * ── Stage 3d: reading a refusal out of an engine ─────────────────────
  *
  * The two vendors do not merely use different bit positions here: Intel keeps
@@ -444,9 +470,11 @@ unsigned iommu_vtd_records_drain(const struct iommu_vtd_records *v,
  * ── #598: the entry an interrupt is remapped through ─────────────────
  *
  * Rev 5.20 §9.9 Figure 9-9, 128 bits; Rev 3.11 §2.2.5.1 Figure 15, 32 bits in
- * the basic format, which is the only one this kernel writes.  Pure, like every
- * encoder above, and read back by decoders WRITTEN FROM THE FIGURES rather than
- * by inverting the encoders, for the reason the page-table pair gives.
+ * the basic format, and since #659 the 128-bit entry of §2.2.5.3 Figure 19,
+ * which an AMD engine reads once GAEn is set (iommu_amd_irte_ga()).  Pure,
+ * like every encoder above, and read back by decoders WRITTEN FROM THE
+ * FIGURES rather than by inverting the encoders, for the reason the
+ * page-table pair gives.
  *
  * 🔑 HERE BOTH VENDORS' EMPTY ENTRIES REFUSE.  Intel's P=0 and AMD's RemapEn=0
  * both block the message and report it -- the opposite of the device table
@@ -467,8 +495,9 @@ struct iommu_irte {
 
 /*
  * Encode an entry delivering `vector' to `destination'.  Answers zero when the
- * destination does not fit: wider than eight bits in Intel's xAPIC mode, and
- * at all in AMD's basic format, which has eight bits and nothing else.
+ * destination names no single processor in the format: above
+ * LAPIC_XAPIC_ID_MAX in Intel's xAPIC mode and in AMD's basic format, which has
+ * eight bits and nothing else, FFH among them being every processor (#659).
  *
  * 🔴 INTEL'S ALWAYS NAMES ITS SOURCE: SVT 01b, SQ 00b, SID = `source'.  Without
  * that, an entry is usable by any device that writes its handle (§5.1.2.2), and
@@ -480,6 +509,13 @@ struct iommu_irte {
  */
 int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2]);
 int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out);
+
+/*
+ * #659: AMD's 128-bit entry, GuestMode clear, the one every entry has once
+ * GAEn is set (Rev 3.11 §2.2.5.3).  `x2apic' is XTEn: with it the destination
+ * has 32 bits, without it eight, as in the basic format.
+ */
+int iommu_amd_irte_ga(const struct iommu_irte *e, int x2apic, uint64_t out[2]);
 
 /*
  * Read an entry back.  Answers 1 when it remaps, 0 when it refuses, and -1
@@ -494,6 +530,8 @@ int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out);
 int iommu_vtd_irte_decode(const uint64_t in[2], int x2apic,
 			  struct iommu_irte *out);
 int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out);
+int iommu_amd_irte_ga_decode(const uint64_t in[2], int x2apic,
+			     struct iommu_irte *out);
 
 /*
  * ── #598: what a source writes so that its interrupt finds its entry ──

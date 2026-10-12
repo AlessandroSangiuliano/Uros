@@ -28,6 +28,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/lapic.h>		/* LAPIC_XAPIC_ID_MAX, #659 */
 #include <cpu/pci_cfg.h>
 #include <cpu/regs.h>		/* cpu_pause */
 #include <device/pci.h>		/* PCI_VENDOR_ID, #598 */
@@ -377,12 +378,19 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
  * ⚠️ And nothing here can say "required".  Every field of the feature register
  * (MMIO 0030h) is a support bit, so there is no counterpart to Intel's IRREQ
  * or EIMER to read -- zero is what the register says, not a default.
+ *
+ * #659: x2APIC ids take XTSup AND GASup.  "In systems with x2APIC enabled,
+ * software must set MMIO 0x18[XTEn]=1 and MMIO 0x18[GAEn]=1", for the 128-bit
+ * entry whose destination has 32 bits (Rev 3.11 §2.2.5.3), and GAEn is one of
+ * the control bits whose "writes ... are ignored when MMIO Offset 0030h[GASup]
+ * = 0" (MMIO 0018h, bit 17).  An engine with XTSup alone would take XTEn and
+ * keep reading four-byte entries with eight bits of destination.
  */
 void iommu_amd_interrupt_decode(uint64_t efr,
 				struct iommu_interrupt_caps *out)
 {
 	out->can_forget = 1;
-	out->x2apic = (int)AMD_EFR_XTSUP(efr);
+	out->x2apic = (int)(AMD_EFR_XTSUP(efr) && AMD_EFR_GASUP(efr));
 	out->required = 0;
 	out->x2apic_required = 0;
 }
@@ -599,6 +607,34 @@ int iommu_amd_build(void)
 #define	AMD_CTL_IOMMU_EN	(1ULL << 0)
 #define	AMD_CTL_EVENTLOG_EN	(1ULL << 2)
 #define	AMD_CTL_CMDBUF_EN	(1ULL << 12)
+#define	AMD_CTL_GA_EN		(1ULL << 17)	/* #659: 128-bit entries */
+#define	AMD_CTL_XT_EN		(1ULL << 50)	/* #659: 32-bit ids in them */
+
+static int amd_ir_x2apic(void);
+
+/*
+ * 🔴 OFF AGAIN, every engine up to `last', when one is refused (#659).  A
+ * refusal that left IommuEn set left the engine translating and remapping
+ * through tables the kernel then counts as not in use: every device
+ * interrupt the boot routes in the old format target-aborted by entries it
+ * believes are not there.  And the engines turned on before it would keep
+ * entries of a size it may not share -- "Software must program all IOMMUs in
+ * a system to use the same size of IRTE" (Rev 3.11 §2.2.5.2).
+ */
+static void amd_engines_off(unsigned last)
+{
+	for (unsigned j = 0; j <= last && j < iommu_unit_count(); j++) {
+		const struct iommu_unit *u = iommu_unit(j);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (regs == 0)
+			continue;
+		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) =
+			*(volatile uint64_t *)(regs + AMD_REG_CONTROL)
+			& ~AMD_CTL_IOMMU_EN;
+	}
+}
 
 int iommu_amd_enable(void)
 {
@@ -610,8 +646,10 @@ int iommu_amd_enable(void)
 		volatile uint8_t *regs;
 		uint64_t control;
 
-		if (!u->answered || u->register_va == 0)
+		if (!u->answered || u->register_va == 0) {
+			amd_engines_off(i);
 			return 0;
+		}
 
 		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
 
@@ -657,6 +695,21 @@ int iommu_amd_enable(void)
 		control &= ~AMD_CTL_COHERENT;
 		if (iommu_amd_devtab_snooped(i))	/* C7, as the IVHD says */
 			control |= AMD_CTL_COHERENT;
+
+		/*
+		 * #659: the entries' format, before the engine reads one.
+		 * x2APIC mode "must set MMIO 0x18[XTEn]=1 and MMIO
+		 * 0x18[GAEn]=1" (Rev 3.11 §2.2.5.3): GAEn for the 128-bit
+		 * entry the tables were built with, XTEn for its 32-bit
+		 * destination.  IntCapXTEn is not set: it is for the engine's
+		 * own interrupts, which this kernel never asks for --
+		 * EventIntEn, which would send them, is not set here.  One a
+		 * firmware left set is kept, as is every bit of this word
+		 * enable does not name (#611).
+		 */
+		control &= ~(AMD_CTL_GA_EN | AMD_CTL_XT_EN);
+		if (amd_ir_x2apic())
+			control |= AMD_CTL_GA_EN | AMD_CTL_XT_EN;
 		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
 
 		control |= AMD_CTL_IOMMU_EN;
@@ -666,13 +719,21 @@ int iommu_amd_enable(void)
 		 * Read back, because a write that was accepted and ignored is
 		 * the failure this cannot afford to call success.  A device
 		 * table meant to be snooped that is not would be read stale:
-		 * nothing was flushed for it.
+		 * nothing was flushed for it.  GAEn is a bit whose writes are
+		 * ignored without GASup (#659): 128-bit entries read as four
+		 * four-byte ones would be entries nobody wrote.  A refusal
+		 * turns this engine off again, and every one before it.
 		 */
 		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
-		if (!(control & AMD_CTL_IOMMU_EN))
+		if (!(control & AMD_CTL_IOMMU_EN)
+		    || (amd_ir_x2apic()
+			&& (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
+			   != (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
+		    || (iommu_amd_devtab_snooped(i)
+			&& !(control & AMD_CTL_COHERENT))) {
+			amd_engines_off(i);
 			return 0;
-		if (iommu_amd_devtab_snooped(i) && !(control & AMD_CTL_COHERENT))
-			return 0;
+		}
 
 		enabled++;
 	}
@@ -1886,9 +1947,9 @@ int iommu_amd_read(void)
  *	31:24	Reserved
  *
  * ⚠️ Eight bits of destination and nothing more.  An x2APIC id needs the
- * 128-bit format and XTEn in the control register, neither of which this
- * kernel writes -- so a wider id is refused by the encoder, not truncated
- * into somebody else's.
+ * 128-bit format below and XTEn in the control register -- so a wider id is
+ * refused by this encoder, not truncated into somebody else's; and so is FFH,
+ * which in physical mode is every processor (LAPIC_XAPIC_ID_MAX, #659).
  */
 #define	AMD_IRTE_REMAP_EN	(1u << 0)
 #define	AMD_IRTE_SUP_IOPF	(1u << 1)
@@ -1900,7 +1961,7 @@ int iommu_amd_read(void)
 
 int iommu_amd_irte(const struct iommu_irte *e, uint32_t *out)
 {
-	if (e == 0 || out == 0 || e->destination > 0xFF)
+	if (e == 0 || out == 0 || e->destination > LAPIC_XAPIC_ID_MAX)
 		return 0;
 
 	*out = AMD_IRTE_REMAP_EN
@@ -1920,6 +1981,71 @@ int iommu_amd_irte_decode(uint32_t in, struct iommu_irte *out)
 
 	out->vector = (uint8_t)((in >> 16) & 0xFF);
 	out->destination = (in >> 8) & 0xFF;
+	out->level = 0;
+	out->source = 0;
+	return 1;
+}
+
+/*
+ * ── #659: the 128-bit entry, GuestMode clear ─────────────────────────
+ *
+ * Rev 3.11 §2.2.5.3, Figure 19: the format every entry has once GAEn is set,
+ * which x2APIC mode requires ("Even if Guest Virtual APIC will not be used,
+ * software must set MMIO 0x18[GAEn]=1 ... with IRTE[GuestMode]=0").  The low
+ * word keeps the basic entry's bits 7:0 and widens the destination:
+ *
+ *	low	0	RemapEn		as in the basic format
+ *		1	SupIOPF
+ *		4:2	IntType		000b fixed
+ *		5	RqEoi
+ *		6	DM		0 physical
+ *		7	GuestMode	0: this figure, not Figure 20
+ *		31:8	Destination[23:0]
+ *		63:32	Reserved
+ *	high	7:0	Vector		(bits 71:64)
+ *		55:8	Reserved	(bits 119:72)
+ *		63:56	Destination[31:24] (bits 127:120)
+ *
+ * "Destination[31:8] are reserved and MSZ when MMIO 0x30[XTSup]=0 or MMIO
+ * 0x18[XTEn]=0", so `x2apic' -- XTEn -- decides how wide the destination may
+ * be, and with it clear an id above LAPIC_XAPIC_ID_MAX is refused here as it
+ * is by the basic encoder.
+ */
+#define	AMD_IRTE_GA_LO_RSVD	0xFFFFFFFF00000000ULL
+#define	AMD_IRTE_GA_LO_DEST_HI	0x00000000FFFF0000ULL	/* Destination[23:8] */
+#define	AMD_IRTE_GA_HI_RSVD	0x00FFFFFFFFFFFF00ULL
+#define	AMD_IRTE_GA_HI_DEST	0xFF00000000000000ULL	/* Destination[31:24] */
+
+int iommu_amd_irte_ga(const struct iommu_irte *e, int x2apic, uint64_t out[2])
+{
+	if (e == 0 || out == 0
+	    || (!x2apic && e->destination > LAPIC_XAPIC_ID_MAX))
+		return 0;
+
+	out[0] = AMD_IRTE_REMAP_EN
+	       | ((uint64_t)(e->destination & 0xFFFFFFu) << 8);
+	out[1] = (uint64_t)e->vector
+	       | ((uint64_t)(e->destination >> 24) << 56);
+	return 1;
+}
+
+int iommu_amd_irte_ga_decode(const uint64_t in[2], int x2apic,
+			     struct iommu_irte *out)
+{
+	if (!(in[0] & AMD_IRTE_REMAP_EN))
+		return 0;
+
+	if ((in[0] & (AMD_IRTE_GA_LO_RSVD | AMD_IRTE_GUEST_MODE
+		      | AMD_IRTE_INT_TYPE_MASK | AMD_IRTE_RQ_EOI
+		      | AMD_IRTE_DM | AMD_IRTE_SUP_IOPF))
+	    || (in[1] & AMD_IRTE_GA_HI_RSVD)
+	    || (!x2apic && ((in[0] & AMD_IRTE_GA_LO_DEST_HI)
+			    || (in[1] & AMD_IRTE_GA_HI_DEST))))
+		return -1;
+
+	out->vector = (uint8_t)(in[1] & 0xFF);
+	out->destination = (uint32_t)((in[0] >> 8) & 0xFFFFFFu)
+			 | (uint32_t)((in[1] >> 56) << 24);
 	out->level = 0;
 	out->source = 0;
 	return 1;
@@ -2026,15 +2152,24 @@ int iommu_amd_dte_interrupts_decode(const uint64_t dte[4], uint64_t *table_pa,
  * for (iommu_amd_ir_prepare(), below).
  *
  * Four tables to a frame: a table is a kilobyte, and starting on a kilobyte
- * gives the 128-byte alignment for nothing.
+ * gives the 128-byte alignment for nothing.  #659: or one, when the tables are
+ * built for x2APIC ids -- amd_x2apic -- whose entries are the 128-bit ones
+ * (Figure 19), sixteen bytes each; the same 256 entries, indexed the same way.
  *
  * 🔴 Nothing points at them until -i: only then is a device table entry's
  * interrupt half written, and an INVALIDATE_INTERRUPT_TABLE ever sent.
  */
 #define	AMD_IRT_ENTRIES		256u
-#define	AMD_IRT_BYTES		(AMD_IRT_ENTRIES * 4u)
 #define	AMD_IRT_TABLES		256u
 #define	AMD_CMD_INVALIDATE_INTR	(5ULL << 60)	/* Rev 3.11 §2.4.5, Figure 48 */
+
+static int	amd_x2apic;		/* #659: 128-bit entries, XTEn */
+
+/* Bytes in an entry, four or sixteen, and so in a table. */
+static unsigned amd_irte_bytes(void)
+{
+	return amd_x2apic ? 16u : 4u;
+}
 
 static struct {
 	uint16_t	device;		/* the DeviceID its messages carry   */
@@ -2054,27 +2189,34 @@ static unsigned	amd_irt_in_frame;	/* ... and how many it holds     */
  */
 static uint64_t amd_irt_table(struct iommu_interrupt_tables *t)
 {
+	unsigned words = amd_irte_bytes() / 4u;	/* in an entry */
+	unsigned bytes = AMD_IRT_ENTRIES * amd_irte_bytes();
 	volatile uint32_t *e;
 	uint64_t pa;
 
-	if (amd_irt_frame == 0 || amd_irt_in_frame == 4096u / AMD_IRT_BYTES) {
+	if (amd_irt_frame == 0 || amd_irt_in_frame == 4096u / bytes) {
 		amd_irt_frame = boot_frame_alloc();
 		amd_irt_in_frame = 0;
 		if (amd_irt_frame == 0)
 			return 0;
 		t->frames++;
 	}
-	pa = amd_irt_frame + (uint64_t)amd_irt_in_frame++ * AMD_IRT_BYTES;
+	pa = amd_irt_frame + (uint64_t)amd_irt_in_frame++ * bytes;
 
 	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(pa);
-	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES * words; i++)
 		e[i] = 0;
 
-	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++)
-		if (e[i] == 0)
+	for (unsigned i = 0; i < AMD_IRT_ENTRIES; i++) {
+		uint32_t any = 0;
+
+		for (unsigned w = 0; w < words; w++)
+			any |= e[i * words + w];
+		if (any == 0)
 			t->entries++;
 		else
 			t->wrong++;
+	}
 
 	t->tables++;
 	return pa;
@@ -2147,10 +2289,13 @@ static int amd_irt_source(const struct iommu_scope *s,
 	return 1;
 }
 
-int iommu_amd_irt_build(void)
+int iommu_amd_irt_build(int x2apic)
 {
 	struct iommu_interrupt_tables t = { 0 };
 	int ok = 1;
+
+	/* #659: every table in one format, decided before the first. */
+	amd_x2apic = t.x2apic = x2apic != 0;
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++)
 		if (iommu_unit(i)->answered
@@ -2210,6 +2355,16 @@ int iommu_amd_irt_build(void)
  */
 static int	amd_prepared;
 static int	amd_remapping;
+
+/*
+ * #659: whether the engine is to read the 128-bit entries with 32-bit ids:
+ * the tables were built so, and -i prepared them -- an engine -I turns on
+ * with nothing prepared remaps nothing, and keeps the reset format.
+ */
+static int amd_ir_x2apic(void)
+{
+	return amd_x2apic && amd_prepared;
+}
 
 static int amd_prepare_fail(const struct iommu_interrupt_tables *t)
 {
@@ -2294,21 +2449,26 @@ int iommu_amd_remapping(void)
 
 /*
  * One entry of `device''s table, then every engine told to forget that
- * device's interrupts.  One 32-bit store is the whole entry, and the
- * engine's interrupt table walks are always coherent (§2.2.5), so nothing
- * is flushed.
+ * device's interrupts.  One 32-bit store is the whole basic entry -- `e[0]''s
+ * low half -- and one 16-byte store the whole 128-bit one (#659,
+ * iommu_store_entry16()); the engine's interrupt table walks are always
+ * coherent (§2.2.5), so nothing is flushed.
  */
-static int amd_irt_write(uint16_t device, uint8_t vector, uint32_t value)
+static int amd_irt_write(uint16_t device, uint8_t vector, const uint64_t e[2])
 {
 	const struct iommu_tables *t = iommu_tables();
-	volatile uint32_t *e;
+	uint64_t base;
 	int k = amd_irt_find(device);
 
 	if (k < 0)
 		return 0;
 
-	e = (volatile uint32_t *)(uintptr_t)phys_to_direct(amd_irt[k].table);
-	e[vector] = value;
+	base = phys_to_direct(amd_irt[k].table);
+	if (!amd_x2apic)
+		((volatile uint32_t *)(uintptr_t)base)[vector] = (uint32_t)e[0];
+	else if (!iommu_store_entry16((volatile uint64_t *)(uintptr_t)
+				      (base + (uint64_t)vector * 16u), e))
+		return 0;
 
 	for (unsigned i = 0; i < iommu_unit_count(); i++) {
 		const struct iommu_unit *u = iommu_unit(i);
@@ -2327,14 +2487,23 @@ static int amd_irt_write(uint16_t device, uint8_t vector, uint32_t value)
 int iommu_amd_remap_entry(uint16_t device, uint8_t vector, uint32_t apic_id)
 {
 	struct iommu_irte e = { vector, apic_id, 0, 0 };
-	uint32_t w;
+	uint64_t w[2] = { 0, 0 };
+	uint32_t basic;
 
-	if (!iommu_amd_irte(&e, &w))
-		return 0;
+	if (amd_x2apic) {
+		if (!iommu_amd_irte_ga(&e, 1, w))
+			return 0;
+	} else {
+		if (!iommu_amd_irte(&e, &basic))
+			return 0;
+		w[0] = basic;
+	}
 	return amd_irt_write(device, vector, w);
 }
 
 void iommu_amd_forget_entry(uint16_t device, uint8_t vector)
 {
-	(void) amd_irt_write(device, vector, 0);
+	const uint64_t none[2] = { 0, 0 };
+
+	(void) amd_irt_write(device, vector, none);
 }

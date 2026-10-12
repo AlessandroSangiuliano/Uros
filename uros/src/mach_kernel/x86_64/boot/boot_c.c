@@ -1821,7 +1821,9 @@ static void acpi_selftest(uint32_t info)
 			if (acpi_cpu(i)->apic_id == id)
 				listed = 1;
 
-		kputs("UrMach x86-64: local apic mapped, this cpu is id ");
+		kputs(lapic_x2apic()
+		      ? "UrMach x86-64: local apic in x2APIC mode, left on by the firmware (#659), this cpu is id "
+		      : "UrMach x86-64: local apic mapped, this cpu is id ");
 		kputdec(id);
 		kputs(lapic_is_bsp() ? " (the boot processor)" : " (NOT the bsp?!)");
 		kputs(listed ? ", and acpi lists it\r\n"
@@ -1834,9 +1836,12 @@ static void acpi_selftest(uint32_t info)
 		 * where there is no device and no cache to be wrong about, and
 		 * fails on hardware in ways that look like the device is
 		 * broken.  This is the only place the mistake is visible while
-		 * it is still cheap.
+		 * it is still cheap.  In x2APIC mode there is no page to map:
+		 * the registers are MSRs (#659).
 		 */
-		{
+		if (lapic_x2apic())
+			kputs("UrMach x86-64: no mapping to check: its registers are MSRs\r\n");
+		else {
 			extern uint64_t lapic_probe_va(void);
 			uint64_t va = lapic_probe_va();
 			pt_entry_t *e = pmap_walk(pmap_kernel()->root_pa, va, 0);
@@ -6025,6 +6030,15 @@ static void iommu_selftest(void)
 				      " every device passing through — amd-vi"
 				      " remaps only with it on\r\n");
 
+			/* #659: only a firmware can leave one on; QEMU never does. */
+			if (iommu_remapping_found_on() != 0) {
+				kputs("UrMach x86-64:   remapping was already on in ");
+				kputdec(iommu_remapping_found_on());
+				kputs(" engine(s), left by whoever ran before:"
+				      " turned off before this kernel's table was"
+				      " given (#659)\r\n");
+			}
+
 			kputs("UrMach x86-64:   -i given: interrupt remapping ");
 			if (n == 0) {
 				kputs(asked ? "COULD NOT BE TURNED ON — WRONG, "
@@ -6048,6 +6062,28 @@ static void iommu_selftest(void)
 					      ? " remaps interrupts\r\n"
 					      : " does not remap — WRONG\r\n");
 				}
+				/*
+				 * #659: what the entries' destinations
+				 * hold, which the local APIC's mode must
+				 * match once lapic_choose_mode() switches.
+				 */
+				kputs("UrMach x86-64:   entries for ");
+				if (iommu_remaps_x2apic())
+					kputs(iommu_vendor() == IOMMU_AMD
+					      ? "32-bit apic ids, XTEn and GAEn"
+						" read back set: the local apic is"
+						" planned for x2APIC mode (#659)\r\n"
+					      : "32-bit apic ids, EIME read back"
+						" set: the local apic is planned"
+						" for x2APIC mode (#659)\r\n");
+				else if (lapic_x2apic_planned())
+					kputs("8-bit apic ids: the local apic is"
+					      " planned for x2APIC mode, and an"
+					      " engine cannot carry its ids"
+					      " (#659)\r\n");
+				else
+					kputs("8-bit apic ids: the local apic"
+					      " stays in xAPIC mode (#659)\r\n");
 				if (io != 0 && iommu_ioapic_source(io->id, &sid)) {
 					int amd = iommu_vendor() == IOMMU_AMD;
 
@@ -6066,6 +6102,36 @@ static void iommu_selftest(void)
 						  : ", its source-id in the dmar"
 						    "\r\n");
 				}
+			}
+		} else if (iommu_vendor() == IOMMU_INTEL) {
+			/*
+			 * #659: without -i every pin and MSI-X slot below is
+			 * sent in the old format, and an engine left remapping
+			 * blocks that format when EIME is set or CFIS clear
+			 * (VT-d 5.20 §5.1.4) -- the state a firmware that hands
+			 * over in x2APIC mode leaves, having turned remapping on
+			 * with EIME first (SDM 13.12.7).  Turned off, then read
+			 * from the engines' status, not from this kernel.
+			 */
+			unsigned on;
+
+			iommu_turn_off_inherited_remapping();
+			on = iommu_engines_remapping();
+			kputs("UrMach x86-64:   no -i: interrupt remapping ");
+			if (on != 0) {
+				kputs("still ON in ");
+				kputdec(on);
+				kputs(" engine(s) — WRONG, a message in the old"
+				      " format may be refused (#659)\r\n");
+			} else if (iommu_remapping_found_on() != 0) {
+				kputs("was on in ");
+				kputdec(iommu_remapping_found_on());
+				kputs(" engine(s), left by whoever ran before:"
+				      " turned off, the old format being what"
+				      " every pin and slot here is sent in"
+				      " (#659)\r\n");
+			} else {
+				kputs("off in every engine, as found (#659)\r\n");
 			}
 		}
 	}
@@ -6280,8 +6346,9 @@ static void msi_selftest(void)
  * MSI-X is a 2009 property.  The board that has none must say so rather than
  * report a test that did not run as one that passed.
  *
- * ⚠️ THIS BOOT SPENDS TWO OF SIXTEEN MSI SLOTS, one here and one in the test
- * above, and never gets them back.  That is not a leak but the rule in
+ * ⚠️ THIS BOOT SPENDS THREE OF SIXTEEN MSI SLOTS, one here, one in the test
+ * above and one in irq_reach_selftest() (#659), and never gets them back.
+ * That is not a leak but the rule in
  * device_md_msi_unregister(): a slot is spent because this side cannot know
  * whether some device is still programmed to write to it.  Here it CAN know,
  * because the disarm below is what makes it so -- and the interface has no way
@@ -6289,6 +6356,9 @@ static void msi_selftest(void)
  * wants all sixteen, reclaiming one honestly means the kernel owning the
  * device's table, which is where #457 is going anyway.
  */
+static volatile uint32_t	*msix_card_regs;	/* #659: an 82574L's */
+static unsigned			 msix_card_dev;		/* ... at 00:dev.0  */
+
 static void msix_table_selftest(void)
 {
 	struct pci_msix		m;
@@ -6457,6 +6527,8 @@ static void msix_table_selftest(void)
 			device_md_msi_unregister(slot);
 			return;
 		}
+		msix_card_regs = regs;		/* #659: rung again later */
+		msix_card_dev = nic;
 
 		regs[0x00E4 / 4] = 0x00080808u;	/* every cause -> entry 0  */
 		regs[0x00D0 / 4] = 0x01000004u;	/* link change, and Other  */
@@ -6604,9 +6676,11 @@ static void ioapic_selftest(void)
 
 	/*
 	 * #598's C16: an APIC id past eight bits is refused by a redirection
-	 * entry and by a message address, not cut to its low byte.  Asked of
-	 * the arithmetic: this kernel reads xAPIC ids, which cannot pass eight
-	 * bits, and whether x2APIC follows is still #598's open question.
+	 * entry and by a message address, not cut to its low byte -- and 255,
+	 * which fits them and is their broadcast (LAPIC_XAPIC_ID_MAX, #659).
+	 * Asked of the arithmetic: these are the old format's words, which
+	 * cannot carry more, and an x2APIC id is reached through a remapping
+	 * entry for 32-bit ids instead (#659, irq_reach_selftest() below).
 	 */
 	{
 		uint32_t high = 0;
@@ -6614,17 +6688,46 @@ static void ioapic_selftest(void)
 		unsigned ok = 0;
 
 		ok += ioapic_rte_destination(3, &high) && high == 0x03000000u;
-		ok += ioapic_rte_destination(255, &high) && high == 0xFF000000u;
+		ok += ioapic_rte_destination(254, &high) && high == 0xFE000000u;
+		ok += !ioapic_rte_destination(255, &high);
 		ok += !ioapic_rte_destination(256, &high);
 		ok += msi_destination(3, &address) && address == 0xFEE03000ULL;
+		ok += msi_destination(254, &address) && address == 0xFEEFE000ULL;
+		ok += !msi_destination(255, &address);
 		ok += !msi_destination(256, &address);
-		kputs("UrMach x86-64: an apic id past eight bits refused by a"
-		      " redirection entry and a message address, not cut to its"
-		      " low byte: ");
+		kputs("UrMach x86-64: apic ids 255 and above refused by a"
+		      " redirection entry and a message address, not sent to all"
+		      " or cut to the low byte: ");
 		kputdec(ok);
-		kputs(ok == 5 ? " of 5\r\n"
-			      : " of 5 — WRONG, it would reach the processor"
-				" that has its low byte\r\n");
+		kputs(ok == 8 ? " of 8\r\n"
+			      : " of 8 — WRONG, it would reach every processor"
+				" or the one that has its low byte\r\n");
+	}
+
+	/*
+	 * #659: and the command register, which C16 did not look at -- in
+	 * xAPIC mode an INIT for processor 256 went to processor 0, and one
+	 * for 255 would have gone to every processor.  In x2APIC mode both
+	 * are processors like any other.
+	 */
+	{
+		uint32_t high = 0;
+		unsigned ok = 0;
+
+		ok += lapic_icr_destination(3, 0, &high) && high == 0x03000000u;
+		ok += lapic_icr_destination(254, 0, &high) && high == 0xFE000000u;
+		ok += !lapic_icr_destination(255, 0, &high);
+		ok += !lapic_icr_destination(256, 0, &high);
+		ok += lapic_icr_destination(255, 1, &high) && high == 255u;
+		ok += lapic_icr_destination(256, 1, &high) && high == 256u;
+		kputs("UrMach x86-64: apic ids 255 and above refused by the"
+		      " command register in xAPIC mode, not sent to all or cut to"
+		      " the low byte, and carried whole in x2APIC mode: ");
+		kputdec(ok);
+		kputs(ok == 6 ? " of 6 (#659)\r\n"
+			      : " of 6 — WRONG, an interrupt for it would reach"
+				" every processor or the one that has its low byte"
+				" (#659)\r\n");
 	}
 
 	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, device_irq);
@@ -7379,6 +7482,237 @@ static void intr_nest_selftest(void)
 	      ? " — the mask is the processor's count, not a flag in the "
 		"lock\r\n"
 	      : " — WRONG, the pairing is not what percpu.h says it is\r\n");
+}
+
+/*
+ * 🔑 #659: AN INTERRUPT ARRIVES AT THE PROCESSOR ITS ENTRY NAMES.
+ *
+ * A pin and an MSI-X slot, routed to the processor with the highest APIC id
+ * the words in use can name -- any once the remapping entries carry 32-bit
+ * ids, up to LAPIC_XAPIC_ID_MAX otherwise -- and counted by where they land:
+ * the handler reads lapic_id().  The tests before this one route to the boot
+ * processor, whose id is 0 on every machine here, and 0 is 0 in every format
+ * there is: the old one's eight bits, Intel's xAPIC field and its x2APIC one,
+ * AMD's basic entry and its 128-bit one.  A destination written in the wrong
+ * place, or read in the wrong mode (EIME, XTEn), delivered there all the same.
+ * Aimed at QEMU's processor 256 (--socket1-cpu with sockets=2,cores=256),
+ * an interrupt must arrive at 256 and nowhere else.
+ *
+ * After the other processors are up, as the tick on every processor is: an
+ * interrupt aimed at one still waiting for its startup would wait with it.
+ * The pin is ISA 0's, the 8254, where the HPET did not take it (#593), as in
+ * ioapic_selftest(); the slot is the 82574L's that msix_table_selftest()
+ * rang, on its registers as that test left them mapped (#612), and one more
+ * MSI slot is spent on it for good (device_md_msi_unregister()).
+ */
+static volatile uint32_t	reach_want;
+static volatile uint32_t	reach_there, reach_elsewhere, reach_other;
+
+static void reach_count(void)
+{
+	uint32_t here = lapic_id();
+
+	if (here == reach_want)
+		__sync_fetch_and_add(&reach_there, 1);
+	else {
+		reach_other = here;
+		__sync_fetch_and_add(&reach_elsewhere, 1);
+	}
+}
+
+static void reach_pin(struct trap_frame *frame)
+{
+	(void)frame;
+	reach_count();
+	lapic_eoi();
+}
+
+static void reach_msi(int slot)
+{
+	(void)slot;
+	reach_count();
+}
+
+/* What one source did: there and nowhere else, elsewhere, or never. */
+static void reach_said(const char *source, uint32_t target)
+{
+	kputs("UrMach x86-64: ");
+	kputs(source);
+	kputs(" aimed at apic id ");
+	kputdec(target);
+	kputs(" arrived there ");
+	kputdec(reach_there);
+	kputs(" times and elsewhere ");
+	kputdec(reach_elsewhere);
+	if (reach_there > 0 && reach_elsewhere == 0) {
+		kputs(" — it reaches the processor its entry names (#659)\r\n");
+	} else if (reach_elsewhere != 0) {
+		kputs(" — WRONG, it reached apic id ");
+		kputdec(reach_other);
+		kputs(" instead (#659)\r\n");
+	} else {
+		kputs(" — WRONG, it never arrived (#659)\r\n");
+	}
+}
+
+static void reach_pin_selftest(uint32_t target)
+{
+	uint32_t gsi = acpi_irq_to_gsi(0);
+	uint16_t flags = acpi_irq_flags(0);
+	trap_handler_t found;
+	int had_interrupts;
+
+	if (!ioapic_present() || hpet_legacy_routed()) {
+		kputs(!ioapic_present()
+		      ? "UrMach x86-64: where irq 0 arrives: NOT ASKED, no I/O"
+			" APIC (#659)\r\n"
+		      : "UrMach x86-64: where irq 0 arrives: NOT ASKED, ISA 0"
+			" is the HPET's, LegacyReplacement on (#593, #659)\r\n");
+		return;
+	}
+
+	reach_want = target;
+	reach_there = reach_elsewhere = 0;
+	found = trap_get_handler(IOAPIC_ISA_VECTOR_BASE);
+	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, reach_pin);
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	if (!pit_periodic_start(IRQ0_TEST_HZ)) {
+		kputs("UrMach x86-64: the 8254 refused the requested rate"
+		      " — WRONG (#659)\r\n");
+	} else {
+		ioapic_route(gsi, IOAPIC_ISA_VECTOR_BASE, target, flags);
+		pit_delay_us(20000);
+		ioapic_mask(gsi);
+		pit_periodic_stop();
+
+		/* One period more, for a message already on its way. */
+		pit_delay_us(1000);
+		reach_said("irq 0", target);
+	}
+
+	if (!had_interrupts)
+		interrupts_disable();
+
+	/*
+	 * And the vector back as it was found: on a boot whose
+	 * device_master_irq_selftest() registered irq 0, the device layer's
+	 * trampoline, which acknowledges what nobody claims.  Not zero.  The
+	 * pin is masked, but a tick another processor's local APIC took just
+	 * before is that processor's to dispatch whenever it next runs -- a
+	 * halted vCPU waits for the host, a core for its SMI -- and the period
+	 * above is no bound on it; with zero there it found no handler and the
+	 * machine halted (device_md_irq_unregister() keeps its trampoline for
+	 * the same reason).
+	 */
+	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, found);
+}
+
+static void reach_msix_selftest(uint32_t target)
+{
+	volatile uint32_t *regs = msix_card_regs;
+	unsigned nic = msix_card_dev, slot = 0, data = 0;
+	unsigned long long addr = 0;
+	struct pci_msix m;
+	uint16_t control;
+	int had_interrupts;
+
+	if (regs == 0) {
+		kputs("UrMach x86-64: where an MSI-X slot's interrupt arrives:"
+		      " NOT ASKED, no 82574L was rung at boot (#659)\r\n");
+		return;
+	}
+	if (!pci_msix_probe(0, 0, (uint8_t)nic, 0, &m)
+	    || !msi_claim_vector_to(target, reach_msi, &slot, &addr, &data)) {
+		kputs("UrMach x86-64: the 82574L's slot could not be aimed at"
+		      " apic id ");
+		kputdec(target);
+		kputs(" — WRONG (#659)\r\n");
+		return;
+	}
+	if (!msi_remap_vector(slot, 0, nic, 0, &addr, &data)) {
+		kputs("UrMach x86-64: the slot aimed at apic id ");
+		kputdec(target);
+		kputs(" could not be given a remapping entry — WRONG (#659)\r\n");
+		device_md_msi_unregister(slot);
+		return;
+	}
+
+	control = pci_cfg_read16(0, 0, (uint8_t)nic, 0,
+				 (uint16_t)(m.cap + PCI_MSIX_CONTROL));
+	reach_want = target;
+	reach_there = reach_elsewhere = 0;
+	pci_msix_arm(&m, 0, addr, data);
+	pci_msix_enable(&m);
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	regs[0x00E4 / 4] = 0x00080808u;		/* every cause -> entry 0  */
+	regs[NIC_IMS / 4] = 0x01000004u;	/* link change, and Other  */
+	(void) regs[NIC_ICR / 4];		/* ICR reads clear         */
+	regs[NIC_ICS / 4] = NIC_ICR_LSC;	/* ring it                 */
+	for (unsigned spin = 0; spin < 5000000u
+	     && reach_there + reach_elsewhere == 0; spin++)
+		cpu_pause();
+	regs[NIC_IMC / 4] = 0xFFFFFFFFu;	/* and be quiet again      */
+	pit_delay_us(1000);
+
+	pci_msix_disarm(&m, 0);
+	if (!(control & PCI_MSIX_CTL_ENABLE))
+		pci_msix_disable(&m);
+	msi_unremap_vector(slot, 0, nic, 0);
+	device_md_msi_unregister(slot);
+	if (!had_interrupts)
+		interrupts_disable();
+
+	reach_said("the 82574L's MSI-X slot", target);
+}
+
+static void irq_reach_selftest(void)
+{
+	uint32_t boot = cpu_to_apic(0), target = boot, highest = boot;
+	unsigned cpus = smp_cpu_count();
+	int other = 0;
+
+	/*
+	 * The highest id among the processors that reported in, other than
+	 * the boot processor's whatever its own id: one the boot did not wake
+	 * (smp_wakeable()) or that stayed silent is no target, and is not a
+	 * reason to aim at nobody either.
+	 */
+	for (unsigned i = 1; i < cpus; i++) {
+		uint32_t id = cpu_to_apic(i);
+
+		if (id > highest)
+			highest = id;
+		if (!smp_is_online(i) || !iommu_names_apic_id(id))
+			continue;
+		if (!other || id > target) {
+			target = id;
+			other = 1;
+		}
+	}
+
+	if (!other) {
+		kputs("UrMach x86-64: where an interrupt arrives: NOT ASKED, ");
+		kputs(cpus < 2 ? "one processor, whose id every format names"
+				 " alike (#659)\r\n"
+		      : "no other processor online that the entries can name"
+			" (#659)\r\n");
+		return;
+	}
+	if (!iommu_names_apic_id(highest)) {
+		kputs("UrMach x86-64:   apic id ");
+		kputdec(highest);
+		kputs(" is above 254 and the entries do not carry 32 bits, so"
+		      " the interrupts are aimed at apic id ");
+		kputdec(target);
+		kputs(" (#659)\r\n");
+	}
+
+	reach_pin_selftest(target);
+	reach_msix_selftest(target);
 }
 
 /*
@@ -8469,6 +8803,39 @@ static void double_fault_selftest(void)
 }
 
 /*
+ * #659: why the local APIC's mode line says x2APIC mode was wanted -- -2, or
+ * an id xAPIC mode cannot name (above LAPIC_XAPIC_ID_MAX) the MADT lists with
+ * nobody asking -- and the rest of the line.
+ */
+static void lapic_mode_by(const char *rest)
+{
+	uint32_t needed = lapic_x2apic_needed();
+
+	if (needed == 0) {
+		kputs("by -2");
+	} else {
+		kputs("for apic id ");
+		kputdec(needed);
+		kputs(", which xAPIC mode cannot name,");
+	}
+	kputs(rest);
+}
+
+static void lapic_mode_asked(const char *rest)
+{
+	uint32_t needed = lapic_x2apic_needed();
+
+	if (needed == 0) {
+		kputs("-2 asked for x2APIC");
+	} else {
+		kputs("apic id ");
+		kputdec(needed);
+		kputs(" needs x2APIC");
+	}
+	kputs(rest);
+}
+
+/*
  * The descriptor tables, which now belong to a processor rather than to the
  * boot.
  *
@@ -8622,7 +8989,55 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 * ioapic_selftest() says what was found.
 	 */
 	(void) ioapic_init();
+
+	/*
+	 * xAPIC or x2APIC mode, decided once the DMAR has been read -- the
+	 * discovery reads its opt-out, and iommu_selftest() asks again to be
+	 * answered from what was recorded -- and before any remapping engine
+	 * is written, since the mode is part of what an engine is given (#659).
+	 */
+	(void) iommu_discover();
+	lapic_plan_mode();
 	iommu_selftest();
+
+	/*
+	 * And the switch the plan says, before any other processor is started
+	 * in it (#659).
+	 */
+	lapic_choose_mode();
+	switch (lapic_mode()) {
+	case LAPIC_MODE_XAPIC:
+		kputs("UrMach x86-64: local apic in xAPIC mode: x2APIC not asked for, and xAPIC mode names every id the MADT lists (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_KEPT:
+		kputs("UrMach x86-64: local apic in x2APIC mode, kept as the firmware left it (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_KEPT_OPTED_OUT:
+		kputs("UrMach x86-64: local apic in x2APIC mode, kept as the firmware left it, though its DMAR asks for no x2APIC -- said, not resolved (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_TURNED_ON:
+		kputs("UrMach x86-64: local apic in x2APIC mode, turned on ");
+		lapic_mode_by(" under a hypervisor (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_TURNED_ON_REMAPPED:
+		kputs("UrMach x86-64: local apic in x2APIC mode, turned on ");
+		lapic_mode_by(" with interrupts remapped to 32-bit ids (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_ABSENT:
+		kputs("UrMach x86-64: local apic in xAPIC mode: ");
+		lapic_mode_asked(", and CPUID offers none (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_OPTED_OUT:
+		kputs("UrMach x86-64: local apic in xAPIC mode: ");
+		lapic_mode_asked(", and the DMAR asks for none (#659)\r\n");
+		break;
+	case LAPIC_MODE_X2APIC_NOT_ON_METAL:
+		kputs("UrMach x86-64: local apic in xAPIC mode: ");
+		lapic_mode_asked(", which on bare metal needs interrupts remapped"
+				 " to 32-bit ids, and they are not (SDM 13.12.6)"
+				 " (#659)\r\n");
+		break;
+	}
 	msi_selftest();
 	msix_table_selftest();
 	ioapic_selftest();
@@ -8644,12 +9059,18 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 		unsigned up = smp_start_others();
 
 		kputs("UrMach x86-64: woke ");
-		kputdec(smp_cpu_count() - 1);
+		kputdec(smp_woken_count());
 		kputs(" processors, ");
 		kputdec(up);
 		kputs(" reported in — ");
 		kputdec(smp_online_count());
 		kputs(" online");
+		if (smp_woken_count() + 1 < smp_cpu_count()) {
+			kputs(", ");
+			kputdec(smp_cpu_count() - 1 - smp_woken_count());
+			kputs(" not woken, their ids above what xAPIC mode names"
+			      " (#659)");
+		}
 		if (left != 0) {
 			kputs(", ");
 			kputdec(left);
@@ -8684,10 +9105,33 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 				kputdec(cpu);
 				kputs(":");
 				kputdec(cpu_to_apic(cpu));
-				if (!smp_is_online(cpu))
+				if (!smp_wakeable(cpu))
+					kputs("(not woken)");
+				else if (!smp_is_online(cpu))
 					kputs("(silent)");
 			}
 			kputs("\r\n");
+		}
+
+		/*
+		 * #659: and each in the boot processor's APIC mode from the
+		 * moment it could report a fault (ap_start_c()), where a report
+		 * would otherwise have touched the other mode's registers.
+		 */
+		if (up != 0) {
+			unsigned late = smp_ap_mode_late();
+
+			kputs("UrMach x86-64:   ");
+			kputdec(late <= up ? up - late : 0);
+			kputs(" of ");
+			kputdec(up);
+			kputs(late == 0
+			      ? " in the boot processor's apic mode from their first"
+				" reportable fault on (#659)\r\n"
+			      : " in the boot processor's apic mode from their first"
+				" reportable fault on — WRONG, a fault reported"
+				" before the switch reads the other mode's"
+				" registers (#659)\r\n");
 		}
 	}
 
@@ -8702,6 +9146,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	silent_cpu_probe();
 #endif
 	smp_timer_selftest();
+	irq_reach_selftest();
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();

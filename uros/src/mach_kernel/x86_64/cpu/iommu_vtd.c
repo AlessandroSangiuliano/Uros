@@ -19,13 +19,12 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/lapic.h>		/* LAPIC_XAPIC_ID_MAX, #659 */
 #include <cpu/pci_cfg.h>
-#include <cpu/regs.h>		/* cpu_has_cmpxchg16b, #598 */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <sync/lock.h>		/* hw_lock: each queue's own, #598 */
-#include <sync/atomic.h>	/* one 16-byte store per entry, #598 */
 
 #include <device/pci.h>		/* PCI_VENDOR_ID */
 
@@ -62,6 +61,18 @@ struct dmar_table {
 
 _Static_assert(sizeof(struct dmar_table) == 48,
 	       "the DMAR header is forty-eight bytes before its structures");
+
+/*
+ * #659: bit 1 counts only beside bit 0 -- X2APIC_OPT_OUT "is valid only when
+ * the INTR_REMAP field (bit 0) is Set" (Rev 5.20 §8.1).  Read alone, a DMAR
+ * with no remapping and the bit set refused -2 under a hypervisor, where
+ * x2APIC mode needs no remapping at all.
+ */
+int iommu_vtd_dmar_opts_out(uint8_t flags)
+{
+	return (flags & (DMAR_FLAG_INTR_REMAP | DMAR_FLAG_X2APIC_OPT_OUT))
+	       == (DMAR_FLAG_INTR_REMAP | DMAR_FLAG_X2APIC_OPT_OUT);
+}
 
 struct dmar_entry {
 	uint16_t	type;
@@ -828,29 +839,6 @@ int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
  * wrong in a way that produces a correct-looking machine.  The moment attach
  * is on a path that runs often, this is the thing to sharpen.
  */
-/*
- * 🔴 ONE 16-BYTE STORE (#598's C20), for an entry an engine may be reading:
- * a context entry -- "software performing an SSPTPTR or Translation Type (TT)
- * field update must use a 16-Byte aligned atomic operation" (§6.2.2.1) -- or
- * an interrupt remapping entry, which hardware reads whole "as software may
- * change the contents of the IRTE atomically" (§5.1.4).  Written as two
- * stores, a present entry is, between them, an entry nobody wrote.  On a
- * processor without the instruction it answers no, and nothing is written.
- */
-static int vtd_store_entry(volatile uint64_t *at, const uint64_t e[2])
-{
-	volatile struct atomic128 *slot = (volatile struct atomic128 *)at;
-	struct atomic128 was, now = { e[0], e[1] };
-
-	if (!cpu_has_cmpxchg16b())
-		return 0;
-	was.lo = slot->lo;
-	was.hi = slot->hi;
-	while (!atomic_cmpxchg128(slot, &was, now))
-		;
-	return 1;
-}
-
 int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 {
 	const struct iommu_tables *t = iommu_tables();
@@ -887,7 +875,7 @@ int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 	 * and address width -- the entry nobody wrote, which the order was
 	 * meant to avoid and only moved (C20).
 	 */
-	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
+	if (!iommu_store_entry16(&ctx[devfn * VTD_ENTRY_WORDS], entry))
 		return 0;
 	iommu_table_written(&ctx[devfn * VTD_ENTRY_WORDS]);	/* C7 */
 
@@ -937,7 +925,7 @@ int iommu_vtd_detach(uint16_t bdf)
 	iommu_vtd_context_blocked(entry);
 
 	/* One store, as in attach (C20), and out of the caches (C7). */
-	if (!vtd_store_entry(&ctx[devfn * VTD_ENTRY_WORDS], entry))
+	if (!iommu_store_entry16(&ctx[devfn * VTD_ENTRY_WORDS], entry))
 		return 0;
 	iommu_table_written(&ctx[devfn * VTD_ENTRY_WORDS]);
 
@@ -1353,7 +1341,7 @@ int iommu_vtd_read(void)
 	iommu_record_platform(dmar->host_address_width
 			      ? dmar->host_address_width + 1u : 0u,
 			      (dmar->flags & DMAR_FLAG_INTR_REMAP) != 0,
-			      (dmar->flags & DMAR_FLAG_X2APIC_OPT_OUT) != 0);
+			      iommu_vtd_dmar_opts_out(dmar->flags));
 
 	first_unit = iommu_unit_count();
 	exact = 1;
@@ -1491,7 +1479,11 @@ int iommu_vtd_irte(const struct iommu_irte *e, int x2apic, uint64_t out[2])
 	if (e == 0 || out == 0)
 		return 0;
 
-	if (!x2apic && e->destination > 0xFF)
+	/*
+	 * In xAPIC mode eight bits, and FFH among them is every processor
+	 * (LAPIC_XAPIC_ID_MAX, #659): an entry the kernel writes names one.
+	 */
+	if (!x2apic && e->destination > LAPIC_XAPIC_ID_MAX)
 		return 0;
 
 	lo = VTD_IRTE_P | VTD_IRTE_VECTOR(e->vector);
@@ -1715,10 +1707,16 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
  * the entries mean would accept garbage beside a clear P -- garbage that
  * becomes an interrupt the day something sets that P.
  *
- * In xAPIC mode, EIME clear: this kernel's APIC ids have eight bits, and
- * whether x2APIC follows is #598's last question.  The word IRTA_REG will be
- * given is composed here, so that the encoder meets a real address before an
- * engine does; nothing is written to it yet.
+ * EIME as the front end decided (#659): set when the local APIC is planned for
+ * x2APIC mode and every engine has EIM, and then every entry's destination is
+ * all of 63:32 (Rev 5.20 §9.9); clear otherwise, and then only 47:40 is read.
+ * The word IRTA_REG will be given is composed here, so that the encoder meets
+ * a real address before an engine does; nothing is written to it yet.  🔑 The
+ * entries' format is read off that word, not off the decision: what the
+ * engines are told and how every entry is encoded are one bit, EIME, and
+ * vtd_x2apic keeps it for the entries written later, since EIME "must not"
+ * change while remapping is on (§11.4.10).  vtd_ir_on() reads the word back
+ * from every engine before the table is used.
  */
 #define	VTD_IRT_ENTRIES		256u
 
@@ -1727,7 +1725,9 @@ _Static_assert(VTD_IRT_PINS <= VTD_IRT_MSI_FIRST
 	       && VTD_IRT_HPET_FIRST + VTD_IRT_HPET_SLOTS <= VTD_IRT_ENTRIES,
 	       "the index map's three ranges overlap, or run past the table");
 
-int iommu_vtd_irt_build(void)
+static int vtd_x2apic;			/* #659: the entries carry 32 bits */
+
+int iommu_vtd_irt_build(int x2apic)
 {
 	struct iommu_interrupt_tables t = { 0 };
 	volatile uint64_t *irt;
@@ -1739,11 +1739,13 @@ int iommu_vtd_irt_build(void)
 			t.engines++;
 
 	pa = t.engines ? boot_frame_alloc() : 0;
-	if (pa == 0 || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, 0, &t.intel_irta)) {
+	if (pa == 0
+	    || !iommu_vtd_irta(pa, VTD_IRT_ENTRIES, x2apic, &t.intel_irta)) {
 		iommu_record_interrupt_tables(&t);
 		return 0;
 	}
 
+	vtd_x2apic = t.x2apic = (t.intel_irta & VTD_IRTA_EIME) != 0;
 	t.intel_table = pa;
 	t.tables = 1;
 	t.frames = 1;
@@ -2159,7 +2161,7 @@ int iommu_vtd_remapping(void)
 }
 
 /*
- * One 16-byte store (vtd_store_entry(), C20): a present entry rewritten in two
+ * One 16-byte store (iommu_store_entry16(), C20): a present entry rewritten in two
  * would be, between them, the new vector to the old destination, or the old
  * source let in.  Then the line out of the caches for an engine that does not
  * snoop, and every engine that remaps told to forget the entry, each through
@@ -2180,7 +2182,7 @@ static int vtd_irte_write(uint32_t index, const uint64_t e[2])
 
 	slot = (volatile uint64_t *)(uintptr_t)
 		phys_to_direct(t->intel_table + (uint64_t)index * 16u);
-	if (!vtd_store_entry(slot, e))
+	if (!iommu_store_entry16(slot, e))
 		return 0;
 
 	if (vtd_irt_uncached)
@@ -2207,7 +2209,7 @@ int iommu_vtd_remap_pin(unsigned pin, uint16_t source, uint8_t vector,
 	uint64_t w[2];
 
 	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_PIN, pin, &index)
-	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w))
+	    || !iommu_vtd_irte(&e, vtd_x2apic, w) || !vtd_irte_write(index, w))
 		return 0;
 
 	return iommu_vtd_ioapic_rte(index, vector, level, active_low, 0,
@@ -2223,7 +2225,7 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
 	uint64_t w[2];
 
 	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_MSI, slot, &index)
-	    || !iommu_vtd_irte(&e, 0, w) || !vtd_irte_write(index, w)
+	    || !iommu_vtd_irte(&e, vtd_x2apic, w) || !vtd_irte_write(index, w)
 	    || !iommu_vtd_msi(index, &a, &dw))
 		return 0;
 
@@ -2245,16 +2247,17 @@ int iommu_vtd_remap_msi(unsigned slot, uint16_t source, uint8_t vector,
  *
  * Composed by iommu_vtd_hpet_words() and only then written: the words alone
  * are what the boot's self-test decodes back for an invented source
- * (iommu_interrupt_check()), since no QEMU table names an HPET.
+ * (iommu_interrupt_check()), since no QEMU table names an HPET -- in both
+ * modes, which is why the mode is an argument and not the table's (#659).
  */
 int iommu_vtd_hpet_words(unsigned comparator, uint16_t source, uint8_t vector,
-			 uint32_t apic_id, uint32_t *index, uint64_t irte[2],
-			 uint32_t *address, uint32_t *data)
+			 uint32_t apic_id, int x2apic, uint32_t *index,
+			 uint64_t irte[2], uint32_t *address, uint32_t *data)
 {
 	struct iommu_irte e = { vector, apic_id, 0, source };
 
 	return iommu_vtd_irt_index(IOMMU_VTD_IRT_HPET, comparator, index)
-	       && iommu_vtd_irte(&e, 0, irte)
+	       && iommu_vtd_irte(&e, x2apic, irte)
 	       && iommu_vtd_msi(*index, address, data);
 }
 
@@ -2270,7 +2273,7 @@ int iommu_vtd_remap_hpet(unsigned comparator, uint16_t source, uint8_t vector,
 	 * and not naming an entry nobody wrote.
 	 */
 	if (!iommu_vtd_hpet_words(comparator, source, vector, apic_id,
-				  &index, w, &a, &d)
+				  vtd_x2apic, &index, w, &a, &d)
 	    || !vtd_irte_write(index, w))
 		return 0;
 	*address = a;
@@ -2324,11 +2327,28 @@ static void vtd_ir_off(volatile uint8_t *regs)
 	(void) wait_bit(regs, VTD_GSTS, VTD_GSTS_IRES, 0, 0);
 }
 
+static unsigned vtd_ir_found_on;	/* #659: engines a predecessor left on */
+
 static int vtd_ir_on(unsigned unit, volatile uint8_t *regs,
 		     const struct iommu_unit *u,
 		     const struct iommu_interrupt_tables *t)
 {
 	uint32_t keep;
+
+	/*
+	 * Off first, where whoever ran before us left remapping on (#659):
+	 * EIME "must not" be modified while it is active (IRES=1, Rev 5.20
+	 * §11.4.10), and the table it reads is about to be replaced.  Linux,
+	 * outside kdump, turns a remapping it finds on off before programming
+	 * it.  Counted, for the boot to say: QEMU never leaves it on, so only
+	 * a firmware can show this path.
+	 */
+	if (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES) {
+		vtd_ir_found_on++;
+		vtd_ir_off(regs);
+		if (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES)
+			return 0;
+	}
 
 	if (!vtd_queue_running(unit)
 	    && !vtd_queue_start(unit, regs, VTD_ECAP_IRO(u->vendor_caps[1])))
@@ -2345,6 +2365,16 @@ static int vtd_ir_on(unsigned unit, volatile uint8_t *regs,
 	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
 	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_SIRTP;
 	if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_IRTPS, 1, 0))
+		return 0;
+
+	/*
+	 * Read back (#659): IRTA_REG is RW (Rev 5.20 §11.4.10), and the word it
+	 * holds is this engine's format -- EIME says how wide it reads every
+	 * entry's destination, and is RsvdZ on an engine without EIM -- which
+	 * the boot then names as read.  An engine that did not take the word as
+	 * written is not given the table.
+	 */
+	if (*(volatile uint64_t *)(regs + VTD_IRTA_REG) != t->intel_irta)
 		return 0;
 
 	if (!VTD_CAP_ESIRTPS(u->vendor_caps[0])) {
@@ -2405,4 +2435,47 @@ unsigned iommu_vtd_ir_enable(void)
 int iommu_vtd_unit_remapping(unsigned unit)
 {
 	return unit < IOMMU_MAX_UNITS && vtd_remapping[unit];
+}
+
+unsigned iommu_vtd_ir_found_on(void)
+{
+	return vtd_ir_found_on;
+}
+
+/*
+ * #659: a boot without -i, whose messages are all in the old format: every
+ * engine a predecessor left remapping turned off, as Linux turns it off
+ * outside kdump, and counted with vtd_ir_on()'s finds.  EIME and CFI are
+ * left as found: with IRES clear neither is read (§5.1.4).
+ */
+void iommu_vtd_ir_off_inherited(void)
+{
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (!u->answered || regs == 0
+		    || !(*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES))
+			continue;
+		vtd_ir_found_on++;
+		vtd_ir_off(regs);
+	}
+}
+
+/* How many engines remap now, by their own status rather than this kernel's. */
+unsigned iommu_vtd_ir_running(void)
+{
+	unsigned on = 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs =
+			(volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (u->answered && regs != 0
+		    && (*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES))
+			on++;
+	}
+	return on;
 }

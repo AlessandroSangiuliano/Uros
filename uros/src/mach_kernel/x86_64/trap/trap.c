@@ -186,6 +186,14 @@ void trap_set_handler(unsigned vector, trap_handler_t handler)
 	ext_handler[vector - T_EXTERNAL_FIRST] = handler;
 }
 
+trap_handler_t trap_get_handler(unsigned vector)
+{
+	if (vector < T_EXTERNAL_FIRST || vector >= IDT_VECTORS)
+		panic("trap: only the vectors above the exceptions are claimed");
+
+	return ext_handler[vector - T_EXTERNAL_FIRST];
+}
+
 static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
 {
 	struct idt_gate *g = &idt[vector];
@@ -730,7 +738,12 @@ static void report_return_symbol(uint64_t ret)
  * The lock is bounded and released before the caller halts.  A processor that
  * faults while holding it must not take the others' last words down with it,
  * so the wait gives up and prints anyway: interleaved output is worse than
- * serialised output and far better than none.
+ * serialised output and far better than none.  #659: it is the console's
+ * report lock now (cons_report_begin()), which the trap report holds around
+ * the whole report and this takes again inside it, and which keeps every
+ * other processor's bytes out as well, where this lock kept two backtraces
+ * apart and nothing else: an application processor's "no handler" came out
+ * interleaved with the boot processor's lines.
  *
  * ⚠️ The label is asked of the interrupt controller, not of cpu_number().
  * cpu_number() reads this processor's per-CPU block through %gs, and before a
@@ -741,8 +754,6 @@ static void report_return_symbol(uint64_t ret)
  * labelled with a processor that is not the one that died is worse than one
  * with no label at all.
  */
-static volatile uint64_t backtrace_lock;
-
 void x86_64_backtrace(uint64_t rbp)
 {
 	x86_64_backtrace_after(rbp, 0);
@@ -751,13 +762,8 @@ void x86_64_backtrace(uint64_t rbp)
 void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 {
 	pmap_t kernel = pmap_kernel();
-	uint64_t spins;
 
-	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
-		if (atomic_cmpxchg64(&backtrace_lock, 0, 1) == 0)
-			break;
-		cpu_pause();
-	}
+	cons_report_begin();
 
 	if (first != 0)
 		first();
@@ -836,7 +842,7 @@ void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 		rbp = next;
 	}
 
-	atomic_store64(&backtrace_lock, 0);
+	cons_report_end();
 }
 
 /*
@@ -893,7 +899,15 @@ unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
 		uint64_t next, ret;
 		const char *name;
 
-		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+		/*
+		 * A kernel address, as the printer asks (#518), and not merely a
+		 * canonical one: since #659 this runs in the handler, for traps
+		 * from ring 3 too, where the live cr3 is a task's and a low
+		 * frame pointer the kernel's pmap calls mapped -- the identity
+		 * map of the low gigabyte -- is read through the task's, or is
+		 * a user page read with AC clear: a fault inside the handler.
+		 */
+		if ((rbp & 7) != 0 || !va_is_kernel(rbp))
 			break;
 		if (pmap_extract(kernel, rbp) == 0
 		    || pmap_extract(kernel, rbp + 8) == 0)
@@ -980,6 +994,11 @@ static void trap_record_frame(const struct trap_frame *frame)
 	last_trap.rsp = frame->rsp;
 	last_trap.frame = (uint64_t)(uintptr_t)frame;
 	last_trap.rbp = frame->rbp;
+	/* #659: walked now, while it is the stack; see <trap/trap.h>. */
+	last_trap.bt_depth = x86_64_backtrace_probe(frame->rbp,
+						    &last_trap.bt_first,
+						    "x86_64_boot",
+						    &last_trap.bt_reached_boot);
 	last_trap.caught = 1;
 }
 
@@ -2130,6 +2149,8 @@ void trap_dispatch(struct trap_frame *frame)
 		}
 	}
 
+	/* One report at a time, the others' bytes held out of it (#659). */
+	cons_report_begin();
 	tputs("\r\nUrMach x86-64: trap ");
 	tputs(trap_name(frame->vector));
 	tputs(" (vector ");
@@ -2187,6 +2208,7 @@ void trap_dispatch(struct trap_frame *frame)
 	 * nobody has fixed means taking it again, so "continue" ends here too.
 	 */
 	tputs("UrMach x86-64: no handler — halted\r\n");
+	cons_report_end();
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }

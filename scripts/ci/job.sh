@@ -383,7 +383,10 @@ if [ -n "$ABLATE" ]; then
 			n=$((n + 1))
 		done < <(tail -n +2 "$OUT/ablate/ablate.csv")
 	fi
-	want=$((BOOTS * (HAS_TCG + HAS_KVM) * 2))
+	# What ablate.sh planned, which a patch's Accel: line can narrow to one
+	# accelerator (#659); the arithmetic only where the plan does not say.
+	want=$(sed -n 's/^ablate: plan: .*, \([0-9][0-9]*\) in all$/\1/p' <<< "$AB_PLAN")
+	[ -n "$want" ] || want=$((BOOTS * (HAS_TCG + HAS_KVM) * 2))
 	{
 		echo "ablate:   ${PATCHES[*]##*/}, $BOOTS boot(s) per arm and accelerator, $n of $want boots reported, ablate.sh status $rc"
 		grep '^ablate: \(ablated tree caught\|fixed tree passed\)' "$OUT/ablate.out" | sed 's/^ablate: /result:   /'
