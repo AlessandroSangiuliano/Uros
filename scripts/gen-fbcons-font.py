@@ -26,7 +26,7 @@
 # Usage:
 #   scripts/gen-fbcons-font.py [PSF.gz] > uros/src/mach_kernel/device/fbcons_font.h
 
-import gzip, struct, sys, os, unicodedata
+import gzip, hashlib, struct, sys, os, unicodedata
 
 DEFAULT = "/usr/share/kbd/consolefonts/cp850-8x16.psfu.gz"
 
@@ -56,7 +56,10 @@ def load_font(path):
         mode, charsize = data[2], data[3]
         nglyphs = 512 if (mode & 0x01) else 256
         glyphs = data[4:4 + nglyphs * charsize]
-        if not mode & 0x02:
+        # kbd's psf.h: PSF1_MODEHASTAB 0x02, PSF1_MODEHASSEQ 0x04 -- a table
+        # with sequences is a table too (#661's review), and either bit
+        # means one follows the glyphs.
+        if not mode & 0x06:
             sys.exit("%s has no Unicode table (PSF1 mode %#x)" % (path, mode))
         return glyphs, 8, charsize, psf1_table(data, 4 + nglyphs * charsize, nglyphs)
     if data[:4] == b"\x72\xb5\x4a\x86":    # PSF2
@@ -164,7 +167,9 @@ HEAD = """\
 #define _DEVICE_FBCONS_FONT_H_
 
 /* 8x16 console font, codepage-437/850 layout (public-domain PC VGA font,
- * extracted from kbd %s).  256 glyphs, 16 bytes each, MSB=left. */
+ * extracted from kbd %s).  256 glyphs, 16 bytes each, MSB=left.
+ * The font read, decompressed, has sha256
+ *   %s */
 static const unsigned char fbcons_font8x16[256][16] = {
 """
 
@@ -202,7 +207,11 @@ def main():
     if len(table) < 256:
         sys.exit("expected 256 glyphs, got %d" % len(table))
     cs = 16
-    out = [HEAD % os.path.basename(path).replace(".gz", "")]
+    # The font is the host's, and a header nobody regenerates is not known to
+    # be its output (#661's review): the hash names the font it came from.
+    raw = gzip.open(path, "rb").read() if path.endswith(".gz") else open(path, "rb").read()
+    out = [HEAD % (os.path.basename(path).replace(".gz", ""),
+                   hashlib.sha256(raw).hexdigest())]
     for g in range(256):
         rows = glyphs[g * cs:(g + 1) * cs].ljust(cs, b"\x00")
         out.append("  { %s }, /* 0x%02x */\n" % (",".join("0x%02x" % b for b in rows), g))
