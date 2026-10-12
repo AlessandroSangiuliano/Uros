@@ -5,12 +5,12 @@ Run: --entry 14 1200 -smp 4
 Measure: what task_create and task_terminate cost on more than one processor (#566, #548's trap sweep), against the same tree without the patch
 
 diff --git a/uros/src/mach_kernel/kern/rcu.c b/uros/src/mach_kernel/kern/rcu.c
-index 01d557f8..332df989 100644
+index 5c4ba4a2..ec19ce4c 100644
 --- a/uros/src/mach_kernel/kern/rcu.c
 +++ b/uros/src/mach_kernel/kern/rcu.c
 @@ -138,6 +138,21 @@ urmach_synchronize_rcu(void)
  	int		c;
- 	int		me = cpu_number();
+ 	int		me;
  
 +	/*
 +	 * Every grace period returns at once, which is UNSAFE -- a reader may still hold what the caller is about to

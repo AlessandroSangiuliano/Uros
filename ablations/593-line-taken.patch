@@ -5,11 +5,11 @@ Run: --entry 0 600 -smp 4
 Expect: LegacyReplacement would take the 8254's or the RTC's input from the driver that routed it
 
 diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
-index 3b36d637..e24d884e 100644
+index 5940e2a8..25c85116 100644
 --- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
 +++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
-@@ -156,6 +156,18 @@ static int choose_route(unsigned *which, uint32_t *cap0)
- 	struct hpet_comparator_caps caps;
+@@ -172,6 +172,18 @@ static int choose_route(unsigned *which, uint32_t *cap0)
+ 	uint16_t source;
  	unsigned n;
  
 +	/*
@@ -25,5 +25,5 @@ index 3b36d637..e24d884e 100644
 +		ioapic_unmask(acpi_irq_to_gsi(8));
 +
  	*cap0 = 0;
+ 	fsb_passed_over = 0;
  	for (n = 0; n < hpet_comparators(); n++) {
- 		hpet_comparator_caps(n, &caps);

@@ -5,10 +5,10 @@ Run: --entry 5 600 -smp 4
 Expect: (preempt_test|fpu_stress|state_test|ast_test|wait_preempt): NOT ASKED .*alone
 
 diff --git a/uros/src/mach_kernel/x86_64/thread/fpu_stress.c b/uros/src/mach_kernel/x86_64/thread/fpu_stress.c
-index 492e0db6..a2ade0f0 100644
+index dc28fba1..1418f44e 100644
 --- a/uros/src/mach_kernel/x86_64/thread/fpu_stress.c
 +++ b/uros/src/mach_kernel/x86_64/thread/fpu_stress.c
-@@ -115,6 +115,15 @@ fpu_stress_run(void)
+@@ -130,6 +130,15 @@ fpu_stress_run_body(int me)
  		break;
  	}
  
@@ -25,12 +25,12 @@ index 492e0db6..a2ade0f0 100644
  	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
  	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
 diff --git a/uros/src/mach_kernel/x86_64/thread/state_test.c b/uros/src/mach_kernel/x86_64/thread/state_test.c
-index 12d96c31..b9ffea8f 100644
+index 2dfec9f3..e2a63d88 100644
 --- a/uros/src/mach_kernel/x86_64/thread/state_test.c
 +++ b/uros/src/mach_kernel/x86_64/thread/state_test.c
-@@ -693,6 +693,15 @@ thread_state_entry_test(void)
+@@ -707,6 +707,15 @@ thread_state_entry_test_body(int me)
  
- 	target = another_processor();
+ 	target = another_processor(me);
  
 +	/*
 +	 * #563: pretend this processor is the only one running, so the line
@@ -45,10 +45,10 @@ index 12d96c31..b9ffea8f 100644
  	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
  	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
 diff --git a/uros/src/mach_kernel/x86_64/time/preempt_test.c b/uros/src/mach_kernel/x86_64/time/preempt_test.c
-index a3c3f270..a6a0e942 100644
+index ae6c5a66..0300b060 100644
 --- a/uros/src/mach_kernel/x86_64/time/preempt_test.c
 +++ b/uros/src/mach_kernel/x86_64/time/preempt_test.c
-@@ -433,6 +433,15 @@ preempt_test_run_remote(void)
+@@ -448,6 +448,15 @@ preempt_test_run_remote_body(int me)
  		break;
  	}
  
@@ -65,10 +65,10 @@ index a3c3f270..a6a0e942 100644
  	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
  	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
 diff --git a/uros/src/mach_kernel/x86_64/trap/ast_test.c b/uros/src/mach_kernel/x86_64/trap/ast_test.c
-index 6fcbaad9..102996a6 100644
+index 31cf899a..3f6ead44 100644
 --- a/uros/src/mach_kernel/x86_64/trap/ast_test.c
 +++ b/uros/src/mach_kernel/x86_64/trap/ast_test.c
-@@ -190,6 +190,15 @@ kernel_ast_test(void)
+@@ -205,6 +205,15 @@ kernel_ast_test_body(int me)
  		break;
  	}
  
@@ -85,10 +85,10 @@ index 6fcbaad9..102996a6 100644
  	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
  	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here
 diff --git a/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c b/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c
-index e19ea525..b78c958c 100644
+index 00e4854c..7a66a870 100644
 --- a/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c
 +++ b/uros/src/mach_kernel/x86_64/trap/wait_preempt_test.c
-@@ -235,6 +235,15 @@ kernel_wait_preempt_test(void)
+@@ -250,6 +250,15 @@ kernel_wait_preempt_test_body(int me)
  		break;
  	}
  
