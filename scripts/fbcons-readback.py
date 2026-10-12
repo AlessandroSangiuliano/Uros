@@ -52,8 +52,11 @@
 #           no monitor, no boot, a monitor or a screendump that broke, an
 #           entry grub.cfg does not have, a --wait-for found before the
 #           screen existed, a run that was stopped and continued (a Ctrl-Z
-#           and fg), a lock that was not this run's any more when it ended;
-#           --all-lines is not given with --kvm either
+#           and fg), a lock that was not this run's any more when it ended,
+#           a report that could not be written -- stdout's reader gone, a
+#           full disk: stdout goes out a line at a time, and a verdict the
+#           run cannot say is not one it gives; --all-lines is not given
+#           with --kvm either
 #  128+n    stopped by TERM, HUP or INT: the run gives the lock, the fifos,
 #           the monitor's socket and qemu back, then dies by that signal, as
 #           a shell expects; a signal it was started with ignored (nohup's
@@ -1070,7 +1073,9 @@ def main():
         rc = 0
     # The instrument breaking, in any mode, is a run that could not be made,
     # not a screen that disagreed: a monitor closed or timed out, a
-    # screendump cut short or not a PPM (#661's review, two rounds).
+    # screendump cut short or not a PPM (#661's review, two rounds) -- and
+    # the report itself, stdout written a line at a time to a reader gone or
+    # a full disk (#661's review, thirteen rounds).
     except (OSError, SystemExit, ValueError) as e:
         print(f"fbcons-readback: the experiment broke: {stopped_or(e)}",
               file=sys.stderr)
