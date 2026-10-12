@@ -51,7 +51,9 @@
 #        2  the experiment could not be run, or compared nothing: no qemu,
 #           no monitor, no boot, a monitor or a screendump that broke, an
 #           entry grub.cfg does not have, a --wait-for found before the
-#           screen existed; --all-lines is not given with --kvm either
+#           screen existed, a TERM, HUP or INT, after which the run leaves
+#           as cleanly as from any other end; --all-lines is not given with
+#           --kvm either
 #
 # 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
 # QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
@@ -158,19 +160,28 @@ NEVER_OPENED = re.compile(r"[^\n]*(NO usable framebuffer from the loader|"
                           r"[^\n]*")
 
 
-def quiet():
-    """From here on no TERM or HUP may cut the way out short: both are
-    ignored (#661's review, six rounds)."""
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, signal.SIG_IGN)
+# 🔴 TERM, HUP and INT are blocked from the start and looked at only where
+# the run can stop cleanly -- each turn of a wait, after the disk is made --
+# so none lands in the middle of taking the lock, starting qemu or giving
+# them back, which a handler that raised could not promise however it was
+# placed; the children get them unblocked (#661's review, seven rounds).
+STOP = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
 
 
-def stop_on(signum, _frame):
-    """🔴 A TERM, or a HUP when the terminal goes, leaves the way every other
-    end does, once, so the lock, the fifos, the monitor's socket and qemu do
-    not outlive the run; a second one is ignored while it leaves."""
-    quiet()
-    sys.exit(f"stopped by {signal.Signals(signum).name}")
+def stop_if_asked():
+    """A run asked to stop leaves from here, the way every other end does:
+    a SystemExit, which the run's own handlers turn into 2 and its finally
+    into a clean exit.  An ignored signal (nohup's HUP) is never pending."""
+    asked = signal.sigpending() & STOP
+    if asked:
+        raise SystemExit("stopped by " + " and ".join(
+            sorted(signal.Signals(sig).name for sig in asked)))
+
+
+def child_signals():
+    """In a child, between fork and exec: the run's blocked signals
+    unblocked, so make-disk and qemu answer them as they always have."""
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
 
 
 def entry_has_f(entry):
@@ -382,6 +393,7 @@ def main():
                          "the bare-metal one (#595); --entry is then its "
                          "GRUB's business")
     a = ap.parse_args()
+    signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     if a.no_uart and a.send is not None:
         ap.error("--send types at the serial line, and --no-uart has none")
     if a.all_lines and (a.no_uart or a.send is not None or a.freeze):
@@ -400,10 +412,24 @@ def main():
         print(f"fbcons-readback: no kernel at {kernel}", file=sys.stderr)
         return 2
 
+    if a.cdrom is not None and not os.path.exists(a.cdrom):
+        print(f"fbcons-readback: no image at {a.cdrom}", file=sys.stderr)
+        return 2
+
+    # The lock before the disk, as run-x86_64.sh takes it: made first, the
+    # disk was remade under a harness run that held the lock, whose
+    # xfile-verify then read a blank image (#661's review, seven rounds).
+    try:
+        os.mkdir(LOCK)
+    except FileExistsError:
+        print(f"fbcons-readback: another run is in flight ({LOCK}) — refusing "
+              f"to interleave", file=sys.stderr)
+        return 2
+
     # Nothing below has looked at a screen yet, so whatever breaks here is a
     # run that could not be made, 2 -- a parser's refusal, a grub.cfg that
-    # cannot be read, a disk that could not be made -- and not 1, which says
-    # the screen disagreed (#661's review, three rounds).
+    # cannot be read, a disk that could not be made, a stop asked for -- and
+    # not 1, which says the screen disagreed (#661's review, three rounds).
     try:
         font = load_font(os.path.join(REPO, FONT_H))
         by_bitmap, fold = reading(font, load_map(os.path.join(REPO, FONT_H)))
@@ -411,35 +437,21 @@ def main():
         # grub.cfg, which make-disk-x86_64.sh writes as it is.
         want_f = True if a.cdrom is not None else entry_has_f(a.entry)
         if want_f is None:
-            print(f"fbcons-readback: grub.cfg has no entry {a.entry}",
-                  file=sys.stderr)
-            return 2
+            raise ValueError(f"grub.cfg has no entry {a.entry}")
         if a.cdrom is None:
             env = dict(os.environ, UROS_BUILD_DIR=build,
                        UROS_X86_64_BOOT_ENTRY=str(a.entry))
             subprocess.run(
                 [os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
-                env=env, check=True,
+                env=env, check=True, preexec_fn=child_signals,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        stop_if_asked()
     except (OSError, SystemExit, ValueError,
             subprocess.CalledProcessError) as e:
         print(f"fbcons-readback: the experiment could not be set up: {e}",
               file=sys.stderr)
+        os.rmdir(LOCK)
         return 2
-    if a.cdrom is not None and not os.path.exists(a.cdrom):
-        print(f"fbcons-readback: no image at {a.cdrom}", file=sys.stderr)
-        return 2
-
-    try:
-        os.mkdir(LOCK)
-    except FileExistsError:
-        print(f"fbcons-readback: another run is in flight ({LOCK}) — refusing "
-              f"to interleave", file=sys.stderr)
-        return 2
-    # Only once there is a lock to give back: a TERM while make-disk ran used
-    # to kill it before its own trap could clean up after it.
-    for sig in (signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, stop_on)
 
     mon = f"/tmp/uros-fbcons-{os.getpid()}.mon"
     # 🔑 A PIPE AND NOT A FILE, because a screen that only ever shows a boot
@@ -454,7 +466,6 @@ def main():
         fifos with it: left behind, the lock refused every later run of the
         harness until somebody removed it by hand (#661's review, three
         rounds)."""
-        quiet()
         for fd in (fd_out, fd_in):
             if fd is not None:
                 try:
@@ -525,7 +536,8 @@ def main():
         fcntl.fcntl(fd_out, 1031, 1 << 20)	# F_SETPIPE_SZ: a whole boot
         fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
         q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.PIPE, text=True)
+                             stderr=subprocess.PIPE, text=True,
+                             preexec_fn=child_signals)
     except (OSError, ValueError, SystemExit,
             subprocess.SubprocessError) as e:
         return unstart(e)
@@ -554,6 +566,7 @@ def main():
             if text in pump():
                 return True
             time.sleep(step)
+            stop_if_asked()
         return False
 
     def hmp(m, cmd=None):
@@ -583,11 +596,13 @@ def main():
                 if time.time() > end or q.poll() is not None:
                     return False
                 time.sleep(0.05)
+                stop_if_asked()
         try:
             hmp(m)				# the banner, up to the first prompt
             last = None
             while time.time() < end and q.poll() is None:
                 time.sleep(a.poll)
+                stop_if_asked()
                 hmp(m, "stop")
                 hmp(m, f"screendump {ppm}")
                 raw = open(ppm, "rb").read()
@@ -646,6 +661,7 @@ def main():
                 if time.time() > end or q.poll() is not None:
                     return False, seen, stable, looks, skipped, cols, 0
                 time.sleep(0.05)
+                stop_if_asked()
 
         def look():
             nonlocal prev, looks, cols
@@ -662,6 +678,7 @@ def main():
             hmp(m)				# the banner, up to the first prompt
             while time.time() < end and q.poll() is None:
                 time.sleep(a.poll)
+                stop_if_asked()
                 if KERNEL_FIRST not in pump():
                     skipped += 1
                     continue
@@ -671,6 +688,7 @@ def main():
                 if text in wire:
                     hmp(m, "cont")
                     time.sleep(a.poll)
+                    stop_if_asked()
                     hmp(m, "stop")
                     look()
                     return True, seen, stable, looks, skipped, cols, len(wire)
@@ -830,11 +848,13 @@ def main():
             f.recv(65536)
             f.sendall(b"stop\n")
             time.sleep(0.5)
+            stop_if_asked()
             f.close()
             print(f"fbcons-readback: stopped the machine on {a.wait_for!r}")
 
         if a.send is not None:
             time.sleep(1.0)
+            stop_if_asked()
             os.write(fd_in, a.send.encode().decode("unicode_escape")
                      .encode("latin-1"))
             if a.then_wait_for and not wait_for(a.then_wait_for, 30.0):
@@ -849,6 +869,7 @@ def main():
         # whatever it is going to write on the screen alone.
         if not a.freeze and not a.no_uart:
             time.sleep(a.settle)
+            stop_if_asked()
         open(log, "w").write(pump())
 
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -857,6 +878,7 @@ def main():
         s.recv(65536)
         s.sendall(f"screendump {ppm}\n".encode())
         time.sleep(1.5)
+        stop_if_asked()
         s.close()
 
         if not os.path.exists(ppm):
@@ -927,7 +949,6 @@ def main():
         print(f"fbcons-readback: the experiment broke: {e}", file=sys.stderr)
         rc = 2
     finally:
-        quiet()
         q.kill()
         q.wait()
         os.close(fd_out)
