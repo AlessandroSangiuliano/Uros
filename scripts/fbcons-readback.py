@@ -46,10 +46,12 @@
 #
 # Exit:  0  the screen's text was found in the serial log
 #        1  the screen disagreed with the log -- a row the log does not have,
-#           or, with --all-lines, a line of the log no look saw -- or is blank
-#        2  the experiment could not be run: no qemu, no monitor, no boot, a
-#           monitor or a screendump that broke under --all-lines, which is
-#           not given with --kvm either
+#           or, with --all-lines, a line of the log no look saw, or a kernel
+#           whose -f is not the boot's -- or is blank, or never opened
+#        2  the experiment could not be run, or compared nothing: no qemu,
+#           no monitor, no boot, a monitor or a screendump that broke, an
+#           entry grub.cfg does not have, a --wait-for found before the
+#           screen existed; --all-lines is not given with --kvm either
 #
 # 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
 # QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
@@ -109,6 +111,32 @@ GRUB_CFG = "uros/src/mach_kernel/x86_64/boot/grub.cfg"
 # What the kernel says once the screen exists, with -f and without it (#666).
 F_DRAWN = "fbcons: -f: the "
 COM1_ONLY = "went to COM1 only; -f draws them here"
+
+
+def as_drawn(line):
+    """A line of the wire as the console draws it, fbcons_draw()'s rules:
+    \\r back to the first column, \\b back one, \\t spaces to the next stop
+    of eight and at least one, any other control code nothing (#661's
+    review, three rounds)."""
+    cells, col = [], 0
+
+    def put(ch):
+        nonlocal col
+        cells.extend(" " * (col + 1 - len(cells)))
+        cells[col] = ch
+        col += 1
+    for ch in line:
+        if ch == "\r":
+            col = 0
+        elif ch == "\b":
+            col = max(0, col - 1)
+        elif ch == "\t":
+            put(" ")
+            while col % 8:
+                put(" ")
+        elif ord(ch) >= 0x20:
+            put(ch)
+    return "".join(cells).rstrip()
 
 
 def entry_has_f(entry):
@@ -338,24 +366,32 @@ def main():
         print(f"fbcons-readback: no kernel at {kernel}", file=sys.stderr)
         return 2
 
-    font = load_font(os.path.join(REPO, FONT_H))
-    by_bitmap, fold = reading(font, load_map(os.path.join(REPO, FONT_H)))
-
-    # The bare-metal image's kernel has -f (#595); an entry says it in
-    # grub.cfg, which make-disk-x86_64.sh writes as it is.
-    want_f = True if a.cdrom is not None else entry_has_f(a.entry)
-    if want_f is None:
-        print(f"fbcons-readback: grub.cfg has no entry {a.entry}",
+    # Nothing below has looked at a screen yet, so whatever breaks here is a
+    # run that could not be made, 2 -- a parser's refusal, a grub.cfg that
+    # cannot be read, a disk that could not be made -- and not 1, which says
+    # the screen disagreed (#661's review, three rounds).
+    try:
+        font = load_font(os.path.join(REPO, FONT_H))
+        by_bitmap, fold = reading(font, load_map(os.path.join(REPO, FONT_H)))
+        # The bare-metal image's kernel has -f (#595); an entry says it in
+        # grub.cfg, which make-disk-x86_64.sh writes as it is.
+        want_f = True if a.cdrom is not None else entry_has_f(a.entry)
+        if want_f is None:
+            print(f"fbcons-readback: grub.cfg has no entry {a.entry}",
+                  file=sys.stderr)
+            return 2
+        if a.cdrom is None:
+            env = dict(os.environ, UROS_BUILD_DIR=build,
+                       UROS_X86_64_BOOT_ENTRY=str(a.entry))
+            subprocess.run(
+                [os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
+                env=env, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (OSError, SystemExit, subprocess.CalledProcessError) as e:
+        print(f"fbcons-readback: the experiment could not be set up: {e}",
               file=sys.stderr)
         return 2
-
-    if a.cdrom is None:
-        env = dict(os.environ, UROS_BUILD_DIR=build,
-                   UROS_X86_64_BOOT_ENTRY=str(a.entry))
-        subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
-                       env=env, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    elif not os.path.exists(a.cdrom):
+    if a.cdrom is not None and not os.path.exists(a.cdrom):
         print(f"fbcons-readback: no image at {a.cdrom}", file=sys.stderr)
         return 2
 
@@ -372,12 +408,35 @@ def main():
     # prompt and a panic's last line are the other two, and reaching the first
     # of them means being able to TYPE at the machine.
     fifo = f"/tmp/uros-fbcons-{os.getpid()}.fifo"
-    for end in (".in", ".out"):
-        try:
-            os.unlink(fifo + end)
-        except FileNotFoundError:
-            pass
-        os.mkfifo(fifo + end)
+    fd_out = fd_in = None
+
+    def unstart(e):
+        """🔴 A start that failed after the lock takes the lock and the
+        fifos with it: left behind, the lock refused every later run of the
+        harness until somebody removed it by hand (#661's review, three
+        rounds)."""
+        print(f"fbcons-readback: the experiment could not start: {e}",
+              file=sys.stderr)
+        for fd in (fd_out, fd_in):
+            if fd is not None:
+                os.close(fd)
+        for path in (fifo + ".in", fifo + ".out"):
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+        os.rmdir(LOCK)
+        return 2
+
+    try:
+        for end in (".in", ".out"):
+            try:
+                os.unlink(fifo + end)
+            except FileNotFoundError:
+                pass
+            os.mkfifo(fifo + end)
+    except OSError as e:
+        return unstart(e)
     log = os.path.join(out, "fbcons-readback.log")
     ppm = os.path.join(out, "fbcons-readback.ppm")
     for p in (log, ppm):
@@ -385,6 +444,8 @@ def main():
             os.unlink(p)
         except FileNotFoundError:
             pass
+        except OSError as e:
+            return unstart(e)
 
     if a.cdrom is not None:
         disks = ["-cdrom", os.path.realpath(a.cdrom), "-boot", "d"]
@@ -410,12 +471,14 @@ def main():
 
     # The reader opens first and non-blocking, so neither side waits for the
     # other; qemu opens its ends O_RDWR and never waits either.
-    fd_out = os.open(fifo + ".out", os.O_RDONLY | os.O_NONBLOCK)
-    fcntl.fcntl(fd_out, 1031, 1 << 20)		# F_SETPIPE_SZ: a whole boot
-    fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
-
-    q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.PIPE, text=True)
+    try:
+        fd_out = os.open(fifo + ".out", os.O_RDONLY | os.O_NONBLOCK)
+        fcntl.fcntl(fd_out, 1031, 1 << 20)	# F_SETPIPE_SZ: a whole boot
+        fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
+        q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.PIPE, text=True)
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        return unstart(e)
     rc = 2
     serial_raw = bytearray()
 
@@ -586,17 +649,14 @@ def main():
                   f"line in {a.budget:.0f}s, after {looks} looks at the "
                   f"screen — the boot did not get there", file=sys.stderr)
             return 2
-        # As the screen draws it, on this side too: no control code but the
-        # tab and the line's end (#661's review, two rounds).
-        serial = "".join(ch for ch in fold(raw)
-                         if ch in "\n\t" or ord(ch) >= 0x20)
+        # As the screen draws it, on this side too (#661's review).
+        serial = "\n".join(as_drawn(l) for l in fold(raw).split("\n"))
         unknown = [l for l in stable if "\0" in l]
         only = [l for l in stable if "\0" not in l and l.strip() not in serial]
-        # Each line the wire finished, as the screen draws it: no control
-        # code but the tab, which is drawn as spaces to the next stop of
-        # eight -- an escape is dropped and what follows it drawn, as this
-        # console does, having no terminal's sequences -- and cut at the
-        # screen's width where it wraps.
+        # Each line the wire finished, as the screen draws it (as_drawn():
+        # an escape is dropped and what follows it drawn, this console having
+        # no terminal's sequences), and cut at the screen's width where it
+        # wraps.
         missed, nlines, distinct = [], 0, set()
         looked = fold(raw[:upto])
         start = looked.find(KERNEL_FIRST)
@@ -618,6 +678,14 @@ def main():
                   f"the kernel says it drew what came before the screen")
             return 1
         if want_f and drawn_early < 0 or not want_f and com1 < 0:
+            # A screen that never opened is a blank screen, not a look taken
+            # too soon (#661's review, three rounds).
+            off = re.search(r"[^\n]*(screen output is off|; no framebuffer "
+                            r"\(#567\)|no framebuffer was drawn)[^\n]*", raw)
+            if off:
+                print(f"fbcons-readback: THE SCREEN NEVER OPENED — "
+                      f"{off.group(0).strip()}")
+                return 1
             print(f"fbcons-readback: {a.wait_for!r} was on the wire before the "
                   f"screen existed, so nothing could be compared yet: wait for "
                   f"a line printed after it", file=sys.stderr)
@@ -625,8 +693,7 @@ def main():
         if not want_f:
             start = looked.rfind("\n", 0, com1) + 1
         for w in looked[start:].split("\n")[:-1]:
-            w = "".join(ch for ch in w if ch == "\t" or ord(ch) >= 0x20)
-            w = w.expandtabs(8).rstrip()
+            w = as_drawn(w)
             if not w:
                 continue
             nlines += 1
@@ -634,6 +701,11 @@ def main():
             pieces = [w[i:i + cols].rstrip() for i in range(0, len(w), cols)]
             if not all(p == "" or p in seen for p in pieces):
                 missed.append(w)
+        if nlines == 0:
+            print(f"fbcons-readback: no line of the serial log was there to "
+                  f"compare, up to {a.wait_for!r}: wait for a later line",
+                  file=sys.stderr)
+            return 2
         print(f"fbcons-readback: --all-lines: {looks} looks at the screen, "
               f"the machine run {a.poll} s between two, from the kernel's "
               f"first line ({skipped} polls before it); {len(seen)} distinct "
@@ -732,7 +804,7 @@ def main():
             return 2
 
         lines, unknown, cols, rows = screen_lines(ppm, by_bitmap)
-        serial = fold(pump())
+        serial = "\n".join(as_drawn(l) for l in fold(pump()).split("\n"))
         drawn = [l for l in lines if l.strip()]
 
         print(f"fbcons-readback: {cols}x{rows} cells, {len(drawn)} non-blank "
