@@ -158,6 +158,21 @@ NEVER_OPENED = re.compile(r"[^\n]*(NO usable framebuffer from the loader|"
                           r"[^\n]*")
 
 
+def quiet():
+    """From here on no TERM or HUP may cut the way out short: both are
+    ignored (#661's review, six rounds)."""
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_IGN)
+
+
+def stop_on(signum, _frame):
+    """🔴 A TERM, or a HUP when the terminal goes, leaves the way every other
+    end does, once, so the lock, the fifos, the monitor's socket and qemu do
+    not outlive the run; a second one is ignored while it leaves."""
+    quiet()
+    sys.exit(f"stopped by {signal.Signals(signum).name}")
+
+
 def entry_has_f(entry):
     """Whether grub.cfg's entry `entry' (from 0) gives the kernel -f, read by
     bootarg.c's rule: a letter counts inside a word that begins with a dash.
@@ -367,10 +382,6 @@ def main():
                          "the bare-metal one (#595); --entry is then its "
                          "GRUB's business")
     a = ap.parse_args()
-    # 🔴 A TERM goes through the same way out as everything else, so the
-    # lock, the fifos, the monitor's socket and qemu do not outlive the run;
-    # killed without this, they did (#661's review, five rounds).
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit("stopped by SIGTERM"))
     if a.no_uart and a.send is not None:
         ap.error("--send types at the serial line, and --no-uart has none")
     if a.all_lines and (a.no_uart or a.send is not None or a.freeze):
@@ -425,6 +436,10 @@ def main():
         print(f"fbcons-readback: another run is in flight ({LOCK}) — refusing "
               f"to interleave", file=sys.stderr)
         return 2
+    # Only once there is a lock to give back: a TERM while make-disk ran used
+    # to kill it before its own trap could clean up after it.
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop_on)
 
     mon = f"/tmp/uros-fbcons-{os.getpid()}.mon"
     # 🔑 A PIPE AND NOT A FILE, because a screen that only ever shows a boot
@@ -439,6 +454,7 @@ def main():
         fifos with it: left behind, the lock refused every later run of the
         harness until somebody removed it by hand (#661's review, three
         rounds)."""
+        quiet()
         for fd in (fd_out, fd_in):
             if fd is not None:
                 try:
@@ -795,7 +811,7 @@ def main():
             print(f"fbcons-readback: stopped the machine on {a.wait_for!r}, "
                   f"read off its screen: no UART (--no-uart)")
         elif not wait_for(a.wait_for, a.budget, 0.02 if a.freeze else 0.25):
-            off = NEVER_OPENED.search(fold(pump()))
+            off = NEVER_OPENED.search(pump())
             if off:
                 print(f"fbcons-readback: THE SCREEN NEVER OPENED — "
                       f"{off.group(0).strip()}")
@@ -911,6 +927,7 @@ def main():
         print(f"fbcons-readback: the experiment broke: {e}", file=sys.stderr)
         rc = 2
     finally:
+        quiet()
         q.kill()
         q.wait()
         os.close(fd_out)
