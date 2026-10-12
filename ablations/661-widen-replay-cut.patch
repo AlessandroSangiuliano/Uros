@@ -1,0 +1,47 @@
+Kind: widen
+Issue: #661
+Holds open: the -f replay ending inside a sequence with more bytes offered than kept -- nothing is kept after the first 0xE2, the lead byte of the first em dash the boot prints before the screen exists, as past FB_EARLY_SIZE the bytes are not kept and the cut can fall anywhere
+Run: --entry 41 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/fbcons.c b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
+index ca190fa9..dee25cae 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/fbcons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
+@@ -373,6 +373,13 @@ static void fbcons_byte(uint8_t b)
+ 			fbcons_draw((uint8_t) out[i]);
+ }
+ 
++/*
++ * Widen 661-widen-replay-cut: nothing is kept after the first 0xE2, the lead
++ * byte of the first em dash, so the replay ends inside a sequence and more
++ * bytes were offered than kept, as past FB_EARLY_SIZE.
++ */
++static volatile uint32_t fb_early_cut = FB_EARLY_SIZE;
++
+ /* Kept for fbcons_init() to draw, while there is no screen (#666). */
+ static void fbcons_keep(char c)
+ {
+@@ -381,8 +388,11 @@ static void fbcons_keep(char c)
+ 	if (fb_early_closed)
+ 		return;
+ 	slot = atomic_add32(&fb_early_len, 1);
+-	if (slot < FB_EARLY_SIZE)
++	if (slot < fb_early_cut) {
+ 		fb_early[slot] = c;
++		if ((uint8_t) c == 0xE2 && fb_early_cut == FB_EARLY_SIZE)
++			fb_early_cut = slot + 1;
++	}
+ }
+ 
+ void fbcons_putc(char ch)
+@@ -662,8 +672,8 @@ static void fbcons_early_draw(void)
+ 	if (paced)
+ 		for (;;) {
+ 			kept = fb_early_len;
+-			if (kept > FB_EARLY_SIZE)
+-				kept = FB_EARLY_SIZE;
++			if (kept > fb_early_cut)
++				kept = fb_early_cut;
+ 			if (drawn == kept)
+ 				break;
+ 			c = (uint8_t) fb_early[drawn++];
