@@ -323,8 +323,12 @@ for i in $(seq 1 "$BOOTS"); do
 			fi
 			rc=$?
 			set -e
+			# Above 128 the boot's runner was killed by a signal: a run
+			# not made, like 2 and 3, and not a verdict on the tree
+			# (#661's review, seven rounds).
 			case $rc in
-			2|3)	die 3 "$arm, $acc, boot $i: the harness could not run it (status $rc), see $RUNDIR/$arm-$acc-$i.out" ;;
+			2|3|129|1[3-9][0-9]|2[0-5][0-9])
+				die 3 "$arm, $acc, boot $i: the harness could not run it (status $rc), see $RUNDIR/$arm-$acc-$i.out" ;;
 			esac
 			hit=0
 			grep -Eqf "$RUNDIR/expect" "$log" && hit=1
