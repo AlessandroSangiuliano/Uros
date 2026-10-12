@@ -84,8 +84,16 @@ fbcons_utf8_glyph(struct fbcons_utf8 *u, unsigned int cp)
 		else
 			hi = mid;
 	}
-	if (u->no_glyph++ == 0)
+	/*
+	 * The first before the count, which a report reads the other way
+	 * round: one that sees a count sees the first it names (#661's
+	 * review).  The compiler is held to the order; both targets' stores
+	 * already keep it.
+	 */
+	if (u->no_glyph == 0)
 		u->first_no_glyph = cp;
+	__asm__ volatile("" ::: "memory");
+	u->no_glyph++;
 	return FBCONS_UTF8_GLYPH | FBCONS_FONT_REPLACEMENT;
 }
 

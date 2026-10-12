@@ -180,8 +180,11 @@ uint64_t fbcons_scrolls(void)
 
 uint32_t fbcons_no_glyph(uint32_t *first)
 {
+	uint32_t n = fb_utf8.no_glyph;
+
+	barrier();		/* the count, then the first it names: #661 */
 	*first = fb_utf8.first_no_glyph;
-	return fb_utf8.no_glyph;
+	return n;
 }
 
 uint32_t fbcons_not_utf8(void)
