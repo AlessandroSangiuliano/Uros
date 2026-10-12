@@ -28,6 +28,17 @@ Expect: <thread_doswapin\+0x
 - `Run:` is what `scripts/run-x86_64.sh` is given after the accelerator.
 - `Expect:` is an extended regular expression, matched line by line against the run's log. There may be several, and any one match means the test caught the defect. Expectations are read only from the ablation patches given on the command line, not from the bases `Over:` brings in: a base that is itself an ablation would otherwise catch the run on its own.
 - `Measure:` replaces `Expect:` in an ablation that no test catches, because it brings back a cost rather than a defect. It names the number that must move. `ablate.sh` checks that such a patch applies, but does not judge a run with it: the bench is read by hand, against the same tree without the patch.
+- `Accel:` names the accelerators, `tcg`, `kvm` or both, the patch can show anything under. `scripts/ablate.sh` boots only those of the ones asked for, says so, and refuses a command line that leaves none; `scripts/ci/job.sh` counts the boots it waits for from ablate.sh's plan. Under KVM's full irqchip QEMU's plain `intel-iommu` remaps nothing, and the pauses of `fbcons-readback.py` restart KVM's in-kernel 8254 (#659, #661).
+- `With:` names a widen patch in the same directory that the patch needs to mean anything, one per line. `scripts/ablate.sh` takes it in, before the patch, when the command line did not name it. An ablation whose `Expect:` matches the fixed tree too unless its widen is applied would otherwise report CAUGHT on every boot, fixed or not (#659).
+- `Screen:` lines boot each arm with `scripts/fbcons-readback.py` instead of `run-x86_64.sh`, one argument of that script per line, written as `--option=value` so that nothing needs quoting. `Expect:` is then matched against what the script printed, and `Run:` is not needed. This is how a test is caught where there is no serial log to read, on a machine with no UART (`--no-uart`, #670):
+
+```
+Screen: --no-uart
+Screen: --entry=41
+Screen: --wait-for=serial port's own receiver
+Screen: --expect=NOT ASKED, no UART answers at COM1
+Expect: not on screen \| NOT ASKED, no UART answers at COM1
+```
 
 ## Running one
 
@@ -35,11 +46,14 @@ Expect: <thread_doswapin\+0x
 scripts/ablate.sh ablations/642-direct-swapin.patch
 scripts/ablate.sh --ab --boots 5 --accel tcg,kvm ablations/642-direct-swapin.patch
 scripts/ablate.sh --check ablations/*.patch
+scripts/ablate.sh --plan --ab --boots 5 --accel tcg,kvm ablations/642-widen-swap.patch ablations/642-direct-swapin.patch
 ```
 
 The first two apply `642-widen-swap.patch` too, because `642-direct-swapin.patch` goes over it. `--check` asks each patch on its own, over its bases: patches given together are not stacked, since unrelated ones may touch the same lines.
 
-Each run takes place in a worktree under `$UROS_ABLATE_DIR` (default `~/uros-tests/ablations`). The build there is configured with the options of `$UROS_ABLATE_REF_BUILD` (default `uros/build-x86_64`), because this tree's configuration cannot be reproduced from the defaults. Every boot adds one line to `ablate.csv` in the same directory: tree, patches, arm, accelerator, the clock and power source the harness recorded, its exit status, and the verdict.
+`--plan` says what the same command without it would build and boot, and refuses what it would refuse, building nothing. The campaign on GitHub asks it before a run that takes fixes out starts on twenty runners (#656).
+
+Each run takes place in a worktree under `$UROS_ABLATE_DIR` (default `~/uros-tests/ablations`). The build there is configured with the options of `$UROS_ABLATE_REF_BUILD` (default `$UROS_BUILD_DIR` if it is set, otherwise `uros/build-x86_64`), because this tree's configuration cannot be reproduced from the defaults. Each arm boots the build of its own worktree, whatever `UROS_BUILD_DIR` the caller exported. Every boot adds one line to `ablate.csv` in the same directory: tree, patches, arm, accelerator, the clock and power source the harness recorded, its exit status, and the verdict.
 
 `--ab` alternates each boot of the ablated tree with one of the fixed tree, which has the widen patches but not the ablation. The ablated arm must be CAUGHT and the fixed arm must pass.
 

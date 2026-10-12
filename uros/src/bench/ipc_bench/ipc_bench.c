@@ -978,6 +978,17 @@ forkrace_child_entry(void)
     unsigned long	 off;
     int			 pass;
 
+    /*
+     * The task's own libmach state before any RPC, as every child in
+     * flipc2_bench_inter.c has.  This child inherited the parent's memory, and
+     * with it the parent's hand-over to libpthreads: the task_terminate() below
+     * looked its reply port up through pthread_self(), which on this raw stack
+     * is garbage, and the child died there of EXC_BAD_ACCESS instead of ending
+     * by itself -- 16 children in 16, at 1.4 GHz and at 4.3 GHz.  The task name
+     * it would have sent to was the parent's too (#645).
+     */
+    mach_task_self_init();
+
     for (pass = 0; pass < FORKRACE_CHILD_PASSES; pass++) {
 	for (off = 0; off < FORKRACE_REGION; off += FORKRACE_PAGE)
 	    (void) p[off];

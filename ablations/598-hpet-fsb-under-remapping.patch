@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #598
+Takes out: the HPET's FSB route passed over while interrupts are remapped and no table names the HPET -- the start then finds no entry it can write for the message, and falls back to the I/O APIC pin saying WRONG; on QEMU, whose DMAR and IVRS name no HPET, that is every -H -i boot whose HPET can send the message.  What keeps a message in compatibility format away from the engine behind this is fsb_compose(), which this leaves in place, and on QEMU the tick runs on the pin either way
+Run: --iommu intel --entry 38 900 -smp 1 -global hpet.msi=on
+Expect: clock_event: hpet: WRONG -- comparator [0-9]+'s entry for its FSB message could not be written
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index 718cfd14..bc195bbe 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -208,7 +208,6 @@ static int legacy_route(unsigned *which);
+ static int choose_route(unsigned *which, uint32_t *cap0)
+ {
+ 	struct hpet_comparator_caps caps;
+-	uint16_t source;
+ 	unsigned n;
+ 
+ #if ABLATE_593_LINE_TAKEN
+@@ -237,11 +236,6 @@ static int choose_route(unsigned *which, uint32_t *cap0)
+ 			 * pin is taken, and the remapped message is checked on
+ 			 * hardware (#595).
+ 			 */
+-			if (iommu_interrupts_remapped()
+-			    && !iommu_hpet_source(hpet_number(), &source)) {
+-				fsb_passed_over = 1;
+-				continue;
+-			}
+ 			*which = n;
+ 			return ROUTE_FSB;
+ 		}

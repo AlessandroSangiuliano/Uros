@@ -1,0 +1,65 @@
+Kind: widen
+Issue: #657
+Holds open: the census's walk, delay(3000) per thread between taking it off the list and reading it, with freed zone elements filled with 0xdeadbeef -- so that the 24 threads -c wakes to end are freed in the middle of the walk if nothing stops them, and a walk that reads one follows a pointer into nothing; the fixed walk holds the processor set's lock, and the threads are freed only after it
+Run: --entry 35 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/census_test.c b/uros/src/mach_kernel/x86_64/cpu/census_test.c
+index c3b7b9d2..08223f06 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/census_test.c
++++ b/uros/src/mach_kernel/x86_64/cpu/census_test.c
+@@ -33,6 +33,8 @@
+ #define	CENSUS_TEST_VICTIMS	24
+ #define	CENSUS_TEST_WAIT_S	10
+ 
++extern boolean_t	zfree_clear;	/* kern/zalloc.c, MACH_ASSERT */
++
+ static int		census_test_event;	/* the victims sleep on it */
+ static volatile uint32_t census_test_waiting;	/* victims asleep, or about to be */
+ static volatile uint32_t census_test_ending;	/* victims woken and ending */
+@@ -95,11 +97,19 @@ census_test(void)
+ 		return;
+ 	}
+ 
++	/*
++	 * ablations/657-widen-walk.patch: freed zone elements filled with
++	 * 0xdeadbeef for the length of the walk, so that a walk reading a freed
++	 * thread follows a pointer into nothing and says so with a fault.
++	 */
++	zfree_clear = TRUE;
++
+ 	printf("census_test: starting: %u threads asleep, woken now while "
+ 	       "processor %d walks the census (#657)\n", CENSUS_TEST_VICTIMS,
+ 	       me);
+ 	thread_wakeup((event_t) &census_test_event);
+ 	n = quiet_census_walk(&had, &unreadable);
++	zfree_clear = FALSE;	/* ablations/657-widen-walk.patch: the walk only */
+ 	ended = census_test_ending;
+ 	thread_bind(current_thread(), PROCESSOR_NULL);
+ 
+diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+index 3d48a0a2..b2cff163 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
++++ b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+@@ -263,6 +263,8 @@ census_state(int state)
+  */
+ static unsigned int	census_unreadable;	/* pointers skipped, since boot */
+ 
++#define	WIDEN_657_US	3000	/* ablations/657-widen-walk.patch */
++
+ static boolean_t
+ census_readable(const void *p, size_t len)
+ {
+@@ -370,6 +372,13 @@ census_threads(void)
+ 		int		walk = 0;
+ 		thread_act_t	ta;
+ 
++		/*
++		 * ablations/657-widen-walk.patch: each thread held between
++		 * taking it off the list and reading it, so that threads ending
++		 * on other processors are freed in the middle of the walk if
++		 * nothing stops them.
++		 */
++		delay(WIDEN_657_US);
+ 		census_add("quiet_census:   th=%p state=%#x", th, th->state);
+ 		census_state(th->state);
+ 		/*

@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #661
+Takes out: the decoding -- every byte the console is handed is drawn as the glyph of its own number again, as before #661, so the em dash's e2 80 94 is three glyphs, "ÔÇö", where the wire says "—"; the serial log has no way to show it, the screen read back does
+Screen: --entry=6
+Expect: rows are NOT in the serial log
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/fbcons.c b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
+index 1366f5ef..7bf263f7 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/fbcons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
+@@ -360,15 +360,10 @@ static void fbcons_draw(uint8_t c)
+  */
+ static void fbcons_byte(uint8_t b)
+ {
+-	unsigned int	out[2];
+-	unsigned int	n, i;
+-
+-	n = fbcons_utf8_feed(&fb_utf8, b, out);
+-	for (i = 0; i < n; i++)
+-		if (out[i] & FBCONS_UTF8_GLYPH)
+-			fbcons_put((uint8_t) out[i]);
+-		else
+-			fbcons_draw((uint8_t) out[i]);
++	if (b < 0x80)
++		fbcons_draw(b);
++	else
++		fbcons_put(b);
+ }
+ 
+ /* Kept for fbcons_init() to draw, while there is no screen (#666). */

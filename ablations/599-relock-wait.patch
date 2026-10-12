@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #599
+Takes out: the wait for a waker in flight after clear_wait_locked() relocks, so a thread clearing its own wait comes back with wait_event at WAKING_EVENT and TH_WAIT set whenever a waker took it off the hash while it took the bucket's lock
+Run: --entry 34 600 -smp 4
+Expect: clear_wait_test: WRONG
+Expect: assert_wait: already asserted event 0xffffffffffffffff
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 901dca7c..7ed3213c 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1213,15 +1213,6 @@ clear_wait_locked(
+ 			event = NO_EVENT;		/* cause to run below */
+ 		}
+ 		simple_unlock(lock);
+-		/*
+-		 * #599, the second read: the thread's lock was let go for the
+-		 * bucket's, and a waker can take the thread off the hash in
+-		 * that gap.  Its own wait then waits for the waker, as at the
+-		 * first read; the bucket's lock is given back first, since the
+-		 * waker's second half does not need it.
+-		 */
+-		if (clear_wait_after_waker(thread))
+-			clear_wait_relock_waits++;
+ 	}
+ 	if (event == NO_EVENT) {
+ 		reset_timeout_check(&thread->timer);

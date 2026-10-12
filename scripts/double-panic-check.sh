@@ -12,7 +12,8 @@
 #      panic at once, this one is cpu N (#599)", the same N twice -- and no
 #      line that starts one and does not finish it;
 #   2. the console's final copy, whole and once, after the message and before
-#      the first backtrace (#567, #568);
+#      the first backtrace (#567, #568): the framebuffer's line, the glyphs'
+#      line where a framebuffer was drawn (#661), and the ring's;
 #   3. one whole backtrace header per processor, each processor once;
 #   4. no line after it that carries a piece of one of these and is not it
 #      whole: that is two outputs run together.  A whole line of some other
@@ -20,7 +21,10 @@
 #      the message and the halt -- and counted.
 #
 # Prints one line, PASS, WRONG or NOT ASKED; exits 0, 1 or 2.  A boot that
-# never posed the question -- one processor, interrupts off -- is NOT ASKED.
+# never posed the question -- one processor, interrupts off -- is NOT ASKED,
+# and so is a log whose every part is whole from a kernel before #661, whose
+# drawn framebuffer has no glyphs line to count: it says no UTF-8 decoder
+# line at boot either.
 #
 #   ./scripts/double-panic-check.sh LOG [processors]
 #
@@ -39,6 +43,7 @@ function wrong(why) {
 BEGIN {
 	msg = "^panic\\(cpu [0-9]+\\): double_panic: two processors panic at once, this one is cpu [0-9]+ \\(#599\\)$"
 	fb = "^UrMach x86-64: console: (the framebuffer drew [0-9]+ glyphs in [0-9]+ cycles( = [0-9]+ ns a glyph)? on a [0-9]+x[0-9]+ screen, [0-9]+ scrolls( — NOT ASKED for the time, no calibrated TSC)? \\(#568\\)|no framebuffer was drawn on this boot — COM1 was the only output there was \\(#568\\))$"
+	glyph = "^UrMach x86-64: console: the framebuffer drew (every character it was handed: 0 without a glyph|■ for [0-9]+ without a glyph \\(the first U\\+[0-9A-F]+\\)), [0-9]+ not UTF-8 \\(#661\\)$"
 	ring = "^UrMach x86-64: console: over this boot the ring was handed over [0-9]+ times by the thread that printed, [0-9]+ by a tick or an idle processor, [0-9]+ on the way down; [0-9]+ writers paid for room, [0-9]+ bytes are still queued \\(#567\\)$"
 	hdr = "^  cpu [0-9]+ backtrace \\(addr2line for file and line\\):$"
 	frame = "^    0x[0-9a-f]+( <[^<>]+>)?$"
@@ -46,6 +51,7 @@ BEGIN {
 /^qemu-system-x86_64:/ || /^=== run conditions/ || /^=== qemu.s own messages/ { done = 1 }
 done { next }
 /^startup: [0-9]+ processors in the scheduler/ { cpus = $2 }
+/^UrMach x86-64: fbcons: the UTF-8 decoder drew / { utf8 = 1 }
 /^double_panic: NOT ASKED/ { declined = $0 }
 /^double_panic: WRONG/ { refused = $0 }
 /^double_panic: processors / { asked = 1 }
@@ -69,7 +75,8 @@ done { next }
 	}
 	if (!at)
 		next
-	if ($0 ~ fb) { nfb++; if (nhdr) late++; next }
+	if ($0 ~ fb) { nfb++; if (index($0, "no framebuffer") == 0) drawn++; if (nhdr) late++; next }
+	if ($0 ~ glyph) { nglyph++; if (nhdr) late++; next }
 	if ($0 ~ ring) { nring++; if (nhdr) late++; next }
 	if ($0 ~ hdr) {
 		id = $2
@@ -108,14 +115,22 @@ END {
 		printf "double-panic-check: NOT ASKED — the log does not say how many processors were in the scheduler\n"
 		exit 2
 	}
+	# #661: a kernel from before the glyphs line has no decoder to say it
+	# drew with, and no glyphs line to count.  Every other part is judged
+	# as before, and a WRONG is WRONG; if nothing else is, the log is not
+	# asked about the glyphs line rather than called WRONG for it -- and
+	# not passed either, so a kernel that lost both lines is not passed by
+	# their absence (the review of #661, two rounds: the first answer left at
+	# once and judged nothing else).
+	old = (drawn && !utf8 && nglyph == 0)
 	if (whole != 1)
 		wrong(sprintf("%d whole panic messages, one wanted", whole))
 	if (mixed)
 		wrong("a panic message names two processors")
 	if (cut)
 		wrong(sprintf("%d lines start a panic message and do not finish it, the first: %s", cut, firstcut))
-	if (nfb != 1 || nring != 1)
-		wrong(sprintf("the console final copy came %d and %d times (framebuffer, ring), once each wanted", nfb, nring))
+	if (nfb != 1 || nring != 1 || nglyph != (drawn && !old ? 1 : 0))
+		wrong(sprintf("the console final copy came %d, %d and %d times (framebuffer, glyphs, ring), once each wanted, the glyphs only where a framebuffer was drawn", nfb, nglyph, nring))
 	if (late)
 		wrong("the console final copy came after a backtrace had started")
 	if (nhdr != want)
@@ -126,6 +141,10 @@ END {
 		wrong(sprintf("%d lines after the message carry a piece of one of its parts and are not it, the first: %s", other, firstother))
 	if (bad)
 		exit 1
+	if (old) {
+		printf "double-panic-check: NOT ASKED — every part judged is whole, but the framebuffer was drawn and no UTF-8 decoder line (#661) is in this log: a kernel from before it, whose console final copy has no glyphs line to count\n"
+		exit 2
+	}
 	printf "double-panic-check: PASS — one whole panic message, the console final copy whole after it, %d whole backtraces for %d processors, nothing run together (%d whole lines from processors not yet stopped)\n", nhdr, want, alive + 0
 	exit 0
 }'

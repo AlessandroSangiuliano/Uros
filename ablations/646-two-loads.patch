@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #646
+Takes out: current_thread()'s single %gs-relative load -- it is cpu_data[cpu_number()].active_thread again, two loads a thread preempted and moved between makes on two processors, and reads the thread running where it was
+Run: --entry 22 1200 -smp 4
+Expect: mutex_lock_assert_safe: thread .* another thread \(#646\)
+Expect: <mutex_lock_assert_safe\+0x
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu_data.h b/uros/src/mach_kernel/x86_64/cpu_data.h
+index 009a0b64..08e5a813 100644
+--- a/uros/src/mach_kernel/x86_64/cpu_data.h
++++ b/uros/src/mach_kernel/x86_64/cpu_data.h
+@@ -92,7 +92,7 @@ static __inline__ int get_preemption_level(void)
+  * thread_machine_set_current(), and one instruction through %gs reads the
+  * block of the processor it executes on.  Same precondition as above.
+  */
+-#define	MACHINE_CURRENT_THREAD	1
++#define	MACHINE_CURRENT_THREAD	0
+ 
+ struct thread_shuttle;
+ 

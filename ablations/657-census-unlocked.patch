@@ -1,0 +1,43 @@
+Kind: ablation
+Issue: #657
+Takes out: the processor set's lock around the census's walk, in quiet_census_walk() and in the idle pass, so that the walk reads threads other processors free under it
+Run: --entry 35 600 -smp 4
+Expect: <census_threads\+0x
+Expect: <quiet_census_walk\+0x
+Expect: census_test: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+--- a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
++++ b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+@@ -621,12 +621,10 @@
+ 	unsigned int	before;
+ 	int		n;
+ 
+-	pset_lock(&default_pset);
+ 	*had = default_pset.thread_count;
+ 	before = census_unreadable;
+ 	n = census_threads();
+ 	*unreadable = census_unreadable - before;
+-	pset_unlock(&default_pset);
+ 	return n;
+ }
+ 
+@@ -703,10 +701,6 @@
+ 	 * it is tried, and a busy lock puts the census off to the next idle
+ 	 * pass, counted and said in the census's first line.
+ 	 */
+-	if (!pset_lock_try(&default_pset)) {
+-		quiet_lock_busy++;
+-		return;
+-	}
+ 	quiet_said = 1;
+ 
+ 	/*
+@@ -735,7 +729,6 @@
+ 		       sched_bound_displaced, sched_bound_displaced_slot);
+ 
+ 	(void) census_threads();
+-	pset_unlock(&default_pset);
+ 
+ 	/*
+ 	 * And who is holding the one that everything piles up behind (#476).

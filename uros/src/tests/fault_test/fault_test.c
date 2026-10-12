@@ -18,6 +18,10 @@
  * ⚠️ The three are deliberately in this order, because each one that passes is
  * a precondition for reading the next honestly: a program that cannot fault on
  * its own memory and carry on cannot be trusted to report anything at all.
+ *
+ * Two came later, each a question of the same kind asked of the same task:
+ * [4], a copy the kernel cannot make, and [5], a single step from ring 3,
+ * reported from the step's own frame (#650).
  */
 
 #include <mach.h>
@@ -50,6 +54,13 @@
  * readable here".
  */
 #define WITNESS		0x5eeded1eafULL
+
+/*
+ * How many arms there are: the summary line says it and the exit status
+ * compares with it, so it is said once.  The two used to be written apart and
+ * disagreed -- "of 4 arms passed" printed, and an exit status that asked for 3.
+ */
+#define FT_ARMS		5
 
 /*
  * Where the second arm faults, and why this address.
@@ -268,6 +279,114 @@ the_thread_that_faults(void *arg)
 }
 
 /*
+ * ── Arm five: a single step from ring 3, reported from its own frame ──
+ *
+ * A debug exception runs on a stack of its own, IST_DEBUG, and the frame the
+ * processor pushes for it lands there -- not at the top of the thread's
+ * kernel stack, where pcb->user points and where thread_get_state() reads.
+ * From ring 3 the exception becomes EXC_BREAKPOINT and the thread waits in
+ * exception() while this handler runs.  If nothing moved the frame, the state
+ * read here is the one the thread's LAST ordinary entry saved -- a system call
+ * or an interrupt -- and a debugger stepping a program is shown where the
+ * program was some time before.
+ *
+ * So a thread sets TF with popfq and executes one more instruction: a TF set
+ * by popf takes effect one instruction late, so the trap comes after that
+ * instruction, and the rip read here must be the address after it, which this
+ * file names ft_step_after.  The rflags read must have TF set, as the step's
+ * own frame does and a system call's never would.  Then the handler sends the
+ * thread to a landing function with TF clear.
+ *
+ * ⚠️ The stack pointer the thread lands on is the one in the state read here.
+ * When that state is stale it is still this thread's own stack, from a moment
+ * earlier, and that is all pthread_exit() needs: the landing never returns.
+ */
+#define RFLAGS_TF	0x100UL
+
+extern char			ft_step_after[];
+static mach_port_t		step_port;
+static volatile int		step_seen, step_type, step_landed;
+static volatile int		step_fell_through, step_extra;
+static volatile natural_t	step_code0;
+static volatile uint64_t	step_rip, step_rflags;
+static volatile kern_return_t	step_get_kr, step_set_kr;
+
+static void
+the_step_landing(void)
+{
+	step_landed = 1;
+	pthread_exit(NULL);
+}
+
+static void *
+the_thread_that_steps(void *arg)
+{
+	(void) arg;
+
+	/*
+	 * Below the red zone first: pushfq writes under the stack pointer,
+	 * where a function may keep its locals.  The add that puts the stack
+	 * pointer back is the one instruction stepped.
+	 */
+	__asm__ volatile(
+		"subq	$128, %%rsp\n\t"
+		"pushfq\n\t"
+		"orq	$0x100, (%%rsp)\n\t"
+		"popfq\n\t"
+		"addq	$128, %%rsp\n\t"
+		".globl	ft_step_after\n"
+		"ft_step_after:\n\t"
+		"nop\n\t"
+		: : : "memory", "cc");
+
+	/* No trap, or one whose handler let the thread go on from here. */
+	step_fell_through = 1;
+	return NULL;
+}
+
+/*
+ * Arm five's half of the handler: what the state says, kept, and the thread
+ * sent on to the landing with TF clear -- whatever the state said, so that a
+ * thread shown a stale frame does not go on stepping.
+ */
+static kern_return_t
+step_caught(mach_port_t thread, mach_port_t task, exception_data_t code,
+	    mach_msg_type_number_t codeCnt)
+{
+	struct x86_64_thread_state	st;
+	mach_msg_type_number_t		n = x86_64_THREAD_STATE_COUNT;
+
+	if (step_seen) {
+		/* A second trap: TF was still set when the thread resumed. */
+		step_extra++;
+	} else {
+		step_type = EXC_BREAKPOINT;
+		step_code0 = (codeCnt > 0) ? code[0] : 0;
+		step_seen = 1;
+	}
+
+	step_get_kr = thread_get_state(thread, x86_64_THREAD_STATE,
+				       (thread_state_t) &st, &n);
+	if (step_get_kr == KERN_SUCCESS) {
+		if (step_extra == 0) {
+			step_rip = st.rip;
+			step_rflags = st.rflags;
+		}
+		st.rip = (uint64_t) (uintptr_t) the_step_landing;
+		st.rsp = (st.rsp & ~15UL) - 8;	/* as a call leaves it */
+		st.rflags &= ~RFLAGS_TF;
+		step_set_kr = thread_set_state(thread, x86_64_THREAD_STATE,
+					       (thread_state_t) &st,
+					       x86_64_THREAD_STATE_COUNT);
+	}
+
+	/* Both rights came with the message, and they are this handler's. */
+	(void) mach_port_deallocate(mach_task_self(), thread);
+	(void) mach_port_deallocate(mach_task_self(), task);
+	return KERN_SUCCESS;
+}
+
+/*
  * What exc_server calls when the message arrives.  MIG demands this name and
  * this shape; it is the whole of the handler.
  */
@@ -276,6 +395,9 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 		      mach_port_t task, int exception,
 		      exception_data_t code, mach_msg_type_number_t codeCnt)
 {
+	if (exception == EXC_BREAKPOINT)
+		return step_caught(thread, task, code, codeCnt);
+
 	(void) exception_port;
 	(void) task;
 
@@ -475,6 +597,115 @@ arm_two_exception_to_the_task(void)
 	return exception_type == EXC_BAD_ACCESS;
 }
 
+/*
+ * One exception message, waited for at most `ms' milliseconds, handled and
+ * answered.  mach_msg_server_once() waits for ever, and a step that never
+ * traps would leave this program waiting with it.
+ */
+static boolean_t
+step_serve_one(mach_msg_timeout_t ms)
+{
+	union {
+		mach_msg_header_t	head;
+		char			room[1024];
+	} req, rep;
+
+	if (mach_msg(&req.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof req,
+		     step_port, ms, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		return FALSE;
+	(void) exc_server(&req.head, &rep.head);
+	(void) mach_msg(&rep.head, MACH_SEND_MSG, rep.head.msgh_size, 0,
+			MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	return TRUE;
+}
+
+static int
+arm_five_single_step(void)
+{
+	pthread_t	stepper;
+	kern_return_t	kr;
+	unsigned	waited;
+	int		ok = 0;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&step_port);
+	if (kr == KERN_SUCCESS)
+		kr = mach_port_insert_right(mach_task_self(), step_port,
+					    step_port, MACH_MSG_TYPE_MAKE_SEND);
+	if (kr == KERN_SUCCESS)
+		kr = task_set_exception_ports(mach_task_self(),
+					      EXC_MASK_BREAKPOINT, step_port,
+					      EXCEPTION_DEFAULT,
+					      THREAD_STATE_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("fault_test: [5] the exception port could not be set up "
+		       "(%d) — WRONG\n", kr);
+		return 0;
+	}
+
+	if (pthread_create(&stepper, NULL, the_thread_that_steps, NULL) != 0) {
+		printf("fault_test: [5] pthread_create failed — WRONG\n");
+		return 0;
+	}
+
+	if (!step_serve_one(5000)) {
+		printf("fault_test: [5] no exception arrived in 5 s%s — WRONG\n",
+		       step_fell_through ? ", and the thread went on past the "
+					   "step" : "");
+		return 0;
+	}
+
+	/*
+	 * The landing, bounded, and serving on the way: a thread that resumed
+	 * with TF still set traps again, and that message must be answered or
+	 * the thread waits in exception() for ever.
+	 */
+	for (waited = 0; !step_landed && !step_fell_through && waited < 500;
+	     waited++)
+		(void) step_serve_one(10);
+	if (step_landed || step_fell_through)
+		(void) pthread_join(stepper, NULL);
+
+	printf("fault_test: [5] a single step from ring 3 reached the task as "
+	       "exception %d code %u; the handler read rip %p and rflags 0x%lx, "
+	       "and the step ended at %p\n", step_type, (unsigned) step_code0,
+	       (void *) (uintptr_t) step_rip, (unsigned long) step_rflags,
+	       (void *) ft_step_after);
+
+	if (step_type != EXC_BREAKPOINT || step_code0 != EXC_X86_64_SGLSTP)
+		printf("fault_test: [5] WRONG — expected EXC_BREAKPOINT (%d) code "
+		       "EXC_X86_64_SGLSTP (%d)\n", EXC_BREAKPOINT,
+		       EXC_X86_64_SGLSTP);
+	else if (step_get_kr != KERN_SUCCESS || step_set_kr != KERN_SUCCESS)
+		printf("fault_test: [5] WRONG — thread_get_state answered %d and "
+		       "thread_set_state %d\n", step_get_kr, step_set_kr);
+	else if (step_rip != (uint64_t) (uintptr_t) ft_step_after
+		 || (step_rflags & RFLAGS_TF) == 0)
+		printf("fault_test: [5] WRONG — the state the handler read is not "
+		       "the step's: the frame of an earlier entry into the kernel "
+		       "(#650)\n");
+	else if (!step_landed)
+		printf("fault_test: [5] WRONG — the thread did not arrive where "
+		       "the handler sent it%s\n", step_fell_through
+		       ? ": it went on from the step instead" : "");
+	else if (step_extra != 0)
+		printf("fault_test: [5] WRONG — %d more traps after the handler "
+		       "cleared TF\n", step_extra);
+	else {
+		printf("fault_test: [5] the handler read the step's own frame and "
+		       "the thread went where it was sent\n");
+		ok = 1;
+	}
+
+	(void) task_set_exception_ports(mach_task_self(), EXC_MASK_BREAKPOINT,
+					MACH_PORT_NULL, EXCEPTION_DEFAULT,
+					THREAD_STATE_NONE);
+	(void) mach_port_mod_refs(mach_task_self(), step_port,
+				  MACH_PORT_RIGHT_RECEIVE, -1);
+	(void) mach_port_deallocate(mach_task_self(), step_port);
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -504,8 +735,9 @@ main(int argc, char **argv)
 	passed += arm_three_copyin_not_resident();
 	passed += arm_four_copy_that_must_fail();
 	passed += arm_two_exception_to_the_task();
+	passed += arm_five_single_step();
 
-	printf("fault_test: %d of 4 arms passed\n", passed);
+	printf("fault_test: %d of %d arms passed\n", passed, FT_ARMS);
 
 	/*
 	 * 🔴 IT ENDS, and the note that used to be here said it must not.
@@ -526,5 +758,5 @@ main(int argc, char **argv)
 	 *
 	 * The exception thread is joined in arm two, so this is the last one.
 	 */
-	return passed == 3 ? 0 : 1;
+	return passed == FT_ARMS ? 0 : 1;
 }

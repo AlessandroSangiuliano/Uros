@@ -63,58 +63,50 @@ machine_real_ncpus_init(void)
  * thread was an application processor arriving in slave_main(), and it found
  * THREAD_NULL.
  *
- * Indexed by APIC id, because that is what cpu_number() answers on this
- * machine -- <x86_64/cpu_number.h> reads it out of the per-CPU block -- so
- * the slot a processor uses and the slot it is registered in are the same
- * number by construction rather than by a mapping somebody has to maintain.
+ * Indexed by processor number, because that is what cpu_number() answers --
+ * <x86_64/cpu_number.h> reads it out of the per-CPU block -- so the slot a
+ * processor uses and the slot it is registered in are the same number by
+ * construction.
  *
- * ⚠️ Sparse, therefore, and deliberately: firmware does not promise
- * consecutive identifiers, so a machine with four processors may light up
- * slots 0, 2, 4 and 6.  Everything that walks machine_slot[] tests is_cpu, so
- * the holes cost array space and nothing else -- and the alternative, a dense
- * logical numbering, means a translation on the path of every cpu_number()
- * call in the kernel.
+ * 🔑 Dense since #663.  It was indexed by APIC id and sparse on purpose,
+ * because a dense numbering was taken to mean a translation on the path of
+ * every cpu_number() call.  It does not: the per-CPU block holds the number,
+ * and the APIC id is translated only where the hardware is addressed.  And
+ * sparse was not free: OMEGA's E-cores have ids 64 to 94, past the NCPUS
+ * slots, and smp_start_others() panicked on the first of them before it could
+ * be registered here.
  */
 void
 machine_slots_init(void)
 {
-	unsigned	self = (unsigned) lapic_id();
-	unsigned	i, n;
+	unsigned	cpu, n;
 
 	/*
 	 * The boot processor first, and unconditionally.  It is running this
 	 * code, which settles the question more firmly than any table: a
 	 * machine whose ACPI tables list no processors at all still has this
 	 * one, and would otherwise reach start_kernel_threads() with nothing
-	 * marked and no idle thread anywhere.
+	 * marked and no idle thread anywhere.  It is number 0.
 	 */
-	if (self >= NCPUS)
-		panic("machine_slots_init: the boot processor's APIC id (%u) "
-		      "is past the %d slots this kernel was built with", self,
-		      NCPUS);
-
-	machine_slot[self].is_cpu = TRUE;
-	machine_slot[self].cpu_type = CPU_TYPE_X86_64;
-	machine_slot[self].cpu_subtype = CPU_SUBTYPE_X86_64_ALL;
+	machine_slot[0].is_cpu = TRUE;
+	machine_slot[0].cpu_type = CPU_TYPE_X86_64;
+	machine_slot[0].cpu_subtype = CPU_SUBTYPE_X86_64_ALL;
 	n = 1;
 
 	/*
-	 * Then the ones that answered.  Online, not listed: a processor ACPI
-	 * named and that never reported in has no per-CPU block, no descriptor
-	 * table and no stack, and giving it an idle thread would mean the
-	 * scheduler dispatching work to a processor that does not exist.
+	 * Then the ones that answered.  Online, not numbered: a processor that
+	 * was numbered and never reported in has no per-CPU block, no
+	 * descriptor table and no stack, and giving it an idle thread would
+	 * mean the scheduler dispatching work to a processor that does not
+	 * exist.
 	 */
-	for (i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (!c->usable || c->apic_id == self)
-			continue;
-		if (!smp_is_online(c->apic_id))
+	for (cpu = 1; cpu < smp_cpu_count() && cpu < NCPUS; cpu++) {
+		if (!smp_is_online(cpu))
 			continue;
 
-		machine_slot[c->apic_id].is_cpu = TRUE;
-		machine_slot[c->apic_id].cpu_type = CPU_TYPE_X86_64;
-		machine_slot[c->apic_id].cpu_subtype = CPU_SUBTYPE_X86_64_ALL;
+		machine_slot[cpu].is_cpu = TRUE;
+		machine_slot[cpu].cpu_type = CPU_TYPE_X86_64;
+		machine_slot[cpu].cpu_subtype = CPU_SUBTYPE_X86_64_ALL;
 		n++;
 	}
 

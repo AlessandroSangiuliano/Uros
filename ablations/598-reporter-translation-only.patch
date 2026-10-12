@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: the fault reporter asking whether an engine remaps -- it asks only whether one translates, and with -i alone it says NOT ASKED while the engine refuses interrupts
+Run: --iommu intel --entry 37 900 -smp 1
+Expect: the fault reporter: NOT ASKED
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_fault.c b/uros/src/mach_kernel/x86_64/cpu/iommu_fault.c
+index 1dfdd958..9f0900d2 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_fault.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_fault.c
+@@ -483,7 +483,7 @@ int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed)
+  */
+ static int engines_refuse(void)
+ {
+-	return iommu_translating() || iommu_interrupts_remapped();
++	return iommu_translating();
+ }
+ 
+ static unsigned drain_all_locked(void)

@@ -782,8 +782,11 @@ static void bench_compare_arms(void)
 	 * prices QEMU rather than the design.  The safety arm below is the
 	 * opposite: it wants emulation, because that is where the interleavings
 	 * it hunts are widest.  Two questions, two instruments.
+	 *
+	 * #661: "!!" and not the warning sign, which the console's font has
+	 * no glyph for -- on a screen this line began with two replacements.
 	 */
-	printf("  ⚠️ only meaningful accelerated or on iron: a spin lock under "
+	printf("  !! only meaningful accelerated or on iron: a spin lock under "
 	       "pure emulation measures the emulator\n");
 	printf("  the lock costs %llu per mille of the bit\n",
 	       (unsigned long long) (bench_median5(bit)

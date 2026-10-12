@@ -56,6 +56,7 @@ static int			counter_64;
 static int			legacy_capable;
 static unsigned			comparators;
 static uint16_t			vendor;
+static uint8_t			number;		/* the ACPI table's, #598 */
 static int			started_here;
 static int			taken;
 static int			legacy_found_on;
@@ -136,6 +137,7 @@ int hpet_init(void)
 		return 0;
 
 	address = t.base.address;
+	number = t.number;
 	regs = (volatile uint8_t *)(uintptr_t)
 		pmap_map_device(address, HPET_BLOCK_SIZE);
 
@@ -207,6 +209,11 @@ unsigned hpet_comparators(void)
 uint16_t hpet_vendor(void)
 {
 	return vendor;
+}
+
+uint8_t hpet_number(void)
+{
+	return number;
 }
 
 int hpet_started_here(void)

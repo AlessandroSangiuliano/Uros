@@ -1,0 +1,50 @@
+Kind: widen
+Issue: #599
+Holds open: a waker's two halves in thread_wakeup_prim(), for -V's event only, for delay(160): the thread it took off the hash stays at WAKING_EVENT that long, so that -V's thread, clearing its own wait, takes the bucket's lock and its own again while the waker is in flight -- the fixed tree waits for the waker after the relock and must still pass, and says how many times it did
+Run: --entry 34 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 901dca7c..09624bb0 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1110,6 +1110,10 @@ wake_dequeued(
+ 	}
+ }
+ 
++/* ablations/599-widen-relock.patch: -V's event, and how long its waker waits */
++extern int	clear_wait_test_event;
++#define	WIDEN_599_US	160
++
+ /*
+  * Rounds in which clear_wait_locked()'s second read found a waker in flight on
+  * the clearing thread's own wait, and waited for it (#599).  Counted under the
+@@ -1290,6 +1294,16 @@ thread_wakeup_prim(
+ 
+ 	simple_unlock(lock);
+ 
++	/*
++	 * ablations/599-widen-relock.patch: the waker's two halves held apart
++	 * for -V's event, so that the thread it took off the hash stays at
++	 * WAKING_EVENT while that thread, clearing its own wait, takes the
++	 * bucket's lock and its own again.
++	 */
++	if (event == (event_t) &clear_wait_test_event &&
++	    !queue_empty(&wake_queue))
++		delay(WIDEN_599_US);
++
+ 	while (!queue_empty (&wake_queue)) {
+ 		thread = (thread_t) dequeue (&wake_queue);
+ 
+diff --git a/uros/src/mach_kernel/x86_64/cpu/clear_wait_test.c b/uros/src/mach_kernel/x86_64/cpu/clear_wait_test.c
+index 83990006..753163bd 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/clear_wait_test.c
++++ b/uros/src/mach_kernel/x86_64/cpu/clear_wait_test.c
+@@ -34,7 +34,7 @@
+ #define	CLEAR_WAIT_TEST_ROUNDS	20000
+ #define	CLEAR_WAIT_TEST_WAIT_S	10
+ 
+-static int		clear_wait_test_event;	/* the event both sides use */
++int			clear_wait_test_event;	/* the event both sides use */
+ static volatile int	clear_wait_test_cpu;	/* where the waker goes */
+ static volatile int	clear_wait_test_bound;	/* it is there */
+ static volatile int	clear_wait_test_go;	/* both start */

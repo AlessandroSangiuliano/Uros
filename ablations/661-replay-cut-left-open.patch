@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #661
+Takes out: closing the sequence the -f replay's cut left open -- the first live byte breaks it again, as before b2db93c2: a ■ after the replayed lines, and the screen's every report after it says 1 not UTF-8 of a wire that had none
+Run: --entry 41 600 -smp 4
+With: 661-widen-replay-cut.patch
+Expect: [1-9][0-9]* not UTF-8 \(#
+Note: the census's line ends in "N not UTF-8 (#567, #568, #661)" -- entry 41 prints no halt report, which a boot that halts adds, ending "N not UTF-8 (#661)"; with the sequence closed N is 0, as the wire is valid UTF-8
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/fbcons.c b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
+index ca190fa9..3633a011 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/fbcons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
+@@ -683,7 +683,7 @@ static void fbcons_early_draw(void)
+ 	 * first live byte, which would draw a ■ for it and count it as not
+ 	 * UTF-8 in every report after; the screen says what it lost below.
+ 	 */
+-	if (paced && offered > drawn)
++	if (0 && paced && offered > drawn)
+ 		fb_utf8.need = 0;
+ 	fb_ready = 1;
+ 	glyphs = fb_glyphs - glyphs;	/* read, not inferred from the bytes */

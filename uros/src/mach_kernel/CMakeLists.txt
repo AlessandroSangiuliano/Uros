@@ -148,9 +148,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/string.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
+    # The machine restarted the way the FADT says, and the older ways after (#373).
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/reset.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons_cost.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/fbcons.c
+    # The console kept in RAM for Linux's ramoops after a reset (#373).
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ramoops.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ddb.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cont_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/disasm.c
@@ -160,6 +164,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic_race_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/msi_race_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     # Configuration space: ECAM where the MCFG describes one, the port
     # pair where it does not -- two boards, not a bridge (#457).
@@ -176,6 +181,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/halt_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/model.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu_check.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/startup.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl.c
@@ -197,6 +203,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_dev.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/delay.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/exact.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/freq_source.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/hpet.c
@@ -211,6 +218,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_event.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/preempt_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rcu_tick_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/sprintf_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/clear_wait_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/census_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu.c

@@ -120,6 +120,28 @@ struct iommu_scope {
 };
 
 /*
+ * What remapping INTERRUPTS needs from an engine, beyond whether it can (#598).
+ *
+ * Each of these decides something before the first entry is written: an
+ * engine that cannot be made to forget an entry is one whose entries can never
+ * change, and one that blocks every message until remapping is on is one whose
+ * boot order is part of its correctness.
+ */
+struct iommu_interrupt_caps {
+	/*
+	 * The engine can be made to forget a cached entry.  🔴 Not implied by
+	 * remapping on Intel: "Register-based invalidation cannot invalidate
+	 * the interrupt entry cache" (Rev 5.20 §6.5.1), so it is the queue or
+	 * nothing.  AMD does it with a command its command buffer always takes.
+	 */
+	int	can_forget;
+
+	int	x2apic;			/* destinations wider than 8 bits    */
+	int	required;		/* every message blocked while off   */
+	int	x2apic_required;	/* every message blocked unless wide */
+};
+
+/*
  * One remapping engine.
  *
  * The first half is what the firmware's table said.  The second half is what
@@ -179,12 +201,13 @@ struct iommu_unit {
 	uint32_t	page_levels;
 
 	int		interrupt_remapping;
+	struct iommu_interrupt_caps interrupt;	/* the rest of that answer */
 	int		coherent_walk;	/* the engine's page walks snoop caches */
 
 	/*
 	 * The vendor's own capability words, kept raw.
 	 *
-	 * ⚠️ Deliberately not decoded past the four fields above.  These are
+	 * ⚠️ Deliberately not decoded past the fields above.  These are
 	 * the evidence for that decode, and a reported number that came out of
 	 * the same arithmetic as the decode would agree with it whether or not
 	 * either was right.
@@ -419,6 +442,204 @@ int iommu_build_passthrough(void);
 const struct iommu_tables *iommu_tables(void);
 
 /*
+ * ── #598: the interrupt tables, built and read back, hardware untouched ──
+ *
+ * Stage 2a's shape for interrupts: allocated, every entry written refusing
+ * and read back, and not one register or device table entry touched -- so a
+ * machine that booted before boots after.  Pointing the engines at them is
+ * the step after, and the first that can stop an interrupt.
+ *
+ * On Intel, ONE table that every engine remapping interrupts will share: Rev
+ * 5.20 §5.1.3 lets units share one, and then the indices are a single space
+ * divided once for the machine.  The price is that changing an entry means
+ * telling every engine to forget it, each through its own queue.
+ *
+ * On AMD a table belongs to a device (Rev 3.11 §2.2.2.1): one for each
+ * DeviceID the IVRS names in a special entry -- I/O APIC, HPET, two of which
+ * may share one -- and one closed table
+ * for every other device, so that a device nobody gave an interrupt is refused
+ * and logged rather than passed unmapped.  ⚠️ An IVRS that names no I/O APIC
+ * is a real one -- QEMU's under KVM -- and leaves its pins with no table.
+ *
+ * All zero when nothing was built.  `engines' zero says why: no engine remaps
+ * interrupts, which is a machine and not a failure.
+ */
+struct iommu_interrupt_tables {
+	unsigned	engines;	/* engines that remap interrupts      */
+	unsigned	tables;		/* built                              */
+	unsigned	entries;	/* read back as written: not present  */
+	unsigned	wrong;		/* read back as anything else         */
+	unsigned	frames;		/* what they cost, in 4K frames       */
+	uint64_t	intel_table;	/* the one every intel engine shares  */
+	uint64_t	intel_irta;	/* ... and the word IRTA_REG will get */
+	unsigned	named;		/* AMD: for the sources the IVRS names */
+	unsigned	ioapics;	/* ... which are I/O APICs            */
+	unsigned	hpets;		/* ... and HPETs, once per DeviceID   */
+	int		x2apic;		/* #659: entries for 32-bit apic ids  */
+};
+
+/*
+ * Build them, once.  Answers non-zero when every table was built and every
+ * entry read back as written.
+ *
+ * #659: for x2APIC ids when the local APIC is planned for them
+ * (lapic_x2apic_planned()) and every engine can take them -- Intel's EIM, AMD's
+ * XTSup and GASup.  Then Intel's IRTA carries EIME and every entry a 32-bit
+ * destination (Rev 5.20 §9.9), and with EIME set a message in the old format is
+ * refused (§5.1.4).
+ */
+int iommu_build_interrupt_tables(void);
+
+const struct iommu_interrupt_tables *iommu_interrupt_tables(void);
+
+/*
+ * #659: whether the entries were built for x2APIC ids; zero before they are
+ * built, and where nothing was.  Remapping on is iommu_interrupts_remapped().
+ */
+int iommu_remaps_x2apic(void);
+
+/*
+ * #659: whether an interrupt routed now can name processor `apic_id': any id
+ * once interrupts are remapped through entries for 32-bit ids, and otherwise
+ * one up to LAPIC_XAPIC_ID_MAX -- the old format's words and an eight-bit
+ * entry's destination, where 255 is the broadcast.  The one answer for
+ * irq_target(), an MSI slot's claim, the reach test and the HPET's probe.
+ */
+int iommu_names_apic_id(uint32_t apic_id);
+
+/*
+ * #659: whether they could be -- every engine able to carry an x2APIC id, a
+ * 16-byte store for the entries, and on Intel a DMAR that says the platform
+ * can remap.  For lapic_plan_mode(), which on bare metal plans x2APIC mode only
+ * where remapping could carry it, before any table is built.
+ */
+int iommu_can_remap_x2apic(void);
+
+/*
+ * ── #598: what a source writes, through remapping or around it ───────
+ *
+ * The question every source asks before it is programmed: an I/O APIC pin in
+ * ioapic_route(), a device's MSI-X entry in device_md_msi_register().  While
+ * nothing is remapped -- every boot without -i, and every machine whose
+ * engines cannot -- the answer is no, the source writes today's words, and
+ * nothing here writes anything.
+ *
+ * 🔴 ONCE IT IS YES, A SOURCE THAT DOES NOT COME THROUGH HERE IS DEAD.  A
+ * message in compatibility format is refused (Intel with CFI clear, fault
+ * 25h), so every pin and every slot must name an entry this kernel wrote.
+ */
+int iommu_interrupts_remapped(void);
+
+/*
+ * Write the entry a pin or an MSI slot delivers through, and answer the words
+ * the source must hold to select it: the two halves ioapic_route() writes,
+ * or the address and data an MSI-X table entry is given.  🔴 The words come
+ * IN holding the compatibility-format ones and go out holding the ones to
+ * write -- on Intel the remappable format, on AMD the very same words, since
+ * there the vector is the index and only the entry is written.  A caller
+ * that passed fresh variables would hand a device garbage on AMD, and did.  The fields are the
+ * ones the source would have written in compatibility format -- vector,
+ * destination APIC id, trigger and polarity -- and the entry is made to stick
+ * before this returns: one 16-byte store, flushed for an engine whose reads
+ * do not snoop, and forgotten by every engine that remaps.
+ *
+ * On Intel the entry also names who may use it (#598 point 2): the I/O APIC's
+ * source-id from the DMAR for a pin, the function's bus/device/function for
+ * a slot.  Answers zero, having written no source's words, when the source
+ * has no entry -- a pin past the map, an id wider than the entries carry
+ * (eight bits, unless they were built for x2APIC ids: iommu_remaps_x2apic(),
+ * #659), an I/O APIC no table names.
+ */
+int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
+		    int level, int active_low, uint32_t *lo, uint32_t *hi);
+int iommu_remap_msi(unsigned slot, uint16_t bdf, uint8_t vector,
+		    uint32_t apic_id, uint64_t *address, uint32_t *data);
+/*
+ * The HPET's comparator, for its FSB message, by the HPET's ACPI sequence
+ * number (#598): the same convention, the words being the FSB route
+ * register's, and the source the one iommu_hpet_source() finds.  Zero when no
+ * table names the HPET, or the comparator is past intel's range: then the
+ * message has no entry, and the comparator stays on its I/O APIC pin.
+ */
+int iommu_remap_hpet(uint8_t number, unsigned comparator, uint8_t vector,
+		     uint32_t apic_id, uint32_t *address, uint32_t *data);
+
+/*
+ * The slot given up: its entry stops remapping, so the device that held it
+ * is refused rather than delivered to whoever is given the vector next.  The
+ * function and the vector too, because on AMD the entry is the vector's in
+ * that function's own table.
+ */
+void iommu_forget_msi(unsigned slot, uint16_t bdf, uint8_t vector);
+
+/*
+ * The requester id an I/O APIC's messages carry, from the firmware's table:
+ * the DMAR's device scope, or the IVRS's special entry, whose enumeration id
+ * is the MADT's id for that controller.  Answers zero when no table names it,
+ * or names it only by a path through bridges this kernel does not walk.
+ */
+int iommu_ioapic_source(uint8_t id, uint16_t *source);
+
+/*
+ * The same for the HPET (#598), whose DMAR scope (type 4) and IVRS special
+ * entry (variety 2) carry its sequence number, the ACPI HPET table's
+ * `number'.  Zero means no table names it: its FSB message has no entry to
+ * go through, and the comparator stays on its I/O APIC pin.
+ */
+int iommu_hpet_source(uint8_t number, uint16_t *source);
+
+/*
+ * ── #598 phase 4: remapping turned on, behind `-i' ────────────────────
+ *
+ * 🔴 THE FIRST STEP OF #598 THAT CAN STOP AN INTERRUPT, so it is asked for,
+ * as translation is with `-I': a default boot remaps nothing.
+ *
+ * Where the platform and every engine say they can, and only all of them:
+ * the DMAR's flag set, every engine reporting remapping and a queue, an
+ * engine that demands extended interrupt mode (EIMER) only with entries
+ * built for 32-bit ids (#659), a processor with a 16-byte
+ * compare-and-exchange, and a table naming the I/O APIC whose pins will need
+ * entries -- and, on bare metal, entries for 32-bit ids under a local APIC
+ * already in x2APIC mode (#659, lapic_remapping_needs_x2apic_entries()).
+ * Answers how many
+ * engines remap.  On zero, `why' says what stopped it, and `asked' says
+ * whether the machine could be asked at all: zero for one that cannot remap
+ * the way this kernel does -- the boot says NOT ASKED -- and one for an
+ * engine that was asked and did not confirm.
+ */
+unsigned iommu_enable_interrupt_remapping(const char **why, int *asked);
+
+/*
+ * The part that must come before translation is turned on, called first when
+ * -i is given.  On AMD it writes every device table entry's interrupt half,
+ * which an engine already on may have cached; on Intel there is nothing to
+ * do before.  Answers zero when that could not be done, and then remapping
+ * is not turned on.
+ */
+int iommu_prepare_interrupt_remapping(void);
+
+/* Whether that engine remaps interrupts, as this kernel turned it on. */
+int iommu_unit_remaps(unsigned unit);
+
+/*
+ * #659: how many engines were remapping already -- left on by whoever ran
+ * before, and turned off: under -i before this kernel's table was given,
+ * since EIME may not change under a running engine, and without -i because
+ * every message is then in the old format, which such an engine may refuse
+ * (iommu_turn_off_inherited_remapping()).  Intel's: AMD's engines are all
+ * turned off before -i programs them, remapping or not, and one left running
+ * in a boot without -i is #677's.
+ */
+unsigned iommu_remapping_found_on(void);
+
+/*
+ * #659: the boot without -i -- every engine found remapping turned off, and
+ * how many remap now, read from their own status for the boot to say.
+ */
+void iommu_turn_off_inherited_remapping(void);
+unsigned iommu_engines_remapping(void);
+
+/*
  * ── Stage 2b: point the engines at those tables and let them run ─────
  *
  * 🔴 THE FIRST THING IN #432 THAT CAN STOP A MACHINE, and therefore the first
@@ -564,7 +785,8 @@ enum iommu_fault_kind {
 	IOMMU_FAULT_UNKNOWN = 0,
 	IOMMU_FAULT_PAGE,		/* no translation, or no permission  */
 	IOMMU_FAULT_ENTRY,		/* the device's own entry is unusable */
-	IOMMU_FAULT_HARDWARE		/* the engine failed to read a table  */
+	IOMMU_FAULT_HARDWARE,		/* the engine failed to read a table  */
+	IOMMU_FAULT_INTERRUPT		/* an interrupt message refused (#598) */
 };
 
 /*
@@ -584,7 +806,19 @@ struct iommu_fault {
 	uint8_t			kind;	   /* enum iommu_fault_kind           */
 	uint8_t			write;	   /* 1 a write, 0 a read             */
 	uint8_t			vendor;	   /* which encoding `reason' is in   */
+	uint32_t		index;	   /* or IOMMU_FAULT_NO_INDEX         */
 };
+
+/*
+ * The remapping entry a refused interrupt went through, when the record names
+ * one (#598).
+ *
+ * ⚠️ Intel names it for most of its interrupt reasons and leaves it undefined
+ * for five (Rev 5.20 §11.4.7.6, FI); AMD's event carries the address the
+ * device wrote and no entry at all.  A sentinel and not zero, because zero is
+ * the first entry of every table.
+ */
+#define	IOMMU_FAULT_NO_INDEX	0xFFFFFFFFu
 
 /*
  * Intel's fault record does not carry one, AMD's does.
@@ -663,6 +897,57 @@ int iommu_fault_ledger_check(unsigned *ran, unsigned *wrong);
  * counted as lost, and nothing else is.
  */
 int iommu_fault_drain_check(unsigned *ran, unsigned *wrong, unsigned *failed);
+
+/*
+ * Encode and decode the words interrupt remapping is made of, against values
+ * written from the two specifications, on every boot and every board (#598).
+ *
+ * The same argument as the two above, and the same reason it has to run where
+ * nothing is remapped: these words are written once and read only by an engine,
+ * so a wrong bit is not a wrong answer -- it is an interrupt delivered to the
+ * wrong processor, or one any device can trigger.
+ */
+int iommu_interrupt_check(unsigned *ran, unsigned *wrong);
+
+/*
+ * #598: the arithmetic of Intel's invalidation queue, on a fabricated engine,
+ * at every boot and on every board -- where descriptors land, when the ring is
+ * full, what a wait carries and what answers it.  A ring that counts its room
+ * one slot wrong stops the engine with every descriptor still in it, or
+ * overwrites one the engine has not read.
+ */
+int iommu_queue_check(unsigned *ran, unsigned *wrong);
+
+/*
+ * #598: what an intel engine's invalidation queue has done, for whoever prints:
+ * whether it is on, how many waits it answered and descriptors it took, how
+ * many times its tail went round the ring -- and, kept from the first time,
+ * what stopped it, with the fault status and the two ends as they were then.
+ * Answers zero for a unit that is not an intel engine this kernel enabled.
+ */
+enum iommu_queue_stop {
+	IOMMU_QUEUE_RUNNING = 0,
+	IOMMU_QUEUE_NO_ROOM,		/* more descriptors than free slots */
+	IOMMU_QUEUE_SILENT,		/* the wait's number never arrived  */
+	IOMMU_QUEUE_REFUSED		/* IQE or ITE: the engine stopped it */
+};
+
+struct iommu_queue_counts {
+	int		on;		/* QIES read back set */
+	uint64_t	waits, descriptors, turns;
+	unsigned	stopped;	/* enum iommu_queue_stop */
+	uint32_t	fsts;		/* at the stop */
+	unsigned	head, tail;	/* at the stop */
+};
+
+int iommu_queue_counts(unsigned unit, struct iommu_queue_counts *out);
+
+/*
+ * Send `n' waits one at a time through an intel engine's queue and answer how
+ * many came back -- for the boot, to take the tail round the ring on the real
+ * engine.  Zero for a unit without a queue this kernel started.
+ */
+unsigned iommu_queue_exercise(unsigned unit, unsigned n);
 
 /*
  * ── Stage 3d: a domain of its own, for one device ────────────────────
@@ -821,8 +1106,9 @@ unsigned iommu_domain_count(void);
 
 /*
  * The thread that drains every engine every 100 ms and prints what they
- * refused -- the only printer of the fault log (#599).  NOT ASKED, said once,
- * when no engine translates.
+ * refused -- the only printer of the fault log once it is asked for (#599);
+ * before that, iommu_fault_report_now() below, for a boot that stops first
+ * (#598).  NOT ASKED, said once, when no engine translates.
  *
  * 🔴 THIS IS "a diagnosable event, not silence" (#432).  It was a poll run by
  * the idle loop, and #432 closed on "no refusal goes unreported": a processor
@@ -834,6 +1120,19 @@ unsigned iommu_domain_count(void);
  * follow-up.
  */
 void iommu_fault_reporter_start(void);
+
+/*
+ * #598: drain the engines and print what they recorded, now, in the caller's
+ * context -- for a boot about to stop before the reporter's thread can exist
+ * or run.  The burn-in's "the timer armed and never fired" was one: under -H
+ * -i the tick that never came is first an HPET message an engine refused, and
+ * its reason (22h, 26h, an IO_PAGE_FAULT) stayed in the engine's registers.
+ * Answers how many lines it printed, as the reporter counts them; zero where
+ * no engine translates or remaps, or none recorded anything -- and zero, with
+ * nothing printed, once iommu_fault_reporter_start() has run: the reporter is
+ * then the one printer, whose cursors are its own.
+ */
+unsigned iommu_fault_report_now(void);
 
 /*
  * What the log knows of one device's refusals, asked by the driver that owns
@@ -858,14 +1157,35 @@ struct iommu_fault_answer {
 void iommu_fault_ask(uint16_t bdf, struct iommu_fault_answer *a);
 
 /*
+ * #598's C7: whether an engine here reads its tables from memory, so that each
+ * line written must leave the processor's caches first (Intel, ECAP.C clear);
+ * how many lines have been flushed for it since boot; and the check that a
+ * scratch domain's one page flushes every line it should.
+ */
+int iommu_tables_uncached(void);
+uint64_t iommu_table_lines_flushed(void);
+int iommu_flush_check(unsigned *expected, unsigned *made);
+
+/*
+ * #598's C7 on AMD: whether a unit's device table is read with snooping, as
+ * its IVHD recommends (the control register's Coherent bit is set to match),
+ * and whether any unit's is not -- in which case every device table line this
+ * kernel writes is flushed.  Page walks are snooped on AMD, SD being clear in
+ * every entry written here.
+ */
+int iommu_amd_devtab_snooped(unsigned unit);
+int iommu_amd_devtab_uncached(void);
+
+/*
  * Whether a domain could be given to a device at all on this machine.
  *
- * ⚠️ Asked rather than assumed, because there are four separate ways for the
+ * ⚠️ Asked rather than assumed, because there are five separate ways for the
  * answer to be no and each of them is a real machine: no engine at all, an
- * engine that did not answer, a description that was truncated, and
- * translation not turned on.  A grant that failed for one of those is not a
- * bug in the caller, and a caller that cannot tell them apart will report it
- * as one.
+ * engine that did not answer, a description that was truncated, translation
+ * not turned on, and on Intel a processor without cmpxchg16b, which a present
+ * context entry is changed with (#598's C20).  A grant that failed for one of
+ * those is not a bug in the caller, and a caller that cannot tell them apart
+ * will report it as one.
  */
 int iommu_can_isolate(void);
 

@@ -305,6 +305,11 @@ int       pthread_join(pthread_t thread,
 int       pthread_timedjoin_np(pthread_t thread,
 			       void **value_ptr,
 			       const struct timespec *abstime);
+/* #667: what a condition variable holds, and what a thread asleep on one
+ * waits for -- for a test that has to say why a waiter did not come back. */
+int       pthread_cond_state_np(pthread_cond_t *cond, int *seq, int *waiters);
+int       pthread_cond_waiting_np(pthread_t thread, pthread_cond_t **cond,
+				  int *seq);
 int       pthread_mutex_destroy(pthread_mutex_t *mutex);
 int       pthread_mutex_getprioceiling(const pthread_mutex_t *mutex, 
                                        int *prioceiling);

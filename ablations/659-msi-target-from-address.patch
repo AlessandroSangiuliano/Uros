@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #659
+Takes out: a slot's destination kept with all 32 bits -- msi_remap_vector() reads it back out of the address's eight again, as before f8c9353c, and a slot aimed at processor 256, whose address names 0, gets an entry for 0
+Run: --iommu intel-eim --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
+Expect: the 82574L's MSI-X slot aimed at apic id [0-9]+ arrived there [0-9]+ times and elsewhere [0-9]+ — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -794,7 +794,7 @@
+ 	    || !iommu_remap_msi(slot - DEVICE_MD_MSI_BASE,
+ 				(uint16_t)((bus << 8) | (dev << 3) | func),
+ 				(uint8_t)*data,
+-				msi_target[slot - DEVICE_MD_MSI_BASE],
++				(uint32_t)((*address >> 12) & 0xFFu),
+ 				&ra, &rd))
+ 		return 0;
+ 

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #658
+Takes out: the allowance under a hypervisor: the floor is 0.1% and 1 us again, and with 658-kvmclock-low.patch the self-test must say a right wait was short
+Run: --entry 0 300 -smp 4
+Expect: delay: WRONG -- [0-9]+ of [0-9]+ waits lasted less than they were asked
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 925e0870..8121a075 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -3818,7 +3818,7 @@ static void delay_selftest(void)
+ 	int		w, by;
+ 
+ 	if (freq_under_hypervisor() && src->adopted >= 0)
+-		apart = src->ppm[src->adopted];
++		apart = 0;
+ 	floor = DELAY_TEST_US - DELAY_TEST_US / 1000 - 1 -
+ 	    (unsigned)(DELAY_TEST_US * apart / 1000000);
+ 

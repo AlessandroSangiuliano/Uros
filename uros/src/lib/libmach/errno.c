@@ -23,11 +23,17 @@
  */
 
 #include <errno.h>
+#include <mach.h>
+#include "externs.h"
 
-int __mach_errno = 0;
-
+/*
+ * errno lives beside the reply port, in the task's mach_thread_state until a
+ * thread library hands over a state per thread (mig_support.c, #645).  It used
+ * to be defined here and again in libpthreads, both strong, and a program got
+ * whichever archive member the linker pulled first.
+ */
 int *
 __mach_errno_addr(void)
 {
-    return &__mach_errno;
+    return &mach_thread_state()->err_no;
 }

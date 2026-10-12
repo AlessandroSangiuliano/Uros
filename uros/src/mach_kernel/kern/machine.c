@@ -875,6 +875,9 @@ processor_doshutdown(
 	 */
 	PMAP_DEACTIVATE_KERNEL(cpu);
         cpu_data[cpu].active_thread = THREAD_NULL;
+#if	MACHINE_CURRENT_THREAD
+	machine_set_current_thread(THREAD_NULL);	/* what current_thread() reads (#646) */
+#endif
 	active_kloaded[cpu] = THR_ACT_NULL;
 	cpu_down(cpu);
 	thread_wakeup((event_t)processor);

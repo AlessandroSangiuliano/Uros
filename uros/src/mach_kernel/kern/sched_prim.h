@@ -233,6 +233,8 @@ extern void	assert_wait_preempt_release(
 /* #324 futex direct hand-off: switch straight to a fully-parked waiter */
 /* Waiters the futex hand-off declined because they were swapped out (#607). */
 extern unsigned int	handoff_declined_swapped;
+/* Second reads of clear_wait_locked() that waited for a waker (#599). */
+extern unsigned int	clear_wait_relock_waits;
 
 extern boolean_t	thread_handoff_to_parked_waiter(
 				event_t		event);
@@ -255,11 +257,15 @@ extern void		thread_bind(
 				thread_t	thread,
 				processor_t	processor);
 
+/* Bind the caller to the processor it is on, and answer which (#646) */
+extern int		thread_bind_here(void);
+
 #define thread_bind_locked(thread,processor)	\
 		(thread)->bound_processor = (processor)
 
 #else	/*NCPUS > 1*/
 #define thread_bind(thread,processor)
+#define thread_bind_here()			(0)
 #define thread_bind_locked(thread,processor)
 #endif	/*NCPUS > 1*/
 

@@ -400,13 +400,28 @@ preempt_test_run(void)
  * panic now stops every other processor -- including the three under test,
  * mid-measurement.  Waiting is not idleness here; it is the test.
  */
+static void preempt_test_run_remote_body(int me);
+
+/*
+ * The driver stays on the processor it chose from (#646).  It read
+ * cpu_number() bare, on an unbound thread, and then counted on running
+ * there; a move in between left `me' naming a processor it had left.
+ */
 void
 preempt_test_run_remote(void)
+{
+	processor_t	was = current_thread()->bound_processor;
+
+	preempt_test_run_remote_body(thread_bind_here());
+	thread_bind(current_thread(), was);
+}
+
+static void
+preempt_test_run_remote_body(int me)
 {
 	thread_t	a, b, r;
 	processor_t	target = PROCESSOR_NULL;
 	uint64_t	t0, limit;
-	int		me = cpu_number();
 	int		i;
 
 	/*

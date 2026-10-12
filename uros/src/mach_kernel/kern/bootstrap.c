@@ -1936,7 +1936,14 @@ boot_script_task_resume (struct cmd *cmd)
       printf("boot_script_task_resume failed with %x\n", rc);
       return BOOT_SCRIPT_MACH_ERROR;
     }
-  printf ("\nstart %s: ", cmd->path);
+  /*
+   * A whole line (#644).  This was GNU Mach serverboot's open line, "\nstart
+   * %s: ", which the started task's first output was meant to finish -- but
+   * the task is already resumed above, the other processors are scheduling,
+   * and whatever any of them printed next finished it instead: "start
+   * boot_probe: clock_event: cpu 0 — first tick arrived (lapic-oneshot)".
+   */
+  printf ("start %s\n", cmd->path);
   return 0;
 }
 

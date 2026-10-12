@@ -17,6 +17,7 @@
 
 #include <cpu/regs.h>
 #include <cpu/percpu.h>	/* #599: PERCPU_USER_RETURNS */
+#include <trap/frame.h>	/* #650: TF_VECTOR */
 
 	.section .text
 	.code64
@@ -84,8 +85,59 @@ isr_\vec:
 	jmp	trap_paranoid
 	.endm
 
+/*
+ * #DB keeps its own stack for ring 0, where it can land inside the window
+ * above, and leaves it at once when it comes from ring 3 (#650).
+ *
+ * From ring 3 the trap is the thread's.  It becomes EXC_BREAKPOINT, and
+ * exception() blocks while a handler reads and writes the thread's state at
+ * pcb->user.  On this processor's interrupt stack the thread would block
+ * where the next #DB here starts again, and the state the handler read would
+ * be the frame of the thread's previous entry into the kernel -- which is
+ * what fault_test's fifth arm saw.  So the seven words the processor and this
+ * stub pushed are copied to where a gate without a stack of its own puts
+ * them, the top of the thread's kernel stack, and the trap goes on as any
+ * other from ring 3: SAVE_REGS completes the frame at pcb->user.
+ *
+ * From ring 3 the saved cs is the truth and %gs is the user's: the window is
+ * a ring-0 matter.  An interrupt gate has turned interrupts off, so nothing
+ * runs on this stack between the copy and the switch.
+ */
+	.macro ISR_DEBUG vec
+	.align 16
+isr_\vec:
+	pushq	$0
+	pushq	$\vec
+	testb	$3, 24(%rsp)		/* the saved cs: from ring 3? */
+	jz	trap_paranoid
+	swapgs				/* the kernel's block, for the stack */
+	pushq	%rax
+	pushq	%rcx
+	movq	%gs:PERCPU_KERNEL_RSP, %rax	/* this thread's pcb->user */
+	addq	$TF_VECTOR, %rax
+	movq	16(%rsp), %rcx		/* vector */
+	movq	%rcx, 0(%rax)
+	movq	24(%rsp), %rcx		/* error */
+	movq	%rcx, 8(%rax)
+	movq	32(%rsp), %rcx		/* rip */
+	movq	%rcx, 16(%rax)
+	movq	40(%rsp), %rcx		/* cs */
+	movq	%rcx, 24(%rax)
+	movq	48(%rsp), %rcx		/* rflags */
+	movq	%rcx, 32(%rax)
+	movq	56(%rsp), %rcx		/* rsp */
+	movq	%rcx, 40(%rax)
+	movq	64(%rsp), %rcx		/* ss */
+	movq	%rcx, 48(%rax)
+	popq	%rcx
+	xchgq	%rax, (%rsp)		/* %rax back; its slot holds the new stack */
+	movq	(%rsp), %rsp
+	swapgs				/* the user's again: trap_common decides */
+	jmp	trap_common
+	.endm
+
 	ISR_NOERR 0
-	ISR_PARANOID_NOERR 1
+	ISR_DEBUG 1
 	ISR_PARANOID_NOERR 2
 	ISR_NOERR 3
 	ISR_NOERR 4

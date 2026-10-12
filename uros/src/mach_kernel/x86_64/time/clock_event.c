@@ -42,6 +42,7 @@
 #include <x86_64/time/pmtimer.h>	/* #593: the ticks against a ruler */
 #include <x86_64/time/line.h>		/* #593: one printf per line */
 #include <x86_64/time/window.h>		/* #593: what both windows share */
+#include <x86_64/cpu/iommu.h>		/* #598: the refusals, before the panic */
 
 /* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
 extern volatile uint64_t	wall_tsc_at_tick;
@@ -638,9 +639,21 @@ clock_event_burnin(unsigned seconds)
 	       clock_event_name(), (unsigned long long) got, seconds, want,
 	       (unsigned long long) (want ? (got * 1000ULL) / want : 0));
 
-	if (got == 0)
+	/*
+	 * #598: and under remapping a timer that never fired is first a
+	 * message an engine refused -- an HPET message through an entry that
+	 * is absent (22h), names another source (26h), or an IO_PAGE_FAULT.
+	 * The thread that reads refusals out does not exist yet, and the boot
+	 * stops here, so the engines are asked now and the answer said first:
+	 * the refusal, or that there was none.
+	 */
+	if (got == 0) {
+		if (iommu_fault_report_now() == 0 && iommu_interrupts_remapped())
+			printf("clock_event: burn-in: no engine recorded a "
+			       "refusal (#598)\n");
 		panic("clock_event: the timer armed and never fired — the "
 		      "kernel would have no clock at all (#459)");
+	}
 
 	/*
 	 * 🔴 Interrupts back as they were found (#612).  The `cli' above closes

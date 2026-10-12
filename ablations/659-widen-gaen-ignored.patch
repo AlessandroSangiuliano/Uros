@@ -1,0 +1,18 @@
+Kind: widen
+Issue: #659
+Holds open: an AMD engine that ignores GAEn -- the read-back after IommuEn sees it clear, as an engine without GASup would leave it -- so that iommu_amd_enable() refuses an engine it has already turned on
+Run: --iommu amd-xt --entry 48 900 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -722,7 +722,8 @@
+ 		 * four-byte ones would be entries nobody wrote.  A refusal
+ 		 * turns this engine off again, and every one before it.
+ 		 */
+-		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
++		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL)
++			  & ~AMD_CTL_GA_EN;
+ 		if (!(control & AMD_CTL_IOMMU_EN)
+ 		    || (amd_ir_x2apic()
+ 			&& (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))

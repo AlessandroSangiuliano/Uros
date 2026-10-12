@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #655
+Takes out: the lock and the splhigh around sprintf(), so that two calls at once share copybyte_str again
+Run: --entry 33 600 -smp 4
+Expect: sprintf_test: WRONG
+
+diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
+index 92c6ed2a..0e2ac3d7 100644
+--- a/uros/src/mach_kernel/kern/printf.c
++++ b/uros/src/mach_kernel/kern/printf.c
+@@ -1236,18 +1236,13 @@ int
+ sprintf(char *buf, const char *fmt, ...)
+ {
+         va_list listp;
+-        spl_t   s;
+         int     n;
+ 
+-        s = splhigh();
+-        simple_lock(&sprintf_lock);
+         va_start(listp, fmt);
+         copybyte_str = buf;
+         _doprnt(fmt, &listp, copybyte, 16);
+         va_end(listp);
+         n = strlen(buf);
+-        simple_unlock(&sprintf_lock);
+-        splx(s);
+         return n;
+ }
+ #endif /* !defined(__alpha) */

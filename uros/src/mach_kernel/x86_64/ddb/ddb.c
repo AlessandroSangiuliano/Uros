@@ -24,6 +24,7 @@
 #include <mach/machine.h>	/* machine_slot[] */
 #include <mach/machine/vm_types.h>
 #include <cpu/lapic.h>		/* lapic_send_nmi */
+#include <cpu/smp.h>		/* cpu_to_apic, #663 */
 #include <cpu/regs.h>		/* cpu_pause */
 #include <sync/atomic.h>	/* one debugger at a time */
 #include <pmap/layout.h>
@@ -402,9 +403,18 @@ void Debugger(const char *message)
 		      "asked for — boot with -r to stop here instead (#428)",
 		      message ? message : "");
 
+	/*
+	 * The store and the trap on ONE processor (#646).  The trap handler
+	 * looks for the message in the slot of the processor the int3 runs
+	 * on; a caller moved in between trapped where the slot was empty,
+	 * and the machine halted with a fault report instead of opening the
+	 * prompt, leaving a stale message for the next int3 on the processor
+	 * it left.  Assert() re-enables preemption before calling here.
+	 */
+	disable_preemption();
 	debugger_why[cpu_number()] = message && *message ? message : "Debugger";
-
 	__asm__ volatile ("int3");
+	enable_preemption();
 }
 
 /*
@@ -908,13 +918,14 @@ static void ddb_stop_others(void)
 		    || !machine_slot[i].running)
 			continue;
 		/*
-		 * The slot number IS the APIC id on this target --
-		 * cause_ast_check() targets an IPI the same way
-		 * (x86_64/cpu/machdep.c).  Said here because the two would
-		 * have to change together.
+		 * The slot number is this kernel's and the APIC id the
+		 * hardware's (#663): the NMI goes to cpu_to_apic(i), as
+		 * cause_ast_check()'s IPI does through ipi_ast_check().
+		 * Sent to the number, it stopped another processor or none
+		 * wherever the two differ -- on pavillion, from slot 6 on.
 		 */
 		ddb_stop_sent[i] = 1;
-		lapic_send_nmi((uint32_t) i);
+		lapic_send_nmi(cpu_to_apic((unsigned) i));
 	}
 
 	/*
