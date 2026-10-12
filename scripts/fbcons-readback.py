@@ -55,7 +55,10 @@
 #  128+n    stopped by TERM, HUP or INT: the run gives the lock, the fifos,
 #           the monitor's socket and qemu back, then dies by that signal, as
 #           a shell expects; a signal it was started with ignored (nohup's
-#           HUP, a background job's INT) stays ignored
+#           HUP, a background job's INT) stays ignored for the whole run --
+#           qemu, which arms all three whatever it inherits, runs in a
+#           session of its own, which a terminal's or a job's signals do not
+#           reach
 #
 # 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
 # QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
@@ -103,10 +106,11 @@
 # ⚠️ One run at a time, with the harness's own lock: two qemus on one machine
 # manufacture each other's failures (run-x86_64.sh says why).
 
-import argparse, fcntl, os, re, signal, socket, subprocess, sys, time
+import argparse, ctypes, fcntl, os, re, signal, socket, subprocess, sys, time
 
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 LOCK = "/tmp/uros-x86_64-run.lock"
+PR_SET_PDEATHSIG = 1		# prctl(2): a signal for when the parent dies
 
 FONT_H = "uros/src/mach_kernel/device/fbcons_font.h"
 # The kernel's first line, which boot.S says before anything else (#661).
@@ -191,6 +195,20 @@ def child_signals():
     for sig in STOP:
         signal.signal(sig, signal.SIG_DFL)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
+
+
+def qemu_signals(parent):
+    """qemu's child_signals(), in a session of its own (#661's review, nine
+    rounds).  QEMU arms INT, HUP and TERM whatever it was started with
+    (os_setup_signal_handling() in os-posix.c), so in the run's process
+    group the hangup nohup ignores, or a job's INT, stopped the machine
+    under the run; out of it they reach the run alone, which gives qemu
+    back as it gives everything back.  And TERM when the run dies without
+    doing so: a KILL to the run's group no longer reaches qemu."""
+    child_signals()
+    ctypes.CDLL(None).prctl(PR_SET_PDEATHSIG, ctypes.c_ulong(signal.SIGTERM))
+    if os.getppid() != parent:		# the run died before the line above
+        os._exit(1)
 
 
 def entry_has_f(entry):
@@ -553,9 +571,12 @@ def main():
         fd_out = os.open(fifo + ".out", os.O_RDONLY | os.O_NONBLOCK)
         fcntl.fcntl(fd_out, 1031, 1 << 20)	# F_SETPIPE_SZ: a whole boot
         fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
-        q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+        parent = os.getpid()
+        q = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL,
                              stderr=subprocess.PIPE, text=True,
-                             preexec_fn=child_signals)
+                             start_new_session=True,
+                             preexec_fn=lambda: qemu_signals(parent))
     except (OSError, ValueError, SystemExit,
             subprocess.SubprocessError) as e:
         return unstart(e)
