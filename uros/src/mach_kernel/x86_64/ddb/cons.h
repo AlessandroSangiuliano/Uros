@@ -67,6 +67,16 @@ void cons_puts(const char *s);
  */
 void cons_putc_wire(char c);
 
+/*
+ * #659: a report on several lines, said by one processor at a time.  The
+ * holder may take it again from inside (a backtrace, a fault in the report);
+ * every other processor's byte to the wire waits while it is held, for at
+ * most about a second, and not again for the same report.  A fatal trap's
+ * report and every backtrace hold it.
+ */
+void cons_report_begin(void);
+void cons_report_end(void);
+
 /* What the bound has done on this boot, for cons_cost_report() (#551). */
 unsigned cons_tx_dropped(void);
 unsigned cons_tx_spins_high(void);

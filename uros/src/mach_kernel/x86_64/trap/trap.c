@@ -738,7 +738,12 @@ static void report_return_symbol(uint64_t ret)
  * The lock is bounded and released before the caller halts.  A processor that
  * faults while holding it must not take the others' last words down with it,
  * so the wait gives up and prints anyway: interleaved output is worse than
- * serialised output and far better than none.
+ * serialised output and far better than none.  #659: it is the console's
+ * report lock now (cons_report_begin()), which the trap report holds around
+ * the whole report and this takes again inside it, and which keeps every
+ * other processor's bytes out as well, where this lock kept two backtraces
+ * apart and nothing else: an application processor's "no handler" came out
+ * interleaved with the boot processor's lines.
  *
  * ⚠️ The label is asked of the interrupt controller, not of cpu_number().
  * cpu_number() reads this processor's per-CPU block through %gs, and before a
@@ -749,8 +754,6 @@ static void report_return_symbol(uint64_t ret)
  * labelled with a processor that is not the one that died is worse than one
  * with no label at all.
  */
-static volatile uint64_t backtrace_lock;
-
 void x86_64_backtrace(uint64_t rbp)
 {
 	x86_64_backtrace_after(rbp, 0);
@@ -759,13 +762,8 @@ void x86_64_backtrace(uint64_t rbp)
 void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 {
 	pmap_t kernel = pmap_kernel();
-	uint64_t spins;
 
-	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
-		if (atomic_cmpxchg64(&backtrace_lock, 0, 1) == 0)
-			break;
-		cpu_pause();
-	}
+	cons_report_begin();
 
 	if (first != 0)
 		first();
@@ -844,7 +842,7 @@ void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 		rbp = next;
 	}
 
-	atomic_store64(&backtrace_lock, 0);
+	cons_report_end();
 }
 
 /*
@@ -2151,6 +2149,8 @@ void trap_dispatch(struct trap_frame *frame)
 		}
 	}
 
+	/* One report at a time, the others' bytes held out of it (#659). */
+	cons_report_begin();
 	tputs("\r\nUrMach x86-64: trap ");
 	tputs(trap_name(frame->vector));
 	tputs(" (vector ");
@@ -2208,6 +2208,7 @@ void trap_dispatch(struct trap_frame *frame)
 	 * nobody has fixed means taking it again, so "continue" ends here too.
 	 */
 	tputs("UrMach x86-64: no handler — halted\r\n");
+	cons_report_end();
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }

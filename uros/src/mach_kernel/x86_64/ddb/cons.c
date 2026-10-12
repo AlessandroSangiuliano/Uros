@@ -8,6 +8,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 
+#include <cpu/lapic.h>	/* lapic_id: who holds a report, #659 */
 #include <cpu/regs.h>
 #include <ddb/cons.h>
 #include <ddb/fbcons.h>
@@ -486,8 +487,109 @@ static int cons_tx_lock_bounded(void)
 	return 0;
 }
 
+/*
+ * 🔑 ONE PROCESSOR'S REPORT AT A TIME (#659).
+ *
+ * A fatal trap's report goes to the wire a byte at a time, and so does every
+ * other processor's console: an application processor's "no handler" came out
+ * interleaved byte by byte with the boot processor's next lines under KVM,
+ * "no handler — halted" unreadable, on every boot of a campaign.  Linux's
+ * answer is printk_cpu_sync, a report at a time with the owner free to nest;
+ * this is that, bounded.  A reporter holds it for its whole report, and again
+ * from inside it (a backtrace, a fault in the report, an NMI); every other
+ * processor's byte to the wire -- written directly or drained from the ring --
+ * waits while it is held, for at most CONS_REPORT_CYCLES, and once a wait has
+ * run that long it is not paid again for the same report: the holder may be
+ * the processor that will never let go.  Keyed by APIC id, which a processor
+ * can read before its per-CPU page; before cons_percpu_ready() there is one
+ * processor, and nothing to wait for.  It replaces trap.c's backtrace lock,
+ * which kept two backtraces apart and nothing else.
+ */
+#define	CONS_REPORT_NOBODY	0xFFFFFFFFu
+#define	CONS_REPORT_CYCLES	4000000000ULL	/* a second at 4 GHz, more below */
+
+static volatile uint32_t	cons_report_owner = CONS_REPORT_NOBODY;
+static unsigned			cons_report_depth;
+static volatile uint32_t	cons_report_epoch;
+static volatile uint32_t	cons_report_waited_out = ~0u;
+
+static uint32_t cons_report_me(void)
+{
+	return lapic_present() ? lapic_id() : 0;
+}
+
+void cons_report_begin(void)
+{
+	uint32_t me;
+	uint64_t t0;
+
+	if (!cons_locks_usable)
+		return;
+	me = cons_report_me();
+	if (cons_report_owner == me) {
+		cons_report_depth++;
+		return;
+	}
+	t0 = rdtsc_ordered();
+	while (!__sync_bool_compare_and_swap(&cons_report_owner,
+					     CONS_REPORT_NOBODY, me)) {
+		if (rdtsc_ordered() - t0 >= CONS_REPORT_CYCLES) {
+			/* a holder that never let go: the report is said */
+			cons_report_owner = me;
+			break;
+		}
+		cpu_pause();
+	}
+	cons_report_depth = 0;
+	cons_report_epoch++;
+}
+
+void cons_report_end(void)
+{
+	if (!cons_locks_usable || cons_report_owner != cons_report_me())
+		return;
+	if (cons_report_depth > 0) {
+		cons_report_depth--;
+		return;
+	}
+	__sync_synchronize();
+	cons_report_owner = CONS_REPORT_NOBODY;
+}
+
+/* Whether another processor holds a report this one has not waited out. */
+static int cons_report_elsewhere(void)
+{
+	uint32_t owner = cons_report_owner;
+
+	return owner != CONS_REPORT_NOBODY && cons_locks_usable
+	       && owner != cons_report_me()
+	       && cons_report_waited_out != cons_report_epoch;
+}
+
+static void cons_report_wait(void)
+{
+	uint32_t owner, epoch;
+	uint64_t t0;
+
+	if (!cons_report_elsewhere())
+		return;
+	owner = cons_report_owner;
+	epoch = cons_report_epoch;
+	t0 = rdtsc_ordered();
+	while (cons_report_owner == owner && cons_report_epoch == epoch) {
+		if (rdtsc_ordered() - t0 >= CONS_REPORT_CYCLES) {
+			cons_report_waited_out = epoch;
+			return;
+		}
+		cpu_pause();
+	}
+}
+
 static void cons_wire_byte(char c)
 {
+	/* Not inside another processor's report (#659). */
+	cons_report_wait();
+
 	/*
 	 * Before the port, and not after: a byte the transmitter refuses is
 	 * still a byte this kernel said, and on a machine where the screen is
@@ -642,6 +744,15 @@ static int cons_tx_one(int may_wait)
 {
 	char	c = 0;
 	int	went = 0;
+
+	/*
+	 * Not inside another processor's report (#659): a drain that may wait
+	 * waits for it, bounded; one that may not leaves the byte in the ring.
+	 */
+	if (may_wait)
+		cons_report_wait();
+	else if (cons_report_elsewhere())
+		return 0;
 
 	if (may_wait)
 		hw_lock_lock(&cons_tx_lock);
