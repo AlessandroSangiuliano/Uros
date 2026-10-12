@@ -180,7 +180,9 @@ judge() {	# entry verdict log-of-the-harness full-log
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
-	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
+	# Its verdict line, not any "PASS": a WRONG quotes the log's line, and
+	# a line run together with "xfile_test: PASS" passed (#661's review).
+	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q '^double-panic-check: PASS' ;;
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq '<x86_64_boot+0x' "$f" &&
 		! grep -aq 'trap general protection' "$f" ;;
@@ -245,10 +247,17 @@ while read -r e v opt cpus; do
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v): $h"
 			WRONG=$((WRONG + 1))
 		elif [ $ng_rc -ne 0 ]; then
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (the no-glyph check could not run: ${ng//[()]/}): $h"
+			# One line, the last, which says why: ci/job.sh reads the
+			# verdict a line at a time.
+			why=$(printf '%s\n' "$ng" | tail -n 1)
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
+			printf 'NO GLYPH (#661): the check could not run (exit %s): %s\n' "$ng_rc" "$why" >> "$h"
 			WRONG=$((WRONG + 1))
 		elif [ -n "$ng" ]; then
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
+			# Named in the log the verdict points at, which the harness's
+			# own verdict did not reach for 40 and 44.
+			printf '%s\n' "$ng" | sed 's/^/NO GLYPH (#661): line /' >> "$h"
 			WRONG=$((WRONG + 1))
 		else
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
