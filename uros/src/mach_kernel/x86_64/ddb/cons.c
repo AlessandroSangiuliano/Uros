@@ -426,8 +426,12 @@ static unsigned cons_tx_room(int may_wait)
  * outside that lock when the ring is armed, and in the caller's thread when it
  * is not, which is exactly the rule the wire follows.
  *
- * ⚠️ It also means order on the screen is order on the wire, because the
- * port's lock is what serialises both.
+ * ⚠️ Order on the screen is order on the wire only where the port's lock
+ * serialises both: the drain and the stuck port's queue draw under it, in ring
+ * order.  cons_wire_byte() draws before it takes the lock -- a byte the port
+ * refuses is still a byte said -- so with the ring off, from the trap reporter
+ * and on the way down, two processors can reach the screen in one order and
+ * the wire in the other (#661).
  *
  * There are three places a byte is handed over -- here, the drain, and the
  * queue that a stuck port throws away -- and each draws once, so no path draws

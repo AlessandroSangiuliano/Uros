@@ -64,7 +64,8 @@ void fbcons_remember(const struct mb2_framebuffer *fb);
 void fbcons_init(void);
 
 /*
- * One character, so every writer may call it unconditionally.  Drawn once
+ * One byte, of a character or of its UTF-8 sequence (#661), so every writer
+ * may call it unconditionally.  Drawn once
  * fbcons_init() has succeeded; before that, kept for fbcons_init() to draw
  * (the first 64 KiB, #666); after an fbcons_init() that found no screen, a
  * no-op.

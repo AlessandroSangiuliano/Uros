@@ -34,10 +34,14 @@
  * not 80..BF, or an overlong form would decode, and ED by 80..9F, or a
  * surrogate would.
  *
- * ⚠️ No lock: the state belongs to one console, and its writers are
- * serialised by the console's own (x86-64: the port's lock, cons.c).  A byte
- * from another processor in the middle of a sequence breaks it, and the
- * result is a ■ and both bytes' writers' text, as the wire shows it.
+ * ⚠️ No lock, and the writers are not serialised.  The state belongs to one
+ * console, and on x86-64 cons_wire_byte() draws before it takes the port's
+ * lock -- the ring off, the trap reporter, the way down -- while on i386
+ * cnputc() takes none.  So two processors' bytes can meet in the middle of a
+ * sequence: then the screen draws a ■ where the wire may have split them
+ * otherwise, and the two can count differently, as the drawing position can
+ * already lose a cell (fbcons.h: no locks).  A lost update costs no more: the
+ * next byte that does not continue a sequence closes it.
  */
 
 #ifndef _DEVICE_FBCONS_UTF8_H_
