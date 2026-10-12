@@ -1099,6 +1099,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # stdout a line at a time, as stderr is: in a log that takes both, as
+    # ablate.sh's do, every line where it happened -- "stopped the machine
+    # on" before the line saying why the run broke after it, not after
+    # (#661's review, twelve rounds).
+    if sys.stdout is not None:
+        sys.stdout.reconfigure(line_buffering=True)
     # An OSError past main()'s own handlers: a report that could not be
     # written -- stderr into a tee the same Ctrl-C killed, a terminal hung up
     # --, the lock that could not be made for a reason other than another
