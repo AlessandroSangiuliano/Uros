@@ -105,6 +105,25 @@ LOCK = "/tmp/uros-x86_64-run.lock"
 FONT_H = "uros/src/mach_kernel/device/fbcons_font.h"
 # The kernel's first line, which boot.S says before anything else (#661).
 KERNEL_FIRST = "UrMach x86-64: reached 32-bit multiboot entry"
+GRUB_CFG = "uros/src/mach_kernel/x86_64/boot/grub.cfg"
+# What the kernel says once the screen exists, with -f and without it (#666).
+F_DRAWN = "fbcons: -f: the "
+COM1_ONLY = "went to COM1 only; -f draws them here"
+
+
+def entry_has_f(entry):
+    """Whether grub.cfg's entry `entry' (from 0) gives the kernel -f, read by
+    bootarg.c's rule: a letter counts inside a word that begins with a dash.
+    None if there is no such entry."""
+    blocks = re.split(r"^menuentry ", open(os.path.join(REPO, GRUB_CFG)).read(),
+                      flags=re.M)[1:]
+    if entry < 0 or entry >= len(blocks):
+        return None
+    for line in blocks[entry].splitlines():
+        words = line.split()
+        if words[:1] == ["multiboot2"]:
+            return any(w.startswith("-") and "f" in w[1:] for w in words[2:])
+    return False
 GLYPH_W, GLYPH_H = 8, 16
 
 
@@ -321,6 +340,14 @@ def main():
 
     font = load_font(os.path.join(REPO, FONT_H))
     by_bitmap, fold = reading(font, load_map(os.path.join(REPO, FONT_H)))
+
+    # The bare-metal image's kernel has -f (#595); an entry says it in
+    # grub.cfg, which make-disk-x86_64.sh writes as it is.
+    want_f = True if a.cdrom is not None else entry_has_f(a.entry)
+    if want_f is None:
+        print(f"fbcons-readback: grub.cfg has no entry {a.entry}",
+              file=sys.stderr)
+        return 2
 
     if a.cdrom is None:
         env = dict(os.environ, UROS_BUILD_DIR=build,
@@ -570,10 +597,29 @@ def main():
         missed, nlines, distinct = [], 0, set()
         looked = fold(raw[:upto])
         start = looked.find(KERNEL_FIRST)
-        # Without -f the screen starts at the line that says what went to
-        # COM1 only: the lines before it were never meant to be drawn.
-        com1 = looked.find("went to COM1 only; -f draws them here", start)
-        if com1 >= 0:
+        # 🔑 Whether the boot has -f is the caller's to say -- its grub.cfg
+        # entry, or the bare-metal image, which has it -- and the kernel's
+        # lines must agree: a kernel that lost -f says what went to COM1 only,
+        # and taking that from the kernel passed it (#661's review, two
+        # rounds).  With -f every line from the kernel's first is required;
+        # without it, from the line that says what went to COM1 only.
+        com1 = looked.find(COM1_ONLY, start)
+        drawn_early = looked.find(F_DRAWN, start)
+        if want_f and com1 >= 0:
+            print(f"fbcons-readback: the boot gives the kernel -f, and the "
+                  f"kernel says what it printed before the screen existed "
+                  f"went to COM1 only — the screen never drew it")
+            return 1
+        if not want_f and drawn_early >= 0:
+            print(f"fbcons-readback: the boot does not give the kernel -f, and "
+                  f"the kernel says it drew what came before the screen")
+            return 1
+        if want_f and drawn_early < 0 or not want_f and com1 < 0:
+            print(f"fbcons-readback: {a.wait_for!r} was on the wire before the "
+                  f"screen existed, so nothing could be compared yet: wait for "
+                  f"a line printed after it", file=sys.stderr)
+            return 2
+        if not want_f:
             start = looked.rfind("\n", 0, com1) + 1
         for w in looked[start:].split("\n")[:-1]:
             w = "".join(ch for ch in w if ch == "\t" or ord(ch) >= 0x20)
