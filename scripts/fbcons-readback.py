@@ -51,13 +51,15 @@
 #        2  the experiment could not be run, or compared nothing: no qemu,
 #           no monitor, no boot, a monitor or a screendump that broke, an
 #           entry grub.cfg does not have, a --wait-for found before the
-#           screen existed, a run that was stopped and continued once its
-#           machine was started (a Ctrl-Z and fg; one during make-disk is
-#           not), a lock that was not this run's any more when it ended,
-#           a report that could not be written -- stdout's reader gone, a
-#           full disk: stdout goes out a line at a time, and a verdict the
-#           run cannot say is not one it gives; --all-lines is not given
-#           with --kvm either
+#           screen existed, a run that was stopped and continued while it
+#           waited on its machine (a Ctrl-Z and fg; one during make-disk, or
+#           after the last look, leaves the verdict standing), a lock that
+#           was not this run's any more when it ended, a report that could
+#           not be written -- stdout's reader gone, a full disk: stdout goes
+#           out a line at a time, and a verdict the run cannot say is not
+#           one it gives (a stdout closed when the run starts is written
+#           nothing, and the run ends with its own status); --all-lines is
+#           not given with --kvm either
 #  128+n    stopped by TERM, HUP or INT: the run gives the lock it made, the
 #           fifos, the monitor's socket and qemu back, then dies by that
 #           signal, as a shell expects; a signal it was started with ignored
