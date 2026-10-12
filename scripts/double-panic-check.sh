@@ -48,6 +48,7 @@ BEGIN {
 /^qemu-system-x86_64:/ || /^=== run conditions/ || /^=== qemu.s own messages/ { done = 1 }
 done { next }
 /^startup: [0-9]+ processors in the scheduler/ { cpus = $2 }
+/^UrMach x86-64: fbcons: the UTF-8 decoder drew / { utf8 = 1 }
 /^double_panic: NOT ASKED/ { declined = $0 }
 /^double_panic: WRONG/ { refused = $0 }
 /^double_panic: processors / { asked = 1 }
@@ -109,6 +110,14 @@ END {
 		want = cpus
 	if (want == "") {
 		printf "double-panic-check: NOT ASKED — the log does not say how many processors were in the scheduler\n"
+		exit 2
+	}
+	# #661: a kernel from before the glyphs line has no decoder to say it
+	# drew with, and no glyphs line to count; its log is not asked about
+	# that, rather than called WRONG for it -- and not passed either, so a
+	# kernel that lost both lines is not passed by their absence.
+	if (drawn && !utf8 && nglyph == 0) {
+		printf "double-panic-check: NOT ASKED — the framebuffer was drawn and no UTF-8 decoder line (#661) is in this log: a kernel from before it, whose console final copy has no glyphs line to count\n"
 		exit 2
 	}
 	if (whole != 1)
