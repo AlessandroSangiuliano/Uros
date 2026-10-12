@@ -99,7 +99,7 @@
 # ⚠️ One run at a time, with the harness's own lock: two qemus on one machine
 # manufacture each other's failures (run-x86_64.sh says why).
 
-import argparse, fcntl, os, re, socket, subprocess, sys, time
+import argparse, fcntl, os, re, signal, socket, subprocess, sys, time
 
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
 LOCK = "/tmp/uros-x86_64-run.lock"
@@ -148,11 +148,14 @@ def as_drawn(line, cols=0):
 
 
 # A kernel whose screen never opened says so, in one of these (#568, #567):
-# the loader gave no framebuffer, fbcons_open() refused it, or a census or a
-# halt found none drawn.
+# the loader gave no framebuffer, fbcons_open() refused it, or a census --
+# which runs only after fbcons_init() -- found none.  Not the halt's "no
+# framebuffer was drawn on this boot": a kernel that dies before the screen
+# exists says that too, and that is a boot that did not get there, not a
+# screen that failed (#661's review, five rounds).
 NEVER_OPENED = re.compile(r"[^\n]*(NO usable framebuffer from the loader|"
-                          r"screen output is off|; no framebuffer \(#567\)|"
-                          r"no framebuffer was drawn)[^\n]*")
+                          r"screen output is off|; no framebuffer \(#567\))"
+                          r"[^\n]*")
 
 
 def entry_has_f(entry):
@@ -364,6 +367,10 @@ def main():
                          "the bare-metal one (#595); --entry is then its "
                          "GRUB's business")
     a = ap.parse_args()
+    # 🔴 A TERM goes through the same way out as everything else, so the
+    # lock, the fifos, the monitor's socket and qemu do not outlive the run;
+    # killed without this, they did (#661's review, five rounds).
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit("stopped by SIGTERM"))
     if a.no_uart and a.send is not None:
         ap.error("--send types at the serial line, and --no-uart has none")
     if a.all_lines and (a.no_uart or a.send is not None or a.freeze):
@@ -461,7 +468,7 @@ def main():
             except FileNotFoundError:
                 pass
             os.mkfifo(fifo + end)
-    except OSError as e:
+    except (OSError, SystemExit) as e:
         return unstart(e)
     log = os.path.join(out, "fbcons-readback.log")
     ppm = os.path.join(out, "fbcons-readback.ppm")
@@ -470,7 +477,7 @@ def main():
             os.unlink(p)
         except FileNotFoundError:
             pass
-        except OSError as e:
+        except (OSError, SystemExit) as e:
             return unstart(e)
 
     if a.cdrom is not None:
@@ -503,7 +510,8 @@ def main():
         fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
         q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
                              stderr=subprocess.PIPE, text=True)
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
+    except (OSError, ValueError, SystemExit,
+            subprocess.SubprocessError) as e:
         return unstart(e)
     rc = 2
     serial_raw = bytearray()
@@ -732,7 +740,7 @@ def main():
             nlines += 1
             distinct.add(tuple(pieces))
             if not all(p == "" or p in seen for p in pieces):
-                missed.append("".join(pieces))
+                missed.append(as_drawn(w)[0])
         if nlines == 0 and not only and not unknown:
             print(f"fbcons-readback: no line of the serial log was there to "
                   f"compare, up to {a.wait_for!r}: wait for a later line",
@@ -787,6 +795,11 @@ def main():
             print(f"fbcons-readback: stopped the machine on {a.wait_for!r}, "
                   f"read off its screen: no UART (--no-uart)")
         elif not wait_for(a.wait_for, a.budget, 0.02 if a.freeze else 0.25):
+            off = NEVER_OPENED.search(fold(pump()))
+            if off:
+                print(f"fbcons-readback: THE SCREEN NEVER OPENED — "
+                      f"{off.group(0).strip()}")
+                return 1
             err = (q.stderr.read() if q.poll() is not None else "").strip()
             print(f"fbcons-readback: never saw {a.wait_for!r} on the serial "
                   f"line in {a.budget:.0f}s — that says nothing about the "
@@ -836,7 +849,8 @@ def main():
             return 2
 
         lines, unknown, cols, rows = screen_lines(ppm, by_bitmap)
-        serial = "\n".join(r for l in fold(pump()).split("\n")
+        wire = fold(pump())
+        serial = "\n".join(r for l in wire.split("\n")
                            for r in as_drawn(l, cols))
         drawn = [l for l in lines if l.strip()]
 
@@ -847,7 +861,7 @@ def main():
 
         if not drawn:
             print("fbcons-readback: THE SCREEN IS BLANK — the kernel printed "
-                  f"{serial.count(chr(10))} lines to the serial line and drew "
+                  f"{wire.count(chr(10))} lines to the serial line and drew "
                   f"none of them")
             return 1
         if unknown:

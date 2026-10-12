@@ -240,9 +240,10 @@ while read -r e v opt cpus; do
 		# so a panic or a restart passed with an undrawable line in
 		# exactly the messages a machine with no serial port needs most
 		# (#661's review, two rounds).  A check that cannot run is said as
-		# such.  What it found goes into the log the verdict points at --
-		# which for 40 and 44 the harness's own verdict never reached --
-		# and before the verdict, on which ci/job.sh copies that log.
+		# such.  For an entry its judge passed, what it found goes into the
+		# log the verdict points at -- which for 40 and 44 the harness's own
+		# verdict never reached -- and before the verdict, on which
+		# ci/job.sh copies that log.
 		ng_rc=0
 		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
 		if ! judge "$e" "$v" "$h" "$f"; then
@@ -252,7 +253,7 @@ while read -r e v opt cpus; do
 			# One line, the last, which says why: ci/job.sh reads the
 			# verdict a line at a time.
 			why=$(printf '%s\n' "$ng" | tail -n 1)
-			[ -n "$why" ] || why="exit $ng_rc, nothing said on its output"
+			[ -n "$why" ] || why="nothing said on its output"
 			printf 'NO GLYPH (#661): the check could not run (exit %s): %s\n' "$ng_rc" "$why" >> "$h"
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
 			WRONG=$((WRONG + 1))
