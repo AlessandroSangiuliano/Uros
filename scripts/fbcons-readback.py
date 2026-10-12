@@ -575,7 +575,7 @@ def main():
         try:
             found, seen, stable, looks, skipped, cols, upto = watch(a.wait_for,
                                                                     a.budget)
-        except (OSError, SystemExit) as e:
+        except (OSError, SystemExit, ValueError) as e:
             print(f"fbcons-readback: the looks could not go on: {e}",
                   file=sys.stderr)
             return 2
@@ -586,7 +586,10 @@ def main():
                   f"line in {a.budget:.0f}s, after {looks} looks at the "
                   f"screen — the boot did not get there", file=sys.stderr)
             return 2
-        serial = fold(raw)
+        # As the screen draws it, on this side too: no control code but the
+        # tab and the line's end (#661's review, two rounds).
+        serial = "".join(ch for ch in fold(raw)
+                         if ch in "\n\t" or ord(ch) >= 0x20)
         unknown = [l for l in stable if "\0" in l]
         only = [l for l in stable if "\0" not in l and l.strip() not in serial]
         # Each line the wire finished, as the screen draws it: no control
@@ -782,6 +785,12 @@ def main():
         print(f"fbcons-readback: PASS — all {len(checked)} distinctive rows "
               f"read back off the panel appear verbatim in the serial log")
         rc = 0
+    # The instrument breaking, in any mode, is a run that could not be made,
+    # not a screen that disagreed: a monitor closed or timed out, a
+    # screendump cut short or not a PPM (#661's review, two rounds).
+    except (OSError, SystemExit, ValueError) as e:
+        print(f"fbcons-readback: the experiment broke: {e}", file=sys.stderr)
+        rc = 2
     finally:
         q.kill()
         q.wait()
