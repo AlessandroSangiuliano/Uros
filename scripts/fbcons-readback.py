@@ -51,9 +51,11 @@
 #        2  the experiment could not be run, or compared nothing: no qemu,
 #           no monitor, no boot, a monitor or a screendump that broke, an
 #           entry grub.cfg does not have, a --wait-for found before the
-#           screen existed, a TERM, HUP or INT, after which the run leaves
-#           as cleanly as from any other end; --all-lines is not given with
-#           --kvm either
+#           screen existed; --all-lines is not given with --kvm either
+#  128+n    stopped by TERM, HUP or INT: the run gives the lock, the fifos,
+#           the monitor's socket and qemu back, then dies by that signal, as
+#           a shell expects; a signal it was started with ignored (nohup's
+#           HUP, a background job's INT) stays ignored
 #
 # 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
 # QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
@@ -164,14 +166,17 @@ NEVER_OPENED = re.compile(r"[^\n]*(NO usable framebuffer from the loader|"
 # the run can stop cleanly -- each turn of a wait, after the disk is made --
 # so none lands in the middle of taking the lock, starting qemu or giving
 # them back, which a handler that raised could not promise however it was
-# placed; the children get them unblocked (#661's review, seven rounds).
-STOP = {signal.SIGTERM, signal.SIGHUP, signal.SIGINT}
+# placed; the children get them back as they were (#661's review, eight
+# rounds).  Filled by main(): a signal the run was started with ignored --
+# nohup's HUP, a background job's INT -- stays ignored and is not a stop,
+# since a blocked signal is pending on Linux even when ignored.
+STOP = set()
 
 
 def stop_if_asked():
     """A run asked to stop leaves from here, the way every other end does:
     a SystemExit, which the run's own handlers turn into 2 and its finally
-    into a clean exit.  An ignored signal (nohup's HUP) is never pending."""
+    into a clean exit; the end of the script then dies by the signal."""
     asked = signal.sigpending() & STOP
     if asked:
         raise SystemExit("stopped by " + " and ".join(
@@ -179,8 +184,12 @@ def stop_if_asked():
 
 
 def child_signals():
-    """In a child, between fork and exec: the run's blocked signals
-    unblocked, so make-disk and qemu answer them as they always have."""
+    """In a child, between fork and exec: the run's stop signals back to
+    their default and unblocked, so make-disk and qemu answer them as they
+    always have, and one pending here kills the child before exec instead
+    of raising in Python's handler inherited by the fork."""
+    for sig in STOP:
+        signal.signal(sig, signal.SIG_DFL)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
 
 
@@ -393,6 +402,8 @@ def main():
                          "the bare-metal one (#595); --entry is then its "
                          "GRUB's business")
     a = ap.parse_args()
+    STOP.update(sig for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+                if signal.getsignal(sig) != signal.SIG_IGN)
     signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
     if a.no_uart and a.send is not None:
         ap.error("--send types at the serial line, and --no-uart has none")
@@ -446,11 +457,18 @@ def main():
                 env=env, check=True, preexec_fn=child_signals,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         stop_if_asked()
-    except (OSError, SystemExit, ValueError,
-            subprocess.CalledProcessError) as e:
-        print(f"fbcons-readback: the experiment could not be set up: {e}",
-              file=sys.stderr)
-        os.rmdir(LOCK)
+    except (OSError, SystemExit, ValueError, subprocess.SubprocessError) as e:
+        # The lock first: a print to a pipe or a terminal the same signal
+        # took away fails, and left it behind (#661's review, eight rounds).
+        try:
+            os.rmdir(LOCK)
+        except OSError:
+            pass
+        try:
+            print(f"fbcons-readback: the experiment could not be set up: {e}",
+                  file=sys.stderr)
+        except OSError:
+            pass
         return 2
 
     mon = f"/tmp/uros-fbcons-{os.getpid()}.mon"
@@ -963,4 +981,22 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # A run asked to stop has given everything back by now, and dies by the
+    # signal it was sent, so the shell that started it sees a signal and a
+    # loop of readbacks ends at Ctrl-C (#661's review, eight rounds);
+    # ablate.sh takes a status above 128 for a run not made.  Flushed by
+    # hand: a pipe or terminal gone with the same signal must not turn the
+    # status into Python's 120.
+    asked = signal.sigpending() & STOP
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except OSError:
+            pass
+    if asked:
+        sig = min(asked)
+        signal.signal(sig, signal.SIG_DFL)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {sig})
+        os._exit(128 + sig)
+    os._exit(rc if isinstance(rc, int) else 1)
