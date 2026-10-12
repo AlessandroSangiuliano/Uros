@@ -51,8 +51,9 @@
 #        2  the experiment could not be run, or compared nothing: no qemu,
 #           no monitor, no boot, a monitor or a screendump that broke, an
 #           entry grub.cfg does not have, a --wait-for found before the
-#           screen existed, a run that was stopped and continued (a Ctrl-Z
-#           and fg), a lock that was not this run's any more when it ended,
+#           screen existed, a run that was stopped and continued once its
+#           machine was started (a Ctrl-Z and fg; one during make-disk is
+#           not), a lock that was not this run's any more when it ended,
 #           a report that could not be written -- stdout's reader gone, a
 #           full disk: stdout goes out a line at a time, and a verdict the
 #           run cannot say is not one it gives; --all-lines is not given
