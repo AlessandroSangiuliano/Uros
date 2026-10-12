@@ -177,14 +177,29 @@ NEVER_OPENED = re.compile(r"[^\n]*(NO usable framebuffer from the loader|"
 STOP = set()
 
 
+def stop_asked():
+    """The stop the run was sent, in the words it says it with, or None."""
+    asked = signal.sigpending() & STOP
+    if asked:
+        return "stopped by " + " and ".join(
+            sorted(signal.Signals(sig).name for sig in asked))
+    return None
+
+
 def stop_if_asked():
     """A run asked to stop leaves from here, the way every other end does:
     a SystemExit, which the run's own handlers turn into 2 and its finally
     into a clean exit; the end of the script then dies by the signal."""
-    asked = signal.sigpending() & STOP
+    asked = stop_asked()
     if asked:
-        raise SystemExit("stopped by " + " and ".join(
-            sorted(signal.Signals(sig).name for sig in asked)))
+        raise SystemExit(asked)
+
+
+def stopped_or(e):
+    """What a run that broke on `e' says: the stop it was sent, if one is
+    pending, since `e' is then its consequence -- qemu gone, the monitor
+    closed under the run (#661's review, nine rounds)."""
+    return stop_asked() or e
 
 
 def child_signals():
@@ -600,6 +615,7 @@ def main():
         end = time.time() + budget
         while time.time() < end:
             if q.poll() is not None:
+                stop_if_asked()		# a qemu gone is the stop's doing
                 pump()
                 return text in pump()
             if text in pump():
@@ -633,6 +649,7 @@ def main():
                 break
             except (FileNotFoundError, ConnectionRefusedError):
                 if time.time() > end or q.poll() is not None:
+                    stop_if_asked()
                     return False
                 time.sleep(0.05)
                 stop_if_asked()
@@ -651,6 +668,7 @@ def main():
                            for l in screen_lines(ppm, by_bitmap)[0]):
                         return True
                 hmp(m, "cont")
+            stop_if_asked()
             return False
         finally:
             m.close()
@@ -698,6 +716,7 @@ def main():
                 break
             except (FileNotFoundError, ConnectionRefusedError):
                 if time.time() > end or q.poll() is not None:
+                    stop_if_asked()
                     return False, seen, stable, looks, skipped, cols, 0
                 time.sleep(0.05)
                 stop_if_asked()
@@ -732,6 +751,7 @@ def main():
                     look()
                     return True, seen, stable, looks, skipped, cols, len(wire)
                 hmp(m, "cont")
+            stop_if_asked()
             return False, seen, stable, looks, skipped, cols, 0
         finally:
             m.close()
@@ -746,8 +766,8 @@ def main():
             found, seen, stable, looks, skipped, cols, upto = watch(a.wait_for,
                                                                     a.budget)
         except (OSError, SystemExit, ValueError) as e:
-            print(f"fbcons-readback: the looks could not go on: {e}",
-                  file=sys.stderr)
+            print(f"fbcons-readback: the looks could not go on: "
+                  f"{stopped_or(e)}", file=sys.stderr)
             return 2
         raw = pump()
         open(log, "w").write(raw)
@@ -985,7 +1005,8 @@ def main():
     # not a screen that disagreed: a monitor closed or timed out, a
     # screendump cut short or not a PPM (#661's review, two rounds).
     except (OSError, SystemExit, ValueError) as e:
-        print(f"fbcons-readback: the experiment broke: {e}", file=sys.stderr)
+        print(f"fbcons-readback: the experiment broke: {stopped_or(e)}",
+              file=sys.stderr)
         rc = 2
     finally:
         q.kill()
