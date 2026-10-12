@@ -5,13 +5,13 @@ Run: --entry 14 1200 -smp 1
 Expect: act_test: \[7\] .*WRONG \(#603\)
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
-index 252383aa..66bbef60 100644
+index 877ab303..b4d9c944 100644
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
 +++ b/uros/src/mach_kernel/x86_64/trap/trap.c
-@@ -1966,8 +1966,6 @@ void trap_dispatch(struct trap_frame *frame)
- 				 * code, where preempting is the interrupt path's
- 				 * question, asked with IF known to be on.
+@@ -2011,8 +2011,6 @@ void trap_dispatch(struct trap_frame *frame)
  				 */
+ 				if ((frame->cs & 3) == USER_RPL)
+ 					act->user_faults++;	/* #603 */
 -				if ((frame->cs & 3) == USER_RPL)
 -					trap_take_ast(frame);
  				return;	/* the instruction runs again */
