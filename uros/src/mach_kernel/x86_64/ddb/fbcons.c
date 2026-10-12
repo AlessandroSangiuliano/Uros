@@ -105,7 +105,9 @@ static uint64_t		 fb_scrolls;
  * The UTF-8 being decoded, and what could not be drawn as itself (#661).
  * One for the console, live and replayed alike: the bytes kept before the
  * screen existed are drawn first, and a sequence they leave open is finished
- * by the live bytes after them, which is the order the wire had.
+ * by the live bytes after them, which is the order the wire had -- unless
+ * bytes between the two were not kept, past FB_EARLY_SIZE, and then
+ * fbcons_early_draw() closes it first.
  */
 static struct fbcons_utf8 fb_utf8;
 
@@ -673,8 +675,17 @@ static void fbcons_early_draw(void)
 		}
 
 	fb_early_closed = 1;
-	fb_ready = 1;
 	offered = fb_early_len;
+	/*
+	 * #661: bytes were offered past those kept, and a sequence the last
+	 * kept byte left open was finished among them -- the wire had it
+	 * whole.  It is closed here, while nothing else draws, and not by the
+	 * first live byte, which would draw a ■ for it and count it as not
+	 * UTF-8 in every report after; the screen says what it lost below.
+	 */
+	if (paced && offered > drawn)
+		fb_utf8.need = 0;
+	fb_ready = 1;
 	glyphs = fb_glyphs - glyphs;	/* read, not inferred from the bytes */
 
 	if (!paced) {
