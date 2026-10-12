@@ -22,10 +22,18 @@
 # patches of ablations/ named, the fixed tree and the tree with the fixes taken
 # out booted one after the other, the same build checks before them.
 #
+# And --sweep runs the patches of ablations/ once each, every one in an
+# ablate.sh run of its own with the ablated arm alone (#643): what a merge that
+# moved the code under them asks of every patch -- whether it still applies,
+# builds, and is caught.  The jobs of a campaign share the list out with
+# --share.
+#
 # Usage:
 #   scripts/ci/job.sh [--entries "N ..."] [--rounds R] [--accel L] [--out DIR]
 #                     [--no-install] [--dry-run]
 #   scripts/ci/job.sh --ablate "P ..." [--boots N] [--accel L] [--out DIR]
+#                     [--no-install] [--dry-run]
+#   scripts/ci/job.sh --sweep all|"P ..." [--share J/N] [--accel L] [--out DIR]
 #                     [--no-install] [--dry-run]
 #
 #   --entries "N ..."  only these merge-test entries (default: its whole list)
@@ -33,8 +41,13 @@
 #   --ablate "P ..."   an A/B instead of the merge test, with these patches of
 #                      ablations/, named without the directory or ".patch"
 #   --boots N          with --ablate, boots per arm and accelerator (default 1)
+#   --sweep all|"P ..."  each of these patches once instead of the merge test,
+#                      the ablated arm alone; all is every ablation of
+#                      ablations/ with an Expect: line, the ones a test catches
+#   --share J/N        with --sweep, only the J-th of every N patches: the
+#                      share of job J of N (default 1/1)
 #   --accel L          tcg, kvm or tcg,kvm (default: tcg, and kvm as well when
-#                      /dev/kvm can be opened)
+#                      /dev/kvm can be opened; with --sweep, tcg)
 #   --out DIR          rows, logs and the job's record (default ./ci-out)
 #   --no-install       use the tools already here, outside a container
 #   --dry-run          print the plan; install, build and boot nothing
@@ -45,11 +58,13 @@
 # every WRONG boot are copied to OUT/failed/rN/; OUT/job.txt says what the job
 # ran on and with which tools.  With --ablate, OUT/ablate.csv gets the rows
 # instead, one per boot of either arm, and every boot's log stays in
-# OUT/ablate/, where ablate.sh works.
+# OUT/ablate/, where ablate.sh works; with --sweep the same, one row per
+# patch's boot, and what ablate.sh said of each patch in OUT/sweep/NAME.out.
 #
 # Exit status: 0 every boot as it should be -- with --ablate, every ablated boot
-# caught and every fixed boot passed · 1 at least one boot WRONG, not caught or
-# failed · 2 the command line is wrong, or a patch does not apply · 3 the job
+# caught and every fixed boot passed; with --sweep, every patch caught · 1 at
+# least one boot WRONG, not caught or failed · 2 the command line is wrong, or a
+# patch does not apply · 3 the job
 # could not boot, or could not read its boots: the packages, the configure or
 # the build failed, the build had a warning, a round or the A/B did not report
 # every boot it was meant to, a boot's log was not where the merge test puts
@@ -89,19 +104,24 @@ ROUNDS_SET=0
 ABLATE=""
 BOOTS=1
 BOOTS_SET=0
+SWEEP=""
+SHARE=1/1
+SHARE_SET=0
 ACCEL=auto
 OUT=ci-out
 INSTALL=1
 DRY=0
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--entries|--rounds|--accel|--out|--ablate|--boots)
+	--entries|--rounds|--accel|--out|--ablate|--boots|--sweep|--share)
 		[ $# -ge 2 ] || die 2 "$1 needs a value"
 		case "$1" in
 		--entries)	ENTRIES=$2 ;;
 		--rounds)	ROUNDS=$2; ROUNDS_SET=1 ;;
 		--ablate)	ABLATE=$2 ;;
 		--boots)	BOOTS=$2; BOOTS_SET=1 ;;
+		--sweep)	SWEEP=$2 ;;
+		--share)	SHARE=$2; SHARE_SET=1 ;;
 		--accel)	ACCEL=$2 ;;
 		--out)		OUT=$2 ;;
 		esac
@@ -145,18 +165,70 @@ if [ -n "$ABLATE" ]; then
 elif [ $BOOTS_SET = 1 ]; then
 	die 2 "--boots counts the boots of an A/B, and goes with --ablate"
 fi
+# The patches of a sweep, by name as an A/B's are, or every ablation a test can
+# catch -- a Measure: line names a number for a person to read, and a widen
+# catches nothing alone -- and of those the J-th of every N, so that the jobs
+# of a campaign split one list without any of them being told the others'.
+SWEPT=()
+if [ -n "$SWEEP" ]; then
+	[ -z "$ABLATE" ] || die 2 "--ablate is one A/B and --sweep every patch once: give one or the other"
+	[ $ROUNDS_SET = 0 ] && [ -z "$ENTRIES" ] ||
+		die 2 "--entries and --rounds choose the merge test's boots, and --sweep boots what each patch's Run: line says: give one or the other"
+	[ $BOOTS_SET = 0 ] || die 2 "--sweep boots each patch once: --boots goes with --ablate"
+	case "$SHARE" in
+	*/*)	;;
+	*)	die 2 "--share takes J/N, two numbers from 1, not '$SHARE'" ;;
+	esac
+	SJ=${SHARE%%/*}
+	SN=${SHARE#*/}
+	case "$SJ/$SN" in
+	[1-9]*/[1-9]*)	;;
+	*)		die 2 "--share takes J/N, two numbers from 1, not '$SHARE'" ;;
+	esac
+	case "$SJ$SN" in
+	*[!0-9]*)	die 2 "--share takes J/N, two numbers from 1, not '$SHARE'" ;;
+	esac
+	[ "$SJ" -le "$SN" ] || die 2 "--share $SHARE: there is no job $SJ of $SN"
+	NAMES=()
+	if [ "$SWEEP" = all ]; then
+		for p in "$REPO"/ablations/*.patch; do
+			hdr=$(sed -n '/^diff --git /q;p' "$p")
+			grep -qx 'Kind:[[:space:]]*ablation' <<< "$hdr" || continue
+			grep -q '^Expect:' <<< "$hdr" || continue
+			NAMES+=("$(basename "$p" .patch)")
+		done
+	else
+		read -r -a NAMES <<< "$(tr ',\n\t' '   ' <<< "$SWEEP")"
+	fi
+	[ ${#NAMES[@]} -gt 0 ] || die 2 "--sweep names no patch"
+	i=0
+	for n in "${NAMES[@]}"; do
+		case "$n" in
+		.*|*[!A-Za-z0-9._-]*)	die 2 "--sweep takes all or the names of patches in ablations/, not '$n'" ;;
+		esac
+		n=${n%.patch}
+		[ -f "$REPO/ablations/$n.patch" ] || die 2 "this tree has no ablations/$n.patch"
+		[ $((i % SN + 1)) = "$SJ" ] && SWEPT+=("$REPO/ablations/$n.patch")
+		i=$((i + 1))
+	done
+	[ ${#SWEPT[@]} -gt 0 ] ||
+		die 2 "--share $SHARE leaves this job none of the ${#NAMES[@]} patches: fewer jobs than $SN"
+	[ "$ACCEL" = auto ] && ACCEL=tcg
+elif [ $SHARE_SET = 1 ]; then
+	die 2 "--share splits a sweep, and goes with --sweep"
+fi
 case "$OUT" in
 /*)	;;
 *)	OUT=$PWD/$OUT ;;
 esac
 OUT=${OUT%/}
 CSV=$OUT/boots.csv
-[ -z "$ABLATE" ] || CSV=$OUT/ablate.csv
+[ -z "$ABLATE$SWEEP" ] || CSV=$OUT/ablate.csv
 
 # The merge test's own list, one boot per line and accelerator.  Empty means its
 # ENTRIES block changed shape under this reader, which is a refusal and not a
 # plan with nothing in it.  An A/B boots what its patches say instead.
-if [ -z "$ABLATE" ]; then
+if [ -z "$ABLATE$SWEEP" ]; then
 	LIST=$(sed -n '/^ENTRIES="$/,/^"$/{/^[0-9]/p}' "$MT")
 	[ -n "$LIST" ] || die 3 "read no entries out of $MT: its ENTRIES block has changed shape, and this script reads it"
 	PLAN=$LIST
@@ -202,7 +274,7 @@ case $HAS_TCG$HAS_KVM in
 esac
 [ $HAS_KVM = 0 ] || [ "$KVM" = "can be opened" ] ||
 	die 3 "kvm was asked for and /dev/kvm cannot be opened here"
-[ -n "$ABLATE" ] || PER_ROUND=$((NLINES * (HAS_TCG + HAS_KVM)))
+[ -n "$ABLATE$SWEEP" ] || PER_ROUND=$((NLINES * (HAS_TCG + HAS_KVM)))
 
 # The packages before anything reads the tree: git is one of them, and the
 # archlinux image has none -- #653's first run stopped on that very line.  The
@@ -258,6 +330,40 @@ if [ -n "$ABLATE" ]; then
 		die 3 "ablate.sh could not plan this A/B (status $rc)"
 	fi
 fi
+# Each patch of a sweep planned by ablate.sh in the same way, every refusal said
+# before anything is built, and the boots each plan counts kept: they are what
+# that patch's rows must come to.
+declare -A SW_BOOTS
+SW_WANT=0
+SW_PLAN=()
+if [ -n "$SWEEP" ]; then
+	scratch=$(mktemp -d) || die 3 "cannot create a scratch directory"
+	refused=0
+	for p in "${SWEPT[@]}"; do
+		pl=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --plan --boots 1 \
+			--accel "$ACCEL" "$p" 2>&1)
+		rc=$?
+		if [ $rc != 0 ]; then
+			sed "s|^|${p##*/}: |" <<< "$pl" >&2
+			if [ $rc != 2 ]; then
+				rm -rf "$scratch"
+				die 3 "ablate.sh could not plan ${p##*/} (status $rc)"
+			fi
+			refused=$((refused + 1))
+			continue
+		fi
+		k=$(sed -n 's/^ablate: plan: .*, \([0-9][0-9]*\) in all$/\1/p' <<< "$pl")
+		if [ -z "$k" ]; then
+			rm -rf "$scratch"
+			die 3 "ablate.sh's plan of ${p##*/} does not say how many boots it makes"
+		fi
+		SW_BOOTS[$p]=$k
+		SW_WANT=$((SW_WANT + k))
+		SW_PLAN+=("${p##*/}: $(sed -n 's/^ablate: plan: \(.*\) is given: /\1 /p' <<< "$pl"), $k boot(s)")
+	done
+	rm -rf "$scratch"
+	[ $refused = 0 ] || die 2 "ablate.sh refuses $refused of the ${#SWEPT[@]} patches of this sweep"
+fi
 
 echo "job: tree $TREE, run $RUN_ID, job $JOB; here: $CPU, $NPROC processors, /dev/kvm $KVM"
 if [ $INSTALL = 1 ]; then
@@ -274,6 +380,10 @@ if [ -n "$ABLATE" ]; then
 	echo "job: an A/B instead of the merge test: scripts/ablate.sh --ab --boots $BOOTS --accel $ACCEL ${PATCHES[*]##*/}"
 	sed 's/^/job:   /' <<< "$AB_PLAN"
 	echo "job: rows: $CSV; every boot's log: $OUT/ablate/runs/"
+elif [ -n "$SWEEP" ]; then
+	echo "job: a sweep instead of the merge test: ${#SWEPT[@]} of the ${#NAMES[@]} patches (share $SHARE), each once in an ablate.sh run of its own, the ablated arm alone, $SW_WANT boots under $ACCS:"
+	printf 'job:   %s\n' "${SW_PLAN[@]}"
+	echo "job: rows: $CSV; every boot's log: $OUT/ablate/runs/; what ablate.sh said of each patch: $OUT/sweep/"
 else
 	echo "job: $ROUNDS round(s) of $MT -a $MT_ACC -o $OUT/logs/rN${ENTRIES:+ -e \"$ENTRIES\"}"
 	echo "job: $PER_ROUND boots a round ($NLINES of the merge test's lines x $ACCS), $((PER_ROUND * ROUNDS)) in all, each at the merge test's -smp unless it names one:"
@@ -370,11 +480,7 @@ clock_of() {	# full-log
 # Its rows become the job's, with the run, the job, the tree and the processor
 # a runner's row needs, and are counted: an A/B that stopped short, or changed
 # the shape of its rows, would otherwise pass as fewer boots with nothing wrong.
-if [ -n "$ABLATE" ]; then
-	echo "job: the A/B ($OUT/ablate.out)"
-	UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --ab --boots "$BOOTS" \
-		--accel "$ACCEL" "${PATCHES[@]}" 2>&1 | tee "$OUT/ablate.out"
-	rc=${PIPESTATUS[0]}
+ab_rows() {
 	echo "$AB_HEADER" > "$CSV"
 	n=0
 	if [ -f "$OUT/ablate/ablate.csv" ]; then
@@ -383,6 +489,14 @@ if [ -n "$ABLATE" ]; then
 			n=$((n + 1))
 		done < <(tail -n +2 "$OUT/ablate/ablate.csv")
 	fi
+}
+
+if [ -n "$ABLATE" ]; then
+	echo "job: the A/B ($OUT/ablate.out)"
+	UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --ab --boots "$BOOTS" \
+		--accel "$ACCEL" "${PATCHES[@]}" 2>&1 | tee "$OUT/ablate.out"
+	rc=${PIPESTATUS[0]}
+	ab_rows
 	# What ablate.sh planned, which a patch's Accel: line can narrow to one
 	# accelerator (#659); the arithmetic only where the plan does not say.
 	want=$(sed -n 's/^ablate: plan: .*, \([0-9][0-9]*\) in all$/\1/p' <<< "$AB_PLAN")
@@ -398,6 +512,58 @@ if [ -n "$ABLATE" ]; then
 	2)	exit 2 ;;
 	*)	exit 3 ;;
 	esac
+fi
+
+# ----------------------------------------------------------------- the sweep
+#
+# One ablate.sh run per patch, one after the other, each to its end whatever the
+# one before said: a patch not caught, or a tree that did not build, is the
+# answer for that patch and no reason to leave the others unasked.  The job's
+# status is the worst of theirs, and the rows of the patches that ran are
+# counted against their plans, as an A/B's are.
+sweep_rows() {
+	if [ -f "$OUT/ablate/ablate.csv" ]; then
+		echo $(($(wc -l < "$OUT/ablate/ablate.csv") - 1))
+	else
+		echo 0
+	fi
+}
+
+if [ -n "$SWEEP" ]; then
+	mkdir -p "$OUT/sweep" || die 3 "cannot create $OUT/sweep"
+	worst=0
+	short=()
+	for p in "${SWEPT[@]}"; do
+		name=${p##*/}
+		name=${name%.patch}
+		before=$(sweep_rows)
+		UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --boots 1 \
+			--accel "$ACCEL" "$p" > "$OUT/sweep/$name.out" 2>&1
+		rc=$?
+		added=$(($(sweep_rows) - before))
+		case $rc in
+		0)	say=CAUGHT ;;
+		1)	say="NOT CAUGHT" ;;
+		2)	say="refused: it does not apply, or ablate.sh will not run it" ;;
+		*)	say="not run: the tree did not build, or a boot could not be made (status $rc)"
+			rc=3 ;;
+		esac
+		# A patch that ran to its end reported every boot its plan counted.
+		case $rc in
+		0|1)	[ $added = "${SW_BOOTS[$p]}" ] ||
+				short+=("$name, $added of ${SW_BOOTS[$p]}") ;;
+		esac
+		got=$(sed -n 's/^ablate: ablated tree caught //p' "$OUT/sweep/$name.out")
+		echo "job: $name: $say${got:+, caught $got}"
+		echo "sweep:    $name: $say${got:+, caught $got}" >> "$OUT/job.txt"
+		[ $rc -gt $worst ] && worst=$rc
+	done
+	ab_rows
+	echo "sweep:    ${#SWEPT[@]} patches of ${#NAMES[@]} (share $SHARE), $n boots reported, the worst status $worst" >> "$OUT/job.txt"
+	echo "job: the sweep reported $n boots of ${#SWEPT[@]} patches, the worst status $worst -- tree $TREE, $CPU, $ACCS"
+	[ ${#short[@]} = 0 ] ||
+		die 3 "the sweep has patches that reported fewer boots than their plans: ${short[*]}: $OUT/sweep/"
+	exit $worst
 fi
 
 WRONGS=()
