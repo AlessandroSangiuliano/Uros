@@ -56,9 +56,8 @@
 #           the monitor's socket and qemu back, then dies by that signal, as
 #           a shell expects; a signal it was started with ignored (nohup's
 #           HUP, a background job's INT) stays ignored for the whole run --
-#           qemu, which arms all three whatever it inherits, runs in a
-#           session of its own, which a terminal's or a job's signals do not
-#           reach
+#           qemu, which arms all three whatever it inherits, is started with
+#           it blocked
 #
 # 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
 # QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
@@ -213,15 +212,19 @@ def child_signals():
 
 
 def qemu_signals(parent):
-    """qemu's child_signals(), in a session of its own (#661's review, nine
-    rounds).  QEMU arms INT, HUP and TERM whatever it was started with
-    (os_setup_signal_handling() in os-posix.c), so in the run's process
-    group the hangup nohup ignores, or a job's INT, stopped the machine
-    under the run; out of it they reach the run alone, which gives qemu
-    back as it gives everything back.  And TERM when the run dies without
-    doing so: a KILL to the run's group no longer reaches qemu."""
+    """qemu's child_signals(), and the signals the run was started with
+    ignored blocked (#661's review, ten rounds).  QEMU arms INT, HUP and
+    TERM whatever it was started with (os_setup_signal_handling() in
+    os-posix.c), so the hangup nohup ignores, or a job's INT, stopped the
+    machine under the run; blocked, it never reaches QEMU's handler.  qemu
+    stays in the run's job, where a Ctrl-Z stops the machine with the run:
+    in a session of its own (fa652184) the guest ran on, unwatched, while
+    the run was stopped.  And KILL when the run dies without giving qemu
+    back, which no mask holds off."""
     child_signals()
-    ctypes.CDLL(None).prctl(PR_SET_PDEATHSIG, ctypes.c_ulong(signal.SIGTERM))
+    signal.pthread_sigmask(signal.SIG_BLOCK,
+                           {signal.SIGTERM, signal.SIGHUP, signal.SIGINT} - STOP)
+    ctypes.CDLL(None).prctl(PR_SET_PDEATHSIG, ctypes.c_ulong(signal.SIGKILL))
     if os.getppid() != parent:		# the run died before the line above
         os._exit(1)
 
@@ -590,7 +593,6 @@ def main():
         q = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.PIPE, text=True,
-                             start_new_session=True,
                              preexec_fn=lambda: qemu_signals(parent))
     except (OSError, ValueError, SystemExit,
             subprocess.SubprocessError) as e:
