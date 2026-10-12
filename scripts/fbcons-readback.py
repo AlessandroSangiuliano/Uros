@@ -58,12 +58,12 @@
 #           full disk: stdout goes out a line at a time, and a verdict the
 #           run cannot say is not one it gives; --all-lines is not given
 #           with --kvm either
-#  128+n    stopped by TERM, HUP or INT: the run gives the lock, the fifos,
-#           the monitor's socket and qemu back, then dies by that signal, as
-#           a shell expects; a signal it was started with ignored (nohup's
-#           HUP, a background job's INT) stays ignored for the whole run --
-#           qemu, which arms all three whatever it inherits, is started with
-#           it blocked
+#  128+n    stopped by TERM, HUP or INT: the run gives the lock it made, the
+#           fifos, the monitor's socket and qemu back, then dies by that
+#           signal, as a shell expects; a signal it was started with ignored
+#           (nohup's HUP, a background job's INT) stays ignored for the whole
+#           run -- qemu, which arms all three whatever it inherits, is
+#           started with it blocked
 #
 # 🔑 --no-uart IS THE MACHINE WITH NO SERIAL PORT (#670).  -serial none, and
 # QEMU then puts no 16550 at COM1 (hw/char/serial-isa.c creates one only for
@@ -235,6 +235,12 @@ def lock_owner():
 
 class NotOurLock(Exception):
     """The lock was not the run's any more when the run ended."""
+
+
+NOT_OUR_LOCK = (f"the lock was not this run's any more when it ended -- "
+                f"removed by hand, perhaps taken by another run since "
+                f"({LOCK}): left as it is, and the run did not hold the "
+                f"machine alone")
 
 
 def give_lock_back(mine):
@@ -566,14 +572,16 @@ def main():
         # The lock first: a print to a pipe or a terminal the same signal
         # took away fails, and left it behind (#661's review, eight rounds).
         try:
-            give_lock_back(mine)
+            ours = give_lock_back(mine)
         except OSError:
-            pass
+            ours = True
         try:
             print(f"fbcons-readback: the experiment could not be set up: {e}",
                   file=sys.stderr)
         except OSError:
             pass
+        if not ours:			# said, as the run's end says it
+            say_last(f"fbcons-readback: {NOT_OUR_LOCK}")
         return 2
 
     mon = f"/tmp/uros-fbcons-{os.getpid()}.mon"
@@ -601,14 +609,16 @@ def main():
             except OSError:
                 pass
         try:
-            give_lock_back(mine)
+            ours = give_lock_back(mine)
         except OSError:
-            pass
+            ours = True
         try:
             print(f"fbcons-readback: the experiment could not start: {e}",
                   file=sys.stderr)
         except OSError:
             pass
+        if not ours:
+            say_last(f"fbcons-readback: {NOT_OUR_LOCK}")
         return 2
 
     try:
@@ -1102,10 +1112,7 @@ def main():
         # and every mode but plain's PASS returns from inside it (#661's
         # review, twelve rounds).
         if not give_lock_back(mine):
-            raise NotOurLock(f"the lock was not this run's any more when it "
-                             f"ended -- removed by hand, perhaps taken by "
-                             f"another run since ({LOCK}): left as it is, and "
-                             f"the run did not hold the machine alone")
+            raise NotOurLock(NOT_OUR_LOCK)
     return rc
 
 
