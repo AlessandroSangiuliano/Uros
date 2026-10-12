@@ -51,7 +51,8 @@
 #        2  the experiment could not be run, or compared nothing: no qemu,
 #           no monitor, no boot, a monitor or a screendump that broke, an
 #           entry grub.cfg does not have, a --wait-for found before the
-#           screen existed; --all-lines is not given with --kvm either
+#           screen existed, a run that was stopped and continued (a Ctrl-Z
+#           and fg); --all-lines is not given with --kvm either
 #  128+n    stopped by TERM, HUP or INT: the run gives the lock, the fifos,
 #           the monitor's socket and qemu back, then dies by that signal, as
 #           a shell expects; a signal it was started with ignored (nohup's
@@ -177,11 +178,25 @@ STOP = set()
 
 
 def stop_asked():
-    """The stop the run was sent, in the words it says it with, or None."""
-    asked = signal.sigpending() & STOP
+    """The stop the run was sent, in the words it says it with, or None.
+
+    🔴 And a stop it was continued from: SIGCONT, blocked with the others
+    and pending once the run runs again (a Ctrl-Z and fg, a STOP and a
+    CONT).  Every wait here is the wall clock's, so the time the run spent
+    stopped passed for its sleeps, its budgets and its monitor's timeouts,
+    and not -- or not as much -- for the machine: a settle, or the --poll
+    between the two looks a row needs, came out as nothing (#661's review,
+    eleven rounds).  What it saw no longer says what the machine did, so it
+    is a run not made, and the end of the script does not die by it."""
+    pending = signal.sigpending()
+    asked = pending & STOP
     if asked:
         return "stopped by " + " and ".join(
             sorted(signal.Signals(sig).name for sig in asked))
+    if signal.SIGCONT in pending:
+        return ("stopped and continued (SIGCONT): its waits counted the time "
+                "it was stopped as time the machine ran, so what it saw no "
+                "longer says what the machine did -- run it again")
     return None
 
 
@@ -208,7 +223,7 @@ def child_signals():
     of raising in Python's handler inherited by the fork."""
     for sig in STOP:
         signal.signal(sig, signal.SIG_DFL)
-    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP)
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, STOP | {signal.SIGCONT})
 
 
 def qemu_signals(parent):
@@ -440,7 +455,7 @@ def main():
     a = ap.parse_args()
     STOP.update(sig for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
                 if signal.getsignal(sig) != signal.SIG_IGN)
-    signal.pthread_sigmask(signal.SIG_BLOCK, STOP)
+    signal.pthread_sigmask(signal.SIG_BLOCK, STOP | {signal.SIGCONT})
     if a.no_uart and a.send is not None:
         ap.error("--send types at the serial line, and --no-uart has none")
     if a.all_lines and (a.no_uart or a.send is not None or a.freeze):
