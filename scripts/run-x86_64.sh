@@ -1384,7 +1384,9 @@ wait "$QPID" 2>/dev/null || true
 # and a guest whose last line had no newline, cut off by the kill, glued the
 # header to it: the readers went on into the harness's own lines, "⚠️ THE CLOCK
 # MOVED" among them (#661's review).
-[ -s "$LOG" ] && [ -n "$(tail -c 1 "$LOG")" ] && printf '\n' >> "$LOG"
+# Counted with wc -l, which a NUL as the last byte cannot hide the way it
+# vanishes from a command substitution (#661's review, two rounds).
+[ -s "$LOG" ] && [ "$(tail -c 1 "$LOG" | wc -l)" -eq 0 ] && printf '\n' >> "$LOG"
 
 # qemu's own messages, after everything the guest said (#613).  The header is
 # what the readers below and double-panic-check.sh take for the end of the

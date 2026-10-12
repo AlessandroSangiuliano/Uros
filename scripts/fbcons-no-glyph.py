@@ -56,6 +56,11 @@ def main():
             os.path.join(REPO, "scripts/fbcons-readback.py"))
         rb = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(rb)
+    except (Exception, SystemExit) as e:
+        print(f"fbcons-no-glyph: fbcons-readback.py, whose parser reads the "
+              f"table, could not be loaded: {e}")
+        return 2
+    try:
         table = rb.load_map(os.path.join(REPO, rb.FONT_H))
     except (Exception, SystemExit) as e:
         print(f"fbcons-no-glyph: the font's table could not be read: {e}")

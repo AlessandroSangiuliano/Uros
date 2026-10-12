@@ -4,7 +4,7 @@ Takes out: closing the sequence the -f replay's cut left open -- the first live 
 Run: --entry 41 600 -smp 4
 With: 661-widen-replay-cut.patch
 Expect: [1-9][0-9]* not UTF-8 \(#
-Note: the census's line and the halt's report end in "N not UTF-8 (#..."; with the sequence closed, N is 0 in both, as the wire is valid UTF-8
+Note: the census's line ends in "N not UTF-8 (#567, #568, #661)" -- entry 41 prints no halt report, which a boot that halts adds, ending "N not UTF-8 (#661)"; with the sequence closed N is 0, as the wire is valid UTF-8
 
 diff --git a/uros/src/mach_kernel/x86_64/ddb/fbcons.c b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
 index ca190fa9..3633a011 100644
