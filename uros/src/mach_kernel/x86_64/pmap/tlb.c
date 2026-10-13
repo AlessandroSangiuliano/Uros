@@ -27,14 +27,6 @@ struct tlb_request {
 
 static struct answer_count served;
 
-/*
- * #437: the whole-TLB flush back to a bare CR3 reload, which leaves global
- * entries in place -- the flush this file says not to be wrong about.
- */
-#ifndef	ABLATE_437_FLUSH_KEEPS_GLOBALS
-#define	ABLATE_437_FLUSH_KEEPS_GLOBALS	0
-#endif
-
 void tlb_flush_local_all(void)
 {
 	uint64_t cr4 = read_cr4();
@@ -47,13 +39,13 @@ void tlb_flush_local_all(void)
 	 * acquires a flush that no longer flushes the kernel's own mappings —
 	 * which are exactly the ones this kernel changes.
 	 *
-	 * Nothing sets CR4.PGE yet; #437 is where that happens.  Rather than
-	 * leave a trap for it, ask: with global pages on, clearing and
-	 * restoring the enable bit discards them too, and is the architecture's
-	 * own answer for this.  One read of a control register to be right in
-	 * both worlds.
+	 * #437 turns CR4.PGE on, on every processor (pmap_control_regs_here()).
+	 * With global pages on, clearing and restoring the enable bit discards
+	 * them too, and is the architecture's own answer for this; one read of
+	 * a control register keeps the flush right with them and without.
+	 * ablations/437-flush-keeps-globals.patch takes this branch out.
 	 */
-	if ((cr4 & CR4_PGE) && !ABLATE_437_FLUSH_KEEPS_GLOBALS) {
+	if (cr4 & CR4_PGE) {
 		write_cr4(cr4 & ~CR4_PGE);
 		write_cr4(cr4);
 		return;
