@@ -1,8 +1,10 @@
 Kind: ablation
 Issue: #467
-Takes out: the exception raised for a ring-3 fault that cannot be resolved -- the task is never told
+Takes out: the exception raised for a ring-3 fault that cannot be resolved -- the task is never told: the fault goes on to the kernel's own report, ring 3's registers in it, and the processor halts
 Run: --entry 14 600 -smp 4
 Expect: fault_test: \[2\] .*WRONG
+Expect: read from user, nothing mapped there
+Expect: ^[ ]{2}cs +0x0+2b +ss +0x0+23[ ]
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
 index 46247c61..6c7fd547 100644
