@@ -170,7 +170,10 @@ LIST=()
 			[ -f "$TREE/boot/$k" ] && [ "$k" != bootstrap ] || {
 				echo "make-baremetal: --entry $e: no --kernel named $k" >&2; exit 2; }
 		fi
-		f=$(echo $f)	# one space between flags, none at the ends
+		# One space between flags, none at the ends: by read and not by
+		# echo, which takes a lone -n or -e for its own and prints nothing.
+		read -ra fw <<< "$f"
+		f="${fw[*]}"
 		title="UrMach x86-64, bare metal: -f${f:+ $f}"
 		[ "$k" = mach_kernel ] || title="$title, kernel $k"
 		[ "$BENCH_ONLY" = 1 ] && title="$title, ipc_bench"
