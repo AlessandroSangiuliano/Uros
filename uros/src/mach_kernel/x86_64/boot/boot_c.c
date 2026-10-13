@@ -2021,7 +2021,7 @@ static void pcid_selftest(void)
 {
 	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
 	uint64_t frame[3] = { 0 }, seen;
-	uint32_t self = cpu_apic_id(), x = SMP_MAX_CPUS;
+	uint32_t self = (uint32_t) cpu_number(), x = SMP_MAX_CPUS;	/* by number (#663) */
 	unsigned i;
 
 	if (pmap_pcid_mode == PMAP_PCID_OFF) {
@@ -2029,15 +2029,11 @@ static void pcid_selftest(void)
 		      "discards everything, so nothing can be kept (#412)\r\n");
 		return;
 	}
-	for (i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id != self && c->apic_id < SMP_MAX_CPUS
-		    && smp_is_online(c->apic_id)) {
-			x = c->apic_id;
+	for (i = 0; i < smp_cpu_count(); i++)
+		if (i != self && smp_is_online(i)) {
+			x = i;
 			break;
 		}
-	}
 	if (x == SMP_MAX_CPUS) {
 		kputs("pcid_test: NOT ASKED — no second processor to switch "
 		      "between spaces while this one changes them (#412)\r\n");
