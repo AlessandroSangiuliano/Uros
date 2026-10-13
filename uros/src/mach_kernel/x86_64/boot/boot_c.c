@@ -2110,9 +2110,15 @@ static void global_split_selftest(void)
  * 🔴 WHAT A PCID KEEPS, AND WHAT IT MUST NOT (#412).
  *
  * With PCID a switch keeps the entries of the space it leaves, so two things
- * that used to come free now have to be earned.  Each is asked on one
- * application processor, X, driven by targeted cross-calls, with two spaces
- * that map the same address to frames of their own:
+ * that used to come free now have to be earned.  Each is asked of one
+ * processor, X, with two spaces that map the same address to frames of their
+ * own.  X is an application processor driven by targeted cross-calls, or, with
+ * one processor online, the boot processor itself, whose steps then run in
+ * place (xs_run_on()).  A control that makes on this processor the
+ * invalidations the question made here must not do so when X is this
+ * processor, since they would be X's own: that is why [3] has a control of its
+ * own then (pcid_ask_alone()), while [1]'s invalidations of XS_VA, made with X
+ * in S2, reach S2's PCID alone and leave the entry S1's holds.
  *
  *   [1] a space changed while X only CACHES it.  X enters S2, then S1,
  *	 where it reads the page, then S2 again, and the boot processor then
@@ -2381,10 +2387,14 @@ static void pcid_ask_alone(uint32_t self)
 	struct xs_step st = { PMAP_NULL, 0, PMAP_NULL, PMAP_NULL, 0, XS_KVA, 0 };
 	pmap_t s1 = pmap_create(0), s2 = pmap_create(0);
 	/*
-	 * The next page's two frames first, so that frames handed out in a
-	 * row never put it at XS_KVA's frame plus a page: an AMD processor
-	 * may keep contiguous 4 KiB pages in one TLB entry, and the control's
-	 * invalidations of the next page would then reach XS_KVA's.
+	 * The next page's two frames first.  Whenever X forms XS_KVA's entry
+	 * the next page maps g0, and with frames handed out in a row, up or
+	 * down, g0 follows neither of XS_KVA's: an AMD processor may keep
+	 * contiguous 4 KiB pages in one TLB entry, and the control's
+	 * invalidations of the next page would then reach XS_KVA's.  (After
+	 * the control's remap the next page may follow XS_KVA's frame, but
+	 * nothing translates either page before the control's read, and a
+	 * shared entry could only make the answer NOT ASKED.)
 	 */
 	uint64_t g0 = boot_frame_alloc(), g1 = boot_frame_alloc();
 	uint64_t f3 = boot_frame_alloc(), f4 = boot_frame_alloc();
@@ -2503,7 +2513,7 @@ static void pcid_ask(void)
 	       != PMAP_MAP_OK
 	    || pmap_enter(s2, XS_VA, frame[1], VM_PROT_READ | VM_PROT_WRITE, 0)
 	       != PMAP_MAP_OK) {
-		kputs("pcid_test: NOT ASKED — could not build the two spaces "
+		kputs("pcid_test: NOT ASKED — could not build the spaces "
 		      "(#412)\r\n");
 	} else {
 		/* [1]: S2 holds a PCID first, so that leaving S1 discards nothing. */
