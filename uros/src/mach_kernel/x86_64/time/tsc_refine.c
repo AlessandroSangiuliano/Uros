@@ -22,7 +22,8 @@
  * refinement: the exact source stands, for the reason it was adopted -- it is
  * the same number every boot, where this measurement carries the host's NTP
  * of the moment -- and the line says how far the second's measurement is
- * from it.
+ * from it.  How far is too far is exact.c's rule too, the one the source was
+ * adopted by: under a hypervisor the ruler is the host's clock (#668).
  *
  * The ruler is the one rulers_long() names: the HPET or the PM timer, never
  * the 8254, whose sixteen bits wrap every 54.9 ms.  How long the sleep really
@@ -37,11 +38,19 @@
 #include <kern/time_out.h>
 #include <kern/misc_protos.h>
 
+#include <time/exact.h>
 #include <time/ruler.h>
 #include <time/rulers.h>
 #include <time/tsc.h>
 
 static int refine_wakeup;	/* an event nobody posts: the timeout ends the wait */
+
+static uint64_t apart_ppm(uint64_t a, uint64_t b)
+{
+	uint64_t spread = a > b ? a - b : b - a;
+
+	return b ? spread * 1000000 / b : 0;
+}
 
 static uint64_t subject_tsc(void)
 {
@@ -106,15 +115,62 @@ static void tsc_refine(void)
 	ppm = spread * 1000000 / boot;
 
 	if (tsc_source()->adopted >= 0) {
-		printf("UrMach x86-64: the TSC checked against the %s over %lu ms: "
-		       "%lu kHz, %lu ppm from %s's value, the ends within %lu ppm"
-		       "%s\n", k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
-		       freq_exact_name((unsigned)tsc_source()->adopted),
-		       ruler_window_ppm(&run),
-		       spread <= boot / RULER_TOLERANCE
-		       ? " — the exact source stands"
-		       : " — WRONG, more than one part in 64 from an exact "
-			 "source");
+		const struct exact_choice *s = tsc_source();
+		unsigned id = (unsigned)s->adopted;
+		uint64_t one[FREQ_EXACT] = { 0 };
+		struct exact_choice now;
+
+		/*
+		 * #668: UNDER A HYPERVISOR THE RULER IS THE HOST'S CLOCK, and how
+		 * far that clock may be from an exact source is the bound exact.c
+		 * adopted the source within -- asked again here, of this second's
+		 * measurement, so that the adoption and the check are one rule.
+		 * They were two: a host whose clocks ran 23420 ppm from KVM's
+		 * clock at boot had the source adopted, and a second later the
+		 * same distance was WRONG past one part in 64 (pavillion, one KVM
+		 * boot in 562).  Within the bound, with the rate in use the one
+		 * adopted, the distance is the host's, and the line says so with
+		 * what the rulers measured at boot.  Beyond it, or with the rate in
+		 * use another, the kernel's rate is wrong.  On bare metal the bound
+		 * is narrower than one part in 64, and nothing changes there.
+		 */
+		one[id] = s->hz[id];
+		(void) exact_choose(one, run.hz, ruler_window_ppm(&run), &now);
+
+		if (spread <= boot / RULER_TOLERANCE)
+			printf("UrMach x86-64: the TSC checked against the %s over "
+			       "%lu ms: %lu kHz, %lu ppm from %s's value, the ends "
+			       "within %lu ppm — the exact source stands\n",
+			       k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
+			       freq_exact_name(id), ruler_window_ppm(&run));
+		else if (now.phase_ppm != 0 && boot == s->hz[id]
+			 && now.verdict[id] != EXACT_CONTRADICTS)
+			printf("UrMach x86-64: the TSC checked against the %s over "
+			       "%lu ms: %lu kHz, %lu ppm from %s's value, the ends "
+			       "within %lu ppm — the exact source stands, and the "
+			       "host's clocks are that far from it: under a "
+			       "hypervisor the %s runs on them, and they may be up "
+			       "to %lu ppm from it, the bound it was adopted within; "
+			       "at boot the rulers were %lu ppm from it, and this "
+			       "second is %lu ppm from their measurement (#594, "
+			       "#668)\n",
+			       k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
+			       freq_exact_name(id), ruler_window_ppm(&run), k->name,
+			       now.bound_ppm, s->ppm[id],
+			       apart_ppm(run.hz, s->measured));
+		else
+			printf("UrMach x86-64: the TSC checked against the %s over "
+			       "%lu ms: %lu kHz, %lu ppm from the rate in use, the "
+			       "ends within %lu ppm — WRONG, %s (#668)\n",
+			       k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
+			       ruler_window_ppm(&run),
+			       boot != s->hz[id]
+			       ? "the rate in use is not the exact source's this "
+				 "kernel adopted"
+			       : now.phase_ppm != 0
+			       ? "further from the exact source than a host's "
+				 "clocks may be from it"
+			       : "more than one part in 64 from an exact source");
 		return;
 	}
 
@@ -140,9 +196,20 @@ static void tsc_refine(void)
  * One thread for both: the refinement once, then the watchdog for as long as
  * there is something to watch (#594).  The watchdog starts from the rate the
  * refinement left, whatever it decided.
+ *
+ * ⚠️ Bound to the boot processor BEFORE the refinement (#646).  Both take
+ * two-point windows, and tsc_watch() explains why a thread that moved between
+ * two points reads two processors' TSCs -- a rate error that is really an
+ * offset.  The bind used to be the watchdog's first act, after the
+ * refinement had already slept a second between its two points unbound,
+ * across the moment the application processors are let into the scheduler.
  */
 static void tsc_time_thread(void)
 {
+#if	NCPUS > 1
+	thread_bind(current_thread(), master_processor);
+	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
+#endif
 	tsc_refine();
 	tsc_watch();
 	thread_terminate_self();

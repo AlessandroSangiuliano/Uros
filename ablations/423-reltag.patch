@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #423
+Takes out: the relocation tag libdl looks for -- it looks for the other machine's (DT_REL on x86-64), so dlopen finds no table, relocates nothing and reports success, and dl_test follows an unrelocated pointer
+Run: --entry 14 600 -smp 4
+Expect: dl_test: \[1\] RELATIVE: WRONG
+
+diff --git a/uros/src/lib/libdl/elf_load.c b/uros/src/lib/libdl/elf_load.c
+index 89c15c3c..d336ddad 100644
+--- a/uros/src/lib/libdl/elf_load.c
++++ b/uros/src/lib/libdl/elf_load.c
+@@ -387,7 +387,7 @@ dl_digest_dynamic(struct dl_object *obj)
+ 		 * reloc_addend() in elf_reloc.c.  Choosing the wrong tag is
+ 		 * the mistake with no second source to fall back on.
+ 		 */
+-		case ELF_DT_REL:
++		case (ELF_RELA_HAS_ADDEND ? DT_REL : DT_RELA):
+ 			obj->rel = (const Elf_Reloc *)
+ 				(obj->relocbase + dyn->d_un.d_ptr);
+ 			break;

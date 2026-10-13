@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #599
+Over: 599-cli-spin.patch
+Takes out: the clock watch from the other processors' own ticks -- applied over 599-cli-spin.patch, only the watch inside a spin (clock_watch_spin) can say processor 0's tick stopped
+Run: i386, UROS_NCPUS > 1, under TCG: under KVM a fast host's bundle ends before tick 3000 and nobody is left to spin on the lock processor 0 holds (#643) -- scripts/run-qemu.sh --tcg --fresh-disk --smp 4 -display none -serial mon:stdio
+Expect: ms \(watched by processor [0-9]+, spinning in 
+
+diff --git a/uros/src/mach_kernel/i386/clock_watch.c b/uros/src/mach_kernel/i386/clock_watch.c
+index e49f9bc6..bd3cbda1 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.c
++++ b/uros/src/mach_kernel/i386/clock_watch.c
+@@ -174,6 +174,8 @@ clock_watch_init(void)
+ 	       "so when it has not run for %u ms (#599)\n", CW_STOP_MS);
+ 	printf("clock: #599 ablation -- at tick %u processor 0 takes the timeout "
+ 	       "list's lock and spins with interrupts off\n", CW_ABLATE_AT);
++	printf("clock: #599 ablation -- the watch does not run from the tick, "
++	       "only from inside spins\n");
+ }
+ 
+ /*
+@@ -282,7 +284,6 @@ cw_watch(int cpu, const char *where)
+ void
+ clock_watch_tick(int cpu)
+ {
+-	cw_watch(cpu, 0);
+ }
+ 
+ /*

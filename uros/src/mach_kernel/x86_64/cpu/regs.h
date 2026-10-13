@@ -514,10 +514,24 @@ static inline void xsetbv(uint32_t index, uint64_t value)
 
 #ifndef __ASSEMBLER__
 
+/*
+ * This processor's APIC id, from CPUID: the x2APIC id, 32 bits, from leaf 0BH
+ * where the leaf enumerates one (SDM Vol. 3A 253668-093US 13.12.8: EDX of any
+ * subleaf), else the eight bits of leaf 1 (#659).  The two agree below 256,
+ * which is every id an xAPIC can hold; an id past that exists only in x2APIC
+ * mode, and only leaf 0BH can say it.  A leaf 0BH whose EBX[15:0] is zero at
+ * subleaf 0 enumerates nothing, and leaf 1 is asked instead.
+ */
 static inline uint32_t cpu_apic_id(void)
 {
 	uint32_t a, b, c, d;
 
+	cpuid(0, &a, &b, &c, &d);
+	if (a >= 0xB) {
+		cpuid_count(0xB, 0, &a, &b, &c, &d);
+		if ((b & 0xFFFF) != 0)
+			return d;
+	}
 	cpuid(1, &a, &b, &c, &d);
 	return b >> 24;
 }

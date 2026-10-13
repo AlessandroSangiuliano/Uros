@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: an interrupt entry cache invalidation's index at bits 47:32 -- it is put at 63:48, where a fault record keeps one, and the engine forgets some other entry
+Run: --entry 0 300
+Expect: interrupt remapping words encoded and decoded, 2 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 2cd28fe9..feb69c61 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1731,7 +1731,7 @@ int iommu_vtd_irt_build(void)
+ #define	VTD_QI_G_GLOBAL		(1ULL << 4)	/* context and IOTLB: 01b */
+ #define	VTD_QI_IEC_BY_INDEX	(1ULL << 4)
+ #define	VTD_QI_IEC_IM(m)	((uint64_t)(m) << 27)
+-#define	VTD_QI_IEC_IIDX(i)	((uint64_t)(i) << 32)
++#define	VTD_QI_IEC_IIDX(i)	((uint64_t)(i) << 48)
+ #define	VTD_QI_WAIT_SW		(1ULL << 5)
+ #define	VTD_QI_WAIT_DATA(d)	((uint64_t)(d) << 32)
+ 

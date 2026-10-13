@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #606
+Takes out: the pageout daemon's bounded sleep -- it asserts nobody is waiting after a scan, and sleeps with no end; a development kernel short of memory stops on the assertion
+Run: --entry 14 1200 -smp 4 -m 96M
+Expect: <vm_pageout\+0x
+
+diff --git a/uros/src/mach_kernel/vm/vm_pageout.c b/uros/src/mach_kernel/vm/vm_pageout.c
+index 3dc72753..d8f8a3e3 100644
+--- a/uros/src/mach_kernel/vm/vm_pageout.c
++++ b/uros/src/mach_kernel/vm/vm_pageout.c
+@@ -2217,10 +2217,8 @@ vm_pageout(void)
+ 		 * waiting the sleep has an end: vm_pageout_empty_wait, the
+ 		 * pause the scan takes itself when it has nothing to do.
+ 		 */
++		assert(vm_page_free_wanted == 0);
+ 		assert_wait((event_t) &vm_page_free_wanted, FALSE);
+-		if (vm_page_free_wanted != 0)
+-			thread_set_timeout(convert_ipc_timeout_to_ticks(
+-						vm_pageout_empty_wait));
+ 		mutex_unlock(&vm_page_queue_free_lock);
+ 		counter(c_vm_pageout_block++);
+ 		thread_block((void (*)(void)) 0);

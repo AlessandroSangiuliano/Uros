@@ -38,7 +38,7 @@
  * clock -- and the host's NTP steers it.  That is not the 500 ppm of MAXFREQ:
  * the phase it corrects is drained on top, an eighth of the offset a second at
  * timesyncd's poll, and #594 measured it after a reboot at 7325 ppm for three
- * windows in a row, 50,000 in the ablation that reproduces it.  A window's rate
+ * windows in a row, 50,000 in ablations/594-ntp-slew.patch.  A window's rate
  * cannot tell that from a broken TSC.  The TIME can: the host's clock is kept
  * within MAXPHASE (0.5 s, <linux/timex.h>) of true time, so over any stretch
  * its elapsed time is within 2 * MAXPHASE of true, however it was slewed in
@@ -91,52 +91,6 @@
 #include <time/rulers.h>
 #include <time/tsc.h>
 
-/*
- * #593: UROS_ABLATE_593_ICR_OPEN's load.  The ablation leaves an IPI send
- * open to an interrupt between its halves, and counts the sends that began
- * inside another -- but a processor sends from thread context with
- * interrupts on only now and then, and 100 s of the HPET's broadcast at four
- * processors found none.  So for one second this thread, bound to the boot
- * processor where the broadcast's class-fifteen interrupt lands, does nothing
- * but send, and says how many sends landed inside one of its own.
- */
-#ifndef	ABLATE_593_ICR_OPEN
-#define	ABLATE_593_ICR_OPEN	0
-#endif
-#if ABLATE_593_ICR_OPEN
-#include <cpu/ipi.h>
-#include <cpu/lapic.h>
-#include <cpu/smp.h>
-
-static void icr_stress(void)
-{
-	uint64_t	rate = tsc_hz(), t0, sent = 0, before;
-	uint32_t	self = lapic_id(), target = self;
-	unsigned	c;
-
-	for (c = 0; c < SMP_MAX_CPUS; c++)
-		if (c != self && smp_is_online(c)) {
-			target = c;
-			break;
-		}
-	before = lapic_icr_nested_on(self);
-	t0 = rdtsc();
-	do {
-		if (target == self)
-			lapic_send_self(IPI_VECTOR_AST);
-		else
-			lapic_send_ipi(target, IPI_VECTOR_AST);
-		sent++;
-	} while (rate != 0 && rdtsc() - t0 < rate);
-	printf("UrMach x86-64: the ICR stress: %llu AST IPIs from thread "
-	       "context on cpu %u to cpu %u in a second, and %llu sends by an "
-	       "interrupt began between the wait and the second write of one "
-	       "of them (UROS_ABLATE_593_ICR_OPEN, #593)\n",
-	       (unsigned long long)sent, self, target,
-	       (unsigned long long)(lapic_icr_nested_on(self) - before));
-}
-#endif
-
 #define WATCH_CONFIRM		3	/* windows in a row before naming */
 #define WATCH_SUMMARY		60	/* windows between summary lines */
 #define WATCH_RULERS_PPM	1000	/* between two rulers: 500 each */
@@ -177,91 +131,10 @@ struct watched {
 
 static int watch_wakeup;	/* posted by nobody: the timeout ends the wait */
 
-#if	ABLATE_594_TSC_SKEWS
-/*
- * #594: from the second window on, the TSC as the watchdog reads it runs one
- * part in thirty-two fast, so both rulers put it outside the bound and the
- * path that names it -- and moves the tick off it -- runs.  Never on in a
- * kernel booted for anything else.
- */
-static uint64_t skew_from;
-
-static uint64_t subject_tsc(void)
-{
-	uint64_t t = rdtsc_ordered();
-
-	if (skew_from != 0 && t > skew_from)
-		t += (t - skew_from) / 32;
-	return t;
-}
-#else
 static uint64_t subject_tsc(void)
 {
 	return rdtsc_ordered();
 }
-#endif
-
-#if	ABLATE_594_HPET_STOPS
-/*
- * #594: from the second window on, the HPET as the watchdog reads it stops
- * counting -- the shape of an HPET that stops in a deep package C-state --
- * so the path that names a ruler runs.  Never on otherwise.
- */
-static uint64_t hpet_frozen;
-
-static uint64_t frozen_read(void)
-{
-	return hpet_frozen;
-}
-#endif
-
-#if	ABLATE_594_NTP_SLEW
-/*
- * #594: the rulers, as the watchdog reads them, carry what a host's NTP does to
- * its clock while it converges -- what #594 measured on a host just rebooted.
- * Linux's PLL drains a phase offset at offset >> (SHIFT_PLL + constant) a
- * second (kernel/time/ntp.c, ntp_offset_chunk()), and timesyncd hands it
- * offsets under 0.4 s with constant = log2(poll) - 4, which is 1 at its 32 s
- * poll (timesyncd-manager.c).  So: from the second window, every 32 windows a
- * new 0.4 s offset, the sign alternating, drained by an eighth a window --
- * 50,000 ppm in its first second, and never more than 0.4 s in all.  A
- * watchdog that names the TSC here has named a host's NTP.  Never on in a
- * kernel booted for anything else.
- */
-static int64_t		slew_rem_ns, slew_phase_ns;
-static uint64_t		(*slew_read_of[WATCH_MAX])(void);
-static uint64_t		slew_hz_of[WATCH_MAX];
-
-static void slew_window(unsigned windows)
-{
-	int64_t chunk;
-
-	if (windows >= 2 && (windows - 2) % 32 == 0)
-		slew_rem_ns = ((windows - 2) / 32) % 2 ? -400000000LL
-						       : 400000000LL;
-	chunk = slew_rem_ns / 8;
-	if (chunk == 0)
-		chunk = slew_rem_ns;
-	slew_rem_ns -= chunk;
-	slew_phase_ns += chunk;
-}
-
-static uint64_t slew_counts(unsigned i)
-{
-	return (uint64_t) (slew_phase_ns * (int64_t) slew_hz_of[i]
-			   / 1000000000LL);
-}
-
-static uint64_t slew_read0(void)
-{
-	return slew_read_of[0]() + slew_counts(0);
-}
-
-static uint64_t slew_read1(void)
-{
-	return slew_read_of[1]() + slew_counts(1);
-}
-#endif
 
 static void watch_sleep(void)
 {
@@ -509,8 +382,8 @@ void tsc_watch(void)
 	}
 
 #if	NCPUS > 1
-	thread_bind(current_thread(), master_processor);
-	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
+	/* Bound by its thread before the refinement ran (tsc_refine.c, #646). */
+	assert(current_thread()->bound_processor == master_processor);
 #endif
 
 	if (vm)
@@ -530,13 +403,6 @@ void tsc_watch(void)
 		       n > 1 ? " and " : "", n > 1 ? w[1].name : "",
 		       WATCH_CONFIRM, bound);
 
-#if	ABLATE_594_NTP_SLEW
-	for (i = 0; i < n; i++) {
-		slew_read_of[i] = w[i].r.read;
-		slew_hz_of[i] = w[i].r.hz;
-		w[i].r.read = i == 0 ? slew_read0 : slew_read1;
-	}
-#endif
 	for (i = 0; i < n; i++)
 		ruler_point(&w[i].r, subject_tsc, &w[i].prev);
 
@@ -556,26 +422,6 @@ void tsc_watch(void)
 		 * been printed, and was lost.
 		 */
 		clock_event_drain_reports();
-
-#if	ABLATE_594_TSC_SKEWS
-		if (windows == 2)
-			skew_from = rdtsc_ordered();
-#endif
-#if	ABLATE_593_ICR_OPEN
-		if (windows == 3)
-			icr_stress();
-#endif
-#if	ABLATE_594_NTP_SLEW
-		slew_window(windows);
-#endif
-#if	ABLATE_594_HPET_STOPS
-		if (windows == 2)
-			for (i = 0; i < n; i++)
-				if (w[i].id == RULER_HPET) {
-					hpet_frozen = w[i].r.read();
-					w[i].r.read = frozen_read;
-				}
-#endif
 
 		live = 0;
 		for (i = 0; i < n; i++) {

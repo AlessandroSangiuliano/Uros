@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #467
+Takes out: vm_fault() for a ring-3 page fault -- the task halts on its first page fault, so the run may end before fault_test prints: today the first is bootstrap's, which the fault path hands to the task as EXC_BAD_ACCESS, and with no exception server the kernel terminates it
+Run: --entry 14 600 -smp 4
+Expect: fault_test: \[1\] .*WRONG
+Expect: panic\(cpu
+Expect: exception_no_server: terminating task .* exception 1,
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 46247c61..93781751 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1911,7 +1911,7 @@ void trap_dispatch(struct trap_frame *frame)
+ 		 * and inventing kernel_map for it would hand an early boot
+ 		 * failure to a subsystem that is not up.
+ 		 */
+-		if (map != VM_MAP_NULL) {
++		if (0 && map != VM_MAP_NULL) {
+ 			fault_kr = fault_in(map, addr, prot, frame);
+ 			if (fault_kr == KERN_SUCCESS) {
+ 				/*

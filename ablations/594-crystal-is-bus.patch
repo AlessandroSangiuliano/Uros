@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #594
+Accel: kvm
+Takes out: nothing -- a probe: CPUID 0x15 states the timing leaf's bus as the crystal and the leaf's TSC over it as the ratio, as a hypervisor following the SDM would and no QEMU does, so the LAPIC timer adopts 0x15's crystal in a guest; KVM only, with +invtsc, which makes QEMU offer the timing leaf
+Run: --entry 14 600 -smp 4 -cpu max,+invtsc
+Expect: after the divisor CPUID 0x15 [0-9]+ kHz, [0-9]+ ppm from the rulers: adopted
+
+diff --git a/uros/src/mach_kernel/x86_64/time/freq_source.c b/uros/src/mach_kernel/x86_64/time/freq_source.c
+index fbb8bfac..532bf075 100644
+--- a/uros/src/mach_kernel/x86_64/time/freq_source.c
++++ b/uros/src/mach_kernel/x86_64/time/freq_source.c
+@@ -198,6 +198,19 @@ void freq_exact_read(struct freq_exact *out)
+ 	*out = (struct freq_exact){ { 0 }, { 0 } };
+ 	freq_cpuid_read(&cpu);
+ 	freq_hypervisor_read(&hv);
++	/*
++	 * #594: the processor states 0x15 the way a hypervisor following the
++	 * SDM would -- the crystal the timing leaf's bus clock, the ratio the
++	 * timing leaf's TSC over it -- so the LAPIC timer's path that adopts
++	 * 0x15's crystal runs in a guest.  Needs `+invtsc', which makes QEMU
++	 * offer the timing leaf.
++	 */
++	if (hv.has_timing && hv.tsc_khz != 0 && hv.bus_khz != 0) {
++		cpu.has_15 = 1;
++		cpu.crystal_hz = hv.bus_khz * 1000;
++		cpu.tsc_numerator = hv.tsc_khz;
++		cpu.tsc_denominator = hv.bus_khz;
++	}
+ 	if (cpu.has_15 && cpu.crystal_hz != 0 && cpu.tsc_numerator != 0
+ 	    && cpu.tsc_denominator != 0) {
+ 		out->tsc_hz[FREQ_CPUID] = (uint64_t)cpu.crystal_hz

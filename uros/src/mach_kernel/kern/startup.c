@@ -222,6 +222,7 @@
 #include <x86_64/thread/context.h>	/* #561 */
 #include <x86_64/time/tsc.h>		/* #508: the refinement */
 #include <x86_64/cpu/iommu.h>		/* #599: the fault reporter */
+#include <x86_64/cpu/reset.h>		/* #373: -b's deadline */
 #endif
 #include <kern/thread_swap.h>
 #include <kern/time_out.h>
@@ -247,11 +248,6 @@
 #include <kern/task_swap.h>
 extern int task_swap_on;
 #endif	/* TASK_SWAPPER */
-
-/* #608: the RCU drain thread is not started; only the idle loop drains. */
-#ifndef	ABLATE_608_NO_DRAIN_THREAD
-#define	ABLATE_608_NO_DRAIN_THREAD	0
-#endif
 
 /* Externs */
 extern	void rtclock_reset(void);
@@ -467,9 +463,7 @@ start_kernel_threads(void)
 	 * #608: the thread that runs RCU callbacks on a machine that never
 	 * idles -- the idle loop was the only thing that ran them.
 	 */
-	if (!ABLATE_608_NO_DRAIN_THREAD)
-		(void) kernel_thread(kernel_task, urmach_rcu_drain_thread,
-				     (char *) 0);
+	(void) kernel_thread(kernel_task, urmach_rcu_drain_thread, (char *) 0);
 #if	NORMA_VM
 	(void) kernel_thread(kernel_task, vm_object_thread, (char *) 0);
 #endif	/* NORMA_VM */
@@ -513,6 +507,12 @@ start_kernel_threads(void)
 	 * which the idle loop used to do when a processor had nothing better.
 	 */
 	iommu_fault_reporter_start();
+
+	/*
+	 * #373: with -b, the thread that restarts the machine reset_after=
+	 * seconds from here if nothing has before -- the census, a panic.
+	 */
+	reset_deadline_start();
 #endif	/* __x86_64__ */
 
 	/*

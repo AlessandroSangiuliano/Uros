@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #659
+Takes out: the high word's half of AMD's 128-bit decoder check without XTEn -- Destination[31:24] in bits 127:120 is read again, the half no case decided before fe183664
+Run: --entry 0 300 -smp 1
+Expect: interrupt remapping words encoded and decoded, 1 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -2037,8 +2037,7 @@
+ 		      | AMD_IRTE_INT_TYPE_MASK | AMD_IRTE_RQ_EOI
+ 		      | AMD_IRTE_DM | AMD_IRTE_SUP_IOPF))
+ 	    || (in[1] & AMD_IRTE_GA_HI_RSVD)
+-	    || (!x2apic && ((in[0] & AMD_IRTE_GA_LO_DEST_HI)
+-			    || (in[1] & AMD_IRTE_GA_HI_DEST))))
++	    || (!x2apic && (in[0] & AMD_IRTE_GA_LO_DEST_HI)))
+ 		return -1;
+ 
+ 	out->vector = (uint8_t)(in[1] & 0xFF);

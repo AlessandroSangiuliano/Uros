@@ -1,0 +1,90 @@
+Kind: ablation
+Issue: #558
+Over: 558-pvfreelock.patch
+Takes out: the per-page lock on the pv walks -- a walk races pv_remove() and misses an entry, the mapping nobody tears down of #531; over 558-pvfreelock.patch, as #531 measured it: with both locks out 6 boots of 18 freed a page still mapped, with the free list's alone 1 of 10; the page lock alone was never measured, and 21 boots of it alone in #643's sweep and reruns met nothing
+Run: --entry 14 1200 -smp 4
+Expect: panic\(cpu
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pv.c b/uros/src/mach_kernel/x86_64/pmap/pv.c
+index f16df901..f6b6c42f 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pv.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pv.c
+@@ -196,66 +196,13 @@ static struct pv_lock *pv_lock_for(uint64_t pa)
+  */
+ static void pv_lock_take(struct pv_lock *p)
+ {
+-	/*
+-	 * ❌ THE PRECONDITION I ASSERTED HERE IS FALSE, AND THAT IS MEASURED
+-	 * (#558, 14/09).
+-	 *
+-	 * The assert was `!pmap_initialized || (read_rflags() & RFLAGS_IF)',
+-	 * on the reasoning that a waiter with interrupts off cannot answer the
+-	 * shootdown of whoever holds the lock -- hw_lock_lock()'s argument,
+-	 * turned around.  It fired on the first boot:
+-	 *
+-	 *     pv_lock_page <- pv_enter <- pmap_enter <- vm_fault_wire_fast
+-	 *       <- vm_fault_wire <- vm_map_wire <- kernel_memory_allocate
+-	 *       <- kmem_alloc_aligned <- stack_alloc <- thread_machine_create
+-	 *
+-	 * Wiring a new thread's kernel stack reaches pv_enter with interrupts
+-	 * ALREADY masked -- a probe at pmap_enter's entry reports
+-	 * percpu_intr_level = 1 there, so a hw_lock is held somewhere above.
+-	 * ⚠️ WHICH ONE IS NOT ESTABLISHED: vm_object_lock and
+-	 * vm_page_lock_queues are both mutexes (atomic_cmpxchg8, no masking),
+-	 * pmap_writer_lock is inert in the arm that ships, urmach_rcu_read_lock
+-	 * raises the PREEMPT level and not the interrupt one, and
+-	 * vm_fault_wire_fast releases the object lock before PMAP_ENTER.  Said
+-	 * as unknown rather than guessed at a fourth time.
+-	 *
+-	 * 🔑 THE DESIGN CONSEQUENCE DOES NOT DEPEND ON THE NAME: legitimate
+-	 * callers arrive here masked, so a waiter can be unable to answer, so
+-	 * NOBODY MAY SHOOT DOWN WHILE HOLDING ONE OF THESE.  The lock is still
+-	 * right for what pv.c does under it -- pv_enter, pv_remove and pv_count
+-	 * shoot down nothing.
+-	 *
+-	 * ⚠️ AND THE SENTENCE THAT USED TO END THIS PARAGRAPH IS NO LONGER TRUE.
+-	 * It said the walks in pmap.c that DO shoot down "are back to
+-	 * unprotected, which is written where they are".  That was the state on
+-	 * 14/09 and it was fixed by separating the two halves: the entries change
+-	 * under this lock and the shootdowns happen after it is dropped
+-	 * (pmap_protect_page_noflush, pmap_unmap_page_noflush, and the flush
+-	 * batches in pmap.c).  Every walk of a pv list now holds this across the
+-	 * dereference of `pv->pmap' and none of them cross-calls under it.
+-	 */
+-
+-	disable_preemption();
+-
+-	for (;;) {
+-		if (atomic_cmpxchg8(&p->l, 0, 1) == 0)
+-			return;
+-
+-		/*
+-		 * Spin on a plain read rather than on the exchange, so waiters
+-		 * share the cache line instead of tearing it away from the
+-		 * holder who needs it to release -- hw_lock_lock()'s reasoning,
+-		 * and it applies to any spin lock.
+-		 */
+-		while (p->l != 0)
+-			cpu_pause();
+-	}
++	(void) p;
++	return;
+ }
+ 
+ static void pv_lock_drop(struct pv_lock *p)
+ {
+-	(void) atomic_swap8(&p->l, 0);
+-	enable_preemption();
++	(void) p;
+ }
+ 
+ /*
+@@ -325,6 +272,8 @@ void pv_bootstrap(uint64_t top_of_ram)
+ 	 * name the arm cannot attribute what it finds -- and this one costs a
+ 	 * line in the ablated arm and nothing at all in the shipping one.
+ 	 */
++	printf("pv: the per-page lock is ABLATED — the walks run with nothing "
++	       "held, so a walk can race pv_remove and MISS an entry\n");
+ 	printf("pv: the free list is ABLATED — pv_alloc and pv_free push and pop "
+ 	       "with no lock, so two processors can be handed the SAME entry\n");
+ }

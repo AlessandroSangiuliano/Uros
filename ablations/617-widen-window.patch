@@ -1,0 +1,58 @@
+Kind: widen
+Issue: #617
+Holds open: thread_return_ast()'s window between reading this processor's number and reading its AST word -- 50 us, for a thread making its first return to ring 3 (a frame of zeros), so pthread_test [31] meets it
+Run: --entry 14 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 46247c61..97aff93c 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1287,6 +1287,40 @@ thread_return_ast_report(void)
+ 	       return_ast_read_on);
+ }
+ 
++/*
++ * #617: the window between reading this processor's number and reading its
++ * AST word in thread_return_ast(), widened for the test that has to show what
++ * happens inside it.  Off, and off is the shipping answer.  On, a thread
++ * making its first return to ring 3 -- a frame of zeros, which only a thread
++ * nobody has given a state has -- spins there for WIDEN_617_US microseconds.
++ * Only those: every other return would pay it too, and the boot would crawl.
++ */
++#define	WIDEN_617_US		50
++
++static void
++return_ast_widen(void)
++{
++	thread_t		th = current_thread();
++	const struct trap_frame	*f;
++	uint64_t		t0, span;
++
++	/*
++	 * ⚠️ The boot's own syscall self-test comes through here before there
++	 * is a thread (a NULL activation was the first thing this option ever
++	 * did, w1, 04/10).
++	 */
++	if (th == THREAD_NULL || th->top_act == THR_ACT_NULL ||
++	    th->top_act->mact.pcb == PCB_NULL)
++		return;
++	f = th->top_act->mact.pcb->user;
++	if (f == (const struct trap_frame *) 0 || f->rip != 0 || f->rsp != 0)
++		return;
++	span = tsc_hz() / 1000000 * WIDEN_617_US;
++	t0 = rdtsc();
++	while (rdtsc() - t0 < span)
++		cpu_pause();
++}
++
+ void
+ thread_return_ast(void)
+ {
+@@ -1295,6 +1329,7 @@ thread_return_ast(void)
+ 	for (;;) {
+ 		interrupts_disable();
+ 		cpu = cpu_number();
++		return_ast_widen();
+ 		if ((need_ast[cpu] & AST_ALL) == 0)
+ 			break;
+ 		interrupts_enable();

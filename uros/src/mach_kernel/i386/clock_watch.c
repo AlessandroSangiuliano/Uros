@@ -68,15 +68,8 @@
 #include <i386/eflags.h>		/* EFL_IF, EFL_VM */
 #include <i386/lapic.h>
 #include <i386/apic.h>
-#include <i386/ioapic.h>		/* ioapic_mask_irq, for an ablation */
 #include <i386/clock_watch.h>
-#include <kern/spl.h>			/* splsched, for an ablation */
 #include <i386/cn_nolock.h>		/* the stopped processor may hold the console lock */
-
-#ifdef ABLATE_599_CLI_SPIN
-#include <kern/lock.h>
-decl_simple_lock_data(extern, timer_lock)	/* kern/mach_clock.c */
-#endif
 
 extern int			db_active;		/* a processor is in DDB */
 extern volatile unsigned int	nmi_cpu_tick[];		/* nmi_watchdog.c */
@@ -90,7 +83,6 @@ extern volatile unsigned int	ioapic_overlaps;	/* ioapic.c */
 #define	CW_STOP_TICKS	200	/* ... and for this many of the watcher's own */
 #define	CW_REPEAT_MS	10000	/* the line again, while the stop lasts */
 #define	CW_CONFIRM_MS	100	/* a spin's second look, see clock_watch_spin */
-#define	CW_ABLATE_AT	3000	/* processor 0's ticks, for the #599 ablations */
 
 /*
  * One per watcher.  Each is written only by its own processor, from its own
@@ -176,85 +168,7 @@ clock_watch_init(void)
 {
 	printf("clock: the other processors watch processor 0's tick, and say "
 	       "so when it has not run for %u ms (#599)\n", CW_STOP_MS);
-#ifdef ABLATE_599_MASK_PIT
-	printf("clock: #599 ablation -- at tick %u processor 0 masks the 8254's "
-	       "pin and leaves nothing pending\n", CW_ABLATE_AT);
-#endif
-#ifdef ABLATE_599_CLI_SPIN
-	printf("clock: #599 ablation -- at tick %u processor 0 takes the timeout "
-	       "list's lock and spins with interrupts off\n", CW_ABLATE_AT);
-#endif
-#ifdef ABLATE_599_SPIN_ONLY
-	printf("clock: #599 ablation -- the watch does not run from the tick, "
-	       "only from inside spins\n");
-#endif
-#ifdef ABLATE_599_NESTED_PRINTF
-	printf("clock: #599 ablation -- after tick %u processor 0 raises a line "
-	       "nobody handles while consolewrite holds printf_lock, once\n",
-	       CW_ABLATE_AT);
-#endif
-#ifdef ABLATE_599_PRINTF_WAITS
-	printf("clock: #599 ablation -- a nested printf waits for printf_lock, "
-	       "as before the fix\n");
-#endif
-#ifdef ABLATE_599_SPL_LEAK
-	printf("clock: #599 ablation -- after tick %u a thread_switch on "
-	       "processor 0 returns to user mode at splsched, once\n",
-	       CW_ABLATE_AT);
-#endif
 }
-
-#if defined(ABLATE_599_MASK_PIT) || defined(ABLATE_599_CLI_SPIN)
-/*
- * Stop processor 0's tick on purpose, from its own tick, CW_ABLATE_AT ticks
- * into the boot -- about half-way through the full bundle's tests.  Each is
- * the shape of one of #599's hypotheses, so a boot with it shows that the
- * watch fires on that shape and what the NMI's dump then says:
- *
- *   MASK_PIT	pin 2 masked with no pending bit to unmask it again, which is
- *		what a lost read-modify-write of the I/O APIC leaves;
- *   CLI_SPIN	processor 0 spinning with interrupts off, never sending its
- *		EOI.  It takes the timeout list's lock first and keeps it, so
- *		that any other processor arming a timeout ends up spinning on
- *		it within a tick -- which is what makes SPIN_ONLY's answer
- *		certain rather than a matter of what the others were doing;
- *   SPIN_ONLY	the watch does not run from the tick, so that with CLI_SPIN
- *		only a spin (clock_watch_spin) can say so.
- */
-void
-clock_watch_ablate(int cpu)
-{
-	static int	done;
-
-	if (cpu != master_cpu || done || nmi_cpu_tick[cpu] < CW_ABLATE_AT)
-		return;
-	done = 1;
-#ifdef ABLATE_599_MASK_PIT
-	{
-		unsigned int	flags;
-
-		/*
-		 * With interrupts off, as every other caller does it: hardclock
-		 * runs with them on, and a device interrupt deferred here would
-		 * do its own read-modify-write inside this one.
-		 */
-		cn_puts("\nclock: #599 ablation -- processor 0 masks the 8254's "
-			"pin now\n");
-		__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
-		ioapic_mask_irq(0);
-		__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
-	}
-#endif
-#ifdef ABLATE_599_CLI_SPIN
-	cn_puts("\nclock: #599 ablation -- processor 0 takes the timeout list's "
-		"lock and spins with interrupts off now\n");
-	simple_lock(&timer_lock);
-	__asm__ volatile("cli");
-	for (;;)
-		__asm__ volatile("pause");
-#endif
-}
-#endif
 
 /*
  * The watch itself.  `where' is 0 from the watcher's own tick, and names the
@@ -329,80 +243,18 @@ cw_watch(int cpu, const char *where)
 	}
 }
 
-#ifdef ABLATE_599_SPL_LEAK
-/*
- * #599's second hypothesis, on purpose: processor 0 goes back to user mode
- * with its level raised, the way kern/subsystem.c's last release and
- * kern/eventcount.c's evc_wait would.  A boot with it shows that
- * return_to_user's check (spl_to_user_seen, trap.c) says so, and whether a
- * raised level on processor 0 is enough to stop the tick, and for how long:
- * the next switch to another thread may lower it.
- */
-void
-clock_watch_ablate_spl_leak(void)
-{
-	static int	done;
-
-	if (cpu_number() != master_cpu || done ||
-	    nmi_cpu_tick[master_cpu] < CW_ABLATE_AT)
-		return;
-	done = 1;
-	cn_puts("\nclock: #599 ablation -- this thread_switch returns to user "
-		"mode at splsched now\n");
-	(void) splsched();
-}
-#endif
-
-#ifdef ABLATE_599_NESTED_PRINTF
-/*
- * The widening arm's second stop, on purpose (#599).  consolewrite() calls
- * this with printf_lock held and interrupts on; once, on processor 0 after
- * CW_ABLATE_AT ticks, it raises the vector of an ISA line whose handler is
- * intnull() -- found in ivect[] rather than named, since a line's owner
- * changes during a boot -- so that intnull()'s printf() runs nested inside
- * the holder.  With printf_nested() (kern/printf.c) the line comes out and
- * the boot goes on; with PRINTF_WAITS it spins before its EOI and the tick
- * stops behind the vector in service.
- */
-extern void	(*ivect[])();
-extern void	intnull(int);
-
-void
-clock_watch_ablate_nested_printf(void)
-{
-	static int	done;
-	int		irq;
-
-	if (cpu_number() != master_cpu || done ||
-	    nmi_cpu_tick[master_cpu] < CW_ABLATE_AT)
-		return;
-	for (irq = 15; irq > 2; irq--)
-		if (ivect[irq] == (void (*)())intnull)
-			break;
-	if (irq <= 2)
-		return;
-	done = 1;
-	cn_puts("\nclock: #599 ablation -- line ");
-	cn_dec((unsigned int)irq);
-	cn_puts(" raised inside consolewrite's hold now\n");
-	lapic_send_self_ipi(0x40 + irq);
-}
-#endif
-
 void
 clock_watch_tick(int cpu)
 {
-#ifndef ABLATE_599_SPIN_ONLY
 	cw_watch(cpu, 0);
-#endif
 }
 
 /*
- * The same watch from inside a wait on another processor, found blind by the
- * CLI_SPIN ablation: when processor 0 stopped with interrupts off, every other
- * processor was in a TLB shootdown's wait for processor 0's ack within ten of
- * its own ticks, spinning with interrupts off too, and none of them ticked
- * again to say so.  The waits call this every 1024 turns
+ * The same watch from inside a wait on another processor, found blind by
+ * ablations/599-cli-spin.patch: when processor 0 stopped with interrupts off,
+ * every other processor was in a TLB shootdown's wait for processor 0's ack
+ * within ten of its own ticks, spinning with interrupts off too, and none of
+ * them ticked again to say so.  The waits call this every 1024 turns
  * (MACHINE_SPIN_WATCH, <i386/lock.h>): a simple lock's spin and a TLB
  * shootdown's wait for its acks.  The assembly spins of i386_lock.S do not.
  *

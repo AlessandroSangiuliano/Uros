@@ -54,17 +54,31 @@ void fbcons_remember(const struct mb2_framebuffer *fb);
  * boot that drew nothing because this is broken look identical otherwise.
  *
  * ⚠️ Must run after the pmap can map device memory, which on this target means
- * machine_init() or later.  Everything printed before that reaches COM1 only,
- * exactly as on i386 -- structural, not an oversight: the framebuffer is above
- * the low identity map and there is no way to reach it earlier.
+ * machine_init() or later.  Nothing printed before that can be drawn when it
+ * is printed -- structural, not an oversight: the framebuffer is above the low
+ * identity map and there is no way to reach it earlier.  It is kept instead,
+ * and with -f this draws it, a line at a time and slowly enough for a camera,
+ * before the console goes on live; without -f it says only how many bytes
+ * went to COM1 alone (#666).
  */
 void fbcons_init(void);
 
 /*
- * One character.  A no-op until fbcons_init() has succeeded, so every writer
- * may call it unconditionally.
+ * One byte, of a character or of its UTF-8 sequence (#661), so every writer
+ * may call it unconditionally.  Drawn once
+ * fbcons_init() has succeeded; before that, kept for fbcons_init() to draw
+ * (the first 64 KiB, #666); after an fbcons_init() that found no screen, a
+ * no-op.
  */
 void fbcons_putc(char c);
+
+/*
+ * The bytes kept while there was no screen, so far (#666), for #373's zone to
+ * start from: how many are kept, the bytes themselves in *bytes, and in
+ * *offered how many were handed over in all -- more than kept once the 64 KiB
+ * filled.
+ */
+uint32_t fbcons_early(const char **bytes, uint32_t *offered);
 
 /*
  * Make sure what has been drawn is actually on the panel.
@@ -90,5 +104,18 @@ unsigned fbcons_rows(void);
 uint64_t fbcons_cycles(void);		/* cycles spent drawing, this boot */
 uint64_t fbcons_glyphs(void);		/* glyphs drawn, this boot */
 uint64_t fbcons_scrolls(void);		/* times the screen scrolled */
+
+/*
+ * What was drawn as the replacement glyph, ■, instead of itself (#661): code
+ * points the font has no glyph for, the first of them in *first, and the
+ * maximal subparts of bytes that were not UTF-8.  The first is a line that
+ * does not read on the screen as it does on the wire; the second is broken on
+ * both alike.
+ */
+uint32_t fbcons_no_glyph(uint32_t *first);
+uint32_t fbcons_not_utf8(void);
+
+/* The decoder against known sequences, said as a self-test line (#661). */
+void fbcons_utf8_selftest(void);
 
 #endif	/* _X86_64_DDB_FBCONS_H_ */

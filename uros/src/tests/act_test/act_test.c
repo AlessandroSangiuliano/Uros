@@ -52,6 +52,8 @@
 #include <mach/mach_host.h>
 #include <mach/host_info.h>	/* #603: how many processors arm eight has */
 #include <mach/thread_info.h>	/* #603: arm seven's yardstick call */
+#include <mach/processor_info.h> /* #660: arm nine's thread count */
+#include <mach/bootstrap.h>	/* #660: the privileged host port it needs */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -229,15 +231,6 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 	 * something other than KERN_SUCCESS (libmach/mach_msg_server.c:100-115).
 	 * It is asked here, at once, because "at once" is the question.
 	 */
-#ifdef ABLATE_507_ASK_LATE_MS
-	/*
-	 * #507's ablation: let the teardown run on before asking.  The nap
-	 * blocks, so the killed thread and the reaper get the processor.
-	 */
-	printf("act_test: [1] #507 ablation — asking %d ms after the kill "
-	       "(nap answered %d)\n", ABLATE_507_ASK_LATE_MS,
-	       (int) nap(ABLATE_507_ASK_LATE_MS));
-#endif
 	arm_one_after_kr = thread_suspend(thread);
 
 	/*
@@ -1045,8 +1038,8 @@ static mach_port_t		arm_six_port;
  * SYSRET's fault-at-CPL-0 behaviour is Intel's.  On an AMD part the same
  * instruction with the same non-canonical %rcx faults in ring 3, where a fault
  * is ordinary -- so on AMD this arm passes whether the guard in entry.S is
- * there or not.  Measured, not assumed: with -DABLATE_411_CANONICAL=1 the arm
- * still reported six of six on an AMD model, and the same ablated kernel under
+ * there or not.  Measured, not assumed: with ablations/411-canonical.patch the
+ * arm still reported six of six on an AMD model, and the same ablated kernel under
  * `-cpu Skylake-Client' died in a double fault with `instruction: sysret' and
  * the kernel standing on a ring-3 stack.
  *
@@ -1399,10 +1392,30 @@ arm_six_non_canonical_return(void)
  * and that is inside the call.  One that stops touches at most the page it
  * was in the middle of; one that runs on reaches the end of its megabyte.  And
  * after the answer, nothing at all, whichever it was.
+ *
+ * 🔴 (07/10) BUT THE COUNT INSIDE THE CALL IS NOT THE STOP'S LATENCY.  It
+ * also holds the time before the stop is asked: the call's way into the
+ * kernel, and whatever keeps the asker from getting there -- a processor
+ * the host stops under TCG, or a quantum given to another thread.  With a
+ * 20 ms wait put in thread_suspend() before the asking, the stop path
+ * untouched, this arm failed in 4 boots of 4 at up to 4096 pages, and the
+ * kernel saw every stop within two faults of its asking; three boots under
+ * TCG on GitHub had failed it at 258 to 301 pages, about a tick of faults.
+ * So the count is printed, and the stop is judged by the kernel, which
+ * counts from the asking: the thread_suspend line of the special handler in
+ * kern/thread_act.c, WRONG past two faults.  What is still judged here is the
+ * promise thread_suspend() makes to its caller: nothing after its answer.
+ *
+ * ⚠️ And this arm sees that promise broken only when the stop is late as
+ * well.  With thread_wait() taken out of thread_suspend() and the stop as
+ * prompt as the fix makes it, the thread stopped within 1 to 4 pages of the
+ * asking, before this thread read its count, in 4 boots of 4; with the stop
+ * held late too, the arm said WRONG in 18 to 20 rounds of 20, in 4 boots of
+ * 4 (ablations/603-suspend-no-wait.patch).
  */
 #define	ARM7_PAGES	4096
 #define	ARM7_ROUNDS	20
-#define	ARM7_RAN_ON	256	/* far beyond a call's own latency */
+#define	ARM7_RAN_ON	256	/* rounds past it are counted and printed */
 
 static volatile mach_port_t	arm_seven_thread;
 static volatile unsigned long	arm_seven_touches;
@@ -1496,18 +1509,16 @@ arm_seven_suspend_in_page_faults(void)
 		       ran_after, ARM7_ROUNDS);
 		return 0;
 	}
-	if (ran_on != 0) {
-		printf("act_test: [7] in %d of %d rounds a thread that lives in "
-		       "page faults ran on after it was asked to stop: up to %lu "
-		       "pages touched inside thread_suspend, %lu inside "
-		       "thread_info — WRONG (#603)\n",
-		       ran_on, ARM7_ROUNDS, most, yardstick);
-		return 0;
-	}
+	/*
+	 * ⚠️ Under 256 bytes: a longer line leaves in two writes, and another
+	 * task's line landed between them once (#578).  The kernel's
+	 * thread_suspend line is the one that judges the stop.
+	 */
 	printf("act_test: [7] a thread that lives in page faults stopped when "
-	       "asked: %d rounds, at most %lu pages touched inside "
-	       "thread_suspend (%lu inside thread_info) and none after "
-	       "(#603)\n", ARM7_ROUNDS, most, yardstick);
+	       "asked: %d rounds, none after thread_suspend answered; inside "
+	       "it at most %lu pages (%lu in thread_info), past %u in %d, the "
+	       "wait for the asking included (#603)\n", ARM7_ROUNDS, most,
+	       yardstick, ARM7_RAN_ON, ran_on);
 	return 1;
 }
 
@@ -1636,11 +1647,152 @@ arm_eight_suspend_a_spinner(void)
 	return 1;
 }
 
+/*
+ * ── Arm nine: the threads a refused thread_create_running() made are freed ─
+ *
+ * thread_create_running() makes the thread first and sets its state second, so
+ * a flavor that does not exist is refused by a thread that already exists, and
+ * the kernel ends it before it answers.  Until #660 that end left the
+ * activation the reference thread_create() had given its creator: the thread,
+ * its activation and its task all outlived the task, 200 of them in every
+ * boot, one for each refused call in pthread_test's sweep.
+ *
+ * A thread leaves the processor set's count only when its last reference goes,
+ * which is where the leak was.  So the count is read, ARM9_CALLS refused calls
+ * are made in a child task, and the count must come back.  The other programs
+ * of the bundle make and end threads meanwhile, so it must come back to within
+ * half of what was made, not to the thread: a leak keeps all of them.
+ */
+#define ARM9_CALLS	300
+#define ARM9_WAIT_MS	2000
+
+static kern_return_t
+arm_nine_thread_count(mach_port_t pset, int *count)
+{
+	struct processor_set_load_info	li;
+	mach_msg_type_number_t		n = PROCESSOR_SET_LOAD_INFO_COUNT;
+	kern_return_t			kr;
+
+	kr = processor_set_statistics(pset, PROCESSOR_SET_LOAD_INFO,
+				      (processor_set_info_t) &li, &n);
+	if (kr == KERN_SUCCESS)
+		*count = li.thread_count;
+	return kr;
+}
+
+static int
+arm_nine_refused_create_running(void)
+{
+	mach_port_t	me = mach_task_self();
+	mach_port_t	host = MACH_PORT_NULL, host_priv = MACH_PORT_NULL;
+	mach_port_t	device = MACH_PORT_NULL, lw = MACH_PORT_NULL;
+	mach_port_t	lp = MACH_PORT_NULL, sec = MACH_PORT_NULL;
+	mach_port_t	name = MACH_PORT_NULL, pset = MACH_PORT_NULL;
+	mach_port_t	child = MACH_PORT_NULL;
+	natural_t	st[4] = { 0, 0, 0, 0 };
+	int		before = 0, after = 0, refused = 0, waited = 0, i;
+	int		passed = 0;
+	kern_return_t	kr;
+
+	kr = bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
+			     &sec);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [9] no privileged host port from bootstrap "
+		       "(%d) — WRONG\n", kr);
+		return 0;
+	}
+	host = mach_host_self();
+	kr = processor_set_default(host, &name);
+	if (kr == KERN_SUCCESS)
+		kr = host_processor_set_priv(host_priv, name, &pset);
+	if (kr == KERN_SUCCESS)
+		kr = task_create(me, NULL, 0, FALSE, &child);
+	if (kr == KERN_SUCCESS)
+		kr = arm_nine_thread_count(pset, &before);
+	if (kr != KERN_SUCCESS)
+		printf("act_test: [9] no processor set or child task to count "
+		       "with (%d) — WRONG\n", kr);
+	if (kr == KERN_SUCCESS) {
+		for (i = 0; i < ARM9_CALLS; i++) {
+			mach_port_t	th = MACH_PORT_NULL;
+
+			kr = thread_create_running(child, 0x7fffffff, st, 4,
+						   &th);
+			if (kr != KERN_SUCCESS) {
+				refused++;
+				continue;
+			}
+			(void) thread_terminate(th);
+			(void) mach_port_deallocate(me, th);
+		}
+
+		/*
+		 * The reaper frees each thread once it has stopped running,
+		 * so the count is asked again until it comes back or the
+		 * patience runs out.  A nap that does not sleep would spend
+		 * that patience in microseconds, so it is checked.
+		 */
+		kr = arm_nine_thread_count(pset, &after);
+		while (kr == KERN_SUCCESS && after - before >= ARM9_CALLS / 2 &&
+		       waited < ARM9_WAIT_MS) {
+			if (nap(10) != MACH_RCV_TIMED_OUT)
+				break;
+			waited += 10;
+			kr = arm_nine_thread_count(pset, &after);
+		}
+
+		if (refused != ARM9_CALLS)
+			printf("act_test: [9] a flavor that does not exist was "
+			       "accepted by %d of %d thread_create_running "
+			       "calls — WRONG (#660)\n", ARM9_CALLS - refused,
+			       ARM9_CALLS);
+		else if (kr != KERN_SUCCESS)
+			printf("act_test: [9] the processor set's count could "
+			       "not be read again (%d) — WRONG (#660)\n", kr);
+		else if (after - before >= ARM9_CALLS / 2)
+			printf("act_test: [9] %d refused thread_create_running "
+			       "calls: the processor set held %d threads before "
+			       "and %d after %d ms, so the threads they made are "
+			       "still held — WRONG (#660)\n", ARM9_CALLS, before,
+			       after, waited);
+		else {
+			printf("act_test: [9] %d refused thread_create_running "
+			       "calls: the processor set held %d threads before "
+			       "and %d after %d ms, so the threads they made were "
+			       "freed (#660)\n", ARM9_CALLS, before, after,
+			       waited);
+			passed = 1;
+		}
+	}
+
+	if (child != MACH_PORT_NULL) {
+		(void) task_terminate(child);
+		(void) mach_port_deallocate(me, child);
+	}
+	if (pset != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, pset);
+	if (name != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, name);
+	if (host != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, host);
+	if (host_priv != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, host_priv);
+	if (device != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, device);
+	if (lw != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lw);
+	if (lp != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lp);
+	if (sec != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, sec);
+	return passed;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 8, r;
+	int		passed = 0, arm_one_passed, arms = 9, r;
 
 	(void) argc;
 	(void) argv;
@@ -1672,6 +1824,8 @@ main(int argc, char **argv)
 		arms--;
 	else
 		passed += r;
+
+	passed += arm_nine_refused_create_running();
 
 	/*
 	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the

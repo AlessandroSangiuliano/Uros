@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #659
+Takes out: the report lock's hold on the other processors -- cons_report_elsewhere() answers that nobody holds a report, as before 0de054a5, so cons_wire_byte() never waits and cons_tx_one() never leaves a byte in the ring while another processor reports, and the target's report goes to the wire byte by byte between the boot processor's lines; two reports still take turns in cons_report_begin()
+Run: --entry 0 600 -smp 4
+Over: 659-widen-tick-in-flight.patch
+Over: 659-widen-unclaimed-report.patch
+Expect: UrMach x86-64: trap unclaimed interrupt \((v[^e]|ve[^c]|vec[^t]|vect[^o]|vecto[^r]|vector[^ ]|vector [^0]|vector 0[^x]|vector 0x[0-9a-f]*[^0-9a-f,])
+Expect: ^  rip .* rsp +[^0 ]
+Expect: ^([^U]|U[^r]|Ur[^M]).*no handler — halted
+Expect: [ ]{2}(r[a-d]x|r[sd]i|r[bs]p|r[0-9]+|cs|ss|cr3) +0x([0-9a-f]{0,15}[^0-9a-f]|[0-9a-f]{16}([^ [:cntrl:]]| [^ ]))
+Note: the four Expect lines are a report another processor's bytes broke, each as it was seen: before the lock, on GitHub's run 38205894781 (8eda7df9), the first line in all four boots under KVM, the rip line and the halt line in one boot each of four under TCG; with it taken out, on OMEGA (0872b14e), a field of a register line in all four boots, the first field or a later one, and the halt line in both under TCG; a line's last field ends in the log's \r, which [:cntrl:] keeps out.  Whole reports match none of them: victus's eight with the lock (2d832e72), OMEGA's four fixed boots, and the 140 logs of a merge test (lotto 19).  The fixed arm fails on the trap the two widens hold open, as 659-vector-back-zero's ablated arm does: what it must not show is the Expect
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index b597a82f..ef89bc51 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -561,9 +561,8 @@ static int cons_report_elsewhere(void)
+ {
+ 	uint32_t owner = cons_report_owner;
+ 
+-	return owner != CONS_REPORT_NOBODY && cons_locks_usable
+-	       && owner != cons_report_me()
+-	       && cons_report_waited_out != cons_report_epoch;
++	(void)owner;
++	return 0;
+ }
+ 
+ static void cons_report_wait(void)

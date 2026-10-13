@@ -1,0 +1,15 @@
+Kind: widen
+Issue: #603
+Holds open: the asker, 20 ms in thread_suspend() just before it sets the stop, where the old order had already noted the faults -- the fixed tree notes them after the set and must say nothing
+
+diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
+--- a/uros/src/mach_kernel/kern/thread_act.c
++++ b/uros/src/mach_kernel/kern/thread_act.c
+@@ -410,6 +410,7 @@
+ 	}
+ 	if (thr_act->user_stop_count++ == 0 &&
+ 		thr_act->suspend_count++ == 0 ) {
++		delay(20000);	/* #603: the asker held before the set */
+ 		install_special_handler(thr_act);
+ 		/*
+ 		 * #603: the faults it has resolved so far, noted once the stop

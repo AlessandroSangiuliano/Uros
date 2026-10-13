@@ -1,0 +1,68 @@
+Kind: ablation
+Issue: #537
+Takes out: the per-processor cache of the token last verified -- every in-kernel check computes the MAC again, for every page of a buffer; the cache's self-test says NOT ASKED
+Run: --entry 14 1200 -smp 4
+Measure: "the MAC" in the block server's per-page split, its line "in the kernel, over all N asks since boot" (#537, i386 at the host's clock: 613 - 659 cycles with the cache, 5 143 - 5 270 without); against the same tree without the patch, under KVM; on x86-64 the asks reach 1024 pages only with UROS_BUNDLE_IPC_BENCH=ON and UROS_BUNDLE_IPC_BENCH_SUITES=disk
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index 424d5b88..2ee69d65 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -374,45 +374,10 @@ cap_check_in_kernel(const struct uros_cap *token,
+                     uint32_t op,
+                     uint64_t resource_id)
+ {
+-    uint32_t epoch = cap_epoch;
+-    struct cap_verified *v;
+-    const uint8_t *a, *b;
+-    uint8_t diff = 0;
+     kern_return_t kr;
+ 
+-    /*
+-     * #537: the token this processor verified last, in this epoch?  Every
+-     * byte, the MAC's included, and in constant time: a comparison that
+-     * stopped at the first difference would say how many leading bytes of a
+-     * guess were right.
+-     */
+-    disable_preemption();
+-    v = &cap_verified[cpu_number()];
+-    a = (const uint8_t *)&v->token;
+-    b = (const uint8_t *)token;
+-    for (size_t i = 0; i < sizeof(*token); i++)
+-        diff |= a[i] ^ b[i];
+-    if (v->valid && v->epoch == epoch && diff == 0) {
+-        v->hits++;
+-        enable_preemption();
+-        return cap_fields_check(token, resource_type, op, resource_id);
+-    }
+-    enable_preemption();
+-
+     kr = cap_check_unlocked(token, resource_type, op, resource_id);
+ 
+-    /*
+-     * Kept with the epoch read BEFORE the check: a revocation during it moves
+-     * the epoch past the entry, which then matches nothing.
+-     */
+-    if (kr == KERN_SUCCESS) {
+-        disable_preemption();
+-        v = &cap_verified[cpu_number()];
+-        v->token = *token;
+-        v->epoch = epoch;
+-        v->valid = 1;
+-        enable_preemption();
+-    }
+     return kr;
+ }
+ 
+@@ -632,7 +597,10 @@ cap_cache_selftest(void)
+            "%llu from the cache; revoked, its next check answers %d -- %s "
+            "(#537)\n", first, second, (unsigned long long)(hits1 - hits0),
+            after,
+-           (first != KERN_SUCCESS || second != KERN_SUCCESS)
++           (first == KERN_SUCCESS && second == KERN_SUCCESS &&
++            after == CAP_ERR_REVOKED)
++           ? "NOT ASKED, the cache is ablated"
++           : (first != KERN_SUCCESS || second != KERN_SUCCESS)
+            ? "WRONG, a valid token was refused"
+            : hits1 - hits0 != 1 ? "WRONG, the second check did not hit"
+            : after != CAP_ERR_REVOKED ? "WRONG, the cache outlived the revocation"

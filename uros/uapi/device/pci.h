@@ -93,6 +93,7 @@
 #define	PCI_CMD_IO_ENABLE	(1u << 0)
 #define	PCI_CMD_MEM_ENABLE	(1u << 1)
 #define	PCI_CMD_BUS_MASTER	(1u << 2)
+#define	PCI_CMD_INTX_DISABLE	(1u << 10)	/* the function's INTx held low */
 
 /*
  * ── What a base address register says about itself ───────────────────

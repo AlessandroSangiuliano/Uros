@@ -112,6 +112,7 @@
  */
 
 #include <cpus.h>
+#include <mach_assert.h>
 #include <mach_rt.h>
 #include <mach_kdb.h>
 #include <mach_ldebug.h>
@@ -2134,11 +2135,34 @@ etap_mutex_unlock(
  * struct thread_shuttle definition without an include cycle.  The hook lives
  * here so the assert is reachable without forcing every caller of
  * <kern/lock.h> to also pull in <kern/thread.h>.
+ *
+ * When the check fails it says what it read (#624).  The event is read once,
+ * so the value judged is the value printed: WAKING_EVENT is a waker on
+ * another processor between its two halves, anything else a wait the thread
+ * has not left.  current_thread() is read again, and a different answer
+ * means the first read named another processor's thread, as the two loads
+ * of #646 could.  The passing path reads the thread and its event once each.
  */
 void
 mutex_lock_assert_safe(void)
 {
-	assert(current_thread() == THREAD_NULL ||
-	       current_thread()->wait_event == NO_EVENT);
+#if	MACH_ASSERT
+	thread_t	self = current_thread();
+	thread_t	again;
+	event_t		event;
+
+	if (self == THREAD_NULL)
+		return;
+	event = self->wait_event;
+	if (event == NO_EVENT)
+		return;
+	again = current_thread();
+	panic("mutex_lock_assert_safe: thread %p takes a mutex with wait_event "
+	      "%p, %s, state 0x%x, wait_result %d; current_thread() read again "
+	      "is %p%s (#624)", self, event,
+	      event == WAKING_EVENT ? "WAKING_EVENT, a wakeup in flight" :
+	      "a wait it has not left", self->state, self->wait_result, again,
+	      again == self ? "" : ", another thread (#646)");
+#endif	/* MACH_ASSERT */
 }
 #endif	/* MACH_RT || (NCPUS > 1) || MACH_LDEBUG */

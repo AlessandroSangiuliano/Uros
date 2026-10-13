@@ -119,13 +119,16 @@ BOOT_ENTRY="${UROS_X86_64_BOOT_ENTRY:-0}"
 #   multiboot2                 both `multiboot2' and `module2'
 #   boot serial terminal       the rest of what grub.cfg actually says
 #   echo test ls cat halt      for the person at a rescue prompt
+#   wrmsr                      entries 47 and 49: x2APIC mode left on before
+#                              the kernel, as a firmware that hands over in it
+#                              does (#659)
 #   search*                    NOT used by the boot -- see the prefix comment
 #                              below -- but kept for the rescue prompt, where
 #                              finding a partition by label is the first thing
 #                              anyone needs and no module can be loaded
 GRUB_MODULES="biosdisk part_msdos ext2 normal configfile multiboot2 boot
 	serial terminal search search_label search_fs_uuid search_fs_file
-	echo test ls cat halt reboot"
+	echo test ls cat halt reboot wrmsr"
 
 # What lives under /boot, read by GRUB.  The kernel and the bundle: the bundle
 # is this system's initrd, and it holds the servers needed to reach a disk.

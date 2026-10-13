@@ -31,10 +31,18 @@
 #include <threadlib_init.h>
 #include <stdio.h>	/* For printf(). */
 #include <stdlib.h>	/* For exit() -- see _pthread_live_count below. */
-#include <errno.h>	/* For __mach_errno_addr() prototype. */
+#include <errno.h>
 #include <mach/thread_info.h>	/* For THREAD_SCHED_RR_INFO (#153). */
 
-extern void mig_init(void *initial);
+/*
+ * Where the calling thread keeps libmach's per-thread state, its reply port
+ * and errno: given to mig_init() when a second thread is created (#645).
+ */
+static struct mach_thread_state *
+_pthread_mach_state(void)
+{
+	return &pthread_self()->mach_state;
+}
 
 /* Kernel trap to propagate thread name for DDB visibility */
 extern kern_return_t mach_thread_set_name(const char *name);
@@ -853,27 +861,6 @@ _pthread_create(pthread_t t,
 		const thread_port_t kernel_thread)
 {
 	int res;
-	extern int _mig_multithreaded;
-
-	/*
-	 * #299 (SMP reply-port aliasing): libmach also ships a single-threaded
-	 * mig_support (one shared static reply port); its symbols are weak, so
-	 * the only thing that guarantees the per-thread libpthreads version is
-	 * linked in is a *strong* reference to a libpthreads-only mig symbol.
-	 * _mig_multithreaded is exactly that — touching it here forces the
-	 * per-thread mig_support to win the link for every program that creates
-	 * threads.  Functionally: the moment a second thread is created, switch
-	 * to per-thread reply ports (migrating the creator's current shared port
-	 * into its own TSD) BEFORE the new thread can run.  Otherwise, on SMP the
-	 * new thread races on another CPU and calls mig_get_reply_port() while
-	 * _mig_multithreaded is still 0, grabbing the SAME reply port as its
-	 * creator: two threads then receive on one reply port, ipc_mqueue_deliver
-	 * hands the RPC reply to whichever is first in line, and the caller hangs
-	 * forever (gpu_server's render worker was the first victim).  mig_init()
-	 * is idempotent once _mig_multithreaded is already 1.
-	 */
-	if (!_mig_multithreaded)
-		mig_init((void *)pthread_self());
 
 	res = ESUCCESS;
 	do
@@ -932,6 +919,19 @@ pthread_create(pthread_t *thread,
 		pthread_attr_init(attrs);
 	}
 	res = ESUCCESS;
+
+	/*
+	 * #299, #645: before a second thread can run, every thread gets its own
+	 * reply port and errno.  Two threads receiving on one reply port take each
+	 * other's replies, and the caller whose reply was taken waits for good
+	 * (gpu_server's render worker).  The creator keeps the port it was using.
+	 * mig_init() returns at once when the hand-over is already done; it is
+	 * asked here every time because a forked child goes back to the task's
+	 * state (mach_task_self_init()), and its first thread hands over again.
+	 * Not in pthread_init(): there pthread_self() is not yet the main thread,
+	 * which still runs on crt0's stack.
+	 */
+	mig_init(_pthread_mach_state);
 
 	/* Try to reuse a pooled kernel thread first */
 	{
@@ -1051,7 +1051,9 @@ pthread_detach(pthread_t thread)
  */
 /*
  * The per-thread teardown both exits owe: cleanup handlers, innermost first,
- * then the thread-specific data destructors.
+ * then the thread-specific data destructors, then the thread's reply port,
+ * which a TSD destructor of libpthreads' own copy of the reply-port code used
+ * to give back (#645).
  */
 static void
 _pthread_run_thread_cleanup(pthread_t self)
@@ -1064,6 +1066,7 @@ _pthread_run_thread_cleanup(pthread_t self)
 		self->cleanup_stack = handler->next;
 	}
 	_pthread_tsd_cleanup(self);
+	mig_dealloc_reply_port(MACH_PORT_NULL);
 }
 
 void 
@@ -1760,18 +1763,8 @@ pthread_init(void)
 	thread = (pthread_t)STACK_SELF(new_stack);
 	_pthread_create(thread, attrs, mach_thread_self());
 	thread->detached = _PTHREAD_CREATE_PARENT;
-	/* Initialize MIG reply port support for multi-threaded mode */
-	mig_init((void *)thread);
+	/* The reply port and errno stay the task's until pthread_create() (#645). */
 	return (new_stack);
-}
-
-/*
- * Thread-local errno
- */
-int *
-__mach_errno_addr(void)
-{
-	return &pthread_self()->err_no;
 }
 
 /*

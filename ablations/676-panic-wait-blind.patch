@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #676
+Over: 676-widen-restart-line-late.patch
+Takes out: the panic wait looking for the restart line -- a -b boot whose panic the harness saw first is ended at three still seconds again, inside the kernel's five before its reset; the fixed arm of an A/B is FAILED whatever happens, the harness exiting 1 for a panic that was asked for: its log is read for the zone's check and the reset, which the ablated one never reaches
+Run: --entry 44 300 -smp 4
+Expect: qemu-system-x86_64: terminating on signal 15
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index cf5832bf..aa7f9ef2 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1302,7 +1302,6 @@ while kill -0 "$QPID" 2>/dev/null; do
+ 			_PANIC_WAITED=0
+ 			while [ "$_PANIC_STILL" -lt 3 ] && [ "$_PANIC_WAITED" -lt 60 ] &&
+ 			      kill -0 "$QPID" 2>/dev/null; do
+-				grep -aqE "$RESTART_RE" "$LOG" && break
+ 				_PANIC_NOW=$(stat -c %s "$LOG")
+ 				if [ "$_PANIC_NOW" = "$_PANIC_SIZE" ]; then
+ 					_PANIC_STILL=$((_PANIC_STILL + 1))
+@@ -1313,7 +1312,6 @@ while kill -0 "$QPID" 2>/dev/null; do
+ 				sleep 1
+ 				_PANIC_WAITED=$((_PANIC_WAITED + 1))
+ 			done
+-			grep -aqE "$RESTART_RE" "$LOG" && continue
+ 		else
+ 			sleep 1
+ 		fi

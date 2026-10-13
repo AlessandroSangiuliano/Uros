@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #593
+Over: 594-hpet-stops.patch
+Takes out: the silencing of the HPET's comparator by the last processor to leave its broadcast -- it stays interrupting, and on hardware would take the boot processor at every wrap of the counter; with ablations/594-hpet-stops.patch, so that the watchdog names the HPET and the tick leaves it
+Run: --entry 22 1200 -smp 4
+Expect: WRONG: is still interrupting, read back
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index 3b36d637..0eb0740d 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -723,7 +723,7 @@ static void hpet_ev_stop(void)
+ 	hw_lock_lock(&ev_lock);
+ 	armed &= ~BIT(self);
+ 	woken &= ~BIT(self);
+-	if ((armed | woken) == 0 && !silenced) {
++	if (0 && (armed | woken) == 0 && !silenced) {
+ 		hpet_comparator_off(comparator);
+ 		programmed = 0;
+ 		silenced = 1;

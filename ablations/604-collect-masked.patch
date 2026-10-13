@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #604
+Takes out: nothing -- a probe: the -M bench collects once with interrupts off, and the check in pmap_collect() must stop the boot
+Run: --entry 9 1200 -smp 4
+Expect: pmap_collect: waiting for a grace period with interrupts off
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/collect_bench.c b/uros/src/mach_kernel/x86_64/pmap/collect_bench.c
+index 766d95e2..f83d1f1e 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/collect_bench.c
++++ b/uros/src/mach_kernel/x86_64/pmap/collect_bench.c
+@@ -440,7 +440,14 @@ static unsigned bench_collect_all(pmap_t p, int *rounds_out)
+ 	for (rounds = 0; rounds < 64; rounds++) {
+ 		unsigned before = pmap_table_frames_live;
+ 
++		/*
++		 * #604: once with interrupts off, which collect_flush() must
++		 * refuse -- a waiter that cannot answer a cross-call.  The
++		 * boot is expected to stop here.
++		 */
++		percpu_intr_disable();
+ 		pmap_collect(p);
++		percpu_intr_enable();
+ 		if (pmap_table_frames_live == before)
+ 			break;
+ 	}

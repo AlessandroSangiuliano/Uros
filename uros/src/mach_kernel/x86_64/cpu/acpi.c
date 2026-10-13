@@ -144,7 +144,8 @@ struct madt_local_x2apic {
 
 static struct acpi_cpu cpus[ACPI_MAX_CPUS];
 static unsigned ncpus;
-static unsigned nusable;
+static unsigned passed_over;	/* not enabled, or an id listed twice (#663) */
+static unsigned left_out;	/* enabled, past the table (#663) */
 static uint64_t lapic_base;
 
 /*
@@ -221,16 +222,37 @@ static int signature_is(const char *field, const char *want, unsigned n)
 	return 1;
 }
 
+/*
+ * 🔑 ONLY A PROCESSOR THAT CAN BE STARTED IS RECORDED (#663).
+ *
+ * A firmware may list every processor the board could hold, the absent ones
+ * not enabled -- QEMU lists `maxcpus' of them -- and those used to count
+ * against the table: a machine with two processors and a MADT of 128 entries
+ * panicked at the 65th.  An entry not enabled is absent now and hot-plug at
+ * most, which this kernel does not start, so it is counted and passed over.
+ * So is an id already recorded: the same processor listed in both forms
+ * would otherwise be woken twice under two numbers.  An enabled processor
+ * past the table is counted as left out and said, not a reason to stop.
+ */
 static void record_cpu(uint32_t apic_id, uint32_t acpi_id, uint32_t flags)
 {
-	if (ncpus == ACPI_MAX_CPUS)
-		panic("acpi: more processors than this kernel can record");
+	unsigned i;
 
+	if (!(flags & MADT_CPU_ENABLED)) {
+		passed_over++;
+		return;
+	}
+	for (i = 0; i < ncpus; i++)
+		if (cpus[i].apic_id == apic_id) {
+			passed_over++;
+			return;
+		}
+	if (ncpus == ACPI_MAX_CPUS) {
+		left_out++;
+		return;
+	}
 	cpus[ncpus].apic_id = apic_id;
 	cpus[ncpus].acpi_id = acpi_id;
-	cpus[ncpus].usable = (flags & MADT_CPU_ENABLED) != 0;
-	if (cpus[ncpus].usable)
-		nusable++;
 	ncpus++;
 }
 
@@ -414,9 +436,14 @@ unsigned acpi_cpu_count(void)
 	return ncpus;
 }
 
-unsigned acpi_usable_cpu_count(void)
+unsigned acpi_cpus_passed_over(void)
 {
-	return nusable;
+	return passed_over;
+}
+
+unsigned acpi_cpus_left_out(void)
+{
+	return left_out;
 }
 
 const struct acpi_cpu *acpi_cpu(unsigned index)
@@ -429,39 +456,14 @@ uint64_t acpi_lapic_base(void)
 	return lapic_base;
 }
 
-/*
- * #563: describe a machine whose firmware lists no I/O APIC, while the rest of
- * the table stays exactly as it was read.
- *
- * 🔑 ONE PLACE, because that is what makes the arm honest.  Faking the refusal
- * at each of the three self-tests would prove those three lines print what they
- * were written to print; withholding the entries HERE makes the whole kernel
- * see the board the firmware describes, and the tests reach their own
- * conclusions about it -- including ioapic_init(), whose single failure is this
- * very lookup coming back empty.
- *
- * ⚠️ The processor census is untouched, and that is the point: it is the other
- * half of the same table, and the discriminator those tests use.  qemu offers
- * no machine that gives one without the other, so without this the branch would
- * ship unexercised.
- */
 unsigned acpi_ioapic_count(void)
 {
-#if	ABLATE_563_NO_IOAPIC
-	return 0;
-#else
 	return nioapics;
-#endif
 }
 
 const struct acpi_ioapic *acpi_ioapic(unsigned index)
 {
-#if	ABLATE_563_NO_IOAPIC
-	(void) index;
-	return 0;
-#else
 	return index < nioapics ? &ioapics[index] : 0;
-#endif
 }
 
 unsigned acpi_override_count(void)
@@ -559,7 +561,8 @@ uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus)
 
 /* ------------------------------------------------------------------ */
 /*
- * The FADT, as far as the power-management timer (ACPI 6.5, 5.2.9).
+ * The FADT, as far as the power-management timer and the reset register
+ * (ACPI 6.5, 5.2.9, Table 5.9).
  *
  * Only the fields this reads are named; the rest are spans of bytes whose
  * offsets are asserted below, because a packed structure that is off by one
@@ -574,7 +577,9 @@ struct acpi_fadt {
 	uint8_t			pm_tmr_len;		/*  91 */
 	uint8_t			to_flags[20];
 	uint32_t		flags;			/* 112 */
-	uint8_t			to_x_pm_tmr_blk[92];
+	struct acpi_gas		reset_reg;		/* 116 */
+	uint8_t			reset_value;		/* 128 */
+	uint8_t			to_x_pm_tmr_blk[79];
 	struct acpi_gas		x_pm_tmr_blk;		/* 208 */
 } __attribute__((packed));
 
@@ -586,10 +591,22 @@ _Static_assert(__builtin_offsetof(struct acpi_fadt, pm_tmr_len) == 91,
 	       "PM_TMR_LEN is at byte 91 of the FADT");
 _Static_assert(__builtin_offsetof(struct acpi_fadt, flags) == 112,
 	       "the fixed feature flags are at byte 112 of the FADT");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, reset_reg) == 116,
+	       "RESET_REG is at byte 116 of the FADT");
+_Static_assert(__builtin_offsetof(struct acpi_fadt, reset_value) == 128,
+	       "RESET_VALUE is at byte 128 of the FADT");
 _Static_assert(__builtin_offsetof(struct acpi_fadt, x_pm_tmr_blk) == 208,
 	       "X_PM_TMR_BLK is at byte 208 of the FADT");
 
+/*
+ * ACPI 1.0's FADT ended at byte 116, which is where 2.0 put RESET_REG: the
+ * fields before it are in every FADT, the ones from it on only in a table
+ * that is long enough to hold them.
+ */
+#define FADT_V1_LENGTH		__builtin_offsetof(struct acpi_fadt, reset_reg)
+
 #define FADT_TMR_VAL_EXT	(1U << 8)
+#define FADT_RESET_REG_SUP	(1U << 10)
 #define FADT_HW_REDUCED_ACPI	(1U << 20)
 
 void acpi_pm_timer(struct acpi_pm_timer *out)
@@ -607,7 +624,7 @@ void acpi_pm_timer(struct acpi_pm_timer *out)
 	 * The two fixed fields are within the ACPI 1.0 table, 116 bytes; a
 	 * table shorter than that is not a FADT this can read.
 	 */
-	if (fadt->header.length < __builtin_offsetof(struct acpi_fadt, to_x_pm_tmr_blk))
+	if (fadt->header.length < FADT_V1_LENGTH)
 		return;
 
 	out->hw_reduced = (fadt->flags & FADT_HW_REDUCED_ACPI) != 0;
@@ -634,6 +651,33 @@ void acpi_pm_timer(struct acpi_pm_timer *out)
 	}
 }
 
+void acpi_reset_reg(struct acpi_reset *out)
+{
+	const struct acpi_fadt *fadt;
+
+	*out = (struct acpi_reset){ 0 };
+
+	fadt = (const struct acpi_fadt *)acpi_find_table("FACP");
+	if (fadt == 0)
+		return;
+	out->fadt_found = 1;
+	out->revision = fadt->header.revision;
+
+	/*
+	 * RESET_REG came with the FADT's revision 2, in the bytes after 1.0's
+	 * 116: in an older table, or a shorter one, those bytes are whatever
+	 * follows the table, and a register read out of them would be written
+	 * to at the moment the machine is meant to restart.
+	 */
+	if (fadt->header.revision < 2
+	    || fadt->header.length < __builtin_offsetof(struct acpi_fadt, to_x_pm_tmr_blk))
+		return;
+	out->in_table = 1;
+	out->supported = (fadt->flags & FADT_RESET_REG_SUP) != 0;
+	out->reg = fadt->reset_reg;
+	out->value = fadt->reset_value;
+}
+
 /*
  * The HPET description table (IA-PC HPET 1.0a, 3.2.4, table 3): 56 bytes.
  */
@@ -657,14 +701,6 @@ void acpi_hpet(struct acpi_hpet *out)
 
 	*out = (struct acpi_hpet){ 0 };
 
-#if	ABLATE_508_NO_HPET
-	/*
-	 * #508: the table is withheld here, in one place, so that the whole
-	 * kernel sees a board without an HPET -- the census, the vote, the
-	 * refinement -- the way #563 withheld the I/O APIC.
-	 */
-	return;
-#endif
 	t = (const struct acpi_hpet_table *)acpi_find_table("HPET");
 	if (t == 0 || t->header.length < sizeof(*t))
 		return;

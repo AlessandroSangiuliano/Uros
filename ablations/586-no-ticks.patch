@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #586
+Takes out: nothing -- a probe: the tick self-test's handler acknowledges each tick and counts none, so the period line meets a calibrated TSC with no gap to measure -- the branch that must stay WRONG, which 586-tsc-disagree.patch cannot reach
+Run: --entry 14 600 -smp 4
+Expect: WRONG, fewer than two ticks, so there was no gap to measure
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 884328c5..b85bda9c 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -3862,6 +3862,14 @@ static void timer_tick(struct trap_frame *frame)
+ 
+ 	(void)frame;
+ 
++	/*
++	 * #586: acknowledged and not counted, so the period line meets a
++	 * calibrated TSC with no gap to measure -- the branch that must stay
++	 * WRONG, and the one the calibration ablation cannot reach.
++	 */
++	(void)prev;
++	lapic_eoi();
++	return;
+ 	ticks[id]++;
+ 	last_tsc[id] = now;
+ 

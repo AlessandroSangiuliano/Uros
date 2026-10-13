@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #558
+Takes out: the lock on the pv free list -- two processors take the same entry
+Run: --entry 14 1200 -smp 4
+Expect: panic\(cpu
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pv.c b/uros/src/mach_kernel/x86_64/pmap/pv.c
+index 2d64f42e..f16df901 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pv.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pv.c
+@@ -113,12 +113,10 @@ decl_simple_lock_data(static, pv_free_lock)
+  */
+ static void pv_free_lock_take(void)
+ {
+-	simple_lock(&pv_free_lock);
+ }
+ 
+ static void pv_free_lock_drop(void)
+ {
+-	simple_unlock(&pv_free_lock);
+ }
+ 
+ /*
+@@ -327,6 +325,8 @@ void pv_bootstrap(uint64_t top_of_ram)
+ 	 * name the arm cannot attribute what it finds -- and this one costs a
+ 	 * line in the ablated arm and nothing at all in the shipping one.
+ 	 */
++	printf("pv: the free list is ABLATED — pv_alloc and pv_free push and pop "
++	       "with no lock, so two processors can be handed the SAME entry\n");
+ }
+ 
+ int pv_managed(uint64_t pa)

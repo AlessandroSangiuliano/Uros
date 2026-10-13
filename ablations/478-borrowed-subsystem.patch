@@ -1,0 +1,36 @@
+Kind: ablation
+Issue: #478
+Takes out: the reference port_name_to_subsystem() takes -- it returns the borrowed pointer again, the trap that released nothing releases nothing, and one failed allocation from ring 3 destroys the subsystem
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[10\] .*WRONG
+Expect: cap_test: \[10\] the subsystem is GONE
+
+diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
+index 2a336bfa..0567f8fd 100644
+--- a/uros/src/mach_kernel/kern/ipc_mig.c
++++ b/uros/src/mach_kernel/kern/ipc_mig.c
+@@ -760,6 +760,8 @@ port_name_to_subsystem(
+ 		/* port unlocked */
+ 	}
+ 
++	subsystem_deallocate(subsys);
++
+ 	return subsys;
+ 
+ abort: {
+@@ -774,6 +776,7 @@ abort: {
+ 		if (IP_VALID(kern_port))
+ 			ipc_port_release_send(kern_port);
+ 	}
++	subsystem_deallocate(subsys);
+ 	return subsys;
+ 	}
+ }
+@@ -3043,7 +3046,6 @@ syscall_mach_port_allocate_subsystem(
+ 	 * for the condition and the value to stop agreeing.  What is being
+ 	 * released is `subsys', so `subsys' is what the line names.
+ 	 */
+-	subsystem_deallocate(subsys);
+ 
+ 	is_release(space);
+ 

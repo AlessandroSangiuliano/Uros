@@ -17,18 +17,6 @@
 #include <syscall/syscall.h>
 #include <trap/frame.h>	/* #474: where the saved user frame's fields are */
 
-/*
- * Taking the second half of #475 back out, for one run (#475).
- *
- * The other half is in x86_64/thread/machine.c and has its own switch; they
- * are separate because they fail differently and a run that removed both
- * would only ever report the first thing to go wrong.  Zero in every build
- * that ships.
- */
-#ifndef ABLATE_475_AST
-#define ABLATE_475_AST	0	/* a syscall return runs its AST handlers */
-#endif
-
 	.section .text
 	.code64
 
@@ -438,13 +426,11 @@ syscall_entry:
 	 * aligned for the call, which is the same arithmetic the entry path's
 	 * fourth push exists for.
 	 */
-#if	!ABLATE_475_AST
 	subq	$16, %rsp
 	movq	%rax, (%rsp)
 	callq	thread_return_ast
 	movq	(%rsp), %rax
 	addq	$16, %rsp
-#endif
 
 	/*
 	 * Read back out of the frame the entry filled (#474), rather than
@@ -497,17 +483,15 @@ syscall_entry:
 	 *
 	 * ⚠️ This comment used to call it "a branch never taken", which was
 	 * true in a way it did not mean: nothing had ever executed it.
-	 * act_test's sixth arm does now, and -DABLATE_411_CANONICAL=1 is how
-	 * the next person confirms the arm is still watching this and not
+	 * act_test's sixth arm does now, and ablations/411-canonical.patch is
+	 * how the next person confirms the arm is still watching this and not
 	 * something the emulator does for free.
 	 */
-#if	!ABLATE_411_CANONICAL
 	movq	%rcx, %r10
 	shlq	$16, %r10
 	sarq	$16, %r10
 	cmpq	%rcx, %r10
 	jne	.Lreturn_the_slow_way
-#endif
 
 
 /*
@@ -543,19 +527,18 @@ syscall_entry:
  * rename and which cost no store, no port and no latency.
  */
 
-
+/*
+ * act_test's fifth arm is the standing check, and ablations/474-clear.patch
+ * must turn it red.  This exists because a previous attempt at it was removed
+ * on an ablation that could not have seen the event it was measuring.
+ */
 	.macro CLEAR_CLOBBERED
-#if	!ABLATE_474_CLEAR
 	xorl	%edi, %edi
 	xorl	%esi, %esi
 	xorl	%edx, %edx
 	xorl	%r8d, %r8d
 	xorl	%r9d, %r9d
 	xorl	%r10d, %r10d
-#endif	/* !ABLATE_474_CLEAR — build with -DABLATE_474_CLEAR=1 and act_test's
-	 * fifth arm must go red.  A correction is verified by taking it away;
-	 * this one exists because the previous attempt at it was removed on an
-	 * ablation that could not have seen the event it was measuring. */
 	.endm
 
 	/*

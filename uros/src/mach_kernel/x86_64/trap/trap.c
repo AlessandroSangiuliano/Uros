@@ -12,72 +12,13 @@
 #include <ddb/cons.h>
 #include <ddb/disasm.h>
 #include <cpu/lapic.h>
+#include <cpu/smp.h>		/* #663: the processor's number */
 #include <kern/ast.h>		/* #459: need_ast, ast_taken */
 #include <kern/thread.h>		/* #467: current_act */
 #include <kern/thread_act.h>
 #include <vm/vm_fault.h>		/* #467: hand a fault to the MI kernel */
 #include <kern/fault_profile.h>	/* #482: open and close the sample     */
 
-/*
- * ── Taking #467 back out again, one arm at a time (#467) ──────────────
- *
- * The issue asks for each of the three arms to be "shown with a test that
- * fails on the kernel before the change", and the only honest way to show
- * that is to remove the arm and watch the test go red -- a correction is
- * verified by TAKING IT AWAY, not by the test passing beside it.
- *
- * ⚠️ One at a time, and not all three together.  All three absent is what the
- * kernel was, but with the first arm gone the task halts on its first page
- * fault and the other two arms are never reached: the run would say nothing
- * about them.  Isolating each is what makes each report attributable.
- *
- * Zero in every build that ships.  These exist to be set from the compiler
- * command line for one run and then unset; nothing in the tree turns them on,
- * which is why they are plain zeros here rather than a configuration option
- * somebody could leave enabled.
- */
-#ifndef ABLATE_467_ARM1
-#define ABLATE_467_ARM1	0	/* a ring-3 page fault gets vm_fault()      */
-#endif
-#ifndef ABLATE_467_ARM2
-#define ABLATE_467_ARM2	0	/* an unresolvable ring-3 fault -> the task */
-#endif
-#ifndef ABLATE_467_ARM3
-#define ABLATE_467_ARM3	0	/* a ring-0 fault on a user address         */
-#endif
-/*
- * #603: the two halves of taking ASTs on the way back to ring 3, each with
- * its own way back out.  FAULT_AST: a page fault resolved for ring 3 returns
- * without looking.  ONE_PASS: a return to ring 3 takes them once, as it did
- * before, instead of until none is pending.
- */
-#ifndef ABLATE_603_FAULT_AST
-#define ABLATE_603_FAULT_AST	0
-#endif
-#ifndef ABLATE_603_ONE_PASS
-#define ABLATE_603_ONE_PASS	0
-#endif
-/*
- * #617: the window between reading this processor's number and reading its
- * AST word in thread_return_ast(), widened for the test that has to show what
- * happens inside it.  Off, and off is the shipping answer.  On, a thread
- * making its first return to ring 3 -- a frame of zeros, which only a thread
- * nobody has given a state has -- spins there for WIDEN_617_US microseconds.
- * Only those: every other return would pay it too, and the boot would crawl.
- */
-#ifndef WIDEN_617_WINDOW
-#define WIDEN_617_WINDOW	0
-#endif
-#define	WIDEN_617_US		50
-/*
- * #617: the switch that puts the old thread_return_ast() back -- its check
- * made with interrupts on, so a thread preempted between reading its
- * processor's number and reading that processor's AST word resumes elsewhere
- * and reads the word of the processor it left.
- */
-#ifndef ABLATE_617_RETURN_AST
-#define ABLATE_617_RETURN_AST	0
-#endif
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -183,6 +124,14 @@ void trap_set_handler(unsigned vector, trap_handler_t handler)
 		panic("trap: only the vectors above the exceptions can be claimed");
 
 	ext_handler[vector - T_EXTERNAL_FIRST] = handler;
+}
+
+trap_handler_t trap_get_handler(unsigned vector)
+{
+	if (vector < T_EXTERNAL_FIRST || vector >= IDT_VECTORS)
+		panic("trap: only the vectors above the exceptions are claimed");
+
+	return ext_handler[vector - T_EXTERNAL_FIRST];
 }
 
 static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
@@ -729,17 +678,22 @@ static void report_return_symbol(uint64_t ret)
  * The lock is bounded and released before the caller halts.  A processor that
  * faults while holding it must not take the others' last words down with it,
  * so the wait gives up and prints anyway: interleaved output is worse than
- * serialised output and far better than none.
+ * serialised output and far better than none.  #659: it is the console's
+ * report lock now (cons_report_begin()), which the trap report holds around
+ * the whole report and this takes again inside it, and which keeps every
+ * other processor's bytes out as well, where this lock kept two backtraces
+ * apart and nothing else: an application processor's "no handler" came out
+ * interleaved with the boot processor's lines.
  *
  * ⚠️ The label is asked of the interrupt controller, not of cpu_number().
- * cpu_number() reads this processor's per-CPU block through %gs, and before
- * percpu_activate() the segment base is zero -- which early in boot is mapped,
- * so it answers a small plausible number rather than faulting.  A backtrace
+ * cpu_number() reads this processor's per-CPU block through %gs, and before a
+ * processor has one -- the boot processor before its GDT load (#665), the
+ * others before ap_start_c() activates theirs -- the segment base is zero,
+ * which early in boot is mapped, so it answers a small plausible number rather
+ * than faulting.  A backtrace
  * labelled with a processor that is not the one that died is worse than one
  * with no label at all.
  */
-static volatile uint64_t backtrace_lock;
-
 void x86_64_backtrace(uint64_t rbp)
 {
 	x86_64_backtrace_after(rbp, 0);
@@ -748,19 +702,19 @@ void x86_64_backtrace(uint64_t rbp)
 void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 {
 	pmap_t kernel = pmap_kernel();
-	uint64_t spins;
 
-	for (spins = 0; spins < CPU_SPIN_BUDGET; spins++) {
-		if (atomic_cmpxchg64(&backtrace_lock, 0, 1) == 0)
-			break;
-		cpu_pause();
-	}
+	cons_report_begin();
 
 	if (first != 0)
 		first();
+	/*
+	 * The processor's number, found from the id its own APIC answers with
+	 * (#663): %gs may be anything when this runs, and the table is not.
+	 * Numbered before the APIC is mapped, so a present APIC has one.
+	 */
 	tputs("  cpu ");
-	if (lapic_present())
-		tputdec(lapic_id());
+	if (lapic_present() && apic_to_cpu(lapic_id()) >= 0)
+		tputdec((unsigned) apic_to_cpu(lapic_id()));
 	else
 		tputc('?');
 	tputs(" backtrace (addr2line for file and line):\r\n");
@@ -828,7 +782,7 @@ void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 		rbp = next;
 	}
 
-	atomic_store64(&backtrace_lock, 0);
+	cons_report_end();
 }
 
 /*
@@ -885,7 +839,15 @@ unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
 		uint64_t next, ret;
 		const char *name;
 
-		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+		/*
+		 * A kernel address, as the printer asks (#518), and not merely a
+		 * canonical one: since #659 this runs in the handler, for traps
+		 * from ring 3 too, where the live cr3 is a task's and a low
+		 * frame pointer the kernel's pmap calls mapped -- the identity
+		 * map of the low gigabyte -- is read through the task's, or is
+		 * a user page read with AC clear: a fault inside the handler.
+		 */
+		if ((rbp & 7) != 0 || !va_is_kernel(rbp))
 			break;
 		if (pmap_extract(kernel, rbp) == 0
 		    || pmap_extract(kernel, rbp + 8) == 0)
@@ -972,6 +934,11 @@ static void trap_record_frame(const struct trap_frame *frame)
 	last_trap.rsp = frame->rsp;
 	last_trap.frame = (uint64_t)(uintptr_t)frame;
 	last_trap.rbp = frame->rbp;
+	/* #659: walked now, while it is the stack; see <trap/trap.h>. */
+	last_trap.bt_depth = x86_64_backtrace_probe(frame->rbp,
+						    &last_trap.bt_first,
+						    "x86_64_boot",
+						    &last_trap.bt_reached_boot);
 	last_trap.caught = 1;
 }
 
@@ -1114,8 +1081,27 @@ void thread_return_ast(void);		/* below: the loop both share */
 static void
 trap_take_ast(struct trap_frame *frame)
 {
-	unsigned cpu = cpu_number();
-	ast_t	 take;
+	unsigned	 cpu = cpu_number();
+	ast_t		 take;
+	thread_act_t	 act;
+
+	/*
+	 * 🔴 AND THE ACTIVATION'S OWN, ON THE WAY BACK TO RING 3 (#603).
+	 *
+	 * act_set_apc() writes a stop into the activation, and copies it into
+	 * need_ast[] only on its caller's own processor.  For an activation
+	 * running on another one, the copy waits for that processor's AST
+	 * interrupt, whose handler runs ast_check(), or for its tick.  Under
+	 * KVM on five of six GitHub runners with an AMD EPYC 9V45, act_test's
+	 * arm seven touched up to 1645 pages inside thread_suspend(), against
+	 * at most 50 on the other runners: the copy came hundreds of faults
+	 * late there.  A thread that lives in faults is in this kernel at every
+	 * page, so it looks at its own activation here and stops at the next
+	 * one, whatever the interrupt does.  Ring 3 only: ring 0 runs no
+	 * return handlers.
+	 */
+	if ((frame->cs & 3) == USER_RPL && (act = current_act()) != THR_ACT_NULL)
+		ast_propagate(act, cpu);
 
 	if (need_ast[cpu] == AST_NONE)
 		return;
@@ -1221,11 +1207,8 @@ trap_take_ast(struct trap_frame *frame)
 		 * So a return to ring 3 is the same loop as the other four ways
 		 * back to ring 3, by being the same function.
 		 */
-		if (!ABLATE_603_ONE_PASS) {
-			thread_return_ast();
-			return;
-		}
-		take = AST_ALL;
+		thread_return_ast();
+		return;
 	} else {
 		if (get_preemption_level() != 0)
 			return;
@@ -1350,48 +1333,17 @@ thread_return_ast_report(void)
 	       return_ast_read_on);
 }
 
-#if	WIDEN_617_WINDOW
-static void
-return_ast_widen(void)
-{
-	thread_t		th = current_thread();
-	const struct trap_frame	*f;
-	uint64_t		t0, span;
-
-	/*
-	 * ⚠️ The boot's own syscall self-test comes through here before there
-	 * is a thread (a NULL activation was the first thing this option ever
-	 * did, w1, 04/10).
-	 */
-	if (th == THREAD_NULL || th->top_act == THR_ACT_NULL ||
-	    th->top_act->mact.pcb == PCB_NULL)
-		return;
-	f = th->top_act->mact.pcb->user;
-	if (f == (const struct trap_frame *) 0 || f->rip != 0 || f->rsp != 0)
-		return;
-	span = tsc_hz() / 1000000 * WIDEN_617_US;
-	t0 = rdtsc();
-	while (rdtsc() - t0 < span)
-		cpu_pause();
-}
-#endif
-
 void
 thread_return_ast(void)
 {
 	int	cpu;
 
 	for (;;) {
-		if (!ABLATE_617_RETURN_AST)
-			interrupts_disable();
+		interrupts_disable();
 		cpu = cpu_number();
-#if	WIDEN_617_WINDOW
-		return_ast_widen();
-#endif
 		if ((need_ast[cpu] & AST_ALL) == 0)
 			break;
-		if (!ABLATE_617_RETURN_AST)
-			interrupts_enable();
+		interrupts_enable();
 		ast_taken(FALSE, AST_ALL, splsched());
 	}
 	return_ast_check(cpu);
@@ -1493,7 +1445,10 @@ uint64_t trap_smap_after_last(void)
  * points -- so the state the handler reads is the state that faulted, and the
  * state it writes back is what resumes.  That is not a coincidence to rely on
  * quietly: trap.h derives both from one expression precisely so there is one
- * claim about those bytes.
+ * claim about those bytes.  A vector with an interrupt stack of its own lands
+ * elsewhere, and #DB, the one of them raised from here, is moved by its stub
+ * (#650); user_frame_is_saved() below stops the machine rather than hand a
+ * handler a frame that is not the thread's.
  */
 static void
 x86_64_exception(int exc, int code, int subcode)
@@ -1531,6 +1486,27 @@ x86_64_exception(int exc, int code, int subcode)
 
 	exception(exc, codes, 2);
 	/*NOTREACHED*/
+}
+
+/*
+ * The frame of a trap from ring 3 that is about to block in exception() has to
+ * be the thread's own at pcb->user (#650): that is where the handler reads and
+ * writes, and what the way back to ring 3 resumes.  One that is not -- a frame
+ * left on an interrupt stack -- would have the thread block on a stack the
+ * next trap there starts again from, and the handler shown an earlier entry's
+ * state.  Asked of pcb->user itself, not of the per-CPU word #DB's stub copies
+ * to, so that the two are checked against each other.
+ */
+static void
+user_frame_is_saved(const struct trap_frame *frame)
+{
+	struct trap_frame *saved = act_user_frame();
+
+	if (frame != saved)
+		panic("trap: vector %lu from ring 3 has its frame at %p and not "
+		      "at the thread's pcb->user %p, where exception() needs it "
+		      "(#650)", (unsigned long) frame->vector, (void *) frame,
+		      (void *) saved);
 }
 
 /*
@@ -1865,7 +1841,7 @@ void trap_dispatch(struct trap_frame *frame)
 				     ? (VM_PROT_READ | VM_PROT_WRITE)
 				     : VM_PROT_READ;
 
-		if (!ABLATE_467_ARM3 && map != VM_MAP_NULL
+		if (map != VM_MAP_NULL
 		    && fault_in(map, read_cr2(), prot, frame) == KERN_SUCCESS) {
 			/*
 			 * #482 here too.  A copyout into a page the task holds
@@ -2005,7 +1981,7 @@ void trap_dispatch(struct trap_frame *frame)
 		 * and inventing kernel_map for it would hand an early boot
 		 * failure to a subsystem that is not up.
 		 */
-		if (!ABLATE_467_ARM1 && map != VM_MAP_NULL) {
+		if (map != VM_MAP_NULL) {
 			fault_kr = fault_in(map, addr, prot, frame);
 			if (fault_kr == KERN_SUCCESS) {
 				/*
@@ -2033,8 +2009,9 @@ void trap_dispatch(struct trap_frame *frame)
 				 * code, where preempting is the interrupt path's
 				 * question, asked with IF known to be on.
 				 */
-				if (!ABLATE_603_FAULT_AST
-				    && (frame->cs & 3) == USER_RPL)
+				if ((frame->cs & 3) == USER_RPL)
+					act->user_faults++;	/* #603 */
+				if ((frame->cs & 3) == USER_RPL)
 					trap_take_ast(frame);
 				return;	/* the instruction runs again */
 			}
@@ -2053,8 +2030,7 @@ void trap_dispatch(struct trap_frame *frame)
 	 * resolved and the instruction runs again -- and raising first would
 	 * turn every first touch of every page into a message.
 	 */
-	if (!ABLATE_467_ARM2
-	    && (frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
+	if ((frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
 		int	exc, code, subcode;
 
 		if (frame->vector == T_PAGE_FAULT) {
@@ -2064,17 +2040,21 @@ void trap_dispatch(struct trap_frame *frame)
 			 * exactly what i386 passes from
 			 * user_page_fault_continue().
 			 */
+			user_frame_is_saved(frame);
 			x86_64_exception(EXC_BAD_ACCESS, (int) fault_kr,
 					 (int) read_cr2());
 			/*NOTREACHED*/
 		}
 
 		if (user_fault_exception(frame, &exc, &code, &subcode)) {
+			user_frame_is_saved(frame);
 			x86_64_exception(exc, code, subcode);
 			/*NOTREACHED*/
 		}
 	}
 
+	/* One report at a time, the others' bytes held out of it (#659). */
+	cons_report_begin();
 	tputs("\r\nUrMach x86-64: trap ");
 	tputs(trap_name(frame->vector));
 	tputs(" (vector ");
@@ -2132,6 +2112,7 @@ void trap_dispatch(struct trap_frame *frame)
 	 * nobody has fixed means taking it again, so "continue" ends here too.
 	 */
 	tputs("UrMach x86-64: no handler — halted\r\n");
+	cons_report_end();
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }

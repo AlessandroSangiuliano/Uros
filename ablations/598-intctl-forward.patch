@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: IntCtl 10b in an AMD device table entry's interrupt half -- it says 01b, and every fixed interrupt is forwarded unmapped beside a valid table
+Run: --entry 0 300
+Expect: interrupt remapping words encoded and decoded, 1 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+index 1c09cad0..dc831328 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -1837,7 +1837,7 @@ int iommu_amd_dte_interrupts(uint64_t table_pa, unsigned log2_entries,
+ 	dte[2] = AMD_DTE_INT_IV
+ 	       | ((uint64_t)log2_entries << AMD_DTE_INT_LEN_SHIFT)
+ 	       | table_pa
+-	       | (AMD_DTE_INT_CTL_REMAP << AMD_DTE_INT_CTL_SHIFT);
++	       | (AMD_DTE_INT_CTL_FORWARD << AMD_DTE_INT_CTL_SHIFT);
+ 	return 1;
+ }
+ 

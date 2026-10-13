@@ -77,35 +77,6 @@ static vm_offset_t	ioapic_base;	/* MMIO virtual base of I/O APIC #0 */
 static unsigned int	ioapic_redirs;	/* number of redirection entries */
 static unsigned char	ioapic_dest;	/* boot CPU physical APIC ID */
 
-#ifdef ABLATE_599_WIDEN
-/*
- * #599 ablation: ABLATE_599_WIDEN reads of port 0x80 (each a VM exit under
- * KVM) in each gap of the pair -- after a select, between a read and the
- * select for the write -- on the other processors only.  Processor 0 keeps
- * its own read-modify-writes, which are the tick's defer and replay, as
- * short as they are.  If the pair's race is what stops the tick, this makes
- * it frequent at four processors and leaves it absent at one.
- */
-static void
-ioapic_widen(void)
-{
-	static int	said;
-	int		w;
-
-	if (cpu_number() == master_cpu)
-		return;
-	if (!said) {
-		said = 1;
-		cn_puts("\nioapic: #599 ablation -- the other processors wait in "
-			"each gap of the select/window pair\n");
-	}
-	for (w = 0; w < ABLATE_599_WIDEN; w++)
-		(void) inb(0x80);
-}
-#else
-#define	ioapic_widen()
-#endif
-
 /*
  * Indexed register access: write the register number to RSELECT, then read
  * or write the value through RWINDOW.
@@ -114,7 +85,6 @@ static unsigned int
 ioapic_read(unsigned int reg)
 {
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
-	ioapic_widen();
 	return *(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW);
 }
 
@@ -122,7 +92,6 @@ static void
 ioapic_write(unsigned int reg, unsigned int value)
 {
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RSELECT) = reg;
-	ioapic_widen();
 	*(volatile unsigned int *)(ioapic_base + IOAPIC_RWINDOW) = value;
 }
 
@@ -144,8 +113,8 @@ volatile unsigned int	ioapic_overlaps;
 /*
  * 🔴 THE PAIR IS ONE FOR THE WHOLE MACHINE, AND A READ-MODIFY-WRITE SELECTS
  * TWICE (#599).  Two processors interleaving inside it each read or write the
- * other's pin.  The widening arm (UROS_ABLATE_599_WIDEN) showed both ways it
- * ends: pin 2 -- the 8254 -- holding pin 11's entry, so hardclock never ran
+ * other's pin.  The widening arm (ablations/599-widen.patch) showed both ways
+ * it ends: pin 2 -- the 8254 -- holding pin 11's entry, so hardclock never ran
  * again while everything else did; and AHCI's pin holding line 5's entry,
  * whose vector had no handler and stopped the tick through intnull's printf.
  * Processor 0 masks and unmasks from interrupt context (the deferral and its
@@ -178,7 +147,6 @@ ioapic_pair_enter(void)
 	int		waited = 0;
 
 	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
-#ifndef ABLATE_599_NO_LOCK
 	for (;;) {
 		busy = 1;
 		__asm__ volatile("xchgb %0, %1"
@@ -191,17 +159,14 @@ ioapic_pair_enter(void)
 	}
 	if (waited)
 		__sync_fetch_and_add(&ioapic_lock_waits, 1);
-#endif
 	return flags;
 }
 
 static void
 ioapic_pair_leave(unsigned int flags)
 {
-#ifndef ABLATE_599_NO_LOCK
 	__asm__ volatile("" : : : "memory");
 	ioapic_pair_lock = 0;
-#endif
 	__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
 }
 
@@ -280,7 +245,6 @@ ioapic_mask_irq(unsigned int irq)
 	flags = ioapic_pair_enter();
 	first = ioapic_enter();
 	low = ioapic_read(reg);
-	ioapic_widen();
 	ioapic_write(reg, low | IOA_R_R_MASKED);
 	ioapic_leave(first, gsi);
 	ioapic_pair_leave(flags);
@@ -301,7 +265,6 @@ ioapic_unmask_irq(unsigned int irq)
 	flags = ioapic_pair_enter();
 	first = ioapic_enter();
 	low = ioapic_read(reg);
-	ioapic_widen();
 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
 	ioapic_leave(first, gsi);
 	ioapic_pair_leave(flags);

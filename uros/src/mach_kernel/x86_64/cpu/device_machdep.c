@@ -31,12 +31,14 @@
 #include <cpu/lapic.h>	/* lapic_eoi, and which processor to route to */
 #include <cpu/pci_cfg.h>
 #include <cpu/pci_msix.h>	/* #457: a device's own table */
+#include <cpu/smp.h>		/* #659: the boot processor's apic id */
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
 #include <ddb/cons.h>	/* #497: who owns COM1 */
 #include <time/pmtimer.h>	/* #508: a ruler is not lent */
 #include <time/hpet.h>		/* #593: the lines LegacyReplacement took */
 #include <sync/atomic.h>	/* #538: atomic_add32 / atomic_swap32 */
+#include <sync/lock.h>		/* #598: a function's slots, one lock */
 #include <kern/misc_protos.h>	/* printf */
 #include <trap/trap.h>	/* the vector table, and the replay path */
 
@@ -265,17 +267,6 @@ device_md_io_reserved(unsigned int base, unsigned int count)
 {
 	unsigned int i;
 
-#if	ABLATE_508_LEND_RULERS
-	/*
-	 * #508: keep nothing, so the claim path hands the rulers out and both
-	 * of the checks that should notice -- the boot line and
-	 * io_claim_race's arm [5] -- can be seen noticing.
-	 */
-	(void)base;
-	(void)count;
-	(void)i;
-	return 0;
-#endif
 	for (i = 0; i < sizeof(kernel_io) / sizeof(kernel_io[0]); i++)
 		if (io_overlaps(base, count, kernel_io[i].base,
 				kernel_io[i].count))
@@ -404,6 +395,52 @@ device_md_irq_trampoline(struct trap_frame *frame)
 
 	if (!trap_in_replay())
 		lapic_eoi();
+
+	/*
+	 * #598 point 3: and a level line's controller told directly.  The
+	 * processor's broadcast EOI clears the pin's Remote IRR only when the
+	 * interrupt arrived marked level and its vector is the redirection
+	 * entry's -- and QEMU's amd-iommu delivers a remapped message marked
+	 * edge whatever it was (hw/i386/amd_iommu.c, lines 2094-2098 in 11.1.1,
+	 * set no trigger mode), so no broadcast comes and the line is silent
+	 * after its first interrupt.  The handler ran first, so the device has
+	 * been told; a level line the forwarder masked stays masked.
+	 */
+	if (irq < DEVICE_MD_IRQ_MAX && device_md_irq_is_level(irq))
+		ioapic_eoi((uint8_t)frame->vector);
+}
+
+/*
+ * #659: the processor a device interrupt is given.  The one registering it,
+ * as it always was, when the words in use can name it: any id once the
+ * remapping entries carry 32-bit ids, up to LAPIC_XAPIC_ID_MAX otherwise -- a
+ * redirection entry's destination, a message's address (#598's C16), where
+ * 255 is the broadcast.  Where they cannot, the boot processor, said once: a
+ * free line refused because of where the asking thread ran was
+ * irq_claim_test's [1] WRONG on a processor numbered 256 (QEMU's
+ * sockets=2,cores=256, x2APIC left on by the firmware, no -i).  Zero when
+ * neither fits.
+ */
+static int	irq_target_said;
+
+static int irq_target(uint32_t *apic_id)
+{
+	uint32_t self = lapic_id(), boot = cpu_to_apic(0);
+
+	if (iommu_names_apic_id(self)) {
+		*apic_id = self;
+		return 1;
+	}
+	if (!iommu_names_apic_id(boot))
+		return 0;
+
+	if (__sync_bool_compare_and_swap(&irq_target_said, 0, 1))
+		printf("device_md: apic id %u cannot be named without "
+		       "interrupts remapped to 32-bit ids, so a device "
+		       "interrupt registered there goes to the boot "
+		       "processor, apic id %u (#659)\n", self, boot);
+	*apic_id = boot;
+	return 1;
 }
 
 /*
@@ -419,7 +456,7 @@ device_md_irq_trampoline(struct trap_frame *frame)
 int
 device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 {
-	uint32_t	gsi;
+	uint32_t	gsi, target;
 
 	if (irq >= DEVICE_MD_IRQ_MAX || handler == 0)
 		return 0;
@@ -449,7 +486,9 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	 * say that ISA 0 arrives on GSI 2, and on a PC it does.
 	 */
 	gsi = acpi_irq_to_gsi((uint8_t)irq);
-	if (gsi >= ioapic_pin_count())
+	if (!ioapic_owns(gsi))		/* the range, not the count: #598's C12 */
+		return 0;
+	if (!irq_target(&target))	/* C16, #659 */
 		return 0;
 
 	/*
@@ -461,7 +500,7 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	 */
 	irq_handler[irq] = handler;
 	trap_set_handler(DEVICE_MD_VECTOR(irq), device_md_irq_trampoline);
-	ioapic_route(gsi, (uint8_t)DEVICE_MD_VECTOR(irq), lapic_id(),
+	ioapic_route(gsi, (uint8_t)DEVICE_MD_VECTOR(irq), target,
 		     acpi_irq_flags((uint8_t)irq));
 
 	return 1;
@@ -480,8 +519,14 @@ device_md_irq_unregister(unsigned int irq)
 	if (ioapic_present())
 		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
 
+	/*
+	 * #598: the handler goes and the trampoline stays, as for a message
+	 * slot (msi_release_vector()).  Masking stops the pin, not an
+	 * interrupt it already sent: one pending while the caller holds the
+	 * level high arrives after this returns, and must find something to
+	 * acknowledge it rather than an unclaimed vector.
+	 */
 	irq_handler[irq] = 0;
-	trap_set_handler(DEVICE_MD_VECTOR(irq), 0);
 }
 
 /*
@@ -544,9 +589,23 @@ device_md_debugger_break(void)
  *             an edge line applies here in full.
  */
 #define	MSI_ADDRESS_BASE	0xFEE00000ULL
-#define	MSI_ADDRESS_DEST(id)	(((unsigned long long)(id) & 0xFFu) << 12)
+
+/*
+ * A message's address for a processor: its APIC id in bits 19:12, eight of
+ * them.  An id they do not name one processor by is refused: past them a mask
+ * would have cut it to its low byte and delivered to whichever processor has
+ * that (#598's C16), and 255 is the broadcast (LAPIC_XAPIC_ID_MAX, #659).
+ */
+int msi_destination(uint32_t apic_id, unsigned long long *address)
+{
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
+		return 0;
+	*address = MSI_ADDRESS_BASE | ((unsigned long long)apic_id << 12);
+	return 1;
+}
 
 static volatile unsigned int	msi_next;	/* slots are handed out in order */
+static uint32_t			msi_target[DEVICE_MD_MSI_MAX];	/* #659 */
 
 /*
  * Claim a vector and say what a device must write to reach it.
@@ -556,13 +615,31 @@ static volatile unsigned int	msi_next;	/* slots are handed out in order */
  * contract above refuses to hand out -- the difference between the two is
  * exactly who is trusted with it, and the answer is "this file and the test
  * that has no device".
+ *
+ * #659: msi_claim_vector() gives the slot to irq_target()'s processor;
+ * msi_claim_vector_to() to the one named, for the self-test that aims a slot
+ * at the highest APIC id, and refuses one the words in use cannot name.
  */
 int
 msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 		 unsigned long long *addr_out, unsigned int *data_out)
 {
+	uint32_t	target;
+
+	if (!lapic_present() || !irq_target(&target))
+		return 0;
+	return msi_claim_vector_to(target, handler, slot_out, addr_out,
+				   data_out);
+}
+
+int
+msi_claim_vector_to(uint32_t target, device_md_intr_t handler,
+		    unsigned int *slot_out, unsigned long long *addr_out,
+		    unsigned int *data_out)
+{
 	unsigned int	slot;
 	unsigned int	vector;
+	unsigned long long address;
 
 	if (handler == 0 || slot_out == 0 || addr_out == 0 || data_out == 0)
 		return 0;
@@ -574,6 +651,26 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 	 * machine that has no APIC there.
 	 */
 	if (!lapic_present())
+		return 0;
+
+	/*
+	 * Before a slot is spent on it: a processor the message can name
+	 * (#659, iommu_names_apic_id()).  An id above LAPIC_XAPIC_ID_MAX is
+	 * named only by the slot's remapping entry for 32-bit ids, written by
+	 * msi_remap_vector(), which every programmer of a device calls next
+	 * (<cpu/pci_msix.h>) -- so the address handed out for one is the old
+	 * format's base, which names APIC id 0.  On hardware not a guess that
+	 * can land: with entries for 32-bit ids, Intel refuses a message in the
+	 * old format (EIME, Rev 5.20 §5.1.4), and AMD finds no entry for a slot
+	 * nobody remapped.  QEMU passes a message in the old format through
+	 * whatever EIME says (intel_iommu.c, vtd_interrupt_remap_msi()), so
+	 * there a forgotten msi_remap_vector() lands on APIC id 0.
+	 */
+	if (!iommu_names_apic_id(target))
+		return 0;
+	if (target > LAPIC_XAPIC_ID_MAX)
+		address = MSI_ADDRESS_BASE;
+	else if (!msi_destination(target, &address))
 		return 0;
 
 	/*
@@ -601,6 +698,7 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 		}
 	}
 	vector = DEVICE_MD_VECTOR(slot);
+	msi_target[slot - DEVICE_MD_MSI_BASE] = target;	/* #659: all 32 bits */
 
 	/*
 	 * The handler before the address, for the reason register does it in
@@ -612,7 +710,7 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
 	trap_set_handler(vector, device_md_irq_trampoline);
 
 	*slot_out = slot;
-	*addr_out = MSI_ADDRESS_BASE | MSI_ADDRESS_DEST(lapic_id());
+	*addr_out = address;
 	*data_out = vector;
 
 	return 1;
@@ -633,6 +731,14 @@ msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
  * acknowledged, which is a lost interrupt and not a wild call -- and the slot
  * is not reused.  Sixteen of them, and reclaiming one honestly means the
  * kernel owning the device's table, which is where #457 is going anyway.
+ *
+ * 🔴 #598: AND THE TRAMPOLINE STAYS, which is what keeps that promise.  This
+ * used to take the vector's handler away as well, so an arriving message
+ * found no trampoline to acknowledge it: an unclaimed vector, and an
+ * unclaimed vector halts the machine.  A device can have a message on its
+ * way when its driver lets go -- the card in irq_claim_test's [12] did, under
+ * KVM -- and device_md_irq_trampoline() already acknowledges a slot with no
+ * handler.
  */
 static void
 msi_release_vector(unsigned int slot)
@@ -641,7 +747,6 @@ msi_release_vector(unsigned int slot)
 		return;
 
 	irq_handler[slot] = 0;
-	trap_set_handler(DEVICE_MD_VECTOR(slot), 0);
 }
 
 /*
@@ -660,6 +765,140 @@ msi_release_vector(unsigned int slot)
  */
 static struct pci_msix	msi_device[DEVICE_MD_MSI_MAX];
 static unsigned int	msi_entry_of[DEVICE_MD_MSI_MAX];
+
+/*
+ * #598: <cpu/pci_msix.h> says why every programmer of a device calls these.
+ * The slot's remapping entry is the slot's: its index in the map is the
+ * slot's number among the MSI slots, and its vector is the slot's.  Its
+ * destination is the one msi_claim_vector() chose, all 32 bits of it (#659):
+ * it was read back out of the address's eight, which cannot hold an x2APIC id.
+ */
+int
+msi_remap_vector(unsigned int slot, unsigned int bus, unsigned int dev,
+		 unsigned int func, unsigned long long *address,
+		 unsigned int *data)
+{
+	uint64_t	ra = *address;
+	uint32_t	rd = *data;
+
+	if (!iommu_interrupts_remapped())
+		return 1;
+	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS
+	    || !iommu_remap_msi(slot - DEVICE_MD_MSI_BASE,
+				(uint16_t)((bus << 8) | (dev << 3) | func),
+				(uint8_t)*data,
+				msi_target[slot - DEVICE_MD_MSI_BASE],
+				&ra, &rd))
+		return 0;
+
+	*address = ra;
+	*data = rd;
+	return 1;
+}
+
+void
+msi_unremap_vector(unsigned int slot, unsigned int bus, unsigned int dev,
+		   unsigned int func)
+{
+	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS)
+		return;
+	iommu_forget_msi(slot - DEVICE_MD_MSI_BASE,
+			 (uint16_t)((bus << 8) | (dev << 3) | func),
+			 (uint8_t)DEVICE_MD_VECTOR(slot));
+}
+
+/*
+ * ── #598's C10: a slot attached to its function, and detached ─────────
+ *
+ * A function's MSI-X enable is one bit for all its entries, so detaching one
+ * asks "was that the function's last?" before clearing it -- and attaching
+ * used to arm and enable first and record the slot after.  Asked between the
+ * two, on another processor, the question answered yes and cleared the enable
+ * under an entry just armed: an interrupt nobody asked to silence.  So the
+ * record comes first, and the two halves take one lock of this file's own.
+ * device_master.c holds irq_forward_lock around its calls as well, and a
+ * layer right only because of a lock in another file is right by accident.
+ *
+ * A leaf, taken by callers at splhigh() with irq_forward_lock held, and by
+ * the boot's tests: nothing below it takes this lock again.
+ */
+static hw_lock_data_t	msi_function_lock;
+
+void
+msi_attach(unsigned int slot, const struct pci_msix *m, unsigned int entry,
+	   unsigned long long addr, unsigned int data)
+{
+	unsigned int i = slot - DEVICE_MD_MSI_BASE;
+
+	hw_lock_lock(&msi_function_lock);
+	msi_device[i] = *m;
+	msi_entry_of[i] = entry;
+
+	/*
+	 * The table before the enable, so the device cannot be let loose on an
+	 * entry that has not been written yet -- and the entry is armed by
+	 * pci_msix_arm()'s last store, which is what makes "written" a moment
+	 * rather than a stretch.
+	 */
+	pci_msix_arm(m, entry, addr, data);
+	pci_msix_enable(m);
+	hw_lock_unlock(&msi_function_lock);
+}
+
+int
+msi_detach(unsigned int slot, struct pci_msix *gone)
+{
+	unsigned int	i = slot - DEVICE_MD_MSI_BASE, j;
+	int		last = 1, had;
+
+	hw_lock_lock(&msi_function_lock);
+	had = msi_device[i].table != 0;
+	if (had) {
+		*gone = msi_device[i];
+
+		/*
+		 * 🔴 The DEVICE first, and the handler second -- the caller
+		 * releases the vector after this.  Between the two an arriving
+		 * message finds a handler that still knows what to do with it;
+		 * the other order leaves a window where the device is still
+		 * armed at a vector nobody claims, and an unclaimed vector
+		 * halts the machine.
+		 */
+		pci_msix_disarm(&msi_device[i], msi_entry_of[i]);
+		msi_device[i].table = 0;
+
+		/*
+		 * 🔴 AND THE FUNCTION'S OWN ENABLE BIT, which nothing used to
+		 * put back (#520).  Disarming the entry stops the interrupt;
+		 * it leaves the device MSI-X-enabled, and a device left in a
+		 * state its driver did not choose is a device whose registers
+		 * may not be where the driver looks for them.  A legacy
+		 * virtio-pci device moves its configuration by four bytes on
+		 * exactly this bit.
+		 *
+		 * ⚠️ Only when this was the LAST entry of that function.  The
+		 * enable is per function and the entries are per vector, so
+		 * clearing it with another vector still armed would silence an
+		 * interrupt nobody asked to silence.  Compared by bus address
+		 * rather than by mapping, because two slots of one device are
+		 * two records of the same function.
+		 */
+		for (j = 0; j < DEVICE_MD_MSI_MAX; j++)
+			if (msi_device[j].table != 0
+			    && msi_device[j].segment == gone->segment
+			    && msi_device[j].bus == gone->bus
+			    && msi_device[j].dev == gone->dev
+			    && msi_device[j].func == gone->func) {
+				last = 0;
+				break;
+			}
+
+		if (last)
+			pci_msix_disable(gone);
+	}
+	hw_lock_unlock(&msi_function_lock);
+	return had;
+}
 
 int
 device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
@@ -683,16 +922,16 @@ device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
 		return 0;
 
 	/*
-	 * The table before the enable, so the device cannot be let loose on an
-	 * entry that has not been written yet -- and the entry is armed by
-	 * pci_msix_arm()'s last store, which is what makes "written" a moment
-	 * rather than a stretch.
+	 * #598: and as the device must be given it.  A slot that cannot have a
+	 * remapping entry is not given out: its message in the old format
+	 * would be refused.
 	 */
-	pci_msix_arm(&m, entry, addr, data);
-	pci_msix_enable(&m);
+	if (!msi_remap_vector(slot, bus, dev, func, &addr, &data)) {
+		msi_release_vector(slot);
+		return 0;
+	}
 
-	msi_device[slot - DEVICE_MD_MSI_BASE] = m;
-	msi_entry_of[slot - DEVICE_MD_MSI_BASE] = entry;
+	msi_attach(slot, &m, entry, addr, data);
 
 	*slot_out = slot;
 	return 1;
@@ -701,56 +940,18 @@ device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
 void
 device_md_msi_unregister(unsigned int slot)
 {
-	unsigned int i;
+	struct pci_msix	gone;
 
 	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS)
 		return;
 
-	i = slot - DEVICE_MD_MSI_BASE;
-
 	/*
-	 * 🔴 The DEVICE first, and the handler second.  Between the two an
-	 * arriving message finds a handler that still knows what to do with it;
-	 * the other order leaves a window where the device is still armed at a
-	 * vector nobody claims, and an unclaimed vector halts the machine.
+	 * #598: and the slot's remapping entry, after the device stops using
+	 * it -- so that the device, told to stop and not doing so, is refused
+	 * instead of reaching whoever holds the vector next.
 	 */
-	if (msi_device[i].table != 0) {
-		struct pci_msix	gone = msi_device[i];
-		unsigned int	j;
-		int		last = 1;
-
-		pci_msix_disarm(&msi_device[i], msi_entry_of[i]);
-		msi_device[i].table = 0;
-
-		/*
-		 * 🔴 AND THE FUNCTION'S OWN ENABLE BIT, which nothing used to
-		 * put back (#520).  Disarming the entry stops the interrupt;
-		 * it leaves the device MSI-X-enabled, and a device left in a
-		 * state its driver did not choose is a device whose registers
-		 * may not be where the driver looks for them.  A legacy
-		 * virtio-pci device moves its configuration by four bytes on
-		 * exactly this bit.
-		 *
-		 * ⚠️ Only when this was the LAST entry of that function.  The
-		 * enable is per function and the entries are per vector, so
-		 * clearing it with another vector still armed would silence an
-		 * interrupt nobody asked to silence.  Compared by bus address
-		 * rather than by mapping, because two slots of one device are
-		 * two records of the same function.
-		 */
-		for (j = 0; j < DEVICE_MD_MSI_MAX; j++)
-			if (msi_device[j].table != 0
-			    && msi_device[j].segment == gone.segment
-			    && msi_device[j].bus == gone.bus
-			    && msi_device[j].dev == gone.dev
-			    && msi_device[j].func == gone.func) {
-				last = 0;
-				break;
-			}
-
-		if (last)
-			pci_msix_disable(&gone);
-	}
+	if (msi_detach(slot, &gone))
+		msi_unremap_vector(slot, gone.bus, gone.dev, gone.func);
 
 	msi_release_vector(slot);
 }

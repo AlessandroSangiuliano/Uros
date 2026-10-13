@@ -10,7 +10,8 @@
  * register.  On i386 that put pin 11's entry on pin 2 and stopped processor 0's
  * clock for good (#599).  x86-64 takes the window in turns since #593
  * (cpu/ioapic.c); this is the test that shows the lock is what keeps the two
- * apart, by taking it away (UROS_ABLATE_599_WINDOW_OPEN, _WINDOW_WIDEN).
+ * apart, by taking it away (ablations/599-window-open.patch, and
+ * 599-window-widen.patch to widen the window).
  *
  * Two sides, each on its own processor, each with a pin of its own.  A round
  * changes the pin's vector by the read-modify-write that masks and unmasks
@@ -134,13 +135,28 @@ race_probe_body(void)
 	}
 }
 
+static void ioapic_window_race_test_body(int me);
+
+/*
+ * The driver stays on the processor it chose from (#646).  It read
+ * cpu_number() bare, on an unbound thread, and then counted on running
+ * there; a move in between left `me' naming a processor it had left.
+ */
 void
 ioapic_window_race_test(void)
+{
+	processor_t	was = current_thread()->bound_processor;
+
+	ioapic_window_race_test_body(thread_bind_here());
+	thread_bind(current_thread(), was);
+}
+
+static void
+ioapic_window_race_test_body(int me)
 {
 	thread_t	th;
 	thread_act_t	act;
 	processor_t	target = PROCESSOR_NULL;
-	int		me = cpu_number();
 	uint32_t	first = ioapic_first_gsi();
 	unsigned	found = 0;
 	uint64_t	spins, wrong, theirs, overlap;

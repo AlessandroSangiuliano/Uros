@@ -1,0 +1,41 @@
+Kind: ablation
+Issue: #597
+Over: 597-widen.patch
+Takes out: pci_cfg_port_lock -- the configuration access is two port accesses with nothing held, as before #597, so another processor's access moves 0xCF8 in between and the read answers about another device; applied over 597-widen.patch
+Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Expect: hal_bar: \[5\] .*WRONG
+Expect: hal: a rescan put a new device in the registry
+Expect: hal: [0-9]+:[0-9]+\.[0-9]+ changed device:
+Expect: pci_scan: 00:01\.0 raw bars
+Expect: has header type 127
+Expect: header type 0x7f is not one
+Expect: refused the claim on [0-9]+:[0-9]+\.[0-9]+ \(kr=4\)
+
+diff --git a/uros/src/mach_kernel/i386/pci/pcibios.c b/uros/src/mach_kernel/i386/pci/pcibios.c
+index 5e18660f..bf52a29d 100644
+--- a/uros/src/mach_kernel/i386/pci/pcibios.c
++++ b/uros/src/mach_kernel/i386/pci/pcibios.c
+@@ -200,6 +200,7 @@ ablate_597_says(void)
+ 	if (said)
+ 		return;
+ 	said = 1;
++	printf("pci: #597 ablation -- the configuration access takes no lock\n");
+ 	printf("pci: #597 ablation -- %d port 0x80 reads between address and "
+ 	       "data\n", WIDEN_597_READS);
+ }
+@@ -211,6 +212,7 @@ pci_cfg_port_enter(void)
+ 	unsigned char	busy;
+ 
+ 	ablate_597_says();
++	return 0;
+ 	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+ 	for (;;) {
+ 		busy = 1;
+@@ -227,6 +229,7 @@ pci_cfg_port_enter(void)
+ static inline void
+ pci_cfg_port_leave(unsigned long flags)
+ {
++	return;
+ 	__asm__ volatile("" : : : "memory");
+ 	pci_cfg_port_lock = 0;
+ 	if (flags & EFL_IF)

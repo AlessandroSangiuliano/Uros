@@ -1,0 +1,204 @@
+Kind: ablation
+Issue: #593
+Takes out: the interrupts icr_send() masks from its wait to its second write -- an interrupt whose handler sends an IPI lands inside a send and rewrites its destination; the patch also counts the sends that began inside another, and has the TSC watchdog's thread send AST IPIs for a second while the HPET's broadcast interrupts it
+Run: --entry 22 1200 -smp 4
+Expect: the ICR stress: [0-9]+ AST IPIs .* and [1-9][0-9]* sends by an interrupt began between the wait and the second write
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.c b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+index e87282c8..97032985 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/lapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/lapic.c
+@@ -424,6 +424,41 @@ static void icr_wait_idle(void)
+ 		cpu_pause();
+ }
+ 
++/*
++ * #593: the send left open to an interrupt, and the count that shows what the
++ * opening lets in: a send begun on a processor that was already past the wait
++ * of another and not yet past its second write -- the window the masking
++ * closes.  A send begun during another's wait is harmless (the wait reads the
++ * register again) and is not counted.
++ */
++#include <cpus.h>		/* NCPUS */
++
++/*
++ * ⚠️ Indexed by the APIC's own ID register and not by cpu_number(): that
++ * reads %gs, and a send is made from inside the swapgs window on purpose --
++ * the #440 test sends an NMI with the user's %gs loaded -- where a %gs read
++ * faults, and the faults nest until the stack is gone.  The first version of
++ * this counter did exactly that, and the ablated kernel never finished its
++ * boot: an instrument that changes the experiment.
++ */
++static volatile uint32_t	icr_inside[NCPUS];
++static volatile uint64_t	icr_nested[NCPUS];	/* each by its own */
++
++uint64_t lapic_icr_nested(void)
++{
++	uint64_t	sum = 0;
++	unsigned	c;
++
++	for (c = 0; c < NCPUS; c++)
++		sum += icr_nested[c];
++	return sum;
++}
++
++uint64_t lapic_icr_nested_on(uint32_t apic_id)
++{
++	return apic_id < NCPUS ? icr_nested[apic_id] : 0;
++}
++
+ /*
+  * #659: the command register's destination for `apic_id', in the mode given:
+  * all 32 bits in x2APIC mode, the 64-bit register's high half (SDM 13.12.9),
+@@ -455,28 +490,19 @@ static void icr_send(uint32_t apic_id, uint32_t command)
+ 		      "xAPIC mode, and would reach the processor with its low "
+ 		      "byte (#659)", apic_id);
+ 
+-	int was_enabled = interrupts_enabled();
+-
+ 	/*
+-	 * 🔴 NO INTERRUPT BETWEEN THE WAIT AND THE SECOND WRITE (#593).
+-	 *
+-	 * The register is one per processor and a send is three steps on it,
+-	 * so an interrupt whose handler sends an IPI of its own, landing in
+-	 * the middle, rewrites the destination under the interrupted send:
+-	 * the interrupted command then leaves with the handler's destination,
+-	 * and the processor it was meant for never hears it.  Landing after
+-	 * the wait and before the writes is the same failure the wait exists
+-	 * to prevent -- a second message written over a first still pending.
+-	 *
+-	 * The tick already sends from interrupt context (hertz_tick can wake a
+-	 * thread and knock on the processor it is given to), and the HPET's
+-	 * broadcast sends from a class no spl level holds back, a hundred
+-	 * times a second.  Masked here and nowhere else, because this is the
+-	 * one place that knows the register takes more than one write.
++	 * Counted by the processor it happens on, so no two write one count:
++	 * a send that interrupts this one runs in a handler with interrupts
++	 * off, and nothing interrupts it in turn.
+ 	 */
+-	interrupts_disable();
++	unsigned self = lapic_id();
++
++	if (self < NCPUS && icr_inside[self])
++		icr_nested[self]++;
+ 
+ 	icr_wait_idle();
++	if (self < NCPUS)
++		icr_inside[self]++;
+ 
+ 	if (x2apic) {
+ 		/*
+@@ -501,8 +527,8 @@ static void icr_send(uint32_t apic_id, uint32_t command)
+ 		lapic_write(LAPIC_ICR_LOW, command);
+ 	}
+ 
+-	if (was_enabled)
+-		interrupts_enable();
++	if (self < NCPUS)
++		icr_inside[self]--;
+ }
+ 
+ void lapic_send_init(uint32_t apic_id)
+diff --git a/uros/src/mach_kernel/x86_64/cpu/lapic.h b/uros/src/mach_kernel/x86_64/cpu/lapic.h
+index 9f46828b..05da3905 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/lapic.h
++++ b/uros/src/mach_kernel/x86_64/cpu/lapic.h
+@@ -216,6 +216,15 @@ void lapic_send_self(uint8_t vector);
+  */
+ void lapic_send_ipi(uint32_t apic_id, uint8_t vector);
+ 
++/*
++ * #593, only in the ablation that leaves a send open to an interrupt: how many
++ * sends began on a processor that was already past the wait of another and
++ * not yet past its second write -- on every processor, or on one.  Without
++ * the ablation the case cannot happen, and there is nothing to count.
++ */
++uint64_t lapic_icr_nested(void);
++uint64_t lapic_icr_nested_on(uint32_t apic_id);
++
+ /*
+  * A non-maskable interrupt to one processor, which is how the kernel gets to
+  * choose when one arrives instead of waiting for the hardware to send one.
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index 5940e2a8..5ad9999e 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -959,6 +959,10 @@ void hpet_event_drain_report(void)
+ 		put_s(&l, " windows since boot closed while one waited to be "
+ 			  "printed");
+ 	}
++	put_s(&l, "; since boot, ");
++	put_u(&l, lapic_icr_nested());
++	put_s(&l, " IPI sends began between another's wait and its second "
++		  "write on the same processor (ablations/593-icr-open.patch)");
+ 	put_s(&l, " (#593)");
+ 	printf("%s\n", l.b);
+ 
+diff --git a/uros/src/mach_kernel/x86_64/time/tsc_watch.c b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
+index cad0bb09..2d27d540 100644
+--- a/uros/src/mach_kernel/x86_64/time/tsc_watch.c
++++ b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
+@@ -91,6 +91,53 @@
+ #include <time/rulers.h>
+ #include <time/tsc.h>
+ 
++/*
++ * #593: this ablation's load.  It leaves an IPI send open to an interrupt
++ * between its halves, and counts the sends that began inside another -- but
++ * a processor sends from thread context with interrupts on only now and
++ * then, and 100 s of the HPET's broadcast at four processors found none.  So
++ * for one second this thread, bound to the boot processor where the
++ * broadcast's class-fifteen interrupt lands, does nothing but send, and says
++ * how many sends landed inside one of its own.
++ */
++#include <cpu/ipi.h>
++#include <cpu/lapic.h>
++#include <cpu/smp.h>
++
++static void icr_stress(void)
++{
++	uint64_t	rate = tsc_hz(), t0, sent = 0, before;
++	uint32_t	self_apic = lapic_id();
++	int		self = apic_to_cpu(self_apic), target = self;
++	unsigned	c;
++
++	/*
++	 * Processors by number, the hardware by id (#663); the ablation's
++	 * count is by id, since it is kept where %gs cannot be read.
++	 */
++	for (c = 0; c < smp_cpu_count(); c++)
++		if ((int) c != self && smp_is_online(c)) {
++			target = (int) c;
++			break;
++		}
++	before = lapic_icr_nested_on(self_apic);
++	t0 = rdtsc();
++	do {
++		if (target == self)
++			lapic_send_self(IPI_VECTOR_AST);
++		else
++			lapic_send_ipi(cpu_to_apic((unsigned) target),
++				       IPI_VECTOR_AST);
++		sent++;
++	} while (rate != 0 && rdtsc() - t0 < rate);
++	printf("UrMach x86-64: the ICR stress: %llu AST IPIs from thread "
++	       "context on cpu %u to cpu %u in a second, and %llu sends by an "
++	       "interrupt began between the wait and the second write of one "
++	       "of them (ablations/593-icr-open.patch, #593)\n",
++	       (unsigned long long)sent, (unsigned) self, (unsigned) target,
++	       (unsigned long long)(lapic_icr_nested_on(self_apic) - before));
++}
++
+ #define WATCH_CONFIRM		3	/* windows in a row before naming */
+ #define WATCH_SUMMARY		60	/* windows between summary lines */
+ #define WATCH_RULERS_PPM	1000	/* between two rulers: 500 each */
+@@ -423,6 +470,9 @@ void tsc_watch(void)
+ 		 */
+ 		clock_event_drain_reports();
+ 
++		if (windows == 3)
++			icr_stress();
++
+ 		live = 0;
+ 		for (i = 0; i < n; i++) {
+ 			if (!w[i].live)

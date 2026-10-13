@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #676
+Holds open: the restart line a second after the panic and its backtrace, so that the harness always finds the panic first -- the order a slow runner gave entry 44 in one or two boots a campaign
+Run: --entry 44 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/model.c b/uros/src/mach_kernel/x86_64/cpu/model.c
+index 008506c3..942cdb69 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/model.c
++++ b/uros/src/mach_kernel/x86_64/cpu/model.c
+@@ -238,6 +238,7 @@ halt_cpu(void)
+ 		if (boot_flag('b') &&
+ 		    atomic_cmpxchg64(&panic_reset_claim, 0, 1) == 0) {
+ 			halt_wait_others();
++			reset_wait_us(1000000u);
+ 			printf("panic: -b: restarting the machine in %u seconds "
+ 			       "(#373)\n", PANIC_RESET_SECONDS);
+ 			reset_wait_us(PANIC_RESET_SECONDS * 1000000u);

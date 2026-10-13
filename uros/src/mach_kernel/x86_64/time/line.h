@@ -26,8 +26,8 @@ struct line {
 /*
  * 🔴 A LINE THAT DOES NOT FIT IS CUT, AND SAYS SO.  It used to stop at the
  * buffer's end without a word, which reads as a line that had nothing more
- * to say: the HPET's window line under UROS_ABLATE_593_ICR_OPEN ran past 399
- * characters in every window, and lost its last words -- the name of the
+ * to say: the HPET's window line under ablations/593-icr-open.patch ran past
+ * 399 characters in every window, and lost its last words -- the name of the
  * ablation among them -- with no sign of it.
  */
 #define	LINE_CUT_MARK	" [line cut]"

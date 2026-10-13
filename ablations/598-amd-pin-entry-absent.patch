@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #598
+Takes out: the I/O APIC's entry written on AMD -- the pin keeps its words and its entry in the I/O APIC's table stays empty, which the engine refuses (RemapEn clear, target abort)
+Run: --iommu amd --entry 36 200 -smp 1
+Expect: irq 0 on pin [0-9]+ delivered [0-9]+ while masked and 0 once routed
+Expect: failed to remap interrupt from devid 0xa0
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index 62808c6c..256b070d 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -484,7 +484,7 @@ int iommu_remap_pin(unsigned pin, uint8_t vector, uint32_t apic_id,
+ 	 * the I/O APIC's own table -- and only the entry is written.
+ 	 */
+ 	if (found_vendor == IOMMU_AMD)
+-		return iommu_amd_remap_entry(source, vector, apic_id);
++		return 1;
+ 
+ 	return iommu_vtd_remap_pin(pin, source, vector, apic_id, level,
+ 				   active_low, lo, hi);

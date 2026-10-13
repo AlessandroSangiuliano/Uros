@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #475
+Takes out: act_machine_return() as a real return -- it panics again, so thread_terminate() of a thread stopped inside exception_raise() stops the machine
+Run: --entry 14 600 -smp 4
+Expect: this machine has no RPC activation chain
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index f975f0ed..82c5b0ce 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -759,6 +759,8 @@ pcb_user_to_kernel(thread_act_t thr_act)
+ void
+ act_machine_return(kern_return_t code)
+ {
++	panic("act_machine_return(0x%x): this machine has no RPC "
++	      "activation chain to return through (#453)", code);
+ 
+ 	/*
+ 	 * The one caller passes KERN_TERMINATED and the name says why: an

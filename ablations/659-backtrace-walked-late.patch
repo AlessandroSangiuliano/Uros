@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #659
+Takes out: the NMI's backtrace walked by the handler -- it is walked from the saved rbp after the NMI returned, as before 360dfc7b, through frames the calls since wrote over, now that the NMI lands inside an icr_send() no longer inlined
+Run: --entry 0 300 -smp 1
+Expect: the backtrace from an NMI is [0-9]+ frames from .* — WRONG, the chain does not reach the bottom
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/entry_test.c b/uros/src/mach_kernel/x86_64/trap/entry_test.c
+--- a/uros/src/mach_kernel/x86_64/trap/entry_test.c
++++ b/uros/src/mach_kernel/x86_64/trap/entry_test.c
+@@ -481,8 +481,15 @@
+ 		  ? " — the gate switched stacks, which is what the slot is for\r\n"
+ 		  : " — WRONG, it did not run on the stack the table names\r\n");
+ 
+-	report_backtrace("an NMI", t->bt_depth, t->bt_first,
+-			 t->bt_reached_boot);
++	{
++		const char *first = 0;
++		int reached = 0;
++		unsigned depth = x86_64_backtrace_probe(t->rbp, &first,
++							"x86_64_boot",
++							&reached);
++
++		report_backtrace("an NMI", depth, first, reached);
++	}
+ }
+ 
+ __attribute__((noinline)) static void nmi_gate_test(void)

@@ -7,7 +7,7 @@
 # ISO on -cdrom, with a separate data disk beside it; it is now the disk
 # itself, which is the whole of what QEMU is handed (#520).
 #
-# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [--kvm] [seconds] [qemu args...]
+# Usage: run-x86_64.sh [--iommu intel|amd|intel-eim|amd-xt] [--hpet fsb] [--entry N] [--kvm] [--socket1-cpu] [seconds] [qemu args...]
 #   run-x86_64.sh
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
@@ -179,6 +179,19 @@ DOUBLE_FAULT='breaking the stack on purpose'
 # silently continuing to pass.
 EXPECTED_END='No bootstrap code loaded with the kernel'
 
+# 🔴 A PANIC, IN EITHER OF ITS TWO SHAPES (#624).
+#
+# `panic(cpu' is the first line, and the one line of a panic that is NOT sure to
+# arrive whole: another processor's output can land inside it ("thread_ipnfanic(cpu
+# 1): Debugoger..." on OMEGA, entry 22).  Every processor's `cpu N backtrace
+# (addr2line ...)' header comes after it, from x86_64_backtrace_after(), which only
+# the two ways of dying call -- halt_cpu()'s panic branch and the fatal trap report
+# -- and each is printed under the backtrace lock, so it arrives whole.  Either
+# shape is a panic.
+PANIC_RE='panic\(cpu|cpu [0-9]+ backtrace \(addr2line'
+# Defined here, above verdict() and the --judge path that calls it before the
+# rest of this file has run.
+
 verdict() {
 # 🔑 Read out of the LOG and not out of the live variable, so that --judge on a
 # log taken weeks ago says what made it.  A log with no conditions block is one
@@ -222,10 +235,47 @@ UNKNOWNS=$(grep -ac "$UNKNOWN_VERDICT" "$LOG" || true)
 BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
 	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
+# #624: a panic whose first line arrived in pieces still leaves its backtraces
+# whole.  One of them names it -- once, and only when no whole `panic(cpu' line
+# does, so a panic is still one unexplained line and not one per processor.
+if ! grep -aq 'panic(cpu' "$LOG"; then
+	SHREDDED=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
+	[ -n "$SHREDDED" ] && BAD=$(printf '%s\n%s' "$BAD" \
+		"PANIC (#624), its first line in pieces: $SHREDDED" | sed '/^$/d')
+fi
+# #624: a task the kernel killed because nothing would take its exception.
+# exception_no_server() says so in one line, the task is gone, and nothing else
+# in the log has to fail for it: in #645's forkrace test without its fix, ten
+# children died of EXC_BAD_ACCESS and the run was reported passed.  No test
+# kills a task this way on purpose -- of 3493 logs, the 18 with the line are
+# ablations and runs that failed anyway -- so every one is unexplained.
+DEATHS=$(grep -a 'exception_no_server: terminating task' "$LOG" || true)
+[ -n "$DEATHS" ] && BAD=$(printf '%s\n%s' "$BAD" "$DEATHS" | sed '/^$/d')
 # #578: a line that carries two programs' output is a failure too, and it is
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
 [ -n "$GARBLED" ] && BAD=$(printf '%s\n%s' "$BAD" "$GARBLED" | sed '/^$/d')
+# #661: a line with a character the screen draws as the replacement, because
+# its font has no glyph for it.  That line does not read on the screen as on
+# the wire, and on a machine with no serial port the screen is all there is.
+# Read off the log, against the font's own table, by fbcons-no-glyph.py.
+#
+# 🔴 NOT FROM THE KERNEL'S COUNT, which is where this read it first.  The
+# kernel counts them, but says the count when the quiet census reports, and a
+# line printed after its last report was counted where nobody could read it:
+# entry 9's "⚠️", which the bench prints after the census's last word, passed.
+#
+# 🔴 And its exit status is read, not only what it printed: through a pipe it
+# was lost, and a check that could not read the table printed nothing, which
+# passed (#661's review).  It says why on the one line it prints.
+NOGLYPH_RC=0
+NOGLYPH=$(python3 "$REPO/scripts/fbcons-no-glyph.py" "$LOG") || NOGLYPH_RC=$?
+if [ "$NOGLYPH_RC" -ne 0 ]; then
+	NOGLYPH="NO GLYPH (#661): the check could not run (exit $NOGLYPH_RC): $(printf '%s\n' "$NOGLYPH" | tail -n 1)"
+else
+	NOGLYPH=$(printf '%s\n' "$NOGLYPH" | sed '/^$/d; s/^/NO GLYPH (#661): line /')
+fi
+[ -n "$NOGLYPH" ] && BAD=$(printf '%s\n%s' "$BAD" "$NOGLYPH" | sed '/^$/d')
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
@@ -372,6 +422,15 @@ must_report() {
 	fi
 	echo "  FAILED: '$1' appeared and '$2' never did."
 	echo "          $3"
+	# #624: a test a panic cut short never reports, and a run that fails here
+	# never reaches the list of unexplained lines where the panic is named --
+	# so it is named here, whole or by the backtrace its shredded first line
+	# left, where the reader is looking.
+	_panic=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
+	if [ -n "$_panic" ]; then
+		echo "          the machine had panicked (#624):"
+		echo "            $_panic"
+	fi
 	# #578: "never did" is also what a line looks like when it arrived in two
 	# pieces with another program's output between them.  If the wire has
 	# such lines, they are shown here, where the reader is looking.
@@ -398,12 +457,32 @@ must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
 must_report 'ioapic_race: racing' 'ioapic_race: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#599).'
+must_report 'msi_race: racing' 'msi_race: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Both sides are bounded and the verdict is printed either way; a run that stops after the start line has stopped inside the race (#598).'
 must_report 'spl_test: starting' 'spl_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every thread stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside the raises, which is the face of #526 that stops a machine (#526).'
 must_report 'shootdown_test: \[1\] starting' 'shootdown_test: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every remapper stops on a count or a clock and the verdict is printed either way; a run that stops after the start line has stopped inside a shootdown (#638).'
 must_report 'shootdown_test: \[2\] starting' 'shootdown_test: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
 	'A cross-call sent to its own sender never returns: it ends the boot with a panic that names it.  A run that stops after the start line without that panic has stopped somewhere else inside the calls (#638).'
+must_report 'rcu_tick: starting' 'rcu_tick: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait on either side is bounded and the verdict is printed either way; a run that stops after the start line has stopped inside a read section or in a grace period that does not end (#649).'
+must_report 'sprintf_test: starting' 'sprintf_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Both sides make a fixed number of calls and the verdict is printed either way; a run that stops after the start line has stopped inside sprintf(), whose lock one side never gave back (#655).'
+must_report 'clear_wait_test: starting' 'clear_wait_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'The rounds are a fixed number and the waker stops on a flag, so the verdict is printed either way; a run that stops after the start line has stopped in a clear that waits for a waker that never finishes, or has panicked in assert_wait() on a wait left behind (#599).'
+must_report 'census_test: starting' 'census_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'The victims end on their own and the walk is one pass under a lock, so the verdict is printed unless the walk does not come back; a run that stops after the start line has faulted or looped inside the census, on a thread freed under it (#657).'
+must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
+must_report 'boot_probe: the startup handed me argv\[0\]' 'boot_probe: the startup handed me argv\[0\] = boot_probe' \
+	'boot_probe prints this line whole, with one mach_print() (#644).  A line that starts and never names it was cut after the prefix by another processor'"'"'s output -- where the GARBLED check does not look, since a cut after a space passes it (#578) -- and the name stands alone further down.'
+must_report 'swap_disable: \[1\] starting' 'swap_disable: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait in the arm is bounded and the verdict is printed either way.  A second swap-in of the same stack ends the boot in the assertion of thread_doswapin(); a run that stops after the start line without that panic has stopped inside thread_swap_disable() (#642).'
+must_report 'swap_disable: \[2\] starting' 'swap_disable: \[2\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait in the arm is bounded and the verdict is printed either way.  A run that stops after the start line has stopped inside the swapper scan or inside thread_swap_disable() (#642).'
+must_report 'swap_disable: \[3\] starting' 'swap_disable: \[3\] \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait in the arm is bounded and the verdict is printed either way.  A run that stops after the start line has stopped inside thread_swap_disable() or the swap-in it waits for (#642).'
 # ⚠️ The terminator matches any count, not `3 of 3'.  A run that reported "2 of
 # 3" DID finish and its failing arm is already caught as a WRONG line; asking
 # here for the passing count as well would report one defect as two, and would
@@ -644,6 +723,8 @@ fi
 IOMMU_ARGS=""
 IOMMU_NAME="none"
 KVM_ARGS=""
+HPET_ARGS=""
+SOCKET1_CPU=0
 
 # Kept before the loop below eats them, so the conditions block can say how the
 # run was actually driven (#516).  A condition nobody can reproduce the command
@@ -661,10 +742,31 @@ while :; do
 		case "${2:-}" in
 		intel)	IOMMU_ARGS="-device intel-iommu" ;;
 		amd)	IOMMU_ARGS="-device amd-iommu,dma-remap=on" ;;
-		*)	echo "usage: $0 [--iommu intel|amd] [--entry <n>] [seconds] [qemu args]" >&2
+		# #659: engines that take x2APIC ids.  QEMU's intel-iommu reports
+		# EIM under TCG only with eim=on, and takes eim=on only with
+		# intremap=on (vtd_decide_config() in hw/i386/intel_iommu.c,
+		# 11.1.1); its amd-iommu reports XTSup with xtsup=on, beside the
+		# GASup it always reports.  Under KVM both need the split irqchip,
+		# which the board below then asks for.
+		intel-eim)
+			IOMMU_ARGS="-device intel-iommu,intremap=on,eim=on" ;;
+		amd-xt)	IOMMU_ARGS="-device amd-iommu,dma-remap=on,xtsup=on" ;;
+		*)	echo "usage: $0 [--iommu intel|amd|intel-eim|amd-xt] [--entry <n>] [seconds] [qemu args]" >&2
 			exit 2 ;;
 		esac
 		IOMMU_NAME=$2
+		shift 2 ;;
+	--hpet)
+		# #598: an HPET whose comparators can send an FSB message, the
+		# route -H takes wherever one can.  QEMU's can only with
+		# hpet.msi=on, so without this no run here took that route, or
+		# passed it over under -i.  An option and not a pass-through,
+		# so that the merge test, which gives options, can ask for it.
+		case "${2:-}" in
+		fsb)	HPET_ARGS="-global hpet.msi=on" ;;
+		*)	echo "usage: $0 [--iommu intel|amd] [--hpet fsb] [--entry <n>] [seconds] [qemu args]" >&2
+			exit 2 ;;
+		esac
 		shift 2 ;;
 	--kvm)
 		# 🔑 AN OPTION AND NOT A PASS-THROUGH FLAG (#567).
@@ -678,6 +780,18 @@ while :; do
 		# Asked for here, before the positionals, it cannot land in the
 		# wrong slot at all.
 		KVM_ARGS="-enable-kvm"
+		shift ;;
+	--socket1-cpu)
+		# 🔑 A PROCESSOR WHOSE APIC ID IS NOT ITS NUMBER (#663).
+		#
+		# QEMU numbers its processors 0 to N-1 and gives processor N
+		# the APIC id N, so a kernel that used the id as the number
+		# passed every run here.  OMEGA's E-cores have ids 64 to 94.
+		# This adds one processor at socket 1, core 0: with the -smp
+		# the caller gives -- sockets=2,cores=64 and a maxcpus of 128,
+		# say -- that is APIC id 64, beside the boot processor's 0, and
+		# a MADT of 128 entries of which two are enabled.
+		SOCKET1_CPU=1
 		shift ;;
 	*)
 		break ;;
@@ -776,6 +890,18 @@ done
 # to decline, hundreds of lines early, be read as the end of the boot.
 DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG|NOT ASKED)|fpu_stress: halting the machine|fpu_stress: ([0-9]+ of|NOT ASKED)|state_test: ([0-9]+ of|NOT ASKED)|ast_test: (PASS|WRONG|NOT ASKED)|cow_test: [0-9]+ of [0-9]+ arms passed|=== Benchmark complete ===|Assertion failed|panic\(cpu'
 
+# 🔑 A BOOT THAT RESTARTS ITSELF ENDS AT THE RESTART (#373).  With -b the
+# kernel resets the machine after the quiet census, on reset_after='s deadline
+# or five seconds after a panic, and says so first: `reset: -b: the machine
+# restarts ...' while it starts, `panic: -b: restarting the machine ...' on the
+# way down.  From that line on, neither a done line nor a panic is the end --
+# the restart is, which with -no-reboot is qemu leaving by itself, the zone's
+# check of what Linux will read among its last lines.  Ended at the done line,
+# as every other boot is, entry 42 was cut off fifteen seconds before its
+# deadline, and entry 44 inside the five seconds after its panic, where the log
+# had stopped growing.  The quiet budget and the wall cap still bound it.
+RESTART_RE='reset: -b: the machine restarts|panic: -b: restarting the machine'
+
 SECS_IN=${1:-90}
 [ $# -gt 0 ] && shift
 
@@ -861,6 +987,14 @@ case " $* " in
 *)		CPU_ARGS="-cpu max" ;;
 esac
 
+# The added processor's type has to be the -cpu model's, and only the default
+# is known here: refused rather than guessed for a model the caller named (#663).
+SOCKET1_ARGS=""
+if [ "$SOCKET1_CPU" = 1 ]; then
+	[ -n "$CPU_ARGS" ] || { echo "run-x86_64: --socket1-cpu adds a processor of the default model, -cpu max, and the command line names another" >&2; exit 2; }
+	SOCKET1_ARGS="-device max-x86_64-cpu,socket-id=1,core-id=0,thread-id=0"
+fi
+
 # ── How much memory, and it was never said (#427) ─────────────────────
 #
 # 🔴 THIS SCRIPT PASSED NO -m AT ALL, so every x86-64 run this port has made
@@ -913,10 +1047,23 @@ echo "=== accelerator: $ACCEL ==="
 # ⚠️ Only then.  `intel-iommu' requires q35 and the default `pc' is a 1996
 # i440FX; a caller who named a machine on purpose gets theirs, and qemu's own
 # refusal, which says more than this silently overriding them would.
+#
+# #659: and under KVM, an engine that takes x2APIC ids asks for the split
+# irqchip.  QEMU remaps interrupts only with the I/O APIC out of the host
+# kernel: under the full irqchip intremap defaults to off, and intremap=on is
+# refused (x86_iommu_realize() in hw/i386/x86-iommu.c, 11.1.1); and under the
+# split one, eim=on and xtsup=on need KVM's X2APIC_API (vtd_decide_config(),
+# amdvi_sysbus_realize()).  Decided by $ACCEL above, which reads -enable-kvm
+# and -accel wherever they came from (#567).  The plain engines keep the full
+# irqchip, and remap nothing under KVM, as before.
 if [ -n "$IOMMU_ARGS" ]; then
+	BOARD="q35"
+	case "$IOMMU_NAME:$ACCEL" in
+	intel-eim:KVM*|amd-xt:KVM*)	BOARD="q35,kernel-irqchip=split" ;;
+	esac
 	case " $* " in
 	*" -machine "*|*" -M "*)	: ;;
-	*)				IOMMU_ARGS="-machine q35 $IOMMU_ARGS" ;;
+	*)				IOMMU_ARGS="-machine $BOARD $IOMMU_ARGS" ;;
 	esac
 fi
 
@@ -1000,7 +1147,7 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 QERR="$LOG.qemu-stderr"
 : > "$QERR"
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $KVM_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
 QPID=$!
 
@@ -1036,7 +1183,13 @@ QPID=$!
 # the deadline on for as long as the tick ran: a machine stopped with its
 # clock alive never went quiet, reached the hard cap, and was called a
 # livelock (a stay-up boot ran its full ten times SECS, every time).
-IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
+#
+# #624: and, when the tick comes from the HPET, that backend's own two lines
+# beside clock_event's, its window and each processor's re-arm (hpet_event.c,
+# #593).  Missing here, they kept OMEGA's basso2-g12-e22-tcg4-2 going for
+# 2 h 27 min after the machine had stopped in its third minute, until it was
+# killed by hand: its last line that meant something is line 778 of 2604.
+IDLE_CHATTER='quiet_census:\|^clock_event: window [0-9]* on \|^clock_event: cpu [0-9]* took [0-9]* ticks in window \|^clock_event: hpet: window [0-9]*, \|^clock_event: hpet: cpu [0-9]* re-armed \|^UrMach x86-64: the TSC watchdog, [0-9]* windows: '
 
 # The hard cap, which is still wall time and still needed: a livelock that
 # keeps printing meaningful lines forever is progress by this measure and has
@@ -1160,7 +1313,14 @@ while kill -0 "$QPID" 2>/dev/null; do
 	# for the same reason -- see the note there.  🔥 That they are written
 	# TWICE in this file is its own hazard: the first copy was corrected for
 	# act_test's fifth arm and this one would have gone on waiting.
-	if grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; then
+	# 🔴 A PANIC ENDS THE RUN, whatever tests it cut short (#624).  The test
+	# that was running when the machine died will never print its last line,
+	# and waiting for it -- all_reported -- held every panicking run for its
+	# whole quiet budget, twenty minutes under TCG, after the machine had
+	# stopped.  The wait below still lets the backtraces finish.
+	if ! grep -aqE "$RESTART_RE" "$LOG" &&
+	   { grep -aqE "$PANIC_RE" "$LOG" \
+	     || { grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; }; }; then
 		# #599: a panic is not over at its first line.  The console's
 		# final copy and every processor's backtrace come after it, at
 		# the wire's pace -- four processors' worth is seconds of bytes
@@ -1168,12 +1328,24 @@ while kill -0 "$QPID" 2>/dev/null; do
 		# line, whatever was still coming.  So a run that ends in a panic
 		# waits until its log has stopped growing for three seconds,
 		# within a minute; every other end is as it was.
-		if grep -aq 'panic(cpu' "$LOG"; then
+		#
+		# 🔴 #676: AND A PANIC SEEN BEFORE ITS RESTART LINE IS NOT THE END.
+		# With -b the kernel says `panic: -b: restarting the machine' after
+		# the backtrace, so a poll can find the panic with the restart line
+		# not yet written.  This wait ended at three still seconds and
+		# never looked again, and the kernel's five seconds before its reset
+		# are still: on GitHub's slower runners entry 44 was cut there, in
+		# one or two boots a campaign, the zone's check and the reset never
+		# reached.  The wait now watches for the restart line too, and a
+		# boot that says it restarts goes back to waiting for qemu to leave,
+		# within the quiet budget and the wall cap like any other.
+		if grep -aqE "$PANIC_RE" "$LOG"; then
 			_PANIC_SIZE=-1
 			_PANIC_STILL=0
 			_PANIC_WAITED=0
 			while [ "$_PANIC_STILL" -lt 3 ] && [ "$_PANIC_WAITED" -lt 60 ] &&
 			      kill -0 "$QPID" 2>/dev/null; do
+				grep -aqE "$RESTART_RE" "$LOG" && break
 				_PANIC_NOW=$(stat -c %s "$LOG")
 				if [ "$_PANIC_NOW" = "$_PANIC_SIZE" ]; then
 					_PANIC_STILL=$((_PANIC_STILL + 1))
@@ -1184,6 +1356,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 				sleep 1
 				_PANIC_WAITED=$((_PANIC_WAITED + 1))
 			done
+			grep -aqE "$RESTART_RE" "$LOG" && continue
 		else
 			sleep 1
 		fi
@@ -1226,6 +1399,16 @@ fi
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+
+# 🔴 What is appended below starts on a line of its own.  The readers of the
+# log -- double-panic-check.sh, fbcons-no-glyph.py -- take a line that begins
+# with qemu's header or "=== run conditions" for the end of the guest's output,
+# and a guest whose last line had no newline, cut off by the kill, glued the
+# header to it: the readers went on into the harness's own lines, "⚠️ THE CLOCK
+# MOVED" among them (#661's review).
+# Counted with wc -l, which a NUL as the last byte cannot hide the way it
+# vanishes from a command substitution (#661's review, two rounds).
+[ -s "$LOG" ] && [ "$(tail -c 1 "$LOG" | wc -l)" -eq 0 ] && printf '\n' >> "$LOG"
 
 # qemu's own messages, after everything the guest said (#613).  The header is
 # what the readers below and double-panic-check.sh take for the end of the
@@ -1289,7 +1472,7 @@ UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
 	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
 	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
-	"cpu:          ${CPU_ARGS:-from the command line}" \
+	"cpu:          ${CPU_ARGS:-from the command line}${SOCKET1_ARGS:+, and $SOCKET1_ARGS (#663)}" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
 	"entry:        ${UROS_X86_64_BOOT_ENTRY:-from grub.cfg default}" \
 	"budget:       ${SECS}s" \

@@ -13,10 +13,31 @@
 /*
  * The most processors this kernel will start.  A cap on the stack table,
  * which has to exist before the count is known — the table is what an AP
- * indexes with its own id on its way in, so it cannot be sized from the
+ * indexes with its own number on its way in, so it cannot be sized from the
  * answer it is part of finding out.
  */
 #define SMP_MAX_CPUS	64
+
+/*
+ * 🔑 A PROCESSOR'S NUMBER IS NOT ITS APIC ID (#663).
+ *
+ * Processors are numbered 0 to N-1, the boot processor 0 and the others in the
+ * order the MADT lists them, and the number is what every per-processor table,
+ * mask and cpu_number() uses.  The APIC id is the hardware's name for one,
+ * wanted only where the hardware is addressed, and the translation is here,
+ * one function each way.  The two used to be the same, which held under QEMU,
+ * where processor N has id N; OMEGA's E-cores have ids 64 to 94, past every
+ * table this kernel sizes by 64.
+ *
+ * smp_number_bsp() runs before anything indexes by number, and the boot
+ * processor is 0 from then on whatever its id; smp_number_cpus() numbers the
+ * others once ACPI has listed them, and answers how many did not fit.
+ */
+void		smp_number_bsp(uint32_t apic_id);
+unsigned	smp_number_cpus(void);
+unsigned	smp_cpu_count(void);
+uint32_t	cpu_to_apic(unsigned cpu);
+int		apic_to_cpu(uint32_t apic_id);
 
 /*
  * Wake every processor ACPI listed as startable, and answer with how many
@@ -55,6 +76,14 @@ unsigned smp_ap_call_probe(void);
 unsigned smp_online_count(void);
 
 /*
+ * #659: how many application processors were not in the boot processor's
+ * APIC mode at the moment they could first report a fault, where
+ * ap_start_c() switches them: a fault report there would have touched the
+ * other mode's registers.
+ */
+unsigned smp_ap_mode_late(void);
+
+/*
  * Publish that count as real_ncpus, which the machine-independent scheduler
  * reads to decide when the machine is up.  Called once, after the others
  * have reported in -- there is nothing to count before that (#453).
@@ -80,14 +109,23 @@ void machine_real_ncpus_init(void);
  */
 void machine_slots_init(void);
 
-/* Whether a given APIC id has reported in. */
-int smp_is_online(uint32_t apic_id);
+/* Whether the processor numbered `cpu' has reported in. */
+int smp_is_online(unsigned cpu);
 
 /*
- * Every processor that answers a broadcast, one bit per APIC id: the ones that
- * reported in AND the boot processor, which online_mask never holds because it
- * never arrived anywhere (#605).  What a cross-call that times out has to
- * compare against to say who did not answer.
+ * #659: whether the processor numbered `cpu' can be woken in the APIC mode
+ * the boot settled on -- the command register can name its id -- and how
+ * many smp_start_others() woke.  One it could not name was not woken, and is
+ * not "silent": it was never asked.
+ */
+int smp_wakeable(unsigned cpu);
+unsigned smp_woken_count(void);
+
+/*
+ * Every processor that answers a broadcast, one bit per processor number: the
+ * ones that reported in AND the boot processor, which online_mask never holds
+ * because it never arrived anywhere (#605).  What a cross-call that times out
+ * has to compare against to say who did not answer.
  */
 uint64_t smp_answering_set(void);
 

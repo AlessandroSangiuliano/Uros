@@ -41,16 +41,6 @@ static void exact_decide(void)
 	uint64_t		adopted;
 
 	freq_exact_read(&e);
-#if	ABLATE_594_NTP_SLEW
-	/*
-	 * #594: the rulers' answer carries a host's NTP slew over the 30 ms
-	 * the runs took -- 5%, the order the kernel's PLL reaches with a 0.4 s
-	 * offset at constant 1 (tsc_watch.c says how) -- so the exact sources
-	 * are checked against rulers that are wrong for a reason a hypervisor's
-	 * guest cannot see.  Never on in a kernel booted for anything else.
-	 */
-	tsc_rate -= tsc_rate / 20;
-#endif
 	adopted = exact_choose(e.tsc_hz, tsc_rate, rulers_bracket_ppm(),
 			       &source);
 	if (adopted != 0)
@@ -79,42 +69,8 @@ static uint64_t subject_tsc(void)
 	return rdtsc_ordered();
 }
 
-#if	ABLATE_508_ONE_RUN_OUT || ABLATE_586_TSC_DISAGREE
-static void ablate_runs(uint64_t run_hz[RULER_RUNS])
-{
-	unsigned i;
-
-	(void)i;
-#if	ABLATE_508_ONE_RUN_OUT
-	/*
-	 * #508: one run reads one part in thirty-two high, the shape of every
-	 * refusal the old calibration took on its own, so the median can be
-	 * seen setting it aside.
-	 */
-	run_hz[0] += run_hz[0] / 32;
-#endif
-#if	ABLATE_586_TSC_DISAGREE
-	/*
-	 * #586, reshaped by #508: every run of every attempt reads a different
-	 * amount high, one part in thirty-two apart, so no two ever agree and
-	 * the calibration declines on purpose -- which is how every consumer of
-	 * tsc_hz() is seen answering a machine that could not calibrate.  With
-	 * one run out of three, the median would simply set it aside.
-	 */
-	for (i = 0; i < RULER_RUNS; i++)
-		run_hz[i] += run_hz[i] * i / 32;
-#endif
-}
-#define	TSC_ABLATE	ablate_runs
-#else
-#define	TSC_ABLATE	0
-#endif
-
 /*
  * Against every ruler the machine has, and then they vote (time/rulers.h).
- * The ablations reach every ruler's runs alike: #586's has to leave the
- * machine with no ruler that answered, or the vote would carry on without the
- * 8254 and the NOT ASKED paths it exists to run would not run.
  */
 int tsc_calibrate(void)
 {
@@ -129,7 +85,7 @@ int tsc_calibrate(void)
 			continue;
 		rulers_start(id);
 		(void) ruler_calibrate(&k->r, subject_tsc, ~0ULL, k->span,
-				       1ULL << 34, TSC_ABLATE, &k->tsc);
+				       1ULL << 34, 0, &k->tsc);
 		rulers_stop(id);
 	}
 

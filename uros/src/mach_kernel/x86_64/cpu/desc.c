@@ -54,17 +54,10 @@ _Static_assert(KERNEL_DS_SELECTOR == KERNEL_CS_SELECTOR + 8,
  * iretq will accept afterwards.  The assertion that catches that is the one
  * about the whole selector.
  */
-#if	ABLATE_477
-_Static_assert(USER_DS_SELECTOR == SYSRET_SELECTOR_BASE + 8,
-	       "SYSRET loads SS from the STAR base + 8");
-_Static_assert(USER_CS_SELECTOR == SYSRET_SELECTOR_BASE + 16,
-	       "SYSRET loads CS from the STAR base + 16");
-#else
 _Static_assert(USER_DS_RPL3 == SYSRET_SELECTOR_BASE + 8,
 	       "SYSRET composes SS as the STAR base + 8, ring bits included");
 _Static_assert(USER_CS_RPL3 == SYSRET_SELECTOR_BASE + 16,
 	       "SYSRET composes CS as the STAR base + 16, ring bits included");
-#endif
 _Static_assert(GDT_FIXED_SLOTS * 8 > USER_CS_SELECTOR,
 	       "the fixed slots do not cover the selectors they must hold");
 
@@ -160,10 +153,7 @@ static void load_gdt(void)
 
 void desc_init_bsp(void)
 {
-	uint32_t self = cpu_apic_id();
-
-	if (self >= SMP_MAX_CPUS)
-		panic("desc: the boot processor's APIC id is past the tables");
+	uint32_t self = 0;	/* the boot processor's number (#663) */
 
 	gdt[0] = 0;
 	gdt[1] = 0x00209A0000000000ULL;		/* code: L, present, DPL0, R/X */

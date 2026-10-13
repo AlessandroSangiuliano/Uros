@@ -15,3 +15,6 @@ uros/src/sysenter_test/sysenter_test.S
 scripts/.layout-probe.c
 
 .vscode/c_cpp_properties.json
+
+# scripts/ci/job.sh writes a campaign job's rows, logs and build here (#653)
+ci-out/

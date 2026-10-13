@@ -195,14 +195,29 @@ wp_probe_body(void)
 	}
 }
 
+static void kernel_wait_preempt_test_body(int me);
+
+/*
+ * The driver stays on the processor it chose from (#646).  It read
+ * cpu_number() bare, on an unbound thread, and then counted on running
+ * there; a move in between left `me' naming a processor it had left.
+ */
 void
 kernel_wait_preempt_test(void)
+{
+	processor_t	was = current_thread()->bound_processor;
+
+	kernel_wait_preempt_test_body(thread_bind_here());
+	thread_bind(current_thread(), was);
+}
+
+static void
+kernel_wait_preempt_test_body(int me)
 {
 	thread_t	th;
 	thread_act_t	act;
 	processor_t	target = PROCESSOR_NULL;
 	uint64_t	t0, second;
-	int		me = cpu_number();
 	int		took_it = 0, took_will = 0;
 	spl_t		s;
 
@@ -235,17 +250,6 @@ kernel_wait_preempt_test(void)
 		break;
 	}
 
-#if	ABLATE_563_ALONE
-	/*
-	 * #563: pretend this processor is the only one running, so the line
-	 * that declines the question can be walked on a machine where it
-	 * would otherwise be unreachable -- there is no boot flag that caps
-	 * the processor count on this target, and an application processor
-	 * cannot be made to fail to arrive on demand.  A branch nobody has
-	 * executed is not support.
-	 */
-	target = PROCESSOR_NULL;
-#endif
 	/*
 	 * 🔑 NOT ASKED (#563).  This runs only when more than one processor was
 	 * ASKED for -- cpu/startup.c gates it on `want > 1' -- so reaching here

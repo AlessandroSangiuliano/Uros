@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #598
+Takes out: the I/O APIC pin's remapping entry under -H -i -C -- the HPET's tick reaches the engine through an entry nobody wrote, QEMU's VT-d refuses it as not present (22h) and records the fault, the burn-in counts no tick and panics.  What is checked is the instrument: the engine's 22h said before the panic, by the kernel, where the reporter's thread does not live to read it.  On a tree without iommu_fault_report_now() in the burn-in this is NOT CAUGHT, the panic coming alone
+Run: --iommu intel --entry 45 900 -smp 1
+Expect: iommu: [0-9a-f]+:[0-9a-f]+\.[0-9] was REFUSED an interrupt through entry [0-9]+ \(reason 0x22\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2189,7 +2189,7 @@
+ 	uint64_t w[2];
+ 
+ 	if (!iommu_vtd_irt_index(IOMMU_VTD_IRT_PIN, pin, &index)
+-	    || !iommu_vtd_irte(&e, vtd_x2apic, w) || !vtd_irte_write(index, w))
++	    || !iommu_vtd_irte(&e, vtd_x2apic, w))
+ 		return 0;
+ 
+ 	return iommu_vtd_ioapic_rte(index, vector, level, active_low, 0,

@@ -15,13 +15,22 @@
  * being pinned: the segment base is what makes it this processor's.  One
  * instruction, no memory the other processors can touch.
  *
+ * 🔴 But what the caller DOES with it depends on the caller being pinned
+ * (#626).  The read is right when it is made; a thread moved after it holds
+ * the number of a processor it is no longer on, and indexes that processor's
+ * data.  So the development kernel asks, at every call, whether the thread can
+ * still move -- see percpu_pinned_check() in <cpu/percpu.h> -- and a caller
+ * that wants the number only as a hint says so with cpu_number_hint().
+ *
  * i386 reads the same thing from %gs at a hard-coded offset (12).  Here the
  * offset comes from PERCPU_CPU_ID in <cpu/percpu.h>, which is also what the
  * assembly entry paths use, so the struct and the reads cannot drift apart.
  *
- * ⚠️ Valid only after percpu_activate() has run on this processor.  Before
- * that %gs's base is zero, and early in boot address zero is mapped, so a
- * premature call returns a plausible small number instead of faulting.
+ * ⚠️ Valid only once this processor has a block: the boot processor from
+ * descriptor_tables_init() on, through the boot block (#665), and the others
+ * from percpu_activate() in ap_start_c().  Before that %gs's base is zero,
+ * and early in boot address zero is mapped, so a premature call returns a
+ * plausible small number instead of faulting.
  */
 
 #ifndef _X86_64_CPU_NUMBER_H_
@@ -31,7 +40,27 @@
 
 #ifndef __ASSEMBLER__
 
-static __inline__ int cpu_number(void)
+static __inline__ __attribute__((always_inline)) int cpu_number(void)
+{
+	int cpu;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(cpu)
+			 : "i"(PERCPU_CPU_ID));
+	percpu_pinned_check(PERCPU_ASKED_NUMBER);	/* #626 */
+	return cpu;
+}
+
+/*
+ * The same read, not asked whether the thread can still move (#626).
+ *
+ * For a caller that wants the number of the processor it is on at that
+ * instant and knows it may be left at once: a statistic, a place to start
+ * looking, or a test that reads it on both sides of something to see whether
+ * the thread moved.  Each caller says which in a comment.  One that indexes
+ * this processor's data with it, and writes there, is none of these.
+ */
+static __inline__ int cpu_number_hint(void)
 {
 	int cpu;
 

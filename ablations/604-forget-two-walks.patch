@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #604
+Takes out: the single walk in pmap_forget() -- it resolves outside a read section and removes in a second walk, at the first user page fault of every boot
+Run: --entry 0 600 -smp 4
+Expect: was walked outside a read section
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+index 4b68ed94..747afd14 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -877,12 +877,11 @@ static void pmap_resident_drop(pmap_t pmap, uint64_t va)
+ 
+ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
+ {
+-	pt_entry_t removed = 0;
+-	uint64_t pa;
++	uint64_t pa = 0;
+ 	uint64_t size;
+ 
+-	size = pmap_unmap_page(pmap, va, &removed);
+-	pa = pte_to_pa(removed);
++	pmap_resolve(pmap->root_pa, va, &pa, 0);
++	size = pmap_unmap_page(pmap, va, 0);
+ 
+ 	if (size == PAGE_SIZE_4K)
+ 		pv_remove(pa, pmap, va);

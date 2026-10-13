@@ -1,0 +1,58 @@
+Kind: ablation
+Issue: #594
+Takes out: the two doors' question to device_md_io_reserved() -- i386_io_port_add() and the iopl #GP emulation no longer ask it, and the emulated channel-2 write to 0x43 is back, so kernel242_test's reads of the 8254 and its gate succeed; with 594-iopl-reopen.patch, the kernel before #594
+Run: i386, not run-x86_64.sh -- scripts/run-qemu.sh -nographic -serial mon:stdio, whose full bundle runs kernel242_test; scripts/ablate.sh cannot judge it
+Expect: a port the kernel keeps reached a task
+
+diff --git a/uros/src/mach_kernel/i386/AT386/iopl.c b/uros/src/mach_kernel/i386/AT386/iopl.c
+index 977ecb57..df18e50a 100644
+--- a/uros/src/mach_kernel/i386/AT386/iopl.c
++++ b/uros/src/mach_kernel/i386/AT386/iopl.c
+@@ -273,8 +273,6 @@ iopl_port_forbidden(
+ 	 * nothing orders a task's read against that sequence running on
+ 	 * another processor.
+ 	 */
+-	if (device_md_io_reserved((unsigned int)io_port, width) != 0)
+-	    return TRUE;
+ 
+ 	/*
+ 	 * #599: and the ports only a claimant reaches, through the RPC, under
+@@ -399,6 +397,25 @@ iopl_emulate(
+ 	if (iopb == 0)
+ 	    return FALSE;		/* no IO mapped */
+ 
++	/*
++	 * Handle outb to the timer control port,
++	 * for timer 2 only.
++	 */
++	if (io_port == PITCTL_PORT) {
++
++	    int	io_byte = regs->eax & 0xff;
++
++	    if (((iopb->bitmap[PITCTR2_PORT >> 3] & (1 << (PITCTR2_PORT & 0x7)))
++		== 0)	/* allowed */
++	     && (opcode == 0xe6 || opcode == 0xee)	/* outb */
++	     && (io_byte & 0xc0) == 0x80)		/* timer 2 */
++	    {
++		outb(io_port, io_byte);
++		return TRUE;
++	    }
++	    return FALSE;	/* invalid IO to port 42 */
++	}
++
+ 	/*
+ 	 * If the thread has the IOPL device mapped, and
+ 	 * the io port is not on the 'forbidden' list, allow
+diff --git a/uros/src/mach_kernel/i386/iopb.c b/uros/src/mach_kernel/i386/iopb.c
+index 4a15beb2..a15bd843 100644
+--- a/uros/src/mach_kernel/i386/iopb.c
++++ b/uros/src/mach_kernel/i386/iopb.c
+@@ -397,8 +397,6 @@ io_port_list_reserved(
+ 	io_reg_t	port;
+ 
+ 	while ((port = *list++) != IO_REG_NULL) {
+-	    if (device_md_io_reserved(port, 1) != 0)
+-		return port;
+ 	}
+ 	return IO_REG_NULL;
+ }

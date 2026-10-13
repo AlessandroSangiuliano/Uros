@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #659
+Takes out: the bound on a byte's wait for another processor's report -- cons_report_wait() waits for as long as the holder holds, as if 0de054a5 had come without CONS_REPORT_CYCLES, so a processor that stops while it holds a report stops every other processor's console with it
+Run: --entry 0 600 -smp 4
+Over: 659-widen-report-held.patch
+Expect: widen 659-widen-report-held: that line took ([3-9][0-9]{3}|[1-9][0-9]{4,}) ms
+Note: with the bound the line takes the bound, 4e9 TSC cycles, a second or two on the machines here; without it, until the widen's timer lets the holder go, eight seconds.  Three seconds and more is caught
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index b597a82f..bed0b973 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -577,7 +577,7 @@ static void cons_report_wait(void)
+ 	epoch = cons_report_epoch;
+ 	t0 = rdtsc_ordered();
+ 	while (cons_report_owner == owner && cons_report_epoch == epoch) {
+-		if (rdtsc_ordered() - t0 >= CONS_REPORT_CYCLES) {
++		if (0 && rdtsc_ordered() - t0 >= CONS_REPORT_CYCLES) {
+ 			cons_report_waited_out = epoch;
+ 			return;
+ 		}

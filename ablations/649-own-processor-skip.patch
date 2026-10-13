@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #649
+Takes out: urmach_rcu_advance() asking about its own processor -- the tick skips the processor it runs on again
+Run: --entry 32 1200 -smp 4
+Expect: rcu_tick: WRONG .* the callback ran while the reader was still in its section
+
+diff --git a/uros/src/mach_kernel/kern/rcu.c b/uros/src/mach_kernel/kern/rcu.c
+index 10004047..09d42961 100644
+--- a/uros/src/mach_kernel/kern/rcu.c
++++ b/uros/src/mach_kernel/kern/rcu.c
+@@ -324,6 +324,7 @@ void
+ urmach_rcu_advance(void)
+ {
+ 	int	c, done = 1;
++	int	me = cpu_number();
+ 
+ 	if (rcu_cb_list == 0 && !rcu_active)
+ 		return;
+@@ -369,6 +370,8 @@ urmach_rcu_advance(void)
+ 	 * is in a section, and a processor that reported is not holding up.
+ 	 */
+ 	for (c = 0; c < NCPUS; c++) {
++		if (c == me)
++			continue;
+ 		if (rcu_holds_up(c, rcu_snap[c])) {
+ 			done = 0;
+ 			break;

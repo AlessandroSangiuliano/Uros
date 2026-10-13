@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #603
+Takes out: the loop on the way back to ring 3 -- a return takes ASTs once, not until none is pending, so one raised while the thread was off the processor is never looked at
+Run: --entry 14 1200 -smp 1
+Expect: act_test: \[8\] .*WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 252383aa..0173c31e 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1188,8 +1188,7 @@ trap_take_ast(struct trap_frame *frame)
+ 		 * So a return to ring 3 is the same loop as the other four ways
+ 		 * back to ring 3, by being the same function.
+ 		 */
+-		thread_return_ast();
+-		return;
++		take = AST_ALL;
+ 	} else {
+ 		if (get_preemption_level() != 0)
+ 			return;

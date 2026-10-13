@@ -158,6 +158,9 @@
 /* Room for the reply and the trailer the kernel appends behind it. */
 #define MSG_BUF_SIZE		256
 
+/* The argv[0] line, prefix and name and newline, printed in one call (#644). */
+#define ARGV0_LINE_SIZE		256
+
 /* Ours, and recognisable in a hexadecimal dump. */
 #define MSG_ID			0x5eed
 #define MSG_ID_NARROW		0x5ee6
@@ -188,9 +191,33 @@ msg:
 	.zero	MSG_BUF_SIZE
 reply:
 	.zero	MSG_BUF_SIZE
+argv0_line:
+	.zero	ARGV0_LINE_SIZE	/* #644: the argv[0] line, put together */
 
 	.section .text
 	.code64
+
+/*
+ * append: copy the string at %rsi to %rdi, up to its NUL or up to %rdx, the
+ * first byte it may not write, and leave %rdi at the end, unterminated (#644).
+ * Clobbers %al and %rsi.
+ */
+	.type	append,@function
+append:
+1:
+	cmpq	%rdx, %rdi
+	jae	2f
+	movb	(%rsi), %al
+	testb	%al, %al
+	jz	2f
+	movb	%al, (%rdi)
+	incq	%rdi
+	incq	%rsi
+	jmp	1b
+2:
+	ret
+	.size	append, .-append
+
 	.globl	main
 	.type	main,@function
 main:
@@ -258,12 +285,25 @@ main:
 	movq	$IPC_A6, %r9
 	syscall
 
-	/* And the name itself, in its own words, through the kernel. */
-	leaq	argv0_prefix(%rip), %rdi
-	call	mach_print
-	movq	(%r12), %rdi
-	call	mach_print
-	leaq	newline(%rip), %rdi
+	/*
+	 * And the name itself, in its own words, through the kernel -- as ONE
+	 * line (#644).  Three calls, the prefix, the name and the newline, let
+	 * another processor's whole line land between them: 13 of the 716 boots
+	 * whose full logs victus keeps had it split.  mach_print() delivers each
+	 * call whole, so the line is put together here, bounded, and printed
+	 * once.
+	 */
+	leaq	argv0_line(%rip), %rdi
+	leaq	argv0_line+ARGV0_LINE_SIZE-3(%rip), %rdx	/* "\r\n" and NUL fit */
+	leaq	argv0_prefix(%rip), %rsi
+	call	append
+	movq	(%r12), %rsi
+	call	append
+	leaq	argv0_line+ARGV0_LINE_SIZE-1(%rip), %rdx
+	leaq	newline(%rip), %rsi
+	call	append
+	movb	$0, (%rdi)
+	leaq	argv0_line(%rip), %rdi
 	call	mach_print
 
 	call	mach_null

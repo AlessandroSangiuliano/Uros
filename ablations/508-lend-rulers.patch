@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #508
+Takes out: the legacy ports the kernel keeps -- device_md_io_reserved() keeps none, so a claim takes the 8254, its gate and the PM timer, and both checks must say WRONG: the boot line and io_claim_race's arm [5]
+Run: --entry 14 600 -smp 4
+Expect: WRONG, a ruler can be claimed
+Expect: io_claim_race: \[5\] WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index d2166b22..a201d68f 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -265,6 +265,15 @@ device_md_io_reserved(unsigned int base, unsigned int count)
+ {
+ 	unsigned int i;
+ 
++	/*
++	 * #508: keep nothing, so the claim path hands the rulers out and both
++	 * of the checks that should notice -- the boot line and
++	 * io_claim_race's arm [5] -- can be seen noticing.
++	 */
++	(void)base;
++	(void)count;
++	(void)i;
++	return 0;
+ 	for (i = 0; i < sizeof(kernel_io) / sizeof(kernel_io[0]); i++)
+ 		if (io_overlaps(base, count, kernel_io[i].base,
+ 				kernel_io[i].count))

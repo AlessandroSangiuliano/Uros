@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #563
+Takes out: the copy's window before the probe that asks whether a trap inherits it -- on a processor with SMAP the self-test must say WRONG; on one without it (-cpu core2duo) the boot must stay green and say there is no SMAP
+Run: --entry 0 600 -smp 4
+Expect: a trap raised inside a copy's window .* WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index f4c4d4de..b8527857 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -1305,7 +1305,6 @@ static void user_pmap_selftest(void)
+ 		 * are the whole of what this correction does, and the only way
+ 		 * to see it from outside.
+ 		 */
+-		pmap_user_access_begin();
+ 		(void) trap_probe_ud();
+ 		pmap_user_access_end();
+ 

@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #638
+Over: 638-widen-window.patch
+Takes out: the pin in ipi_call_mask() -- it strikes its own bit with preemption on, so a thread moved before it sends cross-calls the processor it arrived at, itself, and waits for an answer only it could give
+Run: --entry 31 1200 -smp 4
+Expect: names the processor sending it
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+index ad7cd115..a817fbdb 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+@@ -329,11 +329,10 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+ 	 * lock to send nothing.  ablations/638-strike-unpinned.patch strikes
+ 	 * the bit with preemption on again.
+ 	 */
+-	shootdown_widen();		/* before deciding: a move is harmless */
+-	disable_preemption();
+ 	mask &= ~(1ULL << cpu_number());
++	if (mask != 0)
++		shootdown_widen();	/* between deciding and sending */
+ 	ipi_call_targets(mask, fn, arg);
+-	enable_preemption();
+ }
+ 
+ /*

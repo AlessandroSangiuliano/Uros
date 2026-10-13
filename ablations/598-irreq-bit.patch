@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: ECAP.IRREQ read from its own bit 62 -- it is read from EIMER's bit 61, and an engine that blocks every message while remapping is off looks like one that does not
+Run: --entry 0 300
+Expect: iommu words decoded and encoded, 2 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index d7598978..89baab1f 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -172,7 +172,7 @@ _Static_assert(sizeof(struct dmar_scope) == 6, "a device scope header is six byt
+ #define	VTD_ECAP_QI(e)		((((e) >> 1) & 0x1) != 0)
+ #define	VTD_ECAP_EIM(e)		((((e) >> 4) & 0x1) != 0)
+ #define	VTD_ECAP_EIMER(e)	((((e) >> 61) & 0x1) != 0)
+-#define	VTD_ECAP_IRREQ(e)	((((e) >> 62) & 0x1) != 0)
++#define	VTD_ECAP_IRREQ(e)	((((e) >> 61) & 0x1) != 0)
+ 
+ /*
+  * The engine's version, split as the specification does.  A major version of

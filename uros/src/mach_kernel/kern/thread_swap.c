@@ -1092,7 +1092,13 @@ void thread_swappable(
 	}
 }
 
-int thread_swap_disable_swapins = 0;
+/*
+ * Calls of thread_swap_disable() that found the activation out, or on its way
+ * in or out, and waited for the swapper to bring it in (#642): what -Q reads to
+ * know that it asked.  Counted under the activation's lock but not atomically,
+ * so a figure, not a census.
+ */
+unsigned int thread_swap_disable_waits;
 
 void
 thread_swap_disable(
@@ -1100,6 +1106,7 @@ thread_swap_disable(
 {
 	spl_t		s = 0;
 	thread_t	thread;
+	boolean_t	waited = FALSE;
 
 	/*
 	 * Note: we have to swapin the thread only to make sure
@@ -1110,37 +1117,50 @@ thread_swap_disable(
 		s = splsched();
 		thread_lock(thread);
 	}
-	if ((thread_swap_unwire_stack || thread_swap_unwire_user_stack) &&
-	    (thr_act->swap_state != TH_SW_UNSWAPPABLE)) {
+	if (thread_swap_unwire_stack || thread_swap_unwire_user_stack) {
 		/*
 		 * Make the activation unswappable or it might get swapped
 		 * before we complete its termination.
+		 *
+		 * Swapped in, it is made so on the spot.  In any other state
+		 * someone else may be moving it: the swapin thread, which has
+		 * it queued; thread_swapout(), unwiring its stack; a wakeup,
+		 * about to queue it.  Swapping it in from here as well was a
+		 * second swap-in of the same stack (#642).  So the swap-in is
+		 * asked of the swapper the way thread_swappable() asks it --
+		 * thread_swapin() with the flag, which does the right thing in
+		 * every state -- and waited for, until whoever swaps the
+		 * activation in has made it unswappable.
 		 */
-		if (thr_act->swap_state == TH_SW_IN ||
-		    thr_act->swap_state == (TH_SW_IN|TH_SW_TASK_SWAPPING)) {
-			thr_act->swap_state = TH_SW_UNSWAPPABLE;
+		while (thr_act->swap_state != TH_SW_UNSWAPPABLE) {
+			if (thr_act->swap_state == TH_SW_IN ||
+			    thr_act->swap_state == (TH_SW_IN|TH_SW_TASK_SWAPPING)) {
+				thr_act->swap_state = TH_SW_UNSWAPPABLE;
+				break;
+			}
+			if (!waited) {
+				thread_swap_disable_waits++;
+				waited = TRUE;
+			}
+			thread_swapin(thr_act, TRUE);
+			assert_wait((event_t) &thr_act->swap_state, FALSE);
 			if (thread) {
 				thread_unlock(thread);
 				splx(s);
 			}
 			act_unlock_thread(thr_act);
-		} else {
-			thr_act->swap_state |= TH_SW_MAKE_UNSWAPPABLE;
+			thread_block((void (*)(void)) 0);
+			thread = act_lock_thread(thr_act);
 			if (thread) {
-				thread_unlock(thread);
-				splx(s);
+				s = splsched();
+				thread_lock(thread);
 			}
-			act_unlock_thread(thr_act);
-			thread_swap_disable_swapins++;
-			thread_doswapin(thr_act);
 		}
-
 		assert(thr_act->swap_state == TH_SW_UNSWAPPABLE);
-	} else {
-		if (thread) {
-			thread_unlock(thread);
-			splx(s);
-		}
-		act_unlock_thread(thr_act);
 	}
+	if (thread) {
+		thread_unlock(thread);
+		splx(s);
+	}
+	act_unlock_thread(thr_act);
 }

@@ -38,10 +38,9 @@
  * pulls both TUs into the umbrella link and explodes on multiple
  * definitions of mach_task_self_/vm_page_size/NDR_record/etc.  We
  * sidestep by invoking the primitives directly — each lives in its
- * own unambiguous TU (mig_support.c, mach_init_ports.c) — and by
- * seeding mach_task_self_ via the real SYSENTER trap (the
- * <mach_init.h> macro shadows the function name everywhere it's
- * included, so we re-export the trap under its own asm name).
+ * own unambiguous TU: mach_task_self_init() in mig_support.c, which
+ * seeds mach_task_self_ through the trap and gives the reply port back
+ * to the task (#645), and mach_init_ports() in mach_init_ports.c.
  *
  * The Uros personality tail (#375)
  * --------------------------------
@@ -65,17 +64,10 @@
  * TU without the rest of libposix-uros still links.
  */
 
-extern void mig_init(int);
+extern void mach_task_self_init(void);
 extern void mach_init_ports(void);
 extern void __uros_signals_init(void) __attribute__((weak));
 extern void __uros_absorb_inherited_fds(void) __attribute__((weak));
-
-/* mach_task_self lives in libmach as a SYSENTER stub (trap 28) but the
- * <mach_init.h> macro `#define mach_task_self() mach_task_self_`
- * shadows it everywhere it's #included.  Declare it under a distinct
- * name so this TU can invoke the real trap without fighting the macro. */
-extern unsigned int mach_task_self(void) __asm__("mach_task_self");
-extern unsigned int mach_task_self_;
 
 __attribute__((constructor))
 static void
@@ -84,10 +76,8 @@ __uros_dyn_bootstrap(void)
     /* mach_init_ports() reads mach_task_self_ via the `mach_task_self()`
      * macro; if we don't seed it the trap arg is 0 and every
      * special-port lookup fails.  Static binaries seed it inside
-     * mach_init() after `#undef mach_task_self`; we do the equivalent
-     * here. */
-    mach_task_self_ = mach_task_self();
-    mig_init(0);
+     * mach_init(); mach_task_self_init() does the equivalent here. */
+    mach_task_self_init();
     mach_init_ports();
 
     /* Personality tail — needs the well-known ports seeded just above. */

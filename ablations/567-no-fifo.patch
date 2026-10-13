@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #567
+Takes out: the FIFO's depth -- one byte per look at the transmitter, as before
+Run: --entry 0 600 -smp 4
+Measure: the console's cost per byte (#567), against the same tree without the patch
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index 1188ed0f..c36c647e 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -320,8 +320,12 @@ void cons_putc(char c)
+  */
+ static void cons_fifo_probe(void)
+ {
+-	cons_fifo_depth = ((inb(COM1 + UART_IIR) & IIR_FIFO_ON) == IIR_FIFO_ON)
+-			  ? CONS_FIFO_DEPTH : 1;
++	/*
++	 * The old depth of one, which is what this file did before: the FIFO
++	 * enabled and one slot of it used.  The other arm of the measurement,
++	 * in a binary that differs in nothing else.
++	 */
++	cons_fifo_depth = 1;
+ 	cons_fifo_room = 0;
+ }
+ 

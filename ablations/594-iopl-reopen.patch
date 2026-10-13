@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #594
+Takes out: the removal of the 8254's ports from the iopl device's list -- 0x40, 0x42 and 0x61 are listed again, so i386_io_port_add() must refuse the whole set, and kernel242_test's control probe, the game port the set grants, is refused with it
+Run: i386, not run-x86_64.sh -- scripts/run-qemu.sh -nographic -serial mon:stdio, whose full bundle runs kernel242_test; scripts/ablate.sh cannot judge it
+Expect: the iopl set names this port, so the task should have read it
+Expect: i386_io_port_add: REFUSED -- the set names port 0x40
+
+diff --git a/uros/src/mach_kernel/i386/AT386/iopl.c b/uros/src/mach_kernel/i386/AT386/iopl.c
+index 977ecb57..f044029d 100644
+--- a/uros/src/mach_kernel/i386/AT386/iopl.c
++++ b/uros/src/mach_kernel/i386/AT386/iopl.c
+@@ -135,6 +135,7 @@ device_t	iopl_device = 0;
+  * one back here is not a quiet grant but the iopl device refused whole.
+  */
+ io_reg_t iopl_port_list[] = {
++	0x40, 0x42, 0x61,
+ 	/* PS/2 controller (8042) — data + status/command.
+ 	 * Userspace char_server/ps2.so owns the keyboard; kd0's IRQ
+ 	 * is hijacked via device_intr_register at attach time. */

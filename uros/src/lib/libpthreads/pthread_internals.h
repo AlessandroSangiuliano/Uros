@@ -120,7 +120,7 @@ typedef struct _pthread
 	void	       *arg;	      /* Argment for child routine */
 	int	       cancel_state;  /* Whether thread can be cancelled */
 	struct _pthread_handler_rec *cleanup_stack;
-	int		err_no;		/* thread-local errno */
+	struct mach_thread_state mach_state; /* libmach's: reply port, errno (#645) */
 	char	       name[16];      /* Thread name (NUL-terminated, 15 usable) */
 	unsigned long  sigmask;	      /* Blocked signal set */
 	unsigned long  sigpending;    /* Pending signal set */
@@ -131,6 +131,15 @@ typedef struct _pthread
 					 * previous (already pool_get'd) thread is woken, so a
 					 * slot-keyed futex piles two threads on one key and
 					 * thread_wakeup_one() strands one of them. */
+	/*
+	 * #667: the condition variable this thread sleeps on and the
+	 * generation it read before sleeping; NULL when it sleeps on none.
+	 * The thread writes them itself in _pthread_cond_wait(), and
+	 * pthread_cond_waiting_np() reads them from another, so a test whose
+	 * waiter stays asleep after its signal can say what it waited for.
+	 */
+	struct _pthread_cond * volatile cond_waiting;
+	volatile int   cond_wait_seq;
 	/*
 	 * #444: where a pooled thread resumes when it is reused.
 	 *

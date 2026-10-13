@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #659
+Takes out: IRTA_REG read back after SIRTP -- an engine that did not take EIME is given the table all the same, as before 84d9c7d7, the boot says "EIME read back set" from the decision, and the engine reads the entries for 32-bit ids in xAPIC mode: an interrupt aimed at processor 256 must not arrive there
+Run: --iommu intel-eim --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
+Over: 659-widen-eime-not-latched.patch
+Expect: aimed at apic id [0-9]+ arrived there [0-9]+ times and elsewhere [0-9]+ — WRONG
+Note: with the widen alone the read-back refuses the engine and the boot says "interrupt remapping COULD NOT BE TURNED ON — WRONG, an engine did not confirm it", as it should for an engine that did not take the word: the fixed arm of --ab fails on that line, and what it must not show is the Expect
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2374,8 +2374,6 @@
+ 	 * the boot then names as read.  An engine that did not take the word as
+ 	 * written is not given the table.
+ 	 */
+-	if (*(volatile uint64_t *)(regs + VTD_IRTA_REG) != t->intel_irta)
+-		return 0;
+ 
+ 	if (!VTD_CAP_ESIRTPS(u->vendor_caps[0])) {
+ 		uint64_t d[2];

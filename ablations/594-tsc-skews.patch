@@ -1,0 +1,42 @@
+Kind: ablation
+Issue: #594
+Takes out: nothing -- a probe: from the TSC watchdog's second window the TSC, as the watchdog reads it, runs one part in thirty-two fast, so both rulers disagree with it and the watchdog must name it, move the tick off it and withdraw its rate, with every processor still ticking; about 40 s of watching under a hypervisor, hence the machine that stays up
+Run: --entry 12 180 -smp 4
+Expect: the TSC watchdog .*WRONG: (over the last [0-9]+ s the TSC kept time|the TSC ran -?[0-9]+ ppm from its rate)
+
+diff --git a/uros/src/mach_kernel/x86_64/time/tsc_watch.c b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
+index 72939918..da4f417e 100644
+--- a/uros/src/mach_kernel/x86_64/time/tsc_watch.c
++++ b/uros/src/mach_kernel/x86_64/time/tsc_watch.c
+@@ -131,9 +131,20 @@ struct watched {
+ 
+ static int watch_wakeup;	/* posted by nobody: the timeout ends the wait */
+ 
++/*
++ * #594: from the second window on, the TSC as the watchdog reads it runs one
++ * part in thirty-two fast, so both rulers put it outside the bound and the
++ * path that names it -- and moves the tick off it -- runs.
++ */
++static uint64_t skew_from;
++
+ static uint64_t subject_tsc(void)
+ {
+-	return rdtsc_ordered();
++	uint64_t t = rdtsc_ordered();
++
++	if (skew_from != 0 && t > skew_from)
++		t += (t - skew_from) / 32;
++	return t;
+ }
+ 
+ static void watch_sleep(void)
+@@ -423,6 +434,9 @@ void tsc_watch(void)
+ 		 */
+ 		clock_event_drain_reports();
+ 
++		if (windows == 2)
++			skew_from = rdtsc_ordered();
++
+ 		live = 0;
+ 		for (i = 0; i < n; i++) {
+ 			if (!w[i].live)
