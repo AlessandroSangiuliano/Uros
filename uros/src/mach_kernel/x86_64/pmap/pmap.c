@@ -839,10 +839,16 @@ void pmap_activate(pmap_t pmap)
 
 	if (old == pmap) {
 		/*
-		 * Already here.  Not merely an optimisation: writing CR3 to
-		 * the value it already holds would discard, for nothing, the
-		 * non-global translations of the PCID it names -- without
-		 * PCID, every non-global translation this processor has.
+		 * Already here.  Not an optimisation but a correctness branch:
+		 * going on, the last store below, with old == pmap, would take
+		 * this processor out of the set of the very space it has
+		 * loaded, and every shootdown of that space would pass it by
+		 * (tlb_flush_range() reads cpus_using) -- a stale translation,
+		 * a freed frame still reachable.  The reload itself would also
+		 * cost something without PCID, every non-global translation
+		 * this processor has; with PCID pmap_cr3_for() would load with
+		 * NOFLUSH, the slot being in step, and discard nothing -- which
+		 * is no reason to drop this test.
 		 *
 		 * ❌ AND IT DID WRITE IT.  #439 (ae93c506) added this test, this
 		 * comment and the `return' AROUND the existing write instead of
