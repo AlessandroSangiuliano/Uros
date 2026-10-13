@@ -1,19 +1,25 @@
 Kind: ablation
 Issue: #439
-Takes out: the narrowed shootdown -- every flush of a user mapping is broadcast to every processor again, as before #439
+Takes out: the narrowed shootdown -- every flush of a user mapping interrupts every processor again, as before #439, with the request still naming its space and generation (#412): with PCID a processor that does not have the space loaded leaves it to the generation as before, so only the interrupts come back; until 3e731776 this patch made the kernel's branch unconditional instead, which sent a user flush as a kernel request and returned before the generation moved -- with PCID on, a broken kernel (found by #412's second review round)
 Run: --entry 14 1200 -smp 8
 Measure: the copy-on-write phase breakdown (#482, kern/fault_profile.c) -- FP_PROTECT plus FP_ENTER must swell with the processor count while every other phase stays where it was
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index 5f80a681..f8c1cff5 100644
+index 99492cfc..199ce203 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -281,7 +281,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
- 	if (size != 0 && va_is_kernel(va))
- 		pmap = PMAP_NULL;
+@@ -350,12 +350,12 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
+ 	 * cannot run before that block exists, so "the set is empty" and
+ 	 * "there is no block" cannot come apart.
+ 	 */
+-	if (using == 0) {
++	if (smp_online_count() <= 1) {
+ 		tlb_flush_local_range(va, size);
+ 		return;
+ 	}
  
--	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
-+	{
- 		/*
- 		 * With only this processor online there is nobody to tell and
- 		 * nowhere to be moved to, so the flush here is the whole job.
+-	tlb_flush_here_and_there(&r, 0, using);
++	tlb_flush_here_and_there(&r, 1, 0);
+ }
+ 
+ void tlb_flush_all(struct pmap *pmap)
