@@ -124,10 +124,11 @@ static volatile uint64_t ap_sched_gate;
 /*
  * 🔴 AWAKE FOR A PROBE (#437).  A processor halted in the wait below between
  * two cross-calls is, under KVM, a vCPU whose thread may sleep and wake on
- * another core, and KVM on Intel empties the TLB of a vCPU that moved: a
- * probe of what a TLB keeps would be asking the hypervisor.  While a probe
- * holds them, the processors waiting here spin with interrupts on instead of
- * halting, for the moments the probe takes.  smp_hold_awake().
+ * another core, and KVM on Intel empties the TLB of a vCPU that moved
+ * (vmx_vcpu_load_vmcs()): a probe of what a TLB keeps would be asking the
+ * hypervisor.  While a probe holds them, the processors waiting here spin
+ * with interrupts on instead of halting, for the moments the probe takes.
+ * smp_hold_awake().
  */
 static volatile uint64_t ap_hold;
 

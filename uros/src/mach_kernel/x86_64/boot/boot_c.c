@@ -1850,10 +1850,14 @@ static void control_regs_selftest(void)
  * (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763, nor of 2 more on
  * victus on 13/10, on battery at 2.1 GHz: a CR3 load "may invalidate TLB
  * entries for global pages" (5.10.4.1), and a hypervisor may empty a vCPU's
- * TLB between two interrupts -- KVM on Intel does, when a vCPU halted in
- * between wakes on another core, which is why the other processors spin
- * instead of halting while the probe runs (smp_hold_awake()).  Those numbers
- * are from before they did.  Where a processor lost the entry on its own,
+ * TLB between two interrupts -- KVM on Intel empties it whenever a vCPU is
+ * loaded on another core than the one it last ran on (vmx_vcpu_load_vmcs(),
+ * Linux's arch/x86/kvm/vmx/vmx.c at 7bb6284aa7b3), which a vCPU halted
+ * between two cross-calls may well be.  Those numbers are from before the
+ * other processors were held awake for the probe (smp_hold_awake()); held,
+ * it said WRONG in 2 boots of 2 under KVM on OMEGA and on victus, every
+ * processor in both questions, and the control found all three keeping
+ * their entry in every boot.  Where a processor lost the entry on its own,
  * its fault says nothing.  So the question is asked again on the 4 KiB leaf
  * the split left -- each processor writes it, the boot processor makes the
  * whole-TLB flush a split makes, narrows the page, told to nobody, and each
@@ -1864,10 +1868,11 @@ static void control_regs_selftest(void)
  * that left one would have shown; a fault is none kept, and that processor's
  * faults are not counted.  If no processor kept one, NOT ASKED.  The control
  * is a 4 KiB round and not a large one because it must narrow the page it
- * asks about, and a large leaf of the direct map is other memory too: on
- * victus, on 13/10, the 4 KiB entry outlived a bare reload while the large
- * one did not outlive the split's, so it judges the 4 KiB question only.  A
- * write through either narrowed page is WRONG wherever it happens.
+ * asks about, and a large leaf of the direct map is other memory too; so it
+ * judges the 4 KiB question only -- before the hold, on victus, the 4 KiB
+ * entry outlived a bare reload in rounds where the large one did not outlive
+ * the split's.  A write through either narrowed page is WRONG wherever it
+ * happens.
  */
 static volatile uint64_t gs_va;
 
