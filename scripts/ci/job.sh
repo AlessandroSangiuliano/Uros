@@ -47,7 +47,8 @@
 #   --share J/N        with --sweep, only the J-th of every N patches: the
 #                      share of job J of N (default 1/1)
 #   --accel L          tcg, kvm or tcg,kvm (default: tcg, and kvm as well when
-#                      /dev/kvm can be opened; with --sweep, tcg)
+#                      /dev/kvm can be opened; with --sweep, tcg, and a
+#                      patch's own Accel: line where it has one)
 #   --out DIR          rows, logs and the job's record (default ./ci-out)
 #   --no-install       use the tools already here, outside a container
 #   --dry-run          print the plan; install, build and boot nothing
@@ -336,12 +337,21 @@ fi
 declare -A SW_BOOTS
 SW_WANT=0
 SW_PLAN=()
+# The accelerators a patch of the sweep boots under: its own Accel: line where
+# it has one, since a patch that shows something only under KVM would
+# otherwise be refused by a sweep under TCG (593-no-countdown), and the
+# sweep's elsewhere.
+sweep_accel() {	# patch
+	local a
+	a=$(sed -n -e '/^diff --git /q' -e 's/^Accel:[[:space:]]*//p' "$1" | head -n 1)
+	echo "${a:-$ACCEL}"
+}
 if [ -n "$SWEEP" ]; then
 	scratch=$(mktemp -d) || die 3 "cannot create a scratch directory"
 	refused=0
 	for p in "${SWEPT[@]}"; do
 		pl=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --plan --boots 1 \
-			--accel "$ACCEL" "$p" 2>&1)
+			--accel "$(sweep_accel "$p")" "$p" 2>&1)
 		rc=$?
 		if [ $rc != 0 ]; then
 			sed "s|^|${p##*/}: |" <<< "$pl" >&2
@@ -359,7 +369,7 @@ if [ -n "$SWEEP" ]; then
 		fi
 		SW_BOOTS[$p]=$k
 		SW_WANT=$((SW_WANT + k))
-		SW_PLAN+=("${p##*/}: $(sed -n 's/^ablate: plan: \(.*\) is given: /\1 /p' <<< "$pl"), $k boot(s)")
+		SW_PLAN+=("${p##*/}: $(sed -n 's/^ablate: plan: \(.*\) is given: /\1 /p' <<< "$pl"), $k boot(s) under $(sweep_accel "$p")")
 	done
 	rm -rf "$scratch"
 	[ $refused = 0 ] || die 2 "ablate.sh refuses $refused of the ${#SWEPT[@]} patches of this sweep"
@@ -381,7 +391,7 @@ if [ -n "$ABLATE" ]; then
 	sed 's/^/job:   /' <<< "$AB_PLAN"
 	echo "job: rows: $CSV; every boot's log: $OUT/ablate/runs/"
 elif [ -n "$SWEEP" ]; then
-	echo "job: a sweep instead of the merge test: ${#SWEPT[@]} of the ${#NAMES[@]} patches (share $SHARE), each once in an ablate.sh run of its own, the ablated arm alone, $SW_WANT boots under $ACCS:"
+	echo "job: a sweep instead of the merge test: ${#SWEPT[@]} of the ${#NAMES[@]} patches (share $SHARE), each once in an ablate.sh run of its own, the ablated arm alone, $SW_WANT boots under $ACCS but where a patch's Accel: line says otherwise:"
 	printf 'job:   %s\n' "${SW_PLAN[@]}"
 	echo "job: rows: $CSV; every boot's log: $OUT/ablate/runs/; what ablate.sh said of each patch: $OUT/sweep/"
 else
@@ -539,7 +549,7 @@ if [ -n "$SWEEP" ]; then
 		name=${name%.patch}
 		before=$(sweep_rows)
 		UROS_ABLATE_DIR=$OUT/ablate "$REPO/scripts/ablate.sh" --boots 1 \
-			--accel "$ACCEL" "$p" > "$OUT/sweep/$name.out" 2>&1
+			--accel "$(sweep_accel "$p")" "$p" > "$OUT/sweep/$name.out" 2>&1
 		rc=$?
 		added=$(($(sweep_rows) - before))
 		case $rc in
