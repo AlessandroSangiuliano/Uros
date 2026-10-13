@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #412
 Accel: kvm
-Takes out: the generation check in pmap_cr3_for() -- a slot found for the space keeps its entries whatever its generation says, so a space changed while a processor only cached it is read through the stale entries when the processor comes back; needs PCID, which TCG and victus lack: caught under KVM on OMEGA and omen, on omen's metal, and on GitHub's Xeon 8573C and EPYC 9V74, and not on the EPYC 7763 in 2 boots of 2 in [1]'s present order (run 38381876377; the order before b91b43c7 let no AMD processor catch it, run 38370713633), where [1]'s control now says NOT ASKED if no entry outlives its round; 2 of 2 under KVM on OMEGA on 13/10 at 045e8fb6
+Takes out: the generation check in pmap_cr3_for() -- a slot found for the space keeps its entries whatever its generation says, so a space changed while a processor only cached it is read through the stale entries when the processor comes back; needs PCID, which TCG and victus lack: caught under KVM on OMEGA and omen, on omen's metal, and on GitHub's Xeon 8573C and EPYC 9V74, and not on the EPYC 7763 in 2 boots of 2 in [1]'s present order (run 38381876377; the order before b91b43c7 let no AMD processor catch it, run 38370713633), where [1]'s control now says NOT ASKED if no entry outlives its round; 2 of 2 under KVM on OMEGA on 13/10 at 045e8fb6; at 9c1d9aaa (runs 38449528373 and 38451440260) caught on GitHub's Xeon 8573C and 8370C and EPYC 9V45, and on the EPYC 7763 NOT ASKED in 2 boots of 2, all three questions finding no entry kept through their round
 Run: --entry 0 300 -smp 4
 Expect: pcid_test: \[1\] .*its OLD frame.*WRONG \(#412\)
 
