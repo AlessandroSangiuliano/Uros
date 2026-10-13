@@ -131,9 +131,12 @@ static inline uint64_t read_cr3(void)
 }
 
 /*
- * Writing CR3 also flushes every non-global TLB entry -- without PCID.  With
- * CR4.PCIDE set it flushes the non-global entries of the PCID it names, and
- * none at all with bit 63 set (SDM Vol. 3A 253668-093US 5.10.4.1).
+ * Writing CR3 invalidates at least what SDM Vol. 3A 253668-093US 5.10.4.1
+ * requires of it: every non-global TLB entry without PCID; with CR4.PCIDE set,
+ * the non-global entries of the PCID it names, and with bit 63 set nothing.
+ * That is a floor, not a promise: the same section lets the processor also
+ * invalidate global entries, other PCIDs' entries, and entries when bit 63 is
+ * set, so an entry kept across a load is never something correctness rests on.
  */
 static inline void write_cr3(uint64_t v)
 {

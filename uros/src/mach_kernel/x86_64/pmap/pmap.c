@@ -1836,10 +1836,11 @@ int pmap_pcid_mode = PMAP_PCID_OFF;
  * errata ADL063 (12th Generation Core Specification Update 682436, rev. 040)
  * and RPL043 (13th Generation, 740518, rev. 031).  There a kernel page removed
  * while one space is loaded stays translated under the PCID of another space
- * that used it, and survives any switch back into that space: a CR3 load never
- * discards global entries.  The errata's cures are microcode, which this
- * kernel does not load -- the revision that runs is the firmware's -- or
- * INVPCID type 2 in place of INVLPG, a whole-TLB flush for every kernel page.
+ * that used it, and may survive any switch back into that space: no CR3 load is
+ * required to discard a global entry (SDM Vol. 3A 253668-093US 5.10.4.1).  The
+ * errata's cures are microcode, which this kernel does not load -- the
+ * revision that runs is the firmware's -- or INVPCID type 2 in place of
+ * INVLPG, a whole-TLB flush for every kernel page.
  * This turns PCID off instead, below the first revision without the erratum,
  * as Linux does (arch/x86/mm/init.c, invlpg_miss_ids, whose models and
  * revisions Intel gave and this table copies).  That table errs on the safe
