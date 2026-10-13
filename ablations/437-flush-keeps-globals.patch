@@ -6,21 +6,18 @@ Run: --entry 0 300 -smp 4
 Expect: wrote a page narrowed after .*WRONG \(#437\)
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index fe308684..2fbd94fe 100644
+index 8c76ed68..7244c871 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -53,12 +53,12 @@ void tlb_flush_local_all(void)
+@@ -67,9 +67,9 @@ void tlb_flush_local_all(void)
  	 * the PGE toggle below already reaches every PCID: a CR4 write that
  	 * changes PGE flushes the whole TLB, whatever CR3 names.
  	 */
--	if (pmap_pcid_mode == PMAP_PCID_INVPCID) {
-+	if (0 && pmap_pcid_mode == PMAP_PCID_INVPCID) {
+-	if (pmap_pcid_mode == PMAP_PCID_INVPCID)
++	if (0 && pmap_pcid_mode == PMAP_PCID_INVPCID)
  		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
- 		return;
- 	}
- 
--	if (cr4 & CR4_PGE) {
-+	if (0 && (cr4 & CR4_PGE)) {
+-	else if (cr4 & CR4_PGE) {
++	else if (0 && (cr4 & CR4_PGE)) {
  		write_cr4(cr4 & ~CR4_PGE);
  		write_cr4(cr4);
- 		return;
+ 	} else
