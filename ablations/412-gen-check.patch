@@ -1,9 +1,9 @@
 Kind: ablation
 Issue: #412
 Accel: kvm
-Takes out: the generation check in pmap_cr3_for() -- a slot found for the space keeps its entries whatever its generation says, so a space changed while a processor only cached it is read through the stale entries when the processor comes back; under KVM or on the metal with a processor that has PCID (Intel here: omen, OMEGA), TCG having none
+Takes out: the generation check in pmap_cr3_for() -- a slot found for the space keeps its entries whatever its generation says, so a space changed while a processor only cached it is read through the stale entries when the processor comes back; needs PCID, which TCG and victus lack: caught under KVM on OMEGA and omen, on omen's metal, and on GitHub's Xeon 8573C and EPYC 9V74, and not on the EPYC 7763 in 4 boots of 4 (runs 38370713633, 38381876377), where [1]'s control now says NOT ASKED if no entry outlives its round
 Run: --entry 0 300 -smp 4
-Expect: pcid_test: \[1\] .*WRONG \(#412\)
+Expect: pcid_test: \[1\] .*its OLD frame.*WRONG \(#412\)
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
 index 78684894..c1b8b5ab 100644

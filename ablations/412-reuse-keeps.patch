@@ -1,9 +1,9 @@
 Kind: ablation
 Issue: #412
 Accel: kvm
-Takes out: the discarding of a slot's entries when it changes hands in pmap_cr3_for() -- the CR3 load that gives a PCID to a new space keeps the previous owner's entries, so the new space reads the old one's frame; under KVM or on the metal with a processor that has PCID (Intel here: omen, OMEGA), TCG having none
+Takes out: the discarding of a slot's entries when it changes hands in pmap_cr3_for() -- the CR3 load that gives a PCID to a new space keeps the previous owner's entries, so the new space reads the old one's frame; needs PCID, which TCG and victus lack: caught under KVM on OMEGA and omen, on omen's metal, and on GitHub's EPYC 7763, 9V74 and 9V45 in every boot (runs 38370713633, 38381876377)
 Run: --entry 0 300 -smp 4
-Expect: pcid_test: \[2\] .*WRONG \(#412\)
+Expect: pcid_test: \[2\] .*the other space's frame.*WRONG \(#412\)
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
 index 78684894..5c05ddae 100644
