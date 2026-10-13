@@ -1,14 +1,15 @@
 Kind: ablation
 Issue: #558
-Takes out: the per-page lock on the pv walks -- a walk races pv_remove() and misses an entry, the mapping nobody tears down of #531; a rare race, a third of the boots in the campaigns of 16/09
+Over: 558-pvfreelock.patch
+Takes out: the per-page lock on the pv walks -- a walk races pv_remove() and misses an entry, the mapping nobody tears down of #531; over 558-pvfreelock.patch, as #531 measured it: with both locks out 6 boots of 18 freed a page still mapped, with the free list's alone 1 of 10; the page lock alone was never measured, and 21 boots of it alone in #643's sweep and reruns met nothing
 Run: --entry 14 1200 -smp 4
 Expect: panic\(cpu
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pv.c b/uros/src/mach_kernel/x86_64/pmap/pv.c
-index 2d64f42e..67ea71ac 100644
+index f16df901..f6b6c42f 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/pv.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/pv.c
-@@ -198,66 +198,13 @@ static struct pv_lock *pv_lock_for(uint64_t pa)
+@@ -196,66 +196,13 @@ static struct pv_lock *pv_lock_for(uint64_t pa)
   */
  static void pv_lock_take(struct pv_lock *p)
  {
@@ -78,12 +79,12 @@ index 2d64f42e..67ea71ac 100644
  }
  
  /*
-@@ -327,6 +274,8 @@ void pv_bootstrap(uint64_t top_of_ram)
+@@ -325,6 +272,8 @@ void pv_bootstrap(uint64_t top_of_ram)
  	 * name the arm cannot attribute what it finds -- and this one costs a
  	 * line in the ablated arm and nothing at all in the shipping one.
  	 */
 +	printf("pv: the per-page lock is ABLATED — the walks run with nothing "
 +	       "held, so a walk can race pv_remove and MISS an entry\n");
+ 	printf("pv: the free list is ABLATED — pv_alloc and pv_free push and pop "
+ 	       "with no lock, so two processors can be handed the SAME entry\n");
  }
- 
- int pv_managed(uint64_t pa)
