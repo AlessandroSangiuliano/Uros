@@ -840,8 +840,9 @@ void pmap_activate(pmap_t pmap)
 	if (old == pmap) {
 		/*
 		 * Already here.  Not merely an optimisation: writing CR3 to
-		 * the value it already holds would discard every non-global
-		 * translation this processor has, for nothing.
+		 * the value it already holds would discard, for nothing, the
+		 * non-global translations of the PCID it names -- without
+		 * PCID, every non-global translation this processor has.
 		 *
 		 * ❌ AND IT DID WRITE IT.  #439 (ae93c506) added this test, this
 		 * comment and the `return' AROUND the existing write instead of
@@ -872,18 +873,26 @@ void pmap_activate(pmap_t pmap)
 	 * space whose set does not name it.
 	 *
 	 * Between the first store and the CR3 write this processor is in
-	 * `pmap's set while holding none of its translations: a shootdown for
-	 * pmap would send us an interrupt we did not need.  Between the CR3
-	 * write and the last store it is still in `old's set, and without
-	 * PCID holding none of ITS translations either — CR3 discarded them —
-	 * so again an interrupt for nothing.  With PCID it may still hold them
-	 * under old's PCID: the interrupt is still harmless, because the
-	 * handler acts only on the PCID CR3 names, and old's generation
-	 * covers the rest at the next switch back.  Both windows cost a wasted
-	 * interrupt and
-	 * neither can lose one, which is the only asymmetry that matters:
-	 * the opposite order would open a window in which this processor
-	 * holds translations nobody knows to shoot down.
+	 * `pmap's set without having it loaded: a shootdown for pmap sends us
+	 * an interrupt we did not need.  Without PCID we hold none of pmap's
+	 * translations then, and the handler flushes the range in old for
+	 * nothing.  With PCID we may hold them under pmap's slot from an
+	 * earlier visit, and the handler leaves the request alone, CR3 not
+	 * naming pmap: what keeps them from outliving that shootdown is not
+	 * this order but pmap's generation, which pmap_cr3_for() reads before
+	 * the load.
+	 *
+	 * Between the CR3 write and the last store it is still in `old's set,
+	 * and without PCID holding none of ITS translations either — CR3
+	 * discarded them — so again an interrupt for nothing.  With PCID it
+	 * may still hold them under old's PCID: the interrupt is still
+	 * harmless, because the handler acts only on the PCID CR3 names, and
+	 * old's generation covers the rest at the next switch back.
+	 *
+	 * Both windows cost a wasted interrupt and neither can lose one, which
+	 * is the only asymmetry that matters: the opposite order would open a
+	 * window in which this processor holds translations nobody knows to
+	 * shoot down.
 	 */
 	(void) atomic_test_and_set_bit(&pmap->cpus_using, bit);
 
