@@ -2332,16 +2332,30 @@ static void xs_said3(uint32_t x, uint64_t seen, uint64_t kept)
 }
 
 /*
- * [3] with one processor online.  [1] and [2] need a second processor to
- * switch spaces while this one changes them; [3] does not.  What it asks is
- * whether an invalidation made under one PCID reaches the entry another PCID
- * keeps, which happens on the one processor holding both, and the defect it
- * looks for -- PCID without global pages -- is whole on a uniprocessor.  So
- * this processor is X: it reads the kernel page in S1, moves to S2, remaps it
- * -- with nobody else online the shootdown is tlb_flush_kernel_here() here,
- * the invlpg under S2's PCID -- and reads it back in S1.  Its control is the
- * same round with the remap told to nobody and both of the remap's invlpgs
- * aimed at the page next to it.
+ * [3] with one processor online.  What it asks is whether an invalidation made
+ * under one PCID reaches the entry another PCID keeps, which happens on the one
+ * processor holding both, and the defect it looks for -- PCID without global
+ * pages -- is whole on a uniprocessor.  So this processor is X: it reads the
+ * kernel page in S1, moves to S2, remaps it -- with nobody else online the
+ * shootdown is tlb_flush_kernel_here() here, the invlpg under S2's PCID -- and
+ * reads it back in S1.  Its control is the same round with the remap told to
+ * nobody and both of the remap's invlpgs aimed at the page next to it.
+ *
+ * [1] and [2] are not asked here, though neither needs a second processor
+ * either: [2] runs on X alone, and [1] could be asked of a boot processor
+ * parked in S2 the way [3] is.  Until they are, their NOT ASKED says so.
+ *
+ * ⚠️ Under KVM on OMEGA (i9-13900K) the control finds nothing kept, in every
+ * boot: a software walk of the kernel's tables made here while in S2 --
+ * pmap_walk(), loads through the direct map and nothing else -- takes the 4 KiB
+ * global entry X made in S1 with it, as three experiments on 13/10 showed (a
+ * write of the leaf from S2 did not, the walk alone did).  The question's
+ * pmap_enter() walks the same way, so its new frame proves nothing there, and
+ * NOT ASKED is the answer.  An entry that is not global survives the same
+ * steps, which is how ablations/412-pcid-without-pge.patch is caught at -smp 1
+ * all the same (2 of 2).  Why the walk takes it is not known: processors
+ * "may invalidate any TLB entry at any time" (SDM Vol. 3A 253668-093US
+ * 5.10.2.2), and nothing here relies on keeping one.
  */
 static void pcid_ask_alone(uint32_t self)
 {
@@ -2418,10 +2432,10 @@ static void pcid_ask(void)
 			break;
 		}
 	if (x == SMP_MAX_CPUS) {
-		kputs("pcid_test: [1] NOT ASKED — no second processor to switch "
-		      "between spaces while this one changes them (#412)\r\n");
-		kputs("pcid_test: [2] NOT ASKED — no second processor to switch "
-		      "between spaces while this one changes them (#412)\r\n");
+		kputs("pcid_test: [1] NOT ASKED — not yet asked with one processor "
+		      "online, which it could be (#412)\r\n");
+		kputs("pcid_test: [2] NOT ASKED — not yet asked with one processor "
+		      "online, which it could be (#412)\r\n");
 		pcid_ask_alone(self);
 		return;
 	}
