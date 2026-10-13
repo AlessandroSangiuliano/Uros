@@ -1960,12 +1960,20 @@ static void global_split_selftest(void)
  * application processor, X, driven by targeted cross-calls, with two spaces
  * that map the same address to frames of their own:
  *
- *   [1] a space changed while X only CACHES it.  X enters S1 and reads the
- *	 page, moves to S2, and the boot processor then points S1's page at a
- *	 third frame.  X is no longer in S1's cpus_using, so the shootdown does
- *	 not interrupt it; S1's generation moves on instead.  Back in S1, X must
- *	 read the third frame -- S1's old one means a translation kept across a
- *	 change it was never told of.
+ *   [1] a space changed while X only CACHES it.  X enters S2, then S1,
+ *	 where it reads the page, then S2 again, and the boot processor then
+ *	 points S1's page at a third frame.  X is no longer in S1's cpus_using,
+ *	 so the shootdown does not interrupt it; S1's generation moves on
+ *	 instead.  Back in S1, X must read the third frame -- S1's old one means
+ *	 a translation kept across a change it was never told of.  ⚠️ S2 comes
+ *	 first so that X leaves S1 for a space that still holds its PCID, a
+ *	 switch that discards nothing.  A CR3 load that discards one PCID "may
+ *	 invalidate TLB entries ... associated with PCIDs other than the PCID it
+ *	 is establishing" (SDM Vol. 3A 253668-093US 5.10.4.1), and S2 taking its
+ *	 slot between the read and the return was such a load: it could discard
+ *	 S1's entry by itself and hide a missing flush.  In that order
+ *	 412-gen-check went uncaught in 4 boots of 4 on GitHub's AMD EPYC
+ *	 runners (run 38370713633).
  *   [2] a PCID changing hands.  X reads S1's page again, leaving S1's entry
  *	 under S1's PCID; then, on X, S2 loses its slot and the next miss is
  *	 aimed at S1's.  X enters S2, which takes S1's PCID: S2 must read its
@@ -2072,9 +2080,10 @@ static void pcid_selftest(void)
 		kputs("pcid_test: NOT ASKED — could not build the two spaces "
 		      "(#412)\r\n");
 	} else {
-		/* [1] */
+		/* [1]: S2 holds a PCID first, so that leaving S1 discards nothing. */
+		(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
 		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
-		(void) xs_on(x, s2, 1, PMAP_NULL, PMAP_NULL);
+		(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
 		(void) pmap_enter(s1, XS_VA, frame[2],
 				  VM_PROT_READ | VM_PROT_WRITE, 0);
 		seen = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
