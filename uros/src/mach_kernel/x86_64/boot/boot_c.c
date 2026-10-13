@@ -1829,7 +1829,12 @@ static void control_regs_selftest(void)
  *
  * TCG reloads its whole TLB on every CR3 write, global or not, so there the
  * answer is the same with and without the flush that reaches globals; only a
- * real TLB -- KVM, or the metal -- can say WRONG.
+ * real TLB -- KVM, or the metal -- can say WRONG.  ⚠️ And not every KVM: with
+ * the flush taken out it said WRONG in 4 boots of 4 on victus (Ryzen 5 5600H)
+ * and in none of 6 on OMEGA (i9-13900K) and omen (i7-7700HQ), VPID and EPT on
+ * both -- why is not established (a vCPU moved to another core between the
+ * interrupts, halted in between, would start with an empty TLB).  The metal
+ * has no such question.
  */
 static volatile uint64_t gs_va;
 
