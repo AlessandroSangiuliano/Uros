@@ -131,8 +131,9 @@ static inline uint64_t read_cr3(void)
 }
 
 /*
- * Writing CR3 also flushes every non-global TLB entry, which is why it is
- * the blunt way to make paging changes visible.
+ * Writing CR3 also flushes every non-global TLB entry -- without PCID.  With
+ * CR4.PCIDE set it flushes the non-global entries of the PCID it names, and
+ * none at all with bit 63 set (SDM Vol. 3A 253668-093US 5.10.4.1).
  */
 static inline void write_cr3(uint64_t v)
 {

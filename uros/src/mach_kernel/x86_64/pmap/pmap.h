@@ -265,9 +265,11 @@ static __inline__ void pmap_writer_unlock(volatile uint8_t *l)
 }
 
 /*
- * Make `pmap` the address space this CPU translates through — a CR3 load,
- * which also flushes every non-global TLB entry.  The kernel half is
- * identical across spaces, so the kernel keeps running across the switch.
+ * Make `pmap` the address space this CPU translates through — a CR3 load.
+ * Without PCID it discards every non-global entry; with PCID it keeps the
+ * space's own entries when its slot is current and discards that one PCID when
+ * not (pmap_cr3_for(), #412).  The kernel half is identical across spaces, so
+ * the kernel keeps running across the switch.
  */
 void pmap_activate(pmap_t pmap);
 
@@ -508,9 +510,11 @@ uint64_t pmap_enable_global_pages(void);
  *   PMAP_PCID_NO_INVPCID	PCID, and no INVPCID -- or -x pretending so
  *   PMAP_PCID_INVPCID	both
  *
- * So far CR4.PCIDE is set and every CR3 load still names PCID 0, which
- * discards what it always discarded: the modes exist, and nothing yet keeps a
- * space's entries across a switch.  Returns the CR4 bit it set, or 0.
+ * With PCID a space's entries outlive the switch away from it: each processor
+ * keeps eight slots, a switch into a space whose slot is current loads CR3
+ * with CR3_NOFLUSH, and a slot changing hands discards that PCID in the same
+ * load (pmap_cr3_for()).  The kernel's own tables are PCID 0.  Returns the CR4
+ * bit it set, or 0.
  */
 #define	PMAP_PCID_OFF		0
 #define	PMAP_PCID_NO_INVPCID	1

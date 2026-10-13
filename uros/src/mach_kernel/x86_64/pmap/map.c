@@ -637,14 +637,18 @@ uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 	}
 
 	/*
-	 * One TLB entry covered the whole large page, and naming one sub-page
-	 * would clear it for that address alone — the rest could keep hitting
-	 * the stale large translation.  So the whole table goes, everywhere.
-	 *
-	 * Everywhere is the new part: on one processor this was a CR3 reload,
-	 * which is still what happens locally, but a large page other
-	 * processors have walked is stale on them too.  Split is rare and this
-	 * is bootstrap, so the blunt tool remains the right one.
+	 * One TLB entry may still cover the whole large page.  Right after the
+	 * split it translates what the new table does -- the same frames, the
+	 * same rights -- so it is not stale yet (SDM Vol. 3A 253668-093US
+	 * 5.10.4.2: only the page size changed), and an invlpg of any one
+	 * sub-page later discards it by itself (5.10.4.2, note 1).  The whole
+	 * table goes anyway, everywhere, so that nothing changed later has to
+	 * know whether it was the first change since a split, and so that the
+	 * large translation is gone even where a later change is flushed some
+	 * other way.  It is a flush that reaches global entries (#437:
+	 * tlb_flush_local_all()), and the global split probe checks it on
+	 * every processor.  Split is rare, so the blunt tool remains the right
+	 * one.
 	 */
 	tlb_flush_all(pmap);
 	pmap_read_leave(held);

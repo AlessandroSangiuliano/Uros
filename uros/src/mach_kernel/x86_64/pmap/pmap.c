@@ -874,9 +874,13 @@ void pmap_activate(pmap_t pmap)
 	 * Between the first store and the CR3 write this processor is in
 	 * `pmap's set while holding none of its translations: a shootdown for
 	 * pmap would send us an interrupt we did not need.  Between the CR3
-	 * write and the last store it is still in `old's set while holding
-	 * none of ITS translations either — CR3 discarded them — so again an
-	 * interrupt for nothing.  Both windows cost a wasted interrupt and
+	 * write and the last store it is still in `old's set, and without
+	 * PCID holding none of ITS translations either — CR3 discarded them —
+	 * so again an interrupt for nothing.  With PCID it may still hold them
+	 * under old's PCID: the interrupt is still harmless, because the
+	 * handler acts only on the PCID CR3 names, and old's generation
+	 * covers the rest at the next switch back.  Both windows cost a wasted
+	 * interrupt and
 	 * neither can lose one, which is the only asymmetry that matters:
 	 * the opposite order would open a window in which this processor
 	 * holds translations nobody knows to shoot down.
@@ -1832,13 +1836,19 @@ int pmap_pcid_mode = PMAP_PCID_OFF;
  * errata ADL063 (12th Generation Core Specification Update 682436, rev. 040)
  * and RPL043 (13th Generation, 740518, rev. 031).  There a kernel page removed
  * while one space is loaded stays translated under the PCID of another space
- * that used it, and the switch back into that space keeps what it finds
- * (pmap_cr3_for()).  The cure is microcode, which this kernel does not load:
- * the revision that runs is the firmware's, and below the first one without
- * the erratum PCID stays off -- the revisions Intel gave Linux for the same
- * decision (arch/x86/mm/init.c, invlpg_miss_ids).  Not under a hypervisor:
- * the erratum "does not apply in VMX non-root operation", and a guest would
- * read whatever revision its host chose to show it.
+ * that used it, and survives any switch back into that space: a CR3 load never
+ * discards global entries.  The errata's cures are microcode, which this
+ * kernel does not load -- the revision that runs is the firmware's -- or
+ * INVPCID type 2 in place of INVLPG, a whole-TLB flush for every kernel page.
+ * This turns PCID off instead, below the first revision without the erratum,
+ * as Linux does (arch/x86/mm/init.c, invlpg_miss_ids, whose models and
+ * revisions Intel gave and this table copies).  That table errs on the safe
+ * side: it has Alder Lake N (0xBE), which neither specification update lists;
+ * every stepping of 0xBF, though RPL043 marks the 6P+0E die (B06F5h) N/A; and
+ * every 0x9A, though the Atom C1100 there counts its revisions from 0x4 and
+ * never reaches 0x42c.  Not under a hypervisor: the erratum "does not apply in
+ * VMX non-root operation", and a guest would read whatever revision its host
+ * chose to show it.
  */
 static const struct {
 	uint8_t		model;		/* family 6, as the SDM displays it */
@@ -1910,8 +1920,8 @@ uint64_t pmap_enable_pcid(void)
 	/*
 	 * Allowed only with CR3's low twelve bits zero, which they are: every
 	 * root is a page, and nothing has loaded a PCID into CR3 yet.  From here
-	 * those bits ARE the PCID -- still 0 in every CR3 this kernel writes, so
-	 * a load without bit 63 discards exactly what it discarded before.
+	 * those bits ARE the PCID: 0 for the kernel's own tables, a slot's
+	 * number plus one for a user space (pmap_cr3_for()).
 	 */
 	pmap_cr4_on |= CR4_PCIDE;
 	write_cr4(read_cr4() | CR4_PCIDE);

@@ -66,7 +66,9 @@ void tlb_flush_local_all(void)
 	 * #412: with INVPCID, one instruction that discards every PCID's
 	 * entries and the global ones, instead of two CR4 writes.  Without it
 	 * the PGE toggle below already reaches every PCID: a CR4 write that
-	 * changes PGE flushes the whole TLB, whatever CR3 names.
+	 * changes PGE flushes the whole TLB, whatever CR3 names.  The CR3
+	 * reload at the end reaches the current PCID only, and is reached only
+	 * with global pages off, where pmap_enable_pcid() leaves PCID off too.
 	 */
 	if (pmap_pcid_mode == PMAP_PCID_INVPCID)
 		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
@@ -299,8 +301,11 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * Read once.  A processor joining the set after this load is a
 	 * processor that is about to load CR3 with this root — and CR3 is
 	 * written after the entry we just changed was already gone from the
-	 * table, so what it walks is the new state.  It has nothing stale to
-	 * discard, which is why missing it here is not a hole.
+	 * table, so what it walks is the new state.  Without PCID it has
+	 * nothing stale to discard, which is why missing it here is not a
+	 * hole.  With PCID it may: its slot can still hold the space's old
+	 * entries, and what makes it discard them is the generation it reads
+	 * after joining, which is the order the next paragraph is about.
 	 *
 	 * A processor LEAVING after this load still gets its interrupt and
 	 * flushes something it no longer needs, which costs a message.
@@ -325,8 +330,11 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	using = atomic_load64(&pmap->cpus_using);
 
 	/*
-	 * Nobody has this space loaded, so the flush here is the whole job.
-	 * This is the ORDINARY case, not an edge one: a freshly forked
+	 * Nobody has this space loaded, so there is nobody to interrupt: with
+	 * PCID the generation moved above is what reaches the processors that
+	 * only cache the space, and the flush here is for this processor, which
+	 * may have loaded the root directly (the boot self-tests do).  This is
+	 * the ORDINARY case, not an edge one: a freshly forked
 	 * address space is loaded on the processor doing the forking and on no
 	 * other, and that processor's own bit is not in the set it would send
 	 * to anyway.
