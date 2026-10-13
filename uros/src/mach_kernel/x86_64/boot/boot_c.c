@@ -2150,7 +2150,9 @@ static void global_split_selftest(void)
  *	 pages are on (pmap_enable_pcid() refuses PCID without them) and the
  *	 processor's INVLPG does what the SDM says (pmap_pcid_erratum()).  Its
  *	 control is the same round with the remap told to nobody and every
- *	 invalidation the remap made, X's aimed at the next page.
+ *	 invalidation the remap made, X's aimed at the next page.  With one
+ *	 processor online it is asked all the same, of the boot processor
+ *	 itself (pcid_ask_alone()).
  *
  * Each answer that comes out right is judged by a control of its own shape
  * (xs_control_said()): only where an entry kept through the round would have
@@ -2273,6 +2275,16 @@ static void xs_wake_here(void *arg)
 	(void) arg;
 }
 
+/* [3] with one processor online: this one into `space', reading if asked. */
+static uint64_t xs_alone(struct xs_step *st, pmap_t space, int read)
+{
+	st->space = space;
+	st->read = read;
+	st->seen = 0;
+	xs_step_here(st);
+	return st->seen;
+}
+
 /*
  * The rest of a [1], [2] or [3] line whose question was answered right --
  * `right' says how -- then what its control read, and so whether that answer
@@ -2316,6 +2328,73 @@ static void xs_said3(uint32_t x, uint64_t seen, uint64_t kept)
 				XS_MARK(4), XS_MARK(3));
 }
 
+/*
+ * [3] with one processor online.  [1] and [2] need a second processor to
+ * switch spaces while this one changes them; [3] does not.  What it asks is
+ * whether an invalidation made under one PCID reaches the entry another PCID
+ * keeps, which happens on the one processor holding both, and the defect it
+ * looks for -- PCID without global pages -- is whole on a uniprocessor.  So
+ * this processor is X: it reads the kernel page in S1, moves to S2, remaps it
+ * -- with nobody else online the shootdown is tlb_flush_kernel_here() here,
+ * the invlpg under S2's PCID -- and reads it back in S1.  Its control is the
+ * same round with the remap told to nobody and both of the remap's invlpgs
+ * aimed at the page next to it.
+ */
+static void pcid_ask_alone(uint32_t self)
+{
+	struct xs_step st = { PMAP_NULL, 0, PMAP_NULL, PMAP_NULL, 0, XS_KVA, 0 };
+	pmap_t s1 = pmap_create(0), s2 = pmap_create(0);
+	uint64_t f3 = boot_frame_alloc(), f4 = boot_frame_alloc();
+	uint64_t seen, kept = 0;
+	pt_entry_t *leaf, was;
+	int kmapped = 0;
+
+	if (f3 != 0)
+		*(volatile uint64_t *)(uintptr_t) phys_to_direct(f3) = XS_MARK(3);
+	if (f4 != 0)
+		*(volatile uint64_t *)(uintptr_t) phys_to_direct(f4) = XS_MARK(4);
+	if (s1 != PMAP_NULL && s2 != PMAP_NULL && f3 != 0 && f4 != 0
+	    && pmap_enter(pmap_kernel(), XS_KVA, f3,
+			  VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK)
+		kmapped = 1;
+
+	if (!kmapped)
+		kputs("pcid_test: [3] NOT ASKED — could not build the two "
+		      "spaces or map the kernel page (#412)\r\n");
+	else {
+		(void) xs_alone(&st, s1, 1);
+		(void) xs_alone(&st, s2, 0);
+		(void) pmap_enter(pmap_kernel(), XS_KVA, f4,
+				  VM_PROT_READ | VM_PROT_WRITE, 0);
+		seen = xs_alone(&st, s1, 1);
+
+		(void) xs_alone(&st, s2, 0);
+		leaf = pmap_walk(pmap_kernel()->root_pa, XS_KVA, 0);
+		if (leaf != PT_ENTRY_NULL) {
+			was = *leaf;
+			atomic_store64((volatile uint64_t *) leaf,
+				       (was & ~INTEL_PTE_PFN) | f3);
+			invlpg(XS_KVA + PAGE_SIZE_4K);
+			invlpg(XS_KVA + PAGE_SIZE_4K);
+			kept = xs_alone(&st, s1, 1);
+			atomic_store64((volatile uint64_t *) leaf, was);
+		}
+		pmap_activate(pmap_kernel());
+		xs_said3(self, seen, kept);
+	}
+
+	if (s1 != PMAP_NULL)
+		pmap_destroy(s1);
+	if (s2 != PMAP_NULL)
+		pmap_destroy(s2);
+	if (kmapped)
+		pmap_remove(pmap_kernel(), XS_KVA, XS_KVA + PAGE_SIZE_4K);
+	if (f3 != 0)
+		boot_frame_free(f3);
+	if (f4 != 0)
+		boot_frame_free(f4);
+}
+
 static void pcid_ask(void)
 {
 	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
@@ -2336,8 +2415,11 @@ static void pcid_ask(void)
 			break;
 		}
 	if (x == SMP_MAX_CPUS) {
-		kputs("pcid_test: NOT ASKED — no second processor to switch "
+		kputs("pcid_test: [1] NOT ASKED — no second processor to switch "
 		      "between spaces while this one changes them (#412)\r\n");
+		kputs("pcid_test: [2] NOT ASKED — no second processor to switch "
+		      "between spaces while this one changes them (#412)\r\n");
+		pcid_ask_alone(self);
 		return;
 	}
 
