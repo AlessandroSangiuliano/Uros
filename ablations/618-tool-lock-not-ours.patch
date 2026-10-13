@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #618
+Takes out: giving back only the lock the tool made, in run_lock.py -- give_back() removes whatever lock is there, so a lock removed by hand and taken again by another run is removed by the tool that took the first one
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: lockover
+Expect: lifecycle: lockover char-roundtrip.py: .*REMOVED the lock
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+index a4ffe005..c457f77a 100644
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -64,10 +64,7 @@ def give_back(mine, who):
+         if q.poll() is None:
+             q.kill()
+             q.wait()
+-    try:
+-        ours = _owner() == mine
+-    except FileNotFoundError:
+-        ours = False
++    ours = os.path.isdir(LOCK)
+     if ours:
+         os.rmdir(LOCK)
+     else:
