@@ -82,9 +82,10 @@ WRONG=0
 #             its message and the backtrace after it, and no protection fault
 #             in their place (#665)
 #   pcidx     the harness's verdict and, where the processor offers PCID, -x's
-#             mode (PCID without INVPCID) with pcid_test's [1] and [2] asked (#412)
-#   pcidn     the harness's verdict, -n's line or no PCID offered, and pcid_test
-#             NOT ASKED (#412)
+#             mode (PCID without INVPCID) with pcid_test's [1] and [2] lines;
+#             a pass on a question not asked says NOT ASKED in its verdict (#412)
+#   pcidn     the harness's verdict, -n's line and pcid_test NOT ASKED, or no
+#             PCID offered, said as NOT ASKED (#412)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -177,8 +178,37 @@ SKIPPED="
 19: -B panics on purpose; it needs a verdict of its own
 "
 
-judge() {	# entry verdict log-of-the-harness full-log
-	local e=$1 v=$2 h=$3 f=$4
+# #412: the PCID entries' half of judge().  "Not offered" is taken at the
+# kernel's word only where it can be true: under KVM on a host whose own
+# processor has PCID it is a detection lost, WRONG; under TCG, or on a host
+# without PCID, the flag had nothing to change, and the verdict says NOT ASKED,
+# as it does when [1] or [2] could not judge -- a pass that asked nothing is
+# not written as one that did (#412's second review).  NOTE carries the words.
+host_has_pcid() { grep -qw pcid /proc/cpuinfo; }
+
+pcid_judge() {	# x|n accelerator full-log
+	local flag=$1 a=$2 f=$3
+	if grep -aq 'UrMach x86-64: PCID not offered by this cpu' "$f"; then
+		if [ "$a" = kvm ] && host_has_pcid; then
+			NOTE="no PCID seen under KVM on a host that has it"
+			return 1
+		fi
+		NOTE="NOT ASKED: no PCID offered"
+		return 0
+	fi
+	case $flag in
+	x)	grep -aqE 'UrMach x86-64: PCID on, without INVPCID, (as -x asks|which this cpu lacks)' "$f" &&
+			grep -aq 'pcid_test: \[1\] ' "$f" && grep -aq 'pcid_test: \[2\] ' "$f" || return 1
+		grep -aqE 'pcid_test: \[[12]\] .*NOT ASKED' "$f" && NOTE="NOT ASKED by [1] or [2]"
+		return 0 ;;
+	n)	grep -aq 'UrMach x86-64: PCID off, as -n asks' "$f" &&
+			grep -aq 'pcid_test: NOT ASKED' "$f" ;;
+	esac
+}
+
+judge() {	# entry verdict log-of-the-harness full-log accelerator
+	local e=$1 v=$2 h=$3 f=$4 a=$5
+	NOTE=""
 	case $v in
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
@@ -209,18 +239,14 @@ judge() {	# entry verdict log-of-the-harness full-log
 		[ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ;;
 	# #412: -x and -n are honoured, not merely survived.  Where the
 	# processor offers PCID -- KVM on omen, OMEGA, GitHub's runners -- entry
-	# 50 must run PCID without INVPCID and ask [1] and [2], and entry 51
-	# must run without PCID and leave pcid_test NOT ASKED; under TCG, and on
-	# a host without PCID, the line says so and the flag has nothing to
-	# change.  A renamed flag, or a pcid_test that never ran, failed nothing
-	# under "harness" (#412's review).
+	# 50 must run PCID without INVPCID with [1] and [2] on its log, and entry
+	# 51 must run without PCID and leave pcid_test NOT ASKED (pcid_judge()).
+	# A renamed flag, or a pcid_test that never ran, failed nothing under
+	# "harness" (#412's review).
 	pcidx) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
-		{ grep -aq 'UrMach x86-64: PCID not offered by this cpu' "$f" ||
-		  { grep -aqE 'UrMach x86-64: PCID on, without INVPCID, (as -x asks|which this cpu lacks)' "$f" &&
-		    grep -aq 'pcid_test: \[1\] ' "$f" && grep -aq 'pcid_test: \[2\] ' "$f"; }; } ;;
+		pcid_judge x "$a" "$f" ;;
 	pcidn) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
-		grep -aqE 'UrMach x86-64: PCID (not offered by this cpu|off, as -n asks)' "$f" &&
-		grep -aq 'pcid_test: NOT ASKED' "$f" ;;
+		pcid_judge n "$a" "$f" ;;
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
@@ -290,8 +316,8 @@ while read -r e v opt cpus; do
 		# ci/job.sh copies that log.
 		ng_rc=0
 		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
-		if ! judge "$e" "$v" "$h" "$f"; then
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v): $h"
+		if ! judge "$e" "$v" "$h" "$f" "$a"; then
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v${NOTE:+: $NOTE}): $h"
 			WRONG=$((WRONG + 1))
 		elif [ $ng_rc -ne 0 ]; then
 			# One line, the last, which says why: ci/job.sh reads the
@@ -306,7 +332,7 @@ while read -r e v opt cpus; do
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
 			WRONG=$((WRONG + 1))
 		else
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v${NOTE:+: $NOTE})"
 		fi
 	done
 done <<< "$ENTRIES"
