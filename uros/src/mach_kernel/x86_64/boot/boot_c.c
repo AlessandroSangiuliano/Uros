@@ -2145,7 +2145,7 @@ static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
 	return st.seen;
 }
 
-static void pcid_selftest(void)
+static void pcid_ask(void)
 {
 	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
 	uint64_t frame[3] = { 0 }, seen;
@@ -2236,6 +2236,14 @@ static void pcid_selftest(void)
 	for (i = 0; i < 3; i++)
 		if (frame[i] != 0)
 			boot_frame_free(frame[i]);
+}
+
+/* X awake between its cross-calls, as for the global split probe. */
+static void pcid_selftest(void)
+{
+	smp_hold_awake(1);
+	pcid_ask();
+	smp_hold_awake(0);
 }
 
 /*
