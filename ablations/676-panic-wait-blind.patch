@@ -1,6 +1,7 @@
 Kind: ablation
 Issue: #676
-Takes out: the panic wait looking for the restart line -- a -b boot whose panic the harness saw first is ended at three still seconds again, inside the kernel's five before its reset
+Over: 676-widen-restart-line-late.patch
+Takes out: the panic wait looking for the restart line -- a -b boot whose panic the harness saw first is ended at three still seconds again, inside the kernel's five before its reset; the fixed arm of an A/B is FAILED whatever happens, the harness exiting 1 for a panic that was asked for: its log is read for the zone's check and the reset, which the ablated one never reaches
 Run: --entry 44 300 -smp 4
 Expect: qemu-system-x86_64: terminating on signal 15
 
