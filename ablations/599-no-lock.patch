@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #599
 Over: 599-widen.patch
-Takes out: ioapic_pair_lock -- the select/window pair is used with interrupts off and nothing else, so two processors' read-modify-writes interleave and can leave the 8254's pin holding another pin's entry, processor 0's tick stopped for good
+Takes out: ioapic_pair_lock -- the select/window pair is used with interrupts off and nothing else, so two processors' read-modify-writes interleave and can leave the 8254's pin holding another pin's entry, processor 0's tick stopped for good; met in neither of two boots on OMEGA under KVM (#643): one froze silently after cap_test, the watch saying nothing, the other ran to its end -- #599's question
 Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
 Expect: inside the select/window pair \(#599\)
 Expect: clock: processor 0's tick has not run for
