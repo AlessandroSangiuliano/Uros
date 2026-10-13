@@ -960,22 +960,35 @@ ninja -C "$BUILD" mach_kernel boot_probe name_server_bin bootstrap_server \
 
 # One run at a time, enforced rather than remembered.
 #
-# The killall below is how this script guarantees a clean machine, and it is
-# also how two of these destroy each other: each kills the other's qemu
-# mid-boot, and both report processors that never arrived. That happened,
-# and produced twelve consecutive "failures" of a kernel that was fine.
+# Two of these used to destroy each other: each killed every qemu on the
+# machine before it booted, the other's among them, and both reported
+# processors that never arrived. That happened, and produced twelve
+# consecutive "failures" of a kernel that was fine.
 #
 # So take a lock and refuse rather than interleave. A refusal is a fact; two
 # runs fighting is a lie with a plausible shape.
+#
+# ── What this run kills, and what it only names (#618) ─────────────────
+#
+# 🔴 IT KILLED EVERY qemu-system-x86_64 IT COULD SIGNAL, by name, right here:
+# a boot held under gdb with -s -S, another tool's machine, another project's.
+# The lock had long made a sibling run impossible to meet.  So nothing is
+# killed by name.  Any other qemu alive when the run starts, or still alive
+# when it ends, is named in the run conditions with its command line: it
+# competes for the processors the run is measured on, and on the same build
+# nothing else stops it -- make-disk below makes the images anew, so the other
+# qemu keeps its own, unlinked, and holds no lock on these (measured: on the
+# same files a second qemu refuses, "Failed to get "write" lock"; after
+# make-disk it starts).
 LOCK=/tmp/uros-x86_64-run.lock
 if ! mkdir "$LOCK" 2>/dev/null; then
 	echo "another run-x86_64.sh is in flight ($LOCK) — refusing to interleave" >&2
 	exit 2
 fi
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+OTHER_QEMU_AT_START=$(uros_other_qemus)
 
 mkdir -p "$(dirname "$LOG")"
-killall qemu-system-x86_64 2>/dev/null || true
 echo "=== booting disk-x86_64.img (watchdog ${SECS}s, a backstop only) $* ==="
 
 # The whole stream goes to the log; the console keeps seeing the lines it
@@ -1476,6 +1489,26 @@ else
 		"$([ -r "$CLOCK_CPUFREQ/scaling_available_frequencies" ] && echo 1 || echo 0)")" ;;
 	esac
 fi
+# Every other qemu alive when the run started or when it ended, one field each
+# (#618): what this script used to kill by name, and what competed with it for
+# the processors it measured on.  Ours is gone by now.
+OTHER_QEMU_AT_END=$(uros_other_qemus)
+OTHER_QEMU=()
+while IFS= read -r _q; do
+	[ -n "$_q" ] || continue
+	if printf '%s\n' "$OTHER_QEMU_AT_END" | grep -qxF -- "$_q"; then
+		OTHER_QEMU+=("other qemu:   at the start and at the end, $_q")
+	else
+		OTHER_QEMU+=("other qemu:   at the start, $_q")
+	fi
+done <<< "$OTHER_QEMU_AT_START"
+while IFS= read -r _q; do
+	[ -n "$_q" ] || continue
+	printf '%s\n' "$OTHER_QEMU_AT_START" | grep -qxF -- "$_q" ||
+		OTHER_QEMU+=("other qemu:   at the end, $_q")
+done <<< "$OTHER_QEMU_AT_END"
+[ ${#OTHER_QEMU[@]} -gt 0 ] ||
+	OTHER_QEMU=("other qemu:   none, at the start or at the end (#618)")
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
 	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
@@ -1484,7 +1517,8 @@ UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
 	"entry:        ${UROS_X86_64_BOOT_ENTRY:-from grub.cfg default}" \
 	"budget:       ${SECS}s" \
-	"command:      $0 $ORIG_ARGS")
+	"command:      $0 $ORIG_ARGS" \
+	"${OTHER_QEMU[@]}")
 printf '%s\n' "$UROS_COND" | tee -a "$LOG"
 
 # 🔥 A clock that moved during the run is a run nobody may compare with
