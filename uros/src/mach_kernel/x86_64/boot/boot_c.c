@@ -1818,40 +1818,60 @@ static void control_regs_selftest(void)
  * not.  #437's body names the place this matters most: W^X narrowed after a
  * split, looking applied while not being applied.
  *
- * So: every processor reads a page of the direct map that sits in a large
- * leaf, which leaves the large, global, writable translation in its TLB; the
- * boot processor splits it down to 4 KiB and narrows that one page to
- * read-only WITHOUT telling anyone -- an invlpg anywhere inside the large page
- * would discard the large translation by itself and hide a broken split flush;
- * and every other processor then writes the page.  Each must fault.  The page
- * is a frame of this test's own, so nothing else is denied anything meanwhile.
+ * So: every processor writes a page of the direct map that sits in a large
+ * leaf, which leaves the large, global, writable and dirty translation in its
+ * TLB -- dirty, so that a later write through it needs no walk: the direct
+ * map's leaves are made without the dirty bit, and through a 2 MiB leaf
+ * nobody had written a write would walk again and fault whatever the split's
+ * flush did.  The boot processor splits the large page down to 4 KiB and
+ * narrows that one page to read-only WITHOUT telling anyone -- an invlpg
+ * anywhere inside the large page would discard the large translation by
+ * itself and hide a broken split flush; and every other processor then
+ * writes the page.  Each must fault.  The page is a frame of this test's own,
+ * so nothing else is denied anything meanwhile.
  *
  * ⚠️ NOT THE BOOT PROCESSOR, WHICH NARROWS THE PAGE ITSELF.  Its write comes
  * right after its own store to the entry, and the page walker reads the
  * tables from the cache, not from the store buffer: a write executed ahead
  * can walk the old, writable entry and cache a new translation of it, which
- * the architecture allows until an invlpg (SDM 4.10.4.2).  It wrote through
- * in 2 boots of 2 under KVM on victus and 1 of 2 on OMEGA, the others
- * faulting every time.  The others are asked by an interrupt sent after the
- * store, which they cannot see before it, and they are where a large global
- * translation that outlived the split's flush shows: with the flush taken out
- * (ablations/437-flush-keeps-globals.patch) processors 1 to 3 write.
+ * the architecture allows until an invlpg (SDM Vol. 3A 253668-093US
+ * 5.10.4.2).  It wrote through in 2 boots of 2 under KVM on victus and 1 of 2
+ * on OMEGA, the others faulting every time.  The others are asked by an
+ * interrupt sent after the store, which they cannot see before it, and they
+ * are where a large global translation that outlived the split's flush
+ * shows: with the flush taken out (ablations/437-flush-keeps-globals.patch)
+ * processors 1 to 7 wrote on omen's metal.
  *
- * TCG reloads its whole TLB on every CR3 write, global or not, so there the
- * answer is the same with and without the flush that reaches globals; only a
- * real TLB -- KVM, or the metal -- can say WRONG.  ⚠️ And not every KVM: with
- * the flush taken out it said WRONG in 4 boots of 4 on victus (Ryzen 5 5600H)
- * and in none of 6 on OMEGA (i9-13900K) and omen (i7-7700HQ), VPID and EPT on
- * both -- why is not established (a vCPU moved to another core between the
- * interrupts, halted in between, would start with an empty TLB).  The metal
- * has no such question.
+ * ⚠️ AND ONLY WHERE A TLB KEEPS WHAT THE QUESTION NEEDS KEPT.  TCG reloads its
+ * whole TLB on every CR3 write, global or not.  With the flush taken out the
+ * probe said WRONG on omen's metal (i7-7700HQ, one boot), under KVM on victus
+ * (Ryzen 5 5600H, 4 boots of 4) and on one of GitHub's Xeon Platinum 8573C
+ * (processors 1 and 2 of 3), and in none of 6 boots under KVM on OMEGA
+ * (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763: a CR3 load "may
+ * invalidate TLB entries for global pages" (5.10.4.1), and a hypervisor may
+ * empty a vCPU's TLB between two interrupts.  Where a processor lost the
+ * large entry on its own, its fault says nothing.  So after the question
+ * each processor is asked whether it could have answered: it writes the
+ * page, a 4 KiB global leaf by now, takes a bare CR3 reload -- the flush that
+ * keeps global entries, done on purpose -- and writes it again after the
+ * boot processor narrowed it, told to nobody.  A write that goes through is a
+ * global entry kept across a CR3 reload, and there a split flush that left
+ * one would have shown; a fault is none kept, and that processor's fault
+ * above is not counted.  If no processor kept one, NOT ASKED.
  */
 static volatile uint64_t gs_va;
 
 static void gs_warm_here(void *arg)
 {
 	(void) arg;
-	(void) *(volatile uint32_t *)(uintptr_t) gs_va;
+	*(volatile uint32_t *)(uintptr_t) gs_va = 0;
+}
+
+/* The flush that keeps global entries (5.10.4.1), on purpose. */
+static void gs_reload_here(void *arg)
+{
+	(void) arg;
+	write_cr3(read_cr3());
 }
 
 static void gs_probe_here(void *arg)
@@ -1867,8 +1887,8 @@ static void global_split_selftest(void)
 {
 	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 	uint64_t root = pmap_kernel()->root_pa, size = 0, frame;
-	int faulted[SMP_MAX_CPUS] = { 0 };
-	unsigned asked = 0, through = 0;
+	int faulted[SMP_MAX_CPUS] = { 0 }, lost[SMP_MAX_CPUS] = { 0 };
+	unsigned asked = 0, through = 0, kept = 0;
 	pt_entry_t *leaf;
 
 	if ((read_cr4() & CR4_PGE) == 0) {
@@ -1892,7 +1912,7 @@ static void global_split_selftest(void)
 		return;
 	}
 
-	/* Every other processor caches the large, global, writable translation. */
+	/* Every other processor caches the large global translation, dirty. */
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 		if (cpu == self || !smp_is_online(cpu))
 			continue;
@@ -1941,14 +1961,41 @@ static void global_split_selftest(void)
 		      "the large global translation outlived the split's flush — "
 		      "WRONG (#437)\r\n");
 	}
+
+	/* Could each have said so?  A global entry, a bare CR3 reload, a write. */
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
+		ipi_call_mask(1ULL << cpu, gs_reload_here, 0);
+	}
+	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_probe_here, &lost[cpu]);
+		if (!lost[cpu])
+			kept++;
+	}
+	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
+	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
+
 	kputs("UrMach x86-64: a page narrowed after a split, with global pages "
 	      "on, on ");
 	kputdec(asked);
-	kputs(through == 0
-	      ? " processors besides the one that narrowed it: every write "
-		"faulted\r\n"
-	      : " processors besides the one that narrowed it: some wrote "
-		"through, WRONG (#437)\r\n");
+	kputs(" processors besides the one that narrowed it");
+	if (through != 0)
+		kputs(": some wrote through, WRONG (#437)\r\n");
+	else if (kept == 0)
+		kputs(": none keeps a global entry across a CR3 reload, so a "
+		      "split flush that leaves them could not show here — NOT "
+		      "ASKED (#437)\r\n");
+	else {
+		kputs(", ");
+		kputdec(kept);
+		kputs(" of them keeping a global entry across a CR3 reload: every "
+		      "write faulted\r\n");
+	}
 	boot_frame_free(frame);
 }
 
