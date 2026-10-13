@@ -1,20 +1,20 @@
 Kind: ablation
 Issue: #646
-Takes out: current_thread()'s single %gs-relative load -- it is cpu_data[cpu_number()].active_thread again, two loads a thread preempted and moved between makes on two processors, and reads the thread running where it was
+Takes out: current_thread()'s single %gs-relative load -- it is cpu_data[] indexed by the processor's number again, two loads a thread preempted and moved between makes on two processors, and reads the thread running where it was; the number read unchecked, cpu_number_hint(), as every read was before #626: through cpu_number() each current_thread() asks whether the thread can still move, the question names the thread, and the boot recursed into a triple fault two seconds in (#643's sweep)
 Run: --entry 22 1200 -smp 4
 Expect: mutex_lock_assert_safe: thread .* another thread \(#646\)
 Expect: <mutex_lock_assert_safe\+0x
 
-diff --git a/uros/src/mach_kernel/x86_64/cpu_data.h b/uros/src/mach_kernel/x86_64/cpu_data.h
-index 009a0b64..08e5a813 100644
---- a/uros/src/mach_kernel/x86_64/cpu_data.h
-+++ b/uros/src/mach_kernel/x86_64/cpu_data.h
-@@ -92,7 +92,7 @@ static __inline__ int get_preemption_level(void)
-  * thread_machine_set_current(), and one instruction through %gs reads the
-  * block of the processor it executes on.  Same precondition as above.
-  */
--#define	MACHINE_CURRENT_THREAD	1
-+#define	MACHINE_CURRENT_THREAD	0
- 
- struct thread_shuttle;
- 
+diff --git a/uros/src/mach_kernel/kern/cpu_data.h b/uros/src/mach_kernel/kern/cpu_data.h
+index 0bcfe7b1..6a88985f 100644
+--- a/uros/src/mach_kernel/kern/cpu_data.h
++++ b/uros/src/mach_kernel/kern/cpu_data.h
+@@ -156,7 +156,7 @@ static __inline__ void 		mp_enable_preemption_no_check(void);
+ #if	MACHINE_CURRENT_THREAD
+ static __inline__ struct thread_shuttle  *current_thread(void)
+ {
+-	return (machine_current_thread());
++	return (cpu_data[cpu_number_hint()].active_thread);
+ }
+ #else	/* MACHINE_CURRENT_THREAD */
+ static __inline__ struct thread_shuttle  *current_thread(void)
