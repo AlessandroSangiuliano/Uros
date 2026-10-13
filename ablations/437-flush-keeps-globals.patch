@@ -1,18 +1,24 @@
 Kind: ablation
 Issue: #437
 Accel: kvm
-Takes out: the flush of global entries in tlb_flush_local_all() -- the whole-TLB flush is a bare CR3 reload again, which keeps every global entry, so a large global translation outlives the split that should have taken it off every processor; TCG reloads everything on a CR3 write and cannot show it
+Takes out: the flush of global entries in tlb_flush_local_all() -- the whole-TLB flush is a bare CR3 reload again, neither INVPCID's all-contexts flush (#412) nor the PGE toggle, which keeps every global entry, so a large global translation outlives the split that should have taken it off every processor; TCG reloads everything on a CR3 write and cannot show it
 Run: --entry 0 300 -smp 4
 Expect: wrote a page narrowed after its large page was split: .*WRONG \(#437\)
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index 5e1ca9de..c37a3dc9 100644
+index fe308684..2fbd94fe 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -45,7 +45,7 @@ void tlb_flush_local_all(void)
- 	 * a control register keeps the flush right with them and without.
- 	 * ablations/437-flush-keeps-globals.patch takes this branch out.
+@@ -53,12 +53,12 @@ void tlb_flush_local_all(void)
+ 	 * the PGE toggle below already reaches every PCID: a CR4 write that
+ 	 * changes PGE flushes the whole TLB, whatever CR3 names.
  	 */
+-	if (pmap_pcid_mode == PMAP_PCID_INVPCID) {
++	if (0 && pmap_pcid_mode == PMAP_PCID_INVPCID) {
+ 		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
+ 		return;
+ 	}
+ 
 -	if (cr4 & CR4_PGE) {
 +	if (0 && (cr4 & CR4_PGE)) {
  		write_cr4(cr4 & ~CR4_PGE);
