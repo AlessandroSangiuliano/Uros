@@ -81,6 +81,10 @@ WRONG=0
 #   earlypanic  -p panics on purpose before the boot processor has its page:
 #             its message and the backtrace after it, and no protection fault
 #             in their place (#665)
+#   pcidx     the harness's verdict and, where the processor offers PCID, -x's
+#             mode (PCID without INVPCID) with pcid_test's [1] and [2] asked (#412)
+#   pcidn     the harness's verdict, -n's line or no PCID offered, and pcid_test
+#             NOT ASKED (#412)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -160,8 +164,8 @@ ENTRIES="
 48 reach --iommu_amd-xt
 37 reach --socket1-cpu_--iommu_intel-eim 1,sockets=2,cores=256,maxcpus=512
 37 reach --socket1-cpu_--iommu_amd-xt 1,sockets=2,cores=256,maxcpus=512
-50 harness
-51 harness
+50 pcidx
+51 pcidn
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -203,6 +207,20 @@ judge() {	# entry verdict log-of-the-harness full-log
 	reach) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'entries for 32-bit apic ids' "$f" &&
 		[ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ;;
+	# #412: -x and -n are honoured, not merely survived.  Where the
+	# processor offers PCID -- KVM on omen, OMEGA, GitHub's runners -- entry
+	# 50 must run PCID without INVPCID and ask [1] and [2], and entry 51
+	# must run without PCID and leave pcid_test NOT ASKED; under TCG, and on
+	# a host without PCID, the line says so and the flag has nothing to
+	# change.  A renamed flag, or a pcid_test that never ran, failed nothing
+	# under "harness" (#412's review).
+	pcidx) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		{ grep -aq 'UrMach x86-64: PCID not offered by this cpu' "$f" ||
+		  { grep -aqE 'UrMach x86-64: PCID on, without INVPCID, (as -x asks|which this cpu lacks)' "$f" &&
+		    grep -aq 'pcid_test: \[1\] ' "$f" && grep -aq 'pcid_test: \[2\] ' "$f"; }; } ;;
+	pcidn) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'UrMach x86-64: PCID (not offered by this cpu|off, as -n asks)' "$f" &&
+		grep -aq 'pcid_test: NOT ASKED' "$f" ;;
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
