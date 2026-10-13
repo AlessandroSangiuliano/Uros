@@ -54,8 +54,10 @@
 
 import argparse, bisect, fcntl, os, re, select, socket, subprocess, sys, time
 
+sys.dont_write_bytecode = True		# nothing left in scripts/
+import run_lock				# noqa: E402  the lock, as #618 has it
+
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
-LOCK = "/tmp/uros-x86_64-run.lock"
 
 # The symbols that ARE the wait on the transmitter.
 #
@@ -128,16 +130,21 @@ def main():
     if not os.path.exists(kernel):
         print(f"uart-stall: no kernel at {kernel}", file=sys.stderr); return 2
 
+    run_lock.stop_like_ctrl_c()
+    mine = run_lock.take("uart-stall")
+    if mine is None:
+        return 2
+    try:
+        return stall(a, build, kernel)
+    finally:
+        run_lock.give_back(mine, "uart-stall")
+
+
+def stall(a, build, kernel):
     # the disk, with the entry written into it, exactly as the harness does
     env = dict(os.environ, UROS_BUILD_DIR=build, UROS_X86_64_BOOT_ENTRY=str(a.entry))
     subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")], env=env,
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    try:
-        os.mkdir(LOCK)
-    except FileExistsError:
-        print(f"uart-stall: another run-x86_64.sh is in flight ({LOCK}) — refusing to interleave", file=sys.stderr)
-        return 2
 
     mon = f"/tmp/uros-uart-stall-{os.getpid()}.mon"
     fifo = f"/tmp/uros-uart-stall-{os.getpid()}.fifo"
@@ -166,11 +173,10 @@ def main():
     if a.kvm:
         argv.insert(1, "-enable-kvm")
 
-    q = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    q = run_lock.start_qemu(argv, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     time.sleep(1.0)
     if q.poll() is not None:
         err = q.stderr.read()
-        os.rmdir(LOCK)
         print(f"uart-stall: qemu did not start: {err.strip()}", file=sys.stderr); return 2
 
     addrs, names = symbols(kernel)
@@ -202,7 +208,7 @@ def main():
     t_start = time.time()
     got_before = drain(60.0, upto=a.after)
     if got_before < a.after:
-        q.kill(); os.rmdir(LOCK)
+        q.kill()
         print(f"uart-stall: only {got_before} bytes in 60s, the boot did not get going", file=sys.stderr); return 2
     print(f"uart-stall: {got_before} bytes read in {time.time() - t_start:.1f}s, now the transmitter is stuck for {a.stall:.0f}s")
 
@@ -223,7 +229,7 @@ def main():
     got_after = drain(a.budget)
     if dump: dump.close()
     q.kill(); q.wait()
-    os.close(fd); os.close(fd_in); os.rmdir(LOCK)
+    os.close(fd); os.close(fd_in)
     for path in (mon, fifo + ".in", fifo + ".out"):
         try: os.unlink(path)
         except OSError: pass
