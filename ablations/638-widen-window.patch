@@ -85,14 +85,14 @@ index 8aa648ab..7d3b06d3 100644
  
  static void
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index c9ed9bfc..d5e851a8 100644
+index 5f80a681..0e7ed7bd 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -114,6 +114,7 @@ uint64_t tlb_flushes_served(unsigned cpu)
+@@ -228,6 +228,7 @@ uint64_t tlb_flushes_served(unsigned cpu)
  static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
  				     uint64_t using)
  {
 +	shootdown_widen();	/* before deciding: a move is harmless */
  	disable_preemption();
  
- 	tlb_flush_local_range(r->va, r->size);
+ 	tlb_flush_request_here(r);

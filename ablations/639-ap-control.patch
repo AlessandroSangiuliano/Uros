@@ -5,15 +5,15 @@ Run: --entry 0 600 -smp 4
 Expect: WRONG \(#639\)
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/smp.c b/uros/src/mach_kernel/x86_64/cpu/smp.c
-index 0370e26f..4f034cd3 100644
+index c00e6839..287b250b 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/smp.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/smp.c
-@@ -204,8 +204,6 @@ void ap_start_c(uint32_t cpu)
- 	 * Then CR0.WP, SMEP and SMAP, as the boot processor turned them on:
- 	 * every boot until this ran three of four processors without them.
+@@ -219,8 +219,6 @@ void ap_start_c(uint32_t cpu)
+ 	 * (SMEP, SMAP, and PGE for #437): every boot until this ran three of
+ 	 * four processors without the first three.
  	 */
 -	write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
--	pmap_protections_here();
+-	pmap_control_regs_here();
  
  	/* Per-CPU state; nothing below is shared with another processor. */
  	percpu_activate(cpu);

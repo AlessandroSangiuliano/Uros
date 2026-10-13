@@ -5,12 +5,12 @@ Run: --entry 14 1200 -smp 8
 Measure: the copy-on-write phase breakdown (#482, kern/fault_profile.c) -- FP_PROTECT plus FP_ENTER must swell with the processor count while every other phase stays where it was
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index 2183a92f..bb4ceacf 100644
+index 5f80a681..f8c1cff5 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -155,7 +155,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
- 	 * machine, and the first symptom would be somewhere else entirely.
- 	 */
+@@ -281,7 +281,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
+ 	if (size != 0 && va_is_kernel(va))
+ 		pmap = PMAP_NULL;
  
 -	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
 +	{
