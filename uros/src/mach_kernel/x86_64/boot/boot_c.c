@@ -2131,12 +2131,27 @@ static void global_split_selftest(void)
  *	 the boot's pool of spaces holds fewer, so the eviction is aimed, and
  *	 pmap_cr3_for() takes the same miss either way.
  *
- * Without PCID every switch discards everything and neither question can
- * arise: NOT ASKED.  ablations/412-gen-check.patch must make [1] say WRONG
- * and ablations/412-reuse-keeps.patch [2], under KVM or on the metal (TCG has
- * no PCID).
+ *   [3] a kernel page changed while X is in another space.  X reads a page
+ *	 of the kernel half in S1, moves to S2, and the boot processor remaps
+ *	 the page, its shootdown's invlpg running on X under S2's PCID; back in
+ *	 S1, which keeps what it finds, X must read the new frame.  The kernel's
+ *	 leaves are global, so one invlpg reaches every PCID -- where global
+ *	 pages are on (pmap_enable_pcid() refuses PCID without them) and the
+ *	 processor's INVLPG does what the SDM says (pmap_pcid_erratum()).  Its
+ *	 control is the same round with the remap told to nobody and the
+ *	 shootdown's interrupt and invlpg aimed at the next page.
+ *
+ * Each answer that comes out right is judged by a control of its own shape
+ * (xs_control_said()): only where an entry kept through the round would have
+ * shown is it a PASS, and otherwise NOT ASKED.  Without PCID every switch
+ * discards everything and none of the three can arise: NOT ASKED.
+ * ablations/412-gen-check.patch must make [1] say WRONG,
+ * ablations/412-reuse-keeps.patch [2], and ablations/412-pcid-without-pge.patch
+ * [3], where an entry outlives its round: under KVM or on the metal, never
+ * under TCG, which has no PCID.
  */
 #define XS_VA		0x0000000300000000ULL	/* lower half, nobody else's */
+#define XS_KVA		(KERNEL_HEAP_BASE + 0x400000ULL)	/* [3]: unclaimed at boot */
 #define XS_MARK(i)	(0x5143a000ULL + (uint64_t)(i))
 
 struct xs_step {
@@ -2145,6 +2160,7 @@ struct xs_step {
 	pmap_t		evict_from;	/* [2]: this space's slot is the next miss's */
 	pmap_t		forget;		/* [2]: and this one's slot is cleared */
 	int		reload;		/* [2]'s control: CR3 again, with NOFLUSH */
+	uint64_t	va;		/* what to read: XS_VA, or [3]'s XS_KVA */
 	uint64_t	seen;
 };
 
@@ -2178,7 +2194,7 @@ static void xs_step_here(void *arg)
 		write_cr3(read_cr3() | CR3_NOFLUSH);
 	if (st->read) {
 		pmap_user_access_begin();
-		st->seen = *(volatile uint64_t *)(uintptr_t) XS_VA;
+		st->seen = *(volatile uint64_t *)(uintptr_t) st->va;
 		pmap_user_access_end();
 	}
 }
@@ -2186,7 +2202,7 @@ static void xs_step_here(void *arg)
 static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
 		      pmap_t forget)
 {
-	struct xs_step st = { space, read, evict_from, forget, 0, 0 };
+	struct xs_step st = { space, read, evict_from, forget, 0, XS_VA, 0 };
 
 	ipi_call_mask(1ULL << x, xs_step_here, &st);
 	return st.seen;
@@ -2195,10 +2211,25 @@ static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
 /* [2]'s control: X in `space' already, CR3 loaded again with NOFLUSH, a read. */
 static uint64_t xs_reload_on(uint32_t x, pmap_t space)
 {
-	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 1, 0 };
+	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 1, XS_VA, 0 };
 
 	ipi_call_mask(1ULL << x, xs_step_here, &st);
 	return st.seen;
+}
+
+/* [3]: X into `space', and a read of the kernel page XS_KVA. */
+static uint64_t xs_kread_on(uint32_t x, pmap_t space)
+{
+	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 0, XS_KVA, 0 };
+
+	ipi_call_mask(1ULL << x, xs_step_here, &st);
+	return st.seen;
+}
+
+/* [3]'s control: the shootdown's interrupt and invlpg, aimed elsewhere. */
+static void xs_invlpg_here(void *arg)
+{
+	invlpg((uint64_t)(uintptr_t) arg);
 }
 
 /*
@@ -2228,8 +2259,9 @@ static void xs_control_said(const char *right, uint64_t kept, uint64_t stale,
 static void pcid_ask(void)
 {
 	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
-	uint64_t frame[3] = { 0 }, seen, kept;
+	uint64_t frame[5] = { 0 }, seen, kept;
 	pt_entry_t *leaf, was;
+	int kmapped = 0;
 	uint32_t self = (uint32_t) cpu_number(), x = SMP_MAX_CPUS;	/* by number (#663) */
 	unsigned i;
 
@@ -2249,7 +2281,7 @@ static void pcid_ask(void)
 		return;
 	}
 
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < 5; i++) {
 		frame[i] = boot_frame_alloc();
 		if (frame[i] != 0)
 			*(volatile uint64_t *)(uintptr_t) phys_to_direct(frame[i])
@@ -2258,6 +2290,7 @@ static void pcid_ask(void)
 	s1 = pmap_create(0);
 	s2 = pmap_create(0);
 	if (frame[0] == 0 || frame[1] == 0 || frame[2] == 0
+	    || frame[3] == 0 || frame[4] == 0
 	    || s1 == PMAP_NULL || s2 == PMAP_NULL
 	    || pmap_enter(s1, XS_VA, frame[0], VM_PROT_READ | VM_PROT_WRITE, 0)
 	       != PMAP_MAP_OK
@@ -2350,6 +2383,61 @@ static void pcid_ask(void)
 		else
 			xs_control_said(", its own frame", kept, XS_MARK(2),
 					XS_MARK(0));
+
+		/*
+		 * [3]: a kernel page X read in S1, remapped by the boot
+		 * processor while X is in S2 -- the shootdown's invlpg runs on
+		 * X under S2's PCID -- and read again by X back in S1, which
+		 * keeps what it finds.  The kernel's leaves are global, so the
+		 * invlpg must have reached S1's PCID too.
+		 */
+		if (pmap_enter(pmap_kernel(), XS_KVA, frame[3],
+			       VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK) {
+			kmapped = 1;
+			(void) xs_kread_on(x, s1);
+			(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+			(void) pmap_enter(pmap_kernel(), XS_KVA, frame[4],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
+			seen = xs_kread_on(x, s1);
+
+			/*
+			 * [3]'s control: the same round with the remap told to
+			 * nobody, and the shootdown's interrupt and invlpg sent
+			 * to X aimed at a page next to it -- so that what X
+			 * read back is the entry kept through everything the
+			 * question did but the invalidation itself.
+			 */
+			(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+			leaf = pmap_walk(pmap_kernel()->root_pa, XS_KVA, 0);
+			kept = 0;
+			if (leaf != PT_ENTRY_NULL) {
+				was = *leaf;
+				atomic_store64((volatile uint64_t *) leaf,
+					       (was & ~INTEL_PTE_PFN) | frame[3]);
+				ipi_call_mask(1ULL << x, xs_invlpg_here,
+					      (void *)(uintptr_t)(XS_KVA
+								  + PAGE_SIZE_4K));
+				kept = xs_kread_on(x, s1);
+				atomic_store64((volatile uint64_t *) leaf, was);
+			}
+
+			kputs("pcid_test: [3] a kernel page remapped while "
+			      "processor ");
+			kputdec(x);
+			kputs(" was in another space reads ");
+			kputhex64(seen);
+			if (seen == XS_MARK(3))
+				kputs(", its OLD frame there: the invalidation "
+				      "did not reach the other space's PCID — "
+				      "WRONG (#412)\r\n");
+			else if (seen != XS_MARK(4))
+				kputs(", neither frame — WRONG (#412)\r\n");
+			else
+				xs_control_said(", its new frame", kept,
+						XS_MARK(4), XS_MARK(3));
+		} else
+			kputs("pcid_test: [3] NOT ASKED — could not map the "
+			      "kernel page (#412)\r\n");
 	}
 
 	/* X back on the kernel's tables, out of both spaces' sets. */
@@ -2362,7 +2450,9 @@ static void pcid_ask(void)
 		pmap_remove(s2, XS_VA, XS_VA + PAGE_SIZE_4K);
 		pmap_destroy(s2);
 	}
-	for (i = 0; i < 3; i++)
+	if (kmapped)
+		pmap_remove(pmap_kernel(), XS_KVA, XS_KVA + PAGE_SIZE_4K);
+	for (i = 0; i < 5; i++)
 		if (frame[i] != 0)
 			boot_frame_free(frame[i]);
 }
