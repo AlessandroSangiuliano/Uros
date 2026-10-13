@@ -18,10 +18,10 @@
  * Processor 1 sends lines through the console without pause while processor 0
  * runs the divisor sequence again and again, writing the divisor it found and
  * reading the latch back each time.  With the lock, every read-back is the
- * value written.  Without it (UROS_ABLATE_599_COM_NO_LOCK) a byte lands between
- * DLL and the read-back, and the read-back says so; UROS_ABLATE_599_WIDEN_DIVISOR
- * holds the window open between DLL and DLM so that the ablation does not
- * depend on luck.
+ * value written.  Without it (ablations/599-com-no-lock.patch) a byte lands
+ * between DLL and the read-back, and the read-back says so;
+ * ablations/599-widen-divisor.patch holds the window open between DLL and DLM
+ * so that the ablation does not depend on luck.
  *
  * ⚠️ TWO PROCESSORS, and a uniprocessor answers NOT ASKED.  The sequence runs
  * with interrupts off, so on one processor nothing can come between its

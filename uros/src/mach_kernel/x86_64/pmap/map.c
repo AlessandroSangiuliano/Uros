@@ -22,15 +22,6 @@
 #include <pmap/walk.h>
 #include <trap/trap.h>
 
-/*
- * #606: a removal or a replacement that keeps nothing of the entry it takes
- * away -- what this file did before the record in pv.c existed.
- * phys_ops_selftest() in boot_c.c is what notices.
- */
-#ifndef	ABLATE_606_FORGET_BITS
-#define	ABLATE_606_FORGET_BITS	0
-#endif
-
 static inline pt_entry_t *table_at(uint64_t table_pa)
 {
 	return (pt_entry_t *)(uintptr_t)phys_to_direct(table_pa);
@@ -278,7 +269,7 @@ static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
 		for (;;) {
 			pt_entry_t seen;
 
-			if (pte_is_valid(old) && !ABLATE_606_FORGET_BITS)
+			if (pte_is_valid(old))
 				pv_keep_bits(pte_to_pa(old), old);
 			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
 						old, fresh);
@@ -375,15 +366,6 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 }
 
 /*
- * #604: the removal back to a read of the entry and a plain store of zero,
- * which two removers can both get through.  The -M bench's two-remover arm
- * is what notices.
- */
-#ifndef	ABLATE_604_UNMAP_STORE
-#define	ABLATE_604_UNMAP_STORE	0
-#endif
-
-/*
  * Drop the mapping and leave the shootdown to the caller (#558).
  *
  * 🔴 THE PAIR TO pmap_protect_page_noflush() BELOW, AND FOR THE SAME REASON.
@@ -453,12 +435,8 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 
 		if (!pte_is_valid(old))
 			break;			/* somebody else removed it */
-		if (size == PAGE_SIZE_4K && !ABLATE_606_FORGET_BITS)
+		if (size == PAGE_SIZE_4K)
 			pv_keep_bits(pte_to_pa(old), old);
-		if (ABLATE_604_UNMAP_STORE) {
-			*entry = 0;
-			break;
-		}
 		seen = atomic_cmpxchg64((volatile uint64_t *) entry, old, 0);
 		if (seen == old)
 			break;
@@ -552,10 +530,8 @@ uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
 	return size;
 }
 
-/* #604: the split's interior entry, and what it was before (see pte.h). */
-#define SPLIT_INTERIOR	(ABLATE_604_SPLIT_DROPS				\
-			 ? (INTEL_PTE_VALID | INTEL_PTE_WRITE)		\
-			 : INTEL_PTE_INTERIOR)
+/* #604: the interior entry a split writes, USER included (see pte.h). */
+#define SPLIT_INTERIOR	INTEL_PTE_INTERIOR
 
 uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 {

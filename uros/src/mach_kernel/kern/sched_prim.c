@@ -1312,18 +1312,6 @@ thread_wakeup_prim(
 }
 
 /*
- * #607's two ablations, each the half of the old hand-off that its test arm
- * (-Q) must catch: a swapped-out waiter counted as parked, and the old wake
- * that left a stopped waiter TH_RUN on no run queue.
- */
-#ifndef	ABLATE_607_SWAPPED_PARKED
-#define	ABLATE_607_SWAPPED_PARKED	0
-#endif
-#ifndef	ABLATE_607_OLD_WAKE
-#define	ABLATE_607_OLD_WAKE		0
-#endif
-
-/*
  * Waiters the hand-off declined because they were swapped out, which -O
  * prints: the evidence that the case #607 is about happened.  Counted under
  * the victim's lock but not atomically, so a figure, not a census.
@@ -1408,9 +1396,7 @@ thread_handoff_to_parked_waiter(
 	 * this one, through wake_dequeued() below.
 	 */
 	ostate = victim->state;
-	parked = ((ostate & (TH_SCHED_STATE |
-			     (ABLATE_607_SWAPPED_PARKED ? 0 : TH_SWAPPED_OUT)))
-		  == TH_WAIT);
+	parked = ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT)) == TH_WAIT);
 
 	if (!parked) {
 		if ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT))
@@ -1437,17 +1423,9 @@ thread_handoff_to_parked_waiter(
 		 * that is running -- #360's futex ping-pong ran one waiter on up
 		 * to six processors at once.
 		 */
-#if	ABLATE_607_OLD_WAKE
-		victim->wait_result = THREAD_AWAKENED;
-		victim->at_safe_point = NOT_AT_SAFE_POINT;
-		victim->state = (ostate &~ TH_WAIT) | TH_RUN;
-		if ((ostate & (TH_RUN | TH_SUSP)) == 0)
-			thread_setrun(victim, TRUE, TAIL_Q);
-#else
 		/* Dequeued off the wait hash, so it must have been waiting. */
 		if (!wake_dequeued(victim, THREAD_AWAKENED))
 			panic("thread_handoff_to_parked_waiter");
-#endif
 		thread_unlock(victim);
 		splx(s);
 		return FALSE;
@@ -2684,11 +2662,6 @@ extern int	real_ncpus;
 unsigned int	sched_bound_displaced;
 int		sched_bound_displaced_slot = -1;
 
-/* #615's ablation: the displaced bound thread goes to the set's queue again. */
-#ifndef	ABLATE_615_DISPLACED_TO_SET
-#define	ABLATE_615_DISPLACED_TO_SET	0
-#endif
-
 /*
  *	thread_setrun:
  *
@@ -2892,8 +2865,7 @@ thread_setrun(
 	     * in three.  It goes back to its own processor's queue: this one,
 	     * whose next_thread it was.
 	     */
-	    if (th->bound_processor != PROCESSOR_NULL &&
-		!ABLATE_615_DISPLACED_TO_SET)
+	    if (th->bound_processor != PROCESSOR_NULL)
 		rq = &th->bound_processor->runq;
 #if	S319_INSTRUMENT
 	    if (rq == &pset->runq)
@@ -3329,17 +3301,7 @@ idle_thread_continue(void)
 int
 idle_thread_loop(int idle_thread_type)
 #else	/* FAST_IDLE */
-/*
- * #526: the idle loop restores the level it found again, as it did before.
- */
-#ifndef	ABLATE_526_IDLE_RESTORES
-#define	ABLATE_526_IDLE_RESTORES	0
-#endif
-#if	ABLATE_526_IDLE_RESTORES
-#define	IDLE_WAIT_SPL(s)	(s)
-#else
 #define	IDLE_WAIT_SPL(s)	MACHINE_IDLE_SPL
-#endif
 
 void
 idle_thread_continue(void)

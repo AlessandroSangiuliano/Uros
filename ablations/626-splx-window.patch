@@ -1,19 +1,54 @@
 Kind: ablation
 Issue: #626
-Takes out: #526's fix, through its switch in splx(): the block is found with interrupts still on, at the caller's level -- the check must name splx() on every boot that raises from level zero
+Takes out: #526's fix in splx(): the block is found with interrupts still on, at the caller's level -- the check must name splx() on every boot that raises from level zero
 Run: --entry 0 300 -smp 4
 Expect: percpu: percpu\(\) read where the thread can still move to another processor -- WRONG, at splx\+0x
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/spl.c b/uros/src/mach_kernel/x86_64/cpu/spl.c
-index f7e019b7..aa36336b 100644
+index 8d6d954e..8f4cc5f7 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/spl.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/spl.c
-@@ -162,7 +162,7 @@ spl_t splx(spl_t level)
+@@ -142,38 +142,13 @@ spl_t splx(spl_t level)
  	spl_t		old;
  	int		enabled;
  
--#if	ABLATE_526_SPLX_WINDOW
-+#if	1	/* ABLATE_526_SPLX_WINDOW */
- 	/* #526's ablation: the block found with interrupts still on. */
+-	/*
+-	 * Nothing to change, answered in one instruction and with nothing
+-	 * turned off.  The answer cannot go stale: a thread can be moved to
+-	 * another processor only at level zero (trap_take_ast() asks), and a
+-	 * thread at level zero is at level zero wherever it resumes.
+-	 */
+-	if (percpu_ipl() == level)
+-		return level;
+-
+-	/*
+-	 * 🔴 INTERRUPTS OFF BEFORE THE BLOCK IS FOUND, NOT AFTER (#526).
+-	 *
+-	 * The level and the queue are this processor's, and "this processor"
+-	 * is a question whose answer changes at level zero: an interrupt that
+-	 * lands there may preempt the thread, and it may resume anywhere.
+-	 * This used to find the block first and turn interrupts off only for
+-	 * the write, so a raise preempted in between finished on another
+-	 * processor, through a pointer to the block it had left.  That
+-	 * processor went on at SPLHI under somebody else's thread, with
+-	 * nobody to lower it, deferring its own tick -- on the master,
+-	 * timeout_tick() stopped and every timed wait slept for good.  And the
+-	 * thread itself went on at level zero, believing it was at SPLHI.
+-	 * -E (cpu/spl_test.c) counts both faces; it found 15 split raises in
+-	 * 17 moves on the first boot it was given.
+-	 *
+-	 * With interrupts off nothing can take the thread off this processor,
+-	 * so the block found is the block written.
+-	 */
+-	enabled = interrupts_enabled();
+-	interrupts_disable();
++	/* #526's ablation: the block found with interrupts still on. */
  	p = percpu();
  	old = p->ipl;
++	enabled = interrupts_enabled();
++	if (level == old)
++		return old;
++	interrupts_disable();
+ 
+ 	if (level != old) {
+ 		/* #526: a raise from zero, recorded for the idle loop to name. */

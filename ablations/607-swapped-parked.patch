@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #607
+Takes out: TH_SWAPPED_OUT from the futex hand-off's mask -- a waiter the thread swapper swapped out counts as parked, and the hand-off switches onto its unwired kernel stack
+Run: --entry 25 600 -smp 4
+Expect: handoff: WRONG
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 8f4bff5c..868fd46e 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1363,7 +1363,7 @@ thread_handoff_to_parked_waiter(
+ 	 * this one, through wake_dequeued() below.
+ 	 */
+ 	ostate = victim->state;
+-	parked = ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT)) == TH_WAIT);
++	parked = ((ostate & TH_SCHED_STATE) == TH_WAIT);
+ 
+ 	if (!parked) {
+ 		if ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT))

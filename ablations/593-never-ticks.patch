@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #593
+Takes out: nothing -- a probe: processor 1's tick is never armed, every arm of it claiming success, the shape of a lost first kick or first IPI, so the per-processor window lines must name it; only from window 1, which closes 11 s in, hence a boot that stays up
+Run: --entry 12 60 -smp 4
+Expect: clock_event: cpu 1 took 0 ticks in window .*WRONG: this processor is up and has never ticked
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 528c3475..7dd9dc3f 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -427,6 +427,14 @@ clock_event_arm_ns(uint64_t ns)
+ int
+ clock_event_arm_tick(void)
+ {
++	/*
++	 * #593: processor 1's tick is never armed -- every arm of it claims
++	 * success and arms nothing -- the shape of a first kick or a first IPI
++	 * that is lost.  The per-processor window lines must say so, not leave
++	 * the processor out.
++	 */
++	if (cpu_number() == 1)
++		return 1;
+ 	return clock_event_arm_ns(tick_ns);
+ }
+ 

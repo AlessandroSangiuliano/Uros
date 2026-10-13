@@ -42,7 +42,7 @@
  *
  * ⚠️ Measured before that was true: rsi came back from a Mach trap holding
  * the thread_t of the very thread that made the call.  act_test's fifth arm
- * is the standing check, and -DABLATE_474_CLEAR=1 makes it red again.
+ * is the standing check, and ablations/474-clear.patch makes it red again.
  *
  * ── Why arguments seven and up are in registers ───────────────────────
  *

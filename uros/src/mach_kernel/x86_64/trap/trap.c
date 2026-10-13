@@ -19,66 +19,6 @@
 #include <vm/vm_fault.h>		/* #467: hand a fault to the MI kernel */
 #include <kern/fault_profile.h>	/* #482: open and close the sample     */
 
-/*
- * ── Taking #467 back out again, one arm at a time (#467) ──────────────
- *
- * The issue asks for each of the three arms to be "shown with a test that
- * fails on the kernel before the change", and the only honest way to show
- * that is to remove the arm and watch the test go red -- a correction is
- * verified by TAKING IT AWAY, not by the test passing beside it.
- *
- * ⚠️ One at a time, and not all three together.  All three absent is what the
- * kernel was, but with the first arm gone the task halts on its first page
- * fault and the other two arms are never reached: the run would say nothing
- * about them.  Isolating each is what makes each report attributable.
- *
- * Zero in every build that ships.  These exist to be set from the compiler
- * command line for one run and then unset; nothing in the tree turns them on,
- * which is why they are plain zeros here rather than a configuration option
- * somebody could leave enabled.
- */
-#ifndef ABLATE_467_ARM1
-#define ABLATE_467_ARM1	0	/* a ring-3 page fault gets vm_fault()      */
-#endif
-#ifndef ABLATE_467_ARM2
-#define ABLATE_467_ARM2	0	/* an unresolvable ring-3 fault -> the task */
-#endif
-#ifndef ABLATE_467_ARM3
-#define ABLATE_467_ARM3	0	/* a ring-0 fault on a user address         */
-#endif
-/*
- * #603: the two halves of taking ASTs on the way back to ring 3, each with
- * its own way back out.  FAULT_AST: a page fault resolved for ring 3 returns
- * without looking.  ONE_PASS: a return to ring 3 takes them once, as it did
- * before, instead of until none is pending.
- */
-#ifndef ABLATE_603_FAULT_AST
-#define ABLATE_603_FAULT_AST	0
-#endif
-#ifndef ABLATE_603_ONE_PASS
-#define ABLATE_603_ONE_PASS	0
-#endif
-/*
- * #617: the window between reading this processor's number and reading its
- * AST word in thread_return_ast(), widened for the test that has to show what
- * happens inside it.  Off, and off is the shipping answer.  On, a thread
- * making its first return to ring 3 -- a frame of zeros, which only a thread
- * nobody has given a state has -- spins there for WIDEN_617_US microseconds.
- * Only those: every other return would pay it too, and the boot would crawl.
- */
-#ifndef WIDEN_617_WINDOW
-#define WIDEN_617_WINDOW	0
-#endif
-#define	WIDEN_617_US		50
-/*
- * #617: the switch that puts the old thread_return_ast() back -- its check
- * made with interrupts on, so a thread preempted between reading its
- * processor's number and reading that processor's AST word resumes elsewhere
- * and reads the word of the processor it left.
- */
-#ifndef ABLATE_617_RETURN_AST
-#define ABLATE_617_RETURN_AST	0
-#endif
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -1267,11 +1207,8 @@ trap_take_ast(struct trap_frame *frame)
 		 * So a return to ring 3 is the same loop as the other four ways
 		 * back to ring 3, by being the same function.
 		 */
-		if (!ABLATE_603_ONE_PASS) {
-			thread_return_ast();
-			return;
-		}
-		take = AST_ALL;
+		thread_return_ast();
+		return;
 	} else {
 		if (get_preemption_level() != 0)
 			return;
@@ -1396,48 +1333,17 @@ thread_return_ast_report(void)
 	       return_ast_read_on);
 }
 
-#if	WIDEN_617_WINDOW
-static void
-return_ast_widen(void)
-{
-	thread_t		th = current_thread();
-	const struct trap_frame	*f;
-	uint64_t		t0, span;
-
-	/*
-	 * ⚠️ The boot's own syscall self-test comes through here before there
-	 * is a thread (a NULL activation was the first thing this option ever
-	 * did, w1, 04/10).
-	 */
-	if (th == THREAD_NULL || th->top_act == THR_ACT_NULL ||
-	    th->top_act->mact.pcb == PCB_NULL)
-		return;
-	f = th->top_act->mact.pcb->user;
-	if (f == (const struct trap_frame *) 0 || f->rip != 0 || f->rsp != 0)
-		return;
-	span = tsc_hz() / 1000000 * WIDEN_617_US;
-	t0 = rdtsc();
-	while (rdtsc() - t0 < span)
-		cpu_pause();
-}
-#endif
-
 void
 thread_return_ast(void)
 {
 	int	cpu;
 
 	for (;;) {
-		if (!ABLATE_617_RETURN_AST)
-			interrupts_disable();
+		interrupts_disable();
 		cpu = cpu_number();
-#if	WIDEN_617_WINDOW
-		return_ast_widen();
-#endif
 		if ((need_ast[cpu] & AST_ALL) == 0)
 			break;
-		if (!ABLATE_617_RETURN_AST)
-			interrupts_enable();
+		interrupts_enable();
 		ast_taken(FALSE, AST_ALL, splsched());
 	}
 	return_ast_check(cpu);
@@ -1935,7 +1841,7 @@ void trap_dispatch(struct trap_frame *frame)
 				     ? (VM_PROT_READ | VM_PROT_WRITE)
 				     : VM_PROT_READ;
 
-		if (!ABLATE_467_ARM3 && map != VM_MAP_NULL
+		if (map != VM_MAP_NULL
 		    && fault_in(map, read_cr2(), prot, frame) == KERN_SUCCESS) {
 			/*
 			 * #482 here too.  A copyout into a page the task holds
@@ -2075,7 +1981,7 @@ void trap_dispatch(struct trap_frame *frame)
 		 * and inventing kernel_map for it would hand an early boot
 		 * failure to a subsystem that is not up.
 		 */
-		if (!ABLATE_467_ARM1 && map != VM_MAP_NULL) {
+		if (map != VM_MAP_NULL) {
 			fault_kr = fault_in(map, addr, prot, frame);
 			if (fault_kr == KERN_SUCCESS) {
 				/*
@@ -2105,8 +2011,7 @@ void trap_dispatch(struct trap_frame *frame)
 				 */
 				if ((frame->cs & 3) == USER_RPL)
 					act->user_faults++;	/* #603 */
-				if (!ABLATE_603_FAULT_AST
-				    && (frame->cs & 3) == USER_RPL)
+				if ((frame->cs & 3) == USER_RPL)
 					trap_take_ast(frame);
 				return;	/* the instruction runs again */
 			}
@@ -2125,8 +2030,7 @@ void trap_dispatch(struct trap_frame *frame)
 	 * resolved and the instruction runs again -- and raising first would
 	 * turn every first touch of every page into a message.
 	 */
-	if (!ABLATE_467_ARM2
-	    && (frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
+	if ((frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
 		int	exc, code, subcode;
 
 		if (frame->vector == T_PAGE_FAULT) {

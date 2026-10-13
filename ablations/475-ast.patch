@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #475
+Takes out: the AST handlers on the way back from a syscall -- a thread aborted or suspended while asleep in mach_msg returns to ring 3 as if nothing had been asked; the machine stays up and quietly wrong, unless the kernel's own assertion on the space the thread goes on using stops it first
+Run: --entry 14 600 -smp 4
+Expect: act_test: \[(2|3)\] .*WRONG
+Expect: Assertion failed: .*: space->is_active
+
+diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
+index 5bff9d26..6847a6b2 100644
+--- a/uros/src/mach_kernel/x86_64/syscall/entry.S
++++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
+@@ -426,11 +426,6 @@ syscall_entry:
+ 	 * aligned for the call, which is the same arithmetic the entry path's
+ 	 * fourth push exists for.
+ 	 */
+-	subq	$16, %rsp
+-	movq	%rax, (%rsp)
+-	callq	thread_return_ast
+-	movq	(%rsp), %rax
+-	addq	$16, %rsp
+ 
+ 	/*
+ 	 * Read back out of the frame the entry filled (#474), rather than

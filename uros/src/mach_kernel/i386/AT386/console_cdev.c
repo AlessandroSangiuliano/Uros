@@ -27,9 +27,6 @@
 #include <device/device_types.h>
 #include <i386/pio.h>
 #include <i386/AT386/fbcons.h>
-#ifdef	ABLATE_599_NESTED_PRINTF
-#include <i386/clock_watch.h>
-#endif
 
 extern void com_putc(char c);
 extern void cpu_shutdown(void);
@@ -206,9 +203,6 @@ consolewrite(dev_t dev, io_req_t ior)
 		n -= k;
 		simple_lock(&printf_lock);
 		printf_lock_holder = cpu_number();	/* #599: see printf.c */
-#ifdef ABLATE_599_NESTED_PRINTF
-		clock_watch_ablate_nested_printf();
-#endif
 		while (k--)
 			cnputc(*p++);
 		printf_lock_holder = -1;

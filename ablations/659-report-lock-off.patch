@@ -2,8 +2,8 @@ Kind: ablation
 Issue: #659
 Takes out: the report lock's hold on the other processors -- cons_report_elsewhere() answers that nobody holds a report, as before 0de054a5, so cons_wire_byte() never waits and cons_tx_one() never leaves a byte in the ring while another processor reports, and the target's report goes to the wire byte by byte between the boot processor's lines; two reports still take turns in cons_report_begin()
 Run: --entry 0 600 -smp 4
-With: 659-widen-tick-in-flight.patch
-With: 659-widen-unclaimed-report.patch
+Over: 659-widen-tick-in-flight.patch
+Over: 659-widen-unclaimed-report.patch
 Expect: UrMach x86-64: trap unclaimed interrupt \((v[^e]|ve[^c]|vec[^t]|vect[^o]|vecto[^r]|vector[^ ]|vector [^0]|vector 0[^x]|vector 0x[0-9a-f]*[^0-9a-f,])
 Expect: ^  rip .* rsp +[^0 ]
 Expect: ^([^U]|U[^r]|Ur[^M]).*no handler — halted

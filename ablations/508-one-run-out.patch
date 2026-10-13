@@ -1,0 +1,36 @@
+Kind: ablation
+Issue: #508
+Takes out: nothing -- a probe: the first run of every TSC calibration reads one part in thirty-two high, the shape of every refusal the old two-run calibration took on its own, and the median of three must set it aside
+Run: --entry 14 600 -smp 4
+Expect: on attempt [0-9]+, run 0 set aside as the one that disagreed
+
+diff --git a/uros/src/mach_kernel/x86_64/time/tsc.c b/uros/src/mach_kernel/x86_64/time/tsc.c
+index 4736404c..81bc8b7a 100644
+--- a/uros/src/mach_kernel/x86_64/time/tsc.c
++++ b/uros/src/mach_kernel/x86_64/time/tsc.c
+@@ -79,6 +79,16 @@ static uint64_t subject_tsc(void)
+ 	return rdtsc_ordered();
+ }
+ 
++/*
++ * #508: one run reads one part in thirty-two high, the shape of every refusal
++ * the old calibration took on its own, so the median can be seen setting it
++ * aside.
++ */
++static void ablate_runs(uint64_t run_hz[RULER_RUNS])
++{
++	run_hz[0] += run_hz[0] / 32;
++}
++
+ /*
+  * Against every ruler the machine has, and then they vote (time/rulers.h).
+  */
+@@ -95,7 +105,7 @@ int tsc_calibrate(void)
+ 			continue;
+ 		rulers_start(id);
+ 		(void) ruler_calibrate(&k->r, subject_tsc, ~0ULL, k->span,
+-				       1ULL << 34, 0, &k->tsc);
++				       1ULL << 34, ablate_runs, &k->tsc);
+ 		rulers_stop(id);
+ 	}
+ 

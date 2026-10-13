@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #508
+Takes out: the bound on an MMIO mapping's span -- check_mmio_phys() checks the first page only again, so a task that holds one BAR can map past it, into the I/O APIC, the HPET and the local APIC above the PCI windows
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[10\] WRONG
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 5a2606fc..26c72aa4 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -654,6 +654,12 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
+ 	}
+ 	urmach_rcu_read_unlock();
+ 
++	/*
++	 * #508: the first page only, as before the span was bounded, so that
++	 * irq_claim_test's arm [10] can be seen noticing.
++	 */
++	if (mine)
++		return KERN_SUCCESS;
+ 	if (mine && (uint64_t)phys + len <= end)
+ 		return KERN_SUCCESS;
+ 

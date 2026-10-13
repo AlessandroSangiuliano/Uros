@@ -1,0 +1,72 @@
+Kind: widen
+Issue: #597
+Holds open: the PCI configuration access -- 16 reads of port 0x80 between writing the address to 0xCF8 and touching 0xCFC, each a VM exit under KVM; the fixed tree must keep every access whole with it
+Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+
+diff --git a/uros/src/mach_kernel/i386/pci/pcibios.c b/uros/src/mach_kernel/i386/pci/pcibios.c
+index 108b1575..5e18660f 100644
+--- a/uros/src/mach_kernel/i386/pci/pcibios.c
++++ b/uros/src/mach_kernel/i386/pci/pcibios.c
+@@ -171,12 +171,46 @@ pcici_t pcitag (unsigned char bus,
+  */
+ static volatile unsigned char	pci_cfg_port_lock;
+ 
++/*
++ * #597's widened window: WIDEN_597_READS reads of port 0x80 between the
++ * address and the data, each a VM exit under KVM.  Without the lock it makes
++ * the race frequent at -smp 4; with it, it shows the lock closing even a wide
++ * window.
++ */
++#define	WIDEN_597_READS	16
++
++static inline void
++ablate_597_widen(void)
++{
++	int	w;
++
++	for (w = 0; w < WIDEN_597_READS; w++)
++		(void) inb(0x80);
++}
++
++/*
++ * The first access says what is built, so a log can never pass for an
++ * ordinary kernel's (#597).
++ */
++static void
++ablate_597_says(void)
++{
++	static int	said;
++
++	if (said)
++		return;
++	said = 1;
++	printf("pci: #597 ablation -- %d port 0x80 reads between address and "
++	       "data\n", WIDEN_597_READS);
++}
++
+ static inline unsigned long
+ pci_cfg_port_enter(void)
+ {
+ 	unsigned long	flags;
+ 	unsigned char	busy;
+ 
++	ablate_597_says();
+ 	__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
+ 	for (;;) {
+ 		busy = 1;
+@@ -222,6 +256,7 @@ unsigned long pci_conf_read (pcici_t tag, unsigned long reg)
+ 		printf ("pci_conf_read(1): addr=%x ", addr);
+ #endif
+ 		outl (CONF1_ADDR_PORT, addr);
++		ablate_597_widen();
+ 		data = inl (CONF1_DATA_PORT);
+ 		outl (CONF1_ADDR_PORT, 0   );
+ 		break;
+@@ -273,6 +308,7 @@ void pci_conf_write (pcici_t tag, unsigned long reg, unsigned long data)
+ 			addr, data);
+ #endif
+ 		outl (CONF1_ADDR_PORT, addr);
++		ablate_597_widen();
+ 		outl (CONF1_DATA_PORT, data);
+ 		outl (CONF1_ADDR_PORT,   0 );
+ 		break;

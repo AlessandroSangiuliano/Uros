@@ -366,21 +366,10 @@ apply_pie_relocations(vm_offset_t area_start,
 			 * right -- a coincidence that would hold until the
 			 * first entry where it did not.
 			 */
-#if	!ABLATE_422_RELOC
 			if (has_addend)
 				*slot = addend + load_bias;
 			else
 				*slot += load_bias;
-#else
-			/*
-			 * Build with -DABLATE_422_RELOC=1: the table is walked
-			 * and validated, and nothing is written.  A PIE image
-			 * in the bundle must then fail to run -- which is what
-			 * says the relocations are load-bearing rather than
-			 * that the image happened not to need them.
-			 */
-			(void) slot; (void) addend; (void) has_addend;
-#endif
 		}
 	}
 

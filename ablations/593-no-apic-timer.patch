@@ -1,0 +1,38 @@
+Kind: ablation
+Issue: #593
+Takes out: nothing -- a probe: neither of the local APIC timer's two modes can be used, so the tick must run on the HPET's broadcast and the boot must say so; before #593 this machine ended in the panic of clock_event_init()
+Run: --entry 14 1200 -smp 4
+Expect: clock_event: using hpet at [0-9]+ Hz
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 528c3475..05266b16 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -93,6 +93,17 @@ static int tscdl_probe(void)
+ {
+ 	uint32_t a, b, c, d;
+ 
++	/*
++	 * #593: the local APIC's timer cannot be used at all -- neither of its
++	 * two modes -- which is what a timer that stops, or a calibration that
++	 * found no rate for either clock, leaves a machine with.  Before #593
++	 * that was the panic in clock_event_init(); now the tick must run on
++	 * the HPET and say so.
++	 */
++	printf("clock_event: tsc-deadline: the APIC timer is unusable, by "
++	       "ablation (#593)\n");
++	return 0;
++
+ 	/*
+ 	 * Two conditions, and both are needed for a REASON, not for symmetry:
+ 	 * the CPUID bit says the MSR exists, and a calibrated tsc_hz says we
+@@ -237,6 +248,9 @@ static const struct clock_event_ops tscdl_ops = {
+ 
+ static int lapic_probe_ev(void)
+ {
++	printf("clock_event: lapic-oneshot: the APIC timer is unusable, by "
++	       "ablation (#593)\n");
++	return 0;
+ 	return lapic_present() && lapic_timer_hz() != 0;
+ }
+ 

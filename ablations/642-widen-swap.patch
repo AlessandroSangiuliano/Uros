@@ -4,38 +4,42 @@ Holds open: thread_doswapin() just after it marks the stack in, and thread_swapo
 Run: --entry 25 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/kern/thread_swap.c b/uros/src/mach_kernel/kern/thread_swap.c
-index 59416950..6653e587 100644
+index 59416950..c665e6e9 100644
 --- a/uros/src/mach_kernel/kern/thread_swap.c
 +++ b/uros/src/mach_kernel/kern/thread_swap.c
-@@ -237,6 +237,13 @@ int	maxslp = MAXSLP;
+@@ -237,6 +237,19 @@ int	maxslp = MAXSLP;
  unsigned int	thread_swapouts;
  unsigned int	thread_swapins;
  
 +/*
 + * ablations/642-widen-swap.patch: the activation whose swap-in and swap-out
-+ * are held open, and the spin that holds them (in -Q's test).
++ * are held open, and the spin that holds them -- in -Q's test, which is
++ * x86-64's, so the other target builds without it.
 + */
 +thread_act_t	swap_widen_act;
++#ifdef	__x86_64__
 +extern void	swap_widen_spin(void);
++#define	SWAP_WIDEN(act)	do { if ((act) == swap_widen_act) swap_widen_spin(); } while (0)
++#else
++#define	SWAP_WIDEN(act)	do { (void) (act); } while (0)
++#endif
 +
  #ifndef MAX_SWAP_RATE
  #define MAX_SWAP_RATE	60
  #endif
-@@ -491,6 +498,8 @@ void thread_doswapin(
+@@ -491,6 +504,7 @@ void thread_doswapin(
  		assert(thr_act->kernel_stack_swapped_in == FALSE);
  		thr_act->kernel_stack_swapped_in = TRUE;
  #endif	/* MACH_ASSERT */
-+		if (thr_act == swap_widen_act)
-+			swap_widen_spin();
++		SWAP_WIDEN(thr_act);
  		for (;;) {
  			kr = vm_map_wire(kernel_map, trunc_page(addr),
  					 round_page(addr + KERNEL_STACK_SIZE),
-@@ -647,6 +656,8 @@ void thread_swapout(
+@@ -647,6 +661,7 @@ void thread_swapout(
  	if (thread_swap_unwire_stack && (thread = thr_act->thread)) {
  		assert(KERNEL_STACK_SIZE % page_size == 0);
  		addr = thread->kernel_stack;
-+		if (thr_act == swap_widen_act)
-+			swap_widen_spin();
++		SWAP_WIDEN(thr_act);
  #if	THREAD_SW_DEBUG
  		if (thread_swap_debug) {
  			printf("thread_swapout(%p):unwiring stack %lx\n",

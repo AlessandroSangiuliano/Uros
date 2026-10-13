@@ -373,9 +373,9 @@ comprobe(
 	 * and this kernel wrote its console into it until uart.so attached.
 	 * Before com_cons_init(), which reads the line to know what it has.
 	 *
-	 * ABLATE_599_COMPROBE_OLD_EXIT takes out the adoption and nothing
-	 * else: the line is still set up, and a boot without -r then runs the
-	 * probe below over it, as it used to.
+	 * ablations/599-comprobe-old-exit.patch takes out the adoption and
+	 * nothing else: the line is still set up, and a boot without -r then
+	 * runs the probe below over it, as it used to.
 	 */
 	if (unit == 0) {
 		unsigned char scratch = inb(addr + 7);
@@ -398,18 +398,8 @@ comprobe(
 		} else
 			printf("com0: adopted as it was found, LCR 0x%02x "
 			       "(#599)\n", (unsigned)lcr);
-#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
 		com_cons_init();
 		return(1);
-#else
-		if (cons_is_com1) {
-			com_cons_init();
-			return(1);
-		}
-		printf("com0: ABLATE_599_COMPROBE_OLD_EXIT -- the old probe runs "
-		       "over the line above now, and comattach clears IER and "
-		       "MCR (#599)\n");
-#endif
 	}
 	oldctl = inb(LINE_CTL(addr));	 /* Save old value of LINE_CTL */
 	oldmsb = inb(BAUD_MSB(addr));	 /* Save old value of BAUD_MSB */
@@ -492,13 +482,8 @@ comattach(
 	 * Since #207 the kernel is not this chip's driver: uart.so is, and
 	 * clearing MCR dropped DTR, RTS and OUT2 under it.
 	 */
-#ifndef	ABLATE_599_COMPROBE_OLD_EXIT
 	if (unit == 0)
 		return;
-#else
-	if (unit == 0 && cons_is_com1)
-		return;
-#endif
 	
 	outb(INTR_ENAB(addr), 0);
 	outb(MODEM_CTL(addr), 0);
@@ -1378,11 +1363,6 @@ com_bank_enter_for(unsigned int *flags, int console)
 	me = cpu_number();
 	if (com_bank_owner == me + 1)
 		return 0;			/* nested on the holder */
-#ifdef	ABLATE_599_COM_NO_LOCK
-	(void)i;
-	(void)console;
-	return 1;	/* as before #599: nothing taken, THR written regardless */
-#else
 	if (!db_active || !console) {
 		while (!com_bank_try(me))
 			__asm__ volatile("pause");
@@ -1398,7 +1378,6 @@ com_bank_enter_for(unsigned int *flags, int console)
 	}
 	com_bank_gave_up = 1;
 	return 0;
-#endif
 }
 
 static int
@@ -1459,9 +1438,9 @@ com_ddb_session(int entering)
  * read-back that differs (com_divisor_wrong); saying it is the caller's --
  * device_md_io_set_divisor, comprobe and the -U test each do.
  *
- * ABLATE_599_WIDEN_DIVISOR holds the latch open for N port-0x80 reads
- * between DLL and DLM, with the lock held, so a writer that ignored the lock
- * would land in it.
+ * ablations/599-widen-divisor.patch holds the latch open for 100 port-0x80
+ * reads between DLL and DLM, with the lock held, so a writer that ignored the
+ * lock would land in it.
  */
 unsigned int	com_divisor_sets, com_divisor_wrong;
 
@@ -1470,18 +1449,11 @@ com_set_divisor(unsigned int divisor)
 {
 	unsigned int flags, readback;
 	int took, lcr;
-#ifdef	ABLATE_599_WIDEN_DIVISOR
-	int i;
-#endif
 
 	took = com_bank_enter(&flags);
 	lcr = inb(LINE_CTL(COM0_ADDR)) & ~iDLAB;
 	outb(LINE_CTL(COM0_ADDR), lcr | iDLAB);
 	outb(BAUD_LSB(COM0_ADDR), divisor & 0xFF);
-#ifdef	ABLATE_599_WIDEN_DIVISOR
-	for (i = 0; i < ABLATE_599_WIDEN_DIVISOR; i++)
-		(void)inb(0x80);
-#endif
 	outb(BAUD_MSB(COM0_ADDR), (divisor >> 8) & 0xFF);
 	readback = inb(BAUD_LSB(COM0_ADDR)) |
 		   ((unsigned int)inb(BAUD_MSB(COM0_ADDR)) << 8);

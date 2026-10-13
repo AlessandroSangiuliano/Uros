@@ -4,21 +4,23 @@ Holds open: a waker's two halves in thread_wakeup_prim(), for -V's event only, f
 Run: --entry 34 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
-index 901dca7c..09624bb0 100644
+index cc6ea7cd..280537cc 100644
 --- a/uros/src/mach_kernel/kern/sched_prim.c
 +++ b/uros/src/mach_kernel/kern/sched_prim.c
-@@ -1110,6 +1110,10 @@ wake_dequeued(
+@@ -1110,6 +1110,12 @@ wake_dequeued(
  	}
  }
  
 +/* ablations/599-widen-relock.patch: -V's event, and how long its waker waits */
++#ifdef	__x86_64__		/* -V is x86-64's (cpu/clear_wait_test.c) */
 +extern int	clear_wait_test_event;
 +#define	WIDEN_599_US	160
++#endif
 +
  /*
   * Rounds in which clear_wait_locked()'s second read found a waker in flight on
   * the clearing thread's own wait, and waited for it (#599).  Counted under the
-@@ -1290,6 +1294,16 @@ thread_wakeup_prim(
+@@ -1290,6 +1296,18 @@ thread_wakeup_prim(
  
  	simple_unlock(lock);
  
@@ -28,9 +30,11 @@ index 901dca7c..09624bb0 100644
 +	 * WAKING_EVENT while that thread, clearing its own wait, takes the
 +	 * bucket's lock and its own again.
 +	 */
++#ifdef	__x86_64__
 +	if (event == (event_t) &clear_wait_test_event &&
 +	    !queue_empty(&wake_queue))
 +		delay(WIDEN_599_US);
++#endif
 +
  	while (!queue_empty (&wake_queue)) {
  		thread = (thread_t) dequeue (&wake_queue);

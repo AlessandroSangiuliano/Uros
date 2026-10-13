@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #467
+Takes out: the exception raised for a ring-3 fault that cannot be resolved -- the task is never told: the fault goes on to the kernel's own report, ring 3's registers in it, and the processor halts
+Run: --entry 14 600 -smp 4
+Expect: fault_test: \[2\] .*WRONG
+Expect: read from user, nothing mapped there
+Expect: ^[ ]{2}cs +0x0+2b +ss +0x0+23[ ]
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 46247c61..6c7fd547 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1958,7 +1958,7 @@ void trap_dispatch(struct trap_frame *frame)
+ 	 * resolved and the instruction runs again -- and raising first would
+ 	 * turn every first touch of every page into a message.
+ 	 */
+-	if ((frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
++	if (0 && (frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
+ 		int	exc, code, subcode;
+ 
+ 		if (frame->vector == T_PAGE_FAULT) {

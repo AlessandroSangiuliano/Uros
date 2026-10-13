@@ -1,0 +1,98 @@
+Kind: widen
+Issue: #638
+Holds open: a shootdown's window between deciding which processor it is on and acting on it -- 50 us, while -J has armed it; in the fixed tree the spin runs just before the thread stops moving, where a move is harmless
+Run: --entry 31 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+index 06500d3b..ad7cd115 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+@@ -184,6 +184,22 @@ uint64_t ipi_calls_served(unsigned cpu)
+ 	return answer_count_of(&served, cpu);
+ }
+ 
++volatile int shootdown_widen_armed;
++
++/* #638's test only: see <cpu/ipi.h>.  Nothing before the TSC is calibrated. */
++void shootdown_widen(void)
++{
++	uint64_t span, t0;
++
++	if (!shootdown_widen_armed || tsc_hz() == 0)
++		return;
++
++	span = tsc_hz() / 1000000 * WIDEN_638_US;
++	t0 = rdtsc();
++	while (rdtsc() - t0 < span)
++		cpu_pause();
++}
++
+ void ipi_call_others(void (*fn)(void *), void *arg)
+ {
+ 	unsigned targets = smp_online_count() - 1;
+@@ -313,6 +329,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+ 	 * lock to send nothing.  ablations/638-strike-unpinned.patch strikes
+ 	 * the bit with preemption on again.
+ 	 */
++	shootdown_widen();		/* before deciding: a move is harmless */
+ 	disable_preemption();
+ 	mask &= ~(1ULL << cpu_number());
+ 	ipi_call_targets(mask, fn, arg);
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.h b/uros/src/mach_kernel/x86_64/cpu/ipi.h
+index 24407126..72af1675 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ipi.h
++++ b/uros/src/mach_kernel/x86_64/cpu/ipi.h
+@@ -114,6 +114,28 @@ void ipi_call_others(void (*fn)(void *), void *arg);
+  */
+ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg);
+ 
++/*
++ * #638's widened window, and not an ablation: a shootdown
++ * spins for WIDEN_638_US microseconds between deciding which processor it is
++ * on and acting on the answer -- tlb_flush_range() between its local flush and
++ * its cross-call, ipi_call_mask() between striking its own bit and sending.
++ * With a fix in, the same spin runs just before the thread stops moving,
++ * where a move is harmless, and each fix's ablation puts it back between
++ * deciding and acting.  Only while -J has armed it, so that the rest of the
++ * boot runs at its own speed.
++ *
++ * ⚠️ ONE SPIN, AND WHERE IT IS DECIDES WHAT THE TEST SEES.  A preemption that
++ * arrives while the thread cannot move is not lost: it is taken at the first
++ * interrupt after the thread can.  The cross-call holds call_lock for most of
++ * a shootdown, so the moves pile up at the first stretch where moving is
++ * allowed again.  A first version spun twice, once before deciding and once
++ * after, and the moves went to the first spin: arm [1] said PASS on the
++ * defect it exists to show (#638).
++ */
++#define	WIDEN_638_US		50
++extern volatile int	shootdown_widen_armed;
++void			shootdown_widen(void);
++
+ /*
+  * Ask one processor to look at its asynchronous work.  Returns at once --
+  * there is nothing to wait for, and waiting would be the caller blocking on
+diff --git a/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c b/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c
+index 8aa648ab..7d3b06d3 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c
++++ b/uros/src/mach_kernel/x86_64/pmap/shootdown_test.c
+@@ -402,7 +402,7 @@ shoot_pages_fini(uint32_t n)
+ static void
+ shoot_arm_window(int on)
+ {
+-	(void) on;
++	shootdown_widen_armed = on;
+ }
+ 
+ static void
+diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
+index c9ed9bfc..d5e851a8 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
++++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
+@@ -114,6 +114,7 @@ uint64_t tlb_flushes_served(unsigned cpu)
+ static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
+ 				     uint64_t using)
+ {
++	shootdown_widen();	/* before deciding: a move is harmless */
+ 	disable_preemption();
+ 
+ 	tlb_flush_local_range(r->va, r->size);

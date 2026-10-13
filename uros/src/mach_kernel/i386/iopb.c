@@ -397,10 +397,8 @@ io_port_list_reserved(
 	io_reg_t	port;
 
 	while ((port = *list++) != IO_REG_NULL) {
-#if	!ABLATE_594_UNCHECKED
 	    if (device_md_io_reserved(port, 1) != 0)
 		return port;
-#endif	/* !ABLATE_594_UNCHECKED */
 	}
 	return IO_REG_NULL;
 }

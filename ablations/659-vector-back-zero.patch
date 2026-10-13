@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #659
 Takes out: the vector given back as it was found -- reach_pin_selftest() leaves zero on 0x40 again, as before c9bf9280, and a tick dispatched after it finds no handler and halts the machine
 Run: --entry 0 600 -smp 4
-With: 659-widen-tick-in-flight.patch
+Over: 659-widen-tick-in-flight.patch
 Expect: UrMach x86-64: no handler — halted
 Expect: UrMach x86-64: trap unclaimed interrupt
 

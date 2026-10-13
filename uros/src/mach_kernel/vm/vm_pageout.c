@@ -2189,13 +2189,6 @@ vm_pageout(void)
 	 *	zero, to check vm_page_free_target and
 	 *	vm_page_inactive_target.
 	 */
-	/*
-	 * #606: the loop as it was -- the assertion that nobody is waiting, and
-	 * a sleep with no end.  Off everywhere but the build that asks.
-	 */
-#ifndef	ABLATE_606_PAGEOUT_WAIT
-#define	ABLATE_606_PAGEOUT_WAIT	0
-#endif
 
 	for (;;) {
 		vm_pageout_scan();
@@ -2224,15 +2217,10 @@ vm_pageout(void)
 		 * waiting the sleep has an end: vm_pageout_empty_wait, the
 		 * pause the scan takes itself when it has nothing to do.
 		 */
-#if	ABLATE_606_PAGEOUT_WAIT
-		assert(vm_page_free_wanted == 0);
-		assert_wait((event_t) &vm_page_free_wanted, FALSE);
-#else
 		assert_wait((event_t) &vm_page_free_wanted, FALSE);
 		if (vm_page_free_wanted != 0)
 			thread_set_timeout(convert_ipc_timeout_to_ticks(
 						vm_pageout_empty_wait));
-#endif
 		mutex_unlock(&vm_page_queue_free_lock);
 		counter(c_vm_pageout_block++);
 		thread_block((void (*)(void)) 0);

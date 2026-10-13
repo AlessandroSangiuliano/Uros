@@ -5,14 +5,14 @@ Run: --entry 41 120 -smp 1
 Expect: drawn above: [0-9]+ bytes, 0 glyphs
 
 diff --git a/uros/src/mach_kernel/x86_64/ddb/fbcons.c b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
-index 296d335c..29afb737 100644
+index 58160f23..ccd89646 100644
 --- a/uros/src/mach_kernel/x86_64/ddb/fbcons.c
 +++ b/uros/src/mach_kernel/x86_64/ddb/fbcons.c
-@@ -520,7 +520,6 @@ static void fbcons_early_draw(void)
+@@ -670,7 +670,6 @@ static void fbcons_early_draw(void)
  			if (drawn == kept)
  				break;
  			c = (uint8_t) fb_early[drawn++];
--			fbcons_draw(c);
+-			fbcons_byte(c);
  			if (c == '\n') {
  				lines++;
  				delay(FB_EARLY_LINE_US);

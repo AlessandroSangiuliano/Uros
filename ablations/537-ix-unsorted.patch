@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #537
+Takes out: the heapsort of the page index -- it stays in the order the pages came in and the binary search misses, which dma_ix_selftest() must say at init; a boot with a disk then has its DMA asks refused and does not finish, hence the entry without one
+Run: --entry 0 600 -smp 4
+Expect: the page index of a [0-9]+-page buffer: WRONG
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index d2d53b67..d631d9d9 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -1738,6 +1738,7 @@ dma_ix_build(struct dma_page_ix *ix, const vm_offset_t *pa, unsigned int n)
+ 		ix[i].pa = pa[i];
+ 		ix[i].page = i;
+ 	}
++	return;
+ 	for (i = n / 2; i-- > 0; )
+ 		dma_ix_sift(ix, i, n);
+ 	for (i = n; i-- > 1; ) {

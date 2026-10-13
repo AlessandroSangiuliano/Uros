@@ -323,18 +323,8 @@ void cons_putc(char c)
  */
 static void cons_fifo_probe(void)
 {
-	/*
-	 * ABLATE_567_NO_FIFO keeps the old depth of one, which is what this
-	 * file did before: the FIFO enabled and one slot of it used.  It is
-	 * the other arm of the measurement, in a binary that differs in
-	 * nothing else.
-	 */
-#if	ABLATE_567_NO_FIFO
-	cons_fifo_depth = 1;
-#else
 	cons_fifo_depth = ((inb(COM1 + UART_IIR) & IIR_FIFO_ON) == IIR_FIFO_ON)
 			  ? CONS_FIFO_DEPTH : 1;
-#endif
 	cons_fifo_room = 0;
 }
 
@@ -348,10 +338,10 @@ static void cons_fifo_probe(void)
  * would not wait, or the port is stuck.  What that means for the byte in hand
  * is the caller's decision.
  *
- * ABLATE_551_UNBOUNDED puts the original loop back, so that
+ * ablations/551-unbounded.patch puts the original loop back, so that
  * scripts/uart-stall.py can show the machine it stops -- a bound nothing has
  * ever hit is untested code, and this is how it is hit.  The `may_wait' exit
- * is outside the ablation: it is about who is asking, not about the bound.
+ * is outside the patch: it is about who is asking, not about the bound.
  */
 static unsigned cons_tx_room(int may_wait)
 {
@@ -372,12 +362,10 @@ static unsigned cons_tx_room(int may_wait)
 	while (!(inb(COM1 + UART_LSR) & LSR_THR_EMPTY)) {
 		if (!may_wait)
 			return 0;
-#if	!ABLATE_551_UNBOUNDED
 		if (cons_tx_stuck || ++spins >= CONS_THRE_SPINS) {
 			cons_tx_stuck = 1;
 			return 0;
 		}
-#endif
 		cpu_pause();
 	}
 
@@ -1120,15 +1108,12 @@ static void cons_queue(char c)
  * halt_all_cpus(); the end of a self-test run flushes without disarming,
  * because the machine goes on afterwards.
  *
- * ABLATE_567_NO_RING refuses to arm, which leaves every byte on the synchronous
- * path this file had before -- the other arm of the measurement, in a binary
- * that differs in nothing else.
+ * ablations/567-no-ring.patch refuses to arm, which leaves every byte on the
+ * synchronous path this file had before -- the other arm of the measurement,
+ * in a binary that differs in nothing else.
  */
 void cons_async_set(int on)
 {
-#if	ABLATE_567_NO_RING
-	on = 0;
-#endif
 	if (!on) {
 		/*
 		 * 🔴 AND THE PORT COMES BACK (#497), BEFORE THE DRAIN.

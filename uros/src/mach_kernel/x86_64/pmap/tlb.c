@@ -92,10 +92,6 @@ uint64_t tlb_flushes_served(unsigned cpu)
 	return answer_count_of(&served, cpu);
 }
 
-#ifndef	ABLATE_638_FLUSH_UNPINNED
-#define	ABLATE_638_FLUSH_UNPINNED	0
-#endif
-
 /*
  * Flush this processor, and have the others flush too: every one in `using',
  * or every one at all when `broadcast' is set.
@@ -106,8 +102,8 @@ uint64_t tlb_flushes_served(unsigned cpu)
  * thread moved between the two had flushed the processor it left and left out
  * the one it arrived at, which nobody flushed.  That one can hold the
  * translation: a switch between two threads with the same map does not reload
- * CR3.  So both halves run with preemption off.  UROS_ABLATE_638_FLUSH_UNPINNED
- * runs them with it on again.
+ * CR3.  So both halves run with preemption off.
+ * ablations/638-flush-unpinned.patch runs them with it on again.
  *
  * The local flush still goes first.  Not for correctness — the order between
  * the local flush and the remote ones does not matter, since the entry is
@@ -118,27 +114,16 @@ uint64_t tlb_flushes_served(unsigned cpu)
 static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
 				     uint64_t using)
 {
-	if (!ABLATE_638_FLUSH_UNPINNED) {
-#if	WIDEN_638_WINDOW
-		shootdown_widen();	/* before deciding: a move is harmless */
-#endif
-		disable_preemption();
-	}
+	disable_preemption();
 
 	tlb_flush_local_range(r->va, r->size);
-
-#if	WIDEN_638_WINDOW
-	if (ABLATE_638_FLUSH_UNPINNED)
-		shootdown_widen();	/* between the local flush and the call */
-#endif
 
 	if (broadcast)
 		ipi_call_others(tlb_flush_handler, r);
 	else
 		ipi_call_mask(using, tlb_flush_handler, r);
 
-	if (!ABLATE_638_FLUSH_UNPINNED)
-		enable_preemption();
+	enable_preemption();
 }
 
 void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
@@ -169,31 +154,8 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * stop shooting down kernel mappings on every processor in the
 	 * machine, and the first symptom would be somewhere else entirely.
 	 */
-	/*
-	 * ── Putting the broadcast back, to find out what it cost (#482) ────
-	 *
-	 * #439 narrowed this on an ARGUMENT: the page copy did not move a cycle
-	 * between one processor and eight while the whole fault rose thirty
-	 * times over, and the shootdown was the one part of the path whose cost
-	 * is a function of processor count.  The narrowing worked -- 35,490 down
-	 * to 5,790 -- and a result is not a premise.
-	 *
-	 * The phase breakdown cannot confirm the premise on its own, because
-	 * what it now measures is a fault with no broadcast in it: the growth
-	 * the argument was about is gone, and "nothing grows" is consistent with
-	 * the argument having been right and with its having been right for the
-	 * wrong reason.  🔥 A correction is verified by TAKING IT AWAY.
-	 *
-	 * So this switch restores the broadcast and nothing else -- same kernel,
-	 * same run, same instrument -- and the question becomes an observation:
-	 * does FP_PROTECT plus FP_ENTER swell while every other phase stays
-	 * where it was?  Off in every build that is not answering that question.
-	 */
-#ifndef	ABLATE_439
-#define	ABLATE_439	0
-#endif
 
-	if (ABLATE_439 || pmap == PMAP_NULL || pmap == pmap_kernel()) {
+	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
 		/*
 		 * With only this processor online there is nobody to tell and
 		 * nowhere to be moved to, so the flush here is the whole job.

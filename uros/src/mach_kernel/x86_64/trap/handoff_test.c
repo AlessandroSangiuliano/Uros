@@ -349,7 +349,7 @@ hq_stopped_arm(void)
 /*
  * The stopped arm first, and not for tidiness.  The old wake put a waiter that
  * was not parked on a run queue with thread_setrun(), which asserts the thread
- * is not swapped out -- so under UROS_ABLATE_607_OLD_WAKE the swapped arm ends
+ * is not swapped out -- so under ablations/607-old-wake.patch the swapped arm ends
  * the boot in that assertion, and the stopped arm, run second, would never say
  * what it is there to say.  In this order each ablation shows its own arm.
  */

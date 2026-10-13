@@ -50,28 +50,6 @@
 #include <cpu/regs.h>		/* #422: cpu_apic_id */
 
 /*
- * ── Putting #475 back the way it was, for one run (#475) ──────────────
- *
- * The issue asks for a test that panics the kernel before the change and
- * passes after, and the only honest way to show the first half is to restore
- * what was there and watch the machine stop.  A correction is verified by
- * TAKING IT AWAY.
- *
- * ⚠️ One of two, and the other is in x86_64/syscall/entry.S.  They are
- * separate switches because they fail differently -- this one halts the
- * machine, that one leaves it running and quietly wrong -- and a run that
- * removed both would only ever report the first thing to go wrong.
- *
- * Zero in every build that ships.  This exists to be set from the compiler
- * command line for one run and then unset; nothing in the tree turns it on,
- * which is why it is a plain zero here rather than a configuration option
- * somebody could leave enabled.
- */
-#ifndef ABLATE_475_RETURN
-#define ABLATE_475_RETURN	0	/* a killed activation returns through here */
-#endif
-
-/*
  * Module init.  Both halves exist because the machine-independent tree calls
  * them at different moments -- act_machine_init() before any activation and
  * thread_machine_init() before any thread -- and on this machine there is
@@ -256,11 +234,6 @@ thread_begin_trampoline(void *unused)
 	/*NOTREACHED*/
 }
 
-/* #616's ablation: every thread gets a user frame again, kernel threads too. */
-#ifndef	ABLATE_616_KERNEL_FRAME
-#define	ABLATE_616_KERNEL_FRAME	0
-#endif
-
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -407,7 +380,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * from #422 on, and state_test's check on it -- written five days
 	 * before -- failed unseen until #615 ran entry 7.
 	 */
-	if (thr_act->task != kernel_task || ABLATE_616_KERNEL_FRAME) {
+	if (thr_act->task != kernel_task) {
 		pcb->user = (struct trap_frame *)
 			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
 		thread_frame_init(pcb->user);
@@ -788,9 +761,6 @@ pcb_user_to_kernel(thread_act_t thr_act)
 void
 act_machine_return(kern_return_t code)
 {
-	if (ABLATE_475_RETURN)
-		panic("act_machine_return(0x%x): this machine has no RPC "
-		      "activation chain to return through (#453)", code);
 
 	/*
 	 * The one caller passes KERN_TERMINATED and the name says why: an

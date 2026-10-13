@@ -48,18 +48,6 @@
 #include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 /* #537 step 3: the kept translations -- see blk_xlate_take() below. */
-#ifndef BLK_ABLATE_537_NO_TABLE
-#define BLK_ABLATE_537_NO_TABLE 0
-#endif
-#ifndef BLK_ABLATE_537_TABLE_KEPT
-#define BLK_ABLATE_537_TABLE_KEPT 0
-#endif
-#ifndef BLK_ABLATE_537_NO_EPOCH
-#define BLK_ABLATE_537_NO_EPOCH 0	/* no check after a transfer */
-#endif
-#ifndef BLK_ABLATE_614_NO_MODE_CHECK
-#define BLK_ABLATE_614_NO_MODE_CHECK 0	/* transfers ignore the handle's mode */
-#endif
 #define BLK_DMA_PAGE	4096u		/* the DMA regions' page, both targets */
 
 struct blk_handle;
@@ -119,7 +107,7 @@ blk_handle_for(mach_port_t device, dev_mode_t dir)
 
 	if (h == NULL)
 		return NULL;
-	if ((h->mode & dir) != dir && !BLK_ABLATE_614_NO_MODE_CHECK) {
+	if ((h->mode & dir) != dir) {
 		if (!h->said_mode) {
 			h->said_mode = 1;
 			printf("blk: %s: a %s on a handle opened without %s, "
@@ -183,8 +171,7 @@ blk_handles_revoke_by_cap_id(uint64_t cap_id)
 		 * when it happens, not at the next read.
 		 */
 		for (i = 0, kept = 0; i < h->n_dma_caps; i++) {
-			if (h->dma_cap[i].cap_id == cap_id &&
-			    !BLK_ABLATE_537_TABLE_KEPT) {
+			if (h->dma_cap[i].cap_id == cap_id) {
 				printf("blk: %s: capability %llu forgotten — "
 				       "cap_server says it was revoked\n",
 				       h->part ? h->part->name : "(unknown)",
@@ -1182,25 +1169,12 @@ blk_dma_for(struct blk_handle *h, vm_address_t pa, natural_t op,
 }
 
 /*
- * #537 step 2: every page of a request in one ask, when it has more than one.
- * The handle's capabilities are tried as blk_dma_for() tries them, the one
- * that answered last first, one call each for the whole request.  Anything
- * but an answer for all the pages falls back to blk_dma_for() page by page,
- * which finds the page refused, forgets a capability the kernel refuses for
- * good, and is what blk_refused() has always been told about -- a request
- * whose pages lie in two buffers is answered that way too.  On a refusal
- * *refused is the page.  UROS_ABLATE_537_NO_BATCH asks page by page always.
- */
-#ifndef BLK_ABLATE_537_NO_BATCH
-#define BLK_ABLATE_537_NO_BATCH 0
-#endif
-
-/*
  * #537 step 3: a buffer's translation, kept per handle where the device is
- * isolated (see struct blk_xlate).  UROS_ABLATE_537_NO_TABLE keeps none, so
- * every transfer asks; UROS_ABLATE_537_TABLE_KEPT leaves the capabilities and
- * their tables on a revocation notice, so a revoked buffer's translation is
- * USED -- the IOMMU's refusal of it is what cap_test [26] asks about.
+ * isolated (see struct blk_xlate).  ablations/537-blk-no-table.patch keeps
+ * none, so every transfer asks; ablations/537-blk-table-kept.patch leaves the
+ * capabilities and their tables on a revocation notice, so a revoked buffer's
+ * translation is USED -- the IOMMU's refusal of it is what cap_test [26] asks
+ * about.
  */
 
 static void
@@ -1255,8 +1229,6 @@ blk_xlate_take(struct blk_handle *h, const struct uros_cap *t,
 	uint32_t	epoch;
 
 	blk_xlate_free(x);
-	if (BLK_ABLATE_537_NO_TABLE)
-		return;
 	/* Before the ask: a revocation after it moves the epoch past this. */
 	epoch = (uint32_t)urmach_cap_epoch();
 	kr = device_dma_map_foreign_region(master_device, bdf, (char *)t,
@@ -1341,7 +1313,8 @@ blk_xlate_find(const struct blk_handle *h, vm_address_t pa, natural_t op,
  * device while the controller reported success, and success must not be
  * reported for what may not have happened -- the window between a revocation
  * and its notice, closed.  An epoch moved by somebody else's revocation costs
- * one verification, once.  UROS_ABLATE_537_NO_EPOCH leaves the window open.
+ * one verification, once.  ablations/537-blk-no-epoch.patch leaves the window
+ * open.
  *
  * t2 is the transfer's end; *t3 is set to the check's before anything is
  * printed or freed, for blk_phys_account().
@@ -1356,7 +1329,7 @@ blk_xlate_held(struct blk_handle *h, unsigned int used,
 	unsigned int	i, refused = 0;
 	uint32_t	now;
 
-	if (used == 0 || BLK_ABLATE_537_NO_EPOCH) {
+	if (used == 0) {
 		*t3 = blk_tsc();
 		return KERN_SUCCESS;
 	}
@@ -1396,6 +1369,17 @@ blk_xlate_held(struct blk_handle *h, unsigned int used,
 	return result;
 }
 
+/*
+ * #537 step 2: every page of a request in one ask, when it has more than one.
+ * The handle's capabilities are tried as blk_dma_for() tries them, the one
+ * that answered last first, one call each for the whole request.  Anything
+ * but an answer for all the pages falls back to blk_dma_for() page by page,
+ * which finds the page refused, forgets a capability the kernel refuses for
+ * good, and is what blk_refused() has always been told about -- a request
+ * whose pages lie in two buffers is answered that way too.  On a refusal
+ * *refused is the page.  ablations/537-blk-no-batch.patch asks page by page
+ * always.
+ */
 static kern_return_t
 blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
 		  unsigned int n, natural_t op, vm_address_t *dma,
@@ -1421,7 +1405,7 @@ blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
 		return KERN_SUCCESS;
 	*used = 0;
 
-	if (n > 1 && !BLK_ABLATE_537_NO_BATCH) {
+	if (n > 1) {
 		for (j = 0; j < h->n_dma_caps; j++) {
 			mach_msg_type_number_t cnt = n;
 

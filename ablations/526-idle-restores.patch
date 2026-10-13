@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #526
+Takes out: the idle loop waiting at level zero -- it restores the level it found, and a raised one is held for ever; entry 22 under TCG at 1.4 GHz stalls about once in 30 boots
+Run: --entry 22 1200 -smp 4
+Expect: NOTHING ARRIVED for
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 3cbdfd2f..ba47fcf5 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -3245,7 +3245,7 @@ idle_thread_continue(void)
+ int
+ idle_thread_loop(int idle_thread_type)
+ #else	/* FAST_IDLE */
+-#define	IDLE_WAIT_SPL(s)	MACHINE_IDLE_SPL
++#define	IDLE_WAIT_SPL(s)	(s)
+ 
+ void
+ idle_thread_continue(void)

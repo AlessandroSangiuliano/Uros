@@ -1,0 +1,79 @@
+Kind: ablation
+Issue: #577
+Takes out: nothing -- a probe: the device master answers exactly one configuration read with 0, pci_scan's read-back of 00:05.0's restored BAR5, and pci_scan must say the BAR did not take its address back and leave the device's decoding off, which the old code switched on again
+Run: --entry 14 1200 -smp 1
+Expect: pci_scan: 00:05\.0 is LEFT WITH ITS DECODING OFF: bar5 is not shown to be back
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 78d03057..645a0609 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -790,6 +790,56 @@ check_cfg_access(natural_t bdf)
+ 
+ /* ---- PCI configuration space ---- */
+ 
++/*
++ * #577's ablation, the answering kind: ONE configuration read, the
++ * ABLATE_577_NTH read of register ABLATE_577_REG of device ABLATE_577_BDF, is
++ * answered with 0 -- not a refusal but a device that decodes nothing there,
++ * which is what a region that measures zero needs in order to exist on demand.
++ * Only accesses through the RPC below are counted: the kernel's own
++ * measure_regions() reads the hardware directly.  Every counted access is
++ * printed with its ordinal, so the log shows which step the number landed on.
++ * The count is not atomic: this is an experiment, run on one processor, and it
++ * is never built otherwise.
++ *
++ * The steps #577 asked on x86-64's board, as BDF,WRITE,REG,NTH: 0x28 is
++ * 00:05.0, ahci, whose BAR5 (0x24) is read 1 by the scan, then 2 for the
++ * original value, 3 for the probe and 4 for the read-back, and written 1 with
++ * all ones and 2 to put it back; its command register (0x04) is read 1 and
++ * written 1 by pci_scan, which switches decoding off, written 2 by pci_scan
++ * putting it back, and read 2 and written 3 by ahci.  0x20 is 00:04.0,
++ * virtio-blk, whose BAR0 (0x10) and the upper half of its 64-bit BAR4 (0x24)
++ * count the same way.  ⚠️ The same BDF is a different device on each board:
++ * 0x20 is ahci on i386's.
++ *
++ * #577 answered so the probes of 00:05.0's BAR4, 0x28,0,0x20,3, and of
++ * 00:04.0's BAR0, 0x20,0,0x10,3.  As it stands, pci_scan's read-back of
++ * 00:05.0's restored BAR5: pci_scan must then say that the BAR did not take its
++ * address back, and leave the device's decoding off.
++ */
++#define	ABLATE_577_BDF		0x28
++#define	ABLATE_577_WRITE	0
++#define	ABLATE_577_REG		0x24
++#define	ABLATE_577_NTH		4
++#define	ABLATE_577_SAYS		": ANSWERED 0"
++
++static int
++ablate_577_refuse(natural_t bdf, int write, unsigned int reg)
++{
++	static unsigned int	ablate_577_seen;
++	unsigned int		n;
++
++	if (bdf != (natural_t)ABLATE_577_BDF || write != ABLATE_577_WRITE
++	    || reg != (unsigned int)ABLATE_577_REG)
++		return 0;
++	n = ++ablate_577_seen;
++	printf("device_pci_config: #577 ablation — %s %u of register 0x%02x "
++	       "on %02x:%02x.%u, by task %p%s\n", write ? "write" : "read", n,
++	       reg, (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
++	       (unsigned)(bdf & 7), (void *)current_task(),
++	       n == ABLATE_577_NTH ? ABLATE_577_SAYS : "");
++	return n == ABLATE_577_NTH;
++}
++
+ kern_return_t
+ ds_master_device_pci_config_read(
+ 	ipc_port_t		master_port,
+@@ -812,6 +862,11 @@ ds_master_device_pci_config_read(
+ 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
+ 	if (kr != KERN_SUCCESS)
+ 		return kr;
++	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
++			      0, reg)) {
++		*data = 0;
++		return KERN_SUCCESS;
++	}
+ 
+ 	*data = device_md_pci_read(bus, slot, func, reg);
+ 	return KERN_SUCCESS;

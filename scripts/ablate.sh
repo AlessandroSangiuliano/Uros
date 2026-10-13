@@ -11,6 +11,14 @@
 # A patch with Screen: lines is booted by fbcons-readback.py instead, and what
 # that script read off the screen is read the same way (#670).
 #
+# A patch that must go over another says so with `Over: NAME.patch' in its
+# header, and is applied over it whether or not it was given: the bases come
+# first, each once.  A base is a widen the patch needs to mean anything -- an
+# ablation whose Expect matched the fixed tree too without its widen reported
+# CAUGHT on every boot when given alone (#659) -- a probe it extends, or a patch
+# its diff is written over.  Only the patches given are read for Expect: lines:
+# a base that is itself an ablation would otherwise catch the run on its own.
+#
 # Usage:
 #   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --check [--base REV] PATCH...
@@ -23,7 +31,8 @@
 #   --ab         alternate every ablated boot with a boot of the fixed tree:
 #                the widen patches, without the ablations
 #   --keep       keep the worktrees and their builds afterwards
-#   --check      only say whether every patch still applies to REV
+#   --check      only say whether each patch still applies to REV, over its
+#                bases, each on its own
 #   --plan       say what the same command without --plan would build and
 #                boot, and refuse what it would refuse, building nothing
 #   --make       print the reverse of COMMIT's changes to the PATHs, under a
@@ -117,63 +126,69 @@ done
 REV=$(git -C "$REPO" rev-parse -q --verify "$BASE^{commit}") || die 2 "no revision $BASE"
 SHORT=$(git -C "$REPO" rev-parse --short "$REV")
 
-# A patch's With: lines name the widen patches it needs to mean anything, in
-# its own directory; each comes in before it, once, unless already named.  An
-# ablation whose Expect matches the fixed tree too without its widen reported
-# CAUGHT on every boot when given alone (#659).
-listed() {
-	local want=$1 p
-	shift
-	for p in "$@"; do
-		[ "$p" = "$want" ] && return 0
+# A patch, after the bases its Over: lines name (theirs first), each once.  A
+# base the command line did not name is said: the run is not then the patches
+# given alone.
+with_bases() {
+	local p=$1 b
+
+	case " ${EXPANDED[*]} " in
+	*" $p "*) return ;;
+	esac
+	case " ${VISITING[*]} " in
+	*" $p "*) die 2 "$(basename "$p") goes over itself, through the Over: lines of its bases" ;;
+	esac
+	VISITING+=("$p")
+	[ -r "$p" ] || die 2 "cannot read $p"
+	grep -q '^diff --git ' "$p" || die 2 "$p is not a patch: it has no diff"
+	for b in $(header "$p" Over); do
+		[ -r "$(dirname "$p")/$b" ] ||
+			die 2 "$(basename "$p") goes over $b, which is not next to it"
+		b=$(realpath "$(dirname "$p")/$b")
+		case " ${PATCHES[*]} ${EXPANDED[*]} " in
+		*" $b "*) ;;
+		*) echo "ablate: $(basename "$p") goes over $(basename "$b"), which comes in first (Over:)" ;;
+		esac
+		with_bases "$b"
 	done
-	return 1
+	EXPANDED+=("$p")
 }
-WITH=()
+EXPANDED=()
+VISITING=()
 for p in "${PATCHES[@]}"; do
-	while IFS= read -r w; do
-		[ -n "$w" ] || continue
-		[ -e "$(dirname "$p")/$w" ] ||
-			die 2 "$(basename "$p"): its With: names $w, which is not in $(dirname "$p")"
-		w=$(realpath "$(dirname "$p")/$w")
-		if ! listed "$w" "${WITH[@]}"; then
-			listed "$w" "${PATCHES[@]}" ||
-				echo "ablate: $(basename "$p") brings $(basename "$w") with it (With:)"
-			WITH+=("$w")
-		fi
-	done <<< "$(header "$p" With)"
-	listed "$p" "${WITH[@]}" || WITH+=("$p")
+	with_bases "$p"
 done
-PATCHES=("${WITH[@]}")
 
 # A patch's Accel: line names the accelerators it can show anything under,
 # and the run takes only those (#659): under KVM's full irqchip QEMU's plain
 # intel-iommu remaps nothing, so 659-kept-mode-eight-bit's ablated tree has
 # nothing to print there and was NOT CAUGHT on every KVM boot; and
 # fbcons-readback.py's pauses restart KVM's in-kernel 8254 (#661).  A command
-# line that leaves a patch none of its accelerators is refused.
-for p in "${PATCHES[@]}"; do
-	allow=$(header "$p" Accel | tr ',' ' ')
-	[ -n "$allow" ] || continue
-	kept=()
-	for acc in "${ACCELS[@]}"; do
-		case " $allow " in
-		*" $acc "*)	kept+=("$acc") ;;
-		esac
+# line that leaves a patch none of its accelerators is refused -- but not a
+# --check, which boots nothing: with 477-sysret-base's Accel: kvm, a check of
+# every patch under the default tcg was refused whole (#643).
+if [ $CHECK = 0 ]; then
+	for p in "${EXPANDED[@]}"; do
+		allow=$(header "$p" Accel | tr ',' ' ')
+		[ -n "$allow" ] || continue
+		kept=()
+		for acc in "${ACCELS[@]}"; do
+			case " $allow " in
+			*" $acc "*)	kept+=("$acc") ;;
+			esac
+		done
+		[ ${#kept[@]} -gt 0 ] ||
+			die 2 "$(basename "$p") shows something only under $allow (its Accel:), and --accel asked for ${ACCELS[*]}"
+		[ ${#kept[@]} = ${#ACCELS[@]} ] ||
+			echo "ablate: $(basename "$p") is booted under ${kept[*]} only (Accel:)"
+		ACCELS=("${kept[@]}")
 	done
-	[ ${#kept[@]} -gt 0 ] ||
-		die 2 "$(basename "$p") shows something only under $allow (its Accel:), and --accel asked for ${ACCELS[*]}"
-	[ ${#kept[@]} = ${#ACCELS[@]} ] ||
-		echo "ablate: $(basename "$p") is booted under ${kept[*]} only (Accel:)"
-	ACCELS=("${kept[@]}")
-done
+fi
 
 # Every patch says what it is, and the fixed arm takes only the widen ones.
 WIDENS=()
 ABLATIONS=0
-for p in "${PATCHES[@]}"; do
-	[ -r "$p" ] || die 2 "cannot read $p"
-	grep -q '^diff --git ' "$p" || die 2 "$p is not a patch: it has no diff"
+for p in "${EXPANDED[@]}"; do
 	kind=$(header "$p" Kind | head -n 1)
 	case "$kind" in
 	ablation)	ABLATIONS=$((ABLATIONS + 1)) ;;
@@ -205,23 +220,31 @@ check_applies() {
 	return $bad
 }
 
+# Each patch on its own, over its bases: a patch is not checked over the
+# unrelated ones given beside it, which may touch the same lines.
 if [ $CHECK = 1 ]; then
-	check_applies "${PATCHES[@]}" || exit 2
-	exit 0
+	bad=0
+	for p in "${PATCHES[@]}"; do
+		EXPANDED=()
+		VISITING=()
+		with_bases "$p"
+		check_applies "${EXPANDED[@]}" || bad=1
+	done
+	exit $((bad * 2))
 fi
 
 [ $ABLATIONS -gt 0 ] || die 2 "no ablation among the patches: there is nothing for a test to catch"
-check_applies "${PATCHES[@]}" || exit 2
+check_applies "${EXPANDED[@]}" || exit 2
 
 # #670: a test read off the screen.  Screen: lines, one argument of
 # fbcons-readback.py each so that none needs quoting, boot every arm with that
 # script and its build instead of with run-x86_64.sh, and Expect: is matched
 # against what the script printed.  The way to catch an ablation on a machine
 # with no UART, which has no serial log to read.
-mapfile -t SCREEN < <(for p in "${PATCHES[@]}"; do header "$p" Screen; done)
+mapfile -t SCREEN < <(for p in "${EXPANDED[@]}"; do header "$p" Screen; done)
 
 if [ ${#RUN[@]} -eq 0 ] && [ ${#SCREEN[@]} -eq 0 ]; then
-	run=$(for p in "${PATCHES[@]}"; do header "$p" Run; done | head -n 1)
+	run=$(for p in "${PATCHES[@]}" "${EXPANDED[@]}"; do header "$p" Run; done | head -n 1)
 	[ -n "$run" ] || die 2 "no Run: line in the patches, and no RUN-ARGS after --"
 	read -r -a RUN <<< "$run"
 fi
@@ -242,7 +265,7 @@ fi
 # Everything a run refuses has been refused by now, before anything is built:
 # a plan is the run up to here, and what it would do after (#656).
 if [ $PLAN = 1 ]; then
-	for p in "${PATCHES[@]}"; do
+	for p in "${EXPANDED[@]}"; do
 		what=$(header "$p" 'Takes out'; header "$p" 'Holds open')
 		echo "ablate: plan: $(basename "$p"): $(header "$p" Kind | head -n 1)," \
 			"$(header "$p" Issue | head -n 1): ${what:-says nothing of what it does}"
@@ -258,9 +281,9 @@ if [ $PLAN = 1 ]; then
 		echo "ablate: plan: caught if a line of $read_from matches: $e"
 	done <<< "$EXPECT"
 	if [ $AB = 1 ]; then
-		echo "ablate: plan: the fixed arm is $SHORT with the ${#WIDENS[@]} widen patch(es), the ablated arm with all ${#PATCHES[@]}"
+		echo "ablate: plan: the fixed arm is $SHORT with the ${#WIDENS[@]} widen patch(es), the ablated arm with all ${#EXPANDED[@]}"
 	else
-		echo "ablate: plan: one arm, $SHORT with all ${#PATCHES[@]} patch(es)"
+		echo "ablate: plan: one arm, $SHORT with all ${#EXPANDED[@]} patch(es)"
 	fi
 	echo "ablate: plan: $BOOTS boot(s) per arm under each of ${ACCELS[*]}, $((BOOTS * ${#ACCELS[@]} * ${#ARMS[@]})) in all"
 	exit 0
@@ -283,7 +306,7 @@ trap cleanup EXIT
 
 # The build is configured with every OSFMK_* and UROS_* option of the main
 # build, because this tree's configuration cannot be reproduced from the
-# defaults -- except the in-kernel ablations and widenings, which stay off.
+# defaults.
 configure() {
 	local wt=$1 cache="$REF/CMakeCache.txt" gen bt l n rest t v opts=()
 
@@ -295,11 +318,6 @@ configure() {
 		rest=${l#*:}
 		t=${rest%%=*}
 		v=${rest#*=}
-		case "$n" in
-		UROS_ABLATE_*|UROS_WIDEN_*)
-			[ "$v" = ON ] && echo "note: $n is ON in $REF, and is left off here"
-			continue ;;
-		esac
 		opts+=("-D$n:$t=$v")
 	done < <(grep -E '^(OSFMK|UROS)_[A-Z0-9_]*:(BOOL|STRING|UNINITIALIZED)=' "$cache" | grep -v '_LAST:')
 	echo "configuring with ${#opts[@]} options of $REF"
@@ -312,7 +330,7 @@ for arm in "${ARMS[@]}"; do
 	wt="$RUNDIR/$arm"
 	git -C "$REPO" worktree add -q --detach "$wt" "$REV"
 	if [ "$arm" = ablated ]; then
-		apply=("${PATCHES[@]}")
+		apply=("${EXPANDED[@]}")
 	else
 		apply=("${WIDENS[@]}")
 	fi
@@ -336,7 +354,7 @@ done
 CSV="$DIR/ablate.csv"
 [ -s "$CSV" ] ||
 	echo "date,time,host,base,patches,arm,boot,accel,run,clock_mhz,power,harness_status,verdict,log" > "$CSV"
-names=$(for p in "${PATCHES[@]}"; do basename "$p" .patch; done | paste -sd+)
+names=$(for p in "${EXPANDED[@]}"; do basename "$p" .patch; done | paste -sd+)
 # uname and not hostname: the Arch Linux container the campaign runs in has
 # no hostname, which is in inetutils, and this line under set -e ended its
 # first A/B with both arms built and no boot (#656).

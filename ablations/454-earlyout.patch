@@ -1,0 +1,37 @@
+Kind: ablation
+Issue: #454
+Takes out: spl_replay()'s early-out -- every splx() that lowers to level zero walks 240 vectors again to find four words of zeros
+Run: --entry 14 1200 -smp 4
+Measure: the cost of a mach_msg hand-off in ipc_bench, and splx()'s share of it (#392 measured 19-21% of the on-processor work before the early-out)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/spl.c b/uros/src/mach_kernel/x86_64/cpu/spl.c
+index b15a97b9..0f1299f7 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/spl.c
++++ b/uros/src/mach_kernel/x86_64/cpu/spl.c
+@@ -83,26 +83,6 @@ int spl_defer(unsigned vector)
+  */
+ static void spl_replay(struct percpu *p)
+ {
+-	/*
+-	 * 🔥 #392/#454: NOTHING RECORDED, NOTHING TO LOOK FOR — and the search
+-	 * is 240 iterations long.
+-	 *
+-	 * The scan below runs from vector 255 downwards and stops when the
+-	 * class is masked, which for a level of zero is at vector 15.  So every
+-	 * splx() that lowers to the bottom walks 240 vectors to discover that
+-	 * four words are zero, and #392 measured one splx() at 19-21% of the
+-	 * on-processor work of a mach_msg hand-off -- more than the context
+-	 * switch it protects, and ten times the scheduler state change.
+-	 *
+-	 * Four loads and three ORs answer the same question when the answer is
+-	 * no, which it is on every path that did not defer an interrupt.  It is
+-	 * exactly equivalent: a bit set nowhere is a bit set at no level.
+-	 *
+-	 * ⚠️ ablations/454-earlyout.patch takes it away again, because a
+-	 * correction is verified by REMOVING it and watching the number come back.
+-	 */
+-	if ((p->pending[0] | p->pending[1] | p->pending[2] | p->pending[3]) == 0)
+-		return;
+ 
+ 	for (;;) {
+ 		unsigned found = 0;

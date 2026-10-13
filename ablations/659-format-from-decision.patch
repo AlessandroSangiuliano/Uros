@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #659
 Takes out: the entries' format read off IRTA's word -- it follows the decision again, as before 84d9c7d7, so a word composed without EIME leaves entries for 32-bit ids that the engine reads in xAPIC mode, the destination from bits 47:40: an interrupt aimed at processor 256 must not arrive there
 Run: --iommu intel-eim --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
-With: 659-eime-not-written.patch
+Over: 659-eime-not-written.patch
 Expect: aimed at apic id [0-9]+ arrived there [0-9]+ times and elsewhere [0-9]+ — WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c

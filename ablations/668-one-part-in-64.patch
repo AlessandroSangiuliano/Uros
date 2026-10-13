@@ -1,5 +1,7 @@
 Kind: ablation
 Issue: #668
+Over: 668-widen-host-clock-drift.patch
+Accel: kvm
 Takes out: the check asking exact.c's rule -- past one part in 64 from an exact source it is WRONG again, whatever the bound the source was adopted within, as it was before #668: the fix's code reversed, its comments kept
 Run: --entry 41 120 -smp 4
 Expect: the TSC checked against the .* — WRONG

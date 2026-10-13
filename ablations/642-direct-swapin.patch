@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #642
+Over: 642-widen-swap.patch
 Takes out: thread_swap_disable() asking the swapper for the swap-in -- it swaps in, itself, an activation the swapper may already be moving, as it did before fc9bb15d
 Run: --entry 25 600 -smp 4
 Expect: <thread_doswapin\+0x

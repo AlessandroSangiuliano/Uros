@@ -104,13 +104,6 @@ static struct hmac_sha256_key cap_hmac_ready;
  */
 static volatile uint32_t cap_epoch;
 
-#ifndef ABLATE_537_MAC_EVERY_TIME
-#define ABLATE_537_MAC_EVERY_TIME 0	/* the cache never used */
-#endif
-#ifndef ABLATE_537_EPOCH_KEPT
-#define ABLATE_537_EPOCH_KEPT 0		/* a revocation leaves the epoch */
-#endif
-
 static struct cap_verified {
     struct uros_cap token;
     uint32_t        epoch;
@@ -179,33 +172,6 @@ cap_state_get_or_create(uint64_t cap_id)
 }
 
 /*
- * Compute the HMAC over every byte of the token *except* the trailing
- * hmac[] field, and compare it against token->hmac in constant time.
- * Returns TRUE on match.
- */
-/*
- * #537: UROS_ABLATE_537_HMAC_FULL makes the key's two blocks hashed again on
- * every check, as they were -- the per-page split's MAC column is what shows
- * the difference.
- */
-#ifndef ABLATE_537_HMAC_FULL
-#define ABLATE_537_HMAC_FULL 0
-#endif
-
-static boolean_t
-cap_hmac_check(const struct uros_cap *token)
-{
-    const size_t signed_len = sizeof(*token) - CAP_HMAC_SIZE;
-    uint8_t expected[HMAC_SHA256_SIZE];
-
-    if (ABLATE_537_HMAC_FULL)
-        hmac_sha256(cap_hmac_key, CAP_HMAC_SIZE, token, signed_len, expected);
-    else
-        hmac_sha256_with(&cap_hmac_ready, token, signed_len, expected);
-    return hmac_sha256_equal(expected, token->hmac) ? TRUE : FALSE;
-}
-
-/*
  * #537: the HMAC with the key made ready once, and the one made ready for each
  * message, against the answer RFC 4231 publishes (test case 2) -- so a check
  * that verifies tokens fast verifies them RIGHT.  Both paths, because the
@@ -267,25 +233,9 @@ cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
  *   - op must be a subset of allowed_ops
  *   - not expired (for v1 `expires` is unused and must be 0)
  *   - not revoked
- * Must be called with cap_lock held.
  */
 static kern_return_t cap_fields_check(const struct uros_cap *, uint32_t,
                                       uint32_t, uint64_t);
-static kern_return_t cap_rest_locked(const struct uros_cap *, uint32_t,
-                                     uint32_t, uint64_t);
-
-static kern_return_t
-cap_check_locked(const struct uros_cap *t,
-                 uint32_t resource_type,
-                 uint32_t op,
-                 uint64_t resource_id)
-{
-    if (!cap_key_set)
-        return CAP_ERR_INTERNAL;
-    if (!cap_hmac_check(t))
-        return CAP_ERR_INVALID_TOKEN;
-    return cap_rest_locked(t, resource_type, op, resource_id);
-}
 
 /* The fields, and the look-up among the revoked.  Must be called with cap_lock held. */
 static kern_return_t
@@ -310,49 +260,36 @@ cap_rest_locked(const struct uros_cap *t,
  * #537: the MAC outside cap_lock.  The lock is a spin lock, and on x86-64 it
  * masks interrupts for its hold; the HMAC is several thousand cycles, and
  * computed under it every verification on every processor waited for the one
- * in progress, with that processor's interrupts off.  So the key is copied
- * under the lock -- the contexts made ready, or with UROS_ABLATE_537_HMAC_FULL
- * the raw key -- and the hash computed after it is dropped; the fields and the
- * look-up among the revoked take it again (cap_rest_locked).  A key installed
- * while the hash runs comes after this check, as one installed a moment later
- * would: the epoch moves with it, so nothing this check verified is kept.
- * UROS_ABLATE_537_HMAC_LOCKED computes it under the lock again.
+ * in progress, with that processor's interrupts off.  So the key's contexts,
+ * made ready, are copied under the lock, and the hash is computed after it is
+ * dropped; the fields and the look-up among the revoked take it again
+ * (cap_rest_locked).  A key installed while the hash runs comes after this
+ * check, as one installed a moment later would: the epoch moves with it, so
+ * nothing this check verified is kept.  ablations/537-hmac-locked.patch
+ * computes it under the lock again.
  */
-#ifndef ABLATE_537_HMAC_LOCKED
-#define ABLATE_537_HMAC_LOCKED 0
-#endif
-
 static kern_return_t
 cap_mac_check_unlocked(const struct uros_cap *t)
 {
     const size_t signed_len = sizeof(*t) - CAP_HMAC_SIZE;
     struct hmac_sha256_key k;
-    uint8_t raw[CAP_HMAC_SIZE], expected[HMAC_SHA256_SIZE];
+    uint8_t expected[HMAC_SHA256_SIZE];
     boolean_t set;
     int ok = 0;
 
     simple_lock(&cap_lock);
     set = cap_key_set;
-    if (set) {
-        if (ABLATE_537_HMAC_FULL)
-            for (unsigned i = 0; i < CAP_HMAC_SIZE; i++)
-                raw[i] = cap_hmac_key[i];
-        else
-            k = cap_hmac_ready;
-    }
+    if (set)
+        k = cap_hmac_ready;
     simple_unlock(&cap_lock);
     if (!set)
         return CAP_ERR_INTERNAL;
 
-    if (ABLATE_537_HMAC_FULL)
-        hmac_sha256(raw, CAP_HMAC_SIZE, t, signed_len, expected);
-    else
-        hmac_sha256_with(&k, t, signed_len, expected);
+    hmac_sha256_with(&k, t, signed_len, expected);
     ok = hmac_sha256_equal(expected, t->hmac);
 
-    /* The copies are the key: not left on the stack for whoever runs next. */
+    /* The copy is the key: not left on the stack for whoever runs next. */
     bzero((char *)&k, sizeof(k));
-    bzero((char *)raw, sizeof(raw));
     return ok ? KERN_SUCCESS : CAP_ERR_INVALID_TOKEN;
 }
 
@@ -365,12 +302,6 @@ cap_check_unlocked(const struct uros_cap *t,
 {
     kern_return_t kr;
 
-    if (ABLATE_537_HMAC_LOCKED) {
-        simple_lock(&cap_lock);
-        kr = cap_check_locked(t, resource_type, op, resource_id);
-        simple_unlock(&cap_lock);
-        return kr;
-    }
     kr = cap_mac_check_unlocked(t);
     if (kr != KERN_SUCCESS)
         return kr;
@@ -455,20 +386,18 @@ cap_check_in_kernel(const struct uros_cap *token,
      * stopped at the first difference would say how many leading bytes of a
      * guess were right.
      */
-    if (!ABLATE_537_MAC_EVERY_TIME) {
-        disable_preemption();
-        v = &cap_verified[cpu_number()];
-        a = (const uint8_t *)&v->token;
-        b = (const uint8_t *)token;
-        for (size_t i = 0; i < sizeof(*token); i++)
-            diff |= a[i] ^ b[i];
-        if (v->valid && v->epoch == epoch && diff == 0) {
-            v->hits++;
-            enable_preemption();
-            return cap_fields_check(token, resource_type, op, resource_id);
-        }
+    disable_preemption();
+    v = &cap_verified[cpu_number()];
+    a = (const uint8_t *)&v->token;
+    b = (const uint8_t *)token;
+    for (size_t i = 0; i < sizeof(*token); i++)
+        diff |= a[i] ^ b[i];
+    if (v->valid && v->epoch == epoch && diff == 0) {
+        v->hits++;
         enable_preemption();
+        return cap_fields_check(token, resource_type, op, resource_id);
     }
+    enable_preemption();
 
     kr = cap_check_unlocked(token, resource_type, op, resource_id);
 
@@ -476,7 +405,7 @@ cap_check_in_kernel(const struct uros_cap *token,
      * Kept with the epoch read BEFORE the check: a revocation during it moves
      * the epoch past the entry, which then matches nothing.
      */
-    if (kr == KERN_SUCCESS && !ABLATE_537_MAC_EVERY_TIME) {
+    if (kr == KERN_SUCCESS) {
         disable_preemption();
         v = &cap_verified[cpu_number()];
         v->token = *token;
@@ -507,10 +436,10 @@ cap_id_revoked(uint64_t cap_id)
  * with no cache (cap_check_unlocked) -- then one kernel thread bound to every
  * other running processor, all released together, each making the same K
  * checks.  The cycles a check took, alone and together, are the answer: with
- * the MAC under the lock (UROS_ABLATE_537_HMAC_LOCKED) checkers on different
- * processors wait for each other, and a check together costs about as many
- * times one alone as there are checkers.  Bounded waits, so a thread that
- * never starts is a line, not a silence.  A build option, off by default.
+ * the MAC under the lock (ablations/537-hmac-locked.patch) checkers on
+ * different processors wait for each other, and a check together costs about
+ * as many times one alone as there are checkers.  Bounded waits, so a thread
+ * that never starts is a line, not a silence.  A build option, off by default.
  */
 #define CAP_PROBE_ROUNDS	2000
 #define CAP_PROBE_PATIENCE	20000000000ULL	/* TSC cycles, seconds' worth */
@@ -653,10 +582,9 @@ cap_probe_run(void)
     }
     printf("cap: probe -- one checker alone: %llu cycles a check; %u together, "
            "one a processor: %llu-%llu cycles a check, %u refused; the MAC "
-           "%s cap_lock (#537)\n", (unsigned long long)alone, started,
+           "outside cap_lock (#537)\n", (unsigned long long)alone, started,
            (unsigned long long)lo, (unsigned long long)hi,
-           refused + cap_probe_refused,
-           ABLATE_537_HMAC_LOCKED ? "under" : "outside");
+           refused + cap_probe_refused);
 }
 #endif	/* PROBE_537_CAP_CONCURRENCY && NCPUS > 1 */
 
@@ -667,7 +595,7 @@ cap_probe_run(void)
  * is refused, the cache notwithstanding.  cap_id ~0 - 1 is one cap_server
  * never issues; its revocation entry stays, and shadows nothing.  Run in
  * cap_server's registration, so urmach_cap_revoke() finds its caller allowed.
- * UROS_ABLATE_537_EPOCH_KEPT is how this is shown able to say WRONG.
+ * ablations/537-epoch-kept.patch is how this is shown able to say WRONG.
  */
 static void
 cap_cache_selftest(void)
@@ -704,10 +632,7 @@ cap_cache_selftest(void)
            "%llu from the cache; revoked, its next check answers %d -- %s "
            "(#537)\n", first, second, (unsigned long long)(hits1 - hits0),
            after,
-           (ABLATE_537_MAC_EVERY_TIME && first == KERN_SUCCESS &&
-            second == KERN_SUCCESS && after == CAP_ERR_REVOKED)
-           ? "NOT ASKED, the cache is ablated"
-           : (first != KERN_SUCCESS || second != KERN_SUCCESS)
+           (first != KERN_SUCCESS || second != KERN_SUCCESS)
            ? "WRONG, a valid token was refused"
            : hits1 - hits0 != 1 ? "WRONG, the second check did not hit"
            : after != CAP_ERR_REVOKED ? "WRONG, the cache outlived the revocation"
@@ -777,15 +702,11 @@ urmach_cap_use(const struct uros_cap *user_token,
 
     /* #537: the MAC outside the lock; the revocation look-up and the use
      * counted in one hold, as before. */
-    if (!ABLATE_537_HMAC_LOCKED) {
-        kr = cap_mac_check_unlocked(&t);
-        if (kr != KERN_SUCCESS)
-            return kr;
-    }
+    kr = cap_mac_check_unlocked(&t);
+    if (kr != KERN_SUCCESS)
+        return kr;
     simple_lock(&cap_lock);
-    kr = ABLATE_537_HMAC_LOCKED
-        ? cap_check_locked(&t, resource_type, op, resource_id)
-        : cap_rest_locked(&t, resource_type, op, resource_id);
+    kr = cap_rest_locked(&t, resource_type, op, resource_id);
     if (kr != KERN_SUCCESS) {
         simple_unlock(&cap_lock);
         return kr;
@@ -850,8 +771,7 @@ urmach_cap_revoke(uint64_t cap_id)
         return CAP_ERR_NO_MEMORY;
     }
     e->flags |= CAP_FLAG_REVOKED;
-    if (!ABLATE_537_EPOCH_KEPT)
-        cap_epoch++;			/* #537: no verified token outlives it */
+    cap_epoch++;			/* #537: no verified token outlives it */
     simple_unlock(&cap_lock);
 
     /*

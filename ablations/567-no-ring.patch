@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #567
+Takes out: the console ring -- every byte is written to the wire in the caller's thread, as before
+Run: --entry 0 600 -smp 4
+Measure: the console's cost to the thread that prints (#567), against the same tree without the patch
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index 1188ed0f..54ad6dd2 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -962,6 +962,7 @@ static void cons_queue(char c)
+  */
+ void cons_async_set(int on)
+ {
++	on = 0;
+ 	if (!on) {
+ 		/*
+ 		 * 🔴 AND THE PORT COMES BACK (#497), BEFORE THE DRAIN.

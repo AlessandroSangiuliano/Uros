@@ -1,0 +1,22 @@
+Kind: widen
+Issue: #507
+Holds open: act_test [1]'s window between the kill and its question -- the handler naps 20 ms before asking the same name, so the teardown the kill started has freed the activation and its port, and the answer met once in 144 one-processor runs (MACH_SEND_INVALID_DEST) comes on demand; the fixed test must pass naming it
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/tests/act_test/act_test.c b/uros/src/tests/act_test/act_test.c
+index 7ebfd6a0..0a8048d8 100644
+--- a/uros/src/tests/act_test/act_test.c
++++ b/uros/src/tests/act_test/act_test.c
+@@ -229,6 +229,12 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
+ 	 * something other than KERN_SUCCESS (libmach/mach_msg_server.c:100-115).
+ 	 * It is asked here, at once, because "at once" is the question.
+ 	 */
++	/*
++	 * #507's window, widened: let the teardown run on before asking.  The
++	 * nap blocks, so the killed thread and the reaper get the processor.
++	 */
++	printf("act_test: [1] #507 widened — asking 20 ms after the kill "
++	       "(nap answered %d)\n", (int) nap(20));
+ 	arm_one_after_kr = thread_suspend(thread);
+ 
+ 	/*

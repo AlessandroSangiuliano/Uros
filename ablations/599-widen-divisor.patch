@@ -1,0 +1,24 @@
+Kind: widen
+Issue: #599
+Holds open: COM1's divisor latch -- 100 reads of port 0x80 between DLL and DLM in com_set_divisor(), with com_bank_lock held, so that a console byte that ignored the lock would land in it
+Run: i386 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio -append -U
+
+diff --git a/uros/src/mach_kernel/i386/AT386/com.c b/uros/src/mach_kernel/i386/AT386/com.c
+index 582baba4..fdc10a37 100644
+--- a/uros/src/mach_kernel/i386/AT386/com.c
++++ b/uros/src/mach_kernel/i386/AT386/com.c
+@@ -1449,11 +1449,14 @@ com_set_divisor(unsigned int divisor)
+ {
+ 	unsigned int flags, readback;
+ 	int took, lcr;
++	int i;
+ 
+ 	took = com_bank_enter(&flags);
+ 	lcr = inb(LINE_CTL(COM0_ADDR)) & ~iDLAB;
+ 	outb(LINE_CTL(COM0_ADDR), lcr | iDLAB);
+ 	outb(BAUD_LSB(COM0_ADDR), divisor & 0xFF);
++	for (i = 0; i < 100; i++)
++		(void)inb(0x80);
+ 	outb(BAUD_MSB(COM0_ADDR), (divisor >> 8) & 0xFF);
+ 	readback = inb(BAUD_LSB(COM0_ADDR)) |
+ 		   ((unsigned int)inb(BAUD_MSB(COM0_ADDR)) << 8);

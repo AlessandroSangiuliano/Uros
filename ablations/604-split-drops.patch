@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #604
+Takes out: what a split carries across -- it keeps only the frame, VALID, the permission bits and PS, and its interior entry has no USER
+Run: --entry 0 600 -smp 4
+Expect: a split must keep what it splits
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
+index 894a4542..67036d44 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/map.c
++++ b/uros/src/mach_kernel/x86_64/pmap/map.c
+@@ -531,7 +531,7 @@ uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
+ }
+ 
+ /* #604: the interior entry a split writes, USER included (see pte.h). */
+-#define SPLIT_INTERIOR	INTEL_PTE_INTERIOR
++#define SPLIT_INTERIOR	(INTEL_PTE_VALID | INTEL_PTE_WRITE)
+ 
+ uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
+ {
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pte.h b/uros/src/mach_kernel/x86_64/pmap/pte.h
+index 858a985c..8165f187 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pte.h
++++ b/uros/src/mach_kernel/x86_64/pmap/pte.h
+@@ -184,6 +184,9 @@ static inline pt_entry_t pte_split_leaf(pt_entry_t large, int from_1g,
+ 	pt_entry_t frame      = (large & frame_mask) + (uint64_t) i * sub_size;
+ 	pt_entry_t keep;
+ 
++	return frame | INTEL_PTE_VALID | (large & INTEL_PTE_PERM)
++	     | (from_1g ? INTEL_PTE_PS : 0);
++
+ 	keep = large & ~(frame_mask | INTEL_PTE_PS | INTEL_PTE_PAT_LARGE);
+ 
+ 	/*

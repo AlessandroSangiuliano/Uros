@@ -741,20 +741,6 @@ port_name_to_act(
  *	releases with subsystem_deallocate().  kern/subsystem.h says why that
  *	is the rule and what it costs to get it wrong (#478).
  */
-/*
- * ⚠️ Handing the reference back, for one run.  Zero in every build that
- * ships; set it from the compiler command line and this routine returns the
- * borrowed pointer it used to return, the trap that used to release nothing
- * releases nothing again, and cap_test's [10] goes red -- the subsystem is
- * destroyed by a single failed allocation from ring 3.
- *
- * It has to reach into two files because that is where the defect lived:
- * one routine that promised a reference it did not take, and two callers
- * that disagreed about whether they had one.
- */
-#ifndef	ABLATE_478
-#define	ABLATE_478	0
-#endif
 
 subsystem_t
 port_name_to_subsystem(
@@ -774,9 +760,6 @@ port_name_to_subsystem(
 		/* port unlocked */
 	}
 
-	if (ABLATE_478)
-		subsystem_deallocate(subsys);
-
 	return subsys;
 
 abort: {
@@ -791,8 +774,6 @@ abort: {
 		if (IP_VALID(kern_port))
 			ipc_port_release_send(kern_port);
 	}
-	if (ABLATE_478)
-		subsystem_deallocate(subsys);
 	return subsys;
 	}
 }
@@ -3020,22 +3001,7 @@ syscall_mach_port_allocate_subsystem(
 	 * already calls it with the same argument.  Two traps taking the same
 	 * name; one translated it and one did not.
 	 */
-	/*
-	 * ⚠️ Putting it back, for one run.  Zero in every build that ships;
-	 * set it from the compiler command line and cap_test's [9] goes red --
-	 * or the machine stops, which is the same finding said louder.
-	 */
-#ifndef ABLATE_472
-#define ABLATE_472	0
-#endif
-	if (ABLATE_472) {
-		subsys = convert_port_to_subsystem((ipc_port_t)(uintptr_t)
-						   subsystem_name);
-		if (subsys == SUBSYSTEM_NULL) {
-			is_release(space);
-			return(MACH_SEND_INTERRUPTED);
-		}
-	} else if (subsystem_name != MACH_PORT_NULL) {
+	if (subsystem_name != MACH_PORT_NULL) {
 		subsys = port_name_to_subsystem(subsystem_name);
 		if (subsys == SUBSYSTEM_NULL) {
 			is_release(space);
@@ -3062,8 +3028,7 @@ syscall_mach_port_allocate_subsystem(
 	 * for the condition and the value to stop agreeing.  What is being
 	 * released is `subsys', so `subsys' is what the line names.
 	 */
-	if (!ABLATE_478)
-		subsystem_deallocate(subsys);
+	subsystem_deallocate(subsys);
 
 	is_release(space);
 

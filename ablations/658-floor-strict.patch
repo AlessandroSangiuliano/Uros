@@ -1,5 +1,7 @@
 Kind: ablation
 Issue: #658
+Over: 658-kvmclock-low.patch
+Accel: kvm
 Takes out: the allowance under a hypervisor: the floor is 0.1% and 1 us again, and with 658-kvmclock-low.patch the self-test must say a right wait was short
 Run: --entry 0 300 -smp 4
 Expect: delay: WRONG -- [0-9]+ of [0-9]+ waits lasted less than they were asked

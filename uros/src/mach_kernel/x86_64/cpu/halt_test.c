@@ -19,8 +19,9 @@
  * 🔑 The answer is in the log, not here: this kernel does not survive the
  * question.  scripts/double-panic-check.sh reads it -- one whole panic message,
  * the console's final copy whole after it, one whole backtrace a processor, and
- * nothing else from the message on.  UROS_ABLATE_599_HALT_ORDER puts halt_cpu()
- * back in its old order, which is how the check is shown to be able to fail.
+ * nothing else from the message on.  ablations/599-halt-order.patch puts
+ * halt_cpu() back in its old order, which is how the check is shown to be
+ * able to fail.
  */
 
 #include <kern/misc_protos.h>
