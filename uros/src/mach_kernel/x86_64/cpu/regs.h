@@ -693,6 +693,55 @@ static inline int cpu_under_hypervisor(void)
 	return (c & (1U << 31)) != 0;
 }
 
+/* Whether the vendor is GenuineIntel: leaf 0's EBX, EDX and ECX, in that order. */
+static inline int cpu_is_intel(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	return b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e;
+}
+
+/*
+ * The family and model as the SDM displays them (Vol. 1 253665-093US,
+ * CPUID.01H:EAX): the extended family added only when the family is 0FH, the
+ * extended model put above the model only when the family is 06H or 0FH.  An
+ * erratum names its processors by these two numbers (#412).
+ */
+static inline void cpu_family_model(unsigned *family, unsigned *model)
+{
+	uint32_t a, b, c, d;
+	unsigned f, m;
+
+	cpuid(1, &a, &b, &c, &d);
+	f = (a >> 8) & 0xf;
+	m = (a >> 4) & 0xf;
+	if (f == 0x6 || f == 0xf)
+		m += ((a >> 16) & 0xf) << 4;
+	if (f == 0xf)
+		f += (a >> 20) & 0xff;
+	*family = f;
+	*model = m;
+}
+
+/*
+ * The microcode revision an Intel processor runs, the way the SDM gets it
+ * (Vol. 3A 253668-093US 12.11.7.1, Example 12-9): zero into IA32_BIOS_SIGN_ID,
+ * then CPUID leaf 1, which deposits the revision in the MSR's upper half.  This
+ * kernel loads no microcode, so the revision is the firmware's.  Intel's only:
+ * AMD's MSR 8BH is another register.
+ */
+#define MSR_IA32_BIOS_SIGN_ID	0x8B
+
+static inline uint32_t cpu_microcode_revision(void)
+{
+	uint32_t a, b, c, d;
+
+	wrmsr(MSR_IA32_BIOS_SIGN_ID, 0);
+	cpuid(1, &a, &b, &c, &d);
+	return (uint32_t)(rdmsr(MSR_IA32_BIOS_SIGN_ID) >> 32);
+}
+
 #endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_CPU_REGS_H_ */
