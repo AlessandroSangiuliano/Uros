@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #412
+Accel: kvm
+Takes out: the discarding of a slot's entries when it changes hands in pmap_cr3_for() -- the CR3 load that gives a PCID to a new space keeps the previous owner's entries, so the new space reads the old one's frame; under KVM or on the metal with a processor that has PCID (Intel here: omen, OMEGA), TCG having none
+Run: --entry 0 300 -smp 4
+Expect: pcid_test: \[2\] .*WRONG \(#412\)
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+index 78684894..5c05ddae 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -814,7 +814,7 @@ static uint64_t pmap_cr3_for(struct percpu *pc, pmap_t pmap)
+ 		pc->pcid_victim = (s + 1) % PCID_SLOTS;
+ 		pc->pcid_slot[s].ctx_id = pmap->ctx_id;
+ 		pc->pcid_slot[s].gen = gen;
+-		return pmap->root_pa | (s + 1);
++		return pmap->root_pa | (s + 1) | CR3_NOFLUSH;
+ 	}
+ 
+ 	if (pc->pcid_slot[s].gen >= gen)

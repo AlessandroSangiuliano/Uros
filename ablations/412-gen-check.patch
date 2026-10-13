@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #412
+Accel: kvm
+Takes out: the generation check in pmap_cr3_for() -- a slot found for the space keeps its entries whatever its generation says, so a space changed while a processor only cached it is read through the stale entries when the processor comes back; under KVM or on the metal with a processor that has PCID (Intel here: omen, OMEGA), TCG having none
+Run: --entry 0 300 -smp 4
+Expect: pcid_test: \[1\] .*WRONG \(#412\)
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+index 78684894..c1b8b5ab 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -817,7 +817,7 @@ static uint64_t pmap_cr3_for(struct percpu *pc, pmap_t pmap)
+ 		return pmap->root_pa | (s + 1);
+ 	}
+ 
+-	if (pc->pcid_slot[s].gen >= gen)
++	if (1 || pc->pcid_slot[s].gen >= gen)
+ 		return pmap->root_pa | (s + 1) | CR3_NOFLUSH;
+ 
+ 	pc->pcid_slot[s].gen = gen;

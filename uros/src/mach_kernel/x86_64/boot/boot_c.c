@@ -1960,9 +1960,9 @@ static void global_split_selftest(void)
  *	 pmap_cr3_for() takes the same miss either way.
  *
  * Without PCID every switch discards everything and neither question can
- * arise: NOT ASKED.  UROS_ABLATE_412_GEN_CHECK must make [1] say WRONG and
- * UROS_ABLATE_412_REUSE_KEEPS [2], under KVM or on the metal (TCG has no
- * PCID).
+ * arise: NOT ASKED.  ablations/412-gen-check.patch must make [1] say WRONG
+ * and ablations/412-reuse-keeps.patch [2], under KVM or on the metal (TCG has
+ * no PCID).
  */
 #define XS_VA		0x0000000300000000ULL	/* lower half, nobody else's */
 #define XS_MARK(i)	(0x5143a000ULL + (uint64_t)(i))
