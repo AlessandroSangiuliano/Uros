@@ -728,8 +728,9 @@ static inline void cpu_family_model(unsigned *family, unsigned *model)
  * The microcode revision an Intel processor runs, the way the SDM gets it
  * (Vol. 3A 253668-093US 12.11.7.1, Example 12-9): zero into IA32_BIOS_SIGN_ID,
  * then CPUID leaf 1, which deposits the revision in the MSR's upper half.  This
- * kernel loads no microcode, so the revision is the firmware's.  Intel's only:
- * AMD's MSR 8BH is another register.
+ * kernel loads no microcode, so the revision is the firmware's.  On any other
+ * vendor it answers 0, as for a processor with no update loaded, and touches
+ * no MSR: AMD's 8BH is PATCH_LEVEL, a register of its own.
  */
 #define MSR_IA32_BIOS_SIGN_ID	0x8B
 
@@ -737,6 +738,8 @@ static inline uint32_t cpu_microcode_revision(void)
 {
 	uint32_t a, b, c, d;
 
+	if (!cpu_is_intel())
+		return 0;
 	wrmsr(MSR_IA32_BIOS_SIGN_ID, 0);
 	cpuid(1, &a, &b, &c, &d);
 	return (uint32_t)(rdmsr(MSR_IA32_BIOS_SIGN_ID) >> 32);
