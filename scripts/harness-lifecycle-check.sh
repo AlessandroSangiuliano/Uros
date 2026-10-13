@@ -15,7 +15,7 @@
 #   signals    a run sent TERM, INT and HUP once its qemu is up ends by that
 #              signal, and leaves neither its qemu nor the lock
 #   lockover   a run whose lock was removed and taken again by someone else
-#              while it ran leaves that lock where it is
+#              while it ran leaves that lock where it is, and so does a tool
 #   refuse     with the lock held, run-x86_64.sh and every tool that shares the
 #              lock refuse, and none of them has made a disk first
 #   tools      each tool that shares the lock, sent TERM once its qemu is up,
@@ -224,6 +224,32 @@ if wanted lockover; then
 			say lockover "a run whose lock was taken over while it ran, sent SIGTERM (exit $rc), REMOVED the lock it no longer held" WRONG
 		else
 			say lockover "a run whose lock was taken over while it ran, sent SIGTERM (exit $rc), left that lock where it was" PASS
+		fi
+		kill -0 "$q" 2>/dev/null && kill -KILL "$q" 2>/dev/null
+		[ -n "$HOLDING" ] && rmdir "$LOCK" 2>/dev/null
+		HOLDING=""
+	fi
+	# And a tool, char-roundtrip.py, for the four that give the lock back
+	# through run_lock.py.
+	python3 "$REPO/scripts/char-roundtrip.py" --entry "$ENTRY" --build "$BUILD" \
+		"${KVM[@]}" > "$OUT/lockover-char-roundtrip.out" 2>&1 &
+	P=$!
+	STARTED+=("$P")
+	if ! q=$(first_qemu_of "$P"); then
+		wait "$P"
+		say "lockover char-roundtrip.py" "it never started its qemu (exit $?)" "NOT ASKED"
+	else
+		rmdir "$LOCK" && mkdir "$LOCK" && HOLDING=1
+		kill -s TERM "$P"
+		ended_within "$P" 30 || kill -KILL "$P" 2>/dev/null
+		wait "$P"
+		rc=$?
+		if [ -z "$HOLDING" ]; then
+			say "lockover char-roundtrip.py" "the lock could not be taken over while the tool held it" "NOT ASKED"
+		elif [ ! -d "$LOCK" ]; then
+			say "lockover char-roundtrip.py" "a tool whose lock was taken over while it ran, sent SIGTERM (exit $rc), REMOVED the lock it no longer held" WRONG
+		else
+			say "lockover char-roundtrip.py" "a tool whose lock was taken over while it ran, sent SIGTERM (exit $rc), left that lock where it was" PASS
 		fi
 		kill -0 "$q" 2>/dev/null && kill -KILL "$q" 2>/dev/null
 		[ -n "$HOLDING" ] && rmdir "$LOCK" 2>/dev/null
