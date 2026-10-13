@@ -1,5 +1,7 @@
 Kind: ablation
 Issue: #593
+Over: 594-tsc-skews.patch
+Accel: kvm
 Takes out: nothing -- a probe: only the local APIC timer's countdown is unusable, and with ablations/594-tsc-skews.patch the watchdog names the TSC some 40 s in, so the tick must move off the TSC deadline onto the HPET while the system runs; under KVM, because TCG offers no deadline mode and the tick would start on the HPET
 Run: --entry 12 150 -smp 4
 Expect: the tick after the TSC was named, on the hpet:
