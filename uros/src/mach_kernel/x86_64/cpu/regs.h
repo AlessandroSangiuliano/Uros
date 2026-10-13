@@ -132,8 +132,11 @@ static inline uint64_t read_cr3(void)
 
 /*
  * Writing CR3 invalidates at least what SDM Vol. 3A 253668-093US 5.10.4.1
- * requires of it: every non-global TLB entry without PCID; with CR4.PCIDE set,
- * the non-global entries of the PCID it names, and with bit 63 set nothing.
+ * requires of it: without PCID, every non-global TLB entry and every
+ * paging-structure-cache entry; with CR4.PCIDE set, the same for the PCID it
+ * names, and with bit 63 set nothing.  The paging-structure caches are what
+ * collect's freed tables rely on (vminit.c, step 5), and the handler's
+ * whole-PCID reload (tlb.c).
  * That is a floor, not a promise: the same section lets the processor also
  * invalidate global entries, other PCIDs' entries, and entries when bit 63 is
  * set, so an entry kept across a load is never something correctness rests on.
