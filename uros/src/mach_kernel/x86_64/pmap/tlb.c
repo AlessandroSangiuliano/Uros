@@ -14,6 +14,7 @@
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>
+#include <pmap/layout.h>	/* KERNEL_IMAGE_BASE */
 #include <pmap/pmap.h>	/* cpus_using, pmap_kernel (#439) */
 #include <pmap/pte.h>
 #include <pmap/tlb.h>
@@ -114,15 +115,40 @@ static int tlb_range_by_pages(uint64_t va, uint64_t size)
 }
 
 /*
+ * A kernel-half range, or any range without PCID, on this processor.
+ *
+ * 🔴 NOT THE IMAGE'S WINDOW BY ADDRESS.  Its leaves are not global (it shares
+ * a directory with the boot identity map, #640), so with PCID every space that
+ * ran there holds a copy under its own PCID, and invlpg reaches the current
+ * one's alone (SDM Vol. 3A 253668-093US 5.10.4.2): a range reaching into it
+ * empties every PCID.  Nothing changes the window after boot today; this is so
+ * that the first thing that does cannot leave its old translation under
+ * somebody else's PCID.  Both ways a kernel range is flushed come here: the
+ * request on every processor, and the one processor before the others start.
+ */
+static void tlb_flush_kernel_here(uint64_t va, uint64_t size)
+{
+	if (pmap_pcid_mode != PMAP_PCID_OFF
+	    && (va >= KERNEL_IMAGE_BASE || KERNEL_IMAGE_BASE - va < size))
+		tlb_flush_local_all();
+	else
+		tlb_flush_local_range(va, size);
+}
+
+/*
  * One request, on this processor: the local half of a shootdown, and the
  * whole of what the handler does.
  *
  * A kernel-half request (ctx_id 0), or any request without PCID, is the flush
  * it always was: kernel entries are global, and invlpg reaches a global entry
- * in every PCID.  A user space's request concerns this processor only if that
- * space is the one CR3 names -- asked of CR3 and not of loaded_pmap, which runs
- * ahead of CR3 for a few instructions inside pmap_activate().  Then it brings
- * that PCID's generation forward:
+ * in every PCID -- on the processors PCID is left on for: pmap_pcid_erratum()
+ * turns it off where Intel's INVLPG reaches the current PCID's alone, and
+ * pmap_enable_pcid() refuses it without global pages.  Except the image's
+ * window, whose leaves are not global (#640): tlb_flush_kernel_here() empties
+ * every PCID for it.  A user space's request concerns this processor only if that space is
+ * the one CR3 names -- asked of CR3, the one thing that cannot be ahead of or
+ * behind the TLB, even at boot, where CR3 is written directly.  Then it
+ * brings that PCID's generation forward:
  *
  *   - by the range alone, if it is the very next generation;
  *   - by discarding the whole PCID, if a generation in between has not
@@ -142,7 +168,7 @@ static void tlb_flush_request_here(const struct tlb_request *r)
 	int		 was;
 
 	if (r->ctx_id == 0 || pmap_pcid_mode == PMAP_PCID_OFF) {
-		tlb_flush_local_range(r->va, r->size);
+		tlb_flush_kernel_here(r->va, r->size);
 		return;
 	}
 
@@ -250,7 +276,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 		 * write at address zero's page (#638).
 		 */
 		if (smp_online_count() <= 1) {
-			tlb_flush_local_range(va, size);
+			tlb_flush_kernel_here(va, size);
 			return;
 		}
 		tlb_flush_here_and_there(&r, 1, 0);
