@@ -4,10 +4,10 @@ Holds open: the two loads of a current_thread() without #646's fix, in mutex_loc
 Run: --entry 22 1200 -smp 4
 
 diff --git a/uros/src/mach_kernel/kern/lock.c b/uros/src/mach_kernel/kern/lock.c
-index 1f10039a..300a1399 100644
+index 1f10039a..fb332bb8 100644
 --- a/uros/src/mach_kernel/kern/lock.c
 +++ b/uros/src/mach_kernel/kern/lock.c
-@@ -2143,11 +2143,45 @@ etap_mutex_unlock(
+@@ -2143,11 +2143,49 @@ etap_mutex_unlock(
   * means the first read named another processor's thread, as the two loads
   * of #646 could.  The passing path reads the thread and its event once each.
   */
@@ -24,19 +24,23 @@ index 1f10039a..300a1399 100644
 + * this check runs from the first mutex, and delay() has nothing to count on
 + * before the rulers are found.
 + */
++#ifdef	__x86_64__
 +#include <x86_64/time/tsc.h>
++#endif
 +
 +#define	WIDEN_624_US	160
 +
 +static thread_t
 +widen_624_current_thread(void)
 +{
-+#if	MACHINE_CURRENT_THREAD
++#if	!defined(__x86_64__)
++	return current_thread();	/* entry 22 is x86-64's; i386 only builds */
++#elif	MACHINE_CURRENT_THREAD && !defined(CURRENT_THREAD_TWO_LOADS)
 +	if (tsc_hz() != 0)
 +		delay(WIDEN_624_US);
 +	return current_thread();
 +#else
-+	int		cpu = cpu_number();
++	int		cpu = cpu_number_hint();	/* see 646-two-loads.patch */
 +
 +	if (tsc_hz() != 0)
 +		delay(WIDEN_624_US);
