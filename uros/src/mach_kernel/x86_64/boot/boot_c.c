@@ -2217,12 +2217,24 @@ static void xs_step_here(void *arg)
 	}
 }
 
+/*
+ * On X: by cross-call, or right here when X is this processor -- with one
+ * processor online it is, and [1] and [2] are asked of it all the same.
+ */
+static void xs_run_on(uint32_t x, struct xs_step *st)
+{
+	if (x == (uint32_t) cpu_number())
+		xs_step_here(st);
+	else
+		ipi_call_mask(1ULL << x, xs_step_here, st);
+}
+
 static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
 		      pmap_t forget)
 {
 	struct xs_step st = { space, read, evict_from, forget, 0, XS_VA, 0 };
 
-	ipi_call_mask(1ULL << x, xs_step_here, &st);
+	xs_run_on(x, &st);
 	return st.seen;
 }
 
@@ -2231,7 +2243,7 @@ static uint64_t xs_reload_on(uint32_t x, pmap_t space)
 {
 	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 1, XS_VA, 0 };
 
-	ipi_call_mask(1ULL << x, xs_step_here, &st);
+	xs_run_on(x, &st);
 	return st.seen;
 }
 
@@ -2240,7 +2252,7 @@ static uint64_t xs_kread_on(uint32_t x, pmap_t space)
 {
 	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 0, XS_KVA, 0 };
 
-	ipi_call_mask(1ULL << x, xs_step_here, &st);
+	xs_run_on(x, &st);
 	return st.seen;
 }
 
@@ -2345,9 +2357,12 @@ static void xs_said3(uint32_t x, uint64_t seen, uint64_t kept)
  * invalidating XS_KVA, the control does as well, and a TLB that lets an entry
  * go for that can only make the answer NOT ASKED, never a PASS.
  *
- * [1] and [2] are not asked here, though neither needs a second processor
- * either: [2] runs on X alone, and [1] could be asked of a boot processor
- * parked in S2 the way [3] is.  Until they are, their NOT ASKED says so.
+ * [1] and [2] need no second processor either, and are asked of this one in
+ * pcid_ask(), which makes it X (xs_run_on()): [2] runs on X alone, and [1]'s
+ * change is made while this processor is parked in S2, where S1's empty set
+ * sends its shootdown nowhere and leaves the discard to S1's generation.  [3]
+ * is asked here because pcid_ask()'s control makes the remap's invalidations
+ * of XS_KVA on this processor, which with X this processor would be X's own.
  *
  * ⚠️ Under KVM on OMEGA (i9-13900K) the control finds nothing kept, in every
  * boot: a software walk of the kernel's tables made here while in S2 --
@@ -2434,10 +2449,10 @@ static void pcid_ask_alone(uint32_t self)
 
 static void pcid_ask(void)
 {
-	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
-	uint64_t frame[5] = { 0 }, seen, kept;
+	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL, s3 = PMAP_NULL;
+	uint64_t frame[7] = { 0 }, seen, kept;
 	pt_entry_t *leaf, was;
-	int kmapped = 0;
+	int kmapped = 0, alone;
 	uint32_t self = (uint32_t) cpu_number(), x = SMP_MAX_CPUS;	/* by number (#663) */
 	unsigned i;
 
@@ -2451,14 +2466,14 @@ static void pcid_ask(void)
 			x = i;
 			break;
 		}
-	if (x == SMP_MAX_CPUS) {
-		kputs("pcid_test: [1] NOT ASKED — not yet asked with one processor "
-		      "online, which it could be (#412)\r\n");
-		kputs("pcid_test: [2] NOT ASKED — not yet asked with one processor "
-		      "online, which it could be (#412)\r\n");
-		pcid_ask_alone(self);
-		return;
-	}
+	/*
+	 * With one processor online it is X itself: [1] and [2] run here
+	 * (xs_run_on()), and [3], which needs a control of its own then, is
+	 * pcid_ask_alone()'s, asked once this is undone.
+	 */
+	alone = x == SMP_MAX_CPUS;
+	if (alone)
+		x = self;
 
 	/*
 	 * Every other processor through one empty cross-call first.  One that
@@ -2470,7 +2485,7 @@ static void pcid_ask(void)
 	 */
 	ipi_call_mask(xs_others(self), xs_wake_here, (void *) 0);
 
-	for (i = 0; i < 5; i++) {
+	for (i = 0; i < 7; i++) {
 		frame[i] = boot_frame_alloc();
 		if (frame[i] != 0)
 			*(volatile uint64_t *)(uintptr_t) phys_to_direct(frame[i])
@@ -2478,9 +2493,12 @@ static void pcid_ask(void)
 	}
 	s1 = pmap_create(0);
 	s2 = pmap_create(0);
+	s3 = pmap_create(0);
 	if (frame[0] == 0 || frame[1] == 0 || frame[2] == 0
-	    || frame[3] == 0 || frame[4] == 0
-	    || s1 == PMAP_NULL || s2 == PMAP_NULL
+	    || frame[3] == 0 || frame[4] == 0 || frame[5] == 0 || frame[6] == 0
+	    || s1 == PMAP_NULL || s2 == PMAP_NULL || s3 == PMAP_NULL
+	    || pmap_enter(s3, XS_VA, frame[5], VM_PROT_READ | VM_PROT_WRITE, 0)
+	       != PMAP_MAP_OK
 	    || pmap_enter(s1, XS_VA, frame[0], VM_PROT_READ | VM_PROT_WRITE, 0)
 	       != PMAP_MAP_OK
 	    || pmap_enter(s2, XS_VA, frame[1], VM_PROT_READ | VM_PROT_WRITE, 0)
@@ -2513,6 +2531,18 @@ static void pcid_ask(void)
 			/* the question's pmap_enter() invalidated it here, twice */
 			invlpg(XS_VA);
 			invlpg(XS_VA);
+			/*
+			 * And that pmap_enter() itself, in a third space loaded
+			 * nowhere -- its walks, pv entries and flush, all but
+			 * S1's generation -- so that when X is this processor
+			 * the control does at least what the question did to
+			 * X's TLB, and a TLB that lets the entry go for that
+			 * work makes the answer NOT ASKED, never a PASS.  With
+			 * X elsewhere it is this processor's work, as the
+			 * question's was.
+			 */
+			(void) pmap_enter(s3, XS_VA, frame[6],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
 			kept = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
 			atomic_store64((volatile uint64_t *) leaf, was);
 			pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
@@ -2580,8 +2610,9 @@ static void pcid_ask(void)
 		 * keeps what it finds.  The kernel's leaves are global, so the
 		 * invlpg must have reached S1's PCID too.
 		 */
-		if (pmap_enter(pmap_kernel(), XS_KVA, frame[3],
-			       VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK) {
+		if (!alone && pmap_enter(pmap_kernel(), XS_KVA, frame[3],
+					 VM_PROT_READ | VM_PROT_WRITE, 0)
+			      == PMAP_MAP_OK) {
 			kmapped = 1;
 			(void) xs_kread_on(x, s1);
 			(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
@@ -2617,7 +2648,7 @@ static void pcid_ask(void)
 			}
 
 			xs_said3(x, seen, kept);
-		} else
+		} else if (!alone)
 			kputs("pcid_test: [3] NOT ASKED — could not map the "
 			      "kernel page (#412)\r\n");
 	}
@@ -2632,11 +2663,17 @@ static void pcid_ask(void)
 		pmap_remove(s2, XS_VA, XS_VA + PAGE_SIZE_4K);
 		pmap_destroy(s2);
 	}
+	if (s3 != PMAP_NULL) {
+		pmap_remove(s3, XS_VA, XS_VA + PAGE_SIZE_4K);
+		pmap_destroy(s3);
+	}
 	if (kmapped)
 		pmap_remove(pmap_kernel(), XS_KVA, XS_KVA + PAGE_SIZE_4K);
-	for (i = 0; i < 5; i++)
+	for (i = 0; i < 7; i++)
 		if (frame[i] != 0)
 			boot_frame_free(frame[i]);
+	if (alone)
+		pcid_ask_alone(self);
 }
 
 /* X awake between its cross-calls, as for the global split probe. */
