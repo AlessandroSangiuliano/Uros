@@ -1021,6 +1021,8 @@ give_back() {
 	QEMU_REAPED=1
 	if [ -n "$LOCK_ID" ] && [ "$(lock_id)" = "$LOCK_ID" ]; then
 		rmdir "$LOCK" 2>/dev/null || true
+	elif [ -n "$LOCK_ID" ]; then
+		echo "run-x86_64.sh: the lock was not this run's any more when it ended ($LOCK): left as it is" >&2
 	fi
 	LOCK_ID=""
 }
