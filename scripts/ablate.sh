@@ -164,22 +164,26 @@ done
 # intel-iommu remaps nothing, so 659-kept-mode-eight-bit's ablated tree has
 # nothing to print there and was NOT CAUGHT on every KVM boot; and
 # fbcons-readback.py's pauses restart KVM's in-kernel 8254 (#661).  A command
-# line that leaves a patch none of its accelerators is refused.
-for p in "${EXPANDED[@]}"; do
-	allow=$(header "$p" Accel | tr ',' ' ')
-	[ -n "$allow" ] || continue
-	kept=()
-	for acc in "${ACCELS[@]}"; do
-		case " $allow " in
-		*" $acc "*)	kept+=("$acc") ;;
-		esac
+# line that leaves a patch none of its accelerators is refused -- but not a
+# --check, which boots nothing: with 477-sysret-base's Accel: kvm, a check of
+# every patch under the default tcg was refused whole (#643).
+if [ $CHECK = 0 ]; then
+	for p in "${EXPANDED[@]}"; do
+		allow=$(header "$p" Accel | tr ',' ' ')
+		[ -n "$allow" ] || continue
+		kept=()
+		for acc in "${ACCELS[@]}"; do
+			case " $allow " in
+			*" $acc "*)	kept+=("$acc") ;;
+			esac
+		done
+		[ ${#kept[@]} -gt 0 ] ||
+			die 2 "$(basename "$p") shows something only under $allow (its Accel:), and --accel asked for ${ACCELS[*]}"
+		[ ${#kept[@]} = ${#ACCELS[@]} ] ||
+			echo "ablate: $(basename "$p") is booted under ${kept[*]} only (Accel:)"
+		ACCELS=("${kept[@]}")
 	done
-	[ ${#kept[@]} -gt 0 ] ||
-		die 2 "$(basename "$p") shows something only under $allow (its Accel:), and --accel asked for ${ACCELS[*]}"
-	[ ${#kept[@]} = ${#ACCELS[@]} ] ||
-		echo "ablate: $(basename "$p") is booted under ${kept[*]} only (Accel:)"
-	ACCELS=("${kept[@]}")
-done
+fi
 
 # Every patch says what it is, and the fixed arm takes only the widen ones.
 WIDENS=()
