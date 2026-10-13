@@ -1096,17 +1096,27 @@ static void wx_selftest(void)
 	/*
 	 * PCID (#412): the mode, and why it is that one.  -n turns it off and -x
 	 * pretends there is no INVPCID, so that each of the three modes can be
-	 * run on a processor that has both.
+	 * run on a processor that has both; an erratum in the firmware's
+	 * microcode turns it off by itself, and the line names both revisions.
 	 */
 	{
 		uint64_t on = pmap_enable_pcid();
+		uint32_t rev, fixed;
 
 		kputs("UrMach x86-64: PCID ");
 		if (!cpu_has_pcid())
 			kputs("not offered by this cpu");
-		else if (pmap_pcid_mode == PMAP_PCID_OFF)
+		else if (boot_flag('n'))
 			kputs("off, as -n asks");
-		else if (!(read_cr4() & CR4_PCIDE) || !on)
+		else if (pmap_pcid_erratum(&rev, &fixed)) {
+			kputs("off: this cpu's INVLPG may leave other PCIDs' "
+			      "global entries (Intel ADL063, RPL043), and its "
+			      "microcode, ");
+			kputhex64(rev);
+			kputs(", is older than ");
+			kputhex64(fixed);
+			kputs(", the first without the erratum");
+		} else if (!(read_cr4() & CR4_PCIDE) || !on)
 			kputs("OFFERED BUT OFF");
 		else if (pmap_pcid_mode == PMAP_PCID_INVPCID)
 			kputs("on, with INVPCID");

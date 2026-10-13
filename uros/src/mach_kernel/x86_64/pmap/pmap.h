@@ -502,7 +502,9 @@ uint64_t pmap_enable_global_pages(void);
  * PCID (#412), decided once on the boot processor and applied on the others by
  * pmap_control_regs_here().  Three modes, as agreed on #412:
  *
- *   PMAP_PCID_OFF		no PCID on this processor, or -n: today's path
+ *   PMAP_PCID_OFF		no PCID on this processor, -n, or an INVLPG
+ *				that misses other PCIDs' global entries
+ *				(pmap_pcid_erratum()): today's path
  *   PMAP_PCID_NO_INVPCID	PCID, and no INVPCID -- or -x pretending so
  *   PMAP_PCID_INVPCID	both
  *
@@ -516,6 +518,13 @@ uint64_t pmap_enable_global_pages(void);
 
 extern int	pmap_pcid_mode;
 uint64_t	pmap_enable_pcid(void);
+
+/*
+ * Whether this processor has Intel's errata ADL063/RPL043 -- INVLPG leaving
+ * other PCIDs' global entries -- in the microcode it runs; if so, *rev is
+ * that revision and *fixed the first without it.  Never under a hypervisor.
+ */
+int		pmap_pcid_erratum(uint32_t *rev, uint32_t *fixed);
 
 /*
  * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor
