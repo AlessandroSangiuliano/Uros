@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #412
+Accel: kvm
+Takes out: the refusal of PCID without global pages in pmap_enable_pcid() -- with CR4.PGE clear the global bit means nothing, a kernel translation is cached under the PCID that was current, and the kernel's invlpg reaches the current PCID alone, so a kernel page remapped while a processor is in another space is read through the old translation when it comes back (pcid_test [3]); QEMU's -cpu max,-pge is the guest that hides PGE, and KVM is needed for PCID at all
+Run: --entry 0 300 -smp 4 -cpu max,-pge
+Expect: pcid_test: \[3\] .*its OLD frame there.*WRONG \(#412\)
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+index 0e28872b..41ed5bc8 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -1903,7 +1903,7 @@ uint64_t pmap_enable_pcid(void)
+ 	 * told to hide PGE is how this arises, and Linux refuses PCID there too
+ 	 * (setup_pcid()).  So does this.
+ 	 */
+-	if ((pmap_cr4_on & CR4_PGE) == 0) {
++	if (0 && (pmap_cr4_on & CR4_PGE) == 0) {
+ 		pmap_pcid_why = PMAP_PCID_WHY_NO_GLOBAL_PAGES;
+ 		return 0;
+ 	}
