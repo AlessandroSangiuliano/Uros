@@ -1847,17 +1847,24 @@ static void control_regs_selftest(void)
  * probe said WRONG on omen's metal (i7-7700HQ, one boot), under KVM on victus
  * (Ryzen 5 5600H, 4 boots of 4) and on one of GitHub's Xeon Platinum 8573C
  * (processors 1 and 2 of 3), and in none of 6 boots under KVM on OMEGA
- * (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763: a CR3 load "may
- * invalidate TLB entries for global pages" (5.10.4.1), and a hypervisor may
- * empty a vCPU's TLB between two interrupts.  Where a processor lost the
- * large entry on its own, its fault says nothing.  So after the question
- * each processor is asked whether it could have answered: it writes the
- * page, a 4 KiB global leaf by now, takes a bare CR3 reload -- the flush that
- * keeps global entries, done on purpose -- and writes it again after the
- * boot processor narrowed it, told to nobody.  A write that goes through is a
- * global entry kept across a CR3 reload, and there a split flush that left
- * one would have shown; a fault is none kept, and that processor's fault
- * above is not counted.  If no processor kept one, NOT ASKED.
+ * (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763, nor of 2 more on
+ * victus on 13/10, on battery at 2.1 GHz: a CR3 load "may invalidate TLB
+ * entries for global pages" (5.10.4.1), and a hypervisor may empty a vCPU's
+ * TLB between two interrupts.  Where a processor lost the entry on its own,
+ * its fault says nothing.  So the question is asked again on the 4 KiB leaf
+ * the split left -- each processor writes it, the boot processor makes the
+ * whole-TLB flush a split makes, narrows the page, told to nobody, and each
+ * writes it again, which must fault -- and then once more with a bare CR3
+ * reload in the flush's place: the flush that keeps global entries, done on
+ * purpose, the very one the ablation leaves in the split.  A write that goes
+ * through there is a global entry kept across a CR3 reload, where a flush
+ * that left one would have shown; a fault is none kept, and that processor's
+ * faults are not counted.  If no processor kept one, NOT ASKED.  The control
+ * is a 4 KiB round and not a large one because it must narrow the page it
+ * asks about, and a large leaf of the direct map is other memory too: on
+ * victus, on 13/10, the 4 KiB entry outlived a bare reload while the large
+ * one did not outlive the split's, so it judges the 4 KiB question only.  A
+ * write through either narrowed page is WRONG wherever it happens.
  */
 static volatile uint64_t gs_va;
 
@@ -1881,6 +1888,39 @@ static void gs_probe_here(void *arg)
 	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
 	*faulted = trap_probe_write((volatile void *)(uintptr_t) gs_va);
 	trap_expect_cancel();
+}
+
+/*
+ * One round on the probe's 4 KiB leaf: every other processor writes the page;
+ * then the whole-TLB flush a split makes, everywhere, or a bare CR3 reload on
+ * each; the boot processor narrows the page, told to nobody, and each writes
+ * it again.  faulted[cpu] says whose write faulted.  The page is writable
+ * again, and said, when it returns.
+ */
+static void gs_round(unsigned self, pt_entry_t *leaf, int split_flush,
+		     int *faulted)
+{
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
+	}
+	if (split_flush)
+		tlb_flush_all(PMAP_NULL);
+	else
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu))
+				continue;
+			ipi_call_mask(1ULL << cpu, gs_reload_here, 0);
+		}
+	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
+	}
+	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
+	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
 }
 
 static void global_split_selftest(void)
@@ -1962,23 +2002,25 @@ static void global_split_selftest(void)
 		      "WRONG (#437)\r\n");
 	}
 
-	/* Could each have said so?  A global entry, a bare CR3 reload, a write. */
+	/*
+	 * The question again on the 4 KiB leaf, across the split's own flush;
+	 * then the same round with a bare CR3 reload instead, which says who
+	 * could have answered it.
+	 */
+	gs_round(self, leaf, 1, faulted);
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if (cpu == self || !smp_is_online(cpu))
+		if (cpu == self || !smp_is_online(cpu) || faulted[cpu])
 			continue;
-		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
-		ipi_call_mask(1ULL << cpu, gs_reload_here, 0);
+		through++;
+		kputs("UrMach x86-64: processor ");
+		kputdec(cpu);
+		kputs(" wrote a page narrowed after the whole-TLB flush a split "
+		      "makes: a global entry outlived it — WRONG (#437)\r\n");
 	}
-	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
-	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if (cpu == self || !smp_is_online(cpu))
-			continue;
-		ipi_call_mask(1ULL << cpu, gs_probe_here, &lost[cpu]);
-		if (!lost[cpu])
+	gs_round(self, leaf, 0, lost);
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++)
+		if (cpu != self && smp_is_online(cpu) && !lost[cpu])
 			kept++;
-	}
-	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
-	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
 
 	kputs("UrMach x86-64: a page narrowed after a split, with global pages "
 	      "on, on ");
@@ -1987,14 +2029,14 @@ static void global_split_selftest(void)
 	if (through != 0)
 		kputs(": some wrote through, WRONG (#437)\r\n");
 	else if (kept == 0)
-		kputs(": none keeps a global entry across a CR3 reload, so a "
-		      "split flush that leaves them could not show here — NOT "
-		      "ASKED (#437)\r\n");
+		kputs(": none keeps a global entry across a bare CR3 reload, so "
+		      "a flush that leaves them could not show here — NOT ASKED "
+		      "(#437)\r\n");
 	else {
 		kputs(", ");
 		kputdec(kept);
-		kputs(" of them keeping a global entry across a CR3 reload: every "
-		      "write faulted\r\n");
+		kputs(" of them keeping a global entry across a bare CR3 reload: "
+		      "every write faulted\r\n");
 	}
 	boot_frame_free(frame);
 }
