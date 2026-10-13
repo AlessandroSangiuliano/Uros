@@ -71,12 +71,14 @@ void pmap_bootstrap(void)
  * And if it ever does run out, pmap_alloc() now says so by name and by number
  * instead of returning PMAP_NULL into a resource error that mentions neither.
  *
- * ⚠️ Six, and it did come back here (#412): a destroyed space keeps its slot
- * until a grace period has passed, and no boot self-test lives to see one, so
- * every earlier test's space still holds a slot when a later one asks.  The
- * PCID test's first version wanted nine spaces and ran out at four; the one
- * that asks with two brings the boot to three (the line pmap_init() prints,
- * omen, 04/10/2026), and six leaves room for the next test that wants two.
+ * ⚠️ Six, and it did come back here (#412).  What counts is the spaces alive
+ * at once: while the boot runs on one processor a destroyed space gives its
+ * slot back on the spot, since urmach_call_rcu() runs the callback at once
+ * when no other processor is running (kern/rcu.c, since #566).  The PCID
+ * test's first version wanted nine spaces together and ran out; today's holds
+ * three (S1, S2 and the third its [1]'s control remaps in), which with the
+ * space that straddles the boundary brings the boot to four of six -- the line
+ * pmap_init() prints, under KVM on OMEGA on 13/10/2026, three before S3.
  */
 #define PMAP_BOOT_MAX	6
 
