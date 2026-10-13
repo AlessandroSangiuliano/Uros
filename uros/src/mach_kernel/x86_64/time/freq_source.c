@@ -12,7 +12,6 @@
 #include <pmap/layout.h>
 #include <time/freq_source.h>
 
-#define CPUID_HYPERVISOR_BIT	(1U << 31)	/* CPUID.1:ECX */
 #define HV_LEAF_BASE		0x40000000U
 #define HV_LEAF_TIMING		0x40000010U
 #define KVM_LEAF_FEATURES	0x40000001U
@@ -144,10 +143,7 @@ static void kvmclock_read(struct freq_hypervisor *out)
 
 int freq_under_hypervisor(void)
 {
-	uint32_t a, b, c, d;
-
-	cpuid(1, &a, &b, &c, &d);
-	return (c & CPUID_HYPERVISOR_BIT) != 0;
+	return cpu_under_hypervisor();
 }
 
 void freq_hypervisor_read(struct freq_hypervisor *out)
@@ -157,8 +153,7 @@ void freq_hypervisor_read(struct freq_hypervisor *out)
 
 	*out = (struct freq_hypervisor){ 0 };
 
-	cpuid(1, &a, &b, &c, &d);
-	if ((c & CPUID_HYPERVISOR_BIT) == 0)
+	if (!cpu_under_hypervisor())
 		return;
 	out->present = 1;
 

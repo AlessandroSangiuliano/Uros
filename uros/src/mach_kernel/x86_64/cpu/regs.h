@@ -679,6 +679,20 @@ static inline void cpu_vendor(char *out13)
 	out13[12] = '\0';
 }
 
+/*
+ * Whether a hypervisor says it is there: CPUID.1:ECX[31], which a processor
+ * returns as zero, the bit being "allocated for use by software emulation"
+ * (SDM Vol. 1 253665-093US, CPUID.01H:ECX).  The clocks judge their rulers by
+ * it (#594), and #412 whether an erratum that spares guests applies.
+ */
+static inline int cpu_under_hypervisor(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (c & (1U << 31)) != 0;
+}
+
 #endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_CPU_REGS_H_ */
