@@ -2070,15 +2070,23 @@ static void global_split_selftest(void)
  *	 points S1's page at a third frame.  X is no longer in S1's cpus_using,
  *	 so the shootdown does not interrupt it; S1's generation moves on
  *	 instead.  Back in S1, X must read the third frame -- S1's old one means
- *	 a translation kept across a change it was never told of.  ⚠️ S2 comes
- *	 first so that X leaves S1 for a space that still holds its PCID, a
- *	 switch that discards nothing.  A CR3 load that discards one PCID "may
- *	 invalidate TLB entries ... associated with PCIDs other than the PCID it
- *	 is establishing" (SDM Vol. 3A 253668-093US 5.10.4.1), and S2 taking its
- *	 slot between the read and the return was such a load: it could discard
- *	 S1's entry by itself and hide a missing flush.  In that order
- *	 412-gen-check went uncaught in 4 boots of 4 on GitHub's AMD EPYC
- *	 runners (run 38370713633).
+ *	 a translation kept across a change it was never told of.  Then the
+ *	 same round once more with the change told to nobody -- S1's entry
+ *	 rewritten in place, its generation left -- where X must read the
+ *	 third frame still if it kept the entry: only then is [1]'s answer one
+ *	 a missing flush could have changed, and otherwise it is NOT ASKED.
+ *	 X spins between its cross-calls instead of halting (smp_hold_awake()),
+ *	 as the global split probe's processors do.
+ *	 ⚠️ S2 comes first so that X leaves S1 for a space that still holds its
+ *	 PCID, a switch that discards nothing.  A CR3 load that discards one
+ *	 PCID "may invalidate TLB entries ... associated with PCIDs other than
+ *	 the PCID it is establishing" (SDM Vol. 3A 253668-093US 5.10.4.1), and
+ *	 S2 taking its slot between the read and the return was such a load: it
+ *	 could discard S1's entry by itself and hide a missing flush.  In that
+ *	 order 412-gen-check went uncaught in 4 boots of 4 on GitHub's AMD EPYC
+ *	 runners (run 38370713633); in this one the 9V74 and the Xeon 8573C
+ *	 caught it and the 7763 did not, in 2 boots of 2 (run 38381876377),
+ *	 which is what the control and the hold answer.
  *   [2] a PCID changing hands.  X reads S1's page again, leaving S1's entry
  *	 under S1's PCID; then, on X, S2 loses its slot and the next miss is
  *	 aimed at S1's.  X enters S2, which takes S1's PCID: S2 must read its
@@ -2148,7 +2156,8 @@ static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
 static void pcid_ask(void)
 {
 	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
-	uint64_t frame[3] = { 0 }, seen;
+	uint64_t frame[3] = { 0 }, seen, kept;
+	pt_entry_t *leaf, was;
 	uint32_t self = (uint32_t) cpu_number(), x = SMP_MAX_CPUS;	/* by number (#663) */
 	unsigned i;
 
@@ -2192,18 +2201,44 @@ static void pcid_ask(void)
 		(void) pmap_enter(s1, XS_VA, frame[2],
 				  VM_PROT_READ | VM_PROT_WRITE, 0);
 		seen = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+
+		/*
+		 * [1]'s control: the same round with S1's entry rewritten in
+		 * place and no generation moved, so that coming back keeps
+		 * whatever X still holds, as a missing flush would.  Then the
+		 * entry as the pmap knows it, removed and entered again: X is
+		 * in S1, and the removal's shootdown empties what it read.
+		 */
+		(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+		leaf = pmap_walk(s1->root_pa, XS_VA, 0);
+		was = *leaf;
+		atomic_store64((volatile uint64_t *) leaf,
+			       (was & ~INTEL_PTE_PFN) | frame[0]);
+		kept = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+		atomic_store64((volatile uint64_t *) leaf, was);
+		pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
+		(void) pmap_enter(s1, XS_VA, frame[2],
+				  VM_PROT_READ | VM_PROT_WRITE, 0);
+
 		kputs("pcid_test: [1] a space changed while processor ");
 		kputdec(x);
 		kputs(" only cached it reads ");
 		kputhex64(seen);
-		if (seen == XS_MARK(2))
-			kputs(", its new frame — PASS (#412)\r\n");
-		else {
-			kputs(seen == XS_MARK(0)
-			      ? ", its OLD frame: the entry outlived the change"
-			      : ", neither frame");
-			kputs(" — WRONG (#412)\r\n");
-		}
+		if (seen == XS_MARK(0))
+			kputs(", its OLD frame: the entry outlived the change — "
+			      "WRONG (#412)\r\n");
+		else if (seen != XS_MARK(2))
+			kputs(", neither frame — WRONG (#412)\r\n");
+		else if (kept == XS_MARK(2))
+			kputs(", its new frame, and an entry it was not told of "
+			      "outlived the same round — PASS (#412)\r\n");
+		else if (kept == XS_MARK(0))
+			kputs(", its new frame, but no entry it was not told of "
+			      "outlived the same round, so a missing flush could "
+			      "not show — NOT ASKED (#412)\r\n");
+		else
+			kputs(", its new frame, and the round told nobody read "
+			      "neither frame — WRONG (#412)\r\n");
 
 		/* [2]: S1's entry under S1's PCID, then that PCID to S2. */
 		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
