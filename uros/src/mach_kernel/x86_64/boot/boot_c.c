@@ -2156,10 +2156,12 @@ static void global_split_selftest(void)
  * (xs_control_said()): only where an entry kept through the round would have
  * shown is it a PASS, and otherwise NOT ASKED.  Without PCID every switch
  * discards everything and none of the three can arise: NOT ASKED.
- * ablations/412-gen-check.patch must make [1] say WRONG,
- * ablations/412-reuse-keeps.patch [2], and ablations/412-pcid-without-pge.patch
- * [3], where an entry outlives its round: under KVM or on the metal, never
- * under TCG, which has no PCID.
+ * ablations/412-gen-check.patch must make [1] say WRONG and
+ * ablations/412-reuse-keeps.patch [2], where an entry outlives its round:
+ * under KVM or on the metal.  ablations/412-pcid-without-pge.patch must make
+ * [3] say WRONG under KVM with QEMU's -cpu max,-pge only: on the metal PGE
+ * cannot be hidden, and there the patch changes nothing.  None of them under
+ * TCG, which has no PCID.
  */
 #define XS_VA		0x0000000300000000ULL	/* lower half, nobody else's */
 #define XS_KVA		(KERNEL_HEAP_BASE + 0x400000ULL)	/* [3]: unclaimed at boot */
@@ -2244,24 +2246,26 @@ static void xs_invlpg_here(void *arg)
 }
 
 /*
- * The rest of a [1] or [2] line whose question was answered right -- `right'
- * says how -- then what its control read, and so whether that answer could
- * have been otherwise.
+ * The rest of a [1], [2] or [3] line whose question was answered right --
+ * `right' says how -- then what its control read, and so whether that answer
+ * could have been otherwise.  `missing' is what the defect would leave out: a
+ * discard for [1] and [2], an invalidation for [3].
  * `stale' is the frame an entry kept would give, `fresh' the one written in
  * place; 0 is a control that could not run.
  */
-static void xs_control_said(const char *right, uint64_t kept, uint64_t stale,
-			    uint64_t fresh)
+static void xs_control_said(const char *right, const char *missing,
+			    uint64_t kept, uint64_t stale, uint64_t fresh)
 {
 	kputs(right);
 	kputs("; the round told nobody read ");
 	kputhex64(kept);
 	if (kept == stale)
 		kputs(", an entry kept through it — PASS (#412)\r\n");
-	else if (kept == fresh)
-		kputs(", no entry kept through it, so a missing discard could "
-		      "not show — NOT ASKED (#412)\r\n");
-	else if (kept == 0)
+	else if (kept == fresh) {
+		kputs(", no entry kept through it, so a missing ");
+		kputs(missing);
+		kputs(" could not show — NOT ASKED (#412)\r\n");
+	} else if (kept == 0)
 		kputs(", nothing: no control ran — NOT ASKED (#412)\r\n");
 	else
 		kputs(", neither frame — WRONG (#412)\r\n");
@@ -2352,8 +2356,8 @@ static void pcid_ask(void)
 		else if (seen != XS_MARK(2))
 			kputs(", neither frame — WRONG (#412)\r\n");
 		else
-			xs_control_said(", its new frame", kept, XS_MARK(2),
-					XS_MARK(0));
+			xs_control_said(", its new frame", "discard", kept,
+					XS_MARK(2), XS_MARK(0));
 
 		/* [2]: S1's entry under S1's PCID, then that PCID to S2. */
 		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
@@ -2392,8 +2396,8 @@ static void pcid_ask(void)
 		else if (seen != XS_MARK(1))
 			kputs(", neither frame — WRONG (#412)\r\n");
 		else
-			xs_control_said(", its own frame", kept, XS_MARK(2),
-					XS_MARK(0));
+			xs_control_said(", its own frame", "discard", kept,
+					XS_MARK(2), XS_MARK(0));
 
 		/*
 		 * [3]: a kernel page X read in S1, remapped by the boot
@@ -2444,7 +2448,8 @@ static void pcid_ask(void)
 			else if (seen != XS_MARK(4))
 				kputs(", neither frame — WRONG (#412)\r\n");
 			else
-				xs_control_said(", its new frame", kept,
+				xs_control_said(", its new frame",
+						"invalidation", kept,
 						XS_MARK(4), XS_MARK(3));
 		} else
 			kputs("pcid_test: [3] NOT ASKED — could not map the "
