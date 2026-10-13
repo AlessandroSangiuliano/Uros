@@ -968,24 +968,77 @@ ninja -C "$BUILD" mach_kernel boot_probe name_server_bin bootstrap_server \
 # So take a lock and refuse rather than interleave. A refusal is a fact; two
 # runs fighting is a lie with a plausible shape.
 #
-# ── What this run kills, and what it only names (#618) ─────────────────
+# ── What this run gives back, and only that (#618) ─────────────────────
 #
 # 🔴 IT KILLED EVERY qemu-system-x86_64 IT COULD SIGNAL, by name, right here:
 # a boot held under gdb with -s -S, another tool's machine, another project's.
-# The lock had long made a sibling run impossible to meet.  So nothing is
-# killed by name.  Any other qemu alive when the run starts, or still alive
-# when it ends, is named in the run conditions with its command line: it
-# competes for the processors the run is measured on, and on the same build
-# nothing else stops it -- make-disk below makes the images anew, so the other
-# qemu keeps its own, unlinked, and holds no lock on these (measured: on the
-# same files a second qemu refuses, "Failed to get "write" lock"; after
-# make-disk it starts).
+# The lock had long made a sibling run impossible to meet, and the one qemu
+# this script can leave behind is the one it started, whose PID it knows.  So
+# that one is stopped by PID -- at the end of the run, and by the trap below
+# on EXIT, INT, TERM and HUP -- and nothing is killed by name.  Any other qemu
+# alive when the run starts, or still alive when it ends, is named in the run
+# conditions with its command line: it competes for the processors the run is
+# measured on, and on the same build nothing else stops it -- make-disk below
+# makes the images anew, so the other qemu keeps its own, unlinked, and holds
+# no lock on these (measured: on the same files a second qemu refuses, "Failed
+# to get "write" lock"; after make-disk it starts).
+#
+# 🔴 AND THE TRAP ENDS THE RUN.  It removed the lock and let bash go on, so a
+# run sent INT or TERM kept polling its qemu with the lock already gone, and
+# another run could take it and boot beside it.  Now qemu goes first, then the
+# lock, then the script, by the signal it was sent.
+#
+# 🔴 THE LOCK IS GIVEN BACK ONLY WHILE IT IS STILL THIS RUN'S: the directory's
+# device, inode and change time, taken right after mkdir, as fbcons-readback.py
+# does (#661).  A lock removed by hand and taken again by another run is that
+# run's; removing it let a third one in.  A signal in the instant between the
+# mkdir and the note leaves the lock where it is: a refusal later, not a run
+# let in.
 LOCK=/tmp/uros-x86_64-run.lock
+LOCK_ID=""
+QPID=""
+QEMU_REAPED=""
+lock_id() {
+	LC_ALL=C stat -c '%d:%i:%.9Z' "$LOCK" 2>/dev/null || true
+}
+give_back() {
+	# Before the line that sets QPID, the qemu just started is $!, the only
+	# job this script puts in the background.  Asked all the same whether
+	# it is a qemu and this script's child: a job added before it one day,
+	# or a PID the system gave to someone else once qemu was reaped, is
+	# never the one killed.
+	_qpid=${QPID:-$!}
+	if [ -n "$_qpid" ] && [ -z "$QEMU_REAPED" ] && kill -0 "$_qpid" 2>/dev/null; then
+		_stat=$(cat "/proc/$_qpid/stat" 2>/dev/null || true)
+		# shellcheck disable=SC2086
+		set -- ${_stat##*) }
+		case "$(cat "/proc/$_qpid/comm" 2>/dev/null):${2:-}" in
+		qemu-system*:"$$")
+			kill "$_qpid" 2>/dev/null || true
+			wait "$_qpid" 2>/dev/null || true ;;
+		esac
+	fi
+	QEMU_REAPED=1
+	if [ -n "$LOCK_ID" ] && [ "$(lock_id)" = "$LOCK_ID" ]; then
+		rmdir "$LOCK" 2>/dev/null || true
+	fi
+	LOCK_ID=""
+}
+stopped_by() {
+	trap - EXIT INT TERM HUP
+	give_back
+	echo "run-x86_64.sh: stopped by SIG$1 -- its qemu stopped and the lock given back" >&2
+	kill -s "$1" "$$"
+}
+trap give_back EXIT
+trap 'stopped_by INT' INT
+trap 'stopped_by TERM' TERM
+trap 'stopped_by HUP' HUP
 if ! mkdir "$LOCK" 2>/dev/null; then
 	echo "another run-x86_64.sh is in flight ($LOCK) — refusing to interleave" >&2
 	exit 2
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+LOCK_ID=$(lock_id)
 OTHER_QEMU_AT_START=$(uros_other_qemus)
 
 mkdir -p "$(dirname "$LOG")"
@@ -1420,6 +1473,7 @@ fi
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+QEMU_REAPED=1		# its PID is the system's again: the trap leaves it alone
 
 # 🔴 What is appended below starts on a line of its own.  The readers of the
 # log -- double-panic-check.sh, fbcons-no-glyph.py -- take a line that begins
