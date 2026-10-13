@@ -54,8 +54,10 @@
 
 import argparse, os, re, socket, struct, subprocess, sys, time
 
+sys.dont_write_bytecode = True		# nothing left in scripts/
+import run_lock				# noqa: E402  the lock, as #618 has it
+
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
-LOCK = "/tmp/uros-x86_64-run.lock"
 
 RAMOOPS_SIG = 0x43474244
 RAMOOPS_CONSOLE = 0x80000		# ramoops.console_size
@@ -133,6 +135,17 @@ def main():
         print(f"ramoops-readback: no kernel at {kernel}", file=sys.stderr)
         return 2
 
+    run_lock.stop_like_ctrl_c()
+    mine = run_lock.take("ramoops-readback")
+    if mine is None:
+        return 2
+    try:
+        return readback(a, build, out)
+    finally:
+        run_lock.give_back(mine, "ramoops-readback")
+
+
+def readback(a, build, out):
     env = dict(os.environ, UROS_BUILD_DIR=build,
                UROS_X86_64_BOOT_ENTRY=str(a.entry))
     made = subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
@@ -145,13 +158,6 @@ def main():
               "bootstrap_bundle)" +
               (f": {made.stderr.strip().splitlines()[-1]}"
                if made.stderr.strip() else ""), file=sys.stderr)
-        return 2
-
-    try:
-        os.mkdir(LOCK)
-    except FileExistsError:
-        print(f"ramoops-readback: another run is in flight ({LOCK}) — "
-              f"refusing to interleave", file=sys.stderr)
         return 2
 
     mon = f"/tmp/uros-ramoops-{os.getpid()}.mon"
@@ -183,8 +189,8 @@ def main():
     if a.kvm:
         argv.insert(1, "-enable-kvm")
 
-    q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.PIPE, text=True)
+    q = run_lock.start_qemu(argv, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
     try:
         status = ""
         end = time.time() + a.budget
@@ -297,7 +303,6 @@ def main():
             os.unlink(mon)
         except FileNotFoundError:
             pass
-        os.rmdir(LOCK)
 
 
 if __name__ == "__main__":
