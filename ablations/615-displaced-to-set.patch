@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #615
-Takes out: the bound thread's own run queue -- one displaced from its processor's next_thread goes to the set's run queue, where any processor may take it
+Takes out: the bound thread's own run queue -- one displaced from its processor's next_thread goes to the set's run queue, where any processor may take it; only with a slow guest: 14 of 29 boots at 1.4 GHz under TCG, 0 of 25 at the host's own clock, 0 of 15 under KVM (#615) -- run it with the host held low
 Run: --entry 9 1200 -smp 4
 Expect: pmap_bench:.*WRONG
 Expect: on a run queue not their processor's
