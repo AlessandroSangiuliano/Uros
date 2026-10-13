@@ -302,7 +302,9 @@ uros_conditions_open() {
 #
 # ⚠️ No word here may be one the verdict greps for.  run-x86_64.sh judges a
 # boot by looking for WRONG and FAIL in the log, so a conditions block using
-# either would turn every run red.
+# either would turn every run red.  Its verdict has skipped this block since
+# #618, which put other programs' command lines in it, but the logs of
+# run-qemu.sh are judged by tools that read every line.
 uros_conditions_block() {
 	_target=$1
 	_accel=$2

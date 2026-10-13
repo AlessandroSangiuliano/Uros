@@ -232,7 +232,15 @@ UNKNOWNS=$(grep -ac "$UNKNOWN_VERDICT" "$LOG" || true)
 # test: FAIL", which it prints when it failed and not otherwise.  If the line's
 # shape ever changes the exclusion stops applying and this starts complaining
 # again, which is the direction an exclusion should fail in.
-BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
+#
+# 🔴 And not in the run's conditions block, which is the harness's record and
+# not the guest's output (#618), as garbled-lines.awk already treats it.  It
+# quotes the command line of every other qemu alive around the run, and a path
+# someone else chose, with FAIL in it, is not this boot failing.  The block's
+# own words are kept clear of these by run-conditions.sh; command lines cannot
+# be.
+BAD=$(sed '/^=== run conditions (#516) ===$/,/^=== end run conditions ===$/d' "$LOG" \
+	| grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
 	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
 # #624: a panic whose first line arrived in pieces still leaves its backtraces
