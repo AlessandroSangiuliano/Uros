@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #593
+Over: 594-hpet-stops.patch
 Takes out: the silencing of the HPET's comparator by the last processor to leave its broadcast -- it stays interrupting, and on hardware would take the boot processor at every wrap of the counter; with ablations/594-hpet-stops.patch, so that the watchdog names the HPET and the tick leaves it
 Run: --entry 22 1200 -smp 4
 Expect: WRONG: is still interrupting, read back

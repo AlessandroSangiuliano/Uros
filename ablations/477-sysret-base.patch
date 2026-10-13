@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #477
+Accel: kvm
 Takes out: the ring bits in SYSRET's selector base, and the strict assertions that make the old base fail to compile -- SYSRET loads SS without RPL3, which KVM enforces on the next iretq (TCG lets it pass: run with --accel kvm)
 Run: --entry 0 600 -smp 4
 Expect: panic\(cpu

@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #508
+Accel: kvm
 Takes out: nothing -- a probe: the first exact source that states a TSC rate states it a quarter high, so the rulers must contradict it and the boot line say WRONG; KVM only, where KVM's clock is a source -- under TCG nothing states a rate, and nothing lies
 Run: --entry 14 600 -smp 4
 Expect: the TSC's exact sources: .*WRONG: [0-9]+ ppm from the rulers, who allow [0-9]+
