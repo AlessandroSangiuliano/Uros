@@ -520,6 +520,20 @@ extern int	pmap_pcid_mode;
 uint64_t	pmap_enable_pcid(void);
 
 /*
+ * Why the mode is what it is, as pmap_enable_pcid() decided it, so that the
+ * boot line says that and does not work it out again: on, not offered, -n,
+ * no global pages, or the erratum below with the two revisions it compared.
+ */
+#define	PMAP_PCID_WHY_ON		0
+#define	PMAP_PCID_WHY_NOT_OFFERED	1
+#define	PMAP_PCID_WHY_ASKED_OFF		2	/* -n */
+#define	PMAP_PCID_WHY_NO_GLOBAL_PAGES	3
+#define	PMAP_PCID_WHY_ERRATUM		4
+
+extern int	pmap_pcid_why;
+extern uint32_t	pmap_pcid_erratum_rev, pmap_pcid_erratum_fixed;
+
+/*
  * Whether this processor has Intel's errata ADL063/RPL043 -- INVLPG leaving
  * other PCIDs' global entries -- in the microcode it runs; if so, *rev is
  * that revision and *fixed the first without it.  Never under a hypervisor.

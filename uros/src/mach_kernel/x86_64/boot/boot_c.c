@@ -1094,35 +1094,48 @@ static void wx_selftest(void)
 	}
 
 	/*
-	 * PCID (#412): the mode, and why it is that one.  -n turns it off and -x
-	 * pretends there is no INVPCID, so that each of the three modes can be
-	 * run on a processor that has both; an erratum in the firmware's
-	 * microcode turns it off by itself, and the line names both revisions.
+	 * PCID (#412): the mode, and why it is that one, as pmap_enable_pcid()
+	 * decided it.  -n turns it off and -x pretends there is no INVPCID, so
+	 * that each of the three modes can be run on a processor that has both;
+	 * global pages off, or an erratum in the firmware's microcode, turn it
+	 * off by themselves.  CR4 is asked after, and a disagreement is said.
 	 */
 	{
 		uint64_t on = pmap_enable_pcid();
-		uint32_t rev, fixed;
+		int pcide = (read_cr4() & CR4_PCIDE) != 0;
 
 		kputs("UrMach x86-64: PCID ");
-		if (!cpu_has_pcid())
+		switch (pmap_pcid_why) {
+		case PMAP_PCID_WHY_NOT_OFFERED:
 			kputs("not offered by this cpu");
-		else if (boot_flag('n'))
+			break;
+		case PMAP_PCID_WHY_ASKED_OFF:
 			kputs("off, as -n asks");
-		else if (pmap_pcid_erratum(&rev, &fixed)) {
-			kputs("off: this cpu's INVLPG may leave other PCIDs' "
-			      "global entries (Intel ADL063, RPL043), and its "
+			break;
+		case PMAP_PCID_WHY_NO_GLOBAL_PAGES:
+			kputs("off: global pages are off, and a kernel page "
+			      "removed under one PCID would stay translated under "
+			      "another's");
+			break;
+		case PMAP_PCID_WHY_ERRATUM:
+			kputs("off: this model is in the table of processors whose "
+			      "INVLPG may leave other PCIDs' global entries (Intel "
+			      "ADL063, RPL043; Linux's invlpg_miss_ids), and its "
 			      "microcode, ");
-			kputhex64(rev);
+			kputhex64(pmap_pcid_erratum_rev);
 			kputs(", is older than ");
-			kputhex64(fixed);
-			kputs(", the first without the erratum");
-		} else if (!(read_cr4() & CR4_PCIDE) || !on)
-			kputs("OFFERED BUT OFF");
-		else if (pmap_pcid_mode == PMAP_PCID_INVPCID)
-			kputs("on, with INVPCID");
-		else
-			kputs(cpu_has_invpcid() ? "on, without INVPCID, as -x asks"
+			kputhex64(pmap_pcid_erratum_fixed);
+			kputs(", the first that table takes as fixed");
+			break;
+		default:
+			kputs(pmap_pcid_mode == PMAP_PCID_INVPCID
+			      ? "on, with INVPCID"
+			      : cpu_has_invpcid() ? "on, without INVPCID, as -x asks"
 			      : "on, without INVPCID, which this cpu lacks");
+		}
+		if (pcide != (pmap_pcid_why == PMAP_PCID_WHY_ON && on != 0))
+			kputs(pcide ? " — but CR4.PCIDE is set, WRONG (#412)"
+			      : " — but CR4.PCIDE is clear, WRONG (#412)");
 		kputs("\r\n");
 	}
 }

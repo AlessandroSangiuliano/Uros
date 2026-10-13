@@ -1870,12 +1870,39 @@ int pmap_pcid_erratum(uint32_t *rev, uint32_t *fixed)
 	return 0;
 }
 
+int pmap_pcid_why = PMAP_PCID_WHY_NOT_OFFERED;
+uint32_t pmap_pcid_erratum_rev, pmap_pcid_erratum_fixed;
+
 uint64_t pmap_enable_pcid(void)
 {
-	uint32_t rev, fixed;
-
-	if (!cpu_has_pcid() || boot_flag('n') || pmap_pcid_erratum(&rev, &fixed))
+	if (!cpu_has_pcid())
 		return 0;
+	if (boot_flag('n')) {
+		pmap_pcid_why = PMAP_PCID_WHY_ASKED_OFF;
+		return 0;
+	}
+
+	/*
+	 * 🔴 NOT WITHOUT GLOBAL PAGES.  With CR4.PGE clear the global bit means
+	 * nothing (SDM Vol. 3A 253668-093US 5.10.2.4), so every kernel
+	 * translation is cached under whichever PCID was current: a kernel page
+	 * removed later is invalidated by invlpg in the current PCID alone, and
+	 * a space switched back into with CR3_NOFLUSH still reaches the frame,
+	 * freed and handed out again.  Without INVPCID even the whole-TLB flush
+	 * is a CR3 reload of one PCID.  Every processor with PCID has PGE; a VM
+	 * told to hide PGE is how this arises, and Linux refuses PCID there too
+	 * (setup_pcid()).  So does this.
+	 */
+	if ((pmap_cr4_on & CR4_PGE) == 0) {
+		pmap_pcid_why = PMAP_PCID_WHY_NO_GLOBAL_PAGES;
+		return 0;
+	}
+	if (pmap_pcid_erratum(&pmap_pcid_erratum_rev,
+			      &pmap_pcid_erratum_fixed)) {
+		pmap_pcid_why = PMAP_PCID_WHY_ERRATUM;
+		return 0;
+	}
+	pmap_pcid_why = PMAP_PCID_WHY_ON;
 
 	pmap_pcid_mode = cpu_has_invpcid() && !boot_flag('x')
 		       ? PMAP_PCID_INVPCID : PMAP_PCID_NO_INVPCID;
