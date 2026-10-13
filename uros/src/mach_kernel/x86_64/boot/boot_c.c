@@ -1846,14 +1846,16 @@ static void control_regs_selftest(void)
  * ⚠️ NOT THE BOOT PROCESSOR, WHICH NARROWS THE PAGE ITSELF.  Its write comes
  * right after its own store to the entry, and the page walker reads the
  * tables from the cache, not from the store buffer: a write executed ahead
- * can walk the old, writable entry and cache a new translation of it, which
- * the architecture allows until an invlpg (SDM Vol. 3A 253668-093US
- * 5.10.4.2).  It wrote through in 2 boots of 2 under KVM on victus and 1 of 2
- * on OMEGA, the others faulting every time.  The others are asked by an
- * interrupt sent after the store, which they cannot see before it, and they
- * are where a large global translation that outlived the split's flush
- * shows: with the flush taken out (ablations/437-flush-keeps-globals.patch)
- * processors 1 to 7 wrote on omen's metal.
+ * can walk the old, writable entry and cache a new translation of it: until
+ * the invalidation, the processor "may use translations based on either the
+ * old value or the new value" (SDM Vol. 3A 253668-093US 5.10.4.4, and
+ * 5.10.2.3 on what it may cache).  It wrote through in 2 boots of 2 under KVM
+ * on victus and 1 of 2 on OMEGA, the others faulting every time.  The others
+ * are asked by an interrupt sent after the store, which they cannot see before
+ * it, and they are where a large global translation that outlived the split's
+ * flush shows: with the flush taken out
+ * (ablations/437-flush-keeps-globals.patch) processors 1 to 7 wrote on omen's
+ * metal.
  *
  * ⚠️ AND ONLY WHERE A TLB KEEPS WHAT THE QUESTION NEEDS KEPT.  TCG reloads its
  * whole TLB on every CR3 write, global or not.  With the flush taken out the
@@ -1863,14 +1865,18 @@ static void control_regs_selftest(void)
  * (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763, nor of 2 more on
  * victus on 13/10, on battery at 2.1 GHz: a CR3 load "may invalidate TLB
  * entries for global pages" (5.10.4.1), and a hypervisor may empty a vCPU's
- * TLB between two interrupts -- KVM on Intel empties it whenever a vCPU is
- * loaded on another core than the one it last ran on (vmx_vcpu_load_vmcs(),
- * Linux's arch/x86/kvm/vmx/vmx.c at 7bb6284aa7b3), which a vCPU halted
- * between two cross-calls may well be.  Those numbers are from before the
- * other processors were held awake for the probe (smp_hold_awake()); held,
- * it said WRONG in 2 boots of 2 under KVM on OMEGA and on victus, every
- * processor in both questions, and the control found all three keeping
- * their entry in every boot.  Where a processor lost the entry on its own,
+ * TLB between two interrupts -- KVM empties it whenever a vCPU runs on
+ * another core than the one it last ran on: on Intel by a flush request
+ * (vmx_vcpu_load_vmcs()), on AMD by a new ASID (pre_svm_run(); Linux's
+ * arch/x86/kvm at 7bb6284aa7b3), which a vCPU halted between two cross-calls
+ * may well be.  Those numbers are from before the other processors were held
+ * awake for the probe (smp_hold_awake()), which makes the move much rarer and
+ * does not forbid it: a spinning vCPU can still be preempted and moved.
+ * Held, it said WRONG in 2 boots of 2 under KVM on OMEGA, every processor in
+ * both questions; on victus in 2 of 2, every processor in the 4 KiB question
+ * and two or three of three in the large; on GitHub's EPYC 7763 and 9V74 in
+ * 4 of 4, every processor in the 4 KiB question and 4 of 12 in the large (run
+ * 38381876377).  Where a processor lost the entry on its own,
  * its fault says nothing.  So the question is asked again on the 4 KiB leaf
  * the split left -- each processor writes it, the boot processor makes the
  * whole-TLB flush a split makes, narrows the page, told to nobody, and each
@@ -1884,8 +1890,9 @@ static void control_regs_selftest(void)
  * asks about, and a large leaf of the direct map is other memory too; so it
  * judges the 4 KiB question only -- before the hold, on victus, the 4 KiB
  * entry outlived a bare reload in rounds where the large one did not outlive
- * the split's.  A write through either narrowed page is WRONG wherever it
- * happens.
+ * the split's.  The large question's faults are therefore said, and not
+ * judged: its line says "which no control judges".  A write through either
+ * narrowed page is WRONG wherever it happens.
  */
 static volatile uint64_t gs_va;
 
@@ -1928,12 +1935,14 @@ static void gs_round(unsigned self, pt_entry_t *leaf, int split_flush,
 	}
 	if (split_flush)
 		tlb_flush_all(PMAP_NULL);
-	else
+	else {
 		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 			if (cpu == self || !smp_is_online(cpu))
 				continue;
 			ipi_call_mask(1ULL << cpu, gs_reload_here, 0);
 		}
+		gs_reload_here(0);	/* the boot processor's half too */
+	}
 	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 		if (cpu == self || !smp_is_online(cpu))
@@ -1951,6 +1960,7 @@ static void global_split_ask(void)
 	int faulted[SMP_MAX_CPUS] = { 0 }, lost[SMP_MAX_CPUS] = { 0 };
 	unsigned asked = 0, through = 0, kept = 0;
 	pt_entry_t *leaf;
+	int large;
 
 	if ((read_cr4() & CR4_PGE) == 0) {
 		kputs("UrMach x86-64: global pages are off, so a split cannot "
@@ -1965,21 +1975,16 @@ static void global_split_ask(void)
 	}
 	gs_va = phys_to_direct(frame);
 	leaf = pmap_walk(root, gs_va, &size);
-	if (leaf == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
-		kputs("UrMach x86-64: the direct map is already 4 KiB under the "
-		      "probe's frame, so there is no large translation to keep — "
-		      "NOT ASKED (#437)\r\n");
+	if (leaf == PT_ENTRY_NULL) {
+		kputs("UrMach x86-64: the probe's frame has no entry in the "
+		      "direct map — NOT ASKED (#437)\r\n");
 		boot_frame_free(frame);
 		return;
 	}
 
-	/* Every other processor caches the large global translation, dirty. */
-	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if (cpu == self || !smp_is_online(cpu))
-			continue;
-		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
-		asked++;
-	}
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++)
+		if (cpu != self && smp_is_online(cpu))
+			asked++;
 	if (asked == 0) {
 		kputs("UrMach x86-64: no processor online besides the one that "
 		      "would narrow the page, and it cannot judge itself — NOT "
@@ -1988,39 +1993,55 @@ static void global_split_ask(void)
 		return;
 	}
 
-	/* Down to 4 KiB: each split flushes every processor's TLB. */
-	while (size != PAGE_SIZE_4K && pmap_split_page(PMAP_NULL, gs_va) != 0)
-		(void) pmap_walk(root, gs_va, &size);
-	leaf = pmap_walk(root, gs_va, &size);
-	if (leaf == PT_ENTRY_NULL || size != PAGE_SIZE_4K) {
-		kputs("UrMach x86-64: the probe's page did not split to 4 KiB — "
-		      "WRONG (#437)\r\n");
-		boot_frame_free(frame);
-		return;
-	}
+	large = size != PAGE_SIZE_4K;
+	if (!large)
+		kputs("UrMach x86-64: the direct map is already 4 KiB under the "
+		      "probe's frame: no large translation to keep, so only the "
+		      "4 KiB question is asked (#437)\r\n");
+	else {
+		/* Every other processor caches the large global translation, dirty. */
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu))
+				continue;
+			ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
+		}
 
-	/* Narrowed, and told to nobody. */
-	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
+		/* Down to 4 KiB: each split flushes every processor's TLB. */
+		while (size != PAGE_SIZE_4K
+		       && pmap_split_page(PMAP_NULL, gs_va) != 0)
+			(void) pmap_walk(root, gs_va, &size);
+		leaf = pmap_walk(root, gs_va, &size);
+		if (leaf == PT_ENTRY_NULL || size != PAGE_SIZE_4K) {
+			kputs("UrMach x86-64: the probe's page did not split to "
+			      "4 KiB — WRONG (#437)\r\n");
+			boot_frame_free(frame);
+			return;
+		}
 
-	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if (cpu == self || !smp_is_online(cpu))
-			continue;
-		ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
-	}
+		/* Narrowed, and told to nobody. */
+		atomic_store64((volatile uint64_t *) leaf,
+			       *leaf & ~INTEL_PTE_WRITE);
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu))
+				continue;
+			ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
+		}
 
-	/* Writable again, and this time said. */
-	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
-	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
+		/* Writable again, and this time said. */
+		atomic_store64((volatile uint64_t *) leaf,
+			       *leaf | INTEL_PTE_WRITE);
+		tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
 
-	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if (cpu == self || !smp_is_online(cpu) || faulted[cpu])
-			continue;
-		through++;
-		kputs("UrMach x86-64: processor ");
-		kputdec(cpu);
-		kputs(" wrote a page narrowed after its large page was split: "
-		      "the large global translation outlived the split's flush — "
-		      "WRONG (#437)\r\n");
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu) || faulted[cpu])
+				continue;
+			through++;
+			kputs("UrMach x86-64: processor ");
+			kputdec(cpu);
+			kputs(" wrote a page narrowed after its large page was "
+			      "split: the large global translation outlived the "
+			      "split's flush — WRONG (#437)\r\n");
+		}
 	}
 
 	/*
@@ -2057,7 +2078,9 @@ static void global_split_ask(void)
 		kputs(", ");
 		kputdec(kept);
 		kputs(" of them keeping a global entry across a bare CR3 reload: "
-		      "every write faulted\r\n");
+		      "every write faulted");
+		kputs(large ? ", the large page's too, which no control judges\r\n"
+		      : "\r\n");
 	}
 	boot_frame_free(frame);
 }
