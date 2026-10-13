@@ -31,7 +31,21 @@ static struct answer_count served;
 
 void tlb_flush_local_all(void)
 {
-	uint64_t cr4 = read_cr4();
+	int was = interrupts_enabled();
+	uint64_t cr4;
+
+	/*
+	 * ⚠️ ON ONE PROCESSOR, FROM THE READ TO THE LAST WRITE.  CR4 and CR3
+	 * are read here and written back, and a thread moved in between would
+	 * write one processor's values into another's: CR4 is not the same on
+	 * every processor (#669: the boot processor keeps the MCE and DE bits
+	 * the firmware left), and CR3 is the space a processor runs in.  Most
+	 * callers hold the processor already; the shootdown of a space loaded
+	 * nowhere (tlb_flush_range(), using == 0) did not.  Found by #412's
+	 * review.
+	 */
+	interrupts_disable();
+	cr4 = read_cr4();
 
 	/*
 	 * Reloading CR3 is the usual way to discard everything, and it has one
@@ -53,18 +67,16 @@ void tlb_flush_local_all(void)
 	 * the PGE toggle below already reaches every PCID: a CR4 write that
 	 * changes PGE flushes the whole TLB, whatever CR3 names.
 	 */
-	if (pmap_pcid_mode == PMAP_PCID_INVPCID) {
+	if (pmap_pcid_mode == PMAP_PCID_INVPCID)
 		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
-		return;
-	}
-
-	if (cr4 & CR4_PGE) {
+	else if (cr4 & CR4_PGE) {
 		write_cr4(cr4 & ~CR4_PGE);
 		write_cr4(cr4);
-		return;
-	}
+	} else
+		write_cr3(read_cr3());
 
-	write_cr3(read_cr3());
+	if (was)
+		interrupts_enable();
 }
 
 void tlb_flush_local_range(uint64_t va, uint64_t size)
