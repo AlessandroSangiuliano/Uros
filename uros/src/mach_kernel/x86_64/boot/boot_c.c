@@ -2339,7 +2339,11 @@ static void xs_said3(uint32_t x, uint64_t seen, uint64_t kept)
  * kernel page in S1, moves to S2, remaps it -- with nobody else online the
  * shootdown is tlb_flush_kernel_here() here, the invlpg under S2's PCID -- and
  * reads it back in S1.  Its control is the same round with the remap told to
- * nobody and both of the remap's invlpgs aimed at the page next to it.
+ * nobody, and in its place a real remap of the page next to it -- the same
+ * pmap_enter(), its walks, pv entries and two invlpgs, one page over -- so that
+ * whatever the question's remap does to this processor's TLB besides
+ * invalidating XS_KVA, the control does as well, and a TLB that lets an entry
+ * go for that can only make the answer NOT ASKED, never a PASS.
  *
  * [1] and [2] are not asked here, though neither needs a second processor
  * either: [2] runs on X alone, and [1] could be asked of a boot processor
@@ -2361,10 +2365,17 @@ static void pcid_ask_alone(uint32_t self)
 {
 	struct xs_step st = { PMAP_NULL, 0, PMAP_NULL, PMAP_NULL, 0, XS_KVA, 0 };
 	pmap_t s1 = pmap_create(0), s2 = pmap_create(0);
+	/*
+	 * The next page's two frames first, so that frames handed out in a
+	 * row never put it at XS_KVA's frame plus a page: an AMD processor
+	 * may keep contiguous 4 KiB pages in one TLB entry, and the control's
+	 * invalidations of the next page would then reach XS_KVA's.
+	 */
+	uint64_t g0 = boot_frame_alloc(), g1 = boot_frame_alloc();
 	uint64_t f3 = boot_frame_alloc(), f4 = boot_frame_alloc();
 	uint64_t seen, kept = 0;
 	pt_entry_t *leaf, was;
-	int kmapped = 0;
+	int kmapped = 0, gmapped = 0;
 
 	if (f3 != 0)
 		*(volatile uint64_t *)(uintptr_t) phys_to_direct(f3) = XS_MARK(3);
@@ -2374,10 +2385,14 @@ static void pcid_ask_alone(uint32_t self)
 	    && pmap_enter(pmap_kernel(), XS_KVA, f3,
 			  VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK)
 		kmapped = 1;
+	if (kmapped && g0 != 0 && g1 != 0
+	    && pmap_enter(pmap_kernel(), XS_KVA + PAGE_SIZE_4K, g0,
+			  VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK)
+		gmapped = 1;
 
-	if (!kmapped)
+	if (!gmapped)
 		kputs("pcid_test: [3] NOT ASKED — could not build the two "
-		      "spaces or map the kernel page (#412)\r\n");
+		      "spaces or map the kernel pages (#412)\r\n");
 	else {
 		(void) xs_alone(&st, s1, 1);
 		(void) xs_alone(&st, s2, 0);
@@ -2391,8 +2406,8 @@ static void pcid_ask_alone(uint32_t self)
 			was = *leaf;
 			atomic_store64((volatile uint64_t *) leaf,
 				       (was & ~INTEL_PTE_PFN) | f3);
-			invlpg(XS_KVA + PAGE_SIZE_4K);
-			invlpg(XS_KVA + PAGE_SIZE_4K);
+			(void) pmap_enter(pmap_kernel(), XS_KVA + PAGE_SIZE_4K,
+					  g1, VM_PROT_READ | VM_PROT_WRITE, 0);
 			kept = xs_alone(&st, s1, 1);
 			atomic_store64((volatile uint64_t *) leaf, was);
 		}
@@ -2405,11 +2420,16 @@ static void pcid_ask_alone(uint32_t self)
 	if (s2 != PMAP_NULL)
 		pmap_destroy(s2);
 	if (kmapped)
-		pmap_remove(pmap_kernel(), XS_KVA, XS_KVA + PAGE_SIZE_4K);
+		pmap_remove(pmap_kernel(), XS_KVA,
+			    XS_KVA + (gmapped ? 2 : 1) * PAGE_SIZE_4K);
 	if (f3 != 0)
 		boot_frame_free(f3);
 	if (f4 != 0)
 		boot_frame_free(f4);
+	if (g0 != 0)
+		boot_frame_free(g0);
+	if (g1 != 0)
+		boot_frame_free(g1);
 }
 
 static void pcid_ask(void)
