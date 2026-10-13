@@ -154,4 +154,13 @@ uint64_t smp_answering_set(void);
  */
 unsigned smp_ap_release_to_scheduler(void);
 
+/*
+ * Hold the processors still waiting for the scheduler awake -- spinning with
+ * interrupts on instead of halting -- while a boot probe asks what their TLBs
+ * keep, and let them halt again (#437).  A processor halted between two
+ * cross-calls under KVM may come back on another core with its TLB emptied.
+ * The ones already halted start spinning at the next interrupt they take.
+ */
+void smp_hold_awake(int on);
+
 #endif	/* _X86_64_CPU_SMP_H_ */

@@ -1850,7 +1850,10 @@ static void control_regs_selftest(void)
  * (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763, nor of 2 more on
  * victus on 13/10, on battery at 2.1 GHz: a CR3 load "may invalidate TLB
  * entries for global pages" (5.10.4.1), and a hypervisor may empty a vCPU's
- * TLB between two interrupts.  Where a processor lost the entry on its own,
+ * TLB between two interrupts -- KVM on Intel does, when a vCPU halted in
+ * between wakes on another core, which is why the other processors spin
+ * instead of halting while the probe runs (smp_hold_awake()).  Those numbers
+ * are from before they did.  Where a processor lost the entry on its own,
  * its fault says nothing.  So the question is asked again on the 4 KiB leaf
  * the split left -- each processor writes it, the boot processor makes the
  * whole-TLB flush a split makes, narrows the page, told to nobody, and each
@@ -1923,7 +1926,7 @@ static void gs_round(unsigned self, pt_entry_t *leaf, int split_flush,
 	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
 }
 
-static void global_split_selftest(void)
+static void global_split_ask(void)
 {
 	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 	uint64_t root = pmap_kernel()->root_pa, size = 0, frame;
@@ -2039,6 +2042,14 @@ static void global_split_selftest(void)
 		      "every write faulted\r\n");
 	}
 	boot_frame_free(frame);
+}
+
+/* The other processors awake throughout, so that their TLBs are theirs. */
+static void global_split_selftest(void)
+{
+	smp_hold_awake(1);
+	global_split_ask();
+	smp_hold_awake(0);
 }
 
 /*
