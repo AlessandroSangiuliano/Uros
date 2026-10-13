@@ -26,9 +26,11 @@
 # The script writes no device and needs no root.  Putting the ISO on a stick
 # is a step the user takes, with the dd line it prints.
 #
-# Usage:  scripts/make-baremetal-x86_64.sh [--bench-only] [-o OUT.iso]
+# Usage:  scripts/make-baremetal-x86_64.sh [--bench-only[=SUITES]] [-o OUT.iso]
 #             [--kernel NAME=PATH]... [--entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]
-#   --bench-only  name_server and ipc_bench in the bundle (#332)
+#   --bench-only  name_server and ipc_bench in the bundle (#332); with
+#                 =SUITES, ipc_bench runs those suites ("isweep inter comb")
+#                 instead of all of them
 #   -o OUT.iso    where the ISO goes (default: the build directory)
 #   --kernel      another kernel in the image, as /boot/NAME -- a build with an
 #                 ablation, say; NAME is letters, digits, '.', '_' or '-'
@@ -53,6 +55,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 OUT=""
 BENCH_ONLY=0
+BENCH_SUITES=""
 # -f: the kernel puts on the screen, at a readable pace, what the boot said
 # before the screen was ready -- the calibration and the early self-tests,
 # which on a machine with no serial port reach no one otherwise (#595).
@@ -66,6 +69,7 @@ BEFORE=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--bench-only)	BENCH_ONLY=1; shift ;;
+	--bench-only=*)	BENCH_ONLY=1; BENCH_SUITES=${1#--bench-only=}; shift ;;
 	-o)		OUT=${2:?-o needs a path}; shift 2 ;;
 	--kernel)	kv=${2:?--kernel needs NAME=PATH}
 			KNAMES+=("${kv%%=*}"); KPATHS+=("${kv#*=}"); shift 2 ;;
@@ -73,7 +77,7 @@ while [ $# -gt 0 ]; do
 			ENTRIES+=("$2"); BEFORES+=("$BEFORE"); BEFORE=""; shift 2 ;;
 	--before)	BEFORE=${2:?--before needs a GRUB command}; shift 2 ;;
 	--)		shift; FLAGS="$FLAGS $*"; break ;;
-	*)		echo "usage: $0 [--bench-only] [-o OUT.iso] [--kernel NAME=PATH]... [--entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]" >&2; exit 2 ;;
+	*)		echo "usage: $0 [--bench-only[=SUITES]] [-o OUT.iso] [--kernel NAME=PATH]... [--entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]" >&2; exit 2 ;;
 	esac
 done
 
@@ -116,10 +120,10 @@ mkdir -p "$TREE/boot/grub"
 # The bundle: nothing in it reaches a disk.
 if [ "$BENCH_ONLY" = 1 ]; then
 	conf=$TREE/bootstrap.conf
-	printf 'name_server name_server\nipc_bench ipc_bench\n' > "$conf"
+	printf 'name_server name_server\nipc_bench ipc_bench%s\n' "${BENCH_SUITES:+ $BENCH_SUITES}" > "$conf"
 	"$MKBUNDLE" -o "$TREE/boot/bootstrap.bundle" "bootstrap.conf:$conf" \
 		"name_server:$SBIN/name_server" "ipc_bench:$SBIN/ipc_bench" >/dev/null
-	CONTENTS="name_server ipc_bench"
+	CONTENTS="name_server ipc_bench${BENCH_SUITES:+ ($BENCH_SUITES)}"
 else
 	ninja -C "$BUILD" bootstrap_bundle_nodisk >/dev/null || {
 		echo "make-baremetal: the build could not make bootstrap-nodisk.bundle" >&2; exit 1; }
