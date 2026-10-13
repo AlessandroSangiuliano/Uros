@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #657
+Over: 657-widen-walk.patch
 Takes out: the processor set's lock around the census's walk, in quiet_census_walk() and in the idle pass, so that the walk reads threads other processors free under it
 Run: --entry 35 600 -smp 4
 Expect: <census_threads\+0x

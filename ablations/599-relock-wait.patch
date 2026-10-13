@@ -1,5 +1,6 @@
 Kind: ablation
 Issue: #599
+Over: 599-widen-relock.patch
 Takes out: the wait for a waker in flight after clear_wait_locked() relocks, so a thread clearing its own wait comes back with wait_event at WAKING_EVENT and TH_WAIT set whenever a waker took it off the hash while it took the bucket's lock
 Run: --entry 34 600 -smp 4
 Expect: clear_wait_test: WRONG
