@@ -1,9 +1,10 @@
 Kind: ablation
 Issue: #472
-Takes out: the translation of the subsystem name in trap 100 -- a port name from ring 3 is taken for a kernel pointer again
+Takes out: the translation of the subsystem name in trap 100 -- a port name from ring 3 is taken for a kernel pointer again, and the kernel faults writing through it before cap_test can speak
 Run: --entry 14 600 -smp 4
 Expect: cap_test: \[9\] .*WRONG
 Expect: panic\(cpu
+Expect: <convert_port_to_subsystem\+0x
 
 diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
 index 5b6c4f97..a66310a4 100644
