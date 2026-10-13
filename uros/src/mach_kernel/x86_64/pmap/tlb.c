@@ -126,7 +126,9 @@ static int tlb_range_by_pages(uint64_t va, uint64_t size)
  * empties every PCID.  Nothing changes the window after boot today; this is so
  * that the first thing that does cannot leave its old translation under
  * somebody else's PCID.  Both ways a kernel range is flushed come here: the
- * request on every processor, and the one processor before the others start.
+ * request on every processor, and the path taken while this processor is the
+ * only one online -- before the others start, and for good on a uniprocessor
+ * or at -smp 1, where it is every kernel flush there is.
  */
 static void tlb_flush_kernel_here(uint64_t va, uint64_t size)
 {
