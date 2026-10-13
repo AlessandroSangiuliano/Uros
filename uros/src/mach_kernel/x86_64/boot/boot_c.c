@@ -2149,8 +2149,8 @@ static void global_split_selftest(void)
  *	 leaves are global, so one invlpg reaches every PCID -- where global
  *	 pages are on (pmap_enable_pcid() refuses PCID without them) and the
  *	 processor's INVLPG does what the SDM says (pmap_pcid_erratum()).  Its
- *	 control is the same round with the remap told to nobody and the
- *	 shootdown's interrupt and invlpg aimed at the next page.
+ *	 control is the same round with the remap told to nobody and every
+ *	 invalidation the remap made, X's aimed at the next page.
  *
  * Each answer that comes out right is judged by a control of its own shape
  * (xs_control_said()): only where an entry kept through the round would have
@@ -2239,10 +2239,38 @@ static uint64_t xs_kread_on(uint32_t x, pmap_t space)
 	return st.seen;
 }
 
-/* [3]'s control: the shootdown's interrupt and invlpg, aimed elsewhere. */
-static void xs_invlpg_here(void *arg)
+/*
+ * [3]'s control, on every processor but this one: the invlpg the question's
+ * shootdown ran there, and on X the same aimed at the page next to it.
+ */
+struct xs_aim {
+	uint32_t	x;
+	uint64_t	va;
+};
+
+static void xs_aim_here(void *arg)
 {
-	invlpg((uint64_t)(uintptr_t) arg);
+	const struct xs_aim *a = arg;
+
+	invlpg((uint32_t) cpu_number() == a->x ? a->va + PAGE_SIZE_4K : a->va);
+}
+
+/* Every online processor but `self', by number (#663). */
+static uint64_t xs_others(uint32_t self)
+{
+	uint64_t m = 0;
+	unsigned i;
+
+	for (i = 0; i < smp_cpu_count(); i++)
+		if (i != self && smp_is_online(i))
+			m |= 1ULL << i;
+	return m;
+}
+
+/* Nothing: a processor that ran it is awake for the rounds that follow. */
+static void xs_wake_here(void *arg)
+{
+	(void) arg;
 }
 
 /*
@@ -2271,6 +2299,23 @@ static void xs_control_said(const char *right, const char *missing,
 		kputs(", neither frame — WRONG (#412)\r\n");
 }
 
+/* [3]'s line: what X read back in S1, then what its control read. */
+static void xs_said3(uint32_t x, uint64_t seen, uint64_t kept)
+{
+	kputs("pcid_test: [3] a kernel page remapped while processor ");
+	kputdec(x);
+	kputs(" was in another space reads ");
+	kputhex64(seen);
+	if (seen == XS_MARK(3))
+		kputs(", its OLD frame there: the invalidation did not reach "
+		      "the other space's PCID — WRONG (#412)\r\n");
+	else if (seen != XS_MARK(4))
+		kputs(", neither frame — WRONG (#412)\r\n");
+	else
+		xs_control_said(", its new frame", "invalidation", kept,
+				XS_MARK(4), XS_MARK(3));
+}
+
 static void pcid_ask(void)
 {
 	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL;
@@ -2295,6 +2340,16 @@ static void pcid_ask(void)
 		      "between spaces while this one changes them (#412)\r\n");
 		return;
 	}
+
+	/*
+	 * Every other processor through one empty cross-call first.  One that
+	 * halted before the hold was taken sees the hold only when it next
+	 * wakes, and [3]'s shootdown would be that wake-up: in [3]'s question
+	 * and not in its control, every halted vCPU woken at once on a host
+	 * that may then move X's.  Awake from here on, they spin through every
+	 * round alike.
+	 */
+	ipi_call_mask(xs_others(self), xs_wake_here, (void *) 0);
 
 	for (i = 0; i < 5; i++) {
 		frame[i] = boot_frame_alloc();
@@ -2417,40 +2472,32 @@ static void pcid_ask(void)
 
 			/*
 			 * [3]'s control: the same round with the remap told to
-			 * nobody, and the shootdown's interrupt and invlpg sent
-			 * to X aimed at a page next to it -- so that what X
-			 * read back is the entry kept through everything the
-			 * question did but the invalidation itself.
+			 * nobody and every invalidation the remap made -- the
+			 * two invlpgs pmap_enter() ran here around its
+			 * shootdown, and the shootdown's on every other
+			 * processor -- with X's aimed at the page next to it.
+			 * What X reads back is then the entry kept through
+			 * everything the question did but X's own invalidation,
+			 * a sibling's or a hypervisor's included, as [1]'s
+			 * control does for its own (574c32f3).
 			 */
 			(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
 			leaf = pmap_walk(pmap_kernel()->root_pa, XS_KVA, 0);
 			kept = 0;
 			if (leaf != PT_ENTRY_NULL) {
+				struct xs_aim aim = { x, XS_KVA };
+
 				was = *leaf;
 				atomic_store64((volatile uint64_t *) leaf,
 					       (was & ~INTEL_PTE_PFN) | frame[3]);
-				ipi_call_mask(1ULL << x, xs_invlpg_here,
-					      (void *)(uintptr_t)(XS_KVA
-								  + PAGE_SIZE_4K));
+				invlpg(XS_KVA);
+				ipi_call_mask(xs_others(self), xs_aim_here, &aim);
+				invlpg(XS_KVA);
 				kept = xs_kread_on(x, s1);
 				atomic_store64((volatile uint64_t *) leaf, was);
 			}
 
-			kputs("pcid_test: [3] a kernel page remapped while "
-			      "processor ");
-			kputdec(x);
-			kputs(" was in another space reads ");
-			kputhex64(seen);
-			if (seen == XS_MARK(3))
-				kputs(", its OLD frame there: the invalidation "
-				      "did not reach the other space's PCID — "
-				      "WRONG (#412)\r\n");
-			else if (seen != XS_MARK(4))
-				kputs(", neither frame — WRONG (#412)\r\n");
-			else
-				xs_control_said(", its new frame",
-						"invalidation", kept,
-						XS_MARK(4), XS_MARK(3));
+			xs_said3(x, seen, kept);
 		} else
 			kputs("pcid_test: [3] NOT ASKED — could not map the "
 			      "kernel page (#412)\r\n");
