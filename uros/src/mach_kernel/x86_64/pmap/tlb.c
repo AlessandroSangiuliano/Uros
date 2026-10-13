@@ -267,6 +267,18 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * machine, and the first symptom would be somewhere else entirely.
 	 */
 
+	/*
+	 * 🔴 THE KERNEL HALF BY ADDRESS, WHATEVER PMAP ASKED.  Its tables are
+	 * the same in every space and its leaves are global (#437), so a kernel
+	 * address reached through a user's pmap -- pmap_may_map() lets one
+	 * through, and the walk lands in the shared tables -- is a translation
+	 * every processor may hold, under every PCID.  Sent to that pmap's
+	 * cpus_using it would reach the processors with that space loaded and
+	 * leave the rest.  No caller does this today; this is so that none can.
+	 */
+	if (size != 0 && va_is_kernel(va))
+		pmap = PMAP_NULL;
+
 	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
 		/*
 		 * With only this processor online there is nobody to tell and
