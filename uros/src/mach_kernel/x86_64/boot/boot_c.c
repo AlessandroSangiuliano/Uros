@@ -1790,8 +1790,19 @@ static void control_regs_selftest(void)
  * boot processor splits it down to 4 KiB and narrows that one page to
  * read-only WITHOUT telling anyone -- an invlpg anywhere inside the large page
  * would discard the large translation by itself and hide a broken split flush;
- * and every processor then writes the page.  Each must fault.  The page is a
- * frame of this test's own, so nothing else is denied anything meanwhile.
+ * and every other processor then writes the page.  Each must fault.  The page
+ * is a frame of this test's own, so nothing else is denied anything meanwhile.
+ *
+ * ⚠️ NOT THE BOOT PROCESSOR, WHICH NARROWS THE PAGE ITSELF.  Its write comes
+ * right after its own store to the entry, and the page walker reads the
+ * tables from the cache, not from the store buffer: a write executed ahead
+ * can walk the old, writable entry and cache a new translation of it, which
+ * the architecture allows until an invlpg (SDM 4.10.4.2).  It wrote through
+ * in 2 boots of 2 under KVM on victus and 1 of 2 on OMEGA, the others
+ * faulting every time.  The others are asked by an interrupt sent after the
+ * store, which they cannot see before it, and they are where a large global
+ * translation that outlived the split's flush shows: with the flush taken out
+ * (ablations/437-flush-keeps-globals.patch) processors 1 to 3 write.
  *
  * TCG reloads its whole TLB on every CR3 write, global or not, so there the
  * answer is the same with and without the flush that reaches globals; only a
@@ -1818,8 +1829,8 @@ static void global_split_selftest(void)
 {
 	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 	uint64_t root = pmap_kernel()->root_pa, size = 0, frame;
-	int faulted[SMP_MAX_CPUS] = { 0 }, boot_faulted = 0;
-	unsigned asked = 1, through = 0;
+	int faulted[SMP_MAX_CPUS] = { 0 };
+	unsigned asked = 0, through = 0;
 	pt_entry_t *leaf;
 
 	if ((read_cr4() & CR4_PGE) == 0) {
@@ -1843,13 +1854,19 @@ static void global_split_selftest(void)
 		return;
 	}
 
-	/* Every processor caches the large, global, writable translation. */
-	gs_warm_here(0);
+	/* Every other processor caches the large, global, writable translation. */
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 		if (cpu == self || !smp_is_online(cpu))
 			continue;
 		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
 		asked++;
+	}
+	if (asked == 0) {
+		kputs("UrMach x86-64: no processor online besides the one that "
+		      "would narrow the page, and it cannot judge itself — NOT "
+		      "ASKED (#437)\r\n");
+		boot_frame_free(frame);
+		return;
 	}
 
 	/* Down to 4 KiB: each split flushes every processor's TLB. */
@@ -1866,7 +1883,6 @@ static void global_split_selftest(void)
 	/* Narrowed, and told to nobody. */
 	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
 
-	gs_probe_here(&boot_faulted);
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 		if (cpu == self || !smp_is_online(cpu))
 			continue;
@@ -1878,8 +1894,7 @@ static void global_split_selftest(void)
 	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
 
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if ((cpu != self && !smp_is_online(cpu))
-		    || (cpu == self ? boot_faulted : faulted[cpu]))
+		if (cpu == self || !smp_is_online(cpu) || faulted[cpu])
 			continue;
 		through++;
 		kputs("UrMach x86-64: processor ");
@@ -1891,8 +1906,11 @@ static void global_split_selftest(void)
 	kputs("UrMach x86-64: a page narrowed after a split, with global pages "
 	      "on, on ");
 	kputdec(asked);
-	kputs(through == 0 ? " processors: every write faulted\r\n"
-			   : " processors: some wrote through, WRONG (#437)\r\n");
+	kputs(through == 0
+	      ? " processors besides the one that narrowed it: every write "
+		"faulted\r\n"
+	      : " processors besides the one that narrowed it: some wrote "
+		"through, WRONG (#437)\r\n");
 	boot_frame_free(frame);
 }
 
