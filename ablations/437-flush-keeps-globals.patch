@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #437
 Accel: kvm
-Takes out: the flush of global entries in tlb_flush_local_all() -- the whole-TLB flush is a bare CR3 reload again, which keeps every global entry, so a large global translation outlives the split that should have taken it off every processor; TCG reloads everything on a CR3 write and cannot show it
+Takes out: the flush of global entries in tlb_flush_local_all() -- the whole-TLB flush is a bare CR3 reload again, which keeps every global entry, so a large global translation outlives the split that should have taken it off every processor; TCG reloads everything on a CR3 write and cannot show it; caught under KVM on victus (Ryzen 5 5600H) 4 of 4, and in none of 6 boots on the Intel hosts OMEGA and omen, VPID and EPT on, why not established -- the metal has no such question
 Run: --entry 0 300 -smp 4
 Expect: wrote a page narrowed after its large page was split: .*WRONG \(#437\)
 
