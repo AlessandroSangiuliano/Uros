@@ -1,10 +1,11 @@
 Kind: ablation
 Issue: #477
 Accel: kvm
-Takes out: the ring bits in SYSRET's selector base, and the strict assertions that make the old base fail to compile -- SYSRET loads SS without RPL3, which KVM enforces on the next iretq (TCG lets it pass: run with --accel kvm)
+Takes out: the ring bits in SYSRET's selector base, and the strict assertions that make the old base fail to compile -- SYSRET loads SS without RPL3, which KVM enforces on the next iretq (TCG lets it pass: run with --accel kvm); on an AMD host: under KVM on victus (Ryzen 5 5600H) the iretq refuses SS 0x20, "refused by the GDT entry 4", and on an Intel Xeon Platinum 8573C under KVM the boot passed (#643)
 Run: --entry 0 600 -smp 4
 Expect: panic\(cpu
 Expect: double fault
+Expect: trap general protection \(vector 0x0+d, error 0x0+20\)
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/desc.c b/uros/src/mach_kernel/x86_64/cpu/desc.c
 index 9cc7adc7..e70561d3 100644
