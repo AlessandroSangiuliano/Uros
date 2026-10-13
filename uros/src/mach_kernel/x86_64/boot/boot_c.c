@@ -1127,11 +1127,22 @@ static void wx_selftest(void)
 			kputhex64(pmap_pcid_erratum_fixed);
 			kputs(", the first that table takes as fixed");
 			break;
-		default:
+		case PMAP_PCID_WHY_ON:
 			kputs(pmap_pcid_mode == PMAP_PCID_INVPCID
 			      ? "on, with INVPCID"
 			      : cpu_has_invpcid() ? "on, without INVPCID, as -x asks"
 			      : "on, without INVPCID, which this cpu lacks");
+			break;
+		default:
+			/*
+			 * A reason added to pmap_enable_pcid() and not here.
+			 * Said, rather than printed as "on": with PCID left
+			 * off, CR4.PCIDE agrees with it and the check below
+			 * would not see the line lying.
+			 */
+			kputs("decided for a reason this line does not know, ");
+			kputdec(pmap_pcid_why);
+			kputs(" — WRONG (#412)");
 		}
 		if (pcide != (pmap_pcid_why == PMAP_PCID_WHY_ON && on != 0))
 			kputs(pcide ? " — but CR4.PCIDE is set, WRONG (#412)"
