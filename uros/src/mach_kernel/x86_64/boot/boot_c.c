@@ -1871,10 +1871,12 @@ static void control_regs_selftest(void)
  * ⚠️ AND ONLY WHERE A TLB KEEPS WHAT THE QUESTION NEEDS KEPT.  TCG reloads its
  * whole TLB on every CR3 write, global or not.  With the flush taken out the
  * probe said WRONG on omen's metal (i7-7700HQ, one boot), under KVM on victus
- * (Ryzen 5 5600H, 4 boots of 4) and on one of GitHub's Xeon Platinum 8573C
- * (processors 1 and 2 of 3), and in none of 6 boots under KVM on OMEGA
- * (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763, nor of 2 more on
- * victus on 13/10, on battery at 2.1 GHz: a CR3 load "may invalidate TLB
+ * (Ryzen 5 5600H, 4 boots of 4, on AC at about 3.9 GHz) and on one of GitHub's
+ * Xeon Platinum 8573C (processors 1 and 2 of 3), and in none of 6 boots under
+ * KVM on OMEGA (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763, nor of 4
+ * more on victus on 13/10, on battery at 2.1 GHz (two each at a42a0390 and
+ * b91b43c7, before the 4 KiB question below, which there and then caught it
+ * in 2 of 2 with nobody held): a CR3 load "may invalidate TLB
  * entries for global pages" (5.10.4.1), and a hypervisor may empty a vCPU's
  * TLB between two interrupts -- KVM empties it whenever a vCPU runs on
  * another core than the one it last ran on: on Intel by a flush request
@@ -2158,12 +2160,13 @@ static void global_split_selftest(void)
  * (xs_control_said()): only where an entry kept through the round would have
  * shown is it a PASS, and otherwise NOT ASKED.  Without PCID every switch
  * discards everything and none of the three can arise: NOT ASKED.
- * ablations/412-gen-check.patch must make [1] say WRONG and
- * ablations/412-reuse-keeps.patch [2], where an entry outlives its round:
- * under KVM or on the metal.  ablations/412-pcid-without-pge.patch must make
- * [3] say WRONG under KVM with QEMU's -cpu max,-pge only: on the metal PGE
- * cannot be hidden, and there the patch changes nothing.  None of them under
- * TCG, which has no PCID.
+ * ablations/412-gen-check.patch must make [1] say WRONG,
+ * ablations/412-reuse-keeps.patch [2], and ablations/412-pcid-without-pge.patch
+ * [3] under QEMU's -cpu max,-pge, each where an entry outlives its round (and
+ * where none does, the controls say NOT ASKED): the first two under KVM or on
+ * the metal, the third under KVM only, since on the metal PGE cannot be hidden
+ * and there the patch changes nothing.  None of them under TCG, which has no
+ * PCID.
  */
 #define XS_VA		0x0000000300000000ULL	/* lower half, nobody else's */
 #define XS_KVA		(KERNEL_HEAP_BASE + 0x400000ULL)	/* [3]: unclaimed at boot */
