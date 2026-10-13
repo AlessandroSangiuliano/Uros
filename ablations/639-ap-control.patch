@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #639
-Takes out: the application processors' own control registers -- they keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before the fix
+Takes out: the application processors' own control registers -- they keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before the fix, and, since #437 and #412 put them in the same set (pmap_cr4_on), without PGE and PCIDE; caught by the census before anything else, under TCG 2 of 2 on OMEGA at 3e731776; under KVM on a host with PCID the boot goes on to fault after the census, since pmap_cr3_for() sets bit 63 for the NOFLUSH loads and with PCIDE clear that bit is reserved (SDM Vol. 3A 253668-093US Table 5-12)
 Run: --entry 0 600 -smp 4
 Expect: WRONG \(#639\)
 
