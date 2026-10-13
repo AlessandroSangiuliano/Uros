@@ -1,0 +1,99 @@
+Kind: widen
+Issue: #599
+Holds open: consolewrite()'s printf_lock hold, for an interrupt -- once, after tick 3000, processor 0 raises inside it an ISA line whose handler is intnull(), so intnull()'s printf runs nested in the holder; the fixed tree prints the line and goes on
+Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+
+diff --git a/uros/src/mach_kernel/i386/AT386/console_cdev.c b/uros/src/mach_kernel/i386/AT386/console_cdev.c
+index 8929d439..e50e17e7 100644
+--- a/uros/src/mach_kernel/i386/AT386/console_cdev.c
++++ b/uros/src/mach_kernel/i386/AT386/console_cdev.c
+@@ -27,6 +27,7 @@
+ #include <device/device_types.h>
+ #include <i386/pio.h>
+ #include <i386/AT386/fbcons.h>
++#include <i386/clock_watch.h>
+ 
+ extern void com_putc(char c);
+ extern void cpu_shutdown(void);
+@@ -203,6 +204,7 @@ consolewrite(dev_t dev, io_req_t ior)
+ 		n -= k;
+ 		simple_lock(&printf_lock);
+ 		printf_lock_holder = cpu_number();	/* #599: see printf.c */
++		clock_watch_ablate_nested_printf();
+ 		while (k--)
+ 			cnputc(*p++);
+ 		printf_lock_holder = -1;
+diff --git a/uros/src/mach_kernel/i386/clock_watch.c b/uros/src/mach_kernel/i386/clock_watch.c
+index c4f1e049..573dffa0 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.c
++++ b/uros/src/mach_kernel/i386/clock_watch.c
+@@ -83,6 +83,7 @@ extern volatile unsigned int	ioapic_overlaps;	/* ioapic.c */
+ #define	CW_STOP_TICKS	200	/* ... and for this many of the watcher's own */
+ #define	CW_REPEAT_MS	10000	/* the line again, while the stop lasts */
+ #define	CW_CONFIRM_MS	100	/* a spin's second look, see clock_watch_spin */
++#define	CW_ABLATE_AT	3000	/* processor 0's ticks, for the #599 ablations */
+ 
+ /*
+  * One per watcher.  Each is written only by its own processor, from its own
+@@ -168,6 +169,9 @@ clock_watch_init(void)
+ {
+ 	printf("clock: the other processors watch processor 0's tick, and say "
+ 	       "so when it has not run for %u ms (#599)\n", CW_STOP_MS);
++	printf("clock: #599 ablation -- after tick %u processor 0 raises a line "
++	       "nobody handles while consolewrite holds printf_lock, once\n",
++	       CW_ABLATE_AT);
+ }
+ 
+ /*
+@@ -243,6 +247,40 @@ cw_watch(int cpu, const char *where)
+ 	}
+ }
+ 
++/*
++ * The widening arm's second stop, on purpose (#599).  consolewrite() calls
++ * this with printf_lock held and interrupts on; once, on processor 0 after
++ * CW_ABLATE_AT ticks, it raises the vector of an ISA line whose handler is
++ * intnull() -- found in ivect[] rather than named, since a line's owner
++ * changes during a boot -- so that intnull()'s printf() runs nested inside
++ * the holder.  With printf_nested() (kern/printf.c) the line comes out and
++ * the boot goes on; with ablations/599-printf-waits.patch it spins before its
++ * EOI and the tick stops behind the vector in service.
++ */
++extern void	(*ivect[])();
++extern void	intnull(int);
++
++void
++clock_watch_ablate_nested_printf(void)
++{
++	static int	done;
++	int		irq;
++
++	if (cpu_number() != master_cpu || done ||
++	    nmi_cpu_tick[master_cpu] < CW_ABLATE_AT)
++		return;
++	for (irq = 15; irq > 2; irq--)
++		if (ivect[irq] == (void (*)())intnull)
++			break;
++	if (irq <= 2)
++		return;
++	done = 1;
++	cn_puts("\nclock: #599 ablation -- line ");
++	cn_dec((unsigned int)irq);
++	cn_puts(" raised inside consolewrite's hold now\n");
++	lapic_send_self_ipi(0x40 + irq);
++}
++
+ void
+ clock_watch_tick(int cpu)
+ {
+diff --git a/uros/src/mach_kernel/i386/clock_watch.h b/uros/src/mach_kernel/i386/clock_watch.h
+index 8d2b05e2..80d44df7 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.h
++++ b/uros/src/mach_kernel/i386/clock_watch.h
+@@ -41,4 +41,6 @@ extern void	clock_watch_tick(int cpu);
+ extern void	clock_watch_spin(const char *where);
+ extern int	clock_watch_nmi(struct i386_saved_state *regs);
+ 
++extern void	clock_watch_ablate_nested_printf(void); /* from consolewrite */
++
+ #endif	/* _I386_CLOCK_WATCH_H_ */

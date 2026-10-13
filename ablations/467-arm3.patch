@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #467
+Takes out: vm_fault() for a ring-0 fault on a user address -- a copyout into a page the task holds copy-on-write fails: today the first is the bundle's, read into bootstrap's pages, which arrive as zeros, and no server is loaded
+Run: --entry 14 600 -smp 4
+Expect: fault_test: \[3\] .*WRONG
+Expect: ^bundle: bad magic
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 46247c61..b3a69ffd 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1771,7 +1771,7 @@ void trap_dispatch(struct trap_frame *frame)
+ 				     ? (VM_PROT_READ | VM_PROT_WRITE)
+ 				     : VM_PROT_READ;
+ 
+-		if (map != VM_MAP_NULL
++		if (0 && map != VM_MAP_NULL
+ 		    && fault_in(map, read_cr2(), prot, frame) == KERN_SUCCESS) {
+ 			/*
+ 			 * #482 here too.  A copyout into a page the task holds

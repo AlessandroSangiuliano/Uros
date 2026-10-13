@@ -1,0 +1,38 @@
+Kind: widen
+Issue: #599
+Holds open: the I/O APIC's window -- 100 reads of port 0x80 between selecting a register and using it, so that a second processor's select lands in the gap far more often; the fixed tree must still pass -Y
+Run: --entry 23 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic.c b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+index b099a851..c8fe4953 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ioapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+@@ -85,15 +85,28 @@ static void window_leave(uint64_t flags)
+ 		interrupts_enable();
+ }
+ 
++/*
++ * #599's widened window, for the -Y test (ioapic_race_test.c): 100 port 0x80
++ * reads between selecting a register and using it, so a second processor's
++ * select lands in the gap far more often.
++ */
++static void window_widen(void)
++{
++	for (unsigned i = 0; i < 100; i++)
++		(void) inb(0x80);
++}
++
+ static uint32_t window_read(unsigned reg)
+ {
+ 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
++	window_widen();
+ 	return *(volatile uint32_t *)(io + IOAPIC_WINDOW);
+ }
+ 
+ static void window_write(unsigned reg, uint32_t value)
+ {
+ 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
++	window_widen();
+ 	*(volatile uint32_t *)(io + IOAPIC_WINDOW) = value;
+ }
+ 

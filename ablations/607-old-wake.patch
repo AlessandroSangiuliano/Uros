@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #607
+Takes out: wake_dequeued() from the hand-off's wake of a waiter it does not switch to -- its own old copy leaves a stopped waiter TH_RUN on no run queue, and thread_setrun()s a swapped-out one
+Run: --entry 25 600 -smp 4
+Expect: handoff: WRONG
+Expect: panic\(cpu
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 8f4bff5c..f71b70c5 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1390,9 +1390,11 @@ thread_handoff_to_parked_waiter(
+ 		 * that is running -- #360's futex ping-pong ran one waiter on up
+ 		 * to six processors at once.
+ 		 */
+-		/* Dequeued off the wait hash, so it must have been waiting. */
+-		if (!wake_dequeued(victim, THREAD_AWAKENED))
+-			panic("thread_handoff_to_parked_waiter");
++		victim->wait_result = THREAD_AWAKENED;
++		victim->at_safe_point = NOT_AT_SAFE_POINT;
++		victim->state = (ostate &~ TH_WAIT) | TH_RUN;
++		if ((ostate & (TH_RUN | TH_SUSP)) == 0)
++			thread_setrun(victim, TRUE, TAIL_Q);
+ 		thread_unlock(victim);
+ 		splx(s);
+ 		return FALSE;

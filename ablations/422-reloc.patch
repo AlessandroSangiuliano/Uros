@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #422
+Takes out: the writes of bootstrap's relocation pass -- the table is walked and checked and nothing is written, so every static PIE in the bundle (cap_server first, cow_test the image #422 made one) runs with link-time pointers and dies at the first it follows
+Run: --entry 14 600 -smp 4
+Expect: exception_no_server: terminating task
+
+diff --git a/uros/src/servers/bootstrap/load.c b/uros/src/servers/bootstrap/load.c
+index e3004a69..70e06c73 100644
+--- a/uros/src/servers/bootstrap/load.c
++++ b/uros/src/servers/bootstrap/load.c
+@@ -366,10 +366,14 @@ apply_pie_relocations(vm_offset_t area_start,
+ 			 * right -- a coincidence that would hold until the
+ 			 * first entry where it did not.
+ 			 */
+-			if (has_addend)
+-				*slot = addend + load_bias;
+-			else
+-				*slot += load_bias;
++			/*
++			 * The table is walked and validated, and nothing is
++			 * written.  A PIE image in the bundle must then fail to
++			 * run -- which is what says the relocations are
++			 * load-bearing rather than that the image happened not
++			 * to need them.
++			 */
++			(void) slot; (void) addend; (void) has_addend;
+ 		}
+ 	}
+ 

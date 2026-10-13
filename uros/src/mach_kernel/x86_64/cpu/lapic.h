@@ -23,8 +23,74 @@
  * says where the firmware put it, the MSR says where it is now, and they
  * differ on any machine where it has been relocated.  The MADT value is
  * still worth having as a cross-check, which is why the caller passes it.
+ *
+ * #659: in an x2APIC mode the firmware left on there is nothing to map --
+ * the registers are MSRs -- so neither the mapping nor the cross-check is
+ * done, and the mode is kept.
  */
 void lapic_init(uint64_t madt_base);
+
+/*
+ * xAPIC or x2APIC mode, and how it came to be (#659).  lapic_init() keeps an
+ * x2APIC mode the firmware left on; lapic_plan_mode() is the one decision,
+ * made on the boot processor once the DMAR has been read and before any
+ * remapping engine is written, since the mode is part of what an engine is
+ * given; lapic_x2apic_planned() is what it decided.  lapic_choose_mode() makes
+ * the switch the plan says -- except on bare metal where remapping did not
+ * come on with entries for 32-bit ids, when it stays in xAPIC mode and says so
+ * -- and every processor runs the mode it settles on (lapic_mode_here(),
+ * lapic_enable()).  The boot says which.  "-2" below is also the MADT listing
+ * an id xAPIC mode cannot name (above LAPIC_XAPIC_ID_MAX) with nobody asking,
+ * lapic_x2apic_needed() -- zero otherwise.
+ */
+enum lapic_mode {
+	LAPIC_MODE_XAPIC,			/* not asked, or nothing to keep */
+	LAPIC_MODE_X2APIC_KEPT,			/* the firmware left it on */
+	LAPIC_MODE_X2APIC_KEPT_OPTED_OUT,	/* ...and its DMAR asks for none */
+	LAPIC_MODE_X2APIC_TURNED_ON,		/* -2, under a hypervisor */
+	LAPIC_MODE_X2APIC_ABSENT,		/* -2, and CPUID offers none */
+	LAPIC_MODE_X2APIC_OPTED_OUT,		/* -2, and the DMAR asks for none */
+	LAPIC_MODE_X2APIC_NOT_ON_METAL,		/* -2 on bare metal, no remapping
+						   to 32-bit ids */
+	LAPIC_MODE_X2APIC_TURNED_ON_REMAPPED	/* -2, remapped to 32-bit ids */
+};
+void		lapic_plan_mode(void);
+int		lapic_x2apic_planned(void);
+uint32_t	lapic_x2apic_needed(void);
+void		lapic_choose_mode(void);
+enum lapic_mode	lapic_mode(void);
+int		lapic_x2apic(void);
+
+/*
+ * #659: whether interrupt remapping may come on only with entries for 32-bit
+ * ids: the local APIC is in x2APIC mode already, and the machine is bare
+ * metal, where the SDM has remapping with EIME come first (13.12.7).
+ */
+int		lapic_remapping_needs_x2apic_entries(void);
+
+/*
+ * 🔴 THE HIGHEST APIC ID AN EIGHT-BIT DESTINATION NAMES ONE PROCESSOR BY (#659).
+ *
+ * FEH, not FFH: in physical destination mode FFH is every processor -- "either
+ * a single destination (local APIC IDs 00H through FEH) or a broadcast to all
+ * APICs (the APIC ID is FFH)" (SDM Vol. 3A 253668-093US 13.6.2.1).  The same
+ * eight bits are the command register's in xAPIC mode, a redirection entry's
+ * 63:56, a message address's 19:12 (13.11.1) and a remapping entry's
+ * destination when its engine is not in x2APIC mode, so one limit serves them
+ * all; it is also why firmware hands over in x2APIC mode once any id is "255
+ * or greater" (13.12.7).  An id of 255 written into any of them would have
+ * interrupted every processor.
+ */
+#define	LAPIC_XAPIC_ID_MAX	0xFEu
+
+/*
+ * #659: the command register's destination word for `apic_id' in the mode
+ * given (1 for x2APIC), or no: in xAPIC mode an id above LAPIC_XAPIC_ID_MAX
+ * names no single processor, and is refused rather than cut to its low byte
+ * or sent to all of them.
+ */
+int		lapic_icr_destination(uint32_t apic_id, int x2apic_mode,
+				      uint32_t *high);
 
 /*
  * The vector the local APIC delivers when it has decided, after the fact,
@@ -53,6 +119,16 @@ void lapic_init(uint64_t madt_base);
 void lapic_enable(void);
 
 /*
+ * #659: this processor in the boot processor's mode -- xAPIC or x2APIC --
+ * which every accessor in lapic.c assumes; lapic_enable() makes sure of it,
+ * and an application processor does it first, as soon as it can report a
+ * fault.  lapic_mode_matches() says whether this processor's IA32_APIC_BASE
+ * agrees with the accessors now.
+ */
+void lapic_mode_here(void);
+int lapic_mode_matches(void);
+
+/*
  * Say the current interrupt has been dealt with.
  *
  * Not a formality: the APIC holds the vector's priority level busy until
@@ -73,9 +149,10 @@ void lapic_eoi(void);
  * that says so, because "the acknowledgement is not given twice" is otherwise
  * a claim about code paths rather than an observation.
  *
- * ⚠️ A register read, which is an MMIO access and under virtualisation a trip
- * out of the guest -- the cost #322 rearranged the whole priority mechanism
- * to avoid.  Not for the interrupt path.
+ * ⚠️ A register read -- an MMIO access in xAPIC mode, an RDMSR in x2APIC mode
+ * (#659) -- and under virtualisation a trip out of the guest either way, the
+ * cost #322 rearranged the whole priority mechanism to avoid.  Not for the
+ * interrupt path.
  */
 int lapic_in_service(uint8_t vector);
 
@@ -132,21 +209,12 @@ void lapic_send_self(uint8_t vector);
  * with the last of them delivered long after the first.
  *
  * Neither waits for the interrupt to be *handled*, only for the message to
- * be accepted for delivery.  What the target did about it is the caller's
+ * be accepted for delivery -- in xAPIC mode.  In x2APIC mode there is nothing
+ * to wait for: the command register has no delivery status (SDM 13.12.9), and
+ * the write is the send (#659).  What the target did about it is the caller's
  * question, and the reason the layer above this one counts answers.
  */
 void lapic_send_ipi(uint32_t apic_id, uint8_t vector);
-
-/*
- * #593, only in the ablation that leaves a send open to an interrupt: how many
- * sends began on a processor that was already past the wait of another and
- * not yet past its second write -- on every processor, or on one.  Without
- * the ablation the case cannot happen, and there is nothing to count.
- */
-#if defined(ABLATE_593_ICR_OPEN) && ABLATE_593_ICR_OPEN
-uint64_t lapic_icr_nested(void);
-uint64_t lapic_icr_nested_on(uint32_t apic_id);
-#endif
 
 /*
  * A non-maskable interrupt to one processor, which is how the kernel gets to

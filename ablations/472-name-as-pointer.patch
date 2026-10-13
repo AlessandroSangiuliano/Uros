@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #472
+Takes out: the translation of the subsystem name in trap 100 -- a port name from ring 3 is taken for a kernel pointer again, and the kernel faults writing through it before cap_test can speak
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[9\] .*WRONG
+Expect: panic\(cpu
+Expect: <convert_port_to_subsystem\+0x
+
+diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
+index 5b6c4f97..a66310a4 100644
+--- a/uros/src/mach_kernel/kern/ipc_mig.c
++++ b/uros/src/mach_kernel/kern/ipc_mig.c
+@@ -3001,12 +3001,11 @@ syscall_mach_port_allocate_subsystem(
+ 	 * already calls it with the same argument.  Two traps taking the same
+ 	 * name; one translated it and one did not.
+ 	 */
+-	if (subsystem_name != MACH_PORT_NULL) {
+-		subsys = port_name_to_subsystem(subsystem_name);
+-		if (subsys == SUBSYSTEM_NULL) {
+-			is_release(space);
+-			return(MACH_SEND_INTERRUPTED);
+-		}
++	subsys = convert_port_to_subsystem((ipc_port_t)(uintptr_t)
++					   subsystem_name);
++	if (subsys == SUBSYSTEM_NULL) {
++		is_release(space);
++		return(MACH_SEND_INTERRUPTED);
+ 	}
+ 
+ 	kr = mach_port_allocate_full(space, MACH_PORT_RIGHT_RECEIVE,

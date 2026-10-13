@@ -415,9 +415,10 @@ ddb_kbd_intr(int unit)
  * masked rather than given back -- the reader does not read again, and the
  * line says so.
  *
- * Answers whether the reader stands back now.  Under ABLATE_599_I8042_SHARED
- * it never does: the claim is answered 0, the reader goes on reading the
- * task's bytes, and the line says the ablation is on.
+ * Answers whether the reader stands back now.  With
+ * ablations/599-i8042-shared.patch it never does: the claim is answered 0,
+ * the reader goes on reading the task's bytes, and the line says the
+ * ablation is on.
  */
 unsigned int	ddb_kbd_bytes_dropped;	/* left by a claim, drained after */
 
@@ -426,16 +427,13 @@ ddb_kbd_8042_recompute(void)
 {
 	unsigned int flags;
 	int held, was, now, reader, drained = 0;
-	static int ablation_said;
 
 	if (!ddb_kbd_break_enabled || !ddb_kbd_armed)
 		return 0;
 	flags = i8042_enter();
 	held = device_io_port_held(KBD_DATA) || device_io_port_held(KBD_STATUS);
 	was = i8042_claimed;
-#ifndef	ABLATE_599_I8042_SHARED
 	i8042_claimed = held;
-#endif
 	now = i8042_claimed;
 	reader = ivect[1] == (intr_t)ddb_kbd_intr;
 	if (was && !now) {
@@ -463,11 +461,6 @@ ddb_kbd_8042_recompute(void)
 		       "break-key reader's -- a driver took it and did not give "
 		       "it back -- so the reader does not read again this boot "
 		       "(#599)\n");
-	else if (!now && held && !ablation_said) {
-		ablation_said = 1;
-		printf("DDB: ABLATE_599_I8042_SHARED -- the 8042 is claimed and "
-		       "the break-key reader goes on reading it (#599)\n");
-	}
 	return now;
 }
 

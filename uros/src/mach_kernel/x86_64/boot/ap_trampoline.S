@@ -154,19 +154,53 @@ ap_trampoline_end:
 /*                                                                     */
 /*  This is the point of the whole arrangement.  CPUID answers without  */
 /*  a stack, so a processor can learn its own identity before it has    */
-/*  anywhere to put anything — and index a table of stacks with it.     */
-/*  Nothing is handed to it and nothing is taken in turn.               */
+/*  anywhere to put anything — and find its number, and its stack, with */
+/*  it.  Nothing is handed to it and nothing is taken in turn.          */
 /* ------------------------------------------------------------------ */
 	.section .text
 	.code64
 	.globl	ap_entry64
 ap_entry64:
-	movl	$1, %eax
+	/*
+	 * The id as cpu_apic_id() reads it (#659): leaf 0BH's 32-bit x2APIC
+	 * id where the leaf enumerates one -- EBX[15:0] not zero at subleaf
+	 * 0 -- else leaf 1's eight bits, which agree with it below 256.
+	 */
+	xorl	%eax, %eax
+	cpuid
+	cmpl	$0xb, %eax
+	jb	4f
+	movl	$0xb, %eax
+	xorl	%ecx, %ecx
+	cpuid
+	testw	%bx, %bx
+	jz	4f
+	movl	%edx, %ebx			/* leaf 0BH: EDX = x2APIC id */
+	jmp	5f
+4:	movl	$1, %eax
 	cpuid
 	shrl	$24, %ebx			/* leaf 1: EBX[31:24] = APIC id */
+5:
 
-	leaq	ap_stack_top(%rip), %rax
-	movq	(%rax, %rbx, 8), %rsp
+	/*
+	 * Its number is the index of its id in smp_cpu_apic[] (#663): the id
+	 * is the hardware's name for it, and on OMEGA the E-cores' ids run to
+	 * 94, past the 64 stacks.  A search rather than a lookup, since an id
+	 * can be anything; at most 64 compares, once per processor per boot.
+	 * An id not in the table is a processor nobody woke, so it halts.
+	 */
+	leaq	smp_cpu_apic(%rip), %rsi
+	movl	smp_cpu_numbered(%rip), %ecx
+	xorl	%edi, %edi
+2:	cmpl	%ecx, %edi
+	jae	1f
+	cmpl	(%rsi, %rdi, 4), %ebx
+	je	3f
+	incl	%edi
+	jmp	2b
+
+3:	leaq	ap_stack_top(%rip), %rax
+	movq	(%rax, %rdi, 8), %rsp
 
 	/*
 	 * A stack exists from here.  Clear the frame pointer first so a
@@ -174,8 +208,7 @@ ap_entry64:
 	 * walking into whatever the register happened to hold.
 	 */
 	xorq	%rbp, %rbp
-	movl	%ebx, %edi
-	call	ap_start_c
+	call	ap_start_c			/* %edi = this processor's number */
 
 1:	cli
 	hlt

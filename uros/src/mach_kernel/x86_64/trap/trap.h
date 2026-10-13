@@ -170,6 +170,8 @@ struct trap_frame {
  * field above moves the real offsets and stops the build on the line below,
  * rather than in a boot three weeks later.
  */
+_Static_assert(TF_VECTOR == __builtin_offsetof(struct trap_frame, vector),
+	       "TF_VECTOR and struct trap_frame disagree");
 _Static_assert(TF_RIP    == __builtin_offsetof(struct trap_frame, rip),
 	       "TF_RIP and struct trap_frame disagree");
 _Static_assert(TF_CS     == __builtin_offsetof(struct trap_frame, cs),
@@ -279,6 +281,13 @@ void trap_init(void);
 void trap_dispatch(struct trap_frame *frame);
 
 /*
+ * The running thread's saved user frame, pcb->user (cpu/machdep.c).  Called
+ * from the return paths in entry.S, and from the trap path to check that a
+ * frame about to block in exception() is that one (#650).
+ */
+struct trap_frame *act_user_frame(void);
+
+/*
  * Entry from the four stubs that cannot decide from the saved code segment
  * (#440): #DB, NMI, #DF and #MC.  See trap/entry.S for why those four and no
  * others, and for how the decision is made.
@@ -314,6 +323,13 @@ const char *trap_name(uint64_t vector);
 typedef void (*trap_handler_t)(struct trap_frame *frame);
 
 void trap_set_handler(unsigned vector, trap_handler_t handler);
+
+/*
+ * #659: what claims `vector' now, for a test that borrows one and must give
+ * back what it found -- not zero, which turns an interrupt still on its way
+ * to another processor into "no handler" and a halt.
+ */
+trap_handler_t trap_get_handler(unsigned vector);
 
 /*
  * Run the handler for `vector` as though it had just arrived.
@@ -420,6 +436,17 @@ struct trap_record {
 	uint64_t rsp;
 	uint64_t frame;
 	uint64_t rbp;		/* what a backtrace has to be walked from     */
+	/*
+	 * And that backtrace, walked by the handler while those frames were
+	 * still the stack (#659): how deep, the first name, and whether it
+	 * reached x86_64_boot.  Walked from `rbp' after the trap returned, it
+	 * read frames the calls since had written over -- and passed only
+	 * while the trap landed one call below the test, where every call the
+	 * test made rewrote the dead frame with the same two words.
+	 */
+	unsigned	bt_depth;
+	const char     *bt_first;
+	int		bt_reached_boot;
 	int      caught;
 };
 

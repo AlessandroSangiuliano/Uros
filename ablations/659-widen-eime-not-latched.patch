@@ -1,0 +1,18 @@
+Kind: widen
+Issue: #659
+Holds open: an engine whose IRTA_REG does not take EIME -- the write drops it, as an engine without EIM, where the bit is RsvdZ, would -- so that the word read back is not the word composed
+Run: --iommu intel-eim --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2361,7 +2361,8 @@
+ 				       phys_to_direct(t->intel_table + off));
+ 	}
+ 
+-	*(volatile uint64_t *)(regs + VTD_IRTA_REG) = t->intel_irta;
++	*(volatile uint64_t *)(regs + VTD_IRTA_REG) =
++		t->intel_irta & ~VTD_IRTA_EIME;
+ 	keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+ 	*(volatile uint32_t *)(regs + VTD_GCMD) = keep | (uint32_t)VTD_GCMD_SIRTP;
+ 	if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_IRTPS, 1, 0))

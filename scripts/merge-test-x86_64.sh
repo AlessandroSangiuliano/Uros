@@ -74,7 +74,21 @@ WRONG=0
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in
 #   ioapic    -Y's own line: "ioapic_race: PASS"
+#   msirace   -m's own line: "msi_race: PASS"
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
+#   reach     the harness's verdict, entries for 32-bit apic ids, and a pin and an
+#             MSI-X slot seen arriving at the processor they were aimed at (#659)
+#   earlypanic  -p panics on purpose before the boot processor has its page:
+#             its message and the backtrace after it, and no protection fault
+#             in their place (#665)
+# A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
+# two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
+# Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
+# by GRUB before the kernel, as a firmware that hands over in it does (#659).
+# Entry 48 adds -i with engines that take x2APIC ids (--iommu intel-eim, amd-xt),
+# and 37 runs on processors 0 and 256, x2APIC mode left on by SeaBIOS, so that
+# the interrupts aimed at 256 need all 32 bits; under KVM the harness asks
+# those engines for the split irqchip.
 ENTRIES="
 0 harness
 1 harness
@@ -86,15 +100,29 @@ ENTRIES="
 13 stop13
 14 harness
 14 harness - 1
+14 harness --socket1-cpu 1,sockets=2,cores=64,maxcpus=128
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
+36 harness --iommu_intel
+37 harness --iommu_intel
+38 harness --iommu_intel
+36 harness --iommu_amd
+37 harness --iommu_amd
+38 harness --iommu_amd
+38 hpetfsb --iommu_intel_--hpet_fsb
+45 harness --iommu_intel
+45 harness --iommu_amd
 17 harness
 18 harness
 21 harness
 22 harness
+22 hpetgaps - 6,sockets=2,cores=3
+22 hpetfsb --hpet_fsb
 23 ioapic
+39 msirace --iommu_intel
 24 panic2
+40 earlypanic
 25 harness
 26 harness
 27 harness
@@ -106,13 +134,34 @@ ENTRIES="
 31 harness
 31 harness - 1
 32 harness
+32 harness - 1
 33 harness
+33 harness - 1
+34 harness
+34 harness - 1
+35 harness
+35 harness - 1
 3 harness
 3 harness - 1
 4 harness
 4 harness - 1
 20 harness
 20 harness - 1
+41 early
+42 restart
+42 restart --iommu_intel
+43 restartcensus
+44 restartpanic
+46 harness
+46 harness - 1
+47 harness
+47 harness - 1
+48 reach --iommu_intel-eim
+48 reach --iommu_amd-xt
+37 reach --socket1-cpu_--iommu_intel-eim 1,sockets=2,cores=256,maxcpus=512
+37 reach --socket1-cpu_--iommu_amd-xt 1,sockets=2,cores=256,maxcpus=512
+50 harness
+51 harness
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -130,8 +179,59 @@ judge() {	# entry verdict log-of-the-harness full-log
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
-	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q 'PASS' ;;
+	# #663: numbered with gaps -- APIC ids 0-2 and 4-6, as pavillion's are
+	# 0-5 and 8-13 -- every processor takes the HPET's tick in window 0.
+	hpetgaps) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'cpu 5 took [0-9]+ ticks in window 0' "$f" &&
+		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
+	msirace) grep -aq 'msi_race: PASS' "$f" ;;
+	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
+	# while interrupts are remapped takes its pin instead, for the reason
+	# it gives: QEMU's tables name no HPET, and its message could not go
+	# through an entry of its own.  On q35 under KVM nothing is remapped.
+	hpetfsb) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		if grep -aq 'interrupt remapping IS ON' "$f"; then
+			grep -aq 'not the FSB message: no table names the HPET for interrupt remapping' "$f"
+		else
+			grep -aqE 'FSB message to cpu [0-9]+ \(APIC id [0-9]+\) on vector 0x[0-9a-f]+; each' "$f"
+		fi ;;
+	# #659: the boot passed, entries for 32-bit apic ids were built, and
+	# irq 0 and the 82574L's MSI-X slot, aimed at a processor other than
+	# the boot processor's id 0 -- 0 is 0 in every format -- arrived there
+	# and nowhere else (irq_reach_selftest()).  A NOT ASKED would pass the
+	# harness and test nothing, so the two lines are asked for.
+	reach) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aq 'entries for 32-bit apic ids' "$f" &&
+		[ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ;;
+	# #666: the boot passed, and with -f the screen drew what came before it.
+	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
+	# Its verdict line, not any "PASS": a WRONG quotes the log's line, and
+	# a line run together with "xfile_test: PASS" passed (#661's review).
+	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q '^double-panic-check: PASS' ;;
+	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
+		grep -aq '<x86_64_boot+0x' "$f" &&
+		! grep -aq 'trap general protection' "$f" ;;
+	# #373: -b restarted the machine for the reason the entry gives it --
+	# its deadline, the quiet census, a panic -- and the zone Linux reads
+	# back after the restart read back first as ramoops would read it.
+	restart) grep -aq 'reset: -b: 20 seconds since the scheduler started' "$f" &&
+		zone_kept "$f" ;;
+	restartcensus) grep -aq 'quiet_census: -b: the boot is over; restarting the machine' "$f" &&
+		zone_kept "$f" ;;
+	restartpanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
+		grep -aq 'panic: -b: restarting the machine in 5 seconds' "$f" &&
+		zone_kept "$f" ;;
 	esac
+}
+
+# #373: the zone's check said it reads back as ramoops would read it, nothing
+# was dropped, and the reset was written after it -- the FADT's register, or
+# 0xcf9 on a board whose FADT has none.
+zone_kept() {
+	grep -aqE 'reset: the zone at 0x[0-9a-f]+ reads back as ramoops would read it: signature, start [0-9]+ and size [1-9][0-9]* as written, the [1-9][0-9]* bytes hashing as written and beginning with the [1-9][0-9]* kept before it existed, 0 dropped' "$1" &&
+		grep -aqE '^reset: (writing 0x[0-9a-f]+ to the FADT.s reset register|port 0xcf9, )' "$1" &&
+		! grep -aq 'does NOT read back as ramoops would read it' "$1"
 }
 
 # The stub listens on one port, and a qemu already on it would make every run here refuse to start.
@@ -151,15 +251,44 @@ while read -r e v opt cpus; do
 		budget=1200
 		k=""
 		[ $a = kvm ] && { budget=600; k="--kvm"; }
-		tag="e$e-$a$n${opt:+-${opt##* }}"
+		# No comma in a log's name: an entry's -smp value may be a whole
+		# topology (entry 14's 1,sockets=2,cores=64,maxcpus=128), and
+		# ci/job.sh writes the name into a CSV whose columns commas separate.
+		tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
-		if judge "$e" "$v" "$h" "$f"; then
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
-		else
+		# #661: and no line the screen cannot draw, whoever judges the
+		# entry.  Asked of the full log itself: the harness names one as
+		# NO GLYPH only where its verdict gets that far, which neither an
+		# entry that panics before setup_main (40, 44) nor a run cut short
+		# reaches, and only the judges that ask for its verdict read it --
+		# so a panic or a restart passed with an undrawable line in
+		# exactly the messages a machine with no serial port needs most
+		# (#661's review, two rounds).  A check that cannot run is said as
+		# such.  For an entry its judge passed, what it found goes into the
+		# log the verdict points at -- which for 40 and 44 the harness's own
+		# verdict never reached -- and before the verdict, on which
+		# ci/job.sh copies that log.
+		ng_rc=0
+		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
+		if ! judge "$e" "$v" "$h" "$f"; then
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v): $h"
 			WRONG=$((WRONG + 1))
+		elif [ $ng_rc -ne 0 ]; then
+			# One line, the last, which says why: ci/job.sh reads the
+			# verdict a line at a time.
+			why=$(printf '%s\n' "$ng" | tail -n 1)
+			[ -n "$why" ] || why="nothing said on its output"
+			printf 'NO GLYPH (#661): the check could not run (exit %s): %s\n' "$ng_rc" "$why" >> "$h"
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
+			WRONG=$((WRONG + 1))
+		elif [ -n "$ng" ]; then
+			printf '%s\n' "$ng" | sed 's/^/NO GLYPH (#661): line /' >> "$h"
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
+			WRONG=$((WRONG + 1))
+		else
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v)"
 		fi
 	done
 done <<< "$ENTRIES"

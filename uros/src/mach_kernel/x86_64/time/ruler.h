@@ -95,9 +95,10 @@ struct ruler_calibration {
 /*
  * Calibrate `subject' against `r' by the rule above, each run over `span' of
  * the ruler and bounded by `budget' TSC counts.  `ablate', when not null, is
- * handed each attempt's runs before the vote: it is how an ablation build
- * makes a run disagree on purpose, and it is null in any kernel booted for
- * anything else.  Returns 1 with out->hz set, or 0 with out->hz zero.
+ * handed each attempt's runs before the vote: it is how
+ * ablations/508-one-run-out.patch and 586-tsc-disagree.patch make a run
+ * disagree on purpose, and every caller in the tree passes null.  Returns 1
+ * with out->hz set, or 0 with out->hz zero.
  */
 int ruler_calibrate(const struct ruler *r,
 		    uint64_t (*subject)(void), uint64_t subject_mask,

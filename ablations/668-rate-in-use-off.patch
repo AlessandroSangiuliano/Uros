@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #668
+Accel: kvm
+Takes out: the TSC's rate in use being the exact source's -- it is kept 1/32 below the rate adopted, 3%, well inside the bound a host's clocks may be from the source, so the check must tell it from the host's and say WRONG
+Run: --entry 41 120 -smp 4
+Expect: the TSC checked against the .* — WRONG, the rate in use is not the exact source's
+
+diff --git a/uros/src/mach_kernel/x86_64/time/tsc.c b/uros/src/mach_kernel/x86_64/time/tsc.c
+index 0a6866b0..73dfdd3a 100644
+--- a/uros/src/mach_kernel/x86_64/time/tsc.c
++++ b/uros/src/mach_kernel/x86_64/time/tsc.c
+@@ -54,7 +54,7 @@ static void exact_decide(void)
+ 	adopted = exact_choose(e.tsc_hz, tsc_rate, rulers_bracket_ppm(),
+ 			       &source);
+ 	if (adopted != 0)
+-		tsc_rate = adopted;
++		tsc_rate = adopted - adopted / 32;
+ }
+ 
+ const struct exact_choice *tsc_source(void)

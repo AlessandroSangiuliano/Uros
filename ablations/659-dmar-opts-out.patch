@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #659
+Holds open: a DMAR that opts out of x2APIC mode -- QEMU's never sets the bit, even with intremap=on,eim=off -- so -2 must be refused and the boot must say why
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu.c b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+index 1eebb9e8..496097d1 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu.c
+@@ -404,7 +404,7 @@ int iommu_platform_interrupt_remapping(void)
+ 
+ int iommu_x2apic_discouraged(void)
+ {
+-	return x2apic_discouraged;
++	return 1;	/* #659: a DMAR that opts out, which QEMU's does not */
+ }
+ 
+ /*

@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #508
+Takes out: nothing -- a probe: the ACPI HPET table is withheld, a board without an HPET, so two rulers vote and the one-second refinement falls back to the PM timer
+Run: --entry 14 600 -smp 4
+Expect: the TSC (refined|checked) against the PM timer
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/acpi.c b/uros/src/mach_kernel/x86_64/cpu/acpi.c
+index f03ed773..cf49e5e7 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/acpi.c
++++ b/uros/src/mach_kernel/x86_64/cpu/acpi.c
+@@ -632,6 +632,12 @@ void acpi_hpet(struct acpi_hpet *out)
+ 
+ 	*out = (struct acpi_hpet){ 0 };
+ 
++	/*
++	 * #508: the table is withheld here, in one place, so that the whole
++	 * kernel sees a board without an HPET -- the census, the vote, the
++	 * refinement -- the way #563 withheld the I/O APIC.
++	 */
++	return;
+ 	t = (const struct acpi_hpet_table *)acpi_find_table("HPET");
+ 	if (t == 0 || t->header.length < sizeof(*t))
+ 		return;

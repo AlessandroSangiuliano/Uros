@@ -1,0 +1,98 @@
+Kind: ablation
+Issue: #668
+Over: 668-widen-host-clock-drift.patch
+Accel: kvm
+Takes out: the check asking exact.c's rule -- past one part in 64 from an exact source it is WRONG again, whatever the bound the source was adopted within, as it was before #668: the fix's code reversed, its comments kept
+Run: --entry 41 120 -smp 4
+Expect: the TSC checked against the .* — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/time/tsc_refine.c b/uros/src/mach_kernel/x86_64/time/tsc_refine.c
+index a0c31857..a276f79c 100644
+--- a/uros/src/mach_kernel/x86_64/time/tsc_refine.c
++++ b/uros/src/mach_kernel/x86_64/time/tsc_refine.c
+@@ -38,20 +38,12 @@
+ #include <kern/time_out.h>
+ #include <kern/misc_protos.h>
+ 
+-#include <time/exact.h>
+ #include <time/ruler.h>
+ #include <time/rulers.h>
+ #include <time/tsc.h>
+ 
+ static int refine_wakeup;	/* an event nobody posts: the timeout ends the wait */
+ 
+-static uint64_t apart_ppm(uint64_t a, uint64_t b)
+-{
+-	uint64_t spread = a > b ? a - b : b - a;
+-
+-	return b ? spread * 1000000 / b : 0;
+-}
+-
+ static uint64_t subject_tsc(void)
+ {
+ 	return rdtsc_ordered();
+@@ -115,11 +107,6 @@ static void tsc_refine(void)
+ 	ppm = spread * 1000000 / boot;
+ 
+ 	if (tsc_source()->adopted >= 0) {
+-		const struct exact_choice *s = tsc_source();
+-		unsigned id = (unsigned)s->adopted;
+-		uint64_t one[FREQ_EXACT] = { 0 };
+-		struct exact_choice now;
+-
+ 		/*
+ 		 * #668: UNDER A HYPERVISOR THE RULER IS THE HOST'S CLOCK, and how
+ 		 * far that clock may be from an exact source is the bound exact.c
+@@ -134,43 +121,15 @@ static void tsc_refine(void)
+ 		 * use another, the kernel's rate is wrong.  On bare metal the bound
+ 		 * is narrower than one part in 64, and nothing changes there.
+ 		 */
+-		one[id] = s->hz[id];
+-		(void) exact_choose(one, run.hz, ruler_window_ppm(&run), &now);
+-
+-		if (spread <= boot / RULER_TOLERANCE)
+-			printf("UrMach x86-64: the TSC checked against the %s over "
+-			       "%lu ms: %lu kHz, %lu ppm from %s's value, the ends "
+-			       "within %lu ppm — the exact source stands\n",
+-			       k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
+-			       freq_exact_name(id), ruler_window_ppm(&run));
+-		else if (now.phase_ppm != 0 && boot == s->hz[id]
+-			 && now.verdict[id] != EXACT_CONTRADICTS)
+-			printf("UrMach x86-64: the TSC checked against the %s over "
+-			       "%lu ms: %lu kHz, %lu ppm from %s's value, the ends "
+-			       "within %lu ppm — the exact source stands, and the "
+-			       "host's clocks are that far from it: under a "
+-			       "hypervisor the %s runs on them, and they may be up "
+-			       "to %lu ppm from it, the bound it was adopted within; "
+-			       "at boot the rulers were %lu ppm from it, and this "
+-			       "second is %lu ppm from their measurement (#594, "
+-			       "#668)\n",
+-			       k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
+-			       freq_exact_name(id), ruler_window_ppm(&run), k->name,
+-			       now.bound_ppm, s->ppm[id],
+-			       apart_ppm(run.hz, s->measured));
+-		else
+-			printf("UrMach x86-64: the TSC checked against the %s over "
+-			       "%lu ms: %lu kHz, %lu ppm from the rate in use, the "
+-			       "ends within %lu ppm — WRONG, %s (#668)\n",
+-			       k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
+-			       ruler_window_ppm(&run),
+-			       boot != s->hz[id]
+-			       ? "the rate in use is not the exact source's this "
+-				 "kernel adopted"
+-			       : now.phase_ppm != 0
+-			       ? "further from the exact source than a host's "
+-				 "clocks may be from it"
+-			       : "more than one part in 64 from an exact source");
++		printf("UrMach x86-64: the TSC checked against the %s over %lu ms: "
++		       "%lu kHz, %lu ppm from %s's value, the ends within %lu ppm"
++		       "%s\n", k->name, elapsed * 1000 / boot, run.hz / 1000, ppm,
++		       freq_exact_name((unsigned)tsc_source()->adopted),
++		       ruler_window_ppm(&run),
++		       spread <= boot / RULER_TOLERANCE
++		       ? " — the exact source stands"
++		       : " — WRONG, more than one part in 64 from an exact "
++			 "source");
+ 		return;
+ 	}
+ 

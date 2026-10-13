@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #593
+Takes out: the next APIC timer deadline counted from the last one -- both modes count it from now again, so every period is the interval plus the tick's own delivery time: the tick runs slow, and the kernel's time of day with it
+Run: --entry 12 150 -smp 4
+Measure: each processor's ticks in per mille of nominal, in the clock_event window lines, against the same tree without the patch -- #593 measured 997-999 against 983-992 under KVM (tsc-deadline) and 982-1000 against 961-971 under TCG (lapic-oneshot), three rounds alternated
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 528c3475..49f53ea1 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -174,7 +174,7 @@ static uint64_t next_due_tsc(uint64_t now, uint64_t ticks)
+ 	uint64_t last = cpu < NCPUS ? due_tsc[cpu] : 0;
+ 	uint64_t next = now + ticks;
+ 
+-	if (last != 0 && now >= last && now - last < ticks)
++	if (0 && last != 0 && now >= last && now - last < ticks)
+ 		next = last + ticks;
+ 	if (cpu < NCPUS)
+ 		due_tsc[cpu] = next;

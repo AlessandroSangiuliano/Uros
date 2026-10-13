@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #607
+Takes out: TH_SWAPPED_OUT from the IPC direct switch's mask -- a receiver the thread swapper swapped out counts as parked, and the switch runs it on an unwired kernel stack; the -ON storm meets one
+Run: --entry 28 1200 -smp 4
+Expect: panic\(cpu
+Expect: cpu [0-9]+ backtrace \(addr2line
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+index d6992842..b6489664 100644
+--- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
++++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+@@ -722,7 +722,7 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
+  */
+ 
+ #define	DTS_PARKED(th)							\
+-	(((th)->state & (TH_SCHED_STATE | TH_SWAPPED_OUT)) == TH_WAIT)
++	(((th)->state & TH_SCHED_STATE) == TH_WAIT)
+ #define	DTS_SWAPPED_WAITER(th)						\
+ 	(((th)->state & (TH_SCHED_STATE | TH_SWAPPED_OUT))			\
+ 	 == (TH_WAIT | TH_SWAPPED_OUT))

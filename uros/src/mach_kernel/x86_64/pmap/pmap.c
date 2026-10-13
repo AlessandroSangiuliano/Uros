@@ -962,23 +962,15 @@ static void pmap_resident_drop(pmap_t pmap, uint64_t va)
  * instant than the entry the second one cleared.  The unmap now answers with
  * the entry it removed, inside its own section.
  */
-#ifndef	ABLATE_604_FORGET_TWO_WALKS
-#define	ABLATE_604_FORGET_TWO_WALKS	0
-#endif
 
 static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 {
 	pt_entry_t removed = 0;
-	uint64_t pa = 0;
+	uint64_t pa;
 	uint64_t size;
 
-	if (ABLATE_604_FORGET_TWO_WALKS) {
-		pmap_resolve(pmap->root_pa, va, &pa, 0);
-		size = pmap_unmap_page(pmap, va, 0);
-	} else {
-		size = pmap_unmap_page(pmap, va, &removed);
-		pa = pte_to_pa(removed);
-	}
+	size = pmap_unmap_page(pmap, va, &removed);
+	pa = pte_to_pa(removed);
 
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
@@ -1842,10 +1834,10 @@ int pmap_pcid_mode = PMAP_PCID_OFF;
 
 uint64_t pmap_enable_pcid(void)
 {
-	if (!cpu_has_pcid() || boot_flag('p'))
+	if (!cpu_has_pcid() || boot_flag('n'))
 		return 0;
 
-	pmap_pcid_mode = cpu_has_invpcid() && !boot_flag('i')
+	pmap_pcid_mode = cpu_has_invpcid() && !boot_flag('x')
 		       ? PMAP_PCID_INVPCID : PMAP_PCID_NO_INVPCID;
 
 	/*

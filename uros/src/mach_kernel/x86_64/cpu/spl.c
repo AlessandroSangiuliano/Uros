@@ -14,24 +14,6 @@
 #include <trap/trap.h>
 
 /*
- * The switch that takes the #454 early-out away, for the arm of the
- * measurement that has to show the cost coming back.  Off means the early-out
- * is IN, which is the shipping shape.
- */
-#ifndef	ABLATE_454_EARLYOUT
-#define	ABLATE_454_EARLYOUT	0
-#endif
-
-/*
- * The switch that puts #526's window back: splx() finds this processor's
- * block with interrupts still on.  -E (GRUB entry 30) has to say WRONG with
- * it, which is how the correction is shown to be the thing that matters.
- */
-#ifndef	ABLATE_526_SPLX_WINDOW
-#define	ABLATE_526_SPLX_WINDOW	0
-#endif
-
-/*
  * #526: percpu_ipl(), one instruction.  percpu()->ipl was two, and a thread
  * preempted between them read the level of the processor it had left.
  */
@@ -92,7 +74,6 @@ int spl_defer(unsigned vector)
  */
 static void spl_replay(struct percpu *p)
 {
-#if	!ABLATE_454_EARLYOUT
 	/*
 	 * 🔥 #392/#454: NOTHING RECORDED, NOTHING TO LOOK FOR — and the search
 	 * is 240 iterations long.
@@ -108,12 +89,11 @@ static void spl_replay(struct percpu *p)
 	 * no, which it is on every path that did not defer an interrupt.  It is
 	 * exactly equivalent: a bit set nowhere is a bit set at no level.
 	 *
-	 * ⚠️ ABLATE_454_EARLYOUT=1 takes it away again, because a correction is
-	 * verified by REMOVING it and watching the number come back.
+	 * ⚠️ ablations/454-earlyout.patch takes it away again, because a
+	 * correction is verified by REMOVING it and watching the number come back.
 	 */
 	if ((p->pending[0] | p->pending[1] | p->pending[2] | p->pending[3]) == 0)
 		return;
-#endif
 
 	for (;;) {
 		unsigned found = 0;
@@ -162,15 +142,6 @@ spl_t splx(spl_t level)
 	spl_t		old;
 	int		enabled;
 
-#if	ABLATE_526_SPLX_WINDOW
-	/* #526's ablation: the block found with interrupts still on. */
-	p = percpu();
-	old = p->ipl;
-	enabled = interrupts_enabled();
-	if (level == old)
-		return old;
-	interrupts_disable();
-#else
 	/*
 	 * Nothing to change, answered in one instruction and with nothing
 	 * turned off.  The answer cannot go stale: a thread can be moved to
@@ -203,7 +174,6 @@ spl_t splx(spl_t level)
 	interrupts_disable();
 	p = percpu();
 	old = p->ipl;
-#endif
 
 	if (level != old) {
 		/* #526: a raise from zero, recorded for the idle loop to name. */

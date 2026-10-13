@@ -196,42 +196,8 @@ void freq_exact_read(struct freq_exact *out)
 	struct freq_hypervisor	hv;
 
 	*out = (struct freq_exact){ { 0 }, { 0 } };
-#if	ABLATE_508_EXACT_HIDDEN
-	/*
-	 * #508: no exact source is seen, so the measured path runs on a
-	 * machine that has one.  Never on in a kernel booted otherwise.
-	 */
-	return;
-#endif
 	freq_cpuid_read(&cpu);
-#if	ABLATE_508_CPUID_15
-	/*
-	 * #508: the processor states 0x15 as OMEGA's does (crystal 38.4 MHz,
-	 * TSC/crystal 156/2), because no guest offers the leaf filled in and
-	 * this is the only way the path that adopts it runs.  Never on in a
-	 * kernel booted for anything else.
-	 */
-	cpu.has_15 = 1;
-	cpu.crystal_hz = 38400000;
-	cpu.tsc_numerator = 156;
-	cpu.tsc_denominator = 2;
-#endif
 	freq_hypervisor_read(&hv);
-#if	ABLATE_594_CRYSTAL_IS_BUS
-	/*
-	 * #594: the processor states 0x15 the way a hypervisor following the
-	 * SDM would -- the crystal the timing leaf's bus clock, the ratio the
-	 * timing leaf's TSC over it -- so the LAPIC timer's path that adopts
-	 * 0x15's crystal runs in a guest.  Needs `+invtsc', which makes QEMU
-	 * offer the timing leaf.  Never on in a kernel booted otherwise.
-	 */
-	if (hv.has_timing && hv.tsc_khz != 0 && hv.bus_khz != 0) {
-		cpu.has_15 = 1;
-		cpu.crystal_hz = hv.bus_khz * 1000;
-		cpu.tsc_numerator = hv.tsc_khz;
-		cpu.tsc_denominator = hv.bus_khz;
-	}
-#endif
 	if (cpu.has_15 && cpu.crystal_hz != 0 && cpu.tsc_numerator != 0
 	    && cpu.tsc_denominator != 0) {
 		out->tsc_hz[FREQ_CPUID] = (uint64_t)cpu.crystal_hz
@@ -244,22 +210,6 @@ void freq_exact_read(struct freq_exact *out)
 	if (hv.has_timing && hv.bus_khz != 0)
 		out->lapic_hz[FREQ_TIMING] = (uint64_t)hv.bus_khz * 1000;
 	out->tsc_hz[FREQ_KVMCLOCK] = hv.kvmclock_tsc_hz;
-
-#if	ABLATE_508_EXACT_LIES
-	/*
-	 * #508: the first source that states a rate states it a quarter high,
-	 * so the measurement can be seen contradicting it.  A quarter and not
-	 * the thirty-second it was: under a hypervisor a contradiction now has
-	 * to exceed what the host's NTP can do to the rulers, 12.5% (exact.c,
-	 * #594), and a lie inside that is one this check cannot tell from a
-	 * host converging.
-	 */
-	for (unsigned i = 0; i < FREQ_EXACT; i++)
-		if (out->tsc_hz[i] != 0) {
-			out->tsc_hz[i] += out->tsc_hz[i] / 4;
-			break;
-		}
-#endif
 }
 
 const char *freq_exact_name(unsigned id)

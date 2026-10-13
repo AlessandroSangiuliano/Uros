@@ -411,6 +411,23 @@ thread_suspend(
 	if (thr_act->user_stop_count++ == 0 &&
 		thr_act->suspend_count++ == 0 ) {
 		install_special_handler(thr_act);
+		/*
+		 * #603: the faults it has resolved so far, noted once the stop
+		 * is SET -- install_special_handler() has put AST_APC on the
+		 * activation, which its next return to ring 3 propagates -- and
+		 * under the activation's lock, which special_handler() takes
+		 * before it reads the note, so the stop cannot be judged
+		 * against a note not yet written.
+		 *
+		 * ⚠️ It was noted before the set, and then the count also held
+		 * whatever kept this thread between the note and the set: once
+		 * 21 faults in a boot under KVM at -smp 4 whose thread_info()
+		 * yardstick had 14 (#626's merge test), where after the set the
+		 * thread stops at its next fault.  What the set-then-note order
+		 * can miss is the fault in progress when the set lands.
+		 */
+		thr_act->stop_asked_at = thr_act->user_faults;
+		thr_act->stop_asked = TRUE;
 		if (thread &&
 			thr_act == thread->top_act && thread != current_thread()) {
 			nudge(thr_act);
@@ -1850,6 +1867,14 @@ void act_execute_returnhandlers(
  * special_handler	- handles suspension, termination.  Called
  * with nothing locked.  Returns (if it returns) the same way.
  */
+
+/*
+ * #603: page faults from ring 3 a thread may resolve between thread_suspend()
+ * asking it to stop and the stop: the one in progress, and one more if the
+ * asking landed after its return had looked.
+ */
+#define	SUSPEND_LATE_FAULTS	2
+
 void
 special_handler(
 	ReturnHandler	*rh,
@@ -1968,6 +1993,26 @@ special_handler(
 	 * If we're suspended, go to sleep and wait for someone to wake us up.
 	 */
 	if (cur_act->suspend_count) {
+		/*
+		 * 🔑 #603: how long the STOP took, counted in page faults from
+		 * ring 3 since thread_suspend() asked for it.  A thread that
+		 * lives in faults takes the stop at the next one's return
+		 * (trap_take_ast), so a count past a few is a return that did
+		 * not look.  What a count from user space adds on top of this
+		 * -- the time before the asking -- is the asker's, not the
+		 * stop's, and this line keeps the two apart.
+		 */
+		if (cur_act->stop_asked) {
+			unsigned int	late = cur_act->user_faults -
+					       cur_act->stop_asked_at;
+
+			cur_act->stop_asked = FALSE;
+			if (late > SUSPEND_LATE_FAULTS)
+				printf("thread_suspend: activation %p resolved "
+				       "%u page faults from ring 3 between the "
+				       "stop being asked and the stop -- WRONG "
+				       "(#603)\n", cur_act, late);
+		}
 		if( cur_act->handlers == NULL ) {
 			assert_wait((event_t)&cur_act->suspend_count, TRUE);
 			act_unlock_thread(cur_act);

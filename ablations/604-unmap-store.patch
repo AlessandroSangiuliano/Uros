@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #604
+Takes out: the compare-and-exchange in the unmap -- it reads the entry and stores zero, and two removers can both get through
+Run: --entry 9 1200 -smp 4
+Expect: BOTH REMOVED ONE ENTRY -- WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
+index 894a4542..5400990d 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/map.c
++++ b/uros/src/mach_kernel/x86_64/pmap/map.c
+@@ -437,6 +437,8 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
+ 			break;			/* somebody else removed it */
+ 		if (size == PAGE_SIZE_4K)
+ 			pv_keep_bits(pte_to_pa(old), old);
++		*entry = 0;
++		break;
+ 		seen = atomic_cmpxchg64((volatile uint64_t *) entry, old, 0);
+ 		if (seen == old)
+ 			break;

@@ -60,12 +60,26 @@
 void cons_putc(char c);
 void cons_puts(const char *s);
 
+/* What the wire was given before this could be called: boot.S's 32-bit line,
+ * for the screen and the zone (#661). */
+void cons_said_already(const char *s);
+
 /*
  * The same write, straight to the wire, past the capture buffer (#551).  For
  * the trap path's reporting, whose one message must reach a reader when
  * everything else has stopped -- a selftest's capture included.
  */
 void cons_putc_wire(char c);
+
+/*
+ * #659: a report on several lines, said by one processor at a time.  The
+ * holder may take it again from inside (a backtrace, a fault in the report);
+ * every other processor's byte to the wire waits while it is held, for at
+ * most about a second, and not again for the same report.  A fatal trap's
+ * report and every backtrace hold it.
+ */
+void cons_report_begin(void);
+void cons_report_end(void);
 
 /* What the bound has done on this boot, for cons_cost_report() (#551). */
 unsigned cons_tx_dropped(void);
@@ -151,8 +165,10 @@ void cons_flush(void);
  * (the ring off, the way down, the reporter), which must not wait for ever,
  * waits with a bound, and after a failed wait writes without it if the
  * divisor latch is closed: a holder that is parked or halted will never let
- * go.  One write is made without it on purpose: cons_loopback_probe, at
- * boot, on one processor with the ring off.
+ * go.  Two writes are made without it on purpose, both at boot:
+ * cons_loopback_probe, on one processor with the ring off, and
+ * cons_uart_present, to the scratch register, which no other writer here
+ * touches (#670).
  */
 /* Returns the klog cursor taken at the instant the port changed hands: the
  * forwarder's starting point (#497).  Idempotent; a second call returns the
@@ -241,6 +257,15 @@ int cons_getc(void);
  * it returns.
  */
 int cons_loopback_probe(uint8_t byte);
+
+/*
+ * Whether a UART answers at COM1, asked of its scratch register (#670): 1 if
+ * both patterns written there read back, else 0 with the pattern written and
+ * the byte read back in its place.  Without a UART every register reads 0xFF,
+ * and cons_loopback_probe() would take that for a receiver that answered
+ * wrongly; this is the question to ask first.
+ */
+int cons_uart_present(uint8_t *wrote, uint8_t *read);
 
 /* One byte, two digits — for instruction bytes the decoder declined. */
 void cons_puthex8(uint8_t v);

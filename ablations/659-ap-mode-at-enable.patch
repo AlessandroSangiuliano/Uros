@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #659
+Takes out: an application processor's APIC mode taken as soon as it can report a fault -- lapic_enable() switches it again, as before 06386369, and from desc_activate() to there a fault report's lapic_id() and a panic's IPI are x2APIC MSRs on a processor in xAPIC mode
+Run: --entry 46 600 -smp 4
+Expect: in the boot processor's apic mode from their first reportable fault on — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/smp.c b/uros/src/mach_kernel/x86_64/cpu/smp.c
+--- a/uros/src/mach_kernel/x86_64/cpu/smp.c
++++ b/uros/src/mach_kernel/x86_64/cpu/smp.c
+@@ -193,7 +193,6 @@
+ 	 * mode.  An x2APIC MSR on a processor still in xAPIC mode is a #GP
+ 	 * inside the report.  Counted when it does not hold, for the boot to say.
+ 	 */
+-	lapic_mode_here();
+ 	if (!lapic_mode_matches())
+ 		atomic_inc64((volatile uint64_t *)&ap_mode_late);
+ 

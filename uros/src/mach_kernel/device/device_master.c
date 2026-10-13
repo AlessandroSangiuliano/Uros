@@ -654,14 +654,6 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 	}
 	urmach_rcu_read_unlock();
 
-#if	ABLATE_508_SPAN_UNBOUNDED
-	/*
-	 * #508: the first page only, as before the span was bounded, so that
-	 * irq_claim_test's arm [10] can be seen noticing.
-	 */
-	if (mine)
-		return KERN_SUCCESS;
-#endif
 	if (mine && (uint64_t)phys + len <= end)
 		return KERN_SUCCESS;
 
@@ -790,46 +782,6 @@ check_cfg_access(natural_t bdf)
 
 /* ---- PCI configuration space ---- */
 
-#ifdef ABLATE_577_BDF
-/*
- * #577's ablation: ONE configuration access is refused, the ABLATE_577_NTH
- * read (ABLATE_577_WRITE 0) or write (1) of register ABLATE_577_REG of device
- * ABLATE_577_BDF, so that each step a caller has to check is refused on a real
- * boot rather than argued about.  Only accesses through the two routines below
- * are counted: the kernel's own measure_regions() reads the hardware directly.
- * Every counted access is printed with its ordinal, so the log shows which step
- * the number landed on.  The count is not atomic: this is an experiment, run on
- * one processor, and it is never built otherwise.
- *
- * With ABLATE_577_ZERO the chosen READ is answered with 0 instead: not a
- * refusal but a device that decodes nothing there, which is what a region
- * that measures zero needs in order to exist on demand.
- */
-#ifdef ABLATE_577_ZERO
-#define	ABLATE_577_SAYS	": ANSWERED 0"
-#else
-#define	ABLATE_577_SAYS	": REFUSED"
-#endif
-
-static int
-ablate_577_refuse(natural_t bdf, int write, unsigned int reg)
-{
-	static unsigned int	ablate_577_seen;
-	unsigned int		n;
-
-	if (bdf != (natural_t)ABLATE_577_BDF || write != ABLATE_577_WRITE
-	    || reg != (unsigned int)ABLATE_577_REG)
-		return 0;
-	n = ++ablate_577_seen;
-	printf("device_pci_config: #577 ablation — %s %u of register 0x%02x "
-	       "on %02x:%02x.%u, by task %p%s\n", write ? "write" : "read", n,
-	       reg, (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-	       (unsigned)(bdf & 7), (void *)current_task(),
-	       n == ABLATE_577_NTH ? ABLATE_577_SAYS : "");
-	return n == ABLATE_577_NTH;
-}
-#endif
-
 kern_return_t
 ds_master_device_pci_config_read(
 	ipc_port_t		master_port,
@@ -852,17 +804,6 @@ ds_master_device_pci_config_read(
 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
 	if (kr != KERN_SUCCESS)
 		return kr;
-#ifdef ABLATE_577_BDF
-	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
-			      0, reg)) {
-#ifdef ABLATE_577_ZERO
-		*data = 0;
-		return KERN_SUCCESS;
-#else
-		return KERN_NO_ACCESS;
-#endif
-	}
-#endif
 
 	*data = device_md_pci_read(bus, slot, func, reg);
 	return KERN_SUCCESS;
@@ -893,11 +834,6 @@ ds_master_device_pci_config_write(
 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
 	if (kr != KERN_SUCCESS)
 		return kr;
-#ifdef ABLATE_577_BDF
-	if (ablate_577_refuse((natural_t)((bus << 8) | (slot << 3) | func),
-			      1, reg))
-		return KERN_NO_ACCESS;
-#endif
 
 	device_md_pci_write(bus, slot, func, reg, data);
 	return KERN_SUCCESS;
@@ -1703,16 +1639,10 @@ static uint64_t dma_regions_freed;
  * a heapsort, so no order of pages makes it slow -- and found by a binary
  * search, twelve steps for 4096.  The index lives and dies with `pa': kalloc'd
  * with it, published before `kva' with it, freed with it after the grace
- * period.  UROS_ABLATE_537_PAGE_WALK puts the walk back.
+ * period.  ablations/537-page-walk.patch puts the walk back, and
+ * ablations/537-ix-unsorted.patch leaves the index in the order the pages
+ * came in, which dma_ix_selftest() must call WRONG -- how it is shown able to.
  */
-#ifndef ABLATE_537_PAGE_WALK
-#define ABLATE_537_PAGE_WALK 0
-#endif
-/* The index left in the order the pages came in: dma_ix_selftest() must say
- * WRONG -- how it is shown able to. */
-#ifndef ABLATE_537_IX_UNSORTED
-#define ABLATE_537_IX_UNSORTED 0
-#endif
 
 static void
 dma_ix_sift(struct dma_page_ix *ix, unsigned int root, unsigned int n)
@@ -1744,8 +1674,6 @@ dma_ix_build(struct dma_page_ix *ix, const vm_offset_t *pa, unsigned int n)
 		ix[i].pa = pa[i];
 		ix[i].page = i;
 	}
-	if (ABLATE_537_IX_UNSORTED)
-		return;
 	for (i = n / 2; i-- > 0; )
 		dma_ix_sift(ix, i, n);
 	for (i = n; i-- > 1; ) {
@@ -1762,12 +1690,6 @@ dma_region_page(const struct dma_region *r, vm_offset_t pa)
 {
 	unsigned int lo = 0, hi = r->npages;
 
-	if (ABLATE_537_PAGE_WALK) {
-		for (lo = 0; lo < r->npages; lo++)
-			if (r->pa[lo] == pa)
-				break;
-		return lo;
-	}
 	while (lo < hi) {
 		unsigned int mid = lo + (hi - lo) / 2;
 
@@ -3254,26 +3176,6 @@ check_io_port(unsigned int port, unsigned int size)
 	}
 	urmach_rcu_read_unlock();
 
-#ifdef ABLATE_570_REFUSE_IOBAR
-	/*
-	 * #570's ablation: the holder of a PCI I/O BAR is refused its own
-	 * registers after ABLATE_570_REFUSE_IOBAR accesses, so that the driver's
-	 * refusal path runs on a real boot.  The count is not atomic: this is an
-	 * experiment, run on one processor, and it is never built otherwise.
-	 */
-	if (mine) {
-		static unsigned int	ablate_570_seen;
-		unsigned int		n = ablate_570_seen++;
-
-		if (n >= ABLATE_570_REFUSE_IOBAR) {
-			if (n == ABLATE_570_REFUSE_IOBAR)
-				printf("device_io_port: #570 ablation — refusing "
-				       "0x%x to the holder of its own BAR, after "
-				       "%u allowed accesses\n", port, n);
-			return KERN_NO_ACCESS;
-		}
-	}
-#endif
 	if (mine)
 		return KERN_SUCCESS;
 	if (other_bdf != DEVICE_DMA_NO_BDF) {

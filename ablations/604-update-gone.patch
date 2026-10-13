@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #604
+Takes out: pmap_pte_update() leaving a gone entry alone -- it writes its bits into a word another processor zeroed, which no walk sees and pmap_collect() never frees
+Run: --entry 0 600 -smp 4
+Expect: a gone entry must stay zero
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pte.h b/uros/src/mach_kernel/x86_64/pmap/pte.h
+index 858a985c..ff24ae37 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pte.h
++++ b/uros/src/mach_kernel/x86_64/pmap/pte.h
+@@ -233,8 +233,6 @@ static inline void pmap_pte_update(pt_entry_t *entry, uint64_t set,
+ 		pt_entry_t fresh = (found & ~clear) | set;
+ 		pt_entry_t seen;
+ 
+-		if (!pte_is_valid(found))
+-			return;
+ 		if (fresh == found)
+ 			return;
+ 

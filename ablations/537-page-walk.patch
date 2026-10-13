@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #537
+Takes out: the sorted page index -- a DMA page is found by walking its region's pages in order again, about two thousand comparisons in ext2's 4096-page page cache
+Run: --entry 14 1200 -smp 4
+Measure: "the region and the page" in the block server's per-page split, its line "in the kernel, over all N asks since boot" (#537, i386 at the host's clock: 530 - 641 cycles with the index, 3 169 - 3 407 with the walk); against the same tree without the patch, under KVM; on x86-64 the asks reach 1024 pages only with UROS_BUNDLE_IPC_BENCH=ON and UROS_BUNDLE_IPC_BENCH_SUITES=disk
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index d2d53b67..1e87f05c 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -1754,6 +1754,10 @@ dma_region_page(const struct dma_region *r, vm_offset_t pa)
+ {
+ 	unsigned int lo = 0, hi = r->npages;
+ 
++	for (lo = 0; lo < r->npages; lo++)
++		if (r->pa[lo] == pa)
++			break;
++	return lo;
+ 	while (lo < hi) {
+ 		unsigned int mid = lo + (hi - lo) / 2;
+ 

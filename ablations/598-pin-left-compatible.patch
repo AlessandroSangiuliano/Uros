@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #598
+Takes out: a pin's redirection entry in the remappable format while interrupts are remapped -- the pin stays in the old format, which an engine with CFI clear refuses with fault reason 25h.  QEMU's intel-iommu copies such a message through (hw/i386/intel_iommu.c 4377-4380, 11.1.1), so ablate.sh says NOT CAUGHT there and only bare metal shows it: on omen, 10/10/2026, booted with -f -i, the pin delivered 0 once routed and the engine logged "f0:1f.0 was REFUSED an interrupt before any entry was read (reason 0x25)", box 6's Intel half
+Run: --iommu intel --entry 37 120 -smp 1
+Expect: irq 0 on pin [0-9]+ delivered [0-9]+ while masked and 0 once routed
+Expect: was REFUSED an interrupt before any entry was read \(reason 0x25\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic.c b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+--- a/uros/src/mach_kernel/x86_64/cpu/ioapic.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ioapic.c
+@@ -278,11 +278,6 @@
+ 	 * it.  A pin that cannot have an entry cannot be routed at all: every
+ 	 * message it sent in the old format would be refused.
+ 	 */
+-	if (iommu_interrupts_remapped()
+-	    && !iommu_remap_pin(gsi - base_gsi, vector, apic_id, level,
+-				active_low, &low, &high))
+-		panic("ioapic: pin %u has no remapping entry, and interrupts "
+-		      "are remapped (#598)", gsi - base_gsi);
+ 
+ 	/*
+ 	 * Destination first, then the low half, and the order is the whole

@@ -1,0 +1,104 @@
+Kind: ablation
+Issue: #599
+Takes out: nothing -- a probe: at its tick 3000 processor 0 masks the 8254's pin with nothing pending to unmask it, the shape a lost I/O APIC read-modify-write leaves, and the clock watch must say the tick stopped
+Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
+Expect: clock: processor 0's tick has not run for
+
+diff --git a/uros/src/mach_kernel/i386/clock_watch.c b/uros/src/mach_kernel/i386/clock_watch.c
+index c4f1e049..99ed56b2 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.c
++++ b/uros/src/mach_kernel/i386/clock_watch.c
+@@ -68,6 +68,7 @@
+ #include <i386/eflags.h>		/* EFL_IF, EFL_VM */
+ #include <i386/lapic.h>
+ #include <i386/apic.h>
++#include <i386/ioapic.h>		/* ioapic_mask_irq */
+ #include <i386/clock_watch.h>
+ #include <i386/cn_nolock.h>		/* the stopped processor may hold the console lock */
+ 
+@@ -83,6 +84,7 @@ extern volatile unsigned int	ioapic_overlaps;	/* ioapic.c */
+ #define	CW_STOP_TICKS	200	/* ... and for this many of the watcher's own */
+ #define	CW_REPEAT_MS	10000	/* the line again, while the stop lasts */
+ #define	CW_CONFIRM_MS	100	/* a spin's second look, see clock_watch_spin */
++#define	CW_ABLATE_AT	3000	/* processor 0's ticks, for the #599 ablations */
+ 
+ /*
+  * One per watcher.  Each is written only by its own processor, from its own
+@@ -168,6 +170,41 @@ clock_watch_init(void)
+ {
+ 	printf("clock: the other processors watch processor 0's tick, and say "
+ 	       "so when it has not run for %u ms (#599)\n", CW_STOP_MS);
++	printf("clock: #599 ablation -- at tick %u processor 0 masks the 8254's "
++	       "pin and leaves nothing pending\n", CW_ABLATE_AT);
++}
++
++/*
++ * Stop processor 0's tick on purpose, from its own tick, CW_ABLATE_AT ticks
++ * into the boot -- about half-way through the full bundle's tests.  The way
++ * it stops is the shape of one of #599's hypotheses, so a boot with it shows
++ * that the watch fires on that shape and what the NMI's dump then says.
++ */
++void
++clock_watch_ablate(int cpu)
++{
++	static int	done;
++
++	if (cpu != master_cpu || done || nmi_cpu_tick[cpu] < CW_ABLATE_AT)
++		return;
++	done = 1;
++	{
++		unsigned int	flags;
++
++		/*
++		 * Pin 2 masked with no pending bit to unmask it again, which is
++		 * what a lost read-modify-write of the I/O APIC leaves.
++		 *
++		 * With interrupts off, as every other caller does it: hardclock
++		 * runs with them on, and a device interrupt deferred here would
++		 * do its own read-modify-write inside this one.
++		 */
++		cn_puts("\nclock: #599 ablation -- processor 0 masks the 8254's "
++			"pin now\n");
++		__asm__ volatile("pushfl; popl %0; cli" : "=r" (flags) : : "memory");
++		ioapic_mask_irq(0);
++		__asm__ volatile("pushl %0; popfl" : : "r" (flags) : "memory", "cc");
++	}
+ }
+ 
+ /*
+diff --git a/uros/src/mach_kernel/i386/clock_watch.h b/uros/src/mach_kernel/i386/clock_watch.h
+index 8d2b05e2..411336d4 100644
+--- a/uros/src/mach_kernel/i386/clock_watch.h
++++ b/uros/src/mach_kernel/i386/clock_watch.h
+@@ -41,4 +41,6 @@ extern void	clock_watch_tick(int cpu);
+ extern void	clock_watch_spin(const char *where);
+ extern int	clock_watch_nmi(struct i386_saved_state *regs);
+ 
++extern void	clock_watch_ablate(int cpu);	/* from hardclock */
++
+ #endif	/* _I386_CLOCK_WATCH_H_ */
+diff --git a/uros/src/mach_kernel/i386/hardclock.c b/uros/src/mach_kernel/i386/hardclock.c
+index ac53dcc8..5258e0a7 100644
+--- a/uros/src/mach_kernel/i386/hardclock.c
++++ b/uros/src/mach_kernel/i386/hardclock.c
+@@ -145,6 +145,10 @@
+ #include <i386/mach_param.h>	/* for HZ */
+ #endif	/* MACH_MP_DEBUG */
+ 
++#if	NCPUS > 1
++#include <i386/clock_watch.h>	/* #599 ablations */
++#endif
++
+ extern	char	return_to_iret[];
+ 
+ #if	TIME_STAMP && AT386 && NCPUS > 1
+@@ -225,6 +229,9 @@ hardclock(
+ 	nmi_heartbeat++;
+ 	/* #355: per-cpu tick so the NMI can pinpoint a single wedged core. */
+ 	nmi_cpu_tick[mycpu]++;
++#if	NCPUS > 1
++	clock_watch_ablate(mycpu);	/* #599: stop this tick on purpose */
++#endif
+ 
+ #ifdef	PARANOID_KDB
+ 	if (paranoid_cpu == mycpu &&

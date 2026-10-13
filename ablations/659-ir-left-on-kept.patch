@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #659
+Takes out: the boot without -i turning off the remapping it finds on -- each engine with IRES set is counted and left remapping, as every boot before 86290cad left it, unread; a pin or slot sent in the old format is then blocked where EIME is set or CFIS clear (VT-d Rev 5.20 §5.1.4)
+Run: --iommu intel-eim --entry 0 300 -smp 1
+Over: 659-widen-ir-left-on.patch
+Expect: no -i: interrupt remapping still ON in [0-9]+ engine\(s\) — WRONG
+Note: QEMU 11.1.1's intel-iommu passes a message in the old format whatever IRES, EIME and CFIS say (vtd_interrupt_remap_msi()), so under QEMU the ablated boot's interrupts still arrive and only the engines' status, read back for the line, tells the two trees apart; on bare metal the ablated boot's pins and slots would be refused.  intel-eim, not intel: under KVM's full irqchip QEMU's plain engine remaps nothing (run-x86_64.sh, --iommu), the tables are not built and the widen turns nothing on, so the plain engine under KVM showed both trees "off in every engine, as found" and the ablation NOT CAUGHT 2 of 2; intel-eim takes the split irqchip there
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 731eec9e..a42e3b2c 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -2459,7 +2459,6 @@ void iommu_vtd_ir_off_inherited(void)
+ 		    || !(*(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_IRES))
+ 			continue;
+ 		vtd_ir_found_on++;
+-		vtd_ir_off(regs);
+ 	}
+ }
+ 

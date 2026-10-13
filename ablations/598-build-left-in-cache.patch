@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: the build's flush of its context frames -- on an engine with ECAP.C clear the context tables stay in the caches when translation is turned on
+Run: --iommu intel --entry 16 600 -smp 1
+Expect: passthrough tables at .* every one read back — WRONG, [0-9]+ of [0-9]+ lines left the caches
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index 47696531..3c06c226 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -516,8 +516,6 @@ int iommu_vtd_build(void)
+ 			    || ctx[i * VTD_ENTRY_WORDS + 1] != entry[1])
+ 				return 0;
+ 
+-		iommu_table_frame_written(ctx_pa);	/* C7 */
+-
+ 		iommu_vtd_root_entry(ctx_pa, entry);
+ 		root[bus * VTD_ENTRY_WORDS + 0] = entry[0];
+ 		root[bus * VTD_ENTRY_WORDS + 1] = entry[1];

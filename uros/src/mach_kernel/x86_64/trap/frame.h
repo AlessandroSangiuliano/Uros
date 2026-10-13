@@ -22,6 +22,7 @@
 #ifndef _X86_64_TRAP_FRAME_H_
 #define _X86_64_TRAP_FRAME_H_
 
+#define	TF_VECTOR	120	/* #650: where #DB's stub copies its seven words to */
 #define	TF_RIP		136
 #define	TF_CS		144
 #define	TF_RFLAGS	152

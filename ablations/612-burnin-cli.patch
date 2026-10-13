@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #612
+Takes out: the clock burn-in giving interrupts back as it found them -- it ends with them off whatever its caller had, and at more than one processor the boot stops in setup_main()
+Run: --entry 3 600 -smp 4
+Expect: it must give back the state it was given
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index cc94cade..26db55cd 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -724,8 +724,7 @@ clock_event_burnin(unsigned seconds)
+ 	 * processor setup_main()'s first cross-call, from pmap_steal_memory(),
+ 	 * met ipi_call_others()'s check and stopped the boot.
+ 	 */
+-	if (was_on)
+-		__asm__ __volatile__("sti");
++	(void) was_on;
+ }
+ 
+ /* ------------------------------------------------------- the tick ------ */

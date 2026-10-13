@@ -36,7 +36,14 @@ PPM = os.path.join(BUILD, "fbcons.ppm")
 PNG = os.path.join(BUILD, "fbcons.png")
 
 KERNEL = os.path.join(BUILD, "export", "uros", "boot", "mach_kernel")
-BOOTSTRAP = os.path.join(BUILD, "export", "uros", os.uname().machine, "user", "sbin", "bootstrap")
+# The build's architecture, from #404's stamp as make-omen-boot.sh reads it:
+# the host's (os.uname()) is x86_64 on every machine this runs on, and this
+# tree is i386.
+try:
+    ARCH = open(os.path.join(BUILD, "uros-arch")).read().strip()
+except FileNotFoundError:
+    ARCH = os.uname().machine
+BOOTSTRAP = os.path.join(BUILD, "export", "uros", ARCH, "user", "sbin", "bootstrap")
 BUNDLE = os.path.join(BUILD, "bootstrap.bundle")
 KSYMS = os.path.join(BUILD, "export", "uros", "boot", "ksyms.bin")
 DISK = os.path.join(BUILD, "disk.img")

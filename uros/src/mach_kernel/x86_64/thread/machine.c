@@ -46,29 +46,8 @@
 #include <trap/trap.h>
 #include <cpu/desc.h>		/* #422: rsp0 follows the thread */
 #include <cpu/percpu.h>
+#include <kern/cpu_number.h>	/* #663: tss[] by processor number */
 #include <cpu/regs.h>		/* #422: cpu_apic_id */
-
-/*
- * ── Putting #475 back the way it was, for one run (#475) ──────────────
- *
- * The issue asks for a test that panics the kernel before the change and
- * passes after, and the only honest way to show the first half is to restore
- * what was there and watch the machine stop.  A correction is verified by
- * TAKING IT AWAY.
- *
- * ⚠️ One of two, and the other is in x86_64/syscall/entry.S.  They are
- * separate switches because they fail differently -- this one halts the
- * machine, that one leaves it running and quietly wrong -- and a run that
- * removed both would only ever report the first thing to go wrong.
- *
- * Zero in every build that ships.  This exists to be set from the compiler
- * command line for one run and then unset; nothing in the tree turns it on,
- * which is why it is a plain zero here rather than a configuration option
- * somebody could leave enabled.
- */
-#ifndef ABLATE_475_RETURN
-#define ABLATE_475_RETURN	0	/* a killed activation returns through here */
-#endif
 
 /*
  * Module init.  Both halves exist because the machine-independent tree calls
@@ -174,21 +153,22 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * own stack is not where the processor would build the next one.
 	 */
 	/*
-	 * ⚠️ percpu_apic_id() and not cpu_apic_id(), which is a CPUID (#439).
+	 * ⚠️ The processor's number from its own block, and not cpu_apic_id(),
+	 * which is a CPUID (#439) -- and an APIC id besides, where tss[] is
+	 * indexed by number (#663).
 	 *
 	 * This runs on every context switch -- switch_context() and
 	 * machine_switch_act() are its only callers here -- and CPUID is
 	 * unconditionally serialising, and under KVM an exit to the hypervisor.
-	 * All desc_set_rsp0() wants the id for is to index tss[], and the
-	 * processor's own block has held it since percpu_activate() was handed
-	 * it.  Both callers are scheduler paths, so that block exists.
+	 * The processor's own block has held the number since percpu_activate()
+	 * was handed it.  Both callers are scheduler paths, so that block exists.
 	 *
 	 * 🔑 Found by enumerating the class after taking two of these off the
 	 * shootdown path, rather than by noticing this one: an instruction that
 	 * costs a hypervisor exit reads in C exactly like a field access, and no
 	 * warning distinguishes them.
 	 */
-	desc_set_rsp0(percpu_apic_id(), pcb->ctx.kernel_stack_top);
+	desc_set_rsp0(cpu_number(), pcb->ctx.kernel_stack_top);
 }
 
 /*
@@ -253,11 +233,6 @@ thread_begin_trampoline(void *unused)
 	thread_continue(THREAD_NULL);
 	/*NOTREACHED*/
 }
-
-/* #616's ablation: every thread gets a user frame again, kernel threads too. */
-#ifndef	ABLATE_616_KERNEL_FRAME
-#define	ABLATE_616_KERNEL_FRAME	0
-#endif
 
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
@@ -405,7 +380,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * from #422 on, and state_test's check on it -- written five days
 	 * before -- failed unseen until #615 ran entry 7.
 	 */
-	if (thr_act->task != kernel_task || ABLATE_616_KERNEL_FRAME) {
+	if (thr_act->task != kernel_task) {
 		pcb->user = (struct trap_frame *)
 			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
 		thread_frame_init(pcb->user);
@@ -786,9 +761,6 @@ pcb_user_to_kernel(thread_act_t thr_act)
 void
 act_machine_return(kern_return_t code)
 {
-	if (ABLATE_475_RETURN)
-		panic("act_machine_return(0x%x): this machine has no RPC "
-		      "activation chain to return through (#453)", code);
 
 	/*
 	 * The one caller passes KERN_TERMINATED and the name says why: an
@@ -949,9 +921,9 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	 * this issue made it.
 	 *
 	 * ⚠️ Same shape as the defect #458 records in thread_machine_set_current
-	 * below: current_thread() is cpu_data[cpu_number()].active_thread, the
-	 * machine-independent array, and a thread that starts while that still
-	 * names somebody else reads its own fields through the wrong pointer.
+	 * below: current_thread() reads this processor's record of its thread,
+	 * and a thread that starts while that still names somebody else reads
+	 * its own fields through the wrong pointer.
 	 * The symptom was a call through a null function pointer into the low
 	 * physical page -- rip 0x3, with the interrupt vector table
 	 * disassembling as instructions.
@@ -1089,24 +1061,25 @@ void
 thread_machine_set_current(thread_t thread)
 {
 	/*
-	 * ⚠️ TWO places, and the machine-independent one is the one that
-	 * counts (#458).
+	 * ⚠️ TWO places, and they must agree (#458, #646).
 	 *
-	 * current_thread() is `cpu_data[cpu_number()].active_thread' --
-	 * <kern/cpu_data.h>, an array the shared kernel owns.  This function
-	 * used to set only the per-CPU block below, so the whole
-	 * machine-independent tree asked cpu_data[] and got NULL: the first
-	 * thread reached thread_continue(), read self->continuation through a
-	 * null self, and called whatever the low physical page happened to
-	 * hold.  Two halves that never met, again.
+	 * current_thread() reads the per-CPU block, in one %gs-relative load
+	 * (<machine/cpu_data.h>), so the thread's identity changes with the
+	 * first store below, which an interrupt cannot land inside -- and the
+	 * tick can arrive here, being class 15 above SPLHI.  cpu_data[] is the
+	 * machine-independent tree's array, read by processor number (ddb, the
+	 * quiet census), and is written second.  The syscall entry reads the
+	 * block's copy too, out of %gs before it has a stack.
 	 *
-	 * The per-CPU copy is kept, and is not redundant: the syscall entry
-	 * path reads it out of %gs before it has a stack to index an array
-	 * with.  It is a cache of the line above, and this is the one place
-	 * that writes either.
+	 * Before #458 this function set only the block, while current_thread()
+	 * read cpu_data[]: the first thread read its continuation through a
+	 * null self and called into the low physical page.  Before #646
+	 * current_thread() read cpu_data[cpu_number()], two loads a migration
+	 * could split.  The only other writer is processor_doshutdown(), which
+	 * clears both.
 	 */
+	percpu_set_active_thread((void *) thread);
 	cpu_data[cpu_number()].active_thread = thread;
-	percpu()->active_thread = (void *) thread;
 }
 
 /*

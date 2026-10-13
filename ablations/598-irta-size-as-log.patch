@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #598
+Takes out: IRTA_REG's size as one less than the logarithm -- S is the logarithm of the entries, and the engine would take the table to run into the next frame
+Run: --entry 0 300
+Expect: interrupt remapping words encoded and decoded, 3 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+index ecdcbf41..33a9da7f 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -1656,7 +1656,7 @@ int iommu_vtd_irta(uint64_t table_pa, unsigned entries, int x2apic,
+ 	    || entries > 65536u || (entries & (entries - 1u)) != 0)
+ 		return 0;
+ 
+-	while ((2u << s) < entries)
++	while ((1u << s) < entries)
+ 		s++;
+ 
+ 	*out = table_pa | (x2apic ? VTD_IRTA_EIME : 0) | s;

@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #612
+Takes out: map_selftest() and tlb_shootdown_selftest() taking their pages down -- they stay in the VM's range, for pmap_virtual_space() to find
+Run: --entry 0 600 -smp 4
+Expect: already in the VM's range
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index cc48ea6f..654838f0 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -581,6 +581,7 @@ static void map_selftest(void)
+ 	 * than one processor is a cross-call before the kernel has a thread.
+ 	 * pmap_virtual_space() now says what it finds there.
+ 	 */
++	return;
+ 	pmap_unmap_page(PMAP_NULL, va, 0);
+ 	kputs("UrMach x86-64: unmapped again, ");
+ 	kputs(pmap_walk(root, va, 0) == PT_ENTRY_NULL
+@@ -7334,6 +7335,7 @@ static void tlb_shootdown_selftest(void)
+ 	 * frame the entry names, so with new_frame there it would look for an
+ 	 * index entry that never existed and leave old_frame's behind.
+ 	 */
++	return;
+ 	*entry = pa_to_pte(old_frame) | (*entry & ~INTEL_PTE_PFN);
+ 	pmap_remove(pmap_kernel(), probe.va, probe.va + PAGE_SIZE_4K);
+ 	kputs("UrMach x86-64: shootdown probe taken down, ");

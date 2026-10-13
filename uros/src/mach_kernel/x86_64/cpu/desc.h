@@ -94,27 +94,8 @@
  * are unchanged -- the processor masks the low three bits to reach the table
  * -- so the layout above still says what it said.
  */
-/*
- * Putting #477 back the way it was, for one run.
- *
- * ⚠️ It restores the ASSERTIONS as well as the constant, in <cpu/desc.c>, and
- * that is the point rather than tidiness: with the strict ones in place the
- * old base does not compile, which is the guarantee this fix is really made
- * of.  An ablation that only moved the constant would demonstrate the
- * assertion, not the defect.
- *
- * Zero in every build that ships.  Set it from the compiler command line for
- * one run and unset it; nothing in the tree turns it on.
- */
-#ifndef ABLATE_477
-#define ABLATE_477		0	/* SYSRET's base carries ring 3 */
-#endif
 
-#if	ABLATE_477
-#define SYSRET_SELECTOR_BASE	USER_CS32_SELECTOR
-#else
 #define SYSRET_SELECTOR_BASE	(USER_CS32_SELECTOR | USER_RPL)
-#endif
 
 #ifndef __ASSEMBLER__
 

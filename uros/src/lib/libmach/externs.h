@@ -30,7 +30,8 @@
 #include <stdarg.h>		/* for va_list */
 #include <stddef.h>		/* for size_t */
 
-extern void mig_init(void *);
+struct mach_thread_state;
+extern struct mach_thread_state *mach_thread_state(void);	/* mig_support.c, #645 */
 extern void mach_init_ports(void);
 extern void mig_allocate(vm_address_t *, vm_size_t);
 extern void mig_deallocate(vm_address_t, vm_size_t);

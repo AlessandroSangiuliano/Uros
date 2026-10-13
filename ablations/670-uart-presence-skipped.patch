@@ -1,0 +1,40 @@
+Kind: ablation
+Issue: #670
+Takes out: the question whether a UART is there at all -- the loopback probe is asked straight away, reads 0xFF where there is no UART, and says WRONG, the receive path does not work.  With a UART the probe finds one either way, so a run with a serial log cannot catch it, and with none there is no serial log: it is caught off the screen, by fbcons-readback.py --no-uart
+Screen: --no-uart
+Screen: --entry=41
+Screen: --budget=400
+Screen: --wait-for=serial port's own receiver
+Screen: --expect=NOT ASKED, no UART answers at COM1
+Expect: not on screen \| NOT ASKED, no UART answers at COM1
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 27c18110..e4f69b87 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -4371,7 +4371,6 @@ static void timer_selftest(void)
+ 
+ static void cons_selftest(void)
+ {
+-	uint8_t wrote, read;
+ 	int got;
+ 
+ 	/*
+@@ -4391,17 +4390,6 @@ static void cons_selftest(void)
+ 	 * before it existed, and pavillion, omen and OMEGA, none of which has a
+ 	 * UART at COM1, drew this line saying WRONG.
+ 	 */
+-	if (!cons_uart_present(&wrote, &read)) {
+-		kputs("UrMach x86-64: did not send 0xa5 to the serial port's own "
+-		      "receiver — NOT ASKED, no UART answers at COM1: its scratch "
+-		      "register gave back ");
+-		kputhex64(read);
+-		kputs(" for ");
+-		kputhex64(wrote);
+-		kputs(" (#670)\r\n");
+-		return;
+-	}
+-
+ 	got = cons_loopback_probe(CONS_PROBE_BYTE);
+ 
+ 	kputs("UrMach x86-64: sent 0xa5 to the serial port's own receiver and got ");

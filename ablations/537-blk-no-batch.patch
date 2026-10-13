@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #537
+Takes out: the block server's batched ask -- it asks the kernel for a request's pages one at a time again, as before device_dma_map_foreign_ops
+Run: --entry 14 600 -smp 4
+Measure: asking's cycles a page on cap_test [25]'s handle (32-page requests), the block server's "after 64 physical requests, 2048 pages" line, against the same tree without the patch -- 223-310 in one call, 1 777-1 921 page by page (i386, KVM, -smp 4, the host's clock, alternated); requests of one page must not move
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index 3e6dacd6..e8d8e47f 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -1405,7 +1405,7 @@ blk_dma_for_pages(struct blk_handle *h, const vm_address_t *pa,
+ 		return KERN_SUCCESS;
+ 	*used = 0;
+ 
+-	if (n > 1) {
++	if (0 && n > 1) {
+ 		for (j = 0; j < h->n_dma_caps; j++) {
+ 			mach_msg_type_number_t cnt = n;
+ 

@@ -29,14 +29,6 @@ struct tlb_request {
 
 static struct answer_count served;
 
-/*
- * #437: the whole-TLB flush back to a bare CR3 reload, which leaves global
- * entries in place -- the flush this file says not to be wrong about.
- */
-#ifndef	ABLATE_437_FLUSH_KEEPS_GLOBALS
-#define	ABLATE_437_FLUSH_KEEPS_GLOBALS	0
-#endif
-
 void tlb_flush_local_all(void)
 {
 	uint64_t cr4 = read_cr4();
@@ -49,11 +41,11 @@ void tlb_flush_local_all(void)
 	 * acquires a flush that no longer flushes the kernel's own mappings —
 	 * which are exactly the ones this kernel changes.
 	 *
-	 * Nothing sets CR4.PGE yet; #437 is where that happens.  Rather than
-	 * leave a trap for it, ask: with global pages on, clearing and
-	 * restoring the enable bit discards them too, and is the architecture's
-	 * own answer for this.  One read of a control register to be right in
-	 * both worlds.
+	 * #437 turns CR4.PGE on, on every processor (pmap_control_regs_here()).
+	 * With global pages on, clearing and restoring the enable bit discards
+	 * them too, and is the architecture's own answer for this; one read of
+	 * a control register keeps the flush right with them and without.
+	 * ablations/437-flush-keeps-globals.patch takes this branch out.
 	 */
 	/*
 	 * #412: with INVPCID, one instruction that discards every PCID's
@@ -61,13 +53,12 @@ void tlb_flush_local_all(void)
 	 * the PGE toggle below already reaches every PCID: a CR4 write that
 	 * changes PGE flushes the whole TLB, whatever CR3 names.
 	 */
-	if (pmap_pcid_mode == PMAP_PCID_INVPCID
-	    && !ABLATE_437_FLUSH_KEEPS_GLOBALS) {
+	if (pmap_pcid_mode == PMAP_PCID_INVPCID) {
 		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
 		return;
 	}
 
-	if ((cr4 & CR4_PGE) && !ABLATE_437_FLUSH_KEEPS_GLOBALS) {
+	if (cr4 & CR4_PGE) {
 		write_cr4(cr4 & ~CR4_PGE);
 		write_cr4(cr4);
 		return;
@@ -170,14 +161,10 @@ static void tlb_flush_handler(void *arg)
 	answer_count_mark(&served);
 }
 
-uint64_t tlb_flushes_served(uint32_t apic_id)
+uint64_t tlb_flushes_served(unsigned cpu)
 {
-	return answer_count_of(&served, apic_id);
+	return answer_count_of(&served, cpu);
 }
-
-#ifndef	ABLATE_638_FLUSH_UNPINNED
-#define	ABLATE_638_FLUSH_UNPINNED	0
-#endif
 
 /*
  * Flush this processor, and have the others flush too: every one in `using',
@@ -189,8 +176,8 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
  * thread moved between the two had flushed the processor it left and left out
  * the one it arrived at, which nobody flushed.  That one can hold the
  * translation: a switch between two threads with the same map does not reload
- * CR3.  So both halves run with preemption off.  UROS_ABLATE_638_FLUSH_UNPINNED
- * runs them with it on again.
+ * CR3.  So both halves run with preemption off.
+ * ablations/638-flush-unpinned.patch runs them with it on again.
  *
  * The local flush still goes first.  Not for correctness — the order between
  * the local flush and the remote ones does not matter, since the entry is
@@ -201,27 +188,16 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
 static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
 				     uint64_t using)
 {
-	if (!ABLATE_638_FLUSH_UNPINNED) {
-#if	WIDEN_638_WINDOW
-		shootdown_widen();	/* before deciding: a move is harmless */
-#endif
-		disable_preemption();
-	}
+	disable_preemption();
 
 	tlb_flush_request_here(r);
-
-#if	WIDEN_638_WINDOW
-	if (ABLATE_638_FLUSH_UNPINNED)
-		shootdown_widen();	/* between the local flush and the call */
-#endif
 
 	if (broadcast)
 		ipi_call_others(tlb_flush_handler, r);
 	else
 		ipi_call_mask(using, tlb_flush_handler, r);
 
-	if (!ABLATE_638_FLUSH_UNPINNED)
-		enable_preemption();
+	enable_preemption();
 }
 
 void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
@@ -252,31 +228,8 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * stop shooting down kernel mappings on every processor in the
 	 * machine, and the first symptom would be somewhere else entirely.
 	 */
-	/*
-	 * ── Putting the broadcast back, to find out what it cost (#482) ────
-	 *
-	 * #439 narrowed this on an ARGUMENT: the page copy did not move a cycle
-	 * between one processor and eight while the whole fault rose thirty
-	 * times over, and the shootdown was the one part of the path whose cost
-	 * is a function of processor count.  The narrowing worked -- 35,490 down
-	 * to 5,790 -- and a result is not a premise.
-	 *
-	 * The phase breakdown cannot confirm the premise on its own, because
-	 * what it now measures is a fault with no broadcast in it: the growth
-	 * the argument was about is gone, and "nothing grows" is consistent with
-	 * the argument having been right and with its having been right for the
-	 * wrong reason.  🔥 A correction is verified by TAKING IT AWAY.
-	 *
-	 * So this switch restores the broadcast and nothing else -- same kernel,
-	 * same run, same instrument -- and the question becomes an observation:
-	 * does FP_PROTECT plus FP_ENTER swell while every other phase stays
-	 * where it was?  Off in every build that is not answering that question.
-	 */
-#ifndef	ABLATE_439
-#define	ABLATE_439	0
-#endif
 
-	if (ABLATE_439 || pmap == PMAP_NULL || pmap == pmap_kernel()) {
+	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
 		/*
 		 * With only this processor online there is nobody to tell and
 		 * nowhere to be moved to, so the flush here is the whole job.

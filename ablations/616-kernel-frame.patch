@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #616
+Takes out: the kernel thread without a user frame -- every thread gets a zeroed one again, so thread_get_state() answers for a kernel thread
+Run: --entry 7 1200 -smp 4
+Expect: state_test: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index 0b546e6d..ff2b2466 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -400,7 +400,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
+ 	 * from #422 on, and state_test's check on it -- written five days
+ 	 * before -- failed unseen until #615 ran entry 7.
+ 	 */
+-	if (thr_act->task != kernel_task) {
++	{
+ 		pcb->user = (struct trap_frame *)
+ 			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+ 		thread_frame_init(pcb->user);

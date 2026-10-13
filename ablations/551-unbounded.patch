@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #551
+Takes out: the bound on cons_putc()'s wait for the transmitter -- it waits for ever again, and a held UART stops the machine with preemption off and a lock held
+Run: --entry 0 600 -smp 4
+Measure: not a boot verdict -- scripts/uart-stall.py holds the transmitter and shows the machine stopping; a plain boot never holds it
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index 08bf8a53..89082d99 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -368,10 +368,6 @@ static unsigned cons_tx_room(int may_wait)
+ 	while (!(inb(COM1 + UART_LSR) & LSR_THR_EMPTY)) {
+ 		if (!may_wait)
+ 			return 0;
+-		if (cons_tx_stuck || ++spins >= CONS_THRE_SPINS) {
+-			cons_tx_stuck = 1;
+-			return 0;
+-		}
+ 		cpu_pause();
+ 	}
+ 

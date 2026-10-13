@@ -103,6 +103,6 @@ static inline void tlb_flush_page(struct pmap *pmap, uint64_t va)
 }
 
 /* How many shootdowns this processor has serviced, for the boot-time proof. */
-uint64_t tlb_flushes_served(uint32_t apic_id);
+uint64_t tlb_flushes_served(unsigned cpu);
 
 #endif	/* _X86_64_PMAP_TLB_H_ */

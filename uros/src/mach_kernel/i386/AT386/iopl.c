@@ -135,9 +135,6 @@ device_t	iopl_device = 0;
  * one back here is not a quiet grant but the iopl device refused whole.
  */
 io_reg_t iopl_port_list[] = {
-#if	ABLATE_594_IOPL_REOPEN
-	0x40, 0x42, 0x61,
-#endif	/* ABLATE_594_IOPL_REOPEN */
 	/* PS/2 controller (8042) — data + status/command.
 	 * Userspace char_server/ps2.so owns the keyboard; kd0's IRQ
 	 * is hijacked via device_intr_register at attach time. */
@@ -276,10 +273,8 @@ iopl_port_forbidden(
 	 * nothing orders a task's read against that sequence running on
 	 * another processor.
 	 */
-#if	!ABLATE_594_UNCHECKED
 	if (device_md_io_reserved((unsigned int)io_port, width) != 0)
 	    return TRUE;
-#endif	/* !ABLATE_594_UNCHECKED */
 
 	/*
 	 * #599: and the ports only a claimant reaches, through the RPC, under
@@ -403,27 +398,6 @@ iopl_emulate(
 	iopb = current_act()->mact.pcb->ims.io_tss;
 	if (iopb == 0)
 	    return FALSE;		/* no IO mapped */
-
-#if	ABLATE_594_UNCHECKED
-	/*
-	 * Handle outb to the timer control port,
-	 * for timer 2 only.
-	 */
-	if (io_port == PITCTL_PORT) {
-
-	    int	io_byte = regs->eax & 0xff;
-
-	    if (((iopb->bitmap[PITCTR2_PORT >> 3] & (1 << (PITCTR2_PORT & 0x7)))
-		== 0)	/* allowed */
-	     && (opcode == 0xe6 || opcode == 0xee)	/* outb */
-	     && (io_byte & 0xc0) == 0x80)		/* timer 2 */
-	    {
-		outb(io_port, io_byte);
-		return TRUE;
-	    }
-	    return FALSE;	/* invalid IO to port 42 */
-	}
-#endif	/* ABLATE_594_UNCHECKED */
 
 	/*
 	 * If the thread has the IOPL device mapped, and

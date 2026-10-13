@@ -23,7 +23,9 @@
 #define _DEVICE_FBCONS_FONT_H_
 
 /* 8x16 console font, codepage-437/850 layout (public-domain PC VGA font,
- * extracted from kbd cp850-8x16.psfu).  256 glyphs, 16 bytes each, MSB=left. */
+ * extracted from kbd cp850-8x16.psfu).  256 glyphs, 16 bytes each, MSB=left.
+ * The font read, decompressed, has sha256
+ *   f079053f705bf77483f33125ea305e266ef8c6c63b68a8451a21fb9513b1e96f */
 static const unsigned char fbcons_font8x16[256][16] = {
   { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 }, /* 0x00 */
   { 0x00,0x00,0x7e,0x81,0xa5,0x81,0x81,0xbd,0x99,0x81,0x81,0x7e,0x00,0x00,0x00,0x00 }, /* 0x01 */
@@ -281,6 +283,201 @@ static const unsigned char fbcons_font8x16[256][16] = {
   { 0x00,0x3c,0x66,0x0c,0x18,0x32,0x7e,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 }, /* 0xfd */
   { 0x00,0x00,0x00,0x00,0x7e,0x7e,0x7e,0x7e,0x7e,0x7e,0x7e,0x00,0x00,0x00,0x00,0x00 }, /* 0xfe */
   { 0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00 }, /* 0xff */
+};
+
+/*
+ * What each glyph is, for every code point above ASCII the font draws (#661).
+ *
+ * The font's own Unicode table, which kbd ships beside the glyphs, plus the
+ * aliases scripts/gen-fbcons-font.py lists for what the table leaves out --
+ * the em dash first.  ASCII is not here: a byte below 0x80 is drawn as the
+ * glyph of the same number, which the script refuses to emit a font without.
+ * Sorted by code point, for device/fbcons_utf8.h to search.
+ *
+ * 🔑 One table, two readers: the console, which draws by it, and
+ * scripts/fbcons-readback.py, which parses it to turn the screen back into
+ * characters.  A glyph this says draws a code point is the glyph the reader
+ * expects for it, because neither has a copy of its own.
+ */
+#define FBCONS_FONT_REPLACEMENT	0xfe	/* BLACK SQUARE, for what has no glyph */
+
+static const struct fbcons_font_map {
+	unsigned int	cp;
+	unsigned char	glyph;
+} fbcons_font_unicode[] = {
+  { 0x00a0, 0xff }, /* NO-BREAK SPACE */
+  { 0x00a1, 0xad }, /* INVERTED EXCLAMATION MARK */
+  { 0x00a2, 0xbd }, /* CENT SIGN */
+  { 0x00a3, 0x9c }, /* POUND SIGN */
+  { 0x00a4, 0xcf }, /* CURRENCY SIGN */
+  { 0x00a5, 0xbe }, /* YEN SIGN */
+  { 0x00a6, 0xdd }, /* BROKEN BAR */
+  { 0x00a7, 0xf5 }, /* SECTION SIGN */
+  { 0x00a8, 0xf9 }, /* DIAERESIS */
+  { 0x00a9, 0xb8 }, /* COPYRIGHT SIGN */
+  { 0x00aa, 0xa6 }, /* FEMININE ORDINAL INDICATOR */
+  { 0x00ab, 0xae }, /* LEFT-POINTING DOUBLE ANGLE QUOTATION MARK */
+  { 0x00ac, 0xaa }, /* NOT SIGN */
+  { 0x00ad, 0xf0 }, /* SOFT HYPHEN */
+  { 0x00ae, 0xa9 }, /* REGISTERED SIGN */
+  { 0x00af, 0xee }, /* MACRON */
+  { 0x00b0, 0xf8 }, /* DEGREE SIGN */
+  { 0x00b1, 0xf1 }, /* PLUS-MINUS SIGN */
+  { 0x00b2, 0xfd }, /* SUPERSCRIPT TWO */
+  { 0x00b3, 0xfc }, /* SUPERSCRIPT THREE */
+  { 0x00b4, 0xef }, /* ACUTE ACCENT */
+  { 0x00b5, 0xe6 }, /* MICRO SIGN */
+  { 0x00b6, 0xf4 }, /* PILCROW SIGN */
+  { 0x00b7, 0xfa }, /* MIDDLE DOT */
+  { 0x00b8, 0xf7 }, /* CEDILLA */
+  { 0x00b9, 0xfb }, /* SUPERSCRIPT ONE */
+  { 0x00ba, 0xa7 }, /* MASCULINE ORDINAL INDICATOR */
+  { 0x00bb, 0xaf }, /* RIGHT-POINTING DOUBLE ANGLE QUOTATION MARK */
+  { 0x00bc, 0xac }, /* VULGAR FRACTION ONE QUARTER */
+  { 0x00bd, 0xab }, /* VULGAR FRACTION ONE HALF */
+  { 0x00be, 0xf3 }, /* VULGAR FRACTION THREE QUARTERS */
+  { 0x00bf, 0xa8 }, /* INVERTED QUESTION MARK */
+  { 0x00c0, 0xb7 }, /* LATIN CAPITAL LETTER A WITH GRAVE */
+  { 0x00c1, 0xb5 }, /* LATIN CAPITAL LETTER A WITH ACUTE */
+  { 0x00c2, 0xb6 }, /* LATIN CAPITAL LETTER A WITH CIRCUMFLEX */
+  { 0x00c3, 0xc7 }, /* LATIN CAPITAL LETTER A WITH TILDE */
+  { 0x00c4, 0x8e }, /* LATIN CAPITAL LETTER A WITH DIAERESIS */
+  { 0x00c5, 0x8f }, /* LATIN CAPITAL LETTER A WITH RING ABOVE */
+  { 0x00c6, 0x92 }, /* LATIN CAPITAL LETTER AE */
+  { 0x00c7, 0x80 }, /* LATIN CAPITAL LETTER C WITH CEDILLA */
+  { 0x00c8, 0xd4 }, /* LATIN CAPITAL LETTER E WITH GRAVE */
+  { 0x00c9, 0x90 }, /* LATIN CAPITAL LETTER E WITH ACUTE */
+  { 0x00ca, 0xd2 }, /* LATIN CAPITAL LETTER E WITH CIRCUMFLEX */
+  { 0x00cb, 0xd3 }, /* LATIN CAPITAL LETTER E WITH DIAERESIS */
+  { 0x00cc, 0xde }, /* LATIN CAPITAL LETTER I WITH GRAVE */
+  { 0x00cd, 0xd6 }, /* LATIN CAPITAL LETTER I WITH ACUTE */
+  { 0x00ce, 0xd7 }, /* LATIN CAPITAL LETTER I WITH CIRCUMFLEX */
+  { 0x00cf, 0xd8 }, /* LATIN CAPITAL LETTER I WITH DIAERESIS */
+  { 0x00d0, 0xd1 }, /* LATIN CAPITAL LETTER ETH */
+  { 0x00d1, 0xa5 }, /* LATIN CAPITAL LETTER N WITH TILDE */
+  { 0x00d2, 0xe3 }, /* LATIN CAPITAL LETTER O WITH GRAVE */
+  { 0x00d3, 0xe0 }, /* LATIN CAPITAL LETTER O WITH ACUTE */
+  { 0x00d4, 0xe2 }, /* LATIN CAPITAL LETTER O WITH CIRCUMFLEX */
+  { 0x00d5, 0xe5 }, /* LATIN CAPITAL LETTER O WITH TILDE */
+  { 0x00d6, 0x99 }, /* LATIN CAPITAL LETTER O WITH DIAERESIS */
+  { 0x00d7, 0x9e }, /* MULTIPLICATION SIGN */
+  { 0x00d8, 0x9d }, /* LATIN CAPITAL LETTER O WITH STROKE */
+  { 0x00d9, 0xeb }, /* LATIN CAPITAL LETTER U WITH GRAVE */
+  { 0x00da, 0xe9 }, /* LATIN CAPITAL LETTER U WITH ACUTE */
+  { 0x00db, 0xea }, /* LATIN CAPITAL LETTER U WITH CIRCUMFLEX */
+  { 0x00dc, 0x9a }, /* LATIN CAPITAL LETTER U WITH DIAERESIS */
+  { 0x00dd, 0xed }, /* LATIN CAPITAL LETTER Y WITH ACUTE */
+  { 0x00de, 0xe8 }, /* LATIN CAPITAL LETTER THORN */
+  { 0x00df, 0xe1 }, /* LATIN SMALL LETTER SHARP S */
+  { 0x00e0, 0x85 }, /* LATIN SMALL LETTER A WITH GRAVE */
+  { 0x00e1, 0xa0 }, /* LATIN SMALL LETTER A WITH ACUTE */
+  { 0x00e2, 0x83 }, /* LATIN SMALL LETTER A WITH CIRCUMFLEX */
+  { 0x00e3, 0xc6 }, /* LATIN SMALL LETTER A WITH TILDE */
+  { 0x00e4, 0x84 }, /* LATIN SMALL LETTER A WITH DIAERESIS */
+  { 0x00e5, 0x86 }, /* LATIN SMALL LETTER A WITH RING ABOVE */
+  { 0x00e6, 0x91 }, /* LATIN SMALL LETTER AE */
+  { 0x00e7, 0x87 }, /* LATIN SMALL LETTER C WITH CEDILLA */
+  { 0x00e8, 0x8a }, /* LATIN SMALL LETTER E WITH GRAVE */
+  { 0x00e9, 0x82 }, /* LATIN SMALL LETTER E WITH ACUTE */
+  { 0x00ea, 0x88 }, /* LATIN SMALL LETTER E WITH CIRCUMFLEX */
+  { 0x00eb, 0x89 }, /* LATIN SMALL LETTER E WITH DIAERESIS */
+  { 0x00ec, 0x8d }, /* LATIN SMALL LETTER I WITH GRAVE */
+  { 0x00ed, 0xa1 }, /* LATIN SMALL LETTER I WITH ACUTE */
+  { 0x00ee, 0x8c }, /* LATIN SMALL LETTER I WITH CIRCUMFLEX */
+  { 0x00ef, 0x8b }, /* LATIN SMALL LETTER I WITH DIAERESIS */
+  { 0x00f0, 0xd0 }, /* LATIN SMALL LETTER ETH */
+  { 0x00f1, 0xa4 }, /* LATIN SMALL LETTER N WITH TILDE */
+  { 0x00f2, 0x95 }, /* LATIN SMALL LETTER O WITH GRAVE */
+  { 0x00f3, 0xa2 }, /* LATIN SMALL LETTER O WITH ACUTE */
+  { 0x00f4, 0x93 }, /* LATIN SMALL LETTER O WITH CIRCUMFLEX */
+  { 0x00f5, 0xe4 }, /* LATIN SMALL LETTER O WITH TILDE */
+  { 0x00f6, 0x94 }, /* LATIN SMALL LETTER O WITH DIAERESIS */
+  { 0x00f7, 0xf6 }, /* DIVISION SIGN */
+  { 0x00f8, 0x9b }, /* LATIN SMALL LETTER O WITH STROKE */
+  { 0x00f9, 0x97 }, /* LATIN SMALL LETTER U WITH GRAVE */
+  { 0x00fa, 0xa3 }, /* LATIN SMALL LETTER U WITH ACUTE */
+  { 0x00fb, 0x96 }, /* LATIN SMALL LETTER U WITH CIRCUMFLEX */
+  { 0x00fc, 0x81 }, /* LATIN SMALL LETTER U WITH DIAERESIS */
+  { 0x00fd, 0xec }, /* LATIN SMALL LETTER Y WITH ACUTE */
+  { 0x00fe, 0xe7 }, /* LATIN SMALL LETTER THORN */
+  { 0x00ff, 0x98 }, /* LATIN SMALL LETTER Y WITH DIAERESIS */
+  { 0x0131, 0xd5 }, /* LATIN SMALL LETTER DOTLESS I */
+  { 0x0192, 0x9f }, /* LATIN SMALL LETTER F WITH HOOK */
+  { 0x2000, 0x20 }, /* EN QUAD */
+  { 0x2001, 0x20 }, /* EM QUAD */
+  { 0x2002, 0x20 }, /* EN SPACE */
+  { 0x2003, 0x20 }, /* EM SPACE */
+  { 0x2004, 0x20 }, /* THREE-PER-EM SPACE */
+  { 0x2005, 0x20 }, /* FOUR-PER-EM SPACE */
+  { 0x2006, 0x20 }, /* SIX-PER-EM SPACE */
+  { 0x2007, 0x20 }, /* FIGURE SPACE */
+  { 0x2008, 0x20 }, /* PUNCTUATION SPACE */
+  { 0x2009, 0x20 }, /* THIN SPACE */
+  { 0x200a, 0x20 }, /* HAIR SPACE */
+  { 0x2013, 0xc4 }, /* EN DASH */
+  { 0x2014, 0xc4 }, /* EM DASH */
+  { 0x2015, 0xc4 }, /* HORIZONTAL BAR */
+  { 0x2017, 0xf2 }, /* DOUBLE LOW LINE */
+  { 0x2022, 0x07 }, /* BULLET */
+  { 0x202f, 0x20 }, /* NARROW NO-BREAK SPACE */
+  { 0x203c, 0x13 }, /* DOUBLE EXCLAMATION MARK */
+  { 0x2190, 0x1b }, /* LEFTWARDS ARROW */
+  { 0x2191, 0x18 }, /* UPWARDS ARROW */
+  { 0x2192, 0x1a }, /* RIGHTWARDS ARROW */
+  { 0x2193, 0x19 }, /* DOWNWARDS ARROW */
+  { 0x2194, 0x1d }, /* LEFT RIGHT ARROW */
+  { 0x2195, 0x12 }, /* UP DOWN ARROW */
+  { 0x21a8, 0x17 }, /* UP DOWN ARROW WITH BASE */
+  { 0x221f, 0x1c }, /* RIGHT ANGLE */
+  { 0x2500, 0xc4 }, /* BOX DRAWINGS LIGHT HORIZONTAL */
+  { 0x2502, 0xb3 }, /* BOX DRAWINGS LIGHT VERTICAL */
+  { 0x250c, 0xda }, /* BOX DRAWINGS LIGHT DOWN AND RIGHT */
+  { 0x2510, 0xbf }, /* BOX DRAWINGS LIGHT DOWN AND LEFT */
+  { 0x2514, 0xc0 }, /* BOX DRAWINGS LIGHT UP AND RIGHT */
+  { 0x2518, 0xd9 }, /* BOX DRAWINGS LIGHT UP AND LEFT */
+  { 0x251c, 0xc3 }, /* BOX DRAWINGS LIGHT VERTICAL AND RIGHT */
+  { 0x2524, 0xb4 }, /* BOX DRAWINGS LIGHT VERTICAL AND LEFT */
+  { 0x252c, 0xc2 }, /* BOX DRAWINGS LIGHT DOWN AND HORIZONTAL */
+  { 0x2534, 0xc1 }, /* BOX DRAWINGS LIGHT UP AND HORIZONTAL */
+  { 0x253c, 0xc5 }, /* BOX DRAWINGS LIGHT VERTICAL AND HORIZONTAL */
+  { 0x2550, 0xcd }, /* BOX DRAWINGS DOUBLE HORIZONTAL */
+  { 0x2551, 0xba }, /* BOX DRAWINGS DOUBLE VERTICAL */
+  { 0x2554, 0xc9 }, /* BOX DRAWINGS DOUBLE DOWN AND RIGHT */
+  { 0x2557, 0xbb }, /* BOX DRAWINGS DOUBLE DOWN AND LEFT */
+  { 0x255a, 0xc8 }, /* BOX DRAWINGS DOUBLE UP AND RIGHT */
+  { 0x255d, 0xbc }, /* BOX DRAWINGS DOUBLE UP AND LEFT */
+  { 0x2560, 0xcc }, /* BOX DRAWINGS DOUBLE VERTICAL AND RIGHT */
+  { 0x2563, 0xb9 }, /* BOX DRAWINGS DOUBLE VERTICAL AND LEFT */
+  { 0x2566, 0xcb }, /* BOX DRAWINGS DOUBLE DOWN AND HORIZONTAL */
+  { 0x2569, 0xca }, /* BOX DRAWINGS DOUBLE UP AND HORIZONTAL */
+  { 0x256c, 0xce }, /* BOX DRAWINGS DOUBLE VERTICAL AND HORIZONTAL */
+  { 0x2580, 0xdf }, /* UPPER HALF BLOCK */
+  { 0x2584, 0xdc }, /* LOWER HALF BLOCK */
+  { 0x2588, 0xdb }, /* FULL BLOCK */
+  { 0x2591, 0xb0 }, /* LIGHT SHADE */
+  { 0x2592, 0xb1 }, /* MEDIUM SHADE */
+  { 0x2593, 0xb2 }, /* DARK SHADE */
+  { 0x25a0, 0xfe }, /* BLACK SQUARE */
+  { 0x25ac, 0x16 }, /* BLACK RECTANGLE */
+  { 0x25b2, 0x1e }, /* BLACK UP-POINTING TRIANGLE */
+  { 0x25ba, 0x10 }, /* BLACK RIGHT-POINTING POINTER */
+  { 0x25bc, 0x1f }, /* BLACK DOWN-POINTING TRIANGLE */
+  { 0x25c4, 0x11 }, /* BLACK LEFT-POINTING POINTER */
+  { 0x25cb, 0x09 }, /* WHITE CIRCLE */
+  { 0x25d8, 0x08 }, /* INVERSE BULLET */
+  { 0x25d9, 0x0a }, /* INVERSE WHITE CIRCLE */
+  { 0x263a, 0x01 }, /* WHITE SMILING FACE */
+  { 0x263b, 0x02 }, /* BLACK SMILING FACE */
+  { 0x263c, 0x0f }, /* WHITE SUN WITH RAYS */
+  { 0x2640, 0x0c }, /* FEMALE SIGN */
+  { 0x2642, 0x0b }, /* MALE SIGN */
+  { 0x2660, 0x06 }, /* BLACK SPADE SUIT */
+  { 0x2663, 0x05 }, /* BLACK CLUB SUIT */
+  { 0x2665, 0x03 }, /* BLACK HEART SUIT */
+  { 0x2666, 0x04 }, /* BLACK DIAMOND SUIT */
+  { 0x266a, 0x0d }, /* EIGHTH NOTE */
+  { 0x266b, 0x0e }, /* BEAMED EIGHTH NOTES */
+  { 0xfffd, 0xfe }, /* REPLACEMENT CHARACTER */
 };
 
 #endif	/* _DEVICE_FBCONS_FONT_H_ */

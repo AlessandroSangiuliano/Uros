@@ -47,10 +47,10 @@
  * ── The widened window ────────────────────────────────────────────────
  *
  * Each window is a few instructions, and #638 was seen once in 120 boots.
- * UROS_WIDEN_638_WINDOW makes a shootdown spin for 50 us between deciding
- * which processor it is on and acting on it, while an arm runs (<cpu/ipi.h>,
- * which also says why it is one spin and not two).  Without the option the
- * arms still run, and say what they saw.
+ * ablations/638-widen-window.patch makes a shootdown spin for 50 us between
+ * deciding which processor it is on and acting on it, while an arm runs (the
+ * patch also says why it is one spin and not two).  Without it the arms still
+ * run, and say what they saw.
  */
 
 #include <stdint.h>
@@ -188,9 +188,10 @@ shoot_remap_body(void)
 		atomic_store64((volatile uint64_t *) p->entry,
 			       pa_to_pte(p->frame[i]) | (e & ~INTEL_PTE_PFN));
 
-		before = cpu_number();
+		/* cpu_number_hint(): read where the thread can move, to count the moves (#626) */
+		before = cpu_number_hint();
 		tlb_flush_range(pmap_kernel(), p->base, PAGE_SIZE_4K);
-		after = cpu_number();
+		after = cpu_number_hint();
 		seen = *(volatile uint64_t *) p->base;
 		p->gen_end = n;
 		ops++;
@@ -274,12 +275,13 @@ shoot_call_body(void)
 	while (!shoot_go)
 		cpu_pause();
 
+	/* cpu_number_hint(): read where the thread can move, to count the moves (#626) */
 	for (;;) {
-		int	before = cpu_number();
+		int	before = cpu_number_hint();
 
 		ipi_call_mask(shoot_everyone, shoot_noop, 0);
 		ops++;
-		if (cpu_number() != before)
+		if (cpu_number_hint() != before)
 			atomic_add64(&shoot_moved, 1);
 
 		if ((ops & 15) == 0
@@ -400,11 +402,7 @@ shoot_pages_fini(uint32_t n)
 static void
 shoot_arm_window(int on)
 {
-#if	WIDEN_638_WINDOW
-	shootdown_widen_armed = on;
-#else
 	(void) on;
-#endif
 }
 
 static void

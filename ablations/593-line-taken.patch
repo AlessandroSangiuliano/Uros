@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #593
+Takes out: nothing -- a probe: ISA 8's input unmasked before the HPET chooses its route, as a driver's claim would leave it, so the HPET's probe must refuse LegacyReplacement and say why; with ablations/594-tsc-skews.patch and 593-no-countdown.patch as well, on the latter's run, the watchdog must leave the tick on the named TSC and say "the tick STAYS on it"
+Run: --entry 0 600 -smp 4
+Expect: LegacyReplacement would take the 8254's or the RTC's input from the driver that routed it
+
+diff --git a/uros/src/mach_kernel/x86_64/time/hpet_event.c b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+index 5940e2a8..25c85116 100644
+--- a/uros/src/mach_kernel/x86_64/time/hpet_event.c
++++ b/uros/src/mach_kernel/x86_64/time/hpet_event.c
+@@ -172,6 +172,18 @@ static int choose_route(unsigned *which, uint32_t *cap0)
+ 	uint16_t source;
+ 	unsigned n;
+ 
++	/*
++	 * #593: ISA 8's input unmasked before the backend chooses its route,
++	 * as a driver that had claimed the RTC's line would leave it -- so
++	 * that LegacyReplacement must be refused, and a tick #594 moves off a
++	 * named TSC must stay where it is and say so.  The entry keeps
++	 * whatever vector ioapic_init() left, and nothing asserts the line:
++	 * the RTC's interrupts are off.
++	 */
++	if (!started && ioapic_present()
++	    && acpi_irq_to_gsi(8) < ioapic_pin_count())
++		ioapic_unmask(acpi_irq_to_gsi(8));
++
+ 	*cap0 = 0;
+ 	fsb_passed_over = 0;
+ 	for (n = 0; n < hpet_comparators(); n++) {

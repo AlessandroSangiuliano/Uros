@@ -316,16 +316,14 @@ __uros_signals_init(void)
  * actually re-runs (otherwise the early `if (__sig_initialised)` would
  * short-circuit it), then runs the re-entrant init path above.
  */
-extern void mig_reset_after_fork(void);
-
 void
 __uros_post_fork_init(void)
 {
-    /* libmach_core caches a few port-name globals (mig_reply_port,
+    /* libmach_core caches a few port-name globals (the reply port,
      * mach_task_self_) that are valid in the parent's IPC space but
      * mean nothing in the child's freshly-created one.  Reset before
      * we attempt any MIG RPC. */
-    mig_reset_after_fork();
+    mach_task_self_init();
 
     __sig_initialised = 0;
     __uros_signals_init();

@@ -1,0 +1,40 @@
+Kind: ablation
+Issue: #537
+Takes out: the key made ready once -- a check that misses the cache copies the raw key and hashes its two padded blocks again, two of the six SHA-256 compressions a token takes
+Run: --entry 14 1200 -smp 4
+Measure: "the MAC" in the block server's per-page split, its line "in the kernel, over all N asks since boot" -- it moves only with 537-mac-every-time.patch applied too, since with the cache on only a token's first ask computes a MAC (#537, i386, before the cache: 5 235 - 5 685 cycles, 7 429 - 7 576 ablated); or one checker alone on the probe of UROS_PROBE_537_CAP_CONCURRENCY; against the same tree without the patch, under KVM; on x86-64 the asks reach 1024 pages only with UROS_BUNDLE_IPC_BENCH=ON and UROS_BUNDLE_IPC_BENCH_SUITES=disk
+
+diff --git a/uros/src/mach_kernel/kern/cap.c b/uros/src/mach_kernel/kern/cap.c
+index 424d5b88..178de341 100644
+--- a/uros/src/mach_kernel/kern/cap.c
++++ b/uros/src/mach_kernel/kern/cap.c
+@@ -272,7 +272,7 @@ static kern_return_t
+ cap_mac_check_unlocked(const struct uros_cap *t)
+ {
+     const size_t signed_len = sizeof(*t) - CAP_HMAC_SIZE;
+-    struct hmac_sha256_key k;
++    uint8_t raw[CAP_HMAC_SIZE];
+     uint8_t expected[HMAC_SHA256_SIZE];
+     boolean_t set;
+     int ok = 0;
+@@ -280,16 +280,17 @@ cap_mac_check_unlocked(const struct uros_cap *t)
+     simple_lock(&cap_lock);
+     set = cap_key_set;
+     if (set)
+-        k = cap_hmac_ready;
++        for (unsigned i = 0; i < CAP_HMAC_SIZE; i++)
++            raw[i] = cap_hmac_key[i];
+     simple_unlock(&cap_lock);
+     if (!set)
+         return CAP_ERR_INTERNAL;
+ 
+-    hmac_sha256_with(&k, t, signed_len, expected);
++    hmac_sha256(raw, CAP_HMAC_SIZE, t, signed_len, expected);
+     ok = hmac_sha256_equal(expected, t->hmac);
+ 
+     /* The copy is the key: not left on the stack for whoever runs next. */
+-    bzero((char *)&k, sizeof(k));
++    bzero((char *)raw, sizeof(raw));
+     return ok ? KERN_SUCCESS : CAP_ERR_INVALID_TOKEN;
+ }
+ 

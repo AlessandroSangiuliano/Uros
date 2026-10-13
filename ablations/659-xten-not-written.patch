@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #659
+Takes out: XTEn in AMD's control register -- the 128-bit entries stay, GAEn with them, and the engine reads eight bits of their destination: an interrupt aimed at processor 256 must not arrive there
+Run: --iommu amd-xt --socket1-cpu --entry 37 900 -smp 1,sockets=2,cores=256,maxcpus=512
+Expect: aimed at apic id [0-9]+ arrived there [0-9]+ times and elsewhere [0-9]+ — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_amd.c
+@@ -707,7 +707,7 @@
+ 		 */
+ 		control &= ~(AMD_CTL_GA_EN | AMD_CTL_XT_EN);
+ 		if (amd_ir_x2apic())
+-			control |= AMD_CTL_GA_EN | AMD_CTL_XT_EN;
++			control |= AMD_CTL_GA_EN;
+ 		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
+ 
+ 		control |= AMD_CTL_IOMMU_EN;
+@@ -725,8 +725,7 @@
+ 		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
+ 		if (!(control & AMD_CTL_IOMMU_EN)
+ 		    || (amd_ir_x2apic()
+-			&& (control & (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
+-			   != (AMD_CTL_GA_EN | AMD_CTL_XT_EN))
++			&& (control & AMD_CTL_GA_EN) != AMD_CTL_GA_EN)
+ 		    || (iommu_amd_devtab_snooped(i)
+ 			&& !(control & AMD_CTL_COHERENT))) {
+ 			amd_engines_off(i);

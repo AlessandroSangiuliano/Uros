@@ -121,11 +121,12 @@ spl_test_body(void)
 	 * happens, because the moves are what end the run; there are tens of
 	 * them, so the shared counter costs nothing.
 	 */
+	/* cpu_number_hint(): read where the thread can move, to count the moves (#626) */
 	for (;;) {
-		int	before = cpu_number();
+		int	before = cpu_number_hint();
 		spl_t	s = splsched();
 		spl_t	now = splget();
-		int	after = cpu_number();
+		int	after = cpu_number_hint();
 
 		splx(s);
 		raises++;

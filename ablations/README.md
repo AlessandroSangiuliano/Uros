@@ -1,0 +1,67 @@
+# Ablations
+
+A fix is verified by taking it out: with the fix gone, the test written for it must fail, and fail in the way the defect fails. This directory holds the fixes taken out, one patch each. The kernel holds only the fix and its test.
+
+They used to live in the kernel, as `UROS_ABLATE_*` and `UROS_WIDEN_*` CMake options and `#if` blocks. By the epic at `6e647c11` there were 83 options and 342 places in 56 kernel files. The code grew with every fix, and an ablated branch was compiled only when its option was on, so nothing noticed when one stopped meaning what it once meant.
+
+A patch here can rot too, but not silently: once it no longer applies, `scripts/ablate.sh` stops and says so. That is the moment to look at the test again.
+
+## Two kinds
+
+- **ablation**: brings back the defect. It is usually the reverse of the fix's code and nothing more: no comments, no test, and nothing a test still uses (a counter, for example).
+- **widen**: makes a race window wide enough to be met on demand. It is a spin at the point the race needs, plus whatever arms it in the test. It is applied before the ablation, and alone for the fixed arm of an alternated run: the fix must hold with the window wide open.
+
+## The header
+
+Lines before the first `diff --git` are a header; `git apply` skips them.
+
+```
+Kind: ablation
+Issue: #642
+Takes out: what the fix did, in one line
+Run: --entry 25 600 -smp 4
+Expect: <thread_doswapin\+0x
+```
+
+- `Over:` names a patch in the same directory that this one is applied over, one per line: a widen it needs to mean anything, a probe it extends, or a patch its diff is written over. `scripts/ablate.sh` applies the bases first, theirs before them, each once, and says so when the command line did not name them. An ablation whose `Expect:` matches the fixed tree too unless its widen is applied would otherwise report CAUGHT on every boot, fixed or not (#659).
+- `Takes out:` (an ablation) or `Holds open:` (a widen patch) says in one line what the patch does.
+- `Run:` is what `scripts/run-x86_64.sh` is given after the accelerator.
+- `Expect:` is an extended regular expression, matched line by line against the run's log. There may be several, and any one match means the test caught the defect. Expectations are read only from the ablation patches given on the command line, not from the bases `Over:` brings in: a base that is itself an ablation would otherwise catch the run on its own.
+- `Measure:` replaces `Expect:` in an ablation that no test catches, because it brings back a cost rather than a defect. It names the number that must move. `ablate.sh` checks that such a patch applies, but does not judge a run with it: the bench is read by hand, against the same tree without the patch.
+- `Accel:` names the accelerators, `tcg`, `kvm` or both, the patch can show anything under. `scripts/ablate.sh` boots only those of the ones asked for, says so, and refuses a command line that leaves none; `scripts/ci/job.sh` counts the boots it waits for from ablate.sh's plan. Under KVM's full irqchip QEMU's plain `intel-iommu` remaps nothing, and the pauses of `fbcons-readback.py` restart KVM's in-kernel 8254 (#659, #661).
+- `Screen:` lines boot each arm with `scripts/fbcons-readback.py` instead of `run-x86_64.sh`, one argument of that script per line, written as `--option=value` so that nothing needs quoting. `Expect:` is then matched against what the script printed, and `Run:` is not needed. This is how a test is caught where there is no serial log to read, on a machine with no UART (`--no-uart`, #670):
+
+```
+Screen: --no-uart
+Screen: --entry=41
+Screen: --wait-for=serial port's own receiver
+Screen: --expect=NOT ASKED, no UART answers at COM1
+Expect: not on screen \| NOT ASKED, no UART answers at COM1
+```
+
+## Running one
+
+```
+scripts/ablate.sh ablations/642-direct-swapin.patch
+scripts/ablate.sh --ab --boots 5 --accel tcg,kvm ablations/642-direct-swapin.patch
+scripts/ablate.sh --check ablations/*.patch
+scripts/ablate.sh --plan --ab --boots 5 --accel tcg,kvm ablations/642-direct-swapin.patch
+```
+
+The first two and the last apply `642-widen-swap.patch` too, because `642-direct-swapin.patch` goes over it. `--check` asks each patch on its own, over its bases: patches given together are not stacked, since unrelated ones may touch the same lines.
+
+`--plan` says what the same command without it would build and boot, and refuses what it would refuse, building nothing. The campaign on GitHub asks it before a run that takes fixes out starts on twenty runners (#656).
+
+Each run takes place in a worktree under `$UROS_ABLATE_DIR` (default `~/uros-tests/ablations`). The build there is configured with the options of `$UROS_ABLATE_REF_BUILD` (default `$UROS_BUILD_DIR` if it is set, otherwise `uros/build-x86_64`), because this tree's configuration cannot be reproduced from the defaults. Each arm boots the build of its own worktree, whatever `UROS_BUILD_DIR` the caller exported. Every boot adds one line to `ablate.csv` in the same directory: tree, patches, arm, accelerator, the clock and power source the harness recorded, its exit status, and the verdict.
+
+`--ab` alternates each boot of the ablated tree with one of the fixed tree, which has the widen patches but not the ablation. The ablated arm must be CAUGHT and the fixed arm must pass.
+
+## Making one
+
+Commit the fix first. Then:
+
+```
+scripts/ablate.sh --make <fix-commit> <path>... > ablations/<issue>-<what>.patch
+```
+
+This writes the reverse of the commit's changes to those paths, under a header to fill in. Trim it down to the code that brings the defect back, then check that it does: the ablated run must be CAUGHT, and the fixed run must pass.

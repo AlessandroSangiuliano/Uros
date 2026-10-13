@@ -502,8 +502,8 @@ uint64_t pmap_enable_global_pages(void);
  * PCID (#412), decided once on the boot processor and applied on the others by
  * pmap_control_regs_here().  Three modes, as agreed on #412:
  *
- *   PMAP_PCID_OFF		no PCID on this processor, or -p: today's path
- *   PMAP_PCID_NO_INVPCID	PCID, and no INVPCID -- or -i pretending so
+ *   PMAP_PCID_OFF		no PCID on this processor, or -n: today's path
+ *   PMAP_PCID_NO_INVPCID	PCID, and no INVPCID -- or -x pretending so
  *   PMAP_PCID_INVPCID	both
  *
  * So far CR4.PCIDE is set and every CR3 load still names PCID 0, which

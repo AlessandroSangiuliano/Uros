@@ -1,0 +1,44 @@
+Kind: ablation
+Issue: #586
+Takes out: nothing -- a probe: no two runs of any TSC calibration agree, against every ruler, so it declines as it does on its own about once in 280 boots under TCG, and every consumer of tsc_hz() must say NOT ASKED; the harness excuses the refusal and must pass, and entries 3, 5, 6, 7, 8 and 17 at -smp 4 reach the consumers this entry does not
+Run: --entry 14 600 -smp 4
+Expect: NOT ASKED, the TSC did not calibrate, so the gap has no ruler
+Expect: the TSC refined: NOT ASKED
+
+diff --git a/uros/src/mach_kernel/x86_64/time/tsc.c b/uros/src/mach_kernel/x86_64/time/tsc.c
+index 4736404c..43fda3a2 100644
+--- a/uros/src/mach_kernel/x86_64/time/tsc.c
++++ b/uros/src/mach_kernel/x86_64/time/tsc.c
+@@ -79,6 +79,23 @@ static uint64_t subject_tsc(void)
+ 	return rdtsc_ordered();
+ }
+ 
++/*
++ * #586, reshaped by #508: every run of every attempt reads a different amount
++ * high, one part in thirty-two apart, so no two ever agree and the calibration
++ * declines on purpose -- which is how every consumer of tsc_hz() is seen
++ * answering a machine that could not calibrate.  With one run out of three,
++ * the median would simply set it aside.  Every ruler's runs, alike: this has
++ * to leave the machine with no ruler that answered, or the vote would carry on
++ * without the 8254 and the NOT ASKED paths it exists to run would not run.
++ */
++static void ablate_runs(uint64_t run_hz[RULER_RUNS])
++{
++	unsigned i;
++
++	for (i = 0; i < RULER_RUNS; i++)
++		run_hz[i] += run_hz[i] * i / 32;
++}
++
+ /*
+  * Against every ruler the machine has, and then they vote (time/rulers.h).
+  */
+@@ -95,7 +112,7 @@ int tsc_calibrate(void)
+ 			continue;
+ 		rulers_start(id);
+ 		(void) ruler_calibrate(&k->r, subject_tsc, ~0ULL, k->span,
+-				       1ULL << 34, 0, &k->tsc);
++				       1ULL << 34, ablate_runs, &k->tsc);
+ 		rulers_stop(id);
+ 	}
+ 

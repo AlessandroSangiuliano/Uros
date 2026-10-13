@@ -427,10 +427,6 @@ static pt_entry_t *bench_pd_entry(pmap_t p, uint64_t va)
 	return &table[pd_index(va)];
 }
 
-#ifndef	ABLATE_604_COLLECT_MASKED
-#define	ABLATE_604_COLLECT_MASKED	0
-#endif
-
 /* Collect until a call gives nothing back.  Answers how many tables went. */
 static unsigned bench_collect_all(pmap_t p, int *rounds_out)
 {
@@ -444,17 +440,7 @@ static unsigned bench_collect_all(pmap_t p, int *rounds_out)
 	for (rounds = 0; rounds < 64; rounds++) {
 		unsigned before = pmap_table_frames_live;
 
-		/*
-		 * #604: once with interrupts off, which collect_flush() must
-		 * refuse -- a waiter that cannot answer a cross-call.  The
-		 * boot is expected to stop here.
-		 */
-		if (ABLATE_604_COLLECT_MASKED) {
-			percpu_intr_disable();
-			pmap_collect(p);
-			percpu_intr_enable();
-		} else
-			pmap_collect(p);
+		pmap_collect(p);
 		if (pmap_table_frames_live == before)
 			break;
 	}
@@ -796,8 +782,11 @@ static void bench_compare_arms(void)
 	 * prices QEMU rather than the design.  The safety arm below is the
 	 * opposite: it wants emulation, because that is where the interleavings
 	 * it hunts are widest.  Two questions, two instruments.
+	 *
+	 * #661: "!!" and not the warning sign, which the console's font has
+	 * no glyph for -- on a screen this line began with two replacements.
 	 */
-	printf("  ⚠️ only meaningful accelerated or on iron: a spin lock under "
+	printf("  !! only meaningful accelerated or on iron: a spin lock under "
 	       "pure emulation measures the emulator\n");
 	printf("  the lock costs %llu per mille of the bit\n",
 	       (unsigned long long) (bench_median5(bit)

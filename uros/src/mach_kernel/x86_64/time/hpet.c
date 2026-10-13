@@ -56,21 +56,11 @@ static int			counter_64;
 static int			legacy_capable;
 static unsigned			comparators;
 static uint16_t			vendor;
+static uint8_t			number;		/* the ACPI table's, #598 */
 static int			started_here;
 static int			taken;
 static int			legacy_found_on;
 static uint32_t			comparators_found_on;
-
-/*
- * #593: the block as a firmware that drove its own tick with it would leave
- * it -- LegacyReplacement on, and the last comparator interrupting -- for
- * take_block() to find, silence and report.  QEMU's firmware leaves neither,
- * so without this no boot would ever print those two findings, and a report
- * that no boot prints is not known to work.
- */
-#ifndef	ABLATE_593_FIRMWARE_LEFT
-#define	ABLATE_593_FIRMWARE_LEFT	0
-#endif
 
 /*
  * Every access is 32 bits wide and at an offset the specification allows
@@ -122,13 +112,6 @@ static void take_block(void)
 	uint32_t	conf;
 	unsigned	n;
 
-#if ABLATE_593_FIRMWARE_LEFT
-	if (legacy_capable)
-		wr32(HPET_GEN_CONF, rd32(HPET_GEN_CONF) | GEN_CONF_LEG_RT);
-	wr32(HPET_TN_CONF(comparators - 1),
-	     (rd32(HPET_TN_CONF(comparators - 1)) & TN_WRITABLE) | TN_INT_ENB);
-#endif
-
 	for (n = 0; n < comparators; n++) {
 		if (rd32(HPET_TN_CONF(n)) & TN_INT_ENB)
 			comparators_found_on |= 1U << n;
@@ -154,6 +137,7 @@ int hpet_init(void)
 		return 0;
 
 	address = t.base.address;
+	number = t.number;
 	regs = (volatile uint8_t *)(uintptr_t)
 		pmap_map_device(address, HPET_BLOCK_SIZE);
 
@@ -225,6 +209,11 @@ unsigned hpet_comparators(void)
 uint16_t hpet_vendor(void)
 {
 	return vendor;
+}
+
+uint8_t hpet_number(void)
+{
+	return number;
 }
 
 int hpet_started_here(void)

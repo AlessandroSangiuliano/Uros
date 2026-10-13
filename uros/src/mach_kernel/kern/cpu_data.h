@@ -148,10 +148,22 @@ static __inline__ void 		mp_enable_preemption(void);
 static __inline__ void 		mp_enable_preemption_no_check(void);
 #endif	/* !MACHINE_PREEMPTION_LEVEL */
 
+/*
+ * Two loads, a processor's number and then its slot, so a caller that can be
+ * preempted and moved between them reads another processor's thread.  A
+ * machine that preempts in kernel mode supplies a single load (#646).
+ */
+#if	MACHINE_CURRENT_THREAD
+static __inline__ struct thread_shuttle  *current_thread(void)
+{
+	return (machine_current_thread());
+}
+#else	/* MACHINE_CURRENT_THREAD */
 static __inline__ struct thread_shuttle  *current_thread(void)
 {
 	return (cpu_data[cpu_number()].active_thread);
 }
+#endif	/* MACHINE_CURRENT_THREAD */
 
 /*
  * #301: cpu_id accessor for builds without MACH_RT.  Falls back to

@@ -9,6 +9,8 @@
 
 #include <cpu/acpi.h>
 #include <cpu/ioapic.h>
+#include <cpu/iommu.h>		/* a pin through its remapping entry, #598 */
+#include <cpu/lapic.h>		/* LAPIC_XAPIC_ID_MAX, #659 */
 #include <cpu/regs.h>		/* read_rflags, cpu_pause */
 #include <pmap/pmap.h>
 #include <sync/atomic.h>	/* the window's lock below */
@@ -24,6 +26,7 @@
 #define IOAPIC_REG_ID		0x00
 #define IOAPIC_REG_VERSION	0x01
 #define IOAPIC_REG_REDIR	0x10	/* two registers per pin, from here */
+#define IOAPIC_EOI		0x40	/* version 0x20 and up: EOI by vector */
 
 /*
  * A redirection entry is sixty-four bits across two thirty-two bit
@@ -41,6 +44,7 @@
 
 static volatile uint8_t *io;
 static unsigned pins;
+static uint32_t version;	/* read once, at ioapic_init() */
 static uint32_t base_gsi;
 
 /*
@@ -59,32 +63,21 @@ static uint32_t base_gsi;
  *
  * The same shape as the PCI port pair's lock (cpu/pci_cfg.c) and for the same
  * two reasons: ioapic_init() runs before percpu_activate(), where the lock
- * package cannot be used, and an interrupt landing between the two accesses
+ * package could not be used until the boot block (#665), and an interrupt
+ * landing between the two accesses
  * on ONE processor is the same failure without any second processor at all.
- * Read-modify-write sequences below take it once around both halves.
+ * Read-modify-write sequences below take it once around both halves.  The -Y
+ * test (ioapic_race_test.c) shows what it keeps apart, with
+ * ablations/599-window-open.patch.
  */
 static volatile uint8_t	window_lock;
-
-/*
- * #599: the -Y test's two ablations (ioapic_race_test.c).  WINDOW_OPEN uses
- * the window without the lock and still with interrupts masked, so what it
- * reopens is the race between processors; WINDOW_WIDEN puts that many port
- * 0x80 reads between selecting a register and using it, so a second
- * processor's select lands in the gap far more often.
- */
-#ifndef	ABLATE_599_WINDOW_OPEN
-#define	ABLATE_599_WINDOW_OPEN	0
-#endif
-#ifndef	ABLATE_599_WINDOW_WIDEN
-#define	ABLATE_599_WINDOW_WIDEN	0
-#endif
 
 static uint64_t window_enter(void)
 {
 	uint64_t flags = read_rflags();
 
 	interrupts_disable();
-	while (!ABLATE_599_WINDOW_OPEN && atomic_swap8(&window_lock, 1) != 0)
+	while (atomic_swap8(&window_lock, 1) != 0)
 		cpu_pause();
 	return flags;
 }
@@ -97,23 +90,15 @@ static void window_leave(uint64_t flags)
 		interrupts_enable();
 }
 
-static void window_widen(void)
-{
-	for (unsigned i = 0; i < ABLATE_599_WINDOW_WIDEN; i++)
-		(void) inb(0x80);
-}
-
 static uint32_t window_read(unsigned reg)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
-	window_widen();
 	return *(volatile uint32_t *)(io + IOAPIC_WINDOW);
 }
 
 static void window_write(unsigned reg, uint32_t value)
 {
 	*(volatile uint32_t *)(io + IOAPIC_REGSEL) = reg;
-	window_widen();
 	*(volatile uint32_t *)(io + IOAPIC_WINDOW) = value;
 }
 
@@ -148,9 +133,30 @@ int ioapic_present(void)
 	return io != 0;
 }
 
+/*
+ * The controller's id as the MADT gives it, eight bits: the number the DMAR's
+ * and the IVRS's scopes name it by.  This used to be the ID register's field
+ * read as four bits, which cut any id above 15 to its low nibble (#598's C16).
+ */
 uint32_t ioapic_id(void)
 {
-	return ioapic_present() ? (ioapic_read(IOAPIC_REG_ID) >> 24) & 0xF : 0;
+	const struct acpi_ioapic *a = acpi_ioapic(0);
+
+	return ioapic_present() && a != 0 ? a->id : 0;
+}
+
+/*
+ * A redirection entry's destination: the APIC id in bits 63:56, eight of them.
+ * An id they do not name one processor by is refused: past them a shift would
+ * have dropped its high bits and delivered to whichever processor has the
+ * rest (#598's C16), and 255 is the broadcast (LAPIC_XAPIC_ID_MAX, #659).
+ */
+int ioapic_rte_destination(uint32_t apic_id, uint32_t *high)
+{
+	if (apic_id > LAPIC_XAPIC_ID_MAX)
+		return 0;
+	*high = apic_id << 24;
+	return 1;
 }
 
 uint32_t ioapic_version(void)
@@ -163,10 +169,20 @@ unsigned ioapic_pin_count(void)
 	return pins;
 }
 
+/*
+ * Whether this controller owns a pin, by its global number: pins from
+ * base_gsi, which is where the MADT says this controller's first pin sits --
+ * 24, on a board whose first I/O APIC starts there (#598's C12).
+ */
+int ioapic_owns(uint32_t gsi)
+{
+	return ioapic_present() && gsi >= base_gsi && gsi - base_gsi < pins;
+}
+
 /* Which pair of registers describes a pin, by its global number. */
 static unsigned redir_reg(uint32_t gsi)
 {
-	if (!ioapic_present() || gsi < base_gsi || gsi - base_gsi >= pins)
+	if (!ioapic_owns(gsi))
 		panic("ioapic: asked about a pin this controller does not own");
 
 	return IOAPIC_REG_REDIR + 2 * (gsi - base_gsi);
@@ -190,6 +206,7 @@ int ioapic_init(void)
 	 * with more.
 	 */
 	pins = ((ioapic_read(IOAPIC_REG_VERSION) >> 16) & 0xFF) + 1;
+	version = ioapic_read(IOAPIC_REG_VERSION) & 0xFF;
 
 	/*
 	 * Every pin masked, because the firmware does not hand over a blank
@@ -209,9 +226,21 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 		  uint16_t flags)
 {
 	unsigned reg = redir_reg(gsi);
-	uint32_t low = vector & RTE_VECTOR_MASK;
+	int active_low = (flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW;
+	int level = (flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL;
+	uint32_t low = vector & RTE_VECTOR_MASK, high = 0;
 	uint64_t f;
 
+	/*
+	 * #659: remapped to 32-bit ids, the destination is the entry's alone
+	 * -- Intel's pair below then holds the entry's index, and AMD's engine
+	 * reads the destination from the entry the vector indexes -- so an id
+	 * past eight bits needs no room here, and the high half starts empty.
+	 */
+	if (!(iommu_interrupts_remapped() && iommu_remaps_x2apic())
+	    && !ioapic_rte_destination(apic_id, &high))
+		panic("ioapic: apic id %u does not fit a redirection entry "
+		      "(#598)", apic_id);
 	low |= RTE_DELIVERY_FIXED | RTE_DEST_PHYSICAL;
 
 	/*
@@ -220,20 +249,33 @@ void ioapic_route(uint32_t gsi, uint8_t vector, uint32_t apic_id,
 	 * default" is zero in both fields, and for ISA that default *is* edge
 	 * triggered and active high, which is what the bits already say.
 	 */
-	if ((flags & ACPI_POLARITY_MASK) == ACPI_POLARITY_LOW)
+	if (active_low)
 		low |= RTE_POLARITY_LOW;
-	if ((flags & ACPI_TRIGGER_MASK) == ACPI_TRIGGER_LEVEL)
+	if (level)
 		low |= RTE_TRIGGER_LEVEL;
+
+	/*
+	 * #598: with interrupts remapped, the same pin in the remappable
+	 * format -- its entry written first, and the pair below only selecting
+	 * it.  A pin that cannot have an entry cannot be routed at all: every
+	 * message it sent in the old format would be refused.
+	 */
+	if (iommu_interrupts_remapped()
+	    && !iommu_remap_pin(gsi - base_gsi, vector, apic_id, level,
+				active_low, &low, &high))
+		panic("ioapic: pin %u has no remapping entry, and interrupts "
+		      "are remapped (#598)", gsi - base_gsi);
 
 	/*
 	 * Destination first, then the low half, and the order is the whole
 	 * point: unmasking lives in the low half, so writing it first would
 	 * open the pin for the interval before the destination is set — and
 	 * the destination it would use meanwhile is whatever the firmware
-	 * left.
+	 * left.  Remapped, the high half is the entry's index instead, and the
+	 * same order holds for the same reason.
 	 */
 	f = window_enter();
-	window_write(reg + 1, apic_id << 24);
+	window_write(reg + 1, high);
 	window_write(reg, low);
 	window_leave(f);
 }
@@ -253,6 +295,18 @@ int ioapic_is_masked(uint32_t gsi)
 	return (ioapic_read(redir_reg(gsi)) & RTE_MASKED) != 0;
 }
 
+int ioapic_direct_eoi(void)
+{
+	return ioapic_present() && version >= 0x20;
+}
+
+/* Its own register, not one behind the window: no lock to take. */
+void ioapic_eoi(uint8_t vector)
+{
+	if (ioapic_direct_eoi())
+		*(volatile uint32_t *)(io + IOAPIC_EOI) = vector;
+}
+
 /*
  * #599: the -Y test's way in (ioapic_race_test.c), and nothing else's.  A pin
  * whose low half is still exactly what ioapic_init() wrote has never been
@@ -263,8 +317,7 @@ int ioapic_is_masked(uint32_t gsi)
  */
 int ioapic_pin_untouched(uint32_t gsi)
 {
-	return ioapic_present() && gsi >= base_gsi && gsi - base_gsi < pins &&
-	       ioapic_read(redir_reg(gsi)) == RTE_MASKED;
+	return ioapic_owns(gsi) && ioapic_read(redir_reg(gsi)) == RTE_MASKED;
 }
 
 uint32_t ioapic_low_half(uint32_t gsi)
@@ -285,4 +338,12 @@ void ioapic_set_vector(uint32_t gsi, uint8_t vector)
 uint32_t ioapic_first_gsi(void)
 {
 	return base_gsi;
+}
+
+uint32_t ioapic_set_first_gsi(uint32_t gsi)
+{
+	uint32_t was = base_gsi;
+
+	base_gsi = gsi;
+	return was;
 }

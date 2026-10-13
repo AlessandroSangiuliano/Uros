@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #659
+Takes out: INTR_REMAP beside the DMAR's x2APIC opt-out -- bit 1 is read alone again, as before 0d5d99dd, and the decode self-test's flag bytes with bit 1 and no bit 0 must say so
+Run: --entry 0 300 -smp 1
+Expect: iommu words decoded and encoded, 2 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+--- a/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
++++ b/uros/src/mach_kernel/x86_64/cpu/iommu_vtd.c
+@@ -70,8 +70,7 @@
+  */
+ int iommu_vtd_dmar_opts_out(uint8_t flags)
+ {
+-	return (flags & (DMAR_FLAG_INTR_REMAP | DMAR_FLAG_X2APIC_OPT_OUT))
+-	       == (DMAR_FLAG_INTR_REMAP | DMAR_FLAG_X2APIC_OPT_OUT);
++	return (flags & DMAR_FLAG_X2APIC_OPT_OUT) != 0;
+ }
+ 
+ struct dmar_entry {

@@ -1138,7 +1138,6 @@ exception_no_server(
 	mach_msg_type_number_t	codeCnt)
 {
 	register ipc_thread_t self = current_thread();
-	mach_msg_type_number_t	i;
 
 	/*
 	 *	If this thread is being terminated, cooperate.
@@ -1190,12 +1189,29 @@ exception_no_server(
 	 * and throwing away.  No machine-dependent register access is needed
 	 * to say it (#531).
 	 */
-	printf("exception_no_server: terminating task %p — exception %d,",
-	       (void *)self->top_act->task, (int)exception);
-	for (i = 0; i < codeCnt; i++)
-		printf(" code[%u]=0x%lx", (unsigned)i,
-		       (unsigned long)code[i]);
-	printf("\n");
+	/*
+	 * One printf per line (#644): a line made of a printf for its head, one
+	 * per code and one for the newline let another processor's line land
+	 * between them.  There are at most EXCEPTION_CODE_MAX codes, two.
+	 */
+	switch (codeCnt) {
+	case 0:
+		printf("exception_no_server: terminating task %p — exception "
+		       "%d\n", (void *)self->top_act->task, (int)exception);
+		break;
+	case 1:
+		printf("exception_no_server: terminating task %p — exception "
+		       "%d, code[0]=0x%lx\n", (void *)self->top_act->task,
+		       (int)exception, (unsigned long)code[0]);
+		break;
+	default:
+		printf("exception_no_server: terminating task %p — exception "
+		       "%d, code[0]=0x%lx code[1]=0x%lx%s\n",
+		       (void *)self->top_act->task, (int)exception,
+		       (unsigned long)code[0], (unsigned long)code[1],
+		       codeCnt > 2 ? " (and more)" : "");
+		break;
+	}
 	(void) task_terminate(self->top_act->task);
 	thread_terminate_self();
 	/*NOTREACHED*/
