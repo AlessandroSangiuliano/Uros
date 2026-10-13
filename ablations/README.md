@@ -39,6 +39,15 @@ Screen: --expect=NOT ASKED, no UART answers at COM1
 Expect: not on screen \| NOT ASKED, no UART answers at COM1
 ```
 
+- `Script:` lines run each arm with a script of the arm's own tree instead: the first line is the script's path in the tree, each line after it one argument. The script is given the arm's build in `UROS_BUILD_DIR`, and `--kvm` under KVM; its exit status 2 is a run it could not make. `Expect:` is matched against what it printed. This is how a test is caught when it is about what one run leaves behind, which that run's log cannot show (#618):
+
+```
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: signals
+Expect: lifecycle: signal [A-Z]+: .*STILL RUNNING
+```
+
 ## Running one
 
 ```

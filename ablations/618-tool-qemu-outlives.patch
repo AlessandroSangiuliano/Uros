@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #618
+Takes out: the qemu that dies with its tool -- run_lock.start_qemu() starts it without PR_SET_PDEATHSIG, so a tool killed with SIGKILL, which no finally answers, leaves its qemu running
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: killed
+Expect: lifecycle: killed .*STILL RUNNING
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+index a4ffe005..47bc1541 100644
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -91,7 +91,7 @@ def stop_like_ctrl_c():
+ def start_qemu(argv, **popen):
+     """The run's qemu: subprocess.Popen(argv, **popen), dying with the run
+     and stopped by give_back() before the lock goes."""
+-    q = subprocess.Popen(argv, preexec_fn=dies_with_us(), **popen)
++    q = subprocess.Popen(argv, **popen)
+     _machines.append(q)
+     return q
+ 

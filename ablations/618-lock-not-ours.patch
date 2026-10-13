@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #618
+Takes out: giving back only the lock the run made -- the trap removes whatever lock is there, so a lock removed by hand and taken again by another run is removed by the first one to end
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: lockover
+Expect: lifecycle: lockover: .*REMOVED the lock
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 892ee446..82df7599 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1019,7 +1019,7 @@ give_back() {
+ 		esac
+ 	fi
+ 	QEMU_REAPED=1
+-	if [ -n "$LOCK_ID" ] && [ "$(lock_id)" = "$LOCK_ID" ]; then
++	if [ -n "$LOCK_ID" ]; then
+ 		rmdir "$LOCK" 2>/dev/null || true
+ 	elif [ -n "$LOCK_ID" ]; then
+ 		echo "run-x86_64.sh: the lock was not this run's any more when it ended ($LOCK): left as it is" >&2

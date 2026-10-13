@@ -232,7 +232,15 @@ UNKNOWNS=$(grep -ac "$UNKNOWN_VERDICT" "$LOG" || true)
 # test: FAIL", which it prints when it failed and not otherwise.  If the line's
 # shape ever changes the exclusion stops applying and this starts complaining
 # again, which is the direction an exclusion should fail in.
-BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
+#
+# 🔴 And not in the run's conditions block, which is the harness's record and
+# not the guest's output (#618), as garbled-lines.awk already treats it.  It
+# quotes the command line of every other qemu alive around the run, and a path
+# someone else chose, with FAIL in it, is not this boot failing.  The block's
+# own words are kept clear of these by run-conditions.sh; command lines cannot
+# be.
+BAD=$(sed '/^=== run conditions (#516) ===$/,/^=== end run conditions ===$/d' "$LOG" \
+	| grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" \
 	| grep -avE '[0-9]+ PASS, 0 FAIL' || true)
 # #624: a panic whose first line arrived in pieces still leaves its backtraces
@@ -952,22 +960,90 @@ ninja -C "$BUILD" mach_kernel boot_probe name_server_bin bootstrap_server \
 
 # One run at a time, enforced rather than remembered.
 #
-# The killall below is how this script guarantees a clean machine, and it is
-# also how two of these destroy each other: each kills the other's qemu
-# mid-boot, and both report processors that never arrived. That happened,
-# and produced twelve consecutive "failures" of a kernel that was fine.
+# Two of these used to destroy each other: each killed every qemu on the
+# machine before it booted, the other's among them, and both reported
+# processors that never arrived. That happened, and produced twelve
+# consecutive "failures" of a kernel that was fine.
 #
 # So take a lock and refuse rather than interleave. A refusal is a fact; two
 # runs fighting is a lie with a plausible shape.
+#
+# ── What this run gives back, and only that (#618) ─────────────────────
+#
+# 🔴 IT KILLED EVERY qemu-system-x86_64 IT COULD SIGNAL, by name, right here:
+# a boot held under gdb with -s -S, another tool's machine, another project's.
+# The lock had long made a sibling run impossible to meet, and the one qemu
+# this script can leave behind is the one it started, whose PID it knows.  So
+# that one is stopped by PID -- at the end of the run, and by the trap below
+# on EXIT, INT, TERM and HUP -- and nothing is killed by name.  Any other qemu
+# alive when the run starts, or still alive when it ends, is named in the run
+# conditions with its command line: it competes for the processors the run is
+# measured on, and on the same build nothing else stops it -- make-disk below
+# makes the images anew, so the other qemu keeps its own, unlinked, and holds
+# no lock on these (measured: on the same files a second qemu refuses, "Failed
+# to get "write" lock"; after make-disk it starts).
+#
+# 🔴 AND THE TRAP ENDS THE RUN.  It removed the lock and let bash go on, so a
+# run sent INT or TERM kept polling its qemu with the lock already gone, and
+# another run could take it and boot beside it.  Now qemu goes first, then the
+# lock, then the script, by the signal it was sent.
+#
+# 🔴 THE LOCK IS GIVEN BACK ONLY WHILE IT IS STILL THIS RUN'S: the directory's
+# device, inode and change time, taken right after mkdir, as fbcons-readback.py
+# does (#661).  A lock removed by hand and taken again by another run is that
+# run's; removing it let a third one in.  A signal in the instant between the
+# mkdir and the note leaves the lock where it is: a refusal later, not a run
+# let in.
 LOCK=/tmp/uros-x86_64-run.lock
+LOCK_ID=""
+QPID=""
+QEMU_REAPED=""
+lock_id() {
+	LC_ALL=C stat -c '%d:%i:%.9Z' "$LOCK" 2>/dev/null || true
+}
+give_back() {
+	# Before the line that sets QPID, the qemu just started is $!, the only
+	# job this script puts in the background.  Asked all the same whether
+	# it is a qemu and this script's child: a job added before it one day,
+	# or a PID the system gave to someone else once qemu was reaped, is
+	# never the one killed.
+	_qpid=${QPID:-$!}
+	if [ -n "$_qpid" ] && [ -z "$QEMU_REAPED" ] && kill -0 "$_qpid" 2>/dev/null; then
+		_stat=$(cat "/proc/$_qpid/stat" 2>/dev/null || true)
+		# shellcheck disable=SC2086
+		set -- ${_stat##*) }
+		case "$(cat "/proc/$_qpid/comm" 2>/dev/null):${2:-}" in
+		qemu-system*:"$$")
+			kill "$_qpid" 2>/dev/null || true
+			wait "$_qpid" 2>/dev/null || true ;;
+		esac
+	fi
+	QEMU_REAPED=1
+	if [ -n "$LOCK_ID" ] && [ "$(lock_id)" = "$LOCK_ID" ]; then
+		rmdir "$LOCK" 2>/dev/null || true
+	elif [ -n "$LOCK_ID" ]; then
+		echo "run-x86_64.sh: the lock was not this run's any more when it ended ($LOCK): left as it is" >&2
+	fi
+	LOCK_ID=""
+}
+stopped_by() {
+	trap - EXIT INT TERM HUP
+	give_back
+	echo "run-x86_64.sh: stopped by SIG$1 -- its qemu stopped and the lock given back" >&2
+	kill -s "$1" "$$"
+}
+trap give_back EXIT
+trap 'stopped_by INT' INT
+trap 'stopped_by TERM' TERM
+trap 'stopped_by HUP' HUP
 if ! mkdir "$LOCK" 2>/dev/null; then
 	echo "another run-x86_64.sh is in flight ($LOCK) — refusing to interleave" >&2
 	exit 2
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+LOCK_ID=$(lock_id)
+OTHER_QEMU_AT_START=$(uros_other_qemus)
 
 mkdir -p "$(dirname "$LOG")"
-killall qemu-system-x86_64 2>/dev/null || true
 echo "=== booting disk-x86_64.img (watchdog ${SECS}s, a backstop only) $* ==="
 
 # The whole stream goes to the log; the console keeps seeing the lines it
@@ -1399,6 +1475,7 @@ fi
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+QEMU_REAPED=1		# its PID is the system's again: the trap leaves it alone
 
 # 🔴 What is appended below starts on a line of its own.  The readers of the
 # log -- double-panic-check.sh, fbcons-no-glyph.py -- take a line that begins
@@ -1468,6 +1545,26 @@ else
 		"$([ -r "$CLOCK_CPUFREQ/scaling_available_frequencies" ] && echo 1 || echo 0)")" ;;
 	esac
 fi
+# Every other qemu alive when the run started or when it ended, one field each
+# (#618): what this script used to kill by name, and what competed with it for
+# the processors it measured on.  Ours is gone by now.
+OTHER_QEMU_AT_END=$(uros_other_qemus)
+OTHER_QEMU=()
+while IFS= read -r _q; do
+	[ -n "$_q" ] || continue
+	if printf '%s\n' "$OTHER_QEMU_AT_END" | grep -qxF -- "$_q"; then
+		OTHER_QEMU+=("other qemu:   at the start and at the end, $_q")
+	else
+		OTHER_QEMU+=("other qemu:   at the start, $_q")
+	fi
+done <<< "$OTHER_QEMU_AT_START"
+while IFS= read -r _q; do
+	[ -n "$_q" ] || continue
+	printf '%s\n' "$OTHER_QEMU_AT_START" | grep -qxF -- "$_q" ||
+		OTHER_QEMU+=("other qemu:   at the end, $_q")
+done <<< "$OTHER_QEMU_AT_END"
+[ ${#OTHER_QEMU[@]} -gt 0 ] ||
+	OTHER_QEMU=("other qemu:   none, at the start or at the end (#618)")
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
 	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
@@ -1476,7 +1573,8 @@ UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
 	"entry:        ${UROS_X86_64_BOOT_ENTRY:-from grub.cfg default}" \
 	"budget:       ${SECS}s" \
-	"command:      $0 $ORIG_ARGS")
+	"command:      $0 $ORIG_ARGS" \
+	"${OTHER_QEMU[@]}")
 printf '%s\n' "$UROS_COND" | tee -a "$LOG"
 
 # 🔥 A clock that moved during the run is a run nobody may compare with

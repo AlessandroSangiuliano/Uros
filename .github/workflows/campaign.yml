@@ -272,7 +272,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q gcc binutils cmake ninja-build bison flex \
             python3 qemu-system-x86 grub-common grub-pc-bin e2fsprogs util-linux \
-            iproute2 psmisc gdb
+            iproute2 gdb
           if [ -n "$SWEEP" ]; then
             what=(--sweep "$SWEEP" --share "$SHARE")
           elif [ -n "$ABLATE" ]; then

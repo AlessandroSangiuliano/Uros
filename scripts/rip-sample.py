@@ -32,8 +32,10 @@
 set = None
 import argparse, bisect, os, re, select, socket, subprocess, sys, time, collections
 
+sys.dont_write_bytecode = True		# nothing left in scripts/
+import run_lock				# noqa: E402  the lock, as #618 has it
+
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
-LOCK = "/tmp/uros-x86_64-run.lock"
 
 
 def symbols(kernel):
@@ -97,14 +99,20 @@ def main():
     if not os.path.exists(kernel):
         print("rip-sample: no kernel at %s" % kernel, file=sys.stderr); return 2
 
+    run_lock.stop_like_ctrl_c()
+    mine = run_lock.take("rip-sample")
+    if mine is None:
+        return 2
+    try:
+        return sample(a, build, kernel)
+    finally:
+        run_lock.give_back(mine, "rip-sample")
+
+
+def sample(a, build, kernel):
     env = dict(os.environ, UROS_BUILD_DIR=build, UROS_X86_64_BOOT_ENTRY=str(a.entry))
     subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")], env=env,
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    try:
-        os.mkdir(LOCK)
-    except FileExistsError:
-        print("rip-sample: another run is in flight (%s)" % LOCK, file=sys.stderr); return 2
 
     mon = "/tmp/uros-rip-%d.mon" % os.getpid()
     argv = ["qemu-system-x86_64", "-cpu", "max", "-m", "512M", "-smp", str(a.smp),
@@ -120,7 +128,7 @@ def main():
     if a.kvm:
         argv.insert(1, "-enable-kvm")
 
-    q = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    q = run_lock.start_qemu(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     addrs, names = symbols(kernel)
     hist = collections.Counter()
     armed = a.grep is None
@@ -145,7 +153,6 @@ def main():
             next_sample = time.time() + a.every / 1000.0
 
     q.kill(); q.wait()
-    os.rmdir(LOCK)
     try: os.unlink(mon)
     except OSError: pass
 

@@ -9,7 +9,9 @@
 # about, builds it with the main build's configuration, boots it with
 # run-x86_64.sh, and reads each log for what the ablation says must be there.
 # A patch with Screen: lines is booted by fbcons-readback.py instead, and what
-# that script read off the screen is read the same way (#670).
+# that script read off the screen is read the same way (#670).  One with
+# Script: lines is run by the script they name, from the arm's tree and with
+# its build, and what that script printed is read the same way (#618).
 #
 # A patch that must go over another says so with `Over: NAME.patch' in its
 # header, and is applied over it whether or not it was given: the bases come
@@ -243,7 +245,16 @@ check_applies "${EXPANDED[@]}" || exit 2
 # with no UART, which has no serial log to read.
 mapfile -t SCREEN < <(for p in "${EXPANDED[@]}"; do header "$p" Screen; done)
 
-if [ ${#RUN[@]} -eq 0 ] && [ ${#SCREEN[@]} -eq 0 ]; then
+# #618: a test that is a script of its own.  Script: lines, the first the
+# script's path in the tree and each one after it one argument, run every arm
+# with that script of the arm's own tree, its build in UROS_BUILD_DIR and
+# --kvm under KVM, and Expect: is matched against what it printed.  For what
+# no single run's log can show: a run interrupted, and what it left behind.
+mapfile -t SCRIPT < <(for p in "${EXPANDED[@]}"; do header "$p" Script; done)
+[ ${#SCREEN[@]} -gt 0 ] && [ ${#SCRIPT[@]} -gt 0 ] &&
+	die 2 "the patches have both Screen: and Script: lines: an arm is run one way"
+
+if [ ${#RUN[@]} -eq 0 ] && [ ${#SCREEN[@]} -eq 0 ] && [ ${#SCRIPT[@]} -eq 0 ]; then
 	run=$(for p in "${PATCHES[@]}" "${EXPANDED[@]}"; do header "$p" Run; done | head -n 1)
 	[ -n "$run" ] || die 2 "no Run: line in the patches, and no RUN-ARGS after --"
 	read -r -a RUN <<< "$run"
@@ -273,6 +284,9 @@ if [ $PLAN = 1 ]; then
 	if [ ${#SCREEN[@]} -gt 0 ]; then
 		echo "ablate: plan: fbcons-readback.py is given: ${SCREEN[*]}"
 		read_from="what fbcons-readback.py printed"
+	elif [ ${#SCRIPT[@]} -gt 0 ]; then
+		echo "ablate: plan: ${SCRIPT[0]} is run, given: ${SCRIPT[*]:1}"
+		read_from="what ${SCRIPT[0]} printed"
 	else
 		echo "ablate: plan: run-x86_64.sh is given: ${RUN[*]}"
 		read_from="the log"
@@ -385,6 +399,13 @@ for i in $(seq 1 "$BOOTS"); do
 					--build "$RUNDIR/$arm/uros/build-x86_64" \
 					--out "$RUNDIR/$arm-$acc-$i" "${SCREEN[@]}" \
 					> "$log" 2>&1
+			elif [ ${#SCRIPT[@]} -gt 0 ]; then
+				# #618: its own tree's script, with its own build;
+				# its exit 2 is a run it could not make.
+				log="$RUNDIR/$arm-$acc-$i.out"
+				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" \
+					"$RUNDIR/$arm/${SCRIPT[0]}" "${kvm[@]}" "${SCRIPT[@]:1}" \
+					> "$log" 2>&1
 			else
 				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" UROS_X86_64_LOG=$log \
 					"$RUNDIR/$arm/scripts/run-x86_64.sh" "${kvm[@]}" "${RUN[@]}" \
@@ -420,6 +441,7 @@ for i in $(seq 1 "$BOOTS"); do
 			power=$(sed -n 's/.*host start:.* power=\([^ ]*\).*/\1/p' "$log" | head -n 1)
 			runcol="${RUN[*]}"
 			[ ${#SCREEN[@]} -gt 0 ] && runcol="fbcons-readback.py ${SCREEN[*]}"
+			[ ${#SCRIPT[@]} -gt 0 ] && runcol="${SCRIPT[*]}"
 			# No comma inside a field: scripts/ci/job.sh and
 			# pull-results.sh split a row on every comma, quotes or
 			# not, and "-smp 1,sockets=2,..." or "-cpu max,hypervisor=off"

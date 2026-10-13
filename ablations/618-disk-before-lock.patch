@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #618
+Takes out: the lock before the disk, in char-roundtrip.py -- it makes the disk first again, and only then asks for the lock: started beside a run in flight it rewrites that run's images and then refuses
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: refuse
+Expect: lifecycle: refuse char-roundtrip.py: .*CHANGED under it
+
+diff --git a/scripts/char-roundtrip.py b/scripts/char-roundtrip.py
+index 28eef464..344eb35e 100755
+--- a/scripts/char-roundtrip.py
++++ b/scripts/char-roundtrip.py
+@@ -77,6 +77,12 @@ def main():
+         print(f"char-roundtrip: no kernel at {kernel}", file=sys.stderr)
+         return 2
+ 
++    env = dict(os.environ, UROS_BUILD_DIR=build,
++               UROS_X86_64_BOOT_ENTRY=str(a.entry))
++    subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
++                   env=env, check=True,
++                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++
+     run_lock.stop_like_ctrl_c()
+     mine = run_lock.take("char-roundtrip")
+     if mine is None:

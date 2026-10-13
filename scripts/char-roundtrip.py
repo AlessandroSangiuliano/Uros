@@ -18,7 +18,9 @@ file is what makes the line two-way.
 ⚠️ It takes the SAME lock run-x86_64.sh takes.  Two qemus on one disk image is
 a mistake this project has already made and misread as a failing kernel, so
 the refusal is deliberate and its exit status is 2 -- a statement about the
-caller, never about the kernel.
+caller, never about the kernel.  Taken before the disk is made, given back
+only while it is still this run's, and the qemu dies with the run: run_lock.py
+(#618).
 
 Exit status: 0 the round trip happened · 1 the machine answered wrongly ·
 2 this script refused to start, or the boot never reached the question.
@@ -31,8 +33,10 @@ import subprocess
 import sys
 import time
 
+sys.dont_write_bytecode = True		# nothing left in scripts/
+import run_lock				# noqa: E402
+
 REPO = os.path.realpath(os.path.join(os.path.dirname(__file__), ".."))
-LOCK = "/tmp/uros-x86_64-run.lock"
 
 # What char_test prints when it has found the tty and is about to write.
 #
@@ -73,18 +77,22 @@ def main():
         print(f"char-roundtrip: no kernel at {kernel}", file=sys.stderr)
         return 2
 
+    run_lock.stop_like_ctrl_c()
+    mine = run_lock.take("char-roundtrip")
+    if mine is None:
+        return 2
+    try:
+        return roundtrip(a, build)
+    finally:
+        run_lock.give_back(mine, "char-roundtrip")
+
+
+def roundtrip(a, build):
     env = dict(os.environ, UROS_BUILD_DIR=build,
                UROS_X86_64_BOOT_ENTRY=str(a.entry))
     subprocess.run([os.path.join(REPO, "scripts/make-disk-x86_64.sh")],
                    env=env, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    try:
-        os.mkdir(LOCK)
-    except FileExistsError:
-        print(f"char-roundtrip: another x86-64 run is in flight ({LOCK}) — "
-              f"refusing to interleave", file=sys.stderr)
-        return 2
 
     fifo = f"/tmp/uros-charrt-{os.getpid()}.fifo"
     for end in (".in", ".out"):
@@ -116,8 +124,8 @@ def main():
     fcntl.fcntl(fd_out, 1031, 1 << 20)          # F_SETPIPE_SZ: a whole boot
     fd_in = os.open(fifo + ".in", os.O_RDWR | os.O_NONBLOCK)
 
-    q = subprocess.Popen(argv, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.PIPE, text=True)
+    q = run_lock.start_qemu(argv, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.PIPE, text=True)
     raw = bytearray()
     rc = 2
 
@@ -213,7 +221,6 @@ def main():
                 os.unlink(fifo + end)
             except FileNotFoundError:
                 pass
-        os.rmdir(LOCK)
 
     return rc
 

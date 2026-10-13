@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #618
+Takes out: nothing killed by name -- right after the lock the run kills every qemu-system-x86_64 the user can signal again, as killall did, here read off /proc since psmisc is not installed any more: a qemu started by hand is gone after the run
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: bystander
+Expect: lifecycle: bystander: .* is gone after a run
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 892ee446..20bf676a 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1042,6 +1042,11 @@ if ! mkdir "$LOCK" 2>/dev/null; then
+ fi
+ LOCK_ID=$(lock_id)
+ OTHER_QEMU_AT_START=$(uros_other_qemus)
++for _d in /proc/[0-9]*; do
++	case $(cat "$_d/comm" 2>/dev/null) in
++	qemu-system-x86*) kill "${_d#/proc/}" 2>/dev/null || true ;;
++	esac
++done
+ 
+ mkdir -p "$(dirname "$LOG")"
+ echo "=== booting disk-x86_64.img (watchdog ${SECS}s, a backstop only) $* ==="

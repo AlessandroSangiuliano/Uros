@@ -288,6 +288,34 @@ uros_clock_policy() {
 		_eff="$_top (driver $_drv, governor $_gov: unknown policy)" ;;
 	esac
 }
+# uros_other_qemus [pid ...] — every qemu-system-* alive now but the pids
+# given, one "pid N: its command line" a line; nothing when there is none.
+#
+# The fifth axis named at the head of this file -- what else was running --
+# for the one kind of program that competes for exactly what a run measures,
+# the host's processors, at a guest's pace (#618).  Any architecture's: an
+# aarch64 guest someone left running costs a run as much as an x86-64 one.
+# Read off /proc, as the clock is: pgrep and killall are procps and psmisc,
+# which an image the campaign runs in need not carry.  comm is cut at fifteen
+# characters, "qemu-system-x86", which the pattern still meets.
+uros_other_qemus() {
+	for _d in /proc/[0-9]*; do
+		_pid=${_d#/proc/}
+		case $(cat "$_d/comm" 2>/dev/null) in
+		qemu-system*) ;;
+		*) continue ;;
+		esac
+		_mine=0
+		for _p in "$@"; do
+			[ "$_p" = "$_pid" ] && _mine=1
+		done
+		[ "$_mine" = 1 ] && continue
+		_cmd=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null) || continue
+		[ -n "$_cmd" ] && echo "pid $_pid: ${_cmd% }"
+	done
+	return 0
+}
+
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host
 # state in UROS_HOST_AT_START.
 uros_conditions_open() {
@@ -302,7 +330,9 @@ uros_conditions_open() {
 #
 # ⚠️ No word here may be one the verdict greps for.  run-x86_64.sh judges a
 # boot by looking for WRONG and FAIL in the log, so a conditions block using
-# either would turn every run red.
+# either would turn every run red.  Its verdict has skipped this block since
+# #618, which put other programs' command lines in it, but the logs of
+# run-qemu.sh are judged by tools that read every line.
 uros_conditions_block() {
 	_target=$1
 	_accel=$2
