@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #618
+Takes out: naming the other qemus -- uros_other_qemus() finds none, so the run's conditions say none even with a qemu started by hand running beside it
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: bystander
+Expect: lifecycle: bystander: .*do not name it
+
+diff --git a/scripts/run-conditions.sh b/scripts/run-conditions.sh
+index f9697067..8345059b 100644
+--- a/scripts/run-conditions.sh
++++ b/scripts/run-conditions.sh
+@@ -299,20 +299,6 @@ uros_clock_policy() {
+ # which an image the campaign runs in need not carry.  comm is cut at fifteen
+ # characters, "qemu-system-x86", which the pattern still meets.
+ uros_other_qemus() {
+-	for _d in /proc/[0-9]*; do
+-		_pid=${_d#/proc/}
+-		case $(cat "$_d/comm" 2>/dev/null) in
+-		qemu-system*) ;;
+-		*) continue ;;
+-		esac
+-		_mine=0
+-		for _p in "$@"; do
+-			[ "$_p" = "$_pid" ] && _mine=1
+-		done
+-		[ "$_mine" = 1 ] && continue
+-		_cmd=$(tr '\0' ' ' < "$_d/cmdline" 2>/dev/null) || continue
+-		[ -n "$_cmd" ] && echo "pid $_pid: ${_cmd% }"
+-	done
+ 	return 0
+ }
+ 

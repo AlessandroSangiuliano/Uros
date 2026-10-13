@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #618
+Takes out: the end of the run from the trap -- sent INT, TERM or HUP, the run gives back its qemu and the lock and then goes on, as before #618 it went on with the lock gone, and does not end by the signal
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: signals
+Expect: lifecycle: signal [A-Z]+: .*(did not end by the signal|WENT ON)
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 892ee446..a60ec41a 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1030,7 +1030,6 @@ stopped_by() {
+ 	trap - EXIT INT TERM HUP
+ 	give_back
+ 	echo "run-x86_64.sh: stopped by SIG$1 -- its qemu stopped and the lock given back" >&2
+-	kill -s "$1" "$$"
+ }
+ trap give_back EXIT
+ trap 'stopped_by INT' INT

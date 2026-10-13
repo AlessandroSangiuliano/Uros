@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #618
+Takes out: the trap's kill of the run's qemu -- on EXIT, INT, TERM and HUP the trap gives the lock back and ends the run, and the qemu it started goes on running
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: signals
+Expect: lifecycle: signal [A-Z]+: .*STILL RUNNING
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 892ee446..9e314954 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1007,17 +1007,6 @@ give_back() {
+ 	# it is a qemu and this script's child: a job added before it one day,
+ 	# or a PID the system gave to someone else once qemu was reaped, is
+ 	# never the one killed.
+-	_qpid=${QPID:-$!}
+-	if [ -n "$_qpid" ] && [ -z "$QEMU_REAPED" ] && kill -0 "$_qpid" 2>/dev/null; then
+-		_stat=$(cat "/proc/$_qpid/stat" 2>/dev/null || true)
+-		# shellcheck disable=SC2086
+-		set -- ${_stat##*) }
+-		case "$(cat "/proc/$_qpid/comm" 2>/dev/null):${2:-}" in
+-		qemu-system*:"$$")
+-			kill "$_qpid" 2>/dev/null || true
+-			wait "$_qpid" 2>/dev/null || true ;;
+-		esac
+-	fi
+ 	QEMU_REAPED=1
+ 	if [ -n "$LOCK_ID" ] && [ "$(lock_id)" = "$LOCK_ID" ]; then
+ 		rmdir "$LOCK" 2>/dev/null || true
