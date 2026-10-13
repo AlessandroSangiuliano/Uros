@@ -227,10 +227,14 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  *   5. SHOOT DOWN.  Until this returns, a processor's TLB can still hold a
  *      translation derived THROUGH this table, and an in-flight hardware walk
  *      can still be inside it.  Step 4 removed the way to reach it; only this
- *      removes the copies already taken.  ⚠️ #439 is the size of it: the
- *      shootdown goes to every processor rather than the ones using the pmap,
- *      so on 64 it costs 63 interrupts.  A cost question, not a correctness
- *      one, and batching amortises it.
+ *      removes the copies already taken.  Who it reaches: since #439 the
+ *      interrupt goes only to the processors that have the pmap loaded (its
+ *      cpus_using), and with PCID (#412) a processor that only keeps the
+ *      space cached under a PCID is reached by the space's generation, at its
+ *      next switch into it -- until then it cannot use those entries, since a
+ *      processor translates only through the current PCID's (SDM Vol. 3A
+ *      253668-093US 5.10.1; the exception there is global pages, and these
+ *      tables are the user half's).  Batching amortises the interrupts.
  *
  *   6. WAIT A SECOND GRACE PERIOD, for the READERS -- pmap_walk()'s callers,
  *      which hold a pointer into the table after the walk returns.
