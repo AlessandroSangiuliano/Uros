@@ -2121,6 +2121,7 @@ struct xs_step {
 	int		read;
 	pmap_t		evict_from;	/* [2]: this space's slot is the next miss's */
 	pmap_t		forget;		/* [2]: and this one's slot is cleared */
+	int		reload;		/* [2]'s control: CR3 again, with NOFLUSH */
 	uint64_t	seen;
 };
 
@@ -2150,6 +2151,8 @@ static void xs_step_here(void *arg)
 		pc->pcid_victim = s;
 
 	pmap_activate(st->space);
+	if (st->reload)
+		write_cr3(read_cr3() | CR3_NOFLUSH);
 	if (st->read) {
 		pmap_user_access_begin();
 		st->seen = *(volatile uint64_t *)(uintptr_t) XS_VA;
@@ -2160,10 +2163,43 @@ static void xs_step_here(void *arg)
 static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
 		      pmap_t forget)
 {
-	struct xs_step st = { space, read, evict_from, forget, 0 };
+	struct xs_step st = { space, read, evict_from, forget, 0, 0 };
 
 	ipi_call_mask(1ULL << x, xs_step_here, &st);
 	return st.seen;
+}
+
+/* [2]'s control: X in `space' already, CR3 loaded again with NOFLUSH, a read. */
+static uint64_t xs_reload_on(uint32_t x, pmap_t space)
+{
+	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 1, 0 };
+
+	ipi_call_mask(1ULL << x, xs_step_here, &st);
+	return st.seen;
+}
+
+/*
+ * The rest of a [1] or [2] line whose question was answered right -- `right'
+ * says how -- then what its control read, and so whether that answer could
+ * have been otherwise.
+ * `stale' is the frame an entry kept would give, `fresh' the one written in
+ * place; 0 is a control that could not run.
+ */
+static void xs_control_said(const char *right, uint64_t kept, uint64_t stale,
+			    uint64_t fresh)
+{
+	kputs(right);
+	kputs("; the round told nobody read ");
+	kputhex64(kept);
+	if (kept == stale)
+		kputs(", an entry kept through it — PASS (#412)\r\n");
+	else if (kept == fresh)
+		kputs(", no entry kept through it, so a missing discard could "
+		      "not show — NOT ASKED (#412)\r\n");
+	else if (kept == 0)
+		kputs(", nothing: no control ran — NOT ASKED (#412)\r\n");
+	else
+		kputs(", neither frame — WRONG (#412)\r\n");
 }
 
 static void pcid_ask(void)
@@ -2224,14 +2260,20 @@ static void pcid_ask(void)
 		 */
 		(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
 		leaf = pmap_walk(s1->root_pa, XS_VA, 0);
-		was = *leaf;
-		atomic_store64((volatile uint64_t *) leaf,
-			       (was & ~INTEL_PTE_PFN) | frame[0]);
-		kept = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
-		atomic_store64((volatile uint64_t *) leaf, was);
-		pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
-		(void) pmap_enter(s1, XS_VA, frame[2],
-				  VM_PROT_READ | VM_PROT_WRITE, 0);
+		kept = 0;
+		if (leaf != PT_ENTRY_NULL) {
+			was = *leaf;
+			atomic_store64((volatile uint64_t *) leaf,
+				       (was & ~INTEL_PTE_PFN) | frame[0]);
+			/* the question's pmap_enter() invalidated it here, twice */
+			invlpg(XS_VA);
+			invlpg(XS_VA);
+			kept = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+			atomic_store64((volatile uint64_t *) leaf, was);
+			pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
+			(void) pmap_enter(s1, XS_VA, frame[2],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
+		}
 
 		kputs("pcid_test: [1] a space changed while processor ");
 		kputdec(x);
@@ -2242,33 +2284,49 @@ static void pcid_ask(void)
 			      "WRONG (#412)\r\n");
 		else if (seen != XS_MARK(2))
 			kputs(", neither frame — WRONG (#412)\r\n");
-		else if (kept == XS_MARK(2))
-			kputs(", its new frame, and an entry it was not told of "
-			      "outlived the same round — PASS (#412)\r\n");
-		else if (kept == XS_MARK(0))
-			kputs(", its new frame, but no entry it was not told of "
-			      "outlived the same round, so a missing flush could "
-			      "not show — NOT ASKED (#412)\r\n");
 		else
-			kputs(", its new frame, and the round told nobody read "
-			      "neither frame — WRONG (#412)\r\n");
+			xs_control_said(", its new frame", kept, XS_MARK(2),
+					XS_MARK(0));
 
 		/* [2]: S1's entry under S1's PCID, then that PCID to S2. */
 		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
 		seen = xs_on(x, s2, 1, s1, s2);
+
+		/*
+		 * [2]'s control: S1's entry read under a PCID of its own, S1's
+		 * leaf rewritten in place and told to nobody, and X loading CR3
+		 * again with NOFLUSH before it reads -- the very load the
+		 * handover would be without its discard.  The third frame read
+		 * there is an entry that outlived one cross-call and one such
+		 * load, which is what [2] needs kept; the frame written in place
+		 * is none kept.  Then the entry as the pmap knows it again.
+		 */
+		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+		leaf = pmap_walk(s1->root_pa, XS_VA, 0);
+		kept = 0;
+		if (leaf != PT_ENTRY_NULL) {
+			was = *leaf;
+			atomic_store64((volatile uint64_t *) leaf,
+				       (was & ~INTEL_PTE_PFN) | frame[0]);
+			kept = xs_reload_on(x, s1);
+			atomic_store64((volatile uint64_t *) leaf, was);
+			pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
+			(void) pmap_enter(s1, XS_VA, frame[2],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
+		}
+
 		kputs("pcid_test: [2] a space given another's PCID on processor ");
 		kputdec(x);
 		kputs(" reads ");
 		kputhex64(seen);
-		if (seen == XS_MARK(1))
-			kputs(", its own frame — PASS (#412)\r\n");
-		else {
-			kputs(seen == XS_MARK(2)
-			      ? ", the other space's frame: one space read another's"
-				" memory"
-			      : ", neither frame");
-			kputs(" — WRONG (#412)\r\n");
-		}
+		if (seen == XS_MARK(2))
+			kputs(", the other space's frame: one space read another's"
+			      " memory — WRONG (#412)\r\n");
+		else if (seen != XS_MARK(1))
+			kputs(", neither frame — WRONG (#412)\r\n");
+		else
+			xs_control_said(", its own frame", kept, XS_MARK(2),
+					XS_MARK(0));
 	}
 
 	/* X back on the kernel's tables, out of both spaces' sets. */
