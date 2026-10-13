@@ -1816,7 +1816,7 @@ static void gs_probe_here(void *arg)
 
 static void global_split_selftest(void)
 {
-	uint32_t self = cpu_apic_id();
+	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 	uint64_t root = pmap_kernel()->root_pa, size = 0, frame;
 	int faulted[SMP_MAX_CPUS] = { 0 }, boot_faulted = 0;
 	unsigned asked = 1, through = 0;
@@ -1845,13 +1845,10 @@ static void global_split_selftest(void)
 
 	/* Every processor caches the large, global, writable translation. */
 	gs_warm_here(0);
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
-		    || !smp_is_online(c->apic_id))
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
 			continue;
-		ipi_call_mask(1ULL << c->apic_id, gs_warm_here, 0);
+		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
 		asked++;
 	}
 
@@ -1870,29 +1867,23 @@ static void global_split_selftest(void)
 	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
 
 	gs_probe_here(&boot_faulted);
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id == self || c->apic_id >= SMP_MAX_CPUS
-		    || !smp_is_online(c->apic_id))
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
 			continue;
-		ipi_call_mask(1ULL << c->apic_id, gs_probe_here,
-			      &faulted[c->apic_id]);
+		ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
 	}
 
 	/* Writable again, and this time said. */
 	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
 	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
 
-	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
-		const struct acpi_cpu *c = acpi_cpu(i);
-
-		if (c->apic_id >= SMP_MAX_CPUS || !smp_is_online(c->apic_id)
-		    || (c->apic_id == self ? boot_faulted : faulted[c->apic_id]))
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if ((cpu != self && !smp_is_online(cpu))
+		    || (cpu == self ? boot_faulted : faulted[cpu]))
 			continue;
 		through++;
 		kputs("UrMach x86-64: processor ");
-		kputdec(c->apic_id);
+		kputdec(cpu);
 		kputs(" wrote a page narrowed after its large page was split: "
 		      "the large global translation outlived the split's flush — "
 		      "WRONG (#437)\r\n");
