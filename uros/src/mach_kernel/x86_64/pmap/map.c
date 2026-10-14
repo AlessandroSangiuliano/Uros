@@ -523,7 +523,18 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
 	 * pmap_pte_update() (pte.h); this was a copy of it, and the copy
 	 * wrote the permission bits into an entry a removal had just zeroed
 	 * (#604).
+	 *
+	 * 🔴 AND THE ADDRESS DECIDES U/S, HERE AS IN pmap_enter() (#699).  The
+	 * permission bits are cleared as a group -- INTEL_PTE_PERM is WRITE,
+	 * USER and NX -- and set back from `flags', which pmap_flags_for_prot()
+	 * builds from a vm_prot_t and so never carries USER.  Every protect of
+	 * a user page took ring 3's access away: the task's next touch faulted,
+	 * vm_fault mapped the page again with U/S, and until then SMAP did not
+	 * guard a page the kernel could reach without asking.  A kernel address
+	 * gets no USER here, as pmap_enter() gives it none.
 	 */
+	if (va_is_user(va))
+		flags |= INTEL_PTE_USER;
 	pmap_pte_update(entry, flags & INTEL_PTE_PERM, INTEL_PTE_PERM);
 
 	pmap_read_leave(held);
