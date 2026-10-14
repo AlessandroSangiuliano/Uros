@@ -1077,6 +1077,21 @@ static void wx_selftest(void)
 		      : (cr4 & CR4_SMAP) ? "on" : "OFFERED BUT OFF");
 		kputs((on & cr4) == on ? "\r\n" : " MISMATCH\r\n");
 	}
+
+	/*
+	 * Global pages (#437), after the image is split and narrowed: the
+	 * kernel half's translations now survive a CR3 load, and every
+	 * whole-TLB flush has to reach them -- tlb_flush_local_all() and
+	 * pmap_pat_install() do.  The census (#639) asks the others for it.
+	 */
+	{
+		uint64_t on = pmap_enable_global_pages();
+
+		kputs("UrMach x86-64: global pages ");
+		kputs(!cpu_has_pge() ? "not offered by this cpu\r\n"
+		      : (read_cr4() & CR4_PGE) && on ? "on\r\n"
+		      : "OFFERED BUT OFF\r\n");
+	}
 }
 
 /*
@@ -1756,6 +1771,151 @@ static void control_regs_selftest(void)
 
 	pmap_remove(scratch, CR_PROBE_VA, CR_PROBE_VA + 2 * PAGE_SIZE_4K);
 	pmap_destroy(scratch);
+	boot_frame_free(frame);
+}
+
+/*
+ * 🔴 A SPLIT WITH GLOBAL PAGES ON (#437).
+ *
+ * The direct map's leaves are global, so a processor that has used one keeps
+ * its large translation across every CR3 load.  Splitting that large page and
+ * then narrowing one of its small pages is only real if the split's flush took
+ * the large translation off every processor -- a CR3 reload does not, and a
+ * processor that kept it would still write where the table now says it may
+ * not.  #437's body names the place this matters most: W^X narrowed after a
+ * split, looking applied while not being applied.
+ *
+ * So: every processor reads a page of the direct map that sits in a large
+ * leaf, which leaves the large, global, writable translation in its TLB; the
+ * boot processor splits it down to 4 KiB and narrows that one page to
+ * read-only WITHOUT telling anyone -- an invlpg anywhere inside the large page
+ * would discard the large translation by itself and hide a broken split flush;
+ * and every other processor then writes the page.  Each must fault.  The page
+ * is a frame of this test's own, so nothing else is denied anything meanwhile.
+ *
+ * ⚠️ NOT THE BOOT PROCESSOR, WHICH NARROWS THE PAGE ITSELF.  Its write comes
+ * right after its own store to the entry, and the page walker reads the
+ * tables from the cache, not from the store buffer: a write executed ahead
+ * can walk the old, writable entry and cache a new translation of it, which
+ * the architecture allows until an invlpg (SDM 4.10.4.2).  It wrote through
+ * in 2 boots of 2 under KVM on victus and 1 of 2 on OMEGA, the others
+ * faulting every time.  The others are asked by an interrupt sent after the
+ * store, which they cannot see before it, and they are where a large global
+ * translation that outlived the split's flush shows: with the flush taken out
+ * (ablations/437-flush-keeps-globals.patch) processors 1 to 3 write.
+ *
+ * TCG reloads its whole TLB on every CR3 write, global or not, so there the
+ * answer is the same with and without the flush that reaches globals; only a
+ * real TLB -- KVM, or the metal -- can say WRONG.  ⚠️ And not every KVM: with
+ * the flush taken out it said WRONG in 4 boots of 4 on victus (Ryzen 5 5600H)
+ * and in none of 6 on OMEGA (i9-13900K) and omen (i7-7700HQ), VPID and EPT on
+ * both -- why is not established (a vCPU moved to another core between the
+ * interrupts, halted in between, would start with an empty TLB).  The metal
+ * has no such question.
+ */
+static volatile uint64_t gs_va;
+
+static void gs_warm_here(void *arg)
+{
+	(void) arg;
+	(void) *(volatile uint32_t *)(uintptr_t) gs_va;
+}
+
+static void gs_probe_here(void *arg)
+{
+	int *faulted = arg;
+
+	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+	*faulted = trap_probe_write((volatile void *)(uintptr_t) gs_va);
+	trap_expect_cancel();
+}
+
+static void global_split_selftest(void)
+{
+	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
+	uint64_t root = pmap_kernel()->root_pa, size = 0, frame;
+	int faulted[SMP_MAX_CPUS] = { 0 };
+	unsigned asked = 0, through = 0;
+	pt_entry_t *leaf;
+
+	if ((read_cr4() & CR4_PGE) == 0) {
+		kputs("UrMach x86-64: global pages are off, so a split cannot "
+		      "leave a global translation behind — NOT ASKED (#437)\r\n");
+		return;
+	}
+	frame = boot_frame_alloc();
+	if (frame == 0) {
+		kputs("UrMach x86-64: no frame for the global split probe — "
+		      "NOT ASKED (#437)\r\n");
+		return;
+	}
+	gs_va = phys_to_direct(frame);
+	leaf = pmap_walk(root, gs_va, &size);
+	if (leaf == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
+		kputs("UrMach x86-64: the direct map is already 4 KiB under the "
+		      "probe's frame, so there is no large translation to keep — "
+		      "NOT ASKED (#437)\r\n");
+		boot_frame_free(frame);
+		return;
+	}
+
+	/* Every other processor caches the large, global, writable translation. */
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
+		asked++;
+	}
+	if (asked == 0) {
+		kputs("UrMach x86-64: no processor online besides the one that "
+		      "would narrow the page, and it cannot judge itself — NOT "
+		      "ASKED (#437)\r\n");
+		boot_frame_free(frame);
+		return;
+	}
+
+	/* Down to 4 KiB: each split flushes every processor's TLB. */
+	while (size != PAGE_SIZE_4K && pmap_split_page(PMAP_NULL, gs_va) != 0)
+		(void) pmap_walk(root, gs_va, &size);
+	leaf = pmap_walk(root, gs_va, &size);
+	if (leaf == PT_ENTRY_NULL || size != PAGE_SIZE_4K) {
+		kputs("UrMach x86-64: the probe's page did not split to 4 KiB — "
+		      "WRONG (#437)\r\n");
+		boot_frame_free(frame);
+		return;
+	}
+
+	/* Narrowed, and told to nobody. */
+	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
+
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
+	}
+
+	/* Writable again, and this time said. */
+	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
+	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
+
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu) || faulted[cpu])
+			continue;
+		through++;
+		kputs("UrMach x86-64: processor ");
+		kputdec(cpu);
+		kputs(" wrote a page narrowed after its large page was split: "
+		      "the large global translation outlived the split's flush — "
+		      "WRONG (#437)\r\n");
+	}
+	kputs("UrMach x86-64: a page narrowed after a split, with global pages "
+	      "on, on ");
+	kputdec(asked);
+	kputs(through == 0
+	      ? " processors besides the one that narrowed it: every write "
+		"faulted\r\n"
+	      : " processors besides the one that narrowed it: some wrote "
+		"through, WRONG (#437)\r\n");
 	boot_frame_free(frame);
 }
 
@@ -9131,6 +9291,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	trap_vectors_selftest();
 	trap_entry_test();
 	control_regs_selftest();
+	global_split_selftest();
 
 	/*
 	 * The double-fault self-test is TERMINAL, and that is why it is behind

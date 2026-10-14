@@ -22,6 +22,7 @@
 #include <pmap/direct.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
+#include <pmap/tlb.h>	/* #437: tlb_flush_local_all */
 
 /*
  * The window used when the loader gave us no memory map at all — enough to
@@ -73,7 +74,8 @@ static void fill_1g(unsigned gib)
 	for (unsigned i = 0; i < gib; i++)
 		direct_pdpt[i] = ((uint64_t)i * PAGE_SIZE_1G)
 			       | INTEL_PTE_VALID | INTEL_PTE_WRITE
-			       | INTEL_PTE_PS | INTEL_PTE_NX;
+			       | INTEL_PTE_PS | INTEL_PTE_NX
+			       | INTEL_PTE_GLOBAL;	/* #437 */
 
 	direct_map_page_size = PAGE_SIZE_1G;
 }
@@ -85,7 +87,8 @@ static void fill_2m(unsigned gib)
 			direct_pd[i][j] = ((uint64_t)i * PAGE_SIZE_1G
 					   + (uint64_t)j * PAGE_SIZE_2M)
 					| INTEL_PTE_VALID | INTEL_PTE_WRITE
-					| INTEL_PTE_PS | INTEL_PTE_NX;
+					| INTEL_PTE_PS | INTEL_PTE_NX
+					| INTEL_PTE_GLOBAL;	/* #437 */
 
 		direct_pdpt[i] = kernel_va_to_phys(&direct_pd[i][0])
 			       | INTEL_PTE_VALID | INTEL_PTE_WRITE;
@@ -150,9 +153,10 @@ void direct_map_init(uint64_t top_of_ram)
 					  | INTEL_PTE_NX;
 
 	/*
-	 * Reloading CR3 flushes the non-global TLB.  Strictly, a previously
-	 * not-present entry cannot be cached, so this is belt and braces at
-	 * a point in boot where cheap certainty beats a clever argument.
+	 * A whole-TLB flush.  Strictly, a previously not-present entry cannot
+	 * be cached, so this is belt and braces at a point in boot where cheap
+	 * certainty beats a clever argument -- and it is the routine that
+	 * reaches global entries too (#437), not a CR3 reload, which does not.
 	 */
-	write_cr3(read_cr3());
+	tlb_flush_local_all();
 }

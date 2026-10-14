@@ -290,6 +290,21 @@ int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 	int	 replaced = 0;
 	int	 rc;
 
+	/*
+	 * 🔑 A KERNEL-HALF LEAF IS GLOBAL (#437), with one exception.
+	 *
+	 * The kernel half is the same in every space, so its translations need
+	 * not die with a CR3 load; the global bit says exactly that.  The
+	 * exception is the image's window: boot.S maps it through the same
+	 * page directory as the low identity window, so a leaf there is also an
+	 * identity translation, and a global identity translation would outlive
+	 * the switch into a user space whose low half is its own.  That window
+	 * stays non-global until the identity map is gone and the image has a
+	 * directory of its own.
+	 */
+	if (va_is_kernel(va) && va < KERNEL_IMAGE_BASE)
+		flags |= INTEL_PTE_GLOBAL;
+
 	for (;;) {
 		boolean_t held;
 

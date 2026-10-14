@@ -478,17 +478,26 @@ void pmap_protect_kernel(void);
 uint64_t pmap_enable_smep_smap(void);
 
 /*
- * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor
- * that loads them, and pmap_protect_kernel() and pmap_enable_smep_smap() run on
- * the boot processor alone: the application processors of every boot ran
- * without CR0.WP, SMEP or SMAP.  Without WP the kernel writes through
- * read-only mappings -- .text's and .rodata's, and the copy-on-write ones
- * copyout() relies on faulting -- and the access brackets, which read one
- * global, went on as if SMAP held everywhere.  Each application processor
- * calls this on its way up, and it applies what the boot processor turned on
- * instead of deciding again.
+ * Global pages (#437): CR4.PGE where the processor has it, on the boot
+ * processor; the others get it from pmap_control_regs_here().  Returns the bit
+ * it turned on, or 0.  The kernel half's leaves carry the global bit
+ * (pmap_map_page(), direct.c), except the image's window, which shares its
+ * page directory with the boot identity map.
  */
-void pmap_protections_here(void);
+uint64_t pmap_enable_global_pages(void);
+
+/*
+ * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor
+ * that loads them, and pmap_protect_kernel(), pmap_enable_smep_smap() and
+ * pmap_enable_global_pages() run on the boot processor alone: the application
+ * processors of every boot ran without CR0.WP, SMEP or SMAP.  Without WP the
+ * kernel writes through read-only mappings -- .text's and .rodata's, and the
+ * copy-on-write ones copyout() relies on faulting -- and the access brackets,
+ * which read one global, went on as if SMAP held everywhere.  Each
+ * application processor calls this on its way up, and it applies what the
+ * boot processor turned on instead of deciding again.
+ */
+void pmap_control_regs_here(void);
 
 /*
  * Make `size` bytes of device registers at physical `pa` reachable, and
