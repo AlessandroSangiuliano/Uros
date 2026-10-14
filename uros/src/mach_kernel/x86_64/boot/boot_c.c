@@ -4233,6 +4233,49 @@ static void ring3_selftest(void)
 	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
 	      : " — WRONG, the syscall window is not covered\r\n");
 
+	/*
+	 * And ring 3 reading a page a protect has made read-only (#699).
+	 *
+	 * protect_user_selftest() reads the leaf; this asks the processor, from
+	 * the ring the leaf's U/S bit is for.  The data page is protected
+	 * read-only through pmap_protect(), as fork's copy-on-write protects a
+	 * parent's pages, and ring 3 reads it: the read must go through and the
+	 * HLT after it come back.  A page fault on the read, with the data page
+	 * in cr2, is a protect that took the page away from its own task.  Last,
+	 * because nothing after it may need the page writable.
+	 */
+	{
+		struct trap_record rd;
+
+		pmap_protect(space, USER_PROBE_DATA_VA,
+			     USER_PROBE_DATA_VA + PAGE_SIZE_4K, VM_PROT_READ);
+		write_cr3(space->root_pa);
+		user_probe_enter(USER_PROBE_READ_VA, USER_PROBE_STACK_TOP);
+		rd = *trap_last();
+		write_cr3(kernel_root);
+
+		kputs("UrMach x86-64: ring 3 reading its data page after a "
+		      "protect to read-only took ");
+		kputs(trap_name(rd.vector));
+		kputs(" at ");
+		kputhex64(rd.rip);
+		if (rd.vector == T_PAGE_FAULT) {
+			kputs(", cr2 ");
+			kputhex64(rd.cr2);
+			kputs(", error ");
+			kputhex64(rd.error);
+		}
+		kputs(rd.caught && rd.vector == T_GENERAL_PROTECTION
+		      && rd.rip == USER_PROBE_READ_DONE_VA
+		      ? " — the read went through and its HLT came back, "
+			"PASS (#699)\r\n"
+		      : rd.caught && rd.vector == T_PAGE_FAULT
+		      && rd.cr2 == USER_PROBE_DATA_VA
+		      ? " — WRONG, the read faulted: the protect took U/S "
+			"away (#699)\r\n"
+		      : " — WRONG, not the trap the read ends in (#699)\r\n");
+	}
+
 	/* Ends, not sizes (#612): see user_reachable_selftest(). */
 	pmap_remove(space, USER_PROBE_CODE_VA, USER_PROBE_CODE_VA + PAGE_SIZE_4K);
 	pmap_remove(space, USER_PROBE_DATA_VA, USER_PROBE_DATA_VA + PAGE_SIZE_4K);
