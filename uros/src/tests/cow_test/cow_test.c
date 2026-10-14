@@ -584,6 +584,102 @@ ask_the_fault_count(void)
 }
 
 /*
+ * Arm eight (#699): does copy-on-write survive a protect to read-only and
+ * back?  vm_map_protect() raises a protection by calling pmap_protect() with
+ * it, and leaves the rise to the next fault, which is where a page still
+ * shared copy-on-write gets copied; a pmap that gave WRITE back made such a
+ * page writable in place, and the parent's writes reached its child.  So: a
+ * fork, the parent protects its pages read-only and back to read-write,
+ * writes every one, and the child's copy is read, which must hold what it
+ * held at the fork in every page.  The control is the same without the two
+ * protects, and must hold too.
+ *
+ * Returns how many of the child's pages changed, or -1 if a call failed.
+ */
+static int
+child_pages_changed(int reprotect)
+{
+	vm_address_t	region = 0;
+	vm_size_t	size = (vm_size_t) COW_PAGES * vm_page_size;
+	mach_port_t	kid = MACH_PORT_NULL;
+	vm_size_t	got = 0;
+	kern_return_t	kr;
+	int		i, changed = 0;
+
+	kr = vm_allocate(mach_task_self(), &region, size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [8] vm_allocate failed (%d) — WRONG\n", kr);
+		return -1;
+	}
+	for (i = 0; i < COW_PAGES; i++)
+		*(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size) = 0xa0 + i;
+
+	kr = task_create(mach_task_self(), (ledger_port_array_t) 0, 0, TRUE,
+			 &kid);
+	if (kr == KERN_SUCCESS && reprotect)
+		kr = vm_protect(mach_task_self(), region, size, FALSE,
+				VM_PROT_READ);
+	if (kr == KERN_SUCCESS && reprotect)
+		kr = vm_protect(mach_task_self(), region, size, FALSE,
+				VM_PROT_READ | VM_PROT_WRITE);
+	if (kr == KERN_SUCCESS) {
+		for (i = 0; i < COW_PAGES; i++)
+			*(volatile unsigned long long *)
+				(region + (vm_offset_t) i * vm_page_size) =
+				0xb0 + i;
+		kr = vm_read_overwrite(kid, region, size,
+				       (vm_address_t) mirror, &got);
+	}
+	if (kr != KERN_SUCCESS)
+		printf("cow_test: [8] task_create, vm_protect or "
+		       "vm_read_overwrite failed (%d) — WRONG\n", kr);
+	else
+		for (i = 0; i < COW_PAGES; i++)
+			if (*(unsigned long long *)
+			    (mirror + (vm_offset_t) i * vm_page_size) !=
+			    (unsigned long long) (0xa0 + i))
+				changed++;
+
+	if (kid != MACH_PORT_NULL) {
+		(void) task_terminate(kid);
+		(void) mach_port_deallocate(mach_task_self(), kid);
+	}
+	(void) vm_deallocate(mach_task_self(), region, size);
+	return kr == KERN_SUCCESS ? changed : -1;
+}
+
+static int
+reprotect_keeps_copy(void)
+{
+	int	control = child_pages_changed(0);
+	int	question;
+
+	if (control != 0) {
+		if (control > 0)
+			printf("cow_test: [8] without a protect the parent's "
+			       "writes changed the child's copy in %d of %d "
+			       "pages — WRONG\n", control, COW_PAGES);
+		return 0;
+	}
+	question = child_pages_changed(1);
+	if (question < 0)
+		return 0;
+	if (question > 0) {
+		printf("cow_test: [8] after a protect to read-only and back the "
+		       "parent's writes changed the child's copy in %d of %d "
+		       "pages — WRONG, the protect gave WRITE back (#699)\n",
+		       question, COW_PAGES);
+		return 0;
+	}
+	printf("cow_test: [8] the parent protects %d pages read-only and back "
+	       "after a fork and writes them: the child's copy changed in %d, "
+	       "and in %d without the protects — PASS (#699)\n", COW_PAGES,
+	       question, control);
+	return 1;
+}
+
+/*
  * Everything between the allocation and the verdict.  Split out so that a
  * failure part-way can return a count rather than jump, and so that the child
  * task is terminated on every path by the one caller that owns it.
@@ -853,10 +949,11 @@ run_the_arms(void)
 	 * and not "is it right", and a measurement given a pass/fail would need
 	 * a threshold that nothing here is entitled to choose.  It is last
 	 * because it leaves six terminated tasks behind it.  Arm six, after it,
-	 * has none either; arm seven does, and is counted.
+	 * has none either; arms seven and eight do, and are counted.
 	 */
 	measure_chain_depth();
 	passed += ask_the_fault_count();
+	passed += reprotect_keeps_copy();
 
 	return passed;
 }
@@ -888,7 +985,7 @@ main(int argc, char **argv)
 	if (child != MACH_PORT_NULL)
 		(void) task_terminate(child);
 
-	printf("cow_test: %d of 4 arms passed\n", passed);
+	printf("cow_test: %d of 5 arms passed\n", passed);
 
 	/*
 	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
@@ -907,5 +1004,5 @@ main(int argc, char **argv)
 	 * This program is single-threaded, so it is the last thread and the
 	 * task goes with it.
 	 */
-	return passed == 4 ? 0 : 1;
+	return passed == 5 ? 0 : 1;
 }
