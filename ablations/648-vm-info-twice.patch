@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #648
+Takes out: the pointer moving first in host_statistics()'s sum (fc62af0a) -- the loop adds *stat and only then moves on, so processor 0 is added twice and the last processor never, as from the tree's first commit; host_vm_info_selftest() sets processor c's faults to c + 1 and must find the sum 1 to NCPUS gone wrong (2017 for 2080 at NCPUS 64); common code, pure software
+Run: --entry 0 300 -smp 4
+Expect: HOST_VM_INFO with processor c's faults set to c \+ 1 answers [0-9]+, wanted [0-9]+ — WRONG, a processor counted twice
+
+diff --git a/uros/src/mach_kernel/kern/host.c b/uros/src/mach_kernel/kern/host.c
+index d8dc49cb..8ffcdba5 100644
+--- a/uros/src/mach_kernel/kern/host.c
++++ b/uros/src/mach_kernel/kern/host.c
+@@ -362,16 +362,7 @@ host_statistics(
+ 		{
+ 			register int i;
+ 
+-			/*
+-			 * 🔴 The pointer moves FIRST (#648).  It used to move at
+-			 * the end of the body, so the first pass added
+-			 * processor 0 a second time and the last processor's
+-			 * counts were never added: every HOST_VM_INFO answered
+-			 * with processor 0 doubled, and #699's measurement of
+-			 * the faults a fork costs was made with it.
+-			 */
+ 			for (i = 1; i < NCPUS; i++) {
+-				stat++;
+ 				host_vm_stat.zero_fill_count +=
+ 						stat->zero_fill_count;
+ 				host_vm_stat.reactivations +=
+@@ -382,6 +373,7 @@ host_statistics(
+ 				host_vm_stat.cow_faults += stat->cow_faults;
+ 				host_vm_stat.lookups += stat->lookups;
+ 				host_vm_stat.hits += stat->hits;
++				stat++;
+ 			}
+ 		}
+ #endif
