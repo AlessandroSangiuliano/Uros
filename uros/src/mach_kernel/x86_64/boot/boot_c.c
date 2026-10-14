@@ -84,6 +84,10 @@
 #include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
 #include <kern/misc_protos.h>	/* printf */
 #include <kern/fault_profile.h>	/* #482: arm the instrument once %gs is real */
+#include <kern/host.h>		/* realhost (#648) */
+#include <kern/host_statistics.h>	/* vm_stat[] (#648) */
+#include <mach/host_info.h>		/* HOST_VM_INFO (#648) */
+#include <mach/mach_host_server.h>	/* host_statistics(), as host.c sees it */
 
 #define COM1 0x3F8
 
@@ -1212,6 +1216,46 @@ static void protect_user_selftest(void)
 		pmap_destroy(u);
 	if (frame != 0)
 		boot_frame_free(frame);
+}
+
+/*
+ * HOST_VM_INFO adds every processor's counts once (#648).
+ *
+ * The sum is the machine-independent host_statistics()'s, and it added
+ * processor 0 twice and the last processor never.  Asked here, before the VM
+ * has started and anything else counts, with each processor's faults set to a
+ * value of its own -- processor c's are c + 1 -- so that a processor counted
+ * twice or left out changes the total: the answer must be the sum of 1 to
+ * NCPUS.  The counts are given back as they were.
+ */
+static void host_vm_info_selftest(void)
+{
+	integer_t saved[NCPUS];
+	vm_statistics_data_t answer;
+	mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+	uint64_t want = 0;
+	kern_return_t kr;
+	unsigned c;
+
+	for (c = 0; c < NCPUS; c++) {
+		saved[c] = vm_stat[c].faults;
+		vm_stat[c].faults = (integer_t)(c + 1);
+		want += c + 1;
+	}
+	kr = host_statistics(&realhost, HOST_VM_INFO, (host_info_t) &answer,
+			     &count);
+	for (c = 0; c < NCPUS; c++)
+		vm_stat[c].faults = saved[c];
+
+	kputs("UrMach x86-64: HOST_VM_INFO with processor c's faults set to "
+	      "c + 1 answers ");
+	kputdec((unsigned) answer.faults);
+	kputs(", wanted ");
+	kputdec((unsigned) want);
+	kputs(kr != KERN_SUCCESS ? " — WRONG, host_statistics refused (#648)\r\n"
+	      : (uint64_t) answer.faults == want
+	      ? " — every processor once, PASS (#648)\r\n"
+	      : " — WRONG, a processor counted twice or not at all (#648)\r\n");
 }
 
 /*
@@ -9957,6 +10001,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_selftest();
 	user_pmap_selftest();
 	protect_user_selftest();
+	host_vm_info_selftest();
 
 	acpi_selftest(info);
 	reset_init();		/* #373: the FADT's reset register, said */
