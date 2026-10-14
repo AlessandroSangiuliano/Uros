@@ -89,13 +89,25 @@ struct pmap {
 	 * able to reach it"; the bit clears when CR3 is written to something
 	 * else, which is the moment the translations actually go.
 	 *
-	 * ⚠️ PCID (#412) is where this stops being true, and it is worth
-	 * saying here rather than discovering it there: with PCID a space's
-	 * entries survive on a processor that has switched away, so the
-	 * question becomes what is CACHED and not what is current, and this
-	 * field's meaning changes with it.
+	 * ⚠️ PCID (#412): a space's entries survive on a processor that has
+	 * switched away.  This set still says what is CURRENT, and is still who
+	 * a shootdown interrupts; what is only CACHED is answered by tlb_gen
+	 * below, at the processor's next switch into the space.
 	 */
 	volatile uint64_t cpus_using;
+
+	/*
+	 * PCID (#412).  ctx_id names the space for as long as the machine
+	 * runs, unlike its address, which the pool hands out again.  tlb_gen
+	 * counts the changes that needed a shootdown: each one increments it
+	 * BEFORE reading cpus_using, and a processor switching in reads it AFTER
+	 * joining cpus_using -- so either the shootdown sees the processor and
+	 * interrupts it, or the processor sees the new generation and discards
+	 * the space's entries.  That order is the whole correctness argument,
+	 * and FreeBSD's EN-22:04 is what getting it wrong looks like.
+	 */
+	uint64_t ctx_id;
+	volatile uint64_t tlb_gen;
 };
 
 typedef struct pmap *pmap_t;
@@ -253,9 +265,11 @@ static __inline__ void pmap_writer_unlock(volatile uint8_t *l)
 }
 
 /*
- * Make `pmap` the address space this CPU translates through — a CR3 load,
- * which also flushes every non-global TLB entry.  The kernel half is
- * identical across spaces, so the kernel keeps running across the switch.
+ * Make `pmap` the address space this CPU translates through — a CR3 load.
+ * Without PCID it discards every non-global entry; with PCID it keeps the
+ * space's own entries when its slot is current and discards that one PCID when
+ * not (pmap_cr3_for(), #412).  The kernel half is identical across spaces, so
+ * the kernel keeps running across the switch.
  */
 void pmap_activate(pmap_t pmap);
 
@@ -485,6 +499,50 @@ uint64_t pmap_enable_smep_smap(void);
  * page directory with the boot identity map.
  */
 uint64_t pmap_enable_global_pages(void);
+
+/*
+ * PCID (#412), decided once on the boot processor and applied on the others by
+ * pmap_control_regs_here().  Three modes, as agreed on #412:
+ *
+ *   PMAP_PCID_OFF		no PCID on this processor, -n, or an INVLPG
+ *				that misses other PCIDs' global entries
+ *				(pmap_pcid_erratum()): today's path
+ *   PMAP_PCID_NO_INVPCID	PCID, and no INVPCID -- or -x pretending so
+ *   PMAP_PCID_INVPCID	both
+ *
+ * With PCID a space's entries outlive the switch away from it: each processor
+ * keeps eight slots, a switch into a space whose slot is current loads CR3
+ * with CR3_NOFLUSH, and a slot changing hands discards that PCID in the same
+ * load (pmap_cr3_for()).  The kernel's own tables are PCID 0.  Returns the CR4
+ * bit it set, or 0.
+ */
+#define	PMAP_PCID_OFF		0
+#define	PMAP_PCID_NO_INVPCID	1
+#define	PMAP_PCID_INVPCID	2
+
+extern int	pmap_pcid_mode;
+uint64_t	pmap_enable_pcid(void);
+
+/*
+ * Why the mode is what it is, as pmap_enable_pcid() decided it, so that the
+ * boot line says that and does not work it out again: on, not offered, -n,
+ * no global pages, or the erratum below with the two revisions it compared.
+ */
+#define	PMAP_PCID_WHY_ON		0
+#define	PMAP_PCID_WHY_NOT_OFFERED	1
+#define	PMAP_PCID_WHY_ASKED_OFF		2	/* -n */
+#define	PMAP_PCID_WHY_NO_GLOBAL_PAGES	3
+#define	PMAP_PCID_WHY_ERRATUM		4
+
+extern int	pmap_pcid_why;
+extern uint32_t	pmap_pcid_erratum_rev, pmap_pcid_erratum_fixed;
+
+/*
+ * Whether this processor has Intel's errata ADL063/RPL043 -- INVLPG leaving
+ * other PCIDs' global entries -- in the microcode it runs; if so, *rev is
+ * that revision and *fixed the first without it.  Never under a hypervisor.
+ */
+int		pmap_pcid_erratum(uint32_t *rev, uint32_t *fixed);
 
 /*
  * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor

@@ -9,6 +9,7 @@
 
 
 #include <cpu/regs.h>
+#include <boot/bootarg.h>	/* #412: boot_flag */
 #include <cpu/percpu.h>		/* which space this processor has loaded (#439) */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
@@ -65,12 +66,21 @@ void pmap_bootstrap(void)
  * build and tear down before the VM is up.  Sixteen was never a count of
  * anything; it was what somebody wrote when nothing could be allocated.
  *
- * Four rather than one because the pool costs 4 * 24 bytes of BSS and a
+ * Four rather than one because the pool costs a few bytes of BSS a slot and a
  * self-test that wants two spaces at once should not have to come back here.
  * And if it ever does run out, pmap_alloc() now says so by name and by number
  * instead of returning PMAP_NULL into a resource error that mentions neither.
+ *
+ * ⚠️ Six, and it did come back here (#412).  What counts is the spaces alive
+ * at once: while the boot runs on one processor a destroyed space gives its
+ * slot back on the spot, since urmach_call_rcu() runs the callback at once
+ * when no other processor is running (kern/rcu.c, since #566).  The PCID
+ * test's first version wanted nine spaces together and ran out; today's holds
+ * three (S1, S2 and the third its [1]'s control remaps in), which with the
+ * space that straddles the boundary brings the boot to four of six -- the line
+ * pmap_init() prints, under KVM on OMEGA on 13/10/2026, three before S3.
  */
-#define PMAP_BOOT_MAX	4
+#define PMAP_BOOT_MAX	6
 
 static struct pmap	pmap_pool[PMAP_BOOT_MAX];
 static zone_t		pmap_zone;		/* ZONE_NULL until pmap_init() */
@@ -450,6 +460,9 @@ static void pmap_free(pmap_t pmap)
 
 _Static_assert(KERNEL_PML4_FIRST == 256, "the halves are not evenly split");
 
+/* #412: ctx_id 0 is the kernel's, and never a slot's owner. */
+static volatile uint64_t pmap_ctx_next = 1;
+
 pmap_t pmap_create(uint64_t size)
 {
 	const pt_entry_t *kroot;
@@ -495,6 +508,14 @@ pmap_t pmap_create(uint64_t size)
 	 * panic rather than the fact of it.
 	 */
 	pmap->cpus_using = 0;
+
+	/*
+	 * #412: a name no slot on any processor can already hold, and a
+	 * generation above every slot's zero -- so the first switch into the
+	 * space misses and discards what its PCID held before.
+	 */
+	pmap->ctx_id = atomic_add64(&pmap_ctx_next, 1);
+	pmap->tlb_gen = 1;
 
 	/*
 	 * 🔥 pmap_table_frame() and not boot_frame_alloc(), which is what this
@@ -755,11 +776,62 @@ void pmap_activate_boot(pmap_t pmap)
 		write_cr3(pmap->root_pa);
 }
 
+/*
+ * The CR3 that loads `pmap' on this processor (#412).  Called with interrupts
+ * off and after this processor has joined pmap->cpus_using; see pmap.h's
+ * tlb_gen for why that order.
+ *
+ * Without PCID, and for the kernel's own space, PCID 0 and no keeping:
+ * exactly the load this kernel always did.  Otherwise the space's slot:
+ *
+ *   found, and its generation is the space's -> keep (CR3_NOFLUSH): every
+ *	change since this processor last flushed it has reached it;
+ *   found, but behind -> load without keeping, which discards this PCID's
+ *	entries, and the slot is current again;
+ *   not found -> the next slot round the ring changes hands, and the load
+ *	discards whatever the previous owner left under that PCID.
+ *
+ * A PCID therefore changes owner only here, on this processor, with its
+ * entries discarded in the same instruction -- there is no path by which one
+ * space's entries reach another, and none that needs every processor's
+ * agreement.  ablations/412-gen-check.patch keeps a found slot's entries
+ * whatever its generation says, and ablations/412-reuse-keeps.patch keeps the
+ * previous owner's entries when a slot changes hands.
+ */
+static uint64_t pmap_cr3_for(struct percpu *pc, pmap_t pmap)
+{
+	uint64_t gen;
+	unsigned s;
+
+	if (pmap_pcid_mode == PMAP_PCID_OFF || pmap == pmap_kernel())
+		return pmap->root_pa;
+
+	gen = atomic_load64(&pmap->tlb_gen);
+	for (s = 0; s < PCID_SLOTS; s++)
+		if (pc->pcid_slot[s].ctx_id == pmap->ctx_id)
+			break;
+
+	if (s == PCID_SLOTS) {
+		s = pc->pcid_victim;
+		pc->pcid_victim = (s + 1) % PCID_SLOTS;
+		pc->pcid_slot[s].ctx_id = pmap->ctx_id;
+		pc->pcid_slot[s].gen = gen;
+		return pmap->root_pa | (s + 1);
+	}
+
+	if (pc->pcid_slot[s].gen >= gen)
+		return pmap->root_pa | (s + 1) | CR3_NOFLUSH;
+
+	pc->pcid_slot[s].gen = gen;
+	return pmap->root_pa | (s + 1);
+}
+
 void pmap_activate(pmap_t pmap)
 {
 	struct percpu	*pc;
 	pmap_t		 old;
 	unsigned	 bit;
+	int		 was;
 
 	if (pmap == PMAP_NULL)
 		return;
@@ -769,9 +841,16 @@ void pmap_activate(pmap_t pmap)
 
 	if (old == pmap) {
 		/*
-		 * Already here.  Not merely an optimisation: writing CR3 to
-		 * the value it already holds would discard every non-global
-		 * translation this processor has, for nothing.
+		 * Already here.  Not an optimisation but a correctness branch:
+		 * going on, the last store below, with old == pmap, would take
+		 * this processor out of the set of the very space it has
+		 * loaded, and every shootdown of that space would pass it by
+		 * (tlb_flush_range() reads cpus_using) -- a stale translation,
+		 * a freed frame still reachable.  The reload itself would also
+		 * cost something without PCID, every non-global translation
+		 * this processor has; with PCID pmap_cr3_for() would load with
+		 * NOFLUSH, the slot being in step, and discard nothing -- which
+		 * is no reason to drop this test.
 		 *
 		 * ❌ AND IT DID WRITE IT.  #439 (ae93c506) added this test, this
 		 * comment and the `return' AROUND the existing write instead of
@@ -802,19 +881,41 @@ void pmap_activate(pmap_t pmap)
 	 * space whose set does not name it.
 	 *
 	 * Between the first store and the CR3 write this processor is in
-	 * `pmap's set while holding none of its translations: a shootdown for
-	 * pmap would send us an interrupt we did not need.  Between the CR3
-	 * write and the last store it is still in `old's set while holding
-	 * none of ITS translations either — CR3 discarded them — so again an
-	 * interrupt for nothing.  Both windows cost a wasted interrupt and
-	 * neither can lose one, which is the only asymmetry that matters:
-	 * the opposite order would open a window in which this processor
-	 * holds translations nobody knows to shoot down.
+	 * `pmap's set without having it loaded: a shootdown for pmap sends us
+	 * an interrupt we did not need.  Without PCID we hold none of pmap's
+	 * translations then, and the handler flushes the range in old for
+	 * nothing.  With PCID we may hold them under pmap's slot from an
+	 * earlier visit, and the handler leaves the request alone, CR3 not
+	 * naming pmap: what keeps them from outliving that shootdown is not
+	 * this order but pmap's generation, which pmap_cr3_for() reads before
+	 * the load.
+	 *
+	 * Between the CR3 write and the last store it is still in `old's set,
+	 * and without PCID holding none of ITS translations either — CR3
+	 * discarded them — so again an interrupt for nothing.  With PCID it
+	 * may still hold them under old's PCID: the interrupt is still
+	 * harmless, because the handler acts only on the PCID CR3 names, and
+	 * old's generation covers the rest at the next switch back.
+	 *
+	 * Both windows cost a wasted interrupt and neither can lose one, which
+	 * is the only asymmetry that matters: the opposite order would open a
+	 * window in which this processor holds translations nobody knows to
+	 * shoot down.
 	 */
 	(void) atomic_test_and_set_bit(&pmap->cpus_using, bit);
-	pc->loaded_pmap = pmap;
 
-	write_cr3(pmap->root_pa);
+	/*
+	 * #412: from reading the space's generation to the CR3 write, with
+	 * interrupts off.  A shootdown handler that ran in between would find
+	 * CR3 still naming the old space, or the slot already claiming a
+	 * generation the load has not yet made true.
+	 */
+	was = interrupts_enabled();
+	interrupts_disable();
+	pc->loaded_pmap = pmap;
+	write_cr3(pmap_cr3_for(pc, pmap));
+	if (was)
+		interrupts_enable();
 
 	if (old != PMAP_NULL)
 		(void) atomic_test_and_clear_bit(&old->cpus_using, bit);
@@ -1740,6 +1841,109 @@ uint64_t pmap_enable_global_pages(void)
 	pmap_cr4_on |= CR4_PGE;
 	write_cr4(read_cr4() | CR4_PGE);
 	return CR4_PGE;
+}
+
+int pmap_pcid_mode = PMAP_PCID_OFF;
+
+/*
+ * 🔴 WHERE INVLPG MISSES THE GLOBAL ENTRIES OF OTHER PCIDs (#412).
+ *
+ * On Alder Lake and Raptor Lake, INVLPG "may fail to invalidate TLB entries
+ * for global pages with PCIDs different from the current PCID value": Intel's
+ * errata ADL063 (12th Generation Core Specification Update 682436, rev. 040)
+ * and RPL043 (13th Generation, 740518, rev. 031).  There a kernel page removed
+ * while one space is loaded stays translated under the PCID of another space
+ * that used it, and may survive any switch back into that space: no CR3 load is
+ * required to discard a global entry (SDM Vol. 3A 253668-093US 5.10.4.1).  The
+ * errata's cures are microcode, which this kernel does not load -- the
+ * revision that runs is the firmware's -- or INVPCID type 2 in place of
+ * INVLPG, a whole-TLB flush for every kernel page.
+ * This turns PCID off instead, below the first revision without the erratum,
+ * as Linux does (arch/x86/mm/init.c, invlpg_miss_ids, whose models and
+ * revisions Intel gave and this table copies).  That table errs on the safe
+ * side: it has Alder Lake N (0xBE), which neither specification update lists;
+ * every stepping of 0xBF, though RPL043 marks the 6P+0E die (B06F5h) N/A; and
+ * every 0x9A, though the Atom C1100 there counts its revisions from 0x4 and
+ * never reaches 0x42c.  Not under a hypervisor: the erratum "does not apply in
+ * VMX non-root operation", and a guest would read whatever revision its host
+ * chose to show it.
+ */
+static const struct {
+	uint8_t		model;		/* family 6, as the SDM displays it */
+	uint32_t	fixed;		/* the first revision without the erratum */
+} pcid_invlpg_erratum[] = {
+	{ 0x97, 0x2e },		/* Alder Lake */
+	{ 0x9a, 0x42c },	/* Alder Lake L */
+	{ 0xbe, 0x11 },		/* Alder Lake N */
+	{ 0xb7, 0x118 },	/* Raptor Lake */
+	{ 0xba, 0x4117 },	/* Raptor Lake P */
+	{ 0xbf, 0x2e },		/* Raptor Lake S */
+};
+
+int pmap_pcid_erratum(uint32_t *rev, uint32_t *fixed)
+{
+	unsigned family, model, i;
+
+	if (!cpu_is_intel() || cpu_under_hypervisor())
+		return 0;
+	cpu_family_model(&family, &model);
+	if (family != 6)
+		return 0;
+	for (i = 0; i < sizeof(pcid_invlpg_erratum) / sizeof(pcid_invlpg_erratum[0]); i++)
+		if (pcid_invlpg_erratum[i].model == model) {
+			*rev = cpu_microcode_revision();
+			*fixed = pcid_invlpg_erratum[i].fixed;
+			return *rev < *fixed;
+		}
+	return 0;
+}
+
+int pmap_pcid_why = PMAP_PCID_WHY_NOT_OFFERED;
+uint32_t pmap_pcid_erratum_rev, pmap_pcid_erratum_fixed;
+
+uint64_t pmap_enable_pcid(void)
+{
+	if (!cpu_has_pcid())
+		return 0;
+	if (boot_flag('n')) {
+		pmap_pcid_why = PMAP_PCID_WHY_ASKED_OFF;
+		return 0;
+	}
+
+	/*
+	 * 🔴 NOT WITHOUT GLOBAL PAGES.  With CR4.PGE clear the global bit means
+	 * nothing (SDM Vol. 3A 253668-093US 5.10.2.4), so every kernel
+	 * translation is cached under whichever PCID was current: a kernel page
+	 * removed later is invalidated by invlpg in the current PCID alone, and
+	 * a space switched back into with CR3_NOFLUSH still reaches the frame,
+	 * freed and handed out again.  Without INVPCID even the whole-TLB flush
+	 * is a CR3 reload of one PCID.  Every processor with PCID has PGE; a VM
+	 * told to hide PGE is how this arises, and Linux refuses PCID there too
+	 * (setup_pcid()).  So does this.
+	 */
+	if ((pmap_cr4_on & CR4_PGE) == 0) {
+		pmap_pcid_why = PMAP_PCID_WHY_NO_GLOBAL_PAGES;
+		return 0;
+	}
+	if (pmap_pcid_erratum(&pmap_pcid_erratum_rev,
+			      &pmap_pcid_erratum_fixed)) {
+		pmap_pcid_why = PMAP_PCID_WHY_ERRATUM;
+		return 0;
+	}
+	pmap_pcid_why = PMAP_PCID_WHY_ON;
+
+	pmap_pcid_mode = cpu_has_invpcid() && !boot_flag('x')
+		       ? PMAP_PCID_INVPCID : PMAP_PCID_NO_INVPCID;
+
+	/*
+	 * Allowed only with CR3's low twelve bits zero, which they are: every
+	 * root is a page, and nothing has loaded a PCID into CR3 yet.  From here
+	 * those bits ARE the PCID: 0 for the kernel's own tables, a slot's
+	 * number plus one for a user space (pmap_cr3_for()).
+	 */
+	pmap_cr4_on |= CR4_PCIDE;
+	write_cr4(read_cr4() | CR4_PCIDE);
+	return CR4_PCIDE;
 }
 
 void pmap_control_regs_here(void)

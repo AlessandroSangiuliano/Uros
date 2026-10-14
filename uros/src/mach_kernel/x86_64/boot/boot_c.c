@@ -1092,6 +1092,63 @@ static void wx_selftest(void)
 		      : (read_cr4() & CR4_PGE) && on ? "on\r\n"
 		      : "OFFERED BUT OFF\r\n");
 	}
+
+	/*
+	 * PCID (#412): the mode, and why it is that one, as pmap_enable_pcid()
+	 * decided it.  -n turns it off and -x pretends there is no INVPCID, so
+	 * that each of the three modes can be run on a processor that has both;
+	 * global pages off, or an erratum in the firmware's microcode, turn it
+	 * off by themselves.  CR4 is asked after, and a disagreement is said.
+	 */
+	{
+		uint64_t on = pmap_enable_pcid();
+		int pcide = (read_cr4() & CR4_PCIDE) != 0;
+
+		kputs("UrMach x86-64: PCID ");
+		switch (pmap_pcid_why) {
+		case PMAP_PCID_WHY_NOT_OFFERED:
+			kputs("not offered by this cpu");
+			break;
+		case PMAP_PCID_WHY_ASKED_OFF:
+			kputs("off, as -n asks");
+			break;
+		case PMAP_PCID_WHY_NO_GLOBAL_PAGES:
+			kputs("off: global pages are off, and a kernel page "
+			      "removed under one PCID would stay translated under "
+			      "another's");
+			break;
+		case PMAP_PCID_WHY_ERRATUM:
+			kputs("off: this model is in the table of processors whose "
+			      "INVLPG may leave other PCIDs' global entries (Intel "
+			      "ADL063, RPL043; Linux's invlpg_miss_ids), and its "
+			      "microcode, ");
+			kputhex64(pmap_pcid_erratum_rev);
+			kputs(", is older than ");
+			kputhex64(pmap_pcid_erratum_fixed);
+			kputs(", the first that table takes as fixed");
+			break;
+		case PMAP_PCID_WHY_ON:
+			kputs(pmap_pcid_mode == PMAP_PCID_INVPCID
+			      ? "on, with INVPCID"
+			      : cpu_has_invpcid() ? "on, without INVPCID, as -x asks"
+			      : "on, without INVPCID, which this cpu lacks");
+			break;
+		default:
+			/*
+			 * A reason added to pmap_enable_pcid() and not here.
+			 * Said, rather than printed as "on": with PCID left
+			 * off, CR4.PCIDE agrees with it and the check below
+			 * would not see the line lying.
+			 */
+			kputs("decided for a reason this line does not know, ");
+			kputdec(pmap_pcid_why);
+			kputs(" — WRONG (#412)");
+		}
+		if (pcide != (pmap_pcid_why == PMAP_PCID_WHY_ON && on != 0))
+			kputs(pcide ? " — but CR4.PCIDE is set, WRONG (#412)"
+			      : " — but CR4.PCIDE is clear, WRONG (#412)");
+		kputs("\r\n");
+	}
 }
 
 /*
@@ -1785,40 +1842,84 @@ static void control_regs_selftest(void)
  * not.  #437's body names the place this matters most: W^X narrowed after a
  * split, looking applied while not being applied.
  *
- * So: every processor reads a page of the direct map that sits in a large
- * leaf, which leaves the large, global, writable translation in its TLB; the
- * boot processor splits it down to 4 KiB and narrows that one page to
- * read-only WITHOUT telling anyone -- an invlpg anywhere inside the large page
- * would discard the large translation by itself and hide a broken split flush;
- * and every other processor then writes the page.  Each must fault.  The page
- * is a frame of this test's own, so nothing else is denied anything meanwhile.
+ * So: every processor writes a page of the direct map that sits in a large
+ * leaf, which leaves the large, global, writable and dirty translation in its
+ * TLB -- dirty, so that a later write through it needs no walk: the direct
+ * map's leaves are made without the dirty bit, and through a 2 MiB leaf
+ * nobody had written a write would walk again and fault whatever the split's
+ * flush did.  The boot processor splits the large page down to 4 KiB and
+ * narrows that one page to read-only WITHOUT telling anyone -- an invlpg
+ * anywhere inside the large page would discard the large translation by
+ * itself and hide a broken split flush; and every other processor then
+ * writes the page.  Each must fault.  The page is a frame of this test's own,
+ * so nothing else is denied anything meanwhile.
  *
  * ⚠️ NOT THE BOOT PROCESSOR, WHICH NARROWS THE PAGE ITSELF.  Its write comes
  * right after its own store to the entry, and the page walker reads the
  * tables from the cache, not from the store buffer: a write executed ahead
- * can walk the old, writable entry and cache a new translation of it, which
- * the architecture allows until an invlpg (SDM 4.10.4.2).  It wrote through
- * in 2 boots of 2 under KVM on victus and 1 of 2 on OMEGA, the others
- * faulting every time.  The others are asked by an interrupt sent after the
- * store, which they cannot see before it, and they are where a large global
- * translation that outlived the split's flush shows: with the flush taken out
- * (ablations/437-flush-keeps-globals.patch) processors 1 to 3 write.
+ * can walk the old, writable entry and cache a new translation of it: until
+ * the invalidation, the processor "may use translations based on either the
+ * old value or the new value" (SDM Vol. 3A 253668-093US 5.10.4.4, and
+ * 5.10.2.3 on what it may cache).  It wrote through in 2 boots of 2 under KVM
+ * on victus and 1 of 2 on OMEGA, the others faulting every time.  The others
+ * are asked by an interrupt sent after the store, which they cannot see before
+ * it, and they are where a large global translation that outlived the split's
+ * flush shows: with the flush taken out
+ * (ablations/437-flush-keeps-globals.patch) processors 1 to 7 wrote on omen's
+ * metal.
  *
- * TCG reloads its whole TLB on every CR3 write, global or not, so there the
- * answer is the same with and without the flush that reaches globals; only a
- * real TLB -- KVM, or the metal -- can say WRONG.  ⚠️ And not every KVM: with
- * the flush taken out it said WRONG in 4 boots of 4 on victus (Ryzen 5 5600H)
- * and in none of 6 on OMEGA (i9-13900K) and omen (i7-7700HQ), VPID and EPT on
- * both -- why is not established (a vCPU moved to another core between the
- * interrupts, halted in between, would start with an empty TLB).  The metal
- * has no such question.
+ * ⚠️ AND ONLY WHERE A TLB KEEPS WHAT THE QUESTION NEEDS KEPT.  TCG reloads its
+ * whole TLB on every CR3 write, global or not.  With the flush taken out the
+ * probe said WRONG on omen's metal (i7-7700HQ, one boot), under KVM on victus
+ * (Ryzen 5 5600H, 4 boots of 4, on AC at about 3.9 GHz) and on one of GitHub's
+ * Xeon Platinum 8573C (processors 1 and 2 of 3), and in none of 6 boots under
+ * KVM on OMEGA (i9-13900K) and omen, nor of 3 on GitHub's EPYC 7763, nor of 4
+ * more on victus on 13/10, on battery at 2.1 GHz (two each at a42a0390 and
+ * b91b43c7, before the 4 KiB question below, which there and then caught it
+ * in 2 of 2 with nobody held): a CR3 load "may invalidate TLB
+ * entries for global pages" (5.10.4.1), and a hypervisor may empty a vCPU's
+ * TLB between two interrupts -- KVM empties it whenever a vCPU runs on
+ * another core than the one it last ran on: on Intel by a flush request
+ * (vmx_vcpu_load_vmcs()), on AMD by a new ASID (pre_svm_run(); Linux's
+ * arch/x86/kvm at 7bb6284aa7b3), which a vCPU halted between two cross-calls
+ * may well be.  Those numbers are from before the other processors were held
+ * awake for the probe (smp_hold_awake()), which makes the move much rarer and
+ * does not forbid it: a spinning vCPU can still be preempted and moved.
+ * Held, it said WRONG in 2 boots of 2 under KVM on OMEGA, every processor in
+ * both questions; on victus in 2 of 2, every processor in the 4 KiB question
+ * and two or three of three in the large; on GitHub's EPYC 7763 and 9V74 in
+ * 4 of 4, every processor in the 4 KiB question and 4 of 12 in the large (run
+ * 38381876377).  Where a processor lost the entry on its own,
+ * its fault says nothing.  So the question is asked again on the 4 KiB leaf
+ * the split left -- each processor writes it, the boot processor makes the
+ * whole-TLB flush a split makes, narrows the page, told to nobody, and each
+ * writes it again, which must fault -- and then once more with a bare CR3
+ * reload in the flush's place: the flush that keeps global entries, done on
+ * purpose, the very one the ablation leaves in the split.  A write that goes
+ * through there is a global entry kept across a CR3 reload, where a flush
+ * that left one would have shown; a fault is none kept, and that processor's
+ * faults are not counted.  If no processor kept one, NOT ASKED.  The control
+ * is a 4 KiB round and not a large one because it must narrow the page it
+ * asks about, and a large leaf of the direct map is other memory too; so it
+ * judges the 4 KiB question only -- before the hold, on victus, the 4 KiB
+ * entry outlived a bare reload in rounds where the large one did not outlive
+ * the split's.  The large question's faults are therefore said, and not
+ * judged: its line says "which no control judges".  A write through either
+ * narrowed page is WRONG wherever it happens.
  */
 static volatile uint64_t gs_va;
 
 static void gs_warm_here(void *arg)
 {
 	(void) arg;
-	(void) *(volatile uint32_t *)(uintptr_t) gs_va;
+	*(volatile uint32_t *)(uintptr_t) gs_va = 0;
+}
+
+/* The flush that keeps global entries (5.10.4.1), on purpose. */
+static void gs_reload_here(void *arg)
+{
+	(void) arg;
+	write_cr3(read_cr3());
 }
 
 static void gs_probe_here(void *arg)
@@ -1830,13 +1931,49 @@ static void gs_probe_here(void *arg)
 	trap_expect_cancel();
 }
 
-static void global_split_selftest(void)
+/*
+ * One round on the probe's 4 KiB leaf: every other processor writes the page;
+ * then the whole-TLB flush a split makes, everywhere, or a bare CR3 reload on
+ * each; the boot processor narrows the page, told to nobody, and each writes
+ * it again.  faulted[cpu] says whose write faulted.  The page is writable
+ * again, and said, when it returns.
+ */
+static void gs_round(unsigned self, pt_entry_t *leaf, int split_flush,
+		     int *faulted)
+{
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
+	}
+	if (split_flush)
+		tlb_flush_all(PMAP_NULL);
+	else {
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu))
+				continue;
+			ipi_call_mask(1ULL << cpu, gs_reload_here, 0);
+		}
+		gs_reload_here(0);	/* the boot processor's half too */
+	}
+	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		if (cpu == self || !smp_is_online(cpu))
+			continue;
+		ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
+	}
+	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
+	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
+}
+
+static void global_split_ask(void)
 {
 	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 	uint64_t root = pmap_kernel()->root_pa, size = 0, frame;
-	int faulted[SMP_MAX_CPUS] = { 0 };
-	unsigned asked = 0, through = 0;
+	int faulted[SMP_MAX_CPUS] = { 0 }, lost[SMP_MAX_CPUS] = { 0 };
+	unsigned asked = 0, through = 0, kept = 0;
 	pt_entry_t *leaf;
+	int large;
 
 	if ((read_cr4() & CR4_PGE) == 0) {
 		kputs("UrMach x86-64: global pages are off, so a split cannot "
@@ -1851,21 +1988,16 @@ static void global_split_selftest(void)
 	}
 	gs_va = phys_to_direct(frame);
 	leaf = pmap_walk(root, gs_va, &size);
-	if (leaf == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
-		kputs("UrMach x86-64: the direct map is already 4 KiB under the "
-		      "probe's frame, so there is no large translation to keep — "
-		      "NOT ASKED (#437)\r\n");
+	if (leaf == PT_ENTRY_NULL) {
+		kputs("UrMach x86-64: the probe's frame has no entry in the "
+		      "direct map — NOT ASKED (#437)\r\n");
 		boot_frame_free(frame);
 		return;
 	}
 
-	/* Every other processor caches the large, global, writable translation. */
-	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if (cpu == self || !smp_is_online(cpu))
-			continue;
-		ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
-		asked++;
-	}
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++)
+		if (cpu != self && smp_is_online(cpu))
+			asked++;
 	if (asked == 0) {
 		kputs("UrMach x86-64: no processor online besides the one that "
 		      "would narrow the page, and it cannot judge itself — NOT "
@@ -1874,49 +2006,692 @@ static void global_split_selftest(void)
 		return;
 	}
 
-	/* Down to 4 KiB: each split flushes every processor's TLB. */
-	while (size != PAGE_SIZE_4K && pmap_split_page(PMAP_NULL, gs_va) != 0)
-		(void) pmap_walk(root, gs_va, &size);
-	leaf = pmap_walk(root, gs_va, &size);
-	if (leaf == PT_ENTRY_NULL || size != PAGE_SIZE_4K) {
-		kputs("UrMach x86-64: the probe's page did not split to 4 KiB — "
-		      "WRONG (#437)\r\n");
-		boot_frame_free(frame);
-		return;
+	large = size != PAGE_SIZE_4K;
+	if (!large)
+		kputs("UrMach x86-64: the direct map is already 4 KiB under the "
+		      "probe's frame: no large translation to keep, so only the "
+		      "4 KiB question is asked (#437)\r\n");
+	else {
+		/* Every other processor caches the large global translation, dirty. */
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu))
+				continue;
+			ipi_call_mask(1ULL << cpu, gs_warm_here, 0);
+		}
+
+		/* Down to 4 KiB: each split flushes every processor's TLB. */
+		while (size != PAGE_SIZE_4K
+		       && pmap_split_page(PMAP_NULL, gs_va) != 0)
+			(void) pmap_walk(root, gs_va, &size);
+		leaf = pmap_walk(root, gs_va, &size);
+		if (leaf == PT_ENTRY_NULL || size != PAGE_SIZE_4K) {
+			kputs("UrMach x86-64: the probe's page did not split to "
+			      "4 KiB — WRONG (#437)\r\n");
+			boot_frame_free(frame);
+			return;
+		}
+
+		/* Narrowed, and told to nobody. */
+		atomic_store64((volatile uint64_t *) leaf,
+			       *leaf & ~INTEL_PTE_WRITE);
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu))
+				continue;
+			ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
+		}
+
+		/* Writable again, and this time said. */
+		atomic_store64((volatile uint64_t *) leaf,
+			       *leaf | INTEL_PTE_WRITE);
+		tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
+
+		for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+			if (cpu == self || !smp_is_online(cpu) || faulted[cpu])
+				continue;
+			through++;
+			kputs("UrMach x86-64: processor ");
+			kputdec(cpu);
+			kputs(" wrote a page narrowed after its large page was "
+			      "split: the large global translation outlived the "
+			      "split's flush — WRONG (#437)\r\n");
+		}
 	}
 
-	/* Narrowed, and told to nobody. */
-	atomic_store64((volatile uint64_t *) leaf, *leaf & ~INTEL_PTE_WRITE);
-
-	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
-		if (cpu == self || !smp_is_online(cpu))
-			continue;
-		ipi_call_mask(1ULL << cpu, gs_probe_here, &faulted[cpu]);
-	}
-
-	/* Writable again, and this time said. */
-	atomic_store64((volatile uint64_t *) leaf, *leaf | INTEL_PTE_WRITE);
-	tlb_flush_range(PMAP_NULL, gs_va, PAGE_SIZE_4K);
-
+	/*
+	 * The question again on the 4 KiB leaf, across the split's own flush;
+	 * then the same round with a bare CR3 reload instead, which says who
+	 * could have answered it.
+	 */
+	gs_round(self, leaf, 1, faulted);
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 		if (cpu == self || !smp_is_online(cpu) || faulted[cpu])
 			continue;
 		through++;
 		kputs("UrMach x86-64: processor ");
 		kputdec(cpu);
-		kputs(" wrote a page narrowed after its large page was split: "
-		      "the large global translation outlived the split's flush — "
-		      "WRONG (#437)\r\n");
+		kputs(" wrote a page narrowed after the whole-TLB flush a split "
+		      "makes: a global entry outlived it — WRONG (#437)\r\n");
 	}
+	gs_round(self, leaf, 0, lost);
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++)
+		if (cpu != self && smp_is_online(cpu) && !lost[cpu])
+			kept++;
+
 	kputs("UrMach x86-64: a page narrowed after a split, with global pages "
 	      "on, on ");
 	kputdec(asked);
-	kputs(through == 0
-	      ? " processors besides the one that narrowed it: every write "
-		"faulted\r\n"
-	      : " processors besides the one that narrowed it: some wrote "
-		"through, WRONG (#437)\r\n");
+	kputs(" processors besides the one that narrowed it");
+	if (through != 0)
+		kputs(": some wrote through, WRONG (#437)\r\n");
+	else if (kept == 0)
+		kputs(": none keeps a global entry across a bare CR3 reload, so "
+		      "a flush that leaves them could not show here — NOT ASKED "
+		      "(#437)\r\n");
+	else {
+		kputs(", ");
+		kputdec(kept);
+		kputs(" of them keeping a global entry across a bare CR3 reload: "
+		      "every write faulted");
+		kputs(large ? ", the large page's too, which no control judges\r\n"
+		      : "\r\n");
+	}
 	boot_frame_free(frame);
+}
+
+/* The other processors awake throughout, so that their TLBs are theirs. */
+static void global_split_selftest(void)
+{
+	smp_hold_awake(1);
+	global_split_ask();
+	smp_hold_awake(0);
+}
+
+/*
+ * 🔴 WHAT A PCID KEEPS, AND WHAT IT MUST NOT (#412).
+ *
+ * With PCID a switch keeps the entries of the space it leaves, so two things
+ * that used to come free now have to be earned.  Each is asked of one
+ * processor, X, with two spaces that map the same address to frames of their
+ * own.  X is an application processor driven by targeted cross-calls, or, with
+ * one processor online, the boot processor itself, whose steps then run in
+ * place (xs_run_on()).  A control that makes on this processor the
+ * invalidations the question made here must not do so when X is this
+ * processor, since they would be X's own: that is why [3] has a control of its
+ * own then (pcid_ask_alone()), while [1]'s invalidations of XS_VA, made with X
+ * in S2, reach S2's PCID alone and leave the entry S1's holds.
+ *
+ *   [1] a space changed while X only CACHES it.  X enters S2, then S1,
+ *	 where it reads the page, then S2 again, and the boot processor then
+ *	 points S1's page at a third frame.  X is no longer in S1's cpus_using,
+ *	 so the shootdown does not interrupt it; S1's generation moves on
+ *	 instead.  Back in S1, X must read the third frame -- S1's old one means
+ *	 a translation kept across a change it was never told of.  Then the
+ *	 same round once more with the change told to nobody -- S1's entry
+ *	 rewritten in place, its generation left -- where X must read the
+ *	 third frame still if it kept the entry: only then is [1]'s answer one
+ *	 a missing flush could have changed, and otherwise it is NOT ASKED.
+ *	 X spins between its cross-calls instead of halting (smp_hold_awake()),
+ *	 as the global split probe's processors do.
+ *	 ⚠️ S2 comes first so that X leaves S1 for a space that still holds its
+ *	 PCID, a switch that discards nothing.  A CR3 load that discards one
+ *	 PCID "may invalidate TLB entries ... associated with PCIDs other than
+ *	 the PCID it is establishing" (SDM Vol. 3A 253668-093US 5.10.4.1), and
+ *	 S2 taking its slot between the read and the return was such a load: it
+ *	 could discard S1's entry by itself and hide a missing flush.  In that
+ *	 order 412-gen-check went uncaught in 4 boots of 4 on GitHub's AMD EPYC
+ *	 runners (run 38370713633); in this one the 9V74 and the Xeon 8573C
+ *	 caught it and the 7763 did not, in 2 boots of 2 (run 38381876377),
+ *	 which is what the control and the hold answer.
+ *   [2] a PCID changing hands.  X reads S1's page again, leaving S1's entry
+ *	 under S1's PCID; then, on X, S2 loses its slot and the next miss is
+ *	 aimed at S1's.  X enters S2, which takes S1's PCID: S2 must read its
+ *	 own frame.  S1's frame is one address space reading another's memory.
+ *	 With nine spaces this happens by itself once eight PCIDs are taken;
+ *	 the boot's pool of spaces holds fewer, so the eviction is aimed, and
+ *	 pmap_cr3_for() takes the same miss either way.
+ *
+ *   [3] a kernel page changed while X is in another space.  X reads a page
+ *	 of the kernel half in S1, moves to S2, and the boot processor remaps
+ *	 the page, its shootdown's invlpg running on X under S2's PCID; back in
+ *	 S1, which keeps what it finds, X must read the new frame.  The kernel's
+ *	 leaves are global, so one invlpg reaches every PCID -- where global
+ *	 pages are on (pmap_enable_pcid() refuses PCID without them) and the
+ *	 processor's INVLPG does what the SDM says (pmap_pcid_erratum()).  Its
+ *	 control is the same round with the remap told to nobody and every
+ *	 invalidation the remap made, X's aimed at the next page.  With one
+ *	 processor online it is asked all the same, of the boot processor
+ *	 itself (pcid_ask_alone()).
+ *
+ * Each answer that comes out right is judged by a control of its own shape
+ * (xs_control_said()): only where an entry kept through the round would have
+ * shown is it a PASS, and otherwise NOT ASKED.  Without PCID every switch
+ * discards everything and none of the three can arise: NOT ASKED.
+ * ablations/412-gen-check.patch must make [1] say WRONG,
+ * ablations/412-reuse-keeps.patch [2], and ablations/412-pcid-without-pge.patch
+ * [3] under QEMU's -cpu max,-pge, each where an entry outlives its round (and
+ * where none does, the controls say NOT ASKED): the first two under KVM or on
+ * the metal, the third under KVM only, since on the metal PGE cannot be hidden
+ * and there the patch changes nothing.  None of them under TCG, which has no
+ * PCID.
+ */
+#define XS_VA		0x0000000300000000ULL	/* lower half, nobody else's */
+#define XS_KVA		(KERNEL_HEAP_BASE + 0x400000ULL)	/* [3]: unclaimed at boot */
+#define XS_MARK(i)	(0x5143a000ULL + (uint64_t)(i))
+
+struct xs_step {
+	pmap_t		space;
+	int		read;
+	pmap_t		evict_from;	/* [2]: this space's slot is the next miss's */
+	pmap_t		forget;		/* [2]: and this one's slot is cleared */
+	int		reload;		/* [2]'s control: CR3 again, with NOFLUSH */
+	uint64_t	va;		/* what to read: XS_VA, or [3]'s XS_KVA */
+	uint64_t	seen;
+};
+
+/* The slot `space' holds on this processor, or PCID_SLOTS. */
+static unsigned xs_slot_of(struct percpu *pc, pmap_t space)
+{
+	unsigned s;
+
+	for (s = 0; s < PCID_SLOTS; s++)
+		if (pc->pcid_slot[s].ctx_id == space->ctx_id)
+			break;
+	return s;
+}
+
+/* On X: aim the eviction if asked, enter the space, read the page if asked. */
+static void xs_step_here(void *arg)
+{
+	struct xs_step *st = arg;
+	struct percpu *pc = percpu();
+	unsigned s;
+
+	if (st->forget != PMAP_NULL
+	    && (s = xs_slot_of(pc, st->forget)) < PCID_SLOTS)
+		pc->pcid_slot[s].ctx_id = 0;
+	if (st->evict_from != PMAP_NULL
+	    && (s = xs_slot_of(pc, st->evict_from)) < PCID_SLOTS)
+		pc->pcid_victim = s;
+
+	pmap_activate(st->space);
+	if (st->reload)
+		write_cr3(read_cr3() | CR3_NOFLUSH);
+	if (st->read) {
+		pmap_user_access_begin();
+		st->seen = *(volatile uint64_t *)(uintptr_t) st->va;
+		pmap_user_access_end();
+	}
+}
+
+/*
+ * On X: by cross-call, or right here when X is this processor -- with one
+ * processor online it is, and [1] and [2] are asked of it all the same.
+ */
+static void xs_run_on(uint32_t x, struct xs_step *st)
+{
+	if (x == (uint32_t) cpu_number())
+		xs_step_here(st);
+	else
+		ipi_call_mask(1ULL << x, xs_step_here, st);
+}
+
+static uint64_t xs_on(uint32_t x, pmap_t space, int read, pmap_t evict_from,
+		      pmap_t forget)
+{
+	struct xs_step st = { space, read, evict_from, forget, 0, XS_VA, 0 };
+
+	xs_run_on(x, &st);
+	return st.seen;
+}
+
+/* [2]'s control: X in `space' already, CR3 loaded again with NOFLUSH, a read. */
+static uint64_t xs_reload_on(uint32_t x, pmap_t space)
+{
+	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 1, XS_VA, 0 };
+
+	xs_run_on(x, &st);
+	return st.seen;
+}
+
+/* [3]: X into `space', and a read of the kernel page XS_KVA. */
+static uint64_t xs_kread_on(uint32_t x, pmap_t space)
+{
+	struct xs_step st = { space, 1, PMAP_NULL, PMAP_NULL, 0, XS_KVA, 0 };
+
+	xs_run_on(x, &st);
+	return st.seen;
+}
+
+/*
+ * [3]'s control, on every processor but this one: the invlpg the question's
+ * shootdown ran there, and on X the same aimed at the page next to it.
+ */
+struct xs_aim {
+	uint32_t	x;
+	uint64_t	va;
+};
+
+static void xs_aim_here(void *arg)
+{
+	const struct xs_aim *a = arg;
+
+	invlpg((uint32_t) cpu_number() == a->x ? a->va + PAGE_SIZE_4K : a->va);
+}
+
+/* Every online processor but `self', by number (#663). */
+static uint64_t xs_others(uint32_t self)
+{
+	uint64_t m = 0;
+	unsigned i;
+
+	for (i = 0; i < smp_cpu_count(); i++)
+		if (i != self && smp_is_online(i))
+			m |= 1ULL << i;
+	return m;
+}
+
+/* Nothing: a processor that ran it is awake for the rounds that follow. */
+static void xs_wake_here(void *arg)
+{
+	(void) arg;
+}
+
+/* [3] with one processor online: this one into `space', reading if asked. */
+static uint64_t xs_alone(struct xs_step *st, pmap_t space, int read)
+{
+	st->space = space;
+	st->read = read;
+	st->seen = 0;
+	xs_step_here(st);
+	return st->seen;
+}
+
+/*
+ * The rest of a [1], [2] or [3] line whose question was answered right --
+ * `right' says how -- then what its control read, and so whether that answer
+ * could have been otherwise.  `missing' is what the defect would leave out: a
+ * discard for [1] and [2], an invalidation for [3].
+ * `stale' is the frame an entry kept would give, `fresh' the one written in
+ * place; 0 is a control that could not run.
+ */
+static void xs_control_said(const char *right, const char *missing,
+			    uint64_t kept, uint64_t stale, uint64_t fresh)
+{
+	kputs(right);
+	kputs("; the round told nobody read ");
+	kputhex64(kept);
+	if (kept == stale)
+		kputs(", an entry kept through it — PASS (#412)\r\n");
+	else if (kept == fresh) {
+		kputs(", no entry kept through it, so a missing ");
+		kputs(missing);
+		kputs(" could not show — NOT ASKED (#412)\r\n");
+	} else if (kept == 0)
+		kputs(", nothing: no control ran — NOT ASKED (#412)\r\n");
+	else
+		kputs(", neither frame — WRONG (#412)\r\n");
+}
+
+/* [3]'s line: what X read back in S1, then what its control read. */
+static void xs_said3(uint32_t x, uint64_t seen, uint64_t kept)
+{
+	kputs("pcid_test: [3] a kernel page remapped while processor ");
+	kputdec(x);
+	kputs(" was in another space reads ");
+	kputhex64(seen);
+	if (seen == XS_MARK(3))
+		kputs(", its OLD frame there: the invalidation did not reach "
+		      "the other space's PCID — WRONG (#412)\r\n");
+	else if (seen != XS_MARK(4))
+		kputs(", neither frame — WRONG (#412)\r\n");
+	else
+		xs_control_said(", its new frame", "invalidation", kept,
+				XS_MARK(4), XS_MARK(3));
+}
+
+/*
+ * [3] with one processor online.  What it asks is whether an invalidation made
+ * under one PCID reaches the entry another PCID keeps, which happens on the one
+ * processor holding both, and the defect it looks for -- PCID without global
+ * pages -- is whole on a uniprocessor.  So this processor is X: it reads the
+ * kernel page in S1, moves to S2, remaps it -- with nobody else online the
+ * shootdown is tlb_flush_kernel_here() here, the invlpg under S2's PCID -- and
+ * reads it back in S1.  Its control is the same round with the remap told to
+ * nobody, and in its place a real remap of the page next to it -- the same
+ * pmap_enter(), its walks, pv entries and two invlpgs, one page over -- so that
+ * whatever the question's remap does to this processor's TLB besides
+ * invalidating XS_KVA, the control does as well, and a TLB that lets an entry
+ * go for that can only make the answer NOT ASKED, never a PASS.
+ *
+ * [1] and [2] need no second processor either, and are asked of this one in
+ * pcid_ask(), which makes it X (xs_run_on()): [2] runs on X alone, and [1]'s
+ * change is made while this processor is parked in S2, where S1's empty set
+ * sends its shootdown nowhere and leaves the discard to S1's generation.  [3]
+ * is asked here because pcid_ask()'s control makes the remap's invalidations
+ * of XS_KVA on this processor, which with X this processor would be X's own.
+ *
+ * ⚠️ Under KVM on OMEGA (i9-13900K) the control finds nothing kept, in every
+ * boot: a software walk of the kernel's tables made here while in S2 --
+ * pmap_walk(), loads through the direct map and nothing else -- takes the 4 KiB
+ * global entry X made in S1 with it, as three experiments on 13/10 showed (a
+ * write of the leaf from S2 did not, the walk alone did).  The question's
+ * pmap_enter() walks the same way, so its new frame proves nothing there, and
+ * NOT ASKED is the answer.  An entry that is not global survives the same
+ * steps, which is how ablations/412-pcid-without-pge.patch is caught at -smp 1
+ * all the same (2 of 2).  Why the walk takes it is not known: processors
+ * "may invalidate any TLB entry at any time" (SDM Vol. 3A 253668-093US
+ * 5.10.2.2), and nothing here relies on keeping one.
+ */
+static void pcid_ask_alone(uint32_t self)
+{
+	struct xs_step st = { PMAP_NULL, 0, PMAP_NULL, PMAP_NULL, 0, XS_KVA, 0 };
+	pmap_t s1 = pmap_create(0), s2 = pmap_create(0);
+	/*
+	 * The next page's two frames first.  Whenever X forms XS_KVA's entry
+	 * the next page maps g0, and with frames handed out in a row, up or
+	 * down, g0 follows neither of XS_KVA's: an AMD processor may keep
+	 * contiguous 4 KiB pages in one TLB entry, and the control's
+	 * invalidations of the next page would then reach XS_KVA's.  (After
+	 * the control's remap the next page may follow XS_KVA's frame, but
+	 * nothing translates either page before the control's read, and a
+	 * shared entry could only make the answer NOT ASKED.)
+	 */
+	uint64_t g0 = boot_frame_alloc(), g1 = boot_frame_alloc();
+	uint64_t f3 = boot_frame_alloc(), f4 = boot_frame_alloc();
+	uint64_t seen, kept = 0;
+	pt_entry_t *leaf, was;
+	int kmapped = 0, gmapped = 0;
+
+	if (f3 != 0)
+		*(volatile uint64_t *)(uintptr_t) phys_to_direct(f3) = XS_MARK(3);
+	if (f4 != 0)
+		*(volatile uint64_t *)(uintptr_t) phys_to_direct(f4) = XS_MARK(4);
+	if (s1 != PMAP_NULL && s2 != PMAP_NULL && f3 != 0 && f4 != 0
+	    && pmap_enter(pmap_kernel(), XS_KVA, f3,
+			  VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK)
+		kmapped = 1;
+	if (kmapped && g0 != 0 && g1 != 0
+	    && pmap_enter(pmap_kernel(), XS_KVA + PAGE_SIZE_4K, g0,
+			  VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK)
+		gmapped = 1;
+
+	if (!gmapped)
+		kputs("pcid_test: [3] NOT ASKED — could not build the two "
+		      "spaces or map the kernel pages (#412)\r\n");
+	else {
+		(void) xs_alone(&st, s1, 1);
+		(void) xs_alone(&st, s2, 0);
+		(void) pmap_enter(pmap_kernel(), XS_KVA, f4,
+				  VM_PROT_READ | VM_PROT_WRITE, 0);
+		seen = xs_alone(&st, s1, 1);
+
+		(void) xs_alone(&st, s2, 0);
+		leaf = pmap_walk(pmap_kernel()->root_pa, XS_KVA, 0);
+		if (leaf != PT_ENTRY_NULL) {
+			was = *leaf;
+			atomic_store64((volatile uint64_t *) leaf,
+				       (was & ~INTEL_PTE_PFN) | f3);
+			(void) pmap_enter(pmap_kernel(), XS_KVA + PAGE_SIZE_4K,
+					  g1, VM_PROT_READ | VM_PROT_WRITE, 0);
+			kept = xs_alone(&st, s1, 1);
+			atomic_store64((volatile uint64_t *) leaf, was);
+		}
+		pmap_activate(pmap_kernel());
+		xs_said3(self, seen, kept);
+	}
+
+	if (s1 != PMAP_NULL)
+		pmap_destroy(s1);
+	if (s2 != PMAP_NULL)
+		pmap_destroy(s2);
+	if (kmapped)
+		pmap_remove(pmap_kernel(), XS_KVA,
+			    XS_KVA + (gmapped ? 2 : 1) * PAGE_SIZE_4K);
+	if (f3 != 0)
+		boot_frame_free(f3);
+	if (f4 != 0)
+		boot_frame_free(f4);
+	if (g0 != 0)
+		boot_frame_free(g0);
+	if (g1 != 0)
+		boot_frame_free(g1);
+}
+
+static void pcid_ask(void)
+{
+	pmap_t s1 = PMAP_NULL, s2 = PMAP_NULL, s3 = PMAP_NULL;
+	uint64_t frame[7] = { 0 }, seen, kept;
+	pt_entry_t *leaf, was;
+	int kmapped = 0, alone;
+	uint32_t self = (uint32_t) cpu_number(), x = SMP_MAX_CPUS;	/* by number (#663) */
+	unsigned i;
+
+	if (pmap_pcid_mode == PMAP_PCID_OFF) {
+		kputs("pcid_test: NOT ASKED — no PCID here: every switch "
+		      "discards everything, so nothing can be kept (#412)\r\n");
+		return;
+	}
+	for (i = 0; i < smp_cpu_count(); i++)
+		if (i != self && smp_is_online(i)) {
+			x = i;
+			break;
+		}
+	/*
+	 * With one processor online it is X itself: [1] and [2] run here
+	 * (xs_run_on()), and [3], which needs a control of its own then, is
+	 * pcid_ask_alone()'s, asked once this is undone.
+	 */
+	alone = x == SMP_MAX_CPUS;
+	if (alone)
+		x = self;
+
+	/*
+	 * Every other processor through one empty cross-call first.  One that
+	 * halted before the hold was taken sees the hold only when it next
+	 * wakes, and [3]'s shootdown would be that wake-up: in [3]'s question
+	 * and not in its control, every halted vCPU woken at once on a host
+	 * that may then move X's.  Awake from here on, they spin through every
+	 * round alike.
+	 */
+	ipi_call_mask(xs_others(self), xs_wake_here, (void *) 0);
+
+	for (i = 0; i < 7; i++) {
+		frame[i] = boot_frame_alloc();
+		if (frame[i] != 0)
+			*(volatile uint64_t *)(uintptr_t) phys_to_direct(frame[i])
+				= XS_MARK(i);
+	}
+	s1 = pmap_create(0);
+	s2 = pmap_create(0);
+	s3 = pmap_create(0);
+	if (frame[0] == 0 || frame[1] == 0 || frame[2] == 0
+	    || frame[3] == 0 || frame[4] == 0 || frame[5] == 0 || frame[6] == 0
+	    || s1 == PMAP_NULL || s2 == PMAP_NULL || s3 == PMAP_NULL
+	    || pmap_enter(s3, XS_VA, frame[5], VM_PROT_READ | VM_PROT_WRITE, 0)
+	       != PMAP_MAP_OK
+	    || pmap_enter(s1, XS_VA, frame[0], VM_PROT_READ | VM_PROT_WRITE, 0)
+	       != PMAP_MAP_OK
+	    || pmap_enter(s2, XS_VA, frame[1], VM_PROT_READ | VM_PROT_WRITE, 0)
+	       != PMAP_MAP_OK) {
+		kputs("pcid_test: NOT ASKED — could not build the spaces "
+		      "(#412)\r\n");
+	} else {
+		/* [1]: S2 holds a PCID first, so that leaving S1 discards nothing. */
+		(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+		(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+		(void) pmap_enter(s1, XS_VA, frame[2],
+				  VM_PROT_READ | VM_PROT_WRITE, 0);
+		seen = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+
+		/*
+		 * [1]'s control: the same round with S1's entry rewritten in
+		 * place and no generation moved, so that coming back keeps
+		 * whatever X still holds, as a missing flush would.  Then the
+		 * entry as the pmap knows it, removed and entered again: X is
+		 * in S1, and the removal's shootdown empties what it read.
+		 */
+		(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+		leaf = pmap_walk(s1->root_pa, XS_VA, 0);
+		kept = 0;
+		if (leaf != PT_ENTRY_NULL) {
+			was = *leaf;
+			atomic_store64((volatile uint64_t *) leaf,
+				       (was & ~INTEL_PTE_PFN) | frame[0]);
+			/* the question's pmap_enter() invalidated it here, twice */
+			invlpg(XS_VA);
+			invlpg(XS_VA);
+			/*
+			 * And that pmap_enter() itself, in a third space loaded
+			 * nowhere -- its walks, pv entries and flush, all but
+			 * S1's generation -- so that when X is this processor
+			 * the control does at least what the question did to
+			 * X's TLB, and a TLB that lets the entry go for that
+			 * work makes the answer NOT ASKED, never a PASS.  With
+			 * X elsewhere it is this processor's work, as the
+			 * question's was.
+			 */
+			(void) pmap_enter(s3, XS_VA, frame[6],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
+			kept = xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+			atomic_store64((volatile uint64_t *) leaf, was);
+			pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
+			(void) pmap_enter(s1, XS_VA, frame[2],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
+		}
+
+		kputs("pcid_test: [1] a space changed while processor ");
+		kputdec(x);
+		kputs(" only cached it reads ");
+		kputhex64(seen);
+		if (seen == XS_MARK(0))
+			kputs(", its OLD frame: the entry outlived the change — "
+			      "WRONG (#412)\r\n");
+		else if (seen != XS_MARK(2))
+			kputs(", neither frame — WRONG (#412)\r\n");
+		else
+			xs_control_said(", its new frame", "discard", kept,
+					XS_MARK(2), XS_MARK(0));
+
+		/* [2]: S1's entry under S1's PCID, then that PCID to S2. */
+		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+		seen = xs_on(x, s2, 1, s1, s2);
+
+		/*
+		 * [2]'s control: S1's entry read under a PCID of its own, S1's
+		 * leaf rewritten in place and told to nobody, and X loading CR3
+		 * again with NOFLUSH before it reads -- the very load the
+		 * handover would be without its discard.  The third frame read
+		 * there is an entry that outlived one cross-call and one such
+		 * load, which is what [2] needs kept; the frame written in place
+		 * is none kept.  Then the entry as the pmap knows it again.
+		 */
+		(void) xs_on(x, s1, 1, PMAP_NULL, PMAP_NULL);
+		leaf = pmap_walk(s1->root_pa, XS_VA, 0);
+		kept = 0;
+		if (leaf != PT_ENTRY_NULL) {
+			was = *leaf;
+			atomic_store64((volatile uint64_t *) leaf,
+				       (was & ~INTEL_PTE_PFN) | frame[0]);
+			kept = xs_reload_on(x, s1);
+			atomic_store64((volatile uint64_t *) leaf, was);
+			pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
+			(void) pmap_enter(s1, XS_VA, frame[2],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
+		}
+
+		kputs("pcid_test: [2] a space given another's PCID on processor ");
+		kputdec(x);
+		kputs(" reads ");
+		kputhex64(seen);
+		if (seen == XS_MARK(2))
+			kputs(", the other space's frame: one space read another's"
+			      " memory — WRONG (#412)\r\n");
+		else if (seen != XS_MARK(1))
+			kputs(", neither frame — WRONG (#412)\r\n");
+		else
+			xs_control_said(", its own frame", "discard", kept,
+					XS_MARK(2), XS_MARK(0));
+
+		/*
+		 * [3]: a kernel page X read in S1, remapped by the boot
+		 * processor while X is in S2 -- the shootdown's invlpg runs on
+		 * X under S2's PCID -- and read again by X back in S1, which
+		 * keeps what it finds.  The kernel's leaves are global, so the
+		 * invlpg must have reached S1's PCID too.
+		 */
+		if (!alone && pmap_enter(pmap_kernel(), XS_KVA, frame[3],
+					 VM_PROT_READ | VM_PROT_WRITE, 0)
+			      == PMAP_MAP_OK) {
+			kmapped = 1;
+			(void) xs_kread_on(x, s1);
+			(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+			(void) pmap_enter(pmap_kernel(), XS_KVA, frame[4],
+					  VM_PROT_READ | VM_PROT_WRITE, 0);
+			seen = xs_kread_on(x, s1);
+
+			/*
+			 * [3]'s control: the same round with the remap told to
+			 * nobody and every invalidation the remap made -- the
+			 * two invlpgs pmap_enter() ran here around its
+			 * shootdown, and the shootdown's on every other
+			 * processor -- with X's aimed at the page next to it.
+			 * What X reads back is then the entry kept through
+			 * everything the question did but X's own invalidation,
+			 * a sibling's or a hypervisor's included, as [1]'s
+			 * control does for its own (574c32f3).
+			 */
+			(void) xs_on(x, s2, 0, PMAP_NULL, PMAP_NULL);
+			leaf = pmap_walk(pmap_kernel()->root_pa, XS_KVA, 0);
+			kept = 0;
+			if (leaf != PT_ENTRY_NULL) {
+				struct xs_aim aim = { x, XS_KVA };
+
+				was = *leaf;
+				atomic_store64((volatile uint64_t *) leaf,
+					       (was & ~INTEL_PTE_PFN) | frame[3]);
+				invlpg(XS_KVA);
+				ipi_call_mask(xs_others(self), xs_aim_here, &aim);
+				invlpg(XS_KVA);
+				kept = xs_kread_on(x, s1);
+				atomic_store64((volatile uint64_t *) leaf, was);
+			}
+
+			xs_said3(x, seen, kept);
+		} else if (!alone)
+			kputs("pcid_test: [3] NOT ASKED — could not map the "
+			      "kernel page (#412)\r\n");
+	}
+
+	/* X back on the kernel's tables, out of both spaces' sets. */
+	(void) xs_on(x, pmap_kernel(), 0, PMAP_NULL, PMAP_NULL);
+	if (s1 != PMAP_NULL) {
+		pmap_remove(s1, XS_VA, XS_VA + PAGE_SIZE_4K);
+		pmap_destroy(s1);
+	}
+	if (s2 != PMAP_NULL) {
+		pmap_remove(s2, XS_VA, XS_VA + PAGE_SIZE_4K);
+		pmap_destroy(s2);
+	}
+	if (s3 != PMAP_NULL) {
+		pmap_remove(s3, XS_VA, XS_VA + PAGE_SIZE_4K);
+		pmap_destroy(s3);
+	}
+	if (kmapped)
+		pmap_remove(pmap_kernel(), XS_KVA, XS_KVA + PAGE_SIZE_4K);
+	for (i = 0; i < 7; i++)
+		if (frame[i] != 0)
+			boot_frame_free(frame[i]);
+	if (alone)
+		pcid_ask_alone(self);
+}
+
+/* X awake between its cross-calls, as for the global split probe. */
+static void pcid_selftest(void)
+{
+	smp_hold_awake(1);
+	pcid_ask();
+	smp_hold_awake(0);
 }
 
 /*
@@ -9292,6 +10067,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	trap_entry_test();
 	control_regs_selftest();
 	global_split_selftest();
+	pcid_selftest();
 
 	/*
 	 * The double-fault self-test is TERMINAL, and that is why it is behind

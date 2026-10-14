@@ -1,0 +1,44 @@
+Kind: widen
+Issue: #412
+Holds open: the race between bootstrap provisioning the first server after cap_server and cap_server checking in its name -- cap_server waits 10 s (SWITCH_OPTION_WAIT, a time and not a count) before netname_check_in(), printing when it starts and stops holding, so a provisioning wait that gives up after a count of yields gives up first, as it did in 2 boots of 648 on GitHub's EPYC 9V45 under KVM in #412's merge test (run 38449516704), and one that waits for the name lets cap_test run with its manifest; the fixed tree must still pass
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/servers/cap_server/cap_server.c b/uros/src/servers/cap_server/cap_server.c
+index 475d52cd..982c2c4f 100644
+--- a/uros/src/servers/cap_server/cap_server.c
++++ b/uros/src/servers/cap_server/cap_server.c
+@@ -43,6 +43,7 @@
+ #include <mach/message.h>
+ #include <mach/cap_types.h>
+ #include <mach/mach_traps.h>	/* urmach_cap_revoke (#432) */
++#include <mach/thread_switch.h>	/* 412-widen-checkin */
+ #include <mach_init.h>
+ #include <sa_mach.h>
+ #include <stdio.h>
+@@ -54,6 +55,8 @@
+ #include "cap_revoke.h"          /* MIG-generated cap_revoke_notify user stub */
+ #include "gpu_console.h"         /* #209: async printf mirror */
+ 
++#define CAP_WIDEN_CHECKIN_MS	10000u	/* 412-widen-checkin */
++
+ /*
+  * netname_check_in: publish our service port under "cap_server".
+  */
+@@ -785,6 +788,17 @@ main(int argc, char **argv)
+         return 1;
+     }
+ 
++    /*
++     * 412-widen-checkin: the check-in held back, so that a provisioning wait
++     * in bootstrap that gives up after a count of yields gives up before it,
++     * and one that waits for the name does not.  A time and not a count.
++     */
++    printf("cap: holding the check-in back %u ms (412-widen-checkin)\n",
++           CAP_WIDEN_CHECKIN_MS);
++    (void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
++                         CAP_WIDEN_CHECKIN_MS);
++    printf("cap: checking in now (412-widen-checkin)\n");
++
+     kr = netname_check_in(name_server_port, "cap_server",
+                           MACH_PORT_NULL, cap_port);
+     if (kr != KERN_SUCCESS)

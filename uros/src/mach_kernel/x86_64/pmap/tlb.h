@@ -61,7 +61,10 @@ struct pmap;
 #define TLB_FLUSH_PAGE_LIMIT	32
 
 /*
- * Discard translations on this processor alone.
+ * Discard translations on this processor alone: invlpg page by page up to
+ * TLB_FLUSH_PAGE_LIMIT pages, which with PCID reaches the current PCID's
+ * entries and the global ones; past that, or for size 0, the whole TLB, every
+ * PCID included (tlb_flush_local_all()).
  *
  * For the paths that know no other processor can be using the address —
  * chiefly anything that runs before the others are woken.  Everywhere else
@@ -82,7 +85,9 @@ void tlb_flush_local_all(void);
  * ⚠️ WHOSE translations, and it is not a convenience parameter (#439).  A
  * shootdown only concerns processors that could be holding this mapping,
  * which means the processors with this pmap loaded; for a user address
- * space that is usually one, or none.  Without the pmap this call has no
+ * space that is usually one, or none.  With PCID a processor that only
+ * caches the space holds it too, and is reached by the space's generation
+ * instead, at its next switch in (#412).  Without the pmap this call has no
  * way to ask that question and can only broadcast, which is what it did.
  *
  * PMAP_NULL means "everybody", and is what the kernel's own mappings use:

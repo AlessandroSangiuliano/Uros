@@ -98,7 +98,9 @@ void ipi_call_others(void (*fn)(void *), void *arg);
 /*
  * The same thing asked of a named few (#439).
  *
- * `mask' has one bit per local APIC id.  This processor's own bit is ignored
+ * `mask' has one bit per processor number (#663), turned into the processor's
+ * APIC id (cpu_to_apic()) only where the interrupt is sent: bit 1 is
+ * processor 1, whose APIC id may be 2.  This processor's own bit is ignored
  * if it is set: the caller does its own half directly, and a processor cannot
  * answer a cross-call it is inside.
  *

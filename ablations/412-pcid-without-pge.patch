@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #412
+Accel: kvm
+Takes out: the refusal of PCID without global pages in pmap_enable_pcid() -- with CR4.PGE clear the global bit means nothing, a kernel translation is cached under the PCID that was current, and the kernel's invlpg reaches the current PCID alone, so a kernel page remapped while a processor is in another space is read through the old translation when it comes back (pcid_test [3]); QEMU's -cpu max,-pge is the guest that hides PGE, and KVM on a host with PCID is needed for PCID at all (under KVM on victus, which lacks it, the run is NOT CAUGHT, as for every #412 patch there); on the metal PGE cannot be hidden and the patch changes nothing; caught under KVM on OMEGA and omen in 2 of 2 at 10ea0531, on OMEGA again at 045e8fb6, and at -smp 1 in 2 of 2 at 045e8fb6, where [3] is asked of the boot processor alone; at 9c1d9aaa on GitHub's runners (runs 38449528373 and 38451440260) caught on the Xeon 8370C and in 1 boot of 2 on the EPYC 9V45, and NOT ASKED in the other and in 2 of 2 on the EPYC 7763, all three questions finding no entry kept through their round
+Run: --entry 0 300 -smp 4 -cpu max,-pge
+Expect: pcid_test: \[3\] .*its OLD frame there.*WRONG \(#412\)
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+index 0e28872b..41ed5bc8 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -1903,7 +1903,7 @@ uint64_t pmap_enable_pcid(void)
+ 	 * told to hide PGE is how this arises, and Linux refuses PCID there too
+ 	 * (setup_pcid()).  So does this.
+ 	 */
+-	if ((pmap_cr4_on & CR4_PGE) == 0) {
++	if (0 && (pmap_cr4_on & CR4_PGE) == 0) {
+ 		pmap_pcid_why = PMAP_PCID_WHY_NO_GLOBAL_PAGES;
+ 		return 0;
+ 	}

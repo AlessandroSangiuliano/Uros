@@ -122,6 +122,20 @@ static volatile uint64_t ap_call_reached_bsp;
 static volatile uint64_t ap_sched_gate;
 
 /*
+ * 🔴 AWAKE FOR A PROBE (#437).  A processor halted in the wait below between
+ * two cross-calls is, under KVM, a vCPU whose thread may sleep and wake on
+ * another core, and KVM empties the TLB of a vCPU that moved -- a flush
+ * request on Intel (vmx_vcpu_load_vmcs()), a new ASID on AMD (pre_svm_run()):
+ * a probe of what a TLB keeps would be asking the hypervisor.  While a probe
+ * holds them, the processors waiting here spin with interrupts on instead of
+ * halting, for the moments the probe takes.  That makes the move rarer, and
+ * does not forbid it: a spinning vCPU can still be preempted and moved, which
+ * is why the probes also ask whether each processor kept anything.  A count,
+ * so that holds may nest.  smp_hold_awake().
+ */
+static volatile uint64_t ap_hold;
+
+/*
  * What the volunteer asks everybody to run.  It asks the hardware whether it
  * is the boot processor rather than comparing identifiers, because that is
  * the actual claim being tested — that the message arrived *there* — and the
@@ -303,6 +317,11 @@ void ap_start_c(uint32_t cpu)
 		interrupts_disable();
 		if (atomic_load64(&ap_sched_gate) != 0)
 			break;
+		if (atomic_load64(&ap_hold) != 0) {
+			interrupts_enable();
+			cpu_pause();
+			continue;
+		}
 		__asm__ volatile("sti; hlt");
 	}
 	interrupts_enable();
@@ -319,6 +338,14 @@ void ap_start_c(uint32_t cpu)
 
 	panic("smp: slave_main returned on processor %u — it must not (#461)",
 	      cpu);
+}
+
+void smp_hold_awake(int on)
+{
+	if (on)
+		(void) atomic_add64(&ap_hold, 1);
+	else
+		(void) atomic_add64(&ap_hold, (uint64_t) -1);
 }
 
 unsigned

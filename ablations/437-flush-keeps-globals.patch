@@ -1,20 +1,23 @@
 Kind: ablation
 Issue: #437
 Accel: kvm
-Takes out: the flush of global entries in tlb_flush_local_all() -- the whole-TLB flush is a bare CR3 reload again, which keeps every global entry, so a large global translation outlives the split that should have taken it off every processor; TCG reloads everything on a CR3 write and cannot show it; caught under KVM on victus (Ryzen 5 5600H) 4 of 4, and in none of 6 boots on the Intel hosts OMEGA and omen, VPID and EPT on, why not established -- the metal has no such question
+Takes out: the flush of global entries in tlb_flush_local_all() -- the whole-TLB flush is a bare CR3 reload again, neither INVPCID's all-contexts flush (#412) nor the PGE toggle, which keeps every global entry, so a large global translation outlives the split that should have taken it off every processor, and a 4 KiB one the same whole-TLB flush; TCG reloads everything on a CR3 write and cannot show it; caught on omen's metal (processors 1 to 7, one boot), under KVM on victus (Ryzen 5 5600H) 4 of 4 on AC at about 3.9 GHz and on one of GitHub's Xeon Platinum 8573C; under KVM in none of 6 boots on OMEGA and omen and of 3 on GitHub's EPYC 7763 until the probe held the other processors awake (63a1877d), and on victus on battery at 2.1 GHz in none of 4 until the 4 KiB question (231b9143), then 2 of 2 with nobody held; held, in 2 of 2 on OMEGA, every processor in both questions, in 2 of 2 on victus, every processor in the 4 KiB question and two or three of three in the large, and in 4 of 4 on GitHub's EPYC 7763 and 9V74, every processor in the 4 KiB question and 4 of 12 in the large (run 38381876377) -- the counts global_split_selftest()'s comment gives -- and since, in 2 of 2 on OMEGA at 3e731776 and again at 045e8fb6
 Run: --entry 0 300 -smp 4
-Expect: wrote a page narrowed after its large page was split: .*WRONG \(#437\)
+Expect: wrote a page narrowed after .*WRONG \(#437\)
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index 5e1ca9de..c37a3dc9 100644
+index 5f80a681..a9fe279f 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -45,7 +45,7 @@ void tlb_flush_local_all(void)
- 	 * a control register keeps the flush right with them and without.
- 	 * ablations/437-flush-keeps-globals.patch takes this branch out.
+@@ -70,9 +70,9 @@ void tlb_flush_local_all(void)
+ 	 * reload at the end reaches the current PCID only, and is reached only
+ 	 * with global pages off, where pmap_enable_pcid() leaves PCID off too.
  	 */
--	if (cr4 & CR4_PGE) {
-+	if (0 && (cr4 & CR4_PGE)) {
+-	if (pmap_pcid_mode == PMAP_PCID_INVPCID)
++	if (0 && pmap_pcid_mode == PMAP_PCID_INVPCID)
+ 		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
+-	else if (cr4 & CR4_PGE) {
++	else if (0 && (cr4 & CR4_PGE)) {
  		write_cr4(cr4 & ~CR4_PGE);
  		write_cr4(cr4);
- 		return;
+ 	} else

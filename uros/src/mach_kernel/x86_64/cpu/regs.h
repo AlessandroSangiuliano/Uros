@@ -131,8 +131,15 @@ static inline uint64_t read_cr3(void)
 }
 
 /*
- * Writing CR3 also flushes every non-global TLB entry, which is why it is
- * the blunt way to make paging changes visible.
+ * Writing CR3 invalidates at least what SDM Vol. 3A 253668-093US 5.10.4.1
+ * requires of it: without PCID, every non-global TLB entry and every
+ * paging-structure-cache entry; with CR4.PCIDE set, the same for the PCID it
+ * names, and with bit 63 set nothing.  The paging-structure caches are what
+ * collect's freed tables rely on (vminit.c, step 5), and the handler's
+ * whole-PCID reload (tlb.c).
+ * That is a floor, not a promise: the same section lets the processor also
+ * invalidate global entries, other PCIDs' entries, and entries when bit 63 is
+ * set, so an entry kept across a load is never something correctness rests on.
  */
 static inline void write_cr3(uint64_t v)
 {
@@ -245,6 +252,30 @@ static inline uint64_t read_rflags(void)
 static inline int interrupts_enabled(void)
 {
 	return (read_rflags() & RFLAGS_IF) != 0;
+}
+
+/*
+ * CR3 under CR4.PCIDE (#412).  The low twelve bits are the PCID, and bit 63 on
+ * a load says "keep this PCID's entries" -- it is never stored, so CR3 never
+ * reads back with it.
+ */
+#define CR3_PCID_MASK	0xfffULL
+#define CR3_NOFLUSH	(1ULL << 63)
+
+/*
+ * INVPCID (#412), the four invalidation types the SDM defines.  Only where
+ * cpu_has_invpcid() said yes: the opcode faults elsewhere.
+ */
+#define INVPCID_ADDRESS		0	/* one address, one PCID          */
+#define INVPCID_CONTEXT		1	/* one PCID, global entries kept  */
+#define INVPCID_ALL_GLOBAL	2	/* every PCID, global entries too */
+#define INVPCID_ALL		3	/* every PCID, global entries kept */
+
+static inline void invpcid(uint64_t type, uint64_t pcid, uint64_t va)
+{
+	struct { uint64_t pcid, va; } desc = { pcid, va };
+
+	__asm__ volatile("invpcid %0, %1" : : "m"(desc), "r"(type) : "memory");
 }
 
 static inline uint64_t read_cr4(void)
@@ -567,6 +598,32 @@ static inline int cpu_has_pge(void)
 	return (d & (1U << 13)) != 0;
 }
 
+/*
+ * Process-context identifiers (#412): CPUID.1:ECX[17], and the instruction
+ * that invalidates by one, CPUID.7.0:EBX[10].  pavillion's and victus's Ryzens
+ * have no PCID at all -- victus has INVPCID without it -- so the two are asked
+ * apart and the kernel works with either answer.
+ */
+static inline int cpu_has_pcid(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (c & (1U << 17)) != 0;
+}
+
+static inline int cpu_has_invpcid(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	if (a < 7)
+		return 0;
+
+	cpuid_count(7, 0, &a, &b, &c, &d);
+	return (b & (1U << 10)) != 0;
+}
+
 static inline int cpu_has_smep(void)
 {
 	uint32_t a, b, c, d;
@@ -627,6 +684,72 @@ static inline void cpu_vendor(char *out13)
 		for (int j = 0; j < 4; j++)
 			out13[i * 4 + j] = (char)(words[i] >> (j * 8));
 	out13[12] = '\0';
+}
+
+/*
+ * Whether a hypervisor says it is there: CPUID.1:ECX[31], which a processor
+ * returns as zero, the bit being "allocated for use by software emulation"
+ * (SDM Vol. 1 253665-093US, CPUID.01H:ECX).  The clocks judge their rulers by
+ * it (#594), and #412 whether an erratum that spares guests applies.
+ */
+static inline int cpu_under_hypervisor(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (c & (1U << 31)) != 0;
+}
+
+/* Whether the vendor is GenuineIntel: leaf 0's EBX, EDX and ECX, in that order. */
+static inline int cpu_is_intel(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	return b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e;
+}
+
+/*
+ * The family and model as the SDM displays them (Vol. 1 253665-093US,
+ * CPUID.01H:EAX): the extended family added only when the family is 0FH, the
+ * extended model put above the model only when the family is 06H or 0FH.  An
+ * erratum names its processors by these two numbers (#412).
+ */
+static inline void cpu_family_model(unsigned *family, unsigned *model)
+{
+	uint32_t a, b, c, d;
+	unsigned f, m;
+
+	cpuid(1, &a, &b, &c, &d);
+	f = (a >> 8) & 0xf;
+	m = (a >> 4) & 0xf;
+	if (f == 0x6 || f == 0xf)
+		m += ((a >> 16) & 0xf) << 4;
+	if (f == 0xf)
+		f += (a >> 20) & 0xff;
+	*family = f;
+	*model = m;
+}
+
+/*
+ * The microcode revision an Intel processor runs, the way the SDM gets it
+ * (Vol. 3A 253668-093US 12.11.7.1, Example 12-9): zero into IA32_BIOS_SIGN_ID,
+ * then CPUID leaf 1, which deposits the revision in the MSR's upper half.  This
+ * kernel loads no microcode, so the revision is the firmware's.  On any other
+ * vendor it answers 0, as for a processor with no update loaded, and touches
+ * no MSR: AMD's 8BH is PATCH_LEVEL, a register of its own.
+ */
+#define MSR_IA32_BIOS_SIGN_ID	0x8B
+
+static inline uint32_t cpu_microcode_revision(void)
+{
+	uint32_t a, b, c, d;
+
+	if (!cpu_is_intel())
+		return 0;
+	wrmsr(MSR_IA32_BIOS_SIGN_ID, 0);
+	cpuid(1, &a, &b, &c, &d);
+	return (uint32_t)(rdmsr(MSR_IA32_BIOS_SIGN_ID) >> 32);
 }
 
 #endif	/* __ASSEMBLER__ */

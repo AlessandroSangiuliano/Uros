@@ -14,6 +14,7 @@
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>
+#include <pmap/layout.h>	/* KERNEL_IMAGE_BASE */
 #include <pmap/pmap.h>	/* cpus_using, pmap_kernel (#439) */
 #include <pmap/pte.h>
 #include <pmap/tlb.h>
@@ -23,13 +24,29 @@
 struct tlb_request {
 	uint64_t va;
 	uint64_t size;		/* zero means everything */
+	uint64_t ctx_id;	/* #412: the user space it is for, or 0 */
+	uint64_t gen;		/* #412: the generation it brings that space to */
 };
 
 static struct answer_count served;
 
 void tlb_flush_local_all(void)
 {
-	uint64_t cr4 = read_cr4();
+	int was = interrupts_enabled();
+	uint64_t cr4;
+
+	/*
+	 * ⚠️ ON ONE PROCESSOR, FROM THE READ TO THE LAST WRITE.  CR4 and CR3
+	 * are read here and written back, and a thread moved in between would
+	 * write one processor's values into another's: CR4 is not the same on
+	 * every processor (#669: the boot processor keeps the MCE and DE bits
+	 * the firmware left), and CR3 is the space a processor runs in.  Most
+	 * callers hold the processor already; the shootdown of a space loaded
+	 * nowhere (tlb_flush_range(), using == 0) did not.  Found by #412's
+	 * review.
+	 */
+	interrupts_disable();
+	cr4 = read_cr4();
 
 	/*
 	 * Reloading CR3 is the usual way to discard everything, and it has one
@@ -45,13 +62,24 @@ void tlb_flush_local_all(void)
 	 * a control register keeps the flush right with them and without.
 	 * ablations/437-flush-keeps-globals.patch takes this branch out.
 	 */
-	if (cr4 & CR4_PGE) {
+	/*
+	 * #412: with INVPCID, one instruction that discards every PCID's
+	 * entries and the global ones, instead of two CR4 writes.  Without it
+	 * the PGE toggle below already reaches every PCID: a CR4 write that
+	 * changes PGE flushes the whole TLB, whatever CR3 names.  The CR3
+	 * reload at the end reaches the current PCID only, and is reached only
+	 * with global pages off, where pmap_enable_pcid() leaves PCID off too.
+	 */
+	if (pmap_pcid_mode == PMAP_PCID_INVPCID)
+		invpcid(INVPCID_ALL_GLOBAL, 0, 0);
+	else if (cr4 & CR4_PGE) {
 		write_cr4(cr4 & ~CR4_PGE);
 		write_cr4(cr4);
-		return;
-	}
+	} else
+		write_cr3(read_cr3());
 
-	write_cr3(read_cr3());
+	if (was)
+		interrupts_enable();
 }
 
 void tlb_flush_local_range(uint64_t va, uint64_t size)
@@ -79,11 +107,99 @@ void tlb_flush_local_range(uint64_t va, uint64_t size)
 	}
 }
 
+/* Whether a range is flushed page by page, the way tlb_flush_local_range() decides. */
+static int tlb_range_by_pages(uint64_t va, uint64_t size)
+{
+	uint64_t pages = (((va & (PAGE_SIZE_4K - 1)) + size) + PAGE_SIZE_4K - 1)
+			 / PAGE_SIZE_4K;
+
+	return size != 0 && pages <= TLB_FLUSH_PAGE_LIMIT;
+}
+
+/*
+ * A kernel-half range, or any range without PCID, on this processor.
+ *
+ * 🔴 NOT THE IMAGE'S WINDOW BY ADDRESS.  Its leaves are not global (it shares
+ * a directory with the boot identity map, #640), so with PCID every space that
+ * ran there holds a copy under its own PCID, and invlpg reaches the current
+ * one's alone (SDM Vol. 3A 253668-093US 5.10.4.2): a range reaching into it
+ * empties every PCID.  Nothing changes the window after boot today; this is so
+ * that the first thing that does cannot leave its old translation under
+ * somebody else's PCID.  Both ways a kernel range is flushed come here: the
+ * request on every processor, and the path taken while this processor is the
+ * only one online -- before the others start, and for good on a uniprocessor
+ * or at -smp 1, where it is every kernel flush there is.
+ */
+static void tlb_flush_kernel_here(uint64_t va, uint64_t size)
+{
+	if (pmap_pcid_mode != PMAP_PCID_OFF
+	    && (va >= KERNEL_IMAGE_BASE || KERNEL_IMAGE_BASE - va < size))
+		tlb_flush_local_all();
+	else
+		tlb_flush_local_range(va, size);
+}
+
+/*
+ * One request, on this processor: the local half of a shootdown, and the
+ * whole of what the handler does.
+ *
+ * A kernel-half request (ctx_id 0), or any request without PCID, is the flush
+ * it always was: kernel entries are global, and invlpg reaches a global entry
+ * in every PCID -- on the processors PCID is left on for: pmap_pcid_erratum()
+ * turns it off where Intel's INVLPG reaches the current PCID's alone, and
+ * pmap_enable_pcid() refuses it without global pages.  Except the image's
+ * window, whose leaves are not global (#640): tlb_flush_kernel_here() empties
+ * every PCID for it.  A user space's request concerns this processor only if that space is
+ * the one CR3 names -- asked of CR3, the one thing that cannot be ahead of or
+ * behind the TLB, even at boot, where CR3 is written directly.  Then it
+ * brings that PCID's generation forward:
+ *
+ *   - by the range alone, if it is the very next generation;
+ *   - by discarding the whole PCID, if a generation in between has not
+ *     arrived yet.  Two shootdowns of one space can reach a processor in
+ *     either order, and advancing past one whose pages were never flushed
+ *     here is how a stale entry would come to be trusted (#412).
+ *
+ * A space this processor only caches is left alone: its slot is behind the
+ * space's generation, and the next switch into it discards its entries.
+ * Interrupts off, so that a request landing in the middle cannot see the slot
+ * and CR3 disagree either.
+ */
+static void tlb_flush_request_here(const struct tlb_request *r)
+{
+	struct percpu	*pc;
+	uint64_t	 pcid, *gen;
+	int		 was;
+
+	if (r->ctx_id == 0 || pmap_pcid_mode == PMAP_PCID_OFF) {
+		tlb_flush_kernel_here(r->va, r->size);
+		return;
+	}
+
+	was = interrupts_enabled();
+	interrupts_disable();
+
+	pc = percpu();
+	pcid = read_cr3() & CR3_PCID_MASK;
+	if (pcid != 0 && pcid <= PCID_SLOTS
+	    && pc->pcid_slot[pcid - 1].ctx_id == r->ctx_id) {
+		gen = &pc->pcid_slot[pcid - 1].gen;
+		if (*gen + 1 == r->gen && tlb_range_by_pages(r->va, r->size)) {
+			tlb_flush_local_range(r->va, r->size);
+			*gen = r->gen;
+		} else if (*gen < r->gen) {
+			write_cr3(read_cr3());	/* this PCID, globals kept */
+			*gen = r->gen;
+		}
+	}
+
+	if (was)
+		interrupts_enable();
+}
+
 static void tlb_flush_handler(void *arg)
 {
-	const struct tlb_request *r = arg;
-
-	tlb_flush_local_range(r->va, r->size);
+	tlb_flush_request_here(arg);
 	answer_count_mark(&served);
 }
 
@@ -116,7 +232,7 @@ static void tlb_flush_here_and_there(struct tlb_request *r, int broadcast,
 {
 	disable_preemption();
 
-	tlb_flush_local_range(r->va, r->size);
+	tlb_flush_request_here(r);
 
 	if (broadcast)
 		ipi_call_others(tlb_flush_handler, r);
@@ -133,7 +249,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * one reason: the cross-call does not return until every one of them
 	 * has finished with it, so this frame outlives every reader of it.
 	 */
-	struct tlb_request r = { va, size };
+	struct tlb_request r = { va, size, 0, 0 };
 
 	uint64_t using;
 
@@ -155,6 +271,18 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * machine, and the first symptom would be somewhere else entirely.
 	 */
 
+	/*
+	 * 🔴 THE KERNEL HALF BY ADDRESS, WHATEVER PMAP ASKED.  Its tables are
+	 * the same in every space and its leaves are global (#437), so a kernel
+	 * address reached through a user's pmap -- pmap_may_map() lets one
+	 * through, and the walk lands in the shared tables -- is a translation
+	 * every processor may hold, under every PCID.  Sent to that pmap's
+	 * cpus_using it would reach the processors with that space loaded and
+	 * leave the rest.  No caller does this today; this is so that none can.
+	 */
+	if (size != 0 && va_is_kernel(va))
+		pmap = PMAP_NULL;
+
 	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
 		/*
 		 * With only this processor online there is nobody to tell and
@@ -164,7 +292,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 		 * write at address zero's page (#638).
 		 */
 		if (smp_online_count() <= 1) {
-			tlb_flush_local_range(va, size);
+			tlb_flush_kernel_here(va, size);
 			return;
 		}
 		tlb_flush_here_and_there(&r, 1, 0);
@@ -175,17 +303,40 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * Read once.  A processor joining the set after this load is a
 	 * processor that is about to load CR3 with this root — and CR3 is
 	 * written after the entry we just changed was already gone from the
-	 * table, so what it walks is the new state.  It has nothing stale to
-	 * discard, which is why missing it here is not a hole.
+	 * table, so what it walks is the new state.  Without PCID it has
+	 * nothing stale to discard, which is why missing it here is not a
+	 * hole.  With PCID it may: its slot can still hold the space's old
+	 * entries, and what makes it discard them is the generation it reads
+	 * after joining, which is the order the next paragraph is about.
 	 *
 	 * A processor LEAVING after this load still gets its interrupt and
 	 * flushes something it no longer needs, which costs a message.
 	 */
+	/*
+	 * 🔴 THE GENERATION FIRST, THEN THE SET (#412).  A processor switching
+	 * into this space joins cpus_using and then reads tlb_gen; this side
+	 * increments tlb_gen and then reads cpus_using.  Both are locked
+	 * operations, full barriers here, so at least one side sees the other:
+	 * either the switch finds the new generation and discards the space's
+	 * entries, or this shootdown finds the processor and interrupts it.
+	 * Reading the set first would let a processor slip between the two,
+	 * keep its stale entries, and never be told -- FreeBSD shipped that
+	 * order once (EN-22:04).  Without PCID the generation is never read,
+	 * and is not touched.
+	 */
+	if (pmap_pcid_mode != PMAP_PCID_OFF) {
+		r.ctx_id = pmap->ctx_id;
+		r.gen = atomic_add64(&pmap->tlb_gen, 1) + 1;
+	}
+
 	using = atomic_load64(&pmap->cpus_using);
 
 	/*
-	 * Nobody has this space loaded, so the flush here is the whole job.
-	 * This is the ORDINARY case, not an edge one: a freshly forked
+	 * Nobody has this space loaded, so there is nobody to interrupt: with
+	 * PCID the generation moved above is what reaches the processors that
+	 * only cache the space, and the flush here is for this processor, which
+	 * may have loaded the root directly (the boot self-tests do).  This is
+	 * the ORDINARY case, not an edge one: a freshly forked
 	 * address space is loaded on the processor doing the forking and on no
 	 * other, and that processor's own bit is not in the set it would send
 	 * to anyway.
