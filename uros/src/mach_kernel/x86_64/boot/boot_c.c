@@ -2361,7 +2361,9 @@ static void xs_said3(uint32_t x, uint64_t seen, uint64_t kept)
  * pmap_enter(), its walks, pv entries and two invlpgs, one page over -- so that
  * whatever the question's remap does to this processor's TLB besides
  * invalidating XS_KVA, the control does as well, and a TLB that lets an entry
- * go for that can only make the answer NOT ASKED, never a PASS.
+ * go for that can only make the answer NOT ASKED, never a PASS.  So do its
+ * CR3 loads: S2 is entered once before the question, and after the question's
+ * first read every switch of either arm is a NOFLUSH load of a current slot.
  *
  * [1] and [2] need no second processor either, and are asked of this one in
  * pcid_ask(), which makes it X (xs_run_on()): [2] runs on X alone, and [1]'s
@@ -2419,6 +2421,20 @@ static void pcid_ask_alone(uint32_t self)
 		kputs("pcid_test: [3] NOT ASKED — could not build the two "
 		      "spaces or map the kernel pages (#412)\r\n");
 	else {
+		/*
+		 * S2 first, as [1] enters it: the question then leaves S1 for a
+		 * space that still holds its PCID, a NOFLUSH load as the
+		 * control's is.  S2 taking its slot between the read and the
+		 * return was a load that discards a PCID and "may invalidate TLB
+		 * entries ... associated with PCIDs other than the PCID it is
+		 * establishing" (SDM Vol. 3A 253668-093US 5.10.4.1): it could
+		 * take S1's entry by itself, the question would read the new
+		 * frame, and the control, which never made that load, would keep
+		 * the entry and call the answer a PASS -- with PCID on and the
+		 * global bit meaning nothing, the defect this question is for
+		 * (the cloud audit of 14/10).
+		 */
+		(void) xs_alone(&st, s2, 0);
 		(void) xs_alone(&st, s1, 1);
 		(void) xs_alone(&st, s2, 0);
 		(void) pmap_enter(pmap_kernel(), XS_KVA, f4,
