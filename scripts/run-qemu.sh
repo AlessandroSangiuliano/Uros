@@ -432,6 +432,13 @@ else
     QEMU_ARGS="$QEMU_ARGS $AHCI_ARGS $VIRTIO_ARGS"
 fi
 
+# #591: the disk controllers on this board, read off the arguments qemu is
+# given, into the run's conditions below.  suite-i386.sh requires each one
+# attached with its disks once the block server has started, as run-x86_64.sh
+# does: see scripts/disks-attached.sh.
+# shellcheck disable=SC2086
+DISKS_ON_BOARD=$(uros_board_disks $QEMU_ARGS $EXTRA_ARGS)
+
 # ------------------------------------------------------- run conditions
 #
 # Say what the host was doing and what the machine is, on the same output as
@@ -451,6 +458,7 @@ uros_conditions_block "i386" "$ACCEL" \
 	"smp:          ${SMP_COUNT:-1}" \
 	"disk:         $([ "$USE_DISK" = true ] && echo yes || echo no)" \
 	"virtio:       $([ "$USE_VIRTIO" = true ] && echo "$VIRTIO_DISK, $VIRTIO_PLACE" || echo no)" \
+	"disks:        $DISKS_ON_BOARD" \
 	"command:      $0 $ORIG_ARGS"
 
 # ⚠️ `exec' stays.  Without it this shell remains qemu's parent, and every
