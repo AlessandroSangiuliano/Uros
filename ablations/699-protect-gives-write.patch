@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #699
+Takes out: that a protect only takes away, in pmap_protect_page_noflush() (d0412300) -- the permission bits are set to exactly what pmap_flags_for_prot() gives, U/S decided by the address as 6be1b242 had it, so a protect with write in it gives WRITE back, and vm_map_protect(), which calls pmap_protect() when it raises a protection too, makes a page still shared copy-on-write writable in place; protect_user_selftest()'s leaf protected back to read-write must say WRITE was given back, and cow_test's arm eight must find the parent's writes in the child's copy after a vm_protect() to read-only and back; pure software, so TCG shows it as well as KVM; at 99b9f9c9, entry 14, on victus: caught 2 of 2 under KVM and 1 of 1 under TCG and the fixed tree passed as many, the leaf protected back to read-write reading 0x8000000000ffc007, WRITE given back, and arm eight finding the parent's writes in 8 of the child's 8 pages, where the fixed tree read 0x8000000000ffc005 and 0 of 8
+Run: --entry 14 600 -smp 4
+Expect: a user page protected read-only reads .* — WRONG, a protect to read-write gave WRITE back
+Expect: cow_test: \[8\] after a protect to read-only and back .* — WRONG, the protect gave WRITE back
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
+index b6db283a..9ebe54d1 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/map.c
++++ b/uros/src/mach_kernel/x86_64/pmap/map.c
+@@ -537,8 +537,9 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
+ 	 * its parent made (cow_test [8]), and USER, which a vm_prot_t never
+ 	 * carries, went on every protect of a user page.
+ 	 */
+-	pmap_pte_update(entry, flags & INTEL_PTE_NX,
+-			(flags & INTEL_PTE_WRITE) ? 0 : INTEL_PTE_WRITE);
++	if (va_is_user(va))
++		flags |= INTEL_PTE_USER;
++	pmap_pte_update(entry, flags & INTEL_PTE_PERM, INTEL_PTE_PERM);
+ 
+ 	pmap_read_leave(held);
+ 
