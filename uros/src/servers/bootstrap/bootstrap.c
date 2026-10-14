@@ -603,7 +603,13 @@ cap_server_checked_in(void)
 
 	if (checked_in)
 		return 1;
-	if (cap_server_sp == NULL)
+	/*
+	 * A cap_server already gone is a fact before the name server is asked:
+	 * asking would leave a watcher there that nothing ever answers, and
+	 * cost the child a polling period before the death was looked at (the
+	 * cloud audit of #412, 14/10).
+	 */
+	if (cap_server_sp == NULL || (cap_server_sp->flags & SERVER_DIED_F))
 		return 0;
 
 	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_RECEIVE,
