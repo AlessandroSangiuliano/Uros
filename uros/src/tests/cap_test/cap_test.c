@@ -474,10 +474,12 @@ subsystem_name_is_not_a_pointer(void)
  * answer "who may drive this device": the manifest says what KIND, the claim
  * says which INSTANCE, and neither is a policy alone.
  *
- * ⚠️ A boot where this task has no manifest reports that it DID NOT RUN.
- * cap_server is permissive without one, so a token would come back and prove
- * nothing -- and a pass on the permissive path is exactly the silence this
- * arm exists to break.
+ * ⚠️ A boot where this task has no manifest is WRONG, by the branch below
+ * that names the PCI capability: cap_server is permissive without one, so
+ * that token comes back too.  And the declared capability refused is WRONG
+ * as well -- a server that refuses everything is not a policy.  This comment
+ * said both ended in DID NOT RUN; the second did, and returned success
+ * (#591).
  */
 /*
  * ── [15] The master device port is a way around the manifest (#511) ──────
@@ -651,10 +653,10 @@ the_manifest_refuses_what_it_does_not_declare(void)
                          CAP_OP_PCI_DMA_MAP, 0, &tok_pci);
 
     if (kr_blk != KERN_SUCCESS) {
-        printf("cap_test: [13] the manifest — DID NOT RUN, cap_server would "
-               "not issue even the declared block-device capability "
-               "(kr=%d)\n", (int)kr_blk);
-        return 1;
+        printf("cap_test: [13] WRONG — cap_server would not issue even the "
+               "declared block-device capability (kr=%d), so its refusal of "
+               "the PCI one proves nothing\n", (int)kr_blk);
+        return 0;
     }
 
     if (kr_pci == KERN_SUCCESS) {
@@ -962,13 +964,13 @@ a_capability_is_its_handles(mach_port_t device_port, mach_port_t part_port,
         !b2_alloc(device_port, &r1) || !b2_alloc(device_port, &r2) ||
         b2_hand(ha, r1.region, RESOURCE_DMA_BUFFER) != KERN_SUCCESS ||
         b2_hand(hb, r2.region, RESOURCE_DMA_BUFFER) != KERN_SUCCESS) {
-        printf("cap_test: [19] %s — DID NOT RUN, two handles and two handed "
-               "pages were not all there\n", name);
+        printf("cap_test: [19] WRONG — %s is registered, and two handles "
+               "and two handed pages were not all there (#591)\n", name);
         b2_close(ha);
         b2_close(hb);
         b2_free(device_port, &r1);
         b2_free(device_port, &r2);
-        return 1;
+        return 0;
     }
 
     k1 = b2_read(hb, &r1, &m1, &i1);		/* the other's page */
@@ -1026,11 +1028,11 @@ revoking_a_capability_takes_the_mapping_down(mach_port_t device_port,
     if (kr == KERN_SUCCESS)
         kr = device_register_dma(h, (char *)&t, sizeof(t));
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [20] %s — DID NOT RUN, no handed page (kr=%d)\n",
-               name, (int)kr);
+        printf("cap_test: [20] WRONG — %s is registered, and no page was "
+               "handed over (kr=%d) (#591)\n", name, (int)kr);
         b2_close(h);
         b2_free(device_port, &r);
-        return 1;
+        return 0;
     }
 
     k1 = b2_read(h, &r, &m1, &i1);
@@ -1082,11 +1084,11 @@ a_handle_refuses_rather_than_evicts(mach_port_t device_port,
 
     h = b2_open(part_port, name);
     if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
-        printf("cap_test: [21] %s — DID NOT RUN, no handle or no page\n",
-               name);
+        printf("cap_test: [21] WRONG — %s is registered, and no handle or "
+               "no page came (#591)\n", name);
         b2_close(h);
         b2_free(device_port, &r);
-        return 1;
+        return 0;
     }
     for (i = 0; i < 5; i++) {
         memset(&t[i], 0, sizeof(t[i]));
@@ -1138,11 +1140,11 @@ a_buffer_capability_is_a_buffers(mach_port_t device_port,
 
     h = b2_open(part_port, name);
     if (h == MACH_PORT_NULL || !b2_alloc(device_port, &r)) {
-        printf("cap_test: [24] %s — DID NOT RUN, no handle or no page\n",
-               name);
+        printf("cap_test: [24] WRONG — %s is registered, and no handle or "
+               "no page came (#591)\n", name);
         b2_close(h);
         b2_free(device_port, &r);
-        return 1;
+        return 0;
     }
     kr = b2_hand(h, r.region, RESOURCE_BLK_DEVICE);
     b2_close(h);
@@ -1200,11 +1202,11 @@ a_revoked_translation_is_refused(mach_port_t device_port, mach_port_t part_port,
     if (kr == KERN_SUCCESS)
         kr = device_register_dma(h, (char *)&t, sizeof(t));
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [26] %s — DID NOT RUN, no handed page (kr=%d)\n",
-               name, (int)kr);
+        printf("cap_test: [26] WRONG — %s is registered, and no page was "
+               "handed over (kr=%d) (#591)\n", name, (int)kr);
         b2_close(h);
         b2_free(device_port, &r);
-        return 1;
+        return 0;
     }
 
     k1 = b2_read(h, &r, &m1, &i1);
@@ -1451,9 +1453,9 @@ a_handle_moves_data_only_its_way(mach_port_t device_port,
 
     kr = ct27_open(part_port, name, CAP_OP_BLK_READ, D_READ, &rh, &no_cap);
     if (no_cap) {
-        printf("cap_test: [27] %s — DID NOT RUN, no read-only block "
-               "capability\n", name);
-        return 1;
+        printf("cap_test: [27] WRONG — %s is registered, and no read-only "
+               "block capability was given for it (#591)\n", name);
+        return 0;
     }
     if (kr != KERN_SUCCESS || rh == MACH_PORT_NULL) {
         printf("cap_test: [27] WRONG — %s: a read-only capability was "
@@ -1552,32 +1554,33 @@ many_pages_in_one_request(mach_port_t device_port, mach_port_t part_port,
     kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
                      CAP_OP_BLK_READ, 0, &tok);
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [25] %s — DID NOT RUN, no block capability "
-               "(kr=%d)\n", name, (int)kr);
-        return 1;
+        printf("cap_test: [25] WRONG — %s is registered and no block "
+               "capability was given for it (kr=%d) (#591)\n", name, (int)kr);
+        return 0;
     }
     memcpy(blob, &tok, sizeof(tok));
     kr = device_open_cap(part_port, MACH_PORT_NULL, D_READ, null_sec,
                          (char *)name, blob,
                          (mach_msg_type_number_t)sizeof(tok), &handle);
     if (kr != KERN_SUCCESS || handle == MACH_PORT_NULL) {
-        printf("cap_test: [25] %s — DID NOT RUN, open refused (kr=%d)\n",
-               name, (int)kr);
-        return 1;
+        printf("cap_test: [25] WRONG — %s is registered and refused the "
+               "open (kr=%d) (#591)\n", name, (int)kr);
+        return 0;
     }
 
     kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, CT25_PAGES,
                              mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
                              &region_id);
     if (kr != KERN_SUCCESS || pa_cnt != CT25_PAGES) {
-        printf("cap_test: [25] %s — DID NOT RUN, no %u-page buffer (kr=%d, "
-               "%u pages)\n", name, CT25_PAGES, (int)kr, (unsigned)pa_cnt);
+        printf("cap_test: [25] WRONG — no %u-page buffer to read %s into "
+               "(kr=%d, %u pages) (#591)\n", CT25_PAGES, name, (int)kr,
+               (unsigned)pa_cnt);
         if (pa_list != NULL)
             (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
                                 pa_cnt * sizeof(vm_address_t));
         (void)device_close(handle);
         (void)mach_port_deallocate(mach_task_self(), handle);
-        return 1;
+        return 0;
     }
 
     memset(&buf_cap, 0, sizeof(buf_cap));
@@ -1587,9 +1590,8 @@ many_pages_in_one_request(mach_port_t device_port, mach_port_t part_port,
     if (kr == KERN_SUCCESS)
         kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [25] %s — DID NOT RUN, the buffer was not handed "
-               "over (kr=%d)\n", name, (int)kr);
-        ok = 1;
+        printf("cap_test: [25] WRONG — %s: the buffer was not handed over "
+               "(kr=%d) (#591)\n", name, (int)kr);
         goto out;
     }
 
@@ -2016,20 +2018,20 @@ a_free_takes_its_mapping_not_the_address(mach_port_t device_port)
         (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
                             pa_cnt * sizeof(vm_address_t));
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [23] a free takes its own mapping — DID NOT RUN, "
-               "no buffer (kr=%d)\n", (int)kr);
-        return 1;
+        printf("cap_test: [23] a free takes its own mapping — WRONG, no "
+               "buffer (kr=%d) (#591)\n", (int)kr);
+        return 0;
     }
 
     (void)vm_deallocate(mach_task_self(), uva, 4096);
     mine = uva;
     kr = vm_allocate(mach_task_self(), &mine, 4096, FALSE);
     if (kr != KERN_SUCCESS || mine != uva) {
-        printf("cap_test: [23] a free takes its own mapping — DID NOT RUN, "
-               "the address was not given back to this task (kr=%d)\n",
+        printf("cap_test: [23] a free takes its own mapping — WRONG, the "
+               "address was not given back to this task (kr=%d) (#591)\n",
                (int)kr);
         (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
-        return 1;
+        return 0;
     }
     *(volatile unsigned char *)mine = 0x5A;
 
@@ -2290,8 +2292,8 @@ a_wired_page_can_be_given_back(mach_port_t host_priv)
     kern_return_t kr = vm_allocate(mach_task_self(), &a, size, TRUE);
 
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [16] vm_allocate FAIL kr=%d — the arm did not run\n",
-               (int)kr);
+        printf("cap_test: [16] WRONG — vm_allocate refused (kr=%d), so the "
+               "arm did not run\n", (int)kr);
         return 0;
     }
 
@@ -2301,8 +2303,9 @@ a_wired_page_can_be_given_back(mach_port_t host_priv)
     kr = vm_wire(host_priv, mach_task_self(), a, size,
                  VM_PROT_READ | VM_PROT_WRITE);
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [16] vm_wire refused kr=%d — the arm did not run "
-               "(it needs the privileged host port, see #546)\n", (int)kr);
+        printf("cap_test: [16] WRONG — vm_wire refused (kr=%d), so the arm "
+               "did not run (it needs the privileged host port, see #546)\n",
+               (int)kr);
         (void)vm_deallocate(mach_task_self(), a, size);
         return 0;
     }
@@ -2844,8 +2847,9 @@ main(int argc, char **argv)
                                         0,
                                         &tok);
         if (ckr != KERN_SUCCESS) {
-            printf("cap_test: [3] cap_request(%s) failed (%d) — SKIPPED\n",
-                   found_name, ckr);
+            printf("cap_test: [3] WRONG — cap_request(%s) refused (kr=%d) on "
+                   "a registered partition (#591)\n", found_name, ckr);
+            pass = 0;
         } else {
             char ok_blob[CAP_TOKEN_MAX];
             memcpy(ok_blob, &tok, sizeof(tok));
@@ -2920,8 +2924,9 @@ main(int argc, char **argv)
                                         0,
                                         &tok5);
         if (ck5 != KERN_SUCCESS) {
-            printf("cap_test: [5] cap_request FAIL kr=%d — SKIPPED\n",
-                   (int)ck5);
+            printf("cap_test: [5] WRONG — cap_request(%s) refused (kr=%d) on "
+                   "a registered partition (#591)\n", found_name, (int)ck5);
+            pass = 0;
         } else {
             char blob5[CAP_TOKEN_MAX];
             memcpy(blob5, &tok5, sizeof(tok5));
