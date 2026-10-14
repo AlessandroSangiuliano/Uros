@@ -507,11 +507,13 @@ subsystem_name_is_not_a_pointer(void)
  * reached at all; writing another server's controller registers would prove
  * the same thing and break the boot doing it.
  *
- * ⚠️ WHEN THIS ARM STARTS FAILING, THAT IS #511 BEING FIXED.  It is written
- * to be inverted: after the fix a task without the bus right must be refused
- * here, and done-when 2 of that issue requires the same call from a holder
- * of the right to succeed -- otherwise a refusal and a call that was never
- * going to work look identical.
+ * ⚠️ IT WAS WRITTEN TO BE INVERTED once #511 was fixed, and only its first
+ * question was: the refused read of 0:0.0 below passes as CLOSED.  Past it,
+ * the rest stayed the demonstration it was before the fix, and returned
+ * success when the bypass worked (#511 OPEN) or could not be shown (DID NOT
+ * RUN) -- #511 reopened would have passed.  Every way past that read is WRONG
+ * now, and the lines after the WRONG one say how far the bypass reaches
+ * (#591).
  */
 #define PCI_CFG_VENDOR		0x00
 #define PCI_CFG_CLASS		0x08
@@ -526,7 +528,7 @@ the_master_port_bypasses_the_manifest(mach_port_t device_port)
     natural_t    found_bus = 0, found_slot = 0, found_func = 0;
     natural_t    bar5 = 0;
     vm_address_t uva = 0;
-    int          found = 0, mapped = 0, ok = 0;
+    int          found = 0;
     unsigned     version;
 
     /*
@@ -550,6 +552,9 @@ the_master_port_bypasses_the_manifest(mach_port_t device_port)
                    "three integers\n");
             return 1;
         }
+        printf("cap_test: [15] WRONG — #511 reopened: reading 0:0.0 was not "
+               "refused (kr=%d) to a task that holds no device and no bus\n",
+               (int)probe);
     }
 
     for (bus = 0; bus < 1 && !found; bus++)
@@ -572,33 +577,35 @@ the_master_port_bypasses_the_manifest(mach_port_t device_port)
             }
 
     if (!found) {
-        printf("cap_test: [15] #511 — DID NOT RUN, no SATA controller in "
-               "configuration space (the scan itself was not refused)\n");
-        return 1;
+        printf("cap_test: [15] #511 — no SATA controller in configuration "
+               "space to show how far the reopened read reaches\n");
+        return 0;
     }
 
     if (device_pci_config_read(device_port, found_bus, found_slot, found_func,
                                PCI_CFG_BAR5, &bar5) != KERN_SUCCESS) {
-        printf("cap_test: [15] #511 — DID NOT RUN, BAR5 unreadable\n");
-        return 1;
+        printf("cap_test: [15] #511 — BAR5 of %u:%u.%u unreadable\n",
+               (unsigned)found_bus, (unsigned)found_slot,
+               (unsigned)found_func);
+        return 0;
     }
     bar5 &= ~0xFu;
 
     if (bar5 == 0) {
-        printf("cap_test: [15] #511 — DID NOT RUN, BAR5 is zero\n");
-        return 1;
+        printf("cap_test: [15] #511 — BAR5 of %u:%u.%u is zero\n",
+               (unsigned)found_bus, (unsigned)found_slot,
+               (unsigned)found_func);
+        return 0;
     }
 
     if (device_mmio_map(device_port, (vm_address_t)bar5, 4096,
                         mach_task_self(), &uva) != KERN_SUCCESS || uva == 0) {
-        printf("cap_test: [15] #511 CLOSED — a task whose manifest declares "
-               "no PCI device was refused the mapping of %u:%u.%u BAR5 "
-               "(0x%08X)\n",
+        printf("cap_test: [15] #511 — configuration space is open, and the "
+               "mapping of %u:%u.%u BAR5 (0x%08X) was refused\n",
                (unsigned)found_bus, (unsigned)found_slot,
                (unsigned)found_func, (unsigned)bar5);
-        return 1;
+        return 0;
     }
-    mapped = 1;
 
     version = *(volatile unsigned *)(uva + AHCI_VS_REG);
 
@@ -610,16 +617,14 @@ the_master_port_bypasses_the_manifest(mach_port_t device_port)
                "manifest\n",
                version, (unsigned)found_bus, (unsigned)found_slot,
                (unsigned)found_func, (unsigned)bar5);
-        ok = 1;
     } else {
         printf("cap_test: [15] #511 — the mapping succeeded but 0x%08X is no "
                "AHCI version, so it is NOT evidence about where it landed\n",
                version);
     }
 
-    if (mapped)
-        (void)device_mmio_unmap(device_port, uva, 4096, mach_task_self());
-    return ok;
+    (void)device_mmio_unmap(device_port, uva, 4096, mach_task_self());
+    return 0;
 }
 
 static int
