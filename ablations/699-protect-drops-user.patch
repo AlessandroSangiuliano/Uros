@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #699
+Takes out: U/S decided by the address in pmap_protect_page_noflush() -- a protect clears WRITE, USER and NX together and sets back only what pmap_flags_for_prot() gives, which never carries USER, so every pmap_protect() or pmap_page_protect() of a user page leaves it supervisor-only, as it was from #407 to 6be1b242; protect_user_selftest() reads the leaf after each and must say U/S cleared; pure software, so TCG shows it as well as KVM
+Run: --entry 0 300 -smp 4
+Expect: a user page protected read-only reads .* — WRONG, U/S cleared
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
+index 6f5cfbe0..45321248 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/map.c
++++ b/uros/src/mach_kernel/x86_64/pmap/map.c
+@@ -523,18 +523,7 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
+ 	 * pmap_pte_update() (pte.h); this was a copy of it, and the copy
+ 	 * wrote the permission bits into an entry a removal had just zeroed
+ 	 * (#604).
+-	 *
+-	 * 🔴 AND THE ADDRESS DECIDES U/S, HERE AS IN pmap_enter() (#699).  The
+-	 * permission bits are cleared as a group -- INTEL_PTE_PERM is WRITE,
+-	 * USER and NX -- and set back from `flags', which pmap_flags_for_prot()
+-	 * builds from a vm_prot_t and so never carries USER.  Every protect of
+-	 * a user page took ring 3's access away: the task's next touch faulted,
+-	 * vm_fault mapped the page again with U/S, and until then SMAP did not
+-	 * guard a page the kernel could reach without asking.  A kernel address
+-	 * gets no USER here, as pmap_enter() gives it none.
+ 	 */
+-	if (va_is_user(va))
+-		flags |= INTEL_PTE_USER;
+ 	pmap_pte_update(entry, flags & INTEL_PTE_PERM, INTEL_PTE_PERM);
+ 
+ 	pmap_read_leave(held);
