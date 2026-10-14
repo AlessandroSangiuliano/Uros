@@ -31,6 +31,7 @@
 #include <mach/vm_inherit.h>
 #include <mach/host_info.h>		/* HOST_VM_INFO, arm six (#699) */
 #include <mach/mach_host.h>		/* host_statistics() user stub (#699) */
+#include <mach/bootstrap.h>		/* the privileged host port it takes */
 #include <mach/mach_interface.h>
 #include <mach/mach_syscalls.h>
 
@@ -406,13 +407,17 @@ measure_chain_depth(void)
  * tasks fault in the same window, so READ_PAGES is large enough that one fault
  * per page stands out; the number is printed and not judged, as arm five's
  * are, since no threshold here is this test's to choose.
+ *
+ * host_statistics() takes the privileged host port (mach_host.defs:
+ * host_priv_t), and refuses mach_host_self()'s name port with
+ * KERN_INVALID_HOST; bootstrap hands the privileged one out, as it does to
+ * act_test's arm nine.
  */
 #define READ_PAGES	256
 
 static void
-measure_read_after_fork(void)
+read_after_fork(mach_port_t host_priv)
 {
-	mach_port_t		host = mach_host_self();
 	mach_port_t		kid = MACH_PORT_NULL;
 	vm_statistics_data_t	before, after;
 	mach_msg_type_number_t	n;
@@ -426,7 +431,6 @@ measure_read_after_fork(void)
 	if (kr != KERN_SUCCESS) {
 		printf("cow_test: [6] vm_allocate of %d pages failed (%d) — "
 		       "not measured\n", READ_PAGES, kr);
-		(void) mach_port_deallocate(mach_task_self(), host);
 		return;
 	}
 	/* Resident and writable before the fork, so that the fork protects. */
@@ -439,17 +443,18 @@ measure_read_after_fork(void)
 	if (kr != KERN_SUCCESS) {
 		printf("cow_test: [6] fork failed (%d) — not measured\n", kr);
 		(void) vm_deallocate(mach_task_self(), region, size);
-		(void) mach_port_deallocate(mach_task_self(), host);
 		return;
 	}
 
 	n = HOST_VM_INFO_COUNT;
-	kb = host_statistics(host, HOST_VM_INFO, (host_info_t) &before, &n);
+	kb = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &before,
+			     &n);
 	for (i = 0; i < READ_PAGES; i++)
 		sum += *(volatile unsigned long long *)
 			(region + (vm_offset_t) i * vm_page_size);
 	n = HOST_VM_INFO_COUNT;
-	ka = host_statistics(host, HOST_VM_INFO, (host_info_t) &after, &n);
+	ka = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &after,
+			     &n);
 
 	if (kb != KERN_SUCCESS || ka != KERN_SUCCESS)
 		printf("cow_test: [6] host_statistics refused (%d, %d) — "
@@ -464,7 +469,35 @@ measure_read_after_fork(void)
 	(void) task_terminate(kid);
 	(void) mach_port_deallocate(mach_task_self(), kid);
 	(void) vm_deallocate(mach_task_self(), region, size);
-	(void) mach_port_deallocate(mach_task_self(), host);
+}
+
+/* Every port bootstrap_ports() hands out goes back, used or not. */
+static void
+measure_read_after_fork(void)
+{
+	mach_port_t	host_priv = MACH_PORT_NULL, device = MACH_PORT_NULL;
+	mach_port_t	lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
+	mach_port_t	sec = MACH_PORT_NULL;
+	kern_return_t	kr;
+
+	kr = bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
+			     &sec);
+	if (kr != KERN_SUCCESS)
+		printf("cow_test: [6] no privileged host port from bootstrap "
+		       "(%d) — not measured\n", kr);
+	else
+		read_after_fork(host_priv);
+
+	if (host_priv != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), host_priv);
+	if (device != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), device);
+	if (lw != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), lw);
+	if (lp != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), lp);
+	if (sec != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), sec);
 }
 
 /*
