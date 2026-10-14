@@ -2721,11 +2721,10 @@ main(int argc, char **argv)
 
     /*
      * Test [2]: device_open_cap with a zero-filled token must return
-     * KERN_NO_ACCESS from block_device_server.  Tries the AHCI and
-     * virtio-blk first-partition names in turn; if neither is
-     * registered in the name server the test is skipped without
-     * failing the suite (boot may not have published partitions yet
-     * when cap_test runs).
+     * KERN_NO_ACCESS from block_device_server.  Tries the virtio-blk and
+     * AHCI first-partition names in turn; if neither is registered in the
+     * name server the arm says NOT ASKED rather than failing the suite:
+     * whether the board carries a disk is the harness's to say (#591).
      */
     /*
      * ── The subject is chosen, not raced for (#529) ───────────────────
@@ -2776,8 +2775,9 @@ main(int argc, char **argv)
     }
 
     if (found_name == NULL) {
-        printf("cap_test: [2] device_open_cap negative — "
-               "SKIPPED (no BDS partition in name server)\n");
+        /* NOT ASKED, as [14] says of a missing partition below (#591). */
+        printf("cap_test: [2] device_open_cap negative — NOT ASKED, no "
+               "partition in the name server (#591)\n");
     } else {
         int boot = is_the_boot_disk(part_port);
 
@@ -3050,8 +3050,20 @@ main(int argc, char **argv)
 
         if (netname_look_up(name_server_port, "", (char *)candidates[i], &p)
             != KERN_SUCCESS) {
-            printf("cap_test: [14] '%s' is not registered — the arm did not "
-                   "run on that controller\n", candidates[i]);
+            /*
+             * 🔑 NOT ASKED, the third word, and not WRONG (#591).  This
+             * binary cannot tell a board without the controller from one
+             * that lost it -- i386's default board has no virtio-blk, so
+             * there this line is printed for virtio_blk0a on every boot.
+             * Whether the controller should be here is the harness's
+             * question: it knows what it put on the board, and fails a
+             * boot whose controller never attached (disks-attached.sh).
+             * Said in the words the harnesses count, where it had read as
+             * neither a failure nor a question set aside.
+             */
+            printf("cap_test: [14] '%s' NOT ASKED — not registered, so the "
+                   "arm cannot run on that controller (#591)\n",
+                   candidates[i]);
             continue;
         }
         /*
