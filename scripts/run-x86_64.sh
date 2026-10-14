@@ -766,6 +766,7 @@ fi
 # answers a different question, which is the failure this file exists to stop.
 IOMMU_ARGS=""
 IOMMU_NAME="none"
+BOARD=""
 KVM_ARGS=""
 HPET_ARGS=""
 SOCKET1_CPU=0
@@ -1178,6 +1179,15 @@ if [ -n "$IOMMU_ARGS" ]; then
 	*)				IOMMU_ARGS="-machine $BOARD $IOMMU_ARGS" ;;
 	esac
 fi
+
+# Which board, said apart from the engine on it (#591).  The run's conditions
+# put the engine's name on their `machine:' line, so every default run said
+# "machine: none" and an --iommu run named the engine and not q35; the default
+# board, the fallback beside it, could never be printed.
+case " $* " in
+*" -machine "*|*" -M "*)	MACHINE_SAID="from the command line" ;;
+*)				MACHINE_SAID=${BOARD:-pc (i440FX, 1996)} ;;
+esac
 
 # 🔑 Said out loud for the same reason the accelerator is (#477): a run whose
 # board is not on the screen is a result somebody will later have to guess the
@@ -1613,7 +1623,8 @@ done <<< "$OTHER_QEMU_AT_END"
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
 	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
-	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
+	"machine:      $MACHINE_SAID" \
+	"iommu:        $IOMMU_NAME" \
 	"cpu:          ${CPU_ARGS:-from the command line}${SOCKET1_ARGS:+, and $SOCKET1_ARGS (#663)}" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
 	"disks:        $DISKS_ON_BOARD" \
