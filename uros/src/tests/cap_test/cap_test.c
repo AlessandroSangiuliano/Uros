@@ -425,9 +425,10 @@ subsystem_name_is_not_a_pointer(void)
  * -- a self-test breaking the thing it checks.  device_dma_owned() answers the
  * question without claiming, and exists for this.
  *
- * ⚠️ A boot where nothing is claimed yet reports that it DID NOT RUN and says
- * so.  The order between this task and the block server is an interleaving and
- * not an order (#425); silence would be indistinguishable from a pass.
+ * ⚠️ A boot where nothing is claimed yet says NOT ASKED (#591; it said DID NOT
+ * RUN, which no harness counted).  The order between this task and the block
+ * server is an interleaving and not an order (#425); silence would be
+ * indistinguishable from a pass.
  */
 
 /*
@@ -2078,8 +2079,8 @@ a_device_has_one_driver(mach_port_t device_port)
     }
 
     if (!claimed) {
-        printf("cap_test: [11] a device has one driver — DID NOT RUN, "
-               "nothing on bus 0 is driven by another task yet\n");
+        printf("cap_test: [11] a device has one driver — NOT ASKED, "
+               "nothing on bus 0 is driven by another task yet (#591)\n");
         return 1;
     }
 
@@ -2716,8 +2717,8 @@ main(int argc, char **argv)
                    ctl_bad);
             pass = 0;
         } else if (!hmac_ran) {
-            printf("cap_test: [#395] probe SKIPPED — cap key not set, "
-                   "HMAC never ran (proves nothing)\n");
+            printf("cap_test: [#395] probe NOT ASKED — cap key not set, "
+                   "HMAC never ran (#591)\n");
         } else if (hmac_bad == 0) {
             printf("cap_test: [#395] xmm preserved across cap_verify "
                    "(50/50): OK\n");
