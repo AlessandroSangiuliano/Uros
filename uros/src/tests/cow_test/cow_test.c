@@ -471,22 +471,103 @@ read_after_fork(mach_port_t host_priv)
 	(void) vm_deallocate(mach_task_self(), region, size);
 }
 
-/* Every port bootstrap_ports() hands out goes back, used or not. */
-static void
-measure_read_after_fork(void)
+/*
+ * Arm seven (#699): does the fault count see a fault that vm_fault()'s fast
+ * path resolves?  Arm six's number is HOST_VM_INFO's faults, and the count
+ * used to be taken in vm_fault_page(), which the fast path never calls: a
+ * fault on a resident page went uncounted, and arm six read 0 with the fix it
+ * measures and without it.  So: FAST_PAGES pages touched, protected to nothing
+ * -- which takes them out of the pmap while their object keeps them -- and
+ * back to read and write, then each read once: FAST_PAGES faults, every one on
+ * a resident page, and the count must rise by at least that.  Other tasks'
+ * faults in the same window can only add.
+ */
+#define FAST_PAGES	64
+
+static int
+count_fast_faults(mach_port_t host_priv)
+{
+	vm_statistics_data_t	before, after;
+	mach_msg_type_number_t	n;
+	vm_address_t		region = 0;
+	vm_size_t		size = (vm_size_t) FAST_PAGES * vm_page_size;
+	unsigned long long	sum = 0;
+	kern_return_t		kr, kb, ka;
+	int			i, counted;
+
+	kr = vm_allocate(mach_task_self(), &region, size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [7] vm_allocate of %d pages failed (%d) — "
+		       "WRONG\n", FAST_PAGES, kr);
+		return 0;
+	}
+	for (i = 0; i < FAST_PAGES; i++)
+		*(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size) = (unsigned) i;
+
+	kr = vm_protect(mach_task_self(), region, size, FALSE, VM_PROT_NONE);
+	if (kr == KERN_SUCCESS)
+		kr = vm_protect(mach_task_self(), region, size, FALSE,
+				VM_PROT_READ | VM_PROT_WRITE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [7] vm_protect failed (%d) — WRONG\n", kr);
+		(void) vm_deallocate(mach_task_self(), region, size);
+		return 0;
+	}
+
+	n = HOST_VM_INFO_COUNT;
+	kb = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &before,
+			     &n);
+	for (i = 0; i < FAST_PAGES; i++)
+		sum += *(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size);
+	n = HOST_VM_INFO_COUNT;
+	ka = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &after,
+			     &n);
+	(void) vm_deallocate(mach_task_self(), region, size);
+
+	if (kb != KERN_SUCCESS || ka != KERN_SUCCESS) {
+		printf("cow_test: [7] host_statistics refused (%d, %d) — "
+		       "WRONG\n", kb, ka);
+		return 0;
+	}
+	counted = (int) (after.faults - before.faults);
+	if (counted < FAST_PAGES) {
+		printf("cow_test: [7] %d reads of pages the pmap had dropped "
+		       "and their object kept: the fault count rose by %d, "
+		       "wanted at least %d — WRONG, a fault the fast path "
+		       "resolves is not counted (#699)\n", FAST_PAGES, counted,
+		       FAST_PAGES);
+		return 0;
+	}
+	printf("cow_test: [7] %d reads of pages the pmap had dropped and their "
+	       "object kept: the fault count rose by %d, at least one a read "
+	       "(read back %llu) — PASS (#699)\n", FAST_PAGES, counted, sum);
+	return 1;
+}
+
+/*
+ * Arms six and seven ask host_statistics(), and every port bootstrap_ports()
+ * hands out goes back, used or not.  Returns arm seven's verdict: six has none.
+ */
+static int
+ask_the_fault_count(void)
 {
 	mach_port_t	host_priv = MACH_PORT_NULL, device = MACH_PORT_NULL;
 	mach_port_t	lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
 	mach_port_t	sec = MACH_PORT_NULL;
 	kern_return_t	kr;
+	int		verdict = 0;
 
 	kr = bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
 			     &sec);
 	if (kr != KERN_SUCCESS)
-		printf("cow_test: [6] no privileged host port from bootstrap "
-		       "(%d) — not measured\n", kr);
-	else
+		printf("cow_test: [6] and [7] no privileged host port from "
+		       "bootstrap (%d) — WRONG\n", kr);
+	else {
 		read_after_fork(host_priv);
+		verdict = count_fast_faults(host_priv);
+	}
 
 	if (host_priv != MACH_PORT_NULL)
 		(void) mach_port_deallocate(mach_task_self(), host_priv);
@@ -498,6 +579,8 @@ measure_read_after_fork(void)
 		(void) mach_port_deallocate(mach_task_self(), lp);
 	if (sec != MACH_PORT_NULL)
 		(void) mach_port_deallocate(mach_task_self(), sec);
+
+	return verdict;
 }
 
 /*
@@ -769,10 +852,11 @@ run_the_arms(void)
 	 * ⚠️ Arm five has no verdict and is not counted.  It answers "how much"
 	 * and not "is it right", and a measurement given a pass/fail would need
 	 * a threshold that nothing here is entitled to choose.  It is last
-	 * because it leaves six terminated tasks behind it.
+	 * because it leaves six terminated tasks behind it.  Arm six, after it,
+	 * has none either; arm seven does, and is counted.
 	 */
 	measure_chain_depth();
-	measure_read_after_fork();
+	passed += ask_the_fault_count();
 
 	return passed;
 }
@@ -804,7 +888,7 @@ main(int argc, char **argv)
 	if (child != MACH_PORT_NULL)
 		(void) task_terminate(child);
 
-	printf("cow_test: %d of 3 arms passed\n", passed);
+	printf("cow_test: %d of 4 arms passed\n", passed);
 
 	/*
 	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
@@ -823,5 +907,5 @@ main(int argc, char **argv)
 	 * This program is single-threaded, so it is the last thread and the
 	 * task goes with it.
 	 */
-	return passed == 3 ? 0 : 1;
+	return passed == 4 ? 0 : 1;
 }
