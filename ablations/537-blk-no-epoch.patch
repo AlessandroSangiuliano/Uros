@@ -3,7 +3,7 @@ Issue: #537
 Over: 537-blk-table-kept.patch
 Takes out: the revocation epoch the block server reads after a transfer on kept translations -- a transfer between a revocation and its notice reports the controller's success for what the IOMMU refused; applied over 537-blk-table-kept.patch, which holds that window open
 Run: --iommu intel --entry 16 600 -smp 4
-Expect: cap_test: \[26\] WRONG
+Expect: cap_test: \[26\] WRONG — [a-z_0-9]+: read [0-9]
 
 diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
 index 3e68f771..95dfe3a1 100644
