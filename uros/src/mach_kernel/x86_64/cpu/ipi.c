@@ -223,10 +223,13 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 	atomic_store64(&call_acks, 0);
 
 	/*
-	 * The request is in place before the message that points at it, and
-	 * that ordering is free here: both are stores, and this architecture
-	 * does not move a store ahead of another store.  The barrier is
-	 * against the compiler, which has no such scruples — and against a
+	 * The request is in place before the message that points at it.  In
+	 * xAPIC mode that ordering is free: both are stores, and this
+	 * architecture does not move a store ahead of another store.  In x2APIC
+	 * mode the message is a WRMSR, which may pass earlier stores, and
+	 * icr_send() fences in front of it (SDM Vol. 3A 253668-093US 13.12.3).
+	 * The barrier here is against the compiler, which has no such
+	 * scruples — and against a
 	 * future where this is read by something whose memory model is
 	 * weaker, which is the reason it is spelt smp_wmb() and not a
 	 * comment.

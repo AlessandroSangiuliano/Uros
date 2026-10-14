@@ -336,10 +336,9 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * PCID the generation moved above is what reaches the processors that
 	 * only cache the space, and the flush here is for this processor, which
 	 * may have loaded the root directly (the boot self-tests do).  This is
-	 * the ORDINARY case, not an edge one: a freshly forked
-	 * address space is loaded on the processor doing the forking and on no
-	 * other, and that processor's own bit is not in the set it would send
-	 * to anyway.
+	 * the ORDINARY case, not an edge one: a space no processor has loaded
+	 * -- a freshly forked one until its first thread runs, a task's that is
+	 * not running -- has an empty set, and its flushes come here.
 	 *
 	 * ⚠️ It is also what keeps the boot self-tests working, and that is
 	 * worth naming rather than leaving as a happy accident.  They build

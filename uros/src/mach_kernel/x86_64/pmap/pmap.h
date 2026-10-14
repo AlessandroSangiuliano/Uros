@@ -546,8 +546,9 @@ int		pmap_pcid_erratum(uint32_t *rev, uint32_t *fixed);
 
 /*
  * 🔴 AND ON EVERY OTHER PROCESSOR (#639).  CR0 and CR4 belong to the processor
- * that loads them, and pmap_protect_kernel(), pmap_enable_smep_smap() and
- * pmap_enable_global_pages() run on the boot processor alone: the application
+ * that loads them, and pmap_protect_kernel(), pmap_enable_smep_smap(),
+ * pmap_enable_global_pages() and pmap_enable_pcid() run on the boot processor
+ * alone: the application
  * processors of every boot ran without CR0.WP, SMEP or SMAP.  Without WP the
  * kernel writes through read-only mappings -- .text's and .rodata's, and the
  * copy-on-write ones copyout() relies on faulting -- and the access brackets,
@@ -643,17 +644,17 @@ void pmap_copy_part_rpage(uint64_t src, uint64_t src_offset,
 #define	PMAP_ACTIVATE(pmap, act, cpu)	pmap_activate(pmap)
 
 /*
- * Deactivation records nothing, and that is a statement rather than a gap.
+ * Deactivation records nothing here, and that is a statement rather than a
+ * gap.
  *
  * On i386 the pair maintains a per-pmap bitmap of the processors using it,
- * for the sole purpose of narrowing TLB shootdown to those processors.  This
- * target does not have that narrowing yet -- its shootdown goes to every
- * processor (#439) -- so a bitmap kept here would have no reader, and a
- * bitmap with no reader is worse than none: it costs a store on every switch
- * and rots quietly until someone trusts it.
- *
- * When #439 lands it lands as a set this macro maintains, and this comment
- * is the thing that has to change with it.
+ * for narrowing TLB shootdown to those processors.  This target has that set
+ * too -- pmap->cpus_using, which tlb_flush_range() reads (#439) and on which
+ * #412's whole argument rests -- and pmap_activate() keeps it, in the one
+ * order that is right: this processor's bit set in the new space before CR3
+ * names it, cleared from the old one after.  A deactivation that wrote the set
+ * as well would be its second writer, and the first thing to break that order
+ * (this said the opposite until the cloud audit of 14/10).
  */
 #define	PMAP_DEACTIVATE(pmap, act, cpu)
 

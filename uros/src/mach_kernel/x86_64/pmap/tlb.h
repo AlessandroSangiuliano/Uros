@@ -18,16 +18,21 @@
  *
  * The store into the page table must be visible to another processor before
  * that processor is asked to flush, or it will flush and then reload the
- * entry it was told to discard.  This architecture gives that for free:
- * stores are not reordered with other stores, and the message is itself a
- * store — to the interrupt command register.  So the page-table write is
- * already ahead of the message that follows it, and no fence is needed
- * between them, only the compiler's promise not to move them.
+ * entry it was told to discard.  In xAPIC mode this architecture gives that
+ * for free: stores are not reordered with other stores, and the message is
+ * itself a store — to the interrupt command register.  In x2APIC mode it does
+ * not: the message is a WRMSR, which "may complete before all preceding
+ * stores are globally visible" (SDM Vol. 3A 253668-093US 13.12.3), and
+ * icr_send() puts MFENCE; LFENCE in front of it.  So the page-table write is
+ * ahead of the message in both modes, nothing is needed between them here
+ * besides the compiler's promise not to move them -- and that fence is part
+ * of this argument, not decoration (the cloud audit of 14/10).
  *
  * That is the same argument #350 checked with herd7 for the split page-table
  * locks, and it carries here for the same reason: x86-64 is still x86-TSO.
  * It is worth saying out loud that this is the one place the second
- * architecture costs nothing, because the next architecture will not be so
+ * architecture costs nothing in xAPIC mode and one fence in x2APIC mode,
+ * because the next architecture will not be so
  * generous — a weakly-ordered machine needs a real barrier at exactly this
  * point, and the reason it needs one is written above.
  */
