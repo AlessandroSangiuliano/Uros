@@ -162,7 +162,12 @@ over() {
 }
 
 judge_bundle() {	# judge_bundle LOG CUT -> prints the reasons; status 0 = passed
-	local log=$1 cut=$2 bad=0 m
+	local log=$1 cut=$2 bad=0 m disks
+	# #591: every disk controller on the board must have attached, as
+	# run-x86_64.sh asks; run-qemu.sh records the board in the conditions.
+	# First, so that a boot cut short for want of a disk names the disk.
+	disks=$("$REPO/scripts/disks-attached.sh" "$log" 2>&1) || bad=1
+	[ -z "$disks" ] || printf '%s\n' "$disks" | sed 's/^/  /'
 	if [ -n "$cut" ]; then echo "    $cut"; bad=1; fi
 	clean "$log" | grep -aE "$FAIL_RE" | head -8 | sed 's/^/    unexplained: /' | grep . && bad=1
 	for m in "${MUST[@]}"; do

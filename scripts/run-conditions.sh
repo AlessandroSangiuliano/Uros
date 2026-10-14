@@ -316,6 +316,46 @@ uros_other_qemus() {
 	return 0
 }
 
+# uros_board_disks [qemu argument ...] — the disk controllers a command line
+# puts on the board, each with the disks on it and the block server's driver
+# for it, in the words scripts/disks-attached.sh reads (#591):
+#
+#	virtio-blk-pci with 1 disk (virtio_blk), ich9-ahci with 2 disks (ahci)
+#
+# or "none".  The verdicts require each one attached, with exactly that many
+# disks, once the block server has started.
+#
+# 🔑 Read off the arguments qemu is given, not written beside them: a list kept
+# by hand next to the -device lines would not ask for a controller added to
+# them and left out of it, and nothing would say so.  Only the two kinds the
+# block server has a driver for are known here, and a controller with no disk
+# on it is named without one -- there is nothing on it to read, so nothing to
+# require.
+uros_board_disks() {
+	_out=""
+	for _a in "$@"; do
+		case $_a in
+		virtio-blk-pci|virtio-blk-pci,*)
+			_out="$_out${_out:+, }virtio-blk-pci with 1 disk (virtio_blk)" ;;
+		ich9-ahci,*id=*)
+			_id=${_a#*id=}
+			_id=${_id%%,*}
+			_n=0
+			for _b in "$@"; do
+				case $_b in
+				ide-hd,*bus="$_id".*) _n=$((_n + 1)) ;;
+				esac
+			done
+			case $_n in
+			0) _out="$_out${_out:+, }ich9-ahci with no disk" ;;
+			1) _out="$_out${_out:+, }ich9-ahci with 1 disk (ahci)" ;;
+			*) _out="$_out${_out:+, }ich9-ahci with $_n disks (ahci)" ;;
+			esac ;;
+		esac
+	done
+	echo "${_out:-none}"
+}
+
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host
 # state in UROS_HOST_AT_START.
 uros_conditions_open() {

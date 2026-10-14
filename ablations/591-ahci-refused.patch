@@ -1,0 +1,68 @@
+Kind: ablation
+Issue: #591
+Takes out: nothing -- a probe: the kernel refuses ahci's own write of its command register, so the AHCI controller is lost with every region measured, the way 577-3-E-fix lost it and was passed; the verdict must fail the boot and name the controller, which before #591 it did not ask for at all
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 1
+Expect: FAILED: a disk controller this run put on the board never attached \(#591\)
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 6e55e1e5..004cb85a 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -782,6 +782,42 @@ check_cfg_access(natural_t bdf)
+ 
+ /* ---- PCI configuration space ---- */
+ 
++/*
++ * #591's probe: the kernel refuses ahci's own write of its command register,
++ * the ABLATE_591_NTH write of register ABLATE_591_REG of device ABLATE_591_BDF,
++ * as #577's ablation refused one configuration access -- see
++ * ablations/577-refuse-cfg.patch for the count of each step.  On x86-64's
++ * default board 0x28 is 00:05.0, ahci, and its command register is written 1
++ * by pci_scan, which switches decoding off, 2 by pci_scan putting it back, and
++ * 3 by ahci switching memory decoding and bus mastering on.  Refused there,
++ * ahci says it is not probing and the controller is lost with every region
++ * measured: hal_bar [2], which failed most of #577's boots that lost it, has
++ * nothing to fail for, and before #591 nothing else asked.  Every counted
++ * access is printed with its ordinal, so the log shows which step the number
++ * landed on.  The count is not atomic: an experiment, never built otherwise.
++ */
++#define	ABLATE_591_BDF		0x28
++#define	ABLATE_591_REG		0x04
++#define	ABLATE_591_NTH		3
++
++static int
++ablate_591_refuse(natural_t bdf, int write, unsigned int reg)
++{
++	static unsigned int	ablate_591_seen;
++	unsigned int		n;
++
++	if (bdf != (natural_t)ABLATE_591_BDF || !write
++	    || reg != (unsigned int)ABLATE_591_REG)
++		return 0;
++	n = ++ablate_591_seen;
++	printf("device_pci_config: #591 probe — write %u of register 0x%02x "
++	       "on %02x:%02x.%u, by task %p%s\n", n, reg,
++	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
++	       (unsigned)(bdf & 7), (void *)current_task(),
++	       n == ABLATE_591_NTH ? ": REFUSED" : "");
++	return n == ABLATE_591_NTH;
++}
++
+ kern_return_t
+ ds_master_device_pci_config_read(
+ 	ipc_port_t		master_port,
+@@ -834,6 +870,9 @@ ds_master_device_pci_config_write(
+ 	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
+ 	if (kr != KERN_SUCCESS)
+ 		return kr;
++	if (ablate_591_refuse((natural_t)((bus << 8) | (slot << 3) | func),
++			      1, reg))
++		return KERN_NO_ACCESS;
+ 
+ 	device_md_pci_write(bus, slot, func, reg, data);
+ 	return KERN_SUCCESS;

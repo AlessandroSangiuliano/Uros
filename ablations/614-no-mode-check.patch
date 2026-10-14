@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #614
 Takes out: the direction check on every transfer -- the open still asks the token only for its mode's rights, and then a handle opened D_READ writes and one opened D_WRITE reads
 Run: --entry 14 600 -smp 4
-Expect: cap_test: \[27\] WRONG
+Expect: cap_test: \[27\] WRONG — [a-z_0-9]+: a D_(READ handle wrote|WRITE handle read) [0-9]
 
 diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
 index 6c48ba58..0b991a38 100644

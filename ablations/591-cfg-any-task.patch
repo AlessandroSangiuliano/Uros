@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #591
+Takes out: #511's check that a configuration access comes from the task that holds the device or the bus -- every task reads and writes any configuration space again, as when holding the master port was the whole answer; cap_test [15] must say WRONG, where it said "#511 CLOSED" over a refused mapping and passed: its first question, the read of 0:0.0, was the only half inverted after #511
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[15\] WRONG — #511 reopened
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index 6e55e1e5..234166aa 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -777,7 +777,13 @@ check_cfg_access(natural_t bdf)
+ 
+ 	if (bus)
+ 		return KERN_SUCCESS;
+-	return check_claim(bdf);
++	/*
++	 * #591's ablation: #511's check taken out.  Every task reads and writes
++	 * any device's configuration space again, as when holding the master
++	 * port was the whole answer; check_claim() is not asked.
++	 */
++	(void)bdf;
++	return KERN_SUCCESS;
+ }
+ 
+ /* ---- PCI configuration space ---- */

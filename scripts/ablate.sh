@@ -401,9 +401,13 @@ for i in $(seq 1 "$BOOTS"); do
 					> "$log" 2>&1
 			elif [ ${#SCRIPT[@]} -gt 0 ]; then
 				# #618: its own tree's script, with its own build;
-				# its exit 2 is a run it could not make.
+				# its exit 2 is a run it could not make.  A boot it
+				# makes through run-x86_64.sh with no log of its own
+				# writes the log beside this output, not over the
+				# default one, which every arm would share (#591).
 				log="$RUNDIR/$arm-$acc-$i.out"
 				UROS_BUILD_DIR="$RUNDIR/$arm/uros/build-x86_64" \
+				UROS_X86_64_LOG="$RUNDIR/$arm-$acc-$i.log" \
 					"$RUNDIR/$arm/${SCRIPT[0]}" "${kvm[@]}" "${SCRIPT[@]:1}" \
 					> "$log" 2>&1
 			else
