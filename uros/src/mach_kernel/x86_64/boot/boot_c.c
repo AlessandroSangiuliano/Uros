@@ -1160,6 +1160,61 @@ static void wx_selftest(void)
 #define USER_TEST_VA	0x0000000100000000ULL
 
 /*
+ * A protect changes the bits it is asked to and keeps the rest (#699).
+ *
+ * pmap_verbs_selftest() protects a kernel page and asks whether WRITE went.
+ * It never asked what stayed, and on a kernel page U/S is not there to stay.
+ * Here the page is a user page, protected read-only through pmap_protect(),
+ * then made writable again and protected through pmap_page_protect() -- the
+ * two ways the machine-independent VM asks, fork's copy-on-write among them
+ * -- and each time the leaf must have kept U/S and lost WRITE.  Writable
+ * again by a protect and not by a second pmap_enter(), which would enter the
+ * page in the physical index twice.  Both leaves are printed as read.
+ */
+static void protect_user_selftest(void)
+{
+	pmap_t u = pmap_create(0);
+	uint64_t frame = boot_frame_alloc();
+	pt_entry_t *e, by_range = 0, by_page = 0;
+
+	if (u == PMAP_NULL || frame == 0
+	    || pmap_enter(u, USER_TEST_VA, frame,
+			  VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK)
+		kputs("UrMach x86-64: a user page protected read-only: NOT ASKED "
+		      "— no space, frame or mapping (#699)\r\n");
+	else {
+		pmap_protect(u, USER_TEST_VA, USER_TEST_VA + PAGE_SIZE_4K,
+			     VM_PROT_READ);
+		e = pmap_walk(u->root_pa, USER_TEST_VA, 0);
+		by_range = e != PT_ENTRY_NULL ? *e : 0;
+
+		pmap_protect(u, USER_TEST_VA, USER_TEST_VA + PAGE_SIZE_4K,
+			     VM_PROT_READ | VM_PROT_WRITE);
+		pmap_page_protect(frame, VM_PROT_READ);
+		e = pmap_walk(u->root_pa, USER_TEST_VA, 0);
+		by_page = e != PT_ENTRY_NULL ? *e : 0;
+
+		kputs("UrMach x86-64: a user page protected read-only reads ");
+		kputhex64(by_range);
+		kputs(" after pmap_protect() and ");
+		kputhex64(by_page);
+		kputs(" after pmap_page_protect()");
+		kputs(!(by_range & INTEL_PTE_VALID) || !(by_page & INTEL_PTE_VALID)
+		      ? " — WRONG, a leaf went missing (#699)\r\n"
+		      : !(by_range & INTEL_PTE_USER) || !(by_page & INTEL_PTE_USER)
+		      ? " — WRONG, U/S cleared: ring 3 lost the page (#699)\r\n"
+		      : (by_range & INTEL_PTE_WRITE) || (by_page & INTEL_PTE_WRITE)
+		      ? " — WRONG, still writable (#699)\r\n"
+		      : " — U/S kept and write taken, PASS (#699)\r\n");
+		pmap_remove(u, USER_TEST_VA, USER_TEST_VA + PAGE_SIZE_4K);
+	}
+	if (u != PMAP_NULL)
+		pmap_destroy(u);
+	if (frame != 0)
+		boot_frame_free(frame);
+}
+
+/*
  * Build a second address space and show it is one: the kernel half shared
  * entry-for-entry, the lower half its own, and a mapping made in it invisible
  * from the kernel's.
@@ -9858,6 +9913,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	phys_copy_selftest();
 	wx_selftest();
 	user_pmap_selftest();
+	protect_user_selftest();
 
 	acpi_selftest(info);
 	reset_init();		/* #373: the FADT's reset register, said */
