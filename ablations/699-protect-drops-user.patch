@@ -1,8 +1,9 @@
 Kind: ablation
 Issue: #699
-Takes out: U/S decided by the address in pmap_protect_page_noflush() -- a protect clears WRITE, USER and NX together and sets back only what pmap_flags_for_prot() gives, which never carries USER, so every pmap_protect() or pmap_page_protect() of a user page leaves it supervisor-only, as it was from #407 to 6be1b242; protect_user_selftest() reads the leaf after each and must say U/S cleared; pure software, so TCG shows it as well as KVM
+Takes out: U/S decided by the address in pmap_protect_page_noflush() -- a protect clears WRITE, USER and NX together and sets back only what pmap_flags_for_prot() gives, which never carries USER, so every pmap_protect() or pmap_page_protect() of a user page leaves it supervisor-only, as it was from #407 to 6be1b242; protect_user_selftest() reads the leaf after each and must say U/S cleared, and ring3_selftest()'s read of its protected data page must take a page fault on the read; pure software, so TCG shows it as well as KVM
 Run: --entry 0 300 -smp 4
 Expect: a user page protected read-only reads .* — WRONG, U/S cleared
+Expect: ring 3 reading its data page after a protect to read-only took page fault .* — WRONG, the read faulted
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
 index 6f5cfbe0..45321248 100644
