@@ -85,10 +85,12 @@ uint64_t pmap_unmap_page_noflush(pmap_t pmap, uint64_t va,
 				 pt_entry_t *removed);
 
 /*
- * Change the permission bits (INTEL_PTE_PERM) of the leaf mapping va,
- * keeping its frame and every other bit.  Returns the size of the page it
- * changed, or zero if va was not mapped.  Works on a large leaf as readily
- * as a small one — the protection lives in the entry either way.
+ * Take permissions away from the leaf mapping va, keeping its frame and every
+ * other bit: WRITE is cleared unless `flags' has it, NX is set if `flags' has
+ * it, and nothing is ever given back -- U/S included, which is never changed
+ * (#699).  Returns the size of the page it changed, or zero if va was not
+ * mapped.  Works on a large leaf as readily as a small one — the protection
+ * lives in the entry either way.
  */
 uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags);
 
