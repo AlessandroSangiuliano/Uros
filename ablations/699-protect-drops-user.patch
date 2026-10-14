@@ -1,30 +1,21 @@
 Kind: ablation
 Issue: #699
-Takes out: U/S decided by the address in pmap_protect_page_noflush() -- a protect clears WRITE, USER and NX together and sets back only what pmap_flags_for_prot() gives, which never carries USER, so every pmap_protect() or pmap_page_protect() of a user page leaves it supervisor-only, as it was from #407 to 6be1b242; protect_user_selftest() reads the leaf after each and must say U/S cleared, and ring3_selftest()'s read of its protected data page must take a page fault on the read; pure software, so TCG shows it as well as KVM
-Run: --entry 0 300 -smp 4
+Takes out: that a protect never touches U/S, in pmap_protect_page_noflush() -- USER is cleared with the WRITE a protect takes and never set back, so every pmap_protect() or pmap_page_protect() of a user page leaves it supervisor-only, as it was from #407 (dd0c16e2) to 6be1b242; protect_user_selftest() reads the leaf after each protect and must say U/S cleared, and ring3_selftest()'s read of its protected data page must take a page fault on the read; with it applied, cow_test's arm six counts what that costs a fork; pure software, so TCG shows it as well as KVM; made first against 6be1b242's rule that the address decides U/S (c9a225ae, 10200df5), and again when d0412300 replaced that rule with a protect that only takes away; at 99b9f9c9, entry 14, on victus: caught 2 of 2 under KVM and 1 of 1 under TCG and the fixed tree passed as many, the ablated tree's leaf reading 0x8000000000ffc001 and its ring-3 read faulting on the data page (error 5), and cow_test's arm six counting 256 and 257 faults for 256 pages read after a fork under KVM and 266 under TCG, where the fixed tree counted 0, 0 and 1
+Run: --entry 14 600 -smp 4
 Expect: a user page protected read-only reads .* — WRONG, U/S cleared
 Expect: ring 3 reading its data page after a protect to read-only took page fault .* — WRONG, the read faulted
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/map.c b/uros/src/mach_kernel/x86_64/pmap/map.c
-index 6f5cfbe0..45321248 100644
+index b6db283a..f87ec4b3 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/map.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/map.c
-@@ -523,18 +523,7 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
- 	 * pmap_pte_update() (pte.h); this was a copy of it, and the copy
- 	 * wrote the permission bits into an entry a removal had just zeroed
- 	 * (#604).
--	 *
--	 * 🔴 AND THE ADDRESS DECIDES U/S, HERE AS IN pmap_enter() (#699).  The
--	 * permission bits are cleared as a group -- INTEL_PTE_PERM is WRITE,
--	 * USER and NX -- and set back from `flags', which pmap_flags_for_prot()
--	 * builds from a vm_prot_t and so never carries USER.  Every protect of
--	 * a user page took ring 3's access away: the task's next touch faulted,
--	 * vm_fault mapped the page again with U/S, and until then SMAP did not
--	 * guard a page the kernel could reach without asking.  A kernel address
--	 * gets no USER here, as pmap_enter() gives it none.
+@@ -538,7 +538,8 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
+ 	 * carries, went on every protect of a user page.
  	 */
--	if (va_is_user(va))
--		flags |= INTEL_PTE_USER;
- 	pmap_pte_update(entry, flags & INTEL_PTE_PERM, INTEL_PTE_PERM);
+ 	pmap_pte_update(entry, flags & INTEL_PTE_NX,
+-			(flags & INTEL_PTE_WRITE) ? 0 : INTEL_PTE_WRITE);
++			((flags & INTEL_PTE_WRITE) ? 0 : INTEL_PTE_WRITE)
++			| INTEL_PTE_USER);
  
  	pmap_read_leave(held);
+ 
