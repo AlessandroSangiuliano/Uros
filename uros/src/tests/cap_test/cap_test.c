@@ -1659,12 +1659,19 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
     unsigned               magic;
     int                    ok = 0;
 
+    /*
+     * 🔴 A REFUSAL HERE IS WRONG, NOT AN ARM THAT DID NOT RUN (#591).  The
+     * partition is registered -- an absent one never reaches this function --
+     * so a capability, an open or a page refused is the path failing.  Each of
+     * these said "DID NOT RUN" and returned success, and an arm that never ran
+     * read as one that passed.
+     */
     kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
                      CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok);
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [14] %s — DID NOT RUN, no block capability "
-               "(kr=%d)\n", name, (int)kr);
-        return 1;
+        printf("cap_test: [14] WRONG — %s is registered and no block "
+               "capability was given for it (kr=%d)\n", name, (int)kr);
+        return 0;
     }
 
     memcpy(blob, &tok, sizeof(tok));
@@ -1672,23 +1679,23 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
                          null_sec, (char *)name, blob,
                          (mach_msg_type_number_t)sizeof(tok), &handle);
     if (kr != KERN_SUCCESS || handle == MACH_PORT_NULL) {
-        printf("cap_test: [14] %s — DID NOT RUN, open refused (kr=%d)\n",
-               name, (int)kr);
-        return 1;
+        printf("cap_test: [14] WRONG — %s is registered and refused the "
+               "open (kr=%d)\n", name, (int)kr);
+        return 0;
     }
 
     kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
                              mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
                              &region_id);
     if (kr != KERN_SUCCESS || pa_cnt != 1) {
-        printf("cap_test: [14] %s — DID NOT RUN, no scatter-gather page "
-               "(kr=%d)\n", name, (int)kr);
+        printf("cap_test: [14] WRONG — no scatter-gather page to read %s "
+               "into (kr=%d, %u pages)\n", name, (int)kr, (unsigned)pa_cnt);
         if (pa_list != NULL)
             (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
                                 pa_cnt * sizeof(vm_address_t));
         (void)device_close(handle);
         (void)mach_port_deallocate(mach_task_self(), handle);
-        return 1;
+        return 0;
     }
 
     memset(&buf_cap, 0, sizeof(buf_cap));
@@ -1698,7 +1705,7 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
     if (kr == KERN_SUCCESS)
         kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
     if (kr != KERN_SUCCESS) {
-        printf("cap_test: [14] %s — DID NOT RUN, the buffer was not handed "
+        printf("cap_test: [14] WRONG — %s: the buffer was not handed "
                "over (kr=%d)\n", name, (int)kr);
         goto out;
     }
