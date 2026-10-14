@@ -29,6 +29,8 @@
 #include <mach/message.h>
 #include <mach/vm_prot.h>
 #include <mach/vm_inherit.h>
+#include <mach/host_info.h>		/* HOST_VM_INFO, arm six (#699) */
+#include <mach/mach_host.h>		/* host_statistics() user stub (#699) */
 #include <mach/mach_interface.h>
 #include <mach/mach_syscalls.h>
 
@@ -392,6 +394,80 @@ measure_chain_depth(void)
 }
 
 /*
+ * Arm six (#699): what reading a parent's pages costs after a fork.
+ *
+ * A fork protects the parent's writable pages read-only, through
+ * pmap_protect(), so that its next write faults and copies.  A read must not
+ * fault: the page is still the parent's and still readable from ring 3.  It
+ * did, every one, while a protect took U/S away along with WRITE -- the read
+ * was a protection fault, and vm_fault mapped the page again.  So: READ_PAGES
+ * pages touched, a fork, each page read once, and the system's fault count
+ * (HOST_VM_INFO) around the reads.  The count is the whole machine's, and other
+ * tasks fault in the same window, so READ_PAGES is large enough that one fault
+ * per page stands out; the number is printed and not judged, as arm five's
+ * are, since no threshold here is this test's to choose.
+ */
+#define READ_PAGES	256
+
+static void
+measure_read_after_fork(void)
+{
+	mach_port_t		host = mach_host_self();
+	mach_port_t		kid = MACH_PORT_NULL;
+	vm_statistics_data_t	before, after;
+	mach_msg_type_number_t	n;
+	vm_address_t		region = 0;
+	vm_size_t		size = (vm_size_t) READ_PAGES * vm_page_size;
+	unsigned long long	sum = 0;
+	kern_return_t		kr, kb, ka;
+	int			i;
+
+	kr = vm_allocate(mach_task_self(), &region, size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [6] vm_allocate of %d pages failed (%d) — "
+		       "not measured\n", READ_PAGES, kr);
+		(void) mach_port_deallocate(mach_task_self(), host);
+		return;
+	}
+	/* Resident and writable before the fork, so that the fork protects. */
+	for (i = 0; i < READ_PAGES; i++)
+		*(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size) = (unsigned) i;
+
+	kr = task_create(mach_task_self(), (ledger_port_array_t) 0, 0, TRUE,
+			 &kid);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [6] fork failed (%d) — not measured\n", kr);
+		(void) vm_deallocate(mach_task_self(), region, size);
+		(void) mach_port_deallocate(mach_task_self(), host);
+		return;
+	}
+
+	n = HOST_VM_INFO_COUNT;
+	kb = host_statistics(host, HOST_VM_INFO, (host_info_t) &before, &n);
+	for (i = 0; i < READ_PAGES; i++)
+		sum += *(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size);
+	n = HOST_VM_INFO_COUNT;
+	ka = host_statistics(host, HOST_VM_INFO, (host_info_t) &after, &n);
+
+	if (kb != KERN_SUCCESS || ka != KERN_SUCCESS)
+		printf("cow_test: [6] host_statistics refused (%d, %d) — "
+		       "not measured\n", kb, ka);
+	else
+		printf("cow_test: [6] %d pages read after a fork: %d faults in "
+		       "the whole system meanwhile, %d of them copy-on-write "
+		       "(read back %llu) (#699)\n", READ_PAGES,
+		       (int) (after.faults - before.faults),
+		       (int) (after.cow_faults - before.cow_faults), sum);
+
+	(void) task_terminate(kid);
+	(void) mach_port_deallocate(mach_task_self(), kid);
+	(void) vm_deallocate(mach_task_self(), region, size);
+	(void) mach_port_deallocate(mach_task_self(), host);
+}
+
+/*
  * Everything between the allocation and the verdict.  Split out so that a
  * failure part-way can return a count rather than jump, and so that the child
  * task is terminated on every path by the one caller that owns it.
@@ -663,6 +739,7 @@ run_the_arms(void)
 	 * because it leaves six terminated tasks behind it.
 	 */
 	measure_chain_depth();
+	measure_read_after_fork();
 
 	return passed;
 }
