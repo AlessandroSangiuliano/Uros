@@ -398,6 +398,59 @@ else
 	exit 1
 fi
 
+# Said beside a failure that is a line which never appeared, where the reader
+# is looking.
+missing_line_context() {
+	# #624: a test a panic cut short never reports, and a run that fails
+	# here never reaches the list of unexplained lines where the panic is
+	# named -- so it is named here, whole or by the backtrace its shredded
+	# first line left.
+	_panic=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
+	if [ -n "$_panic" ]; then
+		echo "          the machine had panicked (#624):"
+		echo "            $_panic"
+	fi
+	# #578: "never did" is also what a line looks like when it arrived in
+	# two pieces with another program's output between them.  If the wire
+	# has such lines, they are shown here.
+	_garbled=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")
+	if [ -n "$_garbled" ]; then
+		echo "          it may have arrived in pieces -- these lines carry two"
+		echo "          programs' output (#578, #544):"
+		printf '%s\n' "$_garbled" | sed 's/^/            /'
+	fi
+}
+
+# 🔴 THE DISK CONTROLLERS ON THE BOARD MUST HAVE ATTACHED (#591).
+#
+# Nothing asked, and eight boots that lost the AHCI controller were reported
+# passed: its driver says `failed', `timed out' and `refused', which the scan
+# for WRONG and FAIL does not match; cap_test said its arm "did not run on that
+# controller" and went on to ALL TESTS PASSED; and nothing that reads those
+# disks had to have run.  What this script put on the board is in the run's
+# conditions, so --judge on the log asks the same; disks-attached.sh asks it,
+# and says why the requirement is not read off the boot.
+#
+# ⚠️ Before the tests' own pairs below: ext_server, xfile_test and cap_test's
+# disk arms read these disks, and a controller that never attached would be
+# reported as whichever of them stopped first.
+#
+# 🔴 Its exit status is read, as fbcons-no-glyph.py's is (#661): a check that
+# could not run must not pass by printing nothing.
+DISKS_RC=0
+DISKS=$("$REPO/scripts/disks-attached.sh" "$LOG" 2>&1) || DISKS_RC=$?
+case $DISKS_RC in
+0)	[ -z "$DISKS" ] || printf '%s\n' "$DISKS" ;;
+1)	printf '%s\n' "$DISKS"
+	missing_line_context
+	echo "  log: $LOG"
+	exit 1 ;;
+*)	echo "  FAILED: the disk controllers could not be asked (disks-attached.sh, exit $DISKS_RC):"
+	printf '%s\n' "$DISKS" | sed 's/^/    /'
+	echo "  log: $LOG"
+	exit 1 ;;
+esac
+
 # A test boot has to reach its own verdict (#461).
 #
 # Entry 5 is the preemption test, and its failure mode is SILENCE by design:
@@ -430,24 +483,7 @@ must_report() {
 	fi
 	echo "  FAILED: '$1' appeared and '$2' never did."
 	echo "          $3"
-	# #624: a test a panic cut short never reports, and a run that fails here
-	# never reaches the list of unexplained lines where the panic is named --
-	# so it is named here, whole or by the backtrace its shredded first line
-	# left, where the reader is looking.
-	_panic=$(grep -aE "$PANIC_RE" "$LOG" | grep -av "$EXPECTED_END" | head -1)
-	if [ -n "$_panic" ]; then
-		echo "          the machine had panicked (#624):"
-		echo "            $_panic"
-	fi
-	# #578: "never did" is also what a line looks like when it arrived in two
-	# pieces with another program's output between them.  If the wire has
-	# such lines, they are shown here, where the reader is looking.
-	_garbled=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG")
-	if [ -n "$_garbled" ]; then
-		echo "          it may have arrived in pieces -- these lines carry two"
-		echo "          programs' output (#578, #544):"
-		printf '%s\n' "$_garbled" | sed 's/^/            /'
-	fi
+	missing_line_context
 	echo "  log: $LOG"
 	exit 1
 }
@@ -1212,6 +1248,15 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-drive file=$AHCI_DISK2,if=none,id=ahcidisk1,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
+# 🔴 AND EACH OF THEM MUST ATTACH, which nothing asked (#591): eight boots that
+# lost the AHCI controller were passed.  What this command line puts on the
+# board goes into the run's conditions, read off the arguments qemu is given
+# -- the caller's too -- and the verdict requires each controller attached with
+# its disks once the block server has started; scripts/disks-attached.sh says
+# why the requirement is not read off the boot.
+# shellcheck disable=SC2086
+DISKS_ON_BOARD=$(uros_board_disks $DISK_ARGS "$@")
+
 # 🔴 QEMU'S OWN STDERR APART FROM THE GUEST'S SERIAL OUTPUT (#613).  One file
 # for both had two writers that know nothing of each other's lines: the intel
 # IOMMU model warns on every DMA fault, and under KVM one of its warnings
@@ -1571,6 +1616,7 @@ UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
 	"machine:      ${IOMMU_NAME:-default pc (i440FX, 1996)}" \
 	"cpu:          ${CPU_ARGS:-from the command line}${SOCKET1_ARGS:+, and $SOCKET1_ARGS (#663)}" \
 	"memory:       ${MEM_ARGS:-from the command line}" \
+	"disks:        $DISKS_ON_BOARD" \
 	"entry:        ${UROS_X86_64_BOOT_ENTRY:-from grub.cfg default}" \
 	"budget:       ${SECS}s" \
 	"command:      $0 $ORIG_ARGS" \
@@ -1595,16 +1641,35 @@ if [ "$CUT_SHORT" = 1 ]; then
 	RUN_SECONDS=$(( $(date +%s) - RUN_STARTED ))
 	echo
 	echo "=== verdict ==="
+	# 🔴 A CONTROLLER THAT NEVER ATTACHED IS THE FINDING, NOT THE SILENCE AFTER
+	# IT (#591).  ext_server's first mount waits for ahci0a with no timeout, so
+	# a boot that lost the AHCI controller goes quiet instead of ending, and
+	# this called it a wedge.  Named first, the cut after it as what came next
+	# -- as --judge on this log names it, asking the controllers before the
+	# tests' pairs.
+	HEAD="FAILED:"
+	DISKS_RC=0
+	DISKS=$("$REPO/scripts/disks-attached.sh" "$LOG" 2>&1) || DISKS_RC=$?
+	case $DISKS_RC in
+	0)	;;
+	1)	printf '%s\n' "$DISKS"
+		HEAD="then:  " ;;
+	*)	echo "  (the disk controllers could not be asked: disks-attached.sh, exit $DISKS_RC)" ;;
+	esac
 	if [ "$CUT_REASON" = livelock ]; then
 		# The log kept gaining meaningful lines for ten times the asked-for
 		# budget.  🔑 This is NOT "give it more seconds": it was given ten
 		# times more and used them all.
-		echo "  FAILED: STILL PRODUCING OUTPUT after ${RUN_SECONDS}s, which is the"
+		echo "  $HEAD STILL PRODUCING OUTPUT after ${RUN_SECONDS}s, which is the"
 		echo "          hard cap (${SECS}s x ${HARD_MULTIPLIER}).  The kernel never reached an end"
 		echo "          this script recognises, and it was not stuck -- it was"
 		echo "          printing meaningful lines the whole time.  Giving it more"
 		echo "          seconds is the wrong move: look for something that repeats"
 		echo "          in the log."
+	elif [ "$DISKS_RC" = 1 ]; then
+		echo "  then:   NOTHING ARRIVED for ${SECS}s, after ${RUN_SECONDS}s of running."
+		echo "          What reads a missing controller's disks waits for them:"
+		echo "          ext_server's first mount waits for ahci0a with no timeout."
 	else
 		echo "  FAILED: NOTHING ARRIVED for ${SECS}s, after ${RUN_SECONDS}s of running."
 		echo "          The watchdog measures progress, not wall time, so this says"
