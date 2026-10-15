@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #648
+Takes out: current_stack() of 33a30805 -- it reads active_stacks[cpu_number()] again, which nothing on x86-64 writes, so it answers 0 and stack_privilege() records 0
+Run: --entry 0 300 -smp 4
+Expect: startup: current_stack\(\) answers .* -- WRONG
+
+diff --git a/uros/src/mach_kernel/kern/thread.h b/uros/src/mach_kernel/kern/thread.h
+index 9cf77949..9b2c8ea6 100644
+--- a/uros/src/mach_kernel/kern/thread.h
++++ b/uros/src/mach_kernel/kern/thread.h
+@@ -812,7 +812,12 @@ static __inline__ vm_offset_t current_stack(void);
+ static __inline__ vm_offset_t
+ current_stack(void)
+ {
+-	return current_thread()->kernel_stack;
++	vm_offset_t	ret;
++
++	mp_disable_preemption();
++	ret = active_stacks[cpu_number()];
++	mp_enable_preemption();
++	return ret;
+ }
+ 
+ /* These should be safe if only called in running task context */
