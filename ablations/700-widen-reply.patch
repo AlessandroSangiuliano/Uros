@@ -1,0 +1,78 @@
+Kind: widen
+Issue: #700
+Holds open: a reply's window between taking its receiver off the queue and waking it -- 100 ms, while the receiver is being terminated, and that receiver comes back for its message 20 ms late so that the reply finds it still queued; in the fixed tree the spin runs under imq_lock, where the receiver waits for it; and thread_go() panics, its backtrace naming the waker, when it is about to wake a thread queued for the reaper
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+index ecddb54e..ff138363 100644
+--- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
++++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+@@ -192,6 +192,7 @@
+ #include <kern/ipc_sched.h>
+ #include <kern/ipc_kobject.h>
+ #include <kern/misc_protos.h>
++#include <kern/thread_act.h>	/* #700's widen: top_act->active */
+ #include <ipc/ipc_mqueue.h>
+ #include <ipc/ipc_thread.h>
+ #include <ipc/ipc_kmsg.h>
+@@ -734,6 +735,28 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
+  */
+ unsigned int	ipc_dts_declined_swapped;
+ 
++/*
++ * #700's widened window, and not an ablation.  A receiver whose activation
++ * thread_terminate() has disabled comes back for its message
++ * WIDEN_700_RECEIVER_US late, so that a reply sent after the termination finds
++ * it still queued; the reply's deliverer then spins WIDEN_700_DELIVERER_US
++ * between taking it off the queue and waking it.  With the fix in, that spin
++ * runs under imq_lock, where the receiver waits for it; with the fix out, it
++ * runs after imq_unlock(), and the receiver takes the message, halts in
++ * thread_terminate_self() and is woken out of the reaper's queue.  Only for an
++ * activation being terminated, so that the rest of the boot runs at its own
++ * speed.
++ */
++#define	WIDEN_700_RECEIVER_US	20000
++#define	WIDEN_700_DELIVERER_US	100000
++
++static void
++widen_700(thread_t th, int us)
++{
++	if (th->top_act != THR_ACT_NULL && !th->top_act->active)
++		delay(us);
++}
++
+ mach_msg_return_t
+ ipc_mqueue_deliver(
+ 	register ipc_port_t	port,
+@@ -941,6 +964,7 @@ ipc_mqueue_deliver(
+ 		if (!direct)
+ 			splx(s);
+ 	}
++	widen_700(receiver, WIDEN_700_DELIVERER_US);
+ 	if (!direct)
+ 		thread_go(receiver);
+ 	imq_unlock(mqueue);
+@@ -1181,6 +1205,7 @@ ipc_mqueue_receive(
+ 		thread_block(continuation);
+ 		if (option & MACH_RCV_TIMEOUT)
+ 			reset_timeout_check(&self->timer);
++		widen_700(self, WIDEN_700_RECEIVER_US);
+ 
+                 /* Save proper wait_result in case we block */
+ 		save_wait_result = self->wait_result;
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index f582739b..59531082 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -619,6 +619,11 @@ thread_go(thread_t thread)
+ 	 * under thread_lock too, so the check is race-free.
+ 	 */
+ 	if ((thread->state & TH_WAIT) && thread->wait_event == NO_EVENT) {
++		/* #700's widen: the backtrace names the waker */
++		if (thread->state & TH_HALTED)
++			panic("thread_go: thread %p is halted and queued for "
++			      "the reaper, and its caller is ending a wait it "
++			      "did not mean to (#700)", thread);
+ 		thread->state &= ~TH_WAIT;
+ 		if (!(thread->state & TH_RUN)) {
+ 			thread->state |= TH_RUN;
