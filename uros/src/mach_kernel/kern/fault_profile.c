@@ -115,22 +115,14 @@ fp_percent(uint32_t part, uint32_t whole)
 	return (part * 100u) / whole;
 }
 
-void
-fault_profile_dump(void)
+static void
+fault_profile_dump_slot(struct fault_profile_cpu *fp, int cpu)
 {
-	struct fault_profile_cpu	*fp = fault_profile_slot();
 	uint32_t			col[FP_SAMPLES];
 	uint32_t			whole;
-	int				cpu = cpu_number();
 	int				n;
 	int				median = 0;
 	int				i, p;
-
-	if (fp == (struct fault_profile_cpu *) 0) {
-		printf("fault_profile: asked before this processor has an "
-		       "identity — nothing recorded\n");
-		return;
-	}
 
 	n = (int) fp->nsamples;
 	if (n == 0) {
@@ -163,9 +155,10 @@ fault_profile_dump(void)
 		}
 	}
 
-	printf("fault_profile[%d] #%u: %d faults, %u interrupted, %u via "
-	       "vm_fault_page; %u marks x %u cyc = %u\n",
-	       cpu, fp->ndumps + 1, n, fp->ndropped, fp->nslow,
+	printf("fault_profile[%d] #%u: %d faults, %u interrupted, %u "
+	       "overtaken (the trap moved, or another opened a sample here), "
+	       "%u via vm_fault_page; %u marks x %u cyc = %u\n",
+	       cpu, fp->ndumps + 1, n, fp->ndropped, fp->nmoved, fp->nslow,
 	       (unsigned int) FP_MARKS, fp_pair_cost,
 	       (unsigned int) FP_MARKS * fp_pair_cost);
 	printf("fault_profile[%d]   median fault %u cyc (spread %u..%u)\n",
@@ -189,6 +182,25 @@ fault_profile_dump(void)
 }
 
 /*
+ * This processor's table, with preemption off for the whole of it: the
+ * console takes spin locks only, and a thread that moved halfway would print
+ * one processor's samples under another's number (#648).
+ */
+void
+fault_profile_dump(void)
+{
+	struct fault_profile_cpu	*fp = fault_profile_here();
+
+	if (fp == (struct fault_profile_cpu *) 0) {
+		printf("fault_profile: asked before this processor has an "
+		       "identity — nothing recorded\n");
+		return;
+	}
+	fault_profile_dump_slot(fp, cpu_number());
+	fault_profile_done();
+}
+
+/*
  * A copy-on-write fault that took the slow path.
  *
  * 🔑 Counted rather than profiled, and the count is the answer to a question
@@ -201,22 +213,31 @@ fault_profile_dump(void)
 void
 fault_profile_slow(void)
 {
-	struct fault_profile_cpu	*fp = fault_profile_slot();
+	struct fault_profile_cpu	*fp = fault_profile_here();
 
-	if (fp != (struct fault_profile_cpu *) 0)
-		fp->nslow++;
+	if (fp == (struct fault_profile_cpu *) 0)
+		return;
+	fp->nslow++;
+	fault_profile_done();
 }
 
-void
-fault_profile_commit(const void *token)
+static void
+fault_profile_commit_slot(struct fault_profile_cpu *fp, const void *token)
 {
-	struct fault_profile_cpu	*fp = fault_profile_slot();
 	uint32_t			sum = 0;
 	uint32_t			whole;
 	int				i;
 
-	if (fp == (struct fault_profile_cpu *) 0)
+	/*
+	 * Not this thread's sample (#648): it moved since it opened one, and
+	 * this slot belongs to whoever opened a sample on this processor since
+	 * -- or it stayed, and another thread's trap here opened one over it.
+	 * Either way its own is gone, and this one is not its to close.
+	 */
+	if (!fault_profile_mine(fp)) {
+		fp->nmoved++;
 		return;
+	}
 
 	if (!fp->cow)
 		return;			/* not a fast copy-on-write fault */
@@ -263,11 +284,23 @@ fault_profile_commit(const void *token)
 		 * included the cost of reporting the previous one would be
 		 * measuring itself.
 		 */
-		fault_profile_dump();
+		fault_profile_dump_slot(fp, cpu_number());
 		fp->nsamples = 0;
 		fp->ndropped = 0;
+		fp->nmoved = 0;
 		fp->nslow = 0;
 	}
+}
+
+void
+fault_profile_commit(const void *token)
+{
+	struct fault_profile_cpu	*fp = fault_profile_here();
+
+	if (fp == (struct fault_profile_cpu *) 0)
+		return;
+	fault_profile_commit_slot(fp, token);
+	fault_profile_done();
 }
 
 #else	/* !FAULT_PROFILE */
