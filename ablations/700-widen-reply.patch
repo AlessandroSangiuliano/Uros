@@ -1,10 +1,10 @@
 Kind: widen
 Issue: #700
-Holds open: a reply's window between taking its receiver off the queue and waking it -- 100 ms, while the receiver is being terminated, and that receiver comes back for its message 20 ms late so that the reply finds it still queued; in the fixed tree the spin runs under imq_lock, where the receiver waits for it; and thread_go() panics, its backtrace naming the waker, when it is about to wake a thread queued for the reaper
+Holds open: a reply's window between taking its receiver off the queue and waking it -- 100 ms, while the receiver is being terminated, and that receiver comes back for its message 20 ms late so that the reply finds it still queued; each spin says so, so that a fixed arm that passes shows the window was open; in the fixed tree the spin runs under imq_lock, where the receiver waits for it; and thread_go() panics, its backtrace naming the waker, when it is about to wake a thread queued for the reaper
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index ecddb54e..ff138363 100644
+index ecddb54e..fa629d1a 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
 @@ -192,6 +192,7 @@
@@ -15,7 +15,7 @@ index ecddb54e..ff138363 100644
  #include <ipc/ipc_mqueue.h>
  #include <ipc/ipc_thread.h>
  #include <ipc/ipc_kmsg.h>
-@@ -734,6 +735,28 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
+@@ -734,6 +735,32 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
   */
  unsigned int	ipc_dts_declined_swapped;
  
@@ -35,28 +35,34 @@ index ecddb54e..ff138363 100644
 +#define	WIDEN_700_DELIVERER_US	100000
 +
 +static void
-+widen_700(thread_t th, int us)
++widen_700(thread_t th, int us, const char *what)
 +{
-+	if (th->top_act != THR_ACT_NULL && !th->top_act->active)
++	if (th->top_act != THR_ACT_NULL && !th->top_act->active) {
++		/* said, so that a fixed arm that passes shows the window opened */
++		printf("#700 widen: %s %d us, thread %p being terminated\n",
++		       what, us, th);
 +		delay(us);
++	}
 +}
 +
  mach_msg_return_t
  ipc_mqueue_deliver(
  	register ipc_port_t	port,
-@@ -941,6 +964,7 @@ ipc_mqueue_deliver(
+@@ -941,6 +968,8 @@ ipc_mqueue_deliver(
  		if (!direct)
  			splx(s);
  	}
-+	widen_700(receiver, WIDEN_700_DELIVERER_US);
++	widen_700(receiver, WIDEN_700_DELIVERER_US,
++	    "a reply holds its receiver off the queue, not yet woken, for");
  	if (!direct)
  		thread_go(receiver);
  	imq_unlock(mqueue);
-@@ -1181,6 +1205,7 @@ ipc_mqueue_receive(
+@@ -1181,6 +1210,8 @@ ipc_mqueue_receive(
  		thread_block(continuation);
  		if (option & MACH_RCV_TIMEOUT)
  			reset_timeout_check(&self->timer);
-+		widen_700(self, WIDEN_700_RECEIVER_US);
++		widen_700(self, WIDEN_700_RECEIVER_US,
++		    "a receiver comes back for its message late by");
  
                  /* Save proper wait_result in case we block */
  		save_wait_result = self->wait_result;
