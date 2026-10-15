@@ -744,6 +744,8 @@ ipc_mqueue_deliver(
 	ipc_pset_t pset;
 	ipc_thread_t receiver;
 	ipc_thread_queue_t receivers;
+	boolean_t direct;
+	spl_t s;
 	TR_DECL("ipc_mqueue_deliver");
 
 	TR_IPC_MQEN("enter: port 0x%x kmsg 0x%x thd_ctxt %d", port, kmsg,
@@ -859,7 +861,27 @@ ipc_mqueue_deliver(
 	receiver->ith_kmsg = kmsg;
 	receiver->ith_seqno = port->ip_seqno++;
 
-	imq_unlock(mqueue);
+	/*
+	 * 🔴 WOKEN BEFORE imq_unlock(), NOT AFTER IT (#700).
+	 *
+	 * Taking the receiver off imq_threads under this lock gives it the
+	 * message; waking it is a second step, and the receiver need not wait
+	 * for that one.  An abort or a timeout ends its wait under thread_lock
+	 * alone, so it can run, take this lock the moment it is free, find
+	 * MACH_MSG_SUCCESS and go on with the message -- and be in another
+	 * wait by the time a wakeup sent after the unlock arrives.  thread_go()
+	 * ends any TH_WAIT on NO_EVENT, which is what thread_terminate_self(),
+	 * a semaphore and the next receive all look like: act_test's thread,
+	 * terminated by the handler whose reply this was, ran again out of the
+	 * reaper's queue and panicked "the zombie walks!".
+	 *
+	 * Under the lock that cannot happen: the receiver takes it before it
+	 * reads ith_state, on both of its ways back.  Every other caller of
+	 * thread_go() already wakes under the lock of the queue it took the
+	 * thread off, and the direct switch below claims its receiver here for
+	 * the same reason, switching to it once the lock is dropped.
+	 */
+	direct = FALSE;
 
 	/*
 	 * Direct Thread Switch (DTS): if we are in thread context and the
@@ -874,7 +896,9 @@ ipc_mqueue_deliver(
 	if (thread_context &&
 	    receiver->continuation ==
 		    (void (*)(void)) mach_msg_receive_continue) {
-		spl_t _s = splsched();
+		boolean_t dts;
+
+		s = splsched();
 		thread_lock(receiver);
 		reset_timeout_check(&receiver->timer);
 #if	NCPUS > 1
@@ -896,56 +920,43 @@ ipc_mqueue_deliver(
 		 *     clear, which thread_dispatch() sets only after the receiver
 		 *     has switched away -- so it is genuinely off-core -- and, since
 		 *     #607, not swapped out);
+		 *   - claim it under imq_lock, and switch to it after (#700);
 		 *   - keep splsched ACROSS thread_run (do NOT splx before the switch
 		 *     -- that low-spl window was the actual lost-wakeup hole);
 		 *   - otherwise fall back to the safe thread_go()/thread_setrun path.
 		 * Gated by ipc_dts_smp (default 0) so it can be A/B-measured.
 		 */
-		if (ipc_dts_smp && DTS_PARKED(receiver)) {
-			receiver->state =
-				(receiver->state & ~TH_WAIT) | TH_RUN;
-			receiver->wait_result = THREAD_AWAKENED;
-			thread_unlock(receiver);
-			counter(c_ipc_mqueue_deliver_direct++);
-			/* balance the disable_preemption() above so the receiver
-			 * runs at the right per-CPU preemption level; stay at
-			 * splsched (preemption is still gated by spl) until the
-			 * sender is resumed after the switch. */
-			enable_preemption();
-			thread_run((void (*)(void)) 0, receiver);
-			splx(_s);
-		} else {
-			if (ipc_dts_smp && DTS_SWAPPED_WAITER(receiver))
-				ipc_dts_declined_swapped++;
-			thread_unlock(receiver);
-			splx(_s);
-			enable_preemption();
-			thread_go(receiver);
-		}
+		dts = ipc_dts_smp;
 #else	/* NCPUS > 1 */
-		if (DTS_PARKED(receiver)) {
+		dts = TRUE;
+#endif	/* NCPUS > 1 */
+		if (dts && DTS_PARKED(receiver)) {
 			receiver->state =
 				(receiver->state & ~TH_WAIT) | TH_RUN;
 			receiver->wait_result = THREAD_AWAKENED;
-			thread_unlock(receiver);
-			splx(_s);
-			enable_preemption();
-			counter(c_ipc_mqueue_deliver_direct++);
-			thread_run((void (*)(void)) 0, receiver);
-			/* Sender resumes here when rescheduled */
-		} else {
-			/* Receiver state changed; fall back to normal wakeup */
-			if (DTS_SWAPPED_WAITER(receiver))
-				ipc_dts_declined_swapped++;
-			thread_unlock(receiver);
-			splx(_s);
-			enable_preemption();
-			thread_go(receiver);
-		}
-#endif	/* NCPUS > 1 */
-	} else {
+			direct = TRUE;
+		} else if (dts && DTS_SWAPPED_WAITER(receiver))
+			ipc_dts_declined_swapped++;
+		thread_unlock(receiver);
+		if (!direct)
+			splx(s);
+	}
+	if (!direct)
 		thread_go(receiver);
-		enable_preemption();
+	imq_unlock(mqueue);
+
+	/*
+	 * Balance the disable_preemption() above so the receiver runs at the
+	 * right per-CPU preemption level.  A claimed receiver is switched to
+	 * still at splsched (preemption is still gated by spl) until the
+	 * sender is resumed after the switch.
+	 */
+	enable_preemption();
+	if (direct) {
+		counter(c_ipc_mqueue_deliver_direct++);
+		thread_run((void (*)(void)) 0, receiver);
+		/* Sender resumes here when rescheduled */
+		splx(s);
 	}
 
 	TR_IPC_MQEX("exit: wakeup 0x%x", receiver);

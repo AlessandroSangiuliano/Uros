@@ -84,7 +84,10 @@
 #include <kern/macro_help.h>
 #include <kern/thread.h>
 
-/* Start a thread running */
+/*
+ * Start a thread running.  Called with the lock of the queue the thread was
+ * just taken off still held: see thread_go() in sched_prim.c (#700).
+ */
 extern void thread_go(
 	thread_t	thread);
 
