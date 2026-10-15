@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #437
+Accel: kvm
+Takes out: tlb_flush_user_here() of c3338056 -- every user space's flush is tlb_flush_local_range() again, wherever CR3 is, so a user space's full flush, size 0 or past TLB_FLUSH_PAGE_LIMIT pages, is tlb_flush_local_all(): the PGE toggle, or INVPCID type 2 with PCID, emptying the kernel's global entries -- what a large user unmap or protect and collect's step 5 did from #437 to c3338056, the same in both paths it serves, the request without PCID (tlb_flush_kernel_here() came down to tlb_flush_local_range() there) and the space loaded nowhere; user_flush_globals_selftest() must then read the new frame after the flush in every round its control kept the old one; under KVM, since TCG drops global entries on any CR3 write and says NOT ASKED either way; at 0db43734 on victus under KVM caught 2 of 2 -- the controls kept the entry in 4 rounds of 4 both ways and the flush in 0 and 0, WRONG -- and the fixed tree passed 2 of 2, 4 and 4
+Run: --entry 0 300 -smp 4
+Expect: a user space's full flush and the kernel's global entries: .* — WRONG, a user space's flush emptied the kernel's global entries
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
+index ac497e58..7ef4562e 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
++++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
+@@ -161,17 +161,8 @@ static void tlb_flush_kernel_here(uint64_t va, uint64_t size)
+  */
+ static void tlb_flush_user_here(uint64_t root, uint64_t va, uint64_t size)
+ {
+-	int was = interrupts_enabled();
+-
+-	interrupts_disable();
+-	if ((read_cr3() & INTEL_PTE_PFN) == root) {
+-		if (tlb_range_by_pages(va, size))
+-			tlb_flush_local_range(va, size);
+-		else
+-			write_cr3(read_cr3());	/* this space, globals kept */
+-	}
+-	if (was)
+-		interrupts_enable();
++	(void) root;
++	tlb_flush_local_range(va, size);
+ }
+ 
+ /*
