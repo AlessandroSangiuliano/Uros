@@ -472,8 +472,8 @@ uros_tree_moved() {
 # uros_tree_open <build dir> <the harness's own checkout> -- the first look,
 # before the build.  Sets UROS_TREE_DIR, UROS_TREE_AT_BUILD (empty when no
 # state could be taken), UROS_TREE_LINE, and UROS_HARNESS_LINE: the scripts'
-# own tree when it is not the image's, which a run against UROS_BUILD_DIR
-# from the main checkout is, and empty otherwise.
+# own tree when it is known not to be the image's, which a run against
+# UROS_BUILD_DIR from the main checkout is, and empty otherwise.
 uros_tree_open() {
 	UROS_TREE_DIR=$(uros_tree_of "$1") || UROS_TREE_DIR=
 	UROS_TREE_AT_BUILD=
@@ -487,7 +487,7 @@ uros_tree_open() {
 	fi
 	_hd=$(git -C "$2" rev-parse --show-toplevel 2>/dev/null) || _hd=$2
 	UROS_HARNESS_LINE=
-	if [ "$_hd" != "$UROS_TREE_DIR" ]; then
+	if [ -n "$UROS_TREE_DIR" ] && [ "$_hd" != "$UROS_TREE_DIR" ]; then
 		if _hf=$(uros_tree_files "$_hd"); then
 			UROS_HARNESS_LINE=$(uros_tree_line "$_hd" "$_hf")
 		else
