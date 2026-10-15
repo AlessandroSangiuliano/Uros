@@ -81,7 +81,7 @@
  * rdtsc lands in edx:eax.  %rax is the trap's answer and is saved; %rdx is
  * dead here -- the clearing below is about to zero it either way.
  */
-	.macro	SYSCALL_PROFILE_MARK slot
+	.macro	SYSCALL_PROFILE_MARK slot, owner
 #if	SYSCALL_PROFILE
 	pushq	%rax
 	lfence
@@ -89,10 +89,20 @@
 	shlq	$32, %rdx
 	orq	%rdx, %rax
 	movq	%rax, %gs:\slot
+	movq	%gs:PERCPU_ACTIVE_THREAD, %rax	/* whose mark (#648) */
+	movq	%rax, %gs:\owner
 	popq	%rax
 #endif
 	.endm
 
+	/*
+	 * The mark was written with interrupts on, and they are on until the
+	 * cli below: a thread that was preempted in between may be on another
+	 * processor, whose mark is a stranger's, or back here after another
+	 * thread marked.  Its return is then counted as not timed rather than
+	 * timed against that mark, and the owner is cleared either way, so a
+	 * mark is used once (#648).
+	 */
 	.macro	SYSCALL_PROFILE_RETURN
 #if	SYSCALL_PROFILE
 	pushq	%rax
@@ -100,9 +110,15 @@
 	rdtsc
 	shlq	$32, %rdx
 	orq	%rdx, %rax
+	movq	%gs:PERCPU_ACTIVE_THREAD, %rdx
+	cmpq	%rdx, %gs:PERCPU_SYSCALL_RET_THREAD
+	jne	1f
 	subq	%gs:PERCPU_SYSCALL_RET_MARK, %rax
 	addq	%rax, %gs:PERCPU_SYSCALL_RET_CYC
 	incq	%gs:PERCPU_SYSCALL_RET_CNT
+	jmp	2f
+1:	incq	%gs:PERCPU_SYSCALL_RET_MOVED
+2:	movq	$0, %gs:PERCPU_SYSCALL_RET_THREAD
 	popq	%rax
 #endif
 	.endm
@@ -182,6 +198,8 @@ syscall_entry:
 	shlq	$32, %rdx
 	orq	%rdx, %rax
 	movq	%rax, %gs:PERCPU_SYSCALL_TSC
+	movq	%gs:PERCPU_ACTIVE_THREAD, %rax	/* whose reading (#648) */
+	movq	%rax, %gs:PERCPU_SYSCALL_TSC_THREAD
 	popq	%rdx
 	popq	%rax
 #endif	/* SYSCALL_PROFILE */
@@ -460,7 +478,7 @@ syscall_entry:
 	 * for #392 to weigh: an AST that parks the thread is not part of what
 	 * a message costs.
 	 */
-	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK
+	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK, PERCPU_SYSCALL_RET_THREAD
 
 	movq	TF_RFLAGS(%rsp), %r11	/* flags */
 	movq	TF_RIP(%rsp), %rcx	/* resume address */

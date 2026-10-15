@@ -38,6 +38,9 @@
 #define PERCPU_INTR_LEVEL	176
 #define PERCPU_INTR_SAVED_IF	180
 #define PERCPU_USER_RETURNS	184
+#define PERCPU_SYSCALL_TSC_THREAD	344
+#define PERCPU_SYSCALL_RET_THREAD	352
+#define PERCPU_SYSCALL_RET_MOVED	360
 
 #ifndef __ASSEMBLER__
 
@@ -196,13 +199,14 @@ struct percpu {
 	 * parks it, a hand-off switches to the receiver -- and a per-processor
 	 * cursor would be picked up by whichever thread ran here next.  This
 	 * slot exists only because the entry stub cannot reach
-	 * current_thread(): the stub writes it and the first C instruction of
-	 * the dispatcher reads it, on the same processor, with nothing between
-	 * them that can make a syscall.
+	 * current_thread()'s structure: the stub writes it and the
+	 * dispatcher's C reads it.
 	 *
-	 * Exactly the argument that lets user_rsp live up there, and it is
-	 * repeated rather than referenced because the next person to move a
-	 * field here needs to know which of the two kinds this is.
+	 * 🔴 NOT the argument that lets user_rsp live up there, though it was
+	 * written as that one.  user_rsp is read before sti; this is read
+	 * after it, and the kernel preempts: the thread can be on another
+	 * processor by then, or have been preempted here while another thread
+	 * entered.  syscall_tsc_thread below says whose reading it is (#648).
 	 *
 	 * ⚠️ At the END, like loaded_pmap and for the same reason: the offsets
 	 * asserted below are what the assembly uses, and a field inserted above
@@ -356,6 +360,20 @@ struct percpu {
 	} pcid_slot[PCID_SLOTS];
 	uint32_t pcid_victim;		/* the slot the next miss takes */
 
+	/*
+	 * #648: the thread syscall_tsc and syscall_ret_mark were written for,
+	 * which the stub copies from active_thread as it writes them.  Both are
+	 * read back with interrupts on -- the entry's by the dispatcher's C,
+	 * the return's by the last instructions before cli -- and by then the
+	 * thread may be on another processor, or another thread may have
+	 * written here.  So a reading counts only for its own thread, on the
+	 * processor it was written on, and once.  After the asserted fields,
+	 * like raised_by, so that no offset the assembly already knows moves.
+	 */
+	void	*syscall_tsc_thread;
+	void	*syscall_ret_thread;
+	uint64_t syscall_ret_moved;	/* returns not timed: the thread moved */
+
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is
@@ -403,6 +421,12 @@ _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_count)
 	       == PERCPU_SYSCALL_RET_CNT, "percpu syscall_ret_count moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_mark)
 	       == PERCPU_SYSCALL_RET_MARK, "percpu syscall_ret_mark moved");
+_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc_thread)
+	       == PERCPU_SYSCALL_TSC_THREAD, "percpu syscall_tsc_thread moved");
+_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_thread)
+	       == PERCPU_SYSCALL_RET_THREAD, "percpu syscall_ret_thread moved");
+_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_moved)
+	       == PERCPU_SYSCALL_RET_MOVED, "percpu syscall_ret_moved moved");
 _Static_assert(__builtin_offsetof(struct percpu, intr_level)
 	       == PERCPU_INTR_LEVEL, "percpu intr_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)

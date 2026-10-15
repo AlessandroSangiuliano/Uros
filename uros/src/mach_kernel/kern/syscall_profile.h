@@ -441,6 +441,7 @@ struct syscall_profile_thread {
 	uint32_t	nwindows;	/* how many have been filled so far  */
 	uint32_t	ndumps;
 	uint32_t	ndropped;	/* a trap opened while one was open  */
+	uint32_t	nmoved;		/* not sampled: moved before entry   */
 	uint32_t	nblocked;	/* how many of them went to sleep    */
 	uint32_t	waiting;	/* off the processor right now       */
 	uint32_t	nseen;		/* profiled traps this thread made   */
@@ -773,7 +774,8 @@ extern uint64_t	syscall_profile_entry_tsc(void);
  * And what the return path has cost, which only the entry stub can measure and
  * only the per-processor block can hold — see the note above SP_PHASES.
  */
-extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
+extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
+					      uint64_t *moved);
 
 #define	SP_ENTER(n)	syscall_profile_enter(n)
 #define	SP_LEAVE()	syscall_profile_leave()
