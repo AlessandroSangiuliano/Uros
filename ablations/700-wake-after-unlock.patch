@@ -5,12 +5,14 @@ Takes out: dd73b64e -- ipc_mqueue_deliver() drops imq_lock before it wakes its r
 Run: --entry 14 600 -smp 4
 Expect: thread_go: thread 0x[0-9a-f]+ is halted and queued for the reaper
 Expect: the zombie walks
+Expect: ipc_mqueue_receive: bad wait_result
+Expect: mach_msg_receive_continue: bad wait_result
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index ff138363..141aa151 100644
+index fa629d1a..52ad3fd5 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-@@ -883,6 +883,7 @@ ipc_mqueue_deliver(
+@@ -887,6 +887,7 @@ ipc_mqueue_deliver(
  	receiver->ith_state = MACH_MSG_SUCCESS;
  	receiver->ith_kmsg = kmsg;
  	receiver->ith_seqno = port->ip_seqno++;
@@ -18,8 +20,8 @@ index ff138363..141aa151 100644
  
  	/*
  	 * 🔴 WOKEN BEFORE imq_unlock(), NOT AFTER IT (#700).
-@@ -967,7 +968,6 @@ ipc_mqueue_deliver(
- 	widen_700(receiver, WIDEN_700_DELIVERER_US);
+@@ -972,7 +973,6 @@ ipc_mqueue_deliver(
+ 	    "a reply holds its receiver off the queue, not yet woken, for");
  	if (!direct)
  		thread_go(receiver);
 -	imq_unlock(mqueue);
