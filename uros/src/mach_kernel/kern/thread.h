@@ -336,8 +336,8 @@ typedef struct thread_shuttle {
 	decl_mutex_data(,rpc_lock)	/* RPC lock (rpc_lock()) */
 	int		ref_count;	/* number of references to me */
         
-        vm_offset_t     kernel_stack;   /* accurate only if the thread is 
-                                           not swapped and not executing */
+        vm_offset_t     kernel_stack;   /* its own, from creation to
+                                           destruction (#648) */
 
 	vm_offset_t	stack_privilege;/* reserved kernel stack */
 
@@ -799,16 +799,20 @@ extern void		consider_thread_collect(void);
 	(current_thread() ? current_thread()->top_act : THR_ACT_NULL)
 #define current_act_fast()	(current_thread()->top_act)
 
+/*
+ * The kernel stack the current thread runs on, which is its own.
+ *
+ * A thread's kernel stack is allocated with the thread and freed with it on
+ * both targets (i386/pcb.c, x86_64/thread/machine.c); no target hands one to
+ * another thread, and the thread swapper unwires it where it is.  This used to
+ * read active_stacks[cpu_number()], which only i386's context switch keeps up:
+ * on x86-64 it answered 0 (#648).
+ */
 static __inline__ vm_offset_t current_stack(void);
 static __inline__ vm_offset_t
 current_stack(void)
 {
-	vm_offset_t	ret;
-
-	mp_disable_preemption();
-	ret = active_stacks[cpu_number()];
-	mp_enable_preemption();
-	return ret;
+	return current_thread()->kernel_stack;
 }
 
 /* These should be safe if only called in running task context */

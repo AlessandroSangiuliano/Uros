@@ -83,11 +83,20 @@ mutex_trace(void *m, int what, uint64_t arg)
 		atomic_add32(&mtr_lost, 1);
 
 	e = &mtr_ring[slot % MTR_ENTRIES];
+	/*
+	 * The clock and the processor read with preemption off, so that both
+	 * are one processor's: read apart, a thread that moved between them
+	 * stamped one processor's clock with another's number (#648).  On this
+	 * machine enable_preemption() takes no AST where it is called, so the
+	 * pair adds no preemption point to the mutex's own code.
+	 */
+	disable_preemption();
 	e->tsc     = rdtsc();
+	e->cpu     = (uint8_t) cpu_number();
+	enable_preemption();
 	e->thread  = (void *) current_thread();
 	e->arg     = arg;
 	e->what    = (uint8_t) what;
-	e->cpu     = (uint8_t) cpu_number();
 	e->locked  = (uint8_t) mu->locked;
 	e->waiters = (int16_t) mu->waiters;
 }

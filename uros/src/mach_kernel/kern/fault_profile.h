@@ -290,15 +290,20 @@
 #include <cpus.h>			/* NCPUS */
 #include <kern/tsc.h>			/* urmach_tsc (#537) */
 #include <kern/cpu_number.h>
+#include <kern/thread.h>		/* current_thread (#648) */
 
 /*
  * One per processor, on its own cache line.
  *
  * ⚠️ Per-processor and not per-thread, which is a choice with a cost: a fault
- * that blocks can resume on another processor, and the cursor would then be
- * somebody else's.  The fast copy-on-write path does not block -- it is the
- * path that exists BECAUSE it does not have to talk to a pager -- so what is
- * left to guard against is a nested trap, and `owner' below is what guards it.
+ * that moves resumes on another processor, and the cursor there is somebody
+ * else's.  The fast copy-on-write path does not block -- it is the path that
+ * exists BECAUSE it does not have to talk to a pager -- but on x86-64 it can be
+ * preempted, and so moved (#648).  So the slot is taken with preemption off,
+ * and it names the thread that opened it: a thread that finds another's there
+ * has moved, or been overtaken, and touches nothing; its commit is counted in
+ * `nmoved' and dropped.  A nested trap is the other way to lose the cursor,
+ * and `owner' below is what catches it.
  */
 struct fault_profile_cpu {
 	uint64_t	cursor;		/* timestamp of the most recent mark */
@@ -316,10 +321,12 @@ struct fault_profile_cpu {
 	 */
 	uint64_t	first;
 	const void	*owner;		/* the trap frame this sample is for */
+	const void	*thread;	/* the thread that opened it (#648)  */
 	uint32_t	slice[FP_PHASES];	/* the sample being built    */
 	uint32_t	cow;		/* the copy-on-write branch was taken */
 	uint32_t	nsamples;	/* how many are in `sample'          */
 	uint32_t	ndropped;	/* a nested trap took the cursor     */
+	uint32_t	nmoved;		/* committed by a thread not its own */
 	uint32_t	nslow;		/* copy-on-write via vm_fault_page() */
 	uint32_t	ndumps;
 	uint32_t	sample[FP_SAMPLES][FP_PHASES];
@@ -370,24 +377,46 @@ extern struct fault_profile_cpu	fault_profile[NCPUS];
 extern volatile int	fault_profile_ready;
 
 /*
- * This processor's slot, or nothing at all.
+ * This processor's slot, with preemption off until fault_profile_done(), or
+ * nothing at all and preemption as it was.
  *
  * Returning nothing is the honest answer rather than a convenient one: before
  * the per-CPU block exists there is no processor identity to charge a sample
  * to, so there is no sample.
+ *
+ * 🔴 Preemption off between asking which processor this is and writing its
+ * slot, because the fault path is preemptible here: a thread that moved in
+ * between wrote another processor's slot, racing that processor's own writes
+ * (#648).
  */
 static __inline__ struct fault_profile_cpu *
-fault_profile_slot(void)
+fault_profile_here(void)
 {
 	unsigned int	cpu;
 
 	if (!fault_profile_ready)
 		return (struct fault_profile_cpu *) 0;
 
+	disable_preemption();
 	cpu = (unsigned int) cpu_number();
-	if (cpu >= (unsigned int) NCPUS)
+	if (cpu >= (unsigned int) NCPUS) {
+		enable_preemption();
 		return (struct fault_profile_cpu *) 0;
+	}
 	return &fault_profile[cpu];
+}
+
+static __inline__ void
+fault_profile_done(void)
+{
+	enable_preemption();
+}
+
+/* Whether the sample in this slot is the calling thread's. */
+static __inline__ int
+fault_profile_mine(const struct fault_profile_cpu *fp)
+{
+	return fp->thread == (const void *) current_thread();
 }
 
 /*
@@ -412,7 +441,7 @@ fault_profile_slot(void)
 static __inline__ void
 fault_profile_begin(const void *token)
 {
-	struct fault_profile_cpu	*fp = fault_profile_slot();
+	struct fault_profile_cpu	*fp = fault_profile_here();
 	int				i;
 
 	if (fp == (struct fault_profile_cpu *) 0)
@@ -422,7 +451,9 @@ fault_profile_begin(const void *token)
 		fp->slice[i] = 0;
 	fp->cow = 0;
 	fp->owner = token;
+	fp->thread = (const void *) current_thread();
 	fp->cursor = fp->first = urmach_tsc();
+	fault_profile_done();
 }
 
 /*
@@ -432,15 +463,18 @@ fault_profile_begin(const void *token)
 static __inline__ void
 fault_profile_mark(int phase)
 {
-	struct fault_profile_cpu	*fp = fault_profile_slot();
+	struct fault_profile_cpu	*fp = fault_profile_here();
 	uint64_t			now;
 
 	if (fp == (struct fault_profile_cpu *) 0)
 		return;
 
-	now = urmach_tsc();
-	fp->slice[phase] += (uint32_t) (now - fp->cursor);
-	fp->cursor = now;
+	if (fault_profile_mine(fp)) {
+		now = urmach_tsc();
+		fp->slice[phase] += (uint32_t) (now - fp->cursor);
+		fp->cursor = now;
+	}
+	fault_profile_done();
 }
 
 /*
@@ -450,10 +484,13 @@ fault_profile_mark(int phase)
 static __inline__ void
 fault_profile_cow(void)
 {
-	struct fault_profile_cpu	*fp = fault_profile_slot();
+	struct fault_profile_cpu	*fp = fault_profile_here();
 
-	if (fp != (struct fault_profile_cpu *) 0)
+	if (fp == (struct fault_profile_cpu *) 0)
+		return;
+	if (fault_profile_mine(fp))
 		fp->cow = 1;
+	fault_profile_done();
 }
 
 /*
@@ -464,10 +501,13 @@ fault_profile_cow(void)
 static __inline__ void
 fault_profile_abandon(void)
 {
-	struct fault_profile_cpu	*fp = fault_profile_slot();
+	struct fault_profile_cpu	*fp = fault_profile_here();
 
-	if (fp != (struct fault_profile_cpu *) 0)
+	if (fp == (struct fault_profile_cpu *) 0)
+		return;
+	if (fault_profile_mine(fp))
 		fp->cow = 0;
+	fault_profile_done();
 }
 
 extern void	fault_profile_commit(const void *token);

@@ -393,7 +393,7 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 void
 syscall_profile_dump(struct syscall_profile_thread *p)
 {
-	uint64_t	ret_cyc, ret_n;
+	uint64_t	ret_cyc, ret_n, ret_moved;
 	uint32_t	ret_mean = 0;
 	int		ret_known = 0;
 	int		conta[SP_SHAPES];
@@ -415,24 +415,26 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	 * It is defensible for the return path alone: it runs the same
 	 * instructions whatever the message was.
 	 */
-	syscall_profile_return_cycles(&ret_cyc, &ret_n);
+	syscall_profile_return_cycles(&ret_cyc, &ret_n, &ret_moved);
 	if (ret_n != 0) {
 		ret_mean = (uint32_t) (ret_cyc / ret_n);
 		ret_known = 1;
 	}
 
 	printf("syscall_profile trap %d thread %p dump %u, window %u = traps "
-	       "%u..%u of %u this thread made (%u dropped); shapes: %d "
+	       "%u..%u of %u this thread made (%u dropped, %u not sampled: "
+	       "moved before the entry was read); shapes: %d "
 	       "hand-off, %d blocked, %d awake; %u marks x %u cyc = %u of "
-	       "instrument; return %u (mean of %u); kernel-wide %u candidates, "
-	       "%u hand-offs\n",
+	       "instrument; return %u (mean of %u, %u not timed: moved); "
+	       "kernel-wide %u candidates, %u hand-offs\n",
 	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
 	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen, p->ndropped,
+	       p->nmoved,
 	       conta[SP_SHAPE_HANDOFF], conta[SP_SHAPE_BLOCKED],
 	       conta[SP_SHAPE_AWAKE],
 	       (unsigned int) SP_MARKS, sp_pair_cost,
 	       (unsigned int) SP_MARKS * sp_pair_cost,
-	       ret_mean, (unsigned int) ret_n,
+	       ret_mean, (unsigned int) ret_n, (unsigned int) ret_moved,
 	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
 	printf("syscall_profile   routes kernel-wide: %u combined (%u handed "
 	       "off), %u send-only, %u receive-only (%u of them resumed in the "
@@ -506,12 +508,24 @@ void
 syscall_profile_enter(int trap_number)
 {
 	thread_t	t = current_thread();
+	uint64_t	entry;
 
 	if (trap_number != syscall_profile_trap || t == THREAD_NULL)
 		return;
 
 	t->syscall_profile.self = (const void *) t;
-	syscall_profile_begin(&t->syscall_profile, syscall_profile_entry_tsc());
+	entry = syscall_profile_entry_tsc();
+	/*
+	 * 0 is a reading that was not this thread's, because it moved between
+	 * the stub and here (#648).  Not sampled: the clock read now instead
+	 * would make this sample's entry phase nearly nothing, and the median
+	 * of that column would be taken over two different things.
+	 */
+	if (entry == 0) {
+		t->syscall_profile.nmoved++;
+		return;
+	}
+	syscall_profile_begin(&t->syscall_profile, entry);
 	/*
 	 * The entry phase closes HERE, at the first instruction that could
 	 * close it: everything between the stub's clock reading and this line

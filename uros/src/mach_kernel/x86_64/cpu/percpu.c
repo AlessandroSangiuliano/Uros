@@ -228,11 +228,25 @@ void percpu_activate(uint32_t cpu_id)
  * The one machine-dependent line of the profile: only the stub knows when the
  * trap began, and only this file knows where it put it.  Everything else about
  * the sample is machine-independent and lives in <kern/syscall_profile.h>.
+ *
+ * Or 0, which the sample takes as an entry not timed, when the reading here is
+ * not this thread's: the stub wrote it with interrupts masked, but it is read
+ * after they are back on, by a thread that may have been preempted since -- on
+ * to another processor, or here while another thread entered (#648).  Asked
+ * with preemption off and taken once, so that a reading is used only by its
+ * own thread, on the processor it was written on.
  */
 uint64_t
 syscall_profile_entry_tsc(void)
 {
-	return percpu()->syscall_tsc;
+	uint64_t	tsc = 0;
+
+	disable_preemption();
+	if (percpu()->syscall_tsc_thread == (void *) current_thread())
+		tsc = percpu()->syscall_tsc;
+	percpu()->syscall_tsc_thread = (void *) 0;
+	enable_preemption();
+	return tsc;
 }
 #endif	/* SYSCALL_PROFILE */
 
@@ -241,12 +255,18 @@ syscall_profile_entry_tsc(void)
  * What the return path has cost this processor so far (#411, for #392).
  *
  * The sum and the count rather than a mean, so the caller decides how to
- * report them -- and so that a caller which wants to reset them can.
+ * report them -- and so that a caller which wants to reset them can.  With the
+ * returns not timed because the thread had moved (#648), and all three read
+ * with preemption off, so that they are one processor's.
  */
 void
-syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count)
+syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
+			      uint64_t *moved)
 {
+	disable_preemption();
 	*cycles = percpu()->syscall_ret_cycles;
 	*count  = percpu()->syscall_ret_count;
+	*moved  = percpu()->syscall_ret_moved;
+	enable_preemption();
 }
 #endif	/* SYSCALL_PROFILE */
