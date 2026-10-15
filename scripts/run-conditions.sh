@@ -397,13 +397,17 @@ uros_tree_of() {
 # not, and per untracked file, "<XY> <blob> <path>": git's two status letters,
 # the working copy's blob ("-" for a path that is gone) and the path.
 # Untracked files count because the build globs directories, so a new source
-# file is compiled without being added.  hash-object without -w: nothing is
-# written to the repository.  Status 1 outside a git checkout.
+# file is compiled without being added.  Status 1 outside a git checkout.
+#
+# 🔴 NOTHING IS WRITTEN TO THE REPOSITORY: hash-object without -w, and status
+# with --no-optional-locks.  Without it git status refreshes the index when it
+# can take index.lock -- measured, a file touched and the index rewritten --
+# and three looks a boot, a campaign long, would race whoever commits.
 uros_tree_files() {
 	_head=$(git -C "$1" rev-parse HEAD 2>/dev/null) || return 1
 	echo "HEAD $_head"
-	git -C "$1" status --porcelain -z --untracked-files=all --no-renames \
-		2>/dev/null | tr '\0' '\n' |
+	git --no-optional-locks -C "$1" status --porcelain -z --untracked-files=all \
+		--no-renames 2>/dev/null | tr '\0' '\n' |
 	while IFS= read -r _l; do
 		[ -n "$_l" ] || continue
 		_xy=${_l%"${_l#??}"}
@@ -1202,6 +1206,21 @@ EOF
 		_tt "under set -e: a directory never configured" \
 			"not named: $_tree has no CMakeCache.txt to say which sources it compiles" \
 			"$(set -e; uros_tree_open "$_tree" "$_r"; echo "$UROS_TREE_LINE")"
+		# Nothing written: a touched file leaves the index's record of it
+		# stale, and a git status free to take index.lock rewrites the
+		# index.  The control is that git status, after the look: where it
+		# is not seen writing either, the row cannot ask, and says so.
+		touch "$_r/uros/kept.c"
+		: > "$_tree/ref"
+		uros_tree_files "$_r" > /dev/null
+		_w1=$(find "$_r/.git/index" -newer "$_tree/ref")
+		git -C "$_r" status --porcelain > /dev/null
+		_w2=$(find "$_r/.git/index" -newer "$_tree/ref")
+		if [ -z "$_w2" ]; then
+			echo "  --    a look writes nothing: git status is not seen writing here either -- NOT ASKED"
+		else
+			_tt "a look writes nothing to the repository, where git status does" "" "$_w1"
+		fi
 		echo changed >> "$_r/uros/kept.c"
 		rm "$_r/uros/gone.c"
 		echo staged > "$_r/uros/st.c"
