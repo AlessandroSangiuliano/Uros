@@ -124,10 +124,17 @@ MUST=(
 # line i386's clock watch prints when processor 0's tick stops (#599), which
 # no healthy boot prints, even if the tick runs again.  gpu_server echoes the
 # console into its own lines, which would count each failure twice (as the
-# #599 campaigns found), so its echo is left out of every search.
+# #599 campaigns found), so its echo is left out of every search.  So is the
+# run's conditions block, which is run-qemu.sh's record and not the guest's
+# output, as run-x86_64.sh's verdict has left it out since #618: its tree
+# fields name the files that differ from the commit (#587), and a file name is
+# anyone's choice, WRONG and panic(cpu among what it may hold.
 FAIL_RE='WRONG|SOME TESTS FAILED|[1-9][0-9]* FAIL ===| arm FAIL$|panic\(cpu|<panic\+0x|Assertion failed|double fault|exception_no_server: terminating task|clock: processor 0.s tick has not run'
 
-clean() { grep -av 'gpu_server: text_puts' "$1"; }
+clean() {
+	sed '/^=== run conditions (#516) ===$/,/^=== end run conditions ===$/d' "$1" |
+		grep -av 'gpu_server: text_puts'
+}
 
 mhz() {	# the host's clock now, the mean over its processors, in MHz
 	awk -F: '/^cpu MHz/ {s += $2; n++} END {if (n) printf "%d\n", s / n}' /proc/cpuinfo
