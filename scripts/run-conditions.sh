@@ -520,16 +520,21 @@ uros_tree_since() {
 # #579): a run whose image may hold either state of a file is not what its
 # tree line says, and a run whose tree moved after it is not what the next
 # run will boot.  Nothing for a tree that held still.
+#
+# 🔴 NO PATH IN THEM.  They sit under the block, where the verdicts read every
+# word, and a path is anyone's choice: an untracked FAIL-notes.txt would fail a
+# run that passed.  The paths are in "tree since:", inside the block, which
+# the verdicts leave out.
 uros_tree_warnings() {
 	[ -n "$UROS_TREE_AT_BUILD" ] && [ -n "$1" ] || return 0
-	if _mb=$(uros_tree_moved "$UROS_TREE_AT_BUILD" "$1"); then
-		echo "  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of $_mb"
+	if uros_tree_moved "$UROS_TREE_AT_BUILD" "$1" > /dev/null; then
+		echo "  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of what \"tree since:\" names"
 	fi
 	case "$2" in
 	execs|"") return 0 ;;
 	esac
-	if _mr=$(uros_tree_moved "$1" "$2"); then
-		echo "  ⚠️ THE TREE CHANGED DURING THIS RUN, after its image was made — $_mr: the next run will not boot what this one did"
+	if uros_tree_moved "$1" "$2" > /dev/null; then
+		echo "  ⚠️ THE TREE CHANGED DURING THIS RUN, after its image was made — the next run will not boot what this one did"
 	fi
 	return 0
 }
@@ -549,8 +554,10 @@ uros_conditions_open() {
 # ⚠️ No word here may be one the verdict greps for.  run-x86_64.sh judges a
 # boot by looking for WRONG and FAIL in the log, so a conditions block using
 # either would turn every run red.  Its verdict has skipped this block since
-# #618, which put other programs' command lines in it, but the logs of
-# run-qemu.sh are judged by tools that read every line.
+# #618, which put other programs' command lines in it, and suite-i386.sh's
+# judge since #587, whose tree fields name the files anyone left in the tree.
+# The block's own words still keep clear of them: both-accelerators.sh lines
+# up every line that says PASS, FAIL, WRONG or panic in two logs.
 uros_conditions_block() {
 	_target=$1
 	_accel=$2
@@ -1231,14 +1238,14 @@ A  $(_g hash-object uros/st.c) uros/st.c
 		_tt "no look once the image was made" \
 			"not looked at again: git gave no state of it once the image was made" \
 			"$(uros_tree_since "" "$_a")"
-		_tt "a warning for each move, the build's first" \
-			"  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of uros/during-build.c
-  ⚠️ THE TREE CHANGED DURING THIS RUN, after its image was made — uros/after-image.c: the next run will not boot what this one did" \
+		_tt "a warning for each move, the build's first, and no path in either" \
+			"  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of what \"tree since:\" names
+  ⚠️ THE TREE CHANGED DURING THIS RUN, after its image was made — the next run will not boot what this one did" \
 			"$(uros_tree_warnings "$_b" "$_e")"
 		_tt "no warning for a tree that held still" \
 			"" "$(uros_tree_warnings "$_a" "$_a")"
 		_tt "under exec, the build's warning alone" \
-			"  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of uros/during-build.c" \
+			"  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of what \"tree since:\" names" \
 			"$(uros_tree_warnings "$_b" execs)"
 		UROS_TREE_AT_BUILD=
 		_tt "no first look: nothing after it is claimed" \
