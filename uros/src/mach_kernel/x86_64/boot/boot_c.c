@@ -9654,6 +9654,128 @@ static void tlb_shootdown_selftest(void)
 }
 
 /*
+ * A user space's full flush keeps the kernel's global entries (#437).
+ *
+ * A kernel page is cached through its global leaf, the leaf is repointed and
+ * nobody is told, and then a user space's full flush runs, tlb_flush_all():
+ * the page must still read the old frame, the space's entries alone gone.
+ * Reading the old frame is the PASS here, so a TLB that keeps nothing would
+ * fail it for nothing -- TCG reloads everything on a CR3 write.  Each question
+ * has a control that does all it does but the flush, a CR3 reload in its
+ * place, which keeps global entries by architecture (SDM Vol. 3A 253668-093US
+ * 5.10.4.1): a round whose control lost the entry asks nothing.  Two
+ * questions, the two ways a user space reaches the flush: a space this
+ * processor loaded through pmap_activate(), whose request comes here, and one
+ * whose root it loaded directly, as the boot self-tests do, which is a space
+ * loaded nowhere.  Four rounds each, since a machine under another hypervisor
+ * can drop entries now and then: the flush emptying the global entries in
+ * every round its control kept them, two at least, is WRONG, in none is a
+ * PASS, in some is a machine too unsteady to ask.
+ */
+#define UF_KVA		(KERNEL_HEAP_BASE + 0x280000ULL)	/* unclaimed at boot */
+#define UF_KEPT		0x4b4b4b4b4b4b4b4bULL	/* the old frame: entry kept */
+#define UF_LOST		0x4c4c4c4c4c4c4c4cULL	/* the new frame: entry lost */
+#define UF_ROUNDS	4
+
+/* Cache the page through `old', then point its leaf at `new' telling nobody. */
+static void uf_arm(pt_entry_t *e, uint64_t old, uint64_t new)
+{
+	*e = pa_to_pte(old) | (*e & ~INTEL_PTE_PFN);
+	tlb_flush_range(PMAP_NULL, UF_KVA, PAGE_SIZE_4K);
+	(void) *(volatile uint64_t *)(uintptr_t)UF_KVA;
+	*e = pa_to_pte(new) | (*e & ~INTEL_PTE_PFN);
+}
+
+/*
+ * One round: `loaded' says whether the space goes in by pmap_activate() or by
+ * its root alone, `flush' whether the question's flush runs or the control's
+ * CR3 reload.  Returns whether the page still read the old frame.
+ */
+static int uf_round(pt_entry_t *e, uint64_t a, uint64_t b, pmap_t u,
+		    int loaded, int flush)
+{
+	uint64_t own = read_cr3(), seen;
+
+	uf_arm(e, a, b);
+	if (loaded)
+		pmap_activate(u);
+	else
+		pmap_activate_boot(u);
+	if (flush)
+		tlb_flush_all(u);
+	else
+		write_cr3(read_cr3());
+	seen = *(volatile uint64_t *)(uintptr_t)UF_KVA;
+	if (loaded)
+		pmap_activate(pmap_kernel());
+	else
+		write_cr3(own);
+	return seen == UF_KEPT;
+}
+
+static void user_flush_globals_selftest(void)
+{
+	uint64_t a = boot_frame_alloc(), b = boot_frame_alloc();
+	uint64_t root = read_cr3() & INTEL_PTE_PFN;
+	pmap_t u = pmap_create(0);
+	pt_entry_t *e = PT_ENTRY_NULL;
+	unsigned asked[2] = { 0, 0 }, kept[2] = { 0, 0 };
+	int mapped = 0, w, i;
+
+	if (a != 0 && b != 0 && u != PMAP_NULL
+	    && pmap_enter(pmap_kernel(), UF_KVA, a, VM_PROT_READ | VM_PROT_WRITE,
+			  0) == PMAP_MAP_OK) {
+		mapped = 1;
+		e = pmap_walk(root, UF_KVA, 0);
+	}
+	kputs("UrMach x86-64: a user space's full flush and the kernel's global"
+	      " entries: ");
+	if (e == PT_ENTRY_NULL)
+		kputs("NOT ASKED — no frames, space or mapping (#437)\r\n");
+	else if (!(read_cr4() & CR4_PGE) || !(*e & INTEL_PTE_GLOBAL))
+		kputs("NOT ASKED — no global pages here (#437)\r\n");
+	else {
+		*(volatile uint64_t *)(uintptr_t)phys_to_direct(a) = UF_KEPT;
+		*(volatile uint64_t *)(uintptr_t)phys_to_direct(b) = UF_LOST;
+		for (w = 0; w < 2; w++)
+			for (i = 0; i < UF_ROUNDS; i++)
+				if (uf_round(e, a, b, u, w == 0, 0)) {
+					asked[w]++;
+					kept[w] += uf_round(e, a, b, u, w == 0, 1);
+				}
+		kputs("the controls kept the entry in ");
+		kputdec(asked[0]);
+		kputs(" rounds of 4 with the space loaded here and ");
+		kputdec(asked[1]);
+		kputs(" with it loaded nowhere, the flush in ");
+		kputdec(kept[0]);
+		kputs(" and ");
+		kputdec(kept[1]);
+		kputs(" of those");
+		kputs(asked[0] < 2 || asked[1] < 2
+		      ? " — NOT ASKED, this machine keeps a global entry through a"
+			" CR3 reload in fewer than 2 rounds of 4 (#437)\r\n"
+		      : kept[0] == 0 || kept[1] == 0
+		      ? " — WRONG, a user space's flush emptied the kernel's global"
+			" entries (#437)\r\n"
+		      : kept[0] == asked[0] && kept[1] == asked[1]
+		      ? " — PASS (#437)\r\n"
+		      : " — NOT ASKED, kept in some rounds and not in others: the"
+			" machine drops entries by itself (#437)\r\n");
+	}
+	if (e != PT_ENTRY_NULL)
+		*e = pa_to_pte(a) | (*e & ~INTEL_PTE_PFN);	/* the frame entered */
+	if (mapped)
+		pmap_remove(pmap_kernel(), UF_KVA, UF_KVA + PAGE_SIZE_4K);
+	if (u != PMAP_NULL)
+		pmap_destroy(u);
+	if (a != 0)
+		boot_frame_free(a);
+	if (b != 0)
+		boot_frame_free(b);
+}
+
+/*
  * The other half of the shootdown: who does NOT get told, and why that is
  * safe (#439).
  *
@@ -10236,6 +10358,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ap_to_bsp_selftest();
 	tlb_shootdown_selftest();
 	tlb_targeted_selftest();
+	user_flush_globals_selftest();
 #if	PROBE_605_CALL_COST
 	call_cost_probe();
 #endif
