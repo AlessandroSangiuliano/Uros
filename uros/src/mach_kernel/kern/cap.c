@@ -511,11 +511,11 @@ cap_probe_start(processor_t p)
 }
 
 static void
-cap_probe_run(void)
+cap_probe_drive(int me)
 {
     uint64_t t0, alone, lo = ~0ULL, hi = 0;
     uint32_t started = 0, refused = 0;
-    int me, i;
+    int i;
 
     simple_lock_init(&cap_probe_lock, ETAP_NO_TRACE);
     bzero((char *)&cap_probe_token, sizeof(cap_probe_token));
@@ -530,7 +530,6 @@ cap_probe_run(void)
     simple_unlock(&cap_lock);
 
     disable_preemption();
-    me = cpu_number();
     t0 = urmach_tsc();
     for (unsigned k = 0; k < CAP_PROBE_ROUNDS; k++)
         if (cap_check_unlocked(&cap_probe_token, RESOURCE_DMA_BUFFER,
@@ -585,6 +584,21 @@ cap_probe_run(void)
            "outside cap_lock (#537)\n", (unsigned long long)alone, started,
            (unsigned long long)lo, (unsigned long long)hi,
            refused + cap_probe_refused);
+}
+
+/*
+ * The driver bound to the processor it starts on, for the whole probe (#648).
+ * cap_probe_drive() starts a checker on every processor but `me', and read
+ * `me' with preemption off and used it with preemption on: a driver that moved
+ * started a checker on the processor it then ran on and none on the one it had
+ * left.  Bound, it cannot move; bound here rather than in the body, so that
+ * none of its four ways out has to undo it.
+ */
+static void
+cap_probe_run(void)
+{
+    cap_probe_drive(thread_bind_here());
+    thread_bind(current_thread(), PROCESSOR_NULL);
 }
 #endif	/* PROBE_537_CAP_CONCURRENCY && NCPUS > 1 */
 
