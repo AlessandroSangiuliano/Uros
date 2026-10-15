@@ -346,11 +346,44 @@ static void pageout_probe(void)
 }
 #endif	/* PROBE_606_PAGEOUT */
 
+/*
+ * current_stack() names the stack this thread runs on (#648).
+ *
+ * It read a per-processor array that only i386's context switch writes, and
+ * here it answered 0 -- which stack_privilege() then recorded for the alarm,
+ * timeout, pageout and swapper threads.  Asked from a thread, which is what it
+ * needs, and checked against something it does not compute: the address of a
+ * local, which must lie in the KERNEL_STACK_SIZE bytes it names.  That is also
+ * the property it now rests on, that a thread runs on its own kernel_stack.
+ */
+static void
+current_stack_selftest(void)
+{
+	thread_t		self = current_thread();
+	volatile char		here;
+	vm_offset_t		stack = current_stack();
+	vm_offset_t		at = (vm_offset_t) &here;
+
+	stack_privilege(self);
+	printf("startup: current_stack() answers %p and a local of the "
+	       "asking function is at %p; stack_privilege() recorded %p "
+	       "-- %s (#648)\n", (void *) stack, (void *) at,
+	       (void *) self->stack_privilege,
+	       stack == 0 ? "WRONG, no stack" :
+	       (at < stack || at >= stack + KERNEL_STACK_SIZE)
+	       ? "WRONG, the local is not on that stack" :
+	       self->stack_privilege != stack
+	       ? "WRONG, stack_privilege() recorded another" : "PASS");
+}
+
 void
 machine_processors_ready(void)
 {
 	unsigned	want = (unsigned) real_ncpus;
-	unsigned	got = smp_ap_release_to_scheduler();
+	unsigned	got;
+
+	current_stack_selftest();
+	got = smp_ap_release_to_scheduler();
 
 	if (got >= want) {
 		unsigned	spins;

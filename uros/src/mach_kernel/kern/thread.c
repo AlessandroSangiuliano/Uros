@@ -832,7 +832,10 @@ stack_statistics(
 /*
  *	stack_privilege:
  *
- *	stack_alloc_try on this thread must always succeed.
+ *	Records the thread's kernel stack as reserved for it.  A thread keeps
+ *	its stack from creation to destruction on these targets, so the
+ *	reservation holds by construction; the field's only reader,
+ *	thread_handoff() in kern/ipc_sched.c, is not built (#648).
  */
 
 void
@@ -3125,25 +3128,17 @@ processor_set_stack_usage(
 	maxusage = 0;
 	maxstack = 0;
 	for (i = 0; i < actual; i++) {
-		int cpu;
 		thread_t thread = threads[i];
 		vm_offset_t stack = 0;
 
 		/*
-		 *	thread->kernel_stack is only accurate if the
-		 *	thread isn't swapped and is not executing.
-		 *
-		 *	Of course, we don't have the appropriate locks
-		 *	for these shenanigans.
+		 *	A thread's own kernel_stack, running or not: no
+		 *	target hands stacks between threads, and a running
+		 *	thread's used to be read from active_stacks[], which
+		 *	x86-64 never writes (#648).
 		 */
 
 		stack = thread->kernel_stack;
-
-		for (cpu = 0; cpu < NCPUS; cpu++)
-			if (cpu_data[cpu].active_thread == thread) {
-				stack = active_stacks[cpu];
-				break;
-			}
 
 		if (stack != 0) {
 			total++;
