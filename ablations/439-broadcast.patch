@@ -1,21 +1,21 @@
 Kind: ablation
 Issue: #439
-Takes out: the narrowed shootdown -- every flush of a user mapping interrupts every processor again, as before #439, with the request still naming its space and generation (#412): with PCID a processor that does not have the space loaded leaves it to the generation as before, and with one processor online a space loaded here still goes through the request, which keeps its slot's generation, so only the interrupts come back; until 3e731776 this patch made the kernel's branch unconditional instead, which sent a user flush as a kernel request and returned before the generation moved -- with PCID on, a broken kernel (found by #412's second review round)
+Takes out: the narrowed shootdown -- every flush of a user mapping interrupts every processor again, as before #439, with the request still naming its space and generation (#412): with PCID a processor that does not have the space loaded leaves it to the generation as before, and with one processor online a space loaded here still goes through the request, which keeps its slot's generation, so only the interrupts come back; until 3e731776 this patch made the kernel's branch unconditional instead, which sent a user flush as a kernel request and returned before the generation moved -- with PCID on, a broken kernel (found by #412's second review round); made again over c3338056 (#437), where the path of a space loaded nowhere calls tlb_flush_user_here(), the two lines it changes the same; at 0db43734 on victus under KVM, entry 14 at -smp 8, caught 1 of 1 (7 processors interrupted) and the fixed tree passed 1 of 1 (0)
 Run: --entry 14 1200 -smp 8
 Expect: shootdown on that space interrupted [0-9]+ processors .*WRONG, somebody was told
 Measure: the copy-on-write phase breakdown (#482, kern/fault_profile.c) -- FP_PROTECT plus FP_ENTER must swell with the processor count while every other phase stays where it was
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-index 99492cfc..199ce203 100644
+index ac497e58..e6e8bd86 100644
 --- a/uros/src/mach_kernel/x86_64/pmap/tlb.c
 +++ b/uros/src/mach_kernel/x86_64/pmap/tlb.c
-@@ -350,12 +350,12 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
+@@ -392,12 +392,12 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
  	 * cannot run before that block exists, so "the set is empty" and
  	 * "there is no block" cannot come apart.
  	 */
 -	if (using == 0) {
 +	if (using == 0 && smp_online_count() <= 1) {
- 		tlb_flush_local_range(va, size);
+ 		tlb_flush_user_here(pmap->root_pa, va, size);
  		return;
  	}
  
