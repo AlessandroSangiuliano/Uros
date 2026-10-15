@@ -356,6 +356,94 @@ uros_board_disks() {
 	echo "${_out:-none}"
 }
 
+# ── The tree the image was made from (#587) ───────────────────────────
+#
+# 🔴 BOTH HARNESSES BUILD BEFORE EVERY BOOT, FROM THE TREE AS IT STANDS, and no
+# log said which tree that was.  A campaign that spans an edit, a checkout or a
+# rebase mixes two trees and every log of it looks alike; #586's census was run
+# for forty minutes with the sources frozen by hand, and had they not been,
+# nothing would have shown that the last boots tested a fix the first ones did
+# not have.
+#
+# 🔑 THE TREE IS THE BUILD DIRECTORY'S, NOT THE SCRIPT'S.  A build directory
+# compiles the sources it was configured from, CMakeCache.txt's
+# CMAKE_HOME_DIRECTORY, and UROS_BUILD_DIR (#485) can name one configured from
+# a worktree while the script runs from the main checkout.  So the commit is
+# asked of that directory, not of the checkout the script sits in.
+#
+# ⚠️ Ignored files are not listed, the build directories being among them, so
+# a file the build reads and .gitignore hides is not seen here.  #565 is why
+# nothing is generated into the source tree any more.
+
+# uros_tree_of <build dir> -- the top of the tree <build dir> compiles: its
+# CMAKE_HOME_DIRECTORY, raised to the top of the git checkout holding it.
+# Nothing, and status 1, for a directory that was never configured.
+uros_tree_of() {
+	_src=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$1/CMakeCache.txt" 2>/dev/null)
+	[ -n "$_src" ] || return 1
+	git -C "$_src" rev-parse --show-toplevel 2>/dev/null || echo "$_src"
+}
+
+# uros_tree_files <tree> -- what the tree is, beyond what it names: a line
+# "HEAD <commit>", then one per path that differs from that commit, staged or
+# not, and per untracked file, "<XY> <blob> <path>": git's two status letters,
+# the working copy's blob ("-" for a path that is gone) and the path.
+# Untracked files count because the build globs directories, so a new source
+# file is compiled without being added.  hash-object without -w: nothing is
+# written to the repository.  Status 1 outside a git checkout.
+uros_tree_files() {
+	_head=$(git -C "$1" rev-parse HEAD 2>/dev/null) || return 1
+	echo "HEAD $_head"
+	git -C "$1" status --porcelain -z --untracked-files=all --no-renames \
+		2>/dev/null | tr '\0' '\n' |
+	while IFS= read -r _l; do
+		[ -n "$_l" ] || continue
+		_xy=${_l%"${_l#??}"}
+		_p=${_l#???}
+		if [ -f "$1/$_p" ]; then
+			_b=$(git -C "$1" hash-object -- "$_p" 2>/dev/null) || _b="?"
+		else
+			_b=-
+		fi
+		echo "$_xy $_b $_p"
+	done
+}
+
+# uros_tree_line <tree> <uros_tree_files of it> -- the conditions field: the
+# tree, its commit and branch, and every path that differs from the commit,
+# with a mark of the whole state when any does, so that two runs can be told
+# to have built the same sources by more than their commit.
+uros_tree_line() {
+	_head=$(printf '%s\n' "$2" | sed -n 's/^HEAD //p')
+	_br=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null)
+	[ "$_br" = HEAD ] && _br="detached"
+	_n=$(printf '%s\n' "$2" | grep -vc '^HEAD ')
+	_say="$1 at $(printf '%.8s' "$_head")${_br:+ ($_br)}"
+	if [ "$_n" -eq 0 ]; then
+		echo "$_say, as committed"
+		return
+	fi
+	# "XY blob path" as "XY path", the status letters without git's blanks
+	_paths=$(printf '%s\n' "$2" | grep -v '^HEAD ' |
+		awk '{ xy = substr($0, 1, 2); gsub(/ /, "", xy)
+		       rest = substr($0, 4); i = index(rest, " ")
+		       printf "%s%s %s", (NR > 1 ? ", " : ""), xy, substr(rest, i + 1) }')
+	_mark=$(printf '%s\n' "$2" | git hash-object --stdin 2>/dev/null)
+	_s=s
+	[ "$_n" -eq 1 ] && _s=
+	echo "$_say, with $_n path$_s changed from it: $_paths; sources $(printf '%.12s' "$_mark")"
+}
+
+# uros_tree_moved <files then> <files now> -- the paths whose state differs
+# between two uros_tree_files of one tree, comma-separated, "the commit" for a
+# HEAD that moved; nothing, and status 1, when the two are the same.
+uros_tree_moved() {
+	[ "$1" = "$2" ] && return 1
+	printf '%s\n%s\n' "$1" "$2" | sort | uniq -u |
+		sed -e 's/^HEAD .*/the commit/' -e 's/^.. [^ ]* //' |
+		sort -u | paste -sd, - | sed 's/,/, /g'
+}
+
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host
 # state in UROS_HOST_AT_START.
 uros_conditions_open() {
@@ -952,6 +1040,78 @@ victus: the policy's numbers, not its counters, every core, in order|a|412625 11
 under userspace: the table, base_frequency, every core's scaling_setspeed, not the request|b|1400000 1850000 2100000 2345000 2600000 3000000 4000000 
 no cpufreq at all|none|
 EOF
+
+	# The tree the image was made from (#587): a repository made here, put
+	# in the states a working tree is found in, and read back.  Made and not
+	# described, for the policy numbers' reason: the subject is what git says
+	# about files.  The commit and the blobs are asked of git here, the sources
+	# mark is left out of the comparison: what a row pins is which paths are
+	# said, and how.
+	_tt() {	# <row> <wanted> <read>
+		_total=$(( _total + 1 ))
+		if [ "$3" = "$2" ]; then
+			echo "  ok    $1"
+		else
+			echo "  BAD   $1"
+			echo "        wanted <<$2>>"
+			echo "        read   <<$3>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	}
+	if ! command -v git > /dev/null 2>&1; then
+		echo "  --    the tree rows (#587): no git here -- NOT ASKED"
+	else
+		_r=$_tree/repo
+		_g() {
+			git -C "$_r" -c user.name=self-test -c user.email=self-test@localhost \
+				-c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"
+		}
+		mkdir -p "$_r/uros/sub" "$_tree/build"
+		git init -q "$_r" && _g checkout -q -b selftest
+		echo one > "$_r/uros/kept.c"
+		echo two > "$_r/uros/gone.c"
+		_g add -A && _g commit -q -m one
+		echo "CMAKE_HOME_DIRECTORY:INTERNAL=$_r/uros" > "$_tree/build/CMakeCache.txt"
+		_c=$(_g rev-parse HEAD)
+		_tt "the tree is the one the build directory was configured from, at its top" \
+			"$_r" "$(uros_tree_of "$_tree/build")"
+		_tt "a directory never configured names no tree, and says so" \
+			"status 1, nothing" "$(_o=$(uros_tree_of "$_tree"); echo "status $?, ${_o:-nothing}")"
+		_f0=$(uros_tree_files "$_r")
+		_tt "a tree as committed" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), as committed" "$(uros_tree_line "$_r" "$_f0")"
+		echo changed >> "$_r/uros/kept.c"
+		rm "$_r/uros/gone.c"
+		echo staged > "$_r/uros/st.c"
+		_g add uros/st.c
+		echo new > "$_r/uros/sub/new.c"
+		_f1=$(uros_tree_files "$_r")
+		_tt "each path that differs: changed, gone, staged, untracked in a new directory" \
+			"HEAD $_c
+ D - uros/gone.c
+ M $(_g hash-object uros/kept.c) uros/kept.c
+A  $(_g hash-object uros/st.c) uros/st.c
+?? $(_g hash-object uros/sub/new.c) uros/sub/new.c" "$_f1"
+		_tt "the line names them, with git's letters and a mark of the whole state" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), with 4 paths changed from it: D uros/gone.c, M uros/kept.c, A uros/st.c, ?? uros/sub/new.c; sources <mark>" \
+			"$(uros_tree_line "$_r" "$_f1" | sed 's/; sources [0-9a-f]\{12\}$/; sources <mark>/')"
+		_tt "a tree that did not move is not said to have moved" \
+			"status 1, nothing" "$(_o=$(uros_tree_moved "$_f1" "$_f1"); echo "status $?, ${_o:-nothing}")"
+		echo again >> "$_r/uros/sub/new.c"
+		_f2=$(uros_tree_files "$_r")
+		_tt "a second edit to a path already changed is a move" \
+			"uros/sub/new.c" "$(uros_tree_moved "$_f1" "$_f2")"
+		_g add -A && _g commit -q -m two
+		_f3=$(uros_tree_files "$_r")
+		_tt "a commit made during the run: the commit, and every path it took in" \
+			"the commit, uros/gone.c, uros/kept.c, uros/st.c, uros/sub/new.c" "$(uros_tree_moved "$_f2" "$_f3")"
+		_g checkout -q --detach
+		_tt "a detached checkout says so" \
+			"$_r at $(printf '%.8s' "$(_g rev-parse HEAD)") (detached), as committed" \
+			"$(uros_tree_line "$_r" "$(uros_tree_files "$_r")")"
+		_tt "outside a git checkout there are no files to list" \
+			"status 1" "$(uros_tree_files "$_tree/build" > /dev/null; echo "status $?")"
+	fi
 	rm -rf "$_tree"
 
 	if [ "$_fails" -gt 0 ]; then
