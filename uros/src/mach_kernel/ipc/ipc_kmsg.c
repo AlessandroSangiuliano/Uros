@@ -2464,9 +2464,9 @@ ipc_port_hist_report(void)
 static void
 ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
 {
-	struct ipc_porthist_pcpu *p = &ipc_porthist[cpu_number()];
+	struct ipc_porthist_pcpu *p;
 	mach_msg_header_t *hdr = &kmsg->ikm_header;
-	unsigned long n = 0;
+	unsigned long n = 0, cplx = 0, msgs;
 
 	if (kmsg->ikm_dest != IP_NULL)			/* #442 */
 		n++;
@@ -2478,7 +2478,7 @@ ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
 		mach_msg_descriptor_t *d = (mach_msg_descriptor_t *) (body + 1);
 		mach_msg_descriptor_t *end = d + body->msgh_descriptor_count;
 
-		p->cplx++;
+		cplx = 1;
 		for (; d < end; d++)
 			switch (d->type.type) {
 			case MACH_MSG_PORT_DESCRIPTOR:
@@ -2492,14 +2492,26 @@ ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
 			}
 	}
 
+	/*
+	 * Counted first, and the processor's slot taken only to add the
+	 * count, with preemption off: a thread that moved while it held the
+	 * slot updated another processor's counters, racing that processor's
+	 * own updates (#648).  i386, the target -N runs on, does not preempt
+	 * in the kernel; x86-64 does.
+	 */
+	disable_preemption();
+	p = &ipc_porthist[cpu_number()];
+	p->cplx += cplx;
 	p->msgs++;
 	p->ports += n;
 	if (n > p->most)
 		p->most = n;
 	p->hist[ph_bucket(n)]++;
+	msgs = p->msgs;
+	enable_preemption();
 
 	if (ipc_port_hist_every > 0 &&
-	    p->msgs % (unsigned long) ipc_port_hist_every == 0)
+	    msgs % (unsigned long) ipc_port_hist_every == 0)
 		ipc_port_hist_report();
 }
 
