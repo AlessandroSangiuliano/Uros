@@ -431,11 +431,14 @@ uros_tree_line() {
 		echo "$_say, as committed"
 		return
 	fi
-	# "XY blob path" as "XY path", the status letters without git's blanks
+	# "XY blob path" as "XY path", the status letters without git's blanks;
+	# twenty at most, which a checkout or a rebase left half done would
+	# exceed by hundreds in every log, and the mark covers them all.
 	_paths=$(printf '%s\n' "$2" | grep -v '^HEAD ' |
 		awk '{ xy = substr($0, 1, 2); gsub(/ /, "", xy)
 		       rest = substr($0, 4); i = index(rest, " ")
-		       printf "%s%s %s", (NR > 1 ? ", " : ""), xy, substr(rest, i + 1) }')
+		       if (NR <= 20) printf "%s%s %s", (NR > 1 ? ", " : ""), xy, substr(rest, i + 1) }
+		     END { if (NR > 20) printf ", and %d more", NR - 20 }')
 	_mark=$(printf '%s\n' "$2" | git hash-object --stdin 2>/dev/null) || _mark=
 	_s=s
 	[ "$_n" -ne 1 ] || _s=
@@ -444,12 +447,14 @@ uros_tree_line() {
 
 # uros_tree_moved <files then> <files now> -- the paths whose state differs
 # between two uros_tree_files of one tree, comma-separated, "the commit" for a
-# HEAD that moved; nothing, and status 1, when the two are the same.
+# HEAD that moved, twenty at most as uros_tree_line names them; nothing, and
+# status 1, when the two are the same.
 uros_tree_moved() {
 	[ "$1" = "$2" ] && return 1
 	printf '%s\n%s\n' "$1" "$2" | sort | uniq -u |
-		sed -e 's/^HEAD .*/the commit/' -e 's/^.. [^ ]* //' |
-		sort -u | paste -sd, - | sed 's/,/, /g'
+		sed -e 's/^HEAD .*/the commit/' -e 's/^.. [^ ]* //' | sort -u |
+		awk '{ if (NR <= 20) printf "%s%s", (NR > 1 ? ", " : ""), $0 }
+		     END { if (NR > 20) printf ", and %d more", NR - 20 }'
 }
 
 # ── The three looks, the same for both harnesses ──────────────────────
@@ -1226,6 +1231,26 @@ A  $(_g hash-object uros/st.c) uros/st.c
 		_f3=$(uros_tree_files "$_r")
 		_tt "a commit made during the run: the commit, and every path it took in" \
 			"the commit, uros/gone.c, uros/kept.c, uros/st.c, uros/sub/new.c" "$(uros_tree_moved "$_f2" "$_f3")"
+		mkdir "$_r/uros/many"
+		_i=1
+		_named=
+		_moved=
+		while [ "$_i" -le 25 ]; do
+			_p=uros/many/f$(printf '%02d' "$_i").c
+			echo "$_i" > "$_r/$_p"
+			if [ "$_i" -le 20 ]; then
+				_named="$_named${_named:+, }?? $_p"
+				_moved="$_moved${_moved:+, }$_p"
+			fi
+			_i=$(( _i + 1 ))
+		done
+		_f4=$(uros_tree_files "$_r")
+		_tt "twenty paths named at most, and how many more" \
+			"$_r at $(printf '%.8s' "$(_g rev-parse HEAD)") (selftest), with 25 paths changed from it: $_named, and 5 more; sources <mark>" \
+			"$(uros_tree_line "$_r" "$_f4" | sed 's/; sources [0-9a-f]\{12\}$/; sources <mark>/')"
+		_tt "and twenty moved at most" \
+			"$_moved, and 5 more" "$(uros_tree_moved "$_f3" "$_f4")"
+		rm -r "$_r/uros/many"
 		_g checkout -q --detach
 		_tt "a detached checkout says so" \
 			"$_r at $(printf '%.8s' "$(_g rev-parse HEAD)") (detached), as committed" \
