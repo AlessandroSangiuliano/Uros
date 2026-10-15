@@ -137,6 +137,21 @@ extern char user_probe_after_syscall[], user_probe_fault[];
 					 - __user_probe_start))
 
 /*
+ * And a fourth (#699): a read of the data page, which the boot has protected
+ * read-only, then a HLT.  The HLT's address is what a read that went through
+ * reports; a read that faulted reports its own.
+ */
+extern char user_probe_read[], user_probe_read_done[];
+
+#define USER_PROBE_READ_VA					\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_read	\
+					 - __user_probe_start))
+
+#define USER_PROBE_READ_DONE_VA					\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_read_done	\
+					 - __user_probe_start))
+
+/*
  * Where a fault from the probe comes back to.  Declared here only so the
  * kernel can recognise it in a report; the arming is done by the entry
  * itself, which is the only code that knows the stack the return needs.

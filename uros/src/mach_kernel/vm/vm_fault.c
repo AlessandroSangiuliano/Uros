@@ -479,7 +479,7 @@ vm_fault_page(
 	CLUSTER_STAT(int pages_at_higher_offsets;)
 	CLUSTER_STAT(int pages_at_lower_offsets;)
 
-	VM_STAT(faults++);
+	/* No fault count here: vm_fault() counts each fault once (#699). */
 
 #if	MACH_PAGEMAP
 /*
@@ -2094,6 +2094,15 @@ vm_fault(
 	boolean_t		source_wired;	/* #546 */
 	vm_object_t		new_object;
 
+	/*
+	 * 🔴 EVERY FAULT ONCE, AND HERE (#699).  The count was in
+	 * vm_fault_page(), which the fast path below never calls: a fault on a
+	 * resident page -- a read after a fork, a page the pmap dropped and its
+	 * object kept -- was resolved and never counted, while the callers of
+	 * vm_fault_page() that are no fault, unwiring and copies, were.  Above
+	 * RetryFault:, so a fault that goes round again is still one.
+	 */
+	VM_STAT(faults++);
 
     RetryFault: ;
 
@@ -3041,7 +3050,6 @@ vm_fault_wire_fast(
 	register vm_page_t	m;
 	vm_prot_t		prot;
 
-	VM_STAT(faults++);
 /*
  *	Recovery actions
  */
@@ -3180,6 +3188,11 @@ vm_fault_wire_fast(
 	PAGE_WAKEUP_DONE(m);
 	UNLOCK_AND_DEALLOCATE;
 
+	/*
+	 * Counted on success alone (#699): when this gives up, vm_fault_wire()
+	 * calls vm_fault() for the page, and vm_fault() counts it.
+	 */
+	VM_STAT(faults++);
 	return(KERN_SUCCESS);
 
 }

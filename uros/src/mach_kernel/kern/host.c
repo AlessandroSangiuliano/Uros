@@ -362,7 +362,16 @@ host_statistics(
 		{
 			register int i;
 
+			/*
+			 * 🔴 The pointer moves FIRST (#648).  It used to move at
+			 * the end of the body, so the first pass added
+			 * processor 0 a second time and the last processor's
+			 * counts were never added: every HOST_VM_INFO answered
+			 * with processor 0 doubled, and #699's measurement of
+			 * the faults a fork costs was made with it.
+			 */
 			for (i = 1; i < NCPUS; i++) {
+				stat++;
 				host_vm_stat.zero_fill_count +=
 						stat->zero_fill_count;
 				host_vm_stat.reactivations +=
@@ -373,7 +382,6 @@ host_statistics(
 				host_vm_stat.cow_faults += stat->cow_faults;
 				host_vm_stat.lookups += stat->lookups;
 				host_vm_stat.hits += stat->hits;
-				stat++;
 			}
 		}
 #endif

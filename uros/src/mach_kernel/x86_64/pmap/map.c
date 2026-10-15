@@ -523,8 +523,22 @@ uint64_t pmap_protect_page_noflush(pmap_t pmap, uint64_t va, uint64_t flags)
 	 * pmap_pte_update() (pte.h); this was a copy of it, and the copy
 	 * wrote the permission bits into an entry a removal had just zeroed
 	 * (#604).
+	 *
+	 * 🔴 A PROTECT ONLY TAKES AWAY (#699).  WRITE goes unless `flags' has
+	 * it and NX comes if `flags' has it; nothing is given back, and U/S is
+	 * never a protect's to change.  The MI layer relies on that:
+	 * vm_map_protect() calls pmap_protect() whenever an entry's protection
+	 * changes, when it rises too, and leaves the rise to the next fault --
+	 * which is where copy-on-write makes its copy.  i386's pmap_protect()
+	 * says it "will not increase permissions".  This one cleared WRITE,
+	 * USER and NX as a group and set back what pmap_flags_for_prot() gave:
+	 * a protect back to read-write made a page still shared copy-on-write
+	 * writable in place, so that after a fork the child read every write
+	 * its parent made (cow_test [8]), and USER, which a vm_prot_t never
+	 * carries, went on every protect of a user page.
 	 */
-	pmap_pte_update(entry, flags & INTEL_PTE_PERM, INTEL_PTE_PERM);
+	pmap_pte_update(entry, flags & INTEL_PTE_NX,
+			(flags & INTEL_PTE_WRITE) ? 0 : INTEL_PTE_WRITE);
 
 	pmap_read_leave(held);
 

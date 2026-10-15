@@ -84,6 +84,10 @@
 #include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
 #include <kern/misc_protos.h>	/* printf */
 #include <kern/fault_profile.h>	/* #482: arm the instrument once %gs is real */
+#include <kern/host.h>		/* realhost (#648) */
+#include <kern/host_statistics.h>	/* vm_stat[] (#648) */
+#include <mach/host_info.h>		/* HOST_VM_INFO (#648) */
+#include <mach/mach_host_server.h>	/* host_statistics(), as host.c sees it */
 
 #define COM1 0x3F8
 
@@ -1158,6 +1162,124 @@ static void wx_selftest(void)
  * beneath the same top-level slot.
  */
 #define USER_TEST_VA	0x0000000100000000ULL
+
+/*
+ * A protect takes away what it is asked to, keeps the rest, and gives nothing
+ * back (#699).
+ *
+ * pmap_verbs_selftest() protects a kernel page and asks whether WRITE went.
+ * It never asked what stayed, and on a kernel page U/S is not there to stay.
+ * Here the page is a user page, protected read-only through pmap_protect(),
+ * then protected back to read-write -- which must not make it writable, since
+ * vm_map_protect() raises a protection this way and leaves the rise to the
+ * next fault, where copy-on-write copies -- then removed, entered writable
+ * afresh (the fresh leaf checked writable, so the last question can fail) and
+ * protected through pmap_page_protect(), fork's copy-on-write path.  Each
+ * leaf must have kept U/S and be without WRITE.  The leaves are printed as
+ * read.
+ */
+static void protect_user_selftest(void)
+{
+	pmap_t u = pmap_create(0);
+	uint64_t frame = boot_frame_alloc();
+	pt_entry_t *e, by_range = 0, raised = 0, fresh = 0, by_page = 0;
+
+	if (u == PMAP_NULL || frame == 0
+	    || pmap_enter(u, USER_TEST_VA, frame,
+			  VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK)
+		kputs("UrMach x86-64: a user page protected read-only: NOT ASKED "
+		      "— no space, frame or mapping (#699)\r\n");
+	else {
+		pmap_protect(u, USER_TEST_VA, USER_TEST_VA + PAGE_SIZE_4K,
+			     VM_PROT_READ);
+		e = pmap_walk(u->root_pa, USER_TEST_VA, 0);
+		by_range = e != PT_ENTRY_NULL ? *e : 0;
+
+		pmap_protect(u, USER_TEST_VA, USER_TEST_VA + PAGE_SIZE_4K,
+			     VM_PROT_READ | VM_PROT_WRITE);
+		e = pmap_walk(u->root_pa, USER_TEST_VA, 0);
+		raised = e != PT_ENTRY_NULL ? *e : 0;
+
+		pmap_remove(u, USER_TEST_VA, USER_TEST_VA + PAGE_SIZE_4K);
+		if (pmap_enter(u, USER_TEST_VA, frame,
+			       VM_PROT_READ | VM_PROT_WRITE, 0) == PMAP_MAP_OK) {
+			e = pmap_walk(u->root_pa, USER_TEST_VA, 0);
+			fresh = e != PT_ENTRY_NULL ? *e : 0;
+			pmap_page_protect(frame, VM_PROT_READ);
+			e = pmap_walk(u->root_pa, USER_TEST_VA, 0);
+			by_page = e != PT_ENTRY_NULL ? *e : 0;
+		}
+
+		kputs("UrMach x86-64: a user page protected read-only reads ");
+		kputhex64(by_range);
+		kputs(" after pmap_protect(), ");
+		kputhex64(raised);
+		kputs(" after pmap_protect() back to read-write and ");
+		kputhex64(by_page);
+		kputs(" after pmap_page_protect()");
+		kputs(!(by_range & INTEL_PTE_VALID) || !(raised & INTEL_PTE_VALID)
+		      || !(by_page & INTEL_PTE_VALID)
+		      ? " — WRONG, a leaf went missing (#699)\r\n"
+		      : !(by_range & INTEL_PTE_USER) || !(raised & INTEL_PTE_USER)
+		        || !(by_page & INTEL_PTE_USER)
+		      ? " — WRONG, U/S cleared: ring 3 lost the page (#699)\r\n"
+		      : (by_range & INTEL_PTE_WRITE) || (by_page & INTEL_PTE_WRITE)
+		      ? " — WRONG, still writable (#699)\r\n"
+		      : (raised & INTEL_PTE_WRITE)
+		      ? " — WRONG, a protect to read-write gave WRITE back: "
+			"copy-on-write would write in place (#699)\r\n"
+		      : !(fresh & INTEL_PTE_WRITE)
+		      ? " — WRONG, the page entered writable afresh was not "
+			"writable (#699)\r\n"
+		      : " — U/S kept, write taken and never given back, PASS "
+			"(#699)\r\n");
+		pmap_remove(u, USER_TEST_VA, USER_TEST_VA + PAGE_SIZE_4K);
+	}
+	if (u != PMAP_NULL)
+		pmap_destroy(u);
+	if (frame != 0)
+		boot_frame_free(frame);
+}
+
+/*
+ * HOST_VM_INFO adds every processor's counts once (#648).
+ *
+ * The sum is the machine-independent host_statistics()'s, and it added
+ * processor 0 twice and the last processor never.  Asked here, before the VM
+ * has started and anything else counts, with each processor's faults set to a
+ * value of its own -- processor c's are c + 1 -- so that a processor counted
+ * twice or left out changes the total: the answer must be the sum of 1 to
+ * NCPUS.  The counts are given back as they were.
+ */
+static void host_vm_info_selftest(void)
+{
+	integer_t saved[NCPUS];
+	vm_statistics_data_t answer;
+	mach_msg_type_number_t count = HOST_VM_INFO_COUNT;
+	uint64_t want = 0;
+	kern_return_t kr;
+	unsigned c;
+
+	for (c = 0; c < NCPUS; c++) {
+		saved[c] = vm_stat[c].faults;
+		vm_stat[c].faults = (integer_t)(c + 1);
+		want += c + 1;
+	}
+	kr = host_statistics(&realhost, HOST_VM_INFO, (host_info_t) &answer,
+			     &count);
+	for (c = 0; c < NCPUS; c++)
+		vm_stat[c].faults = saved[c];
+
+	kputs("UrMach x86-64: HOST_VM_INFO with processor c's faults set to "
+	      "c + 1 answers ");
+	kputdec((unsigned) answer.faults);
+	kputs(", wanted ");
+	kputdec((unsigned) want);
+	kputs(kr != KERN_SUCCESS ? " — WRONG, host_statistics refused (#648)\r\n"
+	      : (uint64_t) answer.faults == want
+	      ? " — every processor once, PASS (#648)\r\n"
+	      : " — WRONG, a processor counted twice or not at all (#648)\r\n");
+}
 
 /*
  * Build a second address space and show it is one: the kernel half shared
@@ -4193,6 +4315,49 @@ static void ring3_selftest(void)
 	      && window.gs_on_dispatch == kernel_gs
 	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
 	      : " — WRONG, the syscall window is not covered\r\n");
+
+	/*
+	 * And ring 3 reading a page a protect has made read-only (#699).
+	 *
+	 * protect_user_selftest() reads the leaf; this asks the processor, from
+	 * the ring the leaf's U/S bit is for.  The data page is protected
+	 * read-only through pmap_protect(), as fork's copy-on-write protects a
+	 * parent's pages, and ring 3 reads it: the read must go through and the
+	 * HLT after it come back.  A page fault on the read, with the data page
+	 * in cr2, is a protect that took the page away from its own task.  Last,
+	 * because nothing after it may need the page writable.
+	 */
+	{
+		struct trap_record rd;
+
+		pmap_protect(space, USER_PROBE_DATA_VA,
+			     USER_PROBE_DATA_VA + PAGE_SIZE_4K, VM_PROT_READ);
+		write_cr3(space->root_pa);
+		user_probe_enter(USER_PROBE_READ_VA, USER_PROBE_STACK_TOP);
+		rd = *trap_last();
+		write_cr3(kernel_root);
+
+		kputs("UrMach x86-64: ring 3 reading its data page after a "
+		      "protect to read-only took ");
+		kputs(trap_name(rd.vector));
+		kputs(" at ");
+		kputhex64(rd.rip);
+		if (rd.vector == T_PAGE_FAULT) {
+			kputs(", cr2 ");
+			kputhex64(rd.cr2);
+			kputs(", error ");
+			kputhex64(rd.error);
+		}
+		kputs(rd.caught && rd.vector == T_GENERAL_PROTECTION
+		      && rd.rip == USER_PROBE_READ_DONE_VA
+		      ? " — the read went through and its HLT came back, "
+			"PASS (#699)\r\n"
+		      : rd.caught && rd.vector == T_PAGE_FAULT
+		      && rd.cr2 == USER_PROBE_DATA_VA
+		      ? " — WRONG, the read faulted: the protect took U/S "
+			"away (#699)\r\n"
+		      : " — WRONG, not the trap the read ends in (#699)\r\n");
+	}
 
 	/* Ends, not sizes (#612): see user_reachable_selftest(). */
 	pmap_remove(space, USER_PROBE_CODE_VA, USER_PROBE_CODE_VA + PAGE_SIZE_4K);
@@ -9874,6 +10039,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	phys_copy_selftest();
 	wx_selftest();
 	user_pmap_selftest();
+	protect_user_selftest();
+	host_vm_info_selftest();
 
 	acpi_selftest(info);
 	reset_init();		/* #373: the FADT's reset register, said */

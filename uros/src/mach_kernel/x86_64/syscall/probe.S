@@ -281,3 +281,23 @@ user_probe_wide:
 	movabsq	$USER_PROBE_DATA_VA, %r11
 	movq	%rax, 16(%r11)
 	hlt
+
+/*
+ * And a fourth entry (#699): one read of the data page, then the HLT that
+ * brings it back.
+ *
+ * The boot protects the data page read-only before coming here, and a
+ * protect of a user page must leave it a user page: the read goes through and
+ * the HLT's general protection is what returns, at user_probe_read_done.  A
+ * protect that took U/S away makes the read itself fault instead -- a page
+ * fault at user_probe_read, with the data page in cr2 -- which is the defect
+ * #699 removed, seen from where it hurt: ring 3.  The value read stays in
+ * rax, which no record keeps; the question is whether the read faulted.
+ */
+	.globl	user_probe_read
+user_probe_read:
+	movabsq	$USER_PROBE_DATA_VA, %r11
+	movq	(%r11), %rax
+	.globl	user_probe_read_done
+user_probe_read_done:
+	hlt

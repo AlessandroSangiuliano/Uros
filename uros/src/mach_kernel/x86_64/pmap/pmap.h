@@ -441,7 +441,12 @@ int pmap_is_wired(pmap_t pmap, uint64_t va);
  * physical zero and "no mapping" share a return, is kept on purpose. */
 uint64_t pmap_extract(pmap_t pmap, uint64_t va);
 
-/* Reprotect a range; VM_PROT_NONE removes, as the MI interface specifies. */
+/*
+ * Reprotect a range; VM_PROT_NONE removes, as the MI interface specifies.
+ * Never increases permissions (#699): write and execute only ever go, U/S is
+ * never touched.  vm_map_protect() calls this when it raises a protection as
+ * well, and leaves the rise to the next fault, where copy-on-write copies.
+ */
 void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot);
 
 /* Remove every mapping in a range. */

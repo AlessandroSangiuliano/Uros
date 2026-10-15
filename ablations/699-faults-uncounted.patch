@@ -1,0 +1,55 @@
+Kind: ablation
+Issue: #699
+Takes out: 40a06399, the fault count at vm_fault()'s entry -- the reverse of its vm_fault.c: the count goes back into vm_fault_page(), which vm_fault()'s fast path never calls, and to vm_fault_wire_fast()'s entry; cow_test's arm seven reads 64 pages the pmap dropped and their object kept, each fault resolved by the fast path, and must see HOST_VM_INFO's count rise by less than 64; pure software, so TCG shows it as well as KVM; at 99b9f9c9, entry 14, on victus: caught 2 of 2 under KVM and 1 of 1 under TCG and the fixed tree passed as many, arm seven seeing the count rise by 0 for its 64 faults, where every fixed boot saw at least 64
+Run: --entry 14 600 -smp 4
+Expect: cow_test: \[7\] .* — WRONG, a fault the fast path resolves is not counted
+
+diff --git a/uros/src/mach_kernel/vm/vm_fault.c b/uros/src/mach_kernel/vm/vm_fault.c
+index ef6f5656..18a12020 100644
+--- a/uros/src/mach_kernel/vm/vm_fault.c
++++ b/uros/src/mach_kernel/vm/vm_fault.c
+@@ -479,7 +479,7 @@ vm_fault_page(
+ 	CLUSTER_STAT(int pages_at_higher_offsets;)
+ 	CLUSTER_STAT(int pages_at_lower_offsets;)
+ 
+-	/* No fault count here: vm_fault() counts each fault once (#699). */
++	VM_STAT(faults++);
+ 
+ #if	MACH_PAGEMAP
+ /*
+@@ -2094,15 +2094,6 @@ vm_fault(
+ 	boolean_t		source_wired;	/* #546 */
+ 	vm_object_t		new_object;
+ 
+-	/*
+-	 * 🔴 EVERY FAULT ONCE, AND HERE (#699).  The count was in
+-	 * vm_fault_page(), which the fast path below never calls: a fault on a
+-	 * resident page -- a read after a fork, a page the pmap dropped and its
+-	 * object kept -- was resolved and never counted, while the callers of
+-	 * vm_fault_page() that are no fault, unwiring and copies, were.  Above
+-	 * RetryFault:, so a fault that goes round again is still one.
+-	 */
+-	VM_STAT(faults++);
+ 
+     RetryFault: ;
+ 
+@@ -3050,6 +3041,7 @@ vm_fault_wire_fast(
+ 	register vm_page_t	m;
+ 	vm_prot_t		prot;
+ 
++	VM_STAT(faults++);
+ /*
+  *	Recovery actions
+  */
+@@ -3188,11 +3180,6 @@ vm_fault_wire_fast(
+ 	PAGE_WAKEUP_DONE(m);
+ 	UNLOCK_AND_DEALLOCATE;
+ 
+-	/*
+-	 * Counted on success alone (#699): when this gives up, vm_fault_wire()
+-	 * calls vm_fault() for the page, and vm_fault() counts it.
+-	 */
+-	VM_STAT(faults++);
+ 	return(KERN_SUCCESS);
+ 
+ }

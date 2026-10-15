@@ -29,6 +29,9 @@
 #include <mach/message.h>
 #include <mach/vm_prot.h>
 #include <mach/vm_inherit.h>
+#include <mach/host_info.h>		/* HOST_VM_INFO, arm six (#699) */
+#include <mach/mach_host.h>		/* host_statistics() user stub (#699) */
+#include <mach/bootstrap.h>		/* the privileged host port it takes */
 #include <mach/mach_interface.h>
 #include <mach/mach_syscalls.h>
 
@@ -392,6 +395,291 @@ measure_chain_depth(void)
 }
 
 /*
+ * Arm six (#699): what reading a parent's pages costs after a fork.
+ *
+ * A fork protects the parent's writable pages read-only, through
+ * pmap_protect(), so that its next write faults and copies.  A read must not
+ * fault: the page is still the parent's and still readable from ring 3.  It
+ * did, every one, while a protect took U/S away along with WRITE -- the read
+ * was a protection fault, and vm_fault mapped the page again.  So: READ_PAGES
+ * pages touched, a fork, each page read once, and the system's fault count
+ * (HOST_VM_INFO) around the reads.  The count is the whole machine's, and other
+ * tasks fault in the same window, so READ_PAGES is large enough that one fault
+ * per page stands out; the number is printed and not judged, as arm five's
+ * are, since no threshold here is this test's to choose.
+ *
+ * host_statistics() takes the privileged host port (mach_host.defs:
+ * host_priv_t), and refuses mach_host_self()'s name port with
+ * KERN_INVALID_HOST; bootstrap hands the privileged one out, as it does to
+ * act_test's arm nine.
+ */
+#define READ_PAGES	256
+
+static void
+read_after_fork(mach_port_t host_priv)
+{
+	mach_port_t		kid = MACH_PORT_NULL;
+	vm_statistics_data_t	before, after;
+	mach_msg_type_number_t	n;
+	vm_address_t		region = 0;
+	vm_size_t		size = (vm_size_t) READ_PAGES * vm_page_size;
+	unsigned long long	sum = 0;
+	kern_return_t		kr, kb, ka;
+	int			i;
+
+	kr = vm_allocate(mach_task_self(), &region, size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [6] vm_allocate of %d pages failed (%d) — "
+		       "not measured\n", READ_PAGES, kr);
+		return;
+	}
+	/* Resident and writable before the fork, so that the fork protects. */
+	for (i = 0; i < READ_PAGES; i++)
+		*(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size) = (unsigned) i;
+
+	kr = task_create(mach_task_self(), (ledger_port_array_t) 0, 0, TRUE,
+			 &kid);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [6] fork failed (%d) — not measured\n", kr);
+		(void) vm_deallocate(mach_task_self(), region, size);
+		return;
+	}
+
+	n = HOST_VM_INFO_COUNT;
+	kb = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &before,
+			     &n);
+	for (i = 0; i < READ_PAGES; i++)
+		sum += *(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size);
+	n = HOST_VM_INFO_COUNT;
+	ka = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &after,
+			     &n);
+
+	if (kb != KERN_SUCCESS || ka != KERN_SUCCESS)
+		printf("cow_test: [6] host_statistics refused (%d, %d) — "
+		       "not measured\n", kb, ka);
+	else
+		printf("cow_test: [6] %d pages read after a fork: %d faults in "
+		       "the whole system meanwhile, %d of them copy-on-write "
+		       "(read back %llu) (#699)\n", READ_PAGES,
+		       (int) (after.faults - before.faults),
+		       (int) (after.cow_faults - before.cow_faults), sum);
+
+	(void) task_terminate(kid);
+	(void) mach_port_deallocate(mach_task_self(), kid);
+	(void) vm_deallocate(mach_task_self(), region, size);
+}
+
+/*
+ * Arm seven (#699): does the fault count see a fault that vm_fault()'s fast
+ * path resolves?  Arm six's number is HOST_VM_INFO's faults, and the count
+ * used to be taken in vm_fault_page(), which the fast path never calls: a
+ * fault on a resident page went uncounted, and arm six read 0 with the fix it
+ * measures and without it.  So: FAST_PAGES pages touched, protected to nothing
+ * -- which takes them out of the pmap while their object keeps them -- and
+ * back to read and write, then each read once: FAST_PAGES faults, every one on
+ * a resident page, and the count must rise by at least that.  Other tasks'
+ * faults in the same window can only add.
+ */
+#define FAST_PAGES	64
+
+static int
+count_fast_faults(mach_port_t host_priv)
+{
+	vm_statistics_data_t	before, after;
+	mach_msg_type_number_t	n;
+	vm_address_t		region = 0;
+	vm_size_t		size = (vm_size_t) FAST_PAGES * vm_page_size;
+	unsigned long long	sum = 0;
+	kern_return_t		kr, kb, ka;
+	int			i, counted;
+
+	kr = vm_allocate(mach_task_self(), &region, size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [7] vm_allocate of %d pages failed (%d) — "
+		       "WRONG\n", FAST_PAGES, kr);
+		return 0;
+	}
+	for (i = 0; i < FAST_PAGES; i++)
+		*(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size) = (unsigned) i;
+
+	kr = vm_protect(mach_task_self(), region, size, FALSE, VM_PROT_NONE);
+	if (kr == KERN_SUCCESS)
+		kr = vm_protect(mach_task_self(), region, size, FALSE,
+				VM_PROT_READ | VM_PROT_WRITE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [7] vm_protect failed (%d) — WRONG\n", kr);
+		(void) vm_deallocate(mach_task_self(), region, size);
+		return 0;
+	}
+
+	n = HOST_VM_INFO_COUNT;
+	kb = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &before,
+			     &n);
+	for (i = 0; i < FAST_PAGES; i++)
+		sum += *(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size);
+	n = HOST_VM_INFO_COUNT;
+	ka = host_statistics(host_priv, HOST_VM_INFO, (host_info_t) &after,
+			     &n);
+	(void) vm_deallocate(mach_task_self(), region, size);
+
+	if (kb != KERN_SUCCESS || ka != KERN_SUCCESS) {
+		printf("cow_test: [7] host_statistics refused (%d, %d) — "
+		       "WRONG\n", kb, ka);
+		return 0;
+	}
+	counted = (int) (after.faults - before.faults);
+	if (counted < FAST_PAGES) {
+		printf("cow_test: [7] %d reads of pages the pmap had dropped "
+		       "and their object kept: the fault count rose by %d, "
+		       "wanted at least %d — WRONG, a fault the fast path "
+		       "resolves is not counted (#699)\n", FAST_PAGES, counted,
+		       FAST_PAGES);
+		return 0;
+	}
+	printf("cow_test: [7] %d reads of pages the pmap had dropped and their "
+	       "object kept: the fault count rose by %d, at least one a read "
+	       "(read back %llu) — PASS (#699)\n", FAST_PAGES, counted, sum);
+	return 1;
+}
+
+/*
+ * Arms six and seven ask host_statistics(), and every port bootstrap_ports()
+ * hands out goes back, used or not.  Returns arm seven's verdict: six has none.
+ */
+static int
+ask_the_fault_count(void)
+{
+	mach_port_t	host_priv = MACH_PORT_NULL, device = MACH_PORT_NULL;
+	mach_port_t	lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
+	mach_port_t	sec = MACH_PORT_NULL;
+	kern_return_t	kr;
+	int		verdict = 0;
+
+	kr = bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
+			     &sec);
+	if (kr != KERN_SUCCESS)
+		printf("cow_test: [6] and [7] no privileged host port from "
+		       "bootstrap (%d) — WRONG\n", kr);
+	else {
+		read_after_fork(host_priv);
+		verdict = count_fast_faults(host_priv);
+	}
+
+	if (host_priv != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), host_priv);
+	if (device != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), device);
+	if (lw != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), lw);
+	if (lp != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), lp);
+	if (sec != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), sec);
+
+	return verdict;
+}
+
+/*
+ * Arm eight (#699): does copy-on-write survive a protect to read-only and
+ * back?  vm_map_protect() raises a protection by calling pmap_protect() with
+ * it, and leaves the rise to the next fault, which is where a page still
+ * shared copy-on-write gets copied; a pmap that gave WRITE back made such a
+ * page writable in place, and the parent's writes reached its child.  So: a
+ * fork, the parent protects its pages read-only and back to read-write,
+ * writes every one, and the child's copy is read, which must hold what it
+ * held at the fork in every page.  The control is the same without the two
+ * protects, and must hold too.
+ *
+ * Returns how many of the child's pages changed, or -1 if a call failed.
+ */
+static int
+child_pages_changed(int reprotect)
+{
+	vm_address_t	region = 0;
+	vm_size_t	size = (vm_size_t) COW_PAGES * vm_page_size;
+	mach_port_t	kid = MACH_PORT_NULL;
+	vm_size_t	got = 0;
+	kern_return_t	kr;
+	int		i, changed = 0;
+
+	kr = vm_allocate(mach_task_self(), &region, size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("cow_test: [8] vm_allocate failed (%d) — WRONG\n", kr);
+		return -1;
+	}
+	for (i = 0; i < COW_PAGES; i++)
+		*(volatile unsigned long long *)
+			(region + (vm_offset_t) i * vm_page_size) = 0xa0 + i;
+
+	kr = task_create(mach_task_self(), (ledger_port_array_t) 0, 0, TRUE,
+			 &kid);
+	if (kr == KERN_SUCCESS && reprotect)
+		kr = vm_protect(mach_task_self(), region, size, FALSE,
+				VM_PROT_READ);
+	if (kr == KERN_SUCCESS && reprotect)
+		kr = vm_protect(mach_task_self(), region, size, FALSE,
+				VM_PROT_READ | VM_PROT_WRITE);
+	if (kr == KERN_SUCCESS) {
+		for (i = 0; i < COW_PAGES; i++)
+			*(volatile unsigned long long *)
+				(region + (vm_offset_t) i * vm_page_size) =
+				0xb0 + i;
+		kr = vm_read_overwrite(kid, region, size,
+				       (vm_address_t) mirror, &got);
+	}
+	if (kr != KERN_SUCCESS)
+		printf("cow_test: [8] task_create, vm_protect or "
+		       "vm_read_overwrite failed (%d) — WRONG\n", kr);
+	else
+		for (i = 0; i < COW_PAGES; i++)
+			if (*(unsigned long long *)
+			    (mirror + (vm_offset_t) i * vm_page_size) !=
+			    (unsigned long long) (0xa0 + i))
+				changed++;
+
+	if (kid != MACH_PORT_NULL) {
+		(void) task_terminate(kid);
+		(void) mach_port_deallocate(mach_task_self(), kid);
+	}
+	(void) vm_deallocate(mach_task_self(), region, size);
+	return kr == KERN_SUCCESS ? changed : -1;
+}
+
+static int
+reprotect_keeps_copy(void)
+{
+	int	control = child_pages_changed(0);
+	int	question;
+
+	if (control != 0) {
+		if (control > 0)
+			printf("cow_test: [8] without a protect the parent's "
+			       "writes changed the child's copy in %d of %d "
+			       "pages — WRONG\n", control, COW_PAGES);
+		return 0;
+	}
+	question = child_pages_changed(1);
+	if (question < 0)
+		return 0;
+	if (question > 0) {
+		printf("cow_test: [8] after a protect to read-only and back the "
+		       "parent's writes changed the child's copy in %d of %d "
+		       "pages — WRONG, the protect gave WRITE back (#699)\n",
+		       question, COW_PAGES);
+		return 0;
+	}
+	printf("cow_test: [8] the parent protects %d pages read-only and back "
+	       "after a fork and writes them: the child's copy changed in %d, "
+	       "and in %d without the protects — PASS (#699)\n", COW_PAGES,
+	       question, control);
+	return 1;
+}
+
+/*
  * Everything between the allocation and the verdict.  Split out so that a
  * failure part-way can return a count rather than jump, and so that the child
  * task is terminated on every path by the one caller that owns it.
@@ -660,9 +948,12 @@ run_the_arms(void)
 	 * ⚠️ Arm five has no verdict and is not counted.  It answers "how much"
 	 * and not "is it right", and a measurement given a pass/fail would need
 	 * a threshold that nothing here is entitled to choose.  It is last
-	 * because it leaves six terminated tasks behind it.
+	 * because it leaves six terminated tasks behind it.  Arm six, after it,
+	 * has none either; arms seven and eight do, and are counted.
 	 */
 	measure_chain_depth();
+	passed += ask_the_fault_count();
+	passed += reprotect_keeps_copy();
 
 	return passed;
 }
@@ -694,7 +985,7 @@ main(int argc, char **argv)
 	if (child != MACH_PORT_NULL)
 		(void) task_terminate(child);
 
-	printf("cow_test: %d of 3 arms passed\n", passed);
+	printf("cow_test: %d of 5 arms passed\n", passed);
 
 	/*
 	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
@@ -713,5 +1004,5 @@ main(int argc, char **argv)
 	 * This program is single-threaded, so it is the last thread and the
 	 * task goes with it.
 	 */
-	return passed == 3 ? 0 : 1;
+	return passed == 5 ? 0 : 1;
 }
