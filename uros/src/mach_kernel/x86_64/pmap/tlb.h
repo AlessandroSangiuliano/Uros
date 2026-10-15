@@ -99,6 +99,12 @@ void tlb_flush_local_all(void);
  * every processor has the kernel half loaded at all times, so for those the
  * broadcast is not pessimism, it is the answer.
  *
+ * ⚠️ WHAT "EVERYTHING" IS (#437).  For a user space, size 0 -- or more than
+ * TLB_FLUSH_PAGE_LIMIT pages -- discards that space's entries and never the
+ * kernel's global ones: a user leaf is never global, so a CR3 reload is the
+ * whole of it.  For PMAP_NULL it is the whole TLB, global entries and every
+ * PCID included.
+ *
  * Must be called with interrupts enabled; see <cpu/ipi.h> for why.  Before
  * the other processors are woken it costs nothing and does the local half,
  * so early callers need no special case.

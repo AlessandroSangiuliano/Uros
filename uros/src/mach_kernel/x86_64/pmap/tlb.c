@@ -26,6 +26,7 @@ struct tlb_request {
 	uint64_t size;		/* zero means everything */
 	uint64_t ctx_id;	/* #412: the user space it is for, or 0 */
 	uint64_t gen;		/* #412: the generation it brings that space to */
+	uint64_t root;		/* #437: that space's root, or 0 for the kernel */
 };
 
 static struct answer_count served;
@@ -41,9 +42,8 @@ void tlb_flush_local_all(void)
 	 * write one processor's values into another's: CR4 is not the same on
 	 * every processor (#669: the boot processor keeps the MCE and DE bits
 	 * the firmware left), and CR3 is the space a processor runs in.  Most
-	 * callers hold the processor already; the shootdown of a space loaded
-	 * nowhere (tlb_flush_range(), using == 0) did not.  Found by #412's
-	 * review.
+	 * callers hold the processor already, not every one: #412's review
+	 * found one that did not.
 	 */
 	interrupts_disable();
 	cr4 = read_cr4();
@@ -140,19 +140,55 @@ static void tlb_flush_kernel_here(uint64_t va, uint64_t size)
 }
 
 /*
+ * A user space's range on this processor, if CR3 names that space (#437).
+ *
+ * 🔴 ITS OWN ENTRIES, NEVER THE KERNEL'S.  A user leaf is never global, so a
+ * CR3 reload takes every entry the space has here and keeps the kernel's global
+ * ones, the direct map's among them.  The whole-TLB flush this used to be,
+ * tlb_flush_local_all(), empties those too, on every processor in the space's
+ * cpus_using: a large user unmap or protect, and collect's step 5, cost the
+ * kernel its translations everywhere since global pages were turned on (the
+ * cloud audit of 14/10).
+ *
+ * Only where CR3 names the space, asked of CR3 on this processor from the read
+ * to the write.  Without PCID the CR3 write that left a space discarded every
+ * entry it had (SDM Vol. 3A 253668-093US 5.10.4.1), so a processor running
+ * another holds none; with PCID a space loaded nowhere can still be cached
+ * under its PCID, and the generation tlb_flush_range() moved reaches that, at
+ * the next switch in.  Asked of the root and not of the per-processor block,
+ * which does not exist yet when the boot self-tests flush the spaces they
+ * load directly.
+ */
+static void tlb_flush_user_here(uint64_t root, uint64_t va, uint64_t size)
+{
+	int was = interrupts_enabled();
+
+	interrupts_disable();
+	if ((read_cr3() & INTEL_PTE_PFN) == root) {
+		if (tlb_range_by_pages(va, size))
+			tlb_flush_local_range(va, size);
+		else
+			write_cr3(read_cr3());	/* this space, globals kept */
+	}
+	if (was)
+		interrupts_enable();
+}
+
+/*
  * One request, on this processor: the local half of a shootdown, and the
  * whole of what the handler does.
  *
- * A kernel-half request (ctx_id 0), or any request without PCID, is the flush
- * it always was: kernel entries are global, and invlpg reaches a global entry
- * in every PCID -- on the processors PCID is left on for: pmap_pcid_erratum()
- * turns it off where Intel's INVLPG reaches the current PCID's alone, and
- * pmap_enable_pcid() refuses it without global pages.  Except the image's
- * window, whose leaves are not global (#640): tlb_flush_kernel_here() empties
- * every PCID for it.  A user space's request concerns this processor only if that space is
- * the one CR3 names -- asked of CR3, the one thing that cannot be ahead of or
- * behind the TLB, even at boot, where CR3 is written directly.  Then it
- * brings that PCID's generation forward:
+ * A kernel-half request (root 0) is the flush it always was: kernel entries
+ * are global, and invlpg reaches a global entry in every PCID -- on the
+ * processors PCID is left on for: pmap_pcid_erratum() turns it off where
+ * Intel's INVLPG reaches the current PCID's alone, and pmap_enable_pcid()
+ * refuses it without global pages.  Except the image's window, whose leaves
+ * are not global (#640): tlb_flush_kernel_here() empties every PCID for it.
+ * A user space's request concerns this processor only if that space is the one
+ * CR3 names -- asked of CR3, the one thing that cannot be ahead of or behind
+ * the TLB, even at boot, where CR3 is written directly.  Without PCID that is
+ * the root, and tlb_flush_user_here() takes the space's entries alone.  With
+ * PCID it is the PCID, and the request brings that PCID's generation forward:
  *
  *   - by the range alone, if it is the very next generation;
  *   - by discarding the whole PCID, if a generation in between has not
@@ -171,8 +207,12 @@ static void tlb_flush_request_here(const struct tlb_request *r)
 	uint64_t	 pcid, *gen;
 	int		 was;
 
-	if (r->ctx_id == 0 || pmap_pcid_mode == PMAP_PCID_OFF) {
+	if (r->root == 0) {
 		tlb_flush_kernel_here(r->va, r->size);
+		return;
+	}
+	if (pmap_pcid_mode == PMAP_PCID_OFF) {
+		tlb_flush_user_here(r->root, r->va, r->size);
 		return;
 	}
 
@@ -249,7 +289,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * one reason: the cross-call does not return until every one of them
 	 * has finished with it, so this frame outlives every reader of it.
 	 */
-	struct tlb_request r = { va, size, 0, 0 };
+	struct tlb_request r = { va, size, 0, 0, 0 };
 
 	uint64_t using;
 
@@ -324,6 +364,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * order once (EN-22:04).  Without PCID the generation is never read,
 	 * and is not touched.
 	 */
+	r.root = pmap->root_pa;
 	if (pmap_pcid_mode != PMAP_PCID_OFF) {
 		r.ctx_id = pmap->ctx_id;
 		r.gen = atomic_add64(&pmap->tlb_gen, 1) + 1;
@@ -335,7 +376,9 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * Nobody has this space loaded, so there is nobody to interrupt: with
 	 * PCID the generation moved above is what reaches the processors that
 	 * only cache the space, and the flush here is for this processor, which
-	 * may have loaded the root directly (the boot self-tests do).  This is
+	 * may have loaded the root directly (the boot self-tests do) -- and
+	 * flushes only if it has, and never the kernel's global entries (#437,
+	 * tlb_flush_user_here()).  This is
 	 * the ORDINARY case, not an edge one: a space no processor has loaded
 	 * -- a freshly forked one until its first thread runs, a task's that is
 	 * not running -- has an empty set, and its flushes come here.
@@ -350,7 +393,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * "there is no block" cannot come apart.
 	 */
 	if (using == 0) {
-		tlb_flush_local_range(va, size);
+		tlb_flush_user_here(pmap->root_pa, va, size);
 		return;
 	}
 
