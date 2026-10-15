@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #700
+Over: 700-widen-reply.patch
+Takes out: dd73b64e -- ipc_mqueue_deliver() drops imq_lock before it wakes its receiver again, so a receiver an abort has already freed can take the message, halt in thread_terminate_self() and be woken out of the reaper's queue by the wakeup that comes after
+Run: --entry 14 600 -smp 4
+Expect: thread_go: thread 0x[0-9a-f]+ is halted and queued for the reaper
+Expect: the zombie walks
+Expect: ipc_mqueue_receive: bad wait_result
+Expect: mach_msg_receive_continue: bad wait_result
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+index fa629d1a..52ad3fd5 100644
+--- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
++++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+@@ -887,6 +887,7 @@ ipc_mqueue_deliver(
+ 	receiver->ith_state = MACH_MSG_SUCCESS;
+ 	receiver->ith_kmsg = kmsg;
+ 	receiver->ith_seqno = port->ip_seqno++;
++	imq_unlock(mqueue);
+ 
+ 	/*
+ 	 * 🔴 WOKEN BEFORE imq_unlock(), NOT AFTER IT (#700).
+@@ -972,7 +973,6 @@ ipc_mqueue_deliver(
+ 	    "a reply holds its receiver off the queue, not yet woken, for");
+ 	if (!direct)
+ 		thread_go(receiver);
+-	imq_unlock(mqueue);
+ 
+ 	/*
+ 	 * Balance the disable_preemption() above so the receiver runs at the

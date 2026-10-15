@@ -585,7 +585,12 @@ thread_timeout_setup(
  *	Purpose:
  *		Start a thread running.
  *	Conditions:
- *		IPC locks may be held.
+ *		The caller knows the thread is still in the wait it means to
+ *		end, because it holds the lock of the queue it has just taken
+ *		the thread off: the lock the thread must take to leave that
+ *		wait.  Once the lock is dropped the thread may already be in a
+ *		later wait, which looks the same here, and this would end that
+ *		one instead (#700).
  */
 
 void
