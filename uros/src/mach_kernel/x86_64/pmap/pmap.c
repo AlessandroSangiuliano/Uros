@@ -510,9 +510,10 @@ pmap_t pmap_create(uint64_t size)
 	pmap->cpus_using = 0;
 
 	/*
-	 * #412: a name no slot on any processor can already hold, and a
-	 * generation above every slot's zero -- so the first switch into the
-	 * space misses and discards what its PCID held before.
+	 * #412: a name no slot on any processor can already hold, so the first
+	 * switch into the space misses and discards what its PCID held before:
+	 * pmap_cr3_for() finds a slot by ctx_id alone, and the generation's
+	 * starting value plays no part in it.
 	 */
 	pmap->ctx_id = atomic_add64(&pmap_ctx_next, 1);
 	pmap->tlb_gen = 1;

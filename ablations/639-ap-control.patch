@@ -1,16 +1,16 @@
 Kind: ablation
 Issue: #639
-Takes out: the application processors' own control registers -- they keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before the fix, and, since #437 and #412 put them in the same set (pmap_cr4_on), without PGE and PCIDE; caught by the census before anything else, under TCG 2 of 2 on OMEGA at 3e731776; under KVM on a host with PCID the boot would go on to fault after the census -- reasoned from the code, never booted -- since pmap_cr3_for() sets bit 63 for the NOFLUSH loads and with PCIDE clear that bit is reserved (SDM Vol. 3A 253668-093US Table 5-12)
+Takes out: the application processors' own control registers -- they keep CD and NW set and run without CR0.WP, SMEP and SMAP, as every boot did before the fix, and, since #437 and #412 put them in the same set (pmap_cr4_on), without PGE and PCIDE; caught by the census before anything else, under TCG 2 of 2 on OMEGA at 3e731776; under KVM on a host with PCID the boot would go on to fault after the census -- reasoned from the code, never booted -- since pmap_cr3_for() sets bit 63 for the NOFLUSH loads and with PCIDE clear that bit is reserved (SDM Vol. 3A 253668-093US Table 5-12); made again when fc05cedf rewrote the comment above the two lines, which the merge test at fee4e9a0 (run 38592195427) found no longer applied -- the two lines taken out are the same; at b00ee54e on victus under TCG, caught 2 of 2 -- processors 1 to 3 each "CR0 lacks WP: CR0 has, unlike the boot processor, NW CD: CR4 lacks PGE SMEP SMAP" -- and the fixed tree passed 2 of 2
 Run: --entry 0 600 -smp 4
 Expect: WRONG \(#639\)
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/smp.c b/uros/src/mach_kernel/x86_64/cpu/smp.c
-index c00e6839..287b250b 100644
+index 6033d679..91358eef 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/smp.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/smp.c
 @@ -219,8 +219,6 @@ void ap_start_c(uint32_t cpu)
- 	 * (SMEP, SMAP, and PGE for #437): every boot until this ran three of
- 	 * four processors without the first three.
+ 	 * (SMEP, SMAP, PGE for #437 and PCIDE for #412): every boot until this
+ 	 * ran three of four processors without the first three.
  	 */
 -	write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
 -	pmap_control_regs_here();

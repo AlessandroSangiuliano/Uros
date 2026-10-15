@@ -346,7 +346,9 @@ struct percpu {
 	 * reuses addresses, and a new space born where a dead one lived must not
 	 * find the dead one's entries.  Written by this processor only, with
 	 * interrupts off, so that the shootdown handler never sees a slot and a
-	 * CR3 that disagree.
+	 * CR3 that disagree -- except by pcid_test's probe at boot
+	 * (xs_step_here()), which aims an eviction by hand, with interrupts on
+	 * when it runs in place, while nothing else runs.
 	 */
 	struct {
 		uint64_t ctx_id;

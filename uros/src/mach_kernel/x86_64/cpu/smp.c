@@ -216,8 +216,8 @@ void ap_start_c(uint32_t cpu)
 	 * on: nothing can be dirty in a cache that never filled.
 	 *
 	 * Then CR0.WP and the CR4 bits, as the boot processor turned them on
-	 * (SMEP, SMAP, and PGE for #437): every boot until this ran three of
-	 * four processors without the first three.
+	 * (SMEP, SMAP, PGE for #437 and PCIDE for #412): every boot until this
+	 * ran three of four processors without the first three.
 	 */
 	write_cr0(read_cr0() & ~(CR0_CD | CR0_NW));
 	pmap_control_regs_here();

@@ -1,12 +1,12 @@
 Kind: ablation
 Issue: #412
 Over: 412-widen-checkin.patch
-Takes out: the wait for cap_server's name in provision_cap_port_for_child() -- cap_provision is retried twenty thousand times with a depressed yield between the tries, as before 3ecbd72e, so a cap_server that checks in later than twenty thousand yields last leaves the first server after it with a manifest, cap_test, running without one and refused every capability, as in 2 boots of 648 on GitHub's EPYC 9V45 under KVM in #412's merge test (run 38449516704); over 412-widen-checkin.patch, which holds the check-in back 10 s so that the yields run out first under any accelerator
+Takes out: the wait for cap_server's name in provision_cap_port_for_child() -- cap_provision is retried twenty thousand times with a depressed yield between the tries, as before 3ecbd72e, so a cap_server that checks in later than twenty thousand yields last leaves the first server after it with a manifest, cap_test, running without one and refused every capability, as in 2 boots of 648 on GitHub's EPYC 9V45 under KVM in #412's merge test (run 38449516704); over 412-widen-checkin.patch, which holds the check-in back 10 s so that the yields run out first under any accelerator; the reverse of 3ecbd72e's bootstrap.c and of 6846e35e's, whose look at cap_server's death sits inside the wait 3ecbd72e added and goes with it -- made again when 6846e35e changed that function and the merge test at fee4e9a0 (run 38592195427) refused the tree because this no longer applied; at b00ee54e on victus, over the widen, caught 1 of 1 under TCG and 1 of 1 under KVM -- seven servers provisioned without their manifests, cap_test among them, and cap_test's SOME TESTS FAILED -- and the fixed tree passed as many, none without its manifest and cap_test's ALL TESTS PASSED
 Run: --entry 14 600 -smp 4
 Expect: bootstrap: [a-z_]+: cap_provision_task failed \(2412\)
 
 diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
-index 832c4bcb..9070a86f 100644
+index 5429bbb1..9070a86f 100644
 --- a/uros/src/servers/bootstrap/bootstrap.c
 +++ b/uros/src/servers/bootstrap/bootstrap.c
 @@ -64,6 +64,7 @@
@@ -64,7 +64,7 @@ index 832c4bcb..9070a86f 100644
   */
  #define STAGE2_POLL_MS	250
  
-@@ -565,95 +561,6 @@ boot_open_file(const char *path, struct file *fp)
+@@ -565,101 +561,6 @@ boot_open_file(const char *path, struct file *fp)
  	return open_file(bootstrap_master_device_port, path, fp);
  }
  
@@ -106,7 +106,13 @@ index 832c4bcb..9070a86f 100644
 -
 -	if (checked_in)
 -		return 1;
--	if (cap_server_sp == NULL)
+-	/*
+-	 * A cap_server already gone is a fact before the name server is asked:
+-	 * asking would leave a watcher there that nothing ever answers, and
+-	 * cost the child a polling period before the death was looked at (the
+-	 * cloud audit of #412, 14/10).
+-	 */
+-	if (cap_server_sp == NULL || (cap_server_sp->flags & SERVER_DIED_F))
 -		return 0;
 -
 -	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_RECEIVE,
@@ -160,7 +166,7 @@ index 832c4bcb..9070a86f 100644
  /*
   * provision_cap_port_for_child — see forward declaration.
   *
-@@ -662,7 +569,8 @@ cap_server_checked_in(void)
+@@ -668,7 +569,8 @@ cap_server_checked_in(void)
   * it as TASK_CAP_PORT on the child.  Missing manifest is the common
   * case (no .cmf shipped for legacy / unmigrated servers) — silently
   * skip.  Everything else is logged but non-fatal: a child without
@@ -170,7 +176,7 @@ index 832c4bcb..9070a86f 100644
   */
  static int
  provision_cap_port_for_child(task_port_t child_task,
-@@ -735,33 +643,62 @@ provision_cap_port_for_child(task_port_t child_task,
+@@ -741,33 +643,62 @@ provision_cap_port_for_child(task_port_t child_task,
  	 * STARTED.  #216 provisions at task-CREATION time and cap_server is
  	 * itself created here, so the first child with a manifest is offered
  	 * one before cap_server has registered its name -- cap_provision then
@@ -247,7 +253,7 @@ index 832c4bcb..9070a86f 100644
  		else
  			printf("%s: %s: cap_provision_task failed (%d) — it "
  			       "ships a manifest and will run WITHOUT one, so "
-@@ -1264,9 +1201,9 @@ main(int argc, char **argv)
+@@ -1270,9 +1201,9 @@ main(int argc, char **argv)
  	     * Servers with a "<symtab>.cmf" manifest in the boot bundle
  	     * get a TASK_CAP_PORT stamped on them now, before thread
  	     * creation so libmach init reads it on the first instruction.
@@ -260,7 +266,7 @@ index 832c4bcb..9070a86f 100644
  	     */
  	    (void)provision_cap_port_for_child(user_task, sp->symtab_name);
  
-@@ -1277,7 +1214,7 @@ main(int argc, char **argv)
+@@ -1283,7 +1214,7 @@ main(int argc, char **argv)
  	     * is for.
  	     */
  	    if (strcmp(sp->symtab_name, "cap_server") == 0)

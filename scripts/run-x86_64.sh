@@ -475,10 +475,11 @@ esac
 # So the list is the thing to add to, and it is one line per test.
 must_report() {
 	# $1 the line that says it started · $2 the line that says it finished
-	# $3 what the silence means
+	# $3 what the silence means · $4 the test's name, where $1's prefix is
+	# not one ("UrMach x86-64: ...")
 	grep -aq "$1" "$LOG" || return 0
 	if grep -aq "$2" "$LOG"; then
-		echo "  ${1%%:*}: reported"
+		echo "  ${4:-${1%%:*}}: reported"
 		return 0
 	fi
 	echo "  FAILED: '$1' appeared and '$2' never did."
@@ -491,6 +492,16 @@ must_report() {
 # #586: NOT ASKED is an ending too -- without a calibrated TSC neither test can
 # be timed, and the kernel says so in the word counted above.  Demanding PASS
 # failed a boot for a question the kernel had correctly declined.
+# #412, #437: the PCID and global-pages modes are said early, and the probes
+# that ask them run at the end of the machine-dependent boot.  A probe dropped
+# from the boot, or a boot that stopped before it, said the mode and nothing
+# else (the cloud audit of 14/10).
+must_report 'UrMach x86-64: PCID ' 'pcid_test: ' \
+	'pcid_test prints at least one line on every boot that runs it, NOT ASKED included (#412).' \
+	pcid_test
+must_report 'UrMach x86-64: global pages ' 'UrMach x86-64: \(a page narrowed after a split\|global pages are off, so a split\|no frame for the global split probe\|the probe.s frame has no entry\|no processor online besides the one that\|the direct map is already 4 KiB\|the probe.s page did not split\)' \
+	'The global split probe ends in its summary line or in one of the lines that say why it could not ask (#437).' \
+	'global split probe'
 must_report 'preempt_test: starting' 'preempt_test: \(PASS\|NOT ASKED\)' \
 	'Its failure mode is silence: a processor never taken from a thread that will not yield prints nothing at all (#459/#461).'
 must_report 'fpu_stress: 3 threads' 'fpu_stress: \(PASS\|NOT ASKED\)' \

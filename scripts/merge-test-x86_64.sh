@@ -86,6 +86,9 @@ WRONG=0
 #             a pass on a question not asked says NOT ASKED in its verdict (#412)
 #   pcidn     the harness's verdict, -n's line and pcid_test NOT ASKED, or no
 #             PCID offered, said as NOT ASKED (#412)
+#   pcidd     the harness's verdict and, where the processor offers PCID, the
+#             default mode -- with INVPCID where the host has it, without where
+#             it does not -- with pcid_test's [1], [2] and [3] lines (#412)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -95,7 +98,7 @@ WRONG=0
 # the interrupts aimed at 256 need all 32 bits; under KVM the harness asks
 # those engines for the split irqchip.
 ENTRIES="
-0 harness
+0 pcidd
 1 harness
 5 harness
 6 harness
@@ -185,9 +188,10 @@ SKIPPED="
 # as it does when [1] or [2] could not judge -- a pass that asked nothing is
 # not written as one that did (#412's second review).  NOTE carries the words.
 host_has_pcid() { grep -qw pcid /proc/cpuinfo; }
+host_has_invpcid() { grep -qw invpcid /proc/cpuinfo; }
 
-pcid_judge() {	# x|n accelerator full-log
-	local flag=$1 a=$2 f=$3
+pcid_judge() {	# x|n|d accelerator full-log
+	local flag=$1 a=$2 f=$3 lacks
 	if grep -aq 'UrMach x86-64: PCID not offered by this cpu' "$f"; then
 		if [ "$a" = kvm ] && host_has_pcid; then
 			NOTE="no PCID seen under KVM on a host that has it"
@@ -196,10 +200,31 @@ pcid_judge() {	# x|n accelerator full-log
 		NOTE="NOT ASKED: no PCID offered"
 		return 0
 	fi
+	# A refusal is a failure of x and d, named rather than silent: neither
+	# reaches the merge test's machines -- KVM is exempt from the erratum
+	# and every board has global pages -- so one that does is news (the
+	# cloud audit of 14/10).
+	if [ "$flag" != n ] && grep -aq 'UrMach x86-64: PCID off: ' "$f"; then
+		NOTE="refused: $(grep -a -m1 -o 'UrMach x86-64: PCID off: [^,]*' "$f" | cut -c26-)"
+		return 1
+	fi
+	# Which INVPCID words a mode may say is the host's to decide: where it
+	# has INVPCID, -x must be what took it away, and the default must have
+	# it (the cloud audit of 14/10: "which this cpu lacks" passed on a host
+	# that had it, and nothing asked what the default mode was).
+	if host_has_invpcid; then lacks='as -x asks'; else lacks='which this cpu lacks'; fi
 	case $flag in
-	x)	grep -aqE 'UrMach x86-64: PCID on, without INVPCID, (as -x asks|which this cpu lacks)' "$f" &&
+	x)	grep -aq "UrMach x86-64: PCID on, without INVPCID, $lacks" "$f" &&
 			grep -aq 'pcid_test: \[1\] ' "$f" && grep -aq 'pcid_test: \[2\] ' "$f" || return 1
 		grep -aqE 'pcid_test: \[[12]\] .*NOT ASKED' "$f" && NOTE="NOT ASKED by [1] or [2]"
+		return 0 ;;
+	d)	if host_has_invpcid; then
+			grep -aq 'UrMach x86-64: PCID on, with INVPCID' "$f"
+		else
+			grep -aq 'UrMach x86-64: PCID on, without INVPCID, which this cpu lacks' "$f"
+		fi && grep -aq 'pcid_test: \[1\] ' "$f" && grep -aq 'pcid_test: \[2\] ' "$f" &&
+			grep -aq 'pcid_test: \[3\] ' "$f" || return 1
+		grep -aqE 'pcid_test: \[[123]\] .*NOT ASKED' "$f" && NOTE="NOT ASKED by [1], [2] or [3]"
 		return 0 ;;
 	n)	grep -aq 'UrMach x86-64: PCID off, as -n asks' "$f" &&
 			grep -aq 'pcid_test: NOT ASKED' "$f" ;;
@@ -247,6 +272,11 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 		pcid_judge x "$a" "$f" ;;
 	pcidn) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		pcid_judge n "$a" "$f" ;;
+	# Entry 0, the default: under "harness" a pcid_test that stopped
+	# running, or a default that lost INVPCID, failed nothing (the cloud
+	# audit of 14/10).
+	pcidd) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		pcid_judge d "$a" "$f" ;;
 	# #666: the boot passed, and with -f the screen drew what came before it.
 	early) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;

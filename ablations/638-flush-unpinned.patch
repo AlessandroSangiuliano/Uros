@@ -3,7 +3,7 @@ Issue: #638
 Over: 638-widen-window.patch
 Takes out: the pin in tlb_flush_range() -- it flushes this processor and cross-calls the others with preemption on, so a thread moved between the two leaves the processor it arrived at unflushed
 Run: --entry 31 1200 -smp 4
-Expect: shootdown_test: \[1\] WRONG
+Expect: shootdown_test: \[1\] WRONG — a translation outlived
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/tlb.c b/uros/src/mach_kernel/x86_64/pmap/tlb.c
 index 0e7ed7bd..c4567d09 100644
