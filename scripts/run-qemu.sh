@@ -171,6 +171,13 @@ if [ ! -f "$BUILD_DIR/build.ninja" ]; then
     echo "ERROR: $BUILD_DIR is not a configured build directory (no build.ninja)"
     exit 1
 fi
+# 🔴 WHICH TREE THIS IMAGE IS MADE FROM (#587), looked at before ninja reads it
+# and again once the kernel, the bundle and the disk are made, as run-x86_64.sh
+# does; not when the run ends, because this script execs qemu, and the block
+# says so.  The tree is the one $BUILD_DIR was configured from, which with
+# UROS_BUILD_DIR above can be a worktree's while this script is the main
+# checkout's: run-conditions.sh, uros_tree_open and after.
+uros_tree_open "$BUILD_DIR" "$REPO_ROOT"
 BUILD_LOG="$BUILD_DIR/run-qemu-build.log"
 BUILD_T0=$(date +%s)
 echo "Build:   ninja -C $BUILD_DIR (output in $BUILD_LOG)"
@@ -439,6 +446,10 @@ fi
 # shellcheck disable=SC2086
 DISKS_ON_BOARD=$(uros_board_disks $QEMU_ARGS $EXTRA_ARGS)
 
+# The tree again, the image made (#587): the kernel, the bundle, the disk and
+# its virtio copy are all in place by now.
+TREE_AT_IMAGE=$(uros_tree_look)
+
 # ------------------------------------------------------- run conditions
 #
 # Say what the host was doing and what the machine is, on the same output as
@@ -453,6 +464,10 @@ DISKS_ON_BOARD=$(uros_board_disks $QEMU_ARGS $EXTRA_ARGS)
 # could have.
 uros_conditions_open
 uros_conditions_block "i386" "$ACCEL" \
+	"tree:         $UROS_TREE_LINE" \
+	"tree since:   $(uros_tree_since "$TREE_AT_IMAGE" execs)" \
+	"build:        $BUILD_DIR" \
+	"${UROS_HARNESS_LINE:+harness:      $UROS_HARNESS_LINE -- the scripts that ran this, from another tree than its image}" \
 	"clock in run: not measured (this harness execs qemu; see host end)" \
 	"cpu/accel:    $ACCEL_ARGS" \
 	"smp:          ${SMP_COUNT:-1}" \
@@ -460,6 +475,9 @@ uros_conditions_block "i386" "$ACCEL" \
 	"virtio:       $([ "$USE_VIRTIO" = true ] && echo "$VIRTIO_DISK, $VIRTIO_PLACE" || echo no)" \
 	"disks:        $DISKS_ON_BOARD" \
 	"command:      $0 $ORIG_ARGS"
+# Under the block, as run-x86_64.sh's: a tree that moved while the image was
+# made (#587).  The other move, after it, nobody is here to see.
+uros_tree_warnings "$TREE_AT_IMAGE" execs
 
 # ⚠️ `exec' stays.  Without it this shell remains qemu's parent, and every
 # harness here starts the script with Popen() and later calls terminate() on

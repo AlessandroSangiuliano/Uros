@@ -356,6 +356,206 @@ uros_board_disks() {
 	echo "${_out:-none}"
 }
 
+# ── The tree the image was made from (#587) ───────────────────────────
+#
+# 🔴 BOTH HARNESSES BUILD BEFORE EVERY BOOT, FROM THE TREE AS IT STANDS, and no
+# log said which tree that was.  A campaign that spans an edit, a checkout or a
+# rebase mixes two trees and every log of it looks alike; #586's census was run
+# for forty minutes with the sources frozen by hand, and had they not been,
+# nothing would have shown that the last boots tested a fix the first ones did
+# not have.
+#
+# 🔑 THE TREE IS THE BUILD DIRECTORY'S, NOT THE SCRIPT'S.  A build directory
+# compiles the sources it was configured from, CMakeCache.txt's
+# CMAKE_HOME_DIRECTORY, and UROS_BUILD_DIR (#485) can name one configured from
+# a worktree while the script runs from the main checkout.  So the commit is
+# asked of that directory, not of the checkout the script sits in.
+#
+# ⚠️ Ignored files are not listed, the build directories being among them, so
+# a file the build reads and .gitignore hides is not seen here.  #565 is why
+# nothing is generated into the source tree any more.
+#
+# 🔴 EVERY COMMAND BELOW THAT MAY FAIL HAS ITS `||'.  Both harnesses run under
+# set -e, and as /bin/sh -- bash in POSIX mode, or dash -- a command
+# substitution keeps -e: grep -vc counting no lines exits 1, and the first
+# version of uros_tree_line, counting a clean tree's paths that way, ended
+# run-x86_64.sh on every clean checkout without a word.  --self-test calls
+# these under set -e too.
+
+# uros_tree_of <build dir> -- the top of the tree <build dir> compiles: its
+# CMAKE_HOME_DIRECTORY, raised to the top of the git checkout holding it.
+# Nothing, and status 1, for a directory that was never configured.
+uros_tree_of() {
+	_src=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$1/CMakeCache.txt" 2>/dev/null) ||
+		_src=
+	[ -n "$_src" ] || return 1
+	git -C "$_src" rev-parse --show-toplevel 2>/dev/null || echo "$_src"
+}
+
+# uros_tree_files <tree> -- what the tree is, beyond what it names: a line
+# "HEAD <commit>", then one per path that differs from that commit, staged or
+# not, and per untracked file, "<XY> <blob> <path>": git's two status letters,
+# the working copy's blob ("-" for a path that is gone) and the path.
+# Untracked files count because the build globs directories, so a new source
+# file is compiled without being added.  Status 1 outside a git checkout.
+#
+# 🔴 NOTHING IS WRITTEN TO THE REPOSITORY: hash-object without -w, and status
+# with --no-optional-locks.  Without it git status refreshes the index when it
+# can take index.lock -- measured, a file touched and the index rewritten --
+# and three looks a boot, a campaign long, would race whoever commits.
+uros_tree_files() {
+	_head=$(git -C "$1" rev-parse HEAD 2>/dev/null) || return 1
+	echo "HEAD $_head"
+	git --no-optional-locks -C "$1" status --porcelain -z --untracked-files=all \
+		--no-renames 2>/dev/null | tr '\0' '\n' |
+	while IFS= read -r _l; do
+		[ -n "$_l" ] || continue
+		_xy=${_l%"${_l#??}"}
+		_p=${_l#???}
+		if [ -f "$1/$_p" ]; then
+			_b=$(git -C "$1" hash-object -- "$_p" 2>/dev/null) || _b="?"
+		else
+			_b=-
+		fi
+		echo "$_xy $_b $_p"
+	done
+}
+
+# uros_tree_line <tree> <uros_tree_files of it> -- the conditions field: the
+# tree, its commit and branch, and every path that differs from the commit,
+# with a mark of the whole state when any does, so that two runs can be told
+# to have built the same sources by more than their commit.
+uros_tree_line() {
+	_head=$(printf '%s\n' "$2" | sed -n 's/^HEAD //p')
+	_br=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null) || _br=
+	[ "$_br" != HEAD ] || _br="detached"
+	_n=$(printf '%s\n' "$2" | awk '!/^HEAD / { n++ } END { print n + 0 }')
+	_say="$1 at $(printf '%.8s' "$_head")${_br:+ ($_br)}"
+	if [ "$_n" -eq 0 ]; then
+		echo "$_say, as committed"
+		return
+	fi
+	# "XY blob path" as "XY path", the status letters without git's blanks;
+	# twenty at most, which a checkout or a rebase left half done would
+	# exceed by hundreds in every log, and the mark covers them all.
+	_paths=$(printf '%s\n' "$2" | grep -v '^HEAD ' |
+		awk '{ xy = substr($0, 1, 2); gsub(/ /, "", xy)
+		       rest = substr($0, 4); i = index(rest, " ")
+		       if (NR <= 20) printf "%s%s %s", (NR > 1 ? ", " : ""), xy, substr(rest, i + 1) }
+		     END { if (NR > 20) printf ", and %d more", NR - 20 }')
+	_mark=$(printf '%s\n' "$2" | git hash-object --stdin 2>/dev/null) || _mark=
+	_s=s
+	[ "$_n" -ne 1 ] || _s=
+	echo "$_say, with $_n path$_s changed from it: $_paths; sources $(printf '%.12s' "$_mark")"
+}
+
+# uros_tree_moved <files then> <files now> -- the paths whose state differs
+# between two uros_tree_files of one tree, comma-separated, "the commit" for a
+# HEAD that moved, twenty at most as uros_tree_line names them; nothing, and
+# status 1, when the two are the same.
+uros_tree_moved() {
+	[ "$1" = "$2" ] && return 1
+	printf '%s\n%s\n' "$1" "$2" | sort | uniq -u |
+		sed -e 's/^HEAD .*/the commit/' -e 's/^.. [^ ]* //' | sort -u |
+		awk '{ if (NR <= 20) printf "%s%s", (NR > 1 ? ", " : ""), $0 }
+		     END { if (NR > 20) printf ", and %d more", NR - 20 }'
+}
+
+# ── The three looks, the same for both harnesses ──────────────────────
+#
+# The tree is looked at before the build reads it, once the image is made,
+# and when the run ends -- where the harness is still there to look, which
+# run-qemu.sh is not: it execs qemu.  A change before the image was made may
+# be in it in either state; a change after it leaves the image the tree the
+# block names, and the next run's not.
+
+# uros_tree_open <build dir> <the harness's own checkout> -- the first look,
+# before the build.  Sets UROS_TREE_DIR, UROS_TREE_AT_BUILD (empty when no
+# state could be taken), UROS_TREE_LINE, and UROS_HARNESS_LINE: the scripts'
+# own tree when it is known not to be the image's, which a run against
+# UROS_BUILD_DIR from the main checkout is, and empty otherwise.
+uros_tree_open() {
+	UROS_TREE_DIR=$(uros_tree_of "$1") || UROS_TREE_DIR=
+	UROS_TREE_AT_BUILD=
+	if [ -z "$UROS_TREE_DIR" ]; then
+		UROS_TREE_LINE="not named: $1 has no CMakeCache.txt to say which sources it compiles"
+	elif UROS_TREE_AT_BUILD=$(uros_tree_files "$UROS_TREE_DIR"); then
+		UROS_TREE_LINE=$(uros_tree_line "$UROS_TREE_DIR" "$UROS_TREE_AT_BUILD")
+	else
+		UROS_TREE_AT_BUILD=
+		UROS_TREE_LINE="$UROS_TREE_DIR, not a git checkout: which state of it was built cannot be named"
+	fi
+	_hd=$(git -C "$2" rev-parse --show-toplevel 2>/dev/null) || _hd=$2
+	UROS_HARNESS_LINE=
+	if [ -n "$UROS_TREE_DIR" ] && [ "$_hd" != "$UROS_TREE_DIR" ]; then
+		if _hf=$(uros_tree_files "$_hd"); then
+			UROS_HARNESS_LINE=$(uros_tree_line "$_hd" "$_hf")
+		else
+			UROS_HARNESS_LINE="$_hd, not a git checkout"
+		fi
+	fi
+}
+
+# uros_tree_look -- another look at the tree uros_tree_open looked at: its
+# state, or nothing when the first look took none or git gives none now.
+uros_tree_look() {
+	[ -n "$UROS_TREE_AT_BUILD" ] || return 0
+	uros_tree_files "$UROS_TREE_DIR" || true
+}
+
+# uros_tree_since <look once the image was made> <look when the run ended,
+# or "execs"> -- the field "tree since:", what the later looks found, said
+# when nothing moved too: printed only for a move, the field would be absent
+# both for a tree that held still and for one nobody looked at.
+uros_tree_since() {
+	if [ -z "$UROS_TREE_AT_BUILD" ]; then
+		echo "not looked at again: no state of it was taken"
+		return 0
+	fi
+	if [ -z "$1" ]; then
+		echo "not looked at again: git gave no state of it once the image was made"
+		return 0
+	fi
+	if _mb=$(uros_tree_moved "$UROS_TREE_AT_BUILD" "$1"); then
+		_s="CHANGED while the image was made, in $_mb"
+	else
+		_s="unchanged while the image was made"
+	fi
+	case "$2" in
+	execs)	echo "$_s; not looked at once qemu runs (this harness execs qemu)" ;;
+	"")	echo "$_s; not looked at when the run ended: git gave no state of it" ;;
+	*)	if _mr=$(uros_tree_moved "$1" "$2"); then
+			echo "$_s; CHANGED after it, by the end of the run, in $_mr"
+		else
+			echo "$_s, and when the run ended"
+		fi ;;
+	esac
+}
+
+# uros_tree_warnings <look once the image was made> <look when the run ended,
+# or "execs"> -- a line under the block for each move, as the clock's (#560,
+# #579): a run whose image may hold either state of a file is not what its
+# tree line says, and a run whose tree moved after it is not what the next
+# run will boot.  Nothing for a tree that held still.
+#
+# 🔴 NO PATH IN THEM.  They sit under the block, where the verdicts read every
+# word, and a path is anyone's choice: an untracked FAIL-notes.txt would fail a
+# run that passed.  The paths are in "tree since:", inside the block, which
+# the verdicts leave out.
+uros_tree_warnings() {
+	[ -n "$UROS_TREE_AT_BUILD" ] && [ -n "$1" ] || return 0
+	if uros_tree_moved "$UROS_TREE_AT_BUILD" "$1" > /dev/null; then
+		echo "  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of what \"tree since:\" names"
+	fi
+	case "$2" in
+	execs|"") return 0 ;;
+	esac
+	if uros_tree_moved "$1" "$2" > /dev/null; then
+		echo "  ⚠️ THE TREE CHANGED DURING THIS RUN, after its image was made — the next run will not boot what this one did"
+	fi
+	return 0
+}
+
 # uros_conditions_open  — call BEFORE the run.  Remembers the starting host
 # state in UROS_HOST_AT_START.
 uros_conditions_open() {
@@ -371,8 +571,10 @@ uros_conditions_open() {
 # ⚠️ No word here may be one the verdict greps for.  run-x86_64.sh judges a
 # boot by looking for WRONG and FAIL in the log, so a conditions block using
 # either would turn every run red.  Its verdict has skipped this block since
-# #618, which put other programs' command lines in it, but the logs of
-# run-qemu.sh are judged by tools that read every line.
+# #618, which put other programs' command lines in it, and suite-i386.sh's
+# judge since #587, whose tree fields name the files anyone left in the tree.
+# The block's own words still keep clear of them: both-accelerators.sh lines
+# up every line that says PASS, FAIL, WRONG or panic in two logs.
 uros_conditions_block() {
 	_target=$1
 	_accel=$2
@@ -952,6 +1154,174 @@ victus: the policy's numbers, not its counters, every core, in order|a|412625 11
 under userspace: the table, base_frequency, every core's scaling_setspeed, not the request|b|1400000 1850000 2100000 2345000 2600000 3000000 4000000 
 no cpufreq at all|none|
 EOF
+
+	# The tree the image was made from (#587): a repository made here, put
+	# in the states a working tree is found in, and read back.  Made and not
+	# described, for the policy numbers' reason: the subject is what git says
+	# about files.  The commit and the blobs are asked of git here, the sources
+	# mark is left out of the comparison: what a row pins is which paths are
+	# said, and how.
+	_tt() {	# <row> <wanted> <read>
+		_total=$(( _total + 1 ))
+		if [ "$3" = "$2" ]; then
+			echo "  ok    $1"
+		else
+			echo "  BAD   $1"
+			echo "        wanted <<$2>>"
+			echo "        read   <<$3>>"
+			_fails=$(( _fails + 1 ))
+		fi
+	}
+	if ! command -v git > /dev/null 2>&1; then
+		echo "  --    the tree rows (#587): no git here -- NOT ASKED"
+	else
+		_r=$_tree/repo
+		_g() {
+			git -C "$_r" -c user.name=self-test -c user.email=self-test@localhost \
+				-c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"
+		}
+		mkdir -p "$_r/uros/sub" "$_tree/build"
+		git init -q "$_r" && _g checkout -q -b selftest
+		echo one > "$_r/uros/kept.c"
+		echo two > "$_r/uros/gone.c"
+		_g add -A && _g commit -q -m one
+		echo "CMAKE_HOME_DIRECTORY:INTERNAL=$_r/uros" > "$_tree/build/CMakeCache.txt"
+		_c=$(_g rev-parse HEAD)
+		_tt "the tree is the one the build directory was configured from, at its top" \
+			"$_r" "$(uros_tree_of "$_tree/build")"
+		_tt "a directory never configured names no tree, and says so" \
+			"status 1, nothing" "$(_o=$(uros_tree_of "$_tree"); echo "status $?, ${_o:-nothing}")"
+		_f0=$(uros_tree_files "$_r")
+		_tt "a tree as committed" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), as committed" "$(uros_tree_line "$_r" "$_f0")"
+		# Under set -e, as both harnesses call them: a function that
+		# trips it leaves its row empty.
+		_tt "under set -e, as the harnesses run: a clean tree is named" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), as committed" \
+			"$(set -e; uros_tree_open "$_tree/build" "$_r"; echo "$UROS_TREE_LINE")"
+		_tt "under set -e: the looks, the field and no warning, on a clean tree" \
+			"unchanged while the image was made, and when the run ended|" \
+			"$(set -e; uros_tree_open "$_tree/build" "$_r"; _i=$(uros_tree_look)
+			   _e=$(uros_tree_look); echo "$(uros_tree_since "$_i" "$_e")|$(uros_tree_warnings "$_i" "$_e")")"
+		_tt "under set -e: a directory never configured" \
+			"not named: $_tree has no CMakeCache.txt to say which sources it compiles" \
+			"$(set -e; uros_tree_open "$_tree" "$_r"; echo "$UROS_TREE_LINE")"
+		# Nothing written: a touched file leaves the index's record of it
+		# stale, and a git status free to take index.lock rewrites the
+		# index.  The control is that git status, after the look: where it
+		# is not seen writing either, the row cannot ask, and says so.
+		touch "$_r/uros/kept.c"
+		: > "$_tree/ref"
+		uros_tree_files "$_r" > /dev/null
+		_w1=$(find "$_r/.git/index" -newer "$_tree/ref")
+		git -C "$_r" status --porcelain > /dev/null
+		_w2=$(find "$_r/.git/index" -newer "$_tree/ref")
+		if [ -z "$_w2" ]; then
+			echo "  --    a look writes nothing: git status is not seen writing here either -- NOT ASKED"
+		else
+			_tt "a look writes nothing to the repository, where git status does" "" "$_w1"
+		fi
+		echo changed >> "$_r/uros/kept.c"
+		rm "$_r/uros/gone.c"
+		echo staged > "$_r/uros/st.c"
+		_g add uros/st.c
+		echo new > "$_r/uros/sub/new.c"
+		_f1=$(uros_tree_files "$_r")
+		_tt "each path that differs: changed, gone, staged, untracked in a new directory" \
+			"HEAD $_c
+ D - uros/gone.c
+ M $(_g hash-object uros/kept.c) uros/kept.c
+A  $(_g hash-object uros/st.c) uros/st.c
+?? $(_g hash-object uros/sub/new.c) uros/sub/new.c" "$_f1"
+		_tt "the line names them, with git's letters and a mark of the whole state" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), with 4 paths changed from it: D uros/gone.c, M uros/kept.c, A uros/st.c, ?? uros/sub/new.c; sources <mark>" \
+			"$(uros_tree_line "$_r" "$_f1" | sed 's/; sources [0-9a-f]\{12\}$/; sources <mark>/')"
+		_tt "under set -e: the same tree, the same line" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), with 4 paths changed from it: D uros/gone.c, M uros/kept.c, A uros/st.c, ?? uros/sub/new.c; sources <mark>" \
+			"$(set -e; uros_tree_open "$_tree/build" "$_r"
+			   echo "$UROS_TREE_LINE" | sed 's/; sources [0-9a-f]\{12\}$/; sources <mark>/')"
+		_tt "a tree that did not move is not said to have moved" \
+			"status 1, nothing" "$(_o=$(uros_tree_moved "$_f1" "$_f1"); echo "status $?, ${_o:-nothing}")"
+		echo again >> "$_r/uros/sub/new.c"
+		_f2=$(uros_tree_files "$_r")
+		_tt "a second edit to a path already changed is a move" \
+			"uros/sub/new.c" "$(uros_tree_moved "$_f1" "$_f2")"
+		_g add -A && _g commit -q -m two
+		_f3=$(uros_tree_files "$_r")
+		_tt "a commit made during the run: the commit, and every path it took in" \
+			"the commit, uros/gone.c, uros/kept.c, uros/st.c, uros/sub/new.c" "$(uros_tree_moved "$_f2" "$_f3")"
+		mkdir "$_r/uros/many"
+		_i=1
+		_named=
+		_moved=
+		while [ "$_i" -le 25 ]; do
+			_p=uros/many/f$(printf '%02d' "$_i").c
+			echo "$_i" > "$_r/$_p"
+			if [ "$_i" -le 20 ]; then
+				_named="$_named${_named:+, }?? $_p"
+				_moved="$_moved${_moved:+, }$_p"
+			fi
+			_i=$(( _i + 1 ))
+		done
+		_f4=$(uros_tree_files "$_r")
+		_tt "twenty paths named at most, and how many more" \
+			"$_r at $(printf '%.8s' "$(_g rev-parse HEAD)") (selftest), with 25 paths changed from it: $_named, and 5 more; sources <mark>" \
+			"$(uros_tree_line "$_r" "$_f4" | sed 's/; sources [0-9a-f]\{12\}$/; sources <mark>/')"
+		_tt "and twenty moved at most" \
+			"$_moved, and 5 more" "$(uros_tree_moved "$_f3" "$_f4")"
+		rm -r "$_r/uros/many"
+		_g checkout -q --detach
+		_tt "a detached checkout says so" \
+			"$_r at $(printf '%.8s' "$(_g rev-parse HEAD)") (detached), as committed" \
+			"$(uros_tree_line "$_r" "$(uros_tree_files "$_r")")"
+		_tt "outside a git checkout there are no files to list" \
+			"status 1" "$(uros_tree_files "$_tree/build" > /dev/null; echo "status $?")"
+
+		# The three looks: uros_tree_open on the repository above, then
+		# the two later looks as chosen listings -- what since and
+		# warnings compare is text.
+		uros_tree_open "$_tree/build" "$_r"
+		_tt "the harness in the image's own tree is not named apart" \
+			"" "$UROS_HARNESS_LINE"
+		uros_tree_open "$_tree/build" "$_tree/build"
+		_tt "a harness from elsewhere is named, with what it is" \
+			"$_tree/build, not a git checkout" "$UROS_HARNESS_LINE"
+		_a=$UROS_TREE_AT_BUILD
+		_b="$_a
+?? 0123 uros/during-build.c"
+		_e="$_b
+?? 4567 uros/after-image.c"
+		_tt "still while the image was made and after it" \
+			"unchanged while the image was made, and when the run ended" \
+			"$(uros_tree_since "$_a" "$_a")"
+		_tt "a harness that execs qemu says it could not look again" \
+			"unchanged while the image was made; not looked at once qemu runs (this harness execs qemu)" \
+			"$(uros_tree_since "$_a" execs)"
+		_tt "moved while the image was made and after it, each said apart" \
+			"CHANGED while the image was made, in uros/during-build.c; CHANGED after it, by the end of the run, in uros/after-image.c" \
+			"$(uros_tree_since "$_b" "$_e")"
+		_tt "no look at the end" \
+			"unchanged while the image was made; not looked at when the run ended: git gave no state of it" \
+			"$(uros_tree_since "$_a" "")"
+		_tt "no look once the image was made" \
+			"not looked at again: git gave no state of it once the image was made" \
+			"$(uros_tree_since "" "$_a")"
+		_tt "a warning for each move, the build's first, and no path in either" \
+			"  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of what \"tree since:\" names
+  ⚠️ THE TREE CHANGED DURING THIS RUN, after its image was made — the next run will not boot what this one did" \
+			"$(uros_tree_warnings "$_b" "$_e")"
+		_tt "no warning for a tree that held still" \
+			"" "$(uros_tree_warnings "$_a" "$_a")"
+		_tt "under exec, the build's warning alone" \
+			"  ⚠️ THE TREE CHANGED WHILE THIS IMAGE WAS MADE — it may hold either state of what \"tree since:\" names" \
+			"$(uros_tree_warnings "$_b" execs)"
+		UROS_TREE_AT_BUILD=
+		_tt "no first look: nothing after it is claimed" \
+			"not looked at again: no state of it was taken" \
+			"$(uros_tree_since "$_a" "$_a")"
+		_tt "no first look: no warning either" \
+			"" "$(uros_tree_warnings "$_b" "$_e")"
+	fi
 	rm -rf "$_tree"
 
 	if [ "$_fails" -gt 0 ]; then

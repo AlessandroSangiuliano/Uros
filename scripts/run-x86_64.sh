@@ -999,6 +999,15 @@ SECS=$SECS_IN
 # what it typed.
 RUN_ARGS="$*"
 
+# 🔴 WHICH TREE THIS IMAGE IS MADE FROM, looked at before the build reads it
+# (#587).  The build below runs at every boot, from the tree as it stands, so a
+# run is whatever that tree is at this moment, and a campaign that spans an
+# edit, a checkout or a rebase mixes two trees under logs that look alike.
+# The tree is the one $BUILD was configured from, not necessarily this
+# script's, and it is looked at twice more: once the image is made, and when
+# the run ends (run-conditions.sh, uros_tree_open and after).
+uros_tree_open "$BUILD" "$REPO"
+
 # What the disk image is made of.  Not `uros_iso': that target builds these
 # five and then spends a second and forty megabytes producing a CD that no
 # longer boots anything.  The ISO still exists as a target, for the bare-metal
@@ -1277,6 +1286,9 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 # why the requirement is not read off the boot.
 # shellcheck disable=SC2086
 DISKS_ON_BOARD=$(uros_board_disks $DISK_ARGS "$@")
+
+# The tree again, the image made (#587).
+TREE_AT_IMAGE=$(uros_tree_look)
 
 # 🔴 QEMU'S OWN STDERR APART FROM THE GUEST'S SERIAL OUTPUT (#613).  One file
 # for both had two writers that know nothing of each other's lines: the intel
@@ -1631,7 +1643,13 @@ while IFS= read -r _q; do
 done <<< "$OTHER_QEMU_AT_END"
 [ ${#OTHER_QEMU[@]} -gt 0 ] ||
 	OTHER_QEMU=("other qemu:   none, at the start or at the end (#618)")
+# The tree a third time, the run over (#587).
+TREE_AT_END=$(uros_tree_look)
 UROS_COND=$(uros_conditions_block "x86-64" "$ACCEL" \
+	"tree:         $UROS_TREE_LINE" \
+	"tree since:   $(uros_tree_since "$TREE_AT_IMAGE" "$TREE_AT_END")" \
+	"build:        $BUILD" \
+	"${UROS_HARNESS_LINE:+harness:      $UROS_HARNESS_LINE -- the scripts that ran this, from another tree than its image}" \
 	"clock in run: $CLOCK_LINE (cores running qemu's threads)" \
 	"clock by sec:${CLOCK_SECONDS:- none} (MHz each second; - = no reading)" \
 	"machine:      $MACHINE_SAID" \
@@ -1653,6 +1671,9 @@ if uros_clock_run_moved $CLOCK_SECONDS; then
 	echo "  ⚠️ THE CLOCK MOVED DURING THIS RUN — do not compare its timings" \
 	     | tee -a "$LOG"
 fi
+# 🔥 And a tree that changed, said where the clock is (#587).
+TREE_WARNINGS=$(uros_tree_warnings "$TREE_AT_IMAGE" "$TREE_AT_END")
+[ -z "$TREE_WARNINGS" ] || printf '%s\n' "$TREE_WARNINGS" | tee -a "$LOG"
 
 grep -a "UrMach\|fault\|error\|Error\|panic\|^  " "$LOG" || true
 
