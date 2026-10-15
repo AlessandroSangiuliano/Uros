@@ -9713,6 +9713,91 @@ static int uf_round(pt_entry_t *e, uint64_t a, uint64_t b, pmap_t u,
 	return seen == UF_KEPT;
 }
 
+/*
+ * And what the flush costs the kernel, measured rather than argued: 64 kernel
+ * pages of their own, a global translation each, read after nothing, after a
+ * user space's full flush with the space loaded here and loaded nowhere, and
+ * after the kernel's full flush, which empties everything -- the median of 7
+ * rounds, in cycles.  A user flush that keeps the global entries costs what
+ * nothing costs, one that empties them what the kernel's costs.  Printed, not
+ * judged: no threshold here is this test's to choose.
+ */
+#define UF_COST_KVA	(KERNEL_HEAP_BASE + 0x300000ULL)	/* unclaimed at boot */
+#define UF_COST_PAGES	64
+#define UF_COST_ROUNDS	7
+
+static void uf_cost_read(void)
+{
+	unsigned i;
+
+	for (i = 0; i < UF_COST_PAGES; i++)
+		(void) *(volatile uint64_t *)(uintptr_t)
+			(UF_COST_KVA + (uint64_t) i * PAGE_SIZE_4K);
+}
+
+/* `how': 0 nothing, 1 a loaded space's flush, 2 a space loaded nowhere's, 3 the kernel's. */
+static uint64_t uf_cost(pmap_t u, int how)
+{
+	uint64_t own = read_cr3(), t0, t1, v, cycles[UF_COST_ROUNDS];
+	int i, j;
+
+	for (i = 0; i < UF_COST_ROUNDS; i++) {
+		if (how == 2)
+			pmap_activate_boot(u);
+		else
+			pmap_activate(u);
+		uf_cost_read();
+		if (how == 1 || how == 2)
+			tlb_flush_all(u);
+		else if (how == 3)
+			tlb_flush_all(PMAP_NULL);
+		t0 = rdtsc_ordered();
+		uf_cost_read();
+		t1 = rdtsc_ordered();
+		if (how == 2)
+			write_cr3(own);
+		else
+			pmap_activate(pmap_kernel());
+		v = t1 - t0;
+		for (j = i; j > 0 && cycles[j - 1] > v; j--)
+			cycles[j] = cycles[j - 1];
+		cycles[j] = v;
+	}
+	return cycles[UF_COST_ROUNDS / 2];
+}
+
+static void uf_cost_measure(pmap_t u, uint64_t frame)
+{
+	uint64_t c[4];
+	unsigned i, n = 0;
+	int how;
+
+	for (i = 0; i < UF_COST_PAGES; i++, n++)
+		if (pmap_enter(pmap_kernel(), UF_COST_KVA + (uint64_t) i * PAGE_SIZE_4K,
+			       frame, VM_PROT_READ, 0) != PMAP_MAP_OK)
+			break;
+	if (n == UF_COST_PAGES) {
+		for (how = 0; how < 4; how++)
+			c[how] = uf_cost(u, how);
+		kputs("UrMach x86-64: 64 kernel pages read after nothing, after a"
+		      " user space's full flush loaded here and loaded nowhere,"
+		      " and after the kernel's full flush: ");
+		kputdec(c[0]);
+		kputs(", ");
+		kputdec(c[1]);
+		kputs(", ");
+		kputdec(c[2]);
+		kputs(" and ");
+		kputdec(c[3]);
+		kputs(" cycles, median of 7 (#437)\r\n");
+	} else
+		kputs("UrMach x86-64: the flush's cost not measured — could not map"
+		      " its pages (#437)\r\n");
+	if (n != 0)
+		pmap_remove(pmap_kernel(), UF_COST_KVA,
+			    UF_COST_KVA + (uint64_t) n * PAGE_SIZE_4K);
+}
+
 static void user_flush_globals_selftest(void)
 {
 	uint64_t a = boot_frame_alloc(), b = boot_frame_alloc();
@@ -9762,6 +9847,7 @@ static void user_flush_globals_selftest(void)
 		      ? " — PASS (#437)\r\n"
 		      : " — NOT ASKED, kept in some rounds and not in others: the"
 			" machine drops entries by itself (#437)\r\n");
+		uf_cost_measure(u, a);
 	}
 	if (e != PT_ENTRY_NULL)
 		*e = pa_to_pte(a) | (*e & ~INTEL_PTE_PFN);	/* the frame entered */
