@@ -38,6 +38,10 @@
 # highest of a sample every two seconds), the supply, how many times the host
 # suspended, the kernel's md5, and ipc_bench's x4 RPC and x16 fault-stress
 # times, so that boots of different days and machines can be put side by side.
+# Its tree is the one that boot's image was made from, as its log names it:
+# the commit, and after a + the sources mark of a tree that differed from it
+# (#587).  It used to be this checkout's commit, taken once, whatever tree
+# UROS_BUILD_DIR's build compiled and however the tree moved between boots.
 #
 # Exit status: 0 every run passed · 1 at least one did not · 2 refused to start
 # (another qemu is running, on battery, or no such run) · 3 a run could not be
@@ -64,7 +68,12 @@ set -u
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=${UROS_BUILD_DIR:-$REPO/uros/build}
-TREE=$(git -C "$REPO" rev-parse --short HEAD)
+# The tree the build compiles, not this checkout's (#587): with UROS_BUILD_DIR
+# it can be a worktree's.  It names the logs' directory and the summary; each
+# boot builds anew, so each CSV row takes its own from its log (boot_tree).
+. "$REPO/scripts/run-conditions.sh"
+TREE_DIR=$(uros_tree_of "$BUILD") || TREE_DIR=$REPO
+TREE=$(git -C "$TREE_DIR" rev-parse --short=8 HEAD 2>/dev/null) || TREE=unknown
 OUT=$HOME/uros-tests/suite-i386/$(date +%Y%m%d-%H%M%S)-$TREE
 RUNS=(bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4 bundle-kvm-4
 	bundle-kvm-1 bundle-tcg-4)
@@ -134,6 +143,20 @@ FAIL_RE='WRONG|SOME TESTS FAILED|[1-9][0-9]* FAIL ===| arm FAIL$|panic\(cpu|<pan
 clean() {
 	sed '/^=== run conditions (#516) ===$/,/^=== end run conditions ===$/d' "$1" |
 		grep -av 'gpu_server: text_puts'
+}
+
+# The tree a boot's image was made from, as the block of its log names it
+# (#587): the commit, and after a + the sources mark of a tree that differed
+# from it; nothing for a log that names none.  The commit is the FIRST " at "
+# and eight hex digits: the paths that follow it are anyone's to name.
+boot_tree() {
+	local t c m
+	t=$(tr -d '\r' < "$1" |
+		sed -n '/^=== run conditions (#516) ===$/,/^=== end run conditions ===$/p' |
+		grep -a '^  tree:  ' | head -1)
+	c=$(printf '%s\n' "$t" | grep -o ' at [0-9a-f]\{8\}[ ,]' | head -1 | cut -c5-12)
+	m=$(printf '%s\n' "$t" | sed -n 's/.*; sources \([0-9a-f]\{12\}\)$/\1/p')
+	[ -n "$c" ] && echo "$c${m:++$m}"
 }
 
 mhz() {	# the host's clock now, the mean over its processors, in MHz
@@ -294,7 +317,8 @@ for run in "${RUNS[@]}"; do
 		head -1 | grep -o '[0-9]* ns$' | grep -o '[0-9]*')
 	x16=$(clean "$log" 2>/dev/null | grep -ao 'fault-stress x16 .* in [0-9]* ns' |
 		head -1 | grep -o '[0-9]* ns$' | grep -o '[0-9]*')
-	echo "$(date +%F,%T),$(hostname),$TREE,$run,$verdict,$secs,$cap,$mlo,$mmed,$mhi,$power,$suspends,$md5,$x4,$x16,$log" >> "$CSV"
+	row_tree=$(boot_tree "$log") || row_tree=$TREE
+	echo "$(date +%F,%T),$(hostname),$row_tree,$run,$verdict,$secs,$cap,$mlo,$mmed,$mhi,$power,$suspends,$md5,$x4,$x16,$log" >> "$CSV"
 	echo "suite-i386: $n of ${#RUNS[@]}, $run: $verdict in ${secs}s"
 	[ -n "$why" ] && echo "$why"
 	[ "$verdict" = PASSED ] && passed=$((passed + 1))
