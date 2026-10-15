@@ -374,12 +374,20 @@ uros_board_disks() {
 # ⚠️ Ignored files are not listed, the build directories being among them, so
 # a file the build reads and .gitignore hides is not seen here.  #565 is why
 # nothing is generated into the source tree any more.
+#
+# 🔴 EVERY COMMAND BELOW THAT MAY FAIL HAS ITS `||'.  Both harnesses run under
+# set -e, and as /bin/sh -- bash in POSIX mode, or dash -- a command
+# substitution keeps -e: grep -vc counting no lines exits 1, and the first
+# version of uros_tree_line, counting a clean tree's paths that way, ended
+# run-x86_64.sh on every clean checkout without a word.  --self-test calls
+# these under set -e too.
 
 # uros_tree_of <build dir> -- the top of the tree <build dir> compiles: its
 # CMAKE_HOME_DIRECTORY, raised to the top of the git checkout holding it.
 # Nothing, and status 1, for a directory that was never configured.
 uros_tree_of() {
-	_src=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$1/CMakeCache.txt" 2>/dev/null)
+	_src=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$1/CMakeCache.txt" 2>/dev/null) ||
+		_src=
 	[ -n "$_src" ] || return 1
 	git -C "$_src" rev-parse --show-toplevel 2>/dev/null || echo "$_src"
 }
@@ -415,9 +423,9 @@ uros_tree_files() {
 # to have built the same sources by more than their commit.
 uros_tree_line() {
 	_head=$(printf '%s\n' "$2" | sed -n 's/^HEAD //p')
-	_br=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null)
-	[ "$_br" = HEAD ] && _br="detached"
-	_n=$(printf '%s\n' "$2" | grep -vc '^HEAD ')
+	_br=$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null) || _br=
+	[ "$_br" != HEAD ] || _br="detached"
+	_n=$(printf '%s\n' "$2" | awk '!/^HEAD / { n++ } END { print n + 0 }')
 	_say="$1 at $(printf '%.8s' "$_head")${_br:+ ($_br)}"
 	if [ "$_n" -eq 0 ]; then
 		echo "$_say, as committed"
@@ -428,9 +436,9 @@ uros_tree_line() {
 		awk '{ xy = substr($0, 1, 2); gsub(/ /, "", xy)
 		       rest = substr($0, 4); i = index(rest, " ")
 		       printf "%s%s %s", (NR > 1 ? ", " : ""), xy, substr(rest, i + 1) }')
-	_mark=$(printf '%s\n' "$2" | git hash-object --stdin 2>/dev/null)
+	_mark=$(printf '%s\n' "$2" | git hash-object --stdin 2>/dev/null) || _mark=
 	_s=s
-	[ "$_n" -eq 1 ] && _s=
+	[ "$_n" -ne 1 ] || _s=
 	echo "$_say, with $_n path$_s changed from it: $_paths; sources $(printf '%.12s' "$_mark")"
 }
 
@@ -1177,6 +1185,18 @@ EOF
 		_f0=$(uros_tree_files "$_r")
 		_tt "a tree as committed" \
 			"$_r at $(printf '%.8s' "$_c") (selftest), as committed" "$(uros_tree_line "$_r" "$_f0")"
+		# Under set -e, as both harnesses call them: a function that
+		# trips it leaves its row empty.
+		_tt "under set -e, as the harnesses run: a clean tree is named" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), as committed" \
+			"$(set -e; uros_tree_open "$_tree/build" "$_r"; echo "$UROS_TREE_LINE")"
+		_tt "under set -e: the looks, the field and no warning, on a clean tree" \
+			"unchanged while the image was made, and when the run ended|" \
+			"$(set -e; uros_tree_open "$_tree/build" "$_r"; _i=$(uros_tree_look)
+			   _e=$(uros_tree_look); echo "$(uros_tree_since "$_i" "$_e")|$(uros_tree_warnings "$_i" "$_e")")"
+		_tt "under set -e: a directory never configured" \
+			"not named: $_tree has no CMakeCache.txt to say which sources it compiles" \
+			"$(set -e; uros_tree_open "$_tree" "$_r"; echo "$UROS_TREE_LINE")"
 		echo changed >> "$_r/uros/kept.c"
 		rm "$_r/uros/gone.c"
 		echo staged > "$_r/uros/st.c"
@@ -1192,6 +1212,10 @@ A  $(_g hash-object uros/st.c) uros/st.c
 		_tt "the line names them, with git's letters and a mark of the whole state" \
 			"$_r at $(printf '%.8s' "$_c") (selftest), with 4 paths changed from it: D uros/gone.c, M uros/kept.c, A uros/st.c, ?? uros/sub/new.c; sources <mark>" \
 			"$(uros_tree_line "$_r" "$_f1" | sed 's/; sources [0-9a-f]\{12\}$/; sources <mark>/')"
+		_tt "under set -e: the same tree, the same line" \
+			"$_r at $(printf '%.8s' "$_c") (selftest), with 4 paths changed from it: D uros/gone.c, M uros/kept.c, A uros/st.c, ?? uros/sub/new.c; sources <mark>" \
+			"$(set -e; uros_tree_open "$_tree/build" "$_r"
+			   echo "$UROS_TREE_LINE" | sed 's/; sources [0-9a-f]\{12\}$/; sources <mark>/')"
 		_tt "a tree that did not move is not said to have moved" \
 			"status 1, nothing" "$(_o=$(uros_tree_moved "$_f1" "$_f1"); echo "status $?, ${_o:-nothing}")"
 		echo again >> "$_r/uros/sub/new.c"
