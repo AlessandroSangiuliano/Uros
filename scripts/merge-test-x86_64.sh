@@ -331,7 +331,32 @@ while read -r e v opt cpus; do
 		tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
-		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1
+		# #694: a boot's logs go before it.  run-x86_64.sh starts the full
+		# log only once it holds the lock, so a run that did not start left
+		# the last run's here, and the judges that read only the full log --
+		# stop13, ioapic, msirace, panic2, earlypanic, restart* -- passed on
+		# a boot that never happened.
+		rm -f "$h" "$f" "$f.walk.txt"
+		rc=0
+		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?
+		# A run not made is WRONG, and says which: not started (2), qemu
+		# never ran or said nothing (3), stopped by a signal (above 128) --
+		# the statuses ablate.sh reads the same way -- or no full log
+		# written, whatever the status.  ci/job.sh knows such a boot by the
+		# words "did not run, " and names its harness log, the only one.
+		notrun=""
+		case $rc in
+		2)	notrun="run-x86_64.sh did not start: $(grep -av '^ *$' "$h" | tail -n 1 | sed 's/^ *//; s/^run-x86_64.sh: //')" ;;
+		3)	notrun="qemu never ran, or said nothing" ;;
+		129|1[3-9][0-9]|2[0-5][0-9])
+			notrun="run-x86_64.sh was stopped by SIG$(kill -l $((rc - 128)) 2>/dev/null || echo $((rc - 128)))" ;;
+		*)	[ -e "$f" ] || notrun="no full log was written" ;;
+		esac
+		if [ -n "$notrun" ]; then
+			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (did not run, status $rc: ${notrun//[()]/}): $h"
+			WRONG=$((WRONG + 1))
+			continue
+		fi
 		# #661: and no line the screen cannot draw, whoever judges the
 		# entry.  Asked of the full log itself: the harness names one as
 		# NO GLYPH only where its verdict gets that far, which neither an

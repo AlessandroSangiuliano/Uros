@@ -586,7 +586,7 @@ HEADER_COMMAS=${HEADER//[^,]/}
 # included.  A WRONG boot's logs are copied where the artifact keeps them.
 row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 	local r=$1 e=$2 a=$3 n=$4 opt=$5 res=$6 kind=$7 named=$8
-	local rdir=$OUT/logs/r$r tag h f log mhz x line commas
+	local rdir=$OUT/logs/r$r tag h f keep log mhz x line commas
 	# The name merge-test-x86_64.sh gives a boot's logs.  A WRONG line names
 	# its file, and that name wins over this one; a passing line names none,
 	# and a log missing under this name is said in the row, never guessed,
@@ -599,9 +599,14 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 		h=$named
 	fi
 	f=${h%.log}-full.log
-	if [ -f "$f" ]; then
-		mhz=$(clock_of "$f")
-		log=${f#"$OUT"/}
+	# #694: the merge test removes a boot's logs before it, so a boot it says
+	# was not made -- "did not run, " -- has no full log, and the harness's,
+	# which says why, is the log the row names.
+	keep=$f
+	[[ ! -f $f && $kind == "did not run, "* ]] && keep=$h
+	if [ -f "$keep" ]; then
+		mhz=$(clock_of "$keep")
+		log=${keep#"$OUT"/}
 	else
 		mhz="?"
 		log="missing: ${f#"$OUT"/}"
@@ -612,7 +617,7 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 		for x in "$h" "$f" "$f.walk.txt"; do
 			[ -f "$x" ] && cp -p "$x" "$OUT/failed/r$r/"
 		done
-		[ -f "$f" ] && log=failed/r$r/${f##*/}
+		[ -f "$keep" ] && log=failed/r$r/${keep##*/}
 		WRONGS+=("round $r, entry $e $a -smp $n${opt:+ ($opt)}: $log")
 	fi
 	line="$(date -u '+%F,%T'),$RUN_ID,$JOB,$r,$TREE,$CPU,$mhz,$a,$e,${n//,/;},${opt//,/ },$res (${kind//,/ }),$log"

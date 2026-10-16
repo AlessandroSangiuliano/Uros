@@ -15,8 +15,9 @@
 #   run-x86_64.sh --iommu intel --entry 14 200      the same board, translation off
 #
 # Exit status: 0 the run passed · 1 the KERNEL failed · 2 this script refused
-# to start (another run is in flight) · 3 QEMU never ran, or ran and produced
-# nothing — which says something about the CALLER and nothing about the kernel.
+# to start (another run is in flight, a command line it cannot use, a build that
+# failed) · 3 QEMU never ran, or ran and produced nothing — which says something
+# about the CALLER and nothing about the kernel.
 #
 # 🔑 Three and one are different findings and must not share a status, for the
 # same reason they must not share a sentence.  A rejected command line used to
@@ -1012,8 +1013,18 @@ uros_tree_open "$BUILD" "$REPO"
 # five and then spends a second and forty megabytes producing a CD that no
 # longer boots anything.  The ISO still exists as a target, for the bare-metal
 # and Bochs paths that have no disk.
-ninja -C "$BUILD" mach_kernel boot_probe name_server_bin bootstrap_server \
-	bootstrap_bundle >/dev/null
+#
+# A build that fails is a boot not made, and says so with the status of one
+# (#694).  Under set -e it ended the script with ninja's status, 1, the one that
+# says the kernel failed, and with nothing on the screen: ninja writes the
+# failed command and the compiler's errors to its standard output, which went
+# to /dev/null.  Their end is printed now.
+if ! NINJA_OUT=$(ninja -C "$BUILD" mach_kernel boot_probe name_server_bin \
+	bootstrap_server bootstrap_bundle); then
+	printf '%s\n' "$NINJA_OUT" | tail -n 20 >&2
+	echo "run-x86_64.sh: the build in $BUILD failed -- nothing was booted" >&2
+	exit 2
+fi
 
 # One run at a time, enforced rather than remembered.
 #
