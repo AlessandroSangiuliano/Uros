@@ -1,0 +1,69 @@
+Kind: ablation
+Issue: #703
+Takes out: c3f51189 -- the futex hand-off parks its caller over an abort pending again, so -Q's driver, carrying TH_ABORT into it, is switched away and sleeps until the waiter wakes it, instead of having its wait ended at once
+Run: --entry 25 600 -smp 4
+Expect: handoff: WRONG — a driver with an abort pending was parked by the hand-off
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index bb9b4a56..f582739b 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1342,8 +1342,7 @@ unsigned int	handoff_declined_swapped;
+  *	Returns TRUE if the hand-off happened (current thread blocked and was
+  *	later resumed).  Returns FALSE if no parked waiter was found (the
+  *	caller should fall back to a normal block); a found-but-not-parked
+- *	waiter is woken normally and FALSE is returned, and so is any waiter
+- *	when the caller has an abort pending (#703).
++ *	waiter is woken normally and FALSE is returned.
+  */
+ boolean_t
+ thread_handoff_to_parked_waiter(
+@@ -1355,7 +1354,7 @@ thread_handoff_to_parked_waiter(
+ 	register thread_t	self = current_thread();
+ 	register simple_lock_t	lock;
+ 	thread_t		victim = THREAD_NULL;
+-	boolean_t		parked, aborted;
++	boolean_t		parked;
+ 	register int		ostate;
+ 	spl_t			s;
+ 
+@@ -1385,20 +1384,6 @@ thread_handoff_to_parked_waiter(
+ 		return FALSE;
+ 	}
+ 
+-	/*
+-	 * 🔴 AN ABORT PENDING ON THE CALLER IS ANSWERED, NOT PARKED OVER (#703).
+-	 * thread_abort() sets TH_ABORT and interrupts a wait only if there is
+-	 * one, so a caller aborted before its assert_wait() carries the bit
+-	 * here, and thread_block_reason() -- the one place that reads it --
+-	 * would end its wait at once.  thread_invoke() below does not read it:
+-	 * the waiter is woken the ordinary way instead, and the caller's
+-	 * thread_block() answers the abort.  An abort after the assert_wait()
+-	 * needs nothing here, since it finds the caller waiting.
+-	 */
+-	thread_lock(self);
+-	aborted = (self->state & TH_ABORT) != 0;
+-	thread_unlock(self);
+-
+ 	thread_lock(victim);
+ 	reset_timeout_check(&victim->timer);
+ 	victim->wait_event = NO_EVENT;
+@@ -1418,15 +1403,14 @@ thread_handoff_to_parked_waiter(
+ 	ostate = victim->state;
+ 	parked = ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT)) == TH_WAIT);
+ 
+-	if (!parked || aborted) {
++	if (!parked) {
+ 		if ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT))
+ 		    == (TH_WAIT | TH_SWAPPED_OUT))
+ 			handoff_declined_swapped++;
+ 
+ 		/*
+-		 * Not cleanly parked, or the caller has an abort to answer: wake
+-		 * it the way every other wakeup does, and let the caller block
+-		 * normally.
++		 * Not cleanly parked: wake it the way every other wakeup does,
++		 * and let the caller block normally.
+ 		 *
+ 		 * 🔴 THIS WAS A COPY OF THAT, AND THE COPY HAD DRIFTED (#607).  It
+ 		 * set TH_RUN on every victim, then put on a run queue only one
