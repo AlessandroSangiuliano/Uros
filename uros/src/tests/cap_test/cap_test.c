@@ -2004,9 +2004,11 @@ ct14_write_and_put_back(mach_port_t device_port, mach_port_t handle,
             memset((void *)uva, 0, 4096);
             kr = device_read_phys(handle, D_READ, block, 4096, pa_list,
                                   pa_cnt, &got);
-            if (pkr != KERN_SUCCESS || put != 4096 || kr != KERN_SUCCESS
-                || memcmp((const void *)uva, saved, 4096) != 0)
+            if (pkr != KERN_SUCCESS || put != 4096)
                 back = 0;
+            else if (kr != KERN_SUCCESS
+                     || memcmp((const void *)uva, saved, 4096) != 0)
+                back = -1;
 
             if (wkr != KERN_SUCCESS || wrote != 4096)
                 printf("cap_test: [14] WRONG — %s refused a covered "
@@ -2018,11 +2020,19 @@ ct14_write_and_put_back(mach_port_t device_port, mach_port_t handle,
                        tname, (unsigned)block, (int)kr);
             else
                 ok = 1;
-            if (!back) {
+            /* Two failures, said apart: refused, or said done and not. */
+            if (back == 0) {
                 printf("cap_test: [14] WRONG — %s: putting block %u back "
-                       "failed (kr=%d, %u bytes), and it may still hold the "
-                       "test pattern (#596)\n", tname, (unsigned)block,
-                       (int)pkr, (unsigned)put);
+                       "was refused or short (kr=%d, %u bytes), and it may "
+                       "still hold the test pattern (#596)\n", tname,
+                       (unsigned)block, (int)pkr, (unsigned)put);
+                ok = 0;
+            } else if (back < 0) {
+                printf("cap_test: [14] WRONG — %s: block %u was put back "
+                       "(%u bytes) and does not read as it did before the "
+                       "test (kr=%d), so it may still hold the test pattern "
+                       "(#596)\n", tname, (unsigned)block, (unsigned)put,
+                       (int)kr);
                 ok = 0;
             } else if (ok)
                 printf("cap_test: [14] %s wrote block %u through physical "
