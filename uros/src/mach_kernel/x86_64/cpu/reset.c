@@ -31,7 +31,7 @@
 #include <cpu/reset.h>
 #include <pmap/pmap.h>
 #include <time/delay.h>
-#include <time/tsc.h>		/* rdtsc_ordered, for the wait before the rulers */
+#include <time/tsc.h>		/* the wait before the rulers; the hold */
 
 static struct acpi_reset	rr;
 static int			rr_usable;
@@ -206,6 +206,43 @@ static int	reset_deadline_event;
 static uint64_t		reset_hold;
 static int		reset_hold_event;	/* only ever timed out */
 static volatile int	reset_census_seen;
+static uint64_t		reset_census_tsc;	/* on the census's processor */
+
+/*
+ * The hold's end, said with how long it was: on the TSC, not on the tick that
+ * timed it out, which would be the instrument measuring itself.  A hold that
+ * did not start at the census -- its wakeup lost, and the thread asleep on to
+ * reset_after='s deadline before it began counting -- is a restart minutes
+ * late, and the line said the seconds asked until they were measured.  Early
+ * by more than a second, a tick's phase being far less, or late by more than
+ * a minute, one summary of the watchdog the hold is there for, is WRONG.  The
+ * two readings can be on two processors, whose TSCs nobody has promised to be
+ * in phase (#318): a phase that moved this past a second would be news.
+ */
+static void reset_hold_over(void)
+{
+	uint64_t	khz = tsc_hz() / 1000, ms;
+
+	if (khz == 0) {
+		printf("reset: -b: reset_hold='s %llu seconds since the quiet "
+		       "census are over by the tick, and the TSC has no rate to "
+		       "measure them; restarting the machine (#595)\n",
+		       (unsigned long long)reset_hold);
+		return;
+	}
+	ms = (rdtsc_ordered() - reset_census_tsc) / khz;
+	if (ms + 1000 < reset_hold * 1000 || ms > (reset_hold + 60) * 1000)
+		printf("reset: -b: %llu.%03llu seconds since the quiet census by "
+		       "the TSC, where reset_hold= asks %llu -- WRONG (#595); "
+		       "restarting the machine\n", (unsigned long long)(ms / 1000),
+		       (unsigned long long)(ms % 1000),
+		       (unsigned long long)reset_hold);
+	else
+		printf("reset: -b: %llu.%03llu seconds since the quiet census by "
+		       "the TSC, as reset_hold= asks; restarting the machine "
+		       "(#595)\n", (unsigned long long)(ms / 1000),
+		       (unsigned long long)(ms % 1000));
+}
 
 static void reset_deadline_thread(void)
 {
@@ -219,9 +256,7 @@ static void reset_deadline_thread(void)
 		thread_set_timeout((int)(reset_hold * hz));
 		thread_block((void (*)(void)) 0);
 		reset_timeout_check(&current_thread()->timer);
-		printf("reset: -b: %llu seconds since the quiet census, as "
-		       "reset_hold= asks; restarting the machine (#595)\n",
-		       (unsigned long long)reset_hold);
+		reset_hold_over();
 		halt_all_cpus(TRUE);
 	}
 
@@ -247,6 +282,7 @@ void reset_census_over(void)
 	}
 	if (reset_census_seen)
 		return;
+	reset_census_tsc = rdtsc_ordered();
 	reset_census_seen = 1;
 	printf("quiet_census: -b: the boot is over; the machine restarts in "
 	       "%llu seconds, as reset_hold= asks (#595)\n",
