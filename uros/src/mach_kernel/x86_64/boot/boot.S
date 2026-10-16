@@ -146,9 +146,17 @@ _start:
 	addl	$8, %edi
 	loop	1b
 
-	/* --- PAE on --- */
-	movl	%cr4, %eax
-	orl	$(1 << 5), %eax			/* CR4.PAE */
+	/*
+	 * --- PAE on, and nothing else ---
+	 *
+	 * Written, not added to (#669).  This kept whatever CR4 the firmware
+	 * left -- DE and MCE on omen and OMEGA, DE on pavillion -- while every
+	 * other processor starts from INIT's zero, so those bits were the
+	 * firmware's choice and on this processor only.  Every bit after this
+	 * one is set by the kernel on every processor: DE and MCE in
+	 * percpu_activate(), the rest where their features are set up.
+	 */
+	movl	$(1 << 5), %eax			/* CR4.PAE */
 	movl	%eax, %cr4
 
 	/* --- CR3 = PML4 --- */
