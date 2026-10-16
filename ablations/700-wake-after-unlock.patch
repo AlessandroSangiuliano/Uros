@@ -9,7 +9,7 @@ Expect: ipc_mqueue_receive: bad wait_result
 Expect: mach_msg_receive_continue: bad wait_result
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index fa629d1a..52ad3fd5 100644
+index 9f7f6c12..3b1fac51 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
 @@ -887,6 +887,7 @@ ipc_mqueue_deliver(
@@ -20,7 +20,7 @@ index fa629d1a..52ad3fd5 100644
  
  	/*
  	 * 🔴 WOKEN BEFORE imq_unlock(), NOT AFTER IT (#700).
-@@ -972,7 +973,6 @@ ipc_mqueue_deliver(
+@@ -976,7 +977,6 @@ ipc_mqueue_deliver(
  	    "a reply holds its receiver off the queue, not yet woken, for");
  	if (!direct)
  		thread_go(receiver);

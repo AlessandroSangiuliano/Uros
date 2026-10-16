@@ -5,13 +5,13 @@ Run: --entry 14 600 -smp 4
 Expect: Assertion failed: .*mach_msg\.c.*TH_ABORT
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index 523a34ae..ac02be6d 100644
+index fb1820c1..b10cb46a 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -2024,28 +2024,12 @@ mach_msg_overwrite_trap(
- 		 * in kern/sched_prim.c.
- 		 */
- 		thread_lock(self);
+@@ -2045,28 +2045,12 @@ mach_msg_overwrite_trap(
+ 			      self->state, self->wait_event);
+ 		}
+ #endif	/* WAKER_TRACK */
 +		assert(!(self->state & TH_ABORT));
  		assert(self->state & TH_RUN);
 +		self->state |= TH_WAIT;
@@ -40,7 +40,7 @@ index 523a34ae..ac02be6d 100644
  		thread_unlock(self);
  
  		imq_unlock(rcv_mqueue);
-@@ -2111,8 +2095,7 @@ mach_msg_overwrite_trap(
+@@ -2132,8 +2116,7 @@ mach_msg_overwrite_trap(
  
  			/*
  			 * self (the sender) was already marked TH_WAIT under

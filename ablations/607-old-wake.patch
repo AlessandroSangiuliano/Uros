@@ -6,10 +6,10 @@ Expect: handoff: WRONG
 Expect: panic\(cpu
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
-index 8f4bff5c..f71b70c5 100644
+index 4892ac32..52ac90e4 100644
 --- a/uros/src/mach_kernel/kern/sched_prim.c
 +++ b/uros/src/mach_kernel/kern/sched_prim.c
-@@ -1390,9 +1390,11 @@ thread_handoff_to_parked_waiter(
+@@ -1518,9 +1518,11 @@ thread_handoff_to_parked_waiter(
  		 * that is running -- #360's futex ping-pong ran one waiter on up
  		 * to six processors at once.
  		 */
@@ -21,6 +21,6 @@ index 8f4bff5c..f71b70c5 100644
 +		victim->state = (ostate &~ TH_WAIT) | TH_RUN;
 +		if ((ostate & (TH_RUN | TH_SUSP)) == 0)
 +			thread_setrun(victim, TRUE, TAIL_Q);
+ 		WAKER_NOTE(victim, THREAD_AWAKENED, event,
+ 			   __builtin_return_address(0));
  		thread_unlock(victim);
- 		splx(s);
- 		return FALSE;
