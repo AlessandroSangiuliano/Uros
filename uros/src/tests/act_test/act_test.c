@@ -2164,6 +2164,9 @@ arm_ten_abort_an_rpc_with_its_reply_on_the_way(void)
  * taken out the arm passed 6 KVM boots of 6, while TCG caught 6 of 6.
  */
 #define ARM11_ABORTS		1000000
+
+/* Looks at the count of RPCs begun before a thread that begins none is let be. */
+#define ARM11_IDLE		100000000UL
 #define ARM11_REQUEST_ID	1100
 #define ARM11_REPLY_ID		1101
 #define ARM11_STOP_ID		1102
@@ -2183,6 +2186,7 @@ static mach_port_t		arm_eleven_port;
 static mach_port_t		arm_eleven_reply_port;
 static volatile mach_port_t	arm_eleven_thread;
 static volatile int		arm_eleven_firing;
+static volatile natural_t	arm_eleven_calls;	/* RPCs begun */
 static volatile int		arm_eleven_done;
 static volatile natural_t	arm_eleven_rpcs;
 static volatile kern_return_t	arm_eleven_bad_kr = MACH_MSG_SUCCESS;
@@ -2253,6 +2257,7 @@ the_thread_that_keeps_asking(void *arg)
 				arm_eleven_reply_port, ARM11_REQUEST_ID);
 		b.m.h.msgh_size = sizeof b.m;
 		b.m.seq = i;
+		arm_eleven_calls = i + 1;	/* where the aim is taken */
 		kr = mach_msg(&b.m.h, MACH_SEND_MSG | MACH_RCV_MSG,
 			      sizeof b.m, sizeof b, arm_eleven_reply_port,
 			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -2276,6 +2281,8 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 	mach_msg_header_t	stop;
 	kern_return_t		kr, refused = KERN_SUCCESS;
 	int			aborts = 0, alone, i;
+	natural_t		seen;
+	unsigned long		idle;
 
 	kr = arm_ten_port(&arm_eleven_port, 1);
 	if (kr == KERN_SUCCESS)
@@ -2309,18 +2316,30 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 	}
 
 	/*
-	 * Fired as fast as they go.  At more than one processor nothing comes
-	 * between two: the thread and its server run elsewhere, and a yield
-	 * here only handed them this processor for a quantum (ARM11_ABORTS).
-	 * At one processor a yield follows each, so that the thread gets to
-	 * run into them.  The first is fired before the thread can have made
-	 * an RPC, so a run with no abort in it is a refusal, and the firing
-	 * stops at any refusal: until then the thread is alive and waiting for
-	 * nothing but this flag.
+	 * 🔴 AIMED, at more than one processor: one abort as the thread enters
+	 * each RPC, which is when it is between its trap and the park.  Fired
+	 * at random they were too few to land there under KVM: as few as 4 in
+	 * a whole run, with this processor never yielded, and the ablated arm
+	 * passed one KVM boot of three.  At one processor a yield follows
+	 * each, so that the thread gets to run into them.  The first is fired
+	 * before the thread can have made an RPC, so a run with no abort in it
+	 * is a refusal, and the firing stops at any refusal, or when the
+	 * thread has begun no RPC for ARM11_IDLE looks: until then it is alive.
 	 */
 	alone = processors() <= 1;
 	arm_eleven_firing = 1;
+	seen = 0;
+	idle = 0;
 	while (!arm_eleven_done && aborts < ARM11_ABORTS) {
+		if (aborts > 0 && !alone) {
+			if (arm_eleven_calls == seen) {
+				if (++idle > ARM11_IDLE)
+					break;
+				continue;
+			}
+			seen = arm_eleven_calls;
+			idle = 0;
+		}
 		refused = thread_abort(arm_eleven_thread);
 		if (refused != KERN_SUCCESS)
 			break;
