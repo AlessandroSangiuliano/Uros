@@ -619,6 +619,22 @@ thread_go(thread_t thread)
 	 * under thread_lock too, so the check is race-free.
 	 */
 	if ((thread->state & TH_WAIT) && thread->wait_event == NO_EVENT) {
+#if	WAKER_TRACK
+		/*
+		 * #687: and still the wait the caller took it off.  A thread
+		 * put on an IPC queue again since is in a later wait, which
+		 * this would end with nothing delivered: the late wakeup that
+		 * #700 closed in ipc_mqueue_deliver(), stopped here where it
+		 * is made, with the waker's stack on the screen.
+		 */
+		if (thread->ith_dq_seq != thread->ith_park_seq) {
+			waker_say(thread);
+			panic("thread_go: thread %p was taken off an IPC queue "
+			      "at its park %u and is in park %u, which this "
+			      "would end (#687, #700)", thread,
+			      thread->ith_dq_seq, thread->ith_park_seq);
+		}
+#endif	/* WAKER_TRACK */
 		thread->state &= ~TH_WAIT;
 		if (!(thread->state & TH_RUN)) {
 			thread->state |= TH_RUN;
