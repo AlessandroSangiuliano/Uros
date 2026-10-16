@@ -1827,7 +1827,7 @@ arm_nine_refused_create_running(void)
 
 /*
  * Long enough that the thread is still parked in its second RPC when a wakeup
- * the widen holds open arrives: the widen holds it 200 ms after the reply.
+ * the widen holds open arrives: the widen holds it 300 ms after the reply.
  */
 #define ARM10_HOLD_MS		500
 
