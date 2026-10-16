@@ -69,6 +69,7 @@ static int		hq_never;	/* nobody signals this         */
 static volatile int	hq_ran;		/* the waiter ran after a wake */
 static volatile int	hq_state;	/* its thread state when it did */
 static volatile int	hq_swap;	/* its activation's swap state */
+static volatile int	hq_quiet;	/* it does not wake the driver */
 
 /*
  * The waiter, as futex_wait() leaves one: asleep interruptibly on its word.
@@ -89,7 +90,8 @@ hq_waiter(void)
 	hq_state = current_thread()->state;
 	hq_swap = current_act()->swap_state;
 	hq_ran = 1;
-	thread_wakeup((event_t) &hq_driver);
+	if (!hq_quiet)
+		thread_wakeup((event_t) &hq_driver);
 
 	/*
 	 * ⚠️ And then nothing, for ever.  A waiter switched onto while still
@@ -361,10 +363,18 @@ hq_stopped_arm(void)
  * its own word, the abort pending, until somebody woke that word.
  *
  * So the driver -- this thread -- carries the bit into hq_wake(), and the
- * waiter it wakes wakes it back.  The hand-off must decline, wake the waiter
- * the ordinary way, and leave the driver's wait to thread_block(), which ends
- * it at once: THREAD_INTERRUPTED.  One that switches leaves the driver asleep
- * until the waiter's wakeup ends the wait instead: THREAD_AWAKENED.
+ * waiter it wakes does NOT wake it back: the driver's word is one nobody
+ * wakes, the case where the abort waited for ever.  The hand-off must decline,
+ * wake the waiter the ordinary way, and leave the driver's wait to
+ * thread_block(), which ends it at once: THREAD_INTERRUPTED.  One that
+ * switches leaves the driver asleep until its timeout: THREAD_TIMED_OUT, ten
+ * seconds later.
+ *
+ * ❌ The first version let the waiter wake the driver back, as in the other
+ * arms, and called a wait ended by that wakeup a defect.  Under TCG the waiter
+ * woken the ordinary way ran on another processor and woke the driver before
+ * its thread_block() could answer the abort: THREAD_AWAKENED, with the
+ * hand-off declining as it must, and the fixed tree failed 3 boots of 3.
  *
  * ⚠️ THE BIT IS SET HERE BY HAND, as act_abort() sets it on a thread it finds
  * not waiting.  thread_abort() refuses the current activation, and from
@@ -395,6 +405,7 @@ hq_aborted_arm(void)
 	}
 
 	hq_ran = 0;
+	hq_quiet = 1;
 	s = splsched();
 	thread_lock(self);
 	self->state |= TH_ABORT;
@@ -410,13 +421,21 @@ hq_aborted_arm(void)
 	thread_unlock(self);
 	splx(s);
 
-	if (handed || result != THREAD_INTERRUPTED) {
-		printf("handoff: WRONG — a driver with an abort pending %s, and "
-		       "its wait ended with %d, not THREAD_INTERRUPTED (%d)%s "
-		       "(#703)\n", handed ? "was parked by the hand-off" :
-		       "was not handed off", result, THREAD_INTERRUPTED,
-		       result == THREAD_AWAKENED ?
-		       ": it slept until the waiter woke it" : "");
+	if (handed) {
+		printf("handoff: WRONG — a driver with an abort pending was parked "
+		       "by the hand-off, and its wait ended with %d%s (#703)\n",
+		       result, result == THREAD_TIMED_OUT ?
+		       ", its timeout ten seconds later: the abort waited for a "
+		       "wakeup nobody sent" : "");
+		hq_quiet = 0;
+		return;
+	}
+	if (result != THREAD_INTERRUPTED) {
+		printf("handoff: WRONG — the hand-off declined a driver with an "
+		       "abort pending, and thread_block() ended its wait with %d, "
+		       "not THREAD_INTERRUPTED (%d) (#703)\n", result,
+		       THREAD_INTERRUPTED);
+		hq_quiet = 0;
 		return;
 	}
 
@@ -427,6 +446,7 @@ hq_aborted_arm(void)
 	 */
 	for (int i = 0; i < 10 * hz && !hq_ran; i++)
 		mutex_pause();
+	hq_quiet = 0;
 	if (!hq_ran) {
 		printf("handoff: WRONG — the hand-off declined for the driver's "
 		       "abort, and the waiter never ran in ten seconds: the "
