@@ -1643,7 +1643,8 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 }
 
 /* ================================================================
- * ds_device_get_status — DEV_GET_SIZE returns partition info
+ * ds_device_get_status — DEV_GET_SIZE returns partition info, DEV_GET_HOLDERS
+ * who else has it open (#596)
  * ================================================================ */
 
 kern_return_t
@@ -1723,6 +1724,31 @@ ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
 		}
 		status[DEV_GET_SIZE_RECORD_SIZE] = (int)SECTOR_SIZE;
 		*status_count = DEV_GET_SIZE_COUNT;
+		return KERN_SUCCESS;
+	}
+	if (flavor == DEV_GET_HOLDERS) {
+		/*
+		 * #596: who else holds this partition, counted from the
+		 * handles this server keeps -- it is the one place that knows,
+		 * since a handle records its partition and the mode it was
+		 * opened in (#614) and nothing outside sees them.  The
+		 * asker's own handle is not counted; a revoked one is, since
+		 * its holder still has it open.
+		 */
+		struct blk_handle *self = magic == BLK_MAGIC_HANDLE
+			? (struct blk_handle *)blk_object_for(device) : NULL;
+		unsigned int open = 0, writing = 0;
+
+		for (struct blk_handle *h = blk_handles_head; h; h = h->next) {
+			if (h->part != part || h == self)
+				continue;
+			open++;
+			if (h->mode & D_WRITE)
+				writing++;
+		}
+		status[DEV_GET_HOLDERS_OPEN] = (int)open;
+		status[DEV_GET_HOLDERS_WRITING] = (int)writing;
+		*status_count = DEV_GET_HOLDERS_COUNT;
 		return KERN_SUCCESS;
 	}
 	return D_INVALID_OPERATION;

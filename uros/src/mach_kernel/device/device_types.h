@@ -207,6 +207,22 @@ typedef int		dev_status_data_t[DEV_STATUS_MAX];
 #define	DEV_GET_SIZE_COUNT		2
 
 /*
+ * Who else holds a partition (#596), answered by the block server: asked
+ * through a handle, the OTHER handles open on that handle's partition and how
+ * many of them were opened with D_WRITE; asked of the partition itself, every
+ * handle on it.  A count, naming no handle and no task.
+ *
+ * 🔑 A mounted filesystem and a pager each hold their partition open, so this
+ * is how a client learns that a write of its own would land under one of them
+ * -- the property cap_test's scratch write needs, and could not see: it asked
+ * "is this the boot disk?", and the partition it wrote was ext_server's root.
+ */
+#define	DEV_GET_HOLDERS			1
+#	define	DEV_GET_HOLDERS_OPEN		0	/* the asker's not counted */
+#	define	DEV_GET_HOLDERS_WRITING		1	/* of those, with D_WRITE */
+#define	DEV_GET_HOLDERS_COUNT		2
+
+/*
  * The bus/device/function a DMA buffer is allocated FOR, packed as
  * (bus << 8) | (dev << 3) | func, and the value that means "no device of my
  * own" (#432).
