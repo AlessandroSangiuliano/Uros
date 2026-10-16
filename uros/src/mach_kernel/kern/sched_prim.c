@@ -619,6 +619,22 @@ thread_go(thread_t thread)
 	 * under thread_lock too, so the check is race-free.
 	 */
 	if ((thread->state & TH_WAIT) && thread->wait_event == NO_EVENT) {
+#if	WAKER_TRACK
+		/*
+		 * #687: and still the wait the caller took it off.  A thread
+		 * put on an IPC queue again since is in a later wait, which
+		 * this would end with nothing delivered: the late wakeup that
+		 * #700 closed in ipc_mqueue_deliver(), stopped here where it
+		 * is made, with the waker's stack on the screen.
+		 */
+		if (thread->ith_dq_seq != thread->ith_park_seq) {
+			waker_say(thread);
+			panic("thread_go: thread %p was taken off an IPC queue "
+			      "at its park %u and is in park %u, which this "
+			      "would end (#687, #700)", thread,
+			      thread->ith_dq_seq, thread->ith_park_seq);
+		}
+#endif	/* WAKER_TRACK */
 		thread->state &= ~TH_WAIT;
 		if (!(thread->state & TH_RUN)) {
 			thread->state |= TH_RUN;
@@ -631,11 +647,56 @@ thread_go(thread_t thread)
 		}
 		thread->wait_result = THREAD_AWAKENED;
 		thread->at_safe_point = NOT_AT_SAFE_POINT;
+		WAKER_NOTE(thread, THREAD_AWAKENED, NO_EVENT,
+			   __builtin_return_address(0));
 	}
 
 	thread_unlock(thread);
 	splx(s);
 }
+
+#if	WAKER_TRACK
+#include <ddb/ksym.h>		/* x86-64's: the kernel's own symbols */
+
+/* A waker's caller by name, or "?" with the address printed beside it. */
+static const char *
+waker_sym(void *from, uint64_t *off)
+{
+	const char	*nm;
+
+	*off = 0;
+	if (from == WAKER_FROM_HOTPATH)
+		return "mach_msg_overwrite_trap's claim";
+	if (from == 0)
+		return "nobody";
+	nm = ksym_lookup_call((uint64_t) from, off);
+	return nm != 0 ? nm : "?";
+}
+
+/*
+ * #687: what a thread says about its last wait, one line, one printf (#578):
+ * who ended it, on which processor, with what result and on which event, its
+ * IPC park count and the count it was last taken off at, and the caller of its
+ * last assert_wait().  For the panics that find a thread woken with nothing
+ * delivered, and for thread_go()'s, which finds the wakeup that is late.
+ */
+void
+waker_say(thread_t thread)
+{
+	uint64_t	woff, aoff;
+	const char	*woke = waker_sym(thread->woke_from, &woff);
+	const char	*asked = waker_sym(thread->wait_from, &aoff);
+
+	printf("waker: thread %p, state 0x%x, wait_event %p, wait_result %d; "
+	       "last woken by %s+0x%lx (%p) on cpu %d with result %d, ending "
+	       "a wait on %p (0: an IPC queue); IPC park %u, taken off one at "
+	       "%u; last assert_wait from %s+0x%lx (#687)\n", thread,
+	       thread->state, thread->wait_event, thread->wait_result, woke,
+	       (unsigned long) woff, thread->woke_from, thread->woke_cpu,
+	       thread->woke_result, thread->woke_event, thread->ith_park_seq,
+	       thread->ith_dq_seq, asked, (unsigned long) aoff);
+}
+#endif	/* WAKER_TRACK */
 
 /*
  *	Routine:	thread_will_wait
@@ -1179,6 +1240,9 @@ clear_wait_locked(
 	register queue_t	q;
 	register event_t	event;
 	register simple_lock_t	lock;
+#if	WAKER_TRACK
+	event_t			ended;
+#endif
 
 	if (interrupt_only && (thread->state & TH_UNINT)) {
 		/*
@@ -1198,6 +1262,9 @@ clear_wait_locked(
 	if (event == (event_t)WAKING_EVENT) {
 		return;
 	}
+#if	WAKER_TRACK
+	ended = event;		/* #687: event is NO_EVENT below once removed */
+#endif
 
 	if (event != NO_EVENT) {
 		thread_unlock(thread);
@@ -1230,7 +1297,13 @@ clear_wait_locked(
 	}
 	if (event == NO_EVENT) {
 		reset_timeout_check(&thread->timer);
+#if	WAKER_TRACK
+		if (wake_dequeued(thread, result))
+			WAKER_NOTE(thread, result, ended,
+				   __builtin_return_address(0));
+#else
 		(void) wake_dequeued(thread, result);
+#endif
 	}
 }
 
@@ -1310,6 +1383,7 @@ thread_wakeup_prim(
 		reset_timeout_check(&thread->timer);
 		if (!wake_dequeued(thread, result))
 			panic("thread_wakeup");
+		WAKER_NOTE(thread, result, event, __builtin_return_address(0));
 		thread->wait_event = NO_EVENT;
 		thread_unlock(thread);
 	}
@@ -1447,6 +1521,8 @@ thread_handoff_to_parked_waiter(
 		/* Dequeued off the wait hash, so it must have been waiting. */
 		if (!wake_dequeued(victim, THREAD_AWAKENED))
 			panic("thread_handoff_to_parked_waiter");
+		WAKER_NOTE(victim, THREAD_AWAKENED, event,
+			   __builtin_return_address(0));
 		thread_unlock(victim);
 		splx(s);
 		return FALSE;
@@ -1455,6 +1531,7 @@ thread_handoff_to_parked_waiter(
 	victim->state = (ostate &~ TH_WAIT) | TH_RUN;
 	victim->wait_result = THREAD_AWAKENED;
 	victim->at_safe_point = NOT_AT_SAFE_POINT;
+	WAKER_NOTE(victim, THREAD_AWAKENED, event, __builtin_return_address(0));
 	thread_unlock(victim);
 
 	/* Direct switch.  self (already TH_WAIT via the caller's assert_wait)

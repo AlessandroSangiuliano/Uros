@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #687
+Takes out: nothing of a fix -- it leaves the state 59bc8049's check exists for: an assert_wait() declared and never blocked on or cleared, made here just before the hot path parks, so the thread is still TH_WAIT on that event's hash; thread_go() would pass such a park over (#299) and a wakeup of the old event would end it with nothing delivered; the check must stop the park, with waker_say()'s line naming the assert_wait's caller
+Run: --entry 14 600 -smp 4
+Expect: mmot_hotpath: parking a thread that is already waiting: state 0x[0-9a-f]+, wait_event 0x[0-9a-f]+ \(#687\)
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index fb1820c1..1fa2a096 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -2027,6 +2027,12 @@ mach_msg_overwrite_trap(
+ 		 * sender ends up on a run queue: see thread_go() / thread_dispatch
+ 		 * in kern/sched_prim.c.
+ 		 */
++		{
++			/* #687's ablation: a wait declared and left behind */
++			static int left_687;
++
++			assert_wait((event_t) &left_687, FALSE);
++		}
+ 		thread_lock(self);
+ #if	WAKER_TRACK
+ 		/*

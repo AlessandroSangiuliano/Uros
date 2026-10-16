@@ -121,6 +121,7 @@ ipc_thread_rmqueue(
 	ipc_thread_t next, prev;
 
 	assert(queue->ithq_base != ITH_NULL);
+	ipc_thread_dq_note(thread);
 
 	next = thread->ith_next;
 	prev = thread->ith_prev;

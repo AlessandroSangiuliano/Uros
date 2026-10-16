@@ -4,7 +4,7 @@ Holds open: a reply's window between taking its receiver off the queue and wakin
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index ecddb54e..fa629d1a 100644
+index 091038b8..9f7f6c12 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
 @@ -192,6 +192,7 @@
@@ -48,7 +48,7 @@ index ecddb54e..fa629d1a 100644
  mach_msg_return_t
  ipc_mqueue_deliver(
  	register ipc_port_t	port,
-@@ -941,6 +968,8 @@ ipc_mqueue_deliver(
+@@ -945,6 +972,8 @@ ipc_mqueue_deliver(
  		if (!direct)
  			splx(s);
  	}
@@ -57,7 +57,7 @@ index ecddb54e..fa629d1a 100644
  	if (!direct)
  		thread_go(receiver);
  	imq_unlock(mqueue);
-@@ -1181,6 +1210,8 @@ ipc_mqueue_receive(
+@@ -1185,6 +1214,8 @@ ipc_mqueue_receive(
  		thread_block(continuation);
  		if (option & MACH_RCV_TIMEOUT)
  			reset_timeout_check(&self->timer);
@@ -67,7 +67,7 @@ index ecddb54e..fa629d1a 100644
                  /* Save proper wait_result in case we block */
  		save_wait_result = self->wait_result;
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
-index f582739b..59531082 100644
+index 4892ac32..00ea84d5 100644
 --- a/uros/src/mach_kernel/kern/sched_prim.c
 +++ b/uros/src/mach_kernel/kern/sched_prim.c
 @@ -619,6 +619,11 @@ thread_go(thread_t thread)
@@ -79,6 +79,6 @@ index f582739b..59531082 100644
 +			panic("thread_go: thread %p is halted and queued for "
 +			      "the reaper, and its caller is ending a wait it "
 +			      "did not mean to (#700)", thread);
- 		thread->state &= ~TH_WAIT;
- 		if (!(thread->state & TH_RUN)) {
- 			thread->state |= TH_RUN;
+ #if	WAKER_TRACK
+ 		/*
+ 		 * #687: and still the wait the caller took it off.  A thread

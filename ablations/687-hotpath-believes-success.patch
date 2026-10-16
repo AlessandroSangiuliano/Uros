@@ -7,6 +7,7 @@ Expect: mmot_hotpath: bad wait result 0 \(ith_state 10004001\)
 Expect: #687 widen: thread 0x[0-9a-f]+ has taken its message and is in a later wait
 Expect: mach_msg_receive_continue: bad wait_result
 Expect: the zombie walks
+Expect: thread_go: thread 0x[0-9a-f]+ was taken off an IPC queue at its park [0-9]+ and is in park [0-9]+
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
 index a53dd0a8..1592e9f9 100644

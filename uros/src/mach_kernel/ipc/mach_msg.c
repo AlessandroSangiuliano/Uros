@@ -623,6 +623,9 @@ mach_msg_receive_continue(void)
 
 		    case THREAD_RESTART:
 		    default:
+#if	WAKER_TRACK
+			waker_say(self);	/* #687 */
+#endif
 			panic("mach_msg_receive_continue: bad wait_result");
 		}
 		break;
@@ -1951,6 +1954,7 @@ mach_msg_overwrite_trap(
 		receiver->state &= ~(TH_WAIT|TH_UNINT);
 		receiver->state |= TH_RUN;
 		receiver->at_safe_point = NOT_AT_SAFE_POINT;
+		WAKER_NOTE(receiver, -1, NO_EVENT, WAKER_FROM_HOTPATH);
 #if	NCPUS > 1
 		mp_disable_preemption();
 		receiver->last_processor = current_processor();
@@ -2024,6 +2028,23 @@ mach_msg_overwrite_trap(
 		 * in kern/sched_prim.c.
 		 */
 		thread_lock(self);
+#if	WAKER_TRACK
+		/*
+		 * #687: no wait already declared, before anything is decided.
+		 * An assert_wait() neither blocked on nor cleared leaves this
+		 * thread TH_WAIT on that event's hash with wait_event set:
+		 * thread_go() then passes this park over (#299), and a wakeup of
+		 * the old event ends it with nothing delivered -- "bad wait
+		 * result 0" below, far from the wait that was left behind.
+		 * waker_say() names its caller.
+		 */
+		if ((self->state & TH_WAIT) || self->wait_event != NO_EVENT) {
+			waker_say(self);
+			panic("mmot_hotpath: parking a thread that is already "
+			      "waiting: state 0x%x, wait_event %p (#687)",
+			      self->state, self->wait_event);
+		}
+#endif	/* WAKER_TRACK */
 		assert(self->state & TH_RUN);
 		self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
 		self->reason = 0;		/* inline thread_invoke */
@@ -2243,12 +2264,18 @@ mach_msg_overwrite_trap(
 					return MACH_RCV_INTERRUPTED;
 
 				    default:
+#if	WAKER_TRACK
+					waker_say(self);	/* #687 */
+#endif
 					panic("mmot_hotpath: bad wait result %x (ith_state %x)",
 					      save_wait_result, self->ith_state);
 				}
 				break;
 
 			    default:
+#if	WAKER_TRACK
+				waker_say(self);	/* #687 */
+#endif
 				panic("mmot_hotpath: bad ith_state %x (wait_result %x)",
 				      self->ith_state, save_wait_result);
 			}

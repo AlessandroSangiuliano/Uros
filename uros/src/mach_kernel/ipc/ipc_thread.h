@@ -102,11 +102,26 @@ MACRO_END
 
 #define	ipc_thread_queue_first(queue)	((queue)->ithq_base)
 
+/*
+ * #687: the IPC park count of <kern/thread.h>, kept by every way onto and off
+ * an IPC thread queue, under that queue's lock: a thread is counted when it is
+ * put on one, and the count is copied when it is taken off.
+ */
+#if	WAKER_TRACK
+#define	ipc_thread_park_note(thread)	((thread)->ith_park_seq++)
+#define	ipc_thread_dq_note(thread)	\
+		((thread)->ith_dq_seq = (thread)->ith_park_seq)
+#else	/* WAKER_TRACK */
+#define	ipc_thread_park_note(thread)	((void) 0)
+#define	ipc_thread_dq_note(thread)	((void) 0)
+#endif	/* WAKER_TRACK */
+
 #define	ipc_thread_rmqueue_first_macro(queue, thread)			\
 MACRO_BEGIN								\
 	register ipc_thread_t _next;					\
 									\
 	assert((queue)->ithq_base == (thread));				\
+	ipc_thread_dq_note(thread);					\
 									\
 	_next = (thread)->ith_next;					\
 	if (_next == (thread)) {					\
@@ -126,6 +141,7 @@ MACRO_END
 MACRO_BEGIN								\
 	register ipc_thread_t _first = (queue)->ithq_base;		\
 									\
+	ipc_thread_park_note(thread);					\
 	if (_first == ITH_NULL) {					\
 		(queue)->ithq_base = (thread);				\
 		assert((thread)->ith_next == (thread));			\

@@ -273,6 +273,7 @@
 #include <kern/timer.h>
 #include <kern/lock.h>
 #include <kern/sched.h>
+#include <kern/waker_track.h>	/* #687: WAKER_TRACK */
 #include <vm/vm_map.h>		/* for vm_map_version_t */
 #include <machine/thread.h>
 #include <mach/thread_status.h>
@@ -356,6 +357,17 @@ typedef struct thread_shuttle {
 	 * mutex_t).  Diagnostic only: nothing reads it but the census.
 	 */
 	void		*wait_from;
+#if	WAKER_TRACK
+	/*
+	 * #687: and who last ENDED one of this thread's waits, written under
+	 * its lock by every way a wait ends (WAKER_NOTE in <kern/sched_prim.h>).
+	 * A thread found woken with nothing delivered says here who woke it.
+	 */
+	void		*woke_from;	/* the waking function's caller */
+	event_t		woke_event;	/* NO_EVENT for an IPC queue's wait */
+	int		woke_result;	/* what it gave the thread */
+	int		woke_cpu;
+#endif	/* WAKER_TRACK */
 	kern_return_t	wait_result;	/* outcome of wait -
 					   may be examined by this thread
 					   WITHOUT locking */
@@ -423,6 +435,17 @@ typedef struct thread_shuttle {
 
 	/* IPC data structures */
 	struct thread_shuttle *ith_next, *ith_prev;
+#if	WAKER_TRACK
+	/*
+	 * #687: how many times this thread has been put on an IPC thread
+	 * queue -- a receive's imq_threads, a blocked send's ip_blocked --
+	 * and that count when it was last taken off one, each under that
+	 * queue's lock (<ipc/ipc_thread.h>).  thread_go() is for the wait
+	 * the thread was taken off, so the two still agree there (#700).
+	 */
+	unsigned int	ith_park_seq;
+	unsigned int	ith_dq_seq;
+#endif	/* WAKER_TRACK */
 	mach_msg_return_t ith_state;
 	mach_msg_size_t ith_msize;		/* max size for recvd msg */
 	struct ipc_kmsg *ith_kmsg;		/* received message */
