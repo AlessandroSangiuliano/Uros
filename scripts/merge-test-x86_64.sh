@@ -160,6 +160,7 @@ ENTRIES="
 42 restart --iommu_intel
 43 restartcensus
 44 restartpanic
+52 restarthold
 46 harness
 46 harness - 1
 47 harness
@@ -295,6 +296,16 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 		zone_kept "$f" ;;
 	restartpanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq 'panic: -b: restarting the machine in 5 seconds' "$f" &&
+		zone_kept "$f" ;;
+	# #595: and with reset_hold=, in this order: the census said the
+	# machine restarts seventy seconds later, a summary of the TSC watchdog
+	# came while it was held, and the hold ended as asked by the TSC -- a
+	# hold that ended early or late says WRONG instead.
+	restarthold) LC_ALL=C awk '
+		/quiet_census: -b: the boot is over; the machine restarts in 70 seconds, as reset_hold= asks/ { c = 1 }
+		c && /UrMach x86-64: the TSC watchdog, [0-9]+ windows: / { w = 1 }
+		w && /reset: -b: [0-9]+\.[0-9]+ seconds since the quiet census by the TSC, as reset_hold= asks; restarting the machine/ { r = 1 }
+		END { exit !r }' "$f" &&
 		zone_kept "$f" ;;
 	esac
 }

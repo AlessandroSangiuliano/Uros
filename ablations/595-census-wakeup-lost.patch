@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #595
+Over: 595-widen-census-before-deadline-wait.patch
+Takes out: cccb6470 -- -b's deadline thread declares its wait and sleeps on reset_after='s deadline whatever the census's flag says, so a census that came before the wait was declared woke nobody, and the hold begins only at the deadline, five minutes late; the hold's end, measured on the TSC since the census, must say WRONG
+Run: --entry 52 600 -smp 4
+Expect: reset: -b: [0-9]+\.[0-9]+ seconds since the quiet census by the TSC, where reset_hold= asks 70 -- WRONG \(#595\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/reset.c b/uros/src/mach_kernel/x86_64/cpu/reset.c
+index 43694ab9..ce4dcbe8 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/reset.c
++++ b/uros/src/mach_kernel/x86_64/cpu/reset.c
+@@ -257,18 +257,10 @@ static void reset_deadline_thread(void)
+ 		       "seconds late, and the census %s\n", reset_census_seen
+ 		       ? "came before it" : "has not come yet");
+ 	}
+-	/*
+-	 * The census can come before this thread has declared its wait, and
+-	 * its wakeup then finds nobody: the flag, set before the wakeup and
+-	 * read once the wait is declared, is what it leaves behind.
+-	 */
+ 	assert_wait((event_t) &reset_deadline_event, FALSE);
+-	if (!reset_census_seen) {
+-		thread_set_timeout((int)(reset_after * hz));
+-		thread_block((void (*)(void)) 0);
+-		reset_timeout_check(&current_thread()->timer);
+-	} else
+-		clear_wait(current_thread(), THREAD_AWAKENED, FALSE);
++	thread_set_timeout((int)(reset_after * hz));
++	thread_block((void (*)(void)) 0);
++	reset_timeout_check(&current_thread()->timer);
+ 
+ 	if (reset_census_seen) {
+ 		assert_wait((event_t) &reset_hold_event, FALSE);

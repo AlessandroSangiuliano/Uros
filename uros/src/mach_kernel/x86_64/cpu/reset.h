@@ -38,4 +38,11 @@ void	reset_wait_us(unsigned us);
  */
 void	reset_deadline_start(void);
 
+/*
+ * -b: the quiet census says the boot is over.  Restarts the machine there,
+ * or reset_hold= seconds later from the deadline's thread (#595).  From the
+ * idle thread: it does not sleep.
+ */
+void	reset_census_over(void);
+
 #endif	/* _X86_64_CPU_RESET_H_ */
