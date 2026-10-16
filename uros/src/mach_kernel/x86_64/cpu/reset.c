@@ -246,10 +246,18 @@ static void reset_hold_over(void)
 
 static void reset_deadline_thread(void)
 {
+	/*
+	 * The census can come before this thread has declared its wait, and
+	 * its wakeup then finds nobody: the flag, set before the wakeup and
+	 * read once the wait is declared, is what it leaves behind.
+	 */
 	assert_wait((event_t) &reset_deadline_event, FALSE);
-	thread_set_timeout((int)(reset_after * hz));
-	thread_block((void (*)(void)) 0);
-	reset_timeout_check(&current_thread()->timer);
+	if (!reset_census_seen) {
+		thread_set_timeout((int)(reset_after * hz));
+		thread_block((void (*)(void)) 0);
+		reset_timeout_check(&current_thread()->timer);
+	} else
+		clear_wait(current_thread(), THREAD_AWAKENED, FALSE);
 
 	if (reset_census_seen) {
 		assert_wait((event_t) &reset_hold_event, FALSE);
