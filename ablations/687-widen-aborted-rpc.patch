@@ -1,0 +1,100 @@
+Kind: widen
+Issue: #687
+Holds open: an aborted RPC's window between its reply being written and the wakeup that comes with it -- a thread the hot path parked, let go by an abort, comes back for its reply 100 ms late, so that a reply sent after the abort finds it still queued, and the reply's deliverer, finding its receiver already out of its wait, holds the wakeup 300 ms; each side says so, so that a fixed arm that passes shows the window was open; in the fixed tree the receiver waits for that wakeup under imq_lock; the deliverer says when its wakeup is about to end a later wait; only the first 16 of each in a boot, since act_test [11] aborts a thread some 2000 times
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+index 2049fcac..613a0649 100644
+--- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
++++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
+@@ -734,6 +734,60 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
+  */
+ unsigned int	ipc_dts_declined_swapped;
+ 
++/*
++ * #687's widened window, and not an ablation.  A thread the hot path parked,
++ * let go by an abort, comes back for its reply WIDEN_687_RECEIVER_US late, so
++ * that a reply sent after the abort finds it still queued; the reply's
++ * deliverer, finding its receiver already out of its wait, then holds the
++ * wakeup WIDEN_687_DELIVERER_US.  With the fix in, the receiver takes imq_lock
++ * and waits there for that wakeup to be spent; with it out, it believes the
++ * SUCCESS it reads, goes on into its next RPC, and the wakeup ends that wait.
++ * Each side says so, so that a fixed arm that passes shows the window was
++ * open, and the deliverer says when its wakeup is about to end a later wait.
++ *
++ * Only the first WIDEN_687_TIMES of each in a boot.  act_test [11] aborts a
++ * thread some 2000 times, and with the window held open every time its fixed
++ * TCG boots took 600 s, the whole of their Run: line; arm ten, which this is
++ * for, comes before it, after 2 to 5 of each.
++ */
++#define	WIDEN_687_RECEIVER_US	100000
++#define	WIDEN_687_DELIVERER_US	300000
++#define	WIDEN_687_TIMES		16
++
++/* Not atomic: a budget, not a census. */
++static int	widen_687_receivers, widen_687_deliveries;
++
++void
++widen_687_receiver(thread_t self)
++{
++	if (self->wait_result == THREAD_INTERRUPTED &&
++	    widen_687_receivers < WIDEN_687_TIMES) {
++		widen_687_receivers++;
++		/* said, so that a fixed arm that passes shows the window opened */
++		printf("#687 widen: an RPC aborted on the hot path comes back "
++		       "for its reply %d us late, thread %p\n",
++		       WIDEN_687_RECEIVER_US, self);
++		delay(WIDEN_687_RECEIVER_US);
++	}
++}
++
++static void
++widen_687_deliverer(thread_t receiver)
++{
++	if ((receiver->state & TH_WAIT) ||
++	    widen_687_deliveries >= WIDEN_687_TIMES)
++		return;
++	widen_687_deliveries++;
++	printf("#687 widen: a message goes to thread %p, which an abort or a "
++	       "timeout has let go, and its wakeup waits %d us\n", receiver,
++	       WIDEN_687_DELIVERER_US);
++	delay(WIDEN_687_DELIVERER_US);
++	if (receiver->ith_state != MACH_MSG_SUCCESS)
++		printf("#687 widen: thread %p has taken its message and is in "
++		       "a later wait (ith_state %x) when that wakeup comes\n",
++		       receiver, receiver->ith_state);
++}
++
+ mach_msg_return_t
+ ipc_mqueue_deliver(
+ 	register ipc_port_t	port,
+@@ -945,6 +999,8 @@ ipc_mqueue_deliver(
+ 		if (!direct)
+ 			splx(s);
+ 	}
++	if (!direct && thread_context)
++		widen_687_deliverer(receiver);
+ 	if (!direct)
+ 		thread_go(receiver);
+ 	imq_unlock(mqueue);
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index 523a34ae..23d7669c 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -219,6 +219,8 @@ unsigned int	c_route_msg_continue = 0;
+ #include <dipc/dipc_port.h>
+ #endif	/* DIPC */
+ 
++extern void	widen_687_receiver(thread_t self);	/* in ipc_mqueue.c */
++
+ 
+ /*
+  * Forward declarations
+@@ -2184,6 +2186,7 @@ mach_msg_overwrite_trap(
+ 		 * until its wakeup is spent (#700), so taking it waits for that,
+ 		 * and makes ith_kmsg, written after ith_state, safe to read.
+ 		 */
++		widen_687_receiver(self);
+ 		if (self->ith_state != MACH_MSG_SUCCESS ||
+ 		    self->wait_result == THREAD_INTERRUPTED) {
+ 			/* why did we wake up? */

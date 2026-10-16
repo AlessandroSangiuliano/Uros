@@ -2024,12 +2024,28 @@ mach_msg_overwrite_trap(
 		 * in kern/sched_prim.c.
 		 */
 		thread_lock(self);
-		assert(!(self->state & TH_ABORT));
 		assert(self->state & TH_RUN);
-		self->state |= TH_WAIT;
 		self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
 		self->reason = 0;		/* inline thread_invoke */
-		self->wait_result = -1;		/* for later assertions */
+
+		/*
+		 * 🔴 AN ABORT MAY ALREADY BE PENDING HERE (#687).  thread_abort()
+		 * sets TH_ABORT under thread_lock and interrupts a wait only if
+		 * there is one, and this thread was not waiting yet.  This said
+		 * assert(!(self->state & TH_ABORT)), which any task failed by
+		 * aborting one of its own threads in mid-RPC.  A pending abort
+		 * is answered as thread_block_reason() answers it, with a wait
+		 * interrupted at once: no TH_WAIT, THREAD_INTERRUPTED.  The
+		 * request still goes to the receiver claimed above; the
+		 * receiver's thread_dispatch() puts this thread back on a run
+		 * queue, and it comes back through the abort's locked way below.
+		 */
+		if (self->state & TH_ABORT)
+			self->wait_result = THREAD_INTERRUPTED;
+		else {
+			self->state |= TH_WAIT;
+			self->wait_result = -1;	/* for later assertions */
+		}
 		thread_unlock(self);
 
 		imq_unlock(rcv_mqueue);
@@ -2095,7 +2111,8 @@ mach_msg_overwrite_trap(
 
 			/*
 			 * self (the sender) was already marked TH_WAIT under
-			 * imq_lock(rcv_mqueue) above (window-A fix), so there is
+			 * imq_lock(rcv_mqueue) above (window-A fix), or left
+			 * runnable with an abort pending (#687), so there is
 			 * nothing left to prepare here -- just switch.
 			 *
 			 * Switch to the receiver now.
@@ -2150,7 +2167,25 @@ mach_msg_overwrite_trap(
 		}
 
 
-		if (self->ith_state != MACH_MSG_SUCCESS) {
+		/*
+		 * 🔴 AFTER AN ABORT, imq_lock BEFORE ith_state (#687).
+		 *
+		 * A delivery that woke this thread is done with it by the time
+		 * it runs: a sender's hand-off claimed it and wrote the message
+		 * before switching to it (wait_result still -1), and
+		 * ipc_mqueue_deliver() wrote it and then woke it, under imq_lock
+		 * (THREAD_AWAKENED).  An abort ends the wait under thread_lock
+		 * alone, and a reply's deliverer may by then have taken this
+		 * thread off the queue and written MACH_MSG_SUCCESS without
+		 * having woken it yet.  Believed here, that SUCCESS sent the
+		 * thread on with the reply and into its next RPC, and the wakeup
+		 * still owed ended that wait instead: "bad wait result 0
+		 * (ith_state 10004001)" below.  The deliverer holds imq_lock
+		 * until its wakeup is spent (#700), so taking it waits for that,
+		 * and makes ith_kmsg, written after ith_state, safe to read.
+		 */
+		if (self->ith_state != MACH_MSG_SUCCESS ||
+		    self->wait_result == THREAD_INTERRUPTED) {
 			/* why did we wake up? */
 			kern_return_t	save_wait_result;
 
@@ -2163,7 +2198,9 @@ mach_msg_overwrite_trap(
 				/*
 				 * #387: the reply landed in the window
 				 * between the unlocked ith_state check above
-				 * and imq_lock.  A concurrent abort (e.g.
+				 * and imq_lock -- or before that check, and
+				 * the abort sent us here all the same
+				 * (#687).  A concurrent abort (e.g.
 				 * task_terminate of this task under the kill
 				 * x fork storm) pulled us out of TH_WAIT with
 				 * clear_wait -- thread_lock only, never
