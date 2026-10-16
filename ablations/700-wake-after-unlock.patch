@@ -7,6 +7,7 @@ Expect: thread_go: thread 0x[0-9a-f]+ is halted and queued for the reaper
 Expect: the zombie walks
 Expect: ipc_mqueue_receive: bad wait_result
 Expect: mach_msg_receive_continue: bad wait_result
+Expect: thread_go: thread 0x[0-9a-f]+ was taken off an IPC queue at its park [0-9]+ and is in park [0-9]+
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
 index 9f7f6c12..3b1fac51 100644
