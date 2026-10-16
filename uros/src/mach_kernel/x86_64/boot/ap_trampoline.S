@@ -84,8 +84,7 @@ ap_prot:
 	 * processor's own, so every processor translates through one set from
 	 * its first instruction in long mode.
 	 */
-	movl	%cr4, %eax
-	orl	$(1 << 5), %eax			/* PAE */
+	movl	$(1 << 5), %eax			/* PAE, and nothing else, as boot.S (#669) */
 	movl	%eax, %cr4
 
 	movl	AP_PARAM_CR3, %eax

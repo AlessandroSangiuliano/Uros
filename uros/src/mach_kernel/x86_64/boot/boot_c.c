@@ -1781,11 +1781,24 @@ static const struct cr_bit_name cr0_names[] = {
 	{ CR0_NW, "NW" }, { CR0_EM, "EM" }, { CR0_MP, "MP" }, { 0, 0 }
 };
 
+/*
+ * Every bit SDM Vol. 3A (253668-093US) §2.5 defines, so that the census names
+ * what it meets; it said "bit 3 bit 6" for DE and MCE on bare metal (#669).
+ * AMD's CR4 (APM Vol. 2, 24593 Rev. 3.42, §3.1.3) is the same set less VMXE,
+ * SMXE, KL and everything from PKS up, which it reserves.
+ */
 static const struct cr_bit_name cr4_names[] = {
-	{ CR4_PAE, "PAE" }, { CR4_PGE, "PGE" }, { CR4_OSFXSR, "OSFXSR" },
-	{ CR4_OSXMMEXCPT, "OSXMMEXCPT" }, { CR4_FSGSBASE, "FSGSBASE" },
-	{ CR4_PCIDE, "PCIDE" }, { CR4_OSXSAVE, "OSXSAVE" },
-	{ CR4_SMEP, "SMEP" }, { CR4_SMAP, "SMAP" }, { 0, 0 }
+	{ CR4_VME, "VME" }, { CR4_PVI, "PVI" }, { CR4_TSD, "TSD" },
+	{ CR4_DE, "DE" }, { CR4_PSE, "PSE" }, { CR4_PAE, "PAE" },
+	{ CR4_MCE, "MCE" }, { CR4_PGE, "PGE" }, { CR4_PCE, "PCE" },
+	{ CR4_OSFXSR, "OSFXSR" }, { CR4_OSXMMEXCPT, "OSXMMEXCPT" },
+	{ CR4_UMIP, "UMIP" }, { CR4_LA57, "LA57" }, { CR4_VMXE, "VMXE" },
+	{ CR4_SMXE, "SMXE" }, { CR4_FSGSBASE, "FSGSBASE" },
+	{ CR4_PCIDE, "PCIDE" }, { CR4_OSXSAVE, "OSXSAVE" }, { CR4_KL, "KL" },
+	{ CR4_SMEP, "SMEP" }, { CR4_SMAP, "SMAP" }, { CR4_PKE, "PKE" },
+	{ CR4_CET, "CET" }, { CR4_PKS, "PKS" }, { CR4_UINTR, "UINTR" },
+	{ CR4_LASS, "LASS" }, { CR4_LAM_SUP, "LAM_SUP" }, { CR4_FRED, "FRED" },
+	{ 0, 0 }
 };
 
 static const struct cr_bit_name efer_names[] = {
@@ -3103,6 +3116,17 @@ static void percpu_selftest(void)
 	percpu_alloc(self);
 	percpu_activate(self);
 	p = percpu();
+
+	/*
+	 * #669: what percpu_activate() chose for CR4, said once; every other
+	 * processor makes the same choice there, and #639's census checks it.
+	 */
+	kputs("UrMach x86-64: CR4 on every processor: DE ");
+	kputs(read_cr4() & CR4_DE ? "on" : "off, which CPUID does not offer");
+	kputs(", MCE ");
+	kputs(read_cr4() & CR4_MCE ? "on, so a machine check reaches #MC (#440)"
+				   : "off, which CPUID does not offer");
+	kputs("; no bit kept because the firmware left it (#669)\r\n");
 
 	/*
 	 * #482.  The instrument's trap hook and the console's lock wait for
