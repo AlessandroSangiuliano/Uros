@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #687
+Over: 687-widen-aborted-rpc.patch
+Takes out: 04a28bb7 -- the hot path believes a MACH_MSG_SUCCESS it reads without imq_lock again after an abort, so a thread whose reply was written before the abort ended its wait goes on with it into its next RPC while the reply's wakeup is still owed, and that wakeup ends the next wait
+Run: --entry 14 600 -smp 4
+Expect: mmot_hotpath: bad wait result 0 \(ith_state 10004001\)
+Expect: #687 widen: thread 0x[0-9a-f]+ has taken its message and is in a later wait
+Expect: mach_msg_receive_continue: bad wait_result
+Expect: the zombie walks
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index a53dd0a8..1592e9f9 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -2170,8 +2170,7 @@ mach_msg_overwrite_trap(
+ 		 * and makes ith_kmsg, written after ith_state, safe to read.
+ 		 */
+ 		widen_687_receiver(self);
+-		if (self->ith_state != MACH_MSG_SUCCESS ||
+-		    self->wait_result == THREAD_INTERRUPTED) {
++		if (self->ith_state != MACH_MSG_SUCCESS) {
+ 			/* why did we wake up? */
+ 			kern_return_t	save_wait_result;
+ 
