@@ -2146,16 +2146,24 @@ arm_ten_abort_an_rpc_with_its_reply_on_the_way(void)
  * pending: any task could make that false by aborting one of its own threads
  * in the middle of an RPC, and the kernel's own assert stopped the machine.
  *
- * Arm two aborts a thread that is certainly asleep.  This one aborts, up to
- * ARM11_ABORTS times, a thread that mostly is NOT, while it makes ARM11_RPCS
- * RPCs to a server that answers each in the same call that waits for the next,
- * so that the hot path is taken both ways; and every RPC must still end with
- * its own reply.  An abort that lands on the thread while it is parked sends
- * the server's answer the slow way, so arm ten's crossing is asked here too,
- * by chance and many times.
+ * Arm two aborts a thread that is certainly asleep.  This one aborts, for as
+ * long as it lasts, a thread that mostly is NOT, while it makes ARM11_RPCS RPCs
+ * to a server that answers each in the same call that waits for the next, so
+ * that the hot path is taken both ways; and every RPC must still end with its
+ * own reply.  An abort that lands on the thread while it is parked sends the
+ * server's answer the slow way, so arm ten's crossing is asked here too, by
+ * chance and many times.
  */
 #define ARM11_RPCS		2000
-#define ARM11_ABORTS		1000
+
+/*
+ * A bound and not a target: the firing stops when the thread is done.  It
+ * was a target of 1000 with a yield after each abort, and under KVM the 2000
+ * RPCs were over after as few as 2 of them -- the yield gave the processor to
+ * the thread and its server for a whole quantum each time, and with the fix
+ * taken out the arm passed 6 KVM boots of 6, while TCG caught 6 of 6.
+ */
+#define ARM11_ABORTS		1000000
 #define ARM11_REQUEST_ID	1100
 #define ARM11_REPLY_ID		1101
 #define ARM11_STOP_ID		1102
@@ -2267,7 +2275,7 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 	pthread_t		server, victim;
 	mach_msg_header_t	stop;
 	kern_return_t		kr, refused = KERN_SUCCESS;
-	int			aborts = 0, i;
+	int			aborts = 0, alone, i;
 
 	kr = arm_ten_port(&arm_eleven_port, 1);
 	if (kr == KERN_SUCCESS)
@@ -2301,19 +2309,25 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 	}
 
 	/*
-	 * Fired as fast as they go, with a yield between two so that at one
-	 * processor the thread gets to run into them.  The first is fired
-	 * before the thread can have made an RPC, so a run with no abort in it
-	 * is a refusal, and the firing stops at any refusal: the thread is
-	 * waiting for no more than this flag until then, and alive.
+	 * Fired as fast as they go.  At more than one processor nothing comes
+	 * between two: the thread and its server run elsewhere, and a yield
+	 * here only handed them this processor for a quantum (ARM11_ABORTS).
+	 * At one processor a yield follows each, so that the thread gets to
+	 * run into them.  The first is fired before the thread can have made
+	 * an RPC, so a run with no abort in it is a refusal, and the firing
+	 * stops at any refusal: until then the thread is alive and waiting for
+	 * nothing but this flag.
 	 */
+	alone = processors() <= 1;
 	arm_eleven_firing = 1;
 	while (!arm_eleven_done && aborts < ARM11_ABORTS) {
 		refused = thread_abort(arm_eleven_thread);
 		if (refused != KERN_SUCCESS)
 			break;
 		aborts++;
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+		if (alone)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_NONE, 0);
 	}
 
 	for (i = 0; i < 2 * PATIENCE && !arm_eleven_done; i++)
