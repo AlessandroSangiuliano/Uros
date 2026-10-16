@@ -875,8 +875,12 @@ ipc_mqueue_deliver(
 	 * terminated by the handler whose reply this was, ran again out of the
 	 * reaper's queue and panicked "the zombie walks!".
 	 *
-	 * Under the lock that cannot happen: the receiver takes it before it
-	 * reads ith_state, on both of its ways back.  Every other caller of
+	 * Under the lock that cannot happen: a receiver this wakeup has not
+	 * reached yet takes the lock before it believes ith_state, on each of
+	 * its three ways back -- ipc_mqueue_receive() and
+	 * mach_msg_receive_continue() always, and the hot path in
+	 * mach_msg_overwrite_trap() whenever an abort ended its wait, which
+	 * it read without the lock until #687.  Every other caller of
 	 * thread_go() already wakes under the lock of the queue it took the
 	 * thread off, and the direct switch below claims its receiver here for
 	 * the same reason, switching to it once the lock is dropped.

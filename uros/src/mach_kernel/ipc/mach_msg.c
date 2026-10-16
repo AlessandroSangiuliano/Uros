@@ -2150,7 +2150,25 @@ mach_msg_overwrite_trap(
 		}
 
 
-		if (self->ith_state != MACH_MSG_SUCCESS) {
+		/*
+		 * 🔴 AFTER AN ABORT, imq_lock BEFORE ith_state (#687).
+		 *
+		 * A delivery that woke this thread is done with it by the time
+		 * it runs: a sender's hand-off claimed it and wrote the message
+		 * before switching to it (wait_result still -1), and
+		 * ipc_mqueue_deliver() wrote it and then woke it, under imq_lock
+		 * (THREAD_AWAKENED).  An abort ends the wait under thread_lock
+		 * alone, and a reply's deliverer may by then have taken this
+		 * thread off the queue and written MACH_MSG_SUCCESS without
+		 * having woken it yet.  Believed here, that SUCCESS sent the
+		 * thread on with the reply and into its next RPC, and the wakeup
+		 * still owed ended that wait instead: "bad wait result 0
+		 * (ith_state 10004001)" below.  The deliverer holds imq_lock
+		 * until its wakeup is spent (#700), so taking it waits for that,
+		 * and makes ith_kmsg, written after ith_state, safe to read.
+		 */
+		if (self->ith_state != MACH_MSG_SUCCESS ||
+		    self->wait_result == THREAD_INTERRUPTED) {
 			/* why did we wake up? */
 			kern_return_t	save_wait_result;
 
@@ -2163,7 +2181,9 @@ mach_msg_overwrite_trap(
 				/*
 				 * #387: the reply landed in the window
 				 * between the unlocked ith_state check above
-				 * and imq_lock.  A concurrent abort (e.g.
+				 * and imq_lock -- or before that check, and
+				 * the abort sent us here all the same
+				 * (#687).  A concurrent abort (e.g.
 				 * task_terminate of this task under the kill
 				 * x fork storm) pulled us out of TH_WAIT with
 				 * clear_wait -- thread_lock only, never
