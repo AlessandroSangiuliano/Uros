@@ -100,6 +100,32 @@ static inline uint32_t inl(uint16_t port)
 #define CR4_SMEP	(1UL << 20)	/* no kernel execute of user pages  */
 #define CR4_SMAP	(1UL << 21)	/* no kernel access of user pages   */
 
+/*
+ * The two the kernel chooses on every processor and used to inherit on the
+ * boot one from the firmware (#669), and the rest of CR4 as SDM Vol. 3A
+ * (253668-093US) §2.5 lists it, so that #639's census names whatever bit it
+ * meets.
+ */
+#define CR4_DE		(1UL << 3)	/* DR4/DR5 raise #UD, not alias     */
+#define CR4_MCE		(1UL << 6)	/* machine checks raise #MC         */
+#define CR4_VME		(1UL << 0)
+#define CR4_PVI		(1UL << 1)
+#define CR4_TSD		(1UL << 2)
+#define CR4_PSE		(1UL << 4)
+#define CR4_PCE		(1UL << 8)
+#define CR4_UMIP	(1UL << 11)
+#define CR4_LA57	(1UL << 12)
+#define CR4_VMXE	(1UL << 13)
+#define CR4_SMXE	(1UL << 14)
+#define CR4_KL		(1UL << 19)
+#define CR4_PKE		(1UL << 22)
+#define CR4_CET		(1UL << 23)
+#define CR4_PKS		(1UL << 24)
+#define CR4_UINTR	(1UL << 25)
+#define CR4_LASS	(1UL << 27)
+#define CR4_LAM_SUP	(1UL << 28)
+#define CR4_FRED	(1UL << 32)
+
 #ifndef __ASSEMBLER__
 
 static inline uint64_t read_cr0(void)
@@ -596,6 +622,24 @@ static inline int cpu_has_pge(void)
 
 	cpuid(1, &a, &b, &c, &d);
 	return (d & (1U << 13)) != 0;
+}
+
+/* Debugging extensions, CR4.DE's feature: CPUID.1:EDX[2] (#669). */
+static inline int cpu_has_de(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (d & (1U << 2)) != 0;
+}
+
+/* The machine-check exception, CR4.MCE's feature: CPUID.1:EDX[7] (#669). */
+static inline int cpu_has_mce(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (d & (1U << 7)) != 0;
 }
 
 /*
