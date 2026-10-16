@@ -623,6 +623,9 @@ mach_msg_receive_continue(void)
 
 		    case THREAD_RESTART:
 		    default:
+#if	WAKER_TRACK
+			waker_say(self);	/* #687 */
+#endif
 			panic("mach_msg_receive_continue: bad wait_result");
 		}
 		break;
@@ -1951,6 +1954,7 @@ mach_msg_overwrite_trap(
 		receiver->state &= ~(TH_WAIT|TH_UNINT);
 		receiver->state |= TH_RUN;
 		receiver->at_safe_point = NOT_AT_SAFE_POINT;
+		WAKER_NOTE(receiver, -1, NO_EVENT, WAKER_FROM_HOTPATH);
 #if	NCPUS > 1
 		mp_disable_preemption();
 		receiver->last_processor = current_processor();
@@ -2243,12 +2247,18 @@ mach_msg_overwrite_trap(
 					return MACH_RCV_INTERRUPTED;
 
 				    default:
+#if	WAKER_TRACK
+					waker_say(self);	/* #687 */
+#endif
 					panic("mmot_hotpath: bad wait result %x (ith_state %x)",
 					      save_wait_result, self->ith_state);
 				}
 				break;
 
 			    default:
+#if	WAKER_TRACK
+				waker_say(self);	/* #687 */
+#endif
 				panic("mmot_hotpath: bad ith_state %x (wait_result %x)",
 				      self->ith_state, save_wait_result);
 			}

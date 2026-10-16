@@ -1237,6 +1237,9 @@ ipc_mqueue_receive(
 
 			    case THREAD_RESTART:
 			    default:
+#if	WAKER_TRACK
+				waker_say(self);	/* #687 */
+#endif
 				panic("ipc_mqueue_receive: bad wait_result");
 			}
 			break;

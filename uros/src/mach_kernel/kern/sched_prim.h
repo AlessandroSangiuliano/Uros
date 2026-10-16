@@ -123,6 +123,7 @@
 #include <mach/kern_return.h>
 #include <kern/kern_types.h>
 #include <kern/lock.h>
+#include <kern/waker_track.h>	/* #687: WAKER_TRACK */
 
 /*
  *	Possible results of assert_wait - returned in
@@ -228,6 +229,29 @@ extern void	assert_wait_preempt_release(
 			splx(s);				\
 			assert_wait_preempt_release(Th);	\
 		}
+
+/*
+ * #687: who ended a wait (<kern/waker_track.h>).  Every way a wait ends writes
+ * it into the thread under its lock -- thread_go(), thread_wakeup_prim(),
+ * clear_wait_locked(), the futex hand-off and the hot path's claim -- with the
+ * caller of the function that ended it; waker_say() prints it, before the
+ * panics that find a thread woken with nothing delivered.
+ */
+#if	WAKER_TRACK
+#define		WAKER_NOTE(Th,Res,Ev,From)			\
+		do {						\
+			(Th)->woke_from = (From);		\
+			(Th)->woke_event = (Ev);		\
+			(Th)->woke_result = (Res);		\
+			(Th)->woke_cpu = cpu_number();		\
+		} while (0)
+extern void	waker_say(
+				thread_t	thread);
+/* The hot path's claim, which has no caller to name and no call to spare. */
+#define		WAKER_FROM_HOTPATH	((void *) 1)
+#else	/* WAKER_TRACK */
+#define		WAKER_NOTE(Th,Res,Ev,From)	do { } while (0)
+#endif	/* WAKER_TRACK */
 
 
 /* #324 futex direct hand-off: switch straight to a fully-parked waiter */
