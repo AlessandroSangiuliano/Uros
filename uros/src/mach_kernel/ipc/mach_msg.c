@@ -2024,12 +2024,28 @@ mach_msg_overwrite_trap(
 		 * in kern/sched_prim.c.
 		 */
 		thread_lock(self);
-		assert(!(self->state & TH_ABORT));
 		assert(self->state & TH_RUN);
-		self->state |= TH_WAIT;
 		self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
 		self->reason = 0;		/* inline thread_invoke */
-		self->wait_result = -1;		/* for later assertions */
+
+		/*
+		 * 🔴 AN ABORT MAY ALREADY BE PENDING HERE (#687).  thread_abort()
+		 * sets TH_ABORT under thread_lock and interrupts a wait only if
+		 * there is one, and this thread was not waiting yet.  This said
+		 * assert(!(self->state & TH_ABORT)), which any task failed by
+		 * aborting one of its own threads in mid-RPC.  A pending abort
+		 * is answered as thread_block_reason() answers it, with a wait
+		 * interrupted at once: no TH_WAIT, THREAD_INTERRUPTED.  The
+		 * request still goes to the receiver claimed above; the
+		 * receiver's thread_dispatch() puts this thread back on a run
+		 * queue, and it comes back through the abort's locked way below.
+		 */
+		if (self->state & TH_ABORT)
+			self->wait_result = THREAD_INTERRUPTED;
+		else {
+			self->state |= TH_WAIT;
+			self->wait_result = -1;	/* for later assertions */
+		}
 		thread_unlock(self);
 
 		imq_unlock(rcv_mqueue);
@@ -2095,7 +2111,8 @@ mach_msg_overwrite_trap(
 
 			/*
 			 * self (the sender) was already marked TH_WAIT under
-			 * imq_lock(rcv_mqueue) above (window-A fix), so there is
+			 * imq_lock(rcv_mqueue) above (window-A fix), or left
+			 * runnable with an abort pending (#687), so there is
 			 * nothing left to prepare here -- just switch.
 			 *
 			 * Switch to the receiver now.
