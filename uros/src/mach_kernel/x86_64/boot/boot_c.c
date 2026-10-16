@@ -3105,6 +3105,17 @@ static void percpu_selftest(void)
 	p = percpu();
 
 	/*
+	 * #669: what percpu_activate() chose for CR4, said once; every other
+	 * processor makes the same choice there, and #639's census checks it.
+	 */
+	kputs("UrMach x86-64: CR4 on every processor: DE ");
+	kputs(read_cr4() & CR4_DE ? "on" : "off, which CPUID does not offer");
+	kputs(", MCE ");
+	kputs(read_cr4() & CR4_MCE ? "on, so a machine check reaches #MC (#440)"
+				   : "off, which CPUID does not offer");
+	kputs("; no bit kept because the firmware left it (#669)\r\n");
+
+	/*
 	 * #482.  The instrument's trap hook and the console's lock wait for
 	 * the page, as they did when nothing answered before it: %gs based at
 	 * zero read address zero, a byte of the interrupt vector table in the

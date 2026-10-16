@@ -105,6 +105,42 @@ static void deny_user_segment_bases(void)
 		write_cr4(cr4 & ~CR4_FSGSBASE);
 }
 
+/*
+ * 🔴 DE AND MCE ARE THE KERNEL'S, ON EVERY PROCESSOR (#669).
+ *
+ * The boot processor kept whatever CR4 the firmware handed over -- DE and MCE
+ * on omen and OMEGA, DE on pavillion -- and every other processor starts from
+ * INIT, where CR4 is 0, so the two bits depended on which processor and which
+ * firmware.  boot.S now writes CR4 instead of adding to it, and this sets
+ * both, here and only here, on every processor CPUID says has them:
+ *
+ *   - MCE, so that a machine check reaches the #MC entry, on its own stack
+ *     (#440), instead of shutting the processor down without a word: "If the
+ *     machine-check mechanism is not enabled (the MCE flag in control
+ *     register CR4 is clear), a machine-check exception causes the processor
+ *     to enter the shutdown state" (Intel SDM Vol. 3A, 253668-093US, §7.15),
+ *     and "A machine-check condition that occurs while CR4[MCE] is cleared
+ *     will result in the processor core entering the shutdown state" (AMD
+ *     APM Vol. 2, 24593 Rev. 3.42, §9.4).  Both ask for it on each logical
+ *     processor (Intel §11.7.5).  The banks stay as the firmware set them up;
+ *     what AMD's §9.4 lists before this step is not done here.
+ *   - DE, so that a reference to DR4 or DR5 raises #UD instead of reaching
+ *     DR6 or DR7 by another name (Intel §2.5, AMD §3.1.3).  Nothing in this
+ *     kernel names either register.
+ *
+ * What was chosen is said once, by the boot processor in percpu_selftest(),
+ * and #639's census checks that every other processor carries the same.
+ */
+static void choose_cr4_bits(void)
+{
+	uint64_t cr4 = read_cr4();
+	uint64_t want = (cpu_has_de() ? CR4_DE : 0)
+			| (cpu_has_mce() ? CR4_MCE : 0);
+
+	if ((cr4 & (CR4_DE | CR4_MCE)) != want)
+		write_cr4((cr4 & ~(CR4_DE | CR4_MCE)) | want);
+}
+
 #if	CONTEXT_FPU_COUNT
 /*
  * The #561 counters summed across the running processors.  Here rather than in
@@ -207,6 +243,7 @@ void percpu_activate(uint32_t cpu_id)
 	p->kernel_rsp = KERNEL_STACK_USER_FRAME(desc_rsp0(cpu_id));
 
 	deny_user_segment_bases();
+	choose_cr4_bits();
 
 	wrmsr(MSR_GS_BASE, va);
 
