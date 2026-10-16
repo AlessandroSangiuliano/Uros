@@ -198,10 +198,10 @@ static int	reset_deadline_event;
 /*
  * reset_hold=: how long the machine stays up after the quiet census before -b
  * restarts it (#595).  The census ends a healthy boot within about a minute,
- * before the TSC watchdog's first summary at 120 windows (#594), and those
- * summaries are what #595 asks of bare metal: with the hold they are printed,
- * and reach #373's zone, before the restart.  0, the default, restarts at the
- * census, as before.
+ * before the TSC watchdog's first summary, which comes sixty windows of a
+ * second after the watch starts (#594), and those summaries are what #595
+ * asks of bare metal: with the hold they are printed, and reach #373's zone,
+ * before the restart.  0, the default, restarts at the census, as before.
  */
 static uint64_t		reset_hold;
 static int		reset_hold_event;	/* only ever timed out */
