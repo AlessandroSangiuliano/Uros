@@ -30,6 +30,10 @@
  *   7. thread_suspend() on a thread that lives in page faults
  *   8. thread_suspend() on a thread that spins, at one processor
  *
+ * And one for #687 -- the abort crossing the reply it was waiting for:
+ *
+ *  10. thread_abort() on a thread in an RPC whose reply is being delivered
+ *
  * ⚠️ And the task is expected to SURVIVE all three and print a summary.  A
  * report that a thread died is worth nothing from a program that died with
  * it: the last line is as much of the test as the arms are.
@@ -1788,11 +1792,352 @@ arm_nine_refused_create_running(void)
 	return passed;
 }
 
+/*
+ * ── Arm ten: abort an RPC whose reply is already on its way (#687) ─────
+ *
+ * A thread in an RPC that took the hot path is parked by mach_msg itself, on
+ * its reply port's queue, and its reply comes one of two ways: the server's own
+ * RPC hands it over directly, or a plain send goes through ipc_mqueue_deliver(),
+ * which takes the thread off the queue and writes MACH_MSG_SUCCESS under the
+ * queue's lock, and wakes it after.  An abort ends the same wait under
+ * thread_lock alone.  When the two cross, the thread runs with the message
+ * already handed to it and its wakeup still owed -- and that wakeup, when it
+ * comes, ends whatever wait the thread is in by then.  #687 is that wakeup
+ * ending the thread's NEXT RPC: "mmot_hotpath: bad wait result 0 (ith_state
+ * 10004001)", awake with nothing delivered.
+ *
+ * So the arm makes the two cross and goes straight into a second RPC.  The
+ * first server takes the request and holds it; the thread is aborted; the
+ * server is told to answer at once, with a plain send; and the thread, back
+ * from the first RPC however it came back, asks a second server, which sits
+ * on its request for ARM10_HOLD_MS.  Each RPC must end with its own reply,
+ * once.
+ *
+ * ⚠️ The window is a few instructions wide, so a boot almost never crosses the
+ * two on its own and the arm passes either way: what makes it a test is
+ * ablations/687-widen-aborted-rpc.patch, which holds both sides of the window
+ * open.  Without it, this is the abort-meets-reply path of #387 asked once a
+ * boot, which nothing else in the bundle asks.
+ */
+#define ARM10_REQUEST_ID	687
+#define ARM10_REPLY_ID		688
+#define ARM10_GO_ID		689
+#define ARM10_SECOND_ID		690
+#define ARM10_SECOND_REPLY_ID	691
+
+/*
+ * Long enough that the thread is still parked in its second RPC when a wakeup
+ * the widen holds open arrives: the widen holds it 200 ms after the reply.
+ */
+#define ARM10_HOLD_MS		500
+
+static mach_port_t		arm_ten_server_port;	/* the first RPC asks here */
+static mach_port_t		arm_ten_go_port;	/* and its server waits here */
+static mach_port_t		arm_ten_second_port;	/* the second RPC asks here */
+static mach_port_t		arm_ten_reply_port;
+static mach_port_t		arm_ten_second_reply_port;
+static volatile mach_port_t	arm_ten_thread;
+static volatile int		arm_ten_held;
+static volatile int		arm_ten_done;
+static volatile kern_return_t	arm_ten_first_kr = -1;
+static volatile int		arm_ten_first_id;
+static volatile kern_return_t	arm_ten_after_kr = -1;	/* after an interruption */
+static volatile int		arm_ten_after_id;
+static volatile kern_return_t	arm_ten_second_kr = -1;
+static volatile int		arm_ten_second_id;
+static volatile kern_return_t	arm_ten_answer_kr = -1;
+static volatile kern_return_t	arm_ten_second_answer_kr = -1;
+
+static kern_return_t
+arm_ten_port(mach_port_t *name, int with_send)
+{
+	kern_return_t	kr;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				name);
+	if (kr == KERN_SUCCESS && with_send)
+		kr = mach_port_insert_right(mach_task_self(), *name, *name,
+					    MACH_MSG_TYPE_MAKE_SEND);
+	return kr;
+}
+
+/* A request shaped the way the hot path takes it: an RPC as MIG makes one. */
+static void
+arm_ten_request(mach_msg_header_t *h, mach_port_t to, mach_port_t reply,
+		int id)
+{
+	h->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+				      MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	h->msgh_size = sizeof *h;
+	h->msgh_remote_port = to;
+	h->msgh_local_port = reply;
+	h->msgh_reserved = 0;
+	h->msgh_id = id;
+}
+
+/*
+ * An answer by plain send: never the hot path, which only an RPC takes, so
+ * always the delivery that takes the thread off the queue and wakes it after.
+ */
+static kern_return_t
+arm_ten_answer(mach_msg_header_t *req, int id)
+{
+	mach_msg_header_t	rep;
+
+	rep.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	rep.msgh_size = sizeof rep;
+	rep.msgh_remote_port = req->msgh_remote_port;
+	rep.msgh_local_port = MACH_PORT_NULL;
+	rep.msgh_reserved = 0;
+	rep.msgh_id = id;
+	return mach_msg(&rep, MACH_SEND_MSG, sizeof rep, 0, MACH_PORT_NULL,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static void *
+the_server_that_answers_when_told(void *arg)
+{
+	struct roomy_msg	req, go;
+
+	(void) arg;
+
+	if (mach_msg(&req.h, MACH_RCV_MSG, 0, sizeof req, arm_ten_server_port,
+		     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		return NULL;
+	arm_ten_held = 1;
+
+	if (mach_msg(&go.h, MACH_RCV_MSG, 0, sizeof go, arm_ten_go_port,
+		     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		return NULL;
+	arm_ten_answer_kr = arm_ten_answer(&req.h, ARM10_REPLY_ID);
+	return NULL;
+}
+
+static void *
+the_server_that_sits_on_its_request(void *arg)
+{
+	struct roomy_msg	req;
+
+	(void) arg;
+
+	if (mach_msg(&req.h, MACH_RCV_MSG, 0, sizeof req, arm_ten_second_port,
+		     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		return NULL;
+	nap(ARM10_HOLD_MS);
+	arm_ten_second_answer_kr = arm_ten_answer(&req.h,
+						  ARM10_SECOND_REPLY_ID);
+	return NULL;
+}
+
+static void *
+the_thread_whose_rpc_is_aborted(void *arg)
+{
+	struct roomy_msg	m;
+
+	(void) arg;
+
+	arm_ten_thread = mach_thread_self();
+
+	/*
+	 * ⚠️ MACH_RCV_INTERRUPT is libmach's, and it keeps the bit from the
+	 * kernel (LIBMACH_OPTIONS), so the trap is still the plain RPC the hot
+	 * path takes.  What the bit buys is the answer: an RPC the abort
+	 * interrupted comes back MACH_RCV_INTERRUPTED instead of being
+	 * re-issued, and then the reply is still to come and is waited for
+	 * here.
+	 */
+	arm_ten_request(&m.h, arm_ten_server_port, arm_ten_reply_port,
+			ARM10_REQUEST_ID);
+	arm_ten_first_kr = mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG
+				    | MACH_RCV_INTERRUPT, sizeof m.h, sizeof m,
+				    arm_ten_reply_port, MACH_MSG_TIMEOUT_NONE,
+				    MACH_PORT_NULL);
+	if (arm_ten_first_kr == MACH_MSG_SUCCESS)
+		arm_ten_first_id = m.h.msgh_id;
+	else if (arm_ten_first_kr == MACH_RCV_INTERRUPTED) {
+		arm_ten_after_kr = mach_msg(&m.h, MACH_RCV_MSG
+					    | MACH_RCV_TIMEOUT, 0, sizeof m,
+					    arm_ten_reply_port, PATIENCE * 100,
+					    MACH_PORT_NULL);
+		if (arm_ten_after_kr == MACH_MSG_SUCCESS)
+			arm_ten_after_id = m.h.msgh_id;
+	}
+
+	/*
+	 * 🔴 STRAIGHT INTO THE NEXT RPC, and that is the arm.  A wakeup still
+	 * owed for the first reply ends whatever wait this thread is in when
+	 * it comes, and this is the wait #687 saw it end.
+	 */
+	arm_ten_request(&m.h, arm_ten_second_port, arm_ten_second_reply_port,
+			ARM10_SECOND_ID);
+	arm_ten_second_kr = mach_msg(&m.h, MACH_SEND_MSG | MACH_RCV_MSG,
+				     sizeof m.h, sizeof m,
+				     arm_ten_second_reply_port,
+				     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (arm_ten_second_kr == MACH_MSG_SUCCESS)
+		arm_ten_second_id = m.h.msgh_id;
+	arm_ten_done = 1;
+	return NULL;
+}
+
+static int
+arm_ten_abort_an_rpc_with_its_reply_on_the_way(void)
+{
+	pthread_t		server, second, victim;
+	mach_msg_header_t	go;
+	struct roomy_msg	extra;
+	kern_return_t		kr, abort_kr, extra_kr;
+	const char		*how;
+	int			i;
+
+	kr = arm_ten_port(&arm_ten_server_port, 1);
+	if (kr == KERN_SUCCESS)
+		kr = arm_ten_port(&arm_ten_go_port, 1);
+	if (kr == KERN_SUCCESS)
+		kr = arm_ten_port(&arm_ten_second_port, 1);
+	if (kr == KERN_SUCCESS)
+		kr = arm_ten_port(&arm_ten_reply_port, 0);
+	if (kr == KERN_SUCCESS)
+		kr = arm_ten_port(&arm_ten_second_reply_port, 0);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [10] the ports for two RPCs could not be made "
+		       "(%d) — WRONG\n", kr);
+		return 0;
+	}
+
+	if (pthread_create(&server, NULL, the_server_that_answers_when_told,
+			   NULL) != 0 ||
+	    pthread_create(&second, NULL, the_server_that_sits_on_its_request,
+			   NULL) != 0) {
+		printf("act_test: [10] pthread_create failed for a server "
+		       "— WRONG\n");
+		return 0;
+	}
+
+	/*
+	 * Let both servers reach their receives.  A request that finds no
+	 * server waiting is queued, and the RPC then waits on the slow path,
+	 * which reads its reply under the queue's lock: this arm would ask
+	 * nothing there.
+	 */
+	nap(300);
+
+	if (pthread_create(&victim, NULL, the_thread_whose_rpc_is_aborted,
+			   NULL) != 0) {
+		printf("act_test: [10] pthread_create failed for the thread "
+		       "— WRONG\n");
+		return 0;
+	}
+
+	/*
+	 * The server holds the request, so the thread is parked: the hot path
+	 * parks it on the reply port before it switches to the server, and
+	 * the server cannot have the request before that switch.
+	 */
+	for (i = 0; i < PATIENCE && !arm_ten_held; i++)
+		nap(100);
+	if (!arm_ten_held) {
+		printf("act_test: [10] the first server never got the request "
+		       "— WRONG\n");
+		return 0;
+	}
+
+	abort_kr = thread_abort(arm_ten_thread);
+
+	go.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	go.msgh_size = sizeof go;
+	go.msgh_remote_port = arm_ten_go_port;
+	go.msgh_local_port = MACH_PORT_NULL;
+	go.msgh_reserved = 0;
+	go.msgh_id = ARM10_GO_ID;
+	kr = mach_msg(&go, MACH_SEND_MSG, sizeof go, 0, MACH_PORT_NULL,
+		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (kr != MACH_MSG_SUCCESS) {
+		printf("act_test: [10] the first server could not be told to "
+		       "answer (0x%x) — WRONG\n", (int) kr);
+		return 0;
+	}
+
+	/* Twice the patience: the thread may itself wait PATIENCE for a reply. */
+	for (i = 0; i < 2 * PATIENCE && !arm_ten_done; i++)
+		nap(100);
+	if (!arm_ten_done) {
+		printf("act_test: [10] the aborted thread never came back from "
+		       "its two RPCs: the first answered 0x%x, the second 0x%x "
+		       "— WRONG\n", (int) arm_ten_first_kr,
+		       (int) arm_ten_second_kr);
+		return 0;
+	}
+	(void) pthread_join(victim, NULL);
+	(void) pthread_join(server, NULL);
+	(void) pthread_join(second, NULL);
+
+	if (abort_kr != KERN_SUCCESS) {
+		printf("act_test: [10] thread_abort answered %d on a thread "
+		       "parked in an RPC — WRONG\n", abort_kr);
+		return 0;
+	}
+	if (arm_ten_answer_kr != MACH_MSG_SUCCESS ||
+	    arm_ten_second_answer_kr != MACH_MSG_SUCCESS) {
+		printf("act_test: [10] a server's answer was refused: the first "
+		       "0x%x, the second 0x%x — WRONG\n",
+		       (int) arm_ten_answer_kr,
+		       (int) arm_ten_second_answer_kr);
+		return 0;
+	}
+
+	if (arm_ten_first_kr == MACH_MSG_SUCCESS &&
+	    arm_ten_first_id == ARM10_REPLY_ID)
+		how = "took the reply";
+	else if (arm_ten_first_kr == MACH_RCV_INTERRUPTED &&
+		 arm_ten_after_kr == MACH_MSG_SUCCESS &&
+		 arm_ten_after_id == ARM10_REPLY_ID)
+		how = "came back interrupted, and the reply was there after";
+	else {
+		printf("act_test: [10] the aborted RPC answered 0x%x with id %d, "
+		       "and a receive after it 0x%x with id %d, instead of its "
+		       "reply (id %d) — WRONG\n", (int) arm_ten_first_kr,
+		       arm_ten_first_id, (int) arm_ten_after_kr,
+		       arm_ten_after_id, ARM10_REPLY_ID);
+		return 0;
+	}
+
+	if (arm_ten_second_kr != MACH_MSG_SUCCESS ||
+	    arm_ten_second_id != ARM10_SECOND_REPLY_ID) {
+		printf("act_test: [10] the RPC after the aborted one answered "
+		       "0x%x with id %d instead of its own reply (id %d) "
+		       "— WRONG\n", (int) arm_ten_second_kr,
+		       arm_ten_second_id, ARM10_SECOND_REPLY_ID);
+		return 0;
+	}
+
+	/* Once: nothing more may be waiting on the first reply port. */
+	extra_kr = mach_msg(&extra.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			    sizeof extra, arm_ten_reply_port, 0,
+			    MACH_PORT_NULL);
+	if (extra_kr != MACH_RCV_TIMED_OUT) {
+		printf("act_test: [10] after the aborted RPC had its reply, its "
+		       "reply port still answered 0x%x — WRONG\n",
+		       (int) extra_kr);
+		return 0;
+	}
+
+	(void) mach_port_destroy(mach_task_self(), arm_ten_server_port);
+	(void) mach_port_destroy(mach_task_self(), arm_ten_go_port);
+	(void) mach_port_destroy(mach_task_self(), arm_ten_second_port);
+	(void) mach_port_destroy(mach_task_self(), arm_ten_reply_port);
+	(void) mach_port_destroy(mach_task_self(), arm_ten_second_reply_port);
+
+	printf("act_test: [10] an RPC aborted with its reply on the way %s, "
+	       "and the RPC after it got its own reply (#687)\n", how);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 9, r;
+	int		passed = 0, arm_one_passed, arms = 10, r;
 
 	(void) argc;
 	(void) argv;
@@ -1826,6 +2171,7 @@ main(int argc, char **argv)
 		passed += r;
 
 	passed += arm_nine_refused_create_running();
+	passed += arm_ten_abort_an_rpc_with_its_reply_on_the_way();
 
 	/*
 	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the
