@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #596
+Takes out: the block server's count of who holds a partition -- DEV_GET_HOLDERS answers "nobody" whatever handles are open, as when cap_test could only ask "is this the boot disk?"; on x86-64 [14] must then write ahci0a, ext_server's mounted root, again, which the fixed tree never does: its writes go to ahci0c
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[14\] ahci0a wrote block [0-9]+ through physical addresses
+
+diff --git a/uros/src/servers/block_device_server/block_device.c b/uros/src/servers/block_device_server/block_device.c
+index 8624331d..53d4ee86 100644
+--- a/uros/src/servers/block_device_server/block_device.c
++++ b/uros/src/servers/block_device_server/block_device.c
+@@ -1746,6 +1746,7 @@ ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
+ 			if (h->mode & D_WRITE)
+ 				writing++;
+ 		}
++		open = writing = 0;	/* ablation 596-holders-say-none: nobody, always */
+ 		status[DEV_GET_HOLDERS_OPEN] = (int)open;
+ 		status[DEV_GET_HOLDERS_WRITING] = (int)writing;
+ 		*status_count = DEV_GET_HOLDERS_COUNT;

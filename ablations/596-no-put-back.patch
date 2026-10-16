@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #596
+Takes out: the put back of [14]'s scratch block -- it is not written back, and reported as if it were; the read after it must find the test pattern still there and say WRONG, as nothing did when the put back was skipped on a refused or short write and its result thrown away
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[14\] WRONG — [a-z_0-9]+: putting block [0-9]+ back failed
+
+diff --git a/uros/src/tests/cap_test/cap_test.c b/uros/src/tests/cap_test/cap_test.c
+index b691be95..8a79b63c 100644
+--- a/uros/src/tests/cap_test/cap_test.c
++++ b/uros/src/tests/cap_test/cap_test.c
+@@ -1999,8 +1999,8 @@ ct14_write_and_put_back(mach_port_t device_port, mach_port_t handle,
+ 
+             /* Put back after any write asked for, and read again. */
+             memcpy((void *)uva, saved, 4096);
+-            pkr = device_write_phys(handle, D_WRITE, block, 4096, pa_list,
+-                                    pa_cnt, &put);
++            pkr = KERN_SUCCESS;	/* ablation 596-no-put-back: nothing written */
++            put = 4096;
+             memset((void *)uva, 0, 4096);
+             kr = device_read_phys(handle, D_READ, block, 4096, pa_list,
+                                   pa_cnt, &got);
