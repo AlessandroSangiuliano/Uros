@@ -18,6 +18,9 @@
  *   hand-off's own copy of the wake left it TH_RUN on no run queue, and
  *   thread_unstop(), finding TH_RUN, never put it on one: it never ran again.
  *
+ * And a third way, found by #687 and fixed in #703: a CALLER with an abort
+ * pending, which the hand-off parked anyway -- the arm before the swapped one.
+ *
  * ── Built, not waited for ─────────────────────────────────────────────
  *
  * Neither happens on a boot by itself.  The swapper takes a thread only after
@@ -66,6 +69,7 @@ static int		hq_never;	/* nobody signals this         */
 static volatile int	hq_ran;		/* the waiter ran after a wake */
 static volatile int	hq_state;	/* its thread state when it did */
 static volatile int	hq_swap;	/* its activation's swap state */
+static volatile int	hq_quiet;	/* it does not wake the driver */
 
 /*
  * The waiter, as futex_wait() leaves one: asleep interruptibly on its word.
@@ -86,7 +90,8 @@ hq_waiter(void)
 	hq_state = current_thread()->state;
 	hq_swap = current_act()->swap_state;
 	hq_ran = 1;
-	thread_wakeup((event_t) &hq_driver);
+	if (!hq_quiet)
+		thread_wakeup((event_t) &hq_driver);
 
 	/*
 	 * ⚠️ And then nothing, for ever.  A waiter switched onto while still
@@ -347,18 +352,129 @@ hq_stopped_arm(void)
 }
 
 /*
+ * ── The third arm: the driver hands off with an abort pending (#703) ───
+ *
+ * thread_abort() sets TH_ABORT under thread_lock and interrupts a wait only if
+ * there is one.  On a thread that is not waiting yet, the bit is what makes its
+ * next interruptible wait end at once, and thread_block_reason() is the one
+ * place that reads it.  The hand-off parks its caller with thread_invoke(),
+ * not thread_block(), and did not read it: a futex_wake_wait() aborted after
+ * its trap and before its assert_wait() switched onto the waiter and slept on
+ * its own word, the abort pending, until somebody woke that word.
+ *
+ * So the driver -- this thread -- carries the bit into hq_wake(), and the
+ * waiter it wakes does NOT wake it back: the driver's word is one nobody
+ * wakes, the case where the abort waited for ever.  The hand-off must decline,
+ * wake the waiter the ordinary way, and leave the driver's wait to
+ * thread_block(), which ends it at once: THREAD_INTERRUPTED.  One that
+ * switches leaves the driver asleep until its timeout: THREAD_TIMED_OUT, ten
+ * seconds later.
+ *
+ * ❌ The first version let the waiter wake the driver back, as in the other
+ * arms, and called a wait ended by that wakeup a defect.  Under TCG the waiter
+ * woken the ordinary way ran on another processor and woke the driver before
+ * its thread_block() could answer the abort: THREAD_AWAKENED, with the
+ * hand-off declining as it must, and the fixed tree failed 3 boots of 3.
+ *
+ * ⚠️ THE BIT IS SET HERE BY HAND, as act_abort() sets it on a thread it finds
+ * not waiting.  thread_abort() refuses the current activation, and from
+ * another thread it would also install a special handler on this one, which a
+ * kernel thread never returns to user mode to run.  It is cleared after, as
+ * special_handler() clears it on the way to user mode.
+ */
+static void
+hq_aborted_arm(void)
+{
+	thread_t	self = current_thread();
+	thread_t	th;
+	boolean_t	handed;
+	int		result;
+	spl_t		s;
+
+	th = hq_start(kernel_task, FALSE);
+	if (th == THREAD_NULL) {
+		printf("handoff: WRONG — could not create the waiter for the "
+		       "driver with an abort pending (#703)\n");
+		return;
+	}
+
+	if (!hq_parked(th)) {
+		printf("handoff: WRONG — the waiter for the driver with an abort "
+		       "pending never parked on its word in ten seconds (#703)\n");
+		return;
+	}
+
+	hq_ran = 0;
+	hq_quiet = 1;
+	s = splsched();
+	thread_lock(self);
+	self->state |= TH_ABORT;
+	thread_unlock(self);
+	splx(s);
+
+	handed = hq_wake(10 * hz);
+	result = self->wait_result;
+
+	s = splsched();
+	thread_lock(self);
+	self->state &= ~TH_ABORT;
+	thread_unlock(self);
+	splx(s);
+
+	if (handed) {
+		printf("handoff: WRONG — a driver with an abort pending was parked "
+		       "by the hand-off, and its wait ended with %d%s (#703)\n",
+		       result, result == THREAD_TIMED_OUT ?
+		       ", its timeout ten seconds later: the abort waited for a "
+		       "wakeup nobody sent" : "");
+		hq_quiet = 0;
+		return;
+	}
+	if (result != THREAD_INTERRUPTED) {
+		printf("handoff: WRONG — the hand-off declined a driver with an "
+		       "abort pending, and thread_block() ended its wait with %d, "
+		       "not THREAD_INTERRUPTED (%d) (#703)\n", result,
+		       THREAD_INTERRUPTED);
+		hq_quiet = 0;
+		return;
+	}
+
+	/*
+	 * The waiter must still have been woken, the ordinary way, and run: a
+	 * hand-off that declined by waking nobody would pass the check above
+	 * and lose the futex's wakeup.
+	 */
+	for (int i = 0; i < 10 * hz && !hq_ran; i++)
+		mutex_pause();
+	hq_quiet = 0;
+	if (!hq_ran) {
+		printf("handoff: WRONG — the hand-off declined for the driver's "
+		       "abort, and the waiter never ran in ten seconds: the "
+		       "futex's wakeup was lost (#703)\n");
+		return;
+	}
+
+	printf("handoff: PASS — a driver with an abort pending was not parked by "
+	       "the hand-off: its wait ended at once, THREAD_INTERRUPTED, and the "
+	       "waiter was woken the ordinary way and ran (#703)\n");
+}
+
+/*
  * The stopped arm first, and not for tidiness.  The old wake put a waiter that
  * was not parked on a run queue with thread_setrun(), which asserts the thread
  * is not swapped out -- so under ablations/607-old-wake.patch the swapped arm ends
  * the boot in that assertion, and the stopped arm, run second, would never say
- * what it is there to say.  In this order each ablation shows its own arm.
+ * what it is there to say.  In this order each ablation shows its own arm, and
+ * the aborted arm goes between them for the same reason.
  */
 void
 handoff_wake_test(void)
 {
-	printf("handoff: a futex waiter stopped, then one swapped out, each woken "
-	       "through the hand-off (#607)\n");
+	printf("handoff: a futex waiter stopped, a driver with an abort pending, "
+	       "then a waiter swapped out, each through the hand-off (#607, "
+	       "#703)\n");
 	hq_stopped_arm();
+	hq_aborted_arm();
 	hq_swapped_arm();
 }
 

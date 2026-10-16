@@ -5,15 +5,15 @@ Run: --entry 25 600 -smp 4
 Expect: handoff: WRONG
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
-index 8f4bff5c..868fd46e 100644
+index bb9b4a56..ee05c2b1 100644
 --- a/uros/src/mach_kernel/kern/sched_prim.c
 +++ b/uros/src/mach_kernel/kern/sched_prim.c
-@@ -1363,7 +1363,7 @@ thread_handoff_to_parked_waiter(
+@@ -1416,7 +1416,7 @@ thread_handoff_to_parked_waiter(
  	 * this one, through wake_dequeued() below.
  	 */
  	ostate = victim->state;
 -	parked = ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT)) == TH_WAIT);
 +	parked = ((ostate & TH_SCHED_STATE) == TH_WAIT);
  
- 	if (!parked) {
+ 	if (!parked || aborted) {
  		if ((ostate & (TH_SCHED_STATE | TH_SWAPPED_OUT))
