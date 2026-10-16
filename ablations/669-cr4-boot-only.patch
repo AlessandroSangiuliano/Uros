@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #669
+Takes out: 5108cf36 on every processor but the boot one -- DE and MCE are chosen on the boot processor only, as the firmware left them on bare metal, and every other processor keeps INIT's zero, so #639's census must name both bits as missing on each of them
+Run: --entry 0 600 -smp 4
+Expect: processor [0-9]+: CR4 lacks (DE|MCE)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/percpu.c b/uros/src/mach_kernel/x86_64/cpu/percpu.c
+index 93f35f12..1a9f0230 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/percpu.c
++++ b/uros/src/mach_kernel/x86_64/cpu/percpu.c
+@@ -243,7 +243,8 @@ void percpu_activate(uint32_t cpu_id)
+ 	p->kernel_rsp = KERNEL_STACK_USER_FRAME(desc_rsp0(cpu_id));
+ 
+ 	deny_user_segment_bases();
+-	choose_cr4_bits();
++	if (cpu_id == 0)
++		choose_cr4_bits();
+ 
+ 	wrmsr(MSR_GS_BASE, va);
+ 
