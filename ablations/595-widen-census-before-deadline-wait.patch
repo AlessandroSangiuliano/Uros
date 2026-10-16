@@ -1,0 +1,27 @@
+Kind: widen
+Issue: #595
+Holds open: the census's wakeup before -b's deadline thread has declared its wait -- the thread sleeps thirty seconds before it declares it, and entry 52's census under -S comes within seconds, so its wakeup finds nobody; the thread says whether the census came first, so that a fixed arm that passes shows the window was open; in the fixed tree the thread reads the census's flag once its wait is declared and holds from there
+Run: --entry 52 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/reset.c b/uros/src/mach_kernel/x86_64/cpu/reset.c
+index fd5b28b7..43694ab9 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/reset.c
++++ b/uros/src/mach_kernel/x86_64/cpu/reset.c
+@@ -246,6 +246,17 @@ static void reset_hold_over(void)
+ 
+ static void reset_deadline_thread(void)
+ {
++	{
++		static int widen_595_event;
++
++		assert_wait((event_t) &widen_595_event, FALSE);
++		thread_set_timeout(30 * hz);
++		thread_block((void (*)(void)) 0);
++		reset_timeout_check(&current_thread()->timer);
++		printf("#595 widen: -b's deadline thread declares its wait thirty "
++		       "seconds late, and the census %s\n", reset_census_seen
++		       ? "came before it" : "has not come yet");
++	}
+ 	/*
+ 	 * The census can come before this thread has declared its wait, and
+ 	 * its wakeup then finds nobody: the flag, set before the wakeup and
