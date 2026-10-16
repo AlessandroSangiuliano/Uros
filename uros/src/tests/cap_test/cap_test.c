@@ -786,13 +786,134 @@ out:
  * check.
  */
 /*
- * The last 4096 bytes of a 30720-sector partition, the size of x86-64's AHCI
- * test disks.  It is past everything mke2fs and the loader put near the front
- * of those, and it is read and put back afterwards, so the number only has to
- * be inside the partition.  In a larger partition it can land on data, which
- * is one more reason the boot disk never gets the write half.
+ * A block inside every candidate partition, for the reads a write-only handle
+ * must be refused ([27]): the last 4096 bytes of a 30720-sector partition,
+ * the smallest candidate (x86-64's AHCI test disks).  The writes no longer
+ * use it: they go to the last 4096 bytes of the partition scratch_target()
+ * chose, whatever its size (#596).
  */
 #define SCRATCH_BLOCK	30712u
+
+/*
+ * ── #596: where the writes may go ──────────────────────────────────────
+ *
+ * 🔴 NOT "IS THIS THE BOOT DISK?" ALONE.  [14]'s write half and [27]'s
+ * offered writes asked only that (#592), and on x86-64 the partition they
+ * wrote was ahci0a: ext_server's root, mounted by that name on every full
+ * boot.  The property that matters is whether anybody else holds the
+ * partition, and the block server, which keeps every handle with its
+ * partition and mode, answers it (DEV_GET_HOLDERS).  A partition somebody
+ * else holds -- a filesystem's, a pager's -- gets no write; the same disk's
+ * partition c gets them instead when it is registered and nobody holds it
+ * (x86-64's first AHCI disk has one for this, make-disk-x86_64.sh);
+ * otherwise nothing does, and the line says why.
+ */
+
+/* The other handles on the partition behind `port', and of those the ones
+ * opened for writing: 1 when the block server answered, 0 when it did not. */
+static int
+ct_holders(mach_port_t port, unsigned *open, unsigned *writing)
+{
+    int                    st[DEV_GET_HOLDERS_COUNT];
+    mach_msg_type_number_t cnt = DEV_GET_HOLDERS_COUNT;
+
+    if (device_get_status(port, DEV_GET_HOLDERS, (dev_status_t)st, &cnt)
+            != KERN_SUCCESS || cnt < DEV_GET_HOLDERS_COUNT)
+        return 0;
+    *open = (unsigned)st[DEV_GET_HOLDERS_OPEN];
+    *writing = (unsigned)st[DEV_GET_HOLDERS_WRITING];
+    return 1;
+}
+
+/* The first sector of the partition's last 4096 bytes, asked through `port'
+ * (DEV_GET_SIZE): 1, or 0 when the size is unknown or under one page. */
+static int
+ct_last_block(mach_port_t port, recnum_t *block)
+{
+    int                    info[DEV_GET_SIZE_COUNT];
+    mach_msg_type_number_t cnt = DEV_GET_SIZE_COUNT;
+
+    if (device_get_status(port, DEV_GET_SIZE, (dev_status_t)info, &cnt)
+            != KERN_SUCCESS || cnt < DEV_GET_SIZE_COUNT
+        || info[DEV_GET_SIZE_RECORD_SIZE] <= 0
+        || info[DEV_GET_SIZE_DEVICE_SIZE] < 4096)
+        return 0;
+    *block = (recnum_t)((info[DEV_GET_SIZE_DEVICE_SIZE] - 4096)
+                        / info[DEV_GET_SIZE_RECORD_SIZE]);
+    return 1;
+}
+
+/* Why a partition gets no write, in the words the lines below use. */
+static void
+ct_why(char *why, size_t len, int boot, int asked, unsigned open,
+       unsigned writing)
+{
+    if (boot != 0)
+        snprintf(why, len, "the boot disk, or cannot be told apart from it");
+    else if (!asked)
+        snprintf(why, len, "a partition the block server would not say "
+                 "who holds");
+    else
+        snprintf(why, len, "held by %u other handle%s, %u for writing -- "
+                 "a mounted filesystem's or a pager's", open,
+                 open == 1 ? "" : "s", writing);
+}
+
+/*
+ * The partition a candidate's writes go to: the candidate itself when it is
+ * not the boot disk and nobody else holds it, else its disk's partition c
+ * when that is registered and nobody holds it -- its port in *tport and its
+ * name in tname, and 1.  Otherwise 0, with the line that says why nothing on
+ * this disk is written.  Asked of the partition, before this task opens a
+ * handle on it: every handle counted is somebody else's.
+ */
+static int
+scratch_target(mach_port_t part_port, const char *name, mach_port_t *tport,
+               char *tname, size_t tlen)
+{
+    unsigned    open = 0, writing = 0;
+    int         boot = is_the_boot_disk(part_port), asked = 0;
+    char        why[128], swhy[128], sib[32];
+    mach_port_t sp = MACH_PORT_NULL;
+    size_t      n = strlen(name);
+
+    if (boot == 0) {
+        asked = ct_holders(part_port, &open, &writing);
+        if (asked && open == 0) {
+            *tport = part_port;
+            snprintf(tname, tlen, "%s", name);
+            return 1;
+        }
+    }
+    ct_why(why, sizeof(why), boot, asked, open, writing);
+
+    if (n == 0 || n >= sizeof(sib) || name[n - 1] == 'c') {
+        printf("cap_test: [14] %s is %s — no write is offered on this disk "
+               "(#596)\n", name, why);
+        return 0;
+    }
+    memcpy(sib, name, n + 1);
+    sib[n - 1] = 'c';
+    if (netname_look_up(name_server_port, "", sib, &sp) != KERN_SUCCESS) {
+        printf("cap_test: [14] %s is %s, and this disk has no %s — no write "
+               "is offered on it (#596)\n", name, why, sib);
+        return 0;
+    }
+    open = writing = 0;
+    asked = ct_holders(sp, &open, &writing);
+    if (asked && open == 0) {
+        printf("cap_test: [14] %s is %s — the writes go to %s, which nobody "
+               "else holds (#596)\n", name, why, sib);
+        *tport = sp;
+        snprintf(tname, tlen, "%s", sib);
+        return 1;
+    }
+    ct_why(swhy, sizeof(swhy), 0, asked, open, writing);
+    printf("cap_test: [14] %s is %s, and %s is %s — no write is offered on "
+           "this disk (#596)\n", name, why, sib, swhy);
+    (void)mach_port_deallocate(mach_task_self(), sp);
+    return 0;
+}
 
 /*
  * ── #599: a buffer capability belongs to the handle it was handed on ──────
@@ -1330,15 +1451,16 @@ ct27_buffer_free(mach_port_t device_port, vm_address_t kva,
                             pa_cnt * sizeof(vm_address_t));
 }
 
-/* Each way of writing, offered the block's own bytes: none may be taken. */
+/* Each way of writing, offered the block's own bytes: none may be taken.
+ * `block' is the last page of the partition scratch_target() chose (#596). */
 static int
 ct27_read_only_writes_nothing(mach_port_t device_port, mach_port_t h,
-                              const char *name)
+                              const char *name, recnum_t block)
 {
     io_buf_ptr_t           data = NULL;
     mach_msg_type_number_t cnt = 0;
     io_buf_len_t           wr = 0, got = 0;
-    recnum_t               rec = SCRATCH_BLOCK;
+    recnum_t               rec = block;
     unsigned32             size = CT27_BYTES;
     vm_address_t           kva = 0;
     vm_address_t          *pa_list = NULL;
@@ -1346,7 +1468,7 @@ ct27_read_only_writes_nothing(mach_port_t device_port, mach_port_t h,
     kern_return_t          kr;
     int                    ok = 1;
 
-    kr = device_read(h, D_READ, SCRATCH_BLOCK, CT27_BYTES, &data, &cnt);
+    kr = device_read(h, D_READ, block, CT27_BYTES, &data, &cnt);
     if (kr != KERN_SUCCESS || cnt != CT27_BYTES) {
         printf("cap_test: [27] WRONG — %s: a D_READ handle could not read "
                "the scratch block (kr=%d, %u bytes)\n", name, (int)kr,
@@ -1356,7 +1478,7 @@ ct27_read_only_writes_nothing(mach_port_t device_port, mach_port_t h,
         return 0;
     }
 
-    kr = device_write(h, D_WRITE, SCRATCH_BLOCK, data, cnt, &wr);
+    kr = device_write(h, D_WRITE, block, data, cnt, &wr);
     if (kr == KERN_SUCCESS) {
         printf("cap_test: [27] WRONG — %s: a D_READ handle wrote %u bytes "
                "through device_write\n", name, (unsigned)wr);
@@ -1368,7 +1490,7 @@ ct27_read_only_writes_nothing(mach_port_t device_port, mach_port_t h,
                "through device_write_batch\n", name, (unsigned)wr);
         ok = 0;
     }
-    kr = device_write_inband(h, D_WRITE, SCRATCH_BLOCK, (const char *)data,
+    kr = device_write_inband(h, D_WRITE, block, (const char *)data,
                              IO_INBAND_MAX, &wr);
     if (kr == KERN_SUCCESS) {
         printf("cap_test: [27] WRONG — %s: a D_READ handle wrote %u bytes "
@@ -1379,7 +1501,7 @@ ct27_read_only_writes_nothing(mach_port_t device_port, mach_port_t h,
 
     kr = ct27_buffer(device_port, h, &kva, &pa_list, &pa_cnt);
     if (kr == KERN_SUCCESS)
-        kr = device_read_phys(h, D_READ, SCRATCH_BLOCK, CT27_BYTES, pa_list,
+        kr = device_read_phys(h, D_READ, block, CT27_BYTES, pa_list,
                               pa_cnt, &got);
     if (kr != KERN_SUCCESS) {
         printf("cap_test: [27] WRONG — %s: a D_READ handle could not read "
@@ -1387,7 +1509,7 @@ ct27_read_only_writes_nothing(mach_port_t device_port, mach_port_t h,
                "the physical write was not offered\n", name, (int)kr);
         ok = 0;
     } else {
-        kr = device_write_phys(h, D_WRITE, SCRATCH_BLOCK, CT27_BYTES,
+        kr = device_write_phys(h, D_WRITE, block, CT27_BYTES,
                                pa_list, pa_cnt, &got);
         if (kr == KERN_SUCCESS) {
             printf("cap_test: [27] WRONG — %s: a D_READ handle wrote %u "
@@ -1441,10 +1563,39 @@ ct27_write_only_reads_nothing(mach_port_t device_port, mach_port_t h,
     return ok;
 }
 
+/* The four writes, through a read-only handle of its own on the partition
+ * scratch_target() chose, at that partition's last page (#596). */
+static int
+ct27_writes_offered(mach_port_t device_port, mach_port_t tport,
+                    const char *tname)
+{
+    mach_port_t   h = MACH_PORT_NULL;
+    recnum_t      block = 0;
+    int           no_cap = 0, ok;
+    kern_return_t kr;
+
+    kr = ct27_open(tport, tname, CAP_OP_BLK_READ, D_READ, &h, &no_cap);
+    if (no_cap || kr != KERN_SUCCESS || h == MACH_PORT_NULL) {
+        printf("cap_test: [27] WRONG — %s: no read-only handle to offer the "
+               "writes through (kr=%d%s)\n", tname, (int)kr,
+               no_cap ? ", no capability" : "");
+        return 0;
+    }
+    if (!ct_last_block(h, &block)) {
+        printf("cap_test: [27] WRONG — %s did not say its size, so it has no "
+               "last page to offer the writes at (#596)\n", tname);
+        ct27_close(h);
+        return 0;
+    }
+    ok = ct27_read_only_writes_nothing(device_port, h, tname, block);
+    ct27_close(h);
+    return ok;
+}
+
 static int
 a_handle_moves_data_only_its_way(mach_port_t device_port,
                                  mach_port_t part_port, const char *name,
-                                 int scratch)
+                                 mach_port_t tport, const char *tname)
 {
     mach_port_t   rh = MACH_PORT_NULL, both = MACH_PORT_NULL;
     mach_port_t   wh = MACH_PORT_NULL;
@@ -1473,15 +1624,17 @@ a_handle_moves_data_only_its_way(mach_port_t device_port,
     }
 
     /*
-     * The writes only where [14] may write: should a check be missing they
-     * land.  The opens and the mirror below write nothing, so they run on
-     * every disk -- on i386 the only candidate is the boot disk.
+     * The writes only where [14] may write, the partition scratch_target()
+     * chose (#596): should a check be missing they land, and they used to
+     * land in ext_server's root.  The opens and the mirror below write
+     * nothing, so they run on every candidate.
      */
-    if (!scratch)
-        printf("cap_test: [27] %s is the boot disk, or cannot be told apart "
-               "from it — the four writes are not offered here, a missing "
-               "check would let them through\n", name);
-    else if (!ct27_read_only_writes_nothing(device_port, rh, name))
+    if (tport == MACH_PORT_NULL)
+        printf("cap_test: [27] %s: no partition of this disk is free for "
+               "writes, as [14]'s line says — the four writes are not "
+               "offered, a missing check would let them through (#596)\n",
+               name);
+    else if (!ct27_writes_offered(device_port, tport, tname))
         ok = 0;
     ct27_close(rh);
 
@@ -1500,11 +1653,12 @@ a_handle_moves_data_only_its_way(mach_port_t device_port,
         ct27_close(wh);
     }
 
-    if (ok && scratch)
+    if (ok && tport != MACH_PORT_NULL)
         printf("cap_test: [27] %s: a read-only capability opened D_READ and "
-               "not D_READ | D_WRITE, read, and was refused by each way of "
-               "writing -- copying, batched, physical, inband; a write-only "
-               "one was refused both ways of reading (#614)\n", name);
+               "not D_READ | D_WRITE; on %s one read, and was refused by each "
+               "way of writing -- copying, batched, physical, inband; a "
+               "write-only one was refused both ways of reading (#614)\n",
+               name, tname);
     else if (ok)
         printf("cap_test: [27] %s: a read-only capability opened D_READ and "
                "not D_READ | D_WRITE; a write-only one was refused both ways "
@@ -1652,7 +1806,7 @@ out:
 
 static int
 the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
-                             const char *name, int scratch)
+                             const char *name)
 {
     struct uros_cap        tok, buf_cap;
     security_token_t       null_sec = { { 0, 0 } };
@@ -1755,86 +1909,194 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
            name, (unsigned)pa_cnt, (int)kr);
     ok = 1;
 
-    /*
-     * ── The write half, on a disk it is allowed to touch ─────────────────
-     *
-     * The refusal above is the same code on both paths, but the ADDRESSES
-     * are not: the read half maps every page through the kernel before
-     * handing it to the controller and the write half did not, so only a
-     * transfer that actually happens can tell whether the write half is
-     * speaking the same language.  Read and write must agree about one
-     * block, which needs no oracle outside the pair.
-     *
-     * ⚠️ The block is read first and put back afterwards, so the arm leaves
-     * the disk as it found it even though the image is rebuilt every run.
-     * And it runs only where `scratch' says it may: the boot disk is the
-     * partition every server is still being loaded from.
-     */
-    if (!scratch) {
-        printf("cap_test: [14] %s is the boot disk, or cannot be told apart "
-               "from it — the write transfer is not attempted there, so the "
-               "write path is covered here only by its refusal\n", name);
-        goto out;
-    }
-
-    {
-        static unsigned char saved[4096];
-        unsigned int         i;
-        int                  same = 1;
-
-        memset((void *)uva, 0, 4096);
-        kr = device_read_phys(handle, D_READ, SCRATCH_BLOCK, 4096,
-                              pa_list, pa_cnt, &got);
-        if (kr != KERN_SUCCESS) {
-            printf("cap_test: [14] WRONG — %s could not read the scratch "
-                   "block (kr=%d)\n", name, (int)kr);
-            ok = 0;
-            goto out;
-        }
-        memcpy(saved, (const void *)uva, 4096);
-
-        for (i = 0; i < 4096; i++)
-            ((unsigned char *)uva)[i] = (unsigned char)(i * 7u + 0x5Au);
-
-        kr = device_write_phys(handle, D_WRITE, SCRATCH_BLOCK, 4096,
-                               pa_list, pa_cnt, &got);
-        if (kr != KERN_SUCCESS || got != 4096) {
-            printf("cap_test: [14] WRONG — %s refused a covered physical "
-                   "write (kr=%d, %u bytes)\n", name, (int)kr,
-                   (unsigned)got);
-            ok = 0;
-            goto out;
-        }
-
-        memset((void *)uva, 0, 4096);
-        kr = device_read_phys(handle, D_READ, SCRATCH_BLOCK, 4096,
-                              pa_list, pa_cnt, &got);
-        for (i = 0; i < 4096 && same; i++)
-            if (((unsigned char *)uva)[i]
-                != (unsigned char)(i * 7u + 0x5Au))
-                same = 0;
-
-        if (kr != KERN_SUCCESS || !same) {
-            printf("cap_test: [14] WRONG — %s read back something else "
-                   "after a physical write (kr=%d, first difference at "
-                   "%u)\n", name, (int)kr, i ? i - 1 : 0);
-            ok = 0;
-        } else {
-            printf("cap_test: [14] %s wrote a block through physical "
-                   "addresses and read the same bytes back — the write "
-                   "half's addresses reach the disk\n", name);
-        }
-
-        /* Put it back, whatever happened above. */
-        memcpy((void *)uva, saved, 4096);
-        (void)device_write_phys(handle, D_WRITE, SCRATCH_BLOCK, 4096,
-                                pa_list, pa_cnt, &got);
-    }
-
 out:
     (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
     (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
                         pa_cnt * sizeof(vm_address_t));
+    (void)device_close(handle);
+    (void)mach_port_deallocate(mach_task_self(), handle);
+    return ok;
+}
+
+/*
+ * ── [14]'s write half, on the partition scratch_target() chose ────────────
+ *
+ * The refusal above is the same code on both paths, but the ADDRESSES are
+ * not: the read half maps every page through the kernel before handing it to
+ * the controller and the write half did not, so only a transfer that actually
+ * happens can tell whether the write half is speaking the same language.
+ * Read and write must agree about one block, which needs no oracle outside
+ * the pair.
+ *
+ * 🔴 AND THE BLOCK IS PUT BACK WHENEVER A WRITE WAS ASKED FOR (#596).  The put
+ * back was skipped when the write was refused or short -- a short write may
+ * have written some of it -- and its own result was thrown away.  Now it runs
+ * after every write asked for, and is read again: a block that does not read
+ * as it did before the test is WRONG, and says it may still hold the pattern.
+ */
+
+/* Read, write the pattern, read back, put back, read again: 1 or 0. */
+static int
+ct14_write_and_put_back(mach_port_t device_port, mach_port_t handle,
+                        const char *tname, recnum_t block)
+{
+    static unsigned char   saved[4096];
+    struct uros_cap        buf_cap;
+    vm_address_t           kva = 0, uva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    uint64_t               region_id = 0;
+    io_buf_len_t           got = 0, wrote = 0, put = 0;
+    kern_return_t          kr, wkr, pkr;
+    unsigned int           i;
+    int                    same = 1, back = 1, ok = 0;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (kr != KERN_SUCCESS || pa_cnt != 1) {
+        printf("cap_test: [14] WRONG — no scatter-gather page to write %s "
+               "through (kr=%d, %u pages)\n", tname, (int)kr,
+               (unsigned)pa_cnt);
+        if (pa_list != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                                pa_cnt * sizeof(vm_address_t));
+        return 0;
+    }
+    memset(&buf_cap, 0, sizeof(buf_cap));
+    kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE, 0,
+                     &buf_cap);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+    if (kr != KERN_SUCCESS)
+        printf("cap_test: [14] WRONG — %s: the buffer was not handed over "
+               "(kr=%d)\n", tname, (int)kr);
+    else {
+        memset((void *)uva, 0, 4096);
+        kr = device_read_phys(handle, D_READ, block, 4096, pa_list, pa_cnt,
+                              &got);
+        if (kr != KERN_SUCCESS || got != 4096)
+            printf("cap_test: [14] WRONG — %s could not read block %u, so "
+                   "nothing was written (kr=%d, %u bytes)\n", tname,
+                   (unsigned)block, (int)kr, (unsigned)got);
+        else {
+            memcpy(saved, (const void *)uva, 4096);
+            for (i = 0; i < 4096; i++)
+                ((unsigned char *)uva)[i] = (unsigned char)(i * 7u + 0x5Au);
+            wkr = device_write_phys(handle, D_WRITE, block, 4096, pa_list,
+                                    pa_cnt, &wrote);
+
+            memset((void *)uva, 0, 4096);
+            kr = device_read_phys(handle, D_READ, block, 4096, pa_list,
+                                  pa_cnt, &got);
+            for (i = 0; i < 4096 && same; i++)
+                if (((unsigned char *)uva)[i]
+                    != (unsigned char)(i * 7u + 0x5Au))
+                    same = 0;
+            if (kr != KERN_SUCCESS)
+                same = 0;
+
+            /* Put back after any write asked for, and read again. */
+            memcpy((void *)uva, saved, 4096);
+            pkr = device_write_phys(handle, D_WRITE, block, 4096, pa_list,
+                                    pa_cnt, &put);
+            memset((void *)uva, 0, 4096);
+            kr = device_read_phys(handle, D_READ, block, 4096, pa_list,
+                                  pa_cnt, &got);
+            if (pkr != KERN_SUCCESS || put != 4096)
+                back = 0;
+            else if (kr != KERN_SUCCESS
+                     || memcmp((const void *)uva, saved, 4096) != 0)
+                back = -1;
+
+            if (wkr != KERN_SUCCESS || wrote != 4096)
+                printf("cap_test: [14] WRONG — %s refused a covered "
+                       "physical write of block %u (kr=%d, %u bytes)\n",
+                       tname, (unsigned)block, (int)wkr, (unsigned)wrote);
+            else if (!same)
+                printf("cap_test: [14] WRONG — %s read back something else "
+                       "after a physical write of block %u (kr=%d)\n",
+                       tname, (unsigned)block, (int)kr);
+            else
+                ok = 1;
+            /* Two failures, said apart: refused, or said done and not. */
+            if (back == 0) {
+                printf("cap_test: [14] WRONG — %s: putting block %u back "
+                       "was refused or short (kr=%d, %u bytes), and it may "
+                       "still hold the test pattern (#596)\n", tname,
+                       (unsigned)block, (int)pkr, (unsigned)put);
+                ok = 0;
+            } else if (back < 0) {
+                printf("cap_test: [14] WRONG — %s: block %u was put back "
+                       "(%u bytes) and does not read as it did before the "
+                       "test (kr=%d), so it may still hold the test pattern "
+                       "(#596)\n", tname, (unsigned)block, (unsigned)put,
+                       (int)kr);
+                ok = 0;
+            } else if (ok)
+                printf("cap_test: [14] %s wrote block %u through physical "
+                       "addresses, read the same bytes back, and put the "
+                       "block back as it was — the write half's addresses "
+                       "reach the disk (#596)\n", tname, (unsigned)block);
+        }
+    }
+    (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                        pa_cnt * sizeof(vm_address_t));
+    return ok;
+}
+
+/*
+ * The write half on `tport': 1 passed, 0 WRONG, -1 not attempted (said).
+ * Who holds the partition is asked again through this task's own handle, the
+ * moment before writing: scratch_target() asked before the handle existed.
+ */
+static int
+the_write_half(mach_port_t device_port, mach_port_t tport, const char *tname)
+{
+    struct uros_cap  tok;
+    security_token_t null_sec = { { 0, 0 } };
+    char             blob[CAP_TOKEN_MAX];
+    mach_port_t      handle = MACH_PORT_NULL;
+    unsigned         open = 0, writing = 0;
+    recnum_t         block = 0;
+    kern_return_t    kr;
+    int              ok;
+
+    kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(tname),
+                     CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [14] WRONG — %s is registered and no block "
+               "capability was given for it (kr=%d)\n", tname, (int)kr);
+        return 0;
+    }
+    memcpy(blob, &tok, sizeof(tok));
+    kr = device_open_cap(tport, MACH_PORT_NULL, D_READ | D_WRITE, null_sec,
+                         (char *)tname, blob,
+                         (mach_msg_type_number_t)sizeof(tok), &handle);
+    if (kr != KERN_SUCCESS || handle == MACH_PORT_NULL) {
+        printf("cap_test: [14] WRONG — %s is registered and refused the open "
+               "(kr=%d)\n", tname, (int)kr);
+        return 0;
+    }
+
+    if (!ct_holders(handle, &open, &writing)) {
+        printf("cap_test: [14] %s: the block server would not say who holds "
+               "it now — the write is not attempted (#596)\n", tname);
+        ok = -1;
+    } else if (open != 0) {
+        printf("cap_test: [14] %s: %u other handle%s opened it since it was "
+               "chosen — the write is not attempted (#596)\n", tname, open,
+               open == 1 ? "" : "s");
+        ok = -1;
+    } else if (!ct_last_block(handle, &block)) {
+        printf("cap_test: [14] WRONG — %s did not say its size, so it has no "
+               "last page to write (#596)\n", tname);
+        ok = 0;
+    } else
+        ok = ct14_write_and_put_back(device_port, handle, tname, block);
+
     (void)device_close(handle);
     (void)mach_port_deallocate(mach_task_self(), handle);
     return ok;
@@ -3084,21 +3346,31 @@ main(int argc, char **argv)
                    candidates[i]);
             continue;
         }
-        /*
-         * The boot disk never gets the write half, and neither does a
-         * partition that cannot be told apart from it (#592).  ⚠️ That is not
-         * yet the whole rule: ext_server mounts ahci0a as / by that name, so
-         * where ahci0a is not disk0a (run-x86_64.sh, run-qemu.sh
-         * --virtio-first) the write half lands in a mounted filesystem.
-         * The property that matters is "open by another task", and this
-         * file cannot see it: #596.
-         */
-        if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
-                                          is_the_boot_disk(p) == 0))
+        if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i]))
             pass = 0;
-        if (!a_handle_moves_data_only_its_way(device_port, p, candidates[i],
-                                              is_the_boot_disk(p) == 0))
-            pass = 0;		/* #614 */
+        /*
+         * The writes go where nobody else holds the partition (#596): the
+         * candidate, else its disk's partition c, else nowhere, said.  It
+         * used to be "not the boot disk" (#592), and ext_server mounts
+         * ahci0a as / by that name, so where ahci0a is not disk0a --
+         * run-x86_64.sh, run-qemu.sh --virtio-first -- they landed in a
+         * mounted filesystem.
+         */
+        {
+            mach_port_t tport = MACH_PORT_NULL;
+            char        tname[32] = "";
+
+            if (scratch_target(p, candidates[i], &tport, tname,
+                               sizeof(tname))
+                && the_write_half(device_port, tport, tname) == 0)
+                pass = 0;
+            if (!a_handle_moves_data_only_its_way(device_port, p,
+                                                  candidates[i], tport,
+                                                  tname))
+                pass = 0;		/* #614 */
+            if (tport != MACH_PORT_NULL && tport != p)
+                (void)mach_port_deallocate(mach_task_self(), tport);
+        }
         /* #537 step 3: on the controller behind the IOMMU, whichever is first. */
         if (strcmp(candidates[i], "ahci0a") == 0 &&
             !a_revoked_translation_is_refused(device_port, p, candidates[i]))

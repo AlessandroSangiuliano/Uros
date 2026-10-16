@@ -319,6 +319,24 @@ if grep -q '^ipc_bench ' "$BUILD/src/servers/bootstrap/bootstrap.conf" 2>/dev/nu
 	BENCH_FILES="hello.txt bench.dat bench_4m.dat bench_large.dat bench_rand.dat"
 fi
 
+# 🔴 #596: AND ON THE FIRST DISK A THIRD PARTITION, `c', THAT NOBODY OPENS.
+#
+# cap_test [14] writes a block through physical addresses and reads it back,
+# and [27] offers its writes, and both did it on ahci0a -- ext_server's root,
+# mounted, on every full boot -- because the only rule they had was "not the
+# boot disk".  They now write where nobody else holds the partition, which
+# the block server answers (DEV_GET_HOLDERS), and on this target nothing was
+# left: virtio_blk0a is the boot disk and every AHCI partition is mounted.
+# So one is made for it, in the slot that makes it `c': ext_server mounts
+# ahci0a, ahci0b, ahci1a and ahci1b by name, so a `b' would be its
+# /mnt/disk1, and default_pager opens disk0c, which here is virtio's and
+# absent.  Slot 2 stays empty; the block server names a partition by its
+# slot.  Small, and ext2 for the reason the others are: the block server's
+# read-back self-test checks a superblock, and says the filesystem half did
+# not run on a partition without one.
+SCRATCH_MB=2
+SCRATCH_PART="$WORK/ahci-scratch.img"
+
 ahci_disk_n=0
 for AHCI_DISK in $AHCI_DISKS; do
 	ahci_disk_n=$(( ahci_disk_n + 1 ))
@@ -327,6 +345,8 @@ for AHCI_DISK in $AHCI_DISKS; do
 	AHCI_MB=16
 	[ $ahci_disk_n = 1 ] && [ -n "$BENCH_FILES" ] && AHCI_MB=48
 	AHCI_PART_SECTS=$(( AHCI_MB * 1024 * 1024 / SECT - PART_START ))
+	AHCI_EXTRA_MB=0
+	[ $ahci_disk_n = 1 ] && AHCI_EXTRA_MB=$SCRATCH_MB
 
 	truncate -s $(( AHCI_PART_SECTS * SECT )) "$AHCI_PART"
 	mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -L "$AHCI_LABEL" \
@@ -346,19 +366,35 @@ for AHCI_DISK in $AHCI_DISKS; do
 	} | debugfs -w -f /dev/stdin "$AHCI_PART" >/dev/null 2>&1
 
 	rm -f "$AHCI_DISK"
-	truncate -s "${AHCI_MB}M" "$AHCI_DISK"
-	sfdisk --quiet "$AHCI_DISK" <<EOF
-label: dos
-start=$PART_START, size=$AHCI_PART_SECTS, type=83
-EOF
+	truncate -s "$(( AHCI_MB + AHCI_EXTRA_MB ))M" "$AHCI_DISK"
+	SCRATCH_START=$(( AHCI_MB * 1024 * 1024 / SECT ))
+	SCRATCH_SECTS=$(( AHCI_EXTRA_MB * 1024 * 1024 / SECT ))
+	# Entries named by partition, so that the scratch one is the third
+	# whatever comes before it (#596).
+	{
+		echo "label: dos"
+		echo "${AHCI_DISK}1 : start=$PART_START, size=$AHCI_PART_SECTS, type=83"
+		[ "$AHCI_EXTRA_MB" = 0 ] ||
+			echo "${AHCI_DISK}3 : start=$SCRATCH_START, size=$SCRATCH_SECTS, type=83"
+	} | sfdisk --quiet "$AHCI_DISK"
 	dd if="$AHCI_PART" of="$AHCI_DISK" bs="$SECT" seek="$PART_START" \
 		conv=notrunc status=none
+	if [ "$AHCI_EXTRA_MB" != 0 ]; then
+		rm -f "$SCRATCH_PART"
+		truncate -s "${AHCI_EXTRA_MB}M" "$SCRATCH_PART"
+		mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -L ahci_scratch \
+			-O filetype "$SCRATCH_PART"
+		dd if="$SCRATCH_PART" of="$AHCI_DISK" bs="$SECT" \
+			seek="$SCRATCH_START" conv=notrunc status=none
+	fi
 
 	echo "make-disk-x86_64: $AHCI_DISK — no grub, one ext2 partition at"
 	echo "                  LBA $PART_START (label $AHCI_LABEL), AHCI port $(( ahci_disk_n - 1 ))"
 	if [ $ahci_disk_n = 1 ] && [ -n "$BENCH_FILES" ]; then
 		echo "                  ${AHCI_MB} MB, with ipc_bench's disk files at / (#537): $BENCH_FILES"
 	fi
+	[ "$AHCI_EXTRA_MB" = 0 ] ||
+		echo "                  and partition c at LBA $SCRATCH_START, ${AHCI_EXTRA_MB} MB of ext2 (label ahci_scratch) that nobody opens: cap_test's scratch writes (#596)"
 done
 echo "make-disk-x86_64: $DISK — bootable, grub core at LBA 1 ($CORE_SECTS sectors),"
 echo "                  one ext2 partition at LBA $PART_START (label $PART_LABEL) holding:"
