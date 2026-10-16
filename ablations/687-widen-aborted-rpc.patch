@@ -1,13 +1,13 @@
 Kind: widen
 Issue: #687
-Holds open: an aborted RPC's window between its reply being written and the wakeup that comes with it -- a thread the hot path parked, let go by an abort, comes back for its reply 100 ms late, so that a reply sent after the abort finds it still queued, and the reply's deliverer, finding its receiver already out of its wait, holds the wakeup 300 ms; each side says so, so that a fixed arm that passes shows the window was open; in the fixed tree the receiver waits for that wakeup under imq_lock; and the deliverer says when its wakeup is about to end a later wait
+Holds open: an aborted RPC's window between its reply being written and the wakeup that comes with it -- a thread the hot path parked, let go by an abort, comes back for its reply 100 ms late, so that a reply sent after the abort finds it still queued, and the reply's deliverer, finding its receiver already out of its wait, holds the wakeup 300 ms; each side says so, so that a fixed arm that passes shows the window was open; in the fixed tree the receiver waits for that wakeup under imq_lock; the deliverer says when its wakeup is about to end a later wait; only the first 16 of each in a boot, since act_test [11] aborts a thread some 2000 times
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index 2049fcac..d2e4160e 100644
+index 2049fcac..613a0649 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-@@ -734,6 +734,47 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
+@@ -734,6 +734,60 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
   */
  unsigned int	ipc_dts_declined_swapped;
  
@@ -21,14 +21,25 @@ index 2049fcac..d2e4160e 100644
 + * SUCCESS it reads, goes on into its next RPC, and the wakeup ends that wait.
 + * Each side says so, so that a fixed arm that passes shows the window was
 + * open, and the deliverer says when its wakeup is about to end a later wait.
++ *
++ * Only the first WIDEN_687_TIMES of each in a boot.  act_test [11] aborts a
++ * thread some 2000 times, and with the window held open every time its fixed
++ * TCG boots took 600 s, the whole of their Run: line; arm ten, which this is
++ * for, comes before it, after 2 to 5 of each.
 + */
 +#define	WIDEN_687_RECEIVER_US	100000
 +#define	WIDEN_687_DELIVERER_US	300000
++#define	WIDEN_687_TIMES		16
++
++/* Not atomic: a budget, not a census. */
++static int	widen_687_receivers, widen_687_deliveries;
 +
 +void
 +widen_687_receiver(thread_t self)
 +{
-+	if (self->wait_result == THREAD_INTERRUPTED) {
++	if (self->wait_result == THREAD_INTERRUPTED &&
++	    widen_687_receivers < WIDEN_687_TIMES) {
++		widen_687_receivers++;
 +		/* said, so that a fixed arm that passes shows the window opened */
 +		printf("#687 widen: an RPC aborted on the hot path comes back "
 +		       "for its reply %d us late, thread %p\n",
@@ -40,8 +51,10 @@ index 2049fcac..d2e4160e 100644
 +static void
 +widen_687_deliverer(thread_t receiver)
 +{
-+	if (receiver->state & TH_WAIT)
++	if ((receiver->state & TH_WAIT) ||
++	    widen_687_deliveries >= WIDEN_687_TIMES)
 +		return;
++	widen_687_deliveries++;
 +	printf("#687 widen: a message goes to thread %p, which an abort or a "
 +	       "timeout has let go, and its wakeup waits %d us\n", receiver,
 +	       WIDEN_687_DELIVERER_US);
@@ -55,7 +68,7 @@ index 2049fcac..d2e4160e 100644
  mach_msg_return_t
  ipc_mqueue_deliver(
  	register ipc_port_t	port,
-@@ -945,6 +986,8 @@ ipc_mqueue_deliver(
+@@ -945,6 +999,8 @@ ipc_mqueue_deliver(
  		if (!direct)
  			splx(s);
  	}
@@ -65,7 +78,7 @@ index 2049fcac..d2e4160e 100644
  		thread_go(receiver);
  	imq_unlock(mqueue);
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index ac02be6d..a53dd0a8 100644
+index 523a34ae..23d7669c 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
 @@ -219,6 +219,8 @@ unsigned int	c_route_msg_continue = 0;
@@ -77,7 +90,7 @@ index ac02be6d..a53dd0a8 100644
  
  /*
   * Forward declarations
-@@ -2167,6 +2169,7 @@ mach_msg_overwrite_trap(
+@@ -2184,6 +2186,7 @@ mach_msg_overwrite_trap(
  		 * until its wakeup is spent (#700), so taking it waits for that,
  		 * and makes ith_kmsg, written after ith_state, safe to read.
  		 */
