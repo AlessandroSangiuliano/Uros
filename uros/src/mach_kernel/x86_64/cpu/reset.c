@@ -195,6 +195,18 @@ static void reset_write_register(void)
 static uint64_t	reset_after;
 static int	reset_deadline_event;
 
+/*
+ * reset_hold=: how long the machine stays up after the quiet census before -b
+ * restarts it (#595).  The census ends a healthy boot within about a minute,
+ * before the TSC watchdog's first summary at 120 windows (#594), and those
+ * summaries are what #595 asks of bare metal: with the hold they are printed,
+ * and reach #373's zone, before the restart.  0, the default, restarts at the
+ * census, as before.
+ */
+static uint64_t		reset_hold;
+static int		reset_hold_event;	/* only ever timed out */
+static volatile int	reset_census_seen;
+
 static void reset_deadline_thread(void)
 {
 	assert_wait((event_t) &reset_deadline_event, FALSE);
@@ -202,10 +214,44 @@ static void reset_deadline_thread(void)
 	thread_block((void (*)(void)) 0);
 	reset_timeout_check(&current_thread()->timer);
 
+	if (reset_census_seen) {
+		assert_wait((event_t) &reset_hold_event, FALSE);
+		thread_set_timeout((int)(reset_hold * hz));
+		thread_block((void (*)(void)) 0);
+		reset_timeout_check(&current_thread()->timer);
+		printf("reset: -b: %llu seconds since the quiet census, as "
+		       "reset_hold= asks; restarting the machine (#595)\n",
+		       (unsigned long long)reset_hold);
+		halt_all_cpus(TRUE);
+	}
+
 	printf("reset: -b: %llu seconds since the scheduler started and the "
 	       "boot has not ended; restarting the machine (#373)\n",
 	       (unsigned long long)reset_after);
 	halt_all_cpus(TRUE);
+}
+
+/*
+ * The census's word that the boot is over, under -b.  From the idle thread,
+ * which must not sleep: without a hold this restarts here and now, as the
+ * census did itself; with one it only wakes the deadline thread, which then
+ * sleeps reset_hold= seconds and restarts.  A later census finds the hold
+ * already counting.
+ */
+void reset_census_over(void)
+{
+	if (reset_hold == 0) {
+		printf("quiet_census: -b: the boot is over; restarting the "
+		       "machine (#373)\n");
+		halt_all_cpus(TRUE);
+	}
+	if (reset_census_seen)
+		return;
+	reset_census_seen = 1;
+	printf("quiet_census: -b: the boot is over; the machine restarts in "
+	       "%llu seconds, as reset_hold= asks (#595)\n",
+	       (unsigned long long)reset_hold);
+	thread_wakeup((event_t) &reset_deadline_event);
 }
 
 void reset_deadline_start(void)
@@ -226,9 +272,23 @@ void reset_deadline_start(void)
 			       "this kernel can wait; -b's deadline is %u "
 			       "(#373)\n", RESET_AFTER_DEFAULT);
 	}
-	printf("reset: -b: the machine restarts after the quiet census, five "
-	       "seconds after a panic, or in %llu seconds (#373)\n",
-	       (unsigned long long)reset_after);
+	r = boot_value("reset_hold", &s);
+	if (r == 1 && s <= 0x7fffffffULL / (uint64_t)hz)
+		reset_hold = s;
+	else if (r != 0)
+		printf("reset: reset_hold= is not a number of seconds this "
+		       "kernel can wait; the machine restarts at the census "
+		       "(#595)\n");
+	if (reset_hold != 0)
+		printf("reset: -b: the machine restarts %llu seconds after the "
+		       "quiet census, five seconds after a panic, or in %llu "
+		       "seconds (#373, #595)\n",
+		       (unsigned long long)reset_hold,
+		       (unsigned long long)reset_after);
+	else
+		printf("reset: -b: the machine restarts after the quiet census, "
+		       "five seconds after a panic, or in %llu seconds (#373)\n",
+		       (unsigned long long)reset_after);
 	(void) kernel_thread(kernel_task, reset_deadline_thread, (char *) 0);
 }
 

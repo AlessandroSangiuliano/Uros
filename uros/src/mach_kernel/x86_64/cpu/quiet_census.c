@@ -46,6 +46,7 @@
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
 #include <boot/bootarg.h>	/* #373: -b */
+#include <cpu/reset.h>		/* #595: reset_census_over() */
 #include <cpu/quiet_census.h>
 #include <cpu/percpu.h>	/* #599: returns to ring 3, all processors */
 #include <ddb/cons_cost.h>	/* #567: the console's counts, with each report */
@@ -837,9 +838,6 @@ quiet_census_pass(int mycpu)
 	 * sleep, and nothing on the way down does -- the console's waits spin
 	 * within #551's bound.
 	 */
-	if (boot_flag('b')) {
-		printf("quiet_census: -b: the boot is over; restarting the "
-		       "machine (#373)\n");
-		halt_all_cpus(TRUE);
-	}
+	if (boot_flag('b'))
+		reset_census_over();	/* now, or reset_hold= later (#595) */
 }
