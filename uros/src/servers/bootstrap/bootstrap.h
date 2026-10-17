@@ -154,6 +154,7 @@ struct server {
 	const char 	*server_name;
         int		args_size;
         task_port_t	task_port;
+	mach_port_t	bootstrap_port;	/* #620: its own; names it to us */
 
 	unsigned int	flags;
 	unsigned int	bootstrap_completed; /* Set upon receit of a

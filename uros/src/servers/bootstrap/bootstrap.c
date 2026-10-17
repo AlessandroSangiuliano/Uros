@@ -94,9 +94,6 @@ mach_port_t	bootstrap_root_device_port;	/* local name */
 mach_port_t	bootstrap_master_device_port;	/* local name */
 mach_port_t	bootstrap_master_host_port;	/* local name */
 mach_port_t	bootstrap_notification_port;	/* local name */
-mach_port_t	security_port;
-mach_port_t	root_ledger_wired;
-mach_port_t	root_ledger_paged;
 
 /*const char default_config[] = "\
 name_server name_server\n\
@@ -106,7 +103,7 @@ unix startup -s\n\
 
 const char default_config[] = "\
 name_server name_server\n\
-default_pager default_pager disk0c\n\
+-H default_pager default_pager disk0c\n\
 ";
 
 struct server *servers;
@@ -163,6 +160,8 @@ static struct server	*cap_server_sp;
 char	*boot_device = (char *)BOOT_DEVICE_NAME;
 
 boolean_t bootstrap_demux(mach_msg_header_t *, mach_msg_header_t *);
+static mach_port_t server_bootstrap_port_make(void);
+static struct server *server_by_bootstrap_port(mach_port_t);
 void bootstrap_initialize(mach_port_t);
 void start_bootstrap_thread(boolean_t);
 boolean_t bootstrap_compat(mach_msg_header_t *, mach_msg_header_t *);
@@ -179,9 +178,12 @@ mach_port_t	bootstrap_exception_port;
 mach_port_t	bootstrap_set;
 
 /*
- * We receive bootstrap requests on this port.
+ * #620: requests come in on each server's own bootstrap port
+ * (server_bootstrap_port_make()), so that the port a request arrives on says
+ * which server sent it.  There used to be one port for every task, and
+ * bootstrap_ports() could not tell who was asking: it handed the master host
+ * and device ports to anyone.
  */
-mach_port_t	bootstrap_bootstrap_port;
 
 /*
  * #620: the console, opened once from the master device port and copied to
@@ -824,6 +826,8 @@ main(int argc, char **argv)
 	size_t			config_size;
 	struct server	        *sp;
 	int			result;
+	mach_port_t		root_ledger_wired, root_ledger_paged;
+	mach_port_t		security_port;
 	boolean_t		retry;
 	mach_msg_type_number_t	count;
 	struct file		f;
@@ -837,7 +841,9 @@ main(int argc, char **argv)
 	pthread_mutex_init(&start_mutex, NULL);
 
 	/*
-	 * Get master host and device ports
+	 * Get master host and device ports.  #620: the root ledgers and the
+	 * host security port come too, and are given straight back: bootstrap
+	 * hands them to no task and has no use for them itself.
 	 */
 	kr = bootstrap_ports(bootstrap_port,
 			     &bootstrap_master_host_port,
@@ -847,6 +853,9 @@ main(int argc, char **argv)
 			     &security_port);
 	if (kr != KERN_SUCCESS) 
 	    panic(my_name);
+	(void) mach_port_deallocate(mach_task_self(), root_ledger_wired);
+	(void) mach_port_deallocate(mach_task_self(), root_ledger_paged);
+	(void) mach_port_deallocate(mach_task_self(), security_port);
 
 	/*
 	 * Initialize console and reboot services
@@ -920,14 +929,6 @@ main(int argc, char **argv)
 	if (kr != KERN_SUCCESS)
 	    panic(my_name);
 
-	/*
-	 *	Initialize the bootstrap port.
-	 */
-	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_RECEIVE,
-				&bootstrap_bootstrap_port);
-	if (kr != KERN_SUCCESS)
-	    panic(my_name);
-
 	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_PORT_SET,
 				&bootstrap_set);
 	if (kr != KERN_SUCCESS)
@@ -935,12 +936,6 @@ main(int argc, char **argv)
 
 	kr = mach_port_move_member(bootstrap_self,
 				   bootstrap_exception_port,
-				   bootstrap_set);
-	if (kr != KERN_SUCCESS)
-	    panic(my_name);
-
-	kr = mach_port_move_member(bootstrap_self,
-				   bootstrap_bootstrap_port,
 				   bootstrap_set);
 	if (kr != KERN_SUCCESS)
 	    panic(my_name);
@@ -996,12 +991,9 @@ main(int argc, char **argv)
 	service_init();
 
 	/*
-	 * task_set_exception_ports and task_set_bootstrap_port
-	 * both require a send right.
+	 * task_set_exception_ports requires a send right (and
+	 * task_set_bootstrap_port too: server_bootstrap_port_make()).
 	 */
-	(void) mach_port_insert_right(bootstrap_self, bootstrap_bootstrap_port,
-				      bootstrap_bootstrap_port,
-				      MACH_MSG_TYPE_MAKE_SEND);
 	(void) mach_port_insert_right(bootstrap_self, bootstrap_exception_port,
 				      bootstrap_exception_port,
 				      MACH_MSG_TYPE_MAKE_SEND);
@@ -1287,11 +1279,19 @@ main(int argc, char **argv)
 		    BOOTSTRAP_IO_UNLOCK();
 	    }
 		    
-	    kr = task_set_bootstrap_port(user_task,
-					 bootstrap_bootstrap_port);
+	    /*
+	     * #620: a bootstrap port of its own, recorded before the task has
+	     * a thread, so that whatever it asks arrives on a port that says
+	     * which server it is.  A task it creates inherits the port, and
+	     * with it what this server is given: that is the server's
+	     * authority to pass on, as it could pass on the ports themselves.
+	     */
+	    sp->bootstrap_port = server_bootstrap_port_make();
+	    kr = task_set_bootstrap_port(user_task, sp->bootstrap_port);
 
 	    if (kr != KERN_SUCCESS)
 		panic("task_set_bootstrap_port 0x%x", kr);
+	    (void) mach_port_deallocate(bootstrap_self, sp->bootstrap_port);
 
 	    /*
 	     * #216 v2.1 — best-effort per-task cap_port provisioning.
@@ -1451,7 +1451,6 @@ main(int argc, char **argv)
 	 *	Deallocate the excess send rights.
 	 */
 	(void) mach_port_deallocate(bootstrap_self, bootstrap_exception_port);
-	(void) mach_port_deallocate(bootstrap_self, bootstrap_bootstrap_port);
 
 	BOOTSTRAP_IO_LOCK();
 	printf("%s: started\n", program_name);
@@ -1701,6 +1700,7 @@ parse_config_file(char *conf, size_t size)
 	    sp->mapsize = 0;
 	    sp->flags = 0;
 	    sp->bootstrap_completed = 0;
+	    sp->bootstrap_port = MACH_PORT_NULL;
 
 	    for (;;) {
 		ptr = pptr;
@@ -1797,10 +1797,52 @@ parse_config_file(char *conf, size_t size)
  *		service requests from our "children"
  */
 
+/*
+ * #620: a receive right in bootstrap_set, with the send right that
+ * task_set_bootstrap_port() copies to the server.
+ */
+static mach_port_t
+server_bootstrap_port_make(void)
+{
+	mach_port_t	port;
+	kern_return_t	kr;
+
+	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_RECEIVE, &port);
+	if (kr != KERN_SUCCESS)
+	    panic("server bootstrap port: allocate %d", kr);
+	kr = mach_port_move_member(bootstrap_self, port, bootstrap_set);
+	if (kr != KERN_SUCCESS)
+	    panic("server bootstrap port: into the set %d", kr);
+	kr = mach_port_insert_right(bootstrap_self, port, port,
+				    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS)
+	    panic("server bootstrap port: send right %d", kr);
+	return port;
+}
+
+/*
+ * #620: the server a bootstrap request came from, by the port it arrived
+ * on, or 0.  The receive right is ours, so a task cannot make a request
+ * arrive on another server's port.
+ */
+static struct server *
+server_by_bootstrap_port(mach_port_t port)
+{
+	int		i;
+	struct server	*sp;
+
+	if (port == MACH_PORT_NULL)
+	    return 0;
+	for (i = 0, sp = servers; i < nservers; i++, sp++)
+	    if (sp->bootstrap_port == port)
+		return sp;
+	return 0;
+}
+
 boolean_t
 bootstrap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
-	if (in->msgh_local_port == bootstrap_bootstrap_port)
+	if (server_by_bootstrap_port(in->msgh_local_port) != 0)
 		return bootstrap_server(in, out);
 	if (in->msgh_local_port == bootstrap_exception_port)
 		return exc_server(in, out);
@@ -1985,11 +2027,26 @@ do_bootstrap_ports(mach_port_t bootstrap,
 		   mach_port_t *root_ledger_pagedp,
 		   mach_port_t *security_portp)
 {
-	*hostp = bootstrap_master_host_port;
-	*devicep = bootstrap_master_device_port;
-	*root_ledger_wiredp = root_ledger_wired;
-	*root_ledger_pagedp = root_ledger_paged;
-	*security_portp = security_port;
+	struct server *sp = server_by_bootstrap_port(bootstrap);
+	unsigned int flags = sp != 0 ? sp->flags : 0;
+
+	/*
+	 * #620: only what the server's line in bootstrap.conf gives it -- -H
+	 * the master host port, -D the master device port -- and to any other
+	 * task nothing.  A null port is the answer, not an error, so that a
+	 * task which asked only to print goes on: printf_init() of a null port
+	 * gets the console from bootstrap_console().  The root ledgers and the
+	 * host security port go to no task: none in the tree uses them, and
+	 * the security port sets the security token of a task
+	 * (task_set_security_token()).
+	 */
+	*hostp = (flags & SERVER_HOST_PRIV_F) ? bootstrap_master_host_port
+					       : MACH_PORT_NULL;
+	*devicep = (flags & SERVER_DEVICE_F) ? bootstrap_master_device_port
+					     : MACH_PORT_NULL;
+	*root_ledger_wiredp = MACH_PORT_NULL;
+	*root_ledger_pagedp = MACH_PORT_NULL;
+	*security_portp = MACH_PORT_NULL;
 	return KERN_SUCCESS;
 }
 
