@@ -530,10 +530,11 @@ skip;	/* was device_dma_map_foreign */
  *
  * 🔴 AND WHAT IS CHECKED AFTERWARDS IS THE CLAIM, WITH WHAT IT CARRIES.  The
  * buffer calls -- dma_alloc, dma_alloc_sg, dma_identity and the
- * dma_map_foreign routines -- need the claim to carry DMA_MAP (#621), and the
- * mappings of the device's registers, mmio_map and region_map, MMIO_MAP;
- * dma_free needs the claim alone, since giving memory back takes no
- * authority.  Verifying a token instead would mean an HMAC-SHA256 under a lock
+ * dma_map_foreign routines -- need the claim to carry DMA_MAP (#621), the
+ * mappings of the device's registers, mmio_map and region_map, MMIO_MAP, and
+ * its interrupts, msi_register and intr_register on a line the device raises,
+ * IRQ; dma_free needs the claim alone, since giving memory back takes no
+ * authority, and a line no claimed device raises needs no claim at all.  Verifying a token instead would mean an HMAC-SHA256 under a lock
  * the whole machine shares, on a path that runs once per buffer; the claim and
  * its operations are a pointer comparison and a bit, and in between they can
  * only narrow.

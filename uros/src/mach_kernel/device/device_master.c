@@ -1077,8 +1077,9 @@ measure_regions(struct device_claim_entry *e, natural_t bdf)
  *   what it is testing is the claim mechanism itself.
  *
  * So the rule is about the line's OWNER and not about the caller's holdings:
- * if a claimed device raises it, it is that task's; otherwise the existing
- * one-handler-per-line rule is the whole of the arbitration, as it was.
+ * if a claimed device raises it, it is that task's, and only if the claim
+ * carries IRQ (#621); otherwise the existing one-handler-per-line rule is the
+ * whole of the arbitration, as it was, and no operation is asked for.
  *
  * ⚠️ Register 0x3C is the interrupt LINE, which is what the device was
  * programmed with rather than what it is wired to.  That is the number this
@@ -1091,8 +1092,9 @@ check_irq_owner(unsigned int irq)
 {
 	task_t		me = current_task();
 	unsigned	i, n;
-	natural_t	other_bdf = DEVICE_DMA_NO_BDF;
+	natural_t	other_bdf = DEVICE_DMA_NO_BDF, my_bdf = DEVICE_DMA_NO_BDF;
 	int		mine = 0;
+	unsigned int	ops = 0;
 
 	/*
 	 * The config-space read inside the section is a spin lock and a few
@@ -1117,13 +1119,25 @@ check_irq_owner(unsigned int irq)
 		if (line == 0 || line == 0xFF || line != irq)
 			continue;
 
-		if (device_claim[i].task == me)
+		if (device_claim[i].task == me) {
 			mine = 1;
-		else
+			ops = device_claim[i].ops;
+			my_bdf = bdf;
+		} else
 			other_bdf = bdf;
 		break;
 	}
 	urmach_rcu_read_unlock();
+
+	/* The caller's device raises it, and the claim has to carry IRQ. */
+	if (mine && (ops & (unsigned int)CAP_OP_PCI_IRQ) == 0) {
+		printf("device_intr_register: irq %u is raised by %u:%u.%u, "
+		       "and task 0x%lx's claim on it carries %s and not IRQ "
+		       "(#621)\n", irq, (unsigned)(my_bdf >> 8),
+		       (unsigned)((my_bdf >> 3) & 0x1F), (unsigned)(my_bdf & 0x7),
+		       (unsigned long)me, claim_ops_name(ops));
+		return KERN_NO_ACCESS;
+	}
 
 	if (mine || other_bdf == DEVICE_DMA_NO_BDF)
 		return KERN_SUCCESS;
@@ -1262,6 +1276,10 @@ ds_master_device_msi_register(
 	 * DEVICE's own table, so registering one is a write to whoever's
 	 * device this is -- unlike a line, which is a property of the
 	 * controller and can belong to nothing at all.
+	 *
+	 * And the claim has to carry IRQ (#621).  The first look only picks
+	 * the line to print; the second answers both questions in one walk,
+	 * and it is the one that lets the registration through.
 	 */
 	kr = check_claim((natural_t)((bus << 8) | (dev << 3) | func));
 	if (kr != KERN_SUCCESS) {
@@ -1269,6 +1287,10 @@ ds_master_device_msi_register(
 		       bus, dev, func);
 		return kr;
 	}
+	kr = check_claim_op((natural_t)((bus << 8) | (dev << 3) | func),
+			    (unsigned int)CAP_OP_PCI_IRQ, "device_msi_register");
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	irq_forward_thread_start();
 
@@ -4543,10 +4565,9 @@ ds_master_device_claim(
 	 * carries at least one thing one can do to a device -- and WHICH
 	 * things it carries are recorded with the claim (#621): each of the
 	 * three is checked against the token here, HMAC and all, so that an
-	 * operation afterwards needs to read a bit and not verify a token.
-	 *
-	 * ⚠️ Recorded and not yet asked: the operations still check that the
-	 * caller holds the claim, not that the claim carries theirs.
+	 * operation afterwards needs to read a bit and not verify a token:
+	 * the buffer calls ask for DMA, the register mappings for MMIO, and an
+	 * interrupt of the device's for IRQ.
 	 */
 	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
 				 (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
