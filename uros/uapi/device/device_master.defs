@@ -520,6 +520,14 @@ skip;	/* was device_dma_map_foreign */
  * different sources: one is a signed statement about the task, the other is
  * the hardware answering for itself.
  *
+ * 🔑 AND THE CLAIM RECORDS WHICH DEVICE OPERATIONS THE TOKEN CARRIES (#621),
+ * DMA_MAP, MMIO_MAP and IRQ, each checked against the token once, here.  A
+ * second claim by the holder, with another token for the same device,
+ * NARROWS: the claim keeps the operations both tokens carry and the token
+ * that established it.  An operation can be given up and never gained, and
+ * revoking the first token still ends the claim.  It answers KERN_SUCCESS,
+ * as a second claim by the holder always has.
+ *
  * 🔴 AND WHAT IS CHECKED AFTERWARDS IS THE CLAIM, ON THE BUFFER CALLS ONLY.
  * Five of them ask -- dma_alloc, dma_free, dma_alloc_sg, dma_identity and
  * dma_map_foreign -- and every one is about obtaining or releasing memory.
