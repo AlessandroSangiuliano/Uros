@@ -235,9 +235,9 @@ hello_posix_exec_fd_smoke(void)
  *
  * Each of them asks exec_server for a program, and exec_server reads it from
  * "/".  The bootstrap starts hello_server before both and waits for neither,
- * so the tests used to run against whatever had come up by then: from 2
- * October every logged boot found no "/" yet and lost all four to ENOENT, on
- * one processor as on four, and nothing said so.
+ * so the tests ran against whatever had come up by then -- and in all 111
+ * boots logged on one machine from 2 October, "/" was not there yet: the
+ * four failed with ENOENT, on one processor as on four, and nothing said so.
  *
  * "/" must be SERVED, not merely registered: ext_server registers its mount
  * before its message loop runs, and only the loop answers.  An answered
@@ -245,7 +245,8 @@ hello_posix_exec_fd_smoke(void)
  *
  * 0 when both are there.  -1 when either is still missing after
  * HELLO_WAIT_STEPS tenths of a second, or "/" does not answer, having said
- * which: the first is NOT ASKED, the second WRONG.
+ * which: the tests are NOT ASKED either way, and a "/" that does not answer
+ * is WRONG besides.
  */
 #define HELLO_WAIT_STEPS	1200u
 
@@ -290,8 +291,10 @@ hello_wait_for_exec(void)
         return -1;
     }
     if ((rc = vfs_stat("/", &st)) != 0) {
-        printf("(hello_server): exec tests: WRONG — \"/\" is registered and "
-               "a stat of it failed (%d): ext_server answers nothing\n", rc);
+        printf("(hello_server): WRONG — \"/\" is registered and a stat of it "
+               "failed (%d): ext_server answers nothing\n", rc);
+        printf("(hello_server): exec tests: NOT ASKED — \"/\" does not "
+               "answer\n");
         return -1;
     }
     return 0;
@@ -578,9 +581,14 @@ main(int argc, char **argv)
      *
      * It and every test after it to the end of the /hello_exec block spawn
      * a program, and are asked only once exec_server and "/" are there
-     * (#582).
+     * (#582).  Four arms -- /hello_dyn, /dlopen_test, #269's fork and
+     * execve, the spawn of /hello_exec -- each said WRONG when it fails, and
+     * counted at the end, which scripts/suite-i386.sh waits for: their
+     * failures were printed for weeks as plain lines that no judge read.
      */
+    printf("(hello_server): exec tests: started\n");
     int exec_asked = hello_wait_for_exec() == 0;
+    unsigned int exec_passed = 0;
     if (exec_asked) {
         extern int __uros_spawn(const char *path, char *const argv[],
                                 char *const envp[], mach_port_t *out_task,
@@ -594,7 +602,8 @@ main(int argc, char **argv)
         int dr = __uros_spawn("/hello_dyn", dyn_argv, dyn_envp,
                               &dt, &dth, &dpid, 0 /* spawn child */);
         if (dr != 0) {
-            printf("(hello_server): __uros_spawn(/hello_dyn) failed: %d\n", dr);
+            printf("(hello_server): WRONG — __uros_spawn(/hello_dyn) failed: "
+                   "%d\n", dr);
         } else {
             printf("(hello_server): spawned /hello_dyn pid=%u task=0x%x\n",
                    dpid, (unsigned)dt);
@@ -603,7 +612,12 @@ main(int argc, char **argv)
                                             SWITCH_OPTION_WAIT, 20);
             (void)task_terminate(dt);
             int dst = 0;
-            (void)__uros_waitpid((int)dpid, &dst, 0);
+            int dwr = __uros_waitpid((int)dpid, &dst, 0);
+            if (dwr == (int)dpid)
+                exec_passed++;
+            else
+                printf("(hello_server): WRONG — waitpid(/hello_dyn pid=%u) "
+                       "-> %d\n", dpid, dwr);
         }
     }
 
@@ -626,8 +640,8 @@ main(int argc, char **argv)
         int dlr = __uros_spawn("/dlopen_test", dl_argv, dl_envp,
                                &dlt, &dlth, &dlpid, 0 /* spawn child */);
         if (dlr != 0) {
-            printf("(hello_server): __uros_spawn(/dlopen_test) failed: %d\n",
-                   dlr);
+            printf("(hello_server): WRONG — __uros_spawn(/dlopen_test) "
+                   "failed: %d\n", dlr);
         } else {
             printf("(hello_server): spawned /dlopen_test pid=%u task=0x%x\n",
                    dlpid, (unsigned)dlt);
@@ -636,7 +650,12 @@ main(int argc, char **argv)
                                             SWITCH_OPTION_WAIT, 20);
             (void)task_terminate(dlt);
             int dlst = 0;
-            (void)__uros_waitpid((int)dlpid, &dlst, 0);
+            int dlwr = __uros_waitpid((int)dlpid, &dlst, 0);
+            if (dlwr == (int)dlpid)
+                exec_passed++;
+            else
+                printf("(hello_server): WRONG — waitpid(/dlopen_test pid=%u) "
+                       "-> %d\n", dlpid, dlwr);
         }
     }
 
@@ -672,7 +691,7 @@ main(int argc, char **argv)
         printf("(hello_server): #269 repro — fork+execve\n");
         int xpid = __uros_fork();
         if (xpid < 0) {
-            printf("(hello_server): #269 fork() failed: %d\n", xpid);
+            printf("(hello_server): WRONG — #269 fork() failed: %d\n", xpid);
         } else if (xpid == 0) {
             printf("(hello_server)[fxchild]: pid=%u, calling execve\n",
                    __uros_my_pid);
@@ -706,6 +725,16 @@ main(int argc, char **argv)
             int xwr = __uros_waitpid(xpid, &xst, 0);
             printf("(hello_server): #269 kill(SIGKILL)=%d, waitpid -> wr=%d "
                    "status=0x%x\n", kr_kill, xwr, xst);
+            /*
+             * Killed is the one right end: a child whose execve returned
+             * leaves by its own _exit(11), status 0xb00, before the kill
+             * finds it -- as all 111 of October's that #582 counted did.
+             */
+            if (xwr == xpid && WIFSIGNALED(xst) && WTERMSIG(xst) == SIGKILL)
+                exec_passed++;
+            else
+                printf("(hello_server): WRONG — #269's child was not ended by "
+                       "its parent's SIGKILL: wr=%d status=0x%x\n", xwr, xst);
         }
 
         /*
@@ -725,7 +754,8 @@ main(int argc, char **argv)
          */
 
         if (sr != 0) {
-            printf("(hello_server): __uros_spawn(/hello_exec) failed: %d\n", sr);
+            printf("(hello_server): WRONG — __uros_spawn(/hello_exec) failed: "
+                   "%d\n", sr);
         } else {
             printf("(hello_server): spawned /hello_exec pid=%u task=0x%x\n",
                    child_pid, (unsigned)child_task);
@@ -744,7 +774,14 @@ main(int argc, char **argv)
             else
                 printf("(hello_server): waitpid -> pid=%d status=0x%x\n",
                        wr, status);
+            if (wr == (int)child_pid)
+                exec_passed++;
+            else
+                printf("(hello_server): WRONG — waitpid(/hello_exec pid=%u) "
+                       "-> %d\n", child_pid, wr);
         }
+        printf("(hello_server): exec tests: %u of 4 arms passed\n",
+               exec_passed);
     }
 
     /*
