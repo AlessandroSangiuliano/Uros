@@ -385,7 +385,8 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
  * The legacy ports this kernel keeps (#508): the 8254, which on i386 is not
  * only a ruler but the clock itself -- rtclock ticks from its channel 0 --
  * and port 0x61, which gates channel 2.  And the PCI configuration ports
- * (#597), whose two-step access only the kernel's lock keeps whole.
+ * (#597), whose two-step access only the kernel's lock keeps whole; the CMOS
+ * and the 8259s (#599); and the ISA DMA controller (#620).
  *
  * Asked at every door to a port on this target, not only at
  * device_io_port_claim(): the read and write RPCs (check_io_port(), #597),
@@ -423,6 +424,20 @@ device_md_io_reserved(unsigned int base, unsigned int count)
 		return "the 8259 interrupt controllers";
 	if (base < 0x4D0 + 2 && 0x4D0 < base + count)
 		return "the 8259s' edge/level registers";
+	/*
+	 * #620: the ISA DMA controller.  A task reaching it could program an
+	 * 8237 channel to move bytes between a device and physical memory
+	 * below 16 MB, with no claim and past every check that guards DMA.
+	 * Both 8237s, and the page registers that give a channel its address
+	 * bits above sixteen; 0x80 among them is the unused port drivers write
+	 * to wait, which no task needs.
+	 */
+	if (base < 0x00 + 16 && 0x00 < base + count)
+		return "the first 8237 DMA controller, which reaches memory";
+	if (base < 0xC0 + 32 && 0xC0 < base + count)
+		return "the second 8237 DMA controller, which reaches memory";
+	if (base < 0x80 + 16 && 0x80 < base + count)
+		return "the 8237s' page registers";
 	return 0;
 }
 
