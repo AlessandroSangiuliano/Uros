@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #621
+Takes out: the DMA check -- check_claim_op() takes DMA_MAP as carried by every claim, so the buffer calls are answered for a claim that gave DMA up, as they were for any claim before; irq_claim_test's [14] must say WRONG at dma_alloc and the four after it
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[14\] WRONG
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index c52574d2..4343acc4 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -778,7 +778,7 @@ check_claim_op(natural_t bdf, unsigned int op, const char *what)
+ 		}
+ 	urmach_rcu_read_unlock();
+ 
+-	if (hit && holder == me && (op == 0 || (ops & op) != 0))
++	if (hit && holder == me && (op == 0 || op == (unsigned int)CAP_OP_PCI_DMA_MAP || (ops & op) != 0))
+ 		return KERN_SUCCESS;
+ 	if (hit && holder == me) {
+ 		printf("%s: %02x:%02x.%u REFUSED to task 0x%lx — its claim "
