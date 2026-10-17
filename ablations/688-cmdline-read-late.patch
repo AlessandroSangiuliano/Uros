@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #688
-Takes out: the command line's copy -- mb2_cmdline() reads it at the loader's physical address again, so halt_cpu()'s question for -b, asked on the processor -t panics with a task's CR3 loaded and on every other the stop finds inside a system call, faults on top of the panic; the fixed arm of an A/B is FAILED whatever happens, the harness exiting 1 for a panic that was asked for: its log is read by the merge test's taskpanic judge, no trap after the panic
+Takes out: the command line's copy -- mb2_cmdline() reads it at the loader's physical address again, so halt_cpu()'s question for -b faults on top of -t's panic on both processors that have a task's CR3 loaded: the one that panics inside a system call, and the one held in a task's code that the stop reaches; the fixed arm of an A/B is FAILED whatever happens, the harness exiting 1 for a panic that was asked for: its log is read by the merge test's taskpanic judge, no trap after the panic
 Run: --entry 53 300 -smp 4
 Expect: <halt_cpu\+0x[0-9a-f]+>
 
