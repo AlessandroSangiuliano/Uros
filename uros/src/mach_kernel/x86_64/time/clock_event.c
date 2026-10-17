@@ -87,17 +87,30 @@ static unsigned		event_hz = CLOCK_EVENT_HZ;
 static uint64_t		tick_ns;
 
 /*
- * -t (#688), the merge test's entry 53: a panic on the first tick that finds
- * its processor in the kernel on a task's behalf -- a thread of a task other
- * than the kernel's, inside a system call or a trap, with the task's address
- * space loaded.  halt_cpu() then runs with that CR3 on the processor that
- * panicked, as it does on every processor a panic's stop finds inside a system
- * call, and has to stop each of them without a fault of its own.  The task's
- * thread and not only its space: the first version took the bootstrap's
- * loader, a kernel thread with the new task's map borrowed to copy its image
- * in, which is a task's CR3 too but no system call.  Read once, at boot.
+ * -t (#688), the merge test's entry 53: one panic, and two processors that
+ * reach halt_cpu() with a task's address space loaded, each the way it does.
+ *
+ * - B, the first processor whose tick interrupts a task's own code in ring 3,
+ *   is held in this handler.  It holds no kernel lock, having come from ring
+ *   3, and has interrupts on: the class-15 vectors reach it -- the calls TLB
+ *   shootdowns travel by, the AST's and the stop -- while this tick's own
+ *   class, 14, is in service and keeps the rest out.
+ * - A, the first other processor whose tick then finds it inside the kernel on
+ *   a task's thread -- a system call or a task's trap -- panics there, and
+ *   halt_cpu() runs on A with that task's CR3.
+ * - The panic's stop reaches B in the hold, and halt_cpu() runs on B with B's
+ *   task's CR3, as on every processor a panic's stop finds inside a task.
+ *
+ * A task's thread and not only its space: a first version took the
+ * bootstrap's loader, a kernel thread with the new task's map borrowed to
+ * copy its image in, which is a task's CR3 too but no system call.  B is held
+ * for at most TASK_PANIC_HOLD_CYCLES; when no A came, B panics itself and says
+ * that the stop's way was not asked.  Read once, at boot.
  */
+#define	TASK_PANIC_HOLD_CYCLES	40000000000ULL	/* ten seconds at 4 GHz */
+
 static int		task_panic_armed;
+static volatile int	task_panic_held = -1;	/* B's processor, once held */
 static uint8_t		event_vector;
 
 /* ------------------------------------------------------ tsc-deadline ---- */
@@ -1077,6 +1090,30 @@ clock_event_drain_reports(void)
 	hpet_event_drain_report();
 }
 
+/*
+ * -t's B (#688): held until the panic, interrupts on, and never back.  The
+ * stop's interrupt takes this processor into halt_cpu() from inside the loop;
+ * or the bound runs out, and B panics itself.
+ */
+static void
+task_panic_hold(unsigned cpu)
+{
+	uint64_t	t0 = rdtsc_ordered();
+
+	interrupts_enable();
+	while (__atomic_load_n(&panicstr, __ATOMIC_ACQUIRE) == NULL &&
+	       rdtsc_ordered() - t0 < TASK_PANIC_HOLD_CYCLES)
+		cpu_pause();
+	if (__atomic_load_n(&panicstr, __ATOMIC_ACQUIRE) == NULL) {
+		interrupts_disable();
+		panic("task_panic: asked for with -t, in a task's code on cpu %u, "
+		      "and no other processor came inside the kernel on a task's "
+		      "thread: the stop's way is not asked (#688)", cpu);
+	}
+	for (;;)
+		cpu_pause();
+}
+
 void
 clock_event_tick(struct trap_frame *frame)
 {
@@ -1100,13 +1137,20 @@ clock_event_tick(struct trap_frame *frame)
 		pc = (vm_offset_t) frame->rip;
 		/* -t (#688), on a real frame: a replayed one does not know
 		 * where its tick landed. */
-		if (task_panic_armed && !usermode &&
-		    current_act() != THR_ACT_NULL &&
+		if (task_panic_armed && current_act() != THR_ACT_NULL &&
 		    current_act()->task != kernel_task &&
-		    percpu()->loaded_pmap != pmap_kernel())
-			panic("task_panic: asked for with -t, on a task's thread "
-			      "inside the kernel, with its address space loaded "
-			      "(#688)");
+		    percpu()->loaded_pmap != pmap_kernel()) {
+			if (usermode) {
+				if (__sync_bool_compare_and_swap(&task_panic_held,
+								 -1, (int) cpu))
+					task_panic_hold(cpu);
+			} else if (task_panic_held >= 0 &&
+				   task_panic_held != (int) cpu)
+				panic("task_panic: asked for with -t, on a task's "
+				      "thread inside the kernel, with cpu %d held "
+				      "in a task's code until the stop (#688)",
+				      task_panic_held);
+		}
 	}
 
 	/*
