@@ -20,6 +20,11 @@
  * BSS is cleared and a flag in BSS is set and then wiped (#337 -- it has cost
  * this project three separate bugs).  A function that reads the string has no
  * such hazard, and the string is read a handful of times at boot.
+ *
+ * The string is mb2_cmdline()'s copy in the kernel's own memory, so the
+ * question may be asked on any processor, whatever address space it has
+ * loaded: halt_cpu() asks for -b on every processor a panic stops, inside a
+ * system call as often as not (#688).
  */
 int	boot_flag(char c);
 

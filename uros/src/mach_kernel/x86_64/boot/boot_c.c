@@ -10219,6 +10219,8 @@ static void descriptor_tables_init(void)
 /* ------------------------------------------------------------------ */
 void x86_64_boot(uint32_t magic, uint32_t info)
 {
+	uint32_t	cmdline_len;
+
 	kputs("UrMach x86-64: reached C in long mode (higher-half)\r\n");
 
 	/* multiboot2 hands off magic 0x36d76289 in %eax — captured by boot.S
@@ -10239,8 +10241,20 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 * into `atop(0) - vm_page_free_count', an unsigned subtraction going
 	 * the wrong way.  A wired-page count near four billion, from a
 	 * variable that was defined, documented and never filled in.
+	 *
+	 * And the command line copied into the kernel's own memory (#688), or
+	 * the boot stopped here saying why: a line cut short would answer "not
+	 * given" for every flag past the cut, plausibly and wrongly.
 	 */
-	mb2_remember(info);
+	if ((cmdline_len = mb2_remember(info)) != 0) {
+		kputs("UrMach x86-64: the command line is ");
+		kputdec(cmdline_len);
+		kputs(" bytes, longer than the ");
+		kputdec(MB2_CMDLINE_MAX - 1);
+		kputs(" this kernel keeps -- halted (#688)\r\n");
+		for (;;)
+			__asm__ volatile("cli; hlt");
+	}
 	machine_mem_size_init();
 
 	/* Before anything else that could fault: with no IDT a fault is a
