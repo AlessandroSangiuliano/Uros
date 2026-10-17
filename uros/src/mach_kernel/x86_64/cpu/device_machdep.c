@@ -229,6 +229,11 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
  * HPET is not here because it is memory, and a task maps memory only inside
  * the regions of a PCI device it has claimed (check_mmio_phys()), which the
  * HPET is not.
+ *
+ * 🔑 No port stays open to a holder of the master device port that has not
+ * claimed it (#620): check_io_claim() refuses a port nobody claimed.  So this
+ * is not the line between open and closed ports -- it is what is refused
+ * even to a claim.
  */
 static const struct {
 	unsigned int	base;

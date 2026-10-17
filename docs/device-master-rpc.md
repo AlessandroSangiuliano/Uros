@@ -151,9 +151,26 @@ Frees a previously allocated DMA buffer.
 
 ## Security Model
 
-All RPCs require the `master_device_port`. In the current boot flow,
-only the bootstrap server holds a send right to this port. A userspace
-driver must receive it from the bootstrap server via IPC.
+All RPCs require the `master_device_port`. Bootstrap hands it, through
+`bootstrap_ports()`, only to the servers its configuration names with
+`-D` (#620). Every other task gets a null port, and prints on the console
+that `bootstrap_console()` gives to any task. The master host port goes
+the same way to the servers named with `-H`; the root ledgers and the
+host security port go to no task.
+
+Holding the port is not enough to reach a device:
+
+- An I/O port is reached only by the task that claimed it, every byte of
+  the access: a legacy range claimed with `device_io_port_claim()`, or the
+  I/O window of a PCI device claimed with `device_claim()`. A port nobody
+  claimed is refused (#620).
+- The ports the kernel keeps are refused even to a claim.
+  `device_md_io_reserved()` names them: the 8254 and its gate, the PCI
+  configuration ports, the CMOS, the 8259s and their edge/level registers,
+  the ISA DMA controller, and on x86-64 the ACPI PM timer where it is a
+  port.
+- MMIO and DMA are reached only inside the regions of a claimed device
+  (#511).
 
 ## Future Evolution (x86-64)
 

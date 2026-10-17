@@ -394,6 +394,12 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
  * permission bitmap that names one of these, and the iopl device's #GP
  * emulation (AT386/iopl.c), which refuses to read one (#594).
  * kernel242_test asks the last two from a task, cap_test [18] the first.
+ *
+ * 🔑 No port stays open to a holder of the master device port that has not
+ * claimed it (#620): check_io_claim() refuses a port nobody claimed, at the
+ * read and write RPCs.  So this is not the line between open and closed
+ * ports there -- it is what is refused even to a claim.  The I/O bitmap and
+ * the iopl device are i386's own doors, which #620 leaves as they are.
  */
 const char *
 device_md_io_reserved(unsigned int base, unsigned int count)
