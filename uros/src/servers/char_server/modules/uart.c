@@ -692,19 +692,55 @@ uart_scratch_test(void)
 static void *
 uart_probe(const struct hal_device_info *dev)
 {
+	natural_t	released = 0, klog_from = 0;
+	kern_return_t	kr = KERN_RESOURCE_SHORTAGE;
+	unsigned int	tries;
+
 	(void)dev;
 	if (uart_singleton.attached)
 		return NULL;
-	if (uart_scratch_test() < 0)
+
+	/*
+	 * #620: claimed BEFORE the scratch test, because a port nobody claimed
+	 * is refused now.  The test wrote 0x3FF with no claim on it, and with
+	 * #620 that write was refused and COM1 read as an absent chip -- no
+	 * UART, so no tty for ush on i386.  It is the claim uart_attach()
+	 * makes, which then finds it already this task's and takes no second
+	 * slot; on an absent chip it is given back here.
+	 *
+	 * A full table is waited out for up to a second: four slots, and a
+	 * released one is retiring until a grace period has passed (#538), so
+	 * a claim next to io_claim_race's rounds can find none free for a
+	 * moment -- and a probe that took that for a refusal would take COM1
+	 * away for the whole boot.
+	 */
+	for (tries = 0; tries < 50 && kr == KERN_RESOURCE_SHORTAGE; tries++) {
+		if (tries != 0)
+			thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+		kr = device_io_port_claim(char_core_device_port(), UART_BASE,
+					  8u, &released, &klog_from);
+	}
+	if (kr != KERN_SUCCESS) {
+		printf("uart: COM1 0x%x..0x%x refused to the probe (kr=%d) — "
+		       "another task holds it, or no claim slot is free; not "
+		       "probing\n", UART_BASE, UART_BASE + 7u, (int)kr);
 		return NULL;
+	}
+	if (uart_scratch_test() < 0) {
+		(void)device_io_port_unclaim(char_core_device_port(), UART_BASE);
+		return NULL;
+	}
 
 	/*
 	 * Armed here and not in attach, because attach is where the first
 	 * bytes can already be going out.
 	 */
 	if (!uart_singleton.tx_lock_ready) {
-		if (pthread_mutex_init(&uart_singleton.tx_lock, NULL) != 0)
+		if (pthread_mutex_init(&uart_singleton.tx_lock, NULL) != 0) {
+			(void)device_io_port_unclaim(char_core_device_port(),
+						     UART_BASE);
 			return NULL;
+		}
 		uart_singleton.tx_lock_ready = 1;
 	}
 	return &uart_singleton;
