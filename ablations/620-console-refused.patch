@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #620
+Takes out: bootstrap_console()'s answer -- bootstrap refuses the console to every task, so a task that bootstrap_ports() gave no master device port has nothing to print on; the first of them to call printf_init(), the name server, must say which call failed before it stops, through mach_print
+Run: --entry 14 600 -smp 4
+Expect: libmach: bootstrap_console\(\) failed
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index 2a7b2ecb..03ca1b7c 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -2057,6 +2057,7 @@ kern_return_t
+ do_bootstrap_console(mach_port_t bootstrap, mach_port_t *consolep)
+ {
+ 	(void)bootstrap;
++	return KERN_FAILURE;
+ 	if (bootstrap_console_port == MACH_PORT_NULL)
+ 	    return console_open_kr != KERN_SUCCESS ? console_open_kr
+ 						   : KERN_FAILURE;
