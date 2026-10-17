@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #621
+Takes out: the MMIO check -- device_mmio_map and device_region_map map a claimed device's registers whatever the claim carries, as they did before; irq_claim_test's [16] must say WRONG when a claim narrowed to nothing still maps the card's page
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[16\] WRONG
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index c52574d2..e761cc90 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -685,7 +685,7 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
+ 	urmach_rcu_read_unlock();
+ 
+ 	/* The device's, and the claim has to carry MMIO (#621). */
+-	if (mine && (ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
++	if (0 && mine && (ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
+ 		printf("device_mmio_map: 0x%lx belongs to %02x:%02x.%u, and "
+ 		       "task 0x%lx's claim on it carries %s and not MMIO "
+ 		       "(#621)\n", (unsigned long)phys,
+@@ -2915,7 +2915,7 @@ ds_master_device_region_map(
+ 		       (unsigned)(bdf & 0x7));
+ 		return KERN_NO_ACCESS;
+ 	}
+-	if ((device_claim[i].ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
++	if (0 && (device_claim[i].ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
+ 		unsigned int ops = device_claim[i].ops;
+ 
+ 		urmach_rcu_read_unlock();
