@@ -97,7 +97,9 @@ static uint64_t		tick_ns;
  *   class, 14, is in service and keeps the rest out.
  * - A, the first other processor whose tick then finds it inside the kernel on
  *   a task's thread -- a system call or a task's trap -- panics there, and
- *   halt_cpu() runs on A with that task's CR3.
+ *   halt_cpu() runs on A with that task's CR3.  The first only: the others
+ *   whose ticks meet the same test before the stop reaches them go on, as a
+ *   second panic would be #599's double panic and not this test.
  * - The panic's stop reaches B in the hold, and halt_cpu() runs on B with B's
  *   task's CR3, as on every processor a panic's stop finds inside a task.
  *
@@ -111,6 +113,7 @@ static uint64_t		tick_ns;
 
 static int		task_panic_armed;
 static volatile int	task_panic_held = -1;	/* B's processor, once held */
+static volatile int	task_panic_fired;	/* A's turn, taken once */
 static uint8_t		event_vector;
 
 /* ------------------------------------------------------ tsc-deadline ---- */
@@ -1145,7 +1148,9 @@ clock_event_tick(struct trap_frame *frame)
 								 -1, (int) cpu))
 					task_panic_hold(cpu);
 			} else if (task_panic_held >= 0 &&
-				   task_panic_held != (int) cpu)
+				   task_panic_held != (int) cpu &&
+				   __sync_bool_compare_and_swap(&task_panic_fired,
+								0, 1))
 				panic("task_panic: asked for with -t, on a task's "
 				      "thread inside the kernel, with cpu %d held "
 				      "in a task's code until the stop (#688)",
