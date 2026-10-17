@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #673
+Takes out: pv_change_bits()'s flush -- a clear of the accessed or dirty bits leaves every cached translation of the page; since 8ca1bb8a the self-test reads through its mapping before clearing it, so the read after the clear goes through the cached translation, does not walk, and the bit never comes back, which the test must call WRONG; before 8ca1bb8a its read walked whatever the flush did, and this was not caught
+Run: --entry 0 300 -smp 4
+Expect: UrMach x86-64: after a read, referenced=0 modified=0, WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+index ad7727fc..1d4d356c 100644
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -1692,12 +1692,6 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
+ 		pv_forget_bits(pa, bits);
+ 	pv_unlock_page(pa);
+ 
+-	if (foverflow)
+-		tlb_flush_all(PMAP_NULL);
+-	else
+-		for (unsigned i = 0; i < nflush; i++)
+-			tlb_flush_page(fbatch[i].pmap, fbatch[i].va);
+-
+ 	pmap_read_leave(held);
+ }
+ 

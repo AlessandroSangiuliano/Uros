@@ -871,6 +871,28 @@ static void pv_selftest(uint32_t info)
 }
 
 /*
+ * #673: a serializing instruction between an access and a look at the bits it
+ * set.  AMD does not order an accessed-bit update with respect to loads done
+ * by other instructions (APM Vol. 2, 24593 Rev. 3.42, §5.4.2), and the look,
+ * pv_test_bits()'s read of the entry, is one: on victus under KVM (Zen 3) the
+ * first look after a read found the bit clear in up to 2047 rounds of 4096, and
+ * every one of them found it set by the next look, with no access between.
+ * With MFENCE, LFENCE or CPUID between the read and the look, none did.  The
+ * dirty bit is ordered today, but AMD asks for a serializing operation before
+ * it is read too, for processors to come (same section).  CPUID serializes on
+ * both vendors (AMD §7.6.4; SDM Vol. 3A 253668-093US §11.3).
+ */
+static void pte_bits_settle(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+}
+
+/* Looks past the settling before a read that set no bit is said as one. */
+#define	ACCESSED_LOOKS	1000
+
+/*
  * The operations that start from a physical page, which the index has just
  * made possible.  One frame is mapped twice in the kernel and once in a
  * second address space, so a change made by physical address has to reach
@@ -891,10 +913,21 @@ static void phys_ops_selftest(void)
 	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)kva1;
 	pt_entry_t *e1, *e2, *e3;
 	int ref, mod;
+	unsigned looks;
 
 	pmap_enter(k, kva1, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
 	pmap_enter(k, kva2, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
 	pmap_enter(u, uva, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+
+	/*
+	 * #673: a read first, so that the translation is cached when the bits
+	 * are cleared -- the case the clear's flush exists for.  Without it
+	 * the read below walked whether or not the clear had flushed, and the
+	 * look after it could not see a flush that was missing.  Settled, so
+	 * that this read's bit is not still on its way when it is cleared.
+	 */
+	(void)*p;
+	pte_bits_settle();
 
 	/* Clear first: the frame was just zeroed, which is itself a write. */
 	pmap_clear_reference(frame);
@@ -908,16 +941,34 @@ static void phys_ops_selftest(void)
 	kputs(ref == 0 && mod == 0 ? ", both clear\r\n" : ", NOT CLEAR\r\n");
 
 	(void)*p;				/* a read sets accessed */
-	ref = pmap_is_referenced(frame);
+	pte_bits_settle();
+	/*
+	 * #673: and looked at again, a bounded number of times, should the bit
+	 * still be on its way past the settling: a bit that comes is a read that
+	 * walked, said with the look it came at; one that never comes is a read
+	 * that went through a translation the flush should have removed.
+	 */
+	for (looks = 1; !(ref = pmap_is_referenced(frame)) &&
+	     looks < ACCESSED_LOOKS; looks++)
+		;
 	mod = pmap_is_modified(frame);
 	kputs("UrMach x86-64: after a read, referenced=");
 	kputdec(ref);
 	kputs(" modified=");
 	kputdec(mod);
-	kputs(ref == 1 && mod == 0 ? ", read seen, not a write\r\n"
-				   : ", WRONG\r\n");
+	if (ref == 1 && mod == 0 && looks == 1)
+		kputs(", read seen, not a write\r\n");
+	else if (ref == 1 && mod == 0) {
+		kputs(", read seen at look ");
+		kputdec(looks);
+		kputs(" after CPUID, not a write: the processor wrote the bit "
+		      "after the read, an update AMD does not order with later "
+		      "loads (#673)\r\n");
+	} else
+		kputs(", WRONG\r\n");
 
 	*p = 0xf00d;				/* a write sets dirty */
+	pte_bits_settle();
 	kputs("UrMach x86-64: after a write, modified=");
 	kputdec(pmap_is_modified(frame));
 	kputs(pmap_is_modified(frame) == 1 ? ", write seen\r\n" : ", WRONG\r\n");
