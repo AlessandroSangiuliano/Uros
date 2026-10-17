@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #582
+Over: 582-exec-late.patch
+Takes out: the wait for #269's exec -- the parent kills after its fixed beat again, and looks in /proc once, just before the kill
+Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-1
+Expect: \(hello_server\): WRONG — #269's child never became /hello_exec
+
+diff --git a/uros/src/servers/hello_server/hello_server.c b/uros/src/servers/hello_server/hello_server.c
+index d56d8b14..4c4f8acd 100644
+--- a/uros/src/servers/hello_server/hello_server.c
++++ b/uros/src/servers/hello_server/hello_server.c
+@@ -764,16 +764,10 @@ main(int argc, char **argv)
+              * 0x9 as surely as one killed after.  A fixed beat stood here,
+              * and was taken as the exec's time.
+              */
+-            int seen = 0;
+-            for (unsigned int j = 0; j < HELLO_EXEC_STEPS && seen == 0; j++) {
+-                seen = hello_proc_is((unsigned)xpid, "hello_exec");
+-                if (seen == 0)
+-                    (void)syscall_thread_switch(MACH_PORT_NULL,
+-                                                SWITCH_OPTION_WAIT, 100);
+-            }
+             for (int j = 0; j < 30; j++)
+                 (void)syscall_thread_switch(MACH_PORT_NULL,
+                                             SWITCH_OPTION_WAIT, 20);
++            int seen = hello_proc_is((unsigned)xpid, "hello_exec");
+             int kr_kill = kill(xpid, SIGKILL);
+             int xst = 0;
+             int xwr = __uros_waitpid(xpid, &xst, 0);
