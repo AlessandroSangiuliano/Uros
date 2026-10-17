@@ -360,6 +360,7 @@ main(int argc, char **argv)
 		mach_port_t	sec = MACH_PORT_NULL;
 		kern_return_t	mine, bare, claim, claimed;
 		natural_t	released = 0, klog_from = 0;
+		unsigned int	tries;
 
 		kr = bootstrap_ports(bootstrap_port, &host, &device,
 				     &lw, &lp, &sec);
@@ -372,8 +373,22 @@ main(int argc, char **argv)
 						     1, 0x5Au);
 			bare  = device_io_port_write(device, COM2_SCRATCH,
 						     1, 0x5Au);
-			claim = device_io_port_claim(device, COM2_SCRATCH, 1,
-						     &released, &klog_from);
+			/*
+			 * Four legacy slots, char_server holding three, and a
+			 * released one retiring through a grace period (#538):
+			 * a full table is waited out for a second.
+			 */
+			claim = KERN_RESOURCE_SHORTAGE;
+			for (tries = 0; tries < 50
+			     && claim == KERN_RESOURCE_SHORTAGE; tries++) {
+				if (tries != 0)
+					thread_switch(MACH_PORT_NULL,
+						      SWITCH_OPTION_WAIT, 20);
+				claim = device_io_port_claim(device,
+							     COM2_SCRATCH, 1,
+							     &released,
+							     &klog_from);
+			}
 			claimed = claim;
 			if (claim == KERN_SUCCESS) {
 				claimed = device_io_port_write(device,
@@ -403,6 +418,14 @@ main(int argc, char **argv)
 				       "wrote COM2 0x%x without claiming it; "
 				       "a port nobody claimed is every "
 				       "task's again (#620)\n", COM2_SCRATCH);
+			} else if (claim == KERN_RESOURCE_SHORTAGE) {
+				printf("char_test: [3] NOT ASKED — COM1 and "
+				       "COM2 were refused to this task, but "
+				       "every legacy claim slot stayed taken "
+				       "or retiring for a second, so COM2 "
+				       "could not be claimed to show the way "
+				       "in (#620)\n");
+				arms--;
 			} else {
 				printf("char_test: [3] WRONG — COM1 gave %d "
 				       "and COM2 %d, but COM2 claimed gave %d "

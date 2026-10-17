@@ -2222,17 +2222,41 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
  *     0x2F0 is nobody's.
  *
  * Then the claim is given back.
+ *
+ * ⚠️ The claim takes one of the kernel's four legacy slots, and a released
+ * slot is retiring until a grace period has passed (#538): beside
+ * io_claim_race's rounds the table can be full for a moment.  That is waited
+ * out for a second, and if it lasts, the arm says NOT ASKED -- unless the
+ * read without a claim was served, which is the defect whatever the table.
  */
 static int
 a_port_no_claim_covers_is_refused(mach_port_t device_port)
 {
     const unsigned int port = 0x2EF;
-    unsigned int data = 0, released = 0, klog_from = 0;
-    kern_return_t bare, claim, claimed, wide;
+    unsigned int data = 0, released = 0, klog_from = 0, tries;
+    kern_return_t bare, claim = KERN_RESOURCE_SHORTAGE, claimed, wide;
 
     bare = device_io_port_read(device_port, port, 1, &data);
-    claim = device_io_port_claim(device_port, port, 1, &released,
-                                 &klog_from);
+    for (tries = 0; tries < 50 && claim == KERN_RESOURCE_SHORTAGE; tries++) {
+        if (tries != 0)
+            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        claim = device_io_port_claim(device_port, port, 1, &released,
+                                     &klog_from);
+    }
+    if (claim == KERN_RESOURCE_SHORTAGE) {
+        if (bare != KERN_NO_ACCESS) {
+            printf("cap_test: [28] WRONG — 0x%x read without a claim kr=%d "
+                   "(want %d); no claim slot came free in a second to ask "
+                   "the rest (#620)\n", port, (int)bare,
+                   (int)KERN_NO_ACCESS);
+            return 0;
+        }
+        printf("cap_test: [28] NOT ASKED — 0x%x was refused without a "
+               "claim, but every legacy claim slot stayed taken or retiring "
+               "for a second, so the claim that is the way in could not be "
+               "made (#620)\n", port);
+        return 1;
+    }
     if (claim != KERN_SUCCESS) {
         printf("cap_test: [28] WRONG — a claim of 0x%x alone was refused "
                "with kr=%d, so the way in cannot be shown (#620)\n", port,
