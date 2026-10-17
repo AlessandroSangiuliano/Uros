@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #620
+Takes out: the flags' say in bootstrap_ports() -- do_bootstrap_ports() answers every task as if its line had -H and -D, which is what one bootstrap port for every task amounted to; boot_ports_test's line with no flag must say WRONG at what it was given and at the processor sets its host port reaches
+Run: --entry 14 600 -smp 4
+Expect: boot_ports_test: \[1\] WRONG — host given, device given, .*\(none\)
+Expect: boot_ports_test: \[2\] WRONG — host_processor_sets\(\) on the host port bootstrap gave answered .*\(none\)
+
+diff --git a/uros/src/servers/bootstrap/bootstrap.c b/uros/src/servers/bootstrap/bootstrap.c
+index 2a7b2ecb..0681051c 100644
+--- a/uros/src/servers/bootstrap/bootstrap.c
++++ b/uros/src/servers/bootstrap/bootstrap.c
+@@ -2028,7 +2028,8 @@ do_bootstrap_ports(mach_port_t bootstrap,
+ 		   mach_port_t *security_portp)
+ {
+ 	struct server *sp = server_by_bootstrap_port(bootstrap);
+-	unsigned int flags = sp != 0 ? sp->flags : 0;
++	unsigned int flags = (sp != 0 ? sp->flags : 0)
++	    | SERVER_HOST_PRIV_F | SERVER_DEVICE_F;
+ 
+ 	/*
+ 	 * #620: only what the server's line in bootstrap.conf gives it -- -H
