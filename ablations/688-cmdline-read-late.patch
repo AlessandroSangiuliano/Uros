@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #688
+Takes out: the command line's copy -- mb2_cmdline() reads it at the loader's physical address again, so halt_cpu()'s question for -b, asked on the processor -t panics with a task's CR3 loaded and on every other the stop finds inside a system call, faults on top of the panic; the fixed arm of an A/B is FAILED whatever happens, the harness exiting 1 for a panic that was asked for: its log is read by the merge test's taskpanic judge, no trap after the panic
+Run: --entry 53 300 -smp 4
+Expect: <halt_cpu\+0x[0-9a-f]+>
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/multiboot2.c b/uros/src/mach_kernel/x86_64/boot/multiboot2.c
+index 78969cd7..39df858c 100644
+--- a/uros/src/mach_kernel/x86_64/boot/multiboot2.c
++++ b/uros/src/mach_kernel/x86_64/boot/multiboot2.c
+@@ -299,5 +299,12 @@ const char *mb2_module_string(unsigned int n)
+ 
+ const char *mb2_cmdline(void)
+ {
+-	return mb2_cmdline_kept;
++	const struct mb2_tag_string *t;
++
++	t = (const struct mb2_tag_string *) mb2_find_tag(mb2_info_pa,
++							MB2_TAG_CMDLINE);
++	if (t == 0)
++		return "";
++
++	return t->string;
+ }
