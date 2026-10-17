@@ -2207,6 +2207,58 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
 }
 
 /*
+ * ── [28] A port no claim covers is refused (#620) ─────────────────────
+ *
+ * Holding the master device port used to reach every I/O port that no claim
+ * covered.  Now a task reaches only what it claimed, every byte of the
+ * access.  COM4's scratch register, 0x2EF: no driver here claims it, it is
+ * outside COM1's window, and it is only ever READ, so nothing is disturbed
+ * whatever answers it -- io_claim_race races on COM3, char_test asks COM2.
+ *
+ *   - read without a claim: refused with KERN_NO_ACCESS;
+ *   - claimed, and read again: answered -- the claim is the way in, so the
+ *     refusal above was about the claim and not about the port;
+ *   - still claimed, two bytes from it, 0x2EF..0x2F0: refused, because
+ *     0x2F0 is nobody's.
+ *
+ * Then the claim is given back.
+ */
+static int
+a_port_no_claim_covers_is_refused(mach_port_t device_port)
+{
+    const unsigned int port = 0x2EF;
+    unsigned int data = 0, released = 0, klog_from = 0;
+    kern_return_t bare, claim, claimed, wide;
+
+    bare = device_io_port_read(device_port, port, 1, &data);
+    claim = device_io_port_claim(device_port, port, 1, &released,
+                                 &klog_from);
+    if (claim != KERN_SUCCESS) {
+        printf("cap_test: [28] WRONG — a claim of 0x%x alone was refused "
+               "with kr=%d, so the way in cannot be shown (#620)\n", port,
+               (int)claim);
+        return 0;
+    }
+    claimed = device_io_port_read(device_port, port, 1, &data);
+    wide = device_io_port_read(device_port, port, 2, &data);
+    (void) device_io_port_unclaim(device_port, port);
+
+    if (bare == KERN_NO_ACCESS && claimed == KERN_SUCCESS
+        && wide == KERN_NO_ACCESS) {
+        printf("cap_test: [28] a read of 0x%x refused without a claim and "
+               "answered with one, and 0x%x..0x%x refused past it — a port "
+               "is reached through its claim, every byte (#620)\n", port,
+               port, port + 1);
+        return 1;
+    }
+    printf("cap_test: [28] WRONG — 0x%x read without a claim kr=%d (want "
+           "%d), with one kr=%d (want 0), and 0x%x..0x%x with one kr=%d "
+           "(want %d) (#620)\n", port, (int)bare, (int)KERN_NO_ACCESS,
+           (int)claimed, port, port + 1, (int)wide, (int)KERN_NO_ACCESS);
+    return 0;
+}
+
+/*
  * ── [22] A buffer is freed by its owner, whole, once (#599) ───────────────
  *
  * device_dma_free checked neither: an address that was no region's was
@@ -3320,6 +3372,10 @@ main(int argc, char **argv)
 
     /* #597: no task reaches the configuration ports, claimed or not. */
     if (!the_pci_config_ports_are_the_kernels(device_port))
+        pass = 0;
+
+    /* #620: and no task reaches a port it has not claimed. */
+    if (!a_port_no_claim_covers_is_refused(device_port))
         pass = 0;
 
     /* #599: a DMA buffer is freed by its owner, whole, once. */
