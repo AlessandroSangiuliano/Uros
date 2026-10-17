@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #620
+Takes out: the ISA DMA controller from the ports x86-64 keeps -- kernel_io[] without the two 8237s and their page registers, so any holder of the master device port claims and reads them again, as a task that could program a channel to move bytes to physical memory; cap_test's arm [18] must say WRONG at the claim of the first 8237 and at the read of its status register
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[18\] WRONG — a claim of 0x0\.\.0xf was GRANTED
+Expect: cap_test: \[18\] WRONG — a read of 0x8 answered kr=0 \(it was served\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index af6c0626..ed654631 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -263,9 +263,6 @@ static const struct {
+ 	 * above sixteen.  0x80 among them is the unused port pic.c writes to
+ 	 * wait, which no task needs either.
+ 	 */
+-	{ 0x00, 16, "the first 8237 DMA controller, which reaches memory" },
+-	{ 0xC0, 32, "the second 8237 DMA controller, which reaches memory" },
+-	{ 0x80, 16, "the 8237s' page registers" },
+ };
+ 
+ static int
