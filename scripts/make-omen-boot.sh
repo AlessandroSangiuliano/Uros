@@ -85,7 +85,7 @@ if [ "$BENCH_ONLY" = 1 ]; then
     MKBUNDLE="$BUILD/tools/mkbundle"
     echo "building minimal bench bundle (name_server + ipc_bench only):${BENCH_ARGS:- default suite}"
     CONF=$(mktemp)
-    printf 'name_server name_server\nipc_bench ipc_bench%s\n' "$BENCH_ARGS" > "$CONF"
+    printf 'name_server name_server\n-H ipc_bench ipc_bench%s\n' "$BENCH_ARGS" > "$CONF"
     "$MKBUNDLE" -o "$BUNDLE" \
         "bootstrap.conf:$CONF" \
         "name_server:$SBIN_DIR/name_server" \

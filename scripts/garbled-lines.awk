@@ -32,7 +32,7 @@
 #
 # Usage:  awk -f scripts/garbled-lines.awk <log>     (prints "LINE: text")
 BEGIN {
-	n = split("blk bootstrap cap_test hal cap device bundle dma_reclaim ahci pci_scan device_io_port irq_claim_test cow_test clock_event hal_bar act_test virtio fault_test fperr_test dl_test console io_claim_race netname_test char_server char_test startup pmap pthread_test mig uart char state_test log_forwarder fpu_stress boot_probe", names, " ")
+	n = split("blk bootstrap cap_test hal cap device bundle dma_reclaim ahci pci_scan device_io_port irq_claim_test cow_test clock_event hal_bar act_test virtio fault_test fperr_test dl_test console io_claim_race netname_test boot_ports_test char_server char_test startup pmap pthread_test mig uart char state_test log_forwarder fpu_stress boot_probe", names, " ")
 }
 /^=== run conditions/ { exit }
 {

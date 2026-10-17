@@ -594,6 +594,17 @@ must_report 'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passe
 must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
 
+# #620: three lines and three verdicts -- what bootstrap_ports() gives a line
+# with no flag, with -D and with -H -D.  The start is said through mach_print,
+# which needs no port, so the "none" line whose console never came is a start
+# with no end here, not a test that seems never to have run.
+must_report 'boot_ports_test: asking bootstrap (none)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (none)' \
+	'The line with no flag prints on the console bootstrap_console() gives it, so a start with no end is a task that has no console, or stopped asking bootstrap (#620).'
+must_report 'boot_ports_test: asking bootstrap (device)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (device)' \
+	'The -D line: the master device port and nothing else, or a task that stopped asking bootstrap for it (#620).'
+must_report 'boot_ports_test: asking bootstrap (both)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (both)' \
+	'The -H -D line: the master host and device ports, or a task that stopped asking bootstrap for them (#620).'
+
 # ⚠️ The terminator matches either verdict -- `ALL n TESTS PASSED' or `SOME
 # TESTS FAILED' -- and deliberately does not demand the count.  This list asks
 # whether the program reached its own last sentence; a failing arm already
@@ -1445,6 +1456,9 @@ missing_reports() {
 expected_reports() {
 	"$@" \
 		'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
+		'boot_ports_test: asking bootstrap (none)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (none)' \
+		'boot_ports_test: asking bootstrap (device)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (device)' \
+		'boot_ports_test: asking bootstrap (both)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (both)' \
 		'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
 		'fault_test: started'   'fault_test: [0-9]* of [0-9]* arms passed' \
 		'act_test: started'     'act_test: [0-9]* of [0-9]* arms passed' \

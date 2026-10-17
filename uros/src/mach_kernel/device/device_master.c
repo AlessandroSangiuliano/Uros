@@ -2904,13 +2904,17 @@ ds_master_device_mmio_unmap(
  * sideways.  The regions are measured when the device is claimed now, so the
  * range is the range.
  *
- * 🔑 A port belonging to NO claimed device stays reachable, and that is the
- * same decision check_irq_owner() makes: the legacy devices -- the serial
- * lines, the keyboard, the PIC -- are behind no PCI BAR, and a rule that
- * refused everything unattributed would take the console with it.  The
- * exception is what device_md_io_reserved() names, which the kernel keeps
- * from every task: the 8254 and its gate, the PCI configuration ports, and
- * on x86-64 the PM timer where it is a port (#508, #597).
+ * 🔑 A PORT NO CLAIM COVERS IS REFUSED, every byte of the access (#620).  It
+ * used to stay reachable to any holder of the master device port, for the
+ * legacy devices behind no PCI BAR -- the serial lines, the keyboard -- which
+ * a driver reached without claiming them, and a rule that refused everything
+ * unattributed would have taken them away.  Every driver in the tree claims
+ * what it drives now -- char_server the UARTs and the 8042 -- the kernel's
+ * console writes COM1 from inside the kernel, and a task that wants a legacy
+ * port claims it first.  What device_md_io_reserved() names is refused even
+ * to a claim: the 8254 and its gate, the PCI configuration ports, the CMOS,
+ * the 8259s, the ISA DMA controller, and on x86-64 the PM timer where it is
+ * a port (#508, #597, #599, #620).
  */
 /*
  * Legacy I/O ranges a task has claimed (#497).
@@ -3000,40 +3004,50 @@ dma_slot_retired(struct urmach_rcu_head *h)
 }
 
 /*
- * Does this port belong to somebody who said so?  Returns KERN_SUCCESS when
- * it is ours or unclaimed, KERN_NO_ACCESS when it is somebody else's.
+ * Does every port of [port, port + size) belong to this task, which said so
+ * by claiming it?  KERN_SUCCESS when each one is inside a range it claimed;
+ * KERN_NO_ACCESS when one is somebody else's, said, or nobody's (#620): a port
+ * no task claimed is no longer every task's.  The refusal of a port nobody
+ * claimed is silent, as check_io_port()'s of a reserved one is -- the caller
+ * reports it, and a loop asking again would flood the console.
  */
 static kern_return_t
-check_io_claim(unsigned int port)
+check_io_claim(unsigned int port, unsigned int size)
 {
 	task_t		me = current_task();
-	unsigned int	i;
-	int		verdict = 1;	/* unclaimed, or ours */
-
+	unsigned int	p, i;
 	unsigned int	base = 0, count = 0;
 	task_t		holder = TASK_NULL;
 
 	urmach_rcu_read_lock();
-	for (i = 0; i < IO_CLAIM_MAX; i++) {
-		holder = io_claim[i].task;
-		if (holder == TASK_NULL)
-			continue;
-		base  = io_claim[i].base;
-		count = io_claim[i].count;
-		if (port < base || port >= base + count)
-			continue;
-		verdict = (holder == me);
-		break;
+	for (p = port; p < port + size; p++) {
+		holder = TASK_NULL;
+		for (i = 0; i < IO_CLAIM_MAX; i++) {
+			task_t t = io_claim[i].task;
+
+			if (t == TASK_NULL)
+				continue;
+			base  = io_claim[i].base;
+			count = io_claim[i].count;
+			if (p < base || p >= base + count)
+				continue;
+			holder = t;
+			break;
+		}
+		if (holder != me)
+			break;
 	}
 	urmach_rcu_read_unlock();
 
-	if (verdict)
+	if (holder == me)
 		return KERN_SUCCESS;
+	if (holder == TASK_NULL)
+		return KERN_NO_ACCESS;
 	/* The slot and what it says, not just the verdict: a refusal that
 	 * names no range cannot be told from a table that has been
 	 * overwritten -- and one was (#538). */
 	printf("device_io_port: 0x%x is inside 0x%x..0x%x, which task %p "
-	       "claimed (slot %u of %u; #497)\n", port, base,
+	       "claimed (slot %u of %u; #497)\n", p, base,
 	       base + count - 1, (void *)holder, i, (unsigned)IO_CLAIM_MAX);
 	return KERN_NO_ACCESS;
 }
@@ -3111,16 +3125,19 @@ check_io_port(unsigned int port, unsigned int size)
 	task_t		me = current_task();
 	unsigned	i, n, b;
 	natural_t	other_bdf = DEVICE_DMA_NO_BDF;
-	int		mine = 0;
+	int		mine = 0, past_end = 0;
 
 	/*
 	 * 🔴 The ports the kernel keeps are kept from reads and writes too, not
 	 * only from claims (#597).  Refusing the claim alone left them to every
-	 * holder of the master port: an unclaimed port falls through to
-	 * check_io_claim() below, which lets it through.  So a task could drive
+	 * holder of the master port: an unclaimed port fell through to
+	 * check_io_claim() below, which let it through until #620.  So a task
+	 * could drive
 	 * the PCI configuration pair as two RPCs outside pci_cfg_port_lock --
 	 * the race #597 is about -- or program the 8254 the kernel measures
-	 * time with (#508).  Asked of the whole access, [port, port + size).
+	 * time with (#508).  Still asked first, and of the whole access,
+	 * [port, port + size): a device's I/O window is the BAR's to say, and
+	 * a claim of one that decodes a reserved port must not reach it.
 	 * Silent: a refusal is the caller's to report, and a loop that asked
 	 * again would flood the console.
 	 */
@@ -3129,9 +3146,9 @@ check_io_port(unsigned int port, unsigned int size)
 
 	/*
 	 * #599: a chip reached only by the task that claimed all of it.  An
-	 * unclaimed port falls through to check_io_claim() below, which lets
-	 * it through -- so any holder of the master port could write COM1's
-	 * LCR without claiming a thing.
+	 * unclaimed port fell through to check_io_claim() below, which let it
+	 * through until #620 -- so any holder of the master port could write
+	 * COM1's LCR without claiming a thing.
 	 */
 	{
 		unsigned int wb, wc;
@@ -3151,7 +3168,8 @@ check_io_port(unsigned int port, unsigned int size)
 
 	urmach_rcu_read_lock();
 	n = device_nclaims;
-	for (i = 0; i < n && !mine && other_bdf == DEVICE_DMA_NO_BDF; i++) {
+	for (i = 0; i < n && !mine && !past_end
+		    && other_bdf == DEVICE_DMA_NO_BDF; i++) {
 		if (device_claim[i].task == TASK_NULL)
 			continue;
 		if (device_claim[i].bdf == DEVICE_BDF_BUS)
@@ -3159,18 +3177,25 @@ check_io_port(unsigned int port, unsigned int size)
 
 		for (b = 0; b < device_claim[i].nregions; b++) {
 			uint64_t base = device_claim[i].region[b].base;
-			uint64_t size = device_claim[i].region[b].size;
+			uint64_t rsize = device_claim[i].region[b].size;
 
 			if (!device_claim[i].region[b].is_io)
 				continue;
 			if ((uint64_t)port < base
-			    || (uint64_t)port >= base + size)
+			    || (uint64_t)port >= base + rsize)
 				continue;
 
-			if (device_claim[i].task == me)
+			/*
+			 * #620: all of the access, not its first byte -- a
+			 * port past the window's end is the window's no
+			 * longer, and a port no claim covers is refused.
+			 */
+			if (device_claim[i].task != me)
+				other_bdf = device_claim[i].bdf;
+			else if ((uint64_t)port + size <= base + rsize)
 				mine = 1;
 			else
-				other_bdf = device_claim[i].bdf;
+				past_end = 1;
 			break;
 		}
 	}
@@ -3178,6 +3203,12 @@ check_io_port(unsigned int port, unsigned int size)
 
 	if (mine)
 		return KERN_SUCCESS;
+	if (past_end) {
+		printf("device_io_port: 0x%x..0x%x runs past the end of a "
+		       "window this task holds (#620)\n", port,
+		       port + size - 1);
+		return KERN_NO_ACCESS;
+	}
 	if (other_bdf != DEVICE_DMA_NO_BDF) {
 		printf("device_io_port: 0x%x is inside %u:%u.%u's "
 		       "window, which another task holds\n", port,
@@ -3189,11 +3220,12 @@ check_io_port(unsigned int port, unsigned int size)
 
 	/*
 	 * Nothing measured owns it.  Before #497 that was the end of the
-	 * question and the answer was always yes; now a task may have SAID it
-	 * owns a legacy range, and the hole closes exactly where somebody has
-	 * stepped into it.
+	 * question and the answer was always yes; then a task could SAY it
+	 * owned a legacy range, and the hole closed where somebody had stepped
+	 * into it; since #620 the hole is closed everywhere, and only a range
+	 * this task said is its own is reached.
 	 */
-	return check_io_claim(port);
+	return check_io_claim(port, size);
 }
 
 kern_return_t

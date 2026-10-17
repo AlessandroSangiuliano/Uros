@@ -109,3 +109,17 @@ skip;	/* bootstrap_list_modules — userspace only */
 skip;	/* bootstrap_get_module — userspace only */
 #endif
 
+/*
+ *	#620: the console, for a task to print on.  bootstrap_ports() gives
+ *	the master device port only to the servers bootstrap.conf names with
+ *	-D, and printing is all most tasks wanted it for.  Appended: MIG
+ *	numbers routines by position.
+ */
+#if	!KERNEL_SERVER
+routine bootstrap_console(
+		bootstrap		: mach_port_t;
+	out	console			: mach_port_t);
+#else
+skip;	/* bootstrap_console — userspace only */
+#endif
+

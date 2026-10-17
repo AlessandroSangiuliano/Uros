@@ -57,8 +57,11 @@ kernel interfaces that touch hardware on behalf of drivers:
 | `device_dma_alloc/free` | Allocate/free physically contiguous wired memory for DMA |
 | `device_map` | Map physical ranges (MMIO BARs) into driver address space |
 
-**Security**: all RPCs require `master_device_port`. Only bootstrap and
-tasks it explicitly delegates to hold a send right.
+**Security**: all RPCs require `master_device_port`. Bootstrap holds it,
+and hands it only to the servers its configuration names with `-D`
+(#620). A task that holds it still reaches only what it has claimed: the
+I/O ports of a claim, every byte, and the MMIO and DMA of a claimed
+device; the ports the kernel keeps not even then.
 
 **Future x86-64 evolution**:
 - PCI config via ECAM (memory-mapped, no port I/O)

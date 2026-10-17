@@ -120,7 +120,7 @@ mkdir -p "$TREE/boot/grub"
 # The bundle: nothing in it reaches a disk.
 if [ "$BENCH_ONLY" = 1 ]; then
 	conf=$TREE/bootstrap.conf
-	printf 'name_server name_server\nipc_bench ipc_bench%s\n' "${BENCH_SUITES:+ $BENCH_SUITES}" > "$conf"
+	printf 'name_server name_server\n-H ipc_bench ipc_bench%s\n' "${BENCH_SUITES:+ $BENCH_SUITES}" > "$conf"
 	"$MKBUNDLE" -o "$TREE/boot/bootstrap.bundle" "bootstrap.conf:$conf" \
 		"name_server:$SBIN/name_server" "ipc_bench:$SBIN/ipc_bench" >/dev/null
 	CONTENTS="name_server ipc_bench${BENCH_SUITES:+ ($BENCH_SUITES)}"

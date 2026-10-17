@@ -433,6 +433,12 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/netname_test)
 endif()
 
+# #620: who bootstrap gives the master ports to.  Nothing but libmach and
+# libpthreads, both above this gate.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/boot_ports_test)
+endif()
+
 # And the POSIX thread suite (#425), which is that issue's whole done-when.
 #
 # Nothing new has to cross for it: the five libraries it links -- libpthreads,

@@ -2123,6 +2123,11 @@ the_write_half(mach_port_t device_port, mach_port_t tport, const char *tname)
  * latch command and two one-byte reads.  No write is tried -- if the refusal
  * were missing, writing 0xCF8 would be the race itself -- and the write RPC
  * asks the same checks as the read.
+ *
+ * #620: the ISA DMA controller, which a task could program to move bytes to
+ * physical memory, claimed whole, by one register, from below, and by one
+ * page register; and read at the two status registers and a page register,
+ * which move no byte flip-flop -- the address and count registers would.
  */
 static int
 the_pci_config_ports_are_the_kernels(mach_port_t device_port)
@@ -2138,6 +2143,10 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0x20,  2 },   /* the master 8259 (#599) */
         { 0xA0,  2 },   /* the slave 8259 (#599) */
         { 0x4D0, 2 },   /* the 8259s' edge/level registers (#599) */
+        { 0x00,  16 },  /* the first 8237 DMA controller (#620) */
+        { 0x0A,  1 },   /* its mask register alone (#620) */
+        { 0xBE,  4 },   /* from below, reaching the second 8237 (#620) */
+        { 0x87,  1 },   /* channel 0's page register alone (#620) */
     };
     static const struct {
         unsigned int  port;
@@ -2150,6 +2159,9 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0x61,    1, KERN_NO_ACCESS },          /* the 8254's gate (#508) */
         { 0x71,    1, KERN_NO_ACCESS },          /* the CMOS data (#599) */
         { 0x21,    1, KERN_NO_ACCESS },          /* the 8259's mask (#599) */
+        { 0x08,    1, KERN_NO_ACCESS },          /* the first 8237's status (#620) */
+        { 0xD0,    1, KERN_NO_ACCESS },          /* the second 8237's status (#620) */
+        { 0x81,    1, KERN_NO_ACCESS },          /* channel 2's page register (#620) */
     };
     unsigned int  i, released, klog_from, data, bad = 0;
     kern_return_t kr;
@@ -2187,11 +2199,87 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         return 0;
 
     printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone, "
-           "0xcf4..0xcf8, the CMOS, both 8259s and the ELCR, and reads of "
-           "0xcf8, 0xcfc, 0x61, 0x71, 0x21 and 0x10cfc, refused — the claim "
-           "and read RPCs keep the ports the kernel keeps (#508, #597, "
-           "#599)\n");
+           "0xcf4..0xcf8, the CMOS, both 8259s and the ELCR, the 8237s and "
+           "their page registers, and reads of 0xcf8, 0xcfc, 0x61, 0x71, "
+           "0x21, 0x8, 0xd0, 0x81 and 0x10cfc, refused — the claim and read "
+           "RPCs keep the ports the kernel keeps (#508, #597, #599, #620)\n");
     return 1;
+}
+
+/*
+ * ── [28] A port no claim covers is refused (#620) ─────────────────────
+ *
+ * Holding the master device port used to reach every I/O port that no claim
+ * covered.  Now a task reaches only what it claimed, every byte of the
+ * access.  COM4's scratch register, 0x2EF: no driver here claims it, it is
+ * outside COM1's window, and it is only ever READ, so nothing is disturbed
+ * whatever answers it -- io_claim_race races on COM3, char_test asks COM2.
+ *
+ *   - read without a claim: refused with KERN_NO_ACCESS;
+ *   - claimed, and read again: answered -- the claim is the way in, so the
+ *     refusal above was about the claim and not about the port;
+ *   - still claimed, two bytes from it, 0x2EF..0x2F0: refused, because
+ *     0x2F0 is nobody's.
+ *
+ * Then the claim is given back.
+ *
+ * ⚠️ The claim takes one of the kernel's four legacy slots, and a released
+ * slot is retiring until a grace period has passed (#538): beside
+ * io_claim_race's rounds the table can be full for a moment.  That is waited
+ * out for a second, and if it lasts, the arm says NOT ASKED -- unless the
+ * read without a claim was served, which is the defect whatever the table.
+ */
+static int
+a_port_no_claim_covers_is_refused(mach_port_t device_port)
+{
+    const unsigned int port = 0x2EF;
+    unsigned int data = 0, released = 0, klog_from = 0, tries;
+    kern_return_t bare, claim = KERN_RESOURCE_SHORTAGE, claimed, wide;
+
+    bare = device_io_port_read(device_port, port, 1, &data);
+    for (tries = 0; tries < 50 && claim == KERN_RESOURCE_SHORTAGE; tries++) {
+        if (tries != 0)
+            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        claim = device_io_port_claim(device_port, port, 1, &released,
+                                     &klog_from);
+    }
+    if (claim == KERN_RESOURCE_SHORTAGE) {
+        if (bare != KERN_NO_ACCESS) {
+            printf("cap_test: [28] WRONG — 0x%x read without a claim kr=%d "
+                   "(want %d); no claim slot came free in a second to ask "
+                   "the rest (#620)\n", port, (int)bare,
+                   (int)KERN_NO_ACCESS);
+            return 0;
+        }
+        printf("cap_test: [28] NOT ASKED — 0x%x was refused without a "
+               "claim, but every legacy claim slot stayed taken or retiring "
+               "for a second, so the claim that is the way in could not be "
+               "made (#620)\n", port);
+        return 1;
+    }
+    if (claim != KERN_SUCCESS) {
+        printf("cap_test: [28] WRONG — a claim of 0x%x alone was refused "
+               "with kr=%d, so the way in cannot be shown (#620)\n", port,
+               (int)claim);
+        return 0;
+    }
+    claimed = device_io_port_read(device_port, port, 1, &data);
+    wide = device_io_port_read(device_port, port, 2, &data);
+    (void) device_io_port_unclaim(device_port, port);
+
+    if (bare == KERN_NO_ACCESS && claimed == KERN_SUCCESS
+        && wide == KERN_NO_ACCESS) {
+        printf("cap_test: [28] a read of 0x%x refused without a claim and "
+               "answered with one, and 0x%x..0x%x refused past it — a port "
+               "is reached through its claim, every byte (#620)\n", port,
+               port, port + 1);
+        return 1;
+    }
+    printf("cap_test: [28] WRONG — 0x%x read without a claim kr=%d (want "
+           "%d), with one kr=%d (want 0), and 0x%x..0x%x with one kr=%d "
+           "(want %d) (#620)\n", port, (int)bare, (int)KERN_NO_ACCESS,
+           (int)claimed, port, port + 1, (int)wide, (int)KERN_NO_ACCESS);
+    return 0;
 }
 
 /*
@@ -3308,6 +3396,10 @@ main(int argc, char **argv)
 
     /* #597: no task reaches the configuration ports, claimed or not. */
     if (!the_pci_config_ports_are_the_kernels(device_port))
+        pass = 0;
+
+    /* #620: and no task reaches a port it has not claimed. */
+    if (!a_port_no_claim_covers_is_refused(device_port))
         pass = 0;
 
     /* #599: a DMA buffer is freed by its owner, whole, once. */

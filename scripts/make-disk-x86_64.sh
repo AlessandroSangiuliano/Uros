@@ -310,7 +310,7 @@ dd if="$PART_IMG" of="$DISK" bs="$SECT" seek="$PART_START" conv=notrunc status=n
 # writes for i386, made the same way; 28 MB of them, so that disk grows to 48.
 # Without ipc_bench in the conf nothing here changes.
 BENCH_FILES=""
-if grep -q '^ipc_bench ' "$BUILD/src/servers/bootstrap/bootstrap.conf" 2>/dev/null; then
+if grep -Eq '^(-[A-Za-z] +)*ipc_bench ' "$BUILD/src/servers/bootstrap/bootstrap.conf" 2>/dev/null; then
 	printf 'Hello from /mach_servers/ root\n' > "$WORK/hello.txt"
 	dd if=/dev/urandom of="$WORK/bench.dat" bs=1K count=1 status=none
 	dd if=/dev/urandom of="$WORK/bench_4m.dat" bs=1M count=4 status=none

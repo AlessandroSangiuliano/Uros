@@ -216,36 +216,40 @@ mach_print_code(kern_return_t code)
 
 /*
  * ── What printf_init does with the port, and what the caller owes it
- *    afterwards (#511) ─────────────────────────────────────────────────
+ *    afterwards (#511, #620) ───────────────────────────────────────────
  *
  * 🔑 THE MASTER DEVICE PORT IS BUS AUTHORITY, and printf wants it for one
- * thing: opening "console".  After that the console port is what is written
- * to, and the master port is never consulted here again.
+ * thing: opening "console".  A task that bootstrap_ports() did not hand it
+ * still prints (#620): printf_init takes a null port to mean "ask
+ * bootstrap_console()", which gives the console to any task.
  *
- * 🔴 SO A TASK THAT ONLY PRINTS SHOULD RELEASE IT.  bootstrap_ports() hands
- * the same port to every task that asks -- twenty-nine callers in this tree,
- * and twenty-two of them use it for nothing but this call.  Holding a right
- * that confers configuration space, MMIO, DMA and interrupts in order to
- * write characters is authority kept for no reason, and this project has a
- * rule about that: a right acquired and no longer needed is released.  Five
- * hundred and twelve send rights never given back once wedged the task after
- * them.
- *
- * ⚠️ printf_init does NOT release it itself, and must not: the caller passed
- * a name it may still be using -- block_device_server, hal_server, gpu_server
- * and char_server all keep it to drive hardware -- and deallocating here
- * would invalidate their name too.  Whether the port is still wanted is the
- * caller's fact, so the release is the caller's line.
- *
- * ⚠️ And this is "granted, then given back", not "never granted": between
- * bootstrap_ports() and the release the task does hold bus authority.
- * Closing that window means bootstrap not handing it over at all, which is a
- * different change with an ABI to move.
+ * ⚠️ printf_init does NOT release a port it was given, and must not: the
+ * caller passed a name it may still be using -- the servers that drive
+ * hardware keep it -- and deallocating here would invalidate their name too.
+ * Whether the port is still wanted is the caller's fact, so the release is
+ * the caller's line.
  */
+
+/* #620: the console from bootstrap, which gives it to any task. */
+static kern_return_t
+console_from_bootstrap(void)
+{
+	kern_return_t kr;
+
+	if (bootstrap_port == MACH_PORT_NULL) {
+	    kr = task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT,
+				       &bootstrap_port);
+	    if (kr != KERN_SUCCESS)
+		return kr;
+	}
+	return bootstrap_console(bootstrap_port, &console_port);
+}
+
 void
 printf_init(mach_port_t device_server_port)
 {
 	kern_return_t kr;
+	const char *what;
 
 	/*
 	 * Open the "console" device (kd on i386).  The kd driver writes to
@@ -253,10 +257,16 @@ printf_init(mach_port_t device_server_port)
 	 * com_putc() in cnputc()/kdstart(), so output appears on both the
 	 * QEMU window and -serial stdio without needing a separate com0 open.
 	 */
-	kr = device_open(device_server_port, MACH_PORT_NULL, D_READ|D_WRITE,
-			 null_security_token, (char *)"console",
-			 &console_port);
-	
+	if (device_server_port == MACH_PORT_NULL) {
+		what = "bootstrap_console()";
+		kr = console_from_bootstrap();
+	} else {
+		what = "device_open(\"console\")";
+		kr = device_open(device_server_port, MACH_PORT_NULL,
+				 D_READ|D_WRITE, null_security_token,
+				 (char *)"console", &console_port);
+	}
+
 	if (kr != KERN_SUCCESS) {
 		/*
 		 * Say why, before saying that.
@@ -279,7 +289,9 @@ printf_init(mach_port_t device_server_port)
 		 * nowhere -- because there the FIRST thing every server does
 		 * is fail here, and it used to fail as a bare address.
 		 */
-		mach_print("libmach: device_open(\"console\") failed: ");
+		mach_print("libmach: ");
+		mach_print(what);
+		mach_print(" failed: ");
 		mach_print(mach_error_string(kr));
 		mach_print(" (");
 		mach_print_code(kr);
@@ -329,27 +341,39 @@ static void
 get_console_port(void)
 {
 	kern_return_t kr;
-	mach_port_t device_server_port, junk_port;
+	mach_port_t host, device, wired, paged, security;
 	mach_msg_type_number_t count;
 	security_token_t token;
 
-	if (bootstrap_port == MACH_PORT_NULL) {
-	    kr = task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT,
-				       &bootstrap_port);
-	    if (kr != KERN_SUCCESS)
-		return;
-	}
-	kr = bootstrap_ports(bootstrap_port, &junk_port, &device_server_port,
-			     &junk_port, &junk_port, &junk_port);
+	/*
+	 * #620: from bootstrap, as printf_init() of a null port does.  Only
+	 * bootstrap itself goes past this: its bootstrap port is the kernel's,
+	 * whose server skips bootstrap_console(), so it opens the console
+	 * from the master device port -- and gives back every right that
+	 * bootstrap_ports() handed it, each one, keeping only the console.
+	 */
+	if (console_from_bootstrap() == KERN_SUCCESS)
+	    return;
+	kr = bootstrap_ports(bootstrap_port, &host, &device, &wired, &paged,
+			     &security);
 	if (kr != KERN_SUCCESS)
 	    return;
 	count = TASK_SECURITY_TOKEN_COUNT;
-	kr = task_info(mach_task_self(), TASK_SECURITY_TOKEN,
-		       (task_info_t) &token, &count);
-	if (kr != KERN_SUCCESS)
-	    return;
-	kr = device_open(device_server_port, MACH_PORT_NULL, D_READ|D_WRITE,
-			 token, (char *) "console", &console_port);
+	if (device != MACH_PORT_NULL &&
+	    task_info(mach_task_self(), TASK_SECURITY_TOKEN,
+		      (task_info_t) &token, &count) == KERN_SUCCESS)
+	    (void) device_open(device, MACH_PORT_NULL, D_READ|D_WRITE,
+			       token, (char *) "console", &console_port);
+	if (host != MACH_PORT_NULL)
+	    (void) mach_port_deallocate(mach_task_self(), host);
+	if (device != MACH_PORT_NULL)
+	    (void) mach_port_deallocate(mach_task_self(), device);
+	if (wired != MACH_PORT_NULL)
+	    (void) mach_port_deallocate(mach_task_self(), wired);
+	if (paged != MACH_PORT_NULL)
+	    (void) mach_port_deallocate(mach_task_self(), paged);
+	if (security != MACH_PORT_NULL)
+	    (void) mach_port_deallocate(mach_task_self(), security);
 }
 
 /* Send the first `upto' bytes of the buffer in ONE write per attempt (#578),

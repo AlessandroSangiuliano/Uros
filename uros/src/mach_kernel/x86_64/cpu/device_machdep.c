@@ -220,7 +220,8 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
 
 /*
  * The legacy ports this kernel keeps (#508): its rulers, the PCI
- * configuration ports (#597), the CMOS and the 8259s (#599).
+ * configuration ports (#597), the CMOS and the 8259s (#599), and the ISA DMA
+ * controller (#620).
  *
  * The 8254's four registers and port 0x61, whose low bits gate channel 2 and
  * read its output -- that is how pit_delay_us() times an interval -- and the
@@ -228,6 +229,11 @@ device_md_io_unclaimed(unsigned int base, unsigned int count)
  * HPET is not here because it is memory, and a task maps memory only inside
  * the regions of a PCI device it has claimed (check_mmio_phys()), which the
  * HPET is not.
+ *
+ * 🔑 No port stays open to a holder of the master device port that has not
+ * claimed it (#620): check_io_claim() refuses a port nobody claimed.  So this
+ * is not the line between open and closed ports -- it is what is refused
+ * even to a claim.
  */
 static const struct {
 	unsigned int	base;
@@ -253,6 +259,18 @@ static const struct {
 	{ 0x20, 2, "the 8259 interrupt controllers" },
 	{ 0xA0, 2, "the 8259 interrupt controllers" },
 	{ 0x4D0, 2, "the 8259s' edge/level registers" },
+	/*
+	 * #620: the ISA DMA controller.  A task reaching it could program an
+	 * 8237 channel to move bytes between a device and physical memory
+	 * below 16 MB, with no claim and past every check that guards DMA;
+	 * QEMU's PC boards emulate it, and LPC chipsets still carry it.  Both
+	 * 8237s, and the page registers that give a channel its address bits
+	 * above sixteen.  0x80 among them is the unused port pic.c writes to
+	 * wait, which no task needs either.
+	 */
+	{ 0x00, 16, "the first 8237 DMA controller, which reaches memory" },
+	{ 0xC0, 32, "the second 8237 DMA controller, which reaches memory" },
+	{ 0x80, 16, "the 8237s' page registers" },
 };
 
 static int

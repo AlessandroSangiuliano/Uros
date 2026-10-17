@@ -5,10 +5,10 @@ Run: --entry 14 1200 -smp 1
 Expect: virtio [0-9]+:[0-9]+\.[0-9]+: the kernel refused a 1-byte write of port 0x[0-9a-f]+ \(register \+0x12,
 
 diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
-index 9bb0ed32..8b843613 100644
+index 5dbcb112..b39e2b1e 100644
 --- a/uros/src/mach_kernel/device/device_master.c
 +++ b/uros/src/mach_kernel/device/device_master.c
-@@ -3240,6 +3240,30 @@ check_io_port(unsigned int port, unsigned int size)
+@@ -3201,6 +3201,30 @@ check_io_port(unsigned int port, unsigned int size)
  	}
  	urmach_rcu_read_unlock();
  
@@ -38,4 +38,4 @@ index 9bb0ed32..8b843613 100644
 +	}
  	if (mine)
  		return KERN_SUCCESS;
- 	if (other_bdf != DEVICE_DMA_NO_BDF) {
+ 	if (past_end) {

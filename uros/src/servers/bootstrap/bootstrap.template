@@ -7,7 +7,14 @@
 # task when the system is booted. The syntax for each entry is: (without the
 # leading "# ")
 #
-# server-name server-file-name [server-arguments]
+# [flags] server-name server-file-name [server-arguments]
+#
+# The flags come one to a dash (-w -k, not -wk): -w waits for the server to
+#	finish starting before the next is loaded; -k, or -S<size>, loads it
+#	into the kernel; -d names a data file; -H gives the server the master
+#	host port and -D the master device port when it asks bootstrap_ports()
+#	(#620).  A task without them is answered null ports, and gets the
+#	console from bootstrap_console().
 #
 # The "server-name" tag is used primarily to identify the task to the Mach
 # 	kernel debugger.
@@ -24,5 +31,5 @@
 #	root file system name (ex: hd0a) as it would be typed to the prompt.
 # 
 name_server name_server
-default_pager default_pager
+-H default_pager default_pager
 startup startup
