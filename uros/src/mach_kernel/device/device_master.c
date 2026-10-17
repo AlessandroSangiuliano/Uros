@@ -734,12 +734,19 @@ claim_ops_name(unsigned int ops)
  * belongs to the caller.  The two used to be one function, and the difference
  * is the whole of the policy: first-come-first-served is not an entitlement,
  * it is the absence of one.
+ *
+ * 🔑 And with an operation, whether the claim CARRIES it (#621): `op' is a
+ * CAP_OP_PCI_* bit the capability behind the claim had to carry, `what' the
+ * routine asking, for the refusal's line; 0 asks for the claim alone.  One
+ * walk answers both, so a claim made by another thread of the task between
+ * two looks cannot let an operation through unchecked.
  */
 static kern_return_t
-check_claim(natural_t bdf)
+check_claim_op(natural_t bdf, unsigned int op, const char *what)
 {
 	task_t me = current_task();
 	task_t holder = TASK_NULL;
+	unsigned int ops = 0;
 	unsigned i, n, hit = 0, at = 0;
 
 	if (bdf == DEVICE_DMA_NO_BDF)
@@ -750,14 +757,23 @@ check_claim(natural_t bdf)
 	for (i = 0; i < n; i++)
 		if (device_claim[i].bdf == bdf) {
 			holder = device_claim[i].task;
+			ops = device_claim[i].ops;
 			hit = 1;
 			at = i;
 			break;
 		}
 	urmach_rcu_read_unlock();
 
-	if (hit && holder == me)
+	if (hit && holder == me && (op == 0 || (ops & op) != 0))
 		return KERN_SUCCESS;
+	if (hit && holder == me) {
+		printf("%s: %02x:%02x.%u REFUSED to task 0x%lx — its claim "
+		       "carries %s and not %s (#621)\n", what,
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)me,
+		       claim_ops_name(ops), claim_ops_name(op));
+		return KERN_NO_ACCESS;
+	}
 	if (hit)
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
 		       "it is claimed by task 0x%lx (entry %u of %u)\n",
@@ -766,6 +782,12 @@ check_claim(natural_t bdf)
 		       (unsigned)(bdf & 7), (unsigned long)me,
 		       (unsigned long)holder, at, n);
 	return KERN_NO_ACCESS;
+}
+
+static kern_return_t
+check_claim(natural_t bdf)
+{
+	return check_claim_op(bdf, 0, 0);
 }
 
 /*
@@ -2055,7 +2077,8 @@ ds_master_device_dma_alloc(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_alloc");
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2245,7 +2268,8 @@ ds_master_device_dma_alloc_sg(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_alloc_sg");
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -3643,7 +3667,8 @@ ds_master_device_dma_identity(
 	if (bdf == DEVICE_DMA_NO_BDF)
 		return KERN_INVALID_ARGUMENT;
 
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_identity");
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -4063,8 +4088,12 @@ dma_map_foreign_pages(
 	if (n == 0 || n > DMA_MAP_PAGES_MAX)
 		return KERN_INVALID_ARGUMENT;
 
-	/* A device has one driver, and only that driver may map for it. */
-	kr = check_claim(bdf);
+	/*
+	 * A device has one driver, and only that driver may map for it, with
+	 * DMA in its claim (#621).
+	 */
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_map_foreign_op");
 	if (kr != KERN_SUCCESS)
 		return kr;
 	t1 = urmach_tsc();
@@ -4245,7 +4274,8 @@ ds_master_device_dma_map_foreign_region(
 		return kr;
 	if (bdf == DEVICE_DMA_NO_BDF || tokenCnt != sizeof(struct uros_cap))
 		return KERN_INVALID_ARGUMENT;
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_map_foreign_region");
 	if (kr != KERN_SUCCESS)
 		return kr;
 	memcpy(&cap, token, sizeof(cap));

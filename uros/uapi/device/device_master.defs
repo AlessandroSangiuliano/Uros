@@ -528,12 +528,14 @@ skip;	/* was device_dma_map_foreign */
  * revoking the first token still ends the claim.  It answers KERN_SUCCESS,
  * as a second claim by the holder always has.
  *
- * 🔴 AND WHAT IS CHECKED AFTERWARDS IS THE CLAIM, ON THE BUFFER CALLS ONLY.
- * Five of them ask -- dma_alloc, dma_free, dma_alloc_sg, dma_identity and
- * dma_map_foreign -- and every one is about obtaining or releasing memory.
- * Verifying a token instead would mean an HMAC-SHA256 under a lock the whole
- * machine shares, on a path that runs once per buffer; the claim is a pointer
- * comparison, and the question it answers cannot change in between.
+ * 🔴 AND WHAT IS CHECKED AFTERWARDS IS THE CLAIM, WITH WHAT IT CARRIES.  The
+ * buffer calls -- dma_alloc, dma_alloc_sg, dma_identity and the
+ * dma_map_foreign routines -- need the claim to carry DMA_MAP (#621);
+ * dma_free needs the claim alone, since giving memory back takes no
+ * authority.  Verifying a token instead would mean an HMAC-SHA256 under a lock
+ * the whole machine shares, on a path that runs once per buffer; the claim and
+ * its operations are a pointer comparison and a bit, and in between they can
+ * only narrow.
  *
  * 🔑 A TRANSFER IS CHECKED BY NEITHER, BECAUSE A TRANSFER DOES NOT COME HERE.
  * A userspace driver reads a disk by writing an address into the device's own
