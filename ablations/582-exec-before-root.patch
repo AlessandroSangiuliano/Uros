@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #582
+Takes out: the wait -- the tests that spawn a program run as soon as hello_server reaches them, with or without exec_server and "/"
+Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-1
+Expect: \(hello_server\): WRONG — (__uros_spawn|#269's child)
+
+diff --git a/uros/src/servers/hello_server/hello_server.c b/uros/src/servers/hello_server/hello_server.c
+index 96e26381..95a602be 100644
+--- a/uros/src/servers/hello_server/hello_server.c
++++ b/uros/src/servers/hello_server/hello_server.c
+@@ -253,6 +253,7 @@ hello_posix_exec_fd_smoke(void)
+ static int
+ hello_wait_for_exec(void)
+ {
++    return 0;
+     char host[80] = "";
+     char serv[80] = "exec_server";
+     netname_name_t matched;
