@@ -919,6 +919,16 @@ static void phys_ops_selftest(void)
 	pmap_enter(k, kva2, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
 	pmap_enter(u, uva, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
 
+	/*
+	 * #673: a read first, so that the translation is cached when the bits
+	 * are cleared -- the case the clear's flush exists for.  Without it
+	 * the read below walked whether or not the clear had flushed, and the
+	 * look after it could not see a flush that was missing.  Settled, so
+	 * that this read's bit is not still on its way when it is cleared.
+	 */
+	(void)*p;
+	pte_bits_settle();
+
 	/* Clear first: the frame was just zeroed, which is itself a write. */
 	pmap_clear_reference(frame);
 	pmap_clear_modify(frame);
