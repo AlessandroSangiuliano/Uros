@@ -51,6 +51,8 @@ extern volatile uint64_t	wall_tsc_at_tick;
 #include <mach/machine/vm_types.h>	/* vm_offset_t */
 #include <cpu/regs.h>			/* cpu_pause */
 #include <vm/pmap.h>			/* #688: pmap_kernel(), for -t */
+#include <kern/thread.h>		/* #688: current_act(), for -t */
+#include <kern/task.h>			/* #688: kernel_task, for -t */
 #include <kern/ast.h>			/* #459 TEMP */
 
 /* ------------------------------------------------------------------ rate */
@@ -86,11 +88,14 @@ static uint64_t		tick_ns;
 
 /*
  * -t (#688), the merge test's entry 53: a panic on the first tick that finds
- * its processor in the kernel on a task's behalf -- inside a system call or a
- * task's trap, with the task's address space loaded.  halt_cpu() then runs
- * with that CR3 on the processor that panicked, as it does on every processor
- * a panic's stop finds inside a system call, and has to stop each of them
- * without a fault of its own.  Read once, at boot.
+ * its processor in the kernel on a task's behalf -- a thread of a task other
+ * than the kernel's, inside a system call or a trap, with the task's address
+ * space loaded.  halt_cpu() then runs with that CR3 on the processor that
+ * panicked, as it does on every processor a panic's stop finds inside a system
+ * call, and has to stop each of them without a fault of its own.  The task's
+ * thread and not only its space: the first version took the bootstrap's
+ * loader, a kernel thread with the new task's map borrowed to copy its image
+ * in, which is a task's CR3 too but no system call.  Read once, at boot.
  */
 static int		task_panic_armed;
 static uint8_t		event_vector;
@@ -1096,9 +1101,12 @@ clock_event_tick(struct trap_frame *frame)
 		/* -t (#688), on a real frame: a replayed one does not know
 		 * where its tick landed. */
 		if (task_panic_armed && !usermode &&
+		    current_act() != THR_ACT_NULL &&
+		    current_act()->task != kernel_task &&
 		    percpu()->loaded_pmap != pmap_kernel())
-			panic("task_panic: asked for with -t, inside the kernel "
-			      "with a task's address space loaded (#688)");
+			panic("task_panic: asked for with -t, on a task's thread "
+			      "inside the kernel, with its address space loaded "
+			      "(#688)");
 	}
 
 	/*
