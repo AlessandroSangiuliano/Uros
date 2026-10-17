@@ -503,6 +503,15 @@ static struct device_claim_entry {
 	task_t		task;
 	uint64_t	cap_id;		/* the token that established it */
 
+	/*
+	 * The device operations that token carries, CAP_OP_PCI_* (#621), each
+	 * checked by the kernel when the claim was made; a later claim by the
+	 * same task can only take some away.  Written under the mutex, read
+	 * in the read sections like the rest; a word, so a reader sees the
+	 * old value or the new one and never half of each.
+	 */
+	unsigned int	ops;
+
 	/* Measured once, when the device was handed over. */
 	struct {
 		uint64_t	base;
@@ -522,6 +531,24 @@ static struct device_claim_entry {
 } device_claim[DEVICE_MAX_CLAIMS];
 
 static unsigned device_nclaims;
+
+/*
+ * The device operations in `ops', CAP_OP_PCI_* bits, as the kernel's lines
+ * name them (#621).
+ */
+_Static_assert(CAP_OP_PCI_DMA_MAP == 1 && CAP_OP_PCI_MMIO_MAP == 2
+	       && CAP_OP_PCI_IRQ == 4, "claim_ops_name() indexes by these bits");
+
+static const char *
+claim_ops_name(unsigned int ops)
+{
+	static const char *const name[8] = {
+		"no device operation", "DMA", "MMIO", "DMA and MMIO",
+		"IRQ", "DMA and IRQ", "MMIO and IRQ", "DMA, MMIO and IRQ"
+	};
+
+	return name[ops & 7];
+}
 
 /*
  * ── Whose device is this physical address? (#511) ────────────────────────
@@ -634,8 +661,9 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 {
 	task_t me = current_task();
 	unsigned i, n;
-	natural_t other_bdf = DEVICE_DMA_NO_BDF;
+	natural_t other_bdf = DEVICE_DMA_NO_BDF, my_bdf = DEVICE_DMA_NO_BDF;
 	int mine = 0;
+	unsigned int ops = 0;
 	uint64_t end = 0, region_end;
 
 	urmach_rcu_read_lock();
@@ -648,11 +676,24 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 		if (device_claim[i].task == me) {
 			mine = 1;
 			end = region_end;
+			ops = device_claim[i].ops;
+			my_bdf = device_claim[i].bdf;
 		} else
 			other_bdf = device_claim[i].bdf;
 		break;
 	}
 	urmach_rcu_read_unlock();
+
+	/* The device's, and the claim has to carry MMIO (#621). */
+	if (mine && (ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
+		printf("device_mmio_map: 0x%lx belongs to %02x:%02x.%u, and "
+		       "task 0x%lx's claim on it carries %s and not MMIO "
+		       "(#621)\n", (unsigned long)phys,
+		       (unsigned)(my_bdf >> 8), (unsigned)((my_bdf >> 3) & 0x1F),
+		       (unsigned)(my_bdf & 7), (unsigned long)me,
+		       claim_ops_name(ops));
+		return KERN_NO_ACCESS;
+	}
 
 	if (mine && (uint64_t)phys + len <= end)
 		return KERN_SUCCESS;
@@ -707,12 +748,19 @@ device_claimed_by_other(natural_t bdf)
  * belongs to the caller.  The two used to be one function, and the difference
  * is the whole of the policy: first-come-first-served is not an entitlement,
  * it is the absence of one.
+ *
+ * 🔑 And with an operation, whether the claim CARRIES it (#621): `op' is a
+ * CAP_OP_PCI_* bit the capability behind the claim had to carry, `what' the
+ * routine asking, for the refusal's line; 0 asks for the claim alone.  One
+ * walk answers both, so a claim made by another thread of the task between
+ * two looks cannot let an operation through unchecked.
  */
 static kern_return_t
-check_claim(natural_t bdf)
+check_claim_op(natural_t bdf, unsigned int op, const char *what)
 {
 	task_t me = current_task();
 	task_t holder = TASK_NULL;
+	unsigned int ops = 0;
 	unsigned i, n, hit = 0, at = 0;
 
 	if (bdf == DEVICE_DMA_NO_BDF)
@@ -723,14 +771,23 @@ check_claim(natural_t bdf)
 	for (i = 0; i < n; i++)
 		if (device_claim[i].bdf == bdf) {
 			holder = device_claim[i].task;
+			ops = device_claim[i].ops;
 			hit = 1;
 			at = i;
 			break;
 		}
 	urmach_rcu_read_unlock();
 
-	if (hit && holder == me)
+	if (hit && holder == me && (op == 0 || (ops & op) != 0))
 		return KERN_SUCCESS;
+	if (hit && holder == me) {
+		printf("%s: %02x:%02x.%u REFUSED to task 0x%lx — its claim "
+		       "carries %s and not %s (#621)\n", what,
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)me,
+		       claim_ops_name(ops), claim_ops_name(op));
+		return KERN_NO_ACCESS;
+	}
 	if (hit)
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
 		       "it is claimed by task 0x%lx (entry %u of %u)\n",
@@ -739,6 +796,12 @@ check_claim(natural_t bdf)
 		       (unsigned)(bdf & 7), (unsigned long)me,
 		       (unsigned long)holder, at, n);
 	return KERN_NO_ACCESS;
+}
+
+static kern_return_t
+check_claim(natural_t bdf)
+{
+	return check_claim_op(bdf, 0, 0);
 }
 
 /*
@@ -1014,8 +1077,9 @@ measure_regions(struct device_claim_entry *e, natural_t bdf)
  *   what it is testing is the claim mechanism itself.
  *
  * So the rule is about the line's OWNER and not about the caller's holdings:
- * if a claimed device raises it, it is that task's; otherwise the existing
- * one-handler-per-line rule is the whole of the arbitration, as it was.
+ * if a claimed device raises it, it is that task's, and only if the claim
+ * carries IRQ (#621); otherwise the existing one-handler-per-line rule is the
+ * whole of the arbitration, as it was, and no operation is asked for.
  *
  * ⚠️ Register 0x3C is the interrupt LINE, which is what the device was
  * programmed with rather than what it is wired to.  That is the number this
@@ -1028,8 +1092,9 @@ check_irq_owner(unsigned int irq)
 {
 	task_t		me = current_task();
 	unsigned	i, n;
-	natural_t	other_bdf = DEVICE_DMA_NO_BDF;
+	natural_t	other_bdf = DEVICE_DMA_NO_BDF, my_bdf = DEVICE_DMA_NO_BDF;
 	int		mine = 0;
+	unsigned int	ops = 0;
 
 	/*
 	 * The config-space read inside the section is a spin lock and a few
@@ -1054,13 +1119,25 @@ check_irq_owner(unsigned int irq)
 		if (line == 0 || line == 0xFF || line != irq)
 			continue;
 
-		if (device_claim[i].task == me)
+		if (device_claim[i].task == me) {
 			mine = 1;
-		else
+			ops = device_claim[i].ops;
+			my_bdf = bdf;
+		} else
 			other_bdf = bdf;
 		break;
 	}
 	urmach_rcu_read_unlock();
+
+	/* The caller's device raises it, and the claim has to carry IRQ. */
+	if (mine && (ops & (unsigned int)CAP_OP_PCI_IRQ) == 0) {
+		printf("device_intr_register: irq %u is raised by %u:%u.%u, "
+		       "and task 0x%lx's claim on it carries %s and not IRQ "
+		       "(#621)\n", irq, (unsigned)(my_bdf >> 8),
+		       (unsigned)((my_bdf >> 3) & 0x1F), (unsigned)(my_bdf & 0x7),
+		       (unsigned long)me, claim_ops_name(ops));
+		return KERN_NO_ACCESS;
+	}
 
 	if (mine || other_bdf == DEVICE_DMA_NO_BDF)
 		return KERN_SUCCESS;
@@ -1199,6 +1276,10 @@ ds_master_device_msi_register(
 	 * DEVICE's own table, so registering one is a write to whoever's
 	 * device this is -- unlike a line, which is a property of the
 	 * controller and can belong to nothing at all.
+	 *
+	 * And the claim has to carry IRQ (#621).  The first look only picks
+	 * the line to print; the second answers both questions in one walk,
+	 * and it is the one that lets the registration through.
 	 */
 	kr = check_claim((natural_t)((bus << 8) | (dev << 3) | func));
 	if (kr != KERN_SUCCESS) {
@@ -1206,6 +1287,10 @@ ds_master_device_msi_register(
 		       bus, dev, func);
 		return kr;
 	}
+	kr = check_claim_op((natural_t)((bus << 8) | (dev << 3) | func),
+			    (unsigned int)CAP_OP_PCI_IRQ, "device_msi_register");
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	irq_forward_thread_start();
 
@@ -2028,7 +2113,8 @@ ds_master_device_dma_alloc(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_alloc");
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2218,7 +2304,8 @@ ds_master_device_dma_alloc_sg(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_alloc_sg");
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -2826,6 +2913,17 @@ ds_master_device_region_map(
 		printf("device_region_map: %u:%u.%u is not this task's\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+	if ((device_claim[i].ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
+		unsigned int ops = device_claim[i].ops;
+
+		urmach_rcu_read_unlock();
+		printf("device_region_map: %02x:%02x.%u REFUSED to task 0x%lx "
+		       "— its claim carries %s and not MMIO (#621)\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)me,
+		       claim_ops_name(ops));
 		return KERN_NO_ACCESS;
 	}
 	if (index >= device_claim[i].nregions
@@ -3616,7 +3714,8 @@ ds_master_device_dma_identity(
 	if (bdf == DEVICE_DMA_NO_BDF)
 		return KERN_INVALID_ARGUMENT;
 
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_identity");
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -4036,8 +4135,12 @@ dma_map_foreign_pages(
 	if (n == 0 || n > DMA_MAP_PAGES_MAX)
 		return KERN_INVALID_ARGUMENT;
 
-	/* A device has one driver, and only that driver may map for it. */
-	kr = check_claim(bdf);
+	/*
+	 * A device has one driver, and only that driver may map for it, with
+	 * DMA in its claim (#621).
+	 */
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_map_foreign_op");
 	if (kr != KERN_SUCCESS)
 		return kr;
 	t1 = urmach_tsc();
@@ -4218,7 +4321,8 @@ ds_master_device_dma_map_foreign_region(
 		return kr;
 	if (bdf == DEVICE_DMA_NO_BDF || tokenCnt != sizeof(struct uros_cap))
 		return KERN_INVALID_ARGUMENT;
-	kr = check_claim(bdf);
+	kr = check_claim_op(bdf, (unsigned int)CAP_OP_PCI_DMA_MAP,
+			    "device_dma_map_foreign_region");
 	if (kr != KERN_SUCCESS)
 		return kr;
 	memcpy(&cap, token, sizeof(cap));
@@ -4355,6 +4459,22 @@ ds_master_device_dma_region_users(
 }
 
 /*
+ * A claim its holder presented another capability for (#621): said when it
+ * gave something up, so that an operation refused afterwards can be traced to
+ * the moment the claim stopped carrying it.
+ */
+static void
+claim_narrowed_say(natural_t bdf, task_t me, unsigned int was, unsigned int now)
+{
+	if (was == now)
+		return;
+	printf("device: %02x:%02x.%u — task 0x%lx narrowed its claim from %s "
+	       "to %s (#621)\n", (unsigned)(bdf >> 8),
+	       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7),
+	       (unsigned long)me, claim_ops_name(was), claim_ops_name(now));
+}
+
+/*
  * ── Claiming a device, by showing a capability for its kind (#432) ───
  *
  * See the note on device_claim in <device/device_master.defs>.  In one line:
@@ -4376,6 +4496,7 @@ ds_master_device_claim(
 	unsigned		i;
 	struct device_claim_entry fresh;
 	unsigned int b;
+	unsigned int		ops = 0, was;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -4441,26 +4562,26 @@ ds_master_device_claim(
 	 * 🔑 A CLAIM IS NOT AN OPERATION.  It says "this device is mine", and
 	 * what may be done with it is what the capability's ops say.  So the
 	 * check here is that the capability covers this device's class and
-	 * carries at least one thing one can do to a device -- and WHICH thing
-	 * is the question the operations themselves have to ask.
-	 *
-	 * ⚠️ That finer half is not done here: device_dma_alloc and
-	 * device_mmio_map check that the caller holds the CLAIM, not that its
-	 * capability carries the matching op.  Naming it rather than implying
-	 * it, because a check that looks complete and is not is how this file
-	 * got the arrangement above.
+	 * carries at least one thing one can do to a device -- and WHICH
+	 * things it carries are recorded with the claim (#621): each of the
+	 * three is checked against the token here, HMAC and all, so that an
+	 * operation afterwards needs to read a bit and not verify a token:
+	 * the buffer calls ask for DMA, the register mappings for MMIO, and an
+	 * interrupt of the device's for IRQ.
 	 */
 	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
 				 (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
-	if (kr != KERN_SUCCESS)
-		kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
-					 (uint32_t)CAP_OP_PCI_MMIO_MAP,
-					 class_id);
-	if (kr != KERN_SUCCESS)
-		kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
-					 (uint32_t)CAP_OP_PCI_IRQ,
-					 class_id);
-	if (kr != KERN_SUCCESS) {
+	if (kr == KERN_SUCCESS)
+		ops |= (unsigned int)CAP_OP_PCI_DMA_MAP;
+	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+				 (uint32_t)CAP_OP_PCI_MMIO_MAP, class_id);
+	if (kr == KERN_SUCCESS)
+		ops |= (unsigned int)CAP_OP_PCI_MMIO_MAP;
+	kr = cap_check_in_kernel(&cap, RESOURCE_PCI_DEVICE,
+				 (uint32_t)CAP_OP_PCI_IRQ, class_id);
+	if (kr == KERN_SUCCESS)
+		ops |= (unsigned int)CAP_OP_PCI_IRQ;
+	if (ops == 0) {
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "
 		       "capability does not cover class 0x%06lx with any "
 		       "device operation (kr=%d)\n",
@@ -4473,15 +4594,27 @@ ds_master_device_claim(
 	/*
 	 * First look, under the lock: a device somebody else holds is refused
 	 * before any of its registers is touched (#538).
+	 *
+	 * 🔑 A device this task already holds is NARROWED to the operations
+	 * both capabilities carry (#621).  A claim can give an operation up and
+	 * never gain one -- a driver that has mapped its registers can drop
+	 * MMIO and keep running -- and it keeps the token that established it,
+	 * which is what a revocation ends it by: another token presented here
+	 * changes nothing about who may take the device away.
 	 */
 	mutex_lock(&device_table_lock);
 	for (i = 0; i < device_nclaims; i++)
 		if (device_claim[i].bdf == bdf) {
 			task_t holder = device_claim[i].task;
 
-			mutex_unlock(&device_table_lock);
-			if (holder == me)
+			if (holder == me) {
+				was = device_claim[i].ops;
+				device_claim[i].ops = was & ops;
+				mutex_unlock(&device_table_lock);
+				claim_narrowed_say(bdf, me, was, was & ops);
 				return KERN_SUCCESS;
+			}
+			mutex_unlock(&device_table_lock);
 			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
 			       "it is claimed by task 0x%lx (entry %u of %u)\n",
 			       (unsigned)(bdf >> 8),
@@ -4519,10 +4652,16 @@ ds_master_device_claim(
 		if (device_claim[i].bdf == bdf) {
 			task_t holder = device_claim[i].task;
 
+			if (holder == me) {	/* another thread of this task */
+				was = device_claim[i].ops;
+				device_claim[i].ops = was & ops;
+				mutex_unlock(&device_table_lock);
+				task_deallocate(me);
+				claim_narrowed_say(bdf, me, was, was & ops);
+				return KERN_SUCCESS;
+			}
 			mutex_unlock(&device_table_lock);
 			task_deallocate(me);
-			if (holder == me)
-				return KERN_SUCCESS;
 			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
 			       "task 0x%lx claimed it while this one was "
 			       "measuring it (#538)\n",
@@ -4550,6 +4689,7 @@ ds_master_device_claim(
 	 * slot past the end, the count that brings it into the walk.
 	 */
 	device_claim[i].cap_id = cap.cap_id;
+	device_claim[i].ops = ops;
 	for (b = 0; b < fresh.nregions; b++)
 		device_claim[i].region[b] = fresh.region[b];
 	device_claim[i].nregions = fresh.nregions;
@@ -4570,10 +4710,10 @@ ds_master_device_claim(
 	}
 
 	printf("device: %02x:%02x.%u (class 0x%06lx) is now driven by task "
-	       "0x%lx, which showed a capability for that class\n",
+	       "0x%lx, which showed a capability for that class carrying %s\n",
 	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 	       (unsigned)(bdf & 7), (unsigned long)class_id,
-	       (unsigned long)me);
+	       (unsigned long)me, claim_ops_name(ops));
 	return KERN_SUCCESS;
 }
 
@@ -4702,6 +4842,7 @@ device_master_cap_revoked(uint64_t cap_id)
 		 * dead capability.
 		 */
 		device_claim[i].cap_id = 0;
+		device_claim[i].ops = 0;
 		(void) purge_grants_for_locked(bdf);		/* #599 */
 		mutex_unlock(&device_table_lock);
 
@@ -4913,6 +5054,7 @@ device_master_task_terminating(task_t task)
 		device_claim[i].task = TASK_NULL;
 		publish_barrier();
 		device_claim[i].cap_id = 0;
+		device_claim[i].ops = 0;
 		device_claim[i].retiring = 1;
 		(void) purge_grants_for_locked(bdf);		/* #599 */
 		mutex_unlock(&device_table_lock);

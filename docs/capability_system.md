@@ -107,6 +107,25 @@ kind of device a driver may drive; it cannot say which instance, because it
 does not know what is plugged in. The other half is the device master's
 **claim** — see §6.
 
+🔑 **And the claim records what the token carries** (#621). A
+`RESOURCE_PCI_DEVICE` token carries some of three operations —
+`CAP_OP_PCI_DMA_MAP`, `CAP_OP_PCI_MMIO_MAP`, `CAP_OP_PCI_IRQ` — and the kernel
+checks each against the token once, when the device is claimed, and keeps the
+ones that pass. Afterwards every operation asks for its own:
+
+| operation | the routines |
+|---|---|
+| DMA | `device_dma_alloc`, `device_dma_alloc_sg`, `device_dma_identity`, the `device_dma_map_foreign` routines |
+| MMIO | `device_mmio_map`, `device_region_map` |
+| IRQ | `device_msi_register`, and `device_intr_register` on a line the device raises |
+
+`device_dma_free` needs the claim alone, and a line no claimed device raises —
+the serial ports', say — needs no claim at all. A second claim by the holder,
+with another token, only **narrows**: the claim keeps the operations both
+tokens carry and the token that established it. A driver can give MMIO up once
+its registers are mapped; it cannot get anything back, and revoking the first
+token still ends the claim.
+
 ---
 
 ## 4. The policy: manifests
@@ -462,8 +481,9 @@ Stated so nobody reads this document as a description of a finished system.
   `SERIAL`, `FRAMEBUFFER`, `BUDGET` are reserved values with no enforcement
   behind them — the browser example above is therefore *architecture*, not a
   transcript.
-- **Manifests are shipped for one task.** `cap_test` on both targets. Everything
-  else runs on the permissive path.
+- **A manifest decides every capability.** A task that ships none is refused
+  all of them (`cap_manifest_allows()`, #511). Eighteen programs ship one: the
+  drivers, the tests that claim devices, `cap_test` and a few commands.
 - **Budgets do not exist.** `RESOURCE_BUDGET` is a reserved number.
 
 ## 10. Where the checks can be seen to fail
@@ -477,6 +497,8 @@ this is where to look, and what to break to confirm it still works.
 | a client's buffer needs a capability | `cap_test [12]` | not calling `device_register_dma` |
 | the manifest refuses what it does not declare | `cap_test [13]` | shipping no `.cmf` |
 | revocation tears the mapping down | `blk: gave 0:31.2 back …` | removing `urmach_cap_revoke` from cap_server's `cap_revoke` |
+| a claim's operations are its own | `irq_claim_test [14]`, `[15]`, `[16]` | `ablations/621-dma-unchecked`, `621-irq-unchecked`, `621-mmio-unchecked` |
+| a second claim only narrows | `irq_claim_test [14]`, `[17]` | `ablations/621-claim-not-narrowed`, `621-claim-widened` |
 
 ⚠️ `[11]` asks `device_dma_owned` *before* trying, because a test written as
 "try it and see" would claim any device nobody had claimed yet — a self-test

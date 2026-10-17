@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #621
+Takes out: the narrowing -- a second claim by the holder leaves the claim's operations as they were, as a second claim did before; irq_claim_test's [14] must say WRONG when a claim told to give DMA up still allocates it
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[14\] WRONG
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index c52574d2..57c74068 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -4609,7 +4609,7 @@ ds_master_device_claim(
+ 
+ 			if (holder == me) {
+ 				was = device_claim[i].ops;
+-				device_claim[i].ops = was & ops;
++				device_claim[i].ops = was;
+ 				mutex_unlock(&device_table_lock);
+ 				claim_narrowed_say(bdf, me, was, was & ops);
+ 				return KERN_SUCCESS;
+@@ -4654,7 +4654,7 @@ ds_master_device_claim(
+ 
+ 			if (holder == me) {	/* another thread of this task */
+ 				was = device_claim[i].ops;
+-				device_claim[i].ops = was & ops;
++				device_claim[i].ops = was;
+ 				mutex_unlock(&device_table_lock);
+ 				task_deallocate(me);
+ 				claim_narrowed_say(bdf, me, was, was & ops);

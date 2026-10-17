@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #621
+Takes out: the IRQ check -- device_msi_register asks for the claim alone and device_intr_register lets the holder of a device take its line whatever its claim carries, as they did before; irq_claim_test's [15] must say WRONG when a claim narrowed to MMIO still registers the card's interrupt
+Run: --entry 14 600 -smp 4
+Expect: irq_claim_test: \[15\] WRONG
+
+diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
+index c52574d2..bbb13e0e 100644
+--- a/uros/src/mach_kernel/device/device_master.c
++++ b/uros/src/mach_kernel/device/device_master.c
+@@ -1130,7 +1130,7 @@ check_irq_owner(unsigned int irq)
+ 	urmach_rcu_read_unlock();
+ 
+ 	/* The caller's device raises it, and the claim has to carry IRQ. */
+-	if (mine && (ops & (unsigned int)CAP_OP_PCI_IRQ) == 0) {
++	if (0 && mine && (ops & (unsigned int)CAP_OP_PCI_IRQ) == 0) {
+ 		printf("device_intr_register: irq %u is raised by %u:%u.%u, "
+ 		       "and task 0x%lx's claim on it carries %s and not IRQ "
+ 		       "(#621)\n", irq, (unsigned)(my_bdf >> 8),
+@@ -1288,7 +1288,7 @@ ds_master_device_msi_register(
+ 		return kr;
+ 	}
+ 	kr = check_claim_op((natural_t)((bus << 8) | (dev << 3) | func),
+-			    (unsigned int)CAP_OP_PCI_IRQ, "device_msi_register");
++			    0, "device_msi_register");
+ 	if (kr != KERN_SUCCESS)
+ 		return kr;
+ 

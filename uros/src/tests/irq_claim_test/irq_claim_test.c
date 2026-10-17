@@ -382,6 +382,7 @@ arm_four_what_is_refused(void)
 static struct pci_bar_region	nic_region;
 static natural_t		nic_bdf;	/* the owned card, for [11] (#598) */
 static int			nic_owned;
+static unsigned int		nic_class;	/* its class, for [13]'s tokens */
 
 static int
 own_the_network_card(natural_t *bdf_out)
@@ -439,9 +440,19 @@ own_the_network_card(natural_t *bdf_out)
 		return 0;
 	}
 
+	/*
+	 * All three: [5] asks the card for a message-signalled interrupt, [9]
+	 * to [12] map its registers, and [13] allocates DMA for it before the
+	 * claim gives the operations up one at a time.  This asked for IRQ
+	 * alone while [9] to [12] mapped the registers, which worked only
+	 * because the kernel did not look at what a claim's capability
+	 * carried (#621).
+	 */
+	nic_class = class_rev >> 8;
 	memset(&tok, 0, sizeof(tok));
-	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)(class_rev >> 8),
-			 CAP_OP_PCI_IRQ, 0, &tok);
+	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)nic_class,
+			 CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+			 | CAP_OP_PCI_IRQ, 0, &tok);
 	if (kr != KERN_SUCCESS) {
 		printf("irq_claim_test: cap_server would not issue a "
 		       "capability for class 0x%06x (kr=%d)\n",
@@ -759,6 +770,272 @@ arm_seven_the_card_rings(void)
 	return ok;
 }
 
+/*
+ * [13] to [17]: each operation asks for its own (#621).
+ *
+ * 🔑 ONE DEVICE, ONE TASK, AND THE CLAIM NARROWED A STEP AT A TIME.  The card
+ * was claimed with DMA, MMIO and IRQ; [13] shows the calls working, and every
+ * refusal after it is the same call on the same device by the same task with
+ * one operation fewer in the claim.  A refusal for any other reason -- the
+ * device somebody else's, a line somebody else's device raises -- would have
+ * refused the control as well, and where a control cannot be had the question
+ * is said NOT ASKED instead of passed.
+ *
+ * ⚠️ The order is forced: a claim can give an operation up and never gain one
+ * back, which [17] asks, so this is the last thing done with the card.
+ */
+static kern_return_t
+narrow_the_claim(uint64_t ops)
+{
+	struct uros_cap	tok;
+	kern_return_t	kr;
+
+	memset(&tok, 0, sizeof(tok));
+	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)nic_class, ops, 0,
+			 &tok);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	return device_claim(master_device, nic_bdf, (char *)&tok, sizeof(tok));
+}
+
+/* A mapping of the card's first page, given back; its kr. */
+static kern_return_t
+map_a_page(void)
+{
+	vm_address_t	uva = 0;
+	kern_return_t	kr;
+
+	kr = device_mmio_map(master_device, (vm_address_t)nic_region.base,
+			     (vm_size_t)IQ_PAGE, mach_task_self(), &uva);
+	if (kr == KERN_SUCCESS)
+		(void) device_mmio_unmap(master_device, uva, (vm_size_t)IQ_PAGE,
+					 mach_task_self());
+	return kr;
+}
+
+/* Region 0 mapped by index, given back; its kr. */
+static kern_return_t
+map_region_zero(void)
+{
+	vm_address_t	uva = 0;
+	vm_size_t	size = 0;
+	kern_return_t	kr;
+
+	kr = device_region_map(master_device, nic_bdf, 0, mach_task_self(),
+			       &uva, &size);
+	if (kr == KERN_SUCCESS)
+		(void) device_mmio_unmap(master_device, uva & ~(vm_address_t)
+					 (IQ_PAGE - 1),
+					 (size + (uva & (IQ_PAGE - 1))
+					  + IQ_PAGE - 1) & ~(vm_size_t)
+					 (IQ_PAGE - 1), mach_task_self());
+	return kr;
+}
+
+/* A DMA page for the card, given back; its kr. */
+static kern_return_t
+dma_a_page(void)
+{
+	vm_address_t	vaddr = 0, dma = 0;
+	cap_u64_t	region_id = 0;
+	kern_return_t	kr;
+
+	kr = device_dma_alloc(master_device, nic_bdf, (vm_size_t)IQ_PAGE,
+			      &vaddr, &dma, &region_id);
+	if (kr == KERN_SUCCESS)
+		(void) device_dma_free(master_device, nic_bdf, vaddr,
+				       (vm_size_t)IQ_PAGE);
+	return kr;
+}
+
+static int
+arm_eight_each_operation_its_own(void)
+{
+	natural_t	bus = nic_bdf >> 8, dev = (nic_bdf >> 3) & 0x1F;
+	natural_t	fn = nic_bdf & 0x7, cfg = 0, line = 0, slot = 0;
+	natural_t	iso = 0, ident = 0, rops = 0;
+	vm_address_t	kva = 0, uva = 0, base = 0, dma = 0;
+	cap_u64_t	region_id = 0;
+	dma_sg_addr_t	sg = 0, pages = 0;
+	mach_msg_type_number_t sg_n = 0, pages_n = 0;
+	struct uros_cap	none;
+	mach_port_t	port = MACH_PORT_NULL;
+	kern_return_t	kr, k1, k2, k3, k4, k5, kc;
+	int		ok = 0, line_ours = 0;
+
+	if (!nic_owned || nic_region.size == 0) {
+		printf("irq_claim_test: [13] NOT ASKED — no owned card with a "
+		       "memory region, so no claim to narrow (#621)\n");
+		printf("irq_claim_test: [14] NOT ASKED — nor [15], [16] and "
+		       "[17]\n");
+		return 5;
+	}
+
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &port) != KERN_SUCCESS)
+		return 0;
+
+	/*
+	 * [13] The controls, with all three in the claim.  The card's line is
+	 * a control only if it registers now: on a board where another
+	 * claimed device raises the same line, it is refused for that, and
+	 * its refusal in [15] would say nothing.
+	 */
+	k1 = dma_a_page();
+	k2 = map_region_zero();
+	k3 = device_pci_config_read(master_device, bus, dev, fn, 0x3C, &cfg);
+	line = cfg & 0xFF;
+	k4 = KERN_INVALID_ARGUMENT;
+	if (k3 == KERN_SUCCESS && line != 0 && line < 16) {
+		k4 = device_intr_register(master_device, line, port,
+					  MACH_MSG_TYPE_MAKE_SEND);
+		if (k4 == KERN_SUCCESS) {
+			line_ours = 1;
+			(void) device_intr_unregister(master_device, line);
+		}
+	}
+	if (k1 == KERN_SUCCESS && k2 == KERN_SUCCESS) {
+		printf("irq_claim_test: [13] with DMA, MMIO and IRQ in the "
+		       "claim, a DMA page was allocated and given back, region "
+		       "0 mapped by index, and the card's line %u %s (#621)\n",
+		       line, line_ours ? "registered and was given back"
+		       : "is no control here");
+		ok++;
+	} else {
+		printf("irq_claim_test: [13] WRONG — with DMA, MMIO and IRQ in "
+		       "the claim, dma_alloc answered %d and region_map %d\n",
+		       (int)k1, (int)k2);
+		release(port);
+		return ok;
+	}
+
+	/* [14] DMA given up: every buffer call refused, MMIO still works. */
+	kr = narrow_the_claim(CAP_OP_PCI_MMIO_MAP | CAP_OP_PCI_IRQ);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: [14] WRONG — narrowing the claim to "
+		       "MMIO and IRQ was refused (kr=%d)\n", (int)kr);
+		release(port);
+		return ok;
+	}
+	k1 = dma_a_page();
+	k2 = device_dma_alloc_sg(master_device, nic_bdf, 1, mach_task_self(),
+				 &kva, &uva, &sg, &sg_n, &region_id);
+	if (k2 == KERN_SUCCESS) {
+		(void) device_dma_free(master_device, nic_bdf, kva,
+				       (vm_size_t)IQ_PAGE);
+		if (sg != 0)
+			(void) vm_deallocate(mach_task_self(), (vm_address_t)sg,
+					     sg_n * sizeof(vm_address_t));
+	}
+	k3 = device_dma_identity(master_device, nic_bdf);
+	memset(&none, 0, sizeof(none));
+	k4 = device_dma_map_foreign_op(master_device, nic_bdf,
+				       (vm_address_t)nic_region.base,
+				       CAP_OP_DMA_DEVICE_READ, (char *)&none,
+				       sizeof(none), &dma);
+	k5 = device_dma_map_foreign_region(master_device, nic_bdf,
+					   (char *)&none, sizeof(none), &iso,
+					   &ident, &base, &rops, &pages,
+					   &pages_n);
+	if (k5 == KERN_SUCCESS && pages != 0)
+		(void) vm_deallocate(mach_task_self(), (vm_address_t)pages,
+				     pages_n * sizeof(vm_address_t));
+	kc = map_a_page();
+	if (kr == KERN_SUCCESS && k1 == KERN_NO_ACCESS && k2 == KERN_NO_ACCESS
+	    && k3 == KERN_NO_ACCESS && k4 == KERN_NO_ACCESS
+	    && k5 == KERN_NO_ACCESS && kc == KERN_SUCCESS) {
+		printf("irq_claim_test: [14] narrowed to MMIO and IRQ, "
+		       "dma_alloc, dma_alloc_sg, dma_identity, "
+		       "dma_map_foreign_op and dma_map_foreign_region were each "
+		       "refused with KERN_NO_ACCESS, and the card's page still "
+		       "maps\n");
+		ok++;
+	} else
+		printf("irq_claim_test: [14] WRONG — narrowed to MMIO and IRQ "
+		       "(kr=%d), dma_alloc %d, dma_alloc_sg %d, dma_identity "
+		       "%d, dma_map_foreign_op %d, dma_map_foreign_region %d, "
+		       "and the page %d\n", (int)kr, (int)k1, (int)k2, (int)k3,
+		       (int)k4, (int)k5, (int)kc);
+
+	/* [15] IRQ given up: the card's interrupts refused, MMIO still works. */
+	kr = narrow_the_claim(CAP_OP_PCI_MMIO_MAP);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: [15] WRONG — narrowing the claim to "
+		       "MMIO was refused (kr=%d)\n", (int)kr);
+		release(port);
+		return ok;
+	}
+	k1 = device_msi_register(master_device, bus, dev, fn, 0, port,
+				 MACH_MSG_TYPE_MAKE_SEND, &slot);
+	if (k1 == KERN_SUCCESS)
+		(void) device_intr_unregister(master_device, slot);
+	k2 = KERN_NO_ACCESS;
+	if (line_ours) {
+		k2 = device_intr_register(master_device, line, port,
+					  MACH_MSG_TYPE_MAKE_SEND);
+		if (k2 == KERN_SUCCESS)
+			(void) device_intr_unregister(master_device, line);
+	}
+	kc = map_a_page();
+	if (kr == KERN_SUCCESS && k1 == KERN_NO_ACCESS && k2 == KERN_NO_ACCESS
+	    && kc == KERN_SUCCESS) {
+		printf("irq_claim_test: [15] narrowed to MMIO, msi_register was "
+		       "refused with KERN_NO_ACCESS%s, and the card's page still "
+		       "maps\n", line_ours ? ", and so was intr_register on the "
+		       "card's own line" : "");
+		ok++;
+	} else
+		printf("irq_claim_test: [15] WRONG — narrowed to MMIO (kr=%d), "
+		       "msi_register %d, intr_register on line %u %d, and the "
+		       "page %d\n", (int)kr, (int)k1, line, (int)k2, (int)kc);
+	if (!line_ours)
+		printf("irq_claim_test: [15] NOT ASKED for the card's line %u — "
+		       "it did not register with IRQ in the claim either "
+		       "(kr=%d), so its refusal now would say nothing\n", line,
+		       (int)k4);
+	release(port);
+
+	/* [16] MMIO given up: the mappings refused, the claim still held. */
+	kr = narrow_the_claim(CAP_OP_PCI_IRQ);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: [16] WRONG — narrowing the claim to "
+		       "no device operation was refused (kr=%d)\n", (int)kr);
+		return ok;
+	}
+	k1 = map_a_page();
+	k2 = map_region_zero();
+	k3 = device_pci_config_read(master_device, bus, dev, fn, 0x00, &cfg);
+	if (kr == KERN_SUCCESS && k1 == KERN_NO_ACCESS && k2 == KERN_NO_ACCESS
+	    && k3 == KERN_SUCCESS) {
+		printf("irq_claim_test: [16] narrowed to no device operation, "
+		       "mmio_map and region_map were refused with "
+		       "KERN_NO_ACCESS, and the card is still this task's: its "
+		       "configuration space answers 0x%08x\n", cfg);
+		ok++;
+	} else
+		printf("irq_claim_test: [16] WRONG — narrowed to nothing "
+		       "(kr=%d), mmio_map %d, region_map %d, configuration "
+		       "read %d\n", (int)kr, (int)k1, (int)k2, (int)k3);
+
+	/* [17] All three presented again: nothing comes back. */
+	kr = narrow_the_claim(CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+			      | CAP_OP_PCI_IRQ);
+	k1 = map_a_page();
+	k2 = dma_a_page();
+	if (kr == KERN_SUCCESS && k1 == KERN_NO_ACCESS && k2 == KERN_NO_ACCESS) {
+		printf("irq_claim_test: [17] a capability carrying all three, "
+		       "presented again, was answered with success and gave "
+		       "nothing back: the page and a DMA page are still refused "
+		       "— a claim gives operations up and never gains one\n");
+		ok++;
+	} else
+		printf("irq_claim_test: [17] WRONG — all three presented again "
+		       "(kr=%d), and the page answered %d and a DMA page %d\n",
+		       (int)kr, (int)k1, (int)k2);
+
+	return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -809,7 +1086,8 @@ main(int argc, char **argv)
 	passed += arm_five_an_interrupt_with_no_wire();
 	passed += arm_six_a_mapping_ends_with_its_region();
 	passed += arm_seven_the_card_rings();
-	printf("irq_claim_test: %d of 6 message-signalled and mapping arms "
-	       "passed\n", passed);
-	return passed == 6 ? 0 : 1;
+	passed += arm_eight_each_operation_its_own();	/* last: it narrows */
+	printf("irq_claim_test: %d of 11 message-signalled, mapping and "
+	       "operation arms passed\n", passed);
+	return passed == 11 ? 0 : 1;
 }
