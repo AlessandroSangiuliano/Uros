@@ -301,6 +301,43 @@ hello_wait_for_exec(void)
 }
 
 /*
+ * Has process `pid' become `name'?  Asked of /proc/<pid>/stat, whose second
+ * field is the command proc_server records for it and replaces at an exec's
+ * handoff: a forked child is "forked" until its execve lands (#582).
+ *
+ * 1 when it has; 0 while not yet; -1 when it is a zombie, so it never will;
+ * -2 when its stat cannot be read.
+ */
+#define HELLO_EXEC_STEPS	300u
+
+static int
+hello_proc_is(unsigned int pid, const char *name)
+{
+    char path[32], want[48], buf[256];
+    const char *close_paren;
+    vfs_fd_t fd;
+    ssize_t got;
+
+    snprintf(path, sizeof path, "/proc/%u/stat", pid);
+    snprintf(want, sizeof want, "%u (%s) ", pid, name);
+    fd = vfs_open(path, VFS_O_RDONLY, 0);
+    if (fd == VFS_FD_INVALID)
+        return -2;
+    got = vfs_read(fd, buf, sizeof buf - 1);
+    vfs_close(fd);
+    if (got <= 0)
+        return -2;
+    buf[got] = '\0';
+    if (strncmp(buf, want, strlen(want)) == 0)
+        return 1;
+    /* "<pid> (<command>) <state> ...": the state is what follows. */
+    close_paren = strchr(buf, ')');
+    if (close_paren != NULL && close_paren[1] == ' ' && close_paren[2] == 'Z')
+        return -1;
+    return 0;
+}
+
+/*
  * Global ports — obtained at startup.
  */
 static mach_port_t	host_port;
@@ -713,10 +750,24 @@ main(int argc, char **argv)
              * hello_exec outlived the boot, spinning.  On one processor that
              * starved pthread_test's arm [24].
              *
-             * A beat for the exec to happen and print, the same beat the
-             * spawn below gives its child; then SIGKILL through proc_server,
-             * which terminates the task; then the waitpid, which now returns.
+             * The exec is waited for as proc_server sees it, then a beat
+             * for the new image to print, the same beat the spawn below
+             * gives its child; then SIGKILL through proc_server, which
+             * terminates the task; then the waitpid, which now returns.
+             *
+             * 🔴 THE EXEC IS SEEN, NOT ASSUMED (#582).  The kill ends the
+             * child whatever it is doing, so its status says nothing of the
+             * exec: one killed while its execve was still on the way leaves
+             * 0x9 as surely as one killed after.  A fixed beat stood here,
+             * and was taken as the exec's time.
              */
+            int seen = 0;
+            for (unsigned int j = 0; j < HELLO_EXEC_STEPS && seen == 0; j++) {
+                seen = hello_proc_is((unsigned)xpid, "hello_exec");
+                if (seen == 0)
+                    (void)syscall_thread_switch(MACH_PORT_NULL,
+                                                SWITCH_OPTION_WAIT, 100);
+            }
             for (int j = 0; j < 30; j++)
                 (void)syscall_thread_switch(MACH_PORT_NULL,
                                             SWITCH_OPTION_WAIT, 20);
@@ -726,15 +777,22 @@ main(int argc, char **argv)
             printf("(hello_server): #269 kill(SIGKILL)=%d, waitpid -> wr=%d "
                    "status=0x%x\n", kr_kill, xwr, xst);
             /*
-             * Killed is the one right end: a child whose execve returned
-             * leaves by its own _exit(11), status 0xb00, before the kill
-             * finds it -- as all 111 of October's that #582 counted did.
+             * Became /hello_exec, and then killed, is the one right end: a
+             * child whose execve returned leaves by its own _exit(11),
+             * status 0xb00, before the kill finds it -- as all 111 of
+             * October's that #582 counted did.
              */
-            if (xwr == xpid && WIFSIGNALED(xst) && WTERMSIG(xst) == SIGKILL)
-                exec_passed++;
-            else
+            if (seen != 1)
+                printf("(hello_server): WRONG — #269's child never became "
+                       "/hello_exec in /proc/%d/stat: %s\n", xpid,
+                       seen == 0 ? "not in the time given"
+                       : seen == -1 ? "it ended first"
+                       : "the stat could not be read");
+            else if (xwr != xpid || !WIFSIGNALED(xst) || WTERMSIG(xst) != SIGKILL)
                 printf("(hello_server): WRONG — #269's child was not ended by "
                        "its parent's SIGKILL: wr=%d status=0x%x\n", xwr, xst);
+            else
+                exec_passed++;
         }
 
         /*
