@@ -202,15 +202,19 @@ find(const char *name)
 }
 
 /* Seconds since the clock service's epoch; 0 if the service is absent. */
+/*
+ * #620: from mach_host_self().  The clock service is the host port's to give,
+ * and host_priv goes only to the servers bootstrap.conf names with -H.
+ */
 static unsigned
-seconds_now(mach_port_t host)
+seconds_now(void)
 {
 	static mach_port_t	clock_port = MACH_PORT_NULL;
 	tvalspec_t		tv;
 
 	if (clock_port == MACH_PORT_NULL
-	    && host_get_clock_service(host, REALTIME_CLOCK, &clock_port)
-	       != KERN_SUCCESS)
+	    && host_get_clock_service(mach_host_self(), REALTIME_CLOCK,
+				      &clock_port) != KERN_SUCCESS)
 		return 0;
 	if (clock_get_time(clock_port, &tv) != KERN_SUCCESS)
 		return 0;
@@ -633,7 +637,7 @@ main(int argc, char **argv)
 	}
 
 	ncpu = processors();
-	t0 = seconds_now(host);
+	t0 = seconds_now();
 
 	/*
 	 * [1] The race.  Every round: barrier, claim, winner releases,
@@ -645,7 +649,7 @@ main(int argc, char **argv)
 		unsigned	got, peer_kr, last;
 		natural_t	released = 0, klog_from = 0;
 
-		elapsed = seconds_now(host) - t0;
+		elapsed = seconds_now() - t0;
 		last = (elapsed >= BUDGET_S) ? 1u : 0u;
 
 		if (!tell(peer, MSG_READY, round, last)
