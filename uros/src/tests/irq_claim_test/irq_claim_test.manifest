@@ -25,17 +25,18 @@
 name irq_claim_test
 
 # RESOURCE_PCI_DEVICE (5), class 0x020000 -- an Ethernet controller --
-# MMIO|IRQ.
+# DMA|MMIO|IRQ.
 #
 # 🔑 What the arms do with the card, and nothing more.  [5] asks it for a
 # message-signalled interrupt and gives it back (IRQ); [9] and [10] map its
 # first memory region and one page past it (#508), and [11] and [12] map its
-# registers to make it ring (#598) -- MMIO.  None of them programs its DMA,
-# and a manifest that declared 0x7 out of symmetry with the drivers would be
-# granting authority nobody asked for.
+# registers to make it ring (#598) -- MMIO.  [13] allocates one DMA page for
+# it and gives it back, the control for [14] to [17], which give the three
+# up one at a time and are refused each (#621) -- DMA.  The card never moves
+# a byte: nothing here programs its DMA engine.
 #
 # 🔥 This line said IRQ alone, and "this test does not map the card's
 # registers", after [9] to [12] had begun to: the kernel checked that the
 # claim was this task's and not what its capability carried, so the mapping
 # worked and the sentence went unread (#621).
-required 5 0x020000 0x6
+required 5 0x020000 0x7
