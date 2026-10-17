@@ -1,0 +1,19 @@
+Kind: widen
+Issue: #582
+Holds open: the time between #269's fork and its execve -- the child waits two seconds before it calls execve, past the 600 ms beat after which its parent used to kill it; the fixed tree must still see the exec in /proc before the kill, and pass
+Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-1
+
+diff --git a/uros/src/servers/hello_server/hello_server.c b/uros/src/servers/hello_server/hello_server.c
+index ea0df6d8..d56d8b14 100644
+--- a/uros/src/servers/hello_server/hello_server.c
++++ b/uros/src/servers/hello_server/hello_server.c
+@@ -730,6 +730,9 @@ main(int argc, char **argv)
+         if (xpid < 0) {
+             printf("(hello_server): WRONG — #269 fork() failed: %d\n", xpid);
+         } else if (xpid == 0) {
++            for (int j = 0; j < 100; j++)
++                (void)syscall_thread_switch(MACH_PORT_NULL,
++                                            SWITCH_OPTION_WAIT, 20);
+             printf("(hello_server)[fxchild]: pid=%u, calling execve\n",
+                    __uros_my_pid);
+             char *xav[] = { (char *)"hello_exec", NULL };

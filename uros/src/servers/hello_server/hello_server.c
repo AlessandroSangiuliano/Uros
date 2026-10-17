@@ -55,6 +55,8 @@
 #include <sys/stat.h>                   /* fstat/struct stat — (#262) */
 #include <string.h>                     /* memcmp/strlen — (#262) */
 #include <uros/libposix.h>
+#include <servers/netname.h>            /* netname_look_up{,_mount} (#582) */
+#include <libvfs.h>                     /* vfs_stat (#582) */
 
 /*
  * Phase 4 (#252) smoke: SIGUSR1 handler.  File scope so taking its
@@ -226,6 +228,113 @@ hello_posix_exec_fd_smoke(void)
     close(fd);
     printf("(hello_server): exec-fd smoke %s (child status=0x%x)\n",
            child_ok ? "PASS" : "FAIL", status);
+}
+
+/*
+ * 🔴 THE EXEC TESTS WAIT FOR WHAT THEY LOAD THROUGH (#582).
+ *
+ * Each of them asks exec_server for a program, and exec_server reads it from
+ * "/".  The bootstrap starts hello_server before both and waits for neither,
+ * so the tests ran against whatever had come up by then -- and in all 111
+ * boots logged on one machine from 2 October, "/" was not there yet: the
+ * four failed with ENOENT, on one processor as on four, and nothing said so.
+ *
+ * "/" must be SERVED, not merely registered: ext_server registers its mount
+ * before its message loop runs, and only the loop answers.  An answered
+ * vfs_stat("/") is the loop running, as xfile_test asks it.
+ *
+ * 0 when both are there.  -1 when either is still missing after
+ * HELLO_WAIT_STEPS tenths of a second, or "/" does not answer, having said
+ * which: the tests are NOT ASKED either way, and a "/" that does not answer
+ * is WRONG besides.
+ */
+#define HELLO_WAIT_STEPS	1200u
+
+static int
+hello_wait_for_exec(void)
+{
+    char host[80] = "";
+    char serv[80] = "exec_server";
+    netname_name_t matched;
+    mach_port_t port;
+    vfs_stat_t st;
+    unsigned int step;
+    int exec_up = 0, root_up = 0, rc;
+
+    for (step = 0; step < HELLO_WAIT_STEPS; step++) {
+        if (!exec_up) {
+            port = MACH_PORT_NULL;
+            if (netname_look_up(name_server_port, host, serv, &port)
+                    == NETNAME_SUCCESS && port != MACH_PORT_NULL) {
+                (void)mach_port_deallocate(mach_task_self(), port);
+                exec_up = 1;
+            }
+        }
+        if (!root_up) {
+            port = MACH_PORT_NULL;
+            matched[0] = '\0';
+            if (netname_look_up_mount(name_server_port, "/", &port, matched)
+                    == NETNAME_SUCCESS && port != MACH_PORT_NULL) {
+                (void)mach_port_deallocate(mach_task_self(), port);
+                root_up = 1;
+            }
+        }
+        if (exec_up && root_up)
+            break;
+        (void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+    }
+    if (!exec_up || !root_up) {
+        printf("(hello_server): exec tests: NOT ASKED — %s after %u s\n",
+               !exec_up && !root_up ? "no exec_server and no \"/\""
+               : !exec_up ? "no exec_server" : "no \"/\" mount",
+               HELLO_WAIT_STEPS / 10);
+        return -1;
+    }
+    if ((rc = vfs_stat("/", &st)) != 0) {
+        printf("(hello_server): WRONG — \"/\" is registered and a stat of it "
+               "failed (%d): ext_server answers nothing\n", rc);
+        printf("(hello_server): exec tests: NOT ASKED — \"/\" does not "
+               "answer\n");
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Has process `pid' become `name'?  Asked of /proc/<pid>/stat, whose second
+ * field is the command proc_server records for it and replaces at an exec's
+ * handoff: a forked child is "forked" until its execve lands (#582).
+ *
+ * 1 when it has; 0 while not yet; -1 when it is a zombie, so it never will;
+ * -2 when its stat cannot be read.
+ */
+#define HELLO_EXEC_STEPS	300u
+
+static int
+hello_proc_is(unsigned int pid, const char *name)
+{
+    char path[32], want[48], buf[256];
+    const char *close_paren;
+    vfs_fd_t fd;
+    ssize_t got;
+
+    snprintf(path, sizeof path, "/proc/%u/stat", pid);
+    snprintf(want, sizeof want, "%u (%s) ", pid, name);
+    fd = vfs_open(path, VFS_O_RDONLY, 0);
+    if (fd == VFS_FD_INVALID)
+        return -2;
+    got = vfs_read(fd, buf, sizeof buf - 1);
+    vfs_close(fd);
+    if (got <= 0)
+        return -2;
+    buf[got] = '\0';
+    if (strncmp(buf, want, strlen(want)) == 0)
+        return 1;
+    /* "<pid> (<command>) <state> ...": the state is what follows. */
+    close_paren = strchr(buf, ')');
+    if (close_paren != NULL && close_paren[1] == ' ' && close_paren[2] == 'Z')
+        return -1;
+    return 0;
 }
 
 /*
@@ -471,99 +580,15 @@ main(int argc, char **argv)
     }
 
     /*
-     * #234 Phase 7: spawn the first DYNAMIC binary (/hello_dyn, ET_DYN
-     * with PT_INTERP=/lib/ld-musl-i386.so.1).  exec_server maps it + the
-     * interpreter (the umbrella libc.so); ld-musl self-relocates, relocates
-     * the program, runs musl startup and reaches main(), which mach_print's.
-     * Same spawn+observe+terminate dance as hello_exec below.
+     * Phase 5b (#255): fork() smoke.  Child prints once and
+     * _exit(7); parent waitpid's and checks the encoded status.
+     *
+     * Ahead of the tests that spawn a program, and apart from them: it loads
+     * nothing from a filesystem, so it does not wait for one (#582).
      */
     {
-        extern int __uros_spawn(const char *path, char *const argv[],
-                                char *const envp[], mach_port_t *out_task,
-                                mach_port_t *out_thread, unsigned int *out_pid,
-                                int replace_self);
-        extern int __uros_waitpid(int pid, int *status, int options);
-        char *dyn_argv[] = { (char *)"hello_dyn", NULL };
-        char *dyn_envp[] = { NULL };
-        mach_port_t  dt = MACH_PORT_NULL, dth = MACH_PORT_NULL;
-        unsigned int dpid = 0;
-        int dr = __uros_spawn("/hello_dyn", dyn_argv, dyn_envp,
-                              &dt, &dth, &dpid, 0 /* spawn child */);
-        if (dr != 0) {
-            printf("(hello_server): __uros_spawn(/hello_dyn) failed: %d\n", dr);
-        } else {
-            printf("(hello_server): spawned /hello_dyn pid=%u task=0x%x\n",
-                   dpid, (unsigned)dt);
-            for (int j = 0; j < 60; j++)
-                (void)syscall_thread_switch(MACH_PORT_NULL,
-                                            SWITCH_OPTION_WAIT, 20);
-            (void)task_terminate(dt);
-            int dst = 0;
-            (void)__uros_waitpid((int)dpid, &dst, 0);
-        }
-    }
-
-    /*
-     * #234 Phase 7 incr 4: spawn /dlopen_test, the dlopen end-to-end
-     * smoke test.  Same spawn+observe+terminate pattern as hello_dyn
-     * above; runs after it so the umbrella libc.so is proven to bring
-     * a fresh task up before we ask it to dlopen a second .so.
-     */
-    {
-        extern int __uros_spawn(const char *path, char *const argv[],
-                                char *const envp[], mach_port_t *out_task,
-                                mach_port_t *out_thread, unsigned int *out_pid,
-                                int replace_self);
-        extern int __uros_waitpid(int pid, int *status, int options);
-        char *dl_argv[] = { (char *)"dlopen_test", NULL };
-        char *dl_envp[] = { NULL };
-        mach_port_t  dlt = MACH_PORT_NULL, dlth = MACH_PORT_NULL;
-        unsigned int dlpid = 0;
-        int dlr = __uros_spawn("/dlopen_test", dl_argv, dl_envp,
-                               &dlt, &dlth, &dlpid, 0 /* spawn child */);
-        if (dlr != 0) {
-            printf("(hello_server): __uros_spawn(/dlopen_test) failed: %d\n",
-                   dlr);
-        } else {
-            printf("(hello_server): spawned /dlopen_test pid=%u task=0x%x\n",
-                   dlpid, (unsigned)dlt);
-            for (int j = 0; j < 60; j++)
-                (void)syscall_thread_switch(MACH_PORT_NULL,
-                                            SWITCH_OPTION_WAIT, 20);
-            (void)task_terminate(dlt);
-            int dlst = 0;
-            (void)__uros_waitpid((int)dlpid, &dlst, 0);
-        }
-    }
-
-    /*
-     * Step 4.6 (Phase 5 / #254): spawn /hello_exec via the new
-     * __uros_spawn primitive and waitpid for it.  __uros_spawn is the
-     * same path execve() uses, but called explicitly here so we don't
-     * have to suicide before we can observe the child finish.
-     */
-    {
-        extern int  __uros_spawn(const char *path,
-                                 char *const argv[], char *const envp[],
-                                 mach_port_t *out_task,
-                                 mach_port_t *out_thread,
-                                 unsigned int *out_pid,
-                                 int replace_self);
-        extern int  __uros_waitpid(int pid, int *status, int options);
-
-        char *argv_v[] = { (char *)"hello_exec", NULL };
-        char *envp_v[] = { NULL };
-        mach_port_t  child_task = MACH_PORT_NULL;
-        mach_port_t  child_thread = MACH_PORT_NULL;
-        unsigned int child_pid = 0;
-        int sr = __uros_spawn("/hello_exec", argv_v, envp_v,
-                              &child_task, &child_thread, &child_pid,
-                              0 /* spawn child */);
-        /*
-         * Phase 5b (#255): fork() smoke.  Child prints once and
-         * _exit(7); parent waitpid's and checks the encoded status.
-         */
         extern int __uros_fork(void);
+        extern int __uros_waitpid(int pid, int *status, int options);
         int forked_pid = __uros_fork();
         if (forked_pid < 0) {
             printf("(hello_server): fork() failed: %d\n", forked_pid);
@@ -582,15 +607,128 @@ main(int argc, char **argv)
                 printf("(hello_server): waitpid(forked) -> pid=%d status=0x%x\n",
                        fwr, fst);
         }
+    }
+
+    /*
+     * #234 Phase 7: spawn the first DYNAMIC binary (/hello_dyn, ET_DYN
+     * with PT_INTERP=/lib/ld-musl-i386.so.1).  exec_server maps it + the
+     * interpreter (the umbrella libc.so); ld-musl self-relocates, relocates
+     * the program, runs musl startup and reaches main(), which mach_print's.
+     * Same spawn+observe+terminate dance as hello_exec below.
+     *
+     * It and every test after it to the end of the /hello_exec block spawn
+     * a program, and are asked only once exec_server and "/" are there
+     * (#582).  Four arms -- /hello_dyn, /dlopen_test, #269's fork and
+     * execve, the spawn of /hello_exec -- each said WRONG when it fails, and
+     * counted at the end, which scripts/suite-i386.sh waits for: their
+     * failures were printed for weeks as plain lines that no judge read.
+     */
+    printf("(hello_server): exec tests: started\n");
+    int exec_asked = hello_wait_for_exec() == 0;
+    unsigned int exec_passed = 0;
+    if (exec_asked) {
+        extern int __uros_spawn(const char *path, char *const argv[],
+                                char *const envp[], mach_port_t *out_task,
+                                mach_port_t *out_thread, unsigned int *out_pid,
+                                int replace_self);
+        extern int __uros_waitpid(int pid, int *status, int options);
+        char *dyn_argv[] = { (char *)"hello_dyn", NULL };
+        char *dyn_envp[] = { NULL };
+        mach_port_t  dt = MACH_PORT_NULL, dth = MACH_PORT_NULL;
+        unsigned int dpid = 0;
+        int dr = __uros_spawn("/hello_dyn", dyn_argv, dyn_envp,
+                              &dt, &dth, &dpid, 0 /* spawn child */);
+        if (dr != 0) {
+            printf("(hello_server): WRONG — __uros_spawn(/hello_dyn) failed: "
+                   "%d\n", dr);
+        } else {
+            printf("(hello_server): spawned /hello_dyn pid=%u task=0x%x\n",
+                   dpid, (unsigned)dt);
+            for (int j = 0; j < 60; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL,
+                                            SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(dt);
+            int dst = 0;
+            int dwr = __uros_waitpid((int)dpid, &dst, 0);
+            if (dwr == (int)dpid)
+                exec_passed++;
+            else
+                printf("(hello_server): WRONG — waitpid(/hello_dyn pid=%u) "
+                       "-> %d\n", dpid, dwr);
+        }
+    }
+
+    /*
+     * #234 Phase 7 incr 4: spawn /dlopen_test, the dlopen end-to-end
+     * smoke test.  Same spawn+observe+terminate pattern as hello_dyn
+     * above; runs after it so the umbrella libc.so is proven to bring
+     * a fresh task up before we ask it to dlopen a second .so.
+     */
+    if (exec_asked) {
+        extern int __uros_spawn(const char *path, char *const argv[],
+                                char *const envp[], mach_port_t *out_task,
+                                mach_port_t *out_thread, unsigned int *out_pid,
+                                int replace_self);
+        extern int __uros_waitpid(int pid, int *status, int options);
+        char *dl_argv[] = { (char *)"dlopen_test", NULL };
+        char *dl_envp[] = { NULL };
+        mach_port_t  dlt = MACH_PORT_NULL, dlth = MACH_PORT_NULL;
+        unsigned int dlpid = 0;
+        int dlr = __uros_spawn("/dlopen_test", dl_argv, dl_envp,
+                               &dlt, &dlth, &dlpid, 0 /* spawn child */);
+        if (dlr != 0) {
+            printf("(hello_server): WRONG — __uros_spawn(/dlopen_test) "
+                   "failed: %d\n", dlr);
+        } else {
+            printf("(hello_server): spawned /dlopen_test pid=%u task=0x%x\n",
+                   dlpid, (unsigned)dlt);
+            for (int j = 0; j < 60; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL,
+                                            SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(dlt);
+            int dlst = 0;
+            int dlwr = __uros_waitpid((int)dlpid, &dlst, 0);
+            if (dlwr == (int)dlpid)
+                exec_passed++;
+            else
+                printf("(hello_server): WRONG — waitpid(/dlopen_test pid=%u) "
+                       "-> %d\n", dlpid, dlwr);
+        }
+    }
+
+    /*
+     * Step 4.6 (Phase 5 / #254): spawn /hello_exec via the new
+     * __uros_spawn primitive and waitpid for it.  __uros_spawn is the
+     * same path execve() uses, but called explicitly here so we don't
+     * have to suicide before we can observe the child finish.
+     */
+    if (exec_asked) {
+        extern int  __uros_spawn(const char *path,
+                                 char *const argv[], char *const envp[],
+                                 mach_port_t *out_task,
+                                 mach_port_t *out_thread,
+                                 unsigned int *out_pid,
+                                 int replace_self);
+        extern int  __uros_waitpid(int pid, int *status, int options);
+
+        char *argv_v[] = { (char *)"hello_exec", NULL };
+        char *envp_v[] = { NULL };
+        mach_port_t  child_task = MACH_PORT_NULL;
+        mach_port_t  child_thread = MACH_PORT_NULL;
+        unsigned int child_pid = 0;
+        int sr = __uros_spawn("/hello_exec", argv_v, envp_v,
+                              &child_task, &child_thread, &child_pid,
+                              0 /* spawn child */);
 
         /*
          * #269 reproducer: fork() + execve() in child.  Drives the
          * kernel diagnostic prints in task_create / ref_task_port_locked.
          */
+        extern int __uros_fork(void);
         printf("(hello_server): #269 repro — fork+execve\n");
         int xpid = __uros_fork();
         if (xpid < 0) {
-            printf("(hello_server): #269 fork() failed: %d\n", xpid);
+            printf("(hello_server): WRONG — #269 fork() failed: %d\n", xpid);
         } else if (xpid == 0) {
             printf("(hello_server)[fxchild]: pid=%u, calling execve\n",
                    __uros_my_pid);
@@ -612,10 +750,24 @@ main(int argc, char **argv)
              * hello_exec outlived the boot, spinning.  On one processor that
              * starved pthread_test's arm [24].
              *
-             * A beat for the exec to happen and print, the same beat the
-             * spawn below gives its child; then SIGKILL through proc_server,
-             * which terminates the task; then the waitpid, which now returns.
+             * The exec is waited for as proc_server sees it, then a beat
+             * for the new image to print, the same beat the spawn below
+             * gives its child; then SIGKILL through proc_server, which
+             * terminates the task; then the waitpid, which now returns.
+             *
+             * 🔴 THE EXEC IS SEEN, NOT ASSUMED (#582).  The kill ends the
+             * child whatever it is doing, so its status says nothing of the
+             * exec: one killed while its execve was still on the way leaves
+             * 0x9 as surely as one killed after.  A fixed beat stood here,
+             * and was taken as the exec's time.
              */
+            int seen = 0;
+            for (unsigned int j = 0; j < HELLO_EXEC_STEPS && seen == 0; j++) {
+                seen = hello_proc_is((unsigned)xpid, "hello_exec");
+                if (seen == 0)
+                    (void)syscall_thread_switch(MACH_PORT_NULL,
+                                                SWITCH_OPTION_WAIT, 100);
+            }
             for (int j = 0; j < 30; j++)
                 (void)syscall_thread_switch(MACH_PORT_NULL,
                                             SWITCH_OPTION_WAIT, 20);
@@ -624,6 +776,23 @@ main(int argc, char **argv)
             int xwr = __uros_waitpid(xpid, &xst, 0);
             printf("(hello_server): #269 kill(SIGKILL)=%d, waitpid -> wr=%d "
                    "status=0x%x\n", kr_kill, xwr, xst);
+            /*
+             * Became /hello_exec, and then killed, is the one right end: a
+             * child whose execve returned leaves by its own _exit(11),
+             * status 0xb00, before the kill finds it -- as all 111 of
+             * October's that #582 counted did.
+             */
+            if (seen != 1)
+                printf("(hello_server): WRONG — #269's child never became "
+                       "/hello_exec in /proc/%d/stat: %s\n", xpid,
+                       seen == 0 ? "not in the time given"
+                       : seen == -1 ? "it ended first"
+                       : "the stat could not be read");
+            else if (xwr != xpid || !WIFSIGNALED(xst) || WTERMSIG(xst) != SIGKILL)
+                printf("(hello_server): WRONG — #269's child was not ended by "
+                       "its parent's SIGKILL: wr=%d status=0x%x\n", xwr, xst);
+            else
+                exec_passed++;
         }
 
         /*
@@ -643,7 +812,8 @@ main(int argc, char **argv)
          */
 
         if (sr != 0) {
-            printf("(hello_server): __uros_spawn(/hello_exec) failed: %d\n", sr);
+            printf("(hello_server): WRONG — __uros_spawn(/hello_exec) failed: "
+                   "%d\n", sr);
         } else {
             printf("(hello_server): spawned /hello_exec pid=%u task=0x%x\n",
                    child_pid, (unsigned)child_task);
@@ -662,7 +832,14 @@ main(int argc, char **argv)
             else
                 printf("(hello_server): waitpid -> pid=%d status=0x%x\n",
                        wr, status);
+            if (wr == (int)child_pid)
+                exec_passed++;
+            else
+                printf("(hello_server): WRONG — waitpid(/hello_exec pid=%u) "
+                       "-> %d\n", child_pid, wr);
         }
+        printf("(hello_server): exec tests: %u of 4 arms passed\n",
+               exec_passed);
     }
 
     /*

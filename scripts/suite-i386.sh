@@ -51,11 +51,14 @@
 #
 # As run-x86_64.sh judges x86-64's (#425): the bundle starts its tasks in order
 # and they run at the same time, so no single line can mark the end.  Every
-# test that announced itself must also have concluded; pthread_test, cap_test
-# and ipc_bench must have spoken, so that a boot that stopped before the tests
-# is not passed for having started none; and no line may say WRONG, FAIL or
-# panic.  A run that stops printing for QUIET seconds, or goes on past CAP, is
-# stopped and said to be so.
+# test that announced itself must also have concluded; pthread_test, cap_test,
+# hello_server's exec tests and ipc_bench must have spoken, so that a boot
+# that stopped before the tests is not passed for having started none; and no
+# line may say WRONG, FAIL or panic.  A run that stops printing for QUIET
+# seconds, or goes on past CAP, is stopped and said to be so.
+#
+# hello_server's exec tests are among them because for weeks every one of
+# their spawns failed, printed as a plain line no judge looked for (#582).
 #
 # QUIET must outlast the longest stretch in which a healthy boot prints
 # nothing, and that is ipc_bench's fault-stress x32, which reports only at its
@@ -118,11 +121,13 @@ PAIRS=(
 	'fperr_test: x87 arm starting'	'fperr_test: x87 arm \(PASS\|SKIPPED\|FAIL\)'
 	'fperr_test: SIMD arm starting'	'fperr_test: SIMD arm \(PASS\|SKIPPED\|FAIL\)'
 	'irq_claim_test: '		'irq_claim_test: [0-9]* of 6 line arms passed'
+	'(hello_server): exec tests: started'	'(hello_server): exec tests: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
 )
 # What every full boot must have said: the tests that are always in the bundle.
 MUST=(
 	'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)'
 	'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)'
+	'(hello_server): exec tests: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
 	'^=== Benchmark complete ==='
 )
 # A line that fails the run wherever it appears -- among them a task killed by
