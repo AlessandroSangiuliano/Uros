@@ -5,12 +5,12 @@ Run: --entry 14 600 -smp 4
 Expect: irq_claim_test: \[10\] WRONG
 
 diff --git a/uros/src/mach_kernel/device/device_master.c b/uros/src/mach_kernel/device/device_master.c
-index 5a2606fc..26c72aa4 100644
+index c52574d2..5d0a51ea 100644
 --- a/uros/src/mach_kernel/device/device_master.c
 +++ b/uros/src/mach_kernel/device/device_master.c
-@@ -654,6 +654,12 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
+@@ -695,6 +695,12 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
+ 		return KERN_NO_ACCESS;
  	}
- 	urmach_rcu_read_unlock();
  
 +	/*
 +	 * #508: the first page only, as before the span was bounded, so that
