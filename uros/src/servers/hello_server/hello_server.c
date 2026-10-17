@@ -471,6 +471,36 @@ main(int argc, char **argv)
     }
 
     /*
+     * Phase 5b (#255): fork() smoke.  Child prints once and
+     * _exit(7); parent waitpid's and checks the encoded status.
+     *
+     * Ahead of the tests that spawn a program, and apart from them: it loads
+     * nothing from a filesystem, so it does not wait for one (#582).
+     */
+    {
+        extern int __uros_fork(void);
+        extern int __uros_waitpid(int pid, int *status, int options);
+        int forked_pid = __uros_fork();
+        if (forked_pid < 0) {
+            printf("(hello_server): fork() failed: %d\n", forked_pid);
+        } else if (forked_pid == 0) {
+            printf("(hello_server)[child]: hello from forked child, pid=%u\n",
+                   __uros_my_pid);
+            printf("(hello_server)[child]: about to _exit(7)\n");
+            _exit(7);
+        } else {
+            printf("(hello_server): fork() -> child_pid=%d\n", forked_pid);
+            int fst = 0;
+            int fwr = __uros_waitpid(forked_pid, &fst, 0);
+            if (fwr < 0)
+                printf("(hello_server): waitpid(forked) failed: %d\n", fwr);
+            else
+                printf("(hello_server): waitpid(forked) -> pid=%d status=0x%x\n",
+                       fwr, fst);
+        }
+    }
+
+    /*
      * #234 Phase 7: spawn the first DYNAMIC binary (/hello_dyn, ET_DYN
      * with PT_INTERP=/lib/ld-musl-i386.so.1).  exec_server maps it + the
      * interpreter (the umbrella libc.so); ld-musl self-relocates, relocates
@@ -559,34 +589,12 @@ main(int argc, char **argv)
         int sr = __uros_spawn("/hello_exec", argv_v, envp_v,
                               &child_task, &child_thread, &child_pid,
                               0 /* spawn child */);
-        /*
-         * Phase 5b (#255): fork() smoke.  Child prints once and
-         * _exit(7); parent waitpid's and checks the encoded status.
-         */
-        extern int __uros_fork(void);
-        int forked_pid = __uros_fork();
-        if (forked_pid < 0) {
-            printf("(hello_server): fork() failed: %d\n", forked_pid);
-        } else if (forked_pid == 0) {
-            printf("(hello_server)[child]: hello from forked child, pid=%u\n",
-                   __uros_my_pid);
-            printf("(hello_server)[child]: about to _exit(7)\n");
-            _exit(7);
-        } else {
-            printf("(hello_server): fork() -> child_pid=%d\n", forked_pid);
-            int fst = 0;
-            int fwr = __uros_waitpid(forked_pid, &fst, 0);
-            if (fwr < 0)
-                printf("(hello_server): waitpid(forked) failed: %d\n", fwr);
-            else
-                printf("(hello_server): waitpid(forked) -> pid=%d status=0x%x\n",
-                       fwr, fst);
-        }
 
         /*
          * #269 reproducer: fork() + execve() in child.  Drives the
          * kernel diagnostic prints in task_create / ref_task_port_locked.
          */
+        extern int __uros_fork(void);
         printf("(hello_server): #269 repro — fork+execve\n");
         int xpid = __uros_fork();
         if (xpid < 0) {
