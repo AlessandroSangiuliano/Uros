@@ -5,11 +5,11 @@ Run: --entry 0 600 -smp 4
 Expect: clock_event: hpet: its counter has been named -- by the rulers' vote or by the watchdog -- and is not used
 
 diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
-index 528c3475..ba796799 100644
+index f1f8f9c5..c62858ff 100644
 --- a/uros/src/mach_kernel/x86_64/time/clock_event.c
 +++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
-@@ -83,6 +83,8 @@ static unsigned		event_hz = CLOCK_EVENT_HZ;
- static uint64_t		tick_ns;
+@@ -127,6 +127,8 @@ static uint64_t		task_panic_first;	/* the first hold's TSC */
+ static volatile uint64_t task_panic_rest;	/* no hold before this TSC */
  static uint8_t		event_vector;
  
 +#include <x86_64/time/rulers.h>	/* rulers_distrust */
@@ -17,9 +17,9 @@ index 528c3475..ba796799 100644
  /* ------------------------------------------------------ tsc-deadline ---- */
  
  #define	MSR_IA32_TSC_DEADLINE	0x6E0
-@@ -346,6 +348,16 @@ clock_event_init(uint8_t vector)
- 	forced_lapic = boot_flag('T');
+@@ -391,6 +393,16 @@ clock_event_init(uint8_t vector)
  	forced_hpet = boot_flag('H');
+ 	task_panic_armed = boot_flag('t');
  
 +	/*
 +	 * #593: the HPET's counter named before the clock is chosen, as the

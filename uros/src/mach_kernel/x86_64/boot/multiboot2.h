@@ -188,8 +188,14 @@ uint64_t mb2_usable_ram(uint32_t info_pa);
  * Kept here rather than passed down because <kern/boot_modules.h> is asked
  * its questions from kern/bootstrap.c, which runs after every trace of the
  * boot handoff has gone out of scope.
+ *
+ * And the command line copied into the kernel's own memory (#688): 0 when it
+ * was, or its length in bytes when it is longer than MB2_CMDLINE_MAX - 1 and
+ * was not kept at all -- the caller says so and stops, since a line cut short
+ * would answer "not given" for every flag past the cut.
  */
-void mb2_remember(uint32_t info_pa);
+#define	MB2_CMDLINE_MAX		4096
+uint32_t mb2_remember(uint32_t info_pa);
 
 /* How many modules the loader placed, by walking the chain. */
 unsigned int mb2_module_count(void);
@@ -204,7 +210,10 @@ boolean_t mb2_module_range(unsigned int n, uint64_t *start, uint64_t *size);
  */
 const char *mb2_module_string(unsigned int n);
 
-/* The command line, or "" when the loader supplied none. */
+/*
+ * The command line, or "" when the loader supplied none -- the copy
+ * mb2_remember() made, readable whatever address space is loaded (#688).
+ */
 const char *mb2_cmdline(void);
 
 /* What mb2_remember() was given, or zero if it was never called. */

@@ -4,10 +4,10 @@ Holds open: a report held by a processor that will never let go -- apic id 0x777
 Run: --entry 0 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
-index 77cad042..b394275b 100644
+index ab6142ea..23071870 100644
 --- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
 +++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
-@@ -8860,6 +8860,57 @@ static void descriptor_tables_init(void)
+@@ -10217,6 +10217,57 @@ static void descriptor_tables_init(void)
  /* ------------------------------------------------------------------ */
  /*  Entry from boot.S (SysV: %edi = multiboot magic, %esi = info ptr).  */
  /* ------------------------------------------------------------------ */
@@ -64,8 +64,8 @@ index 77cad042..b394275b 100644
 +
  void x86_64_boot(uint32_t magic, uint32_t info)
  {
- 	kputs("UrMach x86-64: reached C in long mode (higher-half)\r\n");
-@@ -8949,6 +9000,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
+ 	uint32_t	cmdline_len;
+@@ -10323,6 +10374,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
  	spin_budget_selftest();
  	rulers_kept_selftest();
  	timer_selftest();
@@ -74,10 +74,10 @@ index 77cad042..b394275b 100644
  	pci_cap_selftest();
  	/*
 diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
-index b597a82f..6aa98f28 100644
+index bb3d27cb..5b73c954 100644
 --- a/uros/src/mach_kernel/x86_64/ddb/cons.c
 +++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
-@@ -585,6 +585,21 @@ static void cons_report_wait(void)
+@@ -592,6 +592,21 @@ static void cons_report_wait(void)
  	}
  }
  

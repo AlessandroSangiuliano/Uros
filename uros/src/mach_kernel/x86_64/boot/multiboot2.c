@@ -174,9 +174,49 @@ uint64_t mb2_usable_ram(uint32_t info_pa)
  */
 static uint32_t mb2_info_pa = 0;
 
-void mb2_remember(uint32_t info_pa)
+/*
+ * The command line, copied out of the loader's structure into the kernel's own
+ * memory, which every address space maps (#688).
+ *
+ * ⚠️ The loader's structure is reached at its physical address, and that is a
+ * virtual address only in the kernel's own page tables, which map the lower
+ * half one to one: a task's map has its own pages there, or nothing.
+ * boot_flag() reads the line wherever the answer is wanted (bootarg.h), and
+ * halt_cpu() asks it for -b on every processor a panic stops -- the one that
+ * panicked inside a system call, and each one the stop found inside its own,
+ * with its task's CR3 loaded.  In #687's two panics three processors each
+ * faulted on top of the panic that way (runs 38294325296 and 38920198646),
+ * and a task with a page at that address would have had its bytes read as the
+ * command line, a `-b' among them restarting the machine.  Copied here, before
+ * anything can run in a task's space, the line is read in the higher half.
+ *
+ * In .bss, which nothing on this target clears once the loader has, and
+ * written as an initialised object for the reason mb2_info_pa is.
+ */
+static char mb2_cmdline_kept[MB2_CMDLINE_MAX] = "";
+
+uint32_t mb2_remember(uint32_t info_pa)
 {
+	const struct mb2_tag_string	*t;
+	uint32_t			 room, len, i;
+
 	mb2_info_pa = info_pa;
+
+	t = (const struct mb2_tag_string *) mb2_find_tag(info_pa,
+							MB2_TAG_CMDLINE);
+	if (t == 0)
+		return 0;
+
+	/* Up to its terminator, and never past its own tag. */
+	room = t->size > sizeof(*t) ? t->size - (uint32_t) sizeof(*t) : 0;
+	for (len = 0; len < room && t->string[len] != '\0'; len++)
+		;
+	if (len > MB2_CMDLINE_MAX - 1)
+		return len;
+	for (i = 0; i < len; i++)
+		mb2_cmdline_kept[i] = t->string[i];
+	mb2_cmdline_kept[len] = '\0';
+	return 0;
 }
 
 uint32_t mb2_info(void)
@@ -259,12 +299,5 @@ const char *mb2_module_string(unsigned int n)
 
 const char *mb2_cmdline(void)
 {
-	const struct mb2_tag_string *t;
-
-	t = (const struct mb2_tag_string *) mb2_find_tag(mb2_info_pa,
-							MB2_TAG_CMDLINE);
-	if (t == 0)
-		return "";
-
-	return t->string;
+	return mb2_cmdline_kept;
 }

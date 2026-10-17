@@ -89,6 +89,9 @@ WRONG=0
 #   pcidd     the harness's verdict and, where the processor offers PCID, the
 #             default mode -- with INVPCID where the host has it, without where
 #             it does not -- with pcid_test's [1], [2] and [3] lines (#412)
+#   taskpanic -t panics inside a system call while another processor is held
+#             in a task's code, and no processor reports a trap of its own
+#             after it; NOT ASKED when no second processor came (#688)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -131,6 +134,7 @@ ENTRIES="
 39 msirace --iommu_intel
 24 panic2
 40 earlypanic
+53 taskpanic
 25 harness
 26 harness
 27 harness
@@ -307,6 +311,19 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 		w && /reset: -b: [0-9]+\.[0-9]+ seconds since the quiet census by the TSC, as reset_hold= asks; restarting the machine/ { r = 1 }
 		END { exit !r }' "$f" &&
 		zone_kept "$f" ;;
+	# #688: -t's panic, on a processor inside a system call while another
+	# is held in a task's code, and no trap after it.  halt_cpu() asks the
+	# command line for -b on every processor a panic stops, and it was
+	# read at the loader's physical address, which a task's CR3 maps to
+	# the task's pages or to nothing: each processor inside a task
+	# reported a page fault on top of #687's two panics.  Not anchored to
+	# the line's start: those reports came out interleaved.  A boot in
+	# which no second processor came says so, and the stop's way was not
+	# asked.
+	taskpanic) grep -aq 'panic(cpu [0-9]*): task_panic: asked for with -t' "$f" &&
+		! grep -aqE 'UrMach x86-64: trap |no handler' "$f" &&
+		{ grep -aq "held in a task's code until the stop" "$f" ||
+		  NOTE="NOT ASKED: no second processor came, so the stop met no task's space"; } ;;
 	esac
 }
 
