@@ -533,6 +533,24 @@ static struct device_claim_entry {
 static unsigned device_nclaims;
 
 /*
+ * The device operations in `ops', CAP_OP_PCI_* bits, as the kernel's lines
+ * name them (#621).
+ */
+_Static_assert(CAP_OP_PCI_DMA_MAP == 1 && CAP_OP_PCI_MMIO_MAP == 2
+	       && CAP_OP_PCI_IRQ == 4, "claim_ops_name() indexes by these bits");
+
+static const char *
+claim_ops_name(unsigned int ops)
+{
+	static const char *const name[8] = {
+		"no device operation", "DMA", "MMIO", "DMA and MMIO",
+		"IRQ", "DMA and IRQ", "MMIO and IRQ", "DMA, MMIO and IRQ"
+	};
+
+	return name[ops & 7];
+}
+
+/*
  * ── Whose device is this physical address? (#511) ────────────────────────
  *
  * 🔴 device_mmio_map USED TO CHECK THAT THE ADDRESS WAS NOT ZERO.  Holding
@@ -643,8 +661,9 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 {
 	task_t me = current_task();
 	unsigned i, n;
-	natural_t other_bdf = DEVICE_DMA_NO_BDF;
+	natural_t other_bdf = DEVICE_DMA_NO_BDF, my_bdf = DEVICE_DMA_NO_BDF;
 	int mine = 0;
+	unsigned int ops = 0;
 	uint64_t end = 0, region_end;
 
 	urmach_rcu_read_lock();
@@ -657,11 +676,24 @@ check_mmio_phys(vm_offset_t phys, vm_size_t len)
 		if (device_claim[i].task == me) {
 			mine = 1;
 			end = region_end;
+			ops = device_claim[i].ops;
+			my_bdf = device_claim[i].bdf;
 		} else
 			other_bdf = device_claim[i].bdf;
 		break;
 	}
 	urmach_rcu_read_unlock();
+
+	/* The device's, and the claim has to carry MMIO (#621). */
+	if (mine && (ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
+		printf("device_mmio_map: 0x%lx belongs to %02x:%02x.%u, and "
+		       "task 0x%lx's claim on it carries %s and not MMIO "
+		       "(#621)\n", (unsigned long)phys,
+		       (unsigned)(my_bdf >> 8), (unsigned)((my_bdf >> 3) & 0x1F),
+		       (unsigned)(my_bdf & 7), (unsigned long)me,
+		       claim_ops_name(ops));
+		return KERN_NO_ACCESS;
+	}
 
 	if (mine && (uint64_t)phys + len <= end)
 		return KERN_SUCCESS;
@@ -706,24 +738,6 @@ device_claimed_by_other(natural_t bdf)
 	urmach_rcu_read_unlock();
 
 	return other;
-}
-
-/*
- * The device operations in `ops', CAP_OP_PCI_* bits, as the kernel's lines
- * name them (#621).
- */
-_Static_assert(CAP_OP_PCI_DMA_MAP == 1 && CAP_OP_PCI_MMIO_MAP == 2
-	       && CAP_OP_PCI_IRQ == 4, "claim_ops_name() indexes by these bits");
-
-static const char *
-claim_ops_name(unsigned int ops)
-{
-	static const char *const name[8] = {
-		"no device operation", "DMA", "MMIO", "DMA and MMIO",
-		"IRQ", "DMA and IRQ", "MMIO and IRQ", "DMA, MMIO and IRQ"
-	};
-
-	return name[ops & 7];
 }
 
 /*
@@ -2877,6 +2891,17 @@ ds_master_device_region_map(
 		printf("device_region_map: %u:%u.%u is not this task's\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+	if ((device_claim[i].ops & (unsigned int)CAP_OP_PCI_MMIO_MAP) == 0) {
+		unsigned int ops = device_claim[i].ops;
+
+		urmach_rcu_read_unlock();
+		printf("device_region_map: %02x:%02x.%u REFUSED to task 0x%lx "
+		       "— its claim carries %s and not MMIO (#621)\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)me,
+		       claim_ops_name(ops));
 		return KERN_NO_ACCESS;
 	}
 	if (index >= device_claim[i].nregions
