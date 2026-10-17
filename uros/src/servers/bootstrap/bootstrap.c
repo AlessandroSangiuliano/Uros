@@ -184,6 +184,14 @@ mach_port_t	bootstrap_set;
 mach_port_t	bootstrap_bootstrap_port;
 
 /*
+ * #620: the console, opened once from the master device port and copied to
+ * any task that asks bootstrap_console().  Printing is all most tasks wanted
+ * the master device port for.
+ */
+mach_port_t	bootstrap_console_port;
+static kern_return_t console_open_kr;	/* what opening it answered */
+
+/*
  * Security token for device operations
  */
 security_token_t        bootstrap_security_token;
@@ -945,6 +953,26 @@ main(int argc, char **argv)
 		       (task_info_t)&bootstrap_security_token, &count);
 	if (kr != KERN_SUCCESS)
 	    panic(my_name);
+
+	/*
+	 * #620: the console a task without the master device port prints on,
+	 * opened before any server starts, since a server's first printf can
+	 * come before anything else it does.  A failure is said and kept:
+	 * bootstrap_console() then answers it to whoever asks.
+	 */
+	console_open_kr = device_open(bootstrap_master_device_port,
+				      MACH_PORT_NULL, D_READ | D_WRITE,
+				      bootstrap_security_token,
+				      (char *)"console",
+				      &bootstrap_console_port);
+	if (console_open_kr != KERN_SUCCESS) {
+	    BOOTSTRAP_IO_LOCK();
+	    printf("%s: the console for tasks without the master device "
+		   "port did not open: %s (%d) -- they cannot print (#620)\n",
+		   program_name, mach_error_string(console_open_kr),
+		   (int)console_open_kr);
+	    BOOTSTRAP_IO_UNLOCK();
+	}
 
 	/*
 	 *  Have a reply port for dead-name notification.
@@ -1954,6 +1982,20 @@ do_bootstrap_ports(mach_port_t bootstrap,
 	*root_ledger_wiredp = root_ledger_wired;
 	*root_ledger_pagedp = root_ledger_paged;
 	*security_portp = security_port;
+	return KERN_SUCCESS;
+}
+
+/*
+ * #620: the console, to any task: printing confers nothing else.
+ */
+kern_return_t
+do_bootstrap_console(mach_port_t bootstrap, mach_port_t *consolep)
+{
+	(void)bootstrap;
+	if (bootstrap_console_port == MACH_PORT_NULL)
+	    return console_open_kr != KERN_SUCCESS ? console_open_kr
+						   : KERN_FAILURE;
+	*consolep = bootstrap_console_port;
 	return KERN_SUCCESS;
 }
 
