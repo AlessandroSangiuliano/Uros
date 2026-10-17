@@ -55,6 +55,8 @@
 #include <sys/stat.h>                   /* fstat/struct stat — (#262) */
 #include <string.h>                     /* memcmp/strlen — (#262) */
 #include <uros/libposix.h>
+#include <servers/netname.h>            /* netname_look_up{,_mount} (#582) */
+#include <libvfs.h>                     /* vfs_stat (#582) */
 
 /*
  * Phase 4 (#252) smoke: SIGUSR1 handler.  File scope so taking its
@@ -226,6 +228,73 @@ hello_posix_exec_fd_smoke(void)
     close(fd);
     printf("(hello_server): exec-fd smoke %s (child status=0x%x)\n",
            child_ok ? "PASS" : "FAIL", status);
+}
+
+/*
+ * 🔴 THE EXEC TESTS WAIT FOR WHAT THEY LOAD THROUGH (#582).
+ *
+ * Each of them asks exec_server for a program, and exec_server reads it from
+ * "/".  The bootstrap starts hello_server before both and waits for neither,
+ * so the tests used to run against whatever had come up by then: from 2
+ * October every logged boot found no "/" yet and lost all four to ENOENT, on
+ * one processor as on four, and nothing said so.
+ *
+ * "/" must be SERVED, not merely registered: ext_server registers its mount
+ * before its message loop runs, and only the loop answers.  An answered
+ * vfs_stat("/") is the loop running, as xfile_test asks it.
+ *
+ * 0 when both are there.  -1 when either is still missing after
+ * HELLO_WAIT_STEPS tenths of a second, or "/" does not answer, having said
+ * which: the first is NOT ASKED, the second WRONG.
+ */
+#define HELLO_WAIT_STEPS	1200u
+
+static int
+hello_wait_for_exec(void)
+{
+    char host[80] = "";
+    char serv[80] = "exec_server";
+    netname_name_t matched;
+    mach_port_t port;
+    vfs_stat_t st;
+    unsigned int step;
+    int exec_up = 0, root_up = 0, rc;
+
+    for (step = 0; step < HELLO_WAIT_STEPS; step++) {
+        if (!exec_up) {
+            port = MACH_PORT_NULL;
+            if (netname_look_up(name_server_port, host, serv, &port)
+                    == NETNAME_SUCCESS && port != MACH_PORT_NULL) {
+                (void)mach_port_deallocate(mach_task_self(), port);
+                exec_up = 1;
+            }
+        }
+        if (!root_up) {
+            port = MACH_PORT_NULL;
+            matched[0] = '\0';
+            if (netname_look_up_mount(name_server_port, "/", &port, matched)
+                    == NETNAME_SUCCESS && port != MACH_PORT_NULL) {
+                (void)mach_port_deallocate(mach_task_self(), port);
+                root_up = 1;
+            }
+        }
+        if (exec_up && root_up)
+            break;
+        (void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 100);
+    }
+    if (!exec_up || !root_up) {
+        printf("(hello_server): exec tests: NOT ASKED — %s after %u s\n",
+               !exec_up && !root_up ? "no exec_server and no \"/\""
+               : !exec_up ? "no exec_server" : "no \"/\" mount",
+               HELLO_WAIT_STEPS / 10);
+        return -1;
+    }
+    if ((rc = vfs_stat("/", &st)) != 0) {
+        printf("(hello_server): exec tests: WRONG — \"/\" is registered and "
+               "a stat of it failed (%d): ext_server answers nothing\n", rc);
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -506,8 +575,13 @@ main(int argc, char **argv)
      * interpreter (the umbrella libc.so); ld-musl self-relocates, relocates
      * the program, runs musl startup and reaches main(), which mach_print's.
      * Same spawn+observe+terminate dance as hello_exec below.
+     *
+     * It and every test after it to the end of the /hello_exec block spawn
+     * a program, and are asked only once exec_server and "/" are there
+     * (#582).
      */
-    {
+    int exec_asked = hello_wait_for_exec() == 0;
+    if (exec_asked) {
         extern int __uros_spawn(const char *path, char *const argv[],
                                 char *const envp[], mach_port_t *out_task,
                                 mach_port_t *out_thread, unsigned int *out_pid,
@@ -539,7 +613,7 @@ main(int argc, char **argv)
      * above; runs after it so the umbrella libc.so is proven to bring
      * a fresh task up before we ask it to dlopen a second .so.
      */
-    {
+    if (exec_asked) {
         extern int __uros_spawn(const char *path, char *const argv[],
                                 char *const envp[], mach_port_t *out_task,
                                 mach_port_t *out_thread, unsigned int *out_pid,
@@ -572,7 +646,7 @@ main(int argc, char **argv)
      * same path execve() uses, but called explicitly here so we don't
      * have to suicide before we can observe the child finish.
      */
-    {
+    if (exec_asked) {
         extern int  __uros_spawn(const char *path,
                                  char *const argv[], char *const envp[],
                                  mach_port_t *out_task,
