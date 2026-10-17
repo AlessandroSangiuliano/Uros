@@ -2123,6 +2123,11 @@ the_write_half(mach_port_t device_port, mach_port_t tport, const char *tname)
  * latch command and two one-byte reads.  No write is tried -- if the refusal
  * were missing, writing 0xCF8 would be the race itself -- and the write RPC
  * asks the same checks as the read.
+ *
+ * #620: the ISA DMA controller, which a task could program to move bytes to
+ * physical memory, claimed whole, by one register, from below, and by one
+ * page register; and read at the two status registers and a page register,
+ * which move no byte flip-flop -- the address and count registers would.
  */
 static int
 the_pci_config_ports_are_the_kernels(mach_port_t device_port)
@@ -2138,6 +2143,10 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0x20,  2 },   /* the master 8259 (#599) */
         { 0xA0,  2 },   /* the slave 8259 (#599) */
         { 0x4D0, 2 },   /* the 8259s' edge/level registers (#599) */
+        { 0x00,  16 },  /* the first 8237 DMA controller (#620) */
+        { 0x0A,  1 },   /* its mask register alone (#620) */
+        { 0xBE,  4 },   /* from below, reaching the second 8237 (#620) */
+        { 0x87,  1 },   /* channel 0's page register alone (#620) */
     };
     static const struct {
         unsigned int  port;
@@ -2150,6 +2159,9 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         { 0x61,    1, KERN_NO_ACCESS },          /* the 8254's gate (#508) */
         { 0x71,    1, KERN_NO_ACCESS },          /* the CMOS data (#599) */
         { 0x21,    1, KERN_NO_ACCESS },          /* the 8259's mask (#599) */
+        { 0x08,    1, KERN_NO_ACCESS },          /* the first 8237's status (#620) */
+        { 0xD0,    1, KERN_NO_ACCESS },          /* the second 8237's status (#620) */
+        { 0x81,    1, KERN_NO_ACCESS },          /* channel 2's page register (#620) */
     };
     unsigned int  i, released, klog_from, data, bad = 0;
     kern_return_t kr;
@@ -2187,10 +2199,10 @@ the_pci_config_ports_are_the_kernels(mach_port_t device_port)
         return 0;
 
     printf("cap_test: [18] claims of 0xcf8..0xcff, 0xcfc alone, "
-           "0xcf4..0xcf8, the CMOS, both 8259s and the ELCR, and reads of "
-           "0xcf8, 0xcfc, 0x61, 0x71, 0x21 and 0x10cfc, refused — the claim "
-           "and read RPCs keep the ports the kernel keeps (#508, #597, "
-           "#599)\n");
+           "0xcf4..0xcf8, the CMOS, both 8259s and the ELCR, the 8237s and "
+           "their page registers, and reads of 0xcf8, 0xcfc, 0x61, 0x71, "
+           "0x21, 0x8, 0xd0, 0x81 and 0x10cfc, refused — the claim and read "
+           "RPCs keep the ports the kernel keeps (#508, #597, #599, #620)\n");
     return 1;
 }
 
