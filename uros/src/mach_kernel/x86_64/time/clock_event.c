@@ -105,15 +105,26 @@ static uint64_t		tick_ns;
  *
  * A task's thread and not only its space: a first version took the
  * bootstrap's loader, a kernel thread with the new task's map borrowed to
- * copy its image in, which is a task's CR3 too but no system call.  B is held
- * for at most TASK_PANIC_HOLD_CYCLES; when no A came, B panics itself and says
+ * copy its image in, which is a task's CR3 too but no system call.
+ *
+ * B is held a fifth of a second at a time, then let go for a second before the
+ * next: held until A came, the first B under TCG was the bootstrap itself,
+ * the one task running, and nothing else could make the system call A is.
+ * The state says who may move it -- A takes it only from a B still held, and B
+ * lets go only of a state A has not taken -- so B never leaves a hold A has
+ * counted on.  After two minutes of holds with no A, B panics itself and says
  * that the stop's way was not asked.  Read once, at boot.
  */
-#define	TASK_PANIC_HOLD_CYCLES	40000000000ULL	/* ten seconds at 4 GHz */
+#define	TASK_PANIC_HOLD_CYCLES	800000000ULL		/* a fifth of a second at 4 GHz */
+#define	TASK_PANIC_REST_CYCLES	4000000000ULL		/* a second at 4 GHz */
+#define	TASK_PANIC_GIVE_UP_CYCLES	480000000000ULL	/* two minutes at 4 GHz */
+#define	TASK_PANIC_NOBODY	(-1)	/* the state: no B held */
+#define	TASK_PANIC_FIRED	(-2)	/* A has taken the panic; else B's processor */
 
 static int		task_panic_armed;
-static volatile int	task_panic_held = -1;	/* B's processor, once held */
-static volatile int	task_panic_fired;	/* A's turn, taken once */
+static volatile int	task_panic_state = TASK_PANIC_NOBODY;
+static uint64_t		task_panic_first;	/* the first hold's TSC */
+static volatile uint64_t task_panic_rest;	/* no hold before this TSC */
 static uint8_t		event_vector;
 
 /* ------------------------------------------------------ tsc-deadline ---- */
@@ -1094,24 +1105,30 @@ clock_event_drain_reports(void)
 }
 
 /*
- * -t's B (#688): held until the panic, interrupts on, and never back.  The
- * stop's interrupt takes this processor into halt_cpu() from inside the loop;
- * or the bound runs out, and B panics itself.
+ * -t's B (#688): held with interrupts on until A takes the panic, and then
+ * never back -- the stop's interrupt takes this processor into halt_cpu() from
+ * inside the loop.  Or let go, interrupts off again as the tick found them,
+ * when the hold ran out with no A.
  */
 static void
-task_panic_hold(unsigned cpu)
+task_panic_hold(unsigned cpu, uint64_t t0)
 {
-	uint64_t	t0 = rdtsc_ordered();
-
+	if (task_panic_first == 0)
+		task_panic_first = t0;
 	interrupts_enable();
-	while (__atomic_load_n(&panicstr, __ATOMIC_ACQUIRE) == NULL &&
+	while (task_panic_state == (int) cpu &&
 	       rdtsc_ordered() - t0 < TASK_PANIC_HOLD_CYCLES)
 		cpu_pause();
-	if (__atomic_load_n(&panicstr, __ATOMIC_ACQUIRE) == NULL) {
+	if (__sync_bool_compare_and_swap(&task_panic_state, (int) cpu,
+					 TASK_PANIC_NOBODY)) {
 		interrupts_disable();
-		panic("task_panic: asked for with -t, in a task's code on cpu %u, "
-		      "and no other processor came inside the kernel on a task's "
-		      "thread: the stop's way is not asked (#688)", cpu);
+		if (rdtsc_ordered() - task_panic_first >= TASK_PANIC_GIVE_UP_CYCLES)
+			panic("task_panic: asked for with -t, in a task's code on cpu "
+			      "%u, and no other processor came inside the kernel "
+			      "on a task's thread while one was held: the stop's way "
+			      "is not asked (#688)", cpu);
+		task_panic_rest = rdtsc_ordered() + TASK_PANIC_REST_CYCLES;
+		return;
 	}
 	for (;;)
 		cpu_pause();
@@ -1143,18 +1160,21 @@ clock_event_tick(struct trap_frame *frame)
 		if (task_panic_armed && current_act() != THR_ACT_NULL &&
 		    current_act()->task != kernel_task &&
 		    percpu()->loaded_pmap != pmap_kernel()) {
+			int	b = task_panic_state;
+			uint64_t now = rdtsc_ordered();
+
 			if (usermode) {
-				if (__sync_bool_compare_and_swap(&task_panic_held,
-								 -1, (int) cpu))
-					task_panic_hold(cpu);
-			} else if (task_panic_held >= 0 &&
-				   task_panic_held != (int) cpu &&
-				   __sync_bool_compare_and_swap(&task_panic_fired,
-								0, 1))
+				if (now >= task_panic_rest &&
+				    __sync_bool_compare_and_swap(&task_panic_state,
+								 TASK_PANIC_NOBODY,
+								 (int) cpu))
+					task_panic_hold(cpu, now);
+			} else if (b >= 0 && b != (int) cpu &&
+				   __sync_bool_compare_and_swap(&task_panic_state, b,
+								TASK_PANIC_FIRED))
 				panic("task_panic: asked for with -t, on a task's "
 				      "thread inside the kernel, with cpu %d held "
-				      "in a task's code until the stop (#688)",
-				      task_panic_held);
+				      "in a task's code until the stop (#688)", b);
 		}
 	}
 
