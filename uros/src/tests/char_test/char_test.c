@@ -332,14 +332,15 @@ main(int argc, char **argv)
 
 	/*
 	 * [3] WHOSE PORT IS IT.  char_server claimed 0x3F8..0x3FF when uart.so
-	 * attached; this task holds the device master port like any other, and
-	 * before #497 that was enough to write any port behind no PCI BAR --
-	 * COM1 included, while a driver was mid-line on it.
+	 * attached; this task holds the device master port, and before #497
+	 * that was enough to write any port behind no PCI BAR -- COM1 included,
+	 * while a driver was mid-line on it.  Since #620 a port nobody claimed
+	 * is refused too: COM2, which no driver here drives.
 	 *
-	 * Both halves, because one of them alone proves nothing.  A refusal on
-	 * COM1 would be equally consistent with a check that refuses every
-	 * legacy port, and that check would be a worse bug than the hole it
-	 * closed.
+	 * And the half that makes the refusals mean anything: COM2 claimed by
+	 * this task is written.  Without it a refusal of both would be equally
+	 * consistent with a check that refuses every legacy port to everyone,
+	 * which would take the drivers with it.
 	 */
 	arms++;
 	if (!have_uart) {
@@ -357,7 +358,8 @@ main(int argc, char **argv)
 		mach_port_t	host = MACH_PORT_NULL, device = MACH_PORT_NULL;
 		mach_port_t	lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
 		mach_port_t	sec = MACH_PORT_NULL;
-		kern_return_t	mine, other;
+		kern_return_t	mine, bare, claim, claimed;
+		natural_t	released = 0, klog_from = 0;
 
 		kr = bootstrap_ports(bootstrap_port, &host, &device,
 				     &lw, &lp, &sec);
@@ -368,15 +370,27 @@ main(int argc, char **argv)
 		} else {
 			mine  = device_io_port_write(device, COM1_SCRATCH,
 						     1, 0x5Au);
-			other = device_io_port_write(device, COM2_SCRATCH,
+			bare  = device_io_port_write(device, COM2_SCRATCH,
 						     1, 0x5Au);
+			claim = device_io_port_claim(device, COM2_SCRATCH, 1,
+						     &released, &klog_from);
+			claimed = claim;
+			if (claim == KERN_SUCCESS) {
+				claimed = device_io_port_write(device,
+							       COM2_SCRATCH,
+							       1, 0x5Au);
+				(void) device_io_port_unclaim(device,
+							      COM2_SCRATCH);
+			}
 
-			if (mine == KERN_NO_ACCESS && other == KERN_SUCCESS) {
+			if (mine == KERN_NO_ACCESS && bare == KERN_NO_ACCESS
+			    && claimed == KERN_SUCCESS) {
 				printf("char_test: [3] COM1 0x%x is refused "
-				       "to this task and COM2 0x%x is not — "
-				       "the port has an owner, and the check "
-				       "is about the range and not about "
-				       "legacy ports\n",
+				       "to this task, COM2 0x%x too until "
+				       "this task claims it, and then it is "
+				       "written — the port has an owner, and "
+				       "the check is about the claim and not "
+				       "about legacy ports (#497, #620)\n",
 				       COM1_SCRATCH, COM2_SCRATCH);
 				passed++;
 			} else if (mine == KERN_SUCCESS) {
@@ -384,12 +398,17 @@ main(int argc, char **argv)
 				       "wrote COM1 0x%x while char_server was "
 				       "driving it; the claim did not take\n",
 				       COM1_SCRATCH);
+			} else if (bare == KERN_SUCCESS) {
+				printf("char_test: [3] WRONG — this task "
+				       "wrote COM2 0x%x without claiming it; "
+				       "a port nobody claimed is every "
+				       "task's again (#620)\n", COM2_SCRATCH);
 			} else {
 				printf("char_test: [3] WRONG — COM1 gave %d "
-				       "and COM2 gave %d; a check that "
-				       "refuses an unclaimed port has taken "
-				       "the PIT and the keyboard with it\n",
-				       (int)mine, (int)other);
+				       "and COM2 %d, but COM2 claimed gave %d "
+				       "(the claim %d); a claim must be the "
+				       "way in (#620)\n", (int)mine,
+				       (int)bare, (int)claimed, (int)claim);
 			}
 		}
 	}
