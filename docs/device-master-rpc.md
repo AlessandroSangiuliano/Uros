@@ -170,7 +170,12 @@ Holding the port is not enough to reach a device:
   the ISA DMA controller, and on x86-64 the ACPI PM timer where it is a
   port.
 - MMIO and DMA are reached only inside the regions of a claimed device
-  (#511).
+  (#511), and a device's interrupts only by the task that claimed it.
+- Each of the three needs its operation in the claim, as the capability
+  presented to `device_claim()` carried it (#621): DMA for the buffer
+  calls, MMIO for `device_mmio_map()` and `device_region_map()`, IRQ for
+  `device_msi_register()` and for `device_intr_register()` on a line the
+  device raises. A second claim by the holder only narrows them.
 
 ## Future Evolution (x86-64)
 
