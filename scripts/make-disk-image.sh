@@ -244,12 +244,12 @@ HAL_BAR_TEST_CONF_LINE=""
 if [ -f "$HAL_BAR_TEST" ]; then
     # #427: what the HAL says about BARs, after the block server so its rescan
     # runs with controllers bound.
-    HAL_BAR_TEST_CONF_LINE="hal_bar_test hal_bar_test"
+    HAL_BAR_TEST_CONF_LINE="-D hal_bar_test hal_bar_test"
 fi
 
 IRQ_CLAIM_TEST_CONF_LINE=""
 if [ -f "$IRQ_CLAIM_TEST" ]; then
-    IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
+    IRQ_CLAIM_TEST_CONF_LINE="-D irq_claim_test irq_claim_test"
 fi
 
 # #515: un errore aritmetico non mascherato deve arrivare al thread che lo ha
@@ -270,7 +270,7 @@ fi
 
 CAP_TEST_CONF_LINE=""
 if [ -f "$CAP_TEST" ]; then
-    CAP_TEST_CONF_LINE="cap_test cap_test"
+    CAP_TEST_CONF_LINE="-H -D cap_test cap_test"
 fi
 EXEC_SERVER_CONF_LINE=""
 if [ -f "$EXEC_SERVER" ]; then
@@ -278,7 +278,7 @@ if [ -f "$EXEC_SERVER" ]; then
 fi
 PROC_SERVER_CONF_LINE=""
 if [ -f "$PROC_SERVER" ]; then
-    PROC_SERVER_CONF_LINE="proc_server proc_server"
+    PROC_SERVER_CONF_LINE="-H proc_server proc_server"
 fi
 # gpustat (if built) runs after gpu_server / cap_server are up so it
 # can netname_look_up "gpu" and cap_request DEV_ADMIN.  It is a
@@ -308,9 +308,9 @@ fi
 # su netname_notify in attesa che BDS pubblichi la partizione.
 #
 GPU_SERVER_CONF_LINE=""
-[ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
+[ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="-D gpu_server gpu_server"
 CHAR_SERVER_CONF_LINE=""
-[ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
+[ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="-D char_server char_server"
 
 if [ "$MINIMAL" = "1" ]; then
     HELLO_SERVER_LINE=""
@@ -324,7 +324,7 @@ if [ "$MINIMAL" = "1" ]; then
     GPUSTAT_CONF_LINE=""
 else
     HELLO_SERVER_LINE="hello_server hello_server"
-    IPC_BENCH_LINE="ipc_bench ipc_bench${BENCH_ARGS}"
+    IPC_BENCH_LINE="-H ipc_bench ipc_bench${BENCH_ARGS}"
     PTHREAD_TEST_LINE="pthread_test pthread_test"
 fi
 
@@ -336,11 +336,11 @@ name_server name_server
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
 ${CHAR_SERVER_CONF_LINE}
-hal_server hal_server
-block_device_server block_device_server
-default_pager default_pager disk0c
+-D hal_server hal_server
+-D block_device_server block_device_server
+-H default_pager default_pager disk0c
 ${HELLO_SERVER_LINE}
-ext_server ext_server
+-D ext_server ext_server
 ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}
 ${IPC_BENCH_LINE}

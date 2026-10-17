@@ -159,19 +159,19 @@ trap 'rm -f "$BOOTSTRAP_CONF"' EXIT
 CAP_SERVER_CONF_LINE=""
 [ -f "$CAP_SERVER" ] && CAP_SERVER_CONF_LINE="cap_server cap_server"
 CAP_TEST_CONF_LINE=""
-[ -f "$CAP_TEST" ] && CAP_TEST_CONF_LINE="cap_test cap_test"
+[ -f "$CAP_TEST" ] && CAP_TEST_CONF_LINE="-H -D cap_test cap_test"
 # #457: claims an interrupt line and gives it back.  ⚠️ On a kernel where
 # the release halts, nothing after its FIRST line is ever printed -- so a
 # failure here is a missing log rather than a wrong one.
 IRQ_CLAIM_TEST_CONF_LINE=""
-[ -f "$IRQ_CLAIM_TEST" ] && IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
+[ -f "$IRQ_CLAIM_TEST" ] && IRQ_CLAIM_TEST_CONF_LINE="-D irq_claim_test irq_claim_test"
 
 # #427: what the HAL says about BARs.  After block_device_server, so the rescan
 # it issues happens with two controllers BOUND -- which is the state a rescan
 # that touched devices would damage, and the only state in which "it does not"
 # is worth measuring.
 HAL_BAR_TEST_CONF_LINE=""
-[ -f "$HAL_BAR_TEST" ] && HAL_BAR_TEST_CONF_LINE="hal_bar_test hal_bar_test"
+[ -f "$HAL_BAR_TEST" ] && HAL_BAR_TEST_CONF_LINE="-D hal_bar_test hal_bar_test"
 
 # #515: un errore aritmetico non mascherato deve arrivare al thread che lo ha
 # causato.  DUE righe e un solo binario: i bracci si distinguono per argv.
@@ -197,8 +197,8 @@ fi
 # OGNI slot DMA libero, quindi dopo il block server affamerebbe chi il disco lo
 # usa davvero.  I due `-w' serializzano la coppia.
 DMA_RECLAIM_CONF_LINES=""
-[ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="dma_reclaim_test dma_reclaim_test holder
-dma_reclaim_test dma_reclaim_test check"
+[ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="-D dma_reclaim_test dma_reclaim_test holder
+-D dma_reclaim_test dma_reclaim_test check"
 # #498: the MIRROR of the x86-64 bundle's two lines -- this target reads the
 # file x86-64 wrote on /mnt/disk2 and leaves its own for x86-64 to read.  Both
 # say NOT ASKED on a boot without a second AHCI disk; run-qemu.sh
@@ -211,13 +211,13 @@ xfile_test xfile_test write /mnt/disk2/from_i386.dat"
 MSG_SERVER_TEST_CONF_LINE=""
 [ -f "$MSG_SERVER_TEST" ] && MSG_SERVER_TEST_CONF_LINE="msg_server_test msg_server_test"
 KERNEL242_TEST_CONF_LINE=""
-[ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
+[ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="-H -D kernel242_test kernel242_test"
 SIG_TEST_CONF_LINE=""
 [ -f "$SIG_TEST" ] && SIG_TEST_CONF_LINE="sig_test sig_test"
 EXEC_SERVER_CONF_LINE=""
 [ -f "$EXEC_SERVER" ] && EXEC_SERVER_CONF_LINE="exec_server exec_server"
 PROC_SERVER_CONF_LINE=""
-[ -f "$PROC_SERVER" ] && PROC_SERVER_CONF_LINE="proc_server proc_server"
+[ -f "$PROC_SERVER" ] && PROC_SERVER_CONF_LINE="-H proc_server proc_server"
 GPUSTAT_CONF_LINE=""
 [ -f "$GPUSTAT" ] && GPUSTAT_CONF_LINE="gpustat gpustat"
 # ush (#275.5): kept off the bundle (no `ARGS+=` entry below) so it
@@ -238,9 +238,9 @@ elif [ -f "$USH" ]; then
 fi
 
 GPU_SERVER_CONF_LINE=""
-[ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
+[ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="-D gpu_server gpu_server"
 CHAR_SERVER_CONF_LINE=""
-[ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
+[ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="-D char_server char_server"
 
 if [ "$MINIMAL" = "1" ]; then
     HELLO_SERVER_LINE=""
@@ -259,7 +259,7 @@ if [ "$MINIMAL" = "1" ]; then
     GPUSTAT_CONF_LINE=""
 else
     HELLO_SERVER_LINE="hello_server hello_server"
-    IPC_BENCH_LINE="ipc_bench ipc_bench${BENCH_ARGS}"
+    IPC_BENCH_LINE="-H ipc_bench ipc_bench${BENCH_ARGS}"
     PTHREAD_TEST_LINE="pthread_test pthread_test"
 fi
 
@@ -283,13 +283,13 @@ name_server name_server
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
 ${CHAR_SERVER_CONF_LINE}
-hal_server hal_server
+-D hal_server hal_server
 ${DMA_RECLAIM_CONF_LINES}
 ${IPC_BENCH_STAGE1_LINE}
-block_device_server block_device_server
-default_pager default_pager disk0c
+-D block_device_server block_device_server
+-H default_pager default_pager disk0c
 ${HELLO_SERVER_LINE}
-ext_server ext_server
+-D ext_server ext_server
 ${XFILE_CONF_LINES}
 ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}

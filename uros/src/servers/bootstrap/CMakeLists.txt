@@ -457,9 +457,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(UROS_BUNDLE_IPC_BENCH_SUITES "" CACHE STRING
       "Which ipc_bench suites the full x86-64 bundle runs (empty: all)")
   if(UROS_BUNDLE_IPC_BENCH AND UROS_BUNDLE_IPC_BENCH_SUITES)
-    set(_IPC_BENCH_LINE "ipc_bench ipc_bench ${UROS_BUNDLE_IPC_BENCH_SUITES}\n")
+    set(_IPC_BENCH_LINE "-H ipc_bench ipc_bench ${UROS_BUNDLE_IPC_BENCH_SUITES}\n")
   elseif(UROS_BUNDLE_IPC_BENCH)
-    set(_IPC_BENCH_LINE "ipc_bench ipc_bench\n")
+    set(_IPC_BENCH_LINE "-H ipc_bench ipc_bench\n")
   else()
     set(_IPC_BENCH_LINE "")
   endif()
@@ -539,7 +539,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # interleaving mistaken for an order (run-x86_64.sh records that one).
     set(_CHAR_CMF
       "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/char_test.cmf")
-    set(_CHAR_LINE  "char_server char_server\nchar_test char_test\n")
+    set(_CHAR_LINE  "-D char_server char_server\n-D char_test char_test\n")
     set(_CHAR_FILES "char_server:${_SBIN}/char_server"
                     "modules/char/uart.so:${_MOD}/char/uart.so"
                     "char_test:${_SBIN}/char_test"
@@ -593,10 +593,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
         CACHE STRING "Which ipc_bench suites the bench-only bundle runs")
     set(_BENCH_SUITES "${UROS_BENCH_SUITES}")
     file(GENERATE OUTPUT ${_CONF}
-         CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
+         CONTENT "name_server name_server\n-H ipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\nio_claim_race io_claim_race a\nio_claim_race io_claim_race b\next_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\n-D irq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\n-H -D cap_test cap_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n-D irq_claim_test irq_claim_test msi\n-D dma_reclaim_test dma_reclaim_test holder\n-D dma_reclaim_test dma_reclaim_test check\n-D block_device_server block_device_server\n-D hal_bar_test hal_bar_test\n-D io_claim_race io_claim_race a\n-D io_claim_race io_claim_race b\n-D ext_server ext_server\nxfile_test xfile_test read /mnt/disk2/from_i386.dat\nxfile_test xfile_test write /mnt/disk2/from_x86_64.dat\n${_CHAR_LINE}${_IPC_BENCH_LINE}")
   endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
@@ -757,7 +757,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_NODISK_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap-nodisk.bundle)
   set(_NODISK_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap-nodisk.conf)
   file(GENERATE OUTPUT ${_NODISK_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\nact_test act_test\ncow_test cow_test\nhal_server hal_server\n${_CHAR_LINE}")
+       CONTENT "name_server name_server\nnetname_test netname_test\ncap_server cap_server\npthread_test pthread_test\nmsg_server_test msg_server_test\ndl_test dl_test\nfault_test fault_test\nfperr_test fperr_test x87\nfperr_test fperr_test sse\n-H act_test act_test\n-H cow_test cow_test\n-D hal_server hal_server\n${_CHAR_LINE}")
   add_custom_command(
     OUTPUT ${_NODISK_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_NODISK_BUNDLE}

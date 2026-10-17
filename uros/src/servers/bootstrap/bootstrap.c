@@ -1611,6 +1611,14 @@ parse_boot_args(char **data, struct server **sp)
 		/* Data request line */
 		(*sp)->flags |= SERVER_DATA_F;
 		break;
+	    case 'H':
+		/* #620: the master host port, for bootstrap_ports() to hand */
+		(*sp)->flags |= SERVER_HOST_PRIV_F;
+		break;
+	    case 'D':
+		/* #620: the master device port, for bootstrap_ports() to hand */
+		(*sp)->flags |= SERVER_DEVICE_F;
+		break;
 	    default:
 		BOOTSTRAP_IO_LOCK();
 		printf("%s: Unrecognized switch '-%c'\n",

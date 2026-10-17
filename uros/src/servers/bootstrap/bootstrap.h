@@ -144,6 +144,10 @@ extern mach_port_t bootstrap_name_server_port(void);
 #define SERVER_DIED_F	   0x4
 /* Server is a data filename */
 #define	SERVER_DATA_F	   0x8
+/* #620: -H, for bootstrap_ports() to hand this server the master host port */
+#define SERVER_HOST_PRIV_F 0x10
+/* #620: -D, for bootstrap_ports() to hand this server the master device port */
+#define SERVER_DEVICE_F	   0x20
 
 struct server {
 	const char 	*symtab_name;
