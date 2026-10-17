@@ -439,9 +439,15 @@ own_the_network_card(natural_t *bdf_out)
 		return 0;
 	}
 
+	/*
+	 * MMIO and IRQ: [5] asks the card for a message-signalled interrupt,
+	 * [9] to [12] map its registers.  This asked for IRQ alone while [9]
+	 * to [12] mapped them, which worked only because the kernel did not
+	 * look at what a claim's capability carried (#621).
+	 */
 	memset(&tok, 0, sizeof(tok));
 	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)(class_rev >> 8),
-			 CAP_OP_PCI_IRQ, 0, &tok);
+			 CAP_OP_PCI_MMIO_MAP | CAP_OP_PCI_IRQ, 0, &tok);
 	if (kr != KERN_SUCCESS) {
 		printf("irq_claim_test: cap_server would not issue a "
 		       "capability for class 0x%06x (kr=%d)\n",
