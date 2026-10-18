@@ -2091,10 +2091,19 @@ mach_msg_overwrite_trap(
 		receiver->ith_seqno = dest_port->ip_seqno++;
 		imq_unlock(dest_mqueue);
 
-		/* inline ipc_object_release */
-		io_lock(rcv_object);
-		io_release(rcv_object);
-		io_check_unlock(rcv_object);
+		/*
+		 * 🔴 NOT HERE: THE REFERENCE ON rcv_object IS KEPT ACROSS THE
+		 * WAIT (#687).  It was given back at this point, inline, under
+		 * io_lock -- a mutex, taken by a thread already TH_WAIT for its
+		 * reply.  Held by anyone else, the mutex put this thread to
+		 * sleep inside its own park, and the mutex's wakeup ended the
+		 * wait declared for the reply, with nothing delivered: "bad
+		 * wait result 0 (ith_state 10004001)" below.  Nothing between
+		 * the park and the switch may sleep, and mutex_lock() now says
+		 * so.  The reference goes back after the wait, as the slow path
+		 * gives its own back after ipc_mqueue_receive(), and it keeps
+		 * the port or set alive for the imq_lock taken there.
+		 */
 
 		/*
 		 * Switch directly to receiving thread, and block
@@ -2243,8 +2252,10 @@ mach_msg_overwrite_trap(
 			    case MACH_RCV_PORT_CHANGED:
 				/* something bad happened to the port/set */
 
+				mr = self->ith_state;
 				imq_unlock(rcv_mqueue);
-				return self->ith_state;
+				ipc_object_release(rcv_object);
+				return mr;
 
 			    case MACH_RCV_IN_PROGRESS:
 				/*
@@ -2261,6 +2272,7 @@ mach_msg_overwrite_trap(
 					/* receive was interrupted - give up */
 
 					imq_unlock(rcv_mqueue);
+					ipc_object_release(rcv_object);
 					return MACH_RCV_INTERRUPTED;
 
 				    default:
@@ -2280,6 +2292,9 @@ mach_msg_overwrite_trap(
 				      self->ith_state, save_wait_result);
 			}
 		}
+
+		/* The reference kept across the wait, given back awake (#687). */
+		ipc_object_release(rcv_object);
 
 		/*
 		 * Restore state saved in sending thread's send path.
