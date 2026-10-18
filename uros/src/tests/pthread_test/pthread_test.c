@@ -213,12 +213,37 @@ test_cond_signal(void)
 	pthread_t th;
 	void *retval;
 	int seq_before = -1, seq_after = -1, waiters_seen = -1, unused;
+	int waiters_now = -1, waited_ms;
 
 	cond_flag = 0;
 	pthread_create(&th, NULL, thread_cond_waiter, NULL);
 
-	/* Give the waiter time to block */
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+	/*
+	 * #667: the signal waits until the variable counts the waiter.  This
+	 * gave the waiter a depress of 10 ms, which is not a wait for anything
+	 * (#584), and a waiter that had not reached pthread_cond_wait() by then
+	 * found cond_flag set and never waited: the wakeup the case is for was
+	 * needed only when the waiter happened to be asleep first, and
+	 * ablations/667-signal-wakes-nobody was caught only then.  The waiter
+	 * is counted under the variable's lock, before it lets the mutex go, so
+	 * once it is counted it is in the wait or on its way into it.
+	 */
+	for (waited_ms = 0; waited_ms < COND_JOIN_LIMIT_S * 1000; waited_ms++) {
+		if (pthread_cond_state_np(&cond_var, &unused, &waiters_now) == 0
+		    && waiters_now > 0)
+			break;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	}
+	if (waiters_now <= 0) {
+		test_fail("cond_signal", "the waiter was not waiting after "
+			  "thirty seconds, so the signal would ask nothing");
+		pthread_mutex_lock(&cond_mutex);
+		cond_flag = 1;
+		pthread_cond_signal(&cond_var);
+		pthread_mutex_unlock(&cond_mutex);
+		(void) pthread_join(th, &retval);
+		return;
+	}
 
 	pthread_mutex_lock(&cond_mutex);
 	cond_flag = 1;
