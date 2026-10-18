@@ -689,8 +689,9 @@ waker_say(thread_t thread)
 
 	printf("waker: thread %p, state 0x%x, wait_event %p, wait_result %d; "
 	       "last woken by %s+0x%lx (%p) on cpu %d with result %d, ending "
-	       "a wait on %p (0: an IPC queue); IPC park %u, taken off one at "
-	       "%u; last assert_wait from %s+0x%lx (#687)\n", thread,
+	       "a wait on %p (0: an IPC queue, or another wait on no event); "
+	       "IPC park %u, taken off one at %u; last assert_wait from "
+	       "%s+0x%lx (#687)\n", thread,
 	       thread->state, thread->wait_event, thread->wait_result, woke,
 	       (unsigned long) woff, thread->woke_from, thread->woke_cpu,
 	       thread->woke_result, thread->woke_event, thread->ith_park_seq,

@@ -594,6 +594,12 @@ mach_msg_receive_continue(void)
 
 	    case MACH_RCV_IN_PROGRESS:
 	    case MACH_RCV_IN_PROGRESS_TIMED:
+#if	WAKER_TRACK
+		/* #687: before the rmqueue copies the park count, as below */
+		if (save_wait_result != THREAD_INTERRUPTED &&
+		    save_wait_result != THREAD_TIMED_OUT)
+			waker_say(self);
+#endif
 		ipc_thread_rmqueue(&mqueue->imq_threads, self);
 
 		switch (save_wait_result) {
@@ -623,9 +629,6 @@ mach_msg_receive_continue(void)
 
 		    case THREAD_RESTART:
 		    default:
-#if	WAKER_TRACK
-			waker_say(self);	/* #687 */
-#endif
 			panic("mach_msg_receive_continue: bad wait_result");
 		}
 		break;
@@ -2264,6 +2267,17 @@ mach_msg_overwrite_trap(
 				 *	then check the wakeup cause.
 				 */
 
+#if	WAKER_TRACK
+				/*
+				 * #687: said before the rmqueue, which copies
+				 * the park count into the count of the last
+				 * time this thread was taken off a queue, and
+				 * made every such line say it was taken off in
+				 * the park it was found still queued in.
+				 */
+				if (save_wait_result != THREAD_INTERRUPTED)
+					waker_say(self);
+#endif
 				ipc_thread_rmqueue(&rcv_mqueue->imq_threads,
 									self);
 
@@ -2276,9 +2290,6 @@ mach_msg_overwrite_trap(
 					return MACH_RCV_INTERRUPTED;
 
 				    default:
-#if	WAKER_TRACK
-					waker_say(self);	/* #687 */
-#endif
 					panic("mmot_hotpath: bad wait result %x (ith_state %x)",
 					      save_wait_result, self->ith_state);
 				}

@@ -1216,6 +1216,18 @@ ipc_mqueue_receive(
 			 *	then check the wakeup cause.
 			 */
 
+#if	WAKER_TRACK
+			/*
+			 * #687: said before the rmqueue, which copies the park
+			 * count into the count of the last time this thread was
+			 * taken off a queue, and made every such line say it
+			 * was taken off in the park it was found still queued
+			 * in.
+			 */
+			if (save_wait_result != THREAD_INTERRUPTED &&
+			    save_wait_result != THREAD_TIMED_OUT)
+				waker_say(self);
+#endif
 			ipc_thread_rmqueue(&mqueue->imq_threads, self);
 
 			switch (save_wait_result) {
@@ -1237,9 +1249,6 @@ ipc_mqueue_receive(
 
 			    case THREAD_RESTART:
 			    default:
-#if	WAKER_TRACK
-				waker_say(self);	/* #687 */
-#endif
 				panic("ipc_mqueue_receive: bad wait_result");
 			}
 			break;

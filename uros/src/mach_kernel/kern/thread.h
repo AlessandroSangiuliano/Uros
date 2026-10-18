@@ -364,7 +364,7 @@ typedef struct thread_shuttle {
 	 * A thread found woken with nothing delivered says here who woke it.
 	 */
 	void		*woke_from;	/* the waking function's caller */
-	event_t		woke_event;	/* NO_EVENT for an IPC queue's wait */
+	event_t		woke_event;	/* NO_EVENT: an IPC park or the like */
 	int		woke_result;	/* what it gave the thread */
 	int		woke_cpu;
 #endif	/* WAKER_TRACK */
