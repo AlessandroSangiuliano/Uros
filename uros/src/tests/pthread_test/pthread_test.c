@@ -2584,8 +2584,8 @@ first_use_run(const char *name, void *(*body)(void *))
  * initialises the rest.  Two threads that take such a mutex for the first time
  * together must still exclude each other, and they did not: each initialised
  * it, the later one wrote `state = 0' over the earlier one's hold, and both
- * were inside.  That is how [2]'s waiter read cond_flag as 0 after the signal
- * had set it, and slept through a wakeup that had gone by.
+ * were inside.  That is how cond_signal's waiter read cond_flag as 0 after
+ * the signal had set it, and slept through a wakeup that had gone by.
  *
  * Each thread holds the mutex FIRST_LOCK_HOLD_MS, and neither may find the
  * other inside.  The window is a few instructions wide, so a boot rarely
@@ -2706,6 +2706,15 @@ main(int argc, char **argv)
 	printf("pthread_test: starting\n");
 	test_num = 0;
 
+	/*
+	 * #667: first, before any other case uses a static object.  With
+	 * the fix taken out, a static mutex's first use can leave the mutex
+	 * held for good, and a case that comes after one never reaches these:
+	 * cond_broadcast's mutex stopped five boots of six that way.
+	 */
+	test_static_mutex_first_lock();
+	test_static_cond_first_use();
+
 	test_create_join();
 	test_cond_signal();
 	test_cond_broadcast();
@@ -2740,8 +2749,6 @@ main(int argc, char **argv)
 	test_malloc_bench();
 	test_trap_vs_rpc_bench();
 	test_trap_sweep();
-	test_static_mutex_first_lock();
-	test_static_cond_first_use();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
