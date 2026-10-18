@@ -2029,6 +2029,10 @@ mach_msg_overwrite_trap(
 		 * thread_dispatch() (receiver, post-switch) runs first, the
 		 * sender ends up on a run queue: see thread_go() / thread_dispatch
 		 * in kern/sched_prim.c.
+		 *
+		 * 🔴 From here to the switch nothing may sleep (#687): a mutex
+		 * taken in between, held by anyone, ends this wait with its own
+		 * wakeup.  mutex_lock() panics on a thread TH_WAIT on no event.
 		 */
 		thread_lock(self);
 #if	WAKER_TRACK
