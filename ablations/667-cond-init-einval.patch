@@ -1,0 +1,38 @@
+Kind: ablation
+Issue: #667
+Over: 667-widen-first-use.patch
+Takes out: a392f671's gates -- broadcast, signal and wait come to the lazy initialisation only on the initial signature again, so a caller that finds the variable being initialised skips it and answers EINVAL; with the initialiser held by the widen, pthread_test's second first-use case must see its later pthread_cond_signal() answer EINVAL
+Run: --entry 14 600 -smp 4
+Expect: static condition variable, signalled while another thread initialises it: FAIL
+
+diff --git a/uros/src/lib/libpthreads/pthread_cond.c b/uros/src/lib/libpthreads/pthread_cond.c
+index 6a460c56..5c29ce77 100644
+--- a/uros/src/lib/libpthreads/pthread_cond.c
++++ b/uros/src/lib/libpthreads/pthread_cond.c
+@@ -164,7 +164,7 @@ pthread_cond_init(pthread_cond_t *cond,
+ int
+ pthread_cond_broadcast(pthread_cond_t *cond)
+ {
+-	if (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE) != _PTHREAD_COND_SIG)
++	if (cond->sig == _PTHREAD_COND_SIG_init)
+ 	{
+ 		int res;
+ 		res = _pthread_cond_lazy_init(cond);
+@@ -193,7 +193,7 @@ pthread_cond_broadcast(pthread_cond_t *cond)
+ int
+ pthread_cond_signal(pthread_cond_t *cond)
+ {
+-	if (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE) != _PTHREAD_COND_SIG)
++	if (cond->sig == _PTHREAD_COND_SIG_init)
+ 	{
+ 		int res;
+ 		res = _pthread_cond_lazy_init(cond);
+@@ -268,7 +268,7 @@ _pthread_cond_wait(pthread_cond_t *cond,
+ 	pthread_mutex_t *busy;
+ 	int seq;
+ 	pthread_t self = pthread_self();
+-	if (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE) != _PTHREAD_COND_SIG)
++	if (cond->sig == _PTHREAD_COND_SIG_init)
+ 	{
+ 		res = _pthread_cond_lazy_init(cond);
+ 		if (res != 0)
