@@ -1,6 +1,6 @@
 Kind: widen
 Issue: #667
-Holds open: the first use of a statically initialised mutex or condition variable -- the first lock of a static mutex waits 50 ms before it looks at the signature, so that a second thread taking the same mutex for the first time meanwhile finds it uninitialised too, and the thread that won a condition variable's swap waits 50 ms before it fills the variable and publishes its signature, so that another thread using it meanwhile finds it being initialised; each wait says so on the console that needs no lock, so that a fixed run that passes shows the window was open; in the fixed tree the second thread waits for the first's initialisation; pthread_test's two last cases are what meet it; at most 64 waits of each kind in a task, which no task reaches
+Holds open: the first use of a statically initialised mutex or condition variable -- the first thread to initialise a static mutex waits 50 ms before it writes the fields, and a thread that comes meanwhile does not, so that with the fix out that second thread initialises the mutex itself and takes it, and the first one's fields then land on its hold; the thread that won a condition variable's swap waits 50 ms before it fills the variable and publishes its signature, so that another thread using it meanwhile finds it being initialised; each wait says so on the console that needs no lock, so that a fixed run that passes shows the window was open; in the fixed tree the second thread waits for the first's initialisation; pthread_test's two last cases are what meet it, the first one holding the mutex 100 ms; at most 64 waits of each kind in a task
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/lib/libpthreads/pthread_cond.c b/uros/src/lib/libpthreads/pthread_cond.c
@@ -47,46 +47,57 @@ index 6a460c56..88115a31 100644
  			cond->next = (pthread_cond_t *)NULL;
  			cond->prev = (pthread_cond_t *)NULL;
 diff --git a/uros/src/lib/libpthreads/pthread_mutex.c b/uros/src/lib/libpthreads/pthread_mutex.c
-index b1eb3f74..ac5dede6 100644
+index b1eb3f74..40e5c55f 100644
 --- a/uros/src/lib/libpthreads/pthread_mutex.c
 +++ b/uros/src/lib/libpthreads/pthread_mutex.c
-@@ -225,10 +225,39 @@ _pthread_mutex_robust_check(pthread_mutex_t *mutex)
- /*
-  * Lock a mutex.
+@@ -54,12 +54,50 @@ pthread_mutex_destroy(pthread_mutex_t *mutex)
+  * written: this wrote the signature first and then returned EINVAL for a bad
+  * attribute, leaving a mutex that said it was valid and was not.
   */
 +/*
 + * ablations/667-widen-first-use.patch: #667's widened window, and not an
-+ * ablation.  The first lock of a static mutex waits WIDEN_667_MS before it
-+ * looks at the signature, so that a second thread taking the same mutex for
-+ * the first time meanwhile finds it uninitialised too: with the fix in, one of
-+ * the two initialises it and the other waits, and with the fix out both do.
++ * ablation.  The first thread to initialise a static mutex waits WIDEN_667_MS
++ * before it writes the fields, and a thread that comes while it waits does
++ * not.  With the fix in, that second thread finds the initialisation in
++ * progress and waits for it; with the fix out it initialises the mutex
++ * itself and takes it, and the first one's fields then land on its hold.
 + * Said on the console that needs no lock -- printf() may take a mutex -- so
 + * that a fixed run that passes shows the window was open.  At most
-+ * WIDEN_667_TIMES in a task, which no task reaches: each static mutex is
-+ * first locked once.
++ * WIDEN_667_TIMES in a task.
 + */
 +#define	WIDEN_667_MS		50
 +#define	WIDEN_667_TIMES		64
 +
-+static int	widen_667_locks;	/* not atomic: a budget, not a census */
++static volatile int	widen_667_waiting;
++static int		widen_667_inits;	/* a budget, not a census */
 +
 +static void
-+widen_667_first_lock(pthread_mutex_t *mutex)
++widen_667_first_init(pthread_mutex_t *mutex)
 +{
-+	if (mutex->sig != _PTHREAD_MUTEX_SIG_init ||
-+	    widen_667_locks >= WIDEN_667_TIMES)
++	int none = 0;
++
++	/* Only a static mutex's first use: not pthread_mutex_init() itself. */
++	if (mutex->sig != _PTHREAD_MUTEX_SIG_init &&
++	    mutex->sig != _PTHREAD_MUTEX_SIG_initing)
 +		return;
-+	widen_667_locks++;
-+	mach_print("#667 widen: the first lock of a static mutex waits 50 ms\n");
++	if (widen_667_inits >= WIDEN_667_TIMES ||
++	    !__atomic_compare_exchange_n(&widen_667_waiting, &none, 1, 0,
++					 __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
++		return;
++	widen_667_inits++;
++	mach_print("#667 widen: the first thread to initialise a static mutex "
++		   "waits 50 ms\n");
 +	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, WIDEN_667_MS);
++	__atomic_store_n(&widen_667_waiting, 0, __ATOMIC_RELEASE);
 +}
 +
- int
- pthread_mutex_lock(pthread_mutex_t *mutex)
+ static int
+ _pthread_mutex_fields_init(pthread_mutex_t *mutex,
+ 			   const pthread_mutexattr_t *attr)
  {
- 	int old;
-+
-+	widen_667_first_lock(mutex);
- 	if (__atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE) != _PTHREAD_MUTEX_SIG)
+ 	if (attr && attr->sig != _PTHREAD_MUTEX_ATTR_SIG)
+ 		return (EINVAL);
++	widen_667_first_init(mutex);
+ 	LOCK_INIT(mutex->lock);
+ 	if (attr)
  	{
- 		int res = _pthread_mutex_lazy_init(mutex);
