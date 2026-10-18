@@ -49,17 +49,20 @@ pthread_mutex_destroy(pthread_mutex_t *mutex)
 }
 
 /*
- * Initialize a mutex variable, possibly with additional attributes.
+ * Everything in a mutex but its signature, which the caller publishes last
+ * (#667).  An attribute that is not one is refused before anything is
+ * written: this wrote the signature first and then returned EINVAL for a bad
+ * attribute, leaving a mutex that said it was valid and was not.
  */
-int
-pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
+static int
+_pthread_mutex_fields_init(pthread_mutex_t *mutex,
+			   const pthread_mutexattr_t *attr)
 {
+	if (attr && attr->sig != _PTHREAD_MUTEX_ATTR_SIG)
+		return (EINVAL);
 	LOCK_INIT(mutex->lock);
-	mutex->sig = _PTHREAD_MUTEX_SIG;
 	if (attr)
 	{
-		if (attr->sig != _PTHREAD_MUTEX_ATTR_SIG)
-			return (EINVAL);
 		mutex->prioceiling = attr->prioceiling;
 		mutex->protocol = attr->protocol;
 		mutex->type = attr->type;
@@ -83,6 +86,68 @@ pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
 	/* #324: the blocking primitive is now urmach_futex on mutex->state;
 	 * there is no per-mutex Mach semaphore to allocate. */
 	return (ESUCCESS);
+}
+
+/*
+ * Initialize a mutex variable, possibly with additional attributes.
+ */
+int
+pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
+{
+	int res = _pthread_mutex_fields_init(mutex, attr);
+
+	if (res == ESUCCESS)
+		__atomic_store_n(&mutex->sig, _PTHREAD_MUTEX_SIG,
+				 __ATOMIC_RELEASE);
+	return (res);
+}
+
+/*
+ * 🔴 THE FIRST USE OF A STATIC MUTEX, BY ONE THREAD ONLY (#667).
+ *
+ * PTHREAD_MUTEX_INITIALIZER writes the signature alone, and every entry point
+ * used to answer _PTHREAD_MUTEX_SIG_init by calling pthread_mutex_init() -- no
+ * compare-and-swap, the signature written first and `state = 0' last.  Two
+ * threads taking such a mutex for the first time together both initialised
+ * it: the later one's `state = 0' landed on the earlier one's hold, its own
+ * compare-and-swap then took the mutex as well, and both were inside.
+ * pthread_test's [2] lost its wakeup that way, its waiter reading cond_flag as
+ * 0 after the signal had set it, once in some thousands of boots.
+ *
+ * Now one compare-and-swap moves the signature to _PTHREAD_MUTEX_SIG_initing,
+ * the winner fills the fields and publishes the signature with a release
+ * store, and every caller that finds the initialisation in progress waits for
+ * it, whether it lost the swap or came after it.  Anything else -- a destroyed
+ * mutex, or memory that never was one -- is EINVAL, as it was.
+ * _pthread_cond_lazy_init() is the same for condition variables.
+ */
+static int
+_pthread_mutex_lazy_init(pthread_mutex_t *mutex)
+{
+	long sig = __atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE);
+
+	if (sig == _PTHREAD_MUTEX_SIG_init)
+	{
+		long expected = _PTHREAD_MUTEX_SIG_init;
+
+		if (__atomic_compare_exchange_n(&mutex->sig, &expected,
+						_PTHREAD_MUTEX_SIG_initing, 0,
+						__ATOMIC_ACQUIRE,
+						__ATOMIC_ACQUIRE))
+		{
+			(void) _pthread_mutex_fields_init(mutex, NULL);
+			__atomic_store_n(&mutex->sig, _PTHREAD_MUTEX_SIG,
+					 __ATOMIC_RELEASE);
+			return (ESUCCESS);
+		}
+		sig = expected;		/* what the swap found instead */
+	}
+	while (sig == _PTHREAD_MUTEX_SIG_initing)
+	{
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+		sig = __atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE);
+	}
+	return (sig == _PTHREAD_MUTEX_SIG ? ESUCCESS : EINVAL);
 }
 
 /*
@@ -164,15 +229,12 @@ int
 pthread_mutex_lock(pthread_mutex_t *mutex)
 {
 	int old;
-	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
+	if (__atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE) != _PTHREAD_MUTEX_SIG)
 	{
-		int res;
-		res = pthread_mutex_init(mutex, NULL);
+		int res = _pthread_mutex_lazy_init(mutex);
 		if (res != 0)
 			return (res);
 	}
-	if (mutex->sig != _PTHREAD_MUTEX_SIG)
-		return (EINVAL);
 
 	/* Robust: fail immediately if unrecoverable */
 	if (mutex->robust == PTHREAD_MUTEX_ROBUST && mutex->unrecoverable)
@@ -264,15 +326,12 @@ int
 pthread_mutex_trylock(pthread_mutex_t *mutex)
 {
 	int old;
-	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
+	if (__atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE) != _PTHREAD_MUTEX_SIG)
 	{
-		int res;
-		res = pthread_mutex_init(mutex, NULL);
+		int res = _pthread_mutex_lazy_init(mutex);
 		if (res != 0)
 			return (res);
 	}
-	if (mutex->sig != _PTHREAD_MUTEX_SIG)
-		return (EINVAL);
 
 	/* RECURSIVE: if already owned, just bump count */
 	if (mutex->type == PTHREAD_MUTEX_RECURSIVE)
@@ -309,15 +368,12 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 {
 	kern_return_t kern_res;
 	int old;
-	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
+	if (__atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE) != _PTHREAD_MUTEX_SIG)
 	{
-		int res;
-		res = pthread_mutex_init(mutex, NULL);
+		int res = _pthread_mutex_lazy_init(mutex);
 		if (res != 0)
 			return (res);
 	}
-	if (mutex->sig != _PTHREAD_MUTEX_SIG)
-		return (EINVAL);
 
 	/* Robust: fail immediately if unrecoverable */
 	if (mutex->robust == PTHREAD_MUTEX_ROBUST && mutex->unrecoverable)
@@ -400,15 +456,12 @@ int
 pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
 	int old;
-	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
+	if (__atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE) != _PTHREAD_MUTEX_SIG)
 	{
-		int res;
-		res = pthread_mutex_init(mutex, NULL);
+		int res = _pthread_mutex_lazy_init(mutex);
 		if (res != 0)
 			return (res);
 	}
-	if (mutex->sig != _PTHREAD_MUTEX_SIG)
-		return (EINVAL);
 
 	LOCK(mutex->lock);
 	if (mutex->owner != pthread_self())

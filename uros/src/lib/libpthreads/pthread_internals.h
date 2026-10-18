@@ -317,6 +317,14 @@ typedef struct
 #define _PTHREAD_COND_ATTR_SIG		0x434E4441  /* 'CNDA' */
 #define _PTHREAD_COND_SIG		0x434F4E44  /* 'COND' */
 #define _PTHREAD_COND_SIG_init		0x3CB0B1BB  /* [almost] ~'COND' */
+/*
+ * #667: a statically initialised mutex or condition variable while its first
+ * user initialises it.  Not _PTHREAD_NO_SIG, which is what destroy leaves: a
+ * caller that finds an initialisation in progress waits for it, and one that
+ * finds a destroyed object must still be answered EINVAL, not kept waiting.
+ */
+#define _PTHREAD_MUTEX_SIG_initing	0x4D55542D  /* 'MUT-' */
+#define _PTHREAD_COND_SIG_initing	0x434F4E2D  /* 'CON-' */
 #define _PTHREAD_ATTR_SIG		0x54484441  /* 'THDA' */
 #define _PTHREAD_ONCE_SIG		0x4F4E4345  /* 'ONCE' */
 #define _PTHREAD_ONCE_SIG_init		0x30B1BCBA  /* [almost] ~'ONCE' */
