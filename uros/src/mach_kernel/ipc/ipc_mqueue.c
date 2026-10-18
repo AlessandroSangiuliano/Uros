@@ -938,6 +938,8 @@ ipc_mqueue_deliver(
 			receiver->state =
 				(receiver->state & ~TH_WAIT) | TH_RUN;
 			receiver->wait_result = THREAD_AWAKENED;
+			WAKER_NOTE(receiver, THREAD_AWAKENED, NO_EVENT,
+				   WAKER_FROM_DTS);
 			direct = TRUE;
 		} else if (dts && DTS_SWAPPED_WAITER(receiver))
 			ipc_dts_declined_swapped++;

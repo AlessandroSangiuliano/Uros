@@ -667,6 +667,8 @@ waker_sym(void *from, uint64_t *off)
 	*off = 0;
 	if (from == WAKER_FROM_HOTPATH)
 		return "mach_msg_overwrite_trap's claim";
+	if (from == WAKER_FROM_DTS)
+		return "ipc_mqueue_deliver's direct switch";
 	if (from == 0)
 		return "nobody";
 	nm = ksym_lookup_call((uint64_t) from, off);
