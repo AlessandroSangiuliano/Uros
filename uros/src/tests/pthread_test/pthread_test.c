@@ -2532,8 +2532,11 @@ test_trap_sweep(void)
  */
 #define FIRST_USE_PATIENCE	1000000
 
-/* How long each thread holds the mutex, so the other one tries meanwhile. */
-#define FIRST_LOCK_HOLD_MS	20
+/*
+ * How long each thread holds the mutex: longer than the widen makes the first
+ * initialiser wait, so that its late fields land while the other is inside.
+ */
+#define FIRST_LOCK_HOLD_MS	100
 
 /* How late the second signaller comes, while the first initialises. */
 #define FIRST_COND_LATE_MS	10
@@ -2586,8 +2589,9 @@ first_use_run(const char *name, void *(*body)(void *))
  *
  * Each thread holds the mutex FIRST_LOCK_HOLD_MS, and neither may find the
  * other inside.  The window is a few instructions wide, so a boot rarely
- * meets it: ablations/667-widen-first-use.patch holds both threads at their
- * first lock long enough for each to begin the initialisation.
+ * meets it: ablations/667-widen-first-use.patch makes the first thread to
+ * initialise the mutex wait, so that the second one meets the initialisation
+ * half done.
  */
 static pthread_mutex_t first_lock_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile int first_lock_inside;
