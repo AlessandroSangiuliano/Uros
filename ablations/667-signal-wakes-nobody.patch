@@ -1,18 +1,42 @@
 Kind: ablation
 Issue: #667
-Takes out: the wake in pthread_cond_signal(), which still moves the generation: a waiter already asleep is never woken -- pthread_test's case [2] must name it and fail rather than hold the boot, and in every boot, since the case signals only once the variable counts its waiter (#667); it gave the waiter a 10 ms depress, which does not put it to sleep (#584), and a waiter not yet asleep saw the flag and never waited, so in #643's sweep the case passed
+Takes out: the wake in pthread_cond_signal(), in pthread_test alone -- the signal still moves the generation, and a waiter already asleep is never woken; pthread_test's cond_signal case must name it and fail rather than hold the boot, in every boot, since the case signals only once the variable counts its waiter (#667); in pthread_test alone because gpu_server's text renderer waits on a condition variable too, and with its wake gone the screen's queue filled and stopped four boots of six before pthread_test started; a weak symbol that the patch defines in pthread_test decides it
 Run: --entry 14 600 -smp 4
 Expect: cond_signal: the waiter is not back 30 s after its wakeup
 
 diff --git a/uros/src/lib/libpthreads/pthread_cond.c b/uros/src/lib/libpthreads/pthread_cond.c
-index 9f49b887..6f7c3d31 100644
+index 6a460c56..97c29b61 100644
 --- a/uros/src/lib/libpthreads/pthread_cond.c
 +++ b/uros/src/lib/libpthreads/pthread_cond.c
-@@ -188,7 +188,6 @@ pthread_cond_signal(pthread_cond_t *cond)
+@@ -187,6 +187,9 @@ pthread_cond_broadcast(pthread_cond_t *cond)
+ 		return (EINVAL); /* Not a condition variable */
+ }
+ 
++/* Defined by pthread_test alone: the wake is dropped only there. */
++extern char	pthread_test_drops_signal_wake __attribute__((weak));
++
+ /*
+  * Signal a condition variable, waking only one thread.
+  */
+@@ -210,7 +213,8 @@ pthread_cond_signal(pthread_cond_t *cond)
  		}
  		(*COND_SEQ(cond))++;	/* new generation; wakes one waiter */
  		UNLOCK(cond->lock);
 -		_pthread_futex_wake_one(COND_SEQ(cond));
++		if (&pthread_test_drops_signal_wake == 0)
++			_pthread_futex_wake_one(COND_SEQ(cond));
  		return (ESUCCESS);
  	} else
  		return (EINVAL); /* Not a condition variable */
+diff --git a/uros/src/tests/pthread_test/pthread_test.c b/uros/src/tests/pthread_test/pthread_test.c
+index 4a7515d7..92b645f3 100644
+--- a/uros/src/tests/pthread_test/pthread_test.c
++++ b/uros/src/tests/pthread_test/pthread_test.c
+@@ -47,6 +47,7 @@
+ #include "gpu_console.h"
+ 
+ static int pass = 1;
++char pthread_test_drops_signal_wake;	/* 667-signal-wakes-nobody */
+ static int test_num;
+ 
+ static void
