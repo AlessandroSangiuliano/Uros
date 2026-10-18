@@ -30,11 +30,12 @@
  *   7. thread_suspend() on a thread that lives in page faults
  *   8. thread_suspend() on a thread that spins, at one processor
  *
- * And two for #687 -- the abort crossing the reply it was waiting for, and
- * the abort that comes before the wait:
+ * And three for #687 -- the abort crossing the reply it was waiting for, the
+ * abort that comes before the wait, and a lock the wait slept on:
  *
  *  10. thread_abort() on a thread in an RPC whose reply is being delivered
  *  11. thread_abort(), fired again and again, on a thread making RPCs
+ *  12. mach_port_get_attributes() on the reply port of a thread making RPCs
  *
  * ⚠️ And the task is expected to SURVIVE all three and print a summary.  A
  * report that a thread died is worth nothing from a program that died with
@@ -2452,11 +2453,102 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 	return 1;
 }
 
+/*
+ * ── Arm twelve: look at the reply port of a thread that keeps asking (#687) ─
+ *
+ * The hot path parks the thread on its reply port's queue and marks it
+ * TH_WAIT, and it then gave back the reference the trap had taken on that
+ * port -- under the port's own lock, which is a mutex.  When another thread
+ * held that lock, the parked thread slept on it, inside its own park, and the
+ * mutex's wakeup ended the wait the thread had declared for its reply: back
+ * in the trap with nothing delivered, "mmot_hotpath: bad wait result 0
+ * (ith_state 10004001)".
+ *
+ * A port's status is read under its lock and then its queue's, and the queue
+ * is the parked thread's until it has parked: a status call that comes while
+ * the RPC is parking waits for the queue holding the port, and holds it still
+ * when the parked thread comes to give its reference back.  So this arm asks
+ * for the status of the reply port of a thread making ARM12_RPCS RPCs, for as
+ * long as they last, and every RPC must end with its own reply.
+ *
+ * ⚠️ The window is a few instructions wide, so a boot rarely meets it: what
+ * makes this a test is ablations/687-widen-port-held.patch, which holds the
+ * port longer whenever a thread is parked on it and not yet asleep, and says
+ * so.  At one processor the status call cannot run while the RPC parks, and
+ * a yield follows each, so that the RPCs get to run at all.
+ */
+#define ARM12_RPCS		2000
+#define ARM12_REQUEST_ID	1200
+#define ARM12_REPLY_ID		1201
+#define ARM12_STOP_ID		1202
+
+static struct rpc_pair	arm_twelve = {
+	.arm = "[12]",
+	.rpcs = ARM12_RPCS,
+	.request_id = ARM12_REQUEST_ID,
+	.reply_id = ARM12_REPLY_ID,
+	.stop_id = ARM12_STOP_ID,
+	.bad_kr = MACH_MSG_SUCCESS,
+	.server_kr = -1,
+};
+
+static int
+arm_twelve_look_at_the_reply_port(void)
+{
+	pthread_t		server, asker;
+	mach_port_status_t	status;
+	mach_msg_type_number_t	count;
+	kern_return_t		kr = KERN_SUCCESS;
+	int			looks = 0, alone;
+
+	if (!rpc_pair_start(&arm_twelve, &server, &asker))
+		return 0;
+
+	alone = processors() <= 1;
+	arm_twelve.go = 1;
+	while (!arm_twelve.done) {
+		count = MACH_PORT_RECEIVE_STATUS_COUNT;
+		kr = mach_port_get_attributes(mach_task_self(),
+					      arm_twelve.reply_port,
+					      MACH_PORT_RECEIVE_STATUS,
+					      (mach_port_info_t) &status,
+					      &count);
+		if (kr != KERN_SUCCESS)
+			break;
+		looks++;
+		if (alone)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_NONE, 0);
+	}
+
+	if (!rpc_pair_finish(&arm_twelve, server, asker, looks,
+			     "looks at the reply port"))
+		return 0;
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [12] the reply port's status was refused (%d) "
+		       "after %d answers — WRONG\n", kr, looks);
+		return 0;
+	}
+	if (looks == 0) {
+		printf("act_test: [12] the RPCs were over before one look at "
+		       "their reply port, which asks nothing — WRONG\n");
+		return 0;
+	}
+
+	(void) mach_port_destroy(mach_task_self(), arm_twelve.port);
+	(void) mach_port_destroy(mach_task_self(), arm_twelve.reply_port);
+
+	printf("act_test: [12] %d RPCs shaped for the hot path both ways, with "
+	       "their reply port's status read %d times while they were made: "
+	       "each ended with its own reply (#687)\n", ARM12_RPCS, looks);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 11, r;
+	int		passed = 0, arm_one_passed, arms = 12, r;
 
 	(void) argc;
 	(void) argv;
@@ -2492,6 +2584,7 @@ main(int argc, char **argv)
 	passed += arm_nine_refused_create_running();
 	passed += arm_ten_abort_an_rpc_with_its_reply_on_the_way();
 	passed += arm_eleven_abort_a_thread_that_keeps_asking();
+	passed += arm_twelve_look_at_the_reply_port();
 
 	/*
 	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the
