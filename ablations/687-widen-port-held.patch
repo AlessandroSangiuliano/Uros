@@ -1,0 +1,70 @@
+Kind: widen
+Issue: #687
+Holds open: the hot path's park window, where a thread marked TH_WAIT for its reply gave back the reference on its reply port under the port's lock -- a status call that finds a thread parked on the port and not yet asleep holds the port's lock 10 ms longer, so that the parked thread finds it held if it takes it before it switches away; each hold says so, so that a fixed arm that passes shows the window was open, and says again when the parked thread is found asleep on the lock with its receive in progress; in the fixed tree the thread takes the lock only after its wait has ended; only the first 16 holds in a boot, since act_test [12] reads the status thousands of times
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/ipc/mach_port.c b/uros/src/mach_kernel/ipc/mach_port.c
+index cd56af8d..8fba81a6 100644
+--- a/uros/src/mach_kernel/ipc/mach_port.c
++++ b/uros/src/mach_kernel/ipc/mach_port.c
+@@ -1566,6 +1566,43 @@ mach_port_extract_right(
+ 	return kr;
+ }
+ 
++/*
++ * #687's widened window, and not an ablation.  A status call that finds a
++ * thread parked on the port and not yet asleep -- TH_WAIT and still TH_RUN,
++ * between its park and its switch -- holds the port's lock WIDEN_687_HOLD_US
++ * longer, so that the parked thread, if it takes that lock before it is
++ * asleep, finds it held.  With the fix in, it takes the lock only after its
++ * wait has ended; with the fix out, it sleeps on the lock inside its park,
++ * and the mutex's wakeup ends the wait declared for its reply.  Each hold
++ * says so, so that a fixed arm that passes shows the window was open, and
++ * says again when the parked thread is found asleep on the lock with its
++ * receive still in progress.  Only the first WIDEN_687_TIMES in a boot:
++ * act_test [12] reads the status thousands of times.
++ */
++#define	WIDEN_687_HOLD_US	10000
++#define	WIDEN_687_TIMES		16
++
++/* Not atomic: a budget, not a census. */
++static int	widen_687_holds;
++
++static void
++widen_687_port_held(ipc_port_t port, thread_t parked)
++{
++	if ((parked->state & (TH_WAIT | TH_RUN)) != (TH_WAIT | TH_RUN) ||
++	    widen_687_holds >= WIDEN_687_TIMES)
++		return;
++	widen_687_holds++;
++	printf("#687 widen: thread %p is parked on port %p and not asleep, "
++	       "and the port's lock is held %d us\n", parked, port,
++	       WIDEN_687_HOLD_US);
++	delay(WIDEN_687_HOLD_US);
++	if (parked->wait_event ==
++	    (event_t) &((rpc_common_t) port)->rcd_io_lock_data &&
++	    parked->ith_state == MACH_RCV_IN_PROGRESS)
++		printf("#687 widen: thread %p is asleep on port %p's lock, "
++		       "parked on it with its receive in progress\n", parked,
++		       port);
++}
+ 
+ kern_return_t
+ mach_port_get_attributes(
+@@ -1631,10 +1668,16 @@ mach_port_get_attributes(
+                         }
+                 }
+                 if (!have_pset) {
++                        ipc_thread_t parked;
++
+                         statusp->mps_pset = MACH_PORT_NULL;
+                         imq_lock(&port->ip_messages);
+                         statusp->mps_seqno = port->ip_seqno;
++                        parked = ipc_thread_queue_first(
++                                &port->ip_messages.imq_threads);
+                         imq_unlock(&port->ip_messages);
++                        if (parked != ITH_NULL)
++                                widen_687_port_held(port, parked);
+                 }
+                 }
+                 statusp->mps_mscount = port->ip_mscount;
