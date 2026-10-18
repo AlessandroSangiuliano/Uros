@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #667
-Takes out: the wake in pthread_cond_signal(), which still moves the generation: a waiter already asleep is never woken, the lost wakeup #667 is about -- pthread_test's case [2] must name it and fail rather than hold the boot; not on demand, though: case [2] gives the waiter a 10 ms depress to block in, which does not put it to sleep (#584), and a waiter not yet asleep sees the flag and never waits -- in #643's sweep the case passed; waiting for the variable to report its waiter before signalling is #667's to do
+Takes out: the wake in pthread_cond_signal(), which still moves the generation: a waiter already asleep is never woken -- pthread_test's case [2] must name it and fail rather than hold the boot, and in every boot, since the case signals only once the variable counts its waiter (#667); it gave the waiter a 10 ms depress, which does not put it to sleep (#584), and a waiter not yet asleep saw the flag and never waited, so in #643's sweep the case passed
 Run: --entry 14 600 -smp 4
 Expect: cond_signal: the waiter is not back 30 s after its wakeup
 
