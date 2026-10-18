@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #687
+Over: 687-widen-port-held.patch
+Over: 687-release-in-the-park.patch
+Takes out: 0e86e513, over the release put back in the park -- mutex_lock_assert_safe() looks at wait_event alone again, so a mutex taken by a thread TH_WAIT on no event goes by unseen, and what is left is the hot path as it was before #687's fix: the release takes the port's lock inside the park, and when another thread holds it the mutex's wakeup ends the wait for the reply; act_test [12], with the port held open by the widen, must bring back #687's own panic, with the waker line naming the mutex's release
+Run: --entry 14 600 -smp 4
+Expect: mmot_hotpath: bad wait result 0 \(ith_state 10004001\)
+Expect: waker: thread 0x[0-9a-f]+, .*last woken by mutex_unlock_wakeup\+0x
+
+diff --git a/uros/src/mach_kernel/kern/lock.c b/uros/src/mach_kernel/kern/lock.c
+index 55921885..fd2b724b 100644
+--- a/uros/src/mach_kernel/kern/lock.c
++++ b/uros/src/mach_kernel/kern/lock.c
+@@ -2171,7 +2171,7 @@ mutex_lock_assert_safe(void)
+ 		return;
+ 	event = self->wait_event;
+ 	state = self->state;
+-	if (event == NO_EVENT && !(state & TH_WAIT))
++	if (event == NO_EVENT)
+ 		return;
+ 	again = current_thread();
+ 	panic("mutex_lock_assert_safe: thread %p takes a mutex with wait_event "

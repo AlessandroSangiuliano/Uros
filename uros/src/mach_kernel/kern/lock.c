@@ -2127,21 +2127,36 @@ etap_mutex_unlock(
 
 #if	MACH_RT || (NCPUS > 1) || MACH_LDEBUG
 /*
- * Sanity hook for the mutex_lock() macro in <i386/lock.h>.
+ * Sanity hook for the mutex_lock() macros in <i386/lock.h> and
+ * <x86_64/sync/lock.h>.
  *
- * The macro itself cannot dereference current_thread()->wait_event because
- * <i386/lock.h> is included by <kern/lock.h>, which in turn is included by
- * <kern/thread.h> — making it impossible for <i386/lock.h> to see the full
+ * The macro itself cannot dereference current_thread() because the machine's
+ * lock.h is included by <kern/lock.h>, which in turn is included by
+ * <kern/thread.h> — making it impossible for that header to see the full
  * struct thread_shuttle definition without an include cycle.  The hook lives
  * here so the assert is reachable without forcing every caller of
  * <kern/lock.h> to also pull in <kern/thread.h>.
  *
- * When the check fails it says what it read (#624).  The event is read once,
- * so the value judged is the value printed: WAKING_EVENT is a waker on
- * another processor between its two halves, anything else a wait the thread
- * has not left.  current_thread() is read again, and a different answer
- * means the first read named another processor's thread, as the two loads
- * of #646 could.  The passing path reads the thread and its event once each.
+ * 🔴 AND TH_WAIT ON NO EVENT (#687).  A mutex that is held puts its taker to
+ * sleep with assert_wait(), and the release wakes it with THREAD_AWAKENED:
+ * taken inside a wait the thread has declared and not yet blocked on, the
+ * mutex ends that wait, with nothing to show for it.  A wait on an event
+ * shows in wait_event; an IPC park, a semaphore, a lock set and
+ * thread_will_wait*() declare theirs on no event, with TH_WAIT alone, and
+ * this looked at wait_event only.  mach_msg's hot path took io_lock after
+ * parking for its reply, and when another thread held it the mutex's wakeup
+ * ended the park: "bad wait result 0", rarely enough to cost an audit.
+ * Asked on every mutex_lock(), held or not, the mistake is stopped where it
+ * is made, and not in the one race that lands in it.
+ *
+ * When the check fails it says what it read (#624).  The event and the state
+ * are read once each, so the values judged are the values printed:
+ * WAKING_EVENT is a waker on another processor between its two halves, any
+ * other event a wait the thread has not left, and TH_WAIT on no event a wait
+ * declared on no event and not blocked on.  current_thread() is read again,
+ * and a different answer means the first read named another processor's
+ * thread, as the two loads of #646 could.  The passing path reads the thread,
+ * its event and its state once each.
  */
 void
 mutex_lock_assert_safe(void)
@@ -2150,18 +2165,22 @@ mutex_lock_assert_safe(void)
 	thread_t	self = current_thread();
 	thread_t	again;
 	event_t		event;
+	int		state;
 
 	if (self == THREAD_NULL)
 		return;
 	event = self->wait_event;
-	if (event == NO_EVENT)
+	state = self->state;
+	if (event == NO_EVENT && !(state & TH_WAIT))
 		return;
 	again = current_thread();
 	panic("mutex_lock_assert_safe: thread %p takes a mutex with wait_event "
 	      "%p, %s, state 0x%x, wait_result %d; current_thread() read again "
-	      "is %p%s (#624)", self, event,
+	      "is %p%s (#624, #687)", self, event,
 	      event == WAKING_EVENT ? "WAKING_EVENT, a wakeup in flight" :
-	      "a wait it has not left", self->state, self->wait_result, again,
+	      event != NO_EVENT ? "a wait it has not left" :
+	      "TH_WAIT on no event, a wait declared and not blocked on",
+	      state, self->wait_result, again,
 	      again == self ? "" : ", another thread (#646)");
 #endif	/* MACH_ASSERT */
 }

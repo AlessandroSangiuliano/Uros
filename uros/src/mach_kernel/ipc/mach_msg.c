@@ -594,6 +594,12 @@ mach_msg_receive_continue(void)
 
 	    case MACH_RCV_IN_PROGRESS:
 	    case MACH_RCV_IN_PROGRESS_TIMED:
+#if	WAKER_TRACK
+		/* #687: before the rmqueue copies the park count, as below */
+		if (save_wait_result != THREAD_INTERRUPTED &&
+		    save_wait_result != THREAD_TIMED_OUT)
+			waker_say(self);
+#endif
 		ipc_thread_rmqueue(&mqueue->imq_threads, self);
 
 		switch (save_wait_result) {
@@ -623,9 +629,6 @@ mach_msg_receive_continue(void)
 
 		    case THREAD_RESTART:
 		    default:
-#if	WAKER_TRACK
-			waker_say(self);	/* #687 */
-#endif
 			panic("mach_msg_receive_continue: bad wait_result");
 		}
 		break;
@@ -2026,6 +2029,10 @@ mach_msg_overwrite_trap(
 		 * thread_dispatch() (receiver, post-switch) runs first, the
 		 * sender ends up on a run queue: see thread_go() / thread_dispatch
 		 * in kern/sched_prim.c.
+		 *
+		 * 🔴 From here to the switch nothing may sleep (#687): a mutex
+		 * taken in between, held by anyone, ends this wait with its own
+		 * wakeup.  mutex_lock() panics on a thread TH_WAIT on no event.
 		 */
 		thread_lock(self);
 #if	WAKER_TRACK
@@ -2091,10 +2098,19 @@ mach_msg_overwrite_trap(
 		receiver->ith_seqno = dest_port->ip_seqno++;
 		imq_unlock(dest_mqueue);
 
-		/* inline ipc_object_release */
-		io_lock(rcv_object);
-		io_release(rcv_object);
-		io_check_unlock(rcv_object);
+		/*
+		 * 🔴 NOT HERE: THE REFERENCE ON rcv_object IS KEPT ACROSS THE
+		 * WAIT (#687).  It was given back at this point, inline, under
+		 * io_lock -- a mutex, taken by a thread already TH_WAIT for its
+		 * reply.  Held by anyone else, the mutex put this thread to
+		 * sleep inside its own park, and the mutex's wakeup ended the
+		 * wait declared for the reply, with nothing delivered: "bad
+		 * wait result 0 (ith_state 10004001)" below.  Nothing between
+		 * the park and the switch may sleep, and mutex_lock() now says
+		 * so.  The reference goes back after the wait, as the slow path
+		 * gives its own back after ipc_mqueue_receive(), and it keeps
+		 * the port or set alive for the imq_lock taken there.
+		 */
 
 		/*
 		 * Switch directly to receiving thread, and block
@@ -2243,8 +2259,10 @@ mach_msg_overwrite_trap(
 			    case MACH_RCV_PORT_CHANGED:
 				/* something bad happened to the port/set */
 
+				mr = self->ith_state;
 				imq_unlock(rcv_mqueue);
-				return self->ith_state;
+				ipc_object_release(rcv_object);
+				return mr;
 
 			    case MACH_RCV_IN_PROGRESS:
 				/*
@@ -2253,6 +2271,17 @@ mach_msg_overwrite_trap(
 				 *	then check the wakeup cause.
 				 */
 
+#if	WAKER_TRACK
+				/*
+				 * #687: said before the rmqueue, which copies
+				 * the park count into the count of the last
+				 * time this thread was taken off a queue, and
+				 * made every such line say it was taken off in
+				 * the park it was found still queued in.
+				 */
+				if (save_wait_result != THREAD_INTERRUPTED)
+					waker_say(self);
+#endif
 				ipc_thread_rmqueue(&rcv_mqueue->imq_threads,
 									self);
 
@@ -2261,12 +2290,10 @@ mach_msg_overwrite_trap(
 					/* receive was interrupted - give up */
 
 					imq_unlock(rcv_mqueue);
+					ipc_object_release(rcv_object);
 					return MACH_RCV_INTERRUPTED;
 
 				    default:
-#if	WAKER_TRACK
-					waker_say(self);	/* #687 */
-#endif
 					panic("mmot_hotpath: bad wait result %x (ith_state %x)",
 					      save_wait_result, self->ith_state);
 				}
@@ -2280,6 +2307,9 @@ mach_msg_overwrite_trap(
 				      self->ith_state, save_wait_result);
 			}
 		}
+
+		/* The reference kept across the wait, given back awake (#687). */
+		ipc_object_release(rcv_object);
 
 		/*
 		 * Restore state saved in sending thread's send path.

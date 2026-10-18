@@ -5,12 +5,12 @@ Run: --entry 14 600 -smp 4
 Expect: mmot_hotpath: parking a thread that is already waiting: state 0x[0-9a-f]+, wait_event 0x[0-9a-f]+ \(#687\)
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index fb1820c1..1fa2a096 100644
+index ff37619e..efb52c99 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -2027,6 +2027,12 @@ mach_msg_overwrite_trap(
- 		 * sender ends up on a run queue: see thread_go() / thread_dispatch
- 		 * in kern/sched_prim.c.
+@@ -2034,6 +2034,12 @@ mach_msg_overwrite_trap(
+ 		 * taken in between, held by anyone, ends this wait with its own
+ 		 * wakeup.  mutex_lock() panics on a thread TH_WAIT on no event.
  		 */
 +		{
 +			/* #687's ablation: a wait declared and left behind */

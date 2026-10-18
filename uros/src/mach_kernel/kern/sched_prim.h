@@ -233,9 +233,11 @@ extern void	assert_wait_preempt_release(
 /*
  * #687: who ended a wait (<kern/waker_track.h>).  Every way a wait ends writes
  * it into the thread under its lock -- thread_go(), thread_wakeup_prim(),
- * clear_wait_locked(), the futex hand-off and the hot path's claim -- with the
- * caller of the function that ended it; waker_say() prints it, before the
- * panics that find a thread woken with nothing delivered.
+ * clear_wait_locked(), the futex hand-off, the hot path's claim and
+ * ipc_mqueue_deliver()'s direct switch -- with the caller of the function that
+ * ended it; waker_say() prints it, before the panics that find a thread woken
+ * with nothing delivered.  evc_signal() writes nothing: nothing calls
+ * evc_init(), so nothing waits there.
  */
 #if	WAKER_TRACK
 #define		WAKER_NOTE(Th,Res,Ev,From)			\
@@ -249,6 +251,8 @@ extern void	waker_say(
 				thread_t	thread);
 /* The hot path's claim, which has no caller to name and no call to spare. */
 #define		WAKER_FROM_HOTPATH	((void *) 1)
+/* ipc_mqueue_deliver()'s direct switch, the same. */
+#define		WAKER_FROM_DTS		((void *) 2)
 #else	/* WAKER_TRACK */
 #define		WAKER_NOTE(Th,Res,Ev,From)	do { } while (0)
 #endif	/* WAKER_TRACK */

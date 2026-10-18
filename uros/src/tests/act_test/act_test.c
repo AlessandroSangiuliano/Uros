@@ -30,11 +30,12 @@
  *   7. thread_suspend() on a thread that lives in page faults
  *   8. thread_suspend() on a thread that spins, at one processor
  *
- * And two for #687 -- the abort crossing the reply it was waiting for, and
- * the abort that comes before the wait:
+ * And three for #687 -- the abort crossing the reply it was waiting for, the
+ * abort that comes before the wait, and a lock the wait slept on:
  *
  *  10. thread_abort() on a thread in an RPC whose reply is being delivered
  *  11. thread_abort(), fired again and again, on a thread making RPCs
+ *  12. mach_port_get_attributes() on the reply port of a thread making RPCs
  *
  * ⚠️ And the task is expected to SURVIVE all three and print a summary.  A
  * report that a thread died is worth nothing from a program that died with
@@ -2182,35 +2183,47 @@ struct arm11_buf {
 	char			slack[64];
 };
 
-static mach_port_t		arm_eleven_port;
-static mach_port_t		arm_eleven_reply_port;
-static volatile mach_port_t	arm_eleven_thread;
-static volatile int		arm_eleven_firing;
-static volatile natural_t	arm_eleven_calls;	/* RPCs begun */
-static volatile int		arm_eleven_done;
-static volatile natural_t	arm_eleven_rpcs;
-static volatile kern_return_t	arm_eleven_bad_kr = MACH_MSG_SUCCESS;
-static volatile int		arm_eleven_bad_id;
-static volatile natural_t	arm_eleven_bad_seq;
-static volatile kern_return_t	arm_eleven_server_kr = -1;
-static volatile int		arm_eleven_server_id;
+/*
+ * A thread that keeps asking and the server that answers it, as arms eleven
+ * and twelve use them: the server answers each request in the same call that
+ * waits for the next, so that the hot path is taken both ways, and the thread
+ * makes `rpcs' RPCs, each numbered, once `go' is set.
+ */
+struct rpc_pair {
+	const char		*arm;		/* "[11]", in what is said */
+	natural_t		rpcs;
+	int			request_id;
+	int			reply_id;
+	int			stop_id;
+	mach_port_t		port;		/* the server receives here */
+	mach_port_t		reply_port;	/* and the thread here */
+	volatile mach_port_t	thread;
+	volatile int		go;
+	volatile natural_t	calls;		/* RPCs begun */
+	volatile int		done;
+	volatile natural_t	answered;	/* each with its own reply */
+	volatile kern_return_t	bad_kr;
+	volatile int		bad_id;
+	volatile natural_t	bad_seq;
+	volatile kern_return_t	server_kr;
+	volatile int		server_id;
+};
 
 static void *
 the_server_that_answers_every_time(void *arg)
 {
+	struct rpc_pair		*p = arg;
 	struct arm11_buf	b;
 	mach_msg_option_t	option = MACH_RCV_MSG;
 	mach_msg_size_t		send_size = 0;
 	kern_return_t		kr;
 
-	(void) arg;
-
 	for (;;) {
 		kr = mach_msg(&b.m.h, option, send_size, sizeof b,
-			      arm_eleven_port, MACH_MSG_TIMEOUT_NONE,
+			      p->port, MACH_MSG_TIMEOUT_NONE,
 			      MACH_PORT_NULL);
 		if (kr != MACH_MSG_SUCCESS ||
-		    b.m.h.msgh_id != ARM11_REQUEST_ID)
+		    b.m.h.msgh_id != p->request_id)
 			break;
 
 		/* The answer goes in the call that waits for the next request. */
@@ -2219,32 +2232,31 @@ the_server_that_answers_every_time(void *arg)
 		b.m.h.msgh_size = sizeof b.m;
 		b.m.h.msgh_local_port = MACH_PORT_NULL;
 		b.m.h.msgh_reserved = 0;
-		b.m.h.msgh_id = ARM11_REPLY_ID;
+		b.m.h.msgh_id = p->reply_id;
 		option = MACH_SEND_MSG | MACH_RCV_MSG;
 		send_size = sizeof b.m;
 	}
-	arm_eleven_server_kr = kr;
-	arm_eleven_server_id = b.m.h.msgh_id;
+	p->server_kr = kr;
+	p->server_id = b.m.h.msgh_id;
 	return NULL;
 }
 
 static void *
 the_thread_that_keeps_asking(void *arg)
 {
+	struct rpc_pair		*p = arg;
 	struct arm11_buf	b;
 	kern_return_t		kr;
 	natural_t		i;
 
-	(void) arg;
-
-	arm_eleven_thread = mach_thread_self();
+	p->thread = mach_thread_self();
 
 	/*
-	 * ⚠️ Not a single RPC before the aborts start: on a fast machine the
-	 * whole run could otherwise be over before the first one, and an arm
-	 * that fired nothing would have asked nothing.
+	 * ⚠️ Not a single RPC before the arm starts: on a fast machine the
+	 * whole run could otherwise be over before the arm's first abort or
+	 * look, and an arm that did nothing would have asked nothing.
 	 */
-	while (!arm_eleven_firing)
+	while (!p->go)
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
 
 	/*
@@ -2252,68 +2264,142 @@ the_thread_that_keeps_asking(void *arg)
 	 * an RPC an abort interrupts still ends with its reply, and the
 	 * numbers say whether it was the right one.
 	 */
-	for (i = 0; i < ARM11_RPCS; i++) {
-		arm_ten_request(&b.m.h, arm_eleven_port,
-				arm_eleven_reply_port, ARM11_REQUEST_ID);
+	for (i = 0; i < p->rpcs; i++) {
+		arm_ten_request(&b.m.h, p->port, p->reply_port,
+				p->request_id);
 		b.m.h.msgh_size = sizeof b.m;
 		b.m.seq = i;
-		arm_eleven_calls = i + 1;	/* where the aim is taken */
+		p->calls = i + 1;	/* where arm eleven takes its aim */
 		kr = mach_msg(&b.m.h, MACH_SEND_MSG | MACH_RCV_MSG,
-			      sizeof b.m, sizeof b, arm_eleven_reply_port,
+			      sizeof b.m, sizeof b, p->reply_port,
 			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 		if (kr != MACH_MSG_SUCCESS ||
-		    b.m.h.msgh_id != ARM11_REPLY_ID || b.m.seq != i) {
-			arm_eleven_bad_kr = kr;
-			arm_eleven_bad_id = b.m.h.msgh_id;
-			arm_eleven_bad_seq = b.m.seq;
+		    b.m.h.msgh_id != p->reply_id || b.m.seq != i) {
+			p->bad_kr = kr;
+			p->bad_id = b.m.h.msgh_id;
+			p->bad_seq = b.m.seq;
 			break;
 		}
 	}
-	arm_eleven_rpcs = i;
-	arm_eleven_done = 1;
+	p->answered = i;
+	p->done = 1;
 	return NULL;
 }
+
+/*
+ * The two ports, the server in its receive, and the thread, which has said
+ * who it is and waits for `go'.  What failed is said.
+ */
+static int
+rpc_pair_start(struct rpc_pair *p, pthread_t *server, pthread_t *asker)
+{
+	kern_return_t	kr;
+	int		i;
+
+	kr = arm_ten_port(&p->port, 1);
+	if (kr == KERN_SUCCESS)
+		kr = arm_ten_port(&p->reply_port, 0);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: %s the ports for the RPCs could not be made "
+		       "(%d) — WRONG\n", p->arm, kr);
+		return 0;
+	}
+
+	if (pthread_create(server, NULL, the_server_that_answers_every_time,
+			   p) != 0) {
+		printf("act_test: %s pthread_create failed for the server "
+		       "— WRONG\n", p->arm);
+		return 0;
+	}
+	nap(100);	/* the server in its receive, as in arm ten */
+
+	if (pthread_create(asker, NULL, the_thread_that_keeps_asking,
+			   p) != 0) {
+		printf("act_test: %s pthread_create failed for the thread "
+		       "— WRONG\n", p->arm);
+		return 0;
+	}
+	for (i = 0; i < PATIENCE && p->thread == MACH_PORT_NULL; i++)
+		nap(10);
+	if (p->thread == MACH_PORT_NULL) {
+		printf("act_test: %s the thread never published its port "
+		       "— WRONG\n", p->arm);
+		return 0;
+	}
+	return 1;
+}
+
+/*
+ * Waits for the thread, stops the server, and says whether every RPC ended
+ * with its own reply.  `n' and `what' say what the arm did to the thread
+ * meanwhile: "after 12 aborts".
+ */
+static int
+rpc_pair_finish(struct rpc_pair *p, pthread_t server, pthread_t asker,
+		int n, const char *what)
+{
+	mach_msg_header_t	stop;
+	int			i;
+
+	for (i = 0; i < 2 * PATIENCE && !p->done; i++)
+		nap(100);
+
+	stop.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	stop.msgh_size = sizeof stop;
+	stop.msgh_remote_port = p->port;
+	stop.msgh_local_port = MACH_PORT_NULL;
+	stop.msgh_reserved = 0;
+	stop.msgh_id = p->stop_id;
+	(void) mach_msg(&stop, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof stop,
+			0, MACH_PORT_NULL, 1000, MACH_PORT_NULL);
+
+	if (!p->done) {
+		printf("act_test: %s the thread asking never finished: %u of "
+		       "%u RPCs after %d %s — WRONG\n", p->arm,
+		       (unsigned) p->answered, (unsigned) p->rpcs, n, what);
+		return 0;
+	}
+	(void) pthread_join(asker, NULL);
+	(void) pthread_join(server, NULL);
+
+	if (p->answered != p->rpcs) {
+		printf("act_test: %s RPC %u of %u answered 0x%x with id %d and "
+		       "number %u, after %d %s — WRONG\n", p->arm,
+		       (unsigned) p->answered, (unsigned) p->rpcs,
+		       (int) p->bad_kr, p->bad_id, (unsigned) p->bad_seq, n,
+		       what);
+		return 0;
+	}
+	if (p->server_kr != MACH_MSG_SUCCESS || p->server_id != p->stop_id) {
+		printf("act_test: %s the server stopped on 0x%x with id %d "
+		       "instead of the stop message — WRONG\n", p->arm,
+		       (int) p->server_kr, p->server_id);
+		return 0;
+	}
+	return 1;
+}
+
+static struct rpc_pair	arm_eleven = {
+	.arm = "[11]",
+	.rpcs = ARM11_RPCS,
+	.request_id = ARM11_REQUEST_ID,
+	.reply_id = ARM11_REPLY_ID,
+	.stop_id = ARM11_STOP_ID,
+	.bad_kr = MACH_MSG_SUCCESS,
+	.server_kr = -1,
+};
 
 static int
 arm_eleven_abort_a_thread_that_keeps_asking(void)
 {
 	pthread_t		server, victim;
-	mach_msg_header_t	stop;
-	kern_return_t		kr, refused = KERN_SUCCESS;
-	int			aborts = 0, alone, i;
+	kern_return_t		refused = KERN_SUCCESS;
+	int			aborts = 0, alone;
 	natural_t		seen;
 	unsigned long		idle;
 
-	kr = arm_ten_port(&arm_eleven_port, 1);
-	if (kr == KERN_SUCCESS)
-		kr = arm_ten_port(&arm_eleven_reply_port, 0);
-	if (kr != KERN_SUCCESS) {
-		printf("act_test: [11] the ports for the RPCs could not be made "
-		       "(%d) — WRONG\n", kr);
+	if (!rpc_pair_start(&arm_eleven, &server, &victim))
 		return 0;
-	}
-
-	if (pthread_create(&server, NULL, the_server_that_answers_every_time,
-			   NULL) != 0) {
-		printf("act_test: [11] pthread_create failed for the server "
-		       "— WRONG\n");
-		return 0;
-	}
-	nap(100);	/* the server in its receive, as in arm ten */
-
-	if (pthread_create(&victim, NULL, the_thread_that_keeps_asking,
-			   NULL) != 0) {
-		printf("act_test: [11] pthread_create failed for the thread "
-		       "— WRONG\n");
-		return 0;
-	}
-	for (i = 0; i < PATIENCE && arm_eleven_thread == MACH_PORT_NULL; i++)
-		nap(10);
-	if (arm_eleven_thread == MACH_PORT_NULL) {
-		printf("act_test: [11] the thread never published its port "
-		       "— WRONG\n");
-		return 0;
-	}
 
 	/*
 	 * 🔴 AIMED, at more than one processor: one abort as the thread enters
@@ -2327,20 +2413,20 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 	 * thread has begun no RPC for ARM11_IDLE looks: until then it is alive.
 	 */
 	alone = processors() <= 1;
-	arm_eleven_firing = 1;
+	arm_eleven.go = 1;
 	seen = 0;
 	idle = 0;
-	while (!arm_eleven_done && aborts < ARM11_ABORTS) {
+	while (!arm_eleven.done && aborts < ARM11_ABORTS) {
 		if (aborts > 0 && !alone) {
-			if (arm_eleven_calls == seen) {
+			if (arm_eleven.calls == seen) {
 				if (++idle > ARM11_IDLE)
 					break;
 				continue;
 			}
-			seen = arm_eleven_calls;
+			seen = arm_eleven.calls;
 			idle = 0;
 		}
-		refused = thread_abort(arm_eleven_thread);
+		refused = thread_abort(arm_eleven.thread);
 		if (refused != KERN_SUCCESS)
 			break;
 		aborts++;
@@ -2349,42 +2435,8 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 					     SWITCH_OPTION_NONE, 0);
 	}
 
-	for (i = 0; i < 2 * PATIENCE && !arm_eleven_done; i++)
-		nap(100);
-
-	stop.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-	stop.msgh_size = sizeof stop;
-	stop.msgh_remote_port = arm_eleven_port;
-	stop.msgh_local_port = MACH_PORT_NULL;
-	stop.msgh_reserved = 0;
-	stop.msgh_id = ARM11_STOP_ID;
-	(void) mach_msg(&stop, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof stop,
-			0, MACH_PORT_NULL, 1000, MACH_PORT_NULL);
-
-	if (!arm_eleven_done) {
-		printf("act_test: [11] the thread asking never finished: %u of "
-		       "%d RPCs after %d aborts — WRONG\n",
-		       (unsigned) arm_eleven_rpcs, ARM11_RPCS, aborts);
+	if (!rpc_pair_finish(&arm_eleven, server, victim, aborts, "aborts"))
 		return 0;
-	}
-	(void) pthread_join(victim, NULL);
-	(void) pthread_join(server, NULL);
-
-	if (arm_eleven_rpcs != ARM11_RPCS) {
-		printf("act_test: [11] RPC %u of %d answered 0x%x with id %d and "
-		       "number %u, after %d aborts — WRONG\n",
-		       (unsigned) arm_eleven_rpcs, ARM11_RPCS,
-		       (int) arm_eleven_bad_kr, arm_eleven_bad_id,
-		       (unsigned) arm_eleven_bad_seq, aborts);
-		return 0;
-	}
-	if (arm_eleven_server_kr != MACH_MSG_SUCCESS ||
-	    arm_eleven_server_id != ARM11_STOP_ID) {
-		printf("act_test: [11] the server stopped on 0x%x with id %d "
-		       "instead of the stop message — WRONG\n",
-		       (int) arm_eleven_server_kr, arm_eleven_server_id);
-		return 0;
-	}
 	if (aborts == 0) {
 		printf("act_test: [11] thread_abort refused the first abort "
 		       "(%d) on a thread alive and about to ask — WRONG\n",
@@ -2392,8 +2444,8 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 		return 0;
 	}
 
-	(void) mach_port_destroy(mach_task_self(), arm_eleven_port);
-	(void) mach_port_destroy(mach_task_self(), arm_eleven_reply_port);
+	(void) mach_port_destroy(mach_task_self(), arm_eleven.port);
+	(void) mach_port_destroy(mach_task_self(), arm_eleven.reply_port);
 
 	printf("act_test: [11] %d RPCs taking the hot path both ways, with %d "
 	       "aborts fired at the thread making them: each ended with its "
@@ -2401,11 +2453,102 @@ arm_eleven_abort_a_thread_that_keeps_asking(void)
 	return 1;
 }
 
+/*
+ * ── Arm twelve: look at the reply port of a thread that keeps asking (#687) ─
+ *
+ * The hot path parks the thread on its reply port's queue and marks it
+ * TH_WAIT, and it then gave back the reference the trap had taken on that
+ * port -- under the port's own lock, which is a mutex.  When another thread
+ * held that lock, the parked thread slept on it, inside its own park, and the
+ * mutex's wakeup ended the wait the thread had declared for its reply: back
+ * in the trap with nothing delivered, "mmot_hotpath: bad wait result 0
+ * (ith_state 10004001)".
+ *
+ * A port's status is read under its lock and then its queue's, and the queue
+ * is the parked thread's until it has parked: a status call that comes while
+ * the RPC is parking waits for the queue holding the port, and holds it still
+ * when the parked thread comes to give its reference back.  So this arm asks
+ * for the status of the reply port of a thread making ARM12_RPCS RPCs, for as
+ * long as they last, and every RPC must end with its own reply.
+ *
+ * ⚠️ The window is a few instructions wide, so a boot rarely meets it: what
+ * makes this a test is ablations/687-widen-port-held.patch, which holds the
+ * port longer whenever a thread is parked on it and not yet asleep, and says
+ * so.  At one processor the status call cannot run while the RPC parks, and
+ * a yield follows each, so that the RPCs get to run at all.
+ */
+#define ARM12_RPCS		2000
+#define ARM12_REQUEST_ID	1200
+#define ARM12_REPLY_ID		1201
+#define ARM12_STOP_ID		1202
+
+static struct rpc_pair	arm_twelve = {
+	.arm = "[12]",
+	.rpcs = ARM12_RPCS,
+	.request_id = ARM12_REQUEST_ID,
+	.reply_id = ARM12_REPLY_ID,
+	.stop_id = ARM12_STOP_ID,
+	.bad_kr = MACH_MSG_SUCCESS,
+	.server_kr = -1,
+};
+
+static int
+arm_twelve_look_at_the_reply_port(void)
+{
+	pthread_t		server, asker;
+	mach_port_status_t	status;
+	mach_msg_type_number_t	count;
+	kern_return_t		kr = KERN_SUCCESS;
+	int			looks = 0, alone;
+
+	if (!rpc_pair_start(&arm_twelve, &server, &asker))
+		return 0;
+
+	alone = processors() <= 1;
+	arm_twelve.go = 1;
+	while (!arm_twelve.done) {
+		count = MACH_PORT_RECEIVE_STATUS_COUNT;
+		kr = mach_port_get_attributes(mach_task_self(),
+					      arm_twelve.reply_port,
+					      MACH_PORT_RECEIVE_STATUS,
+					      (mach_port_info_t) &status,
+					      &count);
+		if (kr != KERN_SUCCESS)
+			break;
+		looks++;
+		if (alone)
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_NONE, 0);
+	}
+
+	if (!rpc_pair_finish(&arm_twelve, server, asker, looks,
+			     "looks at the reply port"))
+		return 0;
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [12] the reply port's status was refused (%d) "
+		       "after %d answers — WRONG\n", kr, looks);
+		return 0;
+	}
+	if (looks == 0) {
+		printf("act_test: [12] the RPCs were over before one look at "
+		       "their reply port, which asks nothing — WRONG\n");
+		return 0;
+	}
+
+	(void) mach_port_destroy(mach_task_self(), arm_twelve.port);
+	(void) mach_port_destroy(mach_task_self(), arm_twelve.reply_port);
+
+	printf("act_test: [12] %d RPCs shaped for the hot path both ways, with "
+	       "their reply port's status read %d times while they were made: "
+	       "each ended with its own reply (#687)\n", ARM12_RPCS, looks);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 11, r;
+	int		passed = 0, arm_one_passed, arms = 12, r;
 
 	(void) argc;
 	(void) argv;
@@ -2441,6 +2584,7 @@ main(int argc, char **argv)
 	passed += arm_nine_refused_create_running();
 	passed += arm_ten_abort_an_rpc_with_its_reply_on_the_way();
 	passed += arm_eleven_abort_a_thread_that_keeps_asking();
+	passed += arm_twelve_look_at_the_reply_port();
 
 	/*
 	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the
