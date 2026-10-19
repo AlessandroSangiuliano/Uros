@@ -439,6 +439,11 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/boot_ports_test)
 endif()
 
+# #705: the load -t needs, by the same gate and with the same two libraries.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/taskpanic_load)
+endif()
+
 # And the POSIX thread suite (#425), which is that issue's whole done-when.
 #
 # Nothing new has to cross for it: the five libraries it links -- libpthreads,
