@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #718
+Takes out: 2d0e1209 -- the burn-in's handler gives back a preemption level again, enable_preemption_no_check() at its end, though trap.c raises none around an external vector's handler and the handler takes none; every tick of the two-second burn-in lowers processor 0's level by one, and the -C burn-in's question must find it about 200 below where it was, the number of ticks delivered
+Run: --entry 3 600 -smp 4
+Expect: the burn-in found the preemption level at 0 and left it at -[0-9]+ -- WRONG, its handler must give back only what it took \(#718\)
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index f324ea9e..f1f8f9c5 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -625,13 +625,12 @@ burnin_handler(struct trap_frame *frame)
+ 		(void) clock_event_arm_tick();
+ 
+ 	/*
+-	 * No preemption level to give back (#718).  trap.c calls an external
+-	 * vector's handler with no disable_preemption() around it, and this
+-	 * one raises none, so the re-enable that was here released a level
+-	 * nobody had raised: 200 times in a two-second burn-in, which left
+-	 * processor 0 at -200 for the rest of the boot.  clock_event_tick()
+-	 * has the pair because it raises the level itself.
++	 * _no_check: the balanced re-enable, WITHOUT the preemption check it
++	 * would otherwise run.  Taking the switch here would put it back
++	 * inside the interrupt, which is the thing being avoided; the AST
++	 * raised above is taken on the way out of the trap instead.
+ 	 */
++	enable_preemption_no_check();
+ }
+ 
+ void
