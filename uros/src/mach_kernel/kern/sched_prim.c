@@ -580,6 +580,10 @@ thread_timeout_setup(
 #endif	/* NCPUS > 1 */
 }
 
+static __inline__ boolean_t	wake_dequeued(
+					thread_t	thread,
+					int		result);
+
 /*
  *	Routine:	thread_go
  *	Purpose:
@@ -635,18 +639,15 @@ thread_go(thread_t thread)
 			      thread->ith_dq_seq, thread->ith_park_seq);
 		}
 #endif	/* WAKER_TRACK */
-		thread->state &= ~TH_WAIT;
-		if (!(thread->state & TH_RUN)) {
-			thread->state |= TH_RUN;
-#if	THREAD_SWAPPER
-			if (thread->state & TH_SWAPPED_OUT)
-				thread_swapin(thread->top_act, FALSE);
-			else
-#endif	/* THREAD_SWAPPER */
-				thread_setrun(thread, TRUE, TAIL_Q);
-		}
-		thread->wait_result = THREAD_AWAKENED;
-		thread->at_safe_point = NOT_AT_SAFE_POINT;
+		/*
+		 * #709: what every wakeup does to a thread off its wait queue,
+		 * from the one copy (#607) -- and with it TH_SUSP.  A thread
+		 * that thread_stop() stopped stays off the run queues, and
+		 * thread_unstop() restarts it.  The copy that was here left
+		 * TH_SUSP out, so a message restarted a receiver while
+		 * thread_get_state() or thread_set_state() worked on it.
+		 */
+		(void) wake_dequeued(thread, THREAD_AWAKENED);
 		WAKER_NOTE(thread, THREAD_AWAKENED, NO_EVENT,
 			   __builtin_return_address(0));
 	}
