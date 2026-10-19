@@ -183,7 +183,7 @@ Disk benchmarks (`disk_bench` via flipc_bench): raw AHCI 64 KB reads ~240–307 
 
 ### User-space libraries
 
-`libmach`, `libsa_mach`, `libposix-uros`, `libpthreads`, `libdl`, `libmodload`, `libflipc`, `libflipc2`, `libvfs`, `libnetname`, `libnetmemory`, `libmachid`, `libblk`, `libservice`, `librthreads`, `libxmm`, `libcap`, `libgpu_console`, `libc.so` (musl umbrella). All build successfully under the v0.1.0 toolchain.
+`libmach`, `libsa_mach`, `libposix-uros`, `libpthreads`, `libdl`, `libmodload`, `libflipc2`, `libvfs`, `libnetname`, `libblk`, `libservice`, `libcap`, `libgpu_console`, `libc.so` (musl umbrella). All build successfully under the v0.1.0 toolchain.
 
 ## Building
 
@@ -356,12 +356,12 @@ ninja kernel242_test           # kernel no-goto exerciser (#242)
 **Libraries** (all output under `build/export/uros/<arch>/user/lib/`):
 
 ```sh
-ninja libmach libsa_mach libpthreads libcthreads librthreads
+ninja libmach libsa_mach libpthreads
 ninja libposix-uros libposix-uros-pic
 ninja libdl libmodload
-ninja libflipc libflipc2
+ninja libflipc2
 ninja libvfs
-ninja libnetname libmachid libblk libservice libxmm libsa_fs
+ninja libnetname libblk libservice libsa_fs
 ninja libcap libgpu_console
 ninja libc-musl                 # musl static archive
 ninja libc-so                   # libc.so umbrella (musl + libposix-uros)
@@ -517,7 +517,6 @@ uros/
 │           ├── libpthreads/   # POSIX threads (native)
 │           ├── libdl/         # Runtime ELF loader (dlopen/dlsym)
 │           ├── libmodload/    # Shared module loader (per-class pool)
-│           ├── libflipc/      # FLIPC v1
 │           ├── libflipc2/     # FLIPC v2 (SPSC channels, endpoints, bufgroups)
 │           ├── libvfs/        # Client-side VFS + FLIPC fast path
 │           ├── libnetname/    # netname client
