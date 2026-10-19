@@ -202,11 +202,6 @@
 				/* for emulation_vector_t */
 #include <kern/ledger.h>	/* for ledger_t */
 
-#include <norma_vm.h>
-#if	NORMA_VM
-#include <xmm/xmm_obj.h>
-typedef char		*inline_existence_map_t;
-#endif	/* NORMA_VM */
 
 #else	/* MACH_KERNEL */
 typedef mach_port_t		task_port_t;

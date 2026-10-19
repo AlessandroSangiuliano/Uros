@@ -693,9 +693,6 @@ mach_port_allocate_subsystem(
  *		KERN_RESOURCE_SHORTAGE	Couldn't allocate memory.
  *		KERN_NO_SPACE		No room in space for another right.
  */
-#if	TEMPORARY_NO_NMS
-dstat_decl(unsigned int         c_mpalloc_fast = 0;)
-#endif	/* TEMPORARY_NO_NMS */
 
 kern_return_t
 mach_port_allocate_full(
@@ -732,33 +729,6 @@ mach_port_allocate_full(
 	}
 
 	switch (right) {
-#if	TEMPORARY_NO_NMS
-	    case MACH_PORT_RIGHT_RECEIVE_NO_NMS:
-	    {
-		ipc_port_t	port;
-
-		if (qosp->name)
-			kr = ipc_port_alloc_name(space, *namep, &port);
-		else
-			kr = ipc_port_alloc(space, namep, &port);
-		if (kr == KERN_SUCCESS) {
-			dstat(++c_mpalloc_fast);
-			IP_CLEAR_NMS(port);
-
-#if	MACH_RT
-			if (qosp->rt) 
-				port->ip_flags |= IPC_PORT_FLAGS_RT;
-#endif	/* MACH_RT */
-
-			if (subsystem != SUBSYSTEM_NULL) {
-				port->ip_subsystem = &subsystem->user;
-				subsystem_reference (subsystem);
-			}
-			ip_unlock(port);
-		}
-		break;
-	    }
-#endif	/* TEMPORARY_NO_NMS */
 
 	    case MACH_PORT_RIGHT_RECEIVE:
 	    {

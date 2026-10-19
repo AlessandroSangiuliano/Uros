@@ -171,10 +171,6 @@
  */
 
 #include <mach/std_types.defs>
-#if	KERNEL_SERVER
-#include <norma_vm.h>
-#endif	/* KERNEL_SERVER */
-
 type mach_port_status_t = struct[10] of integer_t;	/* obsolete */
 
 		/* mach_port_info_t: can hold either a
@@ -303,22 +299,14 @@ type memory_object_t = mach_port_t ctype: mach_port_t
 
 type memory_object_control_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-#if	NORMA_VM
-		intran: xmm_obj_t xmm_kobj_lookup(mach_port_t) ;
-#else	/* NORMA_VM */
 		intran: vm_object_t vm_object_lookup(mach_port_t) ;
-#endif	/* NORMA_VM */
 #else
 		;
 #endif	/* KERNEL_SERVER */
 
 type memory_cache_control_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-#if	NORMA_VM
-		intran: xmm_obj_t xmm_kobj_lookup(mach_port_t) ;
-#else	/* NORMA_VM */
 		intran: ipc_port_t null_conversion(mach_port_t) ;
-#endif	/* NORMA_VM */
 #else
 		;
 #endif	/* KERNEL_SERVER */
@@ -562,9 +550,6 @@ simport <kern/subsystem.h>;	/* for subsystem_t */
 simport <vm/vm_object.h>;	/* for vm_object_t */
 simport <vm/vm_map.h>;		/* for vm_map_t */
 simport <ipc/ipc_types.h>;	/* for ipc_space_t */
-#if	NORMA_VM
-simport <xmm/xmm_obj.h>;
-#endif	/* NORMA_VM */
 #endif	/* KERNEL_SERVER */
 
 import <mach/mach_types.h>;

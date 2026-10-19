@@ -107,10 +107,6 @@
 #ifndef	_MACH_PORT_H_
 #define _MACH_PORT_H_
 
-#if	MACH_KERNEL
-#include <dipc.h>
-#endif	/* MACH_KERNEL */
-
 #include <mach/boolean.h>
 #include <mach/machine/vm_types.h>
 #include <mach/machine/port_name.h>
@@ -197,18 +193,6 @@ typedef natural_t mach_port_right_t;
 #define MACH_PORT_RIGHT_PORT_SET	((mach_port_right_t) 3)
 #define MACH_PORT_RIGHT_DEAD_NAME	((mach_port_right_t) 4)
 #define MACH_PORT_RIGHT_NUMBER		((mach_port_right_t) 5)
-#define	TEMPORARY_NO_NMS	DIPC
-#if	TEMPORARY_NO_NMS
-/*
- *	XXX This definition is TEMPORARY, to permit
- *	users in-the-know to allocate ports that don't
- *	use NMS detection.  Later, mach_port_allocate
- *	will DEFAULT to this case, and an option will
- *	permit allocating ports that DO support NMS.
- *	Confused yet?  XXX
- */
-#define	MACH_PORT_RIGHT_RECEIVE_NO_NMS	((mach_port_right_t) 6)
-#endif	/* TEMPORARY_NO_NMS */
 
 typedef natural_t mach_port_type_t;
 typedef mach_port_type_t *mach_port_type_array_t;
@@ -272,11 +256,7 @@ typedef struct mach_port_status {
 	mach_port_msgcount_t	mps_qlimit;	/* queue limit */
 	mach_port_msgcount_t	mps_msgcount;	/* number in the queue */
 	mach_port_rights_t	mps_sorights;	/* how many send-once rights */
-#if	DIPC
-	mach_port_srights_t	mps_srights;	/* do send rights exist? */
-#else	/* DIPC */
 	boolean_t		mps_srights;	/* do send rights exist? */
-#endif	/* DIPC */
 	boolean_t		mps_pdrequest;	/* port-deleted requested? */
 	boolean_t		mps_nsrequest;	/* no-senders requested? */
 	unsigned int		mps_flags;	/* port flags */
