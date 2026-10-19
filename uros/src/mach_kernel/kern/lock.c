@@ -2171,7 +2171,7 @@ mutex_lock_assert_safe(void)
 		return;
 	event = self->wait_event;
 	state = self->state;
-	if (event == NO_EVENT && !(state & TH_WAIT))
+	if (!WAIT_DECLARED(event, state))
 		return;
 	again = current_thread();
 	panic("mutex_lock_assert_safe: thread %p takes a mutex with wait_event "
