@@ -64,7 +64,6 @@
 #ifndef	_VM_MEMORY_OBJECT_H_
 #define	_VM_MEMORY_OBJECT_H_
 
-#include <norma_vm.h>
 #include <mach_pagemap.h>
 
 #include <mach/boolean.h>
@@ -75,10 +74,6 @@ extern kern_return_t	memory_object_set_attributes_common(
 				boolean_t	may_cache,
 				memory_object_copy_strategy_t copy_strategy,
 				boolean_t	temporary,
-#if	NORMA_VM && MACH_PAGEMAP
-				vm_external_map_t existence_map,
-				vm_offset_t	existence_size,
-#endif	/* NORMA_VM && MACH_PAGEMAP */
 				vm_size_t	cluster_size,
 				boolean_t	silent_overwrite,
 				boolean_t	advisory_pageout);

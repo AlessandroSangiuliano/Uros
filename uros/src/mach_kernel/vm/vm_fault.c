@@ -241,7 +241,6 @@
 #include <mach_cluster_stats.h>
 #include <mach_pagemap.h>
 #include <mach_kdb.h>
-#include <norma_vm.h>
 
 #include <vm/vm_fault.h>
 #include <mach/kern_return.h>
@@ -268,10 +267,6 @@
 #include <kern/misc_protos.h>
 #include <kern/fault_profile.h>	/* #482: where a copy-on-write fault goes */
 
-#if	NORMA_VM
-#include <kern/host.h>
-#include <xmm/xmm_server_rename.h>
-#endif	/* NORMA_VM */
 
 #define VM_FAULT_CLASSIFY	0
 #define VM_FAULT_STATIC_CONFIG	1
@@ -465,9 +460,7 @@ vm_fault_page(
 	vm_offset_t	offset;
 	vm_page_t	first_m;
 	vm_object_t	next_object;
-#if	!NORMA_VM
 	vm_object_t	copy_object;
-#endif	/* !NORMA_VM */
 	boolean_t	look_for_page;
 	vm_prot_t	access_required = fault_type;
 	vm_prot_t	wants_copy_flag;
@@ -966,70 +959,6 @@ vm_fault_page(
 					return VM_FAULT_RETRY;
 				}
 			}
-#if	NORMA_VM
-			if (object != first_object &&
-			    object->copy_strategy == MEMORY_OBJECT_COPY_CALL) {
-				assert(access_required == VM_PROT_READ);
-
-				if (m->unlock_request != VM_PROT_NONE) {
-					/*
-					 * Page is being unlocked. Wait for the
-					 * lock completed which will copy the
-					 * page in the copy object.
-					 */
-					counter(c_vm_fault_wait_on_unlock++);
-					XPR(XPR_VM_FAULT,
-		  "vm_f_page: CALL unl wait obj 0x%X, offset 0x%X, page 0x%X\n",
-						(integer_t)object, offset,
-						(integer_t)m, 0, 0);
-					/* take an extra ref */
-					assert(object->ref_count > 0);
-					object->ref_count++;
-					vm_object_res_reference(object);
-					vm_fault_cleanup(object, first_m);
-					counter(c_vm_fault_page_block_backoff_kernel++);
-					vm_object_lock(object);
-					assert(object->ref_count > 0);
-					m = vm_page_lookup(object, offset);
-					if (m != VM_PAGE_NULL &&
-					    m->unlock_request != VM_PROT_NONE) {
-						PAGE_ASSERT_WAIT(m, interruptible);
-						vm_object_unlock(object);
-						thread_block((void (*)(void))0);
-						vm_object_deallocate(object);
-						goto backoff;
-					} else {
-						vm_object_unlock(object);
-						vm_object_deallocate(object);
-						return VM_FAULT_RETRY;
-					}
-				}
-
-				if (m->lock_supplied &&
-				    (m->page_lock & VM_PROT_WRITE) == 0) {
-					/* 
-					 * Page has probably been copied to
-					 * copy object by pager via copy_call.
-					 * This can happen when 2 threads fault
-					 * concurrently. The first one scans
-					 * the shadow chain until it reaches
-					 * the real page. But at the same time
-					 * the other thread faults (Write
-					 * access) on the real page and the
-					 * pager pushes the original page into
-					 * the copy object but the first thread
-					 * didn't have a chance to see it.
-					 */
-					vm_fault_cleanup(object, first_m);
-					counter(c_vm_fault_retry_on_w_prot++);
-					XPR(XPR_VM_FAULT,
-		"vm_f_page: call retry_on_w obj 0x%X, offset 0x%X, page 0x%X\n",
-						(integer_t)object, offset,
-						(integer_t)m, 0, 0);
-					return(VM_FAULT_RETRY);
-				}
-			}
-#endif	/* NORMA_VM */
 			/*
 			 *	We mark the page busy and leave it on
 			 *	the pageout queues.  If the pageout
@@ -1694,70 +1623,6 @@ no_clustering:
 		}
 	}
 	
-#if	NORMA_VM
-	/*
-	 *	If the old page was in use by any users of any copy-call
-	 *	copies of the object, the page must be removed from all
-	 *	pmaps.  (We can't know which pmaps use it.)
-	 */
-	if (object->copy_strategy == MEMORY_OBJECT_COPY_CALL) {
-
-		/*
-		 *	If the page is being written, but hasn't been
-		 *	copied to the copy-object, we have to copy it there.
-		 */
-		if ((fault_type & VM_PROT_WRITE) == 0) {
-			*protection &= ~VM_PROT_WRITE;
-
-		} else if (!must_be_resident && !m->lock_supplied) {
-			vm_prot_t	new_unlock_request;
-			kern_return_t	rc;
-
-			vm_page_lock_queues();
-			pmap_page_protect(m->phys_addr, VM_PROT_NONE);
-			vm_page_unlock_queues();
-
-			/*
-			 *	If the page was guaranteed to be resident or
-			 *	has been supplied by the pager, it must already
-			 *	have been copied. Otherwise, it is mandatory to
-			 *	call m_o_data_unlock so that the pager may ask
-			 *	for the content of the page if it really needs
-			 *	to copy it. To be considered successful, the
-			 *	vm_fault_page needs to be restarted to wait for
-			 *	the pager answer (m_o_lock_request).
-			 */
-
-			assert(object->pager_ready);
-			new_unlock_request = m->unlock_request |= fault_type;
-			m->page_lock = VM_PROT_WRITE;
-			m->unusual = TRUE;
-			PAGE_WAKEUP_DONE(m);
-			vm_object_unlock(object);
-			XPR(XPR_VM_FAULT,
-		"vm_f_page: CALL unlock obj 0x%X, offset 0x%X, page 0x%X, unl_req %d\n",
-				(integer_t)object, offset,
-				(integer_t)m, new_unlock_request, 0);
-			rc = memory_object_data_unlock(object->pager,
-						       object->pager_request,
-						       offset +
-						       object->paging_offset,
-						       PAGE_SIZE,
-						       new_unlock_request);
-			vm_object_lock(object);
-			vm_fault_cleanup(object, first_m);
-			if (rc == KERN_SUCCESS)
-				return(VM_FAULT_RETRY);
-
-			if (vm_fault_debug)
-				printf("vm_fault_page: memory_object_data_unlock failed\n");
-			return((rc == MACH_SEND_INTERRUPTED) ?
-			       VM_FAULT_INTERRUPTED :
-			       VM_FAULT_MEMORY_ERROR);
-		}
-	}
-
-#else	/* NORMA_VM */
 
 	/*
 	 *	Now check whether the page needs to be pushed into the
@@ -1997,7 +1862,6 @@ no_clustering:
 
 		break;
 	}
-#endif	/* NORMA_VM */
 
 	*result_page = m;
 	*top_page = first_m;
@@ -2075,9 +1939,7 @@ vm_fault(
 	vm_prot_t		prot;		/* Protection for mapping */
 	vm_behavior_t		behavior;	/* Expected paging behavior */
 	vm_offset_t		lo_offset, hi_offset;
-#if	!NORMA_VM
 	vm_object_t		old_copy_object; /* Saved copy object */
-#endif	/* !NORMA_VM */
 	vm_page_t		result_page;	/* Result of vm_fault_page */
 	vm_page_t		top_page;	/* Placeholder page */
 	kern_return_t		kr;
@@ -2176,7 +2038,6 @@ vm_fault(
 	 *		continuing or exiting loop.
 	 *
 	 */
-#if	!NORMA_VM
 	/*
 	 *	If this page is to be inserted in a copy delay object
 	 *	for writing, and if the object has a copy, then the
@@ -2185,7 +2046,6 @@ vm_fault(
 	if (object->copy_strategy != MEMORY_OBJECT_COPY_DELAY ||
 	    object->copy == VM_OBJECT_NULL ||
 	    (fault_type & VM_PROT_WRITE) == 0)
-#endif /* NORMA_VM */
 	{
 	cur_object = object;
 	cur_offset = offset;
@@ -2340,22 +2200,6 @@ FastPmapEnter:
 
 			if (cur_object == object)
 				break;
-#if	NORMA_VM
-			/*
-			 *	If this page is in a copy call object and
-			 *	is writeable, then we lost a race with the
-			 *	pager and the page we want is a level up.
-			 *	If the page is being unlocked we have to
-			 *	block.  In both cases, bail out, and allow
-			 *	the slow fault code to retry.
-			 */
-			if (cur_object->copy_strategy ==
-						MEMORY_OBJECT_COPY_CALL &&
-				 cur_object->copy != VM_OBJECT_NULL &&
-				 (m->page_lock & VM_PROT_WRITE) == 0 ||
-				 m->unlock_request != VM_PROT_NONE)
-			 		break;
-#endif /* NORMA_VM */
 
 			/*
 			 *	This is now a shadow based copy on write
@@ -2727,9 +2571,7 @@ FastPmapEnter:
 	 *	since our last lookup.
 	 */
 
-#if	!NORMA_VM
 	old_copy_object = m->object->copy;
-#endif	/* !NORMA_VM */
 
 	vm_object_unlock(m->object);
 	while (!vm_map_verify(map, &version)) {
@@ -2779,14 +2621,6 @@ FastPmapEnter:
 	}
 	vm_object_lock(m->object);
 
-#if	NORMA_VM
-	/*
-	 * Write access grant to pages of COPY_CALL objects must have
-	 * page_lock supplied by the pager.
-	 */
-	assert(m->object->copy_strategy != MEMORY_OBJECT_COPY_CALL ||
-	       (prot & VM_PROT_WRITE) == 0 || m->lock_supplied);
-#else	/* NORMA_VM */
 	/*
 	 *	If the copy object changed while the top-level object
 	 *	was unlocked, then we must take away write permission.
@@ -2794,7 +2628,6 @@ FastPmapEnter:
 
 	if (m->object->copy != old_copy_object)
 		prot &= ~VM_PROT_WRITE;
-#endif	/* NORMA_VM */
 
 	/*
 	 *	If we want to wire down this page, but no longer have
@@ -3151,7 +2984,6 @@ vm_fault_wire_fast(
 	VM_PAGE_SET_BUSY(m);
 	assert(!m->absent);
 
-#if	!NORMA_VM
 	/*
 	 *	Give up if the page is being written and there's a copy object
 	 */
@@ -3159,7 +2991,6 @@ vm_fault_wire_fast(
 		RELEASE_PAGE(m);
 		GIVE_UP;
 	}
-#endif	/* !NORMA_VM */
 
 	/*
 	 *	Put this page into the physical map.
@@ -3285,9 +3116,7 @@ vm_fault_copy(
 	vm_prot_t		dst_prot;
 
 	vm_size_t		amount_left;
-#if	!NORMA_VM
 	vm_object_t		old_copy_object;
-#endif	/* !NORMA_VM */
 	kern_return_t		error = 0;
 
 	vm_size_t		part_size;
@@ -3358,9 +3187,7 @@ vm_fault_copy(
 		}
 		assert ((dst_prot & VM_PROT_WRITE) != VM_PROT_NONE);
 
-#if	!NORMA_VM
 		old_copy_object = dst_page->object->copy;
-#endif	/* !NORMA_VM */
 
 		/*
 		 * There exists the possiblity that the source and
@@ -3460,7 +3287,6 @@ vm_fault_copy(
 			break;
 		}
 
-#if	!NORMA_VM
 		vm_object_lock(dst_page->object);
 		if (dst_page->object->copy != old_copy_object) {
 			vm_object_unlock(dst_page->object);
@@ -3471,7 +3297,6 @@ vm_fault_copy(
 			break;
 		}
 		vm_object_unlock(dst_page->object);
-#endif	/* !NORMA_VM */
 
 		/*
 		 *	Copy the page, and note that it is dirty

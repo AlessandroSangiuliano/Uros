@@ -84,25 +84,14 @@
 #ifndef	_VM_VM_PAGEOUT_H_
 #define _VM_VM_PAGEOUT_H_
 
-#include <norma_vm.h>
 
 #include <mach/boolean.h>
 #include <mach/machine/vm_types.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 
-/*
- *	The following ifdef only exists because XMM must (currently)
- *	be given a page at a time.  This should be removed
- *	in the future.
- */
-#if	NORMA_VM
-#define	DATA_WRITE_MAX	1
-#define	POINTER_T(copy)	(copy)
-#else	/* NORMA_VM */
 #define	DATA_WRITE_MAX	32
 #define	POINTER_T(copy)	(pointer_t)(copy)
-#endif	/* NORMA_VM */
 
 
 /*

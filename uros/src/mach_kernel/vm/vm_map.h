@@ -201,8 +201,6 @@
 #ifndef	_VM_VM_MAP_H_
 #define _VM_VM_MAP_H_
 
-#include <norma_vm.h>
-#include <dipc.h>
 #include <mach_rt.h>
 #include <cpus.h>
 #include <task_swapper.h>
@@ -581,9 +579,6 @@ MACRO_END
 #define vm_map_lock_read_to_write(map)					\
 		(lock_read_to_write(&(map)->lock) || (((map)->timestamp++), 0))
 
-#if	NORMA_VM
-extern zone_t		vm_map_copy_zone; /* zone for vm_map_copy structures */
-#endif	/* NORMA_VM */
 
 /*
  *	Exported procedures that operate on vm_map_t.
@@ -773,18 +768,6 @@ extern boolean_t	vm_map_verify(
 				vm_map_version_t *version);	/* REF */
 
 /* Make a copy of a region */
-#if	DIPC
-/*
- *	For DIPC only, src_volatile=TRUE means that the user promises not
- *	to modify data in transit.  Kernel may then avoid copy-on-write
- *	handling.
- *
- *	For non-DIPC kernel configurations, the src_volatile parameter
- *	is visible (even though it has no effect) to avoid ifdef'ing
- *	the interface.  The use of src_volatile has no effect in a
- *	non-DIPC kernel.
- */
-#endif	/* DIPC */
 extern kern_return_t	vm_map_copyin_common(
 				vm_map_t	src_map,
 				vm_offset_t	src_addr,
@@ -817,27 +800,6 @@ extern kern_return_t	vm_map_behavior_set(
 				vm_offset_t	end,
 				vm_behavior_t	new_behavior);
 
-#if	DIPC
-extern kern_return_t	vm_map_convert_to_page_list(
-				vm_map_copy_t	*caller_copy);
-
-extern kern_return_t	vm_map_object_to_page_list_cont(
-				vm_map_copy_t	cont_args,
-				vm_map_copy_t	*copy_result);	/* OUT */
-
-extern kern_return_t	vm_map_object_to_page_list(
-				vm_map_copy_t	*caller_copy);
-
-extern kern_return_t	vm_map_convert_from_page_list(
-				vm_map_copy_t	copy);
-
-extern kern_return_t	vm_map_object_to_entry_list(
-				vm_map_copy_t	copy);
-
-extern void		vm_map_entry_reset(
-				struct vm_map_header *header_map);
-
-#endif	/* DIPC */
 
 /* Split a vm_map_entry into 2 entries */
 extern void		_vm_map_clip_start(
@@ -845,26 +807,6 @@ extern void		_vm_map_clip_start(
 				vm_map_entry_t		entry,
 				vm_offset_t		start);
 
-#if	DIPC
-extern vm_map_copy_t 	vm_map_entry_list_from_object(
-			        vm_object_t		object,
-				vm_offset_t		offset,
-				vm_size_t		size,
-				boolean_t		pageable);
-
-extern kern_return_t	vm_map_convert_to_entry_list(
-				vm_map_copy_t	copy,
-				boolean_t	pageable);
-
-extern vm_map_copy_t	vm_map_copy_overwrite_recv(
-				vm_map_t	map,
-				vm_offset_t	addr,
-				vm_size_t	size);
-
-extern kern_return_t	vm_map_copy_overwrite_recv_done(
-				vm_map_t	map,
-				vm_map_copy_t	copy);
-#endif	/* DIPC */
 
 extern vm_map_entry_t	vm_map_entry_insert(
 				vm_map_t	map,
@@ -945,18 +887,6 @@ extern int		vm_map_copy_cont_is_valid(
 		vm_map_copyin_common(src_map, src_addr, len, src_destroy, \
 					FALSE, copy_result, TRUE)
 
-#if	DIPC
-/*
- *	Caller promises not to modify data in transit.  Kernel may then
- *	avoid copy-on-write handling.
- *
- *	N.B.  When src_destroy=TRUE, turning on src_volatile=TRUE has
- *	no effect.
- */
-#define	vm_map_copyin_volatile(src_map,src_addr,len,src_destroy,copy_result) \
-		vm_map_copyin_common(src_map, src_addr, len, src_destroy, \
-					TRUE, copy_result, FALSE)
-#endif	/* DIPC */
 
 /*
  *	Functions implemented as macros

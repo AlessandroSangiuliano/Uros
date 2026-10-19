@@ -165,7 +165,6 @@
 
 #include <mach_pagemap.h>
 #include <task_swapper.h>
-#include <norma_vm.h>
 
 #include <mach/kern_return.h>
 #include <mach/boolean.h>
@@ -185,11 +184,7 @@
 #include <vm/vm_external.h>
 #endif	/* MACH_PAGEMAP */
 
-#if	NORMA_VM
-typedef struct xmm_obj *	pager_request_t;
-#else	/* NORMA_VM */
 typedef struct ipc_port *	pager_request_t;
-#endif	/* NORMA_VM */
 #define	PAGER_REQUEST_NULL	((pager_request_t) 0)
 
 /*
@@ -302,14 +297,6 @@ struct vm_object {
 						/* Should lock request in
 						 * progress restart search?
 						 */
-#if	NORMA_VM
-	/* boolean_t */		pagemap_exported:1,
-						/* pagemap has been given to
-						 * memory manager */
-	/* boolean_t */		temporary_cached:1,
-	/* boolean_t */		temporary_caching:1,
-	/* boolean_t */		temporary_uncaching:1,
-#endif	/* NORMA_VM */
 	/* boolean_t */		shadowed:1,	/* Shadow may exist */
 	/* boolean_t */		silent_overwrite:1,
 						/* Allow full page overwrite
@@ -424,10 +411,6 @@ MACRO_BEGIN						\
 MACRO_END
 #endif	/* MACH_ASSERT */
 
-#if	NORMA_VM
-extern void		vm_object_deallocate_lazy(
-					vm_object_t	object);
-#endif	/* NORMA_VM */
 
 extern void		vm_object_deallocate(
 					vm_object_t	object);
@@ -530,16 +513,6 @@ extern vm_object_t	vm_object_enter(
 					boolean_t	internal,
 					boolean_t	init);
 
-#if	NORMA_VM
-extern void		vm_object_deallocate_lazy(
-					vm_object_t	object);
-
-extern void		vm_object_export_pagemap_try(
-					vm_object_t	object,
-					vm_size_t	size);
-
-extern void		vm_object_thread(void);
-#endif	/* NORMA_VM */
 
 /*
  *	Event waiting handling
