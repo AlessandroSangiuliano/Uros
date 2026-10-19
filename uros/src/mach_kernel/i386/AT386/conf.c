@@ -178,11 +178,6 @@
 #define	pc586name		"pc"
 #endif /* NPC586 > 0 */
 
-#include <kkt.h>
-#if	NKKT > 0
-#include <i386/kkt/if_kkt.h>
-#define ktname "kkt"
-#endif	/* NKKT > 0 */
 
 #include <sce.h>
 #if	NSCE > 0
@@ -392,12 +387,6 @@ struct dev_ops	dev_name_list[] =
 	  NO_DINFO },
 #endif
 
-#if	NKKT > 0
-	{ ktname,	ktopen,		NULL_CLOSE,	NULL_READ,
-	  ktoutput,	ktgetstat,	ktsetstat,	NULL_MMAP,
-	  ktsetinput,	NULL_RESET,	NULL_DEATH, 	0,
-	  NO_DINFO },
-#endif
 
 #if	NSCE > 0
 	{ scename,	sceopen,	NULL_CLOSE,	NULL_READ,

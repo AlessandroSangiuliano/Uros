@@ -236,8 +236,8 @@ function(uros_write_config_headers outdir arch)
   # what the first such RPC will do.
   # mach_net_in_kernel -- whether the network stack lives in the kernel.
   #
-  # i386's does: device/net_io.c is fed by chips/lance.c, i386/kkt/if_kkt.c,
-  # scsi/if_sce.c and device/cdli.c, all of them in-kernel drivers.  x86-64
+  # i386's does: device/net_io.c is fed by chips/lance.c, scsi/if_sce.c and
+  # device/cdli.c, all of them in-kernel drivers.  x86-64
   # has none and will have none: network cards belong to user-space servers,
   # with the IOMMU making the isolation real, and the TCP/IP stack is a
   # server too.  So net_io.c has no producers here and the three hooks it
