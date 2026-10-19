@@ -63,13 +63,9 @@
  */
 
 #include <mach_kdb.h>
-#include <norma_device.h>
 #include <zone_debug.h>
 #include <mach_kdb.h>
 #include <mach_net_in_kernel.h>
-#if	NORMA_DEVICE
-#include <dipc.h>
-#endif
 
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
@@ -117,9 +113,6 @@
 
 #include <machine/machparam.h>
 
-#if	NORMA_DEVICE && DIPC
-#include <dipc/special_ports.h>
-#endif
 
 /* MIG-generated headers use array typedefs (e.g. device_name_t = char[128],
  * io_buf_ptr_t = char[2048]) but implementations use pointer parameters.
@@ -339,53 +332,6 @@ ds_device_open(
 	    return (MIG_NO_REPLY);	/* no sense in doing anything */
 	}
 
-#if	NORMA_DEVICE
-	if ( mynode == -1 )
-		mynode = node_self();
-	/*
-	 * Translate device name if needed:
-	 * With the server sending to the correct MK, device forwarding becomes
-	 * an issue only when booting; trying to read pagingfile & server
-	 * from the boot file system.
-	 */
-	/*
-	 * Map global device name to <node> + local device name.
-	 */
-	if (name[0] != '<')
-		name = dev_forward_name(name, namebuf, sizeof(namebuf));
-
-	/*
-	 * Look for explicit node specifier, e.g., <2>sd0a.
-	 * If found, then forward request to correct device server.
-	 * If not found, then remove '<n>' and process locally.
-	 *
-	 * XXX should handle send-right reply_port as well as send-once XXX
-	 */
-	if (name[0] == '<') {
-		char *n;
-		int node = 0;
-
-		for (n = &name[1]; *n != '>'; n++) {
-			if (*n >= '0' && *n <= '9') {
-				node = 10 * node + (*n - '0');
-			} else {
-				return (D_NO_SUCH_DEVICE);
-			}
-		}
-		if (node == mynode) {
-			name = &n[1];	/* skip trailing '>' */
-		} else {
-#if	DIPC
-			forward_device_open_send(
-					 dipc_device_port((node_name) node),
-					 reply_port, mode, name);
-#else	/* DIPC */
-			panic("ds_device_open");
-#endif	/* DIPC */
-			return (MIG_NO_REPLY);
-		}
-	}
-#endif	/* NORMA_DEVICE */
 
 #if	PARAGON860 || iPSC386 || iPSC860
 if (ndf_noise) printf("local: %s@%d\n",name,mynode); /* XXX i860 */
@@ -814,15 +760,6 @@ device_write_get_sg(
 	 *      ARD - make sure message is VM_MAP_COPY_PAGE_LIST type.
 	 */
 	io_copy = (vm_map_copy_t) ior->io_data;
-#if	DIPC
-	if (io_copy->type != VM_MAP_COPY_PAGE_LIST) {
-		assert((io_copy->type == VM_MAP_COPY_OBJECT) ||
-			(io_copy->type == VM_MAP_COPY_ENTRY_LIST));
-		kr = vm_map_convert_to_page_list(&io_copy);
-		assert(kr == KERN_SUCCESS);
-		ior->io_data = (io_buf_ptr_t) io_copy;
-	}
-#endif	/* DIPC */
 	assert(io_copy->type == VM_MAP_COPY_PAGE_LIST);
         result = kmem_io_page_list_to_sglist(io_copy, &sgp,
 					     (vm_size_t *)&ior->io_alloc_size,
@@ -1010,15 +947,6 @@ device_write_get(
 	 *	io_alloc_size is the vm size of the region to deallocate.
 	 */
 	io_copy = (vm_map_copy_t) ior->io_data;
-#if	DIPC
-	if (io_copy->type != VM_MAP_COPY_PAGE_LIST) {
-		assert((io_copy->type == VM_MAP_COPY_OBJECT) ||
-			(io_copy->type == VM_MAP_COPY_ENTRY_LIST));
-		kr = vm_map_convert_to_page_list(&io_copy);
-		assert(kr == KERN_SUCCESS);
-		ior->io_data = (io_buf_ptr_t) io_copy;
-	}
-#endif	/* DIPC */
 	assert(io_copy->type == VM_MAP_COPY_PAGE_LIST);
 	result = kmem_io_map_copyout(device_io_map,
 				     (vm_offset_t *)&ior->io_data,

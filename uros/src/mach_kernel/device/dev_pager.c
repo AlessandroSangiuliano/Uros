@@ -184,7 +184,6 @@
  *
  * 	Device pager.
  */
-#include <norma_vm.h>
 
 #include <mach/boolean.h>
 #include <mach/port.h>
@@ -210,18 +209,11 @@
 #include <device/io_req.h>
 #include <device/conf.h>
 
-#if	NORMA_VM
-#include <xmm/xmm_obj.h>
-#endif	/* NORMA_VM */
 
 typedef struct dev_pager *dev_pager_t;
 
 /* Forward */
 
-#if	NORMA_VM
-static vm_object_t	vm_object_lookup_by_pager(
-				ipc_port_t		pager);
-#endif	/* NORMA_VM */
 
 extern void		dev_pager_reference(
 				dev_pager_t		ds);
@@ -243,25 +235,6 @@ extern vm_offset_t	device_map_page(
 				void			* dsp,
 				vm_offset_t		offset);
 
-#if	NORMA_VM
-/*
- * Use this when we really want the vm_object structure.
- * Declaring a function bypasses the macro following.
- */
-static vm_object_t
-vm_object_lookup_by_pager(
-	ipc_port_t	pager)
-{
-	return vm_object_lookup(pager);
-}
-
-/*
- * Use this when we want to perform the port to object conversion that
- * mig would normally do automatically. In a NORMA_VM system, that
- * object is an xmm obj, not a vm object.
- */
-#define	vm_object_lookup(pager_request)		xmm_kobj_lookup(pager_request)
-#endif	/* NORMA_VM */
 
 /*
  *	The device pager routines are called directly from the message
@@ -611,18 +584,8 @@ memory_object_data_request(
 
 	if (ds->type == CHAR_PAGER_TYPE) {
 	    register vm_object_t	object;
-#if	NORMA_VM
-	    object = vm_object_lookup_by_pager(pager);
-	    if (object == VM_OBJECT_NULL) {
-		    (void) memory_object_data_error(
-					vm_object_lookup(pager_request),
-					offset, length, KERN_FAILURE);
-		    return KERN_FAILURE;
-	    }
-#else	/* NORMA_VM */
 	    object = vm_object_lookup(pager_request);
 	    assert(object != VM_OBJECT_NULL);
-#endif	/* NORMA_VM */
 	    vm_object_lock(object);
 	    object->private = TRUE;
 	    vm_object_unlock(object);

@@ -77,7 +77,6 @@
 #ifndef	DS_ROUTINES_H
 #define	DS_ROUTINES_H
 
-#include <norma_device.h>
 #include <vm/vm_map.h>
 #include <mach/machine/vm_types.h>
 #include <mach/vm_sync.h>
@@ -232,12 +231,6 @@ extern io_return_t	ds_device_read_common(
 				io_buf_ptr_t		*data,
 				mach_msg_type_number_t	*data_count);
 
-#if	NORMA_DEVICE
-extern char		*dev_forward_name(
-				char		*name,
-				char		*namebuf,
-				int		namelen);
-#endif	/* NORMA_DEVICE */
 
 #if	MACH_KDB
 extern void		db_show_ior(
