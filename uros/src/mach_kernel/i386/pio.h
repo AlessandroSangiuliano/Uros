@@ -149,8 +149,8 @@ extern void		loutb(
  * been off.  The out-of-line versions in i386/locore.S are what actually runs,
  * and they are a second copy of the same six accessors.
  *
- * Kept and made to compile rather than deleted: which heritage stays as
- * history is #433's question, not this one's.  What #485 needs from it is only
+ * Kept and made to compile rather than deleted, and #433 kept it: it is what
+ * a kernel without assertions compiles.  What #485 needs from it is only
  * that -DUROS_MACH_ASSERT=OFF should produce a kernel rather than an
  * assembler error.
  */

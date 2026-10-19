@@ -84,9 +84,9 @@
  * ⚠️ Nothing calls these two.  `nm' on the linked kernel finds __divsi3 and
  * __udivsi3 defined and referenced nowhere: dividing a 32-bit value on i386
  * is one instruction, so no compiler of this century emits a call for it.
- * They are kept because deleting inherited code that still builds is #433's
- * question and not this issue's -- but the fact is recorded here rather than
- * left for the next reader to measure again.
+ * #433 kept them: it deleted what no target builds, and taking these out
+ * would change the i386 kernel for nothing they do -- but the fact is
+ * recorded here rather than left for the next reader to measure again.
  */
 
 ENTRY(__divsi3)
