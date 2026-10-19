@@ -111,8 +111,8 @@ pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
  * threads taking such a mutex for the first time together both initialised
  * it: the later one's `state = 0' landed on the earlier one's hold, its own
  * compare-and-swap then took the mutex as well, and both were inside.
- * pthread_test's [2] lost its wakeup that way, its waiter reading cond_flag as
- * 0 after the signal had set it, once in some thousands of boots.
+ * pthread_test's cond_signal case lost its wakeup that way, its waiter reading
+ * cond_flag as 0 after the signal had set it, once in some thousands of boots.
  *
  * Now one compare-and-swap moves the signature to _PTHREAD_MUTEX_SIG_initing,
  * the winner fills the fields and publishes the signature with a release
