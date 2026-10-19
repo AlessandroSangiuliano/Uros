@@ -10606,6 +10606,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 */
 	if (boot_flag('C')) {
 		int was_on = interrupts_enabled(), now;
+		int32_t level_was = (int32_t) percpu_preempt_level(), level;
 
 		clock_event_init(LAPIC_TIMER_VECTOR);
 		clock_event_burnin(2);
@@ -10625,6 +10626,29 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 		      ? ", as it found them (#612)\r\n"
 		      : " -- WRONG, it must give back the state it was given "
 			"(#612)\r\n");
+
+		/*
+		 * #718: and the preemption level as it found it.  The level is
+		 * the processor's, not a thread's, and percpu_activate() carries
+		 * the boot block's into processor 0's own page, so whatever the
+		 * burn-in leaves stays for the rest of the boot -- and while it
+		 * is not 0, trap.c refuses processor 0 every preemption in
+		 * kernel mode.
+		 */
+		level = (int32_t) percpu_preempt_level();
+		kputs("UrMach x86-64: the burn-in found the preemption level"
+		      " at ");
+		if (level_was < 0)
+			kputc('-');
+		kputdec(level_was < 0 ? -(int64_t) level_was : level_was);
+		kputs(" and left it at ");
+		if (level < 0)
+			kputc('-');
+		kputdec(level < 0 ? -(int64_t) level : level);
+		kputs(level == level_was
+		      ? ", as it found it (#718)\r\n"
+		      : " -- WRONG, its handler must give back only what it "
+			"took (#718)\r\n");
 	}
 
 	kputs("UrMach x86-64: entering setup_main (#458)\r\n");
