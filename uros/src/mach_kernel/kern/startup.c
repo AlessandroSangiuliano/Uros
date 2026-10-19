@@ -191,7 +191,6 @@
 #include <xpr_debug.h>
 #include <cpus.h>
 #include <mach_host.h>
-#include <norma_vm.h>
 #include <kernel_test.h>
 #include <etap.h>
 #include <cdli.h>
@@ -464,9 +463,6 @@ start_kernel_threads(void)
 	 * idles -- the idle loop was the only thing that ran them.
 	 */
 	(void) kernel_thread(kernel_task, urmach_rcu_drain_thread, (char *) 0);
-#if	NORMA_VM
-	(void) kernel_thread(kernel_task, vm_object_thread, (char *) 0);
-#endif	/* NORMA_VM */
 
 #ifdef	__x86_64__
 	/*

@@ -147,9 +147,7 @@
 /*
  */
 
-#include <norma_vm.h>
 #include <mach_rt.h>
-#include <dipc.h>
 
 #include <mach/boolean.h>
 #include <mach/port.h>
@@ -178,9 +176,6 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_thread.h>
-#if	DIPC
-#include <dipc/dipc_kmsg.h>
-#endif	/* DIPC */
 #include <device/dev_hdr.h>
 #include <device/ds_routines.h>
 #include <device/io_req.h>
@@ -362,19 +357,6 @@ mach_msg_rpc_from_kernel(
 		if (mr == MACH_MSG_SUCCESS)
 			break;
 
-#if	DIPC
-		/* can't tolerate transport errors right now */
-		if (mr == MACH_RCV_TRANSPORT_ERROR) {
-			printf("mach_msg_rpc_from_kernel: transport error\n");
-			printf("    reply port 0x%x kmsg 0x%x\n", reply, kmsg);
-			/*
-			 * kmsg should be freed but we'll leave it around
-			 * since this shouldn't happen anyway.
-			 * The assert below will trip because of this error.
-			 */
-		}
-
-#endif	/* DIPC */
 		assert((mr == MACH_RCV_INTERRUPTED) ||
 		       (mr == MACH_RCV_PORT_DIED));
 
@@ -522,28 +504,6 @@ mach_msg_overwrite(
 						&kmsg, &seqno);
 			/* mqueue is unlocked */
 			ipc_object_release(object);
-#if	DIPC
-			if (mr == MACH_RCV_TRANSPORT_ERROR) {
-				ipc_port_t port =
-				  kmsg->ikm_dest;
-
-				/*
-				 * release DIPC delivery reference; we have
-				 * yet to acquire a reference for the kmsg
-				 * itself (which is normally done by
-				 * dipc_kmsg_copyout).  We free the useless
-				 * kmsg and return the error.  Note that the
-				 * caller is not getting a kmsg back; a sequence
-				 * number will be lost, but the kernel doesn't
-				 * pay attention to sequence numbers anyway.
-				 * XXX Is there any reason that we should,
-				 * say, be copying out this message to reclaim
-				 * transits? XXX
-				 */
-	    			ipc_port_release(port);
-				ikm_free(kmsg);
-			}
-#endif	/* DIPC */
 		} while (mr == MACH_RCV_INTERRUPTED);
 		if (mr != MACH_MSG_SUCCESS)
 			return mr;
@@ -565,9 +525,6 @@ mach_msg_overwrite(
 				      MACH_MSG_BODY_NULL);
 		if (mr != MACH_MSG_SUCCESS) {
 			if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR
-#if	DIPC
-				|| mr == MACH_RCV_TRANSPORT_ERROR
-#endif	/* DIPC */
 			    ) {
 				ipc_kmsg_put_to_kernel(msg, kmsg,
 						kmsg->ikm_header.msgh_size + trailer->msgh_trailer_size);

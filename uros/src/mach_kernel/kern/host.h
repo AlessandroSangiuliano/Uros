@@ -94,9 +94,6 @@ struct	host {
     	struct ipc_port *host_self;
 	struct ipc_port *host_priv_self;
 	struct ipc_port *host_security_self;
-#if NORMA_IPC
-	struct ipc_port *host_paging_self;
-#endif
 };
 
 typedef struct host	*host_t;

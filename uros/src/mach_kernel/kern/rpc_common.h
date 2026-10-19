@@ -26,7 +26,6 @@
 #define _MACH_RPC_COMMON_H_
 
 #include <mach_debug.h>
-#include <dipc.h>
 #include <cpus.h>
 
 /*
@@ -40,11 +39,7 @@
 typedef struct rpc_common_data {
 	struct ipc_common_data	rcd_comm;
 	struct thread_pool	rcd_thread_pool;
-#if	DIPC && NCPUS == 1
-	usimple_lock_data_t	rcd_io_lock_data;
-#else	/* DIPC */
 	decl_mutex_data(,	rcd_io_lock_data)
-#endif	/* DIPC */
 } *rpc_common_t;
 
 #endif	/* _MACH_RPC_COMMON_H_ */

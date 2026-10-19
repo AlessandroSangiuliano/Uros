@@ -31,28 +31,12 @@
  *	Bootstrap distributed kernel services.
  */
 
-#include <dipc.h>
-#include <norma_device.h>
-#include <norma_task.h>
-#include <norma_vm.h>
 #include <kern/misc_protos.h>
 
-#if	DIPC
-#include <dipc/dipc_funcs.h>
-#endif
 
-#if	NORMA_VM
-#include <xmm/xmm_obj.h>
-#endif
 
 void
 norma_bootstrap(void)
 {
-#if	DIPC
-	dipc_bootstrap();
-#endif	/* DIPC */
 
-#if	NORMA_VM
-	norma_vm_init();
-#endif	/* NORMA_VM */
 }

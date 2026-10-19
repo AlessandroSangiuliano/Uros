@@ -249,8 +249,6 @@
 #include <hw_footprint.h>
 #include <mach_host.h>
 #include <mach_prof.h>
-#include <dipc.h>
-#include <xkmachkernel.h>
 #include <mach_lock_mon.h>
 #include <mach_ldebug.h>
 
@@ -517,9 +515,6 @@ typedef struct thread_shuttle {
 	boolean_t	assign_active;	/* someone waiting for may_assign */
 #endif	/* MACH_HOST */
 
-#if	XKMACHKERNEL
-	int		xk_type;
-#endif	/* XKMACHKERNEL */
 
 #if	NCPUS > 1
 	processor_t	last_processor; /* processor this last ran on */

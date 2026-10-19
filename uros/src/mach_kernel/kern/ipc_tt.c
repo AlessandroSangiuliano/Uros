@@ -1071,12 +1071,6 @@ convert_task_to_port(
 
 	itk_lock(task);
 	if (task->itk_self != IP_NULL)
-#if	NORMA_TASK
-		if (task->map == VM_MAP_NULL)
-			/* norma placeholder task */
-			port = ipc_port_copy_send(task->itk_self);
-		else
-#endif	/* NORMA_TASK */
 		port = ipc_port_make_send(task->itk_self);
 	else
 		port = IP_NULL;
