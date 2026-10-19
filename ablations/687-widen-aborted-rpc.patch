@@ -4,10 +4,10 @@ Holds open: an aborted RPC's window between its reply being written and the wake
 Run: --entry 14 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_mqueue.c b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-index 2049fcac..613a0649 100644
+index 80c2c459..f8e6f1cb 100644
 --- a/uros/src/mach_kernel/ipc/ipc_mqueue.c
 +++ b/uros/src/mach_kernel/ipc/ipc_mqueue.c
-@@ -734,6 +734,60 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
+@@ -557,6 +557,60 @@ int	ipc_dts_smp __attribute__((section(".data"))) = 0;
   */
  unsigned int	ipc_dts_declined_swapped;
  
@@ -68,7 +68,7 @@ index 2049fcac..613a0649 100644
  mach_msg_return_t
  ipc_mqueue_deliver(
  	register ipc_port_t	port,
-@@ -945,6 +999,8 @@ ipc_mqueue_deliver(
+@@ -719,6 +773,8 @@ ipc_mqueue_deliver(
  		if (!direct)
  			splx(s);
  	}
@@ -78,19 +78,19 @@ index 2049fcac..613a0649 100644
  		thread_go(receiver);
  	imq_unlock(mqueue);
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index 523a34ae..23d7669c 100644
+index a297e486..5b6a6318 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -219,6 +219,8 @@ unsigned int	c_route_msg_continue = 0;
- #include <dipc/dipc_port.h>
- #endif	/* DIPC */
+@@ -214,6 +214,8 @@ unsigned int	c_route_msg_continue = 0;
+ #endif	/* MACH_RT */
+ 
  
 +extern void	widen_687_receiver(thread_t self);	/* in ipc_mqueue.c */
 +
  
  /*
   * Forward declarations
-@@ -2184,6 +2186,7 @@ mach_msg_overwrite_trap(
+@@ -2185,6 +2187,7 @@ mach_msg_overwrite_trap(
  		 * until its wakeup is spent (#700), so taking it waits for that,
  		 * and makes ith_kmsg, written after ith_state, safe to read.
  		 */

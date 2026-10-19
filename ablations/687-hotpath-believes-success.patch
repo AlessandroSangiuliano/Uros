@@ -10,10 +10,10 @@ Expect: the zombie walks
 Expect: thread_go: thread 0x[0-9a-f]+ was taken off an IPC queue at its park [0-9]+ and is in park [0-9]+
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index a53dd0a8..1592e9f9 100644
+index 5b6a6318..28a77e64 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -2170,8 +2170,7 @@ mach_msg_overwrite_trap(
+@@ -2188,8 +2188,7 @@ mach_msg_overwrite_trap(
  		 * and makes ith_kmsg, written after ith_state, safe to read.
  		 */
  		widen_687_receiver(self);
