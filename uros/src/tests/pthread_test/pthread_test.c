@@ -24,7 +24,9 @@
 /*
  * POSIX Threads test suite for Uros.
  *
- * Tests: create/join, mutex, cond signal/broadcast, TSD, once, cancel.
+ * Tests: create/join, mutex, cond signal/broadcast, TSD, once, cancel, and
+ * the first use of a statically initialised mutex and condition variable by
+ * two threads at once (#667).
  * Runs as a Mach standalone server (loaded by bootstrap).
  */
 
@@ -211,12 +213,37 @@ test_cond_signal(void)
 	pthread_t th;
 	void *retval;
 	int seq_before = -1, seq_after = -1, waiters_seen = -1, unused;
+	int waiters_now = -1, waited_ms;
 
 	cond_flag = 0;
 	pthread_create(&th, NULL, thread_cond_waiter, NULL);
 
-	/* Give the waiter time to block */
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+	/*
+	 * #667: the signal waits until the variable counts the waiter.  This
+	 * gave the waiter a depress of 10 ms, which is not a wait for anything
+	 * (#584), and a waiter that had not reached pthread_cond_wait() by then
+	 * found cond_flag set and never waited: the wakeup the case is for was
+	 * needed only when the waiter happened to be asleep first, and
+	 * ablations/667-signal-wakes-nobody was caught only then.  The waiter
+	 * is counted under the variable's lock, before it lets the mutex go, so
+	 * once it is counted it is in the wait or on its way into it.
+	 */
+	for (waited_ms = 0; waited_ms < COND_JOIN_LIMIT_S * 1000; waited_ms++) {
+		if (pthread_cond_state_np(&cond_var, &unused, &waiters_now) == 0
+		    && waiters_now > 0)
+			break;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 1);
+	}
+	if (waiters_now <= 0) {
+		test_fail("cond_signal", "the waiter was not waiting after "
+			  "thirty seconds, so the signal would ask nothing");
+		pthread_mutex_lock(&cond_mutex);
+		cond_flag = 1;
+		pthread_cond_signal(&cond_var);
+		pthread_mutex_unlock(&cond_mutex);
+		(void) pthread_join(th, &retval);
+		return;
+	}
 
 	pthread_mutex_lock(&cond_mutex);
 	cond_flag = 1;
@@ -2495,6 +2522,168 @@ test_trap_sweep(void)
 }
 
 /* ----------------------------------------------------------------
+ * #667: statically initialised objects, used for the first time by two
+ * threads at once
+ * ---------------------------------------------------------------- */
+
+/*
+ * How long a thread waits at the gate before the case gives up on it, in
+ * yields.  Generous: under TCG a new thread can take a while to run at all.
+ */
+#define FIRST_USE_PATIENCE	1000000
+
+/*
+ * How long each thread holds the mutex: longer than the widen makes the first
+ * initialiser wait, so that its late fields land while the other is inside.
+ */
+#define FIRST_LOCK_HOLD_MS	100
+
+/* How late the second signaller comes, while the first initialises. */
+#define FIRST_COND_LATE_MS	10
+
+static volatile int first_use_ready;
+static volatile int first_use_go;
+
+/* Both threads wait here and are let go together. */
+static void
+first_use_gate(void)
+{
+	__atomic_add_fetch(&first_use_ready, 1, __ATOMIC_SEQ_CST);
+	while (!first_use_go)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+}
+
+/* Starts two threads at the gate and lets them go; says what failed. */
+static int
+first_use_run(const char *name, void *(*body)(void *))
+{
+	pthread_t th[2];
+	int i;
+
+	first_use_ready = 0;
+	first_use_go = 0;
+	for (i = 0; i < 2; i++)
+		if (pthread_create(&th[i], NULL, body, (void *)(long)i) != 0) {
+			test_fail(name, "pthread_create failed");
+			return 0;
+		}
+	for (i = 0; i < FIRST_USE_PATIENCE && first_use_ready < 2; i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+	first_use_go = 1;
+	if (first_use_ready < 2) {
+		test_fail(name, "the two threads never reached the gate");
+		return 0;
+	}
+	for (i = 0; i < 2; i++)
+		(void) pthread_join(th[i], NULL);
+	return 1;
+}
+
+/*
+ * PTHREAD_MUTEX_INITIALIZER sets the signature alone, and the first lock
+ * initialises the rest.  Two threads that take such a mutex for the first time
+ * together must still exclude each other, and they did not: each initialised
+ * it, the later one wrote `state = 0' over the earlier one's hold, and both
+ * were inside.  That is how cond_signal's waiter read cond_flag as 0 after
+ * the signal had set it, and slept through a wakeup that had gone by.
+ *
+ * Each thread holds the mutex FIRST_LOCK_HOLD_MS, and neither may find the
+ * other inside.  The window is a few instructions wide, so a boot rarely
+ * meets it: ablations/667-widen-first-use.patch makes the first thread to
+ * initialise the mutex wait, so that the second one meets the initialisation
+ * half done.
+ */
+static pthread_mutex_t first_lock_mutex = PTHREAD_MUTEX_INITIALIZER;
+static volatile int first_lock_inside;
+static volatile int first_lock_overlap;
+static volatile int first_lock_rc[2] = { -1, -1 };
+
+static void *
+first_lock_taker(void *arg)
+{
+	int me = (int)(long)arg;
+
+	first_use_gate();
+	first_lock_rc[me] = pthread_mutex_lock(&first_lock_mutex);
+	if (first_lock_rc[me] != 0)
+		return NULL;
+	if (__atomic_add_fetch(&first_lock_inside, 1, __ATOMIC_SEQ_CST) > 1)
+		first_lock_overlap = 1;
+	(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+			     FIRST_LOCK_HOLD_MS);
+	__atomic_sub_fetch(&first_lock_inside, 1, __ATOMIC_SEQ_CST);
+	(void) pthread_mutex_unlock(&first_lock_mutex);
+	return NULL;
+}
+
+static void
+test_static_mutex_first_lock(void)
+{
+	const char *name = "static mutex, first lock by two threads at once";
+	char buf[128];
+
+	if (!first_use_run(name, first_lock_taker))
+		return;
+	if (first_lock_rc[0] != 0 || first_lock_rc[1] != 0) {
+		snprintf(buf, sizeof(buf), "pthread_mutex_lock answered %d "
+			 "and %d (#667)", first_lock_rc[0], first_lock_rc[1]);
+		test_fail(name, buf);
+		return;
+	}
+	if (first_lock_overlap) {
+		test_fail(name, "both threads were inside it at once (#667)");
+		return;
+	}
+	test_ok(name);
+}
+
+/*
+ * PTHREAD_COND_INITIALIZER is initialised by its first use too, under a
+ * compare-and-swap, and a caller that came while another thread was
+ * initialising it found neither the initial signature nor the final one and
+ * answered EINVAL: a signal dropped, since nothing in the tree reads that
+ * answer.
+ *
+ * One thread signals the fresh variable, the other FIRST_COND_LATE_MS later,
+ * and both answers must be 0.  Without ablations/667-widen-first-use.patch,
+ * which holds the initialiser between the swap and the signature, the second
+ * call nearly always comes after the first is done.
+ */
+static pthread_cond_t first_use_cond = PTHREAD_COND_INITIALIZER;
+static volatile int first_use_rc[2] = { -1, -1 };
+
+static void *
+first_use_signaller(void *arg)
+{
+	int me = (int)(long)arg;
+
+	first_use_gate();
+	if (me == 1)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+				     FIRST_COND_LATE_MS);
+	first_use_rc[me] = pthread_cond_signal(&first_use_cond);
+	return NULL;
+}
+
+static void
+test_static_cond_first_use(void)
+{
+	const char *name = "static condition variable, signalled while "
+			   "another thread initialises it";
+	char buf[128];
+
+	if (!first_use_run(name, first_use_signaller))
+		return;
+	if (first_use_rc[0] != 0 || first_use_rc[1] != 0) {
+		snprintf(buf, sizeof(buf), "pthread_cond_signal answered %d "
+			 "and %d (#667)", first_use_rc[0], first_use_rc[1]);
+		test_fail(name, buf);
+		return;
+	}
+	test_ok(name);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -2516,6 +2705,15 @@ main(int argc, char **argv)
 
 	printf("pthread_test: starting\n");
 	test_num = 0;
+
+	/*
+	 * #667: first, before any other case uses a static object.  With
+	 * the fix taken out, a static mutex's first use can leave the mutex
+	 * held for good, and a case that comes after one never reaches these:
+	 * cond_broadcast's mutex stopped five boots of six that way.
+	 */
+	test_static_mutex_first_lock();
+	test_static_cond_first_use();
 
 	test_create_join();
 	test_cond_signal();

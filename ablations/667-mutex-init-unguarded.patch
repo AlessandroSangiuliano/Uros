@@ -1,0 +1,45 @@
+Kind: ablation
+Issue: #667
+Over: 667-widen-first-use.patch
+Takes out: 4a4627fc's compare-and-swap -- every caller that finds a static mutex's initial signature initialises the mutex itself, as pthread_mutex_lock(), trylock(), timedlock() and unlock() all did by calling pthread_mutex_init(); with the first initialiser held by the widen, the second initialises the mutex and takes it, and the first one's fields land on its hold, so pthread_test's first-lock case must find both threads inside
+Run: --entry 14 600 -smp 4
+Expect: static mutex, first lock by two threads at once: FAIL
+
+diff --git a/uros/src/lib/libpthreads/pthread_mutex.c b/uros/src/lib/libpthreads/pthread_mutex.c
+index b1eb3f74..e97e9d83 100644
+--- a/uros/src/lib/libpthreads/pthread_mutex.c
++++ b/uros/src/lib/libpthreads/pthread_mutex.c
+@@ -124,30 +124,9 @@ pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
+ static int
+ _pthread_mutex_lazy_init(pthread_mutex_t *mutex)
+ {
+-	long sig = __atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE);
+-
+-	if (sig == _PTHREAD_MUTEX_SIG_init)
+-	{
+-		long expected = _PTHREAD_MUTEX_SIG_init;
+-
+-		if (__atomic_compare_exchange_n(&mutex->sig, &expected,
+-						_PTHREAD_MUTEX_SIG_initing, 0,
+-						__ATOMIC_ACQUIRE,
+-						__ATOMIC_ACQUIRE))
+-		{
+-			(void) _pthread_mutex_fields_init(mutex, NULL);
+-			__atomic_store_n(&mutex->sig, _PTHREAD_MUTEX_SIG,
+-					 __ATOMIC_RELEASE);
+-			return (ESUCCESS);
+-		}
+-		sig = expected;		/* what the swap found instead */
+-	}
+-	while (sig == _PTHREAD_MUTEX_SIG_initing)
+-	{
+-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+-		sig = __atomic_load_n(&mutex->sig, __ATOMIC_ACQUIRE);
+-	}
+-	return (sig == _PTHREAD_MUTEX_SIG ? ESUCCESS : EINVAL);
++	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
++		return (pthread_mutex_init(mutex, NULL));
++	return (mutex->sig == _PTHREAD_MUTEX_SIG ? ESUCCESS : EINVAL);
+ }
+ 
+ /*

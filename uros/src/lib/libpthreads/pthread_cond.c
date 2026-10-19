@@ -42,8 +42,19 @@
 
 /*
  * Thread-safe lazy initialization for PTHREAD_COND_INITIALIZER.
- * Uses CAS to ensure exactly one thread initializes the seq counter;
- * losers spin until the winner publishes _PTHREAD_COND_SIG.
+ * Uses CAS to ensure exactly one thread initializes the seq counter, and
+ * every caller that finds the initialisation in progress waits until the
+ * winner publishes _PTHREAD_COND_SIG.
+ *
+ * 🔥 EVERY CALLER, NOT ONLY THE ONES THAT LOST THE SWAP (#667).  The swap
+ * moved the signature to _PTHREAD_NO_SIG, and the callers came here only on
+ * _PTHREAD_COND_SIG_init: one that read the signature after the swap and
+ * before the publication found neither value, skipped this, and answered
+ * EINVAL -- a pthread_cond_signal() simply dropped, since nothing in the tree
+ * reads that answer.  The swap now goes to _PTHREAD_COND_SIG_initing, which
+ * destroy never leaves, every caller comes here on anything but the final
+ * signature, and the ones that find an initialisation in progress wait for
+ * it.  _pthread_mutex_lazy_init() is the same for mutexes.
  */
 static int
 _pthread_cond_lazy_init(pthread_cond_t *cond)
@@ -70,27 +81,38 @@ _pthread_cond_lazy_init(pthread_cond_t *cond)
 	 * the same lazy-init written correctly in another file, which is what
 	 * made the intent unambiguous.
 	 */
-	long expected = _PTHREAD_COND_SIG_init;
-	if (__atomic_compare_exchange_n(&cond->sig, &expected,
-					_PTHREAD_NO_SIG, 0,
-					__ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+	long sig = __atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE);
+
+	if (sig == _PTHREAD_COND_SIG_init)
 	{
-		LOCK_INIT(cond->lock);
-		cond->next = (pthread_cond_t *)NULL;
-		cond->prev = (pthread_cond_t *)NULL;
-		cond->busy = (pthread_mutex_t *)NULL;
-		cond->waiters = 0;
-		cond->clock = CLOCK_REALTIME;
-		*COND_SEQ(cond) = 0;		/* #324: futex seq, not a port */
-		__atomic_store_n(&cond->sig, _PTHREAD_COND_SIG,
-				 __ATOMIC_RELEASE);
-	} else
-	{
-		while (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE)
-		       != _PTHREAD_COND_SIG)
-			;
+		long expected = _PTHREAD_COND_SIG_init;
+
+		if (__atomic_compare_exchange_n(&cond->sig, &expected,
+						_PTHREAD_COND_SIG_initing, 0,
+						__ATOMIC_ACQUIRE,
+						__ATOMIC_ACQUIRE))
+		{
+			LOCK_INIT(cond->lock);
+			cond->next = (pthread_cond_t *)NULL;
+			cond->prev = (pthread_cond_t *)NULL;
+			cond->busy = (pthread_mutex_t *)NULL;
+			cond->waiters = 0;
+			cond->clock = CLOCK_REALTIME;
+			*COND_SEQ(cond) = 0;	/* #324: futex seq */
+			__atomic_store_n(&cond->sig, _PTHREAD_COND_SIG,
+					 __ATOMIC_RELEASE);
+			return (ESUCCESS);
+		}
+		sig = expected;		/* what the swap found instead */
 	}
-	return (ESUCCESS);
+	/* Yielding, as the spin lock does: on one processor the winner is
+	 * not running while this waits. */
+	while (sig == _PTHREAD_COND_SIG_initing)
+	{
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+		sig = __atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE);
+	}
+	return (sig == _PTHREAD_COND_SIG ? ESUCCESS : EINVAL);
 }
 
 /*
@@ -142,7 +164,7 @@ pthread_cond_init(pthread_cond_t *cond,
 int
 pthread_cond_broadcast(pthread_cond_t *cond)
 {
-	if (cond->sig == _PTHREAD_COND_SIG_init)
+	if (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE) != _PTHREAD_COND_SIG)
 	{
 		int res;
 		res = _pthread_cond_lazy_init(cond);
@@ -171,7 +193,7 @@ pthread_cond_broadcast(pthread_cond_t *cond)
 int
 pthread_cond_signal(pthread_cond_t *cond)
 {
-	if (cond->sig == _PTHREAD_COND_SIG_init)
+	if (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE) != _PTHREAD_COND_SIG)
 	{
 		int res;
 		res = _pthread_cond_lazy_init(cond);
@@ -246,7 +268,7 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	pthread_mutex_t *busy;
 	int seq;
 	pthread_t self = pthread_self();
-	if (cond->sig == _PTHREAD_COND_SIG_init)
+	if (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE) != _PTHREAD_COND_SIG)
 	{
 		res = _pthread_cond_lazy_init(cond);
 		if (res != 0)
