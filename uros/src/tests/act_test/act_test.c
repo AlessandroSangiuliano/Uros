@@ -2544,11 +2544,164 @@ arm_twelve_look_at_the_reply_port(void)
 	return 1;
 }
 
+/* ----------------------------------------------------------------
+ * Arm thirteen: a message to a receiver thread_get_state() holds (#709)
+ * ---------------------------------------------------------------- */
+
+/*
+ * thread_get_state() stops its thread with thread_stop_wait() and reads it as
+ * stopped until thread_unstop().  A receiver asleep in mach_msg counts as
+ * stopped, having blocked interruptibly, and a message delivered to it then
+ * must leave it off the run queues: wake_dequeued() does, and thread_unstop()
+ * restarts it.  thread_go(), which every delivery uses, put it back on a run
+ * queue whatever TH_SUSP said, and it ran -- its copyout among other things --
+ * while its state was being read.  It cannot reach its own code meanwhile:
+ * thread_get_state() also holds it, and the hold stops it on the way to ring 3.
+ * So what this arm looks at is the copyout, in the receiver's buffer, which
+ * any thread of the task can read.
+ *
+ * The receiver asks for ARM13_SIZE, a size nothing else asks for, and
+ * ablations/709-widen-get-state.patch holds thread_get_state() 100 ms between
+ * stopping such a receiver and letting it go.  A third thread sends it a
+ * message 20 ms into that and looks at its buffer 30 ms later: a message there
+ * is a receiver that ran while it was stopped.  Without the widen
+ * thread_get_state() is over before the look, and the arm says it did not ask.
+ */
+#define	ARM13_SIZE		0x7090
+#define	ARM13_ID		709
+#define	ARM13_NOT_ASKED		(-1)
+
+static mach_port_t		arm13_port;
+static mach_port_t		arm13_thread = MACH_PORT_NULL;
+static volatile int		arm13_parked;
+static volatile int		arm13_calling;
+static volatile int		arm13_returned;
+static volatile int		arm13_returned_at_look = -1;
+static volatile int		arm13_seen;
+static volatile kern_return_t	arm13_sent = -1;
+static volatile kern_return_t	arm13_kr = -1;
+static union {
+	mach_msg_header_t	h;
+	char			bytes[ARM13_SIZE];
+} arm13_buf;
+
+static void *
+arm13_receiver(void *arg)
+{
+	(void) arg;
+	arm13_thread = mach_thread_self();
+	arm13_buf.h.msgh_id = 0;
+	arm13_parked = 1;
+	arm13_kr = mach_msg(&arm13_buf.h, MACH_RCV_MSG, 0, ARM13_SIZE,
+			    arm13_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	return NULL;
+}
+
+static void *
+arm13_sender(void *arg)
+{
+	mach_msg_header_t	msg;
+	int			i;
+
+	(void) arg;
+	for (i = 0; i < PATIENCE * 10 && !arm13_calling; i++)
+		nap(1);
+	nap(20);
+	msg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	msg.msgh_size = sizeof msg;
+	msg.msgh_remote_port = arm13_port;
+	msg.msgh_local_port = MACH_PORT_NULL;
+	msg.msgh_id = ARM13_ID;
+	arm13_sent = mach_msg(&msg, MACH_SEND_MSG, sizeof msg, 0,
+			      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+			      MACH_PORT_NULL);
+	nap(30);
+	arm13_returned_at_look = arm13_returned;
+	arm13_seen = ((volatile mach_msg_header_t *) &arm13_buf.h)->msgh_id
+		     == ARM13_ID;
+	return NULL;
+}
+
+static int
+arm_thirteen_message_to_a_receiver_being_read(void)
+{
+	pthread_t			receiver, sender;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	kern_return_t			kr;
+	int				i;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&arm13_port);
+	if (kr == KERN_SUCCESS)
+		kr = mach_port_insert_right(mach_task_self(), arm13_port,
+					    arm13_port, MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [13] the port was not made (%d) — WRONG\n",
+		       kr);
+		return 0;
+	}
+	if (pthread_create(&receiver, NULL, arm13_receiver, NULL) != 0) {
+		printf("act_test: [13] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	for (i = 0; i < PATIENCE && !arm13_parked; i++)
+		nap(100);
+	nap(300);			/* into the receive, like arm three */
+	if (pthread_create(&sender, NULL, arm13_sender, NULL) != 0) {
+		printf("act_test: [13] pthread_create failed — WRONG\n");
+		return 0;
+	}
+
+	arm13_calling = 1;
+	kr = thread_get_state(arm13_thread, x86_64_THREAD_STATE,
+			      (thread_state_t) &state, &count);
+	arm13_returned = 1;
+	(void) pthread_join(sender, NULL);
+	for (i = 0; i < PATIENCE && arm13_kr == -1; i++)
+		nap(100);
+	if (arm13_kr != -1)
+		(void) pthread_join(receiver, NULL);
+	(void) mach_port_destroy(mach_task_self(), arm13_port);
+
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [13] thread_get_state answered %d — WRONG\n",
+		       kr);
+		return 0;
+	}
+	if (arm13_sent != MACH_MSG_SUCCESS) {
+		printf("act_test: [13] the send answered 0x%x — WRONG\n",
+		       (int) arm13_sent);
+		return 0;
+	}
+	if (arm13_kr != MACH_MSG_SUCCESS) {
+		printf("act_test: [13] the receiver's mach_msg answered 0x%x "
+		       "— WRONG\n", (int) arm13_kr);
+		return 0;
+	}
+	if (arm13_returned_at_look) {
+		printf("act_test: [13] NOT ASKED — thread_get_state() had let "
+		       "the receiver go before its buffer was looked at; "
+		       "ablations/709-widen-get-state.patch holds it (#709)\n");
+		return ARM13_NOT_ASKED;
+	}
+	if (arm13_seen) {
+		printf("act_test: [13] the receiver took a message while "
+		       "thread_get_state() held it stopped: a delivery put it "
+		       "back on a run queue (#709) — WRONG\n");
+		return 0;
+	}
+	printf("act_test: [13] a message delivered to a receiver "
+	       "thread_get_state() held stopped waited in the kernel, and was "
+	       "taken once thread_get_state() let it go (#709)\n");
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 12, r;
+	int		passed = 0, arm_one_passed, arms = 13, r;
 
 	(void) argc;
 	(void) argv;
@@ -2585,6 +2738,11 @@ main(int argc, char **argv)
 	passed += arm_ten_abort_an_rpc_with_its_reply_on_the_way();
 	passed += arm_eleven_abort_a_thread_that_keeps_asking();
 	passed += arm_twelve_look_at_the_reply_port();
+	r = arm_thirteen_message_to_a_receiver_being_read();
+	if (r == ARM13_NOT_ASKED)	/* not asked is not passed (arm eight) */
+		arms--;
+	else
+		passed += r;
 
 	/*
 	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the
