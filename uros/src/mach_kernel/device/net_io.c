@@ -2199,7 +2199,7 @@ void net_ast(void)
 	boolean_t awake;
 
 #if NCPUS > 1 || MACH_LDEBUG
-	panic("There should be no network AST with DIPC\n");
+	panic("There should be no network AST with NCPUS > 1 or MACH_LDEBUG\n");
 #else /* NCPUS > 1 || MACH_LDEBUG */
 	net_ast_taken++;
 
