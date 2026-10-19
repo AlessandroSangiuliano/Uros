@@ -66,6 +66,10 @@ esac
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 mkdir -p "$OUT"
 WRONG=0
+# #705: the boots whose judge passed them with a question not asked, counted
+# and named at the end, so that a question going unasked is seen in the total
+# and not only read off its line.
+UNASKED=0 UNASKED_WHERE=""
 
 # The entries, one per line: number, verdict, extra run-x86_64.sh options, and
 # the processor count when it is not the run's.
@@ -320,10 +324,29 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	# the line's start: those reports came out interleaved.  A boot in
 	# which no second processor came says so, and the stop's way was not
 	# asked.
-	taskpanic) grep -aq 'panic(cpu [0-9]*): task_panic: asked for with -t' "$f" &&
-		! grep -aqE 'UrMach x86-64: trap |no handler' "$f" &&
-		{ grep -aq "held in a task's code until the stop" "$f" ||
-		  NOTE="NOT ASKED: no second processor came, so the stop met no task's space"; } ;;
+	#
+	# #705: and a boot in which -t did not ask at all, which was five of
+	# sixteen on OMEGA under TCG before taskpanic_load made both events
+	# certain.  With no -t panic and no trap it is NOT ASKED, not WRONG:
+	# the panic missing is no defect by itself, and the note says whether
+	# the load ran.  A trap, or a boot that did not reach its end, is still
+	# WRONG, and for that.  ⚠️ No parenthesis in a note: ci/job.sh reads a
+	# verdict up to the first closing one.
+	taskpanic) if grep -aq 'panic(cpu [0-9]*): task_panic: asked for with -t' "$f"; then
+			! grep -aqE 'UrMach x86-64: trap |no handler' "$f" &&
+			{ grep -aq "held in a task's code until the stop" "$f" ||
+			  NOTE="NOT ASKED: no second processor came, so the stop met no task's space"; }
+		elif grep -aqE 'UrMach x86-64: trap |no handler' "$f"; then
+			NOTE="no -t panic, and a trap"
+			false
+		elif ! grep -aq 'passed: reached the end, nothing unexplained' "$h"; then
+			NOTE="no -t panic, and the boot did not reach its end"
+			false
+		elif grep -aq 'taskpanic_load: [0-9]* s of load and -t did not ask' "$f"; then
+			NOTE="NOT ASKED: taskpanic_load loaded the machine and -t did not ask"
+		else
+			NOTE="NOT ASKED: the boot ended before -t asked, and nothing loaded it"
+		fi ;;
 	esac
 }
 
@@ -416,8 +439,16 @@ while read -r e v opt cpus; do
 			WRONG=$((WRONG + 1))
 		else
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v${NOTE:+: $NOTE})"
+			case $NOTE in
+			"NOT ASKED"*)
+				UNASKED=$((UNASKED + 1))
+				UNASKED_WHERE="$UNASKED_WHERE, entry $e $a -smp $n" ;;
+			esac
 		fi
 	done
 done <<< "$ENTRIES"
+# ⚠️ Before the total and in a shape of its own: ci/job.sh reads the run's end
+# as exactly "merge-test: N wrong".
+echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 echo "merge-test: $WRONG wrong"
 exit $WRONG
