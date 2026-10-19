@@ -189,7 +189,6 @@
 
 #include <mach_kdb.h>
 #include <bootstrap_symbols.h>
-#include <dipc.h>
 
 #include <cputypes.h>
 #include <mach/port.h>
@@ -1754,10 +1753,6 @@ bootstrap_create_old(void)
 	kern_return_t	kr;
 	ipc_port_t	root_device_port;
 
-#if	DIPC
-	if (no_bootstrap_task())
-		return;
-#endif	/* DIPC */
 
 	/*
 	 * Allocate the master bootstrap port;
@@ -1884,9 +1879,6 @@ move_bootstrap(void)
 	load_info_start = boot_start + boot_size;
 	load_info_size  = bi->load_info_size;
 
-#if DEBUG && 0
-	load_info_print();
-#endif
 
 	ovbcopy_ints((vm_offset_t)bi + sizeof(struct boot_info) + kern_sym_size,
 		     boot_start,

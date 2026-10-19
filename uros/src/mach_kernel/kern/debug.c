@@ -135,7 +135,6 @@
 
 #include <mach_assert.h>
 #include <mach_kdb.h>
-#include <dipc.h>
 #include <mach_kgdb.h>
 #include <cpus.h>
 
@@ -248,9 +247,6 @@ panic_init(void)
 	panic_is_inited = 1;
 }
 
-#if	DIPC
-#include <mach/kkt_request.h>
-#endif	/* DIPC */
 
 /*
  * #599: the panic message, rendered before it is printed so that the whole
@@ -356,13 +352,7 @@ panic(const char *str, ...)
 	_doprnt(str, &listp, panic_line_putc, 0);
 	va_end(listp);
 	panic_line[panic_line_len] = '\0';
-#if	DIPC && NCPUS > 1
-	printf("panic(node %d)(cpu %d): %s%s\n", KKT_NODE_SELF(),
-	       (unsigned) paniccpu, panic_line, panic_line_cut ? " [...]" : "");
-#elif	DIPC
-	printf("panic(node %d): %s%s\n", KKT_NODE_SELF(), panic_line,
-	       panic_line_cut ? " [...]" : "");
-#elif	NCPUS > 1
+#if	NCPUS > 1
 	printf("panic(cpu %d): %s%s\n", (unsigned) paniccpu, panic_line,
 	       panic_line_cut ? " [...]" : "");
 #else

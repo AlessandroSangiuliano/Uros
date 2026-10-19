@@ -22,18 +22,6 @@
  * MkLinux
  */
 
-/*
- * XKERNEL TODO list
- *
- * 1) get rid of ior_xkernel_qhead in uk_xkern/framework/eth_support.[hc]
- * 2) Copy xk buffer to kmsg (if needed) inside an XK thread and not under
- *	IT.
- * 3) Rework net_driver_clone() to duplicate input packets to
- *	both x-kernel and device
- */
-
-#include <xkmachkernel.h>
-#include <xk_debug.h>
 #include <mach_assert.h>
 
 #include <device/conf.h>
@@ -52,13 +40,6 @@
 #include <busses/iobus.h>
 #include <types.h>
 
-#if NET_XKMACHKERNEL
-#include <xkern/protocols/eth/eth_i.h>
-#include <xkern/include/xk_path.h>
-#include <xkern/include/xk_debug.h>
-#include <xkern/include/trace.h>
-#include <uk_xkern/protocols.h>
-#endif /* NET_XKMACHKERNEL */
 
 /*
  * Management of all network devices
@@ -101,59 +82,6 @@ MACRO_BEGIN						\
 MACRO_END
 #endif /* MACH_ASSERT */
 
-#if NET_XKMACHKERNEL
-#if MACH_ASSERT
-#define NET_VALIDATE_XK_NETP(netp, self, func)				\
-MACRO_BEGIN								\
-    assert((unsigned)self->state >= 0 &&				\
-	   (unsigned)self->state < net_board_size &&			\
-	   net_board_addr[(unsigned)self->state]);			\
-    netp = net_board_addr[(unsigned)self->state];			\
-    assert(netp->net_status.index == (unsigned)self->state);		\
-MACRO_END
-#else /* MACH_ASSERT */
-#define NET_VALIDATE_XK_NETP(netp, self, func)				\
-MACRO_BEGIN								\
-    if ((unsigned)self->state < 0 ||					\
-	(unsigned)self->state >= net_board_size ||			\
-	net_board_addr[(unsigned)self->state] == (net_device_t *)0)	\
-	panic("%s: Incorrect unit number (%d)\n", func);		\
-    netp = net_board_addr[(unsigned)self->state];			\
-    assert(netp->net_status.index == (unsigned)self->state);		\
-MACRO_END
-#endif /* MACH_ASSERT */
-
-/*
- * Input x-kernel buffer
- *
- * No conditional locking here: if we execute this code,
- * it means that eth_resources succeded. Hence, no one
- * can else could sneak in and grab this lock.
- */
-#define NET_INPUT_XKERNEL(pool, buf, len)	\
-MACRO_BEGIN					\
-    (buf)->len = (len);				\
-    simple_lock(&(pool)->iplock);		\
-    queue_enter(&(pool)->xkIncomingData, (buf),	\
-		InputBuffer *, link);		\
-    if (more_input_thread(pool))		\
-	thread_wakeup_one((event_t)(pool));	\
-    simple_unlock(&(pool)->iplock);		\
-MACRO_END
-
-/*
- * When used with promiscous traffic,
- * x-kernel traffic is identified by
- * the following interval.
- */
-#define XK_LOWEST_TYPE  0x3000
-#define XK_HIGHEST_TYPE 0x3FFF
-
-#if     XK_DEBUG
-int     tracexknetp;
-#endif /* XK_DEBUG */
-
-#endif /* NET_XKMACHKERNEL */
 
 /*
  * Alias device names management
@@ -294,67 +222,6 @@ net_devops_dinfo(dev_t,
 		 char *
     );
 
-#if NET_XKMACHKERNEL
-InputBuffer *
-net_driver_xkalloc(net_device_t,
-		   InputPool **
-    );
-
-xmsg_handle_t
-xknet_push(XObj,
-	   Msg
-    );
-
-int
-xknet_control(XObj,
-	      int,
-	      char *,
-	      int
-    );
-
-xkern_return_t
-xknet_openenable(XObj, 
-		 XObj, 
-		 XObj,
-		 Part
-    );
-
-boolean_t
-xknet_copyout(char *,
-	      long,
-	      void *
-    );
-
-boolean_t
-xknet_usrcopyout(char *,
-		 long,
-		 void *
-    );
-
-boolean_t
-xknet_copyin(char *,
-	     long,
-	     void *
-    );
-
-boolean_t
-xknet_usrcopyin(char *,
-		long,
-		void *
-    );
-
-boolean_t
-xknet_prepout(char *,
-	      long,
-	      void *
-    );
-
-boolean_t
-xknet_usrprepout(char *,
-		 long,
-		 void *
-    );
-#endif /* NET_XKMACHKERNEL */
 
 /*
  * Network generic device operations
@@ -568,11 +435,6 @@ net_driver_free(
     default:
 	assert(netd->netd_module == NET_MODULE_KGDB);
 	break;
-#if NET_XKMACHKERNEL
-    case NET_MODULE_XKERNEL:
-	pathFree(netd->netd_xk);
-	break;
-#endif /* NET_XKMACHKERNEL */
     case NET_MODULE_DEVICE:
 	iodone(netd->netd_ior);
 	zfree(netp->net_zone, (vm_offset_t)netd);
@@ -620,10 +482,6 @@ net_driver_prepare(
 	panic("%s: Scatter/Gather interface not yet supported\n",
 	      "net_driver_prepare");
 
-#if NET_XKMACHKERNEL
-    if (module == NET_MODULE_XKERNEL)
-	return (TRUE);
-#endif /* NET_XKMACHKERNEL */
 
     for (;;) {
 	kmsg = net_kmsg_get_buf(netp->net_pool);
@@ -654,9 +512,6 @@ net_driver_setup(
     net_device_t netp)
 {
     if (
-#if NET_XKMACHKERNEL
-	net_driver_prepare(netp, NET_MODULE_XKERNEL) &&
-#endif /* NET_XKMACHKERNEL */
 	net_driver_prepare(netp, NET_MODULE_DEVICE)) {
 	if (netp->net_status.flags & NET_STATUS_CALLBACK)
 	    netp->net_status.flags &= ~NET_STATUS_CALLBACK;
@@ -743,20 +598,6 @@ net_driver_reset(
 	netp->net_opacket = (net_done_t)0;
     }
 
-#if NET_XKMACHKERNEL
-    if (netp->net_xk_input != (InputBuffer *)0) {
-	/*
-	 * No conditional locking here: if we execute this code,
-	 * it means that we already got the lock. Hence, no one
-	 * can else could sneak in and grab this lock.
-	 */
-	simple_lock(&netp->net_xk_pool->iplock);
-	queue_enter(&netp->net_xk_pool->xkBufferPool,
-		    netp->net_xk_input, InputBuffer *, link);
-	simple_unlock(&netp->net_xk_pool->iplock);
-	netp->net_xk_input = (InputBuffer *)0;
-    }
-#endif /* NET_XKMACHKERNEL */
 
     return (D_SUCCESS);
 }
@@ -901,33 +742,6 @@ net_driver_input(
     }
     netp->net_genstat.in_bytes += netp->net_ilen;
 
-#if NET_XKMACHKERNEL
-    if (netp->net_xk_input != (InputBuffer *)0) {
-	if (netp->net_kmsg != (ipc_kmsg_t)0) {
-	    /*
-	     * It is assumed here that the header has already been copied
-	     */
-	    bcopy(netp->net_xk_input->data,
-		  (char *)(net_kmsg(netp->net_kmsg)->packet +
-			   sizeof (struct packet_header)),
-		  netp->net_ilen);
-	}
-
-	/*
-	 * No conditional locking here: if we execute this code,
-	 * it means that we already got the lock. Hence, no one
-	 * can else could sneak in and grab this lock.
-	 */
-	netp->net_xk_input->len = netp->net_ilen;
-	simple_lock(&netp->net_xk_pool->iplock);
-	queue_enter(&netp->net_xk_pool->xkIncomingData,
-		    netp->net_xk_input, InputBuffer *, link);
-	if (more_input_thread(netp->net_xk_pool))
-	    thread_wakeup_one((event_t)(netp->net_xk_pool));
-	simple_unlock(&netp->net_xk_pool->iplock);
-	netp->net_xk_input = (InputBuffer *)0;
-    }
-#endif /* NET_XKMACHKERNEL */
 
     if (netp->net_kmsg != (ipc_kmsg_t)0) {
 	struct packet_header *pkt =
@@ -949,11 +763,6 @@ net_driver_input(
 		    assert (netd->netd_module == NET_MODULE_DEVICE);
 		    netp->net_kmsg->ikm_header.msgh_id = NET_RCV_MSG_ID;
 		    break;
-#if NET_XKMACHKERNEL
-		case NET_MODULE_XKERNEL:
-		    netp->net_kmsg->ikm_header.msgh_id = NORMA_RCV_MSG_ID;
-		    break;
-#endif /* NET_XKMACHKERNEL */
 		case NET_MODULE_KGDB:
 		    netp->net_kmsg->ikm_header.msgh_id = NET_RCV_MSG_ID;
 		    break;
@@ -968,7 +777,7 @@ net_driver_input(
 /*
  * net_driver_clone
  *
- * Purpose : Allocate x-kernel buffer and/or ipc kernel message
+ * Purpose : Allocate the ipc kernel message
  * Returns : Nothing
  *
  * In_arg  : netp ==> network generic structure
@@ -978,31 +787,6 @@ net_driver_clone(
     net_device_t netp)
 {
     assert(netp->net_kmsg == (ipc_kmsg_t)0);
-#if NET_XKMACHKERNEL
-    assert (netp->net_xk_input == (InputBuffer *)0);
-
-    if (netp->net_ptype >= netp->net_xk_low &&
-	netp->net_ptype < netp->net_xk_high) {
-	/*
-	 * Allocate an x-kernel input buffer
-	 */
-	netp->net_xk_input = net_driver_xkalloc(netp, &netp->net_xk_pool);
-	if ((netp->net_status.flags & NET_STATUS_PROMISC) == 0)
-	    return;
-    } else {
-	switch (netp->net_ptype) {
-	case ETHERTYPE_ARP:
-	case ETHERTYPE_RARP:
-	    /*
-	     * Allocate an x-kernel input buffer
-	     */
-	    netp->net_xk_input = net_driver_xkalloc(netp, &netp->net_xk_pool);
-	    break;
-	default:
-	    break;
-	}
-    }
-#endif /* NET_XKMACHKERNEL */
 
     /*
      * Allocate an ipc kernel input message
@@ -1050,11 +834,6 @@ net_driver_loopback(
 	default:
 	    assert(netd->netd_module == NET_MODULE_KGDB);
 	    return;
-#if NET_XKMACHKERNEL
-	case NET_MODULE_XKERNEL:
-	    addr = (char *)msgGetAttr(&netd->netd_xk->xk_msg, 0);
-	    break;
-#endif /* NET_XKMACHKERNEL */
 	case NET_MODULE_DEVICE:
 	    addr = (char *)netd->netd_ior->io_data;
 	    break;
@@ -1095,9 +874,6 @@ net_driver_loopback(
 	 * Test case 3
 	 */
 	if (netp->net_device != (device_t)0 &&
-#if NET_XKMACHKERNEL
-	    (netp->net_status.flags & NET_STATUS_XK) ? 1 : 0 +
-#endif /* NET_XKMACHKERNEL */
 	    netp->net_device->open_count > 1) {
 	    for (i = 0; i < netp->net_status.address_size; i++)
 		if (eth->ether_dhost[i] !=
@@ -1127,84 +903,11 @@ net_driver_loopback(
     }
 
     /*
-     * Allocate needed x-kernel buffer and/or ipc kernel message
+     * Allocate the ipc kernel message
      */
     netp->net_ptype = type;
     net_driver_clone(netp);
 
-#if NET_XKMACHKERNEL
-    if (netp->net_xk_input != (InputBuffer *)0) {
-	/*
-	 * Copy header and data into the x-kernel buffer and send it
-	 */
-	switch (netd->netd_module) {
-	case NET_MODULE_XKERNEL:
-	    /*
-	     * Copy header and data of an output x-kernel message
-	     */
-	    bcopy(msgGetAttr(&netd->netd_xk->xk_msg, 0),
-		  netp->net_xk_input->hdr, netp->net_status.header_size);
-	    if (netp->net_kmsg != (ipc_kmsg_t)0) {
-		/*
-		 * If an input kmsg exists, copy header while in the cache
-		 * Data copy into kmsg is delayed until net_driver_input call
-		 */
-		bcopy(netp->net_xk_input->hdr,
-		      net_kmsg(netp->net_kmsg)->header,
-		      netp->net_status.header_size);
-	    }
-	    msgForEachAlternate(&netd->netd_xk->xk_msg,
-				xknet_copyin, xknet_usrcopyin, netp);
-	    netp->net_ilen = msgLen(&netd->netd_xk->xk_msg);
-	    if (netp->net_ilen < (netp->net_status.min_packet_size -
-				  netp->net_status.header_size)) {
-		bzero(&netp->net_xk_input->data[netp->net_ilen],
-		      (netp->net_status.min_packet_size -
-		       netp->net_status.header_size - netp->net_ilen));
-		netp->net_ilen = netp->net_status.min_packet_size;
-	    } else
-		netp->net_ilen += netp->net_status.header_size;
-	    break;
-
-	case NET_MODULE_DEVICE:
-	    /*
-	     * Copy header and data of an output device I/O request
-	     */
-	    bcopy(netd->netd_ior->io_data,
-		  netp->net_xk_input->hdr, netp->net_status.header_size);
-	    if (netp->net_kmsg != (ipc_kmsg_t)0) {
-		/*
-		 * If an input kmsg exists, copy header while in the cache
-		 * Data copy into kmsg is delayed until net_driver_input call
-		 */
-		bcopy(netp->net_xk_input->hdr,
-		      net_kmsg(netp->net_kmsg)->header,
-		      netp->net_status.header_size);
-	    }
-	    bcopy(netd->netd_ior->io_data + netp->net_status.header_size,
-		  netp->net_xk_input->data,
-		  netd->netd_ior->io_count - netp->net_status.header_size);
-	    if (netd->netd_ior->io_count < netp->net_status.min_packet_size) {
-		bzero(netp->net_xk_input->data +
-		      netd->netd_ior->io_count - netp->net_status.header_size,
-		      netp->net_status.min_packet_size -
-		      netd->netd_ior->io_count);
-		netp->net_ilen = (netp->net_status.min_packet_size -
-				  netp->net_status.header_size);
-	    } else
-		netp->net_ilen =
-		    netd->netd_ior->io_count - netp->net_status.header_size;
-	    break;
-
-	case NET_MODULE_KGDB:
-	    break;
-	}
-
-	netp->net_itype = netd->netd_ptype;
-	net_driver_input(netp, netd);
-	return;
-    }
-#endif /* NET_XKMACHKERNEL */
 
     if (netp->net_kmsg == (ipc_kmsg_t)0)
 	return;
@@ -1216,28 +919,6 @@ net_driver_loopback(
     case NET_MODULE_KGDB:
 	break;
 
-#if NET_XKMACHKERNEL
-    case NET_MODULE_XKERNEL:
-	/*
-	 * Copy header and data of an output x-kernel message
-	 */
-	bcopy(msgGetAttr(&netd->netd_xk->xk_msg, 0),
-	      net_kmsg(netp->net_kmsg)->header, netp->net_status.header_size);
-	netp->net_ilen = 0;
-	msgForEachAlternate(&netd->netd_xk->xk_msg,
-			    xknet_copyin, xknet_usrcopyin, netp);
-	if (netp->net_ilen < (netp->net_status.min_packet_size -
-			      netp->net_status.header_size)) {
-	    bzero(net_kmsg(netp->net_kmsg)->packet +
-		  sizeof (struct packet_header) + netp->net_ilen,
-		  netp->net_status.min_packet_size -
-		  netp->net_status.header_size - netp->net_ilen);
-	    netp->net_ilen = netp->net_status.min_packet_size;
-	} else
-	    netp->net_ilen += netp->net_status.header_size;
-	break;
-
-#endif /* NET_XKMACHKERNEL */
     case NET_MODULE_DEVICE:
 	/*
 	 * Copy header and data of an output device I/O request
@@ -1407,24 +1088,6 @@ net_driver_copy(
 	default:
 	    assert(netd->netd_module == NET_MODULE_KGDB);
 	    break;
-#if NET_XKMACHKERNEL
-	case NET_MODULE_XKERNEL:
-	    if (netd->netd_outlen < msgLen(&netd->netd_xk->xk_msg)) {
-		/*
-		 * Continue copying out x-kernel message
-		 */
-		netp->net_xk_olen = netp->net_status.header_size;
-		msgForEachAlternate(&netd->netd_xk->xk_msg,
-				    xknet_copyout, xknet_usrcopyout, netp);
-		if (netd->netd_outlen > netp->net_xk_olen)
-		    return (FALSE);
-	    }
-	    if (net_driver_copyout(netp, netd)) {
-		*copyin = FALSE;
-		return (TRUE);
-	    }
-	    return (FALSE);
-#endif /* NET_XKMACHKERNEL */
 	case NET_MODULE_DEVICE:
 	    if (net_driver_copyout(netp, netd)) {
 		*copyin = FALSE;
@@ -1436,16 +1099,6 @@ net_driver_copy(
     /*
      * BIC chip must not be busy on input
      */
-#if NET_XKMACHKERNEL
-    if (netp->net_xk_input != (InputBuffer *)0) {
-	if (net_driver_copyin(netp, (vm_offset_t)(netp->net_xk_input->data +
-						 netp->net_ilen))) {
-	    *copyin = TRUE;
-	    return (TRUE);
-	}
-	return (FALSE);
-    }
-#endif /* NET_XKMACHKERNEL */
 
     if (netp->net_kmsg != (ipc_kmsg_t)0) {
 	if (net_driver_copyin(netp,
@@ -1462,10 +1115,6 @@ net_driver_copy(
      * First, try to copyout
      */
     for (;;) {
-#if NET_XKMACHKERNEL
-	NET_DEQUEUE(&netp->net_xk_head, netd);
-	if (netd == (net_done_t)0)
-#endif /* NET_XKMACHKERNEL */
 	    NET_DEQUEUE(&netp->net_head, netd);
 	if (netd == (net_done_t)0)
 	    break;
@@ -1486,63 +1135,6 @@ net_driver_copy(
 	    assert(netd->netd_module == NET_MODULE_KGDB);
 	    continue;
 
-#if NET_XKMACHKERNEL
-	case NET_MODULE_XKERNEL:
-	    assert(netd->netd_outlen == 0);
-
-	    switch ((*netp->net_nic_ops.nic_copyout)(netp, netd)) {
-	    case NET_NICOUT_ERROR:	/* error */
-		if (net_driver_reset(netp) == D_SUCCESS)
-		    (void)net_driver_init(netp);
-		return (FALSE);
-
-	    case NET_NICOUT_DELAYED:	/* no available space */
-		netp->net_opacket = (net_done_t)0;
-		NET_PREPEND(&netp->net_head, netd);
-		break;
-
-	    case NET_NICOUT_COMPLETED:	/* packet copyout is completed */
-		*copyin = FALSE;
-		return (TRUE);
-
-	    case NET_NICOUT_SUCCESS:	/* packet copyout is accepted */
-		netd->netd_outlen += netp->net_status.header_size;
-		switch ((*netp->net_bic_ops.bic_copyout)
-			(netp, netd,
-			 (vm_offset_t)msgGetAttr(&netd->netd_xk->xk_msg, 0),
-			 netp->net_status.header_size,
-			 NET_BICOUT_FLAGS_VIRTUAL | NET_BICOUT_FLAGS_FIRST |
-			 (netd->netd_outlen < netd->netd_length ?
-			  0 : NET_BICOUT_FLAGS_LAST))) {
-		case NET_BICOUT_ERROR:		/* error */
-		    if (net_driver_reset(netp) == D_SUCCESS)
-			(void)net_driver_init(netp);
-		    break;
-
-		case NET_BICOUT_IN_PROGRESS:	/* copyout in progress */
-		    break;
-
-		case NET_BICOUT_COMPLETED:	/* copyout completed */
-		    netp->net_xk_olen = netp->net_status.header_size;
-		    msgForEachAlternate(&netd->netd_xk->xk_msg,
-					xknet_copyout, xknet_usrcopyout, netp);
-		    if (netd->netd_outlen > netp->net_xk_olen)
-			break;
-
-		    /*
-		     * X-kernel message has been completely copied out
-		     */
-		    if (net_driver_copyout(netp, netd)) {
-			*copyin = FALSE;
-			return (TRUE);
-		    }
-		    break;
-		}
-		return (FALSE);
-	    }
-	    break;
-
-#endif /* NET_XKMACHKERNEL */
 
 	case NET_MODULE_DEVICE:
 	    assert(netd->netd_outlen == 0);
@@ -1745,8 +1337,6 @@ net_driver_copy(
 	if (kmsg != IKM_NULL) {
 	    /*
 	     * Prepared input buffer
-	     *
-	     * XXX XKERNEL not yet implemented
 	     */
 	    assert(netp->net_kmsg == (ipc_kmsg_t)0);
 	    netp->net_ilen = len;
@@ -1756,58 +1346,13 @@ net_driver_copy(
 	}
 
 	/*
-	 * Allocate needed x-kernel buffer and/or ipc kernel message
+	 * Allocate the ipc kernel message
 	 */
 	net_driver_clone(netp);
 
-#if NET_XKMACHKERNEL
-	/*
-	 * Start by copying it into an x-kernel buffer
-	 */
-	if (netp->net_xk_input != (InputBuffer *)0) {
-	    /*
-	     * First, copy header
-	     */
-	    bcopy(header,
-		  netp->net_xk_input->hdr, netp->net_status.header_size);
-	    if (netp->net_kmsg != (ipc_kmsg_t)0) {
-		/*
-		 * If an input kmsg exists, copy header while in the cache
-		 * Data copy into kmsg is delayed until net_driver_input call
-		 */
-		bcopy(header,
-		      net_kmsg(netp->net_kmsg)->header,
-		      netp->net_status.header_size);
-	    }
-	    to = (vm_offset_t)netp->net_xk_input->data;
-
-	    /*
-	     * Then, copy data
-	     */
-	    netp->net_ilen = len;
-	    switch ((*netp->net_bic_ops.bic_copyin)(netp, receiver,
-						    from, to, len, FALSE)) {
-	    case NET_BICIN_ERROR:	/* error */
-		if (net_driver_reset(netp) == D_SUCCESS)
-		    (void)net_driver_init(netp);
-		break;
-
-	    case NET_BICIN_IN_PROGRESS:	/* copyin in progress */
-		break;
-
-	    case NET_BICIN_COMPLETED:	/* copyin has been done */
-		if (net_driver_copyin(netp, to + len)) {
-		    *copyin = TRUE;
-		    return (TRUE);
-		}
-		break;
-	    }
-	    return (FALSE);
-	}
-#endif /* NET_XKMACHKERNEL */
 
 	/*
-	 * Data is not copied into an x-kernel message, so copy it into a kmsg
+	 * Copy the data into the kmsg
 	 */
 	if (netp->net_kmsg != (ipc_kmsg_t)0) {
 	    /*
@@ -2665,551 +2210,3 @@ net_devops_dinfo(
     return (D_INVALID_OPERATION);
 }
 
-#if NET_XKMACHKERNEL
-/*
- * net_driver_xkalloc
- *
- * Purpose : Allocate an x-kernel buffer
- * Returns : x-kernel buffer
- *
- * IN_arg  : netp ==> network generic structure
- */
-InputBuffer *
-net_driver_xkalloc(
-    net_device_t netp,
-    InputPool **ret)
-{
-    InputBuffer *buf = (InputBuffer *)0;
-
-    switch (netp->net_ptype) {
-    case VCI_ETH_TYPE:	 /* VCI-zed x-kernel traffic */
-    {
-	VCIhdr *vciheader = (VCIhdr *)(eh + 1);
-	VciType vci = vciheader->vci;
-	InputPool *pool;
-		    
-	/* lastVci is in network byte order */
-	if (vci != lastVci) {
-	    vci = ntohs(vciheader->vci);
-	    if (mapResolve(poolMap, &vci, &pool) == XK_FAILURE) { 
-		/* 
-		 * We don't have any resource 
-		 * associated to this vci.
-		 */
-		break;
-	    }
-	    xAssert(pool);
-	    lastVci = vciheader->vci;
-	    lastPool = pool;
-	}
-	/* find resources */
-	if (simple_lock_try(&lastPool->iplock)) {
-	    if (!queue_empty(&lastPool->xkBufferPool)) {
-		queue_remove_first(&lastPool->xkBufferPool, buf, 
-				       InputBuffer *, link);
-		*ret = lastPool;
-		buf->driverProtl = netp->net_xk_self;
-	    }
-	    simple_unlock(&lastPool->iplock);
-	} 
-    }
-
-    default:		/* regular x-kernel traffic */
-	/* find resources */
-	if (defaultPool) 
-	    if (simple_lock_try(&defaultPool->iplock)) {
-		if (!queue_empty(&defaultPool->xkBufferPool)) {
-		    queue_remove_first(&defaultPool->xkBufferPool,
-				       buf, InputBuffer *, link);
-		    *ret = defaultPool;
-		    buf->driverProtl = netp->net_xk_self;
-		}
-		simple_unlock(&defaultPool->iplock);
-	    }
-	break;
-    }
-    return (buf);
-}
-
-/*
- * xknet_init
- *
- * Purpose : X-kernel network generic initialization
- * Returns : X-kernel generic return value
- *
- * IN_arg  : self ==> X-kernel object
- */
-xkern_return_t
-xknet_init(
-    XObj self)
-{
-    int unit;
-    io_return_t ret;
-    char *p;
-    net_device_t netp;
-    spl_t spl;
-
-    xTrace0(xknetp, TR_GROSS_EVENTS, "xknet_init entered");
-
-    for (p = self->instName; *p != '/' && *p != '\0'; p++)
-	continue;
-    if (*p == '\0') {
-	printf("%s: Incorrect x-kernel driver name (unit missing) '%s'\n",
-	       "xknet_init", self->instName);
-	return (XK_FAILURE);
-    }
-
-    unit = 0;
-    p++;
-    while (*p >= '0' && *p <= '9')
-	unit = (unit * 10) + (*p++ - '0');
-    if (*p != '\0') {
-	printf("%s: Incorrect x-kernel driver unit string '%s'\n",
-	       "xknet_init", self->instName);
-	return (XK_FAILURE);
-    }
-
-    if (unit > net_board_size || net_board_addr[unit] == (net_device_t) 0) {
-	printf("%s: Incorrect x-kernel driver unit '%s'\n",
-	       "xknet_init", self->instName);
-	return (XK_FAILURE);
-    }
-
-    netp = net_board_addr[unit];
-    if (netp->net_status.flags & NET_STATUS_XK) {
-	printf("%s: x-kernel driver unit '%s' already initialized\n",
-	       "xknet_init", self->instName);
-	return (XK_FAILURE);
-    }
-
-    /* 
-     * We kludge the unit number in the 'state' pointer field of the XObj.
-     */
-    self->state = (char *)unit;
-    netp->net_xk_self = self;
-
-    /* 
-     * If the interface is in use, we respect the boundaries assigned.
-     * Otherwise, we can take all of the traffic space (0, 0xFFFF).
-     * This is particluarly usefull to run bootp and arp at boot time.
-     */
-    if (netp->net_status.flags & NET_STATUS_RUNNING) {
-	netp->net_xk_low = XK_LOWEST_TYPE;
-	netp->net_xk_high = XK_HIGHEST_TYPE;
-    } else {
-	netp->net_xk_low = 0;
-	netp->net_xk_high = 0xFFFF;
-    }
-
-    spl = splimp();
-    IOBUS_LOCK(&netp->net_dev_lock, IOBUS_LOCK_WAIT);
-    ret = net_driver_init(netp);
-    IOBUS_UNLOCK(&netp->net_dev_lock);
-    splx(spl);
-
-    if (ret != D_SUCCESS) {
-	printf("%s: Unsuccessful x-kernel driver init '%s'\n",
-	       "xknet_init", self->instName);
-	return (XK_FAILURE);
-    }
-
-    netp->net_status.flags |= NET_STATUS_XK;
-
-    if (allocateResources(self) != XK_SUCCESS) {
-	printf("%s: can't allocate x-kernel resource for '%s'\n",
-	      "xknet_init", self->instName);
-	return (XK_FAILURE);
-    }
-    NETQ_INIT(&netp->net_xk_head, 0);
-    netp->net_xk_mda = pathGetAlloc(self->path, MD_ALLOC);
-
-    /*
-     * Set up protocol operations
-     */
-    self->push = xknet_push;
-    self->control = xknet_control;
-    self->openenable = xknet_openenable;
-
-    xTrace0(xknetp, TR_GROSS_EVENTS, "xknet_init returns");
-    return (XK_SUCCESS);
-}
-
-/*
- * xknet_push
- *
- * Purpose : X-kernel network generic write
- * Returns : X-kernel generic handle return value
- *
- * IN_arg  : self    ==> X-kernel object
- *	     downmsg ==> Msg to write on the network
- */
-xmsg_handle_t
-xknet_push(
-    XObj self,
-    Msg downMsg)
-{
-    spl_t spl;
-    net_device_t netp;
-    net_done_t netd;
-    struct net_xk_output *outp;
-    vm_size_t len;
-    IOBUS_LOCK_STATE();
-
-    NET_VALIDATE_XK_NETP(netp, self, "xknet_push");
-
-    switch (netp->net_status.media_type) {
-    case NET_MEDIA_OTHERS:
-	if (netp->net_status.header_size != sizeof (struct if_myrinet_eep)) {
-	    xTraceP0(self, TR_SOFT_ERRORS,
-		     "xknet_push: unsupported media type");
-	    return (XMSG_ERR_HANDLE);
-	}
-	/*FALL THRU */
- 	    
-    case NET_MEDIA_ETHERNET:
-    {
-	ETHhost *dest = &((ETHhdr *)msgGetAttr(downMsg, 0))->dst;
-	xTrace3(xknetp, TR_EVENTS, "xknet_push: send to %x.%x.%x",
-		dest->high, dest->mid, dest->low);
-	if (netp->net_status.header_size == sizeof (ETHhdr))
-	    break;
-	xTraceP0(self, TR_SOFT_ERRORS,
-		 "xknet_push: Ethernet header lengths differ (%d/%d)");
-	return (XMSG_ERR_HANDLE);
-    }
-
-    default:
-        xTraceP0(self, TR_SOFT_ERRORS, "xknet_push: unsupported media type");
-	return (XMSG_ERR_HANDLE);
-    }
-
-    /*
-     * Reject the write if the packet is too large or too small.
-     */
-    len = msgLen(downMsg) + netp->net_status.header_size;
-    if (len > netp->net_status.max_packet_size) {
-	printf("%s: incorrect output packet size (%d bytes) on %s%d\n",
-	       "xknet_push", len, netp->net_name, netp->net_unit);
-	return (XMSG_ERR_HANDLE);
-    }
-
-    /*
-     * Construct packet header
-     */
-    spl = splimp();
-    outp = pathAlloc(self->path,
-		     sizeof (*outp) + netp->net_osize +
-		     netp->net_status.header_size);
-    splx(spl);
-    if (outp = (struct net_xk_output *)0) {
-        xTraceP0(self, TR_SOFT_ERRORS, "xknet_push: allocation error");
-        return (XMSG_ERR_HANDLE);
-    }
-
-    msgConstructCopy(&outp->xk_msg, downMsg);
-    msgSetAttr(&outp->xk_msg, 0,
-	       ((char *)(outp + 1)) + netp->net_osize,
-		netp->net_status.header_size);
-    memcpy((char *)msgGetAttr(&outp->xk_msg, 0),
-	   (const char *)msgGetAttr(downMsg, 0), netp->net_status.header_size);
-
-    /*
-     * Initialize net_done element
-     */
-    netd = &outp->xk_done;
-    netd->netd_xk = outp;
-    netd->netd_module = NET_MODULE_XKERNEL;
-    netd->netd_done = (void (*)(net_device_t, net_done_t))0;
-    netd->netd_external = &outp + 1;
-    netd->netd_outlen = 0;
-    netd->netd_ptype = net_driver_addrtype(netp,
-					   (char *)msgGetAttr(downMsg, 0), 0);
-    if (len < netp->net_status.min_packet_size)
-	netd->netd_length = netp->net_status.min_packet_size;
-    else
-	netd->netd_length = len;
-
-    /*
-     * Validate packet to be copied out
-     */
-    if (netp->net_nic_ops.nic_prepout) {
-	msgForEachAlternate(&netd->netd_xk->xk_msg,
-			    xknet_prepout, xknet_usrprepout, netp);
-	if (netd->netd_outlen < netd->netd_length)
-	    (*netp->net_nic_ops.nic_prepout)
-		(netp, netd, 0, netd->netd_length - len,
-		 NET_BICOUT_FLAGS_LAST | NET_BICOUT_FLAGS_PADDING);
-	netd->netd_outlen = 0;
-    }
-
-    /*
-     * Enqueue message and start the device
-     */
-    spl = splimp();
-    NET_ENQUEUE(&netp->net_xk_head, netd, TRUE);
-
-    if (IOBUS_LOCK(&netp->net_dev_lock, IOBUS_LOCK_START)) {
-	net_driver_event(netp);
-	IOBUS_UNLOCK(&netp->net_dev_lock);
-    }
-    splx(spl);
-
-    return (XMSG_NULL_HANDLE);
-}
-
-/*
- * xknet_control
- *
- * Purpose : X-kernel network generic control operation
- * Returns : length written to buf
- *
- * IN_arg  : self ==> X-kernel object
- *	     op   ==> X-kernel operation
- *	     buf  ==> Output buffer
- *	     len  ==> Length of output buffer
- */
-int
-xknet_control(
-    XObj  self,
-    int   op,
-    char *buf,
-    int   len)
-{  
-    net_device_t netp;
-
-    NET_VALIDATE_XK_NETP(netp, self, "xknet_control");
-    xTrace1(xknetp, TR_FULL_TRACE, "xknet_control: operation 0x%x", op);
-
-    switch (op) {
-    case GETMYHOST:
-	if (len < netp->net_status.address_size)
-	    break;
-	bcopy((char *)netp->net_address, buf, netp->net_status.address_size);
-	return (netp->net_status.address_size);
-
-    default:
-	break;
-    }
-
-    return (-1);
-}
-
-/*
- * xknet_openenable
- *
- * Purpose : X-kernel network generic x-kernel operations
- * Returns : X-kernel generic return value
- *
- * IN_arg  : self    ==> X-kernel object
- *	     hlp     ==> upper X-kernel object
- *	     hlptype ==> lower X-kernel object
- *	     part    ==> list of participant (to demultiplex)
- *
- * Comment : The openenable interface allows the driver get the address
- *		of the higher level protocol to which it interfaces
- */
-xkern_return_t
-xknet_openenable(
-    XObj self, 
-    XObj hlp, 
-    XObj hlptype,
-    Part part)
-{ 
-    net_device_t netp;
-
-    NET_VALIDATE_XK_NETP(netp, self, "xknet_openenable");
-
-    xSetUp(self, hlp);
-    return (XK_SUCCESS);
-}
-
-/*
- * xknet_copyout
- *
- * Purpose : X-kernel buffer copyout
- * Returns : boolean if the copyout can continue
- *
- * IN_arg  : addr ==> output virtual address
- *	     len  ==> output length
- *	     ptr  ==> pointer to the netp structure
- */
-boolean_t
-xknet_copyout(
-    char *from,
-    long len,
-    void *ptr)
-{
-    net_device_t netp = (net_device_t)ptr;
-    net_done_t netd = netp->net_opacket;
-
-    if (len == 0)
-	return (TRUE);
-
-    if (netp->net_xk_olen < netd->netd_outlen) {
-	netp->net_xk_olen += len;
-	return (TRUE);
-    }
-
-    if (netp->net_xk_olen != netd->netd_outlen) {
-	printf("xknet_copyout: synchronization failed (%d/%d)",
-	      netd->netd_outlen, netp->net_xk_olen);
-	if (net_driver_reset(netp) == D_SUCCESS)
-	    (void)net_driver_init(netp);
-	return (FALSE);
-    }
-
-    /*
-     * Restart copyout
-     */
-    netd->netd_outlen += len;
-    switch ((*netp->net_bic_ops.bic_copyout)
-	    (netp, netd, (vm_offset_t)from, len,
-	     NET_BICOUT_FLAGS_VIRTUAL |
-	     (netd->netd_outlen < netd->netd_length ?
-	      0 : NET_BICOUT_FLAGS_LAST))) {
-    case NET_BICOUT_ERROR:		/* error */
-	if (net_driver_reset(netp) == D_SUCCESS)
-	    (void)net_driver_init(netp);
-	break;
-
-    case NET_BICOUT_IN_PROGRESS:	/* copyout in progress */
-	break;
-
-    case NET_BICOUT_COMPLETED:		/* copyout completed */
-	netp->net_xk_olen += len;
-	return (TRUE);
-    }
-    return (FALSE);
-}
-
-/*
- * xknet_usrcopyout
- *
- * Purpose : X-kernel Inplace buffer copyout
- * Returns : boolean if the copyout can continue
- *
- * IN_arg  : addr ==> output virtual address
- *	     len  ==> output length
- *	     ptr  ==> pointer to the netp structure
- */
-boolean_t
-xknet_usrcopyout(
-    char *from,
-    long len,
-    void *ptr)
-{
-    /* 
-     * Validate source address (in case of messages constructed in place,
-     * users may have withdrawn the bits)
-     */
-    if (pmap_extract(kernel_pmap, (vm_offset_t)from) == (vm_offset_t)0)
-	return (FALSE);
-    return (xknet_copyout(from, len, ptr));
-}
-
-/*
- * xknet_copyin
- *
- * Purpose : X-kernel buffer copyin
- * Returns : boolean if the copyin can continue
- *
- * IN_arg  : addr ==> input virtual address
- *	     len  ==> input length
- *	     ptr  ==> pointer to the netp structure
- */
-boolean_t
-xknet_copyin(
-    char *from,
-    long len,
-    void *ptr)
-{
-    net_device_t netp = (net_device_t)ptr;
-
-    if (len == 0)
-	return (TRUE);
-
-    if (netp->net_xk_input != (InputBuffer *)0)
-	bcopy(from, &netp->net_xk_input->data[netp->net_ilen], len);
-    else {
-	assert(netp->net_kmsg != (ipc_kmsg_t)0);
-	bcopy(from, (net_kmsg(netp->net_kmsg)->packet +
-		     sizeof (struct packet_header) + netp->net_ilen), len);
-    }
-    netp->net_ilen += len;
-    return (TRUE);
-}
-
-/*
- * xknet_usrcopyin
- *
- * Purpose : X-kernel Inplace buffer copyin
- * Returns : boolean if the copyin can continue
- *
- * IN_arg  : addr ==> input virtual address
- *	     len  ==> input length
- *	     ptr  ==> pointer to the netp structure
- */
-boolean_t
-xknet_usrcopyin(
-    char *from,
-    long len,
-    void *ptr)
-{
-    /* 
-     * Validate source address (in case of messages constructed in place,
-     * users may have withdrawn the bits)
-     */
-    if (pmap_extract(kernel_pmap, (vm_offset_t)from) == (vm_offset_t)0)
-	return (FALSE);
-    return (xknet_copyin(from, len, ptr));
-}
-
-/*
- * xknet_prepout
- *
- * Purpose : X-kernel preparation of buffer copyout
- * Returns : TRUE
- *
- * IN_arg  : addr ==> input virtual address
- *	     len  ==> input length
- *	     ptr  ==> pointer to the netp structure
- */
-boolean_t
-xknet_prepout(
-    char *from,
-    long len,
-    void *ptr)
-{
-    net_device_t netp = (net_device_t)ptr;
-    net_done_t netd = netp->net_opacket;
-
-    if (len > 0) {
-	netd->netd_outlen += len;
-	(*netp->net_nic_ops.nic_prepout)
-	    (netp, netd, (vm_offset_t)from, len,
-	     NET_BICOUT_FLAGS_VIRTUAL |
-	     (netd->netd_outlen < netd ->netd_length ?
-	      0 : NET_BICOUT_FLAGS_LAST));
-    }
-    return (TRUE);
-}
-
-/*
- * xknet_usrprepout
- *
- * Purpose : X-kernel preparation of Inplace buffer copyout
- * Returns : TRUE
- *
- * IN_arg  : addr ==> input virtual address
- *	     len  ==> input length
- *	     ptr  ==> pointer to the netp structure
- */
-boolean_t
-xknet_usrprepout(
-    char *from,
-    long len,
-    void *ptr)
-{
-    return (xknet_prepout(from, len, ptr));
-}
-#endif /* NET_XKMACHKERNEL */

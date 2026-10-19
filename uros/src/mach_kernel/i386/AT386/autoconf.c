@@ -256,11 +256,6 @@ extern struct	bus_driver	eaha_driver;
 extern	struct	bus_driver	pcdriver;
 #endif /* NPC586 */
 
-#include <kkt.h>
-#if	NKKT > 0
-#include <i386/kkt/if_kkt.h>
-extern	struct	bus_driver	ktdriver;
-#endif	/* NKKT */
 
 #include <sce.h>
 #if	NSCE > 0
@@ -523,10 +518,6 @@ struct	bus_device	bus_device_init[] = {
      '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, 12},
 #endif /* NPC586 > 0 */
 
-#if	NKKT > 0
-    {&ktdriver, "kkt", 0, (intr_t)0, (caddr_t)0, 0, (caddr_t)0,
-	 '?', 0, -1, -1, 0, 0, 0, SPL_SIX, 0},
-#endif	/* NKKT > 0 */
 
 #if	NSCE > 0
     {&scedriver, "sce", 0, (intr_t)0, (caddr_t)0, 0, (caddr_t)0,

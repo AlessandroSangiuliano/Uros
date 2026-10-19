@@ -92,7 +92,6 @@
  * Utilities for playing with network messages.
  */
 
-#include <norma_ether.h>
 
 #include <mach/machine/vm_types.h>
 #include <mach/boolean.h>
@@ -289,11 +288,6 @@ extern ipc_kmsg_t 	net_kmsg_alloc(void);
 extern void		net_kmsg_free(
 				 ipc_kmsg_t	kmsg);
 
-#if	NORMA_ETHER
-extern boolean_t	netipc_net_packet(
-				ipc_kmsg_t	kmsg,
-				unsigned long	count);
-#endif	/* NORMA_ETHER */
 
 extern filter_fct_t	net_filter_alloc(
 				filter_t	*fpstart,

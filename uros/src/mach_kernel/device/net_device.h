@@ -25,7 +25,6 @@
 #ifndef	_DEVICE_NET_DEVICE_H_
 #define _DEVICE_NET_DEVICE_H_
 
-#include <xkmachkernel.h>
 
 #include <mach/boolean.h>
 #include <mach/vm_types.h>
@@ -39,11 +38,6 @@
 #include <device/net_io.h>	/* for net_multicast_t */
 #include <busses/iobus.h>
 
-#if XKMACHKERNEL
-#include <xkern/include/xtype.h>
-#include <xkern/include/msg_s.h>
-#include <uk_xkern/include/eth_support.h>
-#endif /* XKMACHKERNEL */
 
 
 #define	NET_DEVICE_NAME	"net"
@@ -98,9 +92,6 @@ typedef struct net_device *net_device_t;
 /*
  * Output done queue element
  */
-#if XKMACHKERNEL
-struct net_xk_output;
-#endif /* XKMACHKERNEL */
 
 struct net_done {
     queue_chain_t	  netd_queue;		/* Next done element */
@@ -109,9 +100,6 @@ struct net_done {
 	net_done_t);
     void		 *netd_external;	/* External area address */
     union {
-#if XKMACHKERNEL
-	struct net_xk_output	*netdu_xk;	/* Current output x-kernel */
-#endif /* XKMACHKERNEL */
 	io_req_t		 netdu_ior;	/* Current output io_req */
     }			  netd_union;
     int			  netd_module;		/* Packet module */
@@ -122,14 +110,6 @@ struct net_done {
 };
 
 #define	netd_ior	netd_union.netdu_ior
-#if XKMACHKERNEL
-#define	netd_xk		netd_union.netdu_xk
-
-struct net_xk_output {
-    Msg_s		xk_msg;		/* x-kernel buffer header */
-    struct net_done	xk_done;	/* x-kernel if_done structure */
-};
-#endif /* XKMACHKERNEL */
 
 /*
  * Output queue
@@ -368,16 +348,6 @@ struct net_device {
     unsigned int	  net_osize;	/* Extra output packet size */
     ipc_kmsg_t		  net_kmsg;	/* Current input kmsg */
     zone_t		  net_zone;	/* Zone for callback elements */
-#if XKMACHKERNEL
-    XObj		  net_xk_self;	/* x-kernel object associated */
-    InputBuffer		 *net_xk_input;	/* x-kernel current input buf */
-    InputPool		 *net_xk_pool;	/* x-kernel input buffer pool */
-    unsigned short	  net_xk_low;	/* x-kernel lowest pkt type */
-    unsigned short	  net_xk_high;	/* x-kernel highest pkt type */
-    Allocator		  net_xk_mda;	/* x-kernel data allocator */
-    unsigned int	  net_xk_olen;	/* x-kernel output len */
-    struct net_queue	  net_xk_head;	/* x-kernel output queue */
-#endif /* XKMACHKERNEL */
     IOBUS_LOCK_DECL(,net_dev_lock)	/* device ops mutex lock */
 };
 
@@ -409,10 +379,5 @@ extern void		net_driver_intr(int
 extern void		net_driver_timeout(int
     );
 
-#if XKMACHKERNEL
-extern xmsg_handle_t	xknet_push(XObj,
-				   Msg
-    );
-#endif /* XKMACHKERNEL */
 
 #endif /* _DEVICE_NET_DEVICE_H_ */

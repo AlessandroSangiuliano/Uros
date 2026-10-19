@@ -27,10 +27,9 @@
  * Utilities to be used by non-DMA Ethernet drivers.
  * These utilities are fully machine-independent.
  * Besides, they encapsulate the mechanisms which
- * depend upon the networking architecture: Mach IPC 
- * interface versus x-kernel programming model. The
- * utilities are meant to make the driver adaptation
- * simpler and more effective.
+ * depend upon the Mach IPC interface.  The utilities
+ * are meant to make the driver adaptation simpler and
+ * more effective.
  *
  * Support for non-Ethernet media to be verified.
  * Check the CDLI interface work.
@@ -39,16 +38,7 @@
 #ifndef eth_common_h
 #define eth_common_h
 
-#include        <xkmachkernel.h>
-#include        <xk_debug.h>
 
-#if XKMACHKERNEL
-#include	<uk_xkern/include/eth_support.h>
-
-VciType lastVci = -1;   /* static ! */
-InputPool *lastPool;    /* static ! */
-
-#endif /* XKMACHKERNEL */
 
 
 typedef char header_t[sizeof(struct ether_header) + 6];  
@@ -90,65 +80,6 @@ eth_resources(
 	kern_return_t ret = KERN_RESOURCE_SHORTAGE;
 
 	/* type is already ntohs-converted */
-#if     XKMACHKERNEL
-	if (is_xk_type)  {
-            InputBuffer     *buf;
-
-	    switch (type) {
-	    default:		/* regular x-kernel traffic */
-		{
-                    /* find resources */
-                    if (defaultPool) 
-			if (simple_lock_try(&defaultPool->iplock)) {
-			    if (!queue_empty(&defaultPool->xkBufferPool)) {
-				queue_remove_first(&defaultPool->xkBufferPool, buf, 
-						   InputBuffer *, link);
-				*base = (char *)buf;
-				*header = buf->hdr;
-				*body = buf->data;
-				ret = KERN_SUCCESS;
-			    }
-			    simple_unlock(&defaultPool->iplock);
-			}
-		} 
-		break;
-	    case VCI_ETH_TYPE:	 /* VCI-zed x-kernel traffic */
-	    	{
-		    VCIhdr *vciheader = (VCIhdr *)(eh + 1);
-		    VciType vci = vciheader->vci;
-		    InputPool *pool;
-		    
-		    /* lastVci is in network byte order */
-		    if (vci != lastVci) {
-			vci = ntohs(vciheader->vci);
-			if (mapResolve(poolMap, &vci, &pool) == XK_FAILURE) { 
-			    /* 
-			     * We don't have any resource 
-			     * associated to this vci.
-			     */
-			    break;
-		        }
-			xAssert(pool);
-			lastVci = vciheader->vci;
-			lastPool = pool;
-		    }
-	            /* find resources */
-                    if (simple_lock_try(&lastPool->iplock)) {
-			if (!queue_empty(&lastPool->xkBufferPool)) {
-			    queue_remove_first(&lastPool->xkBufferPool, buf, 
-					       InputBuffer *, link);
-			    *base = (char *)buf;
-			    *header = buf->hdr;
-			    *body = buf->data;
-			    ret = KERN_SUCCESS;
-			}
-			simple_unlock(&lastPool->iplock);
-                    } 
-		} 
-		break;
-	    }
-        } else
-#endif   /* XKMACHKERNEL */
 	{
 	    ipc_kmsg_t	new_kmsg;
 	    struct packet_header *pkt;
@@ -175,10 +106,6 @@ eth_resources(
 	return ret;
 }
 
-#if XK_DEBUG
-int xk_input_wakeup;
-int xk_input_queueing;
-#endif
 
 
 /*
@@ -196,29 +123,6 @@ eth_dispatch(
 	io_req_t		ior)
 {
 	/* type is already ntohs-converted */
-#if     XKMACHKERNEL
-	if (is_xk_type)  {
-
-	    XObj     self = self_protocol[unit];
-	    InputBuffer *buf = (InputBuffer *)base;
-	    InputPool *pool = 
-		(type == VCI_ETH_TYPE)? lastPool : defaultPool;
-
-	    buf->driverProtl = self;
-	    buf->len = len;
-
-	    /*
-	     * No conditional locking here: if we execute this code,
-	     * it means that eth_resources succeded. Hence, no one
-	     * can else could sneak in and grab this lock.
-	     */
-	    simple_lock(&pool->iplock);
-	    queue_enter(&pool->xkIncomingData, buf, InputBuffer *, link);
-	    if (more_input_thread(pool)) 
-		thread_wakeup_one((event_t) pool);
-	    simple_unlock(&pool->iplock);
-	} else
-#endif   /* XKMACHKERNEL */
 	{
 	    net_packet(ifp, 
 		       (ipc_kmsg_t) base, 
@@ -233,15 +137,6 @@ eth_tobecloned(
 	       boolean_t                is_xk_type,
 	       unsigned short		type)
 {
-#if     XKMACHKERNEL
-    if (!is_xk_type) {
-	switch (type) {
-	case 0x0806:            /* ARP,  to become a define */
-	case 0x8035:            /* RARP, to become a define */
-	    return (1);
-	}
-    }
-#endif  /* XKMACHKERNEL */
     return (0);
 }
 

@@ -142,7 +142,6 @@
 #include <cpus.h>
 #include <platforms.h>
 #include <fast_idle.h>
-#include <dipc.h>
 #if	PARAGON860
 #include <mcmsg.h>
 #include <mcmsg_eng.h>
@@ -163,9 +162,6 @@
 #include <kern/spl.h>
 #include <mach/policy.h>
 #include <device/net_io.h>
-#if	DIPC
-#include <dipc/dipc_funcs.h>
-#endif	/* DIPC */
 #if	TASK_SWAPPER
 #include <kern/task_swap.h>
 #endif	/* TASK_SWAPPER */
@@ -265,10 +261,6 @@ extern void	log_thread_action(thread_t, char *);
 		scan_input_ast();
 #endif	/* PARAGON860 */
 
-#if	DIPC
-	if (reasons & AST_DIPC)
-		dipc_ast();
-#endif	/* DIPC */
 
 	/*
 	 *	Make darn sure that we don't call thread_halt_self

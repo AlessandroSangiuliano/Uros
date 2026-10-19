@@ -335,7 +335,6 @@
 
 #include <mach_kdb.h>
 #include <mach_host.h>
-#include <norma_task.h>
 #include <mach_prof.h>
 #include <fast_tas.h>
 #include <task_swapper.h>
@@ -593,7 +592,6 @@ kernel_task_create(
 	return (KERN_SUCCESS);
 }
 
-#if	!NORMA_TASK
 kern_return_t
 task_create(
 	task_t			parent_task,
@@ -617,7 +615,6 @@ task_create(
         return(sts);
 }
 
-#endif	/* !NORMA_TASK */
 
 kern_return_t
 task_create_security_token(
@@ -767,9 +764,6 @@ task_create_local(
 
 	ipc_task_enable(new_task);
 
-#if	NORMA_TASK
-	new_task->child_node = -1;
-#endif	/* NORMA_TASK */
 
 #if     MCMSG
 	new_task->mcmsg_task = 0;
@@ -813,15 +807,6 @@ task_free( register task_t	task )
 		mcmsg_task_destroy(task);
 	}
 #endif  /* MCMSG && (iPSC860 || PARAGON860) */
-#if	NORMA_TASK
-	if (task->map == VM_MAP_NULL) {
-		/* norma placeholder task */
-		ipc_port_release_send(task->itk_self);
-		task_unlock(task);
-		zfree(task_zone, (vm_offset_t) task);
-		return;
-	}
-#endif	/* NORMA_TASK */
 
 #if	TASK_SWAPPER
 	/* task_terminate guarantees that this task is off the list */

@@ -146,9 +146,6 @@
 
 #include <cpus.h>
 #include <mach_host.h>
-#include <dipc.h>
-#include <norma_scsi.h>
-#include <dipc_xkern.h>
 
 #include <string.h>
 #include <mach/boolean.h>
@@ -917,13 +914,6 @@ host_get_boot_info(
 	extern char * machine_boot_info(
 				char *			boot_info,
 				vm_size_t		buf_len);
-#if	DIPC && (NORMA_SCSI || DIPC_XKERN)
-	char *p;
-
-#define NORMA_SCSI_BOOT_INFO \
-	"ROOT_FS_NODE=0\nBOOT_NODE_LIST=0..7\nACCEPT_PROCS=1..7\nTIMESHARE_NODES=0..7\n"
-
-#endif	/* DIPC && (NORMA_SCSI || DIPC_XKERN) */
 
 	if (priv_host == HOST_NULL) {
 		return KERN_INVALID_HOST;
@@ -937,21 +927,6 @@ host_get_boot_info(
 	if (src != boot_info)
 		(void) strncpy(boot_info, src, KERNEL_BOOT_INFO_MAX);
 
-#if	DIPC && (NORMA_SCSI || DIPC_XKERN)
-	/*
-	 * Add NORMA boot string after a '\n' if there is enough space.
-	 */
-	p = boot_info;
-	while (*p != '\0')
-		p++;
-
-	if (p - boot_info + strlen(NORMA_SCSI_BOOT_INFO) <
-						KERNEL_BOOT_INFO_MAX - 2) {
-		*p++ = '\n';
-		*p = '\0';
-		(void) strcpy(p, NORMA_SCSI_BOOT_INFO);
-	}
-#endif	/* DIPC && (NORMA_SCSI || DIPC_XKERN) */
 
 	return KERN_SUCCESS;
 }

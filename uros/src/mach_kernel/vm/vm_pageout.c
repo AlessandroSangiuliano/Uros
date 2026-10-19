@@ -287,10 +287,8 @@
  */
 
 #include <mach_pagemap.h>
-#include <norma_vm.h>
 #include <mach_cluster_stats.h>
 #include <mach_kdb.h>
-#include <dipc.h>
 #include <advisory_pageout.h>
 
 #include <mach/mach_types.h>
@@ -313,11 +311,6 @@
 #include <mach_net_in_kernel.h>
 #include <vm/vm_pageout.h>
 #include <machine/vm_tuning.h>
-#if	NORMA_VM
-#include <kern/ipc_sched.h>		/* for convert_ipc_timeout_to_ticks */
-#include <xmm/xmm_svm.h>		/* for NORMA_VM_PRECIOUS_RETURN_HACK */
-#include <xmm/xmm_server_rename.h>	/* for memory_object_data_return */
-#endif	/* NORMA_VM */
 #include <kern/misc_protos.h>
 #include <device/net_io.h>
 
@@ -384,22 +377,8 @@
  */
 
 #ifndef	VM_PAGE_FREE_RESERVED
-#if	NORMA_VM
-/*
- *	In the current implementation of NORMA_VM on top of
- *	DIPC, pageouts are freed as soon as the messages
- *	containing them flow off-node.  Threads critical to
- *	the pageout sequence have wired stacks.  It is not
- *	at all clear how much space must be reserved in the
- *	reserved pool.  For now, we revert to using the
- *	non-NORMA_VM formula.
- */
-/*XXX double since we ran out with AD2.  MUST FIX XXX*/
-#define	VM_PAGE_FREE_RESERVED	(30 + NCPUS)
-#else	/* NORMA_VM */
 #define	VM_PAGE_FREE_RESERVED	\
 	((2 * VM_PAGE_LAUNDRY_MAX) + NCPUS)
-#endif	/* NORMA_VM */
 #endif	/* VM_PAGE_FREE_RESERVED */
 
 
@@ -577,11 +556,7 @@ vm_pageout_object_terminate(
 
 		assert(m != VM_PAGE_NULL);
 		assert(m->cleaning);
-#if	NORMA_VM_PRECIOUS_RETURN_HACK
-		assert(!m->precious || !m->pageout);
-#else	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 		assert(!m->precious);
-#endif	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 		m->cleaning = FALSE;
 
 		/*
@@ -635,16 +610,6 @@ vm_pageout_object_terminate(
 			m->dirty = pmap_is_modified(m->phys_addr);
 
 			if (m->dirty) {
-#if	NORMA_VM_PRECIOUS_RETURN_HACK
-				/*
-				 *	This situation only occurs if a
-				 *	page was converted to be a target
-				 *	during the pageout, something which
-				 *	should not occur with the precious
-				 *	return hack.
-				 */
-				panic("vm_pageout_object_terminate:  ouch!");
-#endif	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 				CLUSTER_STAT(vm_pageout_target_page_dirtied++;)
 				vm_page_unwire(m);/* reactivates */
 				VM_STAT(reactivations++);
@@ -652,16 +617,6 @@ vm_pageout_object_terminate(
 			} else if (m->prep_pin_count != 0) {
 				int s;
 
-#if	NORMA_VM_PRECIOUS_RETURN_HACK
-				/*
-				 *	This situation only occurs if a
-				 *	page was converted to be a target
-				 *	during the pageout, something which
-				 *	should not occur with the precious
-				 *	return hack.
-				 */
-				panic("vm_pageout_object_terminate:  ouch2!");
-#endif	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 				s = splvm();
 				vm_page_pin_lock();
 				if (m->pin_count != 0) {
@@ -996,17 +951,7 @@ vm_pageclean_setup(
 	 */
 	m->cleaning = TRUE;
 	m->dirty = TRUE;
-#if	NORMA_VM_PRECIOUS_RETURN_HACK
-	/*
-	 *	Mark the page precious to preserve the xmm svm
-	 *	invariant that if a page has been dirtied, then
-	 *	all kernels that have copies of the page have
-	 *	precious copies of the page.
-	 */
-	m->precious = TRUE;
-#else	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 	m->precious = FALSE;
-#endif	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 	assert(old_object->pager_trusted);
 
 	/*
@@ -1058,15 +1003,6 @@ vm_pageclean_copy(
 	 */
 	vm_object_lock(m->object);
 	m->dirty = FALSE;
-#if	NORMA_VM_PRECIOUS_RETURN_HACK
-	/*
-	 *	Mark the page precious to preserve the xmm svm
-	 *	invariant that if a page has been dirtied, then
-	 *	all kernels that have copies of the page have
-	 *	precious copies of the page.
-	 */
-	m->precious = TRUE;
-#endif	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 
 	vm_object_paging_end(m->object);
 
@@ -1861,16 +1797,6 @@ vm_pageout_scan(void)
 		 */
 
 		if (m->cleaning) {
-#if	NORMA_VM_PRECIOUS_RETURN_HACK
-			/*
-			 * There's no point in converting this page since
-			 * it's precious and it needs to be cleaned again,
-			 * (whether or not it's actually dirty).
-			 * Just skip it for now, leaving it off of the
-			 * queues.
-			 */
-			assert(m->precious);
-#else	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 #if	MACH_CLUSTER_STATS
 			vm_pageout_cluster_conversions++;
 #endif
@@ -1879,7 +1805,6 @@ vm_pageout_scan(void)
 				m->pageout = TRUE;
 				vm_page_wire(m);
 			}
-#endif	/* NORMA_VM_PRECIOUS_RETURN_HACK */
 			vm_object_unlock(object);
 			vm_page_unlock_queues();
 			continue;

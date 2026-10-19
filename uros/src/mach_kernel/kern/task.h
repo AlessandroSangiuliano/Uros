@@ -189,7 +189,6 @@
 #ifndef	_KERN_TASK_H_
 #define _KERN_TASK_H_
 
-#include <norma_task.h>
 #include <mach_host.h>
 #include <fast_tas.h>
 #include <task_swapper.h>
@@ -299,9 +298,6 @@ typedef struct task {
 	struct ipc_port	*wired_ledger_port;
 	struct ipc_port *paged_ledger_port;
         
-#if	NORMA_TASK
-	long		child_node;	/* if != -1, node for new children */
-#endif	/* NORMA_TASK */
 #if	FAST_TAS
 	vm_offset_t	fast_tas_base;
 	vm_offset_t	fast_tas_end;

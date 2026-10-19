@@ -90,7 +90,6 @@
 #define _KERN_THREAD_ACT_H_
 
 #include <mach_assert.h>
-#include <xkmachkernel.h>
 #include <thread_swapper.h>
 
 #include <cputypes.h>
@@ -328,9 +327,6 @@ typedef struct thread_activation {
 	 */
 	vm_offset_t	cleartid_addr;
 
-#if	XKMACHKERNEL
-	void		*xk_resources;
-#endif	/* XKMACHKERNEL */
 
 #if	MACH_PROF
 	/* Profiling data structures */

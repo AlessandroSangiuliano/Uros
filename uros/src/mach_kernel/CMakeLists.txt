@@ -844,7 +844,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/mach_clock.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/mach_factor.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/machine.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/kern/norma_bootstrap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/posixtime.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/printf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/priority.c
@@ -1371,7 +1370,6 @@ set(KERN_SOURCES
     kern/mach_clock.c
     kern/mach_factor.c
     kern/machine.c
-    kern/norma_bootstrap.c
     kern/printf.c
     kern/priority.c
     kern/processor.c

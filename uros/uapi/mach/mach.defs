@@ -156,10 +156,6 @@
  *	Matchmaker definitions file for Mach kernel interface.
  */
 
-#ifdef	MACH_KERNEL
-#include <norma_vm.h>
-#endif	/* MACH_KERNEL */
-
 subsystem
 #if	KERNEL_USER
 	  KernelUser

@@ -54,10 +54,8 @@
 
 #include <xpr_debug.h>
 #include <cpus.h>
-#include <dipc.h>
 #include <mach_host.h>
 #include <kernel_test.h>
-#include <norma_scsi.h>
 
 #include <mach/boolean.h>
 #include <mach/machine.h>

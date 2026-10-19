@@ -122,7 +122,6 @@
 #define _IPC_IPC_KMSG_H_
 
 #include <cpus.h>
-#include <dipc.h>
 #include <mach_rt.h>
 
 #include <mach/machine/vm_types.h>
@@ -138,9 +137,6 @@
 #include <ipc/ipc_object.h>
 /* Note: vm_map.h NOT included here to break circular dependency.
  * vm_map_t is forward-declared in kern_types.h */
-#if	DIPC
-#include <dipc/dipc_types.h>		/* for handle_t definition */
-#endif	/* DIPC */
 
 /*
  *	This structure is only the header for a kmsg buffer;
@@ -152,26 +148,6 @@
  *	as it did when it arrived and as it will when it leaves (#442).
  */
 
-#if	DIPC
-/*
- *	Refer to dipc/dipc_kmsg.h for a description of the
- *	meta_kmsg, a placeholder used to enqueue sufficient
- *	information about a kmsg to retrieve it from a
- *	remote sender.  Also look in that file for a description
- *	of the changes in use of certain kmsg fields during
- *	the DIPC receiving process.
- *
- *	The ikm_handle links the local kmsg (or meta_kmsg) to
- *	the remote sender's kmsg.  Unfortunately, it just isn't
- *	possible to overload one of the kmsg fields with the
- *	handle.  We can't overload the next and prev pointers
- *	or the ikm_size field because this information is all
- *	needed while the message is enqueued.  The size in the
- *	message header could be stolen but not easily:  then it
- *	is difficult to have a queued, inline kmsg that still
- *	has remote components.
- */
-#endif	/* DIPC */
 
 /*
  *	#442: the destination and reply ports, as pointers, here rather than
@@ -200,9 +176,6 @@ typedef struct ipc_kmsg {
 	struct ipc_kmsg *ikm_next, *ikm_prev;
 	vm_size_t ikm_size;
 	vm_offset_t ikm_private;		/* allocator-private info */
-#if	DIPC
-	handle_t ikm_handle;
-#endif	/* DIPC */
 	ipc_port_t ikm_dest;			/* where it is going */
 	ipc_port_t ikm_reply;			/* where the answer goes */
 	ipc_port_t *ikm_ports;			/* one per descriptor (#442) */
@@ -370,23 +343,6 @@ MACRO_END
  *	the allocator has just touched, and makes "nobody set it" mean
  *	IP_NULL rather than the previous message.
  */
-#if	DIPC
-/*
- *	The msgh_bits must be initialized to zero so that
- *	the MACH_MSGH_BITS_META_KMSG flag is initialized
- *	to FALSE.  This might be worth making the default
- *	for the non-DIPC case, too.
- */
-#define	ikm_init_special(kmsg, size)					\
-MACRO_BEGIN								\
-	(kmsg)->ikm_size = (size);					\
-	(kmsg)->ikm_dest = IP_NULL;					\
-	(kmsg)->ikm_reply = IP_NULL;					\
-	(kmsg)->ikm_ports = (ipc_port_t *) 0;				\
-	(kmsg)->ikm_nports = 0;						\
-	(kmsg)->ikm_header.msgh_bits = 0;				\
-MACRO_END
-#else	/* !DIPC */
 #define	ikm_init_special(kmsg, size)					\
 MACRO_BEGIN								\
 	(kmsg)->ikm_size = (size);					\
@@ -395,7 +351,6 @@ MACRO_BEGIN								\
 	(kmsg)->ikm_ports = (ipc_port_t *) 0;				\
 	(kmsg)->ikm_nports = 0;						\
 MACRO_END
-#endif	/* DIPC */
 
 #define	ikm_check_initialized(kmsg, size)				\
 MACRO_BEGIN								\

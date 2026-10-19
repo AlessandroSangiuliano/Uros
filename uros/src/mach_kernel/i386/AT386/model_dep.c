@@ -177,10 +177,8 @@
 #include <mach_kdb.h>
 #include <eisa.h>
 #include <himem.h>
-#include <dipc.h>
 #include <kernel_test.h>
 #include <fast_idle.h>
-#include <dipc_xkern.h>
 #include <pci.h>
 
 #include <mach/i386/vm_param.h>
@@ -221,9 +219,6 @@
 #include <i386/AT386/eisa_entries.h>
 #include <i386/AT386/misc_protos.h>
 /* #208: kdsoft.h removed with kd.c; no actual references here. */
-#if	DIPC
-#include <dipc/dipc_funcs.h>
-#endif	/* DIPC */
 #if	MACH_KDB
 #include <ddb/db_aout.h>
 #endif /* MACH_KDB */
@@ -1486,44 +1481,6 @@ void fc_get(tvalspec_t *ts) {
 	(void )rtc_gettime(ts);
 }
 
-#if	DIPC
-boolean_t
-no_bootstrap_task(void)
-{
-	return(FALSE);
-}
-
-ipc_port_t
-get_root_master_device_port(void)
-{
-	return(IP_NULL); /* for now */
-}
-
-
-void
-dipc_machine_init(void)
-{
-#if	FAST_IDLE
-	extern fast_idle_enabled;
-#endif	/* FAST_IDLE */
-#if	KERNEL_TEST
-	extern int kkt_test_iterations;
-#endif	/* KERNEL_TEST */
-
-#if	FAST_IDLE
-	fast_idle_enabled = TRUE;
-#endif	/* FAST_IDLE */
-#if	KERNEL_TEST
-#if	DIPC_XKERN
-	kkt_test_iterations = 1;
-#else	/* DIPC_XKERN */
-	kkt_test_iterations = 10;
-#endif	/* DIPC_XKERN */
-
-#endif	/* KERNEL_TEST */
-}
-
-#endif	/* DIPC */
 
 void
 Debugger(

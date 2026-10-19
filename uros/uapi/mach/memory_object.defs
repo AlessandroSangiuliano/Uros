@@ -153,11 +153,7 @@ subsystem
 		     memory_object 2200;
 
 #ifdef	MACH_KERNEL
-#include <norma_vm.h>
 #include <advisory_pageout.h>
-#if	NORMA_VM
-userprefix k_;
-#endif /* NORMA_VM */
 #endif	/* MACH_KERNEL */
 
 #include <mach/std_types.defs>

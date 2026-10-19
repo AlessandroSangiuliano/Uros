@@ -318,7 +318,6 @@
  *
  *	External memory management interface control functions.
  */
-#include <norma_vm.h>
 #include <advisory_pageout.h>
 
 /*
@@ -360,10 +359,6 @@
 
 #include <kern/misc_protos.h>
 
-#if	NORMA_VM
-#include <xmm/xmm_server_rename.h>
-#include <xmm/xmm_obj.h>
-#endif	/* NORMA_VM */
 #if	MACH_PAGEMAP
 #include <vm/vm_external.h>
 #endif	/* MACH_PAGEMAP */
@@ -444,19 +439,6 @@ memory_object_data_supply(
 	original_length = data_cnt;
 	original_offset = offset;
 
-#if	NORMA_VM
-	/*
-	 * pages coming from XMM/DIPC may be either ENTRY_LIST or OBJECT
-	 * flavor.  Convert to PAGE_LIST in either case.
-	 */
-	if (data_copy->type != VM_MAP_COPY_PAGE_LIST) {
-		assert((data_copy->type == VM_MAP_COPY_OBJECT) ||
-			(data_copy->type == VM_MAP_COPY_ENTRY_LIST));
-		result = vm_map_convert_to_page_list(&data_copy);
-		assert(result == KERN_SUCCESS);
-		orig_copy = data_copy;
-	}
-#endif	/* NORMA_VM */
 	assert(data_copy->type == VM_MAP_COPY_PAGE_LIST);
 	page_list = &data_copy->cpy_page_list[0];
 
@@ -638,9 +620,6 @@ memory_object_data_supply(
 
 	if (IP_VALID(reply_to)) {
 		vm_object_unlock(object);
-#if	NORMA_VM
-		panic("XMM does not support memory_object_supply_completed\n");
-#else	/* NORMA_VM */
 		memory_object_supply_completed(
 				reply_to, reply_to_type,
 				object->pager_request,
@@ -648,7 +627,6 @@ memory_object_data_supply(
 				original_length,
 				result,
 				error_offset);
-#endif	/* NORMA_VM */
 	}
 	else
 		vm_object_unlock(object);
@@ -1470,18 +1448,11 @@ memory_object_set_attributes_common(
 	boolean_t	may_cache,
 	memory_object_copy_strategy_t copy_strategy,
 	boolean_t	temporary,
-#if	NORMA_VM && MACH_PAGEMAP
-	vm_external_map_t existence_map,
-	vm_offset_t	existence_size,
-#endif	/* NORMA_VM && MACH_PAGEMAP */
 	vm_size_t	cluster_size,
         boolean_t	silent_overwrite,
 	boolean_t	advisory_pageout)
 {
 	boolean_t	object_became_ready;
-#if	NORMA_VM && MACH_PAGEMAP
-	vm_external_map_t	emap;
-#endif	/* NORMA_VM && MACH_PAGEMAP */
 
         XPR(XPR_MEMORY_OBJECT,
 	    "m_o_set_attr_com, object 0x%X flg %x strat %d\n",
@@ -1496,12 +1467,7 @@ memory_object_set_attributes_common(
 
 	switch(copy_strategy) {
 		case MEMORY_OBJECT_COPY_NONE:
-#if	NORMA_VM
-		case MEMORY_OBJECT_COPY_CALL:
-		case MEMORY_OBJECT_COPY_SYMMETRIC:
-#else	/* NORMA_VM */
 		case MEMORY_OBJECT_COPY_DELAY:
-#endif	/* NORMA_VM */
 			break;
 		default:
 			vm_object_deallocate(object);
@@ -1532,37 +1498,15 @@ memory_object_set_attributes_common(
 		}
 	}
 
-#if	MACH_PAGEMAP && NORMA_VM
-	if (existence_size == 0) {
-		emap = VM_EXTERNAL_NULL;
-	} else {
-		emap = vm_external_create(object->size);
-		if (emap != VM_EXTERNAL_NULL) {
-			if (existence_size < object->size)
-			  vm_external_copy(existence_map, existence_size, emap);
-			else
-			  vm_external_copy(existence_map, object->size, emap);
-		}
-	}
-#endif	/* MACH_PAGEMAP && NORMA_VM */
 
 	vm_object_lock(object);
 
 	/*
 	 *	Copy the attributes
 	 */
-#if	NORMA_VM
-	if (object->internal)
-		object_became_ready = FALSE;
-	else {
-		object_became_ready = !object->pager_ready;
-		object->copy_strategy = copy_strategy;
-	}
-#else	/* NORMA_VM */
 	assert(!object->internal);
 	object_became_ready = !object->pager_ready;
 	object->copy_strategy = copy_strategy;
-#endif	/* NORMA_VM */
 	object->can_persist = may_cache;
 	object->temporary = temporary;
 	object->silent_overwrite = silent_overwrite;
@@ -1574,25 +1518,6 @@ memory_object_set_attributes_common(
 	assert(cluster_size >= PAGE_SIZE &&
 	       cluster_size % PAGE_SIZE == 0);
 
-#if	NORMA_VM
-#if	MACH_PAGEMAP && !NORMA_VM
-	if (object->existence_map == VM_EXTERNAL_NULL) {
-		object->existence_map = emap;
-	} else {
-		/*
-		 * XXX Assert that they match?
-		 * XXX Try to avoid this situation?
-		 */
-		vm_external_destroy(emap, existence_size);
-	}
-#endif	/* MACH_PAGEMAP */
-	/*
-	 * Cluster size operations aren't implemented yet.
-	 *
-	 * object->cluster_size = cluster_size;
-	 */
-	assert(cluster_size == page_size);
-#endif	/* NORMA_VM */
 
 	/*
 	 *	Wake up anyone waiting for the ready attribute
@@ -1611,7 +1536,6 @@ memory_object_set_attributes_common(
 	return(KERN_SUCCESS);
 }
 
-#if	!NORMA_VM
 
 /*
  *	Set the memory object attribute as provided.
@@ -1792,7 +1716,6 @@ memory_object_change_attributes(
 	return(result);
 }
 
-#endif	/* !NORMA_VM */
 
 kern_return_t
 memory_object_get_attributes(
@@ -2029,11 +1952,7 @@ vm_set_default_memory_manager(
 	host_t		host,
 	ipc_port_t	*default_manager)
 {
-#if	NORMA_VM
-	return(host_default_memory_manager(host, default_manager, PAGE_SIZE));
-#else	/* NORMA_VM */
 	return(host_default_memory_manager(host, default_manager, 4*PAGE_SIZE));
-#endif	/* NORMA_VM */
 }
 
 /*
@@ -2174,12 +2093,6 @@ memory_manager_default_port(
  *
  *		If there is no default memory manager, log an error,
  *		but only the first time.
-#if	NORMA_VM
- *		I don't think this is NORMA only.  There is a race with
- *		the server starting things before the default pager gets
- *		to set the memory_manager_default port.  For now, change
- *		the semantics of this call to block until it is set
-#endif
  *
  */
 kern_return_t
@@ -2193,20 +2106,10 @@ memory_manager_default_check(void)
 		static boolean_t logged;	/* initialized to 0 */
 		boolean_t	complain = !logged;
 		logged = TRUE;
-#if	NORMA_VM
-		assert_wait((event_t)&memory_manager_default, FALSE);
-#endif	/* NORMA_VM */
 		mutex_unlock(&memory_manager_default_lock);
-#if	NORMA_VM
-		if (complain)
-			printf("Warning:  Awaiting default memory manager\n");
-		thread_block((void (*)(void))0);
-		return (KERN_SUCCESS);
-#else	/* NORMA_VM */
 		if (complain)
 			printf("Warning: No default memory manager\n");
 		return(KERN_FAILURE);
-#endif	/* NORMA_VM */
 	} else {
 		mutex_unlock(&memory_manager_default_lock);
 		return(KERN_SUCCESS);

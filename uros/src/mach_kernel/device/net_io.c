@@ -179,8 +179,6 @@
  */
 
 #include <mach_kdb.h>
-#include <norma_ether.h>
-#include <dipc.h>
 #include <mach_ldebug.h>
 #include <cpus.h>
 
@@ -221,9 +219,6 @@
 
 #include <machine/endian.h>
 
-#if	NORMA_ETHER
-#include <norma/ipc_ether.h>
-#endif	/*NORMA_ETHER*/
 #include <fddi.h>
 
 /*
@@ -958,13 +953,13 @@ net_packet_pool(
 	 */
 	simple_lock(&net_thread_lock);
 	if (!net_thread_awake) {
-#if DIPC || NCPUS > 1 || MACH_LDEBUG
+#if NCPUS > 1 || MACH_LDEBUG
 	    boolean_t running = net_thread_running;
 	    net_thread_awake = TRUE;
 	    simple_unlock(&net_thread_lock);
 	    if (!running)
 		thread_wakeup((event_t) &net_thread_awake);
-#else /* DIPC || NCPUS > 1 || MACH_LDEBUG */
+#else /* NCPUS > 1 || MACH_LDEBUG */
 	    if (!net_thread_running) {
 		spl_t s;
 		simple_unlock(&net_thread_lock);
@@ -977,7 +972,7 @@ net_packet_pool(
 		net_thread_awake = TRUE;
 		simple_unlock(&net_thread_lock);
 	    }
-#endif /* DIPC || NCPUS > 1 || MACH_LDEBUG */
+#endif /* NCPUS > 1 || MACH_LDEBUG */
 	} else
 	    simple_unlock(&net_thread_lock);
 }
@@ -2174,15 +2169,6 @@ net_packet(
 	boolean_t		priority,
 	io_req_t		ior)
 {
-#if	NORMA_ETHER
-	if (netipc_net_packet(kmsg, count)) {
-		if (!(ifp->if_flags & IFF_PROMISC) || node_self_addr == (struct node_addr *) 0) {
-			net_kmsg_put(kmsg);
-			return;
-		}
-		kmsg->ikm_header.msgh_id = NORMA_RCV_MSG_ID;
-	} else
-#endif	/* NORMA_ETHER */
 		kmsg->ikm_header.msgh_id =
 			(ior != (io_req_t)0 && (ifp->if_flags & IFF_PROMISC)) ?
 				PROMISC_RCV_MSG_ID : NET_RCV_MSG_ID;
@@ -2212,9 +2198,9 @@ void net_ast(void)
 	register net_pool_t listp, p;
 	boolean_t awake;
 
-#if DIPC || NCPUS > 1 || MACH_LDEBUG
-	panic("There should be no network AST with DIPC\n");
-#else /* DIPC || NCPUS > 1 || MACH_LDEBUG */
+#if NCPUS > 1 || MACH_LDEBUG
+	panic("There should be no network AST with NCPUS > 1 or MACH_LDEBUG\n");
+#else /* NCPUS > 1 || MACH_LDEBUG */
 	net_ast_taken++;
 
 #if	MACH_RT
@@ -2285,7 +2271,7 @@ void net_ast(void)
 	splx(s);
 	if (!awake)
 	    thread_wakeup((event_t) &net_thread_awake);
-#endif /* DIPC || NCPUS > 1 || MACH_LDEBUG */
+#endif /* NCPUS > 1 || MACH_LDEBUG */
 }
 
 void
@@ -2319,9 +2305,6 @@ net_thread(void)
 	spl_t s;
 	boolean_t sleep_first = TRUE;
 
-#if	NORMA_ETHER
-	sleep_first = FALSE;
-#endif	/* !NORMA_ETHER */
 #ifdef	AT386
 #include <sce.h>
 #if	NSCE > 0

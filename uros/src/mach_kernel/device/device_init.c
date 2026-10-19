@@ -97,8 +97,6 @@
  *
  * 	Initialize device service as part of kernel task.
  */
-#include <xkmachkernel.h>
-#include <dipc_xkern.h>
 #include <mach_net_in_kernel.h>
 #include <mach_device_master.h>
 #include <ipc/ipc_port.h>
@@ -113,9 +111,6 @@
 #include <device/data_device.h>
 #include <device/device_master.h>
 #
-#if XKMACHKERNEL && !DIPC_XKERN
-#include <uk_xkern/include/utils.h>
-#endif	/* XKMACHKERNEL && !DIPC_XKERN */
 
 ipc_port_t	master_device_port;
 
@@ -147,10 +142,4 @@ device_service_create(void)
 	 */
 	(void) kernel_thread(kernel_task, net_thread, (char *)0);
 #endif	/* MACH_NET_IN_KERNEL */
-#if	XKMACHKERNEL && !DIPC_XKERN
-	/*
-	 * Initialize the x-kernel
-	 */
-	(void) kernel_thread(kernel_task, xkInit, (char *)0);
-#endif	/* XKMACHKERNEL && !DIPC_XKERN */
 }

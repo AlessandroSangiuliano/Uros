@@ -1,8 +1,8 @@
 # Kernel build configuration -- the ODE option knobs, owned by the build.
 #
 # #450.  The machine-independent tree asks for these by #include: <cpus.h>,
-# <mach_rt.h>, <norma_vm.h> and 50-odd more, then tests them with #if.  They
-# are a name and a number each -- build configuration, not code.
+# <mach_rt.h>, <mach_kdb.h> and some forty more, then tests them with #if.
+# They are a name and a number each -- build configuration, not code.
 #
 # They used to be tracked files under i386/AT386/, written by
 # scripts/generate_ode_headers.py from the heritage conf/ files.  That left
@@ -118,8 +118,6 @@ set(UROS_KERNEL_CONFIG
     cdli                   NCDLI 0
     chained_ios            CHAINED_IOS 1
     db_machine_commands    DB_MACHINE_COMMANDS 0
-    dipc                   DIPC 0
-    dipc_xkern             DIPC_XKERN 0
     etap_event_monitor     ETAP_EVENT_MONITOR 0
     etap_lock_accumulate   ETAP_LOCK_ACCUMULATE 0
     etap_lock_monitor      ETAP_LOCK_MONITOR 0
@@ -149,11 +147,6 @@ set(UROS_KERNEL_CONFIG
     mach_tr                MACH_TR 1
     mach_vm_debug          MACH_VM_DEBUG 0
     mp_v1_1                MP_V1_1 0
-    norma_device           NORMA_DEVICE 0
-    norma_ether            NORMA_ETHER 0
-    norma_scsi             NORMA_SCSI 0
-    norma_task             NORMA_TASK 0
-    norma_vm               NORMA_VM 0
     pci                    NPCI 1
     sce                    NSCE 0
     simple_clock           SIMPLE_CLOCK 0
@@ -164,9 +157,6 @@ set(UROS_KERNEL_CONFIG
     thread_swapper         THREAD_SWAPPER 1
     time_stamp             TIME_STAMP 0
     vm_cpm                 VM_CPM 0
-    xk_debug               XK_DEBUG 0
-    xk_proxy               XK_PROXY 0
-    xkmachkernel           XKMACHKERNEL 0
     xpr_debug              XPR_DEBUG 0
     zone_debug             ZONE_DEBUG 0
 )
@@ -236,8 +226,8 @@ function(uros_write_config_headers outdir arch)
   # what the first such RPC will do.
   # mach_net_in_kernel -- whether the network stack lives in the kernel.
   #
-  # i386's does: device/net_io.c is fed by chips/lance.c, i386/kkt/if_kkt.c,
-  # scsi/if_sce.c and device/cdli.c, all of them in-kernel drivers.  x86-64
+  # i386's does: device/net_io.c is fed by chips/lance.c, scsi/if_sce.c and
+  # device/cdli.c, all of them in-kernel drivers.  x86-64
   # has none and will have none: network cards belong to user-space servers,
   # with the IOMMU making the isolation real, and the TCP/IP stack is a
   # server too.  So net_io.c has no producers here and the three hooks it

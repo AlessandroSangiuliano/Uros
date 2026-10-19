@@ -114,7 +114,6 @@
 #include <cpus.h>
 #include <platforms.h>
 #include <fast_idle.h>
-#include <dipc.h>
 #if	PARAGON860
 #include <mcmsg.h>
 #include <mcmsg_eng.h>
@@ -155,9 +154,6 @@
 #endif	/* MCMSG_ENG */
 #endif	/* PARAGON860 */
 
-#if	DIPC
-#define	AST_DIPC	0x10000
-#endif	/* DIPC */
 
 #define AST_SWAPOUT	0x20000
 

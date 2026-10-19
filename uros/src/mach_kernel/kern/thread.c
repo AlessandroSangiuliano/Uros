@@ -495,7 +495,6 @@
 #include <simple_clock.h>
 #include <mach_debug.h>
 #include <mach_prof.h>
-#include <dipc.h>
 #include <stack_usage.h>
 
 #include <mach/boolean.h>

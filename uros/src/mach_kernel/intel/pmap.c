@@ -321,7 +321,6 @@
 #include <cpus.h>
 
 #include <string.h>
-#include <norma_vm.h>
 #include <mach_kdb.h>
 #include <mach_ldebug.h>
 

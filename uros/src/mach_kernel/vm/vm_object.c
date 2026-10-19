@@ -400,7 +400,6 @@
  *
  *	Virtual memory object module.
  */
-#include <norma_vm.h>
 #include <mach_pagemap.h>
 #include <task_swapper.h>
 
@@ -426,10 +425,6 @@
 #include <vm/vm_pageout.h>
 #include <kern/misc_protos.h>
 
-#if	NORMA_VM
-#include <xmm/xmm_server_rename.h>
-#include <xmm/xmm_obj.h>
-#endif	/* NORMA_VM */
 
 /*
  *	Virtual memory objects maintain the actual data
@@ -547,22 +542,10 @@ extern void		memory_object_release(
 				ipc_port_t	pager,
 				pager_request_t	pager_request);
 
-#if	NORMA_VM
-extern boolean_t	vm_object_uncache(
-				vm_object_t	object,
-				boolean_t	may_uncache);
-
-extern void		vm_object_declare_pages(
-				vm_object_t	object);
-
-extern void		vm_object_reaper_continue(void);
-
-#else	/* NORMA_VM */
 extern vm_object_t	vm_object_copy_delayed(
 				vm_object_t	src_object,
 				vm_offset_t	src_offset,
 				vm_size_t	size);
-#endif	/* NORMA_VM */
 
 zone_t		vm_object_zone;		/* vm backing store zone */
 
@@ -623,13 +606,6 @@ decl_mutex_data(,vm_object_cached_lock_data)
 #define vm_object_cache_unlock()	\
 		mutex_unlock(&vm_object_cached_lock_data)
 
-#if	NORMA_VM
-/*
- * List of vm_objects to be asynchronously terminated.
- */
-queue_head_t	vor_list;
-decl_simple_lock_data(,vor_lock)
-#endif	/* NORMA_VM */
 
 /*
  *	Virtual memory objects are initialized from
@@ -776,12 +752,6 @@ vm_object_bootstrap(void)
 	vm_object_template.lock_restart = FALSE;
 	vm_object_template.silent_overwrite = FALSE;
 	vm_object_template.advisory_pageout = FALSE;
-#if	NORMA_VM
-	vm_object_template.pagemap_exported = FALSE;
-	vm_object_template.temporary_cached = FALSE;
-	vm_object_template.temporary_caching = FALSE;
-	vm_object_template.temporary_uncaching = FALSE;
-#endif	/* NORMA_VM */
 	vm_object_template.shadowed = FALSE;
 	/* End bitfields */
 
@@ -822,13 +792,6 @@ vm_object_bootstrap(void)
 	vm_external_module_initialize();
 #endif	/* MACH_PAGEMAP */
 
-#if	NORMA_VM
-	/*
-	 * Initialize reaper_thread resources.
-	 */
-	queue_init(&vor_list);
-	simple_lock_init(&vor_lock, ETAP_NORMA_VOR);
-#endif	/* NORMA_VM */
 }
 
 void
@@ -947,41 +910,6 @@ vm_object_reference(
 int cache_shadows = TRUE;
 #endif	/* MIGHT_NOT_CACHE_SHADOWS */
 
-#if	NORMA_VM
-
-/*
- *	vm_object_deallocate_lazy:
- *
- *	Lose the reference. If other references remain, then we are done.
- *	If it is the last reference, then keep it and insert it into
- *	the vor_list queue to deallocate it under the vm_object_thread
- *	that is allowed to block. If the object is not alive and it is the
- *	last reference, then object is waiting for the last completion, and
- *	the thread waiting for that condition must be awaken.
- *
- *	Object is locked.
- */
-void
-vm_object_deallocate_lazy(
-	vm_object_t	object)
-{
-	assert(object->ref_count > 0);
-	if (!object->alive)
-		panic("vm_object_deallocate_lazy");
-
-	if (object->ref_count > 1) {
-		object->ref_count--;
-		vm_object_res_deallocate(object);
-	} else {
-		simple_lock(&vor_lock);
-		queue_enter(&vor_list, object,
-			    vm_object_t, cached_list);
-		simple_unlock(&vor_lock);
-		thread_wakeup((event_t)&vor_list);
-	}
-}
-
-#endif	/* NORMA_VM */
 
 /*
  *	vm_object_deallocate:
@@ -1051,21 +979,6 @@ vm_object_deallocate(
 			continue;
 		}
 
-#if	NORMA_VM
-		/*
-		 * We have to synchronize m_o_caching() with
-		 * m_o_set_attributes()/m_o_destroy() and vm_object_uncache().
-		 */
-		if (object->temporary_caching) {
-			vm_object_assert_wait(object,
-					      VM_OBJECT_EVENT_CACHING,
-					      FALSE);
-			vm_object_unlock(object);
-			vm_object_cache_unlock();
-			thread_block((void (*)(void)) 0);
-			continue;
-		}
-#endif	/* NORMA_VM */
 
 		/*
 		 *	If this object can persist, then enter it in
@@ -1078,38 +991,7 @@ vm_object_deallocate(
 		 */
 
 		if (object->can_persist
-#if	NORMA_VM
-		    &&
-		    (!object->temporary || object->resident_page_count > 0)
-#endif	/* NORMA_VM */
 		    ) {
-#if	NORMA_VM
-			/*
-			 *	If we are about to cache a temporary object,
-			 *	we must tell the memory manager, so that it
-			 *	can coordinate a termination when appropriate.
-			 *
-			 *	We might, however, simply be returning
-			 *	an object to the cache without having
-			 *	asked to remove it, if we were pulled
-			 *	out of the cache by vm_object_lookup
-			 *	on behalf of a memory manager operation.
-			 */
-			if (object->temporary && ! object->temporary_cached) {
-				assert(!object->temporary_caching);
-				object->temporary_caching = TRUE;
-				vm_object_unlock(object);
-				vm_object_cache_unlock();
-				memory_object_caching(object->pager,
-						      object->pager_request);
-				vm_object_cache_lock();
-				vm_object_lock(object);
-				object->temporary_cached = TRUE;
-				object->temporary_caching = FALSE;
-				vm_object_wakeup(object,
-						 VM_OBJECT_EVENT_CACHING);
-			}
-#endif	/* NORMA_VM */
 			/*
 			 *	Now it is safe to decrement reference count,
 			 *	and to return if reference count is > 0.
@@ -1197,22 +1079,6 @@ vm_object_deallocate(
 				(natural_t)current_thread(),object->ref_count);
 
 
-#if	NORMA_VM
-			/*
-			 *	Wake up anyone waiting for a reply to an
-			 *	uncache request. They will see that
-			 *	object->pager is now null, indicating
-			 *	that the object has destroyed and thus
-			 *	that they have lost.
-			 */
-			if (object->temporary_uncaching) {
-				assert(object->temporary_cached);
-				object->temporary_cached = FALSE;
-				object->temporary_uncaching = FALSE;
-				vm_object_wakeup(object,
-						 VM_OBJECT_EVENT_UNCACHING);
-			}
-#endif	/* NORMA_VM */
 			VM_OBJ_RES_DECR(object);	/* XXX ? */
 			/*
 			 *	Terminate this object. If it had a shadow,
@@ -1689,19 +1555,6 @@ memory_object_destroy(
 	object->pager = IP_NULL;
 	object->pager_request = PAGER_REQUEST_NULL;
 
-#if	NORMA_VM
-	/*
-	 *	Wake up anyone waiting for a reply to an uncache request.
-	 *	They will see that object->pager is now null, indicating
-	 *	that the object has destroyed and thus that they have lost.
-	 */
-	if (object->temporary_uncaching) {
-		assert(object->temporary_cached);
-		object->temporary_cached = FALSE;
-		object->temporary_uncaching = FALSE;
-		vm_object_wakeup(object, VM_OBJECT_EVENT_UNCACHING);
-	}
-#endif	/* NORMA_VM */
 
 	/*
 	 *	Wait for existing paging activity (that might
@@ -1732,79 +1585,6 @@ memory_object_destroy(
 	return(KERN_SUCCESS);
 }
 
-#if	NORMA_VM
-/*
- *	Routine:	vm_object_uncache
- *	Purpose:
- *		Uncache a temporary object, or kill it if it
- *		is no longer uncachable. Return TRUE iff
- *		we succeeded in uncaching the object.
- *	Notes:
- *		Called with object locked and not in vm_object_cache,
- *		but with object->temporary_cached TRUE.
- *		Returns with object locked if it is still alive.
- *
- *		Should consume object ref_count iff failure.
- */
-boolean_t
-vm_object_uncache(
-	vm_object_t	object,
-	boolean_t	may_uncache)
-{
-	assert(object->temporary);
-	assert(object->temporary_cached);
-	assert(object->can_persist);
-	assert(object->ref_count > 0);
-
-	/*
-	 * If no one else has sent an uncache request, then do so now.
-	 */
-	if (! object->temporary_uncaching) {
-		object->temporary_uncaching = TRUE;
-		vm_object_unlock(object);
-		memory_object_uncaching(object->pager, object->pager_request);
-		vm_object_lock(object);
-	}
-
-	/*
-	 * Wait for the response to the uncache request.
-	 */
-	while (object->temporary_cached) {
-		vm_object_wait(object, VM_OBJECT_EVENT_UNCACHING, FALSE);
-		vm_object_lock(object);
-	}
-
-	/*
-	 * If the object was destroyed, then deallocate object
-	 * and return failure; otherwise, return success.
-	 */
-	if (object->pager == IP_NULL) {
-		assert(object->ref_count > 0);
-		vm_object_unlock(object);
-		vm_object_deallocate(object);
-		return FALSE;
-	} else {
-		return TRUE;
-	}
-}
-
-kern_return_t
-memory_object_uncaching_permitted(
-	vm_object_t	object)
-{
-	assert(object != VM_OBJECT_NULL);
-
-	vm_object_lock(object);
-	assert(object->temporary_cached);
-	assert(object->temporary_uncaching);
-	object->temporary_cached = FALSE;
-	object->temporary_uncaching = FALSE;
-	vm_object_wakeup(object, VM_OBJECT_EVENT_UNCACHING);
-	vm_object_unlock(object);
-
-	return KERN_SUCCESS;
-}
-#endif	/* NORMA_VM */
 
 /*
  *	vm_object_deactivate_pages
@@ -2206,11 +1986,9 @@ vm_object_copy_quickly(
 
 		break;
 
-#if	!NORMA_VM
 	case MEMORY_OBJECT_COPY_DELAY:
 		vm_object_unlock(object);
 		return(FALSE);
-#endif	/* !NORMA_VM */
 
 	default:
 		vm_object_unlock(object);
@@ -2291,11 +2069,7 @@ vm_object_copy_call(
 	 *	via memory_object_create_copy.
 	 */
 
-#if	NORMA_VM
-	kr = memory_object_copy(src_object->pager, src_object->pager_request);
-#else	/* NORMA_VM */
 	kr = KERN_FAILURE;	/* XXX need to change memory_object.defs */
-#endif	/* NORMA_VM */
 	if (kr != KERN_SUCCESS) {
 		return kr;
 	}
@@ -2345,7 +2119,6 @@ Retry:
 	return KERN_SUCCESS;
 }
 
-#if	!NORMA_VM
 int copy_delayed_lock_collisions = 0;
 int copy_delayed_max_collisions = 0;
 int copy_delayed_lock_contention = 0;
@@ -2581,7 +2354,6 @@ vm_object_copy_delayed(
 
 	return(new_copy);
 }
-#endif	/* !NORMA_VM */
 
 /*
  *	Routine:	vm_object_copy_strategically
@@ -2653,7 +2425,6 @@ vm_object_copy_strategically(
 		}
 		break;
 
-#if	!NORMA_VM
 	    case MEMORY_OBJECT_COPY_DELAY:
 		vm_object_unlock(src_object);
 		*dst_object = vm_object_copy_delayed(src_object,
@@ -2662,7 +2433,6 @@ vm_object_copy_strategically(
 		*dst_needs_copy = TRUE;
 		result = KERN_SUCCESS;
 		break;
-#endif	/* !NORMA_VM */
 
 	    case MEMORY_OBJECT_COPY_SYMMETRIC:
 		XPR(XPR_VM_OBJECT, "v_o_c_strategically obj 0x%x off 0x%x size 0x%x\n",(natural_t)src_object, src_offset, size, 0, 0);
@@ -2677,301 +2447,6 @@ vm_object_copy_strategically(
 	return(result);
 }
 
-#if	NORMA_VM
-/*
- *	Called (as a synchronous RPC) because some kernel called
- *	memory_object_copy and a new copy needed to be created,
- *	or in response to this kernel calling memory_object_copy.
- *
- *	If the copy is being waited for, we leave a reference around
- *	to the copy for the waiting thread to pick up.
- */
-kern_return_t
-memory_object_create_copy(
-	vm_object_t	src_object,
-	ipc_port_t	new_copy_pager,
-	kern_return_t	*result)
-{
-	vm_page_t	p;
-	vm_object_t	new_copy;
-	boolean_t	handoff_reference;
-	boolean_t	internal;
-
-	/*
-	 *	Source object must be a valid object.
-	 */
-	if (src_object == VM_OBJECT_NULL) {
-		if (IP_VALID(new_copy_pager))
-			ipc_port_release_send(new_copy_pager);
-		*result = KERN_INVALID_ARGUMENT;
-		return KERN_SUCCESS;
-	}
-
-	/*
-	 *	New copy pager must be a valid port.
-	 */
-	if (! IP_VALID(new_copy_pager)) {
-		*result = KERN_INVALID_ARGUMENT;
-		vm_object_deallocate(src_object);
-		return KERN_SUCCESS;
-	}
-
-	internal = !IP_IS_REMOTE(new_copy_pager);
-
-	/*
-	 *	If we aren't waiting for a copy, then we can return
-	 *	without doing anything if we don't have an old copy
-	 *	or if the new copy is the same as the old copy.
-	 *
-	 *	If we are waiting for a copy, then we can return if
-	 *	we have an old copy and it is the same as the new copy.
-	 */
-
-	vm_object_lock(src_object);
-	if (! vm_object_wanted(src_object, VM_OBJECT_EVENT_COPY_CALL)) {
-		if (src_object->copy == VM_OBJECT_NULL ||
-		    src_object->copy->pager == new_copy_pager) {
-			vm_object_unlock(src_object);
-			vm_object_deallocate(src_object);
-			ipc_port_release_send(new_copy_pager);
-			*result = KERN_ABORTED;
-			return KERN_SUCCESS;
-		}
-		vm_object_unlock(src_object);
-		handoff_reference = FALSE;
-	} else {
-		/*
-		 * Try to get src_object and its copy locks (out of order),
-		 *	and increment copy reference count, so that it won't
-		 *	be removed during vm_enter_enter() call.
-		 */
-		while (src_object->copy != VM_OBJECT_NULL &&
-		       src_object->copy->pager == new_copy_pager) {
-			if (!vm_object_lock_try(src_object->copy)) {
-				vm_object_unlock(src_object);
-				mutex_pause();    /* wait a bit */
-				vm_object_lock(src_object);
-				continue;
-			}
-			new_copy = src_object->copy;
-			assert(new_copy->pager_initialized);
-			new_copy->ref_count++;
-#if	TASK_SWAPPER
-			/*
-			 * This is equivalent to
-			 * vm_object_res_reference(new_copy) but without
-			 * the locking problems (both new_copy and
-			 * src_object are currently locked).
-			 */
-			VM_OBJ_RES_INCR(new_copy);
-			if (new_copy->res_count == 1)
-				vm_object_res_reference(src_object);
-#endif	/* TASK_SWAPPER */
-
-			vm_object_unlock(new_copy);
-			vm_object_unlock(src_object);
-
-			/*
-			 *	Do a full-fledged vm_object_enter
-			 *	to handle any setting of copy_strategy
-			 *	and temporary for src_object->copy,
-			 *	allowing general memory manager use
-			 *	of copy_call, even though we know
-			 *	(as of this writing) that the xmm
-			 *	system creates permanent noncachable
-			 *	copies.
-			 *
-			 *	The reference created by vm_object_enter
-			 *	is consumed by the thread waiting for
-			 *	VM_OBJECT_COPY_CALL_EVENT.
-			 */
-#if	MACH_ASSERT
-			assert(vm_object_enter(src_object->copy->pager,
-					       src_object->copy->size,
-					       internal, FALSE) ==
-			       src_object->copy);
-#else	/* MACH_ASSERT */
-			(void) vm_object_enter(src_object->copy->pager,
-					       src_object->copy->size,
-					       internal, FALSE);
-#endif	/* MACH_ASSERT */
-			vm_object_lock(src_object);
-			vm_object_wakeup(src_object,
-					 VM_OBJECT_EVENT_COPY_CALL);
-			vm_object_unlock(src_object);
-			vm_object_deallocate(src_object);
-			vm_object_deallocate(new_copy);
-			ipc_port_release_send(new_copy_pager);
-			*result = KERN_SUCCESS;
-			return KERN_SUCCESS;
-		}
-
-		/*
-		 *	The pager port has already been used as the pager port
-		 *	of a copy object that does not exist anymore. It is an
-		 *	invalid argument, because it won't be able to finish by
-		 *	itself (in xmm_object_terminate), and thus it will lead
-		 *	to a deadlock (with the forthcoming xmm_object_wait
-		 *	indirectly called by vm_object_enter).
-		 */
-		vm_object_unlock(src_object);
-		vm_object_cache_lock();
-		if (ip_kotype(new_copy_pager) == IKOT_PAGER_TERMINATING) {
-			/*
-			 * This object is in the middle of termination.
-			 * Wait for it to finish, then return KERN_INVALID_ARG
-			 * as in the case below to try again.  If we don't
-			 * block here and wait for the termination to finish,
-			 * we end up in a livelock by getting right back here
-			 * from m_ksvm_copy and the termination cannot get
-			 * the cpu to finish up.
-			 */
-			new_copy_pager->ip_kobject =
-						(ipc_kobject_t)new_copy_pager;
-			assert_wait((event_t) new_copy_pager, FALSE);
-			vm_object_cache_unlock();
-			thread_block((void (*)(void))0);
-			vm_object_deallocate(src_object);
-			ipc_port_release_send(new_copy_pager);
-			*result = KERN_INVALID_ARGUMENT;
-			return KERN_SUCCESS;
-		} else if (ip_kotype(new_copy_pager) != IKOT_NONE) {
-			vm_object_cache_unlock();
-			vm_object_deallocate(src_object);
-			ipc_port_release_send(new_copy_pager);
-			*result = KERN_INVALID_ARGUMENT;
-			return KERN_SUCCESS;
-		}
-		vm_object_cache_unlock();
-		handoff_reference = TRUE;
-	}
-
-	/*
-	 *	Create an object for new_copy_pager. If we fail,
-	 *	or if already shadows an object other than src_object,
-	 *	then return failure. (The latter can only happen
-	 *	if we allow objects to hold onto their shadows while
-	 *	being cached.) Otherwise, make new_copy shadow src_object
-	 *	if it does not do so already.
-	 */
-	new_copy = vm_object_enter(new_copy_pager,
-				   src_object->size, internal, FALSE);
-	ipc_port_release_send(new_copy_pager);
-	if (new_copy == VM_OBJECT_NULL ||
-	    (new_copy->shadow != VM_OBJECT_NULL &&
-	     new_copy->shadow != src_object)) {
-		vm_object_deallocate(src_object);
-		vm_object_deallocate(new_copy);
-		*result = KERN_FAILURE;
-		return KERN_FAILURE;
-	}
-	vm_object_lock(new_copy);
-
-	/*
-	 *	pager_ready flag of internal vm_object isn't set by
-	 *	vm_object_enter on a newly created vm_object.
-	 */
-	if (new_copy->internal && !new_copy->pager_ready) {
-		new_copy->pager_ready = TRUE;
-		vm_object_wakeup(new_copy, VM_OBJECT_EVENT_PAGER_READY);
-	}
-
-        /*
-         * Try to get vm_object and its oldcopy locks (out of order).
-         */
-        vm_object_lock(src_object);
-	if (src_object->copy != new_copy) {
-		while (src_object->copy != VM_OBJECT_NULL) {
-			if (vm_object_lock_try(src_object->copy))
-				break;
-			vm_object_unlock(src_object);
-			mutex_pause();    /* wait a bit */
-			vm_object_lock(src_object);
-		}
-
-		/*
-		 *	Make new copy shadow src_object if it does not do so
-		 *	already.  (It might already if it was cached.)
-		 */
-		if (new_copy->shadow != src_object) {
-			new_copy->shadow = src_object;
-			new_copy->shadow_offset = 0;
-			src_object->shadowed = TRUE;
-			assert(src_object->ref_count > 0);
-			src_object->ref_count++;
-			vm_object_res_reference(src_object);
-		}
-
-		/*
-		 *	If we have an old copy, make it shadow the new copy
-		 *	instead of src_object.
-		 */
-		if (src_object->copy != VM_OBJECT_NULL) {
-			src_object->copy->shadow = new_copy;
-			new_copy->shadowed = TRUE;
-			new_copy->ref_count++;
-#if	TASK_SWAPPER
-			/*
-			 * This is equivalent to
-			 * vm_object_res_reference(new_copy) but without
-			 * the locking problems (both new_copy and
-			 * src_object are currently locked).
-			 */
-			VM_OBJ_RES_INCR(new_copy);
-			if (new_copy->res_count == 1)
-				vm_object_res_reference(src_object);
-#endif	/* TASK_SWAPPER */
-			src_object->ref_count--;
-			vm_object_res_deallocate(src_object);
-			assert(src_object->ref_count > 0);
-			vm_object_unlock(src_object->copy);
-		}
-
-		/*
-		 *	Adjust source object's copy pointer.
-		 */
-		src_object->copy = new_copy;
-	}
-
-	assert(new_copy->shadow == src_object);
-
-	vm_object_unlock(new_copy);
-
-	/*
-	 *	Remove write access from all of the pages of
-	 *	the source object that we can.
-	 */
-
-	vm_object_paging_wait(src_object, FALSE);
-	queue_iterate(&src_object->memq, p, vm_page_t, listq) {
-		if (p->fictitious) {
-			continue;
-		}
-		if (! (p->page_lock & VM_PROT_WRITE)) {
-			p->page_lock |= VM_PROT_WRITE;
-			p->unusual = TRUE;
-			pmap_page_protect(p->phys_addr,
-					  VM_PROT_ALL & ~p->page_lock);
-		}
-	}
-
-	/*
-	 *	Wake up anyone waiting for this copy, and return.
-	 */
-	if (handoff_reference) {
-		assert(vm_object_wanted(src_object,
-					VM_OBJECT_EVENT_COPY_CALL));
-		vm_object_wakeup(src_object, VM_OBJECT_EVENT_COPY_CALL);
-		vm_object_unlock(src_object);
-	} else {
-		vm_object_unlock(src_object);
-		vm_object_deallocate(new_copy);
-	}
-	vm_object_deallocate(src_object);
-	*result = KERN_SUCCESS;
-	return KERN_SUCCESS;
-}
-#endif	/* NORMA_VM */
 
 /*
  *	vm_object_shadow:
@@ -3123,11 +2598,7 @@ vm_object_shadow(
  *	termination routines and vm_object_collapse.]
  */
 
-#if	NORMA_VM
-#define	IKOT_PAGER_LOOKUP_TYPE	IKOT_PAGER
-#else	/* NORMA_VM */
 #define	IKOT_PAGER_LOOKUP_TYPE	IKOT_PAGING_REQUEST
-#endif	/* NORMA_VM */
 
 vm_object_t
 vm_object_lookup(
@@ -3247,10 +2718,8 @@ vm_object_destroy(
 
 	ipc_port_release_send(pager);
 
-#if	!NORMA_VM
 	if ((ipc_port_t)old_pager_request != IP_NULL)
 		ipc_port_dealloc_kernel((ipc_port_t)old_pager_request);
-#endif	/* !NORMA_VM */
 
 	/*
 	 *	Restart pending page requests
@@ -3405,7 +2874,6 @@ restart:
 
 	if (must_init) {
 
-#if	!NORMA_VM
 		/*
 		 *	Allocate request port.
 		 */
@@ -3414,7 +2882,6 @@ restart:
 		assert (pager_request != IP_NULL);
 		ipc_kobject_set(pager_request, (ipc_kobject_t) object,
 				IKOT_PAGING_REQUEST);
-#endif	/* !NORMA_VM */
 
 		vm_object_lock(object);
 
@@ -3434,9 +2901,6 @@ restart:
 			/* copy strategy invalid until set by memory manager */
 			object->copy_strategy = MEMORY_OBJECT_COPY_INVALID;
 		}
-#if	NORMA_VM
-		object->pager_ready = FALSE;
-#else	/* NORMA_VM */
 		object->pager_request = pager_request;
 		if (internal) {
 			/* default-pager objects are ready immediately */
@@ -3447,24 +2911,9 @@ restart:
 			object->pager_ready = FALSE;
 		}
 
-#endif	/* NORMA_VM */
 
 		vm_object_unlock(object);
 
-#if	NORMA_VM
-
-		/*
-		 *	Let the xmm system know that we want to use the pager.
-		 *
-		 *	For internal objects, pager_ready will be set after
-		 * 	pages have been declared; otherwise, it will be set
-		 *	via set_attributes_common.
-		 */
-
-		object->cluster_size = PAGE_SIZE;
-
-		(void) xmm_memory_object_init(object);
-#else	/* NORMA_VM */
 
 		/*
 		 *	Let the pager know we're using it.
@@ -3491,7 +2940,6 @@ restart:
 				object->pager_request,
 				PAGE_SIZE);
 		}
-#endif	/* NORMA_VM */
 
 		vm_object_lock(object);
 		object->pager_initialized = TRUE;
@@ -3500,28 +2948,6 @@ restart:
 		vm_object_lock(object);
 
 
-#if	NORMA_VM
-		if (!internal) {
-			/*
-			 *	We have to synchronize m_o_caching() and
-			 *	m_o_set_attributes()/m_o_destroy().
-			 */
-			while (object->temporary_caching) {
-				vm_object_assert_wait(object,
-						      VM_OBJECT_EVENT_CACHING,
-						      FALSE);
-				vm_object_unlock(object);
-				thread_block((void (*)(void)) 0);
-				vm_object_lock(object);
-			}
-
-			if (object->temporary_cached) {
-				if (! vm_object_uncache(object, TRUE)) {
-					goto restart;
-				}
-			}
-		}
-#endif	/* NORMA_VM */
 	}
 	/*
 	 *	[At this point, the object must be locked]
@@ -3546,271 +2972,6 @@ restart:
 	return(object);
 }
 
-#if	NORMA_VM
-/*
- * We have made a new region of the object copy-on-write.
- * If the whole object is now copy-on-write, then we tell
- * the svm layer that the object is frozen, passing it
- * a pagemap that can be sent to other kernels to avoid
- * unnecessary data_requests.
- */
-void
-vm_object_export_pagemap_try(
-	vm_object_t	object,
-	vm_size_t	size)
-{
-#if	MACH_PAGEMAP
-	vm_page_t m;
-
-	vm_object_lock(object);
-	if (object->pagemap_exported) {
-		vm_object_unlock(object);
-		return;
-	}
-
-	/*
-	 * XXX
-	 * Do I need to synchronize between pager_created
-	 * and handle copy-on-write obligations?
-	 */
-
-	assert(object->internal);
-	assert(object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC);
-
-	if (object->existence_map == VM_EXTERNAL_NULL) {
-		vm_object_unlock(object);
-		return;
-	}
-	assert(object->pager_created);
-
-	/*
-	 * Check the size.  It may be the case that only part of the object
-	 * has been write protected, so there are pages in it that may
-	 * not get properly shared.  Once the entire object is present,
-	 * go ahead and share it.
-	 */
-	if (size == object->size)
-		object->frozen_size = size;
-	else
-		object->frozen_size += size;
-
-	if (object->frozen_size != object->size) {
-		if (object->frozen_size < object->size) {
-			vm_object_unlock(object);
-			return;
-		}
-		/*
-		 * XXX Can we do this??  Enough of the frozen
-		 * XXX object has been frozen that we may be able
-		 * XXX to freeze the whole thing...is this strictly
-		 * XXX true?
-		 */
-		object->frozen_size = object->size;
-	}
-
-	/*
-	 * Remember that we have given the pager a frozen pagemap.
-	 */
-	object->pagemap_exported = TRUE;
-
-	/*
-	 * Synchronize declaration of vm_object pages with current pagination
-	 * work on vm_object pages.
-	 */
-	vm_object_paging_wait(object, FALSE);
-	vm_object_paging_begin(object);
-	vm_object_unlock(object);
-
-#if 1
-	/*
-	 * Declare pages now that the svm layer is going to be interested
-	 * in what we do.
-	 */
-	vm_object_declare_pages(object);
-#else	/* 1 */
-
-	/*
-	 * Merge resident page information into the object's
-	 * existence info. This is safe (spurious 1's are okay;
-	 * spurious 0's are not); furthermore, it shouldn't
-	 * be inefficient, since the kernel won't look at these
-	 * 1's as long as the pages are resident, and it will
-	 * set the 1's as it makes them not resident anyway
-	 * (since all of these pages are probably dirty or precious).
-	 *
-	 * XXXO
-	 * There will often be lots of zeros in the existence info.
-	 * We could compress this information with a more
-	 * complex representation, if it seems worthwhile.
-	 */
-	queue_iterate(&object->memq, m, vm_page_t, listq) {
-		assert(m->offset < object->size);
-		vm_external_state_set(object->existence_map,
-			m->offset + object->paging_offset);
-	}
-
-	/*
-	 * Pass pagemap to pager.
-	 */
-	memory_object_freeze(object->pager,
-			     object->pager_request,
-			     object->existence_map,
-			     object->size);
-
-	/*
-	 * Remember that we have given the pager a frozen pagemap.
-	 */
-	object->pagemap_exported = TRUE;
-#endif	/* 1 */
-	vm_object_lock(object);
-	vm_object_paging_end(object);
-	vm_object_unlock(object);
-#endif	/* MACH_PAGEMAP */
-}
-
-/*
- *	For use only by vm_object_declare_pages.
- *	If a page is about to be paged in, then
- *	continue on to the next page; otherwise,
- *	mark the page dirty, and allow it to be
- *	declared.
- *
- *	A page handed to this routine cannot have
- *	the absent, error, or restart bits set,
- *	since such bits are only set upon receiving
- *	a reply from the pager, and since the object
- *	is not ready, we have not even sent it any
- *	requests. A page can, however, be fictitious,
- *	since a fault may be in progress, blocked
- *	on the pager_ready object attribute.
- */
-#define	SET_DIRTY_OR_SKIP(m)					\
-{								\
-	assert(! (m)->error && ! (m)->restart);			\
-	if ((m)->absent || (m)->fictitious) {			\
-		continue;					\
-	}							\
-	(m)->dirty = TRUE;					\
-}
-
-/*
- *	Tell the svm layer about the pages that we have.
- *	The svm layer doesn't know about these pages
- *	because we didn't ask for them because the svm
- *	object for this object didn't exist until we
- *	created the pager and therefore there was no
- *	one to ask. However, the svm layer needs to know
- *	about them now so that it knows what pages to
- *	ask us for if another kernel maps the object.
- *
- *	We will try to give the svm layer a pagemap that
- *	represents this object in a frozen state that
- *	the svm layer can then hand to other kernels,
- *	allowing useless data_requests to be avoided
- *	(those that will always be answered with
- *	data_unavailable). However, if the object is
- *	too large to create a pagemap for, we tell the
- *	kernel about the pages we have, one by one,
- *	avoiding the creation of a pagemap; if the
- *	object is not too large to create a pagemap for,
- *	but it isn't frozen, then we indicate such when
- *	sending the pagemap to the svm layer, so that it
- *	will use it only to see what pages we have,
- *	discarding the pagemap when it is done.
- *	(We can tell that the object is "too large" by
- *	seeing that vm_external_create failed to create
- *	a pagemap for the object.)
- *
- *	Every page here is likely to be dirty or to become dirty.
- *	Mark every page dirty, so that the pager can count on
- *	the kernel to hold a copy. No pages should be being
- *	paged in, since the object is not yet ready.
- *
- *	XXXO
- *	If MACH_PAGEMAP is enabled, we could use pagemaps to
- *	declare chunks of a very large object via multiple
- *	calls to declare_pages.
- */
-void
-vm_object_declare_pages(
-	vm_object_t	object)
-{
-	vm_page_t m;
-	boolean_t frozen;
-	boolean_t gotapage;
-#if	MACH_PAGEMAP
-	vm_external_map_t	emap;
-#endif	/* MACH_PAGEMAP */
-
-	assert(object->pager_created);
-	assert(! object->pager_ready || object->size == object->frozen_size);
-#if	MACH_PAGEMAP
-	if (object->existence_map) {
-		frozen = (object->size == object->frozen_size);
-		/*
-		 * Create a temporary existence map to collect the
-		 * present pages in - doing a declare pages on pages
-		 * the pager has will not work.
-		 */
-		emap = vm_external_create(object->size);
-
-		/*
-		 *	Merge resident page information into the object's
-		 *	existence info, as in vm_object_export_pagemap_try.
-		 *
-		 *	XXXO
-		 *	While it is not incorrect to set bits in the pagemap,
-		 *	it does make coalescing harder. Should use a temporary
-		 *	pagemap instead.
-		 */
-		gotapage = FALSE;
-		vm_object_lock(object);
-		queue_iterate(&object->memq, m, vm_page_t, listq) {
-			assert(m->offset < object->size);
-
-			/*
-			 * If the object is frozen, do not dirty rdonly
-			 * pages.
-			 */
-			if (!(frozen && (m->page_lock & VM_PROT_WRITE)))
-				SET_DIRTY_OR_SKIP(m);
-			vm_external_state_set(object->existence_map,
-				m->offset + object->paging_offset);
-			vm_external_state_set(emap,
-				m->offset + object->paging_offset);
-			if (!gotapage)
-				gotapage = TRUE;
-		}
-		vm_object_unlock(object);
-		
-		/*
-		 * Pass pagemap to pager.
-		 */
-		if (gotapage)
-			memory_object_declare_pages(object->pager,
-						    object->pager_request,
-						    emap,
-						    object->size,
-						    frozen);
-		vm_external_destroy(emap, object->size);
-		return;
-	}
-#endif	/* MACH_PAGEMAP */
-
-	/*
-	 *	Declare each resident page, one by one.
-	 */
-	queue_iterate(&object->memq, m, vm_page_t, listq) {
-		assert(m->offset < object->size);
-		SET_DIRTY_OR_SKIP(m);
-		memory_object_declare_page(object->pager,
-					   object->pager_request,
-					   m->offset,
-					   PAGE_SIZE);
-	}
-}
-
-#endif	/* NORMA_VM */
 
 /*
  *	Routine:	vm_object_pager_create
@@ -3852,21 +3013,12 @@ vm_object_pager_create(
 		 *	Someone else got to it first...
 		 *	wait for them to finish initializing the ports
 		 */
-#if	NORMA_VM
-		while (!object->pager_ready) {
-			vm_object_wait(	object,
-				       VM_OBJECT_EVENT_PAGER_READY,
-				       FALSE);
-			vm_object_lock(object);
-		}
-#else	/* NORMA_VM */
 		while (!object->pager_initialized) {
 			vm_object_wait(	object,
 				       VM_OBJECT_EVENT_INITIALIZED,
 				       FALSE);
 			vm_object_lock(object);
 		}
-#endif	/* NORMA_VM */
 		vm_object_paging_end(object);
 		return;
 	}
@@ -3884,19 +3036,13 @@ vm_object_pager_create(
 #endif	/* MACH_PAGEMAP */
 	vm_object_unlock(object);
 
-#if	MACH_PAGEMAP && !NORMA_VM
-	/*
-	 * The above conditional is incorrect - it should not
-	 * exclude NORMA_VM.  However, there is a problem with the
-	 * new copy logic that precludes this from working properly
-	 * unless a new copy is created.  The fix is not obvious.
-	 */
+#if	MACH_PAGEMAP
 	map = vm_external_create(size);
 	vm_object_lock(object);
 	assert(object->size == size);
 	object->existence_map = map;
 	vm_object_unlock(object);
-#endif	/* MACH_PAGEMAP && !NORMA_VM */
+#endif	/* MACH_PAGEMAP */
 
 	/*
 	 *	Create the pager ports, and associate them with this object.
@@ -3922,23 +3068,7 @@ vm_object_pager_create(
 	 */
 	ipc_port_release_send(pager);
 
-#if	NORMA_VM
-	/*
-	 *	Only after declaring pages do we mark the object ready.
-	 *	This avoids the question of how to declare absent pages.
-	 *	Also tell NORMA XMM that this is a copy call object if
-	 *	it is.
-	 */
-	vm_object_declare_pages(object);
-	if (object->copy_strategy == MEMORY_OBJECT_COPY_CALL)
-		memory_object_share(object->pager, object->pager_request);
 	vm_object_lock(object);
-	assert(! object->pager_ready);
-	object->pager_ready = TRUE;
-	vm_object_wakeup(object, VM_OBJECT_EVENT_PAGER_READY);
-#else	/* NORMA_VM */
-	vm_object_lock(object);
-#endif	/* NORMA_VM */
 
 	/*
 	 *	Release the paging reference
@@ -3963,32 +3093,18 @@ vm_object_remove(
 	if ((port = object->pager) != IP_NULL) {
 		if (ip_kotype(port) == IKOT_PAGER)
 			ipc_kobject_set(port,
-#if	NORMA_VM
-					/*
-					 *	There should no longer be any
-					 *	need for setting the port type
-					 *	to anything other than IKO_NULL.
-					 *	But I've left this in because
-					 *	it's nice when debugging to
-					 *	be able to recognize this state.
-					 */
-					port->ip_kobject,
-#else	/* NORMA_VM */
 					IKO_NULL,
-#endif	/* NORMA_VM */
 					IKOT_PAGER_TERMINATING);
 		 else if (ip_kotype(port) != IKOT_NONE)
 			panic("vm_object_remove: bad object port");
 	}
 
-#if	!NORMA_VM
 	if ((port = object->pager_request) != IP_NULL) {
 		if (ip_kotype(port) == IKOT_PAGING_REQUEST)
 			ipc_kobject_set(port, IKO_NULL, IKOT_NONE);
 		 else if (ip_kotype(port) != IKOT_NONE)
 			panic("vm_object_remove: bad request port");
 	}
-#endif	/* !NORMA_VM */
 }
 
 /*
@@ -4117,13 +3233,11 @@ vm_object_do_collapse(
 		object->cluster_size = backing_object->cluster_size;
 		object->paging_offset =
 		    backing_object->paging_offset + backing_offset;
-#if	!NORMA_VM
 		if (object->pager_request != IP_NULL) {
 			ipc_kobject_set(object->pager_request,
 					(ipc_kobject_t) object,
 					IKOT_PAGING_REQUEST);
 		}
-#endif	/* !NORMA_VM */
 	}
 
 	vm_object_cache_unlock();
@@ -4417,11 +3531,6 @@ vm_object_collapse(
 
 		if (backing_object->ref_count == 1 &&
 		    ! object->pager_created &&
-#if	NORMA_VM
-		    backing_object->temporary &&
-		    ! backing_object->pager_created &&
-		    backing_object->frozen_size == 0 &&
-#endif	/* NORMA_VM */
 		    vm_object_collapse_allowed) {
 
 			XPR(XPR_VM_OBJECT, 
@@ -4824,40 +3933,11 @@ vm_object_page_map(
 	}
 }
 
-#if	NORMA_VM
-void
-vm_object_reaper_continue(void)
-{
-	vm_object_t object;
-
-	for (;;) {
-		simple_lock(&vor_lock);
-		while (!queue_empty(&vor_list)) {
-			queue_remove_first(&vor_list, object,
-					   vm_object_t, cached_list);
-			simple_unlock(&vor_lock);
-			vm_object_deallocate(object);
-			simple_lock(&vor_lock);
-		}
-		assert_wait((event_t)&vor_list, FALSE);
-		simple_unlock(&vor_lock);
-		thread_block(vm_object_reaper_continue);
-	}
-}
-
-void vm_object_thread()
-{
-	vm_object_reaper_continue();
-}
-#endif	/* NORMA_VM */
 
 #include <mach_kdb.h>
 
 #if	MACH_KDB
 
-#if	NORMA_VM
-#include <ddb/db_command.h>
-#endif	/* NORMA_VM */
 #include <ddb/db_output.h>
 #include <vm/vm_print.h>
 
@@ -4968,21 +4048,12 @@ vm_object_print(
 	register vm_page_t p;
 	extern int indent;
 	char *s;
-#if	NORMA_VM
-	boolean_t show_xmm_stack;
-#endif	/* NORMA_VM */
 
 	register int count;
 
 	if (object == VM_OBJECT_NULL)
 		return;
 
-#if	NORMA_VM
-	if (db_option(modif, 'x'))
-		show_xmm_stack = TRUE;
-	else
-		show_xmm_stack = FALSE;
-#endif	/* NORMA_VM */
 
 	iprintf("object 0x%x\n", object);
 
@@ -5104,14 +4175,6 @@ vm_object_print(
 	vm_external_print(object->existence_map, object->size);
 #endif	/* MACH_PAGEMAP */
 
-#if	NORMA_VM
-	iprintf("%spagemap_exported, %stemporary_cached\n",
-		(object->pagemap_exported ? "" : "!"),
-		(object->temporary_cached ? "" : "!"));
-	iprintf("%stemporary_caching, %stemporary_uncaching\n",
-		(object->temporary_caching ? "" : "!"),
-		(object->temporary_uncaching ? "" : "!"));
-#endif	/* NORMA_VM */
 #if	MACH_ASSERT
 	iprintf("paging_object=0x%x\n", object->paging_object);
 #endif	/* MACH_ASSERT */
@@ -5139,10 +4202,6 @@ vm_object_print(
 		}
 	}
 	indent -= 2;
-#if	NORMA_VM
-	if (show_xmm_stack && object->pager_request)
-		xmm_object_stack_print(object->pager_request);
-#endif	/* NORMA_VM */
 }
 
 

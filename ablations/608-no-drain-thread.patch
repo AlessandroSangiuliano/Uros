@@ -5,7 +5,7 @@ Run: --entry 29 1200 -smp 4
 Expect: rcu_bench: WRONG
 
 diff --git a/uros/src/mach_kernel/kern/startup.c b/uros/src/mach_kernel/kern/startup.c
-index 273a8cb0..54465aea 100644
+index 799ce6d8..0f211026 100644
 --- a/uros/src/mach_kernel/kern/startup.c
 +++ b/uros/src/mach_kernel/kern/startup.c
 @@ -462,7 +462,6 @@ start_kernel_threads(void)
@@ -13,6 +13,6 @@ index 273a8cb0..54465aea 100644
  	 * idles -- the idle loop was the only thing that ran them.
  	 */
 -	(void) kernel_thread(kernel_task, urmach_rcu_drain_thread, (char *) 0);
- #if	NORMA_VM
- 	(void) kernel_thread(kernel_task, vm_object_thread, (char *) 0);
- #endif	/* NORMA_VM */
+ 
+ #ifdef	__x86_64__
+ 	/*

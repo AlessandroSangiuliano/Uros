@@ -191,7 +191,6 @@
 #include <xpr_debug.h>
 #include <cpus.h>
 #include <mach_host.h>
-#include <norma_vm.h>
 #include <kernel_test.h>
 #include <etap.h>
 #include <cdli.h>
@@ -464,9 +463,6 @@ start_kernel_threads(void)
 	 * idles -- the idle loop was the only thing that ran them.
 	 */
 	(void) kernel_thread(kernel_task, urmach_rcu_drain_thread, (char *) 0);
-#if	NORMA_VM
-	(void) kernel_thread(kernel_task, vm_object_thread, (char *) 0);
-#endif	/* NORMA_VM */
 
 #ifdef	__x86_64__
 	/*
@@ -524,15 +520,6 @@ start_kernel_threads(void)
 	 *	Create the device service.
 	 */
 	device_service_create();
-
-	/*
-	 *	Initialize distributed services, starting
-	 *	with distributed IPC and progressing to any
-	 *	services layered on top of that.
-	 *
-	 *	This stub exists even in non-NORMA systems.
-	 */
-	norma_bootstrap();
 
 	/*
 	 *	Initialize any testing services blocking the main kernel

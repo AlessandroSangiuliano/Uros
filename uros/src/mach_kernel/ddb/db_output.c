@@ -91,7 +91,6 @@
  * Printf and character output for debugger.
  */
 
-#include <dipc.h>
 
 #include <mach/boolean.h>
 #include <kern/misc_protos.h>
@@ -537,17 +536,11 @@ iprintf(char *fmt, ...)
 	va_end(listp);
 }
 
-#if	DIPC
-#include <mach/kkt_request.h>
-#endif	/* DIPC */
 
 void
 db_output_prompt(void)
 {
 	db_printf("db%s", (db_default_act) ? "t": "");
-#if	DIPC
-	db_printf("%d", KKT_NODE_SELF());
-#endif	/* DIPC */
 #if	NCPUS > 1
 	db_printf("{%d}", cpu_number());
 #endif

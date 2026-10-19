@@ -249,7 +249,6 @@
  */
 
 #include <zone_debug.h>
-#include <norma_vm.h>
 #include <mach_kdb.h>
 #include <kern/assert.h>
 #include <kern/macro_help.h>

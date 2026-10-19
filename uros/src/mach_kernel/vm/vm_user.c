@@ -205,9 +205,6 @@
 #include <vm/vm_page.h>
 #include <vm/memory_object.h>
 
-#if     NORMA_VM
-#include <xmm/xmm_server_rename.h>
-#endif /* NORMA_VM */
 
 #if	VM_CPM
 #include <vm/cpm.h>
@@ -716,13 +713,6 @@ vm_msync(
 			vm_map_unlock(map);
 			continue;
 		}
-#if     NORMA_VM
-		if (object->temporary) {
-			vm_object_unlock(object);
-			vm_map_unlock(map);
-			continue;
-		}
-#endif  /* NORMA_VM */
 		/*
 		 * keep reference on the object until syncing is done
 		 */

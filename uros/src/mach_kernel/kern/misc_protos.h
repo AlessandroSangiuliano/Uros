@@ -25,7 +25,6 @@
 #ifndef	_MISC_PROTOS_H_
 #define	_MISC_PROTOS_H_
 
-#include <dipc.h>
 
 #include <stdarg.h>
 #include <string.h>
@@ -327,12 +326,6 @@ extern void machine_callstack(
 
 extern void consider_machine_collect(void);
 
-extern void norma_bootstrap(void);
-
-#if	DIPC
-extern boolean_t	no_bootstrap_task(void);
-extern ipc_port_t	get_root_master_device_port(void);
-#endif	/* DIPC */
 
 /*
  * Whether Debugger() would actually enter a debugger if called now (#428).

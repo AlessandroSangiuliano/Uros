@@ -115,7 +115,6 @@
  */
 
 #include <mach_debug.h>
-#include <dipc.h>
 #include <mach_rt.h>
 
 #include <mach/kern_return.h>
@@ -261,10 +260,6 @@ ipc_bootstrap(void)
 	kr = ipc_space_create_special(&ipc_space_reply);
 	assert(kr == KERN_SUCCESS);
 
-#if	DIPC
-	kr = ipc_space_create_special(&ipc_space_remote);
-	assert(kr == KERN_SUCCESS);
-#endif	/* DIPC */
 
 	/* initialize modules with hidden data structures */
 

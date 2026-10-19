@@ -155,7 +155,6 @@
  */
 
 #include <cpus.h>
-#include <dipc.h>
 #include <mach_rt.h>
 
 #include <mach/kern_return.h>
@@ -214,10 +213,6 @@ unsigned int	c_route_msg_continue = 0;
 #include <kern/rtalloc.h>
 #endif	/* MACH_RT */
 
-#if	DIPC
-#include <dipc/dipc_funcs.h>
-#include <dipc/dipc_port.h>
-#endif	/* DIPC */
 
 
 /*
@@ -474,9 +469,6 @@ mach_msg_receive(
 
 	if (mr != MACH_MSG_SUCCESS) {
 		if (mr == MACH_RCV_TOO_LARGE || mr == MACH_RCV_SCATTER_SMALL
-#if	DIPC
-		    || mr == MACH_RCV_TRANSPORT_ERROR
-#endif	/* DIPC */
 		    ) {
 			if (msg_receive_error(kmsg, msg, option, seqno, space, rcv_size)
 			    == MACH_RCV_INVALID_DATA)
@@ -506,9 +498,6 @@ mach_msg_receive(
 
 	if (mr != MACH_MSG_SUCCESS) {
 		if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR
-#if	DIPC
-			|| mr == MACH_RCV_TRANSPORT_ERROR
-#endif	/* DIPC */
 		    ) {
 			if (ipc_kmsg_put(msg, kmsg, kmsg->ikm_header.msgh_size +
 			   trailer->msgh_trailer_size) == MACH_RCV_INVALID_DATA)
@@ -648,9 +637,6 @@ finish_receive:
 
 	if (mr != MACH_MSG_SUCCESS) {
 		if (mr == MACH_RCV_TOO_LARGE || mr == MACH_RCV_SCATTER_SMALL
-#if	DIPC
-		    || mr == MACH_RCV_TRANSPORT_ERROR
-#endif	/* DIPC */
 		    ) {
 			space = current_space();
 			if (msg_receive_error(kmsg, msg, option, seqno, space, max_size)
@@ -695,9 +681,6 @@ finish_receive:
 
 	if (mr != MACH_MSG_SUCCESS) {
 		if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR
-#if	DIPC
-			|| mr == MACH_RCV_TRANSPORT_ERROR
-#endif	/* DIPC */
 		    ) {
 			if (ipc_kmsg_put(msg, kmsg,
 			    kmsg->ikm_header.msgh_size +
@@ -1493,14 +1476,6 @@ mach_msg_overwrite_trap(
 				goto kernel_send;
 			}
 
-#if	DIPC
-			if (IP_IS_REMOTE(dest_port)) {
-				ip_unlock(reply_port);
-				ip_unlock(dest_port);
-				HOT(c_mmot_cold_012++);
-				goto slow_send;
-		        }
-#endif	/* DIPC */
 
 			if (dest_port->ip_msgcount >= dest_port->ip_qlimit) {
 				HOT(c_mmot_cold_013++);
@@ -1631,14 +1606,6 @@ mach_msg_overwrite_trap(
 			/* make sure we can queue to the destination */
 
 			assert(dest_port->ip_receiver != ipc_space_kernel);
-#if	DIPC
-			if (IP_IS_REMOTE(dest_port)) {
-				ip_unlock(dest_port);
-				is_write_unlock(space);
-				HOT(c_mmot_cold_023++);
-				goto slow_send;
-			}
-#endif	/* DIPC */
 
 			/* optimized ipc_entry_lookup/ipc_mqueue_copyin */
 
@@ -1774,9 +1741,6 @@ mach_msg_overwrite_trap(
 
 		assert(ip_active(dest_port));
 		assert(dest_port->ip_receiver != ipc_space_kernel);
-#if	DIPC
-		assert(! IP_IS_REMOTE(dest_port));
-#endif	/* DIPC */
 		assert((dest_port->ip_msgcount < dest_port->ip_qlimit) ||
 		       (MACH_MSGH_BITS_REMOTE(hdr->msgh_bits) ==
 						MACH_MSG_TYPE_PORT_SEND_ONCE));
@@ -2318,24 +2282,6 @@ mach_msg_overwrite_trap(
 		assert(kmsg != IKM_NULL);
 		dest_port = kmsg->ikm_dest;
 
-#if	DIPC
-		if (KMSG_IN_DIPC(kmsg)) {
-			mr = ipc_mqueue_finish_receive(&kmsg, dest_port, option,
-							MACH_MSG_SIZE_MAX);
-
-			if (mr == MACH_RCV_TRANSPORT_ERROR) {
-				if (msg_receive_error(kmsg,
-				    (rcv_msg != MACH_MSG_NULL) ? rcv_msg : msg,
-					option, self->ith_seqno, space, rcv_size)
-				    == MACH_RCV_INVALID_DATA) {
-					mr = MACH_RCV_INVALID_DATA;
-				}
-			}
-
-			if (mr != MACH_MSG_SUCCESS)
-				return(mr);
-		} else
-#endif	/* DIPC */
 			{
 			ip_lock(dest_port);
 			assert(dest_port->ip_msgcount > 0);
@@ -2374,9 +2320,6 @@ mach_msg_overwrite_trap(
 
 		reply_size = send_size + trailer->msgh_trailer_size;
 		if ((rcv_size < reply_size)
-#if	DIPC
-		    || KMSG_IS_DIPC_FORMAT(kmsg)
-#endif	/* DIPC */
 						) {
 			HOT(c_mmot_g_slow_copyout6++);
 			goto slow_copyout;
@@ -2480,10 +2423,6 @@ mach_msg_overwrite_trap(
 			fast_pp = dest_port->ip_protected_payload;
 
 			if ((--dest_port->ip_srights == 0) &&
-#if	DIPC
-			    (!DIPC_IS_DIPC_PORT(dest_port) || 
-			     (dest_port->ip_transit == 0)) &&
-#endif	/* DIPC */
 			    (dest_port->ip_nsrequest != IP_NULL)) {
 				ipc_port_t nsrequest;
 				mach_port_mscount_t mscount;
@@ -2629,9 +2568,6 @@ mach_msg_overwrite_trap(
 		 * user and free kmsg.  Must check ikm_cache after
 		 * copyoutmsg.  Inlined ipc_kmsg_put() here.
 		 */
-#if	DIPC
-		assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 		mr = MACH_MSG_SUCCESS;
 		if (copyoutmsg((char *) &kmsg->ikm_header,
@@ -2723,9 +2659,6 @@ mach_msg_overwrite_trap(
 		}
 
 		if (ip_active(dest_port) &&
-#if	DIPC
-		    (! IP_IS_REMOTE(dest_port)) &&
-#endif	/* DIPC */
 		    ((dest_port->ip_msgcount < dest_port->ip_qlimit) ||
 		     (MACH_MSGH_BITS_REMOTE(hdr->msgh_bits) ==
 					MACH_MSG_TYPE_PORT_SEND_ONCE)))
@@ -2943,16 +2876,6 @@ mach_msg_overwrite_trap(
 		/* rcv_mqueue is unlocked */
 		ipc_object_release(rcv_object);
 
-#if	DIPC
-		if (mr == MACH_RCV_TRANSPORT_ERROR) {
-			if (msg_receive_error(temp_kmsg,
-				(rcv_msg != MACH_MSG_NULL) ? rcv_msg : msg,
-				option, temp_seqno, space, rcv_size)
-			    == MACH_RCV_INVALID_DATA) {
-				mr = MACH_RCV_INVALID_DATA;
-			}
-		}
-#endif	/* DIPC */
 
 		if (mr != MACH_MSG_SUCCESS) {
 			return(mr);
@@ -2996,9 +2919,6 @@ mach_msg_overwrite_trap(
 				      MACH_PORT_NULL, MACH_MSG_BODY_NULL);
 		if (mr != MACH_MSG_SUCCESS) {
 			if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR
-#if	DIPC
-				|| mr == MACH_RCV_TRANSPORT_ERROR
-#endif	/* DIPC */
 			    ) {
 				if (ipc_kmsg_put(msg, kmsg, reply_size) == 
 							MACH_RCV_INVALID_DATA)

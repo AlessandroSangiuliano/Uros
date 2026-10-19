@@ -552,10 +552,8 @@
  */
 
 #include <cpus.h>
-#include <norma_vm.h>
 #include <task_swapper.h>
 #include <mach_assert.h>
-#include <dipc.h>
 
 #include <mach/kern_return.h>
 #include <mach/port.h>
@@ -578,10 +576,6 @@
 #include <ddb/tr.h>
 #include <kern/xpr.h>
 
-#if	NORMA_VM
-#include <xmm/xmm_server_rename.h>
-#include <kern/norma_protos.h>	/* for vm_remap_remote() */
-#endif	/* NORMA_VM */
 
 /* Internal prototypes
  */
@@ -664,12 +658,10 @@ extern kern_return_t	vm_remap_range_allocate(
 				boolean_t	anywhere,
 				vm_map_entry_t	*map_entry);	/* OUT */
 
-#if	!NORMA_IPC || !NORMA_VM
 extern void		_vm_map_clip_start(
 				struct vm_map_header	*map_header,
 				vm_map_entry_t		entry,
 				vm_offset_t		start);
-#endif	/* !NORMA_IPC || !NORMA_VM */
 
 /*
  * Macros to copy a vm_map_entry. We must be careful to correctly
@@ -2220,9 +2212,7 @@ vm_map_submap(
 	    (!entry->is_sub_map) &&
 	    ((object = entry->object.vm_object) == vm_submap_object) &&
 	    (object->resident_page_count == 0) &&
-#if	!NORMA_VM
 	    (object->copy == VM_OBJECT_NULL) &&
-#endif	/* !NORMA_VM */
 	    (object->shadow == VM_OBJECT_NULL) &&
 	    (!object->pager_created)) {
 		entry->object.vm_object = VM_OBJECT_NULL;
@@ -4189,158 +4179,11 @@ vm_map_copy_overwrite_aligned(
 	return(KERN_SUCCESS);
 }/* vm_map_copy_overwrite_aligned */
 
-#if	DIPC
-#include <dipc/dipc_counters.h>
-dcntr_decl(unsigned int c_dipc_overwrite_opt = 0;)
-dcntr_decl(unsigned int c_dipc_overwrite_nonopt = 0;)
-dcntr_decl(unsigned int c_dipc_overwrite_recv_done = 0;)
-#else	/* DIPC */
 #define	dstat_decl(foo)
 #define	dstat(foo)
 #define	dcntr_decl(foo)
 #define	dcntr(foo)
-#endif	/* DIPC */
 
-#if	DIPC
-vm_map_copy_t
-vm_map_copy_overwrite_recv(
-	vm_map_t	map,
-	vm_offset_t	addr,
-	vm_size_t	size)
-{
-	vm_offset_t	end_addr;
-	vm_map_copy_t	copy = VM_MAP_COPY_NULL;
-	vm_map_entry_t	entry, new_entry;
-	kern_return_t	kr;
-
-	if (size == 0)
-		return VM_MAP_COPY_NULL;
-
-	if (!page_aligned(size) || !page_aligned(addr)) {
-		end_addr = round_page(addr + size);
-	} else {
-		end_addr = addr + size;
-	}
-
-	/* Do allocations before taking map lock. */
-
-	/* build an ENTRY_LIST vm_map_copy_t */
-	copy = (vm_map_copy_t) zalloc(vm_map_copy_zone);
-	vm_map_copy_first_entry(copy) =
-	 vm_map_copy_last_entry(copy) = vm_map_copy_to_entry(copy);
-	copy->type = VM_MAP_COPY_ENTRY_LIST;
-	copy->offset = addr;
-	copy->size = size;
-	copy->cpy_hdr.nentries = 0;
-	copy->cpy_hdr.entries_pageable = TRUE;
-	new_entry = vm_map_copy_entry_create(copy);
-
-	vm_map_lock(map);
-	if (!vm_map_lookup_entry(map, addr, &entry)) {
-		vm_map_unlock(map);
-		vm_map_copy_entry_dispose(copy, new_entry);
-		vm_map_copy_discard(copy);
-		return VM_MAP_COPY_NULL;
-	}
-
-	/*
-	 * for now, only do this if the range is contained completely
-	 * within a single entry.  Just give up if entry is in_transition:
-	 * it could be another thread wiring/unwiring, but it could be another
-	 * part of this message that set it, in which case we'd deadlock if
-	 * we waited for it to clear.  If the entry is not writeable, give up
-	 * and let the ipc_kmsg_copyout code handle the error later.
-	 */
-	if ((end_addr > entry->vme_end) ||
-	    entry->in_transition ||
-	    !(entry->protection & VM_PROT_WRITE)) {
-		vm_map_unlock(map);
-		dcntr(++c_dipc_overwrite_nonopt);
-		vm_map_copy_entry_dispose(copy, new_entry);
-		vm_map_copy_discard(copy);
-		return VM_MAP_COPY_NULL;
-	}
-
-	vm_map_clip_start(map, entry, trunc_page(addr));
-
-	/* handle COW obligations */
-	if (entry->needs_copy) {
-		vm_object_shadow(&entry->object.vm_object, &entry->offset,
-			(vm_size_t)(entry->vme_end - entry->vme_start));
-		entry->needs_copy = FALSE;
-	}
-
-	/* make sure there's a target object to put pages into */
-	if (entry->object.vm_object == VM_OBJECT_NULL) {
-		entry->object.vm_object = vm_object_allocate((vm_size_t)
-					(entry->vme_end - entry->vme_start));
-		entry->offset = 0;
-	}
-
-	/*
-	 * set in_transition to keep the entry in the map from moving around
-	 * while DIPC fills the object in with data.  This must be cleared
-	 * later on by calling vm_map_copy_overwrite_recv_done (below).
-	 */
-	entry->in_transition = TRUE;
-
-	/* make a copy of the entry */
-	vm_map_entry_copy(new_entry, entry);
-	vm_object_reference(new_entry->object.vm_object);
-
-	vm_map_unlock(map);
-
-	/* link in the new entry */
-	vm_map_copy_entry_link(copy, vm_map_copy_last_entry(copy), new_entry);
-
-	dcntr(++c_dipc_overwrite_opt);
-	return copy;
-}
-
-/*
- * Find the map entry that corresponds to the copy entry, then clear
- * in_transition on it.  Discard the copy.
- */
-kern_return_t
-vm_map_copy_overwrite_recv_done(
-	vm_map_t	map,
-	vm_map_copy_t	copy)
-{
-	vm_map_entry_t	entry, map_entry;
-	boolean_t	need_wakeup = FALSE;
-
-	assert(copy != VM_MAP_COPY_NULL);
-	assert(copy->type == VM_MAP_COPY_ENTRY_LIST);
-	dcntr(++c_dipc_overwrite_recv_done);
-
-	entry = vm_map_copy_first_entry(copy);
-	assert(entry != VM_MAP_ENTRY_NULL);
-
-	vm_map_lock(map);
-	
-	if (!vm_map_lookup_entry(map, entry->vme_start, &map_entry)) {
-		vm_map_unlock(map);
-		return KERN_INVALID_ADDRESS;
-	}
-	while ((map_entry != vm_map_to_entry(map)) &&
-	    (map_entry->vme_end <= entry->vme_end)) {
-		assert(map_entry->in_transition);
-		map_entry->in_transition = FALSE;
-		if (map_entry->needs_wakeup) {
-			map_entry->needs_wakeup = FALSE;
-			need_wakeup = TRUE;
-		}
-		map_entry = map_entry->vme_next;
-	}
-	vm_map_unlock(map);
-	if (need_wakeup)
-		vm_map_entry_wakeup(map);
-	vm_map_copy_discard(copy);
-
-	return KERN_SUCCESS;
-}
-
-#endif	/* DIPC */
 
 /*
  *	Routine:	vm_map_copyout_kernel_buffer
@@ -4934,9 +4777,7 @@ StartAgain:
 	    if ((object->ref_count > 1) ||
 		object->pager_created ||
 		(object->shadow != VM_OBJECT_NULL) ||
-#if	!NORMA_VM
 		(object->copy != VM_OBJECT_NULL) ||
-#endif	/* !NORMA_VM */
 		(object->paging_in_progress != 0)) {
 		    vm_object_unlock(object);
 		    goto create_object;
@@ -5164,21 +5005,6 @@ error:
  *	In/out conditions:
  *		The source map should not be locked on entry.
  */
-#if	DIPC
-dstat_decl(unsigned int c_vmcc_volatile = 0;)
-dstat_decl(unsigned int c_vmcc_null_entry = 0;)
-dstat_decl(unsigned int c_vmcc_null_entry_continue = 0;)
-dstat_decl(unsigned int c_vmcc_src_destroy_opt = 0;)
-dstat_decl(unsigned int c_vmcc_wasnt_wired = 0;)
-dstat_decl(unsigned int c_vmcc_vocq = 0;)
-dstat_decl(unsigned int c_vmcc_vopp = 0;)
-dstat_decl(unsigned int c_vmcc_voept = 0;)
-dstat_decl(unsigned int c_vmcc_vocs = 0;)
-dstat_decl(unsigned int c_vmcc_vocstrat = 0;)
-dstat_decl(unsigned int c_vmcc_vmle = 0;)
-dstat_decl(unsigned int c_vmcc_reloop = 0;)
-dstat_decl(unsigned int c_vmcc_vmd = 0;)
-#endif	/* DIPC */
 
 kern_return_t
 vm_map_copyin_common(
@@ -5223,14 +5049,8 @@ vm_map_copyin_common(
 	src_start = trunc_page(src_addr);
 	src_end = round_page(src_addr + len);
 
-#if	DIPC
-	XPR(XPR_VM_MAP,
-	    "vm_map_copyin_common map 0x%x addr 0x%x len 0x%x dest %d volatile %d\n",
-	    (natural_t)src_map, src_addr, len, src_destroy, src_volatile);
-#else	/* DIPC */
 	XPR(XPR_VM_MAP, "vm_map_copyin_common map 0x%x addr 0x%x len 0x%x dest %d\n",
 	    (natural_t)src_map, src_addr, len, src_destroy, 0);
-#endif	/* DIPC */
 
 	/*
 	 *	Check that the end address doesn't overflow
@@ -5379,28 +5199,6 @@ vm_map_copyin_common(
 		    goto CopySuccessful;
 		}
 
-#if	DIPC
-		/*
-		 *	If the caller promises not to modify the data,
-		 *	we don't have to apply copy-on-write processing
-		 *	to it.  This works best in the distributed case.
-		 *	In the local case, we can wind up with fully
-		 *	shared data between sender and receiver -- a
-		 *	behavior that we aren't entirely sure we want
-		 *	at this point.  So for now, we'll only do this
-		 *	on remote data transfers.
-		 */
-		if (src_volatile == TRUE) {
-		    XPR(XPR_VM_MAP,
-			"vmcc src_obj 0x%x ent 0x%x obj 0x%x VOLATILE\n",
-			src_object, new_entry, new_entry->object.vm_object,
-			0, 0);
-		    assert(src_destroy == FALSE);
-		    dstat(++c_vmcc_volatile);
-		    vm_object_reference(src_object);
-		    goto CopySuccessful;
-		}
-#endif	/* DIPC */
 
 RestartCopy:
 		XPR(XPR_VM_MAP, "vm_map_copyin_common src_obj 0x%x ent 0x%x obj 0x%x was_wired %d\n",
@@ -5436,13 +5234,6 @@ RestartCopy:
 
 				tmp_entry->needs_copy = TRUE;
 			}
-#if	NORMA_VM
-			if (src_needs_copy && src_object->internal) {
-				dstat(++c_vmcc_voept);
-				vm_object_export_pagemap_try(src_object,
-							     src_size);
-			}
-#endif	/* NORMA_VM */
 
 			/*
 			 *	The map has never been unlocked, so it's safe
@@ -6374,14 +6165,7 @@ vm_map_fork_share(
 		 *	the right object.
 		 */
 		
-#if	!NORMA_VM		
 		assert(! old_entry->needs_copy);
-#else	/* !NORMA_VM */
-		/* COPY_CALL, copy might have been deallocated since */
-		assert((!old_entry->needs_copy) ||
-		       (object->copy_strategy == MEMORY_OBJECT_COPY_CALL &&
-			object->ref_count == 1));
-#endif	/* !NORMA_VM */
 	}
 	else if (old_entry->needs_copy ||	/* case 1 */
 		 object->shadowed ||		/* case 2 */
@@ -6493,47 +6277,17 @@ vm_map_fork_share(
 	/*
 	 *	If object was using a symmetric copy strategy,
 	 *	change its copy strategy to the default
-	 *	asymmetric copy strategy, which is copy_delay
-	 *	in the non-norma case and copy_call in the
-	 *	norma case. Bump the reference count for the
-	 *	new entry.
+	 *	asymmetric copy strategy, copy_delay.  Bump the
+	 *	reference count for the new entry.
 	 */
 	
 	vm_object_lock(object);
 	object->ref_count++;
 	vm_object_res_reference(object);
-#if	NORMA_VM
-	if (object->internal) {
-		/*
-		 * If there is no pager, or if a pager is currently
-		 * being created, then wait until it has been created.
-		 */
-		if (! object->pager_initialized) {
-			vm_object_pager_create(object);
-		}
-		assert(object->pager_initialized);
-	}
-
-	if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
-		object->copy_strategy = MEMORY_OBJECT_COPY_CALL;
-
-		/*
-		 *	Notify xmm about change in copy strategy,
-		 *	so that it will give correct copy strategy
-		 *	to other kernels that map this object.
-		 */
-		vm_object_unlock(object);
-		memory_object_share(object->pager, object->pager_request);
-	}
-	else { 
-		vm_object_unlock(object);
-	}
-#else	/* NORMA_VM */
 	if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
 		object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
 	}
 	vm_object_unlock(object);
-#endif	/* NORMA_VM */
 	
 	/*
 	 *	Clone the entry, using object ref from above.
@@ -6720,14 +6474,6 @@ vm_map_fork(
 
 				old_entry->needs_copy = TRUE;
 			}
-#if	NORMA_VM
-			if (src_needs_copy && 
-			    old_entry->object.vm_object->internal)
-				vm_object_export_pagemap_try(
-						old_entry->object.vm_object,
-						(old_entry->vme_end -
-						 old_entry->vme_start));
-#endif	/* NORMA_VM */
 			new_entry->needs_copy = new_entry_needs_copy;
 			
 			/*
@@ -7252,582 +6998,6 @@ vm_map_behavior_set(
 	return(KERN_SUCCESS);
 }
 
-#if	DIPC
-/*
- * This should one day be eliminated;
- * we should always construct the right flavor of copy object
- * the first time. Troublesome areas include vm_read, where vm_map_copyin
- * is called without knowing whom the copy object is for.
- * There are also situations where we do want a lazy data structure
- * even if we are sending to a remote port...
- */
-
-extern kern_return_t vm_map_object_to_page_list(
-						vm_map_copy_t	*caller_copy);
-
-/*
- *	Convert a copy to a page list.  The copy argument is in/out
- *	because we probably have to allocate a new vm_map_copy structure.
- *	We take responsibility for discarding the old structure and
- *	use a continuation to do so.  Postponing this discard ensures
- *	that the objects containing the pages we've marked busy will stick
- *	around.  
- *
- *	N.B.  For the entry list case, be warned that this routine steals
- *	the pages from the entry list's objects!
- */
-kern_return_t
-vm_map_convert_to_page_list(
-	vm_map_copy_t	*caller_copy)
-{
-	vm_map_entry_t	entry;
-	vm_offset_t	va;
-	vm_offset_t	offset;
-	vm_object_t	object;
-	vm_map_copy_t	copy, new_copy;
-	vm_size_t	vm_copy_size;
-	vm_prot_t	result_prot;
-	vm_page_t	m, top_page;
-	kern_return_t	result;
-	kern_return_t	kr;
-
-	copy = *caller_copy;
-
-	/*
-
-	 * We may not have to do anything,
-	 * or may not be able to do anything.
-	 */
-	if (copy == VM_MAP_COPY_NULL || copy->type == VM_MAP_COPY_PAGE_LIST) {
-		return KERN_SUCCESS;
-	}
-	if (copy->type == VM_MAP_COPY_OBJECT) {
-		return vm_map_object_to_page_list(caller_copy);
-	}
-	assert(copy->type == VM_MAP_COPY_ENTRY_LIST);
-
-	/*
-	 *	Check size.  If this is really big, copy it out
-	 *	to the kernel map, and copy in using src_destroy
-	 */
-	vm_copy_size = round_page(copy->offset + copy->size) -
-	  		trunc_page(copy->offset);
-
-	if (vm_copy_size > (VM_MAP_COPY_PAGE_LIST_MAX * PAGE_SIZE)) {
-		vm_size_t	copy_size;
-
-		offset = copy->offset;
-		copy_size = copy->size;
-		result = vm_map_copyout(kernel_map, &va, copy);
-		assert(result == KERN_SUCCESS);
-		va += offset - trunc_page(offset);
-		result = vm_map_copyin_page_list(kernel_map, va, copy_size,
-				(VM_MAP_COPYIN_OPT_SRC_DESTROY|
-				 VM_MAP_COPYIN_OPT_STEAL_PAGES|
-				 VM_PROT_READ),
-				caller_copy, FALSE);
-		return(result);
-	}
-
-	/*
-	 *	Allocate the new copy.  Set its continuation to
-	 *	discard the old one.
-	 */
-	new_copy = (vm_map_copy_t) zalloc(vm_map_copy_zone);
-	new_copy->type = VM_MAP_COPY_PAGE_LIST;
-	new_copy->cpy_npages = 0;
-	new_copy->cpy_page_loose = FALSE;
-	new_copy->offset = copy->offset;
-	new_copy->size = copy->size;
-	new_copy->cpy_cont = vm_map_copy_discard_cont;
-	new_copy->cpy_cont_args = (vm_map_copyin_args_t) copy;
-
-	/*
-	 * Iterate over entries.
-	 */
-	for (entry = vm_map_copy_first_entry(copy);
-	     entry != vm_map_copy_to_entry(copy);
-	     entry = entry->vme_next) {
-
-		object = entry->object.vm_object;
-		offset = entry->offset;
-		/*
-		 * Iterate over pages.
-		 */
-		for (va = entry->vme_start;
-		     va < entry->vme_end;
-		     va += PAGE_SIZE, offset += PAGE_SIZE) {
-
-			assert(new_copy->cpy_npages !=
-			       VM_MAP_COPY_PAGE_LIST_MAX);
-
-			/*
-			 *	If the object is null, this is
-			 *	zero fill data.
-			 */
-			if (object == VM_OBJECT_NULL) {
-				while ((m = vm_page_grab()) == VM_PAGE_NULL) {
-					VM_PAGE_WAIT();
-				}
-				vm_page_zero_fill(m);
-				vm_page_gobble(m);
-				new_copy->cpy_page_list[
-						new_copy->cpy_npages++] = m;
-				continue;
-			}
-
-			/*
-			 *	Try to find the page of data.
-			 */
-
-			vm_object_lock(object);
-			if (((m = vm_page_lookup(object, offset)) !=
-			     VM_PAGE_NULL) && !m->busy && !m->fictitious &&
-			    !m->unusual) {
-
-				/*
-				 *	This is the page.  Mark it busy.
-				 *	Remove it from its old object.
-				 */
-				m->busy = TRUE;
-				vm_page_lock_queues();
-				VM_PAGE_QUEUES_REMOVE(m);
-				vm_page_remove(m);
-				vm_page_unlock_queues();
-				vm_object_unlock(object);
-				new_copy->cpy_page_list[new_copy->cpy_npages++]
-					= m;
-				continue;
-			}
-
-retry:
-			result_prot = VM_PROT_READ;
-			vm_object_paging_begin(object);
-			XPR(XPR_VM_FAULT,
-			    "vm_map_convert_to_page_list -> vm_fault_page\n",
-				0,0,0,0,0);
-			kr = vm_fault_page(object, offset,
-					   VM_PROT_READ, FALSE, FALSE,
-					   entry->offset,
-					   entry->offset + 
-					   (entry->vme_end -
-					    entry->vme_start),
-					   VM_BEHAVIOR_SEQUENTIAL,
-					   &result_prot, &m, &top_page,
-					   FALSE, FALSE, FALSE);
-			if (kr == VM_FAULT_MEMORY_SHORTAGE) {
-				VM_PAGE_WAIT();
-				vm_object_lock(object);
-				goto retry;
-			}
-			if (kr == VM_FAULT_FICTITIOUS_SHORTAGE) {
-				vm_page_more_fictitious();
-				vm_object_lock(object);
-				goto retry;
-			}
-			if (kr != VM_FAULT_SUCCESS) {
-				/* XXX what about data_error? */
-				vm_object_lock(object);
-				goto retry;
-			}
-
-			assert(m != VM_PAGE_NULL);
-			m->busy = TRUE;
-			vm_page_lock_queues();
-			VM_PAGE_QUEUES_REMOVE(m);
-			vm_page_remove(m);
-			vm_page_unlock_queues();
-			vm_object_paging_end(object);
-			vm_object_unlock(object);
-			new_copy->cpy_page_list[new_copy->cpy_npages++] = m;
-
-			if (top_page != VM_PAGE_NULL) {
-				assert(top_page->object == object);
-				vm_object_lock(object);
-				VM_PAGE_FREE(top_page);
-				vm_object_paging_end(object);
-				vm_object_unlock(object);
-			}
-		}
-	}
-
-	*caller_copy = new_copy;
-	return KERN_SUCCESS;
-}
-
-
-/*
- *	Continue converting pages from an object-flavor
- *	copy object into a page-list flavor copy object.
- *	The parameters in the copy object were updated
- *	by the last invocation of vm_map_object_to_page_list
- *	so there's no work to be done other than calling
- *	back into that routine.  Note that the contents
- *	of the underlying object itself never change
- *	during the conversion process.
- */
-kern_return_t
-vm_map_object_to_page_list_cont(
-	vm_map_copy_t	cont_args,
-	vm_map_copy_t	*copy_result)	/* OUT */
-{
-	boolean_t	abort;
-
-	abort = (copy_result == (vm_map_copy_t *) 0);
-	if (abort) {
-		printf("vm_map_object_to_page_list_cont:  abort\n");
-		vm_map_copy_discard(cont_args);
-	}
-
-	assert(cont_args->type == VM_MAP_COPY_OBJECT);
-	*copy_result = cont_args;
-	return vm_map_object_to_page_list(copy_result);
-}
-
-
-/*
- *	Convert a copy object from object flavor to
- *	page list flavor.  For objects containing more
- *	than the allowable maximum number of pages, we
- *	perform the conversion a piece at a time.
- *
- *	The object flavor copy object contains a vm_object_t
- *	that has all the pages; the type, offset and size
- *	fields always present in a vm_map_copy_t; and an
- *	index field unique to the object flavor.  This index
- *	field MUST be zero when first calling this routine.
- *	It is used to record progress converting pages from
- *	the object to the page list.
- *
- *	Assumptions:
- *		- This routine always returns KERN_SUCCESS.
- */
-kern_return_t
-vm_map_object_to_page_list(
-	vm_map_copy_t	*caller_copy)
-{
-	vm_object_t	object;
-	vm_offset_t	offset;
-	vm_map_copy_t	copy, new_copy;
-	vm_size_t	index;
-	vm_size_t	copy_size;
-	vm_page_t	m;
-	vm_prot_t	result_prot;
-	vm_page_t 	top_page;
-	kern_return_t 	kr;
-
-	assert(caller_copy != (vm_map_copy_t *) 0);
-	assert(*caller_copy != VM_MAP_COPY_NULL);
-	assert((*caller_copy)->type == VM_MAP_COPY_OBJECT);
-
-	copy = *caller_copy;
-	object = copy->cpy_object;
-
-	/*
-	 *	Allocate the new copy.  Set its continuation to
-	 *	discard the old one.
-	 */
-	new_copy = (vm_map_copy_t) zalloc(vm_map_copy_zone);
-	new_copy->type = VM_MAP_COPY_PAGE_LIST;
-	new_copy->cpy_npages = 0;
-	new_copy->cpy_page_loose = FALSE;
-	new_copy->offset = copy->offset - trunc_page(copy->offset);
-	new_copy->size = copy->size;
-	assert((long)new_copy->size >= 0);
-	if (new_copy->size == 0)
-		printf("vm_object_to_page_list:  zero size\n");
-	new_copy->cpy_cont = vm_map_copy_discard_cont;
-	new_copy->cpy_cont_args = (vm_map_copyin_args_t) copy;
-
-	/*
-	 *	Compute range of object to extract.
-	 */
-	index = (vm_size_t)copy->cpy_index; /* XXX!XXX! */
-	assert(copy->offset < page_size);
-	copy_size = round_page(copy->offset + copy->size);
-	assert(page_aligned(copy_size));
-
-	/*
-	 *	Detect an object larger than the maximum permitted
-	 *	for an individual page list block.  Save the rest
-	 *	for later.
-	 */
-	if (copy_size > VM_MAP_COPY_PAGE_LIST_MAX_SIZE) {
-		/*
-		 *	Only the first copy object in the chain
-		 *	has the unaligned offset and total size.
-		 *	Each succeeding copy object has an offset
-		 *	of zero and a size decreased by the amount
-		 *	contained in the previous copy object.
-		 *	These values will be used when creating the
-		 *	next page list copy object.
-		 *
-		 *	Reset the continuation because there are
-		 *	more pages left to extract.
-		 */
-		assert(trunc_page(copy->offset) == 0);
-		copy->size = copy->size -
-			(VM_MAP_COPY_PAGE_LIST_MAX_SIZE - copy->offset);
-		copy->offset = 0;
-		copy_size = VM_MAP_COPY_PAGE_LIST_MAX_SIZE;
-		new_copy->cpy_cont = (vm_map_copy_cont_t)
-			vm_map_object_to_page_list_cont;
-		assert(vm_map_copy_cont_is_valid(new_copy));
-	}
-
-	/*
-	 *	Fault in all pages that aren't present.
-	 *	Modelled on vm_map_copyin_page_list.
-	 */
-	for (offset = index; offset < index + copy_size; offset += PAGE_SIZE) {
-		vm_object_lock(object);
-		vm_object_paging_begin(object);
-
-		m = vm_page_lookup(object, offset);
-		if ((m != VM_PAGE_NULL) && !m->busy && !m->fictitious &&
-		    !m->unusual) {
-			m->busy = TRUE;
-		} else {
-retry:
-			result_prot = VM_PROT_READ;
-			XPR(XPR_VM_FAULT,
-				"vm_object_to_page_list -> vm_fault_page\n",
-				0,0,0,0,0);
-			kr = vm_fault_page(object, offset,
-					   VM_PROT_READ, FALSE, FALSE,
-					   offset, index + copy_size,/* XXX ? */
-					   VM_BEHAVIOR_SEQUENTIAL,
-					   &result_prot, &m, &top_page,
-					   0, FALSE, FALSE);
-			switch (kr) {
-			    case VM_FAULT_SUCCESS:
-				break;
-			    case VM_FAULT_MEMORY_SHORTAGE:
-				VM_PAGE_WAIT();
-				vm_object_lock(object);
-				vm_object_paging_begin(object);
-				goto retry;
-			    case VM_FAULT_FICTITIOUS_SHORTAGE:
-				vm_page_more_fictitious();
-				/* fall through... */
-			    case VM_FAULT_INTERRUPTED:
-			    case VM_FAULT_RETRY:
-				vm_object_lock(object);
-				vm_object_paging_begin(object);
-				goto retry;
-			    case VM_FAULT_MEMORY_ERROR:
-				panic("vm_map_object_to_page_list");
-				break;
-			}
-
-			if (top_page != VM_PAGE_NULL) {
-				VM_PAGE_FREE(top_page);
-				vm_object_paging_end(object);
-			}
-		}
-
-		assert(m);
-		assert(m->busy);
-		/* assert(m->wire_count == 0); XXX */
-
-		/*
-		 *	Got the page.  Save it in the page list
-		 *	and rip it away from the object.
-		 */
-		new_copy->cpy_page_list[new_copy->cpy_npages++] = m;
-		vm_page_lock_queues();
-		VM_PAGE_QUEUES_REMOVE(m);
-		vm_page_remove(m);
-		vm_page_unlock_queues();
-
-		vm_object_paging_end(object);
-		vm_object_unlock(object);
-	}
-
-	/*
-	 *	Update index for next pass through the object.
-	 */
-	copy->cpy_index += copy_size;
-
-	*caller_copy = new_copy;
-	assert(vm_map_copy_cont_is_valid(new_copy));
-	return (KERN_SUCCESS);
-}
-
-/*
- *	When allocating a new entry, vm_map_entry_list_from_object must
- *	use the pageable v. non-pageable entry zone based on the
- *	attribute of the map into which the entry will be pasted.
- *	This information must be supplied by the caller, as there is
- *	no way to obtain it from the object.
- *
- *	N.B.  Caller donates a reference.
- */
-vm_map_copy_t
-vm_map_entry_list_from_object(
-	vm_object_t		object,
-	vm_offset_t		offset,
-	vm_size_t		size,
-	boolean_t		pageable)
-{
-	vm_map_entry_t	new_entry;
-	vm_map_copy_t	copy;
-
-	assert(object != VM_OBJECT_NULL);
-	assert(size != 0);
-
-	copy = (vm_map_copy_t) zalloc(vm_map_copy_zone);
-	assert(copy != VM_MAP_COPY_NULL);
-
-	copy->type = VM_MAP_COPY_ENTRY_LIST;
-	vm_map_copy_first_entry(copy) =
-		vm_map_copy_last_entry(copy) = vm_map_copy_to_entry(copy);
-	copy->cpy_hdr.nentries = 0;
-	copy->cpy_hdr.entries_pageable = pageable;
-	copy->offset = offset;
-	copy->size = size;
-
-	/*
-	 *	Allocate and initialize an entry for the object.
-	 */
-	new_entry = vm_map_copy_entry_create(copy);
-	new_entry->vme_start = trunc_page(copy->offset);
-	new_entry->vme_end = round_page(copy->offset + copy->size);
-	new_entry->object.vm_object = object;
-	new_entry->offset = offset;
-	new_entry->is_shared = FALSE;
-	new_entry->is_sub_map = FALSE;
-	new_entry->needs_copy = FALSE;
-	new_entry->protection = VM_PROT_DEFAULT;
-	new_entry->max_protection = VM_PROT_ALL;
-	new_entry->inheritance = VM_INHERIT_DEFAULT;
-	new_entry->wired_count = 0;
-	new_entry->user_wired_count = 0;
-	new_entry->in_transition = FALSE;
-
-	/*
-	 *	Insert entry into copy object, and return.
-	 */
-	vm_map_copy_entry_link(copy, vm_map_copy_last_entry(copy), new_entry);
-	assert(copy->type == VM_MAP_COPY_ENTRY_LIST);
-	return (copy);
-}
-
-/*
- *	Convert a page list copy object to an entry list
- *	flavor copy object.
- */
-kern_return_t
-vm_map_convert_to_entry_list(
-	vm_map_copy_t	copy,
-	boolean_t	pageable)
-{
-	vm_object_t object;
-	int i;
-	vm_map_entry_t	new_entry;
-	vm_page_t	*page_list;
-	vm_map_copy_t	cur_copy, new_copy;
-	vm_offset_t	offset;
-	kern_return_t	result;
-
-	/*
-	 * Check type of copy object.
-	 */
-	if (copy->type != VM_MAP_COPY_PAGE_LIST) {
-		panic("vm_map_convert_to_entry_list 0x%x %d", copy, copy->type);
-	}
-
-	/*
-	 *	Insert all the pages into a new object.
-	 */
-	object = vm_object_allocate(round_page(copy->offset + copy->size) -
-				    trunc_page(copy->offset));
-	offset = (vm_offset_t) 0;
-	cur_copy = copy;
-
-	while (cur_copy) {
-
-		/*
-		 *	Make sure the pages are loose.  This may be
-		 *	a "Can't Happen", but just to be safe ...
-		 */
-		page_list = &cur_copy->cpy_page_list[0];
-		if (!copy->cpy_page_loose)
-			vm_map_copy_steal_pages(cur_copy);
-
-		/*
-		 * Stuff this set of pages into the object, removing
-		 * them from the page list.
-		 */
-		vm_object_lock(object);
-		vm_page_lock_queues();
-		for (i = 0; i < cur_copy->cpy_npages;
-		    i++, offset += PAGE_SIZE) {
-			register vm_page_t m = *page_list;
-
-			vm_page_insert(m, object, offset);
-			m->busy = FALSE;
-			m->dirty = TRUE;
-			vm_page_activate(m);
-			*page_list++ = VM_PAGE_NULL;
-		}
-		vm_page_unlock_queues();
-		vm_object_unlock(object);
-
-		/*
-		 *	Invoke continuation if present.
-		 */
-		if (vm_map_copy_has_cont(cur_copy)) {
-			vm_map_copy_invoke_cont(cur_copy, &new_copy, &result);
-
-			if (result != KERN_SUCCESS)
-				panic("%s:  %s",
-				      "vm_map_convert_to_entry_list",
-				      "continuation failure");
-		} else {
-			new_copy = VM_MAP_COPY_NULL;
-		}		
-		if (cur_copy != copy)
-			vm_map_copy_discard(cur_copy);
-
-		cur_copy = new_copy;
-	}
-
-	/*
-	 * Change type of copy object
-	 */
-	vm_map_copy_first_entry(copy) =
-	    vm_map_copy_last_entry(copy) = vm_map_copy_to_entry(copy);
-	copy->type = VM_MAP_COPY_ENTRY_LIST;
-	copy->cpy_hdr.nentries = 0;
-	copy->cpy_hdr.entries_pageable = pageable;
-
-	/*
-	 * Allocate and initialize an entry for object
-	 */
-	new_entry = vm_map_copy_entry_create(copy);
-	new_entry->vme_start = trunc_page(copy->offset);
-	new_entry->vme_end = round_page(copy->offset + copy->size);
-	new_entry->object.vm_object = object;
-	new_entry->offset = 0;
-	new_entry->is_shared = FALSE;
-	new_entry->is_sub_map = FALSE;
-	new_entry->needs_copy = FALSE;
-	new_entry->protection = VM_PROT_DEFAULT;
-	new_entry->max_protection = VM_PROT_ALL;
-	new_entry->behavior = VM_BEHAVIOR_DEFAULT;
-	new_entry->inheritance = VM_INHERIT_DEFAULT;
-	new_entry->wired_count = 0;
-	new_entry->user_wired_count = 0;
-
-	/*
-	 * Insert entry into copy object, and return.
-	 */
-	vm_map_copy_entry_link(copy, vm_map_copy_last_entry(copy), new_entry);
-	return(KERN_SUCCESS);
-}
-
-#endif	/* DIPC */
 
 int
 vm_map_copy_cont_is_valid(
@@ -8164,28 +7334,6 @@ db_vm_map_total_size(
 
 #endif	/* MACH_KDB */
 
-#if	NORMA_VM
-/*
- *	Routine:	vm_map_entry_reset
- *
- *	Descritpion:	This routine deletes all vm_entries of a map_header.
- */
-void
-vm_map_entry_reset(
-	struct vm_map_header	*map_header)
-{
-	vm_map_entry_t		entry;
-	vm_map_entry_t		next_entry;
-
-	for (entry = map_header->links.next;
-	     entry != (struct vm_map_entry *)&map_header->links;
-	     entry = next_entry) {
-		next_entry = entry->vme_next;
-		_vm_map_entry_unlink(map_header, entry);
-		_vm_map_entry_dispose(map_header, entry);
-	}
-}
-#endif	/* NORMA_VM */
 
 /*
  *	Routine:	vm_map_entry_insert
@@ -8349,15 +7497,7 @@ vm_remap_extract(
 			 *	copy, and therefore we already have
 			 *	the right object.
 			 */
-#if	!NORMA_VM		
 			assert(!src_entry->needs_copy);
-#else	/* !NORMA_VM */
-			/* COPY_CALL, copy might have been deallocated since */
-			assert((!src_entry->needs_copy) ||
-			       (object->copy_strategy ==
-				MEMORY_OBJECT_COPY_CALL &&
-				object->ref_count == 1));
-#endif	/* !NORMA_VM */
 		} else if (src_entry->needs_copy || object->shadowed ||
 			   (object->internal && !src_entry->is_shared &&
 			    object->size > entry_size)) {
@@ -8384,48 +7524,10 @@ vm_remap_extract(
 		vm_object_lock(object);
 		object->ref_count++;	/* object ref. for the new entry */
 		VM_OBJ_RES_INCR(object);
-#if	NORMA_VM
-		if (object->internal) {
-			/*
-			 * If there is no pager, or if a pager is currently
-			 * being created, then wait until it has been created.
-			 */
-			if (! object->pager_initialized) {
-				vm_object_pager_create(object);
-			}
-			assert(object->pager_initialized);
-		}
-#if	MACH_PAGEMAP
-		/*
-		 * Since this object will be shared, any existence
-		 * info will become fatally stale.
-		 */
-		if (object->existence_map != VM_EXTERNAL_NULL) {
-			vm_external_destroy(object->existence_map,
-							object->size);
-		}
-#endif	/* MACH_PAGEMAP */
-		if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
-			object->copy_strategy = MEMORY_OBJECT_COPY_CALL;
-
-			/*
-			 *	Notify xmm about change in copy strategy,
-			 *	so that it will give correct copy strategy
-			 *	to other kernels that map this object.
-			 */
-			vm_object_unlock(object);
-			memory_object_share(object->pager,
-					    object->pager_request);
-		}
-		else { 
-			vm_object_unlock(object);
-		}
-#else	/* NORMA_VM */
 		if (object->copy_strategy == MEMORY_OBJECT_COPY_SYMMETRIC) {
 			object->copy_strategy = MEMORY_OBJECT_COPY_DELAY;
 		}
 		vm_object_unlock(object);
-#endif	/* NORMA_VM */
 
 		new_entry = _vm_map_entry_create(map_header);
 		vm_map_entry_copy(new_entry, src_entry);
@@ -8470,11 +7572,6 @@ vm_remap_extract(
 
 				src_entry->needs_copy = TRUE;
 			}
-#if	NORMA_VM
-			if (src_needs_copy && object->internal)
-				vm_object_export_pagemap_try(object,
-							     entry_size);
-#endif	/* NORMA_VM */
 			/*
 			 * Throw away the old object reference of the new entry.
 			 */
@@ -8644,21 +7741,6 @@ vm_remap(
 		return KERN_INVALID_ARGUMENT;
 	}
 
-#if	NORMA_VM
-	if (IP_IS_REMOTE(src_task)) {
-		/*
-		 * Perform vm_remap operation on the node
-		 * holding the source task map.
-		 */
-		ip_unlock(src_task);
-		result = vm_remap_remote(target_task, address, size, mask,
-					 anywhere, src_task, memory_address,
-					 copy, cur_protection, max_protection,
-					 inheritance);
-		if (result == KERN_SUCCESS || result == MIG_NO_REPLY)
-			ipc_port_release_send(src_task);
-	} else
-#endif	/* NORMA_VM */
 	{
 
 		/* inlined convert_port_to_map() w/lock already held */
