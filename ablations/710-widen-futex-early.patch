@@ -1,13 +1,13 @@
 Kind: widen
 Issue: #710
-Holds open: futex_wait()'s window as i386 has it, between its first read of the word and splsched -- the waiter spins 100 ms with interrupts on, only for a word holding 0x07100710, pthread_test's, and at most 16 times; pthread_test's last case unmaps the page 20 ms after the waiter says it is calling the kernel, so the unmap and its shootdown land inside the hold, and after assert_wait() the second read finds no translation; in the fixed tree it fails and the wait answers KERN_NOT_WAITING; 710-widen-futex-reread holds inside the declared wait, at splsched, which on i386 is cli, so there the shootdown waits and the second read finds the page; each hold says so on the console, before it
+Holds open: futex_wait()'s window as i386 has it, between its first read of the word and splsched -- the waiter spins 100 ms with interrupts on, says on which processor it ended and whether the task's pmap still maps the page, and if it does sleeps 100 ms more and says it again; only for a word holding 0x07100710, pthread_test's, and at most 16 times; pthread_test's last case unmaps the page 20 ms after the waiter says it is calling the kernel, so the unmap and its shootdown land inside the hold, and after assert_wait() the second read finds no translation; in the fixed tree it fails and the wait answers KERN_NOT_WAITING; 710-widen-futex-reread holds inside the declared wait, at splsched, which on i386 is cli, so there the shootdown waits and the second read finds the page; a spin alone opened nothing on OMEGA in six boots of six, every try timing out
 Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-4
 
 diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
-index c6301e2d..c3d7a88a 100644
+index c6301e2d..b21ef537 100644
 --- a/uros/src/mach_kernel/kern/sync_sema.c
 +++ b/uros/src/mach_kernel/kern/sync_sema.c
-@@ -750,6 +750,36 @@ futex_pass_on_wake(event_t key)
+@@ -750,6 +750,58 @@ futex_pass_on_wake(event_t key)
  	thread_wakeup_one(key);
  }
  
@@ -18,8 +18,11 @@ index c6301e2d..c3d7a88a 100644
 + * processor before it raises splsched.  On i386 splsched is cli: a shootdown
 + * cannot reach a processor held inside the declared wait, its TLB keeps the
 + * page, and the second read finds it, so 710-widen-futex-reread opens nothing
-+ * there.  Only for a word holding WIDEN_710E_WORD, pthread_test's, and at
-+ * most WIDEN_710E_BUDGET times; the line is said before the hold.
++ * there.  The hold spins first; a spin alone opened nothing on OMEGA in six
++ * boots of six, so it says on which processor it ended and whether the task's
++ * pmap still maps the page, and if it does it sleeps as long again -- no wait
++ * is declared yet, so it may -- and says it again.  Only for a word holding
++ * WIDEN_710E_WORD, pthread_test's, and at most WIDEN_710E_BUDGET times.
 + */
 +#define	WIDEN_710E_WORD		0x07100710u
 +#define	WIDEN_710E_MS		100
@@ -27,8 +30,21 @@ index c6301e2d..c3d7a88a 100644
 +
 +static volatile int	widen_710e_left = WIDEN_710E_BUDGET;
 +
++static boolean_t
++widen_710e_mapped(unsigned int *uaddr, const char *after)
++{
++	boolean_t	mapped;
++
++	mapped = pmap_extract(vm_map_pmap(current_map()),
++			      (vm_offset_t) uaddr) != 0;
++	printf("#710 widen: after the %s, on processor %d, the page is %s\n",
++	       after, cpu_number(),
++	       mapped ? "still mapped" : "gone from the task's pmap");
++	return mapped;
++}
++
 +static void
-+widen_710e_hold(unsigned int word)
++widen_710e_hold(unsigned int *uaddr, unsigned int word)
 +{
 +	int	ms;
 +
@@ -39,16 +55,22 @@ index c6301e2d..c3d7a88a 100644
 +	       "and splsched\n", WIDEN_710E_MS);
 +	for (ms = 0; ms < WIDEN_710E_MS; ms++)
 +		delay(1000);
++	if (!widen_710e_mapped(uaddr, "spin"))
++		return;
++	assert_wait((event_t) &widen_710e_left, TRUE);
++	thread_set_timeout(WIDEN_710E_MS * hz / 1000);
++	thread_block((void (*)(void)) 0);
++	(void) widen_710e_mapped(uaddr, "sleep");
 +}
 +
  static kern_return_t
  futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
  	   boolean_t is_private)
-@@ -785,6 +815,7 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
+@@ -785,6 +837,7 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
  	 */
  	if (copyin((const char *) uaddr, (char *) &cur, sizeof(cur)) != 0)
  		return KERN_INVALID_ADDRESS;
-+	widen_710e_hold(cur);
++	widen_710e_hold(uaddr, cur);
  
  	s = splsched();
  	assert_wait(key, TRUE);
