@@ -193,7 +193,6 @@
 #include <mach_host.h>
 #include <kernel_test.h>
 #include <etap.h>
-#include <cdli.h>
 #include <task_swapper.h>
 
 #include <mach/boolean.h>
@@ -239,7 +238,6 @@
 #if	KERNEL_TEST
 #include <ddb/kern_test_defs.h>
 #endif	/* KERNEL_TEST */
-#include <device/cdli.h>
 
 #include <mach/mach_server.h>
 
@@ -302,9 +300,6 @@ setup_main(void)
 	init_timers();
 	timeout_init();
 
-#if	CDLI > 0
-	ns_init();	/* Initialize CDLI */
-#endif	/* CDLI > 0 */
 
 	dev_lookup_init();
 	timeout_init();

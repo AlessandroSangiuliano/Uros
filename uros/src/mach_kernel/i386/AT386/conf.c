@@ -593,17 +593,3 @@ struct	clock	clock_list[] = {
 };
 int	clock_count = sizeof(clock_list) / sizeof(clock_list[0]);
 
-#include <cdli.h>
-#if	CDLI > 0
-#include <device/cdli.h>
-
-extern int cdli_ns8390init(void);
-
-struct cdli_inits cdli_inits[] =
-{
-#if NCDLI8390 > 0
-	{cdli_ns8390init},	/* Test CDLI driver using MK */
-#endif
-        {0}			/* Must be NULL terminated */
-};
-#endif
