@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #710
+Over: 710-widen-futex-reread.patch
+Takes out: 1dca2976's answer in futex_wait() -- a word whose page was taken away between the two reads answers KERN_INVALID_ADDRESS again, the answer for an address that was bad at the call, though this one was there; the fault handler still refuses the fault, so the kernel goes on, and pthread_test's last case, its page unmapped inside the window the widen holds open, must say FAIL with the answer it got
+Run: --entry 14 1200 -smp 4
+Expect: futex wait, its page unmapped between its two reads: FAIL — the wait answered 1,
+
+diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
+index c6301e2d..9fd2b67f 100644
+--- a/uros/src/mach_kernel/kern/sync_sema.c
++++ b/uros/src/mach_kernel/kern/sync_sema.c
+@@ -807,7 +807,7 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
+ 		splx(s);
+ 		futex_recheck_drain();
+ 		futex_pass_on_wake(key);
+-		return KERN_NOT_WAITING;
++		return KERN_INVALID_ADDRESS;
+ 	}
+ 	if (cur != val) {
+ 		clear_wait(self, THREAD_AWAKENED, TRUE);
