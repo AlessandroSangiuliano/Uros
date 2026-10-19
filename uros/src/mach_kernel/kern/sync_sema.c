@@ -793,14 +793,21 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 	 * Re-read the word now that we are queued on the wait hash: this
 	 * closes the lost-wakeup window (a waker that stored *uaddr and
 	 * called WAKE before our assert_wait would otherwise be missed).
-	 * Page made resident just above, so copyin does not fault under splsched.
+	 *
+	 * ⚠️ The page was made resident above, but nothing holds it (#710):
+	 * another thread of the task can unmap it, or the pager take it,
+	 * before this read.  The read then faults with the wait declared, the
+	 * fault handler refuses it rather than call vm_fault() there, and
+	 * copyin() fails.  The word could not be confirmed, which is the
+	 * answer a changed word gets: KERN_NOT_WAITING, and the caller reads
+	 * it again in user mode, where a fault is the task's own.
 	 */
 	if (copyin((const char *) uaddr, (char *) &cur, sizeof(cur)) != 0) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
 		futex_recheck_drain();
 		futex_pass_on_wake(key);
-		return KERN_INVALID_ADDRESS;
+		return KERN_NOT_WAITING;
 	}
 	if (cur != val) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
@@ -898,8 +905,9 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 			ticks = 1;
 	}
 
-	/* #299: page the wait word in now (see futex_wait) so the re-read
-	 * under splsched can't enter vm_fault with wait_event set. */
+	/* #299: page the wait word in now (see futex_wait), so that the re-read
+	 * under splsched finds it resident unless it was taken away between
+	 * the two, and then fails instead of faulting (#710). */
 	if (copyin((const char *) wait_uaddr, (char *) &cur, sizeof(cur)) != 0)
 		return KERN_INVALID_ADDRESS;
 
@@ -915,11 +923,12 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	SP_MARK(SP_FX_COPYIN);
 
 	if (copyin((const char *) wait_uaddr, (char *) &cur, sizeof(cur)) != 0) {
+		/* #710: the word could not be confirmed (see futex_wait). */
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
 		futex_recheck_drain();
 		(void) futex_wake(wake_uaddr, 1, is_private);
-		return KERN_INVALID_ADDRESS;
+		return KERN_NOT_WAITING;
 	}
 	if (cur != wait_val) {
 		/* wait condition already gone: don't block, but still wake. */
@@ -1000,7 +1009,7 @@ futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
 	unsigned int		i;
 	unsigned int		cur;
 	int			ticks = 0;
-	int			changed = -1;	/* >=0 word index, -2 fault */
+	int			changed = -1;	/* >=0 the word that moved */
 	int			woken;
 	spl_t			s;
 
@@ -1072,16 +1081,17 @@ futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
 	 * Lost-wakeup recheck: a producer that advanced one of the words
 	 * before we registered did its FUTEX_WAKE against an unqueued
 	 * waiter.  Re-read every word; if any moved off its expected value,
-	 * don't block — the caller rescans and finds the data.  Pages are
-	 * resident (active ring), so copyin won't fault under splsched.
+	 * don't block — the caller rescans and finds the data.
+	 *
+	 * ⚠️ A word whose page was taken away since the pass above cannot be
+	 * read here, with the wait declared: the fault is refused and copyin()
+	 * fails (#710, see futex_wait).  It counts as a word that moved, so
+	 * the caller rescans it in user mode, where a fault is the task's own.
 	 */
 	for (i = 0; i < nr; i++) {
 		if (copyin((const char *) local[i].uaddr,
-			   (char *) &cur, sizeof(cur)) != 0) {
-			changed = -2;
-			break;
-		}
-		if (cur != local[i].val) {
+			   (char *) &cur, sizeof(cur)) != 0 ||
+		    cur != local[i].val) {
 			changed = (int) i;
 			break;
 		}
@@ -1092,8 +1102,6 @@ futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
 		splx(s);
 		futex_recheck_drain();
 		(void) futexv_unregister(slot);
-		if (changed == -2)
-			return KERN_INVALID_ADDRESS;
 		if (woken_out != (unsigned int *) 0) {
 			unsigned int wi = (unsigned int) changed;
 			(void) copyout((const char *) &wi,
