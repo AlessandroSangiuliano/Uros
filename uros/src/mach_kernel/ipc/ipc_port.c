@@ -186,7 +186,6 @@
  *	Functions to manipulate IPC ports.
  */
 
-#include <dipc.h>
 #include <norma_vm.h>
 #include <mach_kdb.h>
 #include <zone_debug.h>
@@ -210,16 +209,6 @@
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_print.h>
 #include <ipc/ipc_table.h>
-#if	DIPC
-#include <dipc/special_ports.h>
-#include <dipc/dipc_port.h>
-#include <dipc/dipc_funcs.h>
-#include <dipc/port_table.h>
-#if	MACH_KDB
-#include <dipc/dipc_msg_progress.h>
-#include <dipc/dipc_kmsg.h>
-#endif	/* MACH_KDB */
-#endif	/* DIPC */
 #if	MACH_KDB
 #include <machine/db_machdep.h>
 #include <ddb/db_command.h>
@@ -284,11 +273,7 @@ ipc_port_dnrequest(
 	ipc_port_request_index_t index;
 
 	assert(ip_active(port));
-#if	DIPC
-	assert(soright == DIPC_FAKE_DNREQUEST || name != MACH_PORT_NULL);
-#else	/*DIPC*/
 	assert(name != MACH_PORT_NULL);
-#endif	/*DIPC*/
 	assert(soright != IP_NULL);
 
 	table = port->ip_dnrequests;
@@ -419,13 +404,6 @@ ipc_port_dngrow(
 		if (otable != IPR_NULL) {
 			it_dnrequests_free(oits, otable);
 	        }
-#if	DIPC
-		else {
-			ip_lock(port);
-			dipc_port_dnrequest_init(port);
-			ip_unlock(port);
-		}
-#endif	/*DIPC*/
 	} else {
 		ip_check_unlock(port);
 		it_dnrequests_free(its, ntable);
@@ -529,9 +507,6 @@ ipc_port_nsrequest(
 
 	if ((port->ip_srights == 0) &&
 	    (sync <= mscount) &&
-#if	DIPC
-	    (!DIPC_IS_DIPC_PORT(port) || (port->ip_transit == 0)) &&
-#endif	/* DIPC */
 	    (notify != IP_NULL)) {
 		port->ip_nsrequest = IP_NULL;
 		ip_unlock(port);
@@ -709,14 +684,7 @@ ipc_port_init(
 	 */
 	IP_SET_NMS(port);
 
-#if	NORMA_VM
-	port->ip_norma_xmm_object_refs = 0;
-	port->ip_norma_xmm_object = IP_NULL;
-#endif	/* NORMA_VM */
 
-#if	DIPC
-	DIPC_INIT_POINTER(port);
-#endif	/* DIPC */
 
 #if	MACH_ASSERT && IPC_PORT_TRACK
 	ipc_port_init_debug(port);
@@ -805,10 +773,10 @@ ipc_port_alloc_name(
 }
 
 /*
- * Generate dead name notifications.  Called from ipc_port_destroy
- * and (#if DIPC) from dproc_dn_notify.  Port is unlocked but still
- * has reference(s); dnrequests was taken from port while the port
- * was locked but the port now has port->ip_dnrequests set to IPR_NULL.
+ * Generate dead name notifications.  Called from ipc_port_destroy.
+ * Port is unlocked but still has reference(s); dnrequests was taken
+ * from port while the port was locked but the port now has
+ * port->ip_dnrequests set to IPR_NULL.
  */
 void
 ipc_port_dnnotify(
@@ -825,19 +793,11 @@ ipc_port_dnnotify(
 		ipc_port_t		soright;
 
 		if (name == MACH_PORT_NULL)
-#if	DIPC
-		    if (ipr->ipr_soright != DIPC_FAKE_DNREQUEST)
-#endif	/* DIPC */
 			continue;
 
 		soright = ipr->ipr_soright;
 		assert(soright != IP_NULL);
 
-#if	DIPC
-		if (soright == DIPC_FAKE_DNREQUEST)
-			dipc_port_dnnotify(port, name);
-		else
-#endif	/* DIPC */
 		ipc_notify_dead_name(soright, name);
 	}
 
@@ -931,12 +891,6 @@ ipc_port_destroy(
 	dnrequests = port->ip_dnrequests;
 	port->ip_dnrequests = IPR_NULL;
 	ip_unlock(port);
-#if	DIPC
-	if (DIPC_IS_DIPC_PORT(port)) {
-		if (port->ip_special == TRUE)
-			dipc_special_port_destroy(port);
-	}
-#endif	/* DIPC */
 
 	/* wakeup any threads waiting on this pool port for an activation */
 	if ((thread_pool = &port->ip_thread_pool) != THREAD_POOL_NULL)
@@ -960,18 +914,6 @@ ipc_port_destroy(
 
 		assert(kmsg->ikm_dest == port);		/* #442 */
 
-#if	DIPC
-		/*
-		 *	Messages delivered along the DIPC interrupt
-		 *	fast delivery path may still own a DIPC-level
-		 *	reference on the port.  This reference must
-		 *	be converted into a valid port reference.
-		 */
-		if (kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_REF_CONVERT) {
-			(void) dipc_uid_port_reference(port);
-			kmsg->ikm_header.msgh_bits&=~MACH_MSGH_BITS_REF_CONVERT;
-		}
-#endif	/* DIPC */
 		ipc_port_release(port);
 		ikm_set_dest(kmsg, IP_NULL);	/* #442 */
 		ipc_kmsg_destroy(kmsg);
@@ -1303,9 +1245,6 @@ ipc_port_release_send(
 	assert(port->ip_srights > 0);
 
 	if (--port->ip_srights == 0 &&
-#if	DIPC
-	    (!DIPC_IS_DIPC_PORT(port) || (port->ip_transit == 0)) &&
-#endif	/* DIPC */
 	    port->ip_nsrequest != IP_NULL) {
 		nsrequest = port->ip_nsrequest;
 		port->ip_nsrequest = IP_NULL;
@@ -1651,10 +1590,6 @@ ipc_port_print(
 			printf("kernel");
 		else if (port->ip_receiver == ipc_space_reply)
 			printf("reply");
-#if	DIPC
-		else if (port->ip_receiver == ipc_space_remote)
-			printf("remote");
-#endif	/* DIPC */
 		else if (port->ip_receiver == default_pager_space)
 			printf("default_pager");
 		else if (task = db_task_from_space(port->ip_receiver, &task_id))
@@ -1686,10 +1621,6 @@ ipc_port_print(
 
 	iprintf("flags=0x%x", port->ip_flags);
 	
-#if	NORMA_VM
-	iprintf("xmm_object_refs=0x%x xmm_object = 0x%x\n",
-		port->ip_norma_xmm_object_refs, port->ip_norma_xmm_object);
-#endif	/* NORMA_VM */
 
 #if	MACH_ASSERT && IPC_PORT_TRACK
 	/* don't bother printing callstack or queue links */
@@ -1715,14 +1646,6 @@ ipc_port_print(
 	}
 #endif	/* MACH_ASSERT */
 
-#if	DIPC
-	printf("ip_dipc=0x%x\n", port->ip_dipc);
-	if (DIPC_IS_DIPC_PORT(port)) {
-		indent -= 2;
-		dipc_port_print(port);
-		indent += 2;
-	}
-#endif	/* DIPC */
 
 	if (verbose) {
 		iprintf("kmsg queue contents:\n");
@@ -1797,9 +1720,6 @@ print_ports(void)
 	int space_reply_count;
 	int space_pager_count;
 	int space_other_count;
-#if	DIPC
-	int space_remote_count;
-#endif	/* DIPC */
 	struct {
 		int total_count;
 		int dead_count;
@@ -1813,9 +1733,6 @@ print_ports(void)
 	space_reply_count = 0;
 	space_pager_count = 0;
 	space_other_count = 0;
-#if	DIPC
-	space_remote_count = 0;
-#endif	/* DIPC */
 
 	for (port = (ipc_port_t)first_element(ipc_object_zones[IOT_PORT]);
 	     port;
@@ -1838,10 +1755,6 @@ print_ports(void)
 		  	space_kernel_count++;
 		else if (port->ip_receiver == ipc_space_reply)
 		  	space_reply_count++;
-#if	DIPC
-		else if (port->ip_receiver == ipc_space_remote)
-		  	space_remote_count++;
-#endif	/* DIPC */
 		else if (port->ip_receiver == default_pager_space)
 		  	space_pager_count++;
 		else
@@ -1876,17 +1789,6 @@ print_ports(void)
 	PRINT_ONE_PORT_TYPE(MASTER_DEVICE);
 	PRINT_ONE_PORT_TYPE(UNKNOWN);
 	printf("\nipc_space:\n\n");
-#if	DIPC
-	printf("NULL	KERNEL	REPLY	REMOTE	PAGER	OTHER\n");
-	printf("%d	%d	%d	%d	%d	%d\n",
-	       space_null_count,
-	       space_kernel_count,
-	       space_reply_count,
-	       space_remote_count,
-	       space_pager_count,
-	       space_other_count
-	);
-#else	/* DIPC */
 	printf("NULL	KERNEL	REPLY	PAGER	OTHER\n");
 	printf("%d	%d	%d	%d	%d\n",
 	       space_null_count,
@@ -1895,7 +1797,6 @@ print_ports(void)
 	       space_pager_count,
 	       space_other_count
 	);
-#endif	/* DIPC */
 }
 
 #endif	/* ZONE_DEBUG */
@@ -1906,25 +1807,12 @@ print_ports(void)
  *	identical message ids into a single entry.  Count up the
  *	amount of inline and out-of-line data consumed by each
  *	and every kmsg.
- *
-#if	DIPC
- *	N.B.  OOL data is only counted for DIPC_FORMAT messages.
-#endif
  */
 
-#if	DIPC
-#define	KMSG_MATCH_FIELD(kmsg)	(KMSG_IS_META(kmsg) ?			      \
-				 (unsigned int) kmsg->ikm_handle :	      \
-				 (unsigned int) kmsg->ikm_header.msgh_id)
-#define	DKQP_LONG(kmsg)		(KMSG_IS_META(kmsg))
-char	*dkqp_long_format = "(%3d) <0x%8x> 0x%x   %10d %10d\n";
-char	*dkqp_format = "(%3d) <%10d> 0x%x   %10d %10d\n";
-#else	/* DIPC */
 #define	KMSG_MATCH_FIELD(kmsg)	((unsigned int) kmsg->ikm_header.msgh_id)
 #define	DKQP_LONG(kmsg)	FALSE
 char	*dkqp_long_format = "(%3d) <%10d> 0x%x   %10d %10d\n";
 char	*dkqp_format = "(%3d) <%10d> 0x%x   %10d %10d\n";
-#endif	/* DIPC */
 
 int
 db_kmsg_queue_print(
@@ -1938,9 +1826,6 @@ db_kmsg_queue_print(
 	mach_msg_id_t	cur_id;
 	unsigned int	inline_total, ool_total;
 	int		nmsgs;
-#if	DIPC
-	msg_progress_t	mp;
-#endif	/* DIPC */
 
 	iprintf("Count      msgh_id  kmsg addr inline bytes   ool bytes\n");
 	inline_total = ool_total = (vm_size_t) 0;
@@ -1963,11 +1848,6 @@ db_kmsg_queue_print(
 			inline_total += kmsg->ikm_size;
 		else
 			inline_total += kmsg->ikm_header.msgh_size;
-#if	DIPC
-		if (!KMSG_IS_META(kmsg) &&
-		    (mp = KMSG_MSG_PROG_SEND(kmsg)) != MSG_PROGRESS_NULL)
-			ool_total += mp->msg_size;
-#endif	/* DIPC */
 	}
 	iprintf(DKQP_LONG(kmsg) ? dkqp_long_format : dkqp_format,
 		icount,	cur_id, ikmsg, inline_total, ool_total);
@@ -2155,11 +2035,9 @@ db_ref(
 }
 
 
-#if	!DIPC
 #ifndef	DIPC_IS_DIPC_PORT
 #define	DIPC_IS_DIPC_PORT(p)	0
 #endif	/* DIPC_IS_DIPC_PORT */
-#endif	/* !DIPC */
 
 /*
  *	Examine all currently allocated ports.
@@ -2259,9 +2137,6 @@ db_port_walk(
 		}
 		if (port->ip_receiver == ipc_space_kernel ||
 		    port->ip_receiver == ipc_space_reply ||
-#if	DIPC
-		    port->ip_receiver == ipc_space_remote ||
-#endif	/* DIPC */
 		    ipc_entry_lookup(port->ip_receiver,
 				     port->ip_receiver_name) != IE_NULL) {
 			port_item_add(&port_spaces,
@@ -2280,9 +2155,6 @@ db_port_walk(
 	}
 	iprintf("Active port type summary:\n");
 	iprintf("\tlocal  IPC %6d\n", ipc_ports);
-#if	DIPC
-	iprintf("\tprincipals %6d proxies %6d\n", principals, proxies);
-#endif	/* DIPC */
 	iprintf("summary:\tcallers %d threads %d spaces %d\n",
 		port_callers.max, port_threads.max, port_spaces.max);
 

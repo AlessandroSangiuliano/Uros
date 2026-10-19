@@ -92,7 +92,6 @@
  *	Notification-sending functions.
  */
 
-#include <dipc.h>
 #include <mach_rt.h>
 
 #include <mach/port.h>
@@ -104,9 +103,6 @@
 #include <ipc/ipc_mqueue.h>
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_port.h>
-#if	DIPC
-#include <ddb/tr.h>
-#endif	/* DIPC */
 
 /*
  * Forward declarations
@@ -449,29 +445,7 @@ ipc_notify_send_once(
 {
 	ipc_kmsg_t kmsg;
 	mach_send_once_notification_t *n;
-#if	DIPC
-	boolean_t active;
-	TR_DECL("ipc_notify_send_once");
-#endif	/* DIPC */
 
-#if	DIPC
-/*	tr2("enter:  port 0x%x", port);*/
-	/*
-	 *	If the port is not active, sending this
-	 *	notification causes an infinite loop.
-	 *	DIPC gets here because the send
-	 *	once right could be on another node.
-	 */
-	ip_lock(port);
-	active = ip_active(port);
-	ip_unlock(port);
-
-	if (!active) {
-		tr2("...port 0x%x is dead", port);
-		ipc_port_release_sonce(port);
-		return;
-	}
-#endif	/* DIPC */
 
 #if	MACH_RT
 	if (IP_RT(port))

@@ -88,7 +88,6 @@
 #ifndef	_IPC_IPC_OBJECT_H_
 #define _IPC_IPC_OBJECT_H_
 
-#include <dipc.h>
 #include <mach_rt.h>
 #include <cpus.h>
 #include <mach_kdb.h>
@@ -181,7 +180,7 @@ extern zone_t ipc_object_zones[IOT_NUMBER];
 #define	io_alloc(otype)		\
 		((ipc_object_t) zalloc(ipc_object_zones[(otype)]))
 
-#if	DIPC || MACH_ASSERT
+#if	MACH_ASSERT
 /*
  *	DIPC must intercept the call to deallocate the IPC
  *	object in case the object in question is a port with
@@ -194,7 +193,7 @@ extern void	io_free(
 #else	/* DIPC || MACH_ASSERT */
 #define	io_free(otype, io)	\
 		zfree(ipc_object_zones[(otype)], (vm_offset_t) (io))
-#endif	/* DIPC || MACH_ASSERT */
+#endif	/* MACH_ASSERT */
 
 /*
  * Here we depend on the ipc_object being first within the ipc_common_data,
@@ -202,19 +201,6 @@ extern void	io_free(
  * within any kernel data structure needing to lock an ipc_object
  * (ipc_port and ipc_pset).
  */
-#if	DIPC && NCPUS == 1
-
-#define io_lock_init(io) \
-	usimple_lock_init(&((rpc_common_t)(io))->rcd_io_lock_data,	\
-			  ETAP_IPC_OBJECT)
-#define	io_lock(io) \
-	usimple_lock(&((rpc_common_t)(io))->rcd_io_lock_data)
-#define	io_lock_try(io) \
-	usimple_lock_try(&((rpc_common_t)(io))->rcd_io_lock_data)
-#define	io_unlock(io) \
-	usimple_unlock(&((rpc_common_t)(io))->rcd_io_lock_data)
-
-#else	/* DIPC  && NCPUS == 1 */
 
 #define io_lock_init(io) \
 	mutex_init(&((rpc_common_t)(io))->rcd_io_lock_data, ETAP_IPC_RPC)
@@ -225,7 +211,6 @@ extern void	io_free(
 #define	io_unlock(io) \
 	mutex_unlock(&((rpc_common_t)(io))->rcd_io_lock_data)
 
-#endif	/* DIPC && NCPUS == 1 */
 
 #if	NCPUS > 1
 #define _VOLATILE_ volatile

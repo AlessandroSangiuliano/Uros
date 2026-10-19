@@ -253,7 +253,6 @@
  */
 
 #include <cpus.h>
-#include <dipc.h>
 #include <mach_rt.h>
 #include <norma_vm.h>
 
@@ -285,13 +284,6 @@
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_table.h>
-#if	DIPC
-#include <dipc/dipc_funcs.h>
-#include <dipc/dipc_types.h>
-#include <dipc/dipc_port.h>
-#include <dipc/dipc_error.h>
-#include <dipc/dipc_kmsg.h>
-#endif	/* DIPC */
 
 #include <device/net_io.h>
 #include <string.h>
@@ -554,13 +546,6 @@ ipc_kmsg_destroy(
 		while ((kmsg = ipc_kmsg_queue_first(queue)) != IKM_NULL) {
 			ipc_kmsg_clean(kmsg);
 			ipc_kmsg_rmqueue(queue, kmsg);
-#if	DIPC
-			if (KMSG_IS_META(kmsg)) {
-				dipc_meta_kmsg_free(((meta_kmsg_t) kmsg));
-				continue;
-			}
-			assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 			ikm_free(kmsg);
 		}
 	}
@@ -585,9 +570,6 @@ ipc_kmsg_clean_body(
     boolean_t			rt;
     mach_msg_type_number_t	i;
 
-#if	DIPC
-    assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
     if ( number == 0 )
 	return;
@@ -712,9 +694,6 @@ ipc_kmsg_clean_partial(
 	ipc_object_t object;
 	mach_msg_bits_t mbits = kmsg->ikm_header.msgh_bits;
 
-#if	DIPC
-	assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
 	assert(IO_VALID(object));
@@ -747,18 +726,6 @@ ipc_kmsg_clean(
 	ipc_object_t object;
 	mach_msg_bits_t mbits;
 
-#if	DIPC
-	/*
-	 *	For a DIPC message, first give DIPC a
-	 *	chance to clean up.  Depending on what
-	 *	could be cleaned up, there may not be local
-	 *	IPC state to clean after DIPC is done.
-	 */
-	if (KMSG_IN_DIPC(kmsg)) {
-		if (dipc_kmsg_clean(kmsg))
-			return;
-	}
-#endif	/* DIPC */
 
 	mbits = kmsg->ikm_header.msgh_bits;
 	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
@@ -800,15 +767,6 @@ ipc_kmsg_free(
 	ikm_ports_free(kmsg);
 
 	switch (size) {
-#if	DIPC
-	    case IKM_SIZE_INTR_KMSG:
-		/*
-		 *	This kmsg was allocated by DIPC
-		 *	from interrupt level.
-		 */
-		dipc_kmsg_free(kmsg);
-		break;
-#endif	/* DIPC */
 
 	    case IKM_SIZE_NETWORK:
 		/* return it to the network code */
@@ -958,9 +916,6 @@ ipc_kmsg_get(
 	if (rt)
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
-#if	DIPC
-	kmsg->ikm_handle = HANDLE_NULL;
-#endif	/* DIPC */
 
 	/* 
 	 * I reserve for the trailer the largest space (MAX_TRAILER_SIZE)
@@ -1042,9 +997,6 @@ ipc_kmsg_get_from_kernel(
 	if (rt)
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
-#if	DIPC
-	kmsg->ikm_handle = HANDLE_NULL;
-#endif	/* DIPC */
 
 	/* 
 	 * I reserve for the trailer the largest space (MAX_TRAILER_SIZE)
@@ -1083,9 +1035,6 @@ ipc_kmsg_put(
 {
 	mach_msg_return_t mr;
 
-#if	DIPC
-	assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 	ikm_check_initialized(kmsg, kmsg->ikm_size);
 
@@ -1118,9 +1067,6 @@ ipc_kmsg_put_to_kernel(
 	ipc_kmsg_t		kmsg,
 	mach_msg_size_t		size)
 {
-#if	DIPC
-	assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 	(void) memcpy((void *) msg, (const void *) &kmsg->ikm_header, size);
 
@@ -1787,12 +1733,6 @@ ipc_kmsg_copyin_header(
  *		MACH_MSG_INVALID_RT_DESCRIPTOR Dealloc and RT are incompatible
  */
 
-#if	DIPC
-dstat_decl(unsigned int c_ikcb_volatile = 0;)
-dstat_decl(unsigned int c_ikcb_volatile_failures = 0;)
-dstat_decl(unsigned int c_ikcb_volatile_seen = 0;)
-dstat_decl(unsigned int c_ikcb_volatile_disabled = 0;)
-#endif	/* DIPC */
 
 mach_msg_return_t
 ipc_kmsg_copyin_body(
@@ -1815,18 +1755,12 @@ ipc_kmsg_copyin_body(
 #if	MACH_RT
     boolean_t			rt;
 #endif	/* MACH_RT */
-#if	DIPC
-    boolean_t			complex_ool;
-#endif	/* DIPC */
     
     /*
      * Determine if the target is a kernel port.
      */
     dest = (ipc_object_t) kmsg->ikm_dest;
     complex = FALSE;
-#if	DIPC
-    complex_ool = FALSE;
-#endif	/* DIPC */
     use_page_lists = ipc_kobject_vm_page_list(ip_kotype((ipc_port_t)dest));
     steal_pages = ipc_kobject_vm_page_steal(ip_kotype((ipc_port_t)dest));
 #if	MACH_RT
@@ -1880,19 +1814,6 @@ ipc_kmsg_copyin_body(
 		    return MACH_SEND_INVALID_TYPE;
 		}
 		
-#if	DIPC
-		/*
-		 *	For all non-DIPC configurations, the VOLATILE
-		 *	descriptor has the same semantics as an ordinary
-		 *	OOL descriptor.  For DIPC alone, if a VOLATILE
-		 *	descriptor is specified in conjunction with a
-		 *	PHYSICAL_COPY option, turn off volatility.
-		 */
-		if (sstart->out_of_line.copy == MACH_MSG_PHYSICAL_COPY) {
-			sstart->type.type = MACH_MSG_OOL_DESCRIPTOR;
-			dstat(++c_ikcb_volatile_disabled);
-		}
-#endif	/* DIPC */
 
 		/*
 		 * Large PHYSICAL_COPY without dealloc now uses
@@ -1986,10 +1907,6 @@ ipc_kmsg_copyin_body(
 		
 		length = dsc->size;
 		
-#if	DIPC
-		dstat(dsc->type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR ? 
-		      ++c_ikcb_volatile_seen : 0);
-#endif	/* DIPC */
 
 		if (length == 0) {
 		    dsc->address = 0;
@@ -2127,19 +2044,6 @@ ipc_kmsg_copyin_body(
 			    return MACH_SEND_INVALID_MEMORY;
 		        }
 		    } else {
-#if	DIPC
-			if (dsc->type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
-				dstat(++c_ikcb_volatile);
-				if (vm_map_copyin_volatile(map, addr, length,
-							   dealloc, &copy)
-				    != KERN_SUCCESS) {
-				    dstat(++c_ikcb_volatile_failures);
-				    ipc_kmsg_clean_partial(kmsg, i, paddr, 
-							   space_needed);
-				    return MACH_SEND_INVALID_MEMORY;
-			        }
-			} else
-#endif	/* DIPC */
 			/*
 			 * Make a virtual copy of the of the data if requested
 			 * or if a physical copy was requested but the source
@@ -2163,9 +2067,6 @@ ipc_kmsg_copyin_body(
 		    dsc->address = (void *) copy;
 		}
 		complex = TRUE;
-#if	DIPC
-		complex_ool = TRUE;
-#endif	/* DIPC */
 		break;
 	    }
 	    case MACH_MSG_OOL_PORTS_DESCRIPTOR: {
@@ -2205,9 +2106,6 @@ ipc_kmsg_copyin_body(
 		
 		if (length == 0) {
 		    complex = TRUE;
-#if	DIPC
-		    complex_ool = TRUE;
-#endif	/* DIPC */
 		    dsc->address = (void *) 0;
 		    /*
 		     * Translate the disposition even for an empty
@@ -2304,9 +2202,6 @@ ipc_kmsg_copyin_body(
 		}
 		
 		complex = TRUE;
-#if	DIPC
-		complex_ool = TRUE;
-#endif	/* DIPC */
 		break;
 	    }
 	    default: {
@@ -2322,10 +2217,6 @@ ipc_kmsg_copyin_body(
     
     if (!complex)
 	kmsg->ikm_header.msgh_bits &= ~MACH_MSGH_BITS_COMPLEX;
-#if	DIPC
-    else if (complex_ool)
-	kmsg->ikm_header.msgh_bits |= MACH_MSGH_BITS_COMPLEX_OOL;
-#endif	/* DIPC */
     
     return MACH_MSG_SUCCESS;
 }
@@ -3217,20 +3108,6 @@ ipc_kmsg_copyout_body(
 
 		SKIP_PORT_DESCRIPTORS(sstart, send);
 
-#if	DIPC
-		/*
-		 *	In most cases, the receiver shouldn't be bothered
-		 *	with the knowledge that the sender specified
-		 *	VOLATILE transmission for a region.
-		 *
-		 *	The exception is in the local case, where under
-		 *	some circumstances the receiver could wind up
-		 *	sharing data with the sender.  For now, we are
-		 *	trying to avoid that case like the plague.
-		 */
-		if (saddr->type.type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR)
-			saddr->type.type = MACH_MSG_OOL_DESCRIPTOR;
-#endif	/* DIPC */
 
 		dsc = &saddr->out_of_line;
 
@@ -3296,18 +3173,6 @@ ipc_kmsg_copyout_body(
 			}
 			(void) copyoutmap(map, snd_addr, rcv_addr, dsc->size);
 			KFREE(snd_addr, dsc->size, rt);
-#if	DIPC
-		    } else if (copy_option == MACH_MSG_OVERWRITE_DIPC) {
-			/*
-			 * dipc_kmsg_copyout arranged for the incoming data
-			 * to be placed directly into the target address
-			 * space.  No copy is necessary, just call the
-			 * cleanup routine which will also discard the copy.
-			 */
-			kr = vm_map_copy_overwrite_recv_done(map,
-				(vm_map_copy_t)dsc->address);
-			assert(kr == KERN_SUCCESS);
-#endif	/* DIPC */
 		    } else {
 
 			/*
@@ -3482,19 +3347,6 @@ ipc_kmsg_copyout(
 {
 	mach_msg_return_t mr;
 
-#if	DIPC
-	if (KMSG_IS_DIPC_FORMAT(kmsg)) {
-		dipc_return_t	dr;
-
-		dr = dipc_kmsg_copyout(kmsg, map, slist);
-		assert(dr == DIPC_SUCCESS || dr == DIPC_TRANSPORT_ERROR);
-		if (dr == DIPC_TRANSPORT_ERROR) {
-			/* error occurred during transmission */
-			return MACH_RCV_TRANSPORT_ERROR;
-		}
-	}
-	assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 	mr = ipc_kmsg_copyout_header(kmsg, space, notify);
 	if (mr != MACH_MSG_SUCCESS)
@@ -3547,9 +3399,6 @@ ipc_kmsg_copyout_pseudo(
 
 	assert(IO_VALID(dest));
 
-#if	DIPC
-	assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 	mr = (ipc_kmsg_copyout_object(space, dest, dest_type, &dest_name) |
 	      ipc_kmsg_copyout_object(space, reply, reply_type, &reply_name));
@@ -3586,23 +3435,6 @@ ipc_kmsg_copyout_dest(
 	mach_msg_type_name_t reply_type;
 	mach_port_t dest_name, reply_name;
 
-#if	DIPC
-	if (KMSG_IS_DIPC_FORMAT(kmsg)) {
-		dipc_return_t dr;
-
-		/*
-		 * The message is still in DIPC format, and if it is complex,
-		 * the OOL portion is still on the sending node.  The complete
-		 * message must be received and converted to local format
-		 * before continuing on to destroy the rights and memory.
-		 */
-		dr = dipc_kmsg_copyout(kmsg, current_task()->map,
-			MACH_MSG_BODY_NULL);
-		assert(dr == DIPC_SUCCESS || dr == DIPC_TRANSPORT_ERROR);
-
-	}
-	assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 	mbits = kmsg->ikm_header.msgh_bits;
 	dest = (ipc_object_t) kmsg->ikm_dest;
@@ -3701,11 +3533,7 @@ ipc_kmsg_check_scatter(
 	    /*
 	     * Skip port descriptors in gather list. 
 	     */
-#if	DIPC
-	    g_type = gstart->type.type & ~DIPC_TYPE_BITS;
-#else	/* DIPC */
 	    g_type = gstart->type.type;
-#endif	/* DIPC */
 	    if (g_type != MACH_MSG_PORT_DESCRIPTOR) {
 
 		/*
@@ -3918,20 +3746,6 @@ ipc_kmsg_copyout_to_kernel(
 	mach_msg_type_name_t reply_type;
 	mach_port_t dest_name, reply_name;
 
-#if	DIPC
-	if (KMSG_IS_DIPC_FORMAT(kmsg)) {
-		dipc_return_t	dr;
-
-		dr = dipc_kmsg_copyout(kmsg, current_task()->map,
-			MACH_MSG_BODY_NULL);
-		assert(dr == DIPC_SUCCESS || dr == DIPC_TRANSPORT_ERROR);
-		if (dr == DIPC_TRANSPORT_ERROR) {
-			/* error occurred during transmission */
-			panic("ipc_kmsg_copyout_to_kernel: transport error");
-		}
-	}
-	assert(!KMSG_IN_DIPC(kmsg));
-#endif	/* DIPC */
 
 	dest = (ipc_object_t) kmsg->ikm_dest;
 	reply = (ipc_object_t) kmsg->ikm_reply;
@@ -4077,15 +3891,6 @@ ipc_kmsg_print(
 		kmsg->ikm_next,
 		kmsg->ikm_prev,
 		kmsg->ikm_size);
-#if	DIPC
-	/*
-	 *	Note that we deliberately refrain from printing
-	 *	a carriage return, above, so that DIPC can tack
-	 *	some information onto the same line.
-	 */
-	printf(", ");
-	dipc_kmsg_print(kmsg);
-#endif	/* DIPC */
 	printf("\n");
 	ipc_msg_print(&kmsg->ikm_header);
 }
@@ -4098,21 +3903,6 @@ msgh_bit_decode(
 	    case MACH_MSGH_BITS_COMPLEX:	return "complex";
 	    case MACH_MSGH_BITS_CIRCULAR:	return "circular";
 	    case MACH_MSGH_BITS_RTALLOC:	return "rtalloc";
-#if	DIPC
-	    case MACH_MSGH_BITS_DIPC_FORMAT:	return "dipc_format";
-	    case MACH_MSGH_BITS_META_KMSG:	return "meta_kmsg";
-	    case MACH_MSGH_BITS_MIGRATING:	return "migrating";
-	    case MACH_MSGH_BITS_SENDER_WAITING:	return "sender_waiting";
-	    case MACH_MSGH_BITS_PLACEHOLDER:	return "placeholder";
-	    case MACH_MSGH_BITS_COMPLEX_OOL:	return "complex_ool";
-	    case MACH_MSGH_BITS_LOCAL_NMS:	return "local_nms";
-	    case MACH_MSGH_BITS_HAS_HANDLE:	return "has_handle";
-	    case MACH_MSGH_BITS_RECEIVING:	return "receiving";
-	    case MACH_MSGH_BITS_REF_CONVERT:	return "ref_convert";
-	    case MACH_MSGH_BITS_RPC:		return "rpc";
-	    case MACH_MSGH_BITS_CONNECTING:	return "connecting";
-	    case MACH_MSGH_BITS_CONNECT_WAIT:	return "connect_wait";
-#endif	/* DIPC */
 	    default:				return (char *) 0;
 	}
 }
@@ -4166,21 +3956,6 @@ ipc_msg_print(
 		iprintf("remote=null");
 	}
 
-#if	DIPC
-	/*
-	 *	A meta-kmsg has no other valid fields to print.
-	 */
-	if (mbits & MACH_MSGH_BITS_META_KMSG) {
-		printf("\n");
-		return;
-	}
-
-	if (mbits & MACH_MSGH_BITS_DIPC_FORMAT) {
-		uid_t uid = *((uid_t *)&msgh->msgh_local_port);
-		printf("%slocal=UID:%x/%x\n", needs_comma ? "," : "",
-		       uid.origin, uid.identifier);
-	} else
-#endif	/* DIPC */
 
 	if (msgh->msgh_local_port) {
 		printf("%slocal=0x%x(", needs_comma ? "," : "",
@@ -4226,11 +4001,6 @@ mm_copy_options_string(
 	    case MACH_MSG_PAGE_LIST_COPY_T:
 		name = "PAGE_LIST_COPY_T";
 		break;
-#if	DIPC
-	    case MACH_MSG_OVERWRITE_DIPC:
-		name = "OVERWRITE_DIPC";
-		break;
-#endif	/* DIPC */
 	    default:
 		name = "unknown";
 		break;
@@ -4254,12 +4024,6 @@ ipc_msg_print_untyped(
 	
 	type = saddr->type.type;
 
-#if	DIPC
-	if (DIPC_DSC(saddr, DIPC_FORMAT_DESCRIPTOR)) {
-		dipc_descriptor_print(saddr);
-		continue;
-	}
-#endif	/* DIPC */
 
 	switch (type) {
 	    

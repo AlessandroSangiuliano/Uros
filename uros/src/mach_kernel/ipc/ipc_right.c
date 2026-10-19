@@ -81,7 +81,6 @@
  *	Functions to manipulate IPC capabilities.
  */
 
-#include <dipc.h>
 
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
@@ -100,9 +99,6 @@
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_table.h>
-#if	DIPC
-#include <dipc/dipc_port.h>
-#endif	/* DIPC */
 
 /*
  *	Routine:	ipc_right_lookup_write
@@ -533,10 +529,6 @@ ipc_right_clean(
 		if (type & MACH_PORT_TYPE_SEND) {
 			assert(port->ip_srights > 0);
 			if (--port->ip_srights == 0
-#if	DIPC
-			    && (!DIPC_IS_DIPC_PORT(port) || 
-				(port->ip_transit == 0))
-#endif	/* DIPC */
 			    ) {
 				nsrequest = port->ip_nsrequest;
 				if (nsrequest != IP_NULL) {
@@ -634,9 +626,6 @@ ipc_right_destroy(
 		ipc_port_t nsrequest = IP_NULL;
 		mach_port_mscount_t mscount = 0;
 		ipc_port_t dnrequest;
-#if	DIPC
-		ipc_port_t drop_port = IP_NULL; 
-#endif	/* DIPC */
 
 		assert(port != IP_NULL);
 
@@ -648,34 +637,13 @@ ipc_right_destroy(
 
 		if (!ip_active(port)) {
 			assert((type & MACH_PORT_TYPE_RECEIVE) == 0);
-#if	DIPC
-			/*
-			 *	In fact, this may well be the last
-			 *	reference on the port, which can result
-			 *	in its destruction.  But we don't want
-			 *	to destroy the port while holding the
-			 *	space locked.
-			 */
-			drop_port = port;
-#else	/* DIPC */
 			ip_release(port);
-#endif	/* DIPC */
 			ip_check_unlock(port);
 
 			entry->ie_request = 0;
 			entry->ie_object = IO_NULL;
 			ipc_entry_dealloc(space, name, entry);
 			is_write_unlock(space);
-#if	DIPC
-			/*
-		 	 *	Dropping the port reference may cause the
-		 	 *	port to disappear.
-		 	 */
-			if (drop_port != IP_NULL){
-				ipc_port_release(drop_port);
-				drop_port = IP_NULL; /* shouldn't be needed */
-			}
-#endif	/* DIPC */
 
 			break;
 		}
@@ -689,10 +657,6 @@ ipc_right_destroy(
 		if (type & MACH_PORT_TYPE_SEND) {
 			assert(port->ip_srights > 0);
 			if (--port->ip_srights == 0
-#if	DIPC
-			    && (!DIPC_IS_DIPC_PORT(port) ||
-				(port->ip_transit == 0))
-#endif	/* DIPC */
 			    ) {
 				nsrequest = port->ip_nsrequest;
 				if (nsrequest != IP_NULL) {
@@ -760,9 +724,6 @@ ipc_right_dealloc(
 {
 	ipc_entry_bits_t bits = entry->ie_bits;
 	mach_port_type_t type = IE_BITS_TYPE(bits);
-#if	DIPC
-	ipc_port_t	drop_port = IP_NULL;
-#endif	/* DIPC */
 
 	assert(space->is_active);
 	space->is_generation++;		/* invalidate per-thread port caches */
@@ -781,10 +742,6 @@ ipc_right_dealloc(
 			entry->ie_bits = bits-1; /* decrement urefs */
 
 		is_write_unlock(space);
-#if	DIPC
-		if (drop_port != IP_NULL)
-			ipc_port_release(drop_port);
-#endif	/* DIPC */
 		break;
 	    }
 
@@ -796,16 +753,6 @@ ipc_right_dealloc(
 		port = (ipc_port_t) entry->ie_object;
 		assert(port != IP_NULL);
 
-#if	DIPC
-		/*
-		 *	The port may only have one send right left.
-		 *	Because ipc_right_check may drop a reference
-		 *	on the port, we must take a reference here
-		 *	to prevent the port from being deallocated.
-		 */
-		ipc_port_reference(port);
-		drop_port = port;
-#endif	/* DIPC */
 
 		if (ipc_right_check(space, port, name, entry)) {
 
@@ -824,10 +771,6 @@ ipc_right_dealloc(
 		ipc_entry_dealloc(space, name, entry);
 		is_write_unlock(space);
 
-#if	DIPC
-		ipc_port_release(port);
-		drop_port = IP_NULL;
-#endif	/* DIPC */
 
 		ipc_notify_send_once(port);
 
@@ -848,16 +791,6 @@ ipc_right_dealloc(
 		port = (ipc_port_t) entry->ie_object;
 		assert(port != IP_NULL);
 
-#if	DIPC
-		/*
-		 *	The port may only have one send right left.
-		 *	Because ipc_right_check may drop a reference
-		 *	on the port, we must take a reference here
-		 *	to prevent the port from being deallocated.
-		 */
-		ipc_port_reference(port);
-		drop_port = port;
-#endif	/* DIPC */
 
 		if (ipc_right_check(space, port, name, entry)) {
 			bits = entry->ie_bits;
@@ -870,10 +803,6 @@ ipc_right_dealloc(
 
 		if (IE_BITS_UREFS(bits) == 1) {
 			if (--port->ip_srights == 0
-#if	DIPC
-			    && (!DIPC_IS_DIPC_PORT(port) ||
-				(port->ip_transit == 0))
-#endif	/* DIPC */
 			    ) {
 				nsrequest = port->ip_nsrequest;
 				if (nsrequest != IP_NULL) {
@@ -898,10 +827,6 @@ ipc_right_dealloc(
 		ip_unlock(port);
 		is_write_unlock(space);
 
-#if	DIPC
-		ipc_port_release(port);
-		drop_port = IP_NULL;	/* shouldn't be needed */
-#endif	/* DIPC */
 
 		if (nsrequest != IP_NULL)
 			ipc_notify_no_senders(nsrequest, mscount);
@@ -929,10 +854,6 @@ ipc_right_dealloc(
 
 		if (IE_BITS_UREFS(bits) == 1) {
 			if (--port->ip_srights == 0
-#if	DIPC
-			    && (!DIPC_IS_DIPC_PORT(port) ||
-				(port->ip_transit == 0))
-#endif	/* DIPC */
 			    ) {
 				nsrequest = port->ip_nsrequest;
 				if (nsrequest != IP_NULL) {
@@ -986,18 +907,6 @@ ipc_right_delta(
 	mach_port_delta_t	delta)
 {
 	ipc_entry_bits_t bits = entry->ie_bits;
-
-/*
- *	The following is used (for case MACH_PORT_RIGHT_DEAD_NAME) in the
- *	switch below. It is used to keep track of those cases (in DIPC)
- *	where we have postponed the dropping of a port reference. Since
- *	the dropping of the reference could cause the port to disappear
- *	we postpone doing so when we are holding the space lock.
- */
-
-#if	DIPC
-	ipc_port_t drop_port = IP_NULL; 
-#endif	/* DIPC */
 
 	assert(space->is_active);
 	assert(right < MACH_PORT_RIGHT_NUMBER);
@@ -1170,16 +1079,6 @@ ipc_right_delta(
 
 			port = (ipc_port_t) entry->ie_object;
 			assert(port != IP_NULL);
-#if	DIPC
-			/*
-		 	 *	The port may only have one send right left.
-		 	 *	Because ipc_right_check may drop a reference
-		 	 *	on the port, we must take a reference here
-		 	 *	to prevent the port from being deallocated.
-		 	 */
-			ipc_port_reference(port);
-			drop_port = port;
-#endif	/* DIPC */
 
 			if (!ipc_right_check(space, port, name, entry)) {
 				/* port is locked and active */
@@ -1207,16 +1106,6 @@ ipc_right_delta(
 			entry->ie_bits = bits + delta;
 
 		is_write_unlock(space);
-#if	DIPC
-		/*
-		 *	Dropping the port reference may cause the
-		 *	port to disappear.
-		 */
-		if (drop_port != IP_NULL){
-			ipc_port_release(drop_port);
-			drop_port = IP_NULL; /* shouldn't be needed */
-		}
-#endif	/* DIPC */
 
 		break;
 	    }
@@ -1227,9 +1116,6 @@ ipc_right_delta(
 		ipc_port_t dnrequest = IP_NULL;
 		ipc_port_t nsrequest = IP_NULL;
 		mach_port_mscount_t mscount = 0;
-#if	DIPC
-		boolean_t drop_port_ref = FALSE;
-#endif	/* DIPC */
 
 		if ((bits & MACH_PORT_TYPE_SEND) == 0)
 			goto invalid_right;
@@ -1259,10 +1145,6 @@ ipc_right_delta(
 
 		if ((urefs + delta) == 0) {
 			if (--port->ip_srights == 0
-#if	DIPC
-			    && (!DIPC_IS_DIPC_PORT(port) ||
-				(port->ip_transit == 0))
-#endif	/* DIPC */
 			    ) {
 				nsrequest = port->ip_nsrequest;
 				if (nsrequest != IP_NULL) {
@@ -1289,18 +1171,7 @@ ipc_right_delta(
 				ipc_hash_delete(space, (ipc_object_t) port,
 						name, entry);
 
-#if	DIPC
-				/*
-				 *	In fact, this may well be the last
-				 *	reference on the port, which can result
-				 *	in its destruction.  But we don't want
-				 *	to destroy the port while holding the
-				 *	space locked.
-				 */
-				drop_port_ref = TRUE;
-#else	/* DIPC */
 				ip_release(port);
-#endif	/* DIPC */
 				entry->ie_object = IO_NULL;
 				ipc_entry_dealloc(space, name, entry);
 			}
@@ -1311,14 +1182,6 @@ ipc_right_delta(
 		ip_unlock(port);
 		is_write_unlock(space);
 
-#if	DIPC
-		/*
-		 *	Dropping the port reference may cause the
-		 *	port to disappear.
-		 */
-		if (drop_port_ref == TRUE)
-			ipc_port_release(port);
-#endif	/* DIPC */
 
 		if (nsrequest != IP_NULL)
 			ipc_notify_no_senders(nsrequest, mscount);
@@ -1340,26 +1203,14 @@ ipc_right_delta(
 
     invalid_right:
 	is_write_unlock(space);
-#if	DIPC
-	if (drop_port != IP_NULL)
-		ipc_port_release(drop_port);
-#endif	/* DIPC */
 	return KERN_INVALID_RIGHT;
 
     invalid_value:
 	is_write_unlock(space);
-#if	DIPC
-	if (drop_port != IP_NULL)
-		ipc_port_release(drop_port);
-#endif	/* DIPC */
 	return KERN_INVALID_VALUE;
 
     urefs_overflow:
 	is_write_unlock(space);
-#if	DIPC
-	if (drop_port != IP_NULL)
-		ipc_port_release(drop_port);
-#endif	/* DIPC */
 	return KERN_UREFS_OVERFLOW;
 }
 
