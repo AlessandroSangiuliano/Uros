@@ -20,7 +20,7 @@
 # rule and a comment asking people to follow one.
 #
 # ⚠️ It deliberately has NO exemption list.  Call sites in code that is not
-# built today — tgdb, the deprecated libcthreads and librthreads — are held to
+# built today — the deprecated libcthreads and librthreads — are held to
 # the same rule, because an exemption list is a thing that rots: the entry
 # outlives the reason, and the next person reads it as permission.
 #
