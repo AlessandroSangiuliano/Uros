@@ -44,6 +44,7 @@
 #include <mach/clock.h>			/* host_get_clock_service, REALTIME_CLOCK */
 #include <signal.h>
 #include <mach/port.h>
+#include <mach/urmach_futex.h>		/* urmach_futex() itself (#710) */
 #include "gpu_console.h"
 
 static int pass = 1;
@@ -2684,6 +2685,156 @@ test_static_cond_first_use(void)
 }
 
 /* ----------------------------------------------------------------
+ * #710: a futex wait whose page is unmapped between its two reads
+ * ---------------------------------------------------------------- */
+
+/*
+ * futex_wait() reads the word once to fault its page in, declares its wait at
+ * splsched, and reads it again, so that a wake between the two is not lost.
+ * Nothing holds the page in between: another thread of the task can unmap it,
+ * and the second read then faults with the wait declared.  vm_fault() could
+ * sleep there, inside the declared wait, which panics -- so the kernel has to
+ * fail that read instead, and answer the wait with KERN_NOT_WAITING, which its
+ * callers already retry on.
+ *
+ * The window is a few instructions.  ablations/710-widen-futex-reread.patch
+ * holds the waiter in it 100 ms when the word holds FUTEX_UNMAP_WORD, and a
+ * thread of this case unmaps the page FUTEX_UNMAP_DELAY_MS after the waiter
+ * says it is calling the kernel.  That thread is started first and SPINS
+ * through its delay rather than sleeping: a sleep ends on a timer interrupt,
+ * and one armed on the processor the waiter is held on at splsched fires only
+ * after the window -- two boots in twelve said NOT ASKED that way.  The case
+ * tries up to FUTEX_UNMAP_TRIES times, and the first try that lands in the
+ * window decides.  Without the widen every try times out and the case says
+ * that it did not ask.  At one processor it never asks: nobody can unmap while
+ * the waiter is at splsched.  Last, by cow_test's rule: with the fix taken
+ * out, it is the case that ends the run.
+ */
+#define	FUTEX_UNMAP_WORD	0x07100710u
+#define	FUTEX_UNMAP_DELAY_MS	20
+#define	FUTEX_UNMAP_TIMEOUT_MS	300
+#define	FUTEX_UNMAP_TRIES	3
+
+static vm_address_t		futex_unmap_page;
+static mach_port_t		futex_unmap_clock;
+static volatile int		futex_unmap_calling;
+static volatile kern_return_t	futex_unmap_kr;
+static volatile kern_return_t	futex_unmap_dealloc_kr;
+
+static void *
+futex_unmap_waiter(void *arg)
+{
+	(void) arg;
+	futex_unmap_calling = 1;
+	futex_unmap_kr = urmach_futex((unsigned int *) futex_unmap_page,
+				      URMACH_FUTEX_WAIT | URMACH_FUTEX_PRIVATE,
+				      FUTEX_UNMAP_WORD, FUTEX_UNMAP_TIMEOUT_MS,
+				      0);
+	return 0;
+}
+
+static void *
+futex_unmap_unmapper(void *arg)
+{
+	tvalspec_t	t0, now;
+	long		ms;
+
+	(void) arg;
+	while (!futex_unmap_calling)
+		;
+	(void) clock_get_time(futex_unmap_clock, &t0);
+	do {
+		(void) clock_get_time(futex_unmap_clock, &now);
+		ms = (long) (now.tv_sec - t0.tv_sec) * 1000 +
+		     ((long) now.tv_nsec - (long) t0.tv_nsec) / 1000000;
+	} while (ms < FUTEX_UNMAP_DELAY_MS);
+	futex_unmap_dealloc_kr = vm_deallocate(mach_task_self(),
+					       futex_unmap_page, 4096);
+	return 0;
+}
+
+static void
+test_futex_wait_page_unmapped(void)
+{
+	static const char	name[] = "futex wait, its page unmapped between "
+					 "its two reads";
+	mach_port_t		me = mach_task_self();
+	pthread_t		waiter, unmapper;
+	kern_return_t		kr;
+	char			buf[256];
+	int			try;
+
+	kr = host_get_clock_service(mach_host_self(), REALTIME_CLOCK,
+				    &futex_unmap_clock);
+	if (kr != KERN_SUCCESS) {
+		snprintf(buf, sizeof(buf), "host_get_clock_service answered "
+			 "%d (#710)", (int) kr);
+		test_fail(name, buf);
+		return;
+	}
+	for (try = 1; try <= FUTEX_UNMAP_TRIES; try++) {
+		futex_unmap_page = 0;
+		futex_unmap_calling = 0;
+		futex_unmap_kr = -1;
+		futex_unmap_dealloc_kr = -1;
+		kr = vm_allocate(me, &futex_unmap_page, 4096, TRUE);
+		if (kr != KERN_SUCCESS) {
+			snprintf(buf, sizeof(buf), "vm_allocate answered %d "
+				 "(#710)", (int) kr);
+			test_fail(name, buf);
+			return;
+		}
+		*(volatile unsigned int *) futex_unmap_page = FUTEX_UNMAP_WORD;
+		if (pthread_create(&unmapper, NULL, futex_unmap_unmapper,
+				   NULL) != 0) {
+			(void) vm_deallocate(me, futex_unmap_page, 4096);
+			test_fail(name, "the unmapping thread was not created "
+				  "(#710)");
+			return;
+		}
+		if (pthread_create(&waiter, NULL, futex_unmap_waiter,
+				   NULL) != 0) {
+			futex_unmap_calling = 1;	/* the unmapper ends */
+			(void) pthread_join(unmapper, NULL);
+			test_fail(name, "the waiter was not created (#710)");
+			return;
+		}
+		(void) pthread_join(waiter, NULL);
+		(void) pthread_join(unmapper, NULL);
+
+		if (futex_unmap_dealloc_kr != KERN_SUCCESS) {
+			snprintf(buf, sizeof(buf), "vm_deallocate answered %d, "
+				 "so the page was not taken away (#710)",
+				 (int) futex_unmap_dealloc_kr);
+			test_fail(name, buf);
+			return;
+		}
+		if (futex_unmap_kr == KERN_NOT_WAITING) {
+			printf("  [%d] %s: OK — at try %d of %d the second read "
+			       "failed with the wait declared, and the wait "
+			       "answered KERN_NOT_WAITING (#710)\n", ++test_num,
+			       name, try, FUTEX_UNMAP_TRIES);
+			return;
+		}
+		if (futex_unmap_kr != KERN_OPERATION_TIMED_OUT) {
+			snprintf(buf, sizeof(buf), "the wait answered %d at "
+				 "try %d, where a word that was there at the "
+				 "call and is gone at the second read is "
+				 "KERN_NOT_WAITING (%d) (#710)",
+				 (int) futex_unmap_kr, try,
+				 (int) KERN_NOT_WAITING);
+			test_fail(name, buf);
+			return;
+		}
+	}
+	printf("  [%d] %s: NOT ASKED — %d tries timed out after %d ms each, so "
+	       "the unmap came after both reads; "
+	       "ablations/710-widen-futex-reread.patch holds the window open "
+	       "(#710)\n", ++test_num, name, FUTEX_UNMAP_TRIES,
+	       FUTEX_UNMAP_TIMEOUT_MS);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -2749,6 +2900,7 @@ main(int argc, char **argv)
 	test_malloc_bench();
 	test_trap_vs_rpc_bench();
 	test_trap_sweep();
+	test_futex_wait_page_unmapped();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);

@@ -1378,6 +1378,28 @@ fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
 {
 	kern_return_t	kr;
 	boolean_t	had = (frame->rflags & RFLAGS_IF) != 0;
+	thread_t	self = current_thread();
+
+	/*
+	 * 🔴 NEVER WITH A WAIT DECLARED (#710).  A thread between assert_wait()
+	 * and thread_block() must block on its wait or leave it before it
+	 * blocks on anything else, and vm_fault() can block: on the map's
+	 * lock, held by a thread that is unmapping, or on a page being read
+	 * in.  A second wait makes assert_wait() panic in every build, and a
+	 * mutex stops a development kernel in mutex_lock_assert_safe().
+	 * futex_wait() reads its word a second time at splsched with its wait
+	 * declared, and another thread of the task can take the page away in
+	 * between -- so a fault taken in the kernel in that state is refused,
+	 * not resolved: copyin() then fails through the exception table, and
+	 * its caller answers.  Here and not at a call site, because this is
+	 * the one place a trap reaches vm_fault() from.  Only on a task's
+	 * map: a fault on the kernel's own memory with a wait declared is a
+	 * defect of another kind, and goes on to be found as it was.  Ring 3
+	 * cannot be in that state, and a fault from it goes on as before.
+	 */
+	if ((frame->cs & 3) == 0 && map != kernel_map && self != THREAD_NULL
+	    && WAIT_DECLARED(self->wait_event, self->state))
+		return KERN_FAILURE;
 
 	if (had)
 		interrupts_enable();

@@ -1,0 +1,41 @@
+Kind: ablation
+Issue: #710
+Over: 710-widen-futex-early.patch
+Takes out: 3cfdd44c -- i386's kernel_trap() hands a fault on a task's memory taken in the kernel to vm_fault() again whatever the thread's state, so the futex waiter that the widen held before splsched, its page unmapped by pthread_test's last case while it was held, faults on its second read with its wait declared, and vm_fault() takes the map's mutex there, which a kernel built with MACH_ASSERT refuses in mutex_lock_assert_safe(); every boot must stop there
+Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-4
+Expect: mutex_lock_assert_safe: thread 0x[0-9a-f]+ takes a mutex with wait_event
+Expect: assert_wait: already asserted event
+
+diff --git a/uros/src/mach_kernel/i386/trap.c b/uros/src/mach_kernel/i386/trap.c
+index 3b567adf..fc7849ab 100644
+--- a/uros/src/mach_kernel/i386/trap.c
++++ b/uros/src/mach_kernel/i386/trap.c
+@@ -545,24 +545,11 @@ kernel_trap(
+ 			 * kernel mode, always try for write permission
+ 			 * first.  If that fails and the fault was a
+ 			 * read fault, retry with read permission.
+-			 *
+-			 * 🔴 But never with a wait declared, on a task's
+-			 * map (#710).  A thread between assert_wait() and
+-			 * thread_block() must not block on anything else,
+-			 * and vm_fault() can: a second wait panics.
+-			 * futex_wait() reads its word again at splsched
+-			 * with its wait declared, and the page can be
+-			 * taken away in between.  The fault is refused, the
+-			 * copy fails through recover_table below, and the
+-			 * futex answers that its word could not be read.
+ 			 */
+-			if (map != kernel_map && thread != THREAD_NULL &&
+-			    WAIT_DECLARED(thread->wait_event, thread->state))
+-				result = KERN_FAILURE;
+-			else
+-				result = vm_fault(map,
+-					trunc_page((vm_offset_t)subcode),
+-					VM_PROT_READ|VM_PROT_WRITE, FALSE);
++		  	result = vm_fault(map,
++					  trunc_page((vm_offset_t)subcode),
++					  VM_PROT_READ|VM_PROT_WRITE,
++					  FALSE);
+ 		}
+ #if	MACH_KDB
+ 		if (result == KERN_SUCCESS) {

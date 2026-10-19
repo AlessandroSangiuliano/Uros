@@ -545,11 +545,24 @@ kernel_trap(
 			 * kernel mode, always try for write permission
 			 * first.  If that fails and the fault was a
 			 * read fault, retry with read permission.
+			 *
+			 * 🔴 But never with a wait declared, on a task's
+			 * map (#710).  A thread between assert_wait() and
+			 * thread_block() must not block on anything else,
+			 * and vm_fault() can: a second wait panics.
+			 * futex_wait() reads its word again at splsched
+			 * with its wait declared, and the page can be
+			 * taken away in between.  The fault is refused, the
+			 * copy fails through recover_table below, and the
+			 * futex answers that its word could not be read.
 			 */
-		  	result = vm_fault(map,
-					  trunc_page((vm_offset_t)subcode),
-					  VM_PROT_READ|VM_PROT_WRITE,
-					  FALSE);
+			if (map != kernel_map && thread != THREAD_NULL &&
+			    WAIT_DECLARED(thread->wait_event, thread->state))
+				result = KERN_FAILURE;
+			else
+				result = vm_fault(map,
+					trunc_page((vm_offset_t)subcode),
+					VM_PROT_READ|VM_PROT_WRITE, FALSE);
 		}
 #if	MACH_KDB
 		if (result == KERN_SUCCESS) {

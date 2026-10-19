@@ -392,6 +392,17 @@ typedef struct thread_shuttle {
 
 #define	TH_SCHED_STATE	(TH_WAIT|TH_SUSP|TH_RUN|TH_UNINT)
 
+/*
+ * A wait declared and not yet left (#710): a wait event, or TH_WAIT on no
+ * event, which is how an IPC park and a semaphore wait declare theirs.  On the
+ * values the caller read, once each, so that what it reports is what it
+ * tested.  A thread in that state must block on its wait or leave it before
+ * it blocks on anything else: mutex_lock_assert_safe() refuses it a mutex, and
+ * the page fault handlers refuse it vm_fault(), which can sleep.
+ */
+#define	WAIT_DECLARED(event, state) \
+	((event) != NO_EVENT || ((state) & TH_WAIT) != 0)
+
 /* These two flags will never be seen and might well be removed */
 #define	TH_STACK_HANDOFF	0x0100	/* thread has no kernel stack */
 #define	TH_STACK_COMING_IN	0x0200	/* thread is waiting for kernel stack */
