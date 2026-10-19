@@ -45,7 +45,7 @@
 
 
 /*
- * Weak NULL fallbacks: libpthreads / libmach / libcthreads override
+ * Weak NULL fallbacks: libpthreads / libmach override
  * these with strong definitions (e.g. _threadlib_init_routine =
  * pthread_init).  Originally they were tentative ("common") defs,
  * which combined with -Wl,--allow-multiple-definition let the BSS

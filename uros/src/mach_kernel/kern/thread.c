@@ -834,8 +834,8 @@ stack_statistics(
  *
  *	Records the thread's kernel stack as reserved for it.  A thread keeps
  *	its stack from creation to destruction on these targets, so the
- *	reservation holds by construction; the field's only reader,
- *	thread_handoff() in kern/ipc_sched.c, is not built (#648).
+ *	reservation holds by construction; the field's only reader was
+ *	thread_handoff(), deleted with kern/ipc_sched.c (#648, #433).
  */
 
 void

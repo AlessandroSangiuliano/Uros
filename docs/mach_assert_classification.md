@@ -71,7 +71,8 @@ code **is**, so that there is a function body to assert inside:
   off**, so they had never been compiled at all. They did not assemble (a
   hand-written `0x66` prefix a current assembler rejects) and did not link
   (`extern __inline__` emits a definition under `-std=gnu11`, colliding with
-  `locore.S`). Fixed, not deleted: what heritage stays is #433's question.
+  `locore.S`). Fixed, not deleted, and #433 kept them: they are what a kernel
+  without assertions compiles.
 - ❌ `i386/AT386/mp/mp.h` — **retracted.** This entry said `MACH_ASSERT`
   selects between a call and an inline sequence for `DISABLE_PREEMPTION`, so
   that a build option decided whether i386 preempts on interrupt exit. It does

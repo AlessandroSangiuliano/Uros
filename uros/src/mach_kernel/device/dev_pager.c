@@ -544,10 +544,10 @@ device_pager_setup(
  * THIS.  A signature no caller checks is a signature no compiler checks
  * either, which is why a wrong one can sit in a file for thirty years.
  *
- * ⚠️ Kept rather than deleted: device_pager_setup() hands out a send right and
- * something must one day give it back, and the deletion of dead code from this
- * era is #433's question, not this issue's.  What #415 owes it is the right
- * type.
+ * ⚠️ Kept rather than deleted, and #433 kept it: device_pager_setup() hands
+ * out a send right and something must one day give it back, so a missing
+ * caller is a question about the device pager, not a husk.  What #415 owes
+ * it is the right type.
  */
 void
 device_pager_release(
