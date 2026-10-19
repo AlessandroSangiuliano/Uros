@@ -15,7 +15,7 @@ index 55921885..fd2b724b 100644
  		return;
  	event = self->wait_event;
  	state = self->state;
--	if (event == NO_EVENT && !(state & TH_WAIT))
+-	if (!WAIT_DECLARED(event, state))
 +	if (event == NO_EVENT)
  		return;
  	again = current_thread();
