@@ -605,6 +605,12 @@ must_report 'boot_ports_test: asking bootstrap (device)' 'boot_ports_test: [0-9]
 must_report 'boot_ports_test: asking bootstrap (both)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (both)' \
 	'The -H -D line: the master host and device ports, or a task that stopped asking bootstrap for them (#620).'
 
+# #705: the load -t needs.  On a boot without -t it reads the kernel's command
+# line and ends; on a -t boot the panic -t asks for ends the run before it can,
+# which is entry 53's verdict to judge, not this list's.
+must_report 'taskpanic_load: started' 'taskpanic_load: .*no load' \
+	'Without -t it reads the kernel'"'"'s command line with the master host port and ends, so a start with no end is a task that could not read the line, or stopped reading it (#705).'
+
 # ⚠️ The terminator matches either verdict -- `ALL n TESTS PASSED' or `SOME
 # TESTS FAILED' -- and deliberately does not demand the count.  This list asks
 # whether the program reached its own last sentence; a failing arm already
@@ -1471,7 +1477,8 @@ expected_reports() {
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed' \
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
-		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
+		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+		'taskpanic_load: started' 'taskpanic_load: .*no load'
 }
 
 # #579: the clock the run gets, asked once a second of the cores qemu's
