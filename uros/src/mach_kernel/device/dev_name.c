@@ -77,11 +77,7 @@
 #include <device/dev_hdr.h>
 #include <device/conf.h>
 #include <device/ds_routines.h>
-#include <cdli.h>
 
-#if CDLI > 0
-#include <device/cdli.h>
-#endif
 
 dev_ops_t	*dev_ops_table;
 int		dev_ops_size;
@@ -239,19 +235,6 @@ dev_name_lookup(
 		}
 	    }
 	    simple_unlock(&dev_name_lock);
-#if CDLI > 0
-    {
-	    /* Check CDLI for device */
-	    struct ndd *nddp;
-	    
-	    if (nddp = ns_locate_wo_lock(name))
-	    {
-		    *ops = &nddp->d_ops;
-		    *unit = nddp->ndd_unit;
-		    return (TRUE);
-	    }
-    }
-#endif
 	    /* Not found in either list. */
 	    return (FALSE);
 	}

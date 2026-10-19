@@ -32,7 +32,6 @@
  * more effective.
  *
  * Support for non-Ethernet media to be verified.
- * Check the CDLI interface work.
  */ 
 
 #ifndef eth_common_h
