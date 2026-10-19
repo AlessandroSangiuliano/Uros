@@ -1,0 +1,72 @@
+Kind: widen
+Issue: #710
+Holds open: futex_wait()'s window between its two reads of the word -- the waiter declares its wait at splsched and spins 100 ms before the second read, only for a word holding 0x07100710, pthread_test's, and at most 16 times; pthread_test's last case unmaps the page 20 ms after the waiter says it is calling the kernel, so the unmap lands inside the window, and in the fixed tree the second read fails and the wait answers KERN_NOT_WAITING; each hold says so on the console, before splsched
+Run: --entry 14 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
+index c6301e2d..b13968b8 100644
+--- a/uros/src/mach_kernel/kern/sync_sema.c
++++ b/uros/src/mach_kernel/kern/sync_sema.c
+@@ -750,6 +750,41 @@ futex_pass_on_wake(event_t key)
+ 	thread_wakeup_one(key);
+ }
+ 
++/*
++ * #710 widen: a futex waiter held between its two reads, so that another
++ * thread of its task can take the page away in between.  Only for a word
++ * holding WIDEN_710_WORD, pthread_test's, and at most WIDEN_710_BUDGET times.
++ * The hold is a spin of WIDEN_710_MS at splsched with the wait declared, the
++ * state the window is in; the shootdown the unmap sends is class 15 and
++ * reaches it.  The line is said before splsched, where printf() can take what
++ * it needs.
++ */
++#define	WIDEN_710_WORD		0x07100710u
++#define	WIDEN_710_MS		100
++#define	WIDEN_710_BUDGET	16
++
++static volatile int	widen_710_left = WIDEN_710_BUDGET;
++
++static boolean_t
++widen_710_wanted(unsigned int word)
++{
++	if (word != WIDEN_710_WORD || widen_710_left <= 0)
++		return FALSE;
++	widen_710_left--;
++	printf("#710 widen: a futex waiter held %d ms between its two reads\n",
++	       WIDEN_710_MS);
++	return TRUE;
++}
++
++static void
++widen_710_hold(void)
++{
++	int	ms;
++
++	for (ms = 0; ms < WIDEN_710_MS; ms++)
++		delay(1000);
++}
++
+ static kern_return_t
+ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
+ 	   boolean_t is_private)
+@@ -759,6 +794,7 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
+ 	unsigned int	cur;
+ 	spl_t		s;
+ 	int		ticks = 0;
++	boolean_t	hold;
+ 
+ 	key = futex_key(uaddr, is_private);
+ 	if (key == (event_t) 0)
+@@ -785,9 +821,12 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
+ 	 */
+ 	if (copyin((const char *) uaddr, (char *) &cur, sizeof(cur)) != 0)
+ 		return KERN_INVALID_ADDRESS;
++	hold = widen_710_wanted(cur);
+ 
+ 	s = splsched();
+ 	assert_wait(key, TRUE);
++	if (hold)
++		widen_710_hold();
+ 
+ 	/*
+ 	 * Re-read the word now that we are queued on the wait hash: this
