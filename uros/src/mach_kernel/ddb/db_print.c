@@ -142,7 +142,6 @@
 /*
  * Miscellaneous printing.
  */
-#include <dipc.h>
 #include <task_swapper.h>
 
 #include <string.h>			/* For strlen() */
@@ -1137,22 +1136,12 @@ db_system_stats(void)
 {
 	extern void	db_device(void);
 	extern void	db_sched(void);
-#if	DIPC
-	extern void	db_dipc_stats(void);
-	extern void	db_show_kkt(void);
-#endif	/* DIPC */
 
 	db_sched();
 	iprintf("\n");
 	db_vm();
 	iprintf("\n");
 	db_device();
-#if	DIPC
-	iprintf("\n");
-	db_dipc_stats();
-	iprintf("\n");
-	db_show_kkt();
-#endif	/* DIPC */
 	iprintf("\n");
 	db_printf("current_{thread/task} 0x%x 0x%x\n",
 			current_thread(),current_task());

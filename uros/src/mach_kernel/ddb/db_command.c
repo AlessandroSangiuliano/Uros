@@ -186,12 +186,7 @@
  * Command dispatcher.
  */
 #include <cpus.h>
-#include <dipc.h>
-#include <dipc_timer.h>
-#include <xkmachkernel.h>
-#include <norma_vm.h>
 #ifdef	AT386
-#include <norma_scsi.h>
 #endif	/* AT386 */
 
 #include <mach/boolean.h>
@@ -233,13 +228,7 @@
 #include <kern/lock.h>			/* For db_show_all_slocks(). */
 #include <device/ds_routines.h>		/* For db_show_ior(). */
 
-#if	DIPC_TIMER
-#include <dipc/dipc_timer.h>
-#endif	/* DIPC_TIMER */
 
-#if	NORMA_VM
-#include <xmm/xmm_obj.h>
-#endif	/* NORMA_VM */
 
 /*
  * Exported global variables
@@ -539,77 +528,12 @@ db_command_list(
 
 extern void	db_system_stats(void);
 
-#if     XKMACHKERNEL
-extern void     db_show_net_memory(void);
 
-struct db_command db_show_net_cmds[] = {
-        { "memory",     (db_func)db_show_net_memory,            0,      0 },
-};
-#endif /* XKMACHKERNEL */
-
-#if	DIPC
-extern void	db_dipc_stats(void), db_dipc_memory(void),
-		db_dipc_port_deads(void), db_dipc_port_table(void),
-		db_dipc_msg_progress(void), db_dipc_special_ports(void),
-		db_dipc_port_table_proxies(void),
-		db_dipc_port_table_principals(void), db_dipc_port_get(void);
-
-extern void	db_show_kkt_handle(void), db_show_kkt_request(void),
-		db_show_kkt_channel(void), db_show_kkt(void),
-		db_show_kkt_node_map(void);
-#if	PARAGON860
-extern void	db_show_kkt_transmit(void), db_show_kkt_transport(void);
-#endif	/* PARAGON860 */
-#if	NORMA_SCSI
-extern void	db_show_kkt_node(void), db_show_kkt_msg(void),
-		db_show_kkt_event(void);
-#endif	/* NORMA_SCSI */
-
-struct db_command db_dipc_port_cmds[] = {
-	{ "dead",	(db_func)db_dipc_port_deads,		0,	0 },
-	{ "principals",	(db_func)db_dipc_port_table_principals,	0,	0 },
-	{ "proxies",	(db_func)db_dipc_port_table_proxies,	0,	0 },
-	{ "special",	(db_func)db_dipc_special_ports,		0,	0 },
-	{ "table",	(db_func)db_dipc_port_table,		0,	0 },
-	{ "uid",	(db_func)db_dipc_port_get,		0,	0 },
-	{ (char *)0 }
-};
-
-struct db_command db_dipc_cmds[] = {
-	{ "port",	0,			0,	db_dipc_port_cmds },
-	{ "memory",	(db_func)db_dipc_memory,		0,	0 },
-	{ "message_progress",(db_func)db_dipc_msg_progress,	0,	0 },
-	{ "mp",		(db_func)db_dipc_msg_progress,		0,	0 },
-	{ "stats",	(db_func)db_dipc_stats,			0,	0 },
-	{ (char *)0 }
-};
-
-struct db_command db_show_kkt_cmds[] = {
-	{ "handle",	(db_func)db_show_kkt_handle,		0,	0 },
-	{ "request",	(db_func)db_show_kkt_request,		0,	0 },
-	{ "channel",	(db_func)db_show_kkt_channel,		0,	0 },
-	{ "stats",	(db_func)db_show_kkt,			0,	0 },
-	{ "map",	(db_func)db_show_kkt_node_map,		0,	0 },
-#if	PARAGON860
-	{ "transmit",	(db_func)db_show_kkt_transmit,		0,	0 },
-	{ "transport",	(db_func)db_show_kkt_transport,		0,	0 },
-#endif	/* PARAGON860 */
-#if	NORMA_SCSI
-        { "node",	(db_func)db_show_kkt_node,		0,	0 },
-        { "msg",	(db_func)db_show_kkt_msg,		0,	0 },
-        { "event",	(db_func)db_show_kkt_event,		0,	0 },
-#endif	/* NORMA_SCSI */
-	{ (char *)0 }
-};
-#endif	/*DIPC*/
 
 struct db_command db_show_all_cmds[] = {
 #if	USLOCK_DEBUG
 	{ "slocks",	(db_func) db_show_all_slocks,		0,	0 },
 #endif	/* USLOCK_DEBUG */
-#if	DIPC_TIMER
-	{ "timers",	(db_func)db_timer_print,		0,	0 },
-#endif	/* DIPC_TIMER */
 	{ "acts",	db_show_all_acts,			0,	0 },
 	{ "spaces",	db_show_all_spaces, 			0,	0 },
 	{ "tasks",	db_show_all_acts,			0,	0 },
@@ -627,13 +551,6 @@ extern void		db_show_one_lock(lock_t*);
 
 struct db_command db_show_cmds[] = {
 	{ "all",	0,			0,	db_show_all_cmds },
-#if	DIPC
-	{ "dipc",	0,			0,	db_dipc_cmds },
-	{ "kkt",	0,			0,	db_show_kkt_cmds },
-#endif	/* DIPC */
-#if     XKMACHKERNEL
-	{ "net",        0,                      0,      db_show_net_cmds },
-#endif /* XKMACHKERNEL */
 	{ "registers",	db_show_regs,		0,	0 },
 	{ "variables",	(db_func) db_show_variable,	CS_OWN,	0 },
 	{ "breaks",	(db_func) db_listbreak_cmd, 	0,	0 },
@@ -656,23 +573,14 @@ struct db_command db_show_cmds[] = {
         { "ior",	(db_func)db_show_ior,		0,	0 },
 	{ "ipc_port",	db_show_port_id,	0,	0 },
 	{ "lock",	(db_func)db_show_one_lock,	0,	0 },
-#if	NORMA_VM
-	{ "xmm_obj",	(db_func) xmm_obj_print,	0,	0 },
-	{ "xmm_reply",	(db_func) xmm_reply_print,	0,	0 },
-#endif	/* NORMA_VM */
 #if	TRACE_BUFFER
 	{ "tr",		db_show_tr,		0,	0 },
 #endif	/* TRACE_BUFFER */
 	{ "space",	db_show_one_space,	0,	0 },
 	{ "system",	(db_func) db_system_stats,	0,	0 },
-#if	DIPC_TIMER
-	{ "timer",	(db_func)db_show_one_timer,	0,	0 },
-#endif	/* DIPC_TIMER */
 	{ "zone",	db_show_one_zone,	0,	0 },
         { "simple_lock", db_show_one_simple_lock,	0,      0 },
-#if !NORMA_IPC
 	{ "mutex",      db_show_one_mutex,      0,      0 },
-#endif /* !NORMA_IPC */
         { "tlog",	(db_func)db_show_thread_log,    0,      0 },
 	{ "subsystem",	db_show_subsystem,	0,	0 },
 	{ (char *)0, }

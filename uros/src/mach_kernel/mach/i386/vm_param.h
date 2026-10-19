@@ -161,8 +161,6 @@
 
 #ifdef	MACH_KERNEL
 
-#include <norma_vm.h>
-#include <xkmachkernel.h>
 #include <task_swapper.h>
 #include <thread_swapper.h>
 
@@ -170,7 +168,6 @@
 #include <i386/cpuid.h>
 #endif
 
-#if !NORMA_VM && !XKMACHKERNEL
 #if !TASK_SWAPPER && !THREAD_SWAPPER
 #define KERNEL_STACK_SIZE	(I386_PGBYTES/2)
 #else
@@ -178,10 +175,6 @@
 #define KERNEL_STACK_SIZE	(I386_PGBYTES)
 #endif	/* TASK || THREAD SWAPPER */
 #define INTSTACK_SIZE		(I386_PGBYTES)	/* interrupt stack size */
-#else	/* NORMA_VM  && !XKMACHKERNEL */
-#define KERNEL_STACK_SIZE	(I386_PGBYTES*2)
-#define INTSTACK_SIZE		(I386_PGBYTES*2)	/* interrupt stack size */
-#endif	/* NORMA_VM && !XKMACHKERNEL */
 
 #endif	/* MACH_KERNEL */
 

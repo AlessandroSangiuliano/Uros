@@ -70,8 +70,6 @@
 #define VM_MAX_KERNEL_LOADED_ADDRESS	((vm_offset_t) 0xffffffffffffffffUL)
 
 #ifdef	MACH_KERNEL
-#include <norma_vm.h>
-#include <xkmachkernel.h>
 #include <task_swapper.h>
 #include <thread_swapper.h>
 
@@ -91,13 +89,8 @@ _Static_assert(VM_MIN_KERNEL_ADDRESS == (vm_offset_t) KERNEL_HALF_BASE,
  * width and there are four more of them, so the frames this stack has to
  * hold are the reason, not caution.
  */
-#if !NORMA_VM && !XKMACHKERNEL
 #define KERNEL_STACK_SIZE	(X86_64_PGBYTES * 4)
 #define INTSTACK_SIZE		(X86_64_PGBYTES * 4)
-#else
-#define KERNEL_STACK_SIZE	(X86_64_PGBYTES * 8)
-#define INTSTACK_SIZE		(X86_64_PGBYTES * 8)
-#endif
 #endif	/* MACH_KERNEL */
 
 #define trunc_x86_64_to_vm(p)	(atop(trunc_page(x86_64_ptob(p))))
