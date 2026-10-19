@@ -577,15 +577,12 @@ ipc_mqueue_deliver(
 	assert(IP_VALID(port));
 	assert(ip_active(port));
 
-	{
-		pset = port->ip_pset;
-		if (pset == IPS_NULL)
-			mqueue = &port->ip_messages;
-		else
-			mqueue = &pset->ips_messages;
-
-			imq_lock(mqueue);
-	}
+	pset = port->ip_pset;
+	if (pset == IPS_NULL)
+		mqueue = &port->ip_messages;
+	else
+		mqueue = &pset->ips_messages;
+	imq_lock(mqueue);
 
 	port->ip_msgcount++;
 	assert(port->ip_msgcount > 0);
