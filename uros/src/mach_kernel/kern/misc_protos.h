@@ -326,8 +326,6 @@ extern void machine_callstack(
 
 extern void consider_machine_collect(void);
 
-extern void norma_bootstrap(void);
-
 
 /*
  * Whether Debugger() would actually enter a debugger if called now (#428).

@@ -522,15 +522,6 @@ start_kernel_threads(void)
 	device_service_create();
 
 	/*
-	 *	Initialize distributed services, starting
-	 *	with distributed IPC and progressing to any
-	 *	services layered on top of that.
-	 *
-	 *	This stub exists even in non-NORMA systems.
-	 */
-	norma_bootstrap();
-
-	/*
 	 *	Initialize any testing services blocking the main kernel
 	 *	thread so that the in-kernel tests run without interference
 	 *	from other boot time activities. We will resume this thread
