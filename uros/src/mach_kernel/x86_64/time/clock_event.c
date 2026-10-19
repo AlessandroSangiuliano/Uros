@@ -625,12 +625,13 @@ burnin_handler(struct trap_frame *frame)
 		(void) clock_event_arm_tick();
 
 	/*
-	 * _no_check: the balanced re-enable, WITHOUT the preemption check it
-	 * would otherwise run.  Taking the switch here would put it back
-	 * inside the interrupt, which is the thing being avoided; the AST
-	 * raised above is taken on the way out of the trap instead.
+	 * No preemption level to give back (#718).  trap.c calls an external
+	 * vector's handler with no disable_preemption() around it, and this
+	 * one raises none, so the re-enable that was here released a level
+	 * nobody had raised: 200 times in a two-second burn-in, which left
+	 * processor 0 at -200 for the rest of the boot.  clock_event_tick()
+	 * has the pair because it raises the level itself.
 	 */
-	enable_preemption_no_check();
 }
 
 void
