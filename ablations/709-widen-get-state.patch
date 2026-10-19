@@ -1,0 +1,53 @@
+Kind: widen
+Issue: #709
+Holds open: thread_get_state()'s window between stopping its thread and letting it go -- 100 ms after thread_stop_wait() and before the activation's lock is taken again, for a receiver that asked for a receive of 0x7090 bytes, act_test [13]'s, and at most 8 times; act_test [13] sends that receiver a message inside the hold and looks at its buffer before thread_get_state() returns, and in the fixed tree the message waits in the kernel; outside the lock, so that a receiver a delivery restarts is not held up on it; each hold says so on the console
+Run: --entry 14 1200 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/thread_act.c b/uros/src/mach_kernel/kern/thread_act.c
+index 998331ab..779a7b05 100644
+--- a/uros/src/mach_kernel/kern/thread_act.c
++++ b/uros/src/mach_kernel/kern/thread_act.c
+@@ -896,6 +896,35 @@ thread_set_special_port(
+  *  now if it's not the top of the chain, use a special handler to
+  *  get the information when the shuttle returns to the activation.
+  */
++/*
++ * #709 widen: thread_get_state() holds a stopped receiver 100 ms before it
++ * takes the activation's lock again, for a receiver that asked for a receive
++ * of WIDEN_709_SIZE, act_test [13]'s, and at most WIDEN_709_BUDGET times.
++ * act_test sends that receiver a message inside the hold.  Outside the lock,
++ * so that a receiver a delivery restarts is not held up on it; each hold says
++ * so on the console.
++ */
++#define	WIDEN_709_SIZE		0x7090
++#define	WIDEN_709_MS		100
++#define	WIDEN_709_BUDGET	8
++
++static int	widen_709_left = WIDEN_709_BUDGET;
++
++static void
++widen_709_hold(thread_t thread)
++{
++	int	ms;
++
++	if (thread == THREAD_NULL || thread->ith_msize != WIDEN_709_SIZE ||
++	    widen_709_left <= 0)
++		return;
++	widen_709_left--;
++	printf("#709 widen: thread_get_state() holds a stopped receiver %d ms\n",
++	       WIDEN_709_MS);
++	for (ms = 0; ms < WIDEN_709_MS; ms++)
++		delay(1000);
++}
++
+ kern_return_t
+ thread_get_state(
+ 	register thread_act_t	thr_act,
+@@ -921,6 +950,7 @@ thread_get_state(
+ 			break;
+ 		act_unlock_thread(thr_act);
+ 		(void)thread_stop_wait(thread);
++		widen_709_hold(thread);
+ 		nthread = act_lock_thread(thr_act);
+ 		if (nthread == thread)
+ 			break;
