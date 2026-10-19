@@ -254,7 +254,6 @@
 
 #include <cpus.h>
 #include <mach_rt.h>
-#include <norma_vm.h>
 
 #include <mach/boolean.h>
 #include <mach/kern_return.h>

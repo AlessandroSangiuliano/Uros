@@ -161,7 +161,6 @@
 #ifndef	_IPC_IPC_PORT_H_
 #define _IPC_IPC_PORT_H_
 
-#include <norma_vm.h>
 #include <mach_rt.h>
 #include <mach_assert.h>
 #include <mach_debug.h>

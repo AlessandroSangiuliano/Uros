@@ -186,7 +186,6 @@
  *	Functions to manipulate IPC ports.
  */
 
-#include <norma_vm.h>
 #include <mach_kdb.h>
 #include <zone_debug.h>
 #include <mach_assert.h>

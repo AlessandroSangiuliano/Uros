@@ -38,8 +38,6 @@
 #ifndef eth_common_h
 #define eth_common_h
 
-#include        <xkmachkernel.h>
-#include        <xk_debug.h>
 
 
 
