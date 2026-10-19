@@ -2035,10 +2035,6 @@ db_ref(
 }
 
 
-#ifndef	DIPC_IS_DIPC_PORT
-#define	DIPC_IS_DIPC_PORT(p)	0
-#endif	/* DIPC_IS_DIPC_PORT */
-
 /*
  *	Examine all currently allocated ports.
  *	Options:
@@ -2061,7 +2057,6 @@ db_port_walk(
 	unsigned int	ref_counts[MAX_REFS];
 	unsigned int	inactive[MAX_REFS];
 	unsigned int	ipc_ports = 0;
-	unsigned int	proxies = 0, principals = 0;
 
 	iprintf("Allocated port count is %d\n", port_count);
 	no_receiver = no_match = ref_overflow = 0;
@@ -2081,21 +2076,9 @@ db_port_walk(
 	queue_iterate(&port_alloc_queue, port, ipc_port_t, ip_port_links) {
 		char	*port_type;
 
-		if (DIPC_IS_DIPC_PORT(port)) {
-			if (IP_IS_REMOTE(port)) {
-				port_type = "    PROXY";
-				if (ip_active(port))
-					++proxies;
-			} else {
-				port_type = "PRINCIPAL";
-				if (ip_active(port))
-					++principals;
-			}
-		} else {
-			port_type = " IPC port";
-			if (ip_active(port))
-				ipc_ports++;
-		}
+		port_type = " IPC port";
+		if (ip_active(port))
+			ipc_ports++;
 
 		refs = port->ip_references;
 		if (ref_search && refs != ref_target)
