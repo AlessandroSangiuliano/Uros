@@ -2709,13 +2709,16 @@ arm_thirteen_message_to_a_receiver_being_read(void)
  *    own space (#688) ──────────────────────────────────────────────────────
  *
  * task_terminate() takes a task's threads off it and then destroys its IPC
- * space, and thread_terminate() does not wait for a thread to leave the
- * kernel: a thread of the dying task can be inside a trap that looks a name
- * up in that space while the space dies.  fast_send_right_lookup(), which
- * syscall_task_info() and four other traps go through, asserted that the
- * space was alive, and so did mach_msg()'s three locked fast paths.
- * taskpanic_load met the first assert in 6 boots of 8, when -t did not ask
- * and its thirty seconds ran out with two threads in syscall_task_info().
+ * space.  thread_terminate() stops each thread wherever it is and lets it go
+ * again to die on its own, so a thread stopped inside a trap goes on with it.
+ * syscall_task_info() on its own task is where that happens: the task's lock
+ * is held by task_terminate(), ref_task_port_locked() sleeps a tick in
+ * mutex_pause() and port_name_to_task() looks the name up again, after the
+ * space has died.  fast_send_right_lookup(), which it and four other traps
+ * go through, asserted that the space was alive, and so did mach_msg()'s
+ * three locked fast paths.  taskpanic_load met the first assert in 6 boots
+ * of 8, when -t did not ask and its thirty seconds ran out with two threads
+ * in syscall_task_info().
  *
  * Each round makes a child with this task's memory and starts three threads
  * in it: two call syscall_task_info() on their own task for ever, and one
@@ -2727,9 +2730,13 @@ arm_thirteen_message_to_a_receiver_being_read(void)
  * dead name after each one.
  *
  * ⚠️ From here, nothing shows whether a thread was inside the window when its
- * space died, since the thread dies on its way out.  The ablations
- * 688-lookup-asserts-live and 688-copyin-asserts-live put the asserts back,
- * and this arm is what stops the kernel on them.
+ * space died, since the thread dies on its way out.  The ablations put the
+ * asserts back, and this arm is what stops the kernel on them:
+ * 688-lookup-asserts-live as it is, and 688-copyin-asserts-live over
+ * 688-widen-copyin-late, which puts the third thread to sleep where the
+ * first two sleep by themselves.  mach_msg() does not sleep before its
+ * lookup, so without the widen a thread is stopped there only by a
+ * preemption that lands in those few instructions.
  */
 #define	ARM14_ROUNDS		50
 #define	ARM14_STACK		(16 * 1024)
@@ -2751,38 +2758,50 @@ arm_fourteen_trap_loop(void)
 	}
 }
 
+union arm14_msg {
+	struct {
+		mach_msg_header_t	head;
+		NDR_record_t		ndr;
+		task_flavor_t		flavor;
+		mach_msg_type_number_t	count;
+	}	in;
+	struct {
+		mach_msg_header_t	head;
+		NDR_record_t		ndr;
+		kern_return_t		ret;
+	}	out;
+	char	room[256];
+};
+
+/* task_info()'s message to `task', its reply received on `reply'. */
+static mach_msg_return_t
+arm_fourteen_ask(mach_port_t task, mach_port_t reply, union arm14_msg *m)
+{
+	m->in.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+					      MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	m->in.head.msgh_size = sizeof(m->in);
+	m->in.head.msgh_remote_port = task;
+	m->in.head.msgh_local_port = reply;
+	m->in.head.msgh_id = ARM14_TASK_INFO_ID;
+	m->in.ndr = NDR_record;
+	m->in.flavor = TASK_BASIC_INFO;
+	m->in.count = TASK_BASIC_INFO_COUNT;
+	return mach_msg_overwrite_trap(&m->in.head,
+				       MACH_SEND_MSG | MACH_RCV_MSG,
+				       sizeof(m->in), sizeof(*m), reply,
+				       MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,
+				       (mach_msg_header_t *) 0, 0);
+}
+
 static void
 arm_fourteen_rpc_loop(void)
 {
 	mach_port_t	self = (mach_task_self)();	/* the trap */
 	mach_port_t	reply = mach_reply_port();
-	union {
-		struct {
-			mach_msg_header_t	head;
-			NDR_record_t		ndr;
-			task_flavor_t		flavor;
-			mach_msg_type_number_t	count;
-		}	in;
-		char	out[256];
-	} m;
+	union arm14_msg	m;
 
-	for (;;) {
-		m.in.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
-						     MACH_MSG_TYPE_MAKE_SEND_ONCE);
-		m.in.head.msgh_size = sizeof(m.in);
-		m.in.head.msgh_remote_port = self;
-		m.in.head.msgh_local_port = reply;
-		m.in.head.msgh_id = ARM14_TASK_INFO_ID;
-		m.in.ndr = NDR_record;
-		m.in.flavor = TASK_BASIC_INFO;
-		m.in.count = TASK_BASIC_INFO_COUNT;
-		(void) mach_msg_overwrite_trap(&m.in.head,
-					       MACH_SEND_MSG | MACH_RCV_MSG,
-					       sizeof(m.in), sizeof(m), reply,
-					       MACH_MSG_TIMEOUT_NONE,
-					       MACH_PORT_NULL,
-					       (mach_msg_header_t *) 0, 0);
-	}
+	for (;;)
+		(void) arm_fourteen_ask(self, reply, &m);
 }
 
 /* A thread of the child, started at `fn' on a stack of its own. */
@@ -2824,6 +2843,28 @@ arm_fourteen_terminate_inside_traps(void)
 	mach_port_type_t	type;
 	kern_return_t		kr;
 	int			round;
+
+	/*
+	 * The third thread's question, asked here first: a message the kernel
+	 * did not answer would leave that thread looping on a refusal, and
+	 * the arm would pass without having asked anything through mach_msg().
+	 */
+	{
+		mach_port_t		reply = mach_reply_port();
+		union arm14_msg		m;
+		mach_msg_return_t	mr = arm_fourteen_ask(me, reply, &m);
+
+		(void) mach_port_mod_refs(me, reply, MACH_PORT_RIGHT_RECEIVE,
+					  -1);
+		if (mr != MACH_MSG_SUCCESS || m.out.ret != KERN_SUCCESS) {
+			printf("act_test: [14] task_info()'s message, sent from "
+			       "here to this task, came back 0x%x with %d: the "
+			       "third thread's question is not one the kernel "
+			       "answers — WRONG\n", mr,
+			       mr == MACH_MSG_SUCCESS ? m.out.ret : 0);
+			return 0;
+		}
+	}
 
 	for (round = 0; round < ARM14_ROUNDS; round++) {
 		child = MACH_PORT_NULL;
