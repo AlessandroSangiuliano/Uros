@@ -241,6 +241,17 @@ pcid_judge() {	# x|n|d accelerator full-log
 	esac
 }
 
+# #688: whether -t held a processor at all, which the kernel says at the first
+# hold.  A boot with no -t panic is then one of two things to look into: a
+# processor held while none came inside the kernel, or no processor held.
+taskpanic_held() {	# full-log
+	if grep -aq "clock_event: -t holds cpu [0-9]* in a task's code, its first hold" "$1"; then
+		echo "a processor was held, and no other came inside the kernel on a task's thread"
+	else
+		echo "no processor was ever held in a task's code"
+	fi
+}
+
 judge() {	# entry verdict log-of-the-harness full-log accelerator
 	local e=$1 v=$2 h=$3 f=$4 a=$5
 	NOTE=""
@@ -333,6 +344,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	# the load ran.  A trap, or a boot that did not reach its end, is still
 	# WRONG, and for that.  ⚠️ No parenthesis in a note: ci/job.sh reads a
 	# verdict up to the first closing one.
+	#
+	# #688: the note also says whether -t held a processor, from the line
+	# the kernel prints at the first hold (taskpanic_held above).
 	taskpanic) if grep -aq 'panic(cpu [0-9]*): task_panic: asked for with -t' "$f"; then
 			! grep -aqE 'UrMach x86-64: trap |no handler' "$f" &&
 			{ grep -aq "held in a task's code until the stop" "$f" ||
@@ -344,9 +358,9 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 			NOTE="no -t panic, and the boot did not reach its end"
 			false
 		elif grep -aq 'taskpanic_load: [0-9]* s of load and -t did not ask' "$f"; then
-			NOTE="NOT ASKED: taskpanic_load loaded the machine and -t did not ask"
+			NOTE="NOT ASKED: taskpanic_load loaded the machine and -t did not ask; $(taskpanic_held "$f")"
 		else
-			NOTE="NOT ASKED: the boot ended before -t asked, and nothing loaded it"
+			NOTE="NOT ASKED: the boot ended before -t asked, and nothing loaded it; $(taskpanic_held "$f")"
 		fi ;;
 	esac
 }
