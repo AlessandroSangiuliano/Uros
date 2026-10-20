@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #688
+Holds open: the window in which -t holds a processor in a task's code and no other comes inside the kernel on a task's thread, for good -- A's test is made false, so B is held and let go until taskpanic_load's thirty seconds end the boot with no panic; the merge test's taskpanic judge must then say NOT ASKED with a processor held, read from the line the kernel prints at the first hold, and not WRONG; the fixed tree must still pass
+Run: --entry 53 300 -smp 4
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 26c1b3a7..3d836c4b 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -1184,7 +1184,7 @@ clock_event_tick(struct trap_frame *frame)
+ 								 TASK_PANIC_NOBODY,
+ 								 (int) cpu))
+ 					task_panic_hold(cpu, now);
+-			} else if (b >= 0 && b != (int) cpu &&
++			} else if (0 && b >= 0 && b != (int) cpu &&
+ 				   __sync_bool_compare_and_swap(&task_panic_state, b,
+ 								TASK_PANIC_FIRED))
+ 				panic("task_panic: asked for with -t, on a task's "
