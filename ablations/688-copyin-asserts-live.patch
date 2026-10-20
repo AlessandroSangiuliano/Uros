@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #688
 Over: 688-widen-copyin-late.patch
-Takes out: the first site of 528f4d7a -- mach_msg()'s request copyin asserts again, under the read lock, that the sender's space is alive, where it went to slow_copyin; act_test [14]'s third thread sends task_info()'s message to its own task in a loop, and over 688-widen-copyin-late it reads the space's generation after the space died, so the per-thread cache and the lock-free resolve both refuse it, the locked lookup is where it comes, and the assert stops the kernel; without the widen the thread read the generation before the space died in 6 boots of 6, the cache's check after the port locks sent it to slow_copyin, and nothing was caught
+Takes out: the first site of 528f4d7a -- mach_msg()'s request copyin asserts again, under the read lock, that the sender's space is alive, where it went to slow_copyin; act_test [14]'s third thread sends task_info()'s message to its own task in a loop, and over 688-widen-copyin-late, asleep in the hot path while its task is terminated, it reads the space's generation after the space died, so the per-thread cache and the lock-free resolve both refuse it, the locked lookup is where it comes, and the assert stops the kernel; without the widen the thread read the generation before the space died in 6 boots of 6, the cache's check after the port locks sent it to slow_copyin, and nothing was caught
 Run: --entry 14 1200 -smp 4
 Expect: Assertion failed: file "[^"]*/ipc/mach_msg\.c", line [0-9]+: space->is_active
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
