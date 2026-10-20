@@ -383,11 +383,13 @@ semaphore_wait_common (semaphore_t semaphore, tvalspec_t *wait_time)
 		 * the decrement below takes a count that is there, and the test
 		 * under the lock answers for one that is not.
 		 *
-		 * In 64 bits: a wait too long for the int thread_set_timeout()
-		 * takes is made infinite, as it was -- 248 days at 100 Hz.
+		 * The seconds in 64 bits: a wait too long for the int
+		 * thread_set_timeout() takes is made infinite, as it was -- 248
+		 * days at 100 Hz.  The nanoseconds in 32, which hold them, so
+		 * that i386 divides them with an instruction and not a call.
 		 */
 		ticks = (unsigned long long) wait_time->tv_sec * hz
-			+ ((unsigned long long) wait_time->tv_nsec
+			+ ((unsigned int) wait_time->tv_nsec
 			   + NSEC_PER_SEC / hz - 1)
 			  / (NSEC_PER_SEC / hz);
 		if (ticks > 0x7fffffff)
