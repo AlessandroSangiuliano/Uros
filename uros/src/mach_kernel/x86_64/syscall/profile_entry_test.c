@@ -69,11 +69,16 @@
 
 /*
  * The run lasts until this many traps have crossed the window, and a clean
- * run with fewer is NOT ASKED.  spl_test.c's count, for spl_test.c's reason:
+ * run with fewer is NOT ASKED.  A count, as spl_test.c's is, for its reason:
  * a crossing is a chance for the defect to show, not a certainty, and the
  * rate depends on the accelerator and the clock while the question does not.
+ *
+ * 🔴 A HUNDRED, MEASURED.  With twenty, on the epic's tree with the window
+ * held open, each of two boots on victus caught one trap sampled after a
+ * crossing (KVM and TCG, 20/10/2026): one in twenty, so twenty crossings miss
+ * the defect about one boot in three, and a hundred under one in a hundred.
  */
-#define	PROFILE_ENTRY_MIN_ASKED		20
+#define	PROFILE_ENTRY_MIN_ASKED		100
 /*
  * ⚠️ And NOT ASKED if it takes longer.  Short, because the verdict has to come
  * while the userland is still booting: the run ends where the bundle does,

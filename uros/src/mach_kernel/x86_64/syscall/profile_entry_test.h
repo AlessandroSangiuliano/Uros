@@ -11,7 +11,7 @@
 
 /*
  * Spinners free to move, two a processor at a user thread's priority, while
- * the userland boots; they stop when twenty profiled traps have been taken
+ * the userland boots; they stop when a hundred profiled traps have been taken
  * off their processor between the entry and the dispatch (twenty seconds at
  * most).  Then the profile's counts say whether any of them was sampled all
  * the same, or opened with an earlier call's reading.
