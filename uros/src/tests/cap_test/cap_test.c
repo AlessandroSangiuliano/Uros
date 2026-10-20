@@ -45,6 +45,7 @@
 #include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
 #include <mach/clock.h>		/* #708: host_get_clock_service, clock_get_time */
 #include <mach/urmach_futex.h>	/* #708: the futex's three timed waits */
+#include <pthread.h>		/* #708: [31]'s sender */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
@@ -3109,6 +3110,119 @@ a_futex_waits_as_long_as_told(mach_port_t task)
     return ok;
 }
 
+/*
+ * #708: [31] a mach_msg() timeout longer than 2^32 / hz milliseconds.
+ *
+ * convert_ipc_timeout_to_ticks() multiplied the milliseconds by hz in 32
+ * bits, so a timeout past 42949672 ms -- eleven hours and fifty-six minutes at
+ * 100 Hz -- wrapped, and 42949673 ms came out as one tick.  A receive is told
+ * to wait that long on a port a second thread sends to after 0.3 s, and must
+ * come back with the message, not with MACH_RCV_TIMED_OUT.
+ *
+ * ⚠️ If the send fails the sender destroys the port, so that the receive ends
+ * either way: with the conversion right it would otherwise wait for its
+ * twelve hours, and a test that hangs reports nothing.
+ */
+#define IPC_TIMEOUT_WRAPS	42949673u	/* x 100 is 2^32 + 4 */
+
+struct late_sender {
+    mach_port_t   port;
+    kern_return_t idle_kr;
+    kern_return_t send_kr;
+};
+
+static void *
+send_after_a_while(void *arg)
+{
+    struct late_sender *s = arg;
+    struct { mach_msg_header_t head; char room[64]; } idle_msg;
+    mach_msg_header_t m;
+    mach_port_t   idle = MACH_PORT_NULL;
+
+    /* 0.3 s by a receive nobody sends to, short enough for either way. */
+    s->idle_kr = mach_port_allocate(mach_task_self(),
+                                    MACH_PORT_RIGHT_RECEIVE, &idle);
+    if (s->idle_kr == KERN_SUCCESS) {
+        s->idle_kr = mach_msg(&idle_msg.head,
+                              MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                              sizeof(idle_msg), idle, 300, MACH_PORT_NULL);
+        (void)mach_port_destroy(mach_task_self(), idle);
+    }
+
+    memset(&m, 0, sizeof(m));
+    m.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+    m.msgh_size        = sizeof(m);
+    m.msgh_remote_port = s->port;
+    m.msgh_local_port  = MACH_PORT_NULL;
+    m.msgh_id          = 708;
+    s->send_kr = mach_msg(&m, MACH_SEND_MSG, sizeof(m), 0, MACH_PORT_NULL,
+                          MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (s->send_kr != MACH_MSG_SUCCESS)
+        (void)mach_port_destroy(mach_task_self(), s->port);
+    return (void *)0;
+}
+
+static boolean_t
+a_long_receive_timeout_is_long(void)
+{
+    struct { mach_msg_header_t head; char room[64]; } got;
+    struct late_sender s;
+    mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
+    pthread_t     sender;
+    tvalspec_t    t0, t1;
+    kern_return_t kr;
+    long          ms;
+    boolean_t     ok = 1;
+
+    kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [31] host_get_clock_service FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+    s.port = MACH_PORT_NULL;
+    s.idle_kr = s.send_kr = KERN_FAILURE;
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &s.port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [31] mach_port_allocate FAIL kr=%d\n", (int)kr);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    if (pthread_create(&sender, NULL, send_after_a_while, &s) != 0) {
+        printf("cap_test: [31] pthread_create FAIL\n");
+        (void)mach_port_destroy(mach_task_self(), s.port);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+
+    memset(&got, 0, sizeof(got));
+    (void)clock_get_time(clk, &t0);
+    kr = mach_msg(&got.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(got),
+                  s.port, IPC_TIMEOUT_WRAPS, MACH_PORT_NULL);
+    (void)clock_get_time(clk, &t1);
+    ms = us_between(&t0, &t1) / 1000;
+    (void)pthread_join(sender, NULL);
+
+    if (kr != MACH_MSG_SUCCESS || got.head.msgh_id != 708 || ms < 150) {
+        printf("cap_test: [31] a receive told %u ms answered 0x%x after %ld "
+               "ms -- WRONG (#708)\n", IPC_TIMEOUT_WRAPS, (unsigned)kr, ms);
+        ok = 0;
+    } else
+        printf("cap_test: [31] a receive told %u ms had the message sent "
+               "after 0.3 s, after %ld ms (#708)\n", IPC_TIMEOUT_WRAPS, ms);
+    if (s.idle_kr != MACH_RCV_TIMED_OUT || s.send_kr != MACH_MSG_SUCCESS) {
+        printf("cap_test: [31] the sender's wait answered 0x%x and its send "
+               "0x%x -- FAIL\n", (unsigned)s.idle_kr, (unsigned)s.send_kr);
+        ok = 0;
+    }
+
+    if (s.send_kr == MACH_MSG_SUCCESS)
+        (void)mach_port_destroy(mach_task_self(), s.port);
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3588,6 +3702,10 @@ main(int argc, char **argv)
 
     /* #708: a futex's, rounded down to a tick. */
     if (!a_futex_waits_as_long_as_told(mach_task_self()))
+        pass = 0;
+
+    /* #708: and mach_msg()'s past 2^32 / hz ms, wrapped. */
+    if (!a_long_receive_timeout_is_long())
         pass = 0;
 
     /* #597: no task reaches the configuration ports, claimed or not. */
