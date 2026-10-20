@@ -368,23 +368,31 @@ semaphore_wait_common (semaphore_t semaphore, tvalspec_t *wait_time)
 		return KERN_INVALID_ARGUMENT;
 
 	if (wait_time != 0) {
+		unsigned long long	ticks;
+
 		if (BAD_TVALSPEC(wait_time) || wait_time->tv_sec < 0)
 			return KERN_INVALID_VALUE;
-		/* Compute the number of hz ticks to wait.  If the computation
-		   overflows, the wait is very long (248 days with 32-bit
-		   ints) so make it infinite.  */
-		ticks_to_wait = wait_time->tv_sec * hz;
-		if (ticks_to_wait < wait_time->tv_sec)
+		/*
+		 * The timeout in ticks, the nanoseconds rounded UP, so that a
+		 * timeout shorter than a tick still waits one (#708).  This was
+		 * tv_nsec / (NSEC_PER_SEC) / hz, integer division from the left
+		 * and so 0 for any timeout under a second; and a timeout with no
+		 * whole second in it then answered KERN_OPERATION_TIMED_OUT here,
+		 * before the count had been looked at.  A zero timeout is a try:
+		 * the decrement below takes a count that is there, and the test
+		 * under the lock answers for one that is not.
+		 *
+		 * In 64 bits: a wait too long for the int thread_set_timeout()
+		 * takes is made infinite, as it was -- 248 days at 100 Hz.
+		 */
+		ticks = (unsigned long long) wait_time->tv_sec * hz
+			+ ((unsigned long long) wait_time->tv_nsec
+			   + NSEC_PER_SEC / hz - 1)
+			  / (NSEC_PER_SEC / hz);
+		if (ticks > 0x7fffffff)
 			wait_time = 0;
-		else {
-			int t = ticks_to_wait +
-			    (wait_time->tv_nsec / (NSEC_PER_SEC)/hz);
-			if (t < ticks_to_wait)
-				wait_time = 0;
-			else if (ticks_to_wait == 0)
-				return KERN_OPERATION_TIMED_OUT;
-			else ticks_to_wait = t;
-		}
+		else
+			ticks_to_wait = (int) ticks;
 	}
 
 	spl_level = splsched();
