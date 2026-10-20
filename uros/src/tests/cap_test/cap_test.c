@@ -43,6 +43,9 @@
 #include <mach/mach_host.h>	/* #546: vm_wire, vm_remap */
 #include <mach/sync.h>		/* #552: semaphore_create/signal/wait */
 #include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
+#include <mach/clock.h>		/* #708: host_get_clock_service, clock_get_time */
+#include <mach/urmach_futex.h>	/* #708: the futex's three timed waits */
+#include <pthread.h>		/* #708: [31]'s sender */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
@@ -2921,6 +2924,292 @@ the_kernel_semaphores_answer(mach_port_t task)
     return 1;
 }
 
+/*
+ * #708: [29] semaphore_timedwait() under a second.
+ *
+ * The kernel turned the timeout into ticks as tv_sec * hz plus
+ * tv_nsec / NSEC_PER_SEC / hz -- integer division from the left, so the
+ * nanoseconds came to 0 below a second -- and with no whole second in it, it
+ * answered KERN_OPERATION_TIMED_OUT before it had looked at the count.  So four
+ * questions, each against what a semaphore promises: a timed wait under a
+ * second, and a zero timeout, take a count that is there; a zero timeout on a
+ * count of zero answers at once; and a wait under a second on a count of zero
+ * lasts about as long as it was told, by the realtime clock.
+ *
+ * ⚠️ That last one has a lower bound and only a loose upper one.  The defect
+ * answers at once, and a loaded boot can wake a waiter late: a test that fails
+ * for a scheduler's lateness reports the wrong thing.
+ */
+static boolean_t
+the_semaphore_waits_as_long_as_told(mach_port_t task)
+{
+    tvalspec_t    zero = { 0, 0 }, half = { 0, 500000000 };
+    tvalspec_t    fifth = { 0, 200000000 }, t0, t1;
+    mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
+    mach_port_t   sema = MACH_PORT_NULL;
+    kern_return_t kr;
+    long          ms;
+    boolean_t     ok = 1;
+
+    kr = semaphore_create(task, &sema, SYNC_POLICY_FIFO, 0);
+    if (kr != KERN_SUCCESS || sema == MACH_PORT_NULL) {
+        printf("cap_test: [29] semaphore_create FAIL kr=%d\n", (int)kr);
+        (void)mach_port_deallocate(mach_task_self(), host);
+        return 0;
+    }
+    kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [29] host_get_clock_service FAIL kr=%d\n", (int)kr);
+        (void)semaphore_destroy(task, sema);
+        return 0;
+    }
+
+    (void)semaphore_signal(sema);
+    kr = semaphore_timedwait(sema, half);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [29] a 0.5 s wait on a count of one answered %d "
+               "-- WRONG (#708)\n", (int)kr);
+        ok = 0;
+    }
+
+    (void)semaphore_signal(sema);
+    kr = semaphore_timedwait(sema, zero);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [29] a zero timeout on a count of one answered %d "
+               "-- WRONG (#708)\n", (int)kr);
+        ok = 0;
+    }
+
+    kr = semaphore_timedwait(sema, zero);
+    if (kr != KERN_OPERATION_TIMED_OUT) {
+        printf("cap_test: [29] a zero timeout on a count of zero answered %d "
+               "-- WRONG (#708)\n", (int)kr);
+        ok = 0;
+    }
+
+    (void)clock_get_time(clk, &t0);
+    kr = semaphore_timedwait(sema, fifth);
+    (void)clock_get_time(clk, &t1);
+    ms = (long)(t1.tv_sec - t0.tv_sec) * 1000
+         + ((long)t1.tv_nsec - (long)t0.tv_nsec) / 1000000;
+    if (kr != KERN_OPERATION_TIMED_OUT || ms < 150 || ms > 2000) {
+        printf("cap_test: [29] a 0.2 s wait on a count of zero answered %d "
+               "after %ld ms -- WRONG (#708)\n", (int)kr, ms);
+        ok = 0;
+    }
+
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    (void)semaphore_destroy(task, sema);
+    if (ok)
+        printf("cap_test: [29] semaphore_timedwait under a second: the "
+               "counts taken, and %ld ms waited of 200 (#708)\n", ms);
+    return ok;
+}
+
+/* Microseconds from t0 to t1, by the clock [29] reads. */
+static long
+us_between(const tvalspec_t *t0, const tvalspec_t *t1)
+{
+    return (long)(t1->tv_sec - t0->tv_sec) * 1000000
+           + ((long)t1->tv_nsec - (long)t0->tv_nsec) / 1000;
+}
+
+/*
+ * #708: [30] a futex's timeout, rounded down to a tick.
+ *
+ * The futex turned its milliseconds into ticks rounding down, with one tick
+ * for anything under one, so a 15 ms wait was given one tick -- 10 ms at most
+ * at 100 Hz -- where mach_msg()'s timeouts, and since [29]
+ * semaphore_timedwait()'s, are rounded up.  So each of the three ways a futex
+ * waits is told FUTEX_WAITS times in a row to wait 15 ms on a word nobody
+ * changes, and the row must take at least the time it was told.  Rounded up,
+ * two ticks a wait, it takes more than 150 ms; rounded down, one tick a wait,
+ * about 80.
+ *
+ * ⚠️ In a row and against the time told, because then lateness cannot make
+ * the fixed kernel fail: each wait starts when the one before it woke, so a
+ * late wake moves the rest of the row later and never shortens it.  The
+ * arm's first version measured each wait against a
+ * semaphore wait told the same, and a loaded uniprocessor boot under TCG woke
+ * the semaphore later than the futex: 238 ms against 409, a WRONG for a
+ * futex that had waited twice what it was told.
+ */
+#define FUTEX_WAITS	8
+#define FUTEX_WAIT_MS	15
+
+static boolean_t
+a_futex_waits_as_long_as_told(void)
+{
+    static const char *const way_name[3] = { "WAIT", "WAKE_WAIT", "WAITV" };
+    tvalspec_t    t0, t1;
+    mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
+    unsigned int  word = 0, nobody = 0, woken;
+    struct urmach_futexv v;
+    kern_return_t kr;
+    long          ms;
+    boolean_t     ok = 1;
+    int           way, i;
+
+    kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [30] host_get_clock_service FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+
+    v.uaddr = &word;
+    v.val = 0;
+    for (way = 0; way < 3; way++) {
+        kr = KERN_OPERATION_TIMED_OUT;
+        (void)clock_get_time(clk, &t0);
+        for (i = 0; i < FUTEX_WAITS && kr == KERN_OPERATION_TIMED_OUT; i++) {
+            if (way == 0)
+                kr = urmach_futex(&word,
+                                  URMACH_FUTEX_WAIT | URMACH_FUTEX_PRIVATE,
+                                  0, FUTEX_WAIT_MS, (unsigned int *)0);
+            else if (way == 1)
+                kr = urmach_futex(&word,
+                                  URMACH_FUTEX_WAKE_WAIT | URMACH_FUTEX_PRIVATE,
+                                  0, FUTEX_WAIT_MS, &nobody);
+            else
+                kr = urmach_futex_waitv(&v, 1, FUTEX_WAIT_MS, &woken);
+        }
+        (void)clock_get_time(clk, &t1);
+        ms = us_between(&t0, &t1) / 1000;
+
+        if (kr != KERN_OPERATION_TIMED_OUT) {
+            printf("cap_test: [30] a futex %s of %d ms answered %d "
+                   "-- WRONG (#708)\n", way_name[way], FUTEX_WAIT_MS, (int)kr);
+            ok = 0;
+        } else if (ms < FUTEX_WAITS * FUTEX_WAIT_MS) {
+            printf("cap_test: [30] futex %s: %d waits of %d ms in a row took "
+                   "%ld ms, of the %d told -- WRONG (#708)\n", way_name[way],
+                   FUTEX_WAITS, FUTEX_WAIT_MS, ms, FUTEX_WAITS * FUTEX_WAIT_MS);
+            ok = 0;
+        } else
+            printf("cap_test: [30] futex %s: %d waits of %d ms in a row took "
+                   "%ld ms, of the %d told (#708)\n", way_name[way],
+                   FUTEX_WAITS, FUTEX_WAIT_MS, ms, FUTEX_WAITS * FUTEX_WAIT_MS);
+    }
+
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    return ok;
+}
+
+/*
+ * #708: [31] a mach_msg() timeout longer than 2^32 / hz milliseconds.
+ *
+ * convert_ipc_timeout_to_ticks() multiplied the milliseconds by hz in 32
+ * bits, so a timeout past 42949672 ms -- eleven hours and fifty-six minutes at
+ * 100 Hz -- wrapped, and 42949673 ms came out as one tick.  A receive is told
+ * to wait that long on a port a second thread sends to after 0.3 s, and must
+ * come back with the message, not with MACH_RCV_TIMED_OUT.
+ *
+ * ⚠️ If the send fails the sender destroys the port, so that the receive ends
+ * either way: with the conversion right it would otherwise wait for its
+ * twelve hours, and a test that hangs reports nothing.
+ */
+#define IPC_TIMEOUT_WRAPS	42949673u	/* x 100 is 2^32 + 4 */
+
+struct late_sender {
+    mach_port_t   port;
+    kern_return_t idle_kr;
+    kern_return_t send_kr;
+};
+
+static void *
+send_after_a_while(void *arg)
+{
+    struct late_sender *s = arg;
+    struct { mach_msg_header_t head; char room[64]; } idle_msg;
+    mach_msg_header_t m;
+    mach_port_t   idle = MACH_PORT_NULL;
+
+    /* 0.3 s by a receive nobody sends to, short enough for either way. */
+    s->idle_kr = mach_port_allocate(mach_task_self(),
+                                    MACH_PORT_RIGHT_RECEIVE, &idle);
+    if (s->idle_kr == KERN_SUCCESS) {
+        s->idle_kr = mach_msg(&idle_msg.head,
+                              MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                              sizeof(idle_msg), idle, 300, MACH_PORT_NULL);
+        (void)mach_port_destroy(mach_task_self(), idle);
+    }
+
+    memset(&m, 0, sizeof(m));
+    m.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+    m.msgh_size        = sizeof(m);
+    m.msgh_remote_port = s->port;
+    m.msgh_local_port  = MACH_PORT_NULL;
+    m.msgh_id          = 708;
+    s->send_kr = mach_msg(&m, MACH_SEND_MSG, sizeof(m), 0, MACH_PORT_NULL,
+                          MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (s->send_kr != MACH_MSG_SUCCESS)
+        (void)mach_port_destroy(mach_task_self(), s->port);
+    return (void *)0;
+}
+
+static boolean_t
+a_long_receive_timeout_is_long(void)
+{
+    struct { mach_msg_header_t head; char room[64]; } got;
+    struct late_sender s;
+    mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
+    pthread_t     sender;
+    tvalspec_t    t0, t1;
+    kern_return_t kr;
+    long          ms;
+    boolean_t     ok = 1;
+
+    kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [31] host_get_clock_service FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+    s.port = MACH_PORT_NULL;
+    s.idle_kr = s.send_kr = KERN_FAILURE;
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &s.port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [31] mach_port_allocate FAIL kr=%d\n", (int)kr);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+    if (pthread_create(&sender, NULL, send_after_a_while, &s) != 0) {
+        printf("cap_test: [31] pthread_create FAIL\n");
+        (void)mach_port_destroy(mach_task_self(), s.port);
+        (void)mach_port_deallocate(mach_task_self(), clk);
+        return 0;
+    }
+
+    memset(&got, 0, sizeof(got));
+    (void)clock_get_time(clk, &t0);
+    kr = mach_msg(&got.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(got),
+                  s.port, IPC_TIMEOUT_WRAPS, MACH_PORT_NULL);
+    (void)clock_get_time(clk, &t1);
+    ms = us_between(&t0, &t1) / 1000;
+    (void)pthread_join(sender, NULL);
+
+    if (kr != MACH_MSG_SUCCESS || got.head.msgh_id != 708 || ms < 150) {
+        printf("cap_test: [31] a receive told %u ms answered 0x%x after %ld "
+               "ms -- WRONG (#708)\n", IPC_TIMEOUT_WRAPS, (unsigned)kr, ms);
+        ok = 0;
+    } else
+        printf("cap_test: [31] a receive told %u ms had the message sent "
+               "after 0.3 s, after %ld ms (#708)\n", IPC_TIMEOUT_WRAPS, ms);
+    if (s.idle_kr != MACH_RCV_TIMED_OUT || s.send_kr != MACH_MSG_SUCCESS) {
+        printf("cap_test: [31] the sender's wait answered 0x%x and its send "
+               "0x%x -- FAIL\n", (unsigned)s.idle_kr, (unsigned)s.send_kr);
+        ok = 0;
+    }
+
+    if (s.send_kr == MACH_MSG_SUCCESS)
+        (void)mach_port_destroy(mach_task_self(), s.port);
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3392,6 +3681,18 @@ main(int argc, char **argv)
 
     /* #552: the semaphore stubs this target never had, exercised. */
     if (!the_kernel_semaphores_answer(mach_task_self()))
+        pass = 0;
+
+    /* #708: and a timed wait under a second, which never waited. */
+    if (!the_semaphore_waits_as_long_as_told(mach_task_self()))
+        pass = 0;
+
+    /* #708: a futex's, rounded down to a tick. */
+    if (!a_futex_waits_as_long_as_told())
+        pass = 0;
+
+    /* #708: and mach_msg()'s past 2^32 / hz ms, wrapped. */
+    if (!a_long_receive_timeout_is_long())
         pass = 0;
 
     /* #597: no task reaches the configuration ports, claimed or not. */
