@@ -625,6 +625,17 @@ mig_strncpy(
 }
 
 
+/*
+ * #688: the caller's own space can be dead.  A thread of a task being
+ * terminated may still be inside one of these traps after
+ * ipc_task_terminate() has destroyed the space: thread_terminate() does not
+ * wait for it to leave the kernel.  ipc_space_destroy() clears is_active
+ * under this lock and frees the table after it, so the flag is all a
+ * reader may look at.  The slow path refuses a dead space
+ * (ipc_right_lookup_write() answers KERN_INVALID_TASK), so the trap
+ * answers an error and the thread meets its termination on the way out.
+ * This was an assert, which taskpanic_load's exit met in 6 boots of 8.
+ */
 #define	fast_send_right_lookup(name, port, abort)			\
 MACRO_BEGIN								\
 	register ipc_space_t space = current_space();			\
@@ -632,7 +643,10 @@ MACRO_BEGIN								\
 	register mach_port_index_t index;				\
 									\
 	is_read_lock(space);						\
-	assert(space->is_active);					\
+	if (!space->is_active) {					\
+		is_read_unlock(space);					\
+		abort;							\
+	}								\
 									\
 	entry = 0;							\
 	index = MACH_PORT_INDEX(name);					\
