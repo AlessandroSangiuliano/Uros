@@ -262,10 +262,13 @@ start_other_cpus(void)
 	 * (the APs run it before the barrier this loop just waited on). */
 	{
 		extern int hwp_cpus_on, hwp_epp_performance;
+		extern int hwp_req_written, hwp_req_kept;
 
 		if (hwp_cpus_on)
-			printf("hwp: hardware P-states active on %d/%d CPUs%s "
-			       "(#358)\n", hwp_cpus_on, real_ncpus,
+			printf("hwp: hardware P-states active on %d/%d CPUs, the "
+			       "request written on %d and read back as written "
+			       "on %d%s (#358, #736)\n", hwp_cpus_on, real_ncpus,
+			       hwp_req_written, hwp_req_kept,
 			       hwp_epp_performance ? ", EPP=performance (-E)"
 						   : "");
 	}

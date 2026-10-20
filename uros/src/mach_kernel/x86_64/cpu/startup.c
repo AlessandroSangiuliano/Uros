@@ -43,6 +43,7 @@
 #include <cpu/sprintf_test.h>	/* #655: -K */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <cpu/census_test.h>	/* #657: -c */
+#include <cpu/hwp.h>		/* #736 */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -159,28 +160,34 @@ machine_init(void)
 /*
  * The kernel is up: run what had to wait for it.
  *
- * Nothing yet, and the two things i386 does here are worth naming so that the
- * emptiness is a statement rather than a gap:
+ * Of the two things i386 does here, this machine does one:
  *
- *   fpu_sanity_check()  confirms CR4.OSFXSR survived bring-up, because on
- *                       i386 an AP once reached this point without it.  This
- *                       machine does not lazy-switch the FPU at all -- state
- *                       is saved eagerly with XSAVE and CR0.TS is never armed
- *                       (#408) -- so the bit it checks is programmed on the
- *                       one path that programs anything, and there is no
- *                       second path for it to disagree with.
+ *   fpu_sanity_check()  NOT here.  It confirms CR4.OSFXSR survived bring-up,
+ *                       because on i386 an AP once reached this point without
+ *                       it.  This machine does not lazy-switch the FPU at all
+ *                       -- state is saved eagerly with XSAVE and CR0.TS is
+ *                       never armed (#408) -- so the bit it checks is
+ *                       programmed on the one path that programs anything,
+ *                       and there is no second path for it to disagree with.
  *
- *   hwp_init_cpu()      enables hardware P-states.  Real work here too, and
- *                       wanted, but it is not bring-up: it changes what the
- *                       clock does under measurement, so it belongs with the
- *                       numbers rather than ahead of them (#358 is i386's).
+ *   hwp_init_cpu()      here (#736, #358 is i386's).  It was kept out as
+ *                       something that "changes what the clock does under
+ *                       measurement", and it does: the cores ran at whatever
+ *                       clock the firmware left, and no number taken on metal
+ *                       said which.  Now it hands the clock to the hardware
+ *                       and measures it, and hwp=0 leaves it as it was.
  *
- * ⚠️ Not empty any more, and the one thing in it is a test rather than
- * bring-up: see below.
+ * And a test, which is not bring-up: see below.
  */
 void
 machine_kernel_ready(void)
 {
+	/*
+	 * #736: before the test below, so that the boot processor's clock is
+	 * measured with nothing else running on it yet.
+	 */
+	hwp_init_cpu(1);
+
 	/*
 	 * The thread state flavour dispatch, checked here because this is the
 	 * first point at which it can be (#408).
@@ -422,6 +429,8 @@ machine_processors_ready(void)
 		       idle >= (int) (got - 1) ? "" :
 		       " — WRONG, one that never goes idle is one the "
 		       "scheduler will never dispatch to (#461)");
+
+		hwp_report();		/* #736: every processor is past it now */
 
 		/*
 		 * What one line on this console costs, once per boot (#551).
@@ -747,17 +756,18 @@ machine_processors_ready(void)
  * question.  The boot processor reaches here by neither path — setup_main()
  * does not call this — so the two are the AP's only coverage of it.
  *
- * ⚠️ i386 does two more things here and this machine deliberately does
- * neither.  fpu_sanity_check() is its answer to a bring-up path that once left
+ * ⚠️ i386 does two more things here, and this machine one of them.
+ * fpu_sanity_check() is its answer to a bring-up path that once left
  * CR4.OSFXSR clear on an AP; here the bit is programmed on the one path that
- * programs anything.  hwp_init_cpu() is real work and wanted, but it changes
- * what the clock does under measurement, so it belongs with the numbers rather
- * than ahead of them.
+ * programs anything.  hwp_init_cpu() runs on every processor because
+ * IA32_HWP_REQUEST is one per thread, even where IA32_PM_ENABLE is one per
+ * package, as on omen; and each one measures its own clock (#736).
  */
 void
 slave_machine_init(void)
 {
 	fpu_init();
+	hwp_init_cpu(0);
 
 	/*
 	 * And this processor's own memory-attribute table (#568).
