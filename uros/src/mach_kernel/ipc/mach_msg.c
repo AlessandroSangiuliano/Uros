@@ -1306,7 +1306,10 @@ mach_msg_overwrite_trap(
 		    }
 
 			is_read_lock(space);
-			assert(space->is_active);
+			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
+				is_read_unlock(space);
+				goto slow_copyin;
+			}
 
 			size = space->is_table_size;
 			table = space->is_table;
@@ -1524,7 +1527,10 @@ mach_msg_overwrite_trap(
 		    }
 
 			is_write_lock(space);
-			assert(space->is_active);
+			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
+				is_write_unlock(space);
+				goto slow_copyin;
+			}
 
 			/* optimized ipc_entry_lookup */
 
@@ -2343,7 +2349,10 @@ mach_msg_overwrite_trap(
 			}
 
 			is_write_lock(space);
-			assert(space->is_active);
+			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
+				is_write_unlock(space);
+				goto slow_copyout;
+			}
 
 			/*
 			 *	To do an atomic copyout, need simultaneous
