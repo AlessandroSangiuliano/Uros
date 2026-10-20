@@ -423,13 +423,13 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 
 	printf("syscall_profile trap %d thread %p dump %u, window %u = traps "
 	       "%u..%u of %u this thread made (%u dropped, %u not sampled: "
-	       "moved before the entry was read); shapes: %d "
+	       "taken off the processor before the entry was read); shapes: %d "
 	       "hand-off, %d blocked, %d awake; %u marks x %u cyc = %u of "
 	       "instrument; return %u (mean of %u, %u not timed: moved); "
 	       "kernel-wide %u candidates, %u hand-offs\n",
 	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
 	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen, p->ndropped,
-	       p->nmoved,
+	       p->npreempted,
 	       conta[SP_SHAPE_HANDOFF], conta[SP_SHAPE_BLOCKED],
 	       conta[SP_SHAPE_AWAKE],
 	       (unsigned int) SP_MARKS, sp_pair_cost,
@@ -569,13 +569,27 @@ syscall_profile_enter(int trap_number)
 		return;
 	}
 	/*
-	 * 0 is a reading that was not this thread's, because it moved between
-	 * the stub and here (#648).  Not sampled: the clock read now instead
-	 * would make this sample's entry phase nearly nothing, and the median
-	 * of that column would be taken over two different things.
+	 * Given a processor again after the stub took its reading, the thread
+	 * was taken off one between the entry and here: counted, and not
+	 * sampled.  Its entry phase would hold the time it spent off the
+	 * processor, and the median of that column would be taken over two
+	 * different things.
+	 *
+	 * 🔑 Told by the thread's own switch stamp against its own reading, so
+	 * that nothing another thread did can decide it -- #648 told it by
+	 * who had last written a per-processor slot, and a reading of this
+	 * thread's own from an earlier call passed (#622).
+	 *
+	 * Nor is it the subject.  Discarding the traps that sleep would discard
+	 * the path, which is why the window keeps them and describes them
+	 * (`hot', `slept'); a preemption before the dispatch is the
+	 * scheduler's, and leaving it out leaves out no part of the path.
+	 *
+	 * 0 is a stub that takes no reading (i386, #554): the sample opens from
+	 * the clock instead, and its entry column says unknown.
 	 */
-	if (entry == 0) {
-		t->syscall_profile.nmoved++;
+	if (entry != 0 && t->syscall_profile.switch_in > entry) {
+		t->syscall_profile.npreempted++;
 		return;
 	}
 	/*

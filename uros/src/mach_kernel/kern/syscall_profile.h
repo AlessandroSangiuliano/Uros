@@ -458,7 +458,7 @@ struct syscall_profile_thread {
 	uint32_t	nwindows;	/* how many have been filled so far  */
 	uint32_t	ndumps;
 	uint32_t	ndropped;	/* a trap opened while one was open  */
-	uint32_t	nmoved;		/* not sampled: moved before entry   */
+	uint32_t	npreempted;	/* not sampled: preempted at entry  */
 	uint32_t	nblocked;	/* how many of them went to sleep    */
 	uint32_t	waiting;	/* off the processor right now       */
 	uint32_t	nseen;		/* profiled traps this thread made   */
