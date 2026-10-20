@@ -1,14 +1,14 @@
 Kind: ablation
 Issue: #708
-Takes out: the timeout's nanoseconds counted in ticks, rounded up, and the count looked at before a zero timeout answers (239e3276) -- tv_nsec / (NSEC_PER_SEC) / hz again, 0 for any timeout under a second, and KERN_OPERATION_TIMED_OUT before the semaphore is locked when the timeout has no whole second in it; cap_test [29] then says WRONG three times, as it did on 11bf7e79 on victus, under KVM and under TCG
+Takes out: the timeout's nanoseconds counted in ticks, rounded up, and the count looked at before a zero timeout answers (239e3276, 4d5d42cb) -- tv_nsec / (NSEC_PER_SEC) / hz again, 0 for any timeout under a second, and KERN_OPERATION_TIMED_OUT before the semaphore is locked when the timeout has no whole second in it; cap_test [29] then says WRONG three times, as it did on 11bf7e79 on victus, under KVM and under TCG
 Run: --entry 14 600 -smp 4
 Expect: cap_test: \[29\] .* -- WRONG \(#708\)
 
 diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
-index 84243fa3..c6301e2d 100644
+index 7eee6ce3..c6301e2d 100644
 --- a/uros/src/mach_kernel/kern/sync_sema.c
 +++ b/uros/src/mach_kernel/kern/sync_sema.c
-@@ -368,31 +368,23 @@ semaphore_wait_common (semaphore_t semaphore, tvalspec_t *wait_time)
+@@ -369,33 +368,23 @@ semaphore_wait_common (semaphore_t semaphore, tvalspec_t *wait_time)
  		return KERN_INVALID_ARGUMENT;
  
  	if (wait_time != 0) {
@@ -26,11 +26,13 @@ index 84243fa3..c6301e2d 100644
 -		 * the decrement below takes a count that is there, and the test
 -		 * under the lock answers for one that is not.
 -		 *
--		 * In 64 bits: a wait too long for the int thread_set_timeout()
--		 * takes is made infinite, as it was -- 248 days at 100 Hz.
+-		 * The seconds in 64 bits: a wait too long for the int
+-		 * thread_set_timeout() takes is made infinite, as it was -- 248
+-		 * days at 100 Hz.  The nanoseconds in 32, which hold them, so
+-		 * that i386 divides them with an instruction and not a call.
 -		 */
 -		ticks = (unsigned long long) wait_time->tv_sec * hz
--			+ ((unsigned long long) wait_time->tv_nsec
+-			+ ((unsigned int) wait_time->tv_nsec
 -			   + NSEC_PER_SEC / hz - 1)
 -			  / (NSEC_PER_SEC / hz);
 -		if (ticks > 0x7fffffff)
