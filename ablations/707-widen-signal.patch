@@ -1,0 +1,36 @@
+Kind: widen
+Issue: #707
+Holds open: semaphore_signal_common()'s window between marking its waiter done and clear_wait()ing it -- 100 ms, still under the semaphore's lock, so that cap_test [32]'s 40 ms wait times out inside it; each spin says so, so that a fixed arm that passes shows the window was open; in the fixed tree the waiter takes that lock before it reads its state, and waits for the spin
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/sync_sema.c b/uros/src/mach_kernel/kern/sync_sema.c
+index 7eee6ce3..fe4f5936 100644
+--- a/uros/src/mach_kernel/kern/sync_sema.c
++++ b/uros/src/mach_kernel/kern/sync_sema.c
+@@ -214,6 +214,16 @@ semaphore_destroy (task_t task, semaphore_t semaphore)
+ 	return KERN_SUCCESS;
+ }
+ 
++/*
++ * #707's widened window, and not an ablation.  semaphore_signal_common()
++ * spins WIDEN_707_US between marking its waiter done and clear_wait()ing it,
++ * still under the semaphore's lock: a waiter that reads its state under that
++ * lock waits for the spin, and one that reads it without the lock does not.
++ * Each spin says so, so that a fixed arm that passes shows the window was
++ * open.  Only cap_test [32] signals a semaphore that has a waiter.
++ */
++#define	WIDEN_707_US	100000
++
+ kern_return_t
+ semaphore_signal_common (semaphore_t semaphore, thread_act_t thread_act,
+ 			 boolean_t all);
+@@ -277,6 +287,9 @@ semaphore_signal_common (semaphore_t semaphore, thread_act_t thread_act,
+ 			panic("semaphore_signal: null thread dq");
+ 
+ 		SEMAPHORE_OPERATION_COMPLETE(thread);
++		printf("#707 widen: a signal holds its waiter off the queue, "
++		       "done and not yet woken, for %d us\n", WIDEN_707_US);
++		delay(WIDEN_707_US);
+ 		clear_wait(thread, KERN_SUCCESS, TRUE);
+ 	} while (all && semaphore->count < 0);
+ 
