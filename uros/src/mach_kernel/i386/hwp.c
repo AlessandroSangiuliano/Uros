@@ -67,12 +67,17 @@ int	hwp_cpus_on;
  * read yet (#736). */
 static int	hwp_firmware_on = -1;
 
+/* CPUs whose request this file wrote, and that read it back as written, for
+ * start_other_cpus()'s summary: the BSP's line alone cannot say what the APs
+ * did (#736). */
+int	hwp_req_written, hwp_req_kept;
+
 void
 hwp_init_cpu(boolean_t bsp)
 {
 	unsigned int	a, b, c, d, eax6;
 	unsigned int	lo, hi, cap_lo, cap_hi, req_lo, req_hi;
-	boolean_t	already, has_epp;
+	boolean_t	already, has_epp, written = FALSE;
 
 	do_cpuid(0, 0, &a, &b, &c, &d);
 	eax6 = 0;
@@ -122,11 +127,21 @@ hwp_init_cpu(boolean_t bsp)
 		else
 			req_lo |= orig & 0xff000000u;
 		wrmsr(MSR_IA32_HWP_REQUEST, req_lo, req_hi);
+		written = TRUE;
 	} else if (hwp_epp_performance && has_epp && (req_lo >> 24) != 0) {
 		/* The firmware runs the show; only bias its EPP to
 		 * performance for this bench boot. */
 		req_lo &= 0x00ffffffu;
 		wrmsr(MSR_IA32_HWP_REQUEST, req_lo, req_hi);
+		written = TRUE;
+	}
+	if (written) {
+		unsigned int	back_lo, back_hi;
+
+		atomic_incl((long *)&hwp_req_written, 1);
+		rdmsr(MSR_IA32_HWP_REQUEST, &back_lo, &back_hi);
+		if (back_lo == req_lo)
+			atomic_incl((long *)&hwp_req_kept, 1);
 	}
 
 	atomic_incl((long *)&hwp_cpus_on, 1);
