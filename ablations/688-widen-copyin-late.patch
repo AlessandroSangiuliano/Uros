@@ -1,0 +1,17 @@
+Kind: widen
+Issue: #688
+Holds open: the window between a request's arrival in mach_msg()'s hot path and the per-thread cache's reading of the space's generation -- a message with task_info()'s id, 2098, which only act_test [14]'s third thread sends since task_info() goes through its trap, waits 3 ms there, so that the child's termination can destroy the space meanwhile and the thread reads the generation ipc_space_destroy() moved; the cache misses, the lock-free resolve refuses a dead space, and the locked lookup is where the thread goes; the fixed tree must still pass
+Run: --entry 14 1200 -smp 4
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index b86b2d3a..26d95c12 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1247,6 +1247,8 @@ mach_msg_overwrite_trap(
+ 			gen = MACH_PORT_GEN(reply_name);
+ 
+ 			/* --- port name cache fast path --- */
++			if (hdr->msgh_id == 2098)	/* act_test [14]'s message */
++				delay(3000);
+ 			{
+ 				natural_t _cgen = space->is_generation;
+ 				mach_port_t _dn = hdr->msgh_remote_port;
