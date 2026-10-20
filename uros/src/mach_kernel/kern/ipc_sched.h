@@ -83,6 +83,7 @@
 #include <mach/boolean.h>
 #include <kern/macro_help.h>
 #include <kern/thread.h>
+#include <kern/time_out.h>		/* hz */
 
 /*
  * Start a thread running.  Called with the lock of the queue the thread was
@@ -105,10 +106,18 @@ extern void thread_will_wait_with_timeout(
  *	to a timeout in ticks (for use by set_timeout).
  *	This conversion rounds UP so that small timeouts
  *	at least wait for one tick instead of not waiting at all.
+ *
+ *	The whole seconds and the rest are converted apart (#708):
+ *	millis * hz in 32 bits wrapped past 2^32 / hz milliseconds,
+ *	eleven hours and fifty-six minutes at 100 Hz, and 42949673 ms
+ *	came out as one tick.  Apart, every timeout the type holds fits,
+ *	at any hz up to 1000, and the division stays in 32 bits.
  */
-
-#define convert_ipc_timeout_to_ticks(millis)	\
-		(((millis) * hz + 999) / 1000)
+static __inline__ unsigned int
+convert_ipc_timeout_to_ticks(mach_msg_timeout_t millis)
+{
+	return millis / 1000 * hz + (millis % 1000 * hz + 999) / 1000;
+}
 
 
 #endif	/* _KERN_IPC_SCHED_H_ */
