@@ -3210,6 +3210,131 @@ a_long_receive_timeout_is_long(void)
     return ok;
 }
 
+/*
+ * #707: [32] a signal in flight when a timed semaphore wait times out.
+ *
+ * semaphore_signal() takes its waiter off the queue and marks it done under
+ * the semaphore's lock, and then clear_wait()s it.  The waiter, back from
+ * thread_block(), read whether it had been done WITHOUT that lock.  So a
+ * timeout that woke it between the signaller's two statements made it return
+ * its wait_result, THREAD_TIMED_OUT, as if that were a kern_return_t -- 1 --
+ * for a wait whose signal it had taken; and the signaller's clear_wait() then
+ * landed in its next wait and ended it.  A second thread signals S 10 ms after
+ * this one starts a 40 ms wait on it, and then this one waits 500 ms on T,
+ * which nobody signals.  The first wait must answer KERN_SUCCESS or
+ * KERN_OPERATION_TIMED_OUT, with the signal counted once -- taken by the wait,
+ * or left in S's count -- and the second must time out, after 450 ms or more.
+ *
+ * ⚠️ The window is two adjacent statements at splsched, so this arm catches
+ * the defect only with ablations/707-widen-signal.patch holding the signaller
+ * between them.  Without it, it passes on either kernel.
+ */
+struct sema_signaller {
+    mach_port_t   sema;
+    kern_return_t idle_kr;
+    kern_return_t signal_kr;
+};
+
+static void *
+signal_after_a_while(void *arg)
+{
+    struct sema_signaller *s = arg;
+    struct { mach_msg_header_t head; char room[64]; } idle_msg;
+    mach_port_t   idle = MACH_PORT_NULL;
+
+    /* 10 ms by a receive nobody sends to. */
+    s->idle_kr = mach_port_allocate(mach_task_self(),
+                                    MACH_PORT_RIGHT_RECEIVE, &idle);
+    if (s->idle_kr == KERN_SUCCESS) {
+        s->idle_kr = mach_msg(&idle_msg.head,
+                              MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                              sizeof(idle_msg), idle, 10, MACH_PORT_NULL);
+        (void)mach_port_destroy(mach_task_self(), idle);
+    }
+    s->signal_kr = semaphore_signal(s->sema);
+    return (void *)0;
+}
+
+static boolean_t
+a_signal_in_flight_ends_one_wait(mach_port_t task)
+{
+    tvalspec_t    forty = { 0, 40000000 }, half = { 0, 500000000 };
+    tvalspec_t    zero = { 0, 0 }, t0, t1;
+    mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
+    mach_port_t   s_sema = MACH_PORT_NULL, t_sema = MACH_PORT_NULL;
+    struct sema_signaller sig;
+    pthread_t     signaller;
+    kern_return_t kr, first, second, left;
+    long          ms;
+    boolean_t     ok = 1;
+
+    kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [32] host_get_clock_service FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+    kr = semaphore_create(task, &s_sema, SYNC_POLICY_FIFO, 0);
+    if (kr == KERN_SUCCESS)
+        kr = semaphore_create(task, &t_sema, SYNC_POLICY_FIFO, 0);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [32] semaphore_create FAIL kr=%d\n", (int)kr);
+        ok = 0;
+    }
+    if (ok) {
+        sig.sema = s_sema;
+        sig.idle_kr = sig.signal_kr = KERN_FAILURE;
+        if (pthread_create(&signaller, NULL, signal_after_a_while, &sig) != 0) {
+            printf("cap_test: [32] pthread_create FAIL\n");
+            ok = 0;
+        }
+    }
+    if (ok) {
+        first = semaphore_timedwait(s_sema, forty);
+        (void)clock_get_time(clk, &t0);
+        second = semaphore_timedwait(t_sema, half);
+        (void)clock_get_time(clk, &t1);
+        ms = us_between(&t0, &t1) / 1000;
+        (void)pthread_join(signaller, NULL);
+        left = semaphore_timedwait(s_sema, zero);
+
+        if (first != KERN_SUCCESS && first != KERN_OPERATION_TIMED_OUT) {
+            printf("cap_test: [32] a 40 ms wait with a signal in flight "
+                   "answered %d -- WRONG (#707)\n", (int)first);
+            ok = 0;
+        } else if ((first == KERN_SUCCESS) != (left == KERN_OPERATION_TIMED_OUT)) {
+            printf("cap_test: [32] the wait answered %d and a try after "
+                   "the signal %d: the signal counted %s -- WRONG (#707)\n",
+                   (int)first, (int)left,
+                   first == KERN_SUCCESS ? "twice" : "never");
+            ok = 0;
+        }
+        if (second != KERN_OPERATION_TIMED_OUT || ms < 450) {
+            printf("cap_test: [32] the next wait, 500 ms on a semaphore "
+                   "nobody signals, answered %d after %ld ms -- WRONG "
+                   "(#707)\n", (int)second, ms);
+            ok = 0;
+        }
+        if (sig.idle_kr != MACH_RCV_TIMED_OUT || sig.signal_kr != KERN_SUCCESS) {
+            printf("cap_test: [32] the signaller's wait answered 0x%x and "
+                   "its signal %d -- FAIL\n", (unsigned)sig.idle_kr,
+                   (int)sig.signal_kr);
+            ok = 0;
+        }
+        if (ok)
+            printf("cap_test: [32] a signal in flight: the wait answered %d, "
+                   "the signal counted once, the next wait timed out after "
+                   "%ld ms (#707)\n", (int)first, ms);
+    }
+
+    if (t_sema != MACH_PORT_NULL)
+        (void)semaphore_destroy(task, t_sema);
+    if (s_sema != MACH_PORT_NULL)
+        (void)semaphore_destroy(task, s_sema);
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3693,6 +3818,10 @@ main(int argc, char **argv)
 
     /* #708: and mach_msg()'s past 2^32 / hz ms, wrapped. */
     if (!a_long_receive_timeout_is_long())
+        pass = 0;
+
+    /* #707: a signal in flight ends one wait, the one it was for. */
+    if (!a_signal_in_flight_ends_one_wait(mach_task_self()))
         pass = 0;
 
     /* #597: no task reaches the configuration ports, claimed or not. */
