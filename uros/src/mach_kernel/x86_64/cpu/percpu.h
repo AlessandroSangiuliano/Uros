@@ -31,16 +31,12 @@
 #define PERCPU_ACTIVE_THREAD	40
 #define PERCPU_PREEMPT_LEVEL	48
 #define PERCPU_IPL		56
-#define PERCPU_SYSCALL_TSC	120
-#define PERCPU_SYSCALL_RET_CYC	128
-#define PERCPU_SYSCALL_RET_CNT	136
-#define PERCPU_SYSCALL_RET_MARK	144
-#define PERCPU_INTR_LEVEL	176
-#define PERCPU_INTR_SAVED_IF	180
-#define PERCPU_USER_RETURNS	184
-#define PERCPU_SYSCALL_TSC_THREAD	344
-#define PERCPU_SYSCALL_RET_THREAD	352
-#define PERCPU_SYSCALL_RET_MOVED	360
+#define PERCPU_SYSCALL_RET_CYC	120
+#define PERCPU_SYSCALL_RET_CNT	128
+#define PERCPU_SYSCALL_RET_MARK	136
+#define PERCPU_INTR_LEVEL	168
+#define PERCPU_INTR_SAVED_IF	172
+#define PERCPU_USER_RETURNS	176
 
 #ifndef __ASSEMBLER__
 
@@ -191,30 +187,6 @@ struct percpu {
 	void *loaded_pmap;
 
 	/*
-	 * The clock reading the syscall entry stub took, on its way to the
-	 * thread that owns it (#411, for #392).
-	 *
-	 * ⚠️ A SCRATCH ACROSS TWO INSTRUCTIONS, not storage.  The sample it
-	 * opens lives on the thread, because a Mach trap blocks -- a receive
-	 * parks it, a hand-off switches to the receiver -- and a per-processor
-	 * cursor would be picked up by whichever thread ran here next.  This
-	 * slot exists only because the entry stub cannot reach
-	 * current_thread()'s structure: the stub writes it and the
-	 * dispatcher's C reads it.
-	 *
-	 * 🔴 NOT the argument that lets user_rsp live up there, though it was
-	 * written as that one.  user_rsp is read before sti; this is read
-	 * after it, and the kernel preempts: the thread can be on another
-	 * processor by then, or have been preempted here while another thread
-	 * entered.  syscall_tsc_thread below says whose reading it is (#648).
-	 *
-	 * ⚠️ At the END, like loaded_pmap and for the same reason: the offsets
-	 * asserted below are what the assembly uses, and a field inserted above
-	 * them would move every one of them in silence.
-	 */
-	uint64_t syscall_tsc;
-
-	/*
 	 * The return path, timed against itself (#411, for #392).
 	 *
 	 * 🔴 A per-processor SUM and count rather than a column in the
@@ -227,10 +199,15 @@ struct percpu {
 	 * Nothing is lost: the return path executes the same instructions
 	 * whatever the message was, so there is no per-message variation to
 	 * attribute to a message.
+	 *
+	 * The mark is a scratch, and safe as one for user_rsp's reason: written
+	 * after thread_return_ast(), which returns with interrupts off (#617),
+	 * and read before the sysretq, with nothing between that can take the
+	 * thread off this processor (#622).
 	 */
 	uint64_t syscall_ret_cycles;
 	uint64_t syscall_ret_count;
-	uint64_t syscall_ret_mark;	/* scratch: the trap function returned */
+	uint64_t syscall_ret_mark;	/* scratch: the exit sequence began */
 
 	/*
 	 * Whether this processor is inside a replayed handler right now (#457).
@@ -251,8 +228,8 @@ struct percpu {
 	 * replayed handler and replay again beneath it -- rare, but a flag
 	 * cleared by the inner one would tell the outer one it had arrived.
 	 *
-	 * ⚠️ At the END, like loaded_pmap and syscall_tsc and for the same
-	 * reason: the offsets asserted below are what the assembly uses.
+	 * ⚠️ At the END, like loaded_pmap and for the same reason: the offsets
+	 * asserted below are what the assembly uses.
 	 */
 	uint32_t in_replay;
 	uint32_t reserved_replay;
@@ -287,9 +264,8 @@ struct percpu {
 	 * check asked for 100 ticks in 200 ms and counted 82.  A deadlock
 	 * traded for a clock that loses a fifth of itself is not a trade.
 	 *
-	 * ⚠️ At the END, like loaded_pmap and syscall_tsc above and for the
-	 * same reason: the offsets asserted below are what the assembly entry
-	 * paths use.
+	 * ⚠️ At the END, like loaded_pmap above and for the same reason: the
+	 * offsets asserted below are what the assembly entry paths use.
 	 */
 	uint32_t pending_ticks;
 	uint32_t reserved_ticks;
@@ -312,9 +288,8 @@ struct percpu {
 	 * That is the property the whole thing exists for: a lock taken in a
 	 * handler must not enable interrupts when it is dropped.
 	 *
-	 * ⚠️ At the END, like loaded_pmap and syscall_tsc above and for the
-	 * same reason: the offsets asserted below are what the assembly entry
-	 * paths use.
+	 * ⚠️ At the END, like loaded_pmap above and for the same reason: the
+	 * offsets asserted below are what the assembly entry paths use.
 	 */
 	uint32_t intr_level;
 	uint32_t intr_saved_if;
@@ -360,20 +335,6 @@ struct percpu {
 	} pcid_slot[PCID_SLOTS];
 	uint32_t pcid_victim;		/* the slot the next miss takes */
 
-	/*
-	 * #648: the thread syscall_tsc and syscall_ret_mark were written for,
-	 * which the stub copies from active_thread as it writes them.  Both are
-	 * read back with interrupts on -- the entry's by the dispatcher's C,
-	 * the return's by the last instructions before cli -- and by then the
-	 * thread may be on another processor, or another thread may have
-	 * written here.  So a reading counts only for its own thread, on the
-	 * processor it was written on, and once.  After the asserted fields,
-	 * like raised_by, so that no offset the assembly already knows moves.
-	 */
-	void	*syscall_tsc_thread;
-	void	*syscall_ret_thread;
-	uint64_t syscall_ret_moved;	/* returns not timed: the thread moved */
-
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is
@@ -413,20 +374,12 @@ _Static_assert(__builtin_offsetof(struct percpu, ipl) == PERCPU_IPL,
 	       "percpu ipl moved");
 _Static_assert(__builtin_offsetof(struct percpu, user_rsp) == PERCPU_USER_RSP,
 	       "percpu user_rsp moved");
-_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc)
-	       == PERCPU_SYSCALL_TSC, "percpu syscall_tsc moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_cycles)
 	       == PERCPU_SYSCALL_RET_CYC, "percpu syscall_ret_cycles moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_count)
 	       == PERCPU_SYSCALL_RET_CNT, "percpu syscall_ret_count moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_mark)
 	       == PERCPU_SYSCALL_RET_MARK, "percpu syscall_ret_mark moved");
-_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc_thread)
-	       == PERCPU_SYSCALL_TSC_THREAD, "percpu syscall_tsc_thread moved");
-_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_thread)
-	       == PERCPU_SYSCALL_RET_THREAD, "percpu syscall_ret_thread moved");
-_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_moved)
-	       == PERCPU_SYSCALL_RET_MOVED, "percpu syscall_ret_moved moved");
 _Static_assert(__builtin_offsetof(struct percpu, intr_level)
 	       == PERCPU_INTR_LEVEL, "percpu intr_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)

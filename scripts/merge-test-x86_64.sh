@@ -188,6 +188,7 @@ SKIPPED="
 11: -rL opens the debugger's prompt on a thread with a continuation and waits
 12: -rS stays up for the console door and never ends
 19: -B panics on purpose; it needs a verdict of its own
+54: -e asks only of a build with UROS_SYSCALL_PROFILE, which a merge build is not; ablate.sh runs it with the widen patch, which compiles the profile in (#622)
 "
 
 # #412: the PCID entries' half of judge().  "Not offered" is taken at the

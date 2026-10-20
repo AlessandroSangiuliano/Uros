@@ -1103,8 +1103,18 @@ trap_take_ast(struct trap_frame *frame)
 	if ((frame->cs & 3) == USER_RPL && (act = current_act()) != THR_ACT_NULL)
 		ast_propagate(act, cpu);
 
-	if (need_ast[cpu] == AST_NONE)
+	if (need_ast[cpu] == AST_NONE) {
+		/*
+		 * #622: back to ring 3 all the same, so the profile hears it, as
+		 * it would have from thread_return_ast().  Interrupts are off
+		 * from here to the iretq -- the handlers run with them off and
+		 * fault_in() turns them off again -- so no switch can come
+		 * between the stamp and the return it stands for.
+		 */
+		if ((frame->cs & 3) == USER_RPL)
+			SP_LEFT();
 		return;
+	}
 
 	/*
 	 * Ring 3 is always safe to preempt.  Ring 0 is safe only where the
@@ -1347,6 +1357,7 @@ thread_return_ast(void)
 		ast_taken(FALSE, AST_ALL, splsched());
 	}
 	return_ast_check(cpu);
+	SP_LEFT();		/* #622: when this thread went back to user mode */
 }
 
 

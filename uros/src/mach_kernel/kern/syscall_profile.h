@@ -403,6 +403,23 @@ struct syscall_profile_thread {
 	 */
 	uint64_t	runnable_at;
 	/*
+	 * When this thread last went back to user mode, stamped on its way out
+	 * with interrupts off (#622): by thread_return_ast(), or by
+	 * trap_take_ast() when an interrupt or a fault goes back with no AST to
+	 * take.  Every way back, because a switch the thread made in the kernel
+	 * must be older than the stamp by the time it is in user mode again.
+	 * Zero on a target that does not stamp it.
+	 *
+	 * 🔑 Two questions about the entry are answered against it.  A system
+	 * call cannot have begun before it, so an entry reading OLDER is an
+	 * earlier call's.  And a switch_in NEWER than it means the thread was
+	 * given a processor again after it entered: it was taken off one
+	 * between the entry and the dispatch, the window the reading crosses.
+	 * Neither answer depends on how the reading got here, which is what
+	 * lets them test it.
+	 */
+	uint64_t	left_at;
+	/*
 	 * Whose breakdown this is.
 	 *
 	 * 🔥 Added because a run printed two hundred dumps that were
@@ -441,7 +458,7 @@ struct syscall_profile_thread {
 	uint32_t	nwindows;	/* how many have been filled so far  */
 	uint32_t	ndumps;
 	uint32_t	ndropped;	/* a trap opened while one was open  */
-	uint32_t	nmoved;		/* not sampled: moved before entry   */
+	uint32_t	npreempted;	/* not sampled: preempted at entry  */
 	uint32_t	nblocked;	/* how many of them went to sleep    */
 	uint32_t	waiting;	/* off the processor right now       */
 	uint32_t	nseen;		/* profiled traps this thread made   */
@@ -765,8 +782,36 @@ extern void	syscall_profile_took_handoff(void);
 extern void	syscall_profile_phase(int phase);
 
 /*
- * What the entry stub left in this processor's block, machine-dependent by
- * nature: only the stub knows when the trap began.
+ * #622: the thread is on its way back to user mode, with interrupts off.  A
+ * target whose return path does not say so leaves left_at at zero, and the
+ * two questions asked against it are not asked there.
+ */
+extern void	syscall_profile_left(void);
+
+/*
+ * #622: what the entry test (-e) reads, kernel-wide.  Counted without a lock
+ * or an atomic, like the scheduler's figures beside them, so figures and not
+ * a census: two processors counting at once can lose one.  They cannot turn a
+ * count that is not zero into zero, which is all the test asks of the two
+ * that say WRONG.
+ *
+ *   asked	profiled traps whose thread was taken off a processor between
+ *		the entry and the dispatch -- the window the reading crosses
+ *   stale	profiled traps whose entry reading was older than their
+ *		thread's last return to user mode: an earlier call's, WRONG
+ *   crossed_sampled
+ *		profiled traps that crossed the window and were sampled all
+ *		the same, the time off the processor in their entry phase:
+ *		WRONG
+ */
+extern volatile uint32_t	syscall_profile_asked;
+extern volatile uint32_t	syscall_profile_stale;
+extern volatile uint32_t	syscall_profile_crossed_sampled;
+
+/*
+ * The clock reading the entry stub took, machine-dependent by nature: only the
+ * stub knows when the trap began, and only the target knows where it left it
+ * (on x86-64, on the thread's own stack, #622).  0 where the stub takes none.
  */
 extern uint64_t	syscall_profile_entry_tsc(void);
 
@@ -774,8 +819,7 @@ extern uint64_t	syscall_profile_entry_tsc(void);
  * And what the return path has cost, which only the entry stub can measure and
  * only the per-processor block can hold — see the note above SP_PHASES.
  */
-extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
-					      uint64_t *moved);
+extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
 
 #define	SP_ENTER(n)	syscall_profile_enter(n)
 #define	SP_LEAVE()	syscall_profile_leave()
@@ -785,6 +829,7 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
 #define	SP_RUNNABLE(t)	syscall_profile_runnable(t)
 #define	SP_HANDOFF()	syscall_profile_took_handoff()
 #define	SP_MARK(p)	syscall_profile_phase(p)
+#define	SP_LEFT()	syscall_profile_left()
 
 #else	/* !SYSCALL_PROFILE */
 
@@ -796,6 +841,7 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
 #define	SP_RUNNABLE(t)	MACRO_BEGIN MACRO_END
 #define	SP_HANDOFF()	MACRO_BEGIN MACRO_END
 #define	SP_MARK(p)	MACRO_BEGIN MACRO_END
+#define	SP_LEFT()	MACRO_BEGIN MACRO_END
 
 #endif	/* SYSCALL_PROFILE */
 

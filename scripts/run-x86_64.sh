@@ -531,6 +531,8 @@ must_report 'census_test: starting' 'census_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'The victims end on their own and the walk is one pass under a lock, so the verdict is printed unless the walk does not come back; a run that stops after the start line has faulted or looped inside the census, on a thread freed under it (#657).'
 must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
+must_report 'profile_entry: starting' 'profile_entry: \(PASS\|WRONG\|NOT ASKED\)' \
+	'The monitor waits twenty seconds at most and the verdict is printed either way, while the userland is still booting; a run that ends after the start line without it has a monitor that never woke, or spinners that never stopped (#622).'
 must_report 'boot_probe: the startup handed me argv\[0\]' 'boot_probe: the startup handed me argv\[0\] = boot_probe' \
 	'boot_probe prints this line whole, with one mach_print() (#644).  A line that starts and never names it was cut after the prefix by another processor'"'"'s output -- where the GARBLED check does not look, since a cut after a space passes it (#578) -- and the name stands alone further down.'
 must_report 'swap_disable: \[1\] starting' 'swap_disable: \[1\] \(PASS\|WRONG\|NOT ASKED\)' \

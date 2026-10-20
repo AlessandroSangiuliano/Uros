@@ -80,8 +80,15 @@
  *
  * rdtsc lands in edx:eax.  %rax is the trap's answer and is saved; %rdx is
  * dead here -- the clearing below is about to zero it either way.
+ *
+ * 🔑 A per-processor mark is safe HERE, for user_rsp's reason and not by
+ * luck: the mark is written after thread_return_ast(), which returns with
+ * interrupts off (#617), and they stay off until the sysretq.  Nothing can
+ * take the thread off this processor between the mark and its reading.
+ * #648 gave the mark an owner, believing interrupts were on until the cli,
+ * and the check could not fail; it went with #622, which met it on the way.
  */
-	.macro	SYSCALL_PROFILE_MARK slot, owner
+	.macro	SYSCALL_PROFILE_MARK slot
 #if	SYSCALL_PROFILE
 	pushq	%rax
 	lfence
@@ -89,20 +96,10 @@
 	shlq	$32, %rdx
 	orq	%rdx, %rax
 	movq	%rax, %gs:\slot
-	movq	%gs:PERCPU_ACTIVE_THREAD, %rax	/* whose mark (#648) */
-	movq	%rax, %gs:\owner
 	popq	%rax
 #endif
 	.endm
 
-	/*
-	 * The mark was written with interrupts on, and they are on until the
-	 * cli below: a thread that was preempted in between may be on another
-	 * processor, whose mark is a stranger's, or back here after another
-	 * thread marked.  Its return is then counted as not timed rather than
-	 * timed against that mark, and the owner is cleared either way, so a
-	 * mark is used once (#648).
-	 */
 	.macro	SYSCALL_PROFILE_RETURN
 #if	SYSCALL_PROFILE
 	pushq	%rax
@@ -110,15 +107,9 @@
 	rdtsc
 	shlq	$32, %rdx
 	orq	%rdx, %rax
-	movq	%gs:PERCPU_ACTIVE_THREAD, %rdx
-	cmpq	%rdx, %gs:PERCPU_SYSCALL_RET_THREAD
-	jne	1f
 	subq	%gs:PERCPU_SYSCALL_RET_MARK, %rax
 	addq	%rax, %gs:PERCPU_SYSCALL_RET_CYC
 	incq	%gs:PERCPU_SYSCALL_RET_CNT
-	jmp	2f
-1:	incq	%gs:PERCPU_SYSCALL_RET_MOVED
-2:	movq	$0, %gs:PERCPU_SYSCALL_RET_THREAD
 	popq	%rax
 #endif
 	.endm
@@ -189,19 +180,34 @@ syscall_entry:
 	 * rdtsc lands in edx:eax, both of which are live (%rax is the trap
 	 * number), so they are saved.  The pushes go BELOW the frame, like the
 	 * slow return path's, and are undone before anything reads it.
+	 *
+	 * 🔴 AND THE READING STAYS ON THIS THREAD'S STACK (#622): in the word
+	 * %rdx was pushed into, SYSCALL_ENTRY_TSC_BELOW bytes under the frame,
+	 * where cpu/percpu.c reads it.  It used to go into the per-processor
+	 * block, and the dispatcher's C read it back after the sti below, where
+	 * this kernel preempts: a thread taken off its processor in between
+	 * found another thread's reading there, or its own from an earlier
+	 * call, since every call wrote it and only the profiled trap took it.
+	 * The word is this thread's for the frame's reason (#474), and nothing
+	 * else lands on it.  Until the sti interrupts are masked, and the
+	 * vectors that ignore the mask run on stacks of their own (IST: NMI,
+	 * #MC, #DB, #DF); from the sti until the dispatch returns, it lies
+	 * inside SYSCALL_ENTRY_RESERVE, below which %rsp stays.
 	 */
 #if	SYSCALL_PROFILE
-	pushq	%rax
+	.if	SYSCALL_ENTRY_TSC_BELOW != 8
+	.error	"the entry's clock reading is the word %rdx is pushed into"
+	.endif
 	pushq	%rdx
+	pushq	%rax
 	lfence
 	rdtsc
 	shlq	$32, %rdx
 	orq	%rdx, %rax
-	movq	%rax, %gs:PERCPU_SYSCALL_TSC
-	movq	%gs:PERCPU_ACTIVE_THREAD, %rax	/* whose reading (#648) */
-	movq	%rax, %gs:PERCPU_SYSCALL_TSC_THREAD
-	popq	%rdx
+	movq	8(%rsp), %rdx
+	movq	%rax, 8(%rsp)		/* the reading, where %rdx was */
 	popq	%rax
+	addq	$8, %rsp		/* and left there, under the frame */
 #endif	/* SYSCALL_PROFILE */
 
 	/*
@@ -297,7 +303,9 @@ syscall_entry:
 	 *
 	 * ⚠️ The two wide paths lean on that parity: they push %rbp and an odd
 	 * number of stacked arguments on top of this, and land their callee on
-	 * the boundary only because what is under them is even.  It still is.
+	 * the boundary only because what is under them is even.  It still is,
+	 * with the profile on too: its reserve below is a multiple of sixteen,
+	 * asserted where it is defined.
 	 */
 
 	/*
@@ -324,7 +332,14 @@ syscall_entry:
 	 * in that window would push a frame at an address ring 3 chose.  The
 	 * swapgs and the stack switch come first for exactly that reason, and
 	 * this has to come after both.
+	 *
+	 * With the profile on, %rsp first goes below the entry's clock reading
+	 * (#622), so that from here on nothing pushed lands on it; .Lreturn
+	 * gives the bytes back.
 	 */
+#if	SYSCALL_PROFILE
+	subq	$SYSCALL_ENTRY_RESERVE, %rsp
+#endif	/* SYSCALL_PROFILE */
 	sti
 
 	/*
@@ -386,6 +401,9 @@ syscall_entry:
 	callq	*(%r11, %rax, 8)
 
 .Lreturn:
+#if	SYSCALL_PROFILE
+	addq	$SYSCALL_ENTRY_RESERVE, %rsp	/* #622: the reading was taken */
+#endif	/* SYSCALL_PROFILE */
 	/*
 	 * 🔥 Pending ASTs FIRST, and this path did not have the check (#475).
 	 *
@@ -453,8 +471,9 @@ syscall_entry:
 	/*
 	 * Read back out of the frame the entry filled (#474), rather than
 	 * popped off a working stack that no longer holds them.  %rsp is the
-	 * frame base again here: the plain paths never moved it, and the wide
-	 * paths restore it from %rbp before jumping here.
+	 * frame base again here: the plain paths never moved it but for the
+	 * profile's reserve, which .Lreturn has given back, and the wide paths
+	 * restore it from %rbp before jumping there.
 	 */
 	/*
 	 * The return path's clock starts HERE, after the AST handling and not
@@ -478,7 +497,7 @@ syscall_entry:
 	 * for #392 to weigh: an AST that parks the thread is not part of what
 	 * a message costs.
 	 */
-	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK, PERCPU_SYSCALL_RET_THREAD
+	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK
 
 	movq	TF_RFLAGS(%rsp), %r11	/* flags */
 	movq	TF_RIP(%rsp), %rcx	/* resume address */

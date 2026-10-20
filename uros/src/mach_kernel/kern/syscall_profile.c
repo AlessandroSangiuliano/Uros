@@ -393,7 +393,7 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 void
 syscall_profile_dump(struct syscall_profile_thread *p)
 {
-	uint64_t	ret_cyc, ret_n, ret_moved;
+	uint64_t	ret_cyc, ret_n;
 	uint32_t	ret_mean = 0;
 	int		ret_known = 0;
 	int		conta[SP_SHAPES];
@@ -415,7 +415,7 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	 * It is defensible for the return path alone: it runs the same
 	 * instructions whatever the message was.
 	 */
-	syscall_profile_return_cycles(&ret_cyc, &ret_n, &ret_moved);
+	syscall_profile_return_cycles(&ret_cyc, &ret_n);
 	if (ret_n != 0) {
 		ret_mean = (uint32_t) (ret_cyc / ret_n);
 		ret_known = 1;
@@ -423,18 +423,18 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 
 	printf("syscall_profile trap %d thread %p dump %u, window %u = traps "
 	       "%u..%u of %u this thread made (%u dropped, %u not sampled: "
-	       "moved before the entry was read); shapes: %d "
+	       "taken off the processor before the entry was read); shapes: %d "
 	       "hand-off, %d blocked, %d awake; %u marks x %u cyc = %u of "
-	       "instrument; return %u (mean of %u, %u not timed: moved); "
+	       "instrument; return %u (mean of %u); "
 	       "kernel-wide %u candidates, %u hand-offs\n",
 	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
 	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen, p->ndropped,
-	       p->nmoved,
+	       p->npreempted,
 	       conta[SP_SHAPE_HANDOFF], conta[SP_SHAPE_BLOCKED],
 	       conta[SP_SHAPE_AWAKE],
 	       (unsigned int) SP_MARKS, sp_pair_cost,
 	       (unsigned int) SP_MARKS * sp_pair_cost,
-	       ret_mean, (unsigned int) ret_n, (unsigned int) ret_moved,
+	       ret_mean, (unsigned int) ret_n,
 	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
 	printf("syscall_profile   routes kernel-wide: %u combined (%u handed "
 	       "off), %u send-only, %u receive-only (%u of them resumed in the "
@@ -498,6 +498,42 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 }
 
 /*
+ * #622: see <kern/syscall_profile.h>.  The first of each WRONG is printed by
+ * the thread that found it, in the trap, where the dump prints too.
+ */
+volatile uint32_t	syscall_profile_asked;
+volatile uint32_t	syscall_profile_stale;
+volatile uint32_t	syscall_profile_crossed_sampled;
+static volatile uint32_t sp_stale_said;
+static volatile uint32_t sp_crossed_said;
+
+static void
+sp_crossed_sampled(thread_t t)
+{
+	syscall_profile_crossed_sampled++;
+	if (sp_crossed_said)
+		return;
+	sp_crossed_said = 1;
+	printf("syscall_profile: thread %p was taken off its processor between "
+	       "entering trap %d and its dispatch, and the trap was sampled -- "
+	       "WRONG, its entry phase holds the time it spent off (#622)\n",
+	       (void *) t, syscall_profile_trap);
+}
+
+static void
+sp_stale(thread_t t, uint64_t entry)
+{
+	syscall_profile_stale++;
+	if (sp_stale_said)
+		return;
+	sp_stale_said = 1;
+	printf("syscall_profile: thread %p entered trap %d with a reading %llu "
+	       "cycles older than its last return to user mode -- WRONG, an "
+	       "earlier call's (#622)\n", (void *) t, syscall_profile_trap,
+	       (unsigned long long) (t->syscall_profile.left_at - entry));
+}
+
+/*
  * The hooks, and the only two calls #392 has to add anywhere else.
  *
  * ⚠️ current_thread() and not the activation.  A sample follows the shuttle
@@ -509,6 +545,7 @@ syscall_profile_enter(int trap_number)
 {
 	thread_t	t = current_thread();
 	uint64_t	entry;
+	int		crossed;
 
 	if (trap_number != syscall_profile_trap || t == THREAD_NULL)
 		return;
@@ -516,15 +553,53 @@ syscall_profile_enter(int trap_number)
 	t->syscall_profile.self = (const void *) t;
 	entry = syscall_profile_entry_tsc();
 	/*
-	 * 0 is a reading that was not this thread's, because it moved between
-	 * the stub and here (#648).  Not sampled: the clock read now instead
-	 * would make this sample's entry phase nearly nothing, and the median
-	 * of that column would be taken over two different things.
+	 * #622: the two questions left_at answers, asked of the reading before
+	 * it is used, however it got here.  A thread given a processor again
+	 * since it last left for user mode was taken off one between its entry
+	 * and this line: the window was crossed, and the entry test counts it.
+	 * A reading older than that last return is an earlier call's: never a
+	 * sample.
 	 */
-	if (entry == 0) {
-		t->syscall_profile.nmoved++;
+	crossed = t->syscall_profile.left_at != 0
+		  && t->syscall_profile.switch_in > t->syscall_profile.left_at;
+	if (crossed)
+		syscall_profile_asked++;
+	if (entry != 0 && entry < t->syscall_profile.left_at) {
+		sp_stale(t, entry);
 		return;
 	}
+	/*
+	 * Given a processor again after the stub took its reading, the thread
+	 * was taken off one between the entry and here: counted, and not
+	 * sampled.  Its entry phase would hold the time it spent off the
+	 * processor, and the median of that column would be taken over two
+	 * different things.
+	 *
+	 * 🔑 Told by the thread's own switch stamp against its own reading, so
+	 * that nothing another thread did can decide it -- #648 told it by
+	 * who had last written a per-processor slot, and a reading of this
+	 * thread's own from an earlier call passed (#622).
+	 *
+	 * Nor is it the subject.  Discarding the traps that sleep would discard
+	 * the path, which is why the window keeps them and describes them
+	 * (`hot', `slept'); a preemption before the dispatch is the
+	 * scheduler's, and leaving it out leaves out no part of the path.
+	 *
+	 * 0 is a stub that takes no reading (i386, #554): the sample opens from
+	 * the clock instead, and its entry column says unknown.
+	 */
+	if (entry != 0 && t->syscall_profile.switch_in > entry) {
+		t->syscall_profile.npreempted++;
+		return;
+	}
+	/*
+	 * #622: and a trap that crossed the window is not a sample of the
+	 * path: its entry phase would hold the time it spent off the processor.
+	 * Reported and not refused -- refusing it here would be the fix's work
+	 * done by its test, and would hide what the test is for.
+	 */
+	if (crossed)
+		sp_crossed_sampled(t);
 	syscall_profile_begin(&t->syscall_profile, entry);
 	/*
 	 * The entry phase closes HERE, at the first instruction that could
@@ -626,6 +701,22 @@ syscall_profile_leave(void)
 		return;
 
 	syscall_profile_commit(&t->syscall_profile);
+}
+
+/*
+ * #622: stamped on every way back to user mode, not only a profiled trap's.
+ * A reading left by any earlier call -- a trap this profile does not follow
+ * included -- is then older than the stamp.
+ */
+void
+syscall_profile_left(void)
+{
+	thread_t	t = current_thread();
+
+	if (t == THREAD_NULL)
+		return;
+
+	t->syscall_profile.left_at = urmach_tsc();
 }
 
 #endif	/* SYSCALL_PROFILE */
