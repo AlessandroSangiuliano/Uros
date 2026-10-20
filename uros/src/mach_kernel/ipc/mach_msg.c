@@ -972,9 +972,16 @@ urmach_msg_lockfree_resolve(
 		return FALSE;
 	}
 
-	/* Re-check the snapshot now that both ports are locked. */
+	/*
+	 * Re-check the snapshot now that both ports are locked.  #688: and
+	 * whether the space is still alive.  ipc_space_destroy() moves
+	 * is_generation, but a snapshot taken after that would match it, and
+	 * the table is freed once is_active is clear: on TSO, the entries
+	 * read above came from the live table if is_active is still set here.
+	 */
 	urmach_rcu_barrier();
-	if (space->is_generation != gen0 || space->is_seq != seq0) {
+	if (space->is_generation != gen0 || space->is_seq != seq0 ||
+	    !space->is_active) {
 		ip_unlock(rp);
 		ip_unlock(dp);
 		return FALSE;
@@ -1269,6 +1276,24 @@ mach_msg_overwrite_trap(
 							self->ith_port_cache[_j].ipc_name =
 								MACH_PORT_NULL;
 						HOT(c_mmot_cold_010++);
+						goto slow_copyin;
+					}
+					/*
+					 * #688: the generation was compared before
+					 * the ports were locked, and a space can die
+					 * in between: this thread's task terminated
+					 * while it was in here.  Asked again under
+					 * the ports' locks, as the lock-free resolve
+					 * asks it, and the space's death asked with it.
+					 */
+					urmach_rcu_barrier();
+					if (space->is_generation != _cgen ||
+					    !space->is_active) {
+						ip_unlock(reply_port);
+						ip_unlock(dest_port);
+						for (_j = 0; _j < IPC_PORT_CACHE_N; _j++)
+							self->ith_port_cache[_j].ipc_name =
+								MACH_PORT_NULL;
 						goto slow_copyin;
 					}
 					counter(c_ipc_port_cache_hit++);
