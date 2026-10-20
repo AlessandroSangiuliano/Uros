@@ -404,8 +404,11 @@ struct syscall_profile_thread {
 	uint64_t	runnable_at;
 	/*
 	 * When this thread last went back to user mode, stamped on its way out
-	 * by thread_return_ast(), with interrupts off (#622).  Zero on a target
-	 * that does not stamp it.
+	 * with interrupts off (#622): by thread_return_ast(), or by
+	 * trap_take_ast() when an interrupt or a fault goes back with no AST to
+	 * take.  Every way back, because a switch the thread made in the kernel
+	 * must be older than the stamp by the time it is in user mode again.
+	 * Zero on a target that does not stamp it.
 	 *
 	 * 🔑 Two questions about the entry are answered against it.  A system
 	 * call cannot have begun before it, so an entry reading OLDER is an
@@ -789,15 +792,21 @@ extern void	syscall_profile_left(void);
  * #622: what the entry test (-e) reads, kernel-wide.  Counted without a lock
  * or an atomic, like the scheduler's figures beside them, so figures and not
  * a census: two processors counting at once can lose one.  They cannot turn a
- * count that is not zero into zero, which is all the test asks of `stale'.
+ * count that is not zero into zero, which is all the test asks of the two
+ * that say WRONG.
  *
  *   asked	profiled traps whose thread was taken off a processor between
  *		the entry and the dispatch -- the window the reading crosses
  *   stale	profiled traps whose entry reading was older than their
  *		thread's last return to user mode: an earlier call's, WRONG
+ *   crossed_sampled
+ *		profiled traps that crossed the window and were sampled all
+ *		the same, the time off the processor in their entry phase:
+ *		WRONG
  */
 extern volatile uint32_t	syscall_profile_asked;
 extern volatile uint32_t	syscall_profile_stale;
+extern volatile uint32_t	syscall_profile_crossed_sampled;
 
 /*
  * What the entry stub left in this processor's block, machine-dependent by

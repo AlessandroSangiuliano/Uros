@@ -32,8 +32,8 @@
  * ablations/622-widen-entry.patch holds it open with a spin before the
  * profiled trap takes its reading.
  *
- * Two counts from <kern/syscall_profile.h>, both answered against the
- * thread's last return to user mode and not against the reading:
+ * Three counts from <kern/syscall_profile.h>, all answered against the
+ * thread's last return to user mode and none against the reading:
  *
  *   asked	profiled traps whose thread was given a processor again after
  *		it entered: the window was crossed.  The run lasts until
@@ -41,6 +41,11 @@
  *		and fewer is NOT ASKED.
  *   stale	profiled traps whose reading was older than that return, an
  *		earlier call's.  WRONG.
+ *   crossed_sampled
+ *		profiled traps that crossed the window and were sampled all the
+ *		same, with the time off the processor in their entry phase.
+ *		WRONG: whatever reading such a trap found, its own fresh one
+ *		included, it measures something else.
  */
 
 #include <stdint.h>
@@ -148,18 +153,20 @@ pe_wait(volatile uint32_t *count, uint32_t want, uint64_t hz,
 	return TRUE;
 }
 
-static void	pe_verdict(uint32_t asked, uint32_t stale, uint64_t ms);
+static void	pe_verdict(uint32_t asked, uint32_t stale, uint32_t crossed,
+			   uint64_t ms);
 
 static void
 pe_monitor(void)
 {
 	uint64_t	hz = tsc_hz(), t0 = rdtsc(), ms;
-	uint32_t	asked, stale;
+	uint32_t	asked, stale, crossed;
 
 	(void) pe_wait(&syscall_profile_asked, PROFILE_ENTRY_MIN_ASKED, hz,
 		       PROFILE_ENTRY_MAX_SECONDS);
 	asked = syscall_profile_asked;
 	stale = syscall_profile_stale;
+	crossed = syscall_profile_crossed_sampled;
 	ms = (rdtsc() - t0) * 1000 / hz;
 	pe_stop = 1;
 
@@ -168,23 +175,28 @@ pe_monitor(void)
 		       "a processor stopped scheduling (#622)\n",
 		       (unsigned) pe_finished, (unsigned) pe_spinners);
 	else
-		pe_verdict(asked, stale, ms);
+		pe_verdict(asked, stale, crossed, ms);
 	thread_terminate_self();
 }
 
 static void
-pe_verdict(uint32_t asked, uint32_t stale, uint64_t ms)
+pe_verdict(uint32_t asked, uint32_t stale, uint32_t crossed, uint64_t ms)
 {
 	printf("profile_entry: %u spinners on %u processors for %u ms: %u "
 	       "profiled traps were taken off their processor between the "
-	       "entry and the dispatch; %u opened with a reading older than "
-	       "their thread's last return to user mode\n",
+	       "entry and the dispatch, and %u of them sampled all the same; "
+	       "%u opened with a reading older than their thread's last "
+	       "return to user mode\n",
 	       (unsigned) pe_spinners, (unsigned) pe_ncpu, (unsigned) ms,
-	       (unsigned) asked, (unsigned) stale);
+	       (unsigned) asked, (unsigned) crossed, (unsigned) stale);
 
-	if (stale != 0)
-		printf("profile_entry: WRONG — a profiled trap opened with an "
-		       "earlier call's reading, not its own (#622)\n");
+	if (stale != 0 || crossed != 0)
+		printf("profile_entry: WRONG — %s (#622)\n",
+		       stale != 0 ? "a profiled trap opened with an earlier "
+				    "call's reading, not its own"
+				  : "a profiled trap taken off its processor "
+				    "before its reading was taken was sampled, "
+				    "the time off in its entry phase");
 	else if (asked < PROFILE_ENTRY_MIN_ASKED)
 		printf("profile_entry: NOT ASKED — %u profiled traps crossed the "
 		       "window in %u s, fewer than %u: a reading taken from the "
@@ -193,8 +205,8 @@ pe_verdict(uint32_t asked, uint32_t stale, uint64_t ms)
 		       PROFILE_ENTRY_MIN_ASKED);
 	else
 		printf("profile_entry: PASS — none of the %u profiled traps that "
-		       "crossed the window opened with a reading older than its "
-		       "thread's last return to user mode (#622)\n",
+		       "crossed the window was sampled, and no reading was older "
+		       "than its thread's last return to user mode (#622)\n",
 		       (unsigned) asked);
 }
 

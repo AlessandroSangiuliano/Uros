@@ -12,9 +12,9 @@
 /*
  * Spinners free to move, two a processor at a user thread's priority, while
  * the userland boots; they stop when twenty profiled traps have been taken
- * off their processor between the entry and the dispatch (sixty seconds at
- * most).  Then the profile's counts say whether any of them opened with an
- * earlier call's reading.
+ * off their processor between the entry and the dispatch (twenty seconds at
+ * most).  Then the profile's counts say whether any of them was sampled all
+ * the same, or opened with an earlier call's reading.
  * Prints "profile_entry: PASS", "WRONG" or "NOT ASKED" when it ends, and
  * returns at once: the boot goes on into bootstrap_create() under it.
  */

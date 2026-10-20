@@ -498,12 +498,27 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 }
 
 /*
- * #622: see <kern/syscall_profile.h>.  The first stale reading is printed by
+ * #622: see <kern/syscall_profile.h>.  The first of each WRONG is printed by
  * the thread that found it, in the trap, where the dump prints too.
  */
 volatile uint32_t	syscall_profile_asked;
 volatile uint32_t	syscall_profile_stale;
+volatile uint32_t	syscall_profile_crossed_sampled;
 static volatile uint32_t sp_stale_said;
+static volatile uint32_t sp_crossed_said;
+
+static void
+sp_crossed_sampled(thread_t t)
+{
+	syscall_profile_crossed_sampled++;
+	if (sp_crossed_said)
+		return;
+	sp_crossed_said = 1;
+	printf("syscall_profile: thread %p was taken off its processor between "
+	       "entering trap %d and its dispatch, and the trap was sampled -- "
+	       "WRONG, its entry phase holds the time it spent off (#622)\n",
+	       (void *) t, syscall_profile_trap);
+}
 
 static void
 sp_stale(thread_t t, uint64_t entry)
@@ -530,6 +545,7 @@ syscall_profile_enter(int trap_number)
 {
 	thread_t	t = current_thread();
 	uint64_t	entry;
+	int		crossed;
 
 	if (trap_number != syscall_profile_trap || t == THREAD_NULL)
 		return;
@@ -544,8 +560,9 @@ syscall_profile_enter(int trap_number)
 	 * A reading older than that last return is an earlier call's: never a
 	 * sample.
 	 */
-	if (t->syscall_profile.left_at != 0
-	    && t->syscall_profile.switch_in > t->syscall_profile.left_at)
+	crossed = t->syscall_profile.left_at != 0
+		  && t->syscall_profile.switch_in > t->syscall_profile.left_at;
+	if (crossed)
 		syscall_profile_asked++;
 	if (entry != 0 && entry < t->syscall_profile.left_at) {
 		sp_stale(t, entry);
@@ -561,6 +578,14 @@ syscall_profile_enter(int trap_number)
 		t->syscall_profile.nmoved++;
 		return;
 	}
+	/*
+	 * #622: and a trap that crossed the window is not a sample of the
+	 * path: its entry phase would hold the time it spent off the processor.
+	 * Reported and not refused -- refusing it here would be the fix's work
+	 * done by its test, and would hide what the test is for.
+	 */
+	if (crossed)
+		sp_crossed_sampled(t);
 	syscall_profile_begin(&t->syscall_profile, entry);
 	/*
 	 * The entry phase closes HERE, at the first instruction that could
