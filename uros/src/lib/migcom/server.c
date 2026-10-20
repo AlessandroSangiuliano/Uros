@@ -298,8 +298,8 @@ WriteIncludes(FILE *file)
      * one in here would drag the hosted headers into every generated stub
      * (sa_mach/types.h and musl already disagree about off_t, and this is
      * not the place to find out).  Declare just the one function instead.
-     * It matches both userland definitions, libmach/printf.c and
-     * libpthreads/fprintf.c, and the declaration already in sa_mach/stdio.h.
+     * It matches the one userland definition, libmach/printf.c, and the
+     * declaration already in sa_mach/stdio.h (#739).
      * The kernel gets printf from its own headers and is left alone.
      */
     if (!IsKernelServer)
