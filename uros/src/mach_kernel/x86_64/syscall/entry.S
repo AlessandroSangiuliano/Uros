@@ -189,19 +189,34 @@ syscall_entry:
 	 * rdtsc lands in edx:eax, both of which are live (%rax is the trap
 	 * number), so they are saved.  The pushes go BELOW the frame, like the
 	 * slow return path's, and are undone before anything reads it.
+	 *
+	 * 🔴 AND THE READING STAYS ON THIS THREAD'S STACK (#622): in the word
+	 * %rdx was pushed into, SYSCALL_ENTRY_TSC_BELOW bytes under the frame,
+	 * where cpu/percpu.c reads it.  It used to go into the per-processor
+	 * block, and the dispatcher's C read it back after the sti below, where
+	 * this kernel preempts: a thread taken off its processor in between
+	 * found another thread's reading there, or its own from an earlier
+	 * call, since every call wrote it and only the profiled trap took it.
+	 * The word is this thread's for the frame's reason (#474), and nothing
+	 * else lands on it.  Until the sti interrupts are masked, and the
+	 * vectors that ignore the mask run on stacks of their own (IST: NMI,
+	 * #MC, #DB, #DF); from the sti until the dispatch returns, it lies
+	 * inside SYSCALL_ENTRY_RESERVE, below which %rsp stays.
 	 */
 #if	SYSCALL_PROFILE
-	pushq	%rax
+	.if	SYSCALL_ENTRY_TSC_BELOW != 8
+	.error	"the entry's clock reading is the word %rdx is pushed into"
+	.endif
 	pushq	%rdx
+	pushq	%rax
 	lfence
 	rdtsc
 	shlq	$32, %rdx
 	orq	%rdx, %rax
-	movq	%rax, %gs:PERCPU_SYSCALL_TSC
-	movq	%gs:PERCPU_ACTIVE_THREAD, %rax	/* whose reading (#648) */
-	movq	%rax, %gs:PERCPU_SYSCALL_TSC_THREAD
-	popq	%rdx
+	movq	8(%rsp), %rdx
+	movq	%rax, 8(%rsp)		/* the reading, where %rdx was */
 	popq	%rax
+	addq	$8, %rsp		/* and left there, under the frame */
 #endif	/* SYSCALL_PROFILE */
 
 	/*
@@ -297,7 +312,9 @@ syscall_entry:
 	 *
 	 * ⚠️ The two wide paths lean on that parity: they push %rbp and an odd
 	 * number of stacked arguments on top of this, and land their callee on
-	 * the boundary only because what is under them is even.  It still is.
+	 * the boundary only because what is under them is even.  It still is,
+	 * with the profile on too: its reserve below is a multiple of sixteen,
+	 * asserted where it is defined.
 	 */
 
 	/*
@@ -324,7 +341,14 @@ syscall_entry:
 	 * in that window would push a frame at an address ring 3 chose.  The
 	 * swapgs and the stack switch come first for exactly that reason, and
 	 * this has to come after both.
+	 *
+	 * With the profile on, %rsp first goes below the entry's clock reading
+	 * (#622), so that from here on nothing pushed lands on it; .Lreturn
+	 * gives the bytes back.
 	 */
+#if	SYSCALL_PROFILE
+	subq	$SYSCALL_ENTRY_RESERVE, %rsp
+#endif	/* SYSCALL_PROFILE */
 	sti
 
 	/*
@@ -386,6 +410,9 @@ syscall_entry:
 	callq	*(%r11, %rax, 8)
 
 .Lreturn:
+#if	SYSCALL_PROFILE
+	addq	$SYSCALL_ENTRY_RESERVE, %rsp	/* #622: the reading was taken */
+#endif	/* SYSCALL_PROFILE */
 	/*
 	 * 🔥 Pending ASTs FIRST, and this path did not have the check (#475).
 	 *
@@ -453,8 +480,9 @@ syscall_entry:
 	/*
 	 * Read back out of the frame the entry filled (#474), rather than
 	 * popped off a working stack that no longer holds them.  %rsp is the
-	 * frame base again here: the plain paths never moved it, and the wide
-	 * paths restore it from %rbp before jumping here.
+	 * frame base again here: the plain paths never moved it but for the
+	 * profile's reserve, which .Lreturn has given back, and the wide paths
+	 * restore it from %rbp before jumping there.
 	 */
 	/*
 	 * The return path's clock starts HERE, after the AST handling and not

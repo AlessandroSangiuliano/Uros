@@ -809,8 +809,9 @@ extern volatile uint32_t	syscall_profile_stale;
 extern volatile uint32_t	syscall_profile_crossed_sampled;
 
 /*
- * What the entry stub left in this processor's block, machine-dependent by
- * nature: only the stub knows when the trap began.
+ * The clock reading the entry stub took, machine-dependent by nature: only the
+ * stub knows when the trap began, and only the target knows where it left it
+ * (on x86-64, on the thread's own stack, #622).  0 where the stub takes none.
  */
 extern uint64_t	syscall_profile_entry_tsc(void);
 

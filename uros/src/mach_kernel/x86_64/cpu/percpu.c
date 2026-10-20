@@ -12,6 +12,7 @@
 #include <cpu/regs.h>
 #include <mach/machine.h>		/* machine_slot[] (#561) */
 #include <kern/syscall_profile.h>	/* #411: the entry stub's clock reading */
+#include <syscall/syscall.h>		/* #622: where the stub leaves it */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/map.h>
@@ -260,30 +261,30 @@ void percpu_activate(uint32_t cpu_id)
 
 #if	SYSCALL_PROFILE
 /*
- * What the syscall entry stub left here on its way in (#411, for #392).
+ * What the syscall entry stub left on its way in (#411, for #392).
  *
  * The one machine-dependent line of the profile: only the stub knows when the
  * trap began, and only this file knows where it put it.  Everything else about
  * the sample is machine-independent and lives in <kern/syscall_profile.h>.
  *
- * Or 0, which the sample takes as an entry not timed, when the reading here is
- * not this thread's: the stub wrote it with interrupts masked, but it is read
- * after they are back on, by a thread that may have been preempted since -- on
- * to another processor, or here while another thread entered (#648).  Asked
- * with preemption off and taken once, so that a reading is used only by its
- * own thread, on the processor it was written on.
+ * 🔑 ON THE THREAD'S OWN STACK, NOT IN THIS PROCESSOR'S BLOCK (#622): the word
+ * SYSCALL_ENTRY_TSC_BELOW bytes under the frame the stub filled, which is this
+ * thread's for the frame's reason (#474) and stays out of everything's way
+ * until the dispatch returns -- entry.S says how.  A thread taken off its
+ * processor after the entry's sti takes the reading with it, and no other
+ * entry can write it.  In this processor's block it could be another thread's,
+ * or this thread's own from an earlier call, and #648's owner check could
+ * catch only the first.
+ *
+ * kernel_rsp is the running thread's frame base, set by the switch that
+ * brought it here, and read in one instruction it is ours on whatever
+ * processor it is read (#526).
  */
 uint64_t
 syscall_profile_entry_tsc(void)
 {
-	uint64_t	tsc = 0;
-
-	disable_preemption();
-	if (percpu()->syscall_tsc_thread == (void *) current_thread())
-		tsc = percpu()->syscall_tsc;
-	percpu()->syscall_tsc_thread = (void *) 0;
-	enable_preemption();
-	return tsc;
+	return *(const uint64_t *) (uintptr_t)
+		(percpu_kernel_rsp() - SYSCALL_ENTRY_TSC_BELOW);
 }
 #endif	/* SYSCALL_PROFILE */
 

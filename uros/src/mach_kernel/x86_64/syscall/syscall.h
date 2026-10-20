@@ -208,9 +208,31 @@
  */
 #define SYSCALL_ENOSYS		(-38)
 
+/*
+ * Where a profiling build's entry leaves its clock reading (#622): this many
+ * bytes BELOW the base of the frame it is about to write, on the same thread's
+ * kernel stack, and how many bytes under the frame it keeps out of the call's
+ * way until the dispatch returns.  Two halves, entry.S writing and
+ * syscall_profile_entry_tsc() in cpu/percpu.c reading, and these two numbers
+ * are all they share.
+ *
+ * ⚠️ Not part of the frame: no reader of the frame sees the word, and
+ * thread_get_state() does not hand it out.  The reserve is a multiple of
+ * sixteen so that the calls below it stay aligned, and the reading lies inside
+ * it -- both asserted below.
+ */
+#define SYSCALL_ENTRY_TSC_BELOW	8
+#define SYSCALL_ENTRY_RESERVE	16
+
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
+
+_Static_assert(SYSCALL_ENTRY_RESERVE % 16 == 0,
+	       "the entry's reserve would misalign every call under it");
+_Static_assert(SYSCALL_ENTRY_TSC_BELOW >= 8
+	       && SYSCALL_ENTRY_TSC_BELOW <= SYSCALL_ENTRY_RESERVE,
+	       "the entry's clock reading must lie inside its reserve");
 
 /*
  * Point this processor's SYSCALL machinery at the entry path.
