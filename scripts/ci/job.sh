@@ -4,7 +4,8 @@
 #
 # ci/job.sh -- one job of the campaign on the epic (#653): the toolchain, the
 # x86-64 build from the preset with no warning, then the merge test round after
-# round, one CSV row per boot.  Or, with --ablate, an A/B of fixes taken out in
+# round, one CSV row per boot; and in the first job, before the boots, both
+# kernels built with the trap phase profile on (#622).  Or, with --ablate, an A/B of fixes taken out in
 # place of the merge test (#656).
 #
 # Why.  The short A/B and the merge test run on a batch of branches save hours
@@ -61,11 +62,15 @@
 # instead, one per boot of either arm, and every boot's log stays in
 # OUT/ablate/, where ablate.sh works; with --sweep the same, one row per
 # patch's boot, and what ablate.sh said of each patch in OUT/sweep/NAME.out.
+# The first job of a merge test keeps the profile builds' logs in
+# OUT/profile-builds/.
 #
 # Exit status: 0 every boot as it should be -- with --ablate, every ablated boot
 # caught and every fixed boot passed; with --sweep, every patch caught · 1 at
 # least one boot WRONG, not caught or failed · 2 the command line is wrong, or a
-# patch does not apply -- with the merge test, any patch of ablations/ · 3 the job
+# patch does not apply -- with the merge test, any patch of ablations/ -- or, in
+# the merge test's first job, a kernel with the profile on did not build without
+# a warning · 3 the job
 # could not boot, or could not read its boots: the packages, the configure or
 # the build failed, the build had a warning, a round or the A/B did not report
 # every boot it was meant to, a boot's log was not where the merge test puts
@@ -641,6 +646,27 @@ row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 VERDICT_RE='^merge-test: entry ([0-9]+) (tcg|kvm) -smp ([0-9][^ ]*) (\(([^)]*)\) )?-- (as it should be|WRONG) \(([^)]*)\)(: (.*))?$'
 END_RE='^merge-test: ([0-9]+) wrong$'
 
+# Both kernels with the trap phase profile on, the kernel and nothing else,
+# in the first job only (#622).  UROS_SYSCALL_PROFILE is off in the preset, and
+# no build turned it on: from #648 to #622 the i386 kernel did not compile with
+# it.  scripts/profile-builds.sh says what it built; a kernel that did not build,
+# or warned, is named and fails the job once its boots are done, as a rotted
+# patch does.  The build trees stay out of OUT, which the artifact keeps.
+PROFILE_BAD=0
+case $JOB in
+1-*)
+	pdir=$(mktemp -d) || die 3 "cannot create a scratch directory"
+	echo "job: both kernels with UROS_SYSCALL_PROFILE on ($OUT/profile-builds/)"
+	PROFILE_OUT=$("$REPO/scripts/profile-builds.sh" "$pdir" 2>&1)
+	PROFILE_BAD=$?
+	printf '%s\n' "$PROFILE_OUT"
+	mkdir -p "$OUT/profile-builds"
+	cp "$pdir"/*.log "$OUT/profile-builds/" 2>/dev/null
+	rm -rf "$pdir"
+	sed -n 's/^profile-builds: /profile:  /p' <<< "$PROFILE_OUT" >> "$OUT/job.txt"
+	;;
+esac
+
 # Every patch of ablations/ asked whether it still applies to this tree (#643).
 # A merge that moves the code under a patch rots it, and #661's merge rotted
 # 666-early-not-drawn with nothing to say so until a sweep asked, three days
@@ -719,7 +745,8 @@ done
 [ $UNFOUND = 0 ] || echo "job: $UNFOUND boot(s) left no log under the name merge-test gives it: see the rows' log column" >&2
 [ ${#MALFORMED[@]} = 0 ] || echo "job: ${#MALFORMED[@]} row(s) with a comma inside a field were not written: see job.txt" >&2
 [ -z "$ROTTED" ] || echo "job: ablations: no longer apply: $ROTTED" >&2
+[ $PROFILE_BAD = 0 ] || echo "job: a kernel with UROS_SYSCALL_PROFILE on did not build without a warning: $OUT/profile-builds/" >&2
 [ $WRONG = 0 ] || exit 1
 [ $SHORT = 0 ] && [ $UNFOUND = 0 ] && [ ${#MALFORMED[@]} = 0 ] || exit 3
-[ -z "$ROTTED" ] || exit 2
+[ -z "$ROTTED" ] && [ $PROFILE_BAD = 0 ] || exit 2
 exit 0
