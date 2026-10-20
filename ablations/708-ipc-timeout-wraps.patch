@@ -1,0 +1,40 @@
+Kind: ablation
+Issue: #708
+Takes out: convert_ipc_timeout_to_ticks() converting the whole seconds and the rest apart (6c8b4b4d) -- millis * hz in 32 bits again, which wraps past 42949672 ms, so 42949673 ms comes out as one tick; cap_test [31]'s receive then times out after a few milliseconds instead of getting the message sent to it after 0.3 s, as on ee963c19 on victus, under KVM and under TCG
+Run: --entry 14 600 -smp 4
+Expect: cap_test: \[31\] .* -- WRONG \(#708\)
+
+diff --git a/uros/src/mach_kernel/kern/ipc_sched.h b/uros/src/mach_kernel/kern/ipc_sched.h
+index 27a2980b..60707c53 100644
+--- a/uros/src/mach_kernel/kern/ipc_sched.h
++++ b/uros/src/mach_kernel/kern/ipc_sched.h
+@@ -83,7 +83,6 @@
+ #include <mach/boolean.h>
+ #include <kern/macro_help.h>
+ #include <kern/thread.h>
+-#include <kern/time_out.h>		/* hz */
+ 
+ /*
+  * Start a thread running.  Called with the lock of the queue the thread was
+@@ -106,18 +105,10 @@ extern void thread_will_wait_with_timeout(
+  *	to a timeout in ticks (for use by set_timeout).
+  *	This conversion rounds UP so that small timeouts
+  *	at least wait for one tick instead of not waiting at all.
+- *
+- *	The whole seconds and the rest are converted apart (#708):
+- *	millis * hz in 32 bits wrapped past 2^32 / hz milliseconds,
+- *	eleven hours and fifty-six minutes at 100 Hz, and 42949673 ms
+- *	came out as one tick.  Apart, every timeout the type holds fits,
+- *	at any hz up to 1000, and the division stays in 32 bits.
+  */
+-static __inline__ unsigned int
+-convert_ipc_timeout_to_ticks(mach_msg_timeout_t millis)
+-{
+-	return millis / 1000 * hz + (millis % 1000 * hz + 999) / 1000;
+-}
++
++#define convert_ipc_timeout_to_ticks(millis)	\
++		(((millis) * hz + 999) / 1000)
+ 
+ 
+ #endif	/* _KERN_IPC_SCHED_H_ */
