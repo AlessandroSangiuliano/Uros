@@ -48,6 +48,7 @@
 #include <kern/sched_prim.h>		/* assert_wait/thread_block/thread_wakeup (#324) */
 #include <kern/thread.h>		/* current_map() (#324) */
 #include <kern/time_out.h>		/* hz (#324) */
+#include <kern/ipc_sched.h>		/* convert_ipc_timeout_to_ticks() (#708) */
 #include <vm/vm_map.h>			/* vm_map_pmap() (#324) */
 #include <vm/pmap.h>			/* pmap_extract() (#324) */
 #include <kern/syscall_profile.h>	/* #554: where the round trip goes */
@@ -772,15 +773,13 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 	if (key == (event_t) 0)
 		return KERN_INVALID_ADDRESS;
 
-	if (timeout_ms != 0) {
-		/* ticks = timeout_ms * hz / 1000, in 32-bit only — the kernel
-		 * has no libgcc 64-bit divide (__udivdi3). */
-		unsigned int uhz = (unsigned int) hz;
-		ticks = (int) ((timeout_ms / 1000) * uhz +
-			       ((timeout_ms % 1000) * uhz) / 1000);
-		if (ticks == 0)
-			ticks = 1;	/* round a sub-tick timeout up to 1 tick */
-	}
+	/*
+	 * Rounded up, by the conversion mach_msg()'s timeouts go through.  It
+	 * was rounded down here, with one tick for anything under one, so a
+	 * 15 ms wait was given one tick, 10 ms at most at 100 Hz (#708).
+	 */
+	if (timeout_ms != 0)
+		ticks = (int) convert_ipc_timeout_to_ticks(timeout_ms);
 
 	/*
 	 * #299: touch the futex word now, while we can still fault safely
@@ -905,13 +904,8 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 		return KERN_INVALID_ADDRESS;
 	SP_MARK(SP_FX_KEY);		/* #554: two user addresses -> two keys */
 
-	if (timeout_ms != 0) {
-		unsigned int uhz = (unsigned int) hz;
-		ticks = (int) ((timeout_ms / 1000) * uhz +
-			       ((timeout_ms % 1000) * uhz) / 1000);
-		if (ticks == 0)
-			ticks = 1;
-	}
+	if (timeout_ms != 0)	/* rounded up, as in futex_wait() (#708) */
+		ticks = (int) convert_ipc_timeout_to_ticks(timeout_ms);
 
 	/* #299: page the wait word in now (see futex_wait), so that the re-read
 	 * under splsched finds it resident unless it was taken away between
@@ -1047,13 +1041,8 @@ futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
 			return KERN_INVALID_ADDRESS;
 	}
 
-	if (timeout_ms != 0) {
-		unsigned int uhz = (unsigned int) hz;
-		ticks = (int) ((timeout_ms / 1000) * uhz +
-			       ((timeout_ms % 1000) * uhz) / 1000);
-		if (ticks == 0)
-			ticks = 1;	/* round a sub-tick timeout up to 1 tick */
-	}
+	if (timeout_ms != 0)	/* rounded up, as in futex_wait() (#708) */
+		ticks = (int) convert_ipc_timeout_to_ticks(timeout_ms);
 
 	s = splsched();
 	simple_lock(&futexv_lock);
@@ -1139,8 +1128,10 @@ futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
  *	Routine:	urmach_futex	(trap)
  *
  *	WAIT(uaddr,val,timeout_ms): if *uaddr == val, block until woken or
- *	    the timeout (ms; 0 = forever) elapses.  Returns KERN_NOT_WAITING
- *	    if the value already differs (caller re-checks and retries).
+ *	    the timeout elapses: milliseconds, rounded up to whole ticks as
+ *	    mach_msg()'s are, the first of them partial; 0 = forever (#708).
+ *	    Returns KERN_NOT_WAITING if the value already differs (caller
+ *	    re-checks and retries).
  *	WAKE(uaddr,n):  wake up to n waiters on uaddr (n==1 -> exactly one).
  *	WAKE_WAIT(uaddr=wait,val=wait_val,timeout,wake_uaddr): wake one waiter
  *	    on wake_uaddr and block on `uaddr` (==val), with a direct hand-off.
