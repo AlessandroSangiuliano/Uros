@@ -308,8 +308,9 @@ ipc_space_destroy(
 	/*
 	 * #688: from here on, every mapping that a lookup without this lock
 	 * took from the space is stale.  A thread of a task being terminated
-	 * can still be inside mach_msg(): thread_terminate() does not wait
-	 * for it to leave the kernel.  The per-thread port cache and
+	 * can still be inside mach_msg(): thread_terminate() stops a thread
+	 * of another task where it is and lets it go again, and a thread
+	 * stopped inside a call goes on with it.  The per-thread port cache and
 	 * urmach_msg_lockfree_resolve() trust is_generation, which
 	 * ipc_right_clean() below does not move, and the table they read is
 	 * freed below.  is_seq is left alone: it is the table's seqlock, and
