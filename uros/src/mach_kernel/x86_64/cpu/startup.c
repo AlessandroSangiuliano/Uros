@@ -52,6 +52,7 @@
 #include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
 #include <trap/handoff_test.h>	/* #607: -Q, the futex hand-off's wake */
 #include <trap/swap_disable_test.h>	/* #642: -Q, thread_swap_disable() */
+#include <syscall/profile_entry_test.h>	/* #622: -e */
 #include <ipc/ipc_mqueue.h>	/* ipc_dts_smp, for -N */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
@@ -548,6 +549,15 @@ machine_processors_ready(void)
 		}
 		if (boot_flag('O'))
 			swapper_storm_start();
+
+		/*
+		 * -e: profiled traps taken off their processor between the
+		 * entry and the dispatch (#622).  Before bootstrap_create() for
+		 * -O's reason: the traps it asks about are the userland's, so
+		 * the userland has to boot under its spinners.  Returns at once.
+		 */
+		if (boot_flag('e'))
+			profile_entry_test_start();
 
 		/*
 		 * -M: what concurrency does to a pmap with no locking (#455).
