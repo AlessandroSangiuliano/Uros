@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #622
+Over: 622-widen-entry.patch
+Takes out: the test of the thread's own switch stamp against its own reading in syscall_profile_enter() (55f3a63a) -- a trap taken off its processor between the entry and the dispatch is sampled like any other, its own reading in hand and the time it spent off the processor in its entry phase; with the reading on the thread's stack, every crossing the widen makes is such a trap
+Accel: tcg,kvm
+Run: --entry 54 600 -smp 4
+Expect: and the trap was sampled -- WRONG, its entry phase holds the time it spent off \(#622\)
+
+diff --git a/uros/src/mach_kernel/kern/syscall_profile.c b/uros/src/mach_kernel/kern/syscall_profile.c
+index fd05c0f0..2a4c9a8f 100644
+--- a/uros/src/mach_kernel/kern/syscall_profile.c
++++ b/uros/src/mach_kernel/kern/syscall_profile.c
+@@ -588,10 +588,6 @@ syscall_profile_enter(int trap_number)
+ 	 * 0 is a stub that takes no reading (i386, #554): the sample opens from
+ 	 * the clock instead, and its entry column says unknown.
+ 	 */
+-	if (entry != 0 && t->syscall_profile.switch_in > entry) {
+-		t->syscall_profile.npreempted++;
+-		return;
+-	}
+ 	/*
+ 	 * #622: and a trap that crossed the window is not a sample of the
+ 	 * path: its entry phase would hold the time it spent off the processor.

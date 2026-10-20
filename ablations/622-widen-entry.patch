@@ -1,0 +1,48 @@
+Kind: widen
+Issue: #622
+Holds open: the window between the entry stub's clock reading and the profiled trap taking it -- every fourth urmach_msg() calls thread_block() with no wait declared before SP_ENTER(33), a yield as swtch() makes one, so that under -e's spinners the thread is taken off its processor there and given one back wherever there is room, by the scheduler; a spin does not do it, since a thread that blocks in every RPC never runs out its quantum inside one (6 crossings in 20 s, with 100000 cycles spun in every call, on victus under KVM; a yield in every sixteenth gave 20 in 5 s under KVM and 4 s under TCG, and -e now asks for a hundred); the trap profile compiled in on x86-64 whatever the cache says, because ablate.sh configures every arm with the reference build's options and a merge build's UROS_SYSCALL_PROFILE is OFF; and no dumps, whose lines the harness reads as garbled; the fixed tree must still pass
+Run: --entry 54 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/CMakeLists.txt b/uros/src/mach_kernel/CMakeLists.txt
+index 3ba585a3..6e987947 100644
+--- a/uros/src/mach_kernel/CMakeLists.txt
++++ b/uros/src/mach_kernel/CMakeLists.txt
+@@ -333,7 +333,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
+       list(APPEND KERNEL_DEFINES_BARE CONTEXT_FPU_COUNT=1)
+       message(STATUS "#561 vector-state exemption counters: ON (x86_64)")
+   endif()
+-  if(UROS_SYSCALL_PROFILE)
++  if(TRUE)	# 622 widen: the profile compiled in, whatever the cache says
+       list(APPEND KERNEL_DEFINES_BARE SYSCALL_PROFILE=1
+            SYSCALL_PROFILE_TRAP=${UROS_SYSCALL_PROFILE_TRAP})
+       message(STATUS "#411 trap phase profile: ON, following trap "
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index a297e486..8f03caaf 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1034,6 +1034,12 @@ urmach_msg(
+ 	 * floor -- the stub, the frame, the dispatch -- which is the thing the
+ 	 * two copies have to be weighed against.
+ 	 */
++	{
++		static volatile unsigned int widen_n;	/* 622 widen */
++
++		if ((++widen_n & 3) == 0)
++			thread_block((void (*)(void)) 0);	/* the window, crossed */
++	}
+ 	SP_ENTER(33);		/* urmach_msg, kern/syscall_sw.c */
+ 
+ 	mr = mach_msg_overwrite_trap(msg, option, send_size, rcv_size,
+diff --git a/uros/src/mach_kernel/kern/syscall_profile.h b/uros/src/mach_kernel/kern/syscall_profile.h
+index a6ab024b..6dd71147 100644
+--- a/uros/src/mach_kernel/kern/syscall_profile.h
++++ b/uros/src/mach_kernel/kern/syscall_profile.h
+@@ -313,7 +313,7 @@
+  * A cap on how many times a thread prints.  A boot makes tens of thousands of
+  * traps; an instrument that fills the log is one nobody reads.
+  */
+-#define	SP_MAX_DUMPS	16
++#define	SP_MAX_DUMPS	0	/* 622 widen: no dumps, whose lines the harness reads as garbled */
+ 
+ /*
+  * 🔥 AND WHICH WINDOWS THOSE ARE, which is not a detail: with the cap alone
