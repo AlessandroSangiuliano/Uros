@@ -37,8 +37,6 @@
 #define PERCPU_INTR_LEVEL	168
 #define PERCPU_INTR_SAVED_IF	172
 #define PERCPU_USER_RETURNS	176
-#define PERCPU_SYSCALL_RET_THREAD	336
-#define PERCPU_SYSCALL_RET_MOVED	344
 
 #ifndef __ASSEMBLER__
 
@@ -332,18 +330,6 @@ struct percpu {
 	} pcid_slot[PCID_SLOTS];
 	uint32_t pcid_victim;		/* the slot the next miss takes */
 
-	/*
-	 * #648: the thread syscall_ret_mark was written for, which the stub
-	 * copies from active_thread as it writes the mark.  It is read back with
-	 * interrupts on, by the last instructions before cli, and by then the
-	 * thread may be on another processor, or another thread may have
-	 * written here.  So a mark counts only for its own thread, on the
-	 * processor it was written on, and once.  After the asserted fields,
-	 * like raised_by, so that no offset the assembly already knows moves.
-	 */
-	void	*syscall_ret_thread;
-	uint64_t syscall_ret_moved;	/* returns not timed: the thread moved */
-
 #if	CONTEXT_FPU_COUNT
 	/*
 	 * #561, and only when asked for: see <thread/context.h> for why this is
@@ -389,10 +375,6 @@ _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_count)
 	       == PERCPU_SYSCALL_RET_CNT, "percpu syscall_ret_count moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_mark)
 	       == PERCPU_SYSCALL_RET_MARK, "percpu syscall_ret_mark moved");
-_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_thread)
-	       == PERCPU_SYSCALL_RET_THREAD, "percpu syscall_ret_thread moved");
-_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_moved)
-	       == PERCPU_SYSCALL_RET_MOVED, "percpu syscall_ret_moved moved");
 _Static_assert(__builtin_offsetof(struct percpu, intr_level)
 	       == PERCPU_INTR_LEVEL, "percpu intr_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)

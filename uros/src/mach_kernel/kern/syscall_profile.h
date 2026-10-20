@@ -819,8 +819,7 @@ extern uint64_t	syscall_profile_entry_tsc(void);
  * And what the return path has cost, which only the entry stub can measure and
  * only the per-processor block can hold — see the note above SP_PHASES.
  */
-extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
-					      uint64_t *moved);
+extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
 
 #define	SP_ENTER(n)	syscall_profile_enter(n)
 #define	SP_LEAVE()	syscall_profile_leave()

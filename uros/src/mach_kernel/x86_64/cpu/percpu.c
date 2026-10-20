@@ -293,18 +293,15 @@ syscall_profile_entry_tsc(void)
  * What the return path has cost this processor so far (#411, for #392).
  *
  * The sum and the count rather than a mean, so the caller decides how to
- * report them -- and so that a caller which wants to reset them can.  With the
- * returns not timed because the thread had moved (#648), and all three read
- * with preemption off, so that they are one processor's.
+ * report them -- and so that a caller which wants to reset them can.  Both
+ * read with preemption off, so that they are one processor's (#648).
  */
 void
-syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
-			      uint64_t *moved)
+syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count)
 {
 	disable_preemption();
 	*cycles = percpu()->syscall_ret_cycles;
 	*count  = percpu()->syscall_ret_count;
-	*moved  = percpu()->syscall_ret_moved;
 	enable_preemption();
 }
 #endif	/* SYSCALL_PROFILE */

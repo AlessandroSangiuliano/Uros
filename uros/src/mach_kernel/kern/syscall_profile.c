@@ -393,7 +393,7 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 void
 syscall_profile_dump(struct syscall_profile_thread *p)
 {
-	uint64_t	ret_cyc, ret_n, ret_moved;
+	uint64_t	ret_cyc, ret_n;
 	uint32_t	ret_mean = 0;
 	int		ret_known = 0;
 	int		conta[SP_SHAPES];
@@ -415,7 +415,7 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	 * It is defensible for the return path alone: it runs the same
 	 * instructions whatever the message was.
 	 */
-	syscall_profile_return_cycles(&ret_cyc, &ret_n, &ret_moved);
+	syscall_profile_return_cycles(&ret_cyc, &ret_n);
 	if (ret_n != 0) {
 		ret_mean = (uint32_t) (ret_cyc / ret_n);
 		ret_known = 1;
@@ -425,7 +425,7 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       "%u..%u of %u this thread made (%u dropped, %u not sampled: "
 	       "taken off the processor before the entry was read); shapes: %d "
 	       "hand-off, %d blocked, %d awake; %u marks x %u cyc = %u of "
-	       "instrument; return %u (mean of %u, %u not timed: moved); "
+	       "instrument; return %u (mean of %u); "
 	       "kernel-wide %u candidates, %u hand-offs\n",
 	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
 	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen, p->ndropped,
@@ -434,7 +434,7 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       conta[SP_SHAPE_AWAKE],
 	       (unsigned int) SP_MARKS, sp_pair_cost,
 	       (unsigned int) SP_MARKS * sp_pair_cost,
-	       ret_mean, (unsigned int) ret_n, (unsigned int) ret_moved,
+	       ret_mean, (unsigned int) ret_n,
 	       c_mmot_combined_S_R, c_mach_msg_trap_switch_fast);
 	printf("syscall_profile   routes kernel-wide: %u combined (%u handed "
 	       "off), %u send-only, %u receive-only (%u of them resumed in the "
