@@ -498,6 +498,27 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 }
 
 /*
+ * #622: see <kern/syscall_profile.h>.  The first stale reading is printed by
+ * the thread that found it, in the trap, where the dump prints too.
+ */
+volatile uint32_t	syscall_profile_asked;
+volatile uint32_t	syscall_profile_stale;
+static volatile uint32_t sp_stale_said;
+
+static void
+sp_stale(thread_t t, uint64_t entry)
+{
+	syscall_profile_stale++;
+	if (sp_stale_said)
+		return;
+	sp_stale_said = 1;
+	printf("syscall_profile: thread %p entered trap %d with a reading %llu "
+	       "cycles older than its last return to user mode -- WRONG, an "
+	       "earlier call's (#622)\n", (void *) t, syscall_profile_trap,
+	       (unsigned long long) (t->syscall_profile.left_at - entry));
+}
+
+/*
  * The hooks, and the only two calls #392 has to add anywhere else.
  *
  * ⚠️ current_thread() and not the activation.  A sample follows the shuttle
@@ -515,6 +536,21 @@ syscall_profile_enter(int trap_number)
 
 	t->syscall_profile.self = (const void *) t;
 	entry = syscall_profile_entry_tsc();
+	/*
+	 * #622: the two questions left_at answers, asked of the reading before
+	 * it is used, however it got here.  A thread given a processor again
+	 * since it last left for user mode was taken off one between its entry
+	 * and this line: the window was crossed, and the entry test counts it.
+	 * A reading older than that last return is an earlier call's: never a
+	 * sample.
+	 */
+	if (t->syscall_profile.left_at != 0
+	    && t->syscall_profile.switch_in > t->syscall_profile.left_at)
+		syscall_profile_asked++;
+	if (entry != 0 && entry < t->syscall_profile.left_at) {
+		sp_stale(t, entry);
+		return;
+	}
 	/*
 	 * 0 is a reading that was not this thread's, because it moved between
 	 * the stub and here (#648).  Not sampled: the clock read now instead
@@ -626,6 +662,22 @@ syscall_profile_leave(void)
 		return;
 
 	syscall_profile_commit(&t->syscall_profile);
+}
+
+/*
+ * #622: stamped on every way back to user mode, not only a profiled trap's.
+ * A reading left by any earlier call -- a trap this profile does not follow
+ * included -- is then older than the stamp.
+ */
+void
+syscall_profile_left(void)
+{
+	thread_t	t = current_thread();
+
+	if (t == THREAD_NULL)
+		return;
+
+	t->syscall_profile.left_at = urmach_tsc();
 }
 
 #endif	/* SYSCALL_PROFILE */

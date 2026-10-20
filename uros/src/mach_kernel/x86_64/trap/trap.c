@@ -1347,6 +1347,7 @@ thread_return_ast(void)
 		ast_taken(FALSE, AST_ALL, splsched());
 	}
 	return_ast_check(cpu);
+	SP_LEFT();		/* #622: when this thread went back to user mode */
 }
 
 

@@ -403,6 +403,20 @@ struct syscall_profile_thread {
 	 */
 	uint64_t	runnable_at;
 	/*
+	 * When this thread last went back to user mode, stamped on its way out
+	 * by thread_return_ast(), with interrupts off (#622).  Zero on a target
+	 * that does not stamp it.
+	 *
+	 * 🔑 Two questions about the entry are answered against it.  A system
+	 * call cannot have begun before it, so an entry reading OLDER is an
+	 * earlier call's.  And a switch_in NEWER than it means the thread was
+	 * given a processor again after it entered: it was taken off one
+	 * between the entry and the dispatch, the window the reading crosses.
+	 * Neither answer depends on how the reading got here, which is what
+	 * lets them test it.
+	 */
+	uint64_t	left_at;
+	/*
 	 * Whose breakdown this is.
 	 *
 	 * 🔥 Added because a run printed two hundred dumps that were
@@ -765,6 +779,27 @@ extern void	syscall_profile_took_handoff(void);
 extern void	syscall_profile_phase(int phase);
 
 /*
+ * #622: the thread is on its way back to user mode, with interrupts off.  A
+ * target whose return path does not say so leaves left_at at zero, and the
+ * two questions asked against it are not asked there.
+ */
+extern void	syscall_profile_left(void);
+
+/*
+ * #622: what the entry test (-e) reads, kernel-wide.  Counted without a lock
+ * or an atomic, like the scheduler's figures beside them, so figures and not
+ * a census: two processors counting at once can lose one.  They cannot turn a
+ * count that is not zero into zero, which is all the test asks of `stale'.
+ *
+ *   asked	profiled traps whose thread was taken off a processor between
+ *		the entry and the dispatch -- the window the reading crosses
+ *   stale	profiled traps whose entry reading was older than their
+ *		thread's last return to user mode: an earlier call's, WRONG
+ */
+extern volatile uint32_t	syscall_profile_asked;
+extern volatile uint32_t	syscall_profile_stale;
+
+/*
  * What the entry stub left in this processor's block, machine-dependent by
  * nature: only the stub knows when the trap began.
  */
@@ -785,6 +820,7 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
 #define	SP_RUNNABLE(t)	syscall_profile_runnable(t)
 #define	SP_HANDOFF()	syscall_profile_took_handoff()
 #define	SP_MARK(p)	syscall_profile_phase(p)
+#define	SP_LEFT()	syscall_profile_left()
 
 #else	/* !SYSCALL_PROFILE */
 
@@ -796,6 +832,7 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count,
 #define	SP_RUNNABLE(t)	MACRO_BEGIN MACRO_END
 #define	SP_HANDOFF()	MACRO_BEGIN MACRO_END
 #define	SP_MARK(p)	MACRO_BEGIN MACRO_END
+#define	SP_LEFT()	MACRO_BEGIN MACRO_END
 
 #endif	/* SYSCALL_PROFILE */
 
