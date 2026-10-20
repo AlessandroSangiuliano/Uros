@@ -43,6 +43,7 @@
 #include <mach/mach_host.h>	/* #546: vm_wire, vm_remap */
 #include <mach/sync.h>		/* #552: semaphore_create/signal/wait */
 #include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
+#include <mach/clock.h>		/* #708: host_get_clock_service, clock_get_time */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
@@ -2921,6 +2922,89 @@ the_kernel_semaphores_answer(mach_port_t task)
     return 1;
 }
 
+/*
+ * #708: [29] semaphore_timedwait() under a second.
+ *
+ * The kernel turned the timeout into ticks as tv_sec * hz plus
+ * tv_nsec / NSEC_PER_SEC / hz -- integer division from the left, so the
+ * nanoseconds came to 0 below a second -- and with no whole second in it, it
+ * answered KERN_OPERATION_TIMED_OUT before it had looked at the count.  So four
+ * questions, each against what a semaphore promises: a timed wait under a
+ * second, and a zero timeout, take a count that is there; a zero timeout on a
+ * count of zero answers at once; and a wait under a second on a count of zero
+ * lasts about as long as it was told, by the realtime clock.
+ *
+ * ⚠️ That last one has a lower bound and only a loose upper one.  The defect
+ * answers at once, and a loaded boot can wake a waiter late: a test that fails
+ * for a scheduler's lateness reports the wrong thing.
+ */
+static boolean_t
+the_semaphore_waits_as_long_as_told(mach_port_t task)
+{
+    tvalspec_t    zero = { 0, 0 }, half = { 0, 500000000 };
+    tvalspec_t    fifth = { 0, 200000000 }, t0, t1;
+    mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
+    mach_port_t   sema = MACH_PORT_NULL;
+    kern_return_t kr;
+    long          ms;
+    boolean_t     ok = 1;
+
+    kr = semaphore_create(task, &sema, SYNC_POLICY_FIFO, 0);
+    if (kr != KERN_SUCCESS || sema == MACH_PORT_NULL) {
+        printf("cap_test: [29] semaphore_create FAIL kr=%d\n", (int)kr);
+        (void)mach_port_deallocate(mach_task_self(), host);
+        return 0;
+    }
+    kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [29] host_get_clock_service FAIL kr=%d\n", (int)kr);
+        (void)semaphore_destroy(task, sema);
+        return 0;
+    }
+
+    (void)semaphore_signal(sema);
+    kr = semaphore_timedwait(sema, half);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [29] a 0.5 s wait on a count of one answered %d "
+               "-- WRONG (#708)\n", (int)kr);
+        ok = 0;
+    }
+
+    (void)semaphore_signal(sema);
+    kr = semaphore_timedwait(sema, zero);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [29] a zero timeout on a count of one answered %d "
+               "-- WRONG (#708)\n", (int)kr);
+        ok = 0;
+    }
+
+    kr = semaphore_timedwait(sema, zero);
+    if (kr != KERN_OPERATION_TIMED_OUT) {
+        printf("cap_test: [29] a zero timeout on a count of zero answered %d "
+               "-- WRONG (#708)\n", (int)kr);
+        ok = 0;
+    }
+
+    (void)clock_get_time(clk, &t0);
+    kr = semaphore_timedwait(sema, fifth);
+    (void)clock_get_time(clk, &t1);
+    ms = (long)(t1.tv_sec - t0.tv_sec) * 1000
+         + ((long)t1.tv_nsec - (long)t0.tv_nsec) / 1000000;
+    if (kr != KERN_OPERATION_TIMED_OUT || ms < 150 || ms > 2000) {
+        printf("cap_test: [29] a 0.2 s wait on a count of zero answered %d "
+               "after %ld ms -- WRONG (#708)\n", (int)kr, ms);
+        ok = 0;
+    }
+
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    (void)semaphore_destroy(task, sema);
+    if (ok)
+        printf("cap_test: [29] semaphore_timedwait under a second: the "
+               "counts taken, and %ld ms waited of 200 (#708)\n", ms);
+    return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3392,6 +3476,10 @@ main(int argc, char **argv)
 
     /* #552: the semaphore stubs this target never had, exercised. */
     if (!the_kernel_semaphores_answer(mach_task_self()))
+        pass = 0;
+
+    /* #708: and a timed wait under a second, which never waited. */
+    if (!the_semaphore_waits_as_long_as_told(mach_task_self()))
         pass = 0;
 
     /* #597: no task reaches the configuration ports, claimed or not. */
