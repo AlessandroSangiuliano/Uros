@@ -199,10 +199,15 @@ struct percpu {
 	 * Nothing is lost: the return path executes the same instructions
 	 * whatever the message was, so there is no per-message variation to
 	 * attribute to a message.
+	 *
+	 * The mark is a scratch, and safe as one for user_rsp's reason: written
+	 * after thread_return_ast(), which returns with interrupts off (#617),
+	 * and read before the sysretq, with nothing between that can take the
+	 * thread off this processor (#622).
 	 */
 	uint64_t syscall_ret_cycles;
 	uint64_t syscall_ret_count;
-	uint64_t syscall_ret_mark;	/* scratch: the trap function returned */
+	uint64_t syscall_ret_mark;	/* scratch: the exit sequence began */
 
 	/*
 	 * Whether this processor is inside a replayed handler right now (#457).
