@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #688
+Takes out: the first site of 528f4d7a -- mach_msg()'s request copyin asserts again, under the read lock, that the sender's space is alive, where it went to slow_copyin; act_test [14]'s third thread sends task_info()'s message to its own task in a loop, and once the space is dead the per-thread cache and the lock-free resolve both refuse it, so the locked lookup is where that thread comes, and the assert stops the kernel
+Run: --entry 14 1200 -smp 4
+Expect: Assertion failed: file "[^"]*/ipc/mach_msg\.c", line [0-9]+: space->is_active
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+index b86b2d3a..7e4f5966 100644
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -1331,10 +1331,7 @@ mach_msg_overwrite_trap(
+ 		    }
+ 
+ 			is_read_lock(space);
+-			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
+-				is_read_unlock(space);
+-				goto slow_copyin;
+-			}
++			assert(space->is_active);
+ 
+ 			size = space->is_table_size;
+ 			table = space->is_table;
