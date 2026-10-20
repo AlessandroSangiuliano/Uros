@@ -44,6 +44,7 @@
 #include <mach/sync.h>		/* #552: semaphore_create/signal/wait */
 #include <mach/sync_policy.h>	/* #552: SYNC_POLICY_FIFO */
 #include <mach/clock.h>		/* #708: host_get_clock_service, clock_get_time */
+#include <mach/urmach_futex.h>	/* #708: the futex's three timed waits */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
@@ -3005,6 +3006,109 @@ the_semaphore_waits_as_long_as_told(mach_port_t task)
     return ok;
 }
 
+/* Microseconds from t0 to t1, by the clock [29] reads. */
+static long
+us_between(const tvalspec_t *t0, const tvalspec_t *t1)
+{
+    return (long)(t1->tv_sec - t0->tv_sec) * 1000000
+           + ((long)t1->tv_nsec - (long)t0->tv_nsec) / 1000;
+}
+
+/*
+ * #708: [30] a futex's timeout, rounded down to a tick.
+ *
+ * The futex turned its milliseconds into ticks rounding down, with one tick
+ * for anything under one, so a 15 ms wait was given one tick -- 10 ms at most
+ * at 100 Hz -- where mach_msg()'s timeouts, and since [29]
+ * semaphore_timedwait()'s, are rounded up.  So each of the three ways a futex
+ * waits is told FUTEX_WAITS times to wait 15 ms on a word nobody changes, each
+ * wait followed by a semaphore wait told the same, and must take at least
+ * three quarters of the semaphore's time: rounded down, it takes half.
+ *
+ * ⚠️ Against the semaphore, not against the clock alone: a loaded boot wakes
+ * both late, by about as much, and what is asked is how many ticks each wait
+ * was given, which the ratio keeps and the lateness does not.
+ */
+#define FUTEX_WAITS	8
+#define FUTEX_WAIT_MS	15
+
+static boolean_t
+a_futex_waits_as_long_as_told(mach_port_t task)
+{
+    static const char *const way_name[3] = { "WAIT", "WAKE_WAIT", "WAITV" };
+    tvalspec_t    told = { 0, FUTEX_WAIT_MS * 1000000 }, t0, t1;
+    mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
+    mach_port_t   sema = MACH_PORT_NULL;
+    unsigned int  word = 0, nobody = 0, woken;
+    struct urmach_futexv v;
+    kern_return_t kr;
+    long          futex_us, sema_us;
+    boolean_t     ok = 1;
+    int           way, i;
+
+    kr = semaphore_create(task, &sema, SYNC_POLICY_FIFO, 0);
+    if (kr != KERN_SUCCESS || sema == MACH_PORT_NULL) {
+        printf("cap_test: [30] semaphore_create FAIL kr=%d\n", (int)kr);
+        (void)mach_port_deallocate(mach_task_self(), host);
+        return 0;
+    }
+    kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+    (void)mach_port_deallocate(mach_task_self(), host);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [30] host_get_clock_service FAIL kr=%d\n", (int)kr);
+        (void)semaphore_destroy(task, sema);
+        return 0;
+    }
+
+    v.uaddr = &word;
+    v.val = 0;
+    for (way = 0; way < 3; way++) {
+        futex_us = sema_us = 0;
+        for (i = 0; i < FUTEX_WAITS; i++) {
+            (void)clock_get_time(clk, &t0);
+            if (way == 0)
+                kr = urmach_futex(&word,
+                                  URMACH_FUTEX_WAIT | URMACH_FUTEX_PRIVATE,
+                                  0, FUTEX_WAIT_MS, (unsigned int *)0);
+            else if (way == 1)
+                kr = urmach_futex(&word,
+                                  URMACH_FUTEX_WAKE_WAIT | URMACH_FUTEX_PRIVATE,
+                                  0, FUTEX_WAIT_MS, &nobody);
+            else
+                kr = urmach_futex_waitv(&v, 1, FUTEX_WAIT_MS, &woken);
+            (void)clock_get_time(clk, &t1);
+            futex_us += us_between(&t0, &t1);
+            if (kr != KERN_OPERATION_TIMED_OUT)
+                break;
+
+            t0 = t1;
+            (void)semaphore_timedwait(sema, told);
+            (void)clock_get_time(clk, &t1);
+            sema_us += us_between(&t0, &t1);
+        }
+
+        if (kr != KERN_OPERATION_TIMED_OUT) {
+            printf("cap_test: [30] a futex %s of %d ms answered %d "
+                   "-- WRONG (#708)\n", way_name[way], FUTEX_WAIT_MS, (int)kr);
+            ok = 0;
+        } else if (futex_us * 4 < sema_us * 3) {
+            printf("cap_test: [30] futex %s: %d waits of %d ms took %ld ms, "
+                   "the semaphore's %ld -- WRONG (#708)\n", way_name[way],
+                   FUTEX_WAITS, FUTEX_WAIT_MS, futex_us / 1000,
+                   sema_us / 1000);
+            ok = 0;
+        } else
+            printf("cap_test: [30] futex %s: %d waits of %d ms took %ld ms, "
+                   "the semaphore's %ld (#708)\n", way_name[way],
+                   FUTEX_WAITS, FUTEX_WAIT_MS, futex_us / 1000,
+                   sema_us / 1000);
+    }
+
+    (void)mach_port_deallocate(mach_task_self(), clk);
+    (void)semaphore_destroy(task, sema);
+    return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -3480,6 +3584,10 @@ main(int argc, char **argv)
 
     /* #708: and a timed wait under a second, which never waited. */
     if (!the_semaphore_waits_as_long_as_told(mach_task_self()))
+        pass = 0;
+
+    /* #708: a futex's, rounded down to a tick. */
+    if (!a_futex_waits_as_long_as_told(mach_task_self()))
         pass = 0;
 
     /* #597: no task reaches the configuration ports, claimed or not. */
