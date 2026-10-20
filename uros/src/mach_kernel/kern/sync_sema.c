@@ -131,7 +131,8 @@ semaphore_create (
  *	creation.
  *
  *	All threads currently blocked on the semaphore are awoken.  These
- *	threads will return with the KERN_TERMINATED error.
+ *	threads will return with the KERN_SEMAPHORE_DESTROYED error; a call
+ *	that finds the semaphore already destroyed gets KERN_TERMINATED.
  */
 kern_return_t
 semaphore_destroy (task_t task, semaphore_t semaphore)
@@ -173,7 +174,7 @@ semaphore_destroy (task_t task, semaphore_t semaphore)
 
 	/*
 	 *  Wakeup blocked threads  
-	 *  Blocked threads will receive a KERN_TERMINATED error
+	 *  Blocked threads will receive a KERN_SEMAPHORE_DESTROYED error
 	 */
 
 	if (semaphore->count < 0)
