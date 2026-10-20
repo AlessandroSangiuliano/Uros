@@ -749,8 +749,9 @@ machine_processors_ready(void)
  * ⚠️ i386 does two more things here, and this machine one of them.
  * fpu_sanity_check() is its answer to a bring-up path that once left
  * CR4.OSFXSR clear on an AP; here the bit is programmed on the one path that
- * programs anything.  hwp_init_cpu() is per processor, as IA32_PM_ENABLE is,
- * and each one measures its own clock (#736).
+ * programs anything.  hwp_init_cpu() runs on every processor because
+ * IA32_HWP_REQUEST is one per thread, even where IA32_PM_ENABLE is one per
+ * package, as on omen; and each one measures its own clock (#736).
  */
 void
 slave_machine_init(void)

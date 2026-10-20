@@ -16,7 +16,11 @@
  *   - IA32_PM_ENABLE says whether the firmware turned it on.  If it did, its
  *     programming is left alone.  If it did not, this turns it on, one way
  *     until reset, and asks for the whole range, autonomously: minimum the
- *     lowest, maximum the highest, desired 0;
+ *     lowest, maximum the highest, desired 0.  ⚠️ What the BOOT PROCESSOR
+ *     read, before anything wrote it, decides for every processor: on omen's
+ *     Kaby Lake the MSR is one per package, so the seven others found it on
+ *     because the boot processor had turned it on, while IA32_HWP_REQUEST is
+ *     one per thread and still each one's to write;
  *   - hwp=0 skips both, for the other arm of an A/B, and hwp_epp=N writes N
  *     into the Energy/Performance Preference -- of the request this kernel
  *     writes, or of the firmware's own -- where the processor has one.
@@ -65,8 +69,8 @@
 /* What each processor found or did, for hwp_report(); 0 is not there yet. */
 #define	HWP_NONE	1	/* no HWP: left alone */
 #define	HWP_SKIPPED	2	/* hwp=0: left alone */
-#define	HWP_ALREADY	3	/* on already, by the firmware */
-#define	HWP_ENABLED	4	/* off, and turned on here */
+#define	HWP_ALREADY	3	/* on, by the firmware, when the boot processor read it */
+#define	HWP_ENABLED	4	/* off when the boot processor read it; turned on here */
 
 static uint8_t		hwp_state[NCPUS];
 static uint32_t		hwp_mhz[NCPUS];		/* 0: not measured */
@@ -76,6 +80,18 @@ static volatile uint32_t hwp_done;		/* processors past hwp_init_cpu */
 static uint32_t		hwp_eax6, hwp_ecx6;
 static uint64_t		hwp_caps, hwp_req;
 static int		hwp_epp_bad;		/* hwp_epp= given and not 0-255 */
+
+/*
+ * The firmware's choice, as the boot processor read IA32_PM_ENABLE before
+ * anything wrote it: 1 on, 0 off, -1 not read yet.  The first version went
+ * by each processor's own reading, and on omen called seven processors on
+ * "already by the firmware" that the boot processor's write had turned on,
+ * and left their requests unwritten (#736).
+ */
+static volatile int	hwp_firmware_on = -1;
+
+/* Processors whose request this file wrote, and that read it back as written. */
+static volatile uint32_t hwp_req_written, hwp_req_kept;
 
 /*
  * The clock this processor runs at, busy, in MHz; 0 when it cannot be told.
@@ -111,7 +127,7 @@ static int
 hwp_enable(uint32_t eax6, int boot_processor)
 {
 	uint64_t	pm, caps, req, v, epp = HWP_EPP_BALANCED;
-	int		already, has_epp, epp_given = 0, r;
+	int		already, has_epp, epp_given = 0, written = 0, r;
 
 	if ((eax6 & CPUID6_EAX_HWP) == 0)
 		return HWP_NONE;
@@ -127,8 +143,10 @@ hwp_enable(uint32_t eax6, int boot_processor)
 	has_epp = (eax6 & CPUID6_EAX_HWP_EPP) != 0;
 
 	pm = rdmsr(MSR_IA32_PM_ENABLE);
-	already = (pm & 1) != 0;
-	if (!already)
+	if (boot_processor)
+		hwp_firmware_on = (pm & 1) != 0;
+	already = hwp_firmware_on >= 0 ? hwp_firmware_on : (pm & 1) != 0;
+	if ((pm & 1) == 0)
 		wrmsr(MSR_IA32_PM_ENABLE, pm | 1);
 
 	caps = rdmsr(MSR_IA32_HWP_CAPS);
@@ -150,9 +168,16 @@ hwp_enable(uint32_t eax6, int boot_processor)
 		else
 			req |= orig & 0xff000000ULL;
 		wrmsr(MSR_IA32_HWP_REQUEST, req);
+		written = 1;
 	} else if (epp_given && has_epp) {
 		req = (req & ~0xff000000ULL) | (epp << 24);
 		wrmsr(MSR_IA32_HWP_REQUEST, req);
+		written = 1;
+	}
+	if (written) {
+		atomic_add32(&hwp_req_written, 1);
+		if (((rdmsr(MSR_IA32_HWP_REQUEST) ^ req) & 0xffffffffULL) == 0)
+			atomic_add32(&hwp_req_kept, 1);
 	}
 
 	if (boot_processor) {
@@ -195,12 +220,15 @@ hwp_report(void)
 
 	if (count[HWP_ENABLED] + count[HWP_ALREADY] != 0)
 		printf("hwp: on in %u of %u processors, %u turned on here and "
-		       "%u already by the firmware%s; the boot processor's "
+		       "%u already by the firmware, as the boot processor found "
+		       "it%s; the request written on %u and read back as "
+		       "written on %u; the boot processor's "
 		       "highest/guaranteed/efficient/lowest %u/%u/%u/%u, "
 		       "request minimum/maximum %u/%u, EPP 0x%x (#736)\n",
 		       count[HWP_ENABLED] + count[HWP_ALREADY], n,
 		       count[HWP_ENABLED], count[HWP_ALREADY],
 		       hwp_epp_bad ? ", hwp_epp= ignored: not 0 to 255" : "",
+		       hwp_req_written, hwp_req_kept,
 		       (unsigned) (hwp_caps & 0xff),
 		       (unsigned) ((hwp_caps >> 8) & 0xff),
 		       (unsigned) ((hwp_caps >> 16) & 0xff),
