@@ -1656,8 +1656,10 @@ s319_dump(void)
 	int		cpu;
 
 	/*
-	 * No 64-bit divide (no libgcc __udivdi3 in the kernel): average each
-	 * CPU's cycles in 32 bits (a few seconds per-CPU fits) then mean them.
+	 * Each CPU's cycles averaged in an unsigned long, which i386 divides
+	 * with an instruction: a 64-bit divide there is a call to
+	 * i386/divide64.c's loop (#415, #708).  A few seconds per CPU fits;
+	 * then the averages are meaned.
 	 */
 	for (cpu = 0; cpu < NCPUS; cpu++) {
 		unsigned long	cnt = s319[cpu].psetlock_cnt;
