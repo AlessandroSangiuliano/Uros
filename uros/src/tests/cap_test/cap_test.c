@@ -3219,16 +3219,22 @@ a_long_receive_timeout_is_long(void)
  * timeout that woke it between the signaller's two statements made it return
  * its wait_result, THREAD_TIMED_OUT, as if that were a kern_return_t -- 1 --
  * for a wait whose signal it had taken; and the signaller's clear_wait() then
- * landed in its next wait and ended it.  A second thread signals S 10 ms after
- * this one starts a 40 ms wait on it, and then this one waits 500 ms on T,
- * which nobody signals.  The first wait must answer KERN_SUCCESS or
- * KERN_OPERATION_TIMED_OUT, with the signal counted once -- taken by the wait,
- * or left in S's count -- and the second must time out, after 450 ms or more.
+ * landed in its next wait and ended it.  In each of SIGNAL_ROUNDS rounds a new
+ * thread signals S 10 ms after this one starts a 40 ms wait on it, and then
+ * this one waits 300 ms on T, which nobody signals.  The first wait must
+ * answer KERN_SUCCESS or KERN_OPERATION_TIMED_OUT, with the signal counted
+ * once -- taken by the wait, or left in S's count -- and the second must time
+ * out, after 250 ms or more.
  *
  * ⚠️ The window is two adjacent statements at splsched, so this arm catches
  * the defect only with ablations/707-widen-signal.patch holding the signaller
- * between them.  Without it, it passes on either kernel.
+ * between them; without it, it passes on either kernel.  And only when the
+ * signaller is not spinning on the master processor, the one timeout_tick()
+ * runs on: there the 40 ms timeout cannot come due inside the window, and one
+ * round in four, at -smp 4, missed it.  Hence the rounds.
  */
+#define SIGNAL_ROUNDS	4
+
 struct sema_signaller {
     mach_port_t   sema;
     kern_return_t idle_kr;
@@ -3258,15 +3264,16 @@ signal_after_a_while(void *arg)
 static boolean_t
 a_signal_in_flight_ends_one_wait(mach_port_t task)
 {
-    tvalspec_t    forty = { 0, 40000000 }, half = { 0, 500000000 };
+    tvalspec_t    forty = { 0, 40000000 }, told = { 0, 300000000 };
     tvalspec_t    zero = { 0, 0 }, t0, t1;
     mach_port_t   host = mach_host_self(), clk = MACH_PORT_NULL;
     mach_port_t   s_sema = MACH_PORT_NULL, t_sema = MACH_PORT_NULL;
     struct sema_signaller sig;
     pthread_t     signaller;
     kern_return_t kr, first, second, left;
-    long          ms;
+    long          ms, ms_min = 0, ms_max = 0;
     boolean_t     ok = 1;
+    int           round, taken = 0;
 
     kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
     (void)mach_port_deallocate(mach_task_self(), host);
@@ -3281,51 +3288,57 @@ a_signal_in_flight_ends_one_wait(mach_port_t task)
         printf("cap_test: [32] semaphore_create FAIL kr=%d\n", (int)kr);
         ok = 0;
     }
-    if (ok) {
+
+    for (round = 1; ok && round <= SIGNAL_ROUNDS; round++) {
         sig.sema = s_sema;
         sig.idle_kr = sig.signal_kr = KERN_FAILURE;
         if (pthread_create(&signaller, NULL, signal_after_a_while, &sig) != 0) {
             printf("cap_test: [32] pthread_create FAIL\n");
             ok = 0;
+            break;
         }
-    }
-    if (ok) {
         first = semaphore_timedwait(s_sema, forty);
         (void)clock_get_time(clk, &t0);
-        second = semaphore_timedwait(t_sema, half);
+        second = semaphore_timedwait(t_sema, told);
         (void)clock_get_time(clk, &t1);
         ms = us_between(&t0, &t1) / 1000;
         (void)pthread_join(signaller, NULL);
         left = semaphore_timedwait(s_sema, zero);
 
         if (first != KERN_SUCCESS && first != KERN_OPERATION_TIMED_OUT) {
-            printf("cap_test: [32] a 40 ms wait with a signal in flight "
-                   "answered %d -- WRONG (#707)\n", (int)first);
+            printf("cap_test: [32] round %d: a 40 ms wait with a signal in "
+                   "flight answered %d -- WRONG (#707)\n", round, (int)first);
             ok = 0;
         } else if ((first == KERN_SUCCESS) != (left == KERN_OPERATION_TIMED_OUT)) {
-            printf("cap_test: [32] the wait answered %d and a try after "
-                   "the signal %d: the signal counted %s -- WRONG (#707)\n",
-                   (int)first, (int)left,
+            printf("cap_test: [32] round %d: the wait answered %d and a try "
+                   "after the signal %d: the signal counted %s -- WRONG "
+                   "(#707)\n", round, (int)first, (int)left,
                    first == KERN_SUCCESS ? "twice" : "never");
             ok = 0;
         }
-        if (second != KERN_OPERATION_TIMED_OUT || ms < 450) {
-            printf("cap_test: [32] the next wait, 500 ms on a semaphore "
-                   "nobody signals, answered %d after %ld ms -- WRONG "
-                   "(#707)\n", (int)second, ms);
+        if (second != KERN_OPERATION_TIMED_OUT || ms < 250) {
+            printf("cap_test: [32] round %d: the next wait, 300 ms on a "
+                   "semaphore nobody signals, answered %d after %ld ms -- "
+                   "WRONG (#707)\n", round, (int)second, ms);
             ok = 0;
         }
         if (sig.idle_kr != MACH_RCV_TIMED_OUT || sig.signal_kr != KERN_SUCCESS) {
-            printf("cap_test: [32] the signaller's wait answered 0x%x and "
-                   "its signal %d -- FAIL\n", (unsigned)sig.idle_kr,
-                   (int)sig.signal_kr);
+            printf("cap_test: [32] round %d: the signaller's wait answered "
+                   "0x%x and its signal %d -- FAIL\n", round,
+                   (unsigned)sig.idle_kr, (int)sig.signal_kr);
             ok = 0;
         }
-        if (ok)
-            printf("cap_test: [32] a signal in flight: the wait answered %d, "
-                   "the signal counted once, the next wait timed out after "
-                   "%ld ms (#707)\n", (int)first, ms);
+        if (first == KERN_SUCCESS)
+            taken++;
+        if (round == 1 || ms < ms_min)
+            ms_min = ms;
+        if (round == 1 || ms > ms_max)
+            ms_max = ms;
     }
+    if (ok)
+        printf("cap_test: [32] %d rounds of a signal in flight: %d taken, "
+               "%d left in the count, next waits %ld-%ld ms (#707)\n",
+               SIGNAL_ROUNDS, taken, SIGNAL_ROUNDS - taken, ms_min, ms_max);
 
     if (t_sema != MACH_PORT_NULL)
         (void)semaphore_destroy(task, t_sema);
