@@ -178,6 +178,33 @@ cons_cost_report(void)
 static int	cons_ring_said;
 
 /*
+ * 🔴 NOT printf() (#702).  This copy is said inside the halting processor's
+ * report, and printf() takes printf_lock -- which a processor waiting for that
+ * same report can hold: once panic() has turned the ring off, its line goes to
+ * the wire a byte at a time, and each byte waits for the report.  The report
+ * waited for the lock, the lock's holder for the report, and when
+ * CONS_REPORT_CYCLES ran out every stopped processor said its own report at
+ * once; this copy and the panicking processor's backtrace never came.  So the
+ * lines are formatted here and go out through cons_putc_wire(), which waits
+ * only with a bound, as trap.c's backtraces do.
+ */
+static void
+report_putc(char c)
+{
+	cons_putc_wire(c);
+}
+
+static void
+report_printf(const char *fmt, ...)
+{
+	va_list	ap;
+
+	va_start(ap, fmt);
+	_doprnt(fmt, &ap, report_putc, 16);
+	va_end(ap);
+}
+
+/*
  * What the framebuffer drew as ■ instead of itself (#661), in the words the
  * census line uses too, "N without a glyph".  For the reader of a log, and for
  * 661-em-dash-no-glyph, which catches its ablation by this count: the harness
@@ -187,7 +214,7 @@ static int	cons_ring_said;
  * Bytes that were not UTF-8 are as broken on the wire as here, and are only
  * counted.
  *
- * ⚠️ One printf a line, never pieces: another processor's line can come
+ * ⚠️ One call a line, never pieces: another processor's line can come
  * between two calls, and a line carrying two writers' output fails the run on
  * its own (#578).  And not sprintf() into a buffer, which takes a lock this
  * report, said on the way down, must not wait for (#655).
@@ -199,13 +226,15 @@ fbcons_replaced_report(void)
 	uint32_t n = fbcons_no_glyph(&first);
 
 	if (n == 0)
-		printf("UrMach x86-64: console: the framebuffer drew every "
-		       "character it was handed: 0 without a glyph, %u not "
-		       "UTF-8 (#661)\n", fbcons_not_utf8());
+		report_printf("UrMach x86-64: console: the framebuffer drew "
+			      "every character it was handed: 0 without a "
+			      "glyph, %u not UTF-8 (#661)\n",
+			      fbcons_not_utf8());
 	else
-		printf("UrMach x86-64: console: the framebuffer drew ■ for %u "
-		       "without a glyph (the first U+%04X), %u not UTF-8 (#661)"
-		       "\n", n, first, fbcons_not_utf8());
+		report_printf("UrMach x86-64: console: the framebuffer drew ■ "
+			      "for %u without a glyph (the first U+%04X), %u "
+			      "not UTF-8 (#661)\n", n, first,
+			      fbcons_not_utf8());
 }
 
 void
@@ -229,52 +258,56 @@ cons_ring_report(void)
 	 * console nobody runs.
 	 */
 	if (!fbcons_present()) {
-		printf("UrMach x86-64: console: no framebuffer was drawn on "
-		       "this boot — COM1 was the only output there was "
-		       "(#568)\n");
+		report_printf("UrMach x86-64: console: no framebuffer was "
+			      "drawn on this boot — COM1 was the only output "
+			      "there was (#568)\n");
 	} else {
 		uint64_t g = fbcons_glyphs();
 		uint64_t cyc = fbcons_cycles();
 
 		hz = tsc_hz();
 		if (hz == 0 || g == 0)
-			printf("UrMach x86-64: console: the framebuffer drew "
-			       "%llu glyphs in %llu cycles on a %ux%u screen, "
-			       "%llu scrolls — NOT ASKED for the time, no "
-			       "calibrated TSC (#568)\n",
-			       (unsigned long long) g,
-			       (unsigned long long) cyc,
-			       fbcons_cols(), fbcons_rows(),
-			       (unsigned long long) fbcons_scrolls());
+			report_printf("UrMach x86-64: console: the "
+				      "framebuffer drew %llu glyphs in %llu "
+				      "cycles on a %ux%u screen, %llu scrolls "
+				      "— NOT ASKED for the time, no "
+				      "calibrated TSC (#568)\n",
+				      (unsigned long long) g,
+				      (unsigned long long) cyc, fbcons_cols(),
+				      fbcons_rows(),
+				      (unsigned long long) fbcons_scrolls());
 		else
-			printf("UrMach x86-64: console: the framebuffer drew "
-			       "%llu glyphs in %llu cycles = %llu ns a glyph "
-			       "on a %ux%u screen, %llu scrolls (#568)\n",
-			       (unsigned long long) g,
-			       (unsigned long long) cyc,
-			       /*
-				* 🔴 DIVIDED BY THE GLYPHS FIRST.  cyc is the
-				* whole boot's: 5.7e10 under KVM, and
-				* multiplying that by a billion overflows a
-				* 64-bit unsigned and reported 223 ns for a
-				* glyph that costs 9600.  A number that is
-				* forty times too small, on the line whose job
-				* is to say what this console costs.
-				*/
-			       (unsigned long long)
-					((cyc / g) * 1000000000ULL / hz),
-			       fbcons_cols(), fbcons_rows(),
-			       (unsigned long long) fbcons_scrolls());
+			report_printf("UrMach x86-64: console: the "
+				      "framebuffer drew %llu glyphs in %llu "
+				      "cycles = %llu ns a glyph on a %ux%u "
+				      "screen, %llu scrolls (#568)\n",
+				      (unsigned long long) g,
+				      (unsigned long long) cyc,
+				      /*
+				       * 🔴 DIVIDED BY THE GLYPHS FIRST.  cyc is
+				       * the whole boot's: 5.7e10 under KVM,
+				       * and multiplying that by a billion
+				       * overflows a 64-bit unsigned and
+				       * reported 223 ns for a glyph that costs
+				       * 9600.  A number that is forty times
+				       * too small, on the line whose job is to
+				       * say what this console costs.
+				       */
+				      (unsigned long long)
+				      ((cyc / g) * 1000000000ULL / hz),
+				      fbcons_cols(), fbcons_rows(),
+				      (unsigned long long) fbcons_scrolls());
 		fbcons_replaced_report();
 	}
 
-	printf("UrMach x86-64: console: over this boot the ring was handed "
-	       "over %u times by the thread that printed, %u by a tick or an "
-	       "idle processor, %u on the way down; %u writers paid for room, "
-	       "%u bytes are still queued (#567)\n",
-	       cons_drains(CONS_DRAIN_WRITER), cons_drains(CONS_DRAIN_DEFERRED),
-	       cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
-	       cons_queued());
+	report_printf("UrMach x86-64: console: over this boot the ring was "
+		      "handed over %u times by the thread that printed, %u by "
+		      "a tick or an idle processor, %u on the way down; %u "
+		      "writers paid for room, %u bytes are still queued "
+		      "(#567)\n", cons_drains(CONS_DRAIN_WRITER),
+		      cons_drains(CONS_DRAIN_DEFERRED),
+		      cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
+		      cons_queued());
 }
 
 /*
