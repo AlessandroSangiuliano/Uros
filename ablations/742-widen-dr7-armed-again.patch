@@ -1,0 +1,46 @@
+Kind: widen
+Issue: #742
+Holds open: what a GitHub runner did once in 1776 boots, a DR7 armed again after #440's window test had reset it -- the boot processor writes DR7 = an execute breakpoint on DR0 at each of its ticks once a thread runs, and clock_event_drain_reports() says so once, in thread context, where printing is allowed; with DR0 at zero after the test, as 979918c1 leaves it, nothing the kernel runs breaks on it, and the fixed tree must still pass; at one processor, as the runner's boot was, since the test leaves DR0 on the boot processor only; the first version armed DR7 once, at the boot processor's first tick in a task's code, which came in 6 boots of 12 at one processor and in 4 of 12 at four, and it printed from the tick, where printing is not allowed; entry 14, whose bundle reaches the idle loop where the line is said, while entry 0 ends with boot_probe before any processor idles, and its fixed boots never said the widen was open
+Run: --entry 14 1200 -smp 1
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 26c1b3a7..98be4dda 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -125,6 +125,7 @@ static int		task_panic_armed;
+ static volatile int	task_panic_state = TASK_PANIC_NOBODY;
+ static uint64_t		task_panic_first;	/* the first hold's TSC */
+ static volatile uint64_t task_panic_rest;	/* no hold before this TSC */
++static volatile int	widen_742;	/* 742-widen: 1 armed, 2 said */
+ static uint8_t		event_vector;
+ 
+ /* ------------------------------------------------------ tsc-deadline ---- */
+@@ -1052,6 +1053,13 @@ clock_event_drain_reports(void)
+ {
+ 	unsigned	cpu;
+ 
++	/* 742-widen: said once, here, where printing is allowed. */
++	if (widen_742 == 1) {
++		widen_742 = 2;
++		printf("742-widen: dr7 armed again on the boot processor, "
++		       "at each of its ticks\n");
++	}
++
+ 	/*
+ 	 * ⚠️ Thread context only.  This prints, and printing is exactly what the
+ 	 * handler may not do -- calling this from an interrupt would put the
+@@ -1156,6 +1164,15 @@ clock_event_tick(struct trap_frame *frame)
+ 	boolean_t	usermode;
+ 	vm_offset_t	pc;
+ 
++	/* 742-widen: DR7 armed again on the boot processor at each of its
++	 * ticks once a thread runs, after #440's window test, as one runner
++	 * did; said in thread context, by clock_event_drain_reports(). */
++	if (cpu == (unsigned) master_cpu && current_act() != THR_ACT_NULL) {
++		write_dr7(DR7_EXEC_DR0);
++		if (widen_742 == 0)
++			widen_742 = 1;
++	}
++
+ 	/*
+ 	 * A real frame always has a code segment with the selector's index
+ 	 * set; a stub frame is all zeros.  Distinguishing them on cs is exact

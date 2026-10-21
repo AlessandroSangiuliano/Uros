@@ -640,7 +640,7 @@ static void arm_breakpoints(void)
 		 */
 	}
 
-	write_dr6(0);
+	write_dr6(DR6_RESET);	/* not zero: see DR6_RESET (#742) */
 	write_dr7(dr7);
 }
 
@@ -753,9 +753,10 @@ boolean_t ddb_breakpoint_hit(struct trap_frame *frame)
 		/*
 		 * ⚠️ DR6 is sticky -- the processor sets the bit and never
 		 * clears it -- so a handler that leaves it makes the next
-		 * debug exception describe this one as well.
+		 * debug exception describe this one as well.  Back to the
+		 * reset value, not zero: see DR6_RESET (#742).
 		 */
-		write_dr6(0);
+		write_dr6(DR6_RESET);
 
 		ddb_enter(frame, breakpoints[i].write ? "watchpoint"
 						     : "breakpoint");

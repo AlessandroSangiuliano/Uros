@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #742
+Over: 742-widen-dr7-armed-again.patch
+Takes out: 979918c1's clearing of DR0-DR3 after #440's window test, so DR0 keeps syscall_entry as it did; over 742-widen-dr7-armed-again the next syscall on the boot processor takes a debug exception on syscall_entry, in ring 0 with the user's stack, as the runner's boot did, and the report names breakpoint 0 from DR6 (9c50c698); the read-back after the test says WRONG as well
+Run: --entry 14 1200 -smp 1
+Expect: dr6 0x[0-9a-f]+: breakpoint 0
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 07c2cff2..4e47f44b 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -4089,8 +4089,6 @@ static void ring3_selftest(void)
+ 	 * to FFFF0FF0H, not to zero: see DR6_RESET.  Read back below.
+ 	 */
+ 	write_dr7(DR7_RESET);
+-	for (unsigned i = 0; i < DR_COUNT; i++)
+-		write_dr(i, 0);
+ 	write_dr6(DR6_RESET);		/* sticky; the hardware never will */
+ 	dr7_after = read_dr7();
+ 	dr_after = 0;

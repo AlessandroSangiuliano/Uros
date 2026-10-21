@@ -290,6 +290,53 @@ static void report_page_fault(uint64_t error)
 }
 
 /*
+ * And a debug exception's: what DR6 says fired, and what DR7 and the address
+ * registers hold (#742).  On one of GitHub's runners a debug exception came on
+ * syscall_entry, in ring 0 with the user's stack, and its report could not say
+ * whether a breakpoint or a single step had fired.
+ *
+ * ⚠️ A B<n> bit counts only for a slot DR7 enables: the processor may set it
+ * for a slot that is not (Intel SDM 325462-093US, Vol. 3B 20.2.3), so one it
+ * does not enable is named as such.  BLD and RTM say their condition when
+ * clear (see DR6_RESET).
+ */
+static void report_debug_registers(void)
+{
+	uint64_t dr6 = read_dr6();
+	uint64_t dr7 = read_dr7();
+
+	tputs("  dr6 ");
+	tputhex(dr6);
+	tputs(":");
+	for (unsigned i = 0; i < DR_COUNT; i++) {
+		if ((dr6 & DR6_HIT(i)) == 0)
+			continue;
+		tputs(" breakpoint ");
+		tputdec(i);
+		if ((dr7 & (3UL << (2 * i))) == 0)
+			tputs(" (not enabled)");
+	}
+	if (dr6 & DR6_BS)
+		tputs(" single step");
+	if (dr6 & DR6_BD)
+		tputs(" debug register access");
+	if (dr6 & DR6_BT)
+		tputs(" task switch");
+	if ((dr6 & DR6_BLD) == 0)
+		tputs(" bus lock");
+	if ((dr6 & DR6_RTM) == 0)
+		tputs(" inside RTM");
+	tputs("\r\n  dr7 ");
+	tputhex(dr7);
+	tputs(", dr0-dr3");
+	for (unsigned i = 0; i < DR_COUNT; i++) {
+		tputs(" ");
+		tputhex(read_dr(i));
+	}
+	tputs("\r\n");
+}
+
+/*
  * And the other error code, which describes a DESCRIPTOR (#409).
  *
  * Six vectors share this format — the segment faults and the general
@@ -2098,6 +2145,9 @@ void trap_dispatch(struct trap_frame *frame)
 
 	if (frame->vector == T_PAGE_FAULT)
 		report_page_fault(frame->error);
+
+	if (frame->vector == T_DEBUG)
+		report_debug_registers();
 
 	if (carries_a_selector(frame->vector))
 		report_selector_error(frame->error);
