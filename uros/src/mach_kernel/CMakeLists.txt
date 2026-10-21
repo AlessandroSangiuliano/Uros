@@ -1601,7 +1601,6 @@ set(PCI_SOURCES
 
 # SCSI subsystem
 set(SCSI_SOURCES
-    # scsi/scsi_info.c  # Disabled - too many dependencies
     device/device_stubs.c  # Stub implementations for missing device functions
 )
 
