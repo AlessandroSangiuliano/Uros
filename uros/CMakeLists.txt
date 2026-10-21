@@ -243,8 +243,8 @@ include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
 # A list of the files that declare types is a list somebody has to remember to
 # add to.  A pattern is not: any *_types.defs in either tree is one of these by
 # construction, and CONFIGURE_DEPENDS makes a new one re-run cmake rather than
-# wait to be noticed.  It sweeps up the machine_types.defs of machines this
-# build has never targeted, which costs nothing -- nobody edits hp_pa.
+# wait to be noticed.  It sweeps up the other target's machine_types.defs
+# too, i386's or x86-64's, the only two since #741 deleted hp_pa's and ppc's.
 #
 # 🔥 AND uapi, NOT export/include (#481).  The interface .defs moved to uapi in
 # #471 and this pattern did not follow them, so from that day mach_types.defs

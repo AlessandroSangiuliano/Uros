@@ -7,7 +7,7 @@
  * ⚠️ This file exists per machine, and it took a check to be sure it should.
  * Ten lines of table look machine-independent, and the obvious move was to
  * lift it out of AT386/ into the shared directory the way parse_args went.
- * The three existing copies say otherwise:
+ * OSF's three copies said otherwise (HP700's and POWERMAC's went with #741):
  *
  *	AT386     ufs, ext2fs, minixfs
  *	HP700     ufs, ext2fs, bext2fs

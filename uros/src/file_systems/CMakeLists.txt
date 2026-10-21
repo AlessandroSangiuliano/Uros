@@ -14,13 +14,13 @@ set(SA_FS_SOURCES
 
 # Which filesystems this machine's boot path can read.
 #
-# ⚠️ Genuinely per machine, which took a check to establish: the three existing
-# copies list DIFFERENT sets -- AT386 ufs/ext2fs/minixfs, HP700 ufs/ext2fs/
-# bext2fs, POWERMAC minixfs/ext2fs/bext2fs/hfs.  It encodes which media a
-# machine is expected to boot from, and fs_switch is tried in order, so it is a
-# preference and not a set.  The obvious move -- lifting ten lines of table into
-# the shared directory the way parse_args went -- would have been wrong for two
-# machines out of three.
+# ⚠️ Genuinely per machine, which took a check to establish: OSF's three copies
+# listed DIFFERENT sets -- AT386 ufs/ext2fs/minixfs, HP700 ufs/ext2fs/bext2fs,
+# POWERMAC minixfs/ext2fs/bext2fs/hfs, the last two gone with #741.  It encodes
+# which media a machine is expected to boot from, and fs_switch is tried in
+# order, so it is a preference and not a set.  The obvious move -- lifting ten
+# lines of table into the shared directory the way parse_args went -- would
+# have been wrong for two machines out of three.
 if(UROS_TARGET_ARCH STREQUAL "i386")
   list(APPEND SA_FS_SOURCES AT386/fs_switch.c)
 else()

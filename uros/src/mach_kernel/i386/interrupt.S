@@ -181,7 +181,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #define END_INTR_HDLR		0	
 		
 #if	MP_V1_1
-#define TRAP_DEBUG 0 /* Must match spl.s and mp_v1_1.c */
+#define TRAP_DEBUG 0 /* Must match spl.S */
 #endif	/* MP_V1_1 */
 
 #if	NCPUS > 1
@@ -416,7 +416,7 @@ mpv1_intr:
 	MP_ENABLE_PREEMPTION(%edx)
 	movl	EXT(lapic_start), %edx
 	movl	%ecx, LAPIC_TPR(%edx)	# Set/Get Task priority (spl)
-	subl	$0x50, %ecx		# XXX Must match mp_v1_1.c
+	subl	$0x50, %ecx		# XXX Must match mp_stub.c's mp_v1_1_intr[]
 	sti				# Enable interrupts
 	pushl	EXT(mp_v1_1_unit)(,%ecx,4)
 	call	*EXT(mp_v1_1_intr)(,%ecx,4)

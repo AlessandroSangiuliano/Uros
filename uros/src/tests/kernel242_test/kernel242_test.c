@@ -689,10 +689,10 @@ test_io_port_list(void)
  *
  * The blocking arm below them is not reachable here, and not for lack of
  * trying: an eventcounter only exists once a driver calls evc_init, and the
- * three that do (scsi/mapped_scsi.c, chips/lance_mapped.c, chips/atm.c) are
- * not in this build.  So every slot is empty and every id is refused, which
- * is exactly why the trap has never been exercised: there was nothing to
- * wait for and nobody to call it.
+ * three that did (scsi/mapped_scsi.c, chips/lance_mapped.c, chips/atm.c) were
+ * never built here, and went with #741.  So every slot is empty and every id
+ * is refused, which is exactly why the trap has never been exercised: there
+ * was nothing to wait for and nobody to call it.
  * ========================================================================= */
 extern kern_return_t evc_wait(unsigned int ev_id);
 
