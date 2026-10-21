@@ -1285,19 +1285,22 @@ mach_msg_overwrite_trap(
 					 * while it was in here.  Asked again under
 					 * the ports' locks, as the lock-free resolve
 					 * asks it, and the space's death asked with it.
+					 * A hit no longer current is a miss: the ports
+					 * are let go, the cache is forgotten, and the
+					 * lookups below answer, each asking whether
+					 * the space is alive.
 					 */
 					urmach_rcu_barrier();
-					if (space->is_generation != _cgen ||
-					    !space->is_active) {
-						ip_unlock(reply_port);
-						ip_unlock(dest_port);
-						for (_j = 0; _j < IPC_PORT_CACHE_N; _j++)
-							self->ith_port_cache[_j].ipc_name =
-								MACH_PORT_NULL;
-						goto slow_copyin;
+					if (space->is_generation == _cgen &&
+					    space->is_active) {
+						counter(c_ipc_port_cache_hit++);
+						goto fast_copyin_cached;
 					}
-					counter(c_ipc_port_cache_hit++);
-					goto fast_copyin_cached;
+					ip_unlock(reply_port);
+					ip_unlock(dest_port);
+					for (_j = 0; _j < IPC_PORT_CACHE_N; _j++)
+						self->ith_port_cache[_j].ipc_name =
+							MACH_PORT_NULL;
 				}
 			}
 
