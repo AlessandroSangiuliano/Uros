@@ -79,27 +79,6 @@ struct region_desc {
 	boolean_t	mapped;		/* mapped or zero-filled */
 };
 
-#ifdef 	__alpha
-typedef  long physaddr_t;
-#define NBOOT_REGIONS	5
-
-#define TEXT	0
-#define DATA	1
-#define BSS	2
-#define STACK	3
-#define SYMS	4
-
-struct bootstrap_map {
-	physaddr_t  boot_location;
-	long	boot_size;
-	long	boot_entry;
-	long	boot_gp_value;
-	long	boot_region_count;
-	struct region_desc boot_regions[NBOOT_REGIONS];
-};
-
-#endif 	/* __alpha */
-
 #define	BOOT_INFO_COMPAT	1
 #if	BOOT_INFO_COMPAT
 /*

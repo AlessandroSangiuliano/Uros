@@ -274,41 +274,6 @@ kernel_trap(map_fd,-43,5)
 kernel_trap(rfs_make_symlink,-44,3)
 kernel_trap(htg_syscall,-52,3)
 
-#if	MCMSG
-#if	RPC
-/*
- *	dangerous RPC test traps (that *will* go away)
- */
-kernel_trap(syscall_rpc_alloc,-150,3)
-kernel_trap(syscall_rpc_free,-151,1)
-kernel_trap(syscall_rpc_recv,-152,3)
-kernel_trap(syscall_rpc_reply,-153,2)
-kernel_trap(syscall_rpc_send,-154,5)
-#endif	/* RPC */
-
-#if	RDMA
-/*
- *	dangerous RDMA test traps (that *will* go away)
- */
-kernel_trap(syscall_rdma_alloc,-155,3)
-kernel_trap(syscall_rdma_free,-156,1)
-kernel_trap(syscall_rdma_token,-157,1)
-kernel_trap(syscall_rdma_accept,-158,1)
-kernel_trap(syscall_rdma_connect,-159,2)
-kernel_trap(syscall_rdma_send,-160,3)
-kernel_trap(syscall_rdma_recv,-161,3)
-kernel_trap(syscall_rdma_disconnect,-162,1)
-kernel_trap(syscall_rdma_send_busy,-163, 1)
-kernel_trap(syscall_rdma_send_ready,-164, 1)
-kernel_trap(syscall_rdma_send_done,-165, 1)
-kernel_trap(syscall_rdma_send_complete,-166, 1)
-kernel_trap(syscall_rdma_recv_busy,-167, 1)
-kernel_trap(syscall_rdma_recv_ready,-168, 1)
-kernel_trap(syscall_rdma_recv_done,-169, 1)
-kernel_trap(syscall_rdma_recv_complete,-170, 1)
-#endif	/* RDMA */
-#endif	/* MCMSG */
-
 kernel_trap(syscall_memory_object_change_attributes,-171,5)
 kernel_trap(syscall_memory_object_data_error,-172,4)
 kernel_trap(syscall_memory_object_data_unavailable,-173,3)
