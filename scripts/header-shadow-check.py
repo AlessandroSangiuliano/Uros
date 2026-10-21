@@ -119,11 +119,6 @@ ACCEPTED = {
     # file in the tree writes #include <cpuid.h>, so no unit picks between them.
     "cpuid.h",
 
-    # <mach/sync.h>: the kernel's own beside the stub generated from sync.defs.
-    # The split follows the boundary -- 522 kernel units get the kernel's, 489
-    # userland units get the stub -- which is what the two files are for.
-    "mach/sync.h",
-
     # default_pager's own types.h, which is its private struct definitions and
     # not a libc header despite the name.  Reachable beside sa_mach/types.h
     # only from default_pager itself, which includes it by quoted name.
