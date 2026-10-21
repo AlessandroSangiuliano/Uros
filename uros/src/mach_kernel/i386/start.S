@@ -239,18 +239,6 @@ multiboot2_header_end:
 
 #if	NCPUS > 1
 
-#ifdef	SYMMETRY
-#include <sqt/asm_macros.h>
-#endif
-
-#ifdef	SQT
-#include <i386/SQT/asm_macros.h>
-#endif	/* SQT */
-
-#ifdef	MBUS
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS */
-
 #define	CX(addr,reg)	addr(,reg,4)
 
 #else
@@ -263,10 +251,6 @@ multiboot2_header_end:
 #ifdef	AT386
 #include <i386/AT386/mp/mp.h>
 #endif	/* AT386 */
-
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
 
 /*
  * GAS won't handle an intersegment jump with a relocatable offset.
@@ -462,17 +446,8 @@ LEXT(pstart)
 1:
 
 #if 0
-#ifdef	SYMMETRY
-#include <sqt/asm_startup.h>
-#endif
-#ifdef	SQT
-#include <i386/SQT/asm_startup.h>
-#endif
 #ifdef	AT386
 #include <i386/AT386/asm_startup.h>
-#endif
-#ifdef	iPSC386
-#include <i386ipsc/asm_startup.h>
 #endif
 #endif
 
@@ -558,45 +533,16 @@ LEXT(pstart)
 	rep
 	stosl				/* edi now points to next page */
 
-#ifdef	CBUS
-
-/*
- *	Map first meg at KERNELBASE for AT bus registers and for this code
- */
-	movl	%edi, %esi		/* Use next available page as page table */
-	andl	$(-NBPG),%esi		/* mask out offset in page */
-	orl	$INTEL_PTE_KERNEL,%esi	/* add pte bits */
-	movl	%esi, KERNELBASEPDE(%ebx)
-	movl	%edi, %esi		
-	addl	$NBPG,%edi		/* update next available page */
-	movl	$INTEL_PTE_KERNEL,%eax	/* set up pte prototype */
-	movl	$256, %ecx
-4:
-	movl	%eax, (%esi)		/* set pte */
-	addl	$4,%esi			/* advance to next pte */
-	addl	$NBPG,%eax		/* advance to next phys page */
-	subl	$1, %ecx
-	cmpl	$0, %ecx
-	jne	4b
-
-#endif	/* CBUS */
-
 /*
  * Use next few pages for page tables.
  */
 	addl	$(KERNELBASEPDE),%ebx	/* point to pde for kernel base */
-#ifdef	CBUS
-	addl	$(CBUS_START_PDE), %ebx
-#endif	/* CBUS */
 	movl	%edi,%esi		/* point to end of current pte page */
 
 /*
  * Enter 1-1 mappings for kernel and for kernel page tables.
  */
 	movl	$(INTEL_PTE_KERNEL),%eax /* set up pte prototype */
-#ifdef	CBUS
-	addl	$CBUS_START, %eax
-#endif	/* CBUS */
 0:
 	cmpl	%esi,%edi		/* at end of pte page? */
 	jb	1f			/* if so: */
@@ -667,12 +613,7 @@ fix_ldt_ret:
  * Turn on paging.
  */
 	movl	%cr3,%eax		/* retrieve kernel PDE phys address */
-#ifdef	CBUS
-	movl	(KERNELBASEPDE+CBUS_START_PDE)(%eax),%ecx
-	movl	%ecx,CBUS_START_PDE(%eax)		
-#else	/* CBUS */
 	movl	KERNELBASEPDE(%eax),%ecx
-#endif	/* CBUS */
 	movl	%ecx,(%eax)		/* set it also as pte for location */
 					/* 0..3fffff, so that the code */
 					/* that enters paged mode is mapped */
@@ -760,18 +701,10 @@ LEXT(slave_start)
 	addl	$(KVTOPHYS),%ebx	/* convert to physical address */
 
 	movl	PA(EXT(mp_boot_pde)),%edx /* point to the bootstrap PDE */
-#ifdef	CBUS
-	movl	KERNELBASEPDE+CBUS_START_PDE(%ebx),%eax
-					/* point to pte for KERNELBASE */
-	movl	%eax,KERNELBASEPDE+CBUS_START_PDE(%edx)
-					/* set in bootstrap PDE */
-	movl	%eax,CBUS_START_PDE(%edx)
-#else	/* CBUS */
 	movl	KERNELBASEPDE(%ebx),%eax
 					/* point to pte for KERNELBASE */
 	movl	%eax,KERNELBASEPDE(%edx)
 					/* set in bootstrap PDE */
-#endif	/* CBUS */
 	movl	%eax,(%edx)		/* set it also as pte for location */
 					/* 0..3fffff, so that the code */
 					/* that enters paged mode is mapped */
@@ -807,18 +740,6 @@ LEXT(svstart)
 	mov	%ax,%ss
 
 	movl	%ebx,%cr3		/* switch to the real kernel PDE  */
-#if	CBUS
-	movl	%cr3, %eax
-	orl	EXT(next_cpu), %eax
-	movl	%eax, %cr3
-	incl	EXT(cbus_ncpus)
-#endif	/* CBUS */
-
-#if	MBUS
-	movl	%cr3, %eax
-	orl	$1, %eax		/* cpu 1 */
-	movl	%eax, %cr3
-#endif	/* MBUS */
 
 	/*
 	 * #321: %gs is not CPU_DATA yet (it is loaded near the end of svstart,

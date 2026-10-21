@@ -130,18 +130,6 @@
 
 #if	NCPUS > 1
 
-#ifdef	SYMMETRY
-#include <sqt/asm_macros.h>
-#endif
-
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
-
-#ifdef	MBUS
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS */
-
 #define	CX(addr, reg)	addr(,reg,4)
 
 #else	/* NCPUS == 1 */

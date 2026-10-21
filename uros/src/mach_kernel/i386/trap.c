@@ -215,15 +215,8 @@
 #include <kern/misc_protos.h>
 
 #include <device/dev_master.h>
-#if	MACH_KGDB
-#include <kgdb/kgdb_defs.h>
-#endif	/* MACH_KGDB */
 
 #include <intel/intel.h>
-
-#if     MACH_KGDB
-#include <kgdb/kgdb_defs.h>
-#endif  /* MACH_KGDB */
 
 #if 	MACH_KDB
 #include <ddb/db_watch.h>
@@ -236,9 +229,6 @@
 
 #include <i386/io_emulate.h>
 #include <i386/cn_nolock.h>		/* #599: spl_to_user_seen */
-#if	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
 
 /*
  * Forward declarations
@@ -296,9 +286,6 @@ user_page_fault_continue(
 	register struct i386_saved_state *regs = USER_REGS(thr_act);
 
 	if (kr == KERN_SUCCESS) {
-#if	NCPUS > 1 && defined(CBUS)
-		pt_entry_t *pte;
-#endif	/* NCPUS > 1 && defined(CBUS) */
 #if	MACH_KDB
 		if (!db_breakpoints_inserted) {
 			db_set_breakpoints();
@@ -311,11 +298,6 @@ user_page_fault_continue(
 				       regs))
 			kdb_trap(T_WATCHPOINT, 0, regs);
 #endif	/* MACH_KDB */
-#if	NCPUS > 1 && defined(CBUS)
-		if(pte = pmap_pte(thr_act->map->pmap, (vm_offset_t)regs->cr2))	
-			if(is_at_io_space(pte_to_pa(*pte)))
-				io_grab_master();
-#endif	/* NCPUS > 1 && defined(CBUS) */
 		thread_exception_return();
 		/*NOTREACHED*/
 	}
@@ -710,11 +692,6 @@ user_trap(
 		break;
 
 	    case T_DEBUG:
-#if     MACH_KGDB
-		if (kgdb_user_trap(regs)) {
-			return;
-		}
-#endif
 #if	MACH_KDB
 		if (db_in_single_step()) {
 		    if (kdb_trap(type, regs->err, regs))
@@ -726,11 +703,6 @@ user_trap(
 		break;
 
 	    case T_INT3:
-#if     MACH_KGDB
-		if (kgdb_user_trap(regs)) {
-			return;
-                }
-#endif
 #if	MACH_KDB
 	    {
 		thread_act_t	curact = current_act();
@@ -855,10 +827,6 @@ user_trap(
 		return;
 
 	    default:
-#if     MACH_KGDB
-		Debugger("Unanticipated user trap");
-		return;
-#endif  /* MACH_KGDB */
 #if	MACH_KDB
 		if (kdb_trap(type, regs->err, regs))
 		    return;

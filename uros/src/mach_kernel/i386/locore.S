@@ -204,22 +204,6 @@
 
 #if	NCPUS > 1
 
-#ifdef	SYMMETRY
-#include <sqt/asm_macros.h>
-#endif
-
-#ifdef	SQT
-#include <i386/SQT/asm_macros.h>
-#endif	/* SQT */
-
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
-
-#ifdef	MBUS
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS */
-
 #define	CX(addr,reg)	addr(,reg,4)
 
 #else
@@ -1081,39 +1065,13 @@ LEXT(return_kernel_loading)
  * Trap from kernel mode.  No need to switch stacks or load segment registers.
  */
 trap_from_kernel:
-#if	MACH_KDB || MACH_KGDB
+#if	MACH_KDB
 	mov	$CPU_DATA,%ax
 	mov	%ax,%gs
 	movl	%esp,%ebx		# save current stack
 
 	cmpl	EXT(int_stack_high),%esp # on an interrupt stack?
 	jb	6f			# OK if so
-
-#if     MACH_KGDB 
-        cmpl    $0,EXT(kgdb_active)     /* Unexpected trap in kgdb */
-        je      0f                      /* no */
-
-        pushl   %esp                    /* Already on kgdb stack */
-        cli
-        call    EXT(kgdb_trap)
-        addl    $4,%esp
-        jmp     EXT(return_from_kernel)
-0:                                      /* should kgdb handle this exception? */
-        cmpl $(T_NO_FPU),R_TRAPNO(%esp) /* FPU disabled? */
-        je      2f                      /* yes */
-        cmpl $(T_PAGE_FAULT),R_TRAPNO(%esp)	/* page fault? */
-        je      2f                      /* yes */
-1:
-        cli                             /* disable interrupts */
-        CPU_NUMBER(%edx)                /* get CPU number */
-        movl    CX(EXT(kgdb_stacks),%edx),%ebx
-        xchgl   %ebx,%esp               /* switch to kgdb stack */
-        pushl   %ebx                    /* pass old sp as an arg */
-        call    EXT(kgdb_from_kernel)
-        popl    %esp                    /* switch back to kernel stack */
-        jmp     EXT(return_from_kernel)
-2:
-#endif  /* MACH_KGDB */
 
 #if	MACH_KDB
 	cmpl	$0,EXT(db_active)       # could trap be from ddb?
@@ -1178,13 +1136,6 @@ trap_from_kernel:
 	pushl	%ebx			# pass old stack as parameter
 	call	EXT(db_trap_from_asm)
 #endif	/* MACH_KDB */
-#if	MACH_KGDB
-        cli                             /* disable interrupts */
-        CPU_NUMBER(%edx)                /* get CPU number */
-        movl    CX(EXT(kgdb_stacks),%edx),%esp
-	pushl	%ebx			# pass old stack as parameter
-	call	EXT(kgdb_from_kernel)
-#endif	/* MACH_KGDB */
 	addl	$4,%esp			# pop parameter
 	testl	%eax,%eax
 	jne	8f
@@ -1197,11 +1148,11 @@ trap_from_kernel:
 	addl	$4,%esp			# pop parameter
 8:
 	movl	%ebx,%esp		# get old stack (from callee-saves reg)
-#else	/* MACH_KDB || MACH_KGDB */
+#else	/* MACH_KDB */
 	pushl	%esp			# pass parameter
 	call	EXT(kernel_trap)	# to kernel trap routine
 	addl	$4,%esp			# pop parameter
-#endif	/* MACH_KDB || MACH_KGDB */
+#endif	/* MACH_KDB */
 
 #if	MACH_RT
 	CPU_NUMBER(%edx)
@@ -1530,7 +1481,7 @@ ast_from_interrupt:
 	popl	%esp			/* back to PCB stack */
 	jmp	EXT(return_from_trap)	/* return */
 
-#if	MACH_KDB || MACH_KGDB 
+#if	MACH_KDB
 /*
  * kdb_kintr:	enter kdb from keyboard interrupt.
  * Chase down the stack frames until we find one whose return
@@ -1570,9 +1521,6 @@ ast_from_interrupt:
  * Call kdb, passing it that register save area.
  */
 
-#if MACH_KGDB
-Entry(kgdb_kintr)
-#endif /* MACH_KGDB */
 #if MACH_KDB
 Entry(kdb_kintr)
 #endif /* MACH_KDB */
@@ -1619,12 +1567,6 @@ kdb_from_iret:
 	pushl	%edi
 	push	%fs
 	push	%gs
-#if MACH_KGDB
-	cli
-        pushl   %esp                    /* pass regs */
-        call    EXT(kgdb_kentry)        /* to kgdb */
-        addl    $4,%esp                 /* pop parameters */
-#endif /* MACH_KGDB */
 #if MACH_KDB
 	pushl	%esp			/* pass regs */
         call    EXT(kdb_kentry)		/* to kdb */
@@ -1654,15 +1596,6 @@ kdb_from_iret_i:			/* on interrupt stack */
 	push	%es
 	push	%fs
 	push	%gs
-#if MACH_KGDB
-	cli				/* disable interrupts */
-        CPU_NUMBER(%edx)                /* get CPU number */
-        movl    CX(EXT(kgdb_stacks),%edx),%ebx
-        xchgl   %ebx,%esp               /* switch to kgdb stack */
-        pushl   %ebx                    /* pass old sp as an arg */
-        call    EXT(kgdb_from_kernel)
-        popl    %esp                    /* switch back to interrupt stack */
-#endif /* MACH_KGDB */
 #if MACH_KDB
         pushl   %esp                    /* pass regs, */
         pushl   $0                      /* code, */
@@ -1678,7 +1611,7 @@ kdb_from_iret_i:			/* on interrupt stack */
 	addl	$8,%esp
 	iret
 
-#endif	/* MACH_KDB || MACH_KGDB */
+#endif	/* MACH_KDB */
 
 
 /*
@@ -2776,16 +2709,7 @@ ENTRY(set_tr)
 /*
  * io register must not be used on slaves (no AT bus)
  */
-#if	NCPUS > 1 && defined(CBUS) && MACH_ASSERT
-#define	ILL_ON_SLAVE			\
-	CPU_NUMBER(%eax)	;	\
-	cmpl	$0, %eax	;	\
-	je	0f		;	\
-	call	EXT(cbus_ill_io);	\
-0:
-#else	/* NCPUS > 1 && defined(CBUS) */
 #define	ILL_ON_SLAVE
-#endif	/* NCPUS > 1 && defined(CBUS) && MACH_ASSERT */
 
 
 #if	MACH_ASSERT
@@ -3225,8 +3149,6 @@ ENTRY(set_cr0)
 	movl	%eax, %cr0
 	ret
 
-#ifndef	SYMMETRY
-
 /*
  * ffs(mask)
  */
@@ -3252,8 +3174,6 @@ Entry(cpu_shutdown)
         xor     %ecx,%ecx       /* generate a divide by zero */
         div     %ecx,%eax       /* reboot now */
         ret                     /* this will "never" be executed */
-
-#endif	/* SYMMETRY */
 
 
 /*

@@ -165,14 +165,6 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <i386/AT386/mp/mp.h>
 #endif	/* AT386 */
 
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
-
-#ifdef	MBUS
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS */
-
 #if	ETAP_EVENT_MONITOR
 #define ETAP_INTERRUPT_PROBE(intr, flg)			\
 	pushal					;	\

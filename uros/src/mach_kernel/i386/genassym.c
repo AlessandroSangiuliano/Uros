@@ -146,17 +146,6 @@
 #if	NCPUS > 1
 #include <i386/mp_desc.h>
 #endif
-#ifdef	SYMMETRY
-#include <sqt/slic.h>
-#include <sqt/intctl.h>
-#endif
-#ifdef	SQT
-#include <i386/SQT/slic.h>
-#include <i386/SQT/intctl.h>
-#endif	/* SQT */
-#if	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
 
 extern void   kernel_preempt_check(void);
 cpu_data_t    cpu_data[NCPUS];
@@ -327,11 +316,6 @@ main(
 	DECLARE("KERNELBASEPDE",
 		(VM_MIN_KERNEL_ADDRESS >> PDESHIFT) *
 		sizeof(pt_entry_t));
-#if	CBUS
-	DECLARE("CBUS_START_PDE",	
-		(CBUS_START >> PDESHIFT) *
-		sizeof(pt_entry_t));
-#endif	/* CBUS */
 
 	DECLARE("TSS_ESP0",	offsetof(struct i386_tss *, esp0));
 	DECLARE("TSS_SS0",	offsetof(struct i386_tss *, ss0));
@@ -363,28 +347,6 @@ main(
 	DECLARE("TH_SYS_TIMER",    offsetof(struct timer *, system_timer));
 	DECLARE("TH_USER_TIMER",   offsetof(struct timer *, user_timer));
 #endif
-#ifdef	SYMMETRY
-	DECLARE("VA_SLIC",	VA_SLIC);
-	DECLARE("VA_ETC",	VA_ETC);
-	DECLARE("SL_PROCID",	offsetof(struct cpuslic *, sl_procid));
-	DECLARE("SL_LMASK",	offsetof(struct cpuslic *, sl_lmask));
-	DECLARE("SL_BININT",	offsetof(struct cpuslic *, sl_binint));
-	DECLARE("SL_B0INT",	offsetof(struct cpuslic *, sl_b0int));
-	DECLARE("BH_SIZE",	offsetof(struct bin_header *, bh_size));
-	DECLARE("BH_HDLRTAB",	offsetof(struct bin_header *, bh_hdlrtab));
-#endif	/* SYMMETRY */
-#ifdef	SQT
-	DECLARE("VA_SLIC",	VA_SLIC);
-	DECLARE("VA_ETC",	VA_ETC);
-	DECLARE("SL_PROCID",	offsetof(struct cpuslic *, sl_procid));
-	DECLARE("SL_LMASK",	offsetof(struct cpuslic *, sl_lmask));
-	DECLARE("SL_BININT",	offsetof(struct cpuslic *, sl_binint));
-	DECLARE("SL_B0INT",	offsetof(struct cpuslic *, sl_b0int));
-	DECLARE("BH_SIZE",	offsetof(struct bin_header *, bh_size));
-	DECLARE("BH_HDLRTAB",	offsetof(struct bin_header *, bh_hdlrtab));
-	DECLARE("SLIC_PDE",	pdenum(VA_SLIC)); 
-	DECLARE("KV_PDE",	pdenum(VM_MIN_KERNEL_ADDRESS)); 
-#endif	/* SQT */
 
 	return (0);
 }

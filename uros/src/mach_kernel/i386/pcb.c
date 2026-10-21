@@ -665,9 +665,6 @@ act_machine_set_state(
 			thr_act->mact.pcb->ims.v86s.flags =
 			    state->efl & (EFL_TF | EFL_IF);
 		    }
-#if	NCPUS > 1 && defined(CBUS)
-		    thread_bind(thr_act->thread, master_processor);
-#endif	/* NCPUS > 1 && defined(CBUS) */
 		}
 		else if (!kernel_act) {
 		    /*
@@ -778,9 +775,6 @@ act_machine_set_state(
 			thr_act->mact.pcb->ims.v86s.flags =
 			    state->efl & (EFL_TF | EFL_IF);
 		    }
-#if	NCPUS > 1 && defined(CBUS)
-		    thread_bind(thr_act->thread, master_processor);
-#endif	/* NCPUS > 1 && defined(CBUS) */
 		}
 		else if (flavor == i386_THREAD_STATE && !kernel_act) {
 		    /*
@@ -829,9 +823,6 @@ act_machine_set_state(
 		if (count < i386_ISA_PORT_MAP_STATE_COUNT)
 			return(KERN_INVALID_ARGUMENT);
 
-#if	NCPUS > 1 && defined(CBUS)
-		thread_bind(thr_act->thread, master_processor);
-#endif	/* NCPUS > 1 && defined(CBUS) */
 		break;
 	    }
 
@@ -859,9 +850,6 @@ act_machine_set_state(
 
 		thr_act->mact.pcb->ims.v86s.flags =
 			USER_REGS(thr_act)->efl & (EFL_TF | EFL_IF);
-#if	NCPUS > 1 && defined(CBUS)
-		thread_bind(thr_act->thread, master_processor);
-#endif	/* NCPUS > 1 && defined(CBUS) */
 		break;
 	    }
 

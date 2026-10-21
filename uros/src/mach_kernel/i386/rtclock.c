@@ -236,9 +236,7 @@ rtc_config(void)
 	/*
 	 * Setup device.
 	 */
-#if	iPSC386
-	pic = 2;
-#elif	MP_V1_1
+#if	MP_V1_1
     {
 	extern boolean_t mp_v1_1_initialized;
 	if (mp_v1_1_initialized)

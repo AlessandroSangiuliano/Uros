@@ -97,12 +97,7 @@ extern	int	xpr_time(void);
 
 #else	/* NCPUS == 1 || MP_V1_1 */
 
-#if	TIME_STAMP && (CBUS || MBUS)
-extern	unsigned time_stamp;
-#define	XPR_TIMESTAMP	(int) time_stamp
-#else	/* CBUS || MBUS */
 #define XPR_TIMESTAMP	(0)
-#endif	/* CBUS || MBUS */
 
 #endif	/* NCPUS == 1 || MP_V1_1 */
 
