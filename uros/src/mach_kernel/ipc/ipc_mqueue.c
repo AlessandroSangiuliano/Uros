@@ -898,9 +898,6 @@ ipc_mqueue_receive(
 	ipc_thread_t self = current_thread();
 	kern_return_t	save_wait_result;
 
-#if	NCPUS > 1 && defined(PARAGON860) && defined(ASMP)
-	MUST_BE_MASTER("ipc_mqueue_receive()");
-#endif
 	assert( !resume );
 	dstat(++c_imr_calls);
 
