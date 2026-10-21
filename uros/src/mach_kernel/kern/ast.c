@@ -142,10 +142,6 @@
 #include <cpus.h>
 #include <platforms.h>
 #include <fast_idle.h>
-#if	PARAGON860
-#include <mcmsg.h>
-#include <mcmsg_eng.h>
-#endif	/* PARAGON860 */
 #include <task_swapper.h>
 
 #include <mach_net_in_kernel.h>
@@ -166,11 +162,7 @@
 #include <kern/task_swap.h>
 #endif	/* TASK_SWAPPER */
 
-#ifdef hp_pa
-volatile ast_t need_ast[NCPUS] = {0};
-#else
 volatile ast_t need_ast[NCPUS];
-#endif
 
 void
 ast_init(void)
@@ -223,43 +215,10 @@ extern void	log_thread_action(thread_t, char *);
 	 *	These actions must not block.
 	 */
 
-#if	MCMSG
-	if (reasons & AST_MCMSG)
-		mcmsg_ast();
-#endif	/* MCMSG */
-
 #if	MACH_NET_IN_KERNEL
 	if (reasons & AST_NETWORK)
 		net_ast();
 #endif	/* MACH_NET_IN_KERNEL */
-
-#if	MCMSG_ENG
-	if (reasons & AST_RPCREQ)
-		rpc_engine_request_intr();
-
-	if (reasons & AST_RPCREPLY)
-		rpc_engine_reply_intr();
-
-	if (reasons & AST_RPCDEPART)
-		rpc_engine_depart_intr();
-
-	if (reasons & AST_RDMASEND)
-		rdma_engine_send_intr();
-
-	if (reasons & AST_RDMARECV)
-		rdma_engine_recv_intr();
-
-	if (reasons & AST_RDMATXF)
-		rdma_engine_send_fault_intr();
-
-	if (reasons & AST_RDMARXF)
-		rdma_engine_recv_fault_intr();
-#endif	/* MCMSG_ENG */
-
-#if	PARAGON860 && MCMSG_ENG
-	if (reasons & AST_SCAN_INPUT)
-		scan_input_ast();
-#endif	/* PARAGON860 */
 
 
 	/*

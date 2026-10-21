@@ -218,9 +218,6 @@ rpc_subsystem_t mig_e[] = {
 #if     MACH_MACHINE_ROUTINES
         (rpc_subsystem_t)&MACHINE_SUBSYSTEM,
 #endif  /* MACH_MACHINE_ROUTINES */
-#if     MCMSG && iPSC860
-	(rpc_subsystem_t)&mcmsg_info_subsystem,
-#endif  /* MCMSG && iPSC860 */
 };
 
 void

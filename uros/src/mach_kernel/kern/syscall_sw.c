@@ -274,9 +274,6 @@ int kern_invalid_debug = 0;
 #include <kern/cap.h>
 #include <kern/syscall_subr.h>
 #include <platforms.h>
-#if	(iPSC860 || PARAGON860)
-#include <mcmsg.h>
-#endif	/* (iPSC860 || PARAGON860) */
 
 mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(kern_invalid, 0),		/* 0 */		/* Unix */
@@ -420,26 +417,6 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(etap_trace_event, 5),			/* 109 */
 
 /* XXX temporary for limited backward compatibility */
-#if	MCMSG && PARAGON860
-	MACH_TRAP(syscall_thread_terminate, 1),	/* 110 */
-	MACH_TRAP(syscall_mcmsg_flick, 0),	/* 111 */
-	MACH_TRAP(syscall_vm_wire, 5),		/* 112 */
-	MACH_TRAP(syscall_vm_machine_attribute, 5),	/* 113 */
-	MACH_TRAP(syscall_thread_abort_safely, 1),	/* 114 */
-	MACH_TRAP(syscall_thread_set_state, 4),	/* 115 */
-	MACH_TRAP(syscall_thread_suspend, 1),	/* 116 */
-	MACH_TRAP(syscall_host_statistics, 4),	/* 117 */
-	MACH_TRAP(syscall_mach_port_mod_refs, 4),	/* 118 */
-	MACH_TRAP(syscall_mach_port_request_notification, 7),	/* 119 */
-	MACH_TRAP(not_implemented, 0),		/* 120 */
-	MACH_TRAP(syscall_mcmsg_boot_send, 7),	/* 121 */
-	MACH_TRAP(syscall_mcmsg_console_open, 2),	/* 122 */
-	MACH_TRAP(syscall_mcmsg_console_close, 1),	/* 123 */
-	MACH_TRAP(syscall_mcmsg_console_read, 3),	/* 124 */
-	MACH_TRAP(syscall_mcmsg_console_write, 3),	/* 125 */
-	MACH_TRAP(syscall_mcmsg_myphysnode, 0),		/* 126 */
-	MACH_TRAP(kern_invalid, 0),		/* 127 */
-#else   /* MCMSG && PARAGON860 */
 	MACH_TRAP(syscall_thread_terminate, 1),	/* 110 */
 	MACH_TRAP(not_implemented, 0),		/* 111 */
 	MACH_TRAP(syscall_vm_wire, 5),		/* 112 */
@@ -458,71 +435,9 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(not_implemented, 0),		/* 125 */
 	MACH_TRAP(not_implemented, 0),		/* 126 */
 	MACH_TRAP(not_implemented, 0),		/* 127 */
-#endif	/* MCMSG && PARAGON860 */
 	MACH_TRAP(not_implemented, 0),		/* 128 */
 	MACH_TRAP(not_implemented, 0),		/* 129 */
 
-#if	MCMSG && PARAGON860
-	MACH_TRAP(syscall_mcmsg_interface, 12),	/* 130 */
-	MACH_TRAP(syscall_mcmsg_myphysnode, 0),	/* 131 */
-	MACH_TRAP(syscall_mcmsg_mp_access, 1),	/* 132 */
-	MACH_TRAP(syscall_mcmsg_flick, 0),	/* 133 */
-	MACH_TRAP(syscall_mcmsg_boot_send, 7),	/* 134 */
-	MACH_TRAP(syscall_mcmsg_console_open, 2),	/* 135 */
-	MACH_TRAP(syscall_mcmsg_console_close, 1),	/* 136 */
-	MACH_TRAP(syscall_mcmsg_console_read, 3),	/* 137 */
-	MACH_TRAP(syscall_mcmsg_console_write, 3),	/* 138 */
-	MACH_TRAP(not_implemented, 0),		/* 139 */
-
-#if	NX
-	MACH_TRAP(syscall_mcmsg_wire, 2),	/* 140 */
-	MACH_TRAP(syscall_mcmsg_nodeinfo, 1),	/* 141 */
-	MACH_TRAP(syscall_mcmsg_nxport_setup, 1),	/* 142 */
-	MACH_TRAP(syscall_mcmsg_nx_local_ast, 1),	/* 143 */
-	MACH_TRAP(syscall_mcmsg_nx_op, 9),		/* 144 */
-	MACH_TRAP(not_implemented, 0),		/* 145 */
-	MACH_TRAP(not_implemented, 0),		/* 146 */
-	MACH_TRAP(not_implemented, 0),		/* 147 */
-	MACH_TRAP(not_implemented, 0),		/* 148 */
-	MACH_TRAP(not_implemented, 0),		/* 149 */
-#else	/* NX */
-	MACH_TRAP(not_implemented, 0),		/* 140 */
-	MACH_TRAP(not_implemented, 0),		/* 141 */
-	MACH_TRAP(not_implemented, 0),		/* 142 */
-	MACH_TRAP(not_implemented, 0),		/* 143 */
-	MACH_TRAP(not_implemented, 0),		/* 144 */
-	MACH_TRAP(not_implemented, 0),		/* 145 */
-	MACH_TRAP(not_implemented, 0),		/* 146 */
-	MACH_TRAP(not_implemented, 0),		/* 147 */
-	MACH_TRAP(not_implemented, 0),		/* 148 */
-#if	VC
-	MACH_TRAP(syscall_mcmsg_vc, 9),		/* 149 */
-#else	/* VC */
-	MACH_TRAP(not_implemented, 0),		/* 149 */
-#endif	/* VC */
-#endif	/* NX */
-	MACH_TRAP(not_implemented, 0),		/* 150 */
-	MACH_TRAP(not_implemented, 0),		/* 151 */
-	MACH_TRAP(not_implemented, 0),		/* 152 */
-	MACH_TRAP(not_implemented, 0),		/* 153 */
-	MACH_TRAP(not_implemented, 0),		/* 154 */
-	MACH_TRAP(not_implemented, 0),		/* 155 */
-	MACH_TRAP(not_implemented, 0),		/* 156 */
-	MACH_TRAP(not_implemented, 0),		/* 157 */
-	MACH_TRAP(not_implemented, 0),		/* 158 */
-	MACH_TRAP(not_implemented, 0),		/* 159 */
-	MACH_TRAP(not_implemented, 0),		/* 160 */
-	MACH_TRAP(not_implemented, 0),		/* 161 */
-	MACH_TRAP(not_implemented, 0),		/* 162 */
-	MACH_TRAP(not_implemented, 0),		/* 163 */
-	MACH_TRAP(not_implemented, 0),		/* 164 */
-	MACH_TRAP(not_implemented, 0),		/* 165 */
-	MACH_TRAP(not_implemented, 0),		/* 166 */
-	MACH_TRAP(not_implemented, 0),		/* 167 */
-	MACH_TRAP(not_implemented, 0),		/* 168 */
-	MACH_TRAP(not_implemented, 0),		/* 169 */
-	MACH_TRAP(not_implemented, 0),		/* 170 */
-#else	/* MCMSG && PARAGON860 */
 	MACH_TRAP(not_implemented, 0),		/* 130 */
 	MACH_TRAP(not_implemented, 0),		/* 131 */
 	MACH_TRAP(not_implemented, 0),		/* 132 */
@@ -564,7 +479,6 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(not_implemented, 0),		/* 168 */
 	MACH_TRAP(not_implemented, 0),		/* 169 */
 	MACH_TRAP(not_implemented, 0),		/* 170 */
-#endif	/* MCMSG && PARAGON860 */
 	MACH_TRAP(syscall_memory_object_change_attributes, 5),	/* 171 */
 	MACH_TRAP(syscall_memory_object_data_error, 4),		/* 171 */
 	MACH_TRAP(syscall_memory_object_data_unavailable, 3),	/* 173 */

@@ -231,11 +231,6 @@
 #if	MACH_KDB
 #include <ddb/db_sym.h>
 
-#if defined(__alpha)
-extern boolean_t	use_kdb;
-extern int		stpages;
-#endif /* defined(__alpha) */
-
 #endif	/* MACH_KDB */
 
 #include "boot_script.h"
@@ -290,23 +285,16 @@ vm_size_t	load_info_size = 0;	/* size of bootstrap load info */
  * plain name would be false here and the block would vanish again, taking
  * regions[], STACK_BASE and STACK_SIZE with it while their users stayed.
  */
-#define	SYS_REBOOT_COMPAT	defined(i386) || defined(__x86_64__) || \
-				defined(i860) || defined(hp_pa)
+#define	SYS_REBOOT_COMPAT	defined(i386) || defined(__x86_64__)
 
 void ovbcopy_ints(vm_offset_t,vm_offset_t,vm_size_t); /* forward; */
 vm_offset_t move_bootstrap(void);	 /* forward; */
 
 #if	SYS_REBOOT_COMPAT
 
-#ifdef hp_pa
-#define	STACK_SIZE		(64*1024)	/* 64k stack */
-#define STACK_BASE		(USER_STACK_END-STACK_SIZE)
-extern void set_bootstrap_args(void);
-#else
 #define	STACK_SIZE		(1024*1024)	/* 1MB stack — MIG stubs use large stack frames */
 #define STACK_BASE		(VM_MAX_ADDRESS-STACK_SIZE)
 #define STACK_PTR		(VM_MAX_ADDRESS-0x10) /* XXX */
-#endif
 
 int	startup_single_user = 0;
 
@@ -366,11 +354,7 @@ char boot_task_name[64] = "/mach_servers/bootstrap";
 
 extern int halt_in_debugger;
 extern char boot_string_store[];
-#ifdef	SQT
-extern char bootdev[];
-#else	/* SQT */
 extern int boottype;
-#endif	/* SQT */
 
 static void
 do_bootstrap_compat(void)
@@ -472,7 +456,6 @@ do_bootstrap_compat(void)
 	machine_bootstrap_thread_sp(STACK_PTR);
 
 #if 0
-#ifndef hp_pa
 	env_start = (vm_offset_t) env_buf;
 	env_size = 0;
 	{
@@ -483,10 +466,6 @@ do_bootstrap_compat(void)
 
 	    while (*p1 = *p2++)
 		p1++;
-#ifdef	SQT
-	    strcpy(p1, bootdev);
-	    while (*p1++);	/* Get to end of string */
-#else	/* SQT */
 	    if (dev_name_lookup("disk0", &disk0_ops, &unit)) {
 		p2 = disk0_ops->d_name;
 		while (*p1 = *p2++)
@@ -501,7 +480,6 @@ do_bootstrap_compat(void)
 		while (*p1++ = *p2++)
 		    ;
 	    }
-#endif	/* SQT */
 	    env_size = p1 - env_buf;
 	}
 	if (boot_string_store[0]) { 
@@ -581,7 +559,6 @@ do_bootstrap_compat(void)
 	    }
 
         }		
-#endif /* !hp_pa */
 #endif
 }
 #endif /* SYS_REBOOT_COMPAT */
@@ -894,7 +871,7 @@ exec_map(vm_offset_t start, vm_size_t size)
 				     VM_INHERIT_DEFAULT);
 			/* XXX mapped regions always aligned? */
 			assert(addr == r->addr);
-#if	MACH_KDB || MACH_KGDB
+#if	MACH_KDB
 			if (r->prot & VM_PROT_EXECUTE)
 				for (off = 0; off < r->size; off += PAGE_SIZE)
 					vm_fault(current_task()->map,
@@ -1265,7 +1242,7 @@ user_bootstrap_old(void)
 				     VM_INHERIT_DEFAULT);
 			/* XXX mapped regions always aligned? */
 			assert(addr == r->addr);
-#if	MACH_KDB || MACH_KGDB
+#if	MACH_KDB
 			if (r->prot & VM_PROT_EXECUTE)
 				for (off = 0; off < r->size; off += PAGE_SIZE)
 					vm_fault(current_task()->map,
@@ -1282,35 +1259,6 @@ user_bootstrap_old(void)
 	vm_object_deallocate(object);
 
 #if	MACH_KDB
-#  if defined(__alpha)
-        /*
-         * Enter the bootstrap symbol table. We need to enter the bootstrap
-         * symbol table into the kernel map so that we may access this
-         * information when the current task is not the bootstrap task.
-         */
-        if (use_kdb && stpages && boot_sym_size) {
-                vm_offset_t addr;
-                vm_map_copy_t copy;
-
-                vm_map_copyin(current_task()->map,
-                                boot_sym_start,
-                                boot_sym_size,
-                                FALSE,
-                                &copy);
-                vm_map_copyout(kernel_map,
-                                &addr,
-                                copy);
-                boot_sym_start = addr;
-                vm_map_wire(kernel_map,
-                        boot_sym_start,
-                        round_page(boot_sym_start+boot_sym_size),
-                        VM_PROT_READ|VM_PROT_WRITE, FALSE);
-                X_db_sym_init((char *) boot_sym_start,
-                              (char *) boot_sym_start + boot_sym_size,
-                              "bootstrap",
-                              (char *) current_task()->map);
-	}
-#  else /* !defined(__alpha) */
 	/*
 	 * Enter the bootstrap symbol table.
 	 */
@@ -1319,15 +1267,7 @@ user_bootstrap_old(void)
 			      (char *) boot_sym_start + boot_sym_size,
 			      "bootstrap",
 			      (char *) current_task()->map);
-#  endif /* defined(__alpha) */
 #endif	/* MACH_KDB */
-
-#ifdef hp_pa
-	/* 
-	 * the stack has finally been allocated, we can copy the arguments.
-	 */  
-	set_bootstrap_args();
-#endif
 
 	/*
 	 * set the bootstrap task thread state.
@@ -1845,29 +1785,15 @@ ovbcopy_ints(
 	    *--dstp = *--srcp;
 }
 
-#ifdef hp_pa
-extern char edata;
-extern char end;
-#else
 extern char	edata[];	/* start of BSS */
 extern char	end[];		/* end of BSS */
-#endif
 
 vm_offset_t
 move_bootstrap(void)
 {
-#ifdef hp_pa
-#ifdef __ELF__
-	struct boot_info *bi = (struct boot_info *)&edata;
-#else
-	struct boot_info *bi = (struct boot_info *)round_page(&edata);
-#endif
-	kern_sym_start = (vm_offset_t) &end;
-#else
 	struct boot_info *bi = (struct boot_info *)edata;
 
 	kern_sym_start = (vm_offset_t) end;
-#endif
 
 	kern_sym_size  = bi->sym_size;
 	/*

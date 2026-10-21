@@ -98,9 +98,7 @@
 #define ipc_object_copyin       ipc_object_copyin_inline
 #define ipc_object_copyout      ipc_object_copyout_inline
 #define thread_pool_get_act     thread_pool_get_act_inline
-#ifndef hp_pa
 #define act_machine_switch_pcb	act_machine_switch_pcb_inline
-#endif
 
 extern void            	act_detach(thread_act_t);
 extern void             act_attach(thread_act_t, thread_t, unsigned);
