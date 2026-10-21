@@ -431,8 +431,12 @@ static unsigned cons_tx_room(int may_wait)
  * one name.  ramoops_putc() does nothing until the zone is started, and never
  * waits long.
  */
+/* The last byte said, for a report to know whether it starts a line (#702). */
+static volatile char	cons_last_said;
+
 static inline void cons_said(char c)
 {
+	cons_last_said = c;
 	fbcons_putc(c);
 	ramoops_putc(c);
 }
@@ -567,6 +571,15 @@ void cons_report_begin(void)
 	}
 	cons_report_depth = 0;
 	cons_report_epoch++;
+
+	/*
+	 * #702: and on a line of its own.  A processor stopped, or made to
+	 * wait, in the middle of a line leaves the wire there, and the first
+	 * line of a report came out glued to it -- "#7   cpu 3 backtrace", a
+	 * whole line of neither.  The other line stays cut; this one does not.
+	 */
+	if (cons_last_said != 0 && cons_last_said != '\n')
+		cons_putc_wire('\n');
 }
 
 void cons_report_end(void)
