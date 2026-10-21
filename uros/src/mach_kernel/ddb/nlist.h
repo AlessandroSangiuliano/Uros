@@ -80,9 +80,6 @@ struct	nlist {
 	unsigned char n_type;	/* type flag, i.e. N_TEXT etc; see below */
 	unsigned char n_other;	/* unused */
 	short	n_desc;		/* see <stab.h> */
-#if	defined(__alpha)
-	int	n_pad;		/* alignment, used to carry framesize info */
-#endif
 	vm_offset_t n_value;	/* value of this symbol (or sdb offset) */
 };
 

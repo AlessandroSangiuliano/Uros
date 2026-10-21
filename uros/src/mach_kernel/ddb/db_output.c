@@ -178,10 +178,6 @@ db_more(void)
 	register  char *p;
 	boolean_t quit_output = FALSE;
 
-#if defined(__alpha)
-	extern boolean_t kdebug_mode;
-	if (kdebug_mode) return;
-#endif /* defined(__alpha) */
 	for (p = "--db_more--"; *p; p++)
 	    cnputc(*p);
 	switch(cngetc()) {
@@ -489,9 +485,6 @@ db_printf(char *fmt, ...)
 {
 	va_list	listp;
 
-#ifdef	luna88k
-	db_printing();
-#endif
 	va_start(listp, fmt);
 	_doprnt_ext(fmt, &listp, db_putchar, db_radix, db_doprnt_ext);
 	va_end(listp);
