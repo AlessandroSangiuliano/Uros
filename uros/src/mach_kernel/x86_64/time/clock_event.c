@@ -1114,8 +1114,22 @@ clock_event_drain_reports(void)
 static void
 task_panic_hold(unsigned cpu, uint64_t t0)
 {
-	if (task_panic_first == 0)
+	/*
+	 * The first hold is said, so that a boot which ends with no panic
+	 * tells "B was held and no A came" from "no B ever came" (#688).
+	 * It is printed here, in the tick, unlike the reports that
+	 * clock_event_drain_reports() prints later: a line that may come after
+	 * the boot has ended cannot be read as absent.  This tick landed in a
+	 * task's user code, so this processor holds no lock of the kernel's,
+	 * and with interrupts still off nothing comes in on top of the printf.
+	 * The time it takes comes out of the hold.
+	 */
+	if (task_panic_first == 0) {
 		task_panic_first = t0;
+		printf("clock_event: -t holds cpu %u in a task's code, its first "
+		       "hold; the panic waits for another processor inside the "
+		       "kernel on a task's thread (#688)\n", cpu);
+	}
 	interrupts_enable();
 	while (task_panic_state == (int) cpu &&
 	       rdtsc_ordered() - t0 < TASK_PANIC_HOLD_CYCLES)

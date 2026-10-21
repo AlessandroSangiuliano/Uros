@@ -972,9 +972,16 @@ urmach_msg_lockfree_resolve(
 		return FALSE;
 	}
 
-	/* Re-check the snapshot now that both ports are locked. */
+	/*
+	 * Re-check the snapshot now that both ports are locked.  #688: and
+	 * whether the space is still alive.  ipc_space_destroy() moves
+	 * is_generation, but a snapshot taken after that would match it, and
+	 * the table is freed once is_active is clear: on TSO, the entries
+	 * read above came from the live table if is_active is still set here.
+	 */
 	urmach_rcu_barrier();
-	if (space->is_generation != gen0 || space->is_seq != seq0) {
+	if (space->is_generation != gen0 || space->is_seq != seq0 ||
+	    !space->is_active) {
 		ip_unlock(rp);
 		ip_unlock(dp);
 		return FALSE;
@@ -1271,8 +1278,29 @@ mach_msg_overwrite_trap(
 						HOT(c_mmot_cold_010++);
 						goto slow_copyin;
 					}
-					counter(c_ipc_port_cache_hit++);
-					goto fast_copyin_cached;
+					/*
+					 * #688: the generation was compared before
+					 * the ports were locked, and a space can die
+					 * in between: this thread's task terminated
+					 * while it was in here.  Asked again under
+					 * the ports' locks, as the lock-free resolve
+					 * asks it, and the space's death asked with it.
+					 * A hit no longer current is a miss: the ports
+					 * are let go, the cache is forgotten, and the
+					 * lookups below answer, each asking whether
+					 * the space is alive.
+					 */
+					urmach_rcu_barrier();
+					if (space->is_generation == _cgen &&
+					    space->is_active) {
+						counter(c_ipc_port_cache_hit++);
+						goto fast_copyin_cached;
+					}
+					ip_unlock(reply_port);
+					ip_unlock(dest_port);
+					for (_j = 0; _j < IPC_PORT_CACHE_N; _j++)
+						self->ith_port_cache[_j].ipc_name =
+							MACH_PORT_NULL;
 				}
 			}
 
@@ -1306,7 +1334,6 @@ mach_msg_overwrite_trap(
 		    }
 
 			is_read_lock(space);
-			assert(space->is_active);
 
 			size = space->is_table_size;
 			table = space->is_table;
@@ -1315,7 +1342,14 @@ mach_msg_overwrite_trap(
 			register ipc_entry_t entry;
 			register ipc_entry_bits_t bits;
 
-			if (index < size) {
+			/*
+			 * #688: a dead space answers no name.  Its table is
+			 * freed (see ipc_space_destroy()) and ipc_entry_lookup()
+			 * asserts a live space, so neither is asked, and
+			 * abort_request_copyin takes the request the slow way,
+			 * where ipc_kmsg_copyin_header() refuses a dead space.
+			 */
+			if (space->is_active && index < size) {
 				entry = &table[index];
 				bits = entry->ie_bits;
 				if (IE_BITS_GEN(bits) != gen ||
@@ -1326,7 +1360,8 @@ mach_msg_overwrite_trap(
 				entry = IE_NULL;
 			}
 			if (entry == IE_NULL) {
-				entry = ipc_entry_lookup(space, reply_name);
+				if (space->is_active)
+					entry = ipc_entry_lookup(space, reply_name);
 				if (entry == IE_NULL) {
 					HOT(c_mmot_cold_006++);
 					goto abort_request_copyin;
@@ -1524,7 +1559,6 @@ mach_msg_overwrite_trap(
 		    }
 
 			is_write_lock(space);
-			assert(space->is_active);
 
 			/* optimized ipc_entry_lookup */
 
@@ -1544,7 +1578,11 @@ mach_msg_overwrite_trap(
 			gen = MACH_PORT_GEN(dest_name);
 		    }
 
-			if (index >= size) {
+			/*
+			 * #688: and a dead space answers no name, its table
+			 * freed (see ipc_space_destroy()).
+			 */
+			if (!space->is_active || index >= size) {
 				HOT(c_mmot_cold_019++);
 				goto abort_reply_dest_copyin;
 			}
@@ -2343,7 +2381,6 @@ mach_msg_overwrite_trap(
 			}
 
 			is_write_lock(space);
-			assert(space->is_active);
 
 			/*
 			 *	To do an atomic copyout, need simultaneous
@@ -2351,10 +2388,13 @@ mach_msg_overwrite_trap(
 			 *	dest_port == reply_port, and simple locking is
 			 *	enabled, then we will abort.  Otherwise it's
 			 *	OK to unlock twice.
+			 *
+			 *	#688: and a live space, a dead one's table
+			 *	freed (see ipc_space_destroy()).
 			 */
 
 			ip_lock(dest_port);
-			if (!ip_active(dest_port) ||
+			if (!space->is_active || !ip_active(dest_port) ||
 			    !ip_lock_try(reply_port)) {
 				HOT(c_mmot_cold_037++);
 				goto abort_request_copyout;

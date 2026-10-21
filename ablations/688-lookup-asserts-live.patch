@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #688
+Takes out: 73208274 -- fast_send_right_lookup() asserts again that the caller's own space is alive, where it went to the slow path; act_test [14] terminates children whose threads loop in syscall_task_info(), and a thread inside the trap as its space dies stops the kernel on the assert, as taskpanic_load's exit did when -t did not ask
+Run: --entry 14 1200 -smp 4
+Expect: Assertion failed: file "[^"]*/kern/ipc_mig\.c", line [0-9]+: space->is_active
+diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
+index 0af1e3e7..70d914c5 100644
+--- a/uros/src/mach_kernel/kern/ipc_mig.c
++++ b/uros/src/mach_kernel/kern/ipc_mig.c
+@@ -643,10 +643,7 @@ MACRO_BEGIN								\
+ 	register mach_port_index_t index;				\
+ 									\
+ 	is_read_lock(space);						\
+-	if (!space->is_active) {					\
+-		is_read_unlock(space);					\
+-		abort;							\
+-	}								\
++	assert(space->is_active);					\
+ 									\
+ 	entry = 0;							\
+ 	index = MACH_PORT_INDEX(name);					\
