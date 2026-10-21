@@ -1,13 +1,37 @@
 Kind: widen
 Issue: #702
-Holds open: a third processor inside printf(), holding printf_lock in the middle of a line, when a panic's report begins -- -Z's driver starts a chatter bound to a processor that is neither of the two that panic, printing from the moment they are told to go, and kern/printf.c holds it after the first byte of the first line it starts once the panic's message is out, until another processor holds the console's report; then the line goes on, each byte waiting for every report, as the processor halted at printf+0xc0 in the campaign's boots was; a line says which processor, or that the widen did not open
+Holds open: a third processor inside printf(), holding printf_lock in the middle of a line, when a panic's report begins -- -Z's driver starts a chatter bound to a processor that is neither of the two that panic, printing from the moment they are told to go, and kern/printf.c holds it after the first byte of the first line it starts once panic() has said its message is out (a flag of the widen's own, set after panicwait is cleared), until another processor holds the console's report; then the line goes on, each byte waiting for every report, as the processor halted at printf+0xc0 in the campaign's boots was; a line says which processor, or that the widen did not open
 Run: --entry 24 600 -smp 4
 
+diff --git a/uros/src/mach_kernel/kern/debug.c b/uros/src/mach_kernel/kern/debug.c
+index 2e7168da..0de9f3eb 100644
+--- a/uros/src/mach_kernel/kern/debug.c
++++ b/uros/src/mach_kernel/kern/debug.c
+@@ -219,6 +219,7 @@ const char		*panicstr;
+ decl_simple_lock_data(,panic_lock)
+ int			paniccpu;
+ volatile int		panicwait;
++volatile int		panic_702_said;	/* #702 widen */
+ unsigned int		panic_is_inited = 0;
+ 
+ /*
+@@ -363,6 +364,11 @@ panic(const char *str, ...)
+ 	 * Release panicwait indicator so that other cpus may call Debugger().
+ 	 */
+ 	panicwait = 0;
++	{	/* #702 widen: the message is out (kern/printf.c) */
++		extern volatile int panic_702_said;
++
++		panic_702_said = 1;
++	}
+ #if	(MACH_KDB || MACH_KGDB)
+ 	Debugger("panic");
+ 
 diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
-index 97d53b33..75120616 100644
+index 97d53b33..0c3c228f 100644
 --- a/uros/src/mach_kernel/kern/printf.c
 +++ b/uros/src/mach_kernel/kern/printf.c
-@@ -1000,11 +1000,35 @@ printf_nested(void)
+@@ -1000,11 +1000,36 @@ printf_nested(void)
   * the putc callback in _doprnt and as a direct cnputc wrapper for
   * the MP cpu-number prefix.
   */
@@ -19,12 +43,13 @@ index 97d53b33..75120616 100644
 + * as the processor halted inside printf() in the campaign's boots was.  After
 + * the first byte, and not further in: the bytes after it wait for every
 + * report, and a hold reached once they were all said would wait for one that
-+ * never comes.
++ * never comes.  And once panic() says its message is out, which it says with a
++ * flag of the widen's own: panicstr is set before panicwait, and a chatter
++ * held between the two stores held the message itself up.
 + */
 +volatile int		printf_702_cpu = -1;
 +static unsigned		printf_702_n;
-+extern const char	*panicstr;
-+extern volatile int	panicwait;
++extern volatile int	panic_702_said;
 +extern int		cons_report_held_elsewhere(void);
 +
  static void
@@ -32,7 +57,7 @@ index 97d53b33..75120616 100644
  {
  	cnputc(c);
  	klog_putc(c);
-+	if (printf_702_cpu == cpu_number() && panicstr != 0 && !panicwait &&
++	if (printf_702_cpu == cpu_number() && panic_702_said &&
 +	    ++printf_702_n == 1) {
 +		unsigned long long i;
 +
