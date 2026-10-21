@@ -128,24 +128,6 @@ ACCEPTED = {
     # not a libc header despite the name.  Reachable beside sa_mach/types.h
     # only from default_pager itself, which includes it by quoted name.
     "types.h",
-
-    # <machine/machlimits.h>: the kernel's i386 copy against a three-line stub
-    # in mach_services/include that does nothing but #include <limits.h>.
-    #
-    # Both are right where they are reachable, and only one build can reach
-    # both: src/mach_kernel/i386 is an -I root on 420 i386 compile commands
-    # and on ZERO x86-64 ones, so the 311 units that see this shadow are all
-    # i386, where the kernel's values and the compiler's agree.
-    #
-    # ⚠️ The tripwire, because the day it trips there will be no diagnostic:
-    # the i386 header defines LONG_MAX as INT_MAX and ULONG_MAX as UINT_MAX,
-    # which is true of a 32-bit long and false by a factor of four billion
-    # otherwise.  If mach_kernel/<arch> ever reaches a build of a different
-    # arch, this entry stops being an acceptance and becomes the defect --
-    # and the stub, which defers to the compiler, is the copy that would have
-    # been right.  There is no x86_64/machlimits.h; nothing needs one while
-    # nobody reaches for the i386 one.
-    "machine/machlimits.h",
 }
 
 # ---------------------------------------------------------------------------
