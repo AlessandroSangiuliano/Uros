@@ -32,9 +32,6 @@
 
 #include <mach/vm_types.h>
 #include <platforms.h>
-#if	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
 
 #define HIMEM_STATS 0
 
@@ -53,29 +50,9 @@ struct himem_link {
  
 typedef struct himem_link *hil_t;	
 
-#if	CBUS
-
-	/* 
-	 * For CBUS, consider the CBUS address space corresponding
-	 * to CBUS_START+bios as high memory, since we cant DMA
-	 * to it as well
-	 */
-
-#define HIGH_MEM	((vm_offset_t) 0xf00000 + CBUS_START)
-#define	BIOS_START	((vm_offset_t) 0x0a0000 + CBUS_START)
-#define	BIOS_END	((vm_offset_t) 0x100000 + CBUS_START)
-
-#define _high_mem_page(x)		       \
-	 ((vm_offset_t)(x) >= HIGH_MEM ||      \
-	  ((vm_offset_t)(x) >= BIOS_START &&   \
-	  (vm_offset_t)(x) < BIOS_END))
-#else	/* CBUS */
-
 #define HIGH_MEM		((vm_offset_t) 0xf00000)
 
 #define _high_mem_page(x)	((vm_offset_t)(x) >= HIGH_MEM)
-
-#endif	/* CBUS */
 
 #if	HIMEM_STATS
 #define high_mem_page(x) \

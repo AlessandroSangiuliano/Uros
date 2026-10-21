@@ -6,7 +6,7 @@
 /*
  * ddb_kbd.c — Minimal polled PS/2 keyboard for the kernel debugger.
  *
- * Replaces kd.c's cngetc/cnpollc/cnmaygetc for DDB and kgdb after
+ * Replaces kd.c's cngetc/cnpollc/cnmaygetc for DDB after
  * #208 retired kd.c.  Scope is deliberately small:
  *
  *   - Polled inb(0x60) reads — no IRQ wiring, no event queue, no
@@ -186,7 +186,7 @@ ddb_kbd_poll(boolean_t wait)
 }
 
 /* ============================================================
- * Public hooks consumed by DDB / kgdb (db_machdep.h, misc_protos.h).
+ * Public hooks consumed by DDB (db_machdep.h, misc_protos.h).
  * ============================================================ */
 
 /*
@@ -288,7 +288,7 @@ cnpollc(boolean_t on)
  * claim below is for.
  * ============================================================ */
 
-#if	MACH_KDB || MACH_KGDB
+#if	MACH_KDB
 extern void kdb_kintr(void);	/* locore.S — break into the debugger */
 #endif
 
@@ -389,7 +389,7 @@ ddb_kbd_intr(int unit)
 	}
 	i8042_leave(flags);
 
-#if	MACH_KDB || MACH_KGDB
+#if	MACH_KDB
 	if (fire)
 		kdb_kintr();
 #else

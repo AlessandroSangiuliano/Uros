@@ -215,16 +215,6 @@
 /* #208: kd.c retired — userspace char_server/ps2.so owns the PS/2
  * keyboard.  No bus_device entry for "kd" anymore. */
 
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-extern	struct	bus_driver	cbusdriver;
-#if	NCPUS > 1
-#else	/* NCPUS > 1 */
-extern  void intnull(int unit);
-#define mp_intr intnull
-#endif	/* NCPUS > 1 */
-#endif	/* CBUS */
-
 #include <fd.h>
 #if NFD > 0
 #include <i386/AT386/fd_entries.h>
@@ -320,11 +310,6 @@ struct	bus_ctlr	bus_master_init[] = {
 
 /* driver    name unit intr    address        len phys_address   
      adaptor alive flags spl    pic				 */
-
-#ifdef	CBUS   
-  {&cbusdriver, "cbus",  0, (intr_t)mp_intr, (caddr_t)0,    0, (caddr_t)0,
-     '?', 	0,  0,	 (caddr_t)CBUS_IPL, 10},
-#endif	/* CBUS */
 
 #if NHBA > 0
   {&hba_driver, "hbac",  0, (intr_t)NULL, (caddr_t)0, 0, (caddr_t)0,

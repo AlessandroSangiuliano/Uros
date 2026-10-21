@@ -224,14 +224,6 @@
 #endif /* MACH_KDB */
 #include <ddb/tr.h>
 
-#if	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
-
-#if	MBUS
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS */
-
 #if	NCPUS > 1
 #include <i386/mp_desc.h>
 #endif	/* NCPUS */
@@ -1156,34 +1148,6 @@ i386_init(void)
 	 * Compute the memory size.
 	 */
 
-#if	defined(CBUS) || defined(MBUS)
-
-#if	CBUS
-	loadpt = CBUS_START;
-	first_addr = round_page(CBUS_START);
-	last_addr = CBUS_START + cbus_memsz() * MB(1);
-#endif	/* CBUS */
-
-#if	MBUS
-	/*
-	 * XXX
-	 * Figuring out how much real memory there is on a SystemPro
-	 * is tough. You must use BIOS int calls to probe the EISA
-	 * bus for each board.
-	 * For the present time I assume that two configurations exist:
-	 * Base machine with 8 Megs
-	 * Base machine with 8 Megs + 32 Megs Memory extension
-	 * For the second configuration extmem is slightly less than 16 Megs.
-	 */
-	 
-	first_addr = 0;
-	if (extmem > (8*1024))	
-	  	extmem += (24 * 1024);	
-	last_addr = 1024*1024 + extmem*1024;
-#endif	/* MBUS */
-
-#else	/* defined(CBUS) || defined(MBUS) */
-
 #if 0
 #if	MP_V1_1
 	/*
@@ -1203,8 +1167,6 @@ i386_init(void)
 	last_addr = 1024*1024 + extmem*1024;
 	/* extended memory starts at 1MB */
        
-#endif	/* defined(CBUS) || defined(MBUS) */
-
 #if	NCPUS > 1
 
 	/*
@@ -1215,22 +1177,14 @@ i386_init(void)
 
 #endif	/* NCPUS > 1 */
 
-#ifdef	CBUS
-	bios_hole_size = 0;
-#else	/* CBUS */
 	bios_hole_size = 1024*1024 - trunc_page((vm_offset_t)(1024 * cnvmem));
-#endif	/* CBUS */
 
 	/*
 	 *	Initialize for pmap_free_pages and pmap_next_page.
 	 *	These guys should be page-aligned.
 	 */
 
-#ifdef	CBUS
-	hole_start = CBUS_START + MB(1);
-#else	/* CBUS */
 	hole_start = trunc_page((vm_offset_t)(1024 * cnvmem));
-#endif	/* CBUS */
 	hole_end = round_page((vm_offset_t)first_avail);
 
 	/*
@@ -1320,21 +1274,12 @@ i386_init(void)
 		(((*pmem_reserve_ctl[i].pmem_size - 1)/I386_PGBYTES)
 		 + 1) * I386_PGBYTES;
 
-	    /* Try to fit it into each of the holes available on the
-	       386.  Since we have MBUS or CBUS, but not both, I may
-	       safely assume that the order of holes in memory is
-	       regular hole (hole_start,hole_end) followed by the MBUS
-	       hole, if it exists.  This allows us to try top of
-	       memory, bottom of memory, and then top of hole (the
-	       last only being tried if mbus).  */
+	    /* Try the top of memory, then the bottom, under the
+	       386's hole (hole_start, hole_end).  */
 
 	    /* End of memory.  */
 	    if (avail_end - size_req >= 
-#if	MBUS
-		MBUS_BIOS_REMAP_END
-#else	/* MBUS */
 		hole_end
-#endif
 		) {
 		avail_end -= *pmem_reserve_ctl[i].pmem_size;
 		*pmem_reserve_ctl[i].pmem_addr = phystokv(avail_end);
@@ -1348,17 +1293,6 @@ i386_init(void)
 		continue;
 	    }
 
-#if	MBUS
-	    /* With MBUS, there's a second memory hole, so it's worth
-	       trying above the first hole as well as under it.  */
-	    if (hole_end + size_req <
-		MBUS_BIOS_REMAP_START) {
-		*pmem_reserve_ctl[i].pmem_addr = phystokv(hole_end);
-		hole_end += size_req;
-		continue;
-	    }
-#endif	/* MBUS */
-
 	    /* Couldn't allocate the physical memory.  Bummer, dude.  */
 	    panic("Couldn't allocate physical memory for pmem_reserve_ctl entry.");
 	}
@@ -1366,9 +1300,6 @@ i386_init(void)
 	/* avail_start is now >= hole_end, so the hole is entirely below the
 	   available range; do not subtract it a second time. */
 	avail_remaining = atop(avail_end - avail_start);
-#if	MBUS
-	avail_remaining -= atop(MBUS_BIOS_REMAP_END-MBUS_BIOS_REMAP_START);
-#endif	/* MBUS */
 
 #if	!HIMEM
 	avail_next = avail_start;
@@ -1397,14 +1328,6 @@ pmap_next_page(
 	if (avail_next == hole_start)
 		avail_next = hole_end;
 
-#if	MBUS
-
-	/* skip BIOS ROM remapping */
-
-	if (avail_next == MBUS_BIOS_REMAP_START)
-	  	avail_next = MBUS_BIOS_REMAP_END;
-#endif	/* MBUS */
-
 	*addrp = avail_next;
 	avail_next += PAGE_SIZE;
 	avail_remaining--;
@@ -1429,13 +1352,6 @@ pmap_next_page(
 
 	if (avail_next == hole_end - PAGE_SIZE)
 		avail_next = hole_start - PAGE_SIZE;
-
-#if	MBUS
-
-	/* skip BIOS ROM remapping */
-	if (avail_next == MBUS_BIOS_REMAP_END - PAGE_SIZE)
-	  	avail_next = MBUS_BIOS_REMAP_START - PAGE_SIZE);
-#endif	/* MBUS */
 
 	*addrp = avail_next;
 	avail_next -= PAGE_SIZE;

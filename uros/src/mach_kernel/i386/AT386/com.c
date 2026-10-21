@@ -198,9 +198,7 @@
 #include <i386/AT386/misc_protos.h>
 
 #include <i386/AT386/mp/mp.h>
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-#elif MP_V1_1
+#if	MP_V1_1
 #include <i386/AT386/mp/mp_v1_1.h>
 #else
 #ifndef AT386_IO_LOCK_DEFINED
@@ -812,16 +810,6 @@ comwaitforempty(
 		if (rebootflag)					\
 			kdreboot();				\
 		kdb_kintr();					\
-		break;						\
-	}
-#elif	MACH_KGDB
-#define check_debugger(c)					\
-	if (c == com_halt_char && !unit && cons_is_com1) {	\
-		extern int rebootflag;				\
-		/* if rebootflag is on, reboot the system */	\
-		if (rebootflag)					\
-			kdreboot();				\
-		kgdb_kintr();					\
 		break;						\
 	}
 #else	/* !MACH_KDB */
