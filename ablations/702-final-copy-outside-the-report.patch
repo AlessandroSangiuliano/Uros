@@ -1,13 +1,13 @@
 Kind: ablation
 Issue: #702
-Takes out: the console's final copy said inside the console's report (56d76be8) -- in an orderly halt every processor that passes cons_ring_report()'s plain word says its copy at the same time, report_printf() taking no lock, and the copies come out a byte of each in turn; entry 21 ends in preempt_test's halt, where under TCG at four processors the merge tests of #707 and #736 had three and four whole copies and the union's at 3216da68 four mixed ones, which the harness failed as GARBLED (#578)
-Script: scripts/run-x86_64.sh
+Takes out: the console's final copy said inside the console's report (56d76be8) -- in an orderly halt every processor that passes cons_ring_report()'s plain word says its copy at the same time, report_printf() taking no lock, and the copies come out a byte of each in turn; entry 21 ends in preempt_test's halt, and on OMEGA under TCG at four processors no line of the copies was whole in 6 boots of 6 and final-copy-check.sh said WRONG in each, where the harness's GARBLED check had seen 2 of the 6, and the fixed tree's 4, 4, 2, 4, 4 and 4 copies were all whole
+Script: scripts/final-copy-boot.sh
 Script: --entry
 Script: 21
 Script: 600
 Script: -smp
 Script: 4
-Expect: GARBLED \(#578\)
+Expect: final-copy-check: WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/ddb/cons_cost.c b/uros/src/mach_kernel/x86_64/ddb/cons_cost.c
 index 4999d4e3..28955dd6 100644
