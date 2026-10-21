@@ -61,11 +61,7 @@
  */
 
 #define	SBSIZE		EXT2_MIN_BLOCK_SIZE	/* Size of superblock */
-#ifdef  HPOSFCOMPAT
-#define	SBLOCK		((daddr_t) 1)		/* Location of superblock */
-#else
 #define	SBLOCK		((daddr_t) 2)		/* Location of superblock */
-#endif /* HPOSFCOMPAT */
 
 #define	NDADDR		EXT2_NDIR_BLOCKS
 #define	NIADDR		(EXT2_N_BLOCKS - EXT2_NDIR_BLOCKS)

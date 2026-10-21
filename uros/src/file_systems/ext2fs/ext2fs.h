@@ -254,28 +254,10 @@ struct file_direct {
 
 #define	file_is_device(_fd_)		((_fd_)->fd_blocks == 0)
 
-#if	defined(__powerpc__) || defined(__hppa__)
-/* Big-endian machines */
-#define cpu_to_le32(x) le32_to_cpu((x))
-extern __inline__ unsigned long le32_to_cpu(unsigned long x)
-{
-        return (((x & 0x000000ffU) << 24) |
-                ((x & 0x0000ff00U) <<  8) |
-                ((x & 0x00ff0000U) >>  8) |
-                ((x & 0xff000000U) >> 24));
-}
-#define cpu_to_le16(x) le16_to_cpu((x))
-extern __inline__ unsigned short le16_to_cpu(unsigned short x)
-{
-        return (((x & 0x00ff) << 8) |
-                ((x & 0xff00) >> 8));
-}
-#else	/* __powerpc__ || __hppa__ */
 /* Little-endian machines */
 #define cpu_to_le32(x)	(x)
 #define le32_to_cpu(x)	(x)
 #define cpu_to_le16(x)	(x)
 #define le16_to_cpu(x)	(x)
-#endif	/* __powerpc__ || __hppa__ */
 
 #endif	/* _EXT2FS_H_ */

@@ -62,11 +62,7 @@
 #define MAXBSIZE	8192
 #define MAXFRAG		8
 #define MAXSYMLINKS	32
-#ifdef  HPOSFCOMPAT
-#define DEV_BSIZE	1024
-#else
 #define DEV_BSIZE	512
-#endif
 
 /*
  * Each disk drive contains some number of file systems.
@@ -92,21 +88,12 @@
  * The first boot and super blocks are given in absolute disk addresses.
  * The byte-offset forms are preferred, as they don't imply a sector size.
  */
-#ifdef   HPOSFCOMPAT
-#define BBSIZE		10240
-#define SBSIZE		8192
-#define	BBOFF		((off_t)(2048))
-#define	SBOFF		((off_t)(BBOFF + BBSIZE))
-#define	BBLOCK		((daddr_t)(2))
-#define	SBLOCK		((daddr_t)(BBLOCK + BBSIZE / DEV_BSIZE))
-#else   /* HPOSFCOMPAT */
 #define BBSIZE		8192
 #define SBSIZE		8192
 #define	BBOFF		((off_t)(0))
 #define	SBOFF		((off_t)(BBOFF + BBSIZE))
 #define	BBLOCK		((daddr_t)(0))
 #define	SBLOCK		((daddr_t)(BBLOCK + BBSIZE / DEV_BSIZE))
-#endif  /* HPOSFCOMPAT */
 
 /*
  * Addresses stored in inodes are capable of addressing fragments
