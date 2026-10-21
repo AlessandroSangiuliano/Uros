@@ -1,0 +1,31 @@
+Kind: widen
+Issue: #742
+Holds open: what a GitHub runner did once in 1776 boots, a DR7 armed again after #440's window test had cleared it -- the boot processor's first tick in a task's code writes DR7 = an execute breakpoint on DR0, and says so; with DR0 at zero after the test, as 979918c1 leaves it, nothing the kernel runs breaks on it, and the fixed tree must still pass
+Run: --entry 0 600 -smp 4
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 26c1b3a7..8b516d2a 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -125,6 +125,7 @@ static int		task_panic_armed;
+ static volatile int	task_panic_state = TASK_PANIC_NOBODY;
+ static uint64_t		task_panic_first;	/* the first hold's TSC */
+ static volatile uint64_t task_panic_rest;	/* no hold before this TSC */
++static int		widen_742_armed;	/* 742-widen: DR7 armed again once */
+ static uint8_t		event_vector;
+ 
+ /* ------------------------------------------------------ tsc-deadline ---- */
+@@ -1170,6 +1171,14 @@ clock_event_tick(struct trap_frame *frame)
+ 		clock_tick_delivered[cpu]++;
+ 		usermode = (frame->cs & 3) != 0;
+ 		pc = (vm_offset_t) frame->rip;
++		/* 742-widen: DR7 armed again on the boot processor, once, at
++		 * its first tick in a task's code, as one runner did. */
++		if (usermode && cpu == (unsigned) master_cpu &&
++		    !widen_742_armed) {
++			widen_742_armed = 1;
++			write_dr7(DR7_EXEC_DR0);
++			printf("742-widen: dr7 armed again on cpu %u\n", cpu);
++		}
+ 		/* -t (#688), on a real frame: a replayed one does not know
+ 		 * where its tick landed. */
+ 		if (task_panic_armed && current_act() != THR_ACT_NULL &&
