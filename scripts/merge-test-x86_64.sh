@@ -346,16 +346,20 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	# verdict up to the first closing one.
 	#
 	# #688: the note also says whether -t held a processor, from the line
-	# the kernel prints at the first hold (taskpanic_held above).
+	# the kernel prints at the first hold (taskpanic_held above), and so does
+	# a WRONG with no -t panic.  The harness fails a boot that reached its
+	# end with a test unexplained as well as one that did not reach it: a
+	# boot whose processor -t held all through it reached its end with
+	# io_claim_race [3] WRONG (#602), and this note said it did not.
 	taskpanic) if grep -aq 'panic(cpu [0-9]*): task_panic: asked for with -t' "$f"; then
 			! grep -aqE 'UrMach x86-64: trap |no handler' "$f" &&
 			{ grep -aq "held in a task's code until the stop" "$f" ||
 			  NOTE="NOT ASKED: no second processor came, so the stop met no task's space"; }
 		elif grep -aqE 'UrMach x86-64: trap |no handler' "$f"; then
-			NOTE="no -t panic, and a trap"
+			NOTE="no -t panic, and a trap; $(taskpanic_held "$f")"
 			false
 		elif ! grep -aq 'passed: reached the end, nothing unexplained' "$h"; then
-			NOTE="no -t panic, and the boot did not reach its end"
+			NOTE="no -t panic, and the harness did not pass the boot; $(taskpanic_held "$f")"
 			false
 		elif grep -aq 'taskpanic_load: [0-9]* s of load and -t did not ask' "$f"; then
 			NOTE="NOT ASKED: taskpanic_load loaded the machine and -t did not ask; $(taskpanic_held "$f")"
