@@ -96,6 +96,8 @@ UNASKED=0 UNASKED_WHERE=""
 #   taskpanic -t panics inside a system call while another processor is held
 #             in a task's code, and no processor reports a trap of its own
 #             after it; NOT ASKED when no second processor came (#688)
+#   halted    the harness's verdict, and the console's final copy whole after
+#             the machine stops (scripts/final-copy-check.sh, #702)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -130,7 +132,7 @@ ENTRIES="
 45 harness --iommu_amd
 17 harness
 18 harness
-21 harness
+21 halted
 22 harness
 22 hpetgaps - 6,sockets=2,cores=3
 22 hpetfsb --hpet_fsb
@@ -293,6 +295,12 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	# Its verdict line, not any "PASS": a WRONG quotes the log's line, and
 	# a line run together with "xfile_test: PASS" passed (#661's review).
 	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q '^double-panic-check: PASS' ;;
+	# #702: an orderly halt has every processor that passes the final copy's
+	# plain word say a copy, and copies mixed a byte of each in turn passed
+	# "harness" in 4 boots of 6 -- garbled-lines.awk rarely finds a name
+	# whole in them -- so the copy itself is asked about.
+	halted) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		"$HERE/scripts/final-copy-check.sh" "$f" | grep -q '^final-copy-check: PASS' ;;
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq '<x86_64_boot+0x' "$f" &&
 		! grep -aq 'trap general protection' "$f" ;;
