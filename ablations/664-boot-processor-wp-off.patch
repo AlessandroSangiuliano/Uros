@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #664
+Takes out: CR0.WP on the boot processor, for the moment its own SMEP, SMAP and CR0.WP probes run and on no other processor -- the census has already read CR0 with WP on, so the probe is asked for, and the store through the read-only mapping goes through; before #664 the boot processor's probes were never judged and this was not caught
+Run: --entry 0 600 -smp 4
+Expect: processor 0 wrote through a read-only mapping
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 25cef166..195cfbee 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -1972,7 +1972,9 @@ static void control_regs_selftest(void)
+ 	code[2] = 0xc3;		/* ret */
+ 	cr_probe_root = scratch->root_pa;
+ 
++	write_cr0(read_cr0() & ~CR0_WP);
+ 	cr_probe_here(&boot);
++	write_cr0(read_cr0() | CR0_WP);
+ 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+ 		if (cpu == self || !smp_is_online(cpu))
+ 			continue;
