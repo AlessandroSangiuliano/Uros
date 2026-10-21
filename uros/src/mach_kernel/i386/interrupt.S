@@ -416,7 +416,7 @@ mpv1_intr:
 	MP_ENABLE_PREEMPTION(%edx)
 	movl	EXT(lapic_start), %edx
 	movl	%ecx, LAPIC_TPR(%edx)	# Set/Get Task priority (spl)
-	subl	$0x50, %ecx		# XXX Must match mp_stub.c's mp_v1_1_intr[]
+	subl	$0x50, %ecx		# XXX Must match mp_v1_1_intr[] in mp_stub.c
 	sti				# Enable interrupts
 	pushl	EXT(mp_v1_1_unit)(,%ecx,4)
 	call	*EXT(mp_v1_1_intr)(,%ecx,4)
