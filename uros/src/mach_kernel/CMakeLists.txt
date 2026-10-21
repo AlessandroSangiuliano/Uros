@@ -913,7 +913,7 @@ set(KERNEL_TEXTORG "0x100000")  # 1MB - physical load address
 set(UROS_NCPUS "1" CACHE STRING "Max CPUs supported (per-CPU array size; 1 = UP). Runtime count from MADT.")
 if(UROS_NCPUS GREATER 1)
     message(STATUS "SMP build: UROS_NCPUS=${UROS_NCPUS} (experimental, #300 in progress)")
-    # MPS 1.x AP-boot path (mp.c, mp_v1_1.c, slave_boot.S).
+    # MPS 1.x AP-boot path (mp.c, mp_stub.c, slave_boot.S).
     # ACPI MADT path will land via #305.
     set(KERNEL_SMP_DEFINES -DMP_V1_1=1)
 else()
@@ -1567,8 +1567,8 @@ set(AT386_SOURCES
 # #300 — SMP bring-up sources, only when UROS_NCPUS > 1.
 # mp.c is the high-level shim (slave_clock, cause_ast_check, cpu_int_word[]).
 # mp_stub.c provides the link-time symbols (cpu_start, mp_probe_cpus, ...)
-# that mp_v1_1.c would have hosted.  The historical mp_v1_1.c is kept out
-# of the build until Increment 3 replaces it with a modern MPS 1.4 parser.
+# that OSF's mp_v1_1.c hosted, which was never built here and went with
+# #741.
 # slave_boot.S (added below to AT386_ASM_SOURCES) is the AP trampoline.
 if(UROS_NCPUS GREATER 1)
     list(APPEND AT386_SOURCES
