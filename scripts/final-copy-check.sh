@@ -22,7 +22,12 @@
 #
 #   1. at least one of the ring's lines comes out whole after it;
 #   2. no line after it carries a piece of the copy -- its framebuffer, glyphs
-#      or ring words -- without being one of those lines whole.
+#      or ring words -- without being one of those lines whole.  Only words
+#      that are the copy's own count: the quiet census's "console so far"
+#      line also says "paid for room" and "without a glyph", and a line that
+#      was being written when the stop came is left cut by the report, on
+#      purpose (#702), as that one was at entry 21 in 2 boots of 1776 of
+#      46d1c9d8's campaign, with every copy whole.
 #
 # Prints one line, PASS, WRONG or NOT ASKED; exits 0, 1 or 2.  A log that
 # never says the machine stops is NOT ASKED: a run the harness ended has no
@@ -39,7 +44,7 @@ BEGIN {
 	fb = "^UrMach x86-64: console: (the framebuffer drew [0-9]+ glyphs in [0-9]+ cycles( = [0-9]+ ns a glyph)? on a [0-9]+x[0-9]+ screen, [0-9]+ scrolls( — NOT ASKED for the time, no calibrated TSC)? \\(#568\\)|no framebuffer was drawn on this boot — COM1 was the only output there was \\(#568\\))$"
 	glyph = "^UrMach x86-64: console: the framebuffer drew (every character it was handed: 0 without a glyph|■ for [0-9]+ without a glyph \\(the first U\\+[0-9A-F]+\\)), [0-9]+ not UTF-8 \\(#661\\)$"
 	ring = "^UrMach x86-64: console: over this boot the ring was handed over [0-9]+ times by the thread that printed, [0-9]+ by a tick or an idle processor, [0-9]+ on the way down; [0-9]+ writers paid for room, [0-9]+ bytes are still queued \\(#567\\)$"
-	piece = "framebuffer drew|without a glyph|not UTF-8 \\(#661\\)|over this boot|the ring was handed|paid for room|still queued|\\(#567\\)|\\(#568\\)"
+	piece = "framebuffer drew|not UTF-8 \\(#661\\)|over this boot|the ring was handed|still queued|\\(#567\\)|\\(#568\\)"
 }
 /^qemu-system-x86_64:/ || /^=== run conditions/ || /^=== qemu.s own messages/ { done = 1 }
 done { next }
