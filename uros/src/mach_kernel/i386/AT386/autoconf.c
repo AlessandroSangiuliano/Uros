@@ -189,7 +189,6 @@
 #include <device/if_ether.h>
 #include <i386/ipl.h>
 #include <chips/busses.h>
-#include <blit.h>
 #include <i386/misc_protos.h>
 #include <i386/AT386/misc_protos.h>
 #include <kern/misc_protos.h>
@@ -215,12 +214,6 @@
 /* #208: kd.c retired — userspace char_server/ps2.so owns the PS/2
  * keyboard.  No bus_device entry for "kd" anymore. */
 
-#include <fd.h>
-#if NFD > 0
-#include <i386/AT386/fd_entries.h>
-extern	struct	bus_driver	fddriver;
-#endif /* NFD */
-
 #include <hba.h>
 #if NHBA > 0
 #include <scsi/scsi_defs.h>
@@ -239,59 +232,12 @@ extern struct	bus_driver	aha_driver;
 extern struct	bus_driver	eaha_driver;
 #endif /* NEAHA */
 
-#include <pc586.h>
-#if NPC586 > 0
-#include <i386/AT386/if_pc586.h>
-#include <i386/AT386/if_pc586_entries.h>
-extern	struct	bus_driver	pcdriver;
-#endif /* NPC586 */
-
-
-#include <sce.h>
-#if	NSCE > 0
-#include <scsi/if_sce.h>
-extern	struct	bus_driver	scedriver;
-#endif	/* NSCE */
-
-#include <ns8390.h>
-#if NNS8390 > 0
-#include <i386/AT386/if_ns8390_entries.h>
-extern	struct	bus_driver	ns8390driver;
-#endif /* NNS8390 */
-
-#include <at3c501.h>
-#if NAT3C501 > 0
-#include <i386/AT386/if_3c501_entries.h>
-extern	struct	bus_driver	at3c501driver;
-#endif /* NAT3C501 */
-
-/* vvv MITCHEM vvv */
-#include <ne.h>
-#if NNE > 0
-#include <i386/AT386/if_ne_entries.h>
-extern	struct	bus_driver	nedriver;
-#endif /* NNE */
-/* ^^^ MITCHEM ^^^ */ 
 
 #include <com.h>
 #if NCOM > 0
 #include <i386/AT386/com_entries.h>
 extern	struct	bus_driver	comdriver;
 #endif /* NCOM */
-
-#include <lpr.h>
-#if NLPR > 0
-#include <i386/AT386/lpr_entries.h>
-extern	struct	bus_driver	lprdriver;
-#endif /* NLPR */
-
-#include <sb.h>
-#if NSB > 0
-#include <i386/AT386/sound/sb_entries.h>
-#include <i386/AT386/sound/sound_config.h>
-#include <i386/soundcard.h>
-extern	struct	bus_driver	sbdriver;
-#endif /* NSB */
 
 #include <wt.h>
 #if NWT > 0
@@ -366,15 +312,6 @@ struct	bus_ctlr	bus_master_init[] = {
 {&eaha_driver, "eahac", 0, (intr_t)eaha_intr,(caddr_t)0xf000,4,(caddr_t)0xf000,
      '?',	0,  0,	 SPL_FIVE, 12},
 #endif /* NEAHA > 0 */
-
-#if NFD > 0
-  {&fddriver, "fdc",  0, (intr_t)fdintr, (caddr_t)0x3f2, 6, (caddr_t)0x3f2,
-     '?',	0,  0,	 SPL_FIVE, 6},
-#if NFD > 2
-  {&fddriver, "fdc",  1, (intr_t)fdintr, (caddr_t)0x372, 6, (caddr_t)0x372,
-     '?',	0,  0,	 SPL_FIVE, 10},
-#endif	/* NFD > 2 */
-#endif	/* NFD > 0 */
 
   0
 };
@@ -479,70 +416,10 @@ struct	bus_device	bus_device_init[] = {
 #endif /* NEAHA > 1 */
 #endif /* NEAHA > 0 */
 
-#if NFD > 0
-  {&fddriver, "fd", 0, (intr_t)fdintr, (caddr_t)0x3f2, 6, (caddr_t)0x3f2,
-     '?',    0,   0,    0,    0,   0,  0,   SPL_FIVE, 6},
-  {&fddriver, "fd", 1, (intr_t)fdintr, (caddr_t)0x3f2, 6, (caddr_t)0x3f2,
-     '?',    0,   0,    1,    0,   0,  0,   SPL_FIVE, 6},
-
-  {&fddriver, "fd", 2, (intr_t)fdintr, (caddr_t)0x372, 6, (caddr_t)0x372,
-     '?',    0,   1,    0,    0,   0,  0,   SPL_FIVE, 10},
-  {&fddriver, "fd", 3, (intr_t)fdintr, (caddr_t)0x372, 6, (caddr_t)0x372,
-     '?',    0,   1,    1,    0,   0,  0,   SPL_FIVE, 10},
-#endif /* NFD > 0 */
-
-#if NPC586 > 0
-  /* For MACH Default */
-  {&pcdriver, "pc", 0, (intr_t)pc586intr, (caddr_t)0xd0000, 0, (caddr_t)0xd0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, 9},
-  /* For Factory Default */
-  {&pcdriver, "pc", 0, (intr_t)pc586intr, (caddr_t)0xc0000, 0, (caddr_t)0xc0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, 5},
-  /* For what Intel Ships */
-  {&pcdriver, "pc", 0, (intr_t)pc586intr, (caddr_t)0xf00000, 0, (caddr_t)0xf00000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, 12},
-#endif /* NPC586 > 0 */
-
-
-#if	NSCE > 0
-    {&scedriver, "sce", 0, (intr_t)0, (caddr_t)0, 0, (caddr_t)0,
-	 '?', 0, -1, -1, 0, 0, 0, SPL_SIX, 0},
-#endif	/* NSCE > 0 */
-
-#if NNS8390 > 0
-	/* "wd" and "el" */
-  {&ns8390driver, "wd", 1, (intr_t)ns8390intr, (caddr_t)0x240,0x2000,(caddr_t)0xcc000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 5},
-  {&ns8390driver, "wd", 0, (intr_t)ns8390intr, (caddr_t)0x280,0x2000,(caddr_t)0xd0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 9},
-  {&ns8390driver, "wd", 0, (intr_t)ns8390intr, (caddr_t)0x2a0,0x2000,(caddr_t)0xd0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 9},
-  {&ns8390driver, "wd", 0, (intr_t)ns8390intr, (caddr_t)0x2c0,0x2000,(caddr_t)0xd8000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 9},
-  {&ns8390driver, "wd", 1, (intr_t)ns8390intr, (caddr_t)0x2e0,0x2000,(caddr_t)0xcc000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 5},
-  {&ns8390driver, "wd", 0, (intr_t)ns8390intr, (caddr_t)0x300,0x2000,(caddr_t)0xd8000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 5},
-  {&ns8390driver, "wd", 0, (intr_t)ns8390intr, (caddr_t)0x320,0x2000,(caddr_t)0xd8000,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 7},
-
-#endif /* NNS8390 > 0 */
 
 #if GPROF > 0
   {&gprof_driver, "gprof",0,  NO_INTR,  0x0,0,  0,    '?',     0,  -1,  -1,    0, },
 #endif /* GPROF */
-
-#if NAT3C501 > 0
-  {&at3c501driver, "et", 0, (intr_t)at3c501intr, (caddr_t)0x300, 0,(caddr_t)0x300,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 9},
-#endif /* NAT3C501 > 0 */
-
-/* vvv MITCHEM vvv */
-#if NNE > 0
-  {&nedriver, "ne", 0, (intr_t)neintr, (caddr_t)0x300, 0,(caddr_t)0x300,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 10},
-#endif /* NNE > 0 */
-/* ^^^ MITCHEM ^^^ */ 
 
 #if NCOM > 0
   {&comdriver, "com", 0, (intr_t)comintr, (caddr_t)0x3f8, 8, (caddr_t)0x3f8,
@@ -554,30 +431,6 @@ struct	bus_device	bus_device_init[] = {
   {&comdriver, "com", 3, (intr_t)comintr, (caddr_t)0x2e8, 8, (caddr_t)0x2e8,
      '?',    0,   -1,    -1,    0,   0,        0,   SPL_TTY, 11},
 #endif /* NCOM > 0 */
-
-#if NLPR > 0
-  {&lprdriver, "lpr", 0, (intr_t)lprintr, (caddr_t)0x378, 3, (caddr_t)0x378,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_TTY, 7},
-  {&lprdriver, "lpr", 0, (intr_t)lprintr, (caddr_t)0x278, 3, (caddr_t)0x278,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_TTY, 7},
-  {&lprdriver, "lpr", 0, (intr_t)lprintr, (caddr_t)0x3bc, 3, (caddr_t)0x3bc,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_TTY, 7},
-#endif /* NLPR > 0 */
-
-#if NSB > 0
-/*
- * driver, name, unit, intr, address, address mod(DMA), phys addr,
- * adaptor, alive, ctlr, slave, flags, mi, next, sysdep(spl), sysdep1(IRQ)
- */
-  {&sbdriver, "sb", SNDCARD_SB, (intr_t)sbintr, (caddr_t)SBC_BASE, SBC_DMA, (caddr_t)SBC_BASE,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, SBC_IRQ},
-  {&sbdriver, "sb16", SNDCARD_SB16, (intr_t)sbintr, (caddr_t)SBC_BASE, SB16_DMA, (caddr_t)SBC_BASE,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, SBC_IRQ},
-  {&sbdriver, "sb16midi", SNDCARD_SB16MIDI, (intr_t)sbintr, (caddr_t)SB16MIDI_BASE, 0, (caddr_t)SB16MIDI_BASE,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, SBC_IRQ},
-  {&sbdriver, "fm", SNDCARD_ADLIB, (intr_t)sbintr, (caddr_t)FM_MONO, 0, (caddr_t)FM_MONO,
-     '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, SBC_IRQ},
-#endif /* NSB > 0 */
 
 #if NWT > 0
   {&wtdriver, "wt", 0, (intr_t)wtintr, (caddr_t)0x300, 2, (caddr_t)0x300,
