@@ -1,7 +1,12 @@
 Kind: ablation
 Issue: #702
 Takes out: the console's final copy said inside the console's report (56d76be8) -- in an orderly halt every processor that passes cons_ring_report()'s plain word says its copy at the same time, report_printf() taking no lock, and the copies come out a byte of each in turn; entry 21 ends in preempt_test's halt, where under TCG at four processors the merge tests of #707 and #736 had three and four whole copies and the union's at 3216da68 four mixed ones, which the harness failed as GARBLED (#578)
-Script: scripts/run-x86_64.sh --entry 21 600 -smp 4
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 21
+Script: 600
+Script: -smp
+Script: 4
 Expect: GARBLED \(#578\)
 
 diff --git a/uros/src/mach_kernel/x86_64/ddb/cons_cost.c b/uros/src/mach_kernel/x86_64/ddb/cons_cost.c
