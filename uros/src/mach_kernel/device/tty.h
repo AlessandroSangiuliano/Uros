@@ -103,9 +103,6 @@
 
 #include <device/io_req.h>
 #include <device/device_types.h>
-#ifdef luna88k
-#include <luna88k/jtermio.h>
-#endif
 #include <device/tty_status.h>
 #include <device/cirbuf.h>
 #include <device/buf.h>
@@ -149,14 +146,6 @@ struct tty {
 				dev_flavor_t	flavor,
 				dev_status_t	data,
 				natural_t	* count);
-#ifdef luna
-      struct jterm    t_jt;
-      short           t_jstate;
-      char            t_term;         /* terminal type */
-      char            t_tmflag;       /* t_tmflag */
-      unsigned short  t_omron;        /* OMRON extended flags */
-      int             *t_kfptr;
-#endif /* luna */
 	io_return_t	(*t_setstat)(	/* routine to set status */
 				dev_t		dev,
 				dev_flavor_t	flavor,

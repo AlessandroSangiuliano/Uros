@@ -100,29 +100,14 @@
  * to leave room for a bootstrap, etc.
  */
 
-#ifdef hp_pa
-
-#ifndef LABELSECTOR
-#define LABELSECTOR	2       /* sector containing label */
-#endif
-#define LABELOFFSET	0	/* offset of label in sector */
-
-#else /* hp_pa */
-
 #define LABELSECTOR	0	/* sector containing label */
 #define LABELOFFSET	64	/* offset of label in sector */
-
-#endif /* hp_pa */
 
 #define DISKMAGIC	((uint32) 0x82564557U)	/* The disk magic number */
 
 #ifndef MAXPARTITIONS
-#ifdef hp_pa
-#define	MAXPARTITIONS	8
-#else
 #define	MAXPARTITIONS	16
 #define PARTITIONS	(MAXPARTITIONS + 1)
-#endif
 #endif
 
 #ifndef PARTITIONS
@@ -222,18 +207,6 @@ struct disklabel {
 		unsigned short	p_cpg;		/* filesystem cylinders per group */
 	} d_partitions[PARTITIONS];	/* actually may be more */
 
-#if	defined(__alpha) && defined(MACH_KERNEL)
-	/*
-	 * Disgusting hack. If this structure contains a pointer,
-	 * as it does for non-kernel, then the compiler rounds
-	 * the size to make it pointer-sized properly (arrays of..).
-	 * But if I define the pointer for the kernel then instances
-	 * of this structure better be aligned otherwise picking
-	 * up a short might be done by too-smart compilers (GCC) with
-	 * a load-long instruction expecting the short to be aligned.
-	 */
-	int32	bugfix;
-#endif
 };
 #else /* LOCORE */
 	/*

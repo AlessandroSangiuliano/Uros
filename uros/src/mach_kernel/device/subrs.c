@@ -293,8 +293,6 @@ strncpy(
 }
 
 
-#if !defined(__alpha)
-
 /*
  * Abstract:
  *      strlen returns the number of characters in "string" preceeding
@@ -311,7 +309,6 @@ strlen(
                 continue;
         return string - 1 - ret;
 }
-#endif /* !defined(__alpha) */
 
 /*
  * atoi:

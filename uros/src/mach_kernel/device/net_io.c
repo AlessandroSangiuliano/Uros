@@ -311,17 +311,11 @@ net_pool_t inline_pagepool;
  * Even a low drop rate (<1%) can cause severe network throughput problems.
  * We add one to net_queue_free_min for every filter.
  */
-#if	SYMMETRY
- /*
- * Sequent needs at least 17 of them. The code shouild be rearranged to
- * remove machine dependencies from here !
- */
-int		net_inline_free_min = 40;
-#elif NFDDI > 0
+#if	NFDDI > 0
 int		net_inline_free_min = 16;
-#else 	/* SYMMETRY */
+#else	/* NFDDI > 0 */
 int		net_inline_free_min = 3;
-#endif 	/* SYMMETRY */
+#endif	/* NFDDI > 0 */
 
 vm_size_t	net_kmsg_size;
 zone_t		net_rcv_zone;

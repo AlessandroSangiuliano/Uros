@@ -294,11 +294,7 @@ struct baud_rate_info baud_rate_to_compat[] = {
 #define TTTRUNCAT	50
 #define hiwattrunc(v)	trunc_at((v), TTTRUNCAT)
 
-#ifdef HPUXCOMPAT
-#define TTINQSIZE	2048	/* XXX */
-#else
 #define TTINQSIZE	4096	/* Should be at least MTU for PPP (1506) */
-#endif /* HPUXCOMPAT */
 #define TTOUTQSIZE	2048	/* XXX */
 
 #define TTMAXHIWAT	hiwattrunc(TTOUTQSIZE)

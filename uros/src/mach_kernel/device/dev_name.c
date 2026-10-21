@@ -248,28 +248,6 @@ dev_name_lookup(
 	 */
 	j = dev->d_subdev;
 	if (j > 0) {
-#ifdef	SQT
-	    /*
-	     * SQT block device names are of the form
-	     *
-	     * <device_name><unit_number>s<partition>
-	     * i.e. wd1s2 (device wd, unit 1, partition 2)
-	     *
-	     * where
-	     * <device_name>        is the name in the device table
-	     * <unit_number>        is an integer
-	     * s                    is the SQT separator
-	     * <partition>          is an integer
-	     */
-	    int i = 0;
-	    cp++;	/* Skip over the separator charater 's' */
-            while ((c = *cp) != '\0' &&
-                    c >= '0' && c <= '9') {
-                i = i * 10 + (c - '0');
-                cp++;
-            }
-           *unit = (*unit * j) + i;	/* Minor = <subdev_count>*unit+part */
-#else	/* SQT */
 	    if (c >= 'a' && c < 'a' + j) {
 		/*
 		 * Minor number is <subdev_count>*unit + letter.
@@ -282,7 +260,6 @@ dev_name_lookup(
 		 */
 		*unit = *unit * j;
 	    }
-#endif	/* SQT */
 	}
 	return (TRUE);
 }
