@@ -1559,10 +1559,6 @@ mach_msg_overwrite_trap(
 		    }
 
 			is_write_lock(space);
-			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
-				is_write_unlock(space);
-				goto slow_copyin;
-			}
 
 			/* optimized ipc_entry_lookup */
 
@@ -1582,7 +1578,11 @@ mach_msg_overwrite_trap(
 			gen = MACH_PORT_GEN(dest_name);
 		    }
 
-			if (index >= size) {
+			/*
+			 * #688: and a dead space answers no name, its table
+			 * freed (see ipc_space_destroy()).
+			 */
+			if (!space->is_active || index >= size) {
 				HOT(c_mmot_cold_019++);
 				goto abort_reply_dest_copyin;
 			}
