@@ -4,10 +4,10 @@ Holds open: a report held by a processor that will never let go -- apic id 0x777
 Run: --entry 0 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
-index ab6142ea..23071870 100644
+index 14c7cc95..e1b0e846 100644
 --- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
 +++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
-@@ -10217,6 +10217,57 @@ static void descriptor_tables_init(void)
+@@ -10268,6 +10268,57 @@ static void descriptor_tables_init(void)
  /* ------------------------------------------------------------------ */
  /*  Entry from boot.S (SysV: %edi = multiboot magic, %esi = info ptr).  */
  /* ------------------------------------------------------------------ */
@@ -65,7 +65,7 @@ index ab6142ea..23071870 100644
  void x86_64_boot(uint32_t magic, uint32_t info)
  {
  	uint32_t	cmdline_len;
-@@ -10323,6 +10374,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
+@@ -10374,6 +10425,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
  	spin_budget_selftest();
  	rulers_kept_selftest();
  	timer_selftest();
@@ -74,10 +74,10 @@ index ab6142ea..23071870 100644
  	pci_cap_selftest();
  	/*
 diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
-index bb3d27cb..5b73c954 100644
+index 2146755f..bd067f2d 100644
 --- a/uros/src/mach_kernel/x86_64/ddb/cons.c
 +++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
-@@ -592,6 +592,21 @@ static void cons_report_wait(void)
+@@ -633,6 +633,21 @@ static void cons_report_wait(void)
  	}
  }
  
@@ -96,6 +96,6 @@ index bb3d27cb..5b73c954 100644
 +	cons_report_owner = CONS_REPORT_NOBODY;
 +}
 +
- static void cons_wire_byte(char c)
- {
- 	/* Not inside another processor's report (#659). */
+ /*
+  * One byte to the port, the port's lock held if `locked' (#599, #702).
+  *
