@@ -710,74 +710,67 @@ ahci_iommu_spin(struct ahci_state *st, vm_address_t pa)
 }
 
 /*
- * #599 [iommu-burst]: a burst larger than the engine's log is recorded whole
- * or counted as lost.  `e' is how many records one refused read made -- the
- * first read's count, taken while `lost' stood still.  Eight refused reads
- * back to back, then the question: the count must have grown by 8e, or `lost'
- * must have moved.  An engine that made one record per read may be
- * collapsing refusals (VT-d does), and there the question cannot be asked.
- * Then one more read, which must still move the count: an engine that
- * stopped logging would not.
+ * #599, #686 [iommu-burst]: eight refused reads, and every one recorded.
+ * Each is asked about before the next is made, and the question reads the
+ * engines out.  A VT-d engine "may collapse additional faults from the same
+ * source-id" while one of its records is unread (Rev 5.20 §7.2.1), and
+ * QEMU's does, so eight reads made back to back promise one record, not
+ * eight: on victus each of eight such bursts left exactly one.  What an
+ * engine does promise is that once a device's records are read out, its
+ * next fault is recorded.  So after each read the count must have grown,
+ * or `lost' must have moved.  By how much is not asked: a read left one
+ * record in every boot on victus, and two in the boot where the burst this
+ * replaced, which scaled by the first read's count, expected sixteen
+ * (#686).  A read that moves nothing is a refusal gone missing, or an
+ * engine that has stopped logging.
  */
 #define AHCI_BURST	8u
 
 static void
-ahci_iommu_burst(struct ahci_state *st, vm_address_t pa, natural_t e)
+ahci_iommu_burst(struct ahci_state *st, vm_address_t pa, int asked)
 {
-	natural_t	confined = 0, c0 = 0, c1 = 0, c2 = 0, l0 = 0, l1 = 0;
-	natural_t	u = 0;
+	natural_t	confined = 0, c0 = 0, c = 0, c1 = 0, l0 = 0, l = 0;
+	natural_t	l1 = 0, u = 0, missing = 0;
 	vm_address_t	refused = 0;
-	natural_t	dc, dl;
-	kern_return_t	kr0, kr1, kr2;
+	kern_return_t	kr;
 	unsigned	i;
 
-	if (e == 0) {
+	if (!asked) {
 		printf("ahci: [iommu-burst] NOT ASKED — the first refused read "
-		       "gave no count to scale by\n");
+		       "was not seen recorded, so there is nothing to repeat\n");
 		return;
 	}
-	kr0 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
-				&c0, &refused, &l0, &u);
-	for (i = 0; i < AHCI_BURST; i++)
+	kr = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
+			       &c0, &refused, &l0, &u);
+	c = c0;
+	l = l0;
+	for (i = 0; i < AHCI_BURST && kr == KERN_SUCCESS; i++) {
 		(void) ahci_read_into_ungranted(st, pa);
-	kr1 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
-				&c1, &refused, &l1, &u);
-	if (kr0 != KERN_SUCCESS || kr1 != KERN_SUCCESS) {
+		kr = device_dma_faults(st->master_device, AHCI_BDF(st),
+				       &confined, &c1, &refused, &l1, &u);
+		if (kr == KERN_SUCCESS && c1 == c && l1 == l)
+			missing++;
+		c = c1;
+		l = l1;
+	}
+	if (kr != KERN_SUCCESS) {
 		/* #599: a failed call leaves zeros, which are not answers */
 		printf("ahci: [iommu-burst] WRONG — device_dma_faults failed "
-		       "(kr %d, %d): the question was not answered\n",
-		       kr0, kr1);
+		       "(kr %d) after %u reads: the question was not "
+		       "answered\n", kr, i);
 		return;
 	}
-	dc = c1 - c0;
-	dl = l1 - l0;
-
-	if (dc == AHCI_BURST * e || dl != 0)
-		printf("ahci: [iommu-burst] %u refused reads of %u records "
-		       "each: %u recorded, lost %u -> %u — recorded whole, or "
-		       "counted as lost\n", AHCI_BURST, (unsigned)e,
-		       (unsigned)dc, (unsigned)l0, (unsigned)l1);
-	else if (e == 1)
-		printf("ahci: [iommu-burst] NOT ASKED — one record per read, so "
-		       "the engine may be collapsing them: %u reads, %u "
-		       "recorded\n", AHCI_BURST, (unsigned)dc);
+	if (missing == 0)
+		printf("ahci: [iommu-burst] %u refused reads, each asked about "
+		       "before the next: %u recorded, lost %u -> %u — every "
+		       "one recorded, or counted as lost\n", AHCI_BURST,
+		       (unsigned)(c - c0), (unsigned)l0, (unsigned)l);
 	else
-		printf("ahci: [iommu-burst] WRONG — %u refused reads of %u "
-		       "records each: %u recorded of %u, and lost stayed at %u: "
-		       "refusals went missing and nothing said so\n",
-		       AHCI_BURST, (unsigned)e, (unsigned)dc,
-		       (unsigned)(AHCI_BURST * e), (unsigned)l1);
-
-	(void) ahci_read_into_ungranted(st, pa);
-	kr2 = device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
-				&c2, &refused, &l1, &u);
-	if (kr2 != KERN_SUCCESS)
-		printf("ahci: [iommu-burst] WRONG — device_dma_faults failed "
-		       "after the burst (kr %d)\n", kr2);
-	else if (c2 == c1)
-		printf("ahci: [iommu-burst] WRONG — a read after the burst moved "
-		       "nothing (count %u): the engine has stopped logging\n",
-		       (unsigned)c2);
+		printf("ahci: [iommu-burst] WRONG — %u of %u refused reads, "
+		       "each asked about before the next, moved neither the "
+		       "count (%u recorded) nor lost (%u): refusals went "
+		       "missing and nothing said so\n", (unsigned)missing,
+		       AHCI_BURST, (unsigned)(c - c0), (unsigned)l);
 }
 
 static void
@@ -894,8 +887,7 @@ ahci_iommu_selftest(struct ahci_state *st)
 		       "is confined — THE DOMAIN IS BUILT AND NOT ENFORCED\n");
 
 	ahci_iommu_spin(st, pa);
-	ahci_iommu_burst(st, pa, kr == KERN_SUCCESS && v == AHCI_REFUSED &&
-				 lost1 == lost0 ? after - before : 0);
+	ahci_iommu_burst(st, pa, kr == KERN_SUCCESS && v == AHCI_REFUSED);
 	device_dma_free(st->master_device, DEVICE_DMA_NO_BDF, kva, 4096);
 }
 
