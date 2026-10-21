@@ -352,6 +352,27 @@ static inline void write_cr4(uint64_t v)
 #define DR6_HIT(n)		(1UL << (n))
 
 /*
+ * The rest of DR6, and the debug registers as a reset leaves them (#742;
+ * Intel SDM 325462-093US, Vol. 3B 20.2.3-20.2.4, Vol. 3A Table 12-1).
+ *
+ * ⚠️ BLD and RTM say their condition when CLEAR, and a debug exception never
+ * sets them again: a DR6 written as zero makes the next exception read as a
+ * bus lock inside a transaction.  The SDM's word is to load DR6 with its
+ * reset value, FFFF0FF0H, before returning.
+ *
+ * DR7's enables are L0-L3 and G0-G3, bits 0 to 7: with none of them set,
+ * nothing is armed, whatever the rest of DR7 holds.
+ */
+#define DR6_BLD			(1UL << 11)	/* clear: a bus lock */
+#define DR6_BD			(1UL << 13)	/* a debug register accessed */
+#define DR6_BS			(1UL << 14)	/* single step */
+#define DR6_BT			(1UL << 15)	/* task switch */
+#define DR6_RTM			(1UL << 16)	/* clear: inside an RTM region */
+#define DR6_RESET		0xffff0ff0UL
+#define DR7_RESET		DR7_RESERVED_ONE
+#define DR7_ENABLES		0xffUL
+
+/*
  * What slot n watches, and how wide (#428).
  *
  * R/W is two bits at 16+4n and LEN two bits at 18+4n.  The encodings are the
@@ -428,6 +449,20 @@ static inline void write_dr(unsigned n, uint64_t v)
 	case 3: __asm__ volatile("mov %0, %%dr3" : : "r"(v)); break;
 	default: break;
 	}
+}
+
+static inline uint64_t read_dr(unsigned n)
+{
+	uint64_t v = 0;
+
+	switch (n) {
+	case 0: __asm__ volatile("mov %%dr0, %0" : "=r"(v)); break;
+	case 1: __asm__ volatile("mov %%dr1, %0" : "=r"(v)); break;
+	case 2: __asm__ volatile("mov %%dr2, %0" : "=r"(v)); break;
+	case 3: __asm__ volatile("mov %%dr3, %0" : "=r"(v)); break;
+	default: break;
+	}
+	return v;
 }
 
 #endif	/* __ASSEMBLER__ */
