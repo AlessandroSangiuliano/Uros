@@ -340,9 +340,6 @@ typedef struct target_info {
 	unsigned int	block_size;
 	volatile char	done;
 	unsigned char	cur_cmd;
-#ifdef	PARAGON860	/* performance mod */
-	char		true_lun; /* the real LUN */
-#endif	/* PARAGON860 */
 	char		lun;
 	char		masterno;
 	char		tgt_name[SCSI_TARGET_NAME_LEN];
@@ -352,12 +349,6 @@ typedef struct target_info {
 		scsi_processor_info_t	cpu;
 	} dev_info;
 	scsi_cdrom_info_t cdrom_info; /* not in union as can be viewed as a disk */
-#ifdef	PARAGON860	/* performance mod */
-        unsigned int    max_dma_data;
-#endif	/* PARAGON860 */
-#ifdef 	POWERMAC
-	unsigned int	retry_count;	/* Retry count for SCSI_RET_RETRY */
-#endif
 #if  NSCSIINFO > 0
       scsi2_inquiry_data_t    target_inquiry;
 #endif
@@ -444,11 +435,7 @@ typedef struct {
 				      char		*buffer,
 				      unsigned int	count);
 	/* per-target state */
-#ifdef	notdef /* PARAGON860 */	/* performance mod */
-	target_info_t	*target[MAX_SCSI_TARGETS][MAX_LUNS];
-#else	/* PARAGON860 */
 	target_info_t		*target[8];
-#endif	/* PARAGON860 */
 } scsi_softc_t;
 
 extern	scsi_softc_t	*scsi_softc[];
@@ -793,24 +780,6 @@ extern	io_return_t	scsi_i386_set_status(
 				dev_status_t		status,
 				mach_msg_type_number_t	status_count);
 #endif /* i386 */
-
-#ifdef PPC
-/*	SCSI disk get_status routine (PPC version)	*/
-extern	io_return_t	scsi_ppc_get_status(
-				dev_t			dev,
-				target_info_t		*tgt,
-				dev_flavor_t		flavor,
-				dev_status_t		status,
-				mach_msg_type_number_t	*status_count);
-
-/*	SCSI disk set_status routine (PPC version)	*/
-extern	io_return_t	scsi_ppc_set_status(
-				dev_t			dev,
-				target_info_t		*tgt,
-				dev_flavor_t		flavor,
-				dev_status_t		status,
-				mach_msg_type_number_t	status_count);
-#endif /* PPC */
 
 /*
  *	Function prototypes for generic SCSI routines

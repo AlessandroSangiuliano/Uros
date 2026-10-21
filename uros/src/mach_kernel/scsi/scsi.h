@@ -598,10 +598,6 @@ typedef struct {
 		unsigned char	info3;
 		unsigned char	add_len;
 		unsigned char	add_bytes[1];/* VARSIZE */
-#ifdef	POWERMAC
-#define	sense_code	u.xtended.add_bytes[4]
-#define	extsense_code	u.xtended.add_bytes[5]
-#endif
 	    } xtended;
 	} u;
 } scsi_sense_data_t;
@@ -803,77 +799,6 @@ typedef	struct {
 	unsigned char	reserved6;
 	unsigned char	reserved7;
 } scsi_mode_sense_page5_t;
-
-#ifdef	PARAGON860	/* Tape Compression Support */
-
-/* page 15 (0x0f) - data compression characteristics page */
-typedef	struct {
-	BITFIELD_3(unsigned char,
-		page_code : 6,
-		reserved1 : 1,
-		ps	  : 1);
-	unsigned char	page_length;
-	BITFIELD_3(unsigned char,
-		reserved2 : 6,
-		dcc	  : 1,
-		dce	  : 1);
-	BITFIELD_3(unsigned char,
-		reserved3 : 5,
-		red	  : 2,
-		dde	  : 1);
-	unsigned char	compression_algorithm_msb;
-	unsigned char	compression_algorithm_sb1;
-	unsigned char	compression_algorithm_sb2;
-	unsigned char	compression_algorithm_lsb;
-	unsigned char	decompression_algorithm_msb;
-	unsigned char	decompression_algorithm_sb1;
-	unsigned char	decompression_algorithm_sb2;
-	unsigned char	decompression_algorithm_lsb;
-	unsigned char	reserved4;
-	unsigned char	reserved5;
-	unsigned char	reserved6;
-	unsigned char	reserved7;
-} scsi_mode_sense_page15_t;
-
-/* page 16 (0x10) - device configuration page */
-typedef	struct {
-	BITFIELD_3(unsigned char,
-		page_code : 6,
-		reserved1 : 1,
-		ps	  : 1);
-	unsigned char	page_length;
-	BITFIELD_4(unsigned char,
-		active_format : 5,
-		caf	      : 1,
-		cap	      : 1,
-		reserved2     : 1);
-	unsigned char	active_partition;
-	unsigned char	write_buffer_full_ratio;
-	unsigned char	read_buffer_full_ratio;
-	unsigned char	write_delay_time_msb;
-	unsigned char	write_delay_time_lsb;
-	BITFIELD_7(unsigned char,
-		rew  : 1,
-		rbo  : 1,
-		socf : 2,
-		avc  : 1,
-		rsmk : 1,
-		bis  : 1,
-		dbr  : 1);
-	unsigned char	gap_size;
-	BITFIELD_4(unsigned char,
-		reserved3   : 3,
-		sew	    : 1,
-		eeg	    : 1,
-		eod_defined : 3);
-	unsigned char	buffer_size_at_early_warning_msb;
-	unsigned char	buffer_size_at_early_warning;
-	unsigned char	buffer_size_at_early_warning_lsb;
-	unsigned char	select_data_compression_algorithm;
-	unsigned char	reserved4;
-} scsi_mode_sense_page16_t;
-
-#endif	/* PARAGON860 */	/* Tape Compression Support */
 
 /* read capacity data */
 typedef struct {
