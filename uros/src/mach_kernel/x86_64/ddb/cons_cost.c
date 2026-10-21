@@ -173,7 +173,11 @@ cons_cost_report(void)
  * ⚠️ A plain word and no atomic, so two processors halting together can both
  * print it.  That is the right way round for a report: a line said twice is a
  * reader's mild confusion, a line lost to a failed exchange is a boot with no
- * answer at all.
+ * answer at all.  #702: and each copy is said inside the console's report, so
+ * that two copies come one after the other.  In an orderly halt every
+ * processor comes here, and under TCG three or four of them did (#707's and
+ * #736's merge tests, entry 21): whole lines while printf_lock kept them
+ * apart, a byte of each in turn once report_printf() went without it.
  */
 static int	cons_ring_said;
 
@@ -247,6 +251,14 @@ cons_ring_report(void)
 	cons_ring_said = 1;
 
 	/*
+	 * #702: one processor's copy at a time, and no other processor's byte
+	 * inside it (#659).  A panic's halting processor holds the report
+	 * already, around its backtrace, and takes it again here; an orderly
+	 * halt holds none until this.
+	 */
+	cons_report_begin();
+
+	/*
 	 * And the other output, beside the wire's figures rather than
 	 * anywhere else (#568).  Two outputs with one cost recorded is how a
 	 * reader concludes the wrong thing about the one that was not.
@@ -308,6 +320,7 @@ cons_ring_report(void)
 		      cons_drains(CONS_DRAIN_DEFERRED),
 		      cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
 		      cons_queued());
+	cons_report_end();
 }
 
 /*
