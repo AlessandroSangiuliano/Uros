@@ -135,7 +135,6 @@
 
 #include <mach_assert.h>
 #include <mach_kdb.h>
-#include <mach_kgdb.h>
 #include <cpus.h>
 
 #include <kern/cpu_number.h>

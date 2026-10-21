@@ -24,7 +24,6 @@
 
 #include <cpus.h>
 #include <mach_kdb.h>
-#include <mach_kgdb.h>
 
 #include <mach_ldebug.h>
 #include <mach/boolean.h>

@@ -186,7 +186,6 @@
 #include <fast_idle.h>
 #include <fpe.h>
 #include <mach_kdb.h>
-#include <mach_kgdb.h>
 #include <mach_ldebug.h>
 
 #include <types.h>

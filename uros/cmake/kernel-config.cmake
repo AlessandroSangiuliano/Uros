@@ -135,7 +135,6 @@ set(UROS_KERNEL_CONFIG
     mach_ipc_debug         MACH_IPC_DEBUG 0
     mach_ipc_test          MACH_IPC_TEST 0
     mach_kdb               MACH_KDB 1
-    mach_kgdb              MACH_KGDB 0
     mach_kprof             MACH_KPROF 0
     mach_lock_mon          MACH_LOCK_MON 0
     mach_machine_routines  MACH_MACHINE_ROUTINES 1

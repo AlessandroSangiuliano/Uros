@@ -174,7 +174,6 @@
 
 #include <cpus.h>
 #include <mach_kdb.h>
-#include <mach_kgdb.h>
 #include <platforms.h>
 #include <mp_v1_1.h>
 #include <types.h>

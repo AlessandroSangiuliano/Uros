@@ -188,7 +188,6 @@
 #include <mach_rt.h>
 #include <platforms.h>
 #include <mach_kdb.h>
-#include <mach_kgdb.h>
 #include <stat_time.h>
 #include <mach_assert.h>
 
