@@ -527,7 +527,7 @@ static uint32_t cons_report_me(void)
 
 void cons_report_begin(void)
 {
-	uint32_t me;
+	uint32_t me, seen, seen_epoch;
 	uint64_t t0;
 
 	if (!cons_locks_usable)
@@ -537,12 +537,30 @@ void cons_report_begin(void)
 		cons_report_depth++;
 		return;
 	}
+	seen = cons_report_owner;
+	seen_epoch = cons_report_epoch;
 	t0 = rdtsc_ordered();
 	while (!__sync_bool_compare_and_swap(&cons_report_owner,
 					     CONS_REPORT_NOBODY, me)) {
-		if (rdtsc_ordered() - t0 >= CONS_REPORT_CYCLES) {
+		uint32_t owner = cons_report_owner;
+
+		/*
+		 * #702: the report is taken FROM the holder this processor
+		 * waited for, by an exchange, and a holder that took it in the
+		 * meantime gets a whole bound of its own.  It was taken by a
+		 * plain store, and two processors whose waits for the same
+		 * holder ran out together both took it, 9471 cycles apart,
+		 * and said their reports at once, a byte of each in turn.
+		 */
+		if (owner != seen || cons_report_epoch != seen_epoch) {
+			seen = owner;
+			seen_epoch = cons_report_epoch;
+			t0 = rdtsc_ordered();
+		} else if (owner != CONS_REPORT_NOBODY &&
+			   rdtsc_ordered() - t0 >= CONS_REPORT_CYCLES &&
+			   __sync_bool_compare_and_swap(&cons_report_owner,
+							owner, me)) {
 			/* a holder that never let go: the report is said */
-			cons_report_owner = me;
 			break;
 		}
 		cpu_pause();
