@@ -445,12 +445,6 @@ LEXT(pstart)
 	movsb
 1:
 
-#if 0
-#ifdef	AT386
-#include <i386/AT386/asm_startup.h>
-#endif
-#endif
-
 /*
  * Build initial page table directory and page tables.
  * %ebx holds first available physical address.
