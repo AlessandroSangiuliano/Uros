@@ -1900,7 +1900,7 @@ static void control_regs_selftest(void)
 {
 	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
 	struct cr_seen boot;
-	unsigned asked = 1, differ = 0, unenforced = 0;
+	unsigned asked = 1, differ = 0, unenforced = 0, judged = 0;
 	pmap_t scratch;
 	uint64_t frame;
 	uint8_t *code;
@@ -1979,11 +1979,20 @@ static void control_regs_selftest(void)
 		ipi_call_mask(1ULL << cpu, cr_probe_here, &cr_seen[cpu]);
 	}
 
+	/*
+	 * 🔴 THE BOOT PROCESSOR IS JUDGED TOO (#664).  The online mask names the
+	 * processors that reported in, and this one never does -- its bit is
+	 * kept apart (smp_answering_set()) -- so a loop that asked the mask
+	 * alone skipped the processor every other one is compared with, while
+	 * the summary below counted it.  And the summary counts what was
+	 * judged, not what was asked.
+	 */
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
 		struct cr_seen *s = cpu == self ? &boot : &cr_seen[cpu];
 
-		if (!smp_is_online(cpu))
+		if (cpu != self && !smp_is_online(cpu))
 			continue;
+		judged++;
 		if (((cr_probe_want & CR4_SMAP) && !s->smap_fault)
 		    || ((cr_probe_want & CR4_SMEP) && !s->smep_fault)
 		    || (cr_probe_wp && !s->wp_fault)) {
@@ -2007,7 +2016,7 @@ static void control_regs_selftest(void)
 	kputs(", CR0.WP ");
 	kputs(cr_probe_wp ? "on" : "off");
 	kputs(" — probed on ");
-	kputdec(asked);
+	kputdec(judged);
 	kputs(unenforced == 0
 	      ? " processors: every probe faulted on every one\r\n"
 	      : " processors: not enforced on some, WRONG (#639)\r\n");
