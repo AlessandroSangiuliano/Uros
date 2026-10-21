@@ -4,10 +4,10 @@ Holds open: a third processor inside printf(), holding printf_lock in the middle
 Run: --entry 24 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/kern/debug.c b/uros/src/mach_kernel/kern/debug.c
-index 2e7168da..0de9f3eb 100644
+index 8af3ac74..e2c9a421 100644
 --- a/uros/src/mach_kernel/kern/debug.c
 +++ b/uros/src/mach_kernel/kern/debug.c
-@@ -219,6 +219,7 @@ const char		*panicstr;
+@@ -208,6 +208,7 @@ const char		*panicstr;
  decl_simple_lock_data(,panic_lock)
  int			paniccpu;
  volatile int		panicwait;
@@ -15,7 +15,7 @@ index 2e7168da..0de9f3eb 100644
  unsigned int		panic_is_inited = 0;
  
  /*
-@@ -363,6 +364,11 @@ panic(const char *str, ...)
+@@ -346,6 +347,11 @@ panic(const char *str, ...)
  	 * Release panicwait indicator so that other cpus may call Debugger().
  	 */
  	panicwait = 0;
@@ -24,14 +24,14 @@ index 2e7168da..0de9f3eb 100644
 +
 +		panic_702_said = 1;
 +	}
- #if	(MACH_KDB || MACH_KGDB)
+ #if	MACH_KDB
  	Debugger("panic");
  
 diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
-index 97d53b33..0c3c228f 100644
+index 59c76cdb..e896d681 100644
 --- a/uros/src/mach_kernel/kern/printf.c
 +++ b/uros/src/mach_kernel/kern/printf.c
-@@ -1000,11 +1000,36 @@ printf_nested(void)
+@@ -998,11 +998,36 @@ printf_nested(void)
   * the putc callback in _doprnt and as a direct cnputc wrapper for
   * the MP cpu-number prefix.
   */
