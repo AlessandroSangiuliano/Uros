@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #702
+Over: 702-widen-printing-when-the-halt-comes.patch
+Takes out: a report starting on a line of its own (5c42405e, 866db5c8) -- the panicking processor's report begins where the widened chatter's cut line ends, its first line comes out glued to it, and double-panic-check.sh calls that a part in pieces: WRONG -- in 4 boots of 4 on 3e8d780b, on victus under TCG and KVM
+Script: scripts/double-panic-boot.sh
+Expect: double-panic-check: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index 2146755f..79839202 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -573,23 +573,6 @@ void cons_report_begin(void)
+ 	}
+ 	cons_report_depth = 0;
+ 	cons_report_epoch++;
+-
+-	/*
+-	 * #702: and on a line of its own.  A processor stopped, or made to
+-	 * wait, in the middle of a line leaves the wire there, and the first
+-	 * line of a report came out glued to it -- "#7   cpu 3 backtrace", a
+-	 * whole line of neither.  The other line stays cut; this one does not.
+-	 * Asked under the port's lock, which every byte to the wire is written
+-	 * under, so that no byte lands between the question and the newline.
+-	 */
+-	{
+-		int locked = cons_tx_lock_bounded();
+-
+-		if (cons_last_said != 0 && cons_last_said != '\n')
+-			cons_wire_put('\n', locked);
+-		if (locked)
+-			hw_lock_unlock(&cons_tx_lock);
+-	}
+ }
+ 
+ void cons_report_end(void)

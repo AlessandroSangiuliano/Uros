@@ -1,0 +1,51 @@
+Kind: ablation
+Issue: #702
+Takes out: the console's final copy said inside the console's report (56d76be8) -- in an orderly halt every processor that passes cons_ring_report()'s plain word says its copy at the same time, report_printf() taking no lock, and the copies come out a byte of each in turn; entry 21 ends in preempt_test's halt, and on OMEGA under TCG at four processors no line of the copies was whole in 6 boots of 6 and final-copy-check.sh said WRONG in each, where the harness's GARBLED check had seen 2 of the 6, and the fixed tree's 4, 4, 2, 4, 4 and 4 copies were all whole
+Script: scripts/final-copy-boot.sh
+Script: --entry
+Script: 21
+Script: 600
+Script: -smp
+Script: 4
+Expect: final-copy-check: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons_cost.c b/uros/src/mach_kernel/x86_64/ddb/cons_cost.c
+index 4999d4e3..28955dd6 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons_cost.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons_cost.c
+@@ -173,11 +173,7 @@ cons_cost_report(void)
+  * ⚠️ A plain word and no atomic, so two processors halting together can both
+  * print it.  That is the right way round for a report: a line said twice is a
+  * reader's mild confusion, a line lost to a failed exchange is a boot with no
+- * answer at all.  #702: and each copy is said inside the console's report, so
+- * that two copies come one after the other.  In an orderly halt every
+- * processor comes here, and under TCG three or four of them did (#707's and
+- * #736's merge tests, entry 21): whole lines while printf_lock kept them
+- * apart, a byte of each in turn once report_printf() went without it.
++ * answer at all.
+  */
+ static int	cons_ring_said;
+ 
+@@ -250,14 +246,6 @@ cons_ring_report(void)
+ 		return;
+ 	cons_ring_said = 1;
+ 
+-	/*
+-	 * #702: one processor's copy at a time, and no other processor's byte
+-	 * inside it (#659).  A panic's halting processor holds the report
+-	 * already, around its backtrace, and takes it again here; an orderly
+-	 * halt holds none until this.
+-	 */
+-	cons_report_begin();
+-
+ 	/*
+ 	 * And the other output, beside the wire's figures rather than
+ 	 * anywhere else (#568).  Two outputs with one cost recorded is how a
+@@ -320,7 +308,6 @@ cons_ring_report(void)
+ 		      cons_drains(CONS_DRAIN_DEFERRED),
+ 		      cons_drains(CONS_DRAIN_DOWN), cons_backpressure(),
+ 		      cons_queued());
+-	cons_report_end();
+ }
+ 
+ /*
