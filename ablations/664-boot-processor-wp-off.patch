@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #664
-Takes out: CR0.WP on the boot processor, for the moment its own SMEP, SMAP and CR0.WP probes run and on no other processor -- the census has already read CR0 with WP on, so the probe is asked for, and the store through the read-only mapping goes through; before #664 the boot processor's probes were never judged and this was not caught
+Takes out: CR0.WP on the boot processor, for the moment its own SMEP, SMAP and CR0.WP probes run and on no other processor -- the census has already read CR0 with WP on, so the probe is asked for, and the store through the read-only mapping goes through; before #664 the boot processor's probes were never judged and this was not caught; at 3c13816c on victus, on battery, caught 4 of 4, two under TCG and two under KVM, each boot saying "processor 0 wrote through a read-only mapping, without a fault -- WRONG (#639)", and the fixed tree passed 4 of 4, "probed on 4 processors: every probe faulted on every one"; over 99338ea9, the tree before the fix, not caught in 2 of 2, one under each, the summary saying every probe had faulted
 Run: --entry 0 600 -smp 4
 Expect: processor 0 wrote through a read-only mapping
 
