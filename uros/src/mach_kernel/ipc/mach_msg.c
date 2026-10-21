@@ -1334,10 +1334,6 @@ mach_msg_overwrite_trap(
 		    }
 
 			is_read_lock(space);
-			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
-				is_read_unlock(space);
-				goto slow_copyin;
-			}
 
 			size = space->is_table_size;
 			table = space->is_table;
@@ -1346,7 +1342,14 @@ mach_msg_overwrite_trap(
 			register ipc_entry_t entry;
 			register ipc_entry_bits_t bits;
 
-			if (index < size) {
+			/*
+			 * #688: a dead space answers no name.  Its table is
+			 * freed (see ipc_space_destroy()) and ipc_entry_lookup()
+			 * asserts a live space, so neither is asked, and
+			 * abort_request_copyin takes the request the slow way,
+			 * where ipc_kmsg_copyin_header() refuses a dead space.
+			 */
+			if (space->is_active && index < size) {
 				entry = &table[index];
 				bits = entry->ie_bits;
 				if (IE_BITS_GEN(bits) != gen ||
@@ -1357,7 +1360,8 @@ mach_msg_overwrite_trap(
 				entry = IE_NULL;
 			}
 			if (entry == IE_NULL) {
-				entry = ipc_entry_lookup(space, reply_name);
+				if (space->is_active)
+					entry = ipc_entry_lookup(space, reply_name);
 				if (entry == IE_NULL) {
 					HOT(c_mmot_cold_006++);
 					goto abort_request_copyin;
