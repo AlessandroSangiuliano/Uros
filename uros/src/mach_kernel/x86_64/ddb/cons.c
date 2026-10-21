@@ -529,6 +529,8 @@ static uint32_t cons_report_me(void)
 	return lapic_present() ? lapic_id() : 0;
 }
 
+static void cons_wire_put(char c, int locked);
+
 void cons_report_begin(void)
 {
 	uint32_t me, seen, seen_epoch;
@@ -577,9 +579,17 @@ void cons_report_begin(void)
 	 * wait, in the middle of a line leaves the wire there, and the first
 	 * line of a report came out glued to it -- "#7   cpu 3 backtrace", a
 	 * whole line of neither.  The other line stays cut; this one does not.
+	 * Asked under the port's lock, which every byte to the wire is written
+	 * under, so that no byte lands between the question and the newline.
 	 */
-	if (cons_last_said != 0 && cons_last_said != '\n')
-		cons_putc_wire('\n');
+	{
+		int locked = cons_tx_lock_bounded();
+
+		if (cons_last_said != 0 && cons_last_said != '\n')
+			cons_wire_put('\n', locked);
+		if (locked)
+			hw_lock_unlock(&cons_tx_lock);
+	}
 }
 
 void cons_report_end(void)
@@ -623,17 +633,18 @@ static void cons_report_wait(void)
 	}
 }
 
-static void cons_wire_byte(char c)
+/*
+ * One byte to the port, the port's lock held if `locked' (#599, #702).
+ *
+ * Before the port, and not after: a byte the transmitter refuses is still a
+ * byte this kernel said, and on a machine where the screen is the only output
+ * there is, dropping it from the screen because a wire nobody is reading
+ * would not take it is the wrong way round.  And under the lock, so that the
+ * last byte said is the last the wire has, which is what a report asks before
+ * its first line (cons_report_begin).
+ */
+static void cons_wire_put(char c, int locked)
 {
-	/* Not inside another processor's report (#659). */
-	cons_report_wait();
-
-	/*
-	 * Before the port, and not after: a byte the transmitter refuses is
-	 * still a byte this kernel said, and on a machine where the screen is
-	 * the only output there is, dropping it from the screen because a wire
-	 * nobody is reading would not take it is the wrong way round.
-	 */
 	cons_said(c);
 
 	/*
@@ -646,35 +657,57 @@ static void cons_wire_byte(char c)
 		return;
 
 	/*
-	 * #599: under the port's lock, with a bound, once the lock package can
-	 * be used (before cons_percpu_ready there is one processor and no
-	 * lock).  This path runs with the ring off -- early boot, and the way
-	 * down, where the other processors may still be running (a DDB entry
-	 * drains the ring before it stops them) and one of them may be in a
-	 * divisor sequence with the latch open (found in review: a printf on
-	 * a third processor went into DLL).  The bound is for a holder that is
-	 * parked or halted and will never let go; after it the byte goes only
-	 * if the latch is closed, and the failure is remembered until a wait
-	 * succeeds, so the bytes after it do not each pay the bound.
+	 * #599: the bound is for a holder that is parked or halted and will
+	 * never let go; after it the byte goes only if the latch is closed --
+	 * a processor parked in a divisor sequence leaves it open (found in
+	 * review: a printf on a third processor went into DLL) -- and the
+	 * failure is remembered until a wait succeeds, so the bytes after it
+	 * do not each pay the bound.
 	 */
-	{
-		int locked = cons_locks_usable ? cons_tx_lock_bounded() : 0;
-
-		if (!locked && cons_locks_usable &&
-		    (inb(COM1 + UART_LCR) & 0x80)) {
-			cons_tx_dropped_count++;
-			return;
-		}
-		if (cons_tx_room(1) == 0) {
-			cons_tx_dropped_count++;
-		} else {
-			outb(COM1 + UART_DATA, (uint8_t)c);
-			if (cons_fifo_room != 0)
-				cons_fifo_room--;
-		}
-		if (locked)
-			hw_lock_unlock(&cons_tx_lock);
+	if (!locked && cons_locks_usable && (inb(COM1 + UART_LCR) & 0x80)) {
+		cons_tx_dropped_count++;
+		return;
 	}
+	if (cons_tx_room(1) == 0) {
+		cons_tx_dropped_count++;
+	} else {
+		outb(COM1 + UART_DATA, (uint8_t)c);
+		if (cons_fifo_room != 0)
+			cons_fifo_room--;
+	}
+}
+
+/*
+ * #599: under the port's lock, with a bound, once the lock package can be
+ * used (before cons_percpu_ready there is one processor and no lock).  This
+ * path runs with the ring off -- early boot, and the way down, where the other
+ * processors may still be running (a DDB entry drains the ring before it
+ * stops them).
+ */
+static void cons_wire_byte(char c)
+{
+	int locked;
+
+	/*
+	 * Not inside another processor's report (#659) -- and not between a
+	 * report's start and its first line either (#702).  The wait was for
+	 * the report found here, and the byte went as soon as that one ended:
+	 * into the next one, begun meanwhile by another processor, whose first
+	 * line it then led -- "7  cpu 0 backtrace", and "clo   cpu 3
+	 * backtrace" in a campaign's boot.  So the question is asked again with
+	 * the port's lock held, which a report's first newline takes too, and
+	 * a byte that finds another report there waits for that one as well.
+	 */
+	for (;;) {
+		cons_report_wait();
+		locked = cons_locks_usable ? cons_tx_lock_bounded() : 0;
+		if (!locked || !cons_report_elsewhere())
+			break;
+		hw_lock_unlock(&cons_tx_lock);
+	}
+	cons_wire_put(c, locked);
+	if (locked)
+		hw_lock_unlock(&cons_tx_lock);
 }
 
 void cons_putc_wire(char c)
@@ -787,15 +820,24 @@ static int cons_tx_one(int may_wait)
 	 * Not inside another processor's report (#659): a drain that may wait
 	 * waits for it, bounded; one that may not leaves the byte in the ring.
 	 */
-	if (may_wait)
-		cons_report_wait();
-	else if (cons_report_elsewhere())
-		return 0;
+	for (;;) {
+		if (may_wait)
+			cons_report_wait();
+		else if (cons_report_elsewhere())
+			return 0;
 
-	if (may_wait)
-		hw_lock_lock(&cons_tx_lock);
-	else if (!hw_lock_try(&cons_tx_lock))
-		return 0;
+		if (may_wait)
+			hw_lock_lock(&cons_tx_lock);
+		else if (!hw_lock_try(&cons_tx_lock))
+			return 0;
+
+		/* #702: asked again under the lock, as cons_wire_byte() does */
+		if (!cons_report_elsewhere())
+			break;
+		hw_lock_unlock(&cons_tx_lock);
+		if (!may_wait)
+			return 0;
+	}
 
 	if (cons_tx_room(may_wait) == 0) {
 		/*
