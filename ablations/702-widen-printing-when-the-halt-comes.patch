@@ -1,0 +1,138 @@
+Kind: widen
+Issue: #702
+Holds open: a third processor inside printf(), holding printf_lock in the middle of a line, when a panic's report begins -- -Z's driver starts a chatter bound to a processor that is neither of the two that panic, printing from the moment they are told to go, and kern/printf.c holds it at the 24th byte of the first line it starts once the panic's message is out, until another processor holds the console's report; then the line goes on, each byte waiting for that report, as the processor halted at printf+0xc0 in the campaign's boots was; a line says which processor, or that the widen did not open
+Run: --entry 24 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
+index 97d53b33..463699b5 100644
+--- a/uros/src/mach_kernel/kern/printf.c
++++ b/uros/src/mach_kernel/kern/printf.c
+@@ -1000,11 +1000,32 @@ printf_nested(void)
+  * the putc callback in _doprnt and as a direct cnputc wrapper for
+  * the MP cpu-number prefix.
+  */
++/*
++ * #702 widen: the processor halt_test.c's chatter runs on is held inside the
++ * first line it starts once a panic's message is out, at its 24th byte, with
++ * printf_lock held, until another processor holds the console's report; then
++ * the line goes on, each byte waiting for that report as such bytes do -- as
++ * the processor halted inside printf() in the campaign's boots was.
++ */
++volatile int		printf_702_cpu = -1;
++static unsigned		printf_702_n;
++extern const char	*panicstr;
++extern volatile int	panicwait;
++extern int		cons_report_held_elsewhere(void);
++
+ static void
+ klog_cnputc(char c)
+ {
+ 	cnputc(c);
+ 	klog_putc(c);
++	if (printf_702_cpu == cpu_number() && panicstr != 0 && !panicwait &&
++	    ++printf_702_n == 24) {
++		unsigned long long i;
++
++		for (i = 0; i < (1ULL << 32) && !cons_report_held_elsewhere();
++		     i++)
++			__asm__ volatile("pause");
++	}
+ }
+ 
+ void
+diff --git a/uros/src/mach_kernel/x86_64/cpu/halt_test.c b/uros/src/mach_kernel/x86_64/cpu/halt_test.c
+index 321d60f2..43916a66 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/halt_test.c
++++ b/uros/src/mach_kernel/x86_64/cpu/halt_test.c
+@@ -79,6 +79,22 @@ dp_probe_body(void)
+ 
+ static void double_panic_test_body(int me);
+ 
++/* #702 widen: a third processor printing while the two panic */
++extern volatile int	printf_702_cpu;
++static volatile int	dp_chatter_running;
++
++static void
++dp_chatter_body(void)
++{
++	printf_702_cpu = cpu_number();
++	dp_chatter_running = 1;
++	while (dp_state != DP_GO)
++		__asm__ volatile("pause");
++	for (;;)
++		printf("#702 widen: a third processor prints while two panic, "
++		       "and is held inside this line once the message is out\n");
++}
++
+ /*
+  * The driver stays on the processor it chose from (#646).  It read
+  * cpu_number() bare, on an unbound thread, and then counted on running
+@@ -167,6 +183,48 @@ double_panic_test_body(int me)
+ 		return;
+ 	}
+ 
++	{
++		processor_t	third = PROCESSOR_NULL;
++		thread_t	cth;
++
++		for (int i = 0; i < NCPUS; i++) {
++			if (i == me || i == target->slot_num ||
++			    !machine_slot[i].is_cpu || !machine_slot[i].running)
++				continue;
++			third = cpu_to_processor(i);
++			break;
++		}
++		if (third != PROCESSOR_NULL &&
++		    thread_create_at(kernel_task, &cth, dp_chatter_body) ==
++		    KERN_SUCCESS) {
++			thread_act_t cact = cth->top_act;
++
++			thread_swappable(cact, FALSE);
++			s = splsched();
++			thread_lock(cth);
++			cth->max_priority = BASEPRI_SYSTEM;
++			cth->priority = BASEPRI_SYSTEM;
++			cth->sched_pri = BASEPRI_SYSTEM;
++			thread_bind_locked(cth, third);
++			cth->state |= TH_RUN;
++			thread_setrun(cth, TRUE, TAIL_Q);
++			thread_unlock(cth);
++			splx(s);
++			act_deallocate(cact);
++			thread_resume(cact);
++			for (spins = 0; spins < CPU_SPIN_BUDGET &&
++			     !dp_chatter_running; spins++)
++				cpu_pause();
++		}
++		if (dp_chatter_running)
++			printf("#702 widen: processor %d prints while the two "
++			       "panic, and is held inside a line once the "
++			       "message is out\n", third->slot_num);
++		else
++			printf("#702 widen: NOT OPEN — no third processor ran "
++			       "the chatter\n");
++	}
++
+ 	printf("double_panic: processors %d and %d panic at the same instant, "
+ 	       "both with interrupts on; the log must keep one whole panic "
+ 	       "message, the console's final copy whole after it, and one whole "
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index c7cae676..fc070ee8 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -594,6 +594,15 @@ void cons_report_end(void)
+ 	cons_report_owner = CONS_REPORT_NOBODY;
+ }
+ 
++/* #702 widen: whether another processor holds a report, waited out or not. */
++int cons_report_held_elsewhere(void)
++{
++	uint32_t owner = cons_report_owner;
++
++	return cons_locks_usable && owner != CONS_REPORT_NOBODY &&
++	       owner != cons_report_me();
++}
++
+ /* Whether another processor holds a report this one has not waited out. */
+ static int cons_report_elsewhere(void)
+ {
