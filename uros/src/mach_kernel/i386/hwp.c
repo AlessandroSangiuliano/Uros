@@ -20,6 +20,11 @@
  *     desired=0 — so the part is never stuck at the firmware's last ratio;
  *   - if the firmware already enabled it, leave its programming alone.
  *
+ * ⚠️ What the BSP read, before anything wrote it, decides for every CPU
+ * (#736): on omen's Kaby Lake IA32_PM_ENABLE is one per package, so the APs
+ * found it on because the BSP had turned it on, and by their own reading left
+ * their IA32_HWP_REQUEST -- one per thread -- as the reset had it.
+ *
  * '-E' (hwp_epp_performance) biases the Energy/Performance Preference to 0
  * (performance) in either case, for benchmark runs where ramp latency and
  * boost stickiness matter more than power.
@@ -58,12 +63,21 @@ int	hwp_skip_enable __attribute__((section(".data"))) = 0;
  * prints the summary.  Plain counter, bumped with atomic_incl. */
 int	hwp_cpus_on;
 
+/* The firmware's choice as the BSP read IA32_PM_ENABLE: 1 on, 0 off, -1 not
+ * read yet (#736). */
+static int	hwp_firmware_on = -1;
+
+/* CPUs whose request this file wrote, and that read it back as written, for
+ * start_other_cpus()'s summary: the BSP's line alone cannot say what the APs
+ * did (#736). */
+int	hwp_req_written, hwp_req_kept;
+
 void
 hwp_init_cpu(boolean_t bsp)
 {
 	unsigned int	a, b, c, d, eax6;
 	unsigned int	lo, hi, cap_lo, cap_hi, req_lo, req_hi;
-	boolean_t	already, has_epp;
+	boolean_t	already, has_epp, written = FALSE;
 
 	do_cpuid(0, 0, &a, &b, &c, &d);
 	eax6 = 0;
@@ -78,7 +92,9 @@ hwp_init_cpu(boolean_t bsp)
 	has_epp = (eax6 & CPUID6_EAX_HWP_EPP) != 0;
 
 	rdmsr(MSR_IA32_PM_ENABLE, &lo, &hi);
-	already = (lo & 1) != 0;
+	if (bsp)
+		hwp_firmware_on = (lo & 1) != 0;
+	already = hwp_firmware_on >= 0 ? hwp_firmware_on : (lo & 1) != 0;
 
 	if (hwp_skip_enable) {
 		/* -Q: don't enable, don't program -- report the untouched state
@@ -89,7 +105,7 @@ hwp_init_cpu(boolean_t bsp)
 		return;
 	}
 
-	if (!already)
+	if ((lo & 1) == 0)
 		wrmsr(MSR_IA32_PM_ENABLE, lo | 1, hi);	/* one-way until reset */
 
 	rdmsr(MSR_IA32_HWP_CAPS, &cap_lo, &cap_hi);
@@ -111,11 +127,21 @@ hwp_init_cpu(boolean_t bsp)
 		else
 			req_lo |= orig & 0xff000000u;
 		wrmsr(MSR_IA32_HWP_REQUEST, req_lo, req_hi);
+		written = TRUE;
 	} else if (hwp_epp_performance && has_epp && (req_lo >> 24) != 0) {
 		/* The firmware runs the show; only bias its EPP to
 		 * performance for this bench boot. */
 		req_lo &= 0x00ffffffu;
 		wrmsr(MSR_IA32_HWP_REQUEST, req_lo, req_hi);
+		written = TRUE;
+	}
+	if (written) {
+		unsigned int	back_lo, back_hi;
+
+		atomic_incl((long *)&hwp_req_written, 1);
+		rdmsr(MSR_IA32_HWP_REQUEST, &back_lo, &back_hi);
+		if (back_lo == req_lo)
+			atomic_incl((long *)&hwp_req_kept, 1);
 	}
 
 	atomic_incl((long *)&hwp_cpus_on, 1);

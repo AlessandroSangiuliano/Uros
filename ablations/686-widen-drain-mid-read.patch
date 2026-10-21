@@ -1,0 +1,87 @@
+Kind: widen
+Issue: #686
+Holds open: the window between QEMU's two reports of one refused DMA write, when it maps the bounce buffer and when it writes it back (address_space_map() and address_space_unmap()), by reading the engines out right after the AHCI driver starts the [iommu] self-test's first refused read and on every turn of its completion poll, and by repeating that read, up to 64 times, until it leaves two records, as the first read of the campaign boot that failed did; a line says on which try and how many times the engines were read out, so that a fixed arm that passes shows the window was open
+Run: --iommu intel --entry 36 600 -smp 4
+
+diff --git a/uros/src/servers/block_device_server/ahci/ahci_io.c b/uros/src/servers/block_device_server/ahci/ahci_io.c
+index 4ad5f664..4583aee8 100644
+--- a/uros/src/servers/block_device_server/ahci/ahci_io.c
++++ b/uros/src/servers/block_device_server/ahci/ahci_io.c
+@@ -29,6 +29,22 @@
+ #include <sa_mach.h>
+ #include <stdio.h>
+ #include "ahci_module.h"
++#include "device_master.h"
++
++/* #686 widen: set around one read, the engines read out while it is in flight */
++int	ahci_686_drain_mid_read;
++unsigned ahci_686_drains;
++
++static void
++ahci_686_drain(struct ahci_state *st)
++{
++	natural_t c = 0, l = 0, u = 0, confined = 0;
++	vm_address_t refused = 0;
++
++	(void) device_dma_faults(st->master_device, AHCI_BDF(st), &confined,
++				 &c, &refused, &l, &u);
++	ahci_686_drains++;
++}
+ 
+ /* ================================================================
+  * Single command submission (polling, slot 0)
+@@ -74,9 +90,14 @@ ahci_submit_cmd(struct ahci_state *st, int port_idx,
+ 	}
+ 
+ 	port_write(st, port, PORT_CI, 1u);
++	if (ahci_686_drain_mid_read)
++		ahci_686_drain(st);
+ 
+ 	for (i = 0; i < 5000000; i++) {
+ 		uint32_t is = port_read(st, port, PORT_IS);
++
++		if (ahci_686_drain_mid_read)
++			ahci_686_drain(st);
+ 		if (is & PORT_IS_TFES) {
+ 			printf("ahci: task file error  IS=0x%08X  TFD=0x%08X\n",
+ 			       is, port_read(st, port, PORT_TFD));
+diff --git a/uros/src/servers/block_device_server/ahci/ahci_module.c b/uros/src/servers/block_device_server/ahci/ahci_module.c
+index 0f00085a..dbf63caa 100644
+--- a/uros/src/servers/block_device_server/ahci/ahci_module.c
++++ b/uros/src/servers/block_device_server/ahci/ahci_module.c
+@@ -835,10 +835,31 @@ ahci_iommu_selftest(struct ahci_state *st)
+ 	printf("ahci: [iommu] asking port 0 to read one sector into "
+ 	       "0x%08lX, a page granted to no device\n", (unsigned long)pa);
+ 
+-	rc = ahci_read_into_ungranted(st, pa);
+-
+-	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
+-			       &confined, &after, &refused, &lost1, &undrained);
++	{
++		extern int ahci_686_drain_mid_read;
++		extern unsigned ahci_686_drains;
++		unsigned tries = 0;
++
++		ahci_686_drains = 0;
++		for (;;) {
++			tries++;
++			ahci_686_drain_mid_read = 1;
++			rc = ahci_read_into_ungranted(st, pa);
++			ahci_686_drain_mid_read = 0;
++			kr = device_dma_faults(st->master_device, AHCI_BDF(st),
++					       &confined, &after, &refused,
++					       &lost1, &undrained);
++			if (kr != KERN_SUCCESS || after - before >= 2 ||
++			    tries == 64)
++				break;
++			before = after;
++			lost0 = lost1;
++		}
++		printf("#686 widen: the first refused read left %u record(s) "
++		       "on try %u, its engines read out %u times while the "
++		       "tries were in flight\n", (unsigned)(after - before),
++		       tries, ahci_686_drains);
++	}
+ 	v = ahci_dma_verdict(before, lost0, after, lost1);
+ 
+ 	/*

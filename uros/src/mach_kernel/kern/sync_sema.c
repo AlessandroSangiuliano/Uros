@@ -131,7 +131,8 @@ semaphore_create (
  *	creation.
  *
  *	All threads currently blocked on the semaphore are awoken.  These
- *	threads will return with the KERN_TERMINATED error.
+ *	threads will return with the KERN_SEMAPHORE_DESTROYED error; a call
+ *	that finds the semaphore already destroyed gets KERN_TERMINATED.
  */
 kern_return_t
 semaphore_destroy (task_t task, semaphore_t semaphore)
@@ -173,7 +174,7 @@ semaphore_destroy (task_t task, semaphore_t semaphore)
 
 	/*
 	 *  Wakeup blocked threads  
-	 *  Blocked threads will receive a KERN_TERMINATED error
+	 *  Blocked threads will receive a KERN_SEMAPHORE_DESTROYED error
 	 */
 
 	if (semaphore->count < 0)
@@ -430,32 +431,48 @@ semaphore_wait_common (semaphore_t semaphore, tvalspec_t *wait_time)
 			thread_set_timeout(ticks_to_wait);
 		thread_block((void (*)(void)) SAFE_MISCELLANEOUS);
 
+		/*
+		 * Whether the wait was completed is read under the semaphore's
+		 * lock (#707).  A signal takes the thread off the queue, marks
+		 * it done and clear_wait()s it in three statements under that
+		 * lock, and a timeout or an abort can wake the thread between
+		 * them.  Read without the lock, "done" sent the thread back to
+		 * user mode and the signaller's clear_wait() then ended its
+		 * next wait.  Taking the lock waits for a signal in flight.
+		 */
+		spl_level = splsched();
+		semaphore_lock(semaphore);
 		if (SEMAPHORE_OPERATION_ABORTED(thread)) {
-			spl_level = splsched();
-			semaphore_lock(semaphore);
-			/* 
-			 *  Make sure the semaphore is active before ripping
-			 *  the thread off of the blocked_threads queue, as
-			 *  semaphore_destroy may have already done this.
+			/*
+			 * Still queued, so nothing completed the wait, and the
+			 * semaphore is active: semaphore_destroy() takes every
+			 * waiter off before it lets the lock go.
 			 */
-			if (semaphore->active) {
-				sync_policy_remqueue(semaphore->policy,
-						    &semaphore->blocked_threads,
-						     thread);
-				semaphore->count++;
-			}
+			assert(semaphore->active);
+			sync_policy_remqueue(semaphore->policy,
+					     &semaphore->blocked_threads, thread);
+			semaphore->count++;
 			semaphore_unlock(semaphore);
 			splx(spl_level);
 
-			res = thread->wait_result;
-			if (res == THREAD_TIMED_OUT) {
-				res = KERN_OPERATION_TIMED_OUT;
-			} else {
-				res = KERN_ABORTED;
-			}
-			return(res);
+			if (thread->wait_result == THREAD_TIMED_OUT)
+				return KERN_OPERATION_TIMED_OUT;
+			return KERN_ABORTED;
 		}
-		return(thread->wait_result);
+		/*
+		 * Completed, by a signal or by semaphore_destroy().  A timeout
+		 * or an abort that woke the thread first left its own result,
+		 * which is no kern_return_t -- THREAD_TIMED_OUT is 1 -- and
+		 * which the completion's clear_wait() could not replace, the
+		 * thread no longer waiting.  The semaphore says which it was.
+		 */
+		res = thread->wait_result;
+		if (res == THREAD_TIMED_OUT || res == THREAD_INTERRUPTED)
+			res = semaphore->active ? KERN_SUCCESS
+						: KERN_SEMAPHORE_DESTROYED;
+		semaphore_unlock(semaphore);
+		splx(spl_level);
+		return res;
 	}
 
 	semaphore_unlock(semaphore);
