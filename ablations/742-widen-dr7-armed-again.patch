@@ -1,7 +1,7 @@
 Kind: widen
 Issue: #742
-Holds open: what a GitHub runner did once in 1776 boots, a DR7 armed again after #440's window test had cleared it -- the boot processor's first tick in a task's code writes DR7 = an execute breakpoint on DR0, and says so; with DR0 at zero after the test, as 979918c1 leaves it, nothing the kernel runs breaks on it, and the fixed tree must still pass
-Run: --entry 0 600 -smp 4
+Holds open: what a GitHub runner did once in 1776 boots, a DR7 armed again after #440's window test had cleared it -- the boot processor's first tick in a task's code writes DR7 = an execute breakpoint on DR0, and says so; with DR0 at zero after the test, as 979918c1 leaves it, nothing the kernel runs breaks on it, and the fixed tree must still pass; at one processor, as the runner's boot was, since the test leaves DR0 on the boot processor only and at four that processor's first tick in a task's code came in 4 boots of 12
+Run: --entry 0 600 -smp 1
 diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
 index 26c1b3a7..8b516d2a 100644
 --- a/uros/src/mach_kernel/x86_64/time/clock_event.c
