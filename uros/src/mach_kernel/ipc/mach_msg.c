@@ -2381,10 +2381,6 @@ mach_msg_overwrite_trap(
 			}
 
 			is_write_lock(space);
-			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
-				is_write_unlock(space);
-				goto slow_copyout;
-			}
 
 			/*
 			 *	To do an atomic copyout, need simultaneous
@@ -2392,10 +2388,13 @@ mach_msg_overwrite_trap(
 			 *	dest_port == reply_port, and simple locking is
 			 *	enabled, then we will abort.  Otherwise it's
 			 *	OK to unlock twice.
+			 *
+			 *	#688: and a live space, a dead one's table
+			 *	freed (see ipc_space_destroy()).
 			 */
 
 			ip_lock(dest_port);
-			if (!ip_active(dest_port) ||
+			if (!space->is_active || !ip_active(dest_port) ||
 			    !ip_lock_try(reply_port)) {
 				HOT(c_mmot_cold_037++);
 				goto abort_request_copyout;
