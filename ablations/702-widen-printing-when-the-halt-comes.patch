@@ -1,22 +1,25 @@
 Kind: widen
 Issue: #702
-Holds open: a third processor inside printf(), holding printf_lock in the middle of a line, when a panic's report begins -- -Z's driver starts a chatter bound to a processor that is neither of the two that panic, printing from the moment they are told to go, and kern/printf.c holds it at the 24th byte of the first line it starts once the panic's message is out, until another processor holds the console's report; then the line goes on, each byte waiting for that report, as the processor halted at printf+0xc0 in the campaign's boots was; a line says which processor, or that the widen did not open
+Holds open: a third processor inside printf(), holding printf_lock in the middle of a line, when a panic's report begins -- -Z's driver starts a chatter bound to a processor that is neither of the two that panic, printing from the moment they are told to go, and kern/printf.c holds it after the first byte of the first line it starts once the panic's message is out, until another processor holds the console's report; then the line goes on, each byte waiting for every report, as the processor halted at printf+0xc0 in the campaign's boots was; a line says which processor, or that the widen did not open
 Run: --entry 24 600 -smp 4
 
 diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
-index 97d53b33..463699b5 100644
+index 97d53b33..75120616 100644
 --- a/uros/src/mach_kernel/kern/printf.c
 +++ b/uros/src/mach_kernel/kern/printf.c
-@@ -1000,11 +1000,32 @@ printf_nested(void)
+@@ -1000,11 +1000,35 @@ printf_nested(void)
   * the putc callback in _doprnt and as a direct cnputc wrapper for
   * the MP cpu-number prefix.
   */
 +/*
 + * #702 widen: the processor halt_test.c's chatter runs on is held inside the
-+ * first line it starts once a panic's message is out, at its 24th byte, with
-+ * printf_lock held, until another processor holds the console's report; then
-+ * the line goes on, each byte waiting for that report as such bytes do -- as
-+ * the processor halted inside printf() in the campaign's boots was.
++ * first line it starts once a panic's message is out, after its first byte,
++ * with printf_lock held, until another processor holds the console's report;
++ * then the line goes on, each byte waiting for that report as such bytes do --
++ * as the processor halted inside printf() in the campaign's boots was.  After
++ * the first byte, and not further in: the bytes after it wait for every
++ * report, and a hold reached once they were all said would wait for one that
++ * never comes.
 + */
 +volatile int		printf_702_cpu = -1;
 +static unsigned		printf_702_n;
@@ -30,7 +33,7 @@ index 97d53b33..463699b5 100644
  	cnputc(c);
  	klog_putc(c);
 +	if (printf_702_cpu == cpu_number() && panicstr != 0 && !panicwait &&
-+	    ++printf_702_n == 24) {
++	    ++printf_702_n == 1) {
 +		unsigned long long i;
 +
 +		for (i = 0; i < (1ULL << 32) && !cons_report_held_elsewhere();
@@ -117,10 +120,10 @@ index 321d60f2..43916a66 100644
  	       "both with interrupts on; the log must keep one whole panic "
  	       "message, the console's final copy whole after it, and one whole "
 diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
-index c7cae676..fc070ee8 100644
+index 2146755f..d41a47a4 100644
 --- a/uros/src/mach_kernel/x86_64/ddb/cons.c
 +++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
-@@ -594,6 +594,15 @@ void cons_report_end(void)
+@@ -604,6 +604,15 @@ void cons_report_end(void)
  	cons_report_owner = CONS_REPORT_NOBODY;
  }
  
