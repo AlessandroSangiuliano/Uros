@@ -1,22 +1,43 @@
 Kind: ablation
 Issue: #688
-Over: 688-widen-copyin-late.patch
-Takes out: the first site of 528f4d7a -- mach_msg()'s request copyin asserts again, under the read lock, that the sender's space is alive, where it went to slow_copyin; act_test [14]'s third thread sends task_info()'s message to its own task in a loop, and over 688-widen-copyin-late, asleep in the hot path while its task is terminated, it reads the space's generation after the space died, so the per-thread cache and the lock-free resolve both refuse it, the locked lookup is where it comes, and the assert stops the kernel; without the widen the thread read the generation before the space died in 6 boots of 6, the cache's check after the port locks sent it to slow_copyin, and nothing was caught
+Takes out: fcfc9cf9 -- mach_msg()'s request copyin asserts again, under the read lock, that the sender's space is alive, and reads its table and asks ipc_entry_lookup() whatever the answer, where a dead space answered no name and abort_request_copyin took the request the slow way; act_test [14]'s third thread sends task_info()'s message to its own task in a loop, and when its task is terminated with it in the hot path, the port cache's check after the port locks finds the space dead and makes the hit a miss (01f8933c), the lock-free resolve refuses a dead space, and the locked lookup is where it comes, so the assert stops the kernel; before 01f8933c that check went to slow_copyin and this ablation needed 688-widen-copyin-late to be caught
 Run: --entry 14 1200 -smp 4
 Expect: Assertion failed: file "[^"]*/ipc/mach_msg\.c", line [0-9]+: space->is_active
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
-index b86b2d3a..7e4f5966 100644
+index 3ac8c1f3..4ccd1655 100644
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
 +++ b/uros/src/mach_kernel/ipc/mach_msg.c
-@@ -1331,10 +1331,7 @@ mach_msg_overwrite_trap(
+@@ -1334,6 +1334,7 @@ mach_msg_overwrite_trap(
  		    }
  
  			is_read_lock(space);
--			if (!space->is_active) {	/* #688: see ipc_space_destroy() */
--				is_read_unlock(space);
--				goto slow_copyin;
--			}
 +			assert(space->is_active);
  
  			size = space->is_table_size;
  			table = space->is_table;
+@@ -1342,14 +1343,7 @@ mach_msg_overwrite_trap(
+ 			register ipc_entry_t entry;
+ 			register ipc_entry_bits_t bits;
+ 
+-			/*
+-			 * #688: a dead space answers no name.  Its table is
+-			 * freed (see ipc_space_destroy()) and ipc_entry_lookup()
+-			 * asserts a live space, so neither is asked, and
+-			 * abort_request_copyin takes the request the slow way,
+-			 * where ipc_kmsg_copyin_header() refuses a dead space.
+-			 */
+-			if (space->is_active && index < size) {
++			if (index < size) {
+ 				entry = &table[index];
+ 				bits = entry->ie_bits;
+ 				if (IE_BITS_GEN(bits) != gen ||
+@@ -1360,8 +1354,7 @@ mach_msg_overwrite_trap(
+ 				entry = IE_NULL;
+ 			}
+ 			if (entry == IE_NULL) {
+-				if (space->is_active)
+-					entry = ipc_entry_lookup(space, reply_name);
++				entry = ipc_entry_lookup(space, reply_name);
+ 				if (entry == IE_NULL) {
+ 					HOT(c_mmot_cold_006++);
+ 					goto abort_request_copyin;
