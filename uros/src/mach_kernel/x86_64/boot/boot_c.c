@@ -3984,6 +3984,7 @@ static void ring3_selftest(void)
 	struct trap_record first, bases;
 	struct trap_paranoid_record window;
 	uint64_t witness, answer, wide, kernel_gs;
+	uint64_t dr7_after, dr_after;	/* #742: what the window test left */
 	pmap_t space;
 	uint64_t size;
 	uint8_t *dst;
@@ -4078,8 +4079,23 @@ static void ring3_selftest(void)
 
 	user_probe_enter(USER_PROBE_CODE_VA, USER_PROBE_STACK_TOP);
 
-	write_dr7(0);
-	write_dr6(0);			/* sticky; the hardware never will */
+	/*
+	 * #742: and every debug register goes back to what a reset leaves,
+	 * DR0 too.  Only DR7 was cleared, and DR0 kept syscall_entry: on one
+	 * of GitHub's runners, under KVM, a debug exception came back on
+	 * syscall_entry long after this test, once in 1776 boots, and halted
+	 * the machine.  What armed DR7 again is not known.  With DR0 at zero,
+	 * a DR7 armed again breaks on nothing the kernel runs.  DR6 goes back
+	 * to FFFF0FF0H, not to zero: see DR6_RESET.  Read back below.
+	 */
+	write_dr7(DR7_RESET);
+	for (unsigned i = 0; i < DR_COUNT; i++)
+		write_dr(i, 0);
+	write_dr6(DR6_RESET);		/* sticky; the hardware never will */
+	dr7_after = read_dr7();
+	dr_after = 0;
+	for (unsigned i = 0; i < DR_COUNT; i++)
+		dr_after |= read_dr(i);
 	window = *trap_last_paranoid();
 
 	write_cr3(kernel_root);
@@ -4390,6 +4406,19 @@ static void ring3_selftest(void)
 	      && window.gs_on_dispatch == kernel_gs
 	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
 	      : " — WRONG, the syscall window is not covered\r\n");
+
+	/*
+	 * And what the window test left in the debug registers (#742), read
+	 * back after the reset above.  DR7 reads with its reserved bit 10 set;
+	 * none of its enables may be, and DR0 to DR3 must hold nothing.
+	 */
+	kputs("UrMach x86-64: after the window, dr7 ");
+	kputhex64(dr7_after);
+	kputs(" and dr0|dr1|dr2|dr3 ");
+	kputhex64(dr_after);
+	kputs((dr7_after & DR7_ENABLES) == 0 && dr_after == 0
+	      ? " — no breakpoint armed, and no address to break on (#742)\r\n"
+	      : " — WRONG, the window test left a breakpoint (#742)\r\n");
 
 	/*
 	 * And ring 3 reading a page a protect has made read-only (#699).
