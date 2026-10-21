@@ -202,11 +202,7 @@ kern_return_t alert_exception_try_task(
 
 #include <ddb/db_output.h>
 
-#if iPSC386 || iPSC860
-boolean_t debug_user_with_kdb = TRUE;
-#else
 boolean_t debug_user_with_kdb = FALSE;
-#endif
 
 #endif	/* MACH_KDB */
 
@@ -1164,10 +1160,6 @@ exception_no_server(
 		 *	then thread_kdb_return won't return.
 		 */
 		db_printf("No exception server, calling kdb...\n");
-#if	iPSC860
-		db_printf("Dropping into ddb, avoiding thread_kdb_return\n");
-		gimmeabreak();
-#endif
 		thread_kdb_return();
 	}
 #endif	/* MACH_KDB */

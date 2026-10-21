@@ -280,18 +280,10 @@
  * one comparison and it is not an assertion.  The poison is a hunt\'s
  * apparatus, already behind its own runtime flag, and may compile out.
  */
-#if defined(__alpha)
-
-#define is_kernel_data_addr(a)						\
-		(!(a) || IS_SYS_VA(a) && !((a) & (sizeof(long)-1)))
-
-#else /* !defined(__alpha) */
 
 #define is_kernel_data_addr(a)						\
 		(!(a) || (a) >= VM_MIN_KERNEL_ADDRESS &&		\
 		    (a) <= VM_MAX_KERNEL_ADDRESS && !((a) & 0x3))
-
-#endif /* defined(__alpha) */
 
 #if	MACH_ASSERT
 

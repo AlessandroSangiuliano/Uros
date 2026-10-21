@@ -166,10 +166,6 @@ static __inline__ int cpu_number(void)
 #endif	/* defined(__GNUC__) */
 #endif	/* AT386 */
 
-#if	SYMMETRY
-extern int	cpu_number(void);
-#endif	/* SYMMETRY */
-
 #endif	/* MP_V1_1 */
 #else	/* NCPUS > 1 */
 #error cpu_number() macro is defined only on MP machines

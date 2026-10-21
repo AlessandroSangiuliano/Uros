@@ -232,9 +232,7 @@ void printnum(
 	register int		base,
 	void			(*putc)(char));
 
-#ifndef hp_pa
 #define	MP_PRINTF	((NCPUS > 1) || MACH_ASSERT)
-#endif /* !hp_pa */
 
 /*
  * Per-CPU "{N} " prefix on every printf line.  Handy for attributing
@@ -1079,8 +1077,6 @@ safe_gets(
 	}
 }
 
-#if !defined(__alpha)
-
 #include <mach_assert.h>
 /*VARARGS1*/
 void
@@ -1246,4 +1242,3 @@ sprintf(char *buf, const char *fmt, ...)
         splx(s);
         return n;
 }
-#endif /* !defined(__alpha) */

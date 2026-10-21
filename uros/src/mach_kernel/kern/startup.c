@@ -371,9 +371,6 @@ setup_main(void)
 	 */
 	(void) thread_create_at(kernel_task, &startup_thread,
 							start_kernel_threads);
-#if	NCPUS > 1 && PARAGON860
-	thread_bind(startup_thread, cpu_to_processor(master_cpu));
-#endif
 	/*
 	 * Pretend it is already running, and resume it.
 	 * Since it looks as if it is running, thread_resume
@@ -532,24 +529,7 @@ start_kernel_threads(void)
 	 */ 
 		simple_lock_init(&kernel_test_lock, ETAP_MISC_KERNEL_TEST);
 
-#if	PARAGON860
-	{
-		char		*s;
-		unsigned int	firstnode;
-
-		/*
-		 *	Only start up loopback tests on boot node.
-		 */
-		if ((s = (char *) getbootenv("BOOT_FIRST_NODE")) == 0)
-			panic("startup");
-		firstnode = atoi(s);
-		(void) kernel_thread(kernel_task, kernel_test_thread,
-				     (char * )(dipc_node_self() == 
-						       (node_name) firstnode));
-	}
-#else	/* PARAGON860 */
 	(void) kernel_thread(kernel_task, kernel_test_thread, (char *) 0);
-#endif	/* PARAGON860 */
 	{
 
 		/*

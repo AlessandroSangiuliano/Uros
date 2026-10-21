@@ -32,20 +32,4 @@
 #include <kern/thread.h>
 #include <machine/spl.h>
 
-#ifdef hp_pa
-cpu_data_t	cpu_data[NCPUS] = {0};
-#else
-#ifdef	PPC
-cpu_data_t	cpu_data[NCPUS] =
-	{ { THREAD_NULL,		/* active_thread */
-#if	MACH_RT
-	    0,				/* preemption_level */
-#endif	/* MACH_RT */
-	    0,				/* simple_lock_cout */
-	    SPLHIGH,			/* interrupt_level */
-	    0				/* cpu_id (#301) */
-	}, };
-#else	/* PPC */
 cpu_data_t	cpu_data[NCPUS];
-#endif	/* PPC */
-#endif

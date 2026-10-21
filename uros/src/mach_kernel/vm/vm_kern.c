@@ -452,9 +452,6 @@ kernel_memory_allocate(
 	/*
 	 *	Return the memory, not zeroed.
 	 */
-#if	(NCPUS > 1)  &&  i860
-	bzero( addr, size );
-#endif                                  /* #if (NCPUS > 1)  &&  i860 */
 	*addrp = addr;
 	return KERN_SUCCESS;
 }

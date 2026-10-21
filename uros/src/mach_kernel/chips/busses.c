@@ -177,13 +177,9 @@ configure_bus_master(
 		if (master->alive)
 			continue;
 		if (((master->adaptor == adpt_no) || (master->adaptor == '?')) &&
-#if defined(__alpha)
-		    (strcmp(master->name, name) == 0))
-#else /* !defined(__alpha) */
 		    (strcmp(master->name, name) == 0))
 			if ((master->phys_address == phys) &&
 			    (master->address == virt))
-#endif /* defined(__alpha) */
 			{
 				found = 1;
 				break;

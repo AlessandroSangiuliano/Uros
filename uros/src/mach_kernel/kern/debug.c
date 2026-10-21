@@ -135,7 +135,6 @@
 
 #include <mach_assert.h>
 #include <mach_kdb.h>
-#include <mach_kgdb.h>
 #include <cpus.h>
 
 #include <kern/cpu_number.h>
@@ -145,11 +144,6 @@
 #include <kern/assert.h>
 #include <kern/misc_protos.h>
 #include <stdarg.h>
-
-#ifdef PPC
-#include <consfeed.h>
-extern void console_feed_cancel_and_flush(void);
-#endif /* def PPC */
 
 int panic_on_assertion_failure = 1;
 
@@ -178,11 +172,6 @@ Assert(
 	if (! mach_assert) {
 		return;
 	}
-#ifdef PPC
-#if NCONSFEED
-	console_feed_cancel_and_flush();
-#endif /* NCONSFEED */
-#endif /* PPC */
 
 #if NCPUS > 1
 	mp_disable_preemption();
@@ -293,18 +282,12 @@ panic(const char *str, ...)
 	 */
 	cnasync(FALSE);
 
-#ifdef PPC
-#if NCONSFEED
-	console_feed_cancel_and_flush();
-#endif /* NCONSFEED */
-#endif /* PPC */
-
 	for (;;) {
 	PANIC_LOCK();
 	if (panicstr) {
 	    if (cpu_number() != paniccpu) {
 		PANIC_UNLOCK();
-#if	(MACH_KDB || MACH_KGDB)
+#if	MACH_KDB
 		/*
 		 * Wait until message has been printed to identify correct
 		 * cpu that made the first panic.
@@ -319,11 +302,11 @@ panic(const char *str, ...)
 		splx(s);
 		mp_enable_preemption();
 		return;
-#else	/* MACH_KDB || MACH_KGDB */
+#else	/* MACH_KDB */
 		mp_enable_preemption();
 		halt_cpu();
 		/* NOTREACHED */
-#endif	/* MACH_KDB || MACH_KGDB */
+#endif	/* MACH_KDB */
 	    }
 	}
 	break;	/* fall through to set panicstr */
@@ -363,7 +346,7 @@ panic(const char *str, ...)
 	 * Release panicwait indicator so that other cpus may call Debugger().
 	 */
 	panicwait = 0;
-#if	(MACH_KDB || MACH_KGDB)
+#if	MACH_KDB
 	Debugger("panic");
 
 	/*
@@ -410,10 +393,10 @@ panic(const char *str, ...)
 	panicstr = (char *)0;
 	PANIC_UNLOCK();
 	splx(s);
-#else	/* MACH_KDB || MACH_KGDB */
+#else	/* MACH_KDB */
 	halt_cpu();
 	/* NOTREACHED */
-#endif	/* MACH_KDB || MACH_KGDB */
+#endif	/* MACH_KDB */
 	mp_enable_preemption();
 }
 

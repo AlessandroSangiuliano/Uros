@@ -106,10 +106,6 @@
 #include <platforms.h>
 #include <cpus.h>
 
-#if	MBUS && NCPUS > 1
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS && NCPUS > 1 */
-
 intr_t ivect[NINTR]= {
 	/* 00 */	(intr_t)hardclock,	/* always */
 	/* 01 */	(intr_t)intnull,	/* #208: ps2.so claims via
@@ -129,10 +125,6 @@ intr_t ivect[NINTR]= {
 
 	/* 12 */	(intr_t)intnull,
 
-#if	MBUS && NCPUS > 1
-	/* Inter processor interrupt also use this vector */
-	/* 13 */	(intr_t)mp_intr,	/* always */
-#else	/* MBUS && NCPUS > 1 */
 	/*
 	 * 🔴 fpintr was here, and IRQ 13 is dead silicon now (#515).
 	 *
@@ -148,7 +140,6 @@ intr_t ivect[NINTR]= {
 	 * is where this issue came from.
 	 */
 	/* 13 */	(intr_t)intnull,
-#endif	/* MBUS && NCPUS > 1 */
 	/* 14 */	(intr_t)intnull,	/* hdintr, ... */
 	/* 15 */	(intr_t)intnull,	/* ??? */
 };

@@ -144,7 +144,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <i386/apic.h>		/* LAPIC_TPR — #311 I/O APIC spl path */
 
 #if	MP_V1_1
-#define	TRAP_DEBUG 0 /* Must match interrupt.s and mp_v1_1.c */
+#define	TRAP_DEBUG 0 /* Must match interrupt.S */
 #endif	/* MP_V1_1 */
 
 #if	AT386

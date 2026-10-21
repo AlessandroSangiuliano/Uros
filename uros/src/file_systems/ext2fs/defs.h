@@ -84,13 +84,8 @@ typedef unsigned long   ino_t;          /* inode number */
 /*
  * Disk devices IO
  */
-#ifdef  HPOSFCOMPAT
-#define	DEV_BSIZE 1024
-#define DEV_BSHIFT 10
-#else
 #define	DEV_BSIZE 512
 #define DEV_BSHIFT 9
-#endif /* HPOSFCOMPAT */
 
 /*
  * Conversion between bytes and disk blocks.

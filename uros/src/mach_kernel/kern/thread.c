@@ -1533,11 +1533,6 @@ kernel_thread(task_t task, void (*start)(void), void *arg)
 		panic("thread_create failure");
 	}
 
-#if     NCPUS > 1 && defined(PARAGON860)
-        /* force ALL kernel threads to the master cpu */
-        thread_bind(thread, cpu_to_processor(master_cpu));
-#endif
-
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
 		printf("\tkernel_thread  thread = %p\n",thread);

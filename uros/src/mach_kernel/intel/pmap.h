@@ -298,20 +298,9 @@
 #define round_intel_to_vm(x)	round_i386_to_vm(x)
 #define vm_to_intel(x)		vm_to_i386(x)
 #endif	/* i386 */
-#if	i860
-#define	INTEL_PGBYTES		I860_PGBYTES
-#define INTEL_PGSHIFT		I860_PGSHIFT
-#define	intel_btop(x)		i860_btop(x)
-#define	intel_ptob(x)		i860_ptob(x)
-#define	intel_round_page(x)	i860_round_page(x)
-#define	intel_trunc_page(x)	i860_trunc_page(x)
-#define trunc_intel_to_vm(x)	trunc_i860_to_vm(x)
-#define round_intel_to_vm(x)	round_i860_to_vm(x)
-#define vm_to_intel(x)		vm_to_i860(x)
-#endif	/* i860 */
 
 /*
- *	i386/i486/i860 Page Table Entry
+ *	i386/i486 Page Table Entry
  */
 
 typedef unsigned int	pt_entry_t;
@@ -348,11 +337,7 @@ typedef unsigned int	pt_entry_t;
  *	without using the bit fields).
  */
 
-#if	i860
-#define INTEL_PTE_valid		0x00000001
-#else
 #define INTEL_PTE_VALID		0x00000001
-#endif
 #define INTEL_PTE_WRITE		0x00000002
 #define INTEL_PTE_USER		0x00000004
 #define INTEL_PTE_WTHRU		0x00000008
@@ -360,44 +345,8 @@ typedef unsigned int	pt_entry_t;
 #define INTEL_PTE_REF		0x00000020
 #define INTEL_PTE_MOD		0x00000040
 #define INTEL_PTE_GLOBAL	0x00000100
-#if	i860
-#if	i860XP
-#define INTEL_PTE_4M		0x00000080
-#endif	/* i860XP */
-#define	INTEL_PTE_wired		0x00000200
-#else
 #define INTEL_PTE_WIRED		0x00000200
-#endif
 #define INTEL_PTE_PFN		0xfffff000
-
-#if	i860
-/*
- *	"wired" implies a fault-free page; the i860 will
- *	generate traps on stores to an unmodified page and/or
- *	accesses to an unreferenced page during a locked
- *	sequence.
- *
- *	This used to define WIRED to be WIRED|REF|MOD, but this
- *	cannot be correctly substituted for just the WIRED bit
- *	in all cases.  Instead, the three bits are explicitly used
- *	as needed in pmap.c.
- */
-#define	INTEL_PTE_WIRED		(INTEL_PTE_wired	\
-				|INTEL_PTE_REF		\
-				|INTEL_PTE_MOD		\
-				)
-#if	NOCACHE
-#define	INTEL_PTE_VALID		(INTEL_PTE_valid	\
-				|INTEL_PTE_WTHRU	\
-				|INTEL_PTE_NCACHE	\
-				)
-#else	/* NOCACHE */
-#define	INTEL_PTE_VALID		(INTEL_PTE_valid	\
-				)
-#endif	/* NOCACHE */
-
-
-#endif	/* i860 */
 
 #define	pa_to_pte(a)		((a) & INTEL_PTE_PFN)
 #define	pte_to_pa(p)		((p) & INTEL_PTE_PFN)
@@ -427,20 +376,11 @@ struct pmap {
 	decl_simple_lock_data(,lock)	/* lock on map */
 	struct pmap_statistics	stats;	/* map statistics */
 	cpu_set		cpus_using;	/* bitmap of cpus using pmap */
-#if	PARAGON860
-	boolean_t	private_pmap;	/* if set, flush_tlb() not needed */
-#endif	/* PARAGON860 */
 };
 
 typedef struct pmap	*pmap_t;
 
 #define PMAP_NULL	((pmap_t) 0)
-
-#if	PARAGON860
-#if	NORMA2
-typedef char *pmap_frozen_t;
-#endif	/* NORMA2 */
-#endif	/* PARAGON860 */
 
 extern pmap_t	kernel_pmap;			/* The kernel's map */
 
@@ -463,10 +403,6 @@ extern pmap_t	kernel_pmap;			/* The kernel's map */
  */
 
 extern pmap_t	real_pmap[NCPUS];
-
-#if	i860
-/*#define	set_dirbase(dirbase)	flush_and_ctxsw(dirbase)*//*akp*/
-#endif	/* i860 */
 
 #if	i386
 #include <i386/proc_reg.h>
@@ -508,11 +444,6 @@ extern pmap_t	real_pmap[NCPUS];
 }
 #endif	/* i386 */
 
-#if	PARAGON860
-#define	set_led(cpu)
-#define clear_led(cpu)
-#endif	/* PARAGON860 */
-
 #if	NCPUS > 1
 /*
  *	List of cpus that are actively using mapped memory.  Any
@@ -546,7 +477,7 @@ extern pmap_t		kernel_pmap;
 #endif	/* NCPUS > 1 */
 
 /*
- *	Machine dependent routines that are used only for i386/i486/i860.
+ *	Machine dependent routines that are used only for i386/i486.
  */
 extern vm_offset_t	(phystokv)(
 				vm_offset_t	pa);
@@ -714,32 +645,6 @@ extern void		flush_tlb(void);
 	splx(spl);							\
 }
 
-#ifdef	SYMMETRY
-#include <sqt/clkarb.h>
-#define	set_led	light_on
-#define clear_led light_off
-#endif	/* SYMMETRY */
-
-#ifdef	SQT
-/*
- * For now, we have not implementated set and clear.
- */
-#define	set_led(cpu)
-#define	clear_led(cpu)
-#endif	/* SQT */
-
-#ifdef	MBUS
-#define	set_led(cpu)
-#define clear_led(cpu)
-#endif	/* MBUS */
-
-#ifdef	CBUS
-/*
- * Get led routine declarations.
- */
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
-
 #if	MP_V1_1
 #define	set_led(cpu)
 #define clear_led(cpu)
@@ -793,21 +698,6 @@ extern void		flush_tlb(void);
 
 #else	/* NCPUS > 1 */
 
-#ifdef	CBUS
-#define MARK_CPU_IDLE(my_cpu)	set_led(my_cpu)
-#define MARK_CPU_ACTIVE(my_cpu)	clear_led(my_cpu)
-#endif	/* CBUS */
-
-#ifdef	iPSC386
-#define MARK_CPU_IDLE(my_cpu)	led_idle()
-#define MARK_CPU_ACTIVE(my_cpu)	led_active()
-#endif	/* iPSC386 */
-
-#ifdef	PARAGON860
-#define MARK_CPU_IDLE(my_cpu)	set_led(my_cpu)
-#define MARK_CPU_ACTIVE(my_cpu)	clear_led(my_cpu)
-#endif	/* PARAGON860 */
-
 /*
  *	With only one CPU, we just have to indicate whether the pmap is
  *	in use.
@@ -857,10 +747,8 @@ extern void		flush_tlb(void);
 #define pmap_phys_address(frame)	((vm_offset_t) (intel_ptob(frame)))
 #define pmap_phys_to_frame(phys)	((int) (intel_btop(phys)))
 #define	pmap_copy(dst_pmap,src_pmap,dst_addr,len,src_addr)
-#ifndef	PARAGON860
 #define	pmap_attribute(pmap,addr,size,attr,value) \
 					((void)(pmap),(void)(addr),(void)(size),(void)(attr),(void)(value),KERN_INVALID_ADDRESS)
-#endif	/* PARAGON860 */
 
 #endif	/* ASSEMBLER */
 

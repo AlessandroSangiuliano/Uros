@@ -114,10 +114,6 @@
 #include <cpus.h>
 #include <platforms.h>
 #include <fast_idle.h>
-#if	PARAGON860
-#include <mcmsg.h>
-#include <mcmsg_eng.h>
-#endif	/* PARAGON860 */
 
 #include <kern/assert.h>
 #include <kern/cpu_number.h>
@@ -138,21 +134,6 @@
 #define AST_QUANTUM     0x10
 #define AST_APC		0x20	/* migration APC hook */
 #define	AST_URGENT	0x40
-#if	PARAGON860
-#if	MCMSG
-#define AST_MCMSG       0x80
-#endif	/* MCMSG */
-#if	MCMSG_ENG
-#define AST_RPCREQ	0x100
-#define AST_RPCREPLY	0x200
-#define AST_RPCDEPART	0x400
-#define AST_RDMASEND	0x800
-#define AST_RDMARECV	0x1000
-#define	AST_RDMATXF	0x2000
-#define	AST_RDMARXF	0x4000
-#define	AST_SCAN_INPUT	0x8000
-#endif	/* MCMSG_ENG */
-#endif	/* PARAGON860 */
 
 
 #define AST_SWAPOUT	0x20000

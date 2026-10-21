@@ -76,20 +76,6 @@
 #include <mach_assert.h>
 
 #if	NCPUS > 1
-#if	MBUS || CBUS
-
-/*
- * Cpu number, no local memory on CPUS, this is a hack, limited to 8 cpus,
- * on the 486, bits 0, 1, 2 and 5, 6, 7, 8, 9, 10, 11 are free. We use bits
- * 0, 1 and 2 If we want to use more cpus, we will have to use bits 5-11
- * with shifts.
- */
-
-#define	CPU_NUMBER(r) \
-	movl	%cr3, r ; \
-	andl	$0x7, r
-
-#else	/* MBUS || CBUS */
 #include <i386/apic.h>
 /*
  * #321: read the logical cpu number from the per-CPU data area via %gs:cpu_id.
@@ -111,8 +97,6 @@
     	shrl	$LAPIC_ID_SHIFT, r; \
     	andl	$LAPIC_ID_MASK, r ; \
     	movzbl	EXT(lapic_to_slot)(,r,1), r	/* #344: APIC ID -> dense slot */
-
-#endif	/* MBUS || CBUS */
 
 #define	MP_IPL		SPL6	/* software interrupt level */
 

@@ -38,14 +38,6 @@
 
 #if NCPUS > 1
 
-#if CBUS
-#include <busses/cbus/cbus.h>
-#endif /* CBUS */
-
-#if MBUS
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS */
-
 #if MP_V1_1
 #include <i386/AT386/mp/mp_v1_1.h>
 #endif	/* MP_V1_1 */
@@ -66,27 +58,10 @@ typedef	volatile vm_offset_t	IOBUS_SHMEM_T;
  * IOBUS synchronization
  */
 #define	IOBUS_LOCK_STATE()		at386_io_lock_state()
-#if MBUS && NCPUS > 1
-#define	IOBUS_LOCK(addr, op)		mbus_dev_lock((addr), (op))
-#define	IOBUS_UNLOCK(addr)		mbus_dev_unlock(addr)
-#define	IOBUS_LOCK_DECL(attr, name)	attr struct mp_dev_lock name;
-#define	IOBUS_LOCK_INIT(addr, num, start, intr, timeo, callb)\
-MACRO_BEGIN						\
-    simple_lock_init(&(addr)->lock, ETAP_IO_DEVINS);	\
-    (addr)->unit = (num);				\
-    (addr)->pending_ops = 0;				\
-    (addr)->op[MP_DEV_OP_START] = (start);		\
-    (addr)->op[MP_DEV_OP_INTR] = (intr);		\
-    (addr)->op[MP_DEV_OP_TIMEO] = (timeo);		\
-    (addr)->op[MP_DEV_OP_CALLB] = (callb);		\
-MACRO_END
-
-#else /*  MBUS && NCPUS > 1 */
 #define	IOBUS_LOCK(addr, op)		at386_io_lock(op)
 #define	IOBUS_UNLOCK(addr)		at386_io_unlock()
 #define	IOBUS_LOCK_DECL(attr, name)
 #define	IOBUS_LOCK_INIT(addr, unit, start, intr, timeo, callb)
-#endif /*  MBUS && NCPUS > 1 */
 
 #define	IOBUS_LOCK_START		MP_DEV_OP_START
 #define	IOBUS_LOCK_INTR			MP_DEV_OP_INTR

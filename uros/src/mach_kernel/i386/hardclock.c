@@ -124,16 +124,7 @@
 #include <i386/misc_protos.h>
 #include <kern/time_out.h>
 
-#ifdef	SYMMETRY
-#include <sqt/intctl.h>
-#endif
-
-#ifdef	SQT
-#include <sys/types.h>
-#include <i386/SQT/intctl.h>
-#endif	/* SQT */
-
-#if	defined(AT386) || defined(iPSC386)
+#if	defined(AT386)
 #include <i386/ipl.h>
 #endif
 

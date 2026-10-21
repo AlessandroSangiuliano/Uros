@@ -455,7 +455,6 @@ kern_return_t   	rpc_reply_args_out(
 
 #endif	/* MACH_KERNEL */
 
-#ifndef __alpha
 /*
  * This is machine dependent and doesn't belong here.
  * jfraser
@@ -472,7 +471,6 @@ extern kern_return_t	machine_rpc_simple(
 extern kern_return_t	klthread_depress_abort(
 				mach_port_t);
 
-#endif /* __alpha */
 /*
  * An rpc_glue_vector_t defined either by the kernel or by crt0
  */

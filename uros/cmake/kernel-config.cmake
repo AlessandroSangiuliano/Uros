@@ -135,7 +135,6 @@ set(UROS_KERNEL_CONFIG
     mach_ipc_debug         MACH_IPC_DEBUG 0
     mach_ipc_test          MACH_IPC_TEST 0
     mach_kdb               MACH_KDB 1
-    mach_kgdb              MACH_KGDB 0
     mach_kprof             MACH_KPROF 0
     mach_lock_mon          MACH_LOCK_MON 0
     mach_machine_routines  MACH_MACHINE_ROUTINES 1
@@ -225,11 +224,11 @@ function(uros_write_config_headers outdir arch)
   # what the first such RPC will do.
   # mach_net_in_kernel -- whether the network stack lives in the kernel.
   #
-  # i386's does: device/net_io.c is fed by chips/lance.c and scsi/if_sce.c,
-  # both of them in-kernel drivers.  x86-64
-  # has none and will have none: network cards belong to user-space servers,
-  # with the IOMMU making the isolation real, and the TCP/IP stack is a
-  # server too.  So net_io.c has no producers here and the three hooks it
+  # i386's does: device/net_io.c, which OSF fed from in-kernel drivers --
+  # chips/lance.c and scsi/if_sce.c, never built here, which #741 deleted.
+  # x86-64 has none and will have none: network cards belong to user-space
+  # servers, with the IOMMU making the isolation real, and the TCP/IP stack
+  # is a server too.  So net_io.c has no producers here and the three hooks it
   # planted in the core -- net_ast, net_kmsg_collect, net_kmsg_put -- have
   # nothing to call (#453).
   if(NOT arch STREQUAL "i386")

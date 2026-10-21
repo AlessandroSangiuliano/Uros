@@ -284,10 +284,11 @@ SIGNALS = (
 def built_sources():
     """Which .c files the two kernels actually compile, asked of the BUILD.
 
-    🔴 Not guessed from the tree.  Half of what walks out of os.walk() is
-    heritage that nothing links -- ppc/, hp_pa/, dipc/, xmm/, scsi/ -- and
-    classifying assertions in code that is never compiled is work spent on
-    nothing.  The authority is the object files each build produced.
+    🔴 Not guessed from the tree.  Half of what walked out of os.walk() was
+    heritage that nothing links -- dipc/ and xmm/ until #433, ppc/, hp_pa/
+    and most of scsi/ until #741 -- and classifying assertions in code that
+    is never compiled is work spent on nothing.  The authority is the object
+    files each build produced.
 
     ⚠️ Falls back to "everything" with a warning if neither build directory
     has been built, rather than quietly reporting a census of the whole tree

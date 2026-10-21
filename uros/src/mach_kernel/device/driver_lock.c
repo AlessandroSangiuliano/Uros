@@ -24,7 +24,6 @@
 
 #include <cpus.h>
 #include <mach_kdb.h>
-#include <mach_kgdb.h>
 
 #include <mach_ldebug.h>
 #include <mach/boolean.h>
@@ -173,10 +172,6 @@ driver_unlock(
 }
 
 
-#if	defined(POWERMAC) && MACH_KDB
-extern struct funnel scc_funnel;
-#endif	/* POWERMAC && MACH_KDB */
-
 #if	MACH_LDEBUG
 int funnel_loop_max = 20000000;
 #endif	/* MACH_LDEBUG */
@@ -212,12 +207,6 @@ funnel_enter(
 	mp_disable_preemption();
 
 #if	MACH_KDB
-#ifdef	POWERMAC
-	if (f == &scc_funnel) {
-		mp_enable_preemption();
-		return;
-	}
-#endif	/* POWERMAC */
 
 	if (db_active
 #if	NCPUS > 1
@@ -266,9 +255,9 @@ funnel_enter(
 			if (i++ == funnel_loop_max) {
 				i = 0;
 				printf("Looping trying to enter funnel 0x%x\n", f);
-#if	MACH_KDB || MACH_KGDB
+#if	MACH_KDB
 				Debugger("funnel_enter: deadlock ?");
-#endif	/* MACH_KDB || MACH_KGDB */
+#endif	/* MACH_KDB */
 			}
 #endif	/* MACH_LDEBUG */
 		}
@@ -304,12 +293,6 @@ funnel_exit(
 	mp_disable_preemption();
 
 #if	MACH_KDB
-#ifdef	POWERMAC
-	if (f == &scc_funnel) {
-		mp_enable_preemption();
-		return;
-	}
-#endif	/* POWERMAC */
 
 	if (db_active
 #if	NCPUS > 1
@@ -375,12 +358,6 @@ funnel_escape(
 	mp_disable_preemption();
 
 #if	MACH_KDB
-#ifdef	POWERMAC
-	if (f == &scc_funnel) {
-		mp_enable_preemption();
-		return 1;
-	}
-#endif	/* POWERMAC */
 
 	if (db_active
 #if	NCPUS > 1
@@ -431,12 +408,6 @@ funnel_reenter(
 	mp_disable_preemption();
 
 #if	MACH_KDB
-#ifdef	POWERMAC
-	if (f == &scc_funnel) {
-		mp_enable_preemption();
-		return;
-	}
-#endif	/* POWERMAC */
 
 	if (db_active
 #if	NCPUS > 1
@@ -481,12 +452,6 @@ funnel_in_use(
 	mp_disable_preemption();
 
 #if	MACH_KDB
-#ifdef	POWERMAC
-	if (f == &scc_funnel) {
-		mp_enable_preemption();
-		return TRUE;
-	}
-#endif	/* POWERMAC */
 
 	if (db_active
 #if	NCPUS > 1

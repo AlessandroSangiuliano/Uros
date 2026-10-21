@@ -88,9 +88,6 @@
  */
 int _pthread_stack_size = 1024 * 1024;
 
-#if	PARAGON860
-mach_port_t	bootstrap_root_device_port;	/* local name */
-#endif	/* PARAGON860 */
 mach_port_t	bootstrap_master_device_port;	/* local name */
 mach_port_t	bootstrap_master_host_port;	/* local name */
 mach_port_t	bootstrap_notification_port;	/* local name */
@@ -1042,16 +1039,12 @@ main(int argc, char **argv)
 		    strlcpy(pathname, newpath, sizeof(pathname));
 	    }
 	    memset((char *)&f, 0, sizeof(f));
-#if	PARAGON860
-	    result = open_file(bootstrap_root_device_port, pathname, &f);
-#else	/* PARAGON860 */
 	    /*
 	     * Configuration file is read before any server has started, so
 	     * stage 2 is not yet active here.  boot_open_file() correctly
 	     * falls through to the kernel-IDE path.
 	     */
 	    result = boot_open_file(pathname, &f);
-#endif	/* PARAGON860 */
 	    if (result != 0) {
 		if (!retry && !prompt) {
 		    /*
@@ -1069,9 +1062,6 @@ main(int argc, char **argv)
 	        BOOTSTRAP_IO_LOCK();
 		printf("\nERROR: bootstrap task cannot find configuration file, please make sure that\n");
 		printf("       your boot device and partition is correctly specified.\n");
-#if	ppc
-		printf("       On PowerMacs this is specified from the MkLinux control panel.\n");
-#endif /* ppc */
 		printf("\n");
 	        BOOTSTRAP_IO_UNLOCK();
 		/* Loop back around, prompting for everything */
@@ -1195,16 +1185,11 @@ main(int argc, char **argv)
 	     * Open the file and validate its format
 	     */
 	    memset((char *)&f, 0, sizeof (f));
-#if	PARAGON860
-	    result = open_file(bootstrap_root_device_port,
-			       sp->server_name, &f);
-#else	/* PARAGON860 */
 	    /*
 	     * Issue #185: stage-2 path kicks in once block_device_server
 	     * has been loaded — see end of this loop iteration.
 	     */
 	    result = boot_open_file(sp->server_name, &f);
-#endif	/* PARAGON860 */
 	    if (result != 0) {
 		BOOTSTRAP_IO_LOCK();
 		printf("%s: unable to open file (result = %d)\n",
@@ -1333,11 +1318,7 @@ main(int argc, char **argv)
 	     * Load the server.
 	     */
 	    kr = boot_load_program(bootstrap_master_host_port,
-#if	PARAGON860
-				   bootstrap_root_device_port,
-#else	/* PARAGON860 */
 				   bootstrap_master_device_port,
-#endif	/* PARAGON860 */
 				   user_task,
 				   user_thread,
 				   sp->flags,
@@ -2411,15 +2392,9 @@ data_device_loop(void)
 	/*
 	 * Open data_device
 	 */
-#if	PARAGON860
-	kr = device_open(bootstrap_root_device_port, MACH_PORT_NULL,
-			 D_READ|D_WRITE, bootstrap_security_token,
-			 (char *)"data_device", &device_port);
-#else	/* PARAGON860 */
 	kr = device_open(bootstrap_master_device_port, MACH_PORT_NULL,
 			 D_READ|D_WRITE, bootstrap_security_token,
 			 (char *)"data_device", &device_port);
-#endif	/* PARAGON860 */
 	if (kr == D_NO_SUCH_DEVICE) {
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: '/dev/data_device' not configured (fatal)\n",
@@ -2589,11 +2564,7 @@ data_device_load_file(
 	 * Open the file.
 	 */
 	memset((char *)&f, 0, sizeof (f));
-#if	PARAGON860
-	result = open_file(bootstrap_root_device_port, filename, &f);
-#else	/* PARAGON860 */
 	result = open_file(bootstrap_master_device_port, filename, &f);
-#endif	/* PARAGON860 */
 	if (result != 0)
 	    return (KERN_INVALID_ARGUMENT);
 	fsize = file_size(&f);

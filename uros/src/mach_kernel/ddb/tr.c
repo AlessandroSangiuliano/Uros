@@ -119,20 +119,6 @@ tr(
 	int	cpu;		/* #445: subscripts tr_indent[] -- see above */
 #endif	/* NCPUS > 1 */
 
-#if	PARAGON860
-	/*
-	 * The following loop replaces the spl_and_lock sequence that
-	 * would normally be here, as they are too heavy weight.  The
-	 * cmpsw (compare-and-swap) call returns -1 if unsuccessful.
-	 */
-	do {
-		ti = trace_index;
-		tn = ti + 1;
-		if (tn >= TRACE_MAX - 1)
-			tn = 0;
-	} while (cmpsw(ti, tn, &trace_index) == -1);
-	fc_get(trace_buffer[ti].timestamp);
-#else	/* PARAGON860 */
 	/*
 	 * Until someone does a cmpsw for other platforms, do it
 	 * the slow way
@@ -149,7 +135,6 @@ tr(
 
 	fc_get(trace_buffer[ti].timestamp);
 /*	get_uniq_timestamp(trace_buffer[ti].timestamp);*/
-#endif	/* PARAGON860 */
 
 	trace_buffer[ti].funcname = funcname;
 	trace_buffer[ti].file = file;
@@ -203,9 +188,6 @@ show_tr(
 	unsigned long	show_extra)
 {
 	char		*filename, *cp;
-#if	PARAGON860
-	trace_event	*last_trace;
-#endif	/* PARAGON860 */
 	unsigned int	level;
 	int		old_history;
 	int		i;
@@ -220,9 +202,6 @@ show_tr(
 	}
 	if (index + range > TRACE_MAX)
 		range = TRACE_MAX - index;
-#if	PARAGON860
-	last_trace = &trace_buffer[index-1];
-#endif	/* PARAGON860 */
 	level = trace_buffer[index-1].indent;
 	/*
 	 * Set up the indentation buffer
@@ -283,25 +262,6 @@ show_tr(
 				db_printf(" (%x/%8x)", 
 					  trace_buffer[i].timestamp[0],
 					  trace_buffer[i].timestamp[1]);
-#if	PARAGON860
-				/*
-				 *	For Paragon only, we compute and
-				 *	print out deltas on the timestamps
-				 *	accumulated in the tr buffer.  One
-				 *	interesting case:  it is meaningless
-				 *	to compute this delta for the last
-				 *	current entry in the log.
-				 */
-				if (old_history &&
-				    ((last_trace - trace_buffer)
-				     < trace_index))
-					db_printf("(N/A)");
-				else
-					db_printf("(%d)", 
-						  timer_subtime(
-						     trace_buffer[i].timestamp,
-						     last_trace->timestamp));
-#endif	/*PARAGON860*/
 				db_printf(" ");
 			}
 			if (show_extra > 1) {
@@ -314,9 +274,6 @@ show_tr(
 			  trace_buffer[i].tag2, trace_buffer[i].tag3,
 			  trace_buffer[i].tag4);
 		db_printf("\n");
-#if	PARAGON860
-		last_trace = &trace_buffer[i];
-#endif	/* PARAGON860 */
 	}
 }
 

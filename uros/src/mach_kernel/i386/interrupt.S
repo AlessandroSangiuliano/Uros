@@ -165,14 +165,6 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <i386/AT386/mp/mp.h>
 #endif	/* AT386 */
 
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-#endif	/* CBUS */
-
-#ifdef	MBUS
-#include <busses/mbus/mbus.h>
-#endif	/* MBUS */
-
 #if	ETAP_EVENT_MONITOR
 #define ETAP_INTERRUPT_PROBE(intr, flg)			\
 	pushal					;	\
@@ -189,7 +181,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #define END_INTR_HDLR		0	
 		
 #if	MP_V1_1
-#define TRAP_DEBUG 0 /* Must match spl.s and mp_v1_1.c */
+#define TRAP_DEBUG 0 /* Must match spl.S */
 #endif	/* MP_V1_1 */
 
 #if	NCPUS > 1
@@ -424,7 +416,7 @@ mpv1_intr:
 	MP_ENABLE_PREEMPTION(%edx)
 	movl	EXT(lapic_start), %edx
 	movl	%ecx, LAPIC_TPR(%edx)	# Set/Get Task priority (spl)
-	subl	$0x50, %ecx		# XXX Must match mp_v1_1.c
+	subl	$0x50, %ecx		# XXX Must match mp_v1_1_intr[] in mp_stub.c
 	sti				# Enable interrupts
 	pushl	EXT(mp_v1_1_unit)(,%ecx,4)
 	call	*EXT(mp_v1_1_intr)(,%ecx,4)

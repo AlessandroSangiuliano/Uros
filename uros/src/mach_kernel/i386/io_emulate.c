@@ -126,9 +126,7 @@
 #include <i386/AT386/mp/mp.h>
 #include <i386/AT386/iopl_entries.h>
 
-#ifdef	CBUS
-#include <busses/cbus/cbus.h>
-#elif MP_V1_1
+#if	MP_V1_1
 #include <i386/AT386/mp/mp_v1_1.h>
 #else
 #define at386_io_lock_state()
@@ -200,13 +198,6 @@ emulate_io(
 	if (i386_io_port_add(thread->top_act, iopl_device)
 	    != KERN_SUCCESS)
 		return EM_IO_ERROR;
-
-#if CBUS	
-	/*
-	 * Assymetric platform, lock this thread on master processor 
-	 */
-	at386_io_lock(MP_DEV_WAIT);
-#endif	/* CBUS */
 
 	/*
 	 * Make the thread use its IO_TSS to get the IO permissions;

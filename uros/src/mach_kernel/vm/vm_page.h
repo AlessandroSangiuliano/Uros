@@ -215,9 +215,6 @@ struct vm_page {
 			highmem:1,	/* page is above LOWMEM_LIMIT (P) */
 			poisoned:1,	/* #385 hunt: free-list poison valid (P) */
 			:0;		/* (force to 'long' boundary) */
-#ifdef	ns32000
-	int		pad;		/* extra space for ns32000 bit ops */
-#endif	/* ns32000 */
 
 #if	MACH_ASSERT
 	/*

@@ -142,12 +142,6 @@
 #define	rtclockname		"rtclock"
 #define	timename		"time"
 
-#include <fd.h>
-#if	NFD > 0
-#include <i386/AT386/fd_entries.h>
-#define	fdname			"fd"
-#endif	/* NFD > 0 */
-
 #include <hba.h>
 #if	NHBA > 0
 #include <scsi/scsi_defs.h>
@@ -171,52 +165,6 @@
 #define	wtname			"wt"
 #endif	/* NWT > 0 */
 
-#include <pc586.h>
-#if	NPC586 > 0
-#include <i386/AT386/if_pc586.h>
-#include <i386/AT386/if_pc586_entries.h>
-#define	pc586name		"pc"
-#endif /* NPC586 > 0 */
-
-
-#include <sce.h>
-#if	NSCE > 0
-#include <scsi/if_sce.h>
-#define scename "sce"
-#endif	/* NSCE > 0 */
-
-#include <ns8390.h>
-#if	NNS8390 > 0
-#include <i386/AT386/if_ns8390_entries.h>
-#define	ns8390wdname		"wd"
-#define	ns8390elname		"el"
-#endif /* NNS8390 > 0 */
-
-#include <at3c501.h>
-#if	NAT3C501 > 0
-#include <i386/AT386/if_3c501_entries.h>
-#define	at3c501name		"et"
-#endif /* NAT3C501 > 0 */
-
-/* vvv MITCHEM vvv */
-#include <ne.h>
-#if	NNE > 0
-#include <i386/AT386/if_ne_entries.h>
-#define	nename		"ne"
-#endif /* NNE > 0 */
-/* ^^^ MITCHEM ^^^ */ 
-
-#include <fta.h>
-#if NFTA > 0
-#include <i386/AT386/if_fta_entries.h>
-#define	ftaname		"fta"
-#endif /* NFTA > 0 */
-
-#include <tu.h>
-#if NTU > 0
-#include <i386/AT386/if_tu_entries.h>
-#define	tuname		"tu"
-#endif /* NTU > 0 */
 
 #include <par.h>
 #if	NPAR > 0
@@ -236,27 +184,10 @@
 #define	comname			"com"
 #endif	/* NCOM > 0 */
 
-#include <sb.h>
-#if	NSB > 0
-#include <i386/AT386/sound/sb_entries.h>
-#endif	/* NSB > 0 */
-
-#include <lpr.h>
-#if	NLPR > 0
-#include <i386/AT386/lpr_entries.h>
-#define	lprname			"lpr"
-#endif	/* NLPR > 0 */
-
 #include <qd.h>
 #if	NQD > 0
 #define	qdname			"qd"
 #endif	/* NQD > 0 */
-
-#include <blit.h>
-#if NBLIT > 0
-#include <i386/AT386/blitvar.h>
-#define	blitname		"blit"
-#endif
 
 /* #208: kbd_entries.h and kd_mouse_entries.h retired together
  * with kd_event.c / kd_mouse.c.  Both roles move to userspace
@@ -348,13 +279,6 @@ struct dev_ops	dev_name_list[] =
 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },
 
-#if	NFD > 0
-	{ fdname,	fdopen,		fdclose,	fdread,
-	  fdwrite,	fdgetstat,	fdsetstat,	NULL_MMAP,
-	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	64,
-	  fddevinfo },
-#endif	/* NFD > 0 */
-
 #if	NAHA > 0 || NHBA > 0
 	{ rzname,	rz_open,	rz_close,	rz_read,
 	  rz_write,	rz_get_status,	rz_set_status,	NO_MMAP,
@@ -380,62 +304,6 @@ struct dev_ops	dev_name_list[] =
 	  NO_DINFO },
 #endif	/* NWT > 0 */
 
-#if	NPC586 > 0
-	{ pc586name,	pc586open,	NULL_CLOSE,	NULL_READ,
-	  pc586output,	pc586getstat,	pc586setstat,	NULL_MMAP,
-	  pc586setinput,NULL_RESET,	NULL_DEATH, 	0,
-	  NO_DINFO },
-#endif
-
-
-#if	NSCE > 0
-	{ scename,	sceopen,	NULL_CLOSE,	NULL_READ,
-	  sceoutput,	scegetstat,	scesetstat,	NULL_MMAP,
-	  scesetinput,	NULL_RESET,	NULL_DEATH, 	0,
-	  NO_DINFO },
-#endif
-
-#if	NAT3C501 > 0
-	{ at3c501name,	at3c501open,	NULL_CLOSE,	NULL_READ,
-	  at3c501output,at3c501getstat,	at3c501setstat,	NULL_MMAP,
-	  at3c501setinput, NULL_RESET,	NULL_DEATH, 	0,
-	  NO_DINFO },
-#endif
-
-/* vvv MITCHEM vvv */
-#if	NNE > 0
-	{ nename,	neopen,	NULL_CLOSE,	NULL_READ,
-	  neoutput,negetstat,	nesetstat,	NULL_MMAP,
-	  nesetinput, NULL_RESET,	NULL_DEATH, 	0,
-	  NO_DINFO },
-#endif
-/* ^^^ MITCHEM ^^^ */ 
-
-#if	NNS8390 > 0
-	{ ns8390wdname,	wd8003open,	ns8390close,	NULL_READ,
-	  ns8390output, ns8390getstat,	ns8390setstat,	NULL_MMAP,
-	  ns8390setinput, NULL_RESET,	NULL_DEATH, 	0,
-	  ns8390devinfo },
-
-	{ ns8390elname,	eliiopen,	ns8390close,	NULL_READ,
-	  ns8390output, ns8390getstat,	ns8390setstat,	NULL_MMAP,
-	  ns8390setinput, NULL_RESET,	NULL_DEATH, 	0,
-	  ns8390devinfo },
-#endif
-
-#if NFTA > 0
-	{ ftaname,       ftaopen,       NULL_CLOSE,     NULL_READ,
-	  ftaoutput,     ftagetstatus,  ftasetstatus,   NULL_MMAP,
-	  ftasetinput,   NULL_RESET,    NULL_DEATH,     0,
-	  ftadevinfo },
-#endif
-
-#if NTU > 0
-	{ tuname,        tuopen,        NULL_CLOSE,     NULL_READ,
-	  tuoutput,      tugetstatus,   tusetstatus,    NULL_MMAP,
-	  tusetinput,    NULL_RESET,    NULL_DEATH,     0,
-	  NO_DINFO },
-#endif
 
 #if	NPAR > 0
 	{ parname,	paropen,	NULL_CLOSE,	NULL_READ,
@@ -448,39 +316,6 @@ struct dev_ops	dev_name_list[] =
 	{ comname,	comopen,	comclose,	comread,
 	  comwrite,	comgetstat,	comsetstat,	NO_MMAP,
 	  NO_ASYNC,	NULL_RESET,	comportdeath,	0,
-	  NO_DINFO },
-#endif
-
-#if	NSB > 0
-	/*
-	 * sb0 = mixer
-	 * sb1 = sequencer
-	 * sb2 = raw midi
-	 * sb3 = dsp (degital voice)
-	 * sb4 = audio
-	 * sb5 16bit dsp
-	 * sb6 status
-	 * sb7 not used
-	 * sb8 sequencer level 2 interface
-	 * sb9 sndproc
-	 */
-	{ "sb",	sndopen,	sndclose,	sndread,
-	  sndwrite,	sndgetstat,	sndsetstat,	NO_MMAP,
-	  NO_ASYNC,	NULL_RESET,	NO_DEATH,	0,
-	  NO_DINFO },
-#endif
-
-#if	NLPR > 0
-	{ lprname,	lpropen,	lprclose,	lprread,
-	  lprwrite,	lprgetstat,	lprsetstat,	NO_MMAP,
-	  NO_ASYNC,	NULL_RESET,	lprportdeath,	0,
-	  NO_DINFO },
-#endif
-
-#if	NBLIT > 0
-	{ blitname,	blitopen,	blitclose,	NO_READ,
-	  NO_WRITE,	blit_get_stat,	NO_SETS,	blitmmap,
-	  NO_ASYNC,	NO_RESET,	NO_DEATH,	0,
 	  NO_DINFO },
 #endif
 

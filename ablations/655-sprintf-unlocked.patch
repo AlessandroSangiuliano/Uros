@@ -5,10 +5,10 @@ Run: --entry 33 600 -smp 4
 Expect: sprintf_test: WRONG
 
 diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
-index 92c6ed2a..0e2ac3d7 100644
+index 59c76cdb..a1733cfa 100644
 --- a/uros/src/mach_kernel/kern/printf.c
 +++ b/uros/src/mach_kernel/kern/printf.c
-@@ -1236,18 +1236,13 @@ int
+@@ -1228,17 +1228,12 @@ int
  sprintf(char *buf, const char *fmt, ...)
  {
          va_list listp;
@@ -26,4 +26,3 @@ index 92c6ed2a..0e2ac3d7 100644
 -        splx(s);
          return n;
  }
- #endif /* !defined(__alpha) */

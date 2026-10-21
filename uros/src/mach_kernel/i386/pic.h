@@ -138,13 +138,6 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #define SIZE_PIC		0x80
 #endif	/* AT386 */
 
-#ifdef	iPSC386
-#define ADDR_PIC_BASE		0xC0
-#define OFF_ICW			0x00
-#define OFF_OCW			0x02
-#define SIZE_PIC		0x04
-#endif	/* iPSC386 */
-
 /*
 ** The following banks of definitions ICW1, ICW2, ICW3, and ICW4 are used
 ** to define the fields of the various ICWs for initialisation of the PICs 
@@ -173,11 +166,6 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #define	PICM_VECTBASE		0x40 
 #define PICS_VECTBASE		PICM_VECTBASE + 0x08
 #endif	/* AT386 */
-
-#ifdef	iPSC386
-#define	PICM_VECTBASE		0x40 
-#define PICS_VECTBASE		PICM_VECTBASE + 0x08
-#endif	/* iPSC386 */
 
 /*
 **	ICW3				
@@ -209,10 +197,6 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #define SNF_MODE_DIS		0x00
 #define BUFFERD_MODE		0x08
 #define NONBUFD_MODE		0x00
-#if	iPSC386
-#define I_AM_A_SLAVE		0x00
-#define I_AM_A_MASTR		0x04
-#endif	/* iPSC386 */
 #define AUTO_EOI_MOD		0x02
 #define NRML_EOI_MOD		0x00
 #define I8086_EMM_MOD		0x01

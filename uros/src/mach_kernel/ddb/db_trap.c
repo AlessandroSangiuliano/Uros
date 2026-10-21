@@ -127,10 +127,6 @@ extern int		db_inst_count;
 extern int		db_load_count;
 extern int		db_store_count;
 
-#if	PARAGON860 && NCPUS > 1
-extern int	db_first_cpu;
-#endif
-
 void
 db_task_trap(
 	int		type,
@@ -171,17 +167,7 @@ db_task_trap(
 
 	    prev = db_recover;
 	    if (_setjmp(db_recover = &db_jmpbuf) == 0) {
-#if defined(__alpha)
-		db_print_loc(db_dot, task_space);
-		db_printf("\n\t");
-		db_print_inst(db_dot, task_space);
-#else /* !defined(__alpha) */
-#if defined(__powerpc__)
-		db_print_loc_and_inst(db_dot, task_space);
-#else	/* __powerpc__ */
 		db_print_loc_and_inst(db_dot, task);
-#endif	/* __powerpc__ */
-#endif /* defined(__alpha) */
 	    } else
 		db_printf("Trouble printing location %#X.\n", db_dot);
 	    db_recover = prev;

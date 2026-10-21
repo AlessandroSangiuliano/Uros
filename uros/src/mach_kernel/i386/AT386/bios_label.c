@@ -65,11 +65,7 @@
 #if	AT386
 #include <vtoc_compat.h>
 #else	/* AT386 */
-#if	PPC
-#define VTOC_COMPAT 0	/* can't easily do struct alignment (+endianness) */
-#else	/* PPC */
 #define	VTOC_COMPAT 1
-#endif	/* PPC */
 #endif	/* AT386 */
 #include <mach/std_types.h>
 #include <scsi/compat_30.h>

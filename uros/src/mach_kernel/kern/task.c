@@ -339,9 +339,6 @@
 #include <fast_tas.h>
 #include <task_swapper.h>
 #include <platforms.h>
-#if	(iPSC860 || PARAGON860)
-#include <mcmsg.h>
-#endif	/* (iPSC860 || PARAGON860) */
 
 #include <mach/boolean.h>
 #include <mach/machine/vm_types.h>
@@ -765,10 +762,6 @@ task_create_local(
 	ipc_task_enable(new_task);
 
 
-#if     MCMSG
-	new_task->mcmsg_task = 0;
-#endif  /* MCMSG */
-
 #if	TASK_SWAPPER
 	task_swapout_eligible(new_task);
 #endif	/* TASK_SWAPPER */
@@ -801,12 +794,6 @@ task_free( register task_t	task )
 	    printf("task_free(%p(%d)) map ref %d\n", task, task->ref_count,
 			task->map->ref_count);
 #endif	/* MACH_ASSERT */
-
-#if     MCMSG && (iPSC860 || PARAGON860)
-	if (task->mcmsg_task != 0) {
-		mcmsg_task_destroy(task);
-	}
-#endif  /* MCMSG && (iPSC860 || PARAGON860) */
 
 #if	TASK_SWAPPER
 	/* task_terminate guarantees that this task is off the list */

@@ -1459,9 +1459,7 @@ db_symtab_cloneeXXX(
  * Switch into symbol-table specific routines
  */
 
-#if	!defined(__alpha) && !defined(INTEL860)
 #define DB_NO_COFF
-#endif
 
 #ifndef	DB_NO_AOUT
 #include <ddb/db_aout.h>

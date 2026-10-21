@@ -193,13 +193,6 @@
 #include <string.h>
 #include <machine/db_machdep.h>
 
-#if defined(__alpha)
-#  include <kdebug.h>
-#  if KDEBUG
-#    include <machine/kdebug.h>
-#  endif
-#endif /* defined(__alpha) */
-
 #include <ddb/db_lex.h>
 #include <ddb/db_output.h>
 #include <ddb/db_break.h>
@@ -726,16 +719,6 @@ void
 db_error(char *s)
 {
 	extern int db_macro_level;
-
-#if defined(__alpha)
-#  if KDEBUG
-	extern boolean_t kdebug_mode;
-	if (kdebug_mode) {
-		if (s) kprintf(DBG_DEBUG, s);
-		return;
-	}
-#  endif /* KDEBUG */
-#endif /* defined(__alpha) */
 
 	db_macro_level = 0;
 	if (db_recover) {

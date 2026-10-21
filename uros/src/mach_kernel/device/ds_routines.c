@@ -119,10 +119,6 @@
  * The mismatch is intentional and harmless on i386 (same ABI). */
 #pragma GCC diagnostic ignored "-Warray-parameter="
 
-#if	PARAGON860 || iPSC386 || iPSC860
-int	ndf_noise=0;
-#endif
-
 /* Zone definitions (declared extern in io_req.h) */
 zone_t	io_req_zone;
 zone_t	io_inband_zone;
@@ -333,18 +329,11 @@ ds_device_open(
 	}
 
 
-#if	PARAGON860 || iPSC386 || iPSC860
-if (ndf_noise) printf("local: %s@%d\n",name,mynode); /* XXX i860 */
-#endif	/* PARAGON860 || iPSC386 || iPSC860 */
-
 	/*
 	 * Find the local device.
 	 */
 	result = device_lookup_mode(name, mode, &device);
 	if (result != D_SUCCESS) {
-#if	PARAGON860 || iPSC386 || iPSC860
-if (ndf_noise) printf("device_lookup_mode(%s) failed\n",name);
-#endif	/* PARAGON860 || iPSC386 || iPSC860 */
 	    return (result);
 	}
 

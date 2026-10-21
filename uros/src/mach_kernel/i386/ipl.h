@@ -118,14 +118,10 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #define SPLTTY          6
 #define SPLNI           6
 
-#if	iPSC386
-#define	IPLHI		7
-#else	/* iPSC386 */
 #define IPLHI           8
-#endif	/* iPSC386 */
 #define SPLHI           IPLHI
 
-#if	MACH_KPROF && !iPSC386
+#if	MACH_KPROF
 #define	SPL7		7
 #else
 #define SPL7		IPLHI
