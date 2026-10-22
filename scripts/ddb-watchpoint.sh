@@ -12,6 +12,7 @@ set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 . "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-watchpoint.log}
+iso_for_entry "stay up, debugger armed" || exit 1
 K="$REPO/uros/build-x86_64/iso-x86_64/boot/mach_kernel"
 TARGET=$(nm "$K" | awk '$3=="clock_tick_delivered"{print $1}')
 [ -n "$TARGET" ] || { echo "FAILED: no clock_tick_delivered symbol"; exit 1; }

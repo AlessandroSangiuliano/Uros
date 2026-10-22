@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #750
+Takes out: the report a Debugger() entry opens with -- ddb_debugger_entry() opens the prompt as ddb_enter() does, so a panic with the debugger armed leaves its registers and the prompt and nothing else, as before #750
+Script: scripts/ddb-report-boot.sh
+Expect: ddb-report-check: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/ddb.c b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+index d691f09f..353ba114 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/ddb.c
++++ b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+@@ -1647,7 +1647,7 @@ int ddb_debugger_entry(struct trap_frame *frame)
+ 
+ 	if (why == (const char *) 0)
+ 		return 0;
+-	ddb_enter_as(frame, why, 1);
++	ddb_enter_as(frame, why, 0);
+ 	return 1;
+ }
+ 
