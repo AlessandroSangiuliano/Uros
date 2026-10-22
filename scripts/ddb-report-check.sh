@@ -20,8 +20,11 @@
 #      runs, and every processor in the scheduler listed: at the prompt,
 #      parked, or said not to have parked;
 #   3. for each parked processor, its own header and its registers, and at
-#      least one frame when it was parked in the kernel: one parked in a
-#      task's code has no kernel stack to walk, and its rip says so.
+#      least one frame when it was parked in the kernel; one parked in ring 3,
+#      as its cs says, the line that its rbp is the task's and is not walked,
+#      and no frame at all -- a frame there is the task's rbp walked as the
+#      kernel's chain, which in run 39781890422 read 0x3040 through the task
+#      at the prompt and stopped the report (#750).
 #
 # Prints one line, PASS, WRONG or NOT ASKED; exits 0, 1 or 2.  A log in which
 # no panic opened the debugger is NOT ASKED.
@@ -63,12 +66,18 @@ state != 1 { next }
 	}
 	next
 }
-sect == "P" && /^  rip    0x[0-9a-f]+/ {
-	pregs[pcpu] = 1
-	if ($2 !~ /^0xffff/)
-		puser[pcpu] = 1
+sect == "P" && /^  rip    0x[0-9a-f]+/ { pregs[pcpu] = 1; next }
+# The ring is the requested privilege level in cs, its low two bits -- which
+# the last hex digit decides alone, 16 being a multiple of 4 -- as
+# trace_frame() asks it in the kernel.  (No apostrophe anywhere in this awk
+# program: it sits inside single quotes.)
+sect == "P" && /^  cs     0x[0-9a-f]+/ {
+	d = index("0123456789abcdef", substr($2, length($2), 1)) - 1
+	if (d % 4 == 3)
+		pring3[pcpu] = 1
 	next
 }
+sect == "P" && /^  in ring 3: / { psaid3[pcpu] = 1; next }
 sect == "p" && /^  cpu [0-9]+  at the prompt$/ {
 	atprompt++
 	me = $2
@@ -108,12 +117,16 @@ END {
 	for (c in parked) {
 		if (!psect[c] || !pregs[c])
 			wrong("cpu " c " was parked, and its registers were not printed before the prompt")
-		if (puser[c])
+		if (pring3[c]) {
+			if (pframes[c])
+				wrong("cpu " c " was parked in ring 3, and its rbp was walked as a chain of the kernel: " pframes[c] " frames before the prompt")
+			if (!psaid3[c])
+				wrong("cpu " c " was parked in ring 3, and the report did not say its rbp belongs to the task and is not walked")
 			nu++
-		else if (!pframes[c])
+		} else if (!pframes[c])
 			wrong("cpu " c " was parked in the kernel, and its backtrace was not printed before the prompt")
 		np++
 	}
-	printf "ddb-report-check: PASS — before its first prompt the debugger said the backtrace, %d frames%s, and %d processors: cpu %s at the prompt with its thread, %d parked with their registers and backtraces%s (#750)\n", tframes, (want != "" ? " through " want "()" : ""), n, me, np, (nu ? ", " nu " of them in the code of a task, where there is no kernel stack to walk" : "")
+	printf "ddb-report-check: PASS — before its first prompt the debugger said the backtrace, %d frames%s, and %d processors: cpu %s at the prompt with its thread, %d parked with their registers and backtraces%s (#750)\n", tframes, (want != "" ? " through " want "()" : ""), n, me, np, (nu ? ", " nu " of them in ring 3, said not walked, the rbp of the task" : "")
 	exit 0
 }'
