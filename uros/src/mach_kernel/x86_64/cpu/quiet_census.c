@@ -739,6 +739,26 @@ quiet_census_pass(int mycpu)
 	       quiet_lock_busy);
 
 	/*
+	 * #749: the kernel stacks the threads hold, beside the threads.  A
+	 * thread that ended without giving its stack back leaves the first
+	 * number ahead of the second, once for every thread that ever ended.
+	 * A measure and not a verdict yet: a thread taken off the set and not
+	 * yet destroyed holds its stack for a moment that this lock does not
+	 * cover.
+	 */
+	{
+		uint64_t	taken, given_back;
+
+		thread_machine_stack_counts(&taken, &given_back);
+		printf("quiet_census: kernel stacks taken %llu, given back %llu, "
+		       "so %llu held, for %d threads alive (#749)\n",
+		       (unsigned long long) taken,
+		       (unsigned long long) given_back,
+		       (unsigned long long) (taken - given_back),
+		       default_pset.thread_count);
+	}
+
+	/*
 	 * #615: whether the scheduler ever queued a bound thread on a run queue
 	 * not its own processor's, where another processor may take it -- said
 	 * by every boot that reaches the census, not only by the bench whose
