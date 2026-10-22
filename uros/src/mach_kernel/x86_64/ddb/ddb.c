@@ -359,6 +359,28 @@ static void trace(uint64_t rbp)
 	}
 }
 
+/*
+ * A frame's backtrace, unless the frame is ring 3's (#750).
+ *
+ * The rbp of a processor interrupted in a task's code is the TASK's: a
+ * register the program uses as it likes -- cpu 0 held 0x3040 in it in run
+ * 39781890422 -- and, when it is a frame pointer at all, one into the task's
+ * stack.  It is never a link of the kernel's chain, so a walk from it answers
+ * nothing true: an address in the user half the step refuses, and a value that
+ * happens to lie in the kernel half would come back as kernel frames,
+ * well-formed and confident, of a chain the processor was never in.  So it is
+ * not walked, and the line says where the answer is instead.
+ */
+static void trace_frame(const struct trap_frame *f)
+{
+	if ((f->cs & 3) != 0) {
+		cons_puts("  in ring 3: its rbp is the task's and is not walked — "
+			  "resolve rip against the program, not the kernel\r\n");
+		return;
+	}
+	trace(f->rbp);
+}
+
 static void usage(void)
 {
 	/*
@@ -1546,12 +1568,13 @@ static void show_processors(void)
 /*
  * One parked processor's registers and backtrace, which is what `P n' prints.
  * A function of its own so that whatever else prints them says what `P n'
- * says.
+ * says.  A processor parked in a task's code has no kernel chain to walk, and
+ * trace_frame() says so instead.
  */
 static void show_parked(unsigned cpu)
 {
 	show_registers(ddb_frame[cpu]);
-	trace(ddb_frame[cpu]->rbp);
+	trace_frame(ddb_frame[cpu]);
 }
 
 /*
@@ -1578,7 +1601,7 @@ static void report_before_prompt(const struct trap_frame *frame)
 	unsigned me = cpu_number();
 
 	cons_puts("ddb: the backtrace, as `t' prints it (#750)\r\n");
-	trace(frame->rbp);
+	trace_frame(frame);
 	cons_puts("ddb: the processors, as `p' prints them\r\n");
 	show_processors();
 	for (int i = 0; i < NCPUS; i++) {
@@ -1713,7 +1736,10 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why,
 			break;
 
 		case 't':
-			trace(parse_hex(p + 1, &arg) ? arg : frame->rbp);
+			if (parse_hex(p + 1, &arg))
+				trace(arg);
+			else
+				trace_frame(frame);
 			break;
 
 		case 'x':
