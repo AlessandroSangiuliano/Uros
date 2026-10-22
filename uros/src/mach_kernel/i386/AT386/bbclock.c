@@ -256,13 +256,23 @@ bbc_gettime(
 	yr = (yr < 70) ? yr+100 : yr;
 	n = sec + 60 * min + 3600 * hr;
 	n += (dom - 1) * 3600 * 24;
-	if (yeartoday(yr) == 366)
+	/*
+	 * 🔴 THE YEARS GO TO yeartoday() WHOLE (#290).
+	 *
+	 * yr counts from 1900 here, and yeartoday() applies the Gregorian
+	 * rule to whatever it is given: as 100, the year 2000 is a century
+	 * that is not a multiple of 400, so 365 days, and every date from
+	 * 2001 on came out a day early.  ext_server's mount and unmount times
+	 * said so on the ush smoke, the date a day behind the host's and the
+	 * time to the second.  bbc_settime() below always passed 1970 on.
+	 */
+	if (yeartoday(1900 + yr) == 366)
 		month[1] = 29;
 	for (i = mon - 2; i >= 0; i--)
 		days += month[i];
 	month[1] = 28;
 	for (i = 70; i < yr; i++)
-		days += yeartoday(i);
+		days += yeartoday(1900 + i);
 	n += days * 3600 * 24;
 	cur_time->tv_sec  = n;
 	cur_time->tv_nsec = 0;
