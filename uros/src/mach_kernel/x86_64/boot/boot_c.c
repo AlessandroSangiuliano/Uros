@@ -4093,9 +4093,16 @@ static void ring3_selftest(void)
 	 * DR0 too.  Only DR7 was cleared, and DR0 kept syscall_entry: on one
 	 * of GitHub's runners, under KVM, a debug exception came back on
 	 * syscall_entry long after this test, once in 1776 boots, and halted
-	 * the machine.  What armed DR7 again is not known.  With DR0 at zero,
-	 * a DR7 armed again breaks on nothing the kernel runs.  DR6 goes back
-	 * to FFFF0FF0H, not to zero: see DR6_RESET.  Read back below.
+	 * the machine.  DR6 goes back to FFFF0FF0H, not to zero: see
+	 * DR6_RESET.  Read back below.
+	 *
+	 * ⚠️ Clearing them is not enough on that kind of runner.  It came back
+	 * once more after the read-back had found every one of them clear,
+	 * DR0 on syscall_entry and DR7 armed, the values written just above
+	 * -- loaded again from outside the guest, since nothing in it writes
+	 * them twice.  So a breakpoint nobody here armed no longer stops the
+	 * machine: trap.c's debug_came_back() says it, clears them again and
+	 * resumes.
 	 */
 	write_dr7(DR7_RESET);
 	for (unsigned i = 0; i < DR_COUNT; i++)
