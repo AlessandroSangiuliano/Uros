@@ -3459,6 +3459,95 @@ static void self_ipi_selftest(void)
 }
 
 /*
+ * 🔴 THE AST MESSAGE IS HELD BY A RAISED LEVEL, AND ACKNOWLEDGED ONCE (#748).
+ *
+ * Its vector is class fourteen, beside the tick, so a raised level holds it:
+ * in class fifteen it reached a processor RUNNING since cpu_up() and still
+ * without a thread, and ast_check() stopped the machine.  Held, it is
+ * acknowledged by the dispatch and run again when the level drops, so its
+ * handler must not acknowledge it a second time.  Both asked of the real
+ * handler, with two messages to this processor: one at level zero, which
+ * must run at once, and one at SPLHI, which must not run until the level
+ * drops and then must run once, as a replay -- the two acknowledged twice in
+ * all, which is where a second acknowledgement would show, for the reason
+ * device_master_irq_selftest() gives.  Before setup_main, so this processor
+ * has no thread yet and ast_check() has nothing to do.
+ */
+static void ast_vector_selftest(void)
+{
+	unsigned self = (unsigned) cpu_number();
+	uint64_t e0, r0, e1, r1, e2, r2, e3, r3, acks, deferrals, d, spins;
+	int had_interrupts = interrupts_enabled();
+	int held_ok, acked_ok;
+	spl_t old;
+
+	interrupts_enable();
+	acks = lapic_ack_count();
+	deferrals = spl_deferred_count();
+
+	/* One: at level zero, it runs at once.  Bounded, as above. */
+	ipi_ast_counts(self, &e0, &r0);
+	ipi_ast_check(self);
+	for (spins = 0; spins < 100000000ULL; spins++) {
+		ipi_ast_counts(self, &e1, &r1);
+		if (e1 != e0)
+			break;
+		cpu_pause();
+	}
+
+	/*
+	 * Two: at SPLHI.  It arrives and is held -- the dispatch defers it and
+	 * acknowledges it -- and runs only on the way down.  Raised first and
+	 * read after (see device_master_irq_selftest()); the wait ends when it
+	 * has been held or when it has run, whichever it did.
+	 */
+	old = splhigh();
+	ipi_ast_counts(self, &e1, &r1);
+	d = spl_deferred_count();
+	ipi_ast_check(self);
+	for (spins = 0; spins < 100000000ULL; spins++) {
+		ipi_ast_counts(self, &e2, &r2);
+		if (spl_deferred_count() != d || e2 != e1)
+			break;
+		cpu_pause();
+	}
+	ipi_ast_counts(self, &e2, &r2);
+	splx(old);
+	ipi_ast_counts(self, &e3, &r3);
+
+	acks = lapic_ack_count() - acks;
+	deferrals = spl_deferred_count() - deferrals;
+	if (!had_interrupts)
+		interrupts_disable();
+
+	held_ok = e1 - e0 == 1 && e2 - e1 == 0 && e3 - e2 == 1 && r3 - r2 == 1
+		  && r2 - r0 == 0;
+	kputs("UrMach x86-64: the AST message ran ");
+	kputdec((unsigned)(e1 - e0));
+	kputs(" time at level zero, ");
+	kputdec((unsigned)(e2 - e1));
+	kputs(" while held at SPLHI and ");
+	kputdec((unsigned)(e3 - e2));
+	kputs(" on the way down, as ");
+	kputdec((unsigned)(r3 - r2));
+	kputs(" replay");
+	kputs(held_ok
+	      ? " — a raised level holds it, as it holds the tick (#748)\r\n"
+	      : " — WRONG, a raised level does not hold the AST message as it"
+		" holds the tick (#748)\r\n");
+
+	acked_ok = acks == 2 && deferrals == 1;
+	kputs("UrMach x86-64: ");
+	kputdec((unsigned)acks);
+	kputs(" acknowledgements for 2 AST messages, ");
+	kputdec((unsigned)deferrals);
+	kputs(" of them deferred");
+	kputs(acked_ok
+	      ? " — one each, and the replay did not add a second (#748)\r\n"
+	      : " — WRONG, not one acknowledgement per message (#748)\r\n");
+}
+
+/*
  * A message to somebody else, which is the first thing in this kernel that
  * makes another processor act.
  *
@@ -10486,6 +10575,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	external_vectors_selftest();
 	self_ipi_selftest();
 	ipi_init();
+	ast_vector_selftest();		/* the AST handler is ipi_init()'s */
 	{
 		unsigned left = smp_number_cpus();
 		unsigned up = smp_start_others();

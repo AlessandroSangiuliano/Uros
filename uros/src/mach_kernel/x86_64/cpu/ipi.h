@@ -132,6 +132,12 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg);
 void ipi_ast_check(unsigned cpu);
 
 /*
+ * #748: how many times the AST handler has run on processor `cpu', and how
+ * many of those runs were replays of a message a raised level held back.
+ */
+void ipi_ast_counts(unsigned cpu, uint64_t *entries, uint64_t *replays);
+
+/*
  * Stop every other processor, and do not wait for any of them (#461).
  *
  * For the panic path and for halt_all_cpus().  Returns immediately: the
