@@ -70,6 +70,10 @@ WRONG=0
 # and named at the end, so that a question going unasked is seen in the total
 # and not only read off its line.
 UNASKED=0 UNASKED_WHERE=""
+# And the boots that passed because a breakpoint nobody here armed was cleared
+# and resumed (#742): what armed it was outside the guest, so they are as they
+# should be, and counted apart so that how often it happens stays seen.
+CAMEBACK=0 CAMEBACK_WHERE=""
 
 # The entries, one per line: number, verdict, extra run-x86_64.sh options, and
 # the processor count when it is not the run's.
@@ -465,6 +469,14 @@ while read -r e v opt cpus; do
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
 			WRONG=$((WRONG + 1))
 		else
+			# #742: said in the row as well, which ci/job.sh writes from
+			# this line.  No parenthesis in the note: its VERDICT_RE ends
+			# the kind at the first one.
+			if grep -aq 'the debug registers came back' "$f"; then
+				NOTE="${NOTE:+$NOTE; }#742: the debug registers came back"
+				CAMEBACK=$((CAMEBACK + 1))
+				CAMEBACK_WHERE="$CAMEBACK_WHERE, entry $e $a -smp $n"
+			fi
 			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v${NOTE:+: $NOTE})"
 			case $NOTE in
 			"NOT ASKED"*)
@@ -476,6 +488,7 @@ while read -r e v opt cpus; do
 done <<< "$ENTRIES"
 # ⚠️ Before the total and in a shape of its own: ci/job.sh reads the run's end
 # as exactly "merge-test: N wrong".
+echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK_WHERE:+:${CAMEBACK_WHERE#,}}"
 echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 echo "merge-test: $WRONG wrong"
 exit $WRONG

@@ -1,0 +1,50 @@
+Kind: widen
+Issue: #742
+Holds open: what a runner's copy of the debug registers did at 99338ea9 -- DR0 on syscall_entry and DR7 armed again, the window test's values, after the test had cleared them and read them back clear; the boot processor writes both at each of its ticks once a thread runs, and clock_event_drain_reports() says so once, in thread context; the fixed tree then takes a debug exception at the first syscall after each tick, says it the first time and at the 2nd, 4th, 8th time, clears the registers and resumes, and must pass; at one processor, as both runner boots were; entry 14, whose bundle reaches the idle loop where the widen's line is said
+Run: --entry 14 1200 -smp 1
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 26c1b3a7..e5addc66 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -125,6 +125,8 @@ static int		task_panic_armed;
+ static volatile int	task_panic_state = TASK_PANIC_NOBODY;
+ static uint64_t		task_panic_first;	/* the first hold's TSC */
+ static volatile uint64_t task_panic_rest;	/* no hold before this TSC */
++static volatile int	widen_742;	/* 742-widen: 1 armed, 2 said */
++extern void		syscall_entry(void);	/* 742-widen: DR0's address */
+ static uint8_t		event_vector;
+ 
+ /* ------------------------------------------------------ tsc-deadline ---- */
+@@ -1052,6 +1054,13 @@ clock_event_drain_reports(void)
+ {
+ 	unsigned	cpu;
+ 
++	/* 742-widen: said once, here, where printing is allowed. */
++	if (widen_742 == 1) {
++		widen_742 = 2;
++		printf("742-widen: dr0 on syscall_entry and dr7 armed again on "
++		       "the boot processor, at each of its ticks\n");
++	}
++
+ 	/*
+ 	 * ⚠️ Thread context only.  This prints, and printing is exactly what the
+ 	 * handler may not do -- calling this from an interrupt would put the
+@@ -1156,6 +1165,17 @@ clock_event_tick(struct trap_frame *frame)
+ 	boolean_t	usermode;
+ 	vm_offset_t	pc;
+ 
++	/* 742-widen: DR0 on syscall_entry and DR7 armed again on the boot
++	 * processor at each of its ticks once a thread runs, after #440's
++	 * window test, as a runner's copy of them came back; said in thread
++	 * context, by clock_event_drain_reports(). */
++	if (cpu == (unsigned) master_cpu && current_act() != THR_ACT_NULL) {
++		write_dr0((uint64_t)(uintptr_t)syscall_entry);
++		write_dr7(DR7_EXEC_DR0);
++		if (widen_742 == 0)
++			widen_742 = 1;
++	}
++
+ 	/*
+ 	 * A real frame always has a code segment with the selector's index
+ 	 * set; a stub frame is all zeros.  Distinguishing them on cs is exact
