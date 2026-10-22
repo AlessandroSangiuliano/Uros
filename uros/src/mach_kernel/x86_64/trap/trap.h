@@ -587,4 +587,13 @@ void	x86_64_backtrace_after(uint64_t rbp, void (*first)(void));
 unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
 				const char *want, int *found);
 
+/*
+ * One step of a walk: the frame at `rbp' read into `*next' and `*ret' when it
+ * is an aligned kernel address with both words mapped, which answers 0, and
+ * otherwise nothing read and what was wrong with it (#750).  Every walker of
+ * the kernel's call chain takes its steps through this, so that the rules of
+ * reading a frame are written once (trap.c says why each of them is there).
+ */
+const char *x86_64_frame_read(uint64_t rbp, uint64_t *next, uint64_t *ret);
+
 #endif	/* _X86_64_TRAP_TRAP_H_ */

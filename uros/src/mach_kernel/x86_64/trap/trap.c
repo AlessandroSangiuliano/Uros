@@ -634,10 +634,11 @@ static void report_instruction(uint64_t rip)
  *
  * This runs in the worst context the kernel has — after a fault, sometimes
  * because the stack itself is wrong — so it trusts nothing it is about to
- * read.  Every frame is checked for alignment, for being a canonical
- * address, and for being mapped at all, the last through the page tables
- * rather than by trying it and seeing.  A backtrace that faults while
- * explaining a fault would replace the diagnosis with a double fault.
+ * read.  Every frame is checked for alignment, for being a kernel address,
+ * and for being mapped at all, the last through the page tables rather than
+ * by trying it and seeing -- by x86_64_frame_read() below, which every walk
+ * takes its steps through.  A backtrace that faults while explaining a fault
+ * would replace the diagnosis with a double fault.
  *
  * Frames are also required to move upward: a stack grows down, so a caller's
  * frame is always at a higher address, and anything else is not a chain but
@@ -652,6 +653,72 @@ static void report_instruction(uint64_t rip)
  * worth suspecting.
  */
 #define BACKTRACE_MAX	16
+
+/*
+ * 🔴 ONE STEP OF EVERY WALK, AND THE ONE PLACE ITS RULES ARE (#750).
+ *
+ * Reads the frame at `rbp' -- `*next' the caller's frame pointer, `*ret' the
+ * return address -- and answers 0; or reads nothing and answers what is wrong
+ * with the address, for a walker that says why it stopped.
+ *
+ * 🔴 A KERNEL ADDRESS, NOT MERELY A CANONICAL ONE (#518).
+ *
+ * The mapping is asked of the KERNEL's pmap, while the processor dereferences
+ * the frame under whatever cr3 is live -- during a trap from a task, or at the
+ * debugger's prompt on a task's thread, that TASK's.  For a kernel address the
+ * two agree, because kernel mappings are in every address space.  For a low
+ * one they do not:
+ *
+ *	boot.S leaves an identity map of the low 1 GiB in place (#640), so
+ *	pmap_extract(kernel_pmap, 0x118) answers YES, and the live user pmap
+ *	has nothing there.
+ *
+ * So a garbage frame pointer in the user half passed a guard that was asking
+ * about a different address space, and the read faulted -- inside the fault
+ * reporter, which is the one place a fault cannot be reported.  The machine
+ * halted.
+ *
+ * 🔑 Reachable from an unprivileged task: act_test arm 6 writes a
+ * non-canonical rip into one of its own threads with thread_set_state, the
+ * iretq refuses it, and the #GP arrives with a frame chain that is no longer
+ * a frame chain.  ⚠️ TCG does not raise that #GP, so the arm written to prove
+ * this path has been passing without ever reaching it (#516).
+ *
+ * Requiring a kernel address removes the mismatch rather than repairing one
+ * instance of it: a walker reports the KERNEL's call chain, a frame pointer
+ * outside the kernel half is not part of one, and every address that survives
+ * this test is one the two pmaps agree about.  It also subsumes the canonical
+ * check -- everything at or above the kernel half is canonical by
+ * construction.
+ *
+ * ⚠️ HERE, AND NOT IN EACH WALKER.  #518 put the rule in the printer below and
+ * #659 in the probe, and the debugger's `t' kept asking for a canonical
+ * address -- under the probe's comment saying it walked "exactly as" `t' did.
+ * The report a panic opens the debugger with walks every parked processor, and
+ * in run 39781890422 cpu 0 was parked in a task's code with 0x3040 in rbp: the
+ * walk read it through the task at the prompt, and the report stopped there,
+ * no prompt after it (entry 55, one boot in 48).
+ */
+const char *x86_64_frame_read(uint64_t rbp, uint64_t *next, uint64_t *ret)
+{
+	pmap_t		kernel = pmap_kernel();
+	const uint64_t	*frame;
+
+	if ((rbp & 7) != 0)
+		return "not aligned";
+	if (!va_is_kernel(rbp))
+		return "not a kernel address";
+
+	/* Both words of the frame have to be there before either is read. */
+	if (pmap_extract(kernel, rbp) == 0
+	    || pmap_extract(kernel, rbp + 8) == 0)
+		return "not mapped";
+
+	frame = (const uint64_t *)(uintptr_t)rbp;
+	*next = frame[0];
+	*ret = frame[1];
+	return 0;
+}
 
 /*
  * The name of whatever contains an address, when there is one.
@@ -748,8 +815,6 @@ void x86_64_backtrace(uint64_t rbp)
 
 void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 {
-	pmap_t kernel = pmap_kernel();
-
 	cons_report_begin();
 
 	if (first != 0)
@@ -767,56 +832,9 @@ void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
 	tputs(" backtrace (addr2line for file and line):\r\n");
 
 	for (unsigned depth = 0; depth < BACKTRACE_MAX; depth++) {
-		const uint64_t *frame;
 		uint64_t next, ret;
 
-		/*
-		 * 🔴 A KERNEL ADDRESS, NOT MERELY A CANONICAL ONE (#518).
-		 *
-		 * This asked only for canonical, and the check below then
-		 * asked the KERNEL's pmap whether the frame was mapped -- while
-		 * the processor dereferences it under whatever cr3 is live,
-		 * which during a trap from a task is that TASK's.  For a
-		 * kernel address the two agree, because kernel mappings are in
-		 * every address space.  For a low one they do not:
-		 *
-		 *	boot.S leaves an identity map of the low 1 GiB in place,
-		 *	so pmap_extract(kernel_pmap, 0x118) answers YES, and the
-		 *	live user pmap has nothing there.
-		 *
-		 * So a garbage frame pointer in the user half passed a guard
-		 * that was asking about a different address space, and the
-		 * read faulted -- inside the fault reporter, which is the one
-		 * place a fault cannot be reported.  The machine halted.
-		 *
-		 * 🔑 Reachable from an unprivileged task: act_test arm 6 writes
-		 * a non-canonical rip into one of its own threads with
-		 * thread_set_state, the iretq refuses it, and the #GP arrives
-		 * here with a frame chain that is no longer a frame chain.
-		 * ⚠️ TCG does not raise that #GP, so the arm written to prove
-		 * this path has been passing without ever reaching it (#516).
-		 *
-		 * Requiring a kernel address removes the mismatch rather than
-		 * repairing one instance of it: this walker reports the
-		 * KERNEL's call chain, a frame pointer outside the kernel half
-		 * is not part of one, and every address that survives this
-		 * test is one the two pmaps agree about.  It also subsumes the
-		 * canonical check -- everything at or above the kernel half is
-		 * canonical by construction.
-		 */
-		if ((rbp & 7) != 0 || !va_is_kernel(rbp))
-			break;
-
-		/* Both words of the frame have to be there before either is read. */
-		if (pmap_extract(kernel, rbp) == 0
-		    || pmap_extract(kernel, rbp + 8) == 0)
-			break;
-
-		frame = (const uint64_t *)(uintptr_t)rbp;
-		next = frame[0];
-		ret = frame[1];
-
-		if (ret == 0)
+		if (x86_64_frame_read(rbp, &next, &ret) != 0 || ret == 0)
 			break;
 
 		tputs("    ");
@@ -873,7 +891,6 @@ static int name_matches(const char *a, const char *b)
 unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
 				const char *want, int *found)
 {
-	pmap_t kernel = pmap_kernel();
 	unsigned depth, walked = 0;
 
 	if (first != 0)
@@ -882,29 +899,18 @@ unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
 		*found = 0;
 
 	for (depth = 0; depth < BACKTRACE_MAX; depth++) {
-		const uint64_t *f;
 		uint64_t next, ret;
 		const char *name;
 
 		/*
-		 * A kernel address, as the printer asks (#518), and not merely a
-		 * canonical one: since #659 this runs in the handler, for traps
-		 * from ring 3 too, where the live cr3 is a task's and a low
-		 * frame pointer the kernel's pmap calls mapped -- the identity
-		 * map of the low gigabyte -- is read through the task's, or is
-		 * a user page read with AC clear: a fault inside the handler.
+		 * The step's kernel address matters here as much as in the
+		 * printer: since #659 this runs in the handler, for traps from
+		 * ring 3 too, where the live cr3 is a task's and a low frame
+		 * pointer the kernel's pmap calls mapped -- the identity map of
+		 * the low gigabyte -- is read through the task's, or is a user
+		 * page read with AC clear: a fault inside the handler.
 		 */
-		if ((rbp & 7) != 0 || !va_is_kernel(rbp))
-			break;
-		if (pmap_extract(kernel, rbp) == 0
-		    || pmap_extract(kernel, rbp + 8) == 0)
-			break;
-
-		f = (const uint64_t *)(uintptr_t)rbp;
-		next = f[0];
-		ret = f[1];
-
-		if (ret == 0)
+		if (x86_64_frame_read(rbp, &next, &ret) != 0 || ret == 0)
 			break;
 
 		name = ksym_lookup_call(ret, 0);
