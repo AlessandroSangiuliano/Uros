@@ -19,8 +19,9 @@
 #   2. the processors' header, the processor at the prompt with the thread it
 #      runs, and every processor in the scheduler listed: at the prompt,
 #      parked, or said not to have parked;
-#   3. for each parked processor, its own header, its registers and at least
-#      one frame.
+#   3. for each parked processor, its own header and its registers, and at
+#      least one frame when it was parked in the kernel: one parked in a
+#      task's code has no kernel stack to walk, and its rip says so.
 #
 # Prints one line, PASS, WRONG or NOT ASKED; exits 0, 1 or 2.  A log in which
 # no panic opened the debugger is NOT ASKED.
@@ -62,7 +63,12 @@ state != 1 { next }
 	}
 	next
 }
-sect == "P" && /^  rip    0x[0-9a-f]+/ { pregs[pcpu] = 1; next }
+sect == "P" && /^  rip    0x[0-9a-f]+/ {
+	pregs[pcpu] = 1
+	if ($2 !~ /^0xffff/)
+		puser[pcpu] = 1
+	next
+}
 sect == "p" && /^  cpu [0-9]+  at the prompt$/ {
 	atprompt++
 	me = $2
@@ -98,11 +104,16 @@ END {
 	if (ncpu > 0 && n != ncpu)
 		wrong(ncpu " processors in the scheduler, " n " listed before the prompt")
 	np = 0
+	nu = 0
 	for (c in parked) {
-		if (!psect[c] || !pregs[c] || !pframes[c])
-			wrong("cpu " c " was parked, and its registers and backtrace were not printed before the prompt")
+		if (!psect[c] || !pregs[c])
+			wrong("cpu " c " was parked, and its registers were not printed before the prompt")
+		if (puser[c])
+			nu++
+		else if (!pframes[c])
+			wrong("cpu " c " was parked in the kernel, and its backtrace was not printed before the prompt")
 		np++
 	}
-	printf "ddb-report-check: PASS — before its first prompt the debugger said the backtrace, %d frames%s, and %d processors: cpu %s at the prompt with its thread, %d parked with their registers and backtraces (#750)\n", tframes, (want != "" ? " through " want "()" : ""), n, me, np
+	printf "ddb-report-check: PASS — before its first prompt the debugger said the backtrace, %d frames%s, and %d processors: cpu %s at the prompt with its thread, %d parked with their registers and backtraces%s (#750)\n", tframes, (want != "" ? " through " want "()" : ""), n, me, np, (nu ? ", " nu " of them in the code of a task, where there is no kernel stack to walk" : "")
 	exit 0
 }'
