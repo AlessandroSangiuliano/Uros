@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #748
-Takes out: the AST handler's trap_in_replay() question -- replayed, it acknowledges a second time, and ast_vector_selftest() counts three acknowledgements for two messages
+Takes out: the AST handler's trap_in_replay() question -- replayed, it acknowledges a second time, and ast_vector_check() says its replay added an acknowledgement
 Run: --entry 0 600 -smp 4
 Expect: WRONG, not one acknowledgement per message
 

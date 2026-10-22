@@ -1,6 +1,6 @@
 Kind: ablation
 Issue: #748
-Takes out: the AST message's move to class fourteen -- back at 0xF2, a raised level no longer holds it, and ast_vector_selftest() says so
+Takes out: the AST message's move to class fourteen -- back at 0xF2, a raised level no longer holds it, and ast_vector_check() says so
 Run: --entry 0 600 -smp 4
 Expect: WRONG, a raised level does not hold the AST message
 
