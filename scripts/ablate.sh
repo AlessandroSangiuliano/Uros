@@ -358,6 +358,12 @@ for arm in "${ARMS[@]}"; do
 	# Which kernel the arm built, by its code: the md5 of the whole file
 	# changes from one build of the same tree to the next, the md5 of .text
 	# does not, so the two arms' lines say whether their kernels differ.
+	# #734: and they can say it.  The kernel's __FILE__ strings were absolute
+	# paths, fixed/ and ablated/ differ in length, and every string after
+	# them moved, so the two md5s differed whatever the patches changed; the
+	# build maps the paths to src/... and build/... now.  The same md5 on both
+	# lines says the patches left the kernel's code alone: a patch outside the
+	# kernel, or a kernel patch under an #if the configuration leaves off.
 	kernel="$wt/uros/build-x86_64/export/uros/boot/mach_kernel"
 	objcopy -O binary --only-section=.text "$kernel" "$RUNDIR/$arm.text" 2>/dev/null ||
 		die 3 "$arm: no kernel text to read at $kernel"
