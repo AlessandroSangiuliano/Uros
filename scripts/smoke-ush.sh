@@ -49,12 +49,32 @@ done
 #
 # $EXP_ARGS is deliberately unquoted: it must word-split into separate argv
 # entries for the expect script.
+#
+# #290: and what the smoke's clean shutdown left in the root's superblock, read
+# from disk.img by the host after the smoke: the mount time and the unmount's
+# write time within the boot, and the volume clean (#284).  The host's clock is
+# taken after the build, so the image's own making falls before the window.
+# Only after a smoke that passed, which is one that reached
+# "shutdown -- unmount / ok".
+BUILD_DIR="${UROS_BUILD_DIR:-$SCRIPT_DIR/../uros/build}"
 if [ -n "$LOGFILE" ]; then
     "$SCRIPT_DIR/run-qemu.sh" --build-only 2>&1 | tee "$LOGFILE"
     [ "${PIPESTATUS[0]}" -eq 0 ] || exit 2
+    start=$(date +%s)
     "$EXP" $EXP_ARGS 2>&1 | tee -a "$LOGFILE"
+    rc=${PIPESTATUS[0]}
+    end=$(date +%s)
+    [ "$rc" -eq 0 ] || exit "$rc"
+    python3 "$SCRIPT_DIR/ext2-times-check.py" "$BUILD_DIR/disk.img" \
+        "$start" "$end" --clean 2>&1 | tee -a "$LOGFILE"
     exit "${PIPESTATUS[0]}"
 else
     "$SCRIPT_DIR/run-qemu.sh" --build-only || exit 2
-    exec "$EXP" $EXP_ARGS
+    start=$(date +%s)
+    rc=0
+    "$EXP" $EXP_ARGS || rc=$?
+    end=$(date +%s)
+    [ "$rc" -eq 0 ] || exit "$rc"
+    exec python3 "$SCRIPT_DIR/ext2-times-check.py" "$BUILD_DIR/disk.img" \
+        "$start" "$end" --clean
 fi
