@@ -465,6 +465,19 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       -fno-common -fno-strict-aliasing -fno-optimize-sibling-calls
       -isystem ${X86_64_GCC_INC} -std=gnu11 -Wall
       #
+      # #734: __FILE__ as a path inside the tree, not where the tree stands.
+      # The kernel names its file in its assertions and panics, and with the
+      # absolute path in .rodata -- 81 of them, from 78 sources and 3 files
+      # the build generates -- two trees whose paths differ in length lay out
+      # the strings after them differently, and the code that addresses them
+      # differs too: ablate.sh's fixed/ and ablated/ arms printed two .text
+      # md5s whatever their patches changed.  A source now reads src/..., a
+      # generated file build/....  The build directory's map comes second:
+      # of two maps that match, GCC takes the last, and a build directory
+      # inside the tree matches both.
+      -fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=
+      -fmacro-prefix-map=${CMAKE_BINARY_DIR}/=build/
+      #
       # The same six suppressions i386 carries, and for the same reason.
       #
       # ⚠️ Measured before adopting, because "the same noise" is a claim.
