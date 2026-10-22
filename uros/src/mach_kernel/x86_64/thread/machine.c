@@ -404,6 +404,31 @@ void
 thread_machine_destroy(thread_t thread)
 {
 	thread_act_t	thr_act = thread->top_act;
+	spl_t		s;
+
+	/*
+	 * 🔴 AND THE KERNEL STACK GOES BACK (#749).
+	 *
+	 * thread_machine_create() takes it and nothing else on this machine
+	 * ever gave it back: every thread that ended kept its 16 KiB for the
+	 * life of the machine.  Measured on omen at 29bd5e94, entry 15 at four
+	 * processors: 3095 stacks taken under TCG and 2660 under KVM, none
+	 * given back, for 39 and 32 threads alive -- about 48 MiB of a 512 MiB
+	 * machine.  i386's thread_machine_destroy() frees it, at splsched as
+	 * stack_free() asks, and the machine-independent side calls this only
+	 * once the thread is off its processor for good.
+	 *
+	 * Owned by the shuttle and not the activation, so before the test
+	 * below and whatever it answers.  Counted before the shuttle goes back
+	 * to its zone, which is what lets the census hold the two side by side.
+	 */
+	if (thread->kernel_stack != 0) {
+		s = splsched();
+		stack_free(thread->kernel_stack);
+		splx(s);
+		thread->kernel_stack = 0;
+		atomic_inc64(&machine_stacks_given_back);
+	}
 
 	if (thr_act == THR_ACT_NULL || thr_act->mact.pcb == PCB_NULL)
 		return;
