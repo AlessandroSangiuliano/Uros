@@ -647,6 +647,28 @@ quiet_census_walk(int *had, unsigned int *unreadable)
 	return n;
 }
 
+/*
+ * #749: the kernel stacks the threads hold, beside the threads.  A thread that
+ * ended without giving its stack back leaves the first number ahead of the
+ * second, once for every thread that ever ended.  A measure and not a verdict
+ * yet: the thread count is read without the set's lock, and a thread taken
+ * off the set and not yet destroyed holds its stack for a moment no lock
+ * here covers.  With each report as the machine goes idle, because the
+ * harness ends an ordinary run before the census below is reached.
+ */
+static void
+quiet_stacks_so_far(void)
+{
+	uint64_t	taken, given_back;
+
+	thread_machine_stack_counts(&taken, &given_back);
+	printf("quiet_census: kernel stacks taken %llu, given back %llu, so "
+	       "%llu held, for %d threads alive (#749)\n",
+	       (unsigned long long) taken, (unsigned long long) given_back,
+	       (unsigned long long) (taken - given_back),
+	       default_pset.thread_count);
+}
+
 void
 quiet_census_pass(int mycpu)
 {
@@ -702,6 +724,7 @@ quiet_census_pass(int mycpu)
 		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
 		       quiet_resets, quiet_all_passes);
 		cons_ring_so_far("quiet_census: ");
+		quiet_stacks_so_far();
 	}
 
 	if (quiet_passes < QUIET_PASSES)
@@ -738,25 +761,7 @@ quiet_census_pass(int mycpu)
 	       quiet_passes, default_pset.task_count, default_pset.thread_count,
 	       quiet_lock_busy);
 
-	/*
-	 * #749: the kernel stacks the threads hold, beside the threads.  A
-	 * thread that ended without giving its stack back leaves the first
-	 * number ahead of the second, once for every thread that ever ended.
-	 * A measure and not a verdict yet: a thread taken off the set and not
-	 * yet destroyed holds its stack for a moment that this lock does not
-	 * cover.
-	 */
-	{
-		uint64_t	taken, given_back;
-
-		thread_machine_stack_counts(&taken, &given_back);
-		printf("quiet_census: kernel stacks taken %llu, given back %llu, "
-		       "so %llu held, for %d threads alive (#749)\n",
-		       (unsigned long long) taken,
-		       (unsigned long long) given_back,
-		       (unsigned long long) (taken - given_back),
-		       default_pset.thread_count);
-	}
+	quiet_stacks_so_far();
 
 	/*
 	 * #615: whether the scheduler ever queued a bound thread on a run queue
