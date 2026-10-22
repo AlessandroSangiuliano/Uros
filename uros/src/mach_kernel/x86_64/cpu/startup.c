@@ -39,6 +39,7 @@
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
 #include <time/tsc.h>		/* #748: the hold's bound */
+#include <cpu/ipi.h>		/* #748: the AST message, to this processor */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <time/rcu_tick_test.h>	/* #649: -U */
 #include <cpu/sprintf_test.h>	/* #655: -K */
@@ -386,6 +387,88 @@ current_stack_selftest(void)
 }
 
 /*
+ * 🔴 THE AST MESSAGE IS HELD BY A RAISED LEVEL, AND ACKNOWLEDGED ONCE (#748).
+ *
+ * Its vector is class fourteen, beside the tick, so a raised level holds it:
+ * in class fifteen it reached a processor RUNNING since cpu_up() and still
+ * without a thread, and ast_check() stopped the machine.  Held, it is
+ * acknowledged by the dispatch and run again when the level drops, so its
+ * handler must not acknowledge it a second time.  Both asked of the real
+ * handler, with two messages to this processor: one at level zero, which
+ * must run at once, and one at SPLHI, which must not run while held and must
+ * run once, as a replay, when the level drops.  Acknowledgements are counted
+ * across the replay alone, with interrupts off, since the tick runs too: a
+ * replay was acknowledged when it was held, and must add none.
+ *
+ * Here, with a thread and the scheduler running, because ast_check() is
+ * scheduler code.  Asked before setup_main, it found the boot processor in
+ * no state at all and panicked, once ast_check() lost its answer for a
+ * processor with no thread.
+ */
+static void
+ast_vector_check(void)
+{
+	unsigned	self = (unsigned) cpu_number();
+	uint64_t	e0, r0, e, r, base, rbase, held, down, replays;
+	uint64_t	at_zero, d, acks, spins;
+	int		had = interrupts_enabled(), held_ok;
+	spl_t		old;
+
+	/* One: at level zero, it runs at once.  Bounded. */
+	ipi_ast_counts(self, &e0, &r0);
+	ipi_ast_check(self);
+	for (spins = 0; spins < 100000000ULL; spins++) {
+		ipi_ast_counts(self, &e, &r);
+		if (e != e0)
+			break;
+		cpu_pause();
+	}
+	ipi_ast_counts(self, &e, &r);
+	at_zero = e - e0;
+
+	/*
+	 * Two: at SPLHI it arrives and is held, and runs only on the way
+	 * down.  The wait ends when it has been held or when it has run,
+	 * whichever it did.
+	 */
+	old = splhigh();
+	ipi_ast_counts(self, &base, &rbase);
+	d = spl_deferred_count();
+	ipi_ast_check(self);
+	for (spins = 0; spins < 100000000ULL; spins++) {
+		ipi_ast_counts(self, &e, &r);
+		if (spl_deferred_count() != d || e != base)
+			break;
+		cpu_pause();
+	}
+	interrupts_disable();
+	ipi_ast_counts(self, &e, &r);
+	held = e - base;
+	acks = lapic_ack_count();
+	splx(old);
+	acks = lapic_ack_count() - acks;
+	ipi_ast_counts(self, &e, &r);
+	down = e - base - held;
+	replays = r - rbase;
+	if (had)
+		interrupts_enable();
+
+	held_ok = at_zero == 1 && held == 0 && down == 1 && replays == 1;
+	printf("startup: the AST message ran %u time at level zero, %u while "
+	       "held at SPLHI and %u on the way down, as %u replay%s (#748)\n",
+	       (unsigned) at_zero, (unsigned) held, (unsigned) down,
+	       (unsigned) replays,
+	       held_ok ? " -- a raised level holds it, as it holds the tick"
+		       : " -- WRONG, a raised level does not hold the AST "
+			 "message as it holds the tick");
+	printf("startup: its replay added %u acknowledgements%s (#748)\n",
+	       (unsigned) acks,
+	       acks == 0 ? " -- one acknowledgement per message, given when "
+			   "it was held"
+			 : " -- WRONG, not one acknowledgement per message");
+}
+
+/*
  * 🔴 A REPLAY ADDS NO ACKNOWLEDGEMENT (#748).
  *
  * A vector a raised level holds back is acknowledged by trap_dispatch() when
@@ -491,6 +574,7 @@ machine_processors_ready(void)
 		hwp_report();		/* #736: every processor is past it now */
 
 		/* With the clock running, in thread context (#748). */
+		ast_vector_check();
 		replay_ack_check();
 
 		/*
