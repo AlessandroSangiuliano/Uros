@@ -256,22 +256,53 @@ static void show_registers(const struct trap_frame *f)
  * A debugger is asked about addresses precisely because they are suspect, so
  * faulting on one would replace the answer with a second fault — and this
  * one would arrive from inside the handler for the first.
+ *
+ * 🔴 AND ONLY IN THE KERNEL'S HALF (#750).  The tables asked are the kernel's,
+ * and the read goes through whatever cr3 is live: at a prompt on a task's
+ * thread, the task's.  The kernel's tables map the low gigabyte (#640), so a
+ * user address there passed and was read through the task, where it is
+ * nothing or a page SMAP refuses outside a copy -- a fault inside the
+ * debugger, the same mismatch #518 took out of the fault report.  A task's
+ * memory is not this debugger's to read until it walks the task's own tables,
+ * so a user address is refused, and said to be.
+ *
+ * Answers what is wrong with the bytes [va, va + bytes), or 0 when every one
+ * of them can be read.
  */
+static const char *unreadable(uint64_t va, uint64_t bytes)
+{
+	pmap_t		kernel = pmap_kernel();
+	uint64_t	end = va + bytes - 1;
+
+	if (!va_is_kernel(va) || !va_is_kernel(end) || end < va)
+		return "not a kernel address";
+	for (uint64_t off = 0; off < bytes; off += PAGE_SIZE_4K) {
+		if (pmap_extract(kernel, va + off) == 0)
+			return "unmapped";
+	}
+	return pmap_extract(kernel, end) != 0 ? (const char *) 0 : "unmapped";
+}
+
+static int readable(uint64_t va, uint64_t bytes)
+{
+	return unreadable(va, bytes) == (const char *) 0;
+}
+
 #define DDB_DUMP_WORDS	8
 
 static void examine(uint64_t addr)
 {
-	pmap_t kernel = pmap_kernel();
-
 	for (unsigned i = 0; i < DDB_DUMP_WORDS; i++) {
-		uint64_t at = addr + i * 8;
+		uint64_t	at = addr + i * 8;
+		const char	*no = unreadable(at, 8);
 
 		cons_puts("  ");
 		cons_puthex64(at);
 		cons_puts(": ");
 
-		if (!va_is_canonical(at) || pmap_extract(kernel, at) == 0) {
-			cons_puts("unmapped\r\n");
+		if (no != (const char *) 0) {
+			cons_puts(no);
+			cons_puts("\r\n");
 			return;
 		}
 
@@ -991,19 +1022,9 @@ static void ddb_release_others(void)
  * thread that has never run carries one too, because thread_start() sets it.
  * The state flags are what separate them, and they are printed rather than
  * interpreted so the reader can disagree.
+ *
+ * Every pointer followed out of a thread is asked of readable() first, above.
  */
-static int readable(uint64_t va, uint64_t bytes)
-{
-	pmap_t kernel = pmap_kernel();
-
-	for (uint64_t off = 0; off < bytes; off += PAGE_SIZE_4K) {
-		if (!va_is_canonical(va + off)
-		    || pmap_extract(kernel, va + off) == 0)
-			return 0;
-	}
-	return va_is_canonical(va + bytes - 1)
-	    && pmap_extract(kernel, va + bytes - 1) != 0;
-}
 
 /*
  * A thread's state in the seven columns the machine-independent debugger has
@@ -1308,8 +1329,6 @@ static void list_threads(void)
 
 static void disassemble(uint64_t addr)
 {
-	pmap_t kernel = pmap_kernel();
-
 	for (unsigned line = 0; line < DDB_DISASM_LINES; line++) {
 		uint8_t		bytes[16];
 		char		text[32];
@@ -1318,7 +1337,7 @@ static void disassemble(uint64_t addr)
 		for (unsigned i = 0; i < sizeof bytes; i++) {
 			uint64_t at = addr + i;
 
-			if (!va_is_canonical(at) || pmap_extract(kernel, at) == 0)
+			if (!readable(at, 1))
 				break;
 			bytes[i] = *(const volatile uint8_t *)(uintptr_t) at;
 			avail++;
@@ -1327,7 +1346,9 @@ static void disassemble(uint64_t addr)
 		if (avail == 0) {
 			cons_puts("  ");
 			cons_puthex64(addr);
-			cons_puts("  unmapped\r\n");
+			cons_puts("  ");
+			cons_puts(unreadable(addr, 1));
+			cons_puts("\r\n");
 			return;
 		}
 
