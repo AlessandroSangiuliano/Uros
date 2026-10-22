@@ -343,7 +343,16 @@ static void ipi_ast_handler(struct trap_frame *frame)
 {
 	(void) frame;
 	ast_check();
-	lapic_eoi();
+
+	/*
+	 * #748: acknowledged only when it really arrived.  In class fourteen it
+	 * can be held back by a raised level and run again when the level
+	 * drops, and the acknowledgement was given when it was held: a second
+	 * one would dismiss whatever the processor has in service by then (see
+	 * trap_in_replay() in <trap/trap.h>).
+	 */
+	if (!trap_in_replay())
+		lapic_eoi();
 }
 
 void ipi_ast_check(unsigned cpu)
