@@ -1,7 +1,7 @@
 Kind: ablation
 Issue: #742
 Over: 742-widen-dr7-armed-again.patch
-Takes out: 979918c1's clearing of DR0-DR3 after #440's window test, so DR0 keeps syscall_entry as it did; over 742-widen-dr7-armed-again the next syscall on the boot processor takes a debug exception on syscall_entry, in ring 0 with the user's stack, as the runner's boot did, and the report names breakpoint 0 from DR6 (9c50c698); the read-back after the test says WRONG as well; regenerated over a203ca67, which rewrote the comment above the two lines, the lines taken out the same; since 4b085fcb the boot no longer stops on that breakpoint but says it, clears the registers and resumes, and its report still names breakpoint 0
+Takes out: 979918c1's clearing of DR0-DR3 after #440's window test, so DR0 keeps syscall_entry as it did; over 742-widen-dr7-armed-again the next syscall on the boot processor takes a debug exception on syscall_entry, in ring 0 with the user's stack, as the runner's boot did, and the report names breakpoint 0 from DR6 (9c50c698); the read-back after the test says WRONG as well; regenerated over a203ca67, which rewrote the comment above the two lines, the lines taken out the same; since 4b085fcb the boot no longer stops on that breakpoint but says it, clears the registers and resumes, and its report still names breakpoint 0; at 39950751 on victus, on battery, caught 6 of 6 under TCG and KVM, each boot saying the breakpoint once and resuming -- once, since the clearing takes DR0 with it and the widen arms DR7 alone -- and failing on the read-back's WRONG, as it should; the fixed tree passed 6 of 6
 Run: --entry 14 1200 -smp 1
 Expect: dr6 0x[0-9a-f]+: breakpoint 0
 diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
