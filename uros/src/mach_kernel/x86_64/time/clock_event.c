@@ -620,7 +620,8 @@ burnin_handler(struct trap_frame *frame)
 {
 	(void) frame;
 	burnin_ticks++;
-	lapic_eoi();
+	if (!trap_in_replay())		/* #748: see clock_event_tick() */
+		lapic_eoi();
 	if (burnin_running)
 		(void) clock_event_arm_tick();
 
@@ -1314,8 +1315,15 @@ clock_event_tick(struct trap_frame *frame)
 	 * And re-arming is not optional the way it was under a periodic timer:
 	 * a one-shot that nobody re-arms fires exactly once, which is a clock
 	 * that ticks a single time and then a machine that looks hung.
+	 *
+	 * #748: and acknowledged only when the tick really arrived.  A tick a
+	 * raised level held back was acknowledged when it was held, and this
+	 * handler runs again for it from spl_replay() when the level drops; a
+	 * second acknowledgement there dismissed whatever the processor had in
+	 * service by then, which <trap/trap.h> says of trap_in_replay().
 	 */
-	lapic_eoi();
+	if (!trap_in_replay())
+		lapic_eoi();
 	(void) clock_event_arm_tick();
 
 	/*
