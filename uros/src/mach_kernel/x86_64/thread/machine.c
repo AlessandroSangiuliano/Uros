@@ -899,6 +899,37 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	assert(new_act != THR_ACT_NULL && new_act->mact.pcb != PCB_NULL);
 
 	/*
+	 * 🔴 A THREAD ALREADY DESTROYED IS NAMED BEFORE IT IS SWITCHED TO (#749).
+	 *
+	 * context_switch() refuses an incoming context with no floating-point
+	 * area, and that is all it can say: it is handed two contexts, not the
+	 * threads.  Two places write that null -- thread_machine_destroy(),
+	 * after freeing the area when the shuttle's last reference goes, and
+	 * act_machine_create(), which zeroes a new activation's pcb before
+	 * thread_machine_create() gives it an area -- so a context with none
+	 * is a thread already destroyed, which a run queue still held.  Twice,
+	 * during act_test's arm 14, the panic said no more than that.
+	 *
+	 * Here the thread is in hand.  Its last waker first: WAKER_TRACK keeps
+	 * it in the thread, and a freed shuttle still holds it until its memory
+	 * is given out again.  Then what the thread and its activation were.
+	 * Before the address space below, which reads the activation's map.
+	 */
+	if (new_act->mact.pcb->ctx.fpu_area == 0) {
+#if	WAKER_TRACK
+		waker_say(new);
+#endif	/* WAKER_TRACK */
+		panic("switch_context: thread %p, activation %p, has no "
+		      "floating-point area -- a thread already destroyed: "
+		      "state 0x%x%s, ref_count %d, active %d; the activation's "
+		      "ref_count %d, active %d, thread %p (#749)",
+		      new, new_act, new->state,
+		      (new->state & TH_HALTED) ? " (halted: the reaper's)" : "",
+		      new->ref_count, new->active, new_act->ref_count,
+		      new_act->active, new_act->thread);
+	}
+
+	/*
 	 * The address space, if it is changing.  An activation may be
 	 * borrowing another task's map, so this is asked of the activations
 	 * and not of the tasks.
