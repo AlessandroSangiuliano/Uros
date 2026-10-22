@@ -55,16 +55,17 @@
 kern_return_t
 kernel_task_create(
 	task_port_t target_task,
+	mach_port_t host_priv,			/* #752: the authority */
 	vm_offset_t map_base,
 	vm_size_t map_size,
 	task_port_t *child_task)
 {
 	kern_return_t result;
 
-	result = syscall_kernel_task_create(target_task,
+	result = syscall_kernel_task_create(target_task, host_priv,
 		map_base, map_size, child_task);
 	if (result == MACH_SEND_INTERRUPTED)
-		result = mig_kernel_task_create(target_task,
+		result = mig_kernel_task_create(target_task, host_priv,
 			map_base, map_size, child_task);
 	return(result);
 }

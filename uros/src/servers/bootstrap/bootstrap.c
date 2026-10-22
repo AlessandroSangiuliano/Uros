@@ -1232,8 +1232,15 @@ main(int argc, char **argv)
 		    sp->flags &= ~SERVER_IN_KERNEL_F;
 		}
 		if (sp->flags & SERVER_IN_KERNEL_F) {
-		    kr = kernel_task_create(bootstrap_self, sp->mapbase,
-					    sp->mapsize, &user_task);
+		    /*
+		     * #752: kernel_task_create now takes the privileged host
+		     * port as the authority.  bootstrap holds it as
+		     * bootstrap_master_host_port, so collocation still loads.
+		     */
+		    kr = kernel_task_create(bootstrap_self,
+					    bootstrap_master_host_port,
+					    sp->mapbase, sp->mapsize,
+					    &user_task);
 		    sp->mapend = sp->mapbase + sp->mapsize;
 	        }
 		else {

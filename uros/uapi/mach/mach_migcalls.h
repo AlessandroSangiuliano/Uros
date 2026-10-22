@@ -42,6 +42,7 @@ extern kern_return_t mig_task_create(
 
 extern kern_return_t mig_kernel_task_create(
 				mach_port_t	parent_task,
+				mach_port_t	host_priv,
 				vm_offset_t	map_base,
 				vm_size_t	map_size,
 				mach_port_t	*child_task);
