@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #750
+Takes out: trace_frame()'s refusal to walk a frame from ring 3 -- a processor parked in a task's code has its rbp, a register the program uses as it likes, walked as the kernel's chain again; since the step refuses a user address the walk stops at the first frame, so the report says nothing of the ring, and ddb-report-check.sh asks for that line
+Script: scripts/ddb-report-boot.sh
+Expect: ddb-report-check: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/ddb.c b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+index b37db3bb..1bff5373 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/ddb.c
++++ b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+@@ -373,11 +373,6 @@ static void trace(uint64_t rbp)
+  */
+ static void trace_frame(const struct trap_frame *f)
+ {
+-	if ((f->cs & 3) != 0) {
+-		cons_puts("  in ring 3: its rbp is the task's and is not walked — "
+-			  "resolve rip against the program, not the kernel\r\n");
+-		return;
+-	}
+ 	trace(f->rbp);
+ }
+ 
