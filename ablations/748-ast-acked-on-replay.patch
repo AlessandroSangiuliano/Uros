@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #748
+Takes out: the AST handler's trap_in_replay() question -- replayed, it acknowledges a second time, and ast_vector_selftest() counts three acknowledgements for two messages
+Run: --entry 0 600 -smp 4
+Expect: WRONG, not one acknowledgement per message
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+index 83566ff7..dabc96c9 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
++++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
+@@ -366,8 +366,7 @@ static void ipi_ast_handler(struct trap_frame *frame)
+ 	 * one would dismiss whatever the processor has in service by then (see
+ 	 * trap_in_replay() in <trap/trap.h>).
+ 	 */
+-	if (!trap_in_replay())
+-		lapic_eoi();
++	lapic_eoi();
+ }
+ 
+ void ipi_ast_check(unsigned cpu)
