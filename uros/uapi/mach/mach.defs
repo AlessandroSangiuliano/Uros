@@ -860,6 +860,7 @@ simpleroutine memory_object_data_supply(
 /* was skip; memory_object_ready */
 routine kernel_task_create(
 		target_task	: task_t;
+		host_priv	: host_priv_t;
 		map_base	: vm_offset_t;
 		map_size	: vm_size_t;
 	out	child_task	: task_t);

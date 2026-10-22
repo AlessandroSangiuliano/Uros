@@ -2256,10 +2256,16 @@ test_trap_sweep(void)
 	 * And once, not 500 times: each call builds a whole task, and a test
 	 * that runs on every boot has no business doing that in a loop.
 	 */
+	/*
+	 * #752: kernel_task_create now takes the privileged host port.  Pass
+	 * MACH_PORT_NULL: the sweep measures the call, and it is refused --
+	 * KERN_NO_ACCESS on i386, KERN_NOT_SUPPORTED on x86-64 -- as it should be
+	 * for a task that does not hold host_priv.
+	 */
 	SWEEP("kernel_task_create", 1, ({ mach_port_t k;
-		kernel_task_create(me, 0, 4096, &k); }));
+		kernel_task_create(me, MACH_PORT_NULL, 0, 4096, &k); }));
 	SWEEP("kernel_task_create(size0)", 1, ({ mach_port_t k;
-		kernel_task_create(me, 0, 0, &k); }));
+		kernel_task_create(me, MACH_PORT_NULL, 0, 0, &k); }));
 	SWEEP("thread_depress_abort", 2000,
 	      thread_depress_abort(mach_thread_self()));
 

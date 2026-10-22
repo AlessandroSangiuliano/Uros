@@ -2913,11 +2913,79 @@ arm_fourteen_terminate_inside_traps(void)
 	return 1;
 }
 
+/*
+ * ── [15] A kernel-loaded task is refused without the privileged host port ──
+ *
+ * syscall_kernel_task_create() (the trap) and kernel_task_create() (its RPC
+ * twin, the MIG stub libmach links) each make a task in the kernel's own
+ * address space.  #752 gave them an authority: the privileged host port.
+ * Called without it -- MACH_PORT_NULL here -- both must refuse, and refuse the
+ * same way (#548), or a task holding only its own task port could put a thread
+ * into the kernel's address space.  This test is x86-64 only, where the answer
+ * is KERN_NOT_SUPPORTED, the machine having no kernel-loaded task at all (#453);
+ * the same shared check answers KERN_NO_ACCESS on i386, which the i386 suite
+ * exercises by booting (bootstrap still loads a collocated server with the
+ * privileged port it holds).
+ *
+ * Were the refusal taken out (the ablation), the task would be created and the
+ * thread this arm then makes in it would reach pcb_user_to_kernel(), which on
+ * x86-64 stops the machine (#453).  On the fixed tree that line is never run.
+ */
+static int
+arm_fifteen_kernel_task_needs_privilege(void)
+{
+	mach_port_t		me = mach_task_self();
+	mach_port_t		kt_trap = MACH_PORT_NULL, kt_rpc = MACH_PORT_NULL;
+	const kern_return_t	want = KERN_NOT_SUPPORTED;	/* x86-64 (#453) */
+	kern_return_t		kr_trap, kr_rpc;
+
+	kr_trap = syscall_kernel_task_create(me, MACH_PORT_NULL, 0, 0, &kt_trap);
+	kr_rpc = kernel_task_create(me, MACH_PORT_NULL, 0, 0, &kt_rpc);
+
+	if (kr_trap == KERN_SUCCESS || kr_rpc == KERN_SUCCESS) {
+		mach_port_t	kt = (kr_trap == KERN_SUCCESS) ? kt_trap : kt_rpc;
+		mach_port_t	th = MACH_PORT_NULL;
+
+		printf("act_test: [15] a kernel-loaded task was created without "
+		       "the privileged host port — making a thread in it to "
+		       "show the cost (#752/#453)\n");
+		(void) thread_create(kt, &th);
+		printf("act_test: [15] a kernel-loaded task was created without "
+		       "privilege, and a thread in it did not stop the machine "
+		       "— WRONG\n");
+		if (th != MACH_PORT_NULL) {
+			(void) thread_terminate(th);
+			(void) mach_port_deallocate(me, th);
+		}
+		(void) task_terminate(kt);
+		return 0;
+	}
+
+	if (kr_trap != kr_rpc) {
+		printf("act_test: [15] the trap answered 0x%x and the RPC 0x%x "
+		       "— the two paths must agree (#548/#752) — WRONG\n",
+		       kr_trap, kr_rpc);
+		return 0;
+	}
+
+	if (kr_trap != want) {
+		printf("act_test: [15] refused with 0x%x, wanted 0x%x "
+		       "(KERN_NOT_SUPPORTED, x86-64 has no kernel-loaded task) "
+		       "— WRONG\n", kr_trap, want);
+		return 0;
+	}
+
+	printf("act_test: [15] a kernel-loaded task is refused without the "
+	       "privileged host port: the trap and the RPC both answered 0x%x "
+	       "(#752)\n", kr_trap);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 14, r;
+	int		passed = 0, arm_one_passed, arms = 15, r;
 
 	(void) argc;
 	(void) argv;
@@ -2962,11 +3030,19 @@ main(int argc, char **argv)
 	passed += arm_fourteen_terminate_inside_traps();
 
 	/*
-	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the
-	 * machine: it makes the kernel take a fault on its own return
-	 * instruction, and if that fault is not attributed to the thread that
-	 * caused it, nothing after this line runs.  Everything the other arms
-	 * have to say is already printed by the time it is provoked.
+	 * Before arm six, and after everything above has printed: on a healthy
+	 * tree this arm only asks a trap and an RPC to refuse and returns, but on
+	 * the #752 ablation it provokes the same kind of machine stop arm six
+	 * does, so it belongs down here beside it.
+	 */
+	passed += arm_fifteen_kernel_task_needs_privilege();
+
+	/*
+	 * ⚠️ Last, and not by accident.  On a healthy tree this is the only arm
+	 * that can stop the machine: it makes the kernel take a fault on its own
+	 * return instruction, and if that fault is not attributed to the thread
+	 * that caused it, nothing after this line runs.  Everything the other
+	 * arms have to say is already printed by the time it is provoked.
 	 */
 	passed += arm_six_non_canonical_return();
 

@@ -409,7 +409,7 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(syscall_mach_port_allocate_qos, 4),	/* 101 */
 	MACH_TRAP(syscall_task_set_port_space, 2),	/* 102 */
 	MACH_TRAP(syscall_mach_port_allocate_full, 5),	/* 103 */
-	MACH_TRAP(syscall_kernel_task_create, 4),	/* 104 */
+	MACH_TRAP(syscall_kernel_task_create, 5),	/* 104 */
 	MACH_TRAP(syscall_thread_set_exception_ports, 5), /* 105 */
 	MACH_TRAP(syscall_thread_info, 4),		/* 106 */
 	MACH_TRAP(syscall_thread_create, 2),		/* 107 */

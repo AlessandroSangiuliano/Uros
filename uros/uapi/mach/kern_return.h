@@ -357,6 +357,12 @@
 		/* Some thread-oriented operation (semaphore_wait) timed out
 		 */
 
+#define	KERN_NOT_SUPPORTED		50
+		/* The operation is not supported on this machine -- not a
+		 * refusal of this caller, but a facility the target does not
+		 * have at all, such as a kernel-loaded task on x86-64 (#752).
+		 */
+
 #define	KERN_RETURN_MAX			0x100
 		/* Maximum return value allowable
 		 */
