@@ -507,6 +507,7 @@ task_unfreeze(
 kern_return_t
 kernel_task_create(
 	task_t			parent_task,
+	host_t			host,
 	vm_offset_t		map_base,
 	vm_size_t		map_size,
 	task_t			*child_task)
@@ -521,6 +522,7 @@ kernel_task_create(
 	 * was: this removes the path to it, not the guard.
 	 */
 	(void) parent_task;
+	(void) host;
 	(void) map_base;
 	(void) map_size;
 	(void) child_task;
@@ -530,6 +532,17 @@ kernel_task_create(
 	task_t			new_task;
 	task_user_data_data_t	user_data;
 	vm_map_t		old_map;
+
+	/*
+	 * #752: the privileged host port is the authority for making a task in
+	 * the kernel's address space.  Without it, refuse.  The trap resolves it
+	 * with port_name_to_host_priv() and the mach.defs RPC with
+	 * convert_port_to_host_priv(), so both paths are gated the same way, and
+	 * only the holders of host_priv_self (bootstrap and the servers it seeds)
+	 * pass.  x86-64 refuses above, having no kernel-loaded task at all (#453).
+	 */
+	if (host == HOST_NULL)
+		return KERN_NO_ACCESS;
 
 	/*
 	 * Create the task.

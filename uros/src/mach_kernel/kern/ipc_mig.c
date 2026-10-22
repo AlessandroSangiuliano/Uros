@@ -1393,11 +1393,13 @@ syscall_task_create(
 kern_return_t
 syscall_kernel_task_create(
 	mach_port_t	parent_task,
+	mach_port_t	host_port,
 	vm_offset_t	map_base,
 	vm_size_t	map_size,
 	mach_port_t	*child_task)		/* OUT */
 {
 	task_t		t, c;
+	host_t		host;
 	ipc_port_t	port;
 	mach_port_t 	name;
 	kern_return_t	result;
@@ -1406,7 +1408,15 @@ syscall_kernel_task_create(
 	if (t == TASK_NULL)
 		return MACH_SEND_INTERRUPTED;
 
-	result = kernel_task_create(t, map_base, map_size, &c);
+	/*
+	 * #752: the privileged host port is the authority.  Resolve it the way
+	 * the RPC's convert_port_to_host_priv() does; kernel_task_create()
+	 * refuses with KERN_NO_ACCESS when it is HOST_NULL, so the trap and the
+	 * RPC are gated alike (and x86-64 refuses regardless, #453).
+	 */
+	host = port_name_to_host_priv(host_port);
+
+	result = kernel_task_create(t, host, map_base, map_size, &c);
 	if (result == KERN_SUCCESS) {
 		port = (ipc_port_t) convert_task_to_port(c);
 		/* always returns a name, even for non-success return codes */
