@@ -380,7 +380,7 @@ static void usage(void)
  */
 static const char *debugger_why[NCPUS];
 
-const char *ddb_debugger_taken(void)
+static const char *ddb_debugger_taken(void)
 {
 	unsigned	cpu = cpu_number();
 	const char	*why = debugger_why[cpu];
@@ -495,7 +495,8 @@ static int	in_ddb[NCPUS];
 static int	break_char = DDB_BREAK_DEFAULT;
 static int	break_requested;
 
-static void ddb_enter_body(struct trap_frame *frame, const char *why);
+static void ddb_enter_body(struct trap_frame *frame, const char *why,
+			   int report);
 
 /*
  * A character from any console.  Answers TRUE when it was the break and has
@@ -1517,7 +1518,47 @@ static void show_parked(unsigned cpu)
 	trace(ddb_frame[cpu]->rbp);
 }
 
-void ddb_enter(struct trap_frame *frame, const char *why)
+/*
+ * 🔴 WHAT `t', `p' AND `P n' WOULD SAY, SAID BEFORE ANYBODY ASKS (#750).
+ *
+ * An entry through Debugger() is the kernel stopping itself: a panic, a
+ * failed assertion, a deadlock or a poisoned zone it caught.  On a boot
+ * nobody watches, the prompt is the last thing the log will hold.  Without
+ * -r the same panic ends in halt_cpu(), which stops every processor and has
+ * each print its backtrace; with -r, panic() calls Debugger() instead, and
+ * the log ended at the registers.  #749's panic, one boot in 255,691, said
+ * the function it was in and not who had called it.
+ *
+ * So the answers come first, from the functions the commands use: the
+ * backtrace from the frame, every processor as `p' lists it with the thread
+ * it runs, and each parked one's registers and backtrace.
+ *
+ * Not for a breakpoint, a watchpoint or a break from the console, which an
+ * operator at the prompt set off and will ask about; and not for a fault,
+ * whose trap report has printed its backtrace already (trap.c).
+ */
+static void report_before_prompt(const struct trap_frame *frame)
+{
+	unsigned me = cpu_number();
+
+	cons_puts("ddb: the backtrace, as `t' prints it (#750)\r\n");
+	trace(frame->rbp);
+	cons_puts("ddb: the processors, as `p' prints them\r\n");
+	show_processors();
+	for (int i = 0; i < NCPUS; i++) {
+		if (i == (int) me || !machine_slot[i].is_cpu
+		    || !machine_slot[i].running || !ddb_parked[i])
+			continue;
+		cons_puts("ddb: cpu ");
+		cons_putdec((uint64_t) i);
+		cons_puts(", as `P ");
+		cons_putdec((uint64_t) i);
+		cons_puts("' prints it\r\n");
+		show_parked((unsigned) i);
+	}
+}
+
+static void ddb_enter_as(struct trap_frame *frame, const char *why, int report)
 {
 	unsigned	me = cpu_number();
 	int		was_in = in_ddb[me];
@@ -1583,7 +1624,7 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 		cons_ddb_session(1);	/* #599: COM1's latch, after the stop */
 	}
 
-	ddb_enter_body(frame, why);
+	ddb_enter_body(frame, why, report);
 
 	arm_breakpoints();
 
@@ -1595,12 +1636,30 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 	in_ddb[me] = was_in;
 }
 
-static void ddb_enter_body(struct trap_frame *frame, const char *why)
+void ddb_enter(struct trap_frame *frame, const char *why)
+{
+	ddb_enter_as(frame, why, 0);
+}
+
+int ddb_debugger_entry(struct trap_frame *frame)
+{
+	const char	*why = ddb_debugger_taken();
+
+	if (why == (const char *) 0)
+		return 0;
+	ddb_enter_as(frame, why, 1);
+	return 1;
+}
+
+static void ddb_enter_body(struct trap_frame *frame, const char *why,
+			   int report)
 {
 	cons_puts("\r\nddb: ");
 	cons_puts(why);
 	cons_puts("\r\n");
 	show_registers(frame);
+	if (report)
+		report_before_prompt(frame);
 
 	for (;;) {
 		const char *p;
