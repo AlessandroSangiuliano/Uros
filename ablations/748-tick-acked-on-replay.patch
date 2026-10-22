@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #748
+Takes out: the tick's trap_in_replay() question -- a tick held at SPLHI is acknowledged when held and again when replayed, and replay_ack_check() says the replay added an acknowledgement
+Run: --entry 0 600 -smp 4
+Expect: WRONG, a replayed handler acknowledged again
+
+diff --git a/uros/src/mach_kernel/x86_64/time/clock_event.c b/uros/src/mach_kernel/x86_64/time/clock_event.c
+index 6a00e16a..4febdb61 100644
+--- a/uros/src/mach_kernel/x86_64/time/clock_event.c
++++ b/uros/src/mach_kernel/x86_64/time/clock_event.c
+@@ -1322,8 +1322,7 @@ clock_event_tick(struct trap_frame *frame)
+ 	 * second acknowledgement there dismissed whatever the processor had in
+ 	 * service by then, which <trap/trap.h> says of trap_in_replay().
+ 	 */
+-	if (!trap_in_replay())
+-		lapic_eoi();
++	lapic_eoi();
+ 	(void) clock_event_arm_tick();
+ 
+ 	/*

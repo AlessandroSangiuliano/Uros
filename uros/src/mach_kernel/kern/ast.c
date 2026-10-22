@@ -306,8 +306,25 @@ ast_check(void)
 	register int		mycpu;
 	register processor_t	myprocessor;
 	register thread_t	thread = current_thread();
-	spl_t			s = splsched();
+	spl_t			s;
 
+	/*
+	 * 🔴 NO THREAD YET, NOTHING TO CHECK (#748).
+	 *
+	 * cpu_up() makes a processor PROCESSOR_RUNNING before
+	 * cpu_launch_first_thread() gives it a thread, so for a few lines a
+	 * running processor has none.  An AST interrupt there -- on x86-64 the
+	 * scheduler gate's knock, which cpu_up()'s splx() lets through -- came
+	 * down the RUNNING arm below to current_act(), dereferenced the null
+	 * activation and stopped the machine.  With no thread there is no
+	 * activation whose ASTs to propagate and no thread to switch away from:
+	 * the first one is about to be loaded, and the check is answered by
+	 * doing nothing.
+	 */
+	if (thread == THREAD_NULL)
+		return;
+
+	s = splsched();
 	mp_disable_preemption();
 	mycpu = cpu_number();
 

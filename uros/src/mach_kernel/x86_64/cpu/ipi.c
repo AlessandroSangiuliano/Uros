@@ -338,17 +338,47 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
  * running here waited for this processor's next tick -- act_test's arm
  * seven, at four processors, touched up to 4324 pages inside the call --
  * and so did a preemption asked from another processor.
+ *
+ * #748: and how many times it ran on each processor, and how many of those
+ * were replays, so that the boot can ask this handler -- not a stand-in --
+ * whether a raised level holds it and whether it is acknowledged once
+ * (ast_vector_selftest()).  Per processor, written only by its own.
  */
+static uint64_t ast_entries[SMP_MAX_CPUS];
+static uint64_t ast_replays[SMP_MAX_CPUS];
+
 static void ipi_ast_handler(struct trap_frame *frame)
 {
+	unsigned cpu = (unsigned) cpu_number();
+
 	(void) frame;
+	if (cpu < SMP_MAX_CPUS) {
+		ast_entries[cpu]++;
+		if (trap_in_replay())
+			ast_replays[cpu]++;
+	}
 	ast_check();
-	lapic_eoi();
+
+	/*
+	 * #748: acknowledged only when it really arrived.  In class fourteen it
+	 * can be held back by a raised level and run again when the level
+	 * drops, and the acknowledgement was given when it was held: a second
+	 * one would dismiss whatever the processor has in service by then (see
+	 * trap_in_replay() in <trap/trap.h>).
+	 */
+	if (!trap_in_replay())
+		lapic_eoi();
 }
 
 void ipi_ast_check(unsigned cpu)
 {
 	lapic_send_ipi(cpu_to_apic(cpu), IPI_VECTOR_AST);
+}
+
+void ipi_ast_counts(unsigned cpu, uint64_t *entries, uint64_t *replays)
+{
+	*entries = cpu < SMP_MAX_CPUS ? ast_entries[cpu] : 0;
+	*replays = cpu < SMP_MAX_CPUS ? ast_replays[cpu] : 0;
 }
 
 /*

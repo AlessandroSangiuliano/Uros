@@ -44,15 +44,23 @@
  * Sent to one processor, not broadcast, and it carries nothing: the message
  * is the interrupt.  The machine-independent scheduler asks for this when it
  * has queued something for a processor that is running, and what it wants is
- * for that processor to reach a point where it checks -- which is the return
- * from any interrupt.  So the handler does nothing at all, and the useful
- * part is the return path it creates.
+ * for that processor to reach a point where it checks.  The handler runs
+ * ast_check() (#603), which copies the running activation's ASTs into the
+ * processor's word and asks for a switch when one is due, and the return
+ * from it is where those are acted on.
  *
- * Class 15, like the call vector, because a processor that stopped answering
- * these while holding a lock would be a deadlock rather than a priority (see
- * <cpu/spl.h>).
+ * 🔴 CLASS FOURTEEN, NOT FIFTEEN (#748).  Class fifteen is for what a sender
+ * waits on: a processor that stopped answering a call while holding a lock
+ * would be a deadlock rather than a priority.  Nobody waits on this one --
+ * every sender sends and goes on, thread_wait() to sleep -- and its handler
+ * is scheduler code, which splsched() is meant to hold off.  In fifteen it
+ * was let through every raised level, and a processor RUNNING since cpu_up()
+ * and still without a thread took it and stopped the machine in
+ * ast_check().  In fourteen, beside the tick (#522), a raised level holds it
+ * until the level drops; ast_check() also answers a processor with no thread
+ * by doing nothing, for the lines where cpu_up() has lowered the level again.
  */
-#define IPI_VECTOR_AST		0xF2
+#define IPI_VECTOR_AST		0xE2
 
 /*
  * "Stop" (#461).
@@ -122,6 +130,12 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg);
  * a processor it has just asked to go and do something.
  */
 void ipi_ast_check(unsigned cpu);
+
+/*
+ * #748: how many times the AST handler has run on processor `cpu', and how
+ * many of those runs were replays of a message a raised level held back.
+ */
+void ipi_ast_counts(unsigned cpu, uint64_t *entries, uint64_t *replays);
 
 /*
  * Stop every other processor, and do not wait for any of them (#461).

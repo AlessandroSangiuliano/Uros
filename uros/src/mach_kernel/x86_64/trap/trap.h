@@ -59,10 +59,12 @@
  *   0x50..0x5F  message-signalled interrupts, which have no pin (#457)
  *   0xE0        one vector kept for exercising this path by hand
  *   0xE1        the local APIC timer (#522)
+ *   0xE2        the AST message, the one processor-to-processor message
+ *               nobody waits on (#748)
  *   0xF0        the HPET comparator that broadcasts the tick when the local
  *               APIC timer cannot be used (#593) -- class fifteen, because
  *               one processor's spl level must not stop every clock
- *   0xF1..0xFE  processor-to-processor messages
+ *   0xF1..0xFE  processor-to-processor messages that a sender waits on
  *   0xFF        the local APIC's spurious vector
  *
  * 🔴 THE TIMER IS IN CLASS FOURTEEN AND THE MESSAGES ARE IN FIFTEEN, and the
@@ -73,6 +75,8 @@
  * priority.  The tick was at 0xF0, inside that exemption, and it is the one
  * interrupt the machine-independent scheduler is written on the promise that
  * splsched() stops.  It cost a self-deadlock on the run queue lock (#522).
+ * The AST message was at 0xF2, and its handler is scheduler code too: a
+ * processor with no thread yet took it and stopped the machine (#748).
  *
  * ⚠️ The message-signalled block is the class ABOVE the pinned one, and
  * <cpu/spl.h>'s SPL_DEVICE covers both -- a level called "the device level"

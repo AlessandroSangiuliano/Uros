@@ -284,10 +284,11 @@ machine_idle_wake(int cpu)
 	idle_state[cpu_number()].knocks++;
 
 	/*
-	 * The AST vector, whose handler does nothing at all.  That is the whole
-	 * requirement: the processor has to wake up and re-read a word in
-	 * memory, and taking an interrupt and returning from it is how it gets
-	 * back to the top of its idle loop to do so.
+	 * The AST vector.  The whole requirement is the interrupt: the
+	 * processor has to wake up and re-read a word in memory, and taking an
+	 * interrupt and returning from it is how it gets back to the top of its
+	 * idle loop to do so.  Its handler runs ast_check() (#603), which on an
+	 * idle processor has its idle thread to look at (#748).
 	 */
 	ipi_ast_check((uint32_t) cpu);
 }
