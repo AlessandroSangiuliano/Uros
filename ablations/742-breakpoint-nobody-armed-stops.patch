@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #742
+Over: 742-widen-dr0-and-dr7-come-back.patch
+Takes out: the call to debug_came_back(), which handles a breakpoint neither #440's window test nor ddb armed -- with 742-widen-dr0-and-dr7-come-back the first syscall after a tick stops the machine on syscall_entry, as the runner's did at 99338ea9, the report naming breakpoint 0 and DR0 on syscall_entry
+Run: --entry 14 1200 -smp 1
+Expect: trap debug \(vector
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index 1c9233a7..f22cf55c 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1923,9 +1923,6 @@ void trap_dispatch(struct trap_frame *frame)
+ 	if (frame->vector == T_DEBUG && ddb_breakpoint_hit(frame))
+ 		return;
+ 
+-	/* And one nobody here set: see debug_came_back() (#742). */
+-	if (frame->vector == T_DEBUG && debug_came_back(frame))
+-		return;
+ 
+ 	if (frame->vector == T_BREAKPOINT) {
+ 		const char *why = ddb_debugger_taken();
