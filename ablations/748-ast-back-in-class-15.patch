@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #748
+Takes out: the AST message's move to class fourteen -- back at 0xF2, a raised level no longer holds it, and ast_vector_selftest() says so
+Run: --entry 0 600 -smp 4
+Expect: WRONG, a raised level does not hold the AST message
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.h b/uros/src/mach_kernel/x86_64/cpu/ipi.h
+index 5ba26227..68d4c902 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/ipi.h
++++ b/uros/src/mach_kernel/x86_64/cpu/ipi.h
+@@ -60,7 +60,7 @@
+  * until the level drops; ast_check() also answers a processor with no thread
+  * by doing nothing, for the lines where cpu_up() has lowered the level again.
+  */
+-#define IPI_VECTOR_AST		0xE2
++#define IPI_VECTOR_AST		0xF2
+ 
+ /*
+  * "Stop" (#461).
