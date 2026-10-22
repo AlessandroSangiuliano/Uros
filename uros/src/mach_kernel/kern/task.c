@@ -511,6 +511,21 @@ kernel_task_create(
 	vm_size_t		map_size,
 	task_t			*child_task)
 {
+#ifdef	__x86_64__
+	/*
+	 * x86-64 has no collocation and no kernel-loaded tasks (#453): a thread
+	 * created in a kernel-loaded task panics in pcb_user_to_kernel().  Refuse
+	 * to create one at all, so that neither syscall_kernel_task_create() nor
+	 * the mach.defs kernel_task_create RPC can reach that panic -- from ring 3
+	 * or from anywhere else (#752).  The panic stays the last-resort guard it
+	 * was: this removes the path to it, not the guard.
+	 */
+	(void) parent_task;
+	(void) map_base;
+	(void) map_size;
+	(void) child_task;
+	return KERN_NOT_SUPPORTED;
+#else	/* __x86_64__ */
 	kern_return_t		retval;
 	task_t			new_task;
 	task_user_data_data_t	user_data;
@@ -587,6 +602,7 @@ kernel_task_create(
 #endif	/* MACH_KDB */
 
 	return (KERN_SUCCESS);
+#endif	/* __x86_64__ */
 }
 
 kern_return_t
