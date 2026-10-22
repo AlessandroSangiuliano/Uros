@@ -408,11 +408,21 @@ current_stack_selftest(void)
 static void
 ast_vector_check(void)
 {
-	unsigned	self = (unsigned) cpu_number();
+	unsigned	self;
 	uint64_t	e0, r0, e, r, base, rbase, held, down, replays;
 	uint64_t	at_zero, d, acks, spins;
 	int		had = interrupts_enabled(), held_ok;
 	spl_t		old;
+
+	/*
+	 * Held on this processor for the whole check: the messages go to it
+	 * and the counts are its own, and a thread that moved in between would
+	 * ask one processor and read another.  The kernel's check of
+	 * cpu_number() said so, read here at level zero with preemption
+	 * allowed: one WRONG in every boot.
+	 */
+	disable_preemption();
+	self = (unsigned) cpu_number();
 
 	/* One: at level zero, it runs at once.  Bounded. */
 	ipi_ast_counts(self, &e0, &r0);
@@ -452,6 +462,7 @@ ast_vector_check(void)
 	replays = r - rbase;
 	if (had)
 		interrupts_enable();
+	enable_preemption();
 
 	held_ok = at_zero == 1 && held == 0 && down == 1 && replays == 1;
 	printf("startup: the AST message ran %u time at level zero, %u while "
