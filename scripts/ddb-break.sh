@@ -1,7 +1,7 @@
 #!/bin/sh
 # Enter the debugger on a RUNNING machine, from the console (#428).
 #
-# Boots entry 1 (-r: debugger armed, nothing else), waits until the kernel is
+# Boots the entry titled "stay up, debugger armed", waits until the kernel is
 # past its self-tests and running threads, then types the break character and
 # waits for the prompt.  No fault is involved: this is the door that was
 # missing, the one for a machine that has stopped answering rather than died.
@@ -9,6 +9,7 @@ set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 . "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-break.log}
+iso_for_entry "stay up, debugger armed" || exit 1
 IN=$(mktemp -u /tmp/ddb-brk.XXXXXX)
 mkfifo "$IN"; : > "$LOG"
 qemu-system-x86_64 -cpu max -smp 4 \
@@ -27,7 +28,7 @@ exec 3>"$IN"
 
 # ── The console door, on a machine that is actually running ───────────
 #
-# GRUB entry 11 is `-rS': the kernel parks the thread that would reach
+# That entry is `-rS': the kernel parks the thread that would reach
 # bootstrap_create and idles instead, so there is a live machine to break
 # into.  Every other entry stops within milliseconds of its first tick, which
 # is why this door went written and undemonstrated.

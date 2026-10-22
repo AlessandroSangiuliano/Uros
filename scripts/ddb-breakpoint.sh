@@ -8,6 +8,7 @@ set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 . "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-breakpoint.log}
+iso_for_entry "stay up, debugger armed" || exit 1
 TARGET=$(nm "$REPO/uros/build-x86_64/iso-x86_64/boot/mach_kernel" | awk '$3=="clock_event_tick"{print $1}')
 [ -n "$TARGET" ] || { echo "FAILED: no clock_event_tick symbol"; exit 1; }
 IN=$(mktemp -u /tmp/ddb-bp.XXXXXX); mkfifo "$IN"; : > "$LOG"

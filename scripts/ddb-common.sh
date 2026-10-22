@@ -77,3 +77,30 @@ ask() {
 	echo "FAILED: '$1' never answered"
 	return 1
 }
+
+# Build the image so that it boots the GRUB entry titled $1, and say which.
+#
+# 🔴 BY ITS TITLE, NOT ITS NUMBER (#750).  These harnesses named their entries
+# by number and the numbers moved: ddb-drive.sh built entry 9, which by the
+# time #750 ran it was "pmap under concurrency", and the others booted
+# whatever the image had last been built for -- entry 0 there, where no
+# prompt opens -- so all six said FAILED about a kernel they never asked.  The
+# title is what an entry is; its number is only where it sits in grub.cfg.
+# The image takes the entry at build time (UROS_X86_64_BOOT_ENTRY, the
+# uros_iso target), which is why this builds it.
+#
+# $1 the title inside "UrMach x86-64 (...)", whole.
+iso_for_entry() {
+	_e_n=$(awk -v want="menuentry \"UrMach x86-64 ($1)\" {" '
+		/^menuentry / { if ($0 == want) { print n; exit } n++ }' \
+		"$REPO/uros/src/mach_kernel/x86_64/boot/grub.cfg")
+	if [ -z "$_e_n" ]; then
+		echo "FAILED: grub.cfg has no entry titled \"UrMach x86-64 ($1)\""
+		return 1
+	fi
+	if ! UROS_X86_64_BOOT_ENTRY=$_e_n ninja -C "$REPO/uros/build-x86_64" uros_iso >/dev/null; then
+		echo "FAILED: the image for entry $_e_n would not build"
+		return 1
+	fi
+	echo "booting GRUB entry $_e_n, \"UrMach x86-64 ($1)\""
+}
