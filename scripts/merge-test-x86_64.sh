@@ -100,6 +100,10 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #   taskpanic -t panics inside a system call while another processor is held
 #             in a task's code, and no processor reports a trap of its own
 #             after it; NOT ASKED when no second processor came (#688)
+#   ddbreport -t's panic with the debugger armed: before its first prompt the
+#             debugger said the backtrace and every processor
+#             (scripts/ddb-report-check.sh, #750); NOT ASKED when -t never
+#             asked, so the prompt never opened
 #   halted    the harness's verdict, and the console's final copy whole after
 #             the machine stops (scripts/final-copy-check.sh, #702)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
@@ -145,6 +149,7 @@ ENTRIES="
 24 panic2
 40 earlypanic
 53 taskpanic
+55 ddbreport
 25 harness
 26 harness
 27 harness
@@ -259,7 +264,7 @@ taskpanic_held() {	# full-log
 }
 
 judge() {	# entry verdict log-of-the-harness full-log accelerator
-	local e=$1 v=$2 h=$3 f=$4 a=$5
+	local e=$1 v=$2 h=$3 f=$4 a=$5 out
 	NOTE=""
 	case $v in
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
@@ -377,6 +382,25 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 			NOTE="NOT ASKED: taskpanic_load loaded the machine and -t did not ask; $(taskpanic_held "$f")"
 		else
 			NOTE="NOT ASKED: the boot ended before -t asked, and nothing loaded it; $(taskpanic_held "$f")"
+		fi ;;
+	# #750: the same panic with the debugger armed, whose log ends at the
+	# prompt; what came before it is ddb-report-check.sh's to judge, and its
+	# line is the note when it is not a pass.
+	ddbreport) if grep -aq 'panic(cpu [0-9]*): task_panic: asked for with -t' "$f"; then
+			out=$("$HERE/scripts/ddb-report-check.sh" "$f" clock_event_tick)
+			case $out in
+			"ddb-report-check: PASS"*) ;;
+			*)	NOTE="${out//[()]/}"
+				false ;;
+			esac
+		elif grep -aqE 'UrMach x86-64: trap |no handler' "$f"; then
+			NOTE="no -t panic, and a trap"
+			false
+		elif ! grep -aq 'passed: reached the end, nothing unexplained' "$h"; then
+			NOTE="no -t panic, and the harness did not pass the boot"
+			false
+		else
+			NOTE="NOT ASKED: the boot ended before -t asked, so the debugger never opened"
 		fi ;;
 	esac
 }

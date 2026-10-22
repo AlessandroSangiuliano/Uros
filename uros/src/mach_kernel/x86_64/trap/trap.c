@@ -1927,14 +1927,8 @@ void trap_dispatch(struct trap_frame *frame)
 	if (frame->vector == T_DEBUG && debug_came_back(frame))
 		return;
 
-	if (frame->vector == T_BREAKPOINT) {
-		const char *why = ddb_debugger_taken();
-
-		if (why != (const char *) 0) {
-			ddb_enter(frame, why);
-			return;
-		}
-	}
+	if (frame->vector == T_BREAKPOINT && ddb_debugger_entry(frame))
+		return;
 
 	/*
 	 * A fault from ring 3, which is recoverable because of where it came

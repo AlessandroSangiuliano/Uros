@@ -63,13 +63,18 @@ void ddb_enter(struct trap_frame *frame, const char *why);
 
 /*
  * Whether the breakpoint that just arrived was a Debugger() request, and if
- * so what it said.  Answers NULL for a breakpoint from anywhere else -- an
- * `int3' in the code under test, or the boot self-test's own -- so the two
- * can never be confused for one another.
+ * so open the prompt for it, with what it said, and answer nonzero.  Answers
+ * zero for a breakpoint from anywhere else -- an `int3' in the code under
+ * test, or the boot self-test's own -- so the two can never be confused for
+ * one another.
  *
  * Consumes: a reason is reported once, to the trap that it belongs to.
+ *
+ * 🔴 AND THE PROMPT IT OPENS STARTS WITH THE ANSWERS (#750): an entry that
+ * the kernel asked for says the backtrace and where every processor is
+ * before its first prompt.  ddb.c says why.
  */
-const char *ddb_debugger_taken(void);
+int ddb_debugger_entry(struct trap_frame *frame);
 
 /*
  * Look for the break character on the console and open the prompt if it is

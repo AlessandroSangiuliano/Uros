@@ -19,6 +19,7 @@ set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 . "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-objects.log}
+iso_for_entry "stay up, debugger armed" || exit 1
 IN=$(mktemp -u /tmp/ddb-obj.XXXXXX); mkfifo "$IN"; : > "$LOG"
 qemu-system-x86_64 -cpu max -smp 4 -cdrom "$REPO/uros/build-x86_64/uros-x86_64.iso" \
 	-nographic -serial mon:stdio -no-reboot < "$IN" > "$LOG" 2>&1 &

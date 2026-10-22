@@ -6,8 +6,8 @@
 # never opens the prompt.  Reading the code and believing it is exactly the
 # habit that let five defects through in #453.
 #
-# So this boots GRUB entry 9 (-rB: debugger armed, Debugger() called from
-# ordinary kernel context), waits for the prompt to ACTUALLY appear on the
+# So this boots the entry titled "debugger entry" (-rB: debugger armed,
+# Debugger() called from ordinary kernel context), waits for the prompt to ACTUALLY appear on the
 # wire, then types at it and reads the answers back.
 #
 # ⚠️ Waits for the prompt rather than sleeping a guessed number of seconds.
@@ -15,11 +15,11 @@
 # boot messages and then reports that the debugger answered nothing.
 set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+. "$(dirname "$0")/ddb-common.sh"	# iso_for_entry (#750)
 LOG=${1:-$HOME/uros-tests/ddb-drive.log}
 IN=$(mktemp -u /tmp/ddb-in.XXXXXX)
 
-ninja -C "$REPO/uros/build-x86_64" uros_iso >/dev/null
-UROS_X86_64_BOOT_ENTRY=9 ninja -C "$REPO/uros/build-x86_64" uros_iso >/dev/null 2>&1 || true
+iso_for_entry "debugger entry" || exit 1
 
 mkfifo "$IN"
 : > "$LOG"
