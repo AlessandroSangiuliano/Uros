@@ -1,0 +1,75 @@
+Kind: widen
+Issue: #748
+Holds open: the window run 39620820519's processor 3 was knocked in -- after cpu_up() has made a processor RUNNING and lowered its level again, before cpu_launch_first_thread() gives it a thread; every processor the scheduler gate knocks sends the AST message to itself there and waits until its handler has run, and machine_processors_ready() says how many did, in thread context; the fixed tree must pass, ast_check() answering each by doing nothing; at four processors, so that three are knocked
+Run: --entry 0 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/startup.c b/uros/src/mach_kernel/kern/startup.c
+index 6a57c428..51b3b7c5 100644
+--- a/uros/src/mach_kernel/kern/startup.c
++++ b/uros/src/mach_kernel/kern/startup.c
+@@ -189,6 +189,7 @@
+  */
+ 
+ #include <xpr_debug.h>
++#include <stdint.h>		/* 748-widen */
+ #include <cpus.h>
+ #include <mach_host.h>
+ #include <kernel_test.h>
+@@ -650,6 +651,29 @@ cpu_launch_first_thread(
+ 
+ 	cpu_up(mycpu);
+ 
++	/* 748-widen: the scheduler gate's knock, in the window cpu_up()
++	 * opens -- RUNNING, no thread yet, at the level cpu_up() lowered to
++	 * again -- on every processor the gate knocks; said by
++	 * machine_processors_ready(), in thread context. */
++	if (th == THREAD_NULL) {
++		extern void ipi_ast_check(unsigned);
++		extern void ipi_ast_counts(unsigned, uint64_t *, uint64_t *);
++		extern volatile unsigned widen_748_knocked;
++		uint64_t e0, r0, e = 0, r;
++		unsigned long spins;
++
++		ipi_ast_counts((unsigned) mycpu, &e0, &r0);
++		ipi_ast_check((unsigned) mycpu);
++		for (spins = 0; spins < 100000000UL; spins++) {
++			ipi_ast_counts((unsigned) mycpu, &e, &r);
++			if (e != e0)
++				break;
++			__asm__ volatile("pause");
++		}
++		if (e != e0)
++			__sync_fetch_and_add(&widen_748_knocked, 1);
++	}
++
+ 	start_timer(&kernel_timer[mycpu]);
+ 
+ 	/*
+diff --git a/uros/src/mach_kernel/x86_64/cpu/startup.c b/uros/src/mach_kernel/x86_64/cpu/startup.c
+index b3d0c9a8..5273ea77 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/startup.c
++++ b/uros/src/mach_kernel/x86_64/cpu/startup.c
+@@ -399,6 +399,8 @@ current_stack_selftest(void)
+  * lower it with interrupts off, so that the replay is all that runs, and
+  * see that the replay added no acknowledgement.
+  */
++volatile unsigned widen_748_knocked;	/* 748-widen */
++
+ static void
+ replay_ack_check(void)
+ {
+@@ -488,6 +490,14 @@ machine_processors_ready(void)
+ 		       " — WRONG, one that never goes idle is one the "
+ 		       "scheduler will never dispatch to (#461)");
+ 
++		/* 748-widen: said here, in thread context. */
++		{
++			extern volatile unsigned widen_748_knocked;
++
++			printf("748-widen: %u processors knocked between cpu_up() "
++			       "and their first thread\n", widen_748_knocked);
++		}
++
+ 		hwp_report();		/* #736: every processor is past it now */
+ 
+ 		/* With the clock running, in thread context (#748). */
