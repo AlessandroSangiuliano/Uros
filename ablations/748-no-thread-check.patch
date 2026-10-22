@@ -1,0 +1,38 @@
+Kind: ablation
+Issue: #748
+Over: 748-widen-knock-after-cpu-up.patch
+Takes out: ast_check()'s return for a processor with no thread yet -- over the widen, each knocked processor goes down the RUNNING arm to the null activation and GCC's ud2 stops the machine, as processor 3's did at entry 41
+Run: --entry 0 600 -smp 4
+Expect: trap invalid opcode \(vector
+
+diff --git a/uros/src/mach_kernel/kern/ast.c b/uros/src/mach_kernel/kern/ast.c
+index 96f4f544..155689bf 100644
+--- a/uros/src/mach_kernel/kern/ast.c
++++ b/uros/src/mach_kernel/kern/ast.c
+@@ -306,25 +306,8 @@ ast_check(void)
+ 	register int		mycpu;
+ 	register processor_t	myprocessor;
+ 	register thread_t	thread = current_thread();
+-	spl_t			s;
++	spl_t			s = splsched();
+ 
+-	/*
+-	 * 🔴 NO THREAD YET, NOTHING TO CHECK (#748).
+-	 *
+-	 * cpu_up() makes a processor PROCESSOR_RUNNING before
+-	 * cpu_launch_first_thread() gives it a thread, so for a few lines a
+-	 * running processor has none.  An AST interrupt there -- on x86-64 the
+-	 * scheduler gate's knock, which cpu_up()'s splx() lets through -- came
+-	 * down the RUNNING arm below to current_act(), dereferenced the null
+-	 * activation and stopped the machine.  With no thread there is no
+-	 * activation whose ASTs to propagate and no thread to switch away from:
+-	 * the first one is about to be loaded, and the check is answered by
+-	 * doing nothing.
+-	 */
+-	if (thread == THREAD_NULL)
+-		return;
+-
+-	s = splsched();
+ 	mp_disable_preemption();
+ 	mycpu = cpu_number();
+ 
