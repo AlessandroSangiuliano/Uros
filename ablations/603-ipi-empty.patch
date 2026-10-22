@@ -1,20 +1,20 @@
 Kind: ablation
 Issue: #603
 Over: 603-act-ast.patch
-Takes out: ast_check() from the AST interrupt -- it is an EOI and nothing else again, so a suspend or a preemption asked from another processor waits for this one's next tick; since the way back to ring 3 looks at the running activation's ASTs as well (#603), that look covers it, so this goes over 603-act-ast.patch, which takes the look out
+Takes out: ast_check() from the AST interrupt -- it is an EOI and nothing else again, so a suspend or a preemption asked from another processor waits for this one's next tick; since the way back to ring 3 looks at the running activation's ASTs as well (#603), that look covers it, so this goes over 603-act-ast.patch, which takes the look out; regenerated over #748's handler, which counts its runs and acknowledges only outside a replay, the line taken out the same
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[7\] .*WRONG \(#603\)
 Expect: thread_suspend: activation .* resolved [0-9]+ page faults from ring 3 between the stop being asked and the stop -- WRONG \(#603\)
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ipi.c b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-index acedc379..7477b9e7 100644
+index 83566ff7..b3f13224 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/ipi.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/ipi.c
-@@ -340,7 +340,6 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
- static void ipi_ast_handler(struct trap_frame *frame)
- {
- 	(void) frame;
+@@ -357,7 +357,6 @@ static void ipi_ast_handler(struct trap_frame *frame)
+ 		if (trap_in_replay())
+ 			ast_replays[cpu]++;
+ 	}
 -	ast_check();
- 	lapic_eoi();
- }
  
+ 	/*
+ 	 * #748: acknowledged only when it really arrived.  In class fourteen it
