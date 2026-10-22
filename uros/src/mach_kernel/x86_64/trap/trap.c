@@ -1709,6 +1709,84 @@ user_fault_exception(const struct trap_frame *frame,
 	return TRUE;
 }
 
+/*
+ * 🔴 A BREAKPOINT THAT NOBODY HERE ARMED (#742).
+ *
+ * This kernel arms a debug register in two places: #440's window test, once
+ * at boot, which then clears every one of them and reads them back, and ddb,
+ * whose breakpoints ddb_breakpoint_hit() has already answered for.  On
+ * GitHub's Xeon 6973P-C runners, under KVM, DR0 and DR7 came back holding the
+ * window test's values long after the read-back had found them clear, and the
+ * next syscall stopped the machine on syscall_entry.  Nothing in the guest
+ * wrote them; nothing in the guest can stop whatever did.  So this keeps it
+ * from stopping the machine: a breakpoint that fires while the window test is
+ * not waiting for one, and that ddb did not set, is cleared with every other
+ * debug register, said, and the instruction resumed.
+ *
+ * Said here, in the handler, as the expected traps say they are resuming:
+ * through the wire, inside the console's report (#702).  This can be the
+ * syscall entry's window, on the debug stack with interrupts off, which is
+ * where the report that used to stop the machine was printed too.  In full
+ * the first time, with what the registers held; after that at the 2nd, 4th,
+ * 8th time and so on, since what did it once may do it at every syscall.
+ * scripts/merge-test-x86_64.sh counts the boots that say "the debug registers
+ * came back".
+ */
+static volatile uint64_t debug_came_back_count;
+
+static int debug_came_back(struct trap_frame *frame)
+{
+	uint64_t dr6 = read_dr6();
+	uint64_t dr7 = read_dr7();
+	uint64_t n;
+	int fired = 0;
+
+	if (expect_armed && expect_vector == T_DEBUG)
+		return 0;		/* the window test's own, answered below */
+	for (unsigned i = 0; i < DR_COUNT; i++)
+		if ((dr6 & DR6_HIT(i)) && (dr7 & (3UL << (2 * i))))
+			fired = 1;
+	if (!fired)
+		return 0;		/* a single step, or no slot enabled */
+
+	n = atomic_add64(&debug_came_back_count, 1) + 1;
+	if ((n & (n - 1)) == 0) {
+		cons_report_begin();
+		if (n == 1) {
+			tputs("UrMach x86-64: breakpoint at ");
+			tputhex(frame->rip);
+			tputs(" on processor ");
+			if (lapic_present() && apic_to_cpu(lapic_id()) >= 0)
+				tputdec((unsigned) apic_to_cpu(lapic_id()));
+			else
+				tputc('?');
+			tputs(", armed neither by #440's window test nor by ddb"
+			      " — the debug registers came back; cleared again,"
+			      " resuming (#742)\r\n");
+			report_debug_registers();
+		} else {
+			tputs("UrMach x86-64: the debug registers came back ");
+			tputdec(n);
+			tputs(" times so far, each cleared again (#742)\r\n");
+		}
+		cons_report_end();
+	}
+
+	write_dr7(DR7_RESET);
+	for (unsigned i = 0; i < DR_COUNT; i++)
+		write_dr(i, 0);
+	write_dr6(DR6_RESET);
+
+	/*
+	 * Not needed with DR7 clear, since nothing is left to fire on the
+	 * instruction; set anyway, as the expected path below sets it, so that
+	 * a breakpoint the clearing did not reach still cannot hold the
+	 * processor on the same instruction.
+	 */
+	frame->rflags |= RFLAGS_RF;
+	return 1;
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
 	/*
@@ -1843,6 +1921,10 @@ void trap_dispatch(struct trap_frame *frame)
 	 * through exactly as before.
 	 */
 	if (frame->vector == T_DEBUG && ddb_breakpoint_hit(frame))
+		return;
+
+	/* And one nobody here set: see debug_came_back() (#742). */
+	if (frame->vector == T_DEBUG && debug_came_back(frame))
 		return;
 
 	if (frame->vector == T_BREAKPOINT) {
