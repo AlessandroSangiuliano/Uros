@@ -38,6 +38,7 @@
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
+#include <time/tsc.h>		/* #748: the hold's bound */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <time/rcu_tick_test.h>	/* #649: -U */
 #include <cpu/sprintf_test.h>	/* #655: -K */
@@ -384,6 +385,63 @@ current_stack_selftest(void)
 	       ? "WRONG, stack_privilege() recorded another" : "PASS");
 }
 
+/*
+ * 🔴 A REPLAY ADDS NO ACKNOWLEDGEMENT (#748).
+ *
+ * A vector a raised level holds back is acknowledged by trap_dispatch() when
+ * it is held, and its handler runs again from spl_replay() when the level
+ * drops.  A handler that acknowledged there as well dismissed whatever the
+ * processor had in service by then -- the tick's did, until #748, and the
+ * boot's own tests could not see it: the one that counts acknowledgements
+ * runs before the clock does.  So, with the clock running and in thread
+ * context, on every boot: hold the level until something has been held --
+ * at a hundred ticks a second, the tick within ten milliseconds -- then
+ * lower it with interrupts off, so that the replay is all that runs, and
+ * see that the replay added no acknowledgement.
+ */
+static void
+replay_ack_check(void)
+{
+	uint64_t	hz = tsc_hz(), t0, held0, acks, replays, spins;
+	int		had = interrupts_enabled(), held = 0;
+	spl_t		old;
+
+	old = splhigh();
+	held0 = spl_deferred_count();
+	t0 = rdtsc_ordered();
+	for (spins = 0; ; spins++) {
+		if (spl_deferred_count() != held0) {
+			held = 1;
+			break;
+		}
+		if (hz != 0 ? rdtsc_ordered() - t0 > hz / 10
+			    : spins > 400000000ULL)
+			break;
+		cpu_pause();
+	}
+	interrupts_disable();
+	acks = lapic_ack_count();
+	replays = spl_replayed_count();
+	splx(old);
+	acks = lapic_ack_count() - acks;
+	replays = spl_replayed_count() - replays;
+	if (had)
+		interrupts_enable();
+
+	if (!held) {
+		printf("startup: nothing arrived to be held in 100 ms at SPLHI, "
+		       "so whether a replay adds an acknowledgement is NOT ASKED "
+		       "(#748)\n");
+		return;
+	}
+	printf("startup: %u replayed after a hold at SPLHI, with %u "
+	       "acknowledgements added%s (#748)\n",
+	       (unsigned) replays, (unsigned) acks,
+	       acks == 0 && replays > 0
+	       ? " -- each was acknowledged once, when it was held"
+	       : " -- WRONG, a replayed handler acknowledged again");
+}
+
 void
 machine_processors_ready(void)
 {
@@ -431,6 +489,9 @@ machine_processors_ready(void)
 		       "scheduler will never dispatch to (#461)");
 
 		hwp_report();		/* #736: every processor is past it now */
+
+		/* With the clock running, in thread context (#748). */
+		replay_ack_check();
 
 		/*
 		 * What one line on this console costs, once per boot (#551).
