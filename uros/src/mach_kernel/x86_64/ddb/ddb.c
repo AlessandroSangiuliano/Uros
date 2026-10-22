@@ -281,30 +281,39 @@ static void examine(uint64_t addr)
 }
 
 /*
- * The same frame-pointer walk the fault report uses, with the same
- * suspicion: alignment, canonical form and a mapping are checked before
- * anything is read, and a frame that does not move upward is not a frame.
+ * The same frame-pointer walk the fault report uses, through the same step:
+ * x86_64_frame_read() checks alignment, a kernel address and a mapping before
+ * anything is read (#750), and a frame that does not move upward is not a
+ * frame.
+ *
+ * 🔴 This one asked for a canonical address, after #518 had made the fault
+ * report ask for a kernel one, and a low frame pointer passed: the kernel's
+ * tables map the low gigabyte (#640), the read went through the task at the
+ * prompt, and the report a panic opened the debugger with stopped at cpu 0's
+ * registers, parked in a task's code with 0x3040 in rbp (run 39781890422).
+ *
+ * When not even the first frame can be read, it says why, so that `t' on an
+ * address answers instead of printing nothing for the operator to take as a
+ * chain with no frames.
  */
 #define DDB_TRACE_MAX	24
 
 static void trace(uint64_t rbp)
 {
-	pmap_t kernel = pmap_kernel();
-
 	for (unsigned depth = 0; depth < DDB_TRACE_MAX; depth++) {
-		const uint64_t *frame;
 		uint64_t next, ret;
+		const char *no = x86_64_frame_read(rbp, &next, &ret);
 
-		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+		if (no != 0) {
+			if (depth == 0) {
+				cons_puts("  no backtrace: rbp ");
+				cons_puthex64(rbp);
+				cons_puts(" is ");
+				cons_puts(no);
+				cons_puts("\r\n");
+			}
 			return;
-		if (pmap_extract(kernel, rbp) == 0
-		    || pmap_extract(kernel, rbp + 8) == 0)
-			return;
-
-		frame = (const uint64_t *)(uintptr_t)rbp;
-		next = frame[0];
-		ret = frame[1];
-
+		}
 		if (ret == 0)
 			return;
 

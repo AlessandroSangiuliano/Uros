@@ -858,12 +858,13 @@ void x86_64_backtrace_after(uint64_t rbp, void (*first)(void))
  * the boot log and letting a reader form an impression is what #451 removed
  * from the harness — 130 self-tests with no way to fail.
  *
- * So this walks the chain exactly as the printer above and the debugger's `t'
- * do, and answers three things: how deep it got, what sits immediately above
- * the interrupted code, and whether a named function was reached.  The last is
- * what separates a chain that is whole from one that is merely non-empty — a
- * walk that breaks in the middle still returns frames, and they still have
- * names, and nothing about them says the bottom is missing.
+ * So this walks the chain as the printer above and the debugger's `t' do, by
+ * the same step (#750), and answers three things: how deep it got, what sits
+ * immediately above the interrupted code, and whether a named function was
+ * reached.  The last is what separates a chain that is whole from one that is
+ * merely non-empty — a walk that breaks in the middle still returns frames,
+ * and they still have names, and nothing about them says the bottom is
+ * missing.
  *
  * ⚠️ The first name is the CALLER, not the interrupted function.  A frame
  * pointer names where its own function will return to, so the function that
