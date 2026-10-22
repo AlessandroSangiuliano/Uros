@@ -2126,19 +2126,28 @@ mount_fs(register struct ext2fs_file	*fp)
 	 * Only the first (uncached) mount reaches here.
 	 */
 	if (fp->f_fs->s_state & EXT2_VALID_FS) {
-		unsigned int	now;
-
 		fp->f_fs->s_state &= ~EXT2_VALID_FS;
 		fp->f_fs->s_mnt_count++;
-		/* #290: and when, which this write is the one to say */
+	}
+
+	/*
+	 * #290: and when, at every first mount and not only the ones that
+	 * find the volume clean.  A volume a crash left in use is mounted
+	 * again with nothing for #284 to mark, and the time it keeps would be
+	 * the mount before the crash's, for as long as boots kept crashing.
+	 * Linux writes the mount time at every mount too.
+	 */
+	{
+		unsigned int	now;
+
 		if (ext2fs_wall_time(&now) == 0) {
 			fp->f_fs->s_mtime = now;
 			fp->f_fs->s_wtime = now;
 		} else
 			printf("ext2fs: the battery clock gave no time: the "
 			       "mount and write times stay as they were (#290)\n");
-		(void) write_super(fp);
 	}
+	(void) write_super(fp);
 
 	/* Cache for subsequent opens in per-mount state */
 	if (m) {
