@@ -1018,10 +1018,15 @@ static int readable(uint64_t va, uint64_t bytes)
  * is not the same as "blocked with one": a thread that has never run carries
  * a continuation too, because thread_start() sets it.  The line below the
  * list says which case it is.
+ *
+ * ⚠️ And an eighth column, `H', which that debugger never had (#749): the
+ * thread is halted, handed to the reaper by thread_terminate_self().  A
+ * thread with `H' on a run queue, or running, is one that should not exist
+ * any more, and it is the question #749's panics asked.
  */
 static void put_state(const struct thread_shuttle *t)
 {
-	char	col[8];
+	char	col[9];
 	int	state = t->state;
 
 	col[0] = (state & TH_RUN)   ? 'R' : '.';
@@ -1031,7 +1036,8 @@ static void put_state(const struct thread_shuttle *t)
 	col[4] = (state & TH_UNINT) ? 'N' : '.';
 	col[5] = (state & TH_IDLE)  ? 'I' : '.';
 	col[6] = t->continuation    ? 'C' : '.';
-	col[7] = 0;
+	col[7] = (state & TH_HALTED) ? 'H' : '.';
+	col[8] = 0;
 
 	cons_puts(" ");
 	cons_puts(col);

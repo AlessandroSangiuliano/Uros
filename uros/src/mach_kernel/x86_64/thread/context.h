@@ -144,6 +144,14 @@ void context_exempt_vector_state(struct context *ctx);
 extern unsigned long	context_fpu_exempted;
 
 /*
+ * How many kernel stacks thread_machine_create() has taken from stack_alloc()
+ * and how many have gone back to stack_free() (#749).  Read by quiet_census,
+ * beside the threads alive: a stack nobody gives back is one the census can
+ * count and nothing else sees.
+ */
+void	thread_machine_stack_counts(uint64_t *taken, uint64_t *given_back);
+
+/*
  * 🔴 AND HOW OFTEN THE EXEMPTION FIRES, WHICH IS OFF (#561).
  *
  *	cmake -DUROS_CONTEXT_FPU_COUNT=ON

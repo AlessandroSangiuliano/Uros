@@ -40,6 +40,7 @@
 #include <kern/lock.h>
 #include <mach/vm_param.h>	/* VM_MIN_KERNEL_ADDRESS (#657) */
 #include <kern/mutex_track.h>
+#include <kern/zalloc.h>	/* #749: the shuttle zone, its lock and its count */
 #include <vm/vm_page.h>
 #include <vm/vm_object.h>
 #include <pmap/pmap.h>
@@ -647,6 +648,51 @@ quiet_census_walk(int *had, unsigned int *unreadable)
 	return n;
 }
 
+/*
+ * 🔴 NO KERNEL STACK OUTLIVES ITS THREAD (#749).
+ *
+ * Every stack x86-64 takes is a thread shuttle's, so the stacks held can never
+ * be more than the shuttles that exist.  On omen at 29bd5e94, before
+ * thread_machine_destroy() gave them back, entry 15 ended with 3095 held for
+ * 39 threads alive.
+ *
+ * ⚠️ Set beside the shuttle zone's count, read under the zone's own lock, and
+ * not beside the threads alive: the processor set lets a thread go a moment
+ * before it is destroyed, and that moment would read as a stack too many.  A
+ * shuttle is counted by zalloc() before thread_machine_create() takes its
+ * stack, and uncounted by zfree() after thread_machine_destroy() gives it
+ * back, both under that lock, so while it is held no creation or destruction
+ * can put a stack outside the count.  The lock is zalloc.c's, taken here
+ * through the struct that holds it (kern/zalloc.h); the shuttle zone has no
+ * per-processor magazine (#330) to count elements outside it.
+ *
+ * With each report as the machine goes idle, because the harness ends an
+ * ordinary run before the census below is reached.
+ */
+extern struct zone	*thread_shuttle_zone;	/* kern/thread.c */
+
+static void
+quiet_stacks_so_far(void)
+{
+	uint64_t	taken, given_back, held;
+	int		shuttles;
+
+	simple_lock(&thread_shuttle_zone->lock);
+	shuttles = thread_shuttle_zone->count;
+	thread_machine_stack_counts(&taken, &given_back);
+	simple_unlock(&thread_shuttle_zone->lock);
+	held = taken - given_back;
+
+	printf("quiet_census: kernel stacks taken %llu, given back %llu, so "
+	       "%llu held, by %d thread shuttles and %d threads alive%s "
+	       "(#749)\n",
+	       (unsigned long long) taken, (unsigned long long) given_back,
+	       (unsigned long long) held, shuttles, default_pset.thread_count,
+	       held > (uint64_t) shuttles ?
+	       " -- WRONG, a kernel stack outlived its thread" :
+	       " -- no kernel stack outlived its thread");
+}
+
 void
 quiet_census_pass(int mycpu)
 {
@@ -702,6 +748,7 @@ quiet_census_pass(int mycpu)
 		       "idle passes of cpu 0)\n", quiet_passes, quiet_peak,
 		       quiet_resets, quiet_all_passes);
 		cons_ring_so_far("quiet_census: ");
+		quiet_stacks_so_far();
 	}
 
 	if (quiet_passes < QUIET_PASSES)
@@ -737,6 +784,8 @@ quiet_census_pass(int mycpu)
 	       "set's lock, found busy %u times (#657)\n",
 	       quiet_passes, default_pset.task_count, default_pset.thread_count,
 	       quiet_lock_busy);
+
+	quiet_stacks_so_far();
 
 	/*
 	 * #615: whether the scheduler ever queued a bound thread on a run queue

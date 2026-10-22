@@ -1,0 +1,42 @@
+Kind: ablation
+Issue: #749
+Takes out: thread_machine_destroy()'s stack_free() -- every thread that ends keeps its kernel stack, as before b5790e3a, and the census finds stacks that no thread shuttle holds
+Run: --entry 15 1200 -smp 4
+Expect: quiet_census: kernel stacks taken [0-9]+, given back 0, so [0-9]+ held, by [0-9]+ thread shuttles and [0-9]+ threads alive -- WRONG, a kernel stack outlived its thread \(#749\)
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index bfe09295..d30bc2c6 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -404,31 +404,6 @@ void
+ thread_machine_destroy(thread_t thread)
+ {
+ 	thread_act_t	thr_act = thread->top_act;
+-	spl_t		s;
+-
+-	/*
+-	 * 🔴 AND THE KERNEL STACK GOES BACK (#749).
+-	 *
+-	 * thread_machine_create() takes it and nothing else on this machine
+-	 * ever gave it back: every thread that ended kept its 16 KiB for the
+-	 * life of the machine.  Measured on omen at 29bd5e94, entry 15 at four
+-	 * processors: 3095 stacks taken under TCG and 2660 under KVM, none
+-	 * given back, for 39 and 32 threads alive -- about 48 MiB of a 512 MiB
+-	 * machine.  i386's thread_machine_destroy() frees it, at splsched as
+-	 * stack_free() asks, and the machine-independent side calls this only
+-	 * once the thread is off its processor for good.
+-	 *
+-	 * Owned by the shuttle and not the activation, so before the test
+-	 * below and whatever it answers.  Counted before the shuttle goes back
+-	 * to its zone, which is what lets the census hold the two side by side.
+-	 */
+-	if (thread->kernel_stack != 0) {
+-		s = splsched();
+-		stack_free(thread->kernel_stack);
+-		splx(s);
+-		thread->kernel_stack = 0;
+-		atomic_inc64(&machine_stacks_given_back);
+-	}
+ 
+ 	if (thr_act == THR_ACT_NULL || thr_act->mact.pcb == PCB_NULL)
+ 		return;

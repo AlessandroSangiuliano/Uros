@@ -1,0 +1,71 @@
+Kind: ablation
+Issue: #749
+Takes out: nothing -- a probe: a fresh kernel thread's context loses its floating-point area, as thread_machine_destroy() leaves one, and the thread is put on a run queue, so that switch_context() meets what #749's two panics met and must name the thread
+Run: --entry 0 300 -smp 4
+Expect: switch_context: thread 0x[0-9a-f]+, activation 0x[0-9a-f]+, has no floating-point area -- a thread already destroyed: state 0x[0-9a-f]+, ref_count [0-9]+, active [0-9]+; the activation's ref_count [0-9]+, active [0-9]+, thread 0x[0-9a-f]+ \(#749\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/startup.c b/uros/src/mach_kernel/x86_64/cpu/startup.c
+index 3d62e84f..10331a43 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/startup.c
++++ b/uros/src/mach_kernel/x86_64/cpu/startup.c
+@@ -40,6 +40,9 @@
+ #include <time/clock_event.h>	/* #459: the scheduler clock */
+ #include <time/tsc.h>		/* #748: the hold's bound */
+ #include <cpu/ipi.h>		/* #748: the AST message, to this processor */
++#include <kern/task.h>		/* 749 probe */
++#include <kern/thread.h>	/* 749 probe */
++#include <kern/thread_swap.h>	/* 749 probe: thread_swappable */
+ #include <time/preempt_test.h>	/* #461: -P on an application processor */
+ #include <time/rcu_tick_test.h>	/* #649: -U */
+ #include <cpu/sprintf_test.h>	/* #655: -K */
+@@ -405,6 +408,42 @@ current_stack_selftest(void)
+  * no state at all and panicked, once ast_check() lost its answer for a
+  * processor with no thread.
+  */
++/*
++ * 749 probe: a thread whose context has lost its floating-point area, the way
++ * thread_machine_destroy() leaves one, put on a run queue.  The next processor
++ * to choose it must name it before switching to it.
++ */
++static void
++probe749_body(void)
++{
++	for (;;)
++		thread_block((void (*)(void)) 0);
++}
++
++static void
++probe749_switch_to_destroyed(void)
++{
++	thread_t	th;
++	thread_act_t	act;
++	spl_t		s;
++
++	if (thread_create_at(kernel_task, &th, probe749_body) != KERN_SUCCESS)
++		panic("749 probe: the thread was not made");
++	thread_swappable(th->top_act, FALSE);
++	s = splsched();
++	thread_lock(th);
++	act = th->top_act;
++	printf("749 probe: thread %p, activation %p: its floating-point area "
++	       "taken away, and the thread put on a run queue\n", th, act);
++	act->mact.pcb->ctx.fpu_area = 0;
++	th->state |= TH_RUN;
++	thread_setrun(th, TRUE, TAIL_Q);
++	thread_unlock(th);
++	splx(s);
++	act_deallocate(act);
++	thread_resume(act);
++}
++
+ static void
+ ast_vector_check(void)
+ {
+@@ -587,6 +626,7 @@ machine_processors_ready(void)
+ 		/* With the clock running, in thread context (#748). */
+ 		ast_vector_check();
+ 		replay_ack_check();
++		probe749_switch_to_destroyed();
+ 
+ 		/*
+ 		 * What one line on this console costs, once per boot (#551).

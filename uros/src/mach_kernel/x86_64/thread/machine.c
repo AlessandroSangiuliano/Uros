@@ -48,6 +48,7 @@
 #include <cpu/percpu.h>
 #include <kern/cpu_number.h>	/* #663: tss[] by processor number */
 #include <cpu/regs.h>		/* #422: cpu_apic_id */
+#include <sync/atomic.h>		/* #749: the stacks taken and given back */
 
 /*
  * Module init.  Both halves exist because the machine-independent tree calls
@@ -234,6 +235,14 @@ thread_begin_trampoline(void *unused)
 	/*NOTREACHED*/
 }
 
+/*
+ * The kernel stacks this file has taken from stack_alloc() and given back to
+ * stack_free(), for the census (#749): thread_machine_create() is the only
+ * place on this machine that takes one.
+ */
+static volatile uint64_t	machine_stacks_taken;
+static volatile uint64_t	machine_stacks_given_back;
+
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -264,6 +273,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	thread->kernel_stack = stack_alloc();
 	if (thread->kernel_stack == 0)
 		return KERN_RESOURCE_SHORTAGE;
+	atomic_inc64(&machine_stacks_taken);
 
 	/*
 	 * The entry point is the MI trampoline, not the thread's own function
@@ -320,6 +330,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	fpu_area = fpu_area_alloc();
 	if (fpu_area == (void *) 0) {
 		stack_free(thread->kernel_stack);
+		atomic_inc64(&machine_stacks_given_back);
 		thread->kernel_stack = 0;
 		return KERN_RESOURCE_SHORTAGE;
 	}
@@ -393,12 +404,44 @@ void
 thread_machine_destroy(thread_t thread)
 {
 	thread_act_t	thr_act = thread->top_act;
+	spl_t		s;
+
+	/*
+	 * 🔴 AND THE KERNEL STACK GOES BACK (#749).
+	 *
+	 * thread_machine_create() takes it and nothing else on this machine
+	 * ever gave it back: every thread that ended kept its 16 KiB for the
+	 * life of the machine.  Measured on omen at 29bd5e94, entry 15 at four
+	 * processors: 3095 stacks taken under TCG and 2660 under KVM, none
+	 * given back, for 39 and 32 threads alive -- about 48 MiB of a 512 MiB
+	 * machine.  i386's thread_machine_destroy() frees it, at splsched as
+	 * stack_free() asks, and the machine-independent side calls this only
+	 * once the thread is off its processor for good.
+	 *
+	 * Owned by the shuttle and not the activation, so before the test
+	 * below and whatever it answers.  Counted before the shuttle goes back
+	 * to its zone, which is what lets the census hold the two side by side.
+	 */
+	if (thread->kernel_stack != 0) {
+		s = splsched();
+		stack_free(thread->kernel_stack);
+		splx(s);
+		thread->kernel_stack = 0;
+		atomic_inc64(&machine_stacks_given_back);
+	}
 
 	if (thr_act == THR_ACT_NULL || thr_act->mact.pcb == PCB_NULL)
 		return;
 
 	fpu_area_free(thr_act->mact.pcb->ctx.fpu_area);
 	thr_act->mact.pcb->ctx.fpu_area = (void *) 0;
+}
+
+void
+thread_machine_stack_counts(uint64_t *taken, uint64_t *given_back)
+{
+	*taken = atomic_load64(&machine_stacks_taken);
+	*given_back = atomic_load64(&machine_stacks_given_back);
 }
 
 /*
@@ -897,6 +940,37 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 
 	assert(old_act != THR_ACT_NULL && old_act->mact.pcb != PCB_NULL);
 	assert(new_act != THR_ACT_NULL && new_act->mact.pcb != PCB_NULL);
+
+	/*
+	 * 🔴 A THREAD ALREADY DESTROYED IS NAMED BEFORE IT IS SWITCHED TO (#749).
+	 *
+	 * context_switch() refuses an incoming context with no floating-point
+	 * area, and that is all it can say: it is handed two contexts, not the
+	 * threads.  Two places write that null -- thread_machine_destroy(),
+	 * after freeing the area when the shuttle's last reference goes, and
+	 * act_machine_create(), which zeroes a new activation's pcb before
+	 * thread_machine_create() gives it an area -- so a context with none
+	 * is a thread already destroyed, which a run queue still held.  Twice,
+	 * during act_test's arm 14, the panic said no more than that.
+	 *
+	 * Here the thread is in hand.  Its last waker first: WAKER_TRACK keeps
+	 * it in the thread, and a freed shuttle still holds it until its memory
+	 * is given out again.  Then what the thread and its activation were.
+	 * Before the address space below, which reads the activation's map.
+	 */
+	if (new_act->mact.pcb->ctx.fpu_area == 0) {
+#if	WAKER_TRACK
+		waker_say(new);
+#endif	/* WAKER_TRACK */
+		panic("switch_context: thread %p, activation %p, has no "
+		      "floating-point area -- a thread already destroyed: "
+		      "state 0x%x%s, ref_count %d, active %d; the activation's "
+		      "ref_count %d, active %d, thread %p (#749)",
+		      new, new_act, new->state,
+		      (new->state & TH_HALTED) ? " (halted: the reaper's)" : "",
+		      new->ref_count, new->active, new_act->ref_count,
+		      new_act->active, new_act->thread);
+	}
 
 	/*
 	 * The address space, if it is changing.  An activation may be
