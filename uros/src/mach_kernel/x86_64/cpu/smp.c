@@ -366,10 +366,15 @@ smp_ap_release_to_scheduler(void)
 	atomic_store64(&ap_sched_gate, 1);
 
 	/*
-	 * And knock, because they are halted.  The AST vector is the right one
-	 * to knock with: its handler does nothing at all and exists only for the
-	 * return path it creates, which is exactly what is wanted from a
-	 * processor that has to wake up and re-read a word in memory.
+	 * And knock, because they are halted.  What the gate needs is the
+	 * interrupt itself: a halted processor wakes on it, held back or not,
+	 * and reads the word again.  It knocks with the AST vector, whose
+	 * handler is not empty -- it runs ast_check() (#603) -- and that is
+	 * harmless on either side of the gate: before it the processor is not
+	 * RUNNING and the check finds nothing to do, and a knock that arrives
+	 * after cpu_up(), while the processor has no thread yet, is held back
+	 * by its raised level or answered by ast_check() doing nothing.  Which
+	 * is what it used to stop the machine for (#748).
 	 */
 	{
 		int self = apic_to_cpu(lapic_id());
