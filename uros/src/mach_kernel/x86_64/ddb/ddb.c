@@ -1506,6 +1506,17 @@ static void show_processors(void)
 	}
 }
 
+/*
+ * One parked processor's registers and backtrace, which is what `P n' prints.
+ * A function of its own so that whatever else prints them says what `P n'
+ * says.
+ */
+static void show_parked(unsigned cpu)
+{
+	show_registers(ddb_frame[cpu]);
+	trace(ddb_frame[cpu]->rbp);
+}
+
 void ddb_enter(struct trap_frame *frame, const char *why)
 {
 	unsigned	me = cpu_number();
@@ -1680,13 +1691,11 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why)
 
 		case 'P':
 			if (parse_hex(p + 1, &arg) && arg < NCPUS
-			    && ddb_parked[arg]) {
-				show_registers(ddb_frame[arg]);
-				trace(ddb_frame[arg]->rbp);
-			} else {
+			    && ddb_parked[arg])
+				show_parked((unsigned) arg);
+			else
 				cons_puts("  P needs the number of a parked "
 					  "processor — try p\r\n");
-			}
 			break;
 
 		case 'c':
