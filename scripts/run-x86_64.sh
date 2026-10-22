@@ -701,6 +701,8 @@ must_report 'xfile_write: started' 'xfile_write: \([0-9]* of [0-9]* arms passed\
 	'It writes, syncs and reads back the file the other target will read (#498).  Silence is a write, a sync or a read that never returned.'
 must_report 'xfile_write: \[1\] wrote' 'xfile-verify: [0-9]* of [0-9]* checks passed' \
 	'The host reads the disk image back after the run with e2fsck and debugfs (#498).  Without that line nobody but the writer has looked, and the writer once reported a clean sync over a file of zeros (#573).'
+must_report 'xfile_write: \[1\] wrote' 'ext2-times: [0-9]* of [0-9]* checks passed' \
+	'The host reads the same disk'"'"'s superblock after the run: the mount and write times the battery clock gave the mount, and the state a boot that did not unmount leaves (#290, #284).'
 
 
 # And the one that must report on EVERY boot that gets far enough, which is a
@@ -1330,6 +1332,9 @@ TREE_AT_IMAGE=$(uros_tree_look)
 # output, under a header of its own, once qemu has exited.
 QERR="$LOG.qemu-stderr"
 : > "$QERR"
+# #290: the host's clock as the boot begins, the images made; ext2-times-check.py
+# sets what the boot wrote in a superblock against it.
+QEMU_STARTED_EPOCH=$(date +%s)
 # shellcheck disable=SC2086
 qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS $HPET_ARGS $KVM_ARGS $SOCKET1_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2> "$QERR" &
@@ -1587,6 +1592,7 @@ fi
 
 kill "$QPID" 2>/dev/null || true
 wait "$QPID" 2>/dev/null || true
+QEMU_ENDED_EPOCH=$(date +%s)	# #290: and as it has ended
 QEMU_REAPED=1		# its PID is the system's again: the trap leaves it alone
 
 # 🔴 What is appended below starts on a line of its own.  The readers of the
@@ -1628,6 +1634,11 @@ if [ -n "$XFILE_PATH" ]; then
 	/mnt/disk2/*)
 		python3 "$REPO/scripts/xfile-verify.py" "$AHCI_DISK2" \
 			"${XFILE_PATH#/mnt/disk2}" --writer x86_64 2>&1 \
+			| tee -a "$LOG" || true
+		# #290: and the times the mount left in that disk's superblock.
+		# --dirty: no boot here unmounts it, so it ends in use (#284).
+		python3 "$REPO/scripts/ext2-times-check.py" "$AHCI_DISK2" \
+			"$QEMU_STARTED_EPOCH" "$QEMU_ENDED_EPOCH" --dirty 2>&1 \
 			| tee -a "$LOG" || true
 		;;
 	*)
