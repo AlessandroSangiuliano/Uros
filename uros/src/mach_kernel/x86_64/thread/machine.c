@@ -48,6 +48,7 @@
 #include <cpu/percpu.h>
 #include <kern/cpu_number.h>	/* #663: tss[] by processor number */
 #include <cpu/regs.h>		/* #422: cpu_apic_id */
+#include <sync/atomic.h>		/* #749: the stacks taken and given back */
 
 /*
  * Module init.  Both halves exist because the machine-independent tree calls
@@ -234,6 +235,14 @@ thread_begin_trampoline(void *unused)
 	/*NOTREACHED*/
 }
 
+/*
+ * The kernel stacks this file has taken from stack_alloc() and given back to
+ * stack_free(), for the census (#749): thread_machine_create() is the only
+ * place on this machine that takes one.
+ */
+static volatile uint64_t	machine_stacks_taken;
+static volatile uint64_t	machine_stacks_given_back;
+
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -264,6 +273,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	thread->kernel_stack = stack_alloc();
 	if (thread->kernel_stack == 0)
 		return KERN_RESOURCE_SHORTAGE;
+	atomic_inc64(&machine_stacks_taken);
 
 	/*
 	 * The entry point is the MI trampoline, not the thread's own function
@@ -320,6 +330,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	fpu_area = fpu_area_alloc();
 	if (fpu_area == (void *) 0) {
 		stack_free(thread->kernel_stack);
+		atomic_inc64(&machine_stacks_given_back);
 		thread->kernel_stack = 0;
 		return KERN_RESOURCE_SHORTAGE;
 	}
@@ -399,6 +410,13 @@ thread_machine_destroy(thread_t thread)
 
 	fpu_area_free(thr_act->mact.pcb->ctx.fpu_area);
 	thr_act->mact.pcb->ctx.fpu_area = (void *) 0;
+}
+
+void
+thread_machine_stack_counts(uint64_t *taken, uint64_t *given_back)
+{
+	*taken = atomic_load64(&machine_stacks_taken);
+	*given_back = atomic_load64(&machine_stacks_given_back);
 }
 
 /*
