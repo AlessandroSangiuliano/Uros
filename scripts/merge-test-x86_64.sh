@@ -36,7 +36,8 @@
 #
 # Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G] [-L]
 #   -a  accelerator(s), default both     -s  processors, default 4
-#   -o  directory for the logs, default ./merge-test-logs
+#   -o  directory for the logs, default ./merge-test-logs, or beside the log
+#       UROS_X86_64_LOG names, as ablate.sh's Script: runs name each arm's (#591)
 #   -e  only these entries (to see one fail, or to rerun one); a merge runs them all
 #   -G  no gdb stub; by default every run has one (-s, port 1234), so a run cut
 #       short is walked by run-x86_64.sh before it is killed
@@ -52,6 +53,10 @@ set -u
 ACC=both
 SMP=4
 OUT=./merge-test-logs
+# #755: run as a Script: of ablate.sh, which names the arm's own log in
+# UROS_X86_64_LOG (#591), the boots' logs go beside it, a directory an arm,
+# and not into a ./merge-test-logs of the caller's that every arm would share.
+[ -n "${UROS_X86_64_LOG:-}" ] && OUT=${UROS_X86_64_LOG%.log}-merge-test
 ONLY=""
 STUB="-s"	# every run with the gdb stub: a run cut short is walked before it is killed (#526); -G turns it off
 LISTS_ONLY=0
