@@ -7,10 +7,10 @@ Expect: mutex_lock_assert_safe: thread 0x[0-9a-f]+ takes a mutex with wait_event
 Expect: assert_wait: already asserted event
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
-index f10c73e3..877ab303 100644
+index bca3f074..e29ac349 100644
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
 +++ b/uros/src/mach_kernel/x86_64/trap/trap.c
-@@ -1378,28 +1378,6 @@ fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
+@@ -1459,28 +1459,6 @@ fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
  {
  	kern_return_t	kr;
  	boolean_t	had = (frame->rflags & RFLAGS_IF) != 0;
@@ -37,5 +37,5 @@ index f10c73e3..877ab303 100644
 -	    && WAIT_DECLARED(self->wait_event, self->state))
 -		return KERN_FAILURE;
  
- 	if (had)
- 		interrupts_enable();
+ 	/*
+ 	 * 🔴 A REFUSAL IS NOT A MISSING PAGE (#750).  A fault from ring 0 on
