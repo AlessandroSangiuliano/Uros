@@ -46,6 +46,7 @@
 #include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <cpu/census_test.h>	/* #657: -c */
 #include <trap/refused_fault_test.h>	/* #750: -j */
+#include <sync/mutex_uaf_test.h>	/* #753: -u */
 #include <cpu/hwp.h>		/* #736 */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
@@ -824,6 +825,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('j'))
 			refused_fault_test();
+
+		/*
+		 * -u: the x86-64 mutex's release is its last access to the
+		 * mutex (#753).  Drives mutex_unlock() through the release
+		 * window and checks nothing is written to the mutex after the
+		 * swap -- NOT ASKED on a build without the widen's probe.
+		 */
+		if (boot_flag('u'))
+			mutex_uaf_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

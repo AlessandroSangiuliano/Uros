@@ -205,6 +205,7 @@ SKIPPED="
 12: -rS stays up for the console door and never ends
 19: -B panics on purpose; it needs a verdict of its own
 54: -e asks only of a build with UROS_SYSCALL_PROFILE, which a merge build is not; ablate.sh runs it with the widen patch, which compiles the profile in (#622)
+57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
 "
 
 # #412: the PCID entries' half of judge().  "Not offered" is taken at the

@@ -32,6 +32,25 @@
 #define	MUTEX_WAIT	2	/* held, and at least one thread will sleep */
 
 /*
+ * The event a thread sleeping on a mutex waits on, and the mutex such an
+ * event names (#753).
+ *
+ * ⚠️ Not the mutex's own address.  A mutex is the first field of many of the
+ * objects that hold one, so its address is the object's -- and an object's
+ * address is often an event in its own right.  struct device begins with
+ * ref_lock, and ds_routines.c sleeps and wakes on (event_t) device.  A
+ * wake-one taken by the other sleeper leaves the mutex's own waiter asleep
+ * with nobody left to wake it.
+ *
+ * `locked' sits at offset 1, so this is an odd address: no object starts
+ * there and no word lives there, and no other wait can share it.  mutex.c
+ * asserts the offset at compile time.
+ */
+#define	MUTEX_EVENT(m)		((event_t) &(m)->locked)
+#define	MUTEX_OF_EVENT(e)						\
+	((mutex_t *) ((char *) (e) - __builtin_offsetof(mutex_t, locked)))
+
+/*
  * Owner tracking.
  *
  * This is not decoration.  The machine-independent tree asserts on

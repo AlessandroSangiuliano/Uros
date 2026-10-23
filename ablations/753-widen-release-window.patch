@@ -1,0 +1,32 @@
+Kind: widen
+Issue: #753
+Holds open: the window right after mutex_unlock()'s swap frees the word -- mutex_uaf_test's probe, called there, stands in for the processor that takes the lock on the fast path and frees the object, and scribbles a sentinel over the mutex. The fixed release touches the mutex no more, so the sentinel stands and the test passes. One processor is enough: the probe is the second one.
+Run: --entry 57 120 -smp 1
+
+diff --git a/uros/src/mach_kernel/x86_64/sync/mutex.c b/uros/src/mach_kernel/x86_64/sync/mutex.c
+index 9ca8fad6..65f034f9 100644
+--- a/uros/src/mach_kernel/x86_64/sync/mutex.c
++++ b/uros/src/mach_kernel/x86_64/sync/mutex.c
+@@ -77,6 +77,7 @@
+ #include <sync/atomic.h>
+ #include <sync/mutex.h>
+ #include <sync/mutex_trace.h>
++#include <sync/mutex_uaf_test.h>	/* #753: -u, the release-window probe */
+ 
+ /*
+  * MUTEX_EVENT() is &m->locked, and it is unique to the mutex only because
+@@ -237,6 +238,14 @@ mutex_unlock(mutex_t *m)
+ 	 * owed no wakeup.
+ 	 */
+ 	was = atomic_swap8(&m->locked, MUTEX_FREE);
++	/*
++	 * WIDEN (#753): the free, in the window right after the swap -- a
++	 * processor taking the lock on the fast path, dropping the last
++	 * reference and freeing the object.  Inert unless mutex_uaf_test
++	 * armed it for this mutex.
++	 */
++	if (mutex_uaf_armed)
++		mutex_uaf_probe(m);
+ 	MUTEX_TRACE(m, was == MUTEX_WAIT ? MTR_UNLOCK : MTR_UNLOCK_QUIET, was);
+ 	if (was == MUTEX_WAIT)
+ 		thread_wakeup_one(MUTEX_EVENT(m));

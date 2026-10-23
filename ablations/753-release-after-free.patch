@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #753
+Over: 753-widen-release-window.patch
+Takes out: the fix -- the release goes back to the mutex after its swap freed the word, as before, for the interlock and the count of sleepers. With the widen's free in that window, hw_lock_lock() writes the interlock of freed memory and mutex_unlock_wakeup() decrements its count, so mutex_uaf_test sees the mutex clobbered after the swap.
+Run: --entry 57 120 -smp 1
+Expect: mutex_uaf_test: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/sync/mutex.c b/uros/src/mach_kernel/x86_64/sync/mutex.c
+--- a/uros/src/mach_kernel/x86_64/sync/mutex.c
++++ b/uros/src/mach_kernel/x86_64/sync/mutex.c
+@@ -246,7 +246,14 @@
+ 	 */
+ 	if (mutex_uaf_armed)
+ 		mutex_uaf_probe(m);
+-	MUTEX_TRACE(m, was == MUTEX_WAIT ? MTR_UNLOCK : MTR_UNLOCK_QUIET, was);
+-	if (was == MUTEX_WAIT)
+-		thread_wakeup_one(MUTEX_EVENT(m));
++	/* ABLATION (#753): the release goes back to the mutex after the swap,
++	 * as before the fix -- the interlock and the count of sleepers.  With
++	 * the widen's free in between, hw_lock_lock() writes the interlock of
++	 * freed memory and mutex_unlock_wakeup() decrements its count. */
++	if (was == MUTEX_HELD && m->waiters == 0)
++		return;
++	hw_lock_lock(&m->interlock);
++	if (m->waiters)
++		mutex_unlock_wakeup(m);
++	hw_lock_unlock(&m->interlock);
+ }
