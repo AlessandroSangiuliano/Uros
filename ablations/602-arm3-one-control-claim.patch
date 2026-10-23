@@ -4,6 +4,7 @@ Over: 602-widen-table-full-at-control.patch
 Takes out: arm [3]'s retry of a full table across the grace period -- one control claim again, as before d5fc9b63, so with the widen's retiring slots it is told KERN_RESOURCE_SHORTAGE and calls the full table a leak
 Run: --entry 14 1200 -smp 4
 Expect: io_claim_race: \[3\] WRONG
+Note: at more than one processor only. At one, a released slot finishes its grace period before the next claim, so the widen cannot fill the table and the control claim succeeds at once: on omen at f030a3d4, -smp 1, TCG and KVM, the ablated tree was not caught in 6 of 6 and the fixed tree passed 6 of 6 without once waiting -- the question is not asked there (#691), and the defect cannot exist there; at four processors it was caught 6 of 6 and the fixed tree passed 6 of 6, after waiting 10 to 20 ms for the retiring slots
 
 diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_claim_race/io_claim_race.c
 --- a/uros/src/tests/io_claim_race/io_claim_race.c
