@@ -867,9 +867,9 @@ main(int argc, char **argv)
 			passed++;
 		} else if (kr == KERN_RESOURCE_SHORTAGE)
 			printf("io_claim_race: [3] WRONG — the table was still "
-			       "full after %u ms, longer than any grace period: "
-			       "a retired slot never came back (#602)\n",
-			       waited);
+			       "full after %u ms of the %u the test waits, many "
+			       "grace periods: a retired slot never came back "
+			       "(#602)\n", waited, (unsigned)RETIRE_WAIT_MS);
 		else
 			printf("io_claim_race: [3] WRONG — the range is not "
 			       "clean after the rounds (claim kr=%d, %s)\n",
