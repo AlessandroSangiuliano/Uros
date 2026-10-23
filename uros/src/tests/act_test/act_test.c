@@ -2914,6 +2914,17 @@ arm_fourteen_terminate_inside_traps(void)
 	return 1;
 }
 
+/* A thread thread_create_running() starts needs somewhere to run; it spins
+ * here until the trap that created it terminates it, so no fault reaches
+ * act_test's exception port (#756).  It runs in act_test's own task, where
+ * this code is mapped. */
+static void
+arm_sixteen_spin(void)
+{
+	for (;;)
+		__asm__ __volatile__("pause");
+}
+
 /*
  * ── [16] A creation whose name cannot be copied out leaves no name behind ──
  *
@@ -2926,18 +2937,26 @@ arm_fourteen_terminate_inside_traps(void)
  * after; equal means nothing leaked.  The #662 ablation takes the step out, and
  * the count rises.  (act_test is x86-64 only; the same four traps carry the
  * same fix on i386.)
+ *
+ * #756: thread_create_running() is given a real x86-64 state -- rip at the spin
+ * above, on a stack of its own -- so it creates the thread and reaches its own
+ * copyout.  An earlier version passed a zero-length state, which was refused
+ * with KERN_INVALID_ARGUMENT before it created, leaving that trap's fix
+ * exercised only by the ablation.
  */
 static int
 arm_sixteen_name_not_copied_out(void)
 {
-	mach_port_t		me = mach_task_self();
-	vm_address_t		ro = 0;
-	mach_port_array_t	names = 0;
-	mach_port_type_array_t	types = 0;
-	mach_msg_type_number_t	nn = 0, nt = 0;
-	natural_t		st[1] = { 0 };
-	int			before, after;
-	kern_return_t		kr, kc, kcr, ktk;
+	mach_port_t			me = mach_task_self();
+	vm_address_t			ro = 0, stack = 0;
+	mach_port_array_t		names = 0;
+	mach_port_type_array_t		types = 0;
+	mach_msg_type_number_t		nn = 0, nt = 0;
+	struct x86_64_thread_state	rstate;
+	mach_msg_type_number_t		rcount = x86_64_THREAD_STATE_COUNT;
+	mach_port_t			tmp = MACH_PORT_NULL;
+	int				before, after;
+	kern_return_t			kr, kc, kcr, ktk;
 
 	/* A page the traps cannot write, so each copyout of the name fails. */
 	kr = vm_allocate(me, &ro, vm_page_size, TRUE);
@@ -2960,8 +2979,34 @@ arm_sixteen_name_not_copied_out(void)
 	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
 	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
 
+	/*
+	 * #756: a valid x86-64 state for thread_create_running, so it creates
+	 * the thread and reaches its copyout.  A fresh stopped thread gives a
+	 * valid baseline (its cs, ss and rflags); rip goes to the spin and rsp
+	 * to a stack of its own, eight below a 16-byte boundary as a call leaves
+	 * it.  If the state cannot be built the arm still tests the other two.
+	 */
+	kr = thread_create(me, &tmp);
+	if (kr == KERN_SUCCESS)
+		kr = thread_get_state(tmp, x86_64_THREAD_STATE,
+				      (thread_state_t) &rstate, &rcount);
+	if (tmp != MACH_PORT_NULL) {
+		(void) thread_terminate(tmp);
+		(void) mach_port_deallocate(me, tmp);
+	}
+	if (kr == KERN_SUCCESS)
+		kr = vm_allocate(me, &stack, vm_page_size * 4, TRUE);
+	if (kr == KERN_SUCCESS) {
+		rstate.rip = (uint64_t) (uintptr_t) arm_sixteen_spin;
+		rstate.rsp = (uint64_t) (stack + vm_page_size * 4 - 8);
+	}
+
 	kc  = syscall_thread_create(me, (mach_port_t *) ro);
-	kcr = syscall_thread_create_running(me, 0, st, 0, (mach_port_t *) ro);
+	kcr = (kr == KERN_SUCCESS)
+	    ? syscall_thread_create_running(me, x86_64_THREAD_STATE,
+					    (natural_t *) &rstate, rcount,
+					    (mach_port_t *) ro)
+	    : KERN_FAILURE;
 	ktk = syscall_task_create(me, 0, 0, FALSE, (mach_port_t *) ro);
 
 	kr = mach_port_names(me, &names, &nn, &types, &nt);
