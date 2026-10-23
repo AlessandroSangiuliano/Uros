@@ -106,6 +106,9 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #             asked, so the prompt never opened
 #   halted    the harness's verdict, and the console's final copy whole after
 #             the machine stops (scripts/final-copy-check.sh, #702)
+#   refusedfault  -j: a fault from ring 0 on a task's present page that SMAP or
+#             SMEP refused is reported, not retried for ever; the probe's own
+#             PASS/WRONG/NOT ASKED verdict (refused_fault_test, #750)
 # A processor count may be a whole -smp value: entry 14 with --socket1-cpu has
 # two processors, APIC ids 0 and 64, in a MADT of 128 entries (#663).
 # Entries 46 and 47 run in x2APIC mode: turned on by the kernel (-2), and left on
@@ -190,6 +193,8 @@ ENTRIES="
 37 reach --socket1-cpu_--iommu_amd-xt 1,sockets=2,cores=256,maxcpus=512
 50 pcidx
 51 pcidn
+56 refusedfault
+56 refusedfault - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -402,6 +407,16 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 		else
 			NOTE="NOT ASKED: the boot ended before -t asked, so the debugger never opened"
 		fi ;;
+	# #750: -j, a refused fault on a task's present page.  Its own verdict,
+	# not the harness's end: the probe prints PASS, WRONG or NOT ASKED, and
+	# a boot stopped after its start line is one probe looping on the fault,
+	# which the harness's must_report pair already fails.
+	refusedfault) out=$(grep -a 'refused_fault_test: \(PASS\|WRONG\|NOT ASKED\)' "$f" | head -n 1)
+		case $out in
+		*"refused_fault_test: PASS"*) ;;
+		"")	NOTE="no refused_fault_test verdict"; false ;;
+		*)	NOTE="${out#*refused_fault_test: }"; false ;;
+		esac ;;
 	esac
 }
 
