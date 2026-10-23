@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #602
+Over: 602-widen-table-full-at-control.patch
+Takes out: arm [3]'s retry of a full table across the grace period -- one control claim again, as before d5fc9b63, so with the widen's retiring slots it is told KERN_RESOURCE_SHORTAGE and calls the full table a leak
+Run: --entry 14 1200 -smp 4
+Expect: io_claim_race: \[3\] WRONG
+
+diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_claim_race/io_claim_race.c
+--- a/uros/src/tests/io_claim_race/io_claim_race.c
++++ b/uros/src/tests/io_claim_race/io_claim_race.c
+@@ -858,7 +858,7 @@
+ 
+ 		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
+ 					  &released, &klog_from);
+-		while (kr == KERN_RESOURCE_SHORTAGE
++		while (0 && kr == KERN_RESOURCE_SHORTAGE
+ 		       && waited < RETIRE_WAIT_MS) {
+ 			(void) thread_switch(MACH_PORT_NULL,
+ 					     SWITCH_OPTION_WAIT, RETIRE_STEP_MS);

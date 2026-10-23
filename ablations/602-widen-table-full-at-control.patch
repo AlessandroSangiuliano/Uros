@@ -1,0 +1,31 @@
+Kind: widen
+Issue: #602
+Holds open: the table full of retiring slots at arm [3]'s control claim -- four ranges, 0x280..0x29f in steps of eight, claimed and given back just before it, so every free slot is in its grace period whether or not uart.so holds one; the fixed test waits for them across the grace period and must pass
+Run: --entry 14 1200 -smp 4
+
+diff --git a/uros/src/tests/io_claim_race/io_claim_race.c b/uros/src/tests/io_claim_race/io_claim_race.c
+index 577caf46..943dd649 100644
+--- a/uros/src/tests/io_claim_race/io_claim_race.c
++++ b/uros/src/tests/io_claim_race/io_claim_race.c
+@@ -841,6 +841,21 @@ main(int argc, char **argv)
+ 		natural_t	released = 0, klog_from = 0;
+ 		unsigned	waited = 0;
+ 
++		/* WIDEN (#602): every free slot retiring at the control claim --
++		 * four ranges claimed and given back just before it, so the table
++		 * is full of slots still in their grace period whether or not
++		 * uart.so holds one. */
++		{
++			unsigned w;
++
++			for (w = 0; w < 4; w++)
++				if (device_io_port_claim(device, 0x280u + 8u * w, 8u,
++							 &released, &klog_from)
++				    == KERN_SUCCESS)
++					(void) device_io_port_unclaim(device,
++								      0x280u + 8u * w);
++		}
++
+ 		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
+ 					  &released, &klog_from);
+ 		while (kr == KERN_RESOURCE_SHORTAGE
