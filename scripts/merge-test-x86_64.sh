@@ -94,6 +94,8 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
 #   reach     the harness's verdict, entries for 32-bit apic ids, and a pin and an
 #             MSI-X slot seen arriving at the processor they were aimed at (#659)
+#   keptreach reach, of an x2APIC mode GRUB left on and the kernel kept: its
+#             "kept as the firmware left it" line as well (#755)
 #   earlypanic  -p panics on purpose before the boot processor has its page:
 #             its message and the backtrace after it, and no protection fault
 #             in their place (#665)
@@ -124,7 +126,9 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 # Entry 48 adds -i with engines that take x2APIC ids (--iommu intel-eim, amd-xt),
 # and 37 runs on processors 0 and 256, x2APIC mode left on by SeaBIOS, so that
 # the interrupts aimed at 256 need all 32 bits; under KVM the harness asks
-# those engines for the split irqchip.
+# those engines for the split irqchip.  Entry 49 is 47's mode with -i: GRUB
+# leaves x2APIC mode on, the kernel keeps it, and the same two engines remap
+# it through entries for 32-bit ids (#755).
 ENTRIES="
 0 pcidd
 1 harness
@@ -199,6 +203,8 @@ ENTRIES="
 48 reach --iommu_amd-xt
 37 reach --socket1-cpu_--iommu_intel-eim 1,sockets=2,cores=256,maxcpus=512
 37 reach --socket1-cpu_--iommu_amd-xt 1,sockets=2,cores=256,maxcpus=512
+49 keptreach --iommu_intel-eim
+49 keptreach --iommu_amd-xt
 50 pcidx
 51 pcidn
 56 refusedfault
@@ -353,6 +359,13 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	reach) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'entries for 32-bit apic ids' "$f" &&
 		[ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ;;
+	# #755: entry 49 asks reach's question of the x2APIC mode GRUB left on,
+	# and the kept line as well, which is what makes it 49 and not 48: the
+	# mode the entries were planned for is the one the kernel found on.
+	# Under "harness" a board that remapped nothing passed: the plain Intel
+	# engine under KVM, which has no split irqchip.
+	keptreach) grep -aq 'local apic in x2APIC mode, kept as the firmware left it' "$f" &&
+		judge "$e" reach "$h" "$f" "$a" ;;
 	# #412: -x and -n are honoured, not merely survived.  Where the
 	# processor offers PCID -- KVM on omen, OMEGA, GitHub's runners -- entry
 	# 50 must run PCID without INVPCID with [1] and [2] on its log, and entry
