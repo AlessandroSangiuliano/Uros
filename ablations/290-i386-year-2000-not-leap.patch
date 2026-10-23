@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #290
+Takes out: the whole year at bbc_gettime()'s two calls of yeartoday() -- as 100 the year 2000 is not a leap year, and i386's battery clock gives every date from 2001 on a day early
+Run: i386, not run-x86_64.sh -- scripts/smoke-ush.sh, whose clean shutdown ext2-times-check.py reads after; scripts/ablate.sh cannot judge it
+Expect: ext2-times: \[1\] WRONG — the mount time is
+
+diff --git a/uros/src/mach_kernel/i386/AT386/bbclock.c b/uros/src/mach_kernel/i386/AT386/bbclock.c
+index ed84d2c2..a05350a4 100644
+--- a/uros/src/mach_kernel/i386/AT386/bbclock.c
++++ b/uros/src/mach_kernel/i386/AT386/bbclock.c
+@@ -266,13 +266,13 @@ bbc_gettime(
+ 	 * said so on the ush smoke, the date a day behind the host's and the
+ 	 * time to the second.  bbc_settime() below always passed 1970 on.
+ 	 */
+-	if (yeartoday(1900 + yr) == 366)
++	if (yeartoday(yr) == 366)
+ 		month[1] = 29;
+ 	for (i = mon - 2; i >= 0; i--)
+ 		days += month[i];
+ 	month[1] = 28;
+ 	for (i = 70; i < yr; i++)
+-		days += yeartoday(1900 + i);
++		days += yeartoday(i);
+ 	n += days * 3600 * 24;
+ 	cur_time->tv_sec  = n;
+ 	cur_time->tv_nsec = 0;

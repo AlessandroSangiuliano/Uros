@@ -45,6 +45,7 @@
 #include <cpu/sprintf_test.h>	/* #655: -K */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <cpu/census_test.h>	/* #657: -c */
+#include <trap/refused_fault_test.h>	/* #750: -j */
 #include <cpu/hwp.h>		/* #736 */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
@@ -814,6 +815,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('c'))
 			census_test();
+
+		/*
+		 * -j: a fault from ring 0 on a task's present page that SMAP
+		 * or SMEP refused is reported, not retried for ever (#750).
+		 * Needs the scheduler up to bind the probe to each processor;
+		 * returns, so the boot goes on.
+		 */
+		if (boot_flag('j'))
+			refused_fault_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);

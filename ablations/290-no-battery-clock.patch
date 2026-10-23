@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #290
+Takes out: the battery clock's answer -- ext2fs_wall_time() asks for a clock nothing serves, as on a machine with no CMOS clock, and the mount must say so and leave the times as they were
+Run: --entry 14 1200 -smp 4
+Expect: ext2fs: the battery clock gave no time: the mount and write times stay as they were \(#290\)
+
+diff --git a/uros/src/file_systems/ext2fs/ext2fs.c b/uros/src/file_systems/ext2fs/ext2fs.c
+index 6492e8fe..40dc2bb7 100644
+--- a/uros/src/file_systems/ext2fs/ext2fs.c
++++ b/uros/src/file_systems/ext2fs/ext2fs.c
+@@ -2083,7 +2083,7 @@ ext2fs_wall_time(unsigned int *now)
+ 	tvalspec_t	t;
+ 	kern_return_t	kr;
+ 
+-	kr = host_get_clock_service(host, BATTERY_CLOCK, &clk);
++	kr = host_get_clock_service(host, BATTERY_CLOCK + 99, &clk);
+ 	if (kr == KERN_SUCCESS) {
+ 		kr = clock_get_time(clk, &t);
+ 		(void) mach_port_deallocate(mach_task_self(), clk);
