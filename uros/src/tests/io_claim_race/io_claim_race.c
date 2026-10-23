@@ -136,6 +136,14 @@ extern mach_port_t	bootstrap_port;
  */
 #define	BREATH_MS	1
 
+/*
+ * [3]'s wait for a table full of retiring slots (#602).  A grace period is a
+ * few ticks; two seconds is many of them on any machine this runs on, so a
+ * slot still retiring at the end is one that never comes back.
+ */
+#define	RETIRE_STEP_MS	10
+#define	RETIRE_WAIT_MS	2000
+
 struct race_msg {
 	mach_msg_header_t	head;
 	NDR_record_t		ndr;
@@ -816,23 +824,56 @@ main(int argc, char **argv)
 	 * a claim that succeeds now, and a release that finds it, say that
 	 * every winner's release was honoured and no retired slot is still
 	 * answering.  Asked whether the peer stayed or not.
+	 *
+	 * 🔴 A FULL TABLE IS NOT A LEAK (#602).  The last round's release left
+	 * its slot RETIRING until a grace period passes (#538), and on a busy
+	 * machine the other free slots may be retiring too: the control claim
+	 * is then told KERN_RESOURCE_SHORTAGE -- the table full, not the range
+	 * held -- which is the answer [2] already counts apart beside a
+	 * winner.  Judged as a leak, it said WRONG once in 70,888 boots (run
+	 * 39908257267, entry 50, TCG at four processors).  So a full table is
+	 * asked again across the grace period, and only a range still refused
+	 * at the end of it, or refused for any other reason, is a leak:
+	 * KERN_NO_ACCESS is a claim still holding it.
 	 */
 	arms++;
 	{
-		natural_t released = 0, klog_from = 0;
+		natural_t	released = 0, klog_from = 0;
+		unsigned	waited = 0;
 
 		kr = device_io_port_claim(device, RACE_PORT, RACE_COUNT,
 					  &released, &klog_from);
+		while (kr == KERN_RESOURCE_SHORTAGE
+		       && waited < RETIRE_WAIT_MS) {
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT, RETIRE_STEP_MS);
+			waited += RETIRE_STEP_MS;
+			kr = device_io_port_claim(device, RACE_PORT,
+						  RACE_COUNT, &released,
+						  &klog_from);
+		}
 		if (kr == KERN_SUCCESS
 		    && device_io_port_unclaim(device, RACE_PORT)
 		       == KERN_SUCCESS) {
-			printf("io_claim_race: [3] the range is free after "
-			       "the last round — no claim leaked\n");
+			if (waited == 0)
+				printf("io_claim_race: [3] the range is free "
+				       "after the last round — no claim "
+				       "leaked\n");
+			else
+				printf("io_claim_race: [3] the range is free "
+				       "after the last round — no claim "
+				       "leaked; the table was full of retiring "
+				       "slots for %u ms first (#602)\n", waited);
 			passed++;
-		} else
+		} else if (kr == KERN_RESOURCE_SHORTAGE)
+			printf("io_claim_race: [3] WRONG — the table was still "
+			       "full after %u ms of the %u the test waits, many "
+			       "grace periods: a retired slot never came back "
+			       "(#602)\n", waited, (unsigned)RETIRE_WAIT_MS);
+		else
 			printf("io_claim_race: [3] WRONG — the range is not "
-			       "clean after the rounds (claim kr=%d)\n",
-			       (int)kr);
+			       "clean after the rounds (claim kr=%d, %s)\n",
+			       (int)kr, claim_code_name(kr));
 	}
 
 	ask_bar_overlap(device, &passed, &arms);
