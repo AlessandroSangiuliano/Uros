@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #755
+Takes out: nothing -- a probe: entry 49's Intel line runs on the plain Intel engine, which under KVM, with no split irqchip, remaps nothing; "harness" passed that boot on victus on 23/10, keptreach must call it WRONG
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 49
+Script: -G
+Expect: merge-test: entry 49 kvm -smp 4 \(--iommu intel\) -- WRONG \(keptreach\)
+Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take. The fixed arm boots entry 49's two lines as they are, intel-eim and amd-xt, and must pass both; the ablated arm boots the plain engine's line in place of intel-eim's. That boot keeps the mode, and its pin and MSI-X slot reach the processors they were aimed at all the same, through the APIC alone, so reach's two arrival lines are there: what says nothing was remapped is the missing "entries for 32-bit apic ids".
+
+diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
+--- a/scripts/merge-test-x86_64.sh
++++ b/scripts/merge-test-x86_64.sh
+@@ -203,7 +203,7 @@
+ 48 reach --iommu_amd-xt
+ 37 reach --socket1-cpu_--iommu_intel-eim 1,sockets=2,cores=256,maxcpus=512
+ 37 reach --socket1-cpu_--iommu_amd-xt 1,sockets=2,cores=256,maxcpus=512
+-49 keptreach --iommu_intel-eim
++49 keptreach --iommu_intel
+ 49 keptreach --iommu_amd-xt
+ 50 pcidx
+ 51 pcidn
