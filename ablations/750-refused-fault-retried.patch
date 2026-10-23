@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #750
+Takes out: fault_in()'s refusal of a protection fault on a task's present page -- refused_by_protection() answers no, so the fault goes to vm_fault(), which answers success for a page that is mapped and resident, and the instruction is retried for ever
+Run: --entry 56 300 -smp 4
+Expect: refused_fault_test: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index bca3f074..ffbc5f91 100644
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -1426,6 +1426,7 @@ static int refused_by_protection(const struct trap_frame *frame)
+ {
+ 	uint64_t cr4 = read_cr4();
+ 
++	return 0;
+ 	if ((frame->error & PF_INSTRUCTION) != 0)
+ 		return (cr4 & CR4_SMEP) != 0;
+ 	return (cr4 & CR4_SMAP) != 0 && (frame->rflags & RFLAGS_AC) == 0;
