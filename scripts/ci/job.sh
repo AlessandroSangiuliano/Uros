@@ -238,6 +238,10 @@ CSV=$OUT/boots.csv
 if [ -z "$ABLATE$SWEEP" ]; then
 	LIST=$(sed -n '/^ENTRIES="$/,/^"$/{/^[0-9]/p}' "$MT")
 	[ -n "$LIST" ] || die 3 "read no entries out of $MT: its ENTRIES block has changed shape, and this script reads it"
+	# #755: and its lists agree with grub.cfg -- each entry run or said not
+	# run -- asked of the merge test itself, in the plan's dry run too, so a
+	# campaign that would leave an entry out stops before it builds.
+	"$MT" -L >&2 || die 3 "$MT -L: its lists and grub.cfg do not agree, see above"
 	PLAN=$LIST
 	if [ -n "$ENTRIES" ]; then
 		for e in "${WANT[@]}"; do
