@@ -256,22 +256,53 @@ static void show_registers(const struct trap_frame *f)
  * A debugger is asked about addresses precisely because they are suspect, so
  * faulting on one would replace the answer with a second fault — and this
  * one would arrive from inside the handler for the first.
+ *
+ * 🔴 AND ONLY IN THE KERNEL'S HALF (#750).  The tables asked are the kernel's,
+ * and the read goes through whatever cr3 is live: at a prompt on a task's
+ * thread, the task's.  The kernel's tables map the low gigabyte (#640), so a
+ * user address there passed and was read through the task, where it is
+ * nothing or a page SMAP refuses outside a copy -- a fault inside the
+ * debugger, the same mismatch #518 took out of the fault report.  A task's
+ * memory is not this debugger's to read until it walks the task's own tables,
+ * so a user address is refused, and said to be.
+ *
+ * Answers what is wrong with the bytes [va, va + bytes), or 0 when every one
+ * of them can be read.
  */
+static const char *unreadable(uint64_t va, uint64_t bytes)
+{
+	pmap_t		kernel = pmap_kernel();
+	uint64_t	end = va + bytes - 1;
+
+	if (!va_is_kernel(va) || !va_is_kernel(end) || end < va)
+		return "not a kernel address";
+	for (uint64_t off = 0; off < bytes; off += PAGE_SIZE_4K) {
+		if (pmap_extract(kernel, va + off) == 0)
+			return "unmapped";
+	}
+	return pmap_extract(kernel, end) != 0 ? (const char *) 0 : "unmapped";
+}
+
+static int readable(uint64_t va, uint64_t bytes)
+{
+	return unreadable(va, bytes) == (const char *) 0;
+}
+
 #define DDB_DUMP_WORDS	8
 
 static void examine(uint64_t addr)
 {
-	pmap_t kernel = pmap_kernel();
-
 	for (unsigned i = 0; i < DDB_DUMP_WORDS; i++) {
-		uint64_t at = addr + i * 8;
+		uint64_t	at = addr + i * 8;
+		const char	*no = unreadable(at, 8);
 
 		cons_puts("  ");
 		cons_puthex64(at);
 		cons_puts(": ");
 
-		if (!va_is_canonical(at) || pmap_extract(kernel, at) == 0) {
-			cons_puts("unmapped\r\n");
+		if (no != (const char *) 0) {
+			cons_puts(no);
+			cons_puts("\r\n");
 			return;
 		}
 
@@ -281,30 +312,39 @@ static void examine(uint64_t addr)
 }
 
 /*
- * The same frame-pointer walk the fault report uses, with the same
- * suspicion: alignment, canonical form and a mapping are checked before
- * anything is read, and a frame that does not move upward is not a frame.
+ * The same frame-pointer walk the fault report uses, through the same step:
+ * x86_64_frame_read() checks alignment, a kernel address and a mapping before
+ * anything is read (#750), and a frame that does not move upward is not a
+ * frame.
+ *
+ * 🔴 This one asked for a canonical address, after #518 had made the fault
+ * report ask for a kernel one, and a low frame pointer passed: the kernel's
+ * tables map the low gigabyte (#640), the read went through the task at the
+ * prompt, and the report a panic opened the debugger with stopped at cpu 0's
+ * registers, parked in a task's code with 0x3040 in rbp (run 39781890422).
+ *
+ * When not even the first frame can be read, it says why, so that `t' on an
+ * address answers instead of printing nothing for the operator to take as a
+ * chain with no frames.
  */
 #define DDB_TRACE_MAX	24
 
 static void trace(uint64_t rbp)
 {
-	pmap_t kernel = pmap_kernel();
-
 	for (unsigned depth = 0; depth < DDB_TRACE_MAX; depth++) {
-		const uint64_t *frame;
 		uint64_t next, ret;
+		const char *no = x86_64_frame_read(rbp, &next, &ret);
 
-		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+		if (no != 0) {
+			if (depth == 0) {
+				cons_puts("  no backtrace: rbp ");
+				cons_puthex64(rbp);
+				cons_puts(" is ");
+				cons_puts(no);
+				cons_puts("\r\n");
+			}
 			return;
-		if (pmap_extract(kernel, rbp) == 0
-		    || pmap_extract(kernel, rbp + 8) == 0)
-			return;
-
-		frame = (const uint64_t *)(uintptr_t)rbp;
-		next = frame[0];
-		ret = frame[1];
-
+		}
 		if (ret == 0)
 			return;
 
@@ -317,6 +357,28 @@ static void trace(uint64_t rbp)
 			return;
 		rbp = next;
 	}
+}
+
+/*
+ * A frame's backtrace, unless the frame is ring 3's (#750).
+ *
+ * The rbp of a processor interrupted in a task's code is the TASK's: a
+ * register the program uses as it likes -- cpu 0 held 0x3040 in it in run
+ * 39781890422 -- and, when it is a frame pointer at all, one into the task's
+ * stack.  It is never a link of the kernel's chain, so a walk from it answers
+ * nothing true: an address in the user half the step refuses, and a value that
+ * happens to lie in the kernel half would come back as kernel frames,
+ * well-formed and confident, of a chain the processor was never in.  So it is
+ * not walked, and the line says where the answer is instead.
+ */
+static void trace_frame(const struct trap_frame *f)
+{
+	if ((f->cs & 3) != 0) {
+		cons_puts("  in ring 3: its rbp is the task's and is not walked — "
+			  "resolve rip against the program, not the kernel\r\n");
+		return;
+	}
+	trace(f->rbp);
 }
 
 static void usage(void)
@@ -982,19 +1044,9 @@ static void ddb_release_others(void)
  * thread that has never run carries one too, because thread_start() sets it.
  * The state flags are what separate them, and they are printed rather than
  * interpreted so the reader can disagree.
+ *
+ * Every pointer followed out of a thread is asked of readable() first, above.
  */
-static int readable(uint64_t va, uint64_t bytes)
-{
-	pmap_t kernel = pmap_kernel();
-
-	for (uint64_t off = 0; off < bytes; off += PAGE_SIZE_4K) {
-		if (!va_is_canonical(va + off)
-		    || pmap_extract(kernel, va + off) == 0)
-			return 0;
-	}
-	return va_is_canonical(va + bytes - 1)
-	    && pmap_extract(kernel, va + bytes - 1) != 0;
-}
 
 /*
  * A thread's state in the seven columns the machine-independent debugger has
@@ -1299,8 +1351,6 @@ static void list_threads(void)
 
 static void disassemble(uint64_t addr)
 {
-	pmap_t kernel = pmap_kernel();
-
 	for (unsigned line = 0; line < DDB_DISASM_LINES; line++) {
 		uint8_t		bytes[16];
 		char		text[32];
@@ -1309,7 +1359,7 @@ static void disassemble(uint64_t addr)
 		for (unsigned i = 0; i < sizeof bytes; i++) {
 			uint64_t at = addr + i;
 
-			if (!va_is_canonical(at) || pmap_extract(kernel, at) == 0)
+			if (!readable(at, 1))
 				break;
 			bytes[i] = *(const volatile uint8_t *)(uintptr_t) at;
 			avail++;
@@ -1318,7 +1368,9 @@ static void disassemble(uint64_t addr)
 		if (avail == 0) {
 			cons_puts("  ");
 			cons_puthex64(addr);
-			cons_puts("  unmapped\r\n");
+			cons_puts("  ");
+			cons_puts(unreadable(addr, 1));
+			cons_puts("\r\n");
 			return;
 		}
 
@@ -1516,12 +1568,13 @@ static void show_processors(void)
 /*
  * One parked processor's registers and backtrace, which is what `P n' prints.
  * A function of its own so that whatever else prints them says what `P n'
- * says.
+ * says.  A processor parked in a task's code has no kernel chain to walk, and
+ * trace_frame() says so instead.
  */
 static void show_parked(unsigned cpu)
 {
 	show_registers(ddb_frame[cpu]);
-	trace(ddb_frame[cpu]->rbp);
+	trace_frame(ddb_frame[cpu]);
 }
 
 /*
@@ -1548,7 +1601,7 @@ static void report_before_prompt(const struct trap_frame *frame)
 	unsigned me = cpu_number();
 
 	cons_puts("ddb: the backtrace, as `t' prints it (#750)\r\n");
-	trace(frame->rbp);
+	trace_frame(frame);
 	cons_puts("ddb: the processors, as `p' prints them\r\n");
 	show_processors();
 	for (int i = 0; i < NCPUS; i++) {
@@ -1683,7 +1736,10 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why,
 			break;
 
 		case 't':
-			trace(parse_hex(p + 1, &arg) ? arg : frame->rbp);
+			if (parse_hex(p + 1, &arg))
+				trace(arg);
+			else
+				trace_frame(frame);
 			break;
 
 		case 'x':

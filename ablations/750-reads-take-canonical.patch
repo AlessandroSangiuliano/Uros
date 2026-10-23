@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #750
+Takes out: the kernel address unreadable() asks for -- a canonical one is enough again, so ddb's `x' and `i' read a lower-half address through whatever cr3 is live, as before #750, and answer by the mapping rather than refusing it as not a kernel address
+Script: scripts/ddb-user-address.sh
+Expect: ddb-user-address: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/ddb.c b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+index b37db3bb..23802bc8 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/ddb.c
++++ b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+@@ -274,7 +274,7 @@ static const char *unreadable(uint64_t va, uint64_t bytes)
+ 	pmap_t		kernel = pmap_kernel();
+ 	uint64_t	end = va + bytes - 1;
+ 
+-	if (!va_is_kernel(va) || !va_is_kernel(end) || end < va)
++	if (!va_is_canonical(va) || !va_is_canonical(end) || end < va)
+ 		return "not a kernel address";
+ 	for (uint64_t off = 0; off < bytes; off += PAGE_SIZE_4K) {
+ 		if (pmap_extract(kernel, va + off) == 0)

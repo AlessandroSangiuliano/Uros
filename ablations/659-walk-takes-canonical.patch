@@ -1,19 +1,21 @@
 Kind: ablation
 Issue: #659
-Takes out: the kernel address the walk made in the handler asks for -- a canonical one is enough again, as before efe21b2f, and a ring-3 trap's low frame pointer is read through the probe's space, where nothing maps it, inside the handler
+Takes out: the kernel address x86_64_frame_read() asks for, which the walk made in the handler takes its steps through since #750 -- a canonical one is enough again, as before efe21b2f, and a ring-3 trap's low frame pointer is read through the probe's space, where nothing maps it, inside the handler
 Run: --entry 0 600 -smp 1
 Over: 659-widen-user-rbp.patch
-Expect: faulting address 0x0+1008([^0-9a-fA-F]|$)
+Expect: faulting address 0x0+10(00|08)([^0-9a-fA-F]|$)
+Note: either word of the widened frame, 0x1000 or 0x1008: the fault lands on whichever the walk reads first, which is the step's order and not the property -- the probe's own loop read the return address first and faulted at 0x1008, x86_64_frame_read() reads the caller's frame pointer first and faults at 0x1000
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+index feb3d728..13d492dd 100644
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
 +++ b/uros/src/mach_kernel/x86_64/trap/trap.c
-@@ -909,7 +909,7 @@
- 		 * map of the low gigabyte -- is read through the task's, or is
- 		 * a user page read with AC clear: a fault inside the handler.
- 		 */
--		if ((rbp & 7) != 0 || !va_is_kernel(rbp))
-+		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
- 			break;
- 		if (pmap_extract(kernel, rbp) == 0
- 		    || pmap_extract(kernel, rbp + 8) == 0)
+@@ -706,7 +706,7 @@ const char *x86_64_frame_read(uint64_t rbp, uint64_t *next, uint64_t *ret)
+ 
+ 	if ((rbp & 7) != 0)
+ 		return "not aligned";
+-	if (!va_is_kernel(rbp))
++	if (!va_is_canonical(rbp))
+ 		return "not a kernel address";
+ 
+ 	/* Both words of the frame have to be there before either is read. */
