@@ -146,6 +146,9 @@
 #include <device/device.h>
 #include <page_cache.h>
 #include <blk.h>
+#include <mach.h>
+#include <mach/clock.h>		/* #290: BATTERY_CLOCK, clock_get_time */
+#include <mach/mach_traps.h>	/* #290: mach_host_self */
 
 /*
  * MIG user stubs from ahci_batch.defs (subsystem 2950).
@@ -2056,6 +2059,42 @@ read_fs(
 	return 0;
 }
 
+/*
+ * 🔴 THE MOUNT AND WRITE TIMES COME FROM THE BATTERY CLOCK (#290).
+ *
+ * #284 marked the volume in use and clean and left the times out, because a
+ * file system server had no wall clock.  BATTERY_CLOCK is one: the CMOS
+ * clock, seconds since the epoch on both targets.  REALTIME_CLOCK would not
+ * do, since on i386 it counts from the boot.  A read spins in the kernel at
+ * splhigh while the chip updates (x86_64/time/rtc.c), so it is asked at the
+ * mount and at the clean unmount, never at a flush.  The clock is taken as
+ * UTC, as rtc.c takes it; a machine whose firmware keeps local time writes
+ * local time.
+ *
+ * The clock is optional, and so is its answer: 0 and the time, or -1, and
+ * the caller then leaves the times as they were and says so, rather than
+ * writing a zero.  Both rights asked for are given back.
+ */
+static int
+ext2fs_wall_time(unsigned int *now)
+{
+	mach_port_t	host = mach_host_self();
+	mach_port_t	clk = MACH_PORT_NULL;
+	tvalspec_t	t;
+	kern_return_t	kr;
+
+	kr = host_get_clock_service(host, BATTERY_CLOCK, &clk);
+	if (kr == KERN_SUCCESS) {
+		kr = clock_get_time(clk, &t);
+		(void) mach_port_deallocate(mach_task_self(), clk);
+	}
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (kr != KERN_SUCCESS || t.tv_sec == 0)
+		return -1;
+	*now = t.tv_sec;
+	return 0;
+}
+
 static int
 mount_fs(register struct ext2fs_file	*fp)
 {
@@ -2089,8 +2128,26 @@ mount_fs(register struct ext2fs_file	*fp)
 	if (fp->f_fs->s_state & EXT2_VALID_FS) {
 		fp->f_fs->s_state &= ~EXT2_VALID_FS;
 		fp->f_fs->s_mnt_count++;
-		(void) write_super(fp);
 	}
+
+	/*
+	 * #290: and when, at every first mount and not only the ones that
+	 * find the volume clean.  A volume a crash left in use is mounted
+	 * again with nothing for #284 to mark, and the time it keeps would be
+	 * the mount before the crash's, for as long as boots kept crashing.
+	 * Linux writes the mount time at every mount too.
+	 */
+	{
+		unsigned int	now;
+
+		if (ext2fs_wall_time(&now) == 0) {
+			fp->f_fs->s_mtime = now;
+			fp->f_fs->s_wtime = now;
+		} else
+			printf("ext2fs: the battery clock gave no time: the "
+			       "mount and write times stay as they were (#290)\n");
+	}
+	(void) write_super(fp);
 
 	/* Cache for subsequent opens in per-mount state */
 	if (m) {
@@ -3693,11 +3750,18 @@ ext2fs_mark_clean_dev(struct device *dev)
 {
 	struct ext2_mount *m = ext2_get_mount(dev);
 	struct ext2fs_file tmp;
+	unsigned int now;
 
 	if (!m || !m->m_fs)
 		return FS_INVALID_FS;
 
 	m->m_fs->s_state |= EXT2_VALID_FS;
+	/* #290: and when it was last written, from the battery clock */
+	if (ext2fs_wall_time(&now) == 0)
+		m->m_fs->s_wtime = now;
+	else
+		printf("ext2fs: the battery clock gave no time: the write "
+		       "time stays as it was (#290)\n");
 
 	/* write_super() only touches f_dev + f_fs, so a stack file with
 	 * just those two fields populated is enough to flush the sb. */
