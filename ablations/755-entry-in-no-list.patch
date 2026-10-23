@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #755
+Takes out: nothing -- a probe: an entry appended to grub.cfg with no line in either list of the merge test, as entry 49 was from 11/10 to #755; merge-test-x86_64.sh -L must refuse it and name it, where before #755 nothing asked
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -L
+Expect: merge-test: lists: entry [0-9]+ is in grub.cfg and in neither list .*a probe of #755
+Note: -L boots nothing, so one accelerator says all of it; under KVM ablate.sh would give the script --kvm, which it does not take. The Expect names the entry by its title, not its number: an entry appended to grub.cfg after this one moves the number, not the title -- and stops the patch applying, which is when to look at it again.
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/grub.cfg b/uros/src/mach_kernel/x86_64/boot/grub.cfg
+--- a/uros/src/mach_kernel/x86_64/boot/grub.cfg
++++ b/uros/src/mach_kernel/x86_64/boot/grub.cfg
+@@ -833,3 +833,12 @@
+ 	module2 /boot/bootstrap.bundle bootstrap.bundle
+ 	boot
+ }
++
++# A probe of #755, not an entry to keep: appended with no line in either list
++# of scripts/merge-test-x86_64.sh, which must then refuse to run and name it.
++menuentry "UrMach x86-64 (a probe of #755: an entry in neither list of the merge test)" {
++	multiboot2 /boot/mach_kernel
++	module2 /boot/bootstrap bootstrap
++	module2 /boot/bootstrap.bundle bootstrap.bundle
++	boot
++}
