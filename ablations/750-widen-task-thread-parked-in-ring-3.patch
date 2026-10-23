@@ -1,0 +1,42 @@
+Kind: widen
+Issue: #750
+Holds open: a processor parked in ring 3, in every boot of entry 55 -- a processor parked on a task's thread is reported with that thread's own frame from ring 3 (pcb->user), its rip, cs and rbp as the task left them, as though the NMI had landed in the task a moment later; -t holds one such processor inside the tick that landed in its task's code, so the report always meets one. Without it the condition came in 1 boot of 32 on omen at 7ce400ae, and 750-ring3-frame-walked was never met; the fixed tree must still pass, each such processor said in ring 3 and not walked
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/ddb.c b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+index b37db3bb..6956e6da 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/ddb.c
++++ b/uros/src/mach_kernel/x86_64/ddb/ddb.c
+@@ -875,6 +875,7 @@ static volatile long		ddb_owner = DDB_NOBODY;
+ static volatile int		ddb_parked[NCPUS];
+ static volatile int		ddb_stop_sent[NCPUS];
+ static struct trap_frame	*ddb_frame[NCPUS];
++static struct trap_frame	widen_user_frame[NCPUS];
+ 
+ /*
+  * Called from the NMI arm of trap_dispatch().  Answers TRUE when this NMI was
+@@ -890,9 +891,24 @@ static struct trap_frame	*ddb_frame[NCPUS];
+  */
+ static void park_until_released(struct trap_frame *frame)
+ {
+-	unsigned me = cpu_number();
++	unsigned	me = cpu_number();
++	thread_act_t	act = current_act();
+ 
+ 	ddb_frame[me] = frame;
++	/*
++	 * WIDEN (#750): a processor parked on a task's thread is reported with
++	 * that thread's own frame from ring 3, where it resumes, as though the
++	 * NMI had landed in the task a moment later.  -t holds one such
++	 * processor inside the tick that landed in its task's code, so every
++	 * boot of entry 55 has one parked in ring 3.
++	 */
++	if ((frame->cs & 3) == 0 && act != THR_ACT_NULL
++	    && act->task != kernel_task && act->mact.xxx_pcb.user != 0
++	    && readable((uint64_t)(uintptr_t) act->mact.xxx_pcb.user,
++			sizeof(struct trap_frame))) {
++		widen_user_frame[me] = *act->mact.xxx_pcb.user;
++		ddb_frame[me] = &widen_user_frame[me];
++	}
+ 	ddb_parked[me] = 1;
+ 
+ 	while (ddb_owner >= 0 && ddb_owner != (int) me)
