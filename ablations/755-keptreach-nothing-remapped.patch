@@ -9,7 +9,7 @@ Script: -e
 Script: 49
 Script: -G
 Expect: merge-test: entry 49 kvm -smp 4 \(--iommu intel\) -- WRONG \(keptreach\)
-Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take. The fixed arm boots entry 49's two lines as they are, intel-eim and amd-xt, and must pass both; the ablated arm boots the plain engine's line in place of intel-eim's.
+Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take. The fixed arm boots entry 49's two lines as they are, intel-eim and amd-xt, and must pass both; the ablated arm boots the plain engine's line in place of intel-eim's. That boot keeps the mode, and its pin and MSI-X slot reach the processors they were aimed at all the same, through the APIC alone, so reach's two arrival lines are there: what says nothing was remapped is the missing "entries for 32-bit apic ids".
 
 diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
 --- a/scripts/merge-test-x86_64.sh
