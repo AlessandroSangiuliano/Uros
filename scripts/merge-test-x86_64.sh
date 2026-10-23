@@ -29,7 +29,10 @@
 # the harness's verdict, or a verdict of its own for an entry that ends on
 # purpose in a panic or a stop -- and, for the ones an unattended run cannot
 # judge, why they are not run.  An entry added to grub.cfg and to nothing here
-# is an entry no merge will run: say it here, one way or the other.
+# is an entry no merge will run: say it here, one way or the other.  That
+# sentence did not keep it so -- entry 49 (#659) was in neither list from 11/10
+# to #755 -- so the script refuses to run until each entry of grub.cfg is in
+# exactly one list and each list names only entries grub.cfg has (lists_cover).
 #
 # Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G]
 #   -a  accelerator(s), default both     -s  processors, default 4
@@ -64,7 +67,6 @@ both) ACCS="tcg kvm" ;;
 *) echo "merge-test: -a is tcg, kvm or both, not '$ACC'" >&2; exit 2 ;;
 esac
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-mkdir -p "$OUT"
 WRONG=0
 # #705: the boots whose judge passed them with a question not asked, counted
 # and named at the end, so that a question going unasked is seen in the total
@@ -207,6 +209,47 @@ SKIPPED="
 54: -e asks only of a build with UROS_SYSCALL_PROFILE, which a merge build is not; ablate.sh runs it with the widen patch, which compiles the profile in (#622)
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
 "
+
+# #755: the two lists and grub.cfg agree, or nothing runs.  Entry 49, x2APIC
+# mode left on with interrupts remapped (#659), went into grub.cfg on 11/10
+# and into neither list, and no merge and no campaign booted it until #755:
+# only the sentence at the top asked for it.  So an entry of grub.cfg in
+# neither list, an entry in both, and a list naming an entry grub.cfg does not
+# have are each a refusal, and named.  Entries are counted, not read by title:
+# an entry's number is where it sits in grub.cfg.
+GRUB_CFG=$HERE/uros/src/mach_kernel/x86_64/boot/grub.cfg
+lists_cover() {
+	local n e title run skip bad=0
+	n=$(grep -c '^menuentry ' "$GRUB_CFG")
+	if [ "$n" -eq 0 ]; then
+		echo "merge-test: lists: no menuentry read out of $GRUB_CFG" >&2
+		return 1
+	fi
+	run=$(awk '$1 ~ /^[0-9]+$/ { print $1 }' <<< "$ENTRIES" | sort -un)
+	skip=$(awk -F: '$1 ~ /^[0-9]+$/ { print $1 }' <<< "$SKIPPED" | sort -un)
+	for ((e = 0; e < n; e++)); do
+		grep -qx "$e" <<< "$run" && continue
+		grep -qx "$e" <<< "$skip" && continue
+		title=$(awk -v n="$e" '/^menuentry / { if (i++ == n) { sub(/^menuentry "/, ""); sub(/" \{$/, ""); print; exit } }' "$GRUB_CFG")
+		echo "merge-test: lists: entry $e is in grub.cfg and in neither list -- run it in ENTRIES with a verdict, or say in SKIPPED why not: \"$title\"" >&2
+		bad=1
+	done
+	for e in $run; do
+		grep -qx "$e" <<< "$skip" || continue
+		echo "merge-test: lists: entry $e is run in ENTRIES and said not run in SKIPPED" >&2
+		bad=1
+	done
+	for e in $run $skip; do
+		[ "$e" -lt "$n" ] && continue
+		echo "merge-test: lists: entry $e is in a list, and grub.cfg has no entry $e: its $n entries are 0 to $((n - 1))" >&2
+		bad=1
+	done
+	[ $bad = 0 ] &&
+		echo "merge-test: lists: each of grub.cfg's $n entries is run or said not run: $(wc -w <<< "$run") run, $(wc -w <<< "$skip") not"
+	return $bad
+}
+lists_cover || exit 2
+mkdir -p "$OUT"
 
 # #412: the PCID entries' half of judge().  "Not offered" is taken at the
 # kernel's word only where it can be true: under KVM on a host whose own
