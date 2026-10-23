@@ -1309,6 +1309,20 @@ clear_wait_locked(
 		(void) wake_dequeued(thread, result);
 #endif
 	}
+
+	/*
+	 * #753: a thread that took back its own wait runs on past it, so the
+	 * TH_UNINT that wait set is over too.  thread_invoke() clears the bit
+	 * on a thread it switches to, and thread_block() on one whose wait
+	 * ended before it blocked; a thread that clears its own wait and
+	 * carries on reached neither, and kept the bit into whatever came
+	 * next -- an interruptible wait that thread_abort() could then not
+	 * interrupt, or the assertion in thread_terminate_self() that a dying
+	 * thread has none.  The x86-64 mutex clears its own wait whenever its
+	 * second announce finds the word free.
+	 */
+	if (thread == current_thread() && (thread->state & TH_WAIT) == 0)
+		thread->state &= ~TH_UNINT;
 }
 
 #if	MACH_LDEBUG || MACH_KDB || DEBUG
