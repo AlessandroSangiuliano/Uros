@@ -36,6 +36,7 @@
 #include <stdint.h>
 
 #include <kern/cpu_number.h>
+#include <kern/lock.h>			/* mutex_pause: the observer yields */
 #include <kern/misc_protos.h>
 #include <kern/processor.h>
 #include <kern/sched_prim.h>		/* thread_bind */
@@ -171,9 +172,17 @@ refused_fault_test(void)
 		}
 		rf_go = 1;
 
+		/*
+		 * ⚠️ mutex_pause(), which yields for a tick, not cpu_pause().
+		 * On one processor the probe is bound to this same one, and a
+		 * busy spin here would never let it run; and a probe spinning
+		 * on the retried fault is preempted at the tick, so the
+		 * observer wakes to find the deadline passed.  Uniprocessor is
+		 * first class, and this is the defect's home ground.
+		 */
 		start = rdtsc_ordered();
 		while (!rf_done && rdtsc_ordered() - start < budget)
-			cpu_pause();
+			mutex_pause();
 		rf_go = 0;
 
 		if (!rf_done) {
