@@ -1,0 +1,57 @@
+Kind: ablation
+Issue: #662
+Takes out: the step #662 adds to the four creating traps -- mach_port_deallocate(current_space(), name) on the copyout-failure path -- so a creation whose name cannot be copied out leaves the send right in the caller's space under a name it was never told, as before the fix. act_test [16] aims the OUT name at a VM_PROT_NONE page, counts the space's names with mach_port_names() before and after, and finds names left behind.
+Run: --entry 14 1200 -smp 1
+Expect: name\(s\) left behind after creations whose name could not be copied out
+diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
+index 14135d13..360317d0 100644
+--- a/uros/src/mach_kernel/kern/ipc_mig.c
++++ b/uros/src/mach_kernel/kern/ipc_mig.c
+@@ -1389,11 +1389,6 @@ syscall_task_create(
+ 						       &name);
+ 			if (copyout((char *)&name, (char *)child_task,
+ 					    sizeof(mach_port_t))) {
+-				/* #662: the caller never learned this name
+-				 * and cannot release it; take the right back
+-				 * out of its space before terminating. */
+-				(void) mach_port_deallocate(current_space(),
+-							    name);
+ 				(void) task_terminate(c);
+ 				result = KERN_INVALID_ADDRESS;
+ 			}
+@@ -1447,11 +1442,6 @@ syscall_kernel_task_create(
+ 						       &name);
+ 			if (copyout((char *)&name, (char *)child_task,
+ 					    sizeof(mach_port_t))) {
+-				/* #662: the caller never learned this name
+-				 * and cannot release it; take the right back
+-				 * out of its space before terminating. */
+-				(void) mach_port_deallocate(current_space(),
+-							    name);
+ 				(void) task_terminate(c);
+ 				result = KERN_INVALID_ADDRESS;
+ 			}
+@@ -1543,11 +1533,6 @@ syscall_thread_create_running(
+ 						       &name);
+ 			if (copyout((char *)&name, (char *)child_thread,
+ 					    sizeof(mach_port_t))) {
+-				/* #662: the caller never learned this name
+-				 * and cannot release it; take the right back
+-				 * out of its space before terminating. */
+-				(void) mach_port_deallocate(current_space(),
+-							    name);
+ 				(void) thread_terminate(thr_act);
+ 				result = KERN_INVALID_ADDRESS;
+ 			}
+@@ -1928,11 +1913,6 @@ syscall_thread_create(
+ 						       &name);
+ 			if (copyout((char *)&name, (char *)child_thread,
+ 					    sizeof(mach_port_t))) {
+-				/* #662: the caller never learned this name
+-				 * and cannot release it; take the right back
+-				 * out of its space before terminating. */
+-				(void) mach_port_deallocate(current_space(),
+-							    name);
+ 				(void) thread_terminate(c);
+ 				result = KERN_INVALID_ADDRESS;
+ 			}
