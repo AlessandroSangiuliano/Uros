@@ -36,13 +36,16 @@
  * which word in front of them.
  */
 #define	MTR_LOCK_FAST	1	/* cmpxchg took it, uncontended            */
-#define	MTR_ANNOUNCE	2	/* swap wrote WAIT; `arg' is what was there */
-#define	MTR_ILK_FREE	3	/* under the interlock the word was FREE    */
-#define	MTR_SLEEP	4	/* about to sleep; `arg' is waiters after ++ */
+#define	MTR_ANNOUNCE	2	/* swap wrote WAIT; `arg' is what was there;
+				   a second in a row came after queueing */
+#define	MTR_SLEEP	4	/* about to block; `arg' is what the announce found */
 #define	MTR_WOKE		5	/* back from sleeping                       */
-#define	MTR_UNLOCK	6	/* swap wrote FREE; `arg' is what was there */
-#define	MTR_WAKEUP	7	/* woke one; `arg' is waiters after --       */
+#define	MTR_UNLOCK	6	/* swap wrote FREE over WAIT, one sleeper woken */
 #define	MTR_UNLOCK_QUIET	8	/* released, nobody announced          */
+/*
+ * 3 and 7 recorded the interlock and the count of sleepers, which the mutex
+ * no longer has (#753).
+ */
 
 /*
  * Off by default, and the reason is where the hooks are.

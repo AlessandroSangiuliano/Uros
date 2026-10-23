@@ -31,10 +31,8 @@ struct mtr_entry {
 	uint64_t	tsc;
 	void		*thread;
 	uint64_t	arg;
-	uint8_t		what;
+	uint8_t		what;		/* which also says what it left in the word */
 	uint8_t		cpu;
-	uint8_t		locked;		/* the word as this operation left it */
-	int16_t		waiters;
 };
 
 static void			*mtr_target;
@@ -51,10 +49,16 @@ mutex_trace_watch(void *m)
 void
 mutex_trace(void *m, int what, uint64_t arg)
 {
-	mutex_t		*mu = (mutex_t *) m;
 	struct mtr_entry *e;
 	uint32_t	slot;
 
+	/*
+	 * ⚠️ The mutex is compared, never read.  mutex_unlock() traces after
+	 * its exchange, and from that exchange on the memory may be another
+	 * thread's to free (#753): a read of the word or the count here would
+	 * be the one access the release has to be the last of.  What the
+	 * operation left in the word is in `what' anyway.
+	 */
 	if (m != mtr_target)
 		return;
 
@@ -97,8 +101,6 @@ mutex_trace(void *m, int what, uint64_t arg)
 	e->thread  = (void *) current_thread();
 	e->arg     = arg;
 	e->what    = (uint8_t) what;
-	e->locked  = (uint8_t) mu->locked;
-	e->waiters = (int16_t) mu->waiters;
 }
 
 static const char *
@@ -107,11 +109,9 @@ mtr_name(int what)
 	switch (what) {
 	case MTR_LOCK_FAST:	return "lock-fast   ";
 	case MTR_ANNOUNCE:	return "announce    ";
-	case MTR_ILK_FREE:	return "ilk-saw-free";
 	case MTR_SLEEP:		return "sleep       ";
 	case MTR_WOKE:		return "woke        ";
-	case MTR_UNLOCK:	return "unlock      ";
-	case MTR_WAKEUP:	return "wakeup-one  ";
+	case MTR_UNLOCK:	return "unlock-wake ";
 	case MTR_UNLOCK_QUIET:	return "unlock-quiet";
 	default:		return "?           ";
 	}
@@ -146,9 +146,9 @@ mutex_trace_report(void)
 		uint32_t	 abs = first + k;
 		struct mtr_entry *e = &mtr_ring[abs % MTR_ENTRIES];
 
-		printf("mutex_trace: %5u cpu%u th=%p %s locked=%d waiters=%d arg=%lu\n",
+		printf("mutex_trace: %5u cpu%u th=%p %s arg=%lu\n",
 		       abs, e->cpu, e->thread, mtr_name(e->what),
-		       e->locked, e->waiters, (unsigned long) e->arg);
+		       (unsigned long) e->arg);
 	}
 }
 
