@@ -34,14 +34,18 @@
 # to #755 -- so the script refuses to run until each entry of grub.cfg is in
 # exactly one list and each list names only entries grub.cfg has (lists_cover).
 #
-# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G]
+# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G] [-L]
 #   -a  accelerator(s), default both     -s  processors, default 4
 #   -o  directory for the logs, default ./merge-test-logs
 #   -e  only these entries (to see one fail, or to rerun one); a merge runs them all
 #   -G  no gdb stub; by default every run has one (-s, port 1234), so a run cut
 #       short is walked by run-x86_64.sh before it is killed
+#   -L  only ask whether each grub.cfg entry is run or said not run, and say so:
+#       0 if each is, 1 if not.  ci/job.sh asks it before it builds (#755)
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
-# default is tested the same way.  The exit status is the number of entries
+# default is tested the same way.  A run that refuses to start -- a bad option,
+# the stub's port taken, the lists and grub.cfg not agreeing -- exits 2, and
+# otherwise the exit status is the number of entries
 # judged wrong (0: every judged entry as it should be).
 
 set -u
@@ -50,13 +54,15 @@ SMP=4
 OUT=./merge-test-logs
 ONLY=""
 STUB="-s"	# every run with the gdb stub: a run cut short is walked before it is killed (#526); -G turns it off
-while getopts "a:s:o:e:G" o; do
+LISTS_ONLY=0
+while getopts "a:s:o:e:GL" o; do
 	case $o in
 	a) ACC=$OPTARG ;;
 	s) SMP=$OPTARG ;;
 	o) OUT=$OPTARG ;;
 	e) ONLY=" $OPTARG " ;;
 	G) STUB="" ;;
+	L) LISTS_ONLY=1 ;;
 	*) sed -n '/^# Usage:/,/^# judged wrong/p' "$0"; exit 2 ;;
 	esac
 done
@@ -248,6 +254,10 @@ lists_cover() {
 		echo "merge-test: lists: each of grub.cfg's $n entries is run or said not run: $(wc -w <<< "$run") run, $(wc -w <<< "$skip") not"
 	return $bad
 }
+if [ $LISTS_ONLY = 1 ]; then
+	lists_cover
+	exit
+fi
 lists_cover || exit 2
 mkdir -p "$OUT"
 
