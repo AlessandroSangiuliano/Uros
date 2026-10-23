@@ -1416,6 +1416,22 @@ thread_return_ast(void)
 
 
 /*
+ * Whether a fault from ring 0 on a present user page is the processor's
+ * protection refusing it (#750): SMEP for a fetch, SMAP for a data access
+ * outside a copy, AC clear in the interrupted code's flags.  CR4 is read on
+ * the processor that faulted, which every processor shares with the boot one
+ * (#639); without either bit the access is allowed and never faults here.
+ */
+static int refused_by_protection(const struct trap_frame *frame)
+{
+	uint64_t cr4 = read_cr4();
+
+	if ((frame->error & PF_INSTRUCTION) != 0)
+		return (cr4 & CR4_SMEP) != 0;
+	return (cr4 & CR4_SMAP) != 0 && (frame->rflags & RFLAGS_AC) == 0;
+}
+
+/*
  * Resolve a fault, with interrupts as the interrupted code had them (#411).
  *
  * 🔥 A trap gate clears IF, so a handler runs with interrupts off -- and
@@ -1465,6 +1481,21 @@ fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
 	if ((frame->cs & 3) == 0 && map != kernel_map && self != THREAD_NULL
 	    && WAIT_DECLARED(self->wait_event, self->state))
 		return KERN_FAILURE;
+
+	/*
+	 * 🔴 A REFUSAL IS NOT A MISSING PAGE (#750).  A fault from ring 0 on
+	 * a task's page that is present was not caused by the page: SMAP
+	 * refused a data access made outside a copy, or SMEP refused a fetch.
+	 * vm_fault() finds nothing to do for a page that is mapped and
+	 * resident, answers success, and the instruction would run again and
+	 * fault again, for ever and with nothing in the log -- the loop
+	 * x86_64/lib/copy.c tells of the copies (#468), which lift SMAP
+	 * around themselves and so never meet this.  Refused here, it goes on
+	 * to the exception table, an expectation, or the report.
+	 */
+	if ((frame->cs & 3) == 0 && map != kernel_map
+	    && (frame->error & PF_PRESENT) != 0 && refused_by_protection(frame))
+		return KERN_PROTECTION_FAILURE;
 
 	if (had)
 		interrupts_enable();
