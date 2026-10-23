@@ -177,12 +177,11 @@ refused_fault_test(void)
 		rf_go = 0;
 
 		if (!rf_done) {
-			printf("refused_fault_test: [cpu %u] WRONG — the probe "
+			printf("refused_fault_test: WRONG — [cpu %u] the probe "
 			       "did not return in %d s: a fault the processor "
 			       "refused was retried for ever (#750)\n",
 			       i, REFUSED_FAULT_WAIT_S);
-			wrong++;
-			break;	/* one looping processor is proof; stop here */
+			return;	/* one looping processor is proof; stop here */
 		}
 
 		tested++;
