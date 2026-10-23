@@ -46,6 +46,7 @@
 #include <pmap/pmap.h>
 #include <thread/context.h>
 #include <sync/mutex_trace.h>
+#include <sync/mutex.h>		/* #753: MUTEX_OF_EVENT() */
 #include <boot/bootarg.h>	/* #373: -b */
 #include <cpu/reset.h>		/* #595: reset_census_over() */
 #include <cpu/quiet_census.h>
@@ -440,9 +441,11 @@ census_threads(void)
 			 * shape of the wedge this was written for.
 			 */
 			/*
-			 * 🔑 #558: when the sleeper is in mutex_lock_wait the
-			 * event IS a mutex_t, and this kernel already records
-			 * who took it -- MUTEX_OWNER_TRACK (#383) keeps own_thr
+			 * 🔑 #558: when the sleeper is in _mutex_lock the event
+			 * names a mutex_t -- MUTEX_OF_EVENT(), since the event
+			 * is the mutex's odd &m->locked and not the mutex
+			 * (#753) -- and this kernel already records who took
+			 * it -- MUTEX_OWNER_TRACK (#383) keeps own_thr
 			 * and own_pc, built for exactly this: "a deadlocked
 			 * mutex whose own_thr points at a thread the census
 			 * also lists tells you the cycle".
@@ -463,10 +466,10 @@ census_threads(void)
 				census_add(" futex=%p", (void *) th->futex_uaddr);
 
 			if (nm != 0 && th->wait_event != 0 &&
-			    census_streq(nm, "mutex_lock_wait") &&
-			    census_readable((void *) th->wait_event,
+			    census_streq(nm, "_mutex_lock") &&
+			    census_readable((void *) MUTEX_OF_EVENT(th->wait_event),
 					    sizeof (mutex_t))) {
-				mutex_t	   *mx = (mutex_t *) th->wait_event;
+				mutex_t	   *mx = MUTEX_OF_EVENT(th->wait_event);
 				uint64_t    poff = 0;
 				const char *pn;
 
@@ -485,8 +488,7 @@ census_threads(void)
 				 * holder, and the note alone cannot tell them
 				 * apart.
 				 */
-				census_add(" locked=%d waiters=%d]", (int) mx->locked,
-				       (int) mx->waiters);
+				census_add(" locked=%d]", (int) mx->locked);
 				walk = 1;
 			}
 
@@ -522,10 +524,8 @@ census_threads(void)
 				if (m->object != VM_OBJECT_NULL &&
 				    census_readable(m->object,
 						    sizeof *m->object))
-					census_add(" [obj-lock locked=%d waiters=%d"
-					       " owner=%p]",
+					census_add(" [obj-lock locked=%d owner=%p]",
 					       (int) m->object->Lock.locked,
-					       (int) m->object->Lock.waiters,
 					       (void *) m->object->Lock.own_thr);
 				walk = 1;
 			}
@@ -866,10 +866,9 @@ quiet_census_pass(int mycpu)
 #endif	/* CONTEXT_FPU_COUNT */
 
 #if	MUTEX_OWNER_TRACK
-	printf("quiet_census: vm_page_queue_lock locked=%d waiters=%d "
+	printf("quiet_census: vm_page_queue_lock locked=%d "
 	       "owner=%p took_it_at=%p\n",
 	       (int) vm_page_queue_lock.locked,
-	       (int) vm_page_queue_lock.waiters,
 	       (void *) vm_page_queue_lock.own_thr,
 	       (void *) vm_page_queue_lock.own_pc);
 #endif	/* MUTEX_OWNER_TRACK */
