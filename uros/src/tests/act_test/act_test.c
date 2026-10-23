@@ -69,6 +69,7 @@
 #include <mach/task_info.h>	/* #688: arm fourteen's question */
 #include <mach/mach_syscalls.h>	/* #688: syscall_task_info() */
 #include <mach/ndr.h>		/* #688: NDR_record, for its message */
+#include <mach/mach_port.h>	/* #662: mach_port_names(), to count the space */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -2914,6 +2915,83 @@ arm_fourteen_terminate_inside_traps(void)
 }
 
 /*
+ * ── [16] A creation whose name cannot be copied out leaves no name behind ──
+ *
+ * syscall_thread_create(), syscall_thread_create_running() and
+ * syscall_task_create() each put a send right in the caller's space and then
+ * copy out its name.  Told to write the name at a page the caller cannot write,
+ * the copyout fails: the object is torn down, and #662 adds the step that takes
+ * the right back out too, so no name is left under a name the caller was never
+ * told.  The arm counts the space's names with mach_port_names() before and
+ * after; equal means nothing leaked.  The #662 ablation takes the step out, and
+ * the count rises.  (act_test is x86-64 only; the same four traps carry the
+ * same fix on i386.)
+ */
+static int
+arm_sixteen_name_not_copied_out(void)
+{
+	mach_port_t		me = mach_task_self();
+	vm_address_t		ro = 0;
+	mach_port_array_t	names = 0;
+	mach_port_type_array_t	types = 0;
+	mach_msg_type_number_t	nn = 0, nt = 0;
+	natural_t		st[1] = { 0 };
+	int			before, after;
+	kern_return_t		kr, kc, kcr, ktk;
+
+	/* A page the traps cannot write, so each copyout of the name fails. */
+	kr = vm_allocate(me, &ro, vm_page_size, TRUE);
+	if (kr == KERN_SUCCESS)
+		kr = vm_protect(me, ro, vm_page_size, FALSE, VM_PROT_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [16] no unwritable page for the OUT name "
+		       "(%d) — WRONG\n", kr);
+		return 0;
+	}
+
+	kr = mach_port_names(me, &names, &nn, &types, &nt);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [16] mach_port_names before (%d) — WRONG\n",
+		       kr);
+		(void) vm_deallocate(me, ro, vm_page_size);
+		return 0;
+	}
+	before = (int) nn;
+	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
+	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+
+	kc  = syscall_thread_create(me, (mach_port_t *) ro);
+	kcr = syscall_thread_create_running(me, 0, st, 0, (mach_port_t *) ro);
+	ktk = syscall_task_create(me, 0, 0, FALSE, (mach_port_t *) ro);
+
+	kr = mach_port_names(me, &names, &nn, &types, &nt);
+	(void) vm_protect(me, ro, vm_page_size, FALSE,
+			  VM_PROT_READ | VM_PROT_WRITE);
+	(void) vm_deallocate(me, ro, vm_page_size);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [16] mach_port_names after (%d) — WRONG\n",
+		       kr);
+		return 0;
+	}
+	after = (int) nn;
+	(void) vm_deallocate(me, (vm_address_t) names, nn * sizeof(*names));
+	(void) vm_deallocate(me, (vm_address_t) types, nt * sizeof(*types));
+
+	if (after != before) {
+		printf("act_test: [16] %d name(s) left behind after creations "
+		       "whose name could not be copied out (%d -> %d): a right "
+		       "the caller was never told and cannot release — WRONG "
+		       "(#662)\n", after - before, before, after);
+		return 0;
+	}
+
+	printf("act_test: [16] a creation whose name could not be copied out "
+	       "left no name behind: %d names before and after, trap codes "
+	       "0x%x/0x%x/0x%x (#662)\n", before, kc, kcr, ktk);
+	return 1;
+}
+
+/*
  * ── [15] A kernel-loaded task is refused without the privileged host port ──
  *
  * syscall_kernel_task_create() (the trap) and kernel_task_create() (its RPC
@@ -2985,7 +3063,7 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 15, r;
+	int		passed = 0, arm_one_passed, arms = 16, r;
 
 	(void) argc;
 	(void) argv;
@@ -3035,6 +3113,8 @@ main(int argc, char **argv)
 	 * the #752 ablation it provokes the same kind of machine stop arm six
 	 * does, so it belongs down here beside it.
 	 */
+	passed += arm_sixteen_name_not_copied_out();
+
 	passed += arm_fifteen_kernel_task_needs_privilege();
 
 	/*

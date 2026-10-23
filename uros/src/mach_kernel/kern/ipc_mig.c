@@ -1375,15 +1375,29 @@ syscall_task_create(
 	result = task_create(t, ledgers, num_ledgers, inherit_memory, &c);
 	if (result == KERN_SUCCESS) {
 		port = (ipc_port_t) convert_task_to_port(c);
-		/* always returns a name, even for non-success return codes */
-		(void) ipc_kmsg_copyout_object(current_space(),
-					       (ipc_object_t) port,
-					       MACH_MSG_TYPE_PORT_SEND, &name);
-		if (copyout((char *)&name, (char *)child_task,
-						    sizeof(mach_port_t))) {
+		if (port == IP_NULL) {
+			/* #662: no self-port -- the caller would be told
+			 * MACH_PORT_NULL and the task would be left with a right
+			 * nobody holds.  Terminate it rather than leak it. */
 			(void) task_terminate(c);
-			result = KERN_INVALID_ADDRESS;
-		} /* XXX else should terminate child if conversion failed */
+			result = KERN_FAILURE;
+		} else {
+			/* always returns a name, even for non-success codes */
+			(void) ipc_kmsg_copyout_object(current_space(),
+						       (ipc_object_t) port,
+						       MACH_MSG_TYPE_PORT_SEND,
+						       &name);
+			if (copyout((char *)&name, (char *)child_task,
+					    sizeof(mach_port_t))) {
+				/* #662: the caller never learned this name
+				 * and cannot release it; take the right back
+				 * out of its space before terminating. */
+				(void) mach_port_deallocate(current_space(),
+							    name);
+				(void) task_terminate(c);
+				result = KERN_INVALID_ADDRESS;
+			}
+		}
 	}
 	task_deallocate(t);
 
@@ -1419,15 +1433,29 @@ syscall_kernel_task_create(
 	result = kernel_task_create(t, host, map_base, map_size, &c);
 	if (result == KERN_SUCCESS) {
 		port = (ipc_port_t) convert_task_to_port(c);
-		/* always returns a name, even for non-success return codes */
-		(void) ipc_kmsg_copyout_object(current_space(),
-					       (ipc_object_t) port,
-					       MACH_MSG_TYPE_PORT_SEND, &name);
-		if (copyout((char *)&name, (char *)child_task,
-							sizeof(mach_port_t))) {
+		if (port == IP_NULL) {
+			/* #662: no self-port -- the caller would be told
+			 * MACH_PORT_NULL and the task would be left with a right
+			 * nobody holds.  Terminate it rather than leak it. */
 			(void) task_terminate(c);
-			result = KERN_INVALID_ADDRESS;
-		} /* XXX else should terminate task if conversion failed */
+			result = KERN_FAILURE;
+		} else {
+			/* always returns a name, even for non-success codes */
+			(void) ipc_kmsg_copyout_object(current_space(),
+						       (ipc_object_t) port,
+						       MACH_MSG_TYPE_PORT_SEND,
+						       &name);
+			if (copyout((char *)&name, (char *)child_task,
+					    sizeof(mach_port_t))) {
+				/* #662: the caller never learned this name
+				 * and cannot release it; take the right back
+				 * out of its space before terminating. */
+				(void) mach_port_deallocate(current_space(),
+							    name);
+				(void) task_terminate(c);
+				result = KERN_INVALID_ADDRESS;
+			}
+		}
 	}
 	task_deallocate(t);
 
@@ -1501,14 +1529,28 @@ syscall_thread_create_running(
 				       new_state_count, &thr_act);
 	if (result == KERN_SUCCESS) {
 		port = (ipc_port_t) convert_act_to_port(thr_act);
-		/* always returns a name, even for non-success return codes */
-                (void) ipc_kmsg_copyout_object(current_space(),
-                                               (ipc_object_t) port,
-                                               MACH_MSG_TYPE_PORT_SEND, &name);
-                if (copyout((char *)&name, (char *)child_thread,
-						    sizeof(mach_port_t))) {
+		if (port == IP_NULL) {
+			/* #662: no self-port -- the caller would be told
+			 * MACH_PORT_NULL and the thread would be left with a right
+			 * nobody holds.  Terminate it rather than leak it. */
 			(void) thread_terminate(thr_act);
-			result = KERN_INVALID_ADDRESS;
+			result = KERN_FAILURE;
+		} else {
+			/* always returns a name, even for non-success codes */
+			(void) ipc_kmsg_copyout_object(current_space(),
+						       (ipc_object_t) port,
+						       MACH_MSG_TYPE_PORT_SEND,
+						       &name);
+			if (copyout((char *)&name, (char *)child_thread,
+					    sizeof(mach_port_t))) {
+				/* #662: the caller never learned this name
+				 * and cannot release it; take the right back
+				 * out of its space before terminating. */
+				(void) mach_port_deallocate(current_space(),
+							    name);
+				(void) thread_terminate(thr_act);
+				result = KERN_INVALID_ADDRESS;
+			}
 		}
         }
         task_deallocate(task);
@@ -1872,15 +1914,29 @@ syscall_thread_create(
 	result = thread_create(t, &c);
 	if (result == KERN_SUCCESS) {
 		port = (ipc_port_t) convert_act_to_port(c);
-		/* always returns a name, even for non-success return codes */
-		(void) ipc_kmsg_copyout_object(current_space(),
-					       (ipc_object_t) port,
-					       MACH_MSG_TYPE_PORT_SEND, &name);
-		if (copyout((char *)&name, (char *)child_thread,
-						    sizeof(mach_port_t))) {
+		if (port == IP_NULL) {
+			/* #662: no self-port -- the caller would be told
+			 * MACH_PORT_NULL and the thread would be left with a right
+			 * nobody holds.  Terminate it rather than leak it. */
 			(void) thread_terminate(c);
-			result = KERN_INVALID_ADDRESS;
-		} /* XXX else should terminate child if conversion failed */
+			result = KERN_FAILURE;
+		} else {
+			/* always returns a name, even for non-success codes */
+			(void) ipc_kmsg_copyout_object(current_space(),
+						       (ipc_object_t) port,
+						       MACH_MSG_TYPE_PORT_SEND,
+						       &name);
+			if (copyout((char *)&name, (char *)child_thread,
+					    sizeof(mach_port_t))) {
+				/* #662: the caller never learned this name
+				 * and cannot release it; take the right back
+				 * out of its space before terminating. */
+				(void) mach_port_deallocate(current_space(),
+							    name);
+				(void) thread_terminate(c);
+				result = KERN_INVALID_ADDRESS;
+			}
+		}
 	}
 	task_deallocate(t);
 
