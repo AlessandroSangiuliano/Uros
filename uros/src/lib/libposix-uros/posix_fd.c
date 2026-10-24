@@ -34,9 +34,6 @@
 #include <mach/thread_switch.h>	/* SWITCH_OPTION_WAIT (#583) */
 #include <mach/mach_syscalls.h>	/* syscall_thread_switch (#583) */
 
-/* Console write sink — same SYSENTER trap handlers.c reaches for. */
-extern void mach_print(const char *);
-
 /* From signals.c: proc_server send right + caller's pid. */
 extern mach_port_t  __uros_proc_port;
 extern unsigned int __uros_my_pid;
@@ -172,17 +169,24 @@ static unsigned vfs_type_to_ifmt(uint8_t t)
 /*  Console I/O (fds 0/1/2)                                             */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The console, for fds 0/1/2 of a task with no controlling tty (#761).
+ *
+ * This cut the bytes into 127-byte pieces and handed each to mach_print as it
+ * was, and mach_print takes a C string: a NUL among the bytes ended the piece
+ * there, and whatever followed it in the same piece never reached the
+ * console.  mach_print_bytes() leaves a NUL out instead, and keeps a line to a
+ * trap while it fits -- the 127-byte cut split lines wherever it fell.
+ *
+ * 🔑 THE CONTRACT, which __uros_write() returns: every byte handed over counts
+ * as written, a NUL included.  A terminal shows nothing for a NUL either, so
+ * leaving it out changes nothing a reader sees; and a short count at a NUL
+ * would be worse than wrong, because the caller -- musl's stdio, for one --
+ * hands the rest back, NUL first, and a NUL can never go out.
+ */
 static void console_write(const char *p, size_t n)
 {
-    char chunk[128];
-    while (n > 0) {
-        size_t take = n < sizeof(chunk) - 1 ? n : sizeof(chunk) - 1;
-        memcpy(chunk, p, take);
-        chunk[take] = '\0';
-        mach_print(chunk);
-        p += take;
-        n -= take;
-    }
+    mach_print_bytes(p, (vm_size_t)n);
 }
 
 /* ------------------------------------------------------------------ */
@@ -606,7 +610,7 @@ long __uros_write(int fd, const void *buf, size_t count)
             return (long)want;
         }
         if (count) console_write((const char *)buf, count);
-        return (long)count;
+        return (long)count;             /* a NUL included: see console_write() */
     }
     ssize_t n = vfs_write(vfd, buf, count);
     return n < 0 ? -EIO : (long)n;
