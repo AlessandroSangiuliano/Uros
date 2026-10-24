@@ -332,7 +332,8 @@ int printf_bufmax = PRINTF_BUFMAX;
 struct printf_state {
 	char buf[PRINTF_BUFMAX + 1]; /* extra for '\r\n' */
 	unsigned int index;
-	unsigned int total;
+	unsigned int total;	/* the characters the format produced (#510) */
+	boolean_t refused;	/* a write the console refused (#510) */
 };
 
 /* Try to obtain the console port.  This is not guaranteed to work (we
@@ -407,6 +408,7 @@ console_refused(struct printf_state *state, kern_return_t kr,
 	char piece[MACH_PRINT_MAX];
 	int n;
 
+	state->refused = TRUE;
 	(void) snprintf(piece, sizeof piece,
 			"libmach: the console refused %d bytes of this task's "
 			"output: %s (0x%08x); they follow through mach_print "
@@ -503,7 +505,6 @@ flush_upto(struct printf_state *state, unsigned int upto)
 		(void) device_set_status(console_port, TTY_DRAIN, &word, 0);
 	}
 #endif	/* TTY_DRAIN */
-	state->total += upto;
 	if (upto < state->index)
 		memmove(state->buf, &state->buf[upto], state->index - upto);
 	state->index -= upto;
@@ -520,6 +521,7 @@ outchar(void *arg, int c)
 {
 	struct printf_state *state = (struct printf_state *) arg;
 
+	state->total++;
 	if (c == '\n') {
 	    state->buf[state->index] = '\r';
 	    state->index++;
@@ -541,6 +543,19 @@ outchar(void *arg, int c)
 
 /*
  * Printing (to console)
+ *
+ * 🔴 WHAT C SAYS PRINTF RETURNS (#510): the characters it transmitted, or a
+ * negative value if an output error occurred.  This returned the length it
+ * had handed to the console whether or not the console took it, so a caller
+ * that checked saw success for output that was refused -- and the log, until
+ * console_refused(), showed nothing missing either.  A refusal is now -1,
+ * although console_refused() has sent the bytes on another way: the console
+ * this was asked to write to did not take them.
+ *
+ * ⚠️ The count is of the FORMAT's characters.  The '\r' that outchar() puts
+ * before each '\n' is this console's line discipline, not the caller's output,
+ * and is not in it -- so a call returns the same number here as it does
+ * through musl's printf.
  */
 int
 vprintf(const char *fmt, va_list args)
@@ -548,11 +563,12 @@ vprintf(const char *fmt, va_list args)
 	struct printf_state state;
 
 	state.index = state.total = 0;
+	state.refused = FALSE;
 	_doprnt(fmt, args, 0, outchar, (char *) &state);
 
 	if (state.index != 0)
 	    flush(&state);
-	return (state.total);
+	return (state.refused ? -1 : (int) state.total);
 }
 
 /*VARARGS1*/
