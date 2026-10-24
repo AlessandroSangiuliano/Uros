@@ -40,6 +40,12 @@ extern int  isascii(int);
 extern int  toascii(int);
 extern void printf_init(mach_port_t);
 /*
+ * The port printf writes to, which printf_init() opens.  Declared here so the
+ * definition in libmach's printf.c is checked against a declaration, and so a
+ * test can point it at a port that refuses (#510).
+ */
+extern mach_port_t console_port;
+/*
  * #199 prep: install an optional mirror callback invoked by the printf
  * flush path.  Pass NULL to disable.  Implemented in libsa_mach;
  * libgpu_console registers a hook that mirrors output to gpu_text_puts.
