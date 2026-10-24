@@ -1002,13 +1002,23 @@ and 1760-2030.  It is an EPP 0x80 boot, so it is outside the comparison above.
 
 ### What the table says to #412
 
-`comb` and `intra` stay in one address space, so PCID must not move their
-`SWITCH`; `inter` changes it, so PCID must move its `SWITCH`.  The KVM guest on
-victus has no PCID, and there `inter`'s `SWITCH` costs 396 cycles more than
-`intra`'s: the change of address space.  On omen under KVM, with PCID, it cost
-234 more -- another machine, so not yet the answer.  The answer is one machine
-with PCID on and off: omen's bare metal, `intra` and `inter` with and without
-`-n` (#737).
+`comb` hands the processor from one thread of a task to another, so PCID has
+nothing to do there.  `inter` changes address space at every switch.  `intra`
+was read here as staying in one, and its traps that never leave the processor
+do -- but its blocked round trip does not: a thread that blocks with nothing
+else to run gives its processor to the idle thread, whose activation's map is
+`kernel_map`, and `switch_context()` (`x86_64/thread/machine.c:980`) writes
+CR3 for it, and again on the way back.
+
+The KVM guest on victus has no PCID, and there `inter`'s `SWITCH` costs 396
+cycles more than `intra`'s; on omen under KVM, with PCID, 234 more -- another
+machine, so not the answer.  The answer is one machine with PCID on and off,
+omen's metal (above): PCID takes 2.4-5.8% off the kernel's time of an `inter`
+round trip and up to 11% off a blocked one's wall time, and up to 7.5% off
+`intra`'s blocked round trip, which passes through the idle thread; `intra`'s
+traps that never leave the processor do not move.  `SWITCH` does not move
+either way.  Without PCID the flush is paid after the switch -- in the
+receive, `mq_recv`, and in the wait for the other side.
 
 ### How to redo it
 
