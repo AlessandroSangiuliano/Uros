@@ -49,8 +49,6 @@
 
 extern void cnputc(char);
 
-decl_simple_lock_data(extern, printf_lock)
-
 /* The most a hold may carry when the caller's bytes have no newline (#551). */
 #define CONSOLE_CHUNK	256
 
@@ -74,6 +72,8 @@ consolewrite(dev_t dev, io_req_t ior)
 {
 	char *p;
 	unsigned int n;
+	unsigned int wrote;	/* #757: what one turn wrote, and its last */
+	char last;
 
 	(void) dev;
 	if (ior == 0)
@@ -130,7 +130,16 @@ consolewrite(dev_t dev, io_req_t ior)
 				break;
 			}
 		n -= k;
-		simple_lock(&printf_lock);
+
+		/*
+		 * #757: the console's turn, as printf() takes it -- after any
+		 * kernel thread's block, with the marks of a line this cuts or
+		 * goes on with -- and the count it gives back says whether the
+		 * chunk left the task's line open.
+		 */
+		wrote = k;
+		last = p[k - 1];
+		printf_writer_take();
 		while (k--) {
 			/*
 			 * 🔥 AND INTO THE LOG RING, WHICH IT WAS NOT (#497).
@@ -165,7 +174,7 @@ consolewrite(dev_t dev, io_req_t ior)
 			klog_putc(*p);
 			cnputc(*p++);
 		}
-		simple_unlock(&printf_lock);
+		printf_writer_give(wrote, last);
 
 		/*
 		 * And the wire outside the hold, like printf() (#567).  Per
