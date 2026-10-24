@@ -1033,6 +1033,10 @@ and on a machine's metal, one stick for every suite and every flag
 (`ADDR` is the machine's ramoops zone):
 
     scripts/make-baremetal-x86_64.sh --bench-only -o uros.iso \
-        --suites comb --entry "-b ramoops=ADDR reset_after=60" \
-        --suites inter --entry "-b ramoops=ADDR reset_after=60" \
-        --suites inter --entry "-n -b ramoops=ADDR reset_after=60"
+        --suites comb --entry "-b ramoops=ADDR reset_after=60 hwp_epp=0" \
+        --suites inter --entry "-b ramoops=ADDR reset_after=60 hwp_epp=0" \
+        --suites inter --entry "-n -b ramoops=ADDR reset_after=60 hwp_epp=0"
+
+⚠️ `hwp_epp=0` asks HWP for performance (#736).  Without it the request is
+balanced, and the clock under measurement is whatever HWP chose: the pair of
+marks printed in every dump says which, 26-28 cycles on omen at full clock.
