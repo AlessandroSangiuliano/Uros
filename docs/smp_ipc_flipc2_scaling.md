@@ -820,3 +820,223 @@ silenzio ogni invocazione che ne nomina una.
 ⚠️ Il profilo per fase e' `-DUROS_SYSCALL_PROFILE=ON`, **spento di default**, e
 va letto solo per le FASI: con i dump accesi un `comb` null RPC legge 51 µs
 contro 2,21, perche' le printf stampano dentro il loop.
+
+
+## 2026-10-23 — the #392 table on today's epic (#737)
+
+The phase table above (13/09) predates #561, which moved the FPU's state into
+the context switch, and #412, PCID.  It was taken again on the epic of 23/10
+(d5e31edb), on victus (AMD Ryzen 5 5600H, Zen 3), under KVM, on AC, with the
+performance governor, boost on and the maximum at the hardware's; the clock
+each boot reported was 3.89-4.0 GHz.
+
+### The hand-off is `comb`'s
+
+The #392 table measured the hand-off: a send that gives the processor to its
+receiver in the same trap.  Today's bench takes it in `comb` (Combined
+SEND|RCV intra-task, the hot path).  `intra` and `inter` block, or never leave
+the processor: their dumps say `[blocked, no hand-off]` and `[never left the
+processor]`, with marks the hand-off has not -- `RUNQ` apart from `SWITCH`,
+`mq_recv`, `mq_send`, `kmsg_get`.
+
+⚠️ **One suite a boot.**  The profile keeps 16 dumps a thread (`SP_MAX_DUMPS`,
+`kern/syscall_profile.h`), and the ping-pong's two threads spend them in the
+first suites they run: with `intra inter comb` in one boot, `comb` had no dump
+at all.  Each suite is built alone, `-DUROS_BENCH_SUITES=comb`.
+
+### `comb`, the 13/09 tree against today's, on one machine
+
+67cf1be4 (the 13/09 tree, before #561) and d5e31edb, `comb` alone, boots
+alternated, 3 at `-smp 1` and 5 at `-smp 4` each; the median of each column
+over 102 and 170 dumps, cycles as printed (each column holds one pair of
+marks, see below):
+
+| phase | 13/09 tree, smp 1 | today, smp 1 | 13/09 tree, smp 4 | today, smp 4 |
+|---|--:|--:|--:|--:|
+| entry | 66 | 66 | 66 | 66 |
+| get buf | 66 | 66 | 66 | 66 |
+| **COPYIN** | **165** | **165** | **165** | **165** |
+| resolve | 132 | 132 | 132 | 132 |
+| queue | 132 | 132 | 132 | 132 |
+| pick rcv | 132 | 132 | 132 | 132 |
+| claim | 99 | 99 | 66 | 99 |
+| park snd | 99 | 99 | 99 | 99 |
+| deliver | 66 | 66 | 66 | 66 |
+| wait (of wall) | 2112 | 2145 | 2112 | 2145 |
+| **SWITCH** | **528** | **528** | **528** | **528** |
+| splx | 66 | 66 | 66 | 66 |
+| resume | 66 | 66 | 66 | 66 |
+| copyout | 198 | 198 | 198 | 198 |
+| **PUT** | **132** | **132** | **132** | **132** |
+| residue | 66 | 66 | 66 | 66 |
+| **on a processor** | **2069** | **2068** | **2068** | **2035** |
+
+- **Nothing on the hand-off's path moved since 13/09 by more than a grain.**
+  The differences from the 13/09 table above -- `SWITCH` 450 there, 528 here
+  -- are the machine's: that table was taken on another machine, whose
+  timestamps moved in grains of 30 cycles; victus's move in grains of 33, and
+  on victus the 13/09 tree measures 528 too.
+- **#561 is not visible on this path, before it or after it.**  Whether the
+  bench's threads touch the FPU at all, which would explain it, has not been
+  checked.
+- **At `-smp 4` it does not grow**, as on 13/09.
+
+### The instrument
+
+On victus every phase reads as a multiple of 33 cycles, and each column holds
+one pair of marks, which the profile measures at each boot: one grain or two
+-- 66 in the 13/09 tree's boots, 33 or 66 in today's.  Taking it out moves a
+column by a grain either way, so the columns are compared as printed, each
+good to a grain.  The fifteen columns of work hold fifteen pairs, 500 to 1000
+of the 2068 cycles on a processor.
+
+### Where the hand-off's cycles are now
+
+Of the 2068 cycles a hand-off spends on a processor (`-smp 1`, today; each
+row is a sum of column medians):
+
+| | cycles | share |
+|---|--:|--:|
+| `SWITCH` (`switch_context` + `thread_dispatch`) | 528 | 26% |
+| finding and queueing (resolve, queue, pick rcv) | 396 | 19% |
+| **the two copies (COPYIN + PUT)** | **297** | **14%** |
+| the header translated out (copyout) | 198 | 10% |
+| the rest (entry, get buf, claim, park snd, deliver, splx, resume, residue) | 594 | 29% |
+
+**#391's ceiling, restated**: the two copies are 297 of the 2068 cycles, 14%
+(13/09: 330 of 2076, on the other machine).  ⚠️ The 13/09 reading above says
+"10-12%" for those same 330 cycles, but 330 of 2076 is 16%, and the text does
+not say what other total it was taken of.  What register-IPC could save on
+this path is still at most the copies: a seventh of it, not a tenth.
+
+### `intra` and `inter` today
+
+Each suite alone, 3 boots at each count, medians as printed:
+
+| | smp 1 | smp 4 |
+|---|---|---|
+| `intra`, blocked: on a processor / RUNQ / SWITCH | 2928 / 1122 / 528 | 3788 / 726 / 891 |
+| `inter`, blocked: on a processor / RUNQ / SWITCH | 3454 / 1155 / 924 | 3983 / 907 / 957 |
+| never left the processor, `intra` / `inter` | 850 / 848 | 1578 / 1641 |
+
+At `-smp 4` these medians spread widely and move between runs more than at
+`-smp 1`.
+
+### On omen's metal (24/10)
+
+omen is an Intel Kaby Lake laptop, four cores and eight threads, its TSC at
+2808 MHz.  One suite a boot from one stick (`make-baremetal-x86_64.sh
+--suites`), the console kept across the reset by ramoops (#373): 22 boots.
+The cycles are TSC ticks as on victus, but of another clock on another
+processor, so omen's numbers are compared with omen's.
+
+**The clock under measurement is HWP's, not the one the boot reports.**  #736
+turns HWP on with the request's minimum at 1, its maximum at 38 and EPP 0x80,
+balanced, so each core's clock follows its own load.  The 10 ms spin that
+reports 3407-3409 MHz on all eight processors at bring-up says nothing about a
+suite whose threads block and wake.  The profile's pair of marks shows it: it
+is measured once, at the first dump (`sp_measure_self()`, nine pairs of
+back-to-back TSC reads), and reads 26-28 ticks on a core at full clock, 47-63
+on a slow one.  With EPP 0x80 it read 47-63 in 5 boots of 11, and in those
+boots `intra`'s traps that never left the processor cost about 2000 cycles
+against about 1780.  With `hwp_epp=0` it read 26-28 in 10 boots of 10, and the
+PCID comparison below is those ten boots.
+
+Two more things the reading of the logs needed:
+
+- **A suite is four tests in a row** -- null, 128 B, 1024 B and 4096 B RPCs --
+  and a thread's dumps come at 16·2^k traps, so which tests they fall in
+  depends on how many threads share the work, and changes from boot to boot.
+  In one boot `comb`'s 128 B test had 11 dumps and in the next none, and its
+  `copyout` read 289 against 186 with every other column equal.  Each dump is
+  counted in the test it was printed in (the bench's `us/op` line ends each
+  test), and only like is compared with like.
+- **#757 splices the phase lines** of two dumps printed at once: of `intra`'s
+  52 dumps a boot, 9 read phase by phase.  A dump's header -- the round trip's
+  wall time and its time on a processor -- is one printf, and it arrived whole
+  in every dump of every boot, so the totals below are the headers'.
+
+`comb`, the hand-off, null RPCs, 40 dumps over two boots (PCID on, EPP 0x80,
+the marks at 28 and 26; the two boots agree to 0.3%), cycles as printed:
+
+| phase | cycles |
+|---|--:|
+| entry / get buf / **COPYIN** | 64 / 61 / **125** |
+| resolve / queue / pick rcv | 126 / 120 / 238 |
+| claim / park snd / deliver | 121 / 123 / 90 |
+| wait (of wall) | 2287 |
+| **SWITCH** | **377** |
+| splx / resume / copyout | 53 / 131 / 188 |
+| **PUT** / residue | **117** / 36 |
+| **on a processor** | **2008** |
+
+Of those 2008 cycles, `SWITCH` is 19%, finding and queueing 24%, **the two
+copies 242 cycles, 12%**, the header translated out 9%, and the rest 34%.  On
+metal #391's ceiling is an eighth of the hand-off.
+
+PCID on and off (`-n`), `hwp_epp=0`, the headers' medians, every test that has
+dumps:
+
+| PCID off against on | on a processor | wall |
+|---|---|---|
+| `inter`, blocked (2 boots each) | +2.4% to +4.9% | +4.3% to +11% |
+| `inter`, never left the processor | +2.7% to +5.8% | the same |
+| `intra`, blocked (4 boots on, 2 off) | +2.3% to +7.5% | +4.8% to +7.1% |
+| `intra`, never left the processor | +1% to +3% | the same |
+
+For `inter`, every boot with PCID off is above every boot with it on, in every
+test and both kinds of trap.  For `intra`'s blocked round trip the wall time
+is, in every test.  `intra`'s never-left traps stay within the boots' spread,
+except in the 4096 B test, which has two dumps a boot.  For scale, a null RPC
+with PCID on: `inter` blocked 3894 and 3998 cycles on a processor, never left
+1797 and 1837; `intra` blocked 4067 to 4142, never left 1762 to 1801.
+
+Phase by phase, `inter` blocked, PCID on and then off (the 128 B, 1024 B and
+4096 B tests; #757 left the null test's phases unreadable): `SWITCH` moves by
++19, -21 and +32 cycles, which is nothing; `mq_recv` by +93, +135 and +137,
+and the wait for the other side by +410 to +495.
+
+⚠️ One boot of the 22 is not explained: `intra` with EPP 0x80 and the marks at
+28 read 3350 and 1457 cycles, where every other `intra` boot read 4000-4450
+and 1760-2030.  It is an EPP 0x80 boot, so it is outside the comparison above.
+
+### What the table says to #412
+
+`comb` hands the processor from one thread of a task to another, so PCID has
+nothing to do there.  `inter` changes address space at every switch.  `intra`
+was read here as staying in one, and its traps that never leave the processor
+do -- but its blocked round trip does not: a thread that blocks with nothing
+else to run gives its processor to the idle thread, whose activation's map is
+`kernel_map`, and `switch_context()` (`x86_64/thread/machine.c:980`) writes
+CR3 for it, and again on the way back.
+
+The KVM guest on victus has no PCID, and there `inter`'s `SWITCH` costs 396
+cycles more than `intra`'s; on omen under KVM, with PCID, 234 more -- another
+machine, so not the answer.  The answer is one machine with PCID on and off,
+omen's metal (above): PCID takes 2.4-5.8% off the kernel's time of an `inter`
+round trip and up to 11% off a blocked one's wall time, and up to 7.5% off
+`intra`'s blocked round trip, which passes through the idle thread; `intra`'s
+traps that never leave the processor do not move.  `SWITCH` does not move
+either way.  Without PCID the flush is paid after the switch -- in the
+receive, `mq_recv`, and in the wait for the other side.
+
+### How to redo it
+
+    sudo cpupower frequency-set -g performance
+    cmake -S uros -B uros/build-x86_64 -DUROS_SYSCALL_PROFILE=ON \
+          -DUROS_BUNDLE_IPC_BENCH=ON -DUROS_BUNDLE_BENCH_ONLY=ON \
+          -DUROS_BENCH_SUITES=comb
+    ninja -C uros/build-x86_64
+    scripts/run-x86_64.sh --entry 14 120 -smp 1 -enable-kvm
+
+and on a machine's metal, one stick for every suite and every flag
+(`ADDR` is the machine's ramoops zone):
+
+    scripts/make-baremetal-x86_64.sh --bench-only -o uros.iso \
+        --suites comb --entry "-b ramoops=ADDR reset_after=60 hwp_epp=0" \
+        --suites inter --entry "-b ramoops=ADDR reset_after=60 hwp_epp=0" \
+        --suites inter --entry "-n -b ramoops=ADDR reset_after=60 hwp_epp=0"
+
+⚠️ `hwp_epp=0` asks HWP for performance (#736).  Without it the request is
+balanced, and the clock under measurement is whatever HWP chose: the pair of
+marks printed in every dump says which, 26-28 cycles on omen at full clock.
