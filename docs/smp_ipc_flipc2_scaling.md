@@ -820,3 +820,131 @@ silenzio ogni invocazione che ne nomina una.
 ⚠️ Il profilo per fase e' `-DUROS_SYSCALL_PROFILE=ON`, **spento di default**, e
 va letto solo per le FASI: con i dump accesi un `comb` null RPC legge 51 µs
 contro 2,21, perche' le printf stampano dentro il loop.
+
+
+## 2026-10-23 — the #392 table on today's epic (#737)
+
+The phase table above (13/09) predates #561, which moved the FPU's state into
+the context switch, and #412, PCID.  It was taken again on the epic of 23/10
+(d5e31edb), on victus (AMD Ryzen 5 5600H, Zen 3), under KVM, on AC, with the
+performance governor, boost on and the maximum at the hardware's; the clock
+each boot reported was 3.89-4.0 GHz.
+
+### The hand-off is `comb`'s
+
+The #392 table measured the hand-off: a send that gives the processor to its
+receiver in the same trap.  Today's bench takes it in `comb` (Combined
+SEND|RCV intra-task, the hot path).  `intra` and `inter` block, or never leave
+the processor: their dumps say `[blocked, no hand-off]` and `[never left the
+processor]`, with marks the hand-off has not -- `RUNQ` apart from `SWITCH`,
+`mq_recv`, `mq_send`, `kmsg_get`.
+
+⚠️ **One suite a boot.**  The profile keeps 16 dumps a thread (`SP_MAX_DUMPS`,
+`kern/syscall_profile.h`), and the ping-pong's two threads spend them in the
+first suites they run: with `intra inter comb` in one boot, `comb` had no dump
+at all.  Each suite is built alone, `-DUROS_BENCH_SUITES=comb`.
+
+### `comb`, the 13/09 tree against today's, on one machine
+
+67cf1be4 (the 13/09 tree, before #561) and d5e31edb, `comb` alone, boots
+alternated, 3 at `-smp 1` and 5 at `-smp 4` each; the median of each column
+over 102 and 170 dumps, cycles as printed (each column holds one pair of
+marks, see below):
+
+| phase | 13/09 tree, smp 1 | today, smp 1 | 13/09 tree, smp 4 | today, smp 4 |
+|---|--:|--:|--:|--:|
+| entry | 66 | 66 | 66 | 66 |
+| get buf | 66 | 66 | 66 | 66 |
+| **COPYIN** | **165** | **165** | **165** | **165** |
+| resolve | 132 | 132 | 132 | 132 |
+| queue | 132 | 132 | 132 | 132 |
+| pick rcv | 132 | 132 | 132 | 132 |
+| claim | 99 | 99 | 66 | 99 |
+| park snd | 99 | 99 | 99 | 99 |
+| deliver | 66 | 66 | 66 | 66 |
+| wait (of wall) | 2112 | 2145 | 2112 | 2145 |
+| **SWITCH** | **528** | **528** | **528** | **528** |
+| splx | 66 | 66 | 66 | 66 |
+| resume | 66 | 66 | 66 | 66 |
+| copyout | 198 | 198 | 198 | 198 |
+| **PUT** | **132** | **132** | **132** | **132** |
+| residue | 66 | 66 | 66 | 66 |
+| **on a processor** | **2069** | **2068** | **2068** | **2035** |
+
+- **Nothing on the hand-off's path moved since 13/09 by more than a grain.**
+  The differences from the 13/09 table above -- `SWITCH` 450 there, 528 here
+  -- are the machine's: that table was taken on another machine, whose
+  timestamps moved in grains of 30 cycles; victus's move in grains of 33, and
+  on victus the 13/09 tree measures 528 too.
+- **#561 is not visible on this path, before it or after it.**  Whether the
+  bench's threads touch the FPU at all, which would explain it, has not been
+  checked.
+- **At `-smp 4` it does not grow**, as on 13/09.
+
+### The instrument
+
+On victus every phase reads as a multiple of 33 cycles, and each column holds
+one pair of marks, which the profile measures at each boot: one grain or two
+-- 66 in the 13/09 tree's boots, 33 or 66 in today's.  Taking it out moves a
+column by a grain either way, so the columns are compared as printed, each
+good to a grain.  The fifteen columns of work hold fifteen pairs, 500 to 1000
+of the 2068 cycles on a processor.
+
+### Where the hand-off's cycles are now
+
+Of the 2068 cycles a hand-off spends on a processor (`-smp 1`, today; each
+row is a sum of column medians):
+
+| | cycles | share |
+|---|--:|--:|
+| `SWITCH` (`switch_context` + `thread_dispatch`) | 528 | 26% |
+| finding and queueing (resolve, queue, pick rcv) | 396 | 19% |
+| **the two copies (COPYIN + PUT)** | **297** | **14%** |
+| the header translated out (copyout) | 198 | 10% |
+| the rest (entry, get buf, claim, park snd, deliver, splx, resume, residue) | 594 | 29% |
+
+**#391's ceiling, restated**: the two copies are 297 of the 2068 cycles, 14%
+(13/09: 330 of 2076, on the other machine).  ⚠️ The 13/09 reading above says
+"10-12%" for those same 330 cycles, but 330 of 2076 is 16%, and the text does
+not say what other total it was taken of.  What register-IPC could save on
+this path is still at most the copies: a seventh of it, not a tenth.
+
+### `intra` and `inter` today
+
+Each suite alone, 3 boots at each count, medians as printed:
+
+| | smp 1 | smp 4 |
+|---|---|---|
+| `intra`, blocked: on a processor / RUNQ / SWITCH | 2928 / 1122 / 528 | 3788 / 726 / 891 |
+| `inter`, blocked: on a processor / RUNQ / SWITCH | 3454 / 1155 / 924 | 3983 / 907 / 957 |
+| never left the processor, `intra` / `inter` | 850 / 848 | 1578 / 1641 |
+
+At `-smp 4` these medians spread widely and move between runs more than at
+`-smp 1`.
+
+### What the table says to #412
+
+`comb` and `intra` stay in one address space, so PCID must not move their
+`SWITCH`; `inter` changes it, so PCID must move its `SWITCH`.  The KVM guest on
+victus has no PCID, and there `inter`'s `SWITCH` costs 396 cycles more than
+`intra`'s: the change of address space.  On omen under KVM, with PCID, it cost
+234 more -- another machine, so not yet the answer.  The answer is one machine
+with PCID on and off: omen's bare metal, `intra` and `inter` with and without
+`-n` (#737).
+
+### How to redo it
+
+    sudo cpupower frequency-set -g performance
+    cmake -S uros -B uros/build-x86_64 -DUROS_SYSCALL_PROFILE=ON \
+          -DUROS_BUNDLE_IPC_BENCH=ON -DUROS_BUNDLE_BENCH_ONLY=ON \
+          -DUROS_BENCH_SUITES=comb
+    ninja -C uros/build-x86_64
+    scripts/run-x86_64.sh --entry 14 120 -smp 1 -enable-kvm
+
+and on a machine's metal, one stick for every suite and every flag
+(`ADDR` is the machine's ramoops zone):
+
+    scripts/make-baremetal-x86_64.sh --bench-only -o uros.iso \
+        --suites comb --entry "-b ramoops=ADDR reset_after=60" \
+        --suites inter --entry "-b ramoops=ADDR reset_after=60" \
+        --suites inter --entry "-n -b ramoops=ADDR reset_after=60"
