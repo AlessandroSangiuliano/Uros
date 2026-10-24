@@ -524,6 +524,38 @@ main(int argc, char **argv)
 	   host_port, device_port, bootstrap_port);
 
     /*
+     * The console arm (#761): a line with a NUL in the middle, printed to
+     * stdout through musl's stdio like any other.  fds 0/1/2 of a task with
+     * no controlling tty are the console, and the console used to end the
+     * line at the NUL: the rest of its piece never went out, and write() said
+     * it had.  scripts/suite-i386.sh waits for the words after the NUL.
+     *
+     * ⚠️ Each line under 80 characters, because stdout is unbuffered here
+     * and musl then formats into an 80-byte buffer of its own, handing a
+     * longer line over in two writes -- between which another task's line
+     * can land: the arm asks about a NUL, not about where musl cuts.  And
+     * printf's count is asked too: every character, the NUL among them, is
+     * what the console's contract says write() returns.
+     */
+    {
+#define	CONSOLE_NUL_LINE "(hello_server): console: a NUL in the middle%c of " \
+			 "this line went out (#761)\n"
+	char	sized[96];
+	int	want = snprintf(sized, sizeof sized, CONSOLE_NUL_LINE, 0);
+	int	got;
+
+	printf("(hello_server): console: started (#761)\n");
+	got = printf(CONSOLE_NUL_LINE, 0);
+	if (got == want)
+	    printf("(hello_server): console: printf returned %d, the line's "
+		   "%d (#761)\n", got, want);
+	else
+	    printf("(hello_server): WRONG — console: printf returned %d, the "
+		   "line's %d (#761)\n", got, want);
+#undef	CONSOLE_NUL_LINE
+    }
+
+    /*
      * Phase 4b (#253): if the operator passed "crash" as an argv,
      * fault deliberately to validate the Mach exception → POSIX
      * signal path.  Normal boot doesn't, so this is a no-op for
