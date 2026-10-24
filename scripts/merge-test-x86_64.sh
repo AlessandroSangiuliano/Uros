@@ -29,31 +29,45 @@
 # the harness's verdict, or a verdict of its own for an entry that ends on
 # purpose in a panic or a stop -- and, for the ones an unattended run cannot
 # judge, why they are not run.  An entry added to grub.cfg and to nothing here
-# is an entry no merge will run: say it here, one way or the other.
+# is an entry no merge will run: say it here, one way or the other.  That
+# sentence did not keep it so -- entry 49 (#659) was in neither list from 11/10
+# to #755 -- so the script refuses to run until each entry of grub.cfg is in
+# exactly one list and each list names only entries grub.cfg has (lists_cover).
 #
-# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G]
+# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G] [-L]
 #   -a  accelerator(s), default both     -s  processors, default 4
-#   -o  directory for the logs, default ./merge-test-logs
+#   -o  directory for the logs, default ./merge-test-logs, or beside the log
+#       UROS_X86_64_LOG names, as ablate.sh's Script: runs name each arm's (#591)
 #   -e  only these entries (to see one fail, or to rerun one); a merge runs them all
 #   -G  no gdb stub; by default every run has one (-s, port 1234), so a run cut
 #       short is walked by run-x86_64.sh before it is killed
+#   -L  only ask whether each grub.cfg entry is run or said not run, and say so:
+#       0 if each is, 1 if not.  ci/job.sh asks it before it builds (#755)
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
-# default is tested the same way.  The exit status is the number of entries
+# default is tested the same way.  A run that refuses to start -- a bad option,
+# the stub's port taken, the lists and grub.cfg not agreeing -- exits 2, and
+# otherwise the exit status is the number of entries
 # judged wrong (0: every judged entry as it should be).
 
 set -u
 ACC=both
 SMP=4
 OUT=./merge-test-logs
+# #755: run as a Script: of ablate.sh, which names the arm's own log in
+# UROS_X86_64_LOG (#591), the boots' logs go beside it, a directory an arm,
+# and not into a ./merge-test-logs of the caller's that every arm would share.
+[ -n "${UROS_X86_64_LOG:-}" ] && OUT=${UROS_X86_64_LOG%.log}-merge-test
 ONLY=""
 STUB="-s"	# every run with the gdb stub: a run cut short is walked before it is killed (#526); -G turns it off
-while getopts "a:s:o:e:G" o; do
+LISTS_ONLY=0
+while getopts "a:s:o:e:GL" o; do
 	case $o in
 	a) ACC=$OPTARG ;;
 	s) SMP=$OPTARG ;;
 	o) OUT=$OPTARG ;;
 	e) ONLY=" $OPTARG " ;;
 	G) STUB="" ;;
+	L) LISTS_ONLY=1 ;;
 	*) sed -n '/^# Usage:/,/^# judged wrong/p' "$0"; exit 2 ;;
 	esac
 done
@@ -64,7 +78,6 @@ both) ACCS="tcg kvm" ;;
 *) echo "merge-test: -a is tcg, kvm or both, not '$ACC'" >&2; exit 2 ;;
 esac
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-mkdir -p "$OUT"
 WRONG=0
 # #705: the boots whose judge passed them with a question not asked, counted
 # and named at the end, so that a question going unasked is seen in the total
@@ -86,6 +99,8 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #   panic2    -Z panics on purpose; scripts/double-panic-check.sh judges it
 #   reach     the harness's verdict, entries for 32-bit apic ids, and a pin and an
 #             MSI-X slot seen arriving at the processor they were aimed at (#659)
+#   keptreach reach, of an x2APIC mode GRUB left on and the kernel kept: its
+#             "kept as the firmware left it" line as well (#755)
 #   earlypanic  -p panics on purpose before the boot processor has its page:
 #             its message and the backtrace after it, and no protection fault
 #             in their place (#665)
@@ -116,7 +131,9 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 # Entry 48 adds -i with engines that take x2APIC ids (--iommu intel-eim, amd-xt),
 # and 37 runs on processors 0 and 256, x2APIC mode left on by SeaBIOS, so that
 # the interrupts aimed at 256 need all 32 bits; under KVM the harness asks
-# those engines for the split irqchip.
+# those engines for the split irqchip.  Entry 49 is 47's mode with -i: GRUB
+# leaves x2APIC mode on, the kernel keeps it, and the same two engines remap
+# it through entries for 32-bit ids (#755).
 ENTRIES="
 0 pcidd
 1 harness
@@ -191,6 +208,8 @@ ENTRIES="
 48 reach --iommu_amd-xt
 37 reach --socket1-cpu_--iommu_intel-eim 1,sockets=2,cores=256,maxcpus=512
 37 reach --socket1-cpu_--iommu_amd-xt 1,sockets=2,cores=256,maxcpus=512
+49 keptreach --iommu_intel-eim
+49 keptreach --iommu_amd-xt
 50 pcidx
 51 pcidn
 56 refusedfault
@@ -207,6 +226,51 @@ SKIPPED="
 54: -e asks only of a build with UROS_SYSCALL_PROFILE, which a merge build is not; ablate.sh runs it with the widen patch, which compiles the profile in (#622)
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
 "
+
+# #755: the two lists and grub.cfg agree, or nothing runs.  Entry 49, x2APIC
+# mode left on with interrupts remapped (#659), went into grub.cfg on 11/10
+# and into neither list, and no merge and no campaign booted it until #755:
+# only the sentence at the top asked for it.  So an entry of grub.cfg in
+# neither list, an entry in both, and a list naming an entry grub.cfg does not
+# have are each a refusal, and named.  Entries are counted, not read by title:
+# an entry's number is where it sits in grub.cfg.
+GRUB_CFG=$HERE/uros/src/mach_kernel/x86_64/boot/grub.cfg
+lists_cover() {
+	local n e title run skip bad=0
+	n=$(grep -c '^menuentry ' "$GRUB_CFG")
+	if [ "$n" -eq 0 ]; then
+		echo "merge-test: lists: no menuentry read out of $GRUB_CFG" >&2
+		return 1
+	fi
+	run=$(awk '$1 ~ /^[0-9]+$/ { print $1 }' <<< "$ENTRIES" | sort -un)
+	skip=$(awk -F: '$1 ~ /^[0-9]+$/ { print $1 }' <<< "$SKIPPED" | sort -un)
+	for ((e = 0; e < n; e++)); do
+		grep -qx "$e" <<< "$run" && continue
+		grep -qx "$e" <<< "$skip" && continue
+		title=$(awk -v n="$e" '/^menuentry / { if (i++ == n) { sub(/^menuentry "/, ""); sub(/" \{$/, ""); print; exit } }' "$GRUB_CFG")
+		echo "merge-test: lists: entry $e is in grub.cfg and in neither list -- run it in ENTRIES with a verdict, or say in SKIPPED why not: \"$title\"" >&2
+		bad=1
+	done
+	for e in $run; do
+		grep -qx "$e" <<< "$skip" || continue
+		echo "merge-test: lists: entry $e is run in ENTRIES and said not run in SKIPPED" >&2
+		bad=1
+	done
+	for e in $run $skip; do
+		[ "$e" -lt "$n" ] && continue
+		echo "merge-test: lists: entry $e is in a list, and grub.cfg has no entry $e: its $n entries are 0 to $((n - 1))" >&2
+		bad=1
+	done
+	[ $bad = 0 ] &&
+		echo "merge-test: lists: each of grub.cfg's $n entries is run or said not run: $(wc -w <<< "$run") run, $(wc -w <<< "$skip") not"
+	return $bad
+}
+if [ $LISTS_ONLY = 1 ]; then
+	lists_cover
+	exit
+fi
+lists_cover || exit 2
+mkdir -p "$OUT"
 
 # #412: the PCID entries' half of judge().  "Not offered" is taken at the
 # kernel's word only where it can be true: under KVM on a host whose own
@@ -300,6 +364,13 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	reach) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'entries for 32-bit apic ids' "$f" &&
 		[ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ;;
+	# #755: entry 49 asks reach's question of the x2APIC mode GRUB left on,
+	# and the kept line as well, which is what makes it 49 and not 48: the
+	# mode the entries were planned for is the one the kernel found on.
+	# Under "harness" a board that remapped nothing passed: the plain Intel
+	# engine under KVM, which has no split irqchip.
+	keptreach) grep -aq 'local apic in x2APIC mode, kept as the firmware left it' "$f" &&
+		judge "$e" reach "$h" "$f" "$a" ;;
 	# #412: -x and -n are honoured, not merely survived.  Where the
 	# processor offers PCID -- KVM on omen, OMEGA, GitHub's runners -- entry
 	# 50 must run PCID without INVPCID with [1] and [2] on its log, and entry

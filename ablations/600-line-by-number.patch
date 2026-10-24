@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #600
+Takes out: the pin -- device_md_irq_register() routes every line but 0 and 8 by its number without claiming its pin, as before #600, so line 2, which a PC's MADT leaves on ISA 0's pin, is routed over the clock's tick
+Run: --entry 22 600 -smp 4
+Expect: clock_pins: ISA line [0-9]+ arrives on GSI [0-9]+, the clock's, and was GRANTED -- WRONG \(#600\)
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+index 587f0a09..59765c7d 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/device_machdep.c
+@@ -520,6 +520,20 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
+ 	 * Said, since a refusal a driver cannot read looks like a device that
+ 	 * never interrupts.
+ 	 */
++	/*
++	 * #600's ablation: the refusal back on the NUMBERS.  Lines 0 and 8 go to
++	 * the claim below, which refuses them while the clock holds their pins;
++	 * every other line is routed by its number without claiming its pin, as
++	 * before #600 -- so line 2, which arrives on ISA 0's pin, takes the tick.
++	 */
++	if (irq != 0 && irq != 8) {
++		irq_handler[irq] = handler;
++		trap_set_handler(DEVICE_MD_VECTOR(irq), device_md_irq_trampoline);
++		ioapic_route(gsi, (uint8_t)DEVICE_MD_VECTOR(irq), target,
++			     acpi_irq_flags((uint8_t)irq));
++		return 1;
++	}
++
+ 	irq_handler[irq] = handler;
+ 	trap_set_handler(DEVICE_MD_VECTOR(irq), device_md_irq_trampoline);
+ 	if (!ioapic_claim_route(gsi, IOAPIC_OWNER_LINE(irq),

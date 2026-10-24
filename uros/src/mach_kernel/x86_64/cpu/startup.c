@@ -45,6 +45,7 @@
 #include <cpu/sprintf_test.h>	/* #655: -K */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <cpu/census_test.h>	/* #657: -c */
+#include <cpu/clock_pins_test.h>	/* #600: the clock's pins are not a line's */
 #include <trap/refused_fault_test.h>	/* #750: -j */
 #include <sync/mutex_uaf_test.h>	/* #753: -u */
 #include <cpu/hwp.h>		/* #736 */
@@ -93,6 +94,13 @@ machine_init(void)
 	 */
 	trap_set_handler(LAPIC_TIMER_VECTOR, clock_event_tick);
 	clock_event_init(LAPIC_TIMER_VECTOR);
+
+	/*
+	 * #600: with the tick on the HPET's LegacyReplacement, no ISA line may
+	 * take one of its pins.  Here, the first moment the clock's route is
+	 * known, and before any task could ask for a line.
+	 */
+	clock_pins_test();
 
 	/*
 	 * The other output (#568).

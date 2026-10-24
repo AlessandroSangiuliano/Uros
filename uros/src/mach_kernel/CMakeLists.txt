@@ -180,6 +180,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/console_cdev.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/machdep.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/halt_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/clock_pins_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/model.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu_check.c

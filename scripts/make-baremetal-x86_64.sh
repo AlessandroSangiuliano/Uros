@@ -41,6 +41,9 @@
 #   --before      a GRUB command the next --entry runs before the kernel, such
 #                 as "wrmsr 0x1b 0xfee00d00" for a boot processor already in
 #                 x2APIC mode, as some firmware hands it over (#659)
+#   --suites      the suites the next --entry's ipc_bench runs, in a bundle of
+#                 its own (with --bench-only): one stick and a boot per suite,
+#                 since the phase profile wants them asked one at a time (#737)
 #   KERNEL-FLAGS  without --entry, the one entry's flags after -f
 #
 # The build is UROS_BUILD_DIR when set, else uros/build-x86_64, and must be an
@@ -65,6 +68,8 @@ KPATHS=()
 ENTRIES=()
 BEFORES=()
 BEFORE=""
+SUITESE=()
+SUITES_NEXT=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -74,10 +79,12 @@ while [ $# -gt 0 ]; do
 	--kernel)	kv=${2:?--kernel needs NAME=PATH}
 			KNAMES+=("${kv%%=*}"); KPATHS+=("${kv#*=}"); shift 2 ;;
 	--entry)	[ $# -ge 2 ] || { echo "make-baremetal: --entry needs [NAME:]FLAGS" >&2; exit 2; }
-			ENTRIES+=("$2"); BEFORES+=("$BEFORE"); BEFORE=""; shift 2 ;;
+			ENTRIES+=("$2"); BEFORES+=("$BEFORE"); SUITESE+=("$SUITES_NEXT")
+			BEFORE=""; SUITES_NEXT=""; shift 2 ;;
 	--before)	BEFORE=${2:?--before needs a GRUB command}; shift 2 ;;
+	--suites)	SUITES_NEXT=${2:?--suites needs the suites}; shift 2 ;;
 	--)		shift; FLAGS="$FLAGS $*"; break ;;
-	*)		echo "usage: $0 [--bench-only[=SUITES]] [-o OUT.iso] [--kernel NAME=PATH]... [--entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]" >&2; exit 2 ;;
+	*)		echo "usage: $0 [--bench-only[=SUITES]] [-o OUT.iso] [--kernel NAME=PATH]... [[--before CMD] [--suites SUITES] --entry [NAME:]FLAGS]... [-- KERNEL-FLAGS...]" >&2; exit 2 ;;
 	esac
 done
 
@@ -131,6 +138,25 @@ else
 	CONTENTS="bootstrap-nodisk ($(sed -n 's/^\([a-z_]*\) .*/\1/p' "$BUILD/src/servers/bootstrap/bootstrap-nodisk.conf" | tr '\n' ' ' | sed 's/ $//'))"
 fi
 
+# #737: an entry's own suites, given by --suites before it, in a bundle of their
+# own, one per suite set, so that one stick carries a boot for each.  The phase
+# profile keeps 16 dumps a thread, and the ping-pong's two threads spend them in
+# the first suites they run: suites asked in one boot are not each asked alone.
+[ -z "$SUITES_NEXT" ] || { echo "make-baremetal: --suites with no --entry after it" >&2; exit 2; }
+declare -A BUNDLE_OF=()
+nb=0
+for s in "${SUITESE[@]}"; do
+	[ -n "$s" ] && [ -z "${BUNDLE_OF[$s]:-}" ] || continue
+	[ "$BENCH_ONLY" = 1 ] || { echo "make-baremetal: --suites makes an ipc_bench bundle: give --bench-only too" >&2; exit 2; }
+	nb=$((nb + 1))
+	conf=$TREE/bootstrap-$nb.conf
+	printf 'name_server name_server\n-H ipc_bench ipc_bench %s\n' "$s" > "$conf"
+	"$MKBUNDLE" -o "$TREE/boot/bootstrap-$nb.bundle" "bootstrap.conf:$conf" \
+		"name_server:$SBIN/name_server" "ipc_bench:$SBIN/ipc_bench" >/dev/null
+	BUNDLE_OF[$s]=bootstrap-$nb.bundle
+	CONTENTS="$CONTENTS; bootstrap-$nb.bundle: name_server ipc_bench ($s)"
+done
+
 cp "$KERNEL" "$TREE/boot/mach_kernel"
 cp "$SBIN/bootstrap" "$TREE/boot/bootstrap"
 
@@ -153,6 +179,7 @@ done
 if [ ${#ENTRIES[@]} -eq 0 ]; then
 	ENTRIES=("${FLAGS# -f}")
 	BEFORES=("")
+	SUITESE=("")
 	TIMEOUT=5
 else
 	[ "$FLAGS" = " -f" ] || { echo "make-baremetal: flags after -- and --entry together: give each entry its flags" >&2; exit 2; }
@@ -181,13 +208,19 @@ LIST=()
 		title="UrMach x86-64, bare metal: -f${f:+ $f}"
 		[ "$k" = mach_kernel ] || title="$title, kernel $k"
 		[ "$BENCH_ONLY" = 1 ] && title="$title, ipc_bench"
+		bf=bootstrap.bundle
+		if [ -n "${SUITESE[$i]}" ]; then
+			bf=${BUNDLE_OF[${SUITESE[$i]}]}
+			title="$title (${SUITESE[$i]})"
+		fi
 		[ -z "$b" ] || title="$title, after GRUB's $b"
 		printf '\nmenuentry "%s" {\n' "$title"
 		# A command of a module: loaded by name first, so the line does not
 		# depend on GRUB finding the command in its list of modules.
 		[ -z "$b" ] || printf '\tinsmod %s\n\t%s\n' "${b%% *}" "$b"
-		printf '\tmultiboot2 /boot/%s -f%s\n\tmodule2 /boot/bootstrap bootstrap\n\tmodule2 /boot/bootstrap.bundle bootstrap.bundle\n\tboot\n}\n' \
-			"$k" "${f:+ $f}"
+		# The module keeps the name bootstrap looks for, whichever file it is.
+		printf '\tmultiboot2 /boot/%s -f%s\n\tmodule2 /boot/bootstrap bootstrap\n\tmodule2 /boot/%s bootstrap.bundle\n\tboot\n}\n' \
+			"$k" "${f:+ $f}" "$bf"
 		LIST+=("$title")
 	done
 } > "$TREE/boot/grub/grub.cfg" || exit $?

@@ -223,19 +223,18 @@ static int legacy_route(unsigned *which)
 		 * Not over a driver's line.  LegacyReplacement takes ISA 0's
 		 * input and silences the RTC's, and #594 can bring the tick
 		 * here while the system runs -- after a driver may have claimed
-		 * either, since device_md_irq_register() refuses them only once
-		 * the bit is on.  An unmasked input is one somebody is using;
-		 * this backend's own, once started, is nobody else's.
+		 * either pin.  Asked of the pin's owner (<cpu/ioapic.h>, #600),
+		 * and not of its mask: a level line is masked while its message
+		 * is in flight, and "is the input unmasked?" called it free.
+		 * This backend's own pins, once started, are the clock's.
 		 *
-		 * ⚠️ Checked, not locked: a driver claiming ISA 0 or 8 between
-		 * this and the switch in hpet_ev_start() keeps a line that goes
-		 * silent.  No driver here claims either -- the drivers take PCI
-		 * inputs, MSI, and ISA 1 and 4 -- and the day one does, the
-		 * check and the claim go under one lock.  Until then the start
-		 * says so if it finds the line taken after all.
+		 * A probe's answer, for this moment.  hpet_ev_start() takes the
+		 * pins whoever holds them, and the take is one turn under the
+		 * claim lock: a line that claims one after this question is
+		 * found by the take, and said there.
 		 */
-		if (!started && (!ioapic_is_masked(acpi_irq_to_gsi(0))
-				 || !ioapic_is_masked(acpi_irq_to_gsi(8))))
+		if (ioapic_owner(acpi_irq_to_gsi(0)) >= IOAPIC_OWNER_LINE(0)
+		    || ioapic_owner(acpi_irq_to_gsi(8)) >= IOAPIC_OWNER_LINE(0))
 			return ROUTE_TAKEN;
 		*which = 0;
 		return ROUTE_LEGACY;
@@ -543,6 +542,7 @@ static void hpet_ev_start(uint8_t vector)
 {
 	uint32_t	cap0;
 	unsigned	fsb_unwritable = 0;	/* #598: its comparator + 1 */
+	int		taken_said = 0;		/* #600: a line's pin, said once */
 
 	if (started)
 		return;
@@ -584,12 +584,12 @@ static void hpet_ev_start(uint8_t vector)
 
 	/*
 	 * The probe found a route a moment ago, and nothing it looked at
-	 * changes but the masks: only a driver that claimed ISA 0 or 8 in
-	 * between can take the route away (choose_route()) -- or, after an FSB
-	 * entry that could not be written, one that held it before the probe,
-	 * which took the FSB message and never looked at the masks (#598).  The
-	 * clock has to run, so the line is taken anyway -- and said, because
-	 * that driver's device has just gone silent.
+	 * changes but the pins' owners: only a driver that claimed ISA 0's or
+	 * 8's pin in between can take the route away (choose_route()) -- or,
+	 * after an FSB entry that could not be written, one that held it before
+	 * the probe, which took the FSB message and never looked at the pins
+	 * (#598).  The clock has to run, so the pin is taken anyway -- and said,
+	 * because that driver's device has just gone silent.
 	 *
 	 * No route at all follows a probe that found one in one case only: the
 	 * probe found the FSB message, its entry could not be written, and the
@@ -603,12 +603,14 @@ static void hpet_ev_start(uint8_t vector)
 		       "all the same (#598)\n", fsb_unwritable - 1, fsb_refusal);
 		route = ROUTE_LEGACY;
 		comparator = 0;
+		taken_said = 1;
 	} else if (route == ROUTE_TAKEN) {
 		printf("clock_event: hpet: WRONG -- ISA 0 or 8 was claimed "
 		       "between the probe and the start; LegacyReplacement "
 		       "takes it all the same (#593)\n");
 		route = ROUTE_LEGACY;
 		comparator = 0;
+		taken_said = 1;
 	} else if (route == ROUTE_NONE && fsb_unwritable) {
 		panic("clock_event: hpet: no route -- comparator %u's %s, and "
 		      "there is no LegacyReplacement to fall back to (#598)",
@@ -620,17 +622,37 @@ static void hpet_ev_start(uint8_t vector)
 	trap_set_handler(HPET_EVENT_VECTOR, hpet_ev_intr);
 
 	/*
+	 * #600: the two pins become the clock's before LegacyReplacement points
+	 * timer 0 at one of them, so that from here no line can claim either
+	 * (device_md_irq_register()) or mask either (a line's mask, unmask and
+	 * release act only on a pin it holds).  A line that held one -- said
+	 * above if the check saw it, and here if it claimed after the check --
+	 * keeps a registration whose pin is no longer its own.
+	 */
+	if (route != ROUTE_FSB) {
+		unsigned had0, had8;
+
+		route_gsi = acpi_irq_to_gsi(0);
+		had0 = ioapic_take(route_gsi, IOAPIC_OWNER_CLOCK);
+		had8 = ioapic_take(acpi_irq_to_gsi(8), IOAPIC_OWNER_CLOCK);
+		if (!taken_said && (had0 >= IOAPIC_OWNER_LINE(0)
+				    || had8 >= IOAPIC_OWNER_LINE(0)))
+			printf("clock_event: hpet: WRONG -- ISA 0 or 8 was "
+			       "claimed between the probe and the start; "
+			       "LegacyReplacement takes it all the same "
+			       "(#593, #600)\n");
+	}
+
+	/*
 	 * Every other comparator is silent, and LegacyReplacement off unless
 	 * the branch below turns it on: the block was taken from the firmware
 	 * at the first look (hpet.c, take_block()), not here -- a boot whose
 	 * tick never comes here needs it as much.
 	 */
 	comparator_route();
-	if (route != ROUTE_FSB) {
-		route_gsi = acpi_irq_to_gsi(0);
+	if (route != ROUTE_FSB)
 		ioapic_route(route_gsi, HPET_EVENT_VECTOR, broadcaster_apic,
 			     acpi_irq_flags(0));
-	}
 
 	window_open(hpet_read32());
 	started = 1;
