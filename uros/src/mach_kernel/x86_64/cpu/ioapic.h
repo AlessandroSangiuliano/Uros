@@ -160,4 +160,49 @@ uint32_t ioapic_first_gsi(void);
  */
 uint32_t ioapic_set_first_gsi(uint32_t gsi);
 
+/*
+ * ── 🔴 A PIN HAS ONE OWNER, AND IT IS ASKED BY THE PIN (#600) ─────────
+ *
+ * Several ISA lines can arrive on one pin.  A PC's MADT sends ISA 0 to GSI 2
+ * and says nothing about ISA 2, which therefore arrives on GSI 2 as well
+ * (acpi_irq_to_gsi() is the identity where there is no override).  The HPET's
+ * LegacyReplacement puts every processor's tick on ISA 0's pin (#593), and
+ * device_md_irq_register() used to refuse it by the line's NUMBER, 0 and 8 --
+ * so a task holding the master port registered line 2, took the tick's pin by
+ * its own number, and stopped every clock in the machine.
+ *
+ * So the owner is recorded here, against the pin, and only the owner routes,
+ * masks, unmasks or releases it.  Each function below asks and acts in one turn
+ * under this file's claim lock, so no claim can land between another's question
+ * and its route.  A pin nobody claimed is left to whoever routes it: the boot's
+ * self-tests route theirs by hand, before any claim is made.
+ */
+#define IOAPIC_OWNER_NONE	0u
+#define IOAPIC_OWNER_CLOCK	1u		/* the HPET's LegacyReplacement */
+#define IOAPIC_OWNER_LINE(n)	(2u + (n))	/* ISA line n, device_md_irq_register() */
+
+/* Who holds a pin: IOAPIC_OWNER_NONE for a pin nobody claimed or not this
+ * controller's. */
+unsigned ioapic_owner(uint32_t gsi);
+
+/*
+ * Claim a pin for `owner' and route it, as ioapic_route() does -- or refuse,
+ * touching nothing, when another owner holds it, and say which in *holder.  A
+ * pin this controller does not own is refused with *holder NONE.
+ */
+int ioapic_claim_route(uint32_t gsi, unsigned owner, uint8_t vector,
+		       uint32_t apic_id, uint16_t flags, unsigned *holder);
+
+/*
+ * Take a pin whoever holds it, and answer who did: for the clock, which has to
+ * run (hpet_event.c says so when a line had it).  Routes nothing.
+ */
+unsigned ioapic_take(uint32_t gsi, unsigned owner);
+
+/* Mask, unmask, or mask and give back a pin -- each only if `owner' holds it,
+ * and nothing otherwise. */
+void ioapic_mask_owned(uint32_t gsi, unsigned owner);
+void ioapic_unmask_owned(uint32_t gsi, unsigned owner);
+void ioapic_release(uint32_t gsi, unsigned owner);
+
 #endif	/* _X86_64_CPU_IOAPIC_H_ */
