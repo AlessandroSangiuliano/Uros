@@ -62,6 +62,18 @@
 #include <stdio.h>
 
 /*
+ * ⚠️ THE NEXT THREE COMMENTS DESCRIBE A FORMATTER THAT IS NO LONGER HERE.
+ *
+ * They are Steve Summit's notes on his 1987 formatter and Mach's additions to
+ * it, and the formatter left this file with #432 (see below).  Its successor
+ * is doprnt.c, which says which conversions survived and why the rest did not
+ * -- %z, for one, is a length modifier now and not signed hexadecimal.  The
+ * notes stay with the notice the first one asks to travel with them; and
+ * where they say this version "does not return any reasonable value", printf
+ * here now does: see vprintf() (#510).
+ */
+
+/*
  *  Common code for printf et al.
  *
  *  The calling routine typically takes a variable number of arguments,
@@ -135,17 +147,6 @@
  *
  *	D,U,O,Z	same as corresponding lower-case versions
  *		(compatibility)
- */
-
-#define isdigit(d) ((d) >= '0' && (d) <= '9')
-#define Ctod(c) ((c) - '0')
-
-#define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
-
-/*
- * 64-bit divmod by an arbitrary base, implemented bit-by-bit to avoid
- * pulling libgcc's __udivmoddi4 into the freestanding -nostdlib build.
- * Slow but called only by printf for at most ~20 iterations per number.
  */
 
 /*
