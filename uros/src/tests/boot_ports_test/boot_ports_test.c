@@ -34,6 +34,10 @@
  *	[4] the device port, where there is one, opens "console" only with -D.
  *	    Without -D and without a port there is nothing to ask, and the arm
  *	    says so.
+ *	[5] printf on a console that refuses (#510) says so in the kernel's
+ *	    log, with the size of what it refused, sends the line on through
+ *	    mach_print, and returns a negative value.  It is here because the
+ *	    console [3] and [4] ask about is the one printf writes to.
  *
  * ⚠️ [2] and [4] ask the port the task holds, not the flag: a bootstrap that
  * gave the master host port to "none" fails [2] as well as [1], by the port
@@ -43,6 +47,8 @@
 #include <mach.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_host.h>
+#include <mach/mach_klog.h>	/* host_get_log: the kernel's log, for [5] */
+#include <mach/host_info.h>	/* klog_data_t */
 #include <mach/bootstrap.h>
 #include <device/device.h>
 
@@ -78,6 +84,66 @@ say_asking(const char *line)
 	buf[n++] = '\n';
 	buf[n] = 0;
 	mach_print(buf);
+}
+
+/*
+ * The kernel's log, for [5]: where it ends now, and what it says from a
+ * given point on.
+ *
+ * host_get_log() takes any host port and a cursor and hands back the bytes
+ * from there, a buffer at a time; a cursor the ring has already overwritten
+ * is moved by the kernel to the oldest byte it still has.  So reading from 0
+ * until nothing comes back is always allowed, and stops at the end.
+ */
+static klog_data_t	klog_buf;
+static char		klog_since[4 * KLOG_DATA_MAX];
+
+static natural_t
+klog_end(mach_port_t host)
+{
+	natural_t		cursor = 0, next;
+	mach_msg_type_number_t	cnt;
+	int			i;
+
+	for (i = 0; i < 64; i++) {
+		cnt = sizeof (klog_buf);
+		if (host_get_log(host, cursor, klog_buf, &cnt, &next)
+		    != KERN_SUCCESS || cnt == 0)
+			break;
+		cursor = next;
+	}
+	return cursor;
+}
+
+static size_t
+klog_read_since(mach_port_t host, natural_t from)
+{
+	natural_t		cursor = from, next;
+	mach_msg_type_number_t	cnt;
+	size_t			have = 0;
+
+	while (have + sizeof (klog_buf) <= sizeof (klog_since)) {
+		cnt = sizeof (klog_buf);
+		if (host_get_log(host, cursor, klog_buf, &cnt, &next)
+		    != KERN_SUCCESS || cnt == 0)
+			break;
+		memcpy(&klog_since[have], klog_buf, cnt);
+		have += cnt;
+		cursor = next;
+	}
+	return have;
+}
+
+/* Where `needle' first occurs in the `n' bytes at `hay', or NULL. */
+static const char *
+find(const char *hay, size_t n, const char *needle)
+{
+	size_t	k = strlen(needle), i;
+
+	for (i = 0; i + k <= n; i++)
+		if (memcmp(&hay[i], needle, k) == 0)
+			return &hay[i];
+	return NULL;
 }
 
 int
@@ -240,6 +306,76 @@ main(int argc, char **argv)
 			       kr == KERN_SUCCESS ? "answered" : "was refused",
 			       (int)kr, want_device ? "has" : "does not have",
 			       line);
+	}
+
+	/*
+	 * [5] printf on a console that refuses (#510).  For one printf the
+	 * port it writes to is MACH_PORT_DEAD, where a send fails at once and
+	 * nothing is allocated; then the kernel's log is read from where it
+	 * ended before.  printf must have returned a negative value, said the
+	 * refusal with the size of what it refused -- the line, and the '\r'
+	 * printf puts before its '\n' -- and sent the line on through
+	 * mach_print.  Each of the three is printed as it was read.
+	 */
+	arms++;
+	{
+		static const char	mark[] = "libmach: the console refused ";
+		mach_port_t		saved = console_port;
+		mach_port_t		khost = mach_host_self();
+		char			text[96], refusal[64];
+		const char		*p;
+		natural_t		from;
+		size_t			have;
+		int			ret, bytes = -1, want, delivered;
+
+		(void) snprintf(text, sizeof (text), "boot_ports_test: [5] this "
+				"line was refused by the console (%s)", line);
+		want = (int)strlen(text) + 2;
+
+		from = klog_end(khost);
+		console_port = MACH_PORT_DEAD;
+		ret = printf("%s\n", text);
+		console_port = saved;
+		have = klog_read_since(khost, from);
+		(void) mach_port_deallocate(mach_task_self(), khost);
+
+		/*
+		 * Every refusal from `from' on, and the one of this line's size
+		 * if there is one: the three lines of this test can run at once,
+		 * and another's refusal may come first -- "device" is longer than
+		 * the other two.  The line itself is this one's own by its name.
+		 */
+		for (p = find(klog_since, have, mark); p != NULL;
+		     p = find(p, (size_t)(klog_since + have - p), mark)) {
+			int	n = 0;
+
+			p += sizeof (mark) - 1;
+			while (p < klog_since + have && *p >= '0' && *p <= '9')
+				n = n * 10 + (*p++ - '0');
+			if (bytes != want)
+				bytes = n;
+		}
+		if (bytes >= 0)
+			(void) snprintf(refusal, sizeof (refusal), "says %d "
+					"bytes were refused", bytes);
+		else
+			(void) snprintf(refusal, sizeof (refusal),
+					"holds no refusal");
+		delivered = find(klog_since, have, text) != NULL;
+
+		if (ret < 0 && bytes == want && delivered) {
+			printf("boot_ports_test: [5] printf on a refused console "
+			       "returned %d, the kernel log %s, the %d the "
+			       "buffer held, and the line came out through "
+			       "mach_print (%s)\n", ret, refusal, want, line);
+			passed++;
+		} else
+			printf("boot_ports_test: [5] WRONG — printf on a refused "
+			       "console returned %d (a negative value wanted), "
+			       "the kernel log %s (%d wanted), and the line %s "
+			       "(%s)\n", ret, refusal, want,
+			       delivered ? "came out through mach_print"
+					 : "is not in it", line);
 	}
 
 	if (host != MACH_PORT_NULL)

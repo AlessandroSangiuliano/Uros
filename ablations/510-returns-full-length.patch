@@ -1,0 +1,18 @@
+Kind: ablation
+Issue: #510
+Takes out: the -1 #510 makes vprintf return after a write the console refused, so printf answers the count of what it was asked to print as if the console had taken it, while the refusal and the refused bytes still go out through mach_print -- only the half a caller would check is gone. boot_ports_test [5] points the console port at MACH_PORT_DEAD for one printf and reads a non-negative return.
+Run: --entry 14 1200 -smp 1
+Expect: boot_ports_test: \[5\] WRONG .* returned [0-9]+ \(a negative value wanted\)
+diff --git a/uros/src/lib/libmach/printf.c b/uros/src/lib/libmach/printf.c
+index 73681c49..181b5dd6 100644
+--- a/uros/src/lib/libmach/printf.c
++++ b/uros/src/lib/libmach/printf.c
+@@ -571,7 +571,7 @@ vprintf(const char *fmt, va_list args)
+ 
+ 	if (state.index != 0)
+ 	    flush(&state);
+-	return (state.refused ? -1 : (int) state.total);
++	return ((int) state.total);
+ }
+ 
+ /*VARARGS1*/

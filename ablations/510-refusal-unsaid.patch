@@ -1,0 +1,17 @@
+Kind: ablation
+Issue: #510
+Takes out: what #510 sends through mach_print when the console refuses a write -- the line naming the refusal and the refused bytes after it -- while vprintf still returns -1, so only the half that makes a lost line visible in the log is gone. boot_ports_test [5] points the console port at MACH_PORT_DEAD for one printf, reads the kernel's log back from where it ended, and finds neither the refusal nor the line.
+Run: --entry 14 1200 -smp 1
+Expect: boot_ports_test: \[5\] WRONG .* the kernel log holds no refusal
+diff --git a/uros/src/lib/libmach/printf.c b/uros/src/lib/libmach/printf.c
+index 73681c49..27912173 100644
+--- a/uros/src/lib/libmach/printf.c
++++ b/uros/src/lib/libmach/printf.c
+@@ -412,6 +412,7 @@ console_refused(struct printf_state *state, kern_return_t kr,
+ 	int n;
+ 
+ 	state->refused = TRUE;
++	return;
+ 	(void) snprintf(piece, sizeof piece,
+ 			"libmach: the console refused %d bytes of this task's "
+ 			"output: %s (0x%08x); they follow through mach_print "

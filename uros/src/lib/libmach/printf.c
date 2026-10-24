@@ -52,6 +52,7 @@
 #include "externs.h"	/* _doprnt, the one formatter (#432) */
 #include <mach.h>
 #include <mach/mach_traps.h>	/* mach_print: the console that needs no port */
+#include <mach/mach_syscalls.h>	/* MACH_PRINT_MAX, the most it carries (#510) */
 #include <mach_error.h>		/* mach_error_string */
 #include <sa_mach.h>
 #include <device/device.h>
@@ -59,6 +60,18 @@
 #include <mach/bootstrap.h>
 #include <stdarg.h>
 #include <stdio.h>
+
+/*
+ * ⚠️ THE NEXT THREE COMMENTS DESCRIBE A FORMATTER THAT IS NO LONGER HERE.
+ *
+ * They are Steve Summit's notes on his 1987 formatter and Mach's additions to
+ * it, and the formatter left this file with #432 (see below).  Its successor
+ * is doprnt.c, which says which conversions survived and why the rest did not
+ * -- %z, for one, is a length modifier now and not signed hexadecimal.  The
+ * notes stay with the notice the first one asks to travel with them; and
+ * where they say this version "does not return any reasonable value", printf
+ * here now does: see vprintf() (#510).
+ */
 
 /*
  *  Common code for printf et al.
@@ -134,17 +147,6 @@
  *
  *	D,U,O,Z	same as corresponding lower-case versions
  *		(compatibility)
- */
-
-#define isdigit(d) ((d) >= '0' && (d) <= '9')
-#define Ctod(c) ((c) - '0')
-
-#define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
-
-/*
- * 64-bit divmod by an arbitrary base, implemented bit-by-bit to avoid
- * pulling libgcc's __udivmoddi4 into the freestanding -nostdlib build.
- * Slow but called only by printf for at most ~20 iterations per number.
  */
 
 /*
@@ -283,11 +285,13 @@ printf_init(mach_port_t device_server_port)
 		 * device and no initialisation.  mach_error_string is already
 		 * in this library.
 		 *
-		 * ⚠️ It matters most on a target with no console device at
-		 * all -- x86-64 has dev_name_count == 0 on purpose, rather
-		 * than a stub console that would report success and write
-		 * nowhere -- because there the FIRST thing every server does
-		 * is fail here, and it used to fail as a bare address.
+		 * ⚠️ It mattered most on x86-64 before #426 gave that target
+		 * a console device: its table was empty on purpose, rather
+		 * than hold a stub console that would report success and
+		 * write nowhere, so the FIRST thing every server did was fail
+		 * here -- and it used to fail as a bare address.  A task that
+		 * still has no console arrives here the same way, and is told
+		 * why.
 		 */
 		mach_print("libmach: ");
 		mach_print(what);
@@ -331,7 +335,8 @@ int printf_bufmax = PRINTF_BUFMAX;
 struct printf_state {
 	char buf[PRINTF_BUFMAX + 1]; /* extra for '\r\n' */
 	unsigned int index;
-	unsigned int total;
+	unsigned int total;	/* the characters the format produced (#510) */
+	boolean_t refused;	/* a write the console refused (#510) */
 };
 
 /* Try to obtain the console port.  This is not guaranteed to work (we
@@ -374,6 +379,66 @@ get_console_port(void)
 	    (void) mach_port_deallocate(mach_task_self(), paged);
 	if (security != MACH_PORT_NULL)
 	    (void) mach_port_deallocate(mach_task_self(), security);
+}
+
+/*
+ * 🔴 A WRITE THE CONSOLE REFUSED IS SAID, AND ITS BYTES STILL GO OUT (#510).
+ *
+ * flush_upto() used to leave its loop on an error with nothing said, and the
+ * bytes it had not written were dropped by the memmove after it -- so a line
+ * that was printed and refused looked, in the log, exactly like a line that
+ * was never printed.  The harness decides pass and fail by reading lines, and
+ * those two have opposite causes.
+ *
+ * mach_print is the way out, for the reason printf_init() uses it: it needs no
+ * port and no device, so it still works when the console port is what failed.
+ * One line names the refusal -- its cause, its code, how many bytes -- and the
+ * bytes follow it, so the output arrives labelled instead of not at all.
+ *
+ * ⚠️ A line to a trap, while it fits: two traps are two kernel printf()s, and
+ * another processor's line can land between them (#578, #644).  A line longer
+ * than MACH_PRINT_MAX - 1 bytes is split, because the trap would not carry it
+ * whole.
+ *
+ * ⚠️ A NUL cannot travel through mach_print, which takes a C string.  It is
+ * skipped -- a terminal shows nothing for it either -- and what follows it is
+ * not lost with it.
+ */
+static void
+console_refused(struct printf_state *state, kern_return_t kr,
+		int offset, int count)
+{
+	char piece[MACH_PRINT_MAX];
+	int n;
+
+	state->refused = TRUE;
+	(void) snprintf(piece, sizeof piece,
+			"libmach: the console refused %d bytes of this task's "
+			"output: %s (0x%08x); they follow through mach_print "
+			"(#510)\r\n", count, mach_error_string(kr),
+			(unsigned int) kr);
+	mach_print(piece);
+
+	while (count > 0) {
+		n = 0;
+		while (n < count && n < (int) sizeof piece - 1) {
+			char c = state->buf[offset + n];
+
+			if (c == '\0')
+				break;
+			piece[n++] = c;
+			if (c == '\n')
+				break;
+		}
+		if (n == 0) {
+			n = 1;			/* the NUL, skipped */
+		} else {
+			piece[n] = '\0';
+			mach_print(piece);
+		}
+		offset += n;
+		count -= n;
+	}
 }
 
 /* Send the first `upto' bytes of the buffer in ONE write per attempt (#578),
@@ -423,6 +488,7 @@ flush_upto(struct printf_state *state, unsigned int upto)
 		    if (console_port != MACH_PORT_NULL)
 			continue;
 		}
+		console_refused(state, kr, offset, count);
 		break;
 	    }
 	    count -= amt;
@@ -442,7 +508,6 @@ flush_upto(struct printf_state *state, unsigned int upto)
 		(void) device_set_status(console_port, TTY_DRAIN, &word, 0);
 	}
 #endif	/* TTY_DRAIN */
-	state->total += upto;
 	if (upto < state->index)
 		memmove(state->buf, &state->buf[upto], state->index - upto);
 	state->index -= upto;
@@ -459,6 +524,7 @@ outchar(void *arg, int c)
 {
 	struct printf_state *state = (struct printf_state *) arg;
 
+	state->total++;
 	if (c == '\n') {
 	    state->buf[state->index] = '\r';
 	    state->index++;
@@ -480,6 +546,19 @@ outchar(void *arg, int c)
 
 /*
  * Printing (to console)
+ *
+ * 🔴 WHAT C SAYS PRINTF RETURNS (#510): the characters it transmitted, or a
+ * negative value if an output error occurred.  This returned the length it
+ * had handed to the console whether or not the console took it, so a caller
+ * that checked saw success for output that was refused -- and the log, until
+ * console_refused(), showed nothing missing either.  A refusal is now -1,
+ * although console_refused() has sent the bytes on another way: the console
+ * this was asked to write to did not take them.
+ *
+ * ⚠️ The count is of the FORMAT's characters.  The '\r' that outchar() puts
+ * before each '\n' is this console's line discipline, not the caller's output,
+ * and is not in it -- so a call returns the same number here as it does
+ * through musl's printf.
  */
 int
 vprintf(const char *fmt, va_list args)
@@ -487,11 +566,12 @@ vprintf(const char *fmt, va_list args)
 	struct printf_state state;
 
 	state.index = state.total = 0;
+	state.refused = FALSE;
 	_doprnt(fmt, args, 0, outchar, (char *) &state);
 
 	if (state.index != 0)
 	    flush(&state);
-	return (state.total);
+	return (state.refused ? -1 : (int) state.total);
 }
 
 /*VARARGS1*/
