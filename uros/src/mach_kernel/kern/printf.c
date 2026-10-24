@@ -221,7 +221,9 @@
 #include <kern/misc_protos.h>
 #include <kern/klog.h>
 #include <kern/spl.h>		/* #655: sprintf() at splhigh */
+#include <kern/cpu_data.h>	/* #757: get_interrupt_level, the writer */
 #include <stdarg.h>
+#include <stdint.h>		/* #757: uintptr_t */
 #include <string.h>
 
 /*
@@ -1005,6 +1007,446 @@ klog_cnputc(char c)
 	klog_putc(c);
 }
 
+/*
+ * ── 🔴 #757: A LINE STAYS A LINE, AND A REPORT A REPORT ───────────────
+ *
+ * printf_lock keeps ONE CALL together, and a line is often several: a phase
+ * line of the profile is three, so another processor's whole line landed
+ * inside it (#757; #578 and #644 were the same shape, fixed in their callers).
+ * And a report of several lines -- one of the profile's dumps -- was
+ * interleaved with another report printed at the same moment: on omen's metal
+ * 43 of intra's 52 dumps a boot lost their phases (#737).
+ *
+ * Fixed here, at the source, and chosen for debugging, by four rules:
+ *
+ *   1. NOTHING IS HELD BACK.  Every call reaches the console's ring when it is
+ *      made.  A line buffer per writer, emitted whole at its newline, would
+ *      lose the first half of a line to a hang between its two calls -- and
+ *      in a hang the last line is the one that matters.
+ *   2. NO LINE IS SPLICED IN SILENCE.  Below, under printf_lock, the console
+ *      knows whose line is open.  A different writer closes it first, with a
+ *      mark naming whose it was; when that writer goes on, the rest starts a
+ *      line of its own with a mark naming it again.  A reader rejoins the two
+ *      by the name.
+ *   3. A REPORT IS A BLOCK.  printf_block_begin()/printf_block_end() keep
+ *      every other THREAD out of the console for a report's length; the
+ *      holder is not preempted, and its bytes go to the ring, the wire after.
+ *      A processor in an interrupt, the debugger and a nested printf are not
+ *      kept out -- they print at once, and rule 2 marks where they did.
+ *   4. EVERY INTRUSION SAYS WHO, and ordinary output carries no tag at all.
+ *
+ * The idea -- a record that knows its writer, a lock that keeps a multi-line
+ * dump together -- was studied in Linux's printk; the design and the code here
+ * are this kernel's.
+ */
+
+/*
+ * Who is writing: a thread, by its address; or a processor in an interrupt,
+ * odd so that it is never a thread's -- the interrupted thread did not write
+ * what its interrupt printed.  get_interrupt_level() is i386's locore and, on
+ * x86-64, trap_common() (#757).  PRINTF_WRITER_RAW is the debugger's and a
+ * nested printf's, which print without printf_lock.
+ */
+typedef uintptr_t	printf_writer_t;
+
+#define	PRINTF_WRITER_RAW	(~(printf_writer_t) 0)
+
+static printf_writer_t
+printf_writer_self(void)
+{
+	thread_t	t;
+	printf_writer_t	w;
+
+	/*
+	 * get_interrupt_level() is this processor's, so it is read where the
+	 * thread cannot move to another: #626 caught it read with preemption
+	 * allowed, from printf()'s last line and from consolewrite().
+	 */
+	disable_preemption();
+	if (get_interrupt_level() > 0 || (t = current_thread()) == THREAD_NULL)
+		w = ((printf_writer_t) cpu_number() << 1) | 1;
+	else
+		w = (printf_writer_t) t;
+	enable_preemption_no_check();
+	return w;
+}
+
+/*
+ * The console's line, under printf_lock: whose line is open, and whose line
+ * another writer cut and who has not gone on with it yet.  The set is small
+ * because a cut is rare; a writer it has to give up -- it was full -- goes on
+ * at the start of a line without its mark, and is counted.
+ */
+#define	PRINTF_CUT_SLOTS	16
+
+struct printf_lines {
+	printf_writer_t	open;			/* 0: no line is open */
+	printf_writer_t	cut[PRINTF_CUT_SLOTS];	/* 0: a free slot */
+	unsigned int	cut_next;		/* the slot a full set gives up */
+	unsigned int	cut_lost;		/* writers given up so */
+};
+
+static struct printf_lines	printf_console_lines;
+
+static void
+printf_put_str(const char *s, void (*put)(char))
+{
+	while (*s != '\0')
+		put(*s++);
+}
+
+/*
+ * A writer's name in a mark: "t:" and the thread's address in hex, "cpuN:irq",
+ * or "raw".  Written here, character by character, because this runs under
+ * printf_lock and printf() is the one thing it cannot call.
+ */
+static void
+printf_put_writer(printf_writer_t w, void (*put)(char))
+{
+	char		digits[2 * sizeof (printf_writer_t)];
+	unsigned int	n = 0;
+
+	if (w == PRINTF_WRITER_RAW) {
+		printf_put_str("raw", put);
+		return;
+	}
+	if (w & 1) {
+		unsigned int cpu = (unsigned int) (w >> 1);
+
+		printf_put_str("cpu", put);
+		do {
+			digits[n++] = (char) ('0' + cpu % 10);
+			cpu /= 10;
+		} while (cpu != 0);
+		while (n > 0)
+			put(digits[--n]);
+		printf_put_str(":irq", put);
+		return;
+	}
+	printf_put_str("t:", put);
+	do {
+		digits[n++] = "0123456789abcdef"[w & 0xf];
+		w >>= 4;
+	} while (w != 0);
+	while (n > 0)
+		put(digits[--n]);
+}
+
+/*
+ * Before writer w's characters.  Another writer's open line is closed with
+ * " <-cut [it]" and a newline, and remembered; a line of w's own that was cut
+ * goes on behind "[w]-> ".  The two marks are the whole format a reader needs:
+ * a line ending in the first is unfinished, and the next line that begins
+ * with the second and the same name is its rest.
+ */
+static void
+printf_lines_turn_begin(struct printf_lines *L, printf_writer_t w,
+			void (*put)(char))
+{
+	unsigned int	i, free_slot;
+
+	if (L->open != 0 && L->open != w) {
+		printf_put_str(" <-cut [", put);
+		printf_put_writer(L->open, put);
+		printf_put_str("]\n", put);
+
+		free_slot = PRINTF_CUT_SLOTS;
+		for (i = 0; i < PRINTF_CUT_SLOTS; i++) {
+			if (L->cut[i] == L->open)
+				break;
+			if (L->cut[i] == 0 && free_slot == PRINTF_CUT_SLOTS)
+				free_slot = i;
+		}
+		if (i == PRINTF_CUT_SLOTS) {
+			if (free_slot == PRINTF_CUT_SLOTS) {
+				free_slot = L->cut_next;
+				L->cut_next = (L->cut_next + 1) % PRINTF_CUT_SLOTS;
+				L->cut_lost++;
+			}
+			L->cut[free_slot] = L->open;
+		}
+		L->open = 0;
+	}
+
+	if (L->open == 0)
+		for (i = 0; i < PRINTF_CUT_SLOTS; i++)
+			if (L->cut[i] == w) {
+				L->cut[i] = 0;
+				put('[');
+				printf_put_writer(w, put);
+				printf_put_str("]-> ", put);
+				break;
+			}
+}
+
+/*
+ * After them: n characters were written, the last one `last'.  A call that
+ * wrote nothing changes nothing -- it opened no line.
+ */
+static void
+printf_lines_turn_end(struct printf_lines *L, printf_writer_t w,
+		      unsigned int n, char last)
+{
+	if (n != 0)
+		L->open = (last == '\n') ? 0 : w;
+}
+
+/*
+ * The thread holding a report's block, or 0; and how deep its own blocks
+ * nest.  Written under printf_lock, read outside it by a writer waiting.
+ */
+static volatile printf_writer_t	printf_block_owner;
+static unsigned int		printf_block_depth;
+
+/* What a writer waiting for a block does on each turn of its loop. */
+#define	printf_pause()	__asm__ __volatile__("pause" : : : "memory")
+
+/*
+ * The turn of the writer holding printf_lock, and what it has written: the
+ * console's writers count their characters through these, so that the turn's
+ * end knows whether the line they leave is open.
+ */
+static printf_writer_t	printf_turn_writer;
+static unsigned int	printf_turn_n;
+static char		printf_turn_last;
+
+static void
+printf_turn_putc(char c)
+{
+	klog_cnputc(c);
+	printf_turn_n++;
+	printf_turn_last = c;
+}
+
+/*
+ * The same count for the raw writer, which prints without printf_lock: kept
+ * apart, so that a printf nested inside a turn does not overwrite the count of
+ * the turn it interrupted.
+ */
+static unsigned int	printf_raw_n;
+static char		printf_raw_last;
+
+static void
+printf_raw_putc(char c)
+{
+	klog_cnputc(c);
+	printf_raw_n++;
+	printf_raw_last = c;
+}
+
+/*
+ * Take the console for one turn: printf_lock, after any other thread's block.
+ * A processor in an interrupt does not wait for a block -- the block's holder
+ * may be the thread it interrupted -- and rule 2 marks where it wrote.
+ */
+void
+printf_writer_take(void)
+{
+	printf_writer_t	self = printf_writer_self();
+
+	for (;;) {
+		simple_lock(&printf_lock);
+		if (printf_block_owner == 0 || printf_block_owner == self ||
+		    (self & 1))
+			break;
+		simple_unlock(&printf_lock);
+		while (printf_block_owner != 0)
+			printf_pause();
+	}
+	printf_lock_holder = cpu_number();
+	printf_turn_writer = self;
+	printf_turn_n = 0;
+	printf_turn_last = '\0';
+	printf_lines_turn_begin(&printf_console_lines, self, klog_cnputc);
+}
+
+/*
+ * Give it back.  `n' characters were written in the turn and `last' was the
+ * last one; printf() passes its own count, read from printf_turn_putc().
+ */
+void
+printf_writer_give(unsigned int n, char last)
+{
+	printf_lines_turn_end(&printf_console_lines, printf_turn_writer, n,
+			      last);
+	printf_lock_holder = -1;
+	simple_unlock(&printf_lock);
+}
+
+/*
+ * A report of several lines, as one block (rule 3).  Thread context only: a
+ * processor in an interrupt prints at once and is marked, so these do nothing
+ * there.  Nests for its holder.  The holder must not block inside -- it is not
+ * preempted, and every other thread that prints waits for it -- so a block is
+ * a report, never a conversation.
+ */
+void
+printf_block_begin(void)
+{
+	printf_writer_t	self = printf_writer_self();
+
+	if (self & 1)
+		return;
+	disable_preemption();
+	if (printf_block_owner == self) {
+		printf_block_depth++;
+		return;
+	}
+	for (;;) {
+		simple_lock(&printf_lock);
+		if (printf_block_owner == 0) {
+			printf_block_owner = self;
+			printf_block_depth = 1;
+			simple_unlock(&printf_lock);
+			return;
+		}
+		simple_unlock(&printf_lock);
+		while (printf_block_owner != 0)
+			printf_pause();
+	}
+}
+
+void
+printf_block_end(void)
+{
+	printf_writer_t	self = printf_writer_self();
+	unsigned int	left;
+
+	if ((self & 1) || printf_block_owner != self)
+		return;
+	left = --printf_block_depth;
+	if (left == 0) {
+		simple_lock(&printf_lock);
+		printf_block_owner = 0;
+		simple_unlock(&printf_lock);
+	}
+	enable_preemption();
+
+	/*
+	 * The wire, which printf() left to the end of the block: a report of
+	 * twenty lines written to the wire inside it would keep this processor
+	 * unpreemptible for the device's time -- 170 ms of a 2 KB dump under
+	 * KVM -- and every other printing thread waiting as long.
+	 */
+	if (left == 0)
+		cnflush();
+}
+
+/*
+ * The rules of the marks, asked at every boot from printf_init() on writers
+ * made up for the purpose and a buffer of its own -- not on the console, where
+ * whoever else prints at that moment would be in the answer.  A WRONG names
+ * the case and what came out.
+ */
+static char		lines_test_buf[256];
+static unsigned int	lines_test_len;
+
+static void
+lines_test_put(char c)
+{
+	if (lines_test_len < sizeof lines_test_buf - 1)
+		lines_test_buf[lines_test_len++] = c;
+	lines_test_buf[lines_test_len] = '\0';
+}
+
+static void
+lines_test_write(struct printf_lines *L, printf_writer_t w, const char *s)
+{
+	unsigned int	n = 0;
+	char		last = '\0';
+
+	printf_lines_turn_begin(L, w, lines_test_put);
+	for (; *s != '\0'; s++, n++) {
+		lines_test_put(*s);
+		last = *s;
+	}
+	printf_lines_turn_end(L, w, n, last);
+}
+
+static void
+printf_lines_selftest(void)
+{
+	static const struct {
+		const char	*writes;	/* writer, text; ... */
+		const char	*expect;
+	} cases[] = {
+		/* whole lines: nothing to mark */
+		{ "A|one\n|B|two\n",
+		  "one\ntwo\n" },
+		/* one writer, one line in three calls */
+		{ "A|ph|A|ase|A| line\n",
+		  "phase line\n" },
+		/* a line cut, and gone on with */
+		{ "A|half|B|whole\n|A| rest\n",
+		  "half <-cut [t:1000]\nwhole\n[t:1000]->  rest\n" },
+		/* an interrupt's line inside a thread's */
+		{ "A|half|I|tick\n|A| rest\n",
+		  "half <-cut [t:1000]\ntick\n[t:1000]->  rest\n" },
+		/* two lines cut, each gone on with by its writer */
+		{ "A|a|B|b|A|A\n|B|B\n",
+		  "a <-cut [t:1000]\nb <-cut [t:2000]\n[t:1000]-> A\n"
+		  "[t:2000]-> B\n" },
+		/* a call that writes nothing opens no line */
+		{ "A||B|x\n",
+		  "x\n" },
+		/* the interrupt's own line cut by a thread */
+		{ "I|irq|A|line\n|I| end\n",
+		  "irq <-cut [cpu2:irq]\nline\n[cpu2:irq]->  end\n" },
+	};
+	struct printf_lines	L;
+	unsigned int		c, wrong = 0;
+
+	for (c = 0; c < sizeof cases / sizeof cases[0]; c++) {
+		const char	*p = cases[c].writes;
+		char		text[64];
+
+		memset(&L, 0, sizeof L);
+		lines_test_len = 0;
+		lines_test_buf[0] = '\0';
+		while (*p != '\0') {
+			printf_writer_t	w;
+			unsigned int	k = 0;
+
+			w = (*p == 'A') ? 0x1000 : (*p == 'B') ? 0x2000
+			    : (((printf_writer_t) 2 << 1) | 1);
+			p += 2;				/* the writer and its '|' */
+			while (*p != '\0' && *p != '|' && k < sizeof text - 1)
+				text[k++] = *p++;
+			text[k] = '\0';
+			if (*p == '|')
+				p++;
+			lines_test_write(&L, w, text);
+		}
+		if (strcmp(lines_test_buf, cases[c].expect) != 0) {
+			wrong++;
+			printf("printf: lines: case %u wrote \"%s\" -- WRONG "
+			       "(#757)\n", c, lines_test_buf);
+		}
+	}
+
+	/*
+	 * And the set giving up: seventeen lines cut, one more than it holds,
+	 * so one writer goes on without its mark -- counted, not lost.  Each of
+	 * eighteen writers leaves a line open and the next one cuts it.
+	 */
+	memset(&L, 0, sizeof L);
+	lines_test_len = 0;
+	for (c = 0; c < PRINTF_CUT_SLOTS + 2; c++) {
+		lines_test_write(&L, 0x1000 * (c + 1), "x");
+		lines_test_len = 0;
+	}
+	if (L.cut_lost != 1) {
+		wrong++;
+		printf("printf: lines: %u cut lines gave up %u writers, not 1 "
+		       "-- WRONG (#757)\n", PRINTF_CUT_SLOTS + 1, L.cut_lost);
+	}
+
+	printf("printf: lines: %u cases of the console's marks, %u wrong -- "
+	       "%s (#757)\n",
+	       (unsigned int) (sizeof cases / sizeof cases[0]) + 1, wrong,
+	       wrong == 0 ? "PASS" : "WRONG");
+}
+
 void
 printf_init(void)
 {
@@ -1026,6 +1468,13 @@ printf_init(void)
 	 * A target whose console is synchronous answers this with nothing.
 	 */
 	cnasync(TRUE);
+
+	/*
+	 * #757: the rules of the marks, before anything relies on them.  Here,
+	 * once, on both targets: printf() works by now, and asks nothing of
+	 * the console the test is about.
+	 */
+	printf_lines_selftest();
 }
 
 /* derived from boot_gets */
@@ -1152,33 +1601,52 @@ printf(const char *fmt, ...)
 #if	MP_PRINTF
 	if (cpu_data[master_cpu].active_thread && !db_active &&
 	    !printf_nested()) {
-		simple_lock(&printf_lock);
-		printf_lock_holder = cpu_number();
+		/*
+		 * #757: printf_lock after any other thread's block, and the
+		 * marks of a line this cuts or goes on with; every character
+		 * through printf_turn_putc(), so the turn knows whether it
+		 * leaves a line open.
+		 */
+		printf_writer_take();
 		if (cpu_number() != master_cpu)
 			new_printf_cpu_number = TRUE;
 		if (MP_PRINTF_CPU_PREFIX && new_printf_cpu_number) {
 			int i;
 
 			i = cpu_number();
-			klog_cnputc('{');
+			printf_turn_putc('{');
 			if (i > 99) {
-				klog_cnputc('?');
+				printf_turn_putc('?');
 			} else {
 				if (i > 9) {
-					klog_cnputc('0'+ (i / 10));
+					printf_turn_putc('0'+ (i / 10));
 					i = i % 10;
 				}
-				klog_cnputc('0' + i);
+				printf_turn_putc('0' + i);
 			}
-			klog_cnputc('}');
-			klog_cnputc(' ');
+			printf_turn_putc('}');
+			printf_turn_putc(' ');
 		}
-		_doprnt(fmt, &listp, klog_cnputc, 16);
-		printf_lock_holder = -1;
-		simple_unlock(&printf_lock);
+		_doprnt(fmt, &listp, printf_turn_putc, 16);
+		printf_writer_give(printf_turn_n, printf_turn_last);
       } else
 #endif	/* MP_PRINTF */
-      _doprnt(fmt, &listp, klog_cnputc, 16);
+	{
+		/*
+		 * #757: the debugger, a printf nested in the holder of
+		 * printf_lock, and the boot before its first thread write
+		 * without the lock, as the raw writer.  A line somebody left
+		 * open is closed with its mark first, at best: the machine is
+		 * stopped, or this processor is the one holding the console.
+		 */
+		printf_raw_n = 0;
+		printf_raw_last = '\0';
+		printf_lines_turn_begin(&printf_console_lines, PRINTF_WRITER_RAW,
+					klog_cnputc);
+		_doprnt(fmt, &listp, printf_raw_putc, 16);
+		printf_lines_turn_end(&printf_console_lines, PRINTF_WRITER_RAW,
+				      printf_raw_n, printf_raw_last);
+	}
 	va_end(listp);
 	enable_preemption();
 
@@ -1201,8 +1669,12 @@ printf(const char *fmt, ...)
 	 * order on the wire is the ring's order and not the caller's.
 	 *
 	 * A target whose console is synchronous answers this with nothing.
+	 *
+	 * #757: not inside a block of this thread's own, which goes to the
+	 * wire when it ends (printf_block_end()).
 	 */
-	cnflush();
+	if (printf_block_owner != printf_writer_self())
+		cnflush();
 }
 
 static char *copybyte_str;
