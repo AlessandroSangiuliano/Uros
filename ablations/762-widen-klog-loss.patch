@@ -1,0 +1,81 @@
+Kind: widen
+Issue: #762
+Holds open: both ways the klog forwarder loses bytes, on purpose -- char_server goes into the x86-64 bundle (OSFMK_BUILD_CHAR_SERVER is off by default, so nothing else runs the forwarder); before its first read the forwarder floods the ring with 320 numbered lines, about 71 KB against a 64 KiB ring, so the kernel moves its cursor; and the first write after the flood is refused as a tty would refuse it. The flood's last line and the refusal's announcement open run-x86_64.sh's two #762 pairs, which close on the lines saying what was lost.
+Run: --entry 14 1200 -smp 1
+
+diff --git a/uros/cmake/presets/x86_64.cmake b/uros/cmake/presets/x86_64.cmake
+index 1301c825..aab06029 100644
+--- a/uros/cmake/presets/x86_64.cmake
++++ b/uros/cmake/presets/x86_64.cmake
+@@ -12,3 +12,6 @@ set(UROS_TARGET_ARCH x86_64 CACHE STRING "")
+ # Release turns the kernel symbol table off by default; every build the harness
+ # has judged had it on.
+ set(OSFMK_GEN_KSYMS ON CACHE BOOL "")
++
++# 762-widen: char_server in the bundle, so that the klog forwarder runs.
++set(OSFMK_BUILD_CHAR_SERVER ON CACHE BOOL "")
+diff --git a/uros/src/servers/char_server/klog_forward.c b/uros/src/servers/char_server/klog_forward.c
+index 9e26bb05..a7783f76 100644
+--- a/uros/src/servers/char_server/klog_forward.c
++++ b/uros/src/servers/char_server/klog_forward.c
+@@ -123,6 +123,7 @@ say(const char *s)
+  */
+ static natural_t	lost_overrun;	/* overwritten in the ring, never read */
+ static natural_t	lost_refused;	/* in writes the tty refused */
++static int		refuse_once;	/* 762-widen */
+ 
+ static void
+ say_lost(void)
+@@ -178,6 +179,32 @@ klog_forward_thread(void *arg)
+ 	 */
+ 	cursor = (natural_t) char_core_wire_klog_from();
+ 
++	/*
++	 * 762-widen: the ring flooded past what it holds before the first read,
++	 * and the first write after the flood refused, so that both of #762's
++	 * counts have something to count.  The flood's lines are its own, and
++	 * its last is the newest in the ring: it survives, and opens the pair
++	 * run-x86_64.sh closes on the line saying what was lost.
++	 */
++	{
++		char	fl[256];
++		int	i;
++
++		for (i = 1; i <= 320; i++) {
++			(void)snprintf(fl, sizeof (fl), "klog flood %03d of 320: "
++			    "%.190s (#762)\n", i, "................................"
++			    "................................................................"
++			    "................................................................"
++			    "................................................................");
++			mach_print(fl);
++		}
++		mach_print("klog flood: done -- 320 lines, more than the ring "
++		    "holds (#762)\n");
++		say("klog: the first write after the flood is refused on "
++		    "purpose (#762)\r\n");
++		refuse_once = 1;
++	}
++
+ 	for (;;) {
+ 		mach_msg_type_number_t	cnt = sizeof(buf);
+ 		natural_t		next;
+@@ -261,8 +288,17 @@ klog_forward_thread(void *arg)
+ 			 * counted, and said with the next bytes that go (#762).
+ 			 */
+ 			say_lost();
+-			if (char_core_tty_write_raw(buf, (size_t)whole) < 0)
+-				lost_refused += whole;
++			{
++				int	rc;
++
++				if (refuse_once) {	/* 762-widen */
++					refuse_once = 0;
++					rc = -1;
++				} else
++					rc = char_core_tty_write_raw(buf, (size_t)whole);
++				if (rc < 0)
++					lost_refused += whole;
++			}
+ 			cursor = from + whole;
+ 		}
+ 		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
