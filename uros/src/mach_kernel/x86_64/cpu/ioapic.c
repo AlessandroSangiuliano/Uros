@@ -347,3 +347,122 @@ uint32_t ioapic_set_first_gsi(uint32_t gsi)
 	base_gsi = gsi;
 	return was;
 }
+
+/*
+ * #600: who each pin belongs to, by its index from base_gsi -- see
+ * <cpu/ioapic.h>.  The count register is eight bits, so 256 entries cover any
+ * controller.
+ *
+ * Under claim_lock, which every function below holds around its question and
+ * its act; the window's lock is taken inside it, never the other way.  The
+ * window lock's shape, for the window lock's reasons: the boot's tests claim
+ * pins before percpu_activate(), and an owned pin is masked from interrupt
+ * context (device_master.c's top half), which must not find the lock held on
+ * its own processor -- interrupts are off while it is.
+ */
+static uint8_t		pin_owner[256];
+static volatile uint8_t	claim_lock;
+
+static uint64_t claim_enter(void)
+{
+	uint64_t flags = read_rflags();
+
+	interrupts_disable();
+	while (atomic_swap8(&claim_lock, 1) != 0)
+		cpu_pause();
+	return flags;
+}
+
+static void claim_leave(uint64_t flags)
+{
+	__asm__ volatile("" ::: "memory");
+	claim_lock = 0;
+	if (flags & RFLAGS_IF)
+		interrupts_enable();
+}
+
+unsigned ioapic_owner(uint32_t gsi)
+{
+	return ioapic_owns(gsi) ? pin_owner[gsi - base_gsi] : IOAPIC_OWNER_NONE;
+}
+
+int ioapic_claim_route(uint32_t gsi, unsigned owner, uint8_t vector,
+		       uint32_t apic_id, uint16_t flags, unsigned *holder)
+{
+	uint64_t f;
+	unsigned had;
+
+	*holder = IOAPIC_OWNER_NONE;
+	if (!ioapic_owns(gsi))
+		return 0;
+
+	f = claim_enter();
+	had = pin_owner[gsi - base_gsi];
+	if (had != IOAPIC_OWNER_NONE && had != owner) {
+		claim_leave(f);
+		*holder = had;
+		return 0;
+	}
+	pin_owner[gsi - base_gsi] = (uint8_t)owner;
+	ioapic_route(gsi, vector, apic_id, flags);
+	claim_leave(f);
+	return 1;
+}
+
+unsigned ioapic_take(uint32_t gsi, unsigned owner)
+{
+	uint64_t f;
+	unsigned had;
+
+	if (!ioapic_owns(gsi))
+		return IOAPIC_OWNER_NONE;
+
+	f = claim_enter();
+	had = pin_owner[gsi - base_gsi];
+	pin_owner[gsi - base_gsi] = (uint8_t)owner;
+	claim_leave(f);
+	return had;
+}
+
+void ioapic_mask_owned(uint32_t gsi, unsigned owner)
+{
+	uint64_t f;
+
+	if (!ioapic_owns(gsi))
+		return;
+	f = claim_enter();
+	if (pin_owner[gsi - base_gsi] == owner)
+		ioapic_mask(gsi);
+	claim_leave(f);
+}
+
+void ioapic_unmask_owned(uint32_t gsi, unsigned owner)
+{
+	uint64_t f;
+
+	if (!ioapic_owns(gsi))
+		return;
+	f = claim_enter();
+	if (pin_owner[gsi - base_gsi] == owner)
+		ioapic_unmask(gsi);
+	claim_leave(f);
+}
+
+/*
+ * The pin masked first and given back second: until it is masked it can still
+ * deliver, and what it delivers to is still its owner's (device_machdep.c's
+ * unregister keeps the handler until after this returns).
+ */
+void ioapic_release(uint32_t gsi, unsigned owner)
+{
+	uint64_t f;
+
+	if (!ioapic_owns(gsi))
+		return;
+	f = claim_enter();
+	if (pin_owner[gsi - base_gsi] == owner) {
+		ioapic_mask(gsi);
+		pin_owner[gsi - base_gsi] = IOAPIC_OWNER_NONE;
+	}
+	claim_leave(f);
+}
