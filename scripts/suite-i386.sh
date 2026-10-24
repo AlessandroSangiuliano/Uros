@@ -122,12 +122,16 @@ PAIRS=(
 	'fperr_test: SIMD arm starting'	'fperr_test: SIMD arm \(PASS\|SKIPPED\|FAIL\)'
 	'irq_claim_test: '		'irq_claim_test: [0-9]* of 6 line arms passed'
 	'(hello_server): exec tests: started'	'(hello_server): exec tests: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
+	# #761: the words after a NUL in the middle of a line, which the
+	# console used to drop with the rest of their piece.
+	'(hello_server): console: started'	'(hello_server): console: a NUL in the middle of this line went out'
 )
 # What every full boot must have said: the tests that are always in the bundle.
 MUST=(
 	'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)'
 	'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)'
 	'(hello_server): exec tests: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
+	'(hello_server): console: a NUL in the middle of this line went out'
 	'^=== Benchmark complete ==='
 )
 # A line that fails the run wherever it appears -- among them a task killed by
