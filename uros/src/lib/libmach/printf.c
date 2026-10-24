@@ -285,11 +285,13 @@ printf_init(mach_port_t device_server_port)
 		 * device and no initialisation.  mach_error_string is already
 		 * in this library.
 		 *
-		 * ⚠️ It matters most on a target with no console device at
-		 * all -- x86-64 has dev_name_count == 0 on purpose, rather
-		 * than a stub console that would report success and write
-		 * nowhere -- because there the FIRST thing every server does
-		 * is fail here, and it used to fail as a bare address.
+		 * ⚠️ It mattered most on x86-64 before #426 gave that target
+		 * a console device: its table was empty on purpose, rather
+		 * than hold a stub console that would report success and
+		 * write nowhere, so the FIRST thing every server did was fail
+		 * here -- and it used to fail as a bare address.  A task that
+		 * still has no console arrives here the same way, and is told
+		 * why.
 		 */
 		mach_print("libmach: ");
 		mach_print(what);
