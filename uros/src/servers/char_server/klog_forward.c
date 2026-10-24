@@ -43,8 +43,8 @@
  * ⚠️ And the cursor can be outrun.  klog is 64 KiB and drops rather than
  * blocking printf -- design doc §11.3 rule 2 -- so a burst larger than that
  * between two runs of this thread is lost, and the kernel snaps the cursor
- * forward silently.  That is a property of the ring and not of this file, and
- * it is the same one bootstrap's forwarder has lived with since #200.
+ * forward.  That is a property of the ring and not of this file.  Saying so
+ * is this file's, and it does: see say_lost() (#762).
  */
 
 #include <mach.h>
@@ -100,6 +100,52 @@ say(const char *s)
 	while (s[n] != '\0')
 		n++;
 	(void)char_core_tty_write_raw(s, n);
+}
+
+/*
+ * 🔴 WHAT WAS LOST IS SAID (#762).
+ *
+ * Bytes leave the ring without reaching the wire two ways, both by design:
+ * the ring overran before this thread read them, and the tty refused a write,
+ * which this thread does not retry, for the reason given at the write.
+ * Neither was said, so a line lost on the way looked, in the log, exactly like
+ * a line never printed -- the confusion #510 took out of printf, here in the
+ * one place every line of the kernel's passes through once COM1 is ours.
+ *
+ * Each is counted, and said ahead of the next bytes forwarded, so that the
+ * line sits where the gap is.  Through the tty, as say() does, because a
+ * printf lands in the ring this thread drains; and a count whose own line
+ * the tty refuses too is kept for the next try rather than lost with it.
+ *
+ * ⚠️ A refused write may have been partly taken: uart's tty_write queues
+ * what fits and drops the rest, and answers only that it dropped.  So that
+ * count is a bound, and its line says "up to".
+ */
+static natural_t	lost_overrun;	/* overwritten in the ring, never read */
+static natural_t	lost_refused;	/* in writes the tty refused */
+
+static void
+say_lost(void)
+{
+	char	line[160];
+	int	n;
+
+	if (lost_overrun != 0) {
+		n = snprintf(line, sizeof (line), "char_server: the kernel's log "
+			     "is missing %u bytes here -- the ring overran before "
+			     "they were read (#762)\r\n",
+			     (unsigned int)lost_overrun);
+		if (n > 0 && char_core_tty_write_raw(line, (size_t)n) >= 0)
+			lost_overrun = 0;
+	}
+	if (lost_refused != 0) {
+		n = snprintf(line, sizeof (line), "char_server: the kernel's log "
+			     "is missing up to %u bytes here -- the tty refused "
+			     "the writes they were in (#762)\r\n",
+			     (unsigned int)lost_refused);
+		if (n > 0 && char_core_tty_write_raw(line, (size_t)n) >= 0)
+			lost_refused = 0;
+	}
 }
 
 static void *
@@ -163,6 +209,15 @@ klog_forward_thread(void *arg)
 			 * moves a cursor that fell out of the ring.
 			 */
 			from = next - cnt;
+			/*
+			 * The kernel moved a cursor the ring had overwritten to
+			 * the oldest byte it still had: what lay between the
+			 * two is gone, and is counted (#762).
+			 */
+			if (from != cursor) {
+				lost_overrun += from - cursor;
+				cursor = from;
+			}
 			whole = cnt;
 			while (whole > 0 && buf[whole - 1] != '\n')
 				whole--;
@@ -202,9 +257,12 @@ klog_forward_thread(void *arg)
 			 * flight, a port that went away -- must not make this
 			 * thread re-read the same bytes for ever, which would
 			 * turn one lost line into a loop that never catches
-			 * up and never lets go of the ring.
+			 * up and never lets go of the ring.  What it costs is
+			 * counted, and said with the next bytes that go (#762).
 			 */
-			(void)char_core_tty_write_raw(buf, (size_t)whole);
+			say_lost();
+			if (char_core_tty_write_raw(buf, (size_t)whole) < 0)
+				lost_refused += whole;
 			cursor = from + whole;
 		}
 		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,

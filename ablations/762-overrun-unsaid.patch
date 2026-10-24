@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #762
+Over: 762-widen-klog-loss.patch
+Takes out: the count of what the ring overran -- the forwarder still moves its cursor where the kernel put it, and says nothing of the bytes in between, as before #762. The widen's flood overruns the ring before the first read, and run-x86_64.sh's pair opened by the flood's last line is never closed.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 1
+Expect: FAILED: 'klog flood: done' appeared and
+
+diff --git a/uros/src/servers/char_server/klog_forward.c b/uros/src/servers/char_server/klog_forward.c
+index a7783f76..5d44c6fd 100644
+--- a/uros/src/servers/char_server/klog_forward.c
++++ b/uros/src/servers/char_server/klog_forward.c
+@@ -242,7 +242,6 @@ klog_forward_thread(void *arg)
+ 			 * two is gone, and is counted (#762).
+ 			 */
+ 			if (from != cursor) {
+-				lost_overrun += from - cursor;
+ 				cursor = from;
+ 			}
+ 			whole = cnt;

@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #762
+Over: 762-widen-klog-loss.patch
+Takes out: the count of what the tty refused -- a refused write is dropped and nothing is said, as before #762. The widen refuses the first write after its flood, and run-x86_64.sh's pair opened by that refusal's announcement is never closed.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 1
+Expect: FAILED: 'klog: the first write after the flood is refused on purpose' appeared and
+
+diff --git a/uros/src/servers/char_server/klog_forward.c b/uros/src/servers/char_server/klog_forward.c
+index a7783f76..7b0a938f 100644
+--- a/uros/src/servers/char_server/klog_forward.c
++++ b/uros/src/servers/char_server/klog_forward.c
+@@ -296,8 +296,7 @@ klog_forward_thread(void *arg)
+ 					rc = -1;
+ 				} else
+ 					rc = char_core_tty_write_raw(buf, (size_t)whole);
+-				if (rc < 0)
+-					lost_refused += whole;
++				(void)rc;
+ 			}
+ 			cursor = from + whole;
+ 		}

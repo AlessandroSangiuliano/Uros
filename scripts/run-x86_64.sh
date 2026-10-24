@@ -617,6 +617,17 @@ must_report 'boot_ports_test: asking bootstrap (both)' 'boot_ports_test: [0-9]* 
 must_report 'taskpanic_load: started' 'taskpanic_load: .*no load' \
 	'Without -t it reads the kernel'"'"'s command line with the master host port and ends, so a start with no end is a task that could not read the line, or stopped reading it (#705).'
 
+# #762: the klog forwarder says what it lost on the way to the wire.  Both
+# pairs are asked only of a build that ablations/762-widen-klog-loss.patch
+# made -- char_server in the bundle, the ring flooded past what it holds
+# before the forwarder reads it, and one write refused on purpose -- because
+# no other boot prints either first line.  The flood's last line is the
+# newest in the ring and survives the overrun it causes.
+must_report 'klog flood: done' 'char_server: the kernel.s log is missing [0-9]* bytes here -- the ring overran' \
+	'The flood ran the ring over before the forwarder read it, and the forwarder said nothing of what it lost (#762).'
+must_report 'klog: the first write after the flood is refused on purpose' 'char_server: the kernel.s log is missing up to [0-9]* bytes here -- the tty refused' \
+	'A write was refused on purpose, and the forwarder said nothing of what it lost (#762).'
+
 # ⚠️ The terminator matches either verdict -- `ALL n TESTS PASSED' or `SOME
 # TESTS FAILED' -- and deliberately does not demand the count.  This list asks
 # whether the program reached its own last sentence; a failing arm already
