@@ -36,7 +36,6 @@
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
 #include <ddb/cons.h>	/* #497: who owns COM1 */
 #include <time/pmtimer.h>	/* #508: a ruler is not lent */
-#include <time/hpet.h>		/* #593: the lines LegacyReplacement took */
 #include <sync/atomic.h>	/* #538: atomic_add32 / atomic_swap32 */
 #include <sync/lock.h>		/* #598: a function's slots, one lock */
 #include <kern/misc_protos.h>	/* printf */
@@ -343,8 +342,16 @@ device_md_irq_mask(unsigned int irq)
 	 */
 	if (irq >= DEVICE_MD_IRQ_MAX)
 		return;
+
+	/*
+	 * #600: the pin only if this line holds it.  Another line can arrive on
+	 * the same pin, and the HPET takes ISA 0's and ISA 8's for the clock
+	 * (<cpu/ioapic.h>): masking the pin for a line that does not hold it
+	 * silences its owner -- the tick, for a dying driver of line 0 or 2.
+	 */
 	if (ioapic_present())
-		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
+		ioapic_mask_owned(acpi_irq_to_gsi((uint8_t)irq),
+				  IOAPIC_OWNER_LINE(irq));
 }
 
 void
@@ -352,8 +359,9 @@ device_md_irq_unmask(unsigned int irq)
 {
 	if (irq >= DEVICE_MD_IRQ_MAX)
 		return;		/* no pin: see device_md_irq_mask() */
-	if (ioapic_present())
-		ioapic_unmask(acpi_irq_to_gsi((uint8_t)irq));
+	if (ioapic_present())	/* only this line's pin: as mask's, #600 */
+		ioapic_unmask_owned(acpi_irq_to_gsi((uint8_t)irq),
+				    IOAPIC_OWNER_LINE(irq));
 }
 
 /*
@@ -467,37 +475,22 @@ static int irq_target(uint32_t *apic_id)
  * ddb's keyboard handler claims IRQ 1 in the kernel and the userspace driver
  * takes the line over from it -- but no in-kernel driver here claims a device
  * line: the clock is on the local APIC's own timer, not a pin -- and when
- * it is on the HPET instead (#593), its line is refused below, not shared.  The day one
- * does, this is where the saving goes, and the overwrite below becomes wrong
- * in a way that would otherwise be silent.
+ * it is on the HPET instead (#593), its pins are the clock's and refused
+ * below, not shared (#600).  The day one does, this is where the saving goes,
+ * and the overwrite below becomes wrong in a way that would otherwise be
+ * silent.
  */
 int
 device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 {
 	uint32_t	gsi, target;
+	unsigned	holder;
 
 	if (irq >= DEVICE_MD_IRQ_MAX || handler == 0)
 		return 0;
 
 	if (!ioapic_present())
 		return 0;
-
-	/*
-	 * 🔴 #593: THE LINES THE HPET TOOK ARE NOT LENT.  With LegacyReplacement
-	 * on, ISA 0's pin carries the HPET comparator that every processor's
-	 * tick comes from, and routing it to a driver's vector would stop every
-	 * clock in the machine; ISA 8's carries nothing, because the RTC no
-	 * longer interrupts at all (IA-PC HPET 1.0a, 2.4.2.1) -- a driver
-	 * handed it would wait for interrupts that cannot come.  Refused, and
-	 * said, since a refusal a driver cannot read looks like a device that
-	 * never interrupts.
-	 */
-	if ((irq == 0 || irq == 8) && hpet_legacy_routed()) {
-		printf("device_md_irq_register: REFUSED -- ISA line %u is "
-		       "the HPET's: this kernel switched LegacyReplacement "
-		       "on for its clock, and it stays on (#593)\n", irq);
-		return 0;
-	}
 
 	/*
 	 * The pin, which is not the line number.  The firmware is entitled to
@@ -515,11 +508,36 @@ device_md_irq_register(unsigned int irq, device_md_intr_t handler)
 	 * it is ready.  Routing is what makes the interrupt arrive, and on a
 	 * machine with more than one processor it can arrive before this
 	 * function returns.
+	 *
+	 * 🔴 #600: AND THE PIN IS CLAIMED, NOT TAKEN.  With LegacyReplacement on,
+	 * ISA 0's pin carries the HPET comparator every processor's tick comes
+	 * from, and ISA 8's carries nothing, because the RTC no longer
+	 * interrupts (IA-PC HPET 1.0a, 2.4.2.1): the HPET holds both (#593).
+	 * This used to refuse lines 0 and 8 by their numbers, and line 2 --
+	 * which a PC's MADT does not mention, so it arrives on ISA 0's pin too
+	 * -- was routed over the tick.  The claim asks by the pin, and refuses
+	 * any line whose pin somebody else holds, the clock or another line.
+	 * Said, since a refusal a driver cannot read looks like a device that
+	 * never interrupts.
 	 */
 	irq_handler[irq] = handler;
 	trap_set_handler(DEVICE_MD_VECTOR(irq), device_md_irq_trampoline);
-	ioapic_route(gsi, (uint8_t)DEVICE_MD_VECTOR(irq), target,
-		     acpi_irq_flags((uint8_t)irq));
+	if (!ioapic_claim_route(gsi, IOAPIC_OWNER_LINE(irq),
+				(uint8_t)DEVICE_MD_VECTOR(irq), target,
+				acpi_irq_flags((uint8_t)irq), &holder)) {
+		irq_handler[irq] = 0;
+		if (holder == IOAPIC_OWNER_CLOCK)
+			printf("device_md_irq_register: REFUSED -- ISA line %u "
+			       "arrives on GSI %u, the HPET's: this kernel "
+			       "switched LegacyReplacement on for its clock, and "
+			       "it stays on (#593, #600)\n", irq, gsi);
+		else
+			printf("device_md_irq_register: REFUSED -- ISA line %u "
+			       "arrives on GSI %u, which ISA line %u holds "
+			       "(#600)\n", irq, gsi,
+			       holder - IOAPIC_OWNER_LINE(0));
+		return 0;
+	}
 
 	return 1;
 }
@@ -532,10 +550,13 @@ device_md_irq_unregister(unsigned int irq)
 
 	/*
 	 * And the mirror: the pin first, because until it is masked the line
-	 * can still deliver, and it must deliver to something.
+	 * can still deliver, and it must deliver to something.  Masked and
+	 * given back only if this line holds it (#600): a line that was refused,
+	 * or whose pin the clock took, would otherwise mask its owner's.
 	 */
 	if (ioapic_present())
-		ioapic_mask(acpi_irq_to_gsi((uint8_t)irq));
+		ioapic_release(acpi_irq_to_gsi((uint8_t)irq),
+			       IOAPIC_OWNER_LINE(irq));
 
 	/*
 	 * #598: the handler goes and the trampoline stays, as for a message
