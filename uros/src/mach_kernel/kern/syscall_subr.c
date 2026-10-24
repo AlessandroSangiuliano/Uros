@@ -689,9 +689,11 @@ mach_null(void)
  * different places in four programs, and working out which one it was meant
  * reading the symbol tables of every image in the bundle and still guessing.
  * The kernel has current_task() in its hand while it prints.
+ *
+ * The bound is MACH_PRINT_MAX from <mach/mach_syscalls.h>, the header the
+ * libraries read too, so a caller that splits a long string splits it at the
+ * size this copies (#510).
  */
-#define MACH_PRINT_MAX	256
-
 void
 mach_print(const char *s)
 {

@@ -33,6 +33,19 @@
 #include <mach/exception.h>
 #include <device/device_types.h>
 
+/*
+ * The longest string mach_print() carries, its terminator included (#510).
+ *
+ * ⚠️ A longer one does not come out whole on either target, and not in the
+ * same way: x86-64's copyinstr() fails a string that has not ended within the
+ * bound, so mach_print() prints the line saying it could not read the string
+ * and none of the string; i386's stops at the bound and reports success, so
+ * the string is cut.  A caller with more to say splits it, at this size --
+ * published here, where the kernel that enforces it and the libraries that
+ * split for it both read it, rather than copied into each.
+ */
+#define	MACH_PRINT_MAX	256
+
 extern kern_return_t syscall_task_create(
 				mach_port_t		parent_task,
 				ledger_port_array_t	ledgers,
