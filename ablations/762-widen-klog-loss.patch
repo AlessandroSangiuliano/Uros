@@ -1,19 +1,39 @@
 Kind: widen
 Issue: #762
-Holds open: both ways the klog forwarder loses bytes, on purpose -- char_server goes into the x86-64 bundle (OSFMK_BUILD_CHAR_SERVER is off by default, so nothing else runs the forwarder); before its first read the forwarder floods the ring with 320 numbered lines, about 71 KB against a 64 KiB ring, so the kernel moves its cursor; and the first write after the flood is refused as a tty would refuse it. The flood's last line and the refusal's announcement open run-x86_64.sh's two #762 pairs, which close on the lines saying what was lost.
+Holds open: both ways the klog forwarder loses bytes, on purpose. char_server is forced into the x86-64 bundle in uros/CMakeLists.txt -- it is off by default, and ablate.sh configures each arm from the reference build's options rather than the preset, so a preset change never reached the arms (the first A/B: 0 of 4, the flood had never run). Before its first read the forwarder floods the ring with 320 numbered lines, about 71 KB against a 64 KiB ring, so the kernel moves its cursor; and the first write after the flood is refused as a tty would refuse it. The flood's last line and the refusal's announcement open run-x86_64.sh's two #762 pairs, closed by the lines saying what was lost -- and the arm's own run-x86_64.sh fails a boot in which the flood never ran, so neither arm can pass for want of it.
 Run: --entry 14 1200 -smp 1
 
-diff --git a/uros/cmake/presets/x86_64.cmake b/uros/cmake/presets/x86_64.cmake
-index 1301c825..aab06029 100644
---- a/uros/cmake/presets/x86_64.cmake
-+++ b/uros/cmake/presets/x86_64.cmake
-@@ -12,3 +12,6 @@ set(UROS_TARGET_ARCH x86_64 CACHE STRING "")
- # Release turns the kernel symbol table off by default; every build the harness
- # has judged had it on.
- set(OSFMK_GEN_KSYMS ON CACHE BOOL "")
-+
-+# 762-widen: char_server in the bundle, so that the klog forwarder runs.
-+set(OSFMK_BUILD_CHAR_SERVER ON CACHE BOOL "")
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 0ac8ea19..53c0ff1a 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -623,6 +623,12 @@ must_report 'taskpanic_load: started' 'taskpanic_load: .*no load' \
+ # before the forwarder reads it, and one write refused on purpose -- because
+ # no other boot prints either first line.  The flood's last line is the
+ # newest in the ring and survives the overrun it causes.
++# 762-widen: the flood must have run, or both arms pass for want of it.
++grep -aq 'klog flood: done' "$LOG" || {
++	echo "  FAILED: 762-widen-klog-loss's flood never ran -- the forwarder is not in this boot"
++	echo "  log: $LOG"
++	exit 1
++}
+ must_report 'klog flood: done' 'char_server: the kernel.s log is missing [0-9]* bytes here -- the ring overran' \
+ 	'The flood ran the ring over before the forwarder read it, and the forwarder said nothing of what it lost (#762).'
+ must_report 'klog: the first write after the flood is refused on purpose' 'char_server: the kernel.s log is missing up to [0-9]* bytes here -- the tty refused' \
+diff --git a/uros/CMakeLists.txt b/uros/CMakeLists.txt
+index 1a888159..d5b2fa8c 100644
+--- a/uros/CMakeLists.txt
++++ b/uros/CMakeLists.txt
+@@ -32,6 +32,9 @@ option(OSFMK_BUILD_CAP_TEST "Build capability negative-test binary" OFF)
+ option(OSFMK_BUILD_GPUSTAT "Build gpustat userspace probe for gpu_query_stats (#203)" OFF)
+ option(OSFMK_BUILD_GPU_SERVER "Build gpu_server (userspace GPU/display server, #194)" OFF)
+ option(OSFMK_BUILD_CHAR_SERVER "Build char_server (userspace character device server, #205)" OFF)
++# 762-widen: char_server in the bundle whatever the reference build says --
++# ablate.sh configures each arm from that build's options, not the preset.
++set(OSFMK_BUILD_CHAR_SERVER ON CACHE BOOL "762-widen" FORCE)
+ option(OSFMK_BUILD_EXEC_SERVER "Build exec_server (userspace ELF loader / process spawner, #228)" OFF)
+ option(OSFMK_BUILD_HELLO_EXEC "Build hello_exec test binary (#228 v0.1.0)" OFF)
+ option(OSFMK_BUILD_PROC_SERVER "Build proc_server (POSIX process model owner, #237)" OFF)
 diff --git a/uros/src/servers/char_server/klog_forward.c b/uros/src/servers/char_server/klog_forward.c
 index 9e26bb05..a7783f76 100644
 --- a/uros/src/servers/char_server/klog_forward.c
