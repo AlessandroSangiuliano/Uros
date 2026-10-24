@@ -276,6 +276,14 @@ DEATHS=$(grep -a 'exception_no_server: terminating task' "$LOG" || true)
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
 [ -n "$GARBLED" ] && BAD=$(printf '%s\n%s' "$BAD" "$GARBLED" | sed '/^$/d')
+# #757: a dump of the IPC profile whose lines another dump's broke into is a
+# failure too -- a reader going by order gives one dump's phases to the other's
+# header, and nothing else in the log says so.  Asked of the rejoined log, as
+# everything here is, and only of a log that has dumps.
+if grep -aq '^syscall_profile trap ' "$LOG"; then
+	DUMPS=$(awk -f "$REPO/scripts/profile-dumps-check.awk" "$LOG" | grep -a 'WRONG' || true)
+	[ -n "$DUMPS" ] && BAD=$(printf '%s\n%s' "$BAD" "$DUMPS" | sed '/^$/d')
+fi
 # #661: a line with a character the screen draws as the replacement, because
 # its font has no glyph for it.  That line does not read on the screen as on
 # the wire, and on a machine with no serial port the screen is all there is.
