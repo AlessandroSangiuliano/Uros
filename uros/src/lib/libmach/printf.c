@@ -395,21 +395,15 @@ get_console_port(void)
  * One line names the refusal -- its cause, its code, how many bytes -- and the
  * bytes follow it, so the output arrives labelled instead of not at all.
  *
- * ⚠️ A line to a trap, while it fits: two traps are two kernel printf()s, and
- * another processor's line can land between them (#578, #644).  A line longer
- * than MACH_PRINT_MAX - 1 bytes is split, because the trap would not carry it
- * whole.
- *
- * ⚠️ A NUL cannot travel through mach_print, which takes a C string.  It is
- * skipped -- a terminal shows nothing for it either -- and what follows it is
- * not lost with it.
+ * The bytes go through mach_print_bytes(), the loop libposix-uros's console
+ * uses too (#761): a line to a trap while it fits, and a NUL left out rather
+ * than ending the line it sits in.
  */
 static void
 console_refused(struct printf_state *state, kern_return_t kr,
 		int offset, int count)
 {
 	char piece[MACH_PRINT_MAX];
-	int n;
 
 	state->refused = TRUE;
 	(void) snprintf(piece, sizeof piece,
@@ -418,27 +412,7 @@ console_refused(struct printf_state *state, kern_return_t kr,
 			"(#510)\r\n", count, mach_error_string(kr),
 			(unsigned int) kr);
 	mach_print(piece);
-
-	while (count > 0) {
-		n = 0;
-		while (n < count && n < (int) sizeof piece - 1) {
-			char c = state->buf[offset + n];
-
-			if (c == '\0')
-				break;
-			piece[n++] = c;
-			if (c == '\n')
-				break;
-		}
-		if (n == 0) {
-			n = 1;			/* the NUL, skipped */
-		} else {
-			piece[n] = '\0';
-			mach_print(piece);
-		}
-		offset += n;
-		count -= n;
-	}
+	mach_print_bytes(&state->buf[offset], (vm_size_t) count);
 }
 
 /* Send the first `upto' bytes of the buffer in ONE write per attempt (#578),
