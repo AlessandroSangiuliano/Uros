@@ -109,7 +109,9 @@ void trap_replay_vector(unsigned vector)
 	 * statement about the handler and nothing else here can ask.
 	 */
 	percpu()->in_replay++;
+	cpu_data[cpu_number()].interrupt_level++;	/* #757: see trap_common() */
 	h(&replay);
+	cpu_data[cpu_number()].interrupt_level--;
 	percpu()->in_replay--;
 }
 
@@ -1913,7 +1915,19 @@ void trap_dispatch(struct trap_frame *frame)
 				return;
 			}
 
+			/*
+			 * #757: the machine-independent interrupt level, which
+			 * <kern/cpu_data.h> reads and i386's locore.S keeps --
+			 * and which nothing on this target wrote, so that
+			 * get_interrupt_level() answered 0 inside every handler.
+			 * The console asks it who is writing: a thread, or a
+			 * processor in an interrupt, which is not the thread it
+			 * interrupted.  Around the handler only, as for a replay
+			 * (trap_replay_vector()): the AST below is the thread's.
+			 */
+			cpu_data[cpu_number()].interrupt_level++;
 			h(frame);
+			cpu_data[cpu_number()].interrupt_level--;
 			trap_take_ast(frame);
 			return;
 		}
