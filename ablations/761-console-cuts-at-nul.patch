@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #761
+Takes out: what #761 changed in libposix-uros's console_write() -- a write to fds 0/1/2 goes back to 127-byte pieces handed to mach_print as they are, so a NUL ends its piece and the rest of the piece never reaches the console, while __uros_write() still returns the whole count. hello_server's console arm prints a line with a NUL in the middle through musl's stdio, and scripts/suite-i386.sh waits for the words after the NUL.
+Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-4, from a worktree with the patch and a build of its own; scripts/ablate.sh cannot judge it
+Expect: started and never reported: \(hello_server\): console: started
+Expect: never said: \(hello_server\): console: a NUL in the middle of this line went out
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+index 84bcdf7e..a063f130 100644
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -186,7 +186,15 @@ static unsigned vfs_type_to_ifmt(uint8_t t)
+  */
+ static void console_write(const char *p, size_t n)
+ {
+-    mach_print_bytes(p, (vm_size_t)n);
++    char chunk[128];
++    while (n > 0) {
++        size_t take = n < sizeof(chunk) - 1 ? n : sizeof(chunk) - 1;
++        memcpy(chunk, p, take);
++        chunk[take] = '\0';
++        mach_print(chunk);
++        p += take;
++        n -= take;
++    }
+ }
+ 
+ /* ------------------------------------------------------------------ */
