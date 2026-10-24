@@ -922,6 +922,84 @@ Each suite alone, 3 boots at each count, medians as printed:
 At `-smp 4` these medians spread widely and move between runs more than at
 `-smp 1`.
 
+### On omen's metal (24/10)
+
+omen is an Intel Kaby Lake laptop, four cores and eight threads, its TSC at
+2808 MHz.  One suite a boot from one stick (`make-baremetal-x86_64.sh
+--suites`), the console kept across the reset by ramoops (#373): 22 boots.
+The cycles are TSC ticks as on victus, but of another clock on another
+processor, so omen's numbers are compared with omen's.
+
+**The clock under measurement is HWP's, not the one the boot reports.**  #736
+turns HWP on with the request's minimum at 1, its maximum at 38 and EPP 0x80,
+balanced, so each core's clock follows its own load.  The 10 ms spin that
+reports 3407-3409 MHz on all eight processors at bring-up says nothing about a
+suite whose threads block and wake.  The profile's pair of marks shows it: it
+is measured once, at the first dump (`sp_measure_self()`, nine pairs of
+back-to-back TSC reads), and reads 26-28 ticks on a core at full clock, 47-63
+on a slow one.  With EPP 0x80 it read 47-63 in 5 boots of 11, and in those
+boots `intra`'s traps that never left the processor cost about 2000 cycles
+against about 1780.  With `hwp_epp=0` it read 26-28 in 10 boots of 10, and the
+PCID comparison below is those ten boots.
+
+Two more things the reading of the logs needed:
+
+- **A suite is four tests in a row** -- null, 128 B, 1024 B and 4096 B RPCs --
+  and a thread's dumps come at 16·2^k traps, so which tests they fall in
+  depends on how many threads share the work, and changes from boot to boot.
+  In one boot `comb`'s 128 B test had 11 dumps and in the next none, and its
+  `copyout` read 289 against 186 with every other column equal.  Each dump is
+  counted in the test it was printed in (the bench's `us/op` line ends each
+  test), and only like is compared with like.
+- **#757 splices the phase lines** of two dumps printed at once: of `intra`'s
+  52 dumps a boot, 9 read phase by phase.  A dump's header -- the round trip's
+  wall time and its time on a processor -- is one printf, and it arrived whole
+  in every dump of every boot, so the totals below are the headers'.
+
+`comb`, the hand-off, null RPCs, 40 dumps over two boots (PCID on, EPP 0x80,
+the marks at 28 and 26; the two boots agree to 0.3%), cycles as printed:
+
+| phase | cycles |
+|---|--:|
+| entry / get buf / **COPYIN** | 64 / 61 / **125** |
+| resolve / queue / pick rcv | 126 / 120 / 238 |
+| claim / park snd / deliver | 121 / 123 / 90 |
+| wait (of wall) | 2287 |
+| **SWITCH** | **377** |
+| splx / resume / copyout | 53 / 131 / 188 |
+| **PUT** / residue | **117** / 36 |
+| **on a processor** | **2008** |
+
+Of those 2008 cycles, `SWITCH` is 19%, finding and queueing 24%, **the two
+copies 242 cycles, 12%**, the header translated out 9%, and the rest 34%.  On
+metal #391's ceiling is an eighth of the hand-off.
+
+PCID on and off (`-n`), `hwp_epp=0`, the headers' medians, every test that has
+dumps:
+
+| PCID off against on | on a processor | wall |
+|---|---|---|
+| `inter`, blocked (2 boots each) | +2.4% to +4.9% | +4.3% to +11% |
+| `inter`, never left the processor | +2.7% to +5.8% | the same |
+| `intra`, blocked (4 boots on, 2 off) | +2.3% to +7.5% | +4.8% to +7.1% |
+| `intra`, never left the processor | +1% to +3% | the same |
+
+For `inter`, every boot with PCID off is above every boot with it on, in every
+test and both kinds of trap.  For `intra`'s blocked round trip the wall time
+is, in every test.  `intra`'s never-left traps stay within the boots' spread,
+except in the 4096 B test, which has two dumps a boot.  For scale, a null RPC
+with PCID on: `inter` blocked 3894 and 3998 cycles on a processor, never left
+1797 and 1837; `intra` blocked 4067 to 4142, never left 1762 to 1801.
+
+Phase by phase, `inter` blocked, PCID on and then off (the 128 B, 1024 B and
+4096 B tests; #757 left the null test's phases unreadable): `SWITCH` moves by
++19, -21 and +32 cycles, which is nothing; `mq_recv` by +93, +135 and +137,
+and the wait for the other side by +410 to +495.
+
+⚠️ One boot of the 22 is not explained: `intra` with EPP 0x80 and the marks at
+28 read 3350 and 1457 cycles, where every other `intra` boot read 4000-4450
+and 1760-2030.  It is an EPP 0x80 boot, so it is outside the comparison above.
+
 ### What the table says to #412
 
 `comb` and `intra` stay in one address space, so PCID must not move their
