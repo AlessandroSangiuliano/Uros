@@ -52,6 +52,7 @@
 #include "externs.h"	/* _doprnt, the one formatter (#432) */
 #include <mach.h>
 #include <mach/mach_traps.h>	/* mach_print: the console that needs no port */
+#include <mach/mach_syscalls.h>	/* MACH_PRINT_MAX, the most it carries (#510) */
 #include <mach_error.h>		/* mach_error_string */
 #include <sa_mach.h>
 #include <device/device.h>
@@ -376,6 +377,65 @@ get_console_port(void)
 	    (void) mach_port_deallocate(mach_task_self(), security);
 }
 
+/*
+ * 🔴 A WRITE THE CONSOLE REFUSED IS SAID, AND ITS BYTES STILL GO OUT (#510).
+ *
+ * flush_upto() used to leave its loop on an error with nothing said, and the
+ * bytes it had not written were dropped by the memmove after it -- so a line
+ * that was printed and refused looked, in the log, exactly like a line that
+ * was never printed.  The harness decides pass and fail by reading lines, and
+ * those two have opposite causes.
+ *
+ * mach_print is the way out, for the reason printf_init() uses it: it needs no
+ * port and no device, so it still works when the console port is what failed.
+ * One line names the refusal -- its cause, its code, how many bytes -- and the
+ * bytes follow it, so the output arrives labelled instead of not at all.
+ *
+ * ⚠️ A line to a trap, while it fits: two traps are two kernel printf()s, and
+ * another processor's line can land between them (#578, #644).  A line longer
+ * than MACH_PRINT_MAX - 1 bytes is split, because the trap would not carry it
+ * whole.
+ *
+ * ⚠️ A NUL cannot travel through mach_print, which takes a C string.  It is
+ * skipped -- a terminal shows nothing for it either -- and what follows it is
+ * not lost with it.
+ */
+static void
+console_refused(struct printf_state *state, kern_return_t kr,
+		int offset, int count)
+{
+	char piece[MACH_PRINT_MAX];
+	int n;
+
+	(void) snprintf(piece, sizeof piece,
+			"libmach: the console refused %d bytes of this task's "
+			"output: %s (0x%08x); they follow through mach_print "
+			"(#510)\r\n", count, mach_error_string(kr),
+			(unsigned int) kr);
+	mach_print(piece);
+
+	while (count > 0) {
+		n = 0;
+		while (n < count && n < (int) sizeof piece - 1) {
+			char c = state->buf[offset + n];
+
+			if (c == '\0')
+				break;
+			piece[n++] = c;
+			if (c == '\n')
+				break;
+		}
+		if (n == 0) {
+			n = 1;			/* the NUL, skipped */
+		} else {
+			piece[n] = '\0';
+			mach_print(piece);
+		}
+		offset += n;
+		count -= n;
+	}
+}
+
 /* Send the first `upto' bytes of the buffer in ONE write per attempt (#578),
  * and keep the rest at the front for the next flush. */
 static void
@@ -423,6 +483,7 @@ flush_upto(struct printf_state *state, unsigned int upto)
 		    if (console_port != MACH_PORT_NULL)
 			continue;
 		}
+		console_refused(state, kr, offset, count);
 		break;
 	    }
 	    count -= amt;
