@@ -4,11 +4,11 @@ Takes out: what #510 sends through mach_print when the console refuses a write -
 Run: --entry 14 1200 -smp 1
 Expect: boot_ports_test: \[5\] WRONG .* the kernel log holds no refusal
 diff --git a/uros/src/lib/libmach/printf.c b/uros/src/lib/libmach/printf.c
-index 73681c49..27912173 100644
+index 85f9d99e..d3166de7 100644
 --- a/uros/src/lib/libmach/printf.c
 +++ b/uros/src/lib/libmach/printf.c
-@@ -412,6 +412,7 @@ console_refused(struct printf_state *state, kern_return_t kr,
- 	int n;
+@@ -406,6 +406,7 @@ console_refused(struct printf_state *state, kern_return_t kr,
+ 	char piece[MACH_PRINT_MAX];
  
  	state->refused = TRUE;
 +	return;

@@ -31,6 +31,9 @@
 #include <mach/std_types.h>
 #include <mach/mach_types.h>
 #include <mach/exception.h>
+#include <mach/message.h>	/* mach_msg_type_number_t and the other mach_msg_*
+				 * types below: every includer had happened to
+				 * include <mach.h> first, until one did not (#761) */
 #include <device/device_types.h>
 
 /*

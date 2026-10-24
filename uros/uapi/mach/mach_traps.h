@@ -141,6 +141,14 @@ mach_port_t	mach_host_self(void);
 void		mach_print(const char *);
 
 /*
+ *	Bytes rather than a string, through mach_print: a line per trap while
+ *	it fits, a longer line split at MACH_PRINT_MAX - 1, and a NUL left out
+ *	rather than ending what follows it (#510, #761).  Not a trap: libmach's,
+ *	and in libmach_core too, so the programs linked with musl have it.
+ */
+void		mach_print_bytes(const char *, vm_size_t);
+
+/*
  *	The rest of the traps C actually calls (#426).
  *
  *	<mach/syscall_sw.h> emits a stub for 117 traps and 41 of them had no
