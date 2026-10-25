@@ -1,120 +1,120 @@
 # FLIPC v2 — Design Document
 
-## 1. Obiettivo
+## 1. Objective
 
-Canale IPC ad alte prestazioni per comunicazioni hot-path tra server/driver
-trusted su Uros.  Complementare a Mach IPC (sicurezza, capability), non
-sostitutivo.
+High-performance IPC channel for hot-path communication between trusted
+servers/drivers on Uros.  Complementary to Mach IPC (security, capability), not
+a replacement.
 
-**Target**: centinaia di nanosecondi per messaggio; zero kernel trap nel fast
+**Target**: hundreds of nanoseconds per message; zero kernel traps in the fast
 path.
 
-**Casi d'uso**:
-- ext2_server ↔ ahci_driver (comandi I/O disco)
-- client ↔ ext2_server (read/write ad alto throughput)
+**Use cases**:
+- ext2_server ↔ ahci_driver (disk I/O commands)
+- client ↔ ext2_server (high-throughput read/write)
 - game engine ↔ GPU driver (command buffer + texture streaming)
-- audio server ↔ client (buffer bassa latenza)
-- qualsiasi coppia di server trusted con comunicazione frequente
+- audio server ↔ client (low-latency buffer)
+- any pair of trusted servers with frequent communication
 
-## 2. Principi architetturali
+## 2. Architectural principles
 
-1. **Setup via Mach IPC, data via shared memory pura.**
-   Il kernel alloca la regione condivisa, la mappa in entrambi i task, fornisce
-   un semaforo Mach per il wakeup.  Dopo il setup, sender e receiver comunicano
-   *senza* coinvolgere il kernel nel data path.
+1. **Setup via Mach IPC, data via pure shared memory.**
+   The kernel allocates the shared region, maps it into both tasks, provides
+   a Mach semaphore for the wakeup.  After the setup, sender and receiver
+   communicate *without* involving the kernel in the data path.
 
 2. **Dual plane: control + data.**
-   - *Control plane*: ring di descriptor piccoli (64 byte) — comandi, ack,
-     metadati.  Lock-free, nel ring buffer shared.
-   - *Data plane*: pagine mappate direttamente (COW o mapping read-only) —
-     blocchi disco, texture, audio buffer.  Zero-copy.
+   - *Control plane*: ring of small descriptors (64 bytes) — commands, acks,
+     metadata.  Lock-free, in the shared ring buffer.
+   - *Data plane*: pages mapped directly (COW or read-only mapping) —
+     disk blocks, textures, audio buffers.  Zero-copy.
 
 3. **Adaptive wakeup.**
-   Spin-poll → fallback semaforo Mach.  Il fast path non entra mai nel kernel.
+   Spin-poll → fallback to the Mach semaphore.  The fast path never enters the kernel.
 
-4. **Niente Message Engine kernel.**
-   A differenza del FLIPC v1, il kernel non partecipa al routing dei messaggi.
-   Il routing è diretto: un canale collega esattamente due endpoint (punto a
-   punto).
+4. **No kernel Message Engine.**
+   Unlike FLIPC v1, the kernel does not take part in the routing of messages.
+   The routing is direct: a channel connects exactly two endpoints (point to
+   point).
 
-## 3. Concetti fondamentali
+## 3. Fundamental concepts
 
 ### 3.1 Channel
 
-Un **channel** è la primitiva FLIPC v2.  Connette esattamente due task:
-un *producer* e un *consumer*.  Ogni channel contiene:
+A **channel** is the FLIPC v2 primitive.  It connects exactly two tasks:
+a *producer* and a *consumer*.  Every channel contains:
 
-- Una regione di shared memory mappata in entrambi i task
-- Un **descriptor ring** (control plane)
-- Un **data region** opzionale (data plane, pagine condivise)
-- Stato di sincronizzazione (puntatori, flag wakeup)
+- A shared memory region mapped into both tasks
+- A **descriptor ring** (control plane)
+- An optional **data region** (data plane, shared pages)
+- Synchronization state (pointers, wakeup flags)
 
-Un task può avere più channel aperti (es. ext2_server ha un channel verso
-ahci_driver e N channel verso i client).
+A task can have several channels open (e.g. ext2_server has one channel to
+ahci_driver and N channels to the clients).
 
 ### 3.2 Descriptor
 
-Un **descriptor** è un record a 64 byte nel ring.  Contiene:
+A **descriptor** is a 64-byte record in the ring.  It contains:
 
 ```c
 struct flipc2_desc {
-    uint32_t    opcode;         /* tipo di operazione                    */
-    uint32_t    flags;          /* flag specifiche per opcode            */
-    uint64_t    cookie;         /* ID operazione (per correlazione req/reply) */
-    uint64_t    data_offset;    /* offset nella data region (0 = no data) */
-    uint64_t    data_length;    /* lunghezza dati in byte                */
-    uint64_t    param[3];       /* parametri opcode-specific             */
-    uint32_t    status;         /* stato completamento (nelle reply)     */
-    uint32_t    _reserved;      /* allineamento a 64 byte               */
+    uint32_t    opcode;         /* type of operation                     */
+    uint32_t    flags;          /* opcode-specific flags                 */
+    uint64_t    cookie;         /* operation ID (for req/reply correlation)   */
+    uint64_t    data_offset;    /* offset in the data region (0 = no data) */
+    uint64_t    data_length;    /* data length in bytes                  */
+    uint64_t    param[3];       /* opcode-specific parameters            */
+    uint32_t    status;         /* completion status (in replies)        */
+    uint32_t    _reserved;      /* alignment to 64 bytes                */
 };
 ```
 
-**64 byte = 1 cache line**.  Il ring non contiene payload, solo metadati.
-I dati bulk sono referenziati tramite `data_offset` + `data_length` nella
+**64 bytes = 1 cache line**.  The ring contains no payload, only metadata.
+The bulk data are referenced through `data_offset` + `data_length` in the
 data region.
 
 ### 3.3 Data Region
 
-Porzione della shared memory (o pagine mappate separatamente) dove risiedono
-i dati bulk.  Due modalità:
+Portion of the shared memory (or of separately mapped pages) where the bulk
+data reside.  Two modes:
 
-- **Inline**: la data region è parte della shared memory del channel.
-  Il producer scrive dati a `data_offset`, il consumer li legge.
-  Adatto per messaggi medi (< qualche KB).
+- **Inline**: the data region is part of the channel's shared memory.
+  The producer writes data at `data_offset`, the consumer reads it.
+  Suited to medium-sized messages (< a few KB).
 
-- **Page-mapped**: il producer registra pagine dal proprio address space
-  tramite una chiamata di setup (Mach IPC).  Il kernel le mappa read-only
-  nel consumer.  Adatto per dati grandi (texture, blocchi disco).
-  Il descriptor contiene l'offset nella regione mappata.
+- **Page-mapped**: the producer registers pages from its own address space
+  through a setup call (Mach IPC).  The kernel maps them read-only
+  into the consumer.  Suited to large data (textures, disk blocks).
+  The descriptor contains the offset in the mapped region.
 
 ### 3.4 Adaptive Wakeup
 
 ```
 PRODUCER                              CONSUMER
    │                                     │
-   │  write descriptor nel ring          │  spin-poll sul ring
-   │  WRITE_FENCE()                      │  (busy loop, N iterazioni)
+   │  write descriptor in the ring       │  spin-poll on the ring
+   │  WRITE_FENCE()                      │  (busy loop, N iterations)
    │  advance tail pointer               │
-   │                                     │  ← vede nuovo descriptor
-   │                                     │     → processa, zero trap
+   │                                     │  ← sees new descriptor
+   │                                     │     → processes, zero traps
    │                                     │
-   │  ┌─ se sleeping_flag == 1 ──┐       │  ┌─ spin timeout ──────┐
+   │  ┌─ if sleeping_flag == 1 ──┐       │  ┌─ spin timeout ──────┐
    │  │  semaphore_signal()      │       │  │  set sleeping_flag=1│
-   │  │  (unico kernel trap)     │       │  │  WRITE_FENCE()      │
+   │  │  (only kernel trap)      │       │  │  WRITE_FENCE()      │
    │  └──────────────────────────┘       │  │  check ring again   │
    │                                     │  │  semaphore_wait()   │
    │                                     │  │  clear sleeping_flag│
    │                                     │  └─────────────────────┘
 ```
 
-- **Fast path** (consumer attivo/spinning): zero kernel trap.
-- **Slow path** (consumer idle): un kernel trap per il wakeup (semaphore_signal).
-- Il consumer ri-controlla il ring *dopo* aver settato `sleeping_flag` per
-  evitare race condition (lost wakeup).
+- **Fast path** (consumer active/spinning): zero kernel traps.
+- **Slow path** (consumer idle): one kernel trap for the wakeup (semaphore_signal).
+- The consumer re-checks the ring *after* setting `sleeping_flag`, to
+  avoid a race condition (lost wakeup).
 
-## 4. Layout memoria del Channel
+## 4. Memory layout of the Channel
 
-La shared memory di un channel ha layout fisso:
+The shared memory of a channel has a fixed layout:
 
 ```
 Offset 0                                           Offset = channel_size
@@ -125,169 +125,169 @@ Offset 0                                           Offset = channel_size
 └──────────────┴──────────────┴─────────────────────┘
 ```
 
-### 4.1 Channel Header (256 byte)
+### 4.1 Channel Header (256 bytes)
 
 ```c
 struct flipc2_channel_header {
-    /* --- costanti (set al setup, immutabili) --- */
+    /* --- constants (set at setup, immutable) --- */
     uint32_t    magic;              /* FLIPC2_MAGIC = 0x464C5032 ("FLP2") */
-    uint32_t    version;            /* versione protocollo                */
-    uint32_t    channel_size;       /* dimensione totale shared memory    */
-    uint32_t    ring_offset;        /* offset del ring dall'inizio        */
-    uint32_t    ring_entries;       /* numero slot nel ring (potenza di 2)*/
-    uint32_t    data_offset;        /* offset data region                 */
-    uint32_t    data_size;          /* dimensione data region             */
-    uint32_t    desc_size;          /* sizeof(flipc2_desc), per estensibilità */
+    uint32_t    version;            /* protocol version                   */
+    uint32_t    channel_size;       /* total shared memory size           */
+    uint32_t    ring_offset;        /* offset of the ring from the start  */
+    uint32_t    ring_entries;       /* number of ring slots (power of 2)  */
+    uint32_t    data_offset;        /* data region offset                 */
+    uint32_t    data_size;          /* data region size                   */
+    uint32_t    desc_size;          /* sizeof(flipc2_desc), for extensibility */
 
-    /* --- producer-owned (scritti dal producer, letti dal consumer) --- */
-    volatile uint32_t   prod_tail;      /* prossimo slot da scrivere     */
-    uint32_t            _pad_prod[15];  /* padding a cache line          */
+    /* --- producer-owned (written by the producer, read by the consumer) --- */
+    volatile uint32_t   prod_tail;      /* next slot to write            */
+    uint32_t            _pad_prod[15];  /* padding to a cache line       */
 
-    /* --- consumer-owned (scritti dal consumer, letti dal producer) --- */
-    volatile uint32_t   cons_head;      /* prossimo slot da leggere      */
-    volatile uint32_t   cons_sleeping;  /* 1 = consumer bloccato su sem  */
-    uint32_t            _pad_cons[14];  /* padding a cache line          */
+    /* --- consumer-owned (written by the consumer, read by the producer) --- */
+    volatile uint32_t   cons_head;      /* next slot to read             */
+    volatile uint32_t   cons_sleeping;  /* 1 = consumer blocked on sem   */
+    uint32_t            _pad_cons[14];  /* padding to a cache line       */
 
-    /* --- semaforo Mach (set al setup) --- */
-    mach_port_t         wakeup_sem;     /* semaphore port per wakeup     */
+    /* --- Mach semaphore (set at setup) --- */
+    mach_port_t         wakeup_sem;     /* semaphore port for wakeup     */
     uint32_t            _pad_sem[15];
 
-    /* --- statistiche (best-effort, non sincronizzate) --- */
-    volatile uint64_t   prod_total;     /* descriptor prodotti           */
-    volatile uint64_t   cons_total;     /* descriptor consumati          */
-    volatile uint64_t   wakeups;        /* numero di semaphore_signal    */
-    uint8_t             _reserved[232 - 3*8]; /* fino a 256 byte totali  */
+    /* --- statistics (best-effort, not synchronized) --- */
+    volatile uint64_t   prod_total;     /* descriptors produced          */
+    volatile uint64_t   cons_total;     /* descriptors consumed          */
+    volatile uint64_t   wakeups;        /* semaphore_signal count        */
+    uint8_t             _reserved[232 - 3*8]; /* up to 256 bytes total   */
 };
 ```
 
-`prod_tail` e `cons_head` sono su cache line separate per evitare false
+`prod_tail` and `cons_head` are on separate cache lines to avoid false
 sharing.
 
 ### 4.2 Descriptor Ring
 
-Array circolare di `ring_entries` descriptor (potenza di 2).  Indice
-calcolato con maschera:
+Circular array of `ring_entries` descriptors (power of 2).  Index
+computed with a mask:
 
 ```c
 #define FLIPC2_RING_IDX(ptr, hdr)  ((ptr) & ((hdr)->ring_entries - 1))
 ```
 
-Il ring è pieno quando `prod_tail - cons_head == ring_entries`.
-Il ring è vuoto quando `prod_tail == cons_head`.
+The ring is full when `prod_tail - cons_head == ring_entries`.
+The ring is empty when `prod_tail == cons_head`.
 
-I puntatori `prod_tail` e `cons_head` sono monotonicamente crescenti (wrappano
-a 32 bit).  Questo elimina l'ambiguità full/empty dei ring buffer classici.
+The `prod_tail` and `cons_head` pointers increase monotonically (they wrap
+at 32 bits).  This removes the full/empty ambiguity of classic ring buffers.
 
 ### 4.3 Data Region
 
-Spazio libero dopo il ring.  Gestito dal producer con un allocatore semplice
-(bump allocator circolare o free list).  Il consumer non scrive nella data
-region — la legge soltanto.
+Free space after the ring.  Managed by the producer with a simple allocator
+(circular bump allocator or free list).  The consumer does not write to the data
+region — it only reads it.
 
-Per dati page-mapped, `data_offset` nel descriptor punta alla regione di
-pagine mappate separatamente (non alla data region inline).  Un bit in `flags`
-distingue i due casi.
+For page-mapped data, `data_offset` in the descriptor points to the region of
+separately mapped pages (not to the inline data region).  A bit in `flags`
+distinguishes the two cases.
 
 ## 5. API
 
 ### 5.1 Setup (slow path — via Mach IPC)
 
 ```c
-/* Crea un channel. Restituisce un handle e il send right per invitare il peer. */
+/* Creates a channel. Returns a handle and the send right to invite the peer. */
 flipc2_return_t
 flipc2_channel_create(
-    uint32_t            channel_size,   /* dimensione totale (min 4KB, max 16MB) */
-    uint32_t            ring_entries,   /* slot nel ring (potenza di 2)          */
-    flipc2_channel_t   *channel,        /* [out] handle locale                   */
-    mach_port_t        *invite_port     /* [out] send right da passare al peer   */
+    uint32_t            channel_size,   /* total size (min 4KB, max 16MB)        */
+    uint32_t            ring_entries,   /* slots in the ring (power of 2)        */
+    flipc2_channel_t   *channel,        /* [out] local handle                    */
+    mach_port_t        *invite_port     /* [out] send right to pass to the peer  */
 );
 
-/* Accetta un invito e si connette al channel (peer). */
+/* Accepts an invitation and connects to the channel (peer). */
 flipc2_return_t
 flipc2_channel_accept(
-    mach_port_t         invite_port,    /* send right ricevuto dal creator       */
-    flipc2_channel_t   *channel         /* [out] handle locale                   */
+    mach_port_t         invite_port,    /* send right received from the creator  */
+    flipc2_channel_t   *channel         /* [out] local handle                    */
 );
 
-/* Chiude il channel e rilascia le risorse. */
+/* Closes the channel and releases the resources. */
 flipc2_return_t
 flipc2_channel_destroy(
     flipc2_channel_t    channel
 );
 
-/* Mappa pagine del producer nel consumer per zero-copy data plane. */
+/* Maps pages of the producer into the consumer for the zero-copy data plane. */
 flipc2_return_t
 flipc2_channel_map_pages(
     flipc2_channel_t    channel,
-    vm_offset_t         source_addr,    /* indirizzo nel producer                */
-    vm_size_t           size,           /* dimensione mapping                    */
-    uint64_t           *region_id       /* [out] ID regione per i descriptor     */
+    vm_offset_t         source_addr,    /* address in the producer               */
+    vm_size_t           size,           /* mapping size                          */
+    uint64_t           *region_id       /* [out] region ID for the descriptors   */
 );
 ```
 
-### 5.2 Produce / Consume (fast path — user-space puro)
+### 5.2 Produce / Consume (fast path — pure user space)
 
 ```c
-/* Ottieni il prossimo slot libero nel ring (NULL se ring pieno). */
+/* Get the next free slot in the ring (NULL if the ring is full). */
 static inline struct flipc2_desc *
 flipc2_produce_reserve(flipc2_channel_t channel);
 
-/* Pubblica il descriptor: avanza prod_tail, sveglia consumer se necessario. */
+/* Publish the descriptor: advance prod_tail, wake the consumer if necessary. */
 static inline void
 flipc2_produce_commit(flipc2_channel_t channel);
 
-/* Pubblica N descriptor in batch. */
+/* Publish N descriptors in a batch. */
 static inline void
 flipc2_produce_commit_n(flipc2_channel_t channel, uint32_t n);
 
-/* Ottieni il prossimo descriptor disponibile (NULL se ring vuoto). */
+/* Get the next available descriptor (NULL if the ring is empty). */
 static inline struct flipc2_desc *
 flipc2_consume_peek(flipc2_channel_t channel);
 
-/* Rilascia il descriptor: avanza cons_head. */
+/* Release the descriptor: advance cons_head. */
 static inline void
 flipc2_consume_release(flipc2_channel_t channel);
 
-/* Rilascia N descriptor in batch. */
+/* Release N descriptors in a batch. */
 static inline void
 flipc2_consume_release_n(flipc2_channel_t channel, uint32_t n);
 
-/* Attendi un descriptor (spin + fallback semaforo). */
+/* Wait for a descriptor (spin + semaphore fallback). */
 static inline struct flipc2_desc *
 flipc2_consume_wait(flipc2_channel_t channel, uint32_t spin_count);
 
-/* Poll: quanti descriptor disponibili? */
+/* Poll: how many descriptors are available? */
 static inline uint32_t
 flipc2_available(flipc2_channel_t channel);
 ```
 
-Tutte le funzioni fast-path sono `static inline` in un header, compilate
-direttamente nel codice del server/driver.  Nessuna libreria da linkare
-nel fast path.
+All the fast-path functions are `static inline` in a header, compiled
+directly into the code of the server/driver.  No library to link
+in the fast path.
 
 ### 5.3 Data Region helpers
 
 ```c
-/* Alloca spazio nella data region inline. Restituisce offset o -1. */
+/* Allocates space in the inline data region. Returns an offset or -1. */
 static inline uint64_t
 flipc2_data_alloc(flipc2_channel_t channel, uint32_t size);
 
-/* Libera spazio nella data region inline. */
+/* Frees space in the inline data region. */
 static inline void
 flipc2_data_free(flipc2_channel_t channel, uint64_t offset, uint32_t size);
 
-/* Puntatore ai dati dato un offset. */
+/* Pointer to the data given an offset. */
 static inline void *
 flipc2_data_ptr(flipc2_channel_t channel, uint64_t offset);
 ```
 
-## 6. Protocollo fast-path (dettaglio)
+## 6. Fast-path protocol (detail)
 
 ### 6.1 Produce (sender)
 
 ```c
 struct flipc2_desc *d = flipc2_produce_reserve(ch);
-if (!d) { /* ring pieno — backpressure */ }
+if (!d) { /* ring full — backpressure */ }
 
 d->opcode = MY_OP;
 d->cookie = request_id;
@@ -299,7 +299,7 @@ WRITE_FENCE();
 flipc2_produce_commit(ch);
 ```
 
-`flipc2_produce_commit` incrementa `prod_tail`, poi:
+`flipc2_produce_commit` increments `prod_tail`, then:
 ```c
 WRITE_FENCE();
 if (hdr->cons_sleeping) {
@@ -313,7 +313,7 @@ if (hdr->cons_sleeping) {
 ```c
 struct flipc2_desc *d = flipc2_consume_wait(ch, SPIN_DEFAULT);
 
-/* processa il descriptor */
+/* process the descriptor */
 void *data = flipc2_data_ptr(ch, d->data_offset);
 handle_request(d->opcode, d->cookie, data, d->data_length);
 
@@ -321,16 +321,16 @@ flipc2_data_free(ch, d->data_offset, d->data_length);
 flipc2_consume_release(ch);
 ```
 
-`flipc2_consume_wait` implementa l'adaptive wakeup:
+`flipc2_consume_wait` implements the adaptive wakeup:
 ```c
 for (uint32_t i = 0; i < spin_count; i++) {
     if (prod_tail != cons_head) return &ring[cons_head & mask];
-    PAUSE();    /* hint al processore: spin-wait loop */
+    PAUSE();    /* hint to the processor: spin-wait loop */
 }
-/* spin esaurito — blocca */
+/* spin exhausted — block */
 hdr->cons_sleeping = 1;
 WRITE_FENCE();
-/* ricontrolla per evitare lost wakeup */
+/* re-check to avoid lost wakeup */
 if (prod_tail != cons_head) {
     hdr->cons_sleeping = 0;
     return &ring[cons_head & mask];
@@ -342,13 +342,13 @@ return &ring[cons_head & mask];
 
 ### 6.3 Batch produce/consume
 
-Per throughput massimo, si possono riservare/rilasciare N descriptor in
-blocco, con una singola fence e un singolo check wakeup.  Utile per
-command buffer GPU o batch di richieste I/O.
+For maximum throughput, N descriptors can be reserved/released in
+a block, with a single fence and a single wakeup check.  Useful for
+GPU command buffers or batches of I/O requests.
 
-## 7. Kernel support necessario
+## 7. Kernel support required
 
-Il kernel fornisce solo servizi di setup (slow path):
+The kernel provides only setup services (slow path):
 
 ### 7.1 System call / MIG RPC
 
@@ -356,90 +356,90 @@ Il kernel fornisce solo servizi di setup (slow path):
 flipc2_channel_create(task, size, ring_entries) → (memory_object, semaphore)
 ```
 
-Il kernel:
-1. Alloca `size` byte di memoria fisica contigua (wired)
-2. Crea un memory object mappabile in entrambi i task
-3. Crea un semaforo Mach
-4. Inizializza il channel header (magic, version, offsets)
-5. Restituisce memory object + semaphore send right
+The kernel:
+1. Allocates `size` bytes of contiguous physical memory (wired)
+2. Creates a memory object mappable into both tasks
+3. Creates a Mach semaphore
+4. Initializes the channel header (magic, version, offsets)
+5. Returns memory object + semaphore send right
 
 ```
 flipc2_channel_map_pages(task, source_va, size, dest_task) → region_id
 ```
 
-Il kernel:
-1. Valida che `source_va..source_va+size` sia valido nel source task
-2. Crea mapping read-only (o COW) nel dest task
-3. Restituisce un `region_id` per i descriptor
+The kernel:
+1. Validates that `source_va..source_va+size` is valid in the source task
+2. Creates a read-only (or COW) mapping in the dest task
+3. Returns a `region_id` for the descriptors
 
-### 7.2 Cosa il kernel NON fa
+### 7.2 What the kernel does NOT do
 
-- Non tocca i descriptor
-- Non fa routing di messaggi
-- Non ha un Message Engine
-- Non interviene nel data path dopo il setup
-- Non fa polling o processing di buffer
+- Does not touch the descriptors
+- Does not route messages
+- Has no Message Engine
+- Does not intervene in the data path after the setup
+- Does not poll or process buffers
 
-## 8. Sicurezza
+## 8. Security
 
-1. **Isolamento via mapping**: ogni channel è mappato solo nei due task
-   partecipanti.  Un task non può accedere a channel altrui.
+1. **Isolation via mapping**: every channel is mapped only into the two
+   participating tasks.  A task cannot access other tasks' channels.
 
-2. **Read-only data region per il consumer**: le pagine page-mapped sono
-   read-only nel consumer — il producer mantiene il write.
+2. **Read-only data region for the consumer**: the page-mapped pages are
+   read-only in the consumer — the producer keeps the write.
 
-3. **Validazione al setup**: il kernel verifica i parametri (size, allineamento,
-   permessi task) solo durante la creazione.  Dopo il setup, i task comunicano
-   direttamente — errori nel protocollo (es. offset fuori range) sono
-   responsabilità dei task.
+3. **Validation at setup**: the kernel checks the parameters (size, alignment,
+   task permissions) only during creation.  After the setup, the tasks communicate
+   directly — errors in the protocol (e.g. offset out of range) are
+   the tasks' responsibility.
 
-4. **Trust model**: FLIPC v2 è per task *trusted* (server di sistema).
-   Non ha l'isolamento a grana fine di Mach IPC (capabilities, port rights).
-   Un server compromesso può corrompere il channel.  Per client non trusted
-   si usa Mach IPC tradizionale.
+4. **Trust model**: FLIPC v2 is for *trusted* tasks (system servers).
+   It does not have the fine-grained isolation of Mach IPC (capabilities, port rights).
+   A compromised server can corrupt the channel.  For untrusted clients,
+   traditional Mach IPC is used.
 
-5. **Futuro con IOMMU (x86-64)**: su hardware con VT-d, il kernel potrà
-   proteggere anche le pagine DMA — il driver non potrà DMA fuori dalla
-   regione autorizzata.
+5. **Future with IOMMU (x86-64)**: on hardware with VT-d, the kernel will be able to
+   protect the DMA pages too — the driver will not be able to DMA outside the
+   authorized region.
 
-## 9. Confronto con FLIPC v1
+## 9. Comparison with FLIPC v1
 
-| Aspetto              | FLIPC v1                          | FLIPC v2                        |
+| Aspect               | FLIPC v1                          | FLIPC v2                        |
 |----------------------|-----------------------------------|---------------------------------|
-| Topologia            | Multi-nodo (NORMA/KKT)            | Punto-a-punto locale            |
-| Message Engine       | Nel kernel, fa il routing          | Nessuno — comunicazione diretta |
-| Buffer model         | Pool a dimensione fissa, 1MB fisso | Ring descriptor 64B + data region configurabile |
-| Data transfer        | Buffer ref nel ring                | Descriptor + page mapping zero-copy |
-| Dimensione channel   | 1MB fisso                          | 4KB – 16MB configurabile       |
-| Wakeup               | Semaforo (sempre kernel trap)      | Adaptive spin + semaforo        |
-| Endpoint model       | Send/Receive separati              | Bidirezionale (producer/consumer per ruolo) |
-| Kernel involvement   | Ogni messaggio (ME)                | Solo setup                      |
-| API                  | ~25 funzioni + macro               | ~12 funzioni inline             |
+| Topology             | Multi-node (NORMA/KKT)            | Local point-to-point            |
+| Message Engine       | In the kernel, does the routing    | None — direct communication     |
+| Buffer model         | Fixed-size pool, fixed 1MB         | Ring of 64B descriptors + configurable data region |
+| Data transfer        | Buffer ref in the ring             | Descriptor + zero-copy page mapping |
+| Channel size         | Fixed 1MB                          | Configurable 4KB – 16MB        |
+| Wakeup               | Semaphore (always a kernel trap)   | Adaptive spin + semaphore       |
+| Endpoint model       | Separate Send/Receive              | Bidirectional (producer/consumer by role)   |
+| Kernel involvement   | Every message (ME)                 | Setup only                      |
+| API                  | ~25 functions + macros             | ~12 inline functions            |
 
-## 10. Piano di implementazione
+## 10. Implementation plan
 
-### Fase 1 — Strutture dati e header
-- `flipc2.h`: header pubblico con struct, costanti, inline fast-path
-- `flipc2_types.h`: tipi e codici di ritorno
+### Phase 1 — Data structures and headers
+- `flipc2.h`: public header with structs, constants, fast-path inlines
+- `flipc2_types.h`: types and return codes
 
-### Fase 2 — Kernel support
-- Nuove MIG RPC in `device_master.defs` o nuovo `flipc2.defs`
-- Allocazione shared memory, creazione semaforo, mapping
+### Phase 2 — Kernel support
+- New MIG RPCs in `device_master.defs` or a new `flipc2.defs`
+- Shared memory allocation, semaphore creation, mapping
 
-### Fase 3 — Libreria userspace
+### Phase 3 — Userspace library
 - `libflipc2/`: channel_create, channel_accept, channel_destroy
-- Setup via Mach IPC, mapping shared memory
+- Setup via Mach IPC, shared memory mapping
 
-### Fase 4 — Test e benchmark
-- `flipc2_test` server: latenza singolo descriptor, throughput batch,
-  confronto con Mach IPC
-- Misurare: ns per descriptor, throughput MB/s con page mapping
+### Phase 4 — Tests and benchmarks
+- `flipc2_test` server: single-descriptor latency, batch throughput,
+  comparison with Mach IPC
+- Measure: ns per descriptor, MB/s throughput with page mapping
 
-### Fase 5 — Integrazione
-- ext2_server ↔ ahci_driver via FLIPC v2 (primo canale reale)
-- Benchmark I/O end-to-end con e senza FLIPC v2
+### Phase 5 — Integration
+- ext2_server ↔ ahci_driver via FLIPC v2 (first real channel)
+- End-to-end I/O benchmark with and without FLIPC v2
 
-### Fase 6 — Page mapping e zero-copy
+### Phase 6 — Page mapping and zero-copy
 - flipc2_channel_map_pages
-- Integrazione con il sistema VM per COW / read-only mapping
-- Benchmark con dati bulk (4KB, 64KB, 1MB)
+- Integration with the VM system for COW / read-only mapping
+- Benchmark with bulk data (4KB, 64KB, 1MB)
