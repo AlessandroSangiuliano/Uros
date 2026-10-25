@@ -1,38 +1,38 @@
-# Differenze tra va_list su architetture 32-bit e 64-bit
+# Differences between va_list on 32-bit and 64-bit architectures
 
-## Il Bug che Abbiamo Risolto
+## The Bug We Fixed
 
-Il crash in MIG era causato da un design che funzionava su 32-bit ma falliva su 64-bit.
-Questo documento spiega perché.
+The crash in MIG was caused by a design that worked on 32-bit but failed on 64-bit.
+This document explains why.
 
 ---
 
-## 1. va_list su Architetture 32-bit (i386)
+## 1. va_list on 32-bit Architectures (i386)
 
-### Implementazione Semplice
+### Simple Implementation
 
-Su i386, `va_list` è semplicemente un **puntatore**:
+On i386, `va_list` is simply a **pointer**:
 
 ```c
 typedef char* va_list;
 ```
 
-### Come Funziona
+### How It Works
 
-Gli argomenti variadici sono impilati sullo **stack** in ordine, uno dopo l'altro:
+The variadic arguments are pushed onto the **stack** in order, one after the other:
 
 ```
-Stack (cresce verso il basso):
+Stack (grows downward):
 +------------------+
-|   arg4 (int)     |  <- va_list punta qui dopo 3 va_arg
+|   arg4 (int)     |  <- va_list points here after 3 va_arg
 +------------------+
-|   arg3 (char*)   |  <- va_list punta qui dopo 2 va_arg
+|   arg3 (char*)   |  <- va_list points here after 2 va_arg
 +------------------+
-|   arg2 (int)     |  <- va_list punta qui dopo 1 va_arg
+|   arg2 (int)     |  <- va_list points here after 1 va_arg
 +------------------+
-|   arg1 (char*)   |  <- va_list iniziale
+|   arg1 (char*)   |  <- initial va_list
 +------------------+
-|   right          |  <- ultimo parametro fisso
+|   right          |  <- last fixed parameter
 +------------------+
 |   left           |
 +------------------+
@@ -44,75 +44,75 @@ Stack (cresce verso il basso):
 +------------------+
 ```
 
-### Passaggio per Valore
+### Passing by Value
 
-Quando passi `va_list` a una funzione:
+When you pass `va_list` to a function:
 
 ```c
 void SkipVFPrintf(FILE *file, char *fmt, va_list pvar) {
-    (void) va_arg(pvar, char*);  // Consuma un argomento
+    (void) va_arg(pvar, char*);  // Consumes one argument
 }
 
 void vWriteCopyType(FILE *file, ipc_type_t *it, char *left, char *right, va_list pvar) {
-    SkipVFPrintf(file, left, pvar);   // pvar viene COPIATO
-    SkipVFPrintf(file, right, pvar);  // pvar è ancora al punto originale!
+    SkipVFPrintf(file, left, pvar);   // pvar is COPIED
+    SkipVFPrintf(file, right, pvar);  // pvar is still at the original point!
 }
 ```
 
-**Su 32-bit**: `va_list` è un puntatore. Passarlo per valore copia il puntatore.
-Entrambe le chiamate vedono lo stesso indirizzo di partenza, ma le modifiche
-fatte da `va_arg` in `SkipVFPrintf` NON si propagano al chiamante.
+**On 32-bit**: `va_list` is a pointer. Passing it by value copies the pointer.
+Both calls see the same starting address, but the changes
+made by `va_arg` in `SkipVFPrintf` are NOT propagated to the caller.
 
-**TUTTAVIA**: Su molti compilatori 32-bit dell'epoca (anni '80-'90), questo
-"funzionava per caso" perché:
-1. Il puntatore veniva modificato in-place in alcuni casi
-2. I garbage values letti erano spesso innocui (0 o indirizzi mappati)
-3. Il codice originale MIG era testato solo su VAX, m68k, e early i386
+**HOWEVER**: On many 32-bit compilers of the time ('80s-'90s), this
+"worked by accident" because:
+1. The pointer was modified in-place in some cases
+2. The garbage values read were often harmless (0 or mapped addresses)
+3. The original MIG code was tested only on VAX, m68k, and early i386
 
 ---
 
-## 2. va_list su Architetture 64-bit (x86_64)
+## 2. va_list on 64-bit Architectures (x86_64)
 
-### Implementazione Complessa
+### Complex Implementation
 
-Su x86_64, `va_list` è un **array di strutture**:
+On x86_64, `va_list` is an **array of structures**:
 
 ```c
 typedef struct {
-    unsigned int gp_offset;     // Offset nel register save area (GP regs)
-    unsigned int fp_offset;     // Offset nel register save area (FP regs)
-    void *overflow_arg_area;    // Puntatore agli args sullo stack
-    void *reg_save_area;        // Puntatore all'area di salvataggio registri
+    unsigned int gp_offset;     // Offset in the register save area (GP regs)
+    unsigned int fp_offset;     // Offset in the register save area (FP regs)
+    void *overflow_arg_area;    // Pointer to the args on the stack
+    void *reg_save_area;        // Pointer to the register save area
 } va_list[1];
 ```
 
-### Perché Così Complesso?
+### Why So Complex?
 
-L'ABI x86_64 (System V AMD64) passa i primi 6 argomenti interi in **registri**:
+The x86_64 ABI (System V AMD64) passes the first 6 integer arguments in **registers**:
 - `%rdi`, `%rsi`, `%rdx`, `%rcx`, `%r8`, `%r9`
 
-E i primi 8 argomenti floating-point in:
+And the first 8 floating-point arguments in:
 - `%xmm0` - `%xmm7`
 
-Solo gli argomenti successivi vanno sullo stack!
+Only the following arguments go on the stack!
 
 ```
-Chiamata: func(file, it, left, right, arg1, arg2, arg3, arg4, arg5, arg6, ...)
+Call: func(file, it, left, right, arg1, arg2, arg3, arg4, arg5, arg6, ...)
                 ^     ^    ^     ^     ^     ^     ^     ^     ^     ^
                rdi   rsi  rdx   rcx   r8    r9   STACK STACK STACK STACK
 
-Per varargs dopo 'right' (4° parametro):
-- arg1 (5°) -> %r8
-- arg2 (6°) -> %r9  
-- arg3 (7°) -> STACK
-- arg4 (8°) -> STACK
+For varargs after 'right' (4th parameter):
+- arg1 (5th) -> %r8
+- arg2 (6th) -> %r9  
+- arg3 (7th) -> STACK
+- arg4 (8th) -> STACK
 - ...
 ```
 
-### Il Register Save Area
+### The Register Save Area
 
-Quando una funzione variadica viene chiamata, il prologo salva TUTTI i registri
-potenzialmente contenenti argomenti in un'area di memoria:
+When a variadic function is called, the prologue saves ALL the registers
+that may contain arguments into an area of memory:
 
 ```
 Register Save Area (176 bytes):
@@ -127,14 +127,14 @@ Register Save Area (176 bytes):
 +------------------+ offset 32
 |      %r8         |
 +------------------+ offset 40
-|      %r9         |  <- gp_offset inizia da qui o dopo
+|      %r9         |  <- gp_offset starts here or later
 +------------------+ offset 48
 |     %xmm0        |
 +------------------+ ...
 |     %xmm7        |
 +------------------+ offset 176
 
-Stack overflow area (argomenti oltre i registri):
+Stack overflow area (arguments beyond the registers):
 +------------------+
 |      arg7        |  <- overflow_arg_area
 +------------------+
@@ -143,20 +143,20 @@ Stack overflow area (argomenti oltre i registri):
 |       ...        |
 ```
 
-### Come va_arg Funziona su x86_64
+### How va_arg Works on x86_64
 
 ```c
-// Pseudo-codice per va_arg(ap, type)
-if (type è integer && ap->gp_offset < 48) {
-    // Prendi dal register save area
+// Pseudo-code for va_arg(ap, type)
+if (type is integer && ap->gp_offset < 48) {
+    // Take from the register save area
     result = *(type*)(ap->reg_save_area + ap->gp_offset);
     ap->gp_offset += 8;
-} else if (type è floating && ap->fp_offset < 176) {
-    // Prendi dai registri XMM salvati
+} else if (type is floating && ap->fp_offset < 176) {
+    // Take from the saved XMM registers
     result = *(type*)(ap->reg_save_area + ap->fp_offset);
     ap->fp_offset += 16;
 } else {
-    // Prendi dallo stack overflow area
+    // Take from the stack overflow area
     result = *(type*)(ap->overflow_arg_area);
     ap->overflow_arg_area += sizeof(type);
 }
@@ -164,49 +164,49 @@ if (type è integer && ap->gp_offset < 48) {
 
 ---
 
-## 3. Il Problema del Passaggio per Valore
+## 3. The Pass-by-Value Problem
 
-### Su x86_64, va_list è un Array
+### On x86_64, va_list Is an Array
 
-In C, quando dichiari:
+In C, when you declare:
 ```c
 void func(va_list pvar);
 ```
 
-E `va_list` è `struct __va_list_tag[1]`, allora:
-- `pvar` è di tipo `struct __va_list_tag*` (decay da array a puntatore)
-- Passare `pvar` passa il **puntatore alla struttura**
-- Le modifiche a `*pvar` SONO visibili al chiamante!
+And `va_list` is `struct __va_list_tag[1]`, then:
+- `pvar` is of type `struct __va_list_tag*` (decay from array to pointer)
+- Passing `pvar` passes the **pointer to the structure**
+- The changes to `*pvar` ARE visible to the caller!
 
-### Ma il Problema è Diverso
+### But the Problem Is Different
 
-Il problema nel nostro codice MIG era:
+The problem in our MIG code was:
 
 ```c
 void vWriteCopyType(..., va_list pvar) {
-    SkipVFPrintf(file, left, pvar);   // Stampa e consuma args per 'left'
-    SkipVFPrintf(file, right, pvar);  // Dovrebbe continuare da dove left ha finito
+    SkipVFPrintf(file, left, pvar);   // Prints and consumes args for 'left'
+    SkipVFPrintf(file, right, pvar);  // Should continue from where left finished
 }
 ```
 
-Su x86_64, le modifiche a `pvar` in `SkipVFPrintf` SONO visibili. Ma il problema
-era che **vfprintf()** consuma la va_list internamente, e dopo vfprintf la va_list
-è in uno stato indeterminato!
+On x86_64, the changes to `pvar` in `SkipVFPrintf` ARE visible. But the problem
+was that **vfprintf()** consumes the va_list internally, and after vfprintf the va_list
+is in an indeterminate state!
 
-### Il Vero Bug
+### The Real Bug
 
 ```c
 static void SkipVFPrintf(FILE *file, char *fmt, va_list pvar) {
     // ... skip comment portion, consuming some args ...
     
-    (void) vfprintf(file, fmt, pvar);  // <-- QUESTO È IL PROBLEMA!
+    (void) vfprintf(file, fmt, pvar);  // <-- THIS IS THE PROBLEM!
     
-    // Dopo vfprintf, 'pvar' è in stato indeterminato secondo lo standard C.
-    // Non possiamo assumere che punti agli argomenti successivi.
+    // After vfprintf, 'pvar' is in an indeterminate state according to the C standard.
+    // We cannot assume that it points to the following arguments.
 }
 ```
 
-**Lo standard C99 dice**:
+**The C99 standard says**:
 > "The object `ap` may be passed as an argument to another function; if that
 > function invokes the `va_arg` macro with parameter `ap`, the value of `ap`
 > in the calling function is indeterminate and shall be passed to the
@@ -214,9 +214,9 @@ static void SkipVFPrintf(FILE *file, char *fmt, va_list pvar) {
 
 ---
 
-## 4. La Soluzione
+## 4. The Solution
 
-### Approccio 1: va_copy (C99+)
+### Approach 1: va_copy (C99+)
 
 ```c
 static void SkipVFPrintf(FILE *file, char *fmt, va_list pvar) {
@@ -228,21 +228,21 @@ static void SkipVFPrintf(FILE *file, char *fmt, va_list pvar) {
     vfprintf(file, fmt, copy);
     va_end(copy);
     
-    // 'pvar' non è stato toccato, ma non abbiamo avanzato il chiamante
+    // 'pvar' has not been touched, but we have not advanced the caller
 }
 ```
 
-Questo non risolve il problema di avanzare la va_list del chiamante.
+This does not solve the problem of advancing the caller's va_list.
 
-### Approccio 2: Pre-formattare le Stringhe (LA NOSTRA SOLUZIONE)
+### Approach 2: Pre-format the Strings (OUR SOLUTION)
 
 ```c
-// Invece di:
+// Instead of:
 WriteCopyType(file, argType,
               "%s%s", "/* %s%s */ %s->%s",
               ref, argVarName, who, msgField);
 
-// Usiamo:
+// We use:
 char left[256], right[256];
 snprintf(left, sizeof(left), "%s%s", ref, argVarName);
 snprintf(right, sizeof(right), "/* %s%s */ %s->%s", 
@@ -250,47 +250,47 @@ snprintf(right, sizeof(right), "/* %s%s */ %s->%s",
 WriteCopyTypeSimple(file, argType, left, right);
 ```
 
-**Vantaggi**:
-- Nessuna propagazione di varargs
-- Nessun rischio di undefined behavior
-- Codice più chiaro e debuggabile
-- Funziona identicamente su tutte le architetture
+**Advantages**:
+- No propagation of varargs
+- No risk of undefined behavior
+- Clearer, more debuggable code
+- Works identically on all architectures
 
 ---
 
-## 5. Tabella Riassuntiva
+## 5. Summary Table
 
-| Aspetto | 32-bit (i386) | 64-bit (x86_64) |
+| Aspect | 32-bit (i386) | 64-bit (x86_64) |
 |---------|---------------|-----------------|
-| Tipo di va_list | `char*` | `struct[1]` (24 bytes) |
-| Passaggio args | Tutti su stack | Primi 6 int in registri |
-| Dimensione puntatore | 4 bytes | 8 bytes |
-| va_arg implementazione | Semplice incremento | Logica complessa |
-| Passaggio va_list | Copia del puntatore | Puntatore a struct |
-| Modifiche visibili al caller | Dipende dal compilatore | Sì (array decay) |
+| va_list type | `char*` | `struct[1]` (24 bytes) |
+| Args passing | All on the stack | First 6 ints in registers |
+| Pointer size | 4 bytes | 8 bytes |
+| va_arg implementation | Simple increment | Complex logic |
+| va_list passing | Copy of the pointer | Pointer to struct |
+| Changes visible to the caller | Depends on the compiler | Yes (array decay) |
 
 ---
 
-## 6. Lezioni Apprese
+## 6. Lessons Learned
 
-1. **Mai assumere che va_list funzioni dopo vfprintf()** - lo standard dice che è indeterminato
+1. **Never assume that va_list works after vfprintf()** - the standard says it is indeterminate
 
-2. **Il codice legacy 32-bit può nascondere bug** - funzionava "per caso" su architetture più semplici
+2. **Legacy 32-bit code can hide bugs** - it worked "by accident" on simpler architectures
 
-3. **Pre-formattare è più sicuro** - evita completamente il problema della propagazione varargs
+3. **Pre-formatting is safer** - it completely avoids the varargs propagation problem
 
-4. **Usare va_copy quando necessario** - se devi passare va_list a più funzioni che la consumano
+4. **Use va_copy when necessary** - if you have to pass va_list to several functions that consume it
 
-5. **Testare su più architetture** - un bug può manifestarsi solo su 64-bit o solo con certi compilatori
+5. **Test on multiple architectures** - a bug may show up only on 64-bit or only with certain compilers
 
 ---
 
-## 7. Riferimenti
+## 7. References
 
-- [System V AMD64 ABI](https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf) - Sezione 3.5.7 "Variable Argument Lists"
-- [C99 Standard](http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf) - Sezione 7.15 "<stdarg.h>"
+- [System V AMD64 ABI](https://refspecs.linuxbase.org/elf/x86_64-abi-0.99.pdf) - Section 3.5.7 "Variable Argument Lists"
+- [C99 Standard](http://www.open-std.org/jtc1/sc22/wg14/www/docs/n1256.pdf) - Section 7.15 "<stdarg.h>"
 - [GCC va_list implementation](https://gcc.gnu.org/onlinedocs/gccint/Varargs.html)
 
 ---
 
-*Documento creato durante il porting di OSF/Mach MIG da 32-bit a 64-bit, Febbraio 2026*
+*Document created during the porting of OSF/Mach MIG from 32-bit to 64-bit, February 2026*
