@@ -1,50 +1,50 @@
-# Uros SMP IPC/FLIPC2 scaling benchmark — 1→12 CPU (mediana N=3)
+# Uros SMP IPC/FLIPC2 scaling benchmark — 1→12 CPU (median N=3)
 
 **Host**: pavillion — AMD Ryzen 5 4600H (6 core / 12 thread SMT), KVM, QEMU 11.0, GCC 16.1.1.
 **Kernel**: branch `feature/302-tsc-bringup-delay` (TSC bring-up delay + SHA-NI stack-align fix).
-**Data**: 2026-06-20. `./scripts/run-qemu.sh --bench --ahci -nographic -serial mon:stdio --smp N`, 3 run per N, **mediana**.
-**Unità**: µs/op salvo dove indicato `(ns)`; `(ns/RPC)` per concurrent. Lower = faster.
+**Date**: 2026-06-20. `./scripts/run-qemu.sh --bench --ahci -nographic -serial mon:stdio --smp N`, 3 runs per N, **median**.
+**Units**: µs/op except where `(ns)` is indicated; `(ns/RPC)` for concurrent. Lower = faster.
 
-> 🔴 **QUESTA COLONNA i386 HA DUE ERE, E QUELLA SOTTO È LA PRIMA (#560).**
+> 🔴 **THIS i386 COLUMN HAS TWO ERAS, AND THE ONE BELOW IS THE FIRST (#560).**
 >
-> Ogni numero i386 di questo documento è stato preso **prima** che lo switch
-> portasse lo stato della FPU. Fino a quel commit il ripristino era *lazy*:
-> `CR0.TS` armato allo switch e lo stato ricaricato dal `#NM` alla prima
-> istruzione in virgola mobile del thread nuovo — che è il pattern di
-> **CVE-2018-3665**, e che rendeva i386 veloce qui *perché non era sicuro*.
+> Every i386 number in this document was taken **before** the switch
+> carried the state of the FPU. Until that commit the restore was *lazy*:
+> `CR0.TS` armed at the switch and the state reloaded by `#NM` at the first
+> floating-point instruction of the new thread — which is the pattern of
+> **CVE-2018-3665**, and which made i386 fast here *because it was not safe*.
 >
-> Reso eager, misurato oggi (18/09/2026) sulla stessa macchina, KVM, 6 boot per
-> braccio **alternati**, clock campionato a 3993 MHz su entrambi:
+> Made eager, measured today (18/09/2026) on the same machine, KVM, 6 boots per
+> arm **alternated**, clock sampled at 3993 MHz on both:
 >
-> | riga | prima (questo documento) | dopo | costo |
+> | row | before (this document) | after | cost |
 > |---|--:|--:|--:|
 > | `smp1` futex WAKE_WAIT ping-pong | 0.678 | 0.852 | **+174 ns** |
 > | `smp1` semaphore ping-pong | 2.625 | 2.790 | **+165 ns** |
 > | `smp4` futex WAKE_WAIT ping-pong | 0.778 | 0.917 | **+139 ns** |
 > | `smp4` semaphore ping-pong | 2.150 | 2.365 | **+215 ns** |
 >
-> 🔑 È **lo stesso numero quattro volte**: il costo è *per switch*, e un round
-> trip sono due switch in ogni riga, quindi cade come la stessa cifra assoluta
-> per quanto lenta sia la riga. Ecco perché il futex segna +26% e il semaforo
-> +6% per la stessa cosa.
+> 🔑 It is **the same number four times**: the cost is *per switch*, and a round
+> trip is two switches in every row, so it comes out as the same absolute figure
+> however slow the row is. That is why the futex shows +26% and the semaphore
+> +6% for the same thing.
 >
-> ⇒ **Un confronto x86-64-contro-i386 che usa le righe qui sotto sottostima
-> i386 di ~170 ns a round trip.** Le righe restano come sono perché sono vere
-> di quello che erano, non perché siano ancora la baseline.
+> ⇒ **An x86-64-against-i386 comparison that uses the rows below underestimates
+> i386 by ~170 ns per round trip.** The rows stay as they are because they are true
+> of what they were, not because they are still the baseline.
 >
-> ⚠️ E i numeri i386 qui sotto sono del **20/06**: la mediana di 3 run
-> consecutivi non tiene ferma la macchina (il build scalda il package e il
-> boost torna solo quando si raffredda), quindi una ripresa va fatta a bracci
-> **alternati** e col clock campionato durante ogni boot.
+> ⚠️ And the i386 numbers below are from **20/06**: the median of 3 runs
+> in a row does not hold the machine still (the build heats the package and the
+> boost comes back only when it cools down), so a retake has to be done with
+> **alternated** arms and with the clock sampled during every boot.
 
-> **Note**
-> - Mediana di 3 run (toglie gli outlier del single-run). Sopra i 6 vCPU = oversubscription (host 6c/12t).
-> - L'outlier `Intra-task null RPC` ~15µs a smp1/2 è un warmup costante del primo sample di quella suite (resta anche in mediana).
-> - Sotto KVM il win lock-free di #331 NON è visibile (no cache-coherence reale → vedi #332 bare-metal).
+> **Notes**
+> - Median of 3 runs (removes single-run outliers). Above 6 vCPUs = oversubscription (host 6c/12t).
+> - The `Intra-task null RPC` outlier of ~15µs at smp1/2 is a constant warmup of the first sample of that suite (it stays in the median too).
+> - Under KVM the lock-free win of #331 is NOT visible (no real cache coherence → see #332 bare-metal).
 
-## IPC — tutte le misurazioni
+## IPC — all the measurements
 
-| Sezione | Metrica | smp1 | smp2 | smp4 | smp6 | smp12 |
+| Section | Metric | smp1 | smp2 | smp4 | smp6 | smp12 |
 |---|---|--:|--:|--:|--:|--:|
 | Raw syscall | mach_null (noop trap) | 0.11 | 0.13 | 0.14 | 0.15 | 0.17 |
 | | mach_print("") trap | 0.13 | 0.64 | 4.73 | 9.14 | 10.91 |
@@ -105,16 +105,16 @@
 | | write+sync (durable) | 671.99 | 762.84 | 640.52 | 818.57 | 4227.19 |
 | | write+sync (2 open,1 dirty) | 427.35 | 553.98 | 368.47 | 469.63 | 1279.66 |
 
-## FLIPC v2 — tutte le misurazioni
+## FLIPC v2 — all the measurements
 
-| Sezione | Metrica | smp1 | smp2 | smp4 | smp6 | smp12 |
+| Section | Metric | smp1 | smp2 | smp4 | smp6 | smp12 |
 |---|---|--:|--:|--:|--:|--:|
 | futex vs sem | futex WAKE_WAIT ping-pong | 0.43 | 1.23 | 1.48 | 2.20 | 6.67 |
 | | semaphore ping-pong | 2.67 | 3.37 | 4.23 | 5.84 | 9.53 |
 | Throughput no-kernel | null desc batch=1 (ns) | 29 | 34 | 34 | 36 | 40 |
 | | null desc batch=16 (ns) | 5 | 6 | 6 | 6 | 9 |
 | | null desc batch=64 (ns) | 4 | 5 | 5 | 5 | 8 |
-| Throughput con dati | 128B prod+cons (ns) | 32 | 38 | 39 | 40 | 42 |
+| Throughput with data | 128B prod+cons (ns) | 32 | 38 | 39 | 40 | 42 |
 | | 1024B prod+cons (ns) | 46 | 50 | 52 | 55 | 68 |
 | | 4096B prod+cons (ns) | 94 | 110 | 110 | 115 | 520 |
 | Intra RPC (semaphore) | null | 1.55 | 1.76 | 2.67 | 4.35 | 6.50 |
@@ -146,79 +146,79 @@
 | | 256B (bufgroup) | 1.54 | 2.34 | 3.04 | 4.62 | 5.94 |
 | | 256B (bufgroup inter) | 2.49 | 3.21 | 4.02 | 1.51 | 1.88 |
 
-## Lettura
+## Reading
 
-- **Più CPU = più lento per-op**, monotòno su quasi tutto (oversubscription host >6 vCPU + contesa stato condiviso kernel).
-- **Peggiore in assoluto: OOL PHYSICAL_COPY intra** (4KB 3.92→68.95µs, ~18×) → segnale per **#338** (split page-table locks, pmap writers).
-- `mach_port_names()` ~14× e `concurrent same-space` degradano: path già reso lock-free da **#331**, ma KVM non mostra il win → **#332** (bare-metal).
-- **FLIPC2 throughput user-space (no kernel) quasi piatto** (4→8 ns) + **futex hand-off** che scala meglio dei path kernel-mediati → prova empirica della direzione **AMP/multikernel** (meno stato condiviso = scala meglio).
-- Misura di scaling pulita (no oversubscription) = **OMEGA (i9 32-core)**.
+- **More CPUs = slower per-op**, monotonic on almost everything (host oversubscription >6 vCPU + contention on shared kernel state).
+- **Worst of all: OOL PHYSICAL_COPY intra** (4KB 3.92→68.95µs, ~18×) → signal for **#338** (split page-table locks, pmap writers).
+- `mach_port_names()` ~14× and `concurrent same-space` degrade: a path already made lock-free by **#331**, but KVM does not show the win → **#332** (bare-metal).
+- **FLIPC2 user-space throughput (no kernel) almost flat** (4→8 ns) + **futex hand-off** that scales better than the kernel-mediated paths → empirical proof of the **AMP/multikernel** direction (less shared state = scales better).
+- Clean scaling measurement (no oversubscription) = **OMEGA (i9 32-core)**.
 
 
 ---
 
-# 2026-09-13 — x86-64, smp1: l'early-out di `spl_replay()` (#454, trovato da #392)
+# 2026-09-13 — x86-64, smp1: the early-out of `spl_replay()` (#454, found by #392)
 
-**Host**: pavillion — **la stessa macchina della tabella sopra**, AMD Ryzen 5 4600H (6 core / 12 thread), KVM, QEMU 11.0.
-**Kernel**: ramo `feature/454-spl-replay-early-out` = epic `v0.3.0-x86-64` + una guardia in `spl_replay()`.
-**Data**: 2026-09-13. `~/uros-tests/431-mediana.sh x64 3 1` — 3 boot per braccio, **mediana**, **entrambe le braccia nella stessa sessione**.
-**Condizione**: governor `performance` + `boost=1`, verificato **prima e dopo** ogni campagna; frequenza campionata durante (412 e 408 campioni). A batteria.
-**Bundle**: **bench DA SOLO** (`bootstrap.conf` = `name_server` + `ipc_bench`), come le baseline di giugno.
-**Unità**: µs/op. Lower = faster.
+**Host**: pavillion — **the same machine as the table above**, AMD Ryzen 5 4600H (6 core / 12 thread), KVM, QEMU 11.0.
+**Kernel**: branch `feature/454-spl-replay-early-out` = epic `v0.3.0-x86-64` + a guard in `spl_replay()`.
+**Date**: 2026-09-13. `~/uros-tests/431-mediana.sh x64 3 1` — 3 boots per arm, **median**, **both arms in the same session**.
+**Condition**: governor `performance` + `boost=1`, verified **before and after** each campaign; frequency sampled during (412 and 408 samples). On battery.
+**Bundle**: **bench ALONE** (`bootstrap.conf` = `name_server` + `ipc_bench`), like the June baselines.
+**Unit**: µs/op. Lower = faster.
 
-🔴 **LE TABELLE DELLE FASI SONO IN TICK DEL TSC, e i µs sono la colonna
-derivata.** Il resto del documento e' in µs/op, che e' quel che stampa il bench;
-la scomposizione per fase la prende `rdtsc`, e l'unita' naturale di quelle righe
-sono i tick — e' li' che si vede la risoluzione e li' che e' espresso il costo
-dichiarato dello strumento.
+🔴 **THE PHASE TABLES ARE IN TSC TICKS, and the µs are the derived
+column.** The rest of the document is in µs/op, which is what the bench prints;
+the per-phase breakdown is taken by `rdtsc`, and the natural unit of those rows
+is the tick — that is where the resolution shows and where the declared cost
+of the instrument is expressed.
 
-🔴🔴 **E IL DIVISORE NON E' LA FREQUENZA DEL CORE.** La prima stesura di queste
-tabelle divideva per i **3993 MHz** campionati durante la corsa, che e' la
-frequenza a cui girava il *core*. Sbagliato del 33%: il TSC non segue il core, e
-questo kernel lo misura da se' a ogni boot contro l'8254 —
+🔴🔴 **AND THE DIVISOR IS NOT THE CORE'S FREQUENCY.** The first draft of these
+tables divided by the **3993 MHz** sampled during the run, which is the
+frequency the *core* ran at. Wrong by 33%: the TSC does not follow the core, and
+this kernel measures it by itself at every boot against the 8254 —
 
     UrMach x86-64: timestamp counter measured against the 8254 at 2999 and 2998 MHz
 
-cioe' la frequenza **base** del 4600H, non il boost. ⇒ `µs = tick / 2999`.
+that is, the **base** frequency of the 4600H, not the boost. ⇒ `µs = tick / 2999`.
 
-🔑 La prova che il TSC non segue il core l'avevamo gia' lo stesso giorno: quando
-il portatile e' passato al profilo batteria e il core e' sceso a 1,4 GHz, i
-conteggi sono **SALITI** di 2,93× a parita' di lavoro. Se il TSC seguisse il core
-sarebbero rimasti uguali.
+🔑 We already had the proof that the TSC does not follow the core the same day:
+when the laptop went to the battery profile and the core dropped to 1.4 GHz, the
+counts went **UP** by 2.93× for the same work. If the TSC followed the core
+they would have stayed the same.
 
-❌ **E il controllo incrociato di cui ero contento passava per il motivo
-sbagliato.** Col divisore errato il trap intero usciva 1,19 µs contro gli 1,35
-µs/op del bench e sembrava un bell'accordo. Col divisore giusto e' **1,59 µs**
-contro 1,35 — e ha piu' senso, perche' il trap e' misurato **con** lo strumento
-dentro (21 mark) e la riga del bench senza. Un accordo che torna per caso e' piu'
-pericoloso di un disaccordo.
+❌ **And the cross-check I was pleased with passed for the wrong
+reason.** With the wrong divisor the whole trap came out at 1.19 µs against the 1.35
+µs/op of the bench and it looked like a nice agreement. With the right divisor it is **1.59 µs**
+against 1.35 — and that makes more sense, because the trap is measured **with** the instrument
+inside (21 marks) and the bench row without. An agreement that comes out right by chance is more
+dangerous than a disagreement.
 
-⚠️ **Il quanto e' 30 tick = 0,010 µs**: ogni cifra e' un suo multiplo, e una riga
-che legge 60 tick e' *due quanti*, cioe' al pavimento della risoluzione — «troppo
-poco per essere misurato qui», non «misurato a 60».
+⚠️ **The grain is 30 ticks = 0.010 µs**: every figure is a multiple of it, and a row
+that reads 60 ticks is *two grains*, that is, at the floor of the resolution — "too
+little to be measured here", not "measured at 60".
 
-## I controlli, prima dei risultati
+## The checks, before the results
 
-Le righe che **non** bloccano e non abbassano il livello di interrupt non si
-muovono. Se si fossero mosse, la misura sarebbe stata di qualcos'altro.
+The rows that do **not** block and do not lower the interrupt level do not
+move. Had they moved, the measurement would have been of something else.
 
-| controllo | prima | dopo |
+| check | before | after |
 |---|--:|--:|
-| `mach_null` (trap nudo) | 0.03 | 0.03 |
+| `mach_null` (bare trap) | 0.03 | 0.03 |
 | `mach_print("")` | 0.05 | 0.05 |
 | `port alloc + destroy` | 0.36 | 0.36 |
 | FLIPC2 throughput no-kernel (batch=1) | 0.03 | 0.03 |
 | FLIPC2 128B produce+consume | 0.03 | 0.03 |
 
-E il controllo di correttezza, che non e' «le suite sono verdi»: l'autotest dei
-differiti del #522 e' l'unico che esercita il replay **con bit pendenti**, ed e'
-verde a `-smp 4` — *«lowering replayed 10 of the 10 owed, handler ran 10 more
-times»*, tick `99 99 99 99`. Senza quella riga, tutto il resto verde sarebbe
-stato compatibile con «il replay non avviene piu'».
+And the correctness check, which is not "the suites are green": the self-test of the
+deferred interrupts of #522 is the only one that exercises the replay **with pending bits**, and it is
+green at `-smp 4` — *"lowering replayed 10 of the 10 owed, handler ran 10 more
+times"*, ticks `99 99 99 99`. Without that line, everything else being green would
+have been compatible with "the replay no longer happens".
 
-## Tutte le misurazioni
+## All the measurements
 
-| Sezione | Metrica | prima | dopo | Δ |
+| Section | Metric | before | after | Δ |
 |---|---|--:|--:|--:|
 | #324 futex vs Mach semaphore ping-pong (block+wake round-trip) | futex WAKE_WAIT ping-pong | 1.34 | 0.58 | -57% |
 |  | semaphore ping-pong | 4.87 | 1.95 | -60% |
@@ -233,7 +233,7 @@ stato compatibile con «il replay non avviene piu'».
 |  | endpoint create+destroy | 13.62 | 12.40 | -9% |
 |  | null RPC (endpoint) | 2.81 | 1.98 | -30% |
 | FLIPC2 game simulation (intra-task throughput) | audio 4KB PCM frame | 0.10 | 0.10 | +0% |
-|  | per draw command | 0.00 | 0.00 | sotto risoluzione |
+|  | per draw command | 0.00 | 0.00 | below resolution |
 |  | texture 16KB chunk | 0.29 | 0.29 | +0% |
 | FLIPC2 inter-task BATCH (vm_remap, amortized) | batch=1 (inter) | 2.82 | 1.87 | -34% |
 |  | batch=16 (inter) | 0.22 | 0.14 | -36% |
@@ -255,8 +255,8 @@ stato compatibile con «il replay non avviene piu'».
 |  | null RPC (isolated inter) | 2.83 | 1.89 | -33% |
 |  | null RPC (isolated intra) | 1.83 | 0.89 | -51% |
 | FLIPC2 throughput (single-thread, no kernel) | null desc (batch=1) | 0.03 | 0.03 | +0% |
-|  | null desc (batch=16) | 0.00 | 0.00 | sotto risoluzione |
-|  | null desc (batch=64) | 0.00 | 0.00 | sotto risoluzione |
+|  | null desc (batch=16) | 0.00 | 0.00 | below resolution |
+|  | null desc (batch=64) | 0.00 | 0.00 | below resolution |
 | FLIPC2 throughput with data | 1024B produce+consume | 0.04 | 0.04 | +0% |
 |  | 128B produce+consume | 0.03 | 0.03 | +0% |
 |  | 4096B produce+consume | 0.10 | 0.09 | -10% |
@@ -300,140 +300,140 @@ stato compatibile con «il replay non avviene piu'».
 |  | 4096B inline RPC (receiver blocked) | 3.55 | 1.50 | -58% |
 |  | null RPC (receiver blocked) | 3.34 | 1.44 | -57% |
 
-⚠️ `mach_port_names()` +5% e `mach_port_type` +11% sono le due righe che salgono:
-nessuna delle due blocca, entrambe sono dentro il rumore fra boot di questa
-suite, e nessuna ha una spiegazione misurata. Restano scritte cosi' invece di
-essere arrotondate a zero.
+⚠️ `mach_port_names()` +5% and `mach_port_type` +11% are the two rows that go up:
+neither of the two blocks, both are within the noise between boots of this
+suite, and neither has a measured explanation. They stay written like this instead of
+being rounded to zero.
 
-## Concurrent same-space (#327) — etichette a parte
+## Concurrent same-space (#327) — labels separately
 
-Il bench stampa il tempo grezzo dentro l'etichetta, quindi ogni boot ha una
-riga diversa e l'estrattore non le appaia. Mediane sui tre boot, calcolate a
-mano dai log:
+The bench prints the raw time inside the label, so every boot has a different
+row and the extractor does not pair them up. Medians over the three boots, computed
+by hand from the logs:
 
-| | prima | dopo | Δ |
+| | before | after | Δ |
 |---|--:|--:|--:|
 | x1, 10000 RPC | 33.53 ms | 14.18 ms | −58% |
 | x2, 20000 RPC | 68.50 ms | 27.50 ms | −60% |
 | x4, 40000 RPC | 136.49 ms | 55.12 ms | −60% |
 
-## Contro la baseline i386 del 20/06 (la tabella in cima a questo file)
+## Against the i386 baseline of 20/06 (the table at the top of this file)
 
-Stessa macchina, stesso acceleratore, stesso bundle, stessa metodologia
-(mediana di 3). Le quattro righe su cui stamattina x86-64 perdeva:
+Same machine, same accelerator, same bundle, same methodology
+(median of 3). The four rows on which x86-64 was losing this morning:
 
-| riga | i386 20/06 | x86-64 prima | x86-64 dopo | dopo vs i386 |
+| row | i386 20/06 | x86-64 before | x86-64 after | after vs i386 |
 |---|--:|--:|--:|--:|
-| Hotpath SEND\|RCV null | 1.40 | 1.65 | **0.87** | **1,6× piu' veloce** |
-| Intra-task 128B | 2.29 | 3.41 | **1.51** | **1,5× piu' veloce** |
-| Slow-path null | 2.30 | 3.34 | **1.44** | **1,6× piu' veloce** |
-| Inter-task null | 3.07 | 4.23 | **2.36** | **1,3× piu' veloce** |
-| futex WAKE_WAIT ping-pong | 0.43 | 1.34 | **0.58** | 1,35× piu' lento (era 3,1×) |
-| port alloc + destroy | 1.24 | 0.36 | 0.36 | 3,4× piu' veloce |
-| mach_null | 0.11 | 0.03 | 0.03 | 3,7× piu' veloce |
+| Hotpath SEND\|RCV null | 1.40 | 1.65 | **0.87** | **1.6× faster** |
+| Intra-task 128B | 2.29 | 3.41 | **1.51** | **1.5× faster** |
+| Slow-path null | 2.30 | 3.34 | **1.44** | **1.6× faster** |
+| Inter-task null | 3.07 | 4.23 | **2.36** | **1.3× faster** |
+| futex WAKE_WAIT ping-pong | 0.43 | 1.34 | **0.58** | 1.35× slower (was 3.1×) |
+| port alloc + destroy | 1.24 | 0.36 | 0.36 | 3.4× faster |
+| mach_null | 0.11 | 0.03 | 0.03 | 3.7× faster |
 
-🔑 **Ogni riga su cui x86-64 era piu' lento di i386 ora e' piu' veloce.** La sola
-che resta indietro e' il ping-pong futex (#554), e il divario e' passato da
-3,1× a 1,35×.
+🔑 **Every row on which x86-64 was slower than i386 is now faster.** The only one
+that remains behind is the futex ping-pong (#554), and the gap went from
+3.1× to 1.35×.
 
-## Dove vanno i cicli — scomposizione per fase (#392)
+## Where the cycles go — breakdown by phase (#392)
 
-Lo strumento e' `kern/syscall_profile.{h,c}`, `cmake -DUROS_SYSCALL_PROFILE=ON`,
-spento di default. Trap `urmach_msg` sulla hot path mmot, `-smp 1`, KVM,
-mediana di 16 trap consecutivi, frequenza 3.993 MHz campionata.
+The instrument is `kern/syscall_profile.{h,c}`, `cmake -DUROS_SYSCALL_PROFILE=ON`,
+off by default. `urmach_msg` trap on the mmot hot path, `-smp 1`, KVM,
+median of 16 consecutive traps, frequency 3993 MHz sampled.
 
-🔴 **Questa e' la tabella da rifare quando arriva il PCID (#412)**: `inter` cambia
-spazio di indirizzamento e `intra` no, quindi il PCID deve muovere `SWITCH`
-sulla prima e lasciarlo fermo sulla seconda. Se muove entrambe o nessuna, la
-premessa del #412 va riletta.
+🔴 **This is the table to redo when PCID (#412) arrives**: `inter` changes
+address space and `intra` does not, so PCID must move `SWITCH`
+on the first and leave it still on the second. If it moves both or neither, the
+premise of #412 has to be reread.
 
-| fase | ablato | con guardia | ablato µs | guardia µs | cosa chiude |
+| phase | ablated | with guard | ablated µs | guard µs | what it closes |
 |---|--:|--:|--:|--:|---|
 | entry | 60 | 60 | 0.020 | 0.020 | SYSCALL, swapgs, frame, dispatch |
 | get buf | 60 | 60 | 0.020 | 0.020 | `ikm_cache_get` |
-| **COPYIN** | **180** | **180** | 0.060 | 0.060 | `copyinmsg` — la copia in invio |
-| resolve | 150 | 120 | 0.050 | 0.040 | nome → porta |
-| queue | 120 | 150 | 0.040 | 0.050 | diritti, limiti di coda, i due lock |
-| **pick rcv** | **690** | **150** | 0.230 | 0.050 | trova e verifica il ricevente (conteneva uno `splx`) |
-| claim | 60 | 60 | 0.020 | 0.020 | cambio di stato sotto `thread_lock` |
-| park snd | 120 | 120 | 0.040 | 0.040 | il mittente sulla coda di reply |
-| deliver | 120 | 120 | 0.040 | 0.040 | consegna il messaggio, prepara lo switch |
-| wait | 3150 | 2040 | 1.050 | 0.680 | fuori dal processore — **il tempo dell'altro capo** |
+| **COPYIN** | **180** | **180** | 0.060 | 0.060 | `copyinmsg` — the copy on send |
+| resolve | 150 | 120 | 0.050 | 0.040 | name → port |
+| queue | 120 | 150 | 0.040 | 0.050 | rights, queue limits, the two locks |
+| **pick rcv** | **690** | **150** | 0.230 | 0.050 | finds and checks the receiver (it contained an `splx`) |
+| claim | 60 | 60 | 0.020 | 0.020 | state change under `thread_lock` |
+| park snd | 120 | 120 | 0.040 | 0.040 | the sender on the reply queue |
+| deliver | 120 | 120 | 0.040 | 0.040 | delivers the message, prepares the switch |
+| wait | 3150 | 2040 | 1.050 | 0.680 | off the processor — **the time of the other end** |
 | **SWITCH** | **450** | **450** | 0.150 | 0.150 | `switch_context` + `thread_dispatch` |
-| **splx** | **600** | **60** | 0.200 | 0.020 | abbassa il livello di interrupt |
-| resume | 60 | 90 | 0.020 | 0.030 | sveglia, `ith_state`, trailer |
-| copyout | 210 | 210 | 0.070 | 0.070 | l'header tradotto: porte → nomi |
-| **PUT** | **150** | **150** | 0.050 | 0.050 | `copyoutmsg` — la copia in ricezione |
-| residue | 60 | 30 | 0.020 | 0.010 | quel che i mark non nominano |
-| return | 51 | 66 | 0.017 | 0.022 | ritorno → SYSRET (media, dal percorso in assembly) |
-| **totale su processore** | **3141** | **2076** | 1.047 | 0.692 | = 1,047 µs contro 0,692 |
+| **splx** | **600** | **60** | 0.200 | 0.020 | lowers the interrupt level |
+| resume | 60 | 90 | 0.020 | 0.030 | wake-up, `ith_state`, trailer |
+| copyout | 210 | 210 | 0.070 | 0.070 | the translated header: ports → names |
+| **PUT** | **150** | **150** | 0.050 | 0.050 | `copyoutmsg` — the copy on receive |
+| residue | 60 | 30 | 0.020 | 0.010 | what the marks do not name |
+| return | 51 | 66 | 0.017 | 0.022 | return → SYSRET (mean, from the assembly path) |
+| **total on a processor** | **3141** | **2076** | 1.047 | 0.692 | = 1.047 µs against 0.692 |
 
-Letture:
+Readings:
 
-- **Il soffitto del #391 (register-IPC) sono le due copie: 330 cicli su 2076, il
-  10-12%.** La macchina della hand-off e' il 63-68%.
-- **`claim` e' 60 cicli**, cioe' al pavimento dello strumento: il cambio di stato
-  dello scheduler — quello di cui parla il #319 — non costa niente. Costava la
-  ricerca del ricevente, e dentro c'era uno `splx`.
-- **A `-smp 4` non cresce niente**: `pick rcv` 690→660, `SWITCH` 450→420,
-  `splx` 600→630. Stessa forma del #482 sulla fault COW a otto processori.
-- ⚠️ **Il quanto del TSC in questo guest e' 30 cicli** e un paio di timestamp ne
-  costa 60: le quattro colonne a 60 sono **al di sotto della risoluzione**, non
-  misurate a 60.
-- ⚠️ **17 mark × 60 = 1020 cicli di strumento** su 3141 di soggetto. Dichiarato.
-  Ogni fase ne porta uno, quindi la correzione e' per colonna e uniforme.
+- **The ceiling of #391 (register-IPC) is the two copies: 330 cycles out of 2076,
+  10-12%.** The hand-off machinery is 63-68%.
+- **`claim` is 60 cycles**, that is, at the floor of the instrument: the state change
+  of the scheduler — the one #319 talks about — costs nothing. What cost was the
+  search for the receiver, and inside it there was an `splx`.
+- **At `-smp 4` nothing grows**: `pick rcv` 690→660, `SWITCH` 450→420,
+  `splx` 600→630. Same shape as #482 on the COW fault at eight processors.
+- ⚠️ **The TSC grain in this guest is 30 cycles** and a pair of timestamps
+  costs 60: the four columns at 60 are **below the resolution**, not
+  measured at 60.
+- ⚠️ **17 marks × 60 = 1020 cycles of instrument** out of the 3141 measured. Declared.
+  Every phase carries one, so the correction is per column and uniform.
 
-## Come rifare questa misura
+## How to redo this measurement
 
     sudo cpupower frequency-set -g performance -d 1.4GHz -u 4GHz
     sudo sh -c 'echo 1 > /sys/devices/system/cpu/cpufreq/boost'
 
     cmake -S uros -B uros/build-x86_64 -DUROS_BUNDLE_IPC_BENCH=ON \
           -DUROS_BUNDLE_BENCH_ONLY=ON
-    ~/uros-tests/431-mediana.sh x64 3 1      # la campagna, 3 boot, mediana
-    ~/uros-tests/mediane.sh <log>...         # mediana per (suite, metrica)
-    ~/uros-tests/392-giro.sh 1 kvm 150 tag   # un boot con le fasi e il clock
+    ~/uros-tests/431-mediana.sh x64 3 1      # the campaign, 3 boots, median
+    ~/uros-tests/mediane.sh <log>...         # median per (suite, metric)
+    ~/uros-tests/392-giro.sh 1 kvm 150 tag   # one boot with the phases and the clock
 
-🔴 **`tlp` e' attivo su questa macchina**: staccando il carica batteria applica
-il profilo batteria e riporta il governor a `powersave`. Gli script verificano
-la condizione prima e dopo e **rifiutano di misurare** se non combacia — un giro
-gia' buttato oggi aveva ogni numero gonfiato di 2,93×, che e' esattamente
-4,10/1,40, perche' il TSC e' invariante e il core no.
+🔴 **`tlp` is active on this machine**: unplugging the charger applies
+the battery profile and puts the governor back to `powersave`. The scripts check
+the condition before and after and **refuse to measure** if it does not match — a run
+already thrown away today had every number inflated by 2.93×, which is exactly
+4.10/1.40, because the TSC is invariant and the core is not.
 
-⚠️ Per misurare una sola suite: `-DUROS_BENCH_SUITES=comb`. Il default resta la
-lista piena.
+⚠️ To measure a single suite: `-DUROS_BENCH_SUITES=comb`. The default stays the
+full list.
 
 
-## 2026-09-13 — lo stesso a `-smp 4`, e qui la mediana di 3 NON basta
+## 2026-09-13 — the same at `-smp 4`, and here the median of 3 is NOT enough
 
-**Stesse condizioni**, stessa sessione, 3 boot per braccio, `~/uros-tests/431-mediana.sh x64 3 4`.
-Governor verificato prima e dopo entrambe le campagne; frequenza campionata (415 e 282 campioni).
+**Same conditions**, same session, 3 boots per arm, `~/uros-tests/431-mediana.sh x64 3 4`.
+Governor verified before and after both campaigns; frequency sampled (415 and 282 samples).
 
-🔴 **La riga pulita e' una sola, e le altre vanno lette come non risolte.**
+🔴 **Only one row is clean, and the others are to be read as unresolved.**
 
-| riga | ablato (min / **mediana** / max) | con guardia (min / **mediana** / max) |
+| row | ablated (min / **median** / max) | with guard (min / **median** / max) |
 |---|---|---|
 | **comb null** | 1.61 / **1.66** / 1.99 | 0.86 / **0.88** / 0.89 |
 | inter null | 3.44 / **3.48** / 3.56 | **2.48** / 3.82 / 3.83 |
 | intra null | 3.45 / **3.57** / 3.70 | **2.53** / 2.62 / 3.00 |
 | slow null | 3.58 / **3.84** / 3.96 | **2.97** / 3.98 / 4.09 |
 
-`comb` riproduce smp1 alla cifra: **−47%**, spread stretto su **entrambe** le braccia.
+`comb` reproduces smp1 to the digit: **−47%**, narrow spread on **both** arms.
 
-⚠️ Le altre tre sono **bimodali nel braccio con la guardia**: un boot molto piu'
-veloce e gli altri sul modo lento, mentre il braccio ablato e' stretto. E' la
-lotteria di piazzamento inter-task gia' registrata (**#356**, **#446**: «inter
-bimodale»). Con tre boot la mediana cade da qualunque parte stiano due boot su
-tre — quindi **quelle tre righe non dicono ne' meglio ne' peggio**, e i loro
-minimi (3.44→2.48, 3.45→2.53, 3.58→2.97) sono l'unica cosa che si muove in modo
-coerente. Separarle vuol dire molti piu' boot, non una lettura piu' attenta.
+⚠️ The other three are **bimodal in the arm with the guard**: one boot much
+faster and the others in the slow mode, while the ablated arm is narrow. It is the
+inter-task placement lottery already recorded (**#356**, **#446**: "inter
+bimodal"). With three boots the median falls wherever two boots out of
+three are — so **those three rows say neither better nor worse**, and their
+minima (3.44→2.48, 3.45→2.53, 3.58→2.97) are the only thing that moves
+coherently. Separating them takes many more boots, not a more careful reading.
 
-I controlli sono fermi anche qui: `mach_null` 0.03→0.03, `mach_port_type`
+The checks stay still here too: `mach_null` 0.03→0.03, `mach_port_type`
 0.29→0.29, `mach_port_names()` 30.84→30.88.
 
-### Tutte le misurazioni, `-smp 4`
+### All the measurements, `-smp 4`
 
-| Sezione | Metrica | prima | dopo | Δ |
+| Section | Metric | before | after | Δ |
 |---|---|--:|--:|--:|
 | #324 futex vs Mach semaphore ping-pong (block+wake round-trip) | futex WAKE_WAIT ping-pong | 1.47 | 0.63 | -57% |
 |  | semaphore ping-pong | 4.17 | 2.94 | -29% |
@@ -448,7 +448,7 @@ I controlli sono fermi anche qui: `mach_null` 0.03→0.03, `mach_port_type`
 |  | endpoint create+destroy | 18.17 | 16.06 | -12% |
 |  | null RPC (endpoint) | 2.89 | 2.65 | -8% |
 | FLIPC2 game simulation (intra-task throughput) | audio 4KB PCM frame | 0.10 | 0.10 | +0% |
-|  | per draw command | 0.00 | 0.00 | sotto risoluzione |
+|  | per draw command | 0.00 | 0.00 | below resolution |
 |  | texture 16KB chunk | 0.29 | 0.29 | +0% |
 | FLIPC2 inter-task BATCH (vm_remap, amortized) | batch=1 (inter) | 2.77 | 2.26 | -18% |
 |  | batch=16 (inter) | 0.20 | 0.17 | -15% |
@@ -470,8 +470,8 @@ I controlli sono fermi anche qui: `mach_null` 0.03→0.03, `mach_port_type`
 |  | null RPC (isolated inter) | 2.98 | 2.72 | -9% |
 |  | null RPC (isolated intra) | 4.11 | 2.15 | -48% |
 | FLIPC2 throughput (single-thread, no kernel) | null desc (batch=1) | 0.03 | 0.03 | +0% |
-|  | null desc (batch=16) | 0.00 | 0.00 | sotto risoluzione |
-|  | null desc (batch=64) | 0.00 | 0.00 | sotto risoluzione |
+|  | null desc (batch=16) | 0.00 | 0.00 | below resolution |
+|  | null desc (batch=64) | 0.00 | 0.00 | below resolution |
 | FLIPC2 throughput with data | 1024B produce+consume | 0.04 | 0.05 | +25% |
 |  | 128B produce+consume | 0.03 | 0.03 | +0% |
 |  | 4096B produce+consume | 0.09 | 0.10 | +11% |
@@ -515,53 +515,53 @@ I controlli sono fermi anche qui: `mach_null` 0.03→0.03, `mach_port_type`
 |  | 4096B inline RPC (receiver blocked) | 4.38 | 3.47 | -21% |
 |  | null RPC (receiver blocked) | 3.84 | 3.98 | +4% |
 
-⚠️ Nel braccio con la guardia il **boot 1 e' morto** su
-`panic(cpu 1): vm_page_release: page 0x2788000 still mapped (#385)`, quindi le
-righe dopo la suite FLIPC2 BATCH hanno meno campioni in quel braccio. Il difetto
-e' **preesistente**: la campagna di stamattina, sull'epic senza la guardia, lo ha
-prodotto in 1 boot su 3 identicamente. Tre boot per braccio non separano 1/3 da
-0/3 su un difetto raro — serve la campagna da venti boot, come quella originale.
+⚠️ In the arm with the guard **boot 1 died** on
+`panic(cpu 1): vm_page_release: page 0x2788000 still mapped (#385)`, so the
+rows after the FLIPC2 BATCH suite have fewer samples in that arm. The defect
+is **pre-existing**: this morning's campaign, on the epic without the guard, produced it
+in 1 boot out of 3 identically. Three boots per arm do not separate 1/3 from
+0/3 on a rare defect — the twenty-boot campaign is needed, like the original one.
 
-## Cosa deve fare il PCID (#412) a questa tabella
+## What PCID (#412) must do to this table
 
-`inter` cambia spazio di indirizzamento, `intra` no. Il PCID deve muovere la
-colonna `SWITCH` della scomposizione per fase **sulla prima e non sulla
-seconda**. Se le muove entrambe, o nessuna, la premessa del #412 va riletta
-prima del codice.
+`inter` changes address space, `intra` does not. PCID must move the
+`SWITCH` column of the per-phase breakdown **on the first and not on the
+second**. If it moves both, or neither, the premise of #412 has to be reread
+before the code.
 
-⚠️ E prima di misurare il PCID, `-smp 4` va reso leggibile: con la bimodalita'
-attuale tre boot non distinguono un guadagno del 20% dal rumore.
+⚠️ And before measuring PCID, `-smp 4` has to be made readable: with the current
+bimodality three boots cannot tell a 20% gain from noise.
 
 
-## 2026-09-13 (3) — `-smp 4` reso leggibile: il flag `-X` (#356/#446), e la slow path scomposta (#559)
+## 2026-09-13 (3) — `-smp 4` made readable: the `-X` flag (#356/#446), and the slow path broken down (#559)
 
-**Stesse condizioni**, stessa sessione, 3 boot per braccio, `~/uros-tests/446-ab.sh 3 4`.
-Governor `performance` + `boost=1` verificato prima e dopo. A batteria. Suite `intra slow inter comb`.
-**Le due braccia sono la STESSA IMMAGINE, un flag di differenza** — voce GRUB 14 contro 18.
+**Same conditions**, same session, 3 boots per arm, `~/uros-tests/446-ab.sh 3 4`.
+Governor `performance` + `boost=1` verified before and after. On battery. Suites `intra slow inter comb`.
+**The two arms are the SAME IMAGE, one flag of difference** — GRUB entry 14 against 18.
 
-🔴 **E il controllo di presenza e' dentro la misura**: il braccio con `-X` deve
-stampare `sched: -X ... is ON`. Visto 0/0/0 nel braccio senza e 1/1/1 in quello
-con. Un flag che non prende e un flag che non fa niente sono indistinguibili nei
-numeri — e questo flag era **letto da due call site e scritto da nessuno** su
-x86-64 fino a oggi.
+🔴 **And the presence check is inside the measurement**: the arm with `-X` must
+print `sched: -X ... is ON`. Seen 0/0/0 in the arm without and 1/1/1 in the one
+with. A flag that does not take hold and a flag that does nothing are indistinguishable in the
+numbers — and this flag was **read by two call sites and written by none** on
+x86-64 until today.
 
-### La lotteria collassa, boot per boot
+### The lottery collapses, boot by boot
 
 | | boot 1 | boot 2 | boot 3 |
 |---|--:|--:|--:|
-| `intra` null **senza** `-X` | **5.51** | 2.59 | 2.43 |
-| `intra` null **con** `-X` | 1.52 | 1.43 | 1.43 |
-| `slow` null **senza** | **4.61** | 2.69 | 2.46 |
-| `slow` null **con** | 1.35 | 1.37 | 1.35 |
+| `intra` null **without** `-X` | **5.51** | 2.59 | 2.43 |
+| `intra` null **with** `-X` | 1.52 | 1.43 | 1.43 |
+| `slow` null **without** | **4.61** | 2.69 | 2.46 |
+| `slow` null **with** | 1.35 | 1.37 | 1.35 |
 
-Da una dispersione del 130% fra boot a un numero stabile al 3%. E' il risultato
-che **#446 aveva misurato su omen** (±30-43% → ±1%), riprodotto su questa
-macchina per la prima volta — perche' fino a oggi il flag qui non era
-raggiungibile.
+From a spread of 130% between boots to a number stable at 3%. It is the result
+that **#446 had measured on omen** (±30-43% → ±1%), reproduced on this
+machine for the first time — because until today the flag was not
+reachable here.
 
-### 🔑 L'esperimento DISCRIMINA, ed e' questo a renderlo una misura
+### 🔑 The experiment DISCRIMINATES, and that is what makes it a measurement
 
-| Sezione | Metrica | prima | dopo | Δ |
+| Section | Metric | before | after | Δ |
 |---|---|--:|--:|--:|
 | Combined SEND\|RCV intra-task (hotpath) | 1024B inline RPC | 0.92 | 1.04 | +13% |
 |  | 128B inline RPC | 0.98 | 0.90 | -8% |
@@ -580,202 +580,202 @@ raggiungibile.
 |  | 4096B inline RPC (receiver blocked) | 3.23 | 1.46 | -55% |
 |  | null RPC (receiver blocked) | 2.69 | 1.35 | -50% |
 
-⚠️ **Le quattro righe `inter` segnate sono un campione solo a testa** e non
-vanno lette come un Δ — vedi la ritirata qui sotto. Le altre dodici righe sono
-riproducibili (la dispersione fra boot crolla, ed e' il punto).
+⚠️ **The four `inter` rows marked are a single sample each** and are not
+to be read as a Δ — see the retraction below. The other twelve rows are
+reproducible (the spread between boots collapses, and that is the point).
 
-`intra` e `slow` crollano del 45-67%; **`inter` e `comb` no**. E' esattamente
-cio' che il gate prevede: la hand-off del #356 e' **same-task only**, quindi
-`inter` (task diversi) non la prende, e `comb` non passa dalla run queue perche'
-usa la hand-off diretta dentro `mach_msg`. Se fossero calate tutte, si sarebbe
-misurato qualcos'altro.
+`intra` and `slow` collapse by 45-67%; **`inter` and `comb` do not**. It is exactly
+what the gate predicts: the hand-off of #356 is **same-task only**, so
+`inter` (different tasks) does not take it, and `comb` does not go through the run queue because
+it uses the direct hand-off inside `mach_msg`. Had they all dropped, something
+else would have been measured.
 
-### ⚠️ Le quattro righe `inter` qui sopra NON vanno lette — ritirata (13/09, sera)
+### ⚠️ The four `inter` rows above are NOT to be read — retracted (13/09, evening)
 
-Questa sezione diceva prima: *«tre boot su tre alti sono un MODO, non una
-lotteria — su 1024B il braccio con `-X` e' riproducibilmente piu' lento»*, e
-concludeva che `-X` costa un +41% su una riga cross-task. **E' sbagliato, e lo
-e' per un motivo che vale ben oltre questa riga.**
+This section used to say: *"three boots out of three high are a MODE, not a
+lottery — at 1024B the arm with `-X` is reproducibly slower"*, and
+concluded that `-X` costs +41% on a cross-task row. **That is wrong, and it is
+wrong for a reason that holds well beyond this row.**
 
-🔴 **L'unita' di campionamento era sbagliata.** Ogni riga `inter` costruisce e
-distrugge il proprio task figlio, e il piazzamento della coppia si decide li'.
-Quindi **una riga e' UNA pescata**, per quante iterazioni medi dentro: le 10000
-iterazioni mediano *dentro* una pescata, non *fra* pescate. Tre boot sono tre
-campioni, non trentamila — e il +41% era una riga che aveva pescato lento tre
-volte confrontata con una che aveva pescato veloce due volte su tre.
+🔴 **The sampling unit was wrong.** Each `inter` row builds and
+destroys its own child task, and the placement of the pair is decided there.
+So **a row is ONE draw**, however many iterations you average inside it: the 10000
+iterations take their median *inside* one draw, not *across* draws. Three boots are three
+samples, not thirty thousand — and the +41% was a row that had drawn slow three
+times compared with one that had drawn fast two times out of three.
 
-#### La misura che lo dice, con il controllo DENTRO il boot
+#### The measurement that says so, with the control INSIDE the boot
 
-Suite `isweep` (#446): dodici taglie, tre ripetizioni ciascuna, **nello stesso
-boot** — cosi' clock, governor, bundle e storia dello scheduler sono identici
-fra le ripetizioni per costruzione invece che per asserzione. Due boot per
-braccio ⇒ **72 misure per braccio**. pavillion, KVM, `-smp 4`, governor
-`performance`, boost on, a rete, ~3,8 GHz campionati prima e dopo, bundle
-`name_server` + `ipc_bench` con `inter isweep`, profilo OFF, voci GRUB 14 e 18
-(stessa immagine, un flag di differenza; `sched: -X ... is ON` verificato
-presente nel solo braccio con `-X`).
+Suite `isweep` (#446): twelve sizes, three repetitions each, **in the same
+boot** — so clock, governor, bundle and scheduler history are identical
+across the repetitions by construction rather than by assertion. Two boots per
+arm ⇒ **72 measurements per arm**. pavillion, KVM, `-smp 4`, governor
+`performance`, boost on, on AC, ~3.8 GHz sampled before and after, bundle
+`name_server` + `ipc_bench` with `inter isweep`, profile OFF, GRUB entries 14 and 18
+(same image, one flag of difference; `sched: -X ... is ON` verified
+present in the arm with `-X` only).
 
-La distribuzione **non e' bimodale**: e' un **picco stretto** a ~2,5 µs piu' una
-**coda destra**.
+The distribution **is not bimodal**: it is a **narrow peak** at ~2.5 µs plus a
+**right tail**.
 
-| su 72 misure | senza `-X` | con `-X` |
+| over 72 measurements | without `-X` | with `-X` |
 |---|--:|--:|
-| pescate nel picco (< 3,0 µs) | 42 (58%) | 42 (58%) |
-| mediana del picco | 2.54 | 2.52 |
-| pescate in coda (≥ 3,0 µs) | 30 (42%) | 30 (42%) |
-| mediana della coda | 3.53 | **3.82** |
-| **peggior pescata** | **13.10** | **4.26** |
+| draws in the peak (< 3.0 µs) | 42 (58%) | 42 (58%) |
+| median of the peak | 2.54 | 2.52 |
+| draws in the tail (≥ 3.0 µs) | 30 (42%) | 30 (42%) |
+| median of the tail | 3.53 | **3.82** |
+| **worst draw** | **13.10** | **4.26** |
 
-🔑 **`-X` non cambia quanto spesso si finisce in coda, ne' il costo del picco.**
-Quel che fa e' **accorciare la coda**: 5 delle 30 pescate lente senza `-X`
-superano la *peggiore* pescata vista con `-X`. Sposta un po' in alto il centro
-della coda e ne toglie l'estremita'. ⚠️ Su 30 pescate lente per braccio e' un
-effetto **indicativo, non stabilito**.
+🔑 **`-X` changes neither how often one ends up in the tail, nor the cost of the peak.**
+What it does is **shorten the tail**: 5 of the 30 slow draws without `-X`
+exceed the *worst* draw seen with `-X`. It moves the center of the tail up a
+little and removes its extremity. ⚠️ On 30 slow draws per arm it is an
+**indicative effect, not an established one**.
 
-🔑 **E nessuna taglia si distingue.** Dentro un boot la stessa taglia legge 2.53,
-5.54 e 2.71; e in un boot intero (`senza-2`) **tutte** le dodici taglie leggono
-fra 2.25 e 2.71 con dispersione dell'1-8%. Tre ripetizioni uguali capitano con
-probabilita' 0,25 ⇒ su dodici taglie ci si aspettano **~3 righe «strette» per
-caso**, e se ne osservano 4: non e' struttura, e' il conteggio previsto.
+🔑 **And no size stands out.** Inside one boot the same size reads 2.53,
+5.54 and 2.71; and in a whole boot (`senza-2`) **all** twelve sizes read
+between 2.25 and 2.71 with a spread of 1-8%. Three equal repetitions happen with
+probability 0.25 ⇒ over twelve sizes one expects **~3 "narrow" rows by
+chance**, and 4 are observed: it is not structure, it is the expected count.
 
-#### ❌ E una correzione dentro la correzione: `HW_FOOTPRINT` E' compilato
+#### ❌ And a correction inside the correction: `HW_FOOTPRINT` IS compiled
 
-La prima stesura di questa sezione diceva che `HW_FOOTPRINT` non e' compilato su
-x86-64 e che quindi `last_processor` non viene usato per piazzare. **Falso.** Il
-generato `config-include/hw_footprint.h` lo mette a **1 su ENTRAMBI** i target, e
-il blocco di affinita' e' nel preprocessato di `sched_prim.c`.
+The first draft of this section said that `HW_FOOTPRINT` is not compiled on
+x86-64 and that therefore `last_processor` is not used for placement. **False.** The
+generated `config-include/hw_footprint.h` sets it to **1 on BOTH** targets, and
+the affinity block is in the preprocessed `sched_prim.c`.
 
-🔴 **L'avevo "dimostrato" con uno strumento rotto**: avevo sostituito `-c` con
-`-E` nella riga di comando lasciandoci il `-o file.o`, quindi il preprocessato
-finiva nell'oggetto e `grep` leggeva stdin vuoto. Zero occorrenze, e le ho
-lette come un'assenza. **Un'assenza va confermata da una presenza**: rifatto con
-`thread_setrun` come controllo (12 occorrenze), `last_processor` ne ha 5.
+🔴 **I had "proved" it with a broken instrument**: I had replaced `-c` with
+`-E` in the command line leaving the `-o file.o` in it, so the preprocessed output
+ended up in the object file and `grep` read an empty stdin. Zero occurrences, and I
+read that as an absence. **An absence must be confirmed by a presence**: redone with
+`thread_setrun` as the control (12 occurrences), `last_processor` has 5.
 
-🔑 **E il meccanismo vero spiega piu' cose di quello che avevo inventato.**
-L'affinita' e' condizionata:
+🔑 **And the real mechanism explains more than the one I had invented.**
+The affinity is conditional:
 
 ```c
 processor = th->last_processor;
-if (processor->state == PROCESSOR_IDLE) { ...dispatch li'...; return; }
-/* altrimenti: la PRIMA CPU idle della coda */
+if (processor->state == PROCESSOR_IDLE) { ...dispatch there...; return; }
+/* otherwise: the FIRST idle CPU in the queue */
 ```
 
-Preferisce l'ultima CPU **solo se quella CPU e' IDLE**. Ma in un RPC sincrono,
-nell'istante in cui il waker sveglia il peer, **il waker sta ancora girando su
-quella CPU**: il controllo fallisce esattamente nel caso in cui co-locare
-servirebbe, e la coppia viene spedita sulla prima CPU idle. ⇒ **l'affinita' non
-puo' co-locare una coppia sincrona, ed e' strutturale, non un difetto.**
+It prefers the last CPU **only if that CPU is IDLE**. But in a synchronous RPC,
+at the instant the waker wakes the peer, **the waker is still running on
+that CPU**: the check fails in exactly the case where co-locating
+would help, and the pair is sent to the first idle CPU. ⇒ **the affinity cannot
+co-locate a synchronous pair, and that is structural, not a defect.**
 
-Ed e' esattamente cio' che la hand-off del #356 aggira: accoda il risvegliato
-sulla runq della CPU **corrente**, perche' il waker *sa* di stare per bloccarsi —
-informazione che `thread_setrun` da sola non ha. Essendo same-task, `inter` non
-la prende **mai** ⇒ la coppia cross-task si divide sempre.
+And that is exactly what the hand-off of #356 works around: it queues the woken one
+on the runq of the **current** CPU, because the waker *knows* it is about to block —
+information that `thread_setrun` alone does not have. Being same-task, `inter`
+**never** takes it ⇒ the cross-task pair always splits.
 
-#### ✅ E la previsione e' stata verificata: a `-smp 1` la coda NON c'e'
+#### ✅ And the prediction was verified: at `-smp 1` the tail is NOT there
 
-Se la coda e' la coppia divisa su due CPU, a **una CPU sola non c'e' dove
-dividerla** e deve sparire. Stessa immagine, stesse voci GRUB, stesso bundle,
-stesso `isweep`, governor `performance` + boost verificati a rete prima e dopo
-(3612 → 3090 MHz, deriva termica), **due boot per braccio = 72 pescate per cella**:
+If the tail is the pair split across two CPUs, with **a single CPU there is nowhere
+to split it** and it must disappear. Same image, same GRUB entries, same bundle,
+same `isweep`, governor `performance` + boost verified on AC before and after
+(3612 → 3090 MHz, thermal drift), **two boots per arm = 72 draws per cell**:
 
-| | nel picco | mediana | p90 | **peggiore** |
+| | in the peak | median | p90 | **worst** |
 |---|--:|--:|--:|--:|
-| **`-smp 1` senza `-X`** | 94% | 2.51 | **2.68** | **3.35** |
-| **`-smp 1` con `-X`** | **100%** | **2.34** | **2.43** | **2.62** |
-| `-smp 4` senza `-X` | 58% | 2.66 | 4.19 | **13.10** |
-| `-smp 4` con `-X` | 58% | 2.61 | 3.92 | 4.26 |
+| **`-smp 1` without `-X`** | 94% | 2.51 | **2.68** | **3.35** |
+| **`-smp 1` with `-X`** | **100%** | **2.34** | **2.43** | **2.62** |
+| `-smp 4` without `-X` | 58% | 2.66 | 4.19 | **13.10** |
+| `-smp 4` with `-X` | 58% | 2.61 | 3.92 | 4.26 |
 
-🔑 **Il picco resta dov'e' e si muove solo la coda**, ed e' questo a rendere la
-misura leggibile: se `-smp 1` fosse semplicemente «un'altra macchina» si sarebbe
-spostato anche il picco. Si e' mosso **soltanto** cio' che l'ipotesi prevedeva.
+🔑 **The peak stays where it is and only the tail moves**, and that is what makes the
+measurement readable: if `-smp 1` were simply "another machine" the peak would
+have moved too. **Only** what the hypothesis predicted has moved.
 
-🔑 **E sparisce anche l'ALTERNANZA.** Le pescate a smp4 non sono indipendenti:
-l'autocorrelazione della sequenza veloce/lenta in `conX-1` da' **lag 1 = 17%**
-(due pescate consecutive sono quasi sempre *diverse*) e lag 2 = 76% — periodo 2.
-A `-smp 1` lag 1 risale a **94%**. Il sospettato e' `queue_first(&pset->idle_queue)`
-nel ramo che l'affinita' non prende: **la coda delle CPU idle ruota**, quindi task
-figli consecutivi pescano CPU diverse a turno.
+🔑 **And the ALTERNATION disappears too.** The draws at smp4 are not independent:
+the autocorrelation of the fast/slow sequence in `conX-1` gives **lag 1 = 17%**
+(two consecutive draws are almost always *different*) and lag 2 = 76% — period 2.
+At `-smp 1` lag 1 climbs back to **94%**. The suspect is `queue_first(&pset->idle_queue)`
+in the branch that the affinity does not take: **the idle-CPU queue rotates**, so consecutive
+child tasks draw different CPUs in turn.
 
-⚠️ Questo **corregge anche un mio argomento**: avevo scritto che tre ripetizioni
-uguali capitano con probabilita' 0,25 *assumendo indipendenza*, che e' violata.
-La conclusione («nessuna taglia si distingue») ne esce **rafforzata** — con
-correlazione seriale le ripetizioni uguali sono ancora **piu'** probabili — ma il
-numero 0,25 e' un limite inferiore, non la probabilita'.
+⚠️ This **also corrects an argument of mine**: I had written that three equal
+repetitions happen with probability 0.25 *assuming independence*, which is violated.
+The conclusion ("no size stands out") comes out **strengthened** — with
+serial correlation equal repetitions are even **more** probable — but the
+number 0.25 is a lower bound, not the probability.
 
-⚠️ **Non spiegato, e con due soli boot per braccio**: a `-smp 1` il braccio con
-`-X` e' anche il piu' veloce in assoluto (mediana 2.34, il picco scende di un
-bucket). `inter` e' cross-task e il gate e' same-task, quindi il flag non
-dovrebbe toccarlo; e la deriva del clock gioca **contro** questo risultato,
-perche' il braccio con `-X` e' girato per secondo, a 3090 MHz. Va ripreso con
-piu' boot prima di dirne qualsiasi cosa.
+⚠️ **Not explained, and with only two boots per arm**: at `-smp 1` the arm with
+`-X` is also the fastest of all (median 2.34, the peak drops by one
+bucket). `inter` is cross-task and the gate is same-task, so the flag
+should not touch it; and the clock drift plays **against** this result,
+because the arm with `-X` ran second, at 3090 MHz. It has to be retaken with
+more boots before saying anything about it.
 
-🔴 **La regola operativa che ne esce**: su `inter` un confronto ha bisogno di
-molte pescate, e la statistica da riportare e' **la frazione nel picco e la
-forma della coda**, mai la media di una riga — che e' picco e coda mescolati.
+🔴 **The operating rule that comes out of it**: on `inter` a comparison needs
+many draws, and the statistic to report is **the fraction in the peak and the
+shape of the tail**, never the mean of a row — which is peak and tail mixed together.
 
-⚠️ La lotteria cross-task **resta**, ed e' quella che il PCID (#412) puo'
-togliere aprendo il gate. Il motivo per cui e' chiuso e' scritto in
-`sched_prim.c` ed e' un costo di i386: *«an inter-task switch on one CPU costs a
-cr3 reload = full TLB flush on i386»*.
+⚠️ The cross-task lottery **remains**, and it is the one that PCID (#412) can
+remove by opening the gate. The reason why it is closed is written in
+`sched_prim.c` and it is an i386 cost: *"an inter-task switch on one CPU costs a
+cr3 reload = full TLB flush on i386"*.
 
-### Dove vanno i cicli di un trap della SLOW path (#559)
+### Where the cycles of a SLOW path trap go (#559)
 
-`-smp 1`, KVM, 3.993 MHz campionati, mediana su una forma sola per finestra.
-🔴 **Un round trip della slow path e' DUE trap e sono due forme diverse**: la
-send non blocca, la receive si. Una mediana sulle due insieme e' una riga mai
-accaduta.
+`-smp 1`, KVM, 3993 MHz sampled, median over a single shape per window.
+🔴 **A slow-path round trip is TWO traps and they are two different shapes**: the
+send does not block, the receive does. A median over the two together is a row that
+never happened.
 
-| fase | hot path | slow send | slow recv | hot µs | send µs | recv µs |
+| phase | hot path | slow send | slow recv | hot µs | send µs | recv µs |
 |---|--:|--:|--:|--:|--:|--:|
 | entry | 60 | 60 | 60 | 0.020 | 0.020 | 0.020 |
 | `get buf` + `COPYIN` | 210 | — | — | 0.070 | — | — |
 | resolve | 150 | 210 | 210 | 0.050 | 0.070 | 0.070 |
-| accodamento / risveglio | 570 | 120 | 180 | 0.190 | 0.040 | 0.060 |
-| `wait` (il peer) *(wall)* | 2100 | — | 2520 | 0.700 | — | 0.840 |
+| queueing / waking up | 570 | 120 | 180 | 0.190 | 0.040 | 0.060 |
+| `wait` (the peer) *(wall)* | 2100 | — | 2520 | 0.700 | — | 0.840 |
 | **`RUNQ`** | **0** | — | **390** | 0.000 | — | 0.130 |
 | `SWITCH` | 450 | — | 540 | 0.150 | — | 0.180 |
 | `splx` + `resume` | 150 | — | — | 0.050 | — | — |
 | `copyout` + `PUT` | 540 | — | 450 | 0.180 | — | 0.150 |
 | residue | 30 | 60 | 390 | 0.010 | 0.020 | 0.130 |
-| **su processore** | **2211** | **651** | **2271** | 0.737 | 0.217 | 0.757 |
+| **on a processor** | **2211** | **651** | **2271** | 0.737 | 0.217 | 0.757 |
 
-🔑 **`RUNQ` + `SWITCH` = 930 su 2271, il 40%** del lavoro di una receive lenta e'
-*essere svegliati e ottenere un processore*. E **`RUNQ` e' esattamente zero sulla
-hot path**, spread `[0..0]` su sedici sample: zero dove il meccanismo dice che
-deve esserlo, perche' una hand-off diretta non tocca mai una run queue.
+🔑 **`RUNQ` + `SWITCH` = 930 out of 2271, 40%** of the work of a slow receive is
+*being woken up and getting a processor*. And **`RUNQ` is exactly zero on the
+hot path**, spread `[0..0]` over sixteen samples: zero where the mechanism says it
+must be, because a direct hand-off never touches a run queue.
 
-⇒ Il round trip a due trap costa **651 + 2271 = 2922** cicli su processore contro
-i **2211** della hot path, **+32%**, e la voce singola piu' grossa che li separa
-e' una fase che la hot path non ha affatto.
+⇒ The two-trap round trip costs **651 + 2271 = 2922** cycles on a processor against
+the **2211** of the hot path, **+32%**, and the single biggest item that separates them
+is a phase that the hot path does not have at all.
 
-### Quale rotta prende davvero il traffico (#559, copertura)
+### Which route the traffic really takes (#559, coverage)
 
-Un trap che arriva in `ipc/mach_msg.c` prende una di tre strade, e la
-scomposizione significa una cosa diversa su ognuna. Un boot, le quattro suite:
+A trap that arrives in `ipc/mach_msg.c` takes one of three routes, and the
+breakdown means something different on each. One boot, the four suites:
 
-| rotta | trap |
+| route | traps |
 |---|--:|
-| combinata (hot path) | 65.825, di cui **65.635 handed off** |
-| **solo SEND** | **242.413** |
-| **solo RCV** | **242.431** |
+| combined (hot path) | 65825, of which **65635 handed off** |
+| **SEND only** | **242413** |
+| **RCV only** | **242431** |
 
-🔑 **La rotta a due trap e' circa l'88% del traffico `mach_msg`.** Cio' che #392
-ha profilato e' la minoranza — ed e' il motivo per cui #559 esiste.
+🔑 **The two-trap route is about 88% of the `mach_msg` traffic.** What #392
+profiled is the minority — and that is the reason #559 exists.
 
-❌ E gli stessi contatori hanno corretto un mio errore: **0 su 242.431** receive
-sono riprese in `mach_msg_receive_continue()`. `ipc_mqueue_receive()` passa la
-continuation a `thread_block()`, che la invoca solo se lo scheduler scarta lo
-stack del kernel — qui non succede mai. I mark li restano (sono giusti per il
-caso che la prende) ma la descrizione onesta e' «un braccio che esiste e qui non
-si prende».
+❌ And the same counters corrected an error of mine: **0 of 242431** receives
+resumed in `mach_msg_receive_continue()`. `ipc_mqueue_receive()` passes the
+continuation to `thread_block()`, which invokes it only if the scheduler discards the
+kernel stack — that never happens here. The marks stay there (they are right for the
+case that takes it) but the honest description is "an arm that exists and is not
+taken here".
 
 
-### E la slow path a quattro processori costa 3× quella a uno — la hot path no
+### And the slow path at four processors costs 3× that at one — the hot path does not
 
-Entrambe le letture con `-X`, quindi **cambia solo il numero di processori**.
-`-smp 1` e `-smp 4`, KVM, 3.993 MHz campionati, mediana sugli 8 sample bloccati.
+Both readings with `-X`, so **only the number of processors changes**.
+`-smp 1` and `-smp 4`, KVM, 3993 MHz sampled, median over the 8 blocked samples.
 
-| fase | smp1 `-X` | smp4 `-X` | smp1 µs | smp4 µs | rapporto |
+| phase | smp1 `-X` | smp4 `-X` | smp1 µs | smp4 µs | ratio |
 |---|--:|--:|--:|--:|--:|
 | entry | 60 | 60 | 0.020 | 0.020 | **1.0** |
 | resolve | 210 | 360 | 0.070 | 0.120 | 1.7 |
@@ -786,40 +786,40 @@ Entrambe le letture con `-X`, quindi **cambia solo il numero di processori**.
 | `copyout` | 300 | 990 | 0.100 | 0.330 | 3.3 |
 | **`PUT`** | **150** | **840** | 0.050 | 0.280 | **5.6** |
 | residue | 360 | 1020 | 0.120 | 0.340 | 2.8 |
-| **su processore** | **2301** | **6797** | 0.767 | 2.266 | **3.0** |
-| di cui «ottenere il processore» | 960 (41%) | 2635 (38%) | 0.320 | 0.879 | |
+| **on a processor** | **2301** | **6797** | 0.767 | 2.266 | **3.0** |
+| of which "getting the processor" | 960 (41%) | 2635 (38%) | 0.320 | 0.879 | |
 
-🔑 **Tre volte, e #392 aveva trovato che la HOT path costa uguale a 1 e a 4.**
-Due comportamenti opposti sullo stesso kernel, ora misurati invece che supposti.
-La *quota* di «ottenere il processore» invece non si muove: 41% contro 38%.
+🔑 **Three times, and #392 had found that the HOT path costs the same at 1 and at 4.**
+Two opposite behaviors on the same kernel, now measured instead of assumed.
+The *share* of "getting the processor", on the other hand, does not move: 41% against 38%.
 
-⚠️ `entry` sta fermo a 60 su entrambe, ed e' il controllo che rende leggibile il
-resto: l'ingresso nel trap e' lavoro per-CPU e non deve dipendere da quanti
-processori ci sono. Se si fosse mosso, la tabella starebbe misurando il clock o
-l'acceleratore.
+⚠️ `entry` stays still at 60 on both, and it is the check that makes the
+rest readable: the entry into the trap is per-CPU work and must not depend on how many
+processors there are. Had it moved, the table would be measuring the clock or
+the accelerator.
 
-⚠️ `PUT` a 5,6× e `copyout` a 3,3× sono le due copie verso la memoria utente.
-Che sia TLB/cache con i thread che si spostano fra processori e' **plausibile e
-non misurato**, e resta scritto cosi' invece che come spiegazione.
+⚠️ `PUT` at 5.6× and `copyout` at 3.3× are the two copies towards user memory.
+That it is TLB/cache with the threads moving between processors is **plausible and
+not measured**, and it stays written like that instead of as an explanation.
 
-## Come si riproduce
+## How to reproduce it
 
     sudo cpupower frequency-set -g performance -d 1.4GHz -u 4GHz
     sudo sh -c 'echo 1 > /sys/devices/system/cpu/cpufreq/boost'
 
     cmake -S uros -B uros/build-x86_64 -DUROS_BUNDLE_IPC_BENCH=ON \
           -DUROS_BUNDLE_BENCH_ONLY=ON -DUROS_BENCH_SUITES="intra slow inter comb"
-    ~/uros-tests/446-ab.sh 3 4        # A/B del flag -X, 3 boot per braccio
-    ~/uros-tests/392-giro.sh 1 kvm 240 tag 18   # un boot con le fasi, voce 18
+    ~/uros-tests/446-ab.sh 3 4        # A/B of the -X flag, 3 boots per arm
+    ~/uros-tests/392-giro.sh 1 kvm 240 tag 18   # one boot with the phases, entry 18
 
-🔴 **La voce GRUB non e' stabile**: 14 = bundle ordinario, 18 = lo stesso con
-`-X`. Si chiede a `uros/src/mach_kernel/x86_64/boot/grub.cfg`, dove le voci
-nuove vanno **in coda** proprio perche' inserirne una in mezzo rinumera in
-silenzio ogni invocazione che ne nomina una.
+🔴 **The GRUB entry is not stable**: 14 = ordinary bundle, 18 = the same with
+`-X`. It is asked of `uros/src/mach_kernel/x86_64/boot/grub.cfg`, where new entries
+go **at the end** precisely because inserting one in the middle silently renumbers
+every invocation that names one.
 
-⚠️ Il profilo per fase e' `-DUROS_SYSCALL_PROFILE=ON`, **spento di default**, e
-va letto solo per le FASI: con i dump accesi un `comb` null RPC legge 51 µs
-contro 2,21, perche' le printf stampano dentro il loop.
+⚠️ The per-phase profile is `-DUROS_SYSCALL_PROFILE=ON`, **off by default**, and
+is to be read only for the PHASES: with the dumps on, a `comb` null RPC reads 51 µs
+against 2.21, because the printfs print inside the loop.
 
 
 ## 2026-10-23 — the #392 table on today's epic (#737)
