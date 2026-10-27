@@ -472,7 +472,9 @@ klcopyout(
  * server.  We assume that we're running in a server thread on its
  * user stack, so just switch to the thread's kernel stack "around"
  * the call.  The copyinstr function was created just for use from
- * this wrapper -- the kernel doesn't employ it.
+ * this wrapper, but the kernel employs it now as well (mach_print,
+ * mach_thread_set_name); what it answers is written in
+ * kern/misc_protos.h, and this passes it through unchanged (#763).
  */
 boolean_t
 klcopyinstr(
