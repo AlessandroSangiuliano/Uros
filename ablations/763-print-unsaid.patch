@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #763
+Takes out: mach_print's answer to a merely long string -- it says again that it could not read the string, and prints none of it. pthread_test prints 300 characters through mach_print, and run-x86_64.sh's pair waits for the mark of the cut.
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 1200
+Script: -smp
+Script: 1
+Expect: FAILED: .pthread_test: starting. appeared and .*mach_print: cut at 255 bytes
+
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index acca1b30..4066a448 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -709,7 +709,7 @@ mach_print(const char *s)
+ 	 * address the kernel could not read, which is what the line below said
+ 	 * of it on x86-64: the first part goes out, and says where it was cut.
+ 	 */
+-	if (rc != 0 && got == sizeof buf) {
++	if (0 && rc != 0 && got == sizeof buf) {
+ 		printf("%s [mach_print: cut at %lu bytes]\n", buf,
+ 		       (unsigned long) (sizeof buf - 1));
+ 		return;

@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #763
+Takes out: the cut of a long thread name -- mach_thread_set_name() takes any failure of copyinstr() for an unreadable address again, and refuses a name of sixteen characters or more with KERN_INVALID_ADDRESS, as x86-64 did. pthread_test's thread name kernel asks a 26-character name and wants it cut.
+Run: --entry 14 1200 -smp 1
+Expect: thread name kernel \(long\): FAIL
+
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index acca1b30..b69c902e 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -773,7 +773,7 @@ mach_thread_set_name(const char *name)
+ 	 * caller.  copyinstr answers both at once, which is why it is the
+ 	 * whole fix rather than a stac/clac pair around the old loop.
+ 	 */
+-	if (copyinstr(name, buf, sizeof buf, &got) != 0 && got != sizeof buf)
++	if (copyinstr(name, buf, sizeof buf, &got) != 0)
+ 		return KERN_INVALID_ADDRESS;
+ 
+ 	/*
