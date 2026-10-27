@@ -198,8 +198,10 @@ __start_mach_c(unsigned long entry_sp)
 	 * found: the loaders disagree about what argv[0] holds -- GRUB writes
 	 * the module name and QEMU -initrd writes the HOST path -- and the tail
 	 * is the part they agree on.  ⚠️ Sixteen bytes including the NUL, so a
-	 * long server name arrives truncated; copyinstr in the trap does the
-	 * truncating, which is why no local buffer is needed here.
+	 * long server name arrives truncated: the trap cuts it to fifteen
+	 * characters, by contract and on both targets (#763), which is why no
+	 * local buffer is needed here.  It used to be i386's copyinstr that
+	 * cut; x86-64's refused the name, and the thread went unnamed.
 	 */
 	if (__argc > 0 && __argv != 0 && __argv[0] != 0) {
 		const char *base = __argv[0];
