@@ -637,6 +637,13 @@ must_report 'klog: the first write after the flood is refused on purpose' 'char_
 must_report 'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
 	'Twenty-three arms of mutexes, condition variables, joins and thread-local storage (#425).  Its silence is a thread library that stopped, which on this target ends the boot rather than failing an arm -- and unlike a failing arm, that has no line of its own.'
 
+# #763: pthread_test prints 300 characters through mach_print, and the kernel
+# prints 255 of them with a mark saying where it cut.  Without the mark the line
+# is gone and "could not read the string" stands in its place -- the answer
+# x86-64 gave a merely long string.
+must_report 'pthread_test: starting' '\[mach_print: cut at 255 bytes\]' \
+	'A string longer than mach_print carries is cut and said so; its absence is the kernel taking a length for an unreadable address again (#763).'
+
 must_report 'fault_test: started' 'fault_test: [0-9]* of [0-9]* arms passed' \
 	'It is the last thing a bundle boot does, so it is also what tells this script the run is over (#489) -- a fault_test that starts and says nothing leaves the machine idling until the watchdog, which used to be reported as the run failing rather than as this test not answering.'
 
