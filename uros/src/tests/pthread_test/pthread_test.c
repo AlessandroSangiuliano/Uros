@@ -33,6 +33,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>			/* malloc/free — the subject of [24] */
+#include <string.h>			/* strlen, for #763's long line */
 #include <sys/timers.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
@@ -1064,6 +1065,61 @@ test_thread_name_kernel(void)
 		snprintf(buf, sizeof(buf), "trap returned %d", kr);
 		test_fail("thread name kernel (direct)", buf);
 		return;
+	}
+
+	/*
+	 * #763: a name longer than the kernel's field is cut, and only an
+	 * address the kernel cannot read is refused.  copyinstr() fails on
+	 * both, on both targets, and tells them apart by how much it took;
+	 * the trap must not take the one for the other.
+	 */
+	kr = mach_thread_set_name("a-name-longer-than-fifteen");
+	if (kr != KERN_SUCCESS) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "a 26-character name: trap returned "
+			 "%d, the cut wanted", kr);
+		test_fail("thread name kernel (long)", buf);
+		return;
+	}
+	{
+		vm_address_t	page = 0;
+		kern_return_t	pkr;
+
+		pkr = vm_allocate(mach_task_self(), &page, vm_page_size, TRUE);
+		if (pkr == KERN_SUCCESS)
+			pkr = vm_protect(mach_task_self(), page, vm_page_size,
+					 FALSE, VM_PROT_NONE);
+		if (pkr != KERN_SUCCESS) {
+			char buf[80];
+			snprintf(buf, sizeof(buf), "no unreadable page to ask "
+				 "with: kr=%d", pkr);
+			test_fail("thread name kernel (unreadable)", buf);
+			return;
+		}
+		kr = mach_thread_set_name((const char *)page);
+		(void) vm_deallocate(mach_task_self(), page, vm_page_size);
+		if (kr != KERN_INVALID_ADDRESS) {
+			char buf[80];
+			snprintf(buf, sizeof(buf), "a name on an unreadable "
+				 "page: trap returned %d", kr);
+			test_fail("thread name kernel (unreadable)", buf);
+			return;
+		}
+	}
+	/*
+	 * And mach_print's half, which only the log can show: 300 characters,
+	 * of which the kernel prints 255 and says where it cut (#763).
+	 */
+	{
+		static char	line[301];
+		int		i;
+
+		snprintf(line, sizeof(line), "pthread_test: 300 characters "
+			 "through mach_print (#763) ");
+		for (i = (int)strlen(line); i < 300; i++)
+			line[i] = '.';
+		line[300] = '\0';
+		mach_print(line);
 	}
 
 	/* Verify userspace side still works after trap */
