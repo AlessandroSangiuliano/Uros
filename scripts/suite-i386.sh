@@ -122,6 +122,9 @@ PAIRS=(
 	'fperr_test: SIMD arm starting'	'fperr_test: SIMD arm \(PASS\|SKIPPED\|FAIL\)'
 	'irq_claim_test: '		'irq_claim_test: [0-9]* of 6 line arms passed'
 	'(hello_server): exec tests: started'	'(hello_server): exec tests: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
+	# #763: 300 characters through mach_print, printed cut at 255 with a
+	# mark -- i386's copyinstr used to cut them silently.
+	'pthread_test: starting'	'\[mach_print: cut at 255 bytes\]'
 	# #761: the words after a NUL in the middle of a line, which the
 	# console used to drop with the rest of their piece.
 	'(hello_server): console: started'	'(hello_server): console: a NUL in the middle of this line went out'

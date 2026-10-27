@@ -704,6 +704,17 @@ mach_print(const char *s)
 	rc = copyinstr(s, buf, sizeof buf, &got);
 	buf[sizeof buf - 1] = 0;
 
+	/*
+	 * Longer than the trap carries (#763).  That is a length and not an
+	 * address the kernel could not read, which is what the line below said
+	 * of it on x86-64: the first part goes out, and says where it was cut.
+	 */
+	if (rc != 0 && got == sizeof buf) {
+		printf("%s [mach_print: cut at %lu bytes]\n", buf,
+		       (unsigned long) (sizeof buf - 1));
+		return;
+	}
+
 	if (rc != 0) {
 		printf("mach_print: could not read the string at %p "
 		       "(copyinstr=%d, %lu bytes) -- task %p, thread \"%s\"\n",
@@ -762,8 +773,18 @@ mach_thread_set_name(const char *name)
 	 * caller.  copyinstr answers both at once, which is why it is the
 	 * whole fix rather than a stac/clac pair around the old loop.
 	 */
-	if (copyinstr(name, buf, sizeof buf, &got) != 0)
+	if (copyinstr(name, buf, sizeof buf, &got) != 0 && got != sizeof buf)
 		return KERN_INVALID_ADDRESS;
+
+	/*
+	 * A name longer than the field is cut to its fifteen characters
+	 * (#763), as pthread_setname_np() cuts it before calling and as
+	 * crt0 counts on.  copyinstr() refuses a string that has not ended
+	 * within the buffer, on both targets, and says so with got equal to
+	 * the buffer: a length, answered with the cut.  KERN_INVALID_ADDRESS
+	 * stays for an address it could not read -- x86-64 gave it to a long
+	 * name too, and crt0's thread went unnamed.
+	 */
 
 	buf[sizeof buf - 1] = '\0';
 	bcopy(buf, thread->name, sizeof thread->name);
