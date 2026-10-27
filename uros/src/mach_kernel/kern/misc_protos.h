@@ -73,6 +73,20 @@ extern void bzero(
 	char	*from,
 	vm_size_t	nbytes);
 
+/*
+ * 🔴 The copy routines answer TRUE when they FAIL, and FALSE when the copy
+ * was made -- Mach's convention, as BSD's copyin() answers 0 or an errno.
+ * Nothing here said so, and a boolean_t that comes back TRUE reads as the
+ * opposite.
+ *
+ * copyinstr() fails on a fault, on a max of 0, and on a string that has not
+ * ended within max bytes, its NUL included: *actual is then max, so a caller
+ * that set it to 0 tells "too long" (*actual == max) from "unreadable"
+ * (*actual not written).  On success *actual counts the bytes taken, the NUL
+ * included.  The same on both targets since #763: i386's used to answer
+ * success for the long string, cut and unterminated.
+ */
+
 /* Move arbitrarily-aligned data from a user space to kernel space */
 extern boolean_t copyin(
 	const char	*user_addr,
