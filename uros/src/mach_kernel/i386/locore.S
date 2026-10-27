@@ -2342,6 +2342,10 @@ copyin_fail:
  * arg1:	kernel address
  * arg2:	max byte count
  * arg3:	actual byte count (OUT)
+ *
+ * Returns 0 when the string, its NUL included, fit within max; 1 when it
+ * did not -- *actual is then max -- when max is 0, or when the user address
+ * faulted.  The same contract as x86-64's copyinstr() (#763).
  */
 Entry(copyinstr)
 	pushl	%esi
@@ -2368,7 +2372,7 @@ Entry(copyinstr)
 	mov	%cx,%fs
 	xorl	%eax,%eax
 	cmpl	$0,%edx
-	je	4f
+	je	copystr_long		/* no room even for the NUL (#763) */
 2:
 	RECOVER(copystr_fail)		/* copy bytes... */
 	movb	%fs:(%esi),%al
@@ -2383,12 +2387,25 @@ Entry(copyinstr)
 	cmpl	$0,%eax
 	jne	2b			/* ...or till a NUL found */
 4:
-	xorl	%eax,%eax		/* return zero for success */
 	movl	8+S_ARG3,%edi		/* get OUT len ptr */
 	cmpl	$0,%edi
-	jz	copystr_ret		/* if null, just return */
+	jz	5f			/* if null, skip it */
 	subl	8+S_ARG0,%esi
 	movl	%esi,(%edi)		/* else set OUT arg to xfer len */
+5:
+	/*
+	 * #763: the loop ends on the NUL or on max, and only the NUL makes a
+	 * string copied.  This said success either way, so a string longer
+	 * than max came back cut and unterminated while x86-64's copyinstr()
+	 * refused it -- one name, two contracts, and crt0's thread name was
+	 * set on one target and not on the other.  %al is the last byte taken.
+	 */
+	testb	%al,%al
+	jnz	copystr_long		/* max reached before the NUL */
+	xorl	%eax,%eax		/* return zero for success */
+	jmp	copystr_ret
+copystr_long:
+	movl	$1,%eax			/* return 1: it did not end within max */
 copystr_ret:
 	popl	%edi			/* restore registers */
 	popl	%esi
