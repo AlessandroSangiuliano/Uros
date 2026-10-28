@@ -49,7 +49,7 @@ PART2_START_SECT=280576      # disk0c — raw swap (264192 + 8 MiB) -> ~375 MB
 BENCH_ARGS=""
 MINIMAL=0
 
-# --- Parse argomenti ---
+# --- Parse arguments ---
 while [ $# -gt 0 ]; do
     case "$1" in
         -o) DISK_IMG="$2"; shift 2 ;;
@@ -353,7 +353,7 @@ ${FPERR_TEST_SSE_CONF_LINE}
 ${USH_CONF_LINE}
 CONF
 
-# --- Calcoli geometria ---
+# --- Geometry calculations ---
 TOTAL_SECTS=$((IMG_SIZE_MB * 1024 * 1024 / SECT_SIZE))
 FS0_SIZE_SECTS=$((FS0_SIZE_MB * 1024 * 1024 / SECT_SIZE))
 FS1_SIZE_SECTS=$((FS1_SIZE_MB * 1024 * 1024 / SECT_SIZE))
@@ -685,7 +685,7 @@ echo "  /mach_servers/hal_server    → $(stat -c%s "$HAL_SERVER") bytes"
 echo "  /mach_servers/modules/hal/pci_scan.so     → $(stat -c%s "$HAL_PCI_SCAN_MODULE") bytes"
 echo "  /mach_servers/ext_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
-# --- 4b. Popola disk0b con hello.txt (test data) ---
+# --- 4b. Populate disk0b with hello.txt (test data) ---
 DBHELLO=$(mktemp -p "$TMPD")
 printf 'Hello from disk0b partition\n' > "$DBHELLO"
 debugfs -w -f /dev/stdin "$PART1_IMG" <<DBGFS 2>/dev/null
