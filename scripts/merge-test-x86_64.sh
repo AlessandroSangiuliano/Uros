@@ -34,7 +34,7 @@
 # to #755 -- so the script refuses to run until each entry of grub.cfg is in
 # exactly one list and each list names only entries grub.cfg has (lists_cover).
 #
-# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G] [-L]
+# Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G] [-L] [-P]
 #   -a  accelerator(s), default both     -s  processors, default 4
 #   -o  directory for the logs, default ./merge-test-logs, or beside the log
 #       UROS_X86_64_LOG names, as ablate.sh's Script: runs name each arm's (#591)
@@ -43,12 +43,15 @@
 #       short is walked by run-x86_64.sh before it is killed
 #   -L  only ask whether each grub.cfg entry is run or said not run, and say so:
 #       0 if each is, 1 if not.  ci/job.sh asks it before it builds (#755)
+#   -P  only ask whether every patch of ablations/ still applies to this tree,
+#       and say so: 0 if each does, 1 if not (#769).  A whole run asks it too
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
 # default is tested the same way; its char build, which the entries marked @char
 # boot, is that build's path with -char after it (#765).  A run that refuses to
 # start -- a bad option, the stub's port taken, the lists and grub.cfg not
-# agreeing -- exits 2, and otherwise the exit status is the number of entries
-# judged wrong (0: every judged entry as it should be).
+# agreeing, the patches not asked -- exits 2, and otherwise the exit status is
+# the number of entries judged wrong, and one more if a patch of ablations/ no
+# longer applies (0: every judged entry as it should be, every patch applying).
 
 set -u
 ACC=both
@@ -61,7 +64,8 @@ OUT=./merge-test-logs
 ONLY=""
 STUB="-s"	# every run with the gdb stub: a run cut short is walked before it is killed (#526); -G turns it off
 LISTS_ONLY=0
-while getopts "a:s:o:e:GL" o; do
+PATCHES_ONLY=0
+while getopts "a:s:o:e:GLP" o; do
 	case $o in
 	a) ACC=$OPTARG ;;
 	s) SMP=$OPTARG ;;
@@ -69,6 +73,7 @@ while getopts "a:s:o:e:GL" o; do
 	e) ONLY=" $OPTARG " ;;
 	G) STUB="" ;;
 	L) LISTS_ONLY=1 ;;
+	P) PATCHES_ONLY=1 ;;
 	*) sed -n '/^# Usage:/,/^# judged wrong/p' "$0"; exit 2 ;;
 	esac
 done
@@ -272,11 +277,45 @@ lists_cover() {
 		echo "merge-test: lists: each of grub.cfg's $n entries is run or said not run: $(wc -w <<< "$run") run, $(wc -w <<< "$skip") not"
 	return $bad
 }
+# #769: whether every patch of ablations/ still applies to this tree, asked of
+# ablate.sh --check-all, which ci/job.sh asks too.  A merge moves the code under
+# the patches, and one that rots a patch must not pass the test it is decided
+# on: #757's merge passed this script, 160 boots and 0 wrong, rotted three
+# patches, and only the campaign after the push said so, by failing.  Returns
+# 0 if each applies, 1 if one does not, 2 if the question could not be asked;
+# the verdict, one line, in PATCHES_SAID.
+PATCHES_SAID=""
+patches_apply() {
+	local scratch out rc
+	scratch=$(mktemp -d) || { PATCHES_SAID="merge-test: ablations: no scratch directory to ask in"; return 2; }
+	out=$(UROS_ABLATE_DIR=$scratch "$HERE/scripts/ablate.sh" --check-all 2>&1)
+	rc=$?
+	rm -rf "$scratch"
+	case $rc in
+	0)	PATCHES_SAID=$(sed -n 's/^ablate: \(all .*\)$/merge-test: ablations: \1/p' <<< "$out")
+		[ -n "$PATCHES_SAID" ] && return 0 ;;
+	2)	PATCHES_SAID=$(sed -n 's/^ablate: \([0-9]* of the .* no longer apply .*\)$/merge-test: ablations: \1 -- WRONG (#769)/p' <<< "$out")
+		[ -n "$PATCHES_SAID" ] && return 1 ;;
+	esac
+	printf '%s\n' "$out" | tail -n 10 >&2
+	PATCHES_SAID="merge-test: ablations: ablate.sh --check-all did not answer (status $rc)"
+	return 2
+}
 if [ $LISTS_ONLY = 1 ]; then
 	lists_cover
 	exit
 fi
+if [ $PATCHES_ONLY = 1 ]; then
+	patches_apply
+	rc=$?
+	echo "$PATCHES_SAID"
+	exit $rc
+fi
 lists_cover || exit 2
+patches_apply
+ROTTEN=$?
+echo "$PATCHES_SAID"
+[ $ROTTEN -le 1 ] || exit 2
 mkdir -p "$OUT"
 
 # #412: the PCID entries' half of judge().  "Not offered" is taken at the
@@ -699,5 +738,9 @@ done <<< "$ENTRIES"
 # as exactly "merge-test: N wrong".
 echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK_WHERE:+:${CAMEBACK_WHERE#,}}"
 echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
+# #769: said again here, beside the totals a reader looks at, and outside the
+# total: ci/job.sh counts that as the entries' WRONG lines, and asks the
+# patches itself.
+echo "$PATCHES_SAID"
 echo "merge-test: $WRONG wrong"
-exit $WRONG
+exit $((WRONG + ROTTEN))

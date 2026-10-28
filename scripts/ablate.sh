@@ -24,6 +24,7 @@
 # Usage:
 #   ablate.sh [--base REV] [--boots N] [--accel tcg,kvm] [--ab] [--keep] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --check [--base REV] PATCH...
+#   ablate.sh --check-all [--base REV]
 #   ablate.sh --plan [--base REV] [--boots N] [--accel L] [--ab] PATCH... [-- RUN-ARGS...]
 #   ablate.sh --make COMMIT PATH...
 #
@@ -35,6 +36,10 @@
 #   --keep       keep the worktrees and their builds afterwards
 #   --check      only say whether each patch still applies to REV, over its
 #                bases, each on its own
+#   --check-all  --check of every patch of this tree's ablations/, and a last
+#                line saying whether all of them still apply, or naming the
+#                ones that do not: the one answer ci/job.sh and
+#                merge-test-x86_64.sh both ask for (#769)
 #   --plan       say what the same command without --plan would build and
 #                boot, and refuse what it would refuse, building nothing
 #   --make       print the reverse of COMMIT's changes to the PATHs, under a
@@ -90,6 +95,7 @@ ACCEL=tcg
 AB=0
 KEEP=0
 CHECK=0
+ALL=0
 PLAN=0
 PATCHES=()
 RUN=()
@@ -106,6 +112,7 @@ while [ $# -gt 0 ]; do
 	--ab)		AB=1; shift ;;
 	--keep)		KEEP=1; shift ;;
 	--check)	CHECK=1; shift ;;
+	--check-all)	CHECK=1; ALL=1; shift ;;
 	--plan)		PLAN=1; shift ;;
 	--)		shift; RUN=("$@"); break ;;
 	-*)		die 2 "unknown option $1" ;;
@@ -113,6 +120,14 @@ while [ $# -gt 0 ]; do
 			PATCHES+=("$(realpath "$1")"); shift ;;
 	esac
 done
+# #769: every patch of the tree's own ablations/, which is what a merge rots.
+if [ $ALL = 1 ]; then
+	[ ${#PATCHES[@]} -eq 0 ] || die 2 "--check-all takes no patch: it asks every one of ablations/"
+	for p in "$REPO"/ablations/*.patch; do
+		[ -e "$p" ] && PATCHES+=("$(realpath "$p")")
+	done
+	[ ${#PATCHES[@]} -gt 0 ] || die 2 "no patch in $REPO/ablations"
+fi
 [ ${#PATCHES[@]} -gt 0 ] || die 2 "no patch given"
 case "$BOOTS" in
 ''|*[!0-9]*|0)	die 2 "--boots takes a number of boots, not '$BOOTS'" ;;
@@ -204,6 +219,7 @@ mkdir -p "$DIR"
 # Whether the patches apply to REV, in order, each on top of the ones before:
 # checked on a scratch index, so nothing is checked out.  A patch that no
 # longer applies has rotted, and is the moment to look at the test again.
+ROTTED_NAMES=()
 check_applies() {
 	local idx="$DIR/.index.$$" err="$DIR/.apply.$$" p bad=0
 
@@ -215,6 +231,7 @@ check_applies() {
 		else
 			echo "ablate: $(basename "$p") NO LONGER APPLIES to $SHORT -- regenerate it, and check that the test still catches the defect" >&2
 			sed 's/^/    /' "$err" >&2
+			ROTTED_NAMES+=("$(basename "$p")")
 			bad=1
 		fi
 	done
@@ -232,6 +249,18 @@ if [ $CHECK = 1 ]; then
 		with_bases "$p"
 		check_applies "${EXPANDED[@]}" || bad=1
 	done
+	# #769: the answer, one line, each name once.  A widen is asked on its
+	# own and again under every patch over it, and an ablation whose hunks
+	# need its widen's lines fails with it and is named beside it, as
+	# ci/job.sh named them.
+	if [ $ALL = 1 ]; then
+		if [ $bad = 0 ]; then
+			echo "ablate: all ${#PATCHES[@]} patches of ablations/ still apply to $SHORT"
+		else
+			rotted=$(printf '%s\n' "${ROTTED_NAMES[@]}" | sort -u)
+			echo "ablate: $(wc -l <<< "$rotted") of the ${#PATCHES[@]} patches of ablations/ no longer apply to $SHORT -- regenerate them: $(paste -sd' ' <<< "$rotted")"
+		fi
+	fi
 	exit $((bad * 2))
 fi
 

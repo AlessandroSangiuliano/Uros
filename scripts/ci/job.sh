@@ -687,15 +687,17 @@ esac
 # A merge that moves the code under a patch rots it, and #661's merge rotted
 # 666-early-not-drawn with nothing to say so until a sweep asked, three days
 # later.  A rotted patch is named, and fails the job once its boots are done.
+# #769: asked of ablate.sh --check-all, which the merge test asks as well: the
+# question a merge is decided on is this one, from the same place.
 scratch=$(mktemp -d) || die 3 "cannot create a scratch directory"
-CHECK=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --check "$REPO"/ablations/*.patch 2>&1)
+CHECK=$(UROS_ABLATE_DIR=$scratch "$REPO/scripts/ablate.sh" --check-all 2>&1)
 CHECK_RC=$?
 rm -rf "$scratch"
 NPATCHES=$(ls "$REPO"/ablations/*.patch | wc -l)
-ROTTED=$(sed -n 's/^ablate: \([^ ]*\) NO LONGER APPLIES.*/\1/p' <<< "$CHECK" | sort -u | paste -sd' ')
+ROTTED=$(sed -n 's/^ablate: [0-9]* of the [0-9]* patches of ablations\/ no longer apply to [^ ]* -- regenerate them: //p' <<< "$CHECK")
 if [ $CHECK_RC != 0 ] && [ -z "$ROTTED" ]; then
 	printf '%s\n' "$CHECK" | tail -n 20 >&2
-	die 3 "ablate.sh --check failed (status $CHECK_RC) without naming a patch"
+	die 3 "ablate.sh --check-all failed (status $CHECK_RC) without naming a patch"
 fi
 if [ -n "$ROTTED" ]; then
 	echo "job: ablations: patches that no longer apply to $TREE -- regenerate them: $ROTTED"
