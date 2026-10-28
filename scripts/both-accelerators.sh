@@ -6,44 +6,47 @@
 # Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
 # SPDX-License-Identifier: MIT
 #
-# Uso:
-#   ./scripts/both-accelerators.sh x86-64 [--entry N] [secondi]
-#   ./scripts/both-accelerators.sh i386   [secondi] [argomenti per smoke-ush.sh]
+# Usage:
+#   ./scripts/both-accelerators.sh x86-64 [--entry N] [seconds]
+#   ./scripts/both-accelerators.sh i386   [seconds] [arguments for smoke-ush.sh]
 #
-# I secondi sono il budget di UNA run, non delle due.
+# The seconds are the budget of ONE run, not of the two.
 #
-# I log finiscono in ~/uros-tests/both-<target>-<accel>.log e restano.
+# The logs end up in ~/uros-tests/both-<target>-<accel>.log and stay there.
 #
-# ── Perche' esiste ────────────────────────────────────────────────────
+# ── Why it exists ─────────────────────────────────────────────────────
 #
-# 🔑 Ogni risultato x86-64 di questo porto e' stato preso sotto TCG, e ogni
-# risultato i386 sotto KVM.  Nessuno dei due target e' mai stato misurato sotto
-# entrambi, e ciascuno ha visto solo quello che l'altro non vede mai.
+# 🔑 Every x86-64 result of this port was taken under TCG, and every i386
+# result under KVM.  Neither target was ever measured under both, and each has
+# seen only what the other never sees.
 #
-# Le divergenze note finora sono TRE, e non hanno tutte la stessa forma:
+# The divergences known so far are THREE, and they do not all have the same
+# shape:
 #
-#   #477  TCG accetta un `iretq' con SS.RPL != CS.RPL  ⇒ nasconde un difetto
-#   #432  TCG accetta la store di un processore alla propria pagina APIC
-#         come se fosse un messaggio                    ⇒ nasconde un difetto
-#   #515  TCG NON alza #XF per un'eccezione SIMD non mascherata
-#                                                       ⇒ INVENTA un difetto
+#   #477  TCG accepts an `iretq' with SS.RPL != CS.RPL  ⇒ hides a defect
+#   #432  TCG accepts a processor's store to its own APIC page
+#         as if it were a message                       ⇒ hides a defect
+#   #515  TCG does NOT raise #XF for an unmasked SIMD exception
+#                                                       ⇒ INVENTS a defect
 #
-# 🔴 Le prime due sono l'emulatore permissivo: fa passare cio' che l'hardware
-# rifiuterebbe, e il kernel sembra sano.  La terza e' l'opposto: non alza cio'
-# che l'hardware alza, e un kernel corretto sembra rotto.  La seconda forma e'
-# peggio per l'abitudine, perche' insegna a ignorare un braccio rosso.
+# 🔴 The first two are the permissive emulator: it lets through what the
+# hardware would refuse, and the kernel looks sound.  The third is the
+# opposite: it does not raise what the hardware raises, and a correct kernel
+# looks broken.  The second form is worse for the habit, because it teaches
+# ignoring a red arm.
 #
-# ── Cosa NON fa ───────────────────────────────────────────────────────
+# ── What it does NOT do ───────────────────────────────────────────────
 #
-# 🔴 Non sceglie un vincitore.  Una divergenza e' un reperto, e risolverla
-# prendendo l'acceleratore che passa vuol dire buttare via l'unica cosa che
-# questo confronto produce.  Lo script stampa entrambe le versioni e si ferma.
-# ⚠️ E nessuno dei due e' il ferro: in #477 e #432 aveva ragione KVM, il che e'
-# prova su QUEI due casi e non una classifica.  Solo il bare metal decide.
+# 🔴 It does not pick a winner.  A divergence is a finding, and resolving it
+# by taking the accelerator that passes means throwing away the one thing this
+# comparison produces.  The script prints both versions and stops.
+# ⚠️ And neither of the two is the hardware: in #477 and #432 KVM was right,
+# which is proof about THOSE two cases and not a ranking.  Only bare metal
+# decides.
 #
-# ⚠️ KVM non sostituisce TCG.  Su un difetto raro o di timing SMP accelerare
-# CAMBIA l'esperimento, e quelle cacce vogliono TCG.  Questo aggiunge una run,
-# non ne toglie una.
+# ⚠️ KVM does not replace TCG.  On a rare defect or an SMP timing one,
+# speeding up CHANGES the experiment, and those hunts want TCG.  This adds a
+# run, it does not take one away.
 
 set -u
 
@@ -54,51 +57,52 @@ mkdir -p "$OUT"
 TARGET=${1:-}
 case "$TARGET" in
 x86-64|i386)	shift ;;
-*)		echo "uso: $0 x86-64|i386 [argomenti]" >&2; exit 2 ;;
+*)		echo "usage: $0 x86-64|i386 [arguments]" >&2; exit 2 ;;
 esac
 
-# Un backstop, e SOLO un backstop.
+# A backstop, and ONLY a backstop.
 #
-# 🔴 I timeout veri stanno dentro l'harness che aspetta: smoke-ush.exp sa se
-# sta aspettando un banner, un prompt o un comando, e ha un budget per
-# ciascuno.  Questo qui non sa niente -- esiste per il caso in cui sia
-# `expect' stesso a piantarsi -- quindi deve stare COMODAMENTE SOPRA e mai
-# accanto ai suoi.
+# 🔴 The real timeouts live inside the harness that waits: smoke-ush.exp knows
+# whether it is waiting for a banner, a prompt or a command, and has a budget
+# for each.  This one knows nothing -- it exists for the case where `expect'
+# itself hangs -- so it must sit COMFORTABLY ABOVE theirs and never next to
+# them.
 #
-# ⚠️ La prima versione lo metteva a 1200, cioe' appena sopra il budget di boot
-# che avevo alzato a 900: un secondo giudice che non ha visto niente e taglia
-# per primo.  Se fosse scattato avrebbe troncato la run a meta' dei comandi e
-# prodotto proprio il confronto-fra-troncati contro cui questo script stampa
-# un avviso.  Misurato dopo: il boot costa 19 s sotto TCG e 22 sotto KVM, quindi
-# i 900 non servivano e il problema era la scelta del numero, non il numero.
+# ⚠️ The first version set it at 1200, just above the boot budget I had raised
+# to 900: a second judge that has seen nothing and cuts first.  Had it fired it
+# would have truncated the run halfway through the commands and produced the
+# very comparison between truncated runs this script prints a warning against.
+# Measured afterwards: the boot costs 19 s under TCG and 22 under KVM, so the
+# 900 was not needed and the problem was the choice of the number, not the
+# number.
 BUDGET=1800
 case "${1:-}" in
 [0-9]*)	BUDGET=$1
 	[ "$TARGET" = i386 ] && shift ;;
 esac
 
-# ── Le due run ────────────────────────────────────────────────────────
+# ── The two runs ──────────────────────────────────────────────────────
 #
-# 🔴 SENZA `set -e', e non e' una svista: una run che FALLISCE e' il dato, non
-# un errore dello script.  Interrompersi al primo rosso vorrebbe dire non
-# arrivare mai a confrontare i due, che e' esattamente il caso in cui il
-# confronto serve di piu'.
+# 🔴 WITHOUT `set -e', and that is not an oversight: a run that FAILS is the
+# data, not an error of the script.  Stopping at the first red would mean never
+# getting to compare the two, which is exactly the case where the comparison
+# is needed most.
 #
-# ⚠️ In sequenza e mai in parallelo: una QEMU per volta.  Due macchine che si
-# contendono la CPU dell'host cambierebbero il timing di entrambe, e la lenta
-# delle due e' quella che gia' fatica a stare nel budget.
-# 🔴 SU i386 SI CONFRONTA LA SMOKE, non un boot nudo, e la ragione e' che UNA
-# RUN CHE NON FINISCE NON SI PUO' CONFRONTARE.
+# ⚠️ In sequence and never in parallel: one QEMU at a time.  Two machines
+# fighting over the host's CPU would change the timing of both, and the slow
+# one of the two is the one that already struggles to fit in the budget.
+# 🔴 ON i386 THE SMOKE IS COMPARED, not a bare boot, and the reason is that A
+# RUN THAT DOES NOT END CANNOT BE COMPARED.
 #
-# run-x86_64.sh sa quando la sua run e' finita: il kernel annuncia un
-# terminatore e lo script lo aspetta.  run-qemu.sh no -- boota fino al prompt
-# di ush e resta li', quindi ogni run i386 nuda brucia il budget e viene
-# uccisa, sotto entrambi gli acceleratori.  Provato: 900 s per braccio, TCG 124
-# e KVM 124, e i due "concordavano" su un insieme TRONCATO.
+# run-x86_64.sh knows when its run is over: the kernel announces a terminator
+# and the script waits for it.  run-qemu.sh does not -- it boots to ush's prompt
+# and stays there, so every bare i386 run burns the budget and gets killed,
+# under both accelerators.  Tried: 900 s per arm, TCG 124 and KVM 124, and the
+# two "agreed" on a TRUNCATED set.
 #
-# La smoke e' la sola run i386 che finisce da sola, perche' e' l'unica che
-# DIGITA `shutdown'.  Quindi e' anche la sola che due acceleratori possano
-# confrontare onestamente.
+# The smoke is the only i386 run that ends by itself, because it is the only
+# one that TYPES `shutdown'.  So it is also the only one that two accelerators
+# can honestly compare.
 TCG_LOG=$OUT/both-$TARGET-tcg.log
 KVM_LOG=$OUT/both-$TARGET-kvm.log
 
@@ -118,15 +122,15 @@ esac
 echo "=== both-accelerators: $TARGET, now KVM ==="
 case "$TARGET" in
 x86-64)
-	# 🔴 --kvm, E NON `-enable-kvm' IN CODA (#567).  Tutto cio' che segue il
-	# primo argomento posizionale va a qemu, e il primo posizionale e' il
-	# budget: senza secondi in "$@" il flag finiva NELLO SLOT DEL BUDGET.
-	# run-x86_64.sh lo accettava, stampava `budget: -enable-kvms', faceva
-	# zero secondi e falliva con "NOTHING ARRIVED" -- una frase su un
-	# kernel, per una qemu mai avviata.  Quindi il braccio KVM di questo
-	# script non ha MAI girato sotto KVM, e il confronto che stampava era
-	# fra un acceleratore e il nulla.  Ora il flag e' un'opzione e non puo'
-	# finire in nessuno slot.
+	# 🔴 --kvm, AND NOT `-enable-kvm' AT THE END (#567).  Everything after the
+	# first positional argument goes to qemu, and the first positional is the
+	# budget: with no seconds in "$@" the flag ended up IN THE BUDGET'S SLOT.
+	# run-x86_64.sh accepted it, printed `budget: -enable-kvms', ran for
+	# zero seconds and failed with "NOTHING ARRIVED" -- a sentence about a
+	# kernel, for a qemu that was never started.  So this script's KVM arm
+	# NEVER ran under KVM, and the comparison it printed was between an
+	# accelerator and nothing.  Now the flag is an option and cannot end up
+	# in any slot.
 	UROS_X86_64_LOG=$KVM_LOG "$SCRIPT_DIR/run-x86_64.sh" --kvm "$@"
 	KVM_RC=$?
 	;;
@@ -137,24 +141,24 @@ i386)
 	;;
 esac
 
-# ── Cosa si confronta, e cosa si normalizza ───────────────────────────
+# ── What is compared, and what is normalized ──────────────────────────
 #
-# Si confrontano le righe che AFFERMANO UN ESITO, non i log interi: due boot
-# della stessa immagine differiscono in indirizzi, cicli e microsecondi senza
-# che nessuna di quelle differenze sia una divergenza fra acceleratori.
+# The lines that STATE AN OUTCOME are compared, not the whole logs: two boots
+# of the same image differ in addresses, cycles and microseconds without any
+# of those differences being a divergence between accelerators.
 #
-# 🔴 E si normalizza il MENO possibile, perche' la normalizzazione e' il punto
-# in cui un confronto puo' mentire.  Vanno via solo due cose, entrambe volatili
-# per costruzione:
+# 🔴 And as LITTLE as possible is normalized, because normalization is the
+# place where a comparison can lie.  Only two things go, both volatile by
+# construction:
 #
-#   - gli indirizzi esadecimali, che cambiano fra due boot qualunque;
-#   - i numeri che portano un'unita' di tempo (us/op, ns/op, cicli, ms),
-#     perche' KVM e TCG differiscono li' di due ordini di grandezza ED E'
-#     ATTESO -- quella non e' la divergenza che questo script cerca.
+#   - hexadecimal addresses, which change between any two boots;
+#   - numbers that carry a unit of time (us/op, ns/op, cycles, ms), because
+#     KVM and TCG differ there by two orders of magnitude AND THAT IS
+#     EXPECTED -- that is not the divergence this script looks for.
 #
-# ⚠️ Gli interi NUDI restano.  `code 16' e `code 19' differiscono di un numero
-# e sono due guasti diversi: cancellarli renderebbe lo strumento cieco proprio
-# alla forma di divergenza che #515 ha trovato.
+# ⚠️ BARE integers stay.  `code 16' and `code 19' differ by a number and are
+# two different faults: deleting them would make the tool blind to exactly the
+# shape of divergence #515 found.
 findings() {
 	grep -aE 'PASS|FAIL|WRONG|SKIPPED|panic|Assertion failed' "$1" 2>/dev/null \
 	| sed -e 's/0x[0-9a-fA-F][0-9a-fA-F]*/0xX/g' \
@@ -175,10 +179,10 @@ echo "=== both-accelerators: $TARGET ==="
 echo "  TCG: exit $TCG_RC   log $TCG_LOG"
 echo "  KVM: exit $KVM_RC   log $KVM_LOG"
 
-# ⚠️ 124 e' il codice con cui `timeout' uccide: quella run non e' finita, e i
-# suoi reperti sono quelli che ha fatto in tempo a stampare.  Detto qui perche'
-# un confronto fra una run intera e una troncata trova divergenze che sono solo
-# il troncamento.
+# ⚠️ 124 is the code `timeout' kills with: that run did not finish, and its
+# findings are what it managed to print.  Said here because a comparison between
+# a whole run and a truncated one finds divergences that are only the
+# truncation.
 for _rc in "TCG:$TCG_RC" "KVM:$KVM_RC"; do
 	case "$_rc" in
 	*:124)	echo "  ⚠️ ${_rc%%:*} hit the ${BUDGET}s budget and was killed —"
@@ -189,9 +193,9 @@ for _rc in "TCG:$TCG_RC" "KVM:$KVM_RC"; do
 done
 
 if [ -z "$ONLY_TCG" ] && [ -z "$ONLY_KVM" ]; then
-	# ⚠️ "Agree" e non "pass": i due possono concordare su un fallimento, e
-	# quello e' un difetto del kernel che entrambi vedono -- il caso piu'
-	# facile da leggere e il piu' facile da confondere con un verde.
+	# ⚠️ "Agree" and not "pass": the two can agree on a failure, and that is
+	# a kernel defect both of them see -- the case easiest to read and the
+	# easiest to confuse with a green.
 	echo "  the two accelerators AGREE on every outcome line"
 	echo "  (which says nothing about whether those outcomes were good)"
 	exit 0
