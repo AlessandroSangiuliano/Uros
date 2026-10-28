@@ -20,7 +20,6 @@
 #include <mach/kern_return.h>
 #include <kern/misc_protos.h>
 #include <kern/lock.h>
-#include <kern/cpu_number.h>		/* printf_lock_holder, #599 */
 #include <device/conf.h>
 #include <device/io_req.h>
 #include <device/ds_routines.h>	/* device_write_get (#578) */
@@ -32,16 +31,13 @@ extern void com_putc(char c);
 extern void cpu_shutdown(void);
 
 /*
- * Shared with kern/printf.c: the single console serialization lock.  Kernel
- * printf() already holds it for the duration of one message; taking the same
- * lock here makes each userspace console write() atomic too, so concurrent
- * writers (servers, the shell, benchmarks) on different CPUs cannot interleave
- * their bytes character-by-character on the COM1 line.  On a uniprocessor
- * simple_lock is a no-op and an in-kernel write runs to completion without a
- * voluntary switch, so no interleaving is possible there anyway.
+ * Shared with kern/printf.c: the single console serialization lock, taken
+ * through printf_writer_take() (#757), which also keeps a line a line --
+ * another writer's open line is closed with a mark, and the rest of this
+ * writer's own cut line goes on behind one.  Kernel printf() takes it the same
+ * way, so a userspace console write() and a kernel line do not interleave
+ * their bytes character by character on the COM1 line.
  */
-decl_simple_lock_data(extern, printf_lock)
-extern volatile int	printf_lock_holder;	/* kern/printf.c, #599 */
 
 /* ============================================================
  * Console primitives that used to live in kd.c.  Moved here so
@@ -193,7 +189,8 @@ consolewrite(dev_t dev, io_req_t ior)
 	 * switch.  Same shape as x86-64's consolewrite().
 	 */
 	while (n > 0) {
-		unsigned int k;
+		unsigned int k, wrote;
+		char last;
 
 		for (k = 0; k < n && k < CONSOLE_CHUNK; k++)
 			if (p[k] == '\n') {
@@ -201,12 +198,12 @@ consolewrite(dev_t dev, io_req_t ior)
 				break;
 			}
 		n -= k;
-		simple_lock(&printf_lock);
-		printf_lock_holder = cpu_number();	/* #599: see printf.c */
+		wrote = k;
+		last = p[k - 1];
+		printf_writer_take();	/* #757, and #599's holder: printf.c */
 		while (k--)
 			cnputc(*p++);
-		printf_lock_holder = -1;
-		simple_unlock(&printf_lock);
+		printf_writer_give(wrote, last);
 	}
 
 	ior->io_residual = 0;

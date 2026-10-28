@@ -421,6 +421,16 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 		ret_known = 1;
 	}
 
+	/*
+	 * #757: the dump is ONE BLOCK on the console, from its header to its
+	 * last line.  The two threads of a ping-pong dump at the same moment,
+	 * and their lines used to alternate: on omen's metal 43 of intra's 52
+	 * dumps a boot could not be read phase by phase, and a reader that
+	 * went by order would have given one dump's phases to the other's
+	 * header.  Only printing in between: a block's holder must not block.
+	 */
+	printf_block_begin();
+
 	printf("syscall_profile trap %d thread %p dump %u, window %u = traps "
 	       "%u..%u of %u this thread made (%u dropped, %u not sampled: "
 	       "taken off the processor before the entry was read); shapes: %d "
@@ -495,6 +505,8 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	if (p->ndumps >= SP_MAX_DUMPS)
 		printf("syscall_profile: %u breakdowns printed, no more from "
 		       "this thread\n", p->ndumps);
+
+	printf_block_end();
 }
 
 /*

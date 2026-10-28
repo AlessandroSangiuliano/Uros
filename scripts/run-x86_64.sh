@@ -194,6 +194,18 @@ PANIC_RE='panic\(cpu|cpu [0-9]+ backtrace \(addr2line'
 # rest of this file has run.
 
 verdict() {
+# 🔑 #757: JUDGED ON THE CONSOLE AS ITS WRITERS WROTE IT.  The kernel no longer
+# splices a line: a writer that prints into another writer's open line closes
+# it with " <-cut [W]" first, and W's rest comes later behind "[W]-> ".  A
+# check that looks for a whole line -- a test's PASS, a must_report pair --
+# would miss one cut in two.  So everything below reads the log with those
+# lines rejoined (scripts/rejoin-lines.awk), and the log itself keeps the
+# marks: they are the record of who broke in where.  RAWLOG is that log, and
+# the one named to whoever reads the verdict.
+RAWLOG=$LOG
+LOG=$RAWLOG.joined
+awk -f "$REPO/scripts/rejoin-lines.awk" "$RAWLOG" > "$LOG"
+
 # 🔑 Read out of the LOG and not out of the live variable, so that --judge on a
 # log taken weeks ago says what made it.  A log with no conditions block is one
 # from before #516, and saying so is the honest answer -- not guessing TCG
@@ -264,6 +276,14 @@ DEATHS=$(grep -a 'exception_no_server: terminating task' "$LOG" || true)
 # named as one -- the wire had two writers inside a line, whatever passed.
 GARBLED=$(awk -f "$REPO/scripts/garbled-lines.awk" "$LOG" | sed 's/^/GARBLED (#578): line /')
 [ -n "$GARBLED" ] && BAD=$(printf '%s\n%s' "$BAD" "$GARBLED" | sed '/^$/d')
+# #757: a dump of the IPC profile whose lines another dump's broke into is a
+# failure too -- a reader going by order gives one dump's phases to the other's
+# header, and nothing else in the log says so.  Asked of the rejoined log, as
+# everything here is, and only of a log that has dumps.
+if grep -aq '^syscall_profile trap ' "$LOG"; then
+	DUMPS=$(awk -f "$REPO/scripts/profile-dumps-check.awk" "$LOG" | grep -a 'WRONG' || true)
+	[ -n "$DUMPS" ] && BAD=$(printf '%s\n%s' "$BAD" "$DUMPS" | sed '/^$/d')
+fi
 # #661: a line with a character the screen draws as the replacement, because
 # its font has no glyph for it.  That line does not read on the screen as on
 # the wire, and on a machine with no serial port the screen is all there is.
@@ -307,7 +327,7 @@ if grep -aq "$MI_ENTRY" "$LOG"; then
 		echo "          handler.  Everything before setup_main passed; what"
 		echo "          follows is the first thing this kernel got wrong:"
 		awk "/$MI_ENTRY/,0" "$LOG" | sed -n '2,20p' | sed 's/^/    /'
-		echo "  log: $LOG"
+		echo "  log: ${RAWLOG:-$LOG}"
 		exit 1
 	fi
 	# ⚠️ The excuse that used to live here is GONE, and its removal is the
@@ -319,7 +339,7 @@ if grep -aq "$MI_ENTRY" "$LOG"; then
 		echo "  FAILED: stopped at bootstrap_create.  A 64-bit boot image"
 		echo "          loads and runs since #422 -- this used to be the"
 		echo "          expected end and is now a regression."
-		echo "  log: $LOG"
+		echo "  log: ${RAWLOG:-$LOG}"
 		exit 1
 	fi
 	# ⚠️ Unless this boot IS the preemption test, on a machine with one
@@ -336,7 +356,7 @@ if grep -aq "$MI_ENTRY" "$LOG"; then
 		echo "  FAILED: entered setup_main and neither reached the first"
 		echo "          thread nor trapped -- it is wedged, which is the case"
 		echo "          #428 exists for"
-		echo "  log: $LOG"
+		echo "  log: ${RAWLOG:-$LOG}"
 		exit 1
 	fi
 elif grep -aq "$DOUBLE_FAULT" "$LOG"; then
@@ -345,7 +365,7 @@ elif grep -aq "$DOUBLE_FAULT" "$LOG"; then
 	if ! grep -aq "$TERMINATOR" "$LOG"; then
 		echo "  FAILED: the run never reached '$TERMINATOR' — it was cut short, so"
 		echo "          the tests after that point did not run and cannot have passed"
-		echo "  log: $LOG"
+		echo "  log: ${RAWLOG:-$LOG}"
 		exit 1
 	fi
 elif grep -aq "$TERMINATOR" "$LOG"; then
@@ -357,7 +377,7 @@ elif grep -aq "$TERMINATOR" "$LOG"; then
 		| while read -r n; do
 			sed -n "$((n > 24 ? n - 24 : 1)),${n}p" "$LOG" | sed 's/^/    /'
 		done
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1
 elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: ' ||
      { head -1 "$LOG" | grep -qxF "$QEMU_STDERR_HEADER" &&
@@ -379,7 +399,7 @@ elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: ' ||
 	echo "          kernel, and the command line is where to look:"
 	grep -vxF "$QEMU_STDERR_HEADER" "$LOG" | sed -n '1,3p' | sed 's/^/    /'
 	echo "    (arguments passed through: $RUN_ARGS)"
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 3
 elif [ ! -s "$LOG" ] || head -1 "$LOG" | grep -qxF "$QEMU_STDERR_HEADER"; then
 	# Started, said nothing at all -- the guest, that is: qemu's own lines,
@@ -389,13 +409,13 @@ elif [ ! -s "$LOG" ] || head -1 "$LOG" | grep -qxF "$QEMU_STDERR_HEADER"; then
 	echo "  FAILED: qemu started and produced no output whatsoever — the"
 	echo "          serial console never carried a byte, so the kernel was"
 	echo "          never reached"
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 3
 else
 	echo "  FAILED: the run reached neither setup_main nor an end it announces"
 	echo "          — it was cut short, so the tests after that point did not"
 	echo "          run and cannot have passed"
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1
 fi
 
@@ -444,11 +464,11 @@ case $DISKS_RC in
 0)	[ -z "$DISKS" ] || printf '%s\n' "$DISKS" ;;
 1)	printf '%s\n' "$DISKS"
 	missing_line_context
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1 ;;
 *)	echo "  FAILED: the disk controllers could not be asked (disks-attached.sh, exit $DISKS_RC):"
 	printf '%s\n' "$DISKS" | sed 's/^/    /'
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1 ;;
 esac
 
@@ -486,7 +506,7 @@ must_report() {
 	echo "  FAILED: '$1' appeared and '$2' never did."
 	echo "          $3"
 	missing_line_context
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1
 }
 
@@ -744,7 +764,7 @@ if grep -aq "$MI_ENTRY" "$LOG" && ! grep -aq 'state_test:' "$LOG"; then
 	echo "          never reported.  It runs unconditionally from"
 	echo "          machine_kernel_ready(), so silence means it was not"
 	echo "          reached (#408)"
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1
 fi
 
@@ -756,9 +776,9 @@ if [ "$NBAD" -gt 0 ]; then
 	# is, and that is read from the log by its own check.
 	if grep -aq 'double_panic: processors' "$LOG"; then
 		echo "  (this boot panicked on purpose, -Z: its verdict is"
-		echo "   scripts/double-panic-check.sh $LOG)"
+		echo "   scripts/double-panic-check.sh ${RAWLOG:-$LOG})"
 	fi
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1
 fi
 
@@ -1468,10 +1488,16 @@ CUT_REASON=
 # So do not choose.  A run is over when everything that announced itself has
 # also concluded -- which is the same set must_report judges afterwards, asked
 # a few seconds earlier so the machine is not killed mid-sentence.
+#
+# #757: asked of the log with its cut lines rejoined, as verdict() asks it: a
+# closing line another writer cut is still a closing line, and waiting for it
+# whole would hold the run to its budget for a line that already arrived.
 all_reported() {
 	# $1 the "started" pattern · $2 the "finished" pattern, in pairs
+	awk -f "$REPO/scripts/rejoin-lines.awk" "$LOG" > "$LOG.live-joined"
 	while [ $# -ge 2 ]; do
-		if grep -aq "$1" "$LOG" && ! grep -aq "$2" "$LOG"; then
+		if grep -aq "$1" "$LOG.live-joined" &&
+		   ! grep -aq "$2" "$LOG.live-joined"; then
 			return 1
 		fi
 		shift 2
@@ -1483,8 +1509,10 @@ all_reported() {
 # its closing line.  #578: a boot whose `cap_test: ALL TESTS PASSED' arrived in
 # two pieces waited 150 s for it and was then called "nothing arrived".
 missing_reports() {
+	awk -f "$REPO/scripts/rejoin-lines.awk" "$LOG" > "$LOG.live-joined"
 	while [ $# -ge 2 ]; do
-		if grep -aq "$1" "$LOG" && ! grep -aq "$2" "$LOG"; then
+		if grep -aq "$1" "$LOG.live-joined" &&
+		   ! grep -aq "$2" "$LOG.live-joined"; then
 			echo "          still waiting for: $2"
 		fi
 		shift 2
@@ -1811,7 +1839,7 @@ if [ "$CUT_SHORT" = 1 ]; then
 		echo "          pieces (#578, #544):"
 		printf '%s\n' "$_garbled" | sed 's/^/            /'
 	fi
-	echo "  log: $LOG"
+	echo "  log: ${RAWLOG:-$LOG}"
 	exit 1
 fi
 

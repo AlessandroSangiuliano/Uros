@@ -145,6 +145,24 @@ extern void printf(const char *format, ...)
 
 extern void printf_init(void);
 
+/*
+ * #757: the console shared by every processor (kern/printf.c says why).
+ *
+ *   printf_writer_take()   printf_lock for one writer's turn, after any other
+ *                          thread's block, with the marks of a line it cuts
+ *                          or goes on with -- for every writer of the console
+ *                          beside printf(): consolewrite(), on both targets.
+ *   printf_writer_give()   and back: n characters written, `last' the last.
+ *   printf_block_begin()   a report of several lines as one block: every
+ *   printf_block_end()     other thread waits; interrupts do not, and are
+ *                          marked.  Thread context; the holder must not
+ *                          block inside.
+ */
+extern void printf_writer_take(void);
+extern void printf_writer_give(unsigned int n, char last);
+extern void printf_block_begin(void);
+extern void printf_block_end(void);
+
 extern void panic(const char *string, ...)
 	__attribute__((format(printf, 1, 2)));
 

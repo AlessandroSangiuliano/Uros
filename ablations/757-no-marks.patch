@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #757
+Takes out: the marks -- printf_lines_turn_begin() returns at once, so another writer's open line is not closed and a cut line's rest is not marked: printf() and consolewrite() splice lines in silence again, as before #757; the self-test of the marks, which asks their rules at every boot, must say so
+Run: --entry 0 300 -smp 4
+Expect: printf: lines: [0-9]+ cases of the console's marks, [1-9][0-9]* wrong -- WRONG \(#757\)
+
+diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
+index 15e89de2..fb2e10a5 100644
+--- a/uros/src/mach_kernel/kern/printf.c
++++ b/uros/src/mach_kernel/kern/printf.c
+@@ -1145,6 +1145,9 @@ printf_lines_turn_begin(struct printf_lines *L, printf_writer_t w,
+ {
+ 	unsigned int	i, free_slot;
+ 
++	/* ABLATION (#757): no marks -- another writer's open line is not
++	 * closed and a cut line's rest is not marked, as before #757. */
++	return;
+ 	if (L->open != 0 && L->open != w) {
+ 		printf_put_str(" <-cut [", put);
+ 		printf_put_writer(L->open, put);
