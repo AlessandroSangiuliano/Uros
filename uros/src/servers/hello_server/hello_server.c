@@ -475,15 +475,11 @@ main(int argc, char **argv)
      * from crt0 (libmach_core) BEFORE main() runs (#259) — main()'s own
      * %gs:0x14 canary prologue depends on it, so it can't live here.
      *
-     * setvbuf disables stdout buffering: musl's isatty() returns -ENOTTY
-     * from our ioctl stub, which makes musl fall back to fully-buffered
-     * mode — every line then sits in a 1 KB FILE buffer waiting for an
-     * explicit fflush that hello_server never issues (it lives forever in
-     * the IPC loop).  Phase 4 will introduce a real char_server ioctl that
-     * reports TTY status; until then, unbuffered output is the honest
-     * choice for a debug server.
+     * stdout is as musl makes it: line-buffered, because isatty(1) answers
+     * since #402.  Until #764 it was unbuffered here, and unbuffered, musl
+     * hands a line over 80 characters to the console in two writes, with
+     * room for another task's line between them.
      */
-    setvbuf(stdout, NULL, _IONBF, 0);
 
     /*
      * Step 1: Get privileged ports from the bootstrap server.
@@ -507,7 +503,8 @@ main(int argc, char **argv)
 
     /*
      * Step 2/3 (was printf_init + panic_init): no longer needed under the
-     * musl path — printf goes directly through SYS_write to mach_print,
+     * musl path — printf goes through SYS_writev to libposix-uros's console,
+     * and from there to mach_print (#764),
      * and panic() isn't linked from libmach_core (the file is excluded;
      * abort()/_Exit() from musl take its place).  See #251.
      */
@@ -530,12 +527,10 @@ main(int argc, char **argv)
      * line at the NUL: the rest of its piece never went out, and write() said
      * it had.  scripts/suite-i386.sh waits for the words after the NUL.
      *
-     * ⚠️ Each line under 80 characters, because stdout is unbuffered here
-     * and musl then formats into an 80-byte buffer of its own, handing a
-     * longer line over in two writes -- between which another task's line
-     * can land: the arm asks about a NUL, not about where musl cuts.  And
      * printf's count is asked too: every character, the NUL among them, is
-     * what the console's contract says write() returns.
+     * what the console's contract says write() returns.  Its lines were kept
+     * under 80 characters while stdout was unbuffered, because musl then
+     * handed a longer line over in two writes (#764); they need not be now.
      */
     {
 #define	CONSOLE_NUL_LINE "(hello_server): console: a NUL in the middle%c of " \
