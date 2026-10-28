@@ -4,10 +4,10 @@ Holds open: consolewrite()'s printf_lock hold, for an interrupt -- once, after t
 Run: i386, UROS_NCPUS > 1 -- scripts/run-qemu.sh --fresh-disk --smp 4 -display none -serial mon:stdio
 
 diff --git a/uros/src/mach_kernel/i386/AT386/console_cdev.c b/uros/src/mach_kernel/i386/AT386/console_cdev.c
-index 8929d439..e50e17e7 100644
+index b149bb24..26bb756c 100644
 --- a/uros/src/mach_kernel/i386/AT386/console_cdev.c
 +++ b/uros/src/mach_kernel/i386/AT386/console_cdev.c
-@@ -27,6 +27,7 @@
+@@ -26,6 +26,7 @@
  #include <device/device_types.h>
  #include <i386/pio.h>
  #include <i386/AT386/fbcons.h>
@@ -15,14 +15,14 @@ index 8929d439..e50e17e7 100644
  
  extern void com_putc(char c);
  extern void cpu_shutdown(void);
-@@ -203,6 +204,7 @@ consolewrite(dev_t dev, io_req_t ior)
- 		n -= k;
- 		simple_lock(&printf_lock);
- 		printf_lock_holder = cpu_number();	/* #599: see printf.c */
+@@ -201,6 +202,7 @@ consolewrite(dev_t dev, io_req_t ior)
+ 		wrote = k;
+ 		last = p[k - 1];
+ 		printf_writer_take();	/* #757, and #599's holder: printf.c */
 +		clock_watch_ablate_nested_printf();
  		while (k--)
  			cnputc(*p++);
- 		printf_lock_holder = -1;
+ 		printf_writer_give(wrote, last);
 diff --git a/uros/src/mach_kernel/i386/clock_watch.c b/uros/src/mach_kernel/i386/clock_watch.c
 index c4f1e049..573dffa0 100644
 --- a/uros/src/mach_kernel/i386/clock_watch.c
