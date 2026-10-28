@@ -392,7 +392,7 @@ else
 	echo "job: install: nothing (--no-install)"
 fi
 echo "job: configure: cmake -G Ninja -C $PRESET -S $REPO/uros -B $BUILD"
-echo "job: build: ninja -C $BUILD, refused on any 'warning:' line but bison's parser.y conflicts"
+echo "job: build: ninja -C $BUILD, refused on any 'warning:' line"
 # The plan of a job started elsewhere, as the workflow's is, was made on a
 # machine whose /dev/kvm may not be that job's.
 [ $AUTO = 0 ] || echo "job: accelerators: tcg, and kvm wherever /dev/kvm can be opened; here it $KVM"
@@ -453,19 +453,31 @@ if ! ninja -C "$BUILD" > "$OUT/build.log" 2>&1; then
 	tail -n 40 "$OUT/build.log"
 	die 3 "the build failed: $OUT/build.log"
 fi
-WARN=$(grep 'warning:' "$OUT/build.log" | grep -v 'parser.y.*conflicts')
+WARN=$(grep 'warning:' "$OUT/build.log")
 if [ -n "$WARN" ]; then
 	printf '%s\n' "$WARN" | head -n 40
 	die 3 "$(printf '%s\n' "$WARN" | wc -l) warning(s) in the build, which has none at home: $OUT/build.log"
 fi
 # A count of zero is worth something only if the grep could have matched.
-# Every fresh build prints bison's conflicts on migcom's parser.y as a
-# `warning:' line; a fresh log without it is a log the grep cannot read.
+# Until #766 every fresh build printed bison's conflicts on migcom's parser.y
+# as a `warning:' line, and a fresh log without it was a log the grep could
+# not read.  The grammar has none now, and a healthy build warns about
+# nothing, so the control is made on purpose: the compiler the build used
+# warns, in this environment, about a variable it never uses, and the grep
+# must find that `warning:'; and the log must hold ninja's own lines, so that
+# it is the build's output, where any warning would have been printed.
 # An incremental build rebuilds only what changed and prints the warnings
 # of nothing else, and that is said rather than counted as zero.
 if [ $FRESH = 1 ]; then
-	grep -q 'parser.y.*warning:.*conflicts' "$OUT/build.log" ||
-		die 3 "a fresh build and no bison conflicts line in $OUT/build.log: the warning count cannot be trusted"
+	CC_USED=$(sed -n 's/^CMAKE_C_COMPILER:[A-Z]*=//p' "$BUILD/CMakeCache.txt")
+	[ -n "$CC_USED" ] ||
+		die 3 "no CMAKE_C_COMPILER in $BUILD/CMakeCache.txt to make the warning on purpose with: the warning count cannot be trusted"
+	printf 'int ci_canary(void) { int unused; return 0; }\n' > "$OUT/canary.c"
+	"$CC_USED" -Wall -c -o /dev/null "$OUT/canary.c" > "$OUT/canary.log" 2>&1
+	grep -q 'canary.c:.*warning:' "$OUT/canary.log" ||
+		die 3 "$CC_USED did not warn on purpose in $OUT/canary.log, or not as 'warning:': the warning count cannot be trusted"
+	grep -q '^\[[0-9]*/[0-9]*\] ' "$OUT/build.log" ||
+		die 3 "a fresh build and no line of ninja's in $OUT/build.log: the warning count cannot be trusted"
 	echo "job: build: 0 warnings"
 else
 	echo "job: build: $BUILD was already configured, so this build was incremental and its 0 warnings cover only what it recompiled"

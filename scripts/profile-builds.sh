@@ -49,7 +49,7 @@ build() {	# target, extra cmake options...
 		FAILED=$((FAILED + 1))
 		return
 	fi
-	warn=$(grep 'warning:' "$DIR/build-$t.log" | grep -v 'parser.y.*conflicts')
+	warn=$(grep 'warning:' "$DIR/build-$t.log")
 	if [ -n "$warn" ]; then
 		printf '%s\n' "$warn" | head -n 20
 		echo "profile-builds: $t: $(printf '%s\n' "$warn" | wc -l) warning(s) with UROS_SYSCALL_PROFILE on: $DIR/build-$t.log"
