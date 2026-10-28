@@ -3150,10 +3150,10 @@ main(int argc, char **argv)
 	}
 
 	/*
-	 * ⚠️ DISCRIMINATORE #510: la riga lunga stampata in DUE pezzi corti.
-	 * Se compaiono entrambi, la causa e' la LUNGHEZZA; se ne manca uno,
-	 * non lo e'.  La riga da 74 caratteri e' scomparsa due volte su due
-	 * mentre quella da 48 accanto e' sempre arrivata.
+	 * ⚠️ DISCRIMINATOR #510: the long line printed in TWO short pieces.
+	 * If both appear, the cause is the LENGTH; if one is missing, it is
+	 * not.  The 74-character line disappeared twice out of two, while the
+	 * 48-character one beside it always arrived.
 	 */
 	/*
 	 * 🔴 ONE LINE, AND IT IS THE ONE THAT ARRIVES.
