@@ -48,7 +48,7 @@
  * exercises the deadline path on a machine with no tsc_deadline_timer flag at
  * all.  That is the whole reason the second backend was written now rather
  * than "later, on hardware that has it": a backend nothing ever executes is
- * collaudated by nobody, and this tree has already paid for that lesson three
+ * tested by nobody, and this tree has already paid for that lesson three
  * times in one day.
  *
  * WHY ONE-SHOT AT ALL, GIVEN THE COST.  Measured on i386, which has the same
