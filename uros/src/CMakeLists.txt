@@ -133,7 +133,7 @@ if(UROS_BUILD_MUSL)
   add_library(uros_musl_dispatcher INTERFACE)
 endif()
 
-# Per ora costruiamo solo i tool host necessari (mig/migcom, librerie base).
+# For now we build only the host tools we need (mig/migcom, base libraries).
 
 # #406: the userland — host tools, libraries, servers, tests, commands — is
 # i386-only until the x86-64 port carries it across (its own contracts:
@@ -270,7 +270,7 @@ endif()
 # yet, so this changes what the tree BUILDS and not what a boot runs. ipc_bench
 # is what wants it, and it arrives once its child-thread start is written for
 # this target -- a library that compiles is not a library that works, and the
-# consumer is what collaudates the producer (libelf was reported done on a host
+# consumer is what tests the producer (libelf was reported done on a host
 # compile while no build here consumed it).
 #
 # ✅ libvfs IS here now (#553).  It was held out because its fs_stat/fs_fstat
@@ -312,7 +312,7 @@ endif()
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   # ⚠️ libelf was NEVER configured for this target.  Its ELF64 support was
   # written and checked with a host compile, and reported as done -- while no
-  # build here consumed it.  The consumer is what collaudates the producer.
+  # build here consumed it.  The consumer is what tests the producer.
   add_subdirectory(lib/libelf)
   add_subdirectory(lib/libblk)
   add_subdirectory(file_systems)
