@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #764
+Over: 764-widen-console-gap.patch
+Takes out: what #764 changed in libposix-uros's __uros_writev() -- a terminal's pieces go back to being written one by one, through __uros_write(), as before #764.  hello_server's stdout stays line-buffered, so its line arm goes over as writev() of what the buffer holds and " (#764)\n": two console writes, the first leaving the line open, and the widen's line lands in the gap.  scripts/suite-i386.sh never finds the arm's line whole.
+Run: i386 -- UROS_BUILD_DIR=<worktree>/uros/build scripts/suite-i386.sh -r bundle-kvm-4, from a worktree with 764-widen-console-gap.patch and this one, and a build of its own; scripts/ablate.sh cannot judge it
+Expect: never said: \(hello_server\): console: a line of \[0-9\]\* characters
+
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+index 38144c90..fc03fd59 100644
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -733,12 +733,7 @@ long __uros_writev(int fd, const void *iov_ptr, int iovcnt)
+     maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
+     vfs_fd_t vfd = resolve_fd(fd, &err);
+     if (err) return err;
+-    if (vfd == -2) {
+-        for (int i = 0; i < iovcnt; i++)
+-            if (iov[i].len)
+-                return terminal_write(fd, iov, iovcnt);
+-        return 0;
+-    }
++    (void)vfd;       /* 764-ablation: a terminal written piece by piece */
+ 
+     long total = 0;
+     for (int i = 0; i < iovcnt; i++) {
