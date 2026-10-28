@@ -169,6 +169,13 @@ extern void yyerror(char *);
 %left	syPlus syMinus
 %left	syStar syDiv
 
+/*
+ * No conflicts, and bison is told so: a change that brings one back is a build
+ * error, not a line in a build's output that nobody reads when it passes.  The
+ * 42 that were here were a warning for eight months (#766).
+ */
+%expect	0
+
 
 %type	<statement_kind> ImportIndicant
 %type	<number> VarArrayHead ArrayHead StructHead IntExp
@@ -180,7 +187,7 @@ extern void yyerror(char *);
 %type	<direction> Direction TrExplKeyword TrImplKeyword
 %type	<argument> Argument Trailer Arguments ArgumentList
 %type	<flag> IPCFlags
-%type	<identifier> ArgumentName
+%type	<identifier> ArgumentName PlainName
 
 %{
 
@@ -651,6 +658,24 @@ ArgumentList		:	Argument
 }
 			;
 
+/*
+ * 🔑 A KEYWORD THAT OPENS AN ARGUMENT IS NOT ITS NAME, UNLESS A KEYWORD COMES
+ * FIRST (#766).
+ *
+ * MIG's keywords may name an argument (75fe4cd3): device.defs says
+ * `sreplyport reply_port : reply_port_t', and the lexer makes reply_port the
+ * keyword.  While Direction could be empty, every keyword that opens an
+ * argument -- a direction, a port keyword, a trailer keyword -- was also a
+ * name with no direction before it, and bison chose between the two readings
+ * 42 times with nothing in the grammar to say so.  It shifted: the keyword
+ * opened the argument, and `in : int' was a syntax error under an
+ * ArgumentName that listed `in'.
+ *
+ * The choice is now written here.  An argument with no direction has a
+ * PlainName, a name no argument opens with, and a keyword is a name only after
+ * a keyword: `out in : int'.  The language is the one bison's choice made, and
+ * bison has nothing left to choose.
+ */
 Argument		:	Direction ArgumentName ArgumentType IPCFlags
 {
     $$ = argAlloc();
@@ -658,6 +683,14 @@ Argument		:	Direction ArgumentName ArgumentType IPCFlags
     $$->argName = $2;
     $$->argType = $3;
     $$->argFlags = $4;
+}
+			|	PlainName ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akNone;
+    $$->argName = $1;
+    $$->argType = $2;
+    $$->argFlags = $3;
 }
 			|	syReplyPort ArgumentType IPCFlags
 {
@@ -711,8 +744,7 @@ Trailer			:	TrExplKeyword ArgumentName ArgumentType
 			;
 
 
-Direction		:	/* empty */	{ $$ = akNone; }
-			|	syIn		{ $$ = akIn; }
+Direction		:	syIn		{ $$ = akIn; }
 			|	syOut		{ $$ = akOut; }
 			|	syInOut		{ $$ = akInOut; }
 			|	syRequestPort	{ $$ = akRequestPort; }
@@ -723,7 +755,14 @@ Direction		:	/* empty */	{ $$ = akNone; }
 			|	syMsgOption	{ $$ = akMsgOption; }
 			;
 
-ArgumentName		:	syIdentifier	{ $$ = $1; }
+/* The names that need no keyword before them: none of them opens an argument. */
+PlainName		:	syIdentifier	{ $$ = $1; }
+			|	syType		{ $$ = strmake("type"); }
+			|	syArray		{ $$ = strmake("array"); }
+			|	syOf		{ $$ = strmake("of"); }
+			;
+
+ArgumentName		:	PlainName	{ $$ = $1; }
 			|	syIn		{ $$ = strmake("in"); }
 			|	syOut		{ $$ = strmake("out"); }
 			|	syInOut		{ $$ = strmake("inout"); }
@@ -734,9 +773,6 @@ ArgumentName		:	syIdentifier	{ $$ = $1; }
 			|	syWaitTime	{ $$ = strmake("waittime"); }
 			|	syMsgOption	{ $$ = strmake("msgoption"); }
 			|	syMsgSeqno	{ $$ = strmake("msgseqno"); }
-			|	syType		{ $$ = strmake("type"); }
-			|	syArray		{ $$ = strmake("array"); }
-			|	syOf		{ $$ = strmake("of"); }
 			|	syServerImpl	{ $$ = strmake("serverimpl"); }
 			|	syUserImpl	{ $$ = strmake("userimpl"); }
 			|	syServerSecToken { $$ = strmake("serversectoken"); }
