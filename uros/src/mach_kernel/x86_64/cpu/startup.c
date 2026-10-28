@@ -43,6 +43,7 @@
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <time/rcu_tick_test.h>	/* #649: -U */
 #include <cpu/sprintf_test.h>	/* #655: -K */
+#include <cpu/console_marks_test.h>	/* #757: the marks, on the console */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <cpu/census_test.h>	/* #657: -c */
 #include <cpu/clock_pins_test.h>	/* #600: the clock's pins are not a line's */
@@ -605,6 +606,15 @@ machine_processors_ready(void)
 		 * number is the line's and not the boot's.
 		 */
 		cons_cost_report();
+
+		/*
+		 * The console's marks on the console itself (#757): two
+		 * threads cut each other's lines through printf() and
+		 * consolewrite(), and the ring says whether the marks came
+		 * out.  Every boot, and here because a second thread can run
+		 * and the other processors are idle.
+		 */
+		console_marks_test();
 
 		/*
 		 * -P on a machine with more than one processor: prove that an
