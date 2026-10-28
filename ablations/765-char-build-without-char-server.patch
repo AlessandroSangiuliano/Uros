@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #765
+Takes out: char_server from the char build -- char_build() configures it with the given build's options and no more, OSFMK_BUILD_CHAR_SERVER off as that build has it, so the entry marked @char boots the default bundle.  The harness passes that boot, as it passes every entry-14 boot of the default build; the merge test's char verdict asks for COM1's handover, the klog forwarder's start and char_test's count, finds none of them, and says WRONG.  A verdict that asked only for the harness's would pass it.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 14
+Script: -G
+Expect: merge-test: entry 14 kvm -smp 4 \(@char\) -- WRONG \(char\)
+Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take.  The arm's patch is in the merge test itself, which ablate.sh runs from the arm's tree.  Read in the ablated arm's full log for the char build that the boot passed the harness and has no "char_test: started".
+
+diff --git a/scripts/merge-test-x86_64.sh b/scripts/merge-test-x86_64.sh
+index 97fe85d6..301cad19 100755
+--- a/scripts/merge-test-x86_64.sh
++++ b/scripts/merge-test-x86_64.sh
+@@ -555,12 +555,11 @@ char_build() {
+ 		rest=${l#*:}
+ 		t=${rest%%=*}
+ 		v=${rest#*=}
+-		[ "$n" = OSFMK_BUILD_CHAR_SERVER ] && continue
+ 		opts+=("-D$n:$t=$v")
+ 	done < <(grep -E '^(OSFMK|UROS)_[A-Z0-9_]*:(BOOL|STRING|UNINITIALIZED)=' "$cache" | grep -v '_LAST:')
+ 	[ -f "$CHAR_BUILD/build.ninja" ] || fresh=1
+ 	if ! cmake -S "$src" -B "$CHAR_BUILD" -G "$gen" -DCMAKE_BUILD_TYPE="$bt" "${opts[@]}" \
+-		-DOSFMK_BUILD_CHAR_SERVER=ON > "$OUT/char-build-configure.log" 2>&1; then
++		> "$OUT/char-build-configure.log" 2>&1; then
+ 		CHAR_REFUSED="the char build did not configure: $OUT/char-build-configure.log"
+ 		return
+ 	fi
