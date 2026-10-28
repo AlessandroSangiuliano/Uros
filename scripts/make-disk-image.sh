@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# make-disk-image.sh — Crea un'immagine disco per OSFMK/Uros (#224)
+# make-disk-image.sh — Creates a disk image for OSFMK/Uros (#224)
 #
-# Genera un disco MBR con tre partizioni, layout compatibile con il
-# block_device_server modulare (ahci.so) — niente più disco IDE:
-#   disk0a (MBR entry 0) — ext2  — /mach_servers/ con config e binari
+# Generates an MBR disk with three partitions, a layout compatible with the
+# modular block_device_server (ahci.so) — no more IDE disk:
+#   disk0a (MBR entry 0) — ext2  — /mach_servers/ with config and binaries
 #   disk0b (MBR entry 1) — ext2  — hello.txt + bench.dat (test data)
-#   disk0c (MBR entry 2) — raw   — paging/swap per il default_pager
+#   disk0c (MBR entry 2) — raw   — paging/swap for the default_pager
 #
-# Il driver AHCI userspace (block_device_server/modules/ahci.so) mappa
-# le entry MBR 1:1 su 'ahci0[abc]' e BDS le ri-pubblica come 'disk0[abc]'.
-# Stage-2 bootstrap (Issue #185) e default_pager (argv="disk0c") aprono
-# queste partizioni via cap_request + device_open_cap.
+# The userspace AHCI driver (block_device_server/modules/ahci.so) maps
+# the MBR entries 1:1 onto 'ahci0[abc]' and BDS re-publishes them as 'disk0[abc]'.
+# Stage-2 bootstrap (Issue #185) and default_pager (argv="disk0c") open
+# these partitions via cap_request + device_open_cap.
 #
-# Uso:
+# Usage:
 #   ./scripts/make-disk-image.sh                    # default 512 MB
-#   ./scripts/make-disk-image.sh -o disk.img        # path output custom
-#   ./scripts/make-disk-image.sh -s 64              # dimensione totale in MB
+#   ./scripts/make-disk-image.sh -o disk.img        # custom output path
+#   ./scripts/make-disk-image.sh -s 64              # total size in MB
 #
-# Requisiti: sfdisk, mke2fs, debugfs (pacchetti: fdisk, e2fsprogs)
-# Non richiede root/sudo.
+# Requirements: sfdisk, mke2fs, debugfs (packages: fdisk, e2fsprogs)
+# Does not need root/sudo.
 # ==========================================================================
 set -euo pipefail
 
@@ -33,7 +33,7 @@ BUILD_DIR="${UROS_BUILD_DIR:-$REPO_ROOT/uros/build}"
 # #404: the build stamps its target arch; uname -m names the HOST
 ARCH="$(cat "$BUILD_DIR/uros-arch" 2>/dev/null || uname -m)"
 
-# --- Parametri di default ---
+# --- Default parameters ---
 IMG_SIZE_MB=512
 DISK_IMG="$BUILD_DIR/disk.img"
 SECT_SIZE=512
@@ -63,29 +63,29 @@ while [ $# -gt 0 ]; do
             ;;
         --minimal) MINIMAL=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...] [--minimal]"
+            echo "Usage: $0 [-o output.img] [-s size_mb] [--bench suite ...] [--minimal]"
             echo ""
-            echo "  --bench suite ...   Passa suite names a ipc_bench"
+            echo "  --bench suite ...   Pass suite names to ipc_bench"
             echo "                      (syscall intra slow inter comb port pp ool flipc2 all)"
             echo "  --minimal           Omit hello_server/ipc_bench/pthread_test/cap_test/"
             echo "                      gpustat from disk bootstrap.conf (stage-2)"
             exit 0
             ;;
-        *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
-# --- Verifica dipendenze ---
+# --- Dependency check ---
 for cmd in dd sfdisk mke2fs debugfs; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "ERRORE: '$cmd' non trovato."
-        echo "  Su Debian/Ubuntu: sudo apt install fdisk e2fsprogs"
-        echo "  Su Fedora:        sudo dnf install util-linux e2fsprogs"
+        echo "ERROR: '$cmd' not found."
+        echo "  On Debian/Ubuntu: sudo apt install fdisk e2fsprogs"
+        echo "  On Fedora:        sudo dnf install util-linux e2fsprogs"
         exit 1
     fi
 done
 
-# --- Percorsi dei binari ---
+# --- Paths of the binaries ---
 NAME_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/name_server"
 DEFAULT_PAGER="$BUILD_DIR/export/uros/$ARCH/user/sbin/default_pager"
 HELLO_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_server"
@@ -130,68 +130,68 @@ DLOPEN_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/dlopen_test"
 LIBFOO_SO="$BUILD_DIR/export/uros/$ARCH/user/lib/libfoo.so"
 
 if [ ! -f "$NAME_SERVER" ]; then
-    echo "ERRORE: name_server non trovato: $NAME_SERVER"
-    echo "  Build con: cd $BUILD_DIR && ninja name_server_bin"
+    echo "ERROR: name_server not found: $NAME_SERVER"
+    echo "  Build with: cd $BUILD_DIR && ninja name_server_bin"
     exit 1
 fi
 
 if [ ! -f "$DEFAULT_PAGER" ]; then
-    echo "ERRORE: default_pager non trovato: $DEFAULT_PAGER"
-    echo "  Build con: cd $BUILD_DIR && ninja default_pager_server"
+    echo "ERROR: default_pager not found: $DEFAULT_PAGER"
+    echo "  Build with: cd $BUILD_DIR && ninja default_pager_server"
     exit 1
 fi
 
 if [ ! -f "$HELLO_SERVER" ]; then
-    echo "ERRORE: hello_server non trovato: $HELLO_SERVER"
-    echo "  Build con: cd $BUILD_DIR && ninja hello_server_server"
+    echo "ERROR: hello_server not found: $HELLO_SERVER"
+    echo "  Build with: cd $BUILD_DIR && ninja hello_server_server"
     exit 1
 fi
 
 if [ ! -f "$IPC_BENCH" ]; then
-    echo "ERRORE: ipc_bench non trovato: $IPC_BENCH"
-    echo "  Build con: cd $BUILD_DIR && ninja ipc_bench_server"
+    echo "ERROR: ipc_bench not found: $IPC_BENCH"
+    echo "  Build with: cd $BUILD_DIR && ninja ipc_bench_server"
     exit 1
 fi
 
 if [ ! -f "$BLOCK_DEVICE_SERVER" ]; then
-    echo "ERRORE: block_device_server non trovato: $BLOCK_DEVICE_SERVER"
-    echo "  Build con: cd $BUILD_DIR && ninja block_device_server"
+    echo "ERROR: block_device_server not found: $BLOCK_DEVICE_SERVER"
+    echo "  Build with: cd $BUILD_DIR && ninja block_device_server"
     exit 1
 fi
 
 if [ ! -f "$AHCI_MODULE" ]; then
-    echo "ERRORE: ahci.so non trovato: $AHCI_MODULE"
-    echo "  Build con: cd $BUILD_DIR && ninja ahci_module"
+    echo "ERROR: ahci.so not found: $AHCI_MODULE"
+    echo "  Build with: cd $BUILD_DIR && ninja ahci_module"
     exit 1
 fi
 
 if [ ! -f "$VIRTIO_BLK_MODULE" ]; then
-    echo "ERRORE: virtio_blk.so non trovato: $VIRTIO_BLK_MODULE"
-    echo "  Build con: cd $BUILD_DIR && ninja virtio_blk_module"
+    echo "ERROR: virtio_blk.so not found: $VIRTIO_BLK_MODULE"
+    echo "  Build with: cd $BUILD_DIR && ninja virtio_blk_module"
     exit 1
 fi
 
 if [ ! -f "$HAL_SERVER" ]; then
-    echo "ERRORE: hal_server non trovato: $HAL_SERVER"
-    echo "  Build con: cd $BUILD_DIR && ninja hal_server"
+    echo "ERROR: hal_server not found: $HAL_SERVER"
+    echo "  Build with: cd $BUILD_DIR && ninja hal_server"
     exit 1
 fi
 
 if [ ! -f "$HAL_PCI_SCAN_MODULE" ]; then
-    echo "ERRORE: pci_scan.so non trovato: $HAL_PCI_SCAN_MODULE"
-    echo "  Build con: cd $BUILD_DIR && ninja hal_pci_scan_module"
+    echo "ERROR: pci_scan.so not found: $HAL_PCI_SCAN_MODULE"
+    echo "  Build with: cd $BUILD_DIR && ninja hal_pci_scan_module"
     exit 1
 fi
 
 if [ ! -f "$EXT2_SERVER" ]; then
-    echo "ERRORE: ext_server non trovato: $EXT2_SERVER"
-    echo "  Build con: cd $BUILD_DIR && ninja ext_server_bin"
+    echo "ERROR: ext_server not found: $EXT2_SERVER"
+    echo "  Build with: cd $BUILD_DIR && ninja ext_server_bin"
     exit 1
 fi
 
 if [ ! -f "$PTHREAD_TEST" ]; then
-    echo "ERRORE: pthread_test non trovato: $PTHREAD_TEST"
-    echo "  Build con: cd $BUILD_DIR && ninja pthread_test_server"
+    echo "ERROR: pthread_test not found: $PTHREAD_TEST"
+    echo "  Build with: cd $BUILD_DIR && ninja pthread_test_server"
     exit 1
 fi
 
@@ -221,7 +221,7 @@ DISK_NEW="$DISK_IMG.new"
 rm -f "$DISK_NEW"
 touch "$DISK_STAMP.new"
 
-# --- File di configurazione del bootstrap ---
+# --- Bootstrap configuration file ---
 # Format: <symtab_name> <path> [args...]
 # Bootstrap takes <path> from the stage-1 bundle, and from /mach_servers/ on
 # disk0a when the bundle does not carry it.  The "disk0c" after default_pager
@@ -252,15 +252,14 @@ if [ -f "$IRQ_CLAIM_TEST" ]; then
     IRQ_CLAIM_TEST_CONF_LINE="-D irq_claim_test irq_claim_test"
 fi
 
-# #515: un errore aritmetico non mascherato deve arrivare al thread che lo ha
-# causato.  Due righe e non una: i due bracci sono due RUN separate, perche'
-# il braccio SIMD lascia il proprio thread parcheggiato dentro una seconda
-# exception_raise() e quel messaggio, in uno stesso task, il braccio dopo se
-# lo prenderebbe per suo.
+# #515: an unmasked arithmetic error must reach the thread that caused it.
+# Two lines and not one: the two arms are two separate RUNS, because the SIMD
+# arm leaves its own thread parked inside a second exception_raise(), and in
+# one and the same task the next arm would take that message for its own.
 #
-# ⚠️ In fondo, subito prima della ush.  Sul kernel che questo issue parte per
-# aggiustare il braccio SIMD PANICA -- e' il reperto di partenza -- quindi
-# tutto il resto del boot deve essere gia' passato quando tocca a lui.
+# ⚠️ At the end, right before ush.  On the kernel this issue starts from to
+# fix the SIMD arm it PANICS -- that is the starting finding -- so everything
+# else in the boot must already have passed when its turn comes.
 FPERR_TEST_X87_CONF_LINE=""
 FPERR_TEST_SSE_CONF_LINE=""
 if [ -f "$FPERR_TEST" ]; then
@@ -301,11 +300,11 @@ elif [ -f "$USH" ]; then
     USH_CONF_LINE="ush ush"
 fi
 #
-# Issue #184: default_pager ora apre la sua partizione di swap via BDS
-# (cap_request + device_open_cap) anziché via il driver IDE in-kernel.
-# Conseguenza sull'ordine: hal_server e block_device_server devono
-# partire PRIMA di default_pager, altrimenti blk_open("disk0c") bloccherebbe
-# su netname_notify in attesa che BDS pubblichi la partizione.
+# Issue #184: default_pager now opens its swap partition via BDS
+# (cap_request + device_open_cap) instead of via the in-kernel IDE driver.
+# Consequence on the order: hal_server and block_device_server must
+# start BEFORE default_pager, otherwise blk_open("disk0c") would block
+# on netname_notify waiting for BDS to publish the partition.
 #
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="-D gpu_server gpu_server"
@@ -328,9 +327,9 @@ else
     PTHREAD_TEST_LINE="pthread_test pthread_test"
 fi
 
-# ⚠️ Il name server NON porta un flag `-w' qui: bootstrap lo aspetta da
-# solo (#492).  La decisione sta in parse_config_file(), perche' questo
-# file e' uno di QUATTRO che scrivono la stessa riga.
+# ⚠️ The name server does NOT carry a `-w' flag here: bootstrap waits for it
+# by itself (#492).  The decision lives in parse_config_file(), because this
+# file is one of FOUR that write the same line.
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
@@ -361,21 +360,21 @@ FS1_SIZE_SECTS=$((FS1_SIZE_MB * 1024 * 1024 / SECT_SIZE))
 SWAP_SIZE_SECTS=$((TOTAL_SECTS - PART2_START_SECT))
 SWAP_SIZE_MB=$((SWAP_SIZE_SECTS * SECT_SIZE / 1024 / 1024))
 
-echo "=== Creazione immagine disco OSFMK ==="
+echo "=== Creating the OSFMK disk image ==="
 echo "  Output:      $DISK_IMG"
-echo "  Dimensione:  ${IMG_SIZE_MB} MB"
+echo "  Size:        ${IMG_SIZE_MB} MB"
 echo "  disk0a: ext2, ${FS0_SIZE_MB} MB  — /mach_servers/"
 echo "  disk0b: ext2, ${FS1_SIZE_MB} MB  — hello.txt + bench.dat (test data)"
 echo "  disk0c: raw,  ${SWAP_SIZE_MB} MB — paging/swap"
 echo ""
 
 
-# --- 1. Immagine vuota ---
-echo "[1/6] Creazione immagine vuota (${IMG_SIZE_MB} MB)..."
+# --- 1. Empty image ---
+echo "[1/6] Creating the empty image (${IMG_SIZE_MB} MB)..."
 dd if=/dev/zero of="$DISK_NEW" bs=1M count="$IMG_SIZE_MB" status=none
 
-# --- 2. Tabella partizioni MBR ---
-echo "[2/6] Scrittura tabella partizioni MBR (3 entries)..."
+# --- 2. MBR partition table ---
+echo "[2/6] Writing the MBR partition table (3 entries)..."
 sfdisk --quiet "$DISK_NEW" <<EOF
 label: dos
 start=$PART0_START_SECT, size=$FS0_SIZE_SECTS, type=83
@@ -383,8 +382,8 @@ start=$PART1_START_SECT, size=$FS1_SIZE_SECTS, type=83
 start=$PART2_START_SECT, size=$SWAP_SIZE_SECTS, type=82
 EOF
 
-# --- 3. Formattare le due partizioni ext2 ---
-echo "[3/6] Formattazione ext2 (disk0a + disk0b)..."
+# --- 3. Format the two ext2 partitions ---
+echo "[3/6] Formatting ext2 (disk0a + disk0b)..."
 PART_IMG=$(mktemp -p "$TMPD" part.XXXXXX.img)
 PART1_IMG=$(mktemp -p "$TMPD" part1.XXXXXX.img)
 
@@ -406,7 +405,7 @@ mke2fs -t ext2 -q -F \
     -O filetype \
     "$PART1_IMG"
 
-# --- 4. Copia file nel filesystem con debugfs ---
+# --- 4. Copy files into the filesystem with debugfs ---
 # cap_server and cap_test are optional: write only when the binaries
 # exist so boot images still build when the corresponding flags are off.
 CAP_SERVER_WRITE_LINE=""
@@ -425,8 +424,8 @@ if [ -f "$IRQ_CLAIM_TEST" ]; then
     IRQ_CLAIM_TEST_WRITE_LINE="write $IRQ_CLAIM_TEST irq_claim_test"
 fi
 
-# #515: un solo binario per le due righe di bootstrap.conf -- i bracci si
-# distinguono per argv, non per immagine.
+# #515: a single binary for the two bootstrap.conf lines -- the arms are told
+# apart by argv, not by image.
 FPERR_TEST_WRITE_LINE=""
 if [ -f "$FPERR_TEST" ]; then
     FPERR_TEST_WRITE_LINE="write $FPERR_TEST fperr_test"
@@ -448,7 +447,7 @@ PROC_SERVER_WRITE_LINE=""
 if [ -f "$PROC_SERVER" ]; then
     PROC_SERVER_WRITE_LINE="write $PROC_SERVER proc_server"
 fi
-echo "[4/6] Copia file nel filesystem ext2..."
+echo "[4/6] Copying files into the ext2 filesystem..."
 # ipc_bench's disk_bench tests open hello.txt / bench.dat at the root
 # of the default ext2 mount (ext_server mounts ahci0a at /), so seed both
 # files here.  bench.dat only needs the first 64 bytes — a 1 KB blob
@@ -694,31 +693,31 @@ write $DBHELLO hello.txt
 DBGFS
 rm -f "$DBHELLO"
 
-# --- 5. Inserimento delle due partizioni ext2 nell'immagine disco ---
-echo "[5/6] Assemblaggio partizioni ext2 (disk0a + disk0b)..."
+# --- 5. Insert the two ext2 partitions into the disk image ---
+echo "[5/6] Assembling the ext2 partitions (disk0a + disk0b)..."
 dd if="$PART_IMG"  of="$DISK_NEW" bs="$SECT_SIZE" seek="$PART0_START_SECT" conv=notrunc status=none
 dd if="$PART1_IMG" of="$DISK_NEW" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
 
-# --- 6. La partizione swap è già zero-filled (nessun formato necessario) ---
-echo "[6/6] Partizione swap (disk0c) pronta (zero-filled)."
+# --- 6. The swap partition is already zero-filled (no format needed) ---
+echo "[6/6] Swap partition (disk0c) ready (zero-filled)."
 mv -f "$DISK_NEW" "$DISK_IMG"
 mv -f "$DISK_STAMP.new" "$DISK_STAMP"
 
 echo ""
-echo "=== Immagine disco creata con successo ==="
+echo "=== Disk image created successfully ==="
 echo "  $DISK_IMG ($(stat -c%s "$DISK_IMG") bytes)"
 echo ""
-echo "Struttura disco (${IMG_SIZE_MB} MB, AHCI):"
-echo "  MBR:     settore 0"
-echo "  disk0a:  settori ${PART0_START_SECT}-$((PART0_START_SECT + FS0_SIZE_SECTS - 1))  (ext2, ${FS0_SIZE_MB} MB)"
+echo "Disk layout (${IMG_SIZE_MB} MB, AHCI):"
+echo "  MBR:     sector 0"
+echo "  disk0a:  sectors ${PART0_START_SECT}-$((PART0_START_SECT + FS0_SIZE_SECTS - 1))  (ext2, ${FS0_SIZE_MB} MB)"
 echo "    └── /mach_servers/ + hello.txt + bench.dat"
-echo "  disk0b:  settori ${PART1_START_SECT}-$((PART1_START_SECT + FS1_SIZE_SECTS - 1))  (ext2, ${FS1_SIZE_MB} MB) — test data"
-echo "  disk0c:  settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (raw,  ${SWAP_SIZE_MB} MB) — paging"
+echo "  disk0b:  sectors ${PART1_START_SECT}-$((PART1_START_SECT + FS1_SIZE_SECTS - 1))  (ext2, ${FS1_SIZE_MB} MB) — test data"
+echo "  disk0c:  sectors ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (raw,  ${SWAP_SIZE_MB} MB) — paging"
 echo ""
-echo "Flusso di boot (#224 — no IDE):"
-echo "  1. Stage-1: kernel mappa bootstrap.bundle → bootstrap legge i binari da RAM"
-echo "  2. Stage-2: bootstrap apre disk0a via BDS (cap_request + device_open_cap)"
+echo "Boot flow (#224 — no IDE):"
+echo "  1. Stage-1: the kernel maps bootstrap.bundle → bootstrap reads the binaries from RAM"
+echo "  2. Stage-2: bootstrap opens disk0a via BDS (cap_request + device_open_cap)"
 echo "  3. default_pager argv[1]='disk0c' → ${SWAP_SIZE_MB} MB swap via BDS"
 echo ""
-echo "Per avviare:"
+echo "To boot:"
 echo "  ./scripts/run-qemu.sh"
