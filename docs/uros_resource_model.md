@@ -320,9 +320,9 @@ may be stale by a few ns, fine for human eyes.
 
 | # | Issue | What lands |
 |---|-------|------------|
-| 1 | #227 | `libelf` — refactor preliminare, sblocca exec_server |
-| 2 | #228 | `exec_server` — usa libelf |
-| 3 | #217 | `proc_server` — usa exec_server, owns pid/wait/signals |
+| 1 | #227 | `libelf` — preliminary refactor, unblocks exec_server |
+| 2 | #228 | `exec_server` — uses libelf |
+| 3 | #217 | `proc_server` — uses exec_server, owns pid/wait/signals |
 | 4 | #229 | `libbudget` — standalone primitive (can proceed in parallel) |
 | 5 | #216 v2.x | `cap_server v2` — manifest, then quota, then budget binding |
 
