@@ -1,0 +1,30 @@
+Kind: widen
+Issue: #764
+Holds open: the gap a console write leaves when it ends without a newline, every time.  libposix-uros's console_write() follows such a write with a line of its own, "[764-widen: a line in the gap]", where at four processors another task's line lands in some boots only -- hello_server's one line over 80 characters in 100 of 211 i386 logs, ush's lines in 190 of 212.  A line written in two writes then comes out cut in every boot, at any number of processors, and scripts/suite-i386.sh does not find hello_server's line arm whole.  Each task says "[764-widen: armed ...]" at its first console write, so a log shows the widen was in its build.
+Run: i386 -- UROS_BUILD_DIR=<worktree>/uros/build scripts/suite-i386.sh -r bundle-kvm-4, from a worktree with the patch and a build of its own; scripts/ablate.sh cannot judge it
+
+diff --git a/uros/src/lib/libposix-uros/posix_fd.c b/uros/src/lib/libposix-uros/posix_fd.c
+index 9a35f197..38144c90 100644
+--- a/uros/src/lib/libposix-uros/posix_fd.c
++++ b/uros/src/lib/libposix-uros/posix_fd.c
+@@ -186,7 +186,20 @@ static unsigned vfs_type_to_ifmt(uint8_t t)
+  */
+ static void console_write(const char *p, size_t n)
+ {
++    static int armed;
++
++    /* 764-widen: said once per task, so that a log shows the widen is in
++     * the build even where nothing falls in a gap. */
++    if (!armed) {
++        armed = 1;
++        mach_print("[764-widen: armed -- a console write that leaves a line "
++                   "open gets a line in the gap]\n");
++    }
+     mach_print_bytes(p, (vm_size_t)n);
++    /* 764-widen: what another task's line does at four processors in some
++     * boots, here every time a write leaves its line open. */
++    if (n > 0 && p[n - 1] != '\n')
++        mach_print("[764-widen: a line in the gap]\n");
+ }
+ 
+ /* ------------------------------------------------------------------ */

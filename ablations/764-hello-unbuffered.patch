@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #764
+Over: 764-widen-console-gap.patch
+Takes out: what #764 changed in hello_server -- setvbuf(stdout, NULL, _IONBF, 0) at the top of main() again, so stdout is unbuffered and musl's vfprintf() formats into 80 bytes of its own.  The line arm's 101-byte literal does not fit in the 42 bytes left of them, so musl sends what it holds with the literal, a console write that leaves the line open, before "this one (#764)" is formatted; the widen's line lands in the gap, and scripts/suite-i386.sh never finds the arm's line whole.  __uros_writev() gathering the pieces does not help here: the line is not finished when the first write goes.
+Run: i386 -- UROS_BUILD_DIR=<worktree>/uros/build scripts/suite-i386.sh -r bundle-kvm-4, from a worktree with 764-widen-console-gap.patch and this one, and a build of its own; scripts/ablate.sh cannot judge it
+Expect: never said: \(hello_server\): console: a line of \[0-9\]\* characters
+
+diff --git a/uros/src/servers/hello_server/hello_server.c b/uros/src/servers/hello_server/hello_server.c
+index e5161a56..43d768de 100644
+--- a/uros/src/servers/hello_server/hello_server.c
++++ b/uros/src/servers/hello_server/hello_server.c
+@@ -480,6 +480,7 @@ main(int argc, char **argv)
+      * hands a line over 80 characters to the console in two writes, with
+      * room for another task's line between them.
+      */
++    setvbuf(stdout, NULL, _IONBF, 0);   /* 764-ablation: unbuffered again */
+ 
+     /*
+      * Step 1: Get privileged ports from the bootstrap server.

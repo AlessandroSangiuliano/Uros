@@ -128,6 +128,11 @@ PAIRS=(
 	# #761: the words after a NUL in the middle of a line, which the
 	# console used to drop with the rest of their piece.
 	'(hello_server): console: started'	'(hello_server): console: a NUL in the middle of this line went out'
+	# #764: 155 characters with a conversion on each side of musl's 80-byte
+	# cut, which must come out whole: a line cut in two by another task's
+	# line no longer matches, and a cut that holds gpu_server's echo is
+	# left out with the echo.
+	'(hello_server): console: started'	'(hello_server): console: a line of [0-9]* characters, more than the 80 bytes musl formats at a time unbuffered, with a conversion after them: this one (#764)'
 )
 # What every full boot must have said: the tests that are always in the bundle.
 MUST=(
@@ -135,6 +140,7 @@ MUST=(
 	'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)'
 	'(hello_server): exec tests: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)'
 	'(hello_server): console: a NUL in the middle of this line went out'
+	'(hello_server): console: a line of [0-9]* characters, more than the 80 bytes musl formats at a time unbuffered, with a conversion after them: this one (#764)'
 	'^=== Benchmark complete ==='
 )
 # A line that fails the run wherever it appears -- among them a task killed by

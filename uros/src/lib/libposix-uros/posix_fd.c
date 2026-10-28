@@ -584,6 +584,100 @@ long __uros_read(int fd, void *buf, size_t count)
     return n < 0 ? -EIO : (long)n;
 }
 
+/* struct iovec on Linux i386: { void *iov_base; size_t iov_len; }. */
+struct uros_iovec { unsigned long base; unsigned long len; };
+
+/* One char_tty_write of n bytes, at most the 4096 chr_buf_t carries: the
+ * bytes it took, or the error. */
+static long tty_send(mach_port_t cport, unsigned dev_id, char *buf, size_t n)
+{
+    char cap[256] = { 0 };
+    int  cres = 0;
+
+    if (char_tty_write(cport, cap, 0, dev_id, (int)__uros_my_pid,
+                       buf, (unsigned int)n, &cres) != 0)
+        return -EIO;
+    if (cres == -1)                       /* CHR_TTY_BACKGROUND (TOSTOP) */
+        return -EINTR;
+    if (cres != 0)
+        return -EIO;
+    return (long)n;
+}
+
+/*
+ * The console's share of a full buffer: the whole lines in it go out, and
+ * what follows the last newline moves to the front, for the bytes that will
+ * finish it.  Returns how many bytes were kept.  A buffer with no newline in
+ * it holds a line longer than itself -- longer than a trap carries, too
+ * (MACH_PRINT_MAX) -- and goes out as it is.
+ */
+static size_t console_send_lines(char *buf, size_t have)
+{
+    size_t end = have;
+
+    while (end > 0 && buf[end - 1] != '\n')
+        end--;
+    if (end == 0)
+        end = have;
+    console_write(buf, end);
+    memmove(buf, buf + end, have - end);
+    return have - end;
+}
+
+/*
+ * 🔑 A TERMINAL GETS ONE WRITE, HOWEVER MANY PIECES IT CAME IN (#764).
+ *
+ * musl's stdio hands a line over as writev() of two pieces -- what its buffer
+ * holds, and the piece with the newline (__stdio_write) -- and writev() used
+ * to write each piece on its own: two console_write()s, so two mach_print
+ * traps, and the line open between them.  At four processors another task's
+ * line landed in that gap in 190 of 212 i386 boots, and at eight in every one:
+ * `ush: setsid -> sid=13 pid=13gpu_server: text_puts(6): [ext]'.  One trap per
+ * line is what closes it, not a narrower gap: the kernel prints the string of
+ * a trap under printf_lock, whole.
+ *
+ * So the pieces are gathered first, and the terminal gets what write() of the
+ * same bytes would have given it.  On a /dev/tty that is one char_tty_write of
+ * at most 4096 bytes -- more is a short count, as a tty write always was.  The
+ * console takes every byte: each time the buffer fills, its whole lines go out
+ * and the start of an unfinished one waits for the rest, so nothing but
+ * MACH_PRINT_MAX, inside console_write(), cuts a line.
+ */
+static long terminal_write(int fd, const struct uros_iovec *iov, int iovcnt)
+{
+    mach_port_t cport;
+    unsigned    dev_id;
+    char        wbuf[4096];
+    size_t      have = 0;
+    long        total = 0;
+    int         tty = tty_fd_snapshot(fd, &cport, &dev_id) == 0;
+
+    for (int i = 0; i < iovcnt; i++) {
+        const char *p = (const char *)iov[i].base;
+        size_t      n = iov[i].len;
+
+        while (n > 0) {
+            size_t take = n < sizeof(wbuf) - have ? n : sizeof(wbuf) - have;
+
+            memcpy(wbuf + have, p, take);
+            have  += take;
+            total += (long)take;
+            p     += take;
+            n     -= take;
+            if (have < sizeof(wbuf))
+                continue;
+            if (tty)
+                return tty_send(cport, dev_id, wbuf, have);
+            have = console_send_lines(wbuf, have);
+        }
+    }
+    if (tty)
+        return tty_send(cport, dev_id, wbuf, have);
+    if (have)
+        console_write(wbuf, have);
+    return total;                       /* a NUL included: see console_write() */
+}
+
 long __uros_write(int fd, const void *buf, size_t count)
 {
     int err;
@@ -591,33 +685,12 @@ long __uros_write(int fd, const void *buf, size_t count)
     vfs_fd_t vfd = resolve_fd(fd, &err);
     if (err) return err;
     if (vfd == -2) {
-        mach_port_t cport;
-        unsigned    dev_id;
-        if (tty_fd_snapshot(fd, &cport, &dev_id) == 0) {
-            char     cap[256] = { 0 };
-            char     wbuf[4096];
-            int      cres = 0;
-            unsigned int want = count > sizeof(wbuf)
-                                ? sizeof(wbuf) : (unsigned)count;
-            if (want) memcpy(wbuf, buf, want);
-            if (char_tty_write(cport, cap, 0, dev_id, (int)__uros_my_pid,
-                               wbuf, want, &cres) != 0)
-                return -EIO;
-            if (cres == -1)               /* CHR_TTY_BACKGROUND (TOSTOP) */
-                return -EINTR;
-            if (cres != 0)
-                return -EIO;
-            return (long)want;
-        }
-        if (count) console_write((const char *)buf, count);
-        return (long)count;             /* a NUL included: see console_write() */
+        struct uros_iovec one = { (unsigned long)buf, (unsigned long)count };
+        return terminal_write(fd, &one, 1);
     }
     ssize_t n = vfs_write(vfd, buf, count);
     return n < 0 ? -EIO : (long)n;
 }
-
-/* struct iovec on Linux i386: { void *iov_base; size_t iov_len; }. */
-struct uros_iovec { unsigned long base; unsigned long len; };
 
 long __uros_readv(int fd, const void *iov_ptr, int iovcnt)
 {
@@ -638,6 +711,22 @@ long __uros_writev(int fd, const void *iov_ptr, int iovcnt)
 {
     const struct uros_iovec *iov = (const struct uros_iovec *)iov_ptr;
     if (iovcnt < 0) return -EINVAL;
+
+    /*
+     * A terminal gets the pieces as one write: see terminal_write() (#764).
+     * Nothing to write is 0 with no RPC, as it always was.
+     */
+    int err;
+    maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
+    vfs_fd_t vfd = resolve_fd(fd, &err);
+    if (err) return err;
+    if (vfd == -2) {
+        for (int i = 0; i < iovcnt; i++)
+            if (iov[i].len)
+                return terminal_write(fd, iov, iovcnt);
+        return 0;
+    }
+
     long total = 0;
     for (int i = 0; i < iovcnt; i++) {
         if (iov[i].len == 0) continue;
