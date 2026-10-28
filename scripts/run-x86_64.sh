@@ -1542,7 +1542,8 @@ expected_reports() {
 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
-		'taskpanic_load: started' 'taskpanic_load: .*no load'
+		'taskpanic_load: started' 'taskpanic_load: .*no load' \
+		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed'
 }
 
 # #579: the clock the run gets, asked once a second of the cores qemu's

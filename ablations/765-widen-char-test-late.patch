@@ -1,0 +1,27 @@
+Kind: widen
+Issue: #765
+Holds open: the race the run's end had with char_test. char_test waits 8 seconds after its start line before its first arm, so ipc_bench has started by then -- its start line is the run's terminator -- and the run ends one second later unless the loop waits for char_test's count. The fixed tree waits for it (expected_reports lists the pair) and passes; the ablation that takes the pair out of that list is cut with char_test between its arms.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 14
+Script: -G
+Note: the boots are under KVM, asked of the merge test with -a kvm, as 765-char-test-uncounted is; Accel: tcg is only what ablate.sh writes on the rows.
+
+diff --git a/uros/src/tests/char_test/char_test.c b/uros/src/tests/char_test/char_test.c
+index ae2033ed..35539778 100644
+--- a/uros/src/tests/char_test/char_test.c
++++ b/uros/src/tests/char_test/char_test.c
+@@ -194,6 +194,10 @@ main(int argc, char **argv)
+ 
+ 	printf("char_test: started (#497)\n");
+ 
++	/* 765-widen: the arms start late, after ipc_bench has started and the run
++	 * has its terminator. */
++	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 8000);
++
+ 	if (name_server_port == MACH_PORT_NULL) {
+ 		printf("char_test: WRONG — no name server port in this task's "
+ 		       "registered ports, so char_server cannot be reached "

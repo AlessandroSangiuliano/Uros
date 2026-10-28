@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #765
+Over: 765-widen-char-test-late.patch
+Takes out: char_test's pair from expected_reports(), the list the loop waits on before it ends a run -- the state of c2dd4cfb, where the pair was in must_report only. With the widen, char_test starts its arms after ipc_bench has started, the run ends one second after that, and the boot is judged on "char_test: started" with no count.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 14
+Script: -G
+Expect: merge-test: entry 14 kvm -smp 4 \(@char\) -- WRONG \(char\)
+Note: under KVM, asked of the merge test with -a kvm, as 765-char-test-uncounted is. The fixed arm is the tree with the widen only and passes.
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index dc0f7508..caedc3d5 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1542,8 +1542,7 @@ expected_reports() {
+ 		'=== ext2 filesystem server' "ext2: ready, entering message loop\\|ext_server' task terminated" \
+ 		'xfile_read: started'   'xfile_read: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+ 		'xfile_write: started'  'xfile_write: \([0-9]* of [0-9]* arms passed\|NOT ASKED\)' \
+-		'taskpanic_load: started' 'taskpanic_load: .*no load' \
+-		'char_test: started'    'char_test: [0-9]* of [0-9]* arms passed'
++		'taskpanic_load: started' 'taskpanic_load: .*no load'
+ }
+ 
+ # #579: the clock the run gets, asked once a second of the cores qemu's
