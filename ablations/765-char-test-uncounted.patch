@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #765
+Takes out: char_test's count of arms at its end -- it runs its arms and returns without saying how many passed, a test that stopped after it started as far as anything reading the log can tell.  run-x86_64.sh's pair for char_test, opened by "char_test: started", never closes and fails the boot, and the merge test's char verdict, which asks for the count as well, says WRONG for entry 14's char build.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 14
+Script: -G
+Expect: merge-test: entry 14 kvm -smp 4 \(@char\) -- WRONG \(char\)
+Note: the boots are under KVM, asked of the merge test with -a kvm; Accel: tcg is only the accelerator ablate.sh writes on the arm's rows, since under KVM it would give the script --kvm, which the merge test does not take (755-keptreach-nothing-remapped.patch does the same).  Each arm builds its own char build from its own tree, the merge test's char_build(); the three default-build lines of entry 14 run in both arms and pass in both.  Read in the ablated arm's harness log for entry 14's char build that it is the pair that failed it: "FAILED: 'char_test: started' appeared and".
+
+diff --git a/uros/src/tests/char_test/char_test.c b/uros/src/tests/char_test/char_test.c
+index ae2033ed..a63a76cb 100644
+--- a/uros/src/tests/char_test/char_test.c
++++ b/uros/src/tests/char_test/char_test.c
+@@ -436,6 +436,5 @@ main(int argc, char **argv)
+ 		}
+ 	}
+ 
+-	printf("char_test: %d of %d arms passed\n", passed, arms);
+ 	return (passed == arms) ? 0 : 1;
+ }
