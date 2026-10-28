@@ -37,8 +37,8 @@
 # read.  Anything it reports as clean still needs its convergence checked by
 # hand before that trap is used -- which is why it prints what each one calls.
 #
-# Uso:
-#   scripts/trap-rpc-parity.py [radice]
+# Usage:
+#   scripts/trap-rpc-parity.py [root]
 
 import re
 import sys
