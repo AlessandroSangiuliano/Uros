@@ -14,18 +14,18 @@ project(uros
 # -DMACH_KDB=1 and -DAT386=1 while the build was not (#453).
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Opzioni principali di configurazione
-option(OSFMK_TARGET_AT386 "Abilita configurazione Mach per AT386 (x86)" ON)
-option(OSFMK_BUILD_TOOLS "Costruisci i tool host (mig, migcom, ecc.)" ON)
-option(OSFMK_BUILD_KERNEL "Costruisci il kernel Mach" ON)
-option(OSFMK_BUILD_BOOTSTRAP "Costruisci il bootstrap task" ON)
-option(OSFMK_BUILD_DEFAULT_PAGER "Costruisci il default pager" OFF)
-option(OSFMK_BUILD_HELLO_SERVER "Costruisci l'hello server (test server)" OFF)
-option(OSFMK_BUILD_IPC_BENCH "Costruisci il benchmark IPC (ipc_bench)" OFF)
-option(OSFMK_BUILD_BLOCK_SERVER "Costruisci il block device server modulare" OFF)
-option(OSFMK_BUILD_HAL_SERVER "Costruisci l'HAL server (discovery + device registry)" OFF)
-option(OSFMK_BUILD_NAME_SERVER "Costruisci il name server (netname)" OFF)
-option(OSFMK_BUILD_EXT2_SERVER "Costruisci il server ext2 filesystem userspace" OFF)
+# Main configuration options
+option(OSFMK_TARGET_AT386 "Enable Mach configuration for AT386 (x86)" ON)
+option(OSFMK_BUILD_TOOLS "Build host tools (mig, migcom, etc.)" ON)
+option(OSFMK_BUILD_KERNEL "Build Mach kernel" ON)
+option(OSFMK_BUILD_BOOTSTRAP "Build bootstrap task" ON)
+option(OSFMK_BUILD_DEFAULT_PAGER "Build default pager" OFF)
+option(OSFMK_BUILD_HELLO_SERVER "Build hello server (test server)" OFF)
+option(OSFMK_BUILD_IPC_BENCH "Build IPC benchmark (ipc_bench)" OFF)
+option(OSFMK_BUILD_BLOCK_SERVER "Build modular block device server" OFF)
+option(OSFMK_BUILD_HAL_SERVER "Build HAL server (discovery + device registry)" OFF)
+option(OSFMK_BUILD_NAME_SERVER "Build name server (netname)" OFF)
+option(OSFMK_BUILD_EXT2_SERVER "Build userspace ext2 filesystem server" OFF)
 option(OSFMK_BUILD_PTHREAD_TEST "Build pthread test server" OFF)
 option(OSFMK_BUILD_CAP_SERVER "Build capability server (Uros cap_server + libcap)" OFF)
 option(OSFMK_BUILD_CAP_TEST "Build capability negative-test binary" OFF)
@@ -297,7 +297,7 @@ set(UROS_UAPI_DIR ${CMAKE_SOURCE_DIR}/uapi)
 # can be removed.
 include_directories(${CMAKE_SOURCE_DIR}/uapi)
 
-# Directory sorgenti principale
+# Main source directory
 include(CTest)
 enable_testing()
 add_subdirectory(src)
@@ -428,7 +428,7 @@ add_custom_target(check-header-shadow
   VERBATIM
 )
 
-# Target clean-all: rimuove completamente la directory di build
+# Target clean-all: removes the build directory completely
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}
   COMMENT "Removing entire build directory: ${CMAKE_BINARY_DIR}"

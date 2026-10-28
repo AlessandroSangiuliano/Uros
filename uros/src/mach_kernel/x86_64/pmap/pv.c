@@ -71,7 +71,7 @@ decl_simple_lock_data(static, pv_free_lock)
  * what this file had before the lock existed -- a walk that follows pv->next
  * and dereferences pv->pmap with nothing held -- and it exists because the
  * general protection fault this was written for has never been reproduced: the
- * lock was designed from a reading of one reperto, and a fix is verified by
+ * lock was designed from a reading of one crash report, and a fix is verified by
  * REMOVING it and watching the fault come back.
  *
  * ❌ THE FIRST VERSION OF THIS SWITCH LEFT THE FREE LIST LOCKED, "to keep the

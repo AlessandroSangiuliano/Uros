@@ -124,7 +124,7 @@ proc uros_interleaved_window {hay needle slack} {
 # noise side is a presence, not an absence: the sweep was taken up until it DID
 # produce false hits, because a false-positive test that has never fired has
 # not been shown able to.  The first one it produced was an installer line
-# ("[5/6] Assemblaggio partizioni ext2...") swallowing `[bg] pid='.
+# ("[5/6] Assembling the ext2 partitions...") swallowing `[bg] pid='.
 #
 # ⚠️ The live haystack is smaller than those 52 KB prefixes -- only what
 # arrived during one wait -- so the noise threshold is further away in practice
@@ -324,10 +324,10 @@ if {[info exists argv0] && [file tail $argv0] eq "smoke-findings.tcl"} {
 		#    Before this existed, the first was read as a budget set too
 		#    tight and the second as a benchmark that had stalled.
 		incr failures [check "a suspend is not a stopped machine (89s)" \
-			[uros_finding "flipc_bench" {{flipc_bench: done}} "niente\n" 98 100 4 90 89] \
+			[uros_finding "flipc_bench" {{flipc_bench: done}} "nothing\n" 98 100 4 90 89] \
 			"THE HOST WAS SUSPENDED"]
 		incr failures [check "a suspend is not a stopped machine (1134s)" \
-			[uros_finding "ush banner" {{ush v0.1.0}} "niente\n" 1136 1147 4 40 1134] \
+			[uros_finding "ush banner" {{ush v0.1.0}} "nothing\n" 1136 1147 4 40 1134] \
 			"THE HOST WAS SUSPENDED"]
 
 		# 8. ⚠️ And garbling still outranks it: bytes that arrived

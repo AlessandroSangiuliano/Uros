@@ -550,7 +550,7 @@ Measured / known on KVM (see ipc_bench results in CLAUDE memory):
 | Scenario                          | Volume       | per-byte putc | batched puts | FLIPC v2 |
 |-----------------------------------|--------------|---------------|--------------|----------|
 | Boot log                          | ~5000 chars  | 7.5 ms        | <100 µs      | <10 µs   |
-| Verbose runtime log               | 1000 ch/s    | 1.5 ms/s      | trascurabile | trascurabile |
+| Verbose runtime log               | 1000 ch/s    | 1.5 ms/s      | negligible   | negligible |
 | `dmesg` snapshot of running system| ~50 KB       | 75 ms         | ~150 µs      | ~10 µs   |
 | Anomalous dump (core trace)       | 1 MB         | **1.5 s**     | ~375 µs      | ~12 ms   |
 

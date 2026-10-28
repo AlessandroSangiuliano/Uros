@@ -998,7 +998,7 @@ done
 # that is not the last one -- and in a bundle without the benchmark it is never
 # printed at all.
 #
-# 🔑 Nor can it hide a reperto, and that was checked rather than argued: in all
+# 🔑 Nor can it hide a crash, and that was checked rather than argued: in all
 # three of the #531 panic logs to hand, `panic(cpu' is present and this line is
 # absent.  A boot that panics dies INSIDE the benchmark and ends on the
 # terminator it already had.  What the marker does cut is the quiet_census
@@ -1191,7 +1191,7 @@ echo "=== booting disk-x86_64.img (watchdog ${SECS}s, a backstop only) $* ==="
 #
 # The default without -cpu is qemu64, which does NOT advertise the TSC
 # deadline timer -- so the kernel would silently fall back to the LAPIC
-# one-shot backend on every run and the deadline path would be collaudated by
+# one-shot backend on every run and the deadline path would be tested by
 # nobody.  `max' advertises it under either accelerator.
 #
 # Named explicitly rather than left to the default so that which backend ran

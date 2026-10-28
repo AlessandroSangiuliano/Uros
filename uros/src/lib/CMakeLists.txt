@@ -130,7 +130,7 @@ add_custom_command(
 )
 add_custom_target(mig_device_header DEPENDS ${DEVICE_HEADER})
 
-# Aggiungi sottodirectory solo se esistono per non rompere la riconfigurazione
+# Add subdirectories only if they exist, so as not to break reconfiguration
 macro(maybe_add DIR)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${DIR}/CMakeLists.txt")
     add_subdirectory(${DIR})

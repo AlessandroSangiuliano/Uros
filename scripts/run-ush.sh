@@ -40,7 +40,7 @@ while [ $# -gt 0 ]; do
             sed -n '3,18p' "$0"
             exit 0
             ;;
-        *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 

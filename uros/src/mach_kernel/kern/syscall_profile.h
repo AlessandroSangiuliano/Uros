@@ -127,7 +127,7 @@
  * the same shape as SP_RUNQ, which is zero on the hot path because a direct
  * hand-off never touches a run queue.
  */
-#define	SP_KMSGGET	3	/* ipc_kmsg_get: buffer E copia, non separabili */
+#define	SP_KMSGGET	3	/* ipc_kmsg_get: buffer AND copy, inseparable */
 #define	SP_RESOLVE	4	/* name -> port: cache, lock-free, or table  */
 #define	SP_QUEUE	5	/* rights, queue limits, the two mqueue locks */
 /*

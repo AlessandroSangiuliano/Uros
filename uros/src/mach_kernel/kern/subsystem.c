@@ -302,7 +302,7 @@ subsystem_deallocate(
 #include <ddb/db_sym.h>
 #include <ddb/db_print.h>
 #include <ddb/db_command.h>
-#include <mach/mach_server.h>	/* #448: interfaccia contro implementazione */
+#include <mach/mach_server.h>	/* #448: interface against implementation */
 
 #define	printf	kdbprintf
 

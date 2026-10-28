@@ -34,7 +34,7 @@
 # Output, one per line, or a C table with --c:
 #     <trap name> <argument count>
 #
-# Uso:
+# Usage:
 #   scripts/gen-trap-list.py [--c] <syscall_sw.h> [output]
 
 import os

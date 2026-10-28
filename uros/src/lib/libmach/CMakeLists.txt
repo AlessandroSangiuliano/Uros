@@ -266,7 +266,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   return()
 endif()
 
-# Raccolgo le sorgenti locali (only .c and .S; lowercase .s needs preprocessing)
+# Collect the local sources (only .c and .S; lowercase .s needs preprocessing)
 file(GLOB LIB_SOURCES CONFIGURE_DEPENDS "*.c" "*.S")
 file(GLOB TOP_S_LOWER_S CONFIGURE_DEPENDS "*.s")
 
@@ -317,7 +317,7 @@ foreach(sfile IN LISTS TOP_S_LOWER_S)
   list(APPEND LIB_SOURCES ${pp_output})
 endforeach()
 
-# Aggiungo sorgenti specifiche per architettura i386 se presenti
+# Add the i386-specific sources, if present
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   file(GLOB ARCH_SOURCES CONFIGURE_DEPENDS "i386/*.c" "i386/*.S")
   file(GLOB ARCH_S_LOWER_S CONFIGURE_DEPENDS "i386/*.s")

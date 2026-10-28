@@ -660,7 +660,7 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
  * got none.  A walk of a page's pv list dereferences `pv->pmap', and a struct
  * handed back to its zone and reissued is a `->root_pa' holding whatever now
  * lives at that offset: a page-table walk whose frame is a kernel pointer,
- * which is the reperto this issue was opened for.
+ * which is the crash this issue was opened for.
  *
  * 🔑 THE ARGUMENT IS LOCAL, AND THAT IS THE POINT.  A reader holds a pmap read
  * section across both the load of `pv->pmap' and its use; this waits for every
@@ -1481,7 +1481,7 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 
 	/*
 	 * 🔴 HELD ACROSS THE WHOLE WALK (#558), and this is the loop the
-	 * reperto faulted in.
+	 * crash faulted in.
 	 *
 	 * Without it, pmap_destroy() on another processor rewrites this list
 	 * underneath -- it reaches pv_remove() through its own page tables and

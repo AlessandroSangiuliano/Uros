@@ -287,7 +287,7 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 {
 	uint32_t	col[SP_SAMPLES];
 	uint32_t	whole, work, copies;
-	int		n = 0, median = -1, i, ph, primo;
+	int		n = 0, median = -1, i, ph, first;
 
 	for (i = 0; i < SP_SAMPLES; i++)
 		if (sp_in_shape(p, i, shape))
@@ -353,17 +353,17 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 		       col[0], col[k - 1]);
 	}
 
-	primo = 1;
+	first = 1;
 	for (ph = 0; ph < SP_PHASES; ph++) {
 		if (p->sample[median][ph] != 0)
 			continue;
-		if (primo) {
+		if (first) {
 			printf("syscall_profile    zero here:");
-			primo = 0;
+			first = 0;
 		}
 		printf(" %s", sp_names()[ph]);
 	}
-	if (!primo)
+	if (!first)
 		printf("\n");
 
 	if (!ret_known)
@@ -396,17 +396,17 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	uint64_t	ret_cyc, ret_n;
 	uint32_t	ret_mean = 0;
 	int		ret_known = 0;
-	int		conta[SP_SHAPES];
+	int		count[SP_SHAPES];
 	int		i, ph, shape;
 
 	if (sp_pair_cost == 0)
 		sp_measure_self();
 
 	for (shape = 0; shape < SP_SHAPES; shape++) {
-		conta[shape] = 0;
+		count[shape] = 0;
 		for (i = 0; i < SP_SAMPLES; i++)
 			if (sp_in_shape(p, i, shape))
-				conta[shape]++;
+				count[shape]++;
 	}
 
 	/*
@@ -440,8 +440,8 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
 	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen, p->ndropped,
 	       p->npreempted,
-	       conta[SP_SHAPE_HANDOFF], conta[SP_SHAPE_BLOCKED],
-	       conta[SP_SHAPE_AWAKE],
+	       count[SP_SHAPE_HANDOFF], count[SP_SHAPE_BLOCKED],
+	       count[SP_SHAPE_AWAKE],
 	       (unsigned int) SP_MARKS, sp_pair_cost,
 	       (unsigned int) SP_MARKS * sp_pair_cost,
 	       ret_mean, (unsigned int) ret_n,

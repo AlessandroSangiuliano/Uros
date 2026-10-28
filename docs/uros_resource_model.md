@@ -180,7 +180,7 @@ in libbudget.
 
 ## Accounting — proc_server + kernel `task_info`
 
-The reportistic layer.  Responsibility: tell `ps`, `top`, system
+The reporting layer.  Responsibility: tell `ps`, `top`, system
 monitors *how much* a process has consumed.
 
 Decision: accounting data is **NOT cached** in proc_server.  It lives
@@ -209,7 +209,7 @@ libvfs.fs_open + fs_read → proc_server:
    4. return buffer
 ```
 
-Per `ps` on 100 processes: ~280 µs total — humanly imperceptible.
+For `ps` on 100 processes: ~280 µs total — humanly imperceptible.
 On Linux the same call costs ~50–100 µs (direct syscalls).  We pay
 ~3–5× more on a tool that runs once per human action.
 
@@ -320,9 +320,9 @@ may be stale by a few ns, fine for human eyes.
 
 | # | Issue | What lands |
 |---|-------|------------|
-| 1 | #227 | `libelf` — refactor preliminare, sblocca exec_server |
-| 2 | #228 | `exec_server` — usa libelf |
-| 3 | #217 | `proc_server` — usa exec_server, owns pid/wait/signals |
+| 1 | #227 | `libelf` — preliminary refactor, unblocks exec_server |
+| 2 | #228 | `exec_server` — uses libelf |
+| 3 | #217 | `proc_server` — uses exec_server, owns pid/wait/signals |
 | 4 | #229 | `libbudget` — standalone primitive (can proceed in parallel) |
 | 5 | #216 v2.x | `cap_server v2` — manifest, then quota, then budget binding |
 

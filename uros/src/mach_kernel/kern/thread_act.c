@@ -747,7 +747,7 @@ thread_abort_safely(
 #include <mach/thread_special_ports.h>
 #include <ipc/ipc_port.h>
 #include <mach/mach_server.h>
-#include <mach/mach_host_server.h>	/* #448: interfaccia contro implementazione */
+#include <mach/mach_host_server.h>	/* #448: interface against implementation */
 
 kern_return_t
 thread_info(
