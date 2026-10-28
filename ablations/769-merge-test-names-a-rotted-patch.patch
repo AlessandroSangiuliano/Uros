@@ -1,0 +1,32 @@
+Kind: ablation
+Issue: #769
+Takes out: nothing -- a probe: puts into ablations/ a patch that does not apply, as a merge that moved the code under one would leave it; the merge test must name it and fail, where before #769 it asked nothing of the patches and passed
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: tcg
+Script: -e
+Script: 0
+Script: -G
+Expect: merge-test: ablations: [0-9]+ of the [0-9]+ patches of ablations/ no longer apply to [0-9a-f]+ -- regenerate them: (.* )?769-rotted-on-purpose\.patch( .*)? -- WRONG \(#769\)
+Note: a whole run, entry 0 alone, and not -P: the question is asked in the run a merge is decided on, and its line comes out beside the totals. Accel: tcg because under KVM ablate.sh would give the script --kvm, which it does not take; the run's own -a tcg names the accelerator.
+
+diff --git a/ablations/769-rotted-on-purpose.patch b/ablations/769-rotted-on-purpose.patch
+new file mode 100644
+index 00000000..882d21da
+--- /dev/null
++++ b/ablations/769-rotted-on-purpose.patch
+@@ -0,0 +1,13 @@
++Kind: ablation
++Issue: #769
++Takes out: nothing -- put here by 769-merge-test-names-a-rotted-patch.patch, and rotted on purpose: its hunk's context is in no file of the tree, as a merge that moved the code under a patch leaves it
++Run: --entry 0 300
++Expect: a line no boot prints
++
++diff --git a/README.md b/README.md
++--- a/README.md
+++++ b/README.md
++@@ -1,2 +1,2 @@
++ a line README.md does not have
++-and another it does not have
+++in place of the other
