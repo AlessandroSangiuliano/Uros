@@ -261,23 +261,23 @@ if [ "$USE_BUNDLE" = true ]; then
 fi
 
 if [ ! -f "$KERNEL" ]; then
-    echo "ERROR: kernel non trovato: $KERNEL"
-    echo "Build con:"
+    echo "ERROR: kernel not found: $KERNEL"
+    echo "Build with:"
     echo "  cd $BUILD_DIR && cmake -DOSFMK_BUILD_KERNEL=ON -DOSFMK_BUILD_BOOTSTRAP=ON .. -G Ninja && ninja"
     exit 1
 fi
 
 if [ ! -f "$BOOTSTRAP" ]; then
-    echo "ERROR: bootstrap server non trovato: $BOOTSTRAP"
+    echo "ERROR: bootstrap server not found: $BOOTSTRAP"
     exit 1
 fi
 
-# Costruisci la riga di comando QEMU.
+# Build the QEMU command line.
 #
-# Issue #186: se è presente il bundle stage-1 lo passiamo come secondo
-# modulo multiboot via -initrd "<bootstrap>,<bundle>".  QEMU multiboot
-# accetta una lista comma-separated; il kernel (kern/bootstrap.c) mappa
-# mod[1] nello spazio del bootstrap server e gli passa --bundle=ADDR,SIZE.
+# Issue #186: if the stage-1 bundle is present we pass it as the second
+# multiboot module via -initrd "<bootstrap>,<bundle>".  QEMU multiboot
+# accepts a comma-separated list; the kernel (kern/bootstrap.c) maps
+# mod[1] into the bootstrap server's space and passes it --bundle=ADDR,SIZE.
 INITRD="$BOOTSTRAP"
 if [ "$USE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
     INITRD="$BOOTSTRAP,$BUNDLE_IMG"
@@ -339,7 +339,7 @@ create_ahci_test_disk() {
     _disk="$1"
     _label="$2"
 
-    echo "  Creazione disco AHCI secondario: $_disk ($_label)"
+    echo "  Creating the secondary AHCI disk: $_disk ($_label)"
     # A new file, not the old one rewritten: a qemu still holding the old disk
     # keeps its own inode (#592).
     rm -f "$_disk"
@@ -370,10 +370,10 @@ DBGFS
 AHCI_ARGS=""
 if [ "$USE_AHCI" = true ]; then
     if [ ! -f "$DISK_IMG" ]; then
-        echo "ERRORE: $DISK_IMG non trovato — esegui ./scripts/make-disk-image.sh prima"
+        echo "ERROR: $DISK_IMG not found — run ./scripts/make-disk-image.sh first"
         exit 1
     fi
-    echo "AHCI port 0: $DISK_IMG (contiene /mach_servers/, hello.txt, swap)"
+    echo "AHCI port 0: $DISK_IMG (holds /mach_servers/, hello.txt, swap)"
     AHCI_ARGS="-device ich9-ahci,id=ahci0"
     AHCI_ARGS="$AHCI_ARGS -drive id=ahcidisk0,file=$DISK_IMG,format=raw,if=none"
     AHCI_ARGS="$AHCI_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
@@ -385,7 +385,7 @@ if [ "$USE_AHCI" = true ]; then
         # bytes on it are the evidence.
         if [ -n "$AHCI2_IMAGE" ]; then
             if [ ! -f "$AHCI2_IMAGE" ]; then
-                echo "ERRORE: --ahci2-image $AHCI2_IMAGE non esiste"
+                echo "ERROR: --ahci2-image $AHCI2_IMAGE does not exist"
                 exit 1
             fi
             AHCI_DISK1="$AHCI2_IMAGE"
@@ -398,8 +398,8 @@ if [ "$USE_AHCI" = true ]; then
         echo "AHCI port 1: $AHCI_DISK1"
     fi
 elif [ "$USE_DISK" = true ]; then
-    echo "ATTENZIONE: disco richiesto ma --ahci non attivo; bootstrap stage-2"
-    echo "  non potrà aprire disk0a — avvio degraded (solo bundle stage-1)."
+    echo "WARNING: disk requested but --ahci not active; bootstrap stage-2"
+    echo "  will not be able to open disk0a — degraded boot (stage-1 bundle only)."
 fi
 
 # --virtio, --virtio-first: a virtio-blk-pci controller beside the AHCI one.
