@@ -201,6 +201,20 @@ open_reports() {
 	done
 }
 
+# Why a run that went quiet was cut, from what its log shows (#768).  The run
+# waits for every line it must say, so a boot that ran to the bundle's end
+# without one of them goes quiet and stays so: that is not a machine that
+# stopped, and the lines it never said follow in the verdict.  This used to say
+# "the machine stopped" of every quiet run, and in each of the nine runs it was
+# said of up to #764 the boot had printed "=== Benchmark complete ===".
+quiet_cut() {	# quiet_cut LOG SECONDS -> the reason, one line
+	if clean "$1" | grep -aq '^=== Benchmark complete ==='; then
+		echo "NOTHING ARRIVED for ${2}s after the bundle's end (=== Benchmark complete ===): what it never said follows"
+	else
+		echo "NOTHING ARRIVED for ${2}s, before the bundle's end: the machine stopped"
+	fi
+}
+
 over() {
 	local log=$1 m
 	for m in "${MUST[@]}"; do
@@ -298,7 +312,7 @@ for run in "${RUNS[@]}"; do
 			fi
 			now=$(stat -c %s "$log" 2>/dev/null || echo 0)
 			if [ "$now" = "$size" ]; then still=$((still + 2)); else still=0; size=$now; fi
-			if [ $still -ge $quiet ]; then cut="NOTHING ARRIVED for ${quiet}s: the machine stopped"; break; fi
+			if [ $still -ge $quiet ]; then cut=$(quiet_cut "$log" $quiet); break; fi
 			if [ $(( $(date +%s) - t0 )) -ge $capsec ]; then cut="still printing after ${capsec}s: cut"; break; fi
 		done
 		if ! kill -0 $pid 2>/dev/null && ! over "$log" && [ -z "$cut" ]; then
