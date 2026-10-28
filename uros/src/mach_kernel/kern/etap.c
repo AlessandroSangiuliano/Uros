@@ -34,7 +34,7 @@
 #include <mach/port.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>         /* for kernel_map, ipc_kernel_map */
-#include <mach/mach_server.h>	/* #448: interfaccia contro implementazione */
+#include <mach/mach_server.h>	/* #448: interface against implementation */
 
 /*
  *	Forwards

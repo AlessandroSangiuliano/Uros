@@ -35,7 +35,7 @@
 #include <kern/klog.h>
 #include <kern/host.h>
 #include <string.h>
-#include <mach/mach_klog_server.h>	/* #448: interfaccia contro implementazione */
+#include <mach/mach_klog_server.h>	/* #448: interface against implementation */
 
 static char		klog_buf[KLOG_BUF_SIZE];
 static natural_t		klog_head;

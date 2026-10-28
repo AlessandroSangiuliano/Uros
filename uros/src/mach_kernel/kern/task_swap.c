@@ -43,7 +43,7 @@
 #include <kern/misc_protos.h>
 #include <kern/assert.h>
 #include <mach/policy.h>
-#include <mach/mach_server.h>	/* #448: interfaccia contro implementazione */
+#include <mach/mach_server.h>	/* #448: interface against implementation */
 
 /*
  * Note:  if TASK_SWAPPER is disabled, then this file defines only
