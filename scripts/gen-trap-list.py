@@ -61,7 +61,7 @@ def main(argv) -> int:
         emit_c = True
         argv = [argv[0]] + argv[2:]
     if len(argv) < 2:
-        print(__doc__ or 'uso: gen-trap-list.py <syscall_sw.h> [output]',
+        print(__doc__ or 'usage: gen-trap-list.py <syscall_sw.h> [output]',
               file=sys.stderr)
         return 2
 

@@ -10,8 +10,8 @@
 #     -server your_file_server.c -sheader your_file_server.h \
 #     your_file.defs
 #
-# All -I flags possono essere passati dentro -cpp tra virgolette.
-# I parametri -user, -header, -server, -sheader permettono di specificare i nomi dei file di output.
+# All -I flags can be passed inside -cpp, in quotes.
+# The -user, -header, -server, -sheader parameters let you specify the output file names.
 #
 # 
 #

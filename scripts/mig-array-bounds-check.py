@@ -36,9 +36,9 @@
 # parsing C by hand.  Struct layout is the compiler's answer, not a thing to
 # recompute: padding and alignment are where every one of these went wrong.
 #
-# Uso:
-#   scripts/mig-array-bounds-check.py [radice]
-# Esce 1 se un limite è troppo stretto.
+# Usage:
+#   scripts/mig-array-bounds-check.py [root]
+# Exits 1 if a bound is too tight.
 
 import re
 import subprocess
