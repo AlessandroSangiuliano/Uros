@@ -169,6 +169,13 @@ extern void yyerror(char *);
 %left	syPlus syMinus
 %left	syStar syDiv
 
+/*
+ * No conflicts, and bison is told so: a change that brings one back is a build
+ * error, not a line in a build's output that nobody reads when it passes.  The
+ * 42 that were here were a warning for eight months (#766).
+ */
+%expect	0
+
 
 %type	<statement_kind> ImportIndicant
 %type	<number> VarArrayHead ArrayHead StructHead IntExp
