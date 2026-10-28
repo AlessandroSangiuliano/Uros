@@ -880,7 +880,7 @@ bench_inter_sweep(int iters)
  * of the same pages at the same time. No IPC, no child threads, no ports
  * beyond the task port each iteration must release: the shortest path from
  * `task_create()' to `vm_map_fork()' to `pmap_page_protect()', which is
- * exactly the backtrace in the reperto.
+ * exactly the backtrace in the crash report.
  *
  * ⚠️ THE REGION IS NOT DECORATION. An address space with nothing resident in
  * it is forked without `vm_map_fork()' ever reaching a page that has pv
@@ -924,7 +924,7 @@ bench_inter_sweep(int iters)
  * child drives pmap_destroy() through all of them while the other children are
  * still faulting them in and every worker's next task_create() is walking the
  * same lists to write-protect them.  Reader, writer and allocator on the same
- * lists at the same time, which is the reperto's shape.
+ * lists at the same time, which is the crash's shape.
  *
  * ⚠️ A child costs far more than a bare fork (a stack, a thread, its faults),
  * so the iteration count belongs lower when this is on -- both are cache
