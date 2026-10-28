@@ -124,7 +124,7 @@ proc uros_interleaved_window {hay needle slack} {
 # noise side is a presence, not an absence: the sweep was taken up until it DID
 # produce false hits, because a false-positive test that has never fired has
 # not been shown able to.  The first one it produced was an installer line
-# ("[5/6] Assemblaggio partizioni ext2...") swallowing `[bg] pid='.
+# ("[5/6] Assembling the ext2 partitions...") swallowing `[bg] pid='.
 #
 # ⚠️ The live haystack is smaller than those 52 KB prefixes -- only what
 # arrived during one wait -- so the noise threshold is further away in practice
