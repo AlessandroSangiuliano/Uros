@@ -1,0 +1,18 @@
+Kind: widen
+Issue: #757
+Holds open: the trap phase profile, compiled in on x86-64 whatever the cache says, as 622-widen-entry.patch does it -- ablate.sh configures every arm with the reference build's options, and a merge build's UROS_SYSCALL_PROFILE is OFF -- so that an ordinary boot prints the profile's dumps, the reports printf_block_begin() keeps whole; the fixed tree must still pass, every dump contiguous and whole
+Run: --entry 14 600 -smp 4
+
+diff --git a/uros/src/mach_kernel/CMakeLists.txt b/uros/src/mach_kernel/CMakeLists.txt
+index 55e0e94e..a020fd48 100644
+--- a/uros/src/mach_kernel/CMakeLists.txt
++++ b/uros/src/mach_kernel/CMakeLists.txt
+@@ -338,7 +338,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
+       list(APPEND KERNEL_DEFINES_BARE CONTEXT_FPU_COUNT=1)
+       message(STATUS "#561 vector-state exemption counters: ON (x86_64)")
+   endif()
+-  if(UROS_SYSCALL_PROFILE)
++  if(TRUE)	# 757 widen: the profile compiled in, whatever the cache says
+       list(APPEND KERNEL_DEFINES_BARE SYSCALL_PROFILE=1
+            SYSCALL_PROFILE_TRAP=${UROS_SYSCALL_PROFILE_TRAP})
+       message(STATUS "#411 trap phase profile: ON, following trap "

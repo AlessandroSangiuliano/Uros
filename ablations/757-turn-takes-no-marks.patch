@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #757
+Takes out: the console's use of the marks -- printf_writer_take() no longer calls printf_lines_turn_begin(), whose rules are untouched, so the self-test of the marks still passes while printf() and consolewrite() splice lines in silence, as before #757; console_marks, which cuts a line on the console itself at every boot, must say so
+Run: --entry 0 300 -smp 4
+Expect: console_marks: round [12]: no .* -- WRONG \(#757\)
+Note: the ablation the self-test cannot catch, and the reason console_marks exists: once the profile's dumps are blocks, the boots #757 was measured on cut no line at all (0 cuts in 12), so nothing else on them would show a console that splices.
+
+diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
+index 15e89de2..dc32debf 100644
+--- a/uros/src/mach_kernel/kern/printf.c
++++ b/uros/src/mach_kernel/kern/printf.c
+@@ -1257,7 +1257,8 @@ printf_writer_take(void)
+ 	printf_turn_writer = self;
+ 	printf_turn_n = 0;
+ 	printf_turn_last = '\0';
+-	printf_lines_turn_begin(&printf_console_lines, self, klog_cnputc);
++	/* ABLATION (#757): the console's turn takes no marks -- their
++	 * rules are untouched, and the self-test still asks them. */
+ }
+ 
+ /*

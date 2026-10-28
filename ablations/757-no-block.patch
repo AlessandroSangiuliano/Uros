@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #757
+Over: 757-widen-profile.patch
+Takes out: the block -- printf_block_begin() and printf_block_end() return at once, so a dump of the IPC profile goes out as any thread's lines and another thread's report lands among them, as before #757; the harness's dump check, which asks every dump to be contiguous and whole, must say so
+Script: scripts/run-x86_64.sh
+Script: --entry
+Script: 14
+Script: 600
+Script: -smp
+Script: 4
+Expect: profile-dumps: the dump at line [0-9]+ .*-- WRONG \(#757\)
+Note: Script: and not Run:, because what catches it is the harness's verdict, which is not in the kernel's log: Expect: reads what run-x86_64.sh printed.
+
+diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
+index 15e89de2..82d9b1e3 100644
+--- a/uros/src/mach_kernel/kern/printf.c
++++ b/uros/src/mach_kernel/kern/printf.c
+@@ -1285,6 +1285,9 @@ printf_block_begin(void)
+ {
+ 	printf_writer_t	self = printf_writer_self();
+ 
++	/* ABLATION (#757): no block -- a report's lines go out as any
++	 * thread's, and another writer's land among them, as before #757. */
++	return;
+ 	if (self & 1)
+ 		return;
+ 	disable_preemption();
+@@ -1312,6 +1315,7 @@ printf_block_end(void)
+ 	printf_writer_t	self = printf_writer_self();
+ 	unsigned int	left;
+ 
++	return;		/* ABLATION (#757): see printf_block_begin() */
+ 	if ((self & 1) || printf_block_owner != self)
+ 		return;
+ 	left = --printf_block_depth;
