@@ -633,7 +633,7 @@ little and removes its extremity. ⚠️ On 30 slow draws per arm it is an
 **indicative effect, not an established one**.
 
 🔑 **And no size stands out.** Inside one boot the same size reads 2.53,
-5.54 and 2.71; and in a whole boot (`senza-2`) **all** twelve sizes read
+5.54 and 2.71; and in a whole boot (`senza-2`, the second boot without `-X`) **all** twelve sizes read
 between 2.25 and 2.71 with a spread of 1-8%. Three equal repetitions happen with
 probability 0.25 ⇒ over twelve sizes one expects **~3 "narrow" rows by
 chance**, and 4 are observed: it is not structure, it is the expected count.
@@ -690,7 +690,7 @@ measurement readable: if `-smp 1` were simply "another machine" the peak would
 have moved too. **Only** what the hypothesis predicted has moved.
 
 🔑 **And the ALTERNATION disappears too.** The draws at smp4 are not independent:
-the autocorrelation of the fast/slow sequence in `conX-1` gives **lag 1 = 17%**
+the autocorrelation of the fast/slow sequence in `conX-1` (the first boot with `-X`) gives **lag 1 = 17%**
 (two consecutive draws are almost always *different*) and lag 2 = 76% — period 2.
 At `-smp 1` lag 1 climbs back to **94%**. The suspect is `queue_first(&pset->idle_queue)`
 in the branch that the affinity does not take: **the idle-CPU queue rotates**, so consecutive
