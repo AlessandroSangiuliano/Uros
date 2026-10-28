@@ -28,10 +28,10 @@ index 8af3ac74..e2c9a421 100644
  	Debugger("panic");
  
 diff --git a/uros/src/mach_kernel/kern/printf.c b/uros/src/mach_kernel/kern/printf.c
-index 59c76cdb..e896d681 100644
+index 15e89de2..bc866b95 100644
 --- a/uros/src/mach_kernel/kern/printf.c
 +++ b/uros/src/mach_kernel/kern/printf.c
-@@ -998,11 +998,36 @@ printf_nested(void)
+@@ -1000,11 +1000,36 @@ printf_nested(void)
   * the putc callback in _doprnt and as a direct cnputc wrapper for
   * the MP cpu-number prefix.
   */
@@ -67,7 +67,7 @@ index 59c76cdb..e896d681 100644
 +	}
  }
  
- void
+ /*
 diff --git a/uros/src/mach_kernel/x86_64/cpu/halt_test.c b/uros/src/mach_kernel/x86_64/cpu/halt_test.c
 index 321d60f2..43916a66 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/halt_test.c
