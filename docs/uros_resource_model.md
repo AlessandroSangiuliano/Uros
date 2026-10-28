@@ -209,7 +209,7 @@ libvfs.fs_open + fs_read → proc_server:
    4. return buffer
 ```
 
-Per `ps` on 100 processes: ~280 µs total — humanly imperceptible.
+For `ps` on 100 processes: ~280 µs total — humanly imperceptible.
 On Linux the same call costs ~50–100 µs (direct syscalls).  We pay
 ~3–5× more on a tool that runs once per human action.
 
