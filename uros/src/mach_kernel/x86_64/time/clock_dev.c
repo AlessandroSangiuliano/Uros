@@ -126,7 +126,7 @@ wall_init(void)
  * measures as ZERO -- ipc_bench timed 16384 trap calls at 0 us.
  *
  * 🔑 THIS EXACT SYMPTOM WAS DIAGNOSED AND FIXED ONCE ALREADY, on i386, in #344:
- * "numeri grossolani (3.00/2.00/2.00/2.00 us arrotondati = fallback mtime)".
+ * "coarse numbers (3.00/2.00/2.00/2.00 us rounded = fallback mtime)".
  * The fix there is rtc_subtick_nsec() in i386/rtclock.c, and this is the same
  * mechanism written for this machine: the tick handler stamps the TSC when it
  * advances the kept time, and a reader converts the distance since that stamp.
