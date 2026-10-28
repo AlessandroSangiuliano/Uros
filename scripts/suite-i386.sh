@@ -191,12 +191,15 @@ supply() {	# AC or battery; a machine that lists no mains supply is a desktop, o
 	echo $p
 }
 
-# Each started test with no closing line, one per line; nothing when all closed.
+# Each started test with no closing line, one per line, and the line it waits
+# for; nothing when all closed.  The closing line is named because two pairs can
+# open on the same line -- #761's and #764's console arms both do -- and the
+# start alone printed the same words twice, without saying which was open (#768).
 open_reports() {
 	local log=$1 i
 	for ((i = 0; i < ${#PAIRS[@]}; i += 2)); do
 		if clean "$log" | grep -aq "${PAIRS[i]}" && ! clean "$log" | grep -aq "${PAIRS[i+1]}"; then
-			echo "${PAIRS[i]%% (}"
+			echo "${PAIRS[i]%% (}, awaiting ${PAIRS[i+1]}"
 		fi
 	done
 }
