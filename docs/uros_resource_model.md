@@ -180,7 +180,7 @@ in libbudget.
 
 ## Accounting — proc_server + kernel `task_info`
 
-The reportistic layer.  Responsibility: tell `ps`, `top`, system
+The reporting layer.  Responsibility: tell `ps`, `top`, system
 monitors *how much* a process has consumed.
 
 Decision: accounting data is **NOT cached** in proc_server.  It lives
