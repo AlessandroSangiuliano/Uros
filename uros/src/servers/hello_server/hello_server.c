@@ -551,6 +551,44 @@ main(int argc, char **argv)
     }
 
     /*
+     * The line arm (#764): a line longer than the 80 bytes musl's vfprintf
+     * formats at a time when stdout is unbuffered, with a conversion before
+     * them and one after, reaches the console in one trap.
+     *
+     * Line-buffered, the line waits in stdout's buffer for its newline and
+     * goes over as one writev() of two pieces, which libposix-uros's
+     * terminal_write() gathers into one write, and console_write() into one
+     * trap.  Two things used to cut it, and either cuts this line.
+     * Unbuffered, the long literal in the middle does not fit in what is
+     * left of the 80 bytes, so musl sends what it holds with the literal,
+     * before the conversion after it is formatted.  And a writev() written
+     * piece by piece sends what the buffer holds, then the newline's piece.
+     * The line is open between the two writes, and at four processors
+     * another task's line landed there: hello_server's one line over 80
+     * characters came out cut in 100 of 211 i386 boots.
+     * scripts/suite-i386.sh wants this line whole, and printf's count is
+     * asked as in the arm above.
+     */
+    {
+#define	CONSOLE_LONG_LINE "(hello_server): console: a line of %d characters, " \
+			  "more than the 80 bytes musl formats at a time " \
+			  "unbuffered, with a conversion after them: %s (#764)\n"
+	char	sized[256];
+	int	want, got;
+
+	/* The line's length is in it: three digits, so 100 sizes it. */
+	want = snprintf(sized, sizeof sized, CONSOLE_LONG_LINE, 100, "this one");
+	got = printf(CONSOLE_LONG_LINE, want, "this one");
+	if (got == want)
+	    printf("(hello_server): console: printf returned %d, the long "
+		   "line's %d (#764)\n", got, want);
+	else
+	    printf("(hello_server): WRONG — console: printf returned %d, the "
+		   "long line's %d (#764)\n", got, want);
+#undef	CONSOLE_LONG_LINE
+    }
+
+    /*
      * Phase 4b (#253): if the operator passed "crash" as an argv,
      * fault deliberately to validate the Mach exception → POSIX
      * signal path.  Normal boot doesn't, so this is a no-op for
