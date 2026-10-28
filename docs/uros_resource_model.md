@@ -323,7 +323,7 @@ may be stale by a few ns, fine for human eyes.
 | 1 | #227 | `libelf` — refactor preliminare, sblocca exec_server |
 | 2 | #228 | `exec_server` — usa libelf |
 | 3 | #217 | `proc_server` — usa exec_server, owns pid/wait/signals |
-| 4 | #229 | `libbudget` — primitiva standalone (può procedere in parallelo) |
+| 4 | #229 | `libbudget` — standalone primitive (can proceed in parallel) |
 | 5 | #216 v2.x | `cap_server v2` — manifest, then quota, then budget binding |
 
 Items 1-3 are sequential.  Item 4 is independent and can be done in
