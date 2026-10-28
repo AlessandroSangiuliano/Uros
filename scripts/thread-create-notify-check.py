@@ -24,9 +24,9 @@
 # thing that rots: the entry outlives the reason, and the next person reads
 # it as permission.
 #
-# Uso:
-#   scripts/thread-create-notify-check.py [radice]
-# Esce 1 se un chiamante non notifica.
+# Usage:
+#   scripts/thread-create-notify-check.py [root]
+# Exits 1 if a caller does not notify.
 
 import re
 import sys
