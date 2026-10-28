@@ -876,7 +876,7 @@ get_ncpus(void)
  * validate_cpus() — mark the first `ncpus` slots in machine_slot[] as
  * containing real processors.  The slot index does NOT have to match the
  * LAPIC ID — kern/processor.c walks slots in order to allocate processor
- * structures, and the AP boot path (Incrementi 4) takes care of pairing
+ * structures, and the AP boot path (increment 4) takes care of pairing
  * the slot back to the right LAPIC ID.
  */
 void

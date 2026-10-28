@@ -18,7 +18,7 @@
 
 /*
  * mp_stub.c — minimal symbols required to link the kernel with NCPUS > 1
- * before the real AP-boot machinery (#300 Incrementi 3-4) lands.
+ * before the real AP-boot machinery (#300 increments 3-4) lands.
  *
  * The historical mp_v1_1.c is intentionally kept out of the build: it carries
  * 1230 lines of Corollary/SystemPro-specific interrupt plumbing that was
