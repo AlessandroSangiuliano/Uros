@@ -628,6 +628,13 @@ must_report 'klog flood: done' 'char_server: the kernel.s log is missing [0-9]* 
 must_report 'klog: the first write after the flood is refused on purpose' 'char_server: the kernel.s log is missing up to [0-9]* bytes here -- the tty refused' \
 	'A write was refused on purpose, and the forwarder said nothing of what it lost (#762).'
 
+# #765: char_test asks char_server for a character each way and for who owns
+# COM1 (#497), on a build with char_server in the bundle -- the merge test's
+# char build boots one.  Every way it ends, its early refusals included, ends
+# in its count of arms, so a start with no count is a test that stopped asking.
+must_report 'char_test: started' 'char_test: [0-9]* of [0-9]* arms passed' \
+	'char_test ends in its count of arms, its early refusals too, so a start with none is a test that stopped -- on a tty read, or waiting on char_server (#765).'
+
 # ⚠️ The terminator matches either verdict -- `ALL n TESTS PASSED' or `SOME
 # TESTS FAILED' -- and deliberately does not demand the count.  This list asks
 # whether the program reached its own last sentence; a failing arm already
