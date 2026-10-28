@@ -326,23 +326,23 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   list(FILTER ARCH_S_LOWER_S EXCLUDE REGEX "/bzero\\.s$")
   list(APPEND LIB_SOURCES ${ARCH_SOURCES})
 
-  # Le divisioni a 64 bit, e UNA copia sola (#415).
+  # 64-bit divisions, and ONE copy only (#415).
   #
-  # i386 non ha un'istruzione che divida un valore a 64 bit, quindi il
-  # compilatore emette una chiamata a un helper; libmach si linka -nostdlib e
-  # non lo riceve dalla runtime del compilatore.  Serve qui per lo stesso
-  # motivo per cui serve al kernel: doprnt.c stampa un `long long' da quando
-  # il #415 gli ha insegnato il modificatore di lunghezza che scartava.
+  # i386 has no instruction that divides a 64-bit value, so the compiler
+  # emits a call to a helper; libmach is linked -nostdlib and does not get
+  # it from the compiler's runtime.  It is needed here for the same reason
+  # the kernel needs it: doprnt.c prints a `long long' since #415 taught it
+  # the length modifier it used to discard.
   #
-  # 🔑 Si compila IL FILE DEL KERNEL invece di copiarlo.  Il formatter in
-  # questo albero esiste gia' in due copie (kern/printf.c e libmach/doprnt.c),
-  # e quella e' una divergenza che si vede leggendo; due copie di una
-  # divisione lunga divergerebbero in silenzio e produrrebbero cifre
-  # plausibili -- che e' il peggior guasto possibile per qualcosa il cui
-  # unico compito e' riportare altri guasti.
+  # 🔑 The KERNEL'S FILE is compiled instead of copied.  The formatter in
+  # this tree already exists in two copies (kern/printf.c and libmach/doprnt.c),
+  # and that is a divergence you can see by reading; two copies of a long
+  # division would diverge silently and produce plausible digits -- which is
+  # the worst possible failure for something whose only job is to report
+  # other failures.
   #
-  # ⚠️ Non e' codice del kernel: e' una proprieta' dell'ARCHITETTURA, e sta in
-  # i386/ perche' quello e' l'unico posto per l'arch che questo albero ha.
+  # ⚠️ It is not kernel code: it is a property of the ARCHITECTURE, and it
+  # lives in i386/ because that is the only place for arch code this tree has.
   list(APPEND LIB_SOURCES
     ${CMAKE_SOURCE_DIR}/src/mach_kernel/i386/divide64.c)
   foreach(sfile IN LISTS ARCH_S_LOWER_S)
@@ -524,7 +524,7 @@ set_source_files_properties(mach_msg.c PROPERTIES COMPILE_DEFINITIONS
 # Depend on MIG-generated device/device.h (defined in parent CMakeLists)
 add_dependencies(libmach mig_device_header mig_mach_public_headers)
 
-# Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
+# Compat: the code is historical (K&R/gnu89); we set less strict options to compile
 # Apply C-only options (including -include stdint.h) only when compiling C sources
 target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin  -mstack-protector-guard=global -include stdint.h>)
 
@@ -539,7 +539,7 @@ target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS})
 # (Imported from libsa_mach via #106.)
 set_source_files_properties(printf.c PROPERTIES COMPILE_FLAGS -fno-stack-protector)
 
-# Mach userspace headers (sa_mach) solo per questa libreria
+# Mach userspace headers (sa_mach) only for this library
 target_include_directories(libmach BEFORE PUBLIC
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
 )
@@ -553,7 +553,7 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_SOURCE_DIR}/include
 )
 
-# Metto gli archivi in export/<system>/lib per compatibilità con l'albero esistente
+# The archives go in export/<system>/lib, for compatibility with the existing tree
 set_target_properties(libmach PROPERTIES
   OUTPUT_NAME "mach"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"

@@ -562,22 +562,23 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   endif()
 
   if(UROS_BUNDLE_BENCH_ONLY)
-    # 🔴 LE SUITE SONO NOMINATE, E `scale' E' FUORI PER UN MOTIVO MISURATO.
+    # 🔴 THE SUITES ARE NAMED, AND `scale' IS OUT FOR A MEASURED REASON.
     #
-    # Su UNA CPU lo scaling sweep passa thr=16 e si pianta a thr=24: 24-32
-    # thread su un processore, che e' la forma di #352 -- «a thr=12 scatta il
-    # lost-wakeup, poi il bench si pianta, un worker resta su pthread_join per
-    # una reply mai arrivata» -- risolta a giugno e raggiunta molto prima dove
-    # c'e' un solo processore.  Riprodotta due volte, firma di #534:
-    # quiet_census passes=100 con resets che cresce.
+    # On ONE CPU the scaling sweep passes thr=16 and hangs at thr=24: 24-32
+    # threads on one processor, which is the shape of #352 -- "at thr=12 the
+    # lost-wakeup fires, then the bench hangs, a worker stays on pthread_join
+    # for a reply that never came" -- fixed in June and reached much sooner
+    # where there is a single processor.  Reproduced twice, the signature of
+    # #534: quiet_census passes=100 with resets growing.
     #
-    # ⚠️ Escluderla NON e' nascondere il difetto: e' il soggetto di un issue
-    # suo, e tenerla qui costerebbe 700 secondi di attesa per boot su una
-    # misura che non la riguarda.  `fault' e `disk' sono fuori perche' sono
-    # lente e non sono il soggetto; tutto il resto della tabella del 20/06 c'e'.
+    # ⚠️ Leaving it out is NOT hiding the defect: it is the subject of an issue
+    # of its own, and keeping it here would cost 700 seconds of waiting per boot
+    # on a measurement it does not concern.  `fault' and `disk' are out because
+    # they are slow and are not the subject; everything else of the 20/06 table
+    # is in.
     #
-    # ⚠️ La suite va nella bootstrap.conf e MAI nel -append del kernel: il
-    # parser boot-arg legge ogni carattere come flag, e la 'h' di bencH e'
+    # ⚠️ The suite goes in bootstrap.conf and NEVER in the kernel's -append: the
+    # boot-arg parser reads every character as a flag, and the 'h' of bencH is
     # halt_in_debugger.
     # 🔑 A CACHE VARIABLE, because a measurement usually wants ONE suite.
     #

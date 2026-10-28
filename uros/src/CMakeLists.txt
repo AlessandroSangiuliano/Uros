@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Questa directory contiene l'intero albero dei sorgenti Mach.
+# This directory holds the whole Mach source tree.
 
 set(OSFMK_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 

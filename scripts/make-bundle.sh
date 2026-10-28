@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# make-bundle.sh — Crea il bundle stage-1 multiboot per Uros (Issue #186).
+# make-bundle.sh — Creates the stage-1 multiboot bundle for Uros (Issue #186).
 #
-# Il bundle è un archivio flat name->bytes che il kernel passa al
-# bootstrap server come secondo modulo multiboot (mod[1]).  Contiene la
-# bootstrap.conf e i binari/moduli necessari prima che il
-# block_device_server sia in piedi (stage-0), così bootstrap.c non deve
-# più affidarsi al driver IDE in-kernel per leggere /mach_servers/.
+# The bundle is a flat name->bytes archive that the kernel passes to the
+# bootstrap server as the second multiboot module (mod[1]).  It holds the
+# bootstrap.conf and the binaries/modules needed before the
+# block_device_server is up (stage-0), so bootstrap.c no longer has to rely
+# on the in-kernel IDE driver to read /mach_servers/.
 #
-# Uso:
-#   ./scripts/make-bundle.sh                  # output di default
-#   ./scripts/make-bundle.sh -o bundle.bin    # path output custom
-#   ./scripts/make-bundle.sh --bench all ...  # passa suite a ipc_bench
+# Usage:
+#   ./scripts/make-bundle.sh                  # default output
+#   ./scripts/make-bundle.sh -o bundle.bin    # custom output path
+#   ./scripts/make-bundle.sh --bench all ...  # pass suites to ipc_bench
 # ==========================================================================
 set -euo pipefail
 
@@ -49,20 +49,20 @@ while [ $# -gt 0 ]; do
         --with-console)
             WITH_CONSOLE=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal] [--diskless]"
+            echo "Usage: $0 [-o output.bundle] [--bench suite ...] [--minimal] [--diskless]"
             echo "  --minimal: skip test/bench tasks (ipc_bench, pthread_test, cap_test,"
             echo "             kernel242_test, sig_test, gpustat) from bootstrap.conf"
             echo "  --diskless: run ipc_bench in stage-1 (before block_device_server) so the"
             echo "              IPC suite completes without a boot disk (#344, omen USB boot)"
             exit 0
             ;;
-        *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
 if [ ! -x "$MKBUNDLE" ]; then
-    echo "ERRORE: mkbundle non trovato: $MKBUNDLE"
-    echo "  Build con: cd $BUILD_DIR && ninja mkbundle"
+    echo "ERROR: mkbundle not found: $MKBUNDLE"
+    echo "  Build with: cd $BUILD_DIR && ninja mkbundle"
     exit 1
 fi
 
@@ -146,13 +146,13 @@ REQUIRED_FILES=(
 [ -f "$GPU_SERVER" ] && REQUIRED_FILES+=("$GPU_SERVER" "$GPU_VGA_MODULE")
 for f in "${REQUIRED_FILES[@]}"; do
     if [ ! -f "$f" ]; then
-        echo "ERRORE: file mancante: $f"
+        echo "ERROR: missing file: $f"
         exit 1
     fi
 done
 
-# bootstrap.conf — stesso contenuto di make-disk-image.sh, perché la
-# personalità di stage-0 deve essere indistinguibile da quella stage-2.
+# bootstrap.conf — same content as make-disk-image.sh, because the stage-0
+# personality must be indistinguishable from the stage-2 one.
 BOOTSTRAP_CONF=$(mktemp)
 trap 'rm -f "$BOOTSTRAP_CONF"' EXIT
 
@@ -173,29 +173,29 @@ IRQ_CLAIM_TEST_CONF_LINE=""
 HAL_BAR_TEST_CONF_LINE=""
 [ -f "$HAL_BAR_TEST" ] && HAL_BAR_TEST_CONF_LINE="-D hal_bar_test hal_bar_test"
 
-# #515: un errore aritmetico non mascherato deve arrivare al thread che lo ha
-# causato.  DUE righe e un solo binario: i bracci si distinguono per argv.
-# Sono due RUN separate perche' il braccio SIMD lascia il proprio thread
-# parcheggiato dentro una seconda exception_raise(), e in uno stesso task il
-# braccio dopo si prenderebbe quel messaggio per suo.
+# #515: an unmasked arithmetic error must reach the thread that caused it.
+# TWO lines and a single binary: the arms are told apart by argv.
+# They are two separate RUNS because the SIMD arm leaves its own thread
+# parked inside a second exception_raise(), and in one and the same task the
+# next arm would take that message for its own.
 #
-# ⚠️ In fondo, subito prima della ush: sul kernel da cui #515 parte il braccio
-# SIMD PANICA, quindi tutto il resto deve essere gia' passato.
+# ⚠️ At the end, right before ush: on the kernel #515 starts from, the SIMD arm
+# PANICS, so everything else must already have passed.
 FPERR_TEST_X87_CONF_LINE=""
 FPERR_TEST_SSE_CONF_LINE=""
 if [ -f "$FPERR_TEST" ]; then
     FPERR_TEST_X87_CONF_LINE="fperr_test fperr_test x87"
     FPERR_TEST_SSE_CONF_LINE="fperr_test fperr_test sse"
 fi
-# #513: lo stesso binario DUE volte -- il primo riempie la tavola delle regioni
-# DMA e MUORE tenendola, il secondo la ritrova resa dal kernel.  Una restituzione
-# non si dimostra con un'assenza: serve qualcun altro a cui venga data.
+# #513: the same binary TWICE -- the first fills the DMA regions table and DIES
+# holding it, the second finds it handed back by the kernel.  A return is not
+# shown by an absence: someone else has to be given it.
 #
-# 🔴 DOPO hal_server e PRIMA di block_device_server, deciso dai due lati: il
-# primo dei due deve morire da DRIVER -- si registra, rivendica l'host bridge e
-# lo riporta -- quindi prima dell'hal non avrebbe con chi registrarsi; e prende
-# OGNI slot DMA libero, quindi dopo il block server affamerebbe chi il disco lo
-# usa davvero.  I due `-w' serializzano la coppia.
+# 🔴 AFTER hal_server and BEFORE block_device_server, decided from both sides:
+# the first of the two must die as a DRIVER -- it registers, claims the host
+# bridge and reports it -- so before the hal it would have nobody to register
+# with; and it takes EVERY free DMA slot, so after the block server it would
+# starve whoever really uses the disk.  The two `-w' serialize the pair.
 DMA_RECLAIM_CONF_LINES=""
 [ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="-D dma_reclaim_test dma_reclaim_test holder
 -D dma_reclaim_test dma_reclaim_test check"
@@ -275,9 +275,9 @@ if [ "$DISKLESS" = "1" ]; then
     IPC_BENCH_LINE=""
 fi
 
-# ⚠️ Il name server NON porta un flag `-w' qui: bootstrap lo aspetta da
-# solo (#492).  La decisione sta in parse_config_file(), perche' questo
-# file e' uno di QUATTRO che scrivono la stessa riga.
+# ⚠️ The name server does NOT carry a `-w' flag here: bootstrap waits for it
+# by itself (#492).  The decision lives in parse_config_file(), because this
+# file is one of FOUR that write the same line.
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}

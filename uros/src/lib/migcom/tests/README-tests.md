@@ -1,50 +1,50 @@
-# Migcom — Descrizione dei test
+# Migcom — Description of the tests
 
-## Cosa viene testato ✅
-- Esecuzione del binario `migcom` con un input minimo (file `.mig`) per verificare che non vada in crash e termini con codice di uscita 0.
-- Test di smoke dopo refactor/compilazioni per accertare che la funzionalità di base del tool sia intatta.
+## What is tested ✅
+- Running the `migcom` binary with a minimal input (a `.mig` file) to check that it does not crash and ends with exit code 0.
+- Smoke test after refactors/builds, to make sure the tool's basic functionality is intact.
 
-## Come lo testo 🔧
-- Test automatico registrato in CTest (file: `CMakeLists.txt` del modulo).
-- Comando eseguito dal test:
+## How I test it 🔧
+- Automatic test registered in CTest (file: the module's `CMakeLists.txt`).
+- Command run by the test:
 
   ```sh
   /path/to/build/src/lib/migcom/migcom -V -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null < tests/minimal.mig
   ```
 
-- Passi per eseguirlo manualmente:
-  1. Configurare il build: `cmake -S . -B build`
-  2. Compilare `migcom`: `cmake --build build --target migcom -j N`
-  3. Eseguire il test di directory: `ctest --test-dir build/src/lib/migcom -V`
+- Steps to run it manually:
+  1. Configure the build: `cmake -S . -B build`
+  2. Build `migcom`: `cmake --build build --target migcom -j N`
+  3. Run the directory's test: `ctest --test-dir build/src/lib/migcom -V`
 
-## Test inclusi nel modulo 🧪
-- `minimal.mig`: test minimale che verifica che `migcom` riconosca un semplice `subsystem` e termini correttamente (smoke test).
-- `routine-simple.mig`: verifica il parsing di una `simpleroutine` con `request_port` e un argomento `in`; controlla la validazione del tipo della porta e la correttezza della firma della routine.
-- `routine-complex.mig`: esercita parsing di una routine con `request_port`, argomenti `in` e `inout`; verifica la gestione di più categorie di argomenti e la robustezza del parser.
-- `skip-only.mig`: verifica che gli statement `skip;`, commenti e whitespace vengano ignorati senza produrre errori.
+## Tests included in the module 🧪
+- `minimal.mig`: minimal test that checks that `migcom` recognizes a simple `subsystem` and ends correctly (smoke test).
+- `routine-simple.mig`: checks the parsing of a `simpleroutine` with `request_port` and an `in` argument; checks the validation of the port's type and the correctness of the routine's signature.
+- `routine-complex.mig`: exercises the parsing of a routine with `request_port`, `in` and `inout` arguments; checks the handling of several categories of arguments and the parser's robustness.
+- `skip-only.mig`: checks that `skip;` statements, comments and whitespace are ignored without producing errors.
 
-Tutti i test sopra devono terminare con codice di uscita `0` (esito `Passed` in CTest).
+All the tests above must end with exit code `0` (`Passed` in CTest).
 
-## Perché lo testo (motivo) 💡
-- Fornisce un controllo semplice e rapido che il processo principale (parsing, generazione file, e terminazione corretta) non sia rotto dalle modifiche.
-- È utile come primo gate di integrazione prima di eseguire test più approfonditi o test di integrazione.
+## Why I test it (reason) 💡
+- Provides a simple, quick check that the main process (parsing, file generation, and correct termination) has not been broken by changes.
+- Useful as a first integration gate before running deeper tests or integration tests.
 
-## Risultati attesi 🎯
-- Il comando deve terminare con codice di uscita `0` (esito `Passed` in CTest).
-- Nessun crash o dump; output di diagnostica (se `-V`) è accettabile, ma non errori fatali.
+## Expected results 🎯
+- The command must end with exit code `0` (`Passed` in CTest).
+- No crash or dump; diagnostic output (with `-V`) is acceptable, but not fatal errors.
 
-## Estendere i test ➕
-- Aggiungere ulteriori file `.mig` in `tests/` che verificano casi più complessi (argomenti polimorfici, KPD vari, template statici, opzioni diverse del comando).
-- Per ogni nuovo test, aggiungere una riga `add_test(...)` nel `CMakeLists.txt` del modulo per registrarlo in CTest.
+## Extending the tests ➕
+- Add more `.mig` files in `tests/` that check more complex cases (polymorphic arguments, various KPDs, static templates, different options of the command).
+- For each new test, add an `add_test(...)` line in the module's `CMakeLists.txt` to register it in CTest.
 
-## Note pratiche e suggerimenti ✨
-- Il test attuale reindirizza output/file a `/dev/null` per renderlo deterministico e rapido.
-- Per test che confrontano output, si possono generare file temporanei e usare `diff` per verificare le aspettative.
+## Practical notes and tips ✨
+- The current test redirects output/files to `/dev/null` to make it deterministic and fast.
+- For tests that compare output, temporary files can be generated and `diff` used to check the expectations.
 
 ---
 
-Se vuoi, posso ora:
-1. Aggiungere test addizionali con casi rappresentativi, oppure
-2. Promuovere i test del modulo in modo che vengano eseguiti anche dal `ctest` a livello di progetto (root). 
+If you like, I can now:
+1. Add further tests with representative cases, or
+2. Promote the module's tests so that they also run from the project-level `ctest` (root). 
 
-Dimmi quale opzione preferisci.
+Tell me which option you prefer.

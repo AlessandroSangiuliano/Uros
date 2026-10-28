@@ -346,7 +346,7 @@ if {[info exists argv0] && [file tail $argv0] eq "smoke-findings.tcl"} {
 	}
 
 	if {[llength $argv] < 2} {
-		puts stderr "uso: smoke-findings.tcl --self-test"
+		puts stderr "usage: smoke-findings.tcl --self-test"
 		puts stderr "     smoke-findings.tcl <transcript> <literal> \[literal...\]"
 		exit 2
 	}

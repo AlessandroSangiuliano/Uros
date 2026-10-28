@@ -32,8 +32,8 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Path to the mig shell script (handles cc -E | migcom pipeline)
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
 
-# Helper: genera i file MIG (.c/.h) usando lo script mig originale.
-# Uso: add_mig_defs(path/to/file.defs INCLUDES...)
+# Helper: generates the MIG files (.c/.h) using the original mig script.
+# Usage: add_mig_defs(path/to/file.defs INCLUDES...)
 function(add_mig_defs DEFS_FILE)
   get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
 
@@ -49,8 +49,8 @@ function(add_mig_defs DEFS_FILE)
 
   set_source_files_properties(${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H} PROPERTIES GENERATED TRUE)
 
-  # Evita di registrare più volte lo stesso .defs (previene errori CMake).
-  # Usa GLOBAL PROPERTY (non CACHE) così si azzera a ogni cmake run.
+  # Avoid registering the same .defs more than once (prevents CMake errors).
+  # Uses a GLOBAL PROPERTY (not CACHE) so it resets on every cmake run.
   get_property(_mig_processed GLOBAL PROPERTY MIG_PROCESSED_${DEFS_NAME})
   if(_mig_processed)
     message(VERBOSE "MIG: ${DEFS_NAME} already processed, reusing outputs")
@@ -85,11 +85,11 @@ function(add_mig_defs DEFS_FILE)
     VERBATIM
   )
 
-  # Espongo solamente i file .c generati come sorgenti della libreria (l'header viene generato ma non è sorgente)
+  # Expose only the generated .c files as the library's sources (the header is generated but is not a source)
   set(${DEFS_NAME}_MIG_GENERATED ${USER_C} ${SERVER_C} PARENT_SCOPE)
 endfunction()
 
-# Tool host principali: migcom (e in seguito mig se necessario).
+# Main host tools: migcom (and later mig if needed).
 add_subdirectory(migcom)
 
 # Generate device/device.h from device.defs via MIG (shared by libmach, libflipc2, etc.)

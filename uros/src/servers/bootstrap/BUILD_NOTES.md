@@ -209,5 +209,5 @@ in libmach, libcthreads, and libsa_mach.
 
 
 
-Dubbi:
-(*_ldr_jump_func)() è rimasta invariata?
+Doubts:
+Has (*_ldr_jump_func)() remained unchanged?
