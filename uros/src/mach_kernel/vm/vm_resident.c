@@ -1690,7 +1690,7 @@ vm_page_release(
 			* ⚠️ Said here rather than left to the reader.  The
 			* releaser being the kernel's own teardown thread and
 			* the holder being a user pmap is the whole reading of
-			* this reperto, and without this the only way to tell
+			* this crash report, and without this the only way to tell
 			* was to match the task address against a census from
 			* ANOTHER boot -- an inference across two runs, which
 			* is how a plausible wrong answer gets written down.
