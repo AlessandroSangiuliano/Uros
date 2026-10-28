@@ -44,9 +44,10 @@
 #   -L  only ask whether each grub.cfg entry is run or said not run, and say so:
 #       0 if each is, 1 if not.  ci/job.sh asks it before it builds (#755)
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
-# default is tested the same way.  A run that refuses to start -- a bad option,
-# the stub's port taken, the lists and grub.cfg not agreeing -- exits 2, and
-# otherwise the exit status is the number of entries
+# default is tested the same way; its char build, which the entries marked @char
+# boot, is that build's path with -char after it (#765).  A run that refuses to
+# start -- a bad option, the stub's port taken, the lists and grub.cfg not
+# agreeing -- exits 2, and otherwise the exit status is the number of entries
 # judged wrong (0: every judged entry as it should be).
 
 set -u
@@ -89,8 +90,13 @@ UNASKED=0 UNASKED_WHERE=""
 CAMEBACK=0 CAMEBACK_WHERE=""
 
 # The entries, one per line: number, verdict, extra run-x86_64.sh options, and
-# the processor count when it is not the run's.
+# the processor count when it is not the run's.  @char among the options boots
+# the char build instead of the build the run was given (#765; char_build below).
 #   harness   the harness's own verdict: "passed: reached the end, nothing unexplained"
+#   char      the harness's verdict, of the char build: COM1 handed over to
+#             char_server, its klog forwarder started, and char_test's count of
+#             arms -- what "harness" would pass a build without char_server
+#             on, since nothing asks for them there (#765)
 #   stop13    the name server stops at service_checkin, which grub.cfg says is
 #             the designed end: a boot task that IS the name server has nothing
 #             above it to answer the check-in
@@ -146,6 +152,7 @@ ENTRIES="
 14 harness
 14 harness - 1
 14 harness --socket1-cpu 1,sockets=2,cores=64,maxcpus=128
+14 char @char
 15 harness
 16 harness --iommu_amd
 16 harness --iommu_intel
@@ -338,6 +345,15 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	NOTE=""
 	case $v in
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
+	# #765: the char build -- char_server in the bundle.  Its three lines are
+	# asked for because nothing else does: a bundle without char_server
+	# passes "harness", and run-x86_64.sh's pair for char_test opens only on
+	# its start.  The count goes into the verdict as char_test printed it.
+	char) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
+		grep -aq 'console: COM1 handed over to its driver' "$f" &&
+		grep -aq "char_server: forwarding the kernel's klog to the tty it now owns" "$f" &&
+		out=$(grep -aoE 'char_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
+		[ -n "$out" ] && NOTE=$out ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
 	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
 	# #663: numbered with gaps -- APIC ids 0-2 and 4-6, as pavillion's are
@@ -506,6 +522,71 @@ if [ -n "$STUB" ] && ss -ltn 2>/dev/null | grep -q ':1234 '; then
 	echo "merge-test: port 1234 is in use, so no run could start with the gdb stub -- free it, or -G to run without" >&2
 	exit 2
 fi
+# #765: the char build -- the build the run was given, and char_server in its
+# bundle.  OSFMK_BUILD_CHAR_SERVER stays off in the default bundle, whose boots
+# are the ones every earlier measurement was taken on (bootstrap's
+# CMakeLists.txt says so), and so char_server, its klog forwarder, COM1's
+# handover (#497) and char_test ran only in builds somebody configured by hand:
+# none of 3874 merge-test logs kept on pavillion since 01/10 had the forwarder's
+# line.  An entry marked @char boots this build instead.
+#
+# 🔑 Configured here, on every run that has such an entry, from the tree the
+# given build was configured from and with every OSFMK_* and UROS_* option of
+# its cache -- ablate.sh's configure(), for its reason: a build beside another
+# has to be that other build and one difference, or a WRONG in it says nothing
+# of which.  A cache left from an earlier run takes the options anew.  Built
+# here too, before any boot, so that a build that fails or warns is said once,
+# with its log, and not as a boot that did not run.  A count of warnings means
+# something only of a build from nothing, which the first run here is.
+MAIN_BUILD=${UROS_BUILD_DIR:-$HERE/uros/build-x86_64}
+CHAR_BUILD=$MAIN_BUILD-char
+CHAR_REFUSED=""
+char_build() {
+	local cache=$MAIN_BUILD/CMakeCache.txt src gen bt l n rest t v w fresh=0 opts=()
+	if [ ! -r "$cache" ]; then
+		CHAR_REFUSED="$MAIN_BUILD has no CMakeCache.txt to take the char build's options from"
+		return
+	fi
+	src=$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' "$cache")
+	gen=$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' "$cache")
+	bt=$(sed -n 's/^CMAKE_BUILD_TYPE:STRING=//p' "$cache")
+	while IFS= read -r l; do
+		n=${l%%:*}
+		rest=${l#*:}
+		t=${rest%%=*}
+		v=${rest#*=}
+		[ "$n" = OSFMK_BUILD_CHAR_SERVER ] && continue
+		opts+=("-D$n:$t=$v")
+	done < <(grep -E '^(OSFMK|UROS)_[A-Z0-9_]*:(BOOL|STRING|UNINITIALIZED)=' "$cache" | grep -v '_LAST:')
+	[ -f "$CHAR_BUILD/build.ninja" ] || fresh=1
+	if ! cmake -S "$src" -B "$CHAR_BUILD" -G "$gen" -DCMAKE_BUILD_TYPE="$bt" "${opts[@]}" \
+		-DOSFMK_BUILD_CHAR_SERVER=ON > "$OUT/char-build-configure.log" 2>&1; then
+		CHAR_REFUSED="the char build did not configure: $OUT/char-build-configure.log"
+		return
+	fi
+	if ! LC_ALL=C ninja -C "$CHAR_BUILD" mach_kernel boot_probe name_server_bin \
+		bootstrap_server bootstrap_bundle > "$OUT/char-build.log" 2>&1; then
+		CHAR_REFUSED="the char build failed: $OUT/char-build.log"
+		return
+	fi
+	w=$(grep -c 'warning:' "$OUT/char-build.log")
+	if [ "$w" != 0 ]; then
+		CHAR_REFUSED="the char build has $w warning(s), and the build it is made from none: $OUT/char-build.log"
+		return
+	fi
+	if [ $fresh = 1 ]; then
+		echo "merge-test: char build $CHAR_BUILD, from $src with ${#opts[@]} options of $MAIN_BUILD and char_server on: built from nothing, 0 warnings"
+	else
+		echo "merge-test: char build $CHAR_BUILD, from $src with ${#opts[@]} options of $MAIN_BUILD and char_server on: rebuilt, so its 0 warnings cover only what it recompiled"
+	fi
+}
+if grep -E '^[0-9]+ ' <<< "$ENTRIES" | while read -r e v opt cpus; do
+	[ -z "$ONLY" ] || [[ "$ONLY" == *" $e "* ]] || continue
+	[[ " ${opt//_/ } " == *" @char "* ]] && echo yes
+done | grep -q yes; then
+	char_build
+	[ -z "$CHAR_REFUSED" ] || echo "merge-test: $CHAR_REFUSED -- the entries marked @char are WRONG, not run" >&2
+fi
 echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}${STUB:+, gdb stub on every run}"
 echo "$SKIPPED" | sed '/^$/d; s/^/merge-test: not run -- /'
 while read -r e v opt cpus; do
@@ -514,6 +595,15 @@ while read -r e v opt cpus; do
 	[ "$opt" = "-" ] && opt=""
 	opt=${opt//_/ }
 	n=${cpus:-$SMP}
+	# #765: @char is the merge test's, not run-x86_64.sh's: it picks the
+	# build.  The options are shown and named with it -- ci/job.sh finds a
+	# boot's log by the name it rebuilds from the verdict line's options.
+	shown=$opt
+	build=""
+	if [[ " $opt " == *" @char "* ]]; then
+		build=$CHAR_BUILD
+		opt=$(echo " $opt " | sed 's/ @char / /; s/^ *//; s/ *$//')
+	fi
 	for a in $ACCS; do
 		budget=1200
 		k=""
@@ -521,7 +611,7 @@ while read -r e v opt cpus; do
 		# No comma in a log's name: an entry's -smp value may be a whole
 		# topology (entry 14's 1,sockets=2,cores=64,maxcpus=128), and
 		# ci/job.sh writes the name into a CSV whose columns commas separate.
-		tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
+		tag="e$e-$a${n//,/_}${shown:+-${shown##* }}"
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		# #694: a boot's logs go before it.  run-x86_64.sh starts the full
@@ -530,8 +620,16 @@ while read -r e v opt cpus; do
 		# stop13, ioapic, msirace, panic2, earlypanic, restart* -- passed on
 		# a boot that never happened.
 		rm -f "$h" "$f" "$f.walk.txt"
+		if [ -n "$build" ] && [ -n "$CHAR_REFUSED" ]; then
+			echo "merge-test: entry $e $a -smp $n ($shown) -- WRONG (did not run, the char build: ${CHAR_REFUSED//[()]/}): $h"
+			echo "$CHAR_REFUSED" > "$h"
+			WRONG=$((WRONG + 1))
+			continue
+		fi
 		rc=0
-		( cd "$HERE" && UROS_X86_64_LOG="$f" ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?
+		( cd "$HERE" || exit 2
+		  [ -z "$build" ] || export UROS_BUILD_DIR=$build
+		  UROS_X86_64_LOG="$f" exec ./scripts/run-x86_64.sh $k $opt --entry "$e" $budget -smp "$n" $STUB ) > "$h" 2>&1 || rc=$?
 		# A run not made is WRONG, and says which: not started (2), qemu
 		# never ran or said nothing (3), stopped by a signal (above 128) --
 		# the statuses ablate.sh reads the same way -- or no full log
@@ -546,7 +644,7 @@ while read -r e v opt cpus; do
 		*)	[ -e "$f" ] || notrun="no full log was written" ;;
 		esac
 		if [ -n "$notrun" ]; then
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (did not run, status $rc: ${notrun//[()]/}): $h"
+			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (did not run, status $rc: ${notrun//[()]/}): $h"
 			WRONG=$((WRONG + 1))
 			continue
 		fi
@@ -565,7 +663,7 @@ while read -r e v opt cpus; do
 		ng_rc=0
 		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
 		if ! judge "$e" "$v" "$h" "$f" "$a"; then
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG ($v${NOTE:+: $NOTE}): $h"
+			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG ($v${NOTE:+: $NOTE}): $h"
 			WRONG=$((WRONG + 1))
 		elif [ $ng_rc -ne 0 ]; then
 			# One line, the last, which says why: ci/job.sh reads the
@@ -573,11 +671,11 @@ while read -r e v opt cpus; do
 			why=$(printf '%s\n' "$ng" | tail -n 1)
 			[ -n "$why" ] || why="nothing said on its output"
 			printf 'NO GLYPH (#661): the check could not run (exit %s): %s\n' "$ng_rc" "$why" >> "$h"
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
+			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (the no-glyph check could not run: ${why//[()]/}): $h"
 			WRONG=$((WRONG + 1))
 		elif [ -n "$ng" ]; then
 			printf '%s\n' "$ng" | sed 's/^/NO GLYPH (#661): line /' >> "$h"
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- WRONG (no glyph): $h"
+			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG (no glyph): $h"
 			WRONG=$((WRONG + 1))
 		else
 			# #742: said in the row as well, which ci/job.sh writes from
@@ -588,7 +686,7 @@ while read -r e v opt cpus; do
 				CAMEBACK=$((CAMEBACK + 1))
 				CAMEBACK_WHERE="$CAMEBACK_WHERE, entry $e $a -smp $n"
 			fi
-			echo "merge-test: entry $e $a -smp $n ${opt:+($opt) }-- as it should be ($v${NOTE:+: $NOTE})"
+			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- as it should be ($v${NOTE:+: $NOTE})"
 			case $NOTE in
 			"NOT ASKED"*)
 				UNASKED=$((UNASKED + 1))
