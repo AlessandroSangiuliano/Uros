@@ -2747,8 +2747,10 @@ run_queue_enqueue(
 #if	NCPUS > 1
 /*
  * #356: run-time gate for the synchronous-RPC hand-off-on-block placement
- * (see the hint consumption in thread_setrun).  Off by default; enabled by
- * the -P boot argument for same-binary A/B on hardware.
+ * (see the hint consumption in thread_setrun).  Off by default, for
+ * same-binary A/B on hardware: -X turns it on -- on i386, where -P is its old
+ * name, for a thread of the waker's task; on x86-64 for a thread of any task
+ * (#446).
  *
  * The hand-off also stays dormant until EVERY CPU has passed cpu_up()
  * (machine_info.avail_cpus reaches real_ncpus -- guaranteed on any boot
@@ -2764,6 +2766,47 @@ run_queue_enqueue(
  * the exact #337 trap (see halt_in_debugger in model_dep.c). */
 int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
 extern int	real_ncpus;
+
+/*
+ * #446: what -X did.  Each processor counts the woken threads it queued on
+ * itself, split by whether the thread was of its waker's task, and the census
+ * says the sums (x86_64/cpu/quiet_census.c).  A line of its own for each
+ * processor because this is the hand-off's own path, taken on every RPC while
+ * -X is on: one shared counter would be a cache line passed between the very
+ * processors whose placement is being measured.  Each counter has one writer,
+ * its processor, so none is lost; a sum read while they move is a little
+ * behind, which a count of what happened can afford.
+ */
+static struct sched_handoff_count {
+	unsigned long	same_task;
+	unsigned long	other_task;
+	unsigned long	other_task_fenced;	/* sent to an idle processor */
+} __attribute__((aligned(64))) sched_handoff_count[NCPUS];
+
+/*
+ * The third count is the check (#446): a woken thread of another task, its
+ * waker about to block, that the same-task fence sent to an idle processor
+ * instead.  Where -X reaches any task it has to stay at zero, and the census
+ * says WRONG when it does not -- which is how the fence, put back by a patch
+ * or by a mistake, is seen in the first boot that has -X on.
+ */
+void
+sched_rpc_handoff_counts(
+	unsigned long	*same_task,
+	unsigned long	*other_task,
+	unsigned long	*other_task_fenced)
+{
+	int	cpu;
+
+	*same_task = 0;
+	*other_task = 0;
+	*other_task_fenced = 0;
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		*same_task += sched_handoff_count[cpu].same_task;
+		*other_task += sched_handoff_count[cpu].other_task;
+		*other_task_fenced += sched_handoff_count[cpu].other_task_fenced;
+	}
+}
 #endif	/* NCPUS > 1 */
 
 /*
@@ -2852,16 +2895,22 @@ thread_setrun(
 
 	    /*
 	     * #356 hand-off on block: the waker flagged that it is about to
-	     * block (combined mach_msg send phase -- the same syscall proceeds
-	     * to the receive and sleeps).  A synchronous RPC pair is
+	     * block (a send in mach_msg -- the combined send-and-receive, or a
+	     * send its caller follows with a receive; ipc/mach_msg.c sets the
+	     * hint for both).  A synchronous RPC pair is
 	     * inherently serial, so instead of shipping the wakee to a remote
 	     * idle CPU (cold caches, wake-from-idle latency -- the measured
 	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
 	     * runq: thread_select picks it up the moment the waker blocks, on
-	     * the one CPU where its data is warm.  Same-task only (an
-	     * inter-task switch on one CPU costs a cr3 reload = full TLB flush
-	     * on i386, measured worse than the split).  One-shot: consumed by
-	     * the first wakeup of the send.  Runtime-gated by -P boot arg.
+	     * the one CPU where its data is warm.  One-shot: consumed by the
+	     * first wakeup of the send.  Runtime-gated by -X (-P on i386).
+	     *
+	     * Same-task only on i386.  The fence was put up there, where a
+	     * switch between tasks on one CPU reloads cr3 and throws the whole
+	     * TLB away, and the split was measured cheaper.  On x86-64 the
+	     * hand-off is cheaper across tasks too, with PCID and without
+	     * (#446, measured on 29/10; x86_64/cpu/startup.c has the numbers),
+	     * so -X there reaches a thread of any task.
 	     */
 	    if (sched_rpc_handoff &&
 		machine_info.avail_cpus >= real_ncpus) {
@@ -2876,15 +2925,26 @@ thread_setrun(
 			    pset == current_processor()->processor_set &&
 #endif	/* MACH_HOST */
 			    self->top_act != THR_ACT_NULL &&
-			    th->top_act != THR_ACT_NULL &&
-			    self->top_act->task == th->top_act->task) {
+			    th->top_act != THR_ACT_NULL) {
+				boolean_t	same = self->top_act->task ==
+						       th->top_act->task;
+
+				if (same ||
+				    sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK) {
 #if	S319_INSTRUMENT
-				s319[cpu_number()].localhoff++;
+					s319[cpu_number()].localhoff++;
 #endif
-				(void) run_queue_enqueue(
-					&current_processor()->runq, th, tail);
-				mp_enable_preemption();
-				return;
+					if (same)
+						sched_handoff_count[cpu_number()].same_task++;
+					else
+						sched_handoff_count[cpu_number()].other_task++;
+					(void) run_queue_enqueue(
+						&current_processor()->runq, th, tail);
+					mp_enable_preemption();
+					return;
+				}
+				/* #446: another task's thread, kept out by the fence */
+				sched_handoff_count[cpu_number()].other_task_fenced++;
 			}
 		}
 	    }

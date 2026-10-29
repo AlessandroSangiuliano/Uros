@@ -140,6 +140,7 @@
 #include <mach/machine.h>
 #include <mach/port.h>
 #include <kern/processor.h>
+#include <kern/sched_prim.h>		/* #446: sched_rpc_handoff_counts */
 #include <mach/processor_info.h>
 #include <mach/vm_param.h>
 
@@ -306,6 +307,32 @@ host_info(
 		cache_info->saved_size = 256;	/* IKM_SAVED_KMSG_SIZE */
 
 		*count = HOST_IPC_CACHE_INFO_COUNT;
+		return(KERN_SUCCESS);
+		}
+
+		/*
+		 * #446: what -X has done, for a benchmark to read around what
+		 * it measures (kern/sched_prim.c).
+		 */
+	case HOST_RPC_HANDOFF_INFO:
+		{ register host_rpc_handoff_info_t	handoff_info;
+		  unsigned long	same = 0, other = 0, fenced = 0;
+
+		if (*count < HOST_RPC_HANDOFF_INFO_COUNT)
+			return(KERN_FAILURE);
+
+		handoff_info = (host_rpc_handoff_info_t) info;
+#if	NCPUS > 1
+		sched_rpc_handoff_counts(&same, &other, &fenced);
+		handoff_info->reach = (unsigned int) sched_rpc_handoff;
+#else	/* NCPUS > 1 */
+		handoff_info->reach = 0;	/* one processor: no -X */
+#endif	/* NCPUS > 1 */
+		handoff_info->same_task  = (unsigned int) same;
+		handoff_info->other_task = (unsigned int) other;
+		handoff_info->other_task_fenced = (unsigned int) fenced;
+
+		*count = HOST_RPC_HANDOFF_INFO_COUNT;
 		return(KERN_SUCCESS);
 		}
 

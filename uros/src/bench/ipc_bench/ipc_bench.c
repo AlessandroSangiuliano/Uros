@@ -193,6 +193,87 @@ print_cache_stats(const char *label,
 }
 
 /* ===================================================================
+ * What -X did during a measurement (#446)
+ *
+ * The hand-off on block (#356) queues a woken thread on its waker's processor
+ * instead of an idle one's.  Which arm a row was taken in, and whether the
+ * hand-off happened in it at all, used to be known only from the command line
+ * of the boot; a row now says it, read from the kernel before and after the
+ * timed loop, so a row read alone cannot be put in the wrong arm.
+ * =================================================================== */
+
+typedef struct {
+    unsigned int reach;
+    unsigned int same_task;
+    unsigned int other_task;
+    unsigned int other_task_fenced;
+} handoff_snap_t;
+
+static int
+handoff_snap(handoff_snap_t *s)
+{
+    host_rpc_handoff_info_data_t	info;
+    mach_msg_type_number_t		count = HOST_RPC_HANDOFF_INFO_COUNT;
+    kern_return_t			kr;
+
+    kr = host_info(host_port, HOST_RPC_HANDOFF_INFO,
+		   (host_info_t)&info, &count);
+    if (kr != KERN_SUCCESS)
+	return 0;
+    s->reach      = info.reach;
+    s->same_task  = info.same_task;
+    s->other_task = info.other_task;
+    s->other_task_fenced = info.other_task_fenced;
+    return 1;
+}
+
+/*
+ * A line whether -X is on or not, and one when the kernel did not answer: a
+ * row without it would be read as one of an arm it was not taken in.  A row of
+ * N round trips wakes at most 2N threads, one per message.
+ */
+static void
+print_handoff_stats(const char *label, int ok,
+		    const handoff_snap_t *before, const handoff_snap_t *after)
+{
+    unsigned int same, other, fenced;
+
+    if (!ok) {
+	printf("  [-X] %-30s not answered: host_info refused "
+	       "HOST_RPC_HANDOFF_INFO\n", label);
+	return;
+    }
+    if (after->reach == 0) {
+	printf("  [-X] %-30s off\n", label);
+	return;
+    }
+    same   = after->same_task  - before->same_task;
+    other  = after->other_task - before->other_task;
+    fenced = after->other_task_fenced - before->other_task_fenced;
+    /*
+     * #446: where -X reaches any task, a woken thread of another task sent to
+     * an idle processor is the same-task fence come back -- WRONG, which the
+     * harness fails the boot on.  Where -X is same-task only (i386) it is the
+     * fence doing its job, and only counted.
+     */
+    if (after->reach == 1)
+	printf("  [-X] %-30s same task: %u woken on their waker's "
+	       "processor, %u of another task; %u of another task kept out\n",
+	       label, same + other, other, fenced);
+    else if (after->reach == 2 && fenced == 0)
+	printf("  [-X] %-30s any task: %u woken on their waker's "
+	       "processor, %u of another task\n", label, same + other, other);
+    else if (after->reach == 2)
+	printf("  [-X] %-30s any task: %u woken on their waker's "
+	       "processor, %u of another task; %u of another task kept out by "
+	       "the fence -- WRONG (#446)\n", label, same + other, other, fenced);
+    else
+	printf("  [-X] %-30s reach %u: %u woken on their waker's "
+	       "processor, %u of another task\n",
+	       label, after->reach, same + other, other);
+}
+
+/* ===================================================================
  * Timing helpers
  * =================================================================== */
 
@@ -383,6 +464,8 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 {
     cache_snap_t	cs_before = { 0 }, cs_after = { 0 };
     int			cs_ok;
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok;
     mach_port_t		echo_port, reply_port;
     kern_return_t	kr;
     tvalspec_t		t0, t1;
@@ -422,6 +505,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     }
 
     /* Timed run */
+    ho_ok = handoff_snap(&ho_before);
     cs_ok = cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
@@ -440,6 +524,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
+    ho_ok &= handoff_snap(&ho_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
     /*
@@ -451,6 +536,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
      */
     if (cs_ok)
 	print_cache_stats(label, &cs_before, &cs_after);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     /* Cleanup: destroy ports (kills echo thread's receive) */
     mach_port_destroy(mach_task_self(), echo_port);
@@ -523,6 +609,8 @@ bench_combined_rpc(const char *label, int send_size, int iters)
     tvalspec_t		t0, t1;
     int			i;
     bench_recv_buf_t	buf;	/* one buffer: send from it, receive into it */
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok;
 
     kr = mach_port_allocate(mach_task_self(),
 			    MACH_PORT_RIGHT_RECEIVE, &echo_port);
@@ -547,6 +635,7 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
 
+    ho_ok = handoff_snap(&ho_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
 	buf.head.msgh_bits =
@@ -560,8 +649,10 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
+    ho_ok &= handoff_snap(&ho_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     mach_port_destroy(mach_task_self(), echo_port);
     mach_port_destroy(mach_task_self(), reply_port);
@@ -611,55 +702,60 @@ child_echo_entry(void)
 }
 
 /* ===================================================================
- * Inter-task RPC benchmark
+ * An echo child: a task of its own, with one thread in child_echo_entry()
  *
- * Creates a child task via task_create(inherit_memory=TRUE),
- * inserts ports into the child's IPC space, creates a thread
- * in the child pointing at child_echo_entry(), and measures
- * round-trip IPC latency.
+ * The setup bench_inter_rpc() has always done, taken out of it so that the
+ * concurrent inter-task suite (#446) starts its children the same way.
+ * task_create(inherit_memory=TRUE) gives the child a COW copy of this address
+ * space, so child_echo_entry() is at the same address there.  The child
+ * receives on `to_child' (CHILD_RECV_NAME in its space) and answers on
+ * `to_parent' (CHILD_SEND_NAME).
  * =================================================================== */
 
-static void
-bench_inter_rpc(const char *label, int send_size, int iters)
+typedef struct {
+    mach_port_t	task;
+    mach_port_t	thread;
+    mach_port_t	to_child;	/* our send right; the child holds the receive */
+    mach_port_t	to_parent;	/* our receive right, for the child's answers */
+} echo_child_t;
+
+/*
+ * 0 when the child's thread is running.  On a failure, says which step under
+ * `label' and returns -1, leaving what it took, as bench_inter_rpc() always
+ * has.
+ */
+static int
+echo_child_start(const char *label, echo_child_t *c)
 {
-    cache_snap_t		cs_before = { 0 }, cs_after = { 0 };
-    int			cs_ok;
     kern_return_t		kr;
-    mach_port_t			child_task, child_thread;
-    mach_port_t			child_recv_port;	/* child receives */
-    mach_port_t			parent_recv_port;	/* parent receives replies */
     vm_offset_t			child_stack;
-    tvalspec_t			t0, t1;
-    int				i;
-    bench_recv_buf_t		send_buf;
-    bench_null_msg_t		recv_buf;
 
     /*
      * Step 1: Allocate ports.
-     * child_recv_port: parent will move the receive right to child.
-     * parent_recv_port: parent keeps the receive right for replies.
+     * to_child: parent will move the receive right to child.
+     * to_parent: parent keeps the receive right for replies.
      */
     kr = mach_port_allocate(mach_task_self(),
 			    MACH_PORT_RIGHT_RECEIVE,
-			    &child_recv_port);
-    if (kr) { printf("  %s: alloc child_recv failed %d\n", label, kr); return; }
+			    &c->to_child);
+    if (kr) { printf("  %s: alloc child_recv failed %d\n", label, kr); return -1; }
 
     /* Create a send right for parent to keep */
     kr = mach_port_insert_right(mach_task_self(),
-				child_recv_port, child_recv_port,
+				c->to_child, c->to_child,
 				MACH_MSG_TYPE_MAKE_SEND);
-    if (kr) { printf("  %s: insert send right failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert send right failed %d\n", label, kr); return -1; }
 
     kr = mach_port_allocate(mach_task_self(),
 			    MACH_PORT_RIGHT_RECEIVE,
-			    &parent_recv_port);
-    if (kr) { printf("  %s: alloc parent_recv failed %d\n", label, kr); return; }
+			    &c->to_parent);
+    if (kr) { printf("  %s: alloc parent_recv failed %d\n", label, kr); return -1; }
 
-    /* Send right for parent_recv_port (will give to child) */
+    /* Send right for to_parent (will give to child) */
     kr = mach_port_insert_right(mach_task_self(),
-				parent_recv_port, parent_recv_port,
+				c->to_parent, c->to_parent,
 				MACH_MSG_TYPE_MAKE_SEND);
-    if (kr) { printf("  %s: insert parent send right failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert parent send right failed %d\n", label, kr); return -1; }
 
     /*
      * Step 2: Create child task.
@@ -669,15 +765,15 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     kr = task_create(mach_task_self(),
 		     (ledger_port_array_t)0, 0,
 		     TRUE,  /* inherit memory */
-		     &child_task);
-    if (kr) { printf("  %s: task_create failed %d\n", label, kr); return; }
+		     &c->task);
+    if (kr) { printf("  %s: task_create failed %d\n", label, kr); return -1; }
 
     /*
      * Step 3: Allocate stack in the child task's address space.
      */
     child_stack = 0;
-    kr = vm_allocate(child_task, &child_stack, CHILD_STACK_SIZE, TRUE);
-    if (kr) { printf("  %s: child stack alloc failed %d\n", label, kr); return; }
+    kr = vm_allocate(c->task, &child_stack, CHILD_STACK_SIZE, TRUE);
+    if (kr) { printf("  %s: child stack alloc failed %d\n", label, kr); return -1; }
 
     /*
      * Step 4: Insert port rights into child's IPC space.
@@ -687,34 +783,75 @@ bench_inter_rpc(const char *label, int send_size, int iters)
      * CHILD_SEND_NAME: send right — child sends replies to parent
      *                  on this port.
      */
-    kr = mach_port_insert_right(child_task,
+    kr = mach_port_insert_right(c->task,
 				CHILD_RECV_NAME,
-				child_recv_port,
+				c->to_child,
 				MACH_MSG_TYPE_MOVE_RECEIVE);
-    if (kr) { printf("  %s: insert child recv failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert child recv failed %d\n", label, kr); return -1; }
     /* Parent lost the receive right; still has send right */
 
-    kr = mach_port_insert_right(child_task,
+    kr = mach_port_insert_right(c->task,
 				CHILD_SEND_NAME,
-				parent_recv_port,
+				c->to_parent,
 				MACH_MSG_TYPE_COPY_SEND);
-    if (kr) { printf("  %s: insert child send failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert child send failed %d\n", label, kr); return -1; }
 
     /*
      * Step 5: Create thread in child and give it a pc and a stack.
      */
-    kr = thread_create(child_task, &child_thread);
-    if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return; }
+    kr = thread_create(c->task, &c->thread);
+    if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return -1; }
 
-    kr = bench_child_thread_start(child_thread, child_echo_entry,
+    kr = bench_child_thread_start(c->thread, child_echo_entry,
 				  child_stack + CHILD_STACK_SIZE);
-    if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return -1; }
 
     /*
      * Step 6: Start child thread.
      */
-    kr = thread_resume(child_thread);
-    if (kr) { printf("  %s: thread_resume failed %d\n", label, kr); return; }
+    kr = thread_resume(c->thread);
+    if (kr) { printf("  %s: thread_resume failed %d\n", label, kr); return -1; }
+
+    return 0;
+}
+
+/*
+ * Destroy the child task, and the rights this task kept to it.
+ */
+static void
+echo_child_stop(echo_child_t *c)
+{
+    task_terminate(c->task);
+    mach_port_deallocate(mach_task_self(), c->thread);
+    mach_port_deallocate(mach_task_self(), c->task);
+    mach_port_destroy(mach_task_self(), c->to_child);
+    mach_port_destroy(mach_task_self(), c->to_parent);
+}
+
+/* ===================================================================
+ * Inter-task RPC benchmark
+ *
+ * Starts an echo child (above) and measures round-trip IPC latency to it.
+ * =================================================================== */
+
+static void
+bench_inter_rpc(const char *label, int send_size, int iters)
+{
+    cache_snap_t		cs_before = { 0 }, cs_after = { 0 };
+    int			cs_ok;
+    handoff_snap_t		ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok;
+    echo_child_t		child;
+    tvalspec_t			t0, t1;
+    int				i;
+    bench_recv_buf_t		send_buf;
+    bench_null_msg_t		recv_buf;
+
+    /*
+     * Steps 1 to 6: the child, its ports and its running thread.
+     */
+    if (echo_child_start(label, &child) != 0)
+	return;
 
     /* Let child settle */
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
@@ -726,36 +863,38 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	send_buf.head.msgh_size	      = send_size;
-	send_buf.head.msgh_remote_port = child_recv_port;
+	send_buf.head.msgh_remote_port = child.to_child;
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
 	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
 
     /*
      * Step 8: Timed run.
      */
+    ho_ok = handoff_snap(&ho_before);
     cs_ok = cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	send_buf.head.msgh_size	      = send_size;
-	send_buf.head.msgh_remote_port = child_recv_port;
+	send_buf.head.msgh_remote_port = child.to_child;
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
 	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
+    ho_ok &= handoff_snap(&ho_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
     /*
@@ -767,15 +906,12 @@ bench_inter_rpc(const char *label, int send_size, int iters)
      */
     if (cs_ok)
 	print_cache_stats(label, &cs_before, &cs_after);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     /*
      * Step 9: Cleanup — destroy the child task.
      */
-    task_terminate(child_task);
-    mach_port_deallocate(mach_task_self(), child_thread);
-    mach_port_deallocate(mach_task_self(), child_task);
-    mach_port_destroy(mach_task_self(), child_recv_port);
-    mach_port_destroy(mach_task_self(), parent_recv_port);
+    echo_child_stop(&child);
 }
 
 /* ===================================================================
@@ -2543,6 +2679,7 @@ bench_mach_print(int iters)
  *   slow     — slow-path receive (continuation)
  *   inter    — inter-task Mach IPC RPC
  *   isweep   — inter-task RPC swept by size, repeated within one boot (#446)
+ *   icc      — concurrent inter-task RPC, 1, 2 and 4 pairs, repeated (#446)
  *   forkrace — concurrent task_create/task_terminate, no IPC (#558)
  *   port     — port alloc/destroy, mach_port_names
  *   pp       — protected payload (test + intra + inter)
@@ -2572,9 +2709,11 @@ bench_mach_print(int iters)
 #define SUITE_KRPC	(1u << 15)	/* MIG kernel RPC, where TypeCheck lives (#443) */
 #define SUITE_ISWEEP	(1u << 16)	/* inter-task RPC by size, repeated (#446) */
 #define SUITE_FORKRACE	(1u << 17)	/* concurrent task_create/terminate (#558) */
+#define SUITE_ICC	(1u << 18)	/* concurrent inter-task RPC (#446) */
 
 /*
- *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME.
+ *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME, and so is
+ *	`icc' (#446), which creates child tasks per run for the same reason.
  *
  *	It answers one question, it creates a child task per measurement, and
  *	it prints a block that is read as a picture rather than as a row in
@@ -2583,7 +2722,7 @@ bench_mach_print(int iters)
  *	compared against those runs.  Naming it in `suites NOT run' is the
  *	honest form: it says the suite exists and did not run.
  */
-#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE)
+#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC)
 
 static int
 streq(const char *a, const char *b)
@@ -2616,6 +2755,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "krpc"))    mask |= SUITE_KRPC;
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
+	else if (streq(argv[i], "icc"))	    mask |= SUITE_ICC;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
 	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
@@ -2770,6 +2910,140 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
 	   "(%llu ns/RPC aggregate)\n",
 	   nthreads, total_rpc, total_ns,
 	   total_ns / (total_rpc ? total_rpc : 1));
+}
+
+/* ===================================================================
+ * Concurrent inter-task RPC (#446)
+ *
+ * cc above, with each worker's echo in a task of its own: `n' workers in this
+ * task, each driving its own echo child (echo_child_start()) over a private
+ * port pair, released together, the aggregate ns/RPC reported.  It is the
+ * question #446 asks of the hand-off widened to any task.  A client and its
+ * server on one processor is the hand-off's whole point for one pair; with
+ * several pairs it is also processors the pairs no longer spread over.  One,
+ * two and four pairs show what that costs, or saves.
+ *
+ * ⚠️ Every run starts its children afresh, so a run is a draw of where its
+ * pairs land, as an inter row is (#446, the correction of 13/09).  So it is
+ * repeated ICC_REPS times in the boot, and asked for by name, not by `all',
+ * for isweep's reason.  Each worker warms its pair up before the others are
+ * released, so the first faults of a fresh child are not in the timed region.
+ * =================================================================== */
+
+#define	ICC_REPS	3
+
+typedef struct {
+    echo_child_t	child;
+    int			iters;
+    pthread_t		th;
+} icc_worker_t;
+
+static volatile int	g_icc_ready;	/* workers whose warmup is done */
+
+static void
+icc_round_trip(icc_worker_t *w)
+{
+    bench_recv_buf_t	send_buf;
+    bench_recv_buf_t	recv_buf;
+
+    send_buf.head.msgh_bits =
+	MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    send_buf.head.msgh_size	   = sizeof(bench_null_msg_t);
+    send_buf.head.msgh_remote_port = w->child.to_child;
+    send_buf.head.msgh_local_port  = MACH_PORT_NULL;
+    send_buf.head.msgh_id	   = 1;
+
+    mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(bench_null_msg_t), 0,
+	     MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+	     w->child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static void *
+icc_worker_func(void *arg)
+{
+    icc_worker_t	*w = (icc_worker_t *)arg;
+    int			i;
+
+    for (i = 0; i < WARMUP_ITERS; i++)
+	icc_round_trip(w);
+    __sync_fetch_and_add(&g_icc_ready, 1);
+
+    /* Released with the others, yielding while it waits: cc_worker_func(). */
+    while (!g_cc_go)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    for (i = 0; i < w->iters; i++)
+	icc_round_trip(w);
+    return (void *)0;
+}
+
+static const char *
+icc_label(int n)
+{
+    switch (n) {
+    case 1:  return "concurrent inter-task x1";
+    case 2:  return "concurrent inter-task x2";
+    case 4:  return "concurrent inter-task x4";
+    default: return "concurrent inter-task";
+    }
+}
+
+static void
+bench_concurrent_intertask(int n, int iters_per_thread)
+{
+    icc_worker_t	w[MAX_CC_THREADS];
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok, i, started;
+    tvalspec_t		t0, t1;
+    unsigned long long	total_ns;
+    long		total_rpc;
+    const char		*label;
+
+    if (n > MAX_CC_THREADS)
+	n = MAX_CC_THREADS;
+    label = icc_label(n);
+
+    g_cc_go = 0;
+    g_icc_ready = 0;
+    for (started = 0; started < n; started++) {
+	w[started].iters = iters_per_thread;
+	if (echo_child_start(label, &w[started].child) != 0)
+	    break;
+    }
+    if (started < n) {
+	printf("  %s: %d of %d children started -- not measured\n",
+	       label, started, n);
+	for (i = 0; i < started; i++)
+	    echo_child_stop(&w[i].child);
+	return;
+    }
+
+    /* Let the children settle, as bench_inter_rpc() does for one. */
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    for (i = 0; i < n; i++)
+	pthread_create(&w[i].th, NULL, icc_worker_func, &w[i]);
+    while (g_icc_ready < n)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    ho_ok = handoff_snap(&ho_before);
+    get_time(&t0);
+    g_cc_go = 1;
+    for (i = 0; i < n; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+    ho_ok &= handoff_snap(&ho_after);
+
+    total_ns  = elapsed_ns(&t0, &t1);
+    total_rpc = (long)n * iters_per_thread;
+    printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
+	   label, total_rpc, total_ns,
+	   total_ns / (total_rpc ? total_rpc : 1));
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
+
+    for (i = 0; i < n; i++)
+	echo_child_stop(&w[i].child);
 }
 
 /*
@@ -3112,6 +3386,7 @@ main(int argc, char **argv)
 	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
 	    { SUITE_ISWEEP,  "isweep" }, { SUITE_FORKRACE, "forkrace" },
+	    { SUITE_ICC,     "icc" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -3296,6 +3571,25 @@ main(int argc, char **argv)
 				   BENCH_ITERS);
 	bench_concurrent_samespace(4, (int)sizeof(bench_null_msg_t),
 				   BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Concurrent inter-task RPC -- N pairs, each server in a task of its
+     * own, repeated within this boot [#446]
+     * --------------------------------------------------------- */
+    if (suites & SUITE_ICC) {
+	int	rep;
+
+	printf("--- Concurrent inter-task RPC (#446), %d repeats in this "
+	       "boot ---\n", ICC_REPS);
+	for (rep = 1; rep <= ICC_REPS; rep++) {
+	    printf("  -- repeat %d of %d --\n", rep, ICC_REPS);
+	    bench_concurrent_intertask(1, BENCH_ITERS);
+	    bench_concurrent_intertask(2, BENCH_ITERS);
+	    bench_concurrent_intertask(4, BENCH_ITERS);
+	}
 
 	printf("\n");
     }

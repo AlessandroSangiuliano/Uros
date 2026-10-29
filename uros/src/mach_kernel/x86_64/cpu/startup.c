@@ -128,9 +128,9 @@ machine_init(void)
 	 * #356 and nothing on x86-64 has ever written it: the flag was set only
 	 * in i386/AT386/model_dep.c, so the experiment was unreachable here --
 	 * code consumed by two call sites and produced by none.  #559 found it
-	 * while trying to make -smp 4 readable, because #446 measured that this
-	 * is what collapses the inter-task placement lottery from +-30-43% to
-	 * +-1%.
+	 * while trying to make -smp 4 readable, because #446 measured on i386
+	 * that this is what collapses intra-task RPC's spread across boots from
+	 * +-30-43% to +-1% (part of which may be the clock, #737).
 	 *
 	 * 🔴 THE LETTER IS -X AND NOT -P, and the difference is deliberate: on
 	 * this machine `P' is already the preemption test (thread/machine.c and
@@ -142,6 +142,18 @@ machine_init(void)
 	 * i386 learns -X too, keeping -P as its old name, so the experiment has
 	 * one name on both targets rather than two.
 	 *
+	 * 🔑 FOR A THREAD OF ANY TASK (#446).  #356 stopped it at the waker's
+	 * task, a fence put up on i386, where a switch between tasks on one
+	 * processor reloads cr3 and throws the whole TLB away, and the split was
+	 * measured cheaper there.  Here it is not, with PCID or without.  On
+	 * omen's metal (29/10, hwp_epp=0, six boots an arm, the arms one image a
+	 * boot argument apart) an inter-task round trip handed off was 23-35%
+	 * cheaper than split, and 19-31% with -n; on OMEGA under KVM, 43-51% and
+	 * 37-45%.  The spread across draws went with it, the placement lottery
+	 * #446 was filed for: every draw in one peak, below the fastest of the
+	 * split's.  The fence stays on i386, where its measurement was taken;
+	 * here ablations/446-fence-back.patch is how it comes back.
+	 *
 	 * ⚠️ Read once, here, and not at the call sites: the scheduler reads it
 	 * inside thread_setrun(), and asking the command line there would scan
 	 * a string on every wakeup in the system.  machine_init() runs after
@@ -149,12 +161,11 @@ machine_init(void)
 	 * when the answer is written down.
 	 */
 	{
-		extern int	sched_rpc_handoff;
-
-		sched_rpc_handoff = boot_flag('X');
-		if (sched_rpc_handoff)
+		sched_rpc_handoff = boot_flag('X') ?
+		    SCHED_RPC_HANDOFF_ANY_TASK : SCHED_RPC_HANDOFF_OFF;
+		if (sched_rpc_handoff != SCHED_RPC_HANDOFF_OFF)
 			printf("sched: -X, the #356 synchronous-RPC hand-off "
-			       "on block is ON (same-task only)\n");
+			       "on block is ON, for a thread of any task (#446)\n");
 	}
 
 	/*
