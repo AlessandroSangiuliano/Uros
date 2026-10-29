@@ -4,7 +4,7 @@ Takes out: the three tails' fresh start -- thread_exception_return, thread_boots
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: UrMach x86-64: trap (general protection|double fault|page fault)|act_test: \[17\] [0-9]+ of 100 exceptions arrived
-Note: both accelerators: the canonical check that sends the thread round again is the kernel's, not the processor's.  The stack runs out before the hundredth round, and either the kernel reports the fault it ends in or the arm counts fewer than a hundred.
+Note: both accelerators: the canonical check that sends the thread round again is the kernel's, not the processor's.  What the overflow does is not fixed, since nothing guards the memory below a kernel stack: on victus (AMD), 4 of 4, KVM double-faulted while arm seventeen was printing its verdict, and under TCG every arm passed and a kernel page fault (error 0x11) followed.  The Expect takes either report, or the arm's own count if it stops short.
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
 index 44bddad9..fefa8f4b 100644
