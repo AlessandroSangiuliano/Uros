@@ -172,6 +172,7 @@ ENTRIES="
 45 harness --iommu_amd
 17 harness
 18 harness
+58 harness
 21 halted
 22 harness
 22 hpetgaps - 6,sockets=2,cores=3
