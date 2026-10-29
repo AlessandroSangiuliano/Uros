@@ -620,6 +620,16 @@ must_report 'io_claim_race: started' 'io_claim_race: [0-9]* of [0-9]* arms passe
 must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
 
+# 🔴 #778: BOOTSTRAP'S STAGE 2 MUST END WITH THE BOOT DISK.  Every program it
+# loads after stage 2 comes off disk0a -- ext_server, xfile_test, hal_bar_test,
+# io_claim_race, taskpanic_load -- and each pair below opens only on its own
+# first line, so a boot whose stage 2 never ended lost all five without a word
+# and was passed: #697's A/B, the boot disk's MBR read timed out, four boots of
+# four.  The wait is on the same pair, in expected_reports().
+must_report "bootstrap: stage-2: waiting for 'disk0a'" "bootstrap: stage-2: 'disk0a' acquired" \
+	'Bootstrap waited for the boot disk'"'"'s partition and never got it, so none of the programs it loads from the boot disk after stage 2 started, and no pair of theirs ever opened to ask (#778).' \
+	"bootstrap's stage 2"
+
 # #620: three lines and three verdicts -- what bootstrap_ports() gives a line
 # with no flag, with -D and with -H -D.  The start is said through mach_print,
 # which needs no port, so the "none" line whose console never came is a start
@@ -1525,6 +1535,7 @@ missing_reports() {
 # the loop already records one such pair going out of step.
 expected_reports() {
 	"$@" \
+		"bootstrap: stage-2: waiting for 'disk0a'" "bootstrap: stage-2: 'disk0a' acquired" \
 		'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 		'boot_ports_test: asking bootstrap (none)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (none)' \
 		'boot_ports_test: asking bootstrap (device)' 'boot_ports_test: [0-9]* of [0-9]* arms passed (device)' \
