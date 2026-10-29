@@ -131,7 +131,7 @@ static unsigned int	quiet_lock_busy;	/* #657: passes put off */
  *
  * So the question is asked of ring 3, on every processor: a return to user
  * mode since the last pass (percpu's user_returns, counted at the exits to
- * ring 3 -- trap_common's, thread_frame_return and SYSRET's; not the NMI/#DB
+ * ring 3 -- trap_common's, thread_user_frame_return and SYSRET's; not the NMI/#DB
  * path's, which a user loop's tick makes up for).  A user loop that never
  * calls the kernel returns at every tick that interrupts it; a user thread
  * stuck in the kernel, spinning or asleep, does not.

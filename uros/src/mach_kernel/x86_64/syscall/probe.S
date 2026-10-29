@@ -89,7 +89,7 @@ user_probe_enter:
 	 * Everything the frame needs is on the stack by now, so what is left in
 	 * the registers is only what this function happened to be holding — and
 	 * that was kernel stack addresses, handed to ring 3 for free.  The real
-	 * return path does not do this: thread_frame_return restores a thread's
+	 * return path does not do this: thread_user_frame_return restores a thread's
 	 * own saved registers, so the value ring 3 gets is one it owned already.
 	 * The probe was the exception, and being a test is not a reason to teach
 	 * a user program where the kernel's stack is.

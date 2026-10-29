@@ -297,7 +297,7 @@ struct percpu {
 
 	/*
 	 * #476, #599: how many times this processor went back to ring 3 by
-	 * trap_common's tail, thread_frame_return or the SYSRET path -- the
+	 * trap_common's tail, thread_user_frame_return or the SYSRET path -- the
 	 * quiet census's measure of work -- counted while %gs is still the
 	 * kernel's.  trap_paranoid's return (NMI, #DB, #DF, #MC from ring 3) is
 	 * not counted.  A user loop that never calls the kernel still

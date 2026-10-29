@@ -656,7 +656,6 @@ thread_user_frame_return:
 	callq	act_user_return_frame	/* %rax = the frame, iretq-able (#780) */
 	cli
 	movq	%rax, %rsp
-thread_frame_return:
 	RESTORE_REGS
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
