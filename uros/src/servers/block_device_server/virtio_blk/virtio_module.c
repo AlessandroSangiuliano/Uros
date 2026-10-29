@@ -30,6 +30,10 @@
 #include <mach.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_port.h>
+#include <mach/thread_switch.h>		/* #697: a request waited for asleep */
+#include <mach/mach_host.h>
+#include <mach/clock.h>
+#include <mach/clock_types.h>
 #include <sa_mach.h>
 #include <device/device.h>
 #include <device/device_types.h>
@@ -114,9 +118,10 @@ static unsigned virtio_n_states;
  *      "stop" does not depend on every one of forty calls remembering to.
  *
  * What the call sites still owe is to look at the latch before they USE a
- * value: vio_refused_p() at the three places a read decides something -- the
+ * value: vio_refused_p() at the four places a read decides something -- the
  * queue size before it sizes an allocation, the capacity before it is
- * believed, and a request before its notify is waited on.
+ * believed, a request before its notify is waited on, and while it is
+ * (vio_wait_used(), #697).
  */
 static void
 vio_refused(struct virtio_state *st, const char *what, unsigned int off,
@@ -406,6 +411,111 @@ virtqueue_setup(struct virtio_state *st)
  * ================================================================ */
 
 /*
+ * #697: what a request is waited for.  The device says it has finished by
+ * moving the used ring's index, and the wait ends on that, or on the device
+ * being gone -- never on a count.  It was 10,000,000 pause instructions, a
+ * deadline in disguise: how long they last is what a pause costs on the
+ * processor and under the hypervisor, and how much of the host the virtual
+ * processor is given, and a slow runner ran them out twice in one job --
+ * cap_test got D_IO_ERROR for reads the device would have completed.
+ *
+ * A short spin first, where a request the device finishes at once ends.
+ * Then the wait sleeps VIO_WAIT_LOOK_MS between looks, asks the device at each
+ * look whether the kernel still lets this driver reach it (#570), and gives up
+ * only after VIO_WAIT_DEADLINE_S on the kernel's REALTIME_CLOCK: the bound
+ * Linux's block layer gives a request by default, long enough that running
+ * out means the device is broken, not slow.  How many polls the spin makes is
+ * a matter of latency only -- a request still pending after them is waited
+ * for by the sleeps, against the same deadline.
+ */
+#define VIO_WAIT_SPINS		100000
+#define VIO_WAIT_LOOK_MS	1
+#define VIO_WAIT_DEADLINE_S	30
+
+static inline int
+vio_used_moved(const struct virtio_state *st)
+{
+	return ((volatile struct vring_used *)st->vq_used)->idx
+	    != st->last_used_idx;
+}
+
+/* Milliseconds on `clk', or -1 if the clock did not answer. */
+static int
+vio_clock_ms(mach_port_t clk, uint64_t *ms)
+{
+	tvalspec_t	t;
+
+	if (clock_get_time(clk, &t) != KERN_SUCCESS)
+		return -1;
+	*ms = (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+	return 0;
+}
+
+/* 0 once the used ring has moved; -1, said, when it is not going to. */
+static int
+vio_wait_used(struct virtio_state *st)
+{
+	mach_port_t	host, clk = MACH_PORT_NULL;
+	uint64_t	start, now;
+	unsigned int	spins;
+	kern_return_t	kr;
+	int		r;
+
+	for (spins = 0; spins < VIO_WAIT_SPINS; spins++) {
+		if (vio_used_moved(st))
+			return 0;
+		__asm__ volatile("pause" ::: "memory");
+	}
+
+	host = mach_host_self();
+	kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+	(void) mach_port_deallocate(mach_task_self(), host);
+	if (kr == KERN_SUCCESS && vio_clock_ms(clk, &start) != 0)
+		kr = KERN_FAILURE;
+	if (kr != KERN_SUCCESS) {
+		printf("virtio: a request is still pending and there is no "
+		       "clock to bound the wait for it (kr=%d) -- refused "
+		       "rather than waited for without end (#697)\n",
+		       (int)kr);
+		r = -1;
+	} else {
+		for (;;) {
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT,
+					     VIO_WAIT_LOOK_MS);
+			if (vio_used_moved(st)) {
+				r = 0;
+				break;
+			}
+			/* A register, which a device taken away refuses. */
+			(void) vio_read8(st, VIRTIO_PCI_STATUS);
+			if (vio_refused_p(st)) {
+				r = -1;
+				break;
+			}
+			if (vio_clock_ms(clk, &now) != 0) {
+				printf("virtio: the clock stopped answering "
+				       "while a request was pending (#697)\n");
+				r = -1;
+				break;
+			}
+			if (now < start)
+				start = now;	/* the clock was set back */
+			if (now - start >= VIO_WAIT_DEADLINE_S * 1000u) {
+				printf("virtio: request timeout -- the used "
+				       "ring did not move in %u ms (#697)\n",
+				       (unsigned int)(now - start));
+				r = -1;
+				break;
+			}
+		}
+	}
+	if (clk != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(), clk);
+	return r;
+}
+
+/*
  * One request, with the data carried by `n_seg' descriptors rather than one
  * (#529).
  *
@@ -431,7 +541,6 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
 	struct virtio_blk_req_hdr *hdr;
 	uint8_t *status_ptr;
 	unsigned int i, status_idx;
-	int timeout;
 
 	if (n_seg == 0)
 		return -1;
@@ -498,23 +607,15 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
 	if (vio_refused_p(st))
 		return -1;
 
-	for (timeout = 0; timeout < 10000000; timeout++) {
-		__asm__ volatile("pause" ::: "memory");
-		if (((volatile struct vring_used *)st->vq_used)->idx
-		    != st->last_used_idx) {
-			vio_read8(st, VIRTIO_PCI_ISR);
-			st->last_used_idx = st->vq_used->idx;
-			if (*status_ptr != VIRTIO_BLK_S_OK) {
-				printf("virtio: request failed, "
-				       "status=%u\n", *status_ptr);
-				return -1;
-			}
-			return 0;
-		}
+	if (vio_wait_used(st) != 0)
+		return -1;
+	vio_read8(st, VIRTIO_PCI_ISR);
+	st->last_used_idx = st->vq_used->idx;
+	if (*status_ptr != VIRTIO_BLK_S_OK) {
+		printf("virtio: request failed, status=%u\n", *status_ptr);
+		return -1;
 	}
-
-	printf("virtio: request timeout\n");
-	return -1;
+	return 0;
 }
 
 /*

@@ -1,0 +1,83 @@
+Kind: ablation
+Issue: #697
+Over: 697-widen-slow-first-request.patch
+Takes out: the wait on a fact -- vio_wait_used() is again the 10,000,000 pause instructions the wait was before #697, which end in "virtio: request timeout". With the widen, the boot disk's first read is not seen done for 20 s, and the count runs out first.
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Expect: virtio: request timeout[[:cntrl:]]*$
+Note: the line the count ends in, and only that one: the wait of #697 says "virtio: request timeout -- the used ring did not move in N ms", which this does not match.
+
+diff --git a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
+index 8554d6a8..cea697b0 100644
+--- a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
++++ b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
+@@ -508,64 +508,15 @@ vio_widen_held(void)
+ static int
+ vio_wait_used(struct virtio_state *st)
+ {
+-	mach_port_t	host, clk = MACH_PORT_NULL;
+-	uint64_t	start, now;
+-	unsigned int	spins;
+-	kern_return_t	kr;
+-	int		r;
++	int	timeout;
+ 
+-	for (spins = 0; spins < VIO_WAIT_SPINS; spins++) {
++	for (timeout = 0; timeout < 10000000; timeout++) {
++		__asm__ volatile("pause" ::: "memory");
+ 		if (vio_used_moved(st))
+ 			return 0;
+-		__asm__ volatile("pause" ::: "memory");
+-	}
+-
+-	host = mach_host_self();
+-	kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+-	(void) mach_port_deallocate(mach_task_self(), host);
+-	if (kr == KERN_SUCCESS && vio_clock_ms(clk, &start) != 0)
+-		kr = KERN_FAILURE;
+-	if (kr != KERN_SUCCESS) {
+-		printf("virtio: a request is still pending and there is no "
+-		       "clock to bound the wait for it (kr=%d) -- refused "
+-		       "rather than waited for without end (#697)\n",
+-		       (int)kr);
+-		r = -1;
+-	} else {
+-		for (;;) {
+-			(void) thread_switch(MACH_PORT_NULL,
+-					     SWITCH_OPTION_WAIT,
+-					     VIO_WAIT_LOOK_MS);
+-			if (vio_used_moved(st)) {
+-				r = 0;
+-				break;
+-			}
+-			/* A register, which a device taken away refuses. */
+-			(void) vio_read8(st, VIRTIO_PCI_STATUS);
+-			if (vio_refused_p(st)) {
+-				r = -1;
+-				break;
+-			}
+-			if (vio_clock_ms(clk, &now) != 0) {
+-				printf("virtio: the clock stopped answering "
+-				       "while a request was pending (#697)\n");
+-				r = -1;
+-				break;
+-			}
+-			if (now < start)
+-				start = now;	/* the clock was set back */
+-			if (now - start >= VIO_WAIT_DEADLINE_S * 1000u) {
+-				printf("virtio: request timeout -- the used "
+-				       "ring did not move in %u ms (#697)\n",
+-				       (unsigned int)(now - start));
+-				r = -1;
+-				break;
+-			}
+-		}
+ 	}
+-	if (clk != MACH_PORT_NULL)
+-		(void) mach_port_deallocate(mach_task_self(), clk);
+-	return r;
++	printf("virtio: request timeout\n");
++	return -1;
+ }
+ 
+ /*
