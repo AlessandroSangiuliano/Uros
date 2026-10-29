@@ -4,12 +4,12 @@ Takes out: nothing -- a probe: ioapic_race says "NOT ASKED -- alone" at four pro
 Accel: tcg
 Script: scripts/merge-test-x86_64.sh
 Script: -a
-Script: both
+Script: kvm
 Script: -e
 Script: 23
 Script: -G
-Expect: merge-test: entry 23 (tcg|kvm) -smp 4 -- WRONG \(ioapic\)
-Note: at the merge test's own -smp 4. Accel: tcg because under KVM ablate.sh would give the script --kvm, which it does not take; the run's own -a both boots the line under TCG and under KVM.
+Expect: merge-test: entry 23 kvm -smp 4 -- WRONG \(ioapic\)
+Note: at the merge test's own -smp 4. Accel: tcg because under KVM ablate.sh would give the script --kvm, which it does not take; the run's own -a kvm names the accelerator. One accelerator, as every other patch run through the merge test: its exit status is its count of WRONG lines, and ablate.sh reads 2 and 3 as a run not made, so a line caught under both accelerators read as a run that did not start.
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/ioapic_race_test.c b/uros/src/mach_kernel/x86_64/cpu/ioapic_race_test.c
 index 87a8511b..63548bb5 100644
