@@ -23,7 +23,12 @@
 
 #define MSR_STAR	0xC0000081
 #define MSR_LSTAR	0xC0000082
+#define MSR_CSTAR	0xC0000083	/* #781 */
 #define MSR_FMASK	0xC0000084
+
+#define MSR_SYSENTER_CS		0x174	/* #781 */
+#define MSR_SYSENTER_ESP	0x175
+#define MSR_SYSENTER_EIP	0x176
 
 /*
  * The flags SYSCALL clears on the way in.
@@ -597,20 +602,68 @@ static void mach_syscall_table_init(void)
 	mach_syscall_count = n;
 }
 
+/*
+ * What syscall_init() writes, in one place, so that the census which reads
+ * them back on every processor compares against the writer and not against a
+ * copy of it (#781).
+ *
+ * STAR carries two selector bases and no selectors: the processor derives
+ * four from them by addition, which is why <cpu/desc.h> lays the table out
+ * the way it does rather than the way it reads.
+ */
+void syscall_msrs_wanted(struct syscall_msrs *m)
+{
+	m->star = ((uint64_t)SYSRET_SELECTOR_BASE << 48)
+		| ((uint64_t)KERNEL_CS_SELECTOR << 32);
+	m->lstar = (uint64_t)(uintptr_t)syscall_entry;
+	m->cstar = (uint64_t)(uintptr_t)syscall_compat_entry;
+	m->fmask = SYSCALL_FMASK;
+	m->sysenter_cs = 0;
+	m->sysenter_esp = 0;
+	m->sysenter_eip = 0;
+}
+
+void syscall_msrs_read(struct syscall_msrs *m)
+{
+	m->star = rdmsr(MSR_STAR);
+	m->lstar = rdmsr(MSR_LSTAR);
+	m->cstar = rdmsr(MSR_CSTAR);
+	m->fmask = rdmsr(MSR_FMASK);
+	m->sysenter_cs = rdmsr(MSR_SYSENTER_CS);
+	m->sysenter_esp = rdmsr(MSR_SYSENTER_ESP);
+	m->sysenter_eip = rdmsr(MSR_SYSENTER_EIP);
+}
+
 void syscall_init(void)
 {
+	struct syscall_msrs w;
+
 	mach_syscall_table_init();
+	syscall_msrs_wanted(&w);
+
+	wrmsr(MSR_STAR, w.star);
+	wrmsr(MSR_LSTAR, w.lstar);
+	wrmsr(MSR_FMASK, w.fmask);
 
 	/*
-	 * STAR carries two selector bases and no selectors: the processor
-	 * derives four from them by addition, which is why <cpu/desc.h> lays
-	 * the table out the way it does rather than the way it reads.
+	 * 🔴 And the two ways into ring 0 nobody meant to offer (#781).
+	 *
+	 * CSTAR is where SYSCALL goes from compatibility mode on AMD, which
+	 * takes the instruction there (Intel refuses it).  Never written, it
+	 * held whatever reset or the firmware left: zero, on every machine
+	 * this has run on, so ring 0 at address zero, on the caller's stack.
+	 * Ring 3 can no longer reach compatibility mode (<cpu/desc.h>), and
+	 * this is not a second guard on that: the register has to hold
+	 * something, and zero is the worst thing it can hold.  It holds an
+	 * entry that answers ENOSYS and touches nothing.
+	 *
+	 * SYSENTER faults while IA32_SYSENTER_CS is zero, and only then --
+	 * so it is made zero rather than found zero.
 	 */
-	wrmsr(MSR_STAR, ((uint64_t)SYSRET_SELECTOR_BASE << 48)
-			| ((uint64_t)KERNEL_CS_SELECTOR << 32));
-
-	wrmsr(MSR_LSTAR, (uint64_t)(uintptr_t)syscall_entry);
-	wrmsr(MSR_FMASK, SYSCALL_FMASK);
+	wrmsr(MSR_CSTAR, w.cstar);
+	wrmsr(MSR_SYSENTER_CS, w.sysenter_cs);
+	wrmsr(MSR_SYSENTER_ESP, w.sysenter_esp);
+	wrmsr(MSR_SYSENTER_EIP, w.sysenter_eip);
 
 	/*
 	 * Last, and it is the switch: without this bit SYSCALL is not a slow

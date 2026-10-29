@@ -681,3 +681,25 @@ syscall_entry:
 	 */
 	call	syscall_return_noncanonical
 	ud2				/* exception() does not return */
+
+/*
+ * 🔴 A SYSCALL from compatibility mode (#781), which CSTAR points at.
+ *
+ * Nothing should arrive here.  Intel refuses SYSCALL outside 64-bit mode, and
+ * ring 3 cannot reach compatibility mode since the descriptor for it went
+ * (<cpu/desc.h>).  The register is written anyway, because it holds
+ * SOMETHING whatever this kernel thinks, and until #781 that something was
+ * zero: on AMD, ring 0 at address zero, on the caller's stack.
+ *
+ * So what arrives here is answered without being trusted with anything.
+ * The instruction has switched neither the stack nor %gs, and neither is
+ * touched: no swapgs, no push, no load.  ENOSYS, which is what a call this
+ * kernel does not have is told (<syscall/syscall.h>), and the 32-bit SYSRET
+ * back to where it came from -- rcx holds its return address and r11 its
+ * flags, exactly as SYSCALL left them.
+ */
+	.globl	syscall_compat_entry
+	.align	16
+syscall_compat_entry:
+	movl	$SYSCALL_ENOSYS, %eax
+	sysretl
