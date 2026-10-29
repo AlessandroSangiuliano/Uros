@@ -1896,6 +1896,92 @@ static void cr_put_diff(const char *reg, uint64_t diff, uint64_t boot,
 	}
 }
 
+/*
+ * 🔴 THE SYSTEM-CALL REGISTERS, AS EVERY PROCESSOR HOLDS THEM (#781).
+ *
+ * syscall_init() runs on each processor and writes seven registers there --
+ * STAR, LSTAR and FMASK, which the syscall path uses, and CSTAR and the three
+ * SYSENTER ones, which it does not and which were left as reset or the
+ * firmware had them until #781.  A register is a claim, so each processor is
+ * asked for all seven and they are compared with what syscall_msrs_wanted()
+ * says it writes: the writer's own description, not a copy of it.
+ *
+ * CSTAR and IA32_SYSENTER_CS are printed as the boot processor read them.  A
+ * line that said "as written" without the values would be the census
+ * agreeing with itself.
+ */
+struct sc_seen {
+	struct syscall_msrs	m;
+	int			answered;
+};
+
+static struct sc_seen sc_seen[SMP_MAX_CPUS];
+
+static void sc_read_here(void *arg)
+{
+	struct sc_seen *s = arg;
+
+	syscall_msrs_read(&s->m);
+	s->answered = 1;
+}
+
+static int sc_same(const struct syscall_msrs *a, const struct syscall_msrs *b)
+{
+	return a->star == b->star && a->lstar == b->lstar
+	    && a->cstar == b->cstar && a->fmask == b->fmask
+	    && a->sysenter_cs == b->sysenter_cs
+	    && a->sysenter_esp == b->sysenter_esp
+	    && a->sysenter_eip == b->sysenter_eip;
+}
+
+static void syscall_msrs_selftest(void)
+{
+	unsigned self = (unsigned) cpu_number();
+	struct syscall_msrs want;
+	unsigned asked = 0, differ = 0;
+
+	syscall_msrs_wanted(&want);
+
+	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
+		struct sc_seen *s = &sc_seen[cpu];
+
+		if (cpu != self && !smp_is_online(cpu))
+			continue;
+		if (cpu == self)
+			sc_read_here(s);
+		else
+			ipi_call_mask(1ULL << cpu, sc_read_here, s);
+		asked++;
+
+		if (s->answered && sc_same(&s->m, &want))
+			continue;
+		differ++;
+		kputs("UrMach x86-64: processor ");
+		kputdec(cpu);
+		kputs(s->answered ? ": its system-call registers are not what "
+				    "syscall_init() writes: CSTAR "
+				  : ": did not answer the census, CSTAR ");
+		kputhex64(s->m.cstar);
+		kputs(", SYSENTER_CS ");
+		kputhex64(s->m.sysenter_cs);
+		kputs(", LSTAR ");
+		kputhex64(s->m.lstar);
+		kputs(" — WRONG (#781)\r\n");
+	}
+
+	kputs("UrMach x86-64: CSTAR ");
+	kputhex64(sc_seen[self].m.cstar);
+	kputs(sc_seen[self].m.cstar == (uint64_t)(uintptr_t)syscall_compat_entry
+	      ? " (syscall_compat_entry)" : " (not syscall_compat_entry)");
+	kputs(", SYSENTER_CS ");
+	kputhex64(sc_seen[self].m.sysenter_cs);
+	kputs(", with STAR, LSTAR, FMASK and SYSENTER's ESP and EIP, on ");
+	kputdec(asked);
+	kputs(differ == 0
+	      ? " processors: each holds what syscall_init() writes\r\n"
+	      : " processors: not on every one, WRONG (#781)\r\n");
+}
+
 static void control_regs_selftest(void)
 {
 	unsigned self = (unsigned) cpu_number();	/* by number (#663) */
@@ -10625,6 +10711,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	trap_vectors_selftest();
 	trap_entry_test();
 	control_regs_selftest();
+	syscall_msrs_selftest();	/* #781 */
 	global_split_selftest();
 	pcid_selftest();
 
