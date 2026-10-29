@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #780
+Takes out: the unmappable last page -- VM_MAX_ADDRESS is 2^47 again, so the stacks that start at the top cover the last page of the user half, and act_test's arm nineteen finds this task's own stack there.
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[19\] a region at 0x[0-9a-f]+-0x[0-9a-f]+ covers the last page of the user half
+Note: the arm's own WRONG for a region found there.
+
+diff --git a/uros/src/mach_kernel/mach/x86_64/vm_param.h b/uros/src/mach_kernel/mach/x86_64/vm_param.h
+index 58012f4b..ea53bc71 100644
+--- a/uros/src/mach_kernel/mach/x86_64/vm_param.h
++++ b/uros/src/mach_kernel/mach/x86_64/vm_param.h
+@@ -69,7 +69,7 @@
+  * a page lower.
+  */
+ #define VM_MIN_ADDRESS		((vm_offset_t) 0)
+-#define VM_MAX_ADDRESS		((vm_offset_t) 0x00007ffffffff000UL)
++#define VM_MAX_ADDRESS		((vm_offset_t) 0x0000800000000000UL)
+ 
+ #define VM_MIN_KERNEL_ADDRESS	((vm_offset_t) 0xffff800000000000UL)
+ #define VM_MAX_KERNEL_ADDRESS	((vm_offset_t) 0xffffffffffffffffUL)

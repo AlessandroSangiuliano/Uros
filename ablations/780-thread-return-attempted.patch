@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #780
+Takes out: the thread-return tail's question -- act_user_return_frame() hands back pcb->user without asking trap_user_return_check(), so act_test's arm seventeen, whose thread starts at a non-canonical rip, goes through an IRETQ that faults at CPL 0 with %rsp in the thread's pcb.
+Accel: kvm
+Run: --entry 14 1200 -smp 4
+Expect: UrMach x86-64: trap (general protection|double fault|page fault)
+Note: KVM only, as 780-trap-return-attempted.  Read in the arm's log that the report follows arm seventeen's announcement.
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/machdep.c b/uros/src/mach_kernel/x86_64/cpu/machdep.c
+index 559f0f04..2efc2e5c 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/machdep.c
++++ b/uros/src/mach_kernel/x86_64/cpu/machdep.c
+@@ -274,6 +274,5 @@ act_user_return_frame(void)
+ {
+ 	struct trap_frame *frame = act_user_frame();
+ 
+-	trap_user_return_check(frame);
+ 	return frame;
+ }

@@ -1,0 +1,36 @@
+Kind: ablation
+Issue: #780
+Takes out: the three tails' fresh start -- thread_exception_return, thread_bootstrap_return and restart_mach_syscall no longer put %rsp back at kernel_stack, so every exception act_test's arm seventeen answers with "resume" comes back through the tail one level deeper on the kernel stack, a hundred times.
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: UrMach x86-64: trap (general protection|double fault|page fault)|act_test: \[17\] [0-9]+ of 100 exceptions arrived
+Note: both accelerators: the canonical check that sends the thread round again is the kernel's, not the processor's.  The stack runs out before the hundredth round, and either the kernel reports the fault it ends in or the arm counts fewer than a hundred.
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
+index b02aee7b..0a92a54f 100644
+--- a/uros/src/mach_kernel/x86_64/trap/entry.S
++++ b/uros/src/mach_kernel/x86_64/trap/entry.S
+@@ -606,7 +606,6 @@ isr_table:
+  * thread to resume there.
+  */
+ thread_exception_return:
+-	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+ 	callq	thread_return_ast	/* AST_APC first: see trap.c */
+ 	jmp	thread_user_frame_return
+ 
+@@ -619,7 +618,6 @@ thread_exception_return:
+  * prepared by thread_set_state(), and resuming it is resuming it.
+  */
+ thread_bootstrap_return:
+-	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+ 	callq	thread_return_ast	/* AST_APC first: see trap.c */
+ 	jmp	thread_user_frame_return
+ 
+@@ -633,7 +631,6 @@ thread_bootstrap_return:
+  * has to rewind anything, and anything that did would be wrong.
+  */
+ restart_mach_syscall:
+-	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+ 	callq	thread_return_ast	/* AST_APC first: see trap.c */
+ 	jmp	thread_user_frame_return
+ 
