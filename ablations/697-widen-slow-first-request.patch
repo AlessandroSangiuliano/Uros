@@ -1,12 +1,12 @@
 Kind: widen
 Issue: #697
-Holds open: the first request virtio_blk.so submits -- its completion is not seen for 20 s after its notify, as if the device took that long. Every x86-64 boot reads /mach_servers off the virtio disk, so the request held is the boot disk's first read. The wait before #697, 10,000,000 pause instructions, runs out before the 20 s are up and calls the read a timeout; the wait of #697 sleeps on the used ring and gives up only after 30 s on the kernel's clock, so the boot goes on 20 s late.
-Accel: kvm
-Run: --entry 1 600 -smp 4
-Note: the clock is asked once every 10,000,000 cycles of the TSC while the request is held, not at every look, so the hold costs the old count nothing it did not spend on its pauses.
+Holds open: the first request virtio_blk.so submits -- its completion is not seen for 20 s after its notify, as if the device took that long. A boot of the bundle, entry 14's, reads /mach_servers off the virtio disk, so the request held is the boot disk's first read. The wait before #697, 10,000,000 pause instructions, runs out long before the 20 s are up and calls the read a timeout; the wait of #697 sleeps on the used ring and gives up only after 30 s on the kernel's clock, so the boot goes on 20 s late.
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
+Note: how long the old count lasts is a fortieth of the kernel's own measure of its 400,000,000-pause budget: about 2.3 s under TCG and 0.5 s under KVM on pavillion, 0.17 s under KVM on omen. Entries 0 and 1 boot boot_probe alone and never start the block device server: a first run on entry 1 passed both arms, holding nothing and saying nothing. The clock is asked once every 10,000,000 cycles of the TSC while the request is held, not at every look, so the hold costs the old count nothing it did not spend on its pauses.
 
 diff --git a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
-index e91f17a2..1cf79d19 100644
+index e91f17a2..8554d6a8 100644
 --- a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
 +++ b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
 @@ -432,9 +432,13 @@ virtqueue_setup(struct virtio_state *st)
@@ -23,18 +23,20 @@ index e91f17a2..1cf79d19 100644
  	return ((volatile struct vring_used *)st->vq_used)->idx
  	    != st->last_used_idx;
  }
-@@ -451,6 +455,53 @@ vio_clock_ms(mach_port_t clk, uint64_t *ms)
+@@ -451,6 +455,55 @@ vio_clock_ms(mach_port_t clk, uint64_t *ms)
  	return 0;
  }
  
 +/*
 + * 697 widen: the first request this module submits is held VIO_WIDEN_HOLD_MS
 + * after its notify -- its completion is not seen before then, as if the
-+ * device took that long.  Longer than the 10,000,000 pauses the wait used to
-+ * be last under KVM, and short of VIO_WAIT_DEADLINE_S.  The clock is asked
-+ * once every 10,000,000 cycles of the TSC and not at every look: a look that
-+ * cost an RPC would stretch the old count past the hold, and hide what the
-+ * hold is there to show.
++ * device took that long.  Far longer than the 10,000,000 pauses the wait
++ * used to be last -- a fortieth of the kernel's 400,000,000-pause budget,
++ * which every boot measures: about 2.3 s under TCG and 0.5 s under KVM on
++ * pavillion -- and short of VIO_WAIT_DEADLINE_S.  The clock is asked once
++ * every 10,000,000 cycles of the TSC and not at every look: a look that cost
++ * an RPC would stretch the old count past the hold, and hide what the hold is
++ * there to show.
 + */
 +#define VIO_WIDEN_HOLD_MS	20000
 +static unsigned int	vio_widen_requests;
@@ -77,7 +79,7 @@ index e91f17a2..1cf79d19 100644
  /* 0 once the used ring has moved; -1, said, when it is not going to. */
  static int
  vio_wait_used(struct virtio_state *st)
-@@ -607,6 +658,16 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
+@@ -607,6 +660,16 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
  	if (vio_refused_p(st))
  		return -1;
  

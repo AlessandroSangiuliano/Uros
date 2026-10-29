@@ -2,16 +2,16 @@ Kind: ablation
 Issue: #697
 Over: 697-widen-slow-first-request.patch
 Takes out: the wait on a fact -- vio_wait_used() is again the 10,000,000 pause instructions the wait was before #697, which end in "virtio: request timeout". With the widen, the boot disk's first read is not seen done for 20 s, and the count runs out first.
-Accel: kvm
-Run: --entry 1 600 -smp 4
+Accel: tcg,kvm
+Run: --entry 14 600 -smp 4
 Expect: virtio: request timeout[[:cntrl:]]*$
 Note: the line the count ends in, and only that one: the wait of #697 says "virtio: request timeout -- the used ring did not move in N ms", which this does not match.
 
 diff --git a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
-index 1cf79d19..a3f13b78 100644
+index 8554d6a8..cea697b0 100644
 --- a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
 +++ b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
-@@ -506,64 +506,15 @@ vio_widen_held(void)
+@@ -508,64 +508,15 @@ vio_widen_held(void)
  static int
  vio_wait_used(struct virtio_state *st)
  {
