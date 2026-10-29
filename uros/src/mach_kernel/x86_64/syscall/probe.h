@@ -151,6 +151,13 @@ extern char user_probe_read[], user_probe_read_done[];
 	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_read_done	\
 					 - __user_probe_start))
 
+/* #781: the far jump to 0x1b, which must fault where it stands. */
+extern char user_probe_compat[];
+
+#define USER_PROBE_COMPAT_VA					\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_compat	\
+					 - __user_probe_start))
+
 /*
  * Where a fault from the probe comes back to.  Declared here only so the
  * kernel can recognise it in a report; the arming is done by the entry

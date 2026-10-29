@@ -3990,7 +3990,7 @@ static void ring3_selftest(void)
 	uint64_t code_frame = boot_frame_alloc();
 	uint64_t data_frame = boot_frame_alloc();
 	const struct trap_record *t;
-	struct trap_record first, bases;
+	struct trap_record first, bases, compat;
 	struct trap_paranoid_record window;
 	uint64_t witness, answer, wide, kernel_gs;
 	uint64_t dr7_after, dr_after;	/* #742: what the window test left */
@@ -4064,6 +4064,14 @@ static void ring3_selftest(void)
 	 * breakpoint on the syscall path and can afford exactly one syscall.
 	 */
 	user_probe_enter(USER_PROBE_WIDE_VA, USER_PROBE_STACK_TOP);
+
+	/*
+	 * And whether ring 3 can leave 64-bit mode (#781): a far jump to the
+	 * slot SYSRET steps over.  Kept at once, like the others, since the
+	 * next entry overwrites the record.
+	 */
+	user_probe_enter(USER_PROBE_COMPAT_VA, USER_PROBE_STACK_TOP);
+	compat = *trap_last();
 
 	/*
 	 * And a third time, to be caught in the window itself (#440).
@@ -4397,6 +4405,31 @@ static void ring3_selftest(void)
 	      && (read_cr4() & CR4_FSGSBASE) == 0
 	      ? " — a user program cannot write its own base\r\n"
 	      : " — WRONG, ring 3 reached the segment bases\r\n");
+
+	/*
+	 * And whether it can leave 64-bit mode (#781).
+	 *
+	 * Refused, the far jump is a general protection fault AT the jump,
+	 * naming the selector -- 0x18, the descriptor's index with the ring
+	 * bits gone, as an error code carries it -- in a frame whose cs is
+	 * still 0x2b.  Taken, it is a page fault at offset zero with cs 0x1b:
+	 * a program in compatibility mode, which is the door #781 closed.
+	 * All four are printed as read, and all four have to match.
+	 */
+	kputs("UrMach x86-64: a far jump to 0x1b in ring 3 -> ");
+	kputs(trap_name(compat.vector));
+	kputs(", error ");
+	kputhex64(compat.error);
+	kputs(", cs ");
+	kputhex64(compat.cs);
+	kputs(", rip ");
+	kputhex64(compat.rip);
+	kputs(compat.caught && compat.vector == T_GENERAL_PROTECTION
+	      && compat.error == USER_CS32_SELECTOR
+	      && compat.cs == USER_CS_RPL3
+	      && compat.rip == USER_PROBE_COMPAT_VA
+	      ? " — refused where it stands: ring 3 has one code segment\r\n"
+	      : " — WRONG, the jump was not refused where it was made (#781)\r\n");
 
 	/*
 	 * And the window as ring 3 actually opens it.
