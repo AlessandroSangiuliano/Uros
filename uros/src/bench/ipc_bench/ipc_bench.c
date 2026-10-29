@@ -688,57 +688,60 @@ child_echo_entry(void)
 }
 
 /* ===================================================================
- * Inter-task RPC benchmark
+ * An echo child: a task of its own, with one thread in child_echo_entry()
  *
- * Creates a child task via task_create(inherit_memory=TRUE),
- * inserts ports into the child's IPC space, creates a thread
- * in the child pointing at child_echo_entry(), and measures
- * round-trip IPC latency.
+ * The setup bench_inter_rpc() has always done, taken out of it so that the
+ * concurrent inter-task suite (#446) starts its children the same way.
+ * task_create(inherit_memory=TRUE) gives the child a COW copy of this address
+ * space, so child_echo_entry() is at the same address there.  The child
+ * receives on `to_child' (CHILD_RECV_NAME in its space) and answers on
+ * `to_parent' (CHILD_SEND_NAME).
  * =================================================================== */
 
-static void
-bench_inter_rpc(const char *label, int send_size, int iters)
+typedef struct {
+    mach_port_t	task;
+    mach_port_t	thread;
+    mach_port_t	to_child;	/* our send right; the child holds the receive */
+    mach_port_t	to_parent;	/* our receive right, for the child's answers */
+} echo_child_t;
+
+/*
+ * 0 when the child's thread is running.  On a failure, says which step under
+ * `label' and returns -1, leaving what it took, as bench_inter_rpc() always
+ * has.
+ */
+static int
+echo_child_start(const char *label, echo_child_t *c)
 {
-    cache_snap_t		cs_before = { 0 }, cs_after = { 0 };
-    int			cs_ok;
-    handoff_snap_t		ho_before = { 0 }, ho_after = { 0 };
-    int			ho_ok;
     kern_return_t		kr;
-    mach_port_t			child_task, child_thread;
-    mach_port_t			child_recv_port;	/* child receives */
-    mach_port_t			parent_recv_port;	/* parent receives replies */
     vm_offset_t			child_stack;
-    tvalspec_t			t0, t1;
-    int				i;
-    bench_recv_buf_t		send_buf;
-    bench_null_msg_t		recv_buf;
 
     /*
      * Step 1: Allocate ports.
-     * child_recv_port: parent will move the receive right to child.
-     * parent_recv_port: parent keeps the receive right for replies.
+     * to_child: parent will move the receive right to child.
+     * to_parent: parent keeps the receive right for replies.
      */
     kr = mach_port_allocate(mach_task_self(),
 			    MACH_PORT_RIGHT_RECEIVE,
-			    &child_recv_port);
-    if (kr) { printf("  %s: alloc child_recv failed %d\n", label, kr); return; }
+			    &c->to_child);
+    if (kr) { printf("  %s: alloc child_recv failed %d\n", label, kr); return -1; }
 
     /* Create a send right for parent to keep */
     kr = mach_port_insert_right(mach_task_self(),
-				child_recv_port, child_recv_port,
+				c->to_child, c->to_child,
 				MACH_MSG_TYPE_MAKE_SEND);
-    if (kr) { printf("  %s: insert send right failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert send right failed %d\n", label, kr); return -1; }
 
     kr = mach_port_allocate(mach_task_self(),
 			    MACH_PORT_RIGHT_RECEIVE,
-			    &parent_recv_port);
-    if (kr) { printf("  %s: alloc parent_recv failed %d\n", label, kr); return; }
+			    &c->to_parent);
+    if (kr) { printf("  %s: alloc parent_recv failed %d\n", label, kr); return -1; }
 
-    /* Send right for parent_recv_port (will give to child) */
+    /* Send right for to_parent (will give to child) */
     kr = mach_port_insert_right(mach_task_self(),
-				parent_recv_port, parent_recv_port,
+				c->to_parent, c->to_parent,
 				MACH_MSG_TYPE_MAKE_SEND);
-    if (kr) { printf("  %s: insert parent send right failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert parent send right failed %d\n", label, kr); return -1; }
 
     /*
      * Step 2: Create child task.
@@ -748,15 +751,15 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     kr = task_create(mach_task_self(),
 		     (ledger_port_array_t)0, 0,
 		     TRUE,  /* inherit memory */
-		     &child_task);
-    if (kr) { printf("  %s: task_create failed %d\n", label, kr); return; }
+		     &c->task);
+    if (kr) { printf("  %s: task_create failed %d\n", label, kr); return -1; }
 
     /*
      * Step 3: Allocate stack in the child task's address space.
      */
     child_stack = 0;
-    kr = vm_allocate(child_task, &child_stack, CHILD_STACK_SIZE, TRUE);
-    if (kr) { printf("  %s: child stack alloc failed %d\n", label, kr); return; }
+    kr = vm_allocate(c->task, &child_stack, CHILD_STACK_SIZE, TRUE);
+    if (kr) { printf("  %s: child stack alloc failed %d\n", label, kr); return -1; }
 
     /*
      * Step 4: Insert port rights into child's IPC space.
@@ -766,34 +769,75 @@ bench_inter_rpc(const char *label, int send_size, int iters)
      * CHILD_SEND_NAME: send right — child sends replies to parent
      *                  on this port.
      */
-    kr = mach_port_insert_right(child_task,
+    kr = mach_port_insert_right(c->task,
 				CHILD_RECV_NAME,
-				child_recv_port,
+				c->to_child,
 				MACH_MSG_TYPE_MOVE_RECEIVE);
-    if (kr) { printf("  %s: insert child recv failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert child recv failed %d\n", label, kr); return -1; }
     /* Parent lost the receive right; still has send right */
 
-    kr = mach_port_insert_right(child_task,
+    kr = mach_port_insert_right(c->task,
 				CHILD_SEND_NAME,
-				parent_recv_port,
+				c->to_parent,
 				MACH_MSG_TYPE_COPY_SEND);
-    if (kr) { printf("  %s: insert child send failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: insert child send failed %d\n", label, kr); return -1; }
 
     /*
      * Step 5: Create thread in child and give it a pc and a stack.
      */
-    kr = thread_create(child_task, &child_thread);
-    if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return; }
+    kr = thread_create(c->task, &c->thread);
+    if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return -1; }
 
-    kr = bench_child_thread_start(child_thread, child_echo_entry,
+    kr = bench_child_thread_start(c->thread, child_echo_entry,
 				  child_stack + CHILD_STACK_SIZE);
-    if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return; }
+    if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return -1; }
 
     /*
      * Step 6: Start child thread.
      */
-    kr = thread_resume(child_thread);
-    if (kr) { printf("  %s: thread_resume failed %d\n", label, kr); return; }
+    kr = thread_resume(c->thread);
+    if (kr) { printf("  %s: thread_resume failed %d\n", label, kr); return -1; }
+
+    return 0;
+}
+
+/*
+ * Destroy the child task, and the rights this task kept to it.
+ */
+static void
+echo_child_stop(echo_child_t *c)
+{
+    task_terminate(c->task);
+    mach_port_deallocate(mach_task_self(), c->thread);
+    mach_port_deallocate(mach_task_self(), c->task);
+    mach_port_destroy(mach_task_self(), c->to_child);
+    mach_port_destroy(mach_task_self(), c->to_parent);
+}
+
+/* ===================================================================
+ * Inter-task RPC benchmark
+ *
+ * Starts an echo child (above) and measures round-trip IPC latency to it.
+ * =================================================================== */
+
+static void
+bench_inter_rpc(const char *label, int send_size, int iters)
+{
+    cache_snap_t		cs_before = { 0 }, cs_after = { 0 };
+    int			cs_ok;
+    handoff_snap_t		ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok;
+    echo_child_t		child;
+    tvalspec_t			t0, t1;
+    int				i;
+    bench_recv_buf_t		send_buf;
+    bench_null_msg_t		recv_buf;
+
+    /*
+     * Steps 1 to 6: the child, its ports and its running thread.
+     */
+    if (echo_child_start(label, &child) != 0)
+	return;
 
     /* Let child settle */
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
@@ -805,14 +849,14 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	send_buf.head.msgh_size	      = send_size;
-	send_buf.head.msgh_remote_port = child_recv_port;
+	send_buf.head.msgh_remote_port = child.to_child;
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
 	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
 
     /*
@@ -825,14 +869,14 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 	send_buf.head.msgh_size	      = send_size;
-	send_buf.head.msgh_remote_port = child_recv_port;
+	send_buf.head.msgh_remote_port = child.to_child;
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
 	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
-		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
@@ -853,11 +897,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     /*
      * Step 9: Cleanup — destroy the child task.
      */
-    task_terminate(child_task);
-    mach_port_deallocate(mach_task_self(), child_thread);
-    mach_port_deallocate(mach_task_self(), child_task);
-    mach_port_destroy(mach_task_self(), child_recv_port);
-    mach_port_destroy(mach_task_self(), parent_recv_port);
+    echo_child_stop(&child);
 }
 
 /* ===================================================================
