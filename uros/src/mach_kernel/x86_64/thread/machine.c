@@ -119,24 +119,24 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * is nothing for this to do about it.
 	 */
 	/*
-	 * 🔥 BELOW the reserved frame, not at the top of the stack (#474).
+	 * 🔥 Three values, and they must not be confused (#474, #770).
 	 *
-	 * The two lines here look like they should carry the same value and
-	 * must not.  The processor takes the TSS one and pushes DOWNWARD from
-	 * it, building the trap frame in exactly the reserved bytes -- so that
-	 * one is the top.  The syscall entry is handed its value and starts
-	 * USING it as a stack, so if it were the top too, every C frame of
-	 * every system call would run down through the frame pcb->user names.
+	 * The processor takes the TSS one and pushes DOWNWARD from it, so it is
+	 * the END of the frame pcb->user names.  The syscall entry writes the
+	 * frame at kernel_rsp, its BASE.  And both entries run C on
+	 * kernel_stack, which must not be the frame: when the frame sat at the
+	 * top of the stack and C ran from the top too, every C frame of every
+	 * system call ran down through it, and thread_get_state() on a thread
+	 * inside mach_msg answered out of the kernel's own stack with
+	 * KERN_SUCCESS -- including a kernel text address where ring 3 expected
+	 * its rip.
 	 *
-	 * It did, and thread_get_state() on a thread inside mach_msg answered
-	 * out of the kernel's own stack with KERN_SUCCESS -- including a kernel
-	 * text address where ring 3 expected its rip.
-	 *
-	 * context_init() was corrected for exactly this and says so; this was
-	 * the other half, and the two are now the same expression.
+	 * context_init() decided all three, and context_switch() hands the
+	 * processor the same two from the same fields: one decision, read in
+	 * two places, rather than an address derived twice.
 	 */
-	percpu()->kernel_rsp =
-		KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+	percpu()->kernel_rsp = pcb->ctx.user_frame;
+	percpu()->kernel_stack = pcb->ctx.entry_stack;
 	/*
 	 * ⚠️ TWO places, and only one of them was here (#422).
 	 *
@@ -169,7 +169,8 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * costs a hypervisor exit reads in C exactly like a field access, and no
 	 * warning distinguishes them.
 	 */
-	desc_set_rsp0(cpu_number(), pcb->ctx.kernel_stack_top);
+	desc_set_rsp0(cpu_number(),
+		      pcb->ctx.user_frame + sizeof(struct trap_frame));
 }
 
 /*
@@ -338,7 +339,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
-		     fpu_area);
+		     fpu_area, 0);
 
 	/*
 	 * 🔴 AND WHETHER THE SWITCH HAS TO CARRY ITS VECTOR STATE (#561).
@@ -378,9 +379,10 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * KERN_INVALID_ARGUMENT -- which the loader does not check, on either
 	 * machine, and which on i386 it never needed to.
 	 *
-	 * ⚠️ The address is derived and not chosen; trap.h's KERNEL_STACK_USER_FRAME
-	 * says why, and act_machine_set_state() below uses the same expression
-	 * because it is the same claim about the same bytes.
+	 * ⚠️ The address is the one context_init() decided, in the same field
+	 * the switch hands the processor as kernel_rsp and rsp0 (#770): the
+	 * frame a reader reads and the frame an entry writes cannot be two
+	 * places.
 	 *
 	 * 🔴 FOR A THREAD OF A USER TASK ONLY (#616).  A kernel thread never
 	 * reaches ring 3, so it keeps pcb_init()'s honest state -- no frame --
@@ -392,8 +394,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * before -- failed unseen until #615 ran entry 7.
 	 */
 	if (thr_act->task != kernel_task) {
-		pcb->user = (struct trap_frame *)
-			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+		pcb->user = (struct trap_frame *)(uintptr_t) pcb->ctx.user_frame;
 		thread_frame_init(pcb->user);
 	}
 
@@ -519,7 +520,7 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
-		     pcb->ctx.fpu_area);
+		     pcb->ctx.fpu_area, 0);
 	pcb->ctx.fpu_switch = keep_fpu_switch;
 	(void) continuation;
 }

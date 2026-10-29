@@ -266,8 +266,33 @@ trap_common:
 	SAVE_REGS
 
 	movq	%rsp, %rdi		/* the frame is the argument */
+
+	/*
+	 * And C does not run on it (#770).  From ring 3 the frame is the one
+	 * the processor built at the TSS's rsp0 -- the thread's own, which a
+	 * reader of its state finds through pcb->user -- and C runs on
+	 * kernel_stack, the thread's stack, which is not where the frame is.
+	 * From ring 0 the frame is on the stack this was already running on,
+	 * and C goes on there.  %rbx carries the frame across the call: the
+	 * user's %rbx is saved in it, and C preserves the register, through a
+	 * block and a resume on another processor as well.
+	 */
+	movq	%rsp, %rbx
+	testb	$3, TF_CS(%rsp)
+	jz	3f
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp
+3:
 	call	trap_dispatch
 
+	/*
+	 * Back onto the frame with interrupts off (#770).  From here to the
+	 * iretq %rsp may be inside the thread's pcb, and an interrupt taken
+	 * there would push its own frame below ours -- into the pcb.  The
+	 * vectors that ignore IF run on stacks of their own (IST), and iretq
+	 * gives the interrupted code its flags back.
+	 */
+	cli
+	movq	%rbx, %rsp
 	RESTORE_REGS
 
 	/*
@@ -546,9 +571,7 @@ isr_table:
  */
 thread_exception_return:
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
-	callq	act_user_frame		/* %rax = this thread's trap frame */
-	movq	%rax, %rsp
-	jmp	thread_frame_return
+	jmp	thread_user_frame_return
 
 /*
  * A thread that has never run, starting for the first time.
@@ -560,9 +583,7 @@ thread_exception_return:
  */
 thread_bootstrap_return:
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
-	callq	act_user_frame
-	movq	%rax, %rsp
-	jmp	thread_frame_return
+	jmp	thread_user_frame_return
 
 /*
  * Run the system call again.
@@ -575,17 +596,24 @@ thread_bootstrap_return:
  */
 restart_mach_syscall:
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
-	callq	act_user_frame
-	movq	%rax, %rsp
-	jmp	thread_frame_return
+	jmp	thread_user_frame_return
 
 /*
- * The tail all three share: the frame is at %rsp, we are going to ring 3.
+ * The tail all three share: this thread's frame, and ring 3.
+ *
+ * ⚠️ Interrupts off BEFORE %rsp goes to the frame (#770), for trap_common's
+ * reason: the frame is in the thread's pcb, and an interrupt taken with %rsp
+ * there would push its frame into the pcb.  One copy of that, here, rather
+ * than one in each of the three.
  *
  * swapgs unconditionally, because every one of these is a return TO USER --
  * unlike trap_common's tail, which has to test, because a trap may have come
  * from either ring.
  */
+thread_user_frame_return:
+	callq	act_user_frame		/* %rax = this thread's trap frame */
+	cli
+	movq	%rax, %rsp
 thread_frame_return:
 	RESTORE_REGS
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */

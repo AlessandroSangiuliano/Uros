@@ -105,6 +105,23 @@ struct context {
 	 * speculation can step around (CVE-2018-3665, #560).
 	 */
 	int	 fpu_switch;		/* 0: nothing to move on a switch  */
+
+	/*
+	 * #770: where an entry from ring 3 writes this thread's registers, and
+	 * the stack it then runs C on.  The switch gives the processor both:
+	 * the frame's base becomes kernel_rsp, its end the TSS's rsp0 (the
+	 * processor pushes downward from there), and entry_stack becomes
+	 * kernel_stack.
+	 *
+	 * Two addresses because they were one only by arrangement.  Since #474
+	 * the frame sat at the top of the kernel stack and C ran below it, so
+	 * the frame's base was also where the stack began; a context built with
+	 * no frame of its own still lays itself out that way (context_init()).
+	 * A thread's frame belongs in its pcb, where a stack given to another
+	 * thread does not carry it along -- which is what continuations need.
+	 */
+	uint64_t user_frame;		/* the frame's base: kernel_rsp     */
+	uint64_t entry_stack;		/* where C runs after an entry     */
 };
 
 /*
@@ -118,9 +135,15 @@ struct context {
  * there would be two ways to resume and one of them would be rare.
  *
  * `stack_top` is the high end; stacks grow down.
+ *
+ * `user_frame` is where an entry from ring 3 writes the thread's registers
+ * (#770), or 0 for none of its own: then the frame is kept at the top of the
+ * stack and the stack begins below it, which is how a context with no pcb
+ * behind it -- the boot path's -- is laid out.
  */
 void context_init(struct context *ctx, uint64_t stack_top,
-		  void (*entry)(void *), void *arg, void *fpu_area);
+		  void (*entry)(void *), void *arg, void *fpu_area,
+		  uint64_t user_frame);
 
 /*
  * Say that this thread will execute vector instructions, so the switch must

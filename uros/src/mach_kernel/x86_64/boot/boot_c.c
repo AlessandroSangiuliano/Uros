@@ -3899,8 +3899,8 @@ static void context_selftest(void)
 	fpu_b = (void *)(uintptr_t)phys_to_direct(fpu_frames + PAGE_SIZE_4K);
 	fpu_main = (void *)(uintptr_t)phys_to_direct(fpu_frames + 2 * PAGE_SIZE_4K);
 
-	context_init(&ctx_a, stack_a, thread_a, 0, fpu_a);
-	context_init(&ctx_b, stack_b, thread_b, 0, fpu_b);
+	context_init(&ctx_a, stack_a, thread_a, 0, fpu_a, 0);
+	context_init(&ctx_b, stack_b, thread_b, 0, fpu_b, 0);
 	fpu_area_init(fpu_main);
 
 	/*

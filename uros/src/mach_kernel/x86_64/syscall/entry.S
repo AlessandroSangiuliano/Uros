@@ -162,28 +162,87 @@ syscall_entry:
 	movq	%gs:PERCPU_KERNEL_RSP, %rsp
 
 	/*
+	 * 🔥 WRITTEN, not pushed, and into the frame this thread already owns
+	 * (#474).
+	 *
+	 * %rsp now holds PERCPU_KERNEL_RSP, and that value is the BASE of this
+	 * thread's trap frame -- the one pcb->user points at, which the switch
+	 * handed the processor (#770).  It used to be the stack TOP, so every
+	 * push below and every C frame after it ran straight down through those
+	 * 176 bytes: the saved user frame and the syscall's working stack were
+	 * the same memory.
+	 *
+	 * What that cost was not theoretical.  thread_get_state() on a thread
+	 * asleep in mach_msg -- which is where a server thread spends its life,
+	 * and exactly the thread a debugger stops -- answered out of pcb->user
+	 * and therefore out of the kernel's own stack, reporting KERN_SUCCESS.
+	 * Measured, before this changed: `cs 0x0 ss 0x7ffffff8fd38 rip
+	 * 0xffffffff8011ba19'.  The fields read one slot out of step, because
+	 * the four pushes landed on ss/rsp/rflags/cs in that order -- and the
+	 * rip a user program got back was a KERNEL TEXT ADDRESS.  A disclosure
+	 * through a call that succeeds, not merely a wrong answer.
+	 *
+	 * So the five words a return needs go into the frame, at their own
+	 * offsets, and the frame then describes the caller for as long as the
+	 * thread is inside the kernel.  It is the same number of stores as the
+	 * pushes were, in the same place on the same cache line, and it lands
+	 * somewhere a reader can make sense of.
+	 *
+	 * ⚠️ And they are per-THREAD by construction, which is what #473 had to
+	 * arrange by hand: the frame is this thread's, so mach_msg can
+	 * block, the scheduler can run somebody else, and no other entry can
+	 * write these words.  The per-CPU slot keeps only its job as the scratch
+	 * across the two instructions above, where it is safe for a reason
+	 * rather than by luck -- SYSCALL masks interrupts through FMASK, so
+	 * nothing runs between the store and the load.
+	 *
+	 * ⚠️ Order matters in one place only: %rcx carries the return address
+	 * and is then reused, so TF_RIP is written before anything else touches
+	 * it.
+	 */
+	movq	%rcx, TF_RIP(%rsp)		/* where ring 3 resumes    */
+	movq	%r11, TF_RFLAGS(%rsp)		/* the flags it resumes on */
+	movq	%gs:PERCPU_USER_RSP, %rcx
+	movq	%rcx, TF_RSP(%rsp)		/* the stack it came in on */
+	movq	$USER_CS_RPL3, TF_CS(%rsp)
+	movq	$USER_DS_RPL3, TF_SS(%rsp)
+
+	/*
+	 * And off the frame, onto the thread's stack, before anything is pushed
+	 * (#770).  The frame is the thread's -- pcb->user names it, and a reader
+	 * may read it while the thread sleeps in here -- and C runs on
+	 * kernel_stack.  Until the sti below interrupts are masked, so nothing
+	 * arrives between the writes above and this move but the vectors that
+	 * run on stacks of their own (IST): %rsp being the frame's base for six
+	 * instructions is safe for that reason, and costs one instruction where
+	 * a scratch register would have cost a spill.
+	 */
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp
+
+	/*
 	 * The clock, as early as this path can read it (#411, for #392).
 	 *
 	 * 🔑 Here and not in C, because "trap entry" is a phase and a phase
-	 * cannot be measured from after it.  Everything below -- the frame
-	 * writes, the argument marshalling, the table dispatch -- is the fixed
-	 * floor #392 has to weigh the two message copies against, and a floor
-	 * measured from its own far end reads as zero and flatters every
-	 * conclusion drawn from it.
+	 * cannot be measured from after it.  Everything below -- the argument
+	 * marshalling, the table dispatch -- is the fixed floor #392 has to
+	 * weigh the two message copies against, and a floor measured from its
+	 * own far end reads as zero and flatters every conclusion drawn from it.
 	 *
-	 * ⚠️ THREE INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed: the
-	 * swapgs and the two stack moves above.  Nothing can be recorded before
-	 * them -- there is no kernel %gs to write through and no stack to save
-	 * a register on -- so the phase begins here and the reader is owed the
-	 * fact that it does.
+	 * ⚠️ NINE INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed: the
+	 * swapgs, the stack moves, and the frame's five writes above (#770).
+	 * The reading needs a stack to save two registers on, and the frame's
+	 * stack is not one any more -- the frame is the thread's and C runs on
+	 * kernel_stack -- so the phase begins once that stack is in %rsp, and
+	 * the reader is owed the fact that it does.  Before #770 the five
+	 * writes were inside it.
 	 *
 	 * rdtsc lands in edx:eax, both of which are live (%rax is the trap
-	 * number), so they are saved.  The pushes go BELOW the frame, like the
-	 * slow return path's, and are undone before anything reads it.
+	 * number), so they are saved.  The pushes go below the top of
+	 * kernel_stack and are undone before anything else uses it.
 	 *
 	 * 🔴 AND THE READING STAYS ON THIS THREAD'S STACK (#622): in the word
-	 * %rdx was pushed into, SYSCALL_ENTRY_TSC_BELOW bytes under the frame,
-	 * where cpu/percpu.c reads it.  It used to go into the per-processor
+	 * %rdx was pushed into, SYSCALL_ENTRY_TSC_BELOW bytes under the top of
+	 * kernel_stack, where cpu/percpu.c reads it.  It used to go into the per-processor
 	 * block, and the dispatcher's C read it back after the sti below, where
 	 * this kernel preempts: a thread taken off its processor in between
 	 * found another thread's reading there, or its own from an earlier
@@ -207,55 +266,9 @@ syscall_entry:
 	movq	8(%rsp), %rdx
 	movq	%rax, 8(%rsp)		/* the reading, where %rdx was */
 	popq	%rax
-	addq	$8, %rsp		/* and left there, under the frame */
+	addq	$8, %rsp		/* and left there, under the stack top */
 #endif	/* SYSCALL_PROFILE */
 
-	/*
-	 * 🔥 WRITTEN, not pushed, and into the frame this thread already owns
-	 * (#474).
-	 *
-	 * %rsp now holds PERCPU_KERNEL_RSP, and that value is the BASE of the
-	 * trap frame reserved at the top of this thread's kernel stack -- the
-	 * one pcb->user points at, the one <trap/trap.h> reserves and
-	 * KERNEL_STACK_USER_FRAME() names.  It used to be the stack TOP, so
-	 * every push below and every C frame after it ran straight down through
-	 * those 176 bytes: the saved user frame and the syscall's working stack
-	 * were the same memory.
-	 *
-	 * What that cost was not theoretical.  thread_get_state() on a thread
-	 * asleep in mach_msg -- which is where a server thread spends its life,
-	 * and exactly the thread a debugger stops -- answered out of pcb->user
-	 * and therefore out of the kernel's own stack, reporting KERN_SUCCESS.
-	 * Measured, before this changed: `cs 0x0 ss 0x7ffffff8fd38 rip
-	 * 0xffffffff8011ba19'.  The fields read one slot out of step, because
-	 * the four pushes landed on ss/rsp/rflags/cs in that order -- and the
-	 * rip a user program got back was a KERNEL TEXT ADDRESS.  A disclosure
-	 * through a call that succeeds, not merely a wrong answer.
-	 *
-	 * So the five words a return needs go into the frame, at their own
-	 * offsets, and the frame then describes the caller for as long as the
-	 * thread is inside the kernel.  It is the same number of stores as the
-	 * pushes were, in the same place on the same cache line, and it lands
-	 * somewhere a reader can make sense of.
-	 *
-	 * ⚠️ And they are per-THREAD by construction, which is what #473 had to
-	 * arrange by hand: the frame is on this thread's stack, so mach_msg can
-	 * block, the scheduler can run somebody else, and no other entry can
-	 * write these words.  The per-CPU slot keeps only its job as the scratch
-	 * across the two instructions above, where it is safe for a reason
-	 * rather than by luck -- SYSCALL masks interrupts through FMASK, so
-	 * nothing runs between the store and the load.
-	 *
-	 * ⚠️ Order matters in one place only: %rcx carries the return address
-	 * and is then reused, so TF_RIP is written before anything else touches
-	 * it.
-	 */
-	movq	%rcx, TF_RIP(%rsp)		/* where ring 3 resumes    */
-	movq	%r11, TF_RFLAGS(%rsp)		/* the flags it resumes on */
-	movq	%gs:PERCPU_USER_RSP, %rcx
-	movq	%rcx, TF_RSP(%rsp)		/* the stack it came in on */
-	movq	$USER_CS_RPL3, TF_CS(%rsp)
-	movq	$USER_DS_RPL3, TF_SS(%rsp)
 
 	/*
 	 * ⚠️ The fifteen general-purpose registers above are NOT written, and
@@ -268,7 +281,8 @@ syscall_entry:
 	 * thread_frame_init() zeroed, what thread_set_state() wrote, or the
 	 * ring-3 registers the thread's last trap saved.  Never kernel stack:
 	 * these bytes stopped being working stack the moment kernel_rsp moved
-	 * below them, which is the whole of this fix.
+	 * below them, which is the whole of this fix -- and since #770 C does
+	 * not even run beside them, but on kernel_stack.
 	 *
 	 * 🔥 A mark saying "a syscall wrote this" lived here briefly, so that
 	 * readers could blank those fifteen, and it was REMOVED on the strength
@@ -297,9 +311,10 @@ syscall_entry:
 	 *
 	 * The System V ABI wants %rsp sixteen-byte aligned AT the call, so that
 	 * the callee sees it eight past a boundary once the return address is
-	 * on.  The frame base is sixteen-byte aligned -- kernel_stack_top is,
-	 * and sizeof(struct trap_frame) is a multiple of sixteen -- so the
-	 * calls below are legal with zero pushes, and zero is even.
+	 * on.  kernel_stack is sixteen-byte aligned -- it is a stack's top,
+	 * which context_init() refuses unless aligned, or a frame's base below
+	 * one, and sizeof(struct trap_frame) is a multiple of sixteen (#770) --
+	 * so the calls below are legal with zero pushes, and zero is even.
 	 *
 	 * ⚠️ The two wide paths lean on that parity: they push %rbp and an odd
 	 * number of stacked arguments on top of this, and land their callee on
@@ -471,9 +486,11 @@ syscall_entry:
 	/*
 	 * Read back out of the frame the entry filled (#474), rather than
 	 * popped off a working stack that no longer holds them.  %rsp is the
-	 * frame base again here: the plain paths never moved it but for the
-	 * profile's reserve, which .Lreturn has given back, and the wide paths
-	 * restore it from %rbp before jumping there.
+	 * top of kernel_stack again here -- the plain paths never moved it but
+	 * for the profile's reserve, which .Lreturn has given back, and the wide
+	 * paths restore it from %rbp before jumping there -- and the frame is
+	 * not on that stack (#770): it is read through kernel_rsp, which the
+	 * switch set for this thread wherever it now runs.
 	 */
 	/*
 	 * The return path's clock starts HERE, after the AST handling and not
@@ -499,8 +516,9 @@ syscall_entry:
 	 */
 	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK
 
-	movq	TF_RFLAGS(%rsp), %r11	/* flags */
-	movq	TF_RIP(%rsp), %rcx	/* resume address */
+	movq	%gs:PERCPU_KERNEL_RSP, %rdx	/* the frame (#770) */
+	movq	TF_RFLAGS(%rdx), %r11	/* flags */
+	movq	TF_RIP(%rdx), %rcx	/* resume address */
 
 	/*
 	 * SYSRET takes the return address from rcx, and on Intel parts it
@@ -587,6 +605,7 @@ syscall_entry:
 	CLEAR_CLOBBERED
 
 	cli
+	movq	%gs:PERCPU_KERNEL_RSP, %rsp	/* the frame, interrupts off (#770) */
 	movq	TF_RSP(%rsp), %rsp	/* this thread's, not this processor's */
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
