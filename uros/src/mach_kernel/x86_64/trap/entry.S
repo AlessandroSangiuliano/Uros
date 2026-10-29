@@ -630,13 +630,17 @@ thread_bootstrap_return:
 	jmp	thread_user_frame_return
 
 /*
- * Run the system call again.
+ * Run the system call again -- which on this port nothing asks for.
  *
- * ⚠️ The frame's rip still points AT the syscall instruction, not past it:
- * the entry path saves rcx, which SYSCALL loaded with the return address,
- * and the return path puts it back -- so "again" is achieved by returning
- * normally to an instruction pointer that was never advanced.  Nothing here
- * has to rewind anything, and anything that did would be wrong.
+ * exception() calls this only for EXC_MACH_SYSCALL with the host as the
+ * handler, and only i386 raises that exception (its locore); here a Mach call
+ * the table does not have is answered ENOSYS (syscall/entry.S).
+ *
+ * ⚠️ And a return from here would NOT run it again.  This said the frame's
+ * rip still points AT the syscall instruction; it points past it: SYSCALL
+ * loads rcx with the address of the next instruction, and that is what the
+ * entry saves as the frame's rip.  A port that raised EXC_MACH_SYSCALL would
+ * have to rewind rip by the instruction's two bytes first (#780).
  */
 restart_mach_syscall:
 	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
