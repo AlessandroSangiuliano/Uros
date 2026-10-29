@@ -206,6 +206,7 @@ typedef struct {
     unsigned int reach;
     unsigned int same_task;
     unsigned int other_task;
+    unsigned int other_task_fenced;
 } handoff_snap_t;
 
 static int
@@ -222,6 +223,7 @@ handoff_snap(handoff_snap_t *s)
     s->reach      = info.reach;
     s->same_task  = info.same_task;
     s->other_task = info.other_task;
+    s->other_task_fenced = info.other_task_fenced;
     return 1;
 }
 
@@ -234,7 +236,7 @@ static void
 print_handoff_stats(const char *label, int ok,
 		    const handoff_snap_t *before, const handoff_snap_t *after)
 {
-    unsigned int same, other;
+    unsigned int same, other, fenced;
 
     if (!ok) {
 	printf("  [-X] %-30s not answered: host_info refused "
@@ -245,14 +247,26 @@ print_handoff_stats(const char *label, int ok,
 	printf("  [-X] %-30s off\n", label);
 	return;
     }
-    same  = after->same_task  - before->same_task;
-    other = after->other_task - before->other_task;
+    same   = after->same_task  - before->same_task;
+    other  = after->other_task - before->other_task;
+    fenced = after->other_task_fenced - before->other_task_fenced;
+    /*
+     * #446: where -X reaches any task, a woken thread of another task sent to
+     * an idle processor is the same-task fence come back -- WRONG, which the
+     * harness fails the boot on.  Where -X is same-task only (i386) it is the
+     * fence doing its job, and only counted.
+     */
     if (after->reach == 1)
 	printf("  [-X] %-30s same task: %u woken on their waker's "
+	       "processor, %u of another task; %u of another task kept out\n",
+	       label, same + other, other, fenced);
+    else if (after->reach == 2 && fenced == 0)
+	printf("  [-X] %-30s any task: %u woken on their waker's "
 	       "processor, %u of another task\n", label, same + other, other);
     else if (after->reach == 2)
 	printf("  [-X] %-30s any task: %u woken on their waker's "
-	       "processor, %u of another task\n", label, same + other, other);
+	       "processor, %u of another task; %u of another task kept out by "
+	       "the fence -- WRONG (#446)\n", label, same + other, other, fenced);
     else
 	printf("  [-X] %-30s reach %u: %u woken on their waker's "
 	       "processor, %u of another task\n",

@@ -316,20 +316,21 @@ host_info(
 		 */
 	case HOST_RPC_HANDOFF_INFO:
 		{ register host_rpc_handoff_info_t	handoff_info;
-		  unsigned long	same = 0, other = 0;
+		  unsigned long	same = 0, other = 0, fenced = 0;
 
 		if (*count < HOST_RPC_HANDOFF_INFO_COUNT)
 			return(KERN_FAILURE);
 
 		handoff_info = (host_rpc_handoff_info_t) info;
 #if	NCPUS > 1
-		sched_rpc_handoff_counts(&same, &other);
+		sched_rpc_handoff_counts(&same, &other, &fenced);
 		handoff_info->reach = (unsigned int) sched_rpc_handoff;
 #else	/* NCPUS > 1 */
 		handoff_info->reach = 0;	/* one processor: no -X */
 #endif	/* NCPUS > 1 */
 		handoff_info->same_task  = (unsigned int) same;
 		handoff_info->other_task = (unsigned int) other;
+		handoff_info->other_task_fenced = (unsigned int) fenced;
 
 		*count = HOST_RPC_HANDOFF_INFO_COUNT;
 		return(KERN_SUCCESS);

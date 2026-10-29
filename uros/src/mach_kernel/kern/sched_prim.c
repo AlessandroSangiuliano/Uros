@@ -2780,20 +2780,31 @@ extern int	real_ncpus;
 static struct sched_handoff_count {
 	unsigned long	same_task;
 	unsigned long	other_task;
+	unsigned long	other_task_fenced;	/* sent to an idle processor */
 } __attribute__((aligned(64))) sched_handoff_count[NCPUS];
 
+/*
+ * The third count is the check (#446): a woken thread of another task, its
+ * waker about to block, that the same-task fence sent to an idle processor
+ * instead.  Where -X reaches any task it has to stay at zero, and the census
+ * says WRONG when it does not -- which is how the fence, put back by a patch
+ * or by a mistake, is seen in the first boot that has -X on.
+ */
 void
 sched_rpc_handoff_counts(
 	unsigned long	*same_task,
-	unsigned long	*other_task)
+	unsigned long	*other_task,
+	unsigned long	*other_task_fenced)
 {
 	int	cpu;
 
 	*same_task = 0;
 	*other_task = 0;
+	*other_task_fenced = 0;
 	for (cpu = 0; cpu < NCPUS; cpu++) {
 		*same_task += sched_handoff_count[cpu].same_task;
 		*other_task += sched_handoff_count[cpu].other_task;
+		*other_task_fenced += sched_handoff_count[cpu].other_task_fenced;
 	}
 }
 #endif	/* NCPUS > 1 */
@@ -2914,20 +2925,26 @@ thread_setrun(
 			    pset == current_processor()->processor_set &&
 #endif	/* MACH_HOST */
 			    self->top_act != THR_ACT_NULL &&
-			    th->top_act != THR_ACT_NULL &&
-			    (self->top_act->task == th->top_act->task ||
-			     sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK)) {
+			    th->top_act != THR_ACT_NULL) {
+				boolean_t	same = self->top_act->task ==
+						       th->top_act->task;
+
+				if (same ||
+				    sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK) {
 #if	S319_INSTRUMENT
-				s319[cpu_number()].localhoff++;
+					s319[cpu_number()].localhoff++;
 #endif
-				if (self->top_act->task == th->top_act->task)
-					sched_handoff_count[cpu_number()].same_task++;
-				else
-					sched_handoff_count[cpu_number()].other_task++;
-				(void) run_queue_enqueue(
-					&current_processor()->runq, th, tail);
-				mp_enable_preemption();
-				return;
+					if (same)
+						sched_handoff_count[cpu_number()].same_task++;
+					else
+						sched_handoff_count[cpu_number()].other_task++;
+					(void) run_queue_enqueue(
+						&current_processor()->runq, th, tail);
+					mp_enable_preemption();
+					return;
+				}
+				/* #446: another task's thread, kept out by the fence */
+				sched_handoff_count[cpu_number()].other_task_fenced++;
 			}
 		}
 	    }

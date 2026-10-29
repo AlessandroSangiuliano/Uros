@@ -280,7 +280,8 @@ typedef struct host_ipc_cache_info	*host_ipc_cache_info_t;
 /*
  * #446: what the hand-off on block (-X, #356) has done since boot -- the woken
  * threads it queued on their waker's processor, of the waker's task and of
- * another -- and how far it reaches.  The counts are the boot's, so a caller
+ * another, and those of another task the same-task fence sent to an idle
+ * processor instead -- and how far it reaches.  The counts are the boot's, so a caller
  * reads them before and after what it measures, and subtracts: unsigned, so a
  * difference stays right across one wrap.
  */
@@ -288,6 +289,7 @@ struct host_rpc_handoff_info {
 	unsigned int	reach;		/* 0 off, 1 the waker's task only, 2 any */
 	unsigned int	same_task;	/* woken threads of the waker's task */
 	unsigned int	other_task;	/* woken threads of another task */
+	unsigned int	other_task_fenced; /* of another task, kept out */
 };
 
 typedef struct host_rpc_handoff_info	host_rpc_handoff_info_data_t;
