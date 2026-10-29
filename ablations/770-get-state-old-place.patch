@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #770
+Takes out: thread_get_state()'s reading of the frame where pcb->user says it is -- the reader is left at the old place, the top of the thread's kernel stack, which since #770 holds kernel frames and nothing of the user's
+Run: --entry 14 900 -smp 4
+Expect: <test_round_trip\+0x
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index e8e62874..4c277e18 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -598,7 +598,9 @@ act_machine_get_state(thread_act_t thr_act, thread_flavor_t flavor,
+ 	case x86_64_THREAD_STATE:
+ 		if (*count < x86_64_THREAD_STATE_COUNT)
+ 			return KERN_INVALID_ARGUMENT;
+-		thread_state_from_frame(pcb->user, pcb->fs_base, pcb->gs_base,
++		thread_state_from_frame((struct trap_frame *)	/* 770 ablation: the old place */
++					KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top),
++					pcb->fs_base, pcb->gs_base,
+ 					(struct x86_64_thread_state *) state);
+ 		*count = x86_64_THREAD_STATE_COUNT;
+ 		return KERN_SUCCESS;
