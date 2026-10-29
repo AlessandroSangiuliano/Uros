@@ -608,10 +608,13 @@ HEADER_COMMAS=${HEADER//[^,]/}
 row() {	# round entry accel smp opt result kind path-a-WRONG-line-names
 	local r=$1 e=$2 a=$3 n=$4 opt=$5 res=$6 kind=$7 named=$8
 	local rdir=$OUT/logs/r$r tag h f keep log mhz x line commas
-	# The name merge-test-x86_64.sh gives a boot's logs.  A WRONG line names
-	# its file, and that name wins over this one; a passing line names none,
-	# and a log missing under this name is said in the row, never guessed,
-	# and fails the job: the names have changed and the clock went unread.
+	# The name merge-test-x86_64.sh gives a boot's logs, its boot_name() --
+	# one boot's, at the count this script runs it at: its lists_cover(),
+	# which -L asks, refuses two lines with one name there (#776).  A WRONG
+	# line names its file, and that name wins over this one; a passing line
+	# names none, and a log missing under this name is said in the row,
+	# never guessed, and fails the job: the names have changed and the clock
+	# went unread.
 	# The -smp value's commas are underscores there, as in the merge test.
 	tag="e$e-$a${n//,/_}${opt:+-${opt##* }}"
 	h=$rdir/$tag.log

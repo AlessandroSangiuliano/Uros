@@ -36,26 +36,33 @@
 #
 # Usage:  scripts/merge-test-x86_64.sh [-a tcg|kvm|both] [-s SMP] [-o DIR] [-e "N ..."] [-G] [-L] [-P]
 #   -a  accelerator(s), default both     -s  processors, default 4
+#       (where two lines are then one boot -- -s 1 makes fourteen entries'
+#       line without a count their "- 1" line -- it is booted once, and said)
 #   -o  directory for the logs, default ./merge-test-logs, or beside the log
 #       UROS_X86_64_LOG names, as ablate.sh's Script: runs name each arm's (#591)
 #   -e  only these entries (to see one fail, or to rerun one); a merge runs them all
 #   -G  no gdb stub; by default every run has one (-s, port 1234), so a run cut
 #       short is walked by run-x86_64.sh before it is killed
-#   -L  only ask whether each grub.cfg entry is run or said not run, and say so:
-#       0 if each is, 1 if not.  ci/job.sh asks it before it builds (#755)
+#   -L  only ask whether each grub.cfg entry is run or said not run, and each
+#       line's boot has a name of its own at the count the list is written
+#       for, and say so: 0 if so, 1 if not.  ci/job.sh asks it before it
+#       builds (#755, #776)
 #   -P  only ask whether every patch of ablations/ still applies to this tree,
 #       and say so: 0 if each does, 1 if not (#769).  A whole run asks it too
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
 # default is tested the same way; its char build, which the entries marked @char
 # boot, is that build's path with -char after it (#765).  A run that refuses to
 # start -- a bad option, the stub's port taken, the lists and grub.cfg not
-# agreeing, the patches not asked -- exits 2, and otherwise the exit status is
+# agreeing, the patches not asked, two lines that are not one boot with one
+# name -- exits 2, and otherwise the exit status is
 # the number of entries judged wrong, and one more if a patch of ablations/ no
 # longer applies (0: every judged entry as it should be, every patch applying).
 
 set -u
 ACC=both
-SMP=4
+# The processor count ENTRIES is written for, and -s's default (#776).
+SMP_LISTED=4
+SMP=$SMP_LISTED
 OUT=./merge-test-logs
 # #755: run as a Script: of ablate.sh, which names the arm's own log in
 # UROS_X86_64_LOG (#591), the boots' logs go beside it, a directory an arm,
@@ -239,6 +246,48 @@ SKIPPED="
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
 "
 
+# A boot's name: what its two logs are called, and what ci/job.sh's row()
+# rebuilds out of its verdict line to find them.  No comma in it: an entry's
+# -smp value may be a whole topology (entry 14's 1,sockets=2,cores=64,
+# maxcpus=128), and ci/job.sh writes the name into a CSV whose columns commas
+# separate.
+boot_name() {	# entry accelerator -smp options-as-shown
+	echo "e$1-$2${3//,/_}${4:+-${4##* }}"
+}
+
+# #776: the boots a run makes at -smp $1 of the entries in $2 (" N ... ", or
+# empty for all), one in PLAN each: entry, verdict, options as the verdict
+# line shows them, and -smp, apart by a unit separator.  Every boot removes
+# the logs under its name before it starts (#694), so two boots under one
+# name left one boot's logs for two verdict lines, and a WRONG line could name
+# the log of a boot that passed.  A line whose name an earlier line has is not
+# planned: it goes in SAME when it is that line's boot -- the same verdict and
+# options at the same count, as fourteen entries' line without a count and
+# their "- 1" line are at -s 1 -- and in CLASH when it is not.
+plan_boots() {	# smp entries
+	local e v opt cpus n line key
+	local -A first=() named=()
+	PLAN=() SAME=() CLASH=()
+	while read -r e v opt cpus; do
+		[ -n "$e" ] || continue
+		[ -z "$2" ] || [[ "$2" == *" $e "* ]] || continue
+		line="$e $v${opt:+ $opt}${cpus:+ $cpus}"
+		[ "$opt" = "-" ] && opt=""
+		opt=${opt//_/ }
+		n=${cpus:-$1}
+		key=$(boot_name "$e" "" "$n" "$opt")
+		if [ -z "${first[$key]:-}" ]; then
+			first[$key]="$v|$opt|$n"
+			named[$key]=$line
+			PLAN+=("$e"$'\x1f'"$v"$'\x1f'"$opt"$'\x1f'"$n")
+		elif [ "${first[$key]}" = "$v|$opt|$n" ]; then
+			SAME+=("'$line' is the boot of '${named[$key]}' at -smp $n")
+		else
+			CLASH+=("'$line' and '${named[$key]}' are not one boot, and at -smp $n both would write their logs as $(boot_name "$e" "<accelerator>" "$n" "$opt")")
+		fi
+	done <<< "$ENTRIES"
+}
+
 # #755: the two lists and grub.cfg agree, or nothing runs.  Entry 49, x2APIC
 # mode left on with interrupts remapped (#659), went into grub.cfg on 11/10
 # and into neither list, and no merge and no campaign booted it until #755:
@@ -271,6 +320,14 @@ lists_cover() {
 	for e in $run $skip; do
 		[ "$e" -lt "$n" ] && continue
 		echo "merge-test: lists: entry $e is in a list, and grub.cfg has no entry $e: its $n entries are 0 to $((n - 1))" >&2
+		bad=1
+	done
+	# #776: and no two lines with one name at the count the list is written
+	# for, the one ci/job.sh boots it at: it counts a round as lines times
+	# accelerators, and a line booted once would leave the round short.
+	plan_boots "$SMP_LISTED" ""
+	for e in "${SAME[@]}" "${CLASH[@]}"; do
+		echo "merge-test: lists: $e -- at the count ENTRIES is written for, $SMP_LISTED, each line's boot needs a name of its own (#776)" >&2
 		bad=1
 	done
 	[ $bad = 0 ] &&
@@ -312,6 +369,11 @@ if [ $PATCHES_ONLY = 1 ]; then
 	exit $rc
 fi
 lists_cover || exit 2
+plan_boots "$SMP" "$ONLY"
+if [ ${#CLASH[@]} -gt 0 ]; then
+	printf 'merge-test: %s -- run them at another -s, or give one a last option of its own (#776)\n' "${CLASH[@]}" >&2
+	exit 2
+fi
 patches_apply
 ROTTEN=$?
 echo "$PATCHES_SAID"
@@ -628,12 +690,9 @@ done | grep -q yes; then
 fi
 echo "merge-test: tree $(git -C "$HERE" describe --always --dirty), build ${UROS_BUILD_DIR:-default}, accelerators: $ACCS, -smp $SMP${ONLY:+, only entries$ONLY}${STUB:+, gdb stub on every run}"
 echo "$SKIPPED" | sed '/^$/d; s/^/merge-test: not run -- /'
-while read -r e v opt cpus; do
-	[ -n "$e" ] || continue
-	[ -z "$ONLY" ] || [[ "$ONLY" == *" $e "* ]] || continue
-	[ "$opt" = "-" ] && opt=""
-	opt=${opt//_/ }
-	n=${cpus:-$SMP}
+[ ${#SAME[@]} -eq 0 ] || printf 'merge-test: booted once -- %s (#776)\n' "${SAME[@]}"
+for boot in "${PLAN[@]}"; do
+	IFS=$'\x1f' read -r e v opt n <<< "$boot"
 	# #765: @char is the merge test's, not run-x86_64.sh's: it picks the
 	# build.  The options are shown and named with it -- ci/job.sh finds a
 	# boot's log by the name it rebuilds from the verdict line's options.
@@ -647,10 +706,7 @@ while read -r e v opt cpus; do
 		budget=1200
 		k=""
 		[ $a = kvm ] && { budget=600; k="--kvm"; }
-		# No comma in a log's name: an entry's -smp value may be a whole
-		# topology (entry 14's 1,sockets=2,cores=64,maxcpus=128), and
-		# ci/job.sh writes the name into a CSV whose columns commas separate.
-		tag="e$e-$a${n//,/_}${shown:+-${shown##* }}"
+		tag=$(boot_name "$e" "$a" "$n" "$shown")
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		# #694: a boot's logs go before it.  run-x86_64.sh starts the full
@@ -733,7 +789,7 @@ while read -r e v opt cpus; do
 			esac
 		fi
 	done
-done <<< "$ENTRIES"
+done
 # ⚠️ Before the total and in a shape of its own: ci/job.sh reads the run's end
 # as exactly "merge-test: N wrong".
 echo "merge-test: $CAMEBACK where the debug registers came back (#742)${CAMEBACK_WHERE:+:${CAMEBACK_WHERE#,}}"
