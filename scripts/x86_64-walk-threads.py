@@ -23,12 +23,16 @@
 #    list_head convention) reads plausible garbage -- 0xf000ff53f000ff53 is
 #    the BIOS IVT.
 #
-# 2. act->mact.pcb->user is the frame of the last INTERRUPT or trap, not of
-#    the syscall the thread is blocked in.  Two threads blocked in mach_msg
-#    and a futex both showed a rip inside a function neither had called: an
-#    old interrupt frame.  The frame of a syscall is at the top of the
-#    thread's kernel stack: (pcb->ctx.kernel_stack_top & ~15) - sizeof
-#    (struct trap_frame); rip at +136, rsp at +160.
+# 2. Read the frame an entry from ring 3 WRITES, not one a pointer names.
+#    act->mact.pcb->user once named the last interrupt's frame: two threads
+#    blocked in mach_msg and a futex both showed a rip inside a function
+#    neither had called.  The frame the entries write is where the switch
+#    points kernel_rsp, pcb->ctx.user_frame: since #770 that is the frame in
+#    the pcb itself, and before #770 it was the top of the thread's kernel
+#    stack, (pcb->ctx.kernel_stack_top & ~15) - sizeof (struct trap_frame),
+#    which on a newer kernel holds C frames.  A kernel without user_frame
+#    gets the old address.  rip at +136, rsp at +160.  The kernel stack's
+#    words are scanned down from its top, which since #770 is where C begins.
 #
 # 3. User memory is not readable with `x' while the machine idles on the
 #    kernel's CR3.  It is read with a page walk from the task's own root
@@ -144,8 +148,12 @@ while q != head and nt < 64:
         try:
             st = int(th["state"])
             flags = "".join(k for k, b in (("W", 1), ("S", 2), ("R", 4), ("U", 8), ("I", 0x80)) if st & b)
-            kst = int(A["mact"]["pcb"]["ctx"]["kernel_stack_top"])
-            fr = (kst & ~15) - 176
+            ctx = A["mact"]["pcb"]["ctx"]
+            kst = int(ctx["kernel_stack_top"]) & ~15
+            try:
+                fr = int(ctx["user_frame"])          # #770: in the pcb
+            except gdb.error:
+                fr = kst - 176                       # before #770: atop the stack
             rip = int(ev("*(unsigned long *)%d" % (fr + 136)))
             rsp = int(ev("*(unsigned long *)%d" % (fr + 160)))
             print("  act %#x th %#x state=%#x[%s] wait_event=%s ith_state=%#x mq=%#x futex=%#x "
@@ -154,7 +162,7 @@ while q != head and nt < 64:
                       int(th["saved"]["receive"]["mqueue"]), int(th["futex_uaddr"]), int(th["timer"]["set"]),
                       int(th["user_timer"]["low_bits"]), int(th["system_timer"]["low_bits"]),
                       ksym(th["continuation"]) if int(th["continuation"]) else "0", rip, symb(rip), rsp))
-            for k in range(fr - 8 * 120, fr, 8):
+            for k in range(kst - 8 * 120, kst, 8):
                 s = ksym(int(ev("*(unsigned long *)%d" % k)))
                 if "+" in s and "usimple_lock" not in s:
                     print("      k %s" % s)
