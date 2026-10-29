@@ -301,6 +301,20 @@ extern int		thread_bind_here(void);
 extern unsigned int	sched_bound_displaced;
 extern int		sched_bound_displaced_slot;
 
+#if	NCPUS > 1
+/*
+ * #356/#446: the hand-off on block, -X.  sched_rpc_handoff says whether it is
+ * on, and sched_rpc_handoff_counts() what it did: the woken threads queued on
+ * their waker's processor, of the waker's task and of another.
+ */
+#define	SCHED_RPC_HANDOFF_OFF		0
+#define	SCHED_RPC_HANDOFF_SAME_TASK	1	/* -X: #356's fence, one task */
+extern int		sched_rpc_handoff;
+extern void		sched_rpc_handoff_counts(
+				unsigned long	*same_task,
+				unsigned long	*other_task);
+#endif	/* NCPUS > 1 */
+
 /* Select a thread to run on a particular processor */
 extern thread_t		thread_select(
 				processor_t	myprocessor);

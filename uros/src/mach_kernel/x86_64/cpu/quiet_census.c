@@ -693,6 +693,28 @@ quiet_stacks_so_far(void)
 	       " -- no kernel stack outlived its thread");
 }
 
+/*
+ * #446: what -X did, said by every boot that has it on -- at zero too, so that
+ * a boot whose hand-off never happened is told from one that was not asked.
+ * -X is same-task only: a thread of another task among them is #356's fence
+ * leaking, and is said as WRONG.  With each report as the machine goes idle,
+ * for the reason quiet_stacks_so_far() gives.
+ */
+static void
+quiet_handoff_so_far(void)
+{
+	unsigned long	same, other;
+
+	if (sched_rpc_handoff == SCHED_RPC_HANDOFF_OFF)
+		return;
+
+	sched_rpc_handoff_counts(&same, &other);
+	printf("quiet_census: -X has queued %lu woken thread(s) on their "
+	       "waker's processor, %lu of them of another task (#446)%s\n",
+	       same + other, other,
+	       other != 0 ? " -- WRONG: -X is same-task only" : "");
+}
+
 void
 quiet_census_pass(int mycpu)
 {
@@ -749,6 +771,7 @@ quiet_census_pass(int mycpu)
 		       quiet_resets, quiet_all_passes);
 		cons_ring_so_far("quiet_census: ");
 		quiet_stacks_so_far();
+		quiet_handoff_so_far();
 	}
 
 	if (quiet_passes < QUIET_PASSES)
@@ -799,6 +822,8 @@ quiet_census_pass(int mycpu)
 		       "on a run queue not their processor's, the last bound "
 		       "to processor %d -- WRONG (#615)\n",
 		       sched_bound_displaced, sched_bound_displaced_slot);
+
+	quiet_handoff_so_far();
 
 	(void) census_threads();
 	pset_unlock(&default_pset);

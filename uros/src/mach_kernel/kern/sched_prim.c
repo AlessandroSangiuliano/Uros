@@ -2764,6 +2764,36 @@ run_queue_enqueue(
  * the exact #337 trap (see halt_in_debugger in model_dep.c). */
 int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
 extern int	real_ncpus;
+
+/*
+ * #446: what -X did.  Each processor counts the woken threads it queued on
+ * itself, split by whether the thread was of its waker's task, and the census
+ * says the sums (x86_64/cpu/quiet_census.c).  A line of its own for each
+ * processor because this is the hand-off's own path, taken on every RPC while
+ * -X is on: one shared counter would be a cache line passed between the very
+ * processors whose placement is being measured.  Each counter has one writer,
+ * its processor, so none is lost; a sum read while they move is a little
+ * behind, which a count of what happened can afford.
+ */
+static struct sched_handoff_count {
+	unsigned long	same_task;
+	unsigned long	other_task;
+} __attribute__((aligned(64))) sched_handoff_count[NCPUS];
+
+void
+sched_rpc_handoff_counts(
+	unsigned long	*same_task,
+	unsigned long	*other_task)
+{
+	int	cpu;
+
+	*same_task = 0;
+	*other_task = 0;
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		*same_task += sched_handoff_count[cpu].same_task;
+		*other_task += sched_handoff_count[cpu].other_task;
+	}
+}
 #endif	/* NCPUS > 1 */
 
 /*
@@ -2881,6 +2911,10 @@ thread_setrun(
 #if	S319_INSTRUMENT
 				s319[cpu_number()].localhoff++;
 #endif
+				if (self->top_act->task == th->top_act->task)
+					sched_handoff_count[cpu_number()].same_task++;
+				else
+					sched_handoff_count[cpu_number()].other_task++;
 				(void) run_queue_enqueue(
 					&current_processor()->runq, th, tail);
 				mp_enable_preemption();
