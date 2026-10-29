@@ -324,3 +324,22 @@ user_probe_compat:
 user_probe_compat_target:
 	.long	0
 	.word	USER_CS32_SELECTOR | USER_RPL
+
+/*
+ * And a sixth (#781): may it reach a code segment through the LDT?
+ *
+ * The same far jump, through 0x1f -- index 3 of the LDT, ring 3.  With the
+ * LDTR null the jump is refused before any memory is read: a general
+ * protection fault here, error code 0x1c, the selector without its ring bits.
+ * With the LDTR as reset leaves it, the processor reads the descriptor at
+ * linear 0x18 of this space, where nothing is mapped, and the page fault
+ * names 0x18 -- which in a task's own space would have been the task's page,
+ * holding whatever descriptor the task chose.
+ */
+	.globl	user_probe_ldt
+user_probe_ldt:
+	ljmpl	*user_probe_ldt_target(%rip)
+	hlt				/* reached by neither outcome */
+user_probe_ldt_target:
+	.long	0
+	.word	0x1f			/* LDT index 3, TI, ring 3 */

@@ -158,6 +158,13 @@ extern char user_probe_compat[];
 	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_compat	\
 					 - __user_probe_start))
 
+/* #781: the far jump through the LDT, which must fault before reading it. */
+extern char user_probe_ldt[];
+
+#define USER_PROBE_LDT_VA					\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_ldt	\
+					 - __user_probe_start))
+
 /*
  * Where a fault from the probe comes back to.  Declared here only so the
  * kernel can recognise it in a report; the arming is done by the entry

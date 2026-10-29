@@ -1897,7 +1897,8 @@ static void cr_put_diff(const char *reg, uint64_t diff, uint64_t boot,
 }
 
 /*
- * 🔴 THE SYSTEM-CALL REGISTERS, AS EVERY PROCESSOR HOLDS THEM (#781).
+ * 🔴 THE SYSTEM-CALL REGISTERS AND THE LDT, AS EVERY PROCESSOR HOLDS THEM
+ * (#781).
  *
  * syscall_init() runs on each processor and writes seven registers there --
  * STAR, LSTAR and FMASK, which the syscall path uses, and CSTAR and the three
@@ -1906,23 +1907,64 @@ static void cr_put_diff(const char *reg, uint64_t diff, uint64_t boot,
  * asked for all seven and they are compared with what syscall_msrs_wanted()
  * says it writes: the writer's own description, not a copy of it.
  *
+ * desc_activate() loads a null LDTR on each processor, and that one is asked
+ * with a fault, because no register tells it apart from the LDT reset
+ * leaves (sc_read_here()).
+ *
  * CSTAR and IA32_SYSENTER_CS are printed as the boot processor read them.  A
  * line that said "as written" without the values would be the census
  * agreeing with itself.
  */
 struct sc_seen {
 	struct syscall_msrs	m;
+	uint64_t		ldt_vector, ldt_error;	/* ~0: the load went through */
 	int			answered;
 };
 
 static struct sc_seen sc_seen[SMP_MAX_CPUS];
+static uint64_t sc_probe_root;	/* a space with nothing in the lower half */
+
+/*
+ * The selector the census loads: index 3 of the LDT, TI set, ring 0.  Its
+ * error code is itself, 0x1c, since the ring bits are not part of one.
+ */
+#define SC_LDT_SELECTOR		0x1c
 
 static void sc_read_here(void *arg)
 {
 	struct sc_seen *s = arg;
+	uint64_t own = read_cr3();
 
 	syscall_msrs_read(&s->m);
+
+	/*
+	 * And the LDT, which no register can answer for: sldt reads selector 0
+	 * for the null LDTR desc_activate() loads and for the one reset leaves,
+	 * whose hidden part is present with base 0.  So a load is tried through
+	 * it, from a space that maps nothing in the lower half: through a null
+	 * LDTR it is a general protection fault naming the selector, before any
+	 * memory is read; through the reset one, a page fault at linear 0x18.
+	 */
+	write_cr3(sc_probe_root);
+	trap_expect_either(T_GENERAL_PROTECTION, T_PAGE_FAULT,
+			   (uint64_t)(uintptr_t)trap_probe_faulted);
+	if (trap_probe_ldt(SC_LDT_SELECTOR)) {
+		s->ldt_vector = trap_last()->vector;
+		s->ldt_error = trap_last()->error;
+	} else {
+		s->ldt_vector = ~0UL;
+		s->ldt_error = 0;
+	}
+	trap_expect_cancel();
+	write_cr3(own);
+
 	s->answered = 1;
+}
+
+static int sc_ldt_refused(const struct sc_seen *s)
+{
+	return s->ldt_vector == T_GENERAL_PROTECTION
+	    && s->ldt_error == SC_LDT_SELECTOR;
 }
 
 static int sc_same(const struct syscall_msrs *a, const struct syscall_msrs *b)
@@ -1939,7 +1981,14 @@ static void syscall_msrs_selftest(void)
 	unsigned self = (unsigned) cpu_number();
 	struct syscall_msrs want;
 	unsigned asked = 0, differ = 0;
+	pmap_t scratch = pmap_create(0);
 
+	if (scratch == PMAP_NULL) {
+		kputs("UrMach x86-64: no space for the system-call census, "
+		      "NOT ASKED (#781)\r\n");
+		return;
+	}
+	sc_probe_root = scratch->root_pa;
 	syscall_msrs_wanted(&want);
 
 	for (unsigned cpu = 0; cpu < smp_cpu_count(); cpu++) {
@@ -1953,21 +2002,32 @@ static void syscall_msrs_selftest(void)
 			ipi_call_mask(1ULL << cpu, sc_read_here, s);
 		asked++;
 
-		if (s->answered && sc_same(&s->m, &want))
+		if (s->answered && sc_same(&s->m, &want) && sc_ldt_refused(s))
 			continue;
 		differ++;
 		kputs("UrMach x86-64: processor ");
 		kputdec(cpu);
-		kputs(s->answered ? ": its system-call registers are not what "
-				    "syscall_init() writes: CSTAR "
-				  : ": did not answer the census, CSTAR ");
-		kputhex64(s->m.cstar);
-		kputs(", SYSENTER_CS ");
-		kputhex64(s->m.sysenter_cs);
-		kputs(", LSTAR ");
-		kputhex64(s->m.lstar);
+		if (!s->answered)
+			kputs(": did not answer the census");
+		if (s->answered && !sc_same(&s->m, &want)) {
+			kputs(": its system-call registers are not what "
+			      "syscall_init() writes: CSTAR ");
+			kputhex64(s->m.cstar);
+			kputs(", SYSENTER_CS ");
+			kputhex64(s->m.sysenter_cs);
+			kputs(", LSTAR ");
+			kputhex64(s->m.lstar);
+		}
+		if (s->answered && !sc_ldt_refused(s)) {
+			kputs(": a load through the LDT gave ");
+			kputs(s->ldt_vector == ~0UL ? "no fault"
+						    : trap_name(s->ldt_vector));
+			kputs(", error ");
+			kputhex64(s->ldt_error);
+		}
 		kputs(" — WRONG (#781)\r\n");
 	}
+	pmap_destroy(scratch);
 
 	kputs("UrMach x86-64: CSTAR ");
 	kputhex64(sc_seen[self].m.cstar);
@@ -1975,10 +2035,17 @@ static void syscall_msrs_selftest(void)
 	      ? " (syscall_compat_entry)" : " (not syscall_compat_entry)");
 	kputs(", SYSENTER_CS ");
 	kputhex64(sc_seen[self].m.sysenter_cs);
-	kputs(", with STAR, LSTAR, FMASK and SYSENTER's ESP and EIP, on ");
+	kputs(", with STAR, LSTAR, FMASK and SYSENTER's ESP and EIP, and a "
+	      "load through the LDT refused with ");
+	kputs(sc_seen[self].ldt_vector == ~0UL
+	      ? "no fault" : trap_name(sc_seen[self].ldt_vector));
+	kputs(" ");
+	kputhex64(sc_seen[self].ldt_error);
+	kputs(", on ");
 	kputdec(asked);
 	kputs(differ == 0
-	      ? " processors: each holds what syscall_init() writes\r\n"
+	      ? " processors: each holds what syscall_init() writes, and none "
+		"has an LDT\r\n"
 	      : " processors: not on every one, WRONG (#781)\r\n");
 }
 
@@ -4076,7 +4143,7 @@ static void ring3_selftest(void)
 	uint64_t code_frame = boot_frame_alloc();
 	uint64_t data_frame = boot_frame_alloc();
 	const struct trap_record *t;
-	struct trap_record first, bases, compat;
+	struct trap_record first, bases, compat, ldt;
 	struct trap_paranoid_record window;
 	uint64_t witness, answer, wide, kernel_gs;
 	uint64_t dr7_after, dr_after;	/* #742: what the window test left */
@@ -4158,6 +4225,8 @@ static void ring3_selftest(void)
 	 */
 	user_probe_enter(USER_PROBE_COMPAT_VA, USER_PROBE_STACK_TOP);
 	compat = *trap_last();
+	user_probe_enter(USER_PROBE_LDT_VA, USER_PROBE_STACK_TOP);
+	ldt = *trap_last();
 
 	/*
 	 * And a third time, to be caught in the window itself (#440).
@@ -4516,6 +4585,29 @@ static void ring3_selftest(void)
 	      && compat.rip == USER_PROBE_COMPAT_VA
 	      ? " — refused where it stands: ring 3 has one code segment\r\n"
 	      : " — WRONG, the jump was not refused where it was made (#781)\r\n");
+
+	/*
+	 * And the other table (#781): through 0x1f, the LDT's index 3.  With
+	 * the LDTR null the jump is a general protection fault naming 0x1c,
+	 * before any memory is read; with the LDTR reset left, a page fault at
+	 * linear 0x18, where the descriptor would have been read from.
+	 */
+	kputs("UrMach x86-64: a far jump through the LDT (0x1f) in ring 3 -> ");
+	kputs(trap_name(ldt.vector));
+	kputs(", error ");
+	kputhex64(ldt.error);
+	if (ldt.vector == T_PAGE_FAULT) {
+		kputs(" at ");
+		kputhex64(ldt.cr2);
+	}
+	kputs(", rip ");
+	kputhex64(ldt.rip);
+	kputs(ldt.caught && ldt.vector == T_GENERAL_PROTECTION
+	      && ldt.error == 0x1c
+	      && ldt.cs == USER_CS_RPL3
+	      && ldt.rip == USER_PROBE_LDT_VA
+	      ? " — refused before the table was read: there is no LDT\r\n"
+	      : " — WRONG, the processor walked an LDT (#781)\r\n");
 
 	/*
 	 * And the window as ring 3 actually opens it.
