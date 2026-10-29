@@ -1,0 +1,36 @@
+Kind: ablation
+Issue: #775
+Over: 775-widen-handover-announcement.patch
+Takes out: the printf_lock round the handover's announcement -- cons_port_release() says it with nothing held, as before #775. With the widen, the announcement is open for a long moment in the middle of the phrase the char verdict asks for, and another processor's line lands inside it.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 14
+Script: -s
+Script: 4
+Script: -G
+Expect: merge-test: entry 14 kvm -smp 4 \(@char\) -- WRONG \(char\)
+Note: under KVM, asked of the merge test with -a kvm.
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index 5085d24b..92dab3a3 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -984,7 +984,6 @@ unsigned int cons_port_release(void)
+ 	 * the window the lock holds is not the whole ring, as the note under it
+ 	 * asks.
+ 	 */
+-	simple_lock(&printf_lock);
+ 	cons_printf("UrMach x86-64: console: COM1 handed over to its ");
+ 	{	/* 775-widen: the line is open for a long moment, mid-phrase */
+ 		volatile unsigned long w;
+@@ -995,7 +994,6 @@ unsigned int cons_port_release(void)
+ 	cons_printf("driver; "
+ 		    "this kernel's output goes to klog and the framebuffer "
+ 		    "from here (#497)\n");
+-	simple_unlock(&printf_lock);
+ 
+ 	cons_flush();
+ 

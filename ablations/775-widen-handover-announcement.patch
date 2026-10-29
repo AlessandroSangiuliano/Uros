@@ -1,0 +1,34 @@
+Kind: widen
+Issue: #775
+Holds open: the announcement of COM1's handover (cons_port_release()) said in two halves, with a long pause between them in the middle of the phrase the char verdict asks for ("COM1 handed over to its" | "driver; ..."). With the announcement under printf_lock the other processors' lines wait for the second half; with it out of the lock they land inside it, as one did in the campaign of 708734c4.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -e
+Script: 14
+Script: -s
+Script: 4
+Script: -G
+Note: the boots are under KVM, asked of the merge test with -a kvm, as 765's are; Accel: tcg is only what ablate.sh writes on the rows.
+
+diff --git a/uros/src/mach_kernel/x86_64/ddb/cons.c b/uros/src/mach_kernel/x86_64/ddb/cons.c
+index c75f335a..5085d24b 100644
+--- a/uros/src/mach_kernel/x86_64/ddb/cons.c
++++ b/uros/src/mach_kernel/x86_64/ddb/cons.c
+@@ -985,7 +985,14 @@ unsigned int cons_port_release(void)
+ 	 * asks.
+ 	 */
+ 	simple_lock(&printf_lock);
+-	cons_printf("UrMach x86-64: console: COM1 handed over to its driver; "
++	cons_printf("UrMach x86-64: console: COM1 handed over to its ");
++	{	/* 775-widen: the line is open for a long moment, mid-phrase */
++		volatile unsigned long w;
++
++		for (w = 0; w < 5000000UL; w++)
++			cpu_pause();
++	}
++	cons_printf("driver; "
+ 		    "this kernel's output goes to klog and the framebuffer "
+ 		    "from here (#497)\n");
+ 	simple_unlock(&printf_lock);
