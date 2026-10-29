@@ -336,10 +336,22 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
+	/*
+	 * 🔑 The frame in the pcb, the whole stack for the kernel (#770).  The
+	 * processor pushes from the frame's end, after aligning it down to
+	 * sixteen: an end that is not aligned would put the frame eight bytes
+	 * below the one pcb->user names, so it is refused here rather than
+	 * trusted to the zone's carving.
+	 */
+	if (((uintptr_t) (&pcb->user_frame + 1)) & 15)
+		panic("thread: the pcb's frame ends at %p, not on sixteen bytes, "
+		      "where the processor pushes (#770)",
+		      (void *) (&pcb->user_frame + 1));
+
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
-		     fpu_area, 0);
+		     fpu_area, (uint64_t) (uintptr_t) &pcb->user_frame);
 
 	/*
 	 * 🔴 AND WHETHER THE SWITCH HAS TO CARRY ITS VECTOR STATE (#561).
@@ -520,7 +532,7 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
-		     pcb->ctx.fpu_area, 0);
+		     pcb->ctx.fpu_area, (uint64_t) (uintptr_t) &pcb->user_frame);
 	pcb->ctx.fpu_switch = keep_fpu_switch;
 	(void) continuation;
 }

@@ -1569,11 +1569,12 @@ uint64_t trap_smap_after_last(void)
  * after it that the fault path still needs.
  *
  * ⚠️ The frame this was called with IS the thread's saved user frame -- a trap
- * from ring 3 lands at KERNEL_STACK_USER_FRAME(top), which is where pcb->user
- * points -- so the state the handler reads is the state that faulted, and the
- * state it writes back is what resumes.  That is not a coincidence to rely on
- * quietly: trap.h derives both from one expression precisely so there is one
- * claim about those bytes.  A vector with an interrupt stack of its own lands
+ * from ring 3 lands in the frame context_init() decided, in the thread's pcb
+ * (#770), whose end the switch gives the processor as rsp0 and whose address
+ * pcb->user holds -- so the state the handler reads is the state that
+ * faulted, and the state it writes back is what resumes.  That is not a
+ * coincidence to rely on quietly: both come from one field of the context,
+ * precisely so there is one claim about those bytes.  A vector with an interrupt stack of its own lands
  * elsewhere, and #DB, the one of them raised from here, is moved by its stub
  * (#650); user_frame_is_saved() below stops the machine rather than hand a
  * handler a frame that is not the thread's.

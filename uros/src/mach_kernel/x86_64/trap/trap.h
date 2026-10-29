@@ -151,6 +151,10 @@ struct trap_frame {
  * act_machine_set_state() writes the first one for a thread that has never
  * trapped at the same address for the same reason.
  *
+ * ⚠️ Since #770 that is the layout of a context with no pcb behind it -- the
+ * boot path's, and the processors' before their first thread.  A thread's
+ * frame is in its pcb, and its stack begins at the top (context_init()).
+ *
  * 🔥 Which means kernel code on that stack must start BELOW it, and it did
  * not.  context_init() started a new thread at the very top, so the trampoline,
  * thread_continue and everything they call ran through the bytes reserved for
