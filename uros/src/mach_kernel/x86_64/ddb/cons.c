@@ -975,9 +975,20 @@ unsigned int cons_port_release(void)
 	 * to the framebuffer and the klog ring -- to everywhere except the
 	 * reader it is addressed to.
 	 */
+	/*
+	 * ⚠️ UNDER printf_lock, LIKE EVERY LINE THIS KERNEL SAYS (#775).  The
+	 * announcement went into the ring with nothing held, and a line another
+	 * processor was saying at the same moment came out inside it, byte for
+	 * byte: `COM1 handed over to its dr i swveep task_tereminate ...'.  Only
+	 * the saying is under the lock -- the flush below stays outside it, so
+	 * the window the lock holds is not the whole ring, as the note under it
+	 * asks.
+	 */
+	simple_lock(&printf_lock);
 	cons_printf("UrMach x86-64: console: COM1 handed over to its driver; "
 		    "this kernel's output goes to klog and the framebuffer "
 		    "from here (#497)\n");
+	simple_unlock(&printf_lock);
 
 	cons_flush();
 
