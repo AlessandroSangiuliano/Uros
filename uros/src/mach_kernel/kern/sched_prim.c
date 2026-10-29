@@ -2748,9 +2748,9 @@ run_queue_enqueue(
 /*
  * #356: run-time gate for the synchronous-RPC hand-off-on-block placement
  * (see the hint consumption in thread_setrun).  Off by default, for
- * same-binary A/B on hardware: -X turns it on for a thread of the waker's
- * task (-P, its old name, on i386), and on x86-64 handoff_any=1 widens it to
- * a thread of any task (#446).
+ * same-binary A/B on hardware: -X turns it on -- on i386, where -P is its old
+ * name, for a thread of the waker's task; on x86-64 for a thread of any task
+ * (#446).
  *
  * The hand-off also stays dormant until EVERY CPU has passed cpu_up()
  * (machine_info.avail_cpus reaches real_ncpus -- guaranteed on any boot
@@ -2894,12 +2894,12 @@ thread_setrun(
 	     * the one CPU where its data is warm.  One-shot: consumed by the
 	     * first wakeup of the send.  Runtime-gated by -X (-P on i386).
 	     *
-	     * Same-task only unless handoff_any=1 widens it (#446).  The fence
-	     * was put up on i386, where a switch between tasks on one CPU
-	     * reloads cr3 and throws the whole TLB away, and the split was
-	     * measured cheaper.  With PCID (#412) the switch keeps the TLB;
-	     * whether the hand-off is then worth having across tasks is what
-	     * #446 measures, the arms a boot argument apart.
+	     * Same-task only on i386.  The fence was put up there, where a
+	     * switch between tasks on one CPU reloads cr3 and throws the whole
+	     * TLB away, and the split was measured cheaper.  On x86-64 the
+	     * hand-off is cheaper across tasks too, with PCID and without
+	     * (#446, measured on 29/10; x86_64/cpu/startup.c has the numbers),
+	     * so -X there reaches a thread of any task.
 	     */
 	    if (sched_rpc_handoff &&
 		machine_info.avail_cpus >= real_ncpus) {

@@ -142,15 +142,17 @@ machine_init(void)
 	 * i386 learns -X too, keeping -P as its old name, so the experiment has
 	 * one name on both targets rather than two.
 	 *
-	 * 🔑 handoff_any=1 widens it to a thread of any task (#446).  -X alone
-	 * stops at the waker's task, a fence #356 put up for i386, where a
-	 * switch between tasks on one processor reloads cr3 and throws the whole
-	 * TLB away.  With PCID (#412) the switch keeps the TLB, and whether the
-	 * hand-off is then worth having across tasks is what #446 measures, on
-	 * one image, the arms a boot argument apart.  A word and not a letter,
-	 * for the reason above.  Given without -X it widens nothing, and says
-	 * so: an arm that is not the one it claims to be would be measured as
-	 * that one.
+	 * 🔑 FOR A THREAD OF ANY TASK (#446).  #356 stopped it at the waker's
+	 * task, a fence put up on i386, where a switch between tasks on one
+	 * processor reloads cr3 and throws the whole TLB away, and the split was
+	 * measured cheaper there.  Here it is not, with PCID or without.  On
+	 * omen's metal (29/10, hwp_epp=0, six boots an arm, the arms one image a
+	 * boot argument apart) an inter-task round trip handed off was 23-35%
+	 * cheaper than split, and 19-31% with -n; on OMEGA under KVM, 43-51% and
+	 * 37-45%.  The spread across draws went with it, the placement lottery
+	 * #446 was filed for: every draw in one peak, below the fastest of the
+	 * split's.  The fence stays on i386, where its measurement was taken;
+	 * here ablations/446-fence-back.patch is how it comes back.
 	 *
 	 * ⚠️ Read once, here, and not at the call sites: the scheduler reads it
 	 * inside thread_setrun(), and asking the command line there would scan
@@ -159,30 +161,11 @@ machine_init(void)
 	 * when the answer is written down.
 	 */
 	{
-		uint64_t	any = 0;
-		int		r;
-
 		sched_rpc_handoff = boot_flag('X') ?
-		    SCHED_RPC_HANDOFF_SAME_TASK : SCHED_RPC_HANDOFF_OFF;
-		r = boot_value("handoff_any", &any);
-		if (r == 1 && any == 1 &&
-		    sched_rpc_handoff == SCHED_RPC_HANDOFF_SAME_TASK)
-			sched_rpc_handoff = SCHED_RPC_HANDOFF_ANY_TASK;
-
-		if (sched_rpc_handoff == SCHED_RPC_HANDOFF_SAME_TASK)
+		    SCHED_RPC_HANDOFF_ANY_TASK : SCHED_RPC_HANDOFF_OFF;
+		if (sched_rpc_handoff != SCHED_RPC_HANDOFF_OFF)
 			printf("sched: -X, the #356 synchronous-RPC hand-off "
-			       "on block is ON (same-task only)\n");
-		else if (sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK)
-			printf("sched: -X, the #356 synchronous-RPC hand-off "
-			       "on block is ON, for a thread of any task "
-			       "(handoff_any=1, #446)\n");
-		if (r == 1 && any == 1 &&
-		    sched_rpc_handoff == SCHED_RPC_HANDOFF_OFF)
-			printf("sched: handoff_any=1 is ignored: it widens -X, "
-			       "and -X is off (#446)\n");
-		else if (r == -1 || (r == 1 && any > 1))
-			printf("sched: handoff_any= is ignored: its value is "
-			       "not 0 or 1 (#446)\n");
+			       "on block is ON, for a thread of any task (#446)\n");
 	}
 
 	/*
