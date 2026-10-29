@@ -52,14 +52,22 @@
  *
  * The gap at USER_CS32_SELECTOR is the arithmetic's, not ours: the 64-bit
  * return skips it, and only the compatibility-mode form of SYSRET would load
- * it.  Nothing emits that form yet.  It holds a correct 32-bit user code
- * descriptor rather than a null one, because a null there would turn the day
- * someone adds a 32-bit userland into a fault with no obvious cause.
+ * it.  Nothing emits that form.
+ *
+ * 🔴 And the slot is EMPTY (#781).  It held a correct 32-bit user code
+ * descriptor, so that a 32-bit userland would find it ready one day -- and a
+ * descriptor ring 3 can load does not wait for anyone.  A far jump through
+ * memory to 0x1b is legal at CPL 3, and it put any program in compatibility
+ * mode, where nothing in this port goes: a trap there saved a cs that
+ * act_user_frame() panics on, and on AMD a SYSCALL went to CSTAR.  So a far
+ * transfer to 0x1b is a general protection fault in ring 3, naming 0x18, and
+ * the day there is a 32-bit userland the descriptor comes back with
+ * everything else that mode needs, as one change.
  */
 #define KERNEL_CS_SELECTOR	0x08
 #define KERNEL_DS_SELECTOR	0x10
 
-#define USER_CS32_SELECTOR	0x18	/* compatibility mode; unused so far  */
+#define USER_CS32_SELECTOR	0x18	/* SYSRET's base; an empty slot (#781) */
 #define USER_DS_SELECTOR	0x20	/* = base + 8,  loaded into SS        */
 #define USER_CS_SELECTOR	0x28	/* = base + 16, loaded into CS        */
 
