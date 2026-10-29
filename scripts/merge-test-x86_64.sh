@@ -54,9 +54,11 @@
 # boot, is that build's path with -char after it (#765).  A run that refuses to
 # start -- a bad option, the stub's port taken, the lists and grub.cfg not
 # agreeing, the patches not asked, two lines that are not one boot with one
-# name -- exits 2, and otherwise the exit status is
-# the number of entries judged wrong, and one more if a patch of ablations/ no
-# longer applies (0: every judged entry as it should be, every patch applying).
+# name -- exits 2; otherwise it exits 1 if an entry was judged wrong or a patch
+# of ablations/ no longer applies, and 0 if every judged entry is as it should
+# be and every patch applies.  How many were wrong is the last line's, "N
+# wrong": a count as the status said 2 and 3 as well, which ablate.sh reads as
+# a run that did not start (#782).
 
 set -u
 ACC=both
@@ -799,4 +801,6 @@ echo "merge-test: $UNASKED not asked${UNASKED_WHERE:+:${UNASKED_WHERE#,}}"
 # patches itself.
 echo "$PATCHES_SAID"
 echo "merge-test: $WRONG wrong"
-exit $((WRONG + ROTTEN))
+# #782: whether, not how many -- see the header.
+[ $((WRONG + ROTTEN)) -eq 0 ] || exit 1
+exit 0
