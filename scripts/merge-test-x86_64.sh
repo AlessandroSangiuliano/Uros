@@ -43,8 +43,10 @@
 #   -e  only these entries (to see one fail, or to rerun one); a merge runs them all
 #   -G  no gdb stub; by default every run has one (-s, port 1234), so a run cut
 #       short is walked by run-x86_64.sh before it is killed
-#   -L  only ask whether each grub.cfg entry is run or said not run, and say so:
-#       0 if each is, 1 if not.  ci/job.sh asks it before it builds (#755)
+#   -L  only ask whether each grub.cfg entry is run or said not run, and each
+#       line's boot has a name of its own at the count the list is written
+#       for, and say so: 0 if so, 1 if not.  ci/job.sh asks it before it
+#       builds (#755, #776)
 #   -P  only ask whether every patch of ablations/ still applies to this tree,
 #       and say so: 0 if each does, 1 if not (#769).  A whole run asks it too
 # UROS_BUILD_DIR is passed through to run-x86_64.sh, so a build other than the
@@ -58,7 +60,9 @@
 
 set -u
 ACC=both
-SMP=4
+# The processor count ENTRIES is written for, and -s's default (#776).
+SMP_LISTED=4
+SMP=$SMP_LISTED
 OUT=./merge-test-logs
 # #755: run as a Script: of ablate.sh, which names the arm's own log in
 # UROS_X86_64_LOG (#591), the boots' logs go beside it, a directory an arm,
@@ -316,6 +320,14 @@ lists_cover() {
 	for e in $run $skip; do
 		[ "$e" -lt "$n" ] && continue
 		echo "merge-test: lists: entry $e is in a list, and grub.cfg has no entry $e: its $n entries are 0 to $((n - 1))" >&2
+		bad=1
+	done
+	# #776: and no two lines with one name at the count the list is written
+	# for, the one ci/job.sh boots it at: it counts a round as lines times
+	# accelerators, and a line booted once would leave the round short.
+	plan_boots "$SMP_LISTED" ""
+	for e in "${SAME[@]}" "${CLASH[@]}"; do
+		echo "merge-test: lists: $e -- at the count ENTRIES is written for, $SMP_LISTED, each line's boot needs a name of its own (#776)" >&2
 		bad=1
 	done
 	[ $bad = 0 ] &&
