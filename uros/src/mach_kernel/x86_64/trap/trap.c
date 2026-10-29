@@ -1359,8 +1359,10 @@ trap_take_ast(struct trap_frame *frame)
  * on the way back.  i386 never needed this: its kernel does not preempt.
  *
  * ⚠️ So this RETURNS WITH INTERRUPTS OFF, and its callers count on it: the
- * three tails in trap/entry.S go to iretq through act_user_frame, which
- * does not block, and reach swapgs with the flag still clear -- an interrupt
+ * three tails in trap/entry.S go to iretq through act_user_return_frame(),
+ * which does not block -- except to give the thread a #GP its rip has asked
+ * for, and then it never comes back to the tail (#780) -- and reach swapgs
+ * with the flag still clear -- an interrupt
  * between swapgs and iretq would find a ring-0 frame and the user's %gs; the
  * syscall return clears it itself a few instructions later; trap_take_ast()
  * was called with it clear and goes back to an interrupt return.
@@ -1678,9 +1680,11 @@ user_return_noncanonical(void)
  * 🔴 WHETHER A FRAME CAN BE RETURNED THROUGH, ASKED BEFORE IT IS (#780).
  *
  * IRETQ to a non-canonical rip is a general protection fault at CPL 0, before
- * the return commits (SDM Vol. 2A, 253666-093US, IRET, "64-Bit Mode
- * Exceptions": "If the return instruction pointer is non-canonical"), and #GP
- * has no stack of its own.  So it is never attempted: the thread gets the
+ * the return commits, on both vendors (SDM Vol. 2A, 253666-093US, IRET,
+ * "64-Bit Mode Exceptions": "If the return instruction pointer is
+ * non-canonical"; APM Vol. 3, 24594 Rev. 3.39, IRET, whose check comes before
+ * IRET_PROTECTED_TO_OUTER_PRIV -- unlike AMD's SYSRET), and #GP has no stack
+ * of its own.  So it is never attempted: the thread gets the
  * fault the hardware would have given it in ring 3, from here, where the
  * kernel is still in a state to give it.  Returns only if the frame can be
  * returned through.
@@ -1693,8 +1697,19 @@ user_return_noncanonical(void)
 void
 trap_user_return_check(const struct trap_frame *frame)
 {
-	if (!va_is_canonical(frame->rip))
-		user_return_noncanonical();
+	if (va_is_canonical(frame->rip))
+		return;
+	/*
+	 * Only a thread can be given a fault.  A ring-3 frame with no thread
+	 * behind it is the boot's probe, whose rip is a constant -- so this
+	 * says what happened, by name, rather than leaving exception() to find
+	 * no thread several calls down.
+	 */
+	if (percpu()->active_thread == (void *) 0)
+		panic("trap: a return to ring 3 at %p, which iretq would refuse, "
+		      "with no thread to give the fault to (#780)",
+		      (void *) frame->rip);
+	user_return_noncanonical();
 }
 
 /*

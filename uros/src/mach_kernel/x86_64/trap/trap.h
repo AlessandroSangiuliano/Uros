@@ -293,8 +293,9 @@ void trap_dispatch(struct trap_frame *frame);
 
 /*
  * The running thread's saved user frame, pcb->user (cpu/machdep.c).  Called
- * from the return paths in entry.S, and from the trap path to check that a
- * frame about to block in exception() is that one (#650).
+ * by act_user_return_frame() for the thread-return tail in entry.S (#780), and
+ * from the trap path to check that a frame about to block in exception() is
+ * that one (#650).
  */
 struct trap_frame *act_user_frame(void);
 

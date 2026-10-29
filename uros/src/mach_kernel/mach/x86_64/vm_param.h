@@ -62,8 +62,8 @@
  * byte, or a SYSCALL in its last two, hands the kernel a user rip of 2^47 --
  * an address IRETQ refuses at CPL 0 and SYSRET at the caller's.  The kernel's
  * own returns check for it, but an NMI or a machine check taken on that
- * boundary returns through trap_paranoid, on its own stack, where there is no
- * thread to give a fault to.  With the page out of every task's reach the
+ * boundary returns through trap_paranoid, on its own stack, which cannot
+ * block and so cannot give the thread a fault instead.  With the page out of every task's reach the
  * processor never saves a non-canonical user rip at all, and thread state is
  * the only way one can be asked for.  The stacks that start at the top start
  * a page lower.
