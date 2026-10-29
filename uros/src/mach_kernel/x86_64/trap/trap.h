@@ -387,6 +387,19 @@ int trap_in_replay(void);
 void trap_expect(uint64_t vector, uint64_t resume_rip);
 
 /*
+ * The same, for a probe whose two outcomes are two different faults (#781).
+ *
+ * A load through a null LDT is refused with a general protection fault before
+ * any memory is read; through the LDT a processor keeps from reset it reads a
+ * descriptor at a low linear address, which a scratch space leaves unmapped,
+ * and page-faults.  Arming one vector would turn the wrong answer into the
+ * end of the boot instead of a line that names it, so either is caught, and
+ * trap_last() says which.
+ */
+void trap_expect_either(uint64_t vector, uint64_t or_vector,
+			uint64_t resume_rip);
+
+/*
  * Withdraw an expectation that did not fire.
  *
  * A probe armed for a fault that the machine then allowed -- the control half
@@ -553,6 +566,14 @@ int trap_probe_de(void);	/* divide error        */
 int trap_probe_gp(void);	/* general protection  */
 
 extern char trap_probe_faulted[];
+
+/*
+ * Load %fs with `selector` and put it back (#781).  0 when the load went
+ * through, 1 when it faulted under an expectation resuming at
+ * trap_probe_faulted.  For a selector naming the LDT, which this kernel
+ * leaves null on every processor.
+ */
+int trap_probe_ldt(unsigned selector);
 
 /*
  * Print the call stack above a frame pointer, symbolised, straight to the
