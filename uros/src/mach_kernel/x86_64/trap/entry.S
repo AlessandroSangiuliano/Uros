@@ -579,6 +579,25 @@ isr_table:
 	.globl	restart_mach_syscall
 
 /*
+ * 🔴 The three ways a thread goes back to ring 3 from C, and each starts by
+ * putting %rsp back at the top of its kernel stack (#780).
+ *
+ * They are called, and never return, so every frame below their caller is
+ * dead -- and since #770 the thread's user state is in its pcb, not on this
+ * stack, so nothing on it is needed to get back to ring 3.  Starting again at
+ * kernel_stack is what Mach i386 does in thread_exception_return, and it is
+ * not tidiness:
+ *
+ *   - the way back can turn into an exception and come here again: a frame
+ *     whose rip iretq would refuse is given its #GP (trap_user_return_check()),
+ *     and a handler that answers "resume" without moving rip sends the thread
+ *     through here once more.  Without the reset each round would sit below
+ *     the last until the stack ran out;
+ *   - the calls below run on the ABI's alignment.  Entered by a call, %rsp
+ *     was eight off sixteen, and the callq's took it to their callees
+ *     sixteen-aligned -- the opposite of what a C function is compiled for.
+ *     kernel_stack is the stack's top, aligned.
+ *
  * An exception has been handled and the thread should carry on where it was.
  *
  * The frame in the pcb is what trap entry saved on the way in, possibly
@@ -587,6 +606,7 @@ isr_table:
  * thread to resume there.
  */
 thread_exception_return:
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	jmp	thread_user_frame_return
 
@@ -599,6 +619,7 @@ thread_exception_return:
  * prepared by thread_set_state(), and resuming it is resuming it.
  */
 thread_bootstrap_return:
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	jmp	thread_user_frame_return
 
@@ -612,6 +633,7 @@ thread_bootstrap_return:
  * has to rewind anything, and anything that did would be wrong.
  */
 restart_mach_syscall:
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	jmp	thread_user_frame_return
 
