@@ -1,0 +1,25 @@
+Kind: ablation
+Issue: #782
+Takes out: nothing -- a probe: every boot of the tree says a WRONG line on purpose, so a run of entry 1 under both accelerators has two WRONG lines. The merge test exited with its count of WRONG lines, 2 here, which ablate.sh reads as a run that did not start; since #782 it exits 1, and the ablated arm is caught.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: both
+Script: -e
+Script: 1
+Script: -G
+Expect: merge-test: entry 1 (tcg|kvm) -smp 4 -- WRONG \(harness\)
+Note: Accel: tcg because under KVM ablate.sh would give the script --kvm, which it does not take; the run's own -a both boots the line under TCG and under KVM, and so makes the two lines.
+
+diff --git a/uros/src/mach_kernel/x86_64/boot/boot_c.c b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+index 3107b9fa..c38ee2e9 100644
+--- a/uros/src/mach_kernel/x86_64/boot/boot_c.c
++++ b/uros/src/mach_kernel/x86_64/boot/boot_c.c
+@@ -10696,6 +10696,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
+ 			"took (#718)\r\n");
+ 	}
+ 
++	kputs("UrMach x86-64: 782 probe: WRONG -- said on purpose, a line every boot of this tree fails on\r\n");
+ 	kputs("UrMach x86-64: entering setup_main (#458)\r\n");
+ 	setup_main();
+ 
