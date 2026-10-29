@@ -2665,6 +2665,7 @@ bench_mach_print(int iters)
  *   slow     — slow-path receive (continuation)
  *   inter    — inter-task Mach IPC RPC
  *   isweep   — inter-task RPC swept by size, repeated within one boot (#446)
+ *   icc      — concurrent inter-task RPC, 1, 2 and 4 pairs, repeated (#446)
  *   forkrace — concurrent task_create/task_terminate, no IPC (#558)
  *   port     — port alloc/destroy, mach_port_names
  *   pp       — protected payload (test + intra + inter)
@@ -2694,9 +2695,11 @@ bench_mach_print(int iters)
 #define SUITE_KRPC	(1u << 15)	/* MIG kernel RPC, where TypeCheck lives (#443) */
 #define SUITE_ISWEEP	(1u << 16)	/* inter-task RPC by size, repeated (#446) */
 #define SUITE_FORKRACE	(1u << 17)	/* concurrent task_create/terminate (#558) */
+#define SUITE_ICC	(1u << 18)	/* concurrent inter-task RPC (#446) */
 
 /*
- *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME.
+ *	`isweep' is a diagnostic and has to be ASKED FOR BY NAME, and so is
+ *	`icc' (#446), which creates child tasks per run for the same reason.
  *
  *	It answers one question, it creates a child task per measurement, and
  *	it prints a block that is read as a picture rather than as a row in
@@ -2705,7 +2708,7 @@ bench_mach_print(int iters)
  *	compared against those runs.  Naming it in `suites NOT run' is the
  *	honest form: it says the suite exists and did not run.
  */
-#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE)
+#define SUITE_ALL	(0xFFFFFFFFu & ~SUITE_ISWEEP & ~SUITE_FORKRACE & ~SUITE_ICC)
 
 static int
 streq(const char *a, const char *b)
@@ -2738,6 +2741,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "krpc"))    mask |= SUITE_KRPC;
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
+	else if (streq(argv[i], "icc"))	    mask |= SUITE_ICC;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
 	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
@@ -2892,6 +2896,140 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
 	   "(%llu ns/RPC aggregate)\n",
 	   nthreads, total_rpc, total_ns,
 	   total_ns / (total_rpc ? total_rpc : 1));
+}
+
+/* ===================================================================
+ * Concurrent inter-task RPC (#446)
+ *
+ * cc above, with each worker's echo in a task of its own: `n' workers in this
+ * task, each driving its own echo child (echo_child_start()) over a private
+ * port pair, released together, the aggregate ns/RPC reported.  It is the
+ * question #446 asks of the hand-off widened to any task.  A client and its
+ * server on one processor is the hand-off's whole point for one pair; with
+ * several pairs it is also processors the pairs no longer spread over.  One,
+ * two and four pairs show what that costs, or saves.
+ *
+ * ⚠️ Every run starts its children afresh, so a run is a draw of where its
+ * pairs land, as an inter row is (#446, the correction of 13/09).  So it is
+ * repeated ICC_REPS times in the boot, and asked for by name, not by `all',
+ * for isweep's reason.  Each worker warms its pair up before the others are
+ * released, so the first faults of a fresh child are not in the timed region.
+ * =================================================================== */
+
+#define	ICC_REPS	3
+
+typedef struct {
+    echo_child_t	child;
+    int			iters;
+    pthread_t		th;
+} icc_worker_t;
+
+static volatile int	g_icc_ready;	/* workers whose warmup is done */
+
+static void
+icc_round_trip(icc_worker_t *w)
+{
+    bench_recv_buf_t	send_buf;
+    bench_recv_buf_t	recv_buf;
+
+    send_buf.head.msgh_bits =
+	MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    send_buf.head.msgh_size	   = sizeof(bench_null_msg_t);
+    send_buf.head.msgh_remote_port = w->child.to_child;
+    send_buf.head.msgh_local_port  = MACH_PORT_NULL;
+    send_buf.head.msgh_id	   = 1;
+
+    mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(bench_null_msg_t), 0,
+	     MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+	     w->child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static void *
+icc_worker_func(void *arg)
+{
+    icc_worker_t	*w = (icc_worker_t *)arg;
+    int			i;
+
+    for (i = 0; i < WARMUP_ITERS; i++)
+	icc_round_trip(w);
+    __sync_fetch_and_add(&g_icc_ready, 1);
+
+    /* Released with the others, yielding while it waits: cc_worker_func(). */
+    while (!g_cc_go)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    for (i = 0; i < w->iters; i++)
+	icc_round_trip(w);
+    return (void *)0;
+}
+
+static const char *
+icc_label(int n)
+{
+    switch (n) {
+    case 1:  return "concurrent inter-task x1";
+    case 2:  return "concurrent inter-task x2";
+    case 4:  return "concurrent inter-task x4";
+    default: return "concurrent inter-task";
+    }
+}
+
+static void
+bench_concurrent_intertask(int n, int iters_per_thread)
+{
+    icc_worker_t	w[MAX_CC_THREADS];
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok, i, started;
+    tvalspec_t		t0, t1;
+    unsigned long long	total_ns;
+    long		total_rpc;
+    const char		*label;
+
+    if (n > MAX_CC_THREADS)
+	n = MAX_CC_THREADS;
+    label = icc_label(n);
+
+    g_cc_go = 0;
+    g_icc_ready = 0;
+    for (started = 0; started < n; started++) {
+	w[started].iters = iters_per_thread;
+	if (echo_child_start(label, &w[started].child) != 0)
+	    break;
+    }
+    if (started < n) {
+	printf("  %s: %d of %d children started -- not measured\n",
+	       label, started, n);
+	for (i = 0; i < started; i++)
+	    echo_child_stop(&w[i].child);
+	return;
+    }
+
+    /* Let the children settle, as bench_inter_rpc() does for one. */
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    for (i = 0; i < n; i++)
+	pthread_create(&w[i].th, NULL, icc_worker_func, &w[i]);
+    while (g_icc_ready < n)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    ho_ok = handoff_snap(&ho_before);
+    get_time(&t0);
+    g_cc_go = 1;
+    for (i = 0; i < n; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+    ho_ok &= handoff_snap(&ho_after);
+
+    total_ns  = elapsed_ns(&t0, &t1);
+    total_rpc = (long)n * iters_per_thread;
+    printf("  %s   %ld RPCs in %llu ns  (%llu ns/RPC aggregate)\n",
+	   label, total_rpc, total_ns,
+	   total_ns / (total_rpc ? total_rpc : 1));
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
+
+    for (i = 0; i < n; i++)
+	echo_child_stop(&w[i].child);
 }
 
 /*
@@ -3234,6 +3372,7 @@ main(int argc, char **argv)
 	    { SUITE_FLIPC2,  "flipc2" },  { SUITE_CC,      "cc" },
 	    { SUITE_FAULT,   "fault" },   { SUITE_SCALE,   "scale" },
 	    { SUITE_ISWEEP,  "isweep" }, { SUITE_FORKRACE, "forkrace" },
+	    { SUITE_ICC,     "icc" },
 	};
 	char		yes[160], no[160];	/* yes[] feeds the count only (see below) */
 	unsigned	i, ny = 0, nn = 0;
@@ -3418,6 +3557,25 @@ main(int argc, char **argv)
 				   BENCH_ITERS);
 	bench_concurrent_samespace(4, (int)sizeof(bench_null_msg_t),
 				   BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Concurrent inter-task RPC -- N pairs, each server in a task of its
+     * own, repeated within this boot [#446]
+     * --------------------------------------------------------- */
+    if (suites & SUITE_ICC) {
+	int	rep;
+
+	printf("--- Concurrent inter-task RPC (#446), %d repeats in this "
+	       "boot ---\n", ICC_REPS);
+	for (rep = 1; rep <= ICC_REPS; rep++) {
+	    printf("  -- repeat %d of %d --\n", rep, ICC_REPS);
+	    bench_concurrent_intertask(1, BENCH_ITERS);
+	    bench_concurrent_intertask(2, BENCH_ITERS);
+	    bench_concurrent_intertask(4, BENCH_ITERS);
+	}
 
 	printf("\n");
     }
