@@ -1444,7 +1444,8 @@ static int refused_by_protection(const struct trap_frame *frame)
 /*
  * Resolve a fault, with interrupts as the interrupted code had them (#411).
  *
- * 🔥 A trap gate clears IF, so a handler runs with interrupts off -- and
+ * 🔥 An interrupt gate clears IF, and every gate here is one (idt_set()), so a
+ * handler runs with interrupts off -- and
  * vm_fault() is not a leaf.  It reaches pmap_enter(), which can unmap a page it
  * is replacing, which shoots the translation down on every processor, which is
  * a cross-call: `ipi: a cross-call with interrupts off would deadlock', and

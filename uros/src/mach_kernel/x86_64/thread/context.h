@@ -68,13 +68,15 @@
  *
  * One word for the register file, because the registers live on the
  * thread's own stack while it is switched out and the stack pointer is
- * where they are.  The second word is not for resuming this thread — it is
- * for the *entry paths*, which need to know where to land when a syscall or
- * a trap arrives while this thread is the current one.
+ * where they are.  The last two are not for resuming this thread -- they
+ * are for the *entry paths*, which need to know where to write the frame and
+ * where to run C when a syscall or a trap arrives while this thread is the
+ * current one (#770).  kernel_stack_top is the top of the stack they were
+ * derived from; no entry reads it.
  */
 struct context {
 	uint64_t rsp;			/* where its saved registers are   */
-	uint64_t kernel_stack_top;	/* where an entry from ring 3 lands */
+	uint64_t kernel_stack_top;	/* the stack's top, as given        */
 	void    *fpu_area;		/* and its floating-point state    */
 	/*
 	 * 🔴 WHETHER THE SWITCH HAS TO MOVE THAT STATE (#561).

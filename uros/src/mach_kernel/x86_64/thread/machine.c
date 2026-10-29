@@ -381,8 +381,8 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		context_exempt_vector_state(&pcb->ctx);
 
 	/*
-	 * And its user frame, here, because here is where the stack it lives on
-	 * comes from (#422).
+	 * And its user frame, here, because here is where its pcb is given the
+	 * frame's address (#422, #770).
 	 *
 	 * i386 does this in pcb_init(): the frame is embedded in the pcb there,
 	 * so a thread has one from the moment it has an activation.  A thread
@@ -636,9 +636,9 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 	/*
 	 * ── Where a thread's user registers live, and who first says so ──
 	 *
-	 * thread_machine_create() -- a thread is given its frame where it is
-	 * given the kernel stack the frame lives on, which is how i386 has
-	 * always done it (pcb_init) and why the loader works there.
+	 * thread_machine_create() -- a thread is given its frame where its pcb
+	 * is set up, which is where the frame lives (#770) and how i386 has
+	 * always done it (pcb_init), and why the loader works there.
 	 *
 	 * 🔥 This used to CREATE one here when it found none, and that was a
 	 * repair aimed one function too late.  It made writing work and left

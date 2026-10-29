@@ -33,10 +33,11 @@
  *
  * ⚠️ The padding is not decoration.  The ABI wants rsp sixteen-byte aligned
  * at the call, the entry has pushed an odd number of words by the time it
- * gets here (four, plus rbp — it was two before #473 added the user stack
- * pointer and the word that keeps the count even, and what matters here is
- * the parity, which has not moved), so an EVEN number of arguments needs one
- * word of padding and an odd number needs none.  Getting this backwards does
+ * gets here (rbp alone, on a kernel_stack that begins aligned -- it was four
+ * and rbp while the entry pushed the frame onto this stack, before #474 and
+ * #770 took the frame off it, and what matters here is the parity, which has
+ * not moved), so an EVEN number of arguments needs one word of padding and an
+ * odd number needs none.  Getting this backwards does
  * not fail: it misaligns every stack frame under the trap, which the kernel
  * survives only because it is compiled -mno-sse and nothing executes an
  * aligned vector move.  It would fail the day that changed, somewhere else.
@@ -133,13 +134,14 @@
  * exist on this architecture.
  *
  * ⚠️ Which is not the same as "nothing to keep up to date", as this said
- * before.  Every context switch still writes TWO stack pointers:
- * percpu()->kernel_rsp for this path, and tss[cpu].rsp0 for the trap gates,
- * which DO take a stack from the task-state segment — both in
- * act_machine_switch_pcb().  i386 writes its tss.esp0 for the same reason.
+ * before.  Every context switch still writes THREE addresses (#770):
+ * percpu()->kernel_rsp, where this path writes the thread's frame,
+ * percpu()->kernel_stack, where it then runs C, and tss[cpu].rsp0 for the
+ * trap gates, which DO take a stack from the task-state segment.  i386
+ * writes its tss.esp0 for the same reason.
  *
  * 🔑 So the honest sum is: x86-64 is i386 MINUS the WRMSR.  What remains is
- * two ordinary stores into memory this processor already owns — nothing
+ * three ordinary stores into memory this processor already owns — nothing
  * serialising, no exit to a hypervisor — and a trampoline that spent an
  * indirection on every syscall to remove two stores per switch would cost
  * more than it saved.  The expensive thing on that path was never the stack

@@ -4395,19 +4395,21 @@ static void ring3_selftest(void)
 	}
 
 	/*
-	 * The syscall writes its saved state into the frame reserved at the top
-	 * of the thread's kernel stack, the one pcb->user names (#474) — it used
-	 * to push three words onto a stack that started at the very top, which
-	 * is the same memory and is why thread_get_state() answered a debugger
-	 * with kernel stack.  They are read back from the frame the entry
-	 * switched to, so a switch that never happened cannot produce them.
+	 * The syscall writes its saved state into the frame at kernel_rsp (#474).
+	 * This probe runs in the boot context, which has no pcb, so that is the
+	 * frame reserved at the top of the boot stack -- the layout every thread
+	 * had until #770 moved a thread's frame into its pcb.  It used to push
+	 * three words onto a stack that started at the very top, which is the
+	 * same memory and is why thread_get_state() answered a debugger with
+	 * kernel stack.  They are read back from the frame the entry switched
+	 * to, so a switch that never happened cannot produce them.
 	 *
 	 * ⚠️ And the stack check is against KERNEL_STACK_USER_FRAME(rsp0), not
-	 * rsp0.  The two values are deliberately different now: the processor
-	 * pushes DOWNWARD from the TSS value, so that one is the top, while the
-	 * syscall entry starts USING its value as a stack and must therefore
-	 * begin below the frame.  This check read `== rsp0' and failed the
-	 * moment they parted, which is what it is for.
+	 * rsp0.  The two values are deliberately different: the processor
+	 * pushes DOWNWARD from the TSS value, so that one is the frame's end,
+	 * while the syscall entry writes the frame from its base.  This check
+	 * read `== rsp0' and failed the moment they parted, which is what it is
+	 * for.
 	 */
 	{
 		uint64_t want_rip = USER_PROBE_AFTER_SYSCALL_VA;
