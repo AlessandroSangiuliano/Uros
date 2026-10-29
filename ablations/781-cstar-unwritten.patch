@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #781
+Takes out: the write of CSTAR -- syscall_init() leaves it as reset left it, which under KVM and TCG is zero, as it was on every processor before #781.
+Accel: tcg,kvm
+Run: --entry 0 300 -smp 4
+Expect: processor [0-9]+: its system-call registers are not what syscall_init\(\) writes: CSTAR 0x0+,
+Note: the census's line for a processor whose CSTAR reads zero; the summary line says WRONG too, but this one names the register and the value.
+
+diff --git a/uros/src/mach_kernel/x86_64/syscall/syscall.c b/uros/src/mach_kernel/x86_64/syscall/syscall.c
+index 021a359c..2a65c179 100644
+--- a/uros/src/mach_kernel/x86_64/syscall/syscall.c
++++ b/uros/src/mach_kernel/x86_64/syscall/syscall.c
+@@ -660,7 +660,6 @@ void syscall_init(void)
+ 	 * SYSENTER faults while IA32_SYSENTER_CS is zero, and only then --
+ 	 * so it is made zero rather than found zero.
+ 	 */
+-	wrmsr(MSR_CSTAR, w.cstar);
+ 	wrmsr(MSR_SYSENTER_CS, w.sysenter_cs);
+ 	wrmsr(MSR_SYSENTER_ESP, w.sysenter_esp);
+ 	wrmsr(MSR_SYSENTER_EIP, w.sysenter_eip);
