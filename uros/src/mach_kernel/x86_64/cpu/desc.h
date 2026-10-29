@@ -62,7 +62,9 @@
  * act_user_frame() panics on, and on AMD a SYSCALL went to CSTAR.  So a far
  * transfer to 0x1b is a general protection fault in ring 3, naming 0x18, and
  * the day there is a 32-bit userland the descriptor comes back with
- * everything else that mode needs, as one change.
+ * everything else that mode needs, as one change.  The other table a
+ * selector can name, the LDT, is loaded null on every processor
+ * (desc_activate()), so this one is the only table there is.
  */
 #define KERNEL_CS_SELECTOR	0x08
 #define KERNEL_DS_SELECTOR	0x10

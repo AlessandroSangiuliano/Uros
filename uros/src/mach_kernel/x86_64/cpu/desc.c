@@ -282,5 +282,25 @@ void desc_activate(uint32_t cpu_id)
 	load_gdt();
 	__asm__ volatile("ltr %w0" : : "r"(tss_selector(cpu_id)));
 
+	/*
+	 * 🔴 And NO local descriptor table, loaded rather than assumed (#781).
+	 *
+	 * This kernel has no LDT, and nothing had ever told the processor so:
+	 * reset leaves the LDTR selector 0 but its hidden part PRESENT, base 0,
+	 * limit FFFFH (SDM Vol. 3A, 253668-093US, Table 10-1; APM Vol. 2, 24593
+	 * Rev. 3.42, Table 14-1), and GRUB loads none.  A selector with TI set
+	 * was therefore a descriptor read from linear address 8 x its index --
+	 * in whatever address space was current, a user task's, whose low pages
+	 * the task maps itself.  Whatever it wrote there -- a 32-bit code
+	 * segment, or a call gate into the kernel's -- was one far transfer
+	 * away, where only SMAP, on a processor that has it, refused the read;
+	 * and the empty 32-bit slot in the GDT closed nothing.  A null selector makes every reference to the LDT a general
+	 * protection fault (APM Vol. 2, "Loading a null selector into the LDTR
+	 * is useful if software does not use an LDT").  Here, with the GDT and
+	 * the TSS, so that every processor does it -- the boot processor and
+	 * each one smp.c brings up.
+	 */
+	__asm__ volatile("lldt %w0" : : "r"((uint16_t)0));
+
 	trap_init();
 }
