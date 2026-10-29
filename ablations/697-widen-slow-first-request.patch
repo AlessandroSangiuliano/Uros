@@ -1,0 +1,96 @@
+Kind: widen
+Issue: #697
+Holds open: the first request virtio_blk.so submits -- its completion is not seen for 20 s after its notify, as if the device took that long. Every x86-64 boot reads /mach_servers off the virtio disk, so the request held is the boot disk's first read. The wait before #697, 10,000,000 pause instructions, runs out before the 20 s are up and calls the read a timeout; the wait of #697 sleeps on the used ring and gives up only after 30 s on the kernel's clock, so the boot goes on 20 s late.
+Accel: kvm
+Run: --entry 1 600 -smp 4
+Note: the clock is asked once every 10,000,000 cycles of the TSC while the request is held, not at every look, so the hold costs the old count nothing it did not spend on its pauses.
+
+diff --git a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
+index e91f17a2..1cf79d19 100644
+--- a/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
++++ b/uros/src/servers/block_device_server/virtio_blk/virtio_module.c
+@@ -432,9 +432,13 @@ virtqueue_setup(struct virtio_state *st)
+ #define VIO_WAIT_LOOK_MS	1
+ #define VIO_WAIT_DEADLINE_S	30
+ 
++static int vio_widen_held(void);	/* 697 widen, below */
++
+ static inline int
+ vio_used_moved(const struct virtio_state *st)
+ {
++	if (vio_widen_held())
++		return 0;
+ 	return ((volatile struct vring_used *)st->vq_used)->idx
+ 	    != st->last_used_idx;
+ }
+@@ -451,6 +455,53 @@ vio_clock_ms(mach_port_t clk, uint64_t *ms)
+ 	return 0;
+ }
+ 
++/*
++ * 697 widen: the first request this module submits is held VIO_WIDEN_HOLD_MS
++ * after its notify -- its completion is not seen before then, as if the
++ * device took that long.  Longer than the 10,000,000 pauses the wait used to
++ * be last under KVM, and short of VIO_WAIT_DEADLINE_S.  The clock is asked
++ * once every 10,000,000 cycles of the TSC and not at every look: a look that
++ * cost an RPC would stretch the old count past the hold, and hide what the
++ * hold is there to show.
++ */
++#define VIO_WIDEN_HOLD_MS	20000
++static unsigned int	vio_widen_requests;
++static uint64_t		vio_widen_until;	/* ms on the clock; 0: none */
++
++static uint64_t
++vio_widen_now_ms(void)
++{
++	static mach_port_t	clk = MACH_PORT_NULL;
++	uint64_t		ms;
++
++	if (clk == MACH_PORT_NULL
++	    && host_get_clock_service(mach_host_self(), REALTIME_CLOCK,
++				      &clk) != KERN_SUCCESS)
++		return 0;
++	if (vio_clock_ms(clk, &ms) != 0)
++		return 0;
++	return ms;
++}
++
++static int
++vio_widen_held(void)
++{
++	static uint64_t	asked;
++	uint64_t	tsc;
++
++	if (vio_widen_until == 0)
++		return 0;
++	tsc = __builtin_ia32_rdtsc();
++	if (tsc - asked < 10000000u)
++		return 1;
++	asked = tsc;
++	if (vio_widen_now_ms() < vio_widen_until)
++		return 1;
++	vio_widen_until = 0;
++	printf("virtio: 697 widen: the held request is let through\n");
++	return 0;
++}
++
+ /* 0 once the used ring has moved; -1, said, when it is not going to. */
+ static int
+ vio_wait_used(struct virtio_state *st)
+@@ -607,6 +658,16 @@ virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
+ 	if (vio_refused_p(st))
+ 		return -1;
+ 
++	if (vio_widen_requests++ == 0) {
++		uint64_t now = vio_widen_now_ms();
++
++		if (now != 0) {
++			vio_widen_until = now + VIO_WIDEN_HOLD_MS;
++			printf("virtio: 697 widen: the first request is held "
++			       "%u ms\n", VIO_WIDEN_HOLD_MS);
++		} else
++			printf("virtio: 697 widen: no clock, nothing held\n");
++	}
+ 	if (vio_wait_used(st) != 0)
+ 		return -1;
+ 	vio_read8(st, VIRTIO_PCI_ISR);
