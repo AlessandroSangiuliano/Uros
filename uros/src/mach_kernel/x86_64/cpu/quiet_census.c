@@ -696,9 +696,10 @@ quiet_stacks_so_far(void)
 /*
  * #446: what -X did, said by every boot that has it on -- at zero too, so that
  * a boot whose hand-off never happened is told from one that was not asked.
- * -X is same-task only: a thread of another task among them is #356's fence
- * leaking, and is said as WRONG.  With each report as the machine goes idle,
- * for the reason quiet_stacks_so_far() gives.
+ * -X alone is same-task only: a thread of another task among them is #356's
+ * fence leaking, and is said as WRONG; with handoff_any=1 it is what the
+ * widening is for.  With each report as the machine goes idle, for the reason
+ * quiet_stacks_so_far() gives.
  */
 static void
 quiet_handoff_so_far(void)
@@ -709,10 +710,13 @@ quiet_handoff_so_far(void)
 		return;
 
 	sched_rpc_handoff_counts(&same, &other);
-	printf("quiet_census: -X has queued %lu woken thread(s) on their "
+	printf("quiet_census: -X%s has queued %lu woken thread(s) on their "
 	       "waker's processor, %lu of them of another task (#446)%s\n",
+	       sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK ?
+	       " handoff_any=1" : "",
 	       same + other, other,
-	       other != 0 ? " -- WRONG: -X is same-task only" : "");
+	       sched_rpc_handoff == SCHED_RPC_HANDOFF_SAME_TASK && other != 0 ?
+	       " -- WRONG: -X alone is same-task only" : "");
 }
 
 void

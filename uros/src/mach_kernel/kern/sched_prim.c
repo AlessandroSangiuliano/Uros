@@ -2747,8 +2747,10 @@ run_queue_enqueue(
 #if	NCPUS > 1
 /*
  * #356: run-time gate for the synchronous-RPC hand-off-on-block placement
- * (see the hint consumption in thread_setrun).  Off by default; enabled by
- * the -P boot argument for same-binary A/B on hardware.
+ * (see the hint consumption in thread_setrun).  Off by default, for
+ * same-binary A/B on hardware: -X turns it on for a thread of the waker's
+ * task (-P, its old name, on i386), and on x86-64 handoff_any=1 widens it to
+ * a thread of any task (#446).
  *
  * The hand-off also stays dormant until EVERY CPU has passed cpu_up()
  * (machine_info.avail_cpus reaches real_ncpus -- guaranteed on any boot
@@ -2882,16 +2884,22 @@ thread_setrun(
 
 	    /*
 	     * #356 hand-off on block: the waker flagged that it is about to
-	     * block (combined mach_msg send phase -- the same syscall proceeds
-	     * to the receive and sleeps).  A synchronous RPC pair is
+	     * block (a send in mach_msg -- the combined send-and-receive, or a
+	     * send its caller follows with a receive; ipc/mach_msg.c sets the
+	     * hint for both).  A synchronous RPC pair is
 	     * inherently serial, so instead of shipping the wakee to a remote
 	     * idle CPU (cold caches, wake-from-idle latency -- the measured
 	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
 	     * runq: thread_select picks it up the moment the waker blocks, on
-	     * the one CPU where its data is warm.  Same-task only (an
-	     * inter-task switch on one CPU costs a cr3 reload = full TLB flush
-	     * on i386, measured worse than the split).  One-shot: consumed by
-	     * the first wakeup of the send.  Runtime-gated by -P boot arg.
+	     * the one CPU where its data is warm.  One-shot: consumed by the
+	     * first wakeup of the send.  Runtime-gated by -X (-P on i386).
+	     *
+	     * Same-task only unless handoff_any=1 widens it (#446).  The fence
+	     * was put up on i386, where a switch between tasks on one CPU
+	     * reloads cr3 and throws the whole TLB away, and the split was
+	     * measured cheaper.  With PCID (#412) the switch keeps the TLB;
+	     * whether the hand-off is then worth having across tasks is what
+	     * #446 measures, the arms a boot argument apart.
 	     */
 	    if (sched_rpc_handoff &&
 		machine_info.avail_cpus >= real_ncpus) {
@@ -2907,7 +2915,8 @@ thread_setrun(
 #endif	/* MACH_HOST */
 			    self->top_act != THR_ACT_NULL &&
 			    th->top_act != THR_ACT_NULL &&
-			    self->top_act->task == th->top_act->task) {
+			    (self->top_act->task == th->top_act->task ||
+			     sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK)) {
 #if	S319_INSTRUMENT
 				s319[cpu_number()].localhoff++;
 #endif

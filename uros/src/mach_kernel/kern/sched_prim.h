@@ -309,6 +309,7 @@ extern int		sched_bound_displaced_slot;
  */
 #define	SCHED_RPC_HANDOFF_OFF		0
 #define	SCHED_RPC_HANDOFF_SAME_TASK	1	/* -X: #356's fence, one task */
+#define	SCHED_RPC_HANDOFF_ANY_TASK	2	/* -X handoff_any=1 (#446) */
 extern int		sched_rpc_handoff;
 extern void		sched_rpc_handoff_counts(
 				unsigned long	*same_task,

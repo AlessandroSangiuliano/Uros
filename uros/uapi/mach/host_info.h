@@ -285,7 +285,7 @@ typedef struct host_ipc_cache_info	*host_ipc_cache_info_t;
  * difference stays right across one wrap.
  */
 struct host_rpc_handoff_info {
-	unsigned int	reach;		/* 0 off, 1 the waker's task only */
+	unsigned int	reach;		/* 0 off, 1 the waker's task only, 2 any */
 	unsigned int	same_task;	/* woken threads of the waker's task */
 	unsigned int	other_task;	/* woken threads of another task */
 };
