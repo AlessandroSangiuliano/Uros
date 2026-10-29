@@ -441,8 +441,20 @@ taskpanic_held() {	# full-log
 	fi
 }
 
-judge() {	# entry verdict log-of-the-harness full-log accelerator
-	local e=$1 v=$2 h=$3 f=$4 a=$5 out
+# #779: a question one processor cannot pose.  There the test says NOT ASKED
+# -- alone, no other processor to pose it with -- and the boot goes on, so the
+# verdict is the harness's and NOT ASKED, counted with the other questions not
+# asked (#705).  At more processors the same words mean processors that never
+# came, and the verdict stays WRONG.
+alone_ok() {	# -smp log-of-the-harness full-log the-test's-words-on-one-processor
+	[ "${1%%,*}" = 1 ] &&
+		grep -aq 'passed: reached the end, nothing unexplained' "$2" &&
+		grep -aqF "$4" "$3" &&
+		NOTE="NOT ASKED: one processor"
+}
+
+judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
+	local e=$1 v=$2 h=$3 f=$4 a=$5 n=${6:-} out
 	NOTE=""
 	case $v in
 	harness) grep -aq 'passed: reached the end, nothing unexplained' "$h" ;;
@@ -456,13 +468,15 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 		out=$(grep -aoE 'char_test: [0-9]+ of [0-9]+ arms passed' "$f" | tail -n 1) &&
 		[ -n "$out" ] && NOTE=$out ;;
 	stop13) grep -aq 'name_server: service_checkin: (ipc/send) invalid destination port' "$f" ;;
-	ioapic) grep -aq 'ioapic_race: PASS' "$f" ;;
+	ioapic) grep -aq 'ioapic_race: PASS' "$f" ||
+		alone_ok "$n" "$h" "$f" 'ioapic_race: NOT ASKED — alone' ;;
 	# #663: numbered with gaps -- APIC ids 0-2 and 4-6, as pavillion's are
 	# 0-5 and 8-13 -- every processor takes the HPET's tick in window 0.
 	hpetgaps) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aqE 'cpu 5 took [0-9]+ ticks in window 0' "$f" &&
 		! grep -aqE 'took [0-9] ticks in window 0,' "$f" ;;
-	msirace) grep -aq 'msi_race: PASS' "$f" ;;
+	msirace) grep -aq 'msi_race: PASS' "$f" ||
+		alone_ok "$n" "$h" "$f" 'msi_race: NOT ASKED — alone' ;;
 	# #598: an HPET that can send an FSB message (--hpet fsb) sends it, and
 	# while interrupts are remapped takes its pin instead, for the reason
 	# it gives: QEMU's tables name no HPET, and its message could not go
@@ -477,17 +491,20 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 	# irq 0 and the 82574L's MSI-X slot, aimed at a processor other than
 	# the boot processor's id 0 -- 0 is 0 in every format -- arrived there
 	# and nowhere else (irq_reach_selftest()).  A NOT ASKED would pass the
-	# harness and test nothing, so the two lines are asked for.
+	# harness and test nothing, so the two lines are asked for -- except on
+	# one processor, where the question does not arise and the verdict says
+	# NOT ASKED (#779).
 	reach) grep -aq 'passed: reached the end, nothing unexplained' "$h" &&
 		grep -aq 'entries for 32-bit apic ids' "$f" &&
-		[ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ;;
+		{ [ "$(grep -acE 'aimed at apic id [1-9][0-9]* arrived there [1-9][0-9]* times and elsewhere 0 — it reaches the processor its entry names' "$f")" -ge 2 ] ||
+		  alone_ok "$n" "$h" "$f" 'where an interrupt arrives: NOT ASKED, one processor'; } ;;
 	# #755: entry 49 asks reach's question of the x2APIC mode GRUB left on,
 	# and the kept line as well, which is what makes it 49 and not 48: the
 	# mode the entries were planned for is the one the kernel found on.
 	# Under "harness" a board that remapped nothing passed: the plain Intel
 	# engine under KVM, which has no split irqchip.
 	keptreach) grep -aq 'local apic in x2APIC mode, kept as the firmware left it' "$f" &&
-		judge "$e" reach "$h" "$f" "$a" ;;
+		judge "$e" reach "$h" "$f" "$a" "$n" ;;
 	# #412: -x and -n are honoured, not merely survived.  Where the
 	# processor offers PCID -- KVM on omen, OMEGA, GitHub's runners -- entry
 	# 50 must run PCID without INVPCID with [1] and [2] on its log, and entry
@@ -508,7 +525,8 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator
 		grep -aqE 'fbcons: -f: the [1-9][0-9]* lines printed before the screen existed are drawn above: [1-9][0-9]* bytes, [1-9][0-9]* glyphs' "$f" ;;
 	# Its verdict line, not any "PASS": a WRONG quotes the log's line, and
 	# a line run together with "xfile_test: PASS" passed (#661's review).
-	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q '^double-panic-check: PASS' ;;
+	panic2) "$HERE/scripts/double-panic-check.sh" "$f" | grep -q '^double-panic-check: PASS' ||
+		alone_ok "$n" "$h" "$f" 'double_panic: NOT ASKED — alone' ;;
 	# #702: an orderly halt has every processor that passes the final copy's
 	# plain word say a copy, and copies mixed a byte of each in turn passed
 	# "harness" in 4 boots of 6 -- garbled-lines.awk rarely finds a name
@@ -757,7 +775,7 @@ for boot in "${PLAN[@]}"; do
 		# ci/job.sh copies that log.
 		ng_rc=0
 		ng=$("$HERE/scripts/fbcons-no-glyph.py" "$f") || ng_rc=$?
-		if ! judge "$e" "$v" "$h" "$f" "$a"; then
+		if ! judge "$e" "$v" "$h" "$f" "$a" "$n"; then
 			echo "merge-test: entry $e $a -smp $n ${shown:+($shown) }-- WRONG ($v${NOTE:+: $NOTE}): $h"
 			WRONG=$((WRONG + 1))
 		elif [ $ng_rc -ne 0 ]; then
