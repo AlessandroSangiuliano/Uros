@@ -285,6 +285,23 @@ trap_common:
 	call	trap_dispatch
 
 	/*
+	 * 🔴 And to ring 3 only through a frame iretq will take (#780).
+	 *
+	 * A rip that is not canonical makes the iretq below fault at CPL 0,
+	 * with %rsp in the thread's pcb: the fault's frame and the C reporting
+	 * it would go over the pcb.  It can be there -- thread_set_state() on
+	 * a thread stopped inside a trap writes this frame -- so it is asked
+	 * here, in C, on kernel_stack and before the cli, where the thread can
+	 * still be given its fault instead.  Read off the frame rather than
+	 * remembered from the way in, for the reason the swapgs below gives.
+	 */
+	testb	$3, TF_CS(%rbx)
+	jz	4f
+	movq	%rbx, %rdi
+	call	trap_user_return_check	/* returns only if iretq will take it */
+4:
+
+	/*
 	 * Back onto the frame with interrupts off (#770).  From here to the
 	 * iretq %rsp may be inside the thread's pcb, and an interrupt taken
 	 * there would push its own frame below ours -- into the pcb.  The
@@ -604,14 +621,17 @@ restart_mach_syscall:
  * ⚠️ Interrupts off BEFORE %rsp goes to the frame (#770), for trap_common's
  * reason: the frame is in the thread's pcb, and an interrupt taken with %rsp
  * there would push its frame into the pcb.  One copy of that, here, rather
- * than one in each of the three.
+ * than one in each of the three.  And the frame is asked first whether iretq
+ * will take it (act_user_return_frame(), #780), on kernel_stack and with
+ * interrupts as they were: a fault iretq raises lands in the pcb, and IF
+ * does not stop it.
  *
  * swapgs unconditionally, because every one of these is a return TO USER --
  * unlike trap_common's tail, which has to test, because a trap may have come
  * from either ring.
  */
 thread_user_frame_return:
-	callq	act_user_frame		/* %rax = this thread's trap frame */
+	callq	act_user_return_frame	/* %rax = the frame, iretq-able (#780) */
 	cli
 	movq	%rax, %rsp
 thread_frame_return:

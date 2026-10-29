@@ -299,6 +299,19 @@ void trap_dispatch(struct trap_frame *frame);
 struct trap_frame *act_user_frame(void);
 
 /*
+ * The same frame, for the thread-return tail in entry.S that is about to iretq
+ * through it: if its rip is not one iretq accepts, the thread is given the
+ * fault instead, and this does not return (#780).
+ */
+struct trap_frame *act_user_return_frame(void);
+
+/* Refuse, by raising the thread's own #GP, a return iretq would refuse (#780). */
+void trap_user_return_check(const struct trap_frame *frame);
+
+/* That #GP, synthesised for the running thread; does not return (#518, #780). */
+void user_return_noncanonical(void);
+
+/*
  * Entry from the four stubs that cannot decide from the saved code segment
  * (#440): #DB, NMI, #DF and #MC.  See trap/entry.S for why those four and no
  * others, and for how the decision is made.

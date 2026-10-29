@@ -198,11 +198,12 @@ cause_ast_check(processor_t processor)
 /*
  * The trap frame of the thread this processor is running.
  *
- * Called from assembly, by the three return paths in trap/entry.S, because
- * reaching a thread's frame is three pointer hops through structures whose
- * layout the machine-independent tree owns -- and a hop written in assembly
- * is a constant that goes stale the day one of those structures gains a
- * field.
+ * In C, for the thread-return tail in trap/entry.S (through
+ * act_user_return_frame() below) and for the trap path's check that a frame
+ * about to block in exception() is this one, because reaching a thread's frame
+ * is three pointer hops through structures whose layout the
+ * machine-independent tree owns -- and a hop written in assembly is a constant
+ * that goes stale the day one of those structures gains a field.
  *
  * ⚠️ Panics rather than answering zero.  Its callers are about to load the
  * result into %rsp and execute iretq off it; a null would iretq off address
@@ -246,10 +247,10 @@ act_user_frame(void)
 	 * means something wrote over the frame.  (Until #781 a far jump to
 	 * 0x1b chose cs, and an exception taken after it ended here.)  That
 	 * is a claim worth testing every time rather than a thing to remember:
-	 * pcb->user lives IN the kernel stack, at its top, sharing those bytes
-	 * with the frame a trap builds -- deliberately -- which makes "who else
-	 * writes there" a permanent question rather than a bug that gets fixed
-	 * once.
+	 * pcb->user is the frame the processor and the entry paths write --
+	 * in the pcb since #770 -- and thread_set_state() writes it too, which
+	 * makes "who else writes there" a permanent question rather than a bug
+	 * that gets fixed once.
 	 */
 	if (act->mact.pcb->user->cs != USER_CS_RPL3
 	    || act->mact.pcb->user->ss != USER_DS_RPL3)
@@ -262,4 +263,17 @@ act_user_frame(void)
 		      USER_CS_RPL3, USER_DS_RPL3);
 
 	return act->mact.pcb->user;
+}
+
+/*
+ * The frame the thread-return tail is about to iretq through, asked first
+ * whether iretq would take it (#780): see trap_user_return_check().
+ */
+struct trap_frame *
+act_user_return_frame(void)
+{
+	struct trap_frame *frame = act_user_frame();
+
+	trap_user_return_check(frame);
+	return frame;
 }

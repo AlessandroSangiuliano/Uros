@@ -700,7 +700,7 @@ syscall_entry:
 	 * ⚠️ Nothing is added to the fast path.  This is reached only by the
 	 * branch a program takes once, on its way to being told about it.
 	 */
-	call	syscall_return_noncanonical
+	call	user_return_noncanonical	/* the IRETQ returns' too (#780) */
 	ud2				/* exception() does not return */
 
 /*
