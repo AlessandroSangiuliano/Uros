@@ -407,6 +407,21 @@ trap_probe_faulted:
  * in is still the caller's.
  */
 
+/*
+ * A segment load through the LDT (#781): %fs is loaded with the selector in
+ * %edi and given back its own if the load went through.  Through a null LDTR
+ * the load is a general protection fault naming the selector, before any
+ * memory is read; the selector and %fs are untouched when it faults.
+ */
+	.globl	trap_probe_ldt
+	.align	16
+trap_probe_ldt:
+	movw	%fs, %ax		/* what it holds */
+	movw	%di, %fs		/* through the LDT */
+	movw	%ax, %fs		/* it went through: give it back */
+	xorl	%eax, %eax
+	ret
+
 /* Invalid opcode: no error code, and the CPU is certain about it. */
 	.globl	trap_probe_ud
 	.align	16

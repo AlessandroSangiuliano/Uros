@@ -961,6 +961,7 @@ unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
  * reported and halted on is the honest outcome.
  */
 static uint64_t expect_vector;
+static uint64_t expect_vector_too;	/* #781: a second answer, or the first */
 static uint64_t expect_resume;
 static int expect_armed;
 
@@ -1000,7 +1001,14 @@ static void trap_record_frame(const struct trap_frame *frame)
 
 void trap_expect(uint64_t vector, uint64_t resume_rip)
 {
+	trap_expect_either(vector, vector, resume_rip);
+}
+
+void trap_expect_either(uint64_t vector, uint64_t or_vector,
+			uint64_t resume_rip)
+{
 	expect_vector = vector;
+	expect_vector_too = or_vector;
 	expect_resume = resume_rip;
 	expect_armed = 1;
 	last_trap.caught = 0;
@@ -2072,7 +2080,8 @@ void trap_dispatch(struct trap_frame *frame)
 		}
 	}
 
-	if (expect_armed && frame->vector == expect_vector) {
+	if (expect_armed && (frame->vector == expect_vector
+			     || frame->vector == expect_vector_too)) {
 		/*
 		 * Disarm first.  If resuming faults again the expectation is
 		 * already spent, so the second one is reported rather than

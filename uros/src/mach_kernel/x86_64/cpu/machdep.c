@@ -237,8 +237,14 @@ act_user_frame(void)
 	 * loaded, and the port's "it works" rests on that.
 	 *
 	 * These two fields are imposed by thread_state_to_frame() and by
-	 * thread_frame_init() and are never a thread's to choose, so anything
-	 * other than these values means something wrote over the frame.  That
+	 * thread_frame_init(), and the processor saves no other values from
+	 * ring 3: since #781 it has one code segment to load, the 32-bit slot
+	 * being empty and the LDT null on every processor, and at CPL 3 SS
+	 * cannot be null (APM Vol. 2, 24593 Rev. 3.42, "Null Selector") and
+	 * has no other data segment to name than USER_DS.  They
+	 * are never a thread's to choose, so anything other than these values
+	 * means something wrote over the frame.  (Until #781 a far jump to
+	 * 0x1b chose cs, and an exception taken after it ended here.)  That
 	 * is a claim worth testing every time rather than a thing to remember:
 	 * pcb->user lives IN the kernel stack, at its top, sharing those bytes
 	 * with the frame a trap builds -- deliberately -- which makes "who else

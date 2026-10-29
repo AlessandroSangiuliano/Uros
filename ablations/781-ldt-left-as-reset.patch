@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #781
+Takes out: the null LDTR -- desc_activate() no longer loads one, so every processor keeps the LDT reset left, present with base 0, as it did before #781.  The ring-3 probe's far jump through 0x1f then reads its descriptor at linear 0x18 and page-faults there, and the census's load through the LDT does the same on every processor.
+Accel: tcg,kvm
+Run: --entry 0 300 -smp 4
+Expect: far jump through the LDT \(0x1f\) in ring 3 -> page fault, error 0x[0-9a-f]+ at 0x0+18, .*WRONG, the processor walked an LDT
+Note: the ring-3 probe's own WRONG, and only for the outcome that says the LDT was read: a page fault at 0x18.  The census says WRONG for each processor too.
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/desc.c b/uros/src/mach_kernel/x86_64/cpu/desc.c
+index 09a9531d..6e0f00b3 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/desc.c
++++ b/uros/src/mach_kernel/x86_64/cpu/desc.c
+@@ -300,7 +300,6 @@ void desc_activate(uint32_t cpu_id)
+ 	 * the TSS, so that every processor does it -- the boot processor and
+ 	 * each one smp.c brings up.
+ 	 */
+-	__asm__ volatile("lldt %w0" : : "r"((uint16_t)0));
+ 
+ 	trap_init();
+ }

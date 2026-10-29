@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #781
+Takes out: the empty slot -- gdt[3] is again the present, DPL 3, 32-bit code descriptor it was before #781, so ring 3's far jump to 0x1b is taken: compatibility mode at offset zero, where the probe's space maps nothing, and the page fault that comes back carries cs 0x1b.
+Accel: tcg,kvm
+Run: --entry 0 300 -smp 4
+Expect: far jump to 0x1b in ring 3 -> page fault, error 0x[0-9a-f]+, cs 0x0+1b, .*WRONG, the jump was not refused where it was made
+Note: the probe's own WRONG, and only for the outcome that says compatibility mode was reached -- a page fault from cs 0x1b -- not for any other way the line could go wrong.
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/desc.c b/uros/src/mach_kernel/x86_64/cpu/desc.c
+index 6e2c8608..403b9c64 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/desc.c
++++ b/uros/src/mach_kernel/x86_64/cpu/desc.c
+@@ -169,7 +169,7 @@ void desc_init_bsp(void)
+ 	 * a far jump, into a mode nothing here supports: <cpu/desc.h> says
+ 	 * what came of filling it.
+ 	 */
+-	gdt[3] = 0;				/* SYSRET's base: empty (#781) */
++	gdt[3] = 0x00CFFA000000FFFFULL;		/* code32: G, D, DPL3, R/X     */
+ 	gdt[4] = 0x0000F20000000000ULL;		/* data:   present, DPL3, R/W  */
+ 	gdt[5] = 0x0020FA0000000000ULL;		/* code:   L, present, DPL3    */
+ 

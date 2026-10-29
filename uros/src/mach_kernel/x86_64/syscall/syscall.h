@@ -242,8 +242,24 @@ _Static_assert(SYSCALL_ENTRY_TSC_BELOW >= 8
  * of a startup interrupt with none of them set.  A processor that misses
  * this does not fail a syscall — it takes an invalid-opcode fault, because
  * without the enable bit the instruction does not exist.
+ *
+ * And CSTAR and the three SYSENTER registers, which nothing here uses and
+ * which are written all the same (#781): see syscall_init().
  */
 void syscall_init(void);
+
+/*
+ * The system-call registers of one processor (#781): as syscall_init() writes
+ * them, and as a processor holds them, so that boot can ask every processor
+ * whether they are the same.
+ */
+struct syscall_msrs {
+	uint64_t	star, lstar, cstar, fmask;
+	uint64_t	sysenter_cs, sysenter_esp, sysenter_eip;
+};
+
+void syscall_msrs_wanted(struct syscall_msrs *m);
+void syscall_msrs_read(struct syscall_msrs *m);
 
 /*
  * The call the boot uses to prove the path.
@@ -285,6 +301,9 @@ uint64_t syscall_probe_gs(void);
  * it has to be able to name it.
  */
 void syscall_entry(void);
+
+/* Where CSTAR points: a SYSCALL from compatibility mode, refused (#781). */
+void syscall_compat_entry(void);
 
 /*
  * The Mach traps as plain pointers, and how many are usable (#411).  Read by

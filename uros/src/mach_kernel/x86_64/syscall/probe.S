@@ -301,3 +301,45 @@ user_probe_read:
 	.globl	user_probe_read_done
 user_probe_read_done:
 	hlt
+
+/*
+ * And a fifth (#781): may a user program leave 64-bit mode?
+ *
+ * A far jump through memory to 0x1b, the slot SYSRET's arithmetic steps over.
+ * With the slot empty the jump is refused where it stands: a general
+ * protection fault at user_probe_compat, error code 0x18, cs still 0x2b.
+ * With a 32-bit code descriptor there the jump is taken -- compatibility mode,
+ * at offset zero, where this space maps nothing -- and the page fault comes
+ * back with cs 0x1b.  Either way the answer is in the frame and nothing in
+ * compatibility mode runs: the first fetch there is the fault.
+ *
+ * RIP-relative, because the page runs at USER_PROBE_CODE_VA and the far
+ * pointer travels in it; and the thirty-two-bit form, m16:32, which both
+ * vendors take in 64-bit mode.
+ */
+	.globl	user_probe_compat
+user_probe_compat:
+	ljmpl	*user_probe_compat_target(%rip)
+	hlt				/* reached by neither outcome */
+user_probe_compat_target:
+	.long	0
+	.word	USER_CS32_SELECTOR | USER_RPL
+
+/*
+ * And a sixth (#781): may it reach a code segment through the LDT?
+ *
+ * The same far jump, through 0x1f -- index 3 of the LDT, ring 3.  With the
+ * LDTR null the jump is refused before any memory is read: a general
+ * protection fault here, error code 0x1c, the selector without its ring bits.
+ * With the LDTR as reset leaves it, the processor reads the descriptor at
+ * linear 0x18 of this space, where nothing is mapped, and the page fault
+ * names 0x18 -- which in a task's own space would have been the task's page,
+ * holding whatever descriptor the task chose.
+ */
+	.globl	user_probe_ldt
+user_probe_ldt:
+	ljmpl	*user_probe_ldt_target(%rip)
+	hlt				/* reached by neither outcome */
+user_probe_ldt_target:
+	.long	0
+	.word	0x1f			/* LDT index 3, TI, ring 3 */
