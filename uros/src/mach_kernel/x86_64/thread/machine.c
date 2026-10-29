@@ -556,9 +556,32 @@ void
 machine_switch_act(thread_t thread, thread_act_t old, thread_act_t new,
 		   unsigned cpu)
 {
-	(void) thread;
 	(void) old;
 	(void) cpu;
+
+	/*
+	 * 🔴 Only an activation built for THIS thread (#770).
+	 *
+	 * A pcb holds its thread's switch state (ctx.rsp, on that thread's
+	 * stack) and the stack the entries run C on (ctx.entry_stack), both
+	 * decided by context_init() for the thread the activation was created
+	 * with -- the frame belongs to the activation, as on i386, but here the
+	 * stack does too.  So an activation run by another thread would hand
+	 * the processor that other thread's stack, on this switch and on every
+	 * switch after it.  Nothing does it: thread pools are never filled,
+	 * since thread_activation_create() has no MIG routine (#783).  If it
+	 * ever happens it stops here, by name, rather than on someone else's
+	 * stack.
+	 */
+	if (new->mact.pcb != PCB_NULL
+	    && new->mact.pcb->ctx.entry_stack
+	       != (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE)
+		panic("machine_switch_act: activation %p was built for another "
+		      "thread's stack (%p, not this thread's %p): an activation "
+		      "runs only on the thread it was created with (#770)",
+		      (void *) new, (void *) new->mact.pcb->ctx.entry_stack,
+		      (void *) ((uint64_t) thread->kernel_stack
+				+ KERNEL_STACK_SIZE));
 
 	act_machine_switch_pcb(new);
 }
