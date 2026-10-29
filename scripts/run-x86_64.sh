@@ -472,6 +472,20 @@ case $DISKS_RC in
 	exit 1 ;;
 esac
 
+# 🔴 A PROGRAM BOOTSTRAP COULD NOT LOAD (#778).  It says so in one line and
+# waits at its prompt for another name (#541), and none of that program's
+# pairs ever opens, so nothing else here asks after it.  With stage 2's pair --
+# the loads off the boot disk happened -- this is what asks each program
+# bootstrap loads to have started: a program's own pairs ask only what it says
+# once it has.
+if grep -aq 'boot_load_program failed' "$LOG"; then
+	echo "  FAILED: bootstrap could not load a program, and stopped at its prompt (#778, #541):"
+	grep -a -B1 'boot_load_program failed' "$LOG" | head -n 6 | sed 's/^/    /'
+	missing_line_context
+	echo "  log: ${RAWLOG:-$LOG}"
+	exit 1
+fi
+
 # A test boot has to reach its own verdict (#461).
 #
 # Entry 5 is the preemption test, and its failure mode is SILENCE by design:
