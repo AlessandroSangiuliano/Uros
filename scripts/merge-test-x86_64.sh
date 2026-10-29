@@ -239,6 +239,15 @@ SKIPPED="
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
 "
 
+# A boot's name: what its two logs are called, and what ci/job.sh's row()
+# rebuilds out of its verdict line to find them.  No comma in it: an entry's
+# -smp value may be a whole topology (entry 14's 1,sockets=2,cores=64,
+# maxcpus=128), and ci/job.sh writes the name into a CSV whose columns commas
+# separate.
+boot_name() {	# entry accelerator -smp options-as-shown
+	echo "e$1-$2${3//,/_}${4:+-${4##* }}"
+}
+
 # #755: the two lists and grub.cfg agree, or nothing runs.  Entry 49, x2APIC
 # mode left on with interrupts remapped (#659), went into grub.cfg on 11/10
 # and into neither list, and no merge and no campaign booted it until #755:
@@ -647,10 +656,7 @@ while read -r e v opt cpus; do
 		budget=1200
 		k=""
 		[ $a = kvm ] && { budget=600; k="--kvm"; }
-		# No comma in a log's name: an entry's -smp value may be a whole
-		# topology (entry 14's 1,sockets=2,cores=64,maxcpus=128), and
-		# ci/job.sh writes the name into a CSV whose columns commas separate.
-		tag="e$e-$a${n//,/_}${shown:+-${shown##* }}"
+		tag=$(boot_name "$e" "$a" "$n" "$shown")
 		h="$OUT/$tag.log"
 		f="$OUT/$tag-full.log"
 		# #694: a boot's logs go before it.  run-x86_64.sh starts the full
