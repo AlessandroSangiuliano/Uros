@@ -193,6 +193,70 @@ print_cache_stats(const char *label,
 }
 
 /* ===================================================================
+ * What -X did during a measurement (#446)
+ *
+ * The hand-off on block (#356) queues a woken thread on its waker's processor
+ * instead of an idle one's.  Which arm a row was taken in, and whether the
+ * hand-off happened in it at all, used to be known only from the command line
+ * of the boot; a row now says it, read from the kernel before and after the
+ * timed loop, so a row read alone cannot be put in the wrong arm.
+ * =================================================================== */
+
+typedef struct {
+    unsigned int reach;
+    unsigned int same_task;
+    unsigned int other_task;
+} handoff_snap_t;
+
+static int
+handoff_snap(handoff_snap_t *s)
+{
+    host_rpc_handoff_info_data_t	info;
+    mach_msg_type_number_t		count = HOST_RPC_HANDOFF_INFO_COUNT;
+    kern_return_t			kr;
+
+    kr = host_info(host_port, HOST_RPC_HANDOFF_INFO,
+		   (host_info_t)&info, &count);
+    if (kr != KERN_SUCCESS)
+	return 0;
+    s->reach      = info.reach;
+    s->same_task  = info.same_task;
+    s->other_task = info.other_task;
+    return 1;
+}
+
+/*
+ * A line whether -X is on or not, and one when the kernel did not answer: a
+ * row without it would be read as one of an arm it was not taken in.  A row of
+ * N round trips wakes at most 2N threads, one per message.
+ */
+static void
+print_handoff_stats(const char *label, int ok,
+		    const handoff_snap_t *before, const handoff_snap_t *after)
+{
+    unsigned int same, other;
+
+    if (!ok) {
+	printf("  [-X] %-30s not answered: host_info refused "
+	       "HOST_RPC_HANDOFF_INFO\n", label);
+	return;
+    }
+    if (after->reach == 0) {
+	printf("  [-X] %-30s off\n", label);
+	return;
+    }
+    same  = after->same_task  - before->same_task;
+    other = after->other_task - before->other_task;
+    if (after->reach == 1)
+	printf("  [-X] %-30s same task: %u woken on their waker's "
+	       "processor, %u of another task\n", label, same + other, other);
+    else
+	printf("  [-X] %-30s reach %u: %u woken on their waker's "
+	       "processor, %u of another task\n",
+	       label, after->reach, same + other, other);
+}
+
+/* ===================================================================
  * Timing helpers
  * =================================================================== */
 
@@ -383,6 +447,8 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 {
     cache_snap_t	cs_before = { 0 }, cs_after = { 0 };
     int			cs_ok;
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok;
     mach_port_t		echo_port, reply_port;
     kern_return_t	kr;
     tvalspec_t		t0, t1;
@@ -422,6 +488,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     }
 
     /* Timed run */
+    ho_ok = handoff_snap(&ho_before);
     cs_ok = cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
@@ -440,6 +507,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
+    ho_ok &= handoff_snap(&ho_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
     /*
@@ -451,6 +519,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
      */
     if (cs_ok)
 	print_cache_stats(label, &cs_before, &cs_after);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     /* Cleanup: destroy ports (kills echo thread's receive) */
     mach_port_destroy(mach_task_self(), echo_port);
@@ -523,6 +592,8 @@ bench_combined_rpc(const char *label, int send_size, int iters)
     tvalspec_t		t0, t1;
     int			i;
     bench_recv_buf_t	buf;	/* one buffer: send from it, receive into it */
+    handoff_snap_t	ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok;
 
     kr = mach_port_allocate(mach_task_self(),
 			    MACH_PORT_RIGHT_RECEIVE, &echo_port);
@@ -547,6 +618,7 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
 
+    ho_ok = handoff_snap(&ho_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
 	buf.head.msgh_bits =
@@ -560,8 +632,10 @@ bench_combined_rpc(const char *label, int send_size, int iters)
 		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
+    ho_ok &= handoff_snap(&ho_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     mach_port_destroy(mach_task_self(), echo_port);
     mach_port_destroy(mach_task_self(), reply_port);
@@ -624,6 +698,8 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 {
     cache_snap_t		cs_before = { 0 }, cs_after = { 0 };
     int			cs_ok;
+    handoff_snap_t		ho_before = { 0 }, ho_after = { 0 };
+    int			ho_ok;
     kern_return_t		kr;
     mach_port_t			child_task, child_thread;
     mach_port_t			child_recv_port;	/* child receives */
@@ -739,6 +815,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     /*
      * Step 8: Timed run.
      */
+    ho_ok = handoff_snap(&ho_before);
     cs_ok = cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
@@ -756,6 +833,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     }
     get_time(&t1);
     cs_ok &= cache_snap(&cs_after);
+    ho_ok &= handoff_snap(&ho_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
     /*
@@ -767,6 +845,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
      */
     if (cs_ok)
 	print_cache_stats(label, &cs_before, &cs_after);
+    print_handoff_stats(label, ho_ok, &ho_before, &ho_after);
 
     /*
      * Step 9: Cleanup — destroy the child task.
