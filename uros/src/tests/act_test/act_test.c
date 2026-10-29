@@ -245,6 +245,13 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 		} else {
 			arm_seventeen_others++;
 		}
+		/*
+		 * Each request brings a reference to both names, and an
+		 * answer of KERN_SUCCESS keeps them (arm one's note above):
+		 * a hundred rounds would leave a hundred behind.
+		 */
+		(void) mach_port_deallocate(mach_task_self(), thread);
+		(void) mach_port_deallocate(mach_task_self(), task);
 		return KERN_SUCCESS;
 	}
 	if (arm_eighteen_armed) {
@@ -252,6 +259,8 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 		arm_eighteen_code = (codeCnt > 0) ? (int) code[0] : 0;
 		arm_eighteen_named_the_victim = (thread == arm_eighteen_thread);
 		(void) thread_terminate(thread);
+		(void) mach_port_deallocate(mach_task_self(), thread);
+		(void) mach_port_deallocate(mach_task_self(), task);
 		return KERN_SUCCESS;
 	}
 	if (arm_six_armed) {
@@ -3233,6 +3242,7 @@ arm_seventeen_start_at_a_noncanonical_rip(void)
 	kern_return_t			kr;
 	unsigned int			i;
 	int				round;
+	char				vendor[13];
 
 	if (!arm_780_watch_bad_instruction("[17]"))
 		return 0;
@@ -3308,10 +3318,12 @@ arm_seventeen_start_at_a_noncanonical_rip(void)
 		return 0;
 	}
 
+	cpu_vendor(vendor);
 	printf("act_test: [17] a thread started at 0x%llx raised "
 	       "EXC_BAD_INSTRUCTION code %d against itself %d times, was told to "
 	       "resume each time, and the machine is still running to say so "
-	       "(#780)\n", NONCANONICAL, arm_seventeen_code, arm_seventeen_seen);
+	       "— cpu %s (#780)\n", NONCANONICAL, arm_seventeen_code,
+	       arm_seventeen_seen, vendor);
 	return 1;
 }
 
@@ -3339,6 +3351,8 @@ arm_eighteen_stopped_in_a_trap(void)
 	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
 	kern_return_t			kr;
 	int				i;
+	unsigned long long		stopped_at;
+	char				vendor[13];
 
 	if (!arm_780_watch_bad_instruction("[18]"))
 		return 0;
@@ -3357,22 +3371,46 @@ arm_eighteen_stopped_in_a_trap(void)
 	}
 	(void) nap(200);
 
-	kr = thread_suspend(arm_eighteen_thread);
-	if (kr != KERN_SUCCESS) {
-		printf("act_test: [18] thread_suspend answered %d — WRONG\n", kr);
-		return 0;
+	/*
+	 * ⚠️ Stopped INSIDE ITS LOOP, and asked rather than assumed.  The
+	 * spinner made one system call before it began to spin, and a thread
+	 * stopped inside one leaves through SYSRET, whose check is #518's: the
+	 * arm would pass, and the ablation of trap_common's check would stay
+	 * green without saying why.  A rip in this function's own code means
+	 * the thread was stopped where only an interrupt could have stopped it;
+	 * anywhere else, it is let go and stopped again.
+	 */
+	for (i = 0; i < 10; i++) {
+		kr = thread_suspend(arm_eighteen_thread);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [18] thread_suspend answered %d "
+			       "— WRONG\n", kr);
+			return 0;
+		}
+		count = x86_64_THREAD_STATE_COUNT;
+		kr = thread_get_state(arm_eighteen_thread, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, &count);
+		if (kr == KERN_SUCCESS
+		    && state.rip >= (uintptr_t) the_thread_stopped_in_a_trap
+		    && state.rip < (uintptr_t) the_thread_stopped_in_a_trap
+				   + 0x100)
+			break;
+		(void) thread_resume(arm_eighteen_thread);
+		(void) nap(50);
 	}
-	kr = thread_get_state(arm_eighteen_thread, x86_64_THREAD_STATE,
-			      (thread_state_t) &state, &count);
-	if (kr != KERN_SUCCESS || state.cs != 0x2bULL || state.ss != 0x23ULL) {
+	if (kr != KERN_SUCCESS || state.cs != 0x2bULL || state.ss != 0x23ULL
+	    || i == 10) {
 		printf("act_test: [18] thread_get_state answered %d, cs 0x%llx "
-		       "ss 0x%llx — not a ring-3 frame to poison — WRONG\n", kr,
+		       "ss 0x%llx rip 0x%llx after %d tries — not a ring-3 frame "
+		       "inside the spinner's loop to poison — WRONG\n", kr,
 		       (unsigned long long) state.cs,
-		       (unsigned long long) state.ss);
+		       (unsigned long long) state.ss,
+		       (unsigned long long) state.rip, i);
 		arm_eighteen_stop = 1;
 		(void) thread_resume(arm_eighteen_thread);
 		return 0;
 	}
+	stopped_at = state.rip;
 
 	state.rip = NONCANONICAL;
 	kr = thread_set_state(arm_eighteen_thread, x86_64_THREAD_STATE,
@@ -3416,10 +3454,12 @@ arm_eighteen_stopped_in_a_trap(void)
 		return 0;
 	}
 
-	printf("act_test: [18] a thread stopped inside a trap and told to resume "
-	       "at 0x%llx raised EXC_BAD_INSTRUCTION code %d against itself, and "
-	       "the machine is still running to say so (#780)\n", NONCANONICAL,
-	       arm_eighteen_code);
+	cpu_vendor(vendor);
+	printf("act_test: [18] a thread stopped inside a trap at 0x%llx, in its "
+	       "loop, and told to resume at 0x%llx raised EXC_BAD_INSTRUCTION "
+	       "code %d against itself, and the machine is still running to say "
+	       "so — cpu %s (#780)\n", stopped_at, NONCANONICAL,
+	       arm_eighteen_code, vendor);
 	return 1;
 }
 
