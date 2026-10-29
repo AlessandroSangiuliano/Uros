@@ -654,8 +654,13 @@ machine_processors_ready(void)
 		 * ever in a wait nobody will signal -- which is the price of a
 		 * target that thread_stop_wait() can actually stop, and why this
 		 * is not on the ordinary boot.
+		 *
+		 * #779: not gated on `want > 1', and neither are the five
+		 * below: on one processor each says why its question does not
+		 * arise there, as -E does.  Gated, a one-processor boot of any
+		 * of them said nothing and was passed.
 		 */
-		if (boot_flag('G') && want > 1)
+		if (boot_flag('G'))
 			thread_state_entry_test();
 
 		/*
@@ -665,7 +670,7 @@ machine_processors_ready(void)
 		 * has to be bound to a processor already in the scheduler.
 		 * Returns, so the boot goes on to bootstrap_create() as usual.
 		 */
-		if (boot_flag('A') && want > 1)
+		if (boot_flag('A'))
 			kernel_ast_test();
 
 		/*
@@ -677,7 +682,7 @@ machine_processors_ready(void)
 		 * what it may BLOCK.  Same requirement of a second processor,
 		 * and it returns so the boot goes on.
 		 */
-		if (boot_flag('W') && want > 1)
+		if (boot_flag('W'))
 			kernel_wait_preempt_test();
 
 		/*
@@ -688,7 +693,7 @@ machine_processors_ready(void)
 		 * while it runs: the drivers that claim lines come with
 		 * bootstrap.  Returns, so the boot goes on.
 		 */
-		if (boot_flag('Y') && want > 1)
+		if (boot_flag('Y'))
 			ioapic_window_race_test();
 
 		/*
@@ -697,7 +702,7 @@ machine_processors_ready(void)
 		 * bootstrap for the same reason too: the device it takes is
 		 * one no driver has claimed yet.  Returns.
 		 */
-		if (boot_flag('m') && want > 1)
+		if (boot_flag('m'))
 			msi_function_race_test();
 
 		/*
@@ -706,7 +711,7 @@ machine_processors_ready(void)
 		 * runs, because the panic is the test (scripts/
 		 * double-panic-check.sh reads the log).
 		 */
-		if (boot_flag('Z') && want > 1)
+		if (boot_flag('Z'))
 			double_panic_test();
 
 		/*
@@ -924,9 +929,11 @@ machine_processors_ready(void)
 		 *
 		 * Here for the same reason as -P: the threads have to be bound
 		 * to a processor that is already in the scheduler, and this is
-		 * the first instant at which one is.
+		 * the first instant at which one is.  Not gated on `want > 1'
+		 * (#779): on one processor fpu_stress_run() says why, and the
+		 * boot ends here as it does on more.
 		 */
-		if (boot_flag('F') && want > 1) {
+		if (boot_flag('F')) {
 			fpu_stress_run();
 			printf("fpu_stress: halting the machine — this boot "
 			       "was the test (#408)\n");
