@@ -7,10 +7,10 @@ Run: --entry 54 600 -smp 4
 Expect: profile_entry: WRONG
 
 diff --git a/uros/src/mach_kernel/kern/syscall_profile.c b/uros/src/mach_kernel/kern/syscall_profile.c
-index fd05c0f0..5bb4a571 100644
+index 1dcd15c6..b9cae074 100644
 --- a/uros/src/mach_kernel/kern/syscall_profile.c
 +++ b/uros/src/mach_kernel/kern/syscall_profile.c
-@@ -588,7 +588,7 @@ syscall_profile_enter(int trap_number)
+@@ -600,7 +600,7 @@ syscall_profile_enter(int trap_number)
  	 * 0 is a stub that takes no reading (i386, #554): the sample opens from
  	 * the clock instead, and its entry column says unknown.
  	 */
@@ -20,15 +20,15 @@ index fd05c0f0..5bb4a571 100644
  		return;
  	}
 diff --git a/uros/src/mach_kernel/x86_64/cpu/percpu.c b/uros/src/mach_kernel/x86_64/cpu/percpu.c
-index 89adb945..13e1c1dd 100644
+index aefa79ae..1cadd779 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/percpu.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/percpu.c
-@@ -283,8 +283,14 @@ void percpu_activate(uint32_t cpu_id)
+@@ -291,8 +291,14 @@ void percpu_activate(uint32_t cpu_id)
  uint64_t
  syscall_profile_entry_tsc(void)
  {
 -	return *(const uint64_t *) (uintptr_t)
--		(percpu_kernel_rsp() - SYSCALL_ENTRY_TSC_BELOW);
+-		(percpu_kernel_stack() - SYSCALL_ENTRY_TSC_BELOW);
 +	uint64_t	tsc = 0;
 +
 +	disable_preemption();
@@ -41,19 +41,19 @@ index 89adb945..13e1c1dd 100644
  #endif	/* SYSCALL_PROFILE */
  
 diff --git a/uros/src/mach_kernel/x86_64/cpu/percpu.h b/uros/src/mach_kernel/x86_64/cpu/percpu.h
-index 0bdfcab9..998e57f2 100644
+index 9a61edfa..72bd9ce7 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/percpu.h
 +++ b/uros/src/mach_kernel/x86_64/cpu/percpu.h
-@@ -37,6 +37,8 @@
- #define PERCPU_INTR_LEVEL	168
+@@ -38,6 +38,8 @@
  #define PERCPU_INTR_SAVED_IF	172
  #define PERCPU_USER_RETURNS	176
-+#define PERCPU_SYSCALL_TSC	336
-+#define PERCPU_SYSCALL_TSC_THREAD	344
+ #define PERCPU_KERNEL_STACK	184
++#define PERCPU_SYSCALL_TSC	344
++#define PERCPU_SYSCALL_TSC_THREAD	352
  
  #ifndef __ASSEMBLER__
  
-@@ -329,6 +331,8 @@ struct percpu {
+@@ -347,6 +349,8 @@ struct percpu {
  		uint64_t gen;
  	} pcid_slot[PCID_SLOTS];
  	uint32_t pcid_victim;		/* the slot the next miss takes */
@@ -62,10 +62,10 @@ index 0bdfcab9..998e57f2 100644
  
  #if	CONTEXT_FPU_COUNT
  	/*
-@@ -381,6 +385,10 @@ _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)
- 	       == PERCPU_INTR_SAVED_IF, "percpu intr_saved_if moved");
- _Static_assert(__builtin_offsetof(struct percpu, user_returns)
+@@ -401,6 +405,10 @@ _Static_assert(__builtin_offsetof(struct percpu, user_returns)
  	       == PERCPU_USER_RETURNS, "percpu user_returns moved");
+ _Static_assert(__builtin_offsetof(struct percpu, kernel_stack)
+ 	       == PERCPU_KERNEL_STACK, "percpu kernel_stack moved");
 +_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc)
 +	       == PERCPU_SYSCALL_TSC, "percpu syscall_tsc moved");
 +_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc_thread)
@@ -74,10 +74,10 @@ index 0bdfcab9..998e57f2 100644
  /*
   * Two halves, and the split is not tidiness.
 diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
-index 674b2452..22c99da9 100644
+index a07b1edf..c62d55db 100644
 --- a/uros/src/mach_kernel/x86_64/syscall/entry.S
 +++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
-@@ -195,19 +195,17 @@ syscall_entry:
+@@ -254,19 +254,17 @@ syscall_entry:
  	 * inside SYSCALL_ENTRY_RESERVE, below which %rsp stays.
  	 */
  #if	SYSCALL_PROFILE
@@ -98,7 +98,7 @@ index 674b2452..22c99da9 100644
 +	movq	%rax, %gs:PERCPU_SYSCALL_TSC_THREAD
 +	popq	%rdx
  	popq	%rax
--	addq	$8, %rsp		/* and left there, under the frame */
+-	addq	$8, %rsp		/* and left there, under the stack top */
  #endif	/* SYSCALL_PROFILE */
  
- 	/*
+ 
