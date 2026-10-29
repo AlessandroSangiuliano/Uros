@@ -250,6 +250,9 @@ print_handoff_stats(const char *label, int ok,
     if (after->reach == 1)
 	printf("  [-X] %-30s same task: %u woken on their waker's "
 	       "processor, %u of another task\n", label, same + other, other);
+    else if (after->reach == 2)
+	printf("  [-X] %-30s any task: %u woken on their waker's "
+	       "processor, %u of another task\n", label, same + other, other);
     else
 	printf("  [-X] %-30s reach %u: %u woken on their waker's "
 	       "processor, %u of another task\n",
