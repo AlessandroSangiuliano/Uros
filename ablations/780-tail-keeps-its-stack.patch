@@ -7,7 +7,7 @@ Expect: UrMach x86-64: trap (general protection|double fault|page fault)|act_tes
 Note: both accelerators: the canonical check that sends the thread round again is the kernel's, not the processor's.  The stack runs out before the hundredth round, and either the kernel reports the fault it ends in or the arm counts fewer than a hundred.
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
-index 1b0c048e..f066da6a 100644
+index 44bddad9..fefa8f4b 100644
 --- a/uros/src/mach_kernel/x86_64/trap/entry.S
 +++ b/uros/src/mach_kernel/x86_64/trap/entry.S
 @@ -610,7 +610,6 @@ isr_table:
@@ -26,8 +26,8 @@ index 1b0c048e..f066da6a 100644
  	xorl	%ebp, %ebp			/* and no frame above it */
  	callq	thread_return_ast	/* AST_APC first: see trap.c */
  	jmp	thread_user_frame_return
-@@ -639,7 +637,6 @@ thread_bootstrap_return:
-  * has to rewind anything, and anything that did would be wrong.
+@@ -643,7 +641,6 @@ thread_bootstrap_return:
+  * have to rewind rip by the instruction's two bytes first (#780).
   */
  restart_mach_syscall:
 -	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
