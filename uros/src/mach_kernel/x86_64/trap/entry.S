@@ -598,6 +598,10 @@ isr_table:
  *     sixteen-aligned -- the opposite of what a C function is compiled for.
  *     kernel_stack is the stack's top, aligned.
  *
+ * %rbp is cleared with it, as i386's call_continuation clears %ebp: it still
+ * named a frame in the region just discarded, and a backtrace taken below
+ * here would have walked into it.
+ *
  * An exception has been handled and the thread should carry on where it was.
  *
  * The frame in the pcb is what trap entry saved on the way in, possibly
@@ -607,6 +611,7 @@ isr_table:
  */
 thread_exception_return:
 	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+	xorl	%ebp, %ebp			/* and no frame above it */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	jmp	thread_user_frame_return
 
@@ -620,6 +625,7 @@ thread_exception_return:
  */
 thread_bootstrap_return:
 	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+	xorl	%ebp, %ebp			/* and no frame above it */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	jmp	thread_user_frame_return
 
@@ -634,6 +640,7 @@ thread_bootstrap_return:
  */
 restart_mach_syscall:
 	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+	xorl	%ebp, %ebp			/* and no frame above it */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	jmp	thread_user_frame_return
 
