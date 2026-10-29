@@ -342,6 +342,15 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * sixteen: an end that is not aligned would put the frame eight bytes
 	 * below the one pcb->user names, so it is refused here rather than
 	 * trusted to the zone's carving.
+	 *
+	 * That carving is what makes it hold today, and nothing states it: the
+	 * pcb is inside the activation (offset 32), the activation zone cuts
+	 * page-aligned chunks into elements of sizeof (struct thread_activation)
+	 * -- 1008 bytes, a multiple of sixteen because this member is aligned --
+	 * and zinit() rounds an element only to eight.  An allocator that
+	 * handed out eight-aligned space instead, a zone made non-collectable
+	 * (zget_space()) or one with an eight-byte debug header, would fail here
+	 * on the first thread whose activation landed on the other eight.
 	 */
 	if (((uintptr_t) (&pcb->user_frame + 1)) & 15)
 		panic("thread: the pcb's frame ends at %p, not on sixteen bytes, "
