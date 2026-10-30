@@ -824,7 +824,16 @@ processor_exit(
 	if (processor == PROCESSOR_NULL)
 		return(KERN_INVALID_ARGUMENT);
 
-#if	NCPUS > 1
+#if	defined(__x86_64__)
+	/*
+	 * 🔴 Refused before anything is queued (#786).  The action thread
+	 * would take the processor out of its set and end in
+	 * switch_to_shutdown_context(), which x86-64 does not implement and
+	 * panics in (#453): a panic asked for from ring 3 by whoever holds a
+	 * processor's port.  Not supported is the answer until it is.
+	 */
+	return(KERN_NOT_SUPPORTED);
+#elif	NCPUS > 1
 	return(processor_shutdown(processor));
 #else	/* NCPUS > 1 */
 	return(KERN_FAILURE);
