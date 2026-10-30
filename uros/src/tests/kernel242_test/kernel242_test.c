@@ -1158,6 +1158,108 @@ wait_for_quiet_boot(void)
     }
 }
 
+/* =========================================================================
+ * ipc/mach_port.c  thread_activation_create -- refused (#783).
+ *
+ * It made an activation with no thread behind it, in a port's thread pool,
+ * for the migrating RPC that traps 35 and 36 were: any task's to make, and
+ * its zero stack was asked of by an assert, which stopped the machine.  The
+ * kernel refuses now, before it looks at anything it is given.  Both calls
+ * are made before either answer is judged, and the zero stack announces
+ * itself: on a kernel without the fix it is the one that stops the machine.
+ * Just before the trap test, which stays last for the same reason.
+ * ========================================================================= */
+static void
+test_activation_create_refused(void)
+{
+    static char stack[4096];		/* offered, never run on */
+    mach_port_t port, act = MACH_PORT_NULL;
+    kern_return_t kr, kr0;
+
+    BEGIN_TEST("thread_activation_create, the empty activation (#783)");
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    EXPECT_KR(kr, KERN_SUCCESS, "a receive right to offer");
+
+    kr = thread_activation_create(mach_task_self(), port,
+                                  (vm_offset_t)(stack + sizeof stack),
+                                  sizeof stack, &act);
+    printf("  with a stack and a receive right it answered 0x%x\n", kr);
+    if (kr == KERN_SUCCESS)
+        (void)mach_port_deallocate(mach_task_self(), act);
+    printf("  with a zero stack; if the machine stops here, that is the "
+           "answer\n");
+    kr0 = thread_activation_create(mach_task_self(), port, 0, 0, &act);
+    printf("  with a zero stack it answered 0x%x\n", kr0);
+    (void)mach_port_mod_refs(mach_task_self(), port,
+                             MACH_PORT_RIGHT_RECEIVE, -1);
+
+    EXPECT_KR(kr, KERN_NOT_SUPPORTED, "refused with a stack");
+    EXPECT_KR(kr0, KERN_NOT_SUPPORTED, "refused with a zero stack");
+    PASS();
+}
+
+/* =========================================================================
+ * kern/syscall_sw.c  traps 35 and 36 -- OSF's thread-migration RPC (#783).
+ *
+ * Nothing in the system calls them and nothing could make them work: they
+ * need activations waiting in a port's thread pool, and nothing fills one.
+ * Any task could call them all the same.  36, the return half of an RPC,
+ * asserted that the caller was in one -- a panic, from any thread, in one
+ * trap -- and 35 kept the send right it copied in on every call it refused.
+ * Both are not_implemented now, as they always were on x86-64.
+ *
+ * Called raw, with the sequence <mach/i386/syscall_sw.h>'s kernel_trap()
+ * emits: no library has a stub for either, which is part of the point.
+ * Trap 35 first, because on a kernel without the fix 36 stops the machine
+ * and 35's answer is the one that would then go unprinted.
+ * ========================================================================= */
+extern kern_return_t k242_trap35(mach_port_t dest, int id, void *sig, int size);
+extern kern_return_t k242_trap36(void);
+__asm__(
+    ".text\n"
+    ".globl k242_trap35\n"
+    "k242_trap35:\n"
+    "    movl $-35, %eax\n"
+    "    movl %esp, %ecx\n"
+    "    call 1f\n"
+    "1:  popl %edx\n"
+    "    addl $(8f - 1b), %edx\n"
+    "    .byte 0x0f, 0x34\n"        /* sysenter */
+    "8:  ret\n"
+    ".globl k242_trap36\n"
+    "k242_trap36:\n"
+    "    movl $-36, %eax\n"
+    "    movl %esp, %ecx\n"
+    "    call 2f\n"
+    "2:  popl %edx\n"
+    "    addl $(9f - 2b), %edx\n"
+    "    .byte 0x0f, 0x34\n"        /* sysenter */
+    "9:  ret\n");
+
+static void
+test_rpc_traps_refused(void)
+{
+    kern_return_t kr35, kr36;
+
+    BEGIN_TEST("traps 35 and 36, the thread-migration RPC (#783)");
+
+    /*
+     * A send right this task certainly holds, so that 35 gets past its
+     * copyin: the refusal that leaked was the one after it.
+     */
+    kr35 = k242_trap35(mach_task_self(), 0, (void *) 0, 0);
+    printf("  trap 35 with this task's own port answered 0x%x\n", kr35);
+    printf("  trap 36 from a thread in no RPC; if the machine stops here, "
+           "that is the answer\n");
+    kr36 = k242_trap36();
+    printf("  trap 36 answered 0x%x\n", kr36);
+
+    EXPECT_KR(kr35, MACH_SEND_INTERRUPTED, "trap 35 is not_implemented's");
+    EXPECT_KR(kr36, MACH_SEND_INTERRUPTED, "trap 36 is not_implemented's");
+    PASS();
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1200,6 +1302,8 @@ main(int argc, char **argv)
     test_device_read();
     test_fpu_state();
     test_io_kernel_ports();
+    test_activation_create_refused();	/* without #783 it stops the machine */
+    test_rpc_traps_refused();	/* last: without #783 it stops the machine */
 
     printf("\n=== kernel242_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);
     return (g_fail == 0) ? 0 : 1;

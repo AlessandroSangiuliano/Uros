@@ -2960,6 +2960,66 @@ arm_fourteen_terminate_inside_traps(void)
 	return 1;
 }
 
+/*
+ * Arm twenty: thread_activation_create() makes nothing (#783).
+ *
+ * It made an empty activation -- no thread behind it -- in a port's thread
+ * pool, the waiting room of OSF's migrating RPC, whose traps 35 and 36 are
+ * not_implemented: nothing could ever come to one, and any task could make
+ * one.  thread_policy() read through the missing thread to address 0, and a
+ * zero user_stack was asked of by an assert.  The kernel refuses now, with
+ * KERN_NOT_SUPPORTED, before it looks at what it is given, and both calls
+ * here must be told that: the first offers what OSF wanted, a receive right
+ * and a stack, the second a zero stack.  If the first makes one all the same
+ * -- the ablation that puts the old body back -- thread_policy() is asked of
+ * it, and must refuse an activation with no thread rather than read it.
+ * Returns 1 when refused, 0 when not, -1 when it could not be asked.
+ */
+static int
+arm_twenty_no_empty_activation(void)
+{
+	static char		stack[4096];	/* offered, never run on */
+	mach_port_t		port, act = MACH_PORT_NULL;
+	policy_timeshare_base_data_t ts;
+	kern_return_t		kr, kr0, krp;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [20] NOT ASKED — no receive right to offer: "
+		       "0x%x\n", kr);
+		return -1;
+	}
+
+	kr = thread_activation_create(mach_task_self(), port,
+				      (vm_offset_t) (stack + sizeof stack),
+				      sizeof stack, &act);
+	if (kr == KERN_SUCCESS) {
+		ts.base_priority = 12;
+		krp = thread_policy(act, POLICY_TIMESHARE, (integer_t *) &ts,
+				    POLICY_TIMESHARE_BASE_COUNT, FALSE);
+		printf("act_test: [20] thread_activation_create() made an "
+		       "activation with no thread, and thread_policy() on it "
+		       "answered 0x%x — WRONG, it makes none (#783)\n", krp);
+		(void) mach_port_deallocate(mach_task_self(), act);
+	}
+	kr0 = thread_activation_create(mach_task_self(), port, 0, 0, &act);
+	(void) mach_port_mod_refs(mach_task_self(), port,
+				  MACH_PORT_RIGHT_RECEIVE, -1);
+
+	if (kr != KERN_NOT_SUPPORTED || kr0 != KERN_NOT_SUPPORTED) {
+		printf("act_test: [20] thread_activation_create() answered 0x%x "
+		       "with a stack and 0x%x without one, where it refuses with "
+		       "KERN_NOT_SUPPORTED, 0x%x — WRONG (#783)\n",
+		       kr, kr0, KERN_NOT_SUPPORTED);
+		return 0;
+	}
+	printf("act_test: [20] thread_activation_create() refused with a stack "
+	       "and without one, KERN_NOT_SUPPORTED both times: no activation "
+	       "with no thread behind it can be made (#783)\n");
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -3559,6 +3619,12 @@ main(int argc, char **argv)
 	else
 		passed += r;
 	passed += arm_fourteen_terminate_inside_traps();
+	arms++;		/* arm twenty, #783: counted here, beside its call */
+	r = arm_twenty_no_empty_activation();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

@@ -1734,65 +1734,24 @@ thread_activation_create(task_t task, mach_port_t name,
                          vm_offset_t user_stack, vm_size_t stack_size, 
 			 thread_act_t *new_act)
 {
-	ipc_space_t space;
-	ipc_object_t object;
-	kern_return_t kr;
-	thread_act_t thr_act;
-	int is_port = 1;
-
-	if (task == TASK_NULL)
-		return KERN_INVALID_TASK;
-
-	/* First create the new activation.  */
 	/*
-	 * We'll need this stack later -- make sure it's present.
+	 * 🔴 REFUSED, ON EVERY TARGET (#783).  An empty activation is the
+	 * waiting room of a migrating RPC, and traps 35 and 36, the RPC
+	 * itself, are not_implemented: nothing could ever come to one.  What
+	 * it could do was be any task's to make -- the routine is in
+	 * mach_port.defs, and libmach has its stub -- and an activation with
+	 * no thread behind it is read through by thread_policy() and by any
+	 * call written since OSF without the empty case in mind, while the
+	 * user_stack it was given was asked of by an assert: a zero stopped
+	 * the machine.  So none is made.  The pools and act_set_thread_pool()
+	 * stay where they are, unreachable from ring 3, with the rest of the
+	 * machinery.
 	 */
-	assert(user_stack != 0);
-	kr = act_create(task, user_stack, stack_size, &thr_act);
-	if (kr != KERN_SUCCESS)
-		return kr;
-
-	space = task->itk_space;
-
-	kr = ipc_object_translate(space, name,
-				  MACH_PORT_RIGHT_PORT_SET, &object);
-	if (kr != KERN_SUCCESS) {
-		kr = ipc_object_translate(space, name,
-					  MACH_PORT_RIGHT_RECEIVE, &object);
-		if (kr != KERN_SUCCESS) {
-			thread_terminate(thr_act);
-			act_deallocate(thr_act);
-			return kr;
-		}
-		is_port = 0;
-	}
-	/* port/pset is locked and active */
-
-#if	MACH_ASSERT
-	if (watchacts & WA_PORT)
-		printf("thr_act on %s=%p stack=%lx thr_act=%p\n",
-		       (is_port ? "port" : "pset"),
-		       object, (unsigned long) user_stack, thr_act);
-#endif	/* MACH_ASSERT */
-
-	/* Assign the activation to the thread_pool.  */
-	kr = act_set_thread_pool(thr_act, (ipc_port_t)object);
-	if (kr != KERN_SUCCESS) {
-		io_unlock(object);
-		thread_terminate(thr_act);
-		act_deallocate(thr_act);
-		return kr;
-	}
-	io_unlock(object);
-
-#if	MACH_ASSERT
-	if (watchacts & WA_PORT)
-		printf("\tpool_port=%p thr_act=%p\n", (ipc_port_t)object, thr_act);
-#endif	/* MACH_ASSERT */
-
-	/* Pass our reference to the activation back to the user.  */
-	*new_act = thr_act;
-
-	return KERN_SUCCESS;
+	(void) task;
+	(void) name;
+	(void) user_stack;
+	(void) stack_size;
+	(void) new_act;
+	return KERN_NOT_SUPPORTED;
 }
 
