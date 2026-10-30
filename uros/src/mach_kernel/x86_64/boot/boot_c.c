@@ -4148,6 +4148,41 @@ static void thread_state_selftest(void)
 		      : " — WRONG, accepted, and the restore faults on it (#786)\r\n");
 	}
 
+	/*
+	 * 🔴 And a component the XSAVE header calls initial reads as its
+	 * initial configuration, whatever its bytes hold (#786): the save that
+	 * found it initial skipped them, and they keep another time's
+	 * registers.  The area fpu_area_init() leaves calls x87 and SSE
+	 * initial; a pattern goes where their status, pointers and registers
+	 * would be, and none of it may come out.
+	 */
+	if (fpu_uses_xsave()) {
+		int initial;
+
+		fpu_area_init(area);
+		for (unsigned i = 2; i < 24; i++)
+			area[i] = (uint8_t) (i * 7 + 3);
+		for (unsigned i = 32; i < 416; i++)
+			area[i] = (uint8_t) (i * 7 + 3);
+		float_state_from_area(area, &fstate);
+		initial = *(uint16_t *)(fstate.fx_image + 0) == 0x037F;
+		for (unsigned i = 2; i < 24; i++)
+			if (fstate.fx_image[i] != 0)
+				initial = 0;
+		for (unsigned i = 32; i < 416; i++)
+			if (fstate.fx_image[i] != 0)
+				initial = 0;
+		kputs(initial
+		      ? "UrMach x86-64: an area whose header calls x87 and SSE "
+			"initial, with a pattern in their bytes, reads as the "
+			"initial state\r\n"
+		      : "UrMach x86-64: an area whose header calls x87 and SSE "
+			"initial, with a pattern in their bytes, reads as the "
+			"pattern — WRONG, another time's registers (#786)\r\n");
+	} else
+		kputs("UrMach x86-64: an area whose header calls x87 and SSE "
+		      "initial: NOT ASKED — no XSAVE here, so no header (#786)\r\n");
+
 	boot_frame_free(frames);
 	boot_frame_free(frames + PAGE_SIZE_4K);
 }
