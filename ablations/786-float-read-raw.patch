@@ -1,0 +1,48 @@
+Kind: ablation
+Issue: #786
+Takes out: fpu_area_get_legacy()'s reading of a component the XSAVE header calls initial as its initial configuration -- the area's bytes come back as they are, so the boot's self-test reads its pattern, and where the processor counts SSE initial after VZEROALL act_test's arm twenty-four reads XMM0's old ones
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: UrMach x86-64: an area whose header calls x87 and SSE initial, with a pattern in their bytes, reads as the pattern .*WRONG
+Expect: act_test: \[24\] the thread got to step 3; .* the second answered 0x0 with [1-9][0-9]* nonzero bytes
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/fpu.c b/uros/src/mach_kernel/x86_64/thread/fpu.c
+index d46f2816..c1a836b1 100644
+--- a/uros/src/mach_kernel/x86_64/thread/fpu.c
++++ b/uros/src/mach_kernel/x86_64/thread/fpu.c
+@@ -558,35 +558,7 @@ int fpu_area_set_legacy(void *area, const uint8_t *image)
+ void fpu_area_get_legacy(const void *area, uint8_t *image)
+ {
+ 	const uint8_t *src = area;
+-	uint64_t bv, comp;
+ 
+ 	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+ 		image[i] = src[i];
+-	if (!use_xsave)
+-		return;			/* FXSAVE wrote all of it */
+-
+-	bv = *(const uint64_t *)(src + XSTATE_BV_OFFSET);
+-	comp = *(const uint64_t *)(src + XCOMP_BV_OFFSET);
+-
+-	/* x87: control 037FH, every register empty and zero, no pointers. */
+-	if (!(bv & XCR0_X87)) {
+-		for (unsigned i = 0; i < LEGACY_MXCSR; i++)
+-			image[i] = 0;
+-		for (unsigned i = LEGACY_ST0; i < LEGACY_XMM0; i++)
+-			image[i] = 0;
+-		*(uint16_t *)image = 0x037F;
+-	}
+-
+-	/*
+-	 * SSE: the XMM registers zero.  MXCSR is not part of the initial
+-	 * configuration: the standard form saves it whatever XSTATE_BV says,
+-	 * and the compacted one clears the bit only for 1F80H, and then does
+-	 * not save it (§13.10).
+-	 */
+-	if (!(bv & XCR0_SSE)) {
+-		for (unsigned i = LEGACY_XMM0; i < LEGACY_XMM_END; i++)
+-			image[i] = 0;
+-		if (comp & XCOMP_BV_COMPACTED)
+-			*(uint32_t *)(image + LEGACY_MXCSR) = MXCSR_RESET;
+-	}
+ }
