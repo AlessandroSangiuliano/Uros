@@ -3422,6 +3422,171 @@ arm_twenty_four_initial_reads_initial(void)
 }
 
 /*
+ * Arm twenty-five (#786): FIFO and RR are the processor set's control port's
+ * to give.  Without it they are refused -- thread_policy() for a thread,
+ * task_policy() for a task -- and with it thread_set_policy() still gives
+ * them, or an arm that passed by refusing everything would prove nothing.
+ * And a thread that asked for FIFO and was refused, started spinning, does not
+ * hold the processor: this one naps and wakes beside it, which at one
+ * processor is the whole point.
+ * Returns 1 when all of it holds, 0 when not, -1 when it could not be asked.
+ */
+#define	ARM25_NAPS	5
+
+static void
+arm_twenty_five_spin(void)
+{
+	for (;;)
+		;
+}
+
+static int
+arm_twenty_five_fifo_rr_need_the_set(void)
+{
+	mach_port_t			me = mach_task_self();
+	mach_port_t			host = mach_host_self();
+	mach_port_t			host_priv = MACH_PORT_NULL;
+	mach_port_t			device = MACH_PORT_NULL, lw = MACH_PORT_NULL;
+	mach_port_t			lp = MACH_PORT_NULL, sec = MACH_PORT_NULL;
+	mach_port_t			name = MACH_PORT_NULL, pset = MACH_PORT_NULL;
+	mach_port_t			child = MACH_PORT_NULL;
+	thread_act_t			quiet = MACH_PORT_NULL;
+	thread_act_t			spinner = MACH_PORT_NULL;
+	vm_address_t			stack = 0;
+	policy_fifo_base_data_t		fifo;
+	policy_fifo_limit_data_t	fifo_limit;
+	policy_rr_base_data_t		rr;
+	struct policy_timeshare_info	ts;
+	struct thread_basic_info	basic;
+	struct x86_64_thread_state	state;
+	host_basic_info_data_t		hi;
+	mach_msg_type_number_t		n;
+	kern_return_t			kr_tf = KERN_FAILURE, kr_tr = KERN_FAILURE;
+	kern_return_t			kr_task = KERN_FAILURE, kr_set = KERN_FAILURE;
+	kern_return_t			kr_spin = KERN_FAILURE;
+	int				naps = 0, cpus = 0, passed = -1;
+	unsigned			i;
+
+	n = POLICY_TIMESHARE_INFO_COUNT;
+	if (bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
+			    &sec) != KERN_SUCCESS ||
+	    processor_set_default(host, &name) != KERN_SUCCESS ||
+	    host_processor_set_priv(host_priv, name, &pset) != KERN_SUCCESS ||
+	    thread_create(me, &quiet) != KERN_SUCCESS ||
+	    thread_create(me, &spinner) != KERN_SUCCESS ||
+	    vm_allocate(me, &stack, vm_page_size, TRUE) != KERN_SUCCESS ||
+	    thread_info(quiet, THREAD_SCHED_TIMESHARE_INFO,
+			(thread_info_t) &ts, &n) != KERN_SUCCESS)
+		printf("act_test: [25] NOT ASKED — no privileged host port, "
+		       "processor set, threads or stack to ask with\n");
+	else {
+		/* At the threads' own base: only the policy is in question. */
+		fifo.base_priority = ts.base_priority;
+		fifo_limit.max_priority = ts.base_priority;
+		rr.quantum = 0;
+		rr.base_priority = ts.base_priority;
+
+		kr_tf = thread_policy(quiet, POLICY_FIFO, (integer_t *) &fifo,
+				      POLICY_FIFO_BASE_COUNT, FALSE);
+		kr_tr = thread_policy(quiet, POLICY_RR, (integer_t *) &rr,
+				      POLICY_RR_BASE_COUNT, FALSE);
+		if (task_create(me, (ledger_port_array_t) 0, 0, FALSE,
+				&child) == KERN_SUCCESS) {
+			kr_task = task_policy(child, POLICY_FIFO,
+					      (integer_t *) &fifo,
+					      POLICY_FIFO_BASE_COUNT, FALSE,
+					      FALSE);
+			(void) task_terminate(child);
+		}
+
+		kr_set = thread_set_policy(quiet, pset, POLICY_FIFO,
+					   (integer_t *) &fifo,
+					   POLICY_FIFO_BASE_COUNT,
+					   (integer_t *) &fifo_limit,
+					   POLICY_FIFO_LIMIT_COUNT);
+		n = THREAD_BASIC_INFO_COUNT;
+		basic.policy = -1;
+		(void) thread_info(quiet, THREAD_BASIC_INFO,
+				   (thread_info_t) &basic, &n);
+
+		/* The spinner: refused, then started. */
+		kr_spin = thread_policy(spinner, POLICY_FIFO,
+					(integer_t *) &fifo,
+					POLICY_FIFO_BASE_COUNT, FALSE);
+		for (i = 0; i < sizeof state; i++)
+			((volatile char *) &state)[i] = 0;
+		state.rip = (uint64_t) (uintptr_t) arm_twenty_five_spin;
+		state.rsp = stack + vm_page_size - 8;	/* as a call leaves it */
+		state.rflags = 0x202;
+		if (thread_set_state(spinner, x86_64_THREAD_STATE,
+				     (thread_state_t) &state,
+				     x86_64_THREAD_STATE_COUNT) == KERN_SUCCESS &&
+		    thread_resume(spinner) == KERN_SUCCESS)
+			for (i = 0; i < ARM25_NAPS; i++)
+				if (nap(10) == MACH_RCV_TIMED_OUT)
+					naps++;
+
+		n = HOST_BASIC_INFO_COUNT;
+		if (host_info(host, HOST_BASIC_INFO, (host_info_t) &hi,
+			      &n) == KERN_SUCCESS)
+			cpus = hi.avail_cpus;
+
+		if (kr_tf != KERN_INVALID_POLICY ||
+		    kr_tr != KERN_INVALID_POLICY ||
+		    kr_task != KERN_INVALID_POLICY || kr_set != KERN_SUCCESS ||
+		    basic.policy != POLICY_FIFO ||
+		    kr_spin != KERN_INVALID_POLICY || naps != ARM25_NAPS) {
+			printf("act_test: [25] without the set's port FIFO "
+			       "answered 0x%x, RR 0x%x, a task's FIFO 0x%x; with "
+			       "it 0x%x, policy %d; the spinner's FIFO 0x%x, and "
+			       "%d of %d naps beside it at %d processors — WRONG, "
+			       "FIFO and RR are the set's control port's to give "
+			       "(#786)\n", kr_tf, kr_tr, kr_task, kr_set,
+			       (int) basic.policy, kr_spin, naps, ARM25_NAPS,
+			       cpus);
+			passed = 0;
+		} else {
+			printf("act_test: [25] without the set's port a thread's "
+			       "FIFO and RR and a task's FIFO were refused with "
+			       "0x%x; with it FIFO was given, policy %d; a thread "
+			       "refused FIFO spun, and this one woke from %d of %d "
+			       "naps beside it at %d processors (#786)\n", kr_tf,
+			       (int) basic.policy, naps, ARM25_NAPS, cpus);
+			passed = 1;
+		}
+	}
+
+	if (spinner != MACH_PORT_NULL) {
+		(void) thread_terminate(spinner);
+		(void) mach_port_deallocate(me, spinner);
+	}
+	if (quiet != MACH_PORT_NULL) {
+		(void) thread_terminate(quiet);
+		(void) mach_port_deallocate(me, quiet);
+	}
+	if (stack != 0)
+		(void) vm_deallocate(me, stack, vm_page_size);
+	if (child != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, child);
+	if (pset != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, pset);
+	if (name != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, name);
+	if (host_priv != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, host_priv);
+	if (device != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, device);
+	if (lw != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lw);
+	if (lp != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lp);
+	if (sec != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, sec);
+	(void) mach_port_deallocate(me, host);
+	return passed;
+}
+
+/*
  * Arm twenty-two (#786): a processor's control port is the privileged host
  * port's to give.  host_processors() gave them for the name port every task
  * has, and with one processor_exit() was queued, and the action thread ended
@@ -4156,6 +4321,12 @@ main(int argc, char **argv)
 		passed += r;
 	arms++;		/* arm twenty-four, #786: harmless even ablated */
 	r = arm_twenty_four_initial_reads_initial();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-five, #786 */
+	r = arm_twenty_five_fifo_rr_need_the_set();
 	if (r < 0)
 		arms--;
 	else
