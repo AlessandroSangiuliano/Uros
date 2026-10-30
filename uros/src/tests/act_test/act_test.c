@@ -3274,6 +3274,154 @@ arm_twenty_three_float_state_is_what_the_thread_finds(void)
 }
 
 /*
+ * Arm twenty-four (#786): a component the XSAVE header calls initial reads
+ * as initial.  The thread puts ones in XMM0 and is stopped, so its area holds
+ * them with SSE marked in use; then it runs VZEROALL and is stopped again.  A
+ * processor that counts SSE initial after VZEROALL makes that second save
+ * skip the XMM registers and clear the bit, and the ones stay in the area:
+ * the read must give zero, which is what the restore would load.
+ * Asked only where the processor says so, through XGETBV(1): TCG never
+ * does, and there the second save writes the zeros itself.
+ * Returns 1 when right, 0 when not, -1 when it could not be asked.
+ */
+#define	ARM24_WAIT_MS	2000
+
+static volatile int		arm24_step;	/* 1 ones, 2 go, 3 zeroed */
+static volatile uint64_t	arm24_xinuse;
+
+static void
+arm_twenty_four_zero_the_vectors(void)
+{
+	uint32_t	a, d;
+
+	__asm__ volatile("pcmpeqd %%xmm0, %%xmm0" ::: "xmm0");
+	arm24_step = 1;
+	while (arm24_step != 2)
+		;
+	__asm__ volatile("vzeroall" ::: "xmm0", "xmm1", "xmm2", "xmm3",
+			 "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9",
+			 "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+	__asm__ volatile("xgetbv" : "=a" (a), "=d" (d) : "c" (1));
+	arm24_xinuse = ((uint64_t) d << 32) | a;
+	arm24_step = 3;
+	for (;;)
+		;
+}
+
+/* Wait for the thread to reach a step; 1 when it did. */
+static int
+arm_twenty_four_wait(int step)
+{
+	int	waited = 0;
+
+	while (arm24_step != step && waited < ARM24_WAIT_MS) {
+		if (nap(10) != MACH_RCV_TIMED_OUT)
+			break;
+		waited += 10;
+	}
+	return arm24_step == step;
+}
+
+/* Whether this processor has VZEROALL and XGETBV(1) for a ring-3 program. */
+static int
+arm_twenty_four_can_ask(void)
+{
+	uint32_t	a, b, c, d, lo, hi;
+
+	__asm__ volatile("cpuid" : "=a" (a), "=b" (b), "=c" (c), "=d" (d)
+			 : "a" (1), "c" (0));
+	if (!(c & (1U << 27)) || !(c & (1U << 28)))	/* OSXSAVE, AVX */
+		return 0;
+	__asm__ volatile("xgetbv" : "=a" (lo), "=d" (hi) : "c" (0));
+	if ((lo & 0x6) != 0x6)				/* XMM and YMM on */
+		return 0;
+	__asm__ volatile("cpuid" : "=a" (a), "=b" (b), "=c" (c), "=d" (d)
+			 : "a" (0xd), "c" (1));
+	return (a & (1U << 2)) != 0;			/* XGETBV with ECX=1 */
+}
+
+static int
+arm_twenty_four_initial_reads_initial(void)
+{
+	struct x86_64_float_state	ones, zeroed;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		n;
+	thread_act_t			t;
+	vm_address_t			stack = 0;
+	kern_return_t			kr1 = KERN_FAILURE, kr2 = KERN_FAILURE;
+	unsigned			i, ones_seen = 0, nonzero = 0;
+	int				passed = 0;
+
+	if (!arm_twenty_four_can_ask()) {
+		printf("act_test: [24] NOT ASKED — no VZEROALL or no XGETBV(1) "
+		       "here, so nothing asks the processor to count SSE "
+		       "initial (#786)\n");
+		return -1;
+	}
+	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE) !=
+	    KERN_SUCCESS || thread_create(mach_task_self(), &t) !=
+	    KERN_SUCCESS) {
+		printf("act_test: [24] NOT ASKED — no stack or no thread\n");
+		if (stack != 0)
+			(void) vm_deallocate(mach_task_self(), stack,
+					     vm_page_size);
+		return -1;
+	}
+
+	for (i = 0; i < sizeof state; i++)
+		((volatile char *) &state)[i] = 0;
+	state.rip = (uint64_t) (uintptr_t) arm_twenty_four_zero_the_vectors;
+	state.rsp = stack + vm_page_size - 8;	/* as a call leaves it */
+	state.rflags = 0x202;
+	arm24_step = 0;
+	if (thread_set_state(t, x86_64_THREAD_STATE, (thread_state_t) &state,
+			     x86_64_THREAD_STATE_COUNT) == KERN_SUCCESS &&
+	    thread_resume(t) == KERN_SUCCESS && arm_twenty_four_wait(1)) {
+		n = x86_64_FLOAT_STATE_COUNT;
+		kr1 = thread_get_state(t, x86_64_FLOAT_STATE,
+				       (thread_state_t) &ones, &n);
+		for (i = 160; kr1 == KERN_SUCCESS && i < 176; i++)
+			ones_seen += ones.fx_image[i] == 0xff;
+		arm24_step = 2;
+		if (arm_twenty_four_wait(3) && (arm24_xinuse & 2) == 0) {
+			n = x86_64_FLOAT_STATE_COUNT;
+			kr2 = thread_get_state(t, x86_64_FLOAT_STATE,
+					       (thread_state_t) &zeroed, &n);
+			for (i = 160; kr2 == KERN_SUCCESS && i < 416; i++)
+				nonzero += zeroed.fx_image[i] != 0;
+		}
+	}
+	(void) thread_terminate(t);
+	(void) mach_port_deallocate(mach_task_self(), t);
+	(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+
+	if (arm24_step == 3 && (arm24_xinuse & 2) != 0) {
+		printf("act_test: [24] NOT ASKED — after VZEROALL this processor "
+		       "still counts SSE in use (XINUSE 0x%llx), so its saves "
+		       "write the XMM registers either way (#786)\n",
+		       (unsigned long long) arm24_xinuse);
+		return -1;
+	}
+	if (kr1 != KERN_SUCCESS || ones_seen != 16 || kr2 != KERN_SUCCESS ||
+	    nonzero != 0) {
+		printf("act_test: [24] the thread got to step %d; the first read "
+		       "answered 0x%x with %u of XMM0's 16 bytes all ones, and "
+		       "after VZEROALL, with SSE initial (XINUSE 0x%llx), the "
+		       "second answered 0x%x with %u nonzero bytes in XMM0-XMM15 "
+		       "— WRONG, a component the header calls initial reads as "
+		       "initial (#786)\n", arm24_step, kr1, ones_seen,
+		       (unsigned long long) arm24_xinuse, kr2, nonzero);
+		return 0;
+	}
+	passed = 1;
+	printf("act_test: [24] XMM0 read back all ones, then after VZEROALL, "
+	       "with the processor counting SSE initial (XINUSE 0x%llx), every "
+	       "XMM register read back zero, what the restore would load "
+	       "(#786)\n", (unsigned long long) arm24_xinuse);
+	return passed;
+}
+
+/*
  * Arm twenty-two (#786): a processor's control port is the privileged host
  * port's to give.  host_processors() gave them for the name port every task
  * has, and with one processor_exit() was queued, and the action thread ended
@@ -4002,6 +4150,12 @@ main(int argc, char **argv)
 		passed += r;
 	arms++;		/* arm twenty-three, #786: harmless even ablated */
 	r = arm_twenty_three_float_state_is_what_the_thread_finds();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-four, #786: harmless even ablated */
+	r = arm_twenty_four_initial_reads_initial();
 	if (r < 0)
 		arms--;
 	else
