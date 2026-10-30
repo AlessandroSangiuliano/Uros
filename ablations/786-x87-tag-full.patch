@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #786
+Takes out: fpu_area_init()'s abridged tag byte of zero -- FFFFH is written there again, every x87 register in use, and the boot's self-test and act_test's arm twenty-three read it in a new thread's image
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: UrMach x86-64: a new thread's floating-point image: x87 control 0x0*37f, tag byte 0x0*ff, MXCSR .*WRONG, not the initial state
+Expect: act_test: \[23\] a new thread.s state: x87 control 0x37f, tag byte 0xff,
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/fpu.c b/uros/src/mach_kernel/x86_64/thread/fpu.c
+index 6d49afbf..689d694e 100644
+--- a/uros/src/mach_kernel/x86_64/thread/fpu.c
++++ b/uros/src/mach_kernel/x86_64/thread/fpu.c
+@@ -460,6 +460,7 @@ void fpu_area_init(void *area)
+ 	 * once the bit is set.
+ 	 */
+ 	*(uint16_t *)(bytes + 0) = 0x037F;	/* x87 control: all masked  */
++	*(uint16_t *)(bytes + 4) = 0xFFFF;	/* tag: every register free */
+ 	*(uint32_t *)(bytes + 24) = 0x1F80;	/* MXCSR: all masked        */
+ 
+ 	/*

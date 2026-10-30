@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #786
+Takes out: fpu_area_set_legacy()'s check of MXCSR against the processor's own mask -- an image setting a bit the restore faults on is written into the area, and the boot's self-test and act_test's arm twenty-three are told it was accepted
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: UrMach x86-64: a floating-point image with MXCSR 0x[0-9a-f]+, a bit outside the mask 0x[0-9a-f]+ .*WRONG, accepted
+Expect: act_test: \[23\] .* outside the mask 0x[0-9a-f]+, answered 0x0 and
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/fpu.c b/uros/src/mach_kernel/x86_64/thread/fpu.c
+index 6d49afbf..b23f0a88 100644
+--- a/uros/src/mach_kernel/x86_64/thread/fpu.c
++++ b/uros/src/mach_kernel/x86_64/thread/fpu.c
+@@ -505,9 +505,6 @@ int fpu_area_set_legacy(void *area, const uint8_t *image)
+ {
+ 	uint8_t *dst = area;
+ 
+-	if (*(const uint32_t *)(image + LEGACY_MXCSR) & ~mxcsr_mask)
+-		return 0;
+-
+ 	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+ 		dst[i] = image[i];
+ 
