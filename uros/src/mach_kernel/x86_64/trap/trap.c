@@ -1713,6 +1713,21 @@ trap_user_return_check(const struct trap_frame *frame)
 }
 
 /*
+ * thread_user_frame_return was entered with %rsp off the top of its kernel
+ * stack (entry.S).  Each of the three tails that jump there puts it at the
+ * top and balances its one call, so one of them kept the stack it was called
+ * on: every exception answered "resume" would bring the thread back a level
+ * deeper, into memory below the stack that nothing guards (#780).
+ */
+void
+trap_tail_off_its_stack(uint64_t top, uint64_t rsp)
+{
+	panic("trap: a return to ring 3 came into the shared tail with %%rsp %p, "
+	      "not at the top of its kernel stack, %p (#780)",
+	      (void *) rsp, (void *) top);
+}
+
+/*
  * Which Mach exception a vector is, and what the handler is told about it.
  *
  * Straight from i386's user_trap(), because it is the same architecture

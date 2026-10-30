@@ -313,6 +313,12 @@ void trap_user_return_check(const struct trap_frame *frame);
 void user_return_noncanonical(void);
 
 /*
+ * The thread-return tail in entry.S, entered with %rsp off the top of its
+ * kernel stack: a tail that kept the stack it was called on; panics (#780).
+ */
+void trap_tail_off_its_stack(uint64_t top, uint64_t rsp);
+
+/*
  * Entry from the four stubs that cannot decide from the saved code segment
  * (#440): #DB, NMI, #DF and #MC.  See trap/entry.S for why those four and no
  * others, and for how the decision is made.

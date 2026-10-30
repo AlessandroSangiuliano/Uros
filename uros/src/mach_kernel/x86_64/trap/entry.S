@@ -662,8 +662,15 @@ restart_mach_syscall:
  * swapgs unconditionally, because every one of these is a return TO USER --
  * unlike trap_common's tail, which has to test, because a trap may have come
  * from either ring.
+ *
+ * And it is entered at the top of the kernel stack, where each of the three
+ * puts %rsp: anything else is a tail that kept the stack it was called on,
+ * said here the first time (tail_off_its_stack) rather than once the stack
+ * has grown into memory nothing guards (#780).
  */
 thread_user_frame_return:
+	cmpq	%gs:PERCPU_KERNEL_STACK, %rsp	/* where each tail puts it (#780) */
+	jne	tail_off_its_stack
 	callq	act_user_return_frame	/* %rax = the frame, iretq-able (#780) */
 	cli
 	movq	%rax, %rsp
@@ -672,3 +679,14 @@ thread_user_frame_return:
 	swapgs
 	addq	$16, %rsp		/* drop the vector and error code */
 	iretq
+
+/*
+ * A tail came into the shared one off the top of its kernel stack.  Under the
+ * stack it kept, the overflow it would grow into faulted on victus and, on
+ * OMEGA under KVM, said nothing at all: so it is said here (#780).
+ */
+tail_off_its_stack:
+	movq	%gs:PERCPU_KERNEL_STACK, %rdi
+	movq	%rsp, %rsi
+	andq	$-16, %rsp
+	callq	trap_tail_off_its_stack	/* panics */
