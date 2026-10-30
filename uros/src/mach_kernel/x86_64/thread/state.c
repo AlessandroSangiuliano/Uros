@@ -187,19 +187,17 @@ int thread_state_to_frame(const struct x86_64_thread_state *state,
 /*
  * The legacy image is the first 512 bytes of the save area under FXSAVE and
  * under XSAVE alike — the extended components live above it — which is what
- * lets one flavour serve both without asking which instruction wrote it.
- * Writing it back has to ask: under XSAVE the header decides whether the
- * restore loads those bytes, and fpu_area_set_legacy() sets it (#786).
+ * lets one flavour serve both.  But under XSAVE the header decides whether
+ * those bytes are the thread's: fpu_area_get_legacy() reads a component the
+ * header calls initial as initial, and fpu_area_set_legacy() marks what it
+ * writes (#786).
  */
 void float_state_from_area(const void *area, struct x86_64_float_state *state)
 {
-	const uint8_t *src = area;
-
 	state->valid = 1;
 	state->reserved = 0;
 
-	for (unsigned i = 0; i < sizeof(state->fx_image); i++)
-		state->fx_image[i] = src[i];
+	fpu_area_get_legacy(area, state->fx_image);
 }
 
 /*

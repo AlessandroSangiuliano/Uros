@@ -48,9 +48,13 @@ static int have_xsaves_unused;	/* offered by the processor, not taken */
  * this processor accepts in it.
  */
 #define	LEGACY_SIZE		512
-#define	LEGACY_MXCSR		24
+#define	LEGACY_MXCSR		24	/* x87's control, status and pointers below */
 #define	LEGACY_MXCSR_MASK	28
+#define	LEGACY_ST0		32	/* ST0-ST7, 16 bytes each */
+#define	LEGACY_XMM0		160	/* XMM0-XMM15, 16 bytes each */
+#define	LEGACY_XMM_END		416
 #define	MXCSR_MASK_DEFAULT	0x0000FFBFU	/* §11.6.6: what a zero there means */
+#define	MXCSR_RESET		0x1F80U
 
 static uint32_t mxcsr_mask = MXCSR_MASK_DEFAULT;
 
@@ -532,4 +536,57 @@ int fpu_area_set_legacy(void *area, const uint8_t *image)
 			*comp |= XCR0_X87 | XCR0_SSE;
 	}
 	return 1;
+}
+
+/*
+ * A thread's legacy image as the thread would find it, for
+ * thread_get_state()'s FLOAT_STATE (#786).
+ *
+ * 🔴 Under XSAVE, a component whose XSTATE_BV bit is clear IS in its initial
+ * configuration, and the area's bytes for it are not its: the save that
+ * found it initial wrote the bit and skipped the bytes (SDM Vol. 1,
+ * 253665-093US, §13.9, §13.10), which keep what an earlier save wrote.
+ * Measured on victus (Zen 3): after VZEROALL the processor counts SSE
+ * initial again, and the next XSAVEOPT leaves the old XMM registers in the
+ * area.  Read as they stand they are another time's registers; written back
+ * through fpu_area_set_legacy(), which marks them, they would become the
+ * thread's, and reading and writing back the same image would change the
+ * thread.  So a component the header calls initial reads as its initial
+ * configuration (§13.6), which is what the restore would load (§13.8).
+ * Whether a processor tracks it is its own business: the SDM allows both.
+ */
+void fpu_area_get_legacy(const void *area, uint8_t *image)
+{
+	const uint8_t *src = area;
+	uint64_t bv, comp;
+
+	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+		image[i] = src[i];
+	if (!use_xsave)
+		return;			/* FXSAVE wrote all of it */
+
+	bv = *(const uint64_t *)(src + XSTATE_BV_OFFSET);
+	comp = *(const uint64_t *)(src + XCOMP_BV_OFFSET);
+
+	/* x87: control 037FH, every register empty and zero, no pointers. */
+	if (!(bv & XCR0_X87)) {
+		for (unsigned i = 0; i < LEGACY_MXCSR; i++)
+			image[i] = 0;
+		for (unsigned i = LEGACY_ST0; i < LEGACY_XMM0; i++)
+			image[i] = 0;
+		*(uint16_t *)image = 0x037F;
+	}
+
+	/*
+	 * SSE: the XMM registers zero.  MXCSR is not part of the initial
+	 * configuration: the standard form saves it whatever XSTATE_BV says,
+	 * and the compacted one clears the bit only for 1F80H, and then does
+	 * not save it (§13.10).
+	 */
+	if (!(bv & XCR0_SSE)) {
+		for (unsigned i = LEGACY_XMM0; i < LEGACY_XMM_END; i++)
+			image[i] = 0;
+		if (comp & XCOMP_BV_COMPACTED)
+			*(uint32_t *)(image + LEGACY_MXCSR) = MXCSR_RESET;
+	}
 }

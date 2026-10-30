@@ -136,6 +136,13 @@ void fpu_area_init(void *area);
 int fpu_area_set_legacy(void *area, const uint8_t *image);
 
 /*
+ * And read it as the thread would find it: a component the XSAVE header calls
+ * initial reads as its initial configuration, not as the bytes an earlier save
+ * left in the area (#786).
+ */
+void fpu_area_get_legacy(const void *area, uint8_t *image);
+
+/*
  * One area per thread, allocated because its size is what this processor
  * needs rather than a constant, and aligned because XSAVE raises #GP on an
  * area that is not (#453).  fpu_area_alloc() returns it already initialised.

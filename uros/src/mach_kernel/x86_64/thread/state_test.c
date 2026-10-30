@@ -509,6 +509,12 @@ test_table_agrees(void)
  * The conversion itself is checked at boot.  What is checked here is that the
  * flavour reaches it: a save area that belongs to the activation rather than
  * to the caller, and a count that is the flavour's.
+ *
+ * 🔴 Written first and read second (#786).  This put its pattern straight
+ * into the area and read it back, and a read now gives a component the XSAVE
+ * header calls initial as its initial configuration -- and the area
+ * fpu_area_init() leaves calls x87 and SSE initial.  A write marks them, so
+ * what was written is what the read must find.
  */
 static void
 test_float_state(void)
@@ -527,10 +533,31 @@ test_float_state(void)
 		return;
 	}
 
-	/* Something recognisable in the area, past the header the init writes. */
+	/*
+	 * Something recognisable, past the control words and MXCSR the init
+	 * wrote -- a legal image -- into the activation's area.
+	 */
+	buf_fill();
+	fs = (struct x86_64_float_state *) buf;
+	fs->valid = 1;
+	fs->reserved = 0;
+	for (unsigned i = 0; i < 32; i++)
+		fs->fx_image[i] = area[i];
 	for (unsigned i = 32; i < 512; i++)
-		area[i] = (uint8_t) (i * 7 + 3);
+		fs->fx_image[i] = (uint8_t) (i * 7 + 3);
 
+	claim(act_machine_set_state(&probe_act, x86_64_FLOAT_STATE,
+				    (thread_state_t) buf,
+				    x86_64_FLOAT_STATE_COUNT)
+	      == KERN_SUCCESS, "the floating-point state could not be written");
+
+	for (unsigned i = 32; i < 512; i++)
+		if (area[i] != (uint8_t) (i * 7 + 3))
+			same = 0;
+	claim(same, "the floating-point image written is not the one in the "
+		    "activation's save area");
+
+	/* And out again. */
 	buf_fill();
 	count = THREAD_STATE_MAX;
 	claim(act_machine_get_state(&probe_act, x86_64_FLOAT_STATE,
@@ -539,25 +566,9 @@ test_float_state(void)
 	claim(count == x86_64_FLOAT_STATE_COUNT,
 	      "the floating-point count did not come back as its own");
 
-	fs = (struct x86_64_float_state *) buf;
-	for (unsigned i = 32; i < 512; i++)
-		if (fs->fx_image[i] != area[i])
-			same = 0;
-	claim(same, "the floating-point image read is not the one in the "
-		    "activation's save area");
-
-	/* Back in, over a wiped area. */
-	for (unsigned i = 0; i < 512; i++)
-		area[i] = 0;
-
-	claim(act_machine_set_state(&probe_act, x86_64_FLOAT_STATE,
-				    (thread_state_t) buf,
-				    x86_64_FLOAT_STATE_COUNT)
-	      == KERN_SUCCESS, "the floating-point state could not be written");
-
 	same = 1;
 	for (unsigned i = 32; i < 512; i++)
-		if (area[i] != (uint8_t) (i * 7 + 3))
+		if (fs->fx_image[i] != (uint8_t) (i * 7 + 3))
 			same = 0;
 	claim(same, "the floating-point image did not survive the round trip "
 		    "through the dispatch");
