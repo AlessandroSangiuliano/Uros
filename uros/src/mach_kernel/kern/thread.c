@@ -2711,7 +2711,13 @@ thread_policy(
 	if (thr_act == THR_ACT_NULL)
 		return (KERN_INVALID_ARGUMENT);
 	thread = act_lock_thread(thr_act);
-	pset = thread->processor_set;
+	/*
+	 * An empty activation has no thread: the set is read only once there
+	 * is one.  It was read first, and an activation from
+	 * thread_activation_create() took the kernel to address 0 (#783).
+	 */
+	pset = (thread != THREAD_NULL) ? thread->processor_set :
+					 PROCESSOR_SET_NULL;
 	if (thread == THREAD_NULL || pset == PROCESSOR_SET_NULL) {
 		act_unlock_thread(thr_act);
 		return(KERN_INVALID_ARGUMENT);
