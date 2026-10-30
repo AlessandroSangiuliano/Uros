@@ -51,11 +51,13 @@
 #include <x86_64/time/clock_event.h>
 #include <x86_64/time/preempt_test.h>
 #include <x86_64/time/tsc.h>
+#include <time/rulers.h>		/* #723: a bound without the TSC's rate */
 #include <x86_64/cpu/regs.h>
 #include <x86_64/cpu/spl.h>
 #include <kern/misc_protos.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
+#include <kern/sched.h>			/* #723: min_quantum */
 #include <kern/processor.h>
 #include <kern/task.h>
 #include <kern/thread_swap.h>
@@ -104,6 +106,41 @@ static volatile int		preempt_slot_b = -1;
 static volatile int		preempt_slot_r = -1;
 static volatile int		preempt_slot_want = -1;
 static volatile int		preempt_probes;
+
+/*
+ * Who had the processor last, and how many times each of the three took it
+ * back (#723).
+ *
+ * A thread that finds the processor last held by another has just been given
+ * it, so the arrivals are the hand-overs -- the thing this test exists to
+ * show, which its PASS line used to state without counting: "100 times a
+ * second", the tick rate.  The scheduler hands a bound thread's processor
+ * over once a quantum, min_quantum ticks, ten times a second at 100 Hz.
+ *
+ * Each thread counts only its own arrivals, so no count has two writers; and
+ * the three only ever run one at a time.
+ */
+#define	PREEMPT_A	0
+#define	PREEMPT_B	1
+#define	PREEMPT_R	2
+static volatile int		preempt_owner = -1;
+static volatile unsigned long	preempt_turns[3];
+
+static __inline__ void
+preempt_arrive(int me)
+{
+	if (preempt_owner != me) {
+		preempt_owner = me;
+		preempt_turns[me]++;
+	}
+}
+
+static unsigned long
+preempt_turns_all(void)
+{
+	return preempt_turns[PREEMPT_A] + preempt_turns[PREEMPT_B] +
+	    preempt_turns[PREEMPT_R];
+}
 
 /*
  * A kernel thread that is bound BEFORE it can run (#461).
@@ -209,6 +246,7 @@ preempt_worker_a(void)
 	 * which is why the counter is sampled rather than assumed.
 	 */
 	while (!preempt_done) {
+		preempt_arrive(PREEMPT_A);
 		if ((preempt_count_a & 0xFFFFFFF) == 0 && preempt_probes < 4) {
 			preempt_probes++;
 			printf("preempt_test: worker a still here, preemption "
@@ -229,8 +267,10 @@ preempt_worker_b(void)
 	preempt_slot_b = current_processor()->slot_num;
 	printf("preempt_test: worker b running on processor %d\n",
 	       preempt_slot_b);
-	while (!preempt_done)
+	while (!preempt_done) {
+		preempt_arrive(PREEMPT_B);
 		preempt_count_b++;
+	}
 	for (;;)
 		cpu_pause();
 }
@@ -269,12 +309,12 @@ static void
 preempt_reporter(void)
 {
 	uint64_t	t0, deadline;
-	unsigned long	a, b;
+	unsigned long	a, b, turns0, ticks0, turns, ticks, promised;
 
 	/*
-	 * A second, measured against the TSC.  Long enough that a 100 Hz tick
-	 * gives roughly a hundred opportunities to switch, so a single
-	 * unlucky handover cannot be mistaken for the mechanism working.
+	 * A second, measured against the TSC.  Long enough for about ten
+	 * hand-overs at 100 Hz, one a quantum (#723), so a single unlucky
+	 * handover cannot be mistaken for the mechanism working.
 	 */
 	preempt_slot_r = current_processor()->slot_num;
 	printf("preempt_test: reporter running on processor %d\n",
@@ -294,8 +334,20 @@ preempt_reporter(void)
 		preempt_end();
 	}
 
-	while (rdtsc() - t0 < deadline)
+	/*
+	 * The window's hand-overs, and the ticks this processor took in it
+	 * (#723).  The reporter holds the processor as the window opens, so its
+	 * own arrival is counted before the window and not in it.
+	 */
+	preempt_arrive(PREEMPT_R);
+	turns0 = preempt_turns_all();
+	ticks0 = clock_event_ticks(preempt_slot_r);
+	while (rdtsc() - t0 < deadline) {
+		preempt_arrive(PREEMPT_R);
 		cpu_pause();
+	}
+	turns = preempt_turns_all() - turns0;
+	ticks = clock_event_ticks(preempt_slot_r) - ticks0;
 
 	a = preempt_count_a;
 	b = preempt_count_b;
@@ -329,9 +381,31 @@ preempt_reporter(void)
 		      "preemption (#461)", preempt_slot_want,
 		      preempt_slot_a, preempt_slot_b, preempt_slot_r);
 
-	printf("preempt_test: PASS — processor %d was taken from a running "
-	       "thread and given to another, %u times a second\n",
-	       current_processor()->slot_num, clock_event_hz());
+	/*
+	 * 🔑 AND HOW OFTEN, AGAINST WHAT THE SCHEDULER PROMISES (#723).  A bound
+	 * thread is given min_quantum ticks (thread_select()), spends them a
+	 * tick at a time (kern/priority.c), and at the end hands the processor
+	 * to a peer of its priority: over `ticks' ticks, about
+	 * ticks / min_quantum hand-overs.
+	 *
+	 * Judged against the ticks this processor took in the window, not
+	 * against the second the TSC measured: a tick held back (#717) is a
+	 * quantum stretched, not a promise broken.  From half the promise to
+	 * twice it, and two more for where the window cuts a quantum.  A
+	 * hand-over at every tick, or one every fourth quantum, is well outside.
+	 */
+	promised = min_quantum > 0 ? ticks / (unsigned long) min_quantum : 0;
+	if (turns < promised / 2 || turns > 2 * promised + 2)
+		printf("preempt_test: WRONG — processor %d changed hands %lu "
+		       "times in %lu ticks, where a quantum of %d ticks "
+		       "promises about %lu (#723)\n", preempt_slot_r, turns,
+		       ticks, min_quantum, promised);
+	else
+		printf("preempt_test: PASS — processor %d was taken from a "
+		       "running thread and given to another %lu times in %lu "
+		       "ticks, where a quantum of %d ticks promises about %lu "
+		       "(#723)\n", preempt_slot_r, turns, ticks, min_quantum,
+		       promised);
 
 	preempt_end();
 }
@@ -413,23 +487,68 @@ static void preempt_test_run_remote_body(int me);
  * The driver stays on the processor it chose from (#646).  It read
  * cpu_number() bare, on an unbound thread, and then counted on running
  * there; a move in between left `me' naming a processor it had left.
+ *
+ * 🔑 AND IT CHOOSES FROM THE BOOT PROCESSOR (#723).  It is
+ * start_kernel_threads(), unbound, and #646 bound it wherever it stood -- on
+ * processor 1 at times.  The test never chooses the boot processor nor the
+ * one the driver stands on, so at two processors the driver standing on
+ * processor 1 left nothing to choose, and a healthy machine said NOT ASKED.
+ * Moved to the boot processor first, it leaves every application processor
+ * to choose from.
  */
 void
 preempt_test_run_remote(void)
 {
 	processor_t	was = current_thread()->bound_processor;
+	int		me;
 
-	preempt_test_run_remote_body(thread_bind_here());
+	thread_bind(current_thread(), master_processor);
+	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
+	me = cpu_number();			/* bound: it stays */
+	if (me != master_cpu)
+		printf("preempt_test: WRONG — the driver was bound to the boot "
+		       "processor %d and runs on %d, so the processor it "
+		       "chooses may be the one it stands on (#723)\n",
+		       master_cpu, me);
+	preempt_test_run_remote_body(me);
 	thread_bind(current_thread(), was);
+}
+
+/*
+ * A ruler to bound a wait on when the TSC has no rate (#723): the HPET, else
+ * the PM timer -- read, never programmed, at a rate known without measuring
+ * (#508), and counting whether or not the TSC calibrated.  One the vote did
+ * not set aside first.  The 8254 is left out: it is a ruler only while
+ * rulers_start() runs it.
+ */
+static struct kernel_ruler *
+preempt_ruler(void)
+{
+	static const unsigned	ids[] = { RULER_HPET, RULER_PM };
+	struct kernel_ruler	*k, *any = NULL;
+	unsigned		i;
+
+	for (i = 0; i < sizeof ids / sizeof ids[0]; i++) {
+		k = rulers_get(ids[i]);
+		if (k == NULL || !k->present)
+			continue;
+		if (!k->dissents)
+			return k;
+		if (any == NULL)
+			any = k;
+	}
+	return any;
 }
 
 static void
 preempt_test_run_remote_body(int me)
 {
-	thread_t	a, b, r;
-	processor_t	target = PROCESSOR_NULL;
-	uint64_t	t0, limit;
-	int		i;
+	thread_t		a, b, r;
+	processor_t		target = PROCESSOR_NULL;
+	uint64_t		t0, limit;
+	struct kernel_ruler	*ruler;
+	uint64_t		ruler_limit = 0, ruler_last = 0, ruler_gone = 0;
+	int			i;
 
 	/*
 	 * The first processor that is neither this one nor the one the
@@ -438,13 +557,14 @@ preempt_test_run_remote_body(int me)
 	 * and this kernel indexes by them.
 	 *
 	 * ⚠️ master_cpu is excluded deliberately, and not because running there
-	 * would be wrong.  The thread calling this is start_kernel_threads(),
-	 * which is unbound -- so once the application processors are in the
-	 * scheduler it may itself be running on one, and the "first processor
-	 * that is not me" was observed to be processor 0.  That run proved
-	 * something real, and it did not prove THIS: that a processor which has
-	 * never in the history of this port run a thread can be given one and
-	 * have it taken away again.
+	 * would be wrong.  When the driver could stand on an application
+	 * processor, the "first processor that is not me" was observed to be
+	 * processor 0.  That run proved something real, and it did not prove
+	 * THIS: that a processor which has never in the history of this port run
+	 * a thread can be given one and have it taken away again.  The driver
+	 * now stands on the boot processor (#723), so `me' and master_cpu are
+	 * one processor; both are named, because a driver that did not get there
+	 * must still not choose the processor it stands on.
 	 */
 	for (i = 0; i < NCPUS; i++) {
 		if (i == me || i == master_cpu)
@@ -500,17 +620,39 @@ preempt_test_run_remote_body(int me)
 	 * Bounded because the failure this exists to catch is silence, and
 	 * waiting forever for a verdict turns a failed test into a hung boot --
 	 * which says strictly less.
+	 *
+	 * 🔑 AND WITHOUT THE TSC'S RATE, TEN SECONDS ON A RULER (#723).  The
+	 * reporter then declines and ends the run -- if it ever runs, and a
+	 * processor whose bound work never arrives is the very thing this waits
+	 * to catch.  So the bound cannot rest on the reporter either.
 	 */
 	t0 = rdtsc();
-	limit = tsc_hz() * 10;	/* zero with no TSC: the reporter declines and ends the run */
+	limit = tsc_hz() * 10;
+	ruler = limit == 0 ? preempt_ruler() : NULL;
+	if (ruler != NULL) {
+		ruler_limit = ruler->r.hz * 10;
+		ruler_last = ruler->r.read();
+	} else if (limit == 0)
+		printf("preempt_test: no calibrated TSC and no ruler, so the "
+		       "wait for processor %d has no bound (#723)\n",
+		       target->slot_num);
 
 	while (!preempt_reported) {
-		if (limit != 0 && rdtsc() - t0 > limit) {
+		if (ruler != NULL) {
+			uint64_t	now = ruler->r.read();
+
+			/* Added up a read apart, so no difference nears a wrap. */
+			ruler_gone += (now - ruler_last) & ruler->r.mask;
+			ruler_last = now;
+		}
+		if ((limit != 0 && rdtsc() - t0 > limit) ||
+		    (ruler != NULL && ruler_gone > ruler_limit)) {
 			printf("preempt_test: WRONG — processor %d never "
-			       "reported in ten seconds.  It reached the "
-			       "scheduler and runs an idle thread, but work "
-			       "bound to it either never arrives or never "
-			       "yields (#461)\n", target->slot_num);
+			       "reported in ten seconds of the %s.  It "
+			       "reached the scheduler and runs an idle thread, "
+			       "but work bound to it either never arrives or "
+			       "never yields (#461)\n", target->slot_num,
+			       ruler != NULL ? ruler->name : "TSC");
 			break;
 		}
 		clock_event_drain_reports();

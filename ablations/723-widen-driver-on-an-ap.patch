@@ -1,0 +1,46 @@
+Kind: widen
+Issue: #723
+Holds open: the driver of -P's test on an application processor -- startup moves start_kernel_threads() to the first application processor running before it calls preempt_test_run_remote(), where the scheduler had it at times, and says where it stands. At two processors that one is the only processor the test may choose.
+Accel: tcg,kvm
+Run: --entry 5 300 -smp 2
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/startup.c b/uros/src/mach_kernel/x86_64/cpu/startup.c
+index 7a3c6c09..b6deb5cf 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/startup.c
++++ b/uros/src/mach_kernel/x86_64/cpu/startup.c
+@@ -19,6 +19,7 @@
+ #include <kern/misc_protos.h>
+ #include <kern/processor.h>
+ #include <kern/sched_prim.h>	/* #428: -S parks the startup thread */	/* #461: real_ncpus */
++#include <mach/machine.h>	/* 723-widen-driver-on-an-ap: machine_slot[] */
+ #include <kern/startup.h>	/* #448: the interface, so it is checked */
+ #include <kern/clock.h>		/* #425: clock_config, the clock devices */
+ #include <mach/machine/vm_param.h>
+@@ -637,8 +638,26 @@ machine_processors_ready(void)
+ 		 * a processor that is already in the scheduler, and this is the
+ 		 * first instant at which one is.  Does not return.
+ 		 */
+-		if (boot_flag('P') && want > 1)
++		if (boot_flag('P') && want > 1) {
++			/*
++			 * 723-widen-driver-on-an-ap: the driver on the first
++			 * application processor running, where the scheduler
++			 * had start_kernel_threads() at times.
++			 */
++			int	ap;
++
++			for (ap = 0; ap < NCPUS; ap++)
++				if (ap != master_cpu && machine_slot[ap].is_cpu &&
++				    machine_slot[ap].running)
++					break;
++			if (ap < NCPUS) {
++				thread_bind(current_thread(), cpu_to_processor(ap));
++				thread_block((void (*)(void)) 0);
++				printf("723-widen: the driver stands on processor "
++				       "%d\n", cpu_number());
++			}
+ 			preempt_test_run_remote();
++		}
+ 
+ 		/*
+ 		 * -G: thread_get_state() and thread_set_state() themselves,
