@@ -184,10 +184,16 @@ subsystem
 
 /*
  *	Get list of processors on this host.
+ *
+ *	🔴 The privileged host port (#786).  What comes back are the
+ *	processors' control ports -- processor_exit(), processor_assign() --
+ *	and this took the host's name port, which every task has.  Reading the
+ *	processors needs no port of theirs: host_processor_info(), at the end
+ *	of this file, answers the name port with the information alone.
  */
 
 routine host_processors(
-		host	: host_t;
+		host_priv	: host_priv_t;
 	out	processor_list	: processor_port_array_t);
 
 /*
@@ -790,3 +796,18 @@ routine	vm_allocate_cpm(
 	inout	address		: vm_address_t;
 		size		: vm_size_t;
 		anywhere	: boolean_t);
+
+/*
+ *	What processor_info() answers for one processor, for every processor
+ *	on the host, one after the other: by the host's NAME port, since it
+ *	is information only, and without handing out the processors' control
+ *	ports, which host_processors() keeps for the privileged host port
+ *	(#786).  out_processor_count is how many processors answered; the
+ *	array holds that many records of the flavor's size.  As XNU's, but
+ *	the array comes back in the reply rather than out of line.
+ */
+routine host_processor_info(
+		host			: host_t;
+		flavor			: processor_flavor_t;
+	out	out_processor_count	: natural_t;
+	out	out_processor_info	: processor_info_array_t, CountInOut);

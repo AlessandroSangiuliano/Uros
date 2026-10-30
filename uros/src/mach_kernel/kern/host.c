@@ -150,6 +150,11 @@ vm_statistics_data_t	vm_stat[NCPUS];
 
 host_data_t	realhost;
 
+/*
+ * The processors' control ports, for the privileged host port only: the stub
+ * converts with convert_port_to_host_priv(), so the name port arrives here as
+ * HOST_NULL (mach_host.defs, #786).
+ */
 kern_return_t
 host_processors(
 	host_t			host,
@@ -201,6 +206,49 @@ host_processors(
 		((ipc_port_t *) tp)[i] = convert_processor_to_port(tp[i]);
 
 	return KERN_SUCCESS;
+}
+
+/*
+ * What processor_info() answers, for every processor in turn, by the host's
+ * name port (#786).  host_processors() hands out the processors' control
+ * ports and asks for the privileged host port; reading needs no port of
+ * theirs, and cpustat and any monitor read here.  The records go back to
+ * back into the caller's array, whose room *countp says on the way in; a
+ * processor whose record does not fit stops it with processor_info()'s own
+ * KERN_FAILURE, and an unknown flavor is processor_info()'s to refuse.
+ */
+kern_return_t
+host_processor_info(
+	host_t			host,
+	processor_flavor_t	flavor,
+	natural_t		*out_processor_count,
+	processor_info_array_t	out_processor_info,
+	mach_msg_type_number_t	*countp)
+{
+	mach_msg_type_number_t	room = *countp, used = 0, one;
+	natural_t		answered = 0;
+	host_t			ignored;
+	kern_return_t		kr;
+	int			i;
+
+	if (host == HOST_NULL)
+		return(KERN_INVALID_ARGUMENT);
+
+	for (i = 0; i < NCPUS; i++) {
+		if (!machine_slot[i].is_cpu)
+			continue;
+		one = room - used;
+		kr = processor_info(cpu_to_processor(i), flavor, &ignored,
+				    out_processor_info + used, &one);
+		if (kr != KERN_SUCCESS)
+			return(kr);
+		used += one;
+		answered++;
+	}
+
+	*out_processor_count = answered;
+	*countp = used;
+	return(KERN_SUCCESS);
 }
 
 kern_return_t

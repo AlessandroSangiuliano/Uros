@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #786
+Takes out: the processor set's timesharing-only default -- FIFO and RR are enabled for thread_policy() and task_policy() again, to every task: act_test's arm twenty-five gets FIFO without the set's port, and pthread_test's explicit_sched gets SCHED_RR and SCHED_FIFO
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[25\] without the set's port FIFO answered 0x0,
+Expect: \[[0-9]+\] explicit_sched: FAIL
+
+diff --git a/uros/src/mach_kernel/kern/processor.c b/uros/src/mach_kernel/kern/processor.c
+index dc725e05..23117b27 100644
+--- a/uros/src/mach_kernel/kern/processor.c
++++ b/uros/src/mach_kernel/kern/processor.c
+@@ -362,7 +362,7 @@ void pset_init(
+ 	 * processor_set_policy_enable() opens one to everybody when that
+ 	 * port's holder decides to.  The limits and bases below serve both.
+ 	 */
+-	pset->policies = POLICY_TIMESHARE;
++	pset->policies = POLICY_TIMESHARE | POLICY_RR | POLICY_FIFO;
+ 	pset->set_quantum = min_quantum;
+ #if	NCPUS > 1
+ 	pset->quantum_adj_index = 0;

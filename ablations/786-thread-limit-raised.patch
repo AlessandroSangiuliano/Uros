@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #786
+Takes out: thread_policy()'s check that set_limit never raises a thread's limit -- the base it is given becomes the limit again, compared with nothing, and act_test's arm twenty-one gets its new thread to priority 0
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[21\] asked for priority 0 with set_limit: the thread answered 0x0 \(
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index 6180851b..0a3cc1ff 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -2796,8 +2796,6 @@ thread_policy(
+ 		 * this one now; raising a limit is thread_set_policy()'s, with
+ 		 * the set's control port.  Lower numbers are higher priorities.
+ 		 */
+-		if (ret == KERN_SUCCESS && new_max < thread->max_priority)
+-			ret = KERN_POLICY_LIMIT;
+ 
+ 	} else {
+ 		/*

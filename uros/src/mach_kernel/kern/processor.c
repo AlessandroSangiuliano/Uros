@@ -347,14 +347,22 @@ void pset_init(
 	pset->pset_name_self = IP_NULL;
 	pset->max_priority = BASEPRI_USER;
 	/*
-	 * #274: enable the fixed-priority policies alongside timesharing.
-	 * The run queues are already per-priority and thread_policy_common
-	 * implements RR quantum / FIFO, so POSIX SCHED_FIFO / SCHED_RR
-	 * threads become schedulable instead of being rejected with
-	 * KERN_INVALID_POLICY.  The per-policy limits/bases below are
-	 * already set up for rr/fifo.
+	 * 🔴 Timesharing alone, for whoever asks without the set's port (#786).
+	 *
+	 * #274 enabled FIFO and RR here, and that opened them to
+	 * thread_policy() and task_policy() -- to every task, libpthreads'
+	 * SCHED_FIFO and SCHED_RR included.  A FIFO thread at its own base
+	 * yields only to a strictly better priority, and every user
+	 * timesharing thread is at that base or worse: any task could stop a
+	 * processor's user level for good, the servers with it.
+	 *
+	 * FIFO and RR are the set's control port's to give: thread_set_policy()
+	 * and task_set_policy() take any policy the set implements, enabled
+	 * here or not -- the default pager's RR comes that way -- and
+	 * processor_set_policy_enable() opens one to everybody when that
+	 * port's holder decides to.  The limits and bases below serve both.
 	 */
-	pset->policies = POLICY_TIMESHARE | POLICY_RR | POLICY_FIFO;
+	pset->policies = POLICY_TIMESHARE;
 	pset->set_quantum = min_quantum;
 #if	NCPUS > 1
 	pset->quantum_adj_index = 0;
@@ -824,7 +832,16 @@ processor_exit(
 	if (processor == PROCESSOR_NULL)
 		return(KERN_INVALID_ARGUMENT);
 
-#if	NCPUS > 1
+#if	defined(__x86_64__)
+	/*
+	 * 🔴 Refused before anything is queued (#786).  The action thread
+	 * would take the processor out of its set and end in
+	 * switch_to_shutdown_context(), which x86-64 does not implement and
+	 * panics in (#453): a panic asked for from ring 3 by whoever holds a
+	 * processor's port.  Not supported is the answer until it is.
+	 */
+	return(KERN_NOT_SUPPORTED);
+#elif	NCPUS > 1
 	return(processor_shutdown(processor));
 #else	/* NCPUS > 1 */
 	return(KERN_FAILURE);
@@ -1046,14 +1063,43 @@ processor_get_assignment(
 	processor_t	processor,
 	processor_set_t	*pset)
 {
-    	int state;
+    	int		state;
+	processor_set_t	ps;
+	spl_t		s;
 
+	/*
+	 * 🔴 Read under the processor's lock, and the set kept alive while it
+	 * is referenced (#786).  This read both fields with no lock, and a
+	 * reassignment leaves the processor in no set between
+	 * pset_remove_processor() and pset_add_processor() with its state
+	 * ASSIGN, which the check let through: pset_reference() of a null set.
+	 * The reference cannot be taken under the processor's lock, a spin
+	 * lock, since the set's is a mutex; all_psets_lock, which
+	 * pset_deallocate() must take before it frees a set, keeps the one
+	 * read alive until it is.
+	 */
+#if	MACH_HOST
+	mutex_lock(&all_psets_lock);
+#endif	/* MACH_HOST */
+	s = splsched();
+	processor_lock(processor);
 	state = processor->state;
-	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE)
-		return(KERN_FAILURE);
+	ps = processor->processor_set;
+	processor_unlock(processor);
+	splx(s);
 
-	*pset = processor->processor_set;
-	pset_reference(*pset);
+	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE ||
+	    ps == PROCESSOR_SET_NULL) {
+#if	MACH_HOST
+		mutex_unlock(&all_psets_lock);
+#endif	/* MACH_HOST */
+		return(KERN_FAILURE);
+	}
+	pset_reference(ps);
+#if	MACH_HOST
+	mutex_unlock(&all_psets_lock);
+#endif	/* MACH_HOST */
+	*pset = ps;
 	return(KERN_SUCCESS);
 }
 

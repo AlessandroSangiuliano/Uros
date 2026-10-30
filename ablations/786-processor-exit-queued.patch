@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #786
+Takes out: processor_exit()'s refusal on x86-64 -- the processor is queued for the action thread again, which takes it out of its set and panics in switch_to_shutdown_context() (#453) once act_test's arm twenty-two asks the last one listed to exit
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: switch_to_shutdown_context: taking a processor out of service is not implemented on this machine yet \(#453\)
+Expect: act_test: \[22\] .* processor_exit 0x0 .*WRONG
+
+diff --git a/uros/src/mach_kernel/kern/processor.c b/uros/src/mach_kernel/kern/processor.c
+index 1404d281..dd49d6f3 100644
+--- a/uros/src/mach_kernel/kern/processor.c
++++ b/uros/src/mach_kernel/kern/processor.c
+@@ -824,16 +824,7 @@ processor_exit(
+ 	if (processor == PROCESSOR_NULL)
+ 		return(KERN_INVALID_ARGUMENT);
+ 
+-#if	defined(__x86_64__)
+-	/*
+-	 * 🔴 Refused before anything is queued (#786).  The action thread
+-	 * would take the processor out of its set and end in
+-	 * switch_to_shutdown_context(), which x86-64 does not implement and
+-	 * panics in (#453): a panic asked for from ring 3 by whoever holds a
+-	 * processor's port.  Not supported is the answer until it is.
+-	 */
+-	return(KERN_NOT_SUPPORTED);
+-#elif	NCPUS > 1
++#if	NCPUS > 1
+ 	return(processor_shutdown(processor));
+ #else	/* NCPUS > 1 */
+ 	return(KERN_FAILURE);

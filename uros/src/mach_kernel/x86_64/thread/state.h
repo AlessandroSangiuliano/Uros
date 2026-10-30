@@ -215,9 +215,13 @@ int thread_state_to_frame(const struct x86_64_thread_state *state,
  */
 int thread_state_bases_ok(const struct x86_64_thread_state *state);
 
-/* The floating-point flavour, out of a save area and back into one. */
+/*
+ * The floating-point flavour, out of a save area and back into one.  The way
+ * back is a predicate, like thread_state_to_frame(): 0 when the image was
+ * refused and the area left as it was (#786).
+ */
 void float_state_from_area(const void *area, struct x86_64_float_state *state);
-void float_state_to_area(const struct x86_64_float_state *state, void *area);
+int float_state_to_area(const struct x86_64_float_state *state, void *area);
 
 /* Why it stopped, out of the frame that says so. */
 void exception_state_from_frame(const struct trap_frame *frame,

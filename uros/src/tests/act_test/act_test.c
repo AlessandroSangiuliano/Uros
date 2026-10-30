@@ -3020,6 +3020,690 @@ arm_twenty_no_empty_activation(void)
 	return 1;
 }
 
+/*
+ * Arm twenty-one: set_limit lowers a limit and never raises it (#786).
+ *
+ * thread_policy() with set_limit made the base it was given the thread's
+ * limit, comparing it with nothing, so a task put a thread of its own at
+ * priority 0, above every kernel thread; task_policy() did the same for a
+ * task.  A thread made here and never started asks for priority 0 with
+ * set_limit, and must be refused with KERN_POLICY_LIMIT, its policy, limit
+ * and base read back as they were; a task made here asks the same and must be
+ * refused too -- a child, so that a kernel without the fix changes nobody
+ * act_test needs.  And a lower priority with set_limit stays granted: an
+ * arm that passed by refusing everything would prove nothing.
+ * Timesharing, the one policy every task may ask for: FIFO, which this arm
+ * asked first, is refused before any limit is looked at since FIFO and RR
+ * became the processor set's control port's to give (#786, arm 25).
+ * Returns 1 when all three answers are right, 0 when not, -1 when it could
+ * not be asked.
+ */
+static int
+arm_twenty_one_set_limit_never_raises(void)
+{
+	thread_act_t			t;
+	mach_port_t			child;
+	kern_return_t			kr, krf, krt, krl;
+	policy_timeshare_base_data_t	zero, ts;
+	struct policy_timeshare_info	before, after;
+	struct thread_basic_info	basic;
+	mach_msg_type_number_t		n;
+
+	if (thread_create(mach_task_self(), &t) != KERN_SUCCESS) {
+		printf("act_test: [21] NOT ASKED — no thread to ask with\n");
+		return -1;
+	}
+	n = POLICY_TIMESHARE_INFO_COUNT;
+	if (thread_info(t, THREAD_SCHED_TIMESHARE_INFO, (thread_info_t) &before,
+			&n) != KERN_SUCCESS) {
+		printf("act_test: [21] NOT ASKED — the new thread is not "
+		       "timesharing\n");
+		(void) thread_terminate(t);
+		(void) mach_port_deallocate(mach_task_self(), t);
+		return -1;
+	}
+
+	zero.base_priority = 0;
+	krf = thread_policy(t, POLICY_TIMESHARE, (integer_t *) &zero,
+			    POLICY_TIMESHARE_BASE_COUNT, TRUE);
+	n = THREAD_BASIC_INFO_COUNT;
+	basic.policy = -1;
+	(void) thread_info(t, THREAD_BASIC_INFO, (thread_info_t) &basic, &n);
+	n = POLICY_TIMESHARE_INFO_COUNT;
+	after.max_priority = after.base_priority = -1;
+	kr = thread_info(t, THREAD_SCHED_TIMESHARE_INFO, (thread_info_t) &after,
+			 &n);
+
+	ts.base_priority = before.max_priority + 4;
+	krl = thread_policy(t, POLICY_TIMESHARE, (integer_t *) &ts,
+			    POLICY_TIMESHARE_BASE_COUNT, TRUE);
+	(void) thread_terminate(t);
+	(void) mach_port_deallocate(mach_task_self(), t);
+
+	krt = KERN_FAILURE;
+	if (task_create(mach_task_self(), (ledger_port_array_t) 0, 0, FALSE,
+			&child) == KERN_SUCCESS) {
+		krt = task_policy(child, POLICY_TIMESHARE, (integer_t *) &zero,
+				  POLICY_TIMESHARE_BASE_COUNT, TRUE, FALSE);
+		(void) task_terminate(child);
+		(void) mach_port_deallocate(mach_task_self(), child);
+	}
+
+	if (krf != KERN_POLICY_LIMIT || krt != KERN_POLICY_LIMIT ||
+	    krl != KERN_SUCCESS || kr != KERN_SUCCESS ||
+	    basic.policy != POLICY_TIMESHARE ||
+	    after.max_priority != before.max_priority ||
+	    after.base_priority != before.base_priority) {
+		printf("act_test: [21] asked for priority 0 with "
+		       "set_limit: the thread answered 0x%x (policy %d, limit %d, "
+		       "base %d, where they were %d and %d), a task 0x%x, and a "
+		       "lower priority 0x%x — WRONG, a limit is lowered and never "
+		       "raised (#786)\n", krf, (int) basic.policy,
+		       after.max_priority, after.base_priority,
+		       before.max_priority, before.base_priority, krt, krl);
+		return 0;
+	}
+	printf("act_test: [21] a thread and a task asked for priority 0 "
+	       "with set_limit: both refused with KERN_POLICY_LIMIT, the "
+	       "thread's limit and base still %d and %d; a lower one, %d, "
+	       "still granted (#786)\n", before.max_priority,
+	       before.base_priority, ts.base_priority);
+	return 1;
+}
+
+/*
+ * Arm twenty-three (#786): the floating-point state thread_set_state() writes
+ * is either refused or is what the thread finds.  Three answers:
+ *  - a new thread's state reads back as the initial one: x87 control 037FH,
+ *    every x87 register empty -- the ABRIDGED tag byte, 0 -- and MXCSR 1F80H;
+ *  - an image whose MXCSR sets the lowest bit this processor's mask does not
+ *    allow is refused, and the state read again is the one before;
+ *  - XMM0 and MXCSR written into a thread that has never used SSE are the
+ *    ones it finds when it starts.  With the header still saying SSE was
+ *    initial, the restore gave it zeros.
+ * The mask comes from an FXSAVE of this program's own: a thread that has
+ * never been switched out has none in its image yet.
+ * ⚠️ The refused image is never run.  On a kernel that accepted it, the next
+ * one overwrites it before the thread starts, so the arm says WRONG and the
+ * machine runs on.
+ * Returns 1 when all three answers are right, 0 when not, -1 when it could
+ * not be asked.
+ */
+#define	ARM23_WAIT_MS	2000
+#define	ARM23_XMM0_LO	0x0123456789abcdefULL
+#define	ARM23_XMM0_HI	0xfedcba9876543210ULL
+#define	ARM23_MXCSR	0x3f80U		/* every exception masked, round down */
+
+static volatile uint64_t	arm23_xmm0[2];
+static volatile uint32_t	arm23_mxcsr;
+static volatile int		arm23_looked;
+
+/* What the started thread finds, read before anything else can touch it. */
+static void
+arm_twenty_three_look(void)
+{
+	uint64_t	x[2];
+	uint32_t	m;
+
+	__asm__ volatile("movdqu %%xmm0, %0\n\tstmxcsr %1"
+			 : "=m" (x), "=m" (m));
+	arm23_xmm0[0] = x[0];
+	arm23_xmm0[1] = x[1];
+	arm23_mxcsr = m;
+	arm23_looked = 1;
+	for (;;)
+		;
+}
+
+static int
+arm_twenty_three_float_state_is_what_the_thread_finds(void)
+{
+	static uint8_t			fx[512] __attribute__((aligned(16)));
+	struct x86_64_float_state	first, again, bad, good;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		n;
+	thread_act_t			t;
+	vm_address_t			stack = 0;
+	kern_return_t			kr_bad, kr_good, kr_regs, kr_go;
+	uint32_t			mask, bit;
+	unsigned			i;
+	int				waited = 0, init_ok, unchanged = 1;
+
+	__asm__ volatile("fxsave %0" : "=m" (fx));
+	mask = *(uint32_t *) (fx + 28);
+	if (mask == 0)
+		mask = 0x0000ffbfU;	/* SDM Vol. 1 §11.6.6: what zero means */
+	bit = ~mask & (0U - ~mask);
+
+	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE) !=
+	    KERN_SUCCESS) {
+		printf("act_test: [23] NOT ASKED — no page for a stack\n");
+		return -1;
+	}
+	if (thread_create(mach_task_self(), &t) != KERN_SUCCESS) {
+		printf("act_test: [23] NOT ASKED — no thread to ask with\n");
+		(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+		return -1;
+	}
+	n = x86_64_FLOAT_STATE_COUNT;
+	if (thread_get_state(t, x86_64_FLOAT_STATE, (thread_state_t) &first,
+			     &n) != KERN_SUCCESS) {
+		printf("act_test: [23] NOT ASKED — no floating-point state to "
+		       "read\n");
+		(void) thread_terminate(t);
+		(void) mach_port_deallocate(mach_task_self(), t);
+		(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+		return -1;
+	}
+	init_ok = *(uint16_t *) (first.fx_image + 0) == 0x037f &&
+		  first.fx_image[4] == 0 &&
+		  *(uint32_t *) (first.fx_image + 24) == 0x1f80;
+
+	bad = first;
+	*(uint32_t *) (bad.fx_image + 24) |= bit;
+	kr_bad = thread_set_state(t, x86_64_FLOAT_STATE, (thread_state_t) &bad,
+				  x86_64_FLOAT_STATE_COUNT);
+	n = x86_64_FLOAT_STATE_COUNT;
+	if (thread_get_state(t, x86_64_FLOAT_STATE, (thread_state_t) &again,
+			     &n) != KERN_SUCCESS)
+		unchanged = 0;
+	for (i = 0; unchanged && i < sizeof(first.fx_image); i++)
+		if (again.fx_image[i] != first.fx_image[i])
+			unchanged = 0;
+
+	good = first;
+	*(uint64_t *) (good.fx_image + 160) = ARM23_XMM0_LO;
+	*(uint64_t *) (good.fx_image + 168) = ARM23_XMM0_HI;
+	*(uint32_t *) (good.fx_image + 24) = ARM23_MXCSR;
+	kr_good = thread_set_state(t, x86_64_FLOAT_STATE,
+				   (thread_state_t) &good,
+				   x86_64_FLOAT_STATE_COUNT);
+
+	for (i = 0; i < sizeof state; i++)
+		((volatile char *) &state)[i] = 0;
+	state.rip = (uint64_t) (uintptr_t) arm_twenty_three_look;
+	state.rsp = stack + vm_page_size - 8;	/* as a call leaves it */
+	state.rflags = 0x202;
+	kr_regs = thread_set_state(t, x86_64_THREAD_STATE,
+				   (thread_state_t) &state,
+				   x86_64_THREAD_STATE_COUNT);
+	kr_go = KERN_FAILURE;
+	if (kr_good == KERN_SUCCESS && kr_regs == KERN_SUCCESS)
+		kr_go = thread_resume(t);
+	while (kr_go == KERN_SUCCESS && !arm23_looked &&
+	       waited < ARM23_WAIT_MS) {
+		if (nap(10) != MACH_RCV_TIMED_OUT)
+			break;
+		waited += 10;
+	}
+	(void) thread_terminate(t);
+	(void) mach_port_deallocate(mach_task_self(), t);
+	(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+
+	if (!init_ok || kr_bad == KERN_SUCCESS || !unchanged ||
+	    kr_good != KERN_SUCCESS || kr_regs != KERN_SUCCESS ||
+	    kr_go != KERN_SUCCESS || !arm23_looked ||
+	    arm23_xmm0[0] != ARM23_XMM0_LO || arm23_xmm0[1] != ARM23_XMM0_HI ||
+	    arm23_mxcsr != ARM23_MXCSR) {
+		printf("act_test: [23] a new thread's state: x87 control 0x%x, "
+		       "tag byte 0x%x, MXCSR 0x%x; an MXCSR with 0x%x set, "
+		       "outside the mask 0x%x, answered 0x%x and left the state "
+		       "%s; XMM0 0x%016llx%016llx and MXCSR 0x%x written answered "
+		       "0x%x, 0x%x, 0x%x, and the thread %s XMM0 "
+		       "0x%016llx%016llx and MXCSR 0x%x — WRONG, written is "
+		       "refused or found (#786)\n",
+		       *(uint16_t *) (first.fx_image + 0), first.fx_image[4],
+		       *(uint32_t *) (first.fx_image + 24), bit, mask, kr_bad,
+		       unchanged ? "as it was" : "CHANGED",
+		       (unsigned long long) ARM23_XMM0_HI,
+		       (unsigned long long) ARM23_XMM0_LO, ARM23_MXCSR,
+		       kr_good, kr_regs, kr_go,
+		       arm23_looked ? "found" : "NEVER LOOKED, so not",
+		       (unsigned long long) arm23_xmm0[1],
+		       (unsigned long long) arm23_xmm0[0], arm23_mxcsr);
+		return 0;
+	}
+	printf("act_test: [23] a new thread's state read back as the initial "
+	       "one, x87 control 0x%x, tag byte 0x%x, MXCSR 0x%x; an MXCSR "
+	       "with 0x%x set, outside the mask 0x%x, refused with 0x%x and "
+	       "nothing changed; XMM0 0x%016llx%016llx and MXCSR 0x%x written, "
+	       "and the thread found both (#786)\n",
+	       *(uint16_t *) (first.fx_image + 0), first.fx_image[4],
+	       *(uint32_t *) (first.fx_image + 24), bit, mask, kr_bad,
+	       (unsigned long long) arm23_xmm0[1],
+	       (unsigned long long) arm23_xmm0[0], arm23_mxcsr);
+	return 1;
+}
+
+/*
+ * Arm twenty-four (#786): a component the XSAVE header calls initial reads
+ * as initial.  The thread puts ones in XMM0 and is stopped, so its area holds
+ * them with SSE marked in use; then it runs VZEROALL and is stopped again.  A
+ * processor that counts SSE initial after VZEROALL makes that second save
+ * skip the XMM registers and clear the bit, and the ones stay in the area:
+ * the read must give zero, which is what the restore would load.
+ * Asked only where the processor says so, through XGETBV(1): TCG never
+ * does, and there the second save writes the zeros itself.
+ * Returns 1 when right, 0 when not, -1 when it could not be asked.
+ */
+#define	ARM24_WAIT_MS	2000
+
+static volatile int		arm24_step;	/* 1 ones, 2 go, 3 zeroed */
+static volatile uint64_t	arm24_xinuse;
+
+static void
+arm_twenty_four_zero_the_vectors(void)
+{
+	uint32_t	a, d;
+
+	__asm__ volatile("pcmpeqd %%xmm0, %%xmm0" ::: "xmm0");
+	arm24_step = 1;
+	while (arm24_step != 2)
+		;
+	__asm__ volatile("vzeroall" ::: "xmm0", "xmm1", "xmm2", "xmm3",
+			 "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9",
+			 "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+	__asm__ volatile("xgetbv" : "=a" (a), "=d" (d) : "c" (1));
+	arm24_xinuse = ((uint64_t) d << 32) | a;
+	arm24_step = 3;
+	for (;;)
+		;
+}
+
+/* Wait for the thread to reach a step; 1 when it did. */
+static int
+arm_twenty_four_wait(int step)
+{
+	int	waited = 0;
+
+	while (arm24_step != step && waited < ARM24_WAIT_MS) {
+		if (nap(10) != MACH_RCV_TIMED_OUT)
+			break;
+		waited += 10;
+	}
+	return arm24_step == step;
+}
+
+/* Whether this processor has VZEROALL and XGETBV(1) for a ring-3 program. */
+static int
+arm_twenty_four_can_ask(void)
+{
+	uint32_t	a, b, c, d, lo, hi;
+
+	__asm__ volatile("cpuid" : "=a" (a), "=b" (b), "=c" (c), "=d" (d)
+			 : "a" (1), "c" (0));
+	if (!(c & (1U << 27)) || !(c & (1U << 28)))	/* OSXSAVE, AVX */
+		return 0;
+	__asm__ volatile("xgetbv" : "=a" (lo), "=d" (hi) : "c" (0));
+	if ((lo & 0x6) != 0x6)				/* XMM and YMM on */
+		return 0;
+	__asm__ volatile("cpuid" : "=a" (a), "=b" (b), "=c" (c), "=d" (d)
+			 : "a" (0xd), "c" (1));
+	return (a & (1U << 2)) != 0;			/* XGETBV with ECX=1 */
+}
+
+static int
+arm_twenty_four_initial_reads_initial(void)
+{
+	struct x86_64_float_state	ones, zeroed;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		n;
+	thread_act_t			t;
+	vm_address_t			stack = 0;
+	kern_return_t			kr1 = KERN_FAILURE, kr2 = KERN_FAILURE;
+	unsigned			i, ones_seen = 0, nonzero = 0;
+	int				passed = 0;
+
+	if (!arm_twenty_four_can_ask()) {
+		printf("act_test: [24] NOT ASKED — no VZEROALL or no XGETBV(1) "
+		       "here, so nothing asks the processor to count SSE "
+		       "initial (#786)\n");
+		return -1;
+	}
+	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE) !=
+	    KERN_SUCCESS || thread_create(mach_task_self(), &t) !=
+	    KERN_SUCCESS) {
+		printf("act_test: [24] NOT ASKED — no stack or no thread\n");
+		if (stack != 0)
+			(void) vm_deallocate(mach_task_self(), stack,
+					     vm_page_size);
+		return -1;
+	}
+
+	for (i = 0; i < sizeof state; i++)
+		((volatile char *) &state)[i] = 0;
+	state.rip = (uint64_t) (uintptr_t) arm_twenty_four_zero_the_vectors;
+	state.rsp = stack + vm_page_size - 8;	/* as a call leaves it */
+	state.rflags = 0x202;
+	arm24_step = 0;
+	if (thread_set_state(t, x86_64_THREAD_STATE, (thread_state_t) &state,
+			     x86_64_THREAD_STATE_COUNT) == KERN_SUCCESS &&
+	    thread_resume(t) == KERN_SUCCESS && arm_twenty_four_wait(1)) {
+		n = x86_64_FLOAT_STATE_COUNT;
+		kr1 = thread_get_state(t, x86_64_FLOAT_STATE,
+				       (thread_state_t) &ones, &n);
+		for (i = 160; kr1 == KERN_SUCCESS && i < 176; i++)
+			ones_seen += ones.fx_image[i] == 0xff;
+		arm24_step = 2;
+		if (arm_twenty_four_wait(3) && (arm24_xinuse & 2) == 0) {
+			n = x86_64_FLOAT_STATE_COUNT;
+			kr2 = thread_get_state(t, x86_64_FLOAT_STATE,
+					       (thread_state_t) &zeroed, &n);
+			for (i = 160; kr2 == KERN_SUCCESS && i < 416; i++)
+				nonzero += zeroed.fx_image[i] != 0;
+		}
+	}
+	(void) thread_terminate(t);
+	(void) mach_port_deallocate(mach_task_self(), t);
+	(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+
+	if (arm24_step == 3 && (arm24_xinuse & 2) != 0) {
+		printf("act_test: [24] NOT ASKED — after VZEROALL this processor "
+		       "still counts SSE in use (XINUSE 0x%llx), so its saves "
+		       "write the XMM registers either way (#786)\n",
+		       (unsigned long long) arm24_xinuse);
+		return -1;
+	}
+	if (kr1 != KERN_SUCCESS || ones_seen != 16 || kr2 != KERN_SUCCESS ||
+	    nonzero != 0) {
+		printf("act_test: [24] the thread got to step %d; the first read "
+		       "answered 0x%x with %u of XMM0's 16 bytes all ones, and "
+		       "after VZEROALL, with SSE initial (XINUSE 0x%llx), the "
+		       "second answered 0x%x with %u nonzero bytes in XMM0-XMM15 "
+		       "— WRONG, a component the header calls initial reads as "
+		       "initial (#786)\n", arm24_step, kr1, ones_seen,
+		       (unsigned long long) arm24_xinuse, kr2, nonzero);
+		return 0;
+	}
+	passed = 1;
+	printf("act_test: [24] XMM0 read back all ones, then after VZEROALL, "
+	       "with the processor counting SSE initial (XINUSE 0x%llx), every "
+	       "XMM register read back zero, what the restore would load "
+	       "(#786)\n", (unsigned long long) arm24_xinuse);
+	return passed;
+}
+
+/*
+ * Arm twenty-five (#786): FIFO and RR are the processor set's control port's
+ * to give.  Without it they are refused -- thread_policy() for a thread,
+ * task_policy() for a task -- and with it thread_set_policy() still gives
+ * them, or an arm that passed by refusing everything would prove nothing.
+ * And a thread that asked for FIFO and was refused, started spinning, does not
+ * hold the processor: this one naps and wakes beside it, which at one
+ * processor is the whole point.
+ * Returns 1 when all of it holds, 0 when not, -1 when it could not be asked.
+ */
+#define	ARM25_NAPS	5
+
+static void
+arm_twenty_five_spin(void)
+{
+	for (;;)
+		;
+}
+
+static int
+arm_twenty_five_fifo_rr_need_the_set(void)
+{
+	mach_port_t			me = mach_task_self();
+	mach_port_t			host = mach_host_self();
+	mach_port_t			host_priv = MACH_PORT_NULL;
+	mach_port_t			device = MACH_PORT_NULL, lw = MACH_PORT_NULL;
+	mach_port_t			lp = MACH_PORT_NULL, sec = MACH_PORT_NULL;
+	mach_port_t			name = MACH_PORT_NULL, pset = MACH_PORT_NULL;
+	mach_port_t			child = MACH_PORT_NULL;
+	thread_act_t			quiet = MACH_PORT_NULL;
+	thread_act_t			spinner = MACH_PORT_NULL;
+	vm_address_t			stack = 0;
+	policy_fifo_base_data_t		fifo;
+	policy_fifo_limit_data_t	fifo_limit;
+	policy_rr_base_data_t		rr;
+	struct policy_timeshare_info	ts;
+	struct thread_basic_info	basic;
+	struct x86_64_thread_state	state;
+	host_basic_info_data_t		hi;
+	mach_msg_type_number_t		n;
+	kern_return_t			kr_tf = KERN_FAILURE, kr_tr = KERN_FAILURE;
+	kern_return_t			kr_task = KERN_FAILURE, kr_set = KERN_FAILURE;
+	kern_return_t			kr_spin = KERN_FAILURE;
+	int				naps = 0, cpus = 0, passed = -1;
+	unsigned			i;
+
+	n = POLICY_TIMESHARE_INFO_COUNT;
+	if (bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
+			    &sec) != KERN_SUCCESS ||
+	    processor_set_default(host, &name) != KERN_SUCCESS ||
+	    host_processor_set_priv(host_priv, name, &pset) != KERN_SUCCESS ||
+	    thread_create(me, &quiet) != KERN_SUCCESS ||
+	    thread_create(me, &spinner) != KERN_SUCCESS ||
+	    vm_allocate(me, &stack, vm_page_size, TRUE) != KERN_SUCCESS ||
+	    thread_info(quiet, THREAD_SCHED_TIMESHARE_INFO,
+			(thread_info_t) &ts, &n) != KERN_SUCCESS)
+		printf("act_test: [25] NOT ASKED — no privileged host port, "
+		       "processor set, threads or stack to ask with\n");
+	else {
+		/* At the threads' own base: only the policy is in question. */
+		fifo.base_priority = ts.base_priority;
+		fifo_limit.max_priority = ts.base_priority;
+		rr.quantum = 0;
+		rr.base_priority = ts.base_priority;
+
+		kr_tf = thread_policy(quiet, POLICY_FIFO, (integer_t *) &fifo,
+				      POLICY_FIFO_BASE_COUNT, FALSE);
+		kr_tr = thread_policy(quiet, POLICY_RR, (integer_t *) &rr,
+				      POLICY_RR_BASE_COUNT, FALSE);
+		if (task_create(me, (ledger_port_array_t) 0, 0, FALSE,
+				&child) == KERN_SUCCESS) {
+			kr_task = task_policy(child, POLICY_FIFO,
+					      (integer_t *) &fifo,
+					      POLICY_FIFO_BASE_COUNT, FALSE,
+					      FALSE);
+			(void) task_terminate(child);
+		}
+
+		kr_set = thread_set_policy(quiet, pset, POLICY_FIFO,
+					   (integer_t *) &fifo,
+					   POLICY_FIFO_BASE_COUNT,
+					   (integer_t *) &fifo_limit,
+					   POLICY_FIFO_LIMIT_COUNT);
+		n = THREAD_BASIC_INFO_COUNT;
+		basic.policy = -1;
+		(void) thread_info(quiet, THREAD_BASIC_INFO,
+				   (thread_info_t) &basic, &n);
+
+		/* The spinner: refused, then started. */
+		kr_spin = thread_policy(spinner, POLICY_FIFO,
+					(integer_t *) &fifo,
+					POLICY_FIFO_BASE_COUNT, FALSE);
+		for (i = 0; i < sizeof state; i++)
+			((volatile char *) &state)[i] = 0;
+		state.rip = (uint64_t) (uintptr_t) arm_twenty_five_spin;
+		state.rsp = stack + vm_page_size - 8;	/* as a call leaves it */
+		state.rflags = 0x202;
+		if (thread_set_state(spinner, x86_64_THREAD_STATE,
+				     (thread_state_t) &state,
+				     x86_64_THREAD_STATE_COUNT) == KERN_SUCCESS &&
+		    thread_resume(spinner) == KERN_SUCCESS)
+			for (i = 0; i < ARM25_NAPS; i++)
+				if (nap(10) == MACH_RCV_TIMED_OUT)
+					naps++;
+
+		n = HOST_BASIC_INFO_COUNT;
+		if (host_info(host, HOST_BASIC_INFO, (host_info_t) &hi,
+			      &n) == KERN_SUCCESS)
+			cpus = hi.avail_cpus;
+
+		if (kr_tf != KERN_INVALID_POLICY ||
+		    kr_tr != KERN_INVALID_POLICY ||
+		    kr_task != KERN_INVALID_POLICY || kr_set != KERN_SUCCESS ||
+		    basic.policy != POLICY_FIFO ||
+		    kr_spin != KERN_INVALID_POLICY || naps != ARM25_NAPS) {
+			printf("act_test: [25] without the set's port FIFO "
+			       "answered 0x%x, RR 0x%x, a task's FIFO 0x%x; with "
+			       "it 0x%x, policy %d; the spinner's FIFO 0x%x, and "
+			       "%d of %d naps beside it at %d processors — WRONG, "
+			       "FIFO and RR are the set's control port's to give "
+			       "(#786)\n", kr_tf, kr_tr, kr_task, kr_set,
+			       (int) basic.policy, kr_spin, naps, ARM25_NAPS,
+			       cpus);
+			passed = 0;
+		} else {
+			printf("act_test: [25] without the set's port a thread's "
+			       "FIFO and RR and a task's FIFO were refused with "
+			       "0x%x; with it FIFO was given, policy %d; a thread "
+			       "refused FIFO spun, and this one woke from %d of %d "
+			       "naps beside it at %d processors (#786)\n", kr_tf,
+			       (int) basic.policy, naps, ARM25_NAPS, cpus);
+			passed = 1;
+		}
+	}
+
+	if (spinner != MACH_PORT_NULL) {
+		(void) thread_terminate(spinner);
+		(void) mach_port_deallocate(me, spinner);
+	}
+	if (quiet != MACH_PORT_NULL) {
+		(void) thread_terminate(quiet);
+		(void) mach_port_deallocate(me, quiet);
+	}
+	if (stack != 0)
+		(void) vm_deallocate(me, stack, vm_page_size);
+	if (child != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, child);
+	if (pset != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, pset);
+	if (name != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, name);
+	if (host_priv != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, host_priv);
+	if (device != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, device);
+	if (lw != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lw);
+	if (lp != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lp);
+	if (sec != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, sec);
+	(void) mach_port_deallocate(me, host);
+	return passed;
+}
+
+/*
+ * Arm twenty-two (#786): a processor's control port is the privileged host
+ * port's to give.  host_processors() gave them for the name port every task
+ * has, and with one processor_exit() was queued, and the action thread ended
+ * in switch_to_shutdown_context(), which x86-64 panics in (#453).  Five
+ * answers, each needed:
+ *  - host_processors() by the name port is refused;
+ *  - host_processors() by the privileged port still answers -- the same
+ *    call, so the port is the only thing the refusal can be about;
+ *  - host_processor_info() by the name port answers the information alone,
+ *    one record per processor, as many as the privileged call lists;
+ *  - processor_get_assignment() of each says the default set;
+ *  - processor_exit() of the last one listed is refused with
+ *    KERN_NOT_SUPPORTED, and this program runs on to say so.
+ * ⚠️ At one processor the one asked is the only one, the last of its set,
+ * and a kernel that queued it would first stop every thread in the set: a
+ * machine that stops, not one that panics.  The ablations run at four, where
+ * the last one listed is not the one that booted.
+ * Returns 1 when all five answers are right, 0 when not, -1 when it could not
+ * be asked.
+ */
+static int
+arm_twenty_two_processor_ports_are_privileged(void)
+{
+	mach_port_t		me = mach_task_self();
+	mach_port_t		host = mach_host_self();
+	mach_port_t		host_priv = MACH_PORT_NULL, device = MACH_PORT_NULL;
+	mach_port_t		lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
+	mach_port_t		sec = MACH_PORT_NULL, dflt = MACH_PORT_NULL;
+	processor_port_array_t	by_name = NULL, list = NULL;
+	mach_msg_type_number_t	n_by_name = 0, n = 0, ints;
+	integer_t		info[PROCESSOR_INFO_ARRAY_MAX];
+	natural_t		answered = 0;
+	kern_return_t		kr_name, kr_priv, kr_info, kr_exit = KERN_FAILURE;
+	unsigned		i, in_default = 0;
+	int			passed = -1;
+
+	if (bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
+			    &sec) != KERN_SUCCESS ||
+	    processor_set_default(host, &dflt) != KERN_SUCCESS)
+		printf("act_test: [22] NOT ASKED — no privileged host port or "
+		       "no default processor set\n");
+	else {
+		kr_name = host_processors(host, &by_name, &n_by_name);
+		kr_priv = host_processors(host_priv, &list, &n);
+		ints = PROCESSOR_INFO_ARRAY_MAX;
+		kr_info = host_processor_info(host, PROCESSOR_CPU_LOAD_INFO,
+					      &answered, info, &ints);
+
+		for (i = 0; kr_priv == KERN_SUCCESS && i < n; i++) {
+			mach_port_t	assigned = MACH_PORT_NULL;
+
+			/* The same port, so the same name in this space. */
+			if (processor_get_assignment(list[i], &assigned) ==
+			    KERN_SUCCESS) {
+				if (assigned == dflt)
+					in_default++;
+				(void) mach_port_deallocate(me, assigned);
+			}
+		}
+		if (kr_priv == KERN_SUCCESS && n > 0)
+			kr_exit = processor_exit(list[n - 1]);
+
+		if (kr_name == KERN_SUCCESS || kr_priv != KERN_SUCCESS ||
+		    n == 0 || kr_info != KERN_SUCCESS || answered != n ||
+		    ints != answered * PROCESSOR_CPU_LOAD_INFO_COUNT ||
+		    in_default != n || kr_exit != KERN_NOT_SUPPORTED) {
+			printf("act_test: [22] host_processors answered the name "
+			       "port 0x%x and the privileged one 0x%x, %u "
+			       "processors; host_processor_info 0x%x, %u "
+			       "processors in %u ints; %u in the default set; "
+			       "processor_exit 0x%x — WRONG, a processor's port "
+			       "is the privileged host port's to give (#786)\n",
+			       kr_name, kr_priv, (unsigned) n, kr_info,
+			       (unsigned) answered, (unsigned) ints, in_default,
+			       kr_exit);
+			passed = 0;
+		} else {
+			printf("act_test: [22] host_processors refused the name "
+			       "port with 0x%x and gave the privileged one %u "
+			       "processors, every one in the default set; "
+			       "host_processor_info answered the name port %u "
+			       "processors in %u ints; processor_exit of the last "
+			       "one refused with 0x%x, and the machine runs on "
+			       "(#786)\n", kr_name, (unsigned) n,
+			       (unsigned) answered, (unsigned) ints, kr_exit);
+			passed = 1;
+		}
+	}
+
+	for (i = 0; i < n_by_name; i++)
+		(void) mach_port_deallocate(me, by_name[i]);
+	if (by_name != NULL)
+		(void) vm_deallocate(me, (vm_address_t) by_name,
+				     n_by_name * sizeof(*by_name));
+	for (i = 0; i < n; i++)
+		(void) mach_port_deallocate(me, list[i]);
+	if (list != NULL)
+		(void) vm_deallocate(me, (vm_address_t) list,
+				     n * sizeof(*list));
+	if (dflt != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, dflt);
+	if (host_priv != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, host_priv);
+	if (device != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, device);
+	if (lw != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lw);
+	if (lp != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lp);
+	if (sec != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, sec);
+	(void) mach_port_deallocate(me, host);
+	return passed;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -3621,6 +4305,42 @@ main(int argc, char **argv)
 	passed += arm_fourteen_terminate_inside_traps();
 	arms++;		/* arm twenty, #783: counted here, beside its call */
 	r = arm_twenty_no_empty_activation();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-one, #786 */
+	r = arm_twenty_one_set_limit_never_raises();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-three, #786: harmless even ablated */
+	r = arm_twenty_three_float_state_is_what_the_thread_finds();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-four, #786: harmless even ablated */
+	r = arm_twenty_four_initial_reads_initial();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-five, #786 */
+	r = arm_twenty_five_fifo_rr_need_the_set();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+
+	/*
+	 * Down here, after everything above has printed, for arm sixteen's
+	 * reason: on a healthy tree it is refused and returns, but on the
+	 * processor_exit ablation the action thread panics (#453).
+	 */
+	arms++;		/* arm twenty-two, #786 */
+	r = arm_twenty_two_processor_ports_are_privileged();
 	if (r < 0)
 		arms--;
 	else

@@ -43,6 +43,45 @@ static int have_xsaves_unused;	/* offered by the processor, not taken */
 #define	MSR_IA32_XSS		0xDA0
 
 /*
+ * The legacy region, the first 512 bytes of every form (SDM Vol. 1,
+ * 253665-093US, §10.5.1): MXCSR at 24, and at 28 the mask of the bits
+ * this processor accepts in it.
+ */
+#define	LEGACY_SIZE		512
+#define	LEGACY_MXCSR		24	/* x87's control, status and pointers below */
+#define	LEGACY_MXCSR_MASK	28
+#define	LEGACY_ST0		32	/* ST0-ST7, 16 bytes each */
+#define	LEGACY_XMM0		160	/* XMM0-XMM15, 16 bytes each */
+#define	LEGACY_XMM_END		416
+#define	MXCSR_MASK_DEFAULT	0x0000FFBFU	/* §11.6.6: what a zero there means */
+#define	MXCSR_RESET		0x1F80U
+
+static uint32_t mxcsr_mask = MXCSR_MASK_DEFAULT;
+
+/*
+ * 🔴 Which MXCSR bits this processor accepts, asked the way the SDM says to
+ * (Vol. 1, 253665-093US, §11.6.6): FXSAVE into a zeroed image, bytes 28-31,
+ * a zero there meaning the default (#786).  fpu_area_set_legacy() checks
+ * every image a thread is given against it.
+ *
+ * ⚠️ A function of its own, kept whole by noinline and noclone, because FXSAVE
+ * is a floating-point instruction and scripts/kernel-vector-check.py allows
+ * them by symbol: this one reads the unit and writes no register.
+ */
+static uint32_t __attribute__((noinline, noclone))
+fpu_mxcsr_mask_probe(void)
+{
+	uint8_t image[LEGACY_SIZE] __attribute__((aligned(16)));
+	uint32_t mask;
+
+	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+		image[i] = 0;
+	__asm__ volatile("fxsave (%0)" : : "r"(image) : "memory");
+	mask = *(uint32_t *)(image + LEGACY_MXCSR_MASK);
+	return mask != 0 ? mask : MXCSR_MASK_DEFAULT;
+}
+
+/*
  * 🔴 XSAVES HAS NOW BEEN RUN, AND IT IS DECLINED FOR A MEASURED REASON RATHER
  * THAN FOR AN UNEXERCISED ONE (#561).
  *
@@ -205,6 +244,9 @@ void fpu_init(void)
 	 */
 	cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
 	write_cr4(cr4);
+
+	/* After OSFXSR, which is what makes FXSAVE write the SSE half. */
+	mxcsr_mask = fpu_mxcsr_mask_probe();
 
 	cpuid(1, &a, &b, &c, &d);
 	if (!(c & (1U << 26)))
@@ -406,14 +448,22 @@ void fpu_area_init(void *area)
 		bytes[i] = 0;
 
 	/*
-	 * A zeroed area is not a valid legacy image: the control word must
-	 * mask the exceptions and the tag word must say the stack is empty,
-	 * and zero says the opposite of both — every exception unmasked, every
-	 * register in use.  The first arithmetic a thread did would raise
-	 * something it never asked for.
+	 * A zeroed area is not a valid legacy image: the control words must
+	 * mask the exceptions, and zero says the opposite -- every exception
+	 * unmasked.  The first arithmetic a thread did would raise something
+	 * it never asked for.
+	 *
+	 * 🔴 The tag word is the one field zero is already right for (#786).
+	 * The image holds the ABRIDGED tag, one bit per register in byte 4,
+	 * and a 0 bit is an empty register (SDM Vol. 1, 253665-093US,
+	 * §10.5.1) -- the full tag word's 11B is what means empty.  This wrote
+	 * FFFFH, the full word's empty, which in the abridged byte says every
+	 * register is in use: FXRSTOR handed each new thread a full x87 stack,
+	 * and its first load overflowed it into a NaN.  Under XSAVE the
+	 * restore ignores it while XSTATE_BV says x87 is initial, and loads it
+	 * once the bit is set.
 	 */
 	*(uint16_t *)(bytes + 0) = 0x037F;	/* x87 control: all masked  */
-	*(uint16_t *)(bytes + 4) = 0xFFFF;	/* tag: every register free */
 	*(uint32_t *)(bytes + 24) = 0x1F80;	/* MXCSR: all masked        */
 
 	/*
@@ -438,4 +488,105 @@ void fpu_area_init(void *area)
 	 */
 	if (fpu_uses_xsaves())
 		*(uint64_t *)(bytes + XCOMP_BV_OFFSET) = XCOMP_BV_COMPACTED;
+}
+
+/*
+ * A thread's legacy image -- its x87 and SSE state, the first 512 bytes --
+ * written into its area, for thread_set_state()'s FLOAT_STATE (#786).
+ *
+ * 🔴 Refused, and nothing written, when its MXCSR sets a bit this processor
+ * does not accept.  FXRSTOR faults on one (SDM Vol. 1, 253665-093US,
+ * §10.5.3), and both forms of XRSTOR do once they load it (§13.8.1,
+ * §13.8.2), and the restore runs in the switch, in ring 0, where nothing
+ * recovers it: any task could halt the machine with a thread of its own.
+ * Refused rather than masked, which is what §11.6.6 suggests, because a
+ * set_state that quietly changed the image would answer success to a request
+ * it did not carry out.
+ *
+ * Returns 1 when the image was written, 0 when it was refused.
+ */
+int fpu_area_set_legacy(void *area, const uint8_t *image)
+{
+	uint8_t *dst = area;
+
+	if (*(const uint32_t *)(image + LEGACY_MXCSR) & ~mxcsr_mask)
+		return 0;
+
+	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+		dst[i] = image[i];
+
+	/*
+	 * 🔴 And the header says it was written (#786).  Under XSAVE a
+	 * component whose XSTATE_BV bit is clear is restored to its initial
+	 * configuration whatever the legacy region holds (§13.8.1, §13.8.2):
+	 * a thread that had not used SSE yet got XMM registers of zero rather
+	 * than the ones written -- and under the compacted form MXCSR 1F80H
+	 * too -- while thread_get_state() read the written ones back.  The
+	 * image carries x87 and SSE, and both are marked, in the bits XCR0
+	 * numbers them by.  A compacted header must also list them in
+	 * XCOMP_BV, or the restore faults; the two live in the legacy region,
+	 * so listing them moves nothing in the extended one (§13.4.3).
+	 */
+	if (use_xsave) {
+		uint64_t *bv = (uint64_t *)(dst + XSTATE_BV_OFFSET);
+		uint64_t *comp = (uint64_t *)(dst + XCOMP_BV_OFFSET);
+
+		*bv |= XCR0_X87 | XCR0_SSE;
+		if (*comp & XCOMP_BV_COMPACTED)
+			*comp |= XCR0_X87 | XCR0_SSE;
+	}
+	return 1;
+}
+
+/*
+ * A thread's legacy image as the thread would find it, for
+ * thread_get_state()'s FLOAT_STATE (#786).
+ *
+ * 🔴 Under XSAVE, a component whose XSTATE_BV bit is clear IS in its initial
+ * configuration, and the area's bytes for it are not its: the save that
+ * found it initial wrote the bit and skipped the bytes (SDM Vol. 1,
+ * 253665-093US, §13.9, §13.10), which keep what an earlier save wrote.
+ * Measured on victus (Zen 3): after VZEROALL the processor counts SSE
+ * initial again, and the next XSAVEOPT leaves the old XMM registers in the
+ * area.  Read as they stand they are another time's registers; written back
+ * through fpu_area_set_legacy(), which marks them, they would become the
+ * thread's, and reading and writing back the same image would change the
+ * thread.  So a component the header calls initial reads as its initial
+ * configuration (§13.6), which is what the restore would load (§13.8).
+ * Whether a processor tracks it is its own business: the SDM allows both.
+ */
+void fpu_area_get_legacy(const void *area, uint8_t *image)
+{
+	const uint8_t *src = area;
+	uint64_t bv, comp;
+
+	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+		image[i] = src[i];
+	if (!use_xsave)
+		return;			/* FXSAVE wrote all of it */
+
+	bv = *(const uint64_t *)(src + XSTATE_BV_OFFSET);
+	comp = *(const uint64_t *)(src + XCOMP_BV_OFFSET);
+
+	/* x87: control 037FH, every register empty and zero, no pointers. */
+	if (!(bv & XCR0_X87)) {
+		for (unsigned i = 0; i < LEGACY_MXCSR; i++)
+			image[i] = 0;
+		for (unsigned i = LEGACY_ST0; i < LEGACY_XMM0; i++)
+			image[i] = 0;
+		*(uint16_t *)image = 0x037F;
+	}
+
+	/*
+	 * SSE: the XMM registers zero.  MXCSR is not part of the initial
+	 * configuration: the standard form saves it whatever XSTATE_BV says,
+	 * and the compacted one clears the bit only for 1F80H, and then does
+	 * not save it (§13.10).
+	 */
+	if (!(bv & XCR0_SSE)) {
+		for (unsigned i = LEGACY_XMM0; i < LEGACY_XMM_END; i++)
+			image[i] = 0;
+		if (comp & XCOMP_BV_COMPACTED)
+			*(uint32_t *)(image + LEGACY_MXCSR) = MXCSR_RESET;
+	}
 }

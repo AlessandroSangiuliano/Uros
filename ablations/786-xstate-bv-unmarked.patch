@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #786
+Takes out: fpu_area_set_legacy()'s marking of x87 and SSE in XSTATE_BV -- a thread that has never used SSE is restored with them initial, and act_test's arm twenty-three's thread finds XMM0 zero rather than what was written
+Accel: kvm
+Run: --entry 14 1200 -smp 4
+Note: KVM only, a true property and not a flake -- the defect is XRSTOR loading the initial XMM registers when XSTATE_BV[1] is clear (SDM Vol. 1, 253665-093US, Sec. 13.8), and TCG's XRSTOR loads the legacy region regardless, so on TCG the written XMM0 comes back whether the marking is there or not and nothing can see the defect.  Caught 2 of 2 KVM boots on OMEGA, missed 2 of 2 TCG boots, which is this line.
+Expect: act_test: \[23\] .* and the thread found XMM0 0x0{32} and MXCSR
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/fpu.c b/uros/src/mach_kernel/x86_64/thread/fpu.c
+index 6d49afbf..d354946c 100644
+--- a/uros/src/mach_kernel/x86_64/thread/fpu.c
++++ b/uros/src/mach_kernel/x86_64/thread/fpu.c
+@@ -527,9 +527,8 @@ int fpu_area_set_legacy(void *area, const uint8_t *image)
+ 		uint64_t *bv = (uint64_t *)(dst + XSTATE_BV_OFFSET);
+ 		uint64_t *comp = (uint64_t *)(dst + XCOMP_BV_OFFSET);
+ 
+-		*bv |= XCR0_X87 | XCR0_SSE;
+-		if (*comp & XCOMP_BV_COMPACTED)
+-			*comp |= XCR0_X87 | XCR0_SSE;
++		(void) bv;
++		(void) comp;
+ 	}
+ 	return 1;
+ }

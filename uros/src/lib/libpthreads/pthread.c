@@ -890,13 +890,19 @@ _pthread_create(pthread_t t,
 		 * #274: with PTHREAD_EXPLICIT_SCHED the thread must start
 		 * under the policy/priority from its attributes rather than
 		 * inheriting the kernel default.  Push it now that the
-		 * kernel thread exists; ignore the result so a policy the
-		 * pset rejects doesn't fail thread creation (the thread
-		 * still runs under the inherited policy).
+		 * kernel thread exists, before it has run.
+		 *
+		 * 🔴 And a refusal fails the create (#786).  This ignored it,
+		 * and the thread ran under the inherited policy while its
+		 * creator believed it had the one it asked for -- which, since
+		 * FIFO and RR need the set's control port, is every time.
+		 * POSIX has pthread_create() answer EPERM; pthread_create()
+		 * takes the thread back.
 		 */
-		if (t->inherit == PTHREAD_EXPLICIT_SCHED)
-			(void)_pthread_push_sched(t, t->policy,
-						  t->param.sched_priority);
+		if (t->inherit == PTHREAD_EXPLICIT_SCHED &&
+		    (res = _pthread_push_sched(t, t->policy,
+					       t->param.sched_priority)) != ESUCCESS)
+			break;
 	} while (0);
 	return (res);
 }
@@ -933,7 +939,13 @@ pthread_create(pthread_t *thread,
 	 */
 	mig_init(_pthread_mach_state);
 
-	/* Try to reuse a pooled kernel thread first */
+	/*
+	 * Try to reuse a pooled kernel thread first -- unless the thread must
+	 * start under a policy of its own (#786).  That can be refused, and a
+	 * refused fresh thread is simply taken back below, where a pooled one
+	 * would have to be parked again.
+	 */
+	if (attrs->inherit != PTHREAD_EXPLICIT_SCHED)
 	{
 		volatile int *wake_word;
 		if (_pthread_pool_get(&t, &stack, &kernel_thread, &wake_word))
@@ -975,6 +987,15 @@ pthread_create(pthread_t *thread,
 		}
 		if ((res = _pthread_create(t, attrs, kernel_thread)) != 0)
 		{
+			/*
+			 * 🔴 Refused before it ever ran (#786): its explicit
+			 * policy was one this task may not have.  The thread
+			 * and its stack are taken back, not left behind.
+			 */
+			(void) thread_terminate(kernel_thread);
+			(void) mach_port_deallocate(mach_task_self(),
+						    kernel_thread);
+			_pthread_free_stack(t);
 			break;
 		}
 		t->arg = arg;
@@ -1305,8 +1326,13 @@ pthread_timedjoin_np(pthread_t thread,
  * Priority range is policy- and kernel-defined (invalid_pri in
  * kern/sched.h: 0..lowest-schedulable, and a thread may only lower its
  * own priority below its max); the kernel is the authority and we map
- * its failures to errno.  A policy the processor set does not enable
- * comes back as KERN_INVALID_POLICY -> ENOTSUP.
+ * its failures to errno.
+ *
+ * 🔴 A policy the processor set does not enable comes back as
+ * KERN_INVALID_POLICY -> EPERM (#786).  FIFO and RR exist; they are the
+ * set's control port's to give, through thread_set_policy(), and the
+ * default set enables timesharing alone for the call made here.  POSIX's
+ * answer to a caller without the privilege is EPERM, not ENOTSUP.
  */
 static int
 _pthread_push_sched(pthread_t thread, int policy, int prio)
@@ -1360,7 +1386,7 @@ _pthread_push_sched(pthread_t thread, int policy, int prio)
 	}
 
 	if (kr == KERN_INVALID_POLICY)
-		return (ENOTSUP);
+		return (EPERM);
 	if (kr != KERN_SUCCESS)
 		return (EINVAL);
 
