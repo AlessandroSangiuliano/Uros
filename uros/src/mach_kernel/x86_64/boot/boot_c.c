@@ -4079,6 +4079,24 @@ static void thread_state_selftest(void)
 	copy = (uint8_t *)(uintptr_t)phys_to_direct(frames + PAGE_SIZE_4K);
 
 	fpu_area_init(area);
+
+	/*
+	 * 🔴 The image a new thread starts with, which FXRSTOR loads as it
+	 * stands (#786): every exception masked, and every x87 register
+	 * empty.  Byte 4 is the ABRIDGED tag, one bit a register, 0 empty --
+	 * FFFFH written there gave each new thread a full x87 stack.
+	 */
+	kputs("UrMach x86-64: a new thread's floating-point image: x87 control ");
+	kputhex64(*(uint16_t *)(area + 0));
+	kputs(", tag byte ");
+	kputhex64(area[4]);
+	kputs(", MXCSR ");
+	kputhex64(*(uint32_t *)(area + 24));
+	kputs(*(uint16_t *)(area + 0) == 0x037F && area[4] == 0 &&
+	      *(uint32_t *)(area + 24) == 0x1F80
+	      ? " — every exception masked, every x87 register empty\r\n"
+	      : " — WRONG, not the initial state (#786)\r\n");
+
 	fpu_save(area);
 	for (unsigned i = 0; i < 512; i++)
 		copy[i] = area[i];
@@ -4096,6 +4114,39 @@ static void thread_state_selftest(void)
 	kputs("UrMach x86-64: the floating-point image ");
 	kputs(float_ok ? "survives the trip out and back\r\n"
 			: "CHANGED — WRONG\r\n");
+
+	/*
+	 * 🔴 And one whose MXCSR the restore would fault on is refused, which
+	 * has to mean the area is untouched (#786).  The bit is the lowest
+	 * one this processor's own mask -- in the image it saved, bytes 28-31,
+	 * zero meaning 0000FFBFH (SDM Vol. 1, 253665-093US, §11.6.6) --
+	 * does not allow.
+	 */
+	{
+		uint32_t mask = *(uint32_t *)(copy + 28);
+		uint32_t bad;
+		int mxcsr_refused;
+
+		if (mask == 0)
+			mask = 0x0000FFBFU;
+		bad = ~mask & (0U - ~mask);
+		float_state_from_area(area, &fstate);
+		*(uint32_t *)(fstate.fx_image + 24) |= bad;
+		for (unsigned i = 0; i < PAGE_SIZE_4K; i++)
+			copy[i] = area[i];
+		mxcsr_refused = !float_state_to_area(&fstate, area);
+		for (unsigned i = 0; i < PAGE_SIZE_4K; i++)
+			if (area[i] != copy[i])
+				mxcsr_refused = 0;
+
+		kputs("UrMach x86-64: a floating-point image with MXCSR ");
+		kputhex64(*(uint32_t *)(fstate.fx_image + 24));
+		kputs(", a bit outside the mask ");
+		kputhex64(mask);
+		kputs(mxcsr_refused
+		      ? " — refused, and the area is untouched\r\n"
+		      : " — WRONG, accepted, and the restore faults on it (#786)\r\n");
+	}
 
 	boot_frame_free(frames);
 	boot_frame_free(frames + PAGE_SIZE_4K);
