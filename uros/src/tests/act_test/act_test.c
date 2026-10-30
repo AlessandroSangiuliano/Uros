@@ -3110,6 +3110,170 @@ arm_twenty_one_set_limit_never_raises(void)
 }
 
 /*
+ * Arm twenty-three (#786): the floating-point state thread_set_state() writes
+ * is either refused or is what the thread finds.  Three answers:
+ *  - a new thread's state reads back as the initial one: x87 control 037FH,
+ *    every x87 register empty -- the ABRIDGED tag byte, 0 -- and MXCSR 1F80H;
+ *  - an image whose MXCSR sets the lowest bit this processor's mask does not
+ *    allow is refused, and the state read again is the one before;
+ *  - XMM0 and MXCSR written into a thread that has never used SSE are the
+ *    ones it finds when it starts.  With the header still saying SSE was
+ *    initial, the restore gave it zeros.
+ * The mask comes from an FXSAVE of this program's own: a thread that has
+ * never been switched out has none in its image yet.
+ * ⚠️ The refused image is never run.  On a kernel that accepted it, the next
+ * one overwrites it before the thread starts, so the arm says WRONG and the
+ * machine runs on.
+ * Returns 1 when all three answers are right, 0 when not, -1 when it could
+ * not be asked.
+ */
+#define	ARM23_WAIT_MS	2000
+#define	ARM23_XMM0_LO	0x0123456789abcdefULL
+#define	ARM23_XMM0_HI	0xfedcba9876543210ULL
+#define	ARM23_MXCSR	0x3f80U		/* every exception masked, round down */
+
+static volatile uint64_t	arm23_xmm0[2];
+static volatile uint32_t	arm23_mxcsr;
+static volatile int		arm23_looked;
+
+/* What the started thread finds, read before anything else can touch it. */
+static void
+arm_twenty_three_look(void)
+{
+	uint64_t	x[2];
+	uint32_t	m;
+
+	__asm__ volatile("movdqu %%xmm0, %0\n\tstmxcsr %1"
+			 : "=m" (x), "=m" (m));
+	arm23_xmm0[0] = x[0];
+	arm23_xmm0[1] = x[1];
+	arm23_mxcsr = m;
+	arm23_looked = 1;
+	for (;;)
+		;
+}
+
+static int
+arm_twenty_three_float_state_is_what_the_thread_finds(void)
+{
+	static uint8_t			fx[512] __attribute__((aligned(16)));
+	struct x86_64_float_state	first, again, bad, good;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		n;
+	thread_act_t			t;
+	vm_address_t			stack = 0;
+	kern_return_t			kr_bad, kr_good, kr_regs, kr_go;
+	uint32_t			mask, bit;
+	unsigned			i;
+	int				waited = 0, init_ok, unchanged = 1;
+
+	__asm__ volatile("fxsave %0" : "=m" (fx));
+	mask = *(uint32_t *) (fx + 28);
+	if (mask == 0)
+		mask = 0x0000ffbfU;	/* SDM Vol. 1 §11.6.6: what zero means */
+	bit = ~mask & (0U - ~mask);
+
+	if (vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE) !=
+	    KERN_SUCCESS) {
+		printf("act_test: [23] NOT ASKED — no page for a stack\n");
+		return -1;
+	}
+	if (thread_create(mach_task_self(), &t) != KERN_SUCCESS) {
+		printf("act_test: [23] NOT ASKED — no thread to ask with\n");
+		(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+		return -1;
+	}
+	n = x86_64_FLOAT_STATE_COUNT;
+	if (thread_get_state(t, x86_64_FLOAT_STATE, (thread_state_t) &first,
+			     &n) != KERN_SUCCESS) {
+		printf("act_test: [23] NOT ASKED — no floating-point state to "
+		       "read\n");
+		(void) thread_terminate(t);
+		(void) mach_port_deallocate(mach_task_self(), t);
+		(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+		return -1;
+	}
+	init_ok = *(uint16_t *) (first.fx_image + 0) == 0x037f &&
+		  first.fx_image[4] == 0 &&
+		  *(uint32_t *) (first.fx_image + 24) == 0x1f80;
+
+	bad = first;
+	*(uint32_t *) (bad.fx_image + 24) |= bit;
+	kr_bad = thread_set_state(t, x86_64_FLOAT_STATE, (thread_state_t) &bad,
+				  x86_64_FLOAT_STATE_COUNT);
+	n = x86_64_FLOAT_STATE_COUNT;
+	if (thread_get_state(t, x86_64_FLOAT_STATE, (thread_state_t) &again,
+			     &n) != KERN_SUCCESS)
+		unchanged = 0;
+	for (i = 0; unchanged && i < sizeof(first.fx_image); i++)
+		if (again.fx_image[i] != first.fx_image[i])
+			unchanged = 0;
+
+	good = first;
+	*(uint64_t *) (good.fx_image + 160) = ARM23_XMM0_LO;
+	*(uint64_t *) (good.fx_image + 168) = ARM23_XMM0_HI;
+	*(uint32_t *) (good.fx_image + 24) = ARM23_MXCSR;
+	kr_good = thread_set_state(t, x86_64_FLOAT_STATE,
+				   (thread_state_t) &good,
+				   x86_64_FLOAT_STATE_COUNT);
+
+	for (i = 0; i < sizeof state; i++)
+		((volatile char *) &state)[i] = 0;
+	state.rip = (uint64_t) (uintptr_t) arm_twenty_three_look;
+	state.rsp = stack + vm_page_size - 8;	/* as a call leaves it */
+	state.rflags = 0x202;
+	kr_regs = thread_set_state(t, x86_64_THREAD_STATE,
+				   (thread_state_t) &state,
+				   x86_64_THREAD_STATE_COUNT);
+	kr_go = KERN_FAILURE;
+	if (kr_good == KERN_SUCCESS && kr_regs == KERN_SUCCESS)
+		kr_go = thread_resume(t);
+	while (kr_go == KERN_SUCCESS && !arm23_looked &&
+	       waited < ARM23_WAIT_MS) {
+		if (nap(10) != MACH_RCV_TIMED_OUT)
+			break;
+		waited += 10;
+	}
+	(void) thread_terminate(t);
+	(void) mach_port_deallocate(mach_task_self(), t);
+	(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+
+	if (!init_ok || kr_bad == KERN_SUCCESS || !unchanged ||
+	    kr_good != KERN_SUCCESS || kr_regs != KERN_SUCCESS ||
+	    kr_go != KERN_SUCCESS || !arm23_looked ||
+	    arm23_xmm0[0] != ARM23_XMM0_LO || arm23_xmm0[1] != ARM23_XMM0_HI ||
+	    arm23_mxcsr != ARM23_MXCSR) {
+		printf("act_test: [23] a new thread's state: x87 control 0x%x, "
+		       "tag byte 0x%x, MXCSR 0x%x; an MXCSR with 0x%x set, "
+		       "outside the mask 0x%x, answered 0x%x and left the state "
+		       "%s; XMM0 0x%016llx%016llx and MXCSR 0x%x written answered "
+		       "0x%x, 0x%x, 0x%x, and the thread %s XMM0 "
+		       "0x%016llx%016llx and MXCSR 0x%x — WRONG, written is "
+		       "refused or found (#786)\n",
+		       *(uint16_t *) (first.fx_image + 0), first.fx_image[4],
+		       *(uint32_t *) (first.fx_image + 24), bit, mask, kr_bad,
+		       unchanged ? "as it was" : "CHANGED",
+		       (unsigned long long) ARM23_XMM0_HI,
+		       (unsigned long long) ARM23_XMM0_LO, ARM23_MXCSR,
+		       kr_good, kr_regs, kr_go,
+		       arm23_looked ? "found" : "NEVER LOOKED, so not",
+		       (unsigned long long) arm23_xmm0[1],
+		       (unsigned long long) arm23_xmm0[0], arm23_mxcsr);
+		return 0;
+	}
+	printf("act_test: [23] a new thread's state read back as the initial "
+	       "one, x87 control 0x%x, tag byte 0x%x, MXCSR 0x%x; an MXCSR "
+	       "with 0x%x set, outside the mask 0x%x, refused with 0x%x and "
+	       "nothing changed; XMM0 0x%016llx%016llx and MXCSR 0x%x written, "
+	       "and the thread found both (#786)\n",
+	       *(uint16_t *) (first.fx_image + 0), first.fx_image[4],
+	       *(uint32_t *) (first.fx_image + 24), bit, mask, kr_bad,
+	       (unsigned long long) arm23_xmm0[1],
+	       (unsigned long long) arm23_xmm0[0], arm23_mxcsr);
+	return 1;
+}
+
+/*
  * Arm twenty-two (#786): a processor's control port is the privileged host
  * port's to give.  host_processors() gave them for the name port every task
  * has, and with one processor_exit() was queued, and the action thread ended
@@ -3832,6 +3996,12 @@ main(int argc, char **argv)
 		passed += r;
 	arms++;		/* arm twenty-one, #786 */
 	r = arm_twenty_one_set_limit_never_raises();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-three, #786: harmless even ablated */
+	r = arm_twenty_three_float_state_is_what_the_thread_finds();
 	if (r < 0)
 		arms--;
 	else
