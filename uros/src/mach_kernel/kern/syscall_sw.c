@@ -318,13 +318,20 @@ mach_trap_t	mach_trap_table[] = {
 	 */
 	MACH_TRAP_STACK(urmach_msg, 6),	/* 33 */
 	MACH_TRAP(kern_invalid, 0),		/* 34 rsvd for pid_by_task */
-#ifdef	i386
-	MACH_TRAP(mach_rpc_trap, 4),		/* 35 */
-	MACH_TRAP(mach_rpc_return_trap, 0),	/* 36 */
-#else
-	MACH_TRAP(not_implemented, 0),		/* 35 */
-	MACH_TRAP(not_implemented, 0),		/* 36 */
-#endif	/* i386 */
+	/*
+	 * 🔴 35 and 36 were OSF's thread-migration RPC, mach_rpc_trap and
+	 * mach_rpc_return_trap, and nothing uses it (#783): it needs
+	 * activations waiting in a port's thread pool, and nothing fills one
+	 * -- thread_activation_create() has no MIG routine.  What any task
+	 * could do with them was the harm.  36, the return half of an RPC,
+	 * asked nothing of a thread that was not in one: an assertion, then a
+	 * null activation.  35 copied a send right in and kept it, with its
+	 * reference, on every call it refused.  x86-64 never had them; i386
+	 * no longer does.  The i386 RPC call gate (USER_RPC) dispatches
+	 * through this table too, so this closes it as well.
+	 */
+	MACH_TRAP(not_implemented, 0),		/* 35: was mach_rpc_trap */
+	MACH_TRAP(not_implemented, 0),		/* 36: was mach_rpc_return_trap */
 	MACH_TRAP(urmach_cap_verify, 5),	/* 37: + type, #599 */
 	MACH_TRAP(urmach_cap_use, 5),		/* 38: + type, #599 */
 	MACH_TRAP(urmach_cap_revoke, 2),	/* 39 */
