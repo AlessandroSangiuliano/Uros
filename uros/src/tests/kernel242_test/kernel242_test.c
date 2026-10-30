@@ -1159,6 +1159,47 @@ wait_for_quiet_boot(void)
 }
 
 /* =========================================================================
+ * ipc/mach_port.c  thread_activation_create -- refused (#783).
+ *
+ * It made an activation with no thread behind it, in a port's thread pool,
+ * for the migrating RPC that traps 35 and 36 were: any task's to make, and
+ * its zero stack was asked of by an assert, which stopped the machine.  The
+ * kernel refuses now, before it looks at anything it is given.  Both calls
+ * are made before either answer is judged, and the zero stack announces
+ * itself: on a kernel without the fix it is the one that stops the machine.
+ * Just before the trap test, which stays last for the same reason.
+ * ========================================================================= */
+static void
+test_activation_create_refused(void)
+{
+    static char stack[4096];		/* offered, never run on */
+    mach_port_t port, act = MACH_PORT_NULL;
+    kern_return_t kr, kr0;
+
+    BEGIN_TEST("thread_activation_create, the empty activation (#783)");
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    EXPECT_KR(kr, KERN_SUCCESS, "a receive right to offer");
+
+    kr = thread_activation_create(mach_task_self(), port,
+                                  (vm_offset_t)(stack + sizeof stack),
+                                  sizeof stack, &act);
+    printf("  with a stack and a receive right it answered 0x%x\n", kr);
+    if (kr == KERN_SUCCESS)
+        (void)mach_port_deallocate(mach_task_self(), act);
+    printf("  with a zero stack; if the machine stops here, that is the "
+           "answer\n");
+    kr0 = thread_activation_create(mach_task_self(), port, 0, 0, &act);
+    printf("  with a zero stack it answered 0x%x\n", kr0);
+    (void)mach_port_mod_refs(mach_task_self(), port,
+                             MACH_PORT_RIGHT_RECEIVE, -1);
+
+    EXPECT_KR(kr, KERN_NOT_SUPPORTED, "refused with a stack");
+    EXPECT_KR(kr0, KERN_NOT_SUPPORTED, "refused with a zero stack");
+    PASS();
+}
+
+/* =========================================================================
  * kern/syscall_sw.c  traps 35 and 36 -- OSF's thread-migration RPC (#783).
  *
  * Nothing in the system calls them and nothing could make them work: they
@@ -1261,6 +1302,7 @@ main(int argc, char **argv)
     test_device_read();
     test_fpu_state();
     test_io_kernel_ports();
+    test_activation_create_refused();	/* without #783 it stops the machine */
     test_rpc_traps_refused();	/* last: without #783 it stops the machine */
 
     printf("\n=== kernel242_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);
