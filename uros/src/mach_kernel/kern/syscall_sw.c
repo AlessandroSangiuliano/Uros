@@ -321,9 +321,9 @@ mach_trap_t	mach_trap_table[] = {
 	/*
 	 * 🔴 35 and 36 were OSF's thread-migration RPC, mach_rpc_trap and
 	 * mach_rpc_return_trap, and nothing uses it (#783): it needs
-	 * activations waiting in a port's thread pool, and nothing fills one
-	 * -- thread_activation_create() has no MIG routine.  What any task
-	 * could do with them was the harm.  36, the return half of an RPC,
+	 * activations waiting in a port's thread pool, which only
+	 * thread_activation_create() makes, and that refuses now too
+	 * (ipc/mach_port.c).  What any task could do with them was the harm.  36, the return half of an RPC,
 	 * asked nothing of a thread that was not in one: an assertion, then a
 	 * null activation.  35 copied a send right in and kept it, with its
 	 * reference, on every call it refused.  x86-64 never had them; i386
