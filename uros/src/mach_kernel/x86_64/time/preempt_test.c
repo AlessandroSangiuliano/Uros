@@ -253,9 +253,16 @@ preempt_end(void)
 			cpu_pause();
 	}
 
-	printf("preempt_test: halted — this boot was the test (#459)\n");
-	for (;;)
-		__asm__ __volatile__("cli; hlt");
+	/*
+	 * #779: through halt_all_cpus(), as the ending of #461 is.  It is the
+	 * stop that says the console's final copy (#702); a bare hlt here
+	 * left the one-processor boot -- the only one whose reporter is the
+	 * boot processor -- as the one ending without it.
+	 */
+	printf("preempt_test: halting the machine — this boot was the test "
+	       "(#459)\n");
+	halt_all_cpus(FALSE);
+	/*NOTREACHED*/
 }
 
 static void

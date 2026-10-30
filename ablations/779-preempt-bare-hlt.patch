@@ -1,0 +1,33 @@
+Kind: ablation
+Issue: #779
+Takes out: the one-processor ending through halt_all_cpus() -- preempt_end() stops the boot processor with a bare cli; hlt again, as before #779, so a one-processor boot of -P ends without the console's final copy, final-copy-check says NOT ASKED, and entry 21's verdict is WRONG.
+Accel: tcg
+Script: scripts/merge-test-x86_64.sh
+Script: -a
+Script: kvm
+Script: -s
+Script: 1
+Script: -e
+Script: 21
+Script: -G
+Expect: merge-test: entry 21 kvm -smp 1 -- WRONG \(halted\)
+Note: Accel: tcg because under KVM ablate.sh would give the script --kvm, which it does not take; the run's own -a kvm names the accelerator. One accelerator, as every other patch run through the merge test: its exit status is its count of WRONG lines, and ablate.sh reads 2 and 3 as a run not made, so a line caught under both accelerators read as a run that did not start.
+
+diff --git a/uros/src/mach_kernel/x86_64/time/preempt_test.c b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+index 615e9c34..4b6c5f2c 100644
+--- a/uros/src/mach_kernel/x86_64/time/preempt_test.c
++++ b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+@@ -259,10 +259,9 @@ preempt_end(void)
+ 	 * left the one-processor boot -- the only one whose reporter is the
+ 	 * boot processor -- as the one ending without it.
+ 	 */
+-	printf("preempt_test: halting the machine — this boot was the test "
+-	       "(#459)\n");
+-	halt_all_cpus(FALSE);
+-	/*NOTREACHED*/
++	printf("preempt_test: halted — this boot was the test (#459)\n");
++	for (;;)
++		__asm__ __volatile__("cli; hlt");
+ }
+ 
+ static void
