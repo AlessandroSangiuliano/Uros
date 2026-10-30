@@ -63,9 +63,10 @@ set_regs(mach_port_t		host_port,
 
 	/*
 	 * The stack goes at the top of the task's address space, below
-	 * whatever the caller has reserved.  VM_MAX_ADDRESS here is the
-	 * canonical hole rather than four gigabytes -- 0x0000800000000000 --
-	 * so the stack lands where a 64-bit user stack belongs.
+	 * whatever the caller has reserved.  VM_MAX_ADDRESS here is near the
+	 * canonical hole rather than four gigabytes -- a page short of
+	 * 0x0000800000000000 (#780) -- so the stack lands where a 64-bit user
+	 * stack belongs.
 	 */
 	stack_end = mapend;
 	if (!stack_end)

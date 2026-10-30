@@ -55,14 +55,37 @@ typedef struct pcb {
 	struct context		ctx;
 
 	/*
-	 * The frame trap entry pushed on the way in from ring 3, or NULL for
-	 * a thread that has never been in user mode.  This is what
-	 * thread_get_state reads and thread_set_state writes; it points into
-	 * the thread's own kernel stack rather than being a copy, so there is
-	 * one place where the user's registers live and no second copy to
-	 * reconcile on the way out.
+	 * The frame trap entry saves on the way in from ring 3, or NULL for a
+	 * thread that never goes there (#616).  This is what thread_get_state
+	 * reads and thread_set_state writes; it points at user_frame below
+	 * rather than being a copy, so there is one place where the user's
+	 * registers live and no second copy to reconcile on the way out.
 	 */
 	struct trap_frame	*user;
+
+	/*
+	 * 🔑 THE FRAME ITSELF, HERE, WHERE i386 HAS ALWAYS KEPT IT (#770).
+	 *
+	 * From #474 it lived at the top of the thread's kernel stack, which
+	 * made the stack the user's state's only home: a thread could not
+	 * block without its stack, nor give the stack to another thread --
+	 * which is what continuations and the stack hand-off are.  Here, the
+	 * stack holds kernel frames and nothing else.
+	 *
+	 * The processor writes it in place: the switch points the TSS's rsp0
+	 * at its END, and an entry from ring 3 pushes downward from there.
+	 * The processor first aligns rsp0 down to sixteen bytes, so the end
+	 * must already be aligned or the frame lands eight bytes low --
+	 * sizeof(struct trap_frame) is a multiple of sixteen, the member is
+	 * aligned to sixteen, and thread_machine_create() refuses a pcb whose
+	 * frame does not end on sixteen, rather than trust the allocator.
+	 *
+	 * ⚠️ And the pcb is then, for a few instructions on every way in and
+	 * out, the stack: an interrupt taken with %rsp in here would push its
+	 * frame into the fields above.  The entry paths keep interrupts off
+	 * whenever %rsp is in this frame (trap/entry.S, syscall/entry.S).
+	 */
+	struct trap_frame	user_frame __attribute__((aligned(16)));
 
 	/*
 	 * The segment bases this thread uses, which the frame has nowhere to
@@ -120,13 +143,12 @@ typedef struct MachineThrAct {
  * The machine-independent tree asks four questions of an activation, and
  * they all resolve to the frame trap entry left behind.
  *
- * ⚠️ USER_REGS() answers a pointer that is NULL for a thread which has never
- * left the kernel -- a kernel thread, or a user thread between creation and
- * its first return to ring 3.  i386 cannot produce that answer, because
- * there the frame is a member of the pcb and so always has an address.  Here
- * it is a pointer into the thread's own stack, which is the arrangement that
- * gives us one copy of the user's registers instead of two, and the price is
- * that the caller has to have a thread that has been to user space.  Every
+ * ⚠️ USER_REGS() answers a pointer that is NULL for a thread that never goes
+ * to ring 3: a kernel thread (#616).  i386 cannot produce that answer,
+ * because there the frame is a member of the pcb and the pointer is the
+ * member's address.  Here the frame is a member too (#770), and the pointer
+ * is kept apart from it so that a kernel thread can say it has none, and the
+ * price is that the caller has to have a user thread.  Every
  * machine-independent caller does -- they run on the exception and system
  * call paths, which start in ring 3 -- and the assertion carried inside the
  * macro is there so that a future one which does not says so immediately,

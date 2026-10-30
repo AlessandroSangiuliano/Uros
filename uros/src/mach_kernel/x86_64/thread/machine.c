@@ -119,24 +119,24 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * is nothing for this to do about it.
 	 */
 	/*
-	 * 🔥 BELOW the reserved frame, not at the top of the stack (#474).
+	 * 🔥 Three values, and they must not be confused (#474, #770).
 	 *
-	 * The two lines here look like they should carry the same value and
-	 * must not.  The processor takes the TSS one and pushes DOWNWARD from
-	 * it, building the trap frame in exactly the reserved bytes -- so that
-	 * one is the top.  The syscall entry is handed its value and starts
-	 * USING it as a stack, so if it were the top too, every C frame of
-	 * every system call would run down through the frame pcb->user names.
+	 * The processor takes the TSS one and pushes DOWNWARD from it, so it is
+	 * the END of the frame pcb->user names.  The syscall entry writes the
+	 * frame at kernel_rsp, its BASE.  And both entries run C on
+	 * kernel_stack, which must not be the frame: when the frame sat at the
+	 * top of the stack and C ran from the top too, every C frame of every
+	 * system call ran down through it, and thread_get_state() on a thread
+	 * inside mach_msg answered out of the kernel's own stack with
+	 * KERN_SUCCESS -- including a kernel text address where ring 3 expected
+	 * its rip.
 	 *
-	 * It did, and thread_get_state() on a thread inside mach_msg answered
-	 * out of the kernel's own stack with KERN_SUCCESS -- including a kernel
-	 * text address where ring 3 expected its rip.
-	 *
-	 * context_init() was corrected for exactly this and says so; this was
-	 * the other half, and the two are now the same expression.
+	 * context_init() decided all three, and context_switch() hands the
+	 * processor the same two from the same fields: one decision, read in
+	 * two places, rather than an address derived twice.
 	 */
-	percpu()->kernel_rsp =
-		KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+	percpu()->kernel_rsp = pcb->ctx.user_frame;
+	percpu()->kernel_stack = pcb->ctx.entry_stack;
 	/*
 	 * ⚠️ TWO places, and only one of them was here (#422).
 	 *
@@ -169,7 +169,8 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * costs a hypervisor exit reads in C exactly like a field access, and no
 	 * warning distinguishes them.
 	 */
-	desc_set_rsp0(cpu_number(), pcb->ctx.kernel_stack_top);
+	desc_set_rsp0(cpu_number(),
+		      pcb->ctx.user_frame + sizeof(struct trap_frame));
 }
 
 /*
@@ -335,10 +336,31 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
+	/*
+	 * 🔑 The frame in the pcb, the whole stack for the kernel (#770).  The
+	 * processor pushes from the frame's end, after aligning it down to
+	 * sixteen: an end that is not aligned would put the frame eight bytes
+	 * below the one pcb->user names, so it is refused here rather than
+	 * trusted to the zone's carving.
+	 *
+	 * That carving is what makes it hold today, and nothing states it: the
+	 * pcb is inside the activation (offset 32), the activation zone cuts
+	 * page-aligned chunks into elements of sizeof (struct thread_activation)
+	 * -- 1008 bytes, a multiple of sixteen because this member is aligned --
+	 * and zinit() rounds an element only to eight.  An allocator that
+	 * handed out eight-aligned space instead, a zone made non-collectable
+	 * (zget_space()) or one with an eight-byte debug header, would fail here
+	 * on the first thread whose activation landed on the other eight.
+	 */
+	if (((uintptr_t) (&pcb->user_frame + 1)) & 15)
+		panic("thread: the pcb's frame ends at %p, not on sixteen bytes, "
+		      "where the processor pushes (#770)",
+		      (void *) (&pcb->user_frame + 1));
+
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
-		     fpu_area);
+		     fpu_area, (uint64_t) (uintptr_t) &pcb->user_frame);
 
 	/*
 	 * 🔴 AND WHETHER THE SWITCH HAS TO CARRY ITS VECTOR STATE (#561).
@@ -368,8 +390,8 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		context_exempt_vector_state(&pcb->ctx);
 
 	/*
-	 * And its user frame, here, because here is where the stack it lives on
-	 * comes from (#422).
+	 * And its user frame, here, because here is where its pcb is given the
+	 * frame's address (#422, #770).
 	 *
 	 * i386 does this in pcb_init(): the frame is embedded in the pcb there,
 	 * so a thread has one from the moment it has an activation.  A thread
@@ -378,9 +400,10 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * KERN_INVALID_ARGUMENT -- which the loader does not check, on either
 	 * machine, and which on i386 it never needed to.
 	 *
-	 * ⚠️ The address is derived and not chosen; trap.h's KERNEL_STACK_USER_FRAME
-	 * says why, and act_machine_set_state() below uses the same expression
-	 * because it is the same claim about the same bytes.
+	 * ⚠️ The address is the one context_init() decided, in the same field
+	 * the switch hands the processor as kernel_rsp and rsp0 (#770): the
+	 * frame a reader reads and the frame an entry writes cannot be two
+	 * places.
 	 *
 	 * 🔴 FOR A THREAD OF A USER TASK ONLY (#616).  A kernel thread never
 	 * reaches ring 3, so it keeps pcb_init()'s honest state -- no frame --
@@ -392,8 +415,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * before -- failed unseen until #615 ran entry 7.
 	 */
 	if (thr_act->task != kernel_task) {
-		pcb->user = (struct trap_frame *)
-			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+		pcb->user = (struct trap_frame *)(uintptr_t) pcb->ctx.user_frame;
 		thread_frame_init(pcb->user);
 	}
 
@@ -519,7 +541,7 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
-		     pcb->ctx.fpu_area);
+		     pcb->ctx.fpu_area, (uint64_t) (uintptr_t) &pcb->user_frame);
 	pcb->ctx.fpu_switch = keep_fpu_switch;
 	(void) continuation;
 }
@@ -534,9 +556,32 @@ void
 machine_switch_act(thread_t thread, thread_act_t old, thread_act_t new,
 		   unsigned cpu)
 {
-	(void) thread;
 	(void) old;
 	(void) cpu;
+
+	/*
+	 * 🔴 Only an activation built for THIS thread (#770).
+	 *
+	 * A pcb holds its thread's switch state (ctx.rsp, on that thread's
+	 * stack) and the stack the entries run C on (ctx.entry_stack), both
+	 * decided by context_init() for the thread the activation was created
+	 * with -- the frame belongs to the activation, as on i386, but here the
+	 * stack does too.  So an activation run by another thread would hand
+	 * the processor that other thread's stack, on this switch and on every
+	 * switch after it.  Nothing does it: thread pools are never filled,
+	 * since thread_activation_create() has no MIG routine (#783).  If it
+	 * ever happens it stops here, by name, rather than on someone else's
+	 * stack.
+	 */
+	if (new->mact.pcb != PCB_NULL
+	    && new->mact.pcb->ctx.entry_stack
+	       != (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE)
+		panic("machine_switch_act: activation %p was built for another "
+		      "thread's stack (%p, not this thread's %p): an activation "
+		      "runs only on the thread it was created with (#770)",
+		      (void *) new, (void *) new->mact.pcb->ctx.entry_stack,
+		      (void *) ((uint64_t) thread->kernel_stack
+				+ KERNEL_STACK_SIZE));
 
 	act_machine_switch_pcb(new);
 }
@@ -623,9 +668,9 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 	/*
 	 * ── Where a thread's user registers live, and who first says so ──
 	 *
-	 * thread_machine_create() -- a thread is given its frame where it is
-	 * given the kernel stack the frame lives on, which is how i386 has
-	 * always done it (pcb_init) and why the loader works there.
+	 * thread_machine_create() -- a thread is given its frame where its pcb
+	 * is set up, which is where the frame lives (#770) and how i386 has
+	 * always done it (pcb_init), and why the loader works there.
 	 *
 	 * 🔥 This used to CREATE one here when it found none, and that was a
 	 * repair aimed one function too late.  It made writing work and left

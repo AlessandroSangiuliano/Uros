@@ -143,13 +143,17 @@ struct trap_frame {
 };
 
 /*
- * Where that frame lives on a thread's kernel stack, said once (#422).
+ * Where that frame lives on a kernel stack with no pcb behind it, said once
+ * (#422, #770).
  *
  * A trap from ring 3 lands on the stack the task-state segment names, and the
  * processor aligns down to sixteen before pushing its five words -- so the
- * frame a trap builds is exactly here, at the top of the stack, and
- * act_machine_set_state() writes the first one for a thread that has never
- * trapped at the same address for the same reason.
+ * frame a trap builds is exactly here, at the top of the stack.
+ *
+ * ⚠️ Since #770 that is the layout of a context with no pcb behind it -- the
+ * boot path's, and the processors' before their first thread.  A thread's
+ * frame is in its pcb, and its stack begins at the top (context_init()); a
+ * thread's frame is never found with this.
  *
  * 🔥 Which means kernel code on that stack must start BELOW it, and it did
  * not.  context_init() started a new thread at the very top, so the trampoline,
@@ -159,8 +163,11 @@ struct trap_frame {
  * address zero out of ast_taken(), which is a page fault in the kernel four
  * calls from anything that mentions a stack.
  *
- * Two users, one expression, because they are the same claim about the same
- * bytes: a second copy of this arithmetic is a second chance to disagree.
+ * One expression for every user -- context.c for a context with no frame of
+ * its own, percpu.c for the processors' first one, and the boot's syscall
+ * probe, which runs in such a context -- because they are the same claim
+ * about the same bytes: a second copy of this arithmetic is a second chance
+ * to disagree.
  */
 #define	KERNEL_STACK_USER_FRAME(top)					\
 	((((uint64_t) (top)) & ~15UL) - sizeof(struct trap_frame))
@@ -286,10 +293,30 @@ void trap_dispatch(struct trap_frame *frame);
 
 /*
  * The running thread's saved user frame, pcb->user (cpu/machdep.c).  Called
- * from the return paths in entry.S, and from the trap path to check that a
- * frame about to block in exception() is that one (#650).
+ * by act_user_return_frame() for the thread-return tail in entry.S (#780), and
+ * from the trap path to check that a frame about to block in exception() is
+ * that one (#650).
  */
 struct trap_frame *act_user_frame(void);
+
+/*
+ * The same frame, for the thread-return tail in entry.S that is about to iretq
+ * through it: if its rip is not one iretq accepts, the thread is given the
+ * fault instead, and this does not return (#780).
+ */
+struct trap_frame *act_user_return_frame(void);
+
+/* Refuse, by raising the thread's own #GP, a return iretq would refuse (#780). */
+void trap_user_return_check(const struct trap_frame *frame);
+
+/* That #GP, synthesised for the running thread; does not return (#518, #780). */
+void user_return_noncanonical(void);
+
+/*
+ * The thread-return tail in entry.S, entered with %rsp off the top of its
+ * kernel stack: a tail that kept the stack it was called on; panics (#780).
+ */
+void trap_tail_off_its_stack(uint64_t top, uint64_t rsp);
 
 /*
  * Entry from the four stubs that cannot decide from the saved code segment

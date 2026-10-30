@@ -14,9 +14,10 @@
  * match is exactly the shape of defect this port keeps finding, so they are
  * checked against each other below rather than kept matching by attention.
  *
- * The user half ends at 2^47 and the kernel half begins at the far end of
- * the canonical hole: with 48-bit virtual addresses the middle of the range
- * is not addressable at all, so unlike i386 these two bounds do not meet.
+ * The user half ends a page short of 2^47 (#780) and the kernel half begins at
+ * the far end of the canonical hole: with 48-bit virtual addresses the middle
+ * of the range is not addressable at all, so unlike i386 these two bounds do
+ * not meet.
  * Code that walks from VM_MAX_ADDRESS expecting to arrive at
  * VM_MIN_KERNEL_ADDRESS is wrong here, and that is a property of the
  * architecture rather than of this layout.
@@ -53,11 +54,22 @@
 #define x86_64_trunc_page(x)	(((unsigned long)(x)) & ~(X86_64_PGBYTES - 1))
 
 /*
- * The canonical low half: 2^47 bytes of user address space.  The hardware
- * rejects anything between here and VM_MIN_KERNEL_ADDRESS.
+ * The canonical low half is 2^47 bytes, and a task gets all of it but the last
+ * page.  The hardware rejects anything between 2^47 and VM_MIN_KERNEL_ADDRESS.
+ *
+ * 🔴 The last page is not a task's to map (#780).  Code that runs in it can
+ * leave the canonical half without a branch: an instruction ending on its last
+ * byte, or a SYSCALL in its last two, hands the kernel a user rip of 2^47 --
+ * an address IRETQ refuses at CPL 0 and SYSRET at the caller's.  The kernel's
+ * own returns check for it, but an NMI or a machine check taken on that
+ * boundary returns through trap_paranoid, on its own stack, which cannot
+ * block and so cannot give the thread a fault instead.  With the page out of every task's reach the
+ * processor never saves a non-canonical user rip at all, and thread state is
+ * the only way one can be asked for.  The stacks that start at the top start
+ * a page lower.
  */
 #define VM_MIN_ADDRESS		((vm_offset_t) 0)
-#define VM_MAX_ADDRESS		((vm_offset_t) 0x0000800000000000UL)
+#define VM_MAX_ADDRESS		((vm_offset_t) 0x00007ffffffff000UL)
 
 #define VM_MIN_KERNEL_ADDRESS	((vm_offset_t) 0xffff800000000000UL)
 #define VM_MAX_KERNEL_ADDRESS	((vm_offset_t) 0xffffffffffffffffUL)

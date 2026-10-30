@@ -96,7 +96,7 @@ isr_\vec:
  * be the frame of the thread's previous entry into the kernel -- which is
  * what fault_test's fifth arm saw.  So the seven words the processor and this
  * stub pushed are copied to where a gate without a stack of its own puts
- * them, the top of the thread's kernel stack, and the trap goes on as any
+ * them, the thread's frame in its pcb (#770), and the trap goes on as any
  * other from ring 3: SAVE_REGS completes the frame at pcb->user.
  *
  * From ring 3 the saved cs is the truth and %gs is the user's: the window is
@@ -266,8 +266,50 @@ trap_common:
 	SAVE_REGS
 
 	movq	%rsp, %rdi		/* the frame is the argument */
+
+	/*
+	 * And C does not run on it (#770).  From ring 3 the frame is the one
+	 * the processor built at the TSS's rsp0 -- the thread's own, which a
+	 * reader of its state finds through pcb->user -- and C runs on
+	 * kernel_stack, the thread's stack, which is not where the frame is.
+	 * From ring 0 the frame is on the stack this was already running on,
+	 * and C goes on there.  %rbx carries the frame across the call: the
+	 * user's %rbx is saved in it, and C preserves the register, through a
+	 * block and a resume on another processor as well.
+	 */
+	movq	%rsp, %rbx
+	testb	$3, TF_CS(%rsp)
+	jz	3f
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp
+3:
 	call	trap_dispatch
 
+	/*
+	 * 🔴 And to ring 3 only through a frame iretq will take (#780).
+	 *
+	 * A rip that is not canonical makes the iretq below fault at CPL 0,
+	 * with %rsp in the thread's pcb: the fault's frame and the C reporting
+	 * it would go over the pcb.  It can be there -- thread_set_state() on
+	 * a thread stopped inside a trap writes this frame -- so it is asked
+	 * here, in C, on kernel_stack and before the cli, where the thread can
+	 * still be given its fault instead.  Read off the frame rather than
+	 * remembered from the way in, for the reason the swapgs below gives.
+	 */
+	testb	$3, TF_CS(%rbx)
+	jz	4f
+	movq	%rbx, %rdi
+	call	trap_user_return_check	/* returns only if iretq will take it */
+4:
+
+	/*
+	 * Back onto the frame with interrupts off (#770).  From here to the
+	 * iretq %rsp may be inside the thread's pcb, and an interrupt taken
+	 * there would push its own frame below ours -- into the pcb.  The
+	 * vectors that ignore IF run on stacks of their own (IST), and iretq
+	 * gives the interrupted code its flags back.
+	 */
+	cli
+	movq	%rbx, %rsp
 	RESTORE_REGS
 
 	/*
@@ -537,6 +579,29 @@ isr_table:
 	.globl	restart_mach_syscall
 
 /*
+ * 🔴 The three ways a thread goes back to ring 3 from C, and each starts by
+ * putting %rsp back at the top of its kernel stack (#780).
+ *
+ * They are called, and never return, so every frame below their caller is
+ * dead -- and since #770 the thread's user state is in its pcb, not on this
+ * stack, so nothing on it is needed to get back to ring 3.  Starting again at
+ * kernel_stack is what Mach i386 does in thread_exception_return, and it is
+ * not tidiness:
+ *
+ *   - the way back can turn into an exception and come here again: a frame
+ *     whose rip iretq would refuse is given its #GP (trap_user_return_check()),
+ *     and a handler that answers "resume" without moving rip sends the thread
+ *     through here once more.  Without the reset each round would sit below
+ *     the last until the stack ran out;
+ *   - the calls below run on the ABI's alignment.  Entered by a call, %rsp
+ *     was eight off sixteen, and the callq's took it to their callees
+ *     sixteen-aligned -- the opposite of what a C function is compiled for.
+ *     kernel_stack is the stack's top, aligned.
+ *
+ * %rbp is cleared with it, as i386's call_continuation clears %ebp: it still
+ * named a frame in the region just discarded, and a backtrace taken below
+ * here would have walked into it.
+ *
  * An exception has been handled and the thread should carry on where it was.
  *
  * The frame in the pcb is what trap entry saved on the way in, possibly
@@ -545,10 +610,10 @@ isr_table:
  * thread to resume there.
  */
 thread_exception_return:
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+	xorl	%ebp, %ebp			/* and no frame above it */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
-	callq	act_user_frame		/* %rax = this thread's trap frame */
-	movq	%rax, %rsp
-	jmp	thread_frame_return
+	jmp	thread_user_frame_return
 
 /*
  * A thread that has never run, starting for the first time.
@@ -559,36 +624,69 @@ thread_exception_return:
  * prepared by thread_set_state(), and resuming it is resuming it.
  */
 thread_bootstrap_return:
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+	xorl	%ebp, %ebp			/* and no frame above it */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
-	callq	act_user_frame
-	movq	%rax, %rsp
-	jmp	thread_frame_return
+	jmp	thread_user_frame_return
 
 /*
- * Run the system call again.
+ * Run the system call again -- which on this port nothing asks for.
  *
- * ⚠️ The frame's rip still points AT the syscall instruction, not past it:
- * the entry path saves rcx, which SYSCALL loaded with the return address,
- * and the return path puts it back -- so "again" is achieved by returning
- * normally to an instruction pointer that was never advanced.  Nothing here
- * has to rewind anything, and anything that did would be wrong.
+ * exception() calls this only for EXC_MACH_SYSCALL with the host as the
+ * handler, and only i386 raises that exception (its locore); here a Mach call
+ * the table does not have is answered ENOSYS (syscall/entry.S).
+ *
+ * ⚠️ And a return from here would NOT run it again.  This said the frame's
+ * rip still points AT the syscall instruction; it points past it: SYSCALL
+ * loads rcx with the address of the next instruction, and that is what the
+ * entry saves as the frame's rip.  A port that raised EXC_MACH_SYSCALL would
+ * have to rewind rip by the instruction's two bytes first (#780).
  */
 restart_mach_syscall:
+	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+	xorl	%ebp, %ebp			/* and no frame above it */
 	callq	thread_return_ast	/* AST_APC first: see trap.c */
-	callq	act_user_frame
-	movq	%rax, %rsp
-	jmp	thread_frame_return
+	jmp	thread_user_frame_return
 
 /*
- * The tail all three share: the frame is at %rsp, we are going to ring 3.
+ * The tail all three share: this thread's frame, and ring 3.
+ *
+ * ⚠️ Interrupts off BEFORE %rsp goes to the frame (#770), for trap_common's
+ * reason: the frame is in the thread's pcb, and an interrupt taken with %rsp
+ * there would push its frame into the pcb.  One copy of that, here, rather
+ * than one in each of the three.  And the frame is asked first whether iretq
+ * will take it (act_user_return_frame(), #780), on kernel_stack and with
+ * interrupts as they were: a fault iretq raises lands in the pcb, and IF
+ * does not stop it.
  *
  * swapgs unconditionally, because every one of these is a return TO USER --
  * unlike trap_common's tail, which has to test, because a trap may have come
  * from either ring.
+ *
+ * And it is entered at the top of the kernel stack, where each of the three
+ * puts %rsp: anything else is a tail that kept the stack it was called on,
+ * said here the first time (tail_off_its_stack) rather than once the stack
+ * has grown into memory nothing guards (#780).
  */
-thread_frame_return:
+thread_user_frame_return:
+	cmpq	%gs:PERCPU_KERNEL_STACK, %rsp	/* where each tail puts it (#780) */
+	jne	tail_off_its_stack
+	callq	act_user_return_frame	/* %rax = the frame, iretq-able (#780) */
+	cli
+	movq	%rax, %rsp
 	RESTORE_REGS
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
 	addq	$16, %rsp		/* drop the vector and error code */
 	iretq
+
+/*
+ * A tail came into the shared one off the top of its kernel stack.  Under the
+ * stack it kept, the overflow it would grow into faulted on victus and, on
+ * OMEGA under KVM, said nothing at all: so it is said here (#780).
+ */
+tail_off_its_stack:
+	movq	%gs:PERCPU_KERNEL_STACK, %rdi
+	movq	%rsp, %rsi
+	andq	$-16, %rsp
+	callq	trap_tail_off_its_stack	/* panics */

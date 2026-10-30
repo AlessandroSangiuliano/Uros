@@ -56,6 +56,12 @@ void context_become_current(struct context *ctx, uint64_t stack_top,
 	ctx->kernel_stack_top = stack_top;
 	ctx->fpu_area = fpu_area;
 	/*
+	 * #770: no pcb behind this one, so its frame is where it always was,
+	 * at the top of the stack, and an entry runs C below it.
+	 */
+	ctx->user_frame = KERNEL_STACK_USER_FRAME(stack_top);
+	ctx->entry_stack = ctx->user_frame;
+	/*
 	 * 🔴 THE CONTEXT THE MACHINE IS ALREADY RUNNING IN, and it keeps the
 	 * state moving (#561).  This is the boot context adopting the first
 	 * thread: whatever is in the vector registers at that moment is not
@@ -93,19 +99,30 @@ void context_exempt_vector_state(struct context *ctx)
 }
 
 void context_init(struct context *ctx, uint64_t stack_top,
-		  void (*entry)(void *), void *arg, void *fpu_area)
+		  void (*entry)(void *), void *arg, void *fpu_area,
+		  uint64_t user_frame)
 {
 	/*
-	 * ⚠️ Below the reserved user frame, not at the top of the stack.
-	 * <trap/trap.h> says why: those bytes belong to the trap frame,
-	 * which act_machine_set_state() may write while this thread is
-	 * running kernel code on the same stack.
+	 * Where an entry from ring 3 saves this thread's registers, and where
+	 * its stack therefore begins (#770).
+	 *
+	 * ⚠️ With no frame of its own, below the frame reserved at the top of
+	 * the stack, not at the top.  <trap/trap.h> says why: those bytes
+	 * belong to the trap frame, which act_machine_set_state() may write
+	 * while this thread is running kernel code on the same stack.  With a
+	 * frame of its own -- in its pcb -- the whole stack is the stack.
 	 */
-	uint64_t rsp = KERNEL_STACK_USER_FRAME(stack_top) - CTX_WORDS * 8;
+	uint64_t entry_stack = user_frame != 0
+		? stack_top : KERNEL_STACK_USER_FRAME(stack_top);
+	uint64_t rsp = entry_stack - CTX_WORDS * 8;
 	uint64_t *frame = (uint64_t *)(uintptr_t)rsp;
 
 	if (stack_top & 0xF)
 		panic("thread: a stack that is not sixteen-byte aligned");
+
+	ctx->user_frame = user_frame != 0
+		? user_frame : KERNEL_STACK_USER_FRAME(stack_top);
+	ctx->entry_stack = entry_stack;
 
 	/*
 	 * The expensive answer by default (#561).  See
@@ -150,12 +167,14 @@ void context_switch(struct context *old, struct context *fresh)
 	 * while there was one thread to arrive on it.
 	 */
 	/*
-	 * ⚠️ Below the reserved user frame, the same as the initial stack this
-	 * file already sets that way (#474).  The syscall entry starts using
-	 * this as a stack; the top belongs to the frame a trap builds and
-	 * pcb->user names.
+	 * Where the incoming thread's frame is, and the stack an entry runs C
+	 * on (#770) -- the two context_init() decided, rather than an address
+	 * derived here a second time.  For a context with no frame of its own
+	 * they are one number: the frame at the top of the stack, the stack
+	 * below it (#474).
 	 */
-	percpu()->kernel_rsp = KERNEL_STACK_USER_FRAME(fresh->kernel_stack_top);
+	percpu()->kernel_rsp = fresh->user_frame;
+	percpu()->kernel_stack = fresh->entry_stack;
 
 	/*
 	 * Both halves before the switch, because after it this code is

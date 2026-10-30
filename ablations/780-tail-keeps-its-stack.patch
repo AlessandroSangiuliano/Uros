@@ -1,0 +1,36 @@
+Kind: ablation
+Issue: #780
+Takes out: the three tails' fresh start -- thread_exception_return, thread_bootstrap_return and restart_mach_syscall no longer put %rsp back at kernel_stack, so every exception act_test's arm seventeen answers with "resume" would come back through the tail one level deeper on the kernel stack, a hundred times; the shared tail's check (5f875988) says so the first time a tail comes into it off the top.
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: trap: a return to ring 3 came into the shared tail with %rsp 0x[0-9a-f]+, not at the top of its kernel stack
+Note: both accelerators: the check is the kernel's, not the processor's.  Before the check, a kept stack showed only where its overflow hit something, which nothing guards: on victus (AMD), 4 of 4, a double fault under KVM and a kernel page fault under TCG; on OMEGA (Intel, 30/10), nothing at all under KVM, and under TCG a single-step trap at an address in data, through a frame the overflow had written.
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
+index da11f10c..4d0f9b20 100644
+--- a/uros/src/mach_kernel/x86_64/trap/entry.S
++++ b/uros/src/mach_kernel/x86_64/trap/entry.S
+@@ -610,7 +610,6 @@ isr_table:
+  * thread to resume there.
+  */
+ thread_exception_return:
+-	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+ 	xorl	%ebp, %ebp			/* and no frame above it */
+ 	callq	thread_return_ast	/* AST_APC first: see trap.c */
+ 	jmp	thread_user_frame_return
+@@ -624,7 +623,6 @@ thread_exception_return:
+  * prepared by thread_set_state(), and resuming it is resuming it.
+  */
+ thread_bootstrap_return:
+-	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+ 	xorl	%ebp, %ebp			/* and no frame above it */
+ 	callq	thread_return_ast	/* AST_APC first: see trap.c */
+ 	jmp	thread_user_frame_return
+@@ -643,7 +641,6 @@ thread_bootstrap_return:
+  * have to rewind rip by the instruction's two bytes first (#780).
+  */
+ restart_mach_syscall:
+-	movq	%gs:PERCPU_KERNEL_STACK, %rsp	/* nothing below is live (#780) */
+ 	xorl	%ebp, %ebp			/* and no frame above it */
+ 	callq	thread_return_ast	/* AST_APC first: see trap.c */
+ 	jmp	thread_user_frame_return

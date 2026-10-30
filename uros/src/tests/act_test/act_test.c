@@ -198,6 +198,20 @@ static volatile int		arm_six_exception = -1;
 static volatile int		arm_six_code;
 static volatile int		arm_six_named_the_victim;
 
+/* #780: arms seventeen and eighteen, whose handler is the same as arm six's. */
+#define	ARM17_ROUNDS	100
+
+static volatile int		arm_seventeen_armed;
+static volatile mach_port_t	arm_seventeen_thread;
+static volatile int		arm_seventeen_seen, arm_seventeen_others;
+static volatile int		arm_seventeen_exception, arm_seventeen_code;
+
+static volatile int		arm_eighteen_armed;
+static volatile mach_port_t	arm_eighteen_thread;
+static volatile int		arm_eighteen_stop;
+static volatile int		arm_eighteen_named_the_victim = -2;
+static volatile int		arm_eighteen_exception, arm_eighteen_code;
+
 /*
  * What exc_server calls when the message arrives.  MIG demands this name and
  * this shape.
@@ -217,6 +231,38 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 	 * makes a non-canonical address resumable -- so the only ending that
 	 * lets this program keep running is to destroy it.
 	 */
+	if (arm_seventeen_armed) {
+		if (thread == arm_seventeen_thread) {
+			arm_seventeen_seen++;
+			arm_seventeen_exception = exception;
+			arm_seventeen_code = (codeCnt > 0) ? (int) code[0] : 0;
+			/*
+			 * "Resume", unchanged, until the last round: the
+			 * thread comes back through the same tail each time.
+			 */
+			if (arm_seventeen_seen >= ARM17_ROUNDS)
+				(void) thread_terminate(thread);
+		} else {
+			arm_seventeen_others++;
+		}
+		/*
+		 * Each request brings a reference to both names, and an
+		 * answer of KERN_SUCCESS keeps them (arm one's note above):
+		 * a hundred rounds would leave a hundred behind.
+		 */
+		(void) mach_port_deallocate(mach_task_self(), thread);
+		(void) mach_port_deallocate(mach_task_self(), task);
+		return KERN_SUCCESS;
+	}
+	if (arm_eighteen_armed) {
+		arm_eighteen_exception = exception;
+		arm_eighteen_code = (codeCnt > 0) ? (int) code[0] : 0;
+		arm_eighteen_named_the_victim = (thread == arm_eighteen_thread);
+		(void) thread_terminate(thread);
+		(void) mach_port_deallocate(mach_task_self(), thread);
+		(void) mach_port_deallocate(mach_task_self(), task);
+		return KERN_SUCCESS;
+	}
 	if (arm_six_armed) {
 		arm_six_exception = exception;
 		arm_six_code = (codeCnt > 0) ? (int) code[0] : 0;
@@ -3104,11 +3150,373 @@ arm_fifteen_kernel_task_needs_privilege(void)
 	return 1;
 }
 
+/* ----------------------------------------------------------------
+ * Arms seventeen and eighteen: a return to ring 3 that IRETQ would refuse
+ * (#780)
+ * ----------------------------------------------------------------
+ *
+ * Arm six asks the syscall return, which since #518 refuses a non-canonical
+ * rip before SYSRET can fault on it.  The other two ways back to ring 3 are
+ * IRETQs -- the tail every thread return shares, and trap_common's -- and
+ * nothing asked them the same question.  An IRETQ to a non-canonical rip is a
+ * general protection fault at CPL 0, and since #770 it is taken with %rsp in
+ * the thread's pcb: the fault's frame and the C that reports it went over the
+ * pcb and the zone around it.  Before #770 it halted the machine.
+ *
+ * Arm seventeen asks the thread-return tail.  A thread created and given a
+ * non-canonical rip before it ever ran starts through thread_bootstrap_return,
+ * and its handler then answers "resume" without moving rip, a hundred times:
+ * the thread comes back through thread_exception_return a hundred times.  The
+ * tails start again at the top of the kernel stack, so a round costs nothing;
+ * without that, each round would sit below the last until the stack ran out.
+ *
+ * Arm eighteen asks trap_common's: a thread spinning in ring 3 is suspended --
+ * inside an interrupt, the only way into the kernel it has -- given a
+ * non-canonical rip, and resumed.
+ *
+ * 🔴 UNDER KVM, NOT TCG.  TCG does not raise the #GP an IRETQ owes a
+ * non-canonical target (#518, #516): there the iretq goes through and the
+ * fetch after it faults in ring 3, so both arms pass under TCG with or without
+ * the fix.  What makes them mean something is KVM, and an ablation per arm
+ * that turns it red there.
+ *
+ * 🔥 Each announces what it is about to do before doing it, for arm six's
+ * reason: on a kernel without the fix the machine stops at the iretq, and the
+ * last line printed has to say what was being done.
+ */
+/* Arms seventeen and eighteen's state: declared with arm six's, above. */
+
+/*
+ * One exception message, waited for four seconds at most and answered -- with
+ * a bound for arm six's reason: a kernel that delivers nothing must not take
+ * the summary of the arms before it down with it.
+ */
+static kern_return_t
+arm_780_serve_one(void)
+{
+	union {
+		mach_msg_header_t	h;
+		char			room[4096];
+	} req, rep;
+	kern_return_t	kr;
+
+	kr = mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof req,
+		      exc_port, 4000, MACH_PORT_NULL);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	(void) exc_server(&req.h, &rep.h);
+	if (rep.h.msgh_remote_port != MACH_PORT_NULL)
+		(void) mach_msg(&rep.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+				rep.h.msgh_size, 0, MACH_PORT_NULL, 1000,
+				MACH_PORT_NULL);
+	return KERN_SUCCESS;
+}
+
+static int
+arm_780_watch_bad_instruction(const char *tag)
+{
+	kern_return_t	kr;
+
+	if (exc_port == MACH_PORT_NULL) {
+		printf("act_test: %s no exception port — arm one did not get "
+		       "far enough for this arm to mean anything — WRONG\n", tag);
+		return 0;
+	}
+	kr = task_set_exception_ports(mach_task_self(),
+				      EXC_MASK_BAD_INSTRUCTION, exc_port,
+				      EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: %s task_set_exception_ports failed (%d)"
+		       " — WRONG\n", tag, kr);
+		return 0;
+	}
+	return 1;
+}
+
+static int
+arm_seventeen_start_at_a_noncanonical_rip(void)
+{
+	struct x86_64_thread_state	state;
+	thread_act_t			t;
+	vm_address_t			stack = 0;
+	kern_return_t			kr;
+	unsigned int			i;
+	int				round;
+	char				vendor[13];
+
+	if (!arm_780_watch_bad_instruction("[17]"))
+		return 0;
+
+	kr = vm_allocate(mach_task_self(), &stack, vm_page_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [17] no page for a stack (%d) — WRONG\n", kr);
+		return 0;
+	}
+	kr = thread_create(mach_task_self(), &t);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [17] thread_create answered %d — WRONG\n", kr);
+		return 0;
+	}
+
+	/*
+	 * A whole state, written before the thread has ever run: zero, a stack
+	 * of its own, and the address.  cs and ss are not ours to choose -- the
+	 * kernel imposes them -- and the flags keep only what ring 3 may set.
+	 */
+	for (i = 0; i < sizeof state; i++)
+		((volatile char *) &state)[i] = 0;
+	state.rip = NONCANONICAL;
+	state.rsp = stack + vm_page_size - 16;
+	state.rflags = 0x202;
+	kr = thread_set_state(t, x86_64_THREAD_STATE, (thread_state_t) &state,
+			      x86_64_THREAD_STATE_COUNT);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [17] thread_set_state refused a non-canonical "
+		       "rip with %d — not this kernel's answer (#780), and the "
+		       "return path is left unasked — WRONG\n", kr);
+		(void) thread_terminate(t);
+		return 0;
+	}
+
+	arm_six_armed = 0;		/* arm six's victim is gone */
+	arm_seventeen_thread = t;
+	arm_seventeen_armed = 1;
+	printf("act_test: [17] starting a thread at rip 0x%llx and answering "
+	       "\"resume\" %d times; if the machine stops here, that is the "
+	       "answer (#780)\n", NONCANONICAL, ARM17_ROUNDS);
+
+	kr = thread_resume(t);
+	if (kr != KERN_SUCCESS) {
+		arm_seventeen_armed = 0;
+		printf("act_test: [17] thread_resume answered %d — WRONG\n", kr);
+		(void) thread_terminate(t);
+		return 0;
+	}
+
+	for (round = 0; round < ARM17_ROUNDS; round++)
+		if ((kr = arm_780_serve_one()) != KERN_SUCCESS)
+			break;
+	arm_seventeen_armed = 0;
+	(void) mach_port_deallocate(mach_task_self(), t);
+	(void) vm_deallocate(mach_task_self(), stack, vm_page_size);
+
+	if (arm_seventeen_seen != ARM17_ROUNDS) {
+		printf("act_test: [17] %d of %d exceptions arrived (the last wait "
+		       "answered %d) — WRONG\n", arm_seventeen_seen, ARM17_ROUNDS,
+		       kr);
+		return 0;
+	}
+	if (arm_seventeen_others != 0) {
+		printf("act_test: [17] %d exceptions named another thread "
+		       "— WRONG\n", arm_seventeen_others);
+		return 0;
+	}
+	if (arm_seventeen_exception != EXC_BAD_INSTRUCTION) {
+		printf("act_test: [17] the exception was %d, not "
+		       "EXC_BAD_INSTRUCTION (%d) — WRONG\n",
+		       arm_seventeen_exception, EXC_BAD_INSTRUCTION);
+		return 0;
+	}
+
+	cpu_vendor(vendor);
+	printf("act_test: [17] a thread started at 0x%llx raised "
+	       "EXC_BAD_INSTRUCTION code %d against itself %d times, was told to "
+	       "resume each time, and the machine is still running to say so "
+	       "— cpu %s (#780)\n", NONCANONICAL, arm_seventeen_code,
+	       arm_seventeen_seen, vendor);
+	return 1;
+}
+
+static void *
+the_thread_stopped_in_a_trap(void *arg)
+{
+	(void) arg;
+
+	arm_eighteen_thread = mach_thread_self();
+	while (!arm_eighteen_stop)
+		;
+	/*
+	 * Not reached when the arm works: the thread is terminated at the
+	 * exception its poisoned frame raises.  Reached, it ran on past it.
+	 */
+	arm_eighteen_named_the_victim = -1;
+	return NULL;
+}
+
+static int
+arm_eighteen_stopped_in_a_trap(void)
+{
+	pthread_t			spinner;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	kern_return_t			kr;
+	int				i;
+	unsigned long long		stopped_at;
+	char				vendor[13];
+
+	if (!arm_780_watch_bad_instruction("[18]"))
+		return 0;
+
+	if (pthread_create(&spinner, NULL, the_thread_stopped_in_a_trap,
+			   NULL) != 0) {
+		printf("act_test: [18] pthread_create failed — WRONG\n");
+		return 0;
+	}
+	for (i = 0; i < PATIENCE && arm_eighteen_thread == MACH_PORT_NULL; i++)
+		(void) nap(100);
+	if (arm_eighteen_thread == MACH_PORT_NULL) {
+		printf("act_test: [18] the spinner never published its port "
+		       "— WRONG\n");
+		return 0;
+	}
+	(void) nap(200);
+
+	/*
+	 * ⚠️ Stopped INSIDE ITS LOOP, and asked rather than assumed.  The
+	 * spinner made one system call before it began to spin, and a thread
+	 * stopped inside one leaves through SYSRET, whose check is #518's: the
+	 * arm would pass, and the ablation of trap_common's check would stay
+	 * green without saying why.  A rip in this function's own code means
+	 * the thread was stopped where only an interrupt could have stopped it;
+	 * anywhere else, it is let go and stopped again.
+	 */
+	for (i = 0; i < 10; i++) {
+		kr = thread_suspend(arm_eighteen_thread);
+		if (kr != KERN_SUCCESS) {
+			printf("act_test: [18] thread_suspend answered %d "
+			       "— WRONG\n", kr);
+			return 0;
+		}
+		count = x86_64_THREAD_STATE_COUNT;
+		kr = thread_get_state(arm_eighteen_thread, x86_64_THREAD_STATE,
+				      (thread_state_t) &state, &count);
+		if (kr == KERN_SUCCESS
+		    && state.rip >= (uintptr_t) the_thread_stopped_in_a_trap
+		    && state.rip < (uintptr_t) the_thread_stopped_in_a_trap
+				   + 0x100)
+			break;
+		(void) thread_resume(arm_eighteen_thread);
+		(void) nap(50);
+	}
+	if (kr != KERN_SUCCESS || state.cs != 0x2bULL || state.ss != 0x23ULL
+	    || i == 10) {
+		printf("act_test: [18] thread_get_state answered %d, cs 0x%llx "
+		       "ss 0x%llx rip 0x%llx after %d tries — not a ring-3 frame "
+		       "inside the spinner's loop to poison — WRONG\n", kr,
+		       (unsigned long long) state.cs,
+		       (unsigned long long) state.ss,
+		       (unsigned long long) state.rip, i);
+		arm_eighteen_stop = 1;
+		(void) thread_resume(arm_eighteen_thread);
+		return 0;
+	}
+	stopped_at = state.rip;
+
+	state.rip = NONCANONICAL;
+	kr = thread_set_state(arm_eighteen_thread, x86_64_THREAD_STATE,
+			      (thread_state_t) &state, count);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [18] thread_set_state refused a non-canonical "
+		       "rip with %d — WRONG\n", kr);
+		arm_eighteen_stop = 1;
+		(void) thread_resume(arm_eighteen_thread);
+		return 0;
+	}
+
+	arm_six_armed = 0;
+	arm_eighteen_armed = 1;
+	printf("act_test: [18] resuming a thread stopped inside a trap, its "
+	       "frame now saying rip 0x%llx; if the machine stops here, that is "
+	       "the answer (#780)\n", NONCANONICAL);
+	(void) thread_resume(arm_eighteen_thread);
+
+	kr = arm_780_serve_one();
+	arm_eighteen_armed = 0;
+	arm_eighteen_stop = 1;		/* for a thread that ran on */
+	(void) mach_port_deallocate(mach_task_self(), arm_eighteen_thread);
+
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [18] no exception arrived within four seconds "
+		       "(%d) — WRONG\n", kr);
+		return 0;
+	}
+	if (arm_eighteen_named_the_victim != 1) {
+		printf("act_test: [18] the exception %s — WRONG\n",
+		       arm_eighteen_named_the_victim == -1
+		       ? "came after the thread ran on past its trap"
+		       : "named a thread that is not the one that was poisoned");
+		return 0;
+	}
+	if (arm_eighteen_exception != EXC_BAD_INSTRUCTION) {
+		printf("act_test: [18] the exception was %d, not "
+		       "EXC_BAD_INSTRUCTION (%d) — WRONG\n",
+		       arm_eighteen_exception, EXC_BAD_INSTRUCTION);
+		return 0;
+	}
+
+	cpu_vendor(vendor);
+	printf("act_test: [18] a thread stopped inside a trap at 0x%llx, in its "
+	       "loop, and told to resume at 0x%llx raised EXC_BAD_INSTRUCTION "
+	       "code %d against itself, and the machine is still running to say "
+	       "so — cpu %s (#780)\n", stopped_at, NONCANONICAL,
+	       arm_eighteen_code, vendor);
+	return 1;
+}
+
+/* ----------------------------------------------------------------
+ * Arm nineteen: the last page of the user half is nobody's (#780)
+ * ----------------------------------------------------------------
+ *
+ * Code in the last page of the canonical half leaves it without a branch: an
+ * instruction ending on its last byte, or a SYSCALL in its last two, gives the
+ * kernel a user rip of 2^47 to return to.  So no task may map that page, and
+ * the stacks that start at the top start a page lower.  Asked of this task's
+ * own map: nothing there or above it, and an allocation there refused.  On a
+ * kernel that still gave the page out, the region found is this program's own
+ * stack.
+ */
+#define	LAST_USER_PAGE	((vm_address_t) 0x00007ffffffff000ULL)
+
+static int
+arm_nineteen_last_page_unmapped(void)
+{
+	vm_address_t			a = LAST_USER_PAGE, fixed = LAST_USER_PAGE;
+	vm_size_t			sz = 0;
+	vm_region_basic_info_data_t	bi;
+	mach_msg_type_number_t		c = VM_REGION_BASIC_INFO_COUNT;
+	mach_port_t			obj = MACH_PORT_NULL;
+	kern_return_t			kr_region, kr_alloc;
+
+	kr_region = vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO,
+			      (vm_region_info_t) &bi, &c, &obj);
+	kr_alloc = vm_allocate(mach_task_self(), &fixed, vm_page_size, FALSE);
+	if (kr_alloc == KERN_SUCCESS)
+		(void) vm_deallocate(mach_task_self(), fixed, vm_page_size);
+
+	if (kr_region == KERN_SUCCESS) {
+		printf("act_test: [19] a region at 0x%llx-0x%llx covers the last "
+		       "page of the user half — WRONG (#780)\n",
+		       (unsigned long long) a, (unsigned long long) (a + sz));
+		return 0;
+	}
+	if (kr_alloc == KERN_SUCCESS) {
+		printf("act_test: [19] vm_allocate gave this task the page at "
+		       "0x%llx — WRONG (#780)\n",
+		       (unsigned long long) LAST_USER_PAGE);
+		return 0;
+	}
+	printf("act_test: [19] the last page of the user half, 0x%llx: "
+	       "vm_region found nothing there or above (%d), and vm_allocate "
+	       "there answered %d — no task can map it (#780)\n",
+	       (unsigned long long) LAST_USER_PAGE, kr_region, kr_alloc);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
 	kern_return_t	kr;
-	int		passed = 0, arm_one_passed, arms = 16, r;
+	int		passed = 0, arm_one_passed, arms = 19, r;
 
 	(void) argc;
 	(void) argv;
@@ -3161,6 +3569,7 @@ main(int argc, char **argv)
 	passed += arm_sixteen_name_not_copied_out();
 
 	passed += arm_fifteen_kernel_task_needs_privilege();
+	passed += arm_nineteen_last_page_unmapped();
 
 	/*
 	 * ⚠️ Last, and not by accident.  On a healthy tree this is the only arm
@@ -3170,6 +3579,14 @@ main(int argc, char **argv)
 	 * arms have to say is already printed by the time it is provoked.
 	 */
 	passed += arm_six_non_canonical_return();
+
+	/*
+	 * And the two IRETQ returns after it (#780), for the same reason: each
+	 * can stop the machine on a kernel without the fix, and does nothing to
+	 * one with it.
+	 */
+	passed += arm_seventeen_start_at_a_noncanonical_rip();
+	passed += arm_eighteen_stopped_in_a_trap();
 
 	/*
 	 * The last thing arm one is owed, asked now that the two arms after it

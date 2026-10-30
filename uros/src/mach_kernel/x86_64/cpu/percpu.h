@@ -37,6 +37,7 @@
 #define PERCPU_INTR_LEVEL	168
 #define PERCPU_INTR_SAVED_IF	172
 #define PERCPU_USER_RETURNS	176
+#define PERCPU_KERNEL_STACK	184
 
 #ifndef __ASSEMBLER__
 
@@ -296,7 +297,7 @@ struct percpu {
 
 	/*
 	 * #476, #599: how many times this processor went back to ring 3 by
-	 * trap_common's tail, thread_frame_return or the SYSRET path -- the
+	 * trap_common's tail, thread_user_frame_return or the SYSRET path -- the
 	 * quiet census's measure of work -- counted while %gs is still the
 	 * kernel's.  trap_paranoid's return (NMI, #DB, #DF, #MC from ring 3) is
 	 * not counted.  A user loop that never calls the kernel still
@@ -305,6 +306,18 @@ struct percpu {
 	 * processor, because it is written on every return.
 	 */
 	uint64_t user_returns;
+
+	/*
+	 * #770: where an entry from ring 3 runs C -- the stack an entry
+	 * switches to once the user's registers are saved, which is not where
+	 * they are saved.  kernel_rsp above names the frame (the trap stubs and
+	 * the syscall entry write it there); this names the stack.  They were
+	 * one number while the frame sat at the top of the stack and the stack
+	 * began below it.  Set with kernel_rsp, at every switch, from the
+	 * context of the thread coming in.  After the asserted fields so that
+	 * no offset the assembly knew moves.
+	 */
+	uint64_t kernel_stack;
 
 	/*
 	 * #526: the last raise of this processor's level from zero -- where it
@@ -386,6 +399,8 @@ _Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)
 	       == PERCPU_INTR_SAVED_IF, "percpu intr_saved_if moved");
 _Static_assert(__builtin_offsetof(struct percpu, user_returns)
 	       == PERCPU_USER_RETURNS, "percpu user_returns moved");
+_Static_assert(__builtin_offsetof(struct percpu, kernel_stack)
+	       == PERCPU_KERNEL_STACK, "percpu kernel_stack moved");
 
 /*
  * Two halves, and the split is not tidiness.
@@ -589,6 +604,16 @@ static inline uint64_t percpu_kernel_rsp(void)
 
 	__asm__ volatile("movq %%gs:%c1, %0"
 			 : "=r"(v) : "i"(PERCPU_KERNEL_RSP));
+	return v;
+}
+
+/* And the stack an entry from ring 3 runs C on (#770), the same way. */
+static inline uint64_t percpu_kernel_stack(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("movq %%gs:%c1, %0"
+			 : "=r"(v) : "i"(PERCPU_KERNEL_STACK));
 	return v;
 }
 

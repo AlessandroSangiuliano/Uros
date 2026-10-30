@@ -196,6 +196,7 @@ void percpu_activate_boot(void)
 	percpu_boot.self = &percpu_boot;
 	percpu_boot.cpu_id = 0;
 	percpu_boot.kernel_rsp = KERNEL_STACK_USER_FRAME(desc_rsp0(0));
+	percpu_boot.kernel_stack = percpu_boot.kernel_rsp;	/* #770: see below */
 
 	wrmsr(MSR_GS_BASE, (uint64_t)(uintptr_t)&percpu_boot);
 	wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)(uintptr_t)&percpu_boot);
@@ -242,6 +243,13 @@ void percpu_activate(uint32_t cpu_id)
 	 * a whole trap frame there.
 	 */
 	p->kernel_rsp = KERNEL_STACK_USER_FRAME(desc_rsp0(cpu_id));
+	/*
+	 * #770: and C runs below that frame, on this processor's stack.  No
+	 * thread is here yet, so there is no pcb to hold the frame: the
+	 * stack's top holds it, as every thread's did before #770, until the
+	 * first switch brings a thread's own values.
+	 */
+	p->kernel_stack = p->kernel_rsp;
 
 	deny_user_segment_bases();
 	choose_cr4_bits();
@@ -268,23 +276,23 @@ void percpu_activate(uint32_t cpu_id)
  * the sample is machine-independent and lives in <kern/syscall_profile.h>.
  *
  * 🔑 ON THE THREAD'S OWN STACK, NOT IN THIS PROCESSOR'S BLOCK (#622): the word
- * SYSCALL_ENTRY_TSC_BELOW bytes under the frame the stub filled, which is this
- * thread's for the frame's reason (#474) and stays out of everything's way
- * until the dispatch returns -- entry.S says how.  A thread taken off its
+ * SYSCALL_ENTRY_TSC_BELOW bytes under the top of the stack the entry runs on
+ * (kernel_stack, #770), which is this thread's and stays out of everything's
+ * way until the dispatch returns -- entry.S says how.  A thread taken off its
  * processor after the entry's sti takes the reading with it, and no other
  * entry can write it.  In this processor's block it could be another thread's,
  * or this thread's own from an earlier call, and #648's owner check could
  * catch only the first.
  *
- * kernel_rsp is the running thread's frame base, set by the switch that
- * brought it here, and read in one instruction it is ours on whatever
- * processor it is read (#526).
+ * kernel_stack is the running thread's, set by the switch that brought it
+ * here, and read in one instruction it is ours on whatever processor it is
+ * read (#526).
  */
 uint64_t
 syscall_profile_entry_tsc(void)
 {
 	return *(const uint64_t *) (uintptr_t)
-		(percpu_kernel_rsp() - SYSCALL_ENTRY_TSC_BELOW);
+		(percpu_kernel_stack() - SYSCALL_ENTRY_TSC_BELOW);
 }
 #endif	/* SYSCALL_PROFILE */
 

@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #780
+Takes out: trap_common's question -- a trap going back to ring 3 no longer asks trap_user_return_check() whether IRETQ will take its frame, so act_test's arm eighteen, which stops a spinning thread inside an interrupt and gives it a non-canonical rip, resumes it through an IRETQ that faults at CPL 0 with %rsp in the thread's pcb.
+Accel: kvm
+Run: --entry 14 1200 -smp 4
+Expect: UrMach x86-64: trap (general protection|double fault|page fault)
+Note: KVM only: TCG does not raise the #GP an IRETQ owes a non-canonical target (#518, #516), so under TCG this tree passes.  The report's first line, which no healthy boot prints; read in the arm's log that it follows arm eighteen's announcement and that arm seventeen passed before it.
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
+index b02aee7b..94ae8dbe 100644
+--- a/uros/src/mach_kernel/x86_64/trap/entry.S
++++ b/uros/src/mach_kernel/x86_64/trap/entry.S
+@@ -295,11 +295,6 @@ trap_common:
+ 	 * still be given its fault instead.  Read off the frame rather than
+ 	 * remembered from the way in, for the reason the swapgs below gives.
+ 	 */
+-	testb	$3, TF_CS(%rbx)
+-	jz	4f
+-	movq	%rbx, %rdi
+-	call	trap_user_return_check	/* returns only if iretq will take it */
+-4:
+ 
+ 	/*
+ 	 * Back onto the frame with interrupts off (#770).  From here to the

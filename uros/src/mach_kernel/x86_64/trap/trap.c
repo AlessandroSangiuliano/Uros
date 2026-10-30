@@ -1359,8 +1359,10 @@ trap_take_ast(struct trap_frame *frame)
  * on the way back.  i386 never needed this: its kernel does not preempt.
  *
  * ⚠️ So this RETURNS WITH INTERRUPTS OFF, and its callers count on it: the
- * three tails in trap/entry.S go to iretq through act_user_frame, which
- * does not block, and reach swapgs with the flag still clear -- an interrupt
+ * three tails in trap/entry.S go to iretq through act_user_return_frame(),
+ * which does not block -- except to give the thread a #GP its rip has asked
+ * for, and then it never comes back to the tail (#780) -- and reach swapgs
+ * with the flag still clear -- an interrupt
  * between swapgs and iretq would find a ring-0 frame and the user's %gs; the
  * syscall return clears it itself a few instructions later; trap_take_ast()
  * was called with it clear and goes back to an interrupt return.
@@ -1444,7 +1446,8 @@ static int refused_by_protection(const struct trap_frame *frame)
 /*
  * Resolve a fault, with interrupts as the interrupted code had them (#411).
  *
- * 🔥 A trap gate clears IF, so a handler runs with interrupts off -- and
+ * 🔥 An interrupt gate clears IF, and every gate here is one (idt_set()), so a
+ * handler runs with interrupts off -- and
  * vm_fault() is not a leaf.  It reaches pmap_enter(), which can unmap a page it
  * is replacing, which shoots the translation down on every processor, which is
  * a cross-call: `ipi: a cross-call with interrupts off would deadlock', and
@@ -1569,11 +1572,12 @@ uint64_t trap_smap_after_last(void)
  * after it that the fault path still needs.
  *
  * ⚠️ The frame this was called with IS the thread's saved user frame -- a trap
- * from ring 3 lands at KERNEL_STACK_USER_FRAME(top), which is where pcb->user
- * points -- so the state the handler reads is the state that faulted, and the
- * state it writes back is what resumes.  That is not a coincidence to rely on
- * quietly: trap.h derives both from one expression precisely so there is one
- * claim about those bytes.  A vector with an interrupt stack of its own lands
+ * from ring 3 lands in the frame context_init() decided, in the thread's pcb
+ * (#770), whose end the switch gives the processor as rsp0 and whose address
+ * pcb->user holds -- so the state the handler reads is the state that
+ * faulted, and the state it writes back is what resumes.  That is not a
+ * coincidence to rely on quietly: both come from one field of the context,
+ * precisely so there is one claim about those bytes.  A vector with an interrupt stack of its own lands
  * elsewhere, and #DB, the one of them raised from here, is moved by its stub
  * (#650); user_frame_is_saved() below stops the machine rather than hand a
  * handler a frame that is not the thread's.
@@ -1596,8 +1600,9 @@ x86_64_exception(int exc, int code, int subcode)
 	 * 🔑 UNCONDITIONAL, and that is a statement about who exception() is
 	 * for.  It is raised on behalf of ring 3 and only ring 3 -- the two
 	 * callers below stand inside `(frame->cs & 3) == USER_RPL', and
-	 * syscall_return_noncanonical() is reached only from a SYSRET that was
-	 * about to go there -- and ring 3 cannot have had interrupts off.  So
+	 * user_return_noncanonical() is reached only from a return that was
+	 * about to go there (#518, #780) -- and ring 3 cannot have had
+	 * interrupts off.  So
 	 * there is no case in which the interrupted context wanted them
 	 * disabled, and none in which the kernel may keep them so: everything
 	 * under exception() takes locks, sends messages and can block.
@@ -1638,14 +1643,18 @@ user_frame_is_saved(const struct trap_frame *frame)
 }
 
 /*
- * Ring 3 asked to resume at an address the processor will not resume at (#518).
+ * Ring 3 asked to resume at an address the processor will not resume at (#518,
+ * #780).
  *
- * Called from the syscall return path's slow branch, which the canonical check
- * takes and nothing else does.  The address in the thread's frame is
- * non-canonical, so neither SYSRET nor IRETQ can deliver it: SYSRET would fault
- * at kernel privilege on the CALLER's stack, which is CVE-2012-0217, and IRETQ
- * faults at kernel privilege on ours -- safe, and until now unhandled, which
- * halted the machine.
+ * Called from every way back to ring 3, just before the instruction that would
+ * refuse the address: the syscall return's slow branch, which its canonical
+ * check takes, and trap_user_return_check() below, which the IRETQ returns
+ * call.  The address in the thread's frame is non-canonical, so neither SYSRET
+ * nor IRETQ can deliver it: SYSRET would fault at kernel privilege on the
+ * CALLER's stack, which is CVE-2012-0217, and IRETQ faults at kernel privilege
+ * on the stack it stands on -- which, since #770, is the thread's frame in its
+ * pcb, so the fault's own frame and the C that reports it would have been
+ * written over the pcb and the zone around it.  #518 checked only the first.
  *
  * 🔑 So the fault is synthesised instead of provoked.  It is the same fault the
  * hardware would raise, given to the same thread, with the difference that the
@@ -1661,10 +1670,61 @@ user_frame_is_saved(const struct trap_frame *frame)
  * ⚠️ Does not return, for the reason x86_64_exception() does not.
  */
 void
-syscall_return_noncanonical(void)
+user_return_noncanonical(void)
 {
 	x86_64_exception(EXC_BAD_INSTRUCTION, EXC_X86_64_GPFLT, 0);
 	/*NOTREACHED*/
+}
+
+/*
+ * 🔴 WHETHER A FRAME CAN BE RETURNED THROUGH, ASKED BEFORE IT IS (#780).
+ *
+ * IRETQ to a non-canonical rip is a general protection fault at CPL 0, before
+ * the return commits, on both vendors (SDM Vol. 2A, 253666-093US, IRET,
+ * "64-Bit Mode Exceptions": "If the return instruction pointer is
+ * non-canonical"; APM Vol. 3, 24594 Rev. 3.39, IRET, whose check comes before
+ * IRET_PROTECTED_TO_OUTER_PRIV -- unlike AMD's SYSRET), and #GP has no stack
+ * of its own.  So it is never attempted: the thread gets the
+ * fault the hardware would have given it in ring 3, from here, where the
+ * kernel is still in a state to give it.  Returns only if the frame can be
+ * returned through.
+ *
+ * Called by both IRETQ returns to ring 3: trap_common's, with the frame the
+ * trap built, and the thread-return tail's, through act_user_return_frame().
+ * The cs and ss an iretq also checks are not asked here: thread state imposes
+ * them, and ring 3 can load no others (#781).
+ */
+void
+trap_user_return_check(const struct trap_frame *frame)
+{
+	if (va_is_canonical(frame->rip))
+		return;
+	/*
+	 * Only a thread can be given a fault.  A ring-3 frame with no thread
+	 * behind it is the boot's probe, whose rip is a constant -- so this
+	 * says what happened, by name, rather than leaving exception() to find
+	 * no thread several calls down.
+	 */
+	if (percpu()->active_thread == (void *) 0)
+		panic("trap: a return to ring 3 at %p, which iretq would refuse, "
+		      "with no thread to give the fault to (#780)",
+		      (void *) frame->rip);
+	user_return_noncanonical();
+}
+
+/*
+ * thread_user_frame_return was entered with %rsp off the top of its kernel
+ * stack (entry.S).  Each of the three tails that jump there puts it at the
+ * top and balances its one call, so one of them kept the stack it was called
+ * on: every exception answered "resume" would bring the thread back a level
+ * deeper, into memory below the stack that nothing guards (#780).
+ */
+void
+trap_tail_off_its_stack(uint64_t top, uint64_t rsp)
+{
+	panic("trap: a return to ring 3 came into the shared tail with %%rsp %p, "
+	      "not at the top of its kernel stack, %p (#780)",
+	      (void *) rsp, (void *) top);
 }
 
 /*
