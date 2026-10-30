@@ -3020,6 +3020,95 @@ arm_twenty_no_empty_activation(void)
 	return 1;
 }
 
+/*
+ * Arm twenty-one: set_limit lowers a limit and never raises it (#786).
+ *
+ * thread_policy() with set_limit made the base it was given the thread's
+ * limit, comparing it with nothing, so a task put a thread of its own at
+ * priority 0, FIFO, above every kernel thread; task_policy() did the same
+ * for a task.  A thread made here and never started asks for priority 0,
+ * FIFO, and must be refused with KERN_POLICY_LIMIT, its policy, limit and
+ * base read back as they were; a task made here asks the same and must be
+ * refused too -- a child, so that a kernel without the fix changes nobody
+ * act_test needs.  And a lower priority with set_limit stays granted: an
+ * arm that passed by refusing everything would prove nothing.
+ * Returns 1 when all three answers are right, 0 when not, -1 when it could
+ * not be asked.
+ */
+static int
+arm_twenty_one_set_limit_never_raises(void)
+{
+	thread_act_t			t;
+	mach_port_t			child;
+	kern_return_t			kr, krf, krt, krl;
+	policy_fifo_base_data_t		fifo;
+	policy_timeshare_base_data_t	ts;
+	struct policy_timeshare_info	before, after;
+	struct thread_basic_info	basic;
+	mach_msg_type_number_t		n;
+
+	if (thread_create(mach_task_self(), &t) != KERN_SUCCESS) {
+		printf("act_test: [21] NOT ASKED — no thread to ask with\n");
+		return -1;
+	}
+	n = POLICY_TIMESHARE_INFO_COUNT;
+	if (thread_info(t, THREAD_SCHED_TIMESHARE_INFO, (thread_info_t) &before,
+			&n) != KERN_SUCCESS) {
+		printf("act_test: [21] NOT ASKED — the new thread is not "
+		       "timesharing\n");
+		(void) thread_terminate(t);
+		(void) mach_port_deallocate(mach_task_self(), t);
+		return -1;
+	}
+
+	fifo.base_priority = 0;
+	krf = thread_policy(t, POLICY_FIFO, (integer_t *) &fifo,
+			    POLICY_FIFO_BASE_COUNT, TRUE);
+	n = THREAD_BASIC_INFO_COUNT;
+	basic.policy = -1;
+	(void) thread_info(t, THREAD_BASIC_INFO, (thread_info_t) &basic, &n);
+	n = POLICY_TIMESHARE_INFO_COUNT;
+	after.max_priority = after.base_priority = -1;
+	kr = thread_info(t, THREAD_SCHED_TIMESHARE_INFO, (thread_info_t) &after,
+			 &n);
+
+	ts.base_priority = before.max_priority + 4;
+	krl = thread_policy(t, POLICY_TIMESHARE, (integer_t *) &ts,
+			    POLICY_TIMESHARE_BASE_COUNT, TRUE);
+	(void) thread_terminate(t);
+	(void) mach_port_deallocate(mach_task_self(), t);
+
+	krt = KERN_FAILURE;
+	if (task_create(mach_task_self(), (ledger_port_array_t) 0, 0, FALSE,
+			&child) == KERN_SUCCESS) {
+		krt = task_policy(child, POLICY_FIFO, (integer_t *) &fifo,
+				  POLICY_FIFO_BASE_COUNT, TRUE, FALSE);
+		(void) task_terminate(child);
+		(void) mach_port_deallocate(mach_task_self(), child);
+	}
+
+	if (krf != KERN_POLICY_LIMIT || krt != KERN_POLICY_LIMIT ||
+	    krl != KERN_SUCCESS || kr != KERN_SUCCESS ||
+	    basic.policy != POLICY_TIMESHARE ||
+	    after.max_priority != before.max_priority ||
+	    after.base_priority != before.base_priority) {
+		printf("act_test: [21] asked for priority 0, FIFO, with "
+		       "set_limit: the thread answered 0x%x (policy %d, limit %d, "
+		       "base %d, where they were %d and %d), a task 0x%x, and a "
+		       "lower priority 0x%x — WRONG, a limit is lowered and never "
+		       "raised (#786)\n", krf, (int) basic.policy,
+		       after.max_priority, after.base_priority,
+		       before.max_priority, before.base_priority, krt, krl);
+		return 0;
+	}
+	printf("act_test: [21] a thread and a task asked for priority 0, FIFO, "
+	       "with set_limit: both refused with KERN_POLICY_LIMIT, the "
+	       "thread's limit and base still %d and %d; a lower one, %d, "
+	       "still granted (#786)\n", before.max_priority,
+	       before.base_priority, ts.base_priority);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -3621,6 +3710,12 @@ main(int argc, char **argv)
 	passed += arm_fourteen_terminate_inside_traps();
 	arms++;		/* arm twenty, #783: counted here, beside its call */
 	r = arm_twenty_no_empty_activation();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-one, #786 */
+	r = arm_twenty_one_set_limit_never_raises();
 	if (r < 0)
 		arms--;
 	else
