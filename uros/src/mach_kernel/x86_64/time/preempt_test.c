@@ -51,6 +51,7 @@
 #include <x86_64/time/clock_event.h>
 #include <x86_64/time/preempt_test.h>
 #include <x86_64/time/tsc.h>
+#include <time/rulers.h>		/* #723: a bound without the TSC's rate */
 #include <x86_64/cpu/regs.h>
 #include <x86_64/cpu/spl.h>
 #include <kern/misc_protos.h>
@@ -440,13 +441,41 @@ preempt_test_run_remote(void)
 	thread_bind(current_thread(), was);
 }
 
+/*
+ * A ruler to bound a wait on when the TSC has no rate (#723): the HPET, else
+ * the PM timer -- read, never programmed, at a rate known without measuring
+ * (#508), and counting whether or not the TSC calibrated.  One the vote did
+ * not set aside first.  The 8254 is left out: it is a ruler only while
+ * rulers_start() runs it.
+ */
+static struct kernel_ruler *
+preempt_ruler(void)
+{
+	static const unsigned	ids[] = { RULER_HPET, RULER_PM };
+	struct kernel_ruler	*k, *any = NULL;
+	unsigned		i;
+
+	for (i = 0; i < sizeof ids / sizeof ids[0]; i++) {
+		k = rulers_get(ids[i]);
+		if (k == NULL || !k->present)
+			continue;
+		if (!k->dissents)
+			return k;
+		if (any == NULL)
+			any = k;
+	}
+	return any;
+}
+
 static void
 preempt_test_run_remote_body(int me)
 {
-	thread_t	a, b, r;
-	processor_t	target = PROCESSOR_NULL;
-	uint64_t	t0, limit;
-	int		i;
+	thread_t		a, b, r;
+	processor_t		target = PROCESSOR_NULL;
+	uint64_t		t0, limit;
+	struct kernel_ruler	*ruler;
+	uint64_t		ruler_limit = 0, ruler_last = 0, ruler_gone = 0;
+	int			i;
 
 	/*
 	 * The first processor that is neither this one nor the one the
@@ -518,17 +547,39 @@ preempt_test_run_remote_body(int me)
 	 * Bounded because the failure this exists to catch is silence, and
 	 * waiting forever for a verdict turns a failed test into a hung boot --
 	 * which says strictly less.
+	 *
+	 * 🔑 AND WITHOUT THE TSC'S RATE, TEN SECONDS ON A RULER (#723).  The
+	 * reporter then declines and ends the run -- if it ever runs, and a
+	 * processor whose bound work never arrives is the very thing this waits
+	 * to catch.  So the bound cannot rest on the reporter either.
 	 */
 	t0 = rdtsc();
-	limit = tsc_hz() * 10;	/* zero with no TSC: the reporter declines and ends the run */
+	limit = tsc_hz() * 10;
+	ruler = limit == 0 ? preempt_ruler() : NULL;
+	if (ruler != NULL) {
+		ruler_limit = ruler->r.hz * 10;
+		ruler_last = ruler->r.read();
+	} else if (limit == 0)
+		printf("preempt_test: no calibrated TSC and no ruler, so the "
+		       "wait for processor %d has no bound (#723)\n",
+		       target->slot_num);
 
 	while (!preempt_reported) {
-		if (limit != 0 && rdtsc() - t0 > limit) {
+		if (ruler != NULL) {
+			uint64_t	now = ruler->r.read();
+
+			/* Added up a read apart, so no difference nears a wrap. */
+			ruler_gone += (now - ruler_last) & ruler->r.mask;
+			ruler_last = now;
+		}
+		if ((limit != 0 && rdtsc() - t0 > limit) ||
+		    (ruler != NULL && ruler_gone > ruler_limit)) {
 			printf("preempt_test: WRONG — processor %d never "
-			       "reported in ten seconds.  It reached the "
-			       "scheduler and runs an idle thread, but work "
-			       "bound to it either never arrives or never "
-			       "yields (#461)\n", target->slot_num);
+			       "reported in ten seconds of the %s.  It "
+			       "reached the scheduler and runs an idle thread, "
+			       "but work bound to it either never arrives or "
+			       "never yields (#461)\n", target->slot_num,
+			       ruler != NULL ? ruler->name : "TSC");
 			break;
 		}
 		clock_event_drain_reports();
