@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #786
+Takes out: host_processors' privileged host port -- it takes the name port every task has again, and act_test's arm twenty-two gets the processors' control ports from it
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[22\] host_processors answered the name port 0x0 and
+
+diff --git a/uros/uapi/mach/mach_host.defs b/uros/uapi/mach/mach_host.defs
+index a38c882b..de53c5b7 100644
+--- a/uros/uapi/mach/mach_host.defs
++++ b/uros/uapi/mach/mach_host.defs
+@@ -193,7 +193,7 @@ subsystem
+  */
+ 
+ routine host_processors(
+-		host_priv	: host_priv_t;
++		host		: host_t;
+ 	out	processor_list	: processor_port_array_t);
+ 
+ /*
