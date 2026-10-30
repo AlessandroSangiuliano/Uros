@@ -4,14 +4,14 @@ Takes out: the one-processor ending through halt_all_cpus() -- preempt_end() sto
 Accel: tcg
 Script: scripts/merge-test-x86_64.sh
 Script: -a
-Script: kvm
+Script: both
 Script: -s
 Script: 1
 Script: -e
 Script: 21
 Script: -G
-Expect: merge-test: entry 21 kvm -smp 1 -- WRONG \(halted\)
-Note: Accel: tcg because under KVM ablate.sh would give the script --kvm, which it does not take; the run's own -a kvm names the accelerator. One accelerator, as every other patch run through the merge test: its exit status is its count of WRONG lines, and ablate.sh reads 2 and 3 as a run not made, so a line caught under both accelerators read as a run that did not start.
+Expect: merge-test: entry 21 (tcg|kvm) -smp 1 -- WRONG \(halted\)
+Note: Accel: tcg because under KVM ablate.sh would give the script --kvm, which it does not take; the run's own -a both boots entry 21 under TCG and under KVM, so an arm caught is caught on two lines, which the merge test says with its status 1 (#782).
 
 diff --git a/uros/src/mach_kernel/x86_64/time/preempt_test.c b/uros/src/mach_kernel/x86_64/time/preempt_test.c
 index 615e9c34..4b6c5f2c 100644
