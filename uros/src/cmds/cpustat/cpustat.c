@@ -11,9 +11,11 @@
  * shell-launched musl binary that reports per-processor CPU utilisation,
  * the "top per-core" view.
  *
- * It enumerates the host's processors with host_processors() and reads
- * each one's cpu_ticks through processor_info(PROCESSOR_CPU_LOAD_INFO) at
- * two instants.  The share spent in each state is that state's tick delta
+ * It reads every processor's cpu_ticks in one call,
+ * host_processor_info(PROCESSOR_CPU_LOAD_INFO), by the host's name port, at
+ * two instants -- not host_processors(), which hands out the processors'
+ * control ports and asks for the privileged host port, a shell tool's to have
+ * neither (#786).  The share spent in each state is that state's tick delta
  * over the total delta, so no wall-clock is needed — the sample interval
  * only sets how long a window each line averages over.  The host feeds
  * these counters from machine_slot[cpu].cpu_ticks[], bumped per-CPU by the
@@ -33,12 +35,12 @@
 #include <mach.h>
 #include <mach/processor_info.h>
 #include <mach/machine.h>		/* CPU_STATE_* */
-#include <mach/mach_host.h>		/* host_processors / processor_info stubs */
+#include <mach/mach_host.h>		/* the host_processor_info stub */
 
-/* mach_host_self / host_processors / processor_info are imported from the
- * umbrella libc.so, which #375 exports from its folded-in Mach backend so
- * this tool runs the umbrella's single, initialised Mach runtime instead of
- * a static duplicate.  The trap has no prototype in the musl include world. */
+/* mach_host_self and host_processor_info are imported from the umbrella
+ * libc.so, which #375 exports from its folded-in Mach backend so this tool
+ * runs the umbrella's single, initialised Mach runtime instead of a static
+ * duplicate.  The trap has no prototype in the musl include world. */
 extern mach_port_t mach_host_self(void);
 
 typedef struct processor_cpu_load_info	cpu_load_t;
@@ -53,27 +55,39 @@ nap(unsigned int secs)
 	nanosleep(&ts, NULL);
 }
 
-/* Read every processor's cpu_ticks snapshot into load[].  0 on success. */
-static int
-sample(processor_port_array_t procs, mach_msg_type_number_t nprocs,
-       cpu_load_t *load)
+/*
+ * Read every processor's cpu_ticks snapshot into load[], all in one call:
+ * host_processor_info() answers one PROCESSOR_CPU_LOAD_INFO record per
+ * processor, back to back.  Returns how many processors answered, or 0 when
+ * the call failed or the records are not the size load[] holds.  load may
+ * be null, to count them.
+ */
+static unsigned int
+sample(mach_port_t host, cpu_load_t *load, unsigned int room)
 {
-	mach_msg_type_number_t i;
+	integer_t buf[PROCESSOR_INFO_ARRAY_MAX];
+	mach_msg_type_number_t count = PROCESSOR_INFO_ARRAY_MAX;
+	natural_t n = 0;
+	kern_return_t kr;
 
-	for (i = 0; i < nprocs; i++) {
-		mach_port_t phost;
-		mach_msg_type_number_t count = PROCESSOR_CPU_LOAD_INFO_COUNT;
-		kern_return_t kr = processor_info(procs[i],
-						  PROCESSOR_CPU_LOAD_INFO, &phost,
-						  (processor_info_t)&load[i],
-						  &count);
-		if (kr != KERN_SUCCESS) {
-			printf("cpustat: processor_info(cpu %u) failed (kr=%d)\n",
-			       (unsigned)i, (int)kr);
-			return -1;
-		}
+	kr = host_processor_info(host, PROCESSOR_CPU_LOAD_INFO, &n, buf,
+				 &count);
+	if (kr != KERN_SUCCESS || n == 0 ||
+	    count != n * PROCESSOR_CPU_LOAD_INFO_COUNT) {
+		printf("cpustat: host_processor_info failed (kr=%d, %u "
+		       "processors, %u ints)\n", (int)kr, (unsigned)n,
+		       (unsigned)count);
+		return 0;
 	}
-	return 0;
+	if (load != NULL) {
+		if (n != room) {
+			printf("cpustat: %u processors answered, %u expected\n",
+			       (unsigned)n, room);
+			return 0;
+		}
+		memcpy(load, buf, n * sizeof(*load));
+	}
+	return n;
 }
 
 /* Print the per-core percentages from the two snapshots' tick deltas. */
@@ -108,10 +122,8 @@ int
 main(int argc, char **argv)
 {
 	mach_port_t host;
-	processor_port_array_t procs = 0;
-	mach_msg_type_number_t nprocs = 0;
+	unsigned int nprocs;
 	unsigned int interval = 0;
-	kern_return_t kr;
 	cpu_load_t *a, *b;
 
 	setvbuf(stdout, NULL, _IONBF, 0);	/* unbuffered — a live monitor */
@@ -124,11 +136,9 @@ main(int argc, char **argv)
 			interval = (unsigned int)v;
 	}
 
-	kr = host_processors(host, &procs, &nprocs);
-	if (kr != KERN_SUCCESS || nprocs == 0) {
-		printf("cpustat: host_processors failed (kr=%d)\n", (int)kr);
+	nprocs = sample(host, NULL, 0);
+	if (nprocs == 0)
 		return 1;
-	}
 
 	a = calloc(nprocs, sizeof(*a));
 	b = calloc(nprocs, sizeof(*b));
@@ -140,7 +150,7 @@ main(int argc, char **argv)
 	printf("cpustat: %u processor%s\n",
 	       (unsigned)nprocs, nprocs == 1 ? "" : "s");
 
-	if (sample(procs, nprocs, b) != 0)
+	if (sample(host, b, nprocs) == 0)
 		return 1;
 
 	if (interval == 0) {
@@ -157,7 +167,7 @@ main(int argc, char **argv)
 	for (;;) {
 		memcpy(a, b, nprocs * sizeof(*a));
 		nap(interval);
-		if (sample(procs, nprocs, b) != 0)
+		if (sample(host, b, nprocs) == 0)
 			return 1;
 		report(a, b, nprocs);
 	}
