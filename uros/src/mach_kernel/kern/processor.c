@@ -347,14 +347,22 @@ void pset_init(
 	pset->pset_name_self = IP_NULL;
 	pset->max_priority = BASEPRI_USER;
 	/*
-	 * #274: enable the fixed-priority policies alongside timesharing.
-	 * The run queues are already per-priority and thread_policy_common
-	 * implements RR quantum / FIFO, so POSIX SCHED_FIFO / SCHED_RR
-	 * threads become schedulable instead of being rejected with
-	 * KERN_INVALID_POLICY.  The per-policy limits/bases below are
-	 * already set up for rr/fifo.
+	 * 🔴 Timesharing alone, for whoever asks without the set's port (#786).
+	 *
+	 * #274 enabled FIFO and RR here, and that opened them to
+	 * thread_policy() and task_policy() -- to every task, libpthreads'
+	 * SCHED_FIFO and SCHED_RR included.  A FIFO thread at its own base
+	 * yields only to a strictly better priority, and every user
+	 * timesharing thread is at that base or worse: any task could stop a
+	 * processor's user level for good, the servers with it.
+	 *
+	 * FIFO and RR are the set's control port's to give: thread_set_policy()
+	 * and task_set_policy() take any policy the set implements, enabled
+	 * here or not -- the default pager's RR comes that way -- and
+	 * processor_set_policy_enable() opens one to everybody when that
+	 * port's holder decides to.  The limits and bases below serve both.
 	 */
-	pset->policies = POLICY_TIMESHARE | POLICY_RR | POLICY_FIFO;
+	pset->policies = POLICY_TIMESHARE;
 	pset->set_quantum = min_quantum;
 #if	NCPUS > 1
 	pset->quantum_adj_index = 0;

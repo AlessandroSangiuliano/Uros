@@ -1509,7 +1509,13 @@ test_setschedparam(void)
 }
 
 /* ----------------------------------------------------------------
- * Test: PTHREAD_EXPLICIT_SCHED at thread creation + FIFO/RR enabled (#274)
+ * Test: FIFO and RR are the processor set's control port's to give (#786)
+ *
+ * #274 enabled them in the default set for every task, and this test said
+ * so.  Since #786 a task asks for them with thread_set_policy() and the
+ * set's control port; libpthreads holds no such port, so its answer is
+ * POSIX's EPERM -- for the calling thread, which keeps its policy, and for
+ * a thread created under them, which is not created at all.
  * ---------------------------------------------------------------- */
 
 static void *
@@ -1530,51 +1536,39 @@ test_explicit_sched(void)
 	pthread_attr_t		attr;
 	pthread_t		th;
 	struct sched_param	p;
-	int			policy, rc, report[2] = { -1, -1 };
+	int			policy, after = -1, rc_rr, rc_fifo, rc_create;
+	int			report[2] = { -1, -1 };
 
-	/* FIFO/RR are now enabled in the default pset (#274): setting RR on
-	 * the current thread must succeed (was ENOTSUP before). */
 	pthread_getschedparam(pthread_self(), &policy, &p);
-	rc = pthread_setschedparam(pthread_self(), SCHED_RR, &p);
-	if (rc != 0) {
-		char buf[80];
-		snprintf(buf, sizeof(buf), "SCHED_RR rc=%d (FIFO/RR enabled?)",
-			 rc);
-		test_fail("explicit_sched", buf);
-		return;
-	}
-	/* Put ourselves back to timesharing so the rest of the run behaves. */
-	(void)pthread_setschedparam(pthread_self(), SCHED_OTHER, &p);
+	rc_rr = pthread_setschedparam(pthread_self(), SCHED_RR, &p);
+	rc_fifo = pthread_setschedparam(pthread_self(), SCHED_FIFO, &p);
+	(void)pthread_getschedparam(pthread_self(), &after, &p);
 
 	/*
-	 * A thread created with PTHREAD_EXPLICIT_SCHED + SCHED_RR must come
-	 * up under RR.  Reuse a kernel-valid base priority (the current
-	 * thread's) so the priority is in range.
+	 * And a thread created under RR.  Reuse a kernel-valid base priority
+	 * (the current thread's), so that the only thing wrong is the policy.
 	 */
 	pthread_attr_init(&attr);
 	pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
 	pthread_attr_setschedpolicy(&attr, SCHED_RR);
 	pthread_attr_setschedparam(&attr, &p);
+	rc_create = pthread_create(&th, &attr, thread_report_policy, report);
+	if (rc_create == 0)
+		pthread_join(th, NULL);
 
-	if (pthread_create(&th, &attr, thread_report_policy, report) != 0) {
-		test_fail("explicit_sched", "pthread_create failed");
-		return;
-	}
-	pthread_join(th, NULL);
-
-	if (report[0] != 0) {
-		test_fail("explicit_sched", "child getschedparam failed");
-		return;
-	}
-	if (report[1] != SCHED_RR) {
-		char buf[80];
-		snprintf(buf, sizeof(buf), "child policy %d != SCHED_RR",
-			 report[1]);
+	if (rc_rr != EPERM || rc_fifo != EPERM || after != SCHED_OTHER ||
+	    rc_create != EPERM) {
+		char buf[160];
+		snprintf(buf, sizeof(buf), "SCHED_RR rc=%d, SCHED_FIFO rc=%d, "
+			 "policy after %d, a create under RR rc=%d (child "
+			 "policy %d); EPERM is %d", rc_rr, rc_fifo, after,
+			 rc_create, report[1], EPERM);
 		test_fail("explicit_sched", buf);
 		return;
 	}
 
-	test_ok("explicit_sched (PTHREAD_EXPLICIT_SCHED + FIFO/RR)");
+	test_ok("explicit_sched (FIFO and RR refused with EPERM without the "
+		"set's control port, and no thread created under them, #786)");
 }
 
 /* ----------------------------------------------------------------
