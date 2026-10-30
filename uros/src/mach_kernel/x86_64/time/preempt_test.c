@@ -413,13 +413,30 @@ static void preempt_test_run_remote_body(int me);
  * The driver stays on the processor it chose from (#646).  It read
  * cpu_number() bare, on an unbound thread, and then counted on running
  * there; a move in between left `me' naming a processor it had left.
+ *
+ * 🔑 AND IT CHOOSES FROM THE BOOT PROCESSOR (#723).  It is
+ * start_kernel_threads(), unbound, and #646 bound it wherever it stood -- on
+ * processor 1 at times.  The test never chooses the boot processor nor the
+ * one the driver stands on, so at two processors the driver standing on
+ * processor 1 left nothing to choose, and a healthy machine said NOT ASKED.
+ * Moved to the boot processor first, it leaves every application processor
+ * to choose from.
  */
 void
 preempt_test_run_remote(void)
 {
 	processor_t	was = current_thread()->bound_processor;
+	int		me;
 
-	preempt_test_run_remote_body(thread_bind_here());
+	thread_bind(current_thread(), master_processor);
+	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
+	me = cpu_number();			/* bound: it stays */
+	if (me != master_cpu)
+		printf("preempt_test: WRONG — the driver was bound to the boot "
+		       "processor %d and runs on %d, so the processor it "
+		       "chooses may be the one it stands on (#723)\n",
+		       master_cpu, me);
+	preempt_test_run_remote_body(me);
 	thread_bind(current_thread(), was);
 }
 
@@ -438,13 +455,14 @@ preempt_test_run_remote_body(int me)
 	 * and this kernel indexes by them.
 	 *
 	 * ⚠️ master_cpu is excluded deliberately, and not because running there
-	 * would be wrong.  The thread calling this is start_kernel_threads(),
-	 * which is unbound -- so once the application processors are in the
-	 * scheduler it may itself be running on one, and the "first processor
-	 * that is not me" was observed to be processor 0.  That run proved
-	 * something real, and it did not prove THIS: that a processor which has
-	 * never in the history of this port run a thread can be given one and
-	 * have it taken away again.
+	 * would be wrong.  When the driver could stand on an application
+	 * processor, the "first processor that is not me" was observed to be
+	 * processor 0.  That run proved something real, and it did not prove
+	 * THIS: that a processor which has never in the history of this port run
+	 * a thread can be given one and have it taken away again.  The driver
+	 * now stands on the boot processor (#723), so `me' and master_cpu are
+	 * one processor; both are named, because a driver that did not get there
+	 * must still not choose the processor it stands on.
 	 */
 	for (i = 0; i < NCPUS; i++) {
 		if (i == me || i == master_cpu)
