@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #723
+Takes out: nothing -- a probe: thread_select() leaves first_quantum FALSE where it set it TRUE, so a thread with a peer of its priority waiting is handed over at the next tick instead of at the end of its quantum. preempt_test's three threads, bound to one processor, then change hands about once a tick, ten times what a quantum of min_quantum ticks promises. Before #723 the test counted nothing, and passed it.
+Accel: tcg,kvm
+Run: --entry 21 300 -smp 1
+Expect: preempt_test: WRONG .* changed hands [0-9]+ times in [0-9]+ ticks
+Note: entry 21 is -P with the HPET forced as the clock; at one processor the test is the form load_context() starts. 723-quantum-four-times asks the other side, at four processors on entry 5.
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 0f4b76c4..d95cd828 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1728,7 +1728,7 @@ thread_select(
+ 	/*
+ 	 *	Check for other non-idle runnable threads.
+ 	 */
+-	myprocessor->first_quantum = TRUE;
++	myprocessor->first_quantum = FALSE;	/* 723-quantum-every-tick: a peer of its priority takes over at the next tick */
+ 	pset = myprocessor->processor_set;
+ 	thread = current_thread();
+ 	thread->unconsumed_quantum = myprocessor->quantum;

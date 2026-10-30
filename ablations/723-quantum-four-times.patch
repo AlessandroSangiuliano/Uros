@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #723
+Takes out: nothing -- a probe: thread_select() gives a bound thread four quanta where it gave one, so preempt_test's three threads, bound to one processor, change hands a quarter as often as a quantum of min_quantum ticks promises. Before #723 the test counted nothing, and passed it.
+Accel: tcg,kvm
+Run: --entry 5 300 -smp 4
+Expect: preempt_test: WRONG .* changed hands [0-9]+ times in [0-9]+ ticks
+Note: entry 5 is -P at four processors, the form whose three threads run on an application processor, watched from the boot processor. 723-quantum-every-tick asks the other side, at one processor on entry 21.
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 0f4b76c4..9266c2ff 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1813,7 +1813,7 @@ thread_select(
+ 	else
+ #if	NCPUS > 1
+ 		myprocessor->quantum = (thread->bound_processor ?
+-					min_quantum : pset->set_quantum);
++					4 * min_quantum : pset->set_quantum);	/* 723-quantum-four-times */
+ #else	/* NCPUS > 1 */
+ 		myprocessor->quantum = pset->set_quantum;
+ #endif	/* NCPUS > 1 */
