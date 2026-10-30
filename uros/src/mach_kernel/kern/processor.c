@@ -1055,14 +1055,43 @@ processor_get_assignment(
 	processor_t	processor,
 	processor_set_t	*pset)
 {
-    	int state;
+    	int		state;
+	processor_set_t	ps;
+	spl_t		s;
 
+	/*
+	 * 🔴 Read under the processor's lock, and the set kept alive while it
+	 * is referenced (#786).  This read both fields with no lock, and a
+	 * reassignment leaves the processor in no set between
+	 * pset_remove_processor() and pset_add_processor() with its state
+	 * ASSIGN, which the check let through: pset_reference() of a null set.
+	 * The reference cannot be taken under the processor's lock, a spin
+	 * lock, since the set's is a mutex; all_psets_lock, which
+	 * pset_deallocate() must take before it frees a set, keeps the one
+	 * read alive until it is.
+	 */
+#if	MACH_HOST
+	mutex_lock(&all_psets_lock);
+#endif	/* MACH_HOST */
+	s = splsched();
+	processor_lock(processor);
 	state = processor->state;
-	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE)
-		return(KERN_FAILURE);
+	ps = processor->processor_set;
+	processor_unlock(processor);
+	splx(s);
 
-	*pset = processor->processor_set;
-	pset_reference(*pset);
+	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE ||
+	    ps == PROCESSOR_SET_NULL) {
+#if	MACH_HOST
+		mutex_unlock(&all_psets_lock);
+#endif	/* MACH_HOST */
+		return(KERN_FAILURE);
+	}
+	pset_reference(ps);
+#if	MACH_HOST
+	mutex_unlock(&all_psets_lock);
+#endif	/* MACH_HOST */
+	*pset = ps;
 	return(KERN_SUCCESS);
 }
 
