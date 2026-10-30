@@ -510,5 +510,26 @@ int fpu_area_set_legacy(void *area, const uint8_t *image)
 
 	for (unsigned i = 0; i < LEGACY_SIZE; i++)
 		dst[i] = image[i];
+
+	/*
+	 * 🔴 And the header says it was written (#786).  Under XSAVE a
+	 * component whose XSTATE_BV bit is clear is restored to its initial
+	 * configuration whatever the legacy region holds (§13.8.1, §13.8.2):
+	 * a thread that had not used SSE yet got XMM registers of zero rather
+	 * than the ones written -- and under the compacted form MXCSR 1F80H
+	 * too -- while thread_get_state() read the written ones back.  The
+	 * image carries x87 and SSE, and both are marked, in the bits XCR0
+	 * numbers them by.  A compacted header must also list them in
+	 * XCOMP_BV, or the restore faults; the two live in the legacy region,
+	 * so listing them moves nothing in the extended one (§13.4.3).
+	 */
+	if (use_xsave) {
+		uint64_t *bv = (uint64_t *)(dst + XSTATE_BV_OFFSET);
+		uint64_t *comp = (uint64_t *)(dst + XCOMP_BV_OFFSET);
+
+		*bv |= XCR0_X87 | XCR0_SSE;
+		if (*comp & XCOMP_BV_COMPACTED)
+			*comp |= XCR0_X87 | XCR0_SSE;
+	}
 	return 1;
 }
