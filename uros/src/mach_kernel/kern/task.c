@@ -2089,8 +2089,9 @@ task_policy(
         policy_fifo_limit_data_t fifo_limit;
         policy_timeshare_limit_data_t ts_limit;
         kern_return_t ret = KERN_SUCCESS;
+	int new_max;			/* set_limit's (#786) */
 
-	
+
 	if (task == TASK_NULL || (pset = task->processor_set) ==
             PROCESSOR_SET_NULL)
 		return(KERN_INVALID_ARGUMENT);
@@ -2110,9 +2111,10 @@ task_policy(
 			if (count != POLICY_RR_BASE_COUNT)
 				return(KERN_INVALID_ARGUMENT);
 			lc = POLICY_RR_LIMIT_COUNT;
-			rr_base = (policy_rr_base_t) base;			
+			rr_base = (policy_rr_base_t) base;
 			rr_limit.max_priority = rr_base->base_priority;
 			limit = (policy_limit_t) &rr_limit;
+			new_max = rr_limit.max_priority;
 			break;
 		}
 
@@ -2126,6 +2128,7 @@ task_policy(
 			fifo_base = (policy_fifo_base_t) base;
 			fifo_limit.max_priority = fifo_base->base_priority;
 			limit = (policy_limit_t) &fifo_limit;
+			new_max = fifo_limit.max_priority;
 			break;
 		}
 
@@ -2139,12 +2142,23 @@ task_policy(
 			ts_base = (policy_timeshare_base_t) base;
 			ts_limit.max_priority = ts_base->base_priority;
 			limit = (policy_limit_t) &ts_limit;
+			new_max = ts_limit.max_priority;
 			break;
 		}
 
 		default:
 			return(KERN_INVALID_POLICY);
 		}
+
+		/*
+		 * 🔴 A limit is lowered here, never raised, as in
+		 * thread_policy() (#786): this made the base it was given the
+		 * task's limit, and with `change' every thread's, compared
+		 * with nothing.  Raising one is task_set_policy()'s, with the
+		 * set's control port.  Lower numbers are higher priorities.
+		 */
+		if (new_max < task->max_priority)
+			return(KERN_POLICY_LIMIT);
 
 	} else {
 		/*
