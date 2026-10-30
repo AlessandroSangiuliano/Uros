@@ -406,14 +406,22 @@ void fpu_area_init(void *area)
 		bytes[i] = 0;
 
 	/*
-	 * A zeroed area is not a valid legacy image: the control word must
-	 * mask the exceptions and the tag word must say the stack is empty,
-	 * and zero says the opposite of both — every exception unmasked, every
-	 * register in use.  The first arithmetic a thread did would raise
-	 * something it never asked for.
+	 * A zeroed area is not a valid legacy image: the control words must
+	 * mask the exceptions, and zero says the opposite -- every exception
+	 * unmasked.  The first arithmetic a thread did would raise something
+	 * it never asked for.
+	 *
+	 * 🔴 The tag word is the one field zero is already right for (#786).
+	 * The image holds the ABRIDGED tag, one bit per register in byte 4,
+	 * and a 0 bit is an empty register (SDM Vol. 1, 253665-093US,
+	 * §10.5.1) -- the full tag word's 11B is what means empty.  This wrote
+	 * FFFFH, the full word's empty, which in the abridged byte says every
+	 * register is in use: FXRSTOR handed each new thread a full x87 stack,
+	 * and its first load overflowed it into a NaN.  Under XSAVE the
+	 * restore ignores it while XSTATE_BV says x87 is initial, and loads it
+	 * once the bit is set.
 	 */
 	*(uint16_t *)(bytes + 0) = 0x037F;	/* x87 control: all masked  */
-	*(uint16_t *)(bytes + 4) = 0xFFFF;	/* tag: every register free */
 	*(uint32_t *)(bytes + 24) = 0x1F80;	/* MXCSR: all masked        */
 
 	/*
