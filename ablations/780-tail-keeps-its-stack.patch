@@ -1,13 +1,13 @@
 Kind: ablation
 Issue: #780
-Takes out: the three tails' fresh start -- thread_exception_return, thread_bootstrap_return and restart_mach_syscall no longer put %rsp back at kernel_stack, so every exception act_test's arm seventeen answers with "resume" comes back through the tail one level deeper on the kernel stack, a hundred times.
+Takes out: the three tails' fresh start -- thread_exception_return, thread_bootstrap_return and restart_mach_syscall no longer put %rsp back at kernel_stack, so every exception act_test's arm seventeen answers with "resume" would come back through the tail one level deeper on the kernel stack, a hundred times; the shared tail's check (5f875988) says so the first time a tail comes into it off the top.
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
-Expect: UrMach x86-64: trap (general protection|double fault|page fault)|act_test: \[17\] [0-9]+ of 100 exceptions arrived
-Note: both accelerators: the canonical check that sends the thread round again is the kernel's, not the processor's.  What the overflow does is not fixed, since nothing guards the memory below a kernel stack: on victus (AMD), 4 of 4, KVM double-faulted while arm seventeen was printing its verdict, and under TCG every arm passed and a kernel page fault (error 0x11) followed.  The Expect takes either report, or the arm's own count if it stops short.
+Expect: trap: a return to ring 3 came into the shared tail with %rsp 0x[0-9a-f]+, not at the top of its kernel stack
+Note: both accelerators: the check is the kernel's, not the processor's.  Before the check, a kept stack showed only where its overflow hit something, which nothing guards: on victus (AMD), 4 of 4, a double fault under KVM and a kernel page fault under TCG; on OMEGA (Intel, 30/10), nothing at all under KVM, and under TCG a single-step trap at an address in data, through a frame the overflow had written.
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
-index 44bddad9..fefa8f4b 100644
+index da11f10c..4d0f9b20 100644
 --- a/uros/src/mach_kernel/x86_64/trap/entry.S
 +++ b/uros/src/mach_kernel/x86_64/trap/entry.S
 @@ -610,7 +610,6 @@ isr_table:
