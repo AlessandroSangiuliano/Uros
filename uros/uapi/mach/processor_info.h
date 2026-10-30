@@ -103,6 +103,13 @@ typedef integer_t	*processor_info_t;	/* varying array of int. */
 #define PROCESSOR_INFO_MAX	(1024)	/* max array size */
 typedef integer_t	processor_info_data_t[PROCESSOR_INFO_MAX];
 
+/*
+ * host_processor_info()'s answer: one record per processor, back to back
+ * (#786).  The size is mach_types.defs' processor_info_array_t.
+ */
+typedef integer_t	*processor_info_array_t;
+#define PROCESSOR_INFO_ARRAY_MAX	(512)
+
 
 typedef integer_t	*processor_set_info_t;	/* varying array of int. */
 

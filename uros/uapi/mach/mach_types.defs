@@ -376,6 +376,11 @@ type processor_port_array_t 	= ^array[] of processor_t;
 		 * may need to be changed. (See mach/processor_info.h) */
 type processor_flavor_t		= int;
 type processor_info_t		= array[*:5] of integer_t;
+		/* processor_info_array_t: host_processor_info()'s records,
+		 * one per processor, back to back, in the reply (#786):
+		 * PROCESSOR_INFO_ARRAY_MAX in <mach/processor_info.h>, five
+		 * ints for each of 64 processors and room to spare. */
+type processor_info_array_t	= array[*:512] of integer_t;
 
 type processor_slot_t		= array[*:1024] of int;
 
