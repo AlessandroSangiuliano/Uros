@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #786
+Takes out: task_policy()'s check that set_limit never raises a task's limit -- the base it is given becomes the task's limit again, compared with nothing, and act_test's arm twenty-one gets its new task to priority 0, FIFO
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[21\] asked for priority 0, FIFO, with set_limit: the thread answered 0x1b .* a task 0x0,
+
+diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
+index adb027d8..1f507f56 100644
+--- a/uros/src/mach_kernel/kern/task.c
++++ b/uros/src/mach_kernel/kern/task.c
+@@ -2157,8 +2157,6 @@ task_policy(
+ 		 * with nothing.  Raising one is task_set_policy()'s, with the
+ 		 * set's control port.  Lower numbers are higher priorities.
+ 		 */
+-		if (new_max < task->max_priority)
+-			return(KERN_POLICY_LIMIT);
+ 
+ 	} else {
+ 		/*
