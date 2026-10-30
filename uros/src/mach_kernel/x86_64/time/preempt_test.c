@@ -57,6 +57,7 @@
 #include <kern/misc_protos.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
+#include <kern/sched.h>			/* #723: min_quantum */
 #include <kern/processor.h>
 #include <kern/task.h>
 #include <kern/thread_swap.h>
@@ -105,6 +106,41 @@ static volatile int		preempt_slot_b = -1;
 static volatile int		preempt_slot_r = -1;
 static volatile int		preempt_slot_want = -1;
 static volatile int		preempt_probes;
+
+/*
+ * Who had the processor last, and how many times each of the three took it
+ * back (#723).
+ *
+ * A thread that finds the processor last held by another has just been given
+ * it, so the arrivals are the hand-overs -- the thing this test exists to
+ * show, which its PASS line used to state without counting: "100 times a
+ * second", the tick rate.  The scheduler hands a bound thread's processor
+ * over once a quantum, min_quantum ticks, ten times a second at 100 Hz.
+ *
+ * Each thread counts only its own arrivals, so no count has two writers; and
+ * the three only ever run one at a time.
+ */
+#define	PREEMPT_A	0
+#define	PREEMPT_B	1
+#define	PREEMPT_R	2
+static volatile int		preempt_owner = -1;
+static volatile unsigned long	preempt_turns[3];
+
+static __inline__ void
+preempt_arrive(int me)
+{
+	if (preempt_owner != me) {
+		preempt_owner = me;
+		preempt_turns[me]++;
+	}
+}
+
+static unsigned long
+preempt_turns_all(void)
+{
+	return preempt_turns[PREEMPT_A] + preempt_turns[PREEMPT_B] +
+	    preempt_turns[PREEMPT_R];
+}
 
 /*
  * A kernel thread that is bound BEFORE it can run (#461).
@@ -210,6 +246,7 @@ preempt_worker_a(void)
 	 * which is why the counter is sampled rather than assumed.
 	 */
 	while (!preempt_done) {
+		preempt_arrive(PREEMPT_A);
 		if ((preempt_count_a & 0xFFFFFFF) == 0 && preempt_probes < 4) {
 			preempt_probes++;
 			printf("preempt_test: worker a still here, preemption "
@@ -230,8 +267,10 @@ preempt_worker_b(void)
 	preempt_slot_b = current_processor()->slot_num;
 	printf("preempt_test: worker b running on processor %d\n",
 	       preempt_slot_b);
-	while (!preempt_done)
+	while (!preempt_done) {
+		preempt_arrive(PREEMPT_B);
 		preempt_count_b++;
+	}
 	for (;;)
 		cpu_pause();
 }
@@ -270,12 +309,12 @@ static void
 preempt_reporter(void)
 {
 	uint64_t	t0, deadline;
-	unsigned long	a, b;
+	unsigned long	a, b, turns0, ticks0, turns, ticks, promised;
 
 	/*
-	 * A second, measured against the TSC.  Long enough that a 100 Hz tick
-	 * gives roughly a hundred opportunities to switch, so a single
-	 * unlucky handover cannot be mistaken for the mechanism working.
+	 * A second, measured against the TSC.  Long enough for about ten
+	 * hand-overs at 100 Hz, one a quantum (#723), so a single unlucky
+	 * handover cannot be mistaken for the mechanism working.
 	 */
 	preempt_slot_r = current_processor()->slot_num;
 	printf("preempt_test: reporter running on processor %d\n",
@@ -295,8 +334,20 @@ preempt_reporter(void)
 		preempt_end();
 	}
 
-	while (rdtsc() - t0 < deadline)
+	/*
+	 * The window's hand-overs, and the ticks this processor took in it
+	 * (#723).  The reporter holds the processor as the window opens, so its
+	 * own arrival is counted before the window and not in it.
+	 */
+	preempt_arrive(PREEMPT_R);
+	turns0 = preempt_turns_all();
+	ticks0 = clock_event_ticks(preempt_slot_r);
+	while (rdtsc() - t0 < deadline) {
+		preempt_arrive(PREEMPT_R);
 		cpu_pause();
+	}
+	turns = preempt_turns_all() - turns0;
+	ticks = clock_event_ticks(preempt_slot_r) - ticks0;
 
 	a = preempt_count_a;
 	b = preempt_count_b;
@@ -330,9 +381,31 @@ preempt_reporter(void)
 		      "preemption (#461)", preempt_slot_want,
 		      preempt_slot_a, preempt_slot_b, preempt_slot_r);
 
-	printf("preempt_test: PASS — processor %d was taken from a running "
-	       "thread and given to another, %u times a second\n",
-	       current_processor()->slot_num, clock_event_hz());
+	/*
+	 * 🔑 AND HOW OFTEN, AGAINST WHAT THE SCHEDULER PROMISES (#723).  A bound
+	 * thread is given min_quantum ticks (thread_select()), spends them a
+	 * tick at a time (kern/priority.c), and at the end hands the processor
+	 * to a peer of its priority: over `ticks' ticks, about
+	 * ticks / min_quantum hand-overs.
+	 *
+	 * Judged against the ticks this processor took in the window, not
+	 * against the second the TSC measured: a tick held back (#717) is a
+	 * quantum stretched, not a promise broken.  From half the promise to
+	 * twice it, and two more for where the window cuts a quantum.  A
+	 * hand-over at every tick, or one every fourth quantum, is well outside.
+	 */
+	promised = min_quantum > 0 ? ticks / (unsigned long) min_quantum : 0;
+	if (turns < promised / 2 || turns > 2 * promised + 2)
+		printf("preempt_test: WRONG — processor %d changed hands %lu "
+		       "times in %lu ticks, where a quantum of %d ticks "
+		       "promises about %lu (#723)\n", preempt_slot_r, turns,
+		       ticks, min_quantum, promised);
+	else
+		printf("preempt_test: PASS — processor %d was taken from a "
+		       "running thread and given to another %lu times in %lu "
+		       "ticks, where a quantum of %d ticks promises about %lu "
+		       "(#723)\n", preempt_slot_r, turns, ticks, min_quantum,
+		       promised);
 
 	preempt_end();
 }
