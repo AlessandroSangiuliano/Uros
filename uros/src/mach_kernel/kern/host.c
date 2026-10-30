@@ -150,6 +150,11 @@ vm_statistics_data_t	vm_stat[NCPUS];
 
 host_data_t	realhost;
 
+/*
+ * The processors' control ports, for the privileged host port only: the stub
+ * converts with convert_port_to_host_priv(), so the name port arrives here as
+ * HOST_NULL (mach_host.defs, #786).
+ */
 kern_return_t
 host_processors(
 	host_t			host,
