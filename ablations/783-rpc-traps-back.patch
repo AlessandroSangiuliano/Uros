@@ -1,0 +1,26 @@
+Kind: ablation
+Issue: #783
+Takes out: not_implemented at traps 35 and 36 on i386 -- mach_rpc_trap and mach_rpc_return_trap are back in the table, any task's to call: 36 asserts that its caller is in an RPC, and 35 keeps the send right it copied in when it refuses
+Run: i386 -- scripts/suite-i386.sh -r bundle-kvm-1
+Expect: Assertion failed: file "[^"]*/kern/rpc\.c", line [0-9]+: svr_act->lower != NULL
+Expect: trap 35 with this task's own port answered 0x8[[:cntrl:]]*$
+Note: on OMEGA (Intel), under KVM, over 883fcafb: the fixed tree passed, kernel242_test 16 PASS, 0 FAIL, both traps answering 0x10000007; with this patch trap 35 answered 0x8, KERN_NO_ACCESS, the refusal that comes after the copyin, and trap 36 stopped the machine at the assertion, which suite-i386 named as unexplained in a FAILED run.
+
+diff --git a/uros/src/mach_kernel/kern/syscall_sw.c b/uros/src/mach_kernel/kern/syscall_sw.c
+index a9fcf61b..a48398df 100644
+--- a/uros/src/mach_kernel/kern/syscall_sw.c
++++ b/uros/src/mach_kernel/kern/syscall_sw.c
+@@ -330,8 +330,13 @@ mach_trap_t	mach_trap_table[] = {
+ 	 * no longer does.  The i386 RPC call gate (USER_RPC) dispatches
+ 	 * through this table too, so this closes it as well.
+ 	 */
++#ifdef	i386
++	MACH_TRAP(mach_rpc_trap, 4),		/* 35 */
++	MACH_TRAP(mach_rpc_return_trap, 0),	/* 36 */
++#else
+ 	MACH_TRAP(not_implemented, 0),		/* 35: was mach_rpc_trap */
+ 	MACH_TRAP(not_implemented, 0),		/* 36: was mach_rpc_return_trap */
++#endif
+ 	MACH_TRAP(urmach_cap_verify, 5),	/* 37: + type, #599 */
+ 	MACH_TRAP(urmach_cap_use, 5),		/* 38: + type, #599 */
+ 	MACH_TRAP(urmach_cap_revoke, 2),	/* 39 */
