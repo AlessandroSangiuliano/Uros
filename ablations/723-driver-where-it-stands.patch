@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #723
+Over: 723-widen-driver-on-an-ap.patch
+Takes out: the move to the boot processor -- preempt_test_run_remote() binds the driver where it stands, as #646 left it. With the widen it stands on an application processor, and at two processors the test then has no processor to choose and says NOT ASKED on a healthy machine.
+Accel: tcg,kvm
+Run: --entry 5 300 -smp 2
+Expect: preempt_test: NOT ASKED .*alone
+
+diff --git a/uros/src/mach_kernel/x86_64/time/preempt_test.c b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+index 4e57366b..f5fcaf1a 100644
+--- a/uros/src/mach_kernel/x86_64/time/preempt_test.c
++++ b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+@@ -502,14 +502,7 @@ preempt_test_run_remote(void)
+ 	processor_t	was = current_thread()->bound_processor;
+ 	int		me;
+ 
+-	thread_bind(current_thread(), master_processor);
+-	thread_block((void (*)(void)) 0);	/* runs next where it is bound */
+-	me = cpu_number();			/* bound: it stays */
+-	if (me != master_cpu)
+-		printf("preempt_test: WRONG — the driver was bound to the boot "
+-		       "processor %d and runs on %d, so the processor it "
+-		       "chooses may be the one it stands on (#723)\n",
+-		       master_cpu, me);
++	me = thread_bind_here();	/* 723-driver-where-it-stands: as #646 left it */
+ 	preempt_test_run_remote_body(me);
+ 	thread_bind(current_thread(), was);
+ }
