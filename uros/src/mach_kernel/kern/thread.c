@@ -2707,7 +2707,8 @@ thread_policy(
         policy_timeshare_limit_data_t	ts_limit;
         kern_return_t			ret = KERN_SUCCESS;
 	thread_t			thread;
-	
+	int				new_max = 0;	/* set_limit's (#786) */
+
 	if (thr_act == THR_ACT_NULL)
 		return (KERN_INVALID_ARGUMENT);
 	thread = act_lock_thread(thr_act);
@@ -2745,6 +2746,7 @@ thread_policy(
                         rr_base = (policy_rr_base_t) base;
                         rr_limit.max_priority = rr_base->base_priority;
                         limit = (policy_limit_t) &rr_limit;
+			new_max = rr_limit.max_priority;
 			break;
 		}
 
@@ -2760,6 +2762,7 @@ thread_policy(
                         fifo_base = (policy_fifo_base_t) base;
                         fifo_limit.max_priority = fifo_base->base_priority;
                         limit = (policy_limit_t) &fifo_limit;
+			new_max = fifo_limit.max_priority;
 			break;
 		}
 
@@ -2775,6 +2778,7 @@ thread_policy(
                         ts_base = (policy_timeshare_base_t) base;
                         ts_limit.max_priority = ts_base->base_priority;
                         limit = (policy_limit_t) &ts_limit;
+			new_max = ts_limit.max_priority;
 			break;
 		}
 
@@ -2782,6 +2786,18 @@ thread_policy(
 			ret = KERN_INVALID_POLICY;
 			break;
 		}
+
+		/*
+		 * 🔴 A limit is lowered here, never raised (#786).  This
+		 * branch made the base it was given the thread's limit and
+		 * compared it with nothing, so a task put a thread of its own
+		 * at priority 0, FIFO, above every kernel thread.  The branch
+		 * below refuses a base above the thread's limit, and so does
+		 * this one now; raising a limit is thread_set_policy()'s, with
+		 * the set's control port.  Lower numbers are higher priorities.
+		 */
+		if (ret == KERN_SUCCESS && new_max < thread->max_priority)
+			ret = KERN_POLICY_LIMIT;
 
 	} else {
 		/*
