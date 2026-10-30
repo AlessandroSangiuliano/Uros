@@ -3,7 +3,7 @@ Issue: #786
 Takes out: task_policy()'s check that set_limit never raises a task's limit -- the base it is given becomes the task's limit again, compared with nothing, and act_test's arm twenty-one gets its new task to priority 0, FIFO
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
-Expect: act_test: \[21\] asked for priority 0, FIFO, with set_limit: the thread answered 0x1b .* a task 0x0,
+Expect: act_test: \[21\] asked for priority 0 with set_limit: the thread answered 0x1b .* a task 0x0,
 
 diff --git a/uros/src/mach_kernel/kern/task.c b/uros/src/mach_kernel/kern/task.c
 index adb027d8..1f507f56 100644

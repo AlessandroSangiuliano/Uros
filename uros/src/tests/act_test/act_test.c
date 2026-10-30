@@ -3025,13 +3025,16 @@ arm_twenty_no_empty_activation(void)
  *
  * thread_policy() with set_limit made the base it was given the thread's
  * limit, comparing it with nothing, so a task put a thread of its own at
- * priority 0, FIFO, above every kernel thread; task_policy() did the same
- * for a task.  A thread made here and never started asks for priority 0,
- * FIFO, and must be refused with KERN_POLICY_LIMIT, its policy, limit and
- * base read back as they were; a task made here asks the same and must be
+ * priority 0, above every kernel thread; task_policy() did the same for a
+ * task.  A thread made here and never started asks for priority 0 with
+ * set_limit, and must be refused with KERN_POLICY_LIMIT, its policy, limit
+ * and base read back as they were; a task made here asks the same and must be
  * refused too -- a child, so that a kernel without the fix changes nobody
  * act_test needs.  And a lower priority with set_limit stays granted: an
  * arm that passed by refusing everything would prove nothing.
+ * Timesharing, the one policy every task may ask for: FIFO, which this arm
+ * asked first, is refused before any limit is looked at since FIFO and RR
+ * became the processor set's control port's to give (#786, arm 25).
  * Returns 1 when all three answers are right, 0 when not, -1 when it could
  * not be asked.
  */
@@ -3041,8 +3044,7 @@ arm_twenty_one_set_limit_never_raises(void)
 	thread_act_t			t;
 	mach_port_t			child;
 	kern_return_t			kr, krf, krt, krl;
-	policy_fifo_base_data_t		fifo;
-	policy_timeshare_base_data_t	ts;
+	policy_timeshare_base_data_t	zero, ts;
 	struct policy_timeshare_info	before, after;
 	struct thread_basic_info	basic;
 	mach_msg_type_number_t		n;
@@ -3061,9 +3063,9 @@ arm_twenty_one_set_limit_never_raises(void)
 		return -1;
 	}
 
-	fifo.base_priority = 0;
-	krf = thread_policy(t, POLICY_FIFO, (integer_t *) &fifo,
-			    POLICY_FIFO_BASE_COUNT, TRUE);
+	zero.base_priority = 0;
+	krf = thread_policy(t, POLICY_TIMESHARE, (integer_t *) &zero,
+			    POLICY_TIMESHARE_BASE_COUNT, TRUE);
 	n = THREAD_BASIC_INFO_COUNT;
 	basic.policy = -1;
 	(void) thread_info(t, THREAD_BASIC_INFO, (thread_info_t) &basic, &n);
@@ -3081,8 +3083,8 @@ arm_twenty_one_set_limit_never_raises(void)
 	krt = KERN_FAILURE;
 	if (task_create(mach_task_self(), (ledger_port_array_t) 0, 0, FALSE,
 			&child) == KERN_SUCCESS) {
-		krt = task_policy(child, POLICY_FIFO, (integer_t *) &fifo,
-				  POLICY_FIFO_BASE_COUNT, TRUE, FALSE);
+		krt = task_policy(child, POLICY_TIMESHARE, (integer_t *) &zero,
+				  POLICY_TIMESHARE_BASE_COUNT, TRUE, FALSE);
 		(void) task_terminate(child);
 		(void) mach_port_deallocate(mach_task_self(), child);
 	}
@@ -3092,7 +3094,7 @@ arm_twenty_one_set_limit_never_raises(void)
 	    basic.policy != POLICY_TIMESHARE ||
 	    after.max_priority != before.max_priority ||
 	    after.base_priority != before.base_priority) {
-		printf("act_test: [21] asked for priority 0, FIFO, with "
+		printf("act_test: [21] asked for priority 0 with "
 		       "set_limit: the thread answered 0x%x (policy %d, limit %d, "
 		       "base %d, where they were %d and %d), a task 0x%x, and a "
 		       "lower priority 0x%x — WRONG, a limit is lowered and never "
@@ -3101,7 +3103,7 @@ arm_twenty_one_set_limit_never_raises(void)
 		       before.max_priority, before.base_priority, krt, krl);
 		return 0;
 	}
-	printf("act_test: [21] a thread and a task asked for priority 0, FIFO, "
+	printf("act_test: [21] a thread and a task asked for priority 0 "
 	       "with set_limit: both refused with KERN_POLICY_LIMIT, the "
 	       "thread's limit and base still %d and %d; a lower one, %d, "
 	       "still granted (#786)\n", before.max_priority,
