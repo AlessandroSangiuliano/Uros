@@ -13,6 +13,7 @@
 #include <cpu/desc.h>
 #include <cpu/regs.h>
 #include <pmap/layout.h>
+#include <thread/fpu.h>
 #include <thread/state.h>
 #include <trap/trap.h>
 
@@ -199,15 +200,17 @@ void float_state_from_area(const void *area, struct x86_64_float_state *state)
 		state->fx_image[i] = src[i];
 }
 
-void float_state_to_area(const struct x86_64_float_state *state, void *area)
+/*
+ * 🔴 Not a copy any more (#786): fpu_area_set_legacy() refuses an image whose
+ * MXCSR the restore would fault on, in the switch, in ring 0.  An image
+ * marked not valid has nothing to write, and is not refused.
+ */
+int float_state_to_area(const struct x86_64_float_state *state, void *area)
 {
-	uint8_t *dst = area;
-
 	if (!state->valid)
-		return;
+		return 1;
 
-	for (unsigned i = 0; i < sizeof(state->fx_image); i++)
-		dst[i] = state->fx_image[i];
+	return fpu_area_set_legacy(area, state->fx_image);
 }
 
 void exception_state_from_frame(const struct trap_frame *frame,

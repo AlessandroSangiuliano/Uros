@@ -43,6 +43,41 @@ static int have_xsaves_unused;	/* offered by the processor, not taken */
 #define	MSR_IA32_XSS		0xDA0
 
 /*
+ * The legacy region, the first 512 bytes of every form (SDM Vol. 1,
+ * 253665-093US, §10.5.1): MXCSR at 24, and at 28 the mask of the bits
+ * this processor accepts in it.
+ */
+#define	LEGACY_SIZE		512
+#define	LEGACY_MXCSR		24
+#define	LEGACY_MXCSR_MASK	28
+#define	MXCSR_MASK_DEFAULT	0x0000FFBFU	/* §11.6.6: what a zero there means */
+
+static uint32_t mxcsr_mask = MXCSR_MASK_DEFAULT;
+
+/*
+ * 🔴 Which MXCSR bits this processor accepts, asked the way the SDM says to
+ * (Vol. 1, 253665-093US, §11.6.6): FXSAVE into a zeroed image, bytes 28-31,
+ * a zero there meaning the default (#786).  fpu_area_set_legacy() checks
+ * every image a thread is given against it.
+ *
+ * ⚠️ A function of its own, kept whole by noinline and noclone, because FXSAVE
+ * is a floating-point instruction and scripts/kernel-vector-check.py allows
+ * them by symbol: this one reads the unit and writes no register.
+ */
+static uint32_t __attribute__((noinline, noclone))
+fpu_mxcsr_mask_probe(void)
+{
+	uint8_t image[LEGACY_SIZE] __attribute__((aligned(16)));
+	uint32_t mask;
+
+	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+		image[i] = 0;
+	__asm__ volatile("fxsave (%0)" : : "r"(image) : "memory");
+	mask = *(uint32_t *)(image + LEGACY_MXCSR_MASK);
+	return mask != 0 ? mask : MXCSR_MASK_DEFAULT;
+}
+
+/*
  * 🔴 XSAVES HAS NOW BEEN RUN, AND IT IS DECLINED FOR A MEASURED REASON RATHER
  * THAN FOR AN UNEXERCISED ONE (#561).
  *
@@ -205,6 +240,9 @@ void fpu_init(void)
 	 */
 	cr4 |= CR4_OSFXSR | CR4_OSXMMEXCPT;
 	write_cr4(cr4);
+
+	/* After OSFXSR, which is what makes FXSAVE write the SSE half. */
+	mxcsr_mask = fpu_mxcsr_mask_probe();
 
 	cpuid(1, &a, &b, &c, &d);
 	if (!(c & (1U << 26)))
@@ -446,4 +484,31 @@ void fpu_area_init(void *area)
 	 */
 	if (fpu_uses_xsaves())
 		*(uint64_t *)(bytes + XCOMP_BV_OFFSET) = XCOMP_BV_COMPACTED;
+}
+
+/*
+ * A thread's legacy image -- its x87 and SSE state, the first 512 bytes --
+ * written into its area, for thread_set_state()'s FLOAT_STATE (#786).
+ *
+ * 🔴 Refused, and nothing written, when its MXCSR sets a bit this processor
+ * does not accept.  FXRSTOR faults on one (SDM Vol. 1, 253665-093US,
+ * §10.5.3), and both forms of XRSTOR do once they load it (§13.8.1,
+ * §13.8.2), and the restore runs in the switch, in ring 0, where nothing
+ * recovers it: any task could halt the machine with a thread of its own.
+ * Refused rather than masked, which is what §11.6.6 suggests, because a
+ * set_state that quietly changed the image would answer success to a request
+ * it did not carry out.
+ *
+ * Returns 1 when the image was written, 0 when it was refused.
+ */
+int fpu_area_set_legacy(void *area, const uint8_t *image)
+{
+	uint8_t *dst = area;
+
+	if (*(const uint32_t *)(image + LEGACY_MXCSR) & ~mxcsr_mask)
+		return 0;
+
+	for (unsigned i = 0; i < LEGACY_SIZE; i++)
+		dst[i] = image[i];
+	return 1;
 }

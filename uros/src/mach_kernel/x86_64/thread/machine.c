@@ -729,8 +729,13 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 	case x86_64_FLOAT_STATE:
 		if (count < x86_64_FLOAT_STATE_COUNT)
 			return KERN_INVALID_ARGUMENT;
-		float_state_to_area((const struct x86_64_float_state *) state,
-				    pcb->ctx.fpu_area);
+		/*
+		 * 🔴 Refused when the image's MXCSR is one the restore would
+		 * fault on at this thread's next switch, in ring 0 (#786).
+		 */
+		if (!float_state_to_area((const struct x86_64_float_state *)
+					 state, pcb->ctx.fpu_area))
+			return KERN_INVALID_ARGUMENT;
 		return KERN_SUCCESS;
 
 	/*

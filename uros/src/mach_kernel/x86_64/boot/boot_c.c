@@ -4086,7 +4086,8 @@ static void thread_state_selftest(void)
 	float_state_from_area(area, &fstate);
 	for (unsigned i = 0; i < 512; i++)
 		area[i] = 0;
-	float_state_to_area(&fstate, area);
+	if (!float_state_to_area(&fstate, area))
+		float_ok = 0;		/* the processor's own image, refused */
 
 	for (unsigned i = 0; i < 512; i++)
 		if (area[i] != copy[i])

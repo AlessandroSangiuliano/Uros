@@ -58,6 +58,13 @@ ALLOWED = {
     "fpu_save": "the save instruction (XSAVEOPT/XSAVE/FXSAVE) itself",
     "fpu_restore": "the restore instruction (XRSTOR/FXRSTOR) itself",
 
+    # x86_64/thread/fpu.c, called by fpu_init() before this processor runs
+    # any thread: FXSAVE into a scratch image, for the MXCSR mask the
+    # processor accepts (#786).  It reads the unit and writes no register.
+    "fpu_mxcsr_mask_probe": "fpu_init: FXSAVE into a scratch image for the "
+                            "MXCSR mask, before any thread; writes no "
+                            "register (#786)",
+
     # x86_64/thread/context.S, called from boot_c.c before there are threads:
     # it switches between two contexts built by hand to ask whether vector
     # state survives a switch at all (#453).  Those contexts go through

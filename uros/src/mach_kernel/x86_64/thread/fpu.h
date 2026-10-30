@@ -129,6 +129,13 @@ void fpu_restore(const void *area);
 void fpu_area_init(void *area);
 
 /*
+ * Write a thread's 512-byte legacy image into its area, or refuse it when
+ * its MXCSR sets a bit the restore would fault on (#786).  1 written, 0
+ * refused and nothing written.
+ */
+int fpu_area_set_legacy(void *area, const uint8_t *image);
+
+/*
  * One area per thread, allocated because its size is what this processor
  * needs rather than a constant, and aligned because XSAVE raises #GP on an
  * area that is not (#453).  fpu_area_alloc() returns it already initialised.
