@@ -3109,6 +3109,122 @@ arm_twenty_one_set_limit_never_raises(void)
 	return 1;
 }
 
+/*
+ * Arm twenty-two (#786): a processor's control port is the privileged host
+ * port's to give.  host_processors() gave them for the name port every task
+ * has, and with one processor_exit() was queued, and the action thread ended
+ * in switch_to_shutdown_context(), which x86-64 panics in (#453).  Five
+ * answers, each needed:
+ *  - host_processors() by the name port is refused;
+ *  - host_processors() by the privileged port still answers -- the same
+ *    call, so the port is the only thing the refusal can be about;
+ *  - host_processor_info() by the name port answers the information alone,
+ *    one record per processor, as many as the privileged call lists;
+ *  - processor_get_assignment() of each says the default set;
+ *  - processor_exit() of the last one listed is refused with
+ *    KERN_NOT_SUPPORTED, and this program runs on to say so.
+ * ⚠️ At one processor the one asked is the only one, the last of its set,
+ * and a kernel that queued it would first stop every thread in the set: a
+ * machine that stops, not one that panics.  The ablations run at four, where
+ * the last one listed is not the one that booted.
+ * Returns 1 when all five answers are right, 0 when not, -1 when it could not
+ * be asked.
+ */
+static int
+arm_twenty_two_processor_ports_are_privileged(void)
+{
+	mach_port_t		me = mach_task_self();
+	mach_port_t		host = mach_host_self();
+	mach_port_t		host_priv = MACH_PORT_NULL, device = MACH_PORT_NULL;
+	mach_port_t		lw = MACH_PORT_NULL, lp = MACH_PORT_NULL;
+	mach_port_t		sec = MACH_PORT_NULL, dflt = MACH_PORT_NULL;
+	processor_port_array_t	by_name = NULL, list = NULL;
+	mach_msg_type_number_t	n_by_name = 0, n = 0, ints;
+	integer_t		info[PROCESSOR_INFO_ARRAY_MAX];
+	natural_t		answered = 0;
+	kern_return_t		kr_name, kr_priv, kr_info, kr_exit = KERN_FAILURE;
+	unsigned		i, in_default = 0;
+	int			passed = -1;
+
+	if (bootstrap_ports(bootstrap_port, &host_priv, &device, &lw, &lp,
+			    &sec) != KERN_SUCCESS ||
+	    processor_set_default(host, &dflt) != KERN_SUCCESS)
+		printf("act_test: [22] NOT ASKED — no privileged host port or "
+		       "no default processor set\n");
+	else {
+		kr_name = host_processors(host, &by_name, &n_by_name);
+		kr_priv = host_processors(host_priv, &list, &n);
+		ints = PROCESSOR_INFO_ARRAY_MAX;
+		kr_info = host_processor_info(host, PROCESSOR_CPU_LOAD_INFO,
+					      &answered, info, &ints);
+
+		for (i = 0; kr_priv == KERN_SUCCESS && i < n; i++) {
+			mach_port_t	assigned = MACH_PORT_NULL;
+
+			/* The same port, so the same name in this space. */
+			if (processor_get_assignment(list[i], &assigned) ==
+			    KERN_SUCCESS) {
+				if (assigned == dflt)
+					in_default++;
+				(void) mach_port_deallocate(me, assigned);
+			}
+		}
+		if (kr_priv == KERN_SUCCESS && n > 0)
+			kr_exit = processor_exit(list[n - 1]);
+
+		if (kr_name == KERN_SUCCESS || kr_priv != KERN_SUCCESS ||
+		    n == 0 || kr_info != KERN_SUCCESS || answered != n ||
+		    ints != answered * PROCESSOR_CPU_LOAD_INFO_COUNT ||
+		    in_default != n || kr_exit != KERN_NOT_SUPPORTED) {
+			printf("act_test: [22] host_processors answered the name "
+			       "port 0x%x and the privileged one 0x%x, %u "
+			       "processors; host_processor_info 0x%x, %u "
+			       "processors in %u ints; %u in the default set; "
+			       "processor_exit 0x%x — WRONG, a processor's port "
+			       "is the privileged host port's to give (#786)\n",
+			       kr_name, kr_priv, (unsigned) n, kr_info,
+			       (unsigned) answered, (unsigned) ints, in_default,
+			       kr_exit);
+			passed = 0;
+		} else {
+			printf("act_test: [22] host_processors refused the name "
+			       "port with 0x%x and gave the privileged one %u "
+			       "processors, every one in the default set; "
+			       "host_processor_info answered the name port %u "
+			       "processors in %u ints; processor_exit of the last "
+			       "one refused with 0x%x, and the machine runs on "
+			       "(#786)\n", kr_name, (unsigned) n,
+			       (unsigned) answered, (unsigned) ints, kr_exit);
+			passed = 1;
+		}
+	}
+
+	for (i = 0; i < n_by_name; i++)
+		(void) mach_port_deallocate(me, by_name[i]);
+	if (by_name != NULL)
+		(void) vm_deallocate(me, (vm_address_t) by_name,
+				     n_by_name * sizeof(*by_name));
+	for (i = 0; i < n; i++)
+		(void) mach_port_deallocate(me, list[i]);
+	if (list != NULL)
+		(void) vm_deallocate(me, (vm_address_t) list,
+				     n * sizeof(*list));
+	if (dflt != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, dflt);
+	if (host_priv != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, host_priv);
+	if (device != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, device);
+	if (lw != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lw);
+	if (lp != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, lp);
+	if (sec != MACH_PORT_NULL)
+		(void) mach_port_deallocate(me, sec);
+	(void) mach_port_deallocate(me, host);
+	return passed;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -3716,6 +3832,18 @@ main(int argc, char **argv)
 		passed += r;
 	arms++;		/* arm twenty-one, #786 */
 	r = arm_twenty_one_set_limit_never_raises();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+
+	/*
+	 * Down here, after everything above has printed, for arm sixteen's
+	 * reason: on a healthy tree it is refused and returns, but on the
+	 * processor_exit ablation the action thread panics (#453).
+	 */
+	arms++;		/* arm twenty-two, #786 */
+	r = arm_twenty_two_processor_ports_are_privileged();
 	if (r < 0)
 		arms--;
 	else
