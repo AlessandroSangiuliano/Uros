@@ -1305,8 +1305,13 @@ pthread_timedjoin_np(pthread_t thread,
  * Priority range is policy- and kernel-defined (invalid_pri in
  * kern/sched.h: 0..lowest-schedulable, and a thread may only lower its
  * own priority below its max); the kernel is the authority and we map
- * its failures to errno.  A policy the processor set does not enable
- * comes back as KERN_INVALID_POLICY -> ENOTSUP.
+ * its failures to errno.
+ *
+ * 🔴 A policy the processor set does not enable comes back as
+ * KERN_INVALID_POLICY -> EPERM (#786).  FIFO and RR exist; they are the
+ * set's control port's to give, through thread_set_policy(), and the
+ * default set enables timesharing alone for the call made here.  POSIX's
+ * answer to a caller without the privilege is EPERM, not ENOTSUP.
  */
 static int
 _pthread_push_sched(pthread_t thread, int policy, int prio)
@@ -1360,7 +1365,7 @@ _pthread_push_sched(pthread_t thread, int policy, int prio)
 	}
 
 	if (kr == KERN_INVALID_POLICY)
-		return (ENOTSUP);
+		return (EPERM);
 	if (kr != KERN_SUCCESS)
 		return (EINVAL);
 
