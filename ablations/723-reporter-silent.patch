@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #723
+Over: 586-tsc-disagree.patch
+Takes out: nothing -- a probe: preempt_test's reporter never reports, as on a processor whose bound work never arrives or never yields, and 586-tsc-disagree leaves the TSC without a rate. The driver's wait is then bounded by a ruler, and it says WRONG after ten seconds of it.
+Accel: tcg,kvm
+Run: --entry 5 300 -smp 4
+Expect: preempt_test: WRONG .* never reported in ten seconds of the (HPET|PM timer)
+Note: the fixed arm takes only widens, so it boots the tree as it is, with its TSC, and passes. Before #723 the same probe ran the boot to the harness's budget with nothing said: the wait had no bound without a TSC rate.
+
+diff --git a/uros/src/mach_kernel/x86_64/time/preempt_test.c b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+index 4e57366b..90391f6c 100644
+--- a/uros/src/mach_kernel/x86_64/time/preempt_test.c
++++ b/uros/src/mach_kernel/x86_64/time/preempt_test.c
+@@ -311,6 +311,9 @@ preempt_reporter(void)
+ 	uint64_t	t0, deadline;
+ 	unsigned long	a, b, turns0, ticks0, turns, ticks, promised;
+ 
++	for (;;)		/* 723-reporter-silent: it never reports */
++		cpu_pause();
++
+ 	/*
+ 	 * A second, measured against the TSC.  Long enough for about ten
+ 	 * hand-overs at 100 Hz, one a quantum (#723), so a single unlucky
