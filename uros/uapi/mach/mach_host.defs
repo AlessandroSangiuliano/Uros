@@ -184,10 +184,16 @@ subsystem
 
 /*
  *	Get list of processors on this host.
+ *
+ *	🔴 The privileged host port (#786).  What comes back are the
+ *	processors' control ports -- processor_exit(), processor_assign() --
+ *	and this took the host's name port, which every task has.  Reading the
+ *	processors needs no port of theirs: host_processor_info(), at the end
+ *	of this file, answers the name port with the information alone.
  */
 
 routine host_processors(
-		host	: host_t;
+		host_priv	: host_priv_t;
 	out	processor_list	: processor_port_array_t);
 
 /*
