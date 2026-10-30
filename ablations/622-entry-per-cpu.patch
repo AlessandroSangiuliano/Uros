@@ -5,6 +5,9 @@ Takes out: the entry's clock reading on the thread's own stack and the preemptio
 Accel: tcg,kvm
 Run: --entry 54 600 -smp 4
 Expect: profile_entry: WRONG
+Expect: syscall_profile: thread 0x[0-9a-f]+ was taken off its processor between entering trap [0-9]+ and its dispatch, and the trap was sampled -- WRONG
+Expect: syscall_profile: thread 0x[0-9a-f]+ entered trap [0-9]+ with a reading [0-9]+ cycles older than its last return to user mode -- WRONG
+Note: profile_entry judges only what crosses its window, and a crossing trap is sampled now and then; syscall_profile says each one itself, whenever it comes.  On OMEGA (30/10, the union with #770 and #783 on 7e5ff3e4), under TCG both came after the window had closed: the judge said PASS for its own and the harness failed the boot on syscall_profile's lines, which the Expect did not know.
 
 diff --git a/uros/src/mach_kernel/kern/syscall_profile.c b/uros/src/mach_kernel/kern/syscall_profile.c
 index 1dcd15c6..b9cae074 100644
