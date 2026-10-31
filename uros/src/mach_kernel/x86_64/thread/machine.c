@@ -1021,6 +1021,31 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	}
 
 	/*
+	 * 🔴 THE TWO HALVES OF HOW IT RESUMES AGREE (#771).
+	 *
+	 * Its continuation field says whether it resumes in a continuation, its
+	 * context says where: a fresh frame at the top of its stack, or the
+	 * frames it saved.  Below, on the way out, this function writes both;
+	 * the debugger, the census and the IPC direct switch read the field
+	 * alone.  A thread parked by the mach_msg hot path's direct switch
+	 * used to keep a stale field over saved frames, and this is where that
+	 * shows -- on the way back in -- rather than in what a reader of the
+	 * field concludes.  Development kernels only: two loads and a compare
+	 * on every switch.
+	 */
+#if	MACH_ASSERT
+	if ((new->continuation != 0)
+	    != context_resumes_fresh(&new_act->mact.pcb->ctx))
+		panic("switch_context: thread %p resumes %s, and its continuation "
+		      "field says %p -- saved sp %p, entry stack %p (#771)",
+		      new, context_resumes_fresh(&new_act->mact.pcb->ctx)
+		      ? "in a fresh frame" : "in frames it saved",
+		      (void *) new->continuation,
+		      (void *) new_act->mact.pcb->ctx.rsp,
+		      (void *) new_act->mact.pcb->ctx.entry_stack);
+#endif	/* MACH_ASSERT */
+
+	/*
 	 * The address space, if it is changing.  An activation may be
 	 * borrowing another task's map, so this is asked of the activations
 	 * and not of the tasks.
