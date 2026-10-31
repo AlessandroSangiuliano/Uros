@@ -1,0 +1,50 @@
+Kind: ablation
+Issue: #771
+Takes out: thread_begin_trampoline's panic that names a continuation that returns -- falling out, the thread reaches context_thread_start's own panic, which says only that "a thread function" returned, and cont-return-check.sh reads that as WRONG
+Accel: tcg,kvm
+Script: scripts/cont-return-boot.sh
+Expect: cont-return-check: WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index c009a011..67b9cd7c 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -195,10 +195,7 @@ act_machine_switch_pcb(thread_act_t thr_act)
+ static void
+ thread_begin_trampoline(void *unused)
+ {
+-	thread_t	prev = (thread_t) percpu()->prev_thread;
+-	void		(*continuation)(void);
+-	const char	*name;
+-	uint64_t	offset = 0;
++	thread_t prev = (thread_t) percpu()->prev_thread;
+ 
+ 	(void) unused;
+ 
+@@ -236,25 +233,8 @@ thread_begin_trampoline(void *unused)
+ 	 * reaches the way out of -- then spllo(), then this thread's own
+ 	 * function through self->continuation.
+ 	 */
+-	continuation = current_thread()->continuation;
+ 	thread_continue(THREAD_NULL);
+-
+-	/*
+-	 * 🔴 A CONTINUATION THAT RETURNS IS NAMED HERE (#771).
+-	 *
+-	 * thread_continue() calls it and does not expect it back: since #771 a
+-	 * continuation begins on a fresh frame with nothing under it but this
+-	 * trampoline.  Falling out of here would reach context_thread_start's
+-	 * own panic, which can say only that "a thread function" returned, so
+-	 * the one that did is named first -- read before the call, since the
+-	 * field afterwards holds whatever the continuation last blocked with.
+-	 * A thread's start function begins the same way, and is named the same.
+-	 */
+-	name = ksym_lookup((uint64_t) (uintptr_t) continuation, &offset);
+-	panic("thread %p: its continuation %p <%s+0x%lx> returned, and nothing "
+-	      "is under a continuation to return to (#771)", current_thread(),
+-	      (void *) continuation, name != 0 ? name : "no symbol",
+-	      (unsigned long) offset);
++	/*NOTREACHED*/
+ }
+ 
+ /*
