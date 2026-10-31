@@ -237,6 +237,8 @@ ENTRIES="
 56 refusedfault - 1
 58 harness
 58 harness - 1
+59 harness
+59 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
