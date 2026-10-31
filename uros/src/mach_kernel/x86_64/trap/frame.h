@@ -22,6 +22,12 @@
 #ifndef _X86_64_TRAP_FRAME_H_
 #define _X86_64_TRAP_FRAME_H_
 
+#define	TF_R15		0	/* #771: the six the syscall contract preserves */
+#define	TF_R14		8
+#define	TF_R13		16
+#define	TF_R12		24
+#define	TF_RBP		64
+#define	TF_RBX		104
 #define	TF_VECTOR	120	/* #650: where #DB's stub copies its seven words to */
 #define	TF_RIP		136
 #define	TF_CS		144
