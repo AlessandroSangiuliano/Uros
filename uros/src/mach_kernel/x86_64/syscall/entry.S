@@ -213,7 +213,9 @@ syscall_entry:
 	 * SYSRET only when SYSRET would leave ring 3 exactly as iretq would --
 	 * which it can see from the frame only if rcx and r11 in it equal rip
 	 * and rflags.  Without these two stores every such return was an
-	 * iretq.
+	 * iretq, and a blocked null RPC cost 1.863 us instead of 1.700 (omen,
+	 * KVM, release kernels, median of fifteen boots each; before #771,
+	 * returning through SYSRET from the C chain, 1.669).
 	 */
 	movq	%rcx, TF_RCX(%rsp)
 	movq	%r11, TF_R11(%rsp)
@@ -265,16 +267,17 @@ syscall_entry:
 	 * weigh the two message copies against, and a floor measured from its
 	 * own far end reads as zero and flatters every conclusion drawn from it.
 	 *
-	 * ⚠️ SIXTEEN INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed:
+	 * ⚠️ EIGHTEEN INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed:
 	 * the swapgs, the three moves of %rsp, the load of the caller's stack
-	 * pointer for the frame, and the frame's eleven writes above -- five
-	 * since #770, and the six callee-saved registers since #771.  The
+	 * pointer for the frame, and the frame's thirteen writes above -- five
+	 * since #770, and since #771 rcx and r11 and the six callee-saved
+	 * registers.  The
 	 * reading needs a stack to save two registers on, and the frame's
 	 * stack is not one any more -- the frame is the thread's and C runs on
 	 * kernel_stack -- so the phase begins once that stack is in %rsp, and
 	 * the reader is owed the fact that it does.  Before #770 the five
 	 * writes were inside it.  (This said nine: one short from #770, which
-	 * left the load out, and six short once #771 added its writes.)
+	 * left the load out, and eight short once #771 added its writes.)
 	 *
 	 * rdtsc lands in edx:eax, both of which are live (%rax is the trap
 	 * number), so they are saved.  The pushes go below the top of
