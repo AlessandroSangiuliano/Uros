@@ -474,9 +474,9 @@ hq_aborted_arm(void)
  * except the hand-off, which parks its caller keeping its stack and said
  * nothing.  The field held whatever the caller's last block had left: on a
  * thread that last resumed in a continuation, the continuation itself.  Once
- * switch_context() honoured it (#771), the hand-off restarted its caller
- * there, on a fresh stack, instead of letting it come back -- a receive that
- * had already finished, run a second time.
+ * switch_context() honoured it (#771), the hand-off would restart its caller
+ * there, at the top of its stack, instead of letting it come back -- a
+ * receive that had already finished, run a second time.
  *
  * So the driver here is that thread.  It blocks with a real continuation,
  * hq_stale_resume, is woken into it, and from inside it does what
