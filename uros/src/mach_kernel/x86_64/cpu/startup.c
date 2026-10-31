@@ -48,6 +48,7 @@
 #include <time/timer_ref_test.h>	/* #787: -o */
 #include <cpu/pset_test.h>	/* #787: -q */
 #include <time/rr_resume_test.h>	/* #787: -k */
+#include <time/dispatch_test.h>	/* #787: -l */
 #include <cpu/census_test.h>	/* #657: -c */
 #include <cpu/clock_pins_test.h>	/* #600: the clock's pins are not a line's */
 #include <trap/refused_fault_test.h>	/* #750: -j */
@@ -896,6 +897,15 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('k'))
 			rr_resume_test();
+
+		/*
+		 * -l: a second wakeup on a dispatching processor does not take
+		 * the place of a better thread (#787).  NOT ASKED on a build
+		 * without the widen whose call site reaches its tick probe;
+		 * returns, so the boot goes on.
+		 */
+		if (boot_flag('l'))
+			dispatch_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
