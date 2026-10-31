@@ -135,11 +135,11 @@ hq_start(task_t task, int swappable)
 }
 
 /*
- * Whether `th' is parked on hq_word -- TH_WAIT and nothing else, the state the
+ * Whether `th' is parked on `event' -- TH_WAIT and nothing else, the state the
  * hand-off switches onto -- asked once a tick for up to ten seconds.
  */
 static int
-hq_parked(thread_t th)
+hq_parked_on(thread_t th, event_t event)
 {
 	for (int i = 0; i < 10 * hz; i++) {
 		spl_t	s = splsched();
@@ -147,7 +147,7 @@ hq_parked(thread_t th)
 
 		thread_lock(th);
 		parked = (th->state & (TH_SCHED_STATE | TH_SWAPPED_OUT)) == TH_WAIT
-			 && th->wait_event == (event_t) &hq_word;
+			 && th->wait_event == event;
 		thread_unlock(th);
 		splx(s);
 
@@ -156,6 +156,13 @@ hq_parked(thread_t th)
 		mutex_pause();
 	}
 	return 0;
+}
+
+/* On hq_word, the futex word every waiter here sleeps on. */
+static int
+hq_parked(thread_t th)
+{
+	return hq_parked_on(th, (event_t) &hq_word);
 }
 
 /*
