@@ -3036,9 +3036,20 @@ thread_setrun(
 		     *	Turn off first_quantum to allow csw.
 		     */
 		if (processor->state == PROCESSOR_DISPATCHING) {
-		    cur_th = processor->next_thread;
-		    processor->next_thread = th;
-		    th = cur_th;
+		    /*
+		     * #787: a second wakeup while this processor dispatches
+		     * takes next_thread's place only if it is better.  The
+		     * swap was made whatever the two priorities, and the
+		     * better thread waited behind the worse for up to a tick:
+		     * on one processor, a wakeup of two sleepers, the better
+		     * first, inverted them every time.  The NCPUS == 1 branch
+		     * below, which no build compiles, always compared.
+		     */
+		    if (processor->next_thread->sched_pri > th->sched_pri) {
+			cur_th = processor->next_thread;
+			processor->next_thread = th;
+			th = cur_th;
+		    }
 		} else {
 		    processor->first_quantum = FALSE;
 		    ast_on(cpu_number(), ast_flags);
@@ -3090,12 +3101,16 @@ thread_setrun(
 	    }
 
 	    /*
-	     * Cause ast on processor if processor is on line, and the
-	     * currently executing thread is not bound to that processor
-	     * (bound threads have implicit priority over non-bound threads).
-	     * We also avoid sending the AST to the idle thread (if it got
-	     * scheduled in the window between the 'if' above and here),
-	     * since the idle_thread is bound.
+	     * Cause ast on processor if processor is on line and the bound
+	     * thread outranks what runs there: by its priority, or, its
+	     * queue having been empty, by its binding -- bound threads have
+	     * implicit priority over non-bound threads.  #787: only the
+	     * second was asked, so a bound thread better than the running
+	     * one, queued behind others, waited for that processor's next
+	     * tick.  An idle thread is bound and the worst of all, so an
+	     * idle processor caught in the window between the 'if' above and
+	     * here is sent the AST too; its handler looks at the idle thread
+	     * (#748), and the idle loop finds the queue.
 	     */
 	    rq = &(processor->runq);
 	    if (processor == current_processor()) {
@@ -3105,9 +3120,12 @@ thread_setrun(
 		    (current_thread()->bound_processor == PROCESSOR_NULL ||
 		     current_thread()->sched_pri > th->sched_pri)) {
 		    if (processor->state == PROCESSOR_DISPATCHING) {
-			cur_th = processor->next_thread;
-			processor->next_thread = th;
-			th = cur_th;
+			/* #787: as in the unbound branch, only if better */
+			if (processor->next_thread->sched_pri > th->sched_pri) {
+			    cur_th = processor->next_thread;
+			    processor->next_thread = th;
+			    th = cur_th;
+			}
 		    } else {
 			processor->first_quantum = FALSE;
 			ast_on(cpu_number(), ast_flags);
@@ -3115,20 +3133,26 @@ thread_setrun(
 		}
 		(void)run_queue_enqueue(rq, th, tail);
 
-	    } else if (run_queue_enqueue(rq, th, tail) == 0 &&
-		       processor->state != PROCESSOR_OFF_LINE &&
-		       (th = cpu_data[processor->slot_num].active_thread) &&
-		       (th->bound_processor != processor)) {
+	    } else {
+		boolean_t	was_empty = (run_queue_enqueue(rq, th, tail) == 0);
+		thread_t	active;
+
+		if (processor->state != PROCESSOR_OFF_LINE &&
+		    (active = cpu_data[processor->slot_num].active_thread)
+							!= THREAD_NULL &&
+		    ((was_empty && active->bound_processor != processor) ||
+		     active->sched_pri > th->sched_pri)) {
 #if 0
-		/*
-		 * Using ast_on() for another processor is illegal.
-		 * We could pass some flags to cause_ast_check()
-		 * to have it send more information about the ASTs we
-		 * want to raise and let it handle it...
-		 */
-		ast_on(processor->slot_num, ast_flags);
+		    /*
+		     * Using ast_on() for another processor is illegal.
+		     * We could pass some flags to cause_ast_check()
+		     * to have it send more information about the ASTs we
+		     * want to raise and let it handle it...
+		     */
+		    ast_on(processor->slot_num, ast_flags);
 #endif
-		cause_ast_check(processor);
+		    cause_ast_check(processor);
+		}
 	    }
 	}
 #else	/* NCPUS > 1 */
