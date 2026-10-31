@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #771
+Takes out: the six stores that put rbx, rbp and r12-r15 into the thread's frame at the syscall entry -- a receive that sleeps returns through the frame once continuations run, so it comes back with the rbp, r14 and r15 of its last trap or zeros, and act_test's arm twenty-six, which holds a pattern in each across a receive the kernel reports WAITING, reads one back changed
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 1
+Expect: act_test: \[26\] (rbp|r14|r15) came back from a receive that slept holding
+
+diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
+index a9550b41..b0f27bcb 100644
+--- a/uros/src/mach_kernel/x86_64/syscall/entry.S
++++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
+@@ -223,12 +223,6 @@ syscall_entry:
+ 	 * the rbp and r12-r15 of its caller's last trap, or the zeros
+ 	 * thread_frame_init() left.
+ 	 */
+-	movq	%r15, TF_R15(%rsp)
+-	movq	%r14, TF_R14(%rsp)
+-	movq	%r13, TF_R13(%rsp)
+-	movq	%r12, TF_R12(%rsp)
+-	movq	%rbp, TF_RBP(%rsp)
+-	movq	%rbx, TF_RBX(%rsp)
+ 
+ 	/*
+ 	 * And off the frame, onto the thread's stack, before anything is pushed
