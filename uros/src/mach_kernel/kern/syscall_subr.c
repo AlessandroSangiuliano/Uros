@@ -229,9 +229,11 @@ swtch_pri(
 
 	/*
 	 *	XXX need to think about depression duration.
-	 *	XXX currently using min quantum.
+	 *	XXX currently using min quantum -- in milliseconds, which is
+	 *	what thread_depress_priority() takes: min_quantum is ticks,
+	 *	ten of them, and given as it was it depressed for one (#787).
 	 */
-	thread_depress_priority(thread, min_quantum);
+	thread_depress_priority(thread, min_quantum * 1000 / hz);
 
 	counter(c_swtch_pri_block++);
 	thread_block((void (*)(void))0);
