@@ -155,7 +155,21 @@ void context_init(struct context *ctx, uint64_t stack_top,
 	fpu_area_init(fpu_area);
 }
 
-void context_switch(struct context *old, struct context *fresh)
+/*
+ * The body of a switch, with where the outgoing thread's resume point is
+ * saved left to the caller (#771).
+ *
+ * Every switch saves the incoming thread's entry stack, moves the vector
+ * state for whoever declared it, and hands the processor over with
+ * context_switch_raw().  What differs is the first argument to that call:
+ * an ordinary switch saves the live stack pointer into `old->rsp', so the
+ * outgoing thread resumes exactly where it is now; a switch away from a
+ * thread that blocked with a continuation saves it into a scratch instead
+ * and abandons it, because that thread's resume point has already been reset
+ * to the top of its stack and the frames it is running in now are given up.
+ */
+static void context_switch_body(struct context *old, struct context *fresh,
+				uint64_t *save_rsp)
 {
 	/*
 	 * Tell this processor where an entry from ring 3 lands now.
@@ -236,5 +250,66 @@ void context_switch(struct context *old, struct context *fresh)
 	if (fresh->fpu_switch)
 		fpu_restore(fresh->fpu_area);
 
-	context_switch_raw(&old->rsp, fresh->rsp);
+	context_switch_raw(save_rsp, fresh->rsp);
+}
+
+/* An ordinary switch: the outgoing thread resumes where it is now. */
+void context_switch(struct context *old, struct context *fresh)
+{
+	context_switch_body(old, fresh, &old->rsp);
+}
+
+/*
+ * A switch away from a thread that blocked with a continuation (#771).
+ *
+ * Its resume point must already have been reset with
+ * context_reset_to_continuation(), which left `old->rsp' pointing at a fresh
+ * frame at the top of its kernel stack.  So the live stack pointer is saved
+ * into a scratch and thrown away: the frames it blocked in are abandoned, and
+ * when it next runs it starts at the top, in thread_continue, not by returning
+ * through them.  Its floating-point state is still saved -- the user registers
+ * are live and this is where they are kept -- which is why the reset above
+ * does not touch the area.
+ */
+void context_switch_continuation(struct context *old, struct context *fresh)
+{
+	uint64_t	abandoned;
+
+	context_switch_body(old, fresh, &abandoned);
+}
+
+/*
+ * Reset a blocked thread's context so its next resume starts fresh at the top
+ * of its kernel stack -- context_thread_start, then `entry'
+ * (thread_begin_trampoline), then thread_continue(), then its continuation --
+ * and the frames it blocked in are abandoned (#771).
+ *
+ * The twin of context_init() for a thread that ALREADY exists and whose
+ * floating-point state is worth keeping.  context_init() ends in
+ * fpu_area_init(), which zeroes the area -- right for a thread being born,
+ * wrong for one blocking inside a syscall with its user FPU state live.  So
+ * this rebuilds only the kernel register-save frame and leaves ctx->fpu_area
+ * and its contents, ctx->fpu_switch, ctx->user_frame and ctx->entry_stack
+ * exactly as they were.
+ *
+ * The frame is written at the top of the stack, in the high part that is
+ * unused while the thread is running far below it -- so this does not touch
+ * the frames the switch away is still standing on.
+ */
+void context_reset_to_continuation(struct context *ctx, void (*entry)(void *))
+{
+	uint64_t rsp = ctx->entry_stack - CTX_WORDS * 8;
+	uint64_t *frame = (uint64_t *)(uintptr_t) rsp;
+
+	frame[CTX_R15] = 0;
+	frame[CTX_R14] = 0;
+	frame[CTX_R13] = (uint64_t)(uintptr_t) entry;
+	frame[CTX_R12] = 0;			/* the trampoline's unused argument */
+	frame[CTX_RBX] = 0;
+	frame[CTX_RBP] = 0;
+	frame[CTX_RFLAGS] = CTX_RFLAGS_INITIAL;
+	frame[CTX_RETURN] = (uint64_t)(uintptr_t) context_thread_start;
+	frame[CTX_CALLER] = 0;
+	frame[CTX_CALLER + 1] = 0;
+	ctx->rsp = rsp;
 }

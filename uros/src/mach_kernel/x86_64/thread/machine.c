@@ -970,23 +970,21 @@ void fpu_area_free(void *area)
  * thread that does not exist yet.  Returning `old' would be right only for
  * the very first switch of each thread and wrong every time after.
  *
- * ⚠️ `continuation' is not used, and that is not an omission.  It tells the
- * machine that the outgoing thread does not need its stack kept, so a
- * machine that had something cheaper to do in that case would do it here.
- * This one does not: the stack is the thread's own page and is not returned
- * on a switch either way, and machine_kernel_stack_init() is what resets it
- * when the scheduler actually discards the contents.  Ignoring it costs a
- * saved register file that will be overwritten; noticing it would cost a
- * branch on every switch to save that.  If a measurement ever says
- * otherwise, this is the comment that says what to change.
+ * 🔴 `continuation' is honoured now (#771).  A non-null one means the
+ * outgoing thread blocked declaring it does not need its kernel stack kept:
+ * its resume point is reset to the top of its stack, in thread_continue, and
+ * the frames it is running in now are abandoned.  It used to be `(void)'d,
+ * and the thread resumed by returning through those frames, on the stack it
+ * blocked on -- so the continuation was never run and no stack could ever be
+ * given up, which #772 (stack hand-off) needs.  The reset keeps the thread's
+ * floating-point area, which still holds its live user state (its save is
+ * below, before the switch); only the kernel register-save frame is rebuilt.
  */
 thread_t
 switch_context(thread_t old, void (*continuation)(void), thread_t new)
 {
 	thread_act_t	old_act = old->top_act;
 	thread_act_t	new_act = new->top_act;
-
-	(void) continuation;
 
 	assert(old_act != THR_ACT_NULL && old_act->mact.pcb != PCB_NULL);
 	assert(new_act != THR_ACT_NULL && new_act->mact.pcb != PCB_NULL);
@@ -1064,7 +1062,19 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	 */
 	percpu()->prev_thread = (void *) old;
 
-	context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
+	if (continuation != 0) {
+		/*
+		 * The outgoing thread keeps no kernel stack: reset its resume
+		 * point to the top of its stack, then switch away abandoning the
+		 * frames it blocked in (#771).  thread_begin_trampoline ends in
+		 * thread_continue(), which runs the continuation.
+		 */
+		context_reset_to_continuation(&old_act->mact.pcb->ctx,
+					      thread_begin_trampoline);
+		context_switch_continuation(&old_act->mact.pcb->ctx,
+					    &new_act->mact.pcb->ctx);
+	} else
+		context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
 
 	return (thread_t) percpu()->prev_thread;
 }
