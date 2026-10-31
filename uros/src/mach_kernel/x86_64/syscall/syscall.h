@@ -86,7 +86,9 @@
  * compiled code keeps them.  A call that blocks with a continuation does not
  * come back that way — it gives up its kernel frames and returns through the
  * thread's frame — so the entry path stores the six callee-saved registers
- * in that frame as well, six stores on every call (#771).  Backtraces
+ * in that frame as well, and rcx and r11 as SYSCALL left them, so that the
+ * way back through the frame can still be SYSRET rather than iretq: eight
+ * stores on every call (#771).  Backtraces
  * across a syscall are unaffected.  So is signal delivery: the frame a
  * handler returns through resumes at the instruction after SYSCALL, where
  * the destroyed registers are already dead by this contract.
