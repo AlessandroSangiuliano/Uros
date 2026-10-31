@@ -3726,7 +3726,10 @@ arm_twenty_two_processor_ports_are_privileged(void)
  * named register across a call), and it is made to sleep.  The message comes
  * from a thread of this program, sent only once the kernel reports the
  * receiver WAITING -- which it reports after thread_dispatch() has cleared
- * TH_RUN, so the receive has blocked and been switched away from.  The stub
+ * TH_RUN, so the receiver has blocked and been switched away from.  That says
+ * it sleeps, not where; the first call below is what makes it the receive.
+ * Without the entry's six stores this arm read rbp back as a user stack
+ * address, the last trap's, on the first TCG boot it was asked.  The stub
  * keeps rbx, r12 and r13 itself, around the three arguments it carries in
  * them: on this trap, rbp, r14 and r15 are the kernel's to keep.
  *
