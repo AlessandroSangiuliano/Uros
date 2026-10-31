@@ -1125,9 +1125,10 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 
 	if (continuation != 0) {
 		/*
-		 * The outgoing thread keeps no kernel stack: reset its resume
-		 * point to the top of its stack, then switch away abandoning the
-		 * frames it blocked in (#771).  thread_begin_trampoline ends in
+		 * The outgoing thread needs none of the frames it blocked in:
+		 * reset its resume point to the top of its stack, then switch
+		 * away abandoning them (#771).  It keeps the stack itself --
+		 * giving that up is #772's.  thread_begin_trampoline ends in
 		 * thread_continue(), which runs the continuation.
 		 */
 		context_reset_to_continuation(&old_act->mact.pcb->ctx,
