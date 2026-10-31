@@ -332,8 +332,20 @@ syscall_thread_switch(
 			if (thread) {
 				s = splsched();
 				thread_lock(thread);
+				/*
+				 * #787: and not bound, asked before rem_runq(),
+				 * which takes a thread off any queue -- another
+				 * processor's local one included -- for
+				 * thread_run() to run it wherever this thread is
+				 * by then.  Not even one bound to this processor:
+				 * this thread can be moved between the splx()
+				 * below and thread_run(), and nothing holds it
+				 * here.  The class of #615; a bound hint gets the
+				 * plain block below instead.
+				 */
 				if (thread &&
 					(thread->processor_set == cur_thread->processor_set) &&
+					(thread->bound_processor == PROCESSOR_NULL) &&
 					(rem_runq(thread) != RUN_QUEUE_NULL)) {
 					/*
 					 *	Hah, got it!!
