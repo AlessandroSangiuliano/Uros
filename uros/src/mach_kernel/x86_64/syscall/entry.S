@@ -220,8 +220,9 @@ syscall_entry:
 	 * it was called through and returns through this one, in
 	 * thread_user_frame_return, whose RESTORE_REGS loads all fifteen from
 	 * here.  With these six unwritten, a receive that slept came back with
-	 * the rbp and r12-r15 of its caller's last trap, or the zeros
-	 * thread_frame_init() left.
+	 * all six as the thread's last trap had left them, or as
+	 * thread_frame_init() zeroed them -- of which libmach's stub hides three
+	 * for mach_msg, keeping rbx, r12 and r13 around the arguments it carries.
 	 */
 	movq	%r15, TF_R15(%rsp)
 	movq	%r14, TF_R14(%rsp)
