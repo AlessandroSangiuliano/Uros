@@ -610,11 +610,11 @@ set_timeout(
 		/*
 		 * Take an extra reference to make sure that the thread
 		 * doesn't disappear while a timeout is on its way.
+		 * Atomically, as every change of the count is (#787).
 		 */
 		thread = (thread_t) (telt->param);
-		simple_lock_held(&thread->lock);
 		assert(thread->ref_count > 0);
-		thread->ref_count++;
+		thread_ref_take(thread);
 	}
 
 	splx(s);
@@ -647,12 +647,15 @@ reset_timeout(
 
 		/*
 		 * Release the extra reference on the thread, taken
-		 * in set_timeout().
+		 * in set_timeout().  Atomically (#787): most callers hold
+		 * no lock of the thread's -- a thread just woken cancels
+		 * its own timer -- and a decrement beside an increment
+		 * under the lock lost one of the two.  Never the last
+		 * reference: the caller holds one.
 		 */
 		thread = (thread_t) (telt->param);
-		simple_lock_held(&thread->lock);
 		assert(thread->ref_count > 1);
-		thread->ref_count--;
+		(void) thread_ref_drop(thread);
 	}
 	splx(s);
 	return retval;
@@ -779,12 +782,12 @@ untimeout(
 
 			/*
 			 * Release the extra reference on the thread, taken
-			 * in set_timeout().
+			 * in set_timeout() -- atomically, as reset_timeout()
+			 * does and for its reason (#787).
 			 */
 			thread = (thread_t) (elt->param);
-			simple_lock_held(&thread->lock);
 			assert(thread->ref_count > 1);
-			thread->ref_count--;
+			(void) thread_ref_drop(thread);
 		}
 
 		splx(s);
