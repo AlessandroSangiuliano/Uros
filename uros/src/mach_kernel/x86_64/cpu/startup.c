@@ -46,6 +46,7 @@
 #include <cpu/console_marks_test.h>	/* #757: the marks, on the console */
 #include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <time/timer_ref_test.h>	/* #787: -o */
+#include <cpu/pset_test.h>	/* #787: -q */
 #include <cpu/census_test.h>	/* #657: -c */
 #include <cpu/clock_pins_test.h>	/* #600: the clock's pins are not a line's */
 #include <trap/refused_fault_test.h>	/* #750: -j */
@@ -878,6 +879,14 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('o'))
 			timer_ref_test();
+
+		/*
+		 * -q: a processor set's thread-changing calls come back (#787).
+		 * -E's reasons: the driver and worker run where the scheduler
+		 * puts them; returns, so the boot goes on.
+		 */
+		if (boot_flag('q'))
+			pset_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
