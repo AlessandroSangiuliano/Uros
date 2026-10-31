@@ -235,6 +235,8 @@ ENTRIES="
 51 pcidn
 56 refusedfault
 56 refusedfault - 1
+58 harness
+58 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
