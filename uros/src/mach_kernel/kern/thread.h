@@ -732,6 +732,14 @@ extern kern_return_t	thread_max_priority_locked(
 				processor_set_t	pset,
 				int		max_priority);
 
+/* Change a thread's policy, base priority kept, while holding RPC locks:
+   it takes the thread's lock alone (#787) */
+extern kern_return_t	thread_policy_common(
+				thread_t	thread,
+				int		policy,
+				int		data,
+				processor_set_t	pset);
+
 /* Set a thread's priority while holding RPC locks */
 extern kern_return_t	thread_priority_locked(
 				thread_t	thread,

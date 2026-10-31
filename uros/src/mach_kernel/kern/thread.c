@@ -589,11 +589,6 @@ vm_size_t		stack_max_use = KERNEL_STACK_SIZE - 64;
 #endif	/* MACH_DEBUG */
 
 /* Forwards */
-kern_return_t	thread_policy_common(
-			thread_t	thread,
-			int		policy,
-			int		data,
-			processor_set_t	pset);
 void		thread_collect_scan(void);
 void		thread_stats(void);
 kern_return_t
