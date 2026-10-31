@@ -572,7 +572,8 @@ isr_table:
  *
  * The machine-independent kernel has four ways of leaving the kernel that
  * are not "return from the trap that got us here", and all four end in the
- * same place: restore the thread's saved user frame and iretq.
+ * same place: restore the thread's saved user frame and iretq -- or SYSRET,
+ * when the frame shows it would do the same (#771).
  *
  * The difference from trap_common's tail above is where the frame comes
  * from.  There, it is on the stack because the processor and SAVE_REGS put
@@ -719,6 +720,12 @@ thread_user_frame_return:
 	 *
 	 * Anything else is an iretq, as before.  The registers are read here
 	 * for the decision only: RESTORE_REGS loads all fifteen either way.
+	 *
+	 * Measured on omen under KVM, release kernels, median of fifteen boots
+	 * each: a null RPC to a receiver that had blocked took 1.863 us with
+	 * every such return an iretq and 1.700 with this; 1.669 before #771,
+	 * when it went back through SYSRET at the end of the C chain.  The
+	 * census says which way they went (quiet_frame_returns_so_far()).
 	 */
 	movq	TF_RIP(%rsp), %rdx
 	cmpq	TF_RCX(%rsp), %rdx
