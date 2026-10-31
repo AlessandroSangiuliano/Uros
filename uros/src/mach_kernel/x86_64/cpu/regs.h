@@ -265,6 +265,13 @@ static inline void interrupts_disable(void)
  */
 #define RFLAGS_AC	(1UL << 18)
 
+/*
+ * Direction flag: the string instructions step backward when it is set, and
+ * the System V ABI has it clear on entry, so the kernel assumes it clear --
+ * which a trap or interrupt gate does not guarantee (#792).
+ */
+#define RFLAGS_DF	(1UL << 10)
+
 #ifndef __ASSEMBLER__
 
 static inline uint64_t read_rflags(void)

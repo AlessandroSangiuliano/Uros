@@ -491,6 +491,13 @@ struct trap_record {
 	unsigned	bt_depth;
 	const char     *bt_first;
 	int		bt_reached_boot;
+	/*
+	 * The flags the handler itself ran with, read where the trap was
+	 * recorded -- after the entry cleared DF and AC (#792).  A test that
+	 * provoked the trap with them set reads them back here: DF must be
+	 * clear, and AC clear where SMAP is on.
+	 */
+	uint64_t	handler_rflags;
 	int      caught;
 };
 
