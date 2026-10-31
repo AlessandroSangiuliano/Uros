@@ -204,6 +204,19 @@ syscall_entry:
 	 */
 	movq	%rcx, TF_RIP(%rsp)		/* where ring 3 resumes    */
 	movq	%r11, TF_RFLAGS(%rsp)		/* the flags it resumes on */
+
+	/*
+	 * 🔥 And rcx and r11 as SYSCALL left them, which are those two again
+	 * (#771).  Not for the caller, which the contract tells not to read
+	 * them: for the way back.  A call that sleeps with a continuation
+	 * leaves through thread_user_frame_return, and that tail returns by
+	 * SYSRET only when SYSRET would leave ring 3 exactly as iretq would --
+	 * which it can see from the frame only if rcx and r11 in it equal rip
+	 * and rflags.  Without these two stores every such return was an
+	 * iretq.
+	 */
+	movq	%rcx, TF_RCX(%rsp)
+	movq	%r11, TF_R11(%rsp)
 	movq	%gs:PERCPU_USER_RSP, %rcx
 	movq	%rcx, TF_RSP(%rsp)		/* the stack it came in on */
 	movq	$USER_CS_RPL3, TF_CS(%rsp)
