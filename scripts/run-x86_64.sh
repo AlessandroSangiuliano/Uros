@@ -575,6 +575,8 @@ must_report 'rr_resume_test: starting' 'rr_resume_test: \(PASS\|WRONG\|NOT ASKED
 	'Every wait is bounded by the clock'"'"'s ticks and the threads stop on a flag this one sets, so the verdict is printed either way; a run that stops after the start line has two round-robin threads that never let this one run again (#787).'
 must_report 'dispatch_test: starting' 'dispatch_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every wait is bounded by the clock'"'"'s ticks and the verdict is printed either way; a run that stops after the start line has H or L woken and never run (#787).'
+must_report 'passover_test: starting' 'passover_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Each round blocks once and the spinner stops on a flag, so the verdict is printed either way; a run that stops after the start line has this thread never given its processor back (#787).'
 must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
 must_report 'profile_entry: starting' 'profile_entry: \(PASS\|WRONG\|NOT ASKED\)' \
