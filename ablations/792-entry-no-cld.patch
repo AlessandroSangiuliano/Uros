@@ -1,0 +1,27 @@
+Kind: ablation
+Issue: #792
+Takes out: the cld at the entry of trap_common and trap_paranoid -- a gate leaves DF as the interrupted code had it, so the handler runs with it set, and the entry self-test, which provokes a fault and an NMI with DF set, reads DF 1 in each handler
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: a fault and an NMI taken with DF and AC set: the fault handler ran with DF 1 
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
+index 834d868d..d004d618 100644
+--- a/uros/src/mach_kernel/x86_64/trap/entry.S
++++ b/uros/src/mach_kernel/x86_64/trap/entry.S
+@@ -281,7 +281,6 @@ trap_common:
+ 	 * path's count of the windows it closes.  DF has no such handler, so it
+ 	 * is cleared here, the once.
+ 	 */
+-	cld
+ 	SAVE_REGS
+ 
+ 	movq	%rsp, %rdi		/* the frame is the argument */
+@@ -374,7 +373,6 @@ trap_common:
+  * is being optimised on any of them.
+  */
+ trap_paranoid:
+-	cld				/* #792: as trap_common; AC is trap_dispatch's (#468) */
+ 	SAVE_REGS
+ 
+ 	/*
