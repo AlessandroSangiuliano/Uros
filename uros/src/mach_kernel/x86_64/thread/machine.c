@@ -625,6 +625,11 @@ thread_set_syscall_return(thread_t thread, kern_return_t retval)
 
 	thr_act->mact.pcb->user->rax = (uint64_t) retval;
 	/*
+	 * #771: and one more call that will leave through its frame, which the
+	 * census sets against the returns that left by SYSRET.
+	 */
+	percpu_count_frame_syscall();
+	/*
 	 * #411/#392: the other way out of a Mach trap.
 	 *
 	 * A blocking receive leaves through the continuation and never unwinds
