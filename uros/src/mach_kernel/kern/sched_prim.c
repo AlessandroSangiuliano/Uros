@@ -2850,7 +2850,15 @@ thread_setrun(
 #if	NCPUS > 1
 	register processor_set_t	pset;
 #endif	/* NCPUS > 1 */
-	ast_t			ast_flags = AST_QUANTUM;
+	/*
+	 * #787: a preemption, not a quantum run out.  AST_QUANTUM made
+	 * thread_dispatch() put the preempted thread at the tail of its
+	 * queue and give an RR thread a new quantum; POSIX wants a preempted
+	 * FIFO or RR thread at the head of its priority's list with what was
+	 * left of its quantum, which is what AST_BLOCK gets it, as ast_taken()
+	 * already does for a thread preempted in its first quantum.
+	 */
+	ast_t			ast_flags = AST_BLOCK;
 
 	mp_disable_preemption();
 
