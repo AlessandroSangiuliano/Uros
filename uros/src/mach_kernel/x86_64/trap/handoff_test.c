@@ -467,6 +467,147 @@ hq_aborted_arm(void)
 }
 
 /*
+ * ── The fourth arm: a driver that began in a continuation hands off (#771) ─
+ *
+ * thread_invoke() hands switch_context() the outgoing thread's own
+ * continuation field, and each of its callers says first what that is --
+ * except the hand-off, which parks its caller keeping its stack and said
+ * nothing.  The field held whatever the caller's last block had left: on a
+ * thread that last resumed in a continuation, the continuation itself.  Once
+ * switch_context() honoured it (#771), the hand-off restarted its caller
+ * there, on a fresh stack, instead of letting it come back -- a receive that
+ * had already finished, run a second time.
+ *
+ * So the driver here is that thread.  It blocks with a real continuation,
+ * hq_stale_resume, is woken into it, and from inside it does what
+ * futex_wait_wake() does; its field still names hq_stale_resume, as a
+ * server's still names mach_msg_receive_continue after a receive.  The
+ * continuation counts its own beginnings: once is right, twice is the
+ * hand-off restarting it.
+ *
+ * 🔑 And it asks one thing more, on the way in: a driver that comes back from
+ * thread_block() at all, instead of beginning in its continuation, was
+ * resumed by returning through its frames -- the continuation thrown away,
+ * which is what this target did before #771.
+ *
+ * ⚠️ On a thread of its own and not the one running the boot: a defect here
+ * strands the driver for good, and the boot has to go on.
+ */
+static int			hq_stale_go;	/* wakes the driver into it */
+static int			hq_stale_done;	/* the driver's report       */
+static volatile int		hq_stale_entries;	/* hq_stale_resume() begun */
+static volatile int		hq_stale_returned;	/* thread_block() came back */
+static volatile int		hq_stale_back;	/* the hand-off came back    */
+static volatile boolean_t	hq_stale_handed;
+static void			(*volatile hq_stale_left)(void);
+
+static void
+hq_park_for_ever(void)
+{
+	for (;;) {
+		spl_t	s = splsched();
+
+		assert_wait((event_t) &hq_never, FALSE);
+		splx(s);
+		thread_block((void (*)(void)) 0);
+	}
+}
+
+/* The continuation.  There is nothing under it to return to, so it parks. */
+static void
+hq_stale_resume(void)
+{
+	if (++hq_stale_entries > 1) {
+		thread_wakeup((event_t) &hq_stale_done);
+		hq_park_for_ever();
+	}
+
+	hq_stale_handed = hq_wake(10 * hz);
+	hq_stale_left = current_thread()->continuation;
+	hq_stale_back = 1;
+	thread_wakeup((event_t) &hq_stale_done);
+	hq_park_for_ever();
+}
+
+static void
+hq_stale_driver(void)
+{
+	spl_t	s;
+
+	s = splsched();
+	assert_wait((event_t) &hq_stale_go, TRUE);
+	splx(s);
+	thread_block(hq_stale_resume);
+
+	/*
+	 * Here only if the block came back instead of beginning in the
+	 * continuation.  Carried on as the continuation would, so the hand-off
+	 * is still asked; the arm reports this first.
+	 */
+	hq_stale_returned = 1;
+	hq_stale_resume();
+}
+
+static void
+hq_stale_arm(void)
+{
+	thread_t	waiter, driver;
+	spl_t		s;
+
+	waiter = hq_start(kernel_task, FALSE);
+	if (waiter == THREAD_NULL || !hq_parked(waiter)) {
+		printf("handoff: WRONG — the waiter for the driver that began in "
+		       "a continuation was not created or never parked on its "
+		       "word (#771)\n");
+		return;
+	}
+
+	driver = kernel_thread(kernel_task, hq_stale_driver, (void *) 0);
+	if (driver == THREAD_NULL
+	    || !hq_parked_on(driver, (event_t) &hq_stale_go)) {
+		printf("handoff: WRONG — the driver never parked to be woken into "
+		       "its continuation (#771)\n");
+		return;
+	}
+
+	s = splsched();
+	assert_wait((event_t) &hq_stale_done, FALSE);
+	thread_set_timeout(10 * hz);
+	splx(s);
+	thread_wakeup((event_t) &hq_stale_go);
+	thread_block((void (*)(void)) 0);
+
+	if (hq_stale_returned) {
+		printf("handoff: WRONG — a thread that blocked with a continuation "
+		       "came back from thread_block() instead of beginning in it: "
+		       "the switch threw the continuation away (#771)\n");
+		return;
+	}
+	if (hq_stale_entries > 1) {
+		printf("handoff: WRONG — the hand-off restarted its caller in the "
+		       "continuation it had already begun: hq_stale_resume began "
+		       "%d times, the caller's field still naming it (#771)\n",
+		       hq_stale_entries);
+		return;
+	}
+	if (!hq_stale_back) {
+		printf("handoff: WRONG — the driver that began in its continuation "
+		       "never came back from the hand-off in ten seconds (#771)\n");
+		return;
+	}
+	if (!hq_stale_handed) {
+		printf("handoff: NOT ASKED — the hand-off declined the waiter, so "
+		       "it never switched away with the driver's field in play "
+		       "(#771)\n");
+		return;
+	}
+	printf("handoff: PASS — a driver that began in its continuation handed "
+	       "off to a parked waiter and came back to it, beginning once; its "
+	       "continuation field read %p afterwards (#771)\n",
+	       (void *) hq_stale_left);
+}
+
+/*
  * The stopped arm first, and not for tidiness.  The old wake put a waiter that
  * was not parked on a run queue with thread_setrun(), which asserts the thread
  * is not swapped out -- so under ablations/607-old-wake.patch the swapped arm ends
@@ -478,11 +619,12 @@ void
 handoff_wake_test(void)
 {
 	printf("handoff: a futex waiter stopped, a driver with an abort pending, "
-	       "then a waiter swapped out, each through the hand-off (#607, "
-	       "#703)\n");
+	       "a waiter swapped out, then a driver that began in a "
+	       "continuation, each through the hand-off (#607, #703, #771)\n");
 	hq_stopped_arm();
 	hq_aborted_arm();
 	hq_swapped_arm();
+	hq_stale_arm();
 }
 
 /*
