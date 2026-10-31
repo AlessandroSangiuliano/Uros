@@ -2115,6 +2115,24 @@ thread_doassign(
 	 *	requires re-acquiring both pset locks in order.
 	 */
 	for (;;) {
+	    /*
+	     * #787: the retry's default set is the set a thread of the
+	     * default set is already in.  Nothing to move then, and the
+	     * branch below would lock the one mutex twice and hold it for
+	     * good, and with it every thread and task creation.  Undone as
+	     * the stop's failure is, above, with the stop itself.
+	     */
+	    if (pset == new_pset) {
+		if (thread != current_thread())
+		    thread_unstop(thread);
+		(void)act_lock_thread(thr_act);
+		thread_release(thr_act);
+		act_locked_act_deallocate(thr_act);
+		act_unlock_thread(thr_act);
+		if (release_freeze)
+		    thread_unfreeze(thread);
+		return;
+	    }
 	    if (pset < new_pset) {
 		pset_lock(pset);
 		pset_lock(new_pset);
