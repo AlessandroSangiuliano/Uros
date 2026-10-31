@@ -578,7 +578,7 @@ task_swap_swapout_thread(void)
 					 * for thread_swapout.
 					 */
 				}
-				thread->ref_count++;
+				thread_ref_take(thread);
 				thread_unlock(thread);
 				thread_unstop(thread);
 			}

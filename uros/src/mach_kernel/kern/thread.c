@@ -1583,7 +1583,7 @@ thread_deallocate(
 	 */
 	s = splsched();
 	thread_lock(thread);
-	if (--thread->ref_count > 0) {
+	if (thread_ref_drop(thread) > 0) {
 		thread_unlock(thread);
 		splx(s);
 		return;
@@ -1598,7 +1598,7 @@ thread_deallocate(
 	 *	the thread, and then lock the pset in the proper order.
 	 */
 	assert(thread->ref_count == 0); /* Else this is an extra dealloc! */
-	thread->ref_count++;
+	thread_ref_take(thread);
 	thread_unlock(thread);
 	splx(s);
 
@@ -1622,7 +1622,7 @@ thread_deallocate(
 		reset_timeout_check(&thread->timer);
 	}
 
-	if (--thread->ref_count > 0) {
+	if (thread_ref_drop(thread) > 0) {
 #if	MACH_HOST
 		boolean_t need_wakeup = FALSE;
 		/*
@@ -1692,7 +1692,7 @@ thread_reference(
 
 	s = splsched();
 	thread_lock(thread);
-	thread->ref_count++;
+	thread_ref_take(thread);
 	thread_unlock(thread);
 	splx(s);
 }

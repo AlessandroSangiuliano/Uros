@@ -909,7 +909,7 @@ restart:
 							thread->state |=
 								TH_SWAPPED_OUT;
 						}
-						thread->ref_count++;
+						thread_ref_take(thread);
 						thread_unlock(thread);
 					}
 					act_locked_act_reference(thr_act);

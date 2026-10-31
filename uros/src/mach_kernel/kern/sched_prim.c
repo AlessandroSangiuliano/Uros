@@ -4027,7 +4027,7 @@ do_runq_scan(
 			     * have better luck next time.
 			     */
 			    if (simple_lock_try(&thread->lock)) {
-				    thread->ref_count++;
+				    thread_ref_take(thread);
 				    thread_unlock(thread);
 				    stuck_threads[stuck_count++] = thread;
 			    }
