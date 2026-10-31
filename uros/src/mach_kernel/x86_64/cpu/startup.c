@@ -50,6 +50,7 @@
 #include <time/rr_resume_test.h>	/* #787: -k */
 #include <time/dispatch_test.h>	/* #787: -l */
 #include <time/passover_test.h>	/* #787: -g */
+#include <time/bound_ipi_test.h>	/* #787: -h */
 #include <cpu/census_test.h>	/* #657: -c */
 #include <cpu/clock_pins_test.h>	/* #600: the clock's pins are not a line's */
 #include <trap/refused_fault_test.h>	/* #750: -j */
@@ -915,6 +916,14 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('g'))
 			passover_test();
+
+		/*
+		 * -h: a thread woken onto another processor's queue, better
+		 * than what runs there, does not wait for its tick (#787).
+		 * NOT ASKED on one processor; returns, so the boot goes on.
+		 */
+		if (boot_flag('h'))
+			bound_ipi_test();
 
 #if	PROBE_606_PAGEOUT
 		(void) kernel_thread(kernel_task, pageout_probe, (char *) 0);
