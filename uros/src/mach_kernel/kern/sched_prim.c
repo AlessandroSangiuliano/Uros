@@ -2227,6 +2227,18 @@ thread_block_reason(
 	aborted = (thread->state & TH_ABORT);
 	if( aborted )
 		clear_wait_locked( thread, THREAD_INTERRUPTED, TRUE );
+	/*
+	 * #787: a wait that ended before the block -- wake_dequeued() takes
+	 * TH_WAIT off a thread that is still running and leaves TH_UNINT --
+	 * leaves the state TH_RUN|TH_UNINT, and thread_select() keeps the
+	 * running thread only at exactly TH_RUN: it gave way to anything
+	 * runnable, a lower priority included, until a tick looked again.
+	 * The wait is over and the bit with it, here, before the selection;
+	 * thread_invoke() cleared it only once the thread was switched back
+	 * to, after it had been passed over.
+	 */
+	if ((thread->state & (TH_WAIT | TH_UNINT)) == TH_UNINT)
+		thread->state &= ~TH_UNINT;
 	thread_unlock(thread);
 
 #if	FAST_TAS
