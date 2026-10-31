@@ -159,9 +159,9 @@ void context_init(struct context *ctx, uint64_t stack_top,
  * The body of a switch, with where the outgoing thread's resume point is
  * saved left to the caller (#771).
  *
- * Every switch saves the incoming thread's entry stack, moves the vector
- * state for whoever declared it, and hands the processor over with
- * context_switch_raw().  What differs is the first argument to that call:
+ * Every switch tells the processor where the incoming thread's frame and
+ * entry stack are, moves the vector state for whoever declared it, and hands
+ * the processor over with context_switch_raw().  What differs is the first argument to that call:
  * an ordinary switch saves the live stack pointer into `old->rsp', so the
  * outgoing thread resumes exactly where it is now; a switch away from a
  * thread that blocked with a continuation saves it into a scratch instead
@@ -303,9 +303,10 @@ void context_switch_continuation(struct context *old, struct context *fresh)
  * and its contents, ctx->fpu_switch, ctx->user_frame and ctx->entry_stack
  * exactly as they were.
  *
- * The frame is written at the top of the stack, in the high part that is
- * unused while the thread is running far below it -- so this does not touch
- * the frames the switch away is still standing on.
+ * The frame is written at the top of the stack, over the outermost frames of
+ * the call the thread blocked in -- frames it is giving up, and nothing runs
+ * in them again: the switch away below runs far down the stack and never
+ * returns up through them.
  */
 void context_reset_to_continuation(struct context *ctx, void (*entry)(void *))
 {
