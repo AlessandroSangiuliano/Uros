@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #787
+Takes out: the priority half of the AST to a bound thread's processor -- thread_setrun() sends it only when that processor's local queue was empty, as before #787. bound_ipi_test's X, better than the spinner running on its processor and queued behind the other, then waits for that processor's tick in every round.
+Accel: tcg,kvm
+Run: --entry 63 300 -smp 2
+Expect: bound_ipi_test: WRONG .* waited for its tick
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index de12a511..4b4f5cf3 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -3153,7 +3153,7 @@ thread_setrun(
+ 		    (active = cpu_data[processor->slot_num].active_thread)
+ 							!= THREAD_NULL &&
+ 		    ((was_empty && active->bound_processor != processor) ||
+-		     active->sched_pri > th->sched_pri)) {
++		     FALSE)) {	/* 787-bound-ast-empty-only: the queue empty, nothing else */
+ #if 0
+ 		    /*
+ 		     * Using ast_on() for another processor is illegal.
