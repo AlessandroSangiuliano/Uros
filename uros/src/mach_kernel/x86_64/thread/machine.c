@@ -49,6 +49,7 @@
 #include <kern/cpu_number.h>	/* #663: tss[] by processor number */
 #include <cpu/regs.h>		/* #422: cpu_apic_id */
 #include <sync/atomic.h>		/* #749: the stacks taken and given back */
+#include <ddb/ksym.h>			/* #771: a continuation that returns, named */
 
 /*
  * Module init.  Both halves exist because the machine-independent tree calls
@@ -194,7 +195,10 @@ act_machine_switch_pcb(thread_act_t thr_act)
 static void
 thread_begin_trampoline(void *unused)
 {
-	thread_t prev = (thread_t) percpu()->prev_thread;
+	thread_t	prev = (thread_t) percpu()->prev_thread;
+	void		(*continuation)(void);
+	const char	*name;
+	uint64_t	offset = 0;
 
 	(void) unused;
 
@@ -232,8 +236,25 @@ thread_begin_trampoline(void *unused)
 	 * reaches the way out of -- then spllo(), then this thread's own
 	 * function through self->continuation.
 	 */
+	continuation = current_thread()->continuation;
 	thread_continue(THREAD_NULL);
-	/*NOTREACHED*/
+
+	/*
+	 * 🔴 A CONTINUATION THAT RETURNS IS NAMED HERE (#771).
+	 *
+	 * thread_continue() calls it and does not expect it back: since #771 a
+	 * continuation begins on a fresh frame with nothing under it but this
+	 * trampoline.  Falling out of here would reach context_thread_start's
+	 * own panic, which can say only that "a thread function" returned, so
+	 * the one that did is named first -- read before the call, since the
+	 * field afterwards holds whatever the continuation last blocked with.
+	 * A thread's start function begins the same way, and is named the same.
+	 */
+	name = ksym_lookup((uint64_t) (uintptr_t) continuation, &offset);
+	panic("thread %p: its continuation %p <%s+0x%lx> returned, and nothing "
+	      "is under a continuation to return to (#771)", current_thread(),
+	      (void *) continuation, name != 0 ? name : "no symbol",
+	      (unsigned long) offset);
 }
 
 /*
