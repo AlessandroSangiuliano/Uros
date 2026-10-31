@@ -1489,9 +1489,17 @@ slow_echo_thread_func(void *arg)
  * echo-reply + receive-reply.
  *
  * The yield overhead is small (~0.1 us) and constant across builds.
- * The wakeup cost is what changes: with continuations, the receiver
- * resumes without restoring callee-saved registers (~50-100 cycles
- * faster than without).
+ * The wakeup cost is what changes.  This said that with continuations
+ * the receiver "resumes without restoring callee-saved registers (~50-100
+ * cycles faster than without)", and nothing measured it.  Measured when
+ * x86-64 first honoured them (#771; omen, KVM, release, phase table and
+ * fifteen boots per arm): the receive's time on the processor did not
+ * move (+5 to +14 cycles in about 2750), and the whole null RPC got
+ * slower, 1.669 us to 1.863, until the return through the frame took
+ * SYSRET instead of iretq (1.700).  A continuation by itself saves
+ * nothing here; what it makes possible -- no kernel stack for a parked
+ * thread, and the stack handed to the receiver instead of a full switch
+ * -- is #772's to measure.
  */
 static void
 bench_slow_receive(const char *label, int send_size, int iters)
