@@ -252,13 +252,16 @@ syscall_entry:
 	 * weigh the two message copies against, and a floor measured from its
 	 * own far end reads as zero and flatters every conclusion drawn from it.
 	 *
-	 * ⚠️ NINE INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed: the
-	 * swapgs, the stack moves, and the frame's five writes above (#770).
-	 * The reading needs a stack to save two registers on, and the frame's
+	 * ⚠️ SIXTEEN INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed:
+	 * the swapgs, the three moves of %rsp, the load of the caller's stack
+	 * pointer for the frame, and the frame's eleven writes above -- five
+	 * since #770, and the six callee-saved registers since #771.  The
+	 * reading needs a stack to save two registers on, and the frame's
 	 * stack is not one any more -- the frame is the thread's and C runs on
 	 * kernel_stack -- so the phase begins once that stack is in %rsp, and
 	 * the reader is owed the fact that it does.  Before #770 the five
-	 * writes were inside it.
+	 * writes were inside it.  (This said nine: one short from #770, which
+	 * left the load out, and six short once #771 added its writes.)
 	 *
 	 * rdtsc lands in edx:eax, both of which are live (%rax is the trap
 	 * number), so they are saved.  The pushes go below the top of
