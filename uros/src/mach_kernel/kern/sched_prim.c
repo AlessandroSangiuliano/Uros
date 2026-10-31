@@ -1567,7 +1567,7 @@ thread_handoff_to_parked_waiter(
 	mp_enable_preemption();
 #endif
 	/*
-	 * 🔴 AND WHAT self RESUMES ON: NOTHING, IT KEEPS ITS STACK (#771).
+	 * 🔴 AND WHAT self RESUMES ON: NOTHING, IT RESUMES HERE (#771).
 	 *
 	 * thread_invoke() hands switch_context() the outgoing thread's own
 	 * continuation field, so each caller says first what it is:
@@ -1575,8 +1575,8 @@ thread_handoff_to_parked_waiter(
 	 * This one did not, and self arrived with whatever its last block had
 	 * left there -- after a receive, mach_msg_receive_continue.  While the
 	 * x86-64 switch threw the argument away that cost nothing; honoured, it
-	 * restarted self in a receive that had already finished, on a fresh
-	 * stack, instead of here.
+	 * would restart self in a receive that had already finished, at the top
+	 * of its stack instead of here -- -Q's fourth arm builds exactly that.
 	 */
 	self->continuation = (void (*)(void)) 0;
 	thread_invoke(self, victim, 0);
