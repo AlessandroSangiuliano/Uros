@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #771
+Takes out: the hand-off's word on what its caller resumes on -- thread_invoke() then hands switch_context() whatever the caller's last block left in its continuation field, and -Q's fourth arm, a driver that began in a real continuation and hands off from inside it, is restarted in that continuation instead of coming back
+Accel: tcg,kvm
+Run: --entry 25 1200 -smp 1
+Expect: handoff: WRONG — the hand-off restarted its caller in the continuation it had already begun
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index b72fb640..a143dac1 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -1578,7 +1578,6 @@ thread_handoff_to_parked_waiter(
+ 	 * restarted self in a receive that had already finished, on a fresh
+ 	 * stack, instead of here.
+ 	 */
+-	self->continuation = (void (*)(void)) 0;
+ 	thread_invoke(self, victim, 0);
+ 
+ 	splx(s);
