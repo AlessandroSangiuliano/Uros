@@ -1062,6 +1062,21 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	 */
 	percpu()->prev_thread = (void *) old;
 
+	/*
+	 * 🔴 WHAT THE OUTGOING THREAD WILL RESUME ON, RECORDED IN IT (#771).
+	 *
+	 * Its continuation or none, written on every switch, because this is
+	 * the one place that decides it -- and whoever looks at a blocked
+	 * thread reads the field to know whether it has frames worth walking:
+	 * the debugger, the census, the IPC direct switch.  i386's
+	 * Switch_context has always written it (cswitch.S).  Left to the
+	 * callers it was right after thread_block() and stale after the
+	 * mach_msg hot path's direct switch, which passes 0 and sets nothing:
+	 * a parked server then read as resuming in mach_msg_receive_continue
+	 * while it held live frames.
+	 */
+	old->continuation = continuation;
+
 	if (continuation != 0) {
 		/*
 		 * The outgoing thread keeps no kernel stack: reset its resume
