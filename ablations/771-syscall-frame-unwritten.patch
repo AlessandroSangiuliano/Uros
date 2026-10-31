@@ -6,12 +6,12 @@ Run: --entry 14 1200 -smp 1
 Expect: act_test: \[26\] (rbp|r14|r15) came back from a receive that slept holding
 
 diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
-index a9550b41..b0f27bcb 100644
+index c8dca653..7555bad6 100644
 --- a/uros/src/mach_kernel/x86_64/syscall/entry.S
 +++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
-@@ -223,12 +223,6 @@ syscall_entry:
- 	 * the rbp and r12-r15 of its caller's last trap, or the zeros
- 	 * thread_frame_init() left.
+@@ -224,12 +224,6 @@ syscall_entry:
+ 	 * thread_frame_init() zeroed them -- of which libmach's stub hides three
+ 	 * for mach_msg, keeping rbx, r12 and r13 around the arguments it carries.
  	 */
 -	movq	%r15, TF_R15(%rsp)
 -	movq	%r14, TF_R14(%rsp)

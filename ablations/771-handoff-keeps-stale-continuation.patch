@@ -6,12 +6,12 @@ Run: --entry 25 1200 -smp 1
 Expect: handoff: WRONG — the hand-off restarted its caller in the continuation it had already begun
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
-index b72fb640..a143dac1 100644
+index ca0d665a..af17ccce 100644
 --- a/uros/src/mach_kernel/kern/sched_prim.c
 +++ b/uros/src/mach_kernel/kern/sched_prim.c
 @@ -1578,7 +1578,6 @@ thread_handoff_to_parked_waiter(
- 	 * restarted self in a receive that had already finished, on a fresh
- 	 * stack, instead of here.
+ 	 * would restart self in a receive that had already finished, at the top
+ 	 * of its stack instead of here -- -Q's fourth arm builds exactly that.
  	 */
 -	self->continuation = (void (*)(void)) 0;
  	thread_invoke(self, victim, 0);
