@@ -141,6 +141,10 @@ extern void	hertz_tick(
 
 extern	void	softclock(void);
 
+/* Clock ticks since boot, counted by timeout_tick() under timer_lock; a
+   plain read is a snapshot (#787: the timer test bounds its waits on it). */
+extern	natural_t	timeout_ticks;
+
 /* for 'private' timer elements */
 
 /* Set timer going */
