@@ -10,8 +10,8 @@ Note: -L boots nothing, so one accelerator says all of it; under KVM ablate.sh w
 diff --git a/uros/src/mach_kernel/x86_64/boot/grub.cfg b/uros/src/mach_kernel/x86_64/boot/grub.cfg
 --- a/uros/src/mach_kernel/x86_64/boot/grub.cfg
 +++ b/uros/src/mach_kernel/x86_64/boot/grub.cfg
-@@ -833,3 +833,12 @@
- 	module2 /boot/bootstrap.bundle bootstrap.bundle
+@@ -840,3 +840,12 @@ menuentry "UrMach x86-64 (a continuation that returns)" {
+ 	module2 /boot/boot_probe boot_probe
  	boot
  }
 +
