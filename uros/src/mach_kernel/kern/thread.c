@@ -968,7 +968,7 @@ thread_terminate_self(void)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_EXIT)
-		printf("thread_terminate_self() thr_act=%p(%d) thr=%p(%d)\n",
+		printf("thread_terminate_self() thr_act=%p(%d) thr=%p(%ld)\n",
 			    current_act(), current_act()->ref_count,
 			    current_thread(), current_thread()->ref_count);
 #endif	/* MACH_ASSERT */
@@ -1931,7 +1931,7 @@ reaper_thread(void)
 
 #if	MACH_ASSERT
 			if (watchacts & (WA_EXIT|WA_THR))
-			    printf("Reaper: thr=%p(%d) thr_act=%p(%d)\n",
+			    printf("Reaper: thr=%p(%ld) thr_act=%p(%d)\n",
 					thread, thread->ref_count,
 					thread->top_act ? thread->top_act : 0,
 					thread->top_act ?

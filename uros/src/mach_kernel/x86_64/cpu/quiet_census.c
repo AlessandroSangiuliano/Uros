@@ -565,7 +565,7 @@ census_threads(void)
 			 * while the task is active.
 			 */
 			if ((th->state & TH_HALTED) != 0) {
-				census_add(" thr_ref=%d act_ref=%d act_active=%d",
+				census_add(" thr_ref=%ld act_ref=%d act_active=%d",
 					   th->ref_count, ta->ref_count,
 					   ta->active);
 				if (ta->task != TASK_NULL &&

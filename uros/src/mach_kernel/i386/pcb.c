@@ -1252,7 +1252,7 @@ act_machine_return(int code)
 	*/
 
 	if (watchacts & WA_EXIT)
-		printf("act_machine_return(0x%x) cur_act=%p(%d) thr=%p(%d)\n",
+		printf("act_machine_return(0x%x) cur_act=%p(%d) thr=%p(%ld)\n",
 			code, thr_act, thr_act->ref_count,
 			thr_act->thread, thr_act->thread
 					? thr_act->thread->ref_count : 0);
@@ -1387,7 +1387,7 @@ dump_act(thread_act_t thr_act)
 	if (!thr_act)
 		return(0);
 
-	printf("thr_act(%p)(%d): thread=%p(%d) task=%p(%d)\n",
+	printf("thr_act(%p)(%d): thread=%p(%ld) task=%p(%d)\n",
 	       thr_act, thr_act->ref_count,
 	       thr_act->thread, thr_act->thread ? thr_act->thread->ref_count:0,
 	       thr_act->task,   thr_act->task   ? thr_act->task->ref_count : 0);
