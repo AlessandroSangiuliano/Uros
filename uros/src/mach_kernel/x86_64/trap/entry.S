@@ -736,12 +736,14 @@ thread_user_frame_return:
 	RESTORE_REGS
 	movq	(TF_RSP - TF_VECTOR)(%rsp), %rsp	/* the thread's own stack */
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
+	incq	%gs:PERCPU_FRAME_SYSRETS	/* and which way, for the same */
 	swapgs
 	sysretq
 
 .Lframe_iretq:
 	RESTORE_REGS
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
+	incq	%gs:PERCPU_FRAME_IRETQS	/* #771: and which way */
 	swapgs
 	addq	$16, %rsp		/* drop the vector and error code */
 	iretq
