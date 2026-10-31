@@ -210,6 +210,27 @@ syscall_entry:
 	movq	$USER_DS_RPL3, TF_SS(%rsp)
 
 	/*
+	 * 🔴 AND THE SIX THE CONTRACT PRESERVES, BECAUSE NOT EVERY CALL GOES
+	 * BACK THE WAY IT CAME IN (#771).
+	 *
+	 * rbx, rbp and r12-r15 reach the caller unchanged, <syscall/syscall.h>
+	 * says.  Through SYSRET that is free: they are callee-saved in the C
+	 * ABI, and the dispatcher's compiled code has kept them.  A call that
+	 * blocks with a continuation is kept by nothing: it gives up the frames
+	 * it was called through and returns through this one, in
+	 * thread_user_frame_return, whose RESTORE_REGS loads all fifteen from
+	 * here.  With these six unwritten, a receive that slept came back with
+	 * the rbp and r12-r15 of its caller's last trap, or the zeros
+	 * thread_frame_init() left.
+	 */
+	movq	%r15, TF_R15(%rsp)
+	movq	%r14, TF_R14(%rsp)
+	movq	%r13, TF_R13(%rsp)
+	movq	%r12, TF_R12(%rsp)
+	movq	%rbp, TF_RBP(%rsp)
+	movq	%rbx, TF_RBX(%rsp)
+
+	/*
 	 * And off the frame, onto the thread's stack, before anything is pushed
 	 * (#770).  The frame is the thread's -- pcb->user names it, and a reader
 	 * may read it while the thread sleeps in here -- and C runs on
@@ -273,7 +294,7 @@ syscall_entry:
 
 
 	/*
-	 * ⚠️ The fifteen general-purpose registers above are NOT written, and
+	 * ⚠️ The other nine general-purpose registers are NOT written, and
 	 * that is the contract rather than an omission: <syscall/syscall.h>
 	 * declares them destroyed, and storing them on every call in the system
 	 * to preserve values the caller has already written off would be the
@@ -292,8 +313,8 @@ syscall_entry:
 	 *
 	 * That conclusion was wrong, and this paragraph said so for months:
 	 * "there is no longer a path that puts kernel memory there".  There is,
-	 * and it is not in this direction -- it is the way OUT.  Not saving the
-	 * fifteen is correct; handing back what the kernel left in them is not,
+	 * and it is not in this direction -- it is the way OUT.  Not saving those
+	 * nine is correct; handing back what the kernel left in them is not,
 	 * and SYSRET does exactly that.  See CLEAR_CLOBBERED below.
 	 *
 	 * ⚠️ The ablation could not have seen what it was measuring.  The leak
