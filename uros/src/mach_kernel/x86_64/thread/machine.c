@@ -184,7 +184,9 @@ act_machine_switch_pcb(thread_act_t thr_act)
  * and an interrupted one are indistinguishable to the switch.
  */
 /*
- * Where a thread that has never run begins.
+ * Where a thread that has never run begins -- and, since #771, where a thread
+ * switched to with a continuation begins again, from the frame
+ * context_reset_to_continuation() built at the top of its stack.
  *
  * context_init() can only place a function and one argument, and the argument
  * a new thread needs -- which thread it took the processor from -- is not
@@ -203,31 +205,43 @@ thread_begin_trampoline(void *unused)
 	(void) unused;
 
 	/*
+	 * ⚠️ INTERRUPTS ARE ALREADY ON HERE: asserted, no longer turned on (#771).
+	 *
+	 * This used to execute an sti, saying that a thread that has never run
+	 * inherits IF clear from the interrupt that preempted its predecessor,
+	 * and that enabling it before the dispatch below stopped the machine on
+	 * the first tick (#459, 6 August).  On 18 August #455 made the flag part
+	 * of the thread: the switch pops RFLAGS with the rest, and the frame a
+	 * new thread starts from carries CTX_RFLAGS_INITIAL, IF set.  From then
+	 * on every thread arrived here with interrupts on, before the dispatch,
+	 * and the sti had nothing left to do; since #771 so does every thread
+	 * resumed in its continuation, whose frame is built the same way, once
+	 * per receive that slept.  The dispatch runs with interrupts on, as it
+	 * does after every other switch: a thread resumed in place returns into
+	 * thread_invoke() with the flag it blocked with and dispatches there.
+	 *
+	 * What IF clear here would mean now is a frame built without it, and
+	 * that is said where it shows -- first, on arrival, before the dispatch
+	 * below, which with interrupts off could wait for ever on a processor
+	 * that needs this one to answer -- rather than repaired a line later,
+	 * where an sti would hide the frame that lost it.
+	 */
+#if	MACH_ASSERT
+	if (!interrupts_enabled())
+		panic("thread %p arrived in the trampoline with interrupts off: the "
+		      "frame the switch popped did not carry IF, which "
+		      "CTX_RFLAGS_INITIAL sets for a thread that has never run and "
+		      "for one reset to its continuation (#455, #771)",
+		      current_thread());
+#endif	/* MACH_ASSERT */
+
+	/*
 	 * The thread we took the processor from, first: it is still accounted
 	 * as running until somebody says otherwise, and nothing else may
 	 * happen on this processor until it has been said.
 	 */
 	if (prev != THREAD_NULL)
 		thread_dispatch(prev);
-
-	/*
-	 * Interrupts on, HERE and not sooner (#459).
-	 *
-	 * A thread that has never run reaches this from inside the interrupt
-	 * that preempted its predecessor, so it inherits IF clear -- and on
-	 * this machine nothing else will set it.  spl is a software priority
-	 * kept in the per-CPU block (x86_64/cpu/spl.c): splx() moves the level
-	 * and does not touch the flag, and only sploff()/splon() do.  A resumed
-	 * thread gets its flag back from the IRETQ of its own trap; a new one
-	 * has no trap to return from.
-	 *
-	 * ⚠️ Order measured, not assumed.  Enabling at the top of the
-	 * trampoline -- before the dispatch above -- lets the next tick in
-	 * while the switch is still letting go of the previous thread, and the
-	 * machine stops on that first tick.  After the dispatch, there is
-	 * nothing left half-done for an interrupt to walk into.
-	 */
-	__asm__ __volatile__("sti" : : : "memory");
 
 	/*
 	 * And the rest to the machine-independent trampoline, with THREAD_NULL
