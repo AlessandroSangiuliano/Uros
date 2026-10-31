@@ -189,8 +189,12 @@ _Static_assert(TF_R13    == __builtin_offsetof(struct trap_frame, r13),
 	       "TF_R13 and struct trap_frame disagree");
 _Static_assert(TF_R12    == __builtin_offsetof(struct trap_frame, r12),
 	       "TF_R12 and struct trap_frame disagree");
+_Static_assert(TF_R11    == __builtin_offsetof(struct trap_frame, r11),
+	       "TF_R11 and struct trap_frame disagree");
 _Static_assert(TF_RBP    == __builtin_offsetof(struct trap_frame, rbp),
 	       "TF_RBP and struct trap_frame disagree");
+_Static_assert(TF_RCX    == __builtin_offsetof(struct trap_frame, rcx),
+	       "TF_RCX and struct trap_frame disagree");
 _Static_assert(TF_RBX    == __builtin_offsetof(struct trap_frame, rbx),
 	       "TF_RBX and struct trap_frame disagree");
 _Static_assert(TF_VECTOR == __builtin_offsetof(struct trap_frame, vector),
