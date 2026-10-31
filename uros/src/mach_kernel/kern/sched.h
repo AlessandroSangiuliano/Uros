@@ -161,6 +161,16 @@
  */
 #define invalid_pri(pri) (((pri) < 0) || ((pri) > MINPRI))
 
+/*
+ * An RR quantum, in milliseconds as policy.h's structures carry it (#787):
+ * one that is a quantum at all, and that the conversion to ticks -- ms * 1000
+ * plus a tick, in an int -- can hold.  Zero or negative made a quantum of a
+ * tick at most, and above the bound the multiplication overflowed.  1000 s
+ * keeps ms * 1000 + tick under 2^31 for a tick of up to a second.
+ */
+#define	POLICY_RR_QUANTUM_MAX	1000000		/* ms */
+#define	invalid_rr_quantum(ms)	(((ms) <= 0) || ((ms) > POLICY_RR_QUANTUM_MAX))
+
 
 struct run_queue {
 	queue_head_t		runq[NRQS];	/* one for each priority */

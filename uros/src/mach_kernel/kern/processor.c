@@ -1658,7 +1658,8 @@ processor_set_base(
 	{
 		policy_rr_base_t rr_base = (policy_rr_base_t) base;
 
-		if (invalid_pri(rr_base->base_priority)) {
+		if (invalid_pri(rr_base->base_priority) ||
+		    invalid_rr_quantum(rr_base->quantum)) {	/* #787 */
 			ret = KERN_INVALID_ARGUMENT;
 			break;	
 		}

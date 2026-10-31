@@ -2626,7 +2626,8 @@ thread_set_policy(
 		dat = rr_base->quantum;
 		bas = rr_base->base_priority;
 		max = rr_limit->max_priority;
-		if (invalid_pri(bas) || invalid_pri(max)) {
+		if (invalid_pri(bas) || invalid_pri(max) ||
+		    invalid_rr_quantum(dat)) {	/* #787 */
 			ret = KERN_INVALID_ARGUMENT;
 			break;
 		}
