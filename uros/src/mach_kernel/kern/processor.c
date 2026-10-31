@@ -1879,7 +1879,9 @@ processor_set_policy_control(
 
 	switch (flavor) {
 	case PROCESSOR_SET_ENABLED_POLICIES:
-		if (count != sizeof(policy_t))
+		/* #787: a count of natural_t's, as processor_set_info() hands
+		   back -- sizeof(policy_t), 4, refused the count it gave. */
+		if (count != PROCESSOR_SET_ENABLED_POLICIES_COUNT)
 			return(KERN_INVALID_ARGUMENT);
 		policy = (policy_t) *policy_info;
 		for (i = POLICY_TIMESHARE ; i <= POLICY_FIFO ; i = i << 1) {
