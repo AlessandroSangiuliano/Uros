@@ -754,7 +754,7 @@ thread_will_wait(thread_t thread)
 	s = splsched();
 	thread_lock(thread);
 
-	assert(thread->wait_result = -1);	/* for later assertions */
+	thread->wait_result = -1;	/* none yet: a waker writes it (#787) */
 	thread->state |= TH_WAIT;
 
 	thread_unlock(thread);
@@ -780,7 +780,7 @@ thread_will_wait_with_timeout(thread_t thread, mach_msg_timeout_t msecs)
 	s = splsched();
 	thread_lock(thread);
 
-	assert(thread->wait_result = -1);	/* for later assertions */
+	thread->wait_result = -1;	/* none yet: a waker writes it (#787) */
 	thread->state |= TH_WAIT;
 
 	set_timeout(&thread->timer, ticks);
