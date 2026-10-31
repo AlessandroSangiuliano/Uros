@@ -1,0 +1,23 @@
+Kind: widen
+Issue: #787
+Holds open: the window is made, not widened -- the master's tick, after timeout_tick(), calls dispatch_test's probe, which wakes H and then L, both bound to the master, from the interrupt that ended its halt. The first wakeup makes the idle master DISPATCHING and the second meets it there. The fixed thread_setrun() keeps the better thread as next_thread, so H runs first and the test passes. One processor is enough.
+Run: --entry 61 300 -smp 1
+
+diff --git a/uros/src/mach_kernel/kern/mach_clock.c b/uros/src/mach_kernel/kern/mach_clock.c
+index 0b743934..e48abb0f 100644
+--- a/uros/src/mach_kernel/kern/mach_clock.c
++++ b/uros/src/mach_kernel/kern/mach_clock.c
+@@ -370,6 +370,13 @@ hertz_tick(
+ 	 */
+ 	if (my_cpu == master_cpu) {
+ 		timeout_tick();		/* update kernel timeout list   */
++#ifdef	__x86_64__
++		{
++			extern void dispatch_test_tick_probe(void);
++
++			dispatch_test_tick_probe();	/* 787-widen-tick-probe */
++		}
++#endif
+ 		utime_tick();		/* update Unix (universal) time */
+ 	}
+ 

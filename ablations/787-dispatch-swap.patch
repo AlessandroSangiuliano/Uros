@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #787
+Over: 787-widen-tick-probe.patch
+Takes out: the priority comparison in thread_setrun()'s two dispatching branches -- a second wakeup on a dispatching processor takes next_thread's place whatever the two priorities, as before #787. dispatch_test's tick wakes H and then L on the idle master, and L, the worse, runs first.
+Accel: tcg,kvm
+Run: --entry 61 300 -smp 1
+Expect: dispatch_test: WRONG .* L ran first
+
+diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c
+index 63469ef3..4e87dec0 100644
+--- a/uros/src/mach_kernel/kern/sched_prim.c
++++ b/uros/src/mach_kernel/kern/sched_prim.c
+@@ -3045,7 +3045,7 @@ thread_setrun(
+ 		     * first, inverted them every time.  The NCPUS == 1 branch
+ 		     * below, which no build compiles, always compared.
+ 		     */
+-		    if (processor->next_thread->sched_pri > th->sched_pri) {
++		    if (TRUE) {	/* 787-dispatch-swap: whatever the priorities */
+ 			cur_th = processor->next_thread;
+ 			processor->next_thread = th;
+ 			th = cur_th;
+@@ -3121,7 +3121,7 @@ thread_setrun(
+ 		     current_thread()->sched_pri > th->sched_pri)) {
+ 		    if (processor->state == PROCESSOR_DISPATCHING) {
+ 			/* #787: as in the unbound branch, only if better */
+-			if (processor->next_thread->sched_pri > th->sched_pri) {
++			if (TRUE) {	/* 787-dispatch-swap */
+ 			    cur_th = processor->next_thread;
+ 			    processor->next_thread = th;
+ 			    th = cur_th;
