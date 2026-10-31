@@ -1546,10 +1546,17 @@ processor_set_things(
 				    }
 
 				    case THING_THREAD: {
-					thread_t *threads = (thread_t *) addr;
+					/*
+					 * #787: activations, each with the
+					 * reference act_locked_act_reference()
+					 * took above; thread_deallocate() dropped
+					 * a thread's reference on them instead.
+					 */
+					thread_act_t *thr_acts =
+					    (thread_act_t *) addr;
 
 					for (i = 0; i < actual; i++)
-						thread_deallocate(threads[i]);
+						act_deallocate(thr_acts[i]);
 					break;
 				    }
 				}
