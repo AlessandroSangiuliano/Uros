@@ -263,6 +263,25 @@ trap_common:
 	jz	1f
 	swapgs
 1:
+	/*
+	 * 🔴 DF cleared on entry, before any kernel C runs (#792).
+	 *
+	 * A gate clears TF, VM, RF and NT, and IF for an interrupt gate, and
+	 * nothing else (SDM Vol. 3A, 253668-093US, Sec. 7.12.1.3) -- so DF
+	 * arrives as the interrupted code set it.  With it set, the kernel's
+	 * rep-string copies (memset, memcpy, copyin, copyout) step backward;
+	 * the System V ABI has DF clear on entry (psABI 1.0, Sec. 3.2.1), and
+	 * the kernel's C is built to that.  The SYSCALL path clears it through
+	 * SYSCALL_FMASK (syscall.c); the gates did not.
+	 *
+	 * AC is the other flag a gate preserves, and it is already handled:
+	 * trap_dispatch() clears it when a trap arrives with it set (#468), and
+	 * trap_dispatch_paranoid() reaches trap_dispatch() too -- so both gates
+	 * are covered there, and clearing it here as well would only blind that
+	 * path's count of the windows it closes.  DF has no such handler, so it
+	 * is cleared here, the once.
+	 */
+	cld
 	SAVE_REGS
 
 	movq	%rsp, %rdi		/* the frame is the argument */
@@ -355,6 +374,7 @@ trap_common:
  * is being optimised on any of them.
  */
 trap_paranoid:
+	cld				/* #792: as trap_common; AC is trap_dispatch's (#468) */
 	SAVE_REGS
 
 	/*
