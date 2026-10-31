@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #771
+Takes out: IF from CTX_RFLAGS_INITIAL, the flags a thread that has never run and a thread reset to its continuation are switched to -- what #455 put there, and what the trampoline's sti used to make good after the dispatch without saying so; the trampoline now asserts interrupts on as it arrives, and must name the thread that came without them
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 1
+Expect: thread 0x[0-9a-f]+ arrived in the trampoline with interrupts off: the frame the switch popped did not carry IF
+Note: the first thread switched to for the first time stops the boot, so this needs no user task; a development kernel, since the assertion is MACH_ASSERT's.
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/context.c b/uros/src/mach_kernel/x86_64/thread/context.c
+--- a/uros/src/mach_kernel/x86_64/thread/context.c
++++ b/uros/src/mach_kernel/x86_64/thread/context.c
+@@ -41,7 +41,7 @@ extern void context_thread_start(void);
+  * and zero is not one: it would start the thread with interrupts disabled,
+  * which is the exact failure the saving was added to close.
+  */
+-#define CTX_RFLAGS_INITIAL	0x202ULL
++#define CTX_RFLAGS_INITIAL	0x002ULL
+ 
+ /*
+  * #561: how many contexts were told they need nothing.  A global, and allowed
