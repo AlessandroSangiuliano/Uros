@@ -694,6 +694,52 @@ thread_user_frame_return:
 	callq	act_user_return_frame	/* %rax = the frame, iretq-able (#780) */
 	cli
 	movq	%rax, %rsp
+
+	/*
+	 * 🔥 BY SYSRET WHEN IT WOULD LEAVE RING 3 EXACTLY AS IRETQ WOULD (#771).
+	 *
+	 * Since #771 this is how every system call that slept leaves -- a
+	 * receive that blocked resumes in its continuation and ends here, not
+	 * in syscall/entry.S's SYSRET -- and iretq is the slow way to ring 3.
+	 * SYSRET loads cs and ss from STAR, rip from rcx and rflags from r11,
+	 * less RF.  So it returns through this frame as iretq would when:
+	 *
+	 *   - cs and ss are the two STAR names: act_user_frame() has panicked
+	 *     on any others, and cpu/desc.c asserts they are SYSRET's pair;
+	 *   - rcx and r11 already hold rip and rflags, as the syscall entry
+	 *     leaves them: SYSRET would otherwise overwrite two registers the
+	 *     frame says something else about;
+	 *   - neither RF nor TF is set: SYSRET drops the one and takes the
+	 *     single-step trap on the other one instruction early;
+	 *   - rip is canonical, asked again HERE, with interrupts off: on Intel
+	 *     a SYSRET to a non-canonical rip faults in ring 0 on the user's
+	 *     stack (CVE-2012-0217), so the check that makes it safe is the
+	 *     one next to it, not act_user_return_frame()'s, which ran with
+	 *     interrupts on.
+	 *
+	 * Anything else is an iretq, as before.  The registers are read here
+	 * for the decision only: RESTORE_REGS loads all fifteen either way.
+	 */
+	movq	TF_RIP(%rsp), %rdx
+	cmpq	TF_RCX(%rsp), %rdx
+	jne	.Lframe_iretq
+	movq	%rdx, %rcx
+	shlq	$16, %rcx
+	sarq	$16, %rcx
+	cmpq	%rdx, %rcx
+	jne	.Lframe_iretq
+	movq	TF_RFLAGS(%rsp), %rdx
+	cmpq	TF_R11(%rsp), %rdx
+	jne	.Lframe_iretq
+	testl	$TF_RFLAGS_IRETQ_ONLY, %edx
+	jnz	.Lframe_iretq
+	RESTORE_REGS
+	movq	(TF_RSP - TF_VECTOR)(%rsp), %rsp	/* the thread's own stack */
+	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
+	swapgs
+	sysretq
+
+.Lframe_iretq:
 	RESTORE_REGS
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	swapgs
