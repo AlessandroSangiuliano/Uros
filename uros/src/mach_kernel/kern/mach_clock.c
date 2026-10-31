@@ -482,7 +482,10 @@ timer_elt_data_t	timer_head;	/* ordered list of timeouts */
  *	them out of the queue, so a race with reset_timeout won't
  *	hurt.  The timeout functions (eg, thread_timeout,
  *	thread_depress_timeout) check timer_set/depress_priority
- *	to see if the timer has been cancelled and if so do nothing.
+ *	to see if the timer has been cancelled and if so do nothing --
+ *	except that thread_timeout() releases the reference the fired
+ *	timer held either way, which a reset_timeout() of a PENDING timer
+ *	leaves to it (#787).
  */
 
 void

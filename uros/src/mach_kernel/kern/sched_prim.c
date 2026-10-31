@@ -514,28 +514,31 @@ wait_queue_init(void)
 
 /*
  *	Thread timeout routine, called when timer expires.
+ *
+ *	softclock() calls it once for each firing of the thread's timer, and
+ *	the timer that fired holds the reference set_timeout() took: it is
+ *	released here whatever the timer's state (#787).  A wakeup after
+ *	softclock() took the timer off the queue, and before this call, finds
+ *	it TELT_PENDING, and reset_timeout() makes it TELT_UNSET with nothing
+ *	to give back -- the reference is still this call's -- so a release on
+ *	PENDING alone lost it, and the thread was never freed.  The wait is
+ *	ended on PENDING only: on UNSET a wakeup ended it, and on SET the
+ *	thread has set its timer again since, for a later wait.
  */
 void
 thread_timeout(
 	thread_t thread)
 {
 	spl_t		s;
-	boolean_t	did_timeout;
 
 	s = splsched();
 	thread_lock(thread);
 	if (thread->timer.set == TELT_PENDING) {
-		did_timeout = TRUE;
 		thread->timer.set = TELT_UNSET;
 		clear_wait_locked(thread, THREAD_TIMED_OUT, FALSE);
-	} else {
-		did_timeout = FALSE;
 	}
 	thread_unlock(thread);
-	if (did_timeout) {
-		/* deallocate the extra reference for the timeout */
-		thread_deallocate(thread);
-	}
+	thread_deallocate(thread);	/* the fired timer's reference */
 	splx(s);
 }
 
