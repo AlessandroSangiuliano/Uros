@@ -48,7 +48,7 @@
 #include <time/timer_ref_test.h>	/* #787: -o */
 #include <cpu/pset_test.h>	/* #787: -q */
 #include <time/rr_resume_test.h>	/* #787: -k */
-#include <time/dispatch_test.h>	/* #787: -l */
+#include <time/dispatch_test.h>	/* #787: -d */
 #include <time/passover_test.h>	/* #787: -g */
 #include <time/bound_ipi_test.h>	/* #787: -h */
 #include <cpu/census_test.h>	/* #657: -c */
@@ -901,12 +901,12 @@ machine_processors_ready(void)
 			rr_resume_test();
 
 		/*
-		 * -l: a second wakeup on a dispatching processor does not take
+		 * -d: a second wakeup on a dispatching processor does not take
 		 * the place of a better thread (#787).  NOT ASKED on a build
 		 * without the widen whose call site reaches its tick probe;
 		 * returns, so the boot goes on.
 		 */
-		if (boot_flag('l'))
+		if (boot_flag('d'))
 			dispatch_test();
 
 		/*

@@ -256,7 +256,7 @@ SKIPPED="
 19: -B panics on purpose; it needs a verdict of its own
 54: -e asks only of a build with UROS_SYSCALL_PROFILE, which a merge build is not; ablate.sh runs it with the widen patch, which compiles the profile in (#622)
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
-61: -l asks only of a build whose master tick calls the dispatch probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
+61: -d asks only of a build whose master tick calls the dispatch probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
 "
 
 # A boot's name: what its two logs are called, and what ci/job.sh's row()

@@ -2,7 +2,7 @@
  * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * SPDX-License-Identifier: MIT
  *
- * -l: a second wakeup on a dispatching processor does not take the place of
+ * -d: a second wakeup on a dispatching processor does not take the place of
  * a better thread (#787, section 7).
  */
 
