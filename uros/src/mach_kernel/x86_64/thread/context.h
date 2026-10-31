@@ -243,6 +243,13 @@ void context_switch_continuation(struct context *old, struct context *fresh);
 void context_reset_to_continuation(struct context *ctx, void (*entry)(void *));
 
 /*
+ * Whether a switched-out context will resume in a fresh frame at the top of
+ * its stack rather than in the frames it saved (#771) -- the half of "how
+ * this thread resumes" that its continuation field must agree with.
+ */
+int context_resumes_fresh(const struct context *ctx);
+
+/*
  * The raw form, in assembly: save at *old_rsp, resume from new_rsp.
  *
  * context_switch() is this plus the bookkeeping that must accompany it —

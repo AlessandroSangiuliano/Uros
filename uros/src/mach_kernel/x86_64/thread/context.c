@@ -260,6 +260,17 @@ void context_switch(struct context *old, struct context *fresh)
 }
 
 /*
+ * Whether `ctx' resumes in a fresh frame at the top of its stack -- a thread
+ * that has never run, or one reset to its continuation -- rather than in
+ * frames it saved by switching away (#771).  Both are built at the one
+ * position, entry_stack less the frame, which is what makes this a compare.
+ */
+int context_resumes_fresh(const struct context *ctx)
+{
+	return ctx->rsp == ctx->entry_stack - CTX_WORDS * 8;
+}
+
+/*
  * A switch away from a thread that blocked with a continuation (#771).
  *
  * Its resume point must already have been reset with
