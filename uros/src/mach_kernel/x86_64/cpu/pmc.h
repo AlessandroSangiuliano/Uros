@@ -38,6 +38,24 @@ int		pmc_count(void);
 const char	*pmc_name(int i);
 
 /*
+ * And what each one measures, by which pmc_test.c knows what a load of known
+ * shape must make it count; 0 for a counter that is not counting.
+ */
+#define	PMC_ROLE_INST			1
+#define	PMC_ROLE_CYCLES			2
+#define	PMC_ROLE_L1D_MISS		3	/* a line replaced in the L1D */
+#define	PMC_ROLE_L2_MISS		4
+#define	PMC_ROLE_LLC_MISS		5
+#define	PMC_ROLE_HITM			6	/* a load from another core's modified line */
+#define	PMC_ROLE_DTLB_LOAD_WALK		7
+#define	PMC_ROLE_DTLB_STORE_WALK	8
+#define	PMC_ROLE_ITLB_WALK		9
+#define	PMC_ROLE_LLC_REF		10
+#define	PMC_ROLE_BRANCH			11
+#define	PMC_ROLE_BRANCH_MISS		12
+int		pmc_role(int i);
+
+/*
  * The same count, for the profiler's marks, which read it on every phase and
  * must not pay a call to learn that nothing is counting.  Set once, by the
  * boot processor.

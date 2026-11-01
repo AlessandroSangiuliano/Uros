@@ -74,22 +74,23 @@ struct pmc_event {
 	const char	*name;
 	uint8_t		event, umask;
 	int8_t		arch_bit;	/* its bit in CPUID.0AH:EBX; -1: a model event */
+	uint8_t		role;		/* PMC_ROLE_*, what pmc_test.c loads it with */
 };
 
 /* pmc=1: where a load's line came from. */
 static const struct pmc_event pmc_set_cache[] = {
-	{ "L1D.REPLACEMENT",			0x51, 0x01, -1 },
-	{ "L2_RQSTS.MISS",			0x24, 0x3f, -1 },
-	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x41,  4 },
-	{ "MEM_LOAD_L3_HIT_RETIRED.XSNP_HITM",	0xd2, 0x04, -1 },
+	{ "L1D.REPLACEMENT",			0x51, 0x01, -1, PMC_ROLE_L1D_MISS },
+	{ "L2_RQSTS.MISS",			0x24, 0x3f, -1, PMC_ROLE_L2_MISS },
+	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x41,  4, PMC_ROLE_LLC_MISS },
+	{ "MEM_LOAD_L3_HIT_RETIRED.XSNP_HITM",	0xd2, 0x04, -1, PMC_ROLE_HITM },
 };
 
 /* pmc=2: page walks, for data and for code. */
 static const struct pmc_event pmc_set_tlb[] = {
-	{ "DTLB_LOAD_MISSES.WALK_COMPLETED",	0x08, 0x0e, -1 },
-	{ "DTLB_STORE_MISSES.WALK_COMPLETED",	0x49, 0x0e, -1 },
-	{ "ITLB_MISSES.WALK_COMPLETED",		0x85, 0x0e, -1 },
-	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x41,  4 },
+	{ "DTLB_LOAD_MISSES.WALK_COMPLETED",	0x08, 0x0e, -1, PMC_ROLE_DTLB_LOAD_WALK },
+	{ "DTLB_STORE_MISSES.WALK_COMPLETED",	0x49, 0x0e, -1, PMC_ROLE_DTLB_STORE_WALK },
+	{ "ITLB_MISSES.WALK_COMPLETED",		0x85, 0x0e, -1, PMC_ROLE_ITLB_WALK },
+	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x41,  4, PMC_ROLE_LLC_MISS },
 };
 
 /*
@@ -97,10 +98,10 @@ static const struct pmc_event pmc_set_tlb[] = {
  * Intel processor that has them, so a set any of them can count.
  */
 static const struct pmc_event pmc_set_arch[] = {
-	{ "LLC Reference",			0x2e, 0x4f,  3 },
-	{ "LLC Misses",				0x2e, 0x41,  4 },
-	{ "Branch Instruction Retired",		0xc4, 0x00,  5 },
-	{ "Branch Misses Retired",		0xc5, 0x00,  6 },
+	{ "LLC Reference",			0x2e, 0x4f,  3, PMC_ROLE_LLC_REF },
+	{ "LLC Misses",				0x2e, 0x41,  4, PMC_ROLE_LLC_MISS },
+	{ "Branch Instruction Retired",		0xc4, 0x00,  5, PMC_ROLE_BRANCH },
+	{ "Branch Misses Retired",		0xc5, 0x00,  6, PMC_ROLE_BRANCH_MISS },
 };
 
 static const struct pmc_set {
@@ -294,6 +295,20 @@ int
 pmc_count(void)
 {
 	return pmc_counting;
+}
+
+int
+pmc_role(int i)
+{
+	int	set = pmc_set_counting;
+
+	if (set == 0 || i < 0 || i >= PMC_FIXED_USED + pmc_sets[set].n)
+		return 0;
+	if (i == 0)
+		return PMC_ROLE_INST;
+	if (i == 1)
+		return PMC_ROLE_CYCLES;
+	return pmc_sets[set].events[i - PMC_FIXED_USED].role;
 }
 
 const char *
