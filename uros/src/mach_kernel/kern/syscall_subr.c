@@ -549,6 +549,15 @@ thread_depress_timeout(
     }
 
     thread_unlock(thread);
+    /*
+     * Release the reference set_timeout() took for this timer (#787
+     * section 11): the depression timer holds one on its thread while it
+     * is set, so a thread terminated as its depression runs out is not
+     * freed before this runs.  Released whatever the depression's state,
+     * as thread_timeout() releases its own; softclock() cleared the timer
+     * before calling, so no reset_timeout() releases it in our stead.
+     */
+    thread_deallocate(thread);
     splx(s);
 }
 

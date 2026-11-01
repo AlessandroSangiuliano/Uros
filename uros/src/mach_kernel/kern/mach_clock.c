@@ -471,6 +471,26 @@ natural_t timeout_ticks = 0;	/* ticks elapsed since bootup */
 decl_simple_lock_data(,timer_lock)		/* lock for ... */
 timer_elt_data_t	timer_head;	/* ordered list of timeouts */
 					/* (doubles as end-of-list) */
+
+/*
+ *	The two timers whose param is a thread and that take a reference on it
+ *	in set_timeout(), so the thread cannot be freed while a timeout is on
+ *	its way (#787): the thread's own wait timer (thread_timeout) and its
+ *	priority-depression timer (thread_depress_timeout).  Both release that
+ *	reference exactly once -- reset_timeout()/untimeout() on a cancel that
+ *	finds the timer still set, and the timeout function itself when it has
+ *	fired.  Only thread_timeout uses TELT_PENDING, to tell a fire from a
+ *	cancel for the wakeup; thread_depress_timeout arbitrates its own action
+ *	on depress_priority and releases whatever it finds.
+ */
+extern void	thread_depress_timeout(thread_t);
+
+static boolean_t
+timer_holds_thread_ref(timeout_fcn_t fcn)
+{
+	return fcn == (timeout_fcn_t) thread_timeout ||
+	       fcn == (timeout_fcn_t) thread_depress_timeout;
+}
 /*
  *	There is a nasty race between softclock and reset_timeout.
  *	For example, scheduling code looks at timer_set and calls
@@ -604,13 +624,16 @@ set_timeout(
 	telt->set = TELT_SET;
 	simple_unlock(&timer_lock);
 
-	if (telt->fcn == (timeout_fcn_t) thread_timeout) {
+	if (timer_holds_thread_ref(telt->fcn)) {
 		thread_t	thread;
 
 		/*
 		 * Take an extra reference to make sure that the thread
 		 * doesn't disappear while a timeout is on its way.
 		 * Atomically, as every change of the count is (#787).
+		 * The depression timer takes one too now, where it took
+		 * none and a thread freed as its depression ran out was
+		 * written into by thread_depress_timeout (#787 section 11).
 		 */
 		thread = (thread_t) (telt->param);
 		assert(thread->ref_count > 0);
@@ -642,7 +665,7 @@ reset_timeout(
 	simple_unlock(&timer_lock);
 
 	if (retval == TRUE &&
-	    telt->fcn == (timeout_fcn_t) thread_timeout) {
+	    timer_holds_thread_ref(telt->fcn)) {
 		thread_t	thread;
 
 		/*
@@ -651,7 +674,10 @@ reset_timeout(
 		 * no lock of the thread's -- a thread just woken cancels
 		 * its own timer -- and a decrement beside an increment
 		 * under the lock lost one of the two.  Never the last
-		 * reference: the caller holds one.
+		 * reference: the caller holds one.  Only on TELT_SET, a
+		 * cancel before the timer fired; a timer that fired is
+		 * TELT_UNSET here (softclock cleared it) and its reference
+		 * is the timeout function's to release.
 		 */
 		thread = (thread_t) (telt->param);
 		assert(thread->ref_count > 1);
@@ -777,7 +803,7 @@ untimeout(
 
 		simple_unlock(&timer_lock);
 
-		if (fcn == (timeout_fcn_t) thread_timeout) {
+		if (timer_holds_thread_ref(fcn)) {
 			thread_t	thread;
 
 			/*

@@ -516,6 +516,7 @@
 #include <kern/queue.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
+#include <kern/syscall_subr.h>	/* thread_depress_timeout (#787) */
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/thread_act.h>
@@ -1607,14 +1608,31 @@ thread_deallocate(
 	s = splsched();
 	thread_lock(thread);
 
-	if (thread->ref_count == 2 &&
-	    thread->timer.set == TELT_SET &&
-	    thread->timer.fcn == (timeout_fcn_t) thread_timeout) {
+	{
 		/*
-		 * Only 2 references left: ours and the timeout's.
-		 * Cancel the timeout and proceed with the thread termination.
+		 * The references a set timer holds on the thread (#787): the
+		 * wait timer and the depression timer each take one in
+		 * set_timeout().  When the only references left are ours and
+		 * those timers', cancel them -- reset_timeout_check() gives
+		 * each one back -- so the drop below reaches zero and the
+		 * thread is freed.  A timer that has fired is TELT_PENDING,
+		 * not TELT_SET: its reference is in flight to its timeout
+		 * function, which will deallocate the thread, so it is not
+		 * counted here and the drop then leaves the thread for it.
 		 */
-		reset_timeout_check(&thread->timer);
+		int	timer_refs = 0;
+
+		if (thread->timer.set == TELT_SET &&
+		    thread->timer.fcn == (timeout_fcn_t) thread_timeout)
+			timer_refs++;
+		if (thread->depress_timer.set == TELT_SET &&
+		    thread->depress_timer.fcn ==
+			(timeout_fcn_t) thread_depress_timeout)
+			timer_refs++;
+		if (thread->ref_count == 1 + timer_refs) {
+			reset_timeout_check(&thread->timer);
+			reset_timeout_check(&thread->depress_timer);
+		}
 	}
 
 	if (thread_ref_drop(thread) > 0) {
