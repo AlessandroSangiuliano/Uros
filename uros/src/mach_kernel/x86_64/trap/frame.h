@@ -44,4 +44,13 @@
  */
 #define	TF_RFLAGS_IRETQ_ONLY	0x10100		/* RF | TF */
 
+/*
+ * #771: what thread_set_syscall_return() leaves in a frame's vector slot,
+ * which the syscall entry never writes, so that the frame return counts a
+ * system call that slept at the instruction that leaves.  One past the last
+ * vector a gate pushes (asserted in <trap/trap.h>), so no trap's frame holds
+ * it; the return takes it off again.
+ */
+#define	TF_VECTOR_SLEPT		256
+
 #endif	/* _X86_64_TRAP_FRAME_H_ */

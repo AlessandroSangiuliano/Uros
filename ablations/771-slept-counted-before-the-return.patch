@@ -1,0 +1,39 @@
+Kind: ablation
+Issue: #771
+Over: 771-widen-slept-call-in-flight.patch
+Takes out: the count made where the call leaves -- thread_set_syscall_return() counts a system call that slept again, as it did before the fix, and the two ways out of thread_user_frame_return stop counting it, so that a census between the two counts finds a call counted and not yet out; over the widen, which holds every such call until the census's next report, that report says WRONG on a tree with nothing wrong in it, as run 41255283097's entry 27 did by chance
+Run: --entry 14 1200 -smp 1
+Expect: quiet_census: returns to ring 3 through a thread's frame: 0 by SYSRET, [0-9]+ by iretq; [1-9][0-9]* were system calls that slept -- WRONG, none of them left by SYSRET \(#771\)
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index 38291c16..887c0a92 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -647,6 +647,7 @@ thread_set_syscall_return(thread_t thread, kern_return_t retval)
+ 	 * its SYSRET, and every census after it found the two counts equal.
+ 	 */
+ 	thr_act->mact.pcb->user->vector = TF_VECTOR_SLEPT;
++	__asm__ volatile("incq %%gs:%c0" : : "i"(PERCPU_FRAME_SYSCALLS));
+ 	/*
+ 	 * 771-widen-slept-call-in-flight: every system call that slept, from
+ 	 * the first on, is held here -- marked, and not yet gone -- until the
+diff --git a/uros/src/mach_kernel/x86_64/trap/entry.S b/uros/src/mach_kernel/x86_64/trap/entry.S
+index 15a109af..5865a111 100644
+--- a/uros/src/mach_kernel/x86_64/trap/entry.S
++++ b/uros/src/mach_kernel/x86_64/trap/entry.S
+@@ -751,7 +751,6 @@ thread_user_frame_return:
+ 	cmpq	$TF_VECTOR_SLEPT, (%rsp)
+ 	jne	.Lframe_sysret_counted
+ 	movq	$0, (%rsp)
+-	incq	%gs:PERCPU_FRAME_SYSCALLS
+ .Lframe_sysret_counted:
+ 	movq	(TF_RSP - TF_VECTOR)(%rsp), %rsp	/* the thread's own stack */
+ 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
+@@ -764,7 +763,6 @@ thread_user_frame_return:
+ 	cmpq	$TF_VECTOR_SLEPT, (%rsp)	/* #771: as on the SYSRET way */
+ 	jne	.Lframe_iretq_counted
+ 	movq	$0, (%rsp)
+-	incq	%gs:PERCPU_FRAME_SYSCALLS
+ .Lframe_iretq_counted:
+ 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
+ 	incq	%gs:PERCPU_FRAME_IRETQS	/* #771: and which way */

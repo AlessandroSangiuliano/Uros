@@ -209,6 +209,8 @@ _Static_assert(TF_RSP    == __builtin_offsetof(struct trap_frame, rsp),
 	       "TF_RSP and struct trap_frame disagree");
 _Static_assert(TF_SS     == __builtin_offsetof(struct trap_frame, ss),
 	       "TF_SS and struct trap_frame disagree");
+_Static_assert(TF_VECTOR_SLEPT > 255,
+	       "TF_VECTOR_SLEPT is a vector a gate could push (#771)");
 
 /*
  * Interrupt stack table slots, numbered as the gate field is: 1 to 7, with
