@@ -1155,8 +1155,8 @@ fi
 # script holding the lock -- and systemctl sends one: a unit's main process, a
 # script with no trap, dies on the first SIGTERM, and what is left of the unit
 # is signalled again.  On 31 October the lock stayed after a stopped campaign,
-# and the next run refused to start until it was removed by hand; stopping a
-# unit the same way (scripts/stop-unit-check.sh) left it in 2 boots of 3.  So
+# and the next run refused to start until it was removed by hand; stopped the
+# same way (harness-lifecycle-check.sh's unitstop), it left it in 3 of 3.  So
 # the signals are ignored while qemu and the lock go, and get their default
 # back only for the kill that ends the script.
 #
