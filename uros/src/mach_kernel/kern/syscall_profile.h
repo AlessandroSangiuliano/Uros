@@ -367,6 +367,33 @@ extern int	syscall_profile_trap;
 #include <kern/tsc.h>		/* urmach_tsc (#537) */
 
 /*
+ * 🔑 AND WHAT HAPPENED IN A PHASE, WHERE THE MACHINE COUNTS IT (#804).
+ *
+ * The clock says how long a phase took, not why: a cache miss, a page walk, a
+ * line fetched from another core's cache and a longer path all lengthen it
+ * alike.  x86-64's performance counters (x86_64/cpu/pmc.c, pmc=N on the
+ * command line) count instructions, cycles and an event set, and they are read
+ * at the same marks as the clock: a phase's events are the difference between
+ * two reads.
+ *
+ * 🔴 TWO READS BY THIS THREAD, ON ONE PROCESSOR, WITH NOTHING BETWEEN THEM
+ * THAT TOOK THE PROCESSOR AWAY.  The counters are each logical processor's
+ * own (SDM 325462-093US, 22.2.1), so a phase whose start another thread
+ * stamped -- the entry, stamped by the stub before C runs; the wait, the
+ * queue and the switch, which end a block -- or across which this thread
+ * moved, has events that cannot be told.  Such a phase is marked lost, and the
+ * dump prints a dash for it rather than a difference between two processors'
+ * counters.  i386 reads none.
+ */
+#if	defined(__x86_64__)
+#include <kern/cpu_number.h>	/* cpu_number_hint() (#626) */
+#include <cpu/pmc.h>
+#define	SP_EVENTS	PMC_MAX
+#else
+#define	SP_EVENTS	0
+#endif
+
+/*
  * One per thread, hung off struct thread, and therefore safe across the
  * blocking this path does by design.
  */
@@ -473,7 +500,75 @@ struct syscall_profile_thread {
 	 * the sample carries the fact and the dump prints a dash.
 	 */
 	uint32_t	entry_unknown;	/* the stub left no timestamp        */
+#if	SP_EVENTS
+	/*
+	 * #804: the counters at the most recent read, the processor they were
+	 * read on (-1 across a switch), and the events of each phase -- of the
+	 * sample being built and of the window kept -- with a bit per phase
+	 * for the ones that cannot be told.
+	 */
+	uint64_t	ev_cursor[SP_EVENTS];
+	int		ev_cpu;
+	uint32_t	ev_lost;
+	uint32_t	ev_slice[SP_PHASES][SP_EVENTS];
+	uint32_t	ev_sample[SP_SAMPLES][SP_PHASES][SP_EVENTS];
+	uint32_t	ev_lost_sample[SP_SAMPLES];
+#endif
 };
+
+#if	SP_EVENTS
+/*
+ * #804: charge the counters' advance since the last read to `phase', where
+ * the last read was this thread's, on this processor; otherwise mark the
+ * phase lost.  Either way this read is the next one's start.  The processor
+ * is asked on both sides of the read, so a thread moved in the middle of it
+ * reads as moved.  Called after the clock is read, as every mark reads it.
+ */
+static __inline__ void
+syscall_profile_events(struct syscall_profile_thread *p, int phase)
+{
+	uint64_t	now[SP_EVENTS];
+	int		n = pmc_counting, cpu, i;
+
+	if (n == 0)
+		return;
+	cpu = cpu_number_hint();
+	pmc_read(now);
+	if (cpu_number_hint() != cpu)
+		cpu = -1;
+	if (cpu < 0 || cpu != p->ev_cpu)
+		p->ev_lost |= 1u << phase;
+	else
+		for (i = 0; i < n; i++)
+			p->ev_slice[phase][i] +=
+			    (uint32_t) (now[i] - p->ev_cursor[i]);
+	for (i = 0; i < n; i++)
+		p->ev_cursor[i] = now[i];
+	p->ev_cpu = cpu;
+}
+
+/* #804: the first read of a sample, charging nothing: the next mark's start. */
+static __inline__ void
+syscall_profile_events_start(struct syscall_profile_thread *p)
+{
+	int	cpu;
+
+	if (pmc_counting == 0)
+		return;
+	cpu = cpu_number_hint();
+	pmc_read(p->ev_cursor);
+	p->ev_cpu = cpu_number_hint() == cpu ? cpu : -1;
+}
+#define	SP_EVENTS_START(p)		syscall_profile_events_start(p)
+#define	SP_EVENTS_MARK(p, phase)	syscall_profile_events(p, phase)
+#define	SP_EVENTS_LOSE(p, phase)	((p)->ev_lost |= 1u << (phase))
+#define	SP_EVENTS_SWITCHED(p)		((p)->ev_cpu = -1)
+#else
+#define	SP_EVENTS_START(p)		MACRO_BEGIN MACRO_END
+#define	SP_EVENTS_MARK(p, phase)	MACRO_BEGIN MACRO_END
+#define	SP_EVENTS_LOSE(p, phase)	MACRO_BEGIN MACRO_END
+#define	SP_EVENTS_SWITCHED(p)		MACRO_BEGIN MACRO_END
+#endif
 
 /*
  * The clock is <kern/tsc.h>'s urmach_tsc(), the one reader every instrument
@@ -542,6 +637,14 @@ syscall_profile_begin(struct syscall_profile_thread *p, uint64_t entry_tsc)
 	p->cursor = entry_tsc;
 	for (i = 0; i < SP_PHASES; i++)
 		p->slice[i] = 0;
+	/*
+	 * #804: the counters from here.  The entry began at the stub's stamp,
+	 * before C, so its events are lost -- unless there was no stamp and
+	 * the clock was read just above.  ev_slice was cleared at the commit.
+	 */
+	SP_EVENTS_START(p);
+	if (!p->entry_unknown)
+		SP_EVENTS_LOSE(p, SP_ENTRY);
 }
 
 /*
@@ -576,6 +679,7 @@ syscall_profile_mark(struct syscall_profile_thread *p, int phase)
 	now = urmach_tsc();
 	p->slice[phase] += (uint32_t) (now - p->cursor);
 	p->cursor = now;
+	SP_EVENTS_MARK(p, phase);
 }
 
 /*
@@ -622,6 +726,9 @@ syscall_profile_switch_out(struct syscall_profile_thread *p,
 		return;
 
 	syscall_profile_mark_at(p, phase, now);
+	/* #804: its own work up to here, on its own processor; then not its own. */
+	SP_EVENTS_MARK(p, phase);
+	SP_EVENTS_SWITCHED(p);
 	p->waiting = 1;
 	p->did_sleep = 1;
 	p->nblocked++;
@@ -674,6 +781,14 @@ syscall_profile_resumed(struct syscall_profile_thread *p)
 		syscall_profile_mark(p, SP_WAIT);
 	}
 	p->waiting = 0;
+	/*
+	 * #804: the wait and the queue were closed at other threads' stamps,
+	 * and the switch, the next mark, began at one: none of their events
+	 * can be told, and the counters start again at the switch's end.
+	 */
+	SP_EVENTS_LOSE(p, SP_WAIT);
+	SP_EVENTS_LOSE(p, SP_RUNQ);
+	SP_EVENTS_SWITCHED(p);
 }
 
 /*
@@ -739,6 +854,20 @@ syscall_profile_commit(struct syscall_profile_thread *p)
 	p->total[p->nsamples] = total;
 	p->hot[p->nsamples] = (uint8_t) p->took_handoff;
 	p->slept[p->nsamples] = (uint8_t) p->did_sleep;
+#if	SP_EVENTS
+	{
+		int	e;
+
+		for (i = 0; i < SP_PHASES; i++)
+			for (e = 0; e < SP_EVENTS; e++) {
+				p->ev_sample[p->nsamples][i][e] =
+				    p->ev_slice[i][e];
+				p->ev_slice[i][e] = 0;
+			}
+		p->ev_lost_sample[p->nsamples] = p->ev_lost;
+		p->ev_lost = 0;
+	}
+#endif
 
 	if (++p->nsamples == SP_SAMPLES) {
 		p->nsamples = 0;
