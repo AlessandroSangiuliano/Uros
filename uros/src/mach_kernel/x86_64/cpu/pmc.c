@@ -350,7 +350,7 @@ pmc_report(void)
 	const struct pmc_found	*f = &pmc_boot;
 	const struct pmc_set	*s = &pmc_sets[f->set];
 	uint64_t		v0[PMC_MAX], v1[PMC_MAX], t0, hz = tsc_hz();
-	int			i, n = pmc_count(), was;
+	int			i, n = pmc_count(), was, cpu;
 
 	printf("pmc: ");
 	if (f->set != 0) {
@@ -419,6 +419,7 @@ pmc_report(void)
 	 */
 	was = interrupts_enabled();
 	interrupts_disable();
+	cpu = cpu_number();	/* the one the spin runs on: read before it can move (#626) */
 	pmc_read(v0);
 	t0 = rdtsc();
 	while (rdtsc() - t0 < hz / 1000000 * PMC_SPIN_US)
@@ -427,7 +428,7 @@ pmc_report(void)
 	if (was)
 		interrupts_enable();
 	printf("pmc: on processor %d, over a %u us spin with interrupts off:",
-	       cpu_number(), PMC_SPIN_US);
+	       cpu, PMC_SPIN_US);
 	for (i = 0; i < n; i++)
 		printf("%s %s %llu", i == 0 ? "" : ",", pmc_name(i),
 		       (unsigned long long) (v1[i] - v0[i]));
