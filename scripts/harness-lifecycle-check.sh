@@ -153,6 +153,31 @@ run_harness() {	# NAME [QEMU-ARGS...]: run-x86_64.sh in the background, its log 
 	RUN=$!
 	STARTED+=("$RUN")
 }
+# 🔴 AND HOW IT ENDED, WHICH `wait' CANNOT SAY (#801).  A run killed by signal N
+# and a run that exited with 128+N both read 128+N to a shell's wait, and since
+# the wait for qemu waits with `wait' (run-x86_64.sh, #801), a run whose trap
+# no longer ends it by the signal -- ablations/618-trap-goes-on.patch -- mostly
+# exits with that same number when set -e meets the interrupted wait: the check
+# found it in 1 boot of 4.  So a run to be signalled is started under
+# ended-by.py, which is its parent with the run's own pid and writes "signal N"
+# or "exit N" into NAME.ended.  RUN is the run's pid, read from NAME.ended.pid;
+# JOB is the watcher's, the one this shell waits for.
+run_harness_watched() {	# NAME [QEMU-ARGS...]
+	local name=$1 i
+	shift
+	rm -f "$OUT/$name.ended" "$OUT/$name.ended.pid"
+	UROS_X86_64_LOG="$OUT/$name.log" python3 -I "$REPO/scripts/ended-by.py" \
+		"$OUT/$name.ended" -- "$REPO/scripts/run-x86_64.sh" "${KVM[@]}" \
+		--entry "$ENTRY" 120 "$@" > "$OUT/$name.out" 2>&1 &
+	JOB=$!
+	RUN=""
+	for i in $(seq 1 100); do
+		[ -s "$OUT/$name.ended.pid" ] && break
+		sleep 0.05
+	done
+	RUN=$(cat "$OUT/$name.ended.pid" 2>/dev/null)
+	STARTED+=(${RUN:+"$RUN"} "$JOB")
+}
 # 🔴 A RUN THAT IS TO BE SIGNALLED OR KILLED BOOTS PAUSED (#801).  Under KVM
 # entry 6 ends within the two seconds a check waits after its qemu appears:
 # the run stopped that qemu itself, at its own end, and only then had the
@@ -201,34 +226,34 @@ fi
 # ── signals ───────────────────────────────────────────────────────────
 if wanted signals; then
 	for sig in TERM INT HUP; do
-		run_harness "signal-$sig" "${PAUSED[@]}"
-		if ! q=$(first_qemu_of "$RUN"); then
-			wait "$RUN"
-			say "signal $sig" "the run never started its qemu (exit $?, $OUT/signal-$sig.out)" "NOT ASKED"
+		run_harness_watched "signal-$sig" "${PAUSED[@]}"
+		if [ -z "$RUN" ] || ! q=$(first_qemu_of "$RUN"); then
+			wait "$JOB"
+			say "signal $sig" "the run never started its qemu (it ended by $(cat "$OUT/signal-$sig.ended" 2>/dev/null || echo 'nothing said'), $OUT/signal-$sig.out)" "NOT ASKED"
 			continue
 		fi
 		sleep 2
 		if qemu_gone_before "$q" "signal $sig"; then
 			ended_within "$RUN" 30 || kill -KILL "$RUN" 2>/dev/null
-			wait "$RUN" 2>/dev/null
+			wait "$JOB" 2>/dev/null
 			continue
 		fi
 		kill -s "$sig" "$RUN"
 		if ! ended_within "$RUN" 30; then
 			kill -KILL "$RUN" 2>/dev/null
-			wait "$RUN" 2>/dev/null
+			wait "$JOB" 2>/dev/null
 			say "signal $sig" "the run WENT ON for 30 s after SIG$sig$(leftovers "$q")" WRONG
 			continue
 		fi
-		wait "$RUN"
-		rc=$?
-		want=$(( 128 + $(kill -l "$sig") ))
+		wait "$JOB"
+		ended=$(cat "$OUT/signal-$sig.ended" 2>/dev/null)
+		want="signal $(kill -l "$sig")"
 		left=$(leftovers "$q")
-		[ "$rc" = "$want" ] || left="$left; exited $rc, not $want: it did not end by the signal"
+		[ "$ended" = "$want" ] || left="$left; it ended by ${ended:-nothing said}, not by $want: it did not end by the signal"
 		if [ -n "$left" ]; then
 			say "signal $sig" "sent SIG$sig with its qemu (pid $q) up${left}" WRONG
 		else
-			say "signal $sig" "sent SIG$sig with its qemu (pid $q) up, the run exited $rc, its qemu gone and the lock given back" PASS
+			say "signal $sig" "sent SIG$sig with its qemu (pid $q) up, the run ended by it, its qemu gone and the lock given back" PASS
 		fi
 	done
 fi
