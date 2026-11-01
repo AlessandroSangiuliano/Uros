@@ -38,6 +38,13 @@ int		pmc_count(void);
 const char	*pmc_name(int i);
 
 /*
+ * The same count, for the profiler's marks, which read it on every phase and
+ * must not pay a call to learn that nothing is counting.  Set once, by the
+ * boot processor.
+ */
+extern int	pmc_counting;
+
+/*
  * RDPMC reads counter ECX: a general one by its index, a fixed one with bit
  * 30 set (Vol. 2B, RDPMC).  At CPL 0 it needs no CR4.PCE.
  */

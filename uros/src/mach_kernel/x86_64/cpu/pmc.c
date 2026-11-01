@@ -144,6 +144,7 @@ struct pmc_found {
 
 static struct pmc_found	pmc_boot;		/* the boot processor's, for the report */
 static volatile int	pmc_set_counting;	/* the same set, read by pmc_read() */
+int			pmc_counting;		/* pmc_count(), for the profiler */
 
 static volatile uint32_t pmc_seen;		/* processors past pmc_init_cpu() */
 static volatile uint32_t pmc_programmed;	/* of them, the ones that programmed */
@@ -281,6 +282,8 @@ pmc_init_cpu(int boot_processor)
 	if (boot_processor) {
 		pmc_boot = f;
 		pmc_set_counting = f.set;
+		pmc_counting = f.set == 0 ? 0 :
+			       PMC_FIXED_USED + pmc_sets[f.set].n;
 	}
 	if (f.set != 0)
 		pmc_program(f.set);
@@ -290,9 +293,7 @@ pmc_init_cpu(int boot_processor)
 int
 pmc_count(void)
 {
-	int	set = pmc_set_counting;
-
-	return set == 0 ? 0 : PMC_FIXED_USED + pmc_sets[set].n;
+	return pmc_counting;
 }
 
 const char *
