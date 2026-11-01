@@ -1,0 +1,156 @@
+Kind: ablation
+Issue: #787
+Takes out: the reference the depression timer holds on its thread (#787 section 11) -- set_timeout() takes one only for the wait timer again, thread_depress_timeout() releases none, and thread_deallocate() reclaims only the wait timer. depress_ref_test arms a parked worker's depression and its count does not rise: the timer holds no reference, and a thread terminated as its depression ran out was the free's.
+Accel: tcg,kvm
+Run: --entry 65 300 -smp 1
+Expect: depress_ref_test: WRONG .* took no reference
+
+diff --git a/uros/src/mach_kernel/kern/mach_clock.c b/uros/src/mach_kernel/kern/mach_clock.c
+index 7e35ecd2..0b743934 100644
+--- a/uros/src/mach_kernel/kern/mach_clock.c
++++ b/uros/src/mach_kernel/kern/mach_clock.c
+@@ -471,26 +471,6 @@ natural_t timeout_ticks = 0;	/* ticks elapsed since bootup */
+ decl_simple_lock_data(,timer_lock)		/* lock for ... */
+ timer_elt_data_t	timer_head;	/* ordered list of timeouts */
+ 					/* (doubles as end-of-list) */
+-
+-/*
+- *	The two timers whose param is a thread and that take a reference on it
+- *	in set_timeout(), so the thread cannot be freed while a timeout is on
+- *	its way (#787): the thread's own wait timer (thread_timeout) and its
+- *	priority-depression timer (thread_depress_timeout).  Both release that
+- *	reference exactly once -- reset_timeout()/untimeout() on a cancel that
+- *	finds the timer still set, and the timeout function itself when it has
+- *	fired.  Only thread_timeout uses TELT_PENDING, to tell a fire from a
+- *	cancel for the wakeup; thread_depress_timeout arbitrates its own action
+- *	on depress_priority and releases whatever it finds.
+- */
+-extern void	thread_depress_timeout(thread_t);
+-
+-static boolean_t
+-timer_holds_thread_ref(timeout_fcn_t fcn)
+-{
+-	return fcn == (timeout_fcn_t) thread_timeout ||
+-	       fcn == (timeout_fcn_t) thread_depress_timeout;
+-}
+ /*
+  *	There is a nasty race between softclock and reset_timeout.
+  *	For example, scheduling code looks at timer_set and calls
+@@ -624,16 +604,13 @@ set_timeout(
+ 	telt->set = TELT_SET;
+ 	simple_unlock(&timer_lock);
+ 
+-	if (timer_holds_thread_ref(telt->fcn)) {
++	if (telt->fcn == (timeout_fcn_t) thread_timeout) {
+ 		thread_t	thread;
+ 
+ 		/*
+ 		 * Take an extra reference to make sure that the thread
+ 		 * doesn't disappear while a timeout is on its way.
+ 		 * Atomically, as every change of the count is (#787).
+-		 * The depression timer takes one too now, where it took
+-		 * none and a thread freed as its depression ran out was
+-		 * written into by thread_depress_timeout (#787 section 11).
+ 		 */
+ 		thread = (thread_t) (telt->param);
+ 		assert(thread->ref_count > 0);
+@@ -665,7 +642,7 @@ reset_timeout(
+ 	simple_unlock(&timer_lock);
+ 
+ 	if (retval == TRUE &&
+-	    timer_holds_thread_ref(telt->fcn)) {
++	    telt->fcn == (timeout_fcn_t) thread_timeout) {
+ 		thread_t	thread;
+ 
+ 		/*
+@@ -674,10 +651,7 @@ reset_timeout(
+ 		 * no lock of the thread's -- a thread just woken cancels
+ 		 * its own timer -- and a decrement beside an increment
+ 		 * under the lock lost one of the two.  Never the last
+-		 * reference: the caller holds one.  Only on TELT_SET, a
+-		 * cancel before the timer fired; a timer that fired is
+-		 * TELT_UNSET here (softclock cleared it) and its reference
+-		 * is the timeout function's to release.
++		 * reference: the caller holds one.
+ 		 */
+ 		thread = (thread_t) (telt->param);
+ 		assert(thread->ref_count > 1);
+@@ -803,7 +777,7 @@ untimeout(
+ 
+ 		simple_unlock(&timer_lock);
+ 
+-		if (timer_holds_thread_ref(fcn)) {
++		if (fcn == (timeout_fcn_t) thread_timeout) {
+ 			thread_t	thread;
+ 
+ 			/*
+diff --git a/uros/src/mach_kernel/kern/syscall_subr.c b/uros/src/mach_kernel/kern/syscall_subr.c
+index 816ba096..eadeb394 100644
+--- a/uros/src/mach_kernel/kern/syscall_subr.c
++++ b/uros/src/mach_kernel/kern/syscall_subr.c
+@@ -549,15 +549,6 @@ thread_depress_timeout(
+     }
+ 
+     thread_unlock(thread);
+-    /*
+-     * Release the reference set_timeout() took for this timer (#787
+-     * section 11): the depression timer holds one on its thread while it
+-     * is set, so a thread terminated as its depression runs out is not
+-     * freed before this runs.  Released whatever the depression's state,
+-     * as thread_timeout() releases its own; softclock() cleared the timer
+-     * before calling, so no reset_timeout() releases it in our stead.
+-     */
+-    thread_deallocate(thread);
+     splx(s);
+ }
+ 
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index d3bfe176..f72d4aae 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -516,7 +516,6 @@
+ #include <kern/queue.h>
+ #include <kern/sched.h>
+ #include <kern/sched_prim.h>
+-#include <kern/syscall_subr.h>	/* thread_depress_timeout (#787) */
+ #include <kern/task.h>
+ #include <kern/thread.h>
+ #include <kern/thread_act.h>
+@@ -1608,31 +1607,14 @@ thread_deallocate(
+ 	s = splsched();
+ 	thread_lock(thread);
+ 
+-	{
++	if (thread->ref_count == 2 &&
++	    thread->timer.set == TELT_SET &&
++	    thread->timer.fcn == (timeout_fcn_t) thread_timeout) {
+ 		/*
+-		 * The references a set timer holds on the thread (#787): the
+-		 * wait timer and the depression timer each take one in
+-		 * set_timeout().  When the only references left are ours and
+-		 * those timers', cancel them -- reset_timeout_check() gives
+-		 * each one back -- so the drop below reaches zero and the
+-		 * thread is freed.  A timer that has fired is TELT_PENDING,
+-		 * not TELT_SET: its reference is in flight to its timeout
+-		 * function, which will deallocate the thread, so it is not
+-		 * counted here and the drop then leaves the thread for it.
++		 * Only 2 references left: ours and the timeout's.
++		 * Cancel the timeout and proceed with the thread termination.
+ 		 */
+-		int	timer_refs = 0;
+-
+-		if (thread->timer.set == TELT_SET &&
+-		    thread->timer.fcn == (timeout_fcn_t) thread_timeout)
+-			timer_refs++;
+-		if (thread->depress_timer.set == TELT_SET &&
+-		    thread->depress_timer.fcn ==
+-			(timeout_fcn_t) thread_depress_timeout)
+-			timer_refs++;
+-		if (thread->ref_count == 1 + timer_refs) {
+-			reset_timeout_check(&thread->timer);
+-			reset_timeout_check(&thread->depress_timer);
+-		}
++		reset_timeout_check(&thread->timer);
+ 	}
+ 
+ 	if (thread_ref_drop(thread) > 0) {

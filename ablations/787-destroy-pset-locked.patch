@@ -1,0 +1,30 @@
+Kind: ablation
+Issue: #787
+Takes out: the pset_unlock() processor_set_destroy() does before thread_doassign() (#787 section 12) -- it holds the set's lock across thread_doassign(), which locks the thread's own set, the one being destroyed, a second time. pset_test's driver does not come back from processor_set_destroy(), asleep on the set's mutex it already holds, after the limit and the disable have come back.
+Accel: tcg,kvm
+Run: --entry 60 300 -smp 4
+Expect: pset_test: WRONG .*processor_set_destroy did not come back
+
+diff --git a/uros/src/mach_kernel/kern/processor.c b/uros/src/mach_kernel/kern/processor.c
+index 8db213a0..3e682f5e 100644
+--- a/uros/src/mach_kernel/kern/processor.c
++++ b/uros/src/mach_kernel/kern/processor.c
+@@ -1000,18 +1000,6 @@ processor_set_destroy(
+ 		 * locking.
+ 		 */
+ 		thread_freeze(thread);
+-		/*
+-		 * #787 section 12: let go of the set's lock before
+-		 * thread_doassign(), which takes it itself -- the set being
+-		 * destroyed is the thread's own, so without this it locked the
+-		 * set's mutex a second time and slept for good holding it, the
+-		 * self-deadlock of #486 and section 9.  The task loop above
+-		 * drops the lock before task_assign() for the same reason; this
+-		 * loop did not, which the "double locking" comment got backwards.
+-		 * thread_doassign() is entered with the activation locked, as it
+-		 * expects, and gives every thread lock back before it returns.
+-		 */
+-		pset_unlock(pset);
+ 		thread_doassign(thread, &default_pset, TRUE);
+ 		/*
+ 		 * All thread-related locks released at this point.

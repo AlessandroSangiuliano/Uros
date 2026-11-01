@@ -1,0 +1,23 @@
+Kind: widen
+Issue: #787
+Holds open: the window in thread_doassign(), after the thread is stopped and before the lock loop, where no set is locked -- doassign_probe(), whose call site this adds, signals doassign_test and waits there, so the test can destroy the set in exactly that window and make the lock loop retry with the default set. The fixed thread_doassign() returns when the retry's set is the one the thread is already in, so the assignment comes back and the test passes. Run at four processors: the driver spins in the probe while the test runs.
+Run: --entry 66 300 -smp 4
+
+diff --git a/uros/src/mach_kernel/kern/thread.c b/uros/src/mach_kernel/kern/thread.c
+index d3bfe176..52682c27 100644
+--- a/uros/src/mach_kernel/kern/thread.c
++++ b/uros/src/mach_kernel/kern/thread.c
+@@ -2122,6 +2122,13 @@ thread_doassign(
+ 	 *	locks.
+ 	 */
+ 
++#ifdef	__x86_64__
++	{
++		extern void doassign_probe(thread_t);	/* 787-widen-doassign-window */
++
++		doassign_probe(thread);
++	}
++#endif
+ 	/*
+ 	 *	Lock both psets now, use ordering to avoid deadlocks.
+ 	 *	Retry if new_pset is inactive — reassigning to default_pset
