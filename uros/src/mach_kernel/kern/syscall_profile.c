@@ -12,6 +12,9 @@
 #include <kern/misc_protos.h>		/* printf */
 #if	SYSCALL_PROFILE
 #include <kern/thread.h>
+#if	SP_EVENTS
+#include <kern/spl.h>			/* the self-measurement, on one processor */
+#endif
 #endif
 
 /*
@@ -48,6 +51,15 @@ int	syscall_profile_trap = SYSCALL_PROFILE_TRAP;
  * rather than a rounding error.
  */
 static uint32_t	sp_pair_cost;
+#if	SP_EVENTS
+/*
+ * #804: and what an empty phase counts -- the events between two marks with
+ * nothing in between, the median of nine like the pair.  With the counters on,
+ * the pair itself is the clock and a read of every counter: what each phase
+ * really carries.
+ */
+static uint32_t	sp_pair_events[SP_EVENTS];
+#endif
 
 /*
  * 🔴 THE PRESENCE CONTROL FOR AN ABSENCE THIS INSTRUMENT CAN PRINT.
@@ -180,15 +192,41 @@ sp_measure_self(void)
 {
 	uint32_t	d[9];
 	int		i;
+#if	SP_EVENTS
+	uint64_t	v0[SP_EVENTS], v1[SP_EVENTS];
+	uint32_t	e[SP_EVENTS][9];
+	int		k, n = pmc_counting;
+	spl_t		s = splhigh();	/* the counters read are this processor's */
+#endif
 
 	for (i = 0; i < 9; i++) {
 		uint64_t	a = urmach_tsc();
-		uint64_t	b = urmach_tsc();
+		uint64_t	b;
 
+#if	SP_EVENTS
+		if (n != 0)
+			pmc_read(v0);
+#endif
+		b = urmach_tsc();
 		d[i] = (uint32_t) (b - a);
+#if	SP_EVENTS
+		if (n != 0) {
+			(void) urmach_tsc();	/* the next mark's clock */
+			pmc_read(v1);
+			for (k = 0; k < n; k++)
+				e[k][i] = (uint32_t) (v1[k] - v0[k]);
+		}
+#endif
 	}
 	sp_sort(d, 9);
 	sp_pair_cost = d[4];		/* median of nine, never the mean */
+#if	SP_EVENTS
+	splx(s);
+	for (k = 0; k < n; k++) {
+		sp_sort(e[k], 9);
+		sp_pair_events[k] = e[k][4];
+	}
+#endif
 }
 
 /*
@@ -271,6 +309,51 @@ sp_in_shape(struct syscall_profile_thread *p, int i, int shape)
 	return p->slept[i] == 0;
 }
 
+#if	SP_EVENTS
+/*
+ * #804: the events of the phases sp_table() printed, one line each: for every
+ * counter the median over the shape's samples in which the phase began on
+ * this thread's own read and stayed on one processor, and how many those
+ * were.  A dash where none did.  The median of each phase and each counter on
+ * its own, unlike the cycles above, which are the median sample's: a sample
+ * whose phase was lost has nothing to give it.
+ */
+static void
+sp_events_table(struct syscall_profile_thread *p, int shape, int median)
+{
+	uint32_t	col[SP_SAMPLES];
+	int		n = pmc_counting, ph, i, e, k;
+
+	for (ph = 0; ph < SP_PHASES; ph++) {
+		if (p->sample[median][ph] == 0)
+			continue;
+		k = 0;
+		for (i = 0; i < SP_SAMPLES; i++)
+			if (sp_in_shape(p, i, shape) &&
+			    ((p->ev_lost_sample[i] >> ph) & 1) == 0)
+				k++;
+		printf("syscall_profile    ev %s", sp_names()[ph]);
+		if (k == 0) {
+			printf("   -  (began on another thread's stamp, or "
+			       "crossed a processor)\n");
+			continue;
+		}
+		printf(" %2d:", k);
+		for (e = 0; e < n; e++) {
+			int	m = 0;
+
+			for (i = 0; i < SP_SAMPLES; i++)
+				if (sp_in_shape(p, i, shape) &&
+				    ((p->ev_lost_sample[i] >> ph) & 1) == 0)
+					col[m++] = p->ev_sample[i][ph][e];
+			sp_sort(col, m);
+			printf(" %u", col[(m - 1) / 2]);
+		}
+		printf("\n");
+	}
+}
+#endif
+
 /*
  * One shape's breakdown.
  *
@@ -352,6 +435,10 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 		       ph == SP_WAIT ? "of wall " : "of work",
 		       col[0], col[k - 1]);
 	}
+#if	SP_EVENTS
+	if (pmc_counting != 0)
+		sp_events_table(p, shape, median);
+#endif
 
 	first = 1;
 	for (ph = 0; ph < SP_PHASES; ph++) {
@@ -472,6 +559,23 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	printf("syscall_profile   each column below includes ONE pair (%u cyc "
 	       "on this target); subtract it per column, and when comparing "
 	       "TARGETS subtract each one's own\n", sp_pair_cost);
+#if	SP_EVENTS
+	/*
+	 * #804: the counters' names, once a dump, and what an empty phase
+	 * counts.  On two lines each under the console's 256 bytes (#802).
+	 */
+	if (pmc_counting != 0) {
+		printf("syscall_profile   events (#804), in each \"ev\" line "
+		       "below in this order:");
+		for (i = 0; i < pmc_counting; i++)
+			printf(" %s", pmc_name(i));
+		printf("\n");
+		printf("syscall_profile   an empty phase counts");
+		for (i = 0; i < pmc_counting; i++)
+			printf(" %u", sp_pair_events[i]);
+		printf(", the pair included: subtract it per phase\n");
+	}
+#endif
 
 	for (shape = 0; shape < SP_SHAPES; shape++)
 		sp_table(p, shape, ret_mean, ret_known);
