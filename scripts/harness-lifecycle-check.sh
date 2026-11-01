@@ -24,6 +24,11 @@
 #              qemu, and the next run names it in its conditions
 #   killed     a tool killed with SIGKILL takes its qemu with it
 #              (PR_SET_PDEATHSIG); the lock it cannot give back is said
+#   unitstop   each of them, run in a transient systemd user unit under a
+#              script with no trap, and the unit stopped with its qemu up --
+#              which signals what is left of the unit twice -- leaves neither
+#              its qemu nor the lock, and run-x86_64.sh says it was stopped
+#              (#801)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
 # ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered.
@@ -42,7 +47,7 @@ BUILD=${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}
 LOCK=/tmp/uros-x86_64-run.lock
 ENTRY=6
 KVM=()
-ONLY=bystander,signals,lockover,refuse,tools,orphan,killed
+ONLY=bystander,signals,lockover,refuse,tools,orphan,killed,unitstop
 OUT=$HOME/uros-tests/lifecycle/$(date +%Y%m%d-%H%M%S)
 
 while [ $# -gt 0 ]; do
@@ -365,6 +370,76 @@ if wanted killed; then
 		else
 			say "killed $name" "killed with SIGKILL, its qemu (pid $q) went with it; $lock" PASS
 		fi
+	fi
+fi
+
+# ── unitstop ──────────────────────────────────────────────────────────
+# #801: each stopped the way a campaign started with systemd-run is -- a
+# script with no trap runs it in a transient user unit, so the unit's main
+# process dies on the first SIGTERM and systemd signals what is left of the
+# unit again.  On 31 October run-x86_64.sh's trap was in the middle of giving
+# its lock back when the second one came, and the next run refused to start
+# until the directory was removed by hand.
+unit_qemu() {	# UNIT: the qemu in the unit's control group
+	local cg p
+	cg=$(systemctl --user show -p ControlGroup --value "$1" 2>/dev/null)
+	[ -n "$cg" ] || return 1
+	for p in $(cat "/sys/fs/cgroup$cg/cgroup.procs" 2>/dev/null); do
+		case $(cat "/proc/$p/comm" 2>/dev/null) in
+		qemu-system*)	echo "$p"; return 0 ;;
+		esac
+	done
+	return 1
+}
+if wanted unitstop; then
+	if ! systemctl --user show-environment > /dev/null 2>&1; then
+		say unitstop "no systemd user manager to start a unit under" "NOT ASKED"
+	else
+		for t in "${TOOLS[@]}"; do
+			name=$(basename "${t%% *}")
+			case $name in
+			*.py)	# shellcheck disable=SC2086
+				cmd=(python3 "$REPO"/$t "${KVM[@]}") ;;
+			*)	cmd=("$REPO/scripts/run-x86_64.sh" "${KVM[@]}" --entry "$ENTRY" 120) ;;
+			esac
+			U=uros-lifecycle-unitstop-$$-$name
+			# Two commands, so that bash cannot exec the tool in its own
+			# place: the wrapper stays the unit's main process.
+			systemd-run --user --quiet --collect --unit="$U" \
+				--setenv=UROS_BUILD_DIR="$BUILD" \
+				--setenv=UROS_X86_64_LOG="$OUT/unitstop-$name.log" \
+				--setenv=LIFECYCLE_OUT="$OUT/unitstop-$name.out" \
+				/bin/bash -c '"$@" > "$LIFECYCLE_OUT" 2>&1; echo "lifecycle: it ended on its own, status $?" >> "$LIFECYCLE_OUT"' \
+				bash "${cmd[@]}"
+			q=""
+			for i in $(seq 1 900); do
+				q=$(unit_qemu "$U") && break
+				systemctl --user is-active --quiet "$U" || break
+				sleep 0.1
+			done
+			if [ -z "$q" ]; then
+				systemctl --user stop "$U" 2>/dev/null
+				say "unitstop $name" "it never started its qemu under a unit ($OUT/unitstop-$name.out)" "NOT ASKED"
+				continue
+			fi
+			sleep 2
+			systemctl --user stop "$U"
+			for i in $(seq 1 300); do
+				systemctl --user is-active --quiet "$U" || break
+				sleep 0.1
+			done
+			sleep 0.5
+			left=$(leftovers "$q")
+			if [ "$name" = run-x86_64.sh ] &&
+			   ! grep -q "^run-x86_64.sh: stopped by SIG" "$OUT/unitstop-$name.out"; then
+				left="$left; it never said it was stopped: its output ends $(tail -n 1 "$OUT/unitstop-$name.out")"
+			fi
+			if [ -n "$left" ]; then
+				say "unitstop $name" "its unit stopped with its qemu (pid $q) up$left" WRONG
+			else
+				say "unitstop $name" "its unit stopped with its qemu (pid $q) up, its qemu gone and the lock given back" PASS
+			fi
+		done
 	fi
 fi
 
