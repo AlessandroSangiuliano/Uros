@@ -581,6 +581,8 @@ must_report 'bound_ipi_test: starting' 'bound_ipi_test: \(PASS\|WRONG\|NOT ASKED
 	'Every wait is bounded by the clock'"'"'s ticks and the threads stop on a flag, so the verdict is printed either way; a run that stops after the start line has X woken and never run on its processor (#787).'
 must_report 'depress_ref_test: starting' 'depress_ref_test: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Every wait is bounded by the clock'"'"'s ticks and the worker stops on a flag, so the verdict is printed either way; a run that stops after the start line has the worker never let go (#787).'
+must_report 'doassign_test: starting' 'doassign_test: \(PASS\|WRONG\|NOT ASKED\)' \
+	'Every wait is bounded by the clock'"'"'s ticks, so the verdict is printed either way; a run that stops after the start line has thread_doassign() wedged on the set'"'"'s mutex (#787).'
 must_report 'delay: starting' 'delay: \(PASS\|WRONG\|NOT ASKED\)' \
 	'Each of the three waits ends when its own counter has moved far enough, and the verdict is printed either way; a run that stops after the start line has stopped inside a wait whose counter does not move (#624).'
 must_report 'profile_entry: starting' 'profile_entry: \(PASS\|WRONG\|NOT ASKED\)' \

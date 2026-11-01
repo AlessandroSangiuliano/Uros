@@ -224,6 +224,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rcu_tick_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/timer_ref_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pset_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/doassign_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rr_resume_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/dispatch_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/passover_test.c

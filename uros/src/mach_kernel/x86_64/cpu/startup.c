@@ -47,6 +47,7 @@
 #include <cpu/clear_wait_test.h>	/* #599: -V */
 #include <time/timer_ref_test.h>	/* #787: -o */
 #include <cpu/pset_test.h>	/* #787: -q */
+#include <cpu/doassign_test.h>	/* #787: -z */
 #include <time/rr_resume_test.h>	/* #787: -k */
 #include <time/dispatch_test.h>	/* #787: -d */
 #include <time/passover_test.h>	/* #787: -g */
@@ -892,6 +893,14 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('q'))
 			pset_test();
+
+		/*
+		 * -z: thread_doassign()'s retry does not lock the default set's
+		 * mutex twice (#787).  NOT ASKED without the widen that adds the
+		 * probe; returns, so the boot goes on.
+		 */
+		if (boot_flag('z'))
+			doassign_test();
 
 		/*
 		 * -k: a round-robin thread preempted by a wakeup resumes before
