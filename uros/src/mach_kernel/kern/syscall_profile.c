@@ -354,6 +354,26 @@ sp_events_table(struct syscall_profile_thread *p, int shape, int median)
 }
 #endif
 
+#if	SP_WHERE
+/* #804: where the shape's samples ended, as processor:samples. */
+static void
+sp_where(struct syscall_profile_thread *p, int shape)
+{
+	int	count[NCPUS], i, c;
+
+	for (c = 0; c < NCPUS; c++)
+		count[c] = 0;
+	for (i = 0; i < SP_SAMPLES; i++)
+		if (sp_in_shape(p, i, shape) && p->cpu_sample[i] < NCPUS)
+			count[p->cpu_sample[i]]++;
+	printf("syscall_profile    ran on processor:samples");
+	for (c = 0; c < NCPUS; c++)
+		if (count[c] != 0)
+			printf(" %d:%d", c, count[c]);
+	printf("\n");
+}
+#endif
+
 /*
  * One shape's breakdown.
  *
@@ -438,6 +458,9 @@ sp_table(struct syscall_profile_thread *p, int shape, uint32_t ret_mean,
 #if	SP_EVENTS
 	if (pmc_counting != 0)
 		sp_events_table(p, shape, median);
+#endif
+#if	SP_WHERE
+	sp_where(p, shape);
 #endif
 
 	first = 1;

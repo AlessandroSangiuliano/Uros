@@ -389,8 +389,10 @@ extern int	syscall_profile_trap;
 #include <kern/cpu_number.h>	/* cpu_number_hint() (#626) */
 #include <cpu/pmc.h>
 #define	SP_EVENTS	PMC_MAX
+#define	SP_WHERE	1
 #else
 #define	SP_EVENTS	0
+#define	SP_WHERE	0
 #endif
 
 /*
@@ -513,6 +515,15 @@ struct syscall_profile_thread {
 	uint32_t	ev_slice[SP_PHASES][SP_EVENTS];
 	uint32_t	ev_sample[SP_SAMPLES][SP_PHASES][SP_EVENTS];
 	uint32_t	ev_lost_sample[SP_SAMPLES];
+#endif
+#if	SP_WHERE
+	/*
+	 * #804: and the processor each sample ended on.  A line from another
+	 * core's cache (HITM), or a phase that misses the L2 on data both ends
+	 * of an RPC touch, reads differently with the two ends on one core --
+	 * two hyperthreads sharing its L1 and L2 -- and on two.
+	 */
+	uint8_t		cpu_sample[SP_SAMPLES];
 #endif
 };
 
@@ -867,6 +878,10 @@ syscall_profile_commit(struct syscall_profile_thread *p)
 		p->ev_lost_sample[p->nsamples] = p->ev_lost;
 		p->ev_lost = 0;
 	}
+#endif
+#if	SP_WHERE
+	/* a statistic, which is what cpu_number_hint() is for (#626) */
+	p->cpu_sample[p->nsamples] = (uint8_t) cpu_number_hint();
 #endif
 
 	if (++p->nsamples == SP_SAMPLES) {
