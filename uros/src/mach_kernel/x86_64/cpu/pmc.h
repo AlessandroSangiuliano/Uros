@@ -81,7 +81,8 @@ void	pmc_read(uint64_t *v);
 /*
  * x86_64/cpu/pmc_test.c: each counter made to count loads of known shape on
  * this processor, and the boot told whether it did.  From pmc_report(), with
- * a set counting; it walks 64 MiB.
+ * a set counting and pmc_test=1 on the command line; it walks 64 MiB, and
+ * keeps them for the boot (see there).
  */
 void	pmc_test(void);
 

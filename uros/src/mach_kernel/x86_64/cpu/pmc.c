@@ -477,5 +477,10 @@ pmc_report(void)
 	printf("%s (#804)\n", v1[0] == v0[0] || v1[1] == v0[1] ?
 	       " -- WRONG, a fixed counter did not move" : "");
 
-	pmc_test();
+	{
+		uint64_t	t;
+
+		if (boot_value("pmc_test", &t) == 1 && t != 0)
+			pmc_test();
+	}
 }

@@ -40,6 +40,20 @@
  * off by a fraction but by everything.  ⚠️ Not checked: a load from another
  * core's modified line, which needs a second core writing, and an instruction
  * TLB walk, which needs code spread over pages: each is said to be unchecked.
+ *
+ * 🔴 ASKED FOR, AND ITS MEMORY KEPT.  It runs with pmc_test=1 only, not on
+ * every boot that counts: it takes a second and 68 MiB, which a measurement
+ * boot should not pay.  And it gives the 68 MiB back to no one.  Freeing
+ * them unwires 17408 pages with a cross-call each, and before user mode has
+ * begun those thousands of IPIs, each waking the idle boot processor, read
+ * to the quiet census as thousands of idle passes: on omen it took the boot
+ * for over, six boots of six, and stopped the machine under the free's
+ * cross-call in three.  Both are defects of their own, filed apart; here a
+ * test boot keeps its 68 MiB.
+ *
+ * The rules' ceilings are loose too: on the walks that miss, a hardware
+ * prefetcher fetches the next line with each one, and omen counted two to
+ * four L2 and last-level events a step in 64 MiB.
  */
 
 #include <stdint.h>
@@ -101,11 +115,11 @@ static const struct pmc_rule pmc_rules[PMC_ROLE_BRANCH_MISS + 1][W_COUNT] = {
 	[PMC_ROLE_CYCLES] =
 	{ { 100, 0 }, { 100, 0 },  { 100, 0 },  { 100, 0 },  { 100, 0 }, { 100, 0 }, { 100, 0 } },
 	[PMC_ROLE_L1D_MISS] =
-	{ { 0, 5 },   { 80, 300 }, { 80, 300 }, { 80, 300 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 80, 300 }, { 80, 600 }, { 80, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_L2_MISS] =
-	{ { 0, 5 },   { 0, 5 },    { 80, 300 }, { 80, 300 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { 80, 600 }, { 80, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_LLC_MISS] =
-	{ { 0, 5 },   { 0, 5 },    { 0, 20 },   { 50, 150 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { 0, 20 },   { 50, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_HITM] =
 	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_DTLB_LOAD_WALK] =
@@ -115,7 +129,7 @@ static const struct pmc_rule pmc_rules[PMC_ROLE_BRANCH_MISS + 1][W_COUNT] = {
 	[PMC_ROLE_ITLB_WALK] =
 	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_LLC_REF] =
-	{ { -1, 0 },  { 0, 5 },    { 80, 300 }, { 80, 300 }, { -1, 0 },  { -1, 0 },  { -1, 0 } },
+	{ { -1, 0 },  { 0, 5 },    { 80, 600 }, { 80, 600 }, { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_BRANCH] =
 	{ { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 } },
 	[PMC_ROLE_BRANCH_MISS] =
@@ -252,8 +266,7 @@ pmc_test(void)
 		printf("\n");
 	}
 
-	kmem_free(kernel_map, idx_buf, idx_size);
-	kmem_free(kernel_map, buf, PMC_BIG);
+	/* Kept: see the head of this file. */
 
 	printf("pmc test (#804): %d checks against loads of known shape, %d "
 	       "WRONG%s; not checked here:", checks, wrong,
