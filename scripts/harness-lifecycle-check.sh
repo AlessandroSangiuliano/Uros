@@ -31,7 +31,9 @@
 #              (#801)
 #
 # Each line ends PASS or WRONG; a check that could not be posed says NOT
-# ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered.
+# ASKED.  The boots are entry 6's, which ends as soon as ring 3 has answered --
+# under KVM before a signal could come, so a run to be signalled or killed
+# boots with its guest paused (#801).
 #
 # Usage:  harness-lifecycle-check.sh [--kvm] [--only CHECK[,CHECK...]] [--out DIR]
 # Exit:   0 every check PASS · 1 a check WRONG · 2 it could not be run (the
@@ -143,11 +145,28 @@ leftovers() {	# QEMU-PID
 	return 0
 }
 
-run_harness() {	# NAME: run-x86_64.sh in the background, its log under OUT
-	UROS_X86_64_LOG="$OUT/$1.log" "$REPO/scripts/run-x86_64.sh" "${KVM[@]}" \
-		--entry "$ENTRY" 120 > "$OUT/$1.out" 2>&1 &
+run_harness() {	# NAME [QEMU-ARGS...]: run-x86_64.sh in the background, its log under OUT
+	local name=$1
+	shift
+	UROS_X86_64_LOG="$OUT/$name.log" "$REPO/scripts/run-x86_64.sh" "${KVM[@]}" \
+		--entry "$ENTRY" 120 "$@" > "$OUT/$name.out" 2>&1 &
 	RUN=$!
 	STARTED+=("$RUN")
+}
+# 🔴 A RUN THAT IS TO BE SIGNALLED OR KILLED BOOTS PAUSED (#801).  Under KVM
+# entry 6 ends within the two seconds a check waits after its qemu appears:
+# the run stopped that qemu itself, at its own end, and only then had the
+# signal -- so a trap that left the qemu running passed, 2 boots of 4 for
+# ablations/618-trap-leaves-qemu, both under KVM.  A guest held at qemu's -S
+# never ends: the qemu is there until something kills it, and the run is in
+# its boot until its 120 s of silence run out.
+PAUSED=(-S)
+# And before each signal, the qemu is asked for: gone already, it is a check
+# that cannot be posed, said as NOT ASKED -- the tools take no qemu flags.
+qemu_gone_before() {	# QEMU-PID CHECK: true, after saying so, if it has gone
+	kill -0 "$1" 2>/dev/null && return 1
+	say "$2" "its qemu (pid $1) had ended before the signal, so what the signal leaves could not be asked" "NOT ASKED"
+	return 0
 }
 images() {
 	stat -c '%i:%Y' "$BUILD/disk-x86_64.img" "$BUILD/disk-x86_64-ahci.img" \
@@ -182,13 +201,18 @@ fi
 # ── signals ───────────────────────────────────────────────────────────
 if wanted signals; then
 	for sig in TERM INT HUP; do
-		run_harness "signal-$sig"
+		run_harness "signal-$sig" "${PAUSED[@]}"
 		if ! q=$(first_qemu_of "$RUN"); then
 			wait "$RUN"
 			say "signal $sig" "the run never started its qemu (exit $?, $OUT/signal-$sig.out)" "NOT ASKED"
 			continue
 		fi
 		sleep 2
+		if qemu_gone_before "$q" "signal $sig"; then
+			ended_within "$RUN" 30 || kill -KILL "$RUN" 2>/dev/null
+			wait "$RUN" 2>/dev/null
+			continue
+		fi
 		kill -s "$sig" "$RUN"
 		if ! ended_within "$RUN" 30; then
 			kill -KILL "$RUN" 2>/dev/null
@@ -211,7 +235,7 @@ fi
 
 # ── lockover ──────────────────────────────────────────────────────────
 if wanted lockover; then
-	run_harness lockover
+	run_harness lockover "${PAUSED[@]}"
 	if ! q=$(first_qemu_of "$RUN"); then
 		wait "$RUN"
 		say lockover "the run never started its qemu (exit $?)" "NOT ASKED"
@@ -304,6 +328,11 @@ if wanted tools; then
 			continue
 		fi
 		sleep 2
+		if qemu_gone_before "$q" "tool $name"; then
+			ended_within "$P" 30 || kill -KILL "$P" 2>/dev/null
+			wait "$P" 2>/dev/null
+			continue
+		fi
 		kill -s TERM "$P"
 		went_on=""
 		ended_within "$P" 30 || { kill -KILL "$P" 2>/dev/null; went_on="; it WENT ON for 30 s"; }
@@ -321,7 +350,7 @@ fi
 
 # ── orphan ────────────────────────────────────────────────────────────
 if wanted orphan; then
-	run_harness orphan-killed
+	run_harness orphan-killed "${PAUSED[@]}"
 	if ! q=$(first_qemu_of "$RUN"); then
 		wait "$RUN"
 		say orphan "the run never started its qemu (exit $?)" "NOT ASKED"
@@ -400,7 +429,7 @@ if wanted unitstop; then
 			case $name in
 			*.py)	# shellcheck disable=SC2086
 				cmd=(python3 "$REPO"/$t "${KVM[@]}") ;;
-			*)	cmd=("$REPO/scripts/run-x86_64.sh" "${KVM[@]}" --entry "$ENTRY" 120) ;;
+			*)	cmd=("$REPO/scripts/run-x86_64.sh" "${KVM[@]}" --entry "$ENTRY" 120 "${PAUSED[@]}") ;;
 			esac
 			U=uros-lifecycle-unitstop-$$-$name
 			# Two commands, so that bash cannot exec the tool in its own
@@ -423,6 +452,10 @@ if wanted unitstop; then
 				continue
 			fi
 			sleep 2
+			if qemu_gone_before "$q" "unitstop $name"; then
+				systemctl --user stop "$U" 2>/dev/null
+				continue
+			fi
 			systemctl --user stop "$U"
 			for i in $(seq 1 300); do
 				systemctl --user is-active --quiet "$U" || break
