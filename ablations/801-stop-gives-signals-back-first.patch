@@ -1,0 +1,24 @@
+Kind: ablation
+Issue: #801
+Over: 801-widen-give-back.patch
+Takes out: the signals ignored while the lock goes back -- stopped_by() puts INT, TERM and HUP back to their default first again, as before the fix, so the second SIGTERM that systemctl stop sends, once the unit's main process has died on the first, ends the script with the lock held; over the widen, which holds give_back() open a second, every stopped boot must leave it, and stop-unit-check.sh say so
+Script: scripts/stop-unit-check.sh
+Expect: stop-unit-check: WRONG -- /tmp/uros-x86_64-run\.lock was left by a run whose unit was stopped
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 19085f3b..54a4e30f 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1200,11 +1200,9 @@ give_back() {
+ 	LOCK_ID=""
+ }
+ stopped_by() {
+-	trap - EXIT
+-	trap '' INT TERM HUP
++	trap - EXIT INT TERM HUP
+ 	give_back
+ 	echo "run-x86_64.sh: stopped by SIG$1 -- its qemu stopped and the lock given back" >&2
+-	trap - INT TERM HUP
+ 	kill -s "$1" "$$"
+ }
+ trap give_back EXIT
