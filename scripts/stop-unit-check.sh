@@ -44,6 +44,9 @@ not_asked() {
 }
 
 # The lock's path and the line are run-x86_64.sh's: read there, not assumed.
+case $SECS in
+''|*[!0-9]*)	not_asked "the budget '$SECS' is not a number of seconds" ;;
+esac
 grep -qx "LOCK=$LOCK" "$RUN" || not_asked "run-x86_64.sh's lock is not $LOCK"
 grep -qF "echo \"$SAID" "$RUN" || not_asked "run-x86_64.sh prints no \"$SAID\" line"
 [ -d "$LOCK" ] && not_asked "another run holds $LOCK"
