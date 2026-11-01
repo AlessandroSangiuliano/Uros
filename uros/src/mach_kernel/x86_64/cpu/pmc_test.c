@@ -48,8 +48,9 @@
  * begun those thousands of IPIs, each waking the idle boot processor, read
  * to the quiet census as thousands of idle passes: on omen it took the boot
  * for over, six boots of six, and stopped the machine under the free's
- * cross-call in three.  Both are defects of their own, filed apart; here a
- * test boot keeps its 68 MiB.
+ * cross-call in three.  Both are defects of their own -- the census's clock
+ * is #805, the cross-call a page #806 -- and here a test boot keeps its
+ * 68 MiB.
  *
  * The rules' ceilings are loose too: on the walks that miss, a hardware
  * prefetcher fetches the next line with each one, and omen counted two to
