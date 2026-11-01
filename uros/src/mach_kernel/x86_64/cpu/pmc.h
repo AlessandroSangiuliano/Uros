@@ -78,4 +78,11 @@ rdpmc(uint32_t counter)
 /* Every counter that counts, into v[0 .. pmc_count() - 1]. */
 void	pmc_read(uint64_t *v);
 
+/*
+ * x86_64/cpu/pmc_test.c: each counter made to count loads of known shape on
+ * this processor, and the boot told whether it did.  From pmc_report(), with
+ * a set counting; it walks 64 MiB.
+ */
+void	pmc_test(void);
+
 #endif	/* _X86_64_CPU_PMC_H_ */

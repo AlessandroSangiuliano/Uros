@@ -450,4 +450,6 @@ pmc_report(void)
 		       (unsigned long long) (v1[i] - v0[i]));
 	printf("%s (#804)\n", v1[0] == v0[0] || v1[1] == v0[1] ?
 	       " -- WRONG, a fixed counter did not move" : "");
+
+	pmc_test();
 }
