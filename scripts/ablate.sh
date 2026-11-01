@@ -265,6 +265,18 @@ if [ $CHECK = 1 ]; then
 fi
 
 [ $ABLATIONS -gt 0 ] || die 2 "no ablation among the patches: there is nothing for a test to catch"
+
+# #804: a patch that only a machine's metal can judge -- Intel's counters, which
+# no QEMU here offers: victus and pavillion are AMD, and OMEGA's KVM gives no
+# virtual PMU on its hybrid processor.  Booted here, both arms would print the
+# same refusal and the ablation would read as not caught.  Its Note says how it
+# was run there; --check-all still asks whether it applies.
+for p in "${EXPANDED[@]}"; do
+	machine=$(header "$p" Machine | head -n 1)
+	[ -z "$machine" ] ||
+		die 2 "$(basename "$p") is judged on $machine's metal (its Machine:), not under QEMU: its Note says how it was run"
+done
+
 check_applies "${EXPANDED[@]}" || exit 2
 
 # #670: a test read off the screen.  Screen: lines, one argument of
