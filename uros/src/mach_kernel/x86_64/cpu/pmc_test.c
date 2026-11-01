@@ -15,6 +15,10 @@
  *
  *   - lines 64 bytes apart in 16 KiB, which the L1D holds (32 KiB on the
  *     6th-generation core): after a pass to warm it, nothing misses;
+ *   - in 128 KiB, four times the L1D and half the L2 (256 KiB): every step
+ *     misses the L1D and hits the L2 -- the walk that tells a counter of L2
+ *     misses from one of L2 requests, which every other walk here makes
+ *     equal;
  *   - in 2 MiB, eight times the L2 (256 KiB) and a third of the last level
  *     (6 MiB on omen): after the warm pass nearly every step misses the L1D
  *     and the L2, and hits the last level;
@@ -58,18 +62,20 @@
 
 /* The walks, and how many steps each counts. */
 #define	W_L1D		0	/* lines in 16 KiB */
-#define	W_L2		1	/* lines in 2 MiB */
-#define	W_BIG		2	/* lines in 64 MiB */
-#define	W_PAGES_FEW	3	/* a slot a page, 4 pages */
-#define	W_PAGES		4	/* a slot a page, 16384 pages */
-#define	W_PAGES_STORE	5	/* the same, storing first */
-#define	W_COUNT		6
+#define	W_L2HIT		1	/* lines in 128 KiB */
+#define	W_L2		2	/* lines in 2 MiB */
+#define	W_BIG		3	/* lines in 64 MiB */
+#define	W_PAGES_FEW	4	/* a slot a page, 4 pages */
+#define	W_PAGES		5	/* a slot a page, 16384 pages */
+#define	W_PAGES_STORE	6	/* the same, storing first */
+#define	W_COUNT		7
 
 static const struct pmc_walk {
 	const char	*what;
 	uint32_t	size, stride, warm, steps, store;
 } pmc_walks[W_COUNT] = {
 	{ "lines in 16 KiB",		16 * 1024,	PMC_LINE,  1,  4096,		0 },
+	{ "lines in 128 KiB",		128 * 1024,	PMC_LINE,  1,  8192,		0 },
 	{ "lines in 2 MiB",		2 * 1024 * 1024, PMC_LINE, 1,  32768,		0 },
 	{ "lines in 64 MiB",		PMC_BIG,	PMC_LINE,  0,  PMC_BIG_STEPS,	0 },
 	{ "pages, 4",			4 * PMC_PAGE,	PMC_PAGE,  1,  4096,		0 },
@@ -89,31 +95,31 @@ struct pmc_rule {
 };
 
 static const struct pmc_rule pmc_rules[PMC_ROLE_BRANCH_MISS + 1][W_COUNT] = {
-	/* lines 16K  lines 2M     lines 64M    pages 4     pages 16K   pages, storing */
+	/* lines 16K  lines 128K   lines 2M     lines 64M    pages 4     pages 16K   pages, storing */
 	[PMC_ROLE_INST] =
-	{ { 100, 0 }, { 100, 0 },  { 100, 0 },  { 100, 0 }, { 100, 0 }, { 100, 0 } },
+	{ { 100, 0 }, { 100, 0 },  { 100, 0 },  { 100, 0 },  { 100, 0 }, { 100, 0 }, { 100, 0 } },
 	[PMC_ROLE_CYCLES] =
-	{ { 100, 0 }, { 100, 0 },  { 100, 0 },  { 100, 0 }, { 100, 0 }, { 100, 0 } },
+	{ { 100, 0 }, { 100, 0 },  { 100, 0 },  { 100, 0 },  { 100, 0 }, { 100, 0 }, { 100, 0 } },
 	[PMC_ROLE_L1D_MISS] =
-	{ { 0, 5 },   { 80, 300 }, { 80, 300 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 80, 300 }, { 80, 300 }, { 80, 300 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_L2_MISS] =
-	{ { 0, 5 },   { 80, 300 }, { 80, 300 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { 80, 300 }, { 80, 300 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_LLC_MISS] =
-	{ { 0, 5 },   { 0, 20 },   { 50, 150 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { 0, 20 },   { 50, 150 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_HITM] =
-	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
+	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_DTLB_LOAD_WALK] =
-	{ { 0, 5 },   { -1, 0 },   { -1, 0 },   { 0, 5 },   { 50, 150 },{ -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { -1, 0 },   { -1, 0 },   { 0, 5 },   { 50, 150 },{ -1, 0 } },
 	[PMC_ROLE_DTLB_STORE_WALK] =
-	{ { 0, 5 },   { -1, 0 },   { -1, 0 },   { 0, 5 },   { 0, 5 },   { 50, 150 } },
+	{ { 0, 5 },   { 0, 5 },    { -1, 0 },   { -1, 0 },   { 0, 5 },   { 0, 5 },   { 50, 150 } },
 	[PMC_ROLE_ITLB_WALK] =
-	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
+	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_LLC_REF] =
-	{ { -1, 0 },  { 80, 300 }, { 80, 300 }, { -1, 0 },  { -1, 0 },  { -1, 0 } },
+	{ { -1, 0 },  { 0, 5 },    { 80, 300 }, { 80, 300 }, { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_BRANCH] =
-	{ { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 } },
+	{ { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 } },
 	[PMC_ROLE_BRANCH_MISS] =
-	{ { 0, 5 },   { 0, 5 },    { 0, 5 },    { 0, 5 },   { 0, 5 },   { 0, 5 } },
+	{ { 0, 5 },   { 0, 5 },    { 0, 5 },    { 0, 5 },    { 0, 5 },   { 0, 5 },   { 0, 5 } },
 };
 
 static const char *const pmc_role_short[PMC_ROLE_BRANCH_MISS + 1] = {
