@@ -22,11 +22,26 @@
 #ifndef _X86_64_TRAP_FRAME_H_
 #define _X86_64_TRAP_FRAME_H_
 
+#define	TF_R15		0	/* #771: the six the syscall contract preserves */
+#define	TF_R14		8
+#define	TF_R13		16
+#define	TF_R12		24
+#define	TF_R11		32	/* #771: SYSCALL's copy of rflags */
+#define	TF_RBP		64
+#define	TF_RCX		96	/* #771: SYSCALL's copy of rip */
+#define	TF_RBX		104
 #define	TF_VECTOR	120	/* #650: where #DB's stub copies its seven words to */
 #define	TF_RIP		136
 #define	TF_CS		144
 #define	TF_RFLAGS	152
 #define	TF_RSP		160
 #define	TF_SS		168
+
+/*
+ * #771: the two flags a frame can hold that only iretq returns on as they
+ * are.  SYSRET clears RF, and restores TF so that the single-step trap is
+ * taken before the next instruction rather than after it.
+ */
+#define	TF_RFLAGS_IRETQ_ONLY	0x10100		/* RF | TF */
 
 #endif	/* _X86_64_TRAP_FRAME_H_ */

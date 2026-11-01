@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #787
 Takes out: thread_timeout()'s release whatever the timer's state -- it releases the fired timer's reference only when it finds the timer PENDING, as before #787. A wakeup that cancelled the timer while it was PENDING leaves the reference to nobody, and every one of timer_ref_test's sleepers, woken with its fired timer pending, ends the reaper with a count of 2 where the test's own is 1: never destroyed.
 Accel: tcg,kvm
-Run: --entry 58 300 -smp 4
+Run: --entry 59 300 -smp 4
 Expect: timer_ref_test: WRONG .* kept a reference after the reaper
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c

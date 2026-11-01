@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #787
 Takes out: the _locked variant in processor_set_policy_disable() alone -- it walks the set's threads holding thread_lock_act(thread) and calls thread_policy(), which takes act_lock_thread() again, the mutex already held; processor_set_limit() keeps its fix and comes back. pset_test's driver then does not come back from processor_set_policy_disable(), its second call, and the watcher names it. 787-pset-relock takes out both halves and is caught at the first.
 Accel: tcg,kvm
-Run: --entry 59 300 -smp 4
+Run: --entry 60 300 -smp 4
 Expect: pset_test: WRONG .*processor_set_policy_disable did not come back
 
 diff --git a/uros/src/mach_kernel/kern/processor.c b/uros/src/mach_kernel/kern/processor.c

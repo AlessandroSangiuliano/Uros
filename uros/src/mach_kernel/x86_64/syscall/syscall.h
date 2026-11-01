@@ -19,7 +19,8 @@
  *
  *   rbx r12 r13 r14 r15        arguments seven to eleven, for the calls
  *                              that have that many — and preserved, either
- *                              way, because the stub saves them
+ *                              way: the stub saves the ones it loads with
+ *                              arguments, and the kernel keeps the rest
  *   rbp                        preserved
  *   everything else            DESTROYED
  *
@@ -80,9 +81,14 @@
  * ══ What this costs us, and what it does not ══════════════════════════
  *
  * The registers a debugger needs in order to unwind — the callee-saved set,
- * and the stack and instruction pointers — are preserved, and preserved for
- * free: they are callee-saved in the C ABI, so the dispatcher's own compiled
- * code keeps them without the entry path storing anything.  Backtraces
+ * and the stack and instruction pointers — are preserved.  Through SYSRET
+ * that is free: they are callee-saved in the C ABI, so the dispatcher's own
+ * compiled code keeps them.  A call that blocks with a continuation does not
+ * come back that way — it gives up its kernel frames and returns through the
+ * thread's frame — so the entry path stores the six callee-saved registers
+ * in that frame as well, and rcx and r11 as SYSCALL left them, so that the
+ * way back through the frame can still be SYSRET rather than iretq: eight
+ * stores on every call (#771).  Backtraces
  * across a syscall are unaffected.  So is signal delivery: the frame a
  * handler returns through resumes at the instruction after SYSCALL, where
  * the destroyed registers are already dead by this contract.

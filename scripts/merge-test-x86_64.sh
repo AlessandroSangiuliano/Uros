@@ -124,6 +124,10 @@ CAMEBACK=0 CAMEBACK_WHERE=""
 #   earlypanic  -p panics on purpose before the boot processor has its page:
 #             its message and the backtrace after it, and no protection fault
 #             in their place (#665)
+#   contret   -l: a continuation that returns stops the machine NAMING it --
+#             thread_begin_trampoline's panic with cont_return_resume, and not
+#             context_thread_start's, which knows only that "a thread
+#             function" returned; scripts/cont-return-check.sh judges it (#771)
 #   pcidx     the harness's verdict and, where the processor offers PCID, -x's
 #             mode (PCID without INVPCID) with pcid_test's [1] and [2] lines;
 #             a pass on a question not asked says NOT ASKED in its verdict (#412)
@@ -189,6 +193,7 @@ ENTRIES="
 39 msirace --iommu_intel
 24 panic2
 40 earlypanic
+58 contret
 53 taskpanic
 55 ddbreport
 25 harness
@@ -235,16 +240,16 @@ ENTRIES="
 51 pcidn
 56 refusedfault
 56 refusedfault - 1
-58 harness
-58 harness - 1
 59 harness
 59 harness - 1
 60 harness
 60 harness - 1
-62 harness
-62 harness - 1
+61 harness
+61 harness - 1
 63 harness
 63 harness - 1
+64 harness
+64 harness - 1
 "
 
 # Not run, and why -- said on every run so the list cannot shrink in silence.
@@ -256,7 +261,7 @@ SKIPPED="
 19: -B panics on purpose; it needs a verdict of its own
 54: -e asks only of a build with UROS_SYSCALL_PROFILE, which a merge build is not; ablate.sh runs it with the widen patch, which compiles the profile in (#622)
 57: -u asks only of a build whose mutex_unlock() calls the release-window probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#753)
-61: -d asks only of a build whose master tick calls the dispatch probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
+62: -d asks only of a build whose master tick calls the dispatch probe, which a merge build's does not; ablate.sh runs it with the widen patch, which adds the call (#787)
 "
 
 # A boot's name: what its two logs are called, and what ci/job.sh's row()
@@ -549,6 +554,10 @@ judge() {	# entry verdict log-of-the-harness full-log accelerator -smp
 	earlypanic) grep -aq 'panic(cpu 0): early_panic: asked for with -p' "$f" &&
 		grep -aq '<x86_64_boot+0x' "$f" &&
 		! grep -aq 'trap general protection' "$f" ;;
+	# #771: its verdict line, as panic2's -- the panic names the
+	# continuation that returned, and context_thread_start's nameless one,
+	# which a fall-through would have reached, is not in the log.
+	contret) "$HERE/scripts/cont-return-check.sh" "$f" | grep -q '^cont-return-check: PASS' ;;
 	# #373: -b restarted the machine for the reason the entry gives it --
 	# its deadline, the quiet census, a panic -- and the zone Linux reads
 	# back after the restart read back first as ramoops would read it.

@@ -15,6 +15,7 @@
 #include <cpu/lapic.h>
 #include <cpu/regs.h>
 #include <ddb/cons.h>
+#include <pmap/pmap.h>		/* #792: pmap_smap_on — whether CLAC is legal */
 #include <time/pit.h>
 #include <trap/entry_test.h>
 #include <trap/trap.h>
@@ -518,6 +519,77 @@ __attribute__((noinline)) static void nmi_gate_test(void)
 			 t->bt_reached_boot);
 }
 
+/*
+ * #792: DF and AC are the two flags a gate leaves as the interrupted code had
+ * them, and the kernel's C assumes clear.
+ *
+ * Set both, then take a fault (through trap_common) and an NMI (through
+ * trap_paranoid), and read the flags each handler ran with -- captured in
+ * trap_record_frame(), where the handler is still live.  Both must read back
+ * clear: DF because the entry clears it (#792, the cld in entry.S), AC because
+ * trap_dispatch() clears it when a trap arrives with it set (#468), which the
+ * paranoid path reaches too.  AC is left as it was only where SMAP is off,
+ * where there is nothing to lift and CLAC would #UD.  So the ablation that
+ * takes out the entry's cld turns this red on DF, the half this issue adds.
+ *
+ * Ring 0, not ring 3, on purpose: the gate inherits the flags the same way
+ * from either ring, this is deterministic, and reading the handler's own live
+ * flags is a thing only the kernel side can do.  Set as late as possible and
+ * cleared at once, so no kernel C between here and the trap runs with DF set.
+ */
+static inline void set_df_ac(void)
+{
+	__asm__ volatile("pushfq; orq $0x40400, (%%rsp); popfq"
+			 ::: "cc", "memory");
+}
+
+static inline void clear_df_ac(void)
+{
+	__asm__ volatile("pushfq; andq $-0x40401, (%%rsp); popfq"
+			 ::: "cc", "memory");
+}
+
+__attribute__((noinline)) static void df_ac_cleared_on_entry(void)
+{
+	const struct trap_record *t;
+	uint64_t			fault_flags, nmi_flags;
+	int				smap = pmap_smap_on;
+	int				fault_df, fault_ac, nmi_df, nmi_ac;
+
+	trap_expect(T_INVALID_OPCODE, (uint64_t)(uintptr_t)trap_probe_faulted);
+	set_df_ac();
+	entry_probe_fault();
+	clear_df_ac();
+	fault_flags = trap_last()->handler_rflags;
+
+	trap_expect(T_NMI, TRAP_RESUME_HERE);
+	set_df_ac();
+	entry_probe_int2();
+	clear_df_ac();
+	nmi_flags = trap_last()->handler_rflags;
+
+	fault_df = (fault_flags & RFLAGS_DF) != 0;
+	fault_ac = (fault_flags & RFLAGS_AC) != 0;
+	nmi_df	 = (nmi_flags & RFLAGS_DF) != 0;
+	nmi_ac	 = (nmi_flags & RFLAGS_AC) != 0;
+
+	cons_puts("UrMach x86-64: a fault and an NMI taken with DF and AC set: "
+		  "the fault handler ran with DF ");
+	cons_putdec(fault_df);
+	cons_puts(" AC ");
+	cons_putdec(fault_ac);
+	cons_puts(", the NMI handler DF ");
+	cons_putdec(nmi_df);
+	cons_puts(" AC ");
+	cons_putdec(nmi_ac);
+	cons_puts(smap ? " (SMAP on)" : " (SMAP off, AC left as set)");
+	if (!fault_df && !nmi_df && (!smap || (!fault_ac && !nmi_ac)))
+		cons_puts(" — the entry cleared what the gate did not (#792)\r\n");
+	else
+		cons_puts(" — WRONG, a gate left DF or AC as the interrupted "
+			  "code had them (#792)\r\n");
+}
+
 void trap_entry_test(void)
 {
 	kernel_fault_entry();
@@ -526,4 +598,5 @@ void trap_entry_test(void)
 	device_entry_test();
 	nmi_delivery_test();
 	nmi_gate_test();
+	df_ac_cleared_on_entry();
 }

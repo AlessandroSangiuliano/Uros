@@ -49,6 +49,7 @@
 #include <kern/cpu_number.h>	/* #663: tss[] by processor number */
 #include <cpu/regs.h>		/* #422: cpu_apic_id */
 #include <sync/atomic.h>		/* #749: the stacks taken and given back */
+#include <ddb/ksym.h>			/* #771: a continuation that returns, named */
 
 /*
  * Module init.  Both halves exist because the machine-independent tree calls
@@ -183,7 +184,9 @@ act_machine_switch_pcb(thread_act_t thr_act)
  * and an interrupted one are indistinguishable to the switch.
  */
 /*
- * Where a thread that has never run begins.
+ * Where a thread that has never run begins -- and, since #771, where a thread
+ * switched to with a continuation begins again, from the frame
+ * context_reset_to_continuation() built at the top of its stack.
  *
  * context_init() can only place a function and one argument, and the argument
  * a new thread needs -- which thread it took the processor from -- is not
@@ -194,9 +197,43 @@ act_machine_switch_pcb(thread_act_t thr_act)
 static void
 thread_begin_trampoline(void *unused)
 {
-	thread_t prev = (thread_t) percpu()->prev_thread;
+	thread_t	prev = (thread_t) percpu()->prev_thread;
+	void		(*continuation)(void);
+	const char	*name;
+	uint64_t	offset = 0;
 
 	(void) unused;
+
+	/*
+	 * ⚠️ INTERRUPTS ARE ALREADY ON HERE: asserted, no longer turned on (#771).
+	 *
+	 * This used to execute an sti, saying that a thread that has never run
+	 * inherits IF clear from the interrupt that preempted its predecessor,
+	 * and that enabling it before the dispatch below stopped the machine on
+	 * the first tick (#459, 6 August).  On 18 August #455 made the flag part
+	 * of the thread: the switch pops RFLAGS with the rest, and the frame a
+	 * new thread starts from carries CTX_RFLAGS_INITIAL, IF set.  From then
+	 * on every thread arrived here with interrupts on, before the dispatch,
+	 * and the sti had nothing left to do; since #771 so does every thread
+	 * resumed in its continuation, whose frame is built the same way, once
+	 * per receive that slept.  The dispatch runs with interrupts on, as it
+	 * does after every other switch: a thread resumed in place returns into
+	 * thread_invoke() with the flag it blocked with and dispatches there.
+	 *
+	 * What IF clear here would mean now is a frame built without it, and
+	 * that is said where it shows -- first, on arrival, before the dispatch
+	 * below, which with interrupts off could wait for ever on a processor
+	 * that needs this one to answer -- rather than repaired a line later,
+	 * where an sti would hide the frame that lost it.
+	 */
+#if	MACH_ASSERT
+	if (!interrupts_enabled())
+		panic("thread %p arrived in the trampoline with interrupts off: the "
+		      "frame the switch popped did not carry IF, which "
+		      "CTX_RFLAGS_INITIAL sets for a thread that has never run and "
+		      "for one reset to its continuation (#455, #771)",
+		      current_thread());
+#endif	/* MACH_ASSERT */
 
 	/*
 	 * The thread we took the processor from, first: it is still accounted
@@ -207,33 +244,31 @@ thread_begin_trampoline(void *unused)
 		thread_dispatch(prev);
 
 	/*
-	 * Interrupts on, HERE and not sooner (#459).
-	 *
-	 * A thread that has never run reaches this from inside the interrupt
-	 * that preempted its predecessor, so it inherits IF clear -- and on
-	 * this machine nothing else will set it.  spl is a software priority
-	 * kept in the per-CPU block (x86_64/cpu/spl.c): splx() moves the level
-	 * and does not touch the flag, and only sploff()/splon() do.  A resumed
-	 * thread gets its flag back from the IRETQ of its own trap; a new one
-	 * has no trap to return from.
-	 *
-	 * ⚠️ Order measured, not assumed.  Enabling at the top of the
-	 * trampoline -- before the dispatch above -- lets the next tick in
-	 * while the switch is still letting go of the previous thread, and the
-	 * machine stops on that first tick.  After the dispatch, there is
-	 * nothing left half-done for an interrupt to walk into.
-	 */
-	__asm__ __volatile__("sti" : : : "memory");
-
-	/*
 	 * And the rest to the machine-independent trampoline, with THREAD_NULL
 	 * because the dispatch is already done: enable_preemption() -- which
 	 * thread_invoke() disabled on the way in and which a new thread never
 	 * reaches the way out of -- then spllo(), then this thread's own
 	 * function through self->continuation.
 	 */
+	continuation = current_thread()->continuation;
 	thread_continue(THREAD_NULL);
-	/*NOTREACHED*/
+
+	/*
+	 * 🔴 A CONTINUATION THAT RETURNS IS NAMED HERE (#771).
+	 *
+	 * thread_continue() calls it and does not expect it back: since #771 a
+	 * continuation begins on a fresh frame with nothing under it but this
+	 * trampoline.  Falling out of here would reach context_thread_start's
+	 * own panic, which can say only that "a thread function" returned, so
+	 * the one that did is named first -- read before the call, since the
+	 * field afterwards holds whatever the continuation last blocked with.
+	 * A thread's start function begins the same way, and is named the same.
+	 */
+	name = ksym_lookup((uint64_t) (uintptr_t) continuation, &offset);
+	panic("thread %p: its continuation %p <%s+0x%lx> returned, and nothing "
+	      "is under a continuation to return to (#771)", current_thread(),
+	      (void *) continuation, name != 0 ? name : "no symbol",
+	      (unsigned long) offset);
 }
 
 /*
@@ -604,6 +639,11 @@ thread_set_syscall_return(thread_t thread, kern_return_t retval)
 
 	thr_act->mact.pcb->user->rax = (uint64_t) retval;
 	/*
+	 * #771: and one more call that will leave through its frame, which the
+	 * census sets against the returns that left by SYSRET.
+	 */
+	percpu_count_frame_syscall();
+	/*
 	 * #411/#392: the other way out of a Mach trap.
 	 *
 	 * A blocking receive leaves through the continuation and never unwinds
@@ -970,23 +1010,21 @@ void fpu_area_free(void *area)
  * thread that does not exist yet.  Returning `old' would be right only for
  * the very first switch of each thread and wrong every time after.
  *
- * ⚠️ `continuation' is not used, and that is not an omission.  It tells the
- * machine that the outgoing thread does not need its stack kept, so a
- * machine that had something cheaper to do in that case would do it here.
- * This one does not: the stack is the thread's own page and is not returned
- * on a switch either way, and machine_kernel_stack_init() is what resets it
- * when the scheduler actually discards the contents.  Ignoring it costs a
- * saved register file that will be overwritten; noticing it would cost a
- * branch on every switch to save that.  If a measurement ever says
- * otherwise, this is the comment that says what to change.
+ * 🔴 `continuation' is honoured now (#771).  A non-null one means the
+ * outgoing thread blocked declaring it does not need its kernel stack kept:
+ * its resume point is reset to the top of its stack, in thread_continue, and
+ * the frames it is running in now are abandoned.  It used to be `(void)'d,
+ * and the thread resumed by returning through those frames, on the stack it
+ * blocked on -- so the continuation was never run and no stack could ever be
+ * given up, which #772 (stack hand-off) needs.  The reset keeps the thread's
+ * floating-point area, which still holds its live user state (its save is
+ * below, before the switch); only the kernel register-save frame is rebuilt.
  */
 thread_t
 switch_context(thread_t old, void (*continuation)(void), thread_t new)
 {
 	thread_act_t	old_act = old->top_act;
 	thread_act_t	new_act = new->top_act;
-
-	(void) continuation;
 
 	assert(old_act != THR_ACT_NULL && old_act->mact.pcb != PCB_NULL);
 	assert(new_act != THR_ACT_NULL && new_act->mact.pcb != PCB_NULL);
@@ -1021,6 +1059,31 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 		      new->ref_count, new->active, new_act->ref_count,
 		      new_act->active, new_act->thread);
 	}
+
+	/*
+	 * 🔴 THE TWO HALVES OF HOW IT RESUMES AGREE (#771).
+	 *
+	 * Its continuation field says whether it resumes in a continuation, its
+	 * context says where: a fresh frame at the top of its stack, or the
+	 * frames it saved.  Below, on the way out, this function writes both;
+	 * the debugger, the census and the IPC direct switch read the field
+	 * alone.  A thread parked by the mach_msg hot path's direct switch
+	 * used to keep a stale field over saved frames, and this is where that
+	 * shows -- on the way back in -- rather than in what a reader of the
+	 * field concludes.  Development kernels only: two loads and a compare
+	 * on every switch.
+	 */
+#if	MACH_ASSERT
+	if ((new->continuation != 0)
+	    != context_resumes_fresh(&new_act->mact.pcb->ctx))
+		panic("switch_context: thread %p resumes %s, and its continuation "
+		      "field says %p -- saved sp %p, entry stack %p (#771)",
+		      new, context_resumes_fresh(&new_act->mact.pcb->ctx)
+		      ? "in a fresh frame" : "in frames it saved",
+		      (void *) new->continuation,
+		      (void *) new_act->mact.pcb->ctx.rsp,
+		      (void *) new_act->mact.pcb->ctx.entry_stack);
+#endif	/* MACH_ASSERT */
 
 	/*
 	 * The address space, if it is changing.  An activation may be
@@ -1064,7 +1127,35 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	 */
 	percpu()->prev_thread = (void *) old;
 
-	context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
+	/*
+	 * 🔴 WHAT THE OUTGOING THREAD WILL RESUME ON, RECORDED IN IT (#771).
+	 *
+	 * Its continuation or none, written on every switch, because this is
+	 * the one place that decides it -- and whoever looks at a blocked
+	 * thread reads the field to know whether it has frames worth walking:
+	 * the debugger, the census, the IPC direct switch.  i386's
+	 * Switch_context has always written it (cswitch.S).  Left to the
+	 * callers it was right after thread_block() and stale after the
+	 * mach_msg hot path's direct switch, which passes 0 and sets nothing:
+	 * a parked server then read as resuming in mach_msg_receive_continue
+	 * while it held live frames.
+	 */
+	old->continuation = continuation;
+
+	if (continuation != 0) {
+		/*
+		 * The outgoing thread needs none of the frames it blocked in:
+		 * reset its resume point to the top of its stack, then switch
+		 * away abandoning them (#771).  It keeps the stack itself --
+		 * giving that up is #772's.  thread_begin_trampoline ends in
+		 * thread_continue(), which runs the continuation.
+		 */
+		context_reset_to_continuation(&old_act->mact.pcb->ctx,
+					      thread_begin_trampoline);
+		context_switch_continuation(&old_act->mact.pcb->ctx,
+					    &new_act->mact.pcb->ctx);
+	} else
+		context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
 
 	return (thread_t) percpu()->prev_thread;
 }

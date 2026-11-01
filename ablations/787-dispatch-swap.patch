@@ -3,7 +3,7 @@ Issue: #787
 Over: 787-widen-tick-probe.patch
 Takes out: the priority comparison in thread_setrun()'s two dispatching branches -- a second wakeup on a dispatching processor takes next_thread's place whatever the two priorities, as before #787. dispatch_test's tick wakes H and then L on the idle master, and L, the worse, runs first.
 Accel: tcg,kvm
-Run: --entry 61 300 -smp 1
+Run: --entry 62 300 -smp 1
 Expect: dispatch_test: WRONG .* L ran first
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c

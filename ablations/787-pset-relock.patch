@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #787
 Takes out: the _locked variants in processor_set_policy_disable() and processor_set_limit() -- each walks the set's threads holding thread_lock_act(thread) and calls thread_policy() and thread_max_priority(), which take act_lock_thread() again, the mutex already held. The x86-64 mutex has no owner check, so the driver sleeps for good holding the worker's activation lock and the set's lock. pset_test's driver does not come back from the first call, and the watcher says so.
 Accel: tcg,kvm
-Run: --entry 59 300 -smp 4
+Run: --entry 60 300 -smp 4
 Expect: pset_test: WRONG .* did not come back
 
 diff --git a/uros/src/mach_kernel/kern/processor.c b/uros/src/mach_kernel/kern/processor.c

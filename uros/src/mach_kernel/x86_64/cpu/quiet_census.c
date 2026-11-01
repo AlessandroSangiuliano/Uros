@@ -702,6 +702,36 @@ quiet_stacks_so_far(void)
  * each report as the machine goes idle, for the reason quiet_stacks_so_far()
  * gives.
  */
+static void quiet_handoff_so_far(void);
+
+/*
+ * #771: which way the returns through a thread's frame went (cpu/percpu.h).
+ *
+ * A system call that slept with a continuation leaves through its frame, and
+ * by SYSRET unless something has moved it there or set TF: the syscall entry
+ * keeps rcx and r11 for exactly the test the tail makes.  So calls having
+ * left that way with none by SYSRET means one of the two halves is gone --
+ * the stores or the test -- and nothing else would say it: iretq hands back
+ * the same registers, and only a measurement sees the difference, which is
+ * how this was found.  With each report as the machine goes idle, for the
+ * reason quiet_stacks_so_far() gives.
+ */
+static void
+quiet_frame_returns_so_far(void)
+{
+	uint64_t	sysrets, iretqs, syscalls;
+
+	percpu_frame_returns(&sysrets, &iretqs, &syscalls);
+	printf("quiet_census: returns to ring 3 through a thread's frame: %llu "
+	       "by SYSRET, %llu by iretq; %llu were system calls that slept%s "
+	       "(#771)\n",
+	       (unsigned long long) sysrets, (unsigned long long) iretqs,
+	       (unsigned long long) syscalls,
+	       syscalls == 0 ? " -- none yet" :
+	       sysrets == 0 ? " -- WRONG, none of them left by SYSRET" :
+	       " -- SYSRET taken");
+}
+
 static void
 quiet_handoff_so_far(void)
 {
@@ -775,6 +805,7 @@ quiet_census_pass(int mycpu)
 		       quiet_resets, quiet_all_passes);
 		cons_ring_so_far("quiet_census: ");
 		quiet_stacks_so_far();
+		quiet_frame_returns_so_far();
 		quiet_handoff_so_far();
 	}
 
@@ -813,6 +844,7 @@ quiet_census_pass(int mycpu)
 	       quiet_lock_busy);
 
 	quiet_stacks_so_far();
+	quiet_frame_returns_so_far();
 
 	/*
 	 * #615: whether the scheduler ever queued a bound thread on a run queue

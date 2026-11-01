@@ -204,10 +204,47 @@ syscall_entry:
 	 */
 	movq	%rcx, TF_RIP(%rsp)		/* where ring 3 resumes    */
 	movq	%r11, TF_RFLAGS(%rsp)		/* the flags it resumes on */
+
+	/*
+	 * 🔥 And rcx and r11 as SYSCALL left them, which are those two again
+	 * (#771).  Not for the caller, which the contract tells not to read
+	 * them: for the way back.  A call that sleeps with a continuation
+	 * leaves through thread_user_frame_return, and that tail returns by
+	 * SYSRET only when SYSRET would leave ring 3 exactly as iretq would --
+	 * which it can see from the frame only if rcx and r11 in it equal rip
+	 * and rflags.  Without these two stores every such return was an
+	 * iretq, and a blocked null RPC cost 1.863 us instead of 1.700 (omen,
+	 * KVM, release kernels, median of fifteen boots each; before #771,
+	 * returning through SYSRET from the C chain, 1.669).
+	 */
+	movq	%rcx, TF_RCX(%rsp)
+	movq	%r11, TF_R11(%rsp)
 	movq	%gs:PERCPU_USER_RSP, %rcx
 	movq	%rcx, TF_RSP(%rsp)		/* the stack it came in on */
 	movq	$USER_CS_RPL3, TF_CS(%rsp)
 	movq	$USER_DS_RPL3, TF_SS(%rsp)
+
+	/*
+	 * 🔴 AND THE SIX THE CONTRACT PRESERVES, BECAUSE NOT EVERY CALL GOES
+	 * BACK THE WAY IT CAME IN (#771).
+	 *
+	 * rbx, rbp and r12-r15 reach the caller unchanged, <syscall/syscall.h>
+	 * says.  Through SYSRET that is free: they are callee-saved in the C
+	 * ABI, and the dispatcher's compiled code has kept them.  A call that
+	 * blocks with a continuation is kept by nothing: it gives up the frames
+	 * it was called through and returns through this one, in
+	 * thread_user_frame_return, whose RESTORE_REGS loads all fifteen from
+	 * here.  With these six unwritten, a receive that slept came back with
+	 * all six as the thread's last trap had left them, or as
+	 * thread_frame_init() zeroed them -- of which libmach's stub hides three
+	 * for mach_msg, keeping rbx, r12 and r13 around the arguments it carries.
+	 */
+	movq	%r15, TF_R15(%rsp)
+	movq	%r14, TF_R14(%rsp)
+	movq	%r13, TF_R13(%rsp)
+	movq	%r12, TF_R12(%rsp)
+	movq	%rbp, TF_RBP(%rsp)
+	movq	%rbx, TF_RBX(%rsp)
 
 	/*
 	 * And off the frame, onto the thread's stack, before anything is pushed
@@ -230,13 +267,17 @@ syscall_entry:
 	 * weigh the two message copies against, and a floor measured from its
 	 * own far end reads as zero and flatters every conclusion drawn from it.
 	 *
-	 * ⚠️ NINE INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed: the
-	 * swapgs, the stack moves, and the frame's five writes above (#770).
-	 * The reading needs a stack to save two registers on, and the frame's
+	 * ⚠️ EIGHTEEN INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed:
+	 * the swapgs, the three moves of %rsp, the load of the caller's stack
+	 * pointer for the frame, and the frame's thirteen writes above -- five
+	 * since #770, and since #771 rcx and r11 and the six callee-saved
+	 * registers.  The
+	 * reading needs a stack to save two registers on, and the frame's
 	 * stack is not one any more -- the frame is the thread's and C runs on
 	 * kernel_stack -- so the phase begins once that stack is in %rsp, and
 	 * the reader is owed the fact that it does.  Before #770 the five
-	 * writes were inside it.
+	 * writes were inside it.  (This said nine: one short from #770, which
+	 * left the load out, and eight short once #771 added its writes.)
 	 *
 	 * rdtsc lands in edx:eax, both of which are live (%rax is the trap
 	 * number), so they are saved.  The pushes go below the top of
@@ -273,7 +314,7 @@ syscall_entry:
 
 
 	/*
-	 * ⚠️ The fifteen general-purpose registers above are NOT written, and
+	 * ⚠️ The other nine general-purpose registers are NOT written, and
 	 * that is the contract rather than an omission: <syscall/syscall.h>
 	 * declares them destroyed, and storing them on every call in the system
 	 * to preserve values the caller has already written off would be the
@@ -292,8 +333,8 @@ syscall_entry:
 	 *
 	 * That conclusion was wrong, and this paragraph said so for months:
 	 * "there is no longer a path that puts kernel memory there".  There is,
-	 * and it is not in this direction -- it is the way OUT.  Not saving the
-	 * fifteen is correct; handing back what the kernel left in them is not,
+	 * and it is not in this direction -- it is the way OUT.  Not saving those
+	 * nine is correct; handing back what the kernel left in them is not,
 	 * and SYSRET does exactly that.  See CLEAR_CLOBBERED below.
 	 *
 	 * ⚠️ The ablation could not have seen what it was measuring.  The leak

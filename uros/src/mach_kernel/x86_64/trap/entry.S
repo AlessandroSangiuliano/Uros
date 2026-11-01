@@ -263,6 +263,25 @@ trap_common:
 	jz	1f
 	swapgs
 1:
+	/*
+	 * 🔴 DF cleared on entry, before any kernel C runs (#792).
+	 *
+	 * A gate clears TF, VM, RF and NT, and IF for an interrupt gate, and
+	 * nothing else (SDM Vol. 3A, 253668-093US, Sec. 7.12.1.3) -- so DF
+	 * arrives as the interrupted code set it.  With it set, the kernel's
+	 * rep-string copies (memset, memcpy, copyin, copyout) step backward;
+	 * the System V ABI has DF clear on entry (psABI 1.0, Sec. 3.2.1), and
+	 * the kernel's C is built to that.  The SYSCALL path clears it through
+	 * SYSCALL_FMASK (syscall.c); the gates did not.
+	 *
+	 * AC is the other flag a gate preserves, and it is already handled:
+	 * trap_dispatch() clears it when a trap arrives with it set (#468), and
+	 * trap_dispatch_paranoid() reaches trap_dispatch() too -- so both gates
+	 * are covered there, and clearing it here as well would only blind that
+	 * path's count of the windows it closes.  DF has no such handler, so it
+	 * is cleared here, the once.
+	 */
+	cld
 	SAVE_REGS
 
 	movq	%rsp, %rdi		/* the frame is the argument */
@@ -355,6 +374,7 @@ trap_common:
  * is being optimised on any of them.
  */
 trap_paranoid:
+	cld				/* #792: as trap_common; AC is trap_dispatch's (#468) */
 	SAVE_REGS
 
 	/*
@@ -552,7 +572,8 @@ isr_table:
  *
  * The machine-independent kernel has four ways of leaving the kernel that
  * are not "return from the trap that got us here", and all four end in the
- * same place: restore the thread's saved user frame and iretq.
+ * same place: restore the thread's saved user frame and iretq -- or SYSRET,
+ * when the frame shows it would do the same (#771).
  *
  * The difference from trap_common's tail above is where the frame comes
  * from.  There, it is on the stack because the processor and SAVE_REGS put
@@ -674,8 +695,62 @@ thread_user_frame_return:
 	callq	act_user_return_frame	/* %rax = the frame, iretq-able (#780) */
 	cli
 	movq	%rax, %rsp
+
+	/*
+	 * 🔥 BY SYSRET WHEN IT WOULD LEAVE RING 3 EXACTLY AS IRETQ WOULD (#771).
+	 *
+	 * Since #771 this is how every system call that slept leaves -- a
+	 * receive that blocked resumes in its continuation and ends here, not
+	 * in syscall/entry.S's SYSRET -- and iretq is the slow way to ring 3.
+	 * SYSRET loads cs and ss from STAR, rip from rcx and rflags from r11,
+	 * less RF.  So it returns through this frame as iretq would when:
+	 *
+	 *   - cs and ss are the two STAR names: act_user_frame() has panicked
+	 *     on any others, and cpu/desc.c asserts they are SYSRET's pair;
+	 *   - rcx and r11 already hold rip and rflags, as the syscall entry
+	 *     leaves them: SYSRET would otherwise overwrite two registers the
+	 *     frame says something else about;
+	 *   - neither RF nor TF is set: SYSRET drops the one and takes the
+	 *     single-step trap on the other one instruction early;
+	 *   - rip is canonical, asked again HERE, with interrupts off: on Intel
+	 *     a SYSRET to a non-canonical rip faults in ring 0 on the user's
+	 *     stack (CVE-2012-0217), so the check that makes it safe is the
+	 *     one next to it, not act_user_return_frame()'s, which ran with
+	 *     interrupts on.
+	 *
+	 * Anything else is an iretq, as before.  The registers are read here
+	 * for the decision only: RESTORE_REGS loads all fifteen either way.
+	 *
+	 * Measured on omen under KVM, release kernels, median of fifteen boots
+	 * each: a null RPC to a receiver that had blocked took 1.863 us with
+	 * every such return an iretq and 1.700 with this; 1.669 before #771,
+	 * when it went back through SYSRET at the end of the C chain.  The
+	 * census says which way they went (quiet_frame_returns_so_far()).
+	 */
+	movq	TF_RIP(%rsp), %rdx
+	cmpq	TF_RCX(%rsp), %rdx
+	jne	.Lframe_iretq
+	movq	%rdx, %rcx
+	shlq	$16, %rcx
+	sarq	$16, %rcx
+	cmpq	%rdx, %rcx
+	jne	.Lframe_iretq
+	movq	TF_RFLAGS(%rsp), %rdx
+	cmpq	TF_R11(%rsp), %rdx
+	jne	.Lframe_iretq
+	testl	$TF_RFLAGS_IRETQ_ONLY, %edx
+	jnz	.Lframe_iretq
+	RESTORE_REGS
+	movq	(TF_RSP - TF_VECTOR)(%rsp), %rsp	/* the thread's own stack */
+	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
+	incq	%gs:PERCPU_FRAME_SYSRETS	/* and which way, for the same */
+	swapgs
+	sysretq
+
+.Lframe_iretq:
 	RESTORE_REGS
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
+	incq	%gs:PERCPU_FRAME_IRETQS	/* #771: and which way */
 	swapgs
 	addq	$16, %rsp		/* drop the vector and error code */
 	iretq

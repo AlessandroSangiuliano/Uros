@@ -2,7 +2,7 @@ Kind: ablation
 Issue: #787
 Takes out: thread_block_reason()'s clearing of TH_UNINT on a thread whose wait ended before it blocked -- the state stays TH_RUN|TH_UNINT, thread_select() does not keep it, and the thread gives way to anything runnable, a lower priority included, until a tick. passover_test's thread is then passed over for the spinner below it, as it was in every round of the measurement before the fix.
 Accel: tcg,kvm
-Run: --entry 62 300 -smp 1
+Run: --entry 63 300 -smp 1
 Expect: passover_test: WRONG .* passed over for L
 
 diff --git a/uros/src/mach_kernel/kern/sched_prim.c b/uros/src/mach_kernel/kern/sched_prim.c

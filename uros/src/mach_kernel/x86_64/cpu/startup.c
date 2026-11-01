@@ -941,6 +941,16 @@ machine_processors_ready(void)
 			cont_probe_start();
 
 		/*
+		 * -l: a continuation that returns, and the machine stopped
+		 * naming it (#771).  Beside -L for the same reason: the thread
+		 * has to be taken off its processor for its resume point to be
+		 * the continuation.  Does not return when it works -- the panic
+		 * is the test, and the merge test reads it (kind contret).
+		 */
+		if (boot_flag('l'))
+			cont_return_start();
+
+		/*
 		 * -S: stay up (#428).
 		 *
 		 * This kernel reaches bootstrap_create() and panics there

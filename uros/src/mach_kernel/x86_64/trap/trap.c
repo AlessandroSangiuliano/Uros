@@ -996,6 +996,13 @@ static void trap_record_frame(const struct trap_frame *frame)
 						    &last_trap.bt_first,
 						    "x86_64_boot",
 						    &last_trap.bt_reached_boot);
+	/*
+	 * The flags this handler is running with, for #792: read here, where
+	 * the handler is live, so a probe that set DF and AC before the trap
+	 * can check the entry cleared them.  Nothing between the gate and this
+	 * point sets either, so it is the entry's doing that shows.
+	 */
+	last_trap.handler_rflags = read_rflags();
 	last_trap.caught = 1;
 }
 

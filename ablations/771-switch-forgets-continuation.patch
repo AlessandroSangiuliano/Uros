@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #771
+Takes out: switch_context()'s record of what the outgoing thread resumes on -- the mach_msg hot path's direct switch passes 0 and sets nothing, so a server it parks keeps an earlier receive's continuation over the frames it saved, and the check on the way back in names the disagreement
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 1
+Expect: switch_context: thread [^ ]+ resumes in frames it saved, and its continuation field says
+
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index 0beb2414..13acd4a5 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -1100,7 +1100,6 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
+ 	 * a parked server then read as resuming in mach_msg_receive_continue
+ 	 * while it held live frames.
+ 	 */
+-	old->continuation = continuation;
+ 
+ 	if (continuation != 0) {
+ 		/*

@@ -228,6 +228,28 @@ void context_become_current(struct context *ctx, uint64_t stack_top,
 void context_switch(struct context *old, struct context *fresh);
 
 /*
+ * A switch away from a thread that blocked with a continuation (#771): its
+ * resume point has been reset with context_reset_to_continuation(), so its
+ * live frames are abandoned rather than saved.
+ */
+void context_switch_continuation(struct context *old, struct context *fresh);
+
+/*
+ * Point a blocked thread's context at a fresh start at the top of its kernel
+ * stack, in `entry' (the trampoline that ends in thread_continue), keeping its
+ * floating-point area and user frame -- for a thread resuming on a
+ * continuation rather than by returning (#771).
+ */
+void context_reset_to_continuation(struct context *ctx, void (*entry)(void *));
+
+/*
+ * Whether a switched-out context will resume in a fresh frame at the top of
+ * its stack rather than in the frames it saved (#771) -- the half of "how
+ * this thread resumes" that its continuation field must agree with.
+ */
+int context_resumes_fresh(const struct context *ctx);
+
+/*
  * The raw form, in assembly: save at *old_rsp, resume from new_rsp.
  *
  * context_switch() is this plus the bookkeeping that must accompany it —
