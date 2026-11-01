@@ -341,11 +341,31 @@ cleanup() {
 
 	[ $KEEP = 1 ] && return
 	for arm in "${ARMS[@]}"; do
-		[ -d "$RUNDIR/$arm" ] && git -C "$REPO" worktree remove --force "$RUNDIR/$arm"
+		[ -d "$RUNDIR/$arm" ] || continue
+		git -C "$REPO" worktree remove --force "$RUNDIR/$arm" ||
+			echo "ablate: the $arm arm's worktree was not removed: git worktree remove --force $RUNDIR/$arm" >&2
 	done
 	return 0
 }
+# 🔴 A SECOND SIGNAL WAITS UNTIL THE WORKTREES ARE GONE (#801), as in
+# run-x86_64.sh.  Stopping a unit signals what is left of it twice -- its main
+# process, a script with no trap, dies on the first -- and the second ended
+# the EXIT trap's git worktree remove: a run stopped in a boot left both arms,
+# 2 runs of 2.  So INT, TERM and HUP are ignored while they go, and get their
+# default back only for the kill that ends the script; and a removal that
+# fails says which, where under set -e it ended the loop before the other arm.
+stopped_by() {
+	trap - EXIT
+	trap '' INT TERM HUP
+	cleanup
+	echo "ablate: stopped by SIG$1" >&2
+	trap - INT TERM HUP
+	kill -s "$1" "$$"
+}
 trap cleanup EXIT
+trap 'stopped_by INT' INT
+trap 'stopped_by TERM' TERM
+trap 'stopped_by HUP' HUP
 
 # The build is configured with every OSFMK_* and UROS_* option of the main
 # build, because this tree's configuration cannot be reproduced from the

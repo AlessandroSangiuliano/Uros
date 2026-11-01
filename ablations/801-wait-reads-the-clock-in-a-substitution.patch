@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #801
+Over: 801-widen-date-lingers.patch
+Takes out: the clock read as a job of the wait's -- the wait for qemu reads it with $(date +%s) again, once a pass, as before the fix; over the widen, which keeps each such read's door open 10 s of every 10.2, the SIGINT that harness-lifecycle-check.sh's signals check sends the run alone is dropped by bash, and the run goes on with its qemu after it
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: signals
+Expect: lifecycle: signal INT: the run WENT ON for 30 s after SIGINT
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 6be96f43..c4918c58 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -1622,7 +1622,7 @@ CLOCK_POLICY=$(uros_clock_policy_khz | tr '\n' ' ')
+ CLOCK_SECONDS=""
+ CLOCK_LAST=$(( $(date +%s) + 1 ))
+ while kill -0 "$QPID" 2>/dev/null; do
+-	waited_line NOW date +%s	# one reading a pass, for every test below
++	NOW=$(date +%s)	# 801-wait-reads-the-clock-in-a-substitution
+ 	if [ -n "$CLOCK_POLICY" ] && [ "$NOW" -gt "$CLOCK_LAST" ]; then
+ 		CLOCK_LAST=$NOW
+ 		waited_line CLOCK_NOW uros_clock_now "$QPID" "$CLOCK_POLICY"

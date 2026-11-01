@@ -1,0 +1,30 @@
+Kind: widen
+Issue: #801
+Holds open: the time bash waits for a $(date +%s)'s child after it has read the child's output -- date() prints, closes its output and takes 10 s more to exit, from the wait's second pass on, where the real date(1) takes a fraction of a millisecond, so that a SIGINT sent to the script alone while it waits for its qemu lands every time where bash only notes it and never runs the trap; the fixed tree, which waits for date as a job with `wait', must still stop at once and pass
+
+diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
+index 6be96f43..73596788 100755
+--- a/scripts/run-x86_64.sh
++++ b/scripts/run-x86_64.sh
+@@ -43,6 +43,21 @@
+ # coverage map named a test that had never existed: a measurement that is
+ # taken and never read.
+ set -e
++# 801-widen-date-lingers: date(1) prints, closes its output, and takes 10 s
++# more to exit -- the real one closes it before it exits, for a fraction of a
++# millisecond -- so that while bash waits for a $(date +%s) of the wait for
++# qemu, the door it leaves open is open for all of each pass but a fifth of a
++# second.  Only from the wait's second pass on, where NOW holds the first
++# reading: the $(date +%s) before the wait, which the fixed tree keeps, stay
++# as quick as the real ones, done long before a check's signal comes.  Only
++# ever run in a subshell: every date in this script is a $(...) or a job of
++# the wait's.
++date() {
++	command date "$@"
++	[ -n "${NOW:-}" ] || return 0
++	exec >&-
++	sleep 10
++}
+ REPO=$(cd "$(dirname "$0")/.." && pwd)
+ 
+ # 🔴 THE SAME OVERRIDE make-disk-x86_64.sh HAS, AND IT WAS MISSING HERE (#566).

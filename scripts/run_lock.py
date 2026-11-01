@@ -37,6 +37,7 @@ LOCK = "/tmp/uros-x86_64-run.lock"
 PR_SET_PDEATHSIG = 1		# prctl(2): a signal for when the parent dies
 
 _machines = []			# the qemus start_qemu() started
+_STOP = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)	# give_back() waits them out
 
 
 def _owner():
@@ -59,20 +60,34 @@ def take(who):
 def give_back(mine, who):
     """The run's qemu stopped, if the run has not stopped it already, and
     then the lock removed, only while it is still `mine' -- said, as `who',
-    when it is not."""
-    for q in _machines:
-        if q.poll() is None:
-            q.kill()
-            q.wait()
+    when it is not.
+
+    🔴 With TERM, HUP and INT ignored until it is done (#801).  _stop() stays
+    the handler, so a second TERM raised SystemExit again in here -- and
+    systemctl sends one: a unit's main process, a script with no trap, dies
+    on the first, and what is left of the unit is signalled again.  Stopped
+    that way (harness-lifecycle-check.sh's unitstop), rip-sample.py and
+    uart-stall.py left the lock in 6 boots of 6 and char-roundtrip.py in 1.
+    Ignored rather than blocked: blocked in this thread, a signal can be
+    taken by another, and Python runs the handler here all the same."""
+    before = [(sig, signal.signal(sig, signal.SIG_IGN)) for sig in _STOP]
     try:
-        ours = _owner() == mine
-    except FileNotFoundError:
-        ours = False
-    if ours:
-        os.rmdir(LOCK)
-    else:
-        print(f"{who}: the lock was not this run's any more when it ended "
-              f"({LOCK}): left as it is", file=sys.stderr)
+        for q in _machines:
+            if q.poll() is None:
+                q.kill()
+                q.wait()
+        try:
+            ours = _owner() == mine
+        except FileNotFoundError:
+            ours = False
+        if ours:
+            os.rmdir(LOCK)
+        else:
+            print(f"{who}: the lock was not this run's any more when it ended "
+                  f"({LOCK}): left as it is", file=sys.stderr)
+    finally:
+        for sig, handler in before:
+            signal.signal(sig, handler)
 
 
 def _stop(signum, _frame):

@@ -1150,6 +1150,16 @@ fi
 # another run could take it and boot beside it.  Now qemu goes first, then the
 # lock, then the script, by the signal it was sent.
 #
+# 🔴 AND A SECOND SIGNAL WAITS UNTIL THE LOCK IS BACK (#801).  The trap put
+# INT, TERM and HUP back to their default first, so a second one ended the
+# script holding the lock -- and systemctl sends one: a unit's main process, a
+# script with no trap, dies on the first SIGTERM, and what is left of the unit
+# is signalled again.  On 31 October the lock stayed after a stopped campaign,
+# and the next run refused to start until it was removed by hand; stopped the
+# same way (harness-lifecycle-check.sh's unitstop), it left it in 3 of 3.  So
+# the signals are ignored while qemu and the lock go, and get their default
+# back only for the kill that ends the script.
+#
 # 🔴 THE LOCK IS GIVEN BACK ONLY WHILE IT IS STILL THIS RUN'S: the directory's
 # device, inode and change time, taken right after mkdir, as fbcons-readback.py
 # does (#661).  A lock removed by hand and taken again by another run is that
@@ -1165,7 +1175,8 @@ lock_id() {
 }
 give_back() {
 	# Before the line that sets QPID, the qemu just started is $!, the only
-	# job this script puts in the background.  Asked all the same whether
+	# job this script has put in the background by then: the wait's own
+	# (waited(), #801) all come after it.  Asked all the same whether
 	# it is a qemu and this script's child: a job added before it one day,
 	# or a PID the system gave to someone else once qemu was reaped, is
 	# never the one killed.
@@ -1189,9 +1200,11 @@ give_back() {
 	LOCK_ID=""
 }
 stopped_by() {
-	trap - EXIT INT TERM HUP
+	trap - EXIT
+	trap '' INT TERM HUP
 	give_back
 	echo "run-x86_64.sh: stopped by SIG$1 -- its qemu stopped and the lock given back" >&2
+	trap - INT TERM HUP
 	kill -s "$1" "$$"
 }
 trap give_back EXIT
@@ -1480,6 +1493,35 @@ RUN_STARTED=$(date +%s)
 # ⚠️ It said so, ~35 times a run, in every log since this watchdog was written,
 # and nobody read it.  A guard that is always broken is worse than no guard,
 # because the runs that do not need it still pass and hide that it is gone.
+# 🔴 THE WAIT EXPANDS NO $(...) AND RUNS NOTHING IN THE FOREGROUND (#801).
+#
+# A SIGINT sent to this script alone -- harness-lifecycle-check.sh's signals
+# check, a kill from another terminal -- is dropped by bash if it arrives while
+# bash waits for the child of a $(...): the handler it sets for that wait only
+# notes the signal, and only the end of a job reads the note, which such a
+# child is not (bash 5.3.20, jobs.c's wait_sigint_handler() and waitchld();
+# on bug-bash since June 2015, and kept).  date(1) closes its output before it
+# exits, so each $(date +%s) of this loop held the door open for a fraction of
+# a millisecond: 1 run in 100 went on to its end with the signal sent, the
+# trap never run (~/uros-tests/801).  A command in the foreground has a
+# narrower window of its own, just after it is reaped.  So in the wait each
+# command runs as a job and is waited for with `wait', which a trapped signal
+# ends at once, running the trap; a line of output comes back through a file,
+# read by the `read' builtin.  Before qemu starts and after it ends the script
+# still expands $(...), and a signal sent alone in those seconds can still be
+# lost: the run then ends as it would have, its lock given back.
+WAITED_LINE="$LOG.waited"
+waited() {
+	"$@" &
+	wait $!
+}
+waited_line() {
+	_waited_var=$1
+	shift
+	"$@" > "$WAITED_LINE" &
+	wait $!
+	read -r "$_waited_var" < "$WAITED_LINE" || true
+}
 progress_count() {
 	_n=$(grep -avc "$IDLE_CHATTER" "$LOG" 2>/dev/null || true)
 	[ -n "$_n" ] || _n=0
@@ -1580,9 +1622,10 @@ CLOCK_POLICY=$(uros_clock_policy_khz | tr '\n' ' ')
 CLOCK_SECONDS=""
 CLOCK_LAST=$(( $(date +%s) + 1 ))
 while kill -0 "$QPID" 2>/dev/null; do
-	if [ -n "$CLOCK_POLICY" ] && [ "$(date +%s)" -gt "$CLOCK_LAST" ]; then
-		CLOCK_LAST=$(date +%s)
-		CLOCK_NOW=$(uros_clock_now "$QPID" "$CLOCK_POLICY")
+	waited_line NOW date +%s	# one reading a pass, for every test below
+	if [ -n "$CLOCK_POLICY" ] && [ "$NOW" -gt "$CLOCK_LAST" ]; then
+		CLOCK_LAST=$NOW
+		waited_line CLOCK_NOW uros_clock_now "$QPID" "$CLOCK_POLICY"
 		CLOCK_SECONDS="$CLOCK_SECONDS ${CLOCK_NOW:--}"
 	fi
 	# ⚠️ Same patterns as must_report above, and the counts are out of these
@@ -1594,9 +1637,10 @@ while kill -0 "$QPID" 2>/dev/null; do
 	# and waiting for it -- all_reported -- held every panicking run for its
 	# whole quiet budget, twenty minutes under TCG, after the machine had
 	# stopped.  The wait below still lets the backtraces finish.
-	if ! grep -aqE "$RESTART_RE" "$LOG" &&
-	   { grep -aqE "$PANIC_RE" "$LOG" \
-	     || { grep -aqE "$DONE_RE" "$LOG" && expected_reports all_reported; }; }; then
+	if ! waited grep -aqE "$RESTART_RE" "$LOG" &&
+	   { waited grep -aqE "$PANIC_RE" "$LOG" \
+	     || { waited grep -aqE "$DONE_RE" "$LOG" &&
+		  waited expected_reports all_reported; }; }; then
 		# #599: a panic is not over at its first line.  The console's
 		# final copy and every processor's backtrace come after it, at
 		# the wire's pace -- four processors' worth is seconds of bytes
@@ -1615,49 +1659,50 @@ while kill -0 "$QPID" 2>/dev/null; do
 		# reached.  The wait now watches for the restart line too, and a
 		# boot that says it restarts goes back to waiting for qemu to leave,
 		# within the quiet budget and the wall cap like any other.
-		if grep -aqE "$PANIC_RE" "$LOG"; then
+		if waited grep -aqE "$PANIC_RE" "$LOG"; then
 			_PANIC_SIZE=-1
 			_PANIC_STILL=0
 			_PANIC_WAITED=0
 			while [ "$_PANIC_STILL" -lt 3 ] && [ "$_PANIC_WAITED" -lt 60 ] &&
 			      kill -0 "$QPID" 2>/dev/null; do
-				grep -aqE "$RESTART_RE" "$LOG" && break
-				_PANIC_NOW=$(stat -c %s "$LOG")
+				waited grep -aqE "$RESTART_RE" "$LOG" && break
+				waited_line _PANIC_NOW stat -c %s "$LOG"
 				if [ "$_PANIC_NOW" = "$_PANIC_SIZE" ]; then
 					_PANIC_STILL=$((_PANIC_STILL + 1))
 				else
 					_PANIC_STILL=0
 					_PANIC_SIZE=$_PANIC_NOW
 				fi
-				sleep 1
+				waited sleep 1
 				_PANIC_WAITED=$((_PANIC_WAITED + 1))
 			done
-			grep -aqE "$RESTART_RE" "$LOG" && continue
+			waited grep -aqE "$RESTART_RE" "$LOG" && continue
 		else
-			sleep 1
+			waited sleep 1
 		fi
 		break
 	fi
-	NOW_PROGRESS=$(progress_count)
+	waited_line NOW_PROGRESS progress_count
 	if [ "$NOW_PROGRESS" -gt "$LAST_PROGRESS" ]; then
 		LAST_PROGRESS=$NOW_PROGRESS
-		DEADLINE=$(( $(date +%s) + SECS ))
+		DEADLINE=$(( NOW + SECS ))
 	fi
 	# ⚠️ The quiet budget is tested FIRST, and that order is the answer when
 	# both have run out: a run that went quiet and then sat there until the
 	# wall cap is a run that went quiet.
-	if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+	if [ "$NOW" -ge "$DEADLINE" ]; then
 		CUT_SHORT=1
 		CUT_REASON=quiet
 		break
 	fi
-	if [ "$(date +%s)" -ge "$HARD_DEADLINE" ]; then
+	if [ "$NOW" -ge "$HARD_DEADLINE" ]; then
 		CUT_SHORT=1
 		CUT_REASON=livelock
 		break
 	fi
-	sleep 0.2
+	waited sleep 0.2
 done
+rm -f "$WAITED_LINE"
 
 # 🔴 A run cut short with the gdb stub on is walked before it is killed (#526).
 #

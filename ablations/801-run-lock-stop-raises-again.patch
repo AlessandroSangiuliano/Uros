@@ -1,0 +1,21 @@
+Kind: ablation
+Issue: #801
+Takes out: the signals ignored while run_lock.py's give_back() runs -- _stop() stays the handler in there, as before the fix, so the second SIGTERM that systemctl stop sends raises SystemExit inside the give-back, and a tool on this lock whose unit is stopped leaves the lock; harness-lifecycle-check.sh's unitstop must say so for rip-sample.py or uart-stall.py, which left it in 6 boots of 6 each before the fix
+Script: scripts/harness-lifecycle-check.sh
+Script: --only
+Script: unitstop
+Expect: lifecycle: unitstop (rip-sample|uart-stall)\.py: .*the lock is STILL THERE
+
+diff --git a/scripts/run_lock.py b/scripts/run_lock.py
+index 54a7bbdb..af6b3b90 100644
+--- a/scripts/run_lock.py
++++ b/scripts/run_lock.py
+@@ -70,7 +70,7 @@ def give_back(mine, who):
+     uart-stall.py left the lock in 6 boots of 6 and char-roundtrip.py in 1.
+     Ignored rather than blocked: blocked in this thread, a signal can be
+     taken by another, and Python runs the handler here all the same."""
+-    before = [(sig, signal.signal(sig, signal.SIG_IGN)) for sig in _STOP]
++    before = []
+     try:
+         for q in _machines:
+             if q.poll() is None:
