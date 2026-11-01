@@ -58,12 +58,17 @@
 #define	MSR_IA32_FIXED_CTR0		0x309
 #define	MSR_IA32_FIXED_CTR_CTRL		0x38D
 #define	MSR_IA32_PERF_GLOBAL_CTRL	0x38F
+#define	MSR_IA32_DEBUGCTL		0x1D9
+#define	MSR_IA32_PERF_CAPABILITIES	0x345	/* if CPUID.01H:ECX[15], PDCM */
 
 #define	PERFEVTSEL_OS		(1u << 17)	/* count at ring 0 */
 #define	PERFEVTSEL_EN		(1u << 22)
 #define	FIXED_CTR_OS(n)		(1ULL << (4 * (n)))	/* ENABLE = 01b: ring 0 */
 #define	GLOBAL_FIXED(n)		(1ULL << (32 + (n)))
 #define	RDPMC_FIXED		(1u << 30)
+#define	CPUID1_ECX_PDCM		(1u << 15)
+#define	PERF_CAP_FREEZE_SMM	(1ULL << 12)	/* DEBUGCTL.FREEZE_WHILE_SMM is there */
+#define	DEBUGCTL_FREEZE_SMM	(1ULL << 14)
 
 #define	PMC_FIXED_USED		2	/* instructions retired, unhalted cycles */
 #define	PMC_GENERAL_MAX		(PMC_MAX - PMC_FIXED_USED)
@@ -141,6 +146,7 @@ struct pmc_found {
 	uint64_t	asked_value;
 	int		set;			/* the set counting, 0 for none */
 	int		refusal, bad_event;
+	int		pdcm;			/* CPUID.01H:ECX[15]: IA32_PERF_CAPABILITIES is there */
 };
 
 static struct pmc_found	pmc_boot;		/* the boot processor's, for the report */
@@ -150,6 +156,7 @@ int			pmc_counting;		/* pmc_count(), for the profiler */
 static volatile uint32_t pmc_seen;		/* processors past pmc_init_cpu() */
 static volatile uint32_t pmc_programmed;	/* of them, the ones that programmed */
 static volatile uint32_t pmc_kept;		/* ... and read every register back as written */
+static volatile uint32_t pmc_frozen_in_smm;	/* ... and froze them while in SMM */
 
 static int
 pmc_is_skl_model(const struct pmc_found *f)
@@ -177,6 +184,7 @@ pmc_choose(struct pmc_found *f)
 	/* "GenuineIntel", in EBX, EDX, ECX. */
 	f->intel = b == 0x756e6547 && d == 0x49656e69 && c == 0x6c65746e;
 	cpuid(1, &a, &b, &c, &d);
+	f->pdcm = (c & CPUID1_ECX_PDCM) != 0;
 	f->family = (a >> 8) & 0xf;
 	f->model = (a >> 4) & 0xf;
 	if (f->family == 0xf)
@@ -239,13 +247,30 @@ pmc_choose(struct pmc_found *f)
 		f->set = (int) v;
 }
 
-/* This processor's counters, the set's events in the general ones. */
+/*
+ * This processor's counters, the set's events in the general ones.
+ *
+ * 🔴 AND FROZEN WHILE THE FIRMWARE RUNS, WHERE THE PROCESSOR OFFERS IT.  An
+ * SMI takes the processor into System Management Mode for the firmware's own
+ * work -- on a laptop on battery, often -- and the counters go on counting
+ * there unless IA32_DEBUGCTL.FREEZE_WHILE_SMM (bit 14) stops them (SDM
+ * 325462-093US, 20.4.1; offered if IA32_PERF_CAPABILITIES[12], 22.8).  On
+ * omen on battery a walk of known shape counted four times its instructions,
+ * and a spin with interrupts off counted page walks, before this was set.
+ */
 static void
-pmc_program(int set)
+pmc_program(int set, int pdcm)
 {
 	const struct pmc_set	*s = &pmc_sets[set];
-	uint64_t		sel, fixed, global;
+	uint64_t		sel, fixed, global, dbg;
 	int			i, kept = 1;
+
+	if (pdcm && (rdmsr(MSR_IA32_PERF_CAPABILITIES) & PERF_CAP_FREEZE_SMM)) {
+		dbg = rdmsr(MSR_IA32_DEBUGCTL) | DEBUGCTL_FREEZE_SMM;
+		wrmsr(MSR_IA32_DEBUGCTL, dbg);
+		if (rdmsr(MSR_IA32_DEBUGCTL) == dbg)
+			atomic_add32(&pmc_frozen_in_smm, 1);
+	}
 
 	wrmsr(MSR_IA32_PERF_GLOBAL_CTRL, 0);
 	for (i = 0; i < s->n; i++) {
@@ -287,7 +312,7 @@ pmc_init_cpu(int boot_processor)
 			       PMC_FIXED_USED + pmc_sets[f.set].n;
 	}
 	if (f.set != 0)
-		pmc_program(f.set);
+		pmc_program(f.set, f.pdcm);
 	atomic_add32(&pmc_seen, 1);
 }
 
@@ -371,8 +396,9 @@ pmc_report(void)
 	printf("pmc: ");
 	if (f->set != 0) {
 		printf("counting the %s set at ring 0 on %u of %u processors, "
-		       "every register read back as written on %u: ", s->what,
-		       pmc_programmed, pmc_seen, pmc_kept);
+		       "every register read back as written on %u, frozen while "
+		       "in SMM on %u: ", s->what, pmc_programmed, pmc_seen,
+		       pmc_kept, pmc_frozen_in_smm);
 		for (i = 0; i < n; i++)
 			printf("%s%s", i == 0 ? "" : ", ", pmc_name(i));
 		printf("; ");
