@@ -59,6 +59,8 @@ static volatile int		pset_test_worker_gone;
 static int			pset_test_event;	/* the worker blocks on */
 static kern_return_t		pset_test_limit_kr;
 static kern_return_t		pset_test_disable_kr;
+static kern_return_t		pset_test_destroy_kr;
+static volatile int		pset_test_worker_policy;
 
 static void
 pset_test_worker_fn(void)
@@ -92,6 +94,7 @@ static void
 pset_test_driver_fn(void)
 {
 	policy_fifo_limit_data_t	fifo_limit;
+	spl_t				s;
 
 	fifo_limit.max_priority = BASEPRI_USER;
 
@@ -103,6 +106,21 @@ pset_test_driver_fn(void)
 	pset_test_disable_kr = processor_set_policy_disable(pset_test_set,
 							    POLICY_FIFO, TRUE);
 	pset_test_phase = 3;
+
+	/* The worker's policy now, before destroy reassigns it (read here, not
+	 * in the test thread, so the two do not race over it). */
+	s = splsched();
+	thread_lock(pset_test_worker);
+	pset_test_worker_policy = pset_test_worker->policy;
+	thread_unlock(pset_test_worker);
+	splx(s);
+
+	/* #787 section 12: destroy the set with the worker still in it.  It
+	 * reassigns the worker to the default set and must come back; it held
+	 * the set's lock across thread_doassign(), which locks that same set
+	 * again. */
+	pset_test_destroy_kr = processor_set_destroy(pset_test_set);
+	pset_test_phase = 4;
 
 	thread_terminate_self();
 }
@@ -133,7 +151,6 @@ pset_test(void)
 	int				worker_policy = -1;
 	const char			*stuck = NULL;
 	natural_t			t0;
-	spl_t				s;
 
 	/*
 	 * A set of the test's own, FIFO enabled: the policy this test disables,
@@ -200,9 +217,9 @@ pset_test(void)
 		goto stop_worker;
 	}
 
-	printf("pset_test: starting: processor_set_limit() then "
-	       "processor_set_policy_disable() on a set with a FIFO worker, "
-	       "each must come back (#787)\n");
+	printf("pset_test: starting: processor_set_limit(), "
+	       "processor_set_policy_disable() and processor_set_destroy() on a "
+	       "set with a FIFO worker, each must come back (#787)\n");
 
 	driver = kernel_thread(kernel_task, pset_test_driver_fn, (char *) 0);
 	if (driver == THREAD_NULL) {
@@ -214,14 +231,10 @@ pset_test(void)
 		stuck = "processor_set_limit";
 	else if (!pset_test_reach(3))
 		stuck = "processor_set_policy_disable";
-
-	if (stuck == NULL) {
-		s = splsched();
-		thread_lock(worker);
-		worker_policy = worker->policy;
-		thread_unlock(worker);
-		splx(s);
-	}
+	else if (!pset_test_reach(4))
+		stuck = "processor_set_destroy";
+	else
+		worker_policy = pset_test_worker_policy;
 
 stop_worker:
 	/*
@@ -230,31 +243,34 @@ stop_worker:
 	 */
 	if (stuck != NULL)
 		printf("pset_test: WRONG — %s did not come back in %u ticks: "
-		       "it is asleep on the activation lock it already holds, "
-		       "and the set's lock with it (#787)\n", stuck,
+		       "it is asleep on a lock it already holds (the "
+		       "activation's, or the set's for destroy) (#787)\n", stuck,
 		       PSET_TEST_WAIT);
 	else if (kr != KERN_SUCCESS)
 		; /* a NOT ASKED was already printed above */
 	else if (pset_test_limit_kr != KERN_SUCCESS ||
-		 pset_test_disable_kr != KERN_SUCCESS)
-		printf("pset_test: WRONG — both calls came back but one "
-		       "failed: limit 0x%x, disable 0x%x (#787)\n",
-		       pset_test_limit_kr, pset_test_disable_kr);
+		 pset_test_disable_kr != KERN_SUCCESS ||
+		 pset_test_destroy_kr != KERN_SUCCESS)
+		printf("pset_test: WRONG — the calls came back but one failed: "
+		       "limit 0x%x, disable 0x%x, destroy 0x%x (#787)\n",
+		       pset_test_limit_kr, pset_test_disable_kr,
+		       pset_test_destroy_kr);
 	else if (worker_policy != POLICY_TIMESHARE)
-		printf("pset_test: WRONG — both calls came back, but the "
+		printf("pset_test: WRONG — the calls came back, but the "
 		       "worker's policy is 0x%x, not TIMESHARE: the disable "
 		       "did not change it (#787)\n", worker_policy);
 	else
-		printf("pset_test: PASS — processor_set_limit() and "
-		       "processor_set_policy_disable() both came back, and the "
-		       "FIFO worker is TIMESHARE after the disable (#787)\n");
+		printf("pset_test: PASS — processor_set_limit(), "
+		       "processor_set_policy_disable() and processor_set_destroy() "
+		       "all came back, and the FIFO worker was TIMESHARE after "
+		       "the disable (#787)\n");
 
 	/*
 	 * Best effort: let the worker terminate itself, so it does not stay a
-	 * parked kernel thread for the rest of the boot.  The set it was in is
-	 * left behind -- harmless, and destroying it here would race the
-	 * worker's own removal from it.  Never woken while a call is stuck:
-	 * the driver holds the worker's locks for good then.
+	 * parked kernel thread for the rest of the boot.  The driver has
+	 * destroyed the set and the worker is back in the default set by now.
+	 * Never woken while a call is stuck: the driver holds locks for good
+	 * then, and the worker may be mid-reassignment.
 	 */
 	if (stuck == NULL) {
 		pset_test_worker_stop = 1;
