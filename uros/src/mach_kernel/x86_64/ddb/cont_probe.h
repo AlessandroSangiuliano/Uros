@@ -16,4 +16,10 @@
 
 void	cont_probe_start(void);
 
+/*
+ * -l: a thread blocked with a continuation that RETURNS, woken into it; the
+ * machine stops naming it (#771).  Returns only when it did not.
+ */
+void	cont_return_start(void);
+
 #endif	/* _X86_64_DDB_CONT_PROBE_H_ */

@@ -38,6 +38,9 @@
 #define PERCPU_INTR_SAVED_IF	172
 #define PERCPU_USER_RETURNS	176
 #define PERCPU_KERNEL_STACK	184
+#define PERCPU_FRAME_SYSRETS	192
+#define PERCPU_FRAME_IRETQS	200
+#define PERCPU_FRAME_SYSCALLS	208
 
 #ifndef __ASSEMBLER__
 
@@ -320,6 +323,21 @@ struct percpu {
 	uint64_t kernel_stack;
 
 	/*
+	 * #771: how the returns through a thread's frame left -- by SYSRET or by
+	 * iretq, counted in thread_user_frame_return (trap/entry.S) -- and how
+	 * many system calls left that way, having slept with a continuation
+	 * (thread_set_syscall_return()).  The census says all three, and says
+	 * WRONG when calls left through their frame and none of them by SYSRET:
+	 * the syscall entry's two stores and the tail's test are the two halves
+	 * of one choice, and losing either costs a blocked RPC a tenth of its
+	 * time while failing nothing.  Asserted, for the assembly that counts
+	 * them; after kernel_stack, so that no offset it knew moves.
+	 */
+	uint64_t frame_sysrets;
+	uint64_t frame_iretqs;
+	uint64_t frame_syscalls;
+
+	/*
 	 * #526: the last raise of this processor's level from zero -- where it
 	 * was asked for, and on which thread.  A level left raised never comes
 	 * back to zero, so after such a leak no later raise from zero overwrites
@@ -401,6 +419,12 @@ _Static_assert(__builtin_offsetof(struct percpu, user_returns)
 	       == PERCPU_USER_RETURNS, "percpu user_returns moved");
 _Static_assert(__builtin_offsetof(struct percpu, kernel_stack)
 	       == PERCPU_KERNEL_STACK, "percpu kernel_stack moved");
+_Static_assert(__builtin_offsetof(struct percpu, frame_sysrets)
+	       == PERCPU_FRAME_SYSRETS, "percpu frame_sysrets moved");
+_Static_assert(__builtin_offsetof(struct percpu, frame_iretqs)
+	       == PERCPU_FRAME_IRETQS, "percpu frame_iretqs moved");
+_Static_assert(__builtin_offsetof(struct percpu, frame_syscalls)
+	       == PERCPU_FRAME_SYSCALLS, "percpu frame_syscalls moved");
 
 /*
  * Two halves, and the split is not tidiness.
@@ -435,6 +459,10 @@ struct percpu *percpu_boot_block(void);
 
 /* #476, #599: returns to ring 3 since boot, all processors; see percpu.c */
 uint64_t percpu_user_returns(void);
+
+/* #771: the three counts of returns through a frame, all processors */
+void percpu_frame_returns(uint64_t *sysrets, uint64_t *iretqs,
+			  uint64_t *syscalls);
 
 /*
  * 🔴 IS THE THREAD THAT ASKS PINNED TO THIS PROCESSOR? (#626)
@@ -605,6 +633,16 @@ static inline uint64_t percpu_kernel_rsp(void)
 	__asm__ volatile("movq %%gs:%c1, %0"
 			 : "=r"(v) : "i"(PERCPU_KERNEL_RSP));
 	return v;
+}
+
+/*
+ * #771: a system call leaving through its frame, counted in ONE instruction,
+ * so that a preemption cannot fall between finding this processor's block and
+ * adding to it.
+ */
+static inline void percpu_count_frame_syscall(void)
+{
+	__asm__ volatile("incq %%gs:%c0" : : "i"(PERCPU_FRAME_SYSCALLS));
 }
 
 /* And the stack an entry from ring 3 runs C on (#770), the same way. */

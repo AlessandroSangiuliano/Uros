@@ -23,10 +23,10 @@ index 1dcd15c6..b9cae074 100644
  		return;
  	}
 diff --git a/uros/src/mach_kernel/x86_64/cpu/percpu.c b/uros/src/mach_kernel/x86_64/cpu/percpu.c
-index aefa79ae..1cadd779 100644
+index 68bdf27a..fa307c04 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/percpu.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/percpu.c
-@@ -291,8 +291,14 @@ void percpu_activate(uint32_t cpu_id)
+@@ -311,8 +311,14 @@ void percpu_activate(uint32_t cpu_id)
  uint64_t
  syscall_profile_entry_tsc(void)
  {
@@ -44,19 +44,19 @@ index aefa79ae..1cadd779 100644
  #endif	/* SYSCALL_PROFILE */
  
 diff --git a/uros/src/mach_kernel/x86_64/cpu/percpu.h b/uros/src/mach_kernel/x86_64/cpu/percpu.h
-index 9a61edfa..72bd9ce7 100644
+index 820b7984..c8af3421 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/percpu.h
 +++ b/uros/src/mach_kernel/x86_64/cpu/percpu.h
-@@ -38,6 +38,8 @@
- #define PERCPU_INTR_SAVED_IF	172
- #define PERCPU_USER_RETURNS	176
- #define PERCPU_KERNEL_STACK	184
-+#define PERCPU_SYSCALL_TSC	344
-+#define PERCPU_SYSCALL_TSC_THREAD	352
+@@ -41,6 +41,8 @@
+ #define PERCPU_FRAME_SYSRETS	192
+ #define PERCPU_FRAME_IRETQS	200
+ #define PERCPU_FRAME_SYSCALLS	208
++#define PERCPU_SYSCALL_TSC	368
++#define PERCPU_SYSCALL_TSC_THREAD	376
  
  #ifndef __ASSEMBLER__
  
-@@ -347,6 +349,8 @@ struct percpu {
+@@ -365,6 +367,8 @@ struct percpu {
  		uint64_t gen;
  	} pcid_slot[PCID_SLOTS];
  	uint32_t pcid_victim;		/* the slot the next miss takes */
@@ -65,10 +65,10 @@ index 9a61edfa..72bd9ce7 100644
  
  #if	CONTEXT_FPU_COUNT
  	/*
-@@ -401,6 +405,10 @@ _Static_assert(__builtin_offsetof(struct percpu, user_returns)
- 	       == PERCPU_USER_RETURNS, "percpu user_returns moved");
- _Static_assert(__builtin_offsetof(struct percpu, kernel_stack)
- 	       == PERCPU_KERNEL_STACK, "percpu kernel_stack moved");
+@@ -425,6 +429,10 @@ _Static_assert(__builtin_offsetof(struct percpu, frame_iretqs)
+ 	       == PERCPU_FRAME_IRETQS, "percpu frame_iretqs moved");
+ _Static_assert(__builtin_offsetof(struct percpu, frame_syscalls)
+ 	       == PERCPU_FRAME_SYSCALLS, "percpu frame_syscalls moved");
 +_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc)
 +	       == PERCPU_SYSCALL_TSC, "percpu syscall_tsc moved");
 +_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc_thread)
@@ -77,10 +77,10 @@ index 9a61edfa..72bd9ce7 100644
  /*
   * Two halves, and the split is not tidiness.
 diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
-index a07b1edf..c62d55db 100644
+index 7de9410e..9036ca9f 100644
 --- a/uros/src/mach_kernel/x86_64/syscall/entry.S
 +++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
-@@ -254,19 +254,17 @@ syscall_entry:
+@@ -297,19 +297,17 @@ syscall_entry:
  	 * inside SYSCALL_ENTRY_RESERVE, below which %rsp stays.
  	 */
  #if	SYSCALL_PROFILE

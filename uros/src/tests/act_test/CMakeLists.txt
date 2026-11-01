@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(act_test C)
+project(act_test C ASM)
 
 # ===========================================================================
 # Taking a thread out of a call it is not going to finish (#475)
@@ -34,12 +34,22 @@ set(AT_MIG_GENERATED)
 add_mig_userland(${UROS_UAPI_DIR}/mach/exc.defs ${_AT_OUT} AT_MIG)
 list(REMOVE_ITEM AT_MIG_GENERATED ${_AT_OUT}/exc_user.c)
 
+# preserved.S: arm twenty-six's six registers across a trap, which C cannot
+# hold in place across a call (#771).
 add_executable(act_test_bin
-  act_test.c ${AT_MIG_GENERATED})
+  act_test.c preserved.S ${AT_MIG_GENERATED})
 
+# ⚠️ The C-only flags are guarded by language, as fperr_test's are, since
+# preserved.S came: `-include stdint.h' would reach the assembler too, and it
+# answers a typedef with "no such instruction".  ${UROS_ARCH_FLAGS} stays
+# unguarded -- both halves have to agree about the machine.
 target_compile_options(act_test_bin PRIVATE
-  ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin 
-  -mstack-protector-guard=global -include stdint.h)
+  ${UROS_ARCH_FLAGS}
+  $<$<COMPILE_LANGUAGE:C>:-std=gnu11>
+  $<$<COMPILE_LANGUAGE:C>:-fno-builtin>
+  $<$<COMPILE_LANGUAGE:C>:-mstack-protector-guard=global>
+  $<$<COMPILE_LANGUAGE:C>:-include>
+  $<$<COMPILE_LANGUAGE:C>:stdint.h>)
 
 target_compile_definitions(act_test_bin PRIVATE MACH_IPC_COMPAT=0)
 

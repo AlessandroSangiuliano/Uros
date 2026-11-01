@@ -3704,6 +3704,202 @@ arm_twenty_two_processor_ports_are_privileged(void)
 	return passed;
 }
 
+/* ----------------------------------------------------------------
+ * Arm twenty-six: what a receive that slept gives back in the six
+ * registers the contract preserves (#771)
+ * ---------------------------------------------------------------- */
+
+/*
+ * Arm five's other half.  <syscall/syscall.h> says rbx, rbp and r12-r15 come
+ * back from a trap as they went in, and a trap that returns the way it came,
+ * through SYSRET, keeps them for nothing: the kernel's compiled C has kept
+ * them.  A receive that SLEEPS returns another way once continuations run
+ * (#771): it gives up the frames it was called through and comes back through
+ * the frame the entry wrote, so the six are there only if the entry put them
+ * there.  Until #771 nothing came back that way and the entry never wrote
+ * them -- and #771's first version woke every server that slept in a receive
+ * with the rbp, r14 and r15 of that server's last trap, or the zeros its
+ * frame began with.
+ *
+ * So the call is made the way a program makes it, through libmach's stub,
+ * with a pattern in each of the six (preserved.S: C cannot hold a value in a
+ * named register across a call), and it is made to sleep.  The message comes
+ * from a thread of this program, sent only once the kernel reports the
+ * receiver WAITING -- which it reports after thread_dispatch() has cleared
+ * TH_RUN, so the receiver has blocked and been switched away from.  That says
+ * it sleeps, not where; the first call below is what makes it the receive.
+ * Without the entry's six stores this arm read rbp back as a user stack
+ * address, the last trap's, on the first TCG boot it was asked.  The stub
+ * keeps rbx, r12 and r13 itself, around the three arguments it carries in
+ * them: on this trap, rbp, r14 and r15 are the kernel's to keep.
+ *
+ * ⚠️ A receive that did not sleep asked nothing -- it came back through
+ * SYSRET whatever the entry writes -- so a sender that never saw the receiver
+ * waiting makes this arm NOT ASKED, not passed.  The first call, with a zero
+ * timeout, is not the question either: it brings the helper's pages in before
+ * the receiver can be seen WAITING, since a thread asleep in a page fault on
+ * its way into the receive reports the same.  It is checked all the same, as
+ * SYSRET's half of the one promise.
+ */
+extern mach_msg_return_t		arm26_trap_with_patterns(
+					    const unsigned long long *args,
+					    unsigned long long *got);
+extern const unsigned long long		arm26_patterns[6];
+
+static mach_port_t		arm_26_port;
+static volatile mach_port_t	arm_26_receiver;
+static volatile int		arm_26_ready;
+static volatile int		arm_26_saw_waiting;
+static volatile kern_return_t	arm_26_send_kr = -1;
+
+static void *
+arm_26_sender(void *arg)
+{
+	mach_msg_header_t	msg;
+	int			i;
+
+	(void) arg;
+
+	for (i = 0; i < PATIENCE && !arm_26_ready; i++)
+		nap(100);
+
+	for (i = 0; i < 10 * PATIENCE && arm_26_ready; i++) {
+		struct thread_basic_info	basic;
+		mach_msg_type_number_t		n = THREAD_BASIC_INFO_COUNT;
+
+		basic.run_state = 0;
+		(void) thread_info(arm_26_receiver, THREAD_BASIC_INFO,
+				   (thread_info_t) &basic, &n);
+		if (basic.run_state == TH_STATE_WAITING) {
+			arm_26_saw_waiting = 1;
+			break;
+		}
+		nap(10);
+	}
+
+	/*
+	 * Sent whether or not the receiver was seen waiting: its receive has no
+	 * timeout, and this is the only thing that ends it.
+	 */
+	msg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+	msg.msgh_size = sizeof msg;
+	msg.msgh_remote_port = arm_26_port;
+	msg.msgh_local_port = MACH_PORT_NULL;
+	msg.msgh_id = 771;
+	arm_26_send_kr = mach_msg(&msg, MACH_SEND_MSG, sizeof msg, 0,
+				  MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+				  MACH_PORT_NULL);
+	return NULL;
+}
+
+/* The first of the six that is not its pattern, by name; 0 if none is. */
+static const char *
+arm_26_lost(const unsigned long long *got, unsigned long long *bad)
+{
+	static const char *const nm[6] = {
+		"rbx", "rbp", "r12", "r13", "r14", "r15"
+	};
+	int	j;
+
+	for (j = 0; j < 6; j++)
+		if (got[j] != arm26_patterns[j]) {
+			*bad = got[j];
+			return nm[j];
+		}
+	return 0;
+}
+
+/* The port given back on every way out, and the verdict passed through. */
+static int
+arm_26_done(int verdict)
+{
+	(void) mach_port_destroy(mach_task_self(), arm_26_port);
+	return verdict;
+}
+
+static int
+arm_twenty_six_a_receive_that_slept_keeps_six(void)
+{
+	pthread_t		sender;
+	struct roomy_msg	msg;
+	unsigned long long	args[9], got[6], bad = 0;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+	const char		*lost;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&arm_26_port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [26] mach_port_allocate failed (%d) — WRONG\n",
+		       kr);
+		return 0;
+	}
+
+	/* mach_msg_overwrite_trap()'s nine, as libmach's mach_msg() passes them. */
+	args[0] = (unsigned long long) (uintptr_t) &msg.h;
+	args[1] = MACH_RCV_MSG | MACH_RCV_TIMEOUT;
+	args[2] = 0;
+	args[3] = sizeof msg;
+	args[4] = arm_26_port;
+	args[5] = 0;				/* the first call waits for nothing */
+	args[6] = MACH_PORT_NULL;
+	args[7] = 0;				/* MACH_MSG_NULL: into msg */
+	args[8] = 0;
+
+	mr = arm26_trap_with_patterns(args, got);
+	if (mr != MACH_RCV_TIMED_OUT) {
+		printf("act_test: [26] a receive with a zero timeout on an empty "
+		       "port answered 0x%x, not MACH_RCV_TIMED_OUT — WRONG\n", mr);
+		return arm_26_done(0);
+	}
+	lost = arm_26_lost(got, &bad);
+	if (lost != 0) {
+		printf("act_test: [26] %s came back through SYSRET holding 0x%llx, "
+		       "not the pattern it went in with, and the contract "
+		       "preserves it — WRONG\n", lost, bad);
+		return arm_26_done(0);
+	}
+
+	arm_26_receiver = mach_thread_self();
+	if (pthread_create(&sender, NULL, arm_26_sender, NULL) != 0) {
+		printf("act_test: [26] pthread_create failed — WRONG\n");
+		(void) mach_port_deallocate(mach_task_self(), arm_26_receiver);
+		return arm_26_done(0);
+	}
+
+	args[1] = MACH_RCV_MSG;
+	args[5] = MACH_MSG_TIMEOUT_NONE;
+	arm_26_ready = 1;
+	mr = arm26_trap_with_patterns(args, got);
+	arm_26_ready = 0;
+	(void) pthread_join(sender, NULL);
+	(void) mach_port_deallocate(mach_task_self(), arm_26_receiver);
+
+	if (mr != MACH_MSG_SUCCESS || arm_26_send_kr != MACH_MSG_SUCCESS) {
+		printf("act_test: [26] the receive answered 0x%x and the send "
+		       "0x%x — WRONG\n", mr, arm_26_send_kr);
+		return arm_26_done(0);
+	}
+	if (!arm_26_saw_waiting) {
+		printf("act_test: [26] NOT ASKED — the sender never saw the "
+		       "receiver WAITING, so the receive may not have slept and "
+		       "came back through SYSRET (#771)\n");
+		return arm_26_done(-1);
+	}
+	lost = arm_26_lost(got, &bad);
+	if (lost != 0) {
+		printf("act_test: [26] %s came back from a receive that slept "
+		       "holding 0x%llx, not the pattern it went in with, and the "
+		       "contract preserves it (#771) — WRONG\n", lost, bad);
+		return arm_26_done(0);
+	}
+
+	printf("act_test: [26] a receive the kernel reported WAITING came back "
+	       "with rbx, rbp and r12-r15 as they went in: rbp 0x%llx, r14 "
+	       "0x%llx, r15 0x%llx, read back (#771)\n", got[1], got[4], got[5]);
+	return arm_26_done(1);
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -4341,6 +4537,12 @@ main(int argc, char **argv)
 	 */
 	arms++;		/* arm twenty-two, #786 */
 	r = arm_twenty_two_processor_ports_are_privileged();
+	if (r < 0)
+		arms--;
+	else
+		passed += r;
+	arms++;		/* arm twenty-six, #771 */
+	r = arm_twenty_six_a_receive_that_slept_keeps_six();
 	if (r < 0)
 		arms--;
 	else

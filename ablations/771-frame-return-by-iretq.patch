@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #771
+Takes out: the two stores that keep rcx and r11 -- SYSCALL's copies of rip and rflags -- in the thread's frame at the syscall entry; thread_user_frame_return then finds rcx and r11 unequal to rip and rflags in every frame, so every system call that slept with a continuation goes back to ring 3 by iretq, which costs a blocked null RPC about a tenth and fails nothing -- and the quiet census, which counts the calls that left through their frame and the returns that left by SYSRET, says WRONG
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 1
+Expect: quiet_census: returns to ring 3 through a thread's frame: 0 by SYSRET, [0-9]+ by iretq; [1-9][0-9]* were system calls that slept -- WRONG, none of them left by SYSRET \(#771\)
+Note: the census prints as the machine goes idle, so the line comes once the bundle has run; a report before any call has slept says "none yet", which is neither caught nor passed.
+
+diff --git a/uros/src/mach_kernel/x86_64/syscall/entry.S b/uros/src/mach_kernel/x86_64/syscall/entry.S
+--- a/uros/src/mach_kernel/x86_64/syscall/entry.S
++++ b/uros/src/mach_kernel/x86_64/syscall/entry.S
+@@ -217,8 +217,6 @@ syscall_entry:
+ 	 * KVM, release kernels, median of fifteen boots each; before #771,
+ 	 * returning through SYSRET from the C chain, 1.669).
+ 	 */
+-	movq	%rcx, TF_RCX(%rsp)
+-	movq	%r11, TF_R11(%rsp)
+ 	movq	%gs:PERCPU_USER_RSP, %rcx
+ 	movq	%rcx, TF_RSP(%rsp)		/* the stack it came in on */
+ 	movq	$USER_CS_RPL3, TF_CS(%rsp)

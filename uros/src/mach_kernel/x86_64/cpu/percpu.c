@@ -45,6 +45,26 @@ uint64_t percpu_user_returns(void)
 	return n;
 }
 
+/*
+ * #771: the census's three counts of returns through a thread's frame, summed
+ * the way percpu_user_returns() sums its own.
+ */
+void percpu_frame_returns(uint64_t *sysrets, uint64_t *iretqs,
+			  uint64_t *syscalls)
+{
+	*sysrets = *iretqs = *syscalls = 0;
+	for (int i = 0; i < NCPUS; i++) {
+		struct percpu *p;
+
+		if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+			continue;
+		p = (struct percpu *)(uintptr_t)percpu_va((uint32_t) i);
+		*sysrets += p->frame_sysrets;
+		*iretqs += p->frame_iretqs;
+		*syscalls += p->frame_syscalls;
+	}
+}
+
 void percpu_alloc(uint32_t cpu_id)
 {
 	uint64_t va = percpu_va(cpu_id);
