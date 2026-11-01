@@ -639,10 +639,14 @@ thread_set_syscall_return(thread_t thread, kern_return_t retval)
 
 	thr_act->mact.pcb->user->rax = (uint64_t) retval;
 	/*
-	 * #771: and one more call that will leave through its frame, which the
-	 * census sets against the returns that left by SYSRET.
+	 * #771: and the mark the frame return counts this call by, at the
+	 * instruction that leaves, where it counts the way it left.  Counted
+	 * here instead, the call was one the census could catch between the two:
+	 * run 41255283097, entry 27, said "1 were system calls that slept --
+	 * WRONG, none of them left by SYSRET" with that call still on its way to
+	 * its SYSRET, and every census after it found the two counts equal.
 	 */
-	percpu_count_frame_syscall();
+	thr_act->mact.pcb->user->vector = TF_VECTOR_SLEPT;
 	/*
 	 * #411/#392: the other way out of a Mach trap.
 	 *

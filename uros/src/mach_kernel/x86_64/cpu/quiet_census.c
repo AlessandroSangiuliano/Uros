@@ -713,8 +713,9 @@ static void quiet_handoff_so_far(void);
  * left that way with none by SYSRET means one of the two halves is gone --
  * the stores or the test -- and nothing else would say it: iretq hands back
  * the same registers, and only a measurement sees the difference, which is
- * how this was found.  With each report as the machine goes idle, for the
- * reason quiet_stacks_so_far() gives.
+ * how this was found.  Both counts are made at the instruction that leaves,
+ * so a call still on its way is in neither.  With each report as the machine
+ * goes idle, for the reason quiet_stacks_so_far() gives.
  */
 static void
 quiet_frame_returns_so_far(void)

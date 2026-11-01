@@ -325,8 +325,9 @@ struct percpu {
 	/*
 	 * #771: how the returns through a thread's frame left -- by SYSRET or by
 	 * iretq, counted in thread_user_frame_return (trap/entry.S) -- and how
-	 * many system calls left that way, having slept with a continuation
-	 * (thread_set_syscall_return()).  The census says all three, and says
+	 * many system calls left that way, having slept with a continuation,
+	 * counted there too by the mark thread_set_syscall_return() leaves in
+	 * the frame (<trap/frame.h>).  The census says all three, and says
 	 * WRONG when calls left through their frame and none of them by SYSRET:
 	 * the syscall entry's two stores and the tail's test are the two halves
 	 * of one choice, and losing either costs a blocked RPC a tenth of its
@@ -633,16 +634,6 @@ static inline uint64_t percpu_kernel_rsp(void)
 	__asm__ volatile("movq %%gs:%c1, %0"
 			 : "=r"(v) : "i"(PERCPU_KERNEL_RSP));
 	return v;
-}
-
-/*
- * #771: a system call leaving through its frame, counted in ONE instruction,
- * so that a preemption cannot fall between finding this processor's block and
- * adding to it.
- */
-static inline void percpu_count_frame_syscall(void)
-{
-	__asm__ volatile("incq %%gs:%c0" : : "i"(PERCPU_FRAME_SYSCALLS));
 }
 
 /* And the stack an entry from ring 3 runs C on (#770), the same way. */

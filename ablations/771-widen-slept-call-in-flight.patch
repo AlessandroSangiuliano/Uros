@@ -1,0 +1,60 @@
+Kind: widen
+Issue: #771
+Holds open: the window between thread_set_syscall_return() marking a system call that slept and that call leaving through thread_user_frame_return -- every such call from the first on waits there, a tick at a time (mutex_pause()), until the quiet census prints its next report, which the census counts in quiet_census_reports -- so that a report finds calls on their way out and none of them out, as run 41255283097's entry 27 found one by chance at four processors under TCG; the fixed tree, which counts a call where it leaves, must still say none yet and pass
+Run: --entry 14 1200 -smp 1
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+index 890c5276..6ceedd71 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
++++ b/uros/src/mach_kernel/x86_64/cpu/quiet_census.c
+@@ -118,6 +118,8 @@ static unsigned long	quiet_resets;
+ static unsigned long	quiet_peak;
+ static int		quiet_said;
+ static unsigned int	quiet_lock_busy;	/* #657: passes put off */
++/* 771-widen-slept-call-in-flight: the reports printed, for the hold to wait on */
++volatile unsigned long	quiet_census_reports;
+ 
+ /*
+  * #476, #599: what counts as work.  It used to be the idle loop handing
+@@ -807,6 +809,7 @@ quiet_census_pass(int mycpu)
+ 		cons_ring_so_far("quiet_census: ");
+ 		quiet_stacks_so_far();
+ 		quiet_frame_returns_so_far();
++		quiet_census_reports++;	/* 771-widen-slept-call-in-flight */
+ 		quiet_handoff_so_far();
+ 	}
+ 
+@@ -846,6 +849,7 @@ quiet_census_pass(int mycpu)
+ 
+ 	quiet_stacks_so_far();
+ 	quiet_frame_returns_so_far();
++	quiet_census_reports++;	/* 771-widen-slept-call-in-flight */
+ 
+ 	/*
+ 	 * #615: whether the scheduler ever queued a bound thread on a run queue
+diff --git a/uros/src/mach_kernel/x86_64/thread/machine.c b/uros/src/mach_kernel/x86_64/thread/machine.c
+index d53c651b..38291c16 100644
+--- a/uros/src/mach_kernel/x86_64/thread/machine.c
++++ b/uros/src/mach_kernel/x86_64/thread/machine.c
+@@ -647,6 +647,21 @@ thread_set_syscall_return(thread_t thread, kern_return_t retval)
+ 	 * its SYSRET, and every census after it found the two counts equal.
+ 	 */
+ 	thr_act->mact.pcb->user->vector = TF_VECTOR_SLEPT;
++	/*
++	 * 771-widen-slept-call-in-flight: every system call that slept, from
++	 * the first on, is held here -- marked, and not yet gone -- until the
++	 * census prints its next report, which then finds calls on their way
++	 * out and none of them out.
++	 */
++	{
++		extern volatile unsigned long quiet_census_reports;
++		static volatile unsigned long held_until;
++
++		if (held_until == 0)
++			held_until = quiet_census_reports + 1;
++		while (quiet_census_reports < held_until)
++			mutex_pause();
++	}
+ 	/*
+ 	 * #411/#392: the other way out of a Mach trap.
+ 	 *

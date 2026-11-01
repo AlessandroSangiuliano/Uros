@@ -741,6 +741,18 @@ thread_user_frame_return:
 	testl	$TF_RFLAGS_IRETQ_ONLY, %edx
 	jnz	.Lframe_iretq
 	RESTORE_REGS
+	/*
+	 * #771: a system call that slept, by the mark thread_set_syscall_return()
+	 * left in the vector slot -- where RESTORE_REGS leaves %rsp -- counted
+	 * here with the way it left, so that no census can hold one count and
+	 * not the other; and taken off, so that the next return through this
+	 * frame is counted for what it is.
+	 */
+	cmpq	$TF_VECTOR_SLEPT, (%rsp)
+	jne	.Lframe_sysret_counted
+	movq	$0, (%rsp)
+	incq	%gs:PERCPU_FRAME_SYSCALLS
+.Lframe_sysret_counted:
 	movq	(TF_RSP - TF_VECTOR)(%rsp), %rsp	/* the thread's own stack */
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	incq	%gs:PERCPU_FRAME_SYSRETS	/* and which way, for the same */
@@ -749,6 +761,11 @@ thread_user_frame_return:
 
 .Lframe_iretq:
 	RESTORE_REGS
+	cmpq	$TF_VECTOR_SLEPT, (%rsp)	/* #771: as on the SYSRET way */
+	jne	.Lframe_iretq_counted
+	movq	$0, (%rsp)
+	incq	%gs:PERCPU_FRAME_SYSCALLS
+.Lframe_iretq_counted:
 	incq	%gs:PERCPU_USER_RETURNS	/* #599: work, for the quiet census */
 	incq	%gs:PERCPU_FRAME_IRETQS	/* #771: and which way */
 	swapgs
