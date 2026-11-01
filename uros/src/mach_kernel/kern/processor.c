@@ -1000,6 +1000,18 @@ processor_set_destroy(
 		 * locking.
 		 */
 		thread_freeze(thread);
+		/*
+		 * #787 section 12: let go of the set's lock before
+		 * thread_doassign(), which takes it itself -- the set being
+		 * destroyed is the thread's own, so without this it locked the
+		 * set's mutex a second time and slept for good holding it, the
+		 * self-deadlock of #486 and section 9.  The task loop above
+		 * drops the lock before task_assign() for the same reason; this
+		 * loop did not, which the "double locking" comment got backwards.
+		 * thread_doassign() is entered with the activation locked, as it
+		 * expects, and gives every thread lock back before it returns.
+		 */
+		pset_unlock(pset);
 		thread_doassign(thread, &default_pset, TRUE);
 		/*
 		 * All thread-related locks released at this point.
