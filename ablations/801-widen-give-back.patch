@@ -3,7 +3,7 @@ Issue: #801
 Holds open: the window between a stopped run's trap starting to give its lock back and the rmdir -- give_back() sleeps a second before it looks at the lock, so the second SIGTERM that systemctl stop sends, once the unit's main process has died on the first, always lands inside it rather than in 2 boots of 3; the fixed tree, which ignores the signals until the lock is back, must still give it back and pass
 
 diff --git a/scripts/run-x86_64.sh b/scripts/run-x86_64.sh
-index f52c53a5..19085f3b 100755
+index 906d804e..ec9a537b 100755
 --- a/scripts/run-x86_64.sh
 +++ b/scripts/run-x86_64.sh
 @@ -1191,6 +1191,7 @@ give_back() {
