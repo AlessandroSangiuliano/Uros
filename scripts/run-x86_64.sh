@@ -1150,6 +1150,16 @@ fi
 # another run could take it and boot beside it.  Now qemu goes first, then the
 # lock, then the script, by the signal it was sent.
 #
+# 🔴 AND A SECOND SIGNAL WAITS UNTIL THE LOCK IS BACK (#801).  The trap put
+# INT, TERM and HUP back to their default first, so a second one ended the
+# script holding the lock -- and systemctl sends one: a unit's main process, a
+# script with no trap, dies on the first SIGTERM, and what is left of the unit
+# is signalled again.  On 31 October the lock stayed after a stopped campaign,
+# and the next run refused to start until it was removed by hand; stopping a
+# unit the same way (scripts/stop-unit-check.sh) left it in 2 boots of 3.  So
+# the signals are ignored while qemu and the lock go, and get their default
+# back only for the kill that ends the script.
+#
 # 🔴 THE LOCK IS GIVEN BACK ONLY WHILE IT IS STILL THIS RUN'S: the directory's
 # device, inode and change time, taken right after mkdir, as fbcons-readback.py
 # does (#661).  A lock removed by hand and taken again by another run is that
@@ -1189,9 +1199,11 @@ give_back() {
 	LOCK_ID=""
 }
 stopped_by() {
-	trap - EXIT INT TERM HUP
+	trap - EXIT
+	trap '' INT TERM HUP
 	give_back
 	echo "run-x86_64.sh: stopped by SIG$1 -- its qemu stopped and the lock given back" >&2
+	trap - INT TERM HUP
 	kill -s "$1" "$$"
 }
 trap give_back EXIT
