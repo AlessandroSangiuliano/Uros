@@ -1,0 +1,29 @@
+Kind: ablation
+Issue: #804
+Takes out: LONGEST_LAT_CACHE.MISS's unit mask, 0x41, for 0x4f, which is LONGEST_LAT_CACHE.REFERENCE (SDM 325462-093US, Table 22-3; skylake_core.json V59), in both sets that count it: the counter named for last-level misses counts every last-level reference
+Machine: omen
+Expect: pmc test \(#804\): lines in 2 MiB, 32768 steps: .* LLC [0-9]+ \(WRONG
+Note: Judged on omen's metal, for the reason 804-l2-miss-counts-requests.patch gives.  Run from omen's GRUB entry uros-804a-llc, pmc=1 pmc_test=1, 02/11/2026: caught in 1 boot of 1 (the 2 MiB walk, which misses the L2 and hits the last level, counted 93649 for 32768 steps, 285%, against at most 20%), the fixed tree 29 checks with 0 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pmc.c b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+index 780e71b3..720cdfb2 100644
+--- a/uros/src/mach_kernel/x86_64/cpu/pmc.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+@@ -86,7 +86,7 @@ struct pmc_event {
+ static const struct pmc_event pmc_set_cache[] = {
+ 	{ "L1D.REPLACEMENT",			0x51, 0x01, -1, PMC_ROLE_L1D_MISS },
+ 	{ "L2_RQSTS.MISS",			0x24, 0x3f, -1, PMC_ROLE_L2_MISS },
+-	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x41,  4, PMC_ROLE_LLC_MISS },
++	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x4f,  4, PMC_ROLE_LLC_MISS },
+ 	{ "MEM_LOAD_L3_HIT_RETIRED.XSNP_HITM",	0xd2, 0x04, -1, PMC_ROLE_HITM },
+ };
+ 
+@@ -95,7 +95,7 @@ static const struct pmc_event pmc_set_tlb[] = {
+ 	{ "DTLB_LOAD_MISSES.WALK_COMPLETED",	0x08, 0x0e, -1, PMC_ROLE_DTLB_LOAD_WALK },
+ 	{ "DTLB_STORE_MISSES.WALK_COMPLETED",	0x49, 0x0e, -1, PMC_ROLE_DTLB_STORE_WALK },
+ 	{ "ITLB_MISSES.WALK_COMPLETED",		0x85, 0x0e, -1, PMC_ROLE_ITLB_WALK },
+-	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x41,  4, PMC_ROLE_LLC_MISS },
++	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x4f,  4, PMC_ROLE_LLC_MISS },
+ };
+ 
+ /*
