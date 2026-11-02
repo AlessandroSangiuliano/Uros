@@ -69,7 +69,7 @@ static const char * err_codes_mach_send[] = {
        /* 11 */	"(ipc/send) invalid notify port",
        /* 12 */	"(ipc/send) invalid memory",
        /* 13 */	"(ipc/send) no msg buffer",
-       /* 14 */	"(ipc/send) no notify possible",
+       /* 14 */	"(ipc/send) message too large",	/* #808; was MACH_SEND_NO_NOTIFY, gone */
        /* 15 */	"(ipc/send) invalid msg-type",
        /* 16 */	"(ipc/send) invalid msg-header",
        /* 17 */ "(ipc/send) invalid msg-trailer",
