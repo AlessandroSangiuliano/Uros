@@ -478,8 +478,16 @@ mach_msg_receive(
 	self->ith_object = (void *) object;
 	self->ith_notify = notify;
 
-	mr = ipc_mqueue_receive(mqueue, option & MACH_RCV_TIMEOUT, rcv_size,
-				timeout, FALSE,
+	/*
+	 * #808: the trailer bits go with the timeout.  The queue measures the
+	 * message against rcv_size with the trailer the option asks for, and
+	 * without them it measured the smallest one while the copyout below
+	 * writes the one asked for -- up to MAX_TRAILER_SIZE less 8 bytes past
+	 * rcv_size, into the receiver's own memory.
+	 */
+	mr = ipc_mqueue_receive(mqueue,
+				option & (MACH_RCV_TIMEOUT | MACH_RCV_TRAILER_MASK),
+				rcv_size, timeout, FALSE,
 				mach_msg_receive_continue,
 				&kmsg, &seqno);
 	/*
