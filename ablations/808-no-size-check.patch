@@ -4,6 +4,7 @@ Takes out: the check in ipc_kmsg_get() that refuses a send past IKM_MAX_MSG_SIZE
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[27\] a send of 0xFFFFFFFC bytes answered 0x[0-9a-f]+, not MACH_SEND_TOO_LARGE
+Note: Judged under QEMU (TCG and KVM), act_test's arm 27, on victus 02/11/2026 at 8d303cbe: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
 --- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
