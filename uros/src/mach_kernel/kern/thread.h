@@ -520,9 +520,16 @@ typedef struct thread_shuttle {
 #if	NCPUS > 1
 	processor_t	last_processor; /* processor this last ran on */
 	boolean_t	handoff_hint;	/* #356: this thread is about to block
-					 * (combined mach_msg send phase) --
+					 * (#777: where mach_msg knows it) --
 					 * thread_setrun should run its wakee
 					 * on THIS cpu, not a remote idle one */
+	struct thread_shuttle *handoff_wakee; /* #777: the thread its last hint
+					 * queued on this cpu, until it blocks;
+					 * a name only, looked for on the run
+					 * queue and never followed otherwise */
+	boolean_t	handoff_spare;	/* #777: MACH_SEND_HANDOFF's "I block
+					 * next" -- one return to user before
+					 * a lost bet is undone */
 #if	MACH_LOCK_MON
 	unsigned	lock_stack;	/* number of locks held */
 #endif  /* MACH_LOCK_MON */
