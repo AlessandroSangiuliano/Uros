@@ -1,9 +1,9 @@
 Kind: ablation
 Issue: #807
-Takes out: pmap_enter()'s refusal of a leaf larger than 4 KiB -- its unmapping branch takes the direct map's leaf at the base away and answers PMAP_MAP_OK, which pmap_verbs_selftest() asks first so as to say so before the next touch of the direct map stops the machine
+Takes out: pmap_enter()'s refusal of a leaf larger than 4 KiB -- pmap_verbs_selftest()'s unmapping branch then takes the direct map's leaf at the base away, and pmap_forget() drops the kernel pmap's resident count for a leaf it never counted, which is zero at that point of the boot: the machine stops there and names the address, before the self-test can say anything; on a kernel whose count were not zero the self-test's own WRONG would be the line
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
-Expect: UrMach x86-64: pmap_enter NONE over the [0-9]+ KiB leaf at the direct map's base -> not refused, WRONG
+Expect: pmap: resident_count underflow at va 0xffff800000000000|UrMach x86-64: pmap_enter NONE over the [0-9]+ KiB leaf at the direct map's base -> not refused, WRONG
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
 --- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
