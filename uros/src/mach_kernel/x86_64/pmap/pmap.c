@@ -1173,10 +1173,30 @@ uint64_t pmap_extract(pmap_t pmap, uint64_t va)
 }
 
 /*
- * Step a range one mapping at a time.  Advancing by the size the operation
- * reports skips a large page in one stride instead of touching its every
- * 4 KiB; where nothing is mapped, 4 KiB is the step that cannot overshoot a
- * mapping that starts partway through.
+ * Step a range one entry at a time, to the end of what the operation found at
+ * the address: the mapping's end, so a large page is one stride instead of its
+ * every 4 KiB -- or, where nothing is mapped, the end of the empty entry the
+ * walk stopped at.
+ *
+ * 🔴 NOT 4 KiB WHERE NOTHING IS MAPPED (#847).  The step used to be 4 KiB
+ * there, "the step that cannot overshoot a mapping that starts partway
+ * through", and an empty PML4 entry -- 512 GiB with nothing under it -- was
+ * 134,217,728 walks from the root, each in a read section of its own.
+ * vm_map_delete() removes across every entry it deletes, touched or not:
+ * #843's test gave back 128 TiB it had never touched, and one processor spent
+ * four to five minutes of KVM in this loop, more than a run's 1200 s of TCG.
+ * An entry that is not valid maps nothing anywhere in its reach, so the end of
+ * that reach, aligned, cannot overshoot a mapping either: the next one is
+ * walked again from the root.
+ *
+ * ⚠️ The END of the entry, not the address plus its size: at an address
+ * partway into a large page, the address plus 2 MiB went past the start of the
+ * next entry, and whatever was mapped there was never asked about.
+ *
+ * The hole is read again after the operation found nothing, in a section of
+ * its own.  A page entered between the two reads would be an enter racing a
+ * removal of the same range -- the 4 KiB step had that window too -- and
+ * should it happen, va is found mapped and the stride is the old 4 KiB.
  *
  * 🔴 An end below the start is refused, not walked as nothing (#612).  Four
  * boot self-tests passed PAGE_SIZE_4K where the end belongs; each removed
@@ -1192,13 +1212,33 @@ static void pmap_range_check(const char *who, uint64_t s, uint64_t e)
 		      (unsigned long) s);
 }
 
+/*
+ * Where the stride from s ends: past what the operation found there, size
+ * bytes of mapping, or past the hole it found when size is zero.  Zero when
+ * the end is past the top of the address space, which the callers stop at.
+ */
+static uint64_t pmap_stride_end(pmap_t pmap, uint64_t s, uint64_t size)
+{
+	if (size == 0) {
+		boolean_t held = pmap_read_enter_for(s);
+
+		size = pmap_hole(pmap->root_pa, s);
+		pmap_read_leave(held);
+		if (size == 0)
+			size = PAGE_SIZE_4K;
+	}
+	return (s | (size - 1)) + 1;
+}
+
 void pmap_remove(pmap_t pmap, uint64_t s, uint64_t e)
 {
 	pmap_range_check("pmap_remove", s, e);
 	while (s < e) {
-		uint64_t sz = pmap_forget(pmap, s);
+		uint64_t next = pmap_stride_end(pmap, s, pmap_forget(pmap, s));
 
-		s += sz ? sz : PAGE_SIZE_4K;
+		if (next <= s)
+			break;
+		s = next;
 	}
 }
 
@@ -1208,14 +1248,17 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 
 	pmap_range_check("pmap_protect", s, e);
 	while (s < e) {
-		uint64_t sz;
+		uint64_t sz, next;
 
 		if (prot == VM_PROT_NONE)
 			sz = pmap_forget(pmap, s);
 		else
 			sz = pmap_protect_page(pmap, s, flags);
 
-		s += sz ? sz : PAGE_SIZE_4K;
+		next = pmap_stride_end(pmap, s, sz);
+		if (next <= s)
+			break;
+		s = next;
 	}
 }
 

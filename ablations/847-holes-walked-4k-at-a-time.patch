@@ -1,0 +1,28 @@
+Kind: ablation
+Issue: #847
+Takes out: the stride over a hole -- where nothing is mapped, pmap_remove() and pmap_protect() step 4 KiB again, as they did before, and range_holes_selftest()'s removal of an empty 512 GiB and the page after it walks from the root 134,217,728 times
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: UrMach x86-64: removing an empty 512 GiB and the page after it took [0-9]+ cycles, against a bound of [0-9]+ -- WRONG, as if the hole was walked 4 KiB at a time
+Note: Judged under QEMU (TCG and KVM), range_holes_selftest(), on victus 02/11/2026 at 33582cc3: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.  The fixed tree's least of three was 165 cycles under KVM and 3,201 under TCG, against a bound of 40,000,000; at 6a5efaef the 4 KiB step took 3.9 billion under KVM and 47.8 billion under TCG.
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -1172,14 +1172,8 @@ static void pmap_range_check(const char *who, uint64_t s, uint64_t e)
+  */
+ static uint64_t pmap_stride_end(pmap_t pmap, uint64_t s, uint64_t size)
+ {
+-	if (size == 0) {
+-		boolean_t held = pmap_read_enter_for(s);
+-
+-		size = pmap_hole(pmap->root_pa, s);
+-		pmap_read_leave(held);
+-		if (size == 0)
+-			size = PAGE_SIZE_4K;
+-	}
++	if (size == 0)
++		size = PAGE_SIZE_4K;
+ 	return (s | (size - 1)) + 1;
+ }
+ 
