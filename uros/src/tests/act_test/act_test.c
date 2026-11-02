@@ -4206,6 +4206,70 @@ arm_thirty_scatter_list_one_word_short(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-one (#840): a complex message's descriptor count is bounded by
+ * the message's size in bytes.
+ *
+ * ipc_kmsg_copyin_body() compared the descriptors' end with
+ * `&kmsg->ikm_header + msgh_size', a sum that moves msgh_size headers of 24
+ * bytes: a count of up to 24 times what the message holds passed, and the
+ * descriptors past its end were taken as its own.  Here a message holds one
+ * port descriptor and says two, then fifty, and each send must answer
+ * MACH_SEND_MSG_TOO_SMALL.  One too many goes first: on a kernel without the
+ * bound the second descriptor is read from just past the message, where the
+ * kernel's own trailer lies, and the send answers something else -- fifty
+ * would read whatever follows the buffer, so it is not asked after a WRONG.
+ */
+static int
+arm_thirty_one_descriptor_count_past_the_message(void)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_port_descriptor_t	d;
+	} m;
+	static const unsigned	says[] = { 2, 50 };
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i, j;
+
+	port = arm_own_port(31);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < sizeof says / sizeof says[0]; i++) {
+		for (j = 0; j < sizeof m; j++)
+			((unsigned char *) &m)[j] = 0;
+		m.h.msgh_bits = MACH_MSGH_BITS_COMPLEX
+				| MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+		m.h.msgh_size = sizeof m;
+		m.h.msgh_remote_port = port;
+		m.h.msgh_local_port = MACH_PORT_NULL;
+		m.h.msgh_id = 31;
+		m.b.msgh_descriptor_count = says[i];
+		m.d.name = MACH_PORT_NULL;
+		m.d.disposition = MACH_MSG_TYPE_COPY_SEND;
+		m.d.type = MACH_MSG_PORT_DESCRIPTOR;
+
+		mr = mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m,
+			      0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+		if (mr != MACH_SEND_MSG_TOO_SMALL) {
+			printf("act_test: [31] a %u-byte message holding one "
+			       "descriptor and saying %u answered 0x%x, not "
+			       "MACH_SEND_MSG_TOO_SMALL — WRONG (#840)\n",
+			       (unsigned) sizeof m, says[i], (int) mr);
+			(void) mach_port_destroy(mach_task_self(), port);
+			return 0;
+		}
+	}
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	printf("act_test: [31] a %u-byte message holding one descriptor and "
+	       "saying 2, then 50, was refused with MACH_SEND_MSG_TOO_SMALL "
+	       "both times (#840)\n", (unsigned) sizeof m);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -4862,6 +4926,8 @@ main(int argc, char **argv)
 	passed += arm_twenty_nine_receive_measured_with_its_trailer();
 	arms++;		/* arm thirty, #808 */
 	passed += arm_thirty_scatter_list_one_word_short();
+	arms++;		/* arm thirty-one, #840 */
+	passed += arm_thirty_one_descriptor_count_past_the_message();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
