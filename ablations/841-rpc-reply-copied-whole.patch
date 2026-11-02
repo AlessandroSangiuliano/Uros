@@ -3,7 +3,8 @@ Issue: #841
 Takes out: the header-only copy in mach_msg_rpc_from_kernel()'s too-large branch, putting back the copy of the whole reply -- act_test's arm 32 answers an exception with 4096 bytes where the stub reads 36, and the kernel writes them over its own stack
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
-Expect: act_test: \[32\] .*WRONG|UrMach x86-64: trap |panic\(cpu
+Expect: instruction fetch from kernel, nothing mapped there|act_test: \[32\] .* — WRONG
+Note: Judged under QEMU (TCG and KVM), act_test's arm 32, on victus 02/11/2026 at e3f9acca: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.  Every ablated boot stopped in arm 32 on an instruction fetch at rip 0 with rax 0x10004004, MACH_RCV_TOO_LARGE: the stub returned its answer, and its return address was the answer's zeroes.  The Expect, first written to take any stop, was narrowed to that one after the run, and matches the same 4 and none of the fixed tree's.
 
 diff --git a/uros/src/mach_kernel/kern/ipc_mig.c b/uros/src/mach_kernel/kern/ipc_mig.c
 --- a/uros/src/mach_kernel/kern/ipc_mig.c
