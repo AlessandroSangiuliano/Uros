@@ -108,6 +108,15 @@
 
 #define KALLOC_MINSIZE		16
 
+/*
+ * The size of kalloc_map, which every allocation above kalloc_max is carved
+ * from (#808).  A constant rather than a variable's initial value, so that
+ * what is bounded by it -- the largest message the kernel takes inline,
+ * IKM_MAX_MSG_SIZE in <ipc/ipc_kmsg.h> -- is checked against it when the
+ * kernel is compiled.
+ */
+#define KALLOC_MAP_SIZE		((vm_size_t) 8 * 1024 * 1024)
+
 extern vm_offset_t	kalloc(
 				vm_size_t	size);
 
