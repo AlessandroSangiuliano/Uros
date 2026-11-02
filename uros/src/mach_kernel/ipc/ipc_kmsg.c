@@ -1803,18 +1803,31 @@ ipc_kmsg_copyin_body(
 
     body = (mach_msg_body_t *) (&kmsg->ikm_header + 1);
     saddr = (mach_msg_descriptor_t *) (body + 1);
-    eaddr = saddr + body->msgh_descriptor_count;
-    
-    /* make sure the message does not ask for more msg descriptors
-     * than the message can hold.
+
+    /*
+     * Make sure the message does not ask for more descriptors than it can
+     * hold.
+     *
+     * 🔴 #840: in integers, and before any descriptor's address is formed.
+     * The test this replaces compared descriptor pointers with
+     * `&kmsg->ikm_header + msgh_size', a sum on a mach_msg_header_t * that
+     * moved msgh_size HEADERS of 24 bytes, not msgh_size bytes -- so a
+     * count of descriptors running far past the message, and past the
+     * buffer that holds it, was taken as the message's own, and every later
+     * walk of the count followed it.  Its other half, `eaddr <= saddr',
+     * relied on the pointer sum overflowing, which C leaves undefined.  The
+     * size is checked first, so that the count is read from inside the
+     * message; a complex message with no descriptor is refused as it was.
      */
-    
-    if (eaddr <= saddr ||
-	eaddr > (mach_msg_descriptor_t *) (&kmsg->ikm_header + 
-			    kmsg->ikm_header.msgh_size)) {
+    if (kmsg->ikm_header.msgh_size < sizeof(mach_msg_base_t) ||
+	body->msgh_descriptor_count == 0 ||
+	body->msgh_descriptor_count >
+	    (kmsg->ikm_header.msgh_size - sizeof(mach_msg_base_t))
+	    / sizeof(mach_msg_descriptor_t)) {
 	ipc_kmsg_clean_partial(kmsg,0,0,0);
 	return MACH_SEND_MSG_TOO_SMALL;
     }
+    eaddr = saddr + body->msgh_descriptor_count;
 
     /*
      * #442: room for the descriptors' ports, now that the count has been
