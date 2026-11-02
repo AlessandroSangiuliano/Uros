@@ -884,9 +884,18 @@ static void pv_selftest(uint32_t info)
  * one pmap_remove() from the empty entry's start to just past the page: one
  * stride of 512 GiB and the page.  At 4 KiB a step it was 134,217,728 walks,
  * most of a second under KVM and tens of seconds under TCG, so its cycles are
- * printed beside a bound neither the stride nor the step comes near.
+ * printed beside a bound neither the stride nor the step comes near: on
+ * victus, 759 to 825 cycles under KVM and 62,205 to 67,551 under TCG, and
+ * 3.9 and 47.8 billion with the 4 KiB step back.
+ *
+ * ⚠️ The least of three.  One reading of a region this short is at the host's
+ * mercy: a host that takes the processor away for 10 ms inside it makes the
+ * stride look like the step, and a boot fails for nothing.  Three removals of
+ * the same page, and the least of them against the bound; the step back is
+ * slow all three times.
  */
 #define	HOLES_BOUND_CYCLES	40000000ULL	/* 10 ms at 4 GHz */
+#define	HOLES_TRIES		3
 
 static void range_holes_selftest(void)
 {
@@ -900,7 +909,7 @@ static void range_holes_selftest(void)
 	uint64_t far = 4 * slot;
 	pmap_t u = pmap_create(0);
 	uint64_t frame = boot_frame_alloc();
-	uint64_t t0, t1;
+	uint64_t t0, t1, least = ~0ULL;
 	int i, mapped = 0, left = 0;
 
 	for (i = 0; i < 3; i++) {
@@ -918,23 +927,30 @@ static void range_holes_selftest(void)
 	kputs(mapped == 3 && left == 0 ? " left (#847)\r\n"
 				       : " left -- WRONG (#847)\r\n");
 
-	pmap_enter(u, far, frame, VM_PROT_READ, 0);
-	mapped = pmap_extract(u, far) == frame;
-	t0 = rdtsc_ordered();
-	pmap_remove(u, 3 * slot, far + PAGE_SIZE_4K);
-	t1 = rdtsc_ordered();
-	left = pmap_extract(u, far) != 0;
+	mapped = 0;
+	left = 0;
+	for (i = 0; i < HOLES_TRIES; i++) {
+		pmap_enter(u, far, frame, VM_PROT_READ, 0);
+		mapped += pmap_extract(u, far) == frame;
+		t0 = rdtsc_ordered();
+		pmap_remove(u, 3 * slot, far + PAGE_SIZE_4K);
+		t1 = rdtsc_ordered();
+		left += pmap_extract(u, far) != 0;
+		if (t1 - t0 < least)
+			least = t1 - t0;
+	}
 	kputs("UrMach x86-64: removing an empty 512 GiB and the page after it took ");
-	kputdec(t1 - t0);
+	kputdec(least);
 	kputs(" cycles, against a bound of ");
 	kputdec(HOLES_BOUND_CYCLES);
-	if (!mapped || left)
-		kputs(", and the page was not taken -- WRONG (#847)\r\n");
-	else if (t1 - t0 > HOLES_BOUND_CYCLES)
+	if (mapped != HOLES_TRIES || left)
+		kputs(", and the page was not taken every time -- WRONG "
+		      "(the least of three, #847)\r\n");
+	else if (least > HOLES_BOUND_CYCLES)
 		kputs(" -- WRONG, as if the hole was walked 4 KiB at a time "
-		      "(#847)\r\n");
+		      "(the least of three, #847)\r\n");
 	else
-		kputs(", the page taken (#847)\r\n");
+		kputs(", the page taken (the least of three, #847)\r\n");
 
 	pmap_destroy(u);
 	boot_frame_free(frame);
