@@ -4,7 +4,7 @@ Takes out: the ring check in the x86-64 page-fault path -- a fault from ring 3 o
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: fault_test: \[6\] a load from ring 3 at 0xffff800000000000, the direct map's base, reached the task as exception 1 code 2 — WRONG
-Note: Judged under QEMU (TCG and KVM), fault_test's arm six, on victus 02/11/2026 at 22198036: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.  The ablated kernel answers the load at the direct map's base with KERN_PROTECTION_FAILURE, kmem_init()'s reservation refusing it, and keeps its direct map whole, since vm_fault() never gets as far as pmap_enter().
+Note: Judged under QEMU (TCG and KVM), fault_test's arm six, on victus 02/11/2026 at 22198036: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.  The ablated kernel answers the load at the direct map's base with KERN_PROTECTION_FAILURE, kmem_init()'s reservation refusing it, and keeps its direct map whole, since vm_fault() never gets as far as pmap_enter().  Judged again on the union of the critical fixes, 72778d46, on victus 02/11/2026: caught 4 of 4, and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
