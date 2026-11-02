@@ -1883,6 +1883,17 @@ thread_invoke(
 
 	thread_unlock(new_thread);
 
+#if	NCPUS > 1
+	/*
+	 * #777: the old thread leaves the processor, so a hand-off it bet on was
+	 * won -- the thread it queued here gets the processor in its turn, and
+	 * nothing is left to undo.  Forgetting the name now spares the next
+	 * undo point a look at the run queue.
+	 */
+	old_thread->handoff_wakee = THREAD_NULL;
+	old_thread->handoff_spare = FALSE;
+#endif	/* NCPUS > 1 */
+
 	ETAP_DATA_LOAD(probe_data[0], new_thread);
 	ETAP_DATA_LOAD(probe_data[1], old_thread->etap_reason);
 	ETAP_DATA_LOAD(probe_data[2], reason);
@@ -2809,6 +2820,7 @@ static struct sched_handoff_count {
 	unsigned long	same_task;
 	unsigned long	other_task;
 	unsigned long	other_task_fenced;	/* sent to an idle processor */
+	unsigned long	undone[SCHED_HANDOFF_UNDO_WHERE];	/* #777 */
 } __attribute__((aligned(64))) sched_handoff_count[NCPUS];
 
 /*
@@ -2834,6 +2846,104 @@ sched_rpc_handoff_counts(
 		*other_task += sched_handoff_count[cpu].other_task;
 		*other_task_fenced += sched_handoff_count[cpu].other_task_fenced;
 	}
+}
+
+/*
+ * #777: the bets lost and undone, by where it showed -- a receive that found a
+ * message instead of blocking, or a return to user space without a block.
+ */
+void
+sched_rpc_handoff_undone(
+	unsigned long	*at_receive,
+	unsigned long	*at_return)
+{
+	int	cpu;
+
+	*at_receive = 0;
+	*at_return = 0;
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		*at_receive +=
+		    sched_handoff_count[cpu].undone[SCHED_HANDOFF_UNDO_RECEIVE];
+		*at_return +=
+		    sched_handoff_count[cpu].undone[SCHED_HANDOFF_UNDO_RETURN];
+	}
+}
+
+/*
+ * #777: undo a hand-off on block whose bet was lost.
+ *
+ * The hint queued the woken thread on this processor's own run queue, which
+ * no other processor takes from (thread_select() reads its own and the set's),
+ * on the bet that the waker would block at once and leave it the processor.
+ * Where the waker does not -- its receive found a message, or its call
+ * returns to user space unblocked -- the woken thread would wait behind it for
+ * a tick or a quantum.  So it is taken off this queue and dispatched the
+ * ordinary way, to an idle processor if there is one, and a lost race costs
+ * microseconds instead.
+ *
+ * The waker knows the thread by name only: once it ran, it may have exited,
+ * so handoff_wakee is never followed.  It is looked for on this processor's
+ * queue, under the queue's lock, by comparing pointers; a thread found there
+ * is alive, since a thread on a run queue has not run.  Not found, it already
+ * ran, and there is nothing to undo.  If the waker moved to another
+ * processor meanwhile, it looks at the wrong queue and finds nothing: the
+ * woken thread runs when its own processor next chooses.
+ *
+ * Called at splsched or lower, with no lock held; returns whether it undid one.
+ */
+boolean_t
+thread_handoff_undo(
+	int	where)
+{
+	thread_t	self = current_thread();
+	thread_t	th = self->handoff_wakee;
+	run_queue_t	rq;
+	queue_t		q = (queue_t) 0;
+	queue_entry_t	e;
+	int		whichq;
+	boolean_t	found = FALSE;
+	spl_t		s;
+
+	if (th == THREAD_NULL)
+		return FALSE;
+	self->handoff_wakee = THREAD_NULL;
+	self->handoff_spare = FALSE;
+
+	s = splsched();
+	mp_disable_preemption();
+	rq = &current_processor()->runq;
+	simple_lock(&rq->lock);
+	for (whichq = rq->low; whichq <= MINPRI && !found; ) {
+		q = rq->runq + whichq;
+		for (e = queue_first(q); !queue_end(q, e); e = queue_next(e))
+			if ((thread_t) e == th) {
+				found = TRUE;
+				break;
+			}
+		if (!found)
+			whichq++;
+	}
+	if (found) {
+		remqueue(q, (queue_entry_t) th);
+		rq->count--;
+		if (th->whichq == DEPRESSPRI)
+			rq->depress_count--;
+		if (queue_empty(q)) {
+			clrbit(whichq, rq->bitmap);
+			rq->low = ffsbit(rq->bitmap);
+		}
+		th->runq = RUN_QUEUE_NULL;
+	}
+	simple_unlock(&rq->lock);
+	if (found) {
+		thread_lock(th);
+		thread_setrun(th, TRUE, TAIL_Q);	/* no hint now: the ordinary way */
+		thread_unlock(th);
+		sched_handoff_count[cpu_number()].undone[where]++;
+	}
+	mp_enable_preemption();
+	splx(s);
+	return found;
 }
 #endif	/* NCPUS > 1 */
 
@@ -2978,6 +3088,8 @@ thread_setrun(
 						sched_handoff_count[cpu_number()].other_task++;
 					(void) run_queue_enqueue(
 						&current_processor()->runq, th, tail);
+					/* #777: by name, for thread_handoff_undo() */
+					self->handoff_wakee = th;
 					mp_enable_preemption();
 					return;
 				}
