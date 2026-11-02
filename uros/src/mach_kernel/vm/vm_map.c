@@ -4261,9 +4261,29 @@ vm_map_copyout_kernel_buffer(
 		vm_map_deallocate(map);
 	}
 
+	/*
+	 * 🔴 #810: the copy is consumed only by a copyout that worked, as the
+	 * description above says.  It was freed whatever the copyout did, and
+	 * the caller, which owns a copy this routine failed to consume, freed
+	 * it again: vm_write() of a small physical copy to an address the task
+	 * does not have reached ipc_kmsg_clean_body()'s discard of the same
+	 * buffer -- a double free of a kalloc element, from any task.  And the
+	 * range this routine entered for the copy goes with the failure, where
+	 * it stayed in the target map.
+	 */
+	if (kr != KERN_SUCCESS) {
+		if (!overwrite) {
+			(void) vm_map_remove(map, *addr,
+					     *addr + round_page(copy->size),
+					     VM_MAP_NO_FLAGS);
+			*addr = 0;
+		}
+		return(kr);
+	}
+
 	kfree((vm_offset_t)copy, copy->cpy_kalloc_size);
 
-	return(kr);
+	return(KERN_SUCCESS);
 }
 		
 /*
