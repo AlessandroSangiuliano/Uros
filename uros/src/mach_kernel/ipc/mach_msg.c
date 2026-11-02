@@ -3002,10 +3002,19 @@ mach_msg_overwrite_trap(
 		 *	ipc_kmsg_copyout/ipc_kmsg_put.
 		 */
 
+		/*
+		 * #844: the sequence number an error writes into its trailer is
+		 * the message's own, from the trailer already filled in -- on
+		 * every way here, the hot path's six gotos above among them.
+		 * temp_seqno is set only by the slow receive just above this
+		 * label, so on the hot path it held whatever the stack did, and
+		 * msg_receive_error() copied that to the user.
+		 */
 		reply_size = send_size + trailer->msgh_trailer_size;
 		if (rcv_size < reply_size) {
-			if (msg_receive_error(kmsg, msg, option, temp_seqno,
-				        space, rcv_size) == MACH_RCV_INVALID_DATA) {
+			if (msg_receive_error(kmsg, msg, option,
+					      trailer->msgh_seqno, space,
+					      rcv_size) == MACH_RCV_INVALID_DATA) {
 				mr = MACH_RCV_INVALID_DATA;
 				return(mr);
 			}
@@ -3026,7 +3035,8 @@ mach_msg_overwrite_trap(
 			} 
 			else {
 				if (msg_receive_error(kmsg, msg, option,
-				    temp_seqno, space, rcv_size) == MACH_RCV_INVALID_DATA)
+				    trailer->msgh_seqno, space, rcv_size)
+						== MACH_RCV_INVALID_DATA)
 					mr = MACH_RCV_INVALID_DATA;
 			}
 
