@@ -4,7 +4,7 @@ Takes out: both guards in front of pmap_enter() -- the ring check, and kmem_init
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: PMAP_ENTER: 0xffff800000000000 lies under a large page
-Note: Judged under QEMU (TCG and KVM), fault_test's arm six, on victus 02/11/2026 at 22198036: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4, every ablated boot stopped by PMAP_ENTER naming 0xffff800000000000 when vm_fault() asked for a page there.
+Note: Judged under QEMU (TCG and KVM), fault_test's arm six, on victus 02/11/2026 at 22198036: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4, every ablated boot stopped by PMAP_ENTER naming 0xffff800000000000 when vm_fault() asked for a page there.  Judged again on the union of the critical fixes, 72778d46, on victus 02/11/2026: caught 4 of 4, and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
