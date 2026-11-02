@@ -1,9 +1,9 @@
 Kind: ablation
 Issue: #844
-Takes out: the trailer's own sequence number at slow_copyout, putting back temp_seqno -- on the hot path it holds whatever the stack did, and act_test's arm 34, whose RPC reply does not fit, reads a sequence number other than its reply's 3 in the trailer
+Takes out: the trailer's own sequence number at slow_copyout, putting back temp_seqno -- on the hot path it holds whatever the stack did, and act_test's arm 34, whose RPC replies do not fit, reads a sequence number other than its reply's 3 in the trailer
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
-Expect: act_test: \[34\] an RPC whose [0-9]+-byte reply does not fit [0-9]+ bytes answered 0x[0-9a-f]+, its trailer saying sequence number [0-9]+ .* WRONG
+Expect: act_test: \[34\] RPC [0-9]+ of [0-9]+, whose [0-9]+-byte reply does not fit [0-9]+ bytes, answered 0x[0-9a-f]+, its trailer saying sequence number [0-9]+ .* WRONG
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
