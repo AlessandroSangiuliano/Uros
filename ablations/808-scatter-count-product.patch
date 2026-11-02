@@ -4,6 +4,7 @@ Takes out: the scatter list's count checked by a division with the body's own si
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[30\] a scatter list of [0-9]+ bytes .* answered 0x[0-9a-f]+, not MACH_RCV_INVALID_TYPE
+Note: Judged under QEMU (TCG and KVM), act_test's arm 30, on victus 02/11/2026 at 8d303cbe: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
 --- a/uros/src/mach_kernel/ipc/mach_msg.c
