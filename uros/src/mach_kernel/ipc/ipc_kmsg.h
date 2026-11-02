@@ -287,6 +287,23 @@ extern void		ikm_ports_report(void);
 #define	ikm_less_overhead(size)	((mach_msg_size_t)((size) - IKM_OVERHEAD))
 
 /*
+ * 🔴 THE LARGEST MESSAGE THE KERNEL TAKES INLINE (#808).
+ *
+ * A message's buffer holds the message, the largest trailer and the kmsg in
+ * front of it, and comes from kalloc, which has nothing larger than
+ * kalloc_map to give: a bigger send could never be allocated, so it is
+ * refused as too large instead of failing as a missing buffer.  The same
+ * bound keeps every sum on a message's size in range on both targets --
+ * ikm_plus_overhead() above adds in a vm_size_t of 32 bits on i386, and
+ * kalloc rounds what it is given to a page -- which ipc_kmsg.c checks when
+ * the kernel is compiled.  A multiple of 4, as every size a send gives must
+ * be.
+ */
+#define	IKM_MAX_MSG_SIZE						\
+	((mach_msg_size_t) ((KALLOC_MAP_SIZE - MAX_TRAILER_SIZE		\
+			     - IKM_OVERHEAD) & ~(vm_size_t) 3))
+
+/*
  * XXX	For debugging.
  */
 #define IKM_BOGUS		((ipc_kmsg_t) 0xffffff10)

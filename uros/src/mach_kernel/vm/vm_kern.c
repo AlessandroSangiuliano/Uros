@@ -275,6 +275,9 @@ kmem_alloc_contig(
 		return KERN_INVALID_ARGUMENT;
 	}
 
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	size = round_page(size);
 	if ((flags & KMA_KOBJECT) == 0) {
 		object = vm_object_allocate(size);
@@ -368,6 +371,13 @@ kernel_memory_allocate(
 	vm_offset_t i;
 	kern_return_t kr;
 
+	/*
+	 * #808: within a page of the top, the rounding wraps to 0 on i386,
+	 * and a zero-length request then finds room anywhere.  Every kalloc
+	 * past kalloc_max comes through here.
+	 */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	size = round_page(size);
 	if ((flags & KMA_KOBJECT) == 0) {
 		/*
@@ -499,6 +509,9 @@ kmem_realloc(
 	oldmin = trunc_page(oldaddr);
 	oldmax = round_page(oldaddr + oldsize);
 	oldsize = oldmax - oldmin;
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(newsize) < newsize)
+		return KERN_INVALID_ARGUMENT;
 	newsize = round_page(newsize);
 
 	/*
@@ -613,6 +626,9 @@ kmem_alloc_pageable(
 	vm_offset_t addr;
 	kern_return_t kr;
 
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	addr = vm_map_min(map);
 	kr = vm_map_enter(map, &addr, round_page(size),
 			  (vm_offset_t) 0, TRUE,
@@ -640,6 +656,15 @@ kmem_free(
 	vm_size_t	size)
 {
 	kern_return_t kr;
+
+	/*
+	 * #808: a range that wraps past the top, or rounds past it, is not
+	 * one anything was allocated as, and vm_map_remove() would be handed
+	 * an end below its start.
+	 */
+	if (addr + size < addr || round_page(addr + size) < addr + size)
+		panic("kmem_free: 0x%lx + 0x%lx wraps", (unsigned long) addr,
+		      (unsigned long) size);
 
 	kr = vm_map_remove(map, trunc_page(addr),
 			   round_page(addr + size), VM_MAP_REMOVE_KUNWIRE);
@@ -781,6 +806,9 @@ kmem_suballoc(
 	vm_map_t map;
 	kern_return_t kr;
 
+	/* #808: within a page of the top, the rounding wraps to 0 on i386. */
+	if (round_page(size) < size)
+		return KERN_INVALID_ARGUMENT;
 	size = round_page(size);
 
 	/*

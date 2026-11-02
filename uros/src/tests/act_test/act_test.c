@@ -3900,6 +3900,312 @@ arm_twenty_six_a_receive_that_slept_keeps_six(void)
 	return arm_26_done(1);
 }
 
+/*
+ * Arm twenty-seven (#808): a send whose size cannot take the trailer is
+ * refused, cleanly, before the kernel adds the trailer to it.
+ *
+ * ipc_kmsg_get() sizes the kernel buffer by `send_size + MAX_TRAILER_SIZE' in
+ * mach_msg_size_t, which is 32 bits, and then copies `send_size' bytes into
+ * it.  A send_size near 2^32 wraps the sum to a small buffer and the copy runs
+ * past it -- the kernel heap overrun of #808.  The fix refuses such a size up
+ * front with MACH_SEND_TOO_LARGE, before any buffer or copy, so on a healthy
+ * tree this arm overruns nothing: the trap returns at its first test.
+ *
+ * The message is a bare header with a real send right as its destination, so
+ * nothing but its size is wrong; the size check precedes the port work, so the
+ * destination only keeps the trap on the ordinary send path.
+ */
+static int
+arm_twenty_seven_send_size_cannot_take_the_trailer(void)
+{
+	mach_port_t		port;
+	mach_msg_header_t	hdr;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [27] mach_port_allocate failed (%d) — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+	kr = mach_port_insert_right(mach_task_self(), port, port,
+				    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [27] insert_right failed (%d) — WRONG\n", kr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+
+	hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	hdr.msgh_size = sizeof hdr;
+	hdr.msgh_remote_port = port;
+	hdr.msgh_local_port = MACH_PORT_NULL;
+	hdr.msgh_reserved = 0;
+	hdr.msgh_id = 0;
+
+	/*
+	 * A multiple of four, at least a header, and larger than any size the
+	 * trailer fits after: the value the kernel must refuse rather than add
+	 * to.  The buffer handed over is one header; the fix never reads past
+	 * it.
+	 */
+	mr = mach_msg(&hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		      (mach_msg_size_t) 0xFFFFFFFCu, 0, MACH_PORT_NULL,
+		      0, MACH_PORT_NULL);
+
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_SEND_TOO_LARGE) {
+		printf("act_test: [27] a send of 0xFFFFFFFC bytes answered "
+		       "0x%x, not MACH_SEND_TOO_LARGE — WRONG (#808)\n",
+		       (int) mr);
+		return 0;
+	}
+
+	printf("act_test: [27] a send whose size cannot take the trailer was "
+	       "refused with MACH_SEND_TOO_LARGE, before the buffer (#808)\n");
+	return 1;
+}
+
+/*
+ * A receive right with a send right beside it, for the arms below that only
+ * need a port of their own.  MACH_PORT_NULL, said, when either step fails.
+ */
+static mach_port_t
+arm_own_port(int arm)
+{
+	mach_port_t	port;
+	kern_return_t	kr;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [%d] mach_port_allocate failed (%d) — "
+		       "WRONG\n", arm, kr);
+		return MACH_PORT_NULL;
+	}
+	kr = mach_port_insert_right(mach_task_self(), port, port,
+				    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [%d] insert_right failed (%d) — WRONG\n",
+		       arm, kr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return MACH_PORT_NULL;
+	}
+	return port;
+}
+
+/*
+ * Arm twenty-eight (#808): a send past the largest message the kernel takes
+ * inline is refused as too large, not left to fail for want of a buffer.
+ *
+ * The kernel's buffer for a message comes from kalloc, which has nothing past
+ * kalloc_map -- 8 MiB -- to give.  Since #808 a send past IKM_MAX_MSG_SIZE, a
+ * little less than that, is answered MACH_SEND_TOO_LARGE before any buffer is
+ * asked for; before it the size passed the only bound there was, the
+ * allocation failed, and the answer was MACH_SEND_NO_BUFFER.  The message is a
+ * bare header at the start of 8 MiB and a page of mapped memory, so a kernel
+ * that tried to copy it in would find every byte it asked for.
+ */
+#define	A28_SIZE	((mach_msg_size_t) (8u * 1024 * 1024 + 4))
+
+static int
+arm_twenty_eight_send_past_the_inline_limit(void)
+{
+	vm_address_t		buf = 0;
+	vm_size_t		len = A28_SIZE + vm_page_size;
+	mach_msg_header_t	*hdr;
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	kern_return_t		kr;
+
+	kr = vm_allocate(mach_task_self(), &buf, len, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [28] vm_allocate of %lu bytes failed (%d) — "
+		       "WRONG\n", (unsigned long) len, kr);
+		return 0;
+	}
+	port = arm_own_port(28);
+	if (port == MACH_PORT_NULL) {
+		(void) vm_deallocate(mach_task_self(), buf, len);
+		return 0;
+	}
+
+	hdr = (mach_msg_header_t *) buf;
+	hdr->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	hdr->msgh_size = A28_SIZE;
+	hdr->msgh_remote_port = port;
+	hdr->msgh_local_port = MACH_PORT_NULL;
+	hdr->msgh_reserved = 0;
+	hdr->msgh_id = 0;
+
+	mr = mach_msg(hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT, A28_SIZE, 0,
+		      MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	(void) vm_deallocate(mach_task_self(), buf, len);
+
+	if (mr != MACH_SEND_TOO_LARGE) {
+		printf("act_test: [28] a send of %u bytes, past the largest "
+		       "inline message, answered 0x%x%s, not MACH_SEND_TOO_LARGE "
+		       "— WRONG (#808)\n", (unsigned) A28_SIZE, (int) mr,
+		       mr == MACH_SEND_NO_BUFFER
+		       ? " (MACH_SEND_NO_BUFFER: the kernel tried to allocate it)"
+		       : "");
+		return 0;
+	}
+
+	printf("act_test: [28] a send of %u bytes, past the largest inline "
+	       "message, was refused with MACH_SEND_TOO_LARGE before any "
+	       "buffer (#808)\n", (unsigned) A28_SIZE);
+	return 1;
+}
+
+/*
+ * Arm twenty-nine (#808): a receive is measured with the trailer it asks for.
+ *
+ * The queue compared the message with rcv_size less the smallest trailer,
+ * because mach_msg_receive() handed it the timeout bit and nothing else of
+ * the option, while the copyout then wrote the trailer the option asked for:
+ * a message that fitted with the smallest trailer and not with the sender's
+ * was taken, and written past rcv_size into the receiver's own memory.  Here
+ * the buffer is rcv_size bytes with canaries after them, rcv_size holding the
+ * message and the smallest trailer only; the receive must answer
+ * MACH_RCV_TOO_LARGE and leave every canary.
+ */
+#define	A29_CANARY	0xa5
+
+static int
+arm_twenty_nine_receive_measured_with_its_trailer(void)
+{
+	struct {
+		mach_msg_header_t	h;
+		unsigned int		body[6];
+	} out;
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[256];
+	} in;
+	mach_msg_size_t		rcv_size = sizeof out + sizeof (mach_msg_trailer_t);
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i, hit = 0;
+
+	port = arm_own_port(29);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	out.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	out.h.msgh_size = sizeof out;
+	out.h.msgh_remote_port = port;
+	out.h.msgh_local_port = MACH_PORT_NULL;
+	out.h.msgh_reserved = 0;
+	out.h.msgh_id = 29;
+	for (i = 0; i < 6; i++)
+		out.body[i] = i;
+
+	mr = mach_msg(&out.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof out, 0,
+		      MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	if (mr != MACH_MSG_SUCCESS) {
+		printf("act_test: [29] the send answered 0x%x — WRONG\n",
+		       (int) mr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+
+	for (i = 0; i < sizeof in.bytes; i++)
+		in.bytes[i] = A29_CANARY;
+
+	mr = mach_msg(&in.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT |
+		      MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
+		      MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SENDER),
+		      0, rcv_size, port, 0, MACH_PORT_NULL);
+
+	for (i = rcv_size; i < sizeof in.bytes; i++)
+		if (in.bytes[i] != A29_CANARY)
+			hit++;
+
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_RCV_TOO_LARGE || hit != 0) {
+		printf("act_test: [29] a %u-byte message received into %u bytes "
+		       "with the sender's trailer asked for answered 0x%x, and %u "
+		       "bytes past rcv_size changed — WRONG, expected "
+		       "MACH_RCV_TOO_LARGE and none (#808)\n",
+		       (unsigned) sizeof out, (unsigned) rcv_size, (int) mr, hit);
+		return 0;
+	}
+
+	printf("act_test: [29] a %u-byte message received into %u bytes with the "
+	       "sender's trailer asked for was MACH_RCV_TOO_LARGE, and nothing "
+	       "past rcv_size changed (#808)\n", (unsigned) sizeof out,
+	       (unsigned) rcv_size);
+	return 1;
+}
+
+/*
+ * Arm thirty (#808): a scatter list is measured with its body's own size.
+ *
+ * With MACH_RCV_OVERWRITE the receive buffer, past its header, is a list of
+ * descriptors: a body, then as many descriptors as the body says.  The check
+ * added the count's 4 bytes for the body, which on x86-64 is 8, so a list
+ * that ended 4 bytes short of its last descriptor passed it.  Here the list
+ * is a body that says one descriptor and room for 4 bytes less than that,
+ * and no message is queued: the receive must answer MACH_RCV_INVALID_TYPE,
+ * from the list, before it looks at the queue -- a kernel that let the list
+ * through answers MACH_RCV_TIMED_OUT instead.
+ */
+static int
+arm_thirty_scatter_list_one_word_short(void)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[128];
+	} buf;
+	mach_msg_body_t		*body = (mach_msg_body_t *) (&buf.h + 1);
+	mach_msg_size_t		scatter_size;
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i;
+
+	scatter_size = sizeof (mach_msg_header_t) + 4
+		       + sizeof (mach_msg_descriptor_t);
+
+	port = arm_own_port(30);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < sizeof buf.bytes; i++)
+		buf.bytes[i] = 0;
+	body->msgh_descriptor_count = 1;
+
+	mr = mach_msg_overwrite(&buf.h, MACH_RCV_MSG | MACH_RCV_OVERWRITE |
+				MACH_RCV_TIMEOUT, 0, sizeof buf, port, 0,
+				MACH_PORT_NULL, &buf.h, scatter_size);
+
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_RCV_INVALID_TYPE) {
+		printf("act_test: [30] a scatter list of %u bytes for one "
+		       "%u-byte descriptor after an %u-byte body answered 0x%x, "
+		       "not MACH_RCV_INVALID_TYPE — WRONG (#808)\n",
+		       (unsigned) (scatter_size - sizeof (mach_msg_header_t)),
+		       (unsigned) sizeof (mach_msg_descriptor_t),
+		       (unsigned) sizeof (mach_msg_body_t), (int) mr);
+		return 0;
+	}
+
+	printf("act_test: [30] a scatter list of %u bytes for one %u-byte "
+	       "descriptor after an %u-byte body was refused with "
+	       "MACH_RCV_INVALID_TYPE (#808)\n",
+	       (unsigned) (scatter_size - sizeof (mach_msg_header_t)),
+	       (unsigned) sizeof (mach_msg_descriptor_t),
+	       (unsigned) sizeof (mach_msg_body_t));
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -4547,6 +4853,15 @@ main(int argc, char **argv)
 		arms--;
 	else
 		passed += r;
+
+	arms++;		/* arm twenty-seven, #808 */
+	passed += arm_twenty_seven_send_size_cannot_take_the_trailer();
+	arms++;		/* arm twenty-eight, #808 */
+	passed += arm_twenty_eight_send_past_the_inline_limit();
+	arms++;		/* arm twenty-nine, #808 */
+	passed += arm_twenty_nine_receive_measured_with_its_trailer();
+	arms++;		/* arm thirty, #808 */
+	passed += arm_thirty_scatter_list_one_word_short();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

@@ -267,6 +267,8 @@ mach_msg_format_0_trailer_t trailer_template = {
  *	Returns:
  *		MACH_MSG_SUCCESS	Sent the message.
  *		MACH_SEND_MSG_TOO_SMALL	Message smaller than a header.
+ *		MACH_SEND_TOO_LARGE	Message, or an array it carries, too
+ *					large for the kernel (#808).
  *		MACH_SEND_NO_BUFFER	Couldn't allocate buffer.
  *		MACH_SEND_INVALID_DATA	Couldn't copy message data.
  *		MACH_SEND_INVALID_HEADER
@@ -277,10 +279,10 @@ mach_msg_format_0_trailer_t trailer_template = {
  *		MACH_SEND_INVALID_REPLY	Can't copyin reply port.
  *		MACH_SEND_TIMED_OUT	Timeout expired without delivery.
  *		MACH_SEND_INTERRUPTED	Delivery interrupted.
- *		MACH_SEND_NO_NOTIFY	Can't allocate a msg-accepted request.
- *		MACH_SEND_WILL_NOTIFY	Msg-accepted notif. requested.
- *		MACH_SEND_NOTIFY_IN_PROGRESS
- *			This space has already forced a message to this port.
+ *
+ *	(#808: MACH_SEND_NO_NOTIFY, MACH_SEND_WILL_NOTIFY and
+ *	MACH_SEND_NOTIFY_IN_PROGRESS were listed here; message.h has none
+ *	of them, nothing returns them, and 0x1000000e is MACH_SEND_TOO_LARGE.)
  */
 
 mach_msg_return_t
@@ -424,16 +426,41 @@ mach_msg_receive(
 		} else {
 			slist_size -= sizeof(mach_msg_header_t);
 			imq_unlock(mqueue);
-			slist = (mach_msg_body_t *)KALLOC(slist_size, slist_rt);
-			if (slist == MACH_MSG_BODY_NULL ||
-			    copyin((char *) (msg + 1), (char *)slist,
-					slist_size)) {
+			/*
+			 * #808: the list is the caller's buffer, copied in
+			 * whole, and its size is the caller's.  No list
+			 * describes more than the largest message the kernel
+			 * takes inline, and a larger one would be a kalloc
+			 * that rounds to a page in a vm_size_t of 32 bits on
+			 * i386: it is refused before it is asked for.
+			 */
+			if (slist_size > IKM_MAX_MSG_SIZE) {
 				ipc_object_release(object);
 				return MACH_RCV_INVALID_DATA;
 			}
-			if ((slist->msgh_descriptor_count*
-			     sizeof(mach_msg_descriptor_t)
-			     + sizeof(mach_msg_size_t)) > slist_size) {
+			slist = (mach_msg_body_t *)KALLOC(slist_size, slist_rt);
+			if (slist == MACH_MSG_BODY_NULL) {
+				ipc_object_release(object);
+				return MACH_RCV_INVALID_DATA;
+			}
+			/* #808: and given back when it cannot be read. */
+			if (copyin((char *) (msg + 1), (char *)slist,
+				   slist_size)) {
+				FREE_SCATTER_LIST(slist, slist_size, slist_rt);
+				ipc_object_release(object);
+				return MACH_RCV_INVALID_DATA;
+			}
+			/*
+			 * #808: the count against the room after the body, in
+			 * a division that cannot wrap -- the product it
+			 * replaces wrapped in 32 bits on i386 -- and with the
+			 * body's own size, which on x86-64 is 8 bytes and not
+			 * the 4 of its count: the last descriptor could end
+			 * four bytes past the list.
+			 */
+			if (slist->msgh_descriptor_count >
+			    (slist_size - sizeof(mach_msg_body_t))
+			    / sizeof(mach_msg_descriptor_t)) {
 				FREE_SCATTER_LIST(slist, slist_size, slist_rt);
 				ipc_object_release(object);
 				return MACH_RCV_INVALID_TYPE;
@@ -451,8 +478,16 @@ mach_msg_receive(
 	self->ith_object = (void *) object;
 	self->ith_notify = notify;
 
-	mr = ipc_mqueue_receive(mqueue, option & MACH_RCV_TIMEOUT, rcv_size,
-				timeout, FALSE,
+	/*
+	 * #808: the trailer bits go with the timeout.  The queue measures the
+	 * message against rcv_size with the trailer the option asks for, and
+	 * without them it measured the smallest one while the copyout below
+	 * writes the one asked for -- up to MAX_TRAILER_SIZE less 8 bytes past
+	 * rcv_size, into the receiver's own memory.
+	 */
+	mr = ipc_mqueue_receive(mqueue,
+				option & (MACH_RCV_TIMEOUT | MACH_RCV_TRAILER_MASK),
+				rcv_size, timeout, FALSE,
 				mach_msg_receive_continue,
 				&kmsg, &seqno);
 	/*

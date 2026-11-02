@@ -793,6 +793,19 @@ ipc_kmsg_free(
 }
 
 /*
+ * #808: what makes IKM_MAX_MSG_SIZE a bound for the sums on a message's
+ * size.  With kalloc_map no larger than 2 GiB, a message that fits in it,
+ * plus its trailer, the kmsg in front of it and kalloc's rounding to a page,
+ * stays below the 32 bits of an i386 vm_size_t -- and of mach_msg_size_t,
+ * on both targets.  A kalloc_map grown past this has to bring a new bound
+ * with it.
+ */
+_Static_assert(KALLOC_MAP_SIZE <= ((vm_size_t) 1 << 31),
+	       "a message as large as kalloc_map must keep its sums in 32 bits");
+_Static_assert(IKM_MAX_MSG_SIZE % 4 == 0,
+	       "the largest inline message must be a size a send can give");
+
+/*
  *	Routine:	ipc_kmsg_get
  *	Purpose:
  *		Allocates a kernel message buffer.
@@ -803,6 +816,7 @@ ipc_kmsg_free(
  *		MACH_MSG_SUCCESS	Acquired a message buffer.
  *		MACH_SEND_MSG_TOO_SMALL	Message smaller than a header.
  *		MACH_SEND_MSG_TOO_SMALL	Message size not long-word multiple.
+ *		MACH_SEND_TOO_LARGE	Message larger than IKM_MAX_MSG_SIZE.
  *		MACH_SEND_NO_BUFFER	Couldn't allocate a message buffer.
  *		MACH_SEND_INVALID_DATA	Couldn't copy message data.
  */
@@ -826,6 +840,17 @@ ipc_kmsg_get(
 
 	if ((size < sizeof(mach_msg_header_t)) || (size & 3))
 		return MACH_SEND_MSG_TOO_SMALL;
+
+	/*
+	 * #808: the buffer is sized for the message AND its trailer, in
+	 * mach_msg_size_t, which is 32 bits on both targets, and then for the
+	 * kmsg in front of it, in a vm_size_t of 32 bits on i386.  A size
+	 * past the largest message the kernel takes inline is refused here,
+	 * before anything is added to it: the sums below must be the size of
+	 * the buffer that copyinmsg() then fills with `size' bytes.
+	 */
+	if (size > IKM_MAX_MSG_SIZE)
+		return MACH_SEND_TOO_LARGE;
 
 #if	MACH_RT
 	/*
@@ -961,6 +986,16 @@ ipc_kmsg_get_from_kernel(
 
 	assert(size >= sizeof(mach_msg_header_t));
 	assert((size & 3) == 0);
+
+	/*
+	 * #808: the same sums as ipc_kmsg_get()'s, on a size from the
+	 * kernel.  No buffer holds a message past the largest one the kernel
+	 * takes inline, and this routine may answer only with a resource
+	 * error, so it says there is none -- in a release kernel too, where
+	 * the asserts above are not there to stop the sums from wrapping.
+	 */
+	if (size > IKM_MAX_MSG_SIZE)
+		return MACH_SEND_NO_BUFFER;
 
 	/* round up for ikm_cache */
 	msg_and_trailer_size = size + MAX_TRAILER_SIZE;
@@ -2100,6 +2135,19 @@ ipc_kmsg_copyin_body(
 		 * first task it created inherited them; and the kernel took a
 		 * mutex on 0x4d8da8 from ring 0, inside ipc_task_init.
 		 */
+		/*
+		 * #808: the count is the caller's, and both sizes below are
+		 * vm_size_t, which is 32 bits on i386; the larger is then
+		 * handed to kalloc, which has nothing past kalloc_map to give
+		 * and rounds to a page in that same vm_size_t.  A count whose
+		 * array kalloc_map could not hold is refused before either is
+		 * computed, so each is the size of what it stands for and the
+		 * allocation is one kalloc can make.
+		 */
+		if (dsc->count > KALLOC_MAP_SIZE / sizeof(ipc_port_t)) {
+		    ipc_kmsg_clean_partial(kmsg, i, paddr, space_needed);
+		    return MACH_SEND_TOO_LARGE;
+		}
 		length = ipc_port_array_size(dsc->count);
 		names_length = mach_port_name_array_size(dsc->count);
 		

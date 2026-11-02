@@ -131,7 +131,7 @@
 #include <vm/vm_map.h>
 
 vm_map_t kalloc_map;
-vm_size_t kalloc_map_size = 8 * 1024 * 1024;
+vm_size_t kalloc_map_size = KALLOC_MAP_SIZE;
 vm_size_t kalloc_max;
 vm_size_t kalloc_max_prerounded;
 
