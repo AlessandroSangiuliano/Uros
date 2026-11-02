@@ -5083,6 +5083,164 @@ arm_thirty_six_vm_write_small_physical_copy(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-seven (#812): a snapshot taken of memory never touched stays as
+ * it was taken, however the memory is then read and written.
+ *
+ * vm_object_copy_delayed() write-protects only the pages resident when the
+ * copy is taken.  A page first touched afterwards by a read was zero-filled
+ * by vm_fault()'s fast path and mapped writable, so the write after it went
+ * straight into the source -- where the copy reads it, through its shadow.
+ * Here three snapshots are taken of a range never touched: vm_read(), vm_copy()
+ * to a second range, and an out-of-line send to a port of this task not yet
+ * received.  Then the range is read, so the fast path fills its pages, and
+ * written.  All three snapshots must still read zero.
+ *
+ * 🔴 The range is mapped a second time first, with vm_remap() and no copy.  A
+ * range just allocated has no object, and an anonymous object copies
+ * symmetrically -- shadows and needs_copy, no object->copy -- so its snapshots
+ * never reached the branch the fix is in: the ablation was caught 0 times in
+ * 4 (02/11).  A second mapping of the same object makes it copy-delay
+ * (vm_remap_extract(), as a shared fork does), and creates the object without
+ * touching a page of it; each snapshot is then a delayed copy, and the read
+ * after them is a zero fill in an object that has a copy.
+ */
+#define	A37_PAGES	2
+
+/* How many bytes of [p, p + len) are not zero. */
+static unsigned
+a37_not_zero(const volatile unsigned char *p, vm_size_t len)
+{
+	unsigned	n = 0;
+	vm_size_t	i;
+
+	for (i = 0; i < len; i++)
+		if (p[i] != 0)
+			n++;
+	return n;
+}
+
+static int
+arm_thirty_seven_snapshot_of_untouched_memory(void)
+{
+	struct {
+		mach_msg_header_t		head;
+		mach_msg_body_t			body;
+		mach_msg_ool_descriptor_t	data;
+	} s;
+	union {
+		struct {
+			mach_msg_header_t		head;
+			mach_msg_body_t			body;
+			mach_msg_ool_descriptor_t	data;
+		} m;
+		unsigned char	room[256];
+	} r;
+	vm_size_t		len = A37_PAGES * vm_page_size;
+	vm_address_t		src = 0, dst = 0, alias = 0;
+	vm_offset_t		rd = 0;
+	mach_msg_type_number_t	rdcnt = 0;
+	vm_prot_t		cur, max;
+	kern_return_t		kr1, kr2, kr3;
+	mach_msg_return_t	sent, got = MACH_RCV_TIMED_OUT;
+	volatile unsigned char	*p;
+	unsigned		bad_read = 0, bad_copy = 0, bad_msg = 0;
+	unsigned		i, sum = 0;
+	mach_port_t		port;
+
+	port = arm_own_port(37);
+	if (port == MACH_PORT_NULL)
+		return 0;
+	kr1 = vm_allocate(mach_task_self(), &src, len, TRUE);
+	kr2 = vm_allocate(mach_task_self(), &dst, len, TRUE);
+	kr3 = kr1 == KERN_SUCCESS
+	      ? vm_remap(mach_task_self(), &alias, len, 0, TRUE, mach_task_self(),
+			 src, FALSE, &cur, &max, VM_INHERIT_NONE)
+	      : KERN_FAILURE;
+	if (kr1 != KERN_SUCCESS || kr2 != KERN_SUCCESS || kr3 != KERN_SUCCESS) {
+		printf("act_test: [37] vm_allocate answered %d and %d, the second "
+		       "mapping %d — WRONG\n", kr1, kr2, kr3);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+
+	/* Three snapshots of a range nothing has touched. */
+	kr1 = vm_read(mach_task_self(), src, len, &rd, &rdcnt);
+	kr2 = vm_copy(mach_task_self(), src, len, dst);
+	for (i = 0; i < sizeof s; i++)
+		((unsigned char *) &s)[i] = 0;
+	s.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			   | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	s.head.msgh_size = sizeof s;
+	s.head.msgh_remote_port = port;
+	s.head.msgh_local_port = MACH_PORT_NULL;
+	s.head.msgh_id = 37;
+	s.body.msgh_descriptor_count = 1;
+	s.data.address = (void *) src;
+	s.data.size = len;
+	s.data.deallocate = FALSE;
+	s.data.copy = MACH_MSG_VIRTUAL_COPY;
+	s.data.type = MACH_MSG_OOL_DESCRIPTOR;
+	sent = mach_msg(&s.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof s, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+	/* Read first, so the fast path fills the pages; then write them. */
+	p = (volatile unsigned char *) src;
+	for (i = 0; i < A37_PAGES; i++)
+		sum += p[i * vm_page_size];
+	for (i = 0; i < len; i++)
+		p[i] = 0x37;
+
+	if (kr1 == KERN_SUCCESS)
+		bad_read = a37_not_zero((const volatile unsigned char *) rd,
+					rdcnt);
+	if (kr2 == KERN_SUCCESS)
+		bad_copy = a37_not_zero((const volatile unsigned char *) dst,
+					len);
+	if (sent == MACH_MSG_SUCCESS) {
+		got = mach_msg(&r.m.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			       sizeof r, port, 1000, MACH_PORT_NULL);
+		if (got == MACH_MSG_SUCCESS) {
+			bad_msg = a37_not_zero(
+			    (const volatile unsigned char *) r.m.data.address,
+			    r.m.data.size);
+			(void) vm_deallocate(mach_task_self(),
+					     (vm_address_t) r.m.data.address,
+					     r.m.data.size);
+		}
+	}
+
+	if (kr1 == KERN_SUCCESS)
+		(void) vm_deallocate(mach_task_self(), rd, rdcnt);
+	(void) vm_deallocate(mach_task_self(), src, len);
+	(void) vm_deallocate(mach_task_self(), alias, len);
+	(void) vm_deallocate(mach_task_self(), dst, len);
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (kr1 != KERN_SUCCESS || kr2 != KERN_SUCCESS
+	    || sent != MACH_MSG_SUCCESS || got != MACH_MSG_SUCCESS) {
+		printf("act_test: [37] the snapshots could not all be taken: "
+		       "vm_read %d, vm_copy %d, send 0x%x, receive 0x%x "
+		       "(sum %u) — WRONG\n", kr1, kr2, (int) sent, (int) got,
+		       sum);
+		return 0;
+	}
+	if (bad_read != 0 || bad_copy != 0 || bad_msg != 0) {
+		printf("act_test: [37] after a read and a write of %lu bytes "
+		       "never touched before, the snapshots taken earlier changed: "
+		       "%u bytes of vm_read's, %u of vm_copy's, %u of the "
+		       "out-of-line message's — WRONG (#812)\n",
+		       (unsigned long) len, bad_read, bad_copy, bad_msg);
+		return 0;
+	}
+
+	printf("act_test: [37] snapshots of %lu bytes never touched -- vm_read, "
+	       "vm_copy and an out-of-line send -- read zero after the range "
+	       "was read and then written (sum %u) (#812)\n",
+	       (unsigned long) len, sum);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -5751,6 +5909,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_five_port_array_with_no_room();
 	arms++;		/* arm thirty-six, #810 */
 	passed += arm_thirty_six_vm_write_small_physical_copy();
+	arms++;		/* arm thirty-seven, #812 */
+	passed += arm_thirty_seven_snapshot_of_untouched_memory();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
