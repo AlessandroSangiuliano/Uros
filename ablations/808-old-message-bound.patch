@@ -4,6 +4,7 @@ Takes out: IKM_MAX_MSG_SIZE as ipc_kmsg_get()'s bound, putting back a179a7db's M
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[28\] a send of [0-9]+ bytes, past the largest inline message, answered 0x[0-9a-f]+ \(MACH_SEND_NO_BUFFER
+Note: Judged under QEMU (TCG and KVM), act_test's arm 28, on victus 02/11/2026 at 8d303cbe: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
 --- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
