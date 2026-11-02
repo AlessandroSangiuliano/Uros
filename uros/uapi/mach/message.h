@@ -671,6 +671,9 @@ typedef kern_return_t mach_msg_return_t;
 		/* Invalid out-of-line memory pointer. */
 #define MACH_SEND_NO_BUFFER		0x1000000d
 		/* No message buffer is available. */
+#define MACH_SEND_TOO_LARGE		0x1000000e
+		/* The message, or an array it carries, is larger than the
+		   kernel can take (#808).  The code the other Machs give it. */
 #define MACH_SEND_INVALID_TYPE		0x1000000f
 		/* Invalid msg-type specification. */
 #define MACH_SEND_INVALID_HEADER	0x10000010
