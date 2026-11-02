@@ -827,12 +827,21 @@ vm_msync(
  *	will cause all future virtual memory allocation to allocate
  *	user wired memory.  Unwiring pages wired down as a result of
  *	this routine is done with the vm_wire interface.
+ *
+ *	#813: only on the privileged host port, as vm_wire() above.
+ *	vm_map_enter() wires every entry of a map that requires it, with
+ *	no limit, so this was a way for any task to drain the free pool
+ *	of every task in the system.
  */
 kern_return_t
 task_wire(
+	host_t		host,
 	vm_map_t	map,
 	boolean_t	must_wire)
 {
+	if (host == HOST_NULL)
+		return KERN_INVALID_HOST;
+
 	if (map == VM_MAP_NULL)
 		return(KERN_INVALID_ARGUMENT);
 

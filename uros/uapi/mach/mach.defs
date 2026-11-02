@@ -179,9 +179,16 @@ userprefix r_;
  *	Require that all future virtual memory allocation
  *	allocates wired memory.  Setting must_wire to FALSE
  *	disables the wired future feature.
+ *
+ *	#813: on the privileged host port, as vm_wire() is, and as
+ *	task_swappable() below is: wiring memory is a privileged
+ *	operation, and with the task's own port alone any task could
+ *	wire everything it would ever allocate.  Same position in this
+ *	file, so the same message id.
  */
 /* old port_allocate */
 routine task_wire(
+		host_priv	: host_priv_t;
 		target_task	: vm_task_t;
 		must_wire	: boolean_t);
 	
