@@ -4517,6 +4517,160 @@ arm_thirty_three_trailer_not_there(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-four (#844): an RPC whose reply does not fit is told so with the
+ * reply's own sequence number in its trailer.
+ *
+ * On the hot path of mach_msg_overwrite_trap(), a reply too large for
+ * rcv_size goes to slow_copyout, where msg_receive_error() writes a header
+ * and the trailer asked for -- and took the sequence number from a variable
+ * only the slow receive sets, so on the hot path it was whatever the kernel's
+ * stack held.  Here the reply port has had three messages received from it,
+ * so the reply is its fourth, sequence number 3; a server thread answers the
+ * RPC with 256 bytes into a receive of 64 that asks for the sequence number,
+ * and the trailer must say 3.
+ */
+#define	A34_PRELOAD	3
+#define	A34_REPLY	256
+#define	A34_RCV		64
+
+static mach_port_t		arm_thirty_four_service;
+static volatile mach_msg_return_t arm_thirty_four_server_rcv = -1;
+static volatile mach_msg_return_t arm_thirty_four_server_snd = -1;
+
+static void *
+arm_thirty_four_server(void *arg)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[256];
+	} req;
+	static union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[A34_REPLY];
+	} rep;
+	unsigned	i;
+
+	(void) arg;
+	arm_thirty_four_server_rcv =
+	    mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof req,
+		     arm_thirty_four_service, 10000, MACH_PORT_NULL);
+	if (arm_thirty_four_server_rcv != MACH_MSG_SUCCESS)
+		return NULL;
+
+	for (i = 0; i < sizeof rep.bytes; i++)
+		rep.bytes[i] = 0;
+	rep.h.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(req.h.msgh_bits),
+					 0);
+	rep.h.msgh_size = A34_REPLY;
+	rep.h.msgh_remote_port = req.h.msgh_remote_port;
+	rep.h.msgh_local_port = MACH_PORT_NULL;
+	rep.h.msgh_id = req.h.msgh_id + 100;
+	arm_thirty_four_server_snd =
+	    mach_msg(&rep.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, A34_REPLY, 0,
+		     MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	return NULL;
+}
+
+static int
+arm_thirty_four_rpc_reply_seqno(void)
+{
+	mach_msg_header_t	small;
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[A34_RCV];
+	} buf;
+	mach_msg_seqno_trailer_t	*tr;
+	mach_port_t		reply;
+	mach_msg_return_t	mr;
+	pthread_t		server;
+	unsigned		i;
+
+	arm_thirty_four_service = arm_own_port(34);
+	if (arm_thirty_four_service == MACH_PORT_NULL)
+		return 0;
+	reply = arm_own_port(34);
+	if (reply == MACH_PORT_NULL) {
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_four_service);
+		return 0;
+	}
+
+	/* Three messages through the reply port, so the next is number 3. */
+	for (i = 0; i < A34_PRELOAD; i++) {
+		small.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+		small.msgh_size = sizeof small;
+		small.msgh_remote_port = reply;
+		small.msgh_local_port = MACH_PORT_NULL;
+		small.msgh_reserved = 0;
+		small.msgh_id = 34;
+		mr = mach_msg(&small, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			      sizeof small, 0, MACH_PORT_NULL, 0,
+			      MACH_PORT_NULL);
+		if (mr == MACH_MSG_SUCCESS)
+			mr = mach_msg(&buf.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+				      sizeof buf, reply, 0, MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS) {
+			printf("act_test: [34] message %u through the reply port "
+			       "answered 0x%x — WRONG\n", i, (int) mr);
+			(void) mach_port_destroy(mach_task_self(), reply);
+			(void) mach_port_destroy(mach_task_self(),
+						 arm_thirty_four_service);
+			return 0;
+		}
+	}
+
+	if (pthread_create(&server, NULL, arm_thirty_four_server, NULL) != 0) {
+		printf("act_test: [34] pthread_create failed — WRONG\n");
+		(void) mach_port_destroy(mach_task_self(), reply);
+		(void) mach_port_destroy(mach_task_self(),
+					 arm_thirty_four_service);
+		return 0;
+	}
+	/* Let the server get to its receive, so the RPC can hand off to it. */
+	for (i = 0; i < 20 && arm_thirty_four_server_rcv == -1; i++)
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+
+	for (i = 0; i < sizeof buf.bytes; i++)
+		buf.bytes[i] = 0;
+	buf.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+					 MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	buf.h.msgh_size = sizeof (mach_msg_header_t);
+	buf.h.msgh_remote_port = arm_thirty_four_service;
+	buf.h.msgh_local_port = reply;
+	buf.h.msgh_reserved = 0;
+	buf.h.msgh_id = 3400;
+	mr = mach_msg(&buf.h, MACH_SEND_MSG | MACH_RCV_MSG
+		      | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+		      | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SEQNO),
+		      sizeof (mach_msg_header_t), A34_RCV, reply,
+		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+
+	(void) pthread_join(server, NULL);
+	tr = (mach_msg_seqno_trailer_t *)
+	     (buf.bytes + ((sizeof (mach_msg_header_t) + 3) & ~3UL));
+
+	(void) mach_port_destroy(mach_task_self(), reply);
+	(void) mach_port_destroy(mach_task_self(), arm_thirty_four_service);
+
+	if (mr != MACH_RCV_TOO_LARGE || tr->msgh_seqno != A34_PRELOAD) {
+		printf("act_test: [34] an RPC whose %u-byte reply does not fit %u "
+		       "bytes answered 0x%x, its trailer saying sequence number %u "
+		       "(server: 0x%x, 0x%x) — WRONG, expected "
+		       "MACH_RCV_TOO_LARGE and %u (#844)\n", A34_REPLY, A34_RCV,
+		       (int) mr, (unsigned) tr->msgh_seqno,
+		       (int) arm_thirty_four_server_rcv,
+		       (int) arm_thirty_four_server_snd, A34_PRELOAD);
+		return 0;
+	}
+
+	printf("act_test: [34] an RPC whose %u-byte reply does not fit %u bytes "
+	       "was MACH_RCV_TOO_LARGE, its trailer saying sequence number %u, "
+	       "the reply's own, read back (#844)\n", A34_REPLY, A34_RCV,
+	       (unsigned) tr->msgh_seqno);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -5179,6 +5333,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_two_exception_answered_too_large();
 	arms++;		/* arm thirty-three, #842 */
 	passed += arm_thirty_three_trailer_not_there();
+	arms++;		/* arm thirty-four, #844 */
+	passed += arm_thirty_four_rpc_reply_seqno();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
