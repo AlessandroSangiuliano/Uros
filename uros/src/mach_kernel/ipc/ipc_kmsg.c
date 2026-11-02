@@ -2137,11 +2137,14 @@ ipc_kmsg_copyin_body(
 		 */
 		/*
 		 * #808: the count is the caller's, and both sizes below are
-		 * vm_size_t, which is 32 bits on i386.  A count they cannot
-		 * hold is refused before either is computed, so each is the
-		 * size of what it stands for.
+		 * vm_size_t, which is 32 bits on i386; the larger is then
+		 * handed to kalloc, which has nothing past kalloc_map to give
+		 * and rounds to a page in that same vm_size_t.  A count whose
+		 * array kalloc_map could not hold is refused before either is
+		 * computed, so each is the size of what it stands for and the
+		 * allocation is one kalloc can make.
 		 */
-		if (dsc->count > ((vm_size_t) ~0) / sizeof(ipc_port_t)) {
+		if (dsc->count > KALLOC_MAP_SIZE / sizeof(ipc_port_t)) {
 		    ipc_kmsg_clean_partial(kmsg, i, paddr, space_needed);
 		    return MACH_SEND_TOO_LARGE;
 		}
