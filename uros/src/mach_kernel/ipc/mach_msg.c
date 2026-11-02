@@ -426,16 +426,41 @@ mach_msg_receive(
 		} else {
 			slist_size -= sizeof(mach_msg_header_t);
 			imq_unlock(mqueue);
-			slist = (mach_msg_body_t *)KALLOC(slist_size, slist_rt);
-			if (slist == MACH_MSG_BODY_NULL ||
-			    copyin((char *) (msg + 1), (char *)slist,
-					slist_size)) {
+			/*
+			 * #808: the list is the caller's buffer, copied in
+			 * whole, and its size is the caller's.  No list
+			 * describes more than the largest message the kernel
+			 * takes inline, and a larger one would be a kalloc
+			 * that rounds to a page in a vm_size_t of 32 bits on
+			 * i386: it is refused before it is asked for.
+			 */
+			if (slist_size > IKM_MAX_MSG_SIZE) {
 				ipc_object_release(object);
 				return MACH_RCV_INVALID_DATA;
 			}
-			if ((slist->msgh_descriptor_count*
-			     sizeof(mach_msg_descriptor_t)
-			     + sizeof(mach_msg_size_t)) > slist_size) {
+			slist = (mach_msg_body_t *)KALLOC(slist_size, slist_rt);
+			if (slist == MACH_MSG_BODY_NULL) {
+				ipc_object_release(object);
+				return MACH_RCV_INVALID_DATA;
+			}
+			/* #808: and given back when it cannot be read. */
+			if (copyin((char *) (msg + 1), (char *)slist,
+				   slist_size)) {
+				FREE_SCATTER_LIST(slist, slist_size, slist_rt);
+				ipc_object_release(object);
+				return MACH_RCV_INVALID_DATA;
+			}
+			/*
+			 * #808: the count against the room after the body, in
+			 * a division that cannot wrap -- the product it
+			 * replaces wrapped in 32 bits on i386 -- and with the
+			 * body's own size, which on x86-64 is 8 bytes and not
+			 * the 4 of its count: the last descriptor could end
+			 * four bytes past the list.
+			 */
+			if (slist->msgh_descriptor_count >
+			    (slist_size - sizeof(mach_msg_body_t))
+			    / sizeof(mach_msg_descriptor_t)) {
 				FREE_SCATTER_LIST(slist, slist_size, slist_rt);
 				ipc_object_release(object);
 				return MACH_RCV_INVALID_TYPE;
