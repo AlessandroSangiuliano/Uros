@@ -445,6 +445,19 @@ void trap_expect_either(uint64_t vector, uint64_t or_vector,
 			uint64_t resume_rip);
 
 /*
+ * The same as trap_expect(), resumed without the line (#811).
+ *
+ * For a bench that provokes the fault on purpose, thousands of times, and
+ * counts the faults itself.  The line goes to the wire a byte at a time, past
+ * the console's lines, so that it can be read when nothing else works; written
+ * by #811's lost-race bench in every one of 2000 rounds, on three processors at
+ * once, it was 2000 of the 2448 lines of a merge test's entry 9, and four of
+ * them landed inside clock_event's -- a boot failed GARBLED (#578) for a probe
+ * that did what it should.  trap_last() still records the fault.
+ */
+void trap_expect_quiet(uint64_t vector, uint64_t resume_rip);
+
+/*
  * Withdraw an expectation that did not fire.
  *
  * A probe armed for a fault that the machine then allowed -- the control half

@@ -1515,11 +1515,11 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			 *
 			 * 🔑 And a zero here is a legitimate interleaving, not
 			 * a corrupt index: pmap_remove() on another processor
-			 * clears the entry through its own tables and then
-			 * blocks in pv_remove() waiting for this lock.  Its pv
-			 * entry is still on the list while its PTE is already
-			 * gone.  Removing it here is what that processor was
-			 * about to do, and it finds nothing left to remove.
+			 * clears the entry through its own tables and only
+			 * later takes this lock in pv_remove().  Its pv entry
+			 * is still on the list while its PTE is already gone.
+			 * Removing it here is what that processor was about to
+			 * do, and it finds nothing left to remove.
 			 */
 			e = pv_remove_locked(pa, hpmap, hva);
 			if (e != PV_ENTRY_NULL) {
@@ -1527,8 +1527,32 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 				dead = e;
 			}
 
-			if (size == 0)
+			/*
+			 * 🔴 BUT GONE FROM THE TABLES IS NOT GONE FROM EVERY
+			 * TLB (#811).  The remover that won clears the entry,
+			 * leaves its read section -- where it can be preempted
+			 * -- and only then flushes (pmap_unmap_page()), before
+			 * it reaches pv_remove().  Nothing orders that flush
+			 * before this return, so another processor may still
+			 * translate the address when this function says the
+			 * page is mapped nowhere, and the page is freed and
+			 * reused under it.  So the address is flushed here as
+			 * well, with the rest of the batch: what this returns
+			 * is ordered after a flush of every translation the pv
+			 * list named, whoever removed it.  The winner's own
+			 * flush comes too, and is merely a second one.  A pv
+			 * entry is only ever a 4 KiB leaf.
+			 */
+			if (size == 0) {
+				if (n < PV_FLUSH_BATCH) {
+					batch[n].pmap = hpmap;
+					batch[n].va = hva;
+					batch[n].size = PAGE_SIZE_4K;
+					n++;
+				} else
+					overflow = TRUE;
 				continue;
+			}
 
 			pmap_resident_drop(hpmap, hva);
 
@@ -1637,8 +1661,16 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 			uint64_t size = pmap_protect_page_noflush(pv->pmap,
 								  pv->va, flags);
 
+			/*
+			 * #811, as in the removal loop above: a zero is an entry
+			 * another remover has cleared and may not have flushed
+			 * yet, and a translation that survives in a TLB still
+			 * grants what this call takes away -- a write after the
+			 * page was made read-only for a copy or a clean.
+			 * Flushed here as well, with the rest.
+			 */
 			if (size == 0)
-				continue;
+				size = PAGE_SIZE_4K;
 			if (n < PV_FLUSH_BATCH) {
 				batch[n].pmap = pv->pmap;
 				batch[n].va = pv->va;
