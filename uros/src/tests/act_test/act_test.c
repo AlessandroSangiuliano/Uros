@@ -70,6 +70,7 @@
 #include <mach/mach_syscalls.h>	/* #688: syscall_task_info() */
 #include <mach/ndr.h>		/* #688: NDR_record, for its message */
 #include <mach/mach_port.h>	/* #662: mach_port_names(), to count the space */
+#include <mach/notify.h>	/* #843: arm thirty-five's no-senders */
 
 #include <stdio.h>
 #include <pthread.h>
@@ -4696,6 +4697,179 @@ arm_thirty_four_rpc_reply_seqno(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-five (#843): an out-of-line port array the receiver has no room
+ * for is released alone; the descriptors delivered before it stay delivered.
+ *
+ * ipc_kmsg_copyout_body() delivers a message's descriptors in order.  When
+ * vm_allocate() failed for a port array in the receiver's map, it cleaned the
+ * whole body from the first descriptor, so rights already moved to the
+ * receiver were released a second time.
+ *
+ * Here a port P, with a no-senders notification asked for, has one send
+ * right, and it travels in a port descriptor; a port array follows, and the
+ * message is received with this task's address space full, so the array has
+ * nowhere to go.  The receive must report the array's failure, P's right must
+ * arrive, and P must not hear "no senders": the right is this task's again.
+ * A kernel that releases it twice takes P's count of send rights to zero while
+ * the right is held, and the notification comes.  Nothing is printed while
+ * the space is full: printing may need memory.
+ */
+#define	A35_FILL_MAX	1024
+
+static vm_address_t	a35_fill_addr[A35_FILL_MAX];
+static vm_size_t	a35_fill_size[A35_FILL_MAX];
+
+/* Every hole of the address space taken, largest first; the count taken. */
+static unsigned
+a35_fill_the_space(void)
+{
+	vm_size_t	size;
+	unsigned	n = 0;
+
+	for (size = (vm_size_t) 1 << 46; size >= vm_page_size; size >>= 1) {
+		while (n < A35_FILL_MAX) {
+			vm_address_t	addr = 0;
+
+			if (vm_allocate(mach_task_self(), &addr, size, TRUE)
+			    != KERN_SUCCESS)
+				break;
+			a35_fill_addr[n] = addr;
+			a35_fill_size[n] = size;
+			n++;
+		}
+	}
+	return n;
+}
+
+static void
+a35_empty_the_space(unsigned n)
+{
+	while (n > 0) {
+		n--;
+		(void) vm_deallocate(mach_task_self(), a35_fill_addr[n],
+				     a35_fill_size[n]);
+	}
+}
+
+static int
+arm_thirty_five_port_array_with_no_room(void)
+{
+	struct {
+		mach_msg_header_t		h;
+		mach_msg_body_t			b;
+		mach_msg_port_descriptor_t	port;
+		mach_msg_ool_ports_descriptor_t	ports;
+	} m;
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[512];
+	} r, note;
+	mach_port_t		dest, p, q, notify, prev = MACH_PORT_NULL;
+	mach_port_t		one[1];
+	mach_port_urefs_t	refs = 0;
+	mach_msg_return_t	mr, sent, heard;
+	vm_address_t		probe = 0;
+	kern_return_t		kr, full;
+	unsigned		filled, i;
+	int			ok = 0;
+
+	dest = arm_own_port(35);
+	p = arm_own_port(35);		/* one send right: the one that travels */
+	q = arm_own_port(35);
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&notify);
+	if (dest == MACH_PORT_NULL || p == MACH_PORT_NULL
+	    || q == MACH_PORT_NULL || kr != KERN_SUCCESS) {
+		printf("act_test: [35] the ports could not be made — WRONG\n");
+		return 0;
+	}
+	kr = mach_port_request_notification(mach_task_self(), p,
+					    MACH_NOTIFY_NO_SENDERS, 0, notify,
+					    MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [35] the no-senders request answered %d — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+
+	for (i = 0; i < sizeof m; i++)
+		((unsigned char *) &m)[i] = 0;
+	m.h.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			| MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.h.msgh_size = sizeof m;
+	m.h.msgh_remote_port = dest;
+	m.h.msgh_local_port = MACH_PORT_NULL;
+	m.h.msgh_id = 35;
+	m.b.msgh_descriptor_count = 2;
+	m.port.name = p;
+	m.port.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	m.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	one[0] = q;
+	m.ports.address = one;
+	m.ports.count = 1;
+	m.ports.deallocate = FALSE;
+	m.ports.copy = MACH_MSG_PHYSICAL_COPY;
+	m.ports.disposition = MACH_MSG_TYPE_COPY_SEND;
+	m.ports.type = MACH_MSG_OOL_PORTS_DESCRIPTOR;
+
+	sent = mach_msg(&m.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+	for (i = 0; i < sizeof r.bytes; i++)	/* its pages, touched now */
+		r.bytes[i] = 0;
+
+	/* ── the space full: no printing until it is emptied ── */
+	filled = a35_fill_the_space();
+	full = vm_allocate(mach_task_self(), &probe, vm_page_size, TRUE);
+	mr = MACH_MSG_SUCCESS;
+	if (sent == MACH_MSG_SUCCESS && full != KERN_SUCCESS)
+		mr = mach_msg(&r.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof r, dest, 0, MACH_PORT_NULL);
+	if (full == KERN_SUCCESS)
+		(void) vm_deallocate(mach_task_self(), probe, vm_page_size);
+	a35_empty_the_space(filled);
+	/* ── emptied ── */
+
+	(void) mach_port_get_refs(mach_task_self(), p, MACH_PORT_RIGHT_SEND,
+				  &refs);
+	heard = mach_msg(&note.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			 sizeof note, notify, 200, MACH_PORT_NULL);
+
+	if (sent != MACH_MSG_SUCCESS)
+		printf("act_test: [35] the send answered 0x%x — WRONG\n",
+		       (int) sent);
+	else if (full == KERN_SUCCESS)
+		printf("act_test: [35] %u allocations did not fill the address "
+		       "space, a page was still free — WRONG\n", filled);
+	else if ((mr & ~MACH_MSG_MASK) != MACH_RCV_BODY_ERROR
+		 || (mr & MACH_MSG_VM_SPACE) == 0)
+		printf("act_test: [35] a receive whose port array had no room "
+		       "answered 0x%x, not MACH_RCV_BODY_ERROR with "
+		       "MACH_MSG_VM_SPACE — WRONG (#843)\n", (int) mr);
+	else if (heard == MACH_MSG_SUCCESS)
+		printf("act_test: [35] P heard \"no senders\" (id %d) while this "
+		       "task holds %u send right%s to it: the right delivered "
+		       "was released again with the array — WRONG (#843)\n",
+		       note.h.msgh_id, (unsigned) refs, refs == 1 ? "" : "s");
+	else if (refs != 1)
+		printf("act_test: [35] P's delivered send right is held %u "
+		       "times, not once — WRONG (#843)\n", (unsigned) refs);
+	else {
+		printf("act_test: [35] with the address space full (%u "
+		       "allocations), the port array failed alone, 0x%x, and "
+		       "the right delivered before it stayed, held once and "
+		       "with no \"no senders\" (#843)\n", filled, (int) mr);
+		ok = 1;
+	}
+
+	(void) mach_port_destroy(mach_task_self(), dest);
+	(void) mach_port_destroy(mach_task_self(), p);
+	(void) mach_port_destroy(mach_task_self(), q);
+	(void) mach_port_destroy(mach_task_self(), notify);
+	return ok;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -5360,6 +5534,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_three_trailer_not_there();
 	arms++;		/* arm thirty-four, #844 */
 	passed += arm_thirty_four_rpc_reply_seqno();
+	arms++;		/* arm thirty-five, #843 */
+	passed += arm_thirty_five_port_array_with_no_room();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
