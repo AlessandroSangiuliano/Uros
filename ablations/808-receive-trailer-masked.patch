@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #808
+Takes out: the trailer bits mach_msg_receive() hands the queue with the timeout -- the queue then measures the message with the smallest trailer while the copyout writes the one asked for, and act_test's arm 29 sees its receive taken and bytes written past rcv_size
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[29\] .* bytes past rcv_size changed — WRONG
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -486,7 +486,7 @@
+ 	 * rcv_size, into the receiver's own memory.
+ 	 */
+ 	mr = ipc_mqueue_receive(mqueue,
+-				option & (MACH_RCV_TIMEOUT | MACH_RCV_TRAILER_MASK),
++				option & MACH_RCV_TIMEOUT,
+ 				rcv_size, timeout, FALSE,
+ 				mach_msg_receive_continue,
+ 				&kmsg, &seqno);
