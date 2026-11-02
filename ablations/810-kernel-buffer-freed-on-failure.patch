@@ -1,0 +1,31 @@
+Kind: ablation
+Issue: #810
+Takes out: the free of the copy only on a copyout that worked, putting back the free whatever the copyout did -- act_test's arm 36 then has its failed vm_write's buffer freed twice, and the two copies of that size after it are handed the same buffer
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[36\] .* — WRONG|UrMach x86-64: trap |panic\(cpu
+
+diff --git a/uros/src/mach_kernel/vm/vm_map.c b/uros/src/mach_kernel/vm/vm_map.c
+--- a/uros/src/mach_kernel/vm/vm_map.c
++++ b/uros/src/mach_kernel/vm/vm_map.c
+@@ -4271,19 +4271,9 @@
+ 	 * range this routine entered for the copy goes with the failure, where
+ 	 * it stayed in the target map.
+ 	 */
+-	if (kr != KERN_SUCCESS) {
+-		if (!overwrite) {
+-			(void) vm_map_remove(map, *addr,
+-					     *addr + round_page(copy->size),
+-					     VM_MAP_NO_FLAGS);
+-			*addr = 0;
+-		}
+-		return(kr);
+-	}
+-
+ 	kfree((vm_offset_t)copy, copy->cpy_kalloc_size);
+ 
+-	return(KERN_SUCCESS);
++	return(kr);
+ }
+ 		
+ /*
