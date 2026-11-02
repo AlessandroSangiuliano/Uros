@@ -793,6 +793,19 @@ ipc_kmsg_free(
 }
 
 /*
+ * #808: what makes IKM_MAX_MSG_SIZE a bound for the sums on a message's
+ * size.  With kalloc_map no larger than 2 GiB, a message that fits in it,
+ * plus its trailer, the kmsg in front of it and kalloc's rounding to a page,
+ * stays below the 32 bits of an i386 vm_size_t -- and of mach_msg_size_t,
+ * on both targets.  A kalloc_map grown past this has to bring a new bound
+ * with it.
+ */
+_Static_assert(KALLOC_MAP_SIZE <= ((vm_size_t) 1 << 31),
+	       "a message as large as kalloc_map must keep its sums in 32 bits");
+_Static_assert(IKM_MAX_MSG_SIZE % 4 == 0,
+	       "the largest inline message must be a size a send can give");
+
+/*
  *	Routine:	ipc_kmsg_get
  *	Purpose:
  *		Allocates a kernel message buffer.
@@ -803,7 +816,7 @@ ipc_kmsg_free(
  *		MACH_MSG_SUCCESS	Acquired a message buffer.
  *		MACH_SEND_MSG_TOO_SMALL	Message smaller than a header.
  *		MACH_SEND_MSG_TOO_SMALL	Message size not long-word multiple.
- *		MACH_SEND_TOO_LARGE	Message size cannot take the trailer.
+ *		MACH_SEND_TOO_LARGE	Message larger than IKM_MAX_MSG_SIZE.
  *		MACH_SEND_NO_BUFFER	Couldn't allocate a message buffer.
  *		MACH_SEND_INVALID_DATA	Couldn't copy message data.
  */
@@ -830,12 +843,13 @@ ipc_kmsg_get(
 
 	/*
 	 * #808: the buffer is sized for the message AND its trailer, in
-	 * mach_msg_size_t, which is 32 bits on both targets.  A size the
-	 * trailer does not fit after is refused here, before anything is
-	 * added to it: the sum below must be the size of the buffer that
-	 * copyinmsg() then fills with `size' bytes.
+	 * mach_msg_size_t, which is 32 bits on both targets, and then for the
+	 * kmsg in front of it, in a vm_size_t of 32 bits on i386.  A size
+	 * past the largest message the kernel takes inline is refused here,
+	 * before anything is added to it: the sums below must be the size of
+	 * the buffer that copyinmsg() then fills with `size' bytes.
 	 */
-	if (size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
+	if (size > IKM_MAX_MSG_SIZE)
 		return MACH_SEND_TOO_LARGE;
 
 #if	MACH_RT
@@ -974,13 +988,13 @@ ipc_kmsg_get_from_kernel(
 	assert((size & 3) == 0);
 
 	/*
-	 * #808: the same sum as ipc_kmsg_get()'s, on a size from the
-	 * kernel.  No buffer holds a message the trailer cannot follow, and
-	 * this routine may answer only with a resource error, so it says
-	 * there is none -- in a release kernel too, where the asserts above
-	 * are not there to stop the sum from wrapping.
+	 * #808: the same sums as ipc_kmsg_get()'s, on a size from the
+	 * kernel.  No buffer holds a message past the largest one the kernel
+	 * takes inline, and this routine may answer only with a resource
+	 * error, so it says there is none -- in a release kernel too, where
+	 * the asserts above are not there to stop the sums from wrapping.
 	 */
-	if (size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
+	if (size > IKM_MAX_MSG_SIZE)
 		return MACH_SEND_NO_BUFFER;
 
 	/* round up for ikm_cache */
