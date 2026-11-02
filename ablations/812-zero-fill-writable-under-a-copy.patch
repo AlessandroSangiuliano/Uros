@@ -4,6 +4,7 @@ Takes out: the write removed from a page the fast path zero-fills in an object w
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[37\] after a read and a write of [0-9]+ bytes never touched before, the snapshots taken earlier changed
+Note: Judged under QEMU (TCG and KVM), act_test's arm 37, on OMEGA 02/11/2026 at 20e1d682: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4; on victus at e71f1a69, 4 of 4 and 4 of 4.  Without the second mapping the arm's snapshots were symmetric copies, and the ablation was caught 0 times in 4.
 
 diff --git a/uros/src/mach_kernel/vm/vm_fault.c b/uros/src/mach_kernel/vm/vm_fault.c
 --- a/uros/src/mach_kernel/vm/vm_fault.c
