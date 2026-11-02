@@ -4526,11 +4526,18 @@ arm_thirty_three_trailer_not_there(void)
  * and the trailer asked for -- and took the sequence number from a variable
  * only the slow receive sets, so on the hot path it was whatever the kernel's
  * stack held.  Here the reply port has had three messages received from it,
- * so the reply is its fourth, sequence number 3; a server thread answers the
- * RPC with 256 bytes into a receive of 64 that asks for the sequence number,
- * and the trailer must say 3.
+ * so the replies are its fourth and on, sequence numbers 3, 4, ...; a server
+ * thread answers A34_ROUNDS RPCs, each with 256 bytes into a receive of 64
+ * that asks for the sequence number, and each trailer must say its own reply's.
+ *
+ * Many rounds and not one, because only an RPC the hot path carries reaches
+ * the defect, and one RPC did not reliably take it: a first ablation with a
+ * single round caught 1 boot of 4.  After the first round the server is
+ * already waiting in its receive when the next request comes, which is when
+ * the hot path hands off.
  */
 #define	A34_PRELOAD	3
+#define	A34_ROUNDS	32
 #define	A34_REPLY	256
 #define	A34_RCV		64
 
@@ -4549,26 +4556,30 @@ arm_thirty_four_server(void *arg)
 		mach_msg_header_t	h;
 		unsigned char		bytes[A34_REPLY];
 	} rep;
-	unsigned	i;
+	unsigned	i, round;
 
 	(void) arg;
-	arm_thirty_four_server_rcv =
-	    mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof req,
-		     arm_thirty_four_service, 10000, MACH_PORT_NULL);
-	if (arm_thirty_four_server_rcv != MACH_MSG_SUCCESS)
-		return NULL;
-
 	for (i = 0; i < sizeof rep.bytes; i++)
 		rep.bytes[i] = 0;
-	rep.h.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(req.h.msgh_bits),
-					 0);
-	rep.h.msgh_size = A34_REPLY;
-	rep.h.msgh_remote_port = req.h.msgh_remote_port;
-	rep.h.msgh_local_port = MACH_PORT_NULL;
-	rep.h.msgh_id = req.h.msgh_id + 100;
-	arm_thirty_four_server_snd =
-	    mach_msg(&rep.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT, A34_REPLY, 0,
-		     MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+	for (round = 0; round < A34_ROUNDS; round++) {
+		arm_thirty_four_server_rcv =
+		    mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			     sizeof req, arm_thirty_four_service, 10000,
+			     MACH_PORT_NULL);
+		if (arm_thirty_four_server_rcv != MACH_MSG_SUCCESS)
+			return NULL;
+
+		rep.h.msgh_bits = MACH_MSGH_BITS(
+		    MACH_MSGH_BITS_REMOTE(req.h.msgh_bits), 0);
+		rep.h.msgh_size = A34_REPLY;
+		rep.h.msgh_remote_port = req.h.msgh_remote_port;
+		rep.h.msgh_local_port = MACH_PORT_NULL;
+		rep.h.msgh_id = req.h.msgh_id + 100;
+		arm_thirty_four_server_snd =
+		    mach_msg(&rep.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+			     A34_REPLY, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	}
 	return NULL;
 }
 
@@ -4582,9 +4593,10 @@ arm_thirty_four_rpc_reply_seqno(void)
 	} buf;
 	mach_msg_seqno_trailer_t	*tr;
 	mach_port_t		reply;
-	mach_msg_return_t	mr;
+	mach_msg_return_t	mr, bad_mr = MACH_MSG_SUCCESS;
 	pthread_t		server;
-	unsigned		i;
+	unsigned		i, round, bad_round = A34_ROUNDS;
+	unsigned		bad_seqno = 0;
 
 	arm_thirty_four_service = arm_own_port(34);
 	if (arm_thirty_four_service == MACH_PORT_NULL)
@@ -4631,43 +4643,56 @@ arm_thirty_four_rpc_reply_seqno(void)
 	for (i = 0; i < 20 && arm_thirty_four_server_rcv == -1; i++)
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
 
-	for (i = 0; i < sizeof buf.bytes; i++)
-		buf.bytes[i] = 0;
-	buf.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
-					 MACH_MSG_TYPE_MAKE_SEND_ONCE);
-	buf.h.msgh_size = sizeof (mach_msg_header_t);
-	buf.h.msgh_remote_port = arm_thirty_four_service;
-	buf.h.msgh_local_port = reply;
-	buf.h.msgh_reserved = 0;
-	buf.h.msgh_id = 3400;
-	mr = mach_msg(&buf.h, MACH_SEND_MSG | MACH_RCV_MSG
-		      | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
-		      | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SEQNO),
-		      sizeof (mach_msg_header_t), A34_RCV, reply,
-		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	for (round = 0; round < A34_ROUNDS; round++) {
+		for (i = 0; i < sizeof buf.bytes; i++)
+			buf.bytes[i] = 0;
+		buf.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						 MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		buf.h.msgh_size = sizeof (mach_msg_header_t);
+		buf.h.msgh_remote_port = arm_thirty_four_service;
+		buf.h.msgh_local_port = reply;
+		buf.h.msgh_reserved = 0;
+		buf.h.msgh_id = 3400;
+		mr = mach_msg(&buf.h, MACH_SEND_MSG | MACH_RCV_MSG
+			      | MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+			      | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SEQNO),
+			      sizeof (mach_msg_header_t), A34_RCV, reply,
+			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		tr = (mach_msg_seqno_trailer_t *)
+		     (buf.bytes + ((sizeof (mach_msg_header_t) + 3) & ~3UL));
+
+		if (bad_round == A34_ROUNDS
+		    && (mr != MACH_RCV_TOO_LARGE
+			|| tr->msgh_seqno != A34_PRELOAD + round)) {
+			bad_round = round;
+			bad_seqno = (unsigned) tr->msgh_seqno;
+			bad_mr = mr;
+		}
+		/* A request that was never sent leaves the server waiting. */
+		if (mr != MACH_RCV_TOO_LARGE && mr != MACH_MSG_SUCCESS)
+			break;
+	}
 
 	(void) pthread_join(server, NULL);
-	tr = (mach_msg_seqno_trailer_t *)
-	     (buf.bytes + ((sizeof (mach_msg_header_t) + 3) & ~3UL));
-
 	(void) mach_port_destroy(mach_task_self(), reply);
 	(void) mach_port_destroy(mach_task_self(), arm_thirty_four_service);
 
-	if (mr != MACH_RCV_TOO_LARGE || tr->msgh_seqno != A34_PRELOAD) {
-		printf("act_test: [34] an RPC whose %u-byte reply does not fit %u "
-		       "bytes answered 0x%x, its trailer saying sequence number %u "
-		       "(server: 0x%x, 0x%x) — WRONG, expected "
-		       "MACH_RCV_TOO_LARGE and %u (#844)\n", A34_REPLY, A34_RCV,
-		       (int) mr, (unsigned) tr->msgh_seqno,
+	if (bad_round < A34_ROUNDS) {
+		printf("act_test: [34] RPC %u of %u, whose %u-byte reply does not "
+		       "fit %u bytes, answered 0x%x, its trailer saying sequence "
+		       "number %u (server: 0x%x, 0x%x) — WRONG, expected "
+		       "MACH_RCV_TOO_LARGE and %u (#844)\n", bad_round + 1,
+		       A34_ROUNDS, A34_REPLY, A34_RCV, (int) bad_mr, bad_seqno,
 		       (int) arm_thirty_four_server_rcv,
-		       (int) arm_thirty_four_server_snd, A34_PRELOAD);
+		       (int) arm_thirty_four_server_snd,
+		       A34_PRELOAD + bad_round);
 		return 0;
 	}
 
-	printf("act_test: [34] an RPC whose %u-byte reply does not fit %u bytes "
-	       "was MACH_RCV_TOO_LARGE, its trailer saying sequence number %u, "
-	       "the reply's own, read back (#844)\n", A34_REPLY, A34_RCV,
-	       (unsigned) tr->msgh_seqno);
+	printf("act_test: [34] %u RPCs whose %u-byte replies do not fit %u bytes "
+	       "were each MACH_RCV_TOO_LARGE, their trailers saying their own "
+	       "sequence numbers, %u to %u, read back (#844)\n", A34_ROUNDS,
+	       A34_REPLY, A34_RCV, A34_PRELOAD, A34_PRELOAD + A34_ROUNDS - 1);
 	return 1;
 }
 
