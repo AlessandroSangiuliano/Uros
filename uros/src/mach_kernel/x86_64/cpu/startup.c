@@ -50,6 +50,7 @@
 #include <trap/refused_fault_test.h>	/* #750: -j */
 #include <sync/mutex_uaf_test.h>	/* #753: -u */
 #include <cpu/hwp.h>		/* #736 */
+#include <cpu/pmc.h>		/* #804 */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
@@ -211,6 +212,7 @@ machine_kernel_ready(void)
 	 * measured with nothing else running on it yet.
 	 */
 	hwp_init_cpu(1);
+	pmc_init_cpu(1);		/* #804: no MSR touched without pmc= */
 
 	/*
 	 * The thread state flavour dispatch, checked here because this is the
@@ -605,6 +607,7 @@ machine_processors_ready(void)
 		       "scheduler will never dispatch to (#461)");
 
 		hwp_report();		/* #736: every processor is past it now */
+		pmc_report();		/* #804: and past pmc_init_cpu() */
 
 		/* With the clock running, in thread context (#748). */
 		ast_vector_check();
@@ -990,6 +993,7 @@ slave_machine_init(void)
 {
 	fpu_init();
 	hwp_init_cpu(0);
+	pmc_init_cpu(0);		/* #804: each processor has its own counters */
 
 	/*
 	 * And this processor's own memory-attribute table (#568).

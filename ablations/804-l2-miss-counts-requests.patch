@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #804
+Takes out: L2_RQSTS.MISS's unit mask, 0x3f, for 0xff, which is L2_RQSTS.REFERENCES in intel/perfmon's SKL/events/skylake_core.json (V59): the counter named for L2 misses counts every request to the L2, hit or miss
+Machine: omen
+Expect: pmc test \(#804\): lines in 128 KiB, 8192 steps: .* L2 [0-9]+ \(WRONG
+Note: Judged on omen's metal (i7-7700HQ), the only machine here whose counters are Intel's and offered: victus and pavillion are AMD, and OMEGA's KVM gives no virtual PMU on its hybrid processor.  Run from omen's GRUB entry uros-804a-l2, pmc=1 pmc_test=1, with the fixed tree's uros-804t-pmc1 beside it, 02/11/2026: caught in 1 boot of 1 (the 128 KiB walk, which misses the L1D and hits the L2, counted 18435 for 8192 steps, 225%, against at most 5%), the fixed tree 29 checks with 0 wrong.  Only the walk that hits the L2 can tell the two: every other walk makes requests and misses equal.  Made again over pmc.c's second backend and judged again at 666f74ca, from omen's uros-804c-l2 beside uros-804r-pmc1, 02/11/2026, on battery: caught in 1 boot of 1 (the 128 KiB walk 18104 for 8192 steps, 220%), the fixed tree 29 checks with 0 wrong
+
+diff --git a/uros/src/mach_kernel/x86_64/cpu/pmc.c b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+--- a/uros/src/mach_kernel/x86_64/cpu/pmc.c
++++ b/uros/src/mach_kernel/x86_64/cpu/pmc.c
+@@ -100,7 +100,7 @@
+ /* Intel, pmc=1: where a load's line came from. */
+ static const struct pmc_event pmc_set_cache[] = {
+ 	{ "L1D.REPLACEMENT",			0x51, 0x01, -1, PMC_ROLE_L1D_MISS },
+-	{ "L2_RQSTS.MISS",			0x24, 0x3f, -1, PMC_ROLE_L2_MISS },
++	{ "L2_RQSTS.MISS",			0x24, 0xff, -1, PMC_ROLE_L2_MISS },
+ 	{ "LONGEST_LAT_CACHE.MISS",		0x2e, 0x41,  4, PMC_ROLE_LLC_MISS },
+ 	{ "MEM_LOAD_L3_HIT_RETIRED.XSNP_HITM",	0xd2, 0x04, -1, PMC_ROLE_HITM },
+ };
