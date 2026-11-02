@@ -1,0 +1,22 @@
+Kind: ablation
+Issue: #807
+Takes out: the ring check in the x86-64 page-fault path -- a fault from ring 3 on a kernel-half address goes to kernel_map again, whose reservation of the direct map, with no access since #807, refuses it with KERN_PROTECTION_FAILURE where no map at all answers KERN_INVALID_ADDRESS, so fault_test's arm six sees the wrong code
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: fault_test: \[6\] a load from ring 3 at 0xffff800000000000, the direct map's base, reached the task as exception 1 code 2 — WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -2261,10 +2261,7 @@
+ 		vm_map_t	map;
+ 		vm_prot_t	prot;
+ 
+-		if (va_is_kernel(addr) && (frame->cs & 3) == USER_RPL) {
+-			map = VM_MAP_NULL;
+-			fault_kr = KERN_INVALID_ADDRESS;
+-		} else if (va_is_kernel(addr))
++		if (va_is_kernel(addr))
+ 			map = kernel_map;
+ 		else
+ 			map = (act != THR_ACT_NULL) ? act->map : VM_MAP_NULL;
