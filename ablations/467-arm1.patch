@@ -7,12 +7,11 @@ Expect: panic\(cpu
 Expect: exception_no_server: terminating task .* exception 1,
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
-index 46247c61..93781751 100644
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
 +++ b/uros/src/mach_kernel/x86_64/trap/trap.c
-@@ -1911,7 +1911,7 @@ void trap_dispatch(struct trap_frame *frame)
- 		 * and inventing kernel_map for it would hand an early boot
- 		 * failure to a subsystem that is not up.
+@@ -2283,7 +2283,7 @@
+ 		 * 3 on the kernel half has no map at all, as above: it goes on
+ 		 * to the task with KERN_INVALID_ADDRESS (#807).
  		 */
 -		if (map != VM_MAP_NULL) {
 +		if (0 && map != VM_MAP_NULL) {
