@@ -52,6 +52,7 @@
 
 #include <vm/pmap.h>			/* pmap_collect (#455) */
 #include <vm/vm_page.h>			/* vm_page_free_count (#455) */
+#include <trap/trap.h>			/* the store that may fault (#811) */
 
 #include <cpu/percpu.h>			/* percpu_intr_disable (#604) */
 #include <pmap/pmap.h>
@@ -960,6 +961,224 @@ static void bench_remove_race(void)
 	pmap_table_frame_free(race_pa);
 }
 
+/*
+ * ── A remover that loses the race still flushes (#811) ────────────────────
+ *
+ * pmap_page_protect() removes a page's mappings through its pv list, and
+ * pmap_remove() can clear the same entry first, from the address.  The winner
+ * flushes only after it has left its read section, so for a while the entry
+ * is gone from the tables and still in a TLB; pmap_page_protect() skipped an
+ * entry it found cleared, and could return -- the page about to be freed --
+ * while another processor could still write it.
+ *
+ * Three processors.  C holds the space and stores to the page, so its TLB has
+ * the entry.  A removes the mapping with pmap_remove().  B waits until the
+ * entry is gone from the tables, counts the round as raced if it is, and calls
+ * pmap_page_protect(VM_PROT_NONE); the moment that returns, C stores again,
+ * under an expected fault.  A store that goes through is a translation that
+ * outlived the call that said there was none.
+ *
+ * The window is a few instructions wide.  ablations/811-widen-flush.patch
+ * holds the winner between its exchange and its flush for long enough that B
+ * lands in it every round; without it a raced round may still find the winner
+ * flushed, so this arm can only fail, never pass, on its own -- the line says
+ * which.
+ *
+ * C takes the space once a round and checks after each store that it still
+ * holds it.  A thread switched out comes back on its task's space, and its
+ * stores would then fault for a reason that has nothing to do with this
+ * question, so such a round is counted void and not judged.  Preemption stays
+ * on: the store C expects to fault goes through vm_fault() on kernel_map,
+ * which may block.  And the space is not taken again within a round, because
+ * with PCID a space taken again may bring back its own stale entries.
+ */
+#define LOST_ROUNDS	2000
+#define LOST_SPIN	200000
+#define LOST_VA		((uint64_t) 14 << PML4_SHIFT)
+
+static pmap_t		lost_pmap;
+static uint64_t		lost_pa;
+static volatile int	lost_round;	/* the round A has mapped */
+static volatile int	lost_loaded;	/* the round C holds the entry for */
+static volatile int	lost_returned;	/* the round B's call has returned */
+static volatile int	lost_probed;	/* the round C stored again */
+static volatile int	lost_done;
+static volatile unsigned lost_rounds, lost_raced, lost_unloaded, lost_void;
+static volatile unsigned lost_stale_none, lost_stale_read;
+
+/*
+ * Odd rounds remove the page's mappings, even rounds make them read-only:
+ * pmap_page_protect() takes the two through different loops, and both had the
+ * same hole.  C's second store must fault after either.
+ */
+#define LOST_PROT(r)	(((r) & 1) ? VM_PROT_NONE : VM_PROT_READ)
+
+/* Whether this processor still translates through lost_pmap. */
+static int lost_on_the_space(void)
+{
+	return (read_cr3() & INTEL_PTE_PFN) == lost_pmap->root_pa;
+}
+
+/* A store to LOST_VA from C: 0 if it went through, 1 if it faulted. */
+static int lost_store(void)
+{
+	int faulted;
+
+	pmap_user_access_begin();
+	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t) trap_probe_faulted);
+	faulted = trap_probe_write((volatile void *)(uintptr_t) LOST_VA);
+	trap_expect_cancel();
+	pmap_user_access_end();
+	return faulted;
+}
+
+static void lost_holder(void)		/* C */
+{
+	int r;
+
+	for (r = 1; r <= LOST_ROUNDS; r++) {
+		while (lost_round != r && !lost_done)
+			cpu_pause();
+		if (lost_done)
+			break;
+
+		int loaded, faulted;
+
+		pmap_activate(lost_pmap);
+		loaded = lost_store() == 0 && lost_on_the_space();
+		lost_loaded = r;
+
+		while (lost_returned != r && !lost_done)
+			cpu_pause();
+		faulted = lost_store();
+
+		if (!lost_on_the_space())
+			lost_void++;		/* switched out: no answer */
+		else if (!loaded)
+			lost_unloaded++;
+		else if (!faulted && LOST_PROT(r) == VM_PROT_NONE)
+			lost_stale_none++;
+		else if (!faulted)
+			lost_stale_read++;
+		pmap_activate(pmap_kernel());
+		lost_probed = r;
+	}
+	thread_terminate_self();
+}
+
+static void lost_protector(void)	/* B */
+{
+	int r, k;
+
+	for (r = 1; r <= LOST_ROUNDS; r++) {
+		while (lost_loaded != r && !lost_done)
+			cpu_pause();
+		if (lost_done)
+			break;
+
+		for (k = 0; k < LOST_SPIN && pmap_extract(lost_pmap, LOST_VA) != 0;
+		     k++)
+			cpu_pause();
+		if (pmap_extract(lost_pmap, LOST_VA) == 0)
+			lost_raced++;
+		pmap_page_protect(lost_pa, LOST_PROT(r));
+		lost_returned = r;
+	}
+	thread_terminate_self();
+}
+
+static void lost_remover(void)		/* A */
+{
+	int r;
+
+	for (r = 1; r <= LOST_ROUNDS; r++) {
+		if (pmap_enter(lost_pmap, LOST_VA, lost_pa,
+			       VM_PROT_READ | VM_PROT_WRITE, FALSE) != PMAP_MAP_OK)
+			break;
+		lost_round = r;
+		while (lost_loaded != r)
+			cpu_pause();
+		pmap_remove(lost_pmap, LOST_VA, LOST_VA + PAGE_SIZE_4K);
+		while (lost_probed != r)
+			cpu_pause();
+		lost_rounds++;
+	}
+	lost_done = 1;
+	thread_terminate_self();
+}
+
+static void bench_lost_race_flushes(void)
+{
+	processor_t	on[3];
+	int		n = 0, i, waits;
+
+	for (i = 0; i < NCPUS && n < 3; i++) {
+		processor_t p = cpu_to_processor(i);
+
+		if (p != PROCESSOR_NULL && p->state != PROCESSOR_OFF_LINE)
+			on[n++] = p;
+	}
+	if (n < 3) {
+		printf("pmap_bench: a remover that lost the race -- %d "
+		       "processor%s, and it takes three to hold, remove and "
+		       "protect at once\n", n, n == 1 ? "" : "s");
+		return;
+	}
+
+	lost_pmap = pmap_create(0);
+	lost_pa = pmap_table_frame();
+	if (lost_pmap == PMAP_NULL || lost_pa == 0) {
+		printf("pmap_bench: a remover that lost the race -- no pmap or "
+		       "no frame -- WRONG\n");
+		return;
+	}
+	lost_round = lost_loaded = lost_returned = lost_probed = lost_done = 0;
+	lost_rounds = lost_raced = lost_unloaded = lost_void = 0;
+	lost_stale_none = lost_stale_read = 0;
+
+	if (bench_thread_bound(lost_holder, on[2]) == THREAD_NULL
+	    || bench_thread_bound(lost_protector, on[1]) == THREAD_NULL
+	    || bench_thread_bound(lost_remover, on[0]) == THREAD_NULL) {
+		lost_done = 1;
+		printf("pmap_bench: a remover that lost the race -- no thread "
+		       "-- WRONG\n");
+		return;
+	}
+
+	for (waits = 0; waits < 20000 && !lost_done; waits++)
+		mutex_pause();
+
+	/* As above: not finished is not destroyed. */
+	if (!lost_done) {
+		printf("pmap_bench: a remover that lost the race -- not finished "
+		       "after %d waits, %u rounds -- WRONG\n", waits,
+		       lost_rounds);
+		return;
+	}
+
+	printf("pmap_bench: a remover that lost the race, %u rounds on three "
+	       "processors: raced %u, void %u, a store after "
+	       "pmap_page_protect() returned went through %u times after "
+	       "VM_PROT_NONE and %u after VM_PROT_READ, the entry not loaded "
+	       "%u -- %s\n",
+	       lost_rounds, lost_raced, lost_void, lost_stale_none,
+	       lost_stale_read, lost_unloaded,
+	       lost_stale_none + lost_stale_read != 0
+	       ? "A TRANSLATION OUTLIVED THE CALL THAT TOOK IT AWAY -- WRONG"
+	       : lost_unloaded != 0 || lost_rounds != LOST_ROUNDS
+	       ? "the holder could not hold the entry -- WRONG"
+	       : lost_void == lost_rounds
+	       ? "the holder was switched out of every round: no answer, "
+		 "this tests nothing -- WRONG"
+	       : lost_raced == 0
+	       ? "it never raced: without the widen the window is a few "
+		 "instructions, and this tests nothing"
+	       : "no translation outlived the call");
+
+	pmap_destroy(lost_pmap);
+	pmap_table_frame_free(lost_pa);
+}
+
 void
 pmap_collect_bench(void)
 {
@@ -1217,4 +1436,5 @@ pmap_collect_bench(void)
 	       : "the lost ones are UNREACHABLE: a walk cannot find them");
 
 	bench_remove_race();
+	bench_lost_race_flushes();
 }
