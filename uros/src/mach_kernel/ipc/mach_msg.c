@@ -1119,8 +1119,23 @@ mach_msg_overwrite_trap(
 	register mach_msg_header_t *hdr;
 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
 	/* mask out some of the options before entering the hot path */
-	mach_msg_option_t  masked_option = 
+	mach_msg_option_t  masked_option =
 		option & ~(MACH_SEND_TRAILER|MACH_RCV_TRAILER_MASK);
+
+	/*
+	 * 🔴 #842: the trailer a receive asks for, checked before anything is
+	 * sent or received.  Its elements are four bits of the option and
+	 * index a table of three sizes, one per trailer this kernel knows;
+	 * past it they read whatever followed the table and used it as the
+	 * trailer's size, where a receive measures its buffer and copies the
+	 * message out.  And format 0 is the only one there is.  Every receive
+	 * from user space comes through here: urmach_msg() calls this trap.
+	 */
+	if ((option & MACH_RCV_MSG) &&
+	    ((option & MACH_RCV_TRAILER_TYPE(0xf))
+		!= MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) ||
+	     GET_RCV_ELEMENTS(option) > MACH_RCV_TRAILER_SENDER))
+		return MACH_RCV_INVALID_TRAILER;
 
 #if	ENABLE_HOTPATH
 	/* BEGINNING OF HOT PATH */
