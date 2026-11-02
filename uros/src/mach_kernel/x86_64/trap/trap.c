@@ -964,6 +964,7 @@ static uint64_t expect_vector;
 static uint64_t expect_vector_too;	/* #781: a second answer, or the first */
 static uint64_t expect_resume;
 static int expect_armed;
+static int expect_quiet;		/* #811: resumed without the line */
 
 static struct trap_record last_trap;
 
@@ -1011,14 +1012,26 @@ void trap_expect(uint64_t vector, uint64_t resume_rip)
 	trap_expect_either(vector, vector, resume_rip);
 }
 
-void trap_expect_either(uint64_t vector, uint64_t or_vector,
-			uint64_t resume_rip)
+static void expect_arm(uint64_t vector, uint64_t or_vector,
+		       uint64_t resume_rip, int quiet)
 {
 	expect_vector = vector;
 	expect_vector_too = or_vector;
 	expect_resume = resume_rip;
+	expect_quiet = quiet;
 	expect_armed = 1;
 	last_trap.caught = 0;
+}
+
+void trap_expect_either(uint64_t vector, uint64_t or_vector,
+			uint64_t resume_rip)
+{
+	expect_arm(vector, or_vector, resume_rip, 0);
+}
+
+void trap_expect_quiet(uint64_t vector, uint64_t resume_rip)
+{
+	expect_arm(vector, vector, resume_rip, 1);
 }
 
 void trap_expect_cancel(void)
@@ -2158,31 +2171,34 @@ void trap_dispatch(struct trap_frame *frame)
 
 		trap_record_frame(frame);
 
-		tputs("UrMach x86-64: expected ");
-		tputs(trap_name(frame->vector));
-		tputs(" (error ");
-		tputhex(frame->error);
-		if (frame->vector == T_PAGE_FAULT) {
-			tputs(", at ");
-			tputhex(read_cr2());
-			tputs(frame->error & PF_PRESENT
-			      ? ", refused by the mapping"
-			      : ", nothing mapped there");
-		}
-		tputs(") — resuming\r\n");
+		if (!expect_quiet) {
+			tputs("UrMach x86-64: expected ");
+			tputs(trap_name(frame->vector));
+			tputs(" (error ");
+			tputhex(frame->error);
+			if (frame->vector == T_PAGE_FAULT) {
+				tputs(", at ");
+				tputhex(read_cr2());
+				tputs(frame->error & PF_PRESENT
+				      ? ", refused by the mapping"
+				      : ", nothing mapped there");
+			}
+			tputs(") — resuming\r\n");
 
-		/*
-		 * ⚠️ Here as well as on the fault report, and that is the point
-		 * of putting it here at all.
-		 *
-		 * The report path only runs on a fault nobody expected, which
-		 * ends the boot -- so a description written only there is
-		 * exercised on the one occasion when nobody can afford to find
-		 * out it was wrong.  The probes take this arm on every boot, so
-		 * the sentence is produced and read where it costs nothing.
-		 */
-		if (carries_a_selector(frame->vector))
-			report_selector_error(frame->error);
+			/*
+			 * ⚠️ Here as well as on the fault report, and that is
+			 * the point of putting it here at all.
+			 *
+			 * The report path only runs on a fault nobody
+			 * expected, which ends the boot -- so a description
+			 * written only there is exercised on the one occasion
+			 * when nobody can afford to find out it was wrong.  The
+			 * probes take this arm on every boot, so the sentence
+			 * is produced and read where it costs nothing.
+			 */
+			if (carries_a_selector(frame->vector))
+				report_selector_error(frame->error);
+		}
 
 		/*
 		 * The frame is what iretq will reload, so changing the saved
