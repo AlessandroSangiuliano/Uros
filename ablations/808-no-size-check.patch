@@ -1,19 +1,18 @@
 Kind: ablation
 Issue: #808
-Takes out: the check in ipc_kmsg_get() that refuses a send size the trailer cannot follow -- the buffer is then sized by size + MAX_TRAILER_SIZE wrapped in 32 bits, a small buffer, and copyinmsg() copies the whole size into it, so act_test's arm 27 sends 0xFFFFFFFC bytes and the trap answers with something other than MACH_SEND_TOO_LARGE instead of refusing at once
+Takes out: the check in ipc_kmsg_get() that refuses a send past IKM_MAX_MSG_SIZE -- the buffer is then sized by size + MAX_TRAILER_SIZE wrapped in 32 bits, a small buffer, and copyinmsg() copies the whole size into it, so act_test's arm 27 sends 0xFFFFFFFC bytes and the trap answers with something other than MACH_SEND_TOO_LARGE instead of refusing at once
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[27\] a send of 0xFFFFFFFC bytes answered 0x[0-9a-f]+, not MACH_SEND_TOO_LARGE
-Note: Judged under QEMU (TCG and KVM), act_test's arm 27, on victus 02/11/2026: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.  On the fixed tree the trap refuses the size before any buffer, so the arm overruns nothing; the ablated tree wraps the sum, takes a small buffer and faults in copyinmsg, answering a code other than MACH_SEND_TOO_LARGE.
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
 --- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
 +++ b/uros/src/mach_kernel/ipc/ipc_kmsg.c
-@@ -835,8 +835,6 @@
- 	 * added to it: the sum below must be the size of the buffer that
- 	 * copyinmsg() then fills with `size' bytes.
+@@ -849,8 +849,6 @@
+ 	 * before anything is added to it: the sums below must be the size of
+ 	 * the buffer that copyinmsg() then fills with `size' bytes.
  	 */
--	if (size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
+-	if (size > IKM_MAX_MSG_SIZE)
 -		return MACH_SEND_TOO_LARGE;
  
  #if	MACH_RT
