@@ -4,6 +4,7 @@ Takes out: the flush of an entry another remover cleared first, in both of pmap_
 Accel: kvm
 Run: --entry 9 1200 -smp 4
 Expect: pmap_bench: a remover that lost the race, .* -- A TRANSLATION OUTLIVED THE CALL THAT TOOK IT AWAY -- WRONG
+Note: Judged under KVM, collect_bench's lost-race arm (entry 9, -smp 4) with 811-widen-flush holding the window open, on victus 02/11/2026 at 7cb4932d: the ablated tree caught 2 of 2 and the fixed tree passed 2 of 2; on omen at a55b3ef9, 2 of 2 and 2 of 2.
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
 --- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
