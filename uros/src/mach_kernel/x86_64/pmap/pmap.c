@@ -1000,11 +1000,41 @@ int pmap_may_map(pmap_t pmap, uint64_t va)
 	return !(va_is_user(va) && pmap == pmap_kernel());
 }
 
+/*
+ * The size of the leaf that maps va, or zero when none does (#807): the walk
+ * pmap_extract() makes, in the same read section.
+ */
+static uint64_t pmap_leaf_size(pmap_t pmap, uint64_t va)
+{
+	boolean_t   held = pmap_read_enter_for(va);
+	uint64_t    size = 0;
+	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, &size);
+
+	pmap_read_leave(held);
+	return entry != PT_ENTRY_NULL ? size : 0;
+}
+
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired)
 {
 	uint64_t flags;
 	int rc;
+
+	/*
+	 * 🔴 NOT OVER A LARGE PAGE (#807).
+	 *
+	 * Every caller maps 4 KiB, and a larger leaf is the kernel's own -- the
+	 * direct map, the image -- over memory no VM object holds.  Taking it
+	 * away for one page unmaps all the rest, and pmap_forget() below would,
+	 * since it removes whatever leaf covers the address, of any size: a
+	 * fault from ring 3 on the direct map's base took a whole leaf of it,
+	 * 1 GiB or 2 MiB as direct_map_init() chose, that way.
+	 * So a large leaf is refused before anything is removed, with the
+	 * answer pmap_map_page() gives for it -- in both branches, because one
+	 * that only removes removes all the same.
+	 */
+	if (pmap_leaf_size(pmap, va) > PAGE_SIZE_4K)
+		return PMAP_MAP_BLOCKED;
 
 	if (prot == VM_PROT_NONE) {
 		pmap_forget(pmap, va);
