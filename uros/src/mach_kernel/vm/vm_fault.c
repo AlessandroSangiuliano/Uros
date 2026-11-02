@@ -2432,6 +2432,23 @@ FastPmapEnter:
 					break;
 				}
 
+				/*
+				 * 🔴 #812: not writable while the object has a
+				 * copy, as a resident page is not above.  The
+				 * fast path takes a read fault on an object with
+				 * a delayed copy, and vm_object_copy_delayed()
+				 * protected only the pages resident when the copy
+				 * was taken: a page zero-filled here writable
+				 * let the next write go straight into the source,
+				 * and the copy -- vm_read(), vm_copy(), an
+				 * out-of-line send, a fork -- read it through the
+				 * shadow.  Read-only, that write faults, and the
+				 * slow path pushes the page into the copy first.
+				 * Asked with the object still locked.
+				 */
+				if (object->copy != VM_OBJECT_NULL)
+					prot &= ~VM_PROT_WRITE;
+
 			  	if (cur_object != object)
 					vm_object_unlock(cur_object);
 
