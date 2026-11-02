@@ -245,9 +245,19 @@ mach_msg_return_t msg_receive_error(
 
 /* the size of each trailer has to be listed here for copyout purposes */
 mach_msg_trailer_size_t trailer_size[] = {
-          sizeof(mach_msg_trailer_t), 
+          sizeof(mach_msg_trailer_t),
 	  sizeof(mach_msg_seqno_trailer_t),
 	  sizeof(mach_msg_security_trailer_t) };
+
+/*
+ * #842: one entry per element up to MACH_RCV_TRAILER_SENDER, which is what
+ * REQUESTED_TRAILER_SIZE() clamps to and mach_msg_overwrite_trap() refuses
+ * past: a trailer added without its entry here would be read from beyond
+ * the table.
+ */
+_Static_assert(sizeof trailer_size / sizeof trailer_size[0]
+		   == MACH_RCV_TRAILER_SENDER + 1,
+	       "trailer_size[] must have one entry per trailer element");
 
 security_token_t KERNEL_SECURITY_TOKEN = KERNEL_SECURITY_TOKEN_VALUE;
 
