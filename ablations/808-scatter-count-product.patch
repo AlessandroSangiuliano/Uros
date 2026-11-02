@@ -1,0 +1,23 @@
+Kind: ablation
+Issue: #808
+Takes out: the scatter list's count checked by a division with the body's own size, putting back the product that adds the count's 4 bytes for the body -- on x86-64 the body is 8, a list 4 bytes short of its descriptor passes, and act_test's arm 30 is answered MACH_RCV_TIMED_OUT from the empty queue instead of MACH_RCV_INVALID_TYPE
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[30\] a scatter list of [0-9]+ bytes .* answered 0x[0-9a-f]+, not MACH_RCV_INVALID_TYPE
+
+diff --git a/uros/src/mach_kernel/ipc/mach_msg.c b/uros/src/mach_kernel/ipc/mach_msg.c
+--- a/uros/src/mach_kernel/ipc/mach_msg.c
++++ b/uros/src/mach_kernel/ipc/mach_msg.c
+@@ -458,9 +458,9 @@
+ 			 * the 4 of its count: the last descriptor could end
+ 			 * four bytes past the list.
+ 			 */
+-			if (slist->msgh_descriptor_count >
+-			    (slist_size - sizeof(mach_msg_body_t))
+-			    / sizeof(mach_msg_descriptor_t)) {
++			if ((slist->msgh_descriptor_count*
++			     sizeof(mach_msg_descriptor_t)
++			     + sizeof(mach_msg_size_t)) > slist_size) {
+ 				FREE_SCATTER_LIST(slist, slist_size, slist_rt);
+ 				ipc_object_release(object);
+ 				return MACH_RCV_INVALID_TYPE;
