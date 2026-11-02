@@ -789,7 +789,7 @@ static void pmap_verbs_selftest(void)
 	volatile uint32_t *page = (volatile uint32_t *)(uintptr_t)va;
 	pt_entry_t *e;
 	uint64_t got;
-	uint64_t size = 0;
+	uint64_t size = 0, big = 0;
 	int rc;
 
 	rc = pmap_enter(k, va, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
@@ -814,28 +814,38 @@ static void pmap_verbs_selftest(void)
 
 	/*
 	 * 🔴 And never over a large page (#807).  DIRECT_MAP_BASE is mapped by a
-	 * leaf of direct_map_page_size -- 1 GiB, or 2 MiB on a processor without
-	 * 1 GiB pages -- and pmap_enter() must refuse it in both of its branches
-	 * and leave it as it was.  The branch that only removes is asked first:
-	 * on a kernel that takes the leaf away it is the one that comes back to
-	 * say so, while the other goes on to build a table through the direct
-	 * map it has just lost.
+	 * large leaf, but not necessarily of direct_map_page_size: by now it is
+	 * 2 MiB, because split_selftest() split the leaf over its witness, which
+	 * lies in the first GiB.  So the size is read first, and pmap_enter() must
+	 * refuse the leaf in both of its branches and leave one of that size.  The
+	 * branch that only unmaps is asked first: on a kernel that takes the leaf
+	 * away it is the one that comes back to say so, while the other goes on
+	 * to build a table through the direct map it has just lost.  And with no
+	 * large leaf there, nothing is asked -- the unmapping branch would take a
+	 * real mapping away.
 	 */
-	rc = pmap_enter(k, DIRECT_MAP_BASE, frame, VM_PROT_NONE, 0);
-	kputs("UrMach x86-64: pmap_enter NONE over the direct map's ");
-	kputdec(direct_map_page_size / 1024);
-	kputs(" KiB leaf -> ");
-	kputs(rc == PMAP_MAP_BLOCKED ? "refused\r\n" : "not refused, WRONG\r\n");
+	e = pmap_walk(k->root_pa, DIRECT_MAP_BASE, &big);
+	if (e == PT_ENTRY_NULL || big <= PAGE_SIZE_4K) {
+		kputs("UrMach x86-64: no large leaf at the direct map's base to "
+		      "ask pmap_enter() about, WRONG\r\n");
+	} else {
+		rc = pmap_enter(k, DIRECT_MAP_BASE, frame, VM_PROT_NONE, 0);
+		kputs("UrMach x86-64: pmap_enter NONE over the ");
+		kputdec(big / 1024);
+		kputs(" KiB leaf at the direct map's base -> ");
+		kputs(rc == PMAP_MAP_BLOCKED ? "refused\r\n"
+					     : "not refused, WRONG\r\n");
 
-	rc = pmap_enter(k, DIRECT_MAP_BASE, frame,
-			VM_PROT_READ | VM_PROT_WRITE, 0);
-	e = pmap_walk(k->root_pa, DIRECT_MAP_BASE, &size);
-	kputs("UrMach x86-64: pmap_enter RW over it -> ");
-	kputs(rc == PMAP_MAP_BLOCKED ? "refused" : "not refused");
-	kputs(", the leaf there now ");
-	kputdec(e != PT_ENTRY_NULL ? size / 1024 : 0);
-	kputs(rc == PMAP_MAP_BLOCKED && e != PT_ENTRY_NULL
-	      && size == direct_map_page_size ? " KiB\r\n" : " KiB, WRONG\r\n");
+		rc = pmap_enter(k, DIRECT_MAP_BASE, frame,
+				VM_PROT_READ | VM_PROT_WRITE, 0);
+		e = pmap_walk(k->root_pa, DIRECT_MAP_BASE, &size);
+		kputs("UrMach x86-64: pmap_enter RW over it -> ");
+		kputs(rc == PMAP_MAP_BLOCKED ? "refused" : "not refused");
+		kputs(", the leaf there now ");
+		kputdec(e != PT_ENTRY_NULL ? size / 1024 : 0);
+		kputs(rc == PMAP_MAP_BLOCKED && e != PT_ENTRY_NULL && size == big
+		      ? " KiB\r\n" : " KiB, WRONG\r\n");
+	}
 
 	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
