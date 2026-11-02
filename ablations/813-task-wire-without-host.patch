@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #813
+Takes out: task_wire()'s refusal without the privileged host port -- act_test's arm 38 asks on the host's ordinary port and is answered KERN_SUCCESS instead of KERN_INVALID_HOST
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[38\] task_wire on the host's ordinary port answered 0, not KERN_INVALID_HOST
+
+diff --git a/uros/src/mach_kernel/vm/vm_user.c b/uros/src/mach_kernel/vm/vm_user.c
+--- a/uros/src/mach_kernel/vm/vm_user.c
++++ b/uros/src/mach_kernel/vm/vm_user.c
+@@ -839,8 +839,7 @@
+ 	vm_map_t	map,
+ 	boolean_t	must_wire)
+ {
+-	if (host == HOST_NULL)
+-		return KERN_INVALID_HOST;
++	(void) host;
+ 
+ 	if (map == VM_MAP_NULL)
+ 		return(KERN_INVALID_ARGUMENT);
