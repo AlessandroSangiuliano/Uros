@@ -1019,13 +1019,17 @@ static int lost_on_the_space(void)
 	return (read_cr3() & INTEL_PTE_PFN) == lost_pmap->root_pa;
 }
 
-/* A store to LOST_VA from C: 0 if it went through, 1 if it faulted. */
+/*
+ * A store to LOST_VA from C: 0 if it went through, 1 if it faulted.  Quiet:
+ * the fault is the right answer in every round, and its line in every round
+ * was 2000 lines a boot, written a byte at a time into clock_event's.
+ */
 static int lost_store(void)
 {
 	int faulted;
 
 	pmap_user_access_begin();
-	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t) trap_probe_faulted);
+	trap_expect_quiet(T_PAGE_FAULT, (uint64_t)(uintptr_t) trap_probe_faulted);
 	faulted = trap_probe_write((volatile void *)(uintptr_t) LOST_VA);
 	trap_expect_cancel();
 	pmap_user_access_end();
