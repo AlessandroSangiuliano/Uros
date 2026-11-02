@@ -245,9 +245,19 @@ mach_msg_return_t msg_receive_error(
 
 /* the size of each trailer has to be listed here for copyout purposes */
 mach_msg_trailer_size_t trailer_size[] = {
-          sizeof(mach_msg_trailer_t), 
+          sizeof(mach_msg_trailer_t),
 	  sizeof(mach_msg_seqno_trailer_t),
 	  sizeof(mach_msg_security_trailer_t) };
+
+/*
+ * #842: one entry per element up to MACH_RCV_TRAILER_SENDER, which is what
+ * REQUESTED_TRAILER_SIZE() clamps to and mach_msg_overwrite_trap() refuses
+ * past: a trailer added without its entry here would be read from beyond
+ * the table.
+ */
+_Static_assert(sizeof trailer_size / sizeof trailer_size[0]
+		   == MACH_RCV_TRAILER_SENDER + 1,
+	       "trailer_size[] must have one entry per trailer element");
 
 security_token_t KERNEL_SECURITY_TOKEN = KERNEL_SECURITY_TOKEN_VALUE;
 
@@ -1119,8 +1129,23 @@ mach_msg_overwrite_trap(
 	register mach_msg_header_t *hdr;
 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
 	/* mask out some of the options before entering the hot path */
-	mach_msg_option_t  masked_option = 
+	mach_msg_option_t  masked_option =
 		option & ~(MACH_SEND_TRAILER|MACH_RCV_TRAILER_MASK);
+
+	/*
+	 * 🔴 #842: the trailer a receive asks for, checked before anything is
+	 * sent or received.  Its elements are four bits of the option and
+	 * index a table of three sizes, one per trailer this kernel knows;
+	 * past it they read whatever followed the table and used it as the
+	 * trailer's size, where a receive measures its buffer and copies the
+	 * message out.  And format 0 is the only one there is.  Every receive
+	 * from user space comes through here: urmach_msg() calls this trap.
+	 */
+	if ((option & MACH_RCV_MSG) &&
+	    ((option & MACH_RCV_TRAILER_TYPE(0xf))
+		!= MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) ||
+	     GET_RCV_ELEMENTS(option) > MACH_RCV_TRAILER_SENDER))
+		return MACH_RCV_INVALID_TRAILER;
 
 #if	ENABLE_HOTPATH
 	/* BEGINNING OF HOT PATH */

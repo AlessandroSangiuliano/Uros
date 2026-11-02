@@ -4460,6 +4460,63 @@ arm_thirty_two_exception_answered_too_large(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-three (#842): a receive asking for a trailer this kernel does not
+ * have is refused before anything is received.
+ *
+ * The elements a receive asks for are four bits of its option, and indexed a
+ * table of three trailer sizes with nothing to stop them: past it, a value
+ * read from beyond the table became the trailer's size.  Here three receives
+ * ask for elements 3 and 15 and for trailer format 1, on a port with nothing
+ * queued and a timeout of zero.  Each must answer MACH_RCV_INVALID_TRAILER; a
+ * kernel that does not look answers MACH_RCV_TIMED_OUT, before it gets as far
+ * as the table, so asking is safe there too.
+ */
+static int
+arm_thirty_three_trailer_not_there(void)
+{
+	static const struct {
+		mach_msg_option_t	trailer;
+		const char		*what;
+	} ask[] = {
+		{ MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+		  | MACH_RCV_TRAILER_ELEMENTS(3), "element 3" },
+		{ MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0)
+		  | MACH_RCV_TRAILER_ELEMENTS(15), "element 15" },
+		{ MACH_RCV_TRAILER_TYPE(1), "format 1" },
+	};
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[256];
+	} buf;
+	mach_msg_return_t	mr;
+	mach_port_t		port;
+	unsigned		i;
+
+	port = arm_own_port(33);
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < sizeof ask / sizeof ask[0]; i++) {
+		mr = mach_msg(&buf.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT
+			      | ask[i].trailer, 0, sizeof buf, port, 0,
+			      MACH_PORT_NULL);
+		if (mr != MACH_RCV_INVALID_TRAILER) {
+			printf("act_test: [33] a receive asking for trailer %s "
+			       "answered 0x%x, not MACH_RCV_INVALID_TRAILER — "
+			       "WRONG (#842)\n", ask[i].what, (int) mr);
+			(void) mach_port_destroy(mach_task_self(), port);
+			return 0;
+		}
+	}
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	printf("act_test: [33] receives asking for trailer element 3, element "
+	       "15 and format 1 were each refused with MACH_RCV_INVALID_TRAILER "
+	       "(#842)\n");
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -5120,6 +5177,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_one_descriptor_count_past_the_message();
 	arms++;		/* arm thirty-two, #841 */
 	passed += arm_thirty_two_exception_answered_too_large();
+	arms++;		/* arm thirty-three, #842 */
+	passed += arm_thirty_three_trailer_not_there();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
