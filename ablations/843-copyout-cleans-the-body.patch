@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #843
+Takes out: the clean of the failing port array alone in ipc_kmsg_copyout_body(), putting back the clean of the whole body -- act_test's arm 35 then has the send right it was delivered released a second time with the array, and its port hears no-senders while the right is held
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[35\] P heard "no senders"
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+--- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
++++ b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+@@ -3331,7 +3331,8 @@
+ 			     * descriptors before it are delivered, and the ones
+ 			     * after it go on to be.
+ 			     */
+-			    ipc_kmsg_clean_ool_ports(dsc, KMSG_IS_RT(kmsg));
++			    ipc_kmsg_clean_body(kmsg,
++						body->msgh_descriptor_count);
+ 			    dsc->address = 0;
+ 
+ 			    if (kr == KERN_RESOURCE_SHORTAGE){
