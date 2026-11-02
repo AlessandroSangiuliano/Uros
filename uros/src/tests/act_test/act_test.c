@@ -212,6 +212,12 @@ static volatile int		arm_eighteen_stop;
 static volatile int		arm_eighteen_named_the_victim = -2;
 static volatile int		arm_eighteen_exception, arm_eighteen_code;
 
+static volatile int		arm_thirty_two_armed;
+static volatile mach_port_t	arm_thirty_two_thread;
+static volatile int		arm_thirty_two_task_seen;
+static volatile int		arm_thirty_two_named_the_victim = -2;
+static volatile int		arm_thirty_two_exception;
+
 /*
  * What exc_server calls when the message arrives.  MIG demands this name and
  * this shape.
@@ -258,6 +264,19 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 		arm_eighteen_exception = exception;
 		arm_eighteen_code = (codeCnt > 0) ? (int) code[0] : 0;
 		arm_eighteen_named_the_victim = (thread == arm_eighteen_thread);
+		(void) thread_terminate(thread);
+		(void) mach_port_deallocate(mach_task_self(), thread);
+		(void) mach_port_deallocate(mach_task_self(), task);
+		return KERN_SUCCESS;
+	}
+	if (arm_thirty_two_armed) {
+		/*
+		 * The task's port, second: the thread's has had its answer, and
+		 * this is where the kernel goes when that answer failed.
+		 */
+		arm_thirty_two_task_seen = 1;
+		arm_thirty_two_exception = exception;
+		arm_thirty_two_named_the_victim = (thread == arm_thirty_two_thread);
 		(void) thread_terminate(thread);
 		(void) mach_port_deallocate(mach_task_self(), thread);
 		(void) mach_port_deallocate(mach_task_self(), task);
@@ -4270,6 +4289,177 @@ arm_thirty_one_descriptor_count_past_the_message(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-two (#841): an exception answered with more than the kernel's
+ * stub asked for is a failed answer, and nothing more.
+ *
+ * The kernel raises an exception with mach_msg_rpc_from_kernel(), receiving
+ * the answer into the generated stub's union of request and reply, on its own
+ * stack, with rcv_size the reply it expects -- 36 bytes for exception_raise.
+ * The size of the answer is the answerer's.  When it was larger, the kernel
+ * said MACH_RCV_TOO_LARGE, but copied all of it into that union first.
+ *
+ * Here a thread's own exception port gets the exception and is answered with
+ * 4096 bytes of zeroes, then the task's port gets it, as it must when the
+ * thread's answer failed, and the thread is ended there.  A kernel that copies
+ * the 4096 bytes writes them over its own stack, and the returns that follow
+ * come back to nothing.  The address the thread loads from is mapped by no arm.
+ */
+#define	A32_PROBE	((vm_offset_t) 0x0000500000000000ULL)
+#define	A32_ANSWER	4096
+#define	A32_RAISE_ID	2401	/* exception_raise, exc.defs */
+
+static mach_port_t		arm_thirty_two_port;
+static volatile kern_return_t	arm_thirty_two_set_kr = -1;
+
+static void *
+arm_thirty_two_victim(void *arg)
+{
+	(void) arg;
+	arm_thirty_two_thread = mach_thread_self();
+	arm_thirty_two_set_kr =
+	    thread_set_exception_ports(arm_thirty_two_thread,
+				       EXC_MASK_BAD_ACCESS, arm_thirty_two_port,
+				       EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+	if (arm_thirty_two_set_kr == KERN_SUCCESS)
+		(void) *(volatile unsigned long *) A32_PROBE;
+	return NULL;
+}
+
+static int
+arm_thirty_two_exception_answered_too_large(void)
+{
+	union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[1024];
+	} req, kreq, kans;
+	static union {
+		mach_msg_header_t	h;
+		unsigned char		bytes[A32_ANSWER];
+	} ans;
+	mach_port_t		tport, kport;
+	mach_msg_return_t	mr, sent = MACH_MSG_SUCCESS;
+	kern_return_t		kr;
+	pthread_t		victim;
+	unsigned		i;
+	int			ok = 0;
+
+	tport = arm_own_port(32);
+	if (tport == MACH_PORT_NULL)
+		return 0;
+	kport = arm_own_port(32);
+	if (kport == MACH_PORT_NULL) {
+		(void) mach_port_destroy(mach_task_self(), tport);
+		return 0;
+	}
+	kr = task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+				      kport, EXCEPTION_DEFAULT,
+				      THREAD_STATE_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [32] task_set_exception_ports failed (%d) — "
+		       "WRONG\n", kr);
+		(void) mach_port_destroy(mach_task_self(), tport);
+		(void) mach_port_destroy(mach_task_self(), kport);
+		return 0;
+	}
+
+	arm_thirty_two_port = tport;
+	arm_thirty_two_armed = 1;
+	if (pthread_create(&victim, NULL, arm_thirty_two_victim, NULL) != 0) {
+		printf("act_test: [32] pthread_create failed — WRONG\n");
+		arm_thirty_two_armed = 0;
+		ok = -1;
+	}
+
+	/* The thread's port first: the request, and an answer far too large. */
+	if (ok == 0) {
+		mr = mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof req, tport, 5000, MACH_PORT_NULL);
+		if (mr != MACH_MSG_SUCCESS || req.h.msgh_id != A32_RAISE_ID) {
+			printf("act_test: [32] the thread's port got 0x%x, id %d, "
+			       "not exception_raise (the set answered %d) — "
+			       "WRONG\n", (int) mr,
+			       mr == MACH_MSG_SUCCESS ? req.h.msgh_id : -1,
+			       (int) arm_thirty_two_set_kr);
+			ok = -1;
+		}
+	}
+	if (ok == 0) {
+		for (i = 0; i < sizeof ans.bytes; i++)
+			ans.bytes[i] = 0;
+		ans.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+		ans.h.msgh_size = A32_ANSWER;
+		ans.h.msgh_remote_port = req.h.msgh_remote_port;
+		ans.h.msgh_local_port = MACH_PORT_NULL;
+		ans.h.msgh_id = req.h.msgh_id + 100;
+		sent = mach_msg(&ans.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+				A32_ANSWER, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+
+		/*
+		 * The request was received raw, not through exc_server, so its
+		 * two rights -- the thread's and the task's -- are this arm's
+		 * to give back.
+		 */
+		{
+			struct {
+				mach_msg_header_t		h;
+				mach_msg_body_t			b;
+				mach_msg_port_descriptor_t	thread, task;
+			} *rq = (void *) &req;
+
+			if ((req.h.msgh_bits & MACH_MSGH_BITS_COMPLEX)
+			    && rq->b.msgh_descriptor_count >= 2) {
+				(void) mach_port_deallocate(mach_task_self(),
+							    rq->thread.name);
+				(void) mach_port_deallocate(mach_task_self(),
+							    rq->task.name);
+			}
+		}
+
+		/* Then the task's port, answered by catch_exception_raise(). */
+		mr = mach_msg(&kreq.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			      sizeof kreq, kport, 5000, MACH_PORT_NULL);
+		if (mr == MACH_MSG_SUCCESS) {
+			(void) exc_server(&kreq.h, &kans.h);
+			(void) mach_msg(&kans.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+					kans.h.msgh_size, 0, MACH_PORT_NULL, 0,
+					MACH_PORT_NULL);
+		}
+	}
+
+	arm_thirty_two_armed = 0;
+	(void) task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
+					MACH_PORT_NULL, EXCEPTION_DEFAULT,
+					THREAD_STATE_NONE);
+	if (arm_thirty_two_thread != MACH_PORT_NULL)
+		(void) mach_port_deallocate(mach_task_self(),
+					    arm_thirty_two_thread);
+	(void) mach_port_destroy(mach_task_self(), tport);
+	(void) mach_port_destroy(mach_task_self(), kport);
+
+	if (ok != 0)
+		return 0;
+	if (sent != MACH_MSG_SUCCESS || !arm_thirty_two_task_seen
+	    || arm_thirty_two_exception != EXC_BAD_ACCESS
+	    || arm_thirty_two_named_the_victim != 1) {
+		printf("act_test: [32] after a %d-byte answer at the thread's "
+		       "port (sent 0x%x), the task's port %s exception %d, "
+		       "naming the thread %d — WRONG, expected EXC_BAD_ACCESS "
+		       "there, for the same thread (#841)\n", A32_ANSWER,
+		       (int) sent, arm_thirty_two_task_seen ? "got"
+						     : "never got",
+		       arm_thirty_two_exception,
+		       arm_thirty_two_named_the_victim);
+		return 0;
+	}
+
+	printf("act_test: [32] an exception answered at the thread's port with "
+	       "%d bytes, where the kernel's stub reads 36, was taken as a "
+	       "failed answer and went on to the task's port (#841)\n",
+	       A32_ANSWER);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -4928,6 +5118,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_scatter_list_one_word_short();
 	arms++;		/* arm thirty-one, #840 */
 	passed += arm_thirty_one_descriptor_count_past_the_message();
+	arms++;		/* arm thirty-two, #841 */
+	passed += arm_thirty_two_exception_answered_too_large();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
