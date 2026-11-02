@@ -4,6 +4,7 @@ Takes out: the integer bound on a complex message's descriptor count, putting ba
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[31\] a [0-9]+-byte message holding one descriptor and saying 2 answered 0x[0-9a-f]+, not MACH_SEND_MSG_TOO_SMALL
+Note: Judged under QEMU (TCG and KVM), act_test's arm 31, on victus 02/11/2026 at b2ae36a0: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
 --- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
