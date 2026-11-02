@@ -30,7 +30,8 @@
  *     second-level TLB maps (1536); four pages need none.  Once storing into
  *     each slot before loading from it, which makes the walks the stores'.
  *     One line a page is 1 MiB of lines, which the last level holds: these
- *     walks say nothing of its misses.
+ *     walks say nothing of its misses.  On AMD's metal the L2 TLB (2048)
+ *     keeps contiguous pages in one entry, and there it is half the steps.
  *
  * Each walk runs in chunks with interrupts off, so that every chunk is read
  * on one processor (RDPMC reads the processor it runs on), and its counts
@@ -55,6 +56,18 @@
  * The rules' ceilings are loose too: on the walks that miss, a hardware
  * prefetcher fetches the next line with each one, and omen counted two to
  * four L2 and last-level events a step in 64 MiB.
+ *
+ * And the floors of the walks four times a cache -- 128 KiB for the L1D,
+ * 2 MiB for AMD's L2 of 512 KiB -- are half the steps, not nearly all: AMD's
+ * fills and L2 requests are the demand's (PPR 55922's PMCx043 is "Demand Data
+ * Cache Fills by Data Source", its PMCx064 "not including L2 Prefetch"), and
+ * a line the prefetcher fetched beside an earlier one is a hit when the walk
+ * gets to it.  On pavillion's Zen 2 that was an eighth of the steps: the
+ * 128 KiB walk filled the L1D at 88% of them and the 2 MiB walk came from the
+ * L3 at 87%, where the counter of a neighbouring source counts 13% or less.
+ * The ceiling of the last level's misses in 2 MiB is half too: under KVM on
+ * victus, where the host shares the L3, 12% of that walk's steps came from
+ * DRAM, and a counter of the last level's references counts them all.
  */
 
 #include <stdint.h>
@@ -116,11 +129,11 @@ static const struct pmc_rule pmc_rules[PMC_ROLE_COUNT][W_COUNT] = {
 	[PMC_ROLE_CYCLES] =
 	{ { 100, 0 }, { 100, 0 },  { 100, 0 },  { 100, 0 },  { 100, 0 }, { 100, 0 }, { 100, 0 } },
 	[PMC_ROLE_L1D_MISS] =
-	{ { 0, 5 },   { 80, 300 }, { 80, 600 }, { 80, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 50, 300 }, { 80, 600 }, { 80, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_L2_MISS] =
-	{ { 0, 5 },   { 0, 5 },    { 80, 600 }, { 80, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { 50, 600 }, { 80, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_LLC_MISS] =
-	{ { 0, 5 },   { 0, 5 },    { 0, 20 },   { 50, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { 0, 50 },   { 50, 600 }, { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_HITM] =
 	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_DTLB_LOAD_WALK] =
@@ -130,7 +143,7 @@ static const struct pmc_rule pmc_rules[PMC_ROLE_COUNT][W_COUNT] = {
 	[PMC_ROLE_ITLB_WALK] =
 	{ { -1, 0 },  { -1, 0 },   { -1, 0 },   { -1, 0 },   { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_LLC_REF] =
-	{ { -1, 0 },  { 0, 5 },    { 80, 600 }, { 80, 600 }, { -1, 0 },  { -1, 0 },  { -1, 0 } },
+	{ { -1, 0 },  { 0, 5 },    { 50, 600 }, { 80, 600 }, { -1, 0 },  { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_BRANCH] =
 	{ { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 } },
 	[PMC_ROLE_BRANCH_MISS] =
@@ -141,14 +154,21 @@ static const struct pmc_rule pmc_rules[PMC_ROLE_COUNT][W_COUNT] = {
 	 * lines is 512 pages, more than the L1 DTLB maps (64 on Zen 2 and Zen
 	 * 3) and fewer than the L2 TLB (2048): it misses the one and hits the
 	 * other.  And a line filled from the L3 or another core's cache is what
-	 * every step of the 2 MiB walk is, and no step of the 128 KiB one.
+	 * most steps of the 2 MiB walk are, and no step of the 128 KiB one.
+	 *
+	 * The 16384 pages walk at a quarter of their steps at least: on the
+	 * metal an L2 TLB entry holds contiguous pages together (the PPR's
+	 * "coalesced page").  On pavillion the 64 MiB of lines walked at 51% of
+	 * its steps and hit the L2 TLB at 47%, as 2048 entries of four pages
+	 * would, mapping half of it, and the 16384 pages walked at 59%; under
+	 * KVM, the guest's pages not contiguous in the host, at 99.9%.
 	 */
 	[PMC_ROLE_DTLB_WALK] =
-	{ { 0, 5 },   { 0, 5 },    { 0, 5 },    { -1, 0 },   { 0, 5 },   { 50, 150 },{ 50, 150 } },
+	{ { 0, 5 },   { 0, 5 },    { 0, 5 },    { -1, 0 },   { 0, 5 },   { 25, 150 },{ 25, 150 } },
 	[PMC_ROLE_DTLB_L2_HIT] =
 	{ { 0, 5 },   { 0, 5 },    { 50, 150 }, { -1, 0 },   { 0, 5 },   { -1, 0 },  { -1, 0 } },
 	[PMC_ROLE_L3_OR_PEER] =
-	{ { 0, 5 },   { 0, 5 },    { 80, 300 }, { -1, 0 },   { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	{ { 0, 5 },   { 0, 5 },    { 50, 300 }, { -1, 0 },   { 0, 5 },   { -1, 0 },  { -1, 0 } },
 };
 
 static const char *const pmc_role_short[PMC_ROLE_COUNT] = {
