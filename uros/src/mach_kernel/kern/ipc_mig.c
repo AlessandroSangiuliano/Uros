@@ -380,9 +380,17 @@ mach_msg_rpc_from_kernel(
 	}
 	 *****/
 
+	/*
+	 * #841: a reply too large for the caller's buffer hands back its
+	 * header only, as mach_msg_overwrite()'s branch for the same case
+	 * does.  The buffer holds rcv_size bytes -- a generated stub's union
+	 * of request and reply, on the kernel stack -- and the reply's size is
+	 * chosen by whoever holds the reply right, which for an exception is
+	 * any task's own handler: copying all of it wrote past the buffer.
+	 */
 	if (rcv_size < kmsg->ikm_header.msgh_size) {
 		ipc_kmsg_copyout_dest(kmsg, ipc_space_reply);
-		ipc_kmsg_put_to_kernel(msg, kmsg, kmsg->ikm_header.msgh_size);
+		ipc_kmsg_put_to_kernel(msg, kmsg, sizeof(mach_msg_header_t));
 		return MACH_RCV_TOO_LARGE;
 	}
 
