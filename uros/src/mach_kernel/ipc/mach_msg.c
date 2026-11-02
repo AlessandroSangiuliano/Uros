@@ -422,14 +422,34 @@ mach_msg_send(
 	 * processor.  One-shot: the first wakeup takes it, and it is cleared
 	 * below whether or not the send woke anyone.
 	 */
-	if (sched_rpc_handoff &&
-	    ((option & MACH_SEND_HANDOFF) ||
-	     mach_msg_rcv_will_block(space, reply_name, rcv_name)))
-		current_thread()->handoff_hint = TRUE;
+	if (sched_rpc_handoff) {
+		thread_t self = current_thread();
+
+		/*
+		 * A hand-off still pending from an earlier call is a promise
+		 * broken: that call said it would block next, and this one is
+		 * not a receive.  Undone first, so that the name below is this
+		 * send's.
+		 */
+		if (self->handoff_wakee != THREAD_NULL)
+			(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RETURN);
+		if ((option & MACH_SEND_HANDOFF) ||
+		    mach_msg_rcv_will_block(space, reply_name, rcv_name))
+			self->handoff_hint = TRUE;
+	}
 #endif	/* NCPUS > 1 */
 	mr = ipc_mqueue_send(kmsg, option & MACH_SEND_TIMEOUT, timeout);
 #if	NCPUS > 1
 	current_thread()->handoff_hint = FALSE;
+	/*
+	 * MACH_SEND_HANDOFF on a send alone says the block comes in the NEXT
+	 * call: this call's return to user space is part of the promise, so
+	 * it may pass once (mach_msg_overwrite_trap()); the next return that
+	 * finds the hand-off still pending undoes it.
+	 */
+	if ((option & MACH_SEND_HANDOFF) && !(option & MACH_RCV_MSG) &&
+	    current_thread()->handoff_wakee != THREAD_NULL)
+		current_thread()->handoff_spare = TRUE;
 #endif	/* NCPUS > 1 */
 
 	/*
@@ -604,6 +624,16 @@ mach_msg_receive(
 
 	/* mqueue is unlocked */
 	ipc_object_release(object);
+#if	NCPUS > 1
+	/*
+	 * #777: back from the receive with a hand-off still pending, so it found
+	 * a message, or failed, instead of blocking -- a block would have let the
+	 * woken thread run and forgotten it (thread_invoke()).  The bet is lost
+	 * here, and the thread it queued must not wait behind this one.
+	 */
+	if (self->handoff_wakee != THREAD_NULL)
+		(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RECEIVE);
+#endif	/* NCPUS > 1 */
 
 	if (mr != MACH_MSG_SUCCESS) {
 		if (mr == MACH_RCV_TOO_LARGE || mr == MACH_RCV_SCATTER_SMALL
@@ -1207,8 +1237,8 @@ urmach_msg(
  *		All of mach_msg_send and mach_msg_receive error codes.
  */
 
-mach_msg_return_t
-mach_msg_overwrite_trap(
+static mach_msg_return_t
+mach_msg_overwrite_trap_call(
 	mach_msg_header_t	*msg,
 	mach_msg_option_t	option,
 	mach_msg_size_t		send_size,
@@ -3038,10 +3068,16 @@ mach_msg_overwrite_trap(
 		 * request is already queued does not block, and the client it
 		 * just answered must not wait behind it.
 		 */
-		if (sched_rpc_handoff &&
-		    ((option & MACH_SEND_HANDOFF) ||
-		     mach_msg_rcv_will_block(space, reply_name, rcv_name)))
-			self->handoff_hint = TRUE;
+		if (sched_rpc_handoff) {
+			/* an earlier call's promise, broken: see mach_msg_send() */
+			if (self->handoff_wakee != THREAD_NULL)
+				(void) thread_handoff_undo(
+				    SCHED_HANDOFF_UNDO_RETURN);
+			if ((option & MACH_SEND_HANDOFF) ||
+			    mach_msg_rcv_will_block(space, reply_name,
+						    rcv_name))
+				self->handoff_hint = TRUE;
+		}
 #endif	/* NCPUS > 1 */
 		mr = ipc_mqueue_send(kmsg, MACH_MSG_OPTION_NONE,
 				     MACH_MSG_TIMEOUT_NONE);
@@ -3087,9 +3123,14 @@ mach_msg_overwrite_trap(
 					MACH_MSG_TIMEOUT_NONE,
 					FALSE,
 					(void(*)(void))SAFE_EXTERNAL_RECEIVE,
-					&temp_kmsg, &temp_seqno); 
+					&temp_kmsg, &temp_seqno);
 		/* rcv_mqueue is unlocked */
 		ipc_object_release(rcv_object);
+#if	NCPUS > 1
+		/* #777: the receive did not block, so slow_send's bet is lost */
+		if (self->handoff_wakee != THREAD_NULL)
+			(void) thread_handoff_undo(SCHED_HANDOFF_UNDO_RECEIVE);
+#endif	/* NCPUS > 1 */
 
 
 		if (mr != MACH_MSG_SUCCESS) {
@@ -3207,7 +3248,7 @@ mach_msg_overwrite_trap(
 		    rcv = rcv_msg;
 		else
 		    rcv = msg;
-		mr = mach_msg_receive(rcv, option, rcv_size, rcv_name, 
+		mr = mach_msg_receive(rcv, option, rcv_size, rcv_name,
 				      timeout, notify, scatter_list_size);
 		if (mr != MACH_MSG_SUCCESS) {
 			return mr;
@@ -3215,6 +3256,48 @@ mach_msg_overwrite_trap(
 	}
 
 	return MACH_MSG_SUCCESS;
+}
+
+/*
+ * The trap: the call above, then #777's last undo point.
+ *
+ * A return through here is a return to user space, and a receive that blocked
+ * does not come this way -- it leaves through its continuation.  So a hand-off
+ * still pending here was bet on a block that did not happen in this call: its
+ * woken thread is undone, unless this was MACH_SEND_HANDOFF's send alone,
+ * whose block is promised for the next call and which passes once.
+ */
+mach_msg_return_t
+mach_msg_overwrite_trap(
+	mach_msg_header_t	*msg,
+	mach_msg_option_t	option,
+	mach_msg_size_t		send_size,
+	mach_msg_size_t		rcv_size,
+	mach_port_t		rcv_name,
+	mach_msg_timeout_t	timeout,
+	mach_port_t		notify,
+	mach_msg_header_t	*rcv_msg,
+        mach_msg_size_t		scatter_list_size)
+{
+	mach_msg_return_t	mr;
+
+	mr = mach_msg_overwrite_trap_call(msg, option, send_size, rcv_size,
+					  rcv_name, timeout, notify, rcv_msg,
+					  scatter_list_size);
+#if	NCPUS > 1
+	{
+		thread_t	self = current_thread();
+
+		if (self->handoff_wakee != THREAD_NULL) {
+			if (self->handoff_spare)
+				self->handoff_spare = FALSE;
+			else
+				(void) thread_handoff_undo(
+				    SCHED_HANDOFF_UNDO_RETURN);
+		}
+	}
+#endif	/* NCPUS > 1 */
+	return mr;
 }
 
 /*
