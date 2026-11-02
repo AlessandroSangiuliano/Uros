@@ -6,12 +6,11 @@ Expect: pmc test \(#804\): pages, 16384, 16384 steps: .* dtlb-ld [0-9]+ \(WRONG
 Note: Judged on omen's metal, for the reason 804-l2-miss-counts-requests.patch gives.  Run from omen's GRUB entry uros-804a-dtlb, pmc=2 pmc_test=1, 02/11/2026: caught in 1 boot of 1 (the walk of loads over 16384 pages counted 4 page walks for 16384 steps, 0%, against at least 50%), the fixed tree 28 checks with 0 wrong
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/pmc.c b/uros/src/mach_kernel/x86_64/cpu/pmc.c
-index 780e71b3..5273895a 100644
 --- a/uros/src/mach_kernel/x86_64/cpu/pmc.c
 +++ b/uros/src/mach_kernel/x86_64/cpu/pmc.c
-@@ -92,7 +92,7 @@ static const struct pmc_event pmc_set_cache[] = {
+@@ -107,7 +107,7 @@
  
- /* pmc=2: page walks, for data and for code. */
+ /* Intel, pmc=2: page walks, for data and for code. */
  static const struct pmc_event pmc_set_tlb[] = {
 -	{ "DTLB_LOAD_MISSES.WALK_COMPLETED",	0x08, 0x0e, -1, PMC_ROLE_DTLB_LOAD_WALK },
 +	{ "DTLB_LOAD_MISSES.WALK_COMPLETED",	0x49, 0x0e, -1, PMC_ROLE_DTLB_LOAD_WALK },
