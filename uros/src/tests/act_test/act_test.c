@@ -5095,6 +5095,15 @@ arm_thirty_six_vm_write_small_physical_copy(void)
  * to a second range, and an out-of-line send to a port of this task not yet
  * received.  Then the range is read, so the fast path fills its pages, and
  * written.  All three snapshots must still read zero.
+ *
+ * 🔴 The range is mapped a second time first, with vm_remap() and no copy.  A
+ * range just allocated has no object, and an anonymous object copies
+ * symmetrically -- shadows and needs_copy, no object->copy -- so its snapshots
+ * never reached the branch the fix is in: the ablation was caught 0 times in
+ * 4 (02/11).  A second mapping of the same object makes it copy-delay
+ * (vm_remap_extract(), as a shared fork does), and creates the object without
+ * touching a page of it; each snapshot is then a delayed copy, and the read
+ * after them is a zero fill in an object that has a copy.
  */
 #define	A37_PAGES	2
 
@@ -5128,10 +5137,11 @@ arm_thirty_seven_snapshot_of_untouched_memory(void)
 		unsigned char	room[256];
 	} r;
 	vm_size_t		len = A37_PAGES * vm_page_size;
-	vm_address_t		src = 0, dst = 0;
+	vm_address_t		src = 0, dst = 0, alias = 0;
 	vm_offset_t		rd = 0;
 	mach_msg_type_number_t	rdcnt = 0;
-	kern_return_t		kr1, kr2;
+	vm_prot_t		cur, max;
+	kern_return_t		kr1, kr2, kr3;
 	mach_msg_return_t	sent, got = MACH_RCV_TIMED_OUT;
 	volatile unsigned char	*p;
 	unsigned		bad_read = 0, bad_copy = 0, bad_msg = 0;
@@ -5143,9 +5153,13 @@ arm_thirty_seven_snapshot_of_untouched_memory(void)
 		return 0;
 	kr1 = vm_allocate(mach_task_self(), &src, len, TRUE);
 	kr2 = vm_allocate(mach_task_self(), &dst, len, TRUE);
-	if (kr1 != KERN_SUCCESS || kr2 != KERN_SUCCESS) {
-		printf("act_test: [37] vm_allocate answered %d and %d — WRONG\n",
-		       kr1, kr2);
+	kr3 = kr1 == KERN_SUCCESS
+	      ? vm_remap(mach_task_self(), &alias, len, 0, TRUE, mach_task_self(),
+			 src, FALSE, &cur, &max, VM_INHERIT_NONE)
+	      : KERN_FAILURE;
+	if (kr1 != KERN_SUCCESS || kr2 != KERN_SUCCESS || kr3 != KERN_SUCCESS) {
+		printf("act_test: [37] vm_allocate answered %d and %d, the second "
+		       "mapping %d — WRONG\n", kr1, kr2, kr3);
 		(void) mach_port_destroy(mach_task_self(), port);
 		return 0;
 	}
@@ -5199,6 +5213,7 @@ arm_thirty_seven_snapshot_of_untouched_memory(void)
 	if (kr1 == KERN_SUCCESS)
 		(void) vm_deallocate(mach_task_self(), rd, rdcnt);
 	(void) vm_deallocate(mach_task_self(), src, len);
+	(void) vm_deallocate(mach_task_self(), alias, len);
 	(void) vm_deallocate(mach_task_self(), dst, len);
 	(void) mach_port_destroy(mach_task_self(), port);
 
