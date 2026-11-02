@@ -109,7 +109,7 @@ struct pmc_rule {
 	int	min, max;
 };
 
-static const struct pmc_rule pmc_rules[PMC_ROLE_BRANCH_MISS + 1][W_COUNT] = {
+static const struct pmc_rule pmc_rules[PMC_ROLE_COUNT][W_COUNT] = {
 	/* lines 16K  lines 128K   lines 2M     lines 64M    pages 4     pages 16K   pages, storing */
 	[PMC_ROLE_INST] =
 	{ { 100, 0 }, { 100, 0 },  { 100, 0 },  { 100, 0 },  { 100, 0 }, { 100, 0 }, { 100, 0 } },
@@ -135,11 +135,25 @@ static const struct pmc_rule pmc_rules[PMC_ROLE_BRANCH_MISS + 1][W_COUNT] = {
 	{ { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 }, { 20, 300 } },
 	[PMC_ROLE_BRANCH_MISS] =
 	{ { 0, 5 },   { 0, 5 },    { 0, 5 },    { 0, 5 },    { 0, 5 },   { 0, 5 },   { 0, 5 } },
+	/*
+	 * AMD's.  Its data page walks are loads' and stores' together, so the
+	 * walk that stores counts as many as the one that loads.  2 MiB of
+	 * lines is 512 pages, more than the L1 DTLB maps (64 on Zen 2 and Zen
+	 * 3) and fewer than the L2 TLB (2048): it misses the one and hits the
+	 * other.  And a line filled from the L3 or another core's cache is what
+	 * every step of the 2 MiB walk is, and no step of the 128 KiB one.
+	 */
+	[PMC_ROLE_DTLB_WALK] =
+	{ { 0, 5 },   { 0, 5 },    { 0, 5 },    { -1, 0 },   { 0, 5 },   { 50, 150 },{ 50, 150 } },
+	[PMC_ROLE_DTLB_L2_HIT] =
+	{ { 0, 5 },   { 0, 5 },    { 50, 150 }, { -1, 0 },   { 0, 5 },   { -1, 0 },  { -1, 0 } },
+	[PMC_ROLE_L3_OR_PEER] =
+	{ { 0, 5 },   { 0, 5 },    { 80, 300 }, { -1, 0 },   { 0, 5 },   { -1, 0 },  { -1, 0 } },
 };
 
-static const char *const pmc_role_short[PMC_ROLE_BRANCH_MISS + 1] = {
+static const char *const pmc_role_short[PMC_ROLE_COUNT] = {
 	"?", "inst", "cyc", "L1D", "L2", "LLC", "HITM", "dtlb-ld", "dtlb-st",
-	"itlb", "LLC-ref", "br", "br-miss",
+	"itlb", "LLC-ref", "br", "br-miss", "dtlb-walk", "dtlb-l2hit", "L3/peer",
 };
 
 static uint64_t		pmc_seed = 0x8040201008040201ULL;

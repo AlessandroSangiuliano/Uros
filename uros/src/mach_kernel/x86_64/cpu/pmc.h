@@ -13,8 +13,8 @@
 
 /*
  * The counters read together: instructions retired and unhalted core cycles
- * in the first two fixed counters, then up to four events in the general
- * ones.
+ * first -- Intel's first two fixed counters, AMD's first two general ones --
+ * then up to four events.
  */
 #define	PMC_MAX		6
 
@@ -53,6 +53,10 @@ const char	*pmc_name(int i);
 #define	PMC_ROLE_LLC_REF		10
 #define	PMC_ROLE_BRANCH			11
 #define	PMC_ROLE_BRANCH_MISS		12
+#define	PMC_ROLE_DTLB_WALK		13	/* AMD: loads' and stores' walks together */
+#define	PMC_ROLE_DTLB_L2_HIT		14	/* missed the L1 DTLB, hit the L2 TLB */
+#define	PMC_ROLE_L3_OR_PEER		15	/* filled from the L3 or another core's cache */
+#define	PMC_ROLE_COUNT			16
 int		pmc_role(int i);
 
 /*
