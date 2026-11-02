@@ -224,7 +224,8 @@ mach_msg_return_t mach_msg_send(
 	mach_msg_option_t	option,
 	mach_msg_size_t		send_size,
 	mach_msg_timeout_t	timeout,
-	mach_port_t		notify);
+	mach_port_t		notify,
+	mach_port_t		rcv_name);
 
 mach_msg_return_t mach_msg_receive(
 	mach_msg_header_t	*msg,
@@ -268,6 +269,74 @@ mach_msg_format_0_trailer_t trailer_template = {
 	/* security_token_t */        KERNEL_SECURITY_TOKEN_VALUE
 };
 
+#if	NCPUS > 1
+/*
+ * #777: will the receive that follows this send block?  Asked before the
+ * send wakes anyone, because the hand-off on block (#356) queues the woken
+ * thread on this processor, where it runs only once this thread leaves it.
+ * Two cases are sure enough to bet on, and nothing else is:
+ *
+ *   - the receive is on the reply port the message itself carries (the same
+ *     name in this space): a MIG client's RPC, whose reply cannot exist
+ *     before the request has been served;
+ *   - the queue it receives from is empty now: a server between requests.
+ *
+ * The second is a look, under the locks ipc_mqueue_copyin() takes and in its
+ * order, not a hold across the send: a message can arrive between the look
+ * and the block, and a reply port can keep a stale reply (#583).  A bet lost
+ * that way is undone where it shows, not prevented here.  A receive that
+ * cannot block -- a poll with a timeout of zero, a name that is no receive
+ * right or set, a port inside a set -- returns at once, so it is no bet.
+ */
+static boolean_t
+mach_msg_rcv_will_block(
+	ipc_space_t	space,
+	mach_port_t	reply_name,
+	mach_port_t	rcv_name)
+{
+	ipc_entry_t	entry;
+	ipc_mqueue_t	mqueue;
+	boolean_t	empty = FALSE;
+
+	if (!MACH_PORT_VALID(rcv_name))
+		return FALSE;
+	if (reply_name == rcv_name)
+		return TRUE;
+
+	is_read_lock(space);
+	if (!space->is_active ||
+	    (entry = ipc_entry_lookup(space, rcv_name)) == IE_NULL) {
+		is_read_unlock(space);
+		return FALSE;
+	}
+	if (entry->ie_bits & MACH_PORT_TYPE_RECEIVE) {
+		ipc_port_t	port = (ipc_port_t) entry->ie_object;
+
+		ip_lock(port);
+		is_read_unlock(space);
+		if (port->ip_pset == IPS_NULL) {
+			mqueue = &port->ip_messages;
+			imq_lock(mqueue);
+			empty = ipc_kmsg_queue_empty(&mqueue->imq_messages);
+			imq_unlock(mqueue);
+		}
+		ip_unlock(port);
+	} else if (entry->ie_bits & MACH_PORT_TYPE_PORT_SET) {
+		ipc_pset_t	pset = (ipc_pset_t) entry->ie_object;
+
+		ips_lock(pset);
+		is_read_unlock(space);
+		mqueue = &pset->ips_messages;
+		imq_lock(mqueue);
+		empty = ipc_kmsg_queue_empty(&mqueue->imq_messages);
+		imq_unlock(mqueue);
+		ips_unlock(pset);
+	} else
+		is_read_unlock(space);
+	return empty;
+}
+#endif	/* NCPUS > 1 */
+
 /*
  *	Routine:	mach_msg_send
  *	Purpose:
@@ -301,12 +370,16 @@ mach_msg_send(
 	mach_msg_option_t	option,
 	mach_msg_size_t		send_size,
 	mach_msg_timeout_t	timeout,
-	mach_port_t		notify)
+	mach_port_t		notify,
+	mach_port_t		rcv_name)	/* #777: the receive after it, or null */
 {
 	ipc_space_t space = current_space();
 	vm_map_t map = current_map();
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
+#if	NCPUS > 1
+	mach_port_t reply_name;
+#endif	/* NCPUS > 1 */
 
 	SP_ROUTE(c_route_msg_send);		/* #559 */
 
@@ -314,6 +387,10 @@ mach_msg_send(
 
 	if (mr != MACH_MSG_SUCCESS)
 		return mr;
+#if	NCPUS > 1
+	/* #777: by name, before ipc_kmsg_copyin() turns it into a port */
+	reply_name = kmsg->ikm_header.msgh_local_port;
+#endif	/* NCPUS > 1 */
 
 	/*
 	 * #559: the buffer and the send-side copy, fused.  This is the route a
@@ -337,7 +414,23 @@ mach_msg_send(
 
 	SP_MARK(SP_RESOLVE);		/* #559: names -> ports, the general way */
 
+#if	NCPUS > 1
+	/*
+	 * #777: the hand-off on block only where this thread blocks next -- its
+	 * caller says so (MACH_SEND_HANDOFF), or the receive after it will.  A
+	 * plain send that goes on running leaves the thread it wakes to an idle
+	 * processor.  One-shot: the first wakeup takes it, and it is cleared
+	 * below whether or not the send woke anyone.
+	 */
+	if (sched_rpc_handoff &&
+	    ((option & MACH_SEND_HANDOFF) ||
+	     mach_msg_rcv_will_block(space, reply_name, rcv_name)))
+		current_thread()->handoff_hint = TRUE;
+#endif	/* NCPUS > 1 */
 	mr = ipc_mqueue_send(kmsg, option & MACH_SEND_TIMEOUT, timeout);
+#if	NCPUS > 1
+	current_thread()->handoff_hint = FALSE;
+#endif	/* NCPUS > 1 */
 
 	/*
 	 * #559: the enqueue and the wake, in one column because from here they
@@ -1128,9 +1221,14 @@ mach_msg_overwrite_trap(
 {
 	register mach_msg_header_t *hdr;
 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
-	/* mask out some of the options before entering the hot path */
+	/*
+	 * mask out some of the options before entering the hot path -- #777's
+	 * MACH_SEND_HANDOFF too: a combined send-and-receive decides its own
+	 * hand-off below, and the bit must not send it off the hot path.
+	 */
 	mach_msg_option_t  masked_option =
-		option & ~(MACH_SEND_TRAILER|MACH_RCV_TRAILER_MASK);
+		option & ~(MACH_SEND_TRAILER|MACH_RCV_TRAILER_MASK|
+			   MACH_SEND_HANDOFF);
 
 	/*
 	 * 🔴 #842: the trailer a receive asks for, checked before anything is
@@ -1160,6 +1258,9 @@ mach_msg_overwrite_trap(
 		register ipc_mqueue_t rcv_mqueue;
 		mach_msg_size_t reply_size;
 		ipc_kmsg_t rcv_kmsg;
+#if	NCPUS > 1
+		mach_port_t reply_name;	/* #777: set at fast_copyin, by name */
+#endif	/* NCPUS > 1 */
 
 		c_mmot_combined_S_R++;
 		self->ith_scatter_list = MACH_MSG_BODY_NULL;
@@ -1278,6 +1379,15 @@ mach_msg_overwrite_trap(
 		 *	because copyin of the message body might
 		 *	affect rcv_name.
 		 */
+
+#if	NCPUS > 1
+		/*
+		 * #777: the reply port by name, while it still is one -- every
+		 * way in arrives here before the copyin, and slow_send asks it
+		 * whether the receive after the send will block.
+		 */
+		reply_name = hdr->msgh_local_port;
+#endif	/* NCPUS > 1 */
 
 		switch (hdr->msgh_bits) {
 		    case MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
@@ -2920,12 +3030,17 @@ mach_msg_overwrite_trap(
 		/*
 		 * #356 hand-off on block: this is the combined-op slow send
 		 * (the hotpath fell off) -- right after it this same thread
-		 * copies in the reply port and blocks in ipc_mqueue_receive.
-		 * Flag it so thread_setrun runs whoever this send wakes on
-		 * THIS cpu instead of a remote idle one (one-shot; cleared
-		 * below if the send woke nobody).
+		 * receives on rcv_name.  #777: flag it so thread_setrun runs
+		 * whoever this send wakes on THIS cpu only if that receive will
+		 * block -- on the reply port the message carries, or on a queue
+		 * empty now -- or if the caller says it blocks (one-shot;
+		 * cleared below if the send woke nobody).  A server whose next
+		 * request is already queued does not block, and the client it
+		 * just answered must not wait behind it.
 		 */
-		if (sched_rpc_handoff)
+		if (sched_rpc_handoff &&
+		    ((option & MACH_SEND_HANDOFF) ||
+		     mach_msg_rcv_will_block(space, reply_name, rcv_name)))
 			self->handoff_hint = TRUE;
 #endif	/* NCPUS > 1 */
 		mr = ipc_mqueue_send(kmsg, MACH_MSG_OPTION_NONE,
@@ -3058,30 +3173,20 @@ mach_msg_overwrite_trap(
 #endif	/* ENABLE_HOTPATH */
 
 	if (option & MACH_SEND_MSG) {
-#if	NCPUS > 1
 		/*
-		 * #356 hand-off on block (EXPERIMENT, -P boot arg): flag the
-		 * sender so thread_setrun runs whoever this send wakes on
-		 * THIS cpu instead of shipping it to a remote idle one
-		 * (one-shot, consumed by the first wakeup; cleared right
-		 * after the send in any case).  RPC-style callers (client
-		 * send->recv, server recv->reply->recv) block right after
-		 * their send, so the wakee picks this CPU up warm the moment
-		 * they do.  A fire-and-forget sender that keeps running
-		 * instead delays its wakee by up to a quantum -- the kernel
-		 * cannot tell the two apart from here, which is why this is
-		 * an -P experiment: if the placement thesis holds on 32-core
-		 * hardware, the durable mechanism is an explicit option bit
-		 * set by callers that know they block (MIG stubs / libmach).
+		 * #777: the hand-off on block (-X) is decided inside, between the
+		 * copyin and the enqueue, where the message's reply port is still
+		 * a name: only for a send whose receive will block, or whose
+		 * caller says it blocks next (MACH_SEND_HANDOFF).  Until #777 every
+		 * send here set the hint, on the bet that it was an RPC's, and a
+		 * sender that went on running kept the thread it woke waiting
+		 * behind it for a tick or a quantum.  A receive that polls, with a
+		 * timeout of zero, cannot block, so it is no reason to hand off.
 		 */
-		if (sched_rpc_handoff)
-			current_thread()->handoff_hint = TRUE;
-#endif	/* NCPUS > 1 */
-		mr = mach_msg_send(msg, option, send_size,
-				   timeout, notify);
-#if	NCPUS > 1
-		current_thread()->handoff_hint = FALSE;
-#endif	/* NCPUS > 1 */
+		mr = mach_msg_send(msg, option, send_size, timeout, notify,
+				   ((option & MACH_RCV_MSG) &&
+				    !((option & MACH_RCV_TIMEOUT) && timeout == 0)) ?
+				   rcv_name : MACH_PORT_NULL);
 		if (mr != MACH_MSG_SUCCESS) {
 			return mr;
 		}
