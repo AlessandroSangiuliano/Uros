@@ -3900,6 +3900,75 @@ arm_twenty_six_a_receive_that_slept_keeps_six(void)
 	return arm_26_done(1);
 }
 
+/*
+ * Arm twenty-seven (#808): a send whose size cannot take the trailer is
+ * refused, cleanly, before the kernel adds the trailer to it.
+ *
+ * ipc_kmsg_get() sizes the kernel buffer by `send_size + MAX_TRAILER_SIZE' in
+ * mach_msg_size_t, which is 32 bits, and then copies `send_size' bytes into
+ * it.  A send_size near 2^32 wraps the sum to a small buffer and the copy runs
+ * past it -- the kernel heap overrun of #808.  The fix refuses such a size up
+ * front with MACH_SEND_TOO_LARGE, before any buffer or copy, so on a healthy
+ * tree this arm overruns nothing: the trap returns at its first test.
+ *
+ * The message is a bare header with a real send right as its destination, so
+ * nothing but its size is wrong; the size check precedes the port work, so the
+ * destination only keeps the trap on the ordinary send path.
+ */
+static int
+arm_twenty_seven_send_size_cannot_take_the_trailer(void)
+{
+	mach_port_t		port;
+	mach_msg_header_t	hdr;
+	mach_msg_return_t	mr;
+	kern_return_t		kr;
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [27] mach_port_allocate failed (%d) — "
+		       "WRONG\n", kr);
+		return 0;
+	}
+	kr = mach_port_insert_right(mach_task_self(), port, port,
+				    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [27] insert_right failed (%d) — WRONG\n", kr);
+		(void) mach_port_destroy(mach_task_self(), port);
+		return 0;
+	}
+
+	hdr.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	hdr.msgh_size = sizeof hdr;
+	hdr.msgh_remote_port = port;
+	hdr.msgh_local_port = MACH_PORT_NULL;
+	hdr.msgh_reserved = 0;
+	hdr.msgh_id = 0;
+
+	/*
+	 * A multiple of four, at least a header, and larger than any size the
+	 * trailer fits after: the value the kernel must refuse rather than add
+	 * to.  The buffer handed over is one header; the fix never reads past
+	 * it.
+	 */
+	mr = mach_msg(&hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		      (mach_msg_size_t) 0xFFFFFFFCu, 0, MACH_PORT_NULL,
+		      0, MACH_PORT_NULL);
+
+	(void) mach_port_destroy(mach_task_self(), port);
+
+	if (mr != MACH_SEND_TOO_LARGE) {
+		printf("act_test: [27] a send of 0xFFFFFFFC bytes answered "
+		       "0x%x, not MACH_SEND_TOO_LARGE — WRONG (#808)\n",
+		       (int) mr);
+		return 0;
+	}
+
+	printf("act_test: [27] a send whose size cannot take the trailer was "
+	       "refused with MACH_SEND_TOO_LARGE, before the buffer (#808)\n");
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -4547,6 +4616,9 @@ main(int argc, char **argv)
 		arms--;
 	else
 		passed += r;
+
+	arms++;		/* arm twenty-seven, #808 */
+	passed += arm_twenty_seven_send_size_cannot_take_the_trailer();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
