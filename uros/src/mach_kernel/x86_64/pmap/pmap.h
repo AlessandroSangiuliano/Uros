@@ -417,6 +417,18 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired);
 
 /*
+ * PMAP_ENTER for the machine-independent VM (#807): pmap_enter(), with a
+ * refusal over a large page said and stopped instead of dropped, the way
+ * vm/pmap.h's own PMAP_ENTER drops every answer.  See the definition.
+ */
+void pmap_enter_vm(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
+		   int wired);
+
+#define PMAP_ENTER(pmap, virtual_address, page, protection, wired)	\
+	pmap_enter_vm((pmap), (virtual_address), (page)->phys_addr,	\
+		      (protection) & ~(page)->page_lock, (wired))
+
+/*
  * A zeroed physical frame for a page table, from whichever allocator owns
  * physical memory right now.  See the comment on the definition (#458).
  */

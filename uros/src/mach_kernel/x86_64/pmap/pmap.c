@@ -1107,6 +1107,23 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	return rc;
 }
 
+/*
+ * 🔴 THE VM'S PMAP_ENTER, WHICH HEARS A REFUSAL (#807).
+ *
+ * vm/pmap.h's PMAP_ENTER calls pmap_enter() and drops the answer.  A large
+ * page refused means the VM asked to put one of its pages over the kernel's
+ * own mapping, which resolves no fault: taken as mapped, the fault would come
+ * back and ask again for ever, with nothing to say why.  So it is said here,
+ * and the machine stops.  PMAP_MAP_NO_FRAME is still dropped: that is #838.
+ */
+void pmap_enter_vm(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
+		   int wired)
+{
+	if (pmap_enter(pmap, va, pa, prot, wired) == PMAP_MAP_BLOCKED)
+		panic("PMAP_ENTER: 0x%lx lies under a large page of the kernel's",
+		      (unsigned long) va);
+}
+
 int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
 {
 	boolean_t held = pmap_read_enter();
