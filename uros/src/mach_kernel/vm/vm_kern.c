@@ -838,6 +838,17 @@ kmem_init(
 
 	/*
 	 *	Reserve virtual memory allocated up to this time.
+	 *
+	 *	kernel_map covers it so that nothing is ever allocated
+	 *	there, and that is all (#807).  The range was mapped before
+	 *	the VM existed -- the direct map on x86-64 and the image on
+	 *	i386, and on both the pages pmap_steal_memory() took for the
+	 *	VM's own tables -- and no VM object holds any of it.  So no
+	 *	access, not even as a maximum: a fault there is refused.
+	 *	With VM_PROT_DEFAULT on a null object, vm_fault() zero-filled
+	 *	a page for it and pmap_enter() took away whatever was mapped
+	 *	there to make room -- a 1 GiB leaf of the direct map, or a
+	 *	page of the VM's tables.
 	 */
 
 	if (start != VM_MIN_KERNEL_ADDRESS) {
@@ -846,7 +857,7 @@ kmem_init(
 				    &addr, start - VM_MIN_KERNEL_ADDRESS,
 				    (vm_offset_t) 0, TRUE,
 				    VM_OBJECT_NULL, (vm_offset_t) 0, FALSE,
-				    VM_PROT_DEFAULT, VM_PROT_ALL,
+				    VM_PROT_NONE, VM_PROT_NONE,
 				    VM_INHERIT_DEFAULT);
 	}
 
