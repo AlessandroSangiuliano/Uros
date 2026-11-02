@@ -267,6 +267,8 @@ mach_msg_format_0_trailer_t trailer_template = {
  *	Returns:
  *		MACH_MSG_SUCCESS	Sent the message.
  *		MACH_SEND_MSG_TOO_SMALL	Message smaller than a header.
+ *		MACH_SEND_TOO_LARGE	Message, or an array it carries, too
+ *					large for the kernel (#808).
  *		MACH_SEND_NO_BUFFER	Couldn't allocate buffer.
  *		MACH_SEND_INVALID_DATA	Couldn't copy message data.
  *		MACH_SEND_INVALID_HEADER
@@ -277,10 +279,10 @@ mach_msg_format_0_trailer_t trailer_template = {
  *		MACH_SEND_INVALID_REPLY	Can't copyin reply port.
  *		MACH_SEND_TIMED_OUT	Timeout expired without delivery.
  *		MACH_SEND_INTERRUPTED	Delivery interrupted.
- *		MACH_SEND_NO_NOTIFY	Can't allocate a msg-accepted request.
- *		MACH_SEND_WILL_NOTIFY	Msg-accepted notif. requested.
- *		MACH_SEND_NOTIFY_IN_PROGRESS
- *			This space has already forced a message to this port.
+ *
+ *	(#808: MACH_SEND_NO_NOTIFY, MACH_SEND_WILL_NOTIFY and
+ *	MACH_SEND_NOTIFY_IN_PROGRESS were listed here; message.h has none
+ *	of them, nothing returns them, and 0x1000000e is MACH_SEND_TOO_LARGE.)
  */
 
 mach_msg_return_t
