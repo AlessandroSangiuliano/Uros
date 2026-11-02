@@ -778,7 +778,8 @@ static void pmap_selftest(void)
  * primitives: enter it read/write and confirm extract finds the frame and a
  * write lands; reprotect read-only and confirm the write bit clears; remove
  * it and confirm extract now finds nothing.  This is the shape the MI side
- * will call.
+ * will call.  And ask it to map over the direct map's large leaf, which it
+ * must refuse (#807).
  */
 static void pmap_verbs_selftest(void)
 {
@@ -788,6 +789,7 @@ static void pmap_verbs_selftest(void)
 	volatile uint32_t *page = (volatile uint32_t *)(uintptr_t)va;
 	pt_entry_t *e;
 	uint64_t got;
+	uint64_t size = 0;
 	int rc;
 
 	rc = pmap_enter(k, va, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
@@ -809,6 +811,32 @@ static void pmap_verbs_selftest(void)
 	kputs("UrMach x86-64: pmap_remove -> extract ");
 	kputhex64(got);
 	kputs(got == 0 ? ", gone\r\n" : ", STILL MAPPED?!\r\n");
+
+	/*
+	 * 🔴 And never over a large page (#807).  DIRECT_MAP_BASE is mapped by a
+	 * leaf of direct_map_page_size -- 1 GiB, or 2 MiB on a processor without
+	 * 1 GiB pages -- and pmap_enter() must refuse it in both of its branches
+	 * and leave it as it was.  The branch that only removes is asked first:
+	 * on a kernel that takes the leaf away it is the one that comes back to
+	 * say so, while the other goes on to build a table through the direct
+	 * map it has just lost.
+	 */
+	rc = pmap_enter(k, DIRECT_MAP_BASE, frame, VM_PROT_NONE, 0);
+	kputs("UrMach x86-64: pmap_enter NONE over the direct map's ");
+	kputdec(direct_map_page_size / 1024);
+	kputs(" KiB leaf -> ");
+	kputs(rc == PMAP_MAP_BLOCKED ? "refused\r\n" : "not refused, WRONG\r\n");
+
+	rc = pmap_enter(k, DIRECT_MAP_BASE, frame,
+			VM_PROT_READ | VM_PROT_WRITE, 0);
+	e = pmap_walk(k->root_pa, DIRECT_MAP_BASE, &size);
+	kputs("UrMach x86-64: pmap_enter RW over it -> ");
+	kputs(rc == PMAP_MAP_BLOCKED ? "refused" : "not refused");
+	kputs(", the leaf there now ");
+	kputdec(e != PT_ENTRY_NULL ? size / 1024 : 0);
+	kputs(rc == PMAP_MAP_BLOCKED && e != PT_ENTRY_NULL
+	      && size == direct_map_page_size ? " KiB\r\n" : " KiB, WRONG\r\n");
+
 	boot_frame_free(frame);		/* #612: nothing left, frame included */
 }
 
