@@ -441,7 +441,7 @@ echo_thread_func(void *arg)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -498,7 +498,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -517,7 +517,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -692,7 +692,7 @@ child_echo_entry(void)
 	reply.head.msgh_id	    = msg.head.msgh_id + 100;
 
 	mach_msg(&reply.head,
-		 MACH_SEND_MSG,
+		 MACH_SEND_MSG | MACH_SEND_HANDOFF,
 		 sizeof(reply),
 		 0,
 		 MACH_PORT_NULL,
@@ -867,7 +867,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -887,7 +887,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
 	send_buf.head.msgh_id	      = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
