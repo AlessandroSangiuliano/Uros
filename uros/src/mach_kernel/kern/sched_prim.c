@@ -2931,9 +2931,11 @@ thread_setrun(
 
 	    /*
 	     * #356 hand-off on block: the waker flagged that it is about to
-	     * block (a send in mach_msg -- the combined send-and-receive, or a
-	     * send its caller follows with a receive; ipc/mach_msg.c sets the
-	     * hint for both).  A synchronous RPC pair is
+	     * block.  #777: ipc/mach_msg.c sets the hint only where it knows --
+	     * a combined send-and-receive whose receive will block (on the
+	     * reply port the message carries, or on a queue empty at the
+	     * send), or a send whose caller says it blocks next
+	     * (MACH_SEND_HANDOFF) -- not on every send.  A synchronous RPC pair is
 	     * inherently serial, so instead of shipping the wakee to a remote
 	     * idle CPU (cold caches, wake-from-idle latency -- the measured
 	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
