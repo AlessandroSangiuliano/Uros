@@ -4,6 +4,7 @@ Takes out: the clean of the failing port array alone in ipc_kmsg_copyout_body(),
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: act_test: \[35\] P heard "no senders"
+Note: Judged under QEMU (TCG and KVM), act_test's arm 35, on OMEGA 02/11/2026 at 54badecd: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
 --- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
