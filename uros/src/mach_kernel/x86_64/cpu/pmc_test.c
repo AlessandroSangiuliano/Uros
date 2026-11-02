@@ -59,7 +59,7 @@
 
 #include <stdint.h>
 
-#include <kern/misc_protos.h>		/* printf */
+#include <kern/misc_protos.h>		/* printf, sprintf */
 #include <vm/vm_kern.h>			/* kmem_alloc, kernel_map */
 
 #include <cpu/pmc.h>
@@ -225,14 +225,32 @@ pmc_follow(uint64_t p, uint32_t steps, int store, uint64_t *d, int n)
 	return p;
 }
 
+/*
+ * The median of three, each counter's on its own.  In QEMU a run whose walk
+ * the host disturbed -- another of its tasks on the core, emptying the L2
+ * between two chunks -- counted 16% of a walk's steps as missing the L2 that
+ * holds it, in one boot of three; on metal and in the other two, nothing.
+ */
+static uint64_t
+pmc_median3(uint64_t a, uint64_t b, uint64_t c)
+{
+	if (a > b) { uint64_t t = a; a = b; b = t; }
+	if (b > c) { uint64_t t = b; b = c; c = t; }
+	return a > b ? a : b;
+}
+
+/* Each line built here and printed whole: one printf cannot be cut by another thread's (#757). */
+static char	pmc_test_line[512];
+
 void
 pmc_test(void)
 {
 	vm_offset_t	buf = 0, idx_buf = 0;
 	uint32_t	idx_size = (PMC_BIG / PMC_LINE) * sizeof (uint32_t);
-	uint64_t	d[PMC_MAX], p;
-	int		n = pmc_count(), w, i, role, checks = 0, wrong = 0;
+	uint64_t	d[3][PMC_MAX], m[PMC_MAX], p;
+	int		n = pmc_count(), w, i, run, role, checks = 0, wrong = 0;
 	const struct pmc_walk *wk;
+	char		*q;
 
 	if (n == 0)
 		return;
@@ -247,53 +265,61 @@ pmc_test(void)
 
 	for (w = 0; w < W_COUNT; w++) {
 		wk = &pmc_walks[w];
-		for (i = 0; i < n; i++)
-			d[i] = 0;
 		p = pmc_cycle(buf, wk->size / wk->stride, wk->stride,
 			      (uint32_t *) idx_buf);
 		if (wk->warm)
 			p = pmc_follow(p, wk->size / wk->stride, wk->store,
 				       0, n);
-		p = pmc_follow(p, wk->steps, wk->store, d, n);
+		for (run = 0; run < 3; run++) {
+			for (i = 0; i < n; i++)
+				d[run][i] = 0;
+			p = pmc_follow(p, wk->steps, wk->store, d[run], n);
+		}
 		pmc_sink = p;
+		for (i = 0; i < n; i++)
+			m[i] = pmc_median3(d[0][i], d[1][i], d[2][i]);
 
-		printf("pmc test (#804): %s, %u steps:", wk->what, wk->steps);
+		q = pmc_test_line;
+		q += sprintf(q, "pmc test (#804): %s, %u steps:", wk->what,
+			     wk->steps);
 		for (i = 0; i < n; i++) {
 			const struct pmc_rule *r;
 			uint64_t		pct;
 
 			role = pmc_role(i);
 			r = &pmc_rules[role][w];
-			pct = d[i] * 100 / wk->steps;
-			printf(" %s %llu", pmc_role_short[role],
-			       (unsigned long long) d[i]);
+			pct = m[i] * 100 / wk->steps;
+			q += sprintf(q, " %s %llu", pmc_role_short[role],
+				     (unsigned long long) m[i]);
 			if (r->min < 0)
 				continue;
 			checks++;
 			if (pct < (uint64_t) r->min ||
 			    (r->max != 0 && pct > (uint64_t) r->max)) {
 				wrong++;
-				printf(" (WRONG: %llu%% of the steps, not %d..%d)",
-				       (unsigned long long) pct, r->min,
-				       r->max);
+				q += sprintf(q, " (WRONG: %llu%% of the steps, not "
+					     "%d..%d)", (unsigned long long) pct,
+					     r->min, r->max);
 			}
 		}
-		printf("\n");
+		printf("%s\n", pmc_test_line);
 	}
 
 	/* Kept: see the head of this file. */
 
-	printf("pmc test (#804): %d checks against loads of known shape, %d "
-	       "WRONG%s; not checked here:", checks, wrong,
-	       wrong != 0 ? " -- a counter that counts something else" : "");
+	q = pmc_test_line;
+	q += sprintf(q, "pmc test (#804): %d checks against loads of known shape, "
+		     "the median of three runs each, %d WRONG%s; not checked "
+		     "here:", checks, wrong, wrong != 0 ?
+		     " -- a counter that counts something else" : "");
 	for (i = 0; i < n; i++) {
 		role = pmc_role(i);
 		if (role == PMC_ROLE_HITM)
-			printf(" %s (needs a second core writing)",
-			       pmc_role_short[role]);
+			q += sprintf(q, " %s (needs a second core writing)",
+				     pmc_role_short[role]);
 		else if (role == PMC_ROLE_ITLB_WALK)
-			printf(" %s (needs code over many pages)",
-			       pmc_role_short[role]);
+			q += sprintf(q, " %s (needs code over many pages)",
+				     pmc_role_short[role]);
 	}
-	printf("\n");
+	printf("%s\n", pmc_test_line);
 }
