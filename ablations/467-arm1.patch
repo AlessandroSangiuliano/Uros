@@ -5,6 +5,7 @@ Run: --entry 14 600 -smp 4
 Expect: fault_test: \[1\] .*WRONG
 Expect: panic\(cpu
 Expect: exception_no_server: terminating task .* exception 1,
+Note: Judged again under QEMU (TCG and KVM) on victus 02/11/2026 at 209bd79f, regenerated over #807's change to the page-fault path: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4.
 
 diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
 --- a/uros/src/mach_kernel/x86_64/trap/trap.c
