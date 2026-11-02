@@ -817,12 +817,13 @@ static void pmap_verbs_selftest(void)
 	 * large leaf, but not necessarily of direct_map_page_size: by now it is
 	 * 2 MiB, because split_selftest() split the leaf over its witness, which
 	 * lies in the first GiB.  So the size is read first, and pmap_enter() must
-	 * refuse the leaf in both of its branches and leave one of that size.  The
-	 * branch that only unmaps is asked first: on a kernel that takes the leaf
-	 * away it is the one that comes back to say so, while the other goes on
-	 * to build a table through the direct map it has just lost.  And with no
-	 * large leaf there, nothing is asked -- the unmapping branch would take a
-	 * real mapping away.
+	 * refuse the leaf in both of its branches and leave one of that size.  On
+	 * a kernel that takes the leaf away, neither branch comes back to say so:
+	 * pmap_forget() drops the kernel pmap's resident count for a leaf it never
+	 * counted, the count is zero at this point of the boot, and the machine
+	 * stops there naming the address -- measured, in
+	 * ablations/807-pmap-enter-takes-the-leaf.  And with no large leaf there,
+	 * nothing is asked: the unmapping branch would take a real mapping away.
 	 */
 	e = pmap_walk(k->root_pa, DIRECT_MAP_BASE, &big);
 	if (e == PT_ENTRY_NULL || big <= PAGE_SIZE_4K) {
