@@ -1,0 +1,20 @@
+Kind: ablation
+Issue: #812
+Takes out: the write removed from a page the fast path zero-fills in an object with a copy -- act_test's arm 37 then reads its untouched range, so the page is mapped writable, writes it, and finds the write in its three snapshots
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[37\] after a read and a write of [0-9]+ bytes never touched before, the snapshots taken earlier changed
+
+diff --git a/uros/src/mach_kernel/vm/vm_fault.c b/uros/src/mach_kernel/vm/vm_fault.c
+--- a/uros/src/mach_kernel/vm/vm_fault.c
++++ b/uros/src/mach_kernel/vm/vm_fault.c
+@@ -2446,9 +2446,6 @@
+ 				 * slow path pushes the page into the copy first.
+ 				 * Asked with the object still locked.
+ 				 */
+-				if (object->copy != VM_OBJECT_NULL)
+-					prot &= ~VM_PROT_WRITE;
+-
+ 			  	if (cur_object != object)
+ 					vm_object_unlock(cur_object);
+ 
