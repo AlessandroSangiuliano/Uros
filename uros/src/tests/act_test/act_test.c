@@ -5241,6 +5241,41 @@ arm_thirty_seven_snapshot_of_untouched_memory(void)
 	return 1;
 }
 
+/*
+ * Arm thirty-eight (#813): task_wire() is refused without the privileged host
+ * port.
+ *
+ * task_wire() took the task's own port alone and set its map to wire every
+ * entry it would ever create, with no limit anywhere: any task could wire all
+ * it allocated, and drain the free pool of every task in the system.  It now
+ * takes the privileged host port, as vm_wire() does.  Here it is asked on the
+ * host's ordinary port and must answer KERN_INVALID_HOST.  A kernel that does
+ * not ask sets the flag, and the arm clears it again at once, so the rest of
+ * this program does not run with every allocation wired.
+ */
+static int
+arm_thirty_eight_task_wire_unprivileged(void)
+{
+	mach_port_t	host = mach_host_self();
+	kern_return_t	kr;
+
+	kr = task_wire(host, mach_task_self(), TRUE);
+	if (kr == KERN_SUCCESS)
+		(void) task_wire(host, mach_task_self(), FALSE);
+	(void) mach_port_deallocate(mach_task_self(), host);
+
+	if (kr != KERN_INVALID_HOST) {
+		printf("act_test: [38] task_wire on the host's ordinary port "
+		       "answered %d, not KERN_INVALID_HOST (%d) — WRONG (#813)\n",
+		       kr, KERN_INVALID_HOST);
+		return 0;
+	}
+
+	printf("act_test: [38] task_wire on the host's ordinary port was "
+	       "refused with KERN_INVALID_HOST, %d (#813)\n", kr);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -5911,6 +5946,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_six_vm_write_small_physical_copy();
 	arms++;		/* arm thirty-seven, #812 */
 	passed += arm_thirty_seven_snapshot_of_untouched_memory();
+	arms++;		/* arm thirty-eight, #813 */
+	passed += arm_thirty_eight_task_wire_unprivileged();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy
