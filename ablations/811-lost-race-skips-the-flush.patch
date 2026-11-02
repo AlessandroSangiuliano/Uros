@@ -1,0 +1,37 @@
+Kind: ablation
+Issue: #811
+Takes out: the flush of an entry another remover cleared first, in both of pmap_page_protect()'s loops -- with widen-811 holding the winner before its flush, collect_bench's lost-race arm then sees its holder's store go through after pmap_page_protect() returned
+Accel: kvm
+Run: --entry 9 1200 -smp 4
+Expect: pmap_bench: a remover that lost the race, .* -- A TRANSLATION OUTLIVED THE CALL THAT TOOK IT AWAY -- WRONG
+
+diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+--- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
++++ b/uros/src/mach_kernel/x86_64/pmap/pmap.c
+@@ -1453,16 +1453,8 @@
+ 			 * flush comes too, and is merely a second one.  A pv
+ 			 * entry is only ever a 4 KiB leaf.
+ 			 */
+-			if (size == 0) {
+-				if (n < PV_FLUSH_BATCH) {
+-					batch[n].pmap = hpmap;
+-					batch[n].va = hva;
+-					batch[n].size = PAGE_SIZE_4K;
+-					n++;
+-				} else
+-					overflow = TRUE;
++			if (size == 0)
+ 				continue;
+-			}
+ 
+ 			pmap_resident_drop(hpmap, hva);
+ 
+@@ -1580,7 +1572,7 @@
+ 			 * Flushed here as well, with the rest.
+ 			 */
+ 			if (size == 0)
+-				size = PAGE_SIZE_4K;
++				continue;
+ 			if (n < PV_FLUSH_BATCH) {
+ 				batch[n].pmap = pv->pmap;
+ 				batch[n].va = pv->va;
