@@ -3,7 +3,7 @@ Issue: #804
 Takes out: LONGEST_LAT_CACHE.MISS's unit mask, 0x41, for 0x4f, which is LONGEST_LAT_CACHE.REFERENCE (SDM 325462-093US, Table 22-3; skylake_core.json V59), in both sets that count it: the counter named for last-level misses counts every last-level reference
 Machine: omen
 Expect: pmc test \(#804\): lines in 2 MiB, 32768 steps: .* LLC [0-9]+ \(WRONG
-Note: Judged on omen's metal, for the reason 804-l2-miss-counts-requests.patch gives.  Run from omen's GRUB entry uros-804a-llc, pmc=1 pmc_test=1, 02/11/2026: caught in 1 boot of 1 (the 2 MiB walk, which misses the L2 and hits the last level, counted 93649 for 32768 steps, 285%, against at most 20%, the ceiling then; at most 50% since, which 285% exceeds as well), the fixed tree 29 checks with 0 wrong
+Note: Judged on omen's metal, for the reason 804-l2-miss-counts-requests.patch gives.  Run from omen's GRUB entry uros-804a-llc, pmc=1 pmc_test=1, 02/11/2026: caught in 1 boot of 1 (the 2 MiB walk, which misses the L2 and hits the last level, counted 93649 for 32768 steps, 285%, against at most 20%, the ceiling then; at most 50% since, which 285% exceeds as well), the fixed tree 29 checks with 0 wrong.  Judged again at 666f74ca, over pmc.c's second backend, from omen's uros-804c-llc beside uros-804r-pmc1, 02/11/2026, on battery: caught in 1 boot of 1 (the 2 MiB walk 93646 for 32768 steps, 285%, against at most 50%), the fixed tree 29 checks with 0 wrong
 
 diff --git a/uros/src/mach_kernel/x86_64/cpu/pmc.c b/uros/src/mach_kernel/x86_64/cpu/pmc.c
 index 780e71b3..720cdfb2 100644
