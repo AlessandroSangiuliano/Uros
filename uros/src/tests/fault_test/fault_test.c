@@ -867,31 +867,40 @@ arm_six_kernel_half(void)
 		if (kh_landed || kh_fell_through)
 			(void) pthread_join(reader, NULL);
 
-		printf("fault_test: [6] a load from ring 3 at 0x%lx, %s, reached "
-		       "the task as exception %d code %u", (unsigned long)
-		       probe[i].va, probe[i].what, kh_type, (unsigned) kh_code0);
+		/*
+		 * Each outcome is one printf, the whole line.  Printed in two,
+		 * the line let another thread's output in between, and under
+		 * TCG it did: it came out cut right after its code.
+		 */
+#define KH_LINE	"fault_test: [6] a load from ring 3 at 0x%lx, %s, reached " \
+		"the task as exception %d code %u — "
+#define KH_ARGS	(unsigned long) probe[i].va, probe[i].what, kh_type, \
+		(unsigned) kh_code0
 
 		if (kh_type == EXC_BAD_ACCESS && kh_code0 == KERN_INVALID_ADDRESS
 		    && kh_landed) {
-			printf(" — EXC_BAD_ACCESS, KERN_INVALID_ADDRESS: no map "
-			       "was asked\n");
+			printf(KH_LINE "EXC_BAD_ACCESS, KERN_INVALID_ADDRESS: "
+			       "no map was asked\n", KH_ARGS);
 			continue;
 		}
 		ok = 0;
 		if (kh_type == EXC_BAD_ACCESS
 		    && kh_code0 == KERN_PROTECTION_FAILURE)
-			printf(" — WRONG, KERN_PROTECTION_FAILURE is kernel_map's "
-			       "answer: the kernel asked its own map (#807)\n");
+			printf(KH_LINE "WRONG, KERN_PROTECTION_FAILURE is "
+			       "kernel_map's answer: the kernel asked its own "
+			       "map (#807)\n", KH_ARGS);
 		else if (kh_type != EXC_BAD_ACCESS
 			 || kh_code0 != KERN_INVALID_ADDRESS)
-			printf(" — WRONG, expected EXC_BAD_ACCESS (%d) code "
-			       "KERN_INVALID_ADDRESS (%d)\n", EXC_BAD_ACCESS,
-			       KERN_INVALID_ADDRESS);
+			printf(KH_LINE "WRONG, expected EXC_BAD_ACCESS (%d) code "
+			       "KERN_INVALID_ADDRESS (%d)\n", KH_ARGS,
+			       EXC_BAD_ACCESS, KERN_INVALID_ADDRESS);
 		else
-			printf(" — WRONG, the thread did not arrive where the "
-			       "handler sent it (state %d)%s\n", kh_state_kr,
-			       kh_fell_through ? ", it went on past the load"
-					       : "");
+			printf(KH_LINE "WRONG, the thread did not arrive where "
+			       "the handler sent it (state %d)%s\n", KH_ARGS,
+			       kh_state_kr, kh_fell_through
+			       ? ", it went on past the load" : "");
+#undef KH_ARGS
+#undef KH_LINE
 	}
 
 	(void) task_set_exception_ports(mach_task_self(), EXC_MASK_BAD_ACCESS,
