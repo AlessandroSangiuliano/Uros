@@ -4870,6 +4870,219 @@ arm_thirty_five_port_array_with_no_room(void)
 	return ok;
 }
 
+/*
+ * Arm thirty-six (#810): a vm_write() of a small physical copy to an address
+ * this task does not have is refused, and its copy is freed once.
+ *
+ * A small out-of-line region sent with MACH_MSG_PHYSICAL_COPY becomes a
+ * kernel-buffer copy, and vm_write() hands it to
+ * vm_map_copyout_kernel_buffer(), whose copyout fails on an address nothing
+ * maps -- and which freed the buffer all the same, before the destruction of
+ * the failed request freed it again.  The library's vm_write() takes a trap
+ * and sends a virtual copy, so the request is built here by hand, to this
+ * task's own port.
+ *
+ * 🔴 Sized as MIG sizes it, to the end of its last field: the server compares
+ * msgh_size with 68, and sizeof the struct is 72 with its padding.  Sized 72 it
+ * was refused with MIG_BAD_ARGUMENTS before vm_write() ran -- an error in the
+ * reply, all this arm asked for, with the double free put back as without it:
+ * the ablation was caught 0 times in 4 (02/11).  The reply must be the
+ * copyout's own KERN_INVALID_ADDRESS, which only that routine gives here.
+ *
+ * 🔴 Then one message of A36_COPIES physical copies of that size, each with
+ * bytes of its own, received and read back.  The copies' buffers come from one
+ * kalloc zone through a per-processor magazine, last in first out and fifteen
+ * deep, and a free into a full magazine goes to the zone's list instead
+ * (kern/zalloc.c).  The element freed twice is handed out twice: by the next
+ * two allocations when the magazine had room for both frees, or else once now
+ * and once when the magazine is refilled from the zone, within thirty more.
+ * Two copies asked for one at a time, as this arm first did, saw it in no boot
+ * of 8 -- the kernel fell later, on an assertion about a port, or not at all.
+ * Thirty-two in one copyin, back to back, take both.  A36_ROUNDS times.
+ */
+#define	A36_BYTES	64
+#define	A36_COPIES	32
+#define	A36_NOWHERE	((vm_address_t) 0x0000700000000000ULL)	/* no arm maps it */
+#define	A36_VM_WRITE	2027	/* vm_write, mach.defs */
+#define	A36_ROUNDS	16
+
+union arm36_msg {
+	struct {
+		mach_msg_header_t		head;
+		mach_msg_body_t			body;
+		mach_msg_ool_descriptor_t	data;
+		NDR_record_t			ndr;
+		vm_address_t			address;
+		mach_msg_type_number_t		count;
+	}	in;
+	struct {
+		mach_msg_header_t	head;
+		NDR_record_t		ndr;
+		kern_return_t		ret;
+	}	out;
+	char	room[256];
+};
+
+struct arm36_many {
+	mach_msg_header_t		head;
+	mach_msg_body_t			body;
+	mach_msg_ool_descriptor_t	data[A36_COPIES];
+};
+
+static unsigned char	arm36_bytes[A36_COPIES][A36_BYTES];
+
+/* One message of A36_COPIES physical copies; copy j holds the byte 0x40 + j. */
+static mach_msg_return_t
+arm36_send_many(mach_port_t port)
+{
+	struct arm36_many	c;
+	unsigned		i, j;
+
+	for (j = 0; j < A36_COPIES; j++)
+		for (i = 0; i < A36_BYTES; i++)
+			arm36_bytes[j][i] = (unsigned char) (0x40 + j);
+	for (i = 0; i < sizeof c; i++)
+		((unsigned char *) &c)[i] = 0;
+	c.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+			   | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	c.head.msgh_size = sizeof c;
+	c.head.msgh_remote_port = port;
+	c.head.msgh_local_port = MACH_PORT_NULL;
+	c.head.msgh_id = 36;
+	c.body.msgh_descriptor_count = A36_COPIES;
+	for (j = 0; j < A36_COPIES; j++) {
+		c.data[j].address = arm36_bytes[j];
+		c.data[j].size = A36_BYTES;
+		c.data[j].deallocate = FALSE;
+		c.data[j].copy = MACH_MSG_PHYSICAL_COPY;
+		c.data[j].type = MACH_MSG_OOL_DESCRIPTOR;
+	}
+	return mach_msg(&c.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof c, 0,
+			MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/*
+ * The copies back: how many of their bytes are not their own, and in
+ * *firstp the first copy that has any.
+ */
+static int
+arm36_receive_many(mach_port_t port, mach_msg_return_t *mrp, int *firstp)
+{
+	union {
+		struct arm36_many	c;
+		unsigned char		room[1024];
+	} r;
+	int		off = 0;
+	unsigned	i, j;
+
+	*firstp = -1;
+	*mrp = mach_msg(&r.c.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+			sizeof r, port, 1000, MACH_PORT_NULL);
+	if (*mrp != MACH_MSG_SUCCESS)
+		return -1;
+	if (r.c.body.msgh_descriptor_count != A36_COPIES)
+		return -1;
+	for (j = 0; j < A36_COPIES; j++) {
+		unsigned char	*got = (unsigned char *) r.c.data[j].address;
+		int		bad = 0;
+
+		for (i = 0; i < A36_BYTES; i++)
+			if (got[i] != (unsigned char) (0x40 + j))
+				bad++;
+		if (bad != 0 && *firstp < 0)
+			*firstp = (int) j;
+		off += bad;
+		(void) vm_deallocate(mach_task_self(), (vm_address_t) got,
+				     r.c.data[j].size);
+	}
+	return off;
+}
+
+static int
+arm_thirty_six_vm_write_small_physical_copy(void)
+{
+	union arm36_msg		m;
+	static unsigned char	src[A36_BYTES];
+	mach_port_t		reply, port;
+	mach_msg_return_t	mr = MACH_MSG_SUCCESS, sent = MACH_MSG_SUCCESS;
+	mach_msg_return_t	got = MACH_MSG_SUCCESS;
+	kern_return_t		ret = KERN_INVALID_ADDRESS;
+	int			off = 0, first = -1;
+	unsigned		i, round;
+
+	reply = arm_own_port(36);
+	port = arm_own_port(36);
+	if (reply == MACH_PORT_NULL || port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < A36_BYTES; i++)
+		src[i] = 0x36;
+	for (round = 0; round < A36_ROUNDS; round++) {
+		for (i = 0; i < sizeof m; i++)
+			((unsigned char *) &m)[i] = 0;
+		m.in.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+				      | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						       MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		m.in.head.msgh_size = __builtin_offsetof(union arm36_msg, in.count)
+				      + sizeof m.in.count;
+		m.in.head.msgh_remote_port = mach_task_self();
+		m.in.head.msgh_local_port = reply;
+		m.in.head.msgh_id = A36_VM_WRITE;
+		m.in.body.msgh_descriptor_count = 1;
+		m.in.data.address = src;
+		m.in.data.size = A36_BYTES;
+		m.in.data.deallocate = FALSE;
+		m.in.data.copy = MACH_MSG_PHYSICAL_COPY;
+		m.in.data.type = MACH_MSG_OOL_DESCRIPTOR;
+		m.in.ndr = NDR_record;
+		m.in.address = A36_NOWHERE;
+		m.in.count = A36_BYTES;
+
+		mr = mach_msg(&m.in.head,
+			      MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+			      m.in.head.msgh_size, sizeof m, reply, 5000,
+			      MACH_PORT_NULL);
+		ret = mr == MACH_MSG_SUCCESS ? m.out.ret : KERN_FAILURE;
+
+		sent = arm36_send_many(port);
+		off = sent == MACH_MSG_SUCCESS
+		      ? arm36_receive_many(port, &got, &first) : -1;
+
+		if (mr != MACH_MSG_SUCCESS || ret != KERN_INVALID_ADDRESS
+		    || sent != MACH_MSG_SUCCESS || got != MACH_MSG_SUCCESS
+		    || off != 0)
+			break;
+	}
+
+	(void) mach_port_destroy(mach_task_self(), port);
+	(void) mach_port_destroy(mach_task_self(), reply);
+
+	if (mr != MACH_MSG_SUCCESS || ret != KERN_INVALID_ADDRESS) {
+		printf("act_test: [36] round %u: a vm_write of a %d-byte physical "
+		       "copy to 0x%lx answered 0x%x, its reply 0x%x — WRONG, "
+		       "expected the copyout's KERN_INVALID_ADDRESS in the "
+		       "reply (#810)\n", round + 1, A36_BYTES,
+		       (unsigned long) A36_NOWHERE, (int) mr, (int) ret);
+		return 0;
+	}
+	if (round < A36_ROUNDS) {
+		printf("act_test: [36] round %u: after a refused vm_write, %d "
+		       "physical copies of %d bytes in one message came back with "
+		       "%d bytes not their own, the first at copy %d (send 0x%x, "
+		       "receive 0x%x) — WRONG: one kalloc buffer handed out twice "
+		       "(#810)\n", round + 1, A36_COPIES, A36_BYTES, off, first,
+		       (int) sent, (int) got);
+		return 0;
+	}
+
+	printf("act_test: [36] %u vm_writes of a %d-byte physical copy to 0x%lx "
+	       "were each refused with KERN_INVALID_ADDRESS, and the %d copies of "
+	       "that size sent after each in one message came back with their "
+	       "own bytes (#810)\n", A36_ROUNDS, A36_BYTES,
+	       (unsigned long) A36_NOWHERE, A36_COPIES);
+	return 1;
+}
+
 /* A thread thread_create_running() starts needs somewhere to run; it spins
  * here until the trap that created it terminates it, so no fault reaches
  * act_test's exception port (#756).  It runs in act_test's own task, where
@@ -5536,6 +5749,8 @@ main(int argc, char **argv)
 	passed += arm_thirty_four_rpc_reply_seqno();
 	arms++;		/* arm thirty-five, #843 */
 	passed += arm_thirty_five_port_array_with_no_room();
+	arms++;		/* arm thirty-six, #810 */
+	passed += arm_thirty_six_vm_write_small_physical_copy();
 
 	/*
 	 * Before arm six, and after everything above has printed: on a healthy

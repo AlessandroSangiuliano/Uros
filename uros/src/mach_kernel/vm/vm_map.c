@@ -3303,6 +3303,30 @@ vm_map_copy_page_discard(
 }
 
 /*
+ * 🔴 #810: a kernel-buffer copy is freed through here, and marked first.
+ *
+ * vm_map_copyout_kernel_buffer() freed its copy whether or not the copyout
+ * worked, and the caller that still owned it -- the destruction of a failed
+ * vm_write() request -- freed it again: one kalloc element twice in a
+ * per-processor magazine, handed later to two owners, and seen, if at all, as
+ * an assertion about a port somewhere else (act_test's arm 36 under the
+ * ablation, 02/11).  Marked with a type no copy has, a copy freed a second
+ * time reaches vm_map_copy_discard()'s default case and stops the kernel
+ * there, at the second free, where it went through without a word.
+ */
+#define	VM_MAP_COPY_FREED	0	/* no copy has this type: freed already */
+
+static void
+vm_map_copy_kernel_buffer_free(
+	vm_map_copy_t	copy)
+{
+	vm_size_t	size = copy->cpy_kalloc_size;
+
+	copy->type = VM_MAP_COPY_FREED;
+	kfree((vm_offset_t) copy, size);
+}
+
+/*
  *	Routine:	vm_map_copy_discard
  *
  *	Description:
@@ -3376,8 +3400,17 @@ free_next_copy:
 		 * allocated by a single call to kalloc(), i.e. the
 		 * vm_map_copy_t was not allocated out of the zone.
 		 */
-		kfree((vm_offset_t) copy, copy->cpy_kalloc_size);
+		vm_map_copy_kernel_buffer_free(copy);
 		return;
+
+	default:
+		/*
+		 * #810: not a type a copy has -- freed already, and marked so,
+		 * or never a copy.  This used to fall out of the switch into
+		 * zfree() on vm_map_copy_zone, whatever zone it came from.
+		 */
+		panic("vm_map_copy_discard: copy %p has type %d -- freed "
+		      "already, or never a copy (#810)", copy, copy->type);
 	}
 	zfree(vm_map_copy_zone, (vm_offset_t) copy);
 }
@@ -4261,9 +4294,29 @@ vm_map_copyout_kernel_buffer(
 		vm_map_deallocate(map);
 	}
 
-	kfree((vm_offset_t)copy, copy->cpy_kalloc_size);
+	/*
+	 * 🔴 #810: the copy is consumed only by a copyout that worked, as the
+	 * description above says.  It was freed whatever the copyout did, and
+	 * the caller, which owns a copy this routine failed to consume, freed
+	 * it again: vm_write() of a small physical copy to an address the task
+	 * does not have reached ipc_kmsg_clean_body()'s discard of the same
+	 * buffer -- a double free of a kalloc element, from any task.  And the
+	 * range this routine entered for the copy goes with the failure, where
+	 * it stayed in the target map.
+	 */
+	if (kr != KERN_SUCCESS) {
+		if (!overwrite) {
+			(void) vm_map_remove(map, *addr,
+					     *addr + round_page(copy->size),
+					     VM_MAP_NO_FLAGS);
+			*addr = 0;
+		}
+		return(kr);
+	}
 
-	return(kr);
+	vm_map_copy_kernel_buffer_free(copy);
+
+	return(KERN_SUCCESS);
 }
 		
 /*
