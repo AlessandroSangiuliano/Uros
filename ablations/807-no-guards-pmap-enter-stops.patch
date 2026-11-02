@@ -1,0 +1,35 @@
+Kind: ablation
+Issue: #807
+Takes out: both guards in front of pmap_enter() -- the ring check, and kmem_init()'s reservation with no access, back to VM_PROT_DEFAULT -- so fault_test's arm six has vm_fault() zero-fill a page at the direct map's base as before #807; pmap_enter() refuses the large leaf there, and PMAP_ENTER must stop the machine and name the address rather than take the page as mapped and let the fault come back for ever
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: PMAP_ENTER: 0xffff800000000000 lies under a large page
+Note: Judged under QEMU (TCG and KVM), fault_test's arm six, on victus 02/11/2026 at 22198036: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4, every ablated boot stopped by PMAP_ENTER naming 0xffff800000000000 when vm_fault() asked for a page there.  Judged again on the union of the critical fixes, 72778d46, on victus 02/11/2026: caught 4 of 4, and the fixed tree passed 4 of 4.
+
+diff --git a/uros/src/mach_kernel/x86_64/trap/trap.c b/uros/src/mach_kernel/x86_64/trap/trap.c
+--- a/uros/src/mach_kernel/x86_64/trap/trap.c
++++ b/uros/src/mach_kernel/x86_64/trap/trap.c
+@@ -2261,10 +2261,7 @@
+ 		vm_map_t	map;
+ 		vm_prot_t	prot;
+ 
+-		if (va_is_kernel(addr) && (frame->cs & 3) == USER_RPL) {
+-			map = VM_MAP_NULL;
+-			fault_kr = KERN_INVALID_ADDRESS;
+-		} else if (va_is_kernel(addr))
++		if (va_is_kernel(addr))
+ 			map = kernel_map;
+ 		else
+ 			map = (act != THR_ACT_NULL) ? act->map : VM_MAP_NULL;
+diff --git a/uros/src/mach_kernel/vm/vm_kern.c b/uros/src/mach_kernel/vm/vm_kern.c
+--- a/uros/src/mach_kernel/vm/vm_kern.c
++++ b/uros/src/mach_kernel/vm/vm_kern.c
+@@ -857,7 +857,7 @@
+ 				    &addr, start - VM_MIN_KERNEL_ADDRESS,
+ 				    (vm_offset_t) 0, TRUE,
+ 				    VM_OBJECT_NULL, (vm_offset_t) 0, FALSE,
+-				    VM_PROT_NONE, VM_PROT_NONE,
++				    VM_PROT_DEFAULT, VM_PROT_ALL,
+ 				    VM_INHERIT_DEFAULT);
+ 	}
+ 
