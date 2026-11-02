@@ -778,7 +778,7 @@ quiet_frame_returns_so_far(void)
 static void
 quiet_handoff_so_far(void)
 {
-	unsigned long	same, other, fenced;
+	unsigned long	same, other, fenced, at_receive, at_return;
 
 	if (sched_rpc_handoff == SCHED_RPC_HANDOFF_OFF)
 		return;
@@ -790,6 +790,12 @@ quiet_handoff_so_far(void)
 	       same + other, other, fenced,
 	       sched_rpc_handoff == SCHED_RPC_HANDOFF_ANY_TASK && fenced != 0 ?
 	       " -- WRONG: -X reaches any task here" : "");
+	/* #777: on a line of its own, under the console's 256 bytes (#802) */
+	sched_rpc_handoff_undone(&at_receive, &at_return);
+	printf("quiet_census: of those, %lu bet(s) lost and undone -- %lu at a "
+	       "receive that found a message, %lu at a return to user space "
+	       "without a block (#777)\n",
+	       at_receive + at_return, at_receive, at_return);
 }
 
 void
