@@ -1,0 +1,19 @@
+Kind: ablation
+Issue: #808
+Takes out: IKM_MAX_MSG_SIZE as ipc_kmsg_get()'s bound, putting back a179a7db's MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE -- a send past what kalloc_map can hold then reaches kalloc, which cannot give it, and act_test's arm 28 is answered MACH_SEND_NO_BUFFER instead of MACH_SEND_TOO_LARGE
+Accel: tcg,kvm
+Run: --entry 14 1200 -smp 4
+Expect: act_test: \[28\] a send of [0-9]+ bytes, past the largest inline message, answered 0x[0-9a-f]+ \(MACH_SEND_NO_BUFFER
+
+diff --git a/uros/src/mach_kernel/ipc/ipc_kmsg.c b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+--- a/uros/src/mach_kernel/ipc/ipc_kmsg.c
++++ b/uros/src/mach_kernel/ipc/ipc_kmsg.c
+@@ -849,7 +849,7 @@
+ 	 * before anything is added to it: the sums below must be the size of
+ 	 * the buffer that copyinmsg() then fills with `size' bytes.
+ 	 */
+-	if (size > IKM_MAX_MSG_SIZE)
++	if (size > MACH_MSG_SIZE_MAX - MAX_TRAILER_SIZE)
+ 		return MACH_SEND_TOO_LARGE;
+ 
+ #if	MACH_RT
