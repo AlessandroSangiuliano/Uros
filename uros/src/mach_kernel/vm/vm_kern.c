@@ -847,7 +847,7 @@ kmem_init(
 	 *	access, not even as a maximum: a fault there is refused.
 	 *	With VM_PROT_DEFAULT on a null object, vm_fault() zero-filled
 	 *	a page for it and pmap_enter() took away whatever was mapped
-	 *	there to make room -- a 1 GiB leaf of the direct map, or a
+	 *	there to make room -- a whole leaf of the direct map, or a
 	 *	page of the VM's tables.
 	 */
 
