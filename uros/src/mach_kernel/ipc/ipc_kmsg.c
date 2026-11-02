@@ -551,6 +551,43 @@ ipc_kmsg_destroy(
 }
 
 /*
+ * Release one out-of-line port array still in the kernel's hands: each right
+ * it carries, destroyed with the descriptor's disposition, and the array
+ * kalloc gave it.
+ *
+ * ipc_kmsg_clean_body() calls it for every array of a message.  And
+ * ipc_kmsg_copyout_body() calls it for the one array it cannot deliver
+ * (#843), where cleaning the whole body -- what it did -- also released the
+ * descriptors already delivered: rights now the receiver's, and, where a copy
+ * object had been, the receiver's address.
+ */
+static void
+ipc_kmsg_clean_ool_ports(
+	mach_msg_ool_ports_descriptor_t	*dsc,
+	boolean_t			rt)
+{
+	ipc_object_t		*objects = (ipc_object_t *) dsc->address;
+	mach_msg_type_number_t	j;
+
+	if (dsc->count == 0)
+		return;
+
+	assert(objects != (ipc_object_t *) 0);
+
+	/* destroy port rights carried in the message */
+	for (j = 0; j < dsc->count; j++) {
+		ipc_object_t object = objects[j];
+
+		if (!IO_VALID(object))
+			continue;
+		ipc_object_destroy(object, dsc->disposition);
+	}
+
+	/* destroy memory carried in the message */
+	KFREE((vm_offset_t) dsc->address, ipc_port_array_size(dsc->count), rt);
+}
+
+/*
  *	Routine:	ipc_kmsg_clean_body
  *	Purpose:
  *		Cleans the body of a kernel message.
@@ -629,40 +666,9 @@ ipc_kmsg_clean_body(
 		}
 		break;
 	    }
-	    case MACH_MSG_OOL_PORTS_DESCRIPTOR : {
-		ipc_object_t             	*objects;
-		mach_msg_type_number_t   	j;
-		mach_msg_ool_ports_descriptor_t	*dsc;
-
-		dsc = &saddr->ool_ports;
-		objects = (ipc_object_t *) dsc->address;
-
-		if (dsc->count == 0) {
-			break;
-		}
-
-		assert(objects != (ipc_object_t *) 0);
-		
-		/* destroy port rights carried in the message */
-		
-		for (j = 0; j < dsc->count; j++) {
-		    ipc_object_t object = objects[j];
-		    
-		    if (!IO_VALID(object))
-			continue;
-		    
-		    ipc_object_destroy(object, dsc->disposition);
-		}
-
-		/* destroy memory carried in the message */
-
-		assert(dsc->count != 0);
-
-		KFREE((vm_offset_t) dsc->address,
-		     ipc_port_array_size(dsc->count),
-		     rt);
+	    case MACH_MSG_OOL_PORTS_DESCRIPTOR :
+		ipc_kmsg_clean_ool_ports(&saddr->ool_ports, rt);
 		break;
-	    }
 	    default : {
 		printf("cleanup: don't understand this type of descriptor\n");
 	    }
@@ -3306,8 +3312,7 @@ ipc_kmsg_copyout_body(
 			 */
 			if (rt) {
 			    mr |= MACH_MSG_INVALID_RT_DESCRIPTOR;
-			    ipc_kmsg_clean_body(kmsg,
-						body->msgh_descriptor_count);
+			    ipc_kmsg_clean_ool_ports(dsc, rt);	/* #843 */
 			    dsc->address = 0;
 			    INCREMENT_SCATTER(sstart);
 			    break;
@@ -3320,8 +3325,13 @@ ipc_kmsg_copyout_body(
 			dsc->copy = MACH_MSG_ALLOCATE;
 		    	if ((kr = vm_allocate(map, &addr, length, TRUE)) !=
 		    						KERN_SUCCESS) {
-			    ipc_kmsg_clean_body(kmsg,
-						body->msgh_descriptor_count);
+			    /*
+			     * #843: this array only, as a failed out-of-line
+			     * region above releases only its own copy.  The
+			     * descriptors before it are delivered, and the ones
+			     * after it go on to be.
+			     */
+			    ipc_kmsg_clean_ool_ports(dsc, KMSG_IS_RT(kmsg));
 			    dsc->address = 0;
 
 			    if (kr == KERN_RESOURCE_SHORTAGE){
