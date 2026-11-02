@@ -4884,10 +4884,21 @@ arm_thirty_five_port_array_with_no_room(void)
  * messages to a port of this task with different bytes: after a double free
  * the two can be handed the same buffer, and the first arrives holding the
  * second's bytes.
+ *
+ * 🔴 The request is sized as MIG sizes it, to the end of its last field: the
+ * server compares msgh_size with 68, and sizeof the struct is 72 with its
+ * padding.  Sized 72 it was refused with MIG_BAD_ARGUMENTS before vm_write()
+ * ran -- an error in the reply, which is all this arm asked for, in the fixed
+ * kernel and with the double free put back alike: the ablation was caught 0
+ * times in 4 (02/11).  Now the reply must be the copyout's own error,
+ * KERN_INVALID_ADDRESS, which only vm_map_copyout_kernel_buffer() gives here.
+ * And the round is made A36_ROUNDS times: one element freed twice is one
+ * chance for the two sends after it to share it.
  */
 #define	A36_BYTES	64
 #define	A36_NOWHERE	((vm_address_t) 0x0000700000000000ULL)	/* no arm maps it */
 #define	A36_VM_WRITE	2027	/* vm_write, mach.defs */
+#define	A36_ROUNDS	16
 
 union arm36_msg {
 	struct {
@@ -4970,9 +4981,12 @@ arm_thirty_six_vm_write_small_physical_copy(void)
 	union arm36_msg		m;
 	static unsigned char	src[A36_BYTES], one[A36_BYTES], two[A36_BYTES];
 	mach_port_t		reply, port;
-	mach_msg_return_t	mr, s1, s2, r1, r2;
-	int			off1, off2;
-	unsigned		i;
+	mach_msg_return_t	mr = MACH_MSG_SUCCESS, s1 = MACH_MSG_SUCCESS;
+	mach_msg_return_t	s2 = MACH_MSG_SUCCESS, r1 = MACH_MSG_SUCCESS;
+	mach_msg_return_t	r2 = MACH_MSG_SUCCESS;
+	kern_return_t		ret = KERN_INVALID_ADDRESS;
+	int			off1 = 0, off2 = 0;
+	unsigned		i, round;
 
 	reply = arm_own_port(36);
 	port = arm_own_port(36);
@@ -4981,60 +4995,71 @@ arm_thirty_six_vm_write_small_physical_copy(void)
 
 	for (i = 0; i < A36_BYTES; i++)
 		src[i] = 0x36;
-	for (i = 0; i < sizeof m; i++)
-		((unsigned char *) &m)[i] = 0;
-	m.in.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
-			      | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
-					       MACH_MSG_TYPE_MAKE_SEND_ONCE);
-	m.in.head.msgh_size = sizeof m.in;
-	m.in.head.msgh_remote_port = mach_task_self();
-	m.in.head.msgh_local_port = reply;
-	m.in.head.msgh_id = A36_VM_WRITE;
-	m.in.body.msgh_descriptor_count = 1;
-	m.in.data.address = src;
-	m.in.data.size = A36_BYTES;
-	m.in.data.deallocate = FALSE;
-	m.in.data.copy = MACH_MSG_PHYSICAL_COPY;
-	m.in.data.type = MACH_MSG_OOL_DESCRIPTOR;
-	m.in.ndr = NDR_record;
-	m.in.address = A36_NOWHERE;
-	m.in.count = A36_BYTES;
+	for (round = 0; round < A36_ROUNDS; round++) {
+		for (i = 0; i < sizeof m; i++)
+			((unsigned char *) &m)[i] = 0;
+		m.in.head.msgh_bits = MACH_MSGH_BITS_COMPLEX
+				      | MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+						       MACH_MSG_TYPE_MAKE_SEND_ONCE);
+		m.in.head.msgh_size = __builtin_offsetof(union arm36_msg, in.count)
+				      + sizeof m.in.count;
+		m.in.head.msgh_remote_port = mach_task_self();
+		m.in.head.msgh_local_port = reply;
+		m.in.head.msgh_id = A36_VM_WRITE;
+		m.in.body.msgh_descriptor_count = 1;
+		m.in.data.address = src;
+		m.in.data.size = A36_BYTES;
+		m.in.data.deallocate = FALSE;
+		m.in.data.copy = MACH_MSG_PHYSICAL_COPY;
+		m.in.data.type = MACH_MSG_OOL_DESCRIPTOR;
+		m.in.ndr = NDR_record;
+		m.in.address = A36_NOWHERE;
+		m.in.count = A36_BYTES;
 
-	mr = mach_msg(&m.in.head, MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-		      sizeof m.in, sizeof m, reply, 5000, MACH_PORT_NULL);
+		mr = mach_msg(&m.in.head,
+			      MACH_SEND_MSG | MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+			      m.in.head.msgh_size, sizeof m, reply, 5000,
+			      MACH_PORT_NULL);
+		ret = mr == MACH_MSG_SUCCESS ? m.out.ret : KERN_FAILURE;
 
-	/* The same kalloc size, twice, with different bytes. */
-	s1 = arm36_send(port, one, 0xaa);
-	s2 = arm36_send(port, two, 0xbb);
-	off1 = arm36_receive(port, 0xaa, &r1);
-	off2 = arm36_receive(port, 0xbb, &r2);
+		/* The same kalloc size, twice, with different bytes. */
+		s1 = arm36_send(port, one, 0xaa);
+		s2 = arm36_send(port, two, 0xbb);
+		off1 = arm36_receive(port, 0xaa, &r1);
+		off2 = arm36_receive(port, 0xbb, &r2);
+
+		if (mr != MACH_MSG_SUCCESS || ret != KERN_INVALID_ADDRESS
+		    || s1 != MACH_MSG_SUCCESS || s2 != MACH_MSG_SUCCESS
+		    || r1 != MACH_MSG_SUCCESS || r2 != MACH_MSG_SUCCESS
+		    || off1 != 0 || off2 != 0)
+			break;
+	}
 
 	(void) mach_port_destroy(mach_task_self(), port);
 	(void) mach_port_destroy(mach_task_self(), reply);
 
-	if (mr != MACH_MSG_SUCCESS || m.out.ret == KERN_SUCCESS) {
-		printf("act_test: [36] a vm_write of a %d-byte physical copy to "
-		       "0x%lx answered 0x%x, its reply 0x%x — WRONG, expected an "
-		       "error in the reply (#810)\n", A36_BYTES,
-		       (unsigned long) A36_NOWHERE, (int) mr,
-		       mr == MACH_MSG_SUCCESS ? (int) m.out.ret : -1);
+	if (mr != MACH_MSG_SUCCESS || ret != KERN_INVALID_ADDRESS) {
+		printf("act_test: [36] round %u: a vm_write of a %d-byte physical "
+		       "copy to 0x%lx answered 0x%x, its reply 0x%x — WRONG, "
+		       "expected the copyout's KERN_INVALID_ADDRESS in the "
+		       "reply (#810)\n", round + 1, A36_BYTES,
+		       (unsigned long) A36_NOWHERE, (int) mr, (int) ret);
 		return 0;
 	}
-	if (s1 != MACH_MSG_SUCCESS || s2 != MACH_MSG_SUCCESS
-	    || r1 != MACH_MSG_SUCCESS || r2 != MACH_MSG_SUCCESS
-	    || off1 != 0 || off2 != 0) {
-		printf("act_test: [36] after it, two %d-byte physical copies "
-		       "came back with %d and %d bytes not their own (sends 0x%x "
-		       "0x%x, receives 0x%x 0x%x) — WRONG: one kalloc buffer "
-		       "handed out twice (#810)\n", A36_BYTES, off1, off2,
-		       (int) s1, (int) s2, (int) r1, (int) r2);
+	if (round < A36_ROUNDS) {
+		printf("act_test: [36] round %u: after a refused vm_write, two "
+		       "%d-byte physical copies came back with %d and %d bytes not "
+		       "their own (sends 0x%x 0x%x, receives 0x%x 0x%x) — WRONG: "
+		       "one kalloc buffer handed out twice (#810)\n", round + 1,
+		       A36_BYTES, off1, off2, (int) s1, (int) s2, (int) r1,
+		       (int) r2);
 		return 0;
 	}
 
-	printf("act_test: [36] a vm_write of a %d-byte physical copy to 0x%lx "
-	       "was refused with 0x%x, and two copies of that size after it "
-	       "each came back with their own bytes (#810)\n", A36_BYTES,
-	       (unsigned long) A36_NOWHERE, (int) m.out.ret);
+	printf("act_test: [36] %u vm_writes of a %d-byte physical copy to 0x%lx "
+	       "were each refused with KERN_INVALID_ADDRESS, and the two copies "
+	       "of that size after each came back with their own bytes (#810)\n",
+	       A36_ROUNDS, A36_BYTES, (unsigned long) A36_NOWHERE);
 	return 1;
 }
 
