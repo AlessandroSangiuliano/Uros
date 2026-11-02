@@ -4,6 +4,7 @@ Takes out: pmap_enter()'s refusal of a leaf larger than 4 KiB -- pmap_verbs_self
 Accel: tcg,kvm
 Run: --entry 14 1200 -smp 4
 Expect: pmap: resident_count underflow at va 0xffff800000000000|UrMach x86-64: pmap_enter NONE over the [0-9]+ KiB leaf at the direct map's base -> not refused, WRONG
+Note: Judged under QEMU (TCG and KVM), pmap_verbs_selftest(), on victus 02/11/2026 at 54555cb5: the ablated tree caught 4 of 4 and the fixed tree passed 4 of 4, every ablated boot stopping at the resident count's underflow at 0xffff800000000000 right after the self-test's pmap_remove line.  A first run at 22198036 expected only the self-test's WRONG, which never comes, and caught 0 of 4 boots that had all stopped there.
 
 diff --git a/uros/src/mach_kernel/x86_64/pmap/pmap.c b/uros/src/mach_kernel/x86_64/pmap/pmap.c
 --- a/uros/src/mach_kernel/x86_64/pmap/pmap.c
