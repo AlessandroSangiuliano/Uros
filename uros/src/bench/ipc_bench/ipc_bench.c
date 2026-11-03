@@ -2847,7 +2847,7 @@ cc_worker_func(void *arg)
 	send_buf.head.msgh_local_port  = w->reply_port;
 	send_buf.head.msgh_id	       = 1;
 
-	mach_msg(&send_buf.head, MACH_SEND_MSG, w->send_size, 0,
+	mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, w->send_size, 0,
 		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
 	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 		 w->reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -2961,7 +2961,7 @@ icc_round_trip(icc_worker_t *w)
     send_buf.head.msgh_local_port  = MACH_PORT_NULL;
     send_buf.head.msgh_id	   = 1;
 
-    mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(bench_null_msg_t), 0,
+    mach_msg(&send_buf.head, MACH_SEND_MSG | MACH_SEND_HANDOFF, sizeof(bench_null_msg_t), 0,
 	     MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
 	     w->child.to_parent, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
