@@ -3130,24 +3130,47 @@ bench_tsc(void)
 
 static unsigned long long	g_tsc_per_us;	/* 0 until measured */
 
-/* The TSC's rate against the clock, over 20 ms, measured once. */
+/*
+ * The TSC's rate against the clock, over 20 ms, measured once.
+ *
+ * ⚠️ A clock that steps back between two readings -- the thread moved to a
+ * processor whose reading is a little behind -- makes elapsed_ns() answer
+ * nearly 2^64: the first version's loop ended at once, with a rate of 0, under
+ * KVM at four processors (03/11).  A step back starts the measurement again, a
+ * rate outside 100 MHz to 20 GHz is refused, and a refusal says what it saw.
+ */
 static int
-tsc_calibrate(void)
+tsc_calibrate(const char *label)
 {
     tvalspec_t		t0, t1;
     unsigned long long	c0, c1, ns;
+    long long		d;
+    int			tries;
 
     if (g_tsc_per_us != 0)
 	return 0;
-    get_time(&t0);
-    c0 = bench_tsc();
-    do {
-	get_time(&t1);
-	ns = elapsed_ns(&t0, &t1);
-    } while (ns < 20000000ULL);
-    c1 = bench_tsc();
-    g_tsc_per_us = (c1 - c0) * 1000ULL / ns;
-    return g_tsc_per_us != 0 ? 0 : -1;
+    for (tries = 0; tries < 10; tries++) {
+	get_time(&t0);
+	c0 = bench_tsc();
+	do {
+	    get_time(&t1);
+	    d = ((long long)t1.tv_sec - (long long)t0.tv_sec) * 1000000000LL +
+		((long long)t1.tv_nsec - (long long)t0.tv_nsec);
+	} while (d >= 0 && d < 20000000LL);
+	c1 = bench_tsc();
+	if (d < 0)
+	    continue;	/* the clock stepped back: again */
+	ns = (unsigned long long)d;
+	g_tsc_per_us = (c1 - c0) * 1000ULL / ns;
+	if (g_tsc_per_us >= 100 && g_tsc_per_us <= 20000)
+	    return 0;
+	printf("  %s: the TSC ran %llu ticks in %llu ns of the clock, %llu a "
+	       "microsecond -- refused\n", label, c1 - c0, ns, g_tsc_per_us);
+	g_tsc_per_us = 0;
+    }
+    printf("  %s: the TSC's rate could not be measured in %d tries -- not "
+	   "measured\n", label, tries);
+    return -1;
 }
 
 /* How long woken threads waited, by decade of microseconds. */
@@ -3272,11 +3295,8 @@ bench_producer(void)
     int			ho_ok = 0, i, round;
     unsigned long long	t;
 
-    if (tsc_calibrate() != 0) {
-	printf("  %s: the TSC's rate could not be measured -- not measured\n",
-	       label);
+    if (tsc_calibrate(label) != 0)
 	return;
-    }
     if (child_start(label, &c, child_prod_entry) != 0)
 	return;
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
@@ -3396,11 +3416,8 @@ bench_server_queue(int k)
     if (k > MAX_CC_THREADS)
 	k = MAX_CC_THREADS;
     snprintf(label, sizeof label, "server with requests queued x%d", k);
-    if (tsc_calibrate() != 0) {
-	printf("  %s: the TSC's rate could not be measured -- not measured\n",
-	       label);
+    if (tsc_calibrate(label) != 0)
 	return;
-    }
     if (child_start(label, &s, child_srvq_entry) != 0)
 	return;
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
